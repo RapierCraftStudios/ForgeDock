@@ -2,18 +2,23 @@
 
 <img src="https://avatars.githubusercontent.com/u/186507793?v=4" alt="ForgeDock" width="120" />
 
-# ForgeDock
+<h1>ForgeDock</h1>
 
-**Autonomous AI development pipeline for Claude Code.**
+<p><strong>Autonomous AI development pipeline for Claude Code.</strong></p>
 
-Issue in. PR out. Merged.
+<p>Issue in. PR out. Merged.</p>
 
-[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
-[![GitHub Stars](https://img.shields.io/github/stars/RapierCraftStudios/forgedock?style=social)](https://github.com/RapierCraftStudios/forgedock/stargazers)
-[![Claude Code](https://img.shields.io/badge/Built%20for-Claude%20Code-blueviolet)](https://docs.anthropic.com/en/docs/claude-code)
-[![PRs Welcome](https://img.shields.io/badge/PRs-welcome-brightgreen.svg)](https://github.com/RapierCraftStudios/forgedock/pulls)
+<a href="LICENSE"><img src="https://img.shields.io/badge/License-MIT-blue.svg" alt="License: MIT" /></a>
+<a href="https://github.com/RapierCraftStudios/forgedock/stargazers"><img src="https://img.shields.io/github/stars/RapierCraftStudios/forgedock?style=social" alt="GitHub Stars" /></a>
+<a href="https://docs.anthropic.com/en/docs/claude-code"><img src="https://img.shields.io/badge/Built%20for-Claude%20Code-blueviolet" alt="Claude Code" /></a>
+<a href="https://github.com/RapierCraftStudios/forgedock/pulls"><img src="https://img.shields.io/badge/PRs-welcome-brightgreen.svg" alt="PRs Welcome" /></a>
 
-[Get Started](#get-started) · [Commands](#commands) · [How It Works](#how-it-works) · [Contributing](#contributing)
+<p>
+<a href="#get-started">Get Started</a> &middot;
+<a href="#commands">Commands</a> &middot;
+<a href="#how-it-works">How It Works</a> &middot;
+<a href="#contributing">Contributing</a>
+</p>
 
 </div>
 
@@ -26,9 +31,9 @@ ForgeDock turns Claude Code from an AI assistant into an **autonomous engineerin
 Point it at a GitHub issue. Get back a production-ready, reviewed PR. That's it.
 
 ```
-You:          "work on issue #42"
-ForgeDock:     Investigates → Architects → Builds → Quality gates → Reviews → Opens PR
-You:          *click merge*
+You:        "work on issue #42"
+ForgeDock:   Investigates -> Architects -> Builds -> Quality gates -> Reviews -> Opens PR
+You:        *click merge*
 ```
 
 ### Without ForgeDock
@@ -50,31 +55,33 @@ ForgeDock is a collection of **slash commands** that orchestrate Claude Code age
 Most AI coding tools treat GitHub as a place to push code. ForgeDock treats it as a **secondary context layer** — a persistent, structured memory that agents read from and write to across every stage of the pipeline.
 
 ```
-GitHub Issue                    GitHub PR
-┌────────────────────┐          ┌────────────────────────────┐
-│ Issue body          │          │ PR description              │
-│ ├─ structured spec  │          │ ├─ implementation summary   │
-│ ├─ acceptance criteria│        │ ├─ architecture decisions   │
-│ └─ labels/metadata  │          │ └─ linked issue context     │
-│                     │          │                              │
-│ Comments:           │          │ Comments:                    │
-│ ├─ FORGE:INVESTIGATION│        │ ├─ FORGE:REVIEW (per agent) │
-│ │  └─ root cause    │          │ │  └─ domain findings       │
-│ ├─ FORGE:CONTRACT   │          │ ├─ FORGE:QUALITY_GATE       │
-│ │  └─ build plan    │          │ │  └─ static analysis       │
-│ ├─ FORGE:DECOMPOSED │          │ └─ FORGE:GATE_FAILURE       │
-│ │  └─ sub-issues    │          │    └─ deploy blocker        │
-│ └─ FORGE:BUILDER    │          │                              │
-│    └─ implementation│          │ Review-finding issues:       │
-│       notes         │          │ └─ linked, tracked, resolved │
-└────────────────────┘          └────────────────────────────┘
+GITHUB ISSUE                          GITHUB PR
++----------------------------+        +----------------------------+
+| Issue body                 |        | PR description             |
+|   - structured spec        |        |   - implementation summary |
+|   - acceptance criteria    |        |   - architecture decisions |
+|   - labels / metadata      |        |   - linked issue context   |
+|                            |        |                            |
+| Comments:                  |        | Comments:                  |
+|   FORGE:INVESTIGATION      |        |   FORGE:REVIEW (per agent) |
+|     -> root cause          |        |     -> domain findings     |
+|   FORGE:CONTRACT           |        |   FORGE:QUALITY_GATE       |
+|     -> build plan          |        |     -> static analysis     |
+|   FORGE:DECOMPOSED         |        |   FORGE:GATE_FAILURE       |
+|     -> sub-issues          |        |     -> deploy blocker      |
+|   FORGE:BUILDER            |        |                            |
+|     -> implementation      |        | Review-finding issues:     |
+|        notes               |        |   -> linked, tracked,      |
++----------------------------+        |      resolved              |
+                                      +----------------------------+
 ```
 
-**Every agent writes structured annotations.** The investigator posts `FORGE:INVESTIGATION` with root cause findings. The builder posts `FORGE:CONTRACT` with its implementation plan. Review agents post `FORGE:REVIEW` with domain-specific findings. Each annotation uses machine-readable markers (`<!-- FORGE:... -->`) so downstream agents can parse them — not just read them.
+**Every agent writes structured annotations.** The investigator posts `FORGE:INVESTIGATION` with root cause findings. The builder posts `FORGE:CONTRACT` with its implementation plan. Review agents post `FORGE:REVIEW` with domain-specific findings. Each annotation uses machine-readable markers so downstream agents can parse them — not just read them.
 
-**Every agent reads prior context.** The builder doesn't start from scratch — it reads the investigation findings, the architecture plan, and the project's CLAUDE.md. The review agents read the PR diff *and* the original issue *and* the builder's contract comment. Context accumulates across the pipeline instead of being lost between conversations.
+**Every agent reads prior context.** The builder doesn't start from scratch — it reads the investigation findings, the architecture plan, and the project's `CLAUDE.md`. The review agents read the PR diff *and* the original issue *and* the builder's contract comment. Context accumulates across the pipeline instead of being lost between conversations.
 
 **This means:**
+
 - No context is lost between pipeline stages — it's persisted on GitHub
 - Any agent can be re-run and it picks up where others left off
 - Humans can inspect every decision the pipeline made, in order, on the issue/PR
@@ -86,12 +93,11 @@ This is what makes ForgeDock fundamentally different from "run a prompt and hope
 ### The Pipeline
 
 ```
-┌─────────┐     ┌─────────────┐     ┌─────────┐     ┌──────────────┐     ┌──────────┐     ┌───────┐
-│  Issue   │────▶│ Investigate │────▶│  Build  │────▶│ Quality Gate │────▶│  Review  │────▶│ Merge │
-└─────────┘     └─────────────┘     └─────────┘     └──────────────┘     └──────────┘     └───────┘
-     │                 ▲ │                ▲ │               ▲ │                ▲ │               │
-     └── writes ───────┘ └── reads ──────┘ └── reads ─────┘ └── reads ──────┘ └── writes ─────┘
-              GitHub comments flow context forward through the pipeline
+Issue --> Investigate --> Build --> Quality Gate --> Review --> Merge
+  |            ^  |         ^  |          ^  |         ^  |        |
+  +-- writes --+  +- reads -+  +- reads --+  +- reads-+  +-writes-+
+
+           GitHub comments flow context forward through the pipeline
 ```
 
 1. **Investigate** — Reads the issue, explores the codebase, finds root cause, posts `FORGE:INVESTIGATION` to the issue
@@ -113,8 +119,8 @@ ForgeDock measures its own performance. `/pipeline-health` correlates prompt cha
 ### Core Pipeline
 
 | Command | What it does |
-|---------|-------------|
-| `/work-on` | **The main command.** Full issue lifecycle: investigate → build → review → merge |
+| --- | --- |
+| `/work-on` | **The main command.** Full issue lifecycle: investigate, build, review, merge |
 | `/issue` | Creates well-structured GitHub issues the pipeline can consume |
 | `/orchestrate` | Decomposes milestones into waves, runs `/work-on` in parallel |
 | `/review-pr` | Context-aware PR review with 9 specialized review agents |
@@ -124,16 +130,16 @@ ForgeDock measures its own performance. `/pipeline-health` correlates prompt cha
 ### Operations
 
 | Command | What it does |
-|---------|-------------|
+| --- | --- |
 | `/deploy-info` | Pre-deploy summary: staging vs main diff with risk assessment |
-| `/review-pr-staging` | Comprehensive staging → main review gate |
+| `/review-pr-staging` | Comprehensive staging to main review gate |
 | `/rollback` | Automated revert PR for production incidents |
 | `/incident-response` | P0 coordination: hotfix validation, timeline, postmortem |
 
 ### Maintenance
 
 | Command | What it does |
-|---------|-------------|
+| --- | --- |
 | `/pipeline-health` | Self-analysis: measures performance, proposes improvements |
 | `/autopilot` | Autonomous improvement cycle: recon, triage, fix |
 | `/cleanup` | Sweeps stale issues, branches, worktrees |
@@ -145,7 +151,7 @@ ForgeDock measures its own performance. `/pipeline-health` correlates prompt cha
 ### Ecosystem
 
 | Command | What it does |
-|---------|-------------|
+| --- | --- |
 | `/analytics` | Pull production analytics from GSC, Clarity, Umami, Stripe, and more |
 | `/geo-audit` | AI engine discoverability audit |
 | `/qa-sweep` | Full platform QA via browser automation |
@@ -197,26 +203,26 @@ ForgeDock is **project-agnostic**. It reads your project's `CLAUDE.md` at runtim
 ## Architecture
 
 ```
-commands/                    ← Slash commands (the pipeline)
-├── work-on.md              ← Full issue lifecycle orchestrator
-├── work-on/
-│   ├── investigate.md      ← Root cause analysis
-│   ├── decompose.md        ← Issue breakdown
-│   ├── review.md           ← PR creation + review trigger
-│   ├── close.md            ← Issue closure + cleanup
-│   └── build/
-│       ├── context.md      ← Pre-build context gathering
-│       ├── architect.md    ← Implementation planning
-│       ├── implement.md    ← Code writing
-│       └── validate.md     ← Quality gate + verification
-├── review-pr.md            ← Multi-agent PR review
-├── review-pr-agents.md     ← 9 specialized review agents
-├── quality-gate.md         ← Static analysis checks
-├── orchestrate.md          ← Milestone decomposition
-└── ...                     ← 20+ more commands
-docs/                        ← Pipeline documentation
-scripts/                     ← Verification scripts
-install.sh                   ← One-command installer
+commands/                        Slash commands (the pipeline)
+|-- work-on.md                   Full issue lifecycle orchestrator
+|-- work-on/
+|   |-- investigate.md           Root cause analysis
+|   |-- decompose.md             Issue breakdown
+|   |-- review.md                PR creation + review trigger
+|   |-- close.md                 Issue closure + cleanup
+|   +-- build/
+|       |-- context.md           Pre-build context gathering
+|       |-- architect.md         Implementation planning
+|       |-- implement.md         Code writing
+|       +-- validate.md          Quality gate + verification
+|-- review-pr.md                 Multi-agent PR review
+|-- review-pr-agents.md          9 specialized review agents
+|-- quality-gate.md              Static analysis checks
+|-- orchestrate.md               Milestone decomposition
++-- ...                          20+ more commands
+docs/                            Pipeline documentation
+scripts/                         Verification scripts
+install.sh                       One-command installer
 ```
 
 ---
@@ -236,9 +242,10 @@ Prompts are engineered with explicit file hints, step-by-step instructions, and 
 ForgeDock has been used in production to ship features, fix bugs, and manage releases across real codebases. The pipeline has been refined through **370+ commits** of prompt engineering, with each change correlated against actual pipeline metrics.
 
 Key stats from production use:
+
 - **20+ orchestrated commands** in the pipeline
 - **9 specialized review agents** (billing, auth, DB, API, security, and more)
-- **Self-tuning** — false positive rate reduced from 44% to <10% through automated pipeline health analysis
+- **Self-tuning** — false positive rate reduced from 44% to under 10% through automated pipeline health analysis
 - **Migration safety checklist** — added after analyzing 79+ DB-related findings
 
 ---
@@ -247,10 +254,10 @@ Key stats from production use:
 
 ForgeDock follows strict rules about where safety checks belong:
 
-- **Quality Gate** → Static analysis (things grep can catch)
-- **Review Agents** → Semantic reasoning (library contracts, cross-service logic)
-- **Builder Rules** → Prevention at write time (simple rules followed during implementation)
-- **Domain Detection** → Broad categories (DB, billing, auth) trigger the right review agents
+- **Quality Gate** — Static analysis (things grep can catch)
+- **Review Agents** — Semantic reasoning (library contracts, cross-service logic)
+- **Builder Rules** — Prevention at write time (simple rules followed during implementation)
+- **Domain Detection** — Broad categories (DB, billing, auth) trigger the right review agents
 
 This prevents one-incident-one-check proliferation and keeps the pipeline maintainable.
 
@@ -288,8 +295,8 @@ We welcome contributions! ForgeDock improves through real-world use.
 
 <div align="center">
 
-Built by [RapierCraft Studios](https://github.com/RapierCraftStudios)
+<p>Built by <a href="https://github.com/RapierCraftStudios">RapierCraft Studios</a></p>
 
-**ForgeDock** — because your issues should ship themselves.
+<p><strong>ForgeDock</strong> — because your issues should ship themselves.</p>
 
 </div>
