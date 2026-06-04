@@ -54,27 +54,14 @@ ForgeDock is a collection of **slash commands** that orchestrate Claude Code age
 
 Most AI coding tools treat GitHub as a place to push code. ForgeDock treats it as a **secondary context layer** — a persistent, structured memory that agents read from and write to across every stage of the pipeline.
 
-```
-GITHUB ISSUE                          GITHUB PR
-+----------------------------+        +----------------------------+
-| Issue body                 |        | PR description             |
-|   - structured spec        |        |   - implementation summary |
-|   - acceptance criteria    |        |   - architecture decisions |
-|   - labels / metadata      |        |   - linked issue context   |
-|                            |        |                            |
-| Comments:                  |        | Comments:                  |
-|   FORGE:INVESTIGATION      |        |   FORGE:REVIEW (per agent) |
-|     -> root cause          |        |     -> domain findings     |
-|   FORGE:CONTRACT           |        |   FORGE:QUALITY_GATE       |
-|     -> build plan          |        |     -> static analysis     |
-|   FORGE:DECOMPOSED         |        |   FORGE:GATE_FAILURE       |
-|     -> sub-issues          |        |     -> deploy blocker      |
-|   FORGE:BUILDER            |        |                            |
-|     -> implementation      |        | Review-finding issues:     |
-|        notes               |        |   -> linked, tracked,      |
-+----------------------------+        |      resolved              |
-                                      +----------------------------+
-```
+| GitHub Issue | GitHub PR |
+| --- | --- |
+| **Issue body** | **PR description** |
+| Structured spec, acceptance criteria, labels | Implementation summary, architecture decisions, linked issue context |
+| **`FORGE:INVESTIGATION`** — root cause analysis | **`FORGE:REVIEW`** — per-agent domain findings |
+| **`FORGE:CONTRACT`** — build plan | **`FORGE:QUALITY_GATE`** — static analysis results |
+| **`FORGE:DECOMPOSED`** — ordered sub-issues | **`FORGE:GATE_FAILURE`** — deploy blocker details |
+| **`FORGE:BUILDER`** — implementation notes | **Review-finding issues** — linked, tracked, resolved |
 
 **Every agent writes structured annotations.** The investigator posts `FORGE:INVESTIGATION` with root cause findings. The builder posts `FORGE:CONTRACT` with its implementation plan. Review agents post `FORGE:REVIEW` with domain-specific findings. Each annotation uses machine-readable markers so downstream agents can parse them — not just read them.
 
