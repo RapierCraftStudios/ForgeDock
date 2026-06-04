@@ -1,6 +1,6 @@
 <div align="center">
 
-<img src="https://avatars.githubusercontent.com/u/186507793?v=4" alt="ForgeDock" width="120" />
+<img src="[https://avatars.githubusercontent.com/u/186507793?v=4](https://avatars.githubusercontent.com/in/3731547?s=41&u=b38eba537e011502c010d4b682d641f802591845&v=4)" alt="ForgeDock" width="120" />
 
 <h1>ForgeDock</h1>
 
