@@ -43,27 +43,64 @@ You point at an issue and walk away. ForgeDock decomposes the problem, investiga
 
 ## How It Works
 
-ForgeDock is a collection of **slash commands** that orchestrate Claude Code agents through a structured pipeline. GitHub is the context bus — every issue, PR comment, and annotation is machine-readable context flowing between agents.
+ForgeDock is a collection of **slash commands** that orchestrate Claude Code agents through a structured pipeline.
+
+### GitHub as a Context Layer
+
+Most AI coding tools treat GitHub as a place to push code. ForgeDock treats it as a **secondary context layer** — a persistent, structured memory that agents read from and write to across every stage of the pipeline.
+
+```
+GitHub Issue                    GitHub PR
+┌────────────────────┐          ┌────────────────────────────┐
+│ Issue body          │          │ PR description              │
+│ ├─ structured spec  │          │ ├─ implementation summary   │
+│ ├─ acceptance criteria│        │ ├─ architecture decisions   │
+│ └─ labels/metadata  │          │ └─ linked issue context     │
+│                     │          │                              │
+│ Comments:           │          │ Comments:                    │
+│ ├─ FORGE:INVESTIGATION│        │ ├─ FORGE:REVIEW (per agent) │
+│ │  └─ root cause    │          │ │  └─ domain findings       │
+│ ├─ FORGE:CONTRACT   │          │ ├─ FORGE:QUALITY_GATE       │
+│ │  └─ build plan    │          │ │  └─ static analysis       │
+│ ├─ FORGE:DECOMPOSED │          │ └─ FORGE:GATE_FAILURE       │
+│ │  └─ sub-issues    │          │    └─ deploy blocker        │
+│ └─ FORGE:BUILDER    │          │                              │
+│    └─ implementation│          │ Review-finding issues:       │
+│       notes         │          │ └─ linked, tracked, resolved │
+└────────────────────┘          └────────────────────────────┘
+```
+
+**Every agent writes structured annotations.** The investigator posts `FORGE:INVESTIGATION` with root cause findings. The builder posts `FORGE:CONTRACT` with its implementation plan. Review agents post `FORGE:REVIEW` with domain-specific findings. Each annotation uses machine-readable markers (`<!-- FORGE:... -->`) so downstream agents can parse them — not just read them.
+
+**Every agent reads prior context.** The builder doesn't start from scratch — it reads the investigation findings, the architecture plan, and the project's CLAUDE.md. The review agents read the PR diff *and* the original issue *and* the builder's contract comment. Context accumulates across the pipeline instead of being lost between conversations.
+
+**This means:**
+- No context is lost between pipeline stages — it's persisted on GitHub
+- Any agent can be re-run and it picks up where others left off
+- Humans can inspect every decision the pipeline made, in order, on the issue/PR
+- The pipeline's own health analysis (`/pipeline-health`) reads these annotations to measure performance
+- Failed runs leave a full audit trail — not a blank terminal
+
+This is what makes ForgeDock fundamentally different from "run a prompt and hope." GitHub becomes the shared memory layer that ties autonomous agents into a coherent system.
+
+### The Pipeline
 
 ```
 ┌─────────┐     ┌─────────────┐     ┌─────────┐     ┌──────────────┐     ┌──────────┐     ┌───────┐
 │  Issue   │────▶│ Investigate │────▶│  Build  │────▶│ Quality Gate │────▶│  Review  │────▶│ Merge │
 └─────────┘     └─────────────┘     └─────────┘     └──────────────┘     └──────────┘     └───────┘
-                       │                  │                                     │
-                  Reads code,        Architects,            9 specialized review agents
-                  finds root         implements,            (billing, auth, DB, API,
-                  cause              validates               security, and more)
+     │                 ▲ │                ▲ │               ▲ │                ▲ │               │
+     └── writes ───────┘ └── reads ──────┘ └── reads ─────┘ └── reads ──────┘ └── writes ─────┘
+              GitHub comments flow context forward through the pipeline
 ```
 
-### The Pipeline
-
-1. **Investigate** — Reads the issue, explores the codebase, finds root cause, posts findings
-2. **Decompose** — Breaks complex issues into ordered sub-issues when needed
-3. **Architect** — Traces all affected code paths, produces an implementation plan
-4. **Build** — Writes code, makes commits, follows project conventions
-5. **Quality Gate** — Pre-commit static analysis catches defects before review
-6. **Review** — Spawns domain-specific review agents that understand billing, auth, DB migrations, and more
-7. **Merge** — Opens PR with full context, ready for human approval
+1. **Investigate** — Reads the issue, explores the codebase, finds root cause, posts `FORGE:INVESTIGATION` to the issue
+2. **Decompose** — Breaks complex issues into ordered sub-issues when needed, posts `FORGE:DECOMPOSED`
+3. **Architect** — Reads investigation findings, traces all affected code paths, produces an implementation plan
+4. **Build** — Reads the architecture plan, writes code, posts `FORGE:CONTRACT` and `FORGE:BUILDER` to the issue
+5. **Quality Gate** — Pre-commit static analysis, posts `FORGE:QUALITY_GATE` to the PR
+6. **Review** — Spawns domain-specific review agents that post `FORGE:REVIEW` findings (billing, auth, DB, API, security, and more)
+7. **Merge** — Opens PR with full context linking back to every annotation, ready for human approval
 
 ### Self-Improving
 
