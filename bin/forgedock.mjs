@@ -1426,18 +1426,30 @@ async function init() {
 
       // --- Project Board prompts ---
       if (selectedSections.includes("projectBoard")) {
-        console.log("");
-        console.log(bold("  Project Board"));
-        console.log(dim("  Find your project number: gh project list --owner " + (ownerInput || detectedOwner)));
-        const projectNumber = await input(
-          "  GitHub Projects v2 project number",
-          "1"
-        );
-        optionalSections.projectBoard = {
-          projectNumber: parseInt(projectNumber, 10) || 1,
-        };
-        console.log(dim("  Field IDs (PVT_/PVTSSF_ strings) must be added manually after generation."));
-        console.log(dim("  Run: gh project field-list " + (projectNumber || "1") + " --owner " + (ownerInput || detectedOwner)));
+        const discovered = await discoverProjectBoard(ownerInput || detectedOwner);
+        if (discovered) {
+          // Auto-discovery succeeded — use resolved IDs
+          optionalSections.projectBoard = {
+            projectNumber: discovered.projectNumber,
+            projectId:     discovered.projectId,
+            fieldIds:      discovered.fieldIds,
+            optionIds:     discovered.optionIds,
+          };
+        } else {
+          // Fallback: manual entry (no regression from previous behaviour)
+          console.log("");
+          console.log(bold("  Project Board (manual)"));
+          console.log(dim("  Find your project number: gh project list --owner " + (ownerInput || detectedOwner)));
+          const projectNumber = await input(
+            "  GitHub Projects v2 project number",
+            "1"
+          );
+          optionalSections.projectBoard = {
+            projectNumber: parseInt(projectNumber, 10) || 1,
+          };
+          console.log(dim("  Field IDs (PVT_/PVTSSF_ strings) must be added manually after generation."));
+          console.log(dim("  Run: gh project field-list " + (projectNumber || "1") + " --owner " + (ownerInput || detectedOwner)));
+        }
       }
 
       // --- Multi-Repo prompts ---
@@ -1549,6 +1561,237 @@ async function init() {
 // ---------------------------------------------------------------------------
 
 /**
+ * Sanitize a string value for safe insertion into a YAML double-quoted scalar.
+ * Strips double-quotes and newlines to prevent YAML injection.
+ *
+ * @param {string} value
+ * @returns {string}
+ */
+function _sanitizeYamlValue(value) {
+  return String(value).replace(/"/g, "").replace(/[\r\n]/g, " ").trim();
+}
+
+/**
+ * Attempt to auto-discover GitHub Projects v2 configuration for the given owner.
+ *
+ * Runs two gh CLI calls:
+ *   1. gh project list --owner {owner} --format json  → project select menu
+ *   2. gh project field-list {number} --owner {owner} --format json  → field/option mapping
+ *
+ * Shows a summary box and asks the user to confirm before returning data.
+ *
+ * @param {string} owner  - GitHub org or username
+ * @returns {Promise<{projectNumber: number, projectId: string, fieldIds: object, optionIds: object} | null>}
+ *   Resolved project board config, or null if skipped / discovery failed.
+ */
+async function discoverProjectBoard(owner) {
+  // Non-TTY: skip auto-discovery — can't prompt
+  if (!process.stdout.isTTY) {
+    return null;
+  }
+
+  console.log("");
+  console.log(bold("  Project Board"));
+  console.log(dim("  Searching for GitHub Projects v2…"));
+
+  // -------------------------------------------------------------------------
+  // Step 1: List projects
+  // -------------------------------------------------------------------------
+  let projects = [];
+  try {
+    const raw = execSync(`gh project list --owner "${owner}" --format json`, {
+      encoding: "utf-8",
+      stdio: ["pipe", "pipe", "pipe"],
+    });
+    const parsed = JSON.parse(raw);
+    projects = parsed.projects || [];
+  } catch {
+    // gh not available, auth failure, or no projects access — fall back silently
+    console.log(dim("  Could not list projects — falling back to manual entry."));
+    return null;
+  }
+
+  if (projects.length === 0) {
+    console.log(dim("  No GitHub Projects v2 boards found for this owner."));
+    console.log(dim("  You can add project_board configuration manually in forge.yaml later."));
+    return null;
+  }
+
+  // Build select menu choices
+  const projectChoices = projects.map((p) => ({
+    label: `${p.title}  ${dim("(#" + p.number + ", " + (p.items?.totalCount ?? "?") + " items)")}`,
+    value: p.number,
+  }));
+  projectChoices.push({ label: dim("Skip — configure project board manually later"), value: null });
+
+  console.log("");
+  const selectedNumber = await select("  Which GitHub Project board?", projectChoices);
+  if (selectedNumber === null) {
+    return null;
+  }
+
+  // Look up the selected project's id
+  const selectedProject = projects.find((p) => p.number === selectedNumber);
+  const projectId = selectedProject?.id ?? "";
+  const projectTitle = _sanitizeYamlValue(selectedProject?.title ?? `Project #${selectedNumber}`);
+
+  // -------------------------------------------------------------------------
+  // Step 2: Fetch field list
+  // -------------------------------------------------------------------------
+  console.log("");
+  console.log(dim("  Fetching project fields…"));
+
+  let fields = [];
+  try {
+    const raw = execSync(`gh project field-list ${selectedNumber} --owner "${owner}" --format json`, {
+      encoding: "utf-8",
+      stdio: ["pipe", "pipe", "pipe"],
+    });
+    const parsed = JSON.parse(raw);
+    fields = (parsed.fields || []).filter((f) => f.type === "ProjectV2SingleSelectField");
+  } catch {
+    console.log(dim("  Could not fetch project fields — falling back to manual entry."));
+    return null;
+  }
+
+  // -------------------------------------------------------------------------
+  // Step 3: Match fields and options by name
+  // -------------------------------------------------------------------------
+
+  /**
+   * Match a field by checking if its name case-insensitively includes the target keyword.
+   * Returns the field or null.
+   */
+  function matchField(keyword) {
+    // Exact match first (case-insensitive)
+    const exact = fields.find((f) => f.name.toLowerCase() === keyword.toLowerCase());
+    if (exact) return { field: exact, fuzzy: false };
+    // Fuzzy: name contains keyword
+    const fuzzy = fields.find((f) => f.name.toLowerCase().includes(keyword.toLowerCase()));
+    if (fuzzy) return { field: fuzzy, fuzzy: true };
+    return null;
+  }
+
+  // Known field keys and their expected name keywords
+  const FIELD_TARGETS = [
+    { key: "status",    keywords: ["status"] },
+    { key: "lane",      keywords: ["lane", "track"] },
+    { key: "component", keywords: ["component"] },
+    { key: "priority",  keywords: ["priority"] },
+    { key: "workflow",  keywords: ["workflow"] },
+  ];
+
+  // Known option name → forge.yaml key mappings per field
+  const OPTION_MAPS = {
+    status:   { "todo": "todo", "in progress": "in_progress", "done": "done" },
+    lane:     { "fast": "fast", "feature": "feature", "sync": "sync" },
+    priority: { "p0": "p0", "p1": "p1", "p2": "p2", "p3": "p3" },
+    workflow: {
+      "investigating": "investigating",
+      "ready to build": "ready_to_build",
+      "building": "building",
+      "in review": "in_review",
+      "merged": "merged",
+      "invalid": "invalid",
+      "decomposed": "decomposed",
+    },
+    component: {}, // component options vary by project — map all options by slugifying the name
+  };
+
+  const resolvedFieldIds = {};
+  const resolvedOptionIds = {};
+  const fuzzyMatches = [];
+
+  for (const target of FIELD_TARGETS) {
+    let match = null;
+    for (const kw of target.keywords) {
+      match = matchField(kw);
+      if (match) break;
+    }
+    if (!match) continue;
+
+    const { field, fuzzy } = match;
+    if (fuzzy) {
+      fuzzyMatches.push({ key: target.key, fieldName: field.name });
+    }
+    resolvedFieldIds[target.key] = field.id;
+
+    // Map option IDs
+    const optMap = OPTION_MAPS[target.key] ?? {};
+    const mappedOptions = {};
+
+    if (target.key === "component") {
+      // For component, map every option by slugifying its name (a–z, 0–9, underscore)
+      for (const opt of field.options || []) {
+        const slug = opt.name.toLowerCase().replace(/[^a-z0-9]+/g, "_").replace(/^_|_$/g, "");
+        mappedOptions[slug] = opt.id;
+      }
+    } else {
+      for (const opt of field.options || []) {
+        const nameLower = opt.name.toLowerCase();
+        const mappedKey = optMap[nameLower];
+        if (mappedKey) {
+          mappedOptions[mappedKey] = opt.id;
+        }
+      }
+    }
+
+    if (Object.keys(mappedOptions).length > 0) {
+      resolvedOptionIds[target.key] = mappedOptions;
+    }
+  }
+
+  // -------------------------------------------------------------------------
+  // Step 4: Confirm fuzzy matches (if any)
+  // -------------------------------------------------------------------------
+  for (const { key, fieldName } of fuzzyMatches) {
+    console.log("");
+    console.log(yellow(`  Fuzzy match: field "${fieldName}" mapped to forge.yaml key "${key}"`));
+    const accepted = await confirm(`  Accept this mapping (${fieldName} → ${key})?`, true);
+    if (!accepted) {
+      delete resolvedFieldIds[key];
+      delete resolvedOptionIds[key];
+    }
+  }
+
+  // -------------------------------------------------------------------------
+  // Step 5: Show summary box and confirm
+  // -------------------------------------------------------------------------
+  const summaryLines = [
+    `Project:    ${projectTitle} (#${selectedNumber})`,
+    `Project ID: ${projectId}`,
+    "",
+    "Fields:",
+  ];
+  for (const [key, id] of Object.entries(resolvedFieldIds)) {
+    const optCount = resolvedOptionIds[key] ? Object.keys(resolvedOptionIds[key]).length : 0;
+    const optLabel = optCount > 0 ? ` (${optCount} options)` : " (no options mapped)";
+    summaryLines.push(`  ${key.padEnd(10)}: ${id}${optLabel}`);
+  }
+  const unmapped = FIELD_TARGETS.map((t) => t.key).filter((k) => !resolvedFieldIds[k]);
+  if (unmapped.length > 0) {
+    summaryLines.push("");
+    summaryLines.push(`Not found:  ${unmapped.join(", ")} — placeholders will be used`);
+  }
+
+  console.log("");
+  console.log(box(summaryLines, { title: "Project Board Config" }));
+
+  const confirmed = await confirm("  Use this configuration?", true);
+  if (!confirmed) {
+    console.log(dim("  Skipped auto-discovery. You can add project_board manually in forge.yaml."));
+    return null;
+  }
+
+  return {
+    projectNumber: selectedNumber,
+    projectId,
+    fieldIds: resolvedFieldIds,
+    optionIds: resolvedOptionIds,
+  };
+}
+
+/**
  * Build the forge.yaml file content string from gathered values.
  * Required sections are always written as active YAML.
  * Optional sections are written as active YAML when config is provided in `optionalSections`,
@@ -1594,18 +1837,43 @@ function buildForgeYamlContent({ owner, repo, projectName, description, root, wo
 #       local_path: "${join(root, "..", "your-satellite-repo")}"`;
 
   // --- project_board section ---
+  // Build field_ids block — use resolved IDs where available, placeholders otherwise
+  const FIELD_KEYS = ["status", "lane", "component", "priority", "workflow"];
+  const resolvedFieldIds = projectBoard?.fieldIds ?? {};
+  const resolvedOptionIds = projectBoard?.optionIds ?? {};
+
+  /**
+   * Build a YAML block for option_ids given a nested map of { fieldKey: { optionKey: id } }.
+   * Only writes fields that have at least one mapped option.
+   */
+  function _buildOptionIdsBlock(optionIds) {
+    const entries = Object.entries(optionIds).filter(([, opts]) => Object.keys(opts).length > 0);
+    if (entries.length === 0) return "";
+    const lines = ["  option_ids:"];
+    for (const [fieldKey, opts] of entries) {
+      lines.push(`    ${fieldKey}:`);
+      for (const [optKey, optId] of Object.entries(opts)) {
+        lines.push(`      ${optKey}: "${optId}"`);
+      }
+    }
+    return "\n" + lines.join("\n");
+  }
+
+  const fieldIdsBlock = FIELD_KEYS
+    .map((k) => `    ${k}: "${resolvedFieldIds[k] ?? "PVTSSF_xxxxxxxxxxxxxxxxxxxxxxxx"}"`)
+    .join("\n");
+
+  const optionIdsBlock = projectBoard?.optionIds ? _buildOptionIdsBlock(resolvedOptionIds) : "";
+
+  const hasDiscoveredId = !!(projectBoard?.projectId);
+
   const projectBoardSection = projectBoard
     ? `project_board:
   owner: "${owner}"
   project_number: ${projectBoard.projectNumber || 1}
-  project_id: "PVT_kwHOxxxxxxxxxxxxxxxx"
+  project_id: "${hasDiscoveredId ? projectBoard.projectId : "PVT_kwHOxxxxxxxxxxxxxxxx"}"
   field_ids:
-    status: "PVTSSF_xxxxxxxxxxxxxxxxxxxxxxxx"
-    lane: "PVTSSF_xxxxxxxxxxxxxxxxxxxxxxxx"
-    component: "PVTSSF_xxxxxxxxxxxxxxxxxxxxxxxx"
-    priority: "PVTSSF_xxxxxxxxxxxxxxxxxxxxxxxx"
-    workflow: "PVTSSF_xxxxxxxxxxxxxxxxxxxxxxxx"
-# To find field IDs: gh project field-list ${projectBoard.projectNumber || 1} --owner ${owner}`
+${fieldIdsBlock}${optionIdsBlock}${!hasDiscoveredId ? `\n# To find IDs: gh project field-list ${projectBoard.projectNumber || 1} --owner ${owner}` : ""}`
     : `# project_board:
 #   owner: "${owner}"
 #   project_number: 1
