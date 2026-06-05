@@ -1471,7 +1471,7 @@ async function init() {
     });
     console.log(`  ${GREEN}Created${RESET}: forge.yaml`);
     console.log("");
-    _printNextSteps({ remoteDetected, cyan: (s) => `${CYAN}${s}${RESET}`, bold: (s) => `${BOLD}${s}${RESET}` });
+    _printNextSteps({ remoteDetected });
     await validate(outputPath);
     return;
   }
@@ -1708,7 +1708,7 @@ async function init() {
         })[s]).join(", ")}`);
       }
       console.log("");
-      _printNextSteps({ remoteDetected: ownerInput !== "your-github-org", cyan: (s) => `${CYAN}${s}${RESET}`, bold: (s) => `${BOLD}${s}${RESET}` });
+      _printNextSteps({ remoteDetected: ownerInput !== "your-github-org" });
       await validate(outputPath);
     }
   }
@@ -2155,7 +2155,7 @@ function _writeForgeYaml(opts) {
 }
 
 /** Print next-steps guidance after forge.yaml is written. */
-function _printNextSteps({ remoteDetected, cyan, bold }) {
+function _printNextSteps({ remoteDetected }) {
   console.log(`${BOLD}Next steps:${RESET}`);
   if (!remoteDetected) {
     console.log(`  ${YELLOW}!${RESET}  Edit ${CYAN}forge.yaml${RESET} — set project.owner and project.repo`);
