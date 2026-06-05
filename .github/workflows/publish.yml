@@ -22,10 +22,12 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: 22
-          registry-url: https://registry.npmjs.org
 
-      - name: Check npm version
-        run: npm --version
+      - name: Configure npm for OIDC
+        run: |
+          echo "registry=https://registry.npmjs.org/" > ~/.npmrc
+          npm whoami 2>&1 || echo "(expected — no token, using OIDC)"
+          npm --version
 
       - name: Bump patch version
         run: |
@@ -37,8 +39,6 @@ jobs:
 
       - name: Publish with provenance (OIDC trusted publishing)
         run: npm publish --access public --provenance
-        env:
-          NPM_CONFIG_PROVENANCE: true
 
       - name: Push version bump
         run: |
