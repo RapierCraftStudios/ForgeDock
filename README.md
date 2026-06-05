@@ -217,19 +217,36 @@ The path from here to there is incremental. Each piece — the knowledge store, 
 
 ## Install
 
+**Step 1: Install commands**
+
 ```bash
 npx forgedock
 ```
 
-That's it. One command — installs all pipeline commands into your Claude Code environment.
+This symlinks all pipeline commands into your Claude Code environment (`~/.claude/commands/`).
 
-Requires [Claude Code](https://docs.anthropic.com/en/docs/claude-code) and [GitHub CLI](https://cli.github.com/). ForgeDock reads your project's `CLAUDE.md` for conventions — no extra config needed.
+**Step 2: Generate config**
+
+```bash
+npx forgedock init         # Auto-detects your repo, owner, and branches
+```
+
+Creates `forge.yaml` in your project root — the config file that makes ForgeDock work with your repo instead of a hardcoded one. Edit it to fill in your project details.
+
+**Step 3: AI-powered setup (optional)**
+
+```
+/forgedock-init            # Inside Claude Code — guided full config walkthrough
+```
+
+Requires [Claude Code](https://docs.anthropic.com/en/docs/claude-code) and [GitHub CLI](https://cli.github.com/).
 
 **Other commands:**
 
 ```bash
 npx forgedock update      # Pull latest commands
 npx forgedock uninstall   # Remove all commands
+npx forgedock help        # Show all commands
 ```
 
 ---

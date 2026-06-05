@@ -114,6 +114,16 @@ async function install() {
     `${GREEN}ForgeDock commands are now available as slash commands in any Claude Code session.${RESET}`
   );
   console.log("");
+
+  // forge.yaml advisory — guide users to run init if config is missing
+  const forgeYamlPath = join(process.cwd(), "forge.yaml");
+  if (!existsSync(forgeYamlPath)) {
+    console.log(`${YELLOW}No forge.yaml found in current directory.${RESET}`);
+    console.log(
+      `  Run ${CYAN}npx forgedock init${RESET} in your project root to generate forge.yaml`
+    );
+    console.log("");
+  }
 }
 
 async function uninstall() {
