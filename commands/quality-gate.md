@@ -337,7 +337,7 @@ Before running host-header checks on shell scripts, read project-specific intern
 FORGE_INTERNAL_PATTERNS=""
 if [ -f "{WORKTREE_PATH}/forge.yaml" ]; then
     # Extract internal_service_patterns list (one pattern per line) and join with |
-    FORGE_INTERNAL_PATTERNS=$(grep -A 20 'internal_service_patterns:' "{WORKTREE_PATH}/forge.yaml" \
+    FORGE_INTERNAL_PATTERNS=$(grep -A 999 'internal_service_patterns:' "{WORKTREE_PATH}/forge.yaml" \
         | grep -E '^\s*-\s+' \
         | sed 's/^\s*-\s*//' \
         | tr -d '"'"'" \
