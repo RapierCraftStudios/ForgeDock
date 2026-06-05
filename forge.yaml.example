@@ -260,3 +260,13 @@ branches:
 #     - name: "web"
 #       container: "acme-web-blue"
 #       health_url: "http://localhost:3000"
+#
+#   # Project-specific service name prefixes that identify internal services
+#   # in shell scripts (curl/wget calls). Used by verify-host-headers.sh via
+#   # the FORGE_INTERNAL_PATTERNS env var. Values are joined with | and appended
+#   # to the generic defaults (localhost, 127.0.0.1, api-, worker-, 172.x, IP vars).
+#   # Add your project's container/service name prefixes here so that curl calls
+#   # to those services are checked for explicit Host headers.
+#   # Example: if your services are named "acme-api", "acme-worker", add "acme-"
+#   internal_service_patterns:
+#     - "acme-"

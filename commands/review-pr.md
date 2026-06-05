@@ -322,6 +322,16 @@ echo "=== Running: verify-env-vars.sh ==="
 ~/projects/forge/scripts/verify-env-vars.sh "$DIFF_TMP" "$REPO_ROOT" || true
 
 # 3. Host headers in shell scripts + client-side proxy bypass check
+# Read project-specific internal service patterns from forge.yaml (if present)
+FORGE_INTERNAL_PATTERNS=""
+if [ -f "$REPO_ROOT/forge.yaml" ]; then
+    FORGE_INTERNAL_PATTERNS=$(grep -A 20 'internal_service_patterns:' "$REPO_ROOT/forge.yaml" \
+        | grep -E '^\s*-\s+' \
+        | sed 's/^\s*-\s*//' \
+        | tr -d '"'"'" \
+        | paste -sd '|' -)
+fi
+export FORGE_INTERNAL_PATTERNS
 echo "=== Running: verify-host-headers.sh ==="
 ~/projects/forge/scripts/verify-host-headers.sh "$CHANGED_FILES_TMP" "$REPO_ROOT" || true
 
