@@ -1,0 +1,888 @@
+---
+description: Context-aware PR review — analyzes what the PR touches, spawns domain-specific agents with project conventions. Supports staging reviews.
+argument-hint: [PR number, URL, "open", or "staging" for feature→main review]
+allowed-tools: Task, Bash, Read, Grep, Glob, WebFetch, Skill
+---
+
+# AlterLab PR Review — Orchestrator
+
+**Input**: $ARGUMENTS
+
+**NEVER use plan mode (EnterPlanMode)** during review — it breaks execution context.
+
+**Agent model policy**: Default `model: "sonnet"`. If Sonnet is rate-limited, fall back to `model: "opus"`. User can override with `--model <name>`. Pass the resolved model in every `Task` tool call.
+
+## Architecture — How This Command Works
+
+This is the **orchestrator**. It routes to the right review mode, runs automated checks, spawns domain-specific agents, triages findings, and posts the verdict.
+
+**Sub-files** (loaded on demand — NOT auto-loaded):
+
+| File | What | How to invoke |
+|------|------|---------------|
+| `/home/mrdubey/.claude/commands/review-pr-agents.md` | Agent prompt templates (9 agents + protocols) | `Read` tool during Phase 3C |
+| `/home/mrdubey/.claude/commands/review-pr-staging.md` | Full staging→main review pipeline | `Skill("review-pr-staging", ...)` during Phase 0 |
+
+**Invocation flow:**
+```
+/review-pr 5428          → Phase 0 detects single PR → runs Phases 1-9 inline
+/review-pr staging       → Phase 0 detects staging mode → Skill("review-pr-staging", "staging")
+/review-pr 5500          → Phase 0 auto-detects staging→main PR → Skill("review-pr-staging", "5500")
+/review-pr 3126 --auto-merge --issue 3124 --base staging  → single PR + auto-merge after approval
+```
+
+---
+
+### Auto-Merge Flag
+
+If `$ARGUMENTS` contains `--auto-merge`, this review was invoked from `/work-on` and must merge the PR after approval. Parse:
+
+```
+Example: "3126 --auto-merge --issue 3124 --base staging --gh-flag -R RapierCraft/AlterLab --worktree /path/to/worktree"
+```
+
+Extract: `PR_NUMBER`, `AUTO_MERGE=true`, `MERGE_ISSUE`, `MERGE_BASE`, `MERGE_GH_FLAG`, `MERGE_WORKTREE` (optional — the absolute path to the git worktree to clean up after merge)
+
+If `--auto-merge` is NOT present, `AUTO_MERGE=false` — Phase 8 (Auto-Merge) will be skipped.
+
+---
+
+## Phase 0: Route to Review Mode
+
+Check input to determine which mode:
+
+**CRITICAL — NO DELTA REVIEWS**: If PR was reviewed before, always run the FULL pipeline. Prior findings are already in GitHub issues. Full re-review catches build failures and prerender crashes.
+
+### MODE 1: Staging Review
+
+If `$ARGUMENTS` is "staging", "feature", or "staging:feature":
+
+```
+>>> INVOKE: Skill("review-pr-staging", "$ARGUMENTS")
+>>> THEN STOP — the staging command handles the full flow.
+```
+
+### MODE 2: Multiple PR Review ("open", "all")
+
+```bash
+gh pr list --state open --json number,title,author,createdAt,headRefName
+```
+
+Show list, ask user which to review, then loop through each with full review.
+
+### MODE 3: Single PR (number or URL)
+
+**Auto-detect staging mode:**
+```bash
+PR_INFO=$(gh pr view $ARGUMENTS --json baseRefName,headRefName,additions,deletions,title)
+HEAD=$(echo $PR_INFO | jq -r '.headRefName')
+BASE=$(echo $PR_INFO | jq -r '.baseRefName')
+```
+
+If `HEAD = "staging" AND BASE = "main"` OR `HEAD = "feature" AND BASE = "main"`:
+```
+>>> INVOKE: Skill("review-pr-staging", "$ARGUMENTS")
+>>> THEN STOP.
+```
+
+If `HEAD starts with "milestone/" AND BASE = "staging"`:
+```
+>>> This is a milestone shipping PR. It has a large accumulated diff from many feat/* PRs.
+>>> Run the FULL inline multi-agent review pipeline (Phases 1-9), NOT a single-PR review.
+>>> The diff is large — treat it like a staging review in terms of thoroughness.
+>>> Proceed to Phase 1.
+```
+
+Otherwise → proceed to Phase 1.
+
+---
+
+## Phase 1: PR Context & Classification
+
+### 1A: Fetch PR Data
+```bash
+gh pr view $ARGUMENTS --json number,title,body,author,baseRefName,headRefName,files,additions,deletions
+REVIEW_SHA=$(gh pr view $ARGUMENTS --json headRefOid --jq '.headRefOid')
+REVIEW_SHA_SHORT=$(echo "$REVIEW_SHA" | cut -c1-7)
+gh pr diff $ARGUMENTS --name-only
+gh pr diff $ARGUMENTS
+```
+
+### 1B: Classify
+```bash
+FILES=$(gh pr diff $ARGUMENTS --name-only)
+DIFF=$(gh pr diff $ARGUMENTS)
+
+echo "=== SERVICES ==="
+echo "$FILES" | grep -c "^services/api/" && echo "API" || true
+echo "$FILES" | grep -c "^services/worker/" && echo "WORKER" || true
+echo "$FILES" | grep -c "^web/" && echo "WEB" || true
+echo "$FILES" | grep -c "^shared/" && echo "SHARED" || true
+echo "$FILES" | grep -cE "^(docker|infra/|\.github|Makefile|traefik)" && echo "INFRA" || true
+
+echo "=== DOMAINS ==="
+echo "$DIFF" | grep -cE "SessionUser|CurrentUser|get_current_user|jwt|oauth|login|logout|Depends\(get_|x.forwarded.for|x_forwarded_for|forwarded_for|rate.limit.*ip|ip.*rate.limit|algorithm.*HS256|algorithm.*RS256|NEXTAUTH_SECRET|JWT_SECRET|admin.proxy" && echo "AUTH" || true
+echo "$DIFF" | grep -cE "credit|balance|debit|reconcil|tier_cost|pricing|charge|refund|stripe|subscription" && echo "BILLING" || true
+echo "$DIFF" | grep -cE "scrape|tier.*escalat|proxy|anti_bot|stealth|playwright|playbook" && echo "SCRAPING" || true
+echo "$DIFF" | grep -cE "FOR UPDATE|atomic|transaction|pipeline|MULTI|distributed_lock|acquire_lock|reserved_by|promo.*claim|voucher.*redeem|is_byop|byop_discount" && echo "CONCURRENCY" || true
+echo "$FILES" | grep -cE "migration|\.sql$" && echo "DATABASE" || true
+echo "$DIFF" | grep -cE "create_async_engine|AsyncSession|connect_args|pool_size|prepared_statement|engine_from_config|sessionmaker" && echo "DB_CONFIG" || true
+echo "$FILES" | grep -cE "router|routes" && echo "API_DESIGN" || true
+```
+
+### 1C: Document
+Record: services touched, domains detected, PR scope (1-2 sentences), change categories.
+
+---
+
+## Phase 2: Automated Checks (Run ALL in Parallel)
+
+### 2A: Python Linting (if Python changed)
+```bash
+cd services/api && poetry run black --check app/
+cd services/api && poetry run isort --check app/
+cd services/worker && poetry run black --check worker/
+cd services/worker && poetry run isort --check worker/
+python3 -m py_compile <each-changed-python-file>
+```
+**IMPORTANT**: Always `cd` into service dir and `poetry run black`. Never `pipx run black`.
+
+### 2B: TypeScript/JS (if web/ changed)
+```bash
+cd web && npx prettier --check "src/**/*.{ts,tsx}"
+cd web && npx tsc --noEmit
+cd web && npx next lint
+```
+
+### 2C: Static Type Checking (if Python changed)
+```bash
+cd services/api && poetry run mypy app/ --ignore-missing-imports --no-error-summary 2>&1 | head -50
+cd services/api && poetry run ruff check app/ --select=E,W,F,B,S --ignore=E501 2>&1 | head -30
+```
+
+### 2D: Environment Variable Audit
+```bash
+gh pr diff $ARGUMENTS | grep -E "os\.getenv|os\.environ|process\.env" | head -30
+```
+Flag if new env vars not in `.env.example`.
+
+### 2E: Secrets Detection (CRITICAL — BLOCKING if found)
+```bash
+gh pr diff $ARGUMENTS | grep -iE "(api[_-]?key|secret[_-]?key|password|token|credential|private[_-]?key)" | grep -vE "(#|//|\.example|placeholder|PLACEHOLDER|YOUR_|<|>)" | head -20
+gh pr diff $ARGUMENTS | grep -oE "['\"][A-Za-z0-9+/=]{40,}['\"]" | head -10
+```
+
+### 2F: SQL Migration Validation (if *.sql changed)
+```bash
+for sql_file in $(gh pr diff $ARGUMENTS --name-only | grep "\.sql$"); do
+    grep -E "FOR UPDATE" "$sql_file" | grep -qE "(SUM|COUNT|AVG|MIN|MAX)\s*\(" && echo "ERROR: FOR UPDATE with aggregate"
+    grep -qE "DROP (TABLE|COLUMN|INDEX)" "$sql_file" && ! grep -qE "IF EXISTS" "$sql_file" && echo "WARNING: DROP without IF EXISTS"
+    grep -qE "ALTER TABLE.*ADD COLUMN.*NOT NULL" "$sql_file" && ! grep -qE "DEFAULT" "$sql_file" && echo "WARNING: NOT NULL without DEFAULT"
+done
+```
+
+### 2G: Dependency Audit (if pyproject.toml or package.json changed)
+```bash
+git diff origin/main...HEAD -- "**/pyproject.toml" | grep -E "^\+" | grep -v "^\+\+\+" | head -20
+git diff origin/main...HEAD -- "**/package.json" | grep -E "^\+" | grep -v "^\+\+\+" | head -20
+```
+
+### 2H: Tests
+```bash
+cd services/api && poetry run pytest tests/ -x -q --tb=short 2>&1 | tail -30
+```
+**BLOCKING if tests fail.**
+
+### 2I: Build Verification (MANDATORY for staging→main AND milestone→staging)
+
+```bash
+CHANGED_FILES=$(gh pr diff $ARGUMENTS --name-only)
+HAS_TS=$(echo "$CHANGED_FILES" | grep -E '\.(tsx?|jsx?)$' | head -1)
+HAS_PY=$(echo "$CHANGED_FILES" | grep -E '\.py$' | head -1)
+IS_STAGING_TO_MAIN=$([[ "$HEAD" == "staging" && "$BASE" == "main" ]] && echo "true" || echo "false")
+IS_MILESTONE_TO_STAGING=$([[ "$HEAD" =~ ^milestone/ && "$BASE" == "staging" ]] && echo "true" || echo "false")
+REQUIRES_FULL_BUILD=$([[ "$IS_STAGING_TO_MAIN" == "true" || "$IS_MILESTONE_TO_STAGING" == "true" ]] && echo "true" || echo "false")
+```
+
+**TypeScript files changed:**
+```bash
+gh pr checkout $ARGUMENTS --detach 2>/dev/null
+cd web && npx tsc --noEmit 2>&1
+TSC_EXIT=$?
+if [ "$REQUIRES_FULL_BUILD" = "true" ] || [ "$TSC_EXIT" -eq 0 ]; then
+    npx next build 2>&1 | tail -30
+    BUILD_EXIT=$?
+fi
+cd .. && git checkout - 2>/dev/null
+```
+
+If `TSC_EXIT != 0`: **CONFIRMED blocking** — type errors.
+If `BUILD_EXIT != 0`: **CONFIRMED blocking** — SSG prerender failure.
+
+**CRITICAL**: `tsc --noEmit` alone is NOT sufficient for staging→main or milestone→staging. PR #2565 passed tsc but failed next build. PR #11637 (Session Intelligence milestone) was APPROVED without any build check because milestone→staging was excluded — 4 build errors shipped to staging.
+
+**Python files changed:**
+```bash
+gh pr checkout $ARGUMENTS --detach 2>/dev/null
+for f in $(echo "$CHANGED_FILES" | grep '\.py$'); do python3 -m py_compile "$f" 2>&1; done
+if [ "$REQUIRES_FULL_BUILD" = "true" ]; then
+    cd services/api && poetry run black --check app/ 2>&1
+    cd ../.. && cd services/worker && poetry run black --check worker/ 2>&1
+fi
+git checkout - 2>/dev/null
+```
+
+**BLOCKING if any check fails.** Fix before merge — do not approve with known build/format failures.
+
+### 2J: Builder Contract Scope Check (if PR is from /work-on pipeline)
+
+Check whether the PR's actual changes match what the builder committed to in its contract:
+
+```bash
+# Find the contract comment on the linked issue
+ISSUE_NUM=$(gh pr view $ARGUMENTS --json body --jq '.body' | grep -oP 'Closes #\K\d+|#\K\d+' | head -1)
+if [ -n "$ISSUE_NUM" ]; then
+    CONTRACT_FILES=$(gh api repos/${REPO}/issues/${ISSUE_NUM}/comments --jq '[.[] | select(.body | contains("FORGE:CONTRACT"))] | .[0].body' 2>/dev/null | grep -oP '`[^`]+\.(py|tsx?|sql|sh|yml|yaml|json)`' | tr -d '`' | sort -u)
+    PR_FILES=$(gh pr diff $ARGUMENTS --name-only | sort -u)
+
+    # Files in PR but NOT in contract
+    SCOPE_CREEP=$(comm -23 <(echo "$PR_FILES") <(echo "$CONTRACT_FILES") 2>/dev/null | grep -vE '\.(md|txt|example)$')
+    if [ -n "$SCOPE_CREEP" ]; then
+        echo "SCOPE: PR changes files not in builder contract:"
+        echo "$SCOPE_CREEP"
+        echo "This is informational — may be legitimate (discovered during implementation). Flag if suspicious."
+    fi
+fi
+```
+
+This is not blocking — scope expansion during implementation is normal. But large unexplained scope creep (5+ uncontracted files) should be flagged in the review summary.
+
+---
+
+## Phase 2.5: Assumption Verification (Integration Integrity)
+
+**WHY THIS EXISTS**: Code review catches logic bugs inside changed files. But bugs increasingly come from correct code that doesn't execute because another system layer blocks, shadows, or reroutes it. As the system grows more layers (nginx → next.config → route handlers → middleware → business logic → Redis → Postgres), the probability of "correct but unreachable" code increases combinatorially.
+
+This phase asks: **"What must be true in the rest of the system for each changed file to actually work? Are those assumptions true?"**
+
+### How It Works
+
+For each changed file, identify its **activation path** — how does execution reach this code? Then verify the path is intact by checking unchanged system files.
+
+### Step 2.5A: Identify File Types and Their Registration Points
+
+Map each changed file to its activation requirements:
+
+| Changed File Pattern | Assumption | Verification Target |
+|---------------------|------------|---------------------|
+| `web/src/app/api/**/*.ts` (Route Handler) | Requests reach this handler | Check `web/next.config.js` rewrites don't shadow it; check `infra/nginx/nginx.conf` routes path to Next.js |
+| `services/api/app/routers/*.py` (API Router) | Router is registered in app | Check `services/api/app/main.py` includes this router |
+| `services/api/app/middleware/*.py` | Middleware is in the stack | Check `services/api/app/main.py` middleware registration order |
+| `infra/migrations/*.sql` | Migration runs on current schema | Check previous migration's end state matches assumptions |
+| `shared/**/*.py` | Imported by consumer services | Verify import paths exist in api/worker; check Docker volume mounts |
+| `services/worker/worker/*.py` (Consumer) | Queue consumer is registered | Check consumer registration in worker startup |
+| Any file using `os.getenv("NEW_VAR")` | Env var is set at runtime | Check `docker-compose.yml`, `.env.example`, `services/api/app/core/env_validation.py` |
+| `scripts/decrypt-secrets.sh` (ENV_MAPPING) | Secret reaches running container | Trace full chain: SOPS key → ENV_MAPPING → deploy workflow SCP target → merge script path → `docker-compose.prod.yml` env_file. See Step 2.5B SOPS deploy chain check. |
+| `.secrets/prod.enc.yaml` | SOPS key maps to ENV_MAPPING | Verify key path in YAML matches the tuple in `decrypt-secrets.sh` ENV_MAPPING |
+| `.github/workflows/deploy-production.yml` | Deploy paths are consistent | Verify SCP target + merge script `PROJECT` var resolve to same dir as `docker-compose.prod.yml` env_file |
+| `web/src/components/**/*.tsx` | Component is imported somewhere | Check for at least one import of this component |
+| `services/*/config/*.json` | Config is baked into image | Check Dockerfile COPY or volume mount in `docker-compose.yml` |
+| `infra/nginx/*.conf` | Nginx loads this config | Check `docker-compose.yml` volume mount for nginx |
+| `infra/**/*.sh`, `scripts/**/*.sh` with `curl`/`wget` to internal services | HTTP request is accepted by target service | Read target service's middleware stack (`main.py` for API: TrustedHostMiddleware, CORS, auth). Verify Host header, auth headers, and URL path will produce the expected status code. |
+| `web/src/app/**/*-client.tsx`, `web/src/components/**/*.tsx`, `web/src/lib/*.ts` (Client-side code with `fetch()`/`useSWR()`) | Client requests go through Next.js proxy (`/api/...`), never directly to FastAPI (`/api/v1/...`) | Grep changed `.tsx`/`.ts` files (excluding `route.ts` proxy handlers) for `fetch("/api/v1/` or `` `/api/v1/ `` in template literals or `useSWR.*"/api/v1/`. Any match is a **CONFIRMED BLOCKING** integration bug — direct calls bypass session auth (admin proxy JWT, session-to-bearer conversion) and fail locally (no nginx). |
+| `.github/workflows/*.yml` (Workflow with test/build jobs) | Sibling workflows with same-named jobs stay in sync | For each job name in the changed workflow, check if the same job name exists in sibling workflows (`ci.yml` ↔ `deploy-production.yml` ↔ `hotfix-deploy.yml`). Compare env vars, PYTHONPATH, working-directory, and run commands for meaningful drift. |
+| `docker-compose*.yml` changes to `postgres` or `redis` service (`command:`, `image:`, `volumes:`, `environment:`) | Stateful container will NOT be recreated during deploy, OR restart is safe | **Auto-escalate to HIGH risk.** Changing `command:` args, `image:` tag, or `volumes:` forces container recreation on `docker-compose up`. For stateful services (postgres, redis), verify: (1) `stop_grace_period` is set and sufficient (≥30s for PG); (2) `full_page_writes = on` in PG config (protects against partial page writes on crash); (3) `fsync = on` (ensures write durability); (4) No long-running transactions will be interrupted. If container recreation is unavoidable, recommend scheduling during a maintenance window — NOT as a side effect of a routine deploy. **This check prevents the class of incident documented in issue #146**: a PG `command:` arg change triggered container restart under active load, corrupting btree indexes. |
+| `docker-compose*.yml` changes `entrypoint:` or `command:` to reference a script (`.sh` file) | Env vars used inside the entrypoint script are available inside the container at runtime | **Run `verify-env-vars.sh`** which detects shell `${VAR}` references in entrypoint scripts and cross-checks against the service's `environment:` section. Docker Compose `${VAR}` in YAML `command:` is parsed at Compose load time (host-side) — the var doesn't need to be in the container. But `${VAR}` inside an entrypoint `.sh` script runs at container runtime — it MUST be injected via `environment:` or `env_file:`. **This check prevents the class of incident documented in RapierCraftStudios/forge#185**: Redis migrated from `command: --requirepass ${REDIS_PASSWORD}` (Compose interpolation) to `entrypoint.sh` (container runtime) without adding `environment: REDIS_PASSWORD`, causing a restart loop on deploy. |
+| **ANY staging→main PR** (regardless of files changed) | `ci.yml` and `deploy-production.yml` test jobs are in sync | **ALWAYS runs for staging→main PRs.** Pre-existing drift is invisible until deploy. Deep-diff shared jobs (test-api, test-web): compare PYTHONPATH values, dependency install steps, and step names. A missing PYTHONPATH or install step in deploy is CONFIRMED BLOCKING — CI passes but deploy fails (PR #11356 incident). |
+
+### Step 2.5B: Run Verification
+
+For each changed file, execute the relevant checks using the standalone verification scripts in `~/projects/forge/scripts/`. These scripts can also be run independently outside the review context (e.g., from `/quality-gate` or `/work-on` builder steps).
+
+```bash
+CHANGED_FILES=$(gh pr diff $ARGUMENTS --name-only)
+REPO_ROOT="."  # Assumes cwd is the repo root
+
+# Write changed files and diff to temp files for script consumption
+CHANGED_FILES_TMP=$(mktemp)
+DIFF_TMP=$(mktemp)
+echo "$CHANGED_FILES" > "$CHANGED_FILES_TMP"
+gh pr diff $ARGUMENTS > "$DIFF_TMP"
+
+# --- Script-based checks (reusable, testable, deterministic) ---
+# Each script exits 0 (pass), 1 (blocking findings), or 2 (warnings only).
+# Output is structured: "BLOCKING: ...", "WARNING: ...", "OK: ..." per line.
+
+# 1. Route/router/middleware/shared-module/component registration
+echo "=== Running: verify-route-registration.sh ==="
+~/projects/forge/scripts/verify-route-registration.sh "$CHANGED_FILES_TMP" "$REPO_ROOT" || true
+
+# 2. Environment variable wiring (checks .env.example, docker-compose, env_validation, SOPS mapping)
+echo "=== Running: verify-env-vars.sh ==="
+~/projects/forge/scripts/verify-env-vars.sh "$DIFF_TMP" "$REPO_ROOT" || true
+
+# 3. Host headers in shell scripts + client-side proxy bypass check
+echo "=== Running: verify-host-headers.sh ==="
+~/projects/forge/scripts/verify-host-headers.sh "$CHANGED_FILES_TMP" "$REPO_ROOT" || true
+
+# 4. SOPS deploy chain (ENV_MAPPING consistency, deploy path drift, hotfix sync)
+echo "=== Running: verify-sops-chain.sh ==="
+~/projects/forge/scripts/verify-sops-chain.sh "$DIFF_TMP" "$CHANGED_FILES_TMP" "$REPO_ROOT" || true
+
+# Cleanup temp files
+rm -f "$CHANGED_FILES_TMP" "$DIFF_TMP"
+
+# --- Inline checks (not yet extracted to scripts) ---
+
+# Python scoping hazard check — local imports that shadow module-level names
+# A local `import X` makes X a local variable for the ENTIRE function scope.
+# Any reference to X ABOVE the local import will crash with UnboundLocalError.
+for f in $(echo "$CHANGED_FILES" | grep -E '\.py$'); do
+    echo "=== Python Scoping Check: $f ==="
+    # Find function-scoped imports (indented import statements)
+    grep -nE "^\s+import [a-z]" "$f" 2>/dev/null | while read line; do
+        LINENO=$(echo "$line" | cut -d: -f1)
+        MODULE=$(echo "$line" | grep -oE "import [a-z_]+" | awk '{print $2}')
+        # Check if the same module is used BEFORE this line in the same function
+        # (simplified check — agents should do full scope analysis)
+        [ -n "$MODULE" ] && head -n $((LINENO-1)) "$f" 2>/dev/null | grep -qE "^\s+.*\b${MODULE}\." && \
+            echo "WARNING: Local 'import $MODULE' at line $LINENO may shadow module-level import — check for UnboundLocalError on references above this line"
+    done
+done
+
+# Config file assumption check (baked into Docker image vs volume-mounted)
+for f in $(echo "$CHANGED_FILES" | grep -E "config/.*\.(json|yaml|yml)$"); do
+    echo "=== Config File: $f ==="
+    grep -n "$(dirname $f)" docker-compose.yml 2>/dev/null || echo "WARNING: Config dir may not be mounted — changes may require --build"
+    grep -n "$(dirname $f)" services/*/Dockerfile 2>/dev/null || true
+done
+
+# Sibling workflow drift check — ALWAYS runs for staging→main PRs.
+# Also runs when any workflow file changes on non-staging PRs.
+#
+# The class of bug this catches: ci.yml has PYTHONPATH + worker deps,
+# deploy-production.yml doesn't. CI passes, deploy fails.
+# PR #11356 was approved with green CI but deploy pipeline broke.
+#
+# CRITICAL: This check must NOT be gated on workflow files being in the
+# diff. Pre-existing drift is the most dangerous kind — it lurks until
+# staging→main and then blocks the deploy.
+WORKFLOW_FILES=$(echo "$CHANGED_FILES" | grep -E "^\.github/workflows/.*\.yml$" || true)
+IS_STAGING_PR=$([[ "$HEAD" == "staging" && "$BASE" == "main" ]] && echo "true" || echo "false")
+
+if [ -n "$WORKFLOW_FILES" ] || [ "$IS_STAGING_PR" = "true" ]; then
+    echo "=== Sibling Workflow Drift Check (MANDATORY for staging→main) ==="
+
+    CI_WF=".github/workflows/ci.yml"
+    DEPLOY_WF=".github/workflows/deploy-production.yml"
+
+    if [ -f "$CI_WF" ] && [ -f "$DEPLOY_WF" ]; then
+        # Deep comparison: extract the full test step (name + run + env) from
+        # each shared job and diff them. Keyword grepping missed the PR #11356
+        # failure — PYTHONPATH was present in CI but absent in deploy.
+        for JOB in test-api test-web; do
+            CI_HAS=$(grep -c "name: Test.*${JOB#test-}" "$CI_WF" 2>/dev/null || echo 0)
+            DEPLOY_HAS=$(grep -c "name: Test.*${JOB#test-}" "$DEPLOY_WF" 2>/dev/null || echo 0)
+            [ "$CI_HAS" -eq 0 ] || [ "$DEPLOY_HAS" -eq 0 ] && continue
+
+            echo "--- Comparing '$JOB' job between ci.yml and deploy-production.yml ---"
+
+            # Extract env vars from ALL steps in the job (not just pytest)
+            CI_ENVS=$(sed -n "/^  ${JOB}:/,/^  [a-z]/p" "$CI_WF" 2>/dev/null | grep -E "PYTHONPATH|DATABASE_URL|REDIS_URL|TESTING" | sed 's/^ *//' | sort)
+            DEPLOY_ENVS=$(sed -n "/^  ${JOB}:/,/^  [a-z]/p" "$DEPLOY_WF" 2>/dev/null | grep -E "PYTHONPATH|DATABASE_URL|REDIS_URL|TESTING" | sed 's/^ *//' | sort)
+
+            # Check for PYTHONPATH specifically — the exact var that caused the #11356 failure
+            CI_PYPATH=$(echo "$CI_ENVS" | grep "PYTHONPATH" || echo "(not set)")
+            DEPLOY_PYPATH=$(echo "$DEPLOY_ENVS" | grep "PYTHONPATH" || echo "(not set)")
+            if [ "$CI_PYPATH" != "$DEPLOY_PYPATH" ]; then
+                echo "  BLOCKING: PYTHONPATH differs between ci.yml and deploy-production.yml for job '$JOB'"
+                echo "    ci.yml:              $CI_PYPATH"
+                echo "    deploy-production:   $DEPLOY_PYPATH"
+                echo "  This WILL cause deploy failure — CI passes but deploy test step uses different Python path."
+            fi
+
+            # Check for dependency installation steps that exist in one but not the other
+            CI_INSTALLS=$(sed -n "/^  ${JOB}:/,/^  [a-z]/p" "$CI_WF" 2>/dev/null | grep -c "poetry install\|pip install\|npm install" || echo 0)
+            DEPLOY_INSTALLS=$(sed -n "/^  ${JOB}:/,/^  [a-z]/p" "$DEPLOY_WF" 2>/dev/null | grep -c "poetry install\|pip install\|npm install" || echo 0)
+            if [ "$CI_INSTALLS" != "$DEPLOY_INSTALLS" ]; then
+                echo "  WARNING: Different number of dependency install steps in '$JOB' — ci.yml has $CI_INSTALLS, deploy has $DEPLOY_INSTALLS"
+                echo "  ACTION: Read both files and verify all dependencies needed by tests are installed in both workflows."
+            fi
+
+            # Check step names — if CI has a step that deploy doesn't, flag it
+            CI_STEPS=$(sed -n "/^  ${JOB}:/,/^  [a-z]/p" "$CI_WF" 2>/dev/null | grep "- name:" | sed 's/.*- name: //' | sort)
+            DEPLOY_STEPS=$(sed -n "/^  ${JOB}:/,/^  [a-z]/p" "$DEPLOY_WF" 2>/dev/null | grep "- name:" | sed 's/.*- name: //' | sort)
+            MISSING_IN_DEPLOY=$(comm -23 <(echo "$CI_STEPS") <(echo "$DEPLOY_STEPS") 2>/dev/null || true)
+            if [ -n "$MISSING_IN_DEPLOY" ]; then
+                echo "  WARNING: Steps in ci.yml '$JOB' missing from deploy-production.yml:"
+                echo "$MISSING_IN_DEPLOY" | sed 's/^/    - /'
+            fi
+        done
+    fi
+fi
+```
+
+### Step 2.5C: Record Broken Assumptions
+
+Any WARNING from the checks above is a **CONFIRMED finding** — the changed code may not execute as intended. Record these as pre-found issues that will be included in the agent context (Phase 3) and in the final findings (Phase 6).
+
+Format: `INTEG-N|CONFIRMED|HIGH|file:line|Changed code may be unreachable: {reason}`
+
+**This phase is NOT optional.** It runs for every review, regardless of PR size or domain. A 3-line route handler change that fails this check is more dangerous than a 500-line refactor that passes.
+
+---
+
+## Phase 3: Agent Selection & Launch
+
+### 3A: Risk Assessment
+
+**NEVER scale review depth by line count.** A 5-line shell script processing LLM output is more dangerous than a 500-line React component.
+
+```bash
+DIFF=$(gh pr diff $ARGUMENTS)
+FILES=$(gh pr diff $ARGUMENTS --name-only)
+echo "=== RISK SIGNALS ==="
+echo "$DIFF" | grep -cE "subprocess|exec|eval|system\(|popen|heredoc|EMEMO_EOF|LLM_|llm_" && echo "  UNTRUSTED_INPUT_PROCESSING" || true
+echo "$DIFF" | grep -cE "\.sh$|bash|shell|cron" && echo "  SHELL_SCRIPT" || true
+echo "$DIFF" | grep -cE "credit|balance|debit|charge|refund|stripe" && echo "  FINANCIAL" || true
+echo "$DIFF" | grep -cE "SessionUser|CurrentUser|jwt|oauth|password|token|secret|x.forwarded.for|x_forwarded_for|forwarded_for|rate.limit.*ip|ip.*rate.limit|algorithm.*HS256|algorithm.*RS256|NEXTAUTH_SECRET|JWT_SECRET|admin.proxy" && echo "  AUTH_SENSITIVE" || true
+echo "$DIFF" | grep -cE "\.sql$|migration|DROP|ALTER|DELETE FROM" && echo "  DATABASE_MUTATION" || true
+echo "$DIFF" | grep -cE "docker|deploy|traefik|nginx|\.yml.*service" && echo "  INFRASTRUCTURE" || true
+echo "$DIFF" | grep -cE "docker-compose.*postgres|docker-compose.*redis|postgres.*command:|redis.*command:|image:.*postgres|image:.*redis" && echo "  DATABASE_CONTAINER" || true
+echo "$DIFF" | grep -cE "create_async_engine|AsyncSession|connect_args|pool_size|prepared_statement|engine_from_config|sessionmaker" && echo "  DB_CONFIG" || true
+echo "$DIFF" | grep -cE "subprocess|os\.system|eval\(|exec\(|pickle|yaml\.load[^_]" && echo "  CODE_EXECUTION" || true
+echo "$FILES" | grep -cE "^sdk/|openapi.*\.json$|openapi-versions/" && echo "  SDK_OPENAPI" || true
+```
+
+### 3B: Select Agents
+
+| Risk Signal | Required Agents |
+|-------------|----------------|
+| UNTRUSTED_INPUT_PROCESSING | Security (deep) + relevant domain |
+| SHELL_SCRIPT | Security (deep) + Infrastructure |
+| FINANCIAL | Security + Billing + Concurrency |
+| AUTH_SENSITIVE | Security + Auth Conventions |
+| DATABASE_MUTATION | Security + Database |
+| DB_CONFIG | Security + Database + Infrastructure |
+| INFRASTRUCTURE | Security + Infrastructure |
+| DATABASE_CONTAINER | Security + Infrastructure (escalate to HIGH risk — stateful container restart) |
+| CODE_EXECUTION | Security (deep) |
+| SDK_OPENAPI | Security + API Design & Consistency (runs cross-PR schema check #10) |
+| None | Security + all matching domain agents |
+
+**General Security agent ALWAYS runs.** Domain agents selected by classification, not PR size. If BILLING detected, always also spawn Concurrency agent. If SHARED touched, spawn agents for all importing services.
+
+**Domain-overlap dispatch (MANDATORY for multi-signal PRs):**
+
+1. **Union semantics**: If multiple risk signals are detected, spawn the UNION of all agents from ALL matched rows. A PR triggering both `AUTH_SENSITIVE` and `FINANCIAL` spawns Security + Auth + Billing + Concurrency — not just one row's agents.
+
+2. **Critical domain override**: If 2+ of these critical domains are detected in the same PR, spawn agents for ALL affected domains regardless of file count or line changes:
+   - AUTH + BILLING → Security (deep) + Auth + Billing + Concurrency
+   - AUTH + DATABASE_MUTATION → Security (deep) + Auth + Database
+   - FINANCIAL + CONCURRENCY → Security (deep) + Billing + Concurrency + Database
+   - AUTH + CODE_EXECUTION → Security (deep) + Auth
+
+3. **Why this exists**: A 2-file PR touching both `services/api/app/core/auth.py` and `services/api/app/routers/billing.py` is MORE dangerous than a 20-file refactor in one domain. Small cross-domain PRs create interaction bugs that single-domain reviewers cannot catch. Never reduce agent count based on file count when multiple critical domains are involved.
+
+### 3C: Load Agent Templates & Launch
+
+**>>> INVOCATION: Read the agent catalog file:**
+```
+Read the file: /home/mrdubey/.claude/commands/review-pr-agents.md
+```
+
+This file contains the Evidence-Based Review Protocol, Structured Findings Protocol, and all 9 agent prompt templates. For each selected agent:
+1. Extract its template from the catalog
+2. Substitute: `[PR_NUMBER]`, `[REVIEW_SHA]`, `[REVIEW_SHA_SHORT]`, `[TITLE]`, relevant files list
+3. If Phase 2.5 found broken assumptions, append them to the agent's prompt as "Pre-found integration issues to verify"
+4. Launch via `Task` tool with the resolved model (default `"sonnet"`, fallback `"opus"` if rate-limited)
+
+**CRITICAL**: Launch ALL selected agents in a SINGLE message using multiple Task tool calls. Each agent posts findings directly to the PR via `gh pr comment`.
+
+---
+
+## Phase 4: Wait for Agents
+
+```bash
+gh pr view $ARGUMENTS --json comments --jq '.comments | length'
+gh api repos/{owner}/{repo}/issues/$ARGUMENTS/comments --jq '.[-10:] | .[].body[:100]'
+```
+
+**Do NOT proceed until ALL launched agent comments are visible on the PR.**
+
+---
+
+## Phase 5: Synthesis (Multi-Agent Arbitration)
+
+**Skip if**: Only 1 agent OR total findings ≤ 3.
+
+```bash
+ALL_FINDINGS=$(gh api "repos/${REPO}/issues/${PR_NUMBER}/comments" --jq '.[].body' | grep -oP '(?<=<!-- FINDING:).*?(?= -->)')
+AGENT_COUNT=$(gh api "repos/${REPO}/issues/${PR_NUMBER}/comments" --jq '[.[] | select(.body | test("REVIEW-FINDINGS-START"))] | length')
+FINDING_COUNT=$(echo "$ALL_FINDINGS" | grep -c '.' || echo 0)
+```
+
+If synthesis needed, launch a `general-purpose` Task (model: resolved per policy — default sonnet, fallback opus):
+- Deduplicate findings by file + line range ±5 (keep higher confidence)
+- Resolve contradictions by reading disputed code
+- Dismiss false positives with evidence
+- Post synthesis comment with `<!-- REVIEW-FINDINGS-SYNTHESIZED-START -->` block
+- Do NOT add new findings — only triage existing ones
+
+**IMPORTANT**: When synthesized block exists, Phase 6 MUST use it instead of raw findings.
+
+---
+
+## Phase 6: Finding Triage & Issue Creation (MANDATORY)
+
+**STOP. DO NOT skip this phase. DO NOT post summary first.** Every finding MUST become a GitHub issue BEFORE the summary.
+
+### 6A: Extract Findings
+
+```bash
+REPO=$(gh repo view --json nameWithOwner --jq '.nameWithOwner')
+HAS_SYNTHESIS=$(gh api "repos/${REPO}/issues/${PR_NUMBER}/comments" --jq '.[].body' | grep -c 'REVIEW-FINDINGS-SYNTHESIZED-START' || echo 0)
+
+if [ "$HAS_SYNTHESIS" -gt 0 ]; then
+    FINDINGS=$(gh api "repos/${REPO}/issues/${PR_NUMBER}/comments" --jq '.[] | select(.body | test("REVIEW-FINDINGS-SYNTHESIZED-START")) | .body' | grep -oP '(?<=<!-- FINDING:).*?(?= -->)')
+else
+    FINDINGS=$(gh api "repos/${REPO}/issues/${PR_NUMBER}/comments" --jq '.[].body' | grep -oP '(?<=<!-- FINDING:).*?(?= -->)')
+fi
+```
+
+Also include any `INTEG-N` findings from Phase 2.5 that weren't already covered by agents.
+
+If 0 structured findings: scan agent comments for unstructured findings (lines starting with "Finding", "Issue", "Bug", "Warning"; sections titled "Findings", "Issues Found"). Extract manually.
+
+If still 0: review is clean — skip to Phase 7.
+
+### 6B: Deduplicate
+- Keep ALL confidence levels (CONFIRMED, LIKELY, POSSIBLE)
+- Dedup by file + line range ±5 — keep higher confidence (covers off-by-one from upstream insertions)
+- Also dedup by title similarity: if two findings share the same file and 3+ title keywords, keep the higher confidence one
+- Sort: CONFIRMED first, then LIKELY, then POSSIBLE; within group by severity
+
+### 6C: Create Issues
+
+```bash
+gh label create "review-finding" --color "D93F0B" --force 2>/dev/null
+gh label create "needs-validation" --color "FBCA04" --force 2>/dev/null
+gh label create "validated" --color "0E8A16" --force 2>/dev/null
+gh label create "false-positive" --color "CCCCCC" --force 2>/dev/null
+```
+
+**Milestone detection:**
+```bash
+# Check BOTH head and base branches — feature PRs targeting milestone/* branches
+# should inherit the milestone for their review findings
+BASE_BRANCH=$(gh pr view ${PR_NUMBER} --json baseRefName --jq '.baseRefName')
+HEAD_BRANCH=$(gh pr view ${PR_NUMBER} --json headRefName --jq '.headRefName')
+MILESTONE_FLAG=""
+
+# First check: PR's base branch is a milestone branch (most common for feature-lane PRs)
+MILESTONE_BRANCH=""
+if echo "$BASE_BRANCH" | grep -qE "^milestone/"; then
+    MILESTONE_BRANCH="$BASE_BRANCH"
+elif echo "$HEAD_BRANCH" | grep -qE "^milestone/"; then
+    MILESTONE_BRANCH="$HEAD_BRANCH"
+fi
+
+if [ -n "$MILESTONE_BRANCH" ]; then
+    BRANCH_SLUG=$(echo "$MILESTONE_BRANCH" | sed 's|^milestone/||')
+    MILESTONE_NUMBER=$(gh api repos/${REPO}/milestones --jq --arg slug "$BRANCH_SLUG" '.[] | select((.title | ascii_downcase | gsub("[^a-z0-9]+"; "-")) == $slug) | .number' 2>/dev/null | head -1)
+    [ -z "$MILESTONE_NUMBER" ] && MILESTONE_NUMBER=$(gh api repos/${REPO}/milestones --jq --arg slug "$BRANCH_SLUG" '.[] | select((.title | ascii_downcase | gsub("[^a-z0-9]+"; "-")) | test($slug)) | .number' 2>/dev/null | head -1)
+    [ -n "$MILESTONE_NUMBER" ] && MILESTONE_FLAG="--milestone $(gh api repos/${REPO}/milestones/${MILESTONE_NUMBER} --jq '.title')"
+fi
+```
+
+**Dedup against existing issues (MANDATORY before creating):**
+
+```bash
+# For each finding, check if an open issue already exists at the same file within ±5 lines
+FINDING_FILE="path/to/file.py"
+FINDING_LINE="123"
+FINDING_TITLE="fix: brief description of finding (review finding — PR #${PR_NUMBER})"
+
+# Build line-range bounds: ±5 tolerance covers typical off-by-one from upstream insertions
+LINE_MIN=$((FINDING_LINE - 5))
+LINE_MAX=$((FINDING_LINE + 5))
+
+# Check open issues for line-range overlap OR title similarity on the same file
+CANDIDATES=$(gh issue list --state open --label "review-finding" --limit 100 --json number,title,body \
+  --jq "[.[] | select(.body | test(\"${FINDING_FILE}\"))]" 2>/dev/null)
+
+EXISTING=$(echo "$CANDIDATES" | jq -r --arg file "$FINDING_FILE" --argjson min "$LINE_MIN" --argjson max "$LINE_MAX" --arg title "$FINDING_TITLE" '
+  .[] |
+  # Extract line number from issue body (pattern: `file.py:NNN`)
+  ((.body | capture($file + ":(?<ln>[0-9]+)") .ln // "0") | tonumber) as $existing_line |
+  if $existing_line >= $min and $existing_line <= $max then
+    .number
+  # Fallback: title keyword overlap (3+ shared words of length >3 → likely same finding)
+  elif ([($title | ascii_downcase | split(" ") | .[] | select(length > 3))] -
+        [(.title | ascii_downcase | split(" ") | .[] | select(length > 3))]) |
+       length <= ([$title | ascii_downcase | split(" ") | .[] | select(length > 3)] | length) - 3 then
+    .number
+  else empty end
+' 2>/dev/null | head -1)
+
+if [ -n "$EXISTING" ]; then
+    echo "DEDUP: Skipping — open issue #${EXISTING} already covers ${FINDING_FILE}:${FINDING_LINE} (range/title match)"
+    # Skip this finding — do NOT create a duplicate issue
+else
+    # Check if a CLOSED issue exists at the same location ±5 lines (regression)
+    CLOSED_CANDIDATES=$(gh issue list --state closed --label "review-finding" --limit 100 --json number,title,body \
+      --jq "[.[] | select(.body | test(\"${FINDING_FILE}\"))]" 2>/dev/null)
+
+    REGRESSION=$(echo "$CLOSED_CANDIDATES" | jq -r --arg file "$FINDING_FILE" --argjson min "$LINE_MIN" --argjson max "$LINE_MAX" '
+      .[] |
+      ((.body | capture($file + ":(?<ln>[0-9]+)") .ln // "0") | tonumber) as $existing_line |
+      if $existing_line >= $min and $existing_line <= $max then
+        .number
+      else empty end
+    ' 2>/dev/null | head -1)
+    if [ -n "$REGRESSION" ]; then
+        echo "REGRESSION: Previously fixed in #${REGRESSION} — elevating priority"
+        # Create with regression warning and P1 priority
+    fi
+fi
+```
+
+**Rules:**
+- Open `review-finding` issue at same file within ±5 lines → **skip** (do not create duplicate)
+- Open `review-finding` issue at same file with similar title (3+ shared keywords) → **skip** (likely same finding despite line drift)
+- Closed `review-finding` at same file within ±5 lines → create with regression warning, elevate to P1
+
+**For each finding** (that passes dedup), create issue:
+```bash
+ISSUE_NUM=$(gh issue create \
+  --title "fix: [summary] (review finding — PR #${PR_NUMBER})" \
+  --label "review-finding,needs-validation,{priority}" \
+  ${MILESTONE_FLAG} \
+  --body "$(cat <<'ISSUE_EOF'
+## Problem
+
+[One sentence: what bug or issue was found. Where it occurs (`file:line`) and what it causes.]
+
+**Source**: PR #[PR_NUMBER] — [TITLE]
+**Agent**: [name] ([domain])
+**Confidence**: [CONFIRMED/LIKELY/POSSIBLE]
+**Severity**: [CRITICAL/HIGH/MEDIUM/LOW]
+**Review comment**: [permalink to agent comment]
+
+## Pattern Metadata
+
+**Pattern**: [short slug identifying the bug class, e.g. type-coercion-at-boundary, missing-auth-check, n+1-query]
+**Files**: [affected file path(s)]
+**Root cause**: [one sentence — why the bug occurs mechanically]
+**Prevention**: [one sentence — what the builder must do to avoid this class of bug]
+
+## Affected Files
+
+Files that need changes:
+1. `[file:line]` — [what needs to change to fix this finding]
+
+## Source Branch Context
+
+**Code branch**: `[HEAD_BRANCH]`
+**Worktree base**: `origin/[HEAD_BRANCH]`
+
+> When fixing: `git worktree add ../fix-{slug} -b fix/{slug} origin/[HEAD_BRANCH]`
+
+## Code Context
+[10 lines around finding]
+
+## Evidence
+[From agent comment]
+
+## Acceptance Criteria
+
+- [ ] Finding validated: VALIDATED / FALSE_POSITIVE / INCONCLUSIVE
+- [ ] If VALIDATED: fix implemented and tested on correct branch
+- [ ] Read code at location on correct branch
+- [ ] Trace code path to verify issue
+- [ ] Check existing mitigations
+- [ ] Reproduce or construct proof-of-concept
+ISSUE_EOF
+)" --json number --jq '.number')
+```
+
+Labels: `review-finding` + `needs-validation` + priority (`P1` CONFIRMED, `P2` LIKELY, `P3` POSSIBLE).
+
+**Add to project board:**
+```bash
+for FINDING_NUM in {numbers}; do
+  ITEM_ID=$(gh project item-add 1 --owner RapierCraft --url "https://github.com/RapierCraft/AlterLab/issues/${FINDING_NUM}" --format json --jq '.id' 2>/dev/null)
+  [ -n "$ITEM_ID" ] && {
+    gh project item-edit --project-id PVT_kwHOCx3gR84BSK2L --id "$ITEM_ID" --field-id PVTSSF_lAHOCx3gR84BSK2Lzg_yF6E --single-select-option-id f75ad846 2>/dev/null || true
+    gh project item-edit --project-id PVT_kwHOCx3gR84BSK2L --id "$ITEM_ID" --field-id PVTSSF_lAHOCx3gR84BSK2Lzg_yF98 --single-select-option-id 62864af4 2>/dev/null || true
+  }
+done
+```
+
+### 6D: Update PR Description
+
+Append `## Review Findings` table to PR body with finding summaries and issue links.
+
+---
+
+## Phase 7: Official Review Action
+
+### 7A: Purpose Regression Gate (Milestone PRs Only)
+
+**Skip if**: `IS_MILESTONE_TO_STAGING` is false (i.e., HEAD branch does NOT start with `milestone/`). This gate fires ONLY for milestone→staging PRs.
+
+**Why this exists**: For milestone PRs, a CONFIRMED finding can be a functional regression even if it doesn't cause a runtime crash. A stealth milestone shipping a detectable signal is the stealth equivalent of a crash — the milestone's entire purpose is negated. The orchestrator's default heuristic (crash or data corruption = blocking) is insufficient here. This gate adds an explicit purpose-aware blocking criterion.
+
+**Step 1 — Extract milestone purpose:**
+```bash
+# PR title and milestone name were fetched in Phase 1A
+# Examples: "Stealth Engine Overhaul", "Session Intelligence", "Billing Reconciliation"
+# Derive the capability domain from the milestone/PR title:
+#   "stealth" → detection avoidance, fingerprint consistency, proxy signal coherence
+#   "performance" → latency, throughput, resource utilization
+#   "billing" → charge accuracy, credit calculation, subscription state
+#   "auth" → session validity, token correctness, permission enforcement
+#   "session" → session state consistency, persistence, expiry
+```
+
+**Step 2 — Evaluate each finding for purpose regression:**
+
+For each finding that is CONFIRMED or LIKELY at MEDIUM+ severity (already created as a GitHub issue in Phase 6), apply the purpose regression test:
+
+> **The test**: "If someone described this milestone's goal in one sentence (e.g., 'Improve stealth to avoid bot detection'), would this finding represent the opposite of that goal?"
+>
+> - A **stealth milestone** + a CONFIRMED finding about a detectable signal/fingerprint mismatch → **PURPOSE REGRESSION** → BLOCKING
+> - A **performance milestone** + a CONFIRMED finding about increased latency or higher resource usage → **PURPOSE REGRESSION** → BLOCKING
+> - A **billing milestone** + a CONFIRMED finding about incorrect charge calculation or credit leak → **PURPOSE REGRESSION** → BLOCKING
+> - A **stealth milestone** + a CONFIRMED finding about a formatting inconsistency or a missing log line → **NOT a purpose regression** → advisory only (still gets a GitHub issue, but does not block)
+
+**Step 3 — Set verdict flag:**
+```bash
+HAS_PURPOSE_REGRESSION=false
+
+# For each CONFIRMED/LIKELY finding at MEDIUM+ severity:
+# Read the finding's title/description from the GitHub issue created in Phase 6.
+# Apply the purpose regression test above.
+# If the finding contradicts the milestone's stated capability improvement:
+HAS_PURPOSE_REGRESSION=true
+PURPOSE_REGRESSION_FINDINGS+=("Finding ID: ..., Reason: ...")
+```
+
+**Step 4 — Log result:**
+
+If `HAS_PURPOSE_REGRESSION=true`:
+```
+PURPOSE REGRESSION GATE: BLOCKED
+Reason: [finding] contradicts milestone goal "[milestone name]"
+Verdict escalated to CHANGES REQUESTED.
+```
+
+If no purpose regression found:
+```
+PURPOSE REGRESSION GATE: PASSED
+No findings contradict the milestone's stated purpose.
+Verdict determined by standard blocking criteria.
+```
+
+---
+
+### 7B: Post Verdict
+
+`gh pr review --approve` fails for self-reviews. Always use `--comment`.
+
+**Blocking criteria** — a finding is BLOCKING if ANY of the following are true:
+1. Phase 2 automated checks failed (build error, type error, test failure)
+2. Agent finding is CONFIRMED at HIGH or CRITICAL severity
+3. **[Milestone PRs only]** Phase 7A Purpose Regression Gate flagged `HAS_PURPOSE_REGRESSION=true` for this finding — regardless of whether it causes a runtime error
+
+```bash
+# Stale review:
+gh pr review $ARGUMENTS --comment --body "Review of commit $REVIEW_SHA_SHORT is stale — PR HEAD changed. Re-run /review-pr."
+
+# Clean (no blocking issues):
+gh pr review $ARGUMENTS --comment --body "APPROVED: commit $REVIEW_SHA_SHORT after context-aware review ([N] agents: [names]). [M] findings created as issues. Safe to merge."
+
+# Blocking issues (including purpose regressions):
+gh pr review $ARGUMENTS --comment --body "CHANGES REQUESTED: commit $REVIEW_SHA_SHORT — [N] blocking issues found. See GitHub issues.
+$([ "$HAS_PURPOSE_REGRESSION" = "true" ] && echo "
+⚠ Purpose Regression: [N] finding(s) contradict the milestone's stated goal and are automatically blocking regardless of runtime impact. See: ${PURPOSE_REGRESSION_FINDINGS[@]}")"
+```
+
+---
+
+## Phase 8: Auto-Merge (Conditional)
+
+**Skip if** `AUTO_MERGE=false`.
+
+```bash
+# Checkpoint comment on issue
+gh issue comment {MERGE_ISSUE} {MERGE_GH_FLAG} --body "Review complete for PR #{PR_NUMBER}. Verdict: {VERDICT}. Proceeding to merge."
+
+# Merge
+gh pr merge {PR_NUMBER} {MERGE_GH_FLAG} --merge
+
+# Verify
+MERGE_STATE=$(gh pr view {PR_NUMBER} {MERGE_GH_FLAG} --json state --jq '.state')
+[ "$MERGE_STATE" != "MERGED" ] && gh issue comment {MERGE_ISSUE} {MERGE_GH_FLAG} --body "PR #{PR_NUMBER} merge failed. State: $MERGE_STATE."
+```
+
+**Important**: Phase 8 ONLY merges the PR. It does NOT close the issue, update labels, or clean up worktrees. When invoked via `/work-on`, those responsibilities belong to `work-on/close.md` — which runs after the router detects state 4 (MERGE_COMPLETE: PR merged + issue open). Doing them here would cause the router to hit TERMINAL_MERGED (state 1) and skip the close phase entirely.
+
+---
+
+## Phase 9: Integrity Check & Summary (LAST)
+
+**Run AFTER Phase 6 (issues created), Phase 7 (verdict posted), Phase 8 (merge if applicable).**
+
+```bash
+CURRENT_SHA=$(gh pr view $ARGUMENTS --json headRefOid --jq '.headRefOid')
+REVIEW_IS_STALE=$([[ "$CURRENT_SHA" != "$REVIEW_SHA" ]] && echo "true" || echo "false")
+```
+
+```bash
+gh pr comment $ARGUMENTS --body "$(cat <<'EOF'
+# PR Review Summary: #[NUMBER] - [TITLE]
+
+## Review Integrity
+**Reviewed commit**: `[SHA]` | **Current HEAD**: `[SHA]` | **Status**: [CURRENT/STALE]
+
+## Verdict: [APPROVE / CHANGES REQUESTED / NEEDS RE-REVIEW]
+
+## Context-Aware Review
+**Domains**: [list] | **Agents**: [N] ([names])
+
+## Integration Checks (Phase 2.5)
+**Code registration**: [pass / N broken activation paths found]
+**SOPS deploy chain**: [pass / not applicable / N warnings found]
+**Purpose Regression Gate (7A)**: [N/A — non-milestone PR / PASSED — no purpose regressions / BLOCKED — N finding(s) contradict milestone goal]
+
+## Risk Matrix
+| Category | Risk | Blocking? | Confidence |
+|----------|------|-----------|------------|
+
+## Findings
+| Finding | Severity | Confidence | Issue |
+|---------|----------|------------|-------|
+
+## Automated Checks
+| Check | Result |
+|-------|--------|
+
+## Recommendation
+[Final recommendation]
+
+---
+*Context-aware review complete. [N] agents + integration checks. [M] findings triaged.*
+EOF
+)"
+```
+
+Notify user:
+```
+Review complete for PR #X. Verdict: [VERDICT].
+- Domains: [list]
+- Agents: [N] ([names])
+- Integration checks: [pass/N broken paths found]
+- Issues created: [M]
+{IF AUTO_MERGE: "PR merged and issue closed." / "Merge FAILED — see issue."}
+```
