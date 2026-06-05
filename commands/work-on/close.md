@@ -134,36 +134,31 @@ WORKFLOW_MERGED_OPTION_ID=$(yq '.project_board.option_ids.workflow_merged // ""'
 
 if [ -z "$PROJECT_BOARD_OWNER" ] || [ -z "$PROJECT_ID" ] || [ -z "$STATUS_FIELD_ID" ]; then
   echo "INFO: project_board not configured in forge.yaml — skipping board update"
-  # → Continue to Phase C2
+  # → STOP: do not proceed to ITEM_ID fetch or board update — continue to Phase C2
+else
+  # Project board is configured — find the item and update it
+
+  # Find the project item ID for this issue
+  ISSUE_URL="https://github.com/{GH_REPO}/issues/{NUMBER}"
+  ITEM_ID=$(gh project item-list "$PROJECT_NUMBER" --owner "$PROJECT_BOARD_OWNER" --format json --limit 200 \
+    --jq ".items[] | select(.content.url == \"$ISSUE_URL\") | .id" 2>/dev/null | head -1)
+
+  if [ -n "$ITEM_ID" ]; then
+    # Set Status=Done
+    if [ -n "$STATUS_FIELD_ID" ] && [ -n "$STATUS_DONE_OPTION_ID" ]; then
+      gh project item-edit --project-id "$PROJECT_ID" --id "$ITEM_ID" \
+        --field-id "$STATUS_FIELD_ID" --single-select-option-id "$STATUS_DONE_OPTION_ID" 2>/dev/null || true
+    fi
+
+    # Set Workflow=Merged
+    if [ -n "$WORKFLOW_FIELD_ID" ] && [ -n "$WORKFLOW_MERGED_OPTION_ID" ]; then
+      gh project item-edit --project-id "$PROJECT_ID" --id "$ITEM_ID" \
+        --field-id "$WORKFLOW_FIELD_ID" --single-select-option-id "$WORKFLOW_MERGED_OPTION_ID" 2>/dev/null || true
+    fi
+  else
+    echo "INFO: Issue #{NUMBER} not found on project board — skipping board update"
+  fi
 fi
-```
-
-If project board is configured:
-```bash
-# Find the project item ID for this issue
-ISSUE_URL="https://github.com/{GH_REPO}/issues/{NUMBER}"
-ITEM_ID=$(gh project item-list "$PROJECT_NUMBER" --owner "$PROJECT_BOARD_OWNER" --format json --limit 200 \
-  --jq ".items[] | select(.content.url == \"$ISSUE_URL\") | .id" 2>/dev/null | head -1)
-```
-
-If `ITEM_ID` is found:
-```bash
-# Set Status=Done
-if [ -n "$STATUS_FIELD_ID" ] && [ -n "$STATUS_DONE_OPTION_ID" ]; then
-  gh project item-edit --project-id "$PROJECT_ID" --id "$ITEM_ID" \
-    --field-id "$STATUS_FIELD_ID" --single-select-option-id "$STATUS_DONE_OPTION_ID" 2>/dev/null || true
-fi
-
-# Set Workflow=Merged
-if [ -n "$WORKFLOW_FIELD_ID" ] && [ -n "$WORKFLOW_MERGED_OPTION_ID" ]; then
-  gh project item-edit --project-id "$PROJECT_ID" --id "$ITEM_ID" \
-    --field-id "$WORKFLOW_FIELD_ID" --single-select-option-id "$WORKFLOW_MERGED_OPTION_ID" 2>/dev/null || true
-fi
-```
-
-If `ITEM_ID` is empty (issue not on project board) → log and skip:
-```bash
-echo "INFO: Issue #{NUMBER} not found on project board — skipping board update"
 ```
 
 **Project board field IDs are read from `forge.yaml → project_board`**. To configure:
