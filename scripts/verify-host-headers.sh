@@ -42,7 +42,7 @@ if [ -n "${FORGE_INTERNAL_PATTERNS:-}" ]; then
     INTERNAL_PATTERNS="${INTERNAL_PATTERNS}|${FORGE_INTERNAL_PATTERNS}"
 fi
 
-echo "$SHELL_FILES" | while read -r f; do
+while read -r f; do
     FILEPATH="$REPO_ROOT/$f"
     if [ ! -f "$FILEPATH" ]; then
         continue
@@ -57,7 +57,7 @@ echo "$SHELL_FILES" | while read -r f; do
     fi
 
     echo "=== Checking: $f ==="
-    echo "$CURL_LINES" | while IFS= read -r line; do
+    while IFS= read -r line; do
         LINENO=$(echo "$line" | cut -d: -f1)
         CONTENT=$(echo "$line" | cut -d: -f2-)
 
@@ -72,8 +72,8 @@ echo "$SHELL_FILES" | while read -r f; do
             echo "  Fix: Add -H 'Host: localhost' (or appropriate allowed host from services/api/app/main.py allowed_hosts)"
             BLOCKING=$((BLOCKING + 1))
         fi
-    done
-done || true
+    done < <(echo "$CURL_LINES")
+done < <(echo "$SHELL_FILES") || true
 
 # --- Client-side proxy bypass check ---
 # Check frontend files for direct /api/v1/ calls (bypasses Next.js auth proxy)
@@ -82,7 +82,7 @@ FRONTEND_FILES=$(echo "$FILES" | grep -E '\.(tsx?|jsx?)$' | grep -v 'route\.ts$'
 if [ -n "$FRONTEND_FILES" ]; then
     echo ""
     echo "=== Client-Side Proxy Bypass Check ==="
-    echo "$FRONTEND_FILES" | while read -r f; do
+    while read -r f; do
         FILEPATH="$REPO_ROOT/$f"
         if [ ! -f "$FILEPATH" ]; then
             continue
@@ -97,15 +97,15 @@ if [ -n "$FRONTEND_FILES" ]; then
 
         if [ -n "$DIRECT_CALLS" ]; then
             echo "BLOCKING: $f — direct /api/v1/ call bypasses Next.js proxy (auth will fail)"
-            echo "$DIRECT_CALLS" | while IFS= read -r match; do
+            while IFS= read -r match; do
                 echo "  $match"
-            done
+            done < <(echo "$DIRECT_CALLS")
             echo "  Fix: Use /api/* proxy routes instead of /api/v1/* direct FastAPI calls"
             BLOCKING=$((BLOCKING + 1))
         else
             echo "OK: $f — no direct backend calls"
         fi
-    done
+    done < <(echo "$FRONTEND_FILES")
 fi
 
 echo ""
