@@ -78,6 +78,32 @@ REPO      = project.repo
 REPO_ROOT = paths.root
 ```
 
+After extracting these values, validate that OWNER and REPO are non-empty and do not contain placeholder values before proceeding:
+
+```bash
+if [ -z "$OWNER" ] || [ "$OWNER" = "your-github-org" ]; then
+  echo "Error: project.owner is not set in forge.yaml."
+  echo ""
+  echo "Open forge.yaml and fill in the 'project:' section:"
+  echo "  project:"
+  echo "    owner: \"your-actual-github-org-or-username\""
+  echo ""
+  echo "Then re-run /forgedock-init."
+  exit 1
+fi
+
+if [ -z "$REPO" ] || [ "$REPO" = "your-repo-name" ]; then
+  echo "Error: project.repo is not set in forge.yaml."
+  echo ""
+  echo "Open forge.yaml and fill in the 'project:' section:"
+  echo "  project:"
+  echo "    repo: \"your-actual-repo-name\""
+  echo ""
+  echo "Then re-run /forgedock-init."
+  exit 1
+fi
+```
+
 ### 1C: Detect already-configured optional sections
 
 For each optional section, check if it has an UNCOMMENTED entry in the file. A commented-out section (all lines starting with `#`) is NOT configured.
