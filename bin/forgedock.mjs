@@ -5,22 +5,16 @@ import { dirname, join, relative } from "path";
 import { mkdir, symlink, readlink, lstat, readdir, stat } from "fs/promises";
 import { existsSync, appendFileSync, readFileSync, writeFileSync, renameSync } from "fs";
 import { execSync } from "child_process";
+import { BOLD, GREEN, YELLOW, CYAN, RED, RESET } from "./tui.mjs";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
 const FORGE_HOME = dirname(__dirname);
 const COMMANDS_DIR = join(FORGE_HOME, "commands");
-const TARGET_DIR = join(process.env.HOME, ".claude", "commands");
+const TARGET_DIR = join(process.env.HOME ?? "", ".claude", "commands");
 
 const args = process.argv.slice(2);
 const command = args[0] || "install";
-
-const BOLD = "\x1b[1m";
-const GREEN = "\x1b[32m";
-const YELLOW = "\x1b[33m";
-const CYAN = "\x1b[36m";
-const RED = "\x1b[31m";
-const RESET = "\x1b[0m";
 
 function checkPrerequisites() {
   const issues = [];
