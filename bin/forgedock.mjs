@@ -8,7 +8,7 @@ import { execSync } from "child_process";
 import {
   BOLD, GREEN, YELLOW, CYAN, RED, RESET,
   bold, dim, green, yellow, cyan, red,
-  box, stepHeader, select, confirm, input, createProgressBar, spinner,
+  box, stepHeader, select, multiSelect, confirm, input, createProgressBar, spinner,
 } from "./tui.mjs";
 
 const __filename = fileURLToPath(import.meta.url);
@@ -1156,7 +1156,107 @@ async function init() {
       console.log(dim("  Starting over — re-enter values below."));
       console.log("");
     } else {
-      // --- Handle existing forge.yaml with confirmation ---
+      // -----------------------------------------------------------------------
+      // Optional sections — multi-select, then guided prompts per section
+      // -----------------------------------------------------------------------
+      console.log("");
+      console.log(bold("  Optional Sections"));
+      console.log(dim("  Select sections to configure now. Unselected sections are written as"));
+      console.log(dim("  commented-out placeholders — you can enable them later by editing forge.yaml."));
+      console.log("");
+
+      const OPTIONAL_SECTION_CHOICES = [
+        {
+          label: "Project Board   — GitHub Projects v2 integration for workflow tracking",
+          value: "projectBoard",
+        },
+        {
+          label: "Multi-Repo      — Satellite repos for cross-repo milestones",
+          value: "multiRepo",
+        },
+        {
+          label: "Review Context  — Tech stack and conventions for PR review agents",
+          value: "review",
+        },
+        {
+          label: "Verification    — Health check endpoints and response patterns",
+          value: "verification",
+        },
+      ];
+
+      const selectedSections = await multiSelect(
+        "  Which optional sections would you like to configure?",
+        OPTIONAL_SECTION_CHOICES
+      );
+
+      /** @type {Record<string, object>} */
+      const optionalSections = {};
+
+      // --- Project Board prompts ---
+      if (selectedSections.includes("projectBoard")) {
+        console.log("");
+        console.log(bold("  Project Board"));
+        console.log(dim("  Find your project number: gh project list --owner " + (ownerInput || detectedOwner)));
+        const projectNumber = await input(
+          "  GitHub Projects v2 project number",
+          "1"
+        );
+        optionalSections.projectBoard = {
+          projectNumber: parseInt(projectNumber, 10) || 1,
+        };
+        console.log(dim("  Field IDs (PVT_/PVTSSF_ strings) must be added manually after generation."));
+        console.log(dim("  Run: gh project field-list " + (projectNumber || "1") + " --owner " + (ownerInput || detectedOwner)));
+      }
+
+      // --- Multi-Repo prompts ---
+      if (selectedSections.includes("multiRepo")) {
+        console.log("");
+        console.log(bold("  Multi-Repo"));
+        console.log(dim("  Configure one satellite repo (add more by editing forge.yaml)."));
+        const prefix = await input(
+          "  Satellite repo prefix (e.g. 'mcp', 'sdk')",
+          "sat"
+        );
+        const satelliteRepo = await input(
+          "  Satellite repo name (just the name, owner will be reused)",
+          "your-satellite-repo"
+        );
+        const satelliteBranch = await input(
+          "  Satellite default/staging branch",
+          "main"
+        );
+        optionalSections.multiRepo = { prefix, satelliteRepo, satelliteBranch };
+      }
+
+      // --- Review Context prompts ---
+      if (selectedSections.includes("review")) {
+        console.log("");
+        console.log(bold("  Review Context"));
+        const techStack = await input(
+          "  Tech stack (e.g. Next.js, FastAPI, PostgreSQL)",
+          "Node.js, TypeScript"
+        );
+        const context = await input(
+          "  Architecture notes (one line; expand in forge.yaml later)",
+          ""
+        );
+        optionalSections.review = { techStack, context };
+      }
+
+      // --- Verification prompts ---
+      if (selectedSections.includes("verification")) {
+        console.log("");
+        console.log(bold("  Verification"));
+        const healthEndpoint = await input(
+          "  Health check endpoint URL",
+          `https://api.${repoInput || detectedRepo}.io/health`
+        );
+        optionalSections.verification = { healthEndpoint };
+      }
+
+      // -----------------------------------------------------------------------
+      // Handle existing forge.yaml with confirmation
+      // -----------------------------------------------------------------------
       if (existsSync(outputPath)) {
         console.log("");
         console.log(`  ${YELLOW}forge.yaml already exists.${RESET}`);
@@ -1192,10 +1292,19 @@ async function init() {
         worktreeBase: worktreeInput || join(cwd, ".claude", "worktrees"),
         defaultBranch: defaultBranchInput,
         stagingBranch: stagingBranchInput,
+        optionalSections,
       });
 
       console.log("");
       console.log(`  ${GREEN}Created${RESET}: forge.yaml`);
+      if (selectedSections.length > 0) {
+        console.log(`  ${GREEN}Configured${RESET}: ${selectedSections.map((s) => ({
+          projectBoard: "project_board",
+          multiRepo: "repos",
+          review: "review",
+          verification: "verification",
+        })[s]).join(", ")}`);
+      }
       console.log("");
       _printNextSteps({ remoteDetected: ownerInput !== "your-github-org", cyan: (s) => `${CYAN}${s}${RESET}`, bold: (s) => `${BOLD}${s}${RESET}` });
     }
@@ -1208,9 +1317,95 @@ async function init() {
 
 /**
  * Build the forge.yaml file content string from gathered values.
- * Returns only the required sections (project, paths, branches) plus commented optional sections.
+ * Required sections are always written as active YAML.
+ * Optional sections are written as active YAML when config is provided in `optionalSections`,
+ * or as commented-out placeholders when absent.
+ *
+ * @param {object} opts
+ * @param {string} opts.owner
+ * @param {string} opts.repo
+ * @param {string} opts.projectName
+ * @param {string} opts.description
+ * @param {string} opts.root
+ * @param {string} opts.worktreeBase
+ * @param {string} opts.defaultBranch
+ * @param {string} opts.stagingBranch
+ * @param {object} [opts.optionalSections] - Optional section configs; absent key = commented-out
+ * @param {object} [opts.optionalSections.projectBoard] - project_board section config
+ * @param {object} [opts.optionalSections.multiRepo]    - repos section config
+ * @param {object} [opts.optionalSections.review]       - review section config
+ * @param {object} [opts.optionalSections.verification] - verification section config
  */
-function buildForgeYamlContent({ owner, repo, projectName, description, root, worktreeBase, defaultBranch, stagingBranch }) {
+function buildForgeYamlContent({ owner, repo, projectName, description, root, worktreeBase, defaultBranch, stagingBranch, optionalSections = {} }) {
+  const { projectBoard, multiRepo, review, verification } = optionalSections;
+
+  // --- repos section ---
+  const reposSection = multiRepo
+    ? `repos:
+  default:
+    repo: "${owner}/${repo}"
+    staging_branch: "${stagingBranch}"
+  satellites:
+    - prefix: "${multiRepo.prefix || "sat"}"
+      repo: "${owner}/${multiRepo.satelliteRepo || "your-satellite-repo"}"
+      staging_branch: "${multiRepo.satelliteBranch || "main"}"
+      local_path: "${join(root, "..", multiRepo.satelliteRepo || "your-satellite-repo")}"`
+    : `# repos:
+#   default:
+#     repo: "${owner}/${repo}"
+#     staging_branch: "${stagingBranch}"
+#   satellites:
+#     - prefix: "mcp"
+#       repo: "${owner}/your-satellite-repo"
+#       staging_branch: "main"
+#       local_path: "${join(root, "..", "your-satellite-repo")}"`;
+
+  // --- project_board section ---
+  const projectBoardSection = projectBoard
+    ? `project_board:
+  owner: "${owner}"
+  project_number: ${projectBoard.projectNumber || 1}
+  project_id: "PVT_kwHOxxxxxxxxxxxxxxxx"
+  field_ids:
+    status: "PVTSSF_xxxxxxxxxxxxxxxxxxxxxxxx"
+    lane: "PVTSSF_xxxxxxxxxxxxxxxxxxxxxxxx"
+    component: "PVTSSF_xxxxxxxxxxxxxxxxxxxxxxxx"
+    priority: "PVTSSF_xxxxxxxxxxxxxxxxxxxxxxxx"
+    workflow: "PVTSSF_xxxxxxxxxxxxxxxxxxxxxxxx"
+# To find field IDs: gh project field-list ${projectBoard.projectNumber || 1} --owner ${owner}`
+    : `# project_board:
+#   owner: "${owner}"
+#   project_number: 1
+#   project_id: "PVT_kwHOxxxxxxxxxxxxxxxx"
+#   field_ids:
+#     status: "PVTSSF_xxxxxxxxxxxxxxxxxxxxxxxx"
+#     lane: "PVTSSF_xxxxxxxxxxxxxxxxxxxxxxxx"
+#     component: "PVTSSF_xxxxxxxxxxxxxxxxxxxxxxxx"
+#     priority: "PVTSSF_xxxxxxxxxxxxxxxxxxxxxxxx"
+#     workflow: "PVTSSF_xxxxxxxxxxxxxxxxxxxxxxxx"`;
+
+  // --- review section ---
+  const reviewSection = review
+    ? `review:
+  tech_stack: "${review.techStack || "Node.js, TypeScript, PostgreSQL"}"
+  context: |
+    ${(review.context || "Add architecture notes and conventions here.").split("\n").join("\n    ")}`
+    : `# review:
+#   tech_stack: "Node.js, TypeScript, PostgreSQL"
+#   context: |
+#     Describe your repo structure and any unusual conventions here.`;
+
+  // --- verification section ---
+  const verificationSection = verification
+    ? `verification:
+  health_endpoint: "${verification.healthEndpoint || `https://api.${repo}.io/health`}"
+  health_patterns:
+    - '"status": "ok"'`
+    : `# verification:
+#   health_endpoint: "https://api.${repo}.io/health"
+#   health_patterns:
+#     - '"status": "ok"'`;
+
   return `# forge.yaml — ForgeDock Configuration
 #
 # Generated by: npx forgedock init
@@ -1253,15 +1448,7 @@ branches:
 # Multi-repo configuration. Remove the # to enable.
 # =============================================================================
 
-# repos:
-#   default:
-#     repo: "${owner}/${repo}"
-#     staging_branch: "${stagingBranch}"
-#   satellites:
-#     - prefix: "mcp"
-#       repo: "${owner}/your-satellite-repo"
-#       staging_branch: "main"
-#       local_path: "${join(root, "..", "your-satellite-repo")}"
+${reposSection}
 
 # =============================================================================
 # PROJECT BOARD (OPTIONAL)
@@ -1269,40 +1456,25 @@ branches:
 # To find IDs: gh project list --owner ${owner}
 # =============================================================================
 
-# project_board:
-#   owner: "${owner}"
-#   project_number: 1
-#   project_id: "PVT_kwHOxxxxxxxxxxxxxxxx"
-#   field_ids:
-#     status: "PVTSSF_xxxxxxxxxxxxxxxxxxxxxxxx"
-#     lane: "PVTSSF_xxxxxxxxxxxxxxxxxxxxxxxx"
-#     component: "PVTSSF_xxxxxxxxxxxxxxxxxxxxxxxx"
-#     priority: "PVTSSF_xxxxxxxxxxxxxxxxxxxxxxxx"
-#     workflow: "PVTSSF_xxxxxxxxxxxxxxxxxxxxxxxx"
+${projectBoardSection}
 
 # =============================================================================
 # REVIEW (OPTIONAL)
 # Context injected into review agent prompts.
 # =============================================================================
 
-# review:
-#   tech_stack: "Node.js, TypeScript, PostgreSQL"
-#   context: |
-#     Describe your repo structure and any unusual conventions here.
+${reviewSection}
 
 # =============================================================================
 # VERIFICATION (OPTIONAL)
 # Health-check patterns for quality gate and validate commands.
 # =============================================================================
 
-# verification:
-#   health_endpoint: "https://api.${repo}.io/health"
-#   health_patterns:
-#     - '"status": "ok"'
+${verificationSection}
 `;
 }
 
-/** Write forge.yaml to disk. */
+/** Write forge.yaml to disk. Accepts all params for buildForgeYamlContent plus outputPath. */
 function _writeForgeYaml(opts) {
   const content = buildForgeYamlContent(opts);
   writeFileSync(opts.outputPath, content, "utf-8");
