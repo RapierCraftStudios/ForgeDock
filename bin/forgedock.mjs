@@ -930,52 +930,282 @@ async function uninstall() {
   console.log("");
 }
 
+// ---------------------------------------------------------------------------
+// Update helpers
+// ---------------------------------------------------------------------------
+
+/**
+ * Query the npm registry for the latest published version of a package.
+ * Returns null on any failure (offline, timeout, package not found).
+ *
+ * @param {string} pkg - npm package name (e.g. "forgedock")
+ * @returns {string | null}
+ */
+function queryNpmRegistry(pkg) {
+  try {
+    const result = execSync(`npm view ${pkg} version`, {
+      encoding: "utf-8",
+      stdio: ["pipe", "pipe", "pipe"],
+      timeout: 5000,
+    });
+    return result.trim() || null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Return a Set of relative paths for all ForgeDock-managed symlinks in TARGET_DIR.
+ * Returns an empty Set if TARGET_DIR does not exist or cannot be read.
+ *
+ * @returns {Promise<Set<string>>}
+ */
+async function getInstalledCommandNames() {
+  const names = new Set();
+  try {
+    const entries = await readdir(TARGET_DIR, { withFileTypes: true });
+    for (const entry of entries) {
+      const fullPath = join(TARGET_DIR, entry.name);
+      try {
+        const stats = await lstat(fullPath);
+        if (stats.isSymbolicLink()) {
+          const linkTarget = await readlink(fullPath);
+          if (linkTarget.includes("commands") && linkTarget.endsWith(".md")) {
+            names.add(entry.name);
+          }
+        }
+      } catch {
+        // Skip unreadable entries
+      }
+    }
+  } catch {
+    // TARGET_DIR absent — return empty Set
+  }
+  return names;
+}
+
+/**
+ * Compute the added and removed command names between two Sets.
+ * Returns formatted display lines, or an empty array if no diff.
+ *
+ * @param {Set<string>} before
+ * @param {Set<string>} after
+ * @returns {string[]}
+ */
+function formatCommandDiff(before, after) {
+  const added = [...after].filter((n) => !before.has(n)).map((n) => n.replace(/\.md$/, ""));
+  const removed = [...before].filter((n) => !after.has(n)).map((n) => n.replace(/\.md$/, ""));
+
+  if (added.length === 0 && removed.length === 0) return [];
+
+  const lines = [""];
+  if (added.length > 0) {
+    lines.push(`  ${green("Added")}    ${added.join(", ")}`);
+  }
+  if (removed.length > 0) {
+    lines.push(`  ${red("Removed")}  ${removed.join(", ")}`);
+  }
+  lines.push("");
+  return lines;
+}
+
 async function update() {
+  const currentVersion = getVersion();
+
   console.log("");
   console.log(`${BOLD}ForgeDock${RESET} — Checking for updates`);
+  console.log(`  ${dim(`Current version: v${currentVersion}`)}`);
   console.log("");
 
-  // Check if installed via npm (no .git directory) or via git clone
+  // Snapshot installed commands before any update
+  const commandsBefore = await getInstalledCommandNames();
+
+  // Determine install type: git clone (has .git) or npm global install
   const gitDir = join(FORGE_HOME, ".git");
   if (existsSync(gitDir)) {
+    // -----------------------------------------------------------------------
+    // Git install path
+    // -----------------------------------------------------------------------
     try {
       const branch = execSync("git rev-parse --abbrev-ref HEAD", {
         cwd: FORGE_HOME,
         encoding: "utf-8",
+        stdio: ["pipe", "pipe", "pipe"],
+        timeout: 5000,
       }).trim();
+
       if (branch !== "main") {
-        console.log(`  Not on main branch (${branch}) — skipping`);
+        console.log(`  ${yellow("Not on main branch")} (${branch}) — skipping automatic update.`);
+        console.log(`  Switch to ${cyan("main")} and re-run to update.`);
+        console.log("");
         return;
       }
 
       const before = execSync("git rev-parse HEAD", {
         cwd: FORGE_HOME,
         encoding: "utf-8",
+        stdio: ["pipe", "pipe", "pipe"],
+        timeout: 5000,
       }).trim();
-      execSync("git fetch origin main --quiet", { cwd: FORGE_HOME });
-      execSync("git merge --ff-only origin/main --quiet", {
+
+      // Fetch — graceful offline fallback
+      try {
+        execSync("git fetch origin main --quiet", {
+          cwd: FORGE_HOME,
+          stdio: ["pipe", "pipe", "pipe"],
+          timeout: 10000,
+        });
+      } catch {
+        console.log(`  ${yellow("Offline or unreachable.")} Could not fetch from origin.`);
+        console.log(`  ${dim("Skipping update check — re-run when connected.")}`);
+        console.log("");
+        return;
+      }
+
+      const remoteHead = execSync("git rev-parse origin/main", {
         cwd: FORGE_HOME,
-      });
+        encoding: "utf-8",
+        stdio: ["pipe", "pipe", "pipe"],
+        timeout: 5000,
+      }).trim();
+
+      if (before === remoteHead) {
+        // Already up to date
+        const lines = [
+          "",
+          `  ${green("✔")}  ForgeDock v${currentVersion} — already up to date`,
+          "",
+        ];
+        process.stdout.write(box(lines, { title: "Up to date" }));
+        console.log("");
+        return;
+      }
+
+      // Show changelog between current HEAD and remote HEAD
+      let changelogLines = [];
+      try {
+        const log = execSync(`git log --oneline ${before}..origin/main`, {
+          cwd: FORGE_HOME,
+          encoding: "utf-8",
+          stdio: ["pipe", "pipe", "pipe"],
+          timeout: 5000,
+        }).trim();
+        if (log) {
+          changelogLines = log.split("\n").map((l) => `  ${dim(l)}`);
+        }
+      } catch {
+        // Non-blocking — skip changelog if log fails
+      }
+
+      if (changelogLines.length > 0) {
+        const boxLines = ["", ...changelogLines, ""];
+        process.stdout.write(box(boxLines, { title: "What's new" }));
+        console.log("");
+      }
+
+      // Apply update
+      try {
+        execSync("git merge --ff-only origin/main --quiet", {
+          cwd: FORGE_HOME,
+          stdio: ["pipe", "pipe", "pipe"],
+          timeout: 15000,
+        });
+      } catch {
+        console.log(
+          `  ${yellow("Cannot fast-forward")} — local changes exist. Skipping merge.`
+        );
+        console.log(`  ${dim("Stash or discard local changes and re-run.")}`);
+        console.log("");
+        return;
+      }
+
       const after = execSync("git rev-parse HEAD", {
         cwd: FORGE_HOME,
         encoding: "utf-8",
+        stdio: ["pipe", "pipe", "pipe"],
+        timeout: 5000,
       }).trim();
 
-      if (before === after) {
-        console.log(`  Already up to date.`);
-      } else {
-        console.log(`  ${GREEN}Updated to latest.${RESET}`);
-        await install();
+      const newVersion = getVersion();
+      console.log(
+        `  ${green("Updated")} v${currentVersion} → v${newVersion}`
+      );
+      console.log("");
+
+      // Re-run symlink installer to pick up new/removed commands
+      await install();
+
+      // Show command diff
+      const commandsAfter = await getInstalledCommandNames();
+      const diffLines = formatCommandDiff(commandsBefore, commandsAfter);
+      if (diffLines.length > 0) {
+        process.stdout.write(box(diffLines, { title: "Command changes" }));
+        console.log("");
       }
     } catch (err) {
       console.log(
-        `  ${YELLOW}Cannot fast-forward — local changes exist. Skipping.${RESET}`
+        `  ${RED}Update failed.${RESET} ${err instanceof Error ? err.message : String(err)}`
       );
+      console.log("");
     }
   } else {
-    console.log(`  Installed via npm. Run ${CYAN}npm update -g forgedock${RESET} to update.`);
+    // -----------------------------------------------------------------------
+    // npm install path
+    // -----------------------------------------------------------------------
+    console.log(`  ${dim("Installed via npm.")}`);
+    console.log("");
+
+    // Query registry for latest version — graceful offline fallback
+    // Only use \r line-clearing trick in TTY environments; in non-TTY just print a static line
+    if (process.stdout.isTTY) {
+      process.stdout.write(`  Checking npm registry...`);
+    } else {
+      console.log(`  Checking npm registry...`);
+    }
+    const latestVersion = queryNpmRegistry("forgedock");
+
+    if (latestVersion === null) {
+      if (process.stdout.isTTY) {
+        process.stdout.write(`\r  ${yellow("Offline or registry unreachable.")} Could not check for updates.\n`);
+      } else {
+        console.log(`  Offline or registry unreachable. Could not check for updates.`);
+      }
+      console.log(`  ${dim("Re-run when connected, or check: ")}${cyan("https://www.npmjs.com/package/forgedock")}`);
+      console.log("");
+      return;
+    }
+
+    // Clear the "Checking..." line (TTY only — non-TTY already printed a newline above)
+    if (process.stdout.isTTY) {
+      process.stdout.write(`\r${" ".repeat(50)}\r`);
+    }
+
+    if (currentVersion === latestVersion) {
+      const lines = [
+        "",
+        `  ${green("✔")}  ForgeDock v${currentVersion} — already up to date`,
+        "",
+      ];
+      process.stdout.write(box(lines, { title: "Up to date" }));
+      console.log("");
+      return;
+    }
+
+    // Update available
+    const lines = [
+      "",
+      `  ${yellow("Update available:")}  v${currentVersion}  →  ${green(`v${latestVersion}`)}`,
+      "",
+      `  Run the following command to update:`,
+      "",
+      `    ${cyan(`npm update -g forgedock`)}`,
+      "",
+      `  Then re-run ${cyan("npx forgedock")} to refresh your commands.`,
+      "",
+    ];
+    process.stdout.write(box(lines, { title: "npm update available" }));
+    console.log("");
   }
-  console.log("");
 }
 
 async function init() {
@@ -1566,6 +1796,9 @@ async function tuiOnboarding() {
     );
     console.log("");
 
+    // Snapshot commands before update so we can show a diff after
+    const commandsBeforeUpdate = await getInstalledCommandNames();
+
     const steps = [
       {
         name: "Preflight Checks",
@@ -1587,6 +1820,14 @@ async function tuiOnboarding() {
     const success = await orchestrator.run();
 
     if (success) {
+      // Show command diff if any commands were added or removed
+      const commandsAfterUpdate = await getInstalledCommandNames();
+      const diffLines = formatCommandDiff(commandsBeforeUpdate, commandsAfterUpdate);
+      if (diffLines.length > 0) {
+        process.stdout.write(box(diffLines, { title: "Command changes" }));
+        console.log("");
+      }
+
       console.log(
         green("Update complete!") +
         ` ForgeDock v${detection.currentVersion} is now active.`
