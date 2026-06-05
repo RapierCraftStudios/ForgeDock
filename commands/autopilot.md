@@ -7,7 +7,12 @@ argument-hint: [--fix | --recon-only | --fix --limit 5 | --dry-run]
 
 **Input**: $ARGUMENTS (default: recon + triage + report, no fixing)
 
-You are AlterLab's autonomous improvement engine. Your job is to **find what's wrong, create trackable issues, and optionally fix the highest-impact ones** — all in a single cycle. Every cycle leaves the platform measurably better than before.
+**Config variables used by this command** (set in `forge.yaml`):
+- `{CREDENTIALS_FILE}` ← `paths.credentials.file` (optional) — path to credentials YAML for analytics APIs
+- `{SERVER_SSH}` ← `services.server_ssh` (optional) — SSH target for production server health checks (e.g., `ubuntu@1.2.3.4`)
+- `{EMEMO_PATH}` ← `services.ememo_path` (optional) — path on production server to open eMemo files
+
+You are an autonomous improvement engine for this project. Your job is to **find what's wrong, create trackable issues, and optionally fix the highest-impact ones** — all in a single cycle. Every cycle leaves the platform measurably better than before.
 
 **This is designed to run repeatedly.** Each cycle builds on the last — issues created in cycle N get fixed in cycle N+1. The platform compounds improvements over time.
 
@@ -94,7 +99,7 @@ Spawn these as **background agents** (all `run_in_background=true`, all `model="
 **Agent: Production Health**
 ```
 Check production system health:
-1. SSH to check for open eMemos: ssh ubuntu@51.195.40.172 "ls /opt/alterlab/app/infra/ememos/*-open-* 2>/dev/null"
+1. SSH to check for open eMemos: if {SERVER_SSH} is configured, run: ssh {SERVER_SSH} "ls {EMEMO_PATH}/*-open-* 2>/dev/null" — skip this step if SERVER_SSH or EMEMO_PATH is not set in forge.yaml
 2. If any exist, cat each one and summarize
 3. Check container health via MCP: get_production_status, run_production_health_check
 4. Check recent error logs: get_production_logs for api and worker (last 100 lines), grep for ERROR/CRITICAL
@@ -133,7 +138,7 @@ Analyze GitHub issue backlog:
 **Agent: Analytics Snapshot** (lightweight — not the full /analytics audit)
 ```
 Quick analytics pulse — just the key metrics, not a full audit:
-1. Read credentials from /home/mrdubey/projects/ScraperAPI/credentials.yaml
+1. Read credentials from {CREDENTIALS_FILE} (set via paths.credentials.file in forge.yaml)
 2. GSC: mcp__gsc__search_analytics for last 7 days — total clicks, impressions, avg position
 3. Stripe: mcp__stripe__retrieve_balance — current balance
 4. Return: clicks trend (up/down), any revenue, notable changes
@@ -409,9 +414,9 @@ When ready to deploy, merge `staging` → `main` via GitHub.
 
 Each cycle feeds the next:
 ```
-Cycle N: /failure-recon finds tier 3 headers broken → creates issue #X
-Cycle N+1: autopilot picks up #X → /work-on fixes it → merged to staging
-Cycle N+2: /failure-recon shows tier 3 pass rate improved 30% → no new issue needed
+Cycle N: CI recon detects recurring lint failures across 3 files → autopilot triage creates issue #X
+Cycle N+1: autopilot picks up #X → /work-on adds pre-commit hook → merged to staging
+Cycle N+2: CI recon shows lint failures resolved — no new issue needed
 ```
 
 ```

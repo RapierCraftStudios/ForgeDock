@@ -69,7 +69,7 @@ When a repo-local adapter exists under `.agents/skills/`, it becomes authoritati
 - different default GitHub repo resolution
 - Codex-native worktree roots
 - Forge-specific review heuristics
-- best-effort handling of project-board steps that are AlterLab-specific upstream
+- best-effort handling of project-board steps that may be project-specific upstream
 
 ## Trust and Global Config
 

@@ -7,6 +7,9 @@ argument-hint: [issue number | "active" | "postmortem {issue}"]
 
 **Input**: $ARGUMENTS
 
+**Config variables used by this command** (set in `forge.yaml`):
+- `{REPO_PATH}` ← `paths.root` — project repository root
+
 You are the pipeline's incident response coordinator. When production goes down or a critical bug surfaces, this command orchestrates the response: validates the hotfix before deploy, reconstructs the incident timeline, and produces a post-incident analysis.
 
 **Agent model policy**: Default `model: "sonnet"`. If Sonnet is rate-limited, fall back to `model: "opus"`. User can override with `--model <name>`.
@@ -106,7 +109,7 @@ You are validating a hotfix for a P0 production incident.
 
 Issue: #{NUMBER} — {TITLE}
 Fix branch: {FIX_BRANCH}
-Repo: /home/mrdubey/projects/ScraperAPI/alterlab
+Repo: {REPO_PATH}
 
 Your job:
 1. Read the fix diff: git diff origin/main..origin/{FIX_BRANCH}

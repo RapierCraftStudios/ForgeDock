@@ -16,6 +16,7 @@ jobs:
     permissions:
       contents: write
       id-token: write
+      packages: write
 
     steps:
       - uses: actions/checkout@v4
@@ -24,20 +25,67 @@ jobs:
         uses: actions/setup-node@v4
         with:
           node-version: 24
+          registry-url: 'https://registry.npmjs.org'
 
       - name: Bump patch version
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          npm version patch --no-git-tag-version
-          NEW_VERSION=$(node -p "require('./package.json').version")
-          echo "VERSION=$NEW_VERSION" >> $GITHUB_ENV
+          CURRENT_VERSION=$(node -p "require('./package.json').version")
+          NEXT_VERSION=$(node -p "
+            const [maj,min,pat] = '$CURRENT_VERSION'.split('.').map(Number);
+            \`\${maj}.\${min}.\${pat+1}\`
+          ")
+          # Re-run guard: check if NEXT_VERSION (not the current committed version) was
+          # already published. This correctly identifies the re-run case where a partial
+          # failure left the bumped version on npm without committing it back to the repo.
+          # Checking CURRENT_VERSION would always be true (the committed version is always
+          # the last published version), which would permanently disable publishing.
+          if npm show forgedock@"$NEXT_VERSION" version --silent 2>/dev/null | grep -q "$NEXT_VERSION"; then
+            echo "Next version $NEXT_VERSION already published — re-run detected, skipping bump"
+            echo "VERSION=$NEXT_VERSION" >> $GITHUB_ENV
+            echo "SKIP_PUBLISH=true" >> $GITHUB_ENV
+          else
+            npm version patch --no-git-tag-version
+            NEW_VERSION=$(node -p "require('./package.json').version")
+            echo "VERSION=$NEW_VERSION" >> $GITHUB_ENV
+            echo "SKIP_PUBLISH=false" >> $GITHUB_ENV
+          fi
 
       - name: Publish to npm (OIDC trusted publishing)
+        if: env.SKIP_PUBLISH != 'true'
         run: npm publish --provenance --access public
 
+      - name: Save package.json before name mutation
+        if: env.SKIP_PUBLISH != 'true'
+        run: cp package.json package.json.orig
+
+      - name: Publish to GitHub Packages
+        if: env.SKIP_PUBLISH != 'true'
+        run: |
+          NPMRC="$RUNNER_TEMP/.npmrc"
+          echo "//npm.pkg.github.com/:_authToken=${{ secrets.GITHUB_TOKEN }}" > "$NPMRC"
+          echo "@rapiercraftstudios:registry=https://npm.pkg.github.com" >> "$NPMRC"
+          npm pkg set name="@rapiercraftstudios/forgedock"
+          npm publish --access public --userconfig "$NPMRC"
+
+      - name: Restore package.json name
+        if: always() && env.SKIP_PUBLISH != 'true'
+        run: mv package.json.orig package.json
+
       - name: Push version bump
+        if: env.SKIP_PUBLISH != 'true'
         run: |
           git add package.json
           git commit -m "chore: bump version to ${{ env.VERSION }} [skip ci]"
           git push
+
+      - name: Create GitHub Release
+        run: |
+          # Idempotent: if the release already exists (e.g. on a re-run), skip gracefully.
+          gh release create "v${{ env.VERSION }}" \
+            --title "v${{ env.VERSION }}" \
+            --generate-notes \
+          || gh release view "v${{ env.VERSION }}" --json tagName --jq '"Release v${{ env.VERSION }} already exists — skipping creation"'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}

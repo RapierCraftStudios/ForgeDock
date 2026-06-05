@@ -35,12 +35,20 @@ The user's input (`$ARGUMENTS`) can be:
 
 ### 1A: Resolve target repository
 
+Read `forge.yaml` to build the routing table dynamically:
+
+```bash
+GH_REPO=$(yq '.project.owner + "/" + .project.repo' forge.yaml)
+GH_FLAG="-R $GH_REPO"
+REPO_PATH=$(yq '.paths.root' forge.yaml)
+STAGING_BRANCH=$(yq '.branches.staging' forge.yaml)
+# Satellite repos from forge.yaml → repos.satellites (each has: prefix, repo, staging_branch)
+```
+
 | Prefix | Repository | GH_REPO | GH_FLAG |
 |--------|-----------|---------|---------|
-| (none) / `alterlab:` | AlterLab | `RapierCraft/AlterLab` | (none) |
-| `forge:` | Forge | `RapierCraftStudios/forge` | `-R RapierCraftStudios/forge` |
-| `mcp:` | MCP Server | `RapierCraft/alterlab-mcp-server` | `-R RapierCraft/alterlab-mcp-server` |
-| `n8n:` | n8n Node | `RapierCraft/n8n-nodes-alterlab` | `-R RapierCraft/n8n-nodes-alterlab` |
+| (none) | Default project | `{GH_REPO}` from `forge.yaml → project.owner/repo` | (none / use `{GH_FLAG}`) |
+| `{satellite_prefix}:` | Satellite repo | `{satellite.repo}` from `forge.yaml → repos.satellites` | `-R {satellite.repo}` |
 
 ### 1B: Classify issue type
 
@@ -88,21 +96,10 @@ Pick ONE primary category label:
 
 ### 2A: Identify the domain
 
-For AlterLab issues, map to domains and their key files:
+Map the issue to its domain and key files. Domain structure comes from the project — check `forge.yaml → review.context` and the project's `CLAUDE.md` for project-specific domain maps.
 
-| Domain | Key Entry Points |
-|--------|-----------------|
-| BILLING | `routers/billing.py`, `core/pricing.py`, `services/credit_service.py` |
-| SCRAPING | `unified_consumer.py`, `queues.py`, `domain_playbooks.json` |
-| AUTH | `core/auth.py`, `routers/auth.py`, `dependencies.py` |
-| DATABASE | `infra/migrations/`, `models/`, `db/` |
-| FRONTEND | `web/src/app/`, `web/src/components/`, `web/src/lib/` |
-| CORTEX | `cortex_client.py`, `routers/cortex.py` |
-| INFRA | `.github/workflows/`, `docker-compose.yml`, `docker-compose.prod.yml`, `infra/traefik/` |
-
-For Forge issues: `commands/*.md`, `CLAUDE.md`, `install.sh`
-For MCP issues: read the repo's `src/` directory
-For n8n issues: read the repo's `nodes/` and `credentials/` directories
+For ForgeDock issues (this repo): `commands/*.md`, `CLAUDE.md`, `install.sh`, `bin/`
+For satellite repo issues: read the satellite repo's source directory (from `forge.yaml → repos.satellites`)
 
 ### 2B: Read the affected files
 
@@ -113,12 +110,12 @@ For n8n issues: read the repo's `nodes/` and `credentials/` directories
 3. **Import chains**: If the issue is about a function, check what imports it and what it imports.
 
 ```bash
-# For AlterLab — resolve the right branch to read from
-# Check staging first (most recent deployable state), then main
-git fetch origin staging main 2>/dev/null
+# Resolve the right branch to read from
+# Check the staging branch first (most recent deployable state), then the default branch
+git fetch origin {STAGING_BRANCH} {DEFAULT_BRANCH} 2>/dev/null
 
 # Read the files relevant to the issue
-# Use git show origin/staging:{filepath} for AlterLab files
+# Use git show origin/{STAGING_BRANCH}:{filepath} for project files
 ```
 
 ### 2C: Identify ALL affected files
@@ -423,11 +420,15 @@ else
 fi
 ```
 
-### 4D: Add to Project board (AlterLab only)
+### 4D: Add to Project board (if configured)
 
 ```bash
-# For AlterLab issues, add to the project board
-gh project item-add {PROJECT_NUMBER} --owner RapierCraft --url "${ISSUE_URL}" 2>/dev/null || true
+# Add to project board if forge.yaml → project_board is configured
+PROJECT_NUMBER=$(yq '.project_board.project_number // ""' forge.yaml)
+PROJECT_BOARD_OWNER=$(yq '.project_board.owner // .project.owner' forge.yaml)
+if [ -n "$PROJECT_NUMBER" ] && [ "$PROJECT_NUMBER" != "null" ]; then
+  gh project item-add "$PROJECT_NUMBER" --owner "$PROJECT_BOARD_OWNER" --url "${ISSUE_URL}" 2>/dev/null || true
+fi
 ```
 
 ### 4E: Report to user

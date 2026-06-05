@@ -1,5 +1,5 @@
 ---
-description: Detect API changes, sync satellite repos, and publish releases (SDKs, MCP server, n8n node)
+description: Detect API changes, sync satellite repos, and publish releases
 argument-hint: [check | auto | status | publish | PR-number]
 ---
 
@@ -7,7 +7,56 @@ argument-hint: [check | auto | status | publish | PR-number]
 
 **Input**: $ARGUMENTS
 
-When the AlterLab API surface changes (new parameters, endpoints, modes, pricing), satellite projects (SDKs, MCP server, n8n node) need updates. This command detects what changed, creates tracking issues, checks publication status, and publishes releases.
+When the `{project.name}` API surface changes (new parameters, endpoints, modes, pricing), satellite projects need updates. This command detects what changed, creates tracking issues, checks publication status, and publishes releases.
+
+---
+
+## Config Preamble
+
+Before any phase runs, build the ecosystem registry from `forge.yaml → repos.satellites`.
+
+```bash
+# Read satellite repos from forge.yaml
+# Each entry provides: prefix, repo, staging_branch, local_path
+# (Optional: package, publish_workflow — read from each satellite's package.json / workflow files)
+
+# Gate: if repos section is absent or has no satellites, stop here
+if [ -z "$(yq '.repos.satellites // empty' forge.yaml 2>/dev/null)" ]; then
+  echo "No satellite repos configured in forge.yaml → repos.satellites."
+  echo "Add entries to forge.yaml to use /sync-ecosystem:"
+  echo ""
+  echo "  repos:"
+  echo "    satellites:"
+  echo "      - prefix: \"sdk\""
+  echo "        repo: \"your-org/your-sdk\""
+  echo "        staging_branch: \"main\""
+  echo "        local_path: \"/home/youruser/projects/your-sdk\""
+  exit 0
+fi
+
+# For each satellite entry, resolve template variables:
+#   {COMPONENT}        = prefix (e.g. "mcp", "sdk", "n8n")
+#   {GH_REPO}          = repo   (e.g. "your-org/your-mcp-server")
+#   {REPO_PATH}        = local_path  (e.g. "/home/youruser/projects/your-mcp-server")
+#   {STAGING_BRANCH}   = staging_branch (e.g. "main")
+#   {PACKAGE}          = read from {REPO_PATH}/package.json "name" field (npm)
+#                        or {REPO_PATH}/pyproject.toml "name" field (PyPI)
+#   {PUBLISH_WORKFLOW} = read from {REPO_PATH}/.github/workflows/ — the workflow
+#                        triggered by GitHub Release (look for "on: release:")
+
+# For monorepo satellites (multiple packages in one repo):
+#   Use a subpath qualifier in local_path, e.g.:
+#     local_path: "/home/youruser/projects/myproject"
+#     subpaths:
+#       python_sdk: "sdk/python"
+#       node_sdk: "sdk/node"
+#   Then {REPO_PATH}/sdk/python and {REPO_PATH}/sdk/node are the per-SDK roots.
+
+PROJECT_NAME=$(yq '.project.name' forge.yaml)
+PROJECT_BOARD_OWNER=$(yq '.project_board.owner // .project.owner' forge.yaml)
+PROJECT_BOARD_NUMBER=$(yq '.project_board.project_number // empty' forge.yaml)
+PROJECT_BOARD_ID=$(yq '.project_board.project_id // empty' forge.yaml)
+```
 
 ---
 
@@ -15,17 +64,33 @@ When the AlterLab API surface changes (new parameters, endpoints, modes, pricing
 
 ### Satellite Projects
 
-| Component | Repo | Local Path | Package | Publish Trigger |
-|-----------|------|------------|---------|-----------------|
-| MCP Server | `RapierCraft/alterlab-mcp-server` | `/home/mrdubey/projects/ScraperAPI/alterlab-mcp-server` | `alterlab-mcp-server` (npm) | GitHub Release → `publish-npm.yml` + `publish-mcp-registry.yml` |
-| n8n Node | `RapierCraft/n8n-nodes-alterlab` | `/home/mrdubey/projects/ScraperAPI/n8n-nodes-alterlab` | `n8n-nodes-alterlab` (npm) | GitHub Release → `publish.yml` |
-| Python SDK | monorepo `sdk/python/` | `/home/mrdubey/projects/ScraperAPI/alterlab/sdk/python` | `alterlab` (PyPI) | Manual `workflow_dispatch` → `publish-sdks.yml` (input: `python` or `both`) |
-| Node SDK | monorepo `sdk/node/` | `/home/mrdubey/projects/ScraperAPI/alterlab/sdk/node` | `@alterlab/sdk` (npm) | Manual `workflow_dispatch` → `publish-sdks.yml` (input: `node` or `both`) |
+Build the ecosystem registry from `forge.yaml → repos.satellites`. Each entry in the `satellites` array becomes one row in the registry:
+
+| Field in `forge.yaml` | Maps to |
+|-----------------------|---------|
+| `satellites[].prefix` | `{COMPONENT}` — the short identifier used in issue routing (e.g. `mcp:5`) |
+| `satellites[].repo` | `{GH_REPO}` — full `owner/repo` used in all `gh` commands |
+| `satellites[].local_path` | `{REPO_PATH}` — absolute local path used in all `cd` commands |
+| `satellites[].staging_branch` | `{STAGING_BRANCH}` — PR target branch for this satellite |
+| Read from `{REPO_PATH}/package.json` | `{PACKAGE}` — npm package name |
+| Read from `{REPO_PATH}/.github/workflows/` | `{PUBLISH_WORKFLOW}` — workflow file triggered on release |
+
+**Example registry output** (what the agent constructs from your `forge.yaml`):
+
+```
+Component: {COMPONENT}
+  Repo:             {GH_REPO}
+  Local path:       {REPO_PATH}
+  Package:          {PACKAGE} ({REGISTRY: npm or PyPI})
+  Publish trigger:  GitHub Release → {PUBLISH_WORKFLOW}
+```
+
+Iterate over all `repos.satellites` entries before proceeding to Phase 1.
 
 ### Version Bump Rules
 
-- **Satellite repos** (MCP, n8n): Version lives in `package.json`. Must be bumped, committed, and pushed to `main` BEFORE creating the GitHub Release tag. The release tag must match the version (`v{VERSION}`).
-- **SDKs** (Python, Node): Version lives in `pyproject.toml` / `package.json` in the monorepo. Must be bumped, committed, and pushed to `main` BEFORE triggering `publish-sdks.yml`.
+- **Satellite repos** (separate GitHub repos): Version lives in `package.json`. Must be bumped, committed, and pushed to `main` BEFORE creating the GitHub Release tag. The release tag must match the version (`v{VERSION}`).
+- **Monorepo packages** (SDKs or tools inside a single repo): Version lives in `pyproject.toml` / `package.json` in the monorepo. Must be bumped, committed, and pushed to `main` BEFORE triggering the publish workflow.
 
 ---
 
@@ -37,7 +102,7 @@ When the AlterLab API surface changes (new parameters, endpoints, modes, pricing
 | `auto` | Same as check, but auto-create issues in satellite repos |
 | `status` | Check publication status of ALL ecosystem components (code vs published versions) |
 | `publish` | Bump versions, cut releases, and trigger publishes for all components with unpublished changes |
-| `publish mcp` / `publish n8n` / `publish sdks` | Publish a specific component |
+| `publish {COMPONENT}` | Publish a specific component by prefix |
 | `PR-number` (e.g., `#1500`) | Analyze a specific PR for ecosystem impact |
 
 ---
@@ -58,24 +123,22 @@ gh pr view {PR_NUMBER} --json title,body,files
 
 ```bash
 # Find recent merged PRs to staging or main (last 7 days)
-gh pr list --state merged --base staging --limit 20 --json number,title,mergedAt,files
-gh pr list --state merged --base main --limit 10 --json number,title,mergedAt,files
+gh pr list --state merged --base {branches.staging} --limit 20 --json number,title,mergedAt,files
+gh pr list --state merged --base {branches.default} --limit 10 --json number,title,mergedAt,files
 ```
 
 ### Analyze changes for sync triggers
 
-Scan the changed files for API surface modifications:
+Scan the changed files for API surface modifications. The file patterns below are illustrative — adapt to your project's structure:
 
 | File Pattern | Trigger Type | Satellite Impact |
 |-------------|--------------|------------------|
-| `services/api/app/routers/scrape*.py` | New/changed scrape parameters | SDKs, MCP, n8n |
-| `services/api/app/schemas/scrape*.py` | Schema changes | SDKs, MCP, n8n |
-| `services/api/app/routers/extract*.py` | Extraction changes | MCP, n8n |
-| `services/api/app/core/pricing.py` | Pricing/credit changes | MCP (estimate tool), SDK docs |
-| `services/api/app/routers/*.py` (new file) | New endpoint | SDKs, MCP |
-| `services/api/app/auth/` | Auth changes | n8n credentials, SDK auth, MCP config |
-| `sdk/python/` | SDK already updated | Check if n8n/MCP need matching update |
-| `sdk/node/` | SDK already updated | Check if n8n/MCP need matching update |
+| API router files (`routers/`, `controllers/`) | New/changed parameters or endpoints | All satellites |
+| Schema files (`schemas/`, `types/`) | Schema changes | All satellites |
+| Pricing/billing files | Pricing/credit changes | Satellites exposing cost estimates |
+| New router/controller file | New endpoint | All satellites |
+| Auth files | Auth changes | All satellite credential configs |
+| Existing SDK subpath | SDK already updated | Check if other satellites need matching update |
 
 **Read the actual diff** for each matched file to understand what specifically changed (new parameter, renamed field, new endpoint, etc.).
 
@@ -91,32 +154,28 @@ changes:
   - description: "Added `cookies` parameter to /api/v1/scrape"
     source_pr: "#1800"
     impacts:
-      - repo: "RapierCraft/alterlab-mcp-server"
+      - repo: "{GH_REPO}"           # e.g. your-org/your-mcp-server
         what: "Add `cookies` param to scrape tool schema"
-        files: ["src/tools/scrape.ts"]
-      - repo: "RapierCraft/n8n-nodes-alterlab"
+        files: ["{REPO_PATH}/src/tools/scrape.ts"]
+      - repo: "{GH_REPO}"           # e.g. your-org/your-n8n-node
         what: "Add `cookies` field to Scrape operation"
-        files: ["nodes/AlterLab/AlterLab.node.ts"]
-      - repo: "sdk/python" (monorepo)
+        files: ["{REPO_PATH}/nodes/YourNode/YourNode.node.ts"]
+      - repo: "{GH_REPO} (monorepo)" # e.g. your-org/your-project
         what: "Add `cookies` kwarg to client.scrape()"
-        files: ["sdk/python/alterlab/client.py"]
-      - repo: "sdk/node" (monorepo)
+        files: ["{REPO_PATH}/sdk/python/src/client.py"]
+      - repo: "{GH_REPO} (monorepo)"
         what: "Add `cookies` option to scrape()"
-        files: ["sdk/node/src/index.ts"]
+        files: ["{REPO_PATH}/sdk/node/src/index.ts"]
 ```
 
 **Check if sync is already done**: Before creating issues, check if the satellite repo already has the change:
 
 ```bash
-# For MCP server (check git main, not local disk — local may be stale):
-cd /home/mrdubey/projects/ScraperAPI/alterlab-mcp-server && git fetch origin main && git show origin/main:src/tools/scrape.ts | grep -n "cookies"
+# For each satellite repo (check git main, not local disk — local may be stale):
+cd {REPO_PATH} && git fetch origin main && git show origin/main:{RELEVANT_FILE} | grep -n "{FEATURE}"
 
-# For n8n node:
-cd /home/mrdubey/projects/ScraperAPI/n8n-nodes-alterlab && git fetch origin main && git show origin/main:nodes/AlterLab/AlterLab.node.ts | grep -n "cookies"
-
-# For SDKs (check origin/main in monorepo):
-cd /home/mrdubey/projects/ScraperAPI/alterlab && git show origin/main:sdk/python/alterlab/client.py | grep -n "cookies"
-cd /home/mrdubey/projects/ScraperAPI/alterlab && git show origin/main:sdk/node/src/index.ts | grep -n "cookies"
+# For monorepo satellites with subpaths:
+cd {REPO_PATH} && git show origin/main:{SUBPATH}/{RELEVANT_FILE} | grep -n "{FEATURE}"
 ```
 
 If the change already exists in a satellite's `origin/main` → skip it (code synced). Then check if it's also **published** (see Phase 5).
@@ -139,10 +198,10 @@ Report what needs syncing without creating issues:
 
 | Repo | Change Needed | Source PR | Status |
 |------|--------------|-----------|--------|
-| MCP Server | Add `cookies` to scrape tool | #1800 | Needs sync |
-| n8n Node | Add `cookies` to Scrape op | #1800 | Needs sync |
-| Python SDK | Already has `cookies` | #1800 | In sync |
-| Node SDK | Add `cookies` option | #1800 | Needs sync |
+| {GH_REPO} | Add `cookies` to scrape tool | #1800 | Needs sync |
+| {GH_REPO} | Add `cookies` to Scrape op | #1800 | Needs sync |
+| {GH_REPO} (sdk/python) | Already has `cookies` | #1800 | In sync |
+| {GH_REPO} (sdk/node) | Add `cookies` option | #1800 | Needs sync |
 
 Run `/sync-ecosystem auto` to create issues automatically.
 ```
@@ -165,7 +224,7 @@ gh issue create -R {TARGET_REPO} \
 
 ## Root Cause (if known)
 
-The upstream AlterLab API changed in PR #{SOURCE_PR}: {brief description of the change}. This satellite repo must be updated to stay in sync.
+The upstream {project.name} API changed in PR #{SOURCE_PR}: {brief description of the change}. This satellite repo must be updated to stay in sync.
 
 ## Affected Files
 
@@ -176,14 +235,14 @@ Files that need changes:
 ## Acceptance Criteria
 
 - [ ] {Specific sync criterion — e.g., new parameter available in tool schema}
-- [ ] Changes passed through to AlterLab API correctly
+- [ ] Changes passed through to {project.name} API correctly
 - [ ] TypeScript types / validation schemas updated
 
 ## Context
 
 **Source**: {SOURCE_REPO} PR #{SOURCE_PR}
 **Change**: {description of upstream API change}
-**Detected by**: \`/sync-ecosystem\`
+**Detected by**: `/sync-ecosystem`
 
 ## API Reference
 
@@ -191,18 +250,18 @@ Files that need changes:
 BODY_EOF
 )"
 
-# For monorepo issues (SDKs, chrome extension):
+# For monorepo issues (SDKs, packages inside a single repo):
 gh issue create \
   --title "feat(sync): {description of what API change needs to be reflected}" \
   --label "feature,P2" \
   --body "$(cat <<'BODY_EOF'
 ## Problem
 
-{1-3 sentences: what API or schema change needs to be reflected in this SDK or extension. What will be out of sync if not updated.}
+{1-3 sentences: what API or schema change needs to be reflected in this SDK or package. What will be out of sync if not updated.}
 
 ## Root Cause (if known)
 
-The upstream AlterLab API changed in PR #{SOURCE_PR}: {brief description of the change}. This SDK must be updated to expose the new capability.
+The upstream {project.name} API changed in PR #{SOURCE_PR}: {brief description of the change}. This SDK must be updated to expose the new capability.
 
 ## Affected Files
 
@@ -220,24 +279,32 @@ Files that need changes:
 
 **Source**: {SOURCE_REPO} PR #{SOURCE_PR}
 **Change**: {description of upstream API change}
-**Detected by**: \`/sync-ecosystem\`
+**Detected by**: `/sync-ecosystem`
 BODY_EOF
 )"
 ```
 
 ### Add sync issues to Project board
 
-For each created issue, add it to the GitHub Project with `Lane=Sync` and the correct `Component`. Reference `~/projects/forge/docs/WORKFLOW.md` → "Project Board Integration" for field IDs.
+For each created issue, add it to the GitHub Project with `Lane=Sync` and the correct `Component`. Reference `docs/WORKFLOW.md` → "Project Board Integration" for field IDs (or read them from `forge.yaml → project_board`).
 
 ```bash
 # For each created issue:
 ISSUE_URL="https://github.com/{TARGET_REPO}/issues/${ISSUE_NUM}"
-ITEM_ID=$(gh project item-add 1 --owner RapierCraft --url "$ISSUE_URL" --format json --jq '.id' 2>/dev/null)
+ITEM_ID=$(gh project item-add {project_board.project_number} --owner {project_board.owner} --url "$ISSUE_URL" --format json --jq '.id' 2>/dev/null)
 if [ -n "$ITEM_ID" ]; then
-  gh project item-edit --project-id PVT_kwHOCx3gR84BSK2L --id "$ITEM_ID" --field-id PVTSSF_lAHOCx3gR84BSK2Lzg_yF6E --single-select-option-id f75ad846 2>/dev/null || true  # Status=Todo
-  gh project item-edit --project-id PVT_kwHOCx3gR84BSK2L --id "$ITEM_ID" --field-id PVTSSF_lAHOCx3gR84BSK2Lzg_yF98 --single-select-option-id c0c37d33 2>/dev/null || true  # Lane=Sync
-  gh project item-edit --project-id PVT_kwHOCx3gR84BSK2L --id "$ITEM_ID" --field-id PVTSSF_lAHOCx3gR84BSK2Lzg_yF-o --single-select-option-id {COMPONENT_OPTION_ID} 2>/dev/null || true  # Component (MCP Server/n8n Node/Python SDK/Node SDK)
-  gh project item-edit --project-id PVT_kwHOCx3gR84BSK2L --id "$ITEM_ID" --field-id PVTSSF_lAHOCx3gR84BSK2Lzg_yF8o --single-select-option-id 4d95eef3 2>/dev/null || true  # Priority=P2
+  gh project item-edit --project-id {project_board.project_id} --id "$ITEM_ID" \
+    --field-id {project_board.field_ids.status} \
+    --single-select-option-id {project_board.option_ids.status.todo} 2>/dev/null || true
+  gh project item-edit --project-id {project_board.project_id} --id "$ITEM_ID" \
+    --field-id {project_board.field_ids.lane} \
+    --single-select-option-id {project_board.option_ids.lane.sync} 2>/dev/null || true
+  gh project item-edit --project-id {project_board.project_id} --id "$ITEM_ID" \
+    --field-id {project_board.field_ids.component} \
+    --single-select-option-id {COMPONENT_OPTION_ID} 2>/dev/null || true
+  gh project item-edit --project-id {project_board.project_id} --id "$ITEM_ID" \
+    --field-id {project_board.field_ids.priority} \
+    --single-select-option-id {project_board.option_ids.priority.p2} 2>/dev/null || true
 fi
 ```
 
@@ -248,11 +315,9 @@ fi
 
 | # | Repo | Issue | Priority |
 |---|------|-------|----------|
-| mcp:#5 | alterlab-mcp-server | Add cookies to scrape tool | P2 |
-| n8n:#12 | n8n-nodes-alterlab | Add cookies to Scrape op | P2 |
-| #2100 | AlterLab (SDK) | Add cookies to Node SDK | P2 |
+| {COMPONENT}:#{NUM} | {GH_REPO} | {CHANGE_DESCRIPTION} | P2 |
 
-Run `/orchestrate mcp:5 n8n:12 #2100` to implement all sync issues in parallel.
+Run `/orchestrate {COMPONENT}:#{NUM} ...` to implement all sync issues in parallel.
 ```
 
 ---
@@ -266,10 +331,7 @@ If the API change warrants a version bump in satellite packages:
 
 | Package | Current | Suggested | Reason |
 |---------|---------|-----------|--------|
-| alterlab (PyPI) | 2.0.1 | 2.1.0 | New `cookies` parameter |
-| @alterlab/sdk (npm) | 2.0.1 | 2.1.0 | New `cookies` parameter |
-| alterlab-mcp-server (npm) | 1.0.0 | 1.1.0 | New scrape tool param |
-| n8n-nodes-alterlab (npm) | 0.5.0 | 0.6.0 | New Scrape field |
+| {PACKAGE} ({REGISTRY}) | {CURRENT_VERSION} | {NEW_VERSION} | {CHANGE_DESCRIPTION} |
 ```
 
 Include version bump instructions in the created issues.
@@ -282,42 +344,38 @@ Include version bump instructions in the created issues.
 
 ### 5A: Collect current versions (code vs published)
 
+For each satellite in `repos.satellites`, collect code version vs published version:
+
 ```bash
-echo "=== MCP Server ==="
+# For each satellite: {COMPONENT}, {GH_REPO}, {REPO_PATH}, {PACKAGE}
+
+echo "=== {COMPONENT} ==="
 # Version in code (on main):
-cd /home/mrdubey/projects/ScraperAPI/alterlab-mcp-server && git fetch origin main 2>/dev/null
-MCP_CODE_VERSION=$(git show origin/main:package.json | grep '"version"' | head -1 | grep -oP '\d+\.\d+\.\d+')
-echo "Code version: $MCP_CODE_VERSION"
+cd {REPO_PATH} && git fetch origin main 2>/dev/null
+CODE_VERSION=$(git show origin/main:package.json | grep '"version"' | head -1 | grep -oP '\d+\.\d+\.\d+')
+# (For pyproject.toml: git show origin/main:pyproject.toml | grep '^version' | grep -oP '\d+\.\d+\.\d+')
+echo "Code version: $CODE_VERSION"
+
 # Latest GitHub release:
-MCP_RELEASE=$(gh release list -R RapierCraft/alterlab-mcp-server --limit 1 --json tagName,publishedAt --jq '.[0] | "\(.tagName) (\(.publishedAt))"' 2>/dev/null)
-echo "Latest release: $MCP_RELEASE"
+LATEST_RELEASE=$(gh release list -R {GH_REPO} --limit 1 --json tagName,publishedAt \
+  --jq '.[0] | "\(.tagName) (\(.publishedAt))"' 2>/dev/null)
+echo "Latest release: $LATEST_RELEASE"
+
 # Commits since last release tag:
-MCP_RELEASE_TAG=$(gh release list -R RapierCraft/alterlab-mcp-server --limit 1 --json tagName --jq '.[0].tagName' 2>/dev/null)
-MCP_COMMITS_SINCE=$(git rev-list ${MCP_RELEASE_TAG}..origin/main --count 2>/dev/null || echo "unknown")
-echo "Commits since release: $MCP_COMMITS_SINCE"
+RELEASE_TAG=$(gh release list -R {GH_REPO} --limit 1 --json tagName --jq '.[0].tagName' 2>/dev/null)
+COMMITS_SINCE=$(git rev-list ${RELEASE_TAG}..origin/main --count 2>/dev/null || echo "unknown")
+echo "Commits since release: $COMMITS_SINCE"
+```
 
-echo "=== n8n Node ==="
-cd /home/mrdubey/projects/ScraperAPI/n8n-nodes-alterlab && git fetch origin main 2>/dev/null
-N8N_CODE_VERSION=$(git show origin/main:package.json | grep '"version"' | head -1 | grep -oP '\d+\.\d+\.\d+')
-echo "Code version: $N8N_CODE_VERSION"
-N8N_RELEASE=$(gh release list -R RapierCraft/n8n-nodes-alterlab --limit 1 --json tagName,publishedAt --jq '.[0] | "\(.tagName) (\(.publishedAt))"' 2>/dev/null)
-echo "Latest release: $N8N_RELEASE"
-N8N_RELEASE_TAG=$(gh release list -R RapierCraft/n8n-nodes-alterlab --limit 1 --json tagName --jq '.[0].tagName' 2>/dev/null)
-N8N_COMMITS_SINCE=$(git rev-list ${N8N_RELEASE_TAG}..origin/main --count 2>/dev/null || echo "unknown")
-echo "Commits since release: $N8N_COMMITS_SINCE"
+For monorepo packages that use `workflow_dispatch` instead of GitHub Releases:
 
-echo "=== Python SDK ==="
-cd /home/mrdubey/projects/ScraperAPI/alterlab && git fetch origin main 2>/dev/null
-PY_CODE_VERSION=$(git show origin/main:sdk/python/pyproject.toml | grep '^version' | grep -oP '\d+\.\d+\.\d+')
-echo "Code version: $PY_CODE_VERSION"
-# Last publish-sdks workflow run:
-PY_LAST_PUBLISH=$(gh run list --workflow=publish-sdks.yml --status=success --limit 1 --json createdAt,headBranch --jq '.[0] | "\(.headBranch) (\(.createdAt))"' 2>/dev/null)
-echo "Last SDK publish: $PY_LAST_PUBLISH"
-
-echo "=== Node SDK ==="
-NODE_CODE_VERSION=$(git show origin/main:sdk/node/package.json | grep '"version"' | head -1 | grep -oP '\d+\.\d+\.\d+')
-echo "Code version: $NODE_CODE_VERSION"
-echo "Last SDK publish: $PY_LAST_PUBLISH"  # Same workflow handles both
+```bash
+# Check last publish workflow run date
+LAST_PUBLISH=$(gh run list --repo {GH_REPO} --workflow={PUBLISH_WORKFLOW} \
+  --status=success --limit 1 \
+  --json createdAt,headBranch \
+  --jq '.[0] | "\(.headBranch) (\(.createdAt))"' 2>/dev/null)
+echo "Last publish: $LAST_PUBLISH"
 ```
 
 ### 5B: Determine what needs publishing
@@ -325,7 +383,7 @@ echo "Last SDK publish: $PY_LAST_PUBLISH"  # Same workflow handles both
 A component needs publishing when ANY of these are true:
 - Commits exist on `main` after the last release tag (for satellite repos)
 - The version in code is newer than the last published version
-- The last `publish-sdks.yml` run predates commits that changed `sdk/python/` or `sdk/node/`
+- The last publish workflow run predates commits that changed the package source
 
 ### 5C: Report publication status
 
@@ -334,10 +392,7 @@ A component needs publishing when ANY of these are true:
 
 | Component | Code Version | Published Version | Commits Behind | Status |
 |-----------|-------------|-------------------|----------------|--------|
-| MCP Server (npm) | {MCP_CODE_VERSION} | {MCP_RELEASE_TAG} | {N} commits | {PUBLISHED / STALE} |
-| n8n Node (npm) | {N8N_CODE_VERSION} | {N8N_RELEASE_TAG} | {N} commits | {PUBLISHED / STALE} |
-| Python SDK (PyPI) | {PY_CODE_VERSION} | last publish: {date} | — | {PUBLISHED / STALE} |
-| Node SDK (npm) | {NODE_CODE_VERSION} | last publish: {date} | — | {PUBLISHED / STALE} |
+| {COMPONENT} ({REGISTRY}) | {CODE_VERSION} | {RELEASE_TAG} | {N} commits | {PUBLISHED / STALE} |
 
 {If any STALE:}
 Run `/sync-ecosystem publish` to bump versions and publish all stale components.
@@ -347,7 +402,7 @@ Run `/sync-ecosystem publish` to bump versions and publish all stale components.
 
 ## Phase 6: Publish Releases
 
-**Only run when input is `publish` (or `publish <component>`).** This phase bumps versions, creates releases, and triggers publish workflows.
+**Only run when input is `publish` (or `publish {COMPONENT}`).** This phase bumps versions, creates releases, and triggers publish workflows.
 
 **IMPORTANT**: Always confirm with the user before publishing. Show the Phase 5 status table and ask: "These components will be published. Proceed?"
 
@@ -364,13 +419,13 @@ For each stale component, determine the appropriate semver bump:
 Read the commit log since the last release to determine the bump type:
 
 ```bash
-# For MCP server:
-cd /home/mrdubey/projects/ScraperAPI/alterlab-mcp-server
-git log ${MCP_RELEASE_TAG}..origin/main --oneline --no-merges
+# For each satellite:
+cd {REPO_PATH}
+git log ${RELEASE_TAG}..origin/main --oneline --no-merges
 # Look for feat: (MINOR), fix: (PATCH), or BREAKING CHANGE (MAJOR)
 ```
 
-### 6B: Publish satellite repos (MCP Server, n8n Node)
+### 6B: Publish satellite repos (separate GitHub repos)
 
 For each satellite repo that needs publishing:
 
@@ -381,7 +436,6 @@ cd {REPO_PATH}
 git checkout main && git pull origin main
 
 # 2. Bump version in package.json
-# Use npm version which updates package.json AND creates a git tag
 npm version {minor|patch|major} --no-git-tag-version
 
 # 3. Commit the version bump
@@ -390,7 +444,7 @@ git add package.json package-lock.json
 git commit -m "chore: bump version to ${NEW_VERSION}"
 git push origin main
 
-# 4. Create GitHub Release (triggers publish-npm.yml automatically)
+# 4. Create GitHub Release (triggers {PUBLISH_WORKFLOW} automatically)
 gh release create "v${NEW_VERSION}" \
   --repo {GH_REPO} \
   --title "v${NEW_VERSION}" \
@@ -402,72 +456,62 @@ sleep 5
 gh run list --repo {GH_REPO} --workflow={PUBLISH_WORKFLOW} --limit 1 --json status,conclusion
 ```
 
-**MCP Server specific**: The `publish-mcp-registry.yml` also fires on release — it publishes to the MCP Registry alongside npm. No extra action needed.
+### 6C: Publish monorepo packages (SDKs and tools inside a shared repo)
 
-### 6C: Publish SDKs (Python + Node)
-
-SDKs live in the AlterLab monorepo and use a `workflow_dispatch` workflow:
+Monorepo packages use a `workflow_dispatch` workflow triggered manually (not on GitHub Release):
 
 ```bash
-cd /home/mrdubey/projects/ScraperAPI/alterlab
+cd {REPO_PATH}
 
-# 1. Check if SDK versions need bumping (compare code version to last publish)
-PY_VERSION=$(git show origin/main:sdk/python/pyproject.toml | grep '^version' | grep -oP '\d+\.\d+\.\d+')
-NODE_VERSION=$(git show origin/main:sdk/node/package.json | grep '"version"' | head -1 | grep -oP '\d+\.\d+\.\d+')
+# 1. Check if package versions need bumping (compare code version to last publish)
+PY_VERSION=$(git show origin/main:{SUBPATH}/pyproject.toml | grep '^version' | grep -oP '\d+\.\d+\.\d+')
+NODE_VERSION=$(git show origin/main:{SUBPATH}/package.json | grep '"version"' | head -1 | grep -oP '\d+\.\d+\.\d+')
 
 # 2. If versions already bumped in code, just trigger the publish
 # If versions need bumping, create a worktree, bump, commit, push, then trigger
 
 # 3. Trigger publish workflow
-gh workflow run publish-sdks.yml --ref main -f sdk=both
+gh workflow run {PUBLISH_WORKFLOW} --repo {GH_REPO} --ref main -f sdk=both
 
 # 4. Verify workflow started
 sleep 5
-gh run list --workflow=publish-sdks.yml --limit 1 --json status,conclusion,createdAt
+gh run list --repo {GH_REPO} --workflow={PUBLISH_WORKFLOW} --limit 1 --json status,conclusion,createdAt
 ```
 
-**If SDK versions need bumping** (code version matches last published version but code has changed):
+**If versions need bumping** (code version matches last published version but code has changed):
 
 ```bash
 # Create worktree for version bump
-cd /home/mrdubey/projects/ScraperAPI/alterlab
-git worktree add ../alterlab-sdk-bump -b fix/sdk-version-bump origin/main
-cd ../alterlab-sdk-bump
+cd {REPO_PATH}
+git worktree add ../{COMPONENT}-version-bump -b fix/{COMPONENT}-version-bump origin/main
+cd ../{COMPONENT}-version-bump
 
-# Bump Python SDK version
-# Edit sdk/python/pyproject.toml: version = "{NEW_VERSION}"
-
-# Bump Node SDK version
-cd sdk/node && npm version {minor|patch} --no-git-tag-version && cd ../..
+# Bump version (example: pyproject.toml or package.json)
+# Edit {SUBPATH}/pyproject.toml: version = "{NEW_VERSION}"
+cd {SUBPATH} && npm version {minor|patch} --no-git-tag-version && cd -
 
 # Commit and push
-git add sdk/python/pyproject.toml sdk/node/package.json sdk/node/package-lock.json
-git commit -m "chore(sdk): bump Python SDK to {PY_NEW} and Node SDK to {NODE_NEW}"
-git push origin fix/sdk-version-bump
+git add {SUBPATH}/pyproject.toml {SUBPATH}/package.json {SUBPATH}/package-lock.json
+git commit -m "chore({COMPONENT}): bump version to {NEW_VERSION}"
+git push origin fix/{COMPONENT}-version-bump
 
-# Create PR to staging (fast-lane), merge, then trigger publish from main after deploy
-gh pr create --base staging --title "chore: bump SDK versions" --body "Version bump for SDK publish"
+# Create PR to {STAGING_BRANCH}, merge, then trigger publish from main
+gh pr create --repo {GH_REPO} --base {STAGING_BRANCH} \
+  --title "chore: bump {COMPONENT} version to {NEW_VERSION}" \
+  --body "Version bump for {COMPONENT} publish"
 ```
 
 ### 6D: Monitor publish workflows
 
-After triggering publishes, monitor completion:
+After triggering publishes, monitor completion for each satellite:
 
 ```bash
 echo "=== Publish Status ==="
 
-# MCP Server
-echo "MCP Server:"
-gh run list --repo RapierCraft/alterlab-mcp-server --workflow=publish-npm.yml --limit 1 --json status,conclusion,createdAt --jq '.[0]'
-gh run list --repo RapierCraft/alterlab-mcp-server --workflow=publish-mcp-registry.yml --limit 1 --json status,conclusion,createdAt --jq '.[0]'
-
-# n8n Node
-echo "n8n Node:"
-gh run list --repo RapierCraft/n8n-nodes-alterlab --workflow=publish.yml --limit 1 --json status,conclusion,createdAt --jq '.[0]'
-
-# SDKs
-echo "SDKs:"
-gh run list --workflow=publish-sdks.yml --limit 1 --json status,conclusion,createdAt --jq '.[0]'
+# For each satellite: {COMPONENT}, {GH_REPO}, {PUBLISH_WORKFLOW}
+echo "{COMPONENT}:"
+gh run list --repo {GH_REPO} --workflow={PUBLISH_WORKFLOW} \
+  --limit 1 --json status,conclusion,createdAt --jq '.[0]'
 ```
 
 ### 6E: Generate changelog for releases
@@ -487,8 +531,8 @@ $CHANGES
 
 ## Ecosystem Sync
 
-This release brings parity with AlterLab API changes from the following PRs:
-{list of source AlterLab PRs that drove these changes}
+This release brings parity with {project.name} API changes from the following PRs:
+{list of source PRs that drove these changes}
 EOF
 ```
 
@@ -499,19 +543,14 @@ EOF
 
 | Component | Old Version | New Version | Status | Registry |
 |-----------|------------|-------------|--------|----------|
-| MCP Server | v1.2.0 | v1.3.0 | Published | npm + MCP Registry |
-| n8n Node | v0.8.0 | v0.9.0 | Published | npm |
-| Python SDK | 2.1.0 | 2.1.1 | Published | PyPI |
-| Node SDK | 2.1.0 | 2.1.1 | Published | npm |
+| {COMPONENT} | {OLD_VERSION} | {NEW_VERSION} | Published | {REGISTRY} |
 
 ### Verification
 
 ```bash
 # Verify packages are live on registries:
-npm view alterlab-mcp-server version
-npm view n8n-nodes-alterlab version
-npm view @alterlab/sdk version
-pip index versions alterlab 2>/dev/null || pip install alterlab== 2>&1 | grep -oP '\d+\.\d+\.\d+'
+npm view {PACKAGE} version          # for npm packages
+pip index versions {PACKAGE} 2>/dev/null || pip install {PACKAGE}== 2>&1 | grep -oP '\d+\.\d+\.\d+'
 ```
 ```
 
@@ -520,8 +559,9 @@ pip index versions alterlab 2>/dev/null || pip install alterlab== 2>&1 | grep -o
 ## Error Handling
 
 - **No API changes detected**: Report "No API surface changes found in recent PRs. Ecosystem is in sync." — but STILL run Phase 5 to check publication status.
-- **Repo not accessible**: Skip and warn (e.g., "Could not access RapierCraft/n8n-nodes-alterlab — check gh auth")
+- **Repo not accessible**: Skip and warn (e.g., "Could not access {GH_REPO} — check gh auth")
 - **Duplicate issues**: Check for existing open issues with "Sync:" prefix before creating new ones
 - **Publish workflow fails**: Report the failure, link to the workflow run, suggest manual investigation. Do NOT retry automatically.
 - **Version conflict on npm/PyPI**: The version already exists on the registry. Bump to the next version and retry.
 - **OIDC publish fails**: Check that the repo has npm/PyPI trusted publishing configured. See workflow files for required permissions.
+- **No repos configured**: If `forge.yaml → repos.satellites` is empty or absent, the command outputs a configuration guide and exits. No error.

@@ -1,6 +1,6 @@
 ---
 description: Investigate a GitHub issue — validate it's real, determine root cause, post findings
-argument-hint: [issue number] [--repo RapierCraftStudios/forge] [--gh-flag "-R RapierCraftStudios/forge"]
+argument-hint: [issue number] [--repo {owner}/{repo}] [--gh-flag "-R {owner}/{repo}"]
 ---
 
 # /work-on:investigate — Issue Investigation Subcommand
@@ -18,10 +18,10 @@ Standalone investigation phase for the work-on pipeline. Validates whether an is
 
 Parse from $ARGUMENTS:
 - `{NUMBER}` — issue number (required)
-- `--repo {GH_REPO}` — GitHub repo (default: `RapierCraftStudios/forge` when running in Forge context; for AlterLab issues use `RapierCraft/AlterLab`)
-- `--gh-flag {GH_FLAG}` — gh CLI repo flag (e.g. `-R RapierCraftStudios/forge`)
+- `--repo {GH_REPO}` — GitHub repo (e.g. `{owner}/{repo}` — resolved from `forge.yaml → project`)
+- `--gh-flag {GH_FLAG}` — gh CLI repo flag (e.g. `-R {owner}/{repo}`)
 
-If called from `work-on`, these are passed through. If invoked standalone, defaults apply.
+If called from `work-on`, these are passed through. If invoked standalone, `--repo` and `--gh-flag` are resolved from `forge.yaml → project`.
 
 ---
 
@@ -33,8 +33,8 @@ gh api repos/{GH_REPO}/issues/{NUMBER}/comments --jq '.[] | {id: .id, body: .bod
 ```
 
 **Resume logic**:
-- If `<!-- FORGE:INVESTIGATOR -->` or `<!-- ALTERLAB:INVESTIGATOR -->` comment exists AND `<!-- INVESTIGATION:COMPLETE -->` is present in the SAME comment → investigation already complete, EXIT (return existing verdict to caller)
-- If `<!-- FORGE:INVESTIGATOR -->` or `<!-- ALTERLAB:INVESTIGATOR -->` comment exists BUT `<!-- INVESTIGATION:COMPLETE -->` is ABSENT → investigation was interrupted, delete the partial comment and restart:
+- If `<!-- FORGE:INVESTIGATOR -->` comment exists AND `<!-- INVESTIGATION:COMPLETE -->` is present in the SAME comment → investigation already complete, EXIT (return existing verdict to caller)
+- If `<!-- FORGE:INVESTIGATOR -->` comment exists BUT `<!-- INVESTIGATION:COMPLETE -->` is ABSENT → investigation was interrupted, delete the partial comment and restart:
   ```bash
   gh api repos/{GH_REPO}/issues/comments/{COMMENT_ID} -X DELETE
   ```
@@ -54,20 +54,16 @@ gh issue edit {NUMBER} {GH_FLAG} --remove-label "workflow:ready-to-build,workflo
 
 ### Resolve target repo and branch
 
-For Forge issues (repo = `RapierCraftStudios/forge`):
-- Key files: `commands/work-on.md`, `commands/review-pr.md`, `commands/quality-gate.md`, `commands/orchestrate.md`, `install.sh`, `CLAUDE.md`
+The target repo is `{GH_REPO}` (resolved from `forge.yaml → project`). The working directory is `{REPO_PATH}` (resolved from `forge.yaml → paths.root`).
 
-For AlterLab issues (repo = `RapierCraft/AlterLab`):
+**Domain-to-files mapping**: The repo's domain structure depends on the project. Before investigating, read the issue body and labels to identify the affected domain. Then look at the repo's directory structure under `{REPO_PATH}` to locate relevant files. Common entry points:
+- Command/prompt files: `commands/`, `.claude/commands/`
+- Backend services: any `services/`, `routers/`, `core/` directories
+- Frontend: any `web/`, `frontend/`, `src/` directories
+- Infrastructure: `.github/workflows/`, `docker-compose*.yml`, `infra/`
+- Config: `forge.yaml`, `.env.example`, any `config/` directory
 
-| Domain | Key files |
-|--------|-----------|
-| BILLING | `routers/billing.py`, `core/pricing.py`, `services/credit_service.py` |
-| SCRAPING | `unified_consumer.py`, `queues.py`, `domain_playbooks.json` |
-| AUTH | `core/auth.py`, `routers/auth.py`, `dependencies.py` |
-| DATABASE | `infra/migrations/`, `models/`, `db/` |
-| FRONTEND | `web/src/app/`, `web/src/components/`, `web/src/lib/` |
-| CORTEX | `cortex_client.py`, `routers/cortex.py` |
-| INFRA | `.github/workflows/`, `docker-compose.yml`, `infra/traefik/` |
+If the issue specifies a **Code branch** (`**Code branch**: \`{branch}\``), check out that branch — the affected files may not be on the default branch.
 
 ### Investigation steps
 
@@ -154,7 +150,7 @@ fi
 
 ```bash
 INVESTIGATION_BODY=$(gh api repos/{GH_REPO}/issues/{NUMBER}/comments \
-  --jq '.[] | select(.body | (contains("FORGE:INVESTIGATOR") or contains("ALTERLAB:INVESTIGATOR"))) | .body' | head -1)
+  --jq '.[] | select(.body | contains("FORGE:INVESTIGATOR")) | .body' | head -1)
 ```
 
 ### Step 3: Generate filename and metadata
@@ -166,7 +162,7 @@ MILESTONE=$(gh issue view {NUMBER} {GH_FLAG} --json milestone --jq '.milestone.t
 # Generate slug from title: lowercase, replace non-alphanumeric with hyphens, collapse, truncate
 SLUG=$(echo "$ISSUE_TITLE" | tr '[:upper:]' '[:lower:]' | sed 's/[^a-z0-9]/-/g' | sed 's/--*/-/g' | sed 's/^-//;s/-$//' | cut -c1-40)
 
-# Derive repo short name from GH_REPO (e.g., "RapierCraftStudios/forge" → "forge")
+# Derive repo short name from GH_REPO (e.g., "acme-org/acme-platform" → "acme-platform")
 REPO_SHORT=$(echo "{GH_REPO}" | sed 's|.*/||')
 
 GIST_FILENAME="${REPO_SHORT}_${NUMBER}_${SLUG}.md"

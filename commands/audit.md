@@ -9,7 +9,7 @@ argument-hint: <description of what went wrong> [--issue N] [--pr N] [--repo pre
 
 You are Forge's post-mortem auditor. When something reaches production that shouldn't have, or an implementation didn't happen correctly, you trace the FULL chain of GitHub artifacts — from the original issue through every pipeline comment, PR, review, and merge — to find exactly where the pipeline broke down. You then file a detailed, evidence-backed improvement issue to the **Forge repository** so the pipeline can heal itself.
 
-**This command ALWAYS files issues to `RapierCraftStudios/forge`.** The target project is read-only — you only read its GitHub artifacts as evidence.
+**This command ALWAYS files issues to `{FORGE_REPO}`.** The target project is read-only — you only read its GitHub artifacts as evidence.
 
 **Agent model policy**: Default `model: "sonnet"`. If Sonnet is rate-limited, fall back to `model: "opus"`.
 
@@ -17,26 +17,64 @@ You are Forge's post-mortem auditor. When something reaches production that shou
 
 ---
 
+## Config Preamble
+
+Before executing any phase, read `forge.yaml` to resolve project references:
+
+```bash
+CONFIG_FILE="${FORGE_CONFIG:-forge.yaml}"
+if [ -f "$CONFIG_FILE" ]; then
+  GH_OWNER=$(yq '.project.owner' "$CONFIG_FILE")
+  GH_REPO_NAME=$(yq '.project.repo' "$CONFIG_FILE")
+  GH_REPO="${GH_OWNER}/${GH_REPO_NAME}"
+  GH_FLAG="-R $GH_REPO"
+  REPO_PATH=$(yq '.paths.root' "$CONFIG_FILE")
+  # FORGE_REPO: the self-pipeline repo where audit improvement issues are filed.
+  # Set project.forge_repo in forge.yaml if your pipeline repo differs from GH_REPO.
+  # Example: project:
+  #            forge_repo: "my-org/my-forge"
+  FORGE_REPO=$(yq '.project.forge_repo // ""' "$CONFIG_FILE")
+  [ -z "$FORGE_REPO" ] && FORGE_REPO="$GH_REPO"
+else
+  echo "WARNING: forge.yaml not found — commands will use placeholder values"
+  echo "Run: cp forge.yaml.example forge.yaml  and fill in your project details"
+  GH_REPO="your-org/your-repo"
+  GH_FLAG="-R $GH_REPO"
+  REPO_PATH="./"
+  FORGE_REPO="$GH_REPO"
+fi
+```
+
+---
+
 ## Multi-Repo Support
 
-| Input Pattern | Target Repo |
-|---------------|-------------|
-| `--repo alterlab` or default | `RapierCraftStudios/AlterLab` |
-| `--repo mcp` | `RapierCraftStudios/alterlab-mcp-server` |
-| `--repo n8n` | `RapierCraftStudios/n8n-nodes-alterlab` |
+If your project spans multiple repositories, define them in the `repos.satellites` section of `forge.yaml`. The `--repo <prefix>` argument selects a satellite by its `prefix` field.
 
 Parse `$ARGUMENTS` for:
 - **Problem description**: free-text explanation of what went wrong
 - **`--issue N`**: specific issue number(s) to trace (comma-separated)
 - **`--pr N`**: specific PR number(s) to trace (comma-separated)
-- **`--repo prefix`**: target repo (default: AlterLab)
+- **`--repo prefix`**: target repo prefix (default: primary repo from `project.owner/project.repo`)
 
-Set context variables:
+Set context variables from config:
 
-| Variable | AlterLab | MCP | n8n |
-|----------|----------|-----|-----|
-| `GH_REPO` | `RapierCraftStudios/AlterLab` | `RapierCraftStudios/alterlab-mcp-server` | `RapierCraftStudios/n8n-nodes-alterlab` |
-| `GH_FLAG` | _(empty)_ | `-R RapierCraftStudios/alterlab-mcp-server` | `-R RapierCraftStudios/n8n-nodes-alterlab` |
+```bash
+REPO_PREFIX=$(echo "$ARGUMENTS" | grep -oP '(?<=--repo )\S+' || true)
+
+if [ -n "$REPO_PREFIX" ]; then
+  # Look up satellite repo by prefix in forge.yaml
+  SATELLITE_REPO=$(yq ".repos.satellites[] | select(.prefix == \"$REPO_PREFIX\") | .repo" "$CONFIG_FILE" 2>/dev/null)
+  if [ -n "$SATELLITE_REPO" ] && [ "$SATELLITE_REPO" != "null" ]; then
+    GH_REPO="$SATELLITE_REPO"
+    GH_FLAG="-R $GH_REPO"
+    REPO_PATH=$(yq ".repos.satellites[] | select(.prefix == \"$REPO_PREFIX\") | .local_path" "$CONFIG_FILE" 2>/dev/null || echo "$REPO_PATH")
+  else
+    echo "WARNING: --repo prefix '$REPO_PREFIX' not found in forge.yaml repos.satellites — using default repo"
+  fi
+fi
+# GH_REPO, GH_FLAG, REPO_PATH are now set for the target repo
+```
 
 ---
 
@@ -247,7 +285,7 @@ Create a detailed, actionable issue in the **Forge repository**.
 ### 4B: Create the issue
 
 ```bash
-gh issue create -R RapierCraftStudios/forge \
+gh issue create -R {FORGE_REPO} \
   --title "fix(pipeline): {one-line description of what the pipeline missed}" \
   --label "{LABELS}" \
   --body "$(cat <<'EOF'
@@ -332,7 +370,7 @@ Files that need changes:
 
 ```bash
 # Search forge for related issues
-gh issue list -R RapierCraftStudios/forge --state all --limit 30 --json number,title \
+gh issue list -R {FORGE_REPO} --state all --limit 30 --json number,title \
   --jq '[.[] | select(.title | test("{KEYWORDS}"; "i"))]'
 ```
 
@@ -351,11 +389,11 @@ Check if this same failure pattern has occurred before:
 
 ```bash
 # Similar audit findings in forge
-gh issue list -R RapierCraftStudios/forge --state all --label "audit-finding" --limit 50 \
+gh issue list -R {FORGE_REPO} --state all --label "audit-finding" --limit 50 \
   --json number,title,state --jq '.[] | "\(.number) | \(.title) | \(.state)"'
 
 # Same failure point in existing issues
-gh issue list -R RapierCraftStudios/forge --state all --limit 100 --json number,title,body \
+gh issue list -R {FORGE_REPO} --state all --limit 100 --json number,title,body \
   --jq "[.[] | select(.body | contains(\"{FAILURE_POINT}\"))] | .[] | \"\(.number) | \(.title)\""
 ```
 
@@ -375,7 +413,7 @@ gh issue comment {NUMBER} {GH_FLAG} --body "$(cat <<'EOF'
 ## Pipeline Audit
 
 This issue was audited by Forge. A pipeline improvement issue has been filed:
-- **Forge issue**: RapierCraftStudios/forge#{FORGE_ISSUE_NUMBER}
+- **Forge issue**: {FORGE_REPO}#{FORGE_ISSUE_NUMBER}
 - **Failure point**: {FAILURE_POINT}
 - **Root cause**: {1-line summary}
 
