@@ -34,8 +34,8 @@ if [ -f "$CONFIG_FILE" ]; then
   GH_FLAG="-R $GH_REPO"
   REPO_PATH=$(yq '.paths.root' "$CONFIG_FILE")
   # FORGE_REPO: the self-pipeline repo where security audit summary comments are posted.
-  # Set forge_repo in forge.yaml if your pipeline repo differs from GH_REPO.
-  FORGE_REPO=$(yq '.forge_repo // ""' "$CONFIG_FILE")
+  # Set project.forge_repo in forge.yaml if your pipeline repo differs from GH_REPO.
+  FORGE_REPO=$(yq '.project.forge_repo // ""' "$CONFIG_FILE")
   [ -z "$FORGE_REPO" ] && FORGE_REPO="$GH_REPO"
   # BILLING_ENABLED: controls whether Phase 4 (Financial Integrity) runs.
   # Set billing.enabled: true in forge.yaml if your project uses Stripe billing.

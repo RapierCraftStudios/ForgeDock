@@ -29,8 +29,8 @@ if [ -f "$CONFIG_FILE" ]; then
   GH_REPO_NAME=$(yq '.project.repo' "$CONFIG_FILE")
   GH_REPO="${GH_OWNER}/${GH_REPO_NAME}"
   # FORGE_REPO: the self-pipeline repo where orchestration metrics are tracked.
-  # Set forge_repo in forge.yaml if your pipeline repo differs from GH_REPO.
-  FORGE_REPO=$(yq '.forge_repo // ""' "$CONFIG_FILE")
+  # Set project.forge_repo in forge.yaml if your pipeline repo differs from GH_REPO.
+  FORGE_REPO=$(yq '.project.forge_repo // ""' "$CONFIG_FILE")
   [ -z "$FORGE_REPO" ] && FORGE_REPO="$GH_REPO"
 else
   echo "WARNING: forge.yaml not found — commands will use placeholder values"
