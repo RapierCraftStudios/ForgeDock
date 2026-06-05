@@ -14,15 +14,90 @@ You are the analytics orchestrator. Pull data from ALL available analytics platf
 
 ---
 
+## Config Preamble (REQUIRED — run before anything else)
+
+**Before any data collection, credentials access, or phase execution**, read `forge.yaml` from the project root and resolve all constants. If the config is missing or incomplete, stop and tell the user what to add.
+
+```bash
+# Locate forge.yaml (project root = directory containing the forge.yaml file)
+FORGE_YAML="${FORGE_CONFIG:-$(git rev-parse --show-toplevel 2>/dev/null)/forge.yaml}"
+
+if [ ! -f "$FORGE_YAML" ]; then
+  echo "ERROR: forge.yaml not found at $FORGE_YAML"
+  echo ""
+  echo "The /analytics command requires forge.yaml to be configured."
+  echo "Run: cp forge.yaml.example forge.yaml"
+  echo "Then fill in the required sections (project, paths, branches) and the"
+  echo "optional services.analytics section for this command."
+  exit 1
+fi
+
+# Read config with Python (YAML parser)
+ANALYTICS_CONFIG=$(python3 -c "
+import yaml, sys
+cfg = yaml.safe_load(open('$FORGE_YAML'))
+svc = cfg.get('services', {})
+analytics = svc.get('analytics', None)
+if analytics is None:
+    print('MISSING_ANALYTICS_CONFIG')
+    sys.exit(0)
+paths = cfg.get('paths', {})
+creds = paths.get('credentials', {})
+project = cfg.get('project', {})
+board = cfg.get('project_board', {})
+print('CREDENTIALS_FILE=' + str(creds.get('file', '')))
+print('DOMAIN=' + str(svc.get('domain', '')))
+print('SITE_URL=' + str(svc.get('gsc_property', '')))
+print('HISTORY_FILE=' + str(analytics.get('history_file', '')))
+print('UMAMI_URL=' + str(analytics.get('umami', {}).get('url', '')))
+print('UMAMI_WEBSITE_ID=' + str(analytics.get('umami', {}).get('website_id', '')))
+print('GA4_PROPERTY_ID=' + str(analytics.get('ga4', {}).get('property_id', '')))
+print('GA4_SERVICE_ACCOUNT_KEY=' + str(analytics.get('ga4', {}).get('service_account_key', '')))
+print('REPO_PATH=' + str(cfg.get('paths', {}).get('root', '')))
+print('GH_REPO=' + str(project.get('owner', '')) + '/' + str(project.get('repo', '')))
+print('PROJECT_BOARD_OWNER=' + str(board.get('owner', project.get('owner', ''))))
+print('PROJECT_NUMBER=' + str(board.get('project_number', '')))
+print('PROJECT_ID=' + str(board.get('project_id', '')))
+")
+
+if echo "$ANALYTICS_CONFIG" | grep -q "MISSING_ANALYTICS_CONFIG"; then
+  echo "ERROR: forge.yaml is missing the 'services.analytics' section."
+  echo ""
+  echo "Add the following to your forge.yaml to use /analytics:"
+  echo ""
+  echo "  services:"
+  echo "    domain: \"your-domain.com\""
+  echo "    gsc_property: \"https://your-domain.com\""
+  echo "    analytics:"
+  echo "      history_file: \"/path/to/analytics-history.yaml\""
+  echo "      umami:"
+  echo "        url: \"https://umami.your-domain.com\""
+  echo "        website_id: \"your-umami-website-id\""
+  echo "      ga4:"
+  echo "        property_id: \"your-ga4-property-id\""
+  echo "        service_account_key: \"/path/to/ga4-service-account.json\""
+  echo ""
+  echo "See docs/CONFIG.md for the full services.analytics schema."
+  exit 1
+fi
+
+# Export resolved constants — all downstream phases use these variables
+eval "$ANALYTICS_CONFIG"
+```
+
+All downstream phases use these resolved constants: `{CREDENTIALS_FILE}`, `{DOMAIN}`, `{SITE_URL}`, `{HISTORY_FILE}`, `{UMAMI_URL}`, `{UMAMI_WEBSITE_ID}`, `{GA4_PROPERTY_ID}`, `{GA4_SERVICE_ACCOUNT_KEY}`, `{REPO_PATH}`, `{GH_REPO}`.
+
+---
+
 ## Credentials
 
-**ALL credentials live in one file**: `/home/mrdubey/projects/ScraperAPI/credentials.yaml`
+**ALL credentials live in one file** at the path resolved from `forge.yaml → paths.credentials.file` (`{CREDENTIALS_FILE}`).
 
 Agents MUST read this file for API keys, tokens, and login creds. Do NOT grep SOPS, do NOT hardcode tokens, do NOT look in `.mcp.json`.
 
 ```bash
 # Read any credential:
-python3 -c "import yaml; creds=yaml.safe_load(open('/home/mrdubey/projects/ScraperAPI/credentials.yaml')); print(creds['section']['key'])"
+python3 -c "import yaml; creds=yaml.safe_load(open('{CREDENTIALS_FILE}')); print(creds['section']['key'])"
 ```
 
 ---
@@ -30,16 +105,17 @@ python3 -c "import yaml; creds=yaml.safe_load(open('/home/mrdubey/projects/Scrap
 ## Constants
 
 ```
-CREDENTIALS_FILE = "/home/mrdubey/projects/ScraperAPI/credentials.yaml"
-SITE_URL = "sc-domain:alterlab.io"
-DOMAIN = "alterlab.io"
+CREDENTIALS_FILE = {forge.yaml → paths.credentials.file}
+SITE_URL         = {forge.yaml → services.gsc_property}
+DOMAIN           = {forge.yaml → services.domain}
+HISTORY_FILE     = {forge.yaml → services.analytics.history_file}
 TODAY = (current date in YYYY-MM-DD)
 SEVEN_DAYS_AGO = (TODAY minus 7 days)
 TWENTY_EIGHT_DAYS_AGO = (TODAY minus 28 days)
 SEO_RECENT_CHANGE_DAYS = 30
 ```
 
-All platform-specific constants (project IDs, zone IDs, API keys, base URLs) are in `credentials.yaml` — read them from there.
+All platform-specific constants (project IDs, zone IDs, API keys, base URLs) are in `{CREDENTIALS_FILE}` — read them from there.
 
 ---
 
@@ -48,11 +124,11 @@ All platform-specific constants (project IDs, zone IDs, API keys, base URLs) are
 **Before any data collection**, read the persistent audit history file. This gives you a multi-run baseline for trend analysis and tells you what issues were created in past audits so you can measure their impact and avoid duplicates.
 
 ```bash
-HISTORY_FILE="/home/mrdubey/projects/ScraperAPI/analytics-history.yaml"
+HISTORY_FILE="{HISTORY_FILE}"
 
 if [ -f "$HISTORY_FILE" ]; then
   HISTORY_AVAILABLE=true
-  # Read last 5 audit snapshots (Python for YAML parsing — same pattern as credentials.yaml)
+  # Read last 5 audit snapshots (Python for YAML parsing — same pattern as credentials file)
   python3 -c "
 import yaml, json
 history = yaml.safe_load(open('$HISTORY_FILE')) or []
@@ -83,7 +159,7 @@ Launch ALL 7 data collection agents simultaneously using `run_in_background=true
 
 Launch as a background Agent (subagent_type: general-purpose, model: sonnet):
 
-**Mission**: Collect Google Search Console data for alterlab.io. Use the MCP GSC tools directly.
+**Mission**: Collect Google Search Console data for `{DOMAIN}`. Use the MCP GSC tools directly.
 
 **Queries to run:**
 
@@ -95,7 +171,7 @@ Launch as a background Agent (subagent_type: general-purpose, model: sonnet):
 6. **Quick wins** — `mcp__gsc__detect_quick_wins` with minImpressions: 30, positionRangeMin: 4, positionRangeMax: 20, maxCtr: 3
 7. **Previous 28 days** (for trend comparison) — same query/page queries but for the prior period
 
-All queries use `siteUrl: "sc-domain:alterlab.io"`.
+All queries use `siteUrl: "{SITE_URL}"`.
 
 **Return**: Total clicks, impressions, avg CTR, avg position (current + previous + % change). Top 20 queries and pages. Quick wins list. Device/country splits. Rising and declining queries.
 
@@ -133,14 +209,14 @@ Launch as a background Agent (subagent_type: general-purpose, model: sonnet):
 
 **Mission**: Collect Umami analytics via REST API.
 
-**Auth**: Read credentials from `credentials.yaml` (under `umami:`), then authenticate:
+**Auth**: Read credentials from `{CREDENTIALS_FILE}` (under `umami:`), then authenticate:
 ```bash
 # Read umami creds
-python3 -c "import yaml; c=yaml.safe_load(open('/home/mrdubey/projects/ScraperAPI/credentials.yaml')); print(c['umami']['username'], c['umami']['password'])"
-# Login: POST https://umami.alterlab.io/api/auth/login with {"username": "...", "password": "..."}
+python3 -c "import yaml; c=yaml.safe_load(open('{CREDENTIALS_FILE}')); print(c['umami']['username'], c['umami']['password'])"
+# Login: POST {UMAMI_URL}/api/auth/login with {"username": "...", "password": "..."}
 ```
 
-**Queries** (all use website ID `ccfb1cdd-5a05-4b41-8e61-48695b4ff6c0`, last 28 days):
+**Queries** (all use website ID `{UMAMI_WEBSITE_ID}`, last 28 days):
 - `/api/websites/{id}/stats` — overall stats
 - `/api/websites/{id}/pageviews?unit=day` — daily trend
 - `/api/websites/{id}/metrics?type=url` — top pages
@@ -160,13 +236,13 @@ Launch as a background Agent (subagent_type: general-purpose, model: sonnet):
 
 **Mission**: Collect Cloudflare traffic/performance data via GraphQL API.
 
-**Auth**: Read from `credentials.yaml`:
+**Auth**: Read from `{CREDENTIALS_FILE}`:
 ```bash
-CF_TOKEN=$(python3 -c "import yaml; print(yaml.safe_load(open('/home/mrdubey/projects/ScraperAPI/credentials.yaml'))['cloudflare']['api_token'])")
-CF_ZONE=$(python3 -c "import yaml; print(yaml.safe_load(open('/home/mrdubey/projects/ScraperAPI/credentials.yaml'))['cloudflare']['zone_id'])")
+CF_TOKEN=$(python3 -c "import yaml; print(yaml.safe_load(open('{CREDENTIALS_FILE}'))['cloudflare']['api_token'])")
+CF_ZONE=$(python3 -c "import yaml; print(yaml.safe_load(open('{CREDENTIALS_FILE}'))['cloudflare']['zone_id'])")
 ```
 
-**GraphQL queries** (zone from `credentials.yaml → cloudflare.zone_id`, last 7 days):
+**GraphQL queries** (zone from `{CREDENTIALS_FILE} → cloudflare.zone_id`, last 7 days):
 1. HTTP requests daily — requests, pageViews, bytes, cachedBytes, threats, countryMap, uniques
 2. Status code breakdown — responseStatusMap
 3. Threats/bot traffic — threatPathingMap
@@ -181,17 +257,17 @@ CF_ZONE=$(python3 -c "import yaml; print(yaml.safe_load(open('/home/mrdubey/proj
 
 Launch as a background Agent (subagent_type: general-purpose, model: sonnet):
 
-**Mission**: Collect Bing Webmaster Tools data for alterlab.io via REST API. Bing powers ChatGPT search, so Bing indexing/ranking data = AI discoverability signal.
+**Mission**: Collect Bing Webmaster Tools data for `{DOMAIN}` via REST API. Bing powers ChatGPT search, so Bing indexing/ranking data = AI discoverability signal.
 
-**Auth**: Read from `credentials.yaml`:
+**Auth**: Read from `{CREDENTIALS_FILE}`:
 ```bash
-BING_KEY=$(python3 -c "import yaml; print(yaml.safe_load(open('/home/mrdubey/projects/ScraperAPI/credentials.yaml'))['bing_webmaster']['api_key'])")
-BING_SITE=$(python3 -c "import yaml; print(yaml.safe_load(open('/home/mrdubey/projects/ScraperAPI/credentials.yaml'))['bing_webmaster']['site_url'])")
-BING_BASE=$(python3 -c "import yaml; print(yaml.safe_load(open('/home/mrdubey/projects/ScraperAPI/credentials.yaml'))['bing_webmaster']['api_base'])")
+BING_KEY=$(python3 -c "import yaml; print(yaml.safe_load(open('{CREDENTIALS_FILE}'))['bing_webmaster']['api_key'])")
+BING_SITE=$(python3 -c "import yaml; print(yaml.safe_load(open('{CREDENTIALS_FILE}'))['bing_webmaster']['site_url'])")
+BING_BASE=$(python3 -c "import yaml; print(yaml.safe_load(open('{CREDENTIALS_FILE}'))['bing_webmaster']['api_base'])")
 ```
 
 **Auth method**: Query param `?apikey={BING_KEY}`
-**Site URL**: URL-encode site_url as `https%3A%2F%2Falterlab.io` in siteUrl param
+**Site URL**: URL-encode the site_url value from `{CREDENTIALS_FILE} → bing_webmaster.site_url` in siteUrl param
 
 **Queries to run:**
 
@@ -233,9 +309,9 @@ Launch as a background Agent (subagent_type: general-purpose, model: sonnet):
 
 **Auth**: JWT-based service account authentication:
 ```bash
-# Service account key at:
-SA_KEY="/home/mrdubey/projects/ScraperAPI/credentials/ga4-service-account.json"
-GA4_PROPERTY_ID="522967190"
+# Service account key and property ID resolved from forge.yaml:
+SA_KEY="{GA4_SERVICE_ACCOUNT_KEY}"
+GA4_PROPERTY_ID="{GA4_PROPERTY_ID}"
 
 # Generate JWT and exchange for access token:
 python3 -c "
@@ -365,17 +441,17 @@ After tracking integrity is validated, synthesize findings. Write down key data 
 
 **Quick wins (with git history check — hard gate)**: GSC queries at position 4-20 with decent impressions but low CTR = title/meta optimization. **BUT FIRST**: For every page you'd propose a title/meta rewrite, run the git history check using `SEO_RECENT_CHANGE_DAYS`:
 ```bash
-git -C /home/mrdubey/projects/ScraperAPI/alterlab log --since="${SEO_RECENT_CHANGE_DAYS} days ago" --oneline -- web/src/app/<page>/page.tsx
+git -C "{REPO_PATH}" log --since="${SEO_RECENT_CHANGE_DAYS} days ago" --oneline -- web/src/app/<page>/page.tsx
 ```
 For blog posts stored in DB, check migration files:
 ```bash
-grep -rl "<slug>" /home/mrdubey/projects/ScraperAPI/alterlab/infra/migrations/ 2>/dev/null
+grep -rl "<slug>" "{REPO_PATH}/infra/migrations/" 2>/dev/null
 ```
 **If metadata changed within `SEO_RECENT_CHANGE_DAYS` days**: **Do NOT add to Proposed Actions.** Instead, add the page to the **"Recently Updated — Monitor"** section of the report (see Phase 3 template) with the note: "Updated {date} — allow 1 SEO cycle before re-evaluating. Current GSC data may reflect pre-change state." Only pages with stable metadata (unchanged for more than `SEO_RECENT_CHANGE_DAYS` days) may appear in Proposed Actions for SEO rewrites.
 
 Quantify the opportunity (e.g., "500 impressions/month at 1.2% CTR → industry avg 5% at position 6 → ~19 extra clicks/month").
 
-**Performance**: Clarity CWV ratings cross-referenced with GSC mobile data — poor mobile CWV hurts mobile rankings. Cloudflare cache hit ratio — **interpret in context**: AlterLab is API-first, so dynamic HTML+JSON responses should NOT be cached. Only flag cache issues if static assets (JS, CSS, images, fonts) have low cache rates. Check content type breakdown from Cloudflare data before claiming "low cache rate."
+**Performance**: Clarity CWV ratings cross-referenced with GSC mobile data — poor mobile CWV hurts mobile rankings. Cloudflare cache hit ratio — **interpret in context**: API-first projects have low cache rates by design, so dynamic HTML+JSON responses should NOT be cached. Only flag cache issues if static assets (JS, CSS, images, fonts) have low cache rates. Check content type breakdown from Cloudflare data before claiming "low cache rate."
 
 **Bing vs Google divergence**: Compare Bing Webmaster keyword rankings with GSC. Keywords ranking well on Bing but not Google (or vice versa) reveal optimization gaps. Bing rankings matter for ChatGPT search discoverability. **But**: only flag as actionable if the query has >50 impressions on the platform where ranking is weak. Below 50, position data is too noisy.
 
@@ -400,7 +476,7 @@ Before treating any event count as meaningful:
 - Cloudflare threat count > 50% of total requests → subtract bot traffic from ALL per-request metrics
 
 **Under-counting awareness** (developer audience):
-- AlterLab targets developers. Developers run ad blockers at 3-5x the general population rate.
+- Developer-focused projects see ad blockers at 3-5x the general population rate.
 - GA4 event counts likely undercount true user actions by 20-50%.
 - Never create a "low conversion rate" issue if Stripe successful charges roughly match or exceed analytics purchase events — the funnel is healthy, tracking is lossy.
 - Self-hosted Umami is more reliable than GA4 for this audience — prefer Umami event counts when they diverge.
@@ -450,7 +526,7 @@ Every candidate finding must pass this gate. If any check fails, downgrade to "O
 - [ ] **Not already tracked**: Before adding a finding to Proposed Actions, check if an open issue in history's `issues_created` list already covers the same finding:
   ```bash
   # For each issue number from history's issues_created:
-  gh issue view {PAST_ISSUE_NUMBER} -R RapierCraft/AlterLab --json state,title --jq '{state, title}'
+  gh issue view {PAST_ISSUE_NUMBER} -R {GH_REPO} --json state,title --jq '{state, title}'
   # If state=OPEN and the title/category matches the current finding → skip creation, note "Already tracked in #{PAST_ISSUE_NUMBER}"
   ```
   If the past issue is closed (fixed), the finding may recur — create a new issue and note the recurrence.
@@ -657,13 +733,13 @@ If an open milestone fits, offer to assign issues to it.
 For each created issue, add it to the GitHub Project. Reference `~/projects/forge/docs/WORKFLOW.md` → "Project Board Integration" for field IDs.
 
 ```bash
-ISSUE_URL="https://github.com/RapierCraft/AlterLab/issues/${ISSUE_NUM}"
-ITEM_ID=$(gh project item-add 1 --owner RapierCraft --url "$ISSUE_URL" --format json --jq '.id' 2>/dev/null)
+ISSUE_URL="https://github.com/{GH_REPO}/issues/${ISSUE_NUM}"
+ITEM_ID=$(gh project item-add {PROJECT_NUMBER} --owner {PROJECT_BOARD_OWNER} --url "$ISSUE_URL" --format json --jq '.id' 2>/dev/null)
 if [ -n "$ITEM_ID" ]; then
-  gh project item-edit --project-id PVT_kwHOCx3gR84BSK2L --id "$ITEM_ID" --field-id PVTSSF_lAHOCx3gR84BSK2Lzg_yF6E --single-select-option-id f75ad846 2>/dev/null || true  # Status=Todo
-  gh project item-edit --project-id PVT_kwHOCx3gR84BSK2L --id "$ITEM_ID" --field-id PVTSSF_lAHOCx3gR84BSK2Lzg_yF98 --single-select-option-id 62864af4 2>/dev/null || true  # Lane=Fast
-  gh project item-edit --project-id PVT_kwHOCx3gR84BSK2L --id "$ITEM_ID" --field-id PVTSSF_lAHOCx3gR84BSK2Lzg_yF-o --single-select-option-id 214c4d65 2>/dev/null || true  # Component=Platform
-  gh project item-edit --project-id PVT_kwHOCx3gR84BSK2L --id "$ITEM_ID" --field-id PVTSSF_lAHOCx3gR84BSK2Lzg_yF8o --single-select-option-id {PRIORITY_OPTION_ID} 2>/dev/null || true  # Priority (from issue)
+  gh project item-edit --project-id {PROJECT_ID} --id "$ITEM_ID" --field-id {project_board.field_ids.status} --single-select-option-id {project_board.option_ids.status.todo} 2>/dev/null || true  # Status=Todo
+  gh project item-edit --project-id {PROJECT_ID} --id "$ITEM_ID" --field-id {project_board.field_ids.lane} --single-select-option-id {project_board.option_ids.lane.fast} 2>/dev/null || true  # Lane=Fast
+  gh project item-edit --project-id {PROJECT_ID} --id "$ITEM_ID" --field-id {project_board.field_ids.component} --single-select-option-id {project_board.option_ids.component} 2>/dev/null || true  # Component
+  gh project item-edit --project-id {PROJECT_ID} --id "$ITEM_ID" --field-id {project_board.field_ids.priority} --single-select-option-id {PRIORITY_OPTION_ID} 2>/dev/null || true  # Priority (from issue)
 fi
 ```
 
@@ -696,7 +772,7 @@ fi
 After displaying the summary, write the current audit snapshot to the history file. This enables Phase 0 of future audits to load it.
 
 ```bash
-HISTORY_FILE="/home/mrdubey/projects/ScraperAPI/analytics-history.yaml"
+HISTORY_FILE="{HISTORY_FILE}"
 
 python3 -c "
 import yaml, os, json

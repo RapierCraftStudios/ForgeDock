@@ -221,6 +221,10 @@ services:
       website_id: "xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx"
     clarity:
       project_id: "xxxxxxxxxx"
+    history_file: "/home/youruser/analytics-history.yaml"
+    ga4:
+      property_id: "000000000"
+      service_account_key: "/home/youruser/credentials/ga4-service-account.json"
 
   api_url: "https://api.acme.io"
 ```
@@ -232,6 +236,9 @@ services:
 | `analytics.umami.url` | string | No | Base URL for Umami self-hosted analytics instance |
 | `analytics.umami.website_id` | string | No | Umami website UUID for metric queries |
 | `analytics.clarity.project_id` | string | No | Microsoft Clarity project identifier |
+| `analytics.history_file` | string (absolute path) | No | Path to the persistent audit history YAML file. Written after each `/analytics` run; provides trend baselines. Do not commit. |
+| `analytics.ga4.property_id` | string | No | Numeric Google Analytics 4 property ID (from GA4 Admin → Property Details) |
+| `analytics.ga4.service_account_key` | string (absolute path) | No | Path to a GA4 service account JSON key file. Grant the account Viewer access in GA4. Do not commit. |
 | `api_url` | string | No | Base URL for the project's API. Used in health checks |
 
 **Commands that use this section**: `analytics`, `geo-audit`, `autopilot` (analytics snapshot)
