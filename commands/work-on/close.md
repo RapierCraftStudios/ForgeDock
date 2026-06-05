@@ -266,18 +266,18 @@ gh issue edit {PARENT_REF} {GH_FLAG} --add-label "workflow:merged"
 Reconstruct the pipeline summary from GitHub state:
 
 ```bash
-# Get investigation verdict from FORGE:INVESTIGATOR comment (or legacy ALTERLAB:INVESTIGATOR)
+# Get investigation verdict from FORGE:INVESTIGATOR comment
 VERDICT=$(gh api repos/{GH_REPO}/issues/{NUMBER}/comments \
-  --jq '.[] | select(.body | (contains("FORGE:INVESTIGATOR") or contains("ALTERLAB:INVESTIGATOR"))) | .body' \
+  --jq '.[] | select(.body | contains("FORGE:INVESTIGATOR")) | .body' \
   | grep -oP '(?<=\*\*Verdict\*\*: )\w+' | head -1)
 
 CONFIDENCE=$(gh api repos/{GH_REPO}/issues/{NUMBER}/comments \
-  --jq '.[] | select(.body | (contains("FORGE:INVESTIGATOR") or contains("ALTERLAB:INVESTIGATOR"))) | .body' \
+  --jq '.[] | select(.body | contains("FORGE:INVESTIGATOR")) | .body' \
   | grep -oP '(?<=\*\*Confidence\*\*: )\w+' | head -1)
 
-# Get files changed from FORGE:BUILDER comment (or legacy ALTERLAB:BUILDER)
+# Get files changed from FORGE:BUILDER comment
 FILES_CHANGED=$(gh api repos/{GH_REPO}/issues/{NUMBER}/comments \
-  --jq '.[] | select(.body | (contains("FORGE:BUILDER") or contains("ALTERLAB:BUILDER"))) | .body' \
+  --jq '.[] | select(.body | contains("FORGE:BUILDER")) | .body' \
   | grep -oP '(?<=\*\*Files changed\*\*: )\d+' | head -1)
 ```
 

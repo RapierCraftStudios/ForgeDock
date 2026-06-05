@@ -475,5 +475,5 @@ Next steps:
   3. If any WARNING appeared above, edit forge.yaml to fix the flagged values.
   4. Backup file: forge.yaml.bak (delete when satisfied)
 
-ForgeDock commands now use your project's config instead of hardcoded AlterLab defaults.
+ForgeDock commands now use your project's config from forge.yaml.
 ```

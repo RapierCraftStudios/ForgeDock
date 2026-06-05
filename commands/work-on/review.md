@@ -36,7 +36,7 @@ gh issue view {NUMBER} {GH_FLAG} --json number,title,body,labels,state,milestone
 
 # Get builder comment (for branch + commit info)
 gh api repos/{GH_REPO}/issues/{NUMBER}/comments \
-  --jq '.[] | select(.body | (contains("FORGE:BUILDER") or contains("ALTERLAB:BUILDER"))) | .body'
+  --jq '.[] | select(.body | contains("FORGE:BUILDER")) | .body'
 
 # Check if PR already exists for this branch
 gh pr list {GH_FLAG} --head {BRANCH} --json number,state,url 2>/dev/null
@@ -45,7 +45,7 @@ gh pr list {GH_FLAG} --head {BRANCH} --json number,state,url 2>/dev/null
 **Resume check**:
 - If PR already exists AND is OPEN → skip to Phase R3 (invoke /review-pr)
 - If PR already exists AND is MERGED → return `REVIEW_RESULT: status: ALREADY_MERGED`
-- If no `<!-- FORGE:BUILDER -->` or `<!-- ALTERLAB:BUILDER -->` comment exists → EXIT with `REVIEW_RESULT: status: BLOCKED`, blocker: "FORGE:BUILDER comment not found — implement phase may not have completed"
+- If no `<!-- FORGE:BUILDER -->` comment exists → EXIT with `REVIEW_RESULT: status: BLOCKED`, blocker: "FORGE:BUILDER comment not found — implement phase may not have completed"
 
 ---
 

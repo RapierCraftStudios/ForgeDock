@@ -66,7 +66,7 @@ done | sort -rn | head -5
 - `latest` or no argument → most recent session with agent outputs
 - A session UUID → that specific session
 - An agent ID (starts with `a`, 17+ hex chars) → find the session containing that agent
-- A project path fragment (e.g., `ScraperAPI`) → filter to sessions for that project
+- A project path fragment (e.g., `my-project`) → filter to sessions for that project
 
 ### Step 1B: Collect agent JSONL files
 
