@@ -330,6 +330,24 @@ For shell scripts that make HTTP requests to internal services:
 2. Check that auth tokens are included if the endpoint requires them
 3. Verify the URL path actually exists
 
+Before running host-header checks on shell scripts, read project-specific internal service patterns from `forge.yaml` and export them so `verify-host-headers.sh` can append them to its generic defaults:
+
+```bash
+# Read project-specific internal service patterns from forge.yaml (if present)
+FORGE_INTERNAL_PATTERNS=""
+if [ -f "{WORKTREE_PATH}/forge.yaml" ]; then
+    # Extract internal_service_patterns list (one pattern per line) and join with |
+    FORGE_INTERNAL_PATTERNS=$(grep -A 20 'internal_service_patterns:' "{WORKTREE_PATH}/forge.yaml" \
+        | grep -E '^\s*-\s+' \
+        | sed 's/^\s*-\s*//' \
+        | tr -d '"'"'" \
+        | paste -sd '|' -)
+fi
+export FORGE_INTERNAL_PATTERNS
+```
+
+The script `verify-host-headers.sh` checks for the `FORGE_INTERNAL_PATTERNS` env var and appends any project-specific patterns to its generic defaults (localhost, 127.0.0.1, api-, worker-, 172.x.x.x, IP env vars) when the var is set.
+
 ### 2G.5: Hardcoded localhost in DB connection functions (shell scripts)
 
 **Triggered when**: changed `*.sh` files contain DB connection patterns (`PGPASSWORD`, `createdb`, `psql`, `pg_dump`, `pg_restore`).

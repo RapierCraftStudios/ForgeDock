@@ -35,7 +35,12 @@ BLOCKING=0
 WARNINGS=0
 
 # Internal service patterns — requests to these need explicit Host headers
-INTERNAL_PATTERNS="localhost|127\.0\.0\.1|api-|worker-|alterlab-|172\.[0-9]+\.[0-9]+\.[0-9]+|\\\$\{?[a-z_]*ip|\\\$\{?[A-Z_]*IP"
+# Generic defaults cover localhost, RFC 1918 addresses, common service name prefixes, and IP env vars.
+# Project-specific prefixes (e.g. "myapp-") can be added via FORGE_INTERNAL_PATTERNS (pipe-separated).
+INTERNAL_PATTERNS="localhost|127\.0\.0\.1|api-|worker-|172\.[0-9]+\.[0-9]+\.[0-9]+|\\\$\{?[a-z_]*ip|\\\$\{?[A-Z_]*IP"
+if [ -n "${FORGE_INTERNAL_PATTERNS:-}" ]; then
+    INTERNAL_PATTERNS="${INTERNAL_PATTERNS}|${FORGE_INTERNAL_PATTERNS}"
+fi
 
 echo "$SHELL_FILES" | while read -r f; do
     FILEPATH="$REPO_ROOT/$f"
