@@ -3,7 +3,7 @@
   "version": "1.0.0",
   "description": "GitHub as a knowledge graph for AI agents. Autonomous dev pipeline for Claude Code.",
   "bin": {
-    "forgedock": "./bin/forgedock.mjs"
+    "forgedock": "bin/forgedock.mjs"
   },
   "keywords": [
     "claude-code",
