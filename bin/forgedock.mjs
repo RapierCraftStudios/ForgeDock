@@ -1748,9 +1748,15 @@ function _sanitizePathValue(value) {
  *
  * Shows a summary box and asks the user to confirm before returning data.
  *
- * @param {string} owner  - GitHub org or username
+ * @param {string} owner  - GitHub org or username (user-typed via \`input()\` — untrusted)
  * @returns {Promise<{projectNumber: number, projectId: string, fieldIds: object, optionIds: object} | null>}
  *   Resolved project board config, or null if skipped / discovery failed.
+ *
+ * @security \`owner\` is a raw user-typed value from an interactive prompt and is UNTRUSTED.
+ *   All gh CLI invocations in this function MUST use \`execFileSync\` with an argument array —
+ *   never interpolate \`owner\` into an \`execSync\` shell string. execFileSync does not invoke
+ *   a shell, so metacharacters in \`owner\` are treated literally and cannot escape argument
+ *   boundaries. (Ref: review-finding #149 — PR #148 originally used execSync template literals)
  */
 async function discoverProjectBoard(owner) {
   // Non-TTY: skip auto-discovery — can't prompt
