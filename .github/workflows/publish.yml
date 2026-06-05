@@ -14,7 +14,7 @@ jobs:
   publish:
     runs-on: ubuntu-latest
     permissions:
-      contents: read
+      contents: write
       id-token: write
     steps:
       - uses: actions/checkout@v4
@@ -32,15 +32,11 @@ jobs:
           NEW_VERSION=$(node -p "require('./package.json').version")
           echo "VERSION=$NEW_VERSION" >> $GITHUB_ENV
 
-      - name: Publish
+      - name: Publish with provenance (trusted publishing)
         run: npm publish --access public --provenance
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
 
       - name: Push version bump
         run: |
           git add package.json
           git commit -m "chore: bump version to ${{ env.VERSION }} [skip ci]"
           git push
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
