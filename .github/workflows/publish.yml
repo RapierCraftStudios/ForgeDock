@@ -22,6 +22,7 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: 20
+          registry-url: https://registry.npmjs.org
 
       - name: Bump patch version
         run: |
@@ -31,8 +32,8 @@ jobs:
           NEW_VERSION=$(node -p "require('./package.json').version")
           echo "VERSION=$NEW_VERSION" >> $GITHUB_ENV
 
-      - name: Publish with provenance (trusted publishing — no token needed)
-        run: npm publish --access public --provenance --registry https://registry.npmjs.org
+      - name: Publish with provenance (OIDC trusted publishing)
+        run: npm publish --access public --provenance
 
       - name: Push version bump
         run: |
