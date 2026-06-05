@@ -4,7 +4,7 @@ import { fileURLToPath } from "url";
 import { dirname, join, relative } from "path";
 import { mkdir, symlink, readlink, lstat, readdir, stat } from "fs/promises";
 import { existsSync, appendFileSync, readFileSync, writeFileSync, renameSync } from "fs";
-import { execSync } from "child_process";
+import { execSync, execFileSync } from "child_process";
 import { createSign } from "crypto";
 import {
   BOLD, GREEN, YELLOW, CYAN, RED, RESET,
@@ -944,7 +944,7 @@ async function uninstall() {
  */
 function queryNpmRegistry(pkg) {
   try {
-    const result = execSync(`npm view ${pkg} version`, {
+    const result = execFileSync("npm", ["view", pkg, "version"], {
       encoding: "utf-8",
       stdio: ["pipe", "pipe", "pipe"],
       timeout: 5000,
@@ -1599,7 +1599,7 @@ async function discoverProjectBoard(owner) {
   // -------------------------------------------------------------------------
   let projects = [];
   try {
-    const raw = execSync(`gh project list --owner "${owner}" --format json`, {
+    const raw = execFileSync("gh", ["project", "list", "--owner", owner, "--format", "json"], {
       encoding: "utf-8",
       stdio: ["pipe", "pipe", "pipe"],
     });
@@ -1643,7 +1643,7 @@ async function discoverProjectBoard(owner) {
 
   let fields = [];
   try {
-    const raw = execSync(`gh project field-list ${selectedNumber} --owner "${owner}" --format json`, {
+    const raw = execFileSync("gh", ["project", "field-list", String(selectedNumber), "--owner", owner, "--format", "json"], {
       encoding: "utf-8",
       stdio: ["pipe", "pipe", "pipe"],
     });
@@ -2166,7 +2166,7 @@ async function validate(forgeYamlPath) {
   // 5. GitHub repo access
   if (owner && repo && !PLACEHOLDERS.has(owner) && !PLACEHOLDERS.has(repo)) {
     try {
-      execSync(`gh repo view "${owner}/${repo}" --json name`, {
+      execFileSync("gh", ["repo", "view", `${owner}/${repo}`, "--json", "name"], {
         stdio: ["pipe", "pipe", "pipe"],
         timeout: 10000,
       });
@@ -2189,7 +2189,7 @@ async function validate(forgeYamlPath) {
   if (root && existsSync(root) && branchesToCheck.length > 0) {
     for (const branch of branchesToCheck) {
       try {
-        const result = execSync(`git ls-remote --heads origin "${branch}"`, {
+        const result = execFileSync("git", ["ls-remote", "--heads", "origin", branch], {
           cwd: root,
           stdio: ["pipe", "pipe", "pipe"],
           encoding: "utf-8",
@@ -2223,8 +2223,9 @@ async function validate(forgeYamlPath) {
       });
     } else {
       try {
-        const result = execSync(
-          `gh api graphql -f query='query { node(id: "${projectId}") { id __typename } }'`,
+        const result = execFileSync(
+          "gh",
+          ["api", "graphql", "-f", `query=query { node(id: "${projectId}") { id __typename } }`],
           { stdio: ["pipe", "pipe", "pipe"], encoding: "utf-8", timeout: 10000 }
         );
         const parsed = JSON.parse(result);
@@ -2249,7 +2250,7 @@ async function validate(forgeYamlPath) {
     } else {
       for (const sat of satellites) {
         try {
-          execSync(`gh repo view "${sat}" --json name`, {
+          execFileSync("gh", ["repo", "view", sat, "--json", "name"], {
             stdio: ["pipe", "pipe", "pipe"],
             timeout: 10000,
           });
