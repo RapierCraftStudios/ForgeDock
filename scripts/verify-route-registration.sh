@@ -27,7 +27,7 @@ BLOCKING=0
 WARNINGS=0
 
 # --- Next.js Route Handler registration check ---
-echo "$FILES" | grep -E "^web/src/app/api/.*route\.ts$" | while read -r f; do
+while read -r f; do
     URL_PATH=$(echo "$f" | sed 's|^web/src/app||; s|/route\.ts$||; s|\[.*\]|*|g')
     ROUTE_SEGMENT=$(echo "$URL_PATH" | sed 's|/api/v1/||; s|/.*||')
 
@@ -48,10 +48,10 @@ echo "$FILES" | grep -E "^web/src/app/api/.*route\.ts$" | while read -r f; do
             WARNINGS=$((WARNINGS + 1))
         fi
     fi
-done || true
+done < <(echo "$FILES" | grep -E "^web/src/app/api/.*route\.ts$") || true
 
 # --- Python API Router registration check ---
-echo "$FILES" | grep -E "^services/api/app/routers/.*\.py$" | while read -r f; do
+while read -r f; do
     ROUTER_NAME=$(basename "$f" .py)
     MAIN_PY="$REPO_ROOT/services/api/app/main.py"
 
@@ -66,10 +66,10 @@ echo "$FILES" | grep -E "^services/api/app/routers/.*\.py$" | while read -r f; d
         echo "WARNING: Cannot verify router registration — main.py not found at $MAIN_PY"
         WARNINGS=$((WARNINGS + 1))
     fi
-done || true
+done < <(echo "$FILES" | grep -E "^services/api/app/routers/.*\.py$") || true
 
 # --- Python Middleware registration check ---
-echo "$FILES" | grep -E "^services/api/app/middleware/.*\.py$" | while read -r f; do
+while read -r f; do
     MIDDLEWARE_NAME=$(basename "$f" .py)
     MAIN_PY="$REPO_ROOT/services/api/app/main.py"
 
@@ -81,10 +81,10 @@ echo "$FILES" | grep -E "^services/api/app/middleware/.*\.py$" | while read -r f
             WARNINGS=$((WARNINGS + 1))
         fi
     fi
-done || true
+done < <(echo "$FILES" | grep -E "^services/api/app/middleware/.*\.py$") || true
 
 # --- Shared module import check ---
-echo "$FILES" | grep -E "^shared/.*\.py$" | while read -r f; do
+while read -r f; do
     MODULE_NAME=$(basename "$f" .py)
 
     IMPORTERS=$(grep -rl "$MODULE_NAME" "$REPO_ROOT/services/api/" "$REPO_ROOT/services/worker/" 2>/dev/null | head -5)
@@ -94,10 +94,10 @@ echo "$FILES" | grep -E "^shared/.*\.py$" | while read -r f; do
         echo "WARNING: Shared module '$MODULE_NAME' ($f) — no imports found in services/api/ or services/worker/"
         WARNINGS=$((WARNINGS + 1))
     fi
-done || true
+done < <(echo "$FILES" | grep -E "^shared/.*\.py$") || true
 
 # --- Component import check ---
-echo "$FILES" | grep -E "^web/src/components/.*\.tsx$" | while read -r f; do
+while read -r f; do
     COMPONENT_NAME=$(basename "$f" .tsx)
 
     IMPORTERS=$(grep -rl "$COMPONENT_NAME" "$REPO_ROOT/web/src/app/" "$REPO_ROOT/web/src/components/" 2>/dev/null | grep -v "$f" | head -3)
@@ -107,7 +107,7 @@ echo "$FILES" | grep -E "^web/src/components/.*\.tsx$" | while read -r f; do
         echo "WARNING: Component '$COMPONENT_NAME' ($f) — no imports found. May be unused or new."
         WARNINGS=$((WARNINGS + 1))
     fi
-done || true
+done < <(echo "$FILES" | grep -E "^web/src/components/.*\.tsx$") || true
 
 # --- Exit code ---
 if [ "$BLOCKING" -gt 0 ]; then
