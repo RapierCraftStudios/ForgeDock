@@ -623,7 +623,9 @@ async function install() {
   const totalLabel =
     installed > 0
       ? `${green("✔")} Installed ${installed + updated}/${files.length} commands`
-      : `${dim("✔")} Commands up to date (${skipped} skipped)`;
+      : updated > 0
+        ? `${green("✔")} Updated ${updated} command${updated === 1 ? "" : "s"}`
+        : `${dim("✔")} Commands up to date (${skipped} skipped)`;
   bar.done(totalLabel);
 
   // -------------------------------------------------------------------------
