@@ -62,15 +62,30 @@ Orchestrator for the full issue lifecycle: investigate → decompose (if needed)
 
 ---
 
-## Multi-Repo Support
+## Project Configuration
 
-| Input | Resolves To | GH_REPO | STAGING_BRANCH |
-|-------|-------------|---------|----------------|
-| `123` / `#123` | AlterLab (default) | `RapierCraft/AlterLab` | `staging` |
-| `mcp:5` | MCP Server | `RapierCraft/alterlab-mcp-server` | `main` |
-| `n8n:12` | n8n Node | `RapierCraft/n8n-nodes-alterlab` | `main` |
+Read `forge.yaml` from the repository root before processing any issue.
 
-Satellite repos (MCP, n8n) have no staging — fast-lane PRs go to `main`.
+If `forge.yaml` is missing: stop and tell the user to run `npx forgedock init` to generate it.
+
+**Resolve these values from `forge.yaml`**:
+
+| Variable | Source field | Notes |
+|----------|-------------|-------|
+| `GH_REPO` | `project.owner` + `/` + `project.repo` | e.g. `acme-org/acme-platform` |
+| `GH_FLAG` | `-R {GH_REPO}` | Passed to all `gh` commands |
+| `REPO_PATH` | `paths.root` | Absolute path to repo root |
+| `WORKTREE_BASE` | `paths.worktree_base` | Base dir for git worktrees |
+| `STAGING_BRANCH` | `branches.staging` | Fast-lane PR target |
+| `PROJECT_BOARD_OWNER` | `project_board.owner` (or `project.owner` as fallback) | For `gh project` commands |
+
+**Multi-repo routing** (when `forge.yaml → repos` section is present):
+
+Parse issue input for a prefix (`<prefix>:<number>`). Look up `<prefix>` in `forge.yaml → repos.satellites[]`. Use that satellite's `repo` and `staging_branch` as `GH_REPO` and `STAGING_BRANCH`. If no prefix is given, use the default (`project.owner/project.repo`).
+
+If `forge.yaml → repos` is absent, only the default repo is available — prefixed issue numbers are invalid.
+
+Satellite repos (those without a `staging` branch) receive fast-lane PRs directly to `main`.
 
 ---
 
@@ -100,12 +115,12 @@ Add issue to project, set Status=In Progress, Lane, Component, Priority, Workflo
 
 ## Phase 1: Investigation
 
-**Skip if**: `<!-- FORGE:INVESTIGATOR -->` or `<!-- ALTERLAB:INVESTIGATOR -->` exists with `<!-- INVESTIGATION:COMPLETE -->` in the SAME comment.
+**Skip if**: `<!-- FORGE:INVESTIGATOR -->` exists with `<!-- INVESTIGATION:COMPLETE -->` in the SAME comment.
 
 **Partial investigation**: If investigator comment exists BUT `<!-- INVESTIGATION:COMPLETE -->` is ABSENT → investigation was interrupted. Delete the partial comment and restart:
 ```bash
 COMMENT_ID=$(gh api repos/{GH_REPO}/issues/{NUMBER}/comments \
-  --jq '.[] | select(.body | (contains("FORGE:INVESTIGATOR") or contains("ALTERLAB:INVESTIGATOR"))) | .id')
+  --jq '.[] | select(.body | contains("FORGE:INVESTIGATOR")) | .id')
 gh api repos/{GH_REPO}/issues/comments/$COMMENT_ID -X DELETE
 ```
 
@@ -171,20 +186,14 @@ Mission: Validate whether the issue is real. Assume description is wrong until p
 
 **Resolve target repo and branch**:
 
-For Forge issues (repo = `RapierCraftStudios/forge`):
-- Key files: `commands/work-on.md`, `commands/review-pr.md`, `commands/quality-gate.md`, `commands/orchestrate.md`, `install.sh`, `CLAUDE.md`
+Read `forge.yaml → review.tech_stack` and `forge.yaml → review.key_paths` (if present) to identify which files are most relevant for the affected domain. If the `review` section is absent, use the issue labels, title keywords, and the affected files listed in the issue body to determine the domain. Start with the files the issue explicitly names, then expand to callers and related modules.
 
-For AlterLab issues (repo = `RapierCraft/AlterLab`):
+**Workflow pipeline issues** (repo is a ForgeDock installation):
+- Key files: `commands/work-on.md`, `commands/review-pr.md`, `commands/quality-gate.md`, `commands/orchestrate.md`, `forge.yaml`, `bin/forgedock.mjs`
 
-| Domain | Key files |
-|--------|-----------|
-| BILLING | `routers/billing.py`, `core/pricing.py`, `services/credit_service.py` |
-| SCRAPING | `unified_consumer.py`, `queues.py`, `domain_playbooks.json` |
-| AUTH | `core/auth.py`, `routers/auth.py`, `dependencies.py` |
-| DATABASE | `infra/migrations/`, `models/`, `db/` |
-| FRONTEND | `web/src/app/`, `web/src/components/`, `web/src/lib/` |
-| CORTEX | `cortex_client.py`, `routers/cortex.py` |
-| INFRA | `.github/workflows/`, `docker-compose.yml`, `infra/traefik/` |
+**Application issues** (all other repos):
+
+Use `forge.yaml → review.tech_stack` and the issue domain labels to identify entry points. If `forge.yaml → review.key_paths` lists domain-to-file mappings, use that table directly. Otherwise, infer key files from the issue body's Affected Files section.
 
 **INFRA domain known footguns** (read before writing any `.github/workflows/*.yml` changes):
 - **appleboy/ssh-action Go template preprocessing**: Any `{{` in a `script:` block is interpreted as a Go template directive **before the script reaches SSH**. This means `docker ps --format '{{.Names}}'` and `docker inspect --format '{{index .RepoTags 0}}'` will crash the action with exit 1. Both function calls (`{{index .X Y}}`) AND field accessors (`{{.Names}}`, `{{.Status}}`) fail on the action's empty data context. Shell error handlers (`|| fallback`, `set -e`, `2>/dev/null`) are bypassed because the failure is client-side. Always use `docker inspect IMAGE | jq -r '.[0].RepoTags[0]'` and `docker ps --format json | jq -r '.Names'` patterns in `appleboy/ssh-action` scripts. (Ref: forge#226 — 6-day silent deploy failure masked by `continue-on-error: true`)
@@ -194,11 +203,10 @@ For AlterLab issues (repo = `RapierCraft/AlterLab`):
 2. Read domain files — start with key files for the affected domain
 2.5. **Existing system search (conditional)**: If the issue describes a gap in a functional capability — content not being distributed, notifications not sending, jobs not running, data not being synced — MUST search for an existing automated system before proposing a new one. The issue body may name a specific tool or path (e.g., `reddit-bot/`, `marketing/`) — do NOT anchor on that path alone. Expand the search to all service layers:
    ```bash
-   # For AlterLab: check Herald, worker, and scheduler for the capability
-   grep -rn "{capability_keyword}" services/herald/app/scheduler/ services/herald/app/content/ services/worker/
-   grep -rn "{capability_keyword}" services/ --include="*.py" -l | head -20
+   # Check all service layers for the capability (adapt paths to your project structure)
+   grep -rn "{capability_keyword}" {REPO_PATH}/services/ --include="*.py" -l | head -20
    # Look for scheduled jobs, automated runners, existing integrations
-   grep -rn "scheduler\|celery\|cron\|nightly\|periodic" services/ --include="*.py" -l | head -10
+   grep -rn "scheduler\|celery\|cron\|nightly\|periodic" {REPO_PATH}/services/ --include="*.py" -l | head -10
    ```
    If an existing system is found that already handles the capability: the fix MUST route through the existing system (fix its config, env var, or gate) — NOT create a new parallel tool. Document the existing system in the investigation report and make it the centerpiece of the recommendation. This check is especially critical when the issue references a standalone tool directory (`reddit-bot/`, `scripts/`, `tools/`) — those directories often duplicate functionality that a service already owns. (Ref: forge#279 — investigator anchored on `reddit-bot/` from issue body, never checked `services/herald/app/scheduler/`, built parallel PRAW integration alongside Herald's existing automated crosspost scheduler)
 3. Verify claims — does the code actually have the problem described?
@@ -308,13 +316,13 @@ gh issue close {NUMBER} {GH_FLAG} --comment "Closing as invalid: {reason from in
 ```bash
 gh issue view {NUMBER} {GH_FLAG} --json number,title,body,labels,state,milestone
 gh api repos/{GH_REPO}/issues/{NUMBER}/comments \
-  --jq '.[] | select(.body | (contains("FORGE:INVESTIGATOR") or contains("ALTERLAB:INVESTIGATOR"))) | .body'
+  --jq '.[] | select(.body | contains("FORGE:INVESTIGATOR")) | .body'
 ```
 
 **MANDATORY — Owner override detection**: After reading the investigation comment, read ALL comments on the issue to check for owner override signals:
 ```bash
 gh api repos/{GH_REPO}/issues/{NUMBER}/comments \
-  --jq '.[] | select(.body | (contains("FORGE:INVESTIGATOR") or contains("ALTERLAB:INVESTIGATOR")) | not) | {author: .user.login, body: .body}'
+  --jq '.[] | select(.body | contains("FORGE:INVESTIGATOR") | not) | {author: .user.login, body: .body}'
 ```
 
 Scan non-agent comments for override signals — phrases like "do not", "do NOT", "instead", "revert", "remove this", "override", "actually", or explicit disagreement with the investigation's recommendation. If an override comment is found from a repo owner or admin (not a bot):
@@ -402,7 +410,7 @@ gh issue edit {NUMBER} {GH_FLAG} \
 
 <!-- FORGE:PHASE_COMPLETE — Entering Phase 3 (Build). See Universal Phase Dispatcher: sub-phases 3A–3M execute in sequence. No sub-phase completion is terminal. -->
 
-**Skip if**: `<!-- FORGE:BUILDER -->` or `<!-- ALTERLAB:BUILDER -->` exists.
+**Skip if**: `<!-- FORGE:BUILDER -->` exists.
 
 **CRITICAL: You MUST execute ALL sub-phases 3A–3M in order. Do NOT skip phases 3C.5 (context) or 3C.6 (architect) — they post mandatory `FORGE:CONTEXT` and `FORGE:ARCHITECT` comments that Phase 3F reads as its primary input. Skipping them degrades build quality and causes review findings. After each sub-phase, continue to the next — no sub-phase is terminal.**
 
@@ -412,11 +420,11 @@ gh issue view {NUMBER} {GH_FLAG} --json number,title,body,labels,state,milestone
 
 # Read investigation report
 gh api repos/{GH_REPO}/issues/{NUMBER}/comments \
-  --jq '.[] | select(.body | (contains("FORGE:INVESTIGATOR") or contains("ALTERLAB:INVESTIGATOR"))) | .body'
+  --jq '.[] | select(.body | contains("FORGE:INVESTIGATOR")) | .body'
 
 # Check if build already completed
 gh api repos/{GH_REPO}/issues/{NUMBER}/comments \
-  --jq '.[] | select(.body | (contains("FORGE:BUILDER") or contains("ALTERLAB:BUILDER"))) | .body'
+  --jq '.[] | select(.body | contains("FORGE:BUILDER")) | .body'
 ```
 
 If no investigation comment with `<!-- INVESTIGATION:COMPLETE -->` → STOP (investigation not complete).
@@ -745,7 +753,7 @@ black {PYTHON_FILES} && isort {PYTHON_FILES} && python -m py_compile {PYTHON_FIL
 ```
 `py_compile` failures are BLOCKING.
 
-**TypeScript (AlterLab)**:
+**TypeScript (primary repo — has tsconfig.json)**:
 ```bash
 cd {WORKTREE_PATH}
 prettier --write {TS_FILES} && tsc --noEmit
@@ -984,13 +992,16 @@ If multi-phase (`HAS_PHASE_HEADINGS > 0` AND `REMAINING_BEFORE > 0`): do NOT che
 If single-phase or final phase: check off all `[ ]` items, add PR reference.
 
 ### 6B: Project board update (Status=Done, Workflow=Merged)
+
+Resolve `PROJECT_BOARD_OWNER` and `PROJECT_BOARD_NUMBER` from `forge.yaml → project_board` (fields: `owner`, `number`). Fall back to `forge.yaml → project.owner` and project number `1` if `project_board` section is absent.
+
 ```bash
 ISSUE_URL="https://github.com/{GH_REPO}/issues/{NUMBER}"
-ITEM_ID=$(gh project item-list 1 --owner RapierCraft --format json --limit 200 \
+ITEM_ID=$(gh project item-list {PROJECT_BOARD_NUMBER} --owner {PROJECT_BOARD_OWNER} --format json --limit 200 \
   --jq ".items[] | select(.content.url == \"$ISSUE_URL\") | .id" 2>/dev/null | head -1)
 ```
 
-If found: set Status=Done, Workflow=Merged using project field IDs.
+If found: set Status=Done, Workflow=Merged using project field IDs from `forge.yaml → project_board.fields`.
 
 ### 6C: Ensure issue is closed
 
