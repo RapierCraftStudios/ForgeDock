@@ -35,7 +35,7 @@ fi
 # Read config with Python (YAML parser — values are shell-quoted via shlex.quote)
 ANALYTICS_CONFIG=$(python3 -c "
 import yaml, sys, shlex
-cfg = yaml.safe_load(open('$FORGE_YAML'))
+cfg = yaml.safe_load(open(sys.argv[1]))
 svc = cfg.get('services', {})
 analytics = svc.get('analytics', None)
 if analytics is None:
@@ -58,7 +58,7 @@ print('GH_REPO=' + shlex.quote(str(project.get('owner', '')) + '/' + str(project
 print('PROJECT_BOARD_OWNER=' + shlex.quote(str(board.get('owner', project.get('owner', '')))))
 print('PROJECT_NUMBER=' + shlex.quote(str(board.get('project_number', ''))))
 print('PROJECT_ID=' + shlex.quote(str(board.get('project_id', ''))))
-")
+" "$FORGE_YAML")
 
 if echo "$ANALYTICS_CONFIG" | grep -q "MISSING_ANALYTICS_CONFIG"; then
   echo "ERROR: forge.yaml is missing the 'services.analytics' section."
@@ -731,7 +731,7 @@ If an open milestone fits, offer to assign issues to it.
 
 ### Add analytics issues to Project board
 
-For each created issue, add it to the GitHub Project. Reference `~/projects/forge/docs/WORKFLOW.md` → "Project Board Integration" for field IDs.
+For each created issue, add it to the GitHub Project. Field IDs are resolved from `forge.yaml → project_board.field_ids` (see the ForgeDock docs for the full project board configuration schema).
 
 ```bash
 ISSUE_URL="https://github.com/{GH_REPO}/issues/${ISSUE_NUM}"
