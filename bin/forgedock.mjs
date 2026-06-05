@@ -1313,6 +1313,7 @@ async function init() {
     console.log(`  ${GREEN}Created${RESET}: forge.yaml`);
     console.log("");
     _printNextSteps({ remoteDetected, cyan: (s) => `${CYAN}${s}${RESET}`, bold: (s) => `${BOLD}${s}${RESET}` });
+    await validate(outputPath);
     return;
   }
 
@@ -1537,6 +1538,7 @@ async function init() {
       }
       console.log("");
       _printNextSteps({ remoteDetected: ownerInput !== "your-github-org", cyan: (s) => `${CYAN}${s}${RESET}`, bold: (s) => `${BOLD}${s}${RESET}` });
+      await validate(outputPath);
     }
   }
 }
@@ -1721,6 +1723,309 @@ function _printNextSteps({ remoteDetected, cyan, bold }) {
   console.log("");
 }
 
+// ---------------------------------------------------------------------------
+// Config Validation
+// ---------------------------------------------------------------------------
+
+/**
+ * Parse a simple top-level YAML key from a forge.yaml string.
+ * Only handles the specific patterns used in forge.yaml required sections.
+ *
+ * @param {string} content - File content
+ * @param {string} key     - Dotted key, e.g. "project.owner"
+ * @returns {string}       - Trimmed value, or empty string if not found
+ */
+function _parseYamlKey(content, key) {
+  const parts = key.split(".");
+  const lines = content.split("\n");
+
+  if (parts.length === 2) {
+    const [section, field] = parts;
+    let inSection = false;
+    for (const line of lines) {
+      if (/^[a-z_]+:/.test(line)) {
+        inSection = line.startsWith(`${section}:`);
+        continue;
+      }
+      if (inSection && line.startsWith(`  ${field}:`)) {
+        const raw = line.replace(`  ${field}:`, "").trim();
+        return raw.replace(/^["']|["']$/g, "");
+      }
+    }
+  }
+  return "";
+}
+
+/**
+ * Check whether a YAML section is active (uncommented) in the content.
+ * @param {string} content
+ * @param {string} section - top-level section name, e.g. "project_board"
+ * @returns {boolean}
+ */
+function _sectionActive(content, section) {
+  return content.split("\n").some((line) => line === `${section}:`);
+}
+
+/**
+ * Extract all satellite repo values from an active repos: section.
+ * Returns an array of "owner/repo" strings from lines like:
+ *   repo: "owner/satellite-repo"
+ * under the satellites: list (skipping the default: sub-key).
+ *
+ * @param {string} content
+ * @returns {string[]}
+ */
+function _parseSatelliteRepos(content) {
+  const lines = content.split("\n");
+  const repos = [];
+  let inRepos = false;
+  let inSatellites = false;
+
+  for (const line of lines) {
+    if (/^[a-z_]+:/.test(line)) {
+      inRepos = line.startsWith("repos:");
+      inSatellites = false;
+      continue;
+    }
+    if (!inRepos) continue;
+
+    if (line.trim() === "default:") { continue; }
+    if (line.trim() === "satellites:") { inSatellites = true; continue; }
+
+    if (inSatellites && /^\s{6,}repo:/.test(line)) {
+      const raw = line.replace(/^\s+repo:\s*/, "").replace(/^["']|["']$/g, "").trim();
+      if (raw) repos.push(raw);
+    }
+  }
+  return repos;
+}
+
+/**
+ * Validate the forge.yaml at the given path.
+ *
+ * Runs a series of checks and renders a summary box.
+ * Never throws — all check failures are surfaced as warnings/errors in the output.
+ *
+ * @param {string} forgeYamlPath - Absolute path to forge.yaml
+ * @returns {Promise<{ passed: boolean, checks: Array<{label: string, status: 'ok'|'warn'|'error', note: string}> }>}
+ */
+async function validate(forgeYamlPath) {
+  /** @type {Array<{label: string, status: 'ok'|'warn'|'error', note: string}>} */
+  const checks = [];
+
+  // 1. Read forge.yaml
+  if (!existsSync(forgeYamlPath)) {
+    checks.push({ label: "forge.yaml found", status: "error", note: `Not found: ${forgeYamlPath}` });
+    _renderValidationSummary(checks);
+    return { passed: false, checks };
+  }
+
+  let content;
+  try {
+    content = readFileSync(forgeYamlPath, "utf-8");
+  } catch (err) {
+    checks.push({ label: "forge.yaml found", status: "error", note: `Cannot read: ${err.message}` });
+    _renderValidationSummary(checks);
+    return { passed: false, checks };
+  }
+
+  checks.push({ label: "forge.yaml found", status: "ok", note: forgeYamlPath });
+
+  // 2. Required fields
+  const PLACEHOLDERS = new Set(["your-github-org", "your-repo-name", "", "your-org", "your-repo"]);
+
+  const owner = _parseYamlKey(content, "project.owner");
+  const repo = _parseYamlKey(content, "project.repo");
+  const root = _parseYamlKey(content, "paths.root");
+  const worktreeBase = _parseYamlKey(content, "paths.worktree_base");
+  const defaultBranch = _parseYamlKey(content, "branches.default");
+
+  const missingFields = [];
+  if (!owner || PLACEHOLDERS.has(owner)) missingFields.push("project.owner");
+  if (!repo || PLACEHOLDERS.has(repo)) missingFields.push("project.repo");
+  if (!root) missingFields.push("paths.root");
+  if (!defaultBranch) missingFields.push("branches.default");
+
+  if (missingFields.length === 0) {
+    checks.push({ label: "Required fields", status: "ok", note: `${owner}/${repo}` });
+  } else {
+    checks.push({
+      label: "Required fields",
+      status: "error",
+      note: `Missing or placeholder: ${missingFields.join(", ")}`,
+    });
+  }
+
+  // 3. paths.root exists
+  if (root) {
+    if (existsSync(root)) {
+      checks.push({ label: "paths.root exists", status: "ok", note: root });
+    } else {
+      checks.push({ label: "paths.root exists", status: "warn", note: `Directory not found: ${root}` });
+    }
+  }
+
+  // 4. Create worktree_base if missing
+  if (worktreeBase) {
+    if (existsSync(worktreeBase)) {
+      checks.push({ label: "worktree_base exists", status: "ok", note: worktreeBase });
+    } else {
+      try {
+        await mkdir(worktreeBase, { recursive: true });
+        checks.push({ label: "worktree_base exists", status: "ok", note: `Created: ${worktreeBase}` });
+      } catch (err) {
+        checks.push({ label: "worktree_base exists", status: "warn", note: `Cannot create: ${err.message}` });
+      }
+    }
+  }
+
+  // 5. GitHub repo access
+  if (owner && repo && !PLACEHOLDERS.has(owner) && !PLACEHOLDERS.has(repo)) {
+    try {
+      execSync(`gh repo view "${owner}/${repo}" --json name`, {
+        stdio: ["pipe", "pipe", "pipe"],
+        timeout: 10000,
+      });
+      checks.push({ label: "GitHub repo accessible", status: "ok", note: `${owner}/${repo}` });
+    } catch {
+      checks.push({
+        label: "GitHub repo accessible",
+        status: "warn",
+        note: `Cannot access ${owner}/${repo} — check owner/repo or run: gh auth login`,
+      });
+    }
+  } else {
+    checks.push({ label: "GitHub repo accessible", status: "warn", note: "Skipped — owner/repo not set" });
+  }
+
+  // 6. Branch existence on remote
+  const stagingBranch = _parseYamlKey(content, "branches.staging");
+  const branchesToCheck = [...new Set([defaultBranch, stagingBranch].filter(Boolean))];
+
+  if (root && existsSync(root) && branchesToCheck.length > 0) {
+    for (const branch of branchesToCheck) {
+      try {
+        const result = execSync(`git ls-remote --heads origin "${branch}"`, {
+          cwd: root,
+          stdio: ["pipe", "pipe", "pipe"],
+          encoding: "utf-8",
+          timeout: 10000,
+        });
+        if (result.trim()) {
+          checks.push({ label: `Branch: ${branch}`, status: "ok", note: "Exists on remote" });
+        } else {
+          checks.push({ label: `Branch: ${branch}`, status: "warn", note: "Not found on remote" });
+        }
+      } catch {
+        checks.push({ label: `Branch: ${branch}`, status: "warn", note: "Cannot verify — git error" });
+      }
+    }
+  }
+
+  // 7. Project board validation
+  if (_sectionActive(content, "project_board")) {
+    const projectId = _parseYamlKey(content, "project_board.project_id");
+    if (!projectId || projectId.includes("xxxx")) {
+      checks.push({
+        label: "Project board configured",
+        status: "warn",
+        note: "project_id is a placeholder — run /forgedock-init to configure",
+      });
+    } else if (!projectId.startsWith("PVT_")) {
+      checks.push({
+        label: "Project board configured",
+        status: "error",
+        note: `project_id must start with PVT_ (got: ${projectId.slice(0, 12)}...)`,
+      });
+    } else {
+      try {
+        const result = execSync(
+          `gh api graphql -f query='query { node(id: "${projectId}") { id __typename } }'`,
+          { stdio: ["pipe", "pipe", "pipe"], encoding: "utf-8", timeout: 10000 }
+        );
+        const parsed = JSON.parse(result);
+        if (parsed?.data?.node?.id) {
+          checks.push({ label: "Project board configured", status: "ok", note: `${projectId.slice(0, 16)}... resolves` });
+        } else {
+          checks.push({ label: "Project board configured", status: "warn", note: "project_id may be invalid — verify with: gh project list" });
+        }
+      } catch {
+        checks.push({ label: "Project board configured", status: "warn", note: "Cannot verify project_id — gh error" });
+      }
+    }
+  } else {
+    checks.push({ label: "Project board", status: "warn", note: "Not configured (optional)" });
+  }
+
+  // 8. Satellite repo access
+  if (_sectionActive(content, "repos")) {
+    const satellites = _parseSatelliteRepos(content);
+    if (satellites.length === 0) {
+      checks.push({ label: "Satellite repos", status: "warn", note: "repos: section active but no satellites found" });
+    } else {
+      for (const sat of satellites) {
+        try {
+          execSync(`gh repo view "${sat}" --json name`, {
+            stdio: ["pipe", "pipe", "pipe"],
+            timeout: 10000,
+          });
+          checks.push({ label: `Satellite: ${sat}`, status: "ok", note: "Accessible" });
+        } catch {
+          checks.push({ label: `Satellite: ${sat}`, status: "warn", note: "Cannot access — check repo name or gh auth" });
+        }
+      }
+    }
+  } else {
+    checks.push({ label: "Satellite repos", status: "warn", note: "Not configured (optional)" });
+  }
+
+  _renderValidationSummary(checks);
+  const hasError = checks.some((c) => c.status === "error");
+  return { passed: !hasError, checks };
+}
+
+/**
+ * Render the validation summary box to stdout.
+ * @param {Array<{label: string, status: 'ok'|'warn'|'error', note: string}>} checks
+ */
+function _renderValidationSummary(checks) {
+  const lines = [""];
+
+  for (const check of checks) {
+    let icon;
+    let labelFn;
+    if (check.status === "ok") {
+      icon = green("✓");
+      labelFn = (s) => s;
+    } else if (check.status === "warn") {
+      icon = yellow("!");
+      labelFn = yellow;
+    } else {
+      icon = red("✗");
+      labelFn = red;
+    }
+
+    const noteStr = check.note ? ` ${dim("(" + check.note + ")")}` : "";
+    lines.push(`  ${icon} ${labelFn(check.label)}${noteStr}`);
+  }
+
+  const hasErrors = checks.some((c) => c.status === "error");
+  const boardOk = checks.some((c) => c.label === "Project board configured" && c.status === "ok");
+
+  lines.push("");
+  lines.push(`  ${bold("Next steps:")}`);
+  if (hasErrors) {
+    lines.push(`  ${dim("•")} Edit ${cyan("forge.yaml")} to fix the errors above`);
+  }
+  if (!boardOk) {
+    lines.push(`  ${dim("•")} Run ${cyan("/forgedock-init")} for AI-powered optional section setup`);
+  }
+  lines.push(`  ${dim("•")} Run ${cyan("/work-on next")} to start your first task`);
+  lines.push("");
+
+  process.stdout.write(box(lines, { title: "Config Validation" }));
+}
+
 function help() {
   console.log("");
   console.log(`${BOLD}ForgeDock${RESET} — GitHub as a knowledge graph for AI agents`);
@@ -1729,6 +2034,7 @@ function help() {
   console.log(`  ${CYAN}npx forgedock${RESET}            Launch TUI onboarding (interactive)`);
   console.log(`  ${CYAN}npx forgedock install${RESET}    Install commands`);
   console.log(`  ${CYAN}npx forgedock init${RESET}       Generate forge.yaml config for your project`);
+  console.log(`  ${CYAN}npx forgedock validate${RESET}   Validate forge.yaml configuration`);
   console.log(`  ${CYAN}npx forgedock uninstall${RESET}  Remove commands (interactive, with confirmation)`);
   console.log(`  ${CYAN}npx forgedock uninstall --yes${RESET}  Remove commands without prompts (non-interactive)`);
   console.log(`  ${CYAN}npx forgedock update${RESET}     Pull latest & reinstall`);
@@ -1876,6 +2182,18 @@ async function tuiOnboarding() {
           }
         },
       },
+      {
+        name: "Validate Configuration",
+        optional: true,
+        run: async () => {
+          const forgeYamlPath = join(process.cwd(), "forge.yaml");
+          if (!existsSync(forgeYamlPath)) {
+            console.log(`  ${dim("No forge.yaml found — skipping validation.")}`);
+            return;
+          }
+          await validate(forgeYamlPath);
+        },
+      },
     ];
 
     const orchestrator = new StepOrchestrator(steps);
@@ -1941,6 +2259,18 @@ async function tuiOnboarding() {
         }
       },
     },
+    {
+      name: "Validate Configuration",
+      optional: true,
+      run: async () => {
+        const forgeYamlPath = join(process.cwd(), "forge.yaml");
+        if (!existsSync(forgeYamlPath)) {
+          console.log(`  ${dim("No forge.yaml found — skipping validation.")}`);
+          return;
+        }
+        await validate(forgeYamlPath);
+      },
+    },
   ];
 
   const orchestrator = new StepOrchestrator(steps);
@@ -1978,6 +2308,12 @@ if (!command) {
     case "init":
       await init();
       break;
+    case "validate": {
+      const forgeYamlPath = join(process.cwd(), "forge.yaml");
+      const result = await validate(forgeYamlPath);
+      if (!result.passed) process.exit(1);
+      break;
+    }
     case "uninstall":
       await uninstall();
       break;
