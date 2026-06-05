@@ -196,6 +196,20 @@ branches:
 #     clarity:
 #       project_id: "xxxxxxxxxx"
 #
+#     # Persistent audit history file (YAML list of past audit snapshots)
+#     # Written by /analytics after each run; read by Phase 0 for trend baselines
+#     # Should be outside the repo — do not commit
+#     # history_file: "/home/youruser/analytics-history.yaml"
+#
+#     # Google Analytics 4
+#     ga4:
+#       # GA4 property ID (numeric, from GA4 dashboard → Admin → Property Details)
+#       property_id: "000000000"
+#       # Path to a GA4 service account JSON key file
+#       # Grant this service account Viewer access in GA4 → Admin → Account Access Management
+#       # File should NOT be committed to version control
+#       # service_account_key: "/home/youruser/credentials/ga4-service-account.json"
+#
 #   # API base URL for health checks and endpoint verification
 #   api_url: "https://api.acme.io"
 
