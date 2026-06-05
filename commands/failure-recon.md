@@ -7,7 +7,11 @@ argument-hint: [full | pull | test | report | issues-only]
 
 **Input**: $ARGUMENTS (default: `full`)
 
-You are AlterLab's scraper intelligence system. Your mission: **improve the platform's scraping capabilities holistically** — tiers, detection, content extraction, and the intelligence feedback loop that ties it all together.
+**Config variables used by this command** (set in `forge.yaml`):
+- `{REPO_PATH}` ← `paths.root` — project repository root
+- `{TOOLS_PATH}` ← `paths.tools_root` (optional) — parent directory containing the `tools/failure-recon/` script and reports
+
+You are this project's scraper intelligence system. Your mission: **improve the platform's scraping capabilities holistically** — tiers, detection, content extraction, and the intelligence feedback loop that ties it all together.
 
 **The scraping ecosystem is a closed loop:**
 ```
@@ -57,7 +61,7 @@ Every fix to ANY part of this loop compounds — better detection feeds better t
 
 First, verify local containers are up:
 ```bash
-cd /home/mrdubey/projects/ScraperAPI/alterlab
+cd {REPO_PATH}
 docker compose ps --format "{{.Name}} {{.Status}}" | grep -E "api|worker|redis|postgres"
 ```
 
@@ -65,7 +69,7 @@ If containers aren't running, tell the user and offer to start them.
 
 Then run the recon script:
 ```bash
-cd /home/mrdubey/projects/ScraperAPI
+cd {TOOLS_PATH}
 
 # Full pipeline: pull → normalize → tier-by-tier test → report
 python3 tools/failure-recon/recon.py full --days 7 --sample-size 10 --max-total 200 --concurrency 3
@@ -86,7 +90,7 @@ If `$ARGUMENTS` is `issues-only`, skip directly to Phase 3 (read existing report
 
 Read the latest report:
 ```bash
-ls -t /home/mrdubey/projects/ScraperAPI/tools/failure-recon/reports/recon_*.json | head -1
+ls -t {TOOLS_PATH}/tools/failure-recon/reports/recon_*.json | head -1
 ```
 
 Read the JSON. Key sections:
@@ -151,7 +155,7 @@ gh issue list --state closed --label "scraper" --search "{protection_type}" --li
 gh pr list --state merged --search "tier hardening {protection}" --limit 10 --json number,title,mergedAt
 
 # Check recent scraper-related commits
-cd /home/mrdubey/projects/ScraperAPI/alterlab
+cd {REPO_PATH}
 git log --oneline --all --grep="tier" --grep="hardening" --since="3 months ago" | head -20
 git log --oneline --all --grep="{protection_type}" --since="3 months ago" | head -20
 ```
@@ -363,7 +367,7 @@ a tier-hardening issue should verify these still pass before merging.
 
 ## Philosophy
 
-AlterLab doesn't accept failure. Every bot protection is a puzzle — Cloudflare, DataDome, Akamai, Kasada, all of them. The question isn't "can we bypass this?" — it's "which tier should bypass this?"
+This platform doesn't accept failure. Every bot protection is a puzzle — Cloudflare, DataDome, Akamai, Kasada, all of them. The question isn't "can we bypass this?" — it's "which tier should bypass this?"
 
 **Tier 1 should handle everything that doesn't check fingerprints.**
 **Tier 2 should handle everything that checks TLS but not IP.**
