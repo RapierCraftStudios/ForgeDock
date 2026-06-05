@@ -34,6 +34,96 @@ function getVersion() {
 }
 
 // ---------------------------------------------------------------------------
+// Install state detection
+// ---------------------------------------------------------------------------
+
+/**
+ * @typedef {'fresh-install' | 'up-to-date' | 'update-available' | 'config-missing'} InstallState
+ *
+ * @typedef {Object} InstallDetectionResult
+ * @property {InstallState} state
+ * @property {string | null} installedVersion  - Version read from existing symlink target, or null
+ * @property {string} currentVersion           - Version from the running package.json
+ */
+
+/**
+ * Detect whether ForgeDock has been installed before and, if so, compare versions.
+ *
+ * Algorithm:
+ *   1. Check if TARGET_DIR exists and has at least one ForgeDock-managed symlink.
+ *   2. If symlinks exist, walk the symlink target to find the installed package.json
+ *      and read its version.
+ *   3. Compare installed version vs. current (running) version.
+ *   4. If commands are installed but forge.yaml is absent → 'config-missing'.
+ *
+ * Always returns a safe result — never throws.
+ *
+ * @returns {Promise<InstallDetectionResult>}
+ */
+async function detectInstallState() {
+  const currentVersion = getVersion();
+
+  // Safely probe TARGET_DIR for ForgeDock-managed symlinks
+  let installedVersion = null;
+  let hasSymlinks = false;
+
+  try {
+    const entries = await readdir(TARGET_DIR, { withFileTypes: true });
+    for (const entry of entries) {
+      if (!entry.name.endsWith(".md") && !entry.isDirectory()) continue;
+
+      const targetPath = join(TARGET_DIR, entry.name);
+      try {
+        const stats = await lstat(targetPath);
+        if (stats.isSymbolicLink()) {
+          const linkTarget = await readlink(targetPath);
+          // Only count symlinks that point into a ForgeDock commands directory
+          if (linkTarget.includes("commands") && linkTarget.endsWith(".md")) {
+            hasSymlinks = true;
+            // Derive the FORGE_HOME of the installed copy:
+            //   linkTarget: /path/to/forge-home/commands/work-on.md
+            //   dirname twice → /path/to/forge-home
+            const installedForgeHome = dirname(dirname(linkTarget));
+            const pkgPath = join(installedForgeHome, "package.json");
+            try {
+              const pkg = JSON.parse(readFileSync(pkgPath, "utf-8"));
+              installedVersion = pkg.version || null;
+            } catch {
+              // package.json missing or malformed — treat as version unknown
+            }
+            break; // One symlink is enough to establish install status
+          }
+        }
+      } catch {
+        // lstat/readlink failed — skip this entry
+      }
+    }
+  } catch {
+    // TARGET_DIR doesn't exist — definitively a fresh install
+    return { state: "fresh-install", installedVersion: null, currentVersion };
+  }
+
+  if (!hasSymlinks) {
+    return { state: "fresh-install", installedVersion: null, currentVersion };
+  }
+
+  // Commands are installed — now determine sub-state
+  const forgeYamlPath = join(process.cwd(), "forge.yaml");
+  const hasConfig = existsSync(forgeYamlPath);
+
+  if (!hasConfig) {
+    return { state: "config-missing", installedVersion, currentVersion };
+  }
+
+  // Both commands and config are present — compare versions
+  if (installedVersion !== null && installedVersion !== currentVersion) {
+    return { state: "update-available", installedVersion, currentVersion };
+  }
+
+  return { state: "up-to-date", installedVersion, currentVersion };
+}
+
+// ---------------------------------------------------------------------------
 // Splash screen — ASCII art logo in a Unicode box
 // ---------------------------------------------------------------------------
 
@@ -379,6 +469,8 @@ async function install() {
     );
     console.log("");
   }
+
+  return { installed, updated, skipped };
 }
 
 async function uninstall() {
@@ -711,7 +803,7 @@ function help() {
 async function tuiOnboarding() {
   splash();
 
-  // Non-TTY fallback: skip TUI, run install directly
+  // Non-TTY fallback: skip TUI and detection, run install directly
   if (!process.stdout.isTTY) {
     console.log(dim("  Non-interactive environment detected — running install."));
     console.log("");
@@ -719,6 +811,147 @@ async function tuiOnboarding() {
     return;
   }
 
+  // Detect install state before routing into a flow
+  const detection = await detectInstallState();
+
+  // -------------------------------------------------------------------------
+  // Flow: up-to-date
+  // Commands installed, forge.yaml present, same version — show summary
+  // -------------------------------------------------------------------------
+  if (detection.state === "up-to-date") {
+    const versionLabel = detection.installedVersion
+      ? `v${detection.installedVersion}`
+      : `v${detection.currentVersion}`;
+    console.log(
+      `  ${green("Everything up to date.")} ForgeDock ${versionLabel} is installed and configured.`
+    );
+    console.log("");
+
+    const action = await select("What would you like to do?", [
+      { label: "Nothing — exit", value: "exit" },
+      { label: "Reconfigure project (regenerate forge.yaml)", value: "reconfigure" },
+      { label: "Reinstall commands", value: "reinstall" },
+    ]);
+
+    if (action === "reconfigure") {
+      console.log("");
+      await init();
+    } else if (action === "reinstall") {
+      console.log("");
+      await install();
+    }
+    console.log("");
+    return;
+  }
+
+  // -------------------------------------------------------------------------
+  // Flow: update-available
+  // Commands installed, forge.yaml present, newer version running — update
+  // -------------------------------------------------------------------------
+  if (detection.state === "update-available") {
+    console.log(
+      `  ${yellow("Update available.")} ` +
+      `Installed: ${dim(`v${detection.installedVersion ?? "unknown"}`)}  →  ` +
+      `New: ${green(`v${detection.currentVersion}`)}`
+    );
+    console.log("");
+
+    const steps = [
+      {
+        name: "Preflight Checks",
+        optional: false,
+        run: async () => {
+          checkPrerequisites();
+        },
+      },
+      {
+        name: "Update Commands",
+        optional: false,
+        run: async () => {
+          await install();
+        },
+      },
+    ];
+
+    const orchestrator = new StepOrchestrator(steps);
+    const success = await orchestrator.run();
+
+    if (success) {
+      console.log(
+        green("Update complete!") +
+        ` ForgeDock v${detection.currentVersion} is now active.`
+      );
+      console.log("");
+    } else {
+      console.log("");
+      console.log(
+        yellow("Update incomplete.") +
+        ` Re-run ${cyan("npx forgedock")} to try again.`
+      );
+      console.log("");
+      process.exit(1);
+    }
+    return;
+  }
+
+  // -------------------------------------------------------------------------
+  // Flow: config-missing
+  // Commands installed but forge.yaml not found — skip to config step
+  // -------------------------------------------------------------------------
+  if (detection.state === "config-missing") {
+    const versionLabel = detection.installedVersion
+      ? `v${detection.installedVersion}`
+      : `v${detection.currentVersion}`;
+    console.log(
+      `  ${yellow("Commands installed")} (${versionLabel}) but no ${cyan("forge.yaml")} found in this directory.`
+    );
+    console.log("");
+
+    const steps = [
+      {
+        name: "Project Configuration",
+        optional: true,
+        run: async () => {
+          const shouldInit = await confirm(
+            "Generate forge.yaml for this project?",
+            true
+          );
+          if (shouldInit) {
+            await init();
+          } else {
+            console.log(
+              `  ${dim("Skipped.")} Run ${cyan("npx forgedock init")} later to generate forge.yaml.`
+            );
+          }
+        },
+      },
+    ];
+
+    const orchestrator = new StepOrchestrator(steps);
+    const success = await orchestrator.run();
+
+    if (success) {
+      console.log(
+        green("Done!") +
+        ` Run ${cyan("/help")} inside Claude Code to see available commands.`
+      );
+      console.log("");
+    } else {
+      console.log("");
+      console.log(
+        yellow("Setup incomplete.") +
+        ` Re-run ${cyan("npx forgedock")} to try again.`
+      );
+      console.log("");
+      process.exit(1);
+    }
+    return;
+  }
+
+  // -------------------------------------------------------------------------
+  // Flow: fresh-install (default)
+  // No existing symlinks — run full onboarding
+  // -------------------------------------------------------------------------
   const steps = [
     {
       name: "Preflight Checks",
