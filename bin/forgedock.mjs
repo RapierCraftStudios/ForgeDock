@@ -2214,7 +2214,14 @@ function _printNextSteps({ remoteDetected }) {
  *
  * @param {string} content - File content
  * @param {string} key     - Dotted key, e.g. "project.owner"
- * @returns {string}       - Trimmed value, or empty string if not found
+ * @returns {string}       - Trimmed value with surrounding quotes stripped, or empty string if not found
+ *
+ * @security Values returned by this function are UNTRUSTED user-controlled strings from forge.yaml.
+ *   - Callers MUST pass returned values as discrete arguments to execFileSync (args array) — never
+ *     interpolate into an execSync shell command string.
+ *   - execFileSync does not invoke a shell, so metacharacters in values are treated literally.
+ *   - When interpolation into a string argument is unavoidable (e.g. GraphQL query fields),
+ *     validate the value against a strict allowlist regex before use.
  */
 function _parseYamlKey(content, key) {
   const parts = key.split(".");
@@ -2420,9 +2427,16 @@ async function validate(forgeYamlPath) {
       });
     } else {
       try {
+        // Use -F (typed variable) to pass projectId as a GraphQL variable rather than
+        // interpolating it into the query string, even though the regex above already
+        // validates it to safe characters.
         const result = execFileSync(
           "gh",
-          ["api", "graphql", "-f", `query=query { node(id: "${projectId}") { id __typename } }`],
+          [
+            "api", "graphql",
+            "-F", `id=${projectId}`,
+            "-f", "query=query($id: ID!) { node(id: $id) { id __typename } }",
+          ],
           { stdio: ["pipe", "pipe", "pipe"], encoding: "utf-8", timeout: 10000 }
         );
         const parsed = JSON.parse(result);
