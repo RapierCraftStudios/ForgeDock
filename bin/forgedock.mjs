@@ -726,10 +726,12 @@ async function install() {
     await writeInstallModeMarker();
   }
 
-  const totalInstalled = installed + updated + copied;
+  // totalInstalled: fresh installs + copy-mode installs. Updated separately — mirrors
+  // pre-existing behaviour where only `installed > 0` (not updates) triggers this branch.
+  const totalInstalled = installed + copied;
   const totalLabel =
     totalInstalled > 0
-      ? `${green("✔")} Installed ${totalInstalled}/${files.length} commands`
+      ? `${green("✔")} Installed ${totalInstalled + updated}/${files.length} commands`
       : updated > 0
         ? `${green("✔")} Updated ${updated} command${updated === 1 ? "" : "s"}`
         : `${dim("✔")} Commands up to date (${skipped} skipped)`;
