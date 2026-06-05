@@ -1,5 +1,5 @@
 ---
-description: Independently verify if a reported issue is actually a problem before making code changes
+description: Independently verify if a reported issue is actually a problem before making code changes.
 argument-hint: [issue description or #number]
 ---
 
