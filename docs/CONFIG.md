@@ -24,6 +24,7 @@ echo "forge.yaml" >> .gitignore  # if your credentials path is sensitive
 | [`services`](#services-optional) | No | External service URLs and IDs |
 | [`review`](#review-optional) | No | Context injected into review agents |
 | [`verification`](#verification-optional) | No | Health-check patterns |
+| [`billing`](#billing-optional) | No | Enable financial integrity audit phase |
 
 ---
 
@@ -37,6 +38,7 @@ project:
   owner: "acme-org"
   repo: "acme-platform"
   description: "SaaS platform for automated data processing"
+  # forge_repo: "acme-org/acme-forge"
 ```
 
 | Field | Type | Required | Description |
@@ -45,8 +47,9 @@ project:
 | `owner` | string | **Yes** | GitHub org or username. Used as `GH_REPO` prefix and `--owner` flag |
 | `repo` | string | **Yes** | Repository name. Combined: `owner/repo` = the `GH_REPO` value in all commands |
 | `description` | string | No | One-line description used in issue templates |
+| `forge_repo` | string | No | Pipeline repository in `owner/repo` format. Set this when your ForgeDock pipeline lives in a different repo than the project being developed. Used by `audit.md`, `audit-agents.md`, and `security-audit.md` to resolve `{FORGE_REPO}` when looking up pipeline issues and commands. Defaults to `project.owner/project.repo` if omitted. |
 
-**Commands that use this section**: `work-on`, `review-pr`, `orchestrate`, `issue`, `milestone`, `cleanup`, `audit`, `pipeline-health`
+**Commands that use this section**: `work-on`, `review-pr`, `orchestrate`, `issue`, `milestone`, `cleanup`, `audit`, `audit-agents`, `security-audit`, `pipeline-health`
 
 ---
 
@@ -326,6 +329,23 @@ cloudflare:
 ```
 
 The credentials file is read directly by analytics and monitoring commands. It is never committed — add it to `.gitignore`.
+
+---
+
+## `billing` (OPTIONAL)
+
+Controls whether financial integrity checks run in `/security-audit`. Only relevant for projects with Stripe or similar billing infrastructure. When omitted or set to `false`, Phase 4 (Financial Integrity) of the security audit is skipped.
+
+```yaml
+billing:
+  enabled: false
+```
+
+| Field | Type | Required | Default | Description |
+|-------|------|----------|---------|-------------|
+| `enabled` | boolean | No | `false` | Set to `true` to enable Phase 4 (Financial Integrity) in `/security-audit`. When `false`, the billing audit phase is skipped — appropriate for projects that do not process payments or have no Stripe integration. |
+
+**Commands that use this section**: `security-audit` (Phase 4 — Financial Integrity)
 
 ---
 
