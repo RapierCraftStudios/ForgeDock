@@ -327,7 +327,7 @@ echo "=== Running: verify-env-vars.sh ==="
 # Read project-specific internal service patterns from forge.yaml (if present)
 FORGE_INTERNAL_PATTERNS=""
 if [ -f "$REPO_ROOT/forge.yaml" ]; then
-    FORGE_INTERNAL_PATTERNS=$(grep -A 20 'internal_service_patterns:' "$REPO_ROOT/forge.yaml" \
+    FORGE_INTERNAL_PATTERNS=$(grep -A 999 'internal_service_patterns:' "$REPO_ROOT/forge.yaml" \
         | grep -E '^\s*-\s+' \
         | sed 's/^\s*-\s*//' \
         | tr -d '"'"'" \
