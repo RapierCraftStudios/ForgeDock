@@ -78,6 +78,7 @@ If `forge.yaml` is missing: stop and tell the user to run `npx forgedock init` t
 | `WORKTREE_BASE` | `paths.worktree_base` | Base dir for git worktrees |
 | `STAGING_BRANCH` | `branches.staging` | Fast-lane PR target |
 | `PROJECT_BOARD_OWNER` | `project_board.owner` (or `project.owner` as fallback) | For `gh project` commands |
+| `PROJECT_BOARD_NUMBER` | `project_board.project_number` (or `1` as fallback) | Project number in `gh project` commands |
 
 **Multi-repo routing** (when `forge.yaml → repos` section is present):
 
@@ -993,7 +994,7 @@ If single-phase or final phase: check off all `[ ]` items, add PR reference.
 
 ### 6B: Project board update (Status=Done, Workflow=Merged)
 
-Resolve `PROJECT_BOARD_OWNER` and `PROJECT_BOARD_NUMBER` from `forge.yaml → project_board` (fields: `owner`, `number`). Fall back to `forge.yaml → project.owner` and project number `1` if `project_board` section is absent.
+Resolve `PROJECT_BOARD_OWNER` and `PROJECT_BOARD_NUMBER` from `forge.yaml → project_board` (fields: `owner`, `project_number`). Fall back to `forge.yaml → project.owner` and project number `1` if `project_board` section is absent.
 
 ```bash
 ISSUE_URL="https://github.com/{GH_REPO}/issues/{NUMBER}"
@@ -1001,7 +1002,7 @@ ITEM_ID=$(gh project item-list {PROJECT_BOARD_NUMBER} --owner {PROJECT_BOARD_OWN
   --jq ".items[] | select(.content.url == \"$ISSUE_URL\") | .id" 2>/dev/null | head -1)
 ```
 
-If found: set Status=Done, Workflow=Merged using project field IDs from `forge.yaml → project_board.fields`.
+If found: set Status=Done, Workflow=Merged using project field IDs from `forge.yaml → project_board.field_ids`.
 
 ### 6C: Ensure issue is closed
 
