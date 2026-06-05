@@ -414,9 +414,9 @@ When ready to deploy, merge `staging` → `main` via GitHub.
 
 Each cycle feeds the next:
 ```
-Cycle N: /failure-recon finds tier 3 headers broken → creates issue #X
-Cycle N+1: autopilot picks up #X → /work-on fixes it → merged to staging
-Cycle N+2: /failure-recon shows tier 3 pass rate improved 30% → no new issue needed
+Cycle N: /quality-gate finds recurring lint violations across 3 files → creates issue #X
+Cycle N+1: autopilot picks up #X → /work-on adds pre-commit hook → merged to staging
+Cycle N+2: /quality-gate runs clean — no new issue needed
 ```
 
 ```
