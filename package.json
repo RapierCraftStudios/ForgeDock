@@ -1,0 +1,45 @@
+{
+  "name": "forgedock",
+  "version": "1.0.0",
+  "description": "GitHub as a knowledge graph for AI agents. Autonomous dev pipeline for Claude Code.",
+  "bin": {
+    "forgedock": "./bin/forgedock.mjs"
+  },
+  "keywords": [
+    "claude-code",
+    "ai-agents",
+    "autonomous-coding",
+    "github-automation",
+    "developer-tools",
+    "ai-pipeline",
+    "code-review",
+    "llm",
+    "knowledge-graph",
+    "claude",
+    "anthropic",
+    "agentic-ai",
+    "devtools",
+    "automation"
+  ],
+  "author": "RapierCraft Studios",
+  "license": "AGPL-3.0",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/RapierCraftStudios/ForgeDock.git"
+  },
+  "homepage": "https://github.com/RapierCraftStudios/ForgeDock",
+  "bugs": {
+    "url": "https://github.com/RapierCraftStudios/ForgeDock/issues"
+  },
+  "files": [
+    "bin/",
+    "commands/",
+    "docs/",
+    "scripts/",
+    "LICENSE",
+    "README.md"
+  ],
+  "engines": {
+    "node": ">=18"
+  }
+}

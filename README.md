@@ -218,12 +218,19 @@ The path from here to there is incremental. Each piece — the knowledge store, 
 ## Install
 
 ```bash
-git clone https://github.com/RapierCraftStudios/forgedock.git
-cd forgedock
-./install.sh
+npx forgedock
 ```
 
+That's it. One command — installs all pipeline commands into your Claude Code environment.
+
 Requires [Claude Code](https://docs.anthropic.com/en/docs/claude-code) and [GitHub CLI](https://cli.github.com/). ForgeDock reads your project's `CLAUDE.md` for conventions — no extra config needed.
+
+**Other commands:**
+
+```bash
+npx forgedock update      # Pull latest commands
+npx forgedock uninstall   # Remove all commands
+```
 
 ---
 
