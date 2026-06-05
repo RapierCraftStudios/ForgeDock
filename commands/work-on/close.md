@@ -125,11 +125,11 @@ STATUS_FIELD_ID=$(yq '.project_board.field_ids.status // ""' forge.yaml 2>/dev/n
 WORKFLOW_FIELD_ID=$(yq '.project_board.field_ids.workflow // ""' forge.yaml 2>/dev/null \
   || python3 -c "import yaml,sys; c=yaml.safe_load(open('forge.yaml')); print(c.get('project_board',{}).get('field_ids',{}).get('workflow',''))" 2>/dev/null \
   || echo "")
-STATUS_DONE_OPTION_ID=$(yq '.project_board.option_ids.status_done // ""' forge.yaml 2>/dev/null \
-  || python3 -c "import yaml,sys; c=yaml.safe_load(open('forge.yaml')); print(c.get('project_board',{}).get('option_ids',{}).get('status_done',''))" 2>/dev/null \
+STATUS_DONE_OPTION_ID=$(yq '.project_board.option_ids.status.done // ""' forge.yaml 2>/dev/null \
+  || python3 -c "import yaml,sys; c=yaml.safe_load(open('forge.yaml')); print(c.get('project_board',{}).get('option_ids',{}).get('status',{}).get('done',''))" 2>/dev/null \
   || echo "")
-WORKFLOW_MERGED_OPTION_ID=$(yq '.project_board.option_ids.workflow_merged // ""' forge.yaml 2>/dev/null \
-  || python3 -c "import yaml,sys; c=yaml.safe_load(open('forge.yaml')); print(c.get('project_board',{}).get('option_ids',{}).get('workflow_merged',''))" 2>/dev/null \
+WORKFLOW_MERGED_OPTION_ID=$(yq '.project_board.option_ids.workflow.merged // ""' forge.yaml 2>/dev/null \
+  || python3 -c "import yaml,sys; c=yaml.safe_load(open('forge.yaml')); print(c.get('project_board',{}).get('option_ids',{}).get('workflow',{}).get('merged',''))" 2>/dev/null \
   || echo "")
 
 if [ -z "$PROJECT_BOARD_OWNER" ] || [ -z "$PROJECT_ID" ] || [ -z "$STATUS_FIELD_ID" ]; then
@@ -171,8 +171,10 @@ project_board:
     status: "PVTSSF_..."
     workflow: "PVTSSF_..."
   option_ids:
-    status_done: "..."
-    workflow_merged: "..."
+    status:
+      done: "..."
+    workflow:
+      merged: "..."
 ```
 To find your project IDs: `gh project list --owner {owner}` and `gh project field-list {number} --owner {owner}`.
 
