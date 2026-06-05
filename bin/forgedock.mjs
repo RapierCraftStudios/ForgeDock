@@ -193,6 +193,10 @@ class StepOrchestrator {
       console.log(`${red("Aborted")} — exiting cleanly.`);
       // Show cursor
       if (process.stdout.isTTY) process.stdout.write("\x1b[?25h");
+      // Restore terminal to cooked mode in case a select/multiSelect prompt was active
+      if (process.stdin.isTTY) {
+        try { process.stdin.setRawMode(false); } catch { /* ignore */ }
+      }
       process.exit(130);
     };
   }
