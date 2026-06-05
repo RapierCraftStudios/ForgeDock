@@ -15,6 +15,7 @@ Thumbs.db
 
 # Claude Code
 .claude/
+CLAUDE.md
 
 # Node
 node_modules/
