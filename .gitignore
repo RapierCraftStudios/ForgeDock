@@ -12,6 +12,7 @@ Thumbs.db
 # Environment
 .env
 .env.local
+forge.yaml
 
 # forge.yaml is the user-configured copy of forge.yaml.example.
 # It may contain local paths, private service URLs, and project board IDs.
