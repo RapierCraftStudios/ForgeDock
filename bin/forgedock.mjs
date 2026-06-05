@@ -483,6 +483,64 @@ async function findMarkdownFiles(dir) {
 }
 
 // ---------------------------------------------------------------------------
+// Command category mapping
+// ---------------------------------------------------------------------------
+
+/**
+ * Maps command name stems (filename without .md extension, no path prefix)
+ * to display categories. Sub-commands (e.g. work-on/build/architect) are
+ * looked up by their stem — unmapped names fall into "Other".
+ */
+const COMMAND_CATEGORIES = {
+  // Pipeline — core orchestration commands
+  "work-on":           "Pipeline",
+  "investigate":       "Pipeline",
+  "build":             "Pipeline",
+  "architect":         "Pipeline",
+  "context":           "Pipeline",
+  "implement":         "Pipeline",
+  "review":            "Pipeline",
+  "decompose":         "Pipeline",
+  "close":             "Pipeline",
+  "review-pr":         "Pipeline",
+  "review-pr-agents":  "Pipeline",
+  "review-pr-staging": "Pipeline",
+  "orchestrate":       "Pipeline",
+  "issue":             "Pipeline",
+  "milestone":         "Pipeline",
+  "quality-gate":      "Pipeline",
+  "work-on-monolithic":"Pipeline",
+
+  // Operations — ongoing automation and monitoring
+  "autopilot":         "Operations",
+  "analytics":         "Operations",
+  "geo-audit":         "Operations",
+  "security-audit":    "Operations",
+  "pipeline-health":   "Operations",
+  "audit":             "Operations",
+  "audit-agents":      "Operations",
+  "qa-sweep":          "Operations",
+  "forge-stats":       "Operations",
+  "sync-ecosystem":    "Operations",
+
+  // Incident — response and recovery
+  "incident-response": "Incident",
+  "rollback":          "Incident",
+  "deploy-info":       "Incident",
+  "failure-recon":     "Incident",
+
+  // Ecosystem — project management utilities
+  "validate":          "Ecosystem",
+  "cleanup":           "Ecosystem",
+
+  // Setup — initial configuration
+  "forgedock-init":    "Setup",
+};
+
+/** Canonical display order for categories. */
+const CATEGORY_ORDER = ["Pipeline", "Operations", "Incident", "Ecosystem", "Setup", "Other"];
+
+// ---------------------------------------------------------------------------
 // Legacy commands (install, uninstall, update, init, help)
 // ---------------------------------------------------------------------------
 
@@ -491,8 +549,8 @@ async function install() {
 
   console.log("");
   console.log(`${BOLD}ForgeDock${RESET} — Installing pipeline commands`);
-  console.log(`  Source: ${CYAN}${COMMANDS_DIR}/${RESET}`);
-  console.log(`  Target: ${CYAN}${TARGET_DIR}/${RESET}`);
+  console.log(`  Source: ${dim(COMMANDS_DIR + "/")}`);
+  console.log(`  Target: ${dim(TARGET_DIR + "/")}`);
   console.log("");
 
   await mkdir(TARGET_DIR, { recursive: true });
@@ -501,6 +559,17 @@ async function install() {
   let installed = 0;
   let updated = 0;
   let skipped = 0;
+
+  /** @type {Array<{rel: string, action: 'installed'|'updated'|'skipped'|'conflict'}>} */
+  const results = [];
+  /** @type {string[]} Relative paths of files that could not be symlinked (regular file conflict) */
+  const conflicts = [];
+
+  // -------------------------------------------------------------------------
+  // Phase 1: Symlink loop with live progress bar
+  // -------------------------------------------------------------------------
+
+  const bar = createProgressBar(files.length, { label: "  Installing commands..." });
 
   for (const file of files) {
     const rel = relative(COMMANDS_DIR, file);
@@ -516,35 +585,109 @@ async function install() {
         const current = await readlink(target);
         if (current === file) {
           skipped++;
+          results.push({ rel, action: "skipped" });
+          bar.tick(1, dim(rel));
         } else {
           await symlink(file, target + ".tmp");
           const { rename } = await import("fs/promises");
           await rename(target + ".tmp", target);
-          console.log(`  ${YELLOW}Updated${RESET}: ${rel}`);
           updated++;
+          results.push({ rel, action: "updated" });
+          bar.tick(1, rel);
         }
       } else {
-        console.log(
-          `  ${YELLOW}WARNING${RESET}: ${rel} is a regular file — skipping (remove it manually to let ForgeDock manage it)`
-        );
+        // Regular file is blocking the symlink — record as conflict
         skipped++;
+        conflicts.push(rel);
+        results.push({ rel, action: "conflict" });
+        bar.tick(1, rel);
       }
     } catch {
       // Doesn't exist — create symlink
       await symlink(file, target);
-      console.log(`  ${GREEN}Installed${RESET}: ${rel}`);
       installed++;
+      results.push({ rel, action: "installed" });
+      bar.tick(1, rel);
     }
   }
 
-  console.log("");
-  console.log(
-    `Done. ${GREEN}Installed: ${installed}${RESET}, Updated: ${updated}, Skipped: ${skipped}`
-  );
-  console.log("");
+  const totalLabel =
+    installed > 0
+      ? `${green("✔")} Installed ${installed + updated}/${files.length} commands`
+      : `${dim("✔")} Commands up to date (${skipped} skipped)`;
+  bar.done(totalLabel);
 
-  // Set FORGE_HOME in shell profiles
-  let profileUpdated = false;
+  // -------------------------------------------------------------------------
+  // Phase 2: Category grouping summary
+  // -------------------------------------------------------------------------
+
+  // Group installed/updated commands by category
+  /** @type {Map<string, string[]>} category → command stems */
+  const categoryMap = new Map(CATEGORY_ORDER.map((c) => [c, []]));
+
+  for (const { rel, action } of results) {
+    if (action === "skipped" || action === "conflict") continue;
+    const stem = rel.replace(/\.md$/, "").split("/").pop() ?? rel;
+    const category = COMMAND_CATEGORIES[stem] ?? "Other";
+    const bucket = categoryMap.get(category) ?? categoryMap.get("Other") ?? [];
+    if (!categoryMap.has(category)) categoryMap.set(category, bucket);
+    bucket.push(stem);
+  }
+
+  // Build category lines — only show categories with at least one command
+  const categoryLines = [];
+  for (const cat of CATEGORY_ORDER) {
+    const cmds = categoryMap.get(cat) ?? [];
+    if (cmds.length === 0) continue;
+    const label = cat.padEnd(12);
+    const cmdList = cmds.join(", ");
+    const count = `(${cmds.length})`;
+    categoryLines.push(`  ${bold(cyan(label))}  ${cmdList}  ${dim(count)}`);
+  }
+
+  if (categoryLines.length > 0) {
+    console.log("");
+    process.stdout.write(box(["", ...categoryLines, ""], { title: "Commands installed" }));
+  }
+
+  // -------------------------------------------------------------------------
+  // Phase 3: Summary box — total counts
+  // -------------------------------------------------------------------------
+
+  const summaryLines = [
+    "",
+    `  ${green("Installed")}  ${bold(String(installed))}`,
+    `  ${yellow("Updated")}    ${bold(String(updated))}`,
+    `  ${dim("Skipped")}    ${dim(String(skipped - conflicts.length))}`,
+    "",
+  ];
+  process.stdout.write(box(summaryLines, { title: "Summary" }));
+
+  // -------------------------------------------------------------------------
+  // Phase 4: Conflict highlighting (prominent red block)
+  // -------------------------------------------------------------------------
+
+  if (conflicts.length > 0) {
+    console.log("");
+    const conflictLines = [
+      "",
+      `  ${bold(red("⚠  Regular files blocking symlink creation:"))}`,
+      "",
+      ...conflicts.map((c) => `    ${red("✖")}  ${c}`),
+      "",
+      `  ${dim("To let ForgeDock manage these, remove or rename each file:")}`,
+      ...conflicts.map((c) => `    ${dim(`rm ~/.claude/commands/${c}`)}`),
+      "",
+    ];
+    process.stdout.write(box(conflictLines, { title: `${conflicts.length} conflict${conflicts.length === 1 ? "" : "s"}` }));
+  }
+
+  // -------------------------------------------------------------------------
+  // Phase 5: FORGE_HOME setup — distinct status line
+  // -------------------------------------------------------------------------
+
+  console.log("");
+  let forgeHomeSet = false;
   for (const profile of [
     join(process.env.HOME ?? "", ".bashrc"),
     join(process.env.HOME ?? "", ".zshrc"),
@@ -556,23 +699,29 @@ async function install() {
           profile,
           `\n# ForgeDock — autonomous development pipeline\nexport FORGE_HOME="${FORGE_HOME}"\n`
         );
-        console.log(`  Added FORGE_HOME to ${profile}`);
-        profileUpdated = true;
+        const profileShort = profile.replace(process.env.HOME ?? "", "~");
+        console.log(`  ${green("✔")}  ${bold("FORGE_HOME")} set in ${cyan(profileShort)}`);
+        forgeHomeSet = true;
       }
     }
   }
 
+  if (!forgeHomeSet) {
+    console.log(`  ${dim("✔")}  ${dim("FORGE_HOME already set in shell profile")}`);
+  }
+
+  console.log("");
   console.log(
-    `${GREEN}ForgeDock commands are now available as slash commands in any Claude Code session.${RESET}`
+    `${green("ForgeDock commands are now available as slash commands in any Claude Code session.")}`
   );
   console.log("");
 
   // forge.yaml advisory — guide users to run init if config is missing
   const forgeYamlPath = join(process.cwd(), "forge.yaml");
   if (!existsSync(forgeYamlPath)) {
-    console.log(`${YELLOW}No forge.yaml found in current directory.${RESET}`);
+    console.log(`${yellow("No forge.yaml found in current directory.")}`);
     console.log(
-      `  Run ${CYAN}npx forgedock init${RESET} in your project root to generate forge.yaml`
+      `  Run ${cyan("npx forgedock init")} in your project root to generate forge.yaml`
     );
     console.log("");
   }
