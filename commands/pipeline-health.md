@@ -43,7 +43,7 @@ echo "Target project: $REPO"
 
 ```bash
 # Last pipeline-health run (if any) — from Forge git log
-LAST_RUN=$(cd $FORGE_HOME && git log --all --oneline --grep="pipeline-health: $REPO" --format="%aI" -1 2>/dev/null || echo "")
+LAST_RUN=$(cd "$FORGE_HOME" && git log --all --oneline --grep="pipeline-health: $REPO" --format="%aI" -1 2>/dev/null || echo "")
 if [ -z "$LAST_RUN" ]; then
     # First run — analyze last 30 days
     SINCE=$(date -d "30 days ago" +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || date -v-30d +%Y-%m-%dT%H:%M:%SZ)
@@ -165,7 +165,7 @@ Run ALL of these in parallel (note: Phase 2I fetches trajectory comments per iss
 ### 2A: Forge changelog (what changed in the pipeline itself)
 
 ```bash
-cd $FORGE_HOME
+cd "$FORGE_HOME"
 git log --oneline --since="$SINCE" -- commands/ docs/
 ```
 
