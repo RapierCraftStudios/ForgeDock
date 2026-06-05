@@ -16,6 +16,7 @@ jobs:
     permissions:
       contents: write
       id-token: write
+      packages: write
 
     steps:
       - uses: actions/checkout@v4
@@ -36,8 +37,26 @@ jobs:
       - name: Publish to npm (OIDC trusted publishing)
         run: npm publish --provenance --access public
 
+      - name: Publish to GitHub Packages
+        run: |
+          echo "//npm.pkg.github.com/:_authToken=${{ secrets.GITHUB_TOKEN }}" > .npmrc
+          echo "@rapiercraftstudios:registry=https://npm.pkg.github.com" >> .npmrc
+          npm pkg set name="@rapiercraftstudios/forgedock"
+          npm publish --access public
+          npm pkg set name="forgedock"
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
       - name: Push version bump
         run: |
           git add package.json
           git commit -m "chore: bump version to ${{ env.VERSION }} [skip ci]"
           git push
+
+      - name: Create GitHub Release
+        run: |
+          gh release create "v${{ env.VERSION }}" \
+            --title "v${{ env.VERSION }}" \
+            --generate-notes
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
