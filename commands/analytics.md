@@ -32,9 +32,9 @@ if [ ! -f "$FORGE_YAML" ]; then
   exit 1
 fi
 
-# Read config with Python (YAML parser)
+# Read config with Python (YAML parser — values are shell-quoted via shlex.quote)
 ANALYTICS_CONFIG=$(python3 -c "
-import yaml, sys
+import yaml, sys, shlex
 cfg = yaml.safe_load(open('$FORGE_YAML'))
 svc = cfg.get('services', {})
 analytics = svc.get('analytics', None)
@@ -45,19 +45,19 @@ paths = cfg.get('paths', {})
 creds = paths.get('credentials', {})
 project = cfg.get('project', {})
 board = cfg.get('project_board', {})
-print('CREDENTIALS_FILE=' + str(creds.get('file', '')))
-print('DOMAIN=' + str(svc.get('domain', '')))
-print('SITE_URL=' + str(svc.get('gsc_property', '')))
-print('HISTORY_FILE=' + str(analytics.get('history_file', '')))
-print('UMAMI_URL=' + str(analytics.get('umami', {}).get('url', '')))
-print('UMAMI_WEBSITE_ID=' + str(analytics.get('umami', {}).get('website_id', '')))
-print('GA4_PROPERTY_ID=' + str(analytics.get('ga4', {}).get('property_id', '')))
-print('GA4_SERVICE_ACCOUNT_KEY=' + str(analytics.get('ga4', {}).get('service_account_key', '')))
-print('REPO_PATH=' + str(cfg.get('paths', {}).get('root', '')))
-print('GH_REPO=' + str(project.get('owner', '')) + '/' + str(project.get('repo', '')))
-print('PROJECT_BOARD_OWNER=' + str(board.get('owner', project.get('owner', ''))))
-print('PROJECT_NUMBER=' + str(board.get('project_number', '')))
-print('PROJECT_ID=' + str(board.get('project_id', '')))
+print('CREDENTIALS_FILE=' + shlex.quote(str(creds.get('file', ''))))
+print('DOMAIN=' + shlex.quote(str(svc.get('domain', ''))))
+print('SITE_URL=' + shlex.quote(str(svc.get('gsc_property', ''))))
+print('HISTORY_FILE=' + shlex.quote(str(analytics.get('history_file', ''))))
+print('UMAMI_URL=' + shlex.quote(str(analytics.get('umami', {}).get('url', ''))))
+print('UMAMI_WEBSITE_ID=' + shlex.quote(str(analytics.get('umami', {}).get('website_id', ''))))
+print('GA4_PROPERTY_ID=' + shlex.quote(str(analytics.get('ga4', {}).get('property_id', ''))))
+print('GA4_SERVICE_ACCOUNT_KEY=' + shlex.quote(str(analytics.get('ga4', {}).get('service_account_key', ''))))
+print('REPO_PATH=' + shlex.quote(str(cfg.get('paths', {}).get('root', ''))))
+print('GH_REPO=' + shlex.quote(str(project.get('owner', '')) + '/' + str(project.get('repo', ''))))
+print('PROJECT_BOARD_OWNER=' + shlex.quote(str(board.get('owner', project.get('owner', '')))))
+print('PROJECT_NUMBER=' + shlex.quote(str(board.get('project_number', ''))))
+print('PROJECT_ID=' + shlex.quote(str(board.get('project_id', ''))))
 ")
 
 if echo "$ANALYTICS_CONFIG" | grep -q "MISSING_ANALYTICS_CONFIG"; then
@@ -82,6 +82,7 @@ if echo "$ANALYTICS_CONFIG" | grep -q "MISSING_ANALYTICS_CONFIG"; then
 fi
 
 # Export resolved constants — all downstream phases use these variables
+# Values are shell-quoted by the Python block above; eval is safe against metacharacters in forge.yaml values
 eval "$ANALYTICS_CONFIG"
 ```
 
