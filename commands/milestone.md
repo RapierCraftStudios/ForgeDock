@@ -13,28 +13,51 @@ Milestones are the top-level planning unit. They group related issues into a shi
 
 **You have access to ALL tools** — Task tool, Skill tool, sub-agents, everything.
 
+## Config Resolution
+
+Read `forge.yaml` at the project root to resolve all project-specific variables before running any commands:
+
+```bash
+# Parse forge.yaml for project context
+GH_REPO=$(yq '.project.owner + "/" + .project.repo' forge.yaml)
+GH_FLAG="-R $GH_REPO"
+REPO_PATH=$(yq '.paths.root' forge.yaml)
+PROJECT_NAME=$(yq '.project.name' forge.yaml)
+STAGING_BRANCH=$(yq '.branches.staging' forge.yaml)
+PROJECT_BOARD_OWNER=$(yq '.project_board.owner // .project.owner' forge.yaml)
+PROJECT_NUMBER=$(yq '.project_board.project_number // "1"' forge.yaml)
+PROJECT_ID=$(yq '.project_board.project_id' forge.yaml)
+# Build satellite repo map from repos.satellites list
+# Each satellite: { prefix, repo, staging_branch }
+```
+
+All `{GH_REPO}`, `{GH_FLAG}`, `{REPO_PATH}`, `{PROJECT_NAME}`, `{STAGING_BRANCH}`, `{PROJECT_BOARD_OWNER}`, `{PROJECT_NUMBER}`, and `{PROJECT_ID}` references below are populated from `forge.yaml`.
+
+---
+
 ## Multi-Repo Support
 
-Milestones can span the AlterLab ecosystem. Project context (repo map, paths, conventions) comes from each project's `CLAUDE.md`.
+Milestones can span multiple repositories. Project context (repo map, paths, conventions) comes from `forge.yaml`.
 
 ### Cross-Repo Milestones
 
-Some milestones (e.g., "BYOS Authenticated Scraping") require changes across multiple repos — the platform, SDKs, MCP server, etc. For these:
+Some milestones require changes across multiple repos — the platform, SDKs, satellite services, etc. For these:
 
-- **The milestone is created in the primary repo** (usually `RapierCraft/AlterLab`)
-- **Issues are created in the repo where the code lives** — e.g., MCP server issues go to `RapierCraft/alterlab-mcp-server`
+- **The milestone is created in the primary repo** (`{GH_REPO}` — the default repo from `forge.yaml`)
+- **Issues are created in the repo where the code lives** — satellite repos come from `forge.yaml → repos.satellites`
 - **Each repo gets its own milestone branch** (`milestone/{slug}`) if it has issues in the milestone
-- **Issues reference the parent milestone** in their body: `Part of cross-repo milestone: **{TITLE}** (primary: RapierCraft/AlterLab)`
+- **Issues reference the parent milestone** in their body: `Part of cross-repo milestone: **{TITLE}** (primary: {GH_REPO})`
 
 ### Repo Prefixes (same as `/work-on`)
 
+Prefixes and repos are defined in `forge.yaml → repos.satellites`. Read the config to build the routing table:
+
 | Prefix | Repo |
 |--------|------|
-| _(none)_ | `RapierCraft/AlterLab` (default) |
-| `mcp:` | `RapierCraft/alterlab-mcp-server` |
-| `n8n:` | `RapierCraft/n8n-nodes-alterlab` |
+| _(none)_ | `{GH_REPO}` (default) |
+| `{SATELLITE_PREFIX}:` | `{SATELLITE_REPO}` (from `forge.yaml → repos.satellites`) |
 
-When decomposing a milestone, tag each proposed issue with its target repo. Use `-R` flag for non-default repos.
+When decomposing a milestone, tag each proposed issue with its target repo. Use `-R {SATELLITE_REPO}` flag for non-default repos.
 
 ---
 
@@ -76,7 +99,7 @@ Capture the milestone number from the response.
 ### Step 3: Create the milestone branch
 
 ```bash
-cd {REPO_PATH}  # default: /home/mrdubey/projects/ScraperAPI/alterlab
+cd {REPO_PATH}
 git fetch origin main
 git branch milestone/{slug} origin/main
 git push origin milestone/{slug}
@@ -86,7 +109,7 @@ git push origin milestone/{slug}
 
 Use a Task sub-agent to analyze the milestone scope and propose issues:
 
-> You are planning the scope for milestone "{TITLE}" on the AlterLab platform.
+> You are planning the scope for milestone "{TITLE}" on the {PROJECT_NAME} platform.
 >
 > **Milestone description**: {DESCRIPTION}
 >
@@ -95,19 +118,16 @@ Use a Task sub-agent to analyze the milestone scope and propose issues:
 > - Specific enough for the `/work-on` pipeline to pick up and implement
 > - Ordered by dependencies (if B needs A's API, A comes first)
 >
-> **AlterLab ecosystem context**:
-> - **Platform** (default): FastAPI backend (services/api/, services/worker/), Next.js frontend (web/), Docker microservices, PostgreSQL, Redis
-> - **Python SDK** (sdk/python/): Async client, httpx, pydantic
-> - **Node SDK** (sdk/node/): TypeScript client, axios
-> - **MCP Server** (alterlab-mcp-server/ — SEPARATE REPO): MCP tools for AI assistants, TypeScript, @modelcontextprotocol/sdk
-> - **n8n Node** (n8n-nodes-alterlab/ — SEPARATE REPO): n8n community node, TypeScript
-> - **Chrome Extension** (tools/chrome-extension/): Cookie capture for BYOS
+> **Project ecosystem context** (from `forge.yaml`):
+> - **Primary repo** (`{GH_REPO}`): The main project codebase at `{REPO_PATH}`
+> - **Tech stack**: {review.tech_stack from forge.yaml, or read CLAUDE.md for project context}
+> - **Satellite repos**: Read from `forge.yaml → repos.satellites` (each has a prefix and repo)
 >
-> Check the existing codebase to understand current architecture before proposing changes.
+> Check the existing codebase at `{REPO_PATH}` to understand current architecture before proposing changes.
 >
 > **Output format**: Numbered list of proposed issues, each with:
-> - **Title**: Actionable, specific (e.g., "Add per-token billing engine for LLM extraction")
-> - **Repo**: Which repo this issue belongs to (`alterlab`, `mcp`, `n8n`, or platform default)
+> - **Title**: Actionable, specific
+> - **Repo**: Which repo this issue belongs to (default or satellite prefix from forge.yaml)
 > - **Type**: `feature`, `bug`, `refactor`, `infra`
 > - **Priority**: P1-P3
 > - **Size**: S (1-2 files), M (3-5 files), L (6+ files)
@@ -126,8 +146,8 @@ Present the proposed issues to the user. Ask:
 For each approved issue, create it in the **correct repo** based on the scope analysis:
 
 ```bash
-# For AlterLab issues (default):
-gh issue create \
+# For default repo issues:
+gh issue create {GH_FLAG} \
   --title "{fix|feat|refactor}: {issue_title}" \
   --label "{type},{priority}" \
   --milestone "{TITLE}" \
@@ -190,7 +210,7 @@ Files that need changes:
 
 ## Context
 
-Part of cross-repo milestone: **{MILESTONE_TITLE}** (primary: RapierCraft/AlterLab)
+Part of cross-repo milestone: **{MILESTONE_TITLE}** (primary: {GH_REPO})
 **Type**: {feature|bug|refactor|infra}
 
 ## Dependencies
@@ -202,17 +222,17 @@ BODY_EOF
 
 ### Step 6B: Add issues to Project board
 
-For each created issue, add it to the GitHub Project board with initial fields. Reference `~/projects/forge/docs/WORKFLOW.md` → "Project Board Integration" for field IDs.
+For each created issue, add it to the GitHub Project board with initial fields. Reference `forge.yaml → project_board` for field IDs, or `docs/CONFIG.md` → "Project Board" for lookup commands.
 
 ```bash
 for ISSUE_NUM in {created_issue_numbers}; do
   ISSUE_URL="https://github.com/{GH_REPO}/issues/${ISSUE_NUM}"
-  ITEM_ID=$(gh project item-add 1 --owner RapierCraft --url "$ISSUE_URL" --format json --jq '.id' 2>/dev/null)
+  ITEM_ID=$(gh project item-add {PROJECT_NUMBER} --owner {PROJECT_BOARD_OWNER} --url "$ISSUE_URL" --format json --jq '.id' 2>/dev/null)
   if [ -n "$ITEM_ID" ]; then
-    gh project item-edit --project-id PVT_kwHOCx3gR84BSK2L --id "$ITEM_ID" --field-id PVTSSF_lAHOCx3gR84BSK2Lzg_yF6E --single-select-option-id f75ad846 2>/dev/null || true  # Status=Todo
-    gh project item-edit --project-id PVT_kwHOCx3gR84BSK2L --id "$ITEM_ID" --field-id PVTSSF_lAHOCx3gR84BSK2Lzg_yF98 --single-select-option-id 4ff6f9e6 2>/dev/null || true  # Lane=Feature
-    gh project item-edit --project-id PVT_kwHOCx3gR84BSK2L --id "$ITEM_ID" --field-id PVTSSF_lAHOCx3gR84BSK2Lzg_yF-o --single-select-option-id {COMPONENT_OPTION_ID} 2>/dev/null || true  # Component (from repo — see WORKFLOW.md mapping)
-    gh project item-edit --project-id PVT_kwHOCx3gR84BSK2L --id "$ITEM_ID" --field-id PVTSSF_lAHOCx3gR84BSK2Lzg_yF8o --single-select-option-id {PRIORITY_OPTION_ID} 2>/dev/null || true  # Priority (from label)
+    gh project item-edit --project-id {PROJECT_ID} --id "$ITEM_ID" --field-id {PROJECT_BOARD_STATUS_FIELD_ID} --single-select-option-id {PROJECT_BOARD_STATUS_TODO_ID} 2>/dev/null || true  # Status=Todo
+    gh project item-edit --project-id {PROJECT_ID} --id "$ITEM_ID" --field-id {PROJECT_BOARD_LANE_FIELD_ID} --single-select-option-id {PROJECT_BOARD_LANE_FEATURE_ID} 2>/dev/null || true  # Lane=Feature
+    gh project item-edit --project-id {PROJECT_ID} --id "$ITEM_ID" --field-id {PROJECT_BOARD_COMPONENT_FIELD_ID} --single-select-option-id {COMPONENT_OPTION_ID} 2>/dev/null || true  # Component (from forge.yaml → project_board.fields)
+    gh project item-edit --project-id {PROJECT_ID} --id "$ITEM_ID" --field-id {PROJECT_BOARD_PRIORITY_FIELD_ID} --single-select-option-id {PRIORITY_OPTION_ID} 2>/dev/null || true  # Priority (from label)
   fi
 done
 ```
@@ -308,13 +328,13 @@ Wait for confirmation.
 Before shipping, ensure the milestone branch is up to date with `staging` (picks up any fast-lane fixes that accumulated since the milestone branch was created):
 
 ```bash
-cd {REPO_PATH}  # default: /home/mrdubey/projects/ScraperAPI/alterlab
-git fetch origin staging milestone/{slug}
+cd {REPO_PATH}
+git fetch origin {STAGING_BRANCH} milestone/{slug}
 git checkout milestone/{slug}
-git merge origin/staging --no-edit
+git merge origin/{STAGING_BRANCH} --no-edit
 # If conflicts, report to user and STOP — do not auto-resolve
 git push origin milestone/{slug}
-git checkout staging
+git checkout {STAGING_BRANCH}
 ```
 
 ### Step 2.5: Pre-Merge Hunk-Loss Audit (MANDATORY before creating PR)
@@ -325,12 +345,12 @@ This step identifies "at-risk hunks" — staging-only content in files the miles
 
 ```bash
 cd {REPO_PATH}
-git fetch origin staging milestone/{slug}
+git fetch origin {STAGING_BRANCH} milestone/{slug}
 
 echo "=== Pre-Merge Hunk-Loss Audit ==="
 
-# Files the milestone branch changes vs staging
-MILESTONE_FILES=$(git diff --name-only origin/staging...origin/milestone/{slug})
+# Files the milestone branch changes vs the staging branch
+MILESTONE_FILES=$(git diff --name-only origin/{STAGING_BRANCH}...origin/milestone/{slug})
 
 if [ -z "$MILESTONE_FILES" ]; then
     echo "No files changed by milestone vs staging — nothing to audit. Proceeding to PR creation."
@@ -339,8 +359,8 @@ else
     # NOTE: $MILESTONE_FILES is intentionally unquoted here — word-splitting is required to pass
     # each filename as a separate path argument to git diff. Quoting would collapse the newline-
     # separated list into a single argument matching no real path, silently producing an empty diff.
-    # Filenames with spaces are not present in this codebase (AlterLab/Forge use standard paths).
-    AT_RISK=$(git diff origin/milestone/{slug}...origin/staging -- $MILESTONE_FILES 2>/dev/null)
+    # Filenames with spaces are not expected in standard project paths.
+    AT_RISK=$(git diff origin/milestone/{slug}...origin/{STAGING_BRANCH} -- $MILESTONE_FILES 2>/dev/null)
     AT_RISK_COUNT=$(echo "$AT_RISK" | grep -c '^@@' 2>/dev/null || echo 0)
 
     if [ "$AT_RISK_COUNT" -eq 0 ]; then
@@ -350,9 +370,9 @@ else
         echo "Affected files:"
         echo "$AT_RISK" | grep '^--- a/' | sed 's|^--- a/||'
 
-        echo "Rebasing milestone/{slug} onto origin/staging to absorb at-risk hunks..."
+        echo "Rebasing milestone/{slug} onto origin/{STAGING_BRANCH} to absorb at-risk hunks..."
         git checkout milestone/{slug}
-        git rebase origin/staging
+        git rebase origin/{STAGING_BRANCH}
 
         REBASE_EXIT=$?
         if [ "$REBASE_EXIT" -ne 0 ]; then
@@ -362,21 +382,21 @@ else
 
             # Abort the failed rebase and return to a clean state
             git rebase --abort 2>/dev/null || true
-            git checkout staging
+            git checkout {STAGING_BRANCH}
 
             # Truncate AT_RISK to safe size for issue body (avoid shell quoting issues with large diffs)
             AT_RISK_SNIPPET=$(echo "$AT_RISK" | head -60 | sed "s/'/'\\\\''/g")
 
-            gh issue create -R {GH_REPO} \
+            gh issue create {GH_FLAG} \
               --title "fix(milestone): rebase conflict during hunk-loss audit for milestone/{slug}" \
               --body "$(cat <<ISSUE_EOF
 ## Problem
 
-The pre-merge hunk-loss audit for milestone \`{slug}\` detected $AT_RISK_COUNT at-risk staging hunks, then attempted to rebase \`milestone/{slug}\` onto \`origin/staging\` to absorb them. The rebase conflicted and was aborted. Manual resolution is required before the milestone can ship.
+The pre-merge hunk-loss audit for milestone \`{slug}\` detected $AT_RISK_COUNT at-risk staging hunks, then attempted to rebase \`milestone/{slug}\` onto \`origin/{STAGING_BRANCH}\` to absorb them. The rebase conflicted and was aborted. Manual resolution is required before the milestone can ship.
 
 ## Root Cause
 
-Divergent changes between \`milestone/{slug}\` and \`origin/staging\` cannot be automatically rebased. Conflicting files must be resolved manually.
+Divergent changes between \`milestone/{slug}\` and \`origin/{STAGING_BRANCH}\` cannot be automatically rebased. Conflicting files must be resolved manually.
 
 ## Affected Files
 
@@ -401,7 +421,7 @@ ${AT_RISK_SNIPPET}
 Resolve the rebase conflict manually:
 \`\`\`bash
 git checkout milestone/{slug}
-git rebase origin/staging
+git rebase origin/{STAGING_BRANCH}
 # resolve conflicts in the files listed above
 git rebase --continue
 git push origin milestone/{slug} --force-with-lease
@@ -421,7 +441,7 @@ ISSUE_EOF
         # Rebase succeeded — push the rebased branch
         git push origin milestone/{slug} --force-with-lease
         echo "Rebase complete. Milestone branch now includes all $AT_RISK_COUNT at-risk staging hunks."
-        git checkout staging
+        git checkout {STAGING_BRANCH}
     fi
 fi
 ```
@@ -430,11 +450,11 @@ fi
 
 ```bash
 # Get the full diff summary (computed after Step 2.5 rebase, so it reflects the final state)
-DIFF_STATS=$(git diff origin/staging...origin/milestone/{slug} --stat)
-COMMIT_LOG=$(git log origin/staging..origin/milestone/{slug} --oneline)
+DIFF_STATS=$(git diff origin/{STAGING_BRANCH}...origin/milestone/{slug} --stat)
+COMMIT_LOG=$(git log origin/{STAGING_BRANCH}..origin/milestone/{slug} --oneline)
 
-gh pr create \
-  --base staging \
+gh pr create {GH_FLAG} \
+  --base {STAGING_BRANCH} \
   --head milestone/{slug} \
   --title "Ship: {MILESTONE_TITLE}" \
   --body "$(cat <<'PR_EOF'
@@ -446,8 +466,8 @@ gh pr create \
 {list of all closed issues in this milestone with PR references}
 
 ## Hunk-Loss Audit
-{If Step 2.5 rebase ran: "✓ Rebase completed — {AT_RISK_COUNT} at-risk staging hunks absorbed into milestone branch before this PR was created. All staging content is preserved."}
-{If Step 2.5 found no at-risk hunks: "✓ Clean — no at-risk staging hunks detected. Safe to merge."}
+{If Step 2.5 rebase ran: "✓ Rebase completed — {AT_RISK_COUNT} at-risk staging-branch hunks absorbed into milestone branch before this PR was created. All staging content is preserved."}
+{If Step 2.5 found no at-risk hunks: "✓ Clean — no at-risk staging-branch hunks detected. Safe to merge."}
 
 > ⚠ **IMPORTANT: Merge this PR using a MERGE COMMIT, not squash.** Squash-merging a milestone PR can silently drop staging-only hunks in files the milestone touches. Use the "Create a merge commit" option in the GitHub UI, or `gh pr merge {PR_NUMBER} --merge`.
 
@@ -544,19 +564,20 @@ To deploy: merge `staging → main` via GitHub web UI when ready.
 
 ## Action: Sync Milestone Branch
 
-Syncs the milestone branch with the latest `main` to pick up fast-lane fixes. Run periodically on long-lived milestones.
+Syncs the milestone branch with the latest default branch to pick up fast-lane fixes. Run periodically on long-lived milestones.
 
 ```bash
-cd {REPO_PATH}  # default: /home/mrdubey/projects/ScraperAPI/alterlab
-git fetch origin main milestone/{slug}
+cd {REPO_PATH}
+DEFAULT_BRANCH=$(yq '.branches.default' forge.yaml)
+git fetch origin $DEFAULT_BRANCH milestone/{slug}
 git checkout milestone/{slug}
-git merge origin/main --no-edit
+git merge origin/$DEFAULT_BRANCH --no-edit
 # If conflicts, report to user and STOP
 git push origin milestone/{slug}
-git checkout main
+git checkout $DEFAULT_BRANCH
 ```
 
-Report: "Synced milestone/{slug} with latest main. {N} new commits from main incorporated."
+Report: "Synced milestone/{slug} with latest `{DEFAULT_BRANCH}`. {N} new commits incorporated."
 
 ---
 

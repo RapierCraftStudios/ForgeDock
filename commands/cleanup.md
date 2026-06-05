@@ -13,6 +13,25 @@ Scan the entire development environment for rot and fix it. This is a maintenanc
 
 ---
 
+## Config Resolution
+
+Read `forge.yaml` at the project root to resolve all project-specific variables before running any commands:
+
+```bash
+# Parse forge.yaml for project context
+GH_REPO=$(yq '.project.owner + "/" + .project.repo' forge.yaml)
+GH_FLAG="-R $GH_REPO"
+REPO_PATH=$(yq '.paths.root' forge.yaml)
+STAGING_BRANCH=$(yq '.branches.staging' forge.yaml)
+PROJECT_BOARD_OWNER=$(yq '.project_board.owner // .project.owner' forge.yaml)
+PROJECT_NUMBER=$(yq '.project_board.project_number // "1"' forge.yaml)
+PROJECT_ID=$(yq '.project_board.project_id' forge.yaml)
+```
+
+All `{GH_REPO}`, `{GH_FLAG}`, `{REPO_PATH}`, `{STAGING_BRANCH}`, `{PROJECT_BOARD_OWNER}`, `{PROJECT_NUMBER}`, and `{PROJECT_ID}` references below are populated from `forge.yaml`.
+
+---
+
 ## Command Router
 
 | Input | Action |
@@ -34,16 +53,16 @@ These labels should only exist on OPEN issues. If a closed issue has them, the p
 
 ```bash
 echo "=== Stale workflow:in-review ==="
-gh issue list -R RapierCraft/AlterLab --state closed --label "workflow:in-review" --limit 100 --json number,title --jq '.[] | "#\(.number) — \(.title)"'
+gh issue list {GH_FLAG} --state closed --label "workflow:in-review" --limit 100 --json number,title --jq '.[] | "#\(.number) — \(.title)"'
 
 echo "=== Stale workflow:building ==="
-gh issue list -R RapierCraft/AlterLab --state closed --label "workflow:building" --limit 100 --json number,title --jq '.[] | "#\(.number) — \(.title)"'
+gh issue list {GH_FLAG} --state closed --label "workflow:building" --limit 100 --json number,title --jq '.[] | "#\(.number) — \(.title)"'
 
 echo "=== Stale workflow:investigating ==="
-gh issue list -R RapierCraft/AlterLab --state closed --label "workflow:investigating" --limit 100 --json number,title --jq '.[] | "#\(.number) — \(.title)"'
+gh issue list {GH_FLAG} --state closed --label "workflow:investigating" --limit 100 --json number,title --jq '.[] | "#\(.number) — \(.title)"'
 
 echo "=== Stale needs-validation ==="
-gh issue list -R RapierCraft/AlterLab --state closed --label "needs-validation" --limit 100 --json number,title --jq '.[] | "#\(.number) — \(.title)"'
+gh issue list {GH_FLAG} --state closed --label "needs-validation" --limit 100 --json number,title --jq '.[] | "#\(.number) — \(.title)"'
 ```
 
 ### 1B: Fix stale labels
@@ -53,8 +72,8 @@ For each closed issue with a stale intermediate label:
 **Stale `workflow:in-review`, `workflow:building`** — these were merged but label wasn't updated:
 ```bash
 for NUM in {stale_issue_numbers}; do
-  gh issue edit $NUM -R RapierCraft/AlterLab --add-label "workflow:merged"
-  gh issue edit $NUM -R RapierCraft/AlterLab --remove-label "workflow:in-review,workflow:building,needs-validation" 2>/dev/null || true
+  gh issue edit $NUM {GH_FLAG} --add-label "workflow:merged"
+  gh issue edit $NUM {GH_FLAG} --remove-label "workflow:in-review,workflow:building,needs-validation" 2>/dev/null || true
 done
 ```
 
@@ -65,14 +84,14 @@ done
 **Stale `needs-validation`** — remove from all closed issues:
 ```bash
 for NUM in {needs_validation_numbers}; do
-  gh issue edit $NUM -R RapierCraft/AlterLab --remove-label "needs-validation" 2>/dev/null || true
+  gh issue edit $NUM {GH_FLAG} --remove-label "needs-validation" 2>/dev/null || true
 done
 ```
 
 ### 1C: Report closed issues with NO workflow label
 
 ```bash
-gh issue list -R RapierCraft/AlterLab --state closed --limit 200 --json number,title,labels \
+gh issue list {GH_FLAG} --state closed --limit 200 --json number,title,labels \
   --jq '.[] | select([.labels[].name] | any(startswith("workflow:")) | not) | "#\(.number) — \(.title)"'
 ```
 
@@ -90,11 +109,11 @@ For each open issue with `workflow:in-review` label, check if it has a merged PR
 
 ```bash
 # Get all open issues with workflow:in-review
-OPEN_IN_REVIEW=$(gh issue list -R RapierCraft/AlterLab --state open --label "workflow:in-review" --limit 100 --json number --jq '.[].number')
+OPEN_IN_REVIEW=$(gh issue list {GH_FLAG} --state open --label "workflow:in-review" --limit 100 --json number --jq '.[].number')
 
 for NUM in $OPEN_IN_REVIEW; do
   # Search for merged PRs that reference this issue
-  MERGED_PR=$(gh pr list -R RapierCraft/AlterLab --search "Closes #$NUM" --state merged --json number --jq '.[0].number' 2>/dev/null)
+  MERGED_PR=$(gh pr list {GH_FLAG} --search "Closes #$NUM" --state merged --json number --jq '.[0].number' 2>/dev/null)
   if [ -n "$MERGED_PR" ]; then
     echo "ORPHAN: #$NUM has merged PR #$MERGED_PR"
   fi
@@ -105,9 +124,9 @@ done
 
 For each orphaned issue found:
 ```bash
-gh issue close $NUM -R RapierCraft/AlterLab --comment "Closed by cleanup — PR #$MERGED_PR was already merged."
-gh issue edit $NUM -R RapierCraft/AlterLab --add-label "workflow:merged"
-gh issue edit $NUM -R RapierCraft/AlterLab --remove-label "workflow:in-review" 2>/dev/null || true
+gh issue close $NUM {GH_FLAG} --comment "Closed by cleanup — PR #$MERGED_PR was already merged."
+gh issue edit $NUM {GH_FLAG} --add-label "workflow:merged"
+gh issue edit $NUM {GH_FLAG} --remove-label "workflow:in-review" 2>/dev/null || true
 ```
 
 Also check open issues with `workflow:building` — same pattern (search for merged PRs referencing them).
@@ -119,10 +138,11 @@ Also check open issues with `workflow:building` — same pattern (search for mer
 ### 3A: Identify worktrees with merged PRs
 
 ```bash
-cd /home/mrdubey/projects/ScraperAPI/alterlab
+cd {REPO_PATH}
 
 # For each worktree (excluding the main one), check if its branch has a merged PR
-git worktree list --porcelain | grep "^worktree " | grep -v "/alterlab$" | sed 's/^worktree //' | while read wt; do
+REPO_NAME=$(basename "{REPO_PATH}")
+git worktree list --porcelain | grep "^worktree " | grep -v "/$REPO_NAME$" | sed 's/^worktree //' | while read wt; do
   branch=$(git -C "$wt" branch --show-current 2>/dev/null)
   if [ -n "$branch" ]; then
     merged_pr=$(gh pr list --head "$branch" --state merged --json number --jq '.[0].number' 2>/dev/null)
@@ -144,19 +164,19 @@ echo "Removed: $WORKTREE_PATH ($BRANCH_NAME)"
 
 ### 3C: Prune merged remote branches
 
-Delete remote `fix/` and `feat/` branches that are fully merged into `staging`:
+Delete remote `fix/` and `feat/` branches that are fully merged into `{STAGING_BRANCH}`:
 
 ```bash
-cd /home/mrdubey/projects/ScraperAPI/alterlab
+cd {REPO_PATH}
 git fetch --prune origin
 
 # Count first
-MERGED_COUNT=$(git branch -r --merged origin/staging | grep -E "origin/(fix|feat)/" | wc -l)
+MERGED_COUNT=$(git branch -r --merged origin/{STAGING_BRANCH} | grep -E "origin/(fix|feat)/" | wc -l)
 echo "Found $MERGED_COUNT merged remote branches to delete"
 
 # Delete them
 if [ "$MERGED_COUNT" -gt 0 ]; then
-  git branch -r --merged origin/staging | grep -E "origin/(fix|feat)/" | sed 's|origin/||' | xargs -I{} git push origin --delete {} 2>&1
+  git branch -r --merged origin/{STAGING_BRANCH} | grep -E "origin/(fix|feat)/" | sed 's|origin/||' | xargs -I{} git push origin --delete {} 2>&1
 fi
 ```
 
@@ -204,16 +224,16 @@ fi
 For closed issues that are on the Project board but have stale fields:
 
 ```bash
-gh project item-list 1 --owner RapierCraft --format json --limit 200
+gh project item-list {PROJECT_NUMBER} --owner {PROJECT_BOARD_OWNER} --format json --limit 200
 ```
 
 For each item where `content.state == "CLOSED"` but `status != "Done"` or `workflow` is not a terminal state:
 
 ```bash
-gh project item-edit --project-id PVT_kwHOCx3gR84BSK2L --id "$ITEM_ID" \
-  --field-id PVTSSF_lAHOCx3gR84BSK2Lzg_yF6E --single-select-option-id 98236657 2>/dev/null || true  # Status=Done
-gh project item-edit --project-id PVT_kwHOCx3gR84BSK2L --id "$ITEM_ID" \
-  --field-id PVTSSF_lAHOCx3gR84BSK2Lzg_yGAA --single-select-option-id b510c537 2>/dev/null || true  # Workflow=Merged
+gh project item-edit --project-id {PROJECT_ID} --id "$ITEM_ID" \
+  --field-id {PROJECT_BOARD_STATUS_FIELD_ID} --single-select-option-id {PROJECT_BOARD_STATUS_DONE_ID} 2>/dev/null || true  # Status=Done
+gh project item-edit --project-id {PROJECT_ID} --id "$ITEM_ID" \
+  --field-id {PROJECT_BOARD_WORKFLOW_FIELD_ID} --single-select-option-id {PROJECT_BOARD_WORKFLOW_MERGED_ID} 2>/dev/null || true  # Workflow=Merged
 ```
 
 ---
