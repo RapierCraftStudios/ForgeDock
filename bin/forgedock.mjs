@@ -8,7 +8,7 @@ import { execSync } from "child_process";
 import {
   BOLD, GREEN, YELLOW, CYAN, RED, RESET,
   bold, dim, green, yellow, cyan, red,
-  box, stepHeader, select, confirm, createProgressBar,
+  box, stepHeader, select, confirm, input, createProgressBar,
 } from "./tui.mjs";
 
 const __filename = fileURLToPath(import.meta.url);
@@ -727,16 +727,19 @@ async function init() {
   checkPrerequisites();
 
   console.log("");
-  console.log(`${BOLD}ForgeDock${RESET} — Generating forge.yaml`);
+  console.log(`${BOLD}ForgeDock${RESET} — Generate forge.yaml`);
   console.log("");
 
   const cwd = process.cwd();
-  const worktreeBase = join(cwd, ".claude", "worktrees");
   const outputPath = join(cwd, "forge.yaml");
 
-  // --- Detect git remote URL and parse owner/repo ---
-  let owner = "your-github-org";
-  let repo = "your-repo-name";
+  // ---------------------------------------------------------------------------
+  // Auto-detect defaults (silent — used as pre-fill values for prompts)
+  // ---------------------------------------------------------------------------
+
+  // Detect git remote URL and parse owner/repo
+  let detectedOwner = "your-github-org";
+  let detectedRepo = "your-repo-name";
   let remoteDetected = false;
 
   try {
@@ -752,58 +755,42 @@ async function init() {
     const httpsMatch = remoteUrl.match(/^https?:\/\/[^/]+\/([^/]+)\/(.+?)(?:\.git)?$/);
 
     if (sshMatch) {
-      owner = sshMatch[1];
-      repo = sshMatch[2];
+      detectedOwner = sshMatch[1];
+      detectedRepo = sshMatch[2];
       remoteDetected = true;
     } else if (httpsMatch) {
-      owner = httpsMatch[1];
-      repo = httpsMatch[2];
+      detectedOwner = httpsMatch[1];
+      detectedRepo = httpsMatch[2];
       remoteDetected = true;
-    } else {
-      console.log(
-        `  ${YELLOW}Warning${RESET}: Could not parse git remote URL — using placeholder values`
-      );
     }
   } catch {
-    console.log(
-      `  ${YELLOW}Warning${RESET}: No git remote found — using placeholder values`
-    );
+    // No remote — use placeholders
   }
 
-  if (remoteDetected) {
-    console.log(`  Detected repo:   ${CYAN}${owner}/${repo}${RESET}`);
-  }
-
-  // --- Detect default branch ---
-  let defaultBranch = "main";
+  // Detect default branch
+  let detectedDefault = "main";
   try {
     const headRef = execSync("git symbolic-ref refs/remotes/origin/HEAD", {
       cwd,
       encoding: "utf-8",
       stdio: ["pipe", "pipe", "pipe"],
     }).trim();
-    // refs/remotes/origin/main → main
-    defaultBranch = headRef.replace(/^refs\/remotes\/origin\//, "");
-    console.log(`  Default branch:  ${CYAN}${defaultBranch}${RESET}`);
+    detectedDefault = headRef.replace(/^refs\/remotes\/origin\//, "");
   } catch {
-    // Fallback: try git rev-parse
     try {
-      defaultBranch = execSync("git rev-parse --abbrev-ref HEAD", {
+      const cur = execSync("git rev-parse --abbrev-ref HEAD", {
         cwd,
         encoding: "utf-8",
         stdio: ["pipe", "pipe", "pipe"],
       }).trim();
-      if (defaultBranch === "HEAD") defaultBranch = "main";
-      console.log(`  Default branch:  ${CYAN}${defaultBranch}${RESET} (from current branch)`);
+      if (cur && cur !== "HEAD") detectedDefault = cur;
     } catch {
-      console.log(
-        `  ${YELLOW}Warning${RESET}: Could not detect default branch — defaulting to "main"`
-      );
+      // Keep "main"
     }
   }
 
-  // --- Detect staging branch ---
-  let stagingBranch = "staging";
+  // Detect staging branch
+  let detectedStaging = detectedDefault;
   try {
     const remoteBranches = execSync("git branch -r", {
       cwd,
@@ -811,44 +798,167 @@ async function init() {
       stdio: ["pipe", "pipe", "pipe"],
     });
     if (remoteBranches.includes("origin/staging")) {
-      stagingBranch = "staging";
-      console.log(`  Staging branch:  ${CYAN}staging${RESET} (detected)`);
-    } else {
-      stagingBranch = defaultBranch;
-      console.log(
-        `  Staging branch:  ${CYAN}${defaultBranch}${RESET} (no staging branch found — using default)`
-      );
+      detectedStaging = "staging";
     }
   } catch {
-    console.log(
-      `  ${YELLOW}Warning${RESET}: Could not read remote branches — defaulting staging to "${defaultBranch}"`
-    );
-    stagingBranch = defaultBranch;
+    // Keep default
   }
 
-  // --- Handle existing forge.yaml ---
-  if (existsSync(outputPath)) {
-    const baseBak = join(cwd, "forge.yaml.bak");
-    const backupPath = existsSync(baseBak)
-      ? join(
-          cwd,
-          `forge.yaml.bak.${new Date().toISOString().replace(/[:.]/g, "-")}`
-        )
-      : baseBak;
-    const backupName = backupPath.split("/").pop();
-    renameSync(outputPath, backupPath);
-    console.log(`  ${YELLOW}Backed up${RESET}: forge.yaml → ${backupName}`);
-  }
-
-  // --- Generate forge.yaml content ---
-  const projectName = repo
+  // Derive project name from repo slug
+  const detectedName = detectedRepo
     .split(/[-_]/)
     .map((w) => w.charAt(0).toUpperCase() + w.slice(1))
     .join(" ");
 
-  const content = `# forge.yaml — ForgeDock Configuration
+  // Non-TTY: skip interactive prompts and use detected values directly
+  if (!process.stdin.isTTY) {
+    if (!remoteDetected) {
+      console.log(
+        `  ${YELLOW}Warning${RESET}: No git remote found — using placeholder values`
+      );
+    }
+    // Silent write — same as pre-interactive behavior
+    _writeForgeYaml({
+      outputPath, cwd,
+      owner: detectedOwner, repo: detectedRepo,
+      projectName: detectedName, description: "",
+      root: cwd, worktreeBase: join(cwd, ".claude", "worktrees"),
+      defaultBranch: detectedDefault, stagingBranch: detectedStaging,
+    });
+    console.log(`  ${GREEN}Created${RESET}: forge.yaml`);
+    console.log("");
+    _printNextSteps({ remoteDetected, cyan: (s) => `${CYAN}${s}${RESET}`, bold: (s) => `${BOLD}${s}${RESET}` });
+    return;
+  }
+
+  // ---------------------------------------------------------------------------
+  // Interactive flow — prompt for each required section
+  // ---------------------------------------------------------------------------
+
+  // Loop until user confirms the preview
+  let confirmed = false;
+
+  while (!confirmed) {
+    console.log(dim("  Auto-detected values are shown as defaults. Press Enter to accept."));
+    console.log("");
+
+    // --- Project section ---
+    console.log(bold("  Project"));
+
+    const ownerInput = await input("  GitHub owner (org or user)", detectedOwner);
+    const repoInput = await input("  Repository name", detectedRepo);
+    const nameInput = await input(
+      "  Project name",
+      detectedName !== "Your-repo-name" ? detectedName : repoInput.split(/[-_]/).map((w) => w.charAt(0).toUpperCase() + w.slice(1)).join(" ")
+    );
+    const descInput = await input("  Brief description", "");
+
+    // --- Paths section ---
+    console.log("");
+    console.log(bold("  Paths"));
+
+    const rootInput = await input("  Repository root (absolute path)", cwd);
+    const worktreeInput = await input(
+      "  Worktree base (for git worktrees)",
+      join(rootInput || cwd, ".claude", "worktrees")
+    );
+
+    // --- Branches section ---
+    console.log("");
+    console.log(bold("  Branches"));
+
+    const defaultBranchInput = await input("  Default branch", detectedDefault);
+    const stagingBranchInput = await input("  Staging branch (PR target for fast-lane changes)", detectedStaging);
+
+    // --- Preview ---
+    console.log("");
+
+    const previewLines = buildForgeYamlContent({
+      owner: ownerInput,
+      repo: repoInput,
+      projectName: nameInput,
+      description: descInput,
+      root: rootInput || cwd,
+      worktreeBase: worktreeInput || join(cwd, ".claude", "worktrees"),
+      defaultBranch: defaultBranchInput,
+      stagingBranch: stagingBranchInput,
+    });
+
+    // Show preview in a box
+    const previewDisplay = previewLines
+      .split("\n")
+      .slice(0, 30) // show first 30 lines of required sections only
+      .join("\n");
+
+    process.stdout.write(
+      box(previewDisplay, { title: "forge.yaml preview (required sections)", padding: 1 })
+    );
+
+    confirmed = await confirm("  Write this forge.yaml?", true);
+
+    if (!confirmed) {
+      console.log("");
+      console.log(dim("  Starting over — re-enter values below."));
+      console.log("");
+    } else {
+      // --- Handle existing forge.yaml with confirmation ---
+      if (existsSync(outputPath)) {
+        console.log("");
+        console.log(`  ${YELLOW}forge.yaml already exists.${RESET}`);
+        const shouldOverwrite = await confirm(
+          "  Back up existing forge.yaml and overwrite?",
+          true
+        );
+        if (!shouldOverwrite) {
+          console.log(`  ${dim("Cancelled.")} forge.yaml was not changed.`);
+          console.log("");
+          return;
+        }
+
+        // Backup with timestamped name if .bak already exists (fix from #36)
+        const baseBak = join(cwd, "forge.yaml.bak");
+        const backupPath = existsSync(baseBak)
+          ? join(cwd, `forge.yaml.bak.${new Date().toISOString().replace(/[:.]/g, "-")}`)
+          : baseBak;
+        const backupName = backupPath.split("/").pop();
+        renameSync(outputPath, backupPath);
+        console.log(`  ${YELLOW}Backed up${RESET}: forge.yaml → ${backupName}`);
+      }
+
+      // Write the file
+      _writeForgeYaml({
+        outputPath,
+        cwd,
+        owner: ownerInput,
+        repo: repoInput,
+        projectName: nameInput,
+        description: descInput,
+        root: rootInput || cwd,
+        worktreeBase: worktreeInput || join(cwd, ".claude", "worktrees"),
+        defaultBranch: defaultBranchInput,
+        stagingBranch: stagingBranchInput,
+      });
+
+      console.log("");
+      console.log(`  ${GREEN}Created${RESET}: forge.yaml`);
+      console.log("");
+      _printNextSteps({ remoteDetected: ownerInput !== "your-github-org", cyan: (s) => `${CYAN}${s}${RESET}`, bold: (s) => `${BOLD}${s}${RESET}` });
+    }
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Helpers for init()
+// ---------------------------------------------------------------------------
+
+/**
+ * Build the forge.yaml file content string from gathered values.
+ * Returns only the required sections (project, paths, branches) plus commented optional sections.
+ */
+function buildForgeYamlContent({ owner, repo, projectName, description, root, worktreeBase, defaultBranch, stagingBranch }) {
+  return `# forge.yaml — ForgeDock Configuration
 #
-# Auto-generated by: npx forgedock init
+# Generated by: npx forgedock init
 # Edit this file with your project details.
 #
 # Required sections: project, paths, branches
@@ -864,14 +974,14 @@ project:
   name: "${projectName}"
   owner: "${owner}"
   repo: "${repo}"
-  description: ""
+  description: "${description}"
 
 # =============================================================================
 # PATHS (REQUIRED)
 # =============================================================================
 
 paths:
-  root: "${cwd}"
+  root: "${root}"
   worktree_base: "${worktreeBase}"
 
 # =============================================================================
@@ -896,7 +1006,7 @@ branches:
 #     - prefix: "mcp"
 #       repo: "${owner}/your-satellite-repo"
 #       staging_branch: "main"
-#       local_path: "${join(cwd, "..", "your-satellite-repo")}"
+#       local_path: "${join(root, "..", "your-satellite-repo")}"
 
 # =============================================================================
 # PROJECT BOARD (OPTIONAL)
@@ -935,19 +1045,22 @@ branches:
 #   health_patterns:
 #     - '"status": "ok"'
 `;
+}
 
-  writeFileSync(outputPath, content, "utf-8");
+/** Write forge.yaml to disk. */
+function _writeForgeYaml(opts) {
+  const content = buildForgeYamlContent(opts);
+  writeFileSync(opts.outputPath, content, "utf-8");
+}
 
-  console.log(`  ${GREEN}Created${RESET}: forge.yaml`);
-  console.log("");
+/** Print next-steps guidance after forge.yaml is written. */
+function _printNextSteps({ remoteDetected, cyan, bold }) {
   console.log(`${BOLD}Next steps:${RESET}`);
-  console.log(`  1. Edit ${CYAN}forge.yaml${RESET} — fill in your project details`);
-  console.log(`     Required: project.name, project.description`);
   if (!remoteDetected) {
-    console.log(`     Required: project.owner, project.repo (could not auto-detect)`);
+    console.log(`  ${YELLOW}!${RESET}  Edit ${CYAN}forge.yaml${RESET} — set project.owner and project.repo`);
   }
-  console.log(`  2. Add ${CYAN}forge.yaml${RESET} to ${CYAN}.gitignore${RESET} if it contains sensitive paths`);
-  console.log(`  3. Run ${CYAN}/forgedock-init${RESET} inside Claude Code for guided AI-powered setup`);
+  console.log(`  1. Add ${CYAN}forge.yaml${RESET} to ${CYAN}.gitignore${RESET} if it contains sensitive paths`);
+  console.log(`  2. Run ${CYAN}/forgedock-init${RESET} inside Claude Code for guided AI-powered setup`);
   console.log("");
 }
 
