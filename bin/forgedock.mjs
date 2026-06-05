@@ -16,7 +16,15 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
 const FORGE_HOME = dirname(__dirname);
 const COMMANDS_DIR = join(FORGE_HOME, "commands");
-const TARGET_DIR = join(process.env.HOME ?? "", ".claude", "commands");
+
+if (!process.env.HOME) {
+  console.error(
+    "Error: HOME environment variable is not set. Cannot determine install location.",
+  );
+  process.exit(1);
+}
+
+const TARGET_DIR = join(process.env.HOME, ".claude", "commands");
 
 const args = process.argv.slice(2);
 const command = args[0];
@@ -2315,7 +2323,7 @@ function _renderValidationSummary(checks) {
 // Bot credentials — store in ~/.forgedock/credentials.json (NOT forge.yaml)
 // ---------------------------------------------------------------------------
 
-const FORGEDOCK_HOME = join(process.env.HOME ?? "", ".forgedock");
+const FORGEDOCK_HOME = join(process.env.HOME, ".forgedock");
 const CREDENTIALS_FILE = join(FORGEDOCK_HOME, "credentials.json");
 
 /**
