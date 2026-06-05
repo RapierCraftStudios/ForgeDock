@@ -33,11 +33,11 @@ gh issue view {NUMBER} {GH_FLAG} --json number,title,body,labels,state,milestone
 
 # Read investigation report (required — contains decomposition plan)
 gh api repos/{GH_REPO}/issues/{NUMBER}/comments \
-  --jq '.[] | select(.body | (contains("FORGE:INVESTIGATOR") or contains("ALTERLAB:INVESTIGATOR"))) | .body'
+  --jq '.[] | select(.body | contains("FORGE:INVESTIGATOR")) | .body'
 ```
 
 **Validation**:
-- If FORGE:INVESTIGATOR / ALTERLAB:INVESTIGATOR comment is absent → EXIT with `DECOMPOSE_RESULT: status: BLOCKED`, blocker: "No investigation report found — run investigate first"
+- If FORGE:INVESTIGATOR comment is absent → EXIT with `DECOMPOSE_RESULT: status: BLOCKED`, blocker: "No investigation report found — run investigate first"
 - If investigation report has no Decomposition Assessment section, OR the assessment does not list any sub-issues → EXIT with `DECOMPOSE_RESULT: status: BLOCKED`, blocker: "Investigation report has no decomposition plan — re-run investigate with explicit decomposition scope"
 
 Extract from investigation report:
@@ -56,10 +56,10 @@ MILESTONE_TITLE=$(gh issue view {NUMBER} {GH_FLAG} --json milestone --jq '.miles
 
 ```bash
 gh api repos/{GH_REPO}/issues/{NUMBER}/comments \
-  --jq '.[] | select(.body | (contains("FORGE:DECOMPOSED") or contains("ALTERLAB:DECOMPOSED"))) | .body'
+  --jq '.[] | select(.body | contains("FORGE:DECOMPOSED")) | .body'
 ```
 
-- If `<!-- FORGE:DECOMPOSED -->` or `<!-- ALTERLAB:DECOMPOSED -->` comment exists → decomposition already complete. EXIT with `DECOMPOSE_RESULT: status: ALREADY_DONE`.
+- If `<!-- FORGE:DECOMPOSED -->` comment exists → decomposition already complete. EXIT with `DECOMPOSE_RESULT: status: ALREADY_DONE`.
 
 ---
 

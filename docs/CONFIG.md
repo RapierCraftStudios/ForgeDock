@@ -1,6 +1,6 @@
 # forge.yaml Configuration Reference
 
-`forge.yaml` is placed at your project root and tells ForgeDock commands how to interact with your specific project. Without it, commands default to their hardcoded AlterLab/RapierCraft values — which are wrong for every other project.
+`forge.yaml` is placed at your project root and tells ForgeDock commands how to interact with your specific project. Without it, commands cannot resolve your GitHub repository, paths, or branches.
 
 ## Quick Start
 

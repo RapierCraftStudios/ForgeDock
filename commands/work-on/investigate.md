@@ -33,8 +33,8 @@ gh api repos/{GH_REPO}/issues/{NUMBER}/comments --jq '.[] | {id: .id, body: .bod
 ```
 
 **Resume logic**:
-- If `<!-- FORGE:INVESTIGATOR -->` or `<!-- ALTERLAB:INVESTIGATOR -->` comment exists AND `<!-- INVESTIGATION:COMPLETE -->` is present in the SAME comment → investigation already complete, EXIT (return existing verdict to caller)
-- If `<!-- FORGE:INVESTIGATOR -->` or `<!-- ALTERLAB:INVESTIGATOR -->` comment exists BUT `<!-- INVESTIGATION:COMPLETE -->` is ABSENT → investigation was interrupted, delete the partial comment and restart:
+- If `<!-- FORGE:INVESTIGATOR -->` comment exists AND `<!-- INVESTIGATION:COMPLETE -->` is present in the SAME comment → investigation already complete, EXIT (return existing verdict to caller)
+- If `<!-- FORGE:INVESTIGATOR -->` comment exists BUT `<!-- INVESTIGATION:COMPLETE -->` is ABSENT → investigation was interrupted, delete the partial comment and restart:
   ```bash
   gh api repos/{GH_REPO}/issues/comments/{COMMENT_ID} -X DELETE
   ```
@@ -150,7 +150,7 @@ fi
 
 ```bash
 INVESTIGATION_BODY=$(gh api repos/{GH_REPO}/issues/{NUMBER}/comments \
-  --jq '.[] | select(.body | (contains("FORGE:INVESTIGATOR") or contains("ALTERLAB:INVESTIGATOR"))) | .body' | head -1)
+  --jq '.[] | select(.body | contains("FORGE:INVESTIGATOR")) | .body' | head -1)
 ```
 
 ### Step 3: Generate filename and metadata
