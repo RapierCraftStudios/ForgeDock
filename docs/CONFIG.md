@@ -7,7 +7,7 @@
 ```bash
 cp forge.yaml.example forge.yaml
 # Edit forge.yaml with your project details
-echo "forge.yaml" >> .gitignore  # if your credentials path is sensitive
+echo "forge.yaml" >> .gitignore  # always recommended — contains project-specific paths and IDs
 ```
 
 ---

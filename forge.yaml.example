@@ -7,7 +7,7 @@
 # Usage:
 #   cp forge.yaml.example forge.yaml
 #   # Edit forge.yaml with your project details
-#   # Add forge.yaml to your .gitignore if it contains sensitive paths
+#   # Always add forge.yaml to .gitignore — it contains project-specific paths and IDs
 #
 # Required sections: project, paths, branches
 # Optional sections: repos, project_board, services, review, verification

@@ -12,6 +12,7 @@ Thumbs.db
 # Environment
 .env
 .env.local
+forge.yaml
 
 # Claude Code
 .claude/
