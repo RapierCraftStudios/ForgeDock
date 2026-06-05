@@ -8,7 +8,7 @@ import { execSync } from "child_process";
 import {
   BOLD, GREEN, YELLOW, CYAN, RED, RESET,
   bold, dim, green, yellow, cyan, red,
-  box, spinner, stepHeader, select, confirm,
+  box, stepHeader, select, confirm,
 } from "./tui.mjs";
 
 const __filename = fileURLToPath(import.meta.url);
@@ -140,11 +140,7 @@ class StepOrchestrator {
             this._aborted = true;
             return false;
           }
-          // If handled (retried successfully or skipped), continue
-          if (step.status !== "done" && step.status !== "skipped") {
-            // Was skipped via handler
-            continue;
-          }
+          // Handled (retried successfully or skipped) — advance normally
         }
 
         this.currentIndex++;
@@ -194,7 +190,6 @@ class StepOrchestrator {
       }
     } else if (action === "skip") {
       step.status = "skipped";
-      this.currentIndex++;
       return true;
     } else {
       // abort
