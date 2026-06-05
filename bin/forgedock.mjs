@@ -2637,7 +2637,12 @@ async function botSetup() {
     try {
       const opener = process.platform === "win32" ? "start" :
                      process.platform === "darwin" ? "open" : "xdg-open";
-      execSync(`${opener} "${createUrl}"`, { stdio: ["pipe", "pipe", "pipe"] });
+      // On Windows, `start "url"` treats the first quoted arg as the window title.
+      // Pass an empty title placeholder so the URL is treated as the target: `start "" "url"`.
+      const cmd = process.platform === "win32"
+        ? `start "" "${createUrl}"`
+        : `${opener} "${createUrl}"`;
+      execSync(cmd, { stdio: ["pipe", "pipe", "pipe"] });
     } catch {
       console.log(`  ${YELLOW}Could not open browser automatically.${RESET}`);
       console.log(`  Please open this URL manually:`);
