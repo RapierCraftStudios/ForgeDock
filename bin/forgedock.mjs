@@ -2641,7 +2641,10 @@ async function botSetup() {
   }
 
   // action === "connect"
-  await connectExistingBot();
+  const connected = await connectExistingBot();
+  if (!connected) {
+    throw new Error("Bot connection failed — credentials were not saved.");
+  }
 }
 
 function help() {
