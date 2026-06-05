@@ -2,7 +2,7 @@
 
 import { fileURLToPath } from "url";
 import { dirname, join, relative, resolve } from "path";
-import { mkdir, symlink, readlink, lstat, readdir, stat } from "fs/promises";
+import { mkdir, symlink, copyFile, readlink, lstat, readdir, stat, writeFile, unlink as fsUnlink } from "fs/promises";
 import { existsSync, appendFileSync, chmodSync, readFileSync, writeFileSync, renameSync } from "fs";
 import { execSync, execFileSync } from "child_process";
 import { createSign } from "crypto";
@@ -40,6 +40,54 @@ function getVersion() {
     return pkg.version || "0.0.0";
   } catch {
     return "0.0.0";
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Install-mode marker — written to TARGET_DIR when copy-based install is used
+// (Windows standard users cannot create symlinks without Developer Mode).
+// ---------------------------------------------------------------------------
+
+/** Path to the install-mode marker file inside TARGET_DIR. */
+const INSTALL_MODE_MARKER = join(TARGET_DIR, ".forgedock-install-mode");
+
+/**
+ * Read the install-mode marker, returning its parsed content or null if absent/invalid.
+ * @returns {{ version: string, mode: string } | null}
+ */
+function readInstallModeMarker() {
+  try {
+    return JSON.parse(readFileSync(INSTALL_MODE_MARKER, "utf-8"));
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Write (or overwrite) the install-mode marker with the current version.
+ * No-op on write failure — marker is best-effort.
+ */
+async function writeInstallModeMarker() {
+  try {
+    await writeFile(
+      INSTALL_MODE_MARKER,
+      JSON.stringify({ version: getVersion(), mode: "copy" }),
+      "utf-8",
+    );
+  } catch {
+    // Best-effort — do not block install on marker write failure
+  }
+}
+
+/**
+ * Remove the install-mode marker if it exists.
+ * No-op on failure.
+ */
+async function removeInstallModeMarker() {
+  try {
+    await fsUnlink(INSTALL_MODE_MARKER);
+  } catch {
+    // Already absent — nothing to do
   }
 }
 
@@ -114,7 +162,13 @@ async function detectInstallState() {
   }
 
   if (!hasSymlinks) {
-    return { state: "fresh-install", installedVersion: null, currentVersion };
+    // Check for copy-mode install (Windows: symlinks not available)
+    const marker = readInstallModeMarker();
+    if (marker) {
+      installedVersion = marker.version ?? null;
+    } else {
+      return { state: "fresh-install", installedVersion: null, currentVersion };
+    }
   }
 
   // Commands are installed — now determine sub-state
@@ -572,8 +626,10 @@ async function install() {
   let installed = 0;
   let updated = 0;
   let skipped = 0;
+  /** Number of files installed via copyFile fallback (Windows: symlinks unavailable). */
+  let copied = 0;
 
-  /** @type {Array<{rel: string, action: 'installed'|'updated'|'skipped'|'conflict'}>} */
+  /** @type {Array<{rel: string, action: 'installed'|'updated'|'skipped'|'conflict'|'copied'}>} */
   const results = [];
   /** @type {string[]} Relative paths of files that could not be symlinked (regular file conflict) */
   const conflicts = [];
@@ -601,32 +657,79 @@ async function install() {
           results.push({ rel, action: "skipped" });
           bar.tick(1, dim(rel));
         } else {
-          await symlink(file, target + ".tmp");
-          const { rename } = await import("fs/promises");
-          await rename(target + ".tmp", target);
-          updated++;
-          results.push({ rel, action: "updated" });
-          bar.tick(1, rel);
+          try {
+            await symlink(file, target + ".tmp");
+            const { rename } = await import("fs/promises");
+            await rename(target + ".tmp", target);
+            updated++;
+            results.push({ rel, action: "updated" });
+            bar.tick(1, rel);
+          } catch (symlinkErr) {
+            if (symlinkErr.code === "EPERM" || symlinkErr.code === "ENOTSUP") {
+              // Symlink not permitted (Windows standard user) — fall back to copy
+              await copyFile(file, target);
+              copied++;
+              results.push({ rel, action: "copied" });
+              bar.tick(1, rel);
+            } else {
+              throw symlinkErr;
+            }
+          }
         }
       } else {
-        // Regular file is blocking the symlink — record as conflict
-        skipped++;
-        conflicts.push(rel);
-        results.push({ rel, action: "conflict" });
-        bar.tick(1, rel);
+        // Regular file present — could be a previous copy-mode install or a user conflict.
+        // Distinguish: if the install-mode marker exists, treat as ForgeDock-managed copy.
+        const isCopyModeInstall = readInstallModeMarker() !== null;
+        if (isCopyModeInstall) {
+          // Re-copy to update the file
+          await copyFile(file, target);
+          copied++;
+          results.push({ rel, action: "copied" });
+          bar.tick(1, rel);
+        } else {
+          // User-owned regular file is blocking — record as conflict
+          skipped++;
+          conflicts.push(rel);
+          results.push({ rel, action: "conflict" });
+          bar.tick(1, rel);
+        }
       }
-    } catch {
-      // Doesn't exist — create symlink
-      await symlink(file, target);
-      installed++;
-      results.push({ rel, action: "installed" });
-      bar.tick(1, rel);
+    } catch (err) {
+      if (err.code === "ENOENT") {
+        // Target doesn't exist — try symlink, fall back to copy on EPERM/ENOTSUP
+        try {
+          await symlink(file, target);
+          installed++;
+          results.push({ rel, action: "installed" });
+          bar.tick(1, rel);
+        } catch (symlinkErr) {
+          if (symlinkErr.code === "EPERM" || symlinkErr.code === "ENOTSUP") {
+            // Symlink not permitted (Windows standard user) — fall back to copy
+            await copyFile(file, target);
+            copied++;
+            results.push({ rel, action: "copied" });
+            bar.tick(1, rel);
+          } else {
+            throw symlinkErr;
+          }
+        }
+      } else {
+        throw err;
+      }
     }
   }
 
+  // If any files were installed via copy, write the install-mode marker so that
+  // subsequent runs (detectInstallState, getInstalledCommandNames, uninstall) know
+  // that regular .md files in TARGET_DIR are ForgeDock-managed.
+  if (copied > 0) {
+    await writeInstallModeMarker();
+  }
+
+  const totalInstalled = installed + updated + copied;
   const totalLabel =
-    installed > 0
-      ? `${green("✔")} Installed ${installed + updated}/${files.length} commands`
+    totalInstalled > 0
+      ? `${green("✔")} Installed ${totalInstalled}/${files.length} commands`
       : updated > 0
         ? `${green("✔")} Updated ${updated} command${updated === 1 ? "" : "s"}`
         : `${dim("✔")} Commands up to date (${skipped} skipped)`;
@@ -643,6 +746,7 @@ async function install() {
   for (const { rel, action } of results) {
     if (action === "skipped" || action === "conflict") continue;
     const stem = rel.replace(/\.md$/, "").split("/").pop() ?? rel;
+    // 'copied' actions are treated the same as 'installed' for category display
     const category = COMMAND_CATEGORIES[stem] ?? "Other";
     const bucket = categoryMap.get(category) ?? categoryMap.get("Other") ?? [];
     if (!categoryMap.has(category)) categoryMap.set(category, bucket);
@@ -676,6 +780,11 @@ async function install() {
     `  ${dim("Skipped")}    ${dim(String(skipped - conflicts.length))}`,
     "",
   ];
+  if (copied > 0) {
+    summaryLines.splice(summaryLines.length - 1, 0,
+      `  ${cyan("Copied")}     ${bold(String(copied))}  ${dim("(symlinks unavailable — files copied instead)")}`
+    );
+  }
   process.stdout.write(box(summaryLines, { title: "Summary" }));
 
   // -------------------------------------------------------------------------
@@ -741,7 +850,7 @@ async function install() {
     console.log("");
   }
 
-  return { installed, updated, skipped };
+  return { installed, updated, skipped, copied };
 }
 
 async function uninstall() {
@@ -758,6 +867,7 @@ async function uninstall() {
   const files = await findMarkdownFiles(COMMANDS_DIR);
   /** @type {Array<{file: string, rel: string, target: string}>} */
   const toRemove = [];
+  const copyMode = readInstallModeMarker() !== null;
 
   for (const file of files) {
     const rel = relative(COMMANDS_DIR, file);
@@ -769,6 +879,9 @@ async function uninstall() {
         if (current === file) {
           toRemove.push({ file, rel, target });
         }
+      } else if (copyMode && rel.endsWith(".md")) {
+        // Copy-mode install — regular files managed by ForgeDock
+        toRemove.push({ file, rel, target });
       }
     } catch {
       // Target doesn't exist — nothing to remove
@@ -807,7 +920,8 @@ async function uninstall() {
 
   const summaryLines = [""];
   if (toRemove.length > 0) {
-    summaryLines.push(`  ${red("Commands")}:   ${bold(String(toRemove.length))} symlinks in ${dim(TARGET_DIR)}`);
+    const fileLabel = copyMode ? "files (copy-mode install)" : "symlinks";
+    summaryLines.push(`  ${red("Commands")}:   ${bold(String(toRemove.length))} ${fileLabel} in ${dim(TARGET_DIR)}`);
   } else {
     summaryLines.push(`  ${dim("Commands:")}   none found`);
   }
@@ -870,6 +984,11 @@ async function uninstall() {
     }
 
     bar.done(`${green("✔")} Removed ${removed}/${toRemove.length} commands`);
+
+    // Clean up install-mode marker if copy-mode install was active
+    if (copyMode) {
+      await removeInstallModeMarker();
+    }
   }
 
   // -------------------------------------------------------------------------
@@ -978,6 +1097,7 @@ function queryNpmRegistry(pkg) {
  */
 async function getInstalledCommandNames() {
   const names = new Set();
+  const copyMode = readInstallModeMarker() !== null;
 
   async function walk(dir) {
     let entries;
@@ -998,6 +1118,9 @@ async function getInstalledCommandNames() {
             if (linkTarget.includes("commands") && linkTarget.endsWith(".md")) {
               names.add(relative(TARGET_DIR, fullPath));
             }
+          } else if (copyMode && entry.name.endsWith(".md")) {
+            // Copy-mode install: regular .md files in TARGET_DIR are ForgeDock-managed
+            names.add(relative(TARGET_DIR, fullPath));
           }
         } catch {
           // Skip unreadable entries
