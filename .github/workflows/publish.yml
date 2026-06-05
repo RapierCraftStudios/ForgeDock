@@ -32,14 +32,18 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
           CURRENT_VERSION=$(node -p "require('./package.json').version")
-          # Re-run guard: if the current version (as checked out) was already published,
-          # the push already happened in a previous run — reuse it and skip the bump.
-          # This prevents a version gap when a post-publish step (release creation) fails
-          # and the workflow is re-run: the checkout now has the bumped-and-pushed version,
-          # so bumping again would skip a number.
-          if npm show forgedock@"$CURRENT_VERSION" version --silent 2>/dev/null | grep -q "$CURRENT_VERSION"; then
-            echo "Current version $CURRENT_VERSION already published — skipping bump, reusing version"
-            echo "VERSION=$CURRENT_VERSION" >> $GITHUB_ENV
+          NEXT_VERSION=$(node -p "
+            const [maj,min,pat] = '$CURRENT_VERSION'.split('.').map(Number);
+            \`\${maj}.\${min}.\${pat+1}\`
+          ")
+          # Re-run guard: check if NEXT_VERSION (not the current committed version) was
+          # already published. This correctly identifies the re-run case where a partial
+          # failure left the bumped version on npm without committing it back to the repo.
+          # Checking CURRENT_VERSION would always be true (the committed version is always
+          # the last published version), which would permanently disable publishing.
+          if npm show forgedock@"$NEXT_VERSION" version --silent 2>/dev/null | grep -q "$NEXT_VERSION"; then
+            echo "Next version $NEXT_VERSION already published — re-run detected, skipping bump"
+            echo "VERSION=$NEXT_VERSION" >> $GITHUB_ENV
             echo "SKIP_PUBLISH=true" >> $GITHUB_ENV
           else
             npm version patch --no-git-tag-version
