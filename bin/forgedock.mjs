@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 
 import { fileURLToPath } from "url";
-import { dirname, join, relative } from "path";
+import { dirname, join, relative, resolve } from "path";
 import { mkdir, symlink, readlink, lstat, readdir, stat } from "fs/promises";
 import { existsSync, appendFileSync, chmodSync, readFileSync, writeFileSync, renameSync } from "fs";
 import { execSync, execFileSync } from "child_process";
@@ -2430,7 +2430,7 @@ async function connectExistingBot() {
   }
 
   const privateKeyPath = await input("Private key path (.pem):", "");
-  const resolvedKeyPath = privateKeyPath.trim().replace(/^~/, process.env.HOME ?? "");
+  const resolvedKeyPath = resolve(privateKeyPath.trim().replace(/^~/, process.env.HOME ?? ""));
   if (!existsSync(resolvedKeyPath)) {
     console.log(`  ${RED}File not found: ${resolvedKeyPath}${RESET}`);
     return false;
