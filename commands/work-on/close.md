@@ -110,27 +110,13 @@ Update the project board to reflect the merged state. This replaces the old Phas
 
 ```bash
 # Read project board config from forge.yaml
-PROJECT_BOARD_OWNER=$(yq '.project_board.owner // ""' forge.yaml 2>/dev/null \
-  || python3 -c "import yaml,sys; c=yaml.safe_load(open('forge.yaml')); print(c.get('project_board',{}).get('owner',''))" 2>/dev/null \
-  || echo "")
-PROJECT_ID=$(yq '.project_board.project_id // ""' forge.yaml 2>/dev/null \
-  || python3 -c "import yaml,sys; c=yaml.safe_load(open('forge.yaml')); print(c.get('project_board',{}).get('project_id',''))" 2>/dev/null \
-  || echo "")
-PROJECT_NUMBER=$(yq '.project_board.project_number // ""' forge.yaml 2>/dev/null \
-  || python3 -c "import yaml,sys; c=yaml.safe_load(open('forge.yaml')); print(c.get('project_board',{}).get('project_number',''))" 2>/dev/null \
-  || echo "")
-STATUS_FIELD_ID=$(yq '.project_board.field_ids.status // ""' forge.yaml 2>/dev/null \
-  || python3 -c "import yaml,sys; c=yaml.safe_load(open('forge.yaml')); print(c.get('project_board',{}).get('field_ids',{}).get('status',''))" 2>/dev/null \
-  || echo "")
-WORKFLOW_FIELD_ID=$(yq '.project_board.field_ids.workflow // ""' forge.yaml 2>/dev/null \
-  || python3 -c "import yaml,sys; c=yaml.safe_load(open('forge.yaml')); print(c.get('project_board',{}).get('field_ids',{}).get('workflow',''))" 2>/dev/null \
-  || echo "")
-STATUS_DONE_OPTION_ID=$(yq '.project_board.option_ids.status.done // ""' forge.yaml 2>/dev/null \
-  || python3 -c "import yaml,sys; c=yaml.safe_load(open('forge.yaml')); print(c.get('project_board',{}).get('option_ids',{}).get('status',{}).get('done',''))" 2>/dev/null \
-  || echo "")
-WORKFLOW_MERGED_OPTION_ID=$(yq '.project_board.option_ids.workflow.merged // ""' forge.yaml 2>/dev/null \
-  || python3 -c "import yaml,sys; c=yaml.safe_load(open('forge.yaml')); print(c.get('project_board',{}).get('option_ids',{}).get('workflow',{}).get('merged',''))" 2>/dev/null \
-  || echo "")
+PROJECT_BOARD_OWNER=$(yq '.project_board.owner // ""' forge.yaml 2>/dev/null || echo "")
+PROJECT_ID=$(yq '.project_board.project_id // ""' forge.yaml 2>/dev/null || echo "")
+PROJECT_NUMBER=$(yq '.project_board.project_number // ""' forge.yaml 2>/dev/null || echo "")
+STATUS_FIELD_ID=$(yq '.project_board.field_ids.status // ""' forge.yaml 2>/dev/null || echo "")
+WORKFLOW_FIELD_ID=$(yq '.project_board.field_ids.workflow // ""' forge.yaml 2>/dev/null || echo "")
+STATUS_DONE_OPTION_ID=$(yq '.project_board.option_ids.status.done // ""' forge.yaml 2>/dev/null || echo "")
+WORKFLOW_MERGED_OPTION_ID=$(yq '.project_board.option_ids.workflow.merged // ""' forge.yaml 2>/dev/null || echo "")
 
 if [ -z "$PROJECT_BOARD_OWNER" ] || [ -z "$PROJECT_ID" ] || [ -z "$STATUS_FIELD_ID" ]; then
   echo "INFO: project_board not configured in forge.yaml — skipping board update"

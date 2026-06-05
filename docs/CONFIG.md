@@ -369,6 +369,17 @@ billing:
 
 ---
 
+## Config Reading Conventions
+
+ForgeDock commands use two accepted patterns for reading `forge.yaml`:
+
+- **`yq` (standard)**: Simple field reads use `yq '.section.field // ""' forge.yaml 2>/dev/null || echo ""`. This is the canonical pattern used by the majority of commands (`cleanup`, `orchestrate`, `work-on/close`, etc.).
+- **Python `yaml.safe_load` (complex extraction)**: Commands that need to extract many fields from optional nested sections in a single pass (e.g., `analytics`, `geo-audit`, `qa-sweep`) use a Python heredoc. This avoids chaining many `yq` calls and allows structured error messaging when optional sections are absent.
+
+Do **not** mix the two patterns for the same block of variables (e.g., `yq` with Python fallback). If a command needs more than 5 fields from a deeply nested optional section, use Python. Otherwise, use `yq`.
+
+---
+
 ## Complete Example
 
 See [`forge.yaml.example`](../forge.yaml.example) at the repository root for a fully annotated example covering all sections.
