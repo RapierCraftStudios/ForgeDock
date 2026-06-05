@@ -217,6 +217,10 @@ branches:
 #       # File should NOT be committed to version control
 #       # service_account_key: "/home/youruser/credentials/ga4-service-account.json"
 #
+#   # Frontend app URL used by qa-sweep for page accessibility testing
+#   # Default: http://localhost:3000 — override for non-localhost deployments
+#   app_url: "https://acme.io"
+#
 #   # API base URL for health checks and endpoint verification
 #   api_url: "https://api.acme.io"
 
