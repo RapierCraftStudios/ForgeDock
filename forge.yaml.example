@@ -10,7 +10,7 @@
 #   # Add forge.yaml to your .gitignore if it contains sensitive paths
 #
 # Required sections: project, paths, branches
-# Optional sections: repos, project_board, services, review, verification
+# Optional sections: repos, project_board, services, review, verification, billing
 
 # =============================================================================
 # PROJECT (REQUIRED)
@@ -33,6 +33,13 @@ project:
   # One-line description of what this project does
   # Used in issue templates and pipeline reports
   description: "SaaS platform for automated data processing"
+
+  # Pipeline repository — optional. Set this if the ForgeDock pipeline itself
+  # lives in a different repo than the project being developed.
+  # Used by audit.md, audit-agents.md, and security-audit.md to resolve {FORGE_REPO}
+  # when looking up pipeline issues, commands, and audit history.
+  # If omitted, these commands fall back to project.owner/project.repo.
+  # forge_repo: "acme-org/acme-forge"
 
 # =============================================================================
 # PATHS (REQUIRED)
@@ -270,3 +277,16 @@ branches:
 #   # Example: if your services are named "acme-api", "acme-worker", add "acme-"
 #   internal_service_patterns:
 #     - "acme-"
+
+# =============================================================================
+# BILLING (OPTIONAL)
+# Controls whether financial integrity checks run in security-audit.md.
+# Only relevant if your project uses Stripe or similar billing infrastructure.
+# Commands: security-audit (Phase 4 — Financial Integrity)
+# =============================================================================
+
+# billing:
+#   # Set to true to enable Phase 4 (Financial Integrity) in /security-audit.
+#   # When false (default), the billing audit phase is skipped — appropriate for
+#   # projects that do not process payments or have no Stripe integration.
+#   enabled: false
