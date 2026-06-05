@@ -157,12 +157,13 @@ Append this block at the very end of your comment (after the `---` footer line, 
 
 **Prompt template:**
 ```
-You are performing a security and code quality scan on PR #[PR_NUMBER] for AlterLab (web scraping DaaS platform).
+You are performing a security and code quality scan on PR #[PR_NUMBER] for [PROJECT_NAME].
 
 ## Context
 - PR title: [TITLE]
 - Services touched: [SERVICES]
 - Files changed: [FILE_LIST]
+[PROJECT_CONTEXT]
 
 ## Your Mission
 Scan ALL changed code for security vulnerabilities and code quality issues. This is the baseline review that runs on every PR.
@@ -538,34 +539,24 @@ EOF
 
 **Prompt template:**
 ```
-You are auditing PR #[PR_NUMBER] for authentication and authorization correctness in AlterLab.
+You are auditing PR #[PR_NUMBER] for authentication and authorization correctness in [PROJECT_NAME].
 
 ## CRITICAL PROJECT CONVENTIONS — You MUST enforce these:
 
-### Auth Dependency Rules
-AlterLab has TWO auth dependencies. Using the wrong one is a security bug:
-
-| Route Type | Auth Dependency | How It Works | Example Routes |
-|-----------|----------------|-------------|----------------|
-| **Dashboard routes** (browser sessions) | `SessionUser` | JWT from httpOnly cookie, set by NextAuth | `/api/dashboard/*`, `/api/billing/*`, `/api/keys/*`, `/api/users/*` |
-| **Public API routes** (SDK/external) | `CurrentUser` | API key from `X-API-Key` header | `/api/v1/scrape`, `/api/v1/jobs/*` |
-| **Admin routes** | `CurrentUser` + `is_admin` check | API key with admin flag | `/api/v1/admin/*` |
-
-**VIOLATION**: Using `CurrentUser` on a dashboard route exposes API key auth to browser sessions.
-**VIOLATION**: Using `SessionUser` on a public API route breaks SDK authentication.
+[DOMAIN_CONTEXT]
 
 ### How to Check
 ```bash
 # Find auth patterns in changed files
-grep -rn "CurrentUser\|SessionUser\|Depends(get_current" [CHANGED_FILES]
+grep -rn "auth\|Depends\|get_current\|verify_token\|require_auth" [CHANGED_FILES]
 
 # Cross-reference with route path to determine if correct
-grep -rn "@router\.(get\|post\|put\|delete)" [CHANGED_FILES]
+grep -rn "@router\.(get\|post\|put\|delete)\|app\.(get\|post\|put\|delete)" [CHANGED_FILES]
 ```
 
 ### What to Verify
 1. Every new endpoint has an auth dependency (no unauthenticated endpoints without justification)
-2. The CORRECT auth dependency is used based on route type (see table above)
+2. The CORRECT auth dependency is used based on route type (refer to project conventions in [DOMAIN_CONTEXT] above — if absent, derive from surrounding code patterns)
 3. Multi-tenancy: resource access checks `user_id` ownership BEFORE returning data
 4. Rate limiting is applied to public-facing endpoints
 5. No IDOR vulnerabilities (different error codes for 404 vs 403 leak existence)
@@ -675,30 +666,15 @@ EOF
 
 **Prompt template:**
 ```
-You are auditing PR #[PR_NUMBER] for billing integrity in AlterLab.
+You are auditing PR #[PR_NUMBER] for billing integrity in [PROJECT_NAME].
 
-CRITICAL: Users pay per scrape. Any billing bug = revenue loss or user overcharging.
+CRITICAL: Any billing bug = revenue loss or user overcharging.
 
 ## Project Billing Architecture
 
-The billing flow spans two services:
-```
-API (pre-scrape):
-  1. Check user balance (services/api/app/core/credits.py or billing/)
-  2. Pre-debit estimated cost based on requested tier
-  3. Queue job to Redis
+[DOMAIN_CONTEXT]
 
-Worker (post-scrape):
-  4. Execute scrape, determine actual tier used
-  5. Reconcile: refund difference if actual tier < estimated tier
-  6. Record final billing in job result
-```
-
-## Key Files to Cross-Reference
-- Pricing: `services/api/app/core/pricing.py` (TIER_COSTS)
-- Credits: `services/api/app/core/credits.py` or `billing/`
-- Reconciliation: `services/worker/worker/queues.py` (search for "reconcil")
-- Tier determination: `services/worker/worker/unified_consumer.py`
+If no billing context is configured above, derive the billing flow from the changed files: trace credit check → debit → execution → reconciliation paths.
 
 ## What to Verify
 1. **Trace the full flow**: credit check → pre-debit → execution → reconciliation
@@ -781,7 +757,7 @@ EOF
 
 **Prompt template:**
 ```
-You are auditing PR #[PR_NUMBER] for concurrency bugs and race conditions in AlterLab.
+You are auditing PR #[PR_NUMBER] for concurrency bugs and race conditions in [PROJECT_NAME].
 
 CRITICAL: This is a billing system. Double-spend = revenue loss.
 
@@ -915,19 +891,13 @@ EOF
 
 **Prompt template:**
 ```
-You are auditing PR #[PR_NUMBER] for scraper logic correctness in AlterLab.
+You are auditing PR #[PR_NUMBER] for domain-specific logic correctness in [PROJECT_NAME].
 
-## Tier System
-AlterLab uses tiered scraping with escalation:
-T1 (curl/httpx) → T2 (HTTP with headers) → T3 (stealth proxy) → T3.5 (light JS) → T4 (full browser/Playwright)
+## Project Domain Architecture
 
-Each tier has different costs. Tier selection affects billing.
+[DOMAIN_CONTEXT]
 
-## Key Architecture
-- **Tier escalation**: `services/worker/worker/unified_consumer.py` — `_parallel_tier_race()`, `get_optimal_starting_tier()`
-- **Domain playbooks**: `services/worker/config/domain_playbooks.json` — domain-specific tier overrides
-- **Cortex intelligence**: `services/worker/worker/cortex_client.py` — learned headers/cookies/min_tier
-- **Content validation**: Determines if scrape succeeded or needs tier escalation
+If no domain context is configured above, derive the architecture from the changed files: read the primary consumer/worker/handler files to understand the execution model.
 
 ## What to Verify
 1. **Tier selection**: Is the starting tier correct? Does escalation logic work?
@@ -1096,14 +1066,13 @@ EOF
 
 **Prompt template:**
 ```
-You are auditing PR #[PR_NUMBER] for frontend quality in AlterLab (Next.js 15, App Router, React Server Components).
+You are auditing PR #[PR_NUMBER] for frontend quality in [PROJECT_NAME].
 
 ## Project Frontend Conventions
-- **Default to Server Components** — only use 'use client' when needed (hooks, event handlers, browser APIs)
-- **Data fetching**: SWR for client-side, server actions or API routes for mutations
-- **Styling**: Tailwind CSS with oklch dark mode, shadcn/ui components
-- **Forms**: Zod for validation schemas
-- **Auth in frontend**: NextAuth sessions, not direct API key usage
+
+[DOMAIN_CONTEXT]
+
+If no frontend context is configured above, derive conventions from the changed files: check package.json for framework versions and look at existing patterns in surrounding components.
 
 ## What to Check
 1. **Server vs Client components**: Is 'use client' used appropriately? Could this be a Server Component instead?
@@ -1176,15 +1145,13 @@ EOF
 
 **Prompt template:**
 ```
-You are auditing PR #[PR_NUMBER] for API design consistency in AlterLab.
+You are auditing PR #[PR_NUMBER] for API design consistency in [PROJECT_NAME].
 
 ## Project API Conventions
-- **Router registration**: New routers must be registered in `services/api/app/main.py`
-- **Schema validation**: All request/response models use Pydantic with type hints
-- **Error format**: Consistent error response schema across all endpoints
-- **Versioning**: Public API endpoints under `/api/v1/`, internal under `/api/`
-- **Auth**: Every endpoint must have explicit auth dependency (see Auth Conventions)
-- **Naming**: snake_case for Python, camelCase for JSON response fields (if using alias)
+
+[DOMAIN_CONTEXT]
+
+If no API context is configured above, derive conventions from the changed files: read the main router/application entrypoint to understand registration patterns, and check neighboring endpoints for error format and naming conventions.
 
 ## What to Check
 1. **Registration**: Is the new router registered in main.py?
@@ -1302,7 +1269,9 @@ EOF
 
 **Prompt template:**
 ```
-You are auditing PR #[PR_NUMBER] for database changes in AlterLab (PostgreSQL).
+You are auditing PR #[PR_NUMBER] for database changes in [PROJECT_NAME].
+
+[DOMAIN_CONTEXT]
 
 ## What to Check
 1. **SQL correctness** (CHECK FIRST — a query that errors at runtime breaks the whole page):
@@ -1393,14 +1362,13 @@ EOF
 
 **Prompt template:**
 ```
-You are auditing PR #[PR_NUMBER] for infrastructure and deployment safety in AlterLab.
+You are auditing PR #[PR_NUMBER] for infrastructure and deployment safety in [PROJECT_NAME].
 
 ## Deployment Architecture
-- **Blue-green deployment**: Both old and new versions run simultaneously during rollout
-- **Traefik**: Reverse proxy, handles routing. Config at `traefik/dynamic/active.yml`
-- **Docker Compose**: `docker-compose.yml` (dev), `docker-compose.prod.yml` (prod)
-- **Services**: api-blue/green, web-blue/green, worker-blue/green, stripe-webhooks-blue/green, postgres, redis, traefik
-- **CI/CD**: GitHub Actions deploys on merge to `main`
+
+[DOMAIN_CONTEXT]
+
+If no infra context is configured above, derive the deployment model from the changed files: read docker-compose files, GitHub Actions workflows, and entrypoint scripts to understand the deployment pipeline.
 
 ## What to Check
 1. **Downtime risk**: Will this change cause container restarts during deploy?
@@ -1516,27 +1484,21 @@ You are auditing PR #[PR_NUMBER] for infrastructure and deployment safety in Alt
    - Common siblings: `ci.yml` ↔ `deploy-production.yml` (share `test-api`, `test-web` jobs), `deploy-production.yml` ↔ `hotfix-deploy.yml` (share build/deploy logic)
    **This is the #1 cause of "CI passed but deploy failed" incidents.** Do not skip this check.
 10. **Deploy scope awareness** (ALWAYS run — checks whether ALL changed services will actually be deployed):
-   AlterLab has two separate deploy pipelines. The PR's CI/CD only covers one of them:
-   | Path prefix | Deploy mechanism | Auto-triggered? |
-   |-------------|-----------------|-----------------|
-   | `web/**`, `services/api/**` | `deploy-production.yml` | Yes (on merge to main) |
-   | `services/worker/**` | `deploy-production.yml` | Yes (on merge to main) |
-   | `services/session-ingest/**` | `deploy-e2e.yml` | **NO — manual trigger required** |
-   | `services/herald/**` | `deploy-e2e.yml` | **NO — manual trigger required** |
-   | `services/cortex/**` | `deploy-e2e.yml` | **NO — manual trigger required** |
+   This project may have multiple deploy pipelines. Check which pipelines cover which services:
 
-   **Steps**:
    ```bash
+   # List all GitHub Actions workflows
+   ls .github/workflows/
    # List all paths changed in this PR
    gh pr diff [PR_NUMBER] --name-only
    ```
-   - For each changed path, determine which deploy mechanism covers it (use table above)
-   - If ALL changed paths are covered by `deploy-production.yml` → no action needed
-   - **If ANY changed path maps to `deploy-e2e.yml` (session-ingest, herald, cortex)**:
-     - Flag as CONFIRMED BLOCKING finding
-     - Verdict: `BLOCK — Deploy prerequisite: manually trigger deploy-e2e.yml for [service names] before or after this deploy`
-     - Rationale: These services run via PM2 on the E2E host and are NOT rebuilt by the Docker deploy pipeline. Deploying without them leaves a broken contract between the API/web layer and the E2E service layer (e.g., a new token header sent by web but not yet verified by session-ingest causes 401/500 errors).
-   E2E services run via PM2 on the E2E host and are not part of the Docker deploy pipeline. When the API/web layer deploys a new auth contract (new token type, new header requirement) without a corresponding E2E service deploy, the two layers operate on mismatched contracts — resulting in 401/500 errors until the E2E service is manually redeployed.
+
+   For each changed path: read the `.github/workflows/` directory to determine which workflow deploys it and whether it's auto-triggered or requires manual action. If any changed service path is NOT covered by an auto-triggered workflow on merge:
+   - Flag as CONFIRMED BLOCKING finding
+   - Verdict: `BLOCK — Deploy prerequisite: manually trigger [workflow] for [service names] before or after this deploy`
+   - Rationale: Services not covered by the auto-deploy pipeline will not be updated on merge, leaving a broken contract between deployed and un-deployed layers.
+
+   If `[DOMAIN_CONTEXT]` above contains a deploy pipeline table, use it as the authoritative source for path → pipeline mapping.
 11. **Config field type/doc-comment consistency** (when the diff introduces new pydantic-settings fields):
    When a new env var is introduced as a pydantic-settings field with a collection type (`list[str]`, `List[str]`, `set[str]`, `Set[str]`), cross-reference the field's type annotation against the format hint documented in `.env.example`. **pydantic-settings v2 parses collection-type fields via `json.loads()` — they require JSON array format like `["a","b"]`, NOT comma-separated format like `a,b`**. A doc comment saying "comma-separated" on a `list[str]` field is a CONFIRMED HIGH finding — it guarantees a startup crash for anyone following the documented format.
    ```bash
@@ -1610,7 +1572,13 @@ You are auditing PR #[PR_NUMBER] for infrastructure and deployment safety in Alt
    The INFRA agent's secret delivery chain verification (env var present in ENV_MAPPING) does NOT verify whether the fallback value is safe. A config file can pass all delivery chain checks while still containing an active placeholder credential for any environment where the env var is absent. This check targets that gap. <!-- Added: forge#301 -->
 
 14. **Host-side database tool invocations in deploy scripts** (when `.github/workflows/*.yml`, `scripts/deploy*.sh`, or any deploy entrypoint script in the diff invokes `psql`, `createdb`, or `pg_dump` directly on the host):
-   Host-side `psql`, `createdb`, and `pg_dump` connect to PostgreSQL via the host's port binding (`localhost:5432` or `127.0.0.1:5432`). In SSH-based deploy contexts, the host-side port mapping to PostgreSQL's Docker container is unreliable — the listening address may differ from what the SSH session can reach, and the mapping is not guaranteed to be present at all in hardened host configurations. The migration system already uses `docker exec alterlab-postgres` for all database operations — deploy scripts must do the same.
+   Host-side `psql`, `createdb`, and `pg_dump` connect to PostgreSQL via the host's port binding (`localhost:5432` or `127.0.0.1:5432`). In SSH-based deploy contexts, the host-side port mapping to PostgreSQL's Docker container is unreliable — the listening address may differ from what the SSH session can reach, and the mapping is not guaranteed to be present at all in hardened host configurations. The safe pattern is to use `docker exec <postgres-container>` for all database operations in deploy scripts.
+
+   To find the correct container name, grep the project's docker-compose files:
+   ```bash
+   grep -n "container_name" docker-compose*.yml | grep -i "postgres\|pg\|db"
+   ```
+   Use the container name found (referred to as `[DB_CONTAINER]` in examples below).
 
    **Scan for host-side database tool invocations:**
    ```bash
@@ -1623,13 +1591,13 @@ You are auditing PR #[PR_NUMBER] for infrastructure and deployment safety in Alt
    **For each match, classify:**
    - `psql`, `createdb`, `pg_dump`, or `pg_restore` called directly (not via `docker exec`): **CONFIRMED HIGH**
      - Rationale: Host-side port mappings to PostgreSQL's Docker container are unreliable in SSH deploy contexts. A deploy step that fails to connect leaves post-deploy database setup incomplete — silently if `continue-on-error: true` is set, or rolls back a successful deploy if not.
-     - The safe pattern used by the migration system: `docker exec alterlab-postgres psql -U $POSTGRES_USER -d $POSTGRES_DB -c "..."` or `docker exec alterlab-postgres createdb -U $POSTGRES_USER $DB_NAME`
-   - `psql`/`createdb`/`pg_dump` called inside `docker exec alterlab-postgres ...`: **OK** — this is the safe pattern.
+     - The safe pattern: `docker exec [DB_CONTAINER] psql -U $POSTGRES_USER -d $POSTGRES_DB -c "..."` or `docker exec [DB_CONTAINER] createdb -U $POSTGRES_USER $DB_NAME`
+   - `psql`/`createdb`/`pg_dump` called inside `docker exec [DB_CONTAINER] ...`: **OK** — this is the safe pattern.
 
-   **Recommended fix**: Replace host-side invocations with `docker exec alterlab-postgres` equivalents:
-   - `psql -h localhost -U $USER -d $DB -c "..."` → `docker exec alterlab-postgres psql -U $USER -d $DB -c "..."`
-   - `createdb -h localhost -U $USER $DB_NAME` → `docker exec alterlab-postgres createdb -U $USER $DB_NAME`
-   - `pg_dump -h localhost -U $USER $DB` → `docker exec alterlab-postgres pg_dump -U $USER $DB`
+   **Recommended fix**: Replace host-side invocations with `docker exec [DB_CONTAINER]` equivalents:
+   - `psql -h localhost -U $USER -d $DB -c "..."` → `docker exec [DB_CONTAINER] psql -U $USER -d $DB -c "..."`
+   - `createdb -h localhost -U $USER $DB_NAME` → `docker exec [DB_CONTAINER] createdb -U $USER $DB_NAME`
+   - `pg_dump -h localhost -U $USER $DB` → `docker exec [DB_CONTAINER] pg_dump -U $USER $DB`
 
    Host-side port bindings to Docker containers are unreliable in SSH deploy contexts. Deploy scripts that invoke database tools directly cannot depend on `localhost:5432` being reachable; the same operation via `docker exec` bypasses the host network entirely and always succeeds when the container is running. <!-- Added: forge#322 -->
 
