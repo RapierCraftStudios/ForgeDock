@@ -2636,7 +2636,13 @@ async function connectExistingBot() {
   }
 
   const privateKeyPath = await input("Private key path (.pem):", "");
-  const resolvedKeyPath = resolve(privateKeyPath.trim().replace(/^~/, process.env.HOME ?? ""));
+  const HOME = process.env.HOME ?? "";
+  const expanded = privateKeyPath.trim().replace(/^~/, HOME);
+  const resolvedKeyPath = resolve(expanded);
+  if (privateKeyPath.trim().startsWith("~") && HOME && !resolvedKeyPath.startsWith(HOME + "/") && resolvedKeyPath !== HOME) {
+    console.log(`  ${RED}Invalid path: cannot traverse outside home directory.${RESET}`);
+    return false;
+  }
   if (!existsSync(resolvedKeyPath)) {
     console.log(`  ${RED}File not found: ${resolvedKeyPath}${RESET}`);
     return false;
