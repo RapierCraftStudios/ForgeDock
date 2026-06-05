@@ -95,9 +95,72 @@ Depth-first, workflow-driven:
 
 ## Phase 0: Setup & Auth
 
-1. Verify services: `curl -s -o /dev/null -w "%{http_code}" http://localhost:3000` and `:8000/api/v1/health`
-2. If down: `cd /home/mrdubey/projects/ScraperAPI/alterlab && docker compose up -d --build web api`
-3. Login via Playwright: navigate `/auth/login`, fill `claude@alterlab.dev` / `ClaudeCode2026!`, submit
+**Load config from forge.yaml** before running any checks:
+
+```bash
+QA_CONFIG=$(python3 - <<'PYEOF'
+import yaml, sys, os
+
+config_path = os.environ.get('FORGE_CONFIG', 'forge.yaml')
+try:
+    cfg = yaml.safe_load(open(config_path))
+except FileNotFoundError:
+    print('ERROR: forge.yaml not found. Run `cp forge.yaml.example forge.yaml` and configure your project.')
+    sys.exit(1)
+
+paths = cfg.get('paths', {})
+root = paths.get('root', '')
+if not root:
+    print('ERROR: forge.yaml missing paths.root — qa-sweep needs the project root to discover pages and start services.')
+    sys.exit(1)
+
+svc = cfg.get('services', {})
+app_url = svc.get('app_url', 'http://localhost:3000')
+api_url = svc.get('api_url', 'http://localhost:8000')
+
+# Read QA credentials from credentials file (graceful: empty string if not set)
+creds = paths.get('credentials', {})
+creds_file = creds.get('file', '') if isinstance(creds, dict) else ''
+qa_user = ''
+qa_pass = ''
+if creds_file:
+    try:
+        creds_data = yaml.safe_load(open(creds_file))
+        qa_section = creds_data.get('qa', {})
+        qa_user = qa_section.get('username', '')
+        qa_pass = qa_section.get('password', '')
+    except (FileNotFoundError, AttributeError):
+        pass  # Credentials file optional — will surface as empty QA_USER/QA_PASS
+
+print(root)
+print(app_url)
+print(api_url)
+print(qa_user)
+print(qa_pass)
+PYEOF
+)
+
+if echo "$QA_CONFIG" | grep -q '^ERROR:'; then
+    echo "$QA_CONFIG"
+    exit 1
+fi
+
+PROJECT_ROOT=$(echo "$QA_CONFIG" | sed -n '1p')
+APP_URL=$(echo "$QA_CONFIG" | sed -n '2p')
+API_URL=$(echo "$QA_CONFIG" | sed -n '3p')
+QA_USER=$(echo "$QA_CONFIG" | sed -n '4p')
+QA_PASS=$(echo "$QA_CONFIG" | sed -n '5p')
+
+if [ -z "$QA_USER" ] || [ -z "$QA_PASS" ]; then
+    echo "WARNING: QA credentials not configured in credentials file."
+    echo "Add qa.username and qa.password to the credentials file at paths.credentials.file in forge.yaml."
+    echo "Proceeding — login step will require manual credential entry."
+fi
+```
+
+1. Verify services: `curl -s -o /dev/null -w "%{http_code}" $APP_URL` and `$API_URL/api/v1/health`
+2. If down: `cd $PROJECT_ROOT && docker compose up -d --build web api`
+3. Login via Playwright: navigate `/auth/login`, fill `$QA_USER` / `$QA_PASS`, submit
 4. Capture baseline data from dashboard/sidebar: balance (exact number + format), user info, plan/tier, notification counts, nav items
 
 ---
@@ -107,7 +170,7 @@ Depth-first, workflow-driven:
 **Dynamic discovery from filesystem** (NOT hardcoded):
 
 ```bash
-cd /home/mrdubey/projects/ScraperAPI/alterlab/web/src/app
+cd $PROJECT_ROOT/web/src/app
 find . -name "page.tsx" -o -name "page.js" | sort
 ```
 
@@ -229,7 +292,7 @@ Next steps: `/orchestrate` on P0/P1 issues before deploy.
 ## Safety Rules
 
 1. NEVER modify production data — only read/interact. CAN create+delete test data.
-2. Test user only: `claude@alterlab.dev` / `ClaudeCode2026!`
+2. Test user only: `$QA_USER` (configured in credentials file via forge.yaml)
 3. Handle dialogs gracefully (accept/dismiss, don't leave hanging)
 4. Snapshot before interactions
 5. Check console after EVERY interaction
