@@ -15,7 +15,9 @@ import readline from "readline";
 // ---------------------------------------------------------------------------
 
 const USE_ANSI =
-  process.stdout.isTTY === true && !process.env.NO_COLOR && process.env.TERM !== "dumb";
+  process.stdout.isTTY === true &&
+  !process.env.NO_COLOR &&
+  process.env.TERM !== "dumb";
 
 // ---------------------------------------------------------------------------
 // Color helpers
@@ -105,9 +107,17 @@ export function box(content, { title = "", padding = 1, width } = {}) {
   // Strip ANSI codes to compute visual width
   const stripAnsi = (s) => s.replace(/\x1b\[[0-9;]*m/g, "");
 
-  const contentWidth = lines.reduce((max, l) => Math.max(max, stripAnsi(l).length), 0);
+  const contentWidth = lines.reduce(
+    (max, l) => Math.max(max, stripAnsi(l).length),
+    0,
+  );
   const titleLen = stripAnsi(title).length;
-  const innerWidth = Math.max(width || 0, contentWidth, titleLen + (title ? 4 : 0), 1);
+  const innerWidth = Math.max(
+    width || 0,
+    contentWidth,
+    titleLen + (title ? 4 : 0),
+    1,
+  );
   const totalInner = innerWidth + padding * 2;
 
   function hLine(leftChar, rightChar, fill) {
@@ -122,14 +132,27 @@ export function box(content, { title = "", padding = 1, width } = {}) {
     return leftChar + fill.repeat(totalInner) + rightChar;
   }
 
-  const top = hLine(BOX_CHARS.topLeft, BOX_CHARS.topRight, BOX_CHARS.horizontal);
+  const top = hLine(
+    BOX_CHARS.topLeft,
+    BOX_CHARS.topRight,
+    BOX_CHARS.horizontal,
+  );
   const bottom =
-    BOX_CHARS.bottomLeft + BOX_CHARS.horizontal.repeat(totalInner) + BOX_CHARS.bottomRight;
+    BOX_CHARS.bottomLeft +
+    BOX_CHARS.horizontal.repeat(totalInner) +
+    BOX_CHARS.bottomRight;
 
   const body = lines.map((line) => {
     const visual = stripAnsi(line).length;
     const spaces = Math.max(0, innerWidth - visual);
-    return BOX_CHARS.vertical + pad + line + " ".repeat(spaces) + pad + BOX_CHARS.vertical;
+    return (
+      BOX_CHARS.vertical +
+      pad +
+      line +
+      " ".repeat(spaces) +
+      pad +
+      BOX_CHARS.vertical
+    );
   });
 
   return [top, ...body, bottom].join("\n") + "\n";
@@ -155,7 +178,10 @@ const BRAILLE_FRAMES = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", 
  *   // ... async work ...
  *   s.stop('success', 'Done!');
  */
-export function spinner(message, { frames = BRAILLE_FRAMES, interval = 80 } = {}) {
+export function spinner(
+  message,
+  { frames = BRAILLE_FRAMES, interval = 80 } = {},
+) {
   let current = message;
   let frame = 0;
   let stopped = false;
@@ -170,8 +196,10 @@ export function spinner(message, { frames = BRAILLE_FRAMES, interval = 80 } = {}
       },
       stop(status, finalMsg) {
         const text = finalMsg || current;
-        if (status === "success") process.stderr.write(green("✔") + " " + text + "\n");
-        else if (status === "fail") process.stderr.write(red("✖") + " " + text + "\n");
+        if (status === "success")
+          process.stderr.write(green("✔") + " " + text + "\n");
+        else if (status === "fail")
+          process.stderr.write(red("✖") + " " + text + "\n");
         else process.stderr.write(text + "\n");
       },
     };
@@ -309,10 +337,9 @@ export function createProgressBar(total, opts = {}) {
 
 /**
  * Create a readline interface for stdin prompt.
- * Returns null if stdin is not a TTY (prompts fall back to defaults).
+ * Callers must guard with `process.stdin.isTTY` before invoking.
  */
 function makeRl() {
-  if (!process.stdin.isTTY) return null;
   return readline.createInterface({
     input: process.stdin,
     output: process.stdout,
@@ -382,7 +409,7 @@ export function select(message, choices, { initialIndex = 0 } = {}) {
   }
 
   const items = choices.map((c) =>
-    typeof c === "object" ? c : { label: String(c), value: c }
+    typeof c === "object" ? c : { label: String(c), value: c },
   );
 
   return new Promise((resolve) => {
@@ -425,12 +452,16 @@ export function select(message, choices, { initialIndex = 0 } = {}) {
     function cleanup(value) {
       try {
         process.stdin.setRawMode(wasRaw || false);
-      } catch { /* ignore */ }
+      } catch {
+        /* ignore */
+      }
       process.stdin.pause();
       process.stdin.removeListener("data", onData);
       // Clear the rendered list and show final selection
       process.stdout.write(`\x1b[${items.length + 1}A\x1b[J`);
-      process.stdout.write(`${cyan("✔")} ${message}: ${bold(items[idx].label)}\n`);
+      process.stdout.write(
+        `${cyan("✔")} ${message}: ${bold(items[idx].label)}\n`,
+      );
       resolve(value);
     }
 
@@ -470,13 +501,15 @@ export function multiSelect(message, choices, { initialSelected = [] } = {}) {
   if (!process.stdin.isTTY) {
     // Non-TTY: return pre-selected values or empty array
     const items = choices.map((c) =>
-      typeof c === "object" ? c : { label: String(c), value: c }
+      typeof c === "object" ? c : { label: String(c), value: c },
     );
-    return Promise.resolve(initialSelected.map((i) => items[i]?.value).filter(Boolean));
+    return Promise.resolve(
+      initialSelected.map((i) => items[i]?.value).filter(Boolean),
+    );
   }
 
   const items = choices.map((c) =>
-    typeof c === "object" ? c : { label: String(c), value: c }
+    typeof c === "object" ? c : { label: String(c), value: c },
   );
 
   return new Promise((resolve) => {
@@ -519,7 +552,9 @@ export function multiSelect(message, choices, { initialSelected = [] } = {}) {
     function cleanup() {
       try {
         process.stdin.setRawMode(wasRaw || false);
-      } catch { /* ignore */ }
+      } catch {
+        /* ignore */
+      }
       process.stdin.pause();
       process.stdin.removeListener("data", onData);
 
@@ -535,7 +570,7 @@ export function multiSelect(message, choices, { initialSelected = [] } = {}) {
       const lines = items.length + 2;
       process.stdout.write(`\x1b[${lines}A\x1b[J`);
       process.stdout.write(
-        `${cyan("✔")} ${message}: ${bold(selectedLabels || "(none)")}\n`
+        `${cyan("✔")} ${message}: ${bold(selectedLabels || "(none)")}\n`,
       );
       resolve(selectedValues);
     }
@@ -589,7 +624,8 @@ export function stepHeader(current, total, label, status = "active") {
   const icon = STEP_STATUS[status] || STEP_STATUS.active;
   const counter = dim(`Step ${current} of ${total}`);
   const dash = dim(" — ");
-  const name = status === "done" ? dim(label) : status === "active" ? bold(label) : label;
+  const name =
+    status === "done" ? dim(label) : status === "active" ? bold(label) : label;
   return `${icon}  ${counter}${dash}${name}`;
 }
 
@@ -607,7 +643,10 @@ export function stepHeader(current, total, label, status = "active") {
  * @param {string}  [opts.separator="─"]  - Separator line character
  * @returns {string} Rendered table string (includes trailing newline)
  */
-export function table(rows, { header = true, padding = 2, separator = "─" } = {}) {
+export function table(
+  rows,
+  { header = true, padding = 2, separator = "─" } = {},
+) {
   if (!rows || rows.length === 0) return "";
 
   const stripAnsi = (s) => s.replace(/\x1b\[[0-9;]*m/g, "");
@@ -615,7 +654,7 @@ export function table(rows, { header = true, padding = 2, separator = "─" } = 
   // Compute column widths
   const colCount = Math.max(...rows.map((r) => r.length));
   const widths = Array.from({ length: colCount }, (_, c) =>
-    Math.max(...rows.map((r) => (r[c] ? stripAnsi(String(r[c])).length : 0)))
+    Math.max(...rows.map((r) => (r[c] ? stripAnsi(String(r[c])).length : 0))),
   );
 
   function renderRow(row, isHeader) {
@@ -637,7 +676,11 @@ export function table(rows, { header = true, padding = 2, separator = "─" } = 
     if (i === 0 && header) {
       lines.push(renderRow(row, true));
       const sepLine = widths.reduce((w, c, ci) => {
-        return w + separator.repeat(c) + (ci < widths.length - 1 ? " ".repeat(padding) : "");
+        return (
+          w +
+          separator.repeat(c) +
+          (ci < widths.length - 1 ? " ".repeat(padding) : "")
+        );
       }, "");
       lines.push(dim(sepLine));
     } else {
