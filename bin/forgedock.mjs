@@ -310,9 +310,16 @@ async function init() {
 
   // --- Handle existing forge.yaml ---
   if (existsSync(outputPath)) {
-    const backupPath = join(cwd, "forge.yaml.bak");
+    const baseBak = join(cwd, "forge.yaml.bak");
+    const backupPath = existsSync(baseBak)
+      ? join(
+          cwd,
+          `forge.yaml.bak.${new Date().toISOString().replace(/[:.]/g, "-")}`
+        )
+      : baseBak;
+    const backupName = backupPath.split("/").pop();
     renameSync(outputPath, backupPath);
-    console.log(`  ${YELLOW}Backed up${RESET}: forge.yaml → forge.yaml.bak`);
+    console.log(`  ${YELLOW}Backed up${RESET}: forge.yaml → ${backupName}`);
   }
 
   // --- Generate forge.yaml content ---
