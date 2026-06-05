@@ -8,7 +8,7 @@ import { execSync } from "child_process";
 import {
   BOLD, GREEN, YELLOW, CYAN, RED, RESET,
   bold, dim, green, yellow, cyan, red,
-  box, stepHeader, select, confirm,
+  box, stepHeader, select, confirm, createProgressBar,
 } from "./tui.mjs";
 
 const __filename = fileURLToPath(import.meta.url);
@@ -19,6 +19,7 @@ const TARGET_DIR = join(process.env.HOME ?? "", ".claude", "commands");
 
 const args = process.argv.slice(2);
 const command = args[0];
+const forceYes = args.includes("--yes") || args.includes("-y");
 
 // ---------------------------------------------------------------------------
 // Version — read dynamically from package.json
@@ -474,35 +475,203 @@ async function install() {
 }
 
 async function uninstall() {
+  const { unlink } = await import("fs/promises");
+
   console.log("");
-  console.log(`${BOLD}ForgeDock${RESET} — Removing pipeline commands`);
+  console.log(`${BOLD}ForgeDock${RESET} — Uninstall`);
   console.log("");
 
+  // -------------------------------------------------------------------------
+  // Phase 1: Dry-run scan — compute what would be removed
+  // -------------------------------------------------------------------------
+
   const files = await findMarkdownFiles(COMMANDS_DIR);
-  let removed = 0;
+  /** @type {Array<{file: string, rel: string, target: string}>} */
+  const toRemove = [];
 
   for (const file of files) {
     const rel = relative(COMMANDS_DIR, file);
     const target = join(TARGET_DIR, rel);
-
     try {
       const stats = await lstat(target);
       if (stats.isSymbolicLink()) {
         const current = await readlink(target);
         if (current === file) {
-          const { unlink } = await import("fs/promises");
-          await unlink(target);
-          console.log(`  ${RED}Removed${RESET}: ${rel}`);
-          removed++;
+          toRemove.push({ file, rel, target });
         }
       }
     } catch {
-      // Doesn't exist — nothing to do
+      // Target doesn't exist — nothing to remove
     }
   }
 
+  // Scan shell profiles for FORGE_HOME block
+  const FORGE_HOME_MARKER = "# ForgeDock — autonomous development pipeline";
+  const shellProfiles = [
+    join(process.env.HOME ?? "", ".bashrc"),
+    join(process.env.HOME ?? "", ".zshrc"),
+  ];
+  /** @type {string[]} Profiles that contain the FORGE_HOME block */
+  const profilesWithForgeHome = shellProfiles.filter((p) => {
+    if (!existsSync(p)) return false;
+    try {
+      return readFileSync(p, "utf-8").includes(FORGE_HOME_MARKER);
+    } catch {
+      return false;
+    }
+  });
+
+  // Check for forge.yaml in cwd
+  const forgeYamlPath = join(process.cwd(), "forge.yaml");
+  const hasForgeYaml = existsSync(forgeYamlPath);
+
+  // -------------------------------------------------------------------------
+  // Phase 2: Pre-removal summary
+  // -------------------------------------------------------------------------
+
+  if (toRemove.length === 0 && profilesWithForgeHome.length === 0 && !hasForgeYaml) {
+    console.log(`  ${dim("Nothing to remove — ForgeDock does not appear to be installed.")}`);
+    console.log("");
+    return;
+  }
+
+  const summaryLines = [""];
+  if (toRemove.length > 0) {
+    summaryLines.push(`  ${red("Commands")}:   ${bold(String(toRemove.length))} symlinks in ${dim(TARGET_DIR)}`);
+  } else {
+    summaryLines.push(`  ${dim("Commands:")}   none found`);
+  }
+  if (profilesWithForgeHome.length > 0) {
+    summaryLines.push(
+      `  ${yellow("Profiles")}:   FORGE_HOME export in ${bold(profilesWithForgeHome.map((p) => p.replace(process.env.HOME ?? "", "~")).join(", "))}`
+    );
+  }
+  if (hasForgeYaml) {
+    summaryLines.push(`  ${cyan("forge.yaml")}: present in current directory`);
+  }
+  summaryLines.push("");
+
+  process.stdout.write(box(summaryLines, { title: "What will be removed" }));
   console.log("");
-  console.log(`Done. Removed: ${removed} commands.`);
+
+  // -------------------------------------------------------------------------
+  // Phase 3: Main confirmation — default N (safe)
+  // -------------------------------------------------------------------------
+
+  const commandLabel =
+    toRemove.length === 1 ? "1 command" : `${toRemove.length} commands`;
+  const profileLabel =
+    profilesWithForgeHome.length > 0
+      ? ` and FORGE_HOME from ${profilesWithForgeHome.length === 1 ? "shell profile" : "shell profiles"}`
+      : "";
+
+  let confirmed = forceYes;
+  if (!confirmed) {
+    confirmed = await confirm(
+      `Remove ${commandLabel}${profileLabel}?`,
+      false
+    );
+  }
+
+  if (!confirmed) {
+    console.log("");
+    console.log(`  ${dim("Aborted — nothing was removed.")}`);
+    console.log("");
+    return;
+  }
+
+  // -------------------------------------------------------------------------
+  // Phase 4: Remove symlinks with progress bar
+  // -------------------------------------------------------------------------
+
+  if (toRemove.length > 0) {
+    console.log("");
+    const bar = createProgressBar(toRemove.length, { label: "  Removing commands" });
+    let removed = 0;
+
+    for (const { target, rel } of toRemove) {
+      try {
+        await unlink(target);
+        removed++;
+        bar.tick(1, rel);
+      } catch (err) {
+        bar.tick(1, `${red("failed:")} ${rel}`);
+      }
+    }
+
+    bar.done(`${green("✔")} Removed ${removed}/${toRemove.length} commands`);
+  }
+
+  // -------------------------------------------------------------------------
+  // Phase 5: FORGE_HOME cleanup (only if detected)
+  // -------------------------------------------------------------------------
+
+  if (profilesWithForgeHome.length > 0) {
+    console.log("");
+    const cleanProfiles = forceYes
+      ? true
+      : await confirm("Remove FORGE_HOME export from shell profiles?", true);
+
+    if (cleanProfiles) {
+      for (const profile of profilesWithForgeHome) {
+        try {
+          const content = readFileSync(profile, "utf-8");
+          // Remove the two-line block written by install():
+          //   \n# ForgeDock — autonomous development pipeline\nexport FORGE_HOME="..."\n
+          // Also handle the case where it's at the very start of the file (no leading \n)
+          const cleaned = content
+            .replace(
+              /\n# ForgeDock — autonomous development pipeline\nexport FORGE_HOME=[^\n]*\n/g,
+              "\n"
+            )
+            .replace(
+              /^# ForgeDock — autonomous development pipeline\nexport FORGE_HOME=[^\n]*\n/,
+              ""
+            );
+          writeFileSync(profile, cleaned, "utf-8");
+          const profileShort = profile.replace(process.env.HOME ?? "", "~");
+          console.log(`  ${green("✔")} Removed FORGE_HOME from ${profileShort}`);
+        } catch (err) {
+          const profileShort = profile.replace(process.env.HOME ?? "", "~");
+          console.log(`  ${red("✖")} Could not update ${profileShort}: ${err.message}`);
+        }
+      }
+    } else {
+      console.log(`  ${dim("Skipped — FORGE_HOME left in shell profiles.")}`);
+    }
+  }
+
+  // -------------------------------------------------------------------------
+  // Phase 6: forge.yaml handling (default: keep)
+  // -------------------------------------------------------------------------
+
+  if (hasForgeYaml) {
+    console.log("");
+    const deleteForgeYaml = forceYes
+      ? false  // --yes flag: keep forge.yaml by default (safe)
+      : await confirm("Delete forge.yaml from this project?", false);
+
+    if (deleteForgeYaml) {
+      try {
+        await unlink(forgeYamlPath);
+        console.log(`  ${green("✔")} Deleted forge.yaml`);
+      } catch (err) {
+        console.log(`  ${red("✖")} Could not delete forge.yaml: ${err.message}`);
+      }
+    } else {
+      console.log(`  ${dim("forge.yaml kept.")}`);
+    }
+  }
+
+  // -------------------------------------------------------------------------
+  // Phase 7: Post-removal summary
+  // -------------------------------------------------------------------------
+
+  console.log("");
+  console.log(`${green("Uninstall complete.")} ForgeDock commands have been removed.`);
+  if (profilesWithForgeHome.length > 0) {
+    console.log(`  ${dim("Restart your shell or run")} ${cyan("source ~/.bashrc")} ${dim("(or")} ${cyan("~/.zshrc")}${dim(")")} ${dim("to apply profile changes.")}`);
+  }
   console.log("");
 }
 
@@ -790,7 +959,8 @@ function help() {
   console.log(`  ${CYAN}npx forgedock${RESET}            Launch TUI onboarding (interactive)`);
   console.log(`  ${CYAN}npx forgedock install${RESET}    Install commands`);
   console.log(`  ${CYAN}npx forgedock init${RESET}       Generate forge.yaml config for your project`);
-  console.log(`  ${CYAN}npx forgedock uninstall${RESET}  Remove commands`);
+  console.log(`  ${CYAN}npx forgedock uninstall${RESET}  Remove commands (interactive, with confirmation)`);
+  console.log(`  ${CYAN}npx forgedock uninstall --yes${RESET}  Remove commands without prompts (non-interactive)`);
   console.log(`  ${CYAN}npx forgedock update${RESET}     Pull latest & reinstall`);
   console.log(`  ${CYAN}npx forgedock help${RESET}       Show this help`);
   console.log("");
