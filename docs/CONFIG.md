@@ -327,6 +327,11 @@ cloudflare:
   api_token: "your-cf-token"
   zone_id: "your-zone-id"
 
+# QA test user credentials — read by /qa-sweep for browser-based authentication
+qa:
+  username: "test@example.com"
+  password: "your-test-password"
+
 # Add other service credentials as needed
 ```
 
