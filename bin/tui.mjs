@@ -5,7 +5,9 @@
  * step renderer, and table renderer using only Node.js built-in APIs.
  *
  * NO_COLOR support: set NO_COLOR=1 or run in a non-TTY environment
- * to disable all ANSI codes. All functions return plain text in that case.
+ * to disable all ANSI escape codes. Unicode symbols (e.g. ●, ✔, ✖, ○, —) are
+ * not ANSI codes and remain in the output even when NO_COLOR is set — this is
+ * correct per the NO_COLOR specification (https://no-color.org/).
  */
 
 import readline from "readline";
@@ -619,6 +621,14 @@ const STEP_STATUS = {
  * @param {string} label      - Step description
  * @param {'pending'|'active'|'done'|'failed'|'skipped'} [status='active']
  * @returns {string} Formatted step header (no trailing newline)
+ *
+ * @remarks
+ * **NO_COLOR behavior**: When \`NO_COLOR\` is set, ANSI color and style codes are
+ * suppressed, but the Unicode status symbols (●, ✔, ✖, ○, —) remain in the
+ * output. This is correct per the NO_COLOR specification
+ * (https://no-color.org/), which only covers ANSI escape codes — not Unicode
+ * characters. Callers that require fully plain-text output must substitute
+ * their own ASCII symbols.
  */
 export function stepHeader(current, total, label, status = "active") {
   const icon = STEP_STATUS[status] || STEP_STATUS.active;
