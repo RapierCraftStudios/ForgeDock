@@ -5,7 +5,11 @@ import { dirname, join, relative } from "path";
 import { mkdir, symlink, readlink, lstat, readdir, stat } from "fs/promises";
 import { existsSync, appendFileSync, readFileSync, writeFileSync, renameSync } from "fs";
 import { execSync } from "child_process";
-import { BOLD, GREEN, YELLOW, CYAN, RED, RESET } from "./tui.mjs";
+import {
+  BOLD, GREEN, YELLOW, CYAN, RED, RESET,
+  bold, dim, green, yellow, cyan, red,
+  box, stepHeader, select, confirm,
+} from "./tui.mjs";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
@@ -14,7 +18,189 @@ const COMMANDS_DIR = join(FORGE_HOME, "commands");
 const TARGET_DIR = join(process.env.HOME ?? "", ".claude", "commands");
 
 const args = process.argv.slice(2);
-const command = args[0] || "install";
+const command = args[0];
+
+// ---------------------------------------------------------------------------
+// Version — read dynamically from package.json
+// ---------------------------------------------------------------------------
+
+function getVersion() {
+  try {
+    const pkg = JSON.parse(readFileSync(join(FORGE_HOME, "package.json"), "utf-8"));
+    return pkg.version || "0.0.0";
+  } catch {
+    return "0.0.0";
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Splash screen — ASCII art logo in a Unicode box
+// ---------------------------------------------------------------------------
+
+const LOGO_LINES = [
+  `${bold(cyan("  ╔═╗╔═╗╦═╗╔═╗╔═╗╔╦╗╔═╗╔═╗╦╔═"))}`,
+  `${bold(cyan("  ╠╣ ║ ║╠╦╝║ ╦║╣  ║║║ ║║  ╠╩╗"))}`,
+  `${bold(cyan("  ╚  ╚═╝╩╚═╚═╝╚═╝═╩╝╚═╝╚═╝╩ ╩"))}`,
+];
+
+function splash() {
+  const version = getVersion();
+  const tagline = dim("GitHub as a knowledge graph for AI agents");
+  const versionLine = dim(`v${version}`);
+
+  const content = [
+    "",
+    ...LOGO_LINES,
+    "",
+    `  ${tagline}`,
+    `  ${versionLine}`,
+    "",
+  ];
+
+  process.stdout.write("\n" + box(content, { padding: 2 }) + "\n");
+}
+
+// ---------------------------------------------------------------------------
+// Step Orchestrator — manages a sequence of named steps
+// ---------------------------------------------------------------------------
+
+/**
+ * @typedef {Object} Step
+ * @property {string} name           - Display name for the step
+ * @property {() => Promise<void>} run - Async function to execute
+ * @property {boolean} [optional]    - If true, failure offers skip option
+ */
+
+class StepOrchestrator {
+  /**
+   * @param {Step[]} steps
+   */
+  constructor(steps) {
+    /** @type {Array<Step & { status: string }>} */
+    this.steps = steps.map((s) => ({ ...s, status: "pending" }));
+    this.currentIndex = 0;
+    this._aborted = false;
+
+    // SIGINT: clean exit — restore cursor, show final state
+    this._sigintHandler = () => {
+      this._aborted = true;
+      // Mark current step as failed if it was active
+      if (this.currentIndex < this.steps.length) {
+        this.steps[this.currentIndex].status = "failed";
+      }
+      this._renderSteps();
+      process.stdout.write("\n");
+      console.log(`${red("Aborted")} — exiting cleanly.`);
+      // Show cursor
+      if (process.stdout.isTTY) process.stdout.write("\x1b[?25h");
+      process.exit(130);
+    };
+  }
+
+  /**
+   * Render the current step list to stdout.
+   */
+  _renderSteps() {
+    const total = this.steps.length;
+    console.log("");
+    for (let i = 0; i < total; i++) {
+      const step = this.steps[i];
+      console.log("  " + stepHeader(i + 1, total, step.name, step.status));
+    }
+    console.log("");
+  }
+
+  /**
+   * Execute all steps in sequence.
+   * @returns {Promise<boolean>} true if all steps completed (or were skipped), false if aborted
+   */
+  async run() {
+    process.on("SIGINT", this._sigintHandler);
+
+    try {
+      this._renderSteps();
+
+      while (this.currentIndex < this.steps.length) {
+        if (this._aborted) return false;
+
+        const step = this.steps[this.currentIndex];
+        step.status = "active";
+        this._renderSteps();
+
+        try {
+          await step.run();
+          step.status = "done";
+        } catch (err) {
+          step.status = "failed";
+          this._renderSteps();
+
+          const handled = await this._handleFailure(step, err);
+          if (!handled) {
+            // Abort
+            this._aborted = true;
+            return false;
+          }
+          // Handled (retried successfully or skipped) — advance normally
+        }
+
+        this.currentIndex++;
+      }
+
+      // All done
+      this._renderSteps();
+      return true;
+    } finally {
+      process.removeListener("SIGINT", this._sigintHandler);
+    }
+  }
+
+  /**
+   * Handle a step failure: offer retry/skip/abort.
+   * @returns {Promise<boolean>} true if recovered (retry succeeded or skipped), false if abort
+   */
+  async _handleFailure(step, err) {
+    console.log(`  ${red("Error")}: ${err.message || String(err)}`);
+    console.log("");
+
+    // Non-TTY: no interactive recovery — abort
+    if (!process.stdin.isTTY) {
+      console.log("  Non-interactive environment — aborting.");
+      return false;
+    }
+
+    const choices = [{ label: "Retry", value: "retry" }];
+    if (step.optional) {
+      choices.push({ label: "Skip this step", value: "skip" });
+    }
+    choices.push({ label: "Abort", value: "abort" });
+
+    const action = await select("What would you like to do?", choices);
+
+    if (action === "retry") {
+      // Re-run the step
+      step.status = "active";
+      this._renderSteps();
+      try {
+        await step.run();
+        step.status = "done";
+        return true;
+      } catch (retryErr) {
+        step.status = "failed";
+        return this._handleFailure(step, retryErr);
+      }
+    } else if (action === "skip") {
+      step.status = "skipped";
+      return true;
+    } else {
+      // abort
+      return false;
+    }
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Prerequisites (unchanged logic, extracted for reuse)
+// ---------------------------------------------------------------------------
 
 function checkPrerequisites() {
   const issues = [];
@@ -81,6 +267,10 @@ function checkPrerequisites() {
   return warnings.length === 0;
 }
 
+// ---------------------------------------------------------------------------
+// File discovery
+// ---------------------------------------------------------------------------
+
 async function findMarkdownFiles(dir) {
   const results = [];
   const entries = await readdir(dir, { withFileTypes: true });
@@ -94,6 +284,10 @@ async function findMarkdownFiles(dir) {
   }
   return results.sort();
 }
+
+// ---------------------------------------------------------------------------
+// Legacy commands (install, uninstall, update, init, help)
+// ---------------------------------------------------------------------------
 
 async function install() {
   checkPrerequisites();
@@ -155,8 +349,8 @@ async function install() {
   // Set FORGE_HOME in shell profiles
   let profileUpdated = false;
   for (const profile of [
-    join(process.env.HOME, ".bashrc"),
-    join(process.env.HOME, ".zshrc"),
+    join(process.env.HOME ?? "", ".bashrc"),
+    join(process.env.HOME ?? "", ".zshrc"),
   ]) {
     if (existsSync(profile)) {
       const content = readFileSync(profile, "utf-8");
@@ -501,7 +695,7 @@ function help() {
   console.log(`${BOLD}ForgeDock${RESET} — GitHub as a knowledge graph for AI agents`);
   console.log("");
   console.log("Usage:");
-  console.log(`  ${CYAN}npx forgedock${RESET}            Install commands (default)`);
+  console.log(`  ${CYAN}npx forgedock${RESET}            Launch TUI onboarding (interactive)`);
   console.log(`  ${CYAN}npx forgedock install${RESET}    Install commands`);
   console.log(`  ${CYAN}npx forgedock init${RESET}       Generate forge.yaml config for your project`);
   console.log(`  ${CYAN}npx forgedock uninstall${RESET}  Remove commands`);
@@ -510,26 +704,110 @@ function help() {
   console.log("");
 }
 
-switch (command) {
-  case "install":
+// ---------------------------------------------------------------------------
+// TUI Onboarding — interactive step-based flow (default when no command given)
+// ---------------------------------------------------------------------------
+
+async function tuiOnboarding() {
+  splash();
+
+  // Non-TTY fallback: skip TUI, run install directly
+  if (!process.stdout.isTTY) {
+    console.log(dim("  Non-interactive environment detected — running install."));
+    console.log("");
     await install();
-    break;
-  case "init":
-    await init();
-    break;
-  case "uninstall":
-    await uninstall();
-    break;
-  case "update":
-    await update();
-    break;
-  case "help":
-  case "--help":
-  case "-h":
-    help();
-    break;
-  default:
-    console.log(`${RED}Unknown command: ${command}${RESET}`);
-    help();
+    return;
+  }
+
+  const steps = [
+    {
+      name: "Preflight Checks",
+      optional: false,
+      run: async () => {
+        checkPrerequisites();
+      },
+    },
+    {
+      name: "Install Commands",
+      optional: false,
+      run: async () => {
+        await install();
+      },
+    },
+    {
+      name: "Project Configuration",
+      optional: true,
+      run: async () => {
+        const forgeYamlPath = join(process.cwd(), "forge.yaml");
+        if (existsSync(forgeYamlPath)) {
+          console.log(`  ${green("forge.yaml")} already exists — skipping generation.`);
+          return;
+        }
+
+        const shouldInit = await confirm(
+          "No forge.yaml found. Generate one now?",
+          true
+        );
+        if (shouldInit) {
+          await init();
+        } else {
+          console.log(
+            `  ${dim("Skipped.")} Run ${cyan("npx forgedock init")} later to generate forge.yaml.`
+          );
+        }
+      },
+    },
+  ];
+
+  const orchestrator = new StepOrchestrator(steps);
+  const success = await orchestrator.run();
+
+  if (success) {
+    console.log(
+      green("Setup complete!") +
+      ` Run ${cyan("/help")} inside Claude Code to see available commands.`
+    );
+    console.log("");
+  } else {
+    console.log("");
+    console.log(
+      yellow("Setup incomplete.") +
+      ` Re-run ${cyan("npx forgedock")} to try again.`
+    );
+    console.log("");
     process.exit(1);
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Command dispatch
+// ---------------------------------------------------------------------------
+
+if (!command) {
+  // No arguments — launch TUI onboarding
+  await tuiOnboarding();
+} else {
+  switch (command) {
+    case "install":
+      await install();
+      break;
+    case "init":
+      await init();
+      break;
+    case "uninstall":
+      await uninstall();
+      break;
+    case "update":
+      await update();
+      break;
+    case "help":
+    case "--help":
+    case "-h":
+      help();
+      break;
+    default:
+      console.log(`${RED}Unknown command: ${command}${RESET}`);
+      help();
+      process.exit(1);
+  }
 }
