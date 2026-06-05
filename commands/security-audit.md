@@ -1,6 +1,6 @@
 ---
 description: Periodic security posture audit — runs a scripted 4-phase checklist against repo files (not diffs), creates GitHub issues for confirmed findings
-argument-hint: [--repo alterlab|mcp|n8n] [--phase 1|2|3|4|all] [--dry-run]
+argument-hint: [--repo <prefix>] [--phase 1|2|3|4|all] [--dry-run]
 ---
 
 # /security-audit — Periodic Security Posture Audit
@@ -21,22 +21,70 @@ This is NOT a PR review — it does not approve or block. It creates issues for 
 
 ---
 
+## Config Preamble
+
+Before executing any phase, read `forge.yaml` to resolve project references:
+
+```bash
+CONFIG_FILE="${FORGE_CONFIG:-forge.yaml}"
+if [ -f "$CONFIG_FILE" ]; then
+  GH_OWNER=$(yq '.project.owner' "$CONFIG_FILE")
+  GH_REPO_NAME=$(yq '.project.repo' "$CONFIG_FILE")
+  GH_REPO="${GH_OWNER}/${GH_REPO_NAME}"
+  GH_FLAG="-R $GH_REPO"
+  REPO_PATH=$(yq '.paths.root' "$CONFIG_FILE")
+  # FORGE_REPO: the self-pipeline repo where security audit summary comments are posted.
+  # Set forge_repo in forge.yaml if your pipeline repo differs from GH_REPO.
+  FORGE_REPO=$(yq '.forge_repo // ""' "$CONFIG_FILE")
+  [ -z "$FORGE_REPO" ] && FORGE_REPO="$GH_REPO"
+  # BILLING_ENABLED: controls whether Phase 4 (Financial Integrity) runs.
+  # Set billing.enabled: true in forge.yaml if your project uses Stripe billing.
+  BILLING_ENABLED=$(yq '.billing.enabled // "false"' "$CONFIG_FILE")
+else
+  echo "WARNING: forge.yaml not found — commands will use placeholder values"
+  echo "Run: cp forge.yaml.example forge.yaml  and fill in your project details"
+  GH_REPO="your-org/your-repo"
+  GH_FLAG="-R $GH_REPO"
+  REPO_PATH="./"
+  FORGE_REPO="$GH_REPO"
+  BILLING_ENABLED="false"
+fi
+```
+
+---
+
 ## Multi-Repo Support
 
-| Input Pattern | Target Repo | GH_REPO | REPO_PATH |
-|---------------|-------------|---------|-----------|
-| `--repo alterlab` or default | AlterLab | `RapierCraft/AlterLab` | `/home/user/projects/alterlab` |
-| `--repo mcp` | MCP Server | `RapierCraft/alterlab-mcp-server` | `/home/user/projects/alterlab-mcp-server` |
-| `--repo n8n` | n8n Node | `RapierCraft/n8n-nodes-alterlab` | `/home/user/projects/n8n-nodes-alterlab` |
+If your project spans multiple repositories, define them in the `repos.satellites` section of `forge.yaml`. The `--repo <prefix>` argument selects a satellite by its `prefix` field.
 
 Parse `$ARGUMENTS` for:
-- **`--repo <name>`**: target repo (default: `alterlab`)
+- **`--repo <prefix>`**: target repo prefix (default: primary repo from `project.owner/project.repo`)
 - **`--phase <N|all>`**: run only a specific phase, or all (default: `all`)
 - **`--dry-run`**: print findings but do NOT create GitHub issues
 
-Set context variables from the table above. If `REPO_PATH` is not found locally, clone from GitHub:
+Set context variables from config:
+
 ```bash
-gh repo clone {GH_REPO} {REPO_PATH} -- --depth=1 2>/dev/null || true
+REPO_PREFIX=$(echo "$ARGUMENTS" | grep -oP '(?<=--repo )\S+' || true)
+
+if [ -n "$REPO_PREFIX" ]; then
+  # Look up satellite repo by prefix in forge.yaml
+  SATELLITE_REPO=$(yq ".repos.satellites[] | select(.prefix == \"$REPO_PREFIX\") | .repo" "$CONFIG_FILE" 2>/dev/null)
+  if [ -n "$SATELLITE_REPO" ] && [ "$SATELLITE_REPO" != "null" ]; then
+    GH_REPO="$SATELLITE_REPO"
+    GH_FLAG="-R $GH_REPO"
+    REPO_PATH=$(yq ".repos.satellites[] | select(.prefix == \"$REPO_PREFIX\") | .local_path" "$CONFIG_FILE" 2>/dev/null || echo "$REPO_PATH")
+    # Also read billing flag for satellite if set
+    BILLING_ENABLED=$(yq ".repos.satellites[] | select(.prefix == \"$REPO_PREFIX\") | .billing_enabled // \"false\"" "$CONFIG_FILE" 2>/dev/null || echo "false")
+  else
+    echo "WARNING: --repo prefix '$REPO_PREFIX' not found in forge.yaml repos.satellites — using default repo"
+  fi
+fi
+
+# If REPO_PATH is not found locally, clone from GitHub
+if [ ! -d "$REPO_PATH" ]; then
+  gh repo clone {GH_REPO} {REPO_PATH} -- --depth=1 2>/dev/null || true
+fi
 ```
 
 ---
@@ -353,9 +401,17 @@ grep -rn '||\s*["'"'"'][a-zA-Z0-9]\{4,\}["'"'"']\|default.*password\|default.*se
 
 ---
 
-## Phase 4: Financial Integrity (AlterLab-specific)
+## Phase 4: Financial Integrity
 
-*Skip this phase for non-AlterLab repos (MCP, n8n). These checks are specific to AlterLab's billing architecture.*
+*Skip this phase if `billing.enabled` is not set to `true` in `forge.yaml`. These checks require Stripe webhook integration and a billing architecture in your project.*
+
+```bash
+if [ "$BILLING_ENABLED" != "true" ]; then
+  echo "Phase 4 skipped — billing.enabled is not true in forge.yaml"
+  echo "To enable: add 'billing:\n  enabled: true' to forge.yaml"
+  # Skip to Phase 5
+fi
+```
 
 ### 4A: Stripe Webhook Handler Coverage
 
@@ -491,7 +547,7 @@ ISSUE_EOF
 If this command was invoked from within a `/work-on` context or with an issue reference:
 
 ```bash
-gh issue comment "{CALLER_ISSUE}" -R RapierCraftStudios/forge --body "$(cat <<'COMMENT_EOF'
+gh issue comment "{CALLER_ISSUE}" -R {FORGE_REPO} --body "$(cat <<'COMMENT_EOF'
 <!-- FORGE:SECURITY_AUDIT -->
 ## Security Audit Complete
 

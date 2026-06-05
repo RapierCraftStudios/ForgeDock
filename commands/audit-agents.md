@@ -18,6 +18,30 @@ Parse agent JSONL output files from orchestration runs to produce actionable dia
 
 ---
 
+## Config Preamble
+
+Before executing any phase, read `forge.yaml` to resolve project references:
+
+```bash
+CONFIG_FILE="${FORGE_CONFIG:-forge.yaml}"
+if [ -f "$CONFIG_FILE" ]; then
+  GH_OWNER=$(yq '.project.owner' "$CONFIG_FILE")
+  GH_REPO_NAME=$(yq '.project.repo' "$CONFIG_FILE")
+  GH_REPO="${GH_OWNER}/${GH_REPO_NAME}"
+  # FORGE_REPO: the self-pipeline repo where orchestration metrics are tracked.
+  # Set forge_repo in forge.yaml if your pipeline repo differs from GH_REPO.
+  FORGE_REPO=$(yq '.forge_repo // ""' "$CONFIG_FILE")
+  [ -z "$FORGE_REPO" ] && FORGE_REPO="$GH_REPO"
+else
+  echo "WARNING: forge.yaml not found — commands will use placeholder values"
+  echo "Run: cp forge.yaml.example forge.yaml  and fill in your project details"
+  GH_REPO="your-org/your-repo"
+  FORGE_REPO="$GH_REPO"
+fi
+```
+
+---
+
 ## Phase 1: Locate Agent Outputs
 
 ### Step 1A: Find the session
@@ -320,17 +344,17 @@ This step posts a structured `<!-- FORGE:AUDIT-AGENTS -->` summary comment to th
 
 ```bash
 # Ensure the label exists before using it (gh issue create fails with GraphQL error if label is absent)
-gh label create "orchestration-metrics" -R RapierCraftStudios/forge \
+gh label create "orchestration-metrics" -R {FORGE_REPO} \
   --color "5319E7" --description "Running log of persisted audit-agents efficiency summaries" \
   --force 2>/dev/null || true
 
-TRACKING_ISSUE=$(gh issue list -R RapierCraftStudios/forge \
+TRACKING_ISSUE=$(gh issue list -R {FORGE_REPO} \
   --state open --label "orchestration-metrics" --limit 1 \
   --json number --jq '.[0].number' 2>/dev/null)
 
 if [ -z "$TRACKING_ISSUE" ]; then
   # Create the tracking issue on first use
-  TRACKING_ISSUE=$(gh issue create -R RapierCraftStudios/forge \
+  TRACKING_ISSUE=$(gh issue create -R {FORGE_REPO} \
     --title "Orchestration Metrics — Running Log" \
     --label "orchestration-metrics" \
     --body "This issue is a running log of persisted \`/audit-agents\` summaries. Each comment contains one session's efficiency metrics. Do not close this issue — \`/pipeline-health\` Phase 2K queries it to aggregate orchestration efficiency trends." \
@@ -363,7 +387,7 @@ STALL_BOUNDARIES=$(echo "${AGENT_DATA[@]}" | jq -r '
 ```bash
 SESSION_DATE=$(date -u +%Y-%m-%dT%H:%M:%SZ)
 
-gh issue comment $TRACKING_ISSUE -R RapierCraftStudios/forge --body "<!-- FORGE:AUDIT-AGENTS -->
+gh issue comment $TRACKING_ISSUE -R {FORGE_REPO} --body "<!-- FORGE:AUDIT-AGENTS -->
 ## Audit-Agents Summary — $SESSION_DATE
 
 **Session**: \`$SESSION_ID\`
