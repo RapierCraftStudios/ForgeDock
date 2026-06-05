@@ -9,7 +9,18 @@ argument-hint: [project repo slug or "all"]
 
 You are the Forge pipeline's self-awareness layer. Your job is to measure how well the pipeline is performing, correlate performance with recent prompt changes, identify weak spots, and propose concrete improvements.
 
-**FORGE_HOME**: `~/projects/forge`
+## Config
+
+Read project identity from `forge.yaml` before running any phase:
+
+```bash
+FORGE_REPO=$(yq e '.project.owner + "/" + .project.repo' forge.yaml)
+FORGE_HOME=$(yq e '.paths.root' forge.yaml)
+echo "Forge repo: $FORGE_REPO"
+echo "Forge home: $FORGE_HOME"
+```
+
+**FORGE_HOME**: `$FORGE_HOME` (set from `forge.yaml` → `paths.root`)
 **This command is READ-ONLY on the target project.** It creates issues in the Forge repo only.
 
 ---
@@ -32,7 +43,7 @@ echo "Target project: $REPO"
 
 ```bash
 # Last pipeline-health run (if any) — from Forge git log
-LAST_RUN=$(cd ~/projects/forge && git log --all --oneline --grep="pipeline-health: $REPO" --format="%aI" -1 2>/dev/null || echo "")
+LAST_RUN=$(cd $FORGE_HOME && git log --all --oneline --grep="pipeline-health: $REPO" --format="%aI" -1 2>/dev/null || echo "")
 if [ -z "$LAST_RUN" ]; then
     # First run — analyze last 30 days
     SINCE=$(date -d "30 days ago" +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || date -v-30d +%Y-%m-%dT%H:%M:%SZ)
@@ -49,7 +60,7 @@ Fetch the most recent `health-report` issue for the same repo and parse its metr
 
 ```bash
 # Find the most recent health-report issue for this repo
-PRIOR_REPORT=$(gh issue list -R RapierCraftStudios/forge \
+PRIOR_REPORT=$(gh issue list -R $FORGE_REPO \
   --state all --label "health-report" --limit 10 \
   --json number,title,body \
   --jq "[.[] | select(.title | contains(\"$REPO\"))] | sort_by(.number) | last")
@@ -154,7 +165,7 @@ Run ALL of these in parallel (note: Phase 2I fetches trajectory comments per iss
 ### 2A: Forge changelog (what changed in the pipeline itself)
 
 ```bash
-cd ~/projects/forge
+cd $FORGE_HOME
 git log --oneline --since="$SINCE" -- commands/ docs/
 ```
 
@@ -366,7 +377,7 @@ echo "Investigation invalidation rate: $INVALID_ISSUES / $TOTAL_INVESTIGATED"
 
 # 2. ISSUE_SPEC audit findings
 # Count of /audit findings classified as ISSUE_SPEC in the window
-ISSUE_SPEC_COUNT=$(gh issue list -R RapierCraftStudios/forge --state all --label "audit-finding" --limit 200 \
+ISSUE_SPEC_COUNT=$(gh issue list -R $FORGE_REPO --state all --label "audit-finding" --limit 200 \
   --json number,title,body,createdAt \
   --jq "[.[] | select(.createdAt > \"$SINCE\" and (.body | contains(\"ISSUE_SPEC\")))] | length")
 
@@ -416,13 +427,13 @@ echo "Issue structure compliance: $STRUCTURED_ISSUES / $TOTAL_ISSUES"
 ```bash
 # Persisted audit-agents summaries are posted to a designated Forge tracking issue
 # tagged with label "orchestration-metrics". Find it:
-TRACKING_ISSUE=$(gh issue list -R RapierCraftStudios/forge \
+TRACKING_ISSUE=$(gh issue list -R $FORGE_REPO \
   --state open --label "orchestration-metrics" --limit 1 \
   --json number --jq '.[0].number' 2>/dev/null)
 
 if [ -n "$TRACKING_ISSUE" ]; then
   # Fetch all FORGE:AUDIT-AGENTS comments posted since $SINCE
-  AUDIT_COMMENTS=$(gh api repos/RapierCraftStudios/forge/issues/$TRACKING_ISSUE/comments \
+  AUDIT_COMMENTS=$(gh api repos/$FORGE_REPO/issues/$TRACKING_ISSUE/comments \
     --jq "[.[] | select(.body | contains(\"FORGE:AUDIT-AGENTS\")) | select(.created_at > \"$SINCE\")]")
   echo "Found $(echo "$AUDIT_COMMENTS" | jq 'length') persisted audit-agents summaries in window"
 else
@@ -530,7 +541,7 @@ fi
 
 ```bash
 # All audit-finding issues created in the window
-AUDIT_FINDINGS=$(gh issue list -R RapierCraftStudios/forge --state all --label "audit-finding" \
+AUDIT_FINDINGS=$(gh issue list -R $FORGE_REPO --state all --label "audit-finding" \
   --limit 200 --json number,title,body,createdAt \
   --jq "[.[] | select(.createdAt > \"$SINCE\")]")
 
@@ -573,7 +584,7 @@ echo "$AUDIT_FINDINGS" | jq -r \
 # Severity breakdown (P1 vs P2 vs P3 from labels)
 echo ""
 echo "Severity breakdown:"
-gh issue list -R RapierCraftStudios/forge --state all --label "audit-finding" \
+gh issue list -R $FORGE_REPO --state all --label "audit-finding" \
   --limit 200 --json number,createdAt,labels \
   --jq "[.[] | select(.createdAt > \"$SINCE\")] | group_by(.labels | map(.name) | map(select(startswith(\"P\"))) | .[0]) | map({severity: .[0].labels | map(.name) | map(select(startswith(\"P\"))) | .[0], count: length})"
 ```
@@ -598,9 +609,9 @@ This phase locates conversation JSONL files for pipeline command sessions (work-
 # Convert a Claude Code project path to its ~/.claude/projects/ directory name
 # Rule: both '/' and '.' are replaced with '-'
 # Examples:
-#   /home/user/projects/forge          ->  -home-user-projects-forge
-#   /home/user/projects/ScraperAPI/.claude/worktrees/fix-branch
-#                                      ->  -home-user-projects-ScraperAPI--claude-worktrees-fix-branch
+#   /home/user/projects/myproject          ->  -home-user-projects-myproject
+#   /home/user/projects/myproject/.claude/worktrees/fix-branch
+#                                          ->  -home-user-projects-myproject--claude-worktrees-fix-branch
 #   (note: .claude -> --claude because '.' becomes '-' and surrounding '/' also become '-')
 _session_project_dir() {
     echo "$1" | sed 's|[/.]|-|g'
@@ -2035,7 +2046,7 @@ For each of the top 3 defect categories:
 Create a detailed health report as a GitHub issue in the Forge repo:
 
 ```bash
-gh issue create -R RapierCraftStudios/forge \
+gh issue create -R $FORGE_REPO \
   --title "Pipeline Health: $REPO — $(date +%Y-%m-%d) — Score: [SCORE]/100" \
   --label "health-report" \
   --body "$(cat <<'EOF'
@@ -2264,7 +2275,7 @@ For each improvement proposal, create a trackable issue using the `/issue` struc
 - Metric < 10% below target → `P3`
 
 ```bash
-gh issue create -R RapierCraftStudios/forge \
+gh issue create -R $FORGE_REPO \
   --title "fix([command]): [description]" \
   --label "[bug|enhancement|feature],[P1|P2|P3]" \
   --body "## Problem
@@ -2338,6 +2349,6 @@ Pipeline health signals:
 
 Top defect categories: [CAT1] ([N]), [CAT2] ([N]), [CAT3] ([N])
 
-Proposed improvements: [N] issues created in RapierCraftStudios/forge
+Proposed improvements: [N] issues created in $FORGE_REPO
 Health report: [ISSUE_URL]
 ```
