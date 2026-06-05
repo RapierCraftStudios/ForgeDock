@@ -19,8 +19,8 @@ argument-hint: [issue number] [--repo GH_REPO] [--gh-flag GH_FLAG]
 
 Parse from $ARGUMENTS:
 - `{NUMBER}` — issue number (required)
-- `--repo {GH_REPO}` — GitHub repo (e.g. `RapierCraftStudios/forge`)
-- `--gh-flag {GH_FLAG}` — gh CLI repo flag (e.g. `-R RapierCraftStudios/forge`)
+- `--repo {GH_REPO}` — GitHub repo (e.g. `{owner}/{repo}` — resolved from `forge.yaml → project`)
+- `--gh-flag {GH_FLAG}` — gh CLI repo flag (e.g. `-R {owner}/{repo}`)
 
 ---
 
