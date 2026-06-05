@@ -414,9 +414,9 @@ When ready to deploy, merge `staging` → `main` via GitHub.
 
 Each cycle feeds the next:
 ```
-Cycle N: /quality-gate finds recurring lint violations across 3 files → creates issue #X
+Cycle N: CI recon detects recurring lint failures across 3 files → autopilot triage creates issue #X
 Cycle N+1: autopilot picks up #X → /work-on adds pre-commit hook → merged to staging
-Cycle N+2: /quality-gate runs clean — no new issue needed
+Cycle N+2: CI recon shows lint failures resolved — no new issue needed
 ```
 
 ```
