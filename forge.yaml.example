@@ -111,6 +111,18 @@ branches:
 #       repo: "acme-org/acme-python-sdk"
 #       staging_branch: "main"
 #       local_path: "/home/youruser/projects/acme-python-sdk"
+#
+#     # Monorepo satellite: multiple packages in a single repo.
+#     # Use subpaths to name each package root relative to local_path.
+#     # /sync-ecosystem uses these to locate per-package version files and
+#     # publish workflows when syncing API changes across SDK packages.
+#     - prefix: "mono"
+#       repo: "acme-org/acme-sdks"
+#       staging_branch: "main"
+#       local_path: "/home/youruser/projects/acme-sdks"
+#       subpaths:
+#         python_sdk: "sdk/python"
+#         node_sdk: "sdk/node"
 
 # =============================================================================
 # PROJECT BOARD (OPTIONAL)
