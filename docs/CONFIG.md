@@ -122,6 +122,18 @@ repos:
       repo: "acme-org/acme-python-sdk"
       staging_branch: "main"
       local_path: "/home/youruser/projects/acme-python-sdk"
+
+    # Monorepo satellite: multiple packages in one repo.
+    # subpaths maps named identifiers to per-package root directories
+    # relative to local_path. Used by /sync-ecosystem when the repo
+    # contains multiple independently published packages.
+    - prefix: "mono"
+      repo: "acme-org/acme-sdks"
+      staging_branch: "main"
+      local_path: "/home/youruser/projects/acme-sdks"
+      subpaths:
+        python_sdk: "sdk/python"
+        node_sdk: "sdk/node"
 ```
 
 | Field | Type | Required | Description |
@@ -132,6 +144,7 @@ repos:
 | `satellites[].repo` | string | **Yes (per entry)** | Full `owner/repo` of the satellite repository |
 | `satellites[].staging_branch` | string | **Yes (per entry)** | Target branch for fast-lane PRs in this repo |
 | `satellites[].local_path` | string | No | Absolute local path to the satellite repo's checkout |
+| `satellites[].subpaths` | map(string→string) | No | Named sub-directory paths within `local_path`, for monorepo satellites that publish multiple packages. Each key is a logical name; the value is the relative path to that package's root. Used by `/sync-ecosystem` to locate per-package version files and publish workflows. |
 
 **Routing syntax in commands**: `<prefix>:<issue_number>` — e.g., `mcp:5`, `sdk:12`
 
