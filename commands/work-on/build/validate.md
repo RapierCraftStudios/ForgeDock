@@ -19,8 +19,8 @@ argument-hint: [issue number] [--repo GH_REPO] [--gh-flag GH_FLAG] [--worktree P
 
 Parse from $ARGUMENTS:
 - `{NUMBER}` — issue number (required)
-- `--repo {GH_REPO}` — GitHub repo (e.g. `RapierCraft/AlterLab`)
-- `--gh-flag {GH_FLAG}` — gh CLI repo flag (e.g. `-R RapierCraft/AlterLab`)
+- `--repo {GH_REPO}` — GitHub repo (e.g. `{owner}/{repo}` — resolved from `forge.yaml → project`)
+- `--gh-flag {GH_FLAG}` — gh CLI repo flag (e.g. `-R {owner}/{repo}`)
 - `--worktree {WORKTREE_PATH}` — absolute path to the git worktree
 - `--files {CHANGED_FILES}` — space-separated list of changed files (from implement result)
 
@@ -99,7 +99,7 @@ python -m py_compile {PYTHON_FILES}
 ```
 Failures in `py_compile` are BLOCKING — fix before continuing.
 
-**TypeScript (AlterLab)**:
+**TypeScript (tsc)**:
 ```bash
 cd {WORKTREE_PATH}
 prettier --write {TS_FILES}

@@ -19,8 +19,8 @@ argument-hint: [issue number] [--repo GH_REPO] [--gh-flag GH_FLAG] [--pr PR_NUMB
 
 Parse from $ARGUMENTS:
 - `{NUMBER}` — issue number (required)
-- `--repo {GH_REPO}` — GitHub repo (e.g. `RapierCraftStudios/forge`)
-- `--gh-flag {GH_FLAG}` — gh CLI repo flag (e.g. `-R RapierCraftStudios/forge`)
+- `--repo {GH_REPO}` — GitHub repo (e.g. `{owner}/{repo}` — resolved from `forge.yaml → project`)
+- `--gh-flag {GH_FLAG}` — gh CLI repo flag (e.g. `-R {owner}/{repo}`)
 - `--pr {PR_NUMBER}` — merged PR number
 - `--base {PR_BASE}` — branch the PR merged into (e.g. `milestone/modular-pipeline-architecture`)
 - `--branch {BRANCH}` — feature branch name (for worktree cleanup reference)
@@ -106,22 +106,59 @@ The `REMAINING_AFTER` variable is passed to Phase C2 to decide whether to close.
 
 Update the project board to reflect the merged state. This replaces the old Phase 5E project board update that existed before the modular refactor.
 
+**Read project board config from `forge.yaml`**. If the `project_board` section is absent or commented out, skip this phase entirely:
+
+```bash
+# Read project board config from forge.yaml
+PROJECT_BOARD_OWNER=$(yq '.project_board.owner // ""' forge.yaml 2>/dev/null \
+  || python3 -c "import yaml,sys; c=yaml.safe_load(open('forge.yaml')); print(c.get('project_board',{}).get('owner',''))" 2>/dev/null \
+  || echo "")
+PROJECT_ID=$(yq '.project_board.project_id // ""' forge.yaml 2>/dev/null \
+  || python3 -c "import yaml,sys; c=yaml.safe_load(open('forge.yaml')); print(c.get('project_board',{}).get('project_id',''))" 2>/dev/null \
+  || echo "")
+PROJECT_NUMBER=$(yq '.project_board.project_number // ""' forge.yaml 2>/dev/null \
+  || python3 -c "import yaml,sys; c=yaml.safe_load(open('forge.yaml')); print(c.get('project_board',{}).get('project_number',''))" 2>/dev/null \
+  || echo "")
+STATUS_FIELD_ID=$(yq '.project_board.field_ids.status // ""' forge.yaml 2>/dev/null \
+  || python3 -c "import yaml,sys; c=yaml.safe_load(open('forge.yaml')); print(c.get('project_board',{}).get('field_ids',{}).get('status',''))" 2>/dev/null \
+  || echo "")
+WORKFLOW_FIELD_ID=$(yq '.project_board.field_ids.workflow // ""' forge.yaml 2>/dev/null \
+  || python3 -c "import yaml,sys; c=yaml.safe_load(open('forge.yaml')); print(c.get('project_board',{}).get('field_ids',{}).get('workflow',''))" 2>/dev/null \
+  || echo "")
+STATUS_DONE_OPTION_ID=$(yq '.project_board.option_ids.status_done // ""' forge.yaml 2>/dev/null \
+  || python3 -c "import yaml,sys; c=yaml.safe_load(open('forge.yaml')); print(c.get('project_board',{}).get('option_ids',{}).get('status_done',''))" 2>/dev/null \
+  || echo "")
+WORKFLOW_MERGED_OPTION_ID=$(yq '.project_board.option_ids.workflow_merged // ""' forge.yaml 2>/dev/null \
+  || python3 -c "import yaml,sys; c=yaml.safe_load(open('forge.yaml')); print(c.get('project_board',{}).get('option_ids',{}).get('workflow_merged',''))" 2>/dev/null \
+  || echo "")
+
+if [ -z "$PROJECT_BOARD_OWNER" ] || [ -z "$PROJECT_ID" ] || [ -z "$STATUS_FIELD_ID" ]; then
+  echo "INFO: project_board not configured in forge.yaml — skipping board update"
+  # → Continue to Phase C2
+fi
+```
+
+If project board is configured:
 ```bash
 # Find the project item ID for this issue
 ISSUE_URL="https://github.com/{GH_REPO}/issues/{NUMBER}"
-ITEM_ID=$(gh project item-list 1 --owner RapierCraft --format json --limit 200 \
+ITEM_ID=$(gh project item-list "$PROJECT_NUMBER" --owner "$PROJECT_BOARD_OWNER" --format json --limit 200 \
   --jq ".items[] | select(.content.url == \"$ISSUE_URL\") | .id" 2>/dev/null | head -1)
 ```
 
 If `ITEM_ID` is found:
 ```bash
 # Set Status=Done
-gh project item-edit --project-id PVT_kwHOCx3gR84BSK2L --id "$ITEM_ID" \
-  --field-id PVTSSF_lAHOCx3gR84BSK2Lzg_yF6E --single-select-option-id 98236657 2>/dev/null || true  # Status=Done
+if [ -n "$STATUS_FIELD_ID" ] && [ -n "$STATUS_DONE_OPTION_ID" ]; then
+  gh project item-edit --project-id "$PROJECT_ID" --id "$ITEM_ID" \
+    --field-id "$STATUS_FIELD_ID" --single-select-option-id "$STATUS_DONE_OPTION_ID" 2>/dev/null || true
+fi
 
 # Set Workflow=Merged
-gh project item-edit --project-id PVT_kwHOCx3gR84BSK2L --id "$ITEM_ID" \
-  --field-id PVTSSF_lAHOCx3gR84BSK2Lzg_yGAA --single-select-option-id b510c537 2>/dev/null || true  # Workflow=Merged
+if [ -n "$WORKFLOW_FIELD_ID" ] && [ -n "$WORKFLOW_MERGED_OPTION_ID" ]; then
+  gh project item-edit --project-id "$PROJECT_ID" --id "$ITEM_ID" \
+    --field-id "$WORKFLOW_FIELD_ID" --single-select-option-id "$WORKFLOW_MERGED_OPTION_ID" 2>/dev/null || true
+fi
 ```
 
 If `ITEM_ID` is empty (issue not on project board) → log and skip:
@@ -129,11 +166,20 @@ If `ITEM_ID` is empty (issue not on project board) → log and skip:
 echo "INFO: Issue #{NUMBER} not found on project board — skipping board update"
 ```
 
-**Field reference** (project `PVT_kwHOCx3gR84BSK2L`):
-| Field | Field ID | Option | Option ID |
-|-------|----------|--------|-----------|
-| Status | `PVTSSF_lAHOCx3gR84BSK2Lzg_yF6E` | Done | `98236657` |
-| Workflow | `PVTSSF_lAHOCx3gR84BSK2Lzg_yGAA` | Merged | `b510c537` |
+**Project board field IDs are read from `forge.yaml → project_board`**. To configure:
+```yaml
+project_board:
+  owner: "{your-github-org}"
+  project_number: 1
+  project_id: "PVT_kwHO..."
+  field_ids:
+    status: "PVTSSF_..."
+    workflow: "PVTSSF_..."
+  option_ids:
+    status_done: "..."
+    workflow_merged: "..."
+```
+To find your project IDs: `gh project list --owner {owner}` and `gh project field-list {number} --owner {owner}`.
 
 ---
 
