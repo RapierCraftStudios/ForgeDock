@@ -1,104 +1,147 @@
 # Workflow Reference
 
-Canonical reference for field IDs, option IDs, and integration constants used by Forge commands.
+Canonical reference for configuring and querying the GitHub Projects v2 field IDs and option IDs used by ForgeDock commands.
 
 ---
 
 ## Project Board Integration
 
-**Project ID**: `PVT_kwHOCx3gR84BSK2L`
+ForgeDock commands add issues to a GitHub Projects v2 board and update fields (Status, Lane, Component, Priority, Workflow) as issues move through the pipeline.
 
-All commands that add issues to the GitHub Project board use the field and option IDs below.
-Reference this document rather than hardcoding values inline.
+**All board IDs are project-specific.** You cannot reuse IDs from another project. Use the discovery commands below to find yours, or run `/forgedock-init` which does this automatically.
 
-### Field IDs
+---
 
-| Field | Field ID |
-|-------|----------|
-| Status | `PVTSSF_lAHOCx3gR84BSK2Lzg_yF6E` |
-| Lane | `PVTSSF_lAHOCx3gR84BSK2Lzg_yF98` |
-| Component | `PVTSSF_lAHOCx3gR84BSK2Lzg_yF-o` |
-| Priority | `PVTSSF_lAHOCx3gR84BSK2Lzg_yF8o` |
-| Workflow | `PVTSSF_lAHOCx3gR84BSK2Lzg_yGAA` |
+## Configuration
 
-### Status Field Options (`PVTSSF_lAHOCx3gR84BSK2Lzg_yF6E`)
+Project board IDs are stored in `forge.yaml` under the `project_board` section. See [`docs/CONFIG.md`](CONFIG.md#project_board-optional) for the full schema.
 
-| Value | Option ID |
-|-------|-----------|
-| Todo | `f75ad846` |
-| In Progress | _(query live if needed)_ |
-| Done | `98236657` |
+```yaml
+project_board:
+  owner: "your-org"
+  project_number: 1
+  project_id: "PVT_kwHOxxxxxxxxxxxxxxxx"
 
-### Lane Field Options (`PVTSSF_lAHOCx3gR84BSK2Lzg_yF98`)
+  field_ids:
+    status: "PVTSSF_xxxxxxxxxxxxxxxxxxxxxxxx"
+    lane: "PVTSSF_xxxxxxxxxxxxxxxxxxxxxxxx"
+    component: "PVTSSF_xxxxxxxxxxxxxxxxxxxxxxxx"
+    priority: "PVTSSF_xxxxxxxxxxxxxxxxxxxxxxxx"
+    workflow: "PVTSSF_xxxxxxxxxxxxxxxxxxxxxxxx"
 
-| Value | Option ID |
-|-------|-----------|
-| Fast | `62864af4` |
-| Feature | `4ff6f9e6` |
-| Sync | `c0c37d33` |
+  option_ids:
+    status:
+      todo: "xxxxxxxx"
+      in_progress: "xxxxxxxx"
+      done: "xxxxxxxx"
+    lane:
+      fast: "xxxxxxxx"
+      feature: "xxxxxxxx"
+      sync: "xxxxxxxx"
+    priority:
+      p0: "xxxxxxxx"
+      p1: "xxxxxxxx"
+      p2: "xxxxxxxx"
+      p3: "xxxxxxxx"
+    workflow:
+      investigating: "xxxxxxxx"
+      building: "xxxxxxxx"
+      in_review: "xxxxxxxx"
+      merged: "xxxxxxxx"
 
-### Component Field Options (`PVTSSF_lAHOCx3gR84BSK2Lzg_yF-o`)
+  components:
+    - repo: "your-org/your-repo"
+      option_id: "xxxxxxxx"
+      label: "Platform"
+```
 
-| Value | Option ID | Repo |
-|-------|-----------|------|
-| Platform | `214c4d65` | `RapierCraft/AlterLab` |
-| MCP Server | _(query live if needed)_ | `RapierCraft/alterlab-mcp-server` |
-| n8n Node | _(query live if needed)_ | `RapierCraft/n8n-nodes-alterlab` |
-| Python SDK | _(query live if needed)_ | `RapierCraft/alterlab-python` |
-| Node SDK | _(query live if needed)_ | `RapierCraft/alterlab-node` |
+---
 
-### Priority Field Options (`PVTSSF_lAHOCx3gR84BSK2Lzg_yF8o`)
+## Finding Your IDs
 
-| Value | Option ID |
-|-------|-----------|
-| P0 | _(query live if needed)_ |
-| P1 | _(query live if needed)_ |
-| P2 | `4d95eef3` |
-| P3 | _(query live if needed)_ |
-
-### Workflow Field Options (`PVTSSF_lAHOCx3gR84BSK2Lzg_yGAA`)
-
-| Value | Option ID |
-|-------|-----------|
-| Investigating | _(query live if needed)_ |
-| Building | _(query live if needed)_ |
-| In Review | _(query live if needed)_ |
-| Merged | `b510c537` |
-
-### Usage Pattern
+### Step 1 — Find your project number and project ID
 
 ```bash
-# Add issue to project board and set initial fields
-ITEM_ID=$(gh project item-add PVT_kwHOCx3gR84BSK2L --owner RapierCraft --url "$ISSUE_URL" --format json --jq '.id')
+# List all projects owned by your org or user
+gh project list --owner <your-org-or-username> --format json \
+  | jq '.projects[] | {number: .number, id: .id, title: .title}'
+```
 
-# Set Status=Todo
-gh project item-edit --project-id PVT_kwHOCx3gR84BSK2L --id "$ITEM_ID" \
-  --field-id PVTSSF_lAHOCx3gR84BSK2Lzg_yF6E --single-select-option-id f75ad846 2>/dev/null || true
+The `id` value is your `project_id` (`PVT_...`). The `number` is used in all subsequent queries.
 
-# Set Lane (Fast=62864af4, Feature=4ff6f9e6, Sync=c0c37d33)
-gh project item-edit --project-id PVT_kwHOCx3gR84BSK2L --id "$ITEM_ID" \
-  --field-id PVTSSF_lAHOCx3gR84BSK2Lzg_yF98 --single-select-option-id 62864af4 2>/dev/null || true
+### Step 2 — List field IDs
 
-# Set Component=Platform
-gh project item-edit --project-id PVT_kwHOCx3gR84BSK2L --id "$ITEM_ID" \
-  --field-id PVTSSF_lAHOCx3gR84BSK2Lzg_yF-o --single-select-option-id 214c4d65 2>/dev/null || true
+```bash
+gh project field-list <project_number> --owner <your-org-or-username> --format json \
+  | jq '.fields[] | {name: .name, id: .id}'
+```
 
-# Set Priority (P2=4d95eef3)
-gh project item-edit --project-id PVT_kwHOCx3gR84BSK2L --id "$ITEM_ID" \
-  --field-id PVTSSF_lAHOCx3gR84BSK2Lzg_yF8o --single-select-option-id 4d95eef3 2>/dev/null || true
+Each field's `id` value (`PVTSSF_...`) maps to a key under `field_ids` in your `forge.yaml`.
+
+### Step 3 — List option IDs for single-select fields
+
+```bash
+# Get all options for a specific field (e.g. Status)
+gh project field-list <project_number> --owner <your-org-or-username> --format json \
+  | jq '.fields[] | select(.name == "Status") | .options[] | {name: .name, id: .id}'
+```
+
+Repeat for each field (Lane, Priority, Workflow, Component). The 8-character hex IDs are your `option_ids` values.
+
+---
+
+## Automated Setup
+
+Running `/forgedock-init` in Claude Code walks you through the full setup interactively: it queries your project board, extracts all field and option IDs, and writes them to `forge.yaml` automatically.
+
+---
+
+## Usage Pattern
+
+Once IDs are in `forge.yaml`, ForgeDock reads them at runtime. The pattern used by commands:
+
+```bash
+# Add issue to project board
+ITEM_ID=$(gh project item-add <project_id> --owner <owner> --url "$ISSUE_URL" \
+  --format json --jq '.id')
+
+# Set Status field
+gh project item-edit --project-id <project_id> --id "$ITEM_ID" \
+  --field-id <status_field_id> --single-select-option-id <todo_option_id> \
+  2>/dev/null || true
+
+# Set Lane field
+gh project item-edit --project-id <project_id> --id "$ITEM_ID" \
+  --field-id <lane_field_id> --single-select-option-id <fast_option_id> \
+  2>/dev/null || true
 
 # On merge: set Status=Done and Workflow=Merged
-gh project item-edit --project-id PVT_kwHOCx3gR84BSK2L --id "$ITEM_ID" \
-  --field-id PVTSSF_lAHOCx3gR84BSK2Lzg_yF6E --single-select-option-id 98236657 2>/dev/null || true
-gh project item-edit --project-id PVT_kwHOCx3gR84BSK2L --id "$ITEM_ID" \
-  --field-id PVTSSF_lAHOCx3gR84BSK2Lzg_yGAA --single-select-option-id b510c537 2>/dev/null || true
+gh project item-edit --project-id <project_id> --id "$ITEM_ID" \
+  --field-id <status_field_id> --single-select-option-id <done_option_id> \
+  2>/dev/null || true
+gh project item-edit --project-id <project_id> --id "$ITEM_ID" \
+  --field-id <workflow_field_id> --single-select-option-id <merged_option_id> \
+  2>/dev/null || true
 ```
 
-### Querying Unknown Option IDs
+All `<placeholder>` values come from your `forge.yaml` — commands read `forge.yaml` and substitute them at runtime.
 
-For option IDs marked "_(query live if needed)_", use:
+---
 
-```bash
-gh project field-list PVT_kwHOCx3gR84BSK2L --owner RapierCraft --format json \
-  --jq '.fields[] | select(.name == "Status") | .options'
-```
+## Adding a Component Field
+
+The Component field maps each repository in your project to a selectable option. For each repo you track:
+
+1. Create a single-select option in your GitHub project's Component field (via the project UI)
+2. Query the new option's ID:
+   ```bash
+   gh project field-list <project_number> --owner <owner> --format json \
+     | jq '.fields[] | select(.name == "Component") | .options[]'
+   ```
+3. Add an entry under `components` in `forge.yaml`:
+   ```yaml
+   components:
+     - repo: "your-org/your-repo"
+       option_id: "xxxxxxxx"
+       label: "Platform"
+   ```
