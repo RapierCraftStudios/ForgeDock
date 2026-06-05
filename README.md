@@ -8,7 +8,7 @@
 
 <p>An autonomous development pipeline for Claude Code that uses GitHub issues, PRs, commits, and blame as structured memory — so every agent knows what happened before it, why the code looks the way it does, and what to do next.</p>
 
-<a href="LICENSE"><img src="https://img.shields.io/badge/License-MIT-blue.svg" alt="License: MIT" /></a>
+<a href="LICENSE"><img src="https://img.shields.io/badge/License-AGPL--3.0-blue.svg" alt="License: AGPL-3.0" /></a>
 <a href="https://github.com/RapierCraftStudios/forgedock/stargazers"><img src="https://img.shields.io/github/stars/RapierCraftStudios/forgedock?style=social" alt="GitHub Stars" /></a>
 <a href="https://docs.anthropic.com/en/docs/claude-code"><img src="https://img.shields.io/badge/Built%20for-Claude%20Code-blueviolet" alt="Claude Code" /></a>
 <a href="https://github.com/RapierCraftStudios/forgedock/pulls"><img src="https://img.shields.io/badge/PRs-welcome-brightgreen.svg" alt="PRs Welcome" /></a>
@@ -232,7 +232,7 @@ PRs welcome. Every change goes through a PR, tested against 3+ scenarios, using 
 
 ## License
 
-[MIT](LICENSE)
+[AGPL-3.0](LICENSE) — free to use, modify, and distribute. If you modify ForgeDock and offer it as a service (including over a network), you must open-source your modifications under the same license.
 
 ---
 
