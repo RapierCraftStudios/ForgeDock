@@ -3,13 +3,27 @@
 import { fileURLToPath } from "url";
 import { dirname, join, relative } from "path";
 import { mkdir, symlink, readlink, lstat, readdir, stat } from "fs/promises";
-import { existsSync, appendFileSync, readFileSync, writeFileSync, renameSync } from "fs";
+import {
+  existsSync,
+  appendFileSync,
+  readFileSync,
+  writeFileSync,
+  renameSync,
+} from "fs";
 import { execSync } from "child_process";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
 const FORGE_HOME = dirname(__dirname);
 const COMMANDS_DIR = join(FORGE_HOME, "commands");
+
+if (!process.env.HOME) {
+  console.error(
+    "Error: HOME environment variable is not set. Cannot determine install location.",
+  );
+  process.exit(1);
+}
+
 const TARGET_DIR = join(process.env.HOME, ".claude", "commands");
 
 const args = process.argv.slice(2);
@@ -73,7 +87,7 @@ async function install() {
         }
       } else {
         console.log(
-          `  ${YELLOW}WARNING${RESET}: ${rel} is a regular file — skipping (remove it manually to let ForgeDock manage it)`
+          `  ${YELLOW}WARNING${RESET}: ${rel} is a regular file — skipping (remove it manually to let ForgeDock manage it)`,
         );
         skipped++;
       }
@@ -87,7 +101,7 @@ async function install() {
 
   console.log("");
   console.log(
-    `Done. ${GREEN}Installed: ${installed}${RESET}, Updated: ${updated}, Skipped: ${skipped}`
+    `Done. ${GREEN}Installed: ${installed}${RESET}, Updated: ${updated}, Skipped: ${skipped}`,
   );
   console.log("");
 
@@ -102,7 +116,7 @@ async function install() {
       if (!content.includes("FORGE_HOME")) {
         appendFileSync(
           profile,
-          `\n# ForgeDock — autonomous development pipeline\nexport FORGE_HOME="${FORGE_HOME}"\n`
+          `\n# ForgeDock — autonomous development pipeline\nexport FORGE_HOME="${FORGE_HOME}"\n`,
         );
         console.log(`  Added FORGE_HOME to ${profile}`);
         profileUpdated = true;
@@ -111,7 +125,7 @@ async function install() {
   }
 
   console.log(
-    `${GREEN}ForgeDock commands are now available as slash commands in any Claude Code session.${RESET}`
+    `${GREEN}ForgeDock commands are now available as slash commands in any Claude Code session.${RESET}`,
   );
   console.log("");
 
@@ -120,7 +134,7 @@ async function install() {
   if (!existsSync(forgeYamlPath)) {
     console.log(`${YELLOW}No forge.yaml found in current directory.${RESET}`);
     console.log(
-      `  Run ${CYAN}npx forgedock init${RESET} in your project root to generate forge.yaml`
+      `  Run ${CYAN}npx forgedock init${RESET} in your project root to generate forge.yaml`,
     );
     console.log("");
   }
@@ -198,11 +212,13 @@ async function update() {
       }
     } catch (err) {
       console.log(
-        `  ${YELLOW}Cannot fast-forward — local changes exist. Skipping.${RESET}`
+        `  ${YELLOW}Cannot fast-forward — local changes exist. Skipping.${RESET}`,
       );
     }
   } else {
-    console.log(`  Installed via npm. Run ${CYAN}npm update -g forgedock${RESET} to update.`);
+    console.log(
+      `  Installed via npm. Run ${CYAN}npm update -g forgedock${RESET} to update.`,
+    );
   }
   console.log("");
 }
@@ -231,7 +247,9 @@ async function init() {
     // SSH: git@github.com:owner/repo.git
     const sshMatch = remoteUrl.match(/^git@[^:]+:([^/]+)\/(.+?)(?:\.git)?$/);
     // HTTPS: https://github.com/owner/repo.git
-    const httpsMatch = remoteUrl.match(/^https?:\/\/[^/]+\/([^/]+)\/(.+?)(?:\.git)?$/);
+    const httpsMatch = remoteUrl.match(
+      /^https?:\/\/[^/]+\/([^/]+)\/(.+?)(?:\.git)?$/,
+    );
 
     if (sshMatch) {
       owner = sshMatch[1];
@@ -243,12 +261,12 @@ async function init() {
       remoteDetected = true;
     } else {
       console.log(
-        `  ${YELLOW}Warning${RESET}: Could not parse git remote URL — using placeholder values`
+        `  ${YELLOW}Warning${RESET}: Could not parse git remote URL — using placeholder values`,
       );
     }
   } catch {
     console.log(
-      `  ${YELLOW}Warning${RESET}: No git remote found — using placeholder values`
+      `  ${YELLOW}Warning${RESET}: No git remote found — using placeholder values`,
     );
   }
 
@@ -276,10 +294,12 @@ async function init() {
         stdio: ["pipe", "pipe", "pipe"],
       }).trim();
       if (defaultBranch === "HEAD") defaultBranch = "main";
-      console.log(`  Default branch:  ${CYAN}${defaultBranch}${RESET} (from current branch)`);
+      console.log(
+        `  Default branch:  ${CYAN}${defaultBranch}${RESET} (from current branch)`,
+      );
     } catch {
       console.log(
-        `  ${YELLOW}Warning${RESET}: Could not detect default branch — defaulting to "main"`
+        `  ${YELLOW}Warning${RESET}: Could not detect default branch — defaulting to "main"`,
       );
     }
   }
@@ -298,12 +318,12 @@ async function init() {
     } else {
       stagingBranch = defaultBranch;
       console.log(
-        `  Staging branch:  ${CYAN}${defaultBranch}${RESET} (no staging branch found — using default)`
+        `  Staging branch:  ${CYAN}${defaultBranch}${RESET} (no staging branch found — using default)`,
       );
     }
   } catch {
     console.log(
-      `  ${YELLOW}Warning${RESET}: Could not read remote branches — defaulting staging to "${defaultBranch}"`
+      `  ${YELLOW}Warning${RESET}: Could not read remote branches — defaulting staging to "${defaultBranch}"`,
     );
     stagingBranch = defaultBranch;
   }
@@ -314,7 +334,7 @@ async function init() {
     const backupPath = existsSync(baseBak)
       ? join(
           cwd,
-          `forge.yaml.bak.${new Date().toISOString().replace(/[:.]/g, "-")}`
+          `forge.yaml.bak.${new Date().toISOString().replace(/[:.]/g, "-")}`,
         )
       : baseBak;
     const backupName = backupPath.split("/").pop();
@@ -423,26 +443,42 @@ branches:
   console.log(`  ${GREEN}Created${RESET}: forge.yaml`);
   console.log("");
   console.log(`${BOLD}Next steps:${RESET}`);
-  console.log(`  1. Edit ${CYAN}forge.yaml${RESET} — fill in your project details`);
+  console.log(
+    `  1. Edit ${CYAN}forge.yaml${RESET} — fill in your project details`,
+  );
   console.log(`     Required: project.name, project.description`);
   if (!remoteDetected) {
-    console.log(`     Required: project.owner, project.repo (could not auto-detect)`);
+    console.log(
+      `     Required: project.owner, project.repo (could not auto-detect)`,
+    );
   }
-  console.log(`  2. Add ${CYAN}forge.yaml${RESET} to ${CYAN}.gitignore${RESET} if it contains sensitive paths`);
-  console.log(`  3. Run ${CYAN}/forgedock-init${RESET} inside Claude Code for guided AI-powered setup`);
+  console.log(
+    `  2. Add ${CYAN}forge.yaml${RESET} to ${CYAN}.gitignore${RESET} if it contains sensitive paths`,
+  );
+  console.log(
+    `  3. Run ${CYAN}/forgedock-init${RESET} inside Claude Code for guided AI-powered setup`,
+  );
   console.log("");
 }
 
 function help() {
   console.log("");
-  console.log(`${BOLD}ForgeDock${RESET} — GitHub as a knowledge graph for AI agents`);
+  console.log(
+    `${BOLD}ForgeDock${RESET} — GitHub as a knowledge graph for AI agents`,
+  );
   console.log("");
   console.log("Usage:");
-  console.log(`  ${CYAN}npx forgedock${RESET}            Install commands (default)`);
+  console.log(
+    `  ${CYAN}npx forgedock${RESET}            Install commands (default)`,
+  );
   console.log(`  ${CYAN}npx forgedock install${RESET}    Install commands`);
-  console.log(`  ${CYAN}npx forgedock init${RESET}       Generate forge.yaml config for your project`);
+  console.log(
+    `  ${CYAN}npx forgedock init${RESET}       Generate forge.yaml config for your project`,
+  );
   console.log(`  ${CYAN}npx forgedock uninstall${RESET}  Remove commands`);
-  console.log(`  ${CYAN}npx forgedock update${RESET}     Pull latest & reinstall`);
+  console.log(
+    `  ${CYAN}npx forgedock update${RESET}     Pull latest & reinstall`,
+  );
   console.log(`  ${CYAN}npx forgedock help${RESET}       Show this help`);
   console.log("");
 }
