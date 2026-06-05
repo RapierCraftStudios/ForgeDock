@@ -96,7 +96,7 @@ async function removeInstallModeMarker() {
 // ---------------------------------------------------------------------------
 
 /**
- * @typedef {'fresh-install' | 'up-to-date' | 'update-available' | 'config-missing'} InstallState
+ * @typedef {'fresh-install' | 'up-to-date' | 'update-available' | 'config-missing' | 'version-unknown'} InstallState
  *
  * @typedef {Object} InstallDetectionResult
  * @property {InstallState} state
@@ -179,8 +179,16 @@ async function detectInstallState() {
     return { state: "config-missing", installedVersion, currentVersion };
   }
 
-  // Both commands and config are present — compare versions
-  if (installedVersion !== null && installedVersion !== currentVersion) {
+  // Commands and config are present — but version may be unreadable
+  if (installedVersion === null) {
+    // package.json was missing or malformed — cannot determine installed version.
+    // Return a distinct state so the caller can inform the user and offer a resolution
+    // path (reinstall), rather than silently claiming "up to date".
+    return { state: "version-unknown", installedVersion: null, currentVersion };
+  }
+
+  // Both versions known — compare them
+  if (installedVersion !== currentVersion) {
     return { state: "update-available", installedVersion, currentVersion };
   }
 
@@ -2985,6 +2993,32 @@ async function tuiOnboarding() {
       console.log("");
       process.exit(1);
     }
+    return;
+  }
+
+  // -------------------------------------------------------------------------
+  // Flow: version-unknown
+  // Commands installed (symlinks found) but package.json unreadable — reinstall
+  // -------------------------------------------------------------------------
+  if (detection.state === "version-unknown") {
+    console.log(
+      `  ${yellow("ForgeDock commands are installed")} but the installed version could not be determined.`
+    );
+    console.log(
+      `  ${dim("The package.json for the installed copy is missing or unreadable.")}`
+    );
+    console.log("");
+
+    const action = await select("How would you like to proceed?", [
+      { label: "Reinstall commands (recommended)", value: "reinstall" },
+      { label: "Nothing — exit", value: "exit" },
+    ]);
+
+    if (action === "reinstall") {
+      console.log("");
+      await install();
+    }
+    console.log("");
     return;
   }
 
