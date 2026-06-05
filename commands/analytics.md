@@ -131,12 +131,12 @@ if [ -f "$HISTORY_FILE" ]; then
   HISTORY_AVAILABLE=true
   # Read last 5 audit snapshots (Python for YAML parsing — same pattern as credentials file)
   python3 -c "
-import yaml, json
-history = yaml.safe_load(open('$HISTORY_FILE')) or []
+import yaml, json, sys
+history = yaml.safe_load(open(sys.argv[1])) or []
 # Keep only last 5 entries
 recent = history[-5:] if len(history) >= 5 else history
 print(json.dumps(recent, indent=2))
-"
+" "$HISTORY_FILE"
 else
   HISTORY_AVAILABLE=false
   echo 'First audit — no historical baseline. History file will be created at end of this run.'
@@ -316,14 +316,14 @@ GA4_PROPERTY_ID="{GA4_PROPERTY_ID}"
 
 # Generate JWT and exchange for access token:
 python3 -c "
-import json, time, jwt, requests
-sa = json.load(open('$SA_KEY'))
+import json, sys, time, jwt, requests
+sa = json.load(open(sys.argv[1]))
 now = int(time.time())
 payload = {'iss': sa['client_email'], 'scope': 'https://www.googleapis.com/auth/analytics.readonly', 'aud': sa['token_uri'], 'iat': now, 'exp': now + 3600}
 signed = jwt.encode(payload, sa['private_key'], algorithm='RS256')
 token = requests.post(sa['token_uri'], data={'grant_type': 'urn:ietf:params:oauth:grant-type:jwt-bearer', 'assertion': signed}).json()['access_token']
 print(token)
-"
+" "$SA_KEY"
 ```
 
 If `jwt` (PyJWT) is not installed, use: `pip install PyJWT requests`
@@ -776,7 +776,7 @@ After displaying the summary, write the current audit snapshot to the history fi
 HISTORY_FILE="{HISTORY_FILE}"
 
 python3 -c "
-import yaml, os, json
+import yaml, os, sys, json
 from datetime import date
 
 # Build snapshot from current audit data
@@ -819,9 +819,9 @@ snapshot = {
 
 # Read existing history (or start fresh)
 history = []
-if os.path.exists('$HISTORY_FILE'):
+if os.path.exists(sys.argv[1]):
     try:
-        history = yaml.safe_load(open('$HISTORY_FILE')) or []
+        history = yaml.safe_load(open(sys.argv[1])) or []
     except Exception:
         history = []  # corrupt file — start fresh, do not fail
 
@@ -830,11 +830,11 @@ history.append(snapshot)
 history = history[-12:]
 
 # Write back
-with open('$HISTORY_FILE', 'w') as f:
+with open(sys.argv[1], 'w') as f:
     yaml.dump(history, f, default_flow_style=False, allow_unicode=True, sort_keys=False)
 
-print(f'History updated: {len(history)} entries in $HISTORY_FILE')
-"
+print(f'History updated: {len(history)} entries in {sys.argv[1]}')
+" "$HISTORY_FILE"
 ```
 
 **Placeholder substitution**: Replace `{GSC_CLICKS}`, `{UMAMI_VISITORS}`, etc. with the actual numeric values from the data collection agents. For any platform that was unavailable this run, use `null` (Python None). For `{ISSUES_CREATED_LIST}`, use a list of dicts matching the schema: `[{'number': 123, 'title': '...', 'priority': 'P1', 'category': 'infra'}]`. For `{KEY_FINDINGS_LIST}`, use a list of the top 3-5 finding strings from the Executive Summary. For `{GA4_STATUS}` etc., use one of: `trusted`, `partially_trusted`, `unverified`, `unavailable`.
