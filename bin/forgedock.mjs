@@ -2215,11 +2215,11 @@ async function validate(forgeYamlPath) {
         status: "warn",
         note: "project_id is a placeholder — run /forgedock-init to configure",
       });
-    } else if (!projectId.startsWith("PVT_")) {
+    } else if (!/^PVT_[A-Za-z0-9_=\-]+$/.test(projectId)) {
       checks.push({
         label: "Project board configured",
         status: "error",
-        note: `project_id must start with PVT_ (got: ${projectId.slice(0, 12)}...)`,
+        note: `project_id must match /^PVT_[A-Za-z0-9_=\\-]+$/ (got: ${projectId.slice(0, 12)}...)`,
       });
     } else {
       try {
