@@ -286,7 +286,6 @@ async function init() {
 
   // --- Detect staging branch ---
   let stagingBranch = "staging";
-  let stagingDetected = false;
   try {
     const remoteBranches = execSync("git branch -r", {
       cwd,
@@ -295,7 +294,6 @@ async function init() {
     });
     if (remoteBranches.includes("origin/staging")) {
       stagingBranch = "staging";
-      stagingDetected = true;
       console.log(`  Staging branch:  ${CYAN}staging${RESET} (detected)`);
     } else {
       stagingBranch = defaultBranch;
