@@ -8,7 +8,7 @@ import { execSync } from "child_process";
 import {
   BOLD, GREEN, YELLOW, CYAN, RED, RESET,
   bold, dim, green, yellow, cyan, red,
-  box, stepHeader, select, confirm, input, createProgressBar,
+  box, stepHeader, select, confirm, input, createProgressBar, spinner,
 } from "./tui.mjs";
 
 const __filename = fileURLToPath(import.meta.url);
@@ -356,6 +356,112 @@ function checkPrerequisites() {
 
   // Warnings are non-blocking — continue with install
   return warnings.length === 0;
+}
+
+// ---------------------------------------------------------------------------
+// Interactive prerequisite checklist (TUI flow)
+// ---------------------------------------------------------------------------
+
+/**
+ * Run the interactive prerequisite checklist with live spinner rendering.
+ *
+ * Each check runs individually with a spinner that resolves to ✓, ✗, or ⚠.
+ * Blocking checks (gh CLI, gh auth, Node.js) throw on failure, stopping the
+ * StepOrchestrator step. Warning checks (git, Claude Code) emit ⚠ but do NOT throw.
+ *
+ * @returns {Promise<void>}
+ */
+async function runPrerequisiteChecklist() {
+  // ── 1. GitHub CLI ──────────────────────────────────────────────────────────
+  {
+    const s = spinner("Checking GitHub CLI…");
+    try {
+      const out = execSync("gh --version", { encoding: "utf-8", stdio: ["pipe", "pipe", "pipe"] });
+      const match = out.match(/gh version (\d+\.\d+\.\d+)/);
+      const version = match ? `v${match[1]}` : "installed";
+      s.stop("success", `${green("[✓]")} GitHub CLI          ${dim(version)}`);
+    } catch {
+      s.stop("fail", `${red("[✗]")} GitHub CLI          not found — install: ${cyan("https://cli.github.com")}`);
+      throw new Error("GitHub CLI (gh) is required. Install it from https://cli.github.com");
+    }
+  }
+
+  // ── 2. GitHub Auth ─────────────────────────────────────────────────────────
+  {
+    const s = spinner("Checking GitHub Auth…");
+    try {
+      // gh auth status writes to stderr; capture it via the error path too
+      let combined = "";
+      try {
+        combined = execSync("gh auth status", { encoding: "utf-8", stdio: ["pipe", "pipe", "pipe"] });
+      } catch (err) {
+        combined = (err.stderr || "") + (err.stdout || "");
+        if (!/Logged in/.test(combined)) {
+          throw err;
+        }
+      }
+      // Parse "Logged in to github.com account USERNAME (keyring|oauth)" from stderr
+      const userMatch = combined.match(/account\s+(\S+)/);
+      const username = userMatch ? `@${userMatch[1]}` : "authenticated";
+      // Try to get primary org from gh api
+      let orgLabel = "";
+      try {
+        const orgsJson = execSync("gh api /user/orgs --jq '.[0].login'", {
+          encoding: "utf-8",
+          stdio: ["pipe", "pipe", "pipe"],
+        }).trim();
+        if (orgsJson && orgsJson !== "null" && orgsJson !== "") {
+          orgLabel = ` (${orgsJson})`;
+        }
+      } catch {
+        // Org lookup is best-effort — not required
+      }
+      s.stop("success", `${green("[✓]")} GitHub Auth         ${dim(`logged in as ${username}${orgLabel}`)}`);
+    } catch {
+      s.stop("fail", `${red("[✗]")} GitHub Auth         not authenticated — run: ${cyan("gh auth login")}`);
+      throw new Error("GitHub CLI is not authenticated. Run: gh auth login");
+    }
+  }
+
+  // ── 3. Node.js ─────────────────────────────────────────────────────────────
+  {
+    const s = spinner("Checking Node.js…");
+    const nodeVersion = process.versions.node;
+    const nodeMajor = parseInt(nodeVersion.split(".")[0], 10);
+    if (nodeMajor < 18) {
+      s.stop("fail", `${red("[✗]")} Node.js             v${nodeVersion} (>= 18 required) — update: ${cyan("https://nodejs.org")}`);
+      throw new Error(`Node.js >= 18 required (found v${nodeVersion}). Update at https://nodejs.org`);
+    }
+    s.stop("success", `${green("[✓]")} Node.js             ${dim(`v${nodeVersion} (>= 18 required)`)}`);
+  }
+
+  // ── 4. Git ─────────────────────────────────────────────────────────────────
+  {
+    const s = spinner("Checking Git…");
+    try {
+      const out = execSync("git --version", { encoding: "utf-8", stdio: ["pipe", "pipe", "pipe"] });
+      const match = out.match(/git version (\d+\.\d+\.\d+)/);
+      const version = match ? `v${match[1]}` : "installed";
+      s.stop("success", `${green("[✓]")} Git                 ${dim(version)}`);
+    } catch {
+      s.stop("warn", `${yellow("[!]")} Git                 not found — install: ${cyan("https://git-scm.com")}`);
+      // Git is a warning — do NOT throw
+    }
+  }
+
+  // ── 5. Claude Code ─────────────────────────────────────────────────────────
+  {
+    const s = spinner("Checking Claude Code…");
+    try {
+      const out = execSync("claude --version", { encoding: "utf-8", stdio: ["pipe", "pipe", "pipe"] });
+      const match = out.trim().match(/(\d+\.\d+\.\d+)/);
+      const version = match ? `v${match[1]}` : "installed";
+      s.stop("success", `${green("[✓]")} Claude Code         ${dim(version)}`);
+    } catch {
+      s.stop("warn", `${yellow("[!]")} Claude Code         not found — install: ${cyan("https://docs.anthropic.com/en/docs/claude-code")}`);
+      // Claude Code is a warning — do NOT throw
+    }
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -1144,7 +1250,7 @@ async function tuiOnboarding() {
         name: "Preflight Checks",
         optional: false,
         run: async () => {
-          checkPrerequisites();
+          await runPrerequisiteChecklist();
         },
       },
       {
@@ -1240,7 +1346,7 @@ async function tuiOnboarding() {
       name: "Preflight Checks",
       optional: false,
       run: async () => {
-        checkPrerequisites();
+        await runPrerequisiteChecklist();
       },
     },
     {
