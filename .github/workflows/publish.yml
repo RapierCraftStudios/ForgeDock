@@ -16,18 +16,14 @@ jobs:
     permissions:
       contents: write
       id-token: write
+
     steps:
       - uses: actions/checkout@v4
 
-      - uses: actions/setup-node@v4
+      - name: Use Node.js 24
+        uses: actions/setup-node@v4
         with:
-          node-version: 22
-
-      - name: Configure npm for OIDC
-        run: |
-          echo "registry=https://registry.npmjs.org/" > ~/.npmrc
-          npm whoami 2>&1 || echo "(expected — no token, using OIDC)"
-          npm --version
+          node-version: 24
 
       - name: Bump patch version
         run: |
@@ -37,8 +33,8 @@ jobs:
           NEW_VERSION=$(node -p "require('./package.json').version")
           echo "VERSION=$NEW_VERSION" >> $GITHUB_ENV
 
-      - name: Publish with provenance (OIDC trusted publishing)
-        run: npm publish --access public --provenance
+      - name: Publish to npm (OIDC trusted publishing)
+        run: npm publish --provenance --access public
 
       - name: Push version bump
         run: |
