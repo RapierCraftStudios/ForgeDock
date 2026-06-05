@@ -111,6 +111,10 @@ branches:
 #       repo: "acme-org/acme-python-sdk"
 #       staging_branch: "main"
 #       local_path: "/home/youruser/projects/acme-python-sdk"
+#       # Set billing_enabled: true to run Phase 4 (Financial Integrity) of
+#       # /security-audit against this satellite repo. Mirrors the top-level
+#       # billing.enabled flag but scoped per-satellite.
+#       # billing_enabled: false
 #
 #     # Monorepo satellite: multiple packages in a single repo.
 #     # Use subpaths to name each package root relative to local_path.
@@ -235,6 +239,17 @@ branches:
 #
 #   # API base URL for health checks and endpoint verification
 #   api_url: "https://api.acme.io"
+#
+#   # SSH target for production server health checks run by /autopilot
+#   # Format: user@host — e.g., ubuntu@203.0.113.42
+#   # Used in Phase 1 (SSH health check) of the autopilot cycle
+#   # Optional — omit if autopilot does not need server-level checks
+#   # server_ssh: "ubuntu@203.0.113.42"
+#
+#   # Absolute path on the production server to open eMemo files
+#   # Used by /autopilot to surface in-progress work notes from the server
+#   # Optional — only relevant if your team uses eMemo
+#   # ememo_path: "/home/ubuntu/ememo"
 
 # =============================================================================
 # REVIEW (OPTIONAL)
@@ -259,6 +274,16 @@ branches:
 #     billing: "Stripe webhooks; idempotency keys required on all handlers"
 #     auth: "JWT + refresh token rotation; sessions stored in Redis"
 #     database: "Always use docker exec <container> for psql/migrations"
+#
+#   # Domain-to-file mapping used by /work-on investigation and /review-pr agents
+#   # to quickly locate relevant files for a given issue domain.
+#   # Keys match issue label domain names; values are lists of file path patterns
+#   # (relative to repo root, glob-style). Optional — if omitted, agents infer
+#   # relevant files from issue labels and the Affected Files section instead.
+#   # key_paths:
+#   #   auth: ["services/api/auth/**", "web/src/lib/auth/**"]
+#   #   billing: ["services/api/billing/**", "web/src/app/billing/**"]
+#   #   database: ["services/api/db/**", "migrations/**"]
 
 # =============================================================================
 # VERIFICATION (OPTIONAL)

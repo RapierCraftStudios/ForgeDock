@@ -122,6 +122,7 @@ repos:
       repo: "acme-org/acme-python-sdk"
       staging_branch: "main"
       local_path: "/home/youruser/projects/acme-python-sdk"
+      # billing_enabled: false  # set true to run /security-audit Phase 4 on this repo
 
     # Monorepo satellite: multiple packages in one repo.
     # subpaths maps named identifiers to per-package root directories
@@ -145,10 +146,11 @@ repos:
 | `satellites[].staging_branch` | string | **Yes (per entry)** | Target branch for fast-lane PRs in this repo |
 | `satellites[].local_path` | string | No | Absolute local path to the satellite repo's checkout |
 | `satellites[].subpaths` | map(string→string) | No | Named sub-directory paths within `local_path`, for monorepo satellites that publish multiple packages. Each key is a logical name; the value is the relative path to that package's root. Used by `/sync-ecosystem` to locate per-package version files and publish workflows. |
+| `satellites[].billing_enabled` | boolean | No | Set to `true` to run Phase 4 (Financial Integrity) of `/security-audit` against this satellite repo. Mirrors the top-level [`billing.enabled`](#billing-optional) flag but scoped per-satellite. Defaults to `false` when absent. |
 
 **Routing syntax in commands**: `<prefix>:<issue_number>` — e.g., `mcp:5`, `sdk:12`
 
-**Commands that use this section**: `work-on` (multi-repo prefix table), `sync-ecosystem`
+**Commands that use this section**: `work-on` (multi-repo prefix table), `sync-ecosystem`, `security-audit` (satellite billing audit)
 
 ---
 
@@ -244,6 +246,9 @@ services:
 
   app_url: "https://acme.io"
   api_url: "https://api.acme.io"
+
+  # server_ssh: "ubuntu@203.0.113.42"
+  # ememo_path: "/home/ubuntu/ememo"
 ```
 
 | Field | Type | Required | Description |
@@ -258,8 +263,10 @@ services:
 | `analytics.ga4.service_account_key` | string (absolute path) | No | Path to a GA4 service account JSON key file. Grant the account Viewer access in GA4. Do not commit. |
 | `app_url` | string | No | Frontend app URL used by `qa-sweep` for page accessibility testing. Default: `http://localhost:3000` |
 | `api_url` | string | No | Base URL for the project's API. Used in health checks |
+| `server_ssh` | string | No | SSH target for production server health checks. Format: `user@host` (e.g., `ubuntu@203.0.113.42`). Used by `/autopilot` Phase 1 to run server-level checks over SSH. |
+| `ememo_path` | string | No | Absolute path on the production server to open eMemo files. Used by `/autopilot` to surface in-progress work notes. Only relevant if your team uses eMemo. |
 
-**Commands that use this section**: `analytics`, `geo-audit`, `autopilot` (analytics snapshot)
+**Commands that use this section**: `analytics`, `geo-audit`, `autopilot` (analytics snapshot, SSH health check)
 
 ---
 
@@ -280,6 +287,11 @@ review:
     billing: "Stripe webhooks; idempotency keys required on all handlers"
     auth: "JWT + refresh token rotation; sessions stored in Redis"
     database: "Always use docker exec <container> for psql/migrations"
+
+  # key_paths:
+  #   auth: ["services/api/auth/**", "web/src/lib/auth/**"]
+  #   billing: ["services/api/billing/**", "web/src/app/billing/**"]
+  #   database: ["services/api/db/**", "migrations/**"]
 ```
 
 | Field | Type | Required | Description |
@@ -287,8 +299,9 @@ review:
 | `tech_stack` | string | No | One-line tech stack summary. Injected into all review agent prompts |
 | `context` | string (multiline) | No | Freeform context about architecture, deploy model, and known pitfalls |
 | `domains.*` | string | No | Domain-specific notes keyed by review agent name (`billing`, `auth`, `database`, `frontend`, `api`, `infra`, `security`) |
+| `key_paths` | map(string→list of strings) | No | Domain-to-file mapping used by `/work-on` investigation and `/review-pr` agents to quickly locate relevant files. Keys are domain names matching issue labels; values are lists of file path patterns (glob-style, relative to repo root). When present, agents use this table instead of inferring files from labels and issue body. |
 
-**Commands that use this section**: `review-pr`, `review-pr-agents` (all domain agents)
+**Commands that use this section**: `review-pr`, `review-pr-agents` (all domain agents), `work-on` (Phase 1B investigation)
 
 ---
 
