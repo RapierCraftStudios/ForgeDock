@@ -355,7 +355,7 @@ repos:
 project_board:
   owner: "{OWNER}"
   project_number: {PROJECT_NUMBER}
-  project_id: "{PROJECT_ID}"
+  project_id: "{PROJECT_ID}"  # Must be a PVT_... node ID — obtain via: gh project list --owner <owner> --format json | jq '.projects[] | .id'
   field_ids:
     status: "{STATUS_FIELD_ID}"
     lane: "{LANE_FIELD_ID}"
@@ -479,14 +479,23 @@ gh repo view "${OWNER}/${REPO}" --json name,url 2>/dev/null \
 
 ### 6C: Project board ID resolution
 
+`project_board.project_id` must be a GitHub Projects v2 node ID with the `PVT_` prefix (e.g. `PVT_kwHOxxxxxxxxxxxxxxxx`). This value is returned by `gh project list --owner <owner> --format json | jq '.projects[] | .id'`. A manually-edited `forge.yaml` with an incorrect value (e.g. a project number instead of a node ID) will produce a confusing GraphQL error — the format check below catches this before attempting the API call.
+
 ```bash
 # Only run if project_board section was written
 if grep -q "^project_board:" "$FORGE_YAML"; then
   PROJECT_ID=$(grep "project_id:" "$FORGE_YAML" | head -1 | awk '{print $2}' | tr -d '"')
-  gh api graphql -f query='query { node(id: "'"$PROJECT_ID"'") { id __typename } }' 2>/dev/null \
-    | jq -e '.data.node.id' > /dev/null \
-    && echo "✓ project_board.project_id resolves" \
-    || echo "WARNING: project_board.project_id may be invalid — verify with: gh project list --owner ${OWNER}"
+  # Validate PVT_ prefix before GraphQL call — any other format will produce a confusing API error
+  if [[ "$PROJECT_ID" != PVT_* ]]; then
+    echo "ERROR: project_board.project_id must start with 'PVT_' (got: '$PROJECT_ID')"
+    echo "  Expected format: PVT_kwHOxxxxxxxxxxxxxxxx"
+    echo "  Obtain the correct value with: gh project list --owner ${OWNER} --format json | jq '.projects[] | .id'"
+  else
+    gh api graphql -f query='query { node(id: "'"$PROJECT_ID"'") { id __typename } }' 2>/dev/null \
+      | jq -e '.data.node.id' > /dev/null \
+      && echo "✓ project_board.project_id resolves" \
+      || echo "WARNING: project_board.project_id may be invalid — verify with: gh project list --owner ${OWNER}"
+  fi
 fi
 ```
 
