@@ -28,6 +28,26 @@ FORCE = true if --force present
 TARGET_SECTION = value from --section <name>, or "all"
 ```
 
+If `--section` was provided, validate the value immediately:
+
+```bash
+ALLOWED_SECTIONS="repos project_board services review verification"
+if [ "$TARGET_SECTION" != "all" ]; then
+  VALID=false
+  for s in $ALLOWED_SECTIONS; do
+    [ "$TARGET_SECTION" = "$s" ] && VALID=true && break
+  done
+  if [ "$VALID" = "false" ]; then
+    echo "Error: '$TARGET_SECTION' is not a valid section name."
+    echo ""
+    echo "Valid sections: repos, project_board, services, review, verification"
+    echo ""
+    echo "Usage: /forgedock-init --section <name>"
+    exit 1
+  fi
+fi
+```
+
 ---
 
 ## Phase 1: Load forge.yaml
