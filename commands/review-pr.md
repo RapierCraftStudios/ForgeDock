@@ -299,7 +299,7 @@ Map each changed file to its activation requirements:
 
 ### Step 2.5B: Run Verification
 
-For each changed file, execute the relevant checks using the standalone verification scripts in `~/projects/forge/scripts/`. These scripts can also be run independently outside the review context (e.g., from `/quality-gate` or `/work-on` builder steps).
+For each changed file, execute the relevant checks using the standalone verification scripts in `$FORGE_HOME/scripts/`. These scripts can also be run independently outside the review context (e.g., from `/quality-gate` or `/work-on` builder steps).
 
 ```bash
 CHANGED_FILES=$(gh pr diff $ARGUMENTS --name-only)
@@ -317,11 +317,11 @@ gh pr diff $ARGUMENTS > "$DIFF_TMP"
 
 # 1. Route/router/middleware/shared-module/component registration
 echo "=== Running: verify-route-registration.sh ==="
-~/projects/forge/scripts/verify-route-registration.sh "$CHANGED_FILES_TMP" "$REPO_ROOT" || true
+$FORGE_HOME/scripts/verify-route-registration.sh "$CHANGED_FILES_TMP" "$REPO_ROOT" || true
 
 # 2. Environment variable wiring (checks .env.example, docker-compose, env_validation, SOPS mapping)
 echo "=== Running: verify-env-vars.sh ==="
-~/projects/forge/scripts/verify-env-vars.sh "$DIFF_TMP" "$REPO_ROOT" || true
+$FORGE_HOME/scripts/verify-env-vars.sh "$DIFF_TMP" "$REPO_ROOT" || true
 
 # 3. Host headers in shell scripts + client-side proxy bypass check
 # Read project-specific internal service patterns from forge.yaml (if present)
@@ -335,11 +335,11 @@ if [ -f "$REPO_ROOT/forge.yaml" ]; then
 fi
 export FORGE_INTERNAL_PATTERNS
 echo "=== Running: verify-host-headers.sh ==="
-~/projects/forge/scripts/verify-host-headers.sh "$CHANGED_FILES_TMP" "$REPO_ROOT" || true
+$FORGE_HOME/scripts/verify-host-headers.sh "$CHANGED_FILES_TMP" "$REPO_ROOT" || true
 
 # 4. SOPS deploy chain (ENV_MAPPING consistency, deploy path drift, hotfix sync)
 echo "=== Running: verify-sops-chain.sh ==="
-~/projects/forge/scripts/verify-sops-chain.sh "$DIFF_TMP" "$CHANGED_FILES_TMP" "$REPO_ROOT" || true
+$FORGE_HOME/scripts/verify-sops-chain.sh "$DIFF_TMP" "$CHANGED_FILES_TMP" "$REPO_ROOT" || true
 
 # Cleanup temp files
 rm -f "$CHANGED_FILES_TMP" "$DIFF_TMP"
