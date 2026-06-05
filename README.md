@@ -58,53 +58,56 @@ The result: agents that are **deterministic**, not guessing. They follow structu
 
 ## See It Working
 
-The best way to understand ForgeDock is to look at real pipeline runs. Every issue below was investigated, built, reviewed, and merged by AI agents — with full context flowing between stages via GitHub comments.
+Here's what a real pipeline run looks like. A user reports that an API endpoint is returning 500 errors — the pipeline takes it from there.
 
 ### Example 1: Bug fix with full context chain
 
-**[AlterLab #20256](https://github.com/RapierCraftStudios/AlterLab/issues/20256)** — `extraction_schema` broke for non-BYOK users. 7 minutes, start to merge.
+A user opens issue #42: *"POST /api/payments returns 500 for free-tier users."*
 
 ```
-FORGE:INVESTIGATOR  →  Traced bug to commit a4eafb07b, identified the PR that introduced it (#4487),
-                        quantified impact (88 errors across 5 users)
+FORGE:INVESTIGATOR  →  Traced bug to commit e8f21a3 (PR #38). The payment validation
+                        gate assumed all users have a billing profile — free-tier users don't.
+                        Quantified impact: 12 affected users, 94 failed requests in the last 24h.
 
-FORGE:CONTRACT      →  2-file fix: decouple extraction_schema from BYOK gate in API,
-                        restore system key fallback in worker
+FORGE:CONTRACT      →  2-file fix: add nil-check in payment validator,
+                        add free-tier guard in the API router
 
-FORGE:CONTEXT       →  Surfaced 3 historical bugs in the same module (#20072, #19852, #20039)
-                        and a known pitfall about spend reservation reversal from #17086
+FORGE:CONTEXT       →  Surfaced 2 historical bugs in the same module:
+                        #29 (missing nil-check on subscription lookup) and
+                        #34 (billing profile race condition on signup).
+                        Known pitfall: don't skip the audit log write on early returns.
 
 FORGE:ARCHITECT     →  Ordered implementation plan with exact file/function/line table
 
-FORGE:BUILDER       →  Branch fix/extraction-schema-byok-20256, commit b19ec393f, 2 files changed
+FORGE:BUILDER       →  Branch fix/payment-validation-free-tier-42, 2 files changed
 
 FORGE:REVIEW        →  4 review agents, 0 findings, auto-merged to staging
 ```
 
-The context phase knew about spend reservation reversal from issue #17086 — a completely different bug, months earlier, in the same module. That's institutional memory.
+The context phase knew about the audit log pitfall from issue #34 — a completely different bug, months earlier, in the same module. That's institutional memory.
 
 ### Example 2: Cross-issue knowledge graph
 
-**[AlterLab #20263](https://github.com/RapierCraftStudios/AlterLab/issues/20263)** — spawned because the fix for #20256 only covered one of three callers.
+The fix for #42 only covered the `/payments` endpoint. But the same nil-check bug exists in `/invoices` and `/subscriptions`. The pipeline spawns issue #43.
 
-The context phase read the previous fix and said: *"BYOK gate pattern was already fixed in scrape_unified.py (#20256) — same pattern must be applied consistently."* It didn't re-investigate. It read structured data from the knowledge graph and applied the known fix to `batch.py` and `crawl.py`. 7 minutes, start to merge.
+The context phase reads the structured data from #42 and says: *"Billing profile nil-check was already fixed in payment_validator.py (#42) — same pattern must be applied consistently."* It doesn't re-investigate. It reads the knowledge graph and applies the known fix to the remaining endpoints. 7 minutes, start to merge.
 
 ### Example 3: Review agents catch bugs across service boundaries
 
-**[AlterLab PR #20265](https://github.com/RapierCraftStudios/AlterLab/pull/20265)** — staging-to-main deploy. Four specialized review agents analyzed the deploy:
+A staging-to-main deploy PR gets reviewed by four specialized agents:
 
-- **Concurrency agent** — verified idempotency keys through PostgreSQL advisory locks across 8 scenarios
-- **Security agent** — flagged `force_https` default change blast radius and unbounded LLM cost exposure
-- **Scraper Logic agent** — verified BYOK decoupling consistency across all 3 endpoints
-- **Billing Integrity agent** — found that the `/invoices` endpoint still used the old `cs.metadata` column name (the deposits fix in #20259 missed it)
+- **Concurrency agent** — verified idempotency keys through PostgreSQL advisory locks
+- **Security agent** — flagged a `force_https` default change with broad blast radius
+- **API agent** — verified route registration consistency across all endpoints
+- **Billing Integrity agent** — found that the `/invoices` query still referenced an old column name that was renamed in a recent migration
 
-That billing finding became **[#20266](https://github.com/RapierCraftStudios/AlterLab/issues/20266)** — a new issue that entered the pipeline, got fixed, and merged. Bug caught before it hit production.
+That billing finding becomes a new issue — enters the same pipeline, gets investigated, built, reviewed, and merged. Bug caught before it hits production.
 
 ### Example 4: The pipeline catches its own false positives
 
-**[AlterLab #20267](https://github.com/RapierCraftStudios/AlterLab/issues/20267)** — a review agent flagged "no input size cap on system key extraction." The investigation phase traced the full call chain and found the cap *already existed* in `quality_gate.py` (`CONTENT_MAX_CHARS = 30_000`). Closed as `workflow:invalid` with an explanation of why the review agent missed it. The trajectory recorded: *"Investigation revealed fix already present."*
+A review agent flags "no input size cap on the system key path." The investigation phase traces the full call chain and finds the cap *already exists* in a downstream quality gate module. Closed as `workflow:invalid` with an explanation of why the review agent missed it (it only inspected the text-building logic, not the downstream gate). The trajectory recorded: *"Investigation revealed fix already present."*
 
-> Browse **[AlterLab's closed issues](https://github.com/RapierCraftStudios/AlterLab/issues?q=is%3Aissue+is%3Aclosed+sort%3Acreated-desc)** to see thousands of pipeline runs — every one with investigation, context, architect, builder, and trajectory comments.
+The pipeline self-corrects. No wasted work. Full audit trail.
 
 ---
 
