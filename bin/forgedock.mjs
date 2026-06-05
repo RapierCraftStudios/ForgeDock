@@ -3,7 +3,7 @@
 import { fileURLToPath } from "url";
 import { dirname, join, relative, resolve } from "path";
 import { mkdir, symlink, copyFile, readlink, lstat, readdir, stat, writeFile, unlink as fsUnlink } from "fs/promises";
-import { existsSync, appendFileSync, chmodSync, readFileSync, writeFileSync, renameSync } from "fs";
+import { existsSync, appendFileSync, chmodSync, readFileSync, writeFileSync, renameSync, unlinkSync } from "fs";
 import { execSync, execFileSync } from "child_process";
 import { createSign } from "crypto";
 import {
@@ -1013,6 +1013,7 @@ async function uninstall() {
 
     if (cleanProfiles) {
       for (const profile of profilesWithForgeHome) {
+        const tmpPath = profile + ".forgedock.tmp";
         try {
           const content = readFileSync(profile, "utf-8");
           // Remove the two-line block written by install():
@@ -1027,10 +1028,15 @@ async function uninstall() {
               /^# ForgeDock — autonomous development pipeline\nexport FORGE_HOME=[^\n]*\n/,
               ""
             );
-          writeFileSync(profile, cleaned, "utf-8");
+          // Write to a temp file first, then atomically rename into place.
+          // This prevents profile corruption if the process is killed mid-write.
+          writeFileSync(tmpPath, cleaned, "utf-8");
+          renameSync(tmpPath, profile);
           const profileShort = profile.replace(process.env.HOME ?? "", "~");
           console.log(`  ${green("✔")} Removed FORGE_HOME from ${profileShort}`);
         } catch (err) {
+          // Clean up temp file if it was created before the error
+          try { unlinkSync(tmpPath); } catch { /* already gone or never created */ }
           const profileShort = profile.replace(process.env.HOME ?? "", "~");
           console.log(`  ${red("✖")} Could not update ${profileShort}: ${err.message}`);
         }
