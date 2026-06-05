@@ -3,7 +3,7 @@
 import { fileURLToPath } from "url";
 import { dirname, join, relative } from "path";
 import { mkdir, symlink, readlink, lstat, readdir, stat } from "fs/promises";
-import { existsSync, appendFileSync, readFileSync, writeFileSync, renameSync } from "fs";
+import { existsSync, appendFileSync, chmodSync, readFileSync, writeFileSync, renameSync } from "fs";
 import { execSync, execFileSync } from "child_process";
 import { createSign } from "crypto";
 import {
@@ -2325,10 +2325,12 @@ const CREDENTIALS_FILE = join(FORGEDOCK_HOME, "credentials.json");
  * @param {{ appId: string, installationId: string, privateKeyPath: string }} creds
  */
 async function saveBotCredentials(creds) {
-  await mkdir(FORGEDOCK_HOME, { recursive: true });
+  await mkdir(FORGEDOCK_HOME, { recursive: true, mode: 0o700 });
   const existing = loadBotCredentials() ?? {};
   const updated = { ...existing, bot: creds };
-  writeFileSync(CREDENTIALS_FILE, JSON.stringify(updated, null, 2) + "\n", "utf-8");
+  writeFileSync(CREDENTIALS_FILE, JSON.stringify(updated, null, 2) + "\n", { encoding: "utf-8", mode: 0o600 });
+  // Tighten permissions on files created before this fix (mode is only applied at creation time)
+  chmodSync(CREDENTIALS_FILE, 0o600);
 }
 
 /**
