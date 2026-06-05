@@ -13,6 +13,11 @@ Thumbs.db
 .env
 .env.local
 
+# forge.yaml is the user-configured copy of forge.yaml.example.
+# It may contain local paths, private service URLs, and project board IDs.
+# forge.yaml.example (the template) remains tracked.
+forge.yaml
+
 # Claude Code
 .claude/
 CLAUDE.md
