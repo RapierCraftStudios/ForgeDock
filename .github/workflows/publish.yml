@@ -68,8 +68,6 @@ jobs:
           echo "@rapiercraftstudios:registry=https://npm.pkg.github.com" >> "$NPMRC"
           npm pkg set name="@rapiercraftstudios/forgedock"
           npm publish --access public --userconfig "$NPMRC"
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Restore package.json name
         if: always() && env.SKIP_PUBLISH != 'true'
