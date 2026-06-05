@@ -965,31 +965,42 @@ function queryNpmRegistry(pkg) {
 
 /**
  * Return a Set of relative paths for all ForgeDock-managed symlinks in TARGET_DIR.
- * Returns an empty Set if TARGET_DIR does not exist or cannot be read.
+ * Recursively walks subdirectories so commands installed under work-on/, work-on/build/,
+ * etc. are included. Returns an empty Set if TARGET_DIR does not exist or cannot be read.
  *
  * @returns {Promise<Set<string>>}
  */
 async function getInstalledCommandNames() {
   const names = new Set();
-  try {
-    const entries = await readdir(TARGET_DIR, { withFileTypes: true });
+
+  async function walk(dir) {
+    let entries;
+    try {
+      entries = await readdir(dir, { withFileTypes: true });
+    } catch {
+      return; // unreadable directory — skip
+    }
     for (const entry of entries) {
-      const fullPath = join(TARGET_DIR, entry.name);
-      try {
-        const stats = await lstat(fullPath);
-        if (stats.isSymbolicLink()) {
-          const linkTarget = await readlink(fullPath);
-          if (linkTarget.includes("commands") && linkTarget.endsWith(".md")) {
-            names.add(entry.name);
+      const fullPath = join(dir, entry.name);
+      if (entry.isDirectory()) {
+        await walk(fullPath);
+      } else {
+        try {
+          const stats = await lstat(fullPath);
+          if (stats.isSymbolicLink()) {
+            const linkTarget = await readlink(fullPath);
+            if (linkTarget.includes("commands") && linkTarget.endsWith(".md")) {
+              names.add(relative(TARGET_DIR, fullPath));
+            }
           }
+        } catch {
+          // Skip unreadable entries
         }
-      } catch {
-        // Skip unreadable entries
       }
     }
-  } catch {
-    // TARGET_DIR absent — return empty Set
   }
+
+  await walk(TARGET_DIR);
   return names;
 }
 
