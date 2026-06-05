@@ -1730,6 +1730,17 @@ function _sanitizeYamlValue(value) {
 }
 
 /**
+ * Sanitize a file-system path value for safe insertion into a YAML double-quoted scalar.
+ * Escapes backslashes (Windows paths) in addition to stripping double-quotes and newlines.
+ *
+ * @param {string} value
+ * @returns {string}
+ */
+function _sanitizePathValue(value) {
+  return String(value).replace(/\\/g, "\\\\").replace(/"/g, "").replace(/[\r\n]/g, " ").trim();
+}
+
+/**
  * Attempt to auto-discover GitHub Projects v2 configuration for the given owner.
  *
  * Runs two gh CLI calls:
@@ -1971,19 +1982,48 @@ async function discoverProjectBoard(owner) {
  * @param {object} [opts.optionalSections.verification] - verification section config
  */
 function buildForgeYamlContent({ owner, repo, projectName, description, root, worktreeBase, defaultBranch, stagingBranch, optionalSections = {} }) {
+  // Sanitize all user-supplied string values before template interpolation to prevent
+  // YAML injection via double-quotes or embedded newlines in double-quoted scalars.
+  owner         = _sanitizeYamlValue(owner);
+  repo          = _sanitizeYamlValue(repo);
+  projectName   = _sanitizeYamlValue(projectName);
+  description   = _sanitizeYamlValue(description);
+  defaultBranch = _sanitizeYamlValue(defaultBranch);
+  stagingBranch = _sanitizeYamlValue(stagingBranch);
+  // Path values: also escape backslashes so Windows paths are valid YAML.
+  root          = _sanitizePathValue(root);
+  worktreeBase  = _sanitizePathValue(worktreeBase);
+
   const { projectBoard, multiRepo, review, verification } = optionalSections;
 
+  // Sanitize optional-section user-supplied strings.
+  const safeMultiRepo = multiRepo ? {
+    prefix:         _sanitizeYamlValue(multiRepo.prefix         || "sat"),
+    satelliteRepo:  _sanitizeYamlValue(multiRepo.satelliteRepo  || "your-satellite-repo"),
+    satelliteBranch: _sanitizeYamlValue(multiRepo.satelliteBranch || "main"),
+  } : null;
+
+  const safeReview = review ? {
+    techStack: _sanitizeYamlValue(review.techStack || "Node.js, TypeScript, PostgreSQL"),
+    // context uses a block scalar (|) — only strip double-quotes; newlines are handled by split/join
+    context:   (review.context || "Add architecture notes and conventions here.").replace(/"/g, ""),
+  } : null;
+
+  const safeVerification = verification ? {
+    healthEndpoint: _sanitizeYamlValue(verification.healthEndpoint || `https://api.${repo}.io/health`),
+  } : null;
+
   // --- repos section ---
-  const reposSection = multiRepo
+  const reposSection = safeMultiRepo
     ? `repos:
   default:
     repo: "${owner}/${repo}"
     staging_branch: "${stagingBranch}"
   satellites:
-    - prefix: "${multiRepo.prefix || "sat"}"
-      repo: "${owner}/${multiRepo.satelliteRepo || "your-satellite-repo"}"
-      staging_branch: "${multiRepo.satelliteBranch || "main"}"
-      local_path: "${join(root, "..", multiRepo.satelliteRepo || "your-satellite-repo")}"`
+    - prefix: "${safeMultiRepo.prefix}"
+      repo: "${owner}/${safeMultiRepo.satelliteRepo}"
+      staging_branch: "${safeMultiRepo.satelliteBranch}"
+      local_path: "${join(root, "..", safeMultiRepo.satelliteRepo)}"`
     : `# repos:
 #   default:
 #     repo: "${owner}/${repo}"
@@ -2044,20 +2084,20 @@ ${fieldIdsBlock}${optionIdsBlock}${!hasDiscoveredId ? `\n# To find IDs: gh proje
 #     workflow: "PVTSSF_xxxxxxxxxxxxxxxxxxxxxxxx"`;
 
   // --- review section ---
-  const reviewSection = review
+  const reviewSection = safeReview
     ? `review:
-  tech_stack: "${review.techStack || "Node.js, TypeScript, PostgreSQL"}"
+  tech_stack: "${safeReview.techStack}"
   context: |
-    ${(review.context || "Add architecture notes and conventions here.").split("\n").join("\n    ")}`
+    ${safeReview.context.split("\n").join("\n    ")}`
     : `# review:
 #   tech_stack: "Node.js, TypeScript, PostgreSQL"
 #   context: |
 #     Describe your repo structure and any unusual conventions here.`;
 
   // --- verification section ---
-  const verificationSection = verification
+  const verificationSection = safeVerification
     ? `verification:
-  health_endpoint: "${verification.healthEndpoint || `https://api.${repo}.io/health`}"
+  health_endpoint: "${safeVerification.healthEndpoint}"
   health_patterns:
     - '"status": "ok"'`
     : `# verification:
