@@ -21,7 +21,7 @@ Parse from $ARGUMENTS:
 - `--repo {GH_REPO}` — GitHub repo (e.g. `{owner}/{repo}` — resolved from `forge.yaml → project`)
 - `--gh-flag {GH_FLAG}` — gh CLI repo flag (e.g. `-R {owner}/{repo}`)
 
-If called from `work-on`, these are passed through. If invoked standalone, defaults apply.
+If called from `work-on`, these are passed through. If invoked standalone, `--repo` and `--gh-flag` are resolved from `forge.yaml → project`.
 
 ---
 
