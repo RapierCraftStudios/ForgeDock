@@ -6,9 +6,7 @@
     "url": "https://smee.io/forgedock",
     "active": false
   },
-  "redirect_url": "",
   "callback_urls": [],
-  "setup_url": "",
   "setup_on_update": false,
   "public": false,
   "default_events": [
