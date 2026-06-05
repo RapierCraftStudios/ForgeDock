@@ -1176,15 +1176,14 @@ async function update() {
   console.log(`  ${dim(`Current version: v${currentVersion}`)}`);
   console.log("");
 
-  // Snapshot installed commands before any update
-  const commandsBefore = await getInstalledCommandNames();
-
   // Determine install type: git clone (has .git) or npm global install
   const gitDir = join(FORGE_HOME, ".git");
   if (existsSync(gitDir)) {
     // -----------------------------------------------------------------------
     // Git install path
     // -----------------------------------------------------------------------
+    // Snapshot installed commands before the update so we can show a diff after
+    const commandsBefore = await getInstalledCommandNames();
     try {
       const branch = execSync("git rev-parse --abbrev-ref HEAD", {
         cwd: FORGE_HOME,
