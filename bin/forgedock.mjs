@@ -2549,6 +2549,10 @@ const CREDENTIALS_FILE = join(FORGEDOCK_HOME, "credentials.json");
  */
 async function saveBotCredentials(creds) {
   await mkdir(FORGEDOCK_HOME, { recursive: true, mode: 0o700 });
+  // Tighten permissions on pre-existing installs: fs.mkdir({ recursive: true }) ignores
+  // mode when the directory already exists (Linux kernel behaviour). chmodSync enforces
+  // 0o700 unconditionally, matching the intent of the mode option above.
+  chmodSync(FORGEDOCK_HOME, 0o700);
   const existing = loadBotCredentials() ?? {};
   const updated = { ...existing, bot: creds };
   writeFileSync(CREDENTIALS_FILE, JSON.stringify(updated, null, 2) + "\n", { encoding: "utf-8", mode: 0o600 });
