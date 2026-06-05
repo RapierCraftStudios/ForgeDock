@@ -25,6 +25,7 @@ jobs:
         uses: actions/setup-node@v4
         with:
           node-version: 24
+          registry-url: 'https://registry.npmjs.org'
 
       - name: Bump patch version
         run: |
@@ -37,15 +38,22 @@ jobs:
       - name: Publish to npm (OIDC trusted publishing)
         run: npm publish --provenance --access public
 
+      - name: Save package.json before name mutation
+        run: cp package.json package.json.orig
+
       - name: Publish to GitHub Packages
         run: |
-          echo "//npm.pkg.github.com/:_authToken=${{ secrets.GITHUB_TOKEN }}" > .npmrc
-          echo "@rapiercraftstudios:registry=https://npm.pkg.github.com" >> .npmrc
+          NPMRC="$RUNNER_TEMP/.npmrc"
+          echo "//npm.pkg.github.com/:_authToken=${{ secrets.GITHUB_TOKEN }}" > "$NPMRC"
+          echo "@rapiercraftstudios:registry=https://npm.pkg.github.com" >> "$NPMRC"
           npm pkg set name="@rapiercraftstudios/forgedock"
-          npm publish --access public
-          npm pkg set name="forgedock"
+          npm publish --access public --userconfig "$NPMRC"
         env:
           NODE_AUTH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Restore package.json name
+        if: always()
+        run: mv package.json.orig package.json
 
       - name: Push version bump
         run: |
