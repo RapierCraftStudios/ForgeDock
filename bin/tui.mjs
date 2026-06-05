@@ -374,6 +374,7 @@ export function input(message, defaultValue = "") {
  * @returns {Promise<any>} The selected value (or choice string if choices are strings)
  */
 export function select(message, choices, { initialIndex = 0 } = {}) {
+  if (choices.length === 0) return Promise.resolve(undefined);
   if (!process.stdin.isTTY) {
     // Non-TTY: return first choice value
     const first = choices[0];
@@ -465,6 +466,7 @@ export function select(message, choices, { initialIndex = 0 } = {}) {
  * @returns {Promise<any[]>} Array of selected values
  */
 export function multiSelect(message, choices, { initialSelected = [] } = {}) {
+  if (choices.length === 0) return Promise.resolve([]);
   if (!process.stdin.isTTY) {
     // Non-TTY: return pre-selected values or empty array
     const items = choices.map((c) =>
