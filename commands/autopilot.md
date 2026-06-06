@@ -52,9 +52,15 @@ DRY_RUN = true if --dry-run present
 ```bash
 echo "=== Autopilot Cycle: $(date -u +%Y-%m-%dT%H:%M:%SZ) ==="
 
+# Portable ISO-8601 date arithmetic using python3 (works on Windows, macOS, Linux).
+# Replaces GNU-only `date -u -d 'N days ago'` which fails on Windows and macOS.
+DATE_3D_AGO=$(python3 -c "from datetime import datetime, timedelta, timezone; print((datetime.now(timezone.utc) - timedelta(days=3)).strftime('%Y-%m-%dT%H:%M:%SZ'))")
+DATE_7D_AGO=$(python3 -c "from datetime import datetime, timedelta, timezone; print((datetime.now(timezone.utc) - timedelta(days=7)).strftime('%Y-%m-%dT%H:%M:%SZ'))")
+DATE_1D_AGO=$(python3 -c "from datetime import datetime, timedelta, timezone; print((datetime.now(timezone.utc) - timedelta(days=1)).strftime('%Y-%m-%dT%H:%M:%SZ'))")
+
 # Recent closed issues (last 3 days) — what was fixed recently?
 gh issue list --state closed --json number,title,labels,closedAt \
-  --jq '[.[] | select(.closedAt > "'$(date -u -d '3 days ago' +%Y-%m-%dT%H:%M:%SZ)'")] | length' 2>/dev/null || echo "0"
+  --jq '[.[] | select(.closedAt > "'"$DATE_3D_AGO"'")] | length' 2>/dev/null || echo "0"
 
 # Open issue count by priority
 gh issue list --state open --label "priority:P0" --json number --jq 'length'
@@ -65,12 +71,12 @@ gh issue list --state open --label "priority:P2" --json number --jq 'length'
 gh issue list --state open --limit 200 --json number,title,labels,createdAt \
   --jq '[.[] | select(
     (.labels | map(.name) | any(startswith("workflow:")) | not) and
-    (.createdAt < "'$(date -u -d '7 days ago' +%Y-%m-%dT%H:%M:%SZ)'")
+    (.createdAt < "'"$DATE_7D_AGO"'")
   )] | length'
 
 # Failed CI runs in last 24h
 gh run list --limit 30 --json conclusion,createdAt \
-  --jq '[.[] | select(.conclusion == "failure" and .createdAt > "'$(date -u -d '1 day ago' +%Y-%m-%dT%H:%M:%SZ)'")] | length'
+  --jq '[.[] | select(.conclusion == "failure" and .createdAt > "'"$DATE_1D_AGO"'")] | length'
 ```
 
 Store these as `BASELINE` metrics for the cycle report.

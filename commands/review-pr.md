@@ -287,9 +287,13 @@ fi
 CHANGED_FILES=$(gh pr diff $ARGUMENTS --name-only)
 HAS_TS=$(echo "$CHANGED_FILES" | grep -E '\.(tsx?|jsx?)$' | head -1)
 HAS_PY=$(echo "$CHANGED_FILES" | grep -E '\.py$' | head -1)
-IS_STAGING_TO_MAIN=$([[ "$HEAD" == "staging" && "$BASE" == "main" ]] && echo "true" || echo "false")
-IS_MILESTONE_TO_STAGING=$([[ "$HEAD" =~ ^milestone/ && "$BASE" == "staging" ]] && echo "true" || echo "false")
-REQUIRES_FULL_BUILD=$([[ "$IS_STAGING_TO_MAIN" == "true" || "$IS_MILESTONE_TO_STAGING" == "true" ]] && echo "true" || echo "false")
+# Use POSIX-portable if/else (avoid bash-only [[ ]])
+IS_STAGING_TO_MAIN="false"
+if [ "$HEAD" = "staging" ] && [ "$BASE" = "main" ]; then IS_STAGING_TO_MAIN="true"; fi
+IS_MILESTONE_TO_STAGING="false"
+case "$HEAD" in milestone/*) if [ "$BASE" = "staging" ]; then IS_MILESTONE_TO_STAGING="true"; fi ;; esac
+REQUIRES_FULL_BUILD="false"
+if [ "$IS_STAGING_TO_MAIN" = "true" ] || [ "$IS_MILESTONE_TO_STAGING" = "true" ]; then REQUIRES_FULL_BUILD="true"; fi
 ```
 
 **TypeScript files changed:**
@@ -355,9 +359,9 @@ Check whether the PR's actual changes match what the builder committed to in its
 
 ```bash
 # Find the contract comment on the linked issue
-ISSUE_NUM=$(gh pr view $ARGUMENTS --json body --jq '.body' | grep -oP 'Closes #\K\d+|#\K\d+' | head -1)
+ISSUE_NUM=$(gh pr view $ARGUMENTS --json body --jq '.body | gsub("(?s).*?(?:Closes #|#)(?<n>[0-9]+).*"; "\(.n)") // empty' 2>/dev/null | head -1)
 if [ -n "$ISSUE_NUM" ]; then
-    CONTRACT_FILES=$(gh api repos/${REPO}/issues/${ISSUE_NUM}/comments --jq '[.[] | select(.body | contains("FORGE:CONTRACT"))] | .[0].body' 2>/dev/null | grep -oP '`[^`]+\.(py|tsx?|sql|sh|yml|yaml|json)`' | tr -d '`' | sort -u)
+    CONTRACT_FILES=$(gh api repos/${REPO}/issues/${ISSUE_NUM}/comments --jq '[.[] | select(.body | contains("FORGE:CONTRACT"))] | .[0].body' 2>/dev/null | grep -E '`[^`]+\.(py|tsx?|sql|sh|yml|yaml|json)`' | grep -oE '`[^`]+\.(py|tsx?|sql|sh|yml|yaml|json)`' | tr -d '`' | sort -u)
     PR_FILES=$(gh pr diff $ARGUMENTS --name-only | sort -u)
 
     # Files in PR but NOT in contract
@@ -425,48 +429,66 @@ Map each changed file to its activation requirements.
 
 For each changed file, execute the relevant checks using the standalone verification scripts in `$FORGE_HOME/scripts/`. These scripts can also be run independently outside the review context (e.g., from `/quality-gate` or `/work-on` builder steps).
 
+**Platform note**: The verify-*.sh scripts require bash and standard POSIX tools. On Windows without bash (Git Bash / WSL / MSYS2), these checks are skipped with an explicit message — the review continues without them.
+
 ```bash
 CHANGED_FILES=$(gh pr diff $ARGUMENTS --name-only)
 REPO_ROOT="."  # Assumes cwd is the repo root
 
-# Write changed files and diff to temp files for script consumption
-CHANGED_FILES_TMP=$(mktemp)
-DIFF_TMP=$(mktemp)
-echo "$CHANGED_FILES" > "$CHANGED_FILES_TMP"
-gh pr diff $ARGUMENTS > "$DIFF_TMP"
-
-# --- Script-based checks (reusable, testable, deterministic) ---
-# Each script exits 0 (pass), 1 (blocking findings), or 2 (warnings only).
-# Output is structured: "BLOCKING: ...", "WARNING: ...", "OK: ..." per line.
-
-# 1. Route/router/middleware/shared-module/component registration
-echo "=== Running: verify-route-registration.sh ==="
-$FORGE_HOME/scripts/verify-route-registration.sh "$CHANGED_FILES_TMP" "$REPO_ROOT" || true
-
-# 2. Environment variable wiring (checks .env.example, docker-compose, env_validation, SOPS mapping)
-echo "=== Running: verify-env-vars.sh ==="
-$FORGE_HOME/scripts/verify-env-vars.sh "$DIFF_TMP" "$REPO_ROOT" || true
-
-# 3. Host headers in shell scripts + client-side proxy bypass check
-# Read project-specific internal service patterns from forge.yaml (if present)
-FORGE_INTERNAL_PATTERNS=""
-if [ -f "$REPO_ROOT/forge.yaml" ]; then
-    FORGE_INTERNAL_PATTERNS=$(grep -A 999 'internal_service_patterns:' "$REPO_ROOT/forge.yaml" \
-        | grep -E '^\s*-\s+' \
-        | sed 's/^\s*-\s*//' \
-        | tr -d '"'"'" \
-        | paste -sd '|' -)
+# --- Platform / bash capability guard ---
+# The verify-*.sh scripts require bash. Detect availability before invoking.
+# On Windows without Git Bash/WSL, skip gracefully rather than crash.
+BASH_AVAILABLE=false
+if command -v bash >/dev/null 2>&1 && bash -c 'echo ok' >/dev/null 2>&1; then
+    BASH_AVAILABLE=true
 fi
-export FORGE_INTERNAL_PATTERNS
-echo "=== Running: verify-host-headers.sh ==="
-$FORGE_HOME/scripts/verify-host-headers.sh "$CHANGED_FILES_TMP" "$REPO_ROOT" || true
 
-# 4. SOPS deploy chain (ENV_MAPPING consistency, deploy path drift, hotfix sync)
-echo "=== Running: verify-sops-chain.sh ==="
-$FORGE_HOME/scripts/verify-sops-chain.sh "$DIFF_TMP" "$CHANGED_FILES_TMP" "$REPO_ROOT" || true
+if [ "$BASH_AVAILABLE" = "true" ]; then
+    # Write changed files and diff to temp files for script consumption.
+    # Use PID-based names instead of mktemp for cross-platform compatibility.
+    CHANGED_FILES_TMP="/tmp/forge-review-changed-$$.tmp"
+    DIFF_TMP="/tmp/forge-review-diff-$$.tmp"
+    echo "$CHANGED_FILES" > "$CHANGED_FILES_TMP"
+    gh pr diff $ARGUMENTS > "$DIFF_TMP"
 
-# Cleanup temp files
-rm -f "$CHANGED_FILES_TMP" "$DIFF_TMP"
+    # --- Script-based checks (reusable, testable, deterministic) ---
+    # Each script exits 0 (pass), 1 (blocking findings), or 2 (warnings only).
+    # Output is structured: "BLOCKING: ...", "WARNING: ...", "OK: ..." per line.
+
+    # 1. Route/router/middleware/shared-module/component registration
+    echo "=== Running: verify-route-registration.sh ==="
+    bash "$FORGE_HOME/scripts/verify-route-registration.sh" "$CHANGED_FILES_TMP" "$REPO_ROOT" || true
+
+    # 2. Environment variable wiring (checks .env.example, docker-compose, env_validation, SOPS mapping)
+    echo "=== Running: verify-env-vars.sh ==="
+    bash "$FORGE_HOME/scripts/verify-env-vars.sh" "$DIFF_TMP" "$REPO_ROOT" || true
+
+    # 3. Host headers in shell scripts + client-side proxy bypass check
+    # Read project-specific internal service patterns from forge.yaml (if present)
+    FORGE_INTERNAL_PATTERNS=""
+    if [ -f "$REPO_ROOT/forge.yaml" ]; then
+        FORGE_INTERNAL_PATTERNS=$(grep -A 999 'internal_service_patterns:' "$REPO_ROOT/forge.yaml" \
+            | grep -E '^\s*-\s+' \
+            | sed 's/^\s*-\s*//' \
+            | tr -d '"'"'" \
+            | awk 'NR>1{printf "|"}{printf $0}END{print ""}')
+    fi
+    export FORGE_INTERNAL_PATTERNS
+    echo "=== Running: verify-host-headers.sh ==="
+    bash "$FORGE_HOME/scripts/verify-host-headers.sh" "$CHANGED_FILES_TMP" "$REPO_ROOT" || true
+
+    # 4. SOPS deploy chain (ENV_MAPPING consistency, deploy path drift, hotfix sync)
+    echo "=== Running: verify-sops-chain.sh ==="
+    bash "$FORGE_HOME/scripts/verify-sops-chain.sh" "$DIFF_TMP" "$CHANGED_FILES_TMP" "$REPO_ROOT" || true
+
+    # Cleanup temp files
+    rm -f "$CHANGED_FILES_TMP" "$DIFF_TMP"
+else
+    echo "=== Phase 2.5B: verify-*.sh skipped — bash not available on this platform ==="
+    echo "    The verify-*.sh scripts require bash (POSIX shell)."
+    echo "    Install Git Bash (Windows) or WSL to enable these checks."
+    echo "    The review continues — integration assumptions should be verified manually."
+fi
 
 # --- Inline checks (not yet extracted to scripts) ---
 
@@ -504,7 +526,9 @@ done
 # diff. Pre-existing drift is the most dangerous kind — it lurks until
 # staging→main and then blocks the deploy.
 WORKFLOW_FILES=$(echo "$CHANGED_FILES" | grep -E "^\.github/workflows/.*\.yml$" || true)
-IS_STAGING_PR=$([[ "$HEAD" == "staging" && "$BASE" == "main" ]] && echo "true" || echo "false")
+# Use POSIX-portable conditional (avoid bash-only [[ ]])
+IS_STAGING_PR="false"
+if [ "$HEAD" = "staging" ] && [ "$BASE" = "main" ]; then IS_STAGING_PR="true"; fi
 
 if [ -n "$WORKFLOW_FILES" ] || [ "$IS_STAGING_PR" = "true" ]; then
     echo "=== Sibling Workflow Drift Check (MANDATORY for staging→main) ==="
@@ -523,9 +547,10 @@ if [ -n "$WORKFLOW_FILES" ] || [ "$IS_STAGING_PR" = "true" ]; then
 
             echo "--- Comparing '$JOB' job between ci.yml and deploy-production.yml ---"
 
-            # Extract env vars from ALL steps in the job (not just pytest)
-            CI_ENVS=$(sed -n "/^  ${JOB}:/,/^  [a-z]/p" "$CI_WF" 2>/dev/null | grep -E "PYTHONPATH|DATABASE_URL|REDIS_URL|TESTING" | sed 's/^ *//' | sort)
-            DEPLOY_ENVS=$(sed -n "/^  ${JOB}:/,/^  [a-z]/p" "$DEPLOY_WF" 2>/dev/null | grep -E "PYTHONPATH|DATABASE_URL|REDIS_URL|TESTING" | sed 's/^ *//' | sort)
+            # Extract env vars from ALL steps in the job (not just pytest).
+            # awk range extraction replaces sed -n "/pat/,/pat/p" for portability.
+            CI_ENVS=$(awk "/^  ${JOB}:/,/^  [a-z]/" "$CI_WF" 2>/dev/null | grep -E "PYTHONPATH|DATABASE_URL|REDIS_URL|TESTING" | sed 's/^ *//' | sort)
+            DEPLOY_ENVS=$(awk "/^  ${JOB}:/,/^  [a-z]/" "$DEPLOY_WF" 2>/dev/null | grep -E "PYTHONPATH|DATABASE_URL|REDIS_URL|TESTING" | sed 's/^ *//' | sort)
 
             # Check for PYTHONPATH specifically — the exact var that caused the #11356 failure
             CI_PYPATH=$(echo "$CI_ENVS" | grep "PYTHONPATH" || echo "(not set)")
@@ -538,16 +563,16 @@ if [ -n "$WORKFLOW_FILES" ] || [ "$IS_STAGING_PR" = "true" ]; then
             fi
 
             # Check for dependency installation steps that exist in one but not the other
-            CI_INSTALLS=$(sed -n "/^  ${JOB}:/,/^  [a-z]/p" "$CI_WF" 2>/dev/null | grep -c "poetry install\|pip install\|npm install" || echo 0)
-            DEPLOY_INSTALLS=$(sed -n "/^  ${JOB}:/,/^  [a-z]/p" "$DEPLOY_WF" 2>/dev/null | grep -c "poetry install\|pip install\|npm install" || echo 0)
+            CI_INSTALLS=$(awk "/^  ${JOB}:/,/^  [a-z]/" "$CI_WF" 2>/dev/null | grep -c "poetry install\|pip install\|npm install" || echo 0)
+            DEPLOY_INSTALLS=$(awk "/^  ${JOB}:/,/^  [a-z]/" "$DEPLOY_WF" 2>/dev/null | grep -c "poetry install\|pip install\|npm install" || echo 0)
             if [ "$CI_INSTALLS" != "$DEPLOY_INSTALLS" ]; then
                 echo "  WARNING: Different number of dependency install steps in '$JOB' — ci.yml has $CI_INSTALLS, deploy has $DEPLOY_INSTALLS"
                 echo "  ACTION: Read both files and verify all dependencies needed by tests are installed in both workflows."
             fi
 
             # Check step names — if CI has a step that deploy doesn't, flag it
-            CI_STEPS=$(sed -n "/^  ${JOB}:/,/^  [a-z]/p" "$CI_WF" 2>/dev/null | grep "- name:" | sed 's/.*- name: //' | sort)
-            DEPLOY_STEPS=$(sed -n "/^  ${JOB}:/,/^  [a-z]/p" "$DEPLOY_WF" 2>/dev/null | grep "- name:" | sed 's/.*- name: //' | sort)
+            CI_STEPS=$(awk "/^  ${JOB}:/,/^  [a-z]/" "$CI_WF" 2>/dev/null | grep "- name:" | sed 's/.*- name: //' | sort)
+            DEPLOY_STEPS=$(awk "/^  ${JOB}:/,/^  [a-z]/" "$DEPLOY_WF" 2>/dev/null | grep "- name:" | sed 's/.*- name: //' | sort)
             MISSING_IN_DEPLOY=$(comm -23 <(echo "$CI_STEPS") <(echo "$DEPLOY_STEPS") 2>/dev/null || true)
             if [ -n "$MISSING_IN_DEPLOY" ]; then
                 echo "  WARNING: Steps in ci.yml '$JOB' missing from deploy-production.yml:"
@@ -676,7 +701,10 @@ gh api repos/{owner}/{repo}/issues/$ARGUMENTS/comments --jq '.[-10:] | .[].body[
 **Skip if**: Only 1 agent OR total findings ≤ 3.
 
 ```bash
-ALL_FINDINGS=$(gh api "repos/${REPO}/issues/${PR_NUMBER}/comments" --jq '.[].body' | grep -oP '(?<=<!-- FINDING:).*?(?= -->)')
+# Extract structured finding IDs from FINDING HTML comments.
+# Uses jq's scan() (POSIX-portable, no grep -oP required).
+ALL_FINDINGS=$(gh api "repos/${REPO}/issues/${PR_NUMBER}/comments" \
+    --jq '[.[].body | scan("<!-- FINDING:([^>]+) -->") | .[0]] | join("\n")')
 AGENT_COUNT=$(gh api "repos/${REPO}/issues/${PR_NUMBER}/comments" --jq '[.[] | select(.body | test("REVIEW-FINDINGS-START"))] | length')
 FINDING_COUNT=$(echo "$ALL_FINDINGS" | grep -c '.' || echo 0)
 ```
@@ -703,9 +731,13 @@ REPO=$(gh repo view --json nameWithOwner --jq '.nameWithOwner')
 HAS_SYNTHESIS=$(gh api "repos/${REPO}/issues/${PR_NUMBER}/comments" --jq '.[].body' | grep -c 'REVIEW-FINDINGS-SYNTHESIZED-START' || echo 0)
 
 if [ "$HAS_SYNTHESIS" -gt 0 ]; then
-    FINDINGS=$(gh api "repos/${REPO}/issues/${PR_NUMBER}/comments" --jq '.[] | select(.body | test("REVIEW-FINDINGS-SYNTHESIZED-START")) | .body' | grep -oP '(?<=<!-- FINDING:).*?(?= -->)')
+    # Extract finding IDs from synthesized block using jq scan() — no grep -oP needed
+    FINDINGS=$(gh api "repos/${REPO}/issues/${PR_NUMBER}/comments" \
+        --jq '[.[] | select(.body | test("REVIEW-FINDINGS-SYNTHESIZED-START")) | .body | scan("<!-- FINDING:([^>]+) -->") | .[0]] | join("\n")')
 else
-    FINDINGS=$(gh api "repos/${REPO}/issues/${PR_NUMBER}/comments" --jq '.[].body' | grep -oP '(?<=<!-- FINDING:).*?(?= -->)')
+    # Extract finding IDs from all agent comments using jq scan() — portable, no grep -oP
+    FINDINGS=$(gh api "repos/${REPO}/issues/${PR_NUMBER}/comments" \
+        --jq '[.[].body | scan("<!-- FINDING:([^>]+) -->") | .[0]] | join("\n")')
 fi
 ```
 
@@ -1032,7 +1064,8 @@ fi
 
 ```bash
 CURRENT_SHA=$(gh pr view $ARGUMENTS --json headRefOid --jq '.headRefOid')
-REVIEW_IS_STALE=$([[ "$CURRENT_SHA" != "$REVIEW_SHA" ]] && echo "true" || echo "false")
+REVIEW_IS_STALE="false"
+if [ "$CURRENT_SHA" != "$REVIEW_SHA" ]; then REVIEW_IS_STALE="true"; fi
 ```
 
 ```bash
