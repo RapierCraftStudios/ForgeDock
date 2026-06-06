@@ -258,6 +258,8 @@ Files/areas to examine:
 
 ### 3D: Pipeline Issue Template (machine-callable reference)
 
+> **Canonical Standard**: This template is the single source of truth for all automated issue creation in the ForgeDock pipeline. `milestone.md`, `orchestrate.md`, and `work-on/decompose.md` MUST use this template structure when creating issues programmatically. A shared convention is only useful if all create-paths enforce it — divergent inline templates in each command file cause acceptance-criteria drift and coverage gaps. See `work-on/decompose.md` Phase D0 for the investigation-gate pattern that enforces this standard at decomposition time. <!-- Added: forge#293 -->
+
 When pipeline agents create issues programmatically (not via user input), use this canonical template. All automated `gh issue create` calls across Forge commands MUST include these mandatory sections. Domain-specific sections are additive — preserve them, but wrap them with this structure.
 
 ```markdown
