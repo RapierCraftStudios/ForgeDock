@@ -768,7 +768,7 @@ for FINDING_NUM in {numbers}; do
   # PROJECT_ID = forge.yaml → project_board.project_id
   # STATUS_FIELD_ID = forge.yaml → project_board.field_ids.status
   # LANE_FIELD_ID = forge.yaml → project_board.field_ids.lane
-  # REVIEW_FINDING_OPTION_ID = forge.yaml → project_board.option_ids.status.in_review
+  # REVIEW_FINDING_OPTION_ID = forge.yaml → project_board.option_ids.workflow.in_review
   ITEM_ID=$(gh project item-add ${PROJECT_NUMBER} --owner ${OWNER} --url "https://github.com/${GH_REPO}/issues/${FINDING_NUM}" --format json --jq '.id' 2>/dev/null)
   [ -n "$ITEM_ID" ] && {
     [ -n "$STATUS_FIELD_ID" ] && gh project item-edit --project-id ${PROJECT_ID} --id "$ITEM_ID" --field-id ${STATUS_FIELD_ID} --single-select-option-id ${REVIEW_FINDING_OPTION_ID} 2>/dev/null || true
