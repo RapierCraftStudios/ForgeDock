@@ -1854,6 +1854,8 @@ async function init() {
     });
     console.log(`  ${GREEN}Created${RESET}: forge.yaml`);
     console.log("");
+    await injectClaudeMd(cwd);
+    console.log("");
     _printNextSteps({ remoteDetected });
     await validate(outputPath);
     return;
@@ -2152,9 +2154,177 @@ async function init() {
         );
       }
       console.log("");
+      await injectClaudeMd(cwd);
+      console.log("");
       _printNextSteps({ remoteDetected: ownerInput !== "your-github-org" });
       await validate(outputPath);
     }
+  }
+}
+
+// ---------------------------------------------------------------------------
+// CLAUDE.md Integration — injectClaudeMd()
+// ---------------------------------------------------------------------------
+
+const CLAUDE_BLOCK_BEGIN = "<!-- BEGIN FORGEDOCK -->";
+const CLAUDE_BLOCK_END = "<!-- END FORGEDOCK -->";
+
+/**
+ * Extract the `description:` value from a command file's YAML frontmatter.
+ * Returns null if no frontmatter or no description is found.
+ *
+ * @param {string} content - Full file content
+ * @returns {string|null}
+ */
+function _extractFrontmatterDescription(content) {
+  // Match YAML frontmatter block: starts with ---, ends with ---
+  const fmMatch = content.match(/^---\r?\n([\s\S]*?)\r?\n---/);
+  if (!fmMatch) return null;
+  const fm = fmMatch[1];
+  // Extract description: value (may span the rest of the line)
+  const descMatch = fm.match(/^description:\s*(.+)$/m);
+  if (!descMatch) return null;
+  return descMatch[1].trim();
+}
+
+/**
+ * Build the managed ForgeDock block content (between markers, not including them).
+ * Reads all commands/*.md files, extracts frontmatter descriptions, and generates
+ * a concise command index.
+ *
+ * @returns {Promise<string>} Block content
+ */
+async function _buildForgeDockBlock() {
+  const files = await findMarkdownFiles(COMMANDS_DIR);
+
+  /** @type {Array<{name: string, description: string}>} */
+  const commands = [];
+
+  for (const file of files) {
+    let content = "";
+    try {
+      content = readFileSync(file, "utf-8");
+    } catch {
+      continue; // skip unreadable files
+    }
+    const description = _extractFrontmatterDescription(content);
+    if (!description) continue;
+
+    // Derive display name: relative path from COMMANDS_DIR, remove .md extension
+    const rel = relative(COMMANDS_DIR, file).replace(/\\/g, "/").replace(/\.md$/, "");
+    commands.push({ name: rel, description });
+  }
+
+  // Sort: top-level commands first, then sub-commands alphabetically
+  commands.sort((a, b) => {
+    const aDepth = a.name.split("/").length;
+    const bDepth = b.name.split("/").length;
+    if (aDepth !== bDepth) return aDepth - bDepth;
+    return a.name.localeCompare(b.name);
+  });
+
+  const indexLines = commands
+    .map(({ name, description }) => `- \`/${name}\` — ${description}`)
+    .join("\n");
+
+  return `## ForgeDock — Autonomous Development Pipeline
+
+This project is driven by **ForgeDock**. GitHub issues are the knowledge graph.
+Core loop: **issue in → PR out** (PRs target \`staging\` fast-lane or \`milestone/{slug}\`).
+
+### When to Use What
+
+- \`/issue\` — file a pipeline-ready issue
+- \`/work-on N\` — full investigate→build→review→merge for issue N
+- \`/milestone\` + \`/orchestrate\` — plan and parallelize milestone work
+- \`/review-pr\` — review a PR with domain agents
+- \`/quality-gate\` — pre-commit quality check
+- \`/validate\` — validate forge.yaml configuration
+
+### Command Index
+
+${indexLines}
+
+### Conventions
+
+- Fast-lane PRs target \`staging\`; milestone PRs target \`milestone/{slug}\`
+- Review findings become separate issues (not merge blockers)
+- \`forge.yaml\` is the project config — see \`docs/CONFIG.md\`
+- Re-generate this block: \`npx forgedock integrate\``;
+}
+
+/**
+ * Idempotently inject (or update) a managed ForgeDock usage block into a file.
+ * The block is bounded by BEGIN FORGEDOCK / END FORGEDOCK HTML comment markers.
+ * Content outside the markers is never modified.
+ *
+ * @param {string} filePath - Absolute path to the target file (CLAUDE.md or AGENTS.md)
+ * @param {string} blockContent - Content to place between the markers
+ * @param {boolean} createIfMissing - Create the file if it does not exist
+ * @returns {'created'|'updated'|'skipped'} Result status
+ */
+function _injectManagedBlock(filePath, blockContent, createIfMissing) {
+  const managed = `${CLAUDE_BLOCK_BEGIN}\n${blockContent}\n${CLAUDE_BLOCK_END}`;
+
+  if (!existsSync(filePath)) {
+    if (!createIfMissing) return "skipped";
+    writeFileSync(filePath, `${managed}\n`, "utf-8");
+    return "created";
+  }
+
+  let existing = readFileSync(filePath, "utf-8");
+
+  if (existing.includes(CLAUDE_BLOCK_BEGIN)) {
+    // Replace existing block — use non-greedy match to avoid eating surrounding content
+    const escaped_begin = CLAUDE_BLOCK_BEGIN.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    const escaped_end = CLAUDE_BLOCK_END.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    const blockRegex = new RegExp(
+      `${escaped_begin}[\\s\\S]*?${escaped_end}`,
+      "g",
+    );
+    existing = existing.replace(blockRegex, managed);
+    writeFileSync(filePath, existing, "utf-8");
+    return "updated";
+  }
+
+  // Append block to existing content, separated by a blank line
+  const separator = existing.endsWith("\n") ? "\n" : "\n\n";
+  writeFileSync(filePath, `${existing}${separator}${managed}\n`, "utf-8");
+  return "updated";
+}
+
+/**
+ * Inject or update the managed ForgeDock block into the project CLAUDE.md.
+ * Also mirrors the block into AGENTS.md if that file already exists.
+ * Creates CLAUDE.md if absent; never creates AGENTS.md.
+ *
+ * @param {string} cwd - Project root directory
+ * @returns {Promise<void>}
+ */
+async function injectClaudeMd(cwd) {
+  const claudePath = join(cwd, "CLAUDE.md");
+  const agentsPath = join(cwd, "AGENTS.md");
+
+  let blockContent;
+  try {
+    blockContent = await _buildForgeDockBlock();
+  } catch (err) {
+    console.log(
+      `  ${YELLOW}!${RESET}  Could not generate command index — skipping CLAUDE.md update (${err.message})`,
+    );
+    return;
+  }
+
+  const claudeResult = _injectManagedBlock(claudePath, blockContent, true);
+  if (claudeResult === "created") {
+    console.log(`  ${GREEN}✔${RESET}  CLAUDE.md created with ForgeDock integration block`);
+  } else {
+    console.log(`  ${GREEN}✔${RESET}  CLAUDE.md updated — ForgeDock block refreshed`);
+  }
+
+  if (existsSync(agentsPath)) {
+    _injectManagedBlock(agentsPath, blockContent, false);
+    console.log(`  ${GREEN}✔${RESET}  AGENTS.md mirrored`);
   }
 }
 
@@ -3354,6 +3524,9 @@ function help() {
   console.log(
     `  ${CYAN}npx forgedock labels setup --repo owner/repo${RESET}  Target a specific repo`,
   );
+  console.log(
+    `  ${CYAN}npx forgedock integrate${RESET}  Inject/update ForgeDock usage block in project CLAUDE.md`,
+  );
   console.log(`  ${CYAN}npx forgedock help${RESET}       Show this help`);
   console.log("");
 }
@@ -3780,6 +3953,9 @@ if (!command) {
       }
       break;
     }
+    case "integrate":
+      await injectClaudeMd(process.cwd());
+      break;
     case "help":
     case "--help":
     case "-h":
