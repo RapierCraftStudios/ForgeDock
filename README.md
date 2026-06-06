@@ -225,6 +225,8 @@ npx forgedock
 
 This symlinks all pipeline commands into your Claude Code environment (`~/.claude/commands/`).
 
+> **Note:** If you run `npx forgedock` from inside the ForgeDock repository, it uses the local working-tree binary rather than the published package. Run from your own project directory, or use `npx forgedock@latest` to pin to the published release.
+
 **Step 2: Generate config**
 
 ```bash
