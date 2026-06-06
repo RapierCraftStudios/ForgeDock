@@ -112,12 +112,29 @@ If conflicts cannot be auto-resolved, report to user and STOP.
 
 ### Step 2C: Verify the revert compiles
 
-```bash
-# Python files
-poetry -C services/api run python -m py_compile {reverted_python_files} 2>&1
+Read `forge.yaml → verification.commands` for project-specific tool commands:
 
-# TypeScript files (if any)
-cd web && npx tsc --noEmit 2>&1 | head -20
+```bash
+# Python compile check (always runs — no config needed)
+for f in {reverted_python_files}; do
+    python3 -m py_compile "$f" 2>&1
+done
+
+# Python format check (config-driven)
+PYTHON_FORMAT=$(grep -A 20 'commands:' forge.yaml 2>/dev/null | grep -A 5 'python:' | grep 'format:' | head -1 | sed "s/.*format: *['\"]//;s/['\"].*//")
+if [ -n "$PYTHON_FORMAT" ]; then
+    eval "$PYTHON_FORMAT" 2>&1 | head -20
+else
+    echo "SKIPPED — python.format not configured in verification.commands"
+fi
+
+# TypeScript typecheck (config-driven)
+TS_TYPECHECK=$(grep -A 20 'commands:' forge.yaml 2>/dev/null | grep -A 5 'typescript:' | grep 'typecheck:' | head -1 | sed "s/.*typecheck: *['\"]//;s/['\"].*//")
+if [ -n "$TS_TYPECHECK" ]; then
+    eval "$TS_TYPECHECK" 2>&1 | head -20
+else
+    echo "SKIPPED — typescript.typecheck not configured in verification.commands"
+fi
 ```
 
 ---

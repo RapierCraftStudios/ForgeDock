@@ -119,9 +119,10 @@ Your job:
    - Does it remove functionality other code depends on?
    - Are there syntax errors?
    - Does it change DB schema without a migration?
-4. Run compile checks:
-   - Python: python -m py_compile on changed .py files
-   - TypeScript: npx tsc --noEmit (if web/ files changed)
+4. Run compile checks (read forge.yaml → verification.commands for tool commands):
+   - Python: always run python -m py_compile on changed .py files (no config needed)
+   - Python format/lint: run verification.commands.python.format and .lint if configured; log "SKIPPED — not configured in verification.commands" if absent
+   - TypeScript: run verification.commands.typescript.typecheck if configured; log "SKIPPED — not configured in verification.commands" if absent
 5. Check if the fix is scoped tightly (minimal changes for the incident)
 
 Output:

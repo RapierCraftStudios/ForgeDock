@@ -747,25 +747,50 @@ if iteration == max_iterations AND not PASS:
 
 ### 3H: Format and verify
 
+All tool commands are read from `forge.yaml → verification.commands`. When a key is absent, the step logs `SKIPPED — not configured in verification.commands` and continues rather than silently passing.
+
 **Python**:
 ```bash
 cd {WORKTREE_PATH}
-black {PYTHON_FILES} && isort {PYTHON_FILES} && python -m py_compile {PYTHON_FILES}
+
+PYTHON_FORMAT=$(grep -A 20 'commands:' forge.yaml 2>/dev/null | grep -A 5 'python:' | grep 'format:' | head -1 | sed "s/.*format: *['\"]//;s/['\"].*//")
+if [ -n "$PYTHON_FORMAT" ]; then
+    eval "$PYTHON_FORMAT" 2>&1
+else
+    echo "SKIPPED — python.format not configured in verification.commands"
+fi
+
+# Compile check always runs (no config needed — catches syntax errors)
+python -m py_compile {PYTHON_FILES}
 ```
 `py_compile` failures are BLOCKING.
 
-**TypeScript (primary repo — has tsconfig.json)**:
+**TypeScript**:
 ```bash
 cd {WORKTREE_PATH}
-prettier --write {TS_FILES} && tsc --noEmit
-```
-`tsc --noEmit` failures are BLOCKING.
 
-**TypeScript (satellite repos)**:
-```bash
-cd {WORKTREE_PATH}
-npm run build && prettier --write {TS_FILES}
+TS_FORMAT=$(grep -A 20 'commands:' forge.yaml 2>/dev/null | grep -A 5 'typescript:' | grep 'format:' | head -1 | sed "s/.*format: *['\"]//;s/['\"].*//")
+TS_TYPECHECK=$(grep -A 20 'commands:' forge.yaml 2>/dev/null | grep -A 5 'typescript:' | grep 'typecheck:' | head -1 | sed "s/.*typecheck: *['\"]//;s/['\"].*//")
+TS_BUILD=$(grep -A 20 'commands:' forge.yaml 2>/dev/null | grep -A 5 'typescript:' | grep 'build:' | head -1 | sed "s/.*build: *['\"]//;s/['\"].*//")
+
+if [ -n "$TS_FORMAT" ]; then
+    eval "$TS_FORMAT" 2>&1
+else
+    echo "SKIPPED — typescript.format not configured in verification.commands"
+fi
+
+if [ -n "$TS_TYPECHECK" ]; then
+    eval "$TS_TYPECHECK" 2>&1
+    TS_EXIT=$?
+elif [ -n "$TS_BUILD" ]; then
+    eval "$TS_BUILD" 2>&1 | tail -30
+    TS_EXIT=$?
+else
+    echo "SKIPPED — typescript.typecheck and typescript.build not configured in verification.commands"
+    TS_EXIT=0
+fi
 ```
+Typecheck or build failures are BLOCKING.
 
 ### 3I: Frontend proxy wiring check (MANDATORY)
 

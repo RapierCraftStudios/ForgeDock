@@ -805,7 +805,14 @@ They remain open in GitHub — they will be picked up by future `/orchestrate` o
 
 **When to run**: After each wave completes, IF the batch targets a milestone branch AND any `.tsx`/`.ts` files were changed by agents in the completed wave.
 
+All tool commands are read from `forge.yaml → verification.commands`; each step logs `SKIPPED — not configured` when the corresponding key is absent rather than silently passing.
+
 ```bash
+# Read toolchain commands from forge.yaml
+TS_TYPECHECK=$(grep -A 20 'commands:' forge.yaml 2>/dev/null | grep -A 5 'typescript:' | grep 'typecheck:' | head -1 | sed "s/.*typecheck: *['\"]//;s/['\"].*//")
+TS_BUILD=$(grep -A 20 'commands:' forge.yaml 2>/dev/null | grep -A 5 'typescript:' | grep 'build:' | head -1 | sed "s/.*build: *['\"]//;s/['\"].*//")
+PYTHON_FORMAT=$(grep -A 20 'commands:' forge.yaml 2>/dev/null | grep -A 5 'python:' | grep 'format:' | head -1 | sed "s/.*format: *['\"]//;s/['\"].*//")
+
 # Check if this is a milestone batch with TypeScript changes
 MILESTONE_BRANCH="milestone/{milestone_slug}"
 TS_CHANGED=$(git diff origin/{DEFAULT_BRANCH}...origin/${MILESTONE_BRANCH} --name-only | grep -E '\.(tsx?|jsx?)$' | head -1)
@@ -815,20 +822,31 @@ if [ -n "$TS_CHANGED" ]; then
     cd {REPO_PATH}
     git fetch origin ${MILESTONE_BRANCH}
     git checkout origin/${MILESTONE_BRANCH} --detach 2>/dev/null
-    cd web && npx tsc --noEmit 2>&1 | head -30
-    TSC_EXIT=$?
-    if [ "$TSC_EXIT" -eq 0 ]; then
-        npx next build 2>&1 | tail -30
-        BUILD_EXIT=$?
+
+    if [ -n "$TS_TYPECHECK" ]; then
+        eval "$TS_TYPECHECK" 2>&1 | head -30
+        TSC_EXIT=$?
+    else
+        echo "SKIPPED — typescript.typecheck not configured in verification.commands"
+        TSC_EXIT=0
     fi
-    cd .. && git checkout - 2>/dev/null
+
+    if [ "$TSC_EXIT" -eq 0 ] && [ -n "$TS_BUILD" ]; then
+        eval "$TS_BUILD" 2>&1 | tail -30
+        BUILD_EXIT=$?
+    elif [ -z "$TS_BUILD" ]; then
+        echo "SKIPPED — typescript.build not configured in verification.commands"
+        BUILD_EXIT=0
+    fi
+
+    git checkout - 2>/dev/null
 
     if [ "$TSC_EXIT" -ne 0 ]; then
         echo "BLOCKING: TypeScript errors on ${MILESTONE_BRANCH} after Wave {N}."
         echo "Fix type errors before starting next wave."
     elif [ "${BUILD_EXIT:-0}" -ne 0 ]; then
-        echo "BLOCKING: next build failed on ${MILESTONE_BRANCH} after Wave {N}."
-        echo "SSG prerender or build errors — fix before starting next wave."
+        echo "BLOCKING: build failed on ${MILESTONE_BRANCH} after Wave {N}."
+        echo "Build/prerender errors — fix before starting next wave."
     fi
 fi
 
@@ -838,20 +856,25 @@ if [ -n "$PY_CHANGED" ]; then
     echo "=== Integration Build Gate (Python): Wave {N} ==="
     cd {REPO_PATH}
     git checkout origin/${MILESTONE_BRANCH} --detach 2>/dev/null
-    cd services/api && poetry run black --check app/ 2>&1 | tail -10
-    BLACK_EXIT=$?
-    poetry run isort --check app/ 2>&1 | tail -10
-    ISORT_EXIT=$?
-    cd ../.. && git checkout - 2>/dev/null
 
-    if [ "$BLACK_EXIT" -ne 0 ] || [ "$ISORT_EXIT" -ne 0 ]; then
+    if [ -n "$PYTHON_FORMAT" ]; then
+        eval "$PYTHON_FORMAT" 2>&1 | tail -10
+        FORMAT_EXIT=$?
+    else
+        echo "SKIPPED — python.format not configured in verification.commands"
+        FORMAT_EXIT=0
+    fi
+
+    git checkout - 2>/dev/null
+
+    if [ "$FORMAT_EXIT" -ne 0 ]; then
         echo "WARNING: Python formatting issues on ${MILESTONE_BRANCH} after Wave {N}."
         echo "Not blocking but should be fixed before milestone→staging."
     fi
 fi
 ```
 
-**If the gate fails**: Report the errors to the user. Do NOT proceed to the next wave. The accumulated milestone branch has integration errors that will only get worse with more PRs on top. `next build` failures are BLOCKING (not just `tsc`) — SSG prerender crashes are invisible to type checking.
+**If the gate fails**: Report the errors to the user. Do NOT proceed to the next wave. The accumulated milestone branch has integration errors that will only get worse with more PRs on top. Build failures are BLOCKING — SSG/prerender crashes are invisible to typecheck alone — configure `typescript.build` in `verification.commands` to catch them.
 
 ### Step 4E: Advance to next wave
 
