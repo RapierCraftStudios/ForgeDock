@@ -1725,13 +1725,15 @@ async function init() {
 
 /**
  * Sanitize a string value for safe insertion into a YAML double-quoted scalar.
- * Strips double-quotes and newlines to prevent YAML injection.
+ * Escapes backslashes (so a trailing \ does not corrupt the closing quote),
+ * then strips double-quotes and newlines to prevent YAML injection.
+ * Backslash escaping MUST come first — before any other replacement.
  *
  * @param {string} value
  * @returns {string}
  */
 function _sanitizeYamlValue(value) {
-  return String(value).replace(/"/g, "").replace(/[\r\n]/g, " ").trim();
+  return String(value).replace(/\\/g, "\\\\").replace(/"/g, "").replace(/[\r\n]/g, " ").trim();
 }
 
 /**
