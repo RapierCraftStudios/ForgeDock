@@ -117,33 +117,38 @@ git push origin milestone/{slug}
 
 ### Step 4: Scope decomposition
 
-Use a Task sub-agent to analyze the milestone scope and propose issues:
+**Investigation-gated decomposition** — do NOT skip code reads. The single-pass shallow-planning approach (one agent, whole milestone, no per-issue code reads) produces under-specified issues that ship incomplete. This step mandates per-proposed-issue investigation before any issue body is written. See `work-on/decompose.md` Phase D0 for the reference pattern that enforces this gate. <!-- Added: forge#293 -->
 
-> You are planning the scope for milestone "{TITLE}" on the {PROJECT_NAME} platform.
->
-> **Milestone description**: {DESCRIPTION}
->
-> **Your job**: Break this milestone into concrete, implementable GitHub issues. Each issue should be:
-> - Independently shippable (produces a working PR on its own)
-> - Specific enough for the `/work-on` pipeline to pick up and implement
-> - Ordered by dependencies (if B needs A's API, A comes first)
->
-> **Project ecosystem context** (from `forge.yaml`):
-> - **Primary repo** (`{GH_REPO}`): The main project codebase at `{REPO_PATH}`
-> - **Tech stack**: {review.tech_stack from forge.yaml, or read CLAUDE.md for project context}
-> - **Satellite repos**: Read from `forge.yaml → repos.satellites` (each has a prefix and repo)
->
-> Check the existing codebase at `{REPO_PATH}` to understand current architecture before proposing changes.
->
-> **Output format**: Numbered list of proposed issues, each with:
-> - **Title**: Actionable, specific
-> - **Repo**: Which repo this issue belongs to (default or satellite prefix from forge.yaml)
-> - **Type**: `feature`, `bug`, `refactor`, `infra`
-> - **Priority**: P1-P3
-> - **Size**: S (1-2 files), M (3-5 files), L (6+ files)
-> - **Dependencies**: Which other issues must be done first (by number)
-> - **Scope**: Key files/modules affected
-> - **Acceptance criteria**: 2-3 testable requirements
+**4A: First pass — enumerate proposed issues (no code reads yet)**
+
+Analyze the milestone description and produce a preliminary list of proposed issues. At this stage, only the title, type, and rough dependency order are needed. Do NOT write issue bodies yet.
+
+**4B: Per-issue investigation (MANDATORY before writing any issue body)**
+
+For each proposed issue in the preliminary list, MUST read the actual code before writing the issue body:
+
+1. **Identify affected files**: Read the files the issue will touch. Start with the files named in the milestone description, then expand to callers and related modules.
+2. **Enumerate all call sites**: For coverage/refactor tasks, grep for every occurrence of the pattern being changed. Do NOT estimate — enumerate. Example: `grep -rn 'poetry run\|npx ' commands/ --include='*.md' | wc -l` to count call sites before writing a "make X config-driven" issue.
+3. **Write exhaustive acceptance criteria**: For coverage/refactor tasks, acceptance criteria MUST be falsifiable. A `grep`/absence assertion qualifies (e.g., `` `grep -rn 'hardcoded_value' commands/` returns no matches ``). The number of criteria must match the scope — there is no cap. Two criteria for a 14-call-site refactor is not acceptable.
+4. **Identify override/companion files**: If a file needs a change, its companion files (config overrides, prod variants, sibling modules) almost certainly do too. List all of them.
+
+**4C: Output format — per-issue, after code read**
+
+For each proposed issue, after completing the per-issue investigation in Step 4B:
+
+- **Title**: Actionable, specific (conventional commit prefix: `fix:`, `feat:`, `refactor:`)
+- **Repo**: Which repo this issue belongs to (default or satellite prefix from forge.yaml)
+- **Type**: `feature`, `bug`, `refactor`, `infra`
+- **Priority**: P1-P3
+- **Size**: S (1-2 files), M (3-5 files), L (6+ files)
+- **Dependencies**: Which other issues must be done first (by number)
+- **Affected files**: Full list of files enumerated during the Step 4B code read (not estimated)
+- **Acceptance criteria**: Exhaustive and falsifiable. For coverage/refactor tasks: one criterion per affected call site or pattern, written as a grep/absence assertion. No cap on criteria count — the list must be complete enough that a reviewer can verify coverage without reading the implementation.
+
+**Project ecosystem context** (from `forge.yaml`):
+- **Primary repo** (`{GH_REPO}`): The main project codebase at `{REPO_PATH}`
+- **Tech stack**: {review.tech_stack from forge.yaml, or read CLAUDE.md for project context}
+- **Satellite repos**: Read from `forge.yaml → repos.satellites` (each has a prefix and repo)
 
 ### Step 5: Review with user
 
@@ -153,10 +158,14 @@ Present the proposed issues to the user. Ask:
 
 ### Step 6: Create issues and assign to milestone
 
+**Issue body standard**: Use the **Pipeline Issue Template** from `issue.md` Phase 3D as the body structure for every issue created here. Do NOT use a bespoke inline template — the Pipeline Issue Template is the single canonical standard for all automated issue creation across the pipeline. The body content (Problem, Root Cause, Affected Files, Acceptance Criteria, Context, Dependencies) comes from the per-issue investigation in Step 4B. <!-- Added: forge#293 -->
+
 For each approved issue, create it in the **correct repo** based on the scope analysis:
 
 ```bash
 # For default repo issues:
+# Body content derives from the Step 4B per-issue investigation.
+# Structure MUST match the Pipeline Issue Template in issue.md Phase 3D.
 gh issue create {GH_FLAG} \
   --title "{fix|feat|refactor}: {issue_title}" \
   --label "{type},{priority}" \
@@ -164,20 +173,21 @@ gh issue create {GH_FLAG} \
   --body "$(cat <<'BODY_EOF'
 ## Problem
 
-{1-3 sentences: what needs to be built or fixed for this milestone. What's missing or broken.}
+{1-3 sentences: what needs to be built or fixed for this milestone. Specific — derived from Step 4B code read, not milestone description alone.}
 
 ## Root Cause (if known)
 
-{Why this needs to change — architecture gap, missing feature, technical debt. If a new feature: "New capability required for {MILESTONE_TITLE}."}
+{Why this needs to change — architecture gap, missing feature, technical debt. Reference specific file:line where possible. If a new feature: "New capability required for {MILESTONE_TITLE}."}
 
 ## Affected Files
 
-Files that need changes:
+Files that need changes (full list from Step 4B code read — ordered by dependency):
 1. `{filepath}` — {what needs to change}
 2. `{filepath}` — {what needs to change}
 
 ## Acceptance Criteria
 
+{Exhaustive and falsifiable. For coverage/refactor tasks: one criterion per affected call site or pattern, written as a grep/absence assertion. No cap — list must be complete.}
 - [ ] {Specific, testable criterion}
 - [ ] {Specific, testable criterion}
 - [ ] No regression in {related feature}
@@ -195,6 +205,7 @@ BODY_EOF
 
 # For satellite repo issues (MCP, n8n) — create in the satellite repo:
 # Note: GitHub milestones are per-repo, so satellite issues reference the milestone by name only
+# Body structure MUST match the Pipeline Issue Template in issue.md Phase 3D.
 gh issue create -R {SATELLITE_REPO} \
   --title "{fix|feat|refactor}: {issue_title}" \
   --label "{type},{priority}" \
@@ -205,16 +216,17 @@ gh issue create -R {SATELLITE_REPO} \
 
 ## Root Cause (if known)
 
-{Why this needs to change. If a new feature: "New capability required for {MILESTONE_TITLE}."}
+{Why this needs to change. Reference specific file:line where possible. If a new feature: "New capability required for {MILESTONE_TITLE}."}
 
 ## Affected Files
 
-Files that need changes:
+Files that need changes (full list from Step 4B code read):
 1. `{filepath}` — {what needs to change}
 2. `{filepath}` — {what needs to change}
 
 ## Acceptance Criteria
 
+{Exhaustive and falsifiable. No cap — coverage/refactor tasks require one criterion per affected call site.}
 - [ ] {Specific, testable criterion}
 - [ ] {Specific, testable criterion}
 
