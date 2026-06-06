@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 
 import { fileURLToPath } from "url";
-import { dirname, join, relative, resolve } from "path";
+import { basename, dirname, join, relative, resolve } from "path";
 import { mkdir, symlink, copyFile, readlink, lstat, readdir, stat, writeFile, unlink as fsUnlink } from "fs/promises";
 import { existsSync, appendFileSync, chmodSync, readFileSync, writeFileSync, renameSync, unlinkSync } from "fs";
 import { execSync, execFileSync } from "child_process";
@@ -1682,7 +1682,7 @@ async function init() {
         const backupPath = existsSync(baseBak)
           ? join(cwd, `forge.yaml.bak.${new Date().toISOString().replace(/[:.]/g, "-")}`)
           : baseBak;
-        const backupName = backupPath.split("/").pop();
+        const backupName = basename(backupPath);
         renameSync(outputPath, backupPath);
         console.log(`  ${YELLOW}Backed up${RESET}: forge.yaml → ${backupName}`);
       }
