@@ -3,14 +3,49 @@
 import os from "os";
 import { fileURLToPath } from "url";
 import { basename, dirname, isAbsolute, join, relative, resolve } from "path";
-import { mkdir, symlink, copyFile, readlink, lstat, readdir, stat, writeFile, unlink as fsUnlink } from "fs/promises";
-import { existsSync, appendFileSync, chmodSync, readFileSync, writeFileSync, renameSync, unlinkSync } from "fs";
+import {
+  mkdir,
+  symlink,
+  copyFile,
+  readlink,
+  lstat,
+  readdir,
+  stat,
+  writeFile,
+  unlink as fsUnlink,
+} from "fs/promises";
+import {
+  existsSync,
+  appendFileSync,
+  chmodSync,
+  readFileSync,
+  writeFileSync,
+  renameSync,
+  unlinkSync,
+} from "fs";
 import { execSync, execFileSync } from "child_process";
 import { createSign } from "crypto";
 import {
-  BOLD, GREEN, YELLOW, CYAN, RED, RESET,
-  bold, dim, green, yellow, cyan, red,
-  box, stepHeader, select, multiSelect, confirm, input, createProgressBar, spinner,
+  BOLD,
+  GREEN,
+  YELLOW,
+  CYAN,
+  RED,
+  RESET,
+  bold,
+  dim,
+  green,
+  yellow,
+  cyan,
+  red,
+  box,
+  stepHeader,
+  select,
+  multiSelect,
+  confirm,
+  input,
+  createProgressBar,
+  spinner,
 } from "./tui.mjs";
 
 const __filename = fileURLToPath(import.meta.url);
@@ -18,14 +53,10 @@ const __dirname = dirname(__filename);
 const FORGE_HOME = dirname(__dirname);
 const COMMANDS_DIR = join(FORGE_HOME, "commands");
 
-if (!process.env.HOME) {
-  console.error(
-    "Error: HOME environment variable is not set. Cannot determine install location.",
-  );
-  process.exit(1);
-}
+// Resolve home directory cross-platform: HOME (POSIX), USERPROFILE (Windows), os.homedir() fallback.
+const HOME = process.env.HOME || process.env.USERPROFILE || os.homedir();
 
-const TARGET_DIR = join(process.env.HOME, ".claude", "commands");
+const TARGET_DIR = join(HOME, ".claude", "commands");
 
 const args = process.argv.slice(2);
 const command = args[0];
@@ -37,7 +68,9 @@ const forceYes = args.includes("--yes") || args.includes("-y");
 
 function getVersion() {
   try {
-    const pkg = JSON.parse(readFileSync(join(FORGE_HOME, "package.json"), "utf-8"));
+    const pkg = JSON.parse(
+      readFileSync(join(FORGE_HOME, "package.json"), "utf-8"),
+    );
     return pkg.version || "0.0.0";
   } catch {
     return "0.0.0";
@@ -258,7 +291,11 @@ class StepOrchestrator {
       if (process.stdout.isTTY) process.stdout.write("\x1b[?25h");
       // Restore terminal to cooked mode in case a select/multiSelect prompt was active
       if (process.stdin.isTTY) {
-        try { process.stdin.setRawMode(false); } catch { /* ignore */ }
+        try {
+          process.stdin.setRawMode(false);
+        } catch {
+          /* ignore */
+        }
       }
       process.exit(130);
     };
@@ -379,7 +416,7 @@ function checkPrerequisites() {
   } catch {
     issues.push(
       `${RED}✗${RESET} GitHub CLI (gh) is not installed.\n` +
-      `    Install: ${CYAN}https://cli.github.com${RESET}`
+        `    Install: ${CYAN}https://cli.github.com${RESET}`,
     );
   }
 
@@ -390,7 +427,7 @@ function checkPrerequisites() {
     } catch {
       issues.push(
         `${RED}✗${RESET} GitHub CLI is not authenticated.\n` +
-        `    Run: ${CYAN}gh auth login${RESET}`
+          `    Run: ${CYAN}gh auth login${RESET}`,
       );
     }
   }
@@ -401,7 +438,7 @@ function checkPrerequisites() {
   } catch {
     warnings.push(
       `${YELLOW}!${RESET} Claude Code CLI not found on PATH.\n` +
-      `    Install: ${CYAN}https://docs.anthropic.com/en/docs/claude-code${RESET}`
+        `    Install: ${CYAN}https://docs.anthropic.com/en/docs/claude-code${RESET}`,
     );
   }
 
@@ -410,7 +447,7 @@ function checkPrerequisites() {
   if (nodeVersion < 18) {
     issues.push(
       `${RED}✗${RESET} Node.js >= 18 required (found ${process.versions.node}).\n` +
-      `    Update: ${CYAN}https://nodejs.org${RESET}`
+        `    Update: ${CYAN}https://nodejs.org${RESET}`,
     );
   }
 
@@ -425,7 +462,7 @@ function checkPrerequisites() {
   if (issues.length > 0) {
     console.log(
       `${RED}${BOLD}Blocking issues found.${RESET} ForgeDock requires the GitHub CLI ` +
-      `with authentication to function.\nResolve the issues above, then re-run the command.\n`
+        `with authentication to function.\nResolve the issues above, then re-run the command.\n`,
     );
     process.exit(1);
   }
@@ -452,13 +489,21 @@ async function runPrerequisiteChecklist() {
   {
     const s = spinner("Checking GitHub CLI…");
     try {
-      const out = execSync("gh --version", { encoding: "utf-8", stdio: ["pipe", "pipe", "pipe"] });
+      const out = execSync("gh --version", {
+        encoding: "utf-8",
+        stdio: ["pipe", "pipe", "pipe"],
+      });
       const match = out.match(/gh version (\d+\.\d+\.\d+)/);
       const version = match ? `v${match[1]}` : "installed";
       s.stop("success", `${green("[✓]")} GitHub CLI          ${dim(version)}`);
     } catch {
-      s.stop("fail", `${red("[✗]")} GitHub CLI          not found — install: ${cyan("https://cli.github.com")}`);
-      throw new Error("GitHub CLI (gh) is required. Install it from https://cli.github.com");
+      s.stop(
+        "fail",
+        `${red("[✗]")} GitHub CLI          not found — install: ${cyan("https://cli.github.com")}`,
+      );
+      throw new Error(
+        "GitHub CLI (gh) is required. Install it from https://cli.github.com",
+      );
     }
   }
 
@@ -469,7 +514,10 @@ async function runPrerequisiteChecklist() {
       // gh auth status writes to stderr; capture it via the error path too
       let combined = "";
       try {
-        combined = execSync("gh auth status", { encoding: "utf-8", stdio: ["pipe", "pipe", "pipe"] });
+        combined = execSync("gh auth status", {
+          encoding: "utf-8",
+          stdio: ["pipe", "pipe", "pipe"],
+        });
       } catch (err) {
         combined = (err.stderr || "") + (err.stdout || "");
         if (!/Logged in/.test(combined)) {
@@ -492,9 +540,15 @@ async function runPrerequisiteChecklist() {
       } catch {
         // Org lookup is best-effort — not required
       }
-      s.stop("success", `${green("[✓]")} GitHub Auth         ${dim(`logged in as ${username}${orgLabel}`)}`);
+      s.stop(
+        "success",
+        `${green("[✓]")} GitHub Auth         ${dim(`logged in as ${username}${orgLabel}`)}`,
+      );
     } catch {
-      s.stop("fail", `${red("[✗]")} GitHub Auth         not authenticated — run: ${cyan("gh auth login")}`);
+      s.stop(
+        "fail",
+        `${red("[✗]")} GitHub Auth         not authenticated — run: ${cyan("gh auth login")}`,
+      );
       throw new Error("GitHub CLI is not authenticated. Run: gh auth login");
     }
   }
@@ -505,22 +559,36 @@ async function runPrerequisiteChecklist() {
     const nodeVersion = process.versions.node;
     const nodeMajor = parseInt(nodeVersion.split(".")[0], 10);
     if (nodeMajor < 18) {
-      s.stop("fail", `${red("[✗]")} Node.js             v${nodeVersion} (>= 18 required) — update: ${cyan("https://nodejs.org")}`);
-      throw new Error(`Node.js >= 18 required (found v${nodeVersion}). Update at https://nodejs.org`);
+      s.stop(
+        "fail",
+        `${red("[✗]")} Node.js             v${nodeVersion} (>= 18 required) — update: ${cyan("https://nodejs.org")}`,
+      );
+      throw new Error(
+        `Node.js >= 18 required (found v${nodeVersion}). Update at https://nodejs.org`,
+      );
     }
-    s.stop("success", `${green("[✓]")} Node.js             ${dim(`v${nodeVersion} (>= 18 required)`)}`);
+    s.stop(
+      "success",
+      `${green("[✓]")} Node.js             ${dim(`v${nodeVersion} (>= 18 required)`)}`,
+    );
   }
 
   // ── 4. Git ─────────────────────────────────────────────────────────────────
   {
     const s = spinner("Checking Git…");
     try {
-      const out = execSync("git --version", { encoding: "utf-8", stdio: ["pipe", "pipe", "pipe"] });
+      const out = execSync("git --version", {
+        encoding: "utf-8",
+        stdio: ["pipe", "pipe", "pipe"],
+      });
       const match = out.match(/git version (\d+\.\d+\.\d+)/);
       const version = match ? `v${match[1]}` : "installed";
       s.stop("success", `${green("[✓]")} Git                 ${dim(version)}`);
     } catch {
-      s.stop("warn", `${yellow("[!]")} Git                 not found — install: ${cyan("https://git-scm.com")}`);
+      s.stop(
+        "warn",
+        `${yellow("[!]")} Git                 not found — install: ${cyan("https://git-scm.com")}`,
+      );
       // Git is a warning — do NOT throw
     }
   }
@@ -529,12 +597,18 @@ async function runPrerequisiteChecklist() {
   {
     const s = spinner("Checking Claude Code…");
     try {
-      const out = execSync("claude --version", { encoding: "utf-8", stdio: ["pipe", "pipe", "pipe"] });
+      const out = execSync("claude --version", {
+        encoding: "utf-8",
+        stdio: ["pipe", "pipe", "pipe"],
+      });
       const match = out.trim().match(/(\d+\.\d+\.\d+)/);
       const version = match ? `v${match[1]}` : "installed";
       s.stop("success", `${green("[✓]")} Claude Code         ${dim(version)}`);
     } catch {
-      s.stop("warn", `${yellow("[!]")} Claude Code         not found — install: ${cyan("https://docs.anthropic.com/en/docs/claude-code")}`);
+      s.stop(
+        "warn",
+        `${yellow("[!]")} Claude Code         not found — install: ${cyan("https://docs.anthropic.com/en/docs/claude-code")}`,
+      );
       // Claude Code is a warning — do NOT throw
     }
   }
@@ -569,52 +643,59 @@ async function findMarkdownFiles(dir) {
  */
 const COMMAND_CATEGORIES = {
   // Pipeline — core orchestration commands
-  "work-on":           "Pipeline",
-  "investigate":       "Pipeline",
-  "build":             "Pipeline",
-  "architect":         "Pipeline",
-  "context":           "Pipeline",
-  "implement":         "Pipeline",
-  "review":            "Pipeline",
-  "decompose":         "Pipeline",
-  "close":             "Pipeline",
-  "review-pr":         "Pipeline",
-  "review-pr-agents":  "Pipeline",
+  "work-on": "Pipeline",
+  investigate: "Pipeline",
+  build: "Pipeline",
+  architect: "Pipeline",
+  context: "Pipeline",
+  implement: "Pipeline",
+  review: "Pipeline",
+  decompose: "Pipeline",
+  close: "Pipeline",
+  "review-pr": "Pipeline",
+  "review-pr-agents": "Pipeline",
   "review-pr-staging": "Pipeline",
-  "orchestrate":       "Pipeline",
-  "issue":             "Pipeline",
-  "milestone":         "Pipeline",
-  "quality-gate":      "Pipeline",
-  "work-on-monolithic":"Pipeline",
+  orchestrate: "Pipeline",
+  issue: "Pipeline",
+  milestone: "Pipeline",
+  "quality-gate": "Pipeline",
+  "work-on-monolithic": "Pipeline",
 
   // Operations — ongoing automation and monitoring
-  "autopilot":         "Operations",
-  "analytics":         "Operations",
-  "geo-audit":         "Operations",
-  "security-audit":    "Operations",
-  "pipeline-health":   "Operations",
-  "audit":             "Operations",
-  "audit-agents":      "Operations",
-  "qa-sweep":          "Operations",
-  "forge-stats":       "Operations",
-  "sync-ecosystem":    "Operations",
+  autopilot: "Operations",
+  analytics: "Operations",
+  "geo-audit": "Operations",
+  "security-audit": "Operations",
+  "pipeline-health": "Operations",
+  audit: "Operations",
+  "audit-agents": "Operations",
+  "qa-sweep": "Operations",
+  "forge-stats": "Operations",
+  "sync-ecosystem": "Operations",
 
   // Incident — response and recovery
   "incident-response": "Incident",
-  "rollback":          "Incident",
-  "deploy-info":       "Incident",
-  "failure-recon":     "Incident",
+  rollback: "Incident",
+  "deploy-info": "Incident",
+  "failure-recon": "Incident",
 
   // Ecosystem — project management utilities
-  "validate":          "Ecosystem",
-  "cleanup":           "Ecosystem",
+  validate: "Ecosystem",
+  cleanup: "Ecosystem",
 
   // Setup — initial configuration
-  "forgedock-init":    "Setup",
+  "forgedock-init": "Setup",
 };
 
 /** Canonical display order for categories. */
-const CATEGORY_ORDER = ["Pipeline", "Operations", "Incident", "Ecosystem", "Setup", "Other"];
+const CATEGORY_ORDER = [
+  "Pipeline",
+  "Operations",
+  "Incident",
+  "Ecosystem",
+  "Setup",
+  "Other",
+];
 
 // ---------------------------------------------------------------------------
 // Legacy commands (install, uninstall, update, init, help)
@@ -647,7 +728,9 @@ async function install() {
   // Phase 1: Symlink loop with live progress bar
   // -------------------------------------------------------------------------
 
-  const bar = createProgressBar(files.length, { label: "  Installing commands..." });
+  const bar = createProgressBar(files.length, {
+    label: "  Installing commands...",
+  });
 
   for (const file of files) {
     const rel = relative(COMMANDS_DIR, file);
@@ -777,7 +860,9 @@ async function install() {
 
   if (categoryLines.length > 0) {
     console.log("");
-    process.stdout.write(box(["", ...categoryLines, ""], { title: "Commands installed" }));
+    process.stdout.write(
+      box(["", ...categoryLines, ""], { title: "Commands installed" }),
+    );
   }
 
   // -------------------------------------------------------------------------
@@ -792,8 +877,10 @@ async function install() {
     "",
   ];
   if (copied > 0) {
-    summaryLines.splice(summaryLines.length - 1, 0,
-      `  ${cyan("Copied")}     ${bold(String(copied))}  ${dim("(symlinks unavailable — files copied instead)")}`
+    summaryLines.splice(
+      summaryLines.length - 1,
+      0,
+      `  ${cyan("Copied")}     ${bold(String(copied))}  ${dim("(symlinks unavailable — files copied instead)")}`,
     );
   }
   process.stdout.write(box(summaryLines, { title: "Summary" }));
@@ -814,7 +901,11 @@ async function install() {
       ...conflicts.map((c) => `    ${dim(`rm ~/.claude/commands/${c}`)}`),
       "",
     ];
-    process.stdout.write(box(conflictLines, { title: `${conflicts.length} conflict${conflicts.length === 1 ? "" : "s"}` }));
+    process.stdout.write(
+      box(conflictLines, {
+        title: `${conflicts.length} conflict${conflicts.length === 1 ? "" : "s"}`,
+      }),
+    );
   }
 
   // -------------------------------------------------------------------------
@@ -823,31 +914,32 @@ async function install() {
 
   console.log("");
   let forgeHomeSet = false;
-  for (const profile of [
-    join(process.env.HOME ?? "", ".bashrc"),
-    join(process.env.HOME ?? "", ".zshrc"),
-  ]) {
+  for (const profile of [join(HOME, ".bashrc"), join(HOME, ".zshrc")]) {
     if (existsSync(profile)) {
       const content = readFileSync(profile, "utf-8");
       if (!content.includes("FORGE_HOME")) {
         appendFileSync(
           profile,
-          `\n# ForgeDock — autonomous development pipeline\nexport FORGE_HOME="${FORGE_HOME}"\n`
+          `\n# ForgeDock — autonomous development pipeline\nexport FORGE_HOME="${FORGE_HOME}"\n`,
         );
-        const profileShort = profile.replace(process.env.HOME ?? "", "~");
-        console.log(`  ${green("✔")}  ${bold("FORGE_HOME")} set in ${cyan(profileShort)}`);
+        const profileShort = profile.replace(HOME, "~");
+        console.log(
+          `  ${green("✔")}  ${bold("FORGE_HOME")} set in ${cyan(profileShort)}`,
+        );
         forgeHomeSet = true;
       }
     }
   }
 
   if (!forgeHomeSet) {
-    console.log(`  ${dim("✔")}  ${dim("FORGE_HOME already set in shell profile")}`);
+    console.log(
+      `  ${dim("✔")}  ${dim("FORGE_HOME already set in shell profile")}`,
+    );
   }
 
   console.log("");
   console.log(
-    `${green("ForgeDock commands are now available as slash commands in any Claude Code session.")}`
+    `${green("ForgeDock commands are now available as slash commands in any Claude Code session.")}`,
   );
   console.log("");
 
@@ -856,7 +948,7 @@ async function install() {
   if (!existsSync(forgeYamlPath)) {
     console.log(`${yellow("No forge.yaml found in current directory.")}`);
     console.log(
-      `  Run ${cyan("npx forgedock init")} in your project root to generate forge.yaml`
+      `  Run ${cyan("npx forgedock init")} in your project root to generate forge.yaml`,
     );
     console.log("");
   }
@@ -901,10 +993,7 @@ async function uninstall() {
 
   // Scan shell profiles for FORGE_HOME block
   const FORGE_HOME_MARKER = "# ForgeDock — autonomous development pipeline";
-  const shellProfiles = [
-    join(process.env.HOME ?? "", ".bashrc"),
-    join(process.env.HOME ?? "", ".zshrc"),
-  ];
+  const shellProfiles = [join(HOME, ".bashrc"), join(HOME, ".zshrc")];
   /** @type {string[]} Profiles that contain the FORGE_HOME block */
   const profilesWithForgeHome = shellProfiles.filter((p) => {
     if (!existsSync(p)) return false;
@@ -923,8 +1012,14 @@ async function uninstall() {
   // Phase 2: Pre-removal summary
   // -------------------------------------------------------------------------
 
-  if (toRemove.length === 0 && profilesWithForgeHome.length === 0 && !hasForgeYaml) {
-    console.log(`  ${dim("Nothing to remove — ForgeDock does not appear to be installed.")}`);
+  if (
+    toRemove.length === 0 &&
+    profilesWithForgeHome.length === 0 &&
+    !hasForgeYaml
+  ) {
+    console.log(
+      `  ${dim("Nothing to remove — ForgeDock does not appear to be installed.")}`,
+    );
     console.log("");
     return;
   }
@@ -932,13 +1027,15 @@ async function uninstall() {
   const summaryLines = [""];
   if (toRemove.length > 0) {
     const fileLabel = copyMode ? "files (copy-mode install)" : "symlinks";
-    summaryLines.push(`  ${red("Commands")}:   ${bold(String(toRemove.length))} ${fileLabel} in ${dim(TARGET_DIR)}`);
+    summaryLines.push(
+      `  ${red("Commands")}:   ${bold(String(toRemove.length))} ${fileLabel} in ${dim(TARGET_DIR)}`,
+    );
   } else {
     summaryLines.push(`  ${dim("Commands:")}   none found`);
   }
   if (profilesWithForgeHome.length > 0) {
     summaryLines.push(
-      `  ${yellow("Profiles")}:   FORGE_HOME export in ${bold(profilesWithForgeHome.map((p) => p.replace(process.env.HOME ?? "", "~")).join(", "))}`
+      `  ${yellow("Profiles")}:   FORGE_HOME export in ${bold(profilesWithForgeHome.map((p) => p.replace(HOME, "~")).join(", "))}`,
     );
   }
   if (hasForgeYaml) {
@@ -962,10 +1059,7 @@ async function uninstall() {
 
   let confirmed = forceYes;
   if (!confirmed) {
-    confirmed = await confirm(
-      `Remove ${commandLabel}${profileLabel}?`,
-      false
-    );
+    confirmed = await confirm(`Remove ${commandLabel}${profileLabel}?`, false);
   }
 
   if (!confirmed) {
@@ -981,7 +1075,9 @@ async function uninstall() {
 
   if (toRemove.length > 0) {
     console.log("");
-    const bar = createProgressBar(toRemove.length, { label: "  Removing commands" });
+    const bar = createProgressBar(toRemove.length, {
+      label: "  Removing commands",
+    });
     let removed = 0;
 
     for (const { target, rel } of toRemove) {
@@ -1023,23 +1119,31 @@ async function uninstall() {
           const cleaned = content
             .replace(
               /\n# ForgeDock — autonomous development pipeline\nexport FORGE_HOME=[^\n]*\n/g,
-              "\n"
+              "\n",
             )
             .replace(
               /^# ForgeDock — autonomous development pipeline\nexport FORGE_HOME=[^\n]*\n/,
-              ""
+              "",
             );
           // Write to a temp file first, then atomically rename into place.
           // This prevents profile corruption if the process is killed mid-write.
           writeFileSync(tmpPath, cleaned, "utf-8");
           renameSync(tmpPath, profile);
-          const profileShort = profile.replace(process.env.HOME ?? "", "~");
-          console.log(`  ${green("✔")} Removed FORGE_HOME from ${profileShort}`);
+          const profileShort = profile.replace(HOME, "~");
+          console.log(
+            `  ${green("✔")} Removed FORGE_HOME from ${profileShort}`,
+          );
         } catch (err) {
           // Clean up temp file if it was created before the error
-          try { unlinkSync(tmpPath); } catch { /* already gone or never created */ }
-          const profileShort = profile.replace(process.env.HOME ?? "", "~");
-          console.log(`  ${red("✖")} Could not update ${profileShort}: ${err.message}`);
+          try {
+            unlinkSync(tmpPath);
+          } catch {
+            /* already gone or never created */
+          }
+          const profileShort = profile.replace(HOME, "~");
+          console.log(
+            `  ${red("✖")} Could not update ${profileShort}: ${err.message}`,
+          );
         }
       }
     } else {
@@ -1054,7 +1158,7 @@ async function uninstall() {
   if (hasForgeYaml) {
     console.log("");
     const deleteForgeYaml = forceYes
-      ? false  // --yes flag: keep forge.yaml by default (safe)
+      ? false // --yes flag: keep forge.yaml by default (safe)
       : await confirm("Delete forge.yaml from this project?", false);
 
     if (deleteForgeYaml) {
@@ -1062,7 +1166,9 @@ async function uninstall() {
         await unlink(forgeYamlPath);
         console.log(`  ${green("✔")} Deleted forge.yaml`);
       } catch (err) {
-        console.log(`  ${red("✖")} Could not delete forge.yaml: ${err.message}`);
+        console.log(
+          `  ${red("✖")} Could not delete forge.yaml: ${err.message}`,
+        );
       }
     } else {
       console.log(`  ${dim("forge.yaml kept.")}`);
@@ -1074,9 +1180,13 @@ async function uninstall() {
   // -------------------------------------------------------------------------
 
   console.log("");
-  console.log(`${green("Uninstall complete.")} ForgeDock commands have been removed.`);
+  console.log(
+    `${green("Uninstall complete.")} ForgeDock commands have been removed.`,
+  );
   if (profilesWithForgeHome.length > 0) {
-    console.log(`  ${dim("Restart your shell or run")} ${cyan("source ~/.bashrc")} ${dim("(or")} ${cyan("~/.zshrc")}${dim(")")} ${dim("to apply profile changes.")}`);
+    console.log(
+      `  ${dim("Restart your shell or run")} ${cyan("source ~/.bashrc")} ${dim("(or")} ${cyan("~/.zshrc")}${dim(")")} ${dim("to apply profile changes.")}`,
+    );
   }
   console.log("");
 }
@@ -1159,8 +1269,12 @@ async function getInstalledCommandNames() {
  * @returns {string[]}
  */
 function formatCommandDiff(before, after) {
-  const added = [...after].filter((n) => !before.has(n)).map((n) => n.replace(/\.md$/, ""));
-  const removed = [...before].filter((n) => !after.has(n)).map((n) => n.replace(/\.md$/, ""));
+  const added = [...after]
+    .filter((n) => !before.has(n))
+    .map((n) => n.replace(/\.md$/, ""));
+  const removed = [...before]
+    .filter((n) => !after.has(n))
+    .map((n) => n.replace(/\.md$/, ""));
 
   if (added.length === 0 && removed.length === 0) return [];
 
@@ -1200,7 +1314,9 @@ async function update() {
       }).trim();
 
       if (branch !== "main") {
-        console.log(`  ${yellow("Not on main branch")} (${branch}) — skipping automatic update.`);
+        console.log(
+          `  ${yellow("Not on main branch")} (${branch}) — skipping automatic update.`,
+        );
         console.log(`  Switch to ${cyan("main")} and re-run to update.`);
         console.log("");
         return;
@@ -1221,8 +1337,12 @@ async function update() {
           timeout: 10000,
         });
       } catch {
-        console.log(`  ${yellow("Offline or unreachable.")} Could not fetch from origin.`);
-        console.log(`  ${dim("Skipping update check — re-run when connected.")}`);
+        console.log(
+          `  ${yellow("Offline or unreachable.")} Could not fetch from origin.`,
+        );
+        console.log(
+          `  ${dim("Skipping update check — re-run when connected.")}`,
+        );
         console.log("");
         return;
       }
@@ -1277,7 +1397,7 @@ async function update() {
         });
       } catch {
         console.log(
-          `  ${yellow("Cannot fast-forward")} — local changes exist. Skipping merge.`
+          `  ${yellow("Cannot fast-forward")} — local changes exist. Skipping merge.`,
         );
         console.log(`  ${dim("Stash or discard local changes and re-run.")}`);
         console.log("");
@@ -1292,9 +1412,7 @@ async function update() {
       }).trim();
 
       const newVersion = getVersion();
-      console.log(
-        `  ${green("Updated")} v${currentVersion} → v${newVersion}`
-      );
+      console.log(`  ${green("Updated")} v${currentVersion} → v${newVersion}`);
       console.log("");
 
       // Re-run symlink installer to pick up new/removed commands
@@ -1309,7 +1427,7 @@ async function update() {
       }
     } catch (err) {
       console.log(
-        `  ${RED}Update failed.${RESET} ${err instanceof Error ? err.message : String(err)}`
+        `  ${RED}Update failed.${RESET} ${err instanceof Error ? err.message : String(err)}`,
       );
       console.log("");
     }
@@ -1331,11 +1449,17 @@ async function update() {
 
     if (latestVersion === null) {
       if (process.stdout.isTTY) {
-        process.stdout.write(`\r  ${yellow("Offline or registry unreachable.")} Could not check for updates.\n`);
+        process.stdout.write(
+          `\r  ${yellow("Offline or registry unreachable.")} Could not check for updates.\n`,
+        );
       } else {
-        console.log(`  Offline or registry unreachable. Could not check for updates.`);
+        console.log(
+          `  Offline or registry unreachable. Could not check for updates.`,
+        );
       }
-      console.log(`  ${dim("Re-run when connected, or check: ")}${cyan("https://www.npmjs.com/package/forgedock")}`);
+      console.log(
+        `  ${dim("Re-run when connected, or check: ")}${cyan("https://www.npmjs.com/package/forgedock")}`,
+      );
       console.log("");
       return;
     }
@@ -1382,7 +1506,9 @@ async function init() {
     execSync("claude --version", { stdio: ["pipe", "pipe", "pipe"] });
   } catch {
     console.log(`  ${YELLOW}!${RESET} Claude Code CLI not found on PATH.`);
-    console.log(`    Install: ${CYAN}https://docs.anthropic.com/en/docs/claude-code${RESET}`);
+    console.log(
+      `    Install: ${CYAN}https://docs.anthropic.com/en/docs/claude-code${RESET}`,
+    );
     console.log("");
   }
 
@@ -1412,7 +1538,9 @@ async function init() {
     // SSH: git@github.com:owner/repo.git
     const sshMatch = remoteUrl.match(/^git@[^:]+:([^/]+)\/(.+?)(?:\.git)?$/);
     // HTTPS: https://github.com/owner/repo.git
-    const httpsMatch = remoteUrl.match(/^https?:\/\/[^/]+\/([^/]+)\/(.+?)(?:\.git)?$/);
+    const httpsMatch = remoteUrl.match(
+      /^https?:\/\/[^/]+\/([^/]+)\/(.+?)(?:\.git)?$/,
+    );
 
     if (sshMatch) {
       detectedOwner = sshMatch[1];
@@ -1474,16 +1602,21 @@ async function init() {
   if (!process.stdin.isTTY) {
     if (!remoteDetected) {
       console.log(
-        `  ${YELLOW}Warning${RESET}: No git remote found — using placeholder values`
+        `  ${YELLOW}Warning${RESET}: No git remote found — using placeholder values`,
       );
     }
     // Silent write — same as pre-interactive behavior
     _writeForgeYaml({
-      outputPath, cwd,
-      owner: detectedOwner, repo: detectedRepo,
-      projectName: detectedName, description: "",
-      root: cwd, worktreeBase: join(cwd, ".claude", "worktrees"),
-      defaultBranch: detectedDefault, stagingBranch: detectedStaging,
+      outputPath,
+      cwd,
+      owner: detectedOwner,
+      repo: detectedRepo,
+      projectName: detectedName,
+      description: "",
+      root: cwd,
+      worktreeBase: join(cwd, ".claude", "worktrees"),
+      defaultBranch: detectedDefault,
+      stagingBranch: detectedStaging,
     });
     console.log(`  ${GREEN}Created${RESET}: forge.yaml`);
     console.log("");
@@ -1500,17 +1633,29 @@ async function init() {
   let confirmed = false;
 
   while (!confirmed) {
-    console.log(dim("  Auto-detected values are shown as defaults. Press Enter to accept."));
+    console.log(
+      dim(
+        "  Auto-detected values are shown as defaults. Press Enter to accept.",
+      ),
+    );
     console.log("");
 
     // --- Project section ---
     console.log(bold("  Project"));
 
-    const ownerInput = await input("  GitHub owner (org or user)", detectedOwner);
+    const ownerInput = await input(
+      "  GitHub owner (org or user)",
+      detectedOwner,
+    );
     const repoInput = await input("  Repository name", detectedRepo);
     const nameInput = await input(
       "  Project name",
-      detectedName !== "Your-repo-name" ? detectedName : repoInput.split(/[-_]/).map((w) => w.charAt(0).toUpperCase() + w.slice(1)).join(" ")
+      detectedName !== "Your-repo-name"
+        ? detectedName
+        : repoInput
+            .split(/[-_]/)
+            .map((w) => w.charAt(0).toUpperCase() + w.slice(1))
+            .join(" "),
     );
     const descInput = await input("  Brief description", "");
 
@@ -1521,7 +1666,7 @@ async function init() {
     const rootInput = await input("  Repository root (absolute path)", cwd);
     const worktreeInput = await input(
       "  Worktree base (for git worktrees)",
-      join(rootInput || cwd, ".claude", "worktrees")
+      join(rootInput || cwd, ".claude", "worktrees"),
     );
 
     // --- Branches section ---
@@ -1529,7 +1674,10 @@ async function init() {
     console.log(bold("  Branches"));
 
     const defaultBranchInput = await input("  Default branch", detectedDefault);
-    const stagingBranchInput = await input("  Staging branch (PR target for fast-lane changes)", detectedStaging);
+    const stagingBranchInput = await input(
+      "  Staging branch (PR target for fast-lane changes)",
+      detectedStaging,
+    );
 
     // --- Preview ---
     console.log("");
@@ -1552,7 +1700,10 @@ async function init() {
       .join("\n");
 
     process.stdout.write(
-      box(previewDisplay, { title: "forge.yaml preview (required sections)", padding: 1 })
+      box(previewDisplay, {
+        title: "forge.yaml preview (required sections)",
+        padding: 1,
+      }),
     );
 
     confirmed = await confirm("  Write this forge.yaml?", true);
@@ -1567,13 +1718,22 @@ async function init() {
       // -----------------------------------------------------------------------
       console.log("");
       console.log(bold("  Optional Sections"));
-      console.log(dim("  Select sections to configure now. Unselected sections are written as"));
-      console.log(dim("  commented-out placeholders — you can enable them later by editing forge.yaml."));
+      console.log(
+        dim(
+          "  Select sections to configure now. Unselected sections are written as",
+        ),
+      );
+      console.log(
+        dim(
+          "  commented-out placeholders — you can enable them later by editing forge.yaml.",
+        ),
+      );
       console.log("");
 
       const OPTIONAL_SECTION_CHOICES = [
         {
-          label: "Project Board   — GitHub Projects v2 integration for workflow tracking",
+          label:
+            "Project Board   — GitHub Projects v2 integration for workflow tracking",
           value: "projectBoard",
         },
         {
@@ -1581,18 +1741,20 @@ async function init() {
           value: "multiRepo",
         },
         {
-          label: "Review Context  — Tech stack and conventions for PR review agents",
+          label:
+            "Review Context  — Tech stack and conventions for PR review agents",
           value: "review",
         },
         {
-          label: "Verification    — Health check endpoints and response patterns",
+          label:
+            "Verification    — Health check endpoints and response patterns",
           value: "verification",
         },
       ];
 
       const selectedSections = await multiSelect(
         "  Which optional sections would you like to configure?",
-        OPTIONAL_SECTION_CHOICES
+        OPTIONAL_SECTION_CHOICES,
       );
 
       /** @type {Record<string, object>} */
@@ -1600,29 +1762,47 @@ async function init() {
 
       // --- Project Board prompts ---
       if (selectedSections.includes("projectBoard")) {
-        const discovered = await discoverProjectBoard(ownerInput || detectedOwner);
+        const discovered = await discoverProjectBoard(
+          ownerInput || detectedOwner,
+        );
         if (discovered) {
           // Auto-discovery succeeded — use resolved IDs
           optionalSections.projectBoard = {
             projectNumber: discovered.projectNumber,
-            projectId:     discovered.projectId,
-            fieldIds:      discovered.fieldIds,
-            optionIds:     discovered.optionIds,
+            projectId: discovered.projectId,
+            fieldIds: discovered.fieldIds,
+            optionIds: discovered.optionIds,
           };
         } else {
           // Fallback: manual entry (no regression from previous behaviour)
           console.log("");
           console.log(bold("  Project Board (manual)"));
-          console.log(dim("  Find your project number: gh project list --owner " + (ownerInput || detectedOwner)));
+          console.log(
+            dim(
+              "  Find your project number: gh project list --owner " +
+                (ownerInput || detectedOwner),
+            ),
+          );
           const projectNumber = await input(
             "  GitHub Projects v2 project number",
-            "1"
+            "1",
           );
           optionalSections.projectBoard = {
             projectNumber: parseInt(projectNumber, 10) || 1,
           };
-          console.log(dim("  Field IDs (PVT_/PVTSSF_ strings) must be added manually after generation."));
-          console.log(dim("  Run: gh project field-list " + (projectNumber || "1") + " --owner " + (ownerInput || detectedOwner)));
+          console.log(
+            dim(
+              "  Field IDs (PVT_/PVTSSF_ strings) must be added manually after generation.",
+            ),
+          );
+          console.log(
+            dim(
+              "  Run: gh project field-list " +
+                (projectNumber || "1") +
+                " --owner " +
+                (ownerInput || detectedOwner),
+            ),
+          );
         }
       }
 
@@ -1630,18 +1810,22 @@ async function init() {
       if (selectedSections.includes("multiRepo")) {
         console.log("");
         console.log(bold("  Multi-Repo"));
-        console.log(dim("  Configure one satellite repo (add more by editing forge.yaml)."));
+        console.log(
+          dim(
+            "  Configure one satellite repo (add more by editing forge.yaml).",
+          ),
+        );
         const prefix = await input(
           "  Satellite repo prefix (e.g. 'mcp', 'sdk')",
-          "sat"
+          "sat",
         );
         const satelliteRepo = await input(
           "  Satellite repo name (just the name, owner will be reused)",
-          "your-satellite-repo"
+          "your-satellite-repo",
         );
         const satelliteBranch = await input(
           "  Satellite default/staging branch",
-          "main"
+          "main",
         );
         optionalSections.multiRepo = { prefix, satelliteRepo, satelliteBranch };
       }
@@ -1652,11 +1836,11 @@ async function init() {
         console.log(bold("  Review Context"));
         const techStack = await input(
           "  Tech stack (e.g. Next.js, FastAPI, PostgreSQL)",
-          "Node.js, TypeScript"
+          "Node.js, TypeScript",
         );
         const context = await input(
           "  Architecture notes (one line; expand in forge.yaml later)",
-          ""
+          "",
         );
         optionalSections.review = { techStack, context };
       }
@@ -1667,7 +1851,7 @@ async function init() {
         console.log(bold("  Verification"));
         const healthEndpoint = await input(
           "  Health check endpoint URL",
-          `https://api.${repoInput || detectedRepo}.io/health`
+          `https://api.${repoInput || detectedRepo}.io/health`,
         );
         optionalSections.verification = { healthEndpoint };
       }
@@ -1680,7 +1864,7 @@ async function init() {
         console.log(`  ${YELLOW}forge.yaml already exists.${RESET}`);
         const shouldOverwrite = await confirm(
           "  Back up existing forge.yaml and overwrite?",
-          true
+          true,
         );
         if (!shouldOverwrite) {
           console.log(`  ${dim("Cancelled.")} forge.yaml was not changed.`);
@@ -1691,7 +1875,10 @@ async function init() {
         // Backup with timestamped name if .bak already exists (fix from #36)
         const baseBak = join(cwd, "forge.yaml.bak");
         const backupPath = existsSync(baseBak)
-          ? join(cwd, `forge.yaml.bak.${new Date().toISOString().replace(/[:.]/g, "-")}`)
+          ? join(
+              cwd,
+              `forge.yaml.bak.${new Date().toISOString().replace(/[:.]/g, "-")}`,
+            )
           : baseBak;
         const backupName = basename(backupPath);
         renameSync(outputPath, backupPath);
@@ -1716,12 +1903,19 @@ async function init() {
       console.log("");
       console.log(`  ${GREEN}Created${RESET}: forge.yaml`);
       if (selectedSections.length > 0) {
-        console.log(`  ${GREEN}Configured${RESET}: ${selectedSections.map((s) => ({
-          projectBoard: "project_board",
-          multiRepo: "repos",
-          review: "review",
-          verification: "verification",
-        })[s]).join(", ")}`);
+        console.log(
+          `  ${GREEN}Configured${RESET}: ${selectedSections
+            .map(
+              (s) =>
+                ({
+                  projectBoard: "project_board",
+                  multiRepo: "repos",
+                  review: "review",
+                  verification: "verification",
+                })[s],
+            )
+            .join(", ")}`,
+        );
       }
       console.log("");
       _printNextSteps({ remoteDetected: ownerInput !== "your-github-org" });
@@ -1744,7 +1938,11 @@ async function init() {
  * @returns {string}
  */
 function _sanitizeYamlValue(value) {
-  return String(value).replace(/\\/g, "\\\\").replace(/"/g, "").replace(/[\r\n]/g, " ").trim();
+  return String(value)
+    .replace(/\\/g, "\\\\")
+    .replace(/"/g, "")
+    .replace(/[\r\n]/g, " ")
+    .trim();
 }
 
 /**
@@ -1755,7 +1953,11 @@ function _sanitizeYamlValue(value) {
  * @returns {string}
  */
 function _sanitizePathValue(value) {
-  return String(value).replace(/\\/g, "\\\\").replace(/"/g, "").replace(/[\r\n]/g, " ").trim();
+  return String(value)
+    .replace(/\\/g, "\\\\")
+    .replace(/"/g, "")
+    .replace(/[\r\n]/g, " ")
+    .trim();
 }
 
 /**
@@ -1792,21 +1994,31 @@ async function discoverProjectBoard(owner) {
   // -------------------------------------------------------------------------
   let projects = [];
   try {
-    const raw = execFileSync("gh", ["project", "list", "--owner", owner, "--format", "json"], {
-      encoding: "utf-8",
-      stdio: ["pipe", "pipe", "pipe"],
-    });
+    const raw = execFileSync(
+      "gh",
+      ["project", "list", "--owner", owner, "--format", "json"],
+      {
+        encoding: "utf-8",
+        stdio: ["pipe", "pipe", "pipe"],
+      },
+    );
     const parsed = JSON.parse(raw);
     projects = parsed.projects || [];
   } catch {
     // gh not available, auth failure, or no projects access — fall back silently
-    console.log(dim("  Could not list projects — falling back to manual entry."));
+    console.log(
+      dim("  Could not list projects — falling back to manual entry."),
+    );
     return null;
   }
 
   if (projects.length === 0) {
     console.log(dim("  No GitHub Projects v2 boards found for this owner."));
-    console.log(dim("  You can add project_board configuration manually in forge.yaml later."));
+    console.log(
+      dim(
+        "  You can add project_board configuration manually in forge.yaml later.",
+      ),
+    );
     return null;
   }
 
@@ -1815,10 +2027,16 @@ async function discoverProjectBoard(owner) {
     label: `${p.title}  ${dim("(#" + p.number + ", " + (p.items?.totalCount ?? "?") + " items)")}`,
     value: p.number,
   }));
-  projectChoices.push({ label: dim("Skip — configure project board manually later"), value: null });
+  projectChoices.push({
+    label: dim("Skip — configure project board manually later"),
+    value: null,
+  });
 
   console.log("");
-  const selectedNumber = await select("  Which GitHub Project board?", projectChoices);
+  const selectedNumber = await select(
+    "  Which GitHub Project board?",
+    projectChoices,
+  );
   if (selectedNumber === null) {
     return null;
   }
@@ -1826,7 +2044,9 @@ async function discoverProjectBoard(owner) {
   // Look up the selected project's id
   const selectedProject = projects.find((p) => p.number === selectedNumber);
   const projectId = selectedProject?.id ?? "";
-  const projectTitle = _sanitizeYamlValue(selectedProject?.title ?? `Project #${selectedNumber}`);
+  const projectTitle = _sanitizeYamlValue(
+    selectedProject?.title ?? `Project #${selectedNumber}`,
+  );
 
   // -------------------------------------------------------------------------
   // Step 2: Fetch field list
@@ -1836,14 +2056,30 @@ async function discoverProjectBoard(owner) {
 
   let fields = [];
   try {
-    const raw = execFileSync("gh", ["project", "field-list", String(selectedNumber), "--owner", owner, "--format", "json"], {
-      encoding: "utf-8",
-      stdio: ["pipe", "pipe", "pipe"],
-    });
+    const raw = execFileSync(
+      "gh",
+      [
+        "project",
+        "field-list",
+        String(selectedNumber),
+        "--owner",
+        owner,
+        "--format",
+        "json",
+      ],
+      {
+        encoding: "utf-8",
+        stdio: ["pipe", "pipe", "pipe"],
+      },
+    );
     const parsed = JSON.parse(raw);
-    fields = (parsed.fields || []).filter((f) => f.type === "ProjectV2SingleSelectField");
+    fields = (parsed.fields || []).filter(
+      (f) => f.type === "ProjectV2SingleSelectField",
+    );
   } catch {
-    console.log(dim("  Could not fetch project fields — falling back to manual entry."));
+    console.log(
+      dim("  Could not fetch project fields — falling back to manual entry."),
+    );
     return null;
   }
 
@@ -1857,36 +2093,40 @@ async function discoverProjectBoard(owner) {
    */
   function matchField(keyword) {
     // Exact match first (case-insensitive)
-    const exact = fields.find((f) => f.name.toLowerCase() === keyword.toLowerCase());
+    const exact = fields.find(
+      (f) => f.name.toLowerCase() === keyword.toLowerCase(),
+    );
     if (exact) return { field: exact, fuzzy: false };
     // Fuzzy: name contains keyword
-    const fuzzy = fields.find((f) => f.name.toLowerCase().includes(keyword.toLowerCase()));
+    const fuzzy = fields.find((f) =>
+      f.name.toLowerCase().includes(keyword.toLowerCase()),
+    );
     if (fuzzy) return { field: fuzzy, fuzzy: true };
     return null;
   }
 
   // Known field keys and their expected name keywords
   const FIELD_TARGETS = [
-    { key: "status",    keywords: ["status"] },
-    { key: "lane",      keywords: ["lane", "track"] },
+    { key: "status", keywords: ["status"] },
+    { key: "lane", keywords: ["lane", "track"] },
     { key: "component", keywords: ["component"] },
-    { key: "priority",  keywords: ["priority"] },
-    { key: "workflow",  keywords: ["workflow"] },
+    { key: "priority", keywords: ["priority"] },
+    { key: "workflow", keywords: ["workflow"] },
   ];
 
   // Known option name → forge.yaml key mappings per field
   const OPTION_MAPS = {
-    status:   { "todo": "todo", "in progress": "in_progress", "done": "done" },
-    lane:     { "fast": "fast", "feature": "feature", "sync": "sync" },
-    priority: { "p0": "p0", "p1": "p1", "p2": "p2", "p3": "p3" },
+    status: { todo: "todo", "in progress": "in_progress", done: "done" },
+    lane: { fast: "fast", feature: "feature", sync: "sync" },
+    priority: { p0: "p0", p1: "p1", p2: "p2", p3: "p3" },
     workflow: {
-      "investigating": "investigating",
+      investigating: "investigating",
       "ready to build": "ready_to_build",
-      "building": "building",
+      building: "building",
       "in review": "in_review",
-      "merged": "merged",
-      "invalid": "invalid",
-      "decomposed": "decomposed",
+      merged: "merged",
+      invalid: "invalid",
+      decomposed: "decomposed",
     },
     component: {}, // component options vary by project — map all options by slugifying the name
   };
@@ -1916,7 +2156,10 @@ async function discoverProjectBoard(owner) {
     if (target.key === "component") {
       // For component, map every option by slugifying its name (a–z, 0–9, underscore)
       for (const opt of field.options || []) {
-        const slug = opt.name.toLowerCase().replace(/[^a-z0-9]+/g, "_").replace(/^_|_$/g, "");
+        const slug = opt.name
+          .toLowerCase()
+          .replace(/[^a-z0-9]+/g, "_")
+          .replace(/^_|_$/g, "");
         mappedOptions[slug] = opt.id;
       }
     } else {
@@ -1939,8 +2182,15 @@ async function discoverProjectBoard(owner) {
   // -------------------------------------------------------------------------
   for (const { key, fieldName } of fuzzyMatches) {
     console.log("");
-    console.log(yellow(`  Fuzzy match: field "${fieldName}" mapped to forge.yaml key "${key}"`));
-    const accepted = await confirm(`  Accept this mapping (${fieldName} → ${key})?`, true);
+    console.log(
+      yellow(
+        `  Fuzzy match: field "${fieldName}" mapped to forge.yaml key "${key}"`,
+      ),
+    );
+    const accepted = await confirm(
+      `  Accept this mapping (${fieldName} → ${key})?`,
+      true,
+    );
     if (!accepted) {
       delete resolvedFieldIds[key];
       delete resolvedOptionIds[key];
@@ -1957,14 +2207,21 @@ async function discoverProjectBoard(owner) {
     "Fields:",
   ];
   for (const [key, id] of Object.entries(resolvedFieldIds)) {
-    const optCount = resolvedOptionIds[key] ? Object.keys(resolvedOptionIds[key]).length : 0;
-    const optLabel = optCount > 0 ? ` (${optCount} options)` : " (no options mapped)";
+    const optCount = resolvedOptionIds[key]
+      ? Object.keys(resolvedOptionIds[key]).length
+      : 0;
+    const optLabel =
+      optCount > 0 ? ` (${optCount} options)` : " (no options mapped)";
     summaryLines.push(`  ${key.padEnd(10)}: ${id}${optLabel}`);
   }
-  const unmapped = FIELD_TARGETS.map((t) => t.key).filter((k) => !resolvedFieldIds[k]);
+  const unmapped = FIELD_TARGETS.map((t) => t.key).filter(
+    (k) => !resolvedFieldIds[k],
+  );
   if (unmapped.length > 0) {
     summaryLines.push("");
-    summaryLines.push(`Not found:  ${unmapped.join(", ")} — placeholders will be used`);
+    summaryLines.push(
+      `Not found:  ${unmapped.join(", ")} — placeholders will be used`,
+    );
   }
 
   console.log("");
@@ -1972,7 +2229,11 @@ async function discoverProjectBoard(owner) {
 
   const confirmed = await confirm("  Use this configuration?", true);
   if (!confirmed) {
-    console.log(dim("  Skipped auto-discovery. You can add project_board manually in forge.yaml."));
+    console.log(
+      dim(
+        "  Skipped auto-discovery. You can add project_board manually in forge.yaml.",
+      ),
+    );
     return null;
   }
 
@@ -2005,40 +2266,66 @@ async function discoverProjectBoard(owner) {
  * @param {object} [opts.optionalSections.review]       - review section config
  * @param {object} [opts.optionalSections.verification] - verification section config
  */
-function buildForgeYamlContent({ owner, repo, projectName, description, root, worktreeBase, defaultBranch, stagingBranch, optionalSections = {} }) {
+function buildForgeYamlContent({
+  owner,
+  repo,
+  projectName,
+  description,
+  root,
+  worktreeBase,
+  defaultBranch,
+  stagingBranch,
+  optionalSections = {},
+}) {
   // Sanitize all user-supplied string values before template interpolation to prevent
   // YAML injection via double-quotes or embedded newlines in double-quoted scalars.
-  owner         = _sanitizeYamlValue(owner);
-  repo          = _sanitizeYamlValue(repo);
-  projectName   = _sanitizeYamlValue(projectName);
-  description   = _sanitizeYamlValue(description);
+  owner = _sanitizeYamlValue(owner);
+  repo = _sanitizeYamlValue(repo);
+  projectName = _sanitizeYamlValue(projectName);
+  description = _sanitizeYamlValue(description);
   defaultBranch = _sanitizeYamlValue(defaultBranch);
   stagingBranch = _sanitizeYamlValue(stagingBranch);
   // Path values: also escape backslashes so Windows paths are valid YAML.
   // Preserve rawRoot for use in path.join() operations — join() expects raw OS paths,
   // not YAML-escaped strings. Always apply _sanitizePathValue() to the join() result.
   const rawRoot = root;
-  root          = _sanitizePathValue(root);
-  worktreeBase  = _sanitizePathValue(worktreeBase);
+  root = _sanitizePathValue(root);
+  worktreeBase = _sanitizePathValue(worktreeBase);
 
   const { projectBoard, multiRepo, review, verification } = optionalSections;
 
   // Sanitize optional-section user-supplied strings.
-  const safeMultiRepo = multiRepo ? {
-    prefix:         _sanitizeYamlValue(multiRepo.prefix         || "sat"),
-    satelliteRepo:  _sanitizeYamlValue(multiRepo.satelliteRepo  || "your-satellite-repo"),
-    satelliteBranch: _sanitizeYamlValue(multiRepo.satelliteBranch || "main"),
-  } : null;
+  const safeMultiRepo = multiRepo
+    ? {
+        prefix: _sanitizeYamlValue(multiRepo.prefix || "sat"),
+        satelliteRepo: _sanitizeYamlValue(
+          multiRepo.satelliteRepo || "your-satellite-repo",
+        ),
+        satelliteBranch: _sanitizeYamlValue(
+          multiRepo.satelliteBranch || "main",
+        ),
+      }
+    : null;
 
-  const safeReview = review ? {
-    techStack: _sanitizeYamlValue(review.techStack || "Node.js, TypeScript, PostgreSQL"),
-    // context uses a block scalar (|) — only strip double-quotes; newlines are handled by split/join
-    context:   (review.context || "Add architecture notes and conventions here.").replace(/"/g, ""),
-  } : null;
+  const safeReview = review
+    ? {
+        techStack: _sanitizeYamlValue(
+          review.techStack || "Node.js, TypeScript, PostgreSQL",
+        ),
+        // context uses a block scalar (|) — only strip double-quotes; newlines are handled by split/join
+        context: (
+          review.context || "Add architecture notes and conventions here."
+        ).replace(/"/g, ""),
+      }
+    : null;
 
-  const safeVerification = verification ? {
-    healthEndpoint: _sanitizeYamlValue(verification.healthEndpoint || `https://api.${repo}.io/health`),
-  } : null;
+  const safeVerification = verification
+    ? {
+        healthEndpoint: _sanitizeYamlValue(
+          verification.healthEndpoint || `https://api.${repo}.io/health`,
+        ),
+      }
+    : null;
 
   // --- repos section ---
   const reposSection = safeMultiRepo
@@ -2072,7 +2359,9 @@ function buildForgeYamlContent({ owner, repo, projectName, description, root, wo
    * Only writes fields that have at least one mapped option.
    */
   function _buildOptionIdsBlock(optionIds) {
-    const entries = Object.entries(optionIds).filter(([, opts]) => Object.keys(opts).length > 0);
+    const entries = Object.entries(optionIds).filter(
+      ([, opts]) => Object.keys(opts).length > 0,
+    );
     if (entries.length === 0) return "";
     const lines = ["  option_ids:"];
     for (const [fieldKey, opts] of entries) {
@@ -2084,13 +2373,16 @@ function buildForgeYamlContent({ owner, repo, projectName, description, root, wo
     return "\n" + lines.join("\n");
   }
 
-  const fieldIdsBlock = FIELD_KEYS
-    .map((k) => `    ${k}: "${resolvedFieldIds[k] ?? "PVTSSF_xxxxxxxxxxxxxxxxxxxxxxxx"}"`)
-    .join("\n");
+  const fieldIdsBlock = FIELD_KEYS.map(
+    (k) =>
+      `    ${k}: "${resolvedFieldIds[k] ?? "PVTSSF_xxxxxxxxxxxxxxxxxxxxxxxx"}"`,
+  ).join("\n");
 
-  const optionIdsBlock = projectBoard?.optionIds ? _buildOptionIdsBlock(resolvedOptionIds) : "";
+  const optionIdsBlock = projectBoard?.optionIds
+    ? _buildOptionIdsBlock(resolvedOptionIds)
+    : "";
 
-  const hasDiscoveredId = !!(projectBoard?.projectId);
+  const hasDiscoveredId = !!projectBoard?.projectId;
 
   const projectBoardSection = projectBoard
     ? `project_board:
@@ -2225,10 +2517,16 @@ function _writeForgeYaml(opts) {
 function _printNextSteps({ remoteDetected }) {
   console.log(`${BOLD}Next steps:${RESET}`);
   if (!remoteDetected) {
-    console.log(`  ${YELLOW}!${RESET}  Edit ${CYAN}forge.yaml${RESET} — set project.owner and project.repo`);
+    console.log(
+      `  ${YELLOW}!${RESET}  Edit ${CYAN}forge.yaml${RESET} — set project.owner and project.repo`,
+    );
   }
-  console.log(`  1. Add ${CYAN}forge.yaml${RESET} to ${CYAN}.gitignore${RESET} if it contains sensitive paths`);
-  console.log(`  2. Run ${CYAN}/forgedock-init${RESET} inside Claude Code for guided AI-powered setup`);
+  console.log(
+    `  1. Add ${CYAN}forge.yaml${RESET} to ${CYAN}.gitignore${RESET} if it contains sensitive paths`,
+  );
+  console.log(
+    `  2. Run ${CYAN}/forgedock-init${RESET} inside Claude Code for guided AI-powered setup`,
+  );
   console.log("");
 }
 
@@ -2305,11 +2603,19 @@ function _parseSatelliteRepos(content) {
     }
     if (!inRepos) continue;
 
-    if (line.trim() === "default:") { continue; }
-    if (line.trim() === "satellites:") { inSatellites = true; continue; }
+    if (line.trim() === "default:") {
+      continue;
+    }
+    if (line.trim() === "satellites:") {
+      inSatellites = true;
+      continue;
+    }
 
     if (inSatellites && /^\s{6,}repo:/.test(line)) {
-      const raw = line.replace(/^\s+repo:\s*/, "").replace(/^["']|["']$/g, "").trim();
+      const raw = line
+        .replace(/^\s+repo:\s*/, "")
+        .replace(/^["']|["']$/g, "")
+        .trim();
       if (raw) repos.push(raw);
     }
   }
@@ -2331,7 +2637,11 @@ async function validate(forgeYamlPath) {
 
   // 1. Read forge.yaml
   if (!existsSync(forgeYamlPath)) {
-    checks.push({ label: "forge.yaml found", status: "error", note: `Not found: ${forgeYamlPath}` });
+    checks.push({
+      label: "forge.yaml found",
+      status: "error",
+      note: `Not found: ${forgeYamlPath}`,
+    });
     _renderValidationSummary(checks);
     return { passed: false, checks };
   }
@@ -2340,7 +2650,11 @@ async function validate(forgeYamlPath) {
   try {
     content = readFileSync(forgeYamlPath, "utf-8");
   } catch (err) {
-    checks.push({ label: "forge.yaml found", status: "error", note: `Cannot read: ${err.message}` });
+    checks.push({
+      label: "forge.yaml found",
+      status: "error",
+      note: `Cannot read: ${err.message}`,
+    });
     _renderValidationSummary(checks);
     return { passed: false, checks };
   }
@@ -2348,7 +2662,13 @@ async function validate(forgeYamlPath) {
   checks.push({ label: "forge.yaml found", status: "ok", note: forgeYamlPath });
 
   // 2. Required fields
-  const PLACEHOLDERS = new Set(["your-github-org", "your-repo-name", "", "your-org", "your-repo"]);
+  const PLACEHOLDERS = new Set([
+    "your-github-org",
+    "your-repo-name",
+    "",
+    "your-org",
+    "your-repo",
+  ]);
 
   const owner = _parseYamlKey(content, "project.owner");
   const repo = _parseYamlKey(content, "project.repo");
@@ -2363,7 +2683,11 @@ async function validate(forgeYamlPath) {
   if (!defaultBranch) missingFields.push("branches.default");
 
   if (missingFields.length === 0) {
-    checks.push({ label: "Required fields", status: "ok", note: `${owner}/${repo}` });
+    checks.push({
+      label: "Required fields",
+      status: "ok",
+      note: `${owner}/${repo}`,
+    });
   } else {
     checks.push({
       label: "Required fields",
@@ -2377,20 +2701,36 @@ async function validate(forgeYamlPath) {
     if (existsSync(root)) {
       checks.push({ label: "paths.root exists", status: "ok", note: root });
     } else {
-      checks.push({ label: "paths.root exists", status: "warn", note: `Directory not found: ${root}` });
+      checks.push({
+        label: "paths.root exists",
+        status: "warn",
+        note: `Directory not found: ${root}`,
+      });
     }
   }
 
   // 4. Create worktree_base if missing
   if (worktreeBase) {
     if (existsSync(worktreeBase)) {
-      checks.push({ label: "worktree_base exists", status: "ok", note: worktreeBase });
+      checks.push({
+        label: "worktree_base exists",
+        status: "ok",
+        note: worktreeBase,
+      });
     } else {
       try {
         await mkdir(worktreeBase, { recursive: true });
-        checks.push({ label: "worktree_base exists", status: "ok", note: `Created: ${worktreeBase}` });
+        checks.push({
+          label: "worktree_base exists",
+          status: "ok",
+          note: `Created: ${worktreeBase}`,
+        });
       } catch (err) {
-        checks.push({ label: "worktree_base exists", status: "warn", note: `Cannot create: ${err.message}` });
+        checks.push({
+          label: "worktree_base exists",
+          status: "warn",
+          note: `Cannot create: ${err.message}`,
+        });
       }
     }
   }
@@ -2398,11 +2738,19 @@ async function validate(forgeYamlPath) {
   // 5. GitHub repo access
   if (owner && repo && !PLACEHOLDERS.has(owner) && !PLACEHOLDERS.has(repo)) {
     try {
-      execFileSync("gh", ["repo", "view", `${owner}/${repo}`, "--json", "name"], {
-        stdio: ["pipe", "pipe", "pipe"],
-        timeout: 10000,
+      execFileSync(
+        "gh",
+        ["repo", "view", `${owner}/${repo}`, "--json", "name"],
+        {
+          stdio: ["pipe", "pipe", "pipe"],
+          timeout: 10000,
+        },
+      );
+      checks.push({
+        label: "GitHub repo accessible",
+        status: "ok",
+        note: `${owner}/${repo}`,
       });
-      checks.push({ label: "GitHub repo accessible", status: "ok", note: `${owner}/${repo}` });
     } catch {
       checks.push({
         label: "GitHub repo accessible",
@@ -2411,29 +2759,51 @@ async function validate(forgeYamlPath) {
       });
     }
   } else {
-    checks.push({ label: "GitHub repo accessible", status: "warn", note: "Skipped — owner/repo not set" });
+    checks.push({
+      label: "GitHub repo accessible",
+      status: "warn",
+      note: "Skipped — owner/repo not set",
+    });
   }
 
   // 6. Branch existence on remote
   const stagingBranch = _parseYamlKey(content, "branches.staging");
-  const branchesToCheck = [...new Set([defaultBranch, stagingBranch].filter(Boolean))];
+  const branchesToCheck = [
+    ...new Set([defaultBranch, stagingBranch].filter(Boolean)),
+  ];
 
   if (root && existsSync(root) && branchesToCheck.length > 0) {
     for (const branch of branchesToCheck) {
       try {
-        const result = execFileSync("git", ["ls-remote", "--heads", "origin", branch], {
-          cwd: root,
-          stdio: ["pipe", "pipe", "pipe"],
-          encoding: "utf-8",
-          timeout: 10000,
-        });
+        const result = execFileSync(
+          "git",
+          ["ls-remote", "--heads", "origin", branch],
+          {
+            cwd: root,
+            stdio: ["pipe", "pipe", "pipe"],
+            encoding: "utf-8",
+            timeout: 10000,
+          },
+        );
         if (result.trim()) {
-          checks.push({ label: `Branch: ${branch}`, status: "ok", note: "Exists on remote" });
+          checks.push({
+            label: `Branch: ${branch}`,
+            status: "ok",
+            note: "Exists on remote",
+          });
         } else {
-          checks.push({ label: `Branch: ${branch}`, status: "warn", note: "Not found on remote" });
+          checks.push({
+            label: `Branch: ${branch}`,
+            status: "warn",
+            note: "Not found on remote",
+          });
         }
       } catch {
-        checks.push({ label: `Branch: ${branch}`, status: "warn", note: "Cannot verify — git error" });
+        checks.push({
+          label: `Branch: ${branch}`,
+          status: "warn",
+          note: "Cannot verify — git error",
+        });
       }
     }
   }
@@ -2461,31 +2831,58 @@ async function validate(forgeYamlPath) {
         const result = execFileSync(
           "gh",
           [
-            "api", "graphql",
-            "-F", `id=${projectId}`,
-            "-f", "query=query($id: ID!) { node(id: $id) { id __typename } }",
+            "api",
+            "graphql",
+            "-F",
+            `id=${projectId}`,
+            "-f",
+            "query=query($id: ID!) { node(id: $id) { id __typename } }",
           ],
-          { stdio: ["pipe", "pipe", "pipe"], encoding: "utf-8", timeout: 10000 }
+          {
+            stdio: ["pipe", "pipe", "pipe"],
+            encoding: "utf-8",
+            timeout: 10000,
+          },
         );
         const parsed = JSON.parse(result);
         if (parsed?.data?.node?.id) {
-          checks.push({ label: "Project board configured", status: "ok", note: `${projectId.slice(0, 16)}... resolves` });
+          checks.push({
+            label: "Project board configured",
+            status: "ok",
+            note: `${projectId.slice(0, 16)}... resolves`,
+          });
         } else {
-          checks.push({ label: "Project board configured", status: "warn", note: "project_id may be invalid — verify with: gh project list" });
+          checks.push({
+            label: "Project board configured",
+            status: "warn",
+            note: "project_id may be invalid — verify with: gh project list",
+          });
         }
       } catch {
-        checks.push({ label: "Project board configured", status: "warn", note: "Cannot verify project_id — gh error" });
+        checks.push({
+          label: "Project board configured",
+          status: "warn",
+          note: "Cannot verify project_id — gh error",
+        });
       }
     }
   } else {
-    checks.push({ label: "Project board", status: "warn", note: "Not configured (optional)" });
+    checks.push({
+      label: "Project board",
+      status: "warn",
+      note: "Not configured (optional)",
+    });
   }
 
   // 8. Satellite repo access
   if (_sectionActive(content, "repos")) {
     const satellites = _parseSatelliteRepos(content);
     if (satellites.length === 0) {
-      checks.push({ label: "Satellite repos", status: "warn", note: "repos: section active but no satellites found" });
+      checks.push({
+        label: "Satellite repos",
+        status: "warn",
+        note: "repos: section active but no satellites found",
+      });
     } else {
       for (const sat of satellites) {
         try {
@@ -2493,14 +2890,26 @@ async function validate(forgeYamlPath) {
             stdio: ["pipe", "pipe", "pipe"],
             timeout: 10000,
           });
-          checks.push({ label: `Satellite: ${sat}`, status: "ok", note: "Accessible" });
+          checks.push({
+            label: `Satellite: ${sat}`,
+            status: "ok",
+            note: "Accessible",
+          });
         } catch {
-          checks.push({ label: `Satellite: ${sat}`, status: "warn", note: "Cannot access — check repo name or gh auth" });
+          checks.push({
+            label: `Satellite: ${sat}`,
+            status: "warn",
+            note: "Cannot access — check repo name or gh auth",
+          });
         }
       }
     }
   } else {
-    checks.push({ label: "Satellite repos", status: "warn", note: "Not configured (optional)" });
+    checks.push({
+      label: "Satellite repos",
+      status: "warn",
+      note: "Not configured (optional)",
+    });
   }
 
   _renderValidationSummary(checks);
@@ -2534,17 +2943,25 @@ function _renderValidationSummary(checks) {
   }
 
   const hasErrors = checks.some((c) => c.status === "error");
-  const boardOk = checks.some((c) => c.label === "Project board configured" && c.status === "ok");
+  const boardOk = checks.some(
+    (c) => c.label === "Project board configured" && c.status === "ok",
+  );
 
   lines.push("");
   lines.push(`  ${bold("Next steps:")}`);
   if (hasErrors) {
-    lines.push(`  ${dim("•")} Edit ${cyan("forge.yaml")} to fix the errors above`);
+    lines.push(
+      `  ${dim("•")} Edit ${cyan("forge.yaml")} to fix the errors above`,
+    );
   }
   if (!boardOk) {
-    lines.push(`  ${dim("•")} Run ${cyan("/forgedock-init")} for AI-powered optional section setup`);
+    lines.push(
+      `  ${dim("•")} Run ${cyan("/forgedock-init")} for AI-powered optional section setup`,
+    );
   }
-  lines.push(`  ${dim("•")} Run ${cyan("/work-on next")} to start your first task`);
+  lines.push(
+    `  ${dim("•")} Run ${cyan("/work-on next")} to start your first task`,
+  );
   lines.push("");
 
   process.stdout.write(box(lines, { title: "Config Validation" }));
@@ -2554,7 +2971,7 @@ function _renderValidationSummary(checks) {
 // Bot credentials — store in ~/.forgedock/credentials.json (NOT forge.yaml)
 // ---------------------------------------------------------------------------
 
-const FORGEDOCK_HOME = join(process.env.HOME, ".forgedock");
+const FORGEDOCK_HOME = join(HOME, ".forgedock");
 const CREDENTIALS_FILE = join(FORGEDOCK_HOME, "credentials.json");
 
 /**
@@ -2571,7 +2988,10 @@ async function saveBotCredentials(creds) {
   chmodSync(FORGEDOCK_HOME, 0o700);
   const existing = loadBotCredentials() ?? {};
   const updated = { ...existing, bot: creds };
-  writeFileSync(CREDENTIALS_FILE, JSON.stringify(updated, null, 2) + "\n", { encoding: "utf-8", mode: 0o600 });
+  writeFileSync(CREDENTIALS_FILE, JSON.stringify(updated, null, 2) + "\n", {
+    encoding: "utf-8",
+    mode: 0o600,
+  });
   // Tighten permissions on files created before this fix (mode is only applied at creation time)
   chmodSync(CREDENTIALS_FILE, 0o600);
 }
@@ -2606,12 +3026,14 @@ function loadBotCredentials() {
 function generateAppJwt(appId, privateKey) {
   const now = Math.floor(Date.now() / 1000);
   const payload = {
-    iat: now - 60,   // issued 60s ago to account for clock skew
-    exp: now + 600,  // expires in 10 minutes (GitHub max)
+    iat: now - 60, // issued 60s ago to account for clock skew
+    exp: now + 600, // expires in 10 minutes (GitHub max)
     iss: appId,
   };
 
-  const header = Buffer.from(JSON.stringify({ alg: "RS256", typ: "JWT" })).toString("base64url");
+  const header = Buffer.from(
+    JSON.stringify({ alg: "RS256", typ: "JWT" }),
+  ).toString("base64url");
   const body = Buffer.from(JSON.stringify(payload)).toString("base64url");
   const unsigned = `${header}.${body}`;
 
@@ -2632,17 +3054,19 @@ function generateAppJwt(appId, privateKey) {
  */
 async function connectExistingBot() {
   console.log("");
-  console.log(box(
-    [
-      `${bold("Connect an existing GitHub App")}`,
-      "",
-      "You'll need:",
-      `  • App ID  (GitHub → Settings → Developer settings → GitHub Apps → your app)`,
-      `  • Private key file  (.pem downloaded from app settings)`,
-      `  • Installation ID  (GitHub → your org → Settings → Installed Apps → your app → configure → URL)`,
-    ].join("\n"),
-    { title: "Connect GitHub App" }
-  ));
+  console.log(
+    box(
+      [
+        `${bold("Connect an existing GitHub App")}`,
+        "",
+        "You'll need:",
+        `  • App ID  (GitHub → Settings → Developer settings → GitHub Apps → your app)`,
+        `  • Private key file  (.pem downloaded from app settings)`,
+        `  • Installation ID  (GitHub → your org → Settings → Installed Apps → your app → configure → URL)`,
+      ].join("\n"),
+      { title: "Connect GitHub App" },
+    ),
+  );
   console.log("");
 
   const appId = await input("App ID (numeric):", "");
@@ -2661,7 +3085,9 @@ async function connectExistingBot() {
   if (trimmedKeyPath.startsWith("~")) {
     const rel = relative(home, resolvedKeyPath);
     if (rel.startsWith("..") || isAbsolute(rel)) {
-      console.log(`  ${RED}Invalid path: cannot traverse outside home directory.${RESET}`);
+      console.log(
+        `  ${RED}Invalid path: cannot traverse outside home directory.${RESET}`,
+      );
       return false;
     }
   }
@@ -2672,7 +3098,9 @@ async function connectExistingBot() {
 
   const installationId = await input("Installation ID (numeric):", "");
   if (!installationId || !/^\d+$/.test(installationId.trim())) {
-    console.log(`  ${RED}Invalid Installation ID — must be a numeric string.${RESET}`);
+    console.log(
+      `  ${RED}Invalid Installation ID — must be a numeric string.${RESET}`,
+    );
     return false;
   }
 
@@ -2698,11 +3126,15 @@ async function connectExistingBot() {
     });
     if (!resp.ok) {
       const body = await resp.json().catch(() => ({}));
-      console.log(`  ${RED}GitHub API error ${resp.status}: ${body.message ?? "unknown"}${RESET}`);
+      console.log(
+        `  ${RED}GitHub API error ${resp.status}: ${body.message ?? "unknown"}${RESET}`,
+      );
       return false;
     }
     const appData = await resp.json();
-    console.log(`  ${GREEN}Connected!${RESET} App: ${bold(appData.name)} (id: ${appId.trim()})`);
+    console.log(
+      `  ${GREEN}Connected!${RESET} App: ${bold(appData.name)} (id: ${appId.trim()})`,
+    );
   } catch (err) {
     console.log(`  ${RED}Validation failed: ${err.message}${RESET}`);
     return false;
@@ -2735,8 +3167,8 @@ async function botStatus() {
   if (!creds) {
     console.log(
       `  ${YELLOW}No bot credentials found.${RESET}\n` +
-      `  Run ${cyan("npx forgedock bot setup")} to configure a GitHub App, or\n` +
-      `  add credentials to ${cyan(CREDENTIALS_FILE)}.`
+        `  Run ${cyan("npx forgedock bot setup")} to configure a GitHub App, or\n` +
+        `  add credentials to ${cyan(CREDENTIALS_FILE)}.`,
     );
     console.log("");
     return;
@@ -2749,7 +3181,9 @@ async function botStatus() {
 
   // Check private key file
   if (!existsSync(creds.privateKeyPath)) {
-    console.log(`  ${RED}Private key file not found: ${creds.privateKeyPath}${RESET}`);
+    console.log(
+      `  ${RED}Private key file not found: ${creds.privateKeyPath}${RESET}`,
+    );
     console.log(`  Run ${cyan("npx forgedock bot setup")} to reconfigure.`);
     console.log("");
     return;
@@ -2778,12 +3212,16 @@ async function botStatus() {
     });
     if (!appResp.ok) {
       const body = await appResp.json().catch(() => ({}));
-      console.log(`  ${RED}GitHub API error ${appResp.status}: ${body.message ?? "unknown"}${RESET}`);
+      console.log(
+        `  ${RED}GitHub API error ${appResp.status}: ${body.message ?? "unknown"}${RESET}`,
+      );
       console.log("");
       return;
     }
     const appData = await appResp.json();
-    console.log(`  ${GREEN}Connected${RESET} — App: ${bold(appData.name)} (slug: @${appData.slug})`);
+    console.log(
+      `  ${GREEN}Connected${RESET} — App: ${bold(appData.name)} (slug: @${appData.slug})`,
+    );
 
     // Rate limit for app
     const rlResp = await fetch("https://api.github.com/rate_limit", {
@@ -2799,7 +3237,9 @@ async function botStatus() {
       if (core) {
         const used = core.limit - core.remaining;
         const resetTime = new Date(core.reset * 1000).toLocaleTimeString();
-        console.log(`  Rate limit:      ${cyan(core.remaining)}/${core.limit} remaining (${used} used, resets ${resetTime})`);
+        console.log(
+          `  Rate limit:      ${cyan(core.remaining)}/${core.limit} remaining (${used} used, resets ${resetTime})`,
+        );
       }
     }
   } catch (err) {
@@ -2820,19 +3260,21 @@ async function botStatus() {
  */
 async function botSetup() {
   console.log("");
-  console.log(box(
-    [
-      `${bold("GitHub Bot Setup")} ${dim("(Optional)")}`,
-      "",
-      "A GitHub App gives ForgeDock its own identity",
-      "for pipeline operations. Benefits:",
-      `  ${cyan("•")} Separate audit trail for bot actions`,
-      `  ${cyan("•")} Higher API rate limits`,
-      `  ${cyan("•")} Webhook-driven automation (future)`,
-      `  ${cyan("•")} Multi-user team support`,
-    ].join("\n"),
-    { title: "GitHub Bot" }
-  ));
+  console.log(
+    box(
+      [
+        `${bold("GitHub Bot Setup")} ${dim("(Optional)")}`,
+        "",
+        "A GitHub App gives ForgeDock its own identity",
+        "for pipeline operations. Benefits:",
+        `  ${cyan("•")} Separate audit trail for bot actions`,
+        `  ${cyan("•")} Higher API rate limits`,
+        `  ${cyan("•")} Webhook-driven automation (future)`,
+        `  ${cyan("•")} Multi-user team support`,
+      ].join("\n"),
+      { title: "GitHub Bot" },
+    ),
+  );
   console.log("");
 
   const action = await select("How would you like to set up the bot?", [
@@ -2843,7 +3285,7 @@ async function botSetup() {
 
   if (action === "skip") {
     console.log(
-      `  ${dim("Skipped.")} Run ${cyan("npx forgedock bot setup")} later to configure a bot identity.`
+      `  ${dim("Skipped.")} Run ${cyan("npx forgedock bot setup")} later to configure a bot identity.`,
     );
     return;
   }
@@ -2855,7 +3297,9 @@ async function botSetup() {
     try {
       manifest = JSON.parse(readFileSync(manifestPath, "utf-8"));
     } catch {
-      console.log(`  ${RED}Could not read github-app-manifest.json — skipping.${RESET}`);
+      console.log(
+        `  ${RED}Could not read github-app-manifest.json — skipping.${RESET}`,
+      );
       return;
     }
 
@@ -2863,19 +3307,26 @@ async function botSetup() {
     const createUrl = `https://github.com/settings/apps/new?manifest=${encodedManifest}`;
 
     console.log("");
-    console.log(`  ${bold("Opening GitHub App registration in your browser…")}`);
+    console.log(
+      `  ${bold("Opening GitHub App registration in your browser…")}`,
+    );
     console.log(`  URL: ${cyan(createUrl.substring(0, 80))}…`);
     console.log("");
 
     // Try to open the browser
     try {
-      const opener = process.platform === "win32" ? "start" :
-                     process.platform === "darwin" ? "open" : "xdg-open";
+      const opener =
+        process.platform === "win32"
+          ? "start"
+          : process.platform === "darwin"
+            ? "open"
+            : "xdg-open";
       // On Windows, `start "url"` treats the first quoted arg as the window title.
       // Pass an empty title placeholder so the URL is treated as the target: `start "" "url"`.
-      const cmd = process.platform === "win32"
-        ? `start "" "${createUrl}"`
-        : `${opener} "${createUrl}"`;
+      const cmd =
+        process.platform === "win32"
+          ? `start "" "${createUrl}"`
+          : `${opener} "${createUrl}"`;
       execSync(cmd, { stdio: ["pipe", "pipe", "pipe"] });
     } catch {
       console.log(`  ${YELLOW}Could not open browser automatically.${RESET}`);
@@ -2887,7 +3338,9 @@ async function botSetup() {
     console.log("  After creating the app in your browser:");
     console.log(`  1. Download the private key (.pem) from the app settings`);
     console.log(`  2. Note your App ID and Installation ID`);
-    console.log(`  3. Run ${cyan("npx forgedock bot setup")} again and choose \"Connect existing\"`);
+    console.log(
+      `  3. Run ${cyan("npx forgedock bot setup")} again and choose \"Connect existing\"`,
+    );
     console.log("");
     return;
   }
@@ -2901,19 +3354,39 @@ async function botSetup() {
 
 function help() {
   console.log("");
-  console.log(`${BOLD}ForgeDock${RESET} — GitHub as a knowledge graph for AI agents`);
+  console.log(
+    `${BOLD}ForgeDock${RESET} — GitHub as a knowledge graph for AI agents`,
+  );
   console.log("");
   console.log("Usage:");
-  console.log(`  ${CYAN}npx forgedock${RESET}            Launch TUI onboarding (interactive)`);
+  console.log(
+    `  ${CYAN}npx forgedock${RESET}            Launch TUI onboarding (interactive)`,
+  );
   console.log(`  ${CYAN}npx forgedock install${RESET}    Install commands`);
-  console.log(`  ${CYAN}npx forgedock init${RESET}       Generate forge.yaml config for your project`);
-  console.log(`  ${CYAN}npx forgedock validate${RESET}   Validate forge.yaml configuration`);
-  console.log(`  ${CYAN}npx forgedock uninstall${RESET}  Remove commands (interactive, with confirmation)`);
-  console.log(`  ${CYAN}npx forgedock uninstall --yes${RESET}  Remove commands without prompts (non-interactive)`);
-  console.log(`  ${CYAN}npx forgedock update${RESET}     Pull latest & reinstall`);
-  console.log(`  ${CYAN}npx forgedock bot${RESET}        Manage GitHub App bot identity`);
-  console.log(`  ${CYAN}npx forgedock bot status${RESET} Show bot health and rate limit usage`);
-  console.log(`  ${CYAN}npx forgedock bot setup${RESET}  Configure GitHub App bot (interactive)`);
+  console.log(
+    `  ${CYAN}npx forgedock init${RESET}       Generate forge.yaml config for your project`,
+  );
+  console.log(
+    `  ${CYAN}npx forgedock validate${RESET}   Validate forge.yaml configuration`,
+  );
+  console.log(
+    `  ${CYAN}npx forgedock uninstall${RESET}  Remove commands (interactive, with confirmation)`,
+  );
+  console.log(
+    `  ${CYAN}npx forgedock uninstall --yes${RESET}  Remove commands without prompts (non-interactive)`,
+  );
+  console.log(
+    `  ${CYAN}npx forgedock update${RESET}     Pull latest & reinstall`,
+  );
+  console.log(
+    `  ${CYAN}npx forgedock bot${RESET}        Manage GitHub App bot identity`,
+  );
+  console.log(
+    `  ${CYAN}npx forgedock bot status${RESET} Show bot health and rate limit usage`,
+  );
+  console.log(
+    `  ${CYAN}npx forgedock bot setup${RESET}  Configure GitHub App bot (interactive)`,
+  );
   console.log(`  ${CYAN}npx forgedock help${RESET}       Show this help`);
   console.log("");
 }
@@ -2927,7 +3400,9 @@ async function tuiOnboarding() {
 
   // Non-TTY fallback: skip TUI and detection, run install directly
   if (!process.stdout.isTTY) {
-    console.log(dim("  Non-interactive environment detected — running install."));
+    console.log(
+      dim("  Non-interactive environment detected — running install."),
+    );
     console.log("");
     await install();
     return;
@@ -2945,13 +3420,16 @@ async function tuiOnboarding() {
       ? `v${detection.installedVersion}`
       : `v${detection.currentVersion}`;
     console.log(
-      `  ${green("Everything up to date.")} ForgeDock ${versionLabel} is installed and configured.`
+      `  ${green("Everything up to date.")} ForgeDock ${versionLabel} is installed and configured.`,
     );
     console.log("");
 
     const action = await select("What would you like to do?", [
       { label: "Nothing — exit", value: "exit" },
-      { label: "Reconfigure project (regenerate forge.yaml)", value: "reconfigure" },
+      {
+        label: "Reconfigure project (regenerate forge.yaml)",
+        value: "reconfigure",
+      },
       { label: "Reinstall commands", value: "reinstall" },
     ]);
 
@@ -2973,8 +3451,8 @@ async function tuiOnboarding() {
   if (detection.state === "update-available") {
     console.log(
       `  ${yellow("Update available.")} ` +
-      `Installed: ${dim(`v${detection.installedVersion ?? "unknown"}`)}  →  ` +
-      `New: ${green(`v${detection.currentVersion}`)}`
+        `Installed: ${dim(`v${detection.installedVersion ?? "unknown"}`)}  →  ` +
+        `New: ${green(`v${detection.currentVersion}`)}`,
     );
     console.log("");
 
@@ -3004,7 +3482,10 @@ async function tuiOnboarding() {
     if (success) {
       // Show command diff if any commands were added or removed
       const commandsAfterUpdate = await getInstalledCommandNames();
-      const diffLines = formatCommandDiff(commandsBeforeUpdate, commandsAfterUpdate);
+      const diffLines = formatCommandDiff(
+        commandsBeforeUpdate,
+        commandsAfterUpdate,
+      );
       if (diffLines.length > 0) {
         process.stdout.write(box(diffLines, { title: "Command changes" }));
         console.log("");
@@ -3012,14 +3493,14 @@ async function tuiOnboarding() {
 
       console.log(
         green("Update complete!") +
-        ` ForgeDock v${detection.currentVersion} is now active.`
+          ` ForgeDock v${detection.currentVersion} is now active.`,
       );
       console.log("");
     } else {
       console.log("");
       console.log(
         yellow("Update incomplete.") +
-        ` Re-run ${cyan("npx forgedock")} to try again.`
+          ` Re-run ${cyan("npx forgedock")} to try again.`,
       );
       console.log("");
       process.exit(1);
@@ -3036,7 +3517,7 @@ async function tuiOnboarding() {
       ? `v${detection.installedVersion}`
       : `v${detection.currentVersion}`;
     console.log(
-      `  ${yellow("Commands installed")} (${versionLabel}) but no ${cyan("forge.yaml")} found in this directory.`
+      `  ${yellow("Commands installed")} (${versionLabel}) but no ${cyan("forge.yaml")} found in this directory.`,
     );
     console.log("");
 
@@ -3047,13 +3528,13 @@ async function tuiOnboarding() {
         run: async () => {
           const shouldInit = await confirm(
             "Generate forge.yaml for this project?",
-            true
+            true,
           );
           if (shouldInit) {
             await init();
           } else {
             console.log(
-              `  ${dim("Skipped.")} Run ${cyan("npx forgedock init")} later to generate forge.yaml.`
+              `  ${dim("Skipped.")} Run ${cyan("npx forgedock init")} later to generate forge.yaml.`,
             );
           }
         },
@@ -3064,7 +3545,9 @@ async function tuiOnboarding() {
         run: async () => {
           const forgeYamlPath = join(process.cwd(), "forge.yaml");
           if (!existsSync(forgeYamlPath)) {
-            console.log(`  ${dim("No forge.yaml found — skipping validation.")}`);
+            console.log(
+              `  ${dim("No forge.yaml found — skipping validation.")}`,
+            );
             return;
           }
           await validate(forgeYamlPath);
@@ -3078,14 +3561,14 @@ async function tuiOnboarding() {
     if (success) {
       console.log(
         green("Done!") +
-        ` Run ${cyan("/help")} inside Claude Code to see available commands.`
+          ` Run ${cyan("/help")} inside Claude Code to see available commands.`,
       );
       console.log("");
     } else {
       console.log("");
       console.log(
         yellow("Setup incomplete.") +
-        ` Re-run ${cyan("npx forgedock")} to try again.`
+          ` Re-run ${cyan("npx forgedock")} to try again.`,
       );
       console.log("");
       process.exit(1);
@@ -3099,10 +3582,10 @@ async function tuiOnboarding() {
   // -------------------------------------------------------------------------
   if (detection.state === "version-unknown") {
     console.log(
-      `  ${yellow("ForgeDock commands are installed")} but the installed version could not be determined.`
+      `  ${yellow("ForgeDock commands are installed")} but the installed version could not be determined.`,
     );
     console.log(
-      `  ${dim("The package.json for the installed copy is missing or unreadable.")}`
+      `  ${dim("The package.json for the installed copy is missing or unreadable.")}`,
     );
     console.log("");
 
@@ -3144,19 +3627,21 @@ async function tuiOnboarding() {
       run: async () => {
         const forgeYamlPath = join(process.cwd(), "forge.yaml");
         if (existsSync(forgeYamlPath)) {
-          console.log(`  ${green("forge.yaml")} already exists — skipping generation.`);
+          console.log(
+            `  ${green("forge.yaml")} already exists — skipping generation.`,
+          );
           return;
         }
 
         const shouldInit = await confirm(
           "No forge.yaml found. Generate one now?",
-          true
+          true,
         );
         if (shouldInit) {
           await init();
         } else {
           console.log(
-            `  ${dim("Skipped.")} Run ${cyan("npx forgedock init")} later to generate forge.yaml.`
+            `  ${dim("Skipped.")} Run ${cyan("npx forgedock init")} later to generate forge.yaml.`,
           );
         }
       },
@@ -3188,14 +3673,14 @@ async function tuiOnboarding() {
   if (success) {
     console.log(
       green("Setup complete!") +
-      ` Run ${cyan("/help")} inside Claude Code to see available commands.`
+        ` Run ${cyan("/help")} inside Claude Code to see available commands.`,
     );
     console.log("");
   } else {
     console.log("");
     console.log(
       yellow("Setup incomplete.") +
-      ` Re-run ${cyan("npx forgedock")} to try again.`
+        ` Re-run ${cyan("npx forgedock")} to try again.`,
     );
     console.log("");
     process.exit(1);
