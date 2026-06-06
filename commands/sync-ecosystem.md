@@ -217,7 +217,7 @@ Create issues in the affected repos:
 # For satellite repos (separate GitHub repos):
 gh issue create -R {TARGET_REPO} \
   --title "feat(sync): {description of what API change needs to be reflected}" \
-  --label "feature,P2" \
+  --label "feature,priority:P2" \
   --body "$(cat <<'BODY_EOF'
 ## Problem
 
@@ -254,7 +254,7 @@ BODY_EOF
 # For monorepo issues (SDKs, packages inside a single repo):
 gh issue create \
   --title "feat(sync): {description of what API change needs to be reflected}" \
-  --label "feature,P2" \
+  --label "feature,priority:P2" \
   --body "$(cat <<'BODY_EOF'
 ## Problem
 

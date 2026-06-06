@@ -192,7 +192,7 @@ fi
 
 ```bash
 gh issue create --title "fix: {original_title} (reverted — needs new approach)" \
-  --label "bug,P1" \
+  --label "bug,priority:P1" \
   --body "$(cat <<'BODY_EOF'
 ## Problem
 
