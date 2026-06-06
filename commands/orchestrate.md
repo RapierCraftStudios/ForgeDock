@@ -738,7 +738,7 @@ for FINDING_NUM in {spawned_finding_numbers}; do
   FINDING_DATA=$(gh issue view $FINDING_NUM -R {GH_REPO} --json labels,title,body \
     --jq '{labels: [.labels[].name], title: .title, body: .body}')
 
-  PRIORITY=$(echo "$FINDING_DATA" | jq -r '.labels[] | select(startswith("P")) | .' | head -1)
+  PRIORITY=$(echo "$FINDING_DATA" | jq -r '.labels[] | select(startswith("priority:P")) | ltrimstr("priority:")' | head -1)
   TITLE=$(echo "$FINDING_DATA" | jq -r '.title')
 
   # Heuristic 1: Generation check — source issue has review-finding label (always defer, even for P1/P2)
