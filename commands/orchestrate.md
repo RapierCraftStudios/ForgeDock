@@ -363,11 +363,17 @@ When two issues modify different files that **import from the same utility/init 
 
 **Apply inferences:**
 ```
-# High-fan-in files — if ANY issue touches these, serialize it with all same-service issues:
+# High-fan-in files — if ANY issue touches these, serialize it with all same-service issues.
+# Read layout paths from forge.yaml review.layout; fall back to AlterLab defaults.
+# Example (pseudo-code — adapt to your forge.yaml parsing method):
+#   API_MAIN   = forge_yaml.review.layout.api_main   ?? "services/api/app/main.py"
+#   WORKER_DIR = forge_yaml.review.layout.worker      ?? "services/worker"
+#   PAGES_ROOT = forge_yaml.review.layout.pages       ?? "web/src/app"
+
 HIGH_FAN_IN = [
-  "services/api/app/main.py",
-  "services/worker/worker/unified_consumer.py",
-  "web/src/app/layout.tsx",
+  API_MAIN,                          # e.g. "services/api/app/main.py" — router/middleware registration
+  WORKER_DIR + "/unified_consumer.py",  # e.g. "services/worker/worker/unified_consumer.py" — adjust to your worker entrypoint
+  PAGES_ROOT + "/layout.tsx",        # e.g. "web/src/app/layout.tsx" — root layout for all pages
   "docker-compose.yml",
   "docker-compose.prod.yml",
   ".env.example"

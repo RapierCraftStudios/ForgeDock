@@ -153,13 +153,20 @@ done
 # Full file diff summary
 git diff --stat origin/$TARGET..origin/$SOURCE
 
+# Read layout paths from forge.yaml, fall back to AlterLab defaults
+LAYOUT_API=$(yq '.review.layout.api // "services/api"' $PROJECT_ROOT/forge.yaml 2>/dev/null || echo "services/api")
+LAYOUT_WORKER=$(yq '.review.layout.worker // "services/worker"' $PROJECT_ROOT/forge.yaml 2>/dev/null || echo "services/worker")
+LAYOUT_PAGES=$(yq '.review.layout.pages // "web/src/app"' $PROJECT_ROOT/forge.yaml 2>/dev/null || echo "web/src/app")
+# Derive web root from pages root (strip trailing /src/app or similar suffix if present)
+LAYOUT_WEB=$(echo "$LAYOUT_PAGES" | sed 's|/src/app$||; s|/src$||')
+
 # Categorize by service
 echo "=== By Service ==="
 git diff --name-only origin/$TARGET..origin/$SOURCE | sort | while read f; do
   case "$f" in
-    services/api/*) echo "API: $f" ;;
-    services/worker/*) echo "WORKER: $f" ;;
-    web/*) echo "WEB: $f" ;;
+    ${LAYOUT_API}/*) echo "API: $f" ;;
+    ${LAYOUT_WORKER}/*) echo "WORKER: $f" ;;
+    ${LAYOUT_WEB}/*) echo "WEB: $f" ;;
     shared/*) echo "SHARED: $f" ;;
     infra/*) echo "INFRA: $f" ;;
     *) echo "OTHER: $f" ;;
@@ -170,8 +177,11 @@ done | sort
 ### Step 2E: Migration check
 
 ```bash
+# Read migrations path from forge.yaml, fall back to infra/migrations
+LAYOUT_MIGRATIONS=$(yq '.review.layout.migrations // "infra/migrations"' $PROJECT_ROOT/forge.yaml 2>/dev/null || echo "infra/migrations")
+
 # Are there new migrations?
-MIGRATIONS=$(git diff --name-only origin/$TARGET..origin/$SOURCE | grep "^infra/migrations/" | sort)
+MIGRATIONS=$(git diff --name-only origin/$TARGET..origin/$SOURCE | grep "^${LAYOUT_MIGRATIONS}/" | sort)
 if [ -n "$MIGRATIONS" ]; then
   echo "⚠️ DATABASE MIGRATIONS INCLUDED:"
   echo "$MIGRATIONS"
