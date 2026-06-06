@@ -11,6 +11,7 @@ argument-hint: [--fix | --recon-only | --fix --limit 5 | --dry-run]
 - `{CREDENTIALS_FILE}` ← `paths.credentials.file` (optional) — path to credentials YAML for analytics APIs
 - `{SERVER_SSH}` ← `services.server_ssh` (optional) — SSH target for production server health checks (e.g., `ubuntu@1.2.3.4`)
 - `{EMEMO_PATH}` ← `services.ememo_path` (optional) — path on production server to open eMemo files
+- `{BILLING_ENABLED}` ← `billing.enabled` (optional, default `false`) — set to `true` to enable Stripe data collection in the Analytics Snapshot agent
 
 You are an autonomous improvement engine for this project. Your job is to **find what's wrong, create trackable issues, and optionally fix the highest-impact ones** — all in a single cycle. Every cycle leaves the platform measurably better than before.
 
@@ -140,8 +141,9 @@ Analyze GitHub issue backlog:
 Quick analytics pulse — just the key metrics, not a full audit:
 1. Read credentials from {CREDENTIALS_FILE} (set via paths.credentials.file in forge.yaml)
 2. GSC: mcp__gsc__search_analytics for last 7 days — total clicks, impressions, avg position
-3. Stripe: mcp__stripe__retrieve_balance — current balance
-4. Return: clicks trend (up/down), any revenue, notable changes
+3. Stripe (only if {BILLING_ENABLED} is true): mcp__stripe__retrieve_balance — current balance.
+   Skip this step entirely if {BILLING_ENABLED} is false — do NOT call any Stripe MCP tools.
+4. Return: clicks trend (up/down), revenue (or "N/A — billing.enabled: false" if skipped), notable changes
 ```
 
 ### 1B: Collect results
@@ -291,7 +293,7 @@ Print a structured report:
 
 ### Analytics Pulse
 - Clicks (7d): {N} ({trend})
-- Revenue: ${N}
+- Revenue: ${N} (or "N/A — billing.enabled: false" if Stripe step was skipped)
 
 ### Actions Taken
 - Issues created: {count} ({list with numbers})
