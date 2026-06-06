@@ -816,27 +816,44 @@ Advisory only — does not block build. Check for lambda/callable in connect_arg
 
 Skip if no new env vars introduced.
 
+**Config variables used by this phase** (set in `forge.yaml`):
+- `{deploy.secrets_backend}` — secrets delivery method (`sops`, `aws-sm`, `vault`, `ci-env`, `none`). When absent or not `sops`, SOPS-specific checks below are skipped with an explicit log message.
+- `{verification.services[name].container}` — container name for post-deploy verification. Resolved by matching the service name; falls back to `{service}` (bare name) when not configured.
+
 For each new env var, verify present in ALL required locations:
 
 | Location | Required for |
 |----------|-------------|
 | `.env.example` | All new vars |
-| `infra/secrets/prod.enc.yaml` (SOPS) | Production secrets |
-| `infra/decrypt-secrets.sh` ENV_MAPPING | All vars in deploy chain |
-| `app/env_validation.py` | API service vars |
-| `docker-compose.prod.yml` | Vars needing explicit injection |
+| Secrets backend (see `deploy.secrets_backend`) | Secret vars — skip if backend is `none` or unset |
+| `app/env_validation.py` | API service vars (if project has one) |
+| `docker-compose.prod.yml` | Vars needing explicit injection (if project uses Docker Compose) |
 
-Deploy chain: SOPS → `decrypt-secrets.sh` (ENV_MAPPING) → `.env.secrets` → `merge-env-secrets.sh` → `.env.production` → docker-compose `env_file`.
+**Secrets backend check** *(trigger: `deploy.secrets_backend == "sops"`)*:
 
-**Operator-set var classification** *(trigger: new env var is NOT present in `infra/secrets/prod.enc.yaml`)*: <!-- Added: forge#380 -->
+If the project uses SOPS, verify the new var is present in all SOPS chain locations:
+- `infra/secrets/prod.enc.yaml` — SOPS-encrypted secret store
+- `infra/decrypt-secrets.sh` ENV_MAPPING — maps SOPS key to env var name
+- Deploy chain: SOPS → `decrypt-secrets.sh` (ENV_MAPPING) → `.env.secrets` → `merge-env-secrets.sh` → `.env.production` → docker-compose `env_file`
 
-Some env vars are operator-set (non-secret, not sourced from SOPS) — they must be manually added to `.env.production` on the production server. The SOPS deploy chain does not carry them. When a new env var has no entry in `prod.enc.yaml`, classify it as operator-set and add a **HARD BLOCKER** item to the Testing Checklist:
+If `deploy.secrets_backend` is absent or not `sops`, skip these checks and log:
+> `SKIP: SOPS chain check — deploy.secrets_backend is not "sops". Configure deploy.secrets_backend in forge.yaml to enable.`
+
+**Operator-set var classification** *(trigger: new env var is NOT in the configured secrets backend)*: <!-- Added: forge#380 -->
+
+Some env vars are operator-set (non-secret, not sourced from the secrets backend) — they must be manually added to the runtime environment on the production server. When a new env var has no entry in the secrets backend, classify it as operator-set and add a **HARD BLOCKER** item to the Testing Checklist.
+
+Resolve the container name for the verification command:
+1. Look up the service in `forge.yaml → verification.services[]` by name — use the `container` field if present.
+2. If no matching entry, fall back to the bare service name: `{service}` (no suffix).
 
 ```
-- [ ] HARD BLOCKER: Add {VAR_NAME} to .env.production on the production server.
-      This var is operator-set (not in SOPS) — it does NOT flow through the automated
-      deploy chain. It must be added manually before or after deploy.
-      Verify with: docker exec {service}-blue env | grep {VAR_NAME}
+- [ ] HARD BLOCKER: Add {VAR_NAME} to the runtime environment on the production server.
+      This var is operator-set — it does NOT flow through the automated secrets chain.
+      It must be added manually before or after deploy.
+      Verify with: docker exec {CONTAINER_NAME} env | grep {VAR_NAME}
+      (CONTAINER_NAME resolved from verification.services[{service}].container in forge.yaml,
+       or bare service name if not configured)
 ```
 
 **`env_file` re-read warning** *(trigger: any new env var added to `.env.production` path)*:
@@ -847,11 +864,13 @@ Add this warning to the Testing Checklist whenever a new env var is introduced (
 
 **Post-deploy in-container verification** *(trigger: any new env var)*:
 
-Add the following to the Testing Checklist so the deployer can confirm delivery after deploy:
+Add the following to the Testing Checklist so the deployer can confirm delivery after deploy.
+
+Resolve `{CONTAINER_NAME}` from `forge.yaml → verification.services[{service}].container`; use `{service}` (bare) if the field is absent.
 
 ```bash
 # Verify env var reached the running container (run post-deploy)
-docker exec {service}-blue env | grep {VAR_NAME}
+docker exec {CONTAINER_NAME} env | grep {VAR_NAME}
 # Expected: {VAR_NAME}={value}
 # If blank: container was not recreated — run: docker compose up --no-deps --force-recreate {service}
 ```

@@ -10,7 +10,7 @@
 #   # Add forge.yaml to your .gitignore if it contains sensitive paths
 #
 # Required sections: project, paths, branches
-# Optional sections: repos, project_board, services, review, verification, billing
+# Optional sections: repos, project_board, services, review, verification, deploy, billing
 
 # =============================================================================
 # PROJECT (REQUIRED)
@@ -408,6 +408,42 @@ branches:
 #   #     typecheck: ""
 #   #     test: "cargo test"
 #   #     build: "cargo build"
+
+# =============================================================================
+# DEPLOY (OPTIONAL)
+# Deployment model configuration. Used by deploy-info, incident-response,
+# rollback, and work-on to trigger and verify deploys without hardcoding
+# workflow names, secrets chains, or container naming conventions.
+# Commands: deploy-info, incident-response, rollback, work-on (Phase 3J)
+# =============================================================================
+
+# deploy:
+#   # Filename of the GitHub Actions workflow used to trigger deploys.
+#   # Referenced as: gh workflow run {deploy.workflow} --ref {branch} -f ...
+#   # Set to "" or omit to skip workflow-trigger steps (CI/CD deploys automatically).
+#   # Example: "hotfix-deploy.yml", "deploy.yml", "release.yml"
+#   workflow: "hotfix-deploy.yml"
+#
+#   # Input parameter names for the deploy workflow.
+#   # Keys are semantic names used by pipeline commands; values are the actual
+#   # workflow_dispatch input names declared in the workflow file.
+#   # Omit fields whose workflow does not declare the corresponding input.
+#   workflow_inputs:
+#     # Which services to rebuild/restart (comma-separated or "all")
+#     services: "services"
+#     # Human-readable deploy reason logged by the workflow
+#     reason: "reason"
+#
+#   # Secrets backend used to deliver runtime secrets to containers.
+#   # Controls which secret-chain checks run in work-on (Phase 3J) and deploy-info.
+#   # Values:
+#   #   sops     — Mozilla SOPS + decrypt-secrets.sh → .env.production chain
+#   #   aws-sm   — AWS Secrets Manager (verification steps skipped — configure separately)
+#   #   vault    — HashiCorp Vault (verification steps skipped — configure separately)
+#   #   ci-env   — Secrets injected directly by CI/CD runner environment variables
+#   #   none     — No secrets backend; all vars are operator-set in .env.production
+#   # Default: none (all secret-chain checks are skipped with an explicit log message)
+#   secrets_backend: "sops"
 
 # =============================================================================
 # BILLING (OPTIONAL)

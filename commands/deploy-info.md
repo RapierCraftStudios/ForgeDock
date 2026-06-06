@@ -10,6 +10,8 @@ argument-hint: [staging | milestone/{slug} | compare {branch}]
 **Config variables used by this command** (set in `forge.yaml`):
 - `{REPO_PATH}` ← `paths.root` — project repository root
 - `{HEALTH_ENDPOINT}` ← `services.health_endpoint` (optional) — URL used in post-deploy health check
+- `{DEPLOY_WORKFLOW}` ← `deploy.workflow` (optional) — GitHub Actions workflow filename to trigger a deploy (e.g., `hotfix-deploy.yml`). When absent or empty, workflow-trigger steps are omitted.
+- `{DEPLOY_SECRETS_BACKEND}` ← `deploy.secrets_backend` (optional) — secrets delivery method (`sops`, `aws-sm`, `vault`, `ci-env`, `none`). Controls whether secret-chain checks run.
 
 You are the pipeline's deploy awareness layer. Before the user merges staging → main (triggering CI/CD deployment), this command shows exactly what's going out: which PRs, which issues, what changed, and what risks exist.
 
@@ -205,7 +207,7 @@ Analyze the deploy payload and flag risks:
 |--------|-----------|--------|
 | Database migrations present | MEDIUM | Verify migrations are reversible |
 | `shared/` changes | LOW | Restart-only deploy possible (no rebuild) |
-| `.env.example` changes | HIGH | Verify SOPS + decrypt-secrets has new vars |
+| `.env.example` changes | HIGH | Verify secrets backend has new vars (see `deploy.secrets_backend`) |
 | `docker-compose.prod.yml` changes | HIGH | Review infrastructure changes carefully |
 | `infra/traefik/` changes | HIGH | Routing changes — test before full deploy |
 | 10+ PRs in one deploy | MEDIUM | Consider deploying in smaller batches |
@@ -215,17 +217,22 @@ Analyze the deploy payload and flag risks:
 ### Automated Checks
 
 ```bash
-# Check for new env vars that might not be in SOPS
+# Check for new env vars that might not be in the configured secrets backend
 NEW_ENV=$(git diff origin/$TARGET..origin/$SOURCE -- '.env.example' | grep "^+" | grep -v "^+++" | grep -v "^#")
 if [ -n "$NEW_ENV" ]; then
-  echo "⚠️ NEW ENVIRONMENT VARIABLES — verify they exist in SOPS:"
+  echo "⚠️ NEW ENVIRONMENT VARIABLES — verify they exist in your secrets backend ({deploy.secrets_backend}):"
   echo "$NEW_ENV"
-  # Cross-check with decrypt-secrets.sh
-  for var in $(echo "$NEW_ENV" | grep -oP '^\+\K[A-Z_]+'); do
-    if ! grep -q "$var" scripts/decrypt-secrets.sh 2>/dev/null; then
-      echo "  ❌ $var NOT in decrypt-secrets.sh ENV_MAPPING"
-    fi
-  done
+  # Cross-check with SOPS chain (only when deploy.secrets_backend == "sops")
+  # If your project uses a different backend, skip this block and verify manually.
+  if [ "{deploy.secrets_backend}" = "sops" ]; then
+    for var in $(echo "$NEW_ENV" | grep -oP '^\+\K[A-Z_]+'); do
+      if ! grep -q "$var" scripts/decrypt-secrets.sh 2>/dev/null; then
+        echo "  ❌ $var NOT in decrypt-secrets.sh ENV_MAPPING"
+      fi
+    done
+  else
+    echo "  ℹ️  SOPS chain check skipped — deploy.secrets_backend is '{deploy.secrets_backend}'. Verify new vars in your configured backend."
+  fi
 fi
 ```
 
@@ -242,7 +249,7 @@ Generate a checklist based on what's in the deploy:
 - [ ] All PRs in this deploy have been reviewed
 - [ ] No open `needs-human` issues blocking deploy
 - [ ] {If migrations} Database backup verified
-- [ ] {If new env vars} SOPS secrets updated and decrypt-secrets.sh has mapping
+- [ ] {If new env vars} Secrets backend ({deploy.secrets_backend}) updated with new vars; verify via your configured secrets chain
 - [ ] {If traefik changes} Routing tested locally
 
 ### Deploy Command
@@ -250,8 +257,9 @@ Generate a checklist based on what's in the deploy:
 # Standard deploy (merge staging → main via GitHub web UI)
 # CI/CD auto-triggers on push to main
 
-# Or manual trigger for specific services:
-gh workflow run hotfix-deploy.yml --ref main -f services={affected_services} -f reason="Deploy: {summary}"
+# Or manual trigger for specific services (requires deploy.workflow set in forge.yaml):
+gh workflow run {deploy.workflow} --ref main -f {deploy.workflow_inputs.services}={affected_services} -f {deploy.workflow_inputs.reason}="Deploy: {summary}"
+# If deploy.workflow is not configured, deploy via the GitHub web UI or your CI/CD provider.
 ```
 
 ### Post-Deploy
@@ -302,5 +310,6 @@ gh workflow run hotfix-deploy.yml --ref main -f services={affected_services} -f 
 ---
 
 **Ready to deploy?** Merge staging → main via GitHub web UI, or run:
-`gh workflow run hotfix-deploy.yml --ref staging -f services={services} -f reason="Batch deploy"`
+`gh workflow run {deploy.workflow} --ref staging -f {deploy.workflow_inputs.services}={services} -f {deploy.workflow_inputs.reason}="Batch deploy"`
+*(requires `deploy.workflow` set in `forge.yaml`; omit this line if not configured)*
 ```

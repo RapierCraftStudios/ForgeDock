@@ -9,6 +9,7 @@ argument-hint: [issue number | "active" | "postmortem {issue}"]
 
 **Config variables used by this command** (set in `forge.yaml`):
 - `{REPO_PATH}` ← `paths.root` — project repository root
+- `{DEPLOY_WORKFLOW}` ← `deploy.workflow` (optional) — GitHub Actions workflow filename for hotfix deploys (e.g., `hotfix-deploy.yml`). When absent or empty, workflow-trigger and workflow-monitor steps are omitted.
 
 You are the pipeline's incident response coordinator. When production goes down or a critical bug surfaces, this command orchestrates the response: validates the hotfix before deploy, reconstructs the incident timeline, and produces a post-incident analysis.
 
@@ -55,8 +56,9 @@ Parse the issue to understand:
 gh pr list --state merged --base main --json number,title,mergedAt \
   --jq '[.[] | select(.mergedAt > (now - 86400 | todate))] | .[] | "\(.number) | \(.title) | \(.mergedAt)"'
 
-# Check recent hotfix deploys
-gh run list --workflow=hotfix-deploy.yml --limit 5 --json databaseId,status,conclusion,createdAt,displayTitle
+# Check recent hotfix deploys (requires deploy.workflow set in forge.yaml)
+# Skip this check if deploy.workflow is not configured.
+gh run list --workflow={deploy.workflow} --limit 5 --json databaseId,status,conclusion,createdAt,displayTitle
 ```
 
 #### Step 1C: Post incident acknowledgment
@@ -144,10 +146,11 @@ gh issue comment {NUMBER} --body "$(cat <<'EOF'
 **Confidence**: {level}
 
 {If safe}:
-**Ready for deploy.** Run:
+**Ready for deploy.** Run (requires `deploy.workflow` set in `forge.yaml`):
 ```
-gh workflow run hotfix-deploy.yml --ref {FIX_BRANCH} -f services={affected_services} -f reason="P0: {TITLE}"
+gh workflow run {deploy.workflow} --ref {FIX_BRANCH} -f {deploy.workflow_inputs.services}={affected_services} -f {deploy.workflow_inputs.reason}="P0: {TITLE}"
 ```
+*(If `deploy.workflow` is not configured, merge the fix branch via the GitHub web UI or your CI/CD provider.)*
 
 {If not safe}:
 **Concerns found:**
@@ -165,8 +168,9 @@ EOF
 #### Step 3A: Watch the deploy workflow
 
 ```bash
-# Find the most recent hotfix-deploy run
-RUN_ID=$(gh run list --workflow=hotfix-deploy.yml --limit 1 --json databaseId --jq '.[0].databaseId')
+# Find the most recent deploy run (requires deploy.workflow set in forge.yaml)
+# Skip if deploy.workflow is not configured.
+RUN_ID=$(gh run list --workflow={deploy.workflow} --limit 1 --json databaseId --jq '.[0].databaseId')
 
 # Check status
 gh run view $RUN_ID --json status,conclusion,jobs
