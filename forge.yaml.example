@@ -284,6 +284,47 @@ branches:
 #   #   auth: ["services/api/auth/**", "web/src/lib/auth/**"]
 #   #   billing: ["services/api/billing/**", "web/src/app/billing/**"]
 #   #   database: ["services/api/db/**", "migrations/**"]
+#
+#   # Layout paths used by pipeline commands for file discovery and classification.
+#   # These drive /qa-sweep page discovery, /deploy-info file categorization,
+#   # /orchestrate high-fan-in detection, /review-pr route-registration checks,
+#   # and the verify-route-registration.sh script. All values are relative to
+#   # the repository root. Defaults match the AlterLab monorepo layout — set
+#   # these if your project uses a different directory structure.
+#   #
+#   # layout:
+#   #   # Root directory of Next.js App Router pages (contains page.tsx / page.js files).
+#   #   # Used by /qa-sweep to discover pages. Agent fails loudly if zero pages are
+#   #   # found here and this key is not set.
+#   #   pages: "web/src/app"
+#   #
+#   #   # Root directory of the backend API service.
+#   #   # Used by /deploy-info file categorization and /review-pr integration checks.
+#   #   api: "services/api"
+#   #
+#   #   # Directory containing FastAPI router modules (.py files).
+#   #   # Used by /review-pr and verify-route-registration.sh to check router registration.
+#   #   api_routers: "services/api/app/routers"
+#   #
+#   #   # Path to the API application entrypoint (router/middleware registration).
+#   #   # High-fan-in file: /orchestrate serializes any issue that touches this file.
+#   #   api_main: "services/api/app/main.py"
+#   #
+#   #   # Directory containing API middleware modules.
+#   #   # Used by /review-pr and verify-route-registration.sh.
+#   #   api_middleware: "services/api/app/middleware"
+#   #
+#   #   # Root directory of the background worker service.
+#   #   # Used by /deploy-info file categorization and /orchestrate high-fan-in detection.
+#   #   worker: "services/worker"
+#   #
+#   #   # Directory containing database migration files.
+#   #   # Used by /deploy-info to detect and list migration changes.
+#   #   migrations: "infra/migrations"
+#   #
+#   #   # Root directory of shared frontend component library.
+#   #   # Used by verify-route-registration.sh to check component import coverage.
+#   #   frontend_components: "web/src/components"
 
 # =============================================================================
 # VERIFICATION (OPTIONAL)

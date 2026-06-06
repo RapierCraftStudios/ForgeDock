@@ -289,17 +289,28 @@ For each changed file, identify its **activation path** — how does execution r
 
 ### Step 2.5A: Identify File Types and Their Registration Points
 
-Map each changed file to its activation requirements:
+Map each changed file to its activation requirements.
+
+**Layout path resolution** — Before applying the table below, read your project's layout from `forge.yaml → review.layout` and substitute the values into the pattern column. Defaults (used when the key is absent) match the AlterLab monorepo layout:
+
+| `forge.yaml` key | Default | Used in table as |
+|-----------------|---------|-----------------|
+| `review.layout.pages` | `web/src/app` | `{PAGES_ROOT}` |
+| `review.layout.api_routers` | `services/api/app/routers` | `{API_ROUTERS}` |
+| `review.layout.api_main` | `services/api/app/main.py` | `{API_MAIN}` |
+| `review.layout.api_middleware` | `services/api/app/middleware` | `{API_MIDDLEWARE}` |
+| `review.layout.migrations` | `infra/migrations` | `{MIGRATIONS}` |
+| `review.layout.worker` | `services/worker` | `{WORKER}` |
 
 | Changed File Pattern | Assumption | Verification Target |
 |---------------------|------------|---------------------|
-| `web/src/app/api/**/*.ts` (Route Handler) | Requests reach this handler | Check `web/next.config.js` rewrites don't shadow it; check `infra/nginx/nginx.conf` routes path to Next.js |
-| `services/api/app/routers/*.py` (API Router) | Router is registered in app | Check `services/api/app/main.py` includes this router |
-| `services/api/app/middleware/*.py` | Middleware is in the stack | Check `services/api/app/main.py` middleware registration order |
-| `infra/migrations/*.sql` | Migration runs on current schema | Check previous migration's end state matches assumptions |
+| `{PAGES_ROOT}/api/**/*.ts` (Route Handler) | Requests reach this handler | Check `web/next.config.js` rewrites don't shadow it; check `infra/nginx/nginx.conf` routes path to Next.js |
+| `{API_ROUTERS}/*.py` (API Router) | Router is registered in app | Check `{API_MAIN}` includes this router |
+| `{API_MIDDLEWARE}/*.py` | Middleware is in the stack | Check `{API_MAIN}` middleware registration order |
+| `{MIGRATIONS}/*.sql` | Migration runs on current schema | Check previous migration's end state matches assumptions |
 | `shared/**/*.py` | Imported by consumer services | Verify import paths exist in api/worker; check Docker volume mounts |
-| `services/worker/worker/*.py` (Consumer) | Queue consumer is registered | Check consumer registration in worker startup |
-| Any file using `os.getenv("NEW_VAR")` | Env var is set at runtime | Check `docker-compose.yml`, `.env.example`, `services/api/app/core/env_validation.py` |
+| `{WORKER}/**/*.py` (Consumer) | Queue consumer is registered | Check consumer registration in worker startup |
+| Any file using `os.getenv("NEW_VAR")` | Env var is set at runtime | Check `docker-compose.yml`, `.env.example`, `{API_MAIN}` env validation module |
 | `scripts/decrypt-secrets.sh` (ENV_MAPPING) | Secret reaches running container | Trace full chain: SOPS key → ENV_MAPPING → deploy workflow SCP target → merge script path → `docker-compose.prod.yml` env_file. See Step 2.5B SOPS deploy chain check. |
 | `.secrets/prod.enc.yaml` | SOPS key maps to ENV_MAPPING | Verify key path in YAML matches the tuple in `decrypt-secrets.sh` ENV_MAPPING |
 | `.github/workflows/deploy-production.yml` | Deploy paths are consistent | Verify SCP target + merge script `PROJECT` var resolve to same dir as `docker-compose.prod.yml` env_file |
