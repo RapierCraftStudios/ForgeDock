@@ -290,9 +290,11 @@ Keep ALL findings (CONFIRMED/LIKELY/POSSIBLE). Deduplicate by file:line (keep hi
 
 ### 7C: Ensure Labels
 ```bash
-gh label create "review-finding" --color "D93F0B" --force 2>/dev/null
-gh label create "needs-validation" --color "FBCA04" --force 2>/dev/null
-gh label create "staging-review" --color "1D76DB" --force 2>/dev/null
+# Colors match the canonical ForgeDock label manifest (bin/labels.json).
+# Run `npx forgedock labels setup` to bootstrap all managed labels at once.
+gh label create "review-finding" --color "D93F0B" --description "Defect or improvement found during automated PR review. Managed by ForgeDock." --force -R {GH_REPO} 2>/dev/null
+gh label create "needs-validation" --color "FBCA04" --description "Review finding awaiting human validation. Managed by ForgeDock." --force -R {GH_REPO} 2>/dev/null
+gh label create "staging-review" --color "1D76DB" --description "Finding from a staging branch review before deploy to main. Managed by ForgeDock." --force -R {GH_REPO} 2>/dev/null
 ```
 
 ### 7D: Milestone Detection
@@ -303,6 +305,50 @@ Check for open review-finding issues at same file:line → skip. Closed issues a
 
 ### 7F: Create Issues
 Sequential creation. Title: `Staging Review: {summary} (staging → main)`. Labels: review-finding, needs-validation, staging-review, P1/P2/P3. Body includes: source branch context (`staging`), code context, evidence, validation checklist.
+
+**For each finding** (that passes dedup), create issue:
+```bash
+ISSUE_NUM=$(gh issue create \
+  -R {GH_REPO} \
+  --title "chore: [summary] (staging review — PR #${PR_NUMBER})" \
+  --label "review-finding,needs-validation,staging-review,{priority}" \
+  --body "$(cat <<'ISSUE_EOF'
+## Problem
+
+[One sentence: what bug or issue was found. Where it occurs (`file:line`) and what it causes.]
+
+**Source**: PR #[PR_NUMBER] — [TITLE]
+**Confidence**: [CONFIRMED/LIKELY/POSSIBLE]
+**Severity**: [CRITICAL/HIGH/MEDIUM/LOW]
+**Review comment**: [permalink to agent comment]
+
+## Affected Files
+
+Files that need changes:
+1. `[file:line]` — [what needs to change to fix this finding]
+
+## Source Branch Context
+
+**Code branch**: `staging`
+**Worktree base**: `origin/staging`
+
+> When fixing: `git worktree add ../fix-{slug} -b fix/{slug} origin/staging`
+
+## Code Context
+[10 lines around finding]
+
+## Evidence
+[From agent comment]
+
+## Acceptance Criteria
+
+- [ ] Finding validated: VALIDATED / FALSE_POSITIVE / INCONCLUSIVE
+- [ ] If VALIDATED: fix implemented and tested on correct branch
+ISSUE_EOF
+)" --json number --jq '.number')
+```
+
+Labels: `review-finding` + `needs-validation` + `staging-review` + priority (`priority:P1` CONFIRMED, `priority:P2` LIKELY, `priority:P3` POSSIBLE).
 
 **No pre-filtering**: Every finding becomes an issue. Validation agents sort out false positives downstream.
 

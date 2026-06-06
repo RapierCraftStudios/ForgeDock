@@ -39,7 +39,7 @@ You are the pipeline's incident response coordinator. When production goes down 
 gh issue view {NUMBER} --json number,title,body,labels,state,comments,assignees,createdAt
 
 # If "active" — find most recent open P0
-gh issue list --state open --label "P0" --limit 5 --json number,title,createdAt,labels \
+gh issue list --state open --label "priority:P0" --limit 5 --json number,title,createdAt,labels \
   --jq 'sort_by(.createdAt) | reverse | .[0]'
 ```
 

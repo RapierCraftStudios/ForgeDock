@@ -233,7 +233,13 @@ This symlinks all pipeline commands into your Claude Code environment (`~/.claud
 npx forgedock init         # Auto-detects your repo, owner, and branches
 ```
 
-Creates `forge.yaml` in your project root — the config file that makes ForgeDock work with your repo instead of a hardcoded one. Edit it to fill in your project details.
+Creates `forge.yaml` in your project root — the config file that makes ForgeDock work with your repo instead of a hardcoded one. It also injects a concise **ForgeDock usage block** into your project's `CLAUDE.md` so every Claude Code session in the repo automatically knows that ForgeDock drives development here and which commands to use.
+
+To regenerate the block later (e.g. after a ForgeDock update):
+
+```bash
+npx forgedock integrate
+```
 
 **Step 3: AI-powered setup (optional)**
 

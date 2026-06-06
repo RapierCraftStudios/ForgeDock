@@ -1,0 +1,152 @@
+[
+  {
+    "name": "priority:P0",
+    "color": "B60205",
+    "description": "Critical priority — production broken, data loss, security breach. Managed by ForgeDock."
+  },
+  {
+    "name": "priority:P1",
+    "color": "D93F0B",
+    "description": "High priority — major feature broken, no workaround. Managed by ForgeDock."
+  },
+  {
+    "name": "priority:P2",
+    "color": "FBCA04",
+    "description": "Medium priority — impaired functionality, workaround exists. Managed by ForgeDock."
+  },
+  {
+    "name": "priority:P3",
+    "color": "C2E0C6",
+    "description": "Low priority — minor issue or polish. Managed by ForgeDock."
+  },
+  {
+    "name": "workflow:investigating",
+    "color": "1D76DB",
+    "description": "Pipeline: investigation phase in progress. Managed by ForgeDock."
+  },
+  {
+    "name": "workflow:ready-to-build",
+    "color": "0075CA",
+    "description": "Pipeline: investigation complete, ready for build. Managed by ForgeDock."
+  },
+  {
+    "name": "workflow:building",
+    "color": "0052CC",
+    "description": "Pipeline: implementation in progress. Managed by ForgeDock."
+  },
+  {
+    "name": "workflow:in-review",
+    "color": "5319E7",
+    "description": "Pipeline: PR created, under review. Managed by ForgeDock."
+  },
+  {
+    "name": "workflow:merged",
+    "color": "0E8A16",
+    "description": "Pipeline: PR merged, issue closed. Managed by ForgeDock."
+  },
+  {
+    "name": "workflow:decomposed",
+    "color": "BFD4F2",
+    "description": "Pipeline: decomposed into sub-issues. Managed by ForgeDock."
+  },
+  {
+    "name": "workflow:invalid",
+    "color": "CCCCCC",
+    "description": "Pipeline: issue closed as invalid after investigation. Managed by ForgeDock."
+  },
+  {
+    "name": "needs-human",
+    "color": "E4E669",
+    "description": "Pipeline stalled — requires human intervention. Managed by ForgeDock."
+  },
+  {
+    "name": "review-finding",
+    "color": "D93F0B",
+    "description": "Defect or improvement found during automated PR review. Managed by ForgeDock."
+  },
+  {
+    "name": "needs-validation",
+    "color": "FBCA04",
+    "description": "Review finding awaiting human validation. Managed by ForgeDock."
+  },
+  {
+    "name": "validated",
+    "color": "0E8A16",
+    "description": "Review finding confirmed as a real issue. Managed by ForgeDock."
+  },
+  {
+    "name": "false-positive",
+    "color": "CCCCCC",
+    "description": "Review finding dismissed as a false positive. Managed by ForgeDock."
+  },
+  {
+    "name": "staging-review",
+    "color": "1D76DB",
+    "description": "Finding from a staging branch review before deploy to main. Managed by ForgeDock."
+  },
+  {
+    "name": "audit-finding",
+    "color": "D93F0B",
+    "description": "Security or compliance defect found during audit. Managed by ForgeDock."
+  },
+  {
+    "name": "orchestration-metrics",
+    "color": "5319E7",
+    "description": "Running log of persisted audit-agents efficiency summaries. Managed by ForgeDock."
+  },
+  {
+    "name": "health-report",
+    "color": "1D76DB",
+    "description": "Pipeline health report issue. Managed by ForgeDock."
+  },
+  {
+    "name": "bug",
+    "color": "D73A4A",
+    "description": "Something isn't working. Managed by ForgeDock."
+  },
+  {
+    "name": "enhancement",
+    "color": "A2EEEF",
+    "description": "New feature or request. Managed by ForgeDock."
+  },
+  {
+    "name": "feature",
+    "color": "0075CA",
+    "description": "New feature implementation. Managed by ForgeDock."
+  },
+  {
+    "name": "refactor",
+    "color": "FEF2C0",
+    "description": "Code restructuring without behavior change. Managed by ForgeDock."
+  },
+  {
+    "name": "dead-code",
+    "color": "E4E669",
+    "description": "Unused code to be removed. Managed by ForgeDock."
+  },
+  {
+    "name": "improvement",
+    "color": "C5DEF5",
+    "description": "Non-bug improvement to existing functionality. Managed by ForgeDock."
+  },
+  {
+    "name": "documentation",
+    "color": "0075CA",
+    "description": "Documentation addition or update. Managed by ForgeDock."
+  },
+  {
+    "name": "qa",
+    "color": "E99695",
+    "description": "Quality assurance or testing issue. Managed by ForgeDock."
+  },
+  {
+    "name": "security",
+    "color": "B60205",
+    "description": "Security vulnerability or hardening. Managed by ForgeDock."
+  },
+  {
+    "name": "performance",
+    "color": "F9D0C4",
+    "description": "Performance optimization or regression. Managed by ForgeDock."
+  }
+]

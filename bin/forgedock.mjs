@@ -2,7 +2,7 @@
 
 import os from "os";
 import { fileURLToPath } from "url";
-import { basename, dirname, isAbsolute, join, relative, resolve } from "path";
+import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "path";
 import {
   mkdir,
   symlink,
@@ -10,6 +10,7 @@ import {
   readlink,
   lstat,
   readdir,
+  realpath,
   stat,
   writeFile,
   unlink as fsUnlink,
@@ -17,14 +18,12 @@ import {
 import {
   existsSync,
   appendFileSync,
-  chmodSync,
   readFileSync,
   writeFileSync,
   renameSync,
   unlinkSync,
 } from "fs";
 import { execSync, execFileSync } from "child_process";
-import { createSign } from "crypto";
 import {
   BOLD,
   GREEN,
@@ -1221,15 +1220,8 @@ function queryNpmRegistry(pkg) {
 
 /**
  * Path to the update-check cache file.
- * Stored in ~/.forgedock/ alongside credentials.json.
- * Populated lazily — FORGEDOCK_HOME is defined later in the file, but this
- * constant is only resolved at module evaluation time so the ordering is fine.
+ * Stored in ~/.forgedock/update-check.json.
  */
-// NOTE: FORGEDOCK_HOME is declared later in the file (line ~2974). This const
-// is a forward reference that is only evaluated when the module finishes loading,
-// which is after FORGEDOCK_HOME is defined. Node ESM top-level await ensures
-// the module is fully evaluated before any exported binding is read.
-// We defer the join() call to avoid the forward-reference issue:
 function _getUpdateCheckCachePath() {
   return join(HOME, ".forgedock", "update-check.json");
 }
@@ -1862,6 +1854,8 @@ async function init() {
     });
     console.log(`  ${GREEN}Created${RESET}: forge.yaml`);
     console.log("");
+    await injectClaudeMd(cwd);
+    console.log("");
     _printNextSteps({ remoteDetected });
     await validate(outputPath);
     return;
@@ -2160,9 +2154,184 @@ async function init() {
         );
       }
       console.log("");
+      await injectClaudeMd(cwd);
+      console.log("");
       _printNextSteps({ remoteDetected: ownerInput !== "your-github-org" });
       await validate(outputPath);
     }
+  }
+}
+
+// ---------------------------------------------------------------------------
+// CLAUDE.md Integration — injectClaudeMd()
+// ---------------------------------------------------------------------------
+
+const CLAUDE_BLOCK_BEGIN = "<!-- BEGIN FORGEDOCK -->";
+const CLAUDE_BLOCK_END = "<!-- END FORGEDOCK -->";
+
+/**
+ * Extract the `description:` value from a command file's YAML frontmatter.
+ * Returns null if no frontmatter or no description is found.
+ *
+ * @param {string} content - Full file content
+ * @returns {string|null}
+ */
+function _extractFrontmatterDescription(content) {
+  // Match YAML frontmatter block: starts with ---, ends with ---
+  const fmMatch = content.match(/^---\r?\n([\s\S]*?)\r?\n---/);
+  if (!fmMatch) return null;
+  const fm = fmMatch[1];
+  // Extract description: value (may span the rest of the line)
+  const descMatch = fm.match(/^description:\s*(.+)$/m);
+  if (!descMatch) return null;
+  return descMatch[1].trim();
+}
+
+/**
+ * Build the managed ForgeDock block content (between markers, not including them).
+ * Reads all commands/*.md files, extracts frontmatter descriptions, and generates
+ * a concise command index.
+ *
+ * @returns {Promise<string>} Block content
+ */
+async function _buildForgeDockBlock() {
+  const files = await findMarkdownFiles(COMMANDS_DIR);
+
+  /** @type {Array<{name: string, description: string}>} */
+  const commands = [];
+
+  for (const file of files) {
+    let content = "";
+    try {
+      content = readFileSync(file, "utf-8");
+    } catch {
+      continue; // skip unreadable files
+    }
+    const description = _extractFrontmatterDescription(content);
+    if (!description) continue;
+
+    // Derive display name: relative path from COMMANDS_DIR, remove .md extension
+    const rel = relative(COMMANDS_DIR, file).replace(/\\/g, "/").replace(/\.md$/, "");
+    commands.push({ name: rel, description });
+  }
+
+  // Sort: top-level commands first, then sub-commands alphabetically
+  commands.sort((a, b) => {
+    const aDepth = a.name.split("/").length;
+    const bDepth = b.name.split("/").length;
+    if (aDepth !== bDepth) return aDepth - bDepth;
+    return a.name.localeCompare(b.name);
+  });
+
+  const indexLines = commands
+    .map(({ name, description }) => `- \`/${name}\` — ${description}`)
+    .join("\n");
+
+  return `## ForgeDock — Autonomous Development Pipeline
+
+This project is driven by **ForgeDock**. GitHub issues are the knowledge graph.
+Core loop: **issue in → PR out** (PRs target \`staging\` fast-lane or \`milestone/{slug}\`).
+
+### When to Use What
+
+- \`/issue\` — file a pipeline-ready issue
+- \`/work-on N\` — full investigate→build→review→merge for issue N
+- \`/milestone\` + \`/orchestrate\` — plan and parallelize milestone work
+- \`/review-pr\` — review a PR with domain agents
+- \`/quality-gate\` — pre-commit quality check
+- \`/validate\` — validate forge.yaml configuration
+
+### Command Index
+
+${indexLines}
+
+### Conventions
+
+- Fast-lane PRs target \`staging\`; milestone PRs target \`milestone/{slug}\`
+- Review findings become separate issues (not merge blockers)
+- \`forge.yaml\` is the project config — see \`docs/CONFIG.md\`
+- Re-generate this block: \`npx forgedock integrate\``;
+}
+
+/**
+ * Idempotently inject (or update) a managed ForgeDock usage block into a file.
+ * The block is bounded by BEGIN FORGEDOCK / END FORGEDOCK HTML comment markers.
+ * Content outside the markers is never modified.
+ *
+ * @param {string} filePath - Absolute path to the target file (CLAUDE.md or AGENTS.md)
+ * @param {string} blockContent - Content to place between the markers
+ * @param {boolean} createIfMissing - Create the file if it does not exist
+ * @returns {'created'|'updated'|'skipped'} Result status
+ */
+function _injectManagedBlock(filePath, blockContent, createIfMissing) {
+  const managed = `${CLAUDE_BLOCK_BEGIN}\n${blockContent}\n${CLAUDE_BLOCK_END}`;
+
+  if (!existsSync(filePath)) {
+    if (!createIfMissing) return "skipped";
+    writeFileSync(filePath, `${managed}\n`, "utf-8");
+    return "created";
+  }
+
+  let existing = readFileSync(filePath, "utf-8");
+
+  if (existing.includes(CLAUDE_BLOCK_BEGIN) && existing.includes(CLAUDE_BLOCK_END)) {
+    // Both markers present — replace existing block in place
+    const escaped_begin = CLAUDE_BLOCK_BEGIN.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    const escaped_end = CLAUDE_BLOCK_END.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    const blockRegex = new RegExp(
+      `${escaped_begin}[\\s\\S]*?${escaped_end}`,
+      "g",
+    );
+    existing = existing.replace(blockRegex, managed);
+    writeFileSync(filePath, existing, "utf-8");
+    return "updated";
+  }
+
+  if (existing.includes(CLAUDE_BLOCK_BEGIN)) {
+    // BEGIN present but END missing — file is truncated or malformed.
+    // Strip the orphaned marker and everything after it, then fall through
+    // to the append path below so the complete block is written correctly.
+    existing = existing.slice(0, existing.indexOf(CLAUDE_BLOCK_BEGIN)).trimEnd();
+  }
+
+  // Append block to existing content, separated by a blank line
+  const separator = existing.length === 0 || existing.endsWith("\n") ? "\n" : "\n\n";
+  writeFileSync(filePath, `${existing}${separator}${managed}\n`, "utf-8");
+  return "updated";
+}
+
+/**
+ * Inject or update the managed ForgeDock block into the project CLAUDE.md.
+ * Also mirrors the block into AGENTS.md if that file already exists.
+ * Creates CLAUDE.md if absent; never creates AGENTS.md.
+ *
+ * @param {string} cwd - Project root directory
+ * @returns {Promise<void>}
+ */
+async function injectClaudeMd(cwd) {
+  const claudePath = join(cwd, "CLAUDE.md");
+  const agentsPath = join(cwd, "AGENTS.md");
+
+  let blockContent;
+  try {
+    blockContent = await _buildForgeDockBlock();
+  } catch (err) {
+    console.log(
+      `  ${YELLOW}!${RESET}  Could not generate command index — skipping CLAUDE.md update (${err.message})`,
+    );
+    return;
+  }
+
+  const claudeResult = _injectManagedBlock(claudePath, blockContent, true);
+  if (claudeResult === "created") {
+    console.log(`  ${GREEN}✔${RESET}  CLAUDE.md created with ForgeDock integration block`);
+  } else {
+    console.log(`  ${GREEN}✔${RESET}  CLAUDE.md updated — ForgeDock block refreshed`);
+  }
+
+  if (existsSync(agentsPath)) {
+    _injectManagedBlock(agentsPath, blockContent, false);
+    console.log(`  ${GREEN}✔${RESET}  AGENTS.md mirrored`);
   }
 }
 
@@ -2731,21 +2900,6 @@ ${reviewSection}
 # =============================================================================
 
 ${verificationSection}
-
-# =============================================================================
-# BOT (OPTIONAL)
-# GitHub App bot identity for pipeline operations.
-# Credentials are stored separately in ~/.forgedock/credentials.json — not here.
-# Run: npx forgedock bot setup  to configure interactively.
-# Run: npx forgedock bot status to verify.
-# =============================================================================
-
-# bot:
-#   app_id: 12345
-#   installation_id: 67890
-#   private_key_path: "~/.forgedock/forgedock-bot.private-key.pem"
-#   # When configured, pipeline commands use the app token instead of personal token.
-#   # Bot-authored comments include <!-- forgedock-bot --> for audit filtering.
 `;
 }
 
@@ -3210,388 +3364,276 @@ function _renderValidationSummary(checks) {
 }
 
 // ---------------------------------------------------------------------------
-// Bot credentials — store in ~/.forgedock/credentials.json (NOT forge.yaml)
+// Labels Bootstrap — idempotently create/update all ForgeDock-managed labels
 // ---------------------------------------------------------------------------
 
-const FORGEDOCK_HOME = join(HOME, ".forgedock");
-const CREDENTIALS_FILE = join(FORGEDOCK_HOME, "credentials.json");
-
 /**
- * Save bot credentials to ~/.forgedock/credentials.json.
- * The private key itself is NOT stored — only the path.
+ * Resolve the target repo for the labels command.
  *
- * @param {{ appId: string, installationId: string, privateKeyPath: string }} creds
- */
-async function saveBotCredentials(creds) {
-  await mkdir(FORGEDOCK_HOME, { recursive: true, mode: 0o700 });
-  // Tighten permissions on pre-existing installs: fs.mkdir({ recursive: true }) ignores
-  // mode when the directory already exists (Linux kernel behaviour). chmodSync enforces
-  // 0o700 unconditionally, matching the intent of the mode option above.
-  chmodSync(FORGEDOCK_HOME, 0o700);
-  const existing = loadBotCredentials() ?? {};
-  const updated = { ...existing, bot: creds };
-  writeFileSync(CREDENTIALS_FILE, JSON.stringify(updated, null, 2) + "\n", {
-    encoding: "utf-8",
-    mode: 0o600,
-  });
-  // Tighten permissions on files created before this fix (mode is only applied at creation time)
-  chmodSync(CREDENTIALS_FILE, 0o600);
-}
-
-/**
- * Load bot credentials from ~/.forgedock/credentials.json.
- * Returns null if the file is absent or malformed.
+ * Priority order:
+ *   1. --repo <owner/repo> passed on the CLI
+ *   2. forge.yaml → project.owner + project.repo in the current working directory
+ *   3. Returns null if neither is available (caller prints an error)
  *
- * @returns {{ appId: string, installationId: string, privateKeyPath: string } | null}
+ * @param {string[]} subArgs - CLI args after "labels [setup]"
+ * @returns {string|null} "owner/repo" string or null
  */
-function loadBotCredentials() {
-  try {
-    const raw = readFileSync(CREDENTIALS_FILE, "utf-8");
-    const parsed = JSON.parse(raw);
-    return parsed.bot ?? null;
-  } catch {
-    return null;
-  }
-}
-
-// ---------------------------------------------------------------------------
-// GitHub App JWT — generates a short-lived RS256 JWT for App-level API calls
-// ---------------------------------------------------------------------------
-
-/**
- * Generate a GitHub App JWT (valid for 10 minutes).
- *
- * @param {string} appId      - GitHub App ID (numeric string)
- * @param {string} privateKey - PEM-encoded PKCS#8 or PKCS#1 RSA private key content
- * @returns {string} Signed JWT
- */
-function generateAppJwt(appId, privateKey) {
-  const now = Math.floor(Date.now() / 1000);
-  const payload = {
-    iat: now - 60, // issued 60s ago to account for clock skew
-    exp: now + 600, // expires in 10 minutes (GitHub max)
-    iss: appId,
-  };
-
-  const header = Buffer.from(
-    JSON.stringify({ alg: "RS256", typ: "JWT" }),
-  ).toString("base64url");
-  const body = Buffer.from(JSON.stringify(payload)).toString("base64url");
-  const unsigned = `${header}.${body}`;
-
-  const sign = createSign("RSA-SHA256");
-  sign.update(unsigned);
-  const signature = sign.sign(privateKey, "base64url");
-
-  return `${unsigned}.${signature}`;
-}
-
-// ---------------------------------------------------------------------------
-// Bot — connect existing GitHub App
-// ---------------------------------------------------------------------------
-
-/**
- * Interactive flow: prompt for App ID, private key path, installation ID.
- * Validates credentials against the GitHub API before saving.
- */
-async function connectExistingBot() {
-  console.log("");
-  console.log(
-    box(
-      [
-        `${bold("Connect an existing GitHub App")}`,
-        "",
-        "You'll need:",
-        `  • App ID  (GitHub → Settings → Developer settings → GitHub Apps → your app)`,
-        `  • Private key file  (.pem downloaded from app settings)`,
-        `  • Installation ID  (GitHub → your org → Settings → Installed Apps → your app → configure → URL)`,
-      ].join("\n"),
-      { title: "Connect GitHub App" },
-    ),
-  );
-  console.log("");
-
-  const appId = await input("App ID (numeric):", "");
-  if (!appId || !/^\d+$/.test(appId.trim())) {
-    console.log(`  ${RED}Invalid App ID — must be a numeric string.${RESET}`);
-    return false;
+function resolveLabelsRepo(subArgs) {
+  // 1. Explicit --repo flag
+  const repoFlagIdx = subArgs.indexOf("--repo");
+  if (repoFlagIdx !== -1 && subArgs[repoFlagIdx + 1]) {
+    return subArgs[repoFlagIdx + 1];
   }
 
-  const privateKeyPath = await input("Private key path (.pem):", "");
-  const trimmedKeyPath = privateKeyPath.trim();
-  const home = os.homedir();
-  const expanded = trimmedKeyPath.startsWith("~")
-    ? join(home, trimmedKeyPath.slice(1))
-    : trimmedKeyPath;
-  const resolvedKeyPath = resolve(expanded);
-  if (trimmedKeyPath.startsWith("~")) {
-    const rel = relative(home, resolvedKeyPath);
-    if (rel.startsWith("..") || isAbsolute(rel)) {
-      console.log(
-        `  ${RED}Invalid path: cannot traverse outside home directory.${RESET}`,
-      );
-      return false;
-    }
-  }
-  if (!existsSync(resolvedKeyPath)) {
-    console.log(`  ${RED}File not found: ${resolvedKeyPath}${RESET}`);
-    return false;
-  }
-
-  const installationId = await input("Installation ID (numeric):", "");
-  if (!installationId || !/^\d+$/.test(installationId.trim())) {
-    console.log(
-      `  ${RED}Invalid Installation ID — must be a numeric string.${RESET}`,
-    );
-    return false;
-  }
-
-  // Validate credentials with GitHub API
-  console.log("");
-  console.log(`  Validating credentials…`);
-  let privateKey;
-  try {
-    privateKey = readFileSync(resolvedKeyPath, "utf-8");
-  } catch (err) {
-    console.log(`  ${RED}Cannot read private key: ${err.message}${RESET}`);
-    return false;
-  }
-
-  try {
-    const jwt = generateAppJwt(appId.trim(), privateKey);
-    const resp = await fetch("https://api.github.com/app", {
-      headers: {
-        Authorization: `Bearer ${jwt}`,
-        Accept: "application/vnd.github+json",
-        "X-GitHub-Api-Version": "2022-11-28",
-      },
-    });
-    if (!resp.ok) {
-      const body = await resp.json().catch(() => ({}));
-      console.log(
-        `  ${RED}GitHub API error ${resp.status}: ${body.message ?? "unknown"}${RESET}`,
-      );
-      return false;
-    }
-    const appData = await resp.json();
-    console.log(
-      `  ${GREEN}Connected!${RESET} App: ${bold(appData.name)} (id: ${appId.trim()})`,
-    );
-  } catch (err) {
-    console.log(`  ${RED}Validation failed: ${err.message}${RESET}`);
-    return false;
-  }
-
-  await saveBotCredentials({
-    appId: appId.trim(),
-    installationId: installationId.trim(),
-    privateKeyPath: resolvedKeyPath,
-  });
-
-  console.log(`  Credentials saved to ${cyan(CREDENTIALS_FILE)}`);
-  return true;
-}
-
-// ---------------------------------------------------------------------------
-// Bot — status command
-// ---------------------------------------------------------------------------
-
-/**
- * Show bot health, identity, and rate limit usage.
- * Gracefully handles missing credentials.
- */
-async function botStatus() {
-  console.log("");
-  console.log(`${BOLD}ForgeDock Bot Status${RESET}`);
-  console.log("");
-
-  const creds = loadBotCredentials();
-  if (!creds) {
-    console.log(
-      `  ${YELLOW}No bot credentials found.${RESET}\n` +
-        `  Run ${cyan("npx forgedock bot setup")} to configure a GitHub App, or\n` +
-        `  add credentials to ${cyan(CREDENTIALS_FILE)}.`,
-    );
-    console.log("");
-    return;
-  }
-
-  console.log(`  App ID:          ${cyan(creds.appId)}`);
-  console.log(`  Installation ID: ${cyan(creds.installationId)}`);
-  console.log(`  Private key:     ${cyan(creds.privateKeyPath)}`);
-  console.log("");
-
-  // Check private key file
-  if (!existsSync(creds.privateKeyPath)) {
-    console.log(
-      `  ${RED}Private key file not found: ${creds.privateKeyPath}${RESET}`,
-    );
-    console.log(`  Run ${cyan("npx forgedock bot setup")} to reconfigure.`);
-    console.log("");
-    return;
-  }
-
-  console.log("  Verifying with GitHub API…");
-  let privateKey;
-  try {
-    privateKey = readFileSync(creds.privateKeyPath, "utf-8");
-  } catch (err) {
-    console.log(`  ${RED}Cannot read private key: ${err.message}${RESET}`);
-    console.log("");
-    return;
-  }
-
-  try {
-    const jwt = generateAppJwt(creds.appId, privateKey);
-
-    // App identity
-    const appResp = await fetch("https://api.github.com/app", {
-      headers: {
-        Authorization: `Bearer ${jwt}`,
-        Accept: "application/vnd.github+json",
-        "X-GitHub-Api-Version": "2022-11-28",
-      },
-    });
-    if (!appResp.ok) {
-      const body = await appResp.json().catch(() => ({}));
-      console.log(
-        `  ${RED}GitHub API error ${appResp.status}: ${body.message ?? "unknown"}${RESET}`,
-      );
-      console.log("");
-      return;
-    }
-    const appData = await appResp.json();
-    console.log(
-      `  ${GREEN}Connected${RESET} — App: ${bold(appData.name)} (slug: @${appData.slug})`,
-    );
-
-    // Rate limit for app
-    const rlResp = await fetch("https://api.github.com/rate_limit", {
-      headers: {
-        Authorization: `Bearer ${jwt}`,
-        Accept: "application/vnd.github+json",
-        "X-GitHub-Api-Version": "2022-11-28",
-      },
-    });
-    if (rlResp.ok) {
-      const rl = await rlResp.json();
-      const core = rl.resources?.core;
-      if (core) {
-        const used = core.limit - core.remaining;
-        const resetTime = new Date(core.reset * 1000).toLocaleTimeString();
-        console.log(
-          `  Rate limit:      ${cyan(core.remaining)}/${core.limit} remaining (${used} used, resets ${resetTime})`,
-        );
+  // 2. forge.yaml in cwd
+  const forgeYamlPath = join(process.cwd(), "forge.yaml");
+  if (existsSync(forgeYamlPath)) {
+    try {
+      const raw = readFileSync(forgeYamlPath, "utf-8");
+      const ownerMatch = raw.match(/^\s*owner:\s*["']?([^\s"'#]+)["']?/m);
+      const repoMatch = raw.match(/^\s*repo:\s*["']?([^\s"'#]+)["']?/m);
+      if (ownerMatch && repoMatch) {
+        return `${ownerMatch[1]}/${repoMatch[1]}`;
       }
+    } catch {
+      // fall through
     }
+  }
+
+  return null;
+}
+
+/**
+ * Idempotently create or update all ForgeDock-managed labels on a GitHub repo.
+ *
+ * Reads the canonical manifest from bin/labels.json (co-located with this
+ * script). For each label entry, calls:
+ *
+ *   gh label create <name> --color <hex> --description <desc> --force --repo <repo>
+ *
+ * --force makes the call idempotent: it creates the label if absent, or updates
+ * its color and description if it already exists. Safe to re-run at any time.
+ *
+ * @param {string} repo - "owner/repo" string
+ * @returns {{ created: number, failed: string[] }}
+ */
+async function labelsSetup(repo) {
+  const manifestPath = join(__dirname, "labels.json");
+
+  if (!existsSync(manifestPath)) {
+    console.log(
+      `${RED}Label manifest not found: ${manifestPath}${RESET}`,
+    );
+    process.exit(1);
+  }
+
+  /** @type {Array<{name: string, color: string, description: string}>} */
+  let labels;
+  try {
+    labels = JSON.parse(readFileSync(manifestPath, "utf-8"));
   } catch (err) {
-    console.log(`  ${RED}Error: ${err.message}${RESET}`);
+    console.log(`${RED}Failed to parse labels.json: ${err.message}${RESET}`);
+    process.exit(1);
   }
 
   console.log("");
+  console.log(`${BOLD}ForgeDock Label Bootstrap${RESET}`);
+  console.log(`  Repository: ${cyan(repo)}`);
+  console.log(`  Labels:     ${labels.length} managed labels`);
+  console.log("");
+
+  const bar = createProgressBar(labels.length, {
+    label: "  Bootstrapping labels...",
+  });
+
+  let created = 0;
+  const failed = [];
+
+  for (const { name, color, description } of labels) {
+    bar.tick(1, dim(name));
+    try {
+      execFileSync(
+        "gh",
+        [
+          "label",
+          "create",
+          name,
+          "--color",
+          color,
+          "--description",
+          description,
+          "--force",
+          "--repo",
+          repo,
+        ],
+        { stdio: ["pipe", "pipe", "pipe"] },
+      );
+      created++;
+    } catch (err) {
+      failed.push(name);
+      // Continue — don't abort the whole bootstrap for one failure
+    }
+  }
+
+  bar.done(
+    failed.length === 0
+      ? `${green("✔")} Bootstrapped ${created}/${labels.length} labels on ${cyan(repo)}`
+      : `${yellow("⚠")} Bootstrapped ${created}/${labels.length} labels — ${failed.length} failed`,
+  );
+
+  if (failed.length > 0) {
+    console.log("");
+    console.log(`  ${RED}Failed labels:${RESET}`);
+    for (const name of failed) {
+      console.log(`    ${dim("•")} ${name}`);
+    }
+    console.log(
+      `\n  Run ${cyan("gh auth status")} to verify GitHub authentication.`,
+    );
+  }
+
+  console.log("");
+  return { created, failed };
 }
 
 // ---------------------------------------------------------------------------
-// Bot — setup TUI step (called from StepOrchestrator or directly)
+// docs init — scaffold devdocs knowledge tree into a project
 // ---------------------------------------------------------------------------
 
 /**
- * Interactive bot setup step.
- * Shows options: Create new app / Connect existing / Skip.
- * Called as an optional step in tuiOnboarding() or via `npx forgedock bot setup`.
+ * Walk a directory tree and return all file paths (any extension).
+ * @param {string} dir
+ * @returns {Promise<string[]>}
  */
-async function botSetup() {
+async function _findAllFiles(dir) {
+  const results = [];
+  const entries = await readdir(dir, { withFileTypes: true });
+  for (const entry of entries) {
+    const full = join(dir, entry.name);
+    if (entry.isDirectory()) {
+      results.push(...(await _findAllFiles(full)));
+    } else {
+      results.push(full);
+    }
+  }
+  return results.sort();
+}
+
+async function docsInit() {
+  const cwd = process.cwd();
+
+  // Resolve target devdocs path: forge.yaml → devdocs.path, default "devdocs/"
+  let devdocsRelPath = "devdocs";
+  const forgeYamlPath = join(cwd, "forge.yaml");
+  if (existsSync(forgeYamlPath)) {
+    try {
+      const raw = readFileSync(forgeYamlPath, "utf-8");
+      const parsed = _parseYamlKey(raw, "devdocs.path");
+      if (parsed && parsed.trim()) {
+        devdocsRelPath = _sanitizePathValue(parsed.trim().replace(/\/$/, ""));
+      }
+    } catch {
+      // forge.yaml unreadable — use default
+    }
+  }
+
+  const targetDir = isAbsolute(devdocsRelPath)
+    ? devdocsRelPath
+    : join(cwd, devdocsRelPath);
+
+  // Security: assert targetDir is confined to the project directory.
+  // Prevents path traversal via ../.. sequences, absolute paths, and symlinks in devdocs.path.
+  // Use realpath() to dereference symlinks — resolve() does not follow them, so a symlink
+  // pre-placed inside the project (e.g. devdocs -> /etc) would bypass a resolve()-only check.
+  // Fall back to resolve() when targetDir does not yet exist (no symlink to dereference).
+  let resolvedTarget;
+  try {
+    resolvedTarget = await realpath(targetDir);
+  } catch {
+    resolvedTarget = resolve(targetDir);
+  }
+  if (resolvedTarget !== cwd && !resolvedTarget.startsWith(cwd + sep)) {
+    console.log(
+      `${RED}Error: devdocs.path must be inside the project directory.${RESET}`,
+    );
+    console.log(`  Resolved: ${resolvedTarget}`);
+    console.log(`  Project:  ${cwd}`);
+    console.log(
+      `  Fix: set ${CYAN}devdocs.path${RESET} to a relative path inside your project (e.g. "devdocs" or "docs/knowledge").`,
+    );
+    process.exit(1);
+  }
+
+  // Template source: templates/devdocs/ inside the ForgeDock package
+  const templatesDir = join(FORGE_HOME, "templates", "devdocs");
+
+  if (!existsSync(templatesDir)) {
+    console.log(
+      `${RED}DevDocs templates not found: ${templatesDir}${RESET}`,
+    );
+    console.log(
+      `  This usually means ForgeDock is not installed correctly.`,
+    );
+    console.log(
+      `  Try: ${CYAN}npm install -g forgedock${RESET} or ${CYAN}npx forgedock@latest docs init${RESET}`,
+    );
+    process.exit(1);
+  }
+
+  const templateFiles = await _findAllFiles(templatesDir);
+
+  console.log("");
+  console.log(`${BOLD}ForgeDock${RESET} — Scaffold DevDocs`);
+  console.log(`  Source:  ${dim(templatesDir + "/")}`);
+  console.log(`  Target:  ${dim(targetDir + "/")}`);
+  console.log(`  Files:   ${templateFiles.length} seed files`);
+  console.log("");
+
+  await mkdir(targetDir, { recursive: true });
+
+  let copied = 0;
+  let skipped = 0;
+
+  for (const srcFile of templateFiles) {
+    const rel = relative(templatesDir, srcFile);
+    const destFile = join(targetDir, rel);
+    const destDir = dirname(destFile);
+
+    await mkdir(destDir, { recursive: true });
+
+    if (existsSync(destFile)) {
+      skipped++;
+      console.log(`  ${dim("skip")}  ${dim(rel)}`);
+    } else {
+      await copyFile(srcFile, destFile);
+      copied++;
+      console.log(`  ${green("+")}     ${rel}`);
+    }
+  }
+
+  console.log("");
+  if (copied > 0 && skipped === 0) {
+    console.log(
+      `${green("DevDocs scaffolded!")} ${copied} file${copied !== 1 ? "s" : ""} created in ${cyan(devdocsRelPath + "/")}.`,
+    );
+  } else if (copied > 0) {
+    console.log(
+      `${green("DevDocs scaffolded!")} ${copied} file${copied !== 1 ? "s" : ""} created, ${skipped} already existed (skipped).`,
+    );
+  } else {
+    console.log(
+      `${yellow("DevDocs already up to date.")} All ${skipped} file${skipped !== 1 ? "s" : ""} already exist — nothing was overwritten.`,
+    );
+  }
+
   console.log("");
   console.log(
-    box(
-      [
-        `${bold("GitHub Bot Setup")} ${dim("(Optional)")}`,
-        "",
-        "A GitHub App gives ForgeDock its own identity",
-        "for pipeline operations. Benefits:",
-        `  ${cyan("•")} Separate audit trail for bot actions`,
-        `  ${cyan("•")} Higher API rate limits`,
-        `  ${cyan("•")} Webhook-driven automation (future)`,
-        `  ${cyan("•")} Multi-user team support`,
-      ].join("\n"),
-      { title: "GitHub Bot" },
-    ),
+    `  ${dim("Tip:")} Customise the files in ${cyan(devdocsRelPath + "/")} for your project.`,
+  );
+  console.log(
+    `  ${dim("Agents read these files as authoritative project knowledge.")}`,
   );
   console.log("");
-
-  const action = await select("How would you like to set up the bot?", [
-    { label: "Create new GitHub App (opens browser)", value: "create" },
-    { label: "Connect existing GitHub App", value: "connect" },
-    { label: "Skip — use personal token (current default)", value: "skip" },
-  ]);
-
-  if (action === "skip") {
-    console.log(
-      `  ${dim("Skipped.")} Run ${cyan("npx forgedock bot setup")} later to configure a bot identity.`,
-    );
-    return;
-  }
-
-  if (action === "create") {
-    // Build the GitHub App manifest URL — opens the browser-based creation flow
-    const manifestPath = join(dirname(__filename), "github-app-manifest.json");
-    let manifest;
-    try {
-      manifest = JSON.parse(readFileSync(manifestPath, "utf-8"));
-    } catch {
-      console.log(
-        `  ${RED}Could not read github-app-manifest.json — skipping.${RESET}`,
-      );
-      return;
-    }
-
-    const encodedManifest = encodeURIComponent(JSON.stringify(manifest));
-    const createUrl = `https://github.com/settings/apps/new?manifest=${encodedManifest}`;
-
-    console.log("");
-    console.log(
-      `  ${bold("Opening GitHub App registration in your browser…")}`,
-    );
-    console.log(`  URL: ${cyan(createUrl.substring(0, 80))}…`);
-    console.log("");
-
-    // Try to open the browser
-    try {
-      const opener =
-        process.platform === "win32"
-          ? "start"
-          : process.platform === "darwin"
-            ? "open"
-            : "xdg-open";
-      // On Windows, `start "url"` treats the first quoted arg as the window title.
-      // Pass an empty title placeholder so the URL is treated as the target: `start "" "url"`.
-      const cmd =
-        process.platform === "win32"
-          ? `start "" "${createUrl}"`
-          : `${opener} "${createUrl}"`;
-      execSync(cmd, { stdio: ["pipe", "pipe", "pipe"] });
-    } catch {
-      console.log(`  ${YELLOW}Could not open browser automatically.${RESET}`);
-      console.log(`  Please open this URL manually:`);
-      console.log(`  ${cyan(createUrl)}`);
-    }
-
-    console.log("");
-    console.log("  After creating the app in your browser:");
-    console.log(`  1. Download the private key (.pem) from the app settings`);
-    console.log(`  2. Note your App ID and Installation ID`);
-    console.log(
-      `  3. Run ${cyan("npx forgedock bot setup")} again and choose \"Connect existing\"`,
-    );
-    console.log("");
-    return;
-  }
-
-  // action === "connect"
-  const connected = await connectExistingBot();
-  if (!connected) {
-    throw new Error("Bot connection failed — credentials were not saved.");
-  }
 }
 
 function help() {
@@ -3621,13 +3663,19 @@ function help() {
     `  ${CYAN}npx forgedock update${RESET}     Pull latest & reinstall`,
   );
   console.log(
-    `  ${CYAN}npx forgedock bot${RESET}        Manage GitHub App bot identity`,
+    `  ${CYAN}npx forgedock labels${RESET}     Bootstrap ForgeDock-managed labels on a GitHub repo`,
   );
   console.log(
-    `  ${CYAN}npx forgedock bot status${RESET} Show bot health and rate limit usage`,
+    `  ${CYAN}npx forgedock labels setup${RESET}  Create/update all managed labels (idempotent)`,
   );
   console.log(
-    `  ${CYAN}npx forgedock bot setup${RESET}  Configure GitHub App bot (interactive)`,
+    `  ${CYAN}npx forgedock labels setup --repo owner/repo${RESET}  Target a specific repo`,
+  );
+  console.log(
+    `  ${CYAN}npx forgedock integrate${RESET}  Inject/update ForgeDock usage block in project CLAUDE.md`,
+  );
+  console.log(
+    `  ${CYAN}npx forgedock docs init${RESET}  Scaffold devdocs knowledge tree into current project`,
   );
   console.log(`  ${CYAN}npx forgedock help${RESET}       Show this help`);
   console.log("");
@@ -3984,13 +4032,6 @@ async function tuiOnboarding() {
         await validate(forgeYamlPath);
       },
     },
-    {
-      name: "GitHub Bot Setup",
-      optional: true,
-      run: async () => {
-        await botSetup();
-      },
-    },
   ];
 
   const orchestrator = new StepOrchestrator(steps);
@@ -4040,15 +4081,40 @@ if (!command) {
     case "update":
       await update();
       break;
-    case "bot": {
+    case "labels": {
       const subcommand = args[1];
-      if (!subcommand || subcommand === "status") {
-        await botStatus();
-      } else if (subcommand === "setup") {
-        await botSetup();
+      if (!subcommand || subcommand === "setup" || subcommand.startsWith("--")) {
+        const subArgs = args.slice(1);
+        const repo = resolveLabelsRepo(subArgs);
+        if (!repo) {
+          console.log(
+            `${RED}No repository specified.${RESET}\n` +
+              `  Pass ${cyan("--repo owner/repo")} or run from a directory with ${cyan("forge.yaml")}.`,
+          );
+          process.exit(1);
+        }
+        await labelsSetup(repo);
       } else {
-        console.log(`${RED}Unknown bot subcommand: ${subcommand}${RESET}`);
-        console.log(`Usage: ${CYAN}npx forgedock bot [status|setup]${RESET}`);
+        console.log(`${RED}Unknown labels subcommand: ${subcommand}${RESET}`);
+        console.log(
+          `Usage: ${CYAN}npx forgedock labels [setup] [--repo owner/repo]${RESET}`,
+        );
+        process.exit(1);
+      }
+      break;
+    }
+    case "integrate":
+      await injectClaudeMd(process.cwd());
+      break;
+    case "docs": {
+      const docsSubcommand = args[1];
+      if (!docsSubcommand || docsSubcommand === "init") {
+        await docsInit();
+      } else {
+        console.log(`${RED}Unknown docs subcommand: ${docsSubcommand}${RESET}`);
+        console.log(
+          `Usage: ${CYAN}npx forgedock docs init${RESET}`,
+        );
         process.exit(1);
       }
       break;

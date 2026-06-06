@@ -56,9 +56,9 @@ gh issue list --state closed --json number,title,labels,closedAt \
   --jq '[.[] | select(.closedAt > "'$(date -u -d '3 days ago' +%Y-%m-%dT%H:%M:%SZ)'")] | length' 2>/dev/null || echo "0"
 
 # Open issue count by priority
-gh issue list --state open --label P0 --json number --jq 'length'
-gh issue list --state open --label P1 --json number --jq 'length'
-gh issue list --state open --label P2 --json number --jq 'length'
+gh issue list --state open --label "priority:P0" --json number --jq 'length'
+gh issue list --state open --label "priority:P1" --json number --jq 'length'
+gh issue list --state open --label "priority:P2" --json number --jq 'length'
 
 # Stale issues (open, no workflow label, older than 7 days)
 gh issue list --state open --limit 200 --json number,title,labels,createdAt \
@@ -77,7 +77,7 @@ Store these as `BASELINE` metrics for the cycle report.
 ### 0B: Check for open P0s
 
 ```bash
-gh issue list --state open --label P0 --json number,title --jq '.[] | "#\(.number) \(.title)"'
+gh issue list --state open --label "priority:P0" --json number,title --jq '.[] | "#\(.number) \(.title)"'
 ```
 
 If any P0 issues exist:
@@ -334,7 +334,7 @@ Pick the top `FIX_LIMIT` issues by this priority:
 ```bash
 # Get candidates
 gh issue list --state open --label "bug" --limit 50 --json number,title,labels,createdAt \
-  --jq 'sort_by(.labels | map(select(.name | startswith("P"))) | .[0].name) | .[:{FIX_LIMIT}] | .[] | "#\(.number) \(.title)"'
+  --jq 'sort_by(.labels | map(select(.name | startswith("priority:P"))) | .[0].name) | .[:{FIX_LIMIT}] | .[] | "#\(.number) \(.title)"'
 ```
 
 ### 4B: Present fix plan to user
