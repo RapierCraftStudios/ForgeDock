@@ -1374,7 +1374,17 @@ async function update() {
 }
 
 async function init() {
-  checkPrerequisites();
+  // init() generates forge.yaml from prompts and git remote detection.
+  // It does NOT require gh CLI or gh auth for core operation (project board
+  // auto-discovery is optional and guarded separately). Only warn if Claude
+  // Code is missing — it's the primary consumer of the generated config.
+  try {
+    execSync("claude --version", { stdio: ["pipe", "pipe", "pipe"] });
+  } catch {
+    console.log(`  ${YELLOW}!${RESET} Claude Code CLI not found on PATH.`);
+    console.log(`    Install: ${CYAN}https://docs.anthropic.com/en/docs/claude-code${RESET}`);
+    console.log("");
+  }
 
   console.log("");
   console.log(`${BOLD}ForgeDock${RESET} — Generate forge.yaml`);
