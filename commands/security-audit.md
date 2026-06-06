@@ -7,7 +7,7 @@ argument-hint: [--repo <prefix>] [--phase 1|2|3|4|all] [--dry-run]
 
 **Input**: $ARGUMENTS
 
-You are the security posture auditor. Run a scripted 4-phase checklist against the **current state** of the target repository (not a PR diff). Each check uses bash/grep against repo files. Confirmed findings are posted as GitHub issues in the target repo, labeled `security,audit-finding,P1/P2/P3`.
+You are the security posture auditor. Run a scripted 4-phase checklist against the **current state** of the target repository (not a PR diff). Each check uses bash/grep against repo files. Confirmed findings are posted as GitHub issues in the target repo, labeled `security,audit-finding,priority:P1/priority:P2/priority:P3`.
 
 This command is designed to be run:
 - **Manually** after a pen test engagement
@@ -119,7 +119,7 @@ done
 
 **Confirm**: For each hit, verify the port is NOT a web-facing port (80, 443, 8080, 3000). Ports like 6432 (PgBouncer), 6379 (Redis), 5432 (Postgres), 27017 (MongoDB) bound to `0.0.0.0` are confirmed findings.
 
-**Severity**: P1 if no external firewall documented; P2 otherwise.
+**Severity**: `priority:P1` if no external firewall documented; `priority:P2` otherwise.
 
 **Issue title**: `security: {SERVICE} port {PORT} bound to 0.0.0.0 — exposed beyond localhost`
 
@@ -142,7 +142,7 @@ done
 
 **Confirm**: Check if the Dockerfile is for a long-running service (not a one-shot build image). If service container with no USER → confirmed finding.
 
-**Severity**: P2 (standard finding; exploitability depends on runtime isolation).
+**Severity**: `priority:P2` (standard finding; exploitability depends on runtime isolation).
 
 **Issue title**: `security: {SERVICE} Dockerfile has no USER directive — runs as root`
 
@@ -167,7 +167,7 @@ done
 
 **Manual review**: Check for `POSTGRES_PASSWORD` and `requirepass` in compose environment sections. Flag any service using a blank/trivial password as a documented value.
 
-**Severity**: P3 for dev compose; P1 if the compose file is used in production.
+**Severity**: `priority:P3` for dev compose; `priority:P1` if the compose file is used in production.
 
 **Issue title**: `security: {SERVICE} in {FILE} has no authentication configured`
 
@@ -198,7 +198,7 @@ done
 
 **Confirm**: Verify the flagged step is indeed a security scanner step (not a notification or deploy step). Confirmed if scanner produces failure exit codes that are being swallowed.
 
-**Severity**: P2 (scanner present but findings are silently ignored).
+**Severity**: `priority:P2` (scanner present but findings are silently ignored).
 
 **Issue title**: `security: {SCANNER} step in {WORKFLOW} has continue-on-error: true — findings silently ignored`
 
@@ -219,7 +219,7 @@ done
 
 **Confirm**: Distinguish intentional comments (documentation) from disabled access control rules. Confirmed if the commented line is a functional directive that would restrict access.
 
-**Severity**: P1 if the endpoint is publicly accessible; P2 otherwise.
+**Severity**: `priority:P1` if the endpoint is publicly accessible; `priority:P2` otherwise.
 
 **Issue title**: `security: commented-out access control in {FILE} — {DIRECTIVE} disabled`
 
@@ -242,7 +242,7 @@ done
 
 **Confirm**: Verify the CSP header applies to the production site (not just dev/storybook). Check if a nonce-based approach is already in use (nonce + unsafe-inline is still a finding but lower severity).
 
-**Severity**: P2 (XSS protection materially weakened).
+**Severity**: `priority:P2` (XSS protection materially weakened).
 
 **Issue title**: `security: CSP script-src includes unsafe-inline in {FILE} — XSS protection bypassed`
 
@@ -261,9 +261,9 @@ for f in $HEADER_FILES; do
 done
 ```
 
-**Confirm**: Check if the header is set in a response (not just read). If set in outbound responses → confirmed finding. Internal-only APIs (not publicly routed) are P3; public APIs are P2.
+**Confirm**: Check if the header is set in a response (not just read). If set in outbound responses → confirmed finding. Internal-only APIs (not publicly routed) are `priority:P3`; public APIs are `priority:P2`.
 
-**Severity**: P2 for public APIs; P3 for internal.
+**Severity**: `priority:P2` for public APIs; `priority:P3` for internal.
 
 **Issue title**: `security: {HEADER} response header leaks deployment/version information`
 
@@ -291,7 +291,7 @@ grep -rn '@router.get\("/health"\|@app.route("/health"\|@router.get\("/metrics"\
 
 **Confirm**: Manually verify the route has no authentication dependency. Check if it's behind a network-level gate (traefik middleware, nginx ACL). Confirmed if publicly routable and returns system state.
 
-**Severity**: P2 (information disclosure enables targeted attacks).
+**Severity**: `priority:P2` (information disclosure enables targeted attacks).
 
 **Issue title**: `security: unauthenticated {ROUTE} endpoint exposes system state`
 
@@ -326,7 +326,7 @@ grep -rn "new Map\(\)" "$REPO_PATH/web" --include="*.ts" --include="*.tsx" --inc
 
 **Confirm**: Verify the rate limiter is not backed by Redis, a database, or a distributed cache. Confirmed if per-process store with no TTL-based external backend.
 
-**Severity**: P2 (rate limit bypass possible in scaled deployments).
+**Severity**: `priority:P2` (rate limit bypass possible in scaled deployments).
 
 **Issue title**: `security: in-memory rate limiter in {FILE} has no cross-replica enforcement`
 
@@ -363,9 +363,9 @@ grep -rn "document\.cookie\s*=\|res\.cookie(" "$REPO_PATH/web" --include="*.ts" 
   done
 ```
 
-**Confirm**: Verify the cookie stores user-controlled data or authentication state. Internal-only cookies (debug flags, feature flags with no sensitive data) are P3. Auth/session cookies without flags are P1.
+**Confirm**: Verify the cookie stores user-controlled data or authentication state. Internal-only cookies (debug flags, feature flags with no sensitive data) are `priority:P3`. Auth/session cookies without flags are `priority:P1`.
 
-**Severity**: P1 for auth/session tokens; P2 for user-controlled data; P3 for non-sensitive cookies.
+**Severity**: `priority:P1` for auth/session tokens; `priority:P2` for user-controlled data; `priority:P3` for non-sensitive cookies.
 
 **Issue title**: `security: {COOKIE_NAME} cookie missing {FLAGS} — vulnerable to XSS/CSRF/MITM`
 
@@ -395,7 +395,7 @@ grep -rn '||\s*["'"'"'][a-zA-Z0-9]\{4,\}["'"'"']\|default.*password\|default.*se
 
 **Confirm**: Verify the fallback value is a real credential (not a placeholder like `""` or `"REPLACE_ME"` which would fail explicitly). Confirmed if a non-trivial value would silently succeed authentication.
 
-**Severity**: P1 if the credential protects a production service; P2 otherwise.
+**Severity**: `priority:P1` if the credential protects a production service; `priority:P2` otherwise.
 
 **Issue title**: `security: credential placeholder fallback in {FILE} — {VAR} defaults to hardcoded value`
 
@@ -445,7 +445,7 @@ done
 
 **Confirm**: Verify the event type appears in a handler dispatch (not just a comment). Confirmed if the event would change user entitlements or financial state but has no handler.
 
-**Severity**: P1 for events that affect billing state (subscription.deleted, payment_failed, dispute); P2 for informational events.
+**Severity**: `priority:P1` for events that affect billing state (subscription.deleted, payment_failed, dispute); `priority:P2` for informational events.
 
 **Issue title**: `security: Stripe event {EVENT_TYPE} not handled in {FILE} — financial state may diverge`
 
@@ -466,7 +466,7 @@ grep -rn "pre_reserve\|prereserve\|reserve_credits\|MAX_COST\|max_cost\|PRE_RESE
 
 **Manual review required**: Compare the pre-reserve amount against the maximum operation cost for the highest-tier model. If pre-reserve < max possible cost, users can overdraw.
 
-**Severity**: P2 (financial loss; users can consume credits they don't have).
+**Severity**: `priority:P2` (financial loss; users can consume credits they don't have).
 
 **Issue title**: `security: pre-reservation credit cap {AMOUNT} is below maximum operation cost {MAX_COST}`
 
@@ -483,8 +483,8 @@ After all phases complete, produce a summary table:
 
 | # | Phase | Finding | File | Severity | Status |
 |---|-------|---------|------|----------|--------|
-| 1 | 1A | Port binding | docker-compose.prod.yml:12 | P1 | CONFIRMED |
-| 2 | 1B | No USER directive | services/worker/Dockerfile | P2 | CONFIRMED |
+| 1 | 1A | Port binding | docker-compose.prod.yml:12 | priority:P1 | CONFIRMED |
+| 2 | 1B | No USER directive | services/worker/Dockerfile | priority:P2 | CONFIRMED |
 ...
 ```
 
@@ -561,9 +561,9 @@ gh issue comment "{CALLER_ISSUE}" -R {FORGE_REPO} --body "$(cat <<'COMMENT_EOF'
 
 | Severity | Count |
 |----------|-------|
-| P1 | {P1_COUNT} |
-| P2 | {P2_COUNT} |
-| P3 | {P3_COUNT} |
+| priority:P1 | {P1_COUNT} |
+| priority:P2 | {P2_COUNT} |
+| priority:P3 | {P3_COUNT} |
 
 ### Issues Created
 
