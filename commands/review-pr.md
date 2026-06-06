@@ -695,7 +695,7 @@ else
     ' 2>/dev/null | head -1)
     if [ -n "$REGRESSION" ]; then
         echo "REGRESSION: Previously fixed in #${REGRESSION} — elevating priority"
-        # Create with regression warning and P1 priority
+        # Create with regression warning and priority:P1 label
     fi
 fi
 ```
@@ -703,7 +703,7 @@ fi
 **Rules:**
 - Open `review-finding` issue at same file within ±5 lines → **skip** (do not create duplicate)
 - Open `review-finding` issue at same file with similar title (3+ shared keywords) → **skip** (likely same finding despite line drift)
-- Closed `review-finding` at same file within ±5 lines → create with regression warning, elevate to P1
+- Closed `review-finding` at same file within ±5 lines → create with regression warning, elevate to `priority:P1`
 
 **For each finding** (that passes dedup), create issue:
 ```bash
@@ -759,7 +759,7 @@ ISSUE_EOF
 )" --json number --jq '.number')
 ```
 
-Labels: `review-finding` + `needs-validation` + priority (`P1` CONFIRMED, `P2` LIKELY, `P3` POSSIBLE).
+Labels: `review-finding` + `needs-validation` + priority (`priority:P1` CONFIRMED, `priority:P2` LIKELY, `priority:P3` POSSIBLE).
 
 **Add to project board:**
 ```bash
