@@ -3543,21 +3543,39 @@ async function docsInit() {
 
   // Security: assert targetDir is confined to the project directory.
   // Prevents path traversal via ../.. sequences, absolute paths, and symlinks in devdocs.path.
-  // Use realpath() to dereference symlinks — resolve() does not follow them, so a symlink
-  // pre-placed inside the project (e.g. devdocs -> /etc) would bypass a resolve()-only check.
-  // Fall back to resolve() when targetDir does not yet exist (no symlink to dereference).
+  //
+  // Two hardening steps beyond the initial check:
+  //
+  // 1. realpath(cwd) — on Windows, process.cwd() may return a directory-junction path while
+  //    realpath() returns the canonical target.  Comparing a canonical resolvedTarget against
+  //    a non-canonical cwd would false-reject valid paths (BUG-3).
+  //
+  // 2. Parent-first resolution on ENOENT — when the leaf path does not yet exist, falling back
+  //    to lexical resolve() fails to follow intermediate symlinks.  A symlink planted at
+  //    "sub/" pointing outside the project would not be dereferenced, so the lexical result
+  //    would appear inside the project and the containment check would pass, allowing mkdir()
+  //    to write through the symlink (SEC-1).  Instead, resolve the parent directory (which
+  //    always exists) via realpath() so that intermediate symlinks are followed, then append
+  //    only the leaf basename.
+  const realCwd = await realpath(cwd).catch(() => resolve(cwd));
   let resolvedTarget;
   try {
     resolvedTarget = await realpath(targetDir);
   } catch {
-    resolvedTarget = resolve(targetDir);
+    // Leaf does not exist — dereference the parent to catch intermediate symlinks, then
+    // reattach the leaf segment.  A double fallback to resolve() handles the unlikely case
+    // where the parent itself does not exist.
+    const parentReal = await realpath(dirname(targetDir)).catch(
+      () => resolve(dirname(targetDir)),
+    );
+    resolvedTarget = join(parentReal, basename(targetDir));
   }
-  if (resolvedTarget !== cwd && !resolvedTarget.startsWith(cwd + sep)) {
+  if (resolvedTarget !== realCwd && !resolvedTarget.startsWith(realCwd + sep)) {
     console.log(
       `${RED}Error: devdocs.path must be inside the project directory.${RESET}`,
     );
     console.log(`  Resolved: ${resolvedTarget}`);
-    console.log(`  Project:  ${cwd}`);
+    console.log(`  Project:  ${realCwd}`);
     console.log(
       `  Fix: set ${CYAN}devdocs.path${RESET} to a relative path inside your project (e.g. "devdocs" or "docs/knowledge").`,
     );
