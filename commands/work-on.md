@@ -1100,4 +1100,4 @@ gh issue comment {NUMBER} {GH_FLAG} --body "<!-- FORGE:TRAJECTORY -->
 - PR creation fails: check if branch pushed, if PR already exists
 - Merge conflicts: report to user, do NOT auto-resolve
 - gh CLI fails: check `gh auth status`
-- Label missing: `gh label create "{name}" --color {hex} -R {GH_REPO}`
+- Label missing: run `npx forgedock labels setup` (from the project directory, or pass `--repo owner/repo`) to idempotently bootstrap all ForgeDock-managed labels with canonical colors and descriptions. Alternatively: `gh label create "{name}" --color {hex} --description "Managed by ForgeDock." --force -R {GH_REPO}`

@@ -382,6 +382,47 @@ billing:
 
 ---
 
+## Label Bootstrap
+
+ForgeDock manages a canonical set of GitHub labels for use across all pipeline commands. Labels cover workflow state, priority, review findings, audit findings, and category classification.
+
+### Bootstrap command
+
+```bash
+# Create/update all ForgeDock-managed labels on the repo defined in forge.yaml:
+npx forgedock labels setup
+
+# Or target a specific repo explicitly:
+npx forgedock labels setup --repo owner/repo
+```
+
+Running this command is idempotent — it creates labels that don't exist and updates the color/description of labels that do. Safe to re-run at any time.
+
+**When to run it**: Once after `npx forgedock install`, or whenever a pipeline command fails with "label not found". The command bootstraps every label the pipeline relies on.
+
+### Canonical label set
+
+The full manifest lives in [`bin/labels.json`](../bin/labels.json) in the ForgeDock package. Each label has a fixed hex color and a description attributing it to ForgeDock.
+
+| Family | Labels |
+|--------|--------|
+| Priority | `priority:P0` `priority:P1` `priority:P2` `priority:P3` |
+| Workflow | `workflow:investigating` `workflow:ready-to-build` `workflow:building` `workflow:in-review` `workflow:merged` `workflow:decomposed` `workflow:invalid` |
+| Pipeline | `needs-human` `review-finding` `needs-validation` `validated` `false-positive` `staging-review` `audit-finding` `orchestration-metrics` `health-report` |
+| Category | `bug` `enhancement` `feature` `refactor` `dead-code` `improvement` `documentation` `qa` `security` `performance` |
+
+### Colors
+
+Colors are grouped by semantic meaning:
+- **Critical/error** (`#B60205`): `priority:P0`, `security`
+- **High/warning-red** (`#D93F0B`): `priority:P1`, `review-finding`, `audit-finding`
+- **Medium/yellow** (`#FBCA04`): `priority:P2`, `needs-validation`
+- **Low/green** (`#C2E0C6`, `#0E8A16`): `priority:P3`, `workflow:merged`, `validated`
+- **Blue pipeline** (`#1D76DB`, `#0075CA`, `#0052CC`): active workflow states
+- **Neutral** (`#CCCCCC`, `#E4E669`): terminal/dismissal states
+
+---
+
 ## Config Reading Conventions
 
 ForgeDock commands use two accepted patterns for reading `forge.yaml`:

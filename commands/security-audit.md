@@ -492,12 +492,14 @@ If `--dry-run` was passed, print the table and STOP. Do not create issues.
 
 ### 5B: Ensure labels exist in target repo
 
-Before creating any issues, ensure all required labels exist:
+Before creating any issues, ensure all required labels exist. Colors match the canonical ForgeDock label manifest (`bin/labels.json`). Run `npx forgedock labels setup` to bootstrap all managed labels at once.
 
 ```bash
-for label in "security" "audit-finding" "P1" "P2" "P3"; do
-  gh label create "$label" --color "d73a4a" --force -R "{GH_REPO}" 2>/dev/null || true
-done
+gh label create "security" --color "B60205" --description "Security vulnerability or hardening. Managed by ForgeDock." --force -R "{GH_REPO}" 2>/dev/null || true
+gh label create "audit-finding" --color "D93F0B" --description "Security or compliance defect found during audit. Managed by ForgeDock." --force -R "{GH_REPO}" 2>/dev/null || true
+gh label create "priority:P1" --color "D93F0B" --description "High priority — major feature broken, no workaround. Managed by ForgeDock." --force -R "{GH_REPO}" 2>/dev/null || true
+gh label create "priority:P2" --color "FBCA04" --description "Medium priority — impaired functionality, workaround exists. Managed by ForgeDock." --force -R "{GH_REPO}" 2>/dev/null || true
+gh label create "priority:P3" --color "C2E0C6" --description "Low priority — minor issue or polish. Managed by ForgeDock." --force -R "{GH_REPO}" 2>/dev/null || true
 ```
 
 ### 5C: Create GitHub issues for CONFIRMED findings

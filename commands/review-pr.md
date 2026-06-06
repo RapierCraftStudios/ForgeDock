@@ -616,10 +616,12 @@ If still 0: review is clean — skip to Phase 7.
 ### 6C: Create Issues
 
 ```bash
-gh label create "review-finding" --color "D93F0B" --force 2>/dev/null
-gh label create "needs-validation" --color "FBCA04" --force 2>/dev/null
-gh label create "validated" --color "0E8A16" --force 2>/dev/null
-gh label create "false-positive" --color "CCCCCC" --force 2>/dev/null
+# Colors match the canonical ForgeDock label manifest (bin/labels.json).
+# Run `npx forgedock labels setup` to bootstrap all managed labels at once.
+gh label create "review-finding" --color "D93F0B" --description "Defect or improvement found during automated PR review. Managed by ForgeDock." --force -R {GH_REPO} 2>/dev/null
+gh label create "needs-validation" --color "FBCA04" --description "Review finding awaiting human validation. Managed by ForgeDock." --force -R {GH_REPO} 2>/dev/null
+gh label create "validated" --color "0E8A16" --description "Review finding confirmed as a real issue. Managed by ForgeDock." --force -R {GH_REPO} 2>/dev/null
+gh label create "false-positive" --color "CCCCCC" --description "Review finding dismissed as a false positive. Managed by ForgeDock." --force -R {GH_REPO} 2>/dev/null
 ```
 
 **Milestone detection:**
