@@ -1336,8 +1336,35 @@ async function checkForRemoteUpdate(force = false) {
         timeout: 5000,
       }).trim();
 
+      // An update is only "available" when local HEAD is strictly BEHIND
+      // origin/main. Plain SHA inequality is direction-agnostic: a checkout
+      // that is ahead of or diverged from origin/main (e.g. a contributor with
+      // local commits) would otherwise show a spurious "Update available"
+      // notice. `git merge-base --is-ancestor HEAD origin/main` exits 0 when
+      // HEAD is an ancestor of origin/main (behind or equal); combined with the
+      // inequality below this means strictly behind. Any non-zero exit ("not an
+      // ancestor") or error throws under execFileSync — treat all such cases as
+      // "not behind" so we never show a false-positive notice.
+      let headIsAncestorOfRemote = false;
+      try {
+        execFileSync(
+          "git",
+          ["merge-base", "--is-ancestor", "HEAD", "origin/main"],
+          {
+            cwd: FORGE_HOME,
+            stdio: ["pipe", "pipe", "pipe"],
+            timeout: 5000,
+          },
+        );
+        headIsAncestorOfRemote = true;
+      } catch {
+        // HEAD is ahead of, diverged from, or unrelated to origin/main — or git
+        // failed. In every case, do not report an update as available.
+        headIsAncestorOfRemote = false;
+      }
+
       result = {
-        updateAvailable: localHead !== remoteHead,
+        updateAvailable: localHead !== remoteHead && headIsAncestorOfRemote,
         latestVersion: null,
         remoteHead,
       };
