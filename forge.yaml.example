@@ -1,0 +1,333 @@
+# forge.yaml — ForgeDock Configuration
+#
+# Copy this file to forge.yaml in your project root and customize it.
+# ForgeDock commands read forge.yaml to replace hardcoded project references
+# with your project's actual values.
+#
+# Usage:
+#   cp forge.yaml.example forge.yaml
+#   # Edit forge.yaml with your project details
+#   # Add forge.yaml to your .gitignore if it contains sensitive paths
+#
+# Required sections: project, paths, branches
+# Optional sections: repos, project_board, services, review, verification, billing
+
+# =============================================================================
+# PROJECT (REQUIRED)
+# Core identity of your project. Used by all commands that interact with GitHub.
+# Commands: work-on, review-pr, orchestrate, issue, milestone, cleanup
+# =============================================================================
+
+project:
+  # Human-readable project name (used in reports and comments)
+  name: "Acme Platform"
+
+  # GitHub organization or username that owns the repository
+  # Used as the --owner flag in gh project commands
+  owner: "acme-org"
+
+  # GitHub repository name (without the owner prefix)
+  # Combined with owner to form GH_REPO: "acme-org/acme-platform"
+  repo: "acme-platform"
+
+  # One-line description of what this project does
+  # Used in issue templates and pipeline reports
+  description: "SaaS platform for automated data processing"
+
+  # Pipeline repository — optional. Set this if the ForgeDock pipeline itself
+  # lives in a different repo than the project being developed.
+  # Used by audit.md, audit-agents.md, and security-audit.md to resolve {FORGE_REPO}
+  # when looking up pipeline issues, commands, and audit history.
+  # If omitted, these commands fall back to project.owner/project.repo.
+  # forge_repo: "acme-org/acme-forge"
+
+# =============================================================================
+# PATHS (REQUIRED)
+# Local filesystem paths. Used by commands that create worktrees and read files.
+# Commands: work-on (Phase 3E worktree creation), quality-gate, deploy-info
+# =============================================================================
+
+paths:
+  # Absolute path to the project root on the local machine
+  # This is where `git worktree add` commands are anchored
+  root: "/home/youruser/projects/acme-platform"
+
+  # Directory where git worktrees are created for each branch
+  # Relative to root, or absolute path
+  # Default: "{root}/.claude/worktrees"
+  worktree_base: "/home/youruser/projects/acme-platform/.claude/worktrees"
+
+  # Path to a credentials YAML file for external service authentication
+  # Optional — only needed for commands that access analytics, monitoring, etc.
+  # File should NOT be committed to version control
+  # credentials:
+  #   file: "/home/youruser/credentials.yaml"
+
+# =============================================================================
+# BRANCHES (REQUIRED)
+# Branch naming conventions. Used to determine PR targets and source branches.
+# Commands: work-on (PR targeting), review-pr, cleanup
+# =============================================================================
+
+branches:
+  # Default branch of the repository (usually main or master)
+  default: "main"
+
+  # Staging branch name for fast-lane PRs (issues without a milestone)
+  # Set to "main" if your project has no staging branch
+  staging: "staging"
+
+  # Pattern for feature/milestone branches
+  # {slug} is replaced with the milestone title converted to kebab-case
+  # Example: milestone "User Auth v2" → "milestone/user-auth-v2"
+  feature_pattern: "milestone/{slug}"
+
+# =============================================================================
+# REPOS (OPTIONAL)
+# Multi-repo configuration. Used when your project spans multiple repositories.
+# Commands: work-on (multi-repo prefix routing), sync-ecosystem
+#
+# Without this section, all issues are routed to project.owner/project.repo.
+# With this section, you can use prefixes like "mcp:5" or "n8n:12" to route
+# issues to satellite repositories.
+# =============================================================================
+
+# repos:
+#   # The default repository (same as project.owner/project.repo)
+#   # Issues without a prefix are routed here
+#   default:
+#     repo: "acme-org/acme-platform"
+#     staging_branch: "staging"
+#
+#   # Satellite repositories, keyed by prefix
+#   # Format: "<prefix>:<issue_number>" in work-on commands
+#   satellites:
+#     - prefix: "mcp"
+#       repo: "acme-org/acme-mcp-server"
+#       staging_branch: "main"
+#       local_path: "/home/youruser/projects/acme-mcp-server"
+#
+#     - prefix: "sdk"
+#       repo: "acme-org/acme-python-sdk"
+#       staging_branch: "main"
+#       local_path: "/home/youruser/projects/acme-python-sdk"
+#       # Set billing_enabled: true to run Phase 4 (Financial Integrity) of
+#       # /security-audit against this satellite repo. Mirrors the top-level
+#       # billing.enabled flag but scoped per-satellite.
+#       # billing_enabled: false
+#
+#     # Monorepo satellite: multiple packages in a single repo.
+#     # Use subpaths to name each package root relative to local_path.
+#     # /sync-ecosystem uses these to locate per-package version files and
+#     # publish workflows when syncing API changes across SDK packages.
+#     - prefix: "mono"
+#       repo: "acme-org/acme-sdks"
+#       staging_branch: "main"
+#       local_path: "/home/youruser/projects/acme-sdks"
+#       subpaths:
+#         python_sdk: "sdk/python"
+#         node_sdk: "sdk/node"
+
+# =============================================================================
+# PROJECT BOARD (OPTIONAL)
+# GitHub Projects (v2) integration. Used to track issue workflow state on the
+# project board automatically as issues move through the pipeline.
+# Commands: work-on (Phase 0C sync, Phase 6B update), orchestrate
+#
+# To find your project_id and field IDs:
+#   gh project list --owner <owner>
+#   gh project field-list <project_number> --owner <owner>
+# =============================================================================
+
+# project_board:
+#   # GitHub organization or username that owns the project board
+#   owner: "acme-org"
+#
+#   # Project number (visible in the URL: /projects/1)
+#   project_number: 1
+#
+#   # GraphQL node ID of the project (PVT_... format)
+#   # Run: gh project list --owner <owner> --format json | jq '.projects[] | {number, id}'
+#   project_id: "PVT_kwHOxxxxxxxxxxxxxxxx"
+#
+#   # GitHub Projects field IDs (PVTSSF_... format)
+#   # Run: gh project field-list <number> --owner <owner> --format json
+#   field_ids:
+#     status: "PVTSSF_xxxxxxxxxxxxxxxxxxxxxxxx"
+#     lane: "PVTSSF_xxxxxxxxxxxxxxxxxxxxxxxx"
+#     component: "PVTSSF_xxxxxxxxxxxxxxxxxxxxxxxx"
+#     priority: "PVTSSF_xxxxxxxxxxxxxxxxxxxxxxxx"
+#     workflow: "PVTSSF_xxxxxxxxxxxxxxxxxxxxxxxx"
+#
+#   # Single-select option IDs for each field
+#   # Run: gh project field-list <number> --owner <owner> --format json --jq '.fields[]'
+#   option_ids:
+#     status:
+#       todo: "xxxxxxxx"
+#       in_progress: "xxxxxxxx"
+#       done: "xxxxxxxx"
+#
+#     lane:
+#       fast: "xxxxxxxx"
+#       feature: "xxxxxxxx"
+#       sync: "xxxxxxxx"
+#
+#     priority:
+#       p0: "xxxxxxxx"
+#       p1: "xxxxxxxx"
+#       p2: "xxxxxxxx"
+#       p3: "xxxxxxxx"
+#
+#     workflow:
+#       investigating: "xxxxxxxx"
+#       building: "xxxxxxxx"
+#       in_review: "xxxxxxxx"
+#       merged: "xxxxxxxx"
+#
+#   # Component options map repo identifiers to option IDs
+#   # Used to set the Component field when an issue is added to the board
+#   components:
+#     - repo: "acme-org/acme-platform"
+#       option_id: "xxxxxxxx"
+#       label: "Platform"
+#     - repo: "acme-org/acme-mcp-server"
+#       option_id: "xxxxxxxx"
+#       label: "MCP Server"
+
+# =============================================================================
+# SERVICES (OPTIONAL)
+# External service URLs and identifiers. Used by analytics, monitoring, and
+# GEO audit commands.
+# Commands: analytics, geo-audit, autopilot (analytics snapshot)
+# =============================================================================
+
+# services:
+#   # Primary domain of the project's public-facing site
+#   domain: "acme.io"
+#
+#   # Google Search Console property (full URL or domain: prefix)
+#   gsc_property: "https://acme.io"
+#
+#   analytics:
+#     # Umami self-hosted analytics
+#     umami:
+#       url: "https://umami.acme.io"
+#       # Website ID from Umami dashboard
+#       website_id: "xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx"
+#
+#     # Microsoft Clarity
+#     clarity:
+#       project_id: "xxxxxxxxxx"
+#
+#     # Persistent audit history file (YAML list of past audit snapshots)
+#     # Written by /analytics after each run; read by Phase 0 for trend baselines
+#     # Should be outside the repo — do not commit
+#     # history_file: "/home/youruser/analytics-history.yaml"
+#
+#     # Google Analytics 4
+#     ga4:
+#       # GA4 property ID (numeric, from GA4 dashboard → Admin → Property Details)
+#       property_id: "000000000"
+#       # Path to a GA4 service account JSON key file
+#       # Grant this service account Viewer access in GA4 → Admin → Account Access Management
+#       # File should NOT be committed to version control
+#       # service_account_key: "/home/youruser/credentials/ga4-service-account.json"
+#
+#   # Frontend app URL used by qa-sweep for page accessibility testing
+#   # Default: http://localhost:3000 — override for non-localhost deployments
+#   app_url: "https://acme.io"
+#
+#   # API base URL for health checks and endpoint verification
+#   api_url: "https://api.acme.io"
+#
+#   # SSH target for production server health checks run by /autopilot
+#   # Format: user@host — e.g., ubuntu@203.0.113.42
+#   # Used in Phase 1 (SSH health check) of the autopilot cycle
+#   # Optional — omit if autopilot does not need server-level checks
+#   # server_ssh: "ubuntu@203.0.113.42"
+#
+#   # Absolute path on the production server to open eMemo files
+#   # Used by /autopilot to surface in-progress work notes from the server
+#   # Optional — only relevant if your team uses eMemo
+#   # ememo_path: "/home/ubuntu/ememo"
+
+# =============================================================================
+# REVIEW (OPTIONAL)
+# Context provided to review agents when they audit PRs.
+# Commands: review-pr, review-pr-agents (all domain agents)
+# =============================================================================
+
+# review:
+#   # Tech stack description — injected into review agent prompts
+#   # Be specific: framework versions, DB engines, hosting environment
+#   tech_stack: "Next.js 15 App Router, FastAPI, PostgreSQL 16, Docker, Traefik"
+#
+#   # Additional context for reviewers
+#   # What makes this codebase unusual? What pitfalls exist?
+#   context: |
+#     Multi-service monorepo: services/api (Python/FastAPI), web/ (Next.js).
+#     Deploy: blue/green via Docker Compose on a single VPS behind Traefik.
+#     Database: PostgreSQL with async SQLAlchemy. No ORM migrations — raw SQL.
+#
+#   # Domain-specific review notes (keyed by review-pr-agents domain)
+#   domains:
+#     billing: "Stripe webhooks; idempotency keys required on all handlers"
+#     auth: "JWT + refresh token rotation; sessions stored in Redis"
+#     database: "Always use docker exec <container> for psql/migrations"
+#
+#   # Domain-to-file mapping used by /work-on investigation and /review-pr agents
+#   # to quickly locate relevant files for a given issue domain.
+#   # Keys match issue label domain names; values are lists of file path patterns
+#   # (relative to repo root, glob-style). Optional — if omitted, agents infer
+#   # relevant files from issue labels and the Affected Files section instead.
+#   # key_paths:
+#   #   auth: ["services/api/auth/**", "web/src/lib/auth/**"]
+#   #   billing: ["services/api/billing/**", "web/src/app/billing/**"]
+#   #   database: ["services/api/db/**", "migrations/**"]
+
+# =============================================================================
+# VERIFICATION (OPTIONAL)
+# Service health-check patterns for the quality gate and validate commands.
+# Commands: quality-gate, validate
+# =============================================================================
+
+# verification:
+#   # HTTP endpoint that returns 200 when the service is healthy
+#   health_endpoint: "https://api.acme.io/health"
+#
+#   # Patterns to verify in the health response body
+#   health_patterns:
+#     - '"status": "ok"'
+#     - '"database": "connected"'
+#
+#   # Services to check as part of deployment verification
+#   services:
+#     - name: "api"
+#       container: "acme-api-blue"
+#       health_url: "http://localhost:8000/health"
+#     - name: "web"
+#       container: "acme-web-blue"
+#       health_url: "http://localhost:3000"
+#
+#   # Project-specific service name prefixes that identify internal services
+#   # in shell scripts (curl/wget calls). Used by verify-host-headers.sh via
+#   # the FORGE_INTERNAL_PATTERNS env var. Values are joined with | and appended
+#   # to the generic defaults (localhost, 127.0.0.1, api-, worker-, 172.x, IP vars).
+#   # Add your project's container/service name prefixes here so that curl calls
+#   # to those services are checked for explicit Host headers.
+#   # Example: if your services are named "acme-api", "acme-worker", add "acme-"
+#   internal_service_patterns:
+#     - "acme-"
+
+# =============================================================================
+# BILLING (OPTIONAL)
+# Controls whether financial integrity checks run in security-audit.md.
+# Only relevant if your project uses Stripe or similar billing infrastructure.
+# Commands: security-audit (Phase 4 — Financial Integrity)
+# =============================================================================
+
+# billing:
+#   # Set to true to enable Phase 4 (Financial Integrity) in /security-audit.
+#   # When false (default), the billing audit phase is skipped — appropriate for
+#   # projects that do not process payments or have no Stripe integration.
+#   enabled: false

@@ -29,24 +29,23 @@ Orchestrator for the full issue lifecycle: investigate → build → review → 
 
 ---
 
-## Multi-Repo Support
+## Project Configuration
 
-| Input | Resolves To |
-|-------|-------------|
-| `123` / `#123` | AlterLab (default): `RapierCraftStudios/AlterLab` |
-| `mcp:5` | MCP Server: `RapierCraftStudios/alterlab-mcp-server` |
-| `n8n:12` | n8n Node: `RapierCraftStudios/n8n-nodes-alterlab` |
+Read `forge.yaml` from the repository root. If missing, tell the user to run `npx forgedock init` and stop.
 
-**Context Variables** (set after resolving project):
+Resolve the following variables from `forge.yaml` before running any pipeline phase:
 
-| Variable | AlterLab | MCP | n8n |
-|----------|----------|-----|-----|
-| `GH_REPO` | `RapierCraftStudios/AlterLab` | `RapierCraftStudios/alterlab-mcp-server` | `RapierCraftStudios/n8n-nodes-alterlab` |
-| `REPO_PATH` | `/home/mrdubey/projects/ScraperAPI/alterlab` | `/home/mrdubey/projects/ScraperAPI/alterlab-mcp-server` | `/home/mrdubey/projects/ScraperAPI/n8n-nodes-alterlab` |
-| `STAGING_BRANCH` | `staging` | `main` | `main` |
-| `GH_FLAG` | _(empty)_ | `-R RapierCraftStudios/alterlab-mcp-server` | `-R RapierCraftStudios/n8n-nodes-alterlab` |
+| Variable | Source in forge.yaml | Description |
+|----------|----------------------|-------------|
+| `GH_REPO` | `project.owner` + `project.repo` | Full GitHub repo identifier (`owner/repo`) |
+| `REPO_PATH` | `paths.root` | Absolute path to the local repository |
+| `STAGING_BRANCH` | `branches.staging` | Branch for fast-lane PRs (no milestone) |
+| `WORKTREE_BASE` | `paths.worktree_base` | Directory where git worktrees are created |
+| `GH_FLAG` | _(empty for default repo; `-R owner/repo` for satellites)_ | Extra flag for `gh` CLI satellite repo calls |
 
-Satellite repos (MCP, n8n) have no staging — fast-lane PRs go to `main`.
+**Multi-repo routing** (optional): If `forge.yaml` contains a `repos.satellites` list, build the prefix routing table from it. Each satellite entry has `prefix`, `repo`, `staging_branch`, and `local_path`. Issues without a prefix route to the default `GH_REPO`. Satellite repos have no staging — their fast-lane PRs go to their configured `staging_branch` (typically `main`).
+
+If no `repos.satellites` section exists, only the primary repo is available — all issues route to `GH_REPO`.
 
 ---
 
@@ -189,7 +188,7 @@ Branch slug from title (lowercase, hyphenated, max 40 chars). Prefix: `fix/` (bu
 cd {REPO_PATH}
 git fetch origin
 BRANCH="fix/{slug}-{NUMBER}"
-git worktree add /home/mrdubey/projects/ScraperAPI/{WT_PREFIX}-worktrees/{BRANCH} -b {BRANCH} origin/{PR_BASE}
+git worktree add {WORKTREE_BASE}/{BRANCH} -b {BRANCH} origin/{PR_BASE}
 ```
 
 ### 3F: Implement
@@ -204,7 +203,7 @@ Fix HIGH/MEDIUM findings. Max 2 iterations. Skip for 1-file config/docs edits.
 
 ### 3G: Format and verify
 - Python: `black` + `isort` + `py_compile`
-- TypeScript (AlterLab): `prettier --write` + `tsc --noEmit` (BLOCKING if fails)
+- TypeScript (primary repo): `prettier --write` + `tsc --noEmit` (BLOCKING if fails)
 - TypeScript (satellite): `npm run build` + `prettier --write`
 
 ### 3H: Frontend proxy wiring check (MANDATORY)

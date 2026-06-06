@@ -21,8 +21,8 @@ argument-hint: [issue number] [--repo GH_REPO] [--gh-flag GH_FLAG] [--base PR_BA
 
 Parse from $ARGUMENTS:
 - `{NUMBER}` — issue number (required)
-- `--repo {GH_REPO}` — GitHub repo (e.g. `RapierCraftStudios/forge`)
-- `--gh-flag {GH_FLAG}` — gh CLI repo flag (e.g. `-R RapierCraftStudios/forge`)
+- `--repo {GH_REPO}` — GitHub repo (e.g. `{owner}/{repo}` — resolved from `forge.yaml → project`)
+- `--gh-flag {GH_FLAG}` — gh CLI repo flag (e.g. `-R {owner}/{repo}`)
 - `--base {PR_BASE}` — PR target branch (e.g. `milestone/modular-pipeline-architecture` or `staging`)
 
 ---
@@ -36,16 +36,16 @@ gh issue view {NUMBER} {GH_FLAG} --json number,title,body,labels,state,milestone
 
 # Check investigation report
 gh api repos/{GH_REPO}/issues/{NUMBER}/comments \
-  --jq '.[] | select(.body | (contains("FORGE:INVESTIGATOR") or contains("ALTERLAB:INVESTIGATOR"))) | .body'
+  --jq '.[] | select(.body | contains("FORGE:INVESTIGATOR")) | .body'
 
 # Check if build already completed
 gh api repos/{GH_REPO}/issues/{NUMBER}/comments \
-  --jq '.[] | select(.body | (contains("FORGE:BUILDER") or contains("ALTERLAB:BUILDER"))) | .body'
+  --jq '.[] | select(.body | contains("FORGE:BUILDER")) | .body'
 ```
 
 **Resume check**:
-- If `<!-- FORGE:BUILDER -->` or `<!-- ALTERLAB:BUILDER -->` comment exists → build already complete. Return `BUILD_RESULT: status: ALREADY_DONE` to router.
-- If no `<!-- FORGE:INVESTIGATOR -->` or `<!-- ALTERLAB:INVESTIGATOR -->` comment with `<!-- INVESTIGATION:COMPLETE -->` → EXIT with `BUILD_RESULT: status: BLOCKED`, blocker: "Investigation not complete — run investigate first".
+- If `<!-- FORGE:BUILDER -->` comment exists → build already complete. Return `BUILD_RESULT: status: ALREADY_DONE` to router.
+- If no `<!-- FORGE:INVESTIGATOR -->` comment with `<!-- INVESTIGATION:COMPLETE -->` → EXIT with `BUILD_RESULT: status: BLOCKED`, blocker: "Investigation not complete — run investigate first".
 
 Extract from investigation report:
 - Affected files list

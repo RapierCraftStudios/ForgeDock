@@ -7,6 +7,9 @@ argument-hint: [PR number to revert, or "last" for most recent deploy]
 
 **Input**: $ARGUMENTS
 
+**Config variables used by this command** (set in `forge.yaml`):
+- `{REPO_PATH}` ← `paths.root` — project repository root
+
 You are the pipeline's emergency rollback system. When a shipped feature or fix causes production issues, this command creates a revert PR and fast-tracks it through the pipeline.
 
 **Agent model policy**: Default `model: "sonnet"`. If Sonnet is rate-limited, fall back to `model: "opus"`. User can override with `--model <name>`.
@@ -75,11 +78,11 @@ Which approach? (Reply or press enter for option 1)
 ### Step 2A: Create a revert branch
 
 ```bash
-cd /home/mrdubey/projects/ScraperAPI/alterlab
+cd {REPO_PATH}
 git fetch origin main
-git worktree add ../alterlab-revert-pr-{PR_NUMBER} -b revert/pr-{PR_NUMBER} origin/main
+git worktree add ../revert-pr-{PR_NUMBER} -b revert/pr-{PR_NUMBER} origin/main
 
-cd ../alterlab-revert-pr-{PR_NUMBER}
+cd ../revert-pr-{PR_NUMBER}
 ```
 
 ### Step 2B: Execute the revert
@@ -230,8 +233,8 @@ BODY_EOF
 ### Step 4C: Clean up worktree
 
 ```bash
-cd /home/mrdubey/projects/ScraperAPI/alterlab
-git worktree remove ../alterlab-revert-pr-{PR_NUMBER}
+cd {REPO_PATH}
+git worktree remove ../revert-pr-{PR_NUMBER}
 git branch -D revert/pr-{PR_NUMBER} 2>/dev/null || true
 ```
 

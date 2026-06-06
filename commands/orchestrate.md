@@ -25,17 +25,35 @@ You are the top-level orchestrator. Your job is to take a batch of issues, plan 
 
 ---
 
+## Config Resolution
+
+Read `forge.yaml` at the project root to resolve all project-specific variables before running any commands:
+
+```bash
+# Parse forge.yaml for project context
+GH_REPO=$(yq '.project.owner + "/" + .project.repo' forge.yaml)
+GH_FLAG="-R $GH_REPO"
+REPO_PATH=$(yq '.paths.root' forge.yaml)
+PROJECT_NAME=$(yq '.project.name' forge.yaml)
+STAGING_BRANCH=$(yq '.branches.staging' forge.yaml)
+# Build satellite repo map from repos.satellites list
+# Each satellite: { prefix, repo, staging_branch }
+```
+
+All `{GH_REPO}`, `{GH_FLAG}`, `{REPO_PATH}`, `{PROJECT_NAME}`, and `{STAGING_BRANCH}` references below are populated from `forge.yaml`.
+
+---
+
 ## Multi-Repo Support
 
-This orchestrator supports issues across the AlterLab ecosystem. See `/work-on` → "Multi-Repo Support" for the full project registry and context variables.
+This orchestrator supports issues across multiple repositories. See `/work-on` → "Multi-Repo Support" and `forge.yaml → repos` for the full project registry and context variables.
 
 ### Cross-Repo Issue References
 
-Issues can be prefixed with a project shorthand:
-- `#123` or `123` → AlterLab (default: `RapierCraft/AlterLab`)
-- `mcp:5` → MCP Server (`RapierCraft/alterlab-mcp-server`)
-- `n8n:12` → n8n Node (`RapierCraft/n8n-nodes-alterlab`)
-- `all-repos` → Scan all ecosystem repos for open issues (combine and prioritize)
+Issues can be prefixed with a project shorthand derived from `forge.yaml → repos.satellites`:
+- `#123` or `123` → default repo (`{GH_REPO}`)
+- `{satellite_prefix}:5` → satellite repo (e.g., `mcp:5`, `n8n:12`) — prefixes and repos come from `forge.yaml → repos.satellites`
+- `all-repos` → Scan all configured repos for open issues (combine and prioritize)
 
 When spawning sub-agents, pass the project prefix so `/work-on` resolves to the correct repo.
 
@@ -63,20 +81,20 @@ Parse `$ARGUMENTS` to determine which issues to work on:
 For each resolved repo, use the appropriate `-R` flag:
 
 ```bash
-# AlterLab (default — no flag needed):
-gh issue list --milestone "{TITLE}" --state open --limit 500 --json number,title,labels,milestone --jq '.[] | {number, title, labels: [.labels[].name], milestone: .milestone.title}'
+# Default repo (no flag needed if using GH_FLAG="" for the default):
+gh issue list {GH_FLAG} --milestone "{TITLE}" --state open --limit 500 --json number,title,labels,milestone --jq '.[] | {number, title, labels: [.labels[].name], milestone: .milestone.title}'
 
-# Satellite repos — always include -R flag:
-gh issue list -R RapierCraft/alterlab-mcp-server --milestone "{TITLE}" --state open --limit 500 --json number,title,labels,milestone
-gh issue list -R RapierCraft/n8n-nodes-alterlab --milestone "{TITLE}" --state open --limit 500 --json number,title,labels,milestone
+# Satellite repos — always include -R flag with the satellite repo from forge.yaml:
+# For each satellite in forge.yaml → repos.satellites:
+gh issue list -R {SATELLITE_REPO} --milestone "{TITLE}" --state open --limit 500 --json number,title,labels,milestone
 
 # For specific numbers with repo prefix:
-gh issue view 5 -R RapierCraft/alterlab-mcp-server --json number,title,labels,state,milestone,body
+gh issue view {NUMBER} -R {SATELLITE_REPO} --json number,title,labels,state,milestone,body
 
-# For "all-repos" — fetch from all and combine:
-gh issue list --state open --limit {N} --json number,title,labels,milestone
-gh issue list -R RapierCraft/alterlab-mcp-server --state open --limit 500 --json number,title,labels,milestone
-gh issue list -R RapierCraft/n8n-nodes-alterlab --state open --limit 500 --json number,title,labels,milestone
+# For "all-repos" — fetch from all configured repos and combine:
+gh issue list {GH_FLAG} --state open --limit {N} --json number,title,labels,milestone
+# For each satellite in forge.yaml → repos.satellites:
+gh issue list -R {SATELLITE_REPO} --state open --limit 500 --json number,title,labels,milestone
 # Combine, sort by priority, take top N
 ```
 
@@ -526,7 +544,7 @@ Agent(
   model="sonnet",
   description="Work on {PROJECT_PREFIX}#{NUMBER}",
   run_in_background=true,
-  prompt="You are working on GitHub issue #{NUMBER} for the AlterLab ecosystem.
+  prompt="You are working on GitHub issue #{NUMBER} for the {PROJECT_NAME} project.
 
 **Project**: {PROJECT_NAME}
 **Repository**: {GH_REPO}
@@ -540,11 +558,10 @@ Agent(
 
 **IMPORTANT RULES**:
 - **MANDATORY**: You MUST use the Skill tool to invoke 'work-on' with args '{PROJECT_PREFIX}{NUMBER}'. Do NOT implement manually — /work-on handles the full pipeline including label state machine (workflow:investigating → workflow:building → workflow:in-review → workflow:merged), investigation reports, PR creation, and cleanup.
-  - For AlterLab issues: `Skill(skill='work-on', args='{NUMBER}')`
-  - For MCP issues: `Skill(skill='work-on', args='mcp:{NUMBER}')`
-  - For n8n issues: `Skill(skill='work-on', args='n8n:{NUMBER}')`
+  - For default repo issues: `Skill(skill='work-on', args='{NUMBER}')`
+  - For satellite repo issues: `Skill(skill='work-on', args='{SATELLITE_PREFIX}:{NUMBER}')` (prefix from forge.yaml → repos.satellites)
 - NEVER bypass /work-on with manual git/gh commands — the label updates and structured comments are critical for tracking
-- NEVER target `main` for AlterLab PRs. Use `staging` for fast-lane issues, or `milestone/{slug}` for milestone issues.
+- NEVER target `main` for PRs targeting the default repo. Use `{STAGING_BRANCH}` for fast-lane issues, or `milestone/{slug}` for milestone issues.
 - Satellite repos (MCP, n8n) have no staging branch — fast-lane PRs go to `main` for those.
 - If the issue is INVALID after investigation, close it with a comment explaining why
 - If you hit merge conflicts or blockers, post a comment on the issue and STOP — do not force anything

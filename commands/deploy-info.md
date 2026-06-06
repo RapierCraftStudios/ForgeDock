@@ -7,6 +7,10 @@ argument-hint: [staging | milestone/{slug} | compare {branch}]
 
 **Input**: $ARGUMENTS (default: `staging`)
 
+**Config variables used by this command** (set in `forge.yaml`):
+- `{REPO_PATH}` ← `paths.root` — project repository root
+- `{HEALTH_ENDPOINT}` ← `services.health_endpoint` (optional) — URL used in post-deploy health check
+
 You are the pipeline's deploy awareness layer. Before the user merges staging → main (triggering CI/CD deployment), this command shows exactly what's going out: which PRs, which issues, what changed, and what risks exist.
 
 **Agent model policy**: Default `model: "sonnet"`. If Sonnet is rate-limited, fall back to `model: "opus"`. User can override with `--model <name>`.
@@ -22,7 +26,7 @@ You are the pipeline's deploy awareness layer. Before the user merges staging �
 **Non-blocking**: This phase emits a warning but does NOT block. Deploy-info is an informational tool. The authoritative gate is Phase 0A of `/review-pr-staging`.
 
 ```bash
-cd /home/mrdubey/projects/ScraperAPI/alterlab
+cd {REPO_PATH}
 git fetch origin main staging
 
 SOURCE=${SOURCE_BRANCH:-staging}
@@ -90,7 +94,7 @@ fi
 | `compare {branch}` | `{branch}` | `main` | Custom comparison |
 
 ```bash
-cd /home/mrdubey/projects/ScraperAPI/alterlab
+cd {REPO_PATH}
 git fetch origin main staging
 
 # Determine source and target
@@ -241,7 +245,7 @@ gh workflow run hotfix-deploy.yml --ref main -f services={affected_services} -f 
 ```
 
 ### Post-Deploy
-- [ ] Health check: `curl -s https://alterlab.io/api/health | jq .`
+- [ ] Health check: `curl -s {HEALTH_ENDPOINT} | jq .`
 - [ ] {If migrations} Verify migration applied: check new tables/columns exist
 - [ ] {If new features} Smoke test the new functionality
 - [ ] Monitor error rates for 15 minutes

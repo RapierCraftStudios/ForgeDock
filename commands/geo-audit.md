@@ -12,14 +12,81 @@ You are the GEO (Generative Engine Optimization) auditor. Pull AI referral data 
 
 ---
 
+## Phase 0: Load Config
+
+Read `forge.yaml` from the current directory (or the path passed as `$ARGUMENTS`). Gate the entire command on the `services.analytics` section existing.
+
+```bash
+# Verify forge.yaml exists and analytics is configured
+GEO_CONFIG=$(python3 - <<'PYEOF'
+import yaml, sys, os
+
+config_path = os.environ.get('FORGE_CONFIG', 'forge.yaml')
+try:
+    cfg = yaml.safe_load(open(config_path))
+except FileNotFoundError:
+    print('ERROR: forge.yaml not found. Run `cp forge.yaml.example forge.yaml` and configure your project.')
+    sys.exit(1)
+
+svc = cfg.get('services', {})
+analytics = svc.get('analytics', {})
+if not analytics:
+    print('ERROR: forge.yaml missing services.analytics section — geo-audit requires analytics to be configured.')
+    print('Add services.analytics.umami and/or services.analytics.clarity to forge.yaml.')
+    sys.exit(1)
+
+paths = cfg.get('paths', {})
+proj = cfg.get('project', {})
+creds = paths.get('credentials', {})
+creds_file = creds.get('file', '') if isinstance(creds, dict) else ''
+
+domain = svc.get('domain', '')
+if not domain:
+    print('ERROR: forge.yaml missing services.domain — required for page compliance checks.')
+    sys.exit(1)
+
+umami = analytics.get('umami', {})
+clarity = analytics.get('clarity', {})
+owner = proj.get('owner', '')
+repo = proj.get('repo', '')
+
+print(domain)
+print('https://' + domain)
+print(umami.get('website_id', ''))
+print(umami.get('url', ''))
+print(clarity.get('project_id', ''))
+print(creds_file)
+print((owner + '/' + repo) if owner and repo else '')
+PYEOF
+)
+
+if echo "$GEO_CONFIG" | grep -q '^ERROR:'; then
+    echo "$GEO_CONFIG"
+    exit 1
+fi
+
+# Assign config variables
+DOMAIN=$(echo "$GEO_CONFIG" | sed -n '1p')
+SITE_URL=$(echo "$GEO_CONFIG" | sed -n '2p')
+UMAMI_WEBSITE_ID=$(echo "$GEO_CONFIG" | sed -n '3p')
+UMAMI_API=$(echo "$GEO_CONFIG" | sed -n '4p')
+CLARITY_PROJECT=$(echo "$GEO_CONFIG" | sed -n '5p')
+CREDENTIALS_FILE=$(echo "$GEO_CONFIG" | sed -n '6p')
+GH_REPO=$(echo "$GEO_CONFIG" | sed -n '7p')
+```
+
+---
+
 ## Constants
 
 ```
-DOMAIN = "alterlab.io"
-SITE_URL = "https://alterlab.io"
-UMAMI_WEBSITE_ID = "ccfb1cdd-5a05-4b41-8e61-48695b4ff6c0"
-UMAMI_API = "https://umami.alterlab.io"
-CLARITY_PROJECT = "v28wblv737"
+DOMAIN       = (from forge.yaml → services.domain)
+SITE_URL     = (from forge.yaml → "https://" + services.domain)
+UMAMI_WEBSITE_ID = (from forge.yaml → services.analytics.umami.website_id)
+UMAMI_API    = (from forge.yaml → services.analytics.umami.url)
+CLARITY_PROJECT  = (from forge.yaml → services.analytics.clarity.project_id)
+CREDENTIALS_FILE = (from forge.yaml → paths.credentials.file)
+GH_REPO      = (from forge.yaml → project.owner + "/" + project.repo)
 TODAY = (current date in YYYY-MM-DD)
 THIRTY_DAYS_AGO = (TODAY minus 30 days)
 
@@ -41,11 +108,11 @@ AI_REFERRERS = [
 
 ### 1A. Umami — AI Referrer Metrics
 
-Authenticate with Umami (credentials from `credentials.yaml`):
+Authenticate with Umami (credentials from credentials file set in forge.yaml):
 ```bash
-UMAMI_USER=$(python3 -c "import yaml; print(yaml.safe_load(open('/home/mrdubey/projects/ScraperAPI/credentials.yaml'))['umami']['username'])")
-UMAMI_PASS=$(python3 -c "import yaml; print(yaml.safe_load(open('/home/mrdubey/projects/ScraperAPI/credentials.yaml'))['umami']['password'])")
-UMAMI_TOKEN=$(curl -s -X POST "https://umami.alterlab.io/api/auth/login" \
+UMAMI_USER=$(python3 -c "import yaml; print(yaml.safe_load(open('$CREDENTIALS_FILE'))['umami']['username'])")
+UMAMI_PASS=$(python3 -c "import yaml; print(yaml.safe_load(open('$CREDENTIALS_FILE'))['umami']['password'])")
+UMAMI_TOKEN=$(curl -s -X POST "$UMAMI_API/api/auth/login" \
   -H "Content-Type: application/json" \
   -d "{\"username\":\"$UMAMI_USER\",\"password\":\"$UMAMI_PASS\"}" | jq -r '.token')
 ```
@@ -54,7 +121,7 @@ Then pull referrer metrics for the last 30 days:
 ```bash
 START_AT=$(date -d '30 days ago' +%s)000
 END_AT=$(date +%s)000
-curl -s "https://umami.alterlab.io/api/websites/ccfb1cdd-5a05-4b41-8e61-48695b4ff6c0/metrics?startAt=${START_AT}&endAt=${END_AT}&type=referrer" \
+curl -s "$UMAMI_API/api/websites/$UMAMI_WEBSITE_ID/metrics?startAt=${START_AT}&endAt=${END_AT}&type=referrer" \
   -H "Authorization: Bearer $UMAMI_TOKEN" | jq '.'
 ```
 
@@ -62,7 +129,7 @@ From the results, filter for AI_REFERRERS. Record each AI referrer's session cou
 
 Also pull landing page metrics to see WHERE AI traffic lands:
 ```bash
-curl -s "https://umami.alterlab.io/api/websites/ccfb1cdd-5a05-4b41-8e61-48695b4ff6c0/metrics?startAt=${START_AT}&endAt=${END_AT}&type=url" \
+curl -s "$UMAMI_API/api/websites/$UMAMI_WEBSITE_ID/metrics?startAt=${START_AT}&endAt=${END_AT}&type=url" \
   -H "Authorization: Bearer $UMAMI_TOKEN" | jq '.'
 ```
 
@@ -70,7 +137,7 @@ For previous period comparison (30-60 days ago):
 ```bash
 PREV_START=$(date -d '60 days ago' +%s)000
 PREV_END=$(date -d '30 days ago' +%s)000
-curl -s "https://umami.alterlab.io/api/websites/ccfb1cdd-5a05-4b41-8e61-48695b4ff6c0/metrics?startAt=${PREV_START}&endAt=${PREV_END}&type=referrer" \
+curl -s "$UMAMI_API/api/websites/$UMAMI_WEBSITE_ID/metrics?startAt=${PREV_START}&endAt=${PREV_END}&type=referrer" \
   -H "Authorization: Bearer $UMAMI_TOKEN" | jq '.'
 ```
 
@@ -96,17 +163,17 @@ Cross-reference Clarity referrer data with Umami to validate numbers.
 
 Get the sitemap to find all public pages:
 ```bash
-curl -s "https://alterlab.io/sitemap.xml" | grep -oP '<loc>\K[^<]+' | sort
+curl -s "$SITE_URL/sitemap.xml" | grep -oP '<loc>\K[^<]+' | sort
 ```
 
 Also check llms.txt for listed pages:
 ```bash
-curl -s "https://alterlab.io/llms.txt"
+curl -s "$SITE_URL/llms.txt"
 ```
 
 And the full version:
 ```bash
-curl -s "https://alterlab.io/llms-full.txt"
+curl -s "$SITE_URL/llms-full.txt"
 ```
 
 Build the list of all unique public pages from both sources.
@@ -133,7 +200,7 @@ curl -s "PAGE_URL" | grep -oP '<script type="application/ld\+json">\K[^<]+' | jq
 ```bash
 curl -s "PAGE_URL" | grep -oP 'property="og:title" content="\K[^"]+'
 ```
-- PASS: og:title exists and is NOT the generic site default (e.g., not just "AlterLab" or empty)
+- PASS: og:title exists and is NOT the generic site default (e.g., not just the project name or empty)
 - FAIL: missing or generic → flag "Missing/generic OG tags"
 
 Also check og:description:
@@ -152,7 +219,7 @@ Check if page URL appears in llms.txt content.
 ### 2C. Check robots.txt for AI Bots
 
 ```bash
-curl -s "https://alterlab.io/robots.txt"
+curl -s "$SITE_URL/robots.txt"
 ```
 
 Known AI crawler user-agents to check for:
@@ -297,16 +364,35 @@ gh issue edit {NUMBER} --milestone "geo-ai-discoverability"
 
 ### Add GEO issues to Project board
 
-For each created issue, add to the GitHub Project. Reference `~/projects/forge/docs/WORKFLOW.md` → "Project Board Integration" for field IDs.
+Read project board IDs from `forge.yaml → project_board`. If `project_board` is not configured, skip board integration.
 
 ```bash
-ISSUE_URL="https://github.com/RapierCraft/AlterLab/issues/${ISSUE_NUM}"
-ITEM_ID=$(gh project item-add 1 --owner RapierCraft --url "$ISSUE_URL" --format json --jq '.id' 2>/dev/null)
-if [ -n "$ITEM_ID" ]; then
-  gh project item-edit --project-id PVT_kwHOCx3gR84BSK2L --id "$ITEM_ID" --field-id PVTSSF_lAHOCx3gR84BSK2Lzg_yF6E --single-select-option-id f75ad846 2>/dev/null || true  # Status=Todo
-  gh project item-edit --project-id PVT_kwHOCx3gR84BSK2L --id "$ITEM_ID" --field-id PVTSSF_lAHOCx3gR84BSK2Lzg_yF98 --single-select-option-id 62864af4 2>/dev/null || true  # Lane=Fast
-  gh project item-edit --project-id PVT_kwHOCx3gR84BSK2L --id "$ITEM_ID" --field-id PVTSSF_lAHOCx3gR84BSK2Lzg_yF-o --single-select-option-id 214c4d65 2>/dev/null || true  # Component=Platform
-  gh project item-edit --project-id PVT_kwHOCx3gR84BSK2L --id "$ITEM_ID" --field-id PVTSSF_lAHOCx3gR84BSK2Lzg_yF8o --single-select-option-id {PRIORITY_OPTION_ID} 2>/dev/null || true  # Priority
+# Read project board config from forge.yaml
+BOARD_CONFIG=$(python3 - <<'PYEOF'
+import yaml, sys
+cfg = yaml.safe_load(open('forge.yaml'))
+board = cfg.get('project_board', {})
+if not board:
+    print('')
+    sys.exit(0)
+print(board.get('owner', cfg.get('project', {}).get('owner', '')))
+print(str(board.get('project_number', '')))
+print(board.get('project_id', ''))
+PYEOF
+)
+
+BOARD_OWNER=$(echo "$BOARD_CONFIG" | sed -n '1p')
+BOARD_NUMBER=$(echo "$BOARD_CONFIG" | sed -n '2p')
+BOARD_ID=$(echo "$BOARD_CONFIG" | sed -n '3p')
+
+if [ -n "$BOARD_OWNER" ] && [ -n "$BOARD_NUMBER" ]; then
+  ISSUE_URL="https://github.com/$GH_REPO/issues/${ISSUE_NUM}"
+  ITEM_ID=$(gh project item-add "$BOARD_NUMBER" --owner "$BOARD_OWNER" --url "$ISSUE_URL" --format json --jq '.id' 2>/dev/null)
+  if [ -n "$ITEM_ID" ] && [ -n "$BOARD_ID" ]; then
+    # Set Status, Lane, Priority using field IDs from forge.yaml → project_board.field_ids
+    # See docs/CONFIG.md → project_board section for how to get field IDs
+    echo "Issue added to project board. Set Status/Lane/Priority manually or configure field_ids in forge.yaml."
+  fi
 fi
 ```
 
@@ -336,8 +422,10 @@ fi
 
 ## Error Handling
 
+- **forge.yaml missing**: Print setup instructions and exit. Do not proceed without config.
+- **services.analytics missing**: Print configuration instructions and exit.
 - **Umami auth fails**: Try SOPS credentials. If still broken, skip Umami and note in report.
 - **Clarity MCP fails**: Skip Clarity data, proceed with Umami only.
-- **curl to alterlab.io fails**: Report "Site unreachable — cannot run compliance checks" and only show referral data.
+- **curl to site fails**: Report "Site unreachable — cannot run compliance checks" and only show referral data.
 - **No AI referral data at all**: Report "No AI referral traffic detected in the last 30 days" — this IS an insight (we need to improve discoverability).
 - **Rate limits or timeouts**: Note which checks were incomplete. Partial audit > no audit.

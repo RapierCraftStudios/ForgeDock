@@ -4,7 +4,7 @@ argument-hint: [PR number, URL, "open", or "staging" for feature→main review]
 allowed-tools: Task, Bash, Read, Grep, Glob, WebFetch, Skill
 ---
 
-# AlterLab PR Review — Orchestrator
+# PR Review — Orchestrator
 
 **Input**: $ARGUMENTS
 
@@ -20,8 +20,10 @@ This is the **orchestrator**. It routes to the right review mode, runs automated
 
 | File | What | How to invoke |
 |------|------|---------------|
-| `/home/mrdubey/.claude/commands/review-pr-agents.md` | Agent prompt templates (9 agents + protocols) | `Read` tool during Phase 3C |
-| `/home/mrdubey/.claude/commands/review-pr-staging.md` | Full staging→main review pipeline | `Skill("review-pr-staging", ...)` during Phase 0 |
+| `$FORGE_HOME/commands/review-pr-agents.md` | Agent prompt templates (9 agents + protocols) | `Read` tool during Phase 3C |
+| `$FORGE_HOME/commands/review-pr-staging.md` | Full staging→main review pipeline | `Skill("review-pr-staging", ...)` during Phase 0 |
+
+`$FORGE_HOME` defaults to `~/.claude` (the directory where `npx forgedock` symlinks commands). Override by setting `FORGE_HOME` in your environment.
 
 **Invocation flow:**
 ```
@@ -38,7 +40,7 @@ This is the **orchestrator**. It routes to the right review mode, runs automated
 If `$ARGUMENTS` contains `--auto-merge`, this review was invoked from `/work-on` and must merge the PR after approval. Parse:
 
 ```
-Example: "3126 --auto-merge --issue 3124 --base staging --gh-flag -R RapierCraft/AlterLab --worktree /path/to/worktree"
+Example: "3126 --auto-merge --issue 3124 --base staging --gh-flag -R $GH_REPO --worktree /path/to/worktree"
 ```
 
 Extract: `PR_NUMBER`, `AUTO_MERGE=true`, `MERGE_ISSUE`, `MERGE_BASE`, `MERGE_GH_FLAG`, `MERGE_WORKTREE` (optional — the absolute path to the git worktree to clean up after merge)
@@ -292,12 +294,12 @@ Map each changed file to its activation requirements:
 | `web/src/app/**/*-client.tsx`, `web/src/components/**/*.tsx`, `web/src/lib/*.ts` (Client-side code with `fetch()`/`useSWR()`) | Client requests go through Next.js proxy (`/api/...`), never directly to FastAPI (`/api/v1/...`) | Grep changed `.tsx`/`.ts` files (excluding `route.ts` proxy handlers) for `fetch("/api/v1/` or `` `/api/v1/ `` in template literals or `useSWR.*"/api/v1/`. Any match is a **CONFIRMED BLOCKING** integration bug — direct calls bypass session auth (admin proxy JWT, session-to-bearer conversion) and fail locally (no nginx). |
 | `.github/workflows/*.yml` (Workflow with test/build jobs) | Sibling workflows with same-named jobs stay in sync | For each job name in the changed workflow, check if the same job name exists in sibling workflows (`ci.yml` ↔ `deploy-production.yml` ↔ `hotfix-deploy.yml`). Compare env vars, PYTHONPATH, working-directory, and run commands for meaningful drift. |
 | `docker-compose*.yml` changes to `postgres` or `redis` service (`command:`, `image:`, `volumes:`, `environment:`) | Stateful container will NOT be recreated during deploy, OR restart is safe | **Auto-escalate to HIGH risk.** Changing `command:` args, `image:` tag, or `volumes:` forces container recreation on `docker-compose up`. For stateful services (postgres, redis), verify: (1) `stop_grace_period` is set and sufficient (≥30s for PG); (2) `full_page_writes = on` in PG config (protects against partial page writes on crash); (3) `fsync = on` (ensures write durability); (4) No long-running transactions will be interrupted. If container recreation is unavoidable, recommend scheduling during a maintenance window — NOT as a side effect of a routine deploy. **This check prevents the class of incident documented in issue #146**: a PG `command:` arg change triggered container restart under active load, corrupting btree indexes. |
-| `docker-compose*.yml` changes `entrypoint:` or `command:` to reference a script (`.sh` file) | Env vars used inside the entrypoint script are available inside the container at runtime | **Run `verify-env-vars.sh`** which detects shell `${VAR}` references in entrypoint scripts and cross-checks against the service's `environment:` section. Docker Compose `${VAR}` in YAML `command:` is parsed at Compose load time (host-side) — the var doesn't need to be in the container. But `${VAR}` inside an entrypoint `.sh` script runs at container runtime — it MUST be injected via `environment:` or `env_file:`. **This check prevents the class of incident documented in RapierCraftStudios/forge#185**: Redis migrated from `command: --requirepass ${REDIS_PASSWORD}` (Compose interpolation) to `entrypoint.sh` (container runtime) without adding `environment: REDIS_PASSWORD`, causing a restart loop on deploy. |
+| `docker-compose*.yml` changes `entrypoint:` or `command:` to reference a script (`.sh` file) | Env vars used inside the entrypoint script are available inside the container at runtime | **Run `verify-env-vars.sh`** which detects shell `${VAR}` references in entrypoint scripts and cross-checks against the service's `environment:` section. Docker Compose `${VAR}` in YAML `command:` is parsed at Compose load time (host-side) — the var doesn't need to be in the container. But `${VAR}` inside an entrypoint `.sh` script runs at container runtime — it MUST be injected via `environment:` or `env_file:`. **This check prevents the class of incident where a service migrates from `command:` args (Compose interpolation) to an entrypoint script (container runtime) without adding the env var to `environment:`, causing a restart loop on deploy.** <!-- Added: forge#185 --> |
 | **ANY staging→main PR** (regardless of files changed) | `ci.yml` and `deploy-production.yml` test jobs are in sync | **ALWAYS runs for staging→main PRs.** Pre-existing drift is invisible until deploy. Deep-diff shared jobs (test-api, test-web): compare PYTHONPATH values, dependency install steps, and step names. A missing PYTHONPATH or install step in deploy is CONFIRMED BLOCKING — CI passes but deploy fails (PR #11356 incident). |
 
 ### Step 2.5B: Run Verification
 
-For each changed file, execute the relevant checks using the standalone verification scripts in `~/projects/forge/scripts/`. These scripts can also be run independently outside the review context (e.g., from `/quality-gate` or `/work-on` builder steps).
+For each changed file, execute the relevant checks using the standalone verification scripts in `$FORGE_HOME/scripts/`. These scripts can also be run independently outside the review context (e.g., from `/quality-gate` or `/work-on` builder steps).
 
 ```bash
 CHANGED_FILES=$(gh pr diff $ARGUMENTS --name-only)
@@ -315,19 +317,29 @@ gh pr diff $ARGUMENTS > "$DIFF_TMP"
 
 # 1. Route/router/middleware/shared-module/component registration
 echo "=== Running: verify-route-registration.sh ==="
-~/projects/forge/scripts/verify-route-registration.sh "$CHANGED_FILES_TMP" "$REPO_ROOT" || true
+$FORGE_HOME/scripts/verify-route-registration.sh "$CHANGED_FILES_TMP" "$REPO_ROOT" || true
 
 # 2. Environment variable wiring (checks .env.example, docker-compose, env_validation, SOPS mapping)
 echo "=== Running: verify-env-vars.sh ==="
-~/projects/forge/scripts/verify-env-vars.sh "$DIFF_TMP" "$REPO_ROOT" || true
+$FORGE_HOME/scripts/verify-env-vars.sh "$DIFF_TMP" "$REPO_ROOT" || true
 
 # 3. Host headers in shell scripts + client-side proxy bypass check
+# Read project-specific internal service patterns from forge.yaml (if present)
+FORGE_INTERNAL_PATTERNS=""
+if [ -f "$REPO_ROOT/forge.yaml" ]; then
+    FORGE_INTERNAL_PATTERNS=$(grep -A 999 'internal_service_patterns:' "$REPO_ROOT/forge.yaml" \
+        | grep -E '^\s*-\s+' \
+        | sed 's/^\s*-\s*//' \
+        | tr -d '"'"'" \
+        | paste -sd '|' -)
+fi
+export FORGE_INTERNAL_PATTERNS
 echo "=== Running: verify-host-headers.sh ==="
-~/projects/forge/scripts/verify-host-headers.sh "$CHANGED_FILES_TMP" "$REPO_ROOT" || true
+$FORGE_HOME/scripts/verify-host-headers.sh "$CHANGED_FILES_TMP" "$REPO_ROOT" || true
 
 # 4. SOPS deploy chain (ENV_MAPPING consistency, deploy path drift, hotfix sync)
 echo "=== Running: verify-sops-chain.sh ==="
-~/projects/forge/scripts/verify-sops-chain.sh "$DIFF_TMP" "$CHANGED_FILES_TMP" "$REPO_ROOT" || true
+$FORGE_HOME/scripts/verify-sops-chain.sh "$DIFF_TMP" "$CHANGED_FILES_TMP" "$REPO_ROOT" || true
 
 # Cleanup temp files
 rm -f "$CHANGED_FILES_TMP" "$DIFF_TMP"
@@ -488,14 +500,37 @@ echo "$FILES" | grep -cE "^sdk/|openapi.*\.json$|openapi-versions/" && echo "  S
 
 **>>> INVOCATION: Read the agent catalog file:**
 ```
-Read the file: /home/mrdubey/.claude/commands/review-pr-agents.md
+Read the file: $FORGE_HOME/commands/review-pr-agents.md
 ```
+
+(`$FORGE_HOME` defaults to `~/.claude`)
+
+**>>> LOAD CONFIG: Read forge.yaml for project context:**
+```bash
+# Read review config from forge.yaml (if present in project root)
+FORGE_YAML="${REPO_ROOT}/forge.yaml"
+PROJECT_NAME=$(yq '.project.name' "$FORGE_YAML" 2>/dev/null || echo "this project")
+PROJECT_CONTEXT=$(yq '.review.context' "$FORGE_YAML" 2>/dev/null || echo "")
+TECH_STACK=$(yq '.review.tech_stack' "$FORGE_YAML" 2>/dev/null || echo "")
+# Domain-specific context (keyed by agent name)
+DOMAIN_CONTEXT_AUTH=$(yq '.review.domains.auth' "$FORGE_YAML" 2>/dev/null || echo "")
+DOMAIN_CONTEXT_BILLING=$(yq '.review.domains.billing' "$FORGE_YAML" 2>/dev/null || echo "")
+DOMAIN_CONTEXT_INFRA=$(yq '.review.domains.infra' "$FORGE_YAML" 2>/dev/null || echo "")
+DOMAIN_CONTEXT_DATABASE=$(yq '.review.domains.database' "$FORGE_YAML" 2>/dev/null || echo "")
+DOMAIN_CONTEXT_FRONTEND=$(yq '.review.domains.frontend' "$FORGE_YAML" 2>/dev/null || echo "")
+DOMAIN_CONTEXT_SECURITY=$(yq '.review.domains.security' "$FORGE_YAML" 2>/dev/null || echo "")
+DOMAIN_CONTEXT_API=$(yq '.review.domains.api' "$FORGE_YAML" 2>/dev/null || echo "")
+```
+
+If `forge.yaml` is absent or a field is empty/null, agents fall back to generic checks (no project-specific context injected — agents still function correctly, just without project conventions).
 
 This file contains the Evidence-Based Review Protocol, Structured Findings Protocol, and all 9 agent prompt templates. For each selected agent:
 1. Extract its template from the catalog
 2. Substitute: `[PR_NUMBER]`, `[REVIEW_SHA]`, `[REVIEW_SHA_SHORT]`, `[TITLE]`, relevant files list
-3. If Phase 2.5 found broken assumptions, append them to the agent's prompt as "Pre-found integration issues to verify"
-4. Launch via `Task` tool with the resolved model (default `"sonnet"`, fallback `"opus"` if rate-limited)
+3. Substitute: `[PROJECT_NAME]` → `$PROJECT_NAME`, `[PROJECT_CONTEXT]` → `$PROJECT_CONTEXT`, `[TECH_STACK]` → `$TECH_STACK`
+4. Substitute per-agent domain context: `[DOMAIN_CONTEXT]` → the agent's matching key from `forge.yaml → review.domains` (e.g., `$DOMAIN_CONTEXT_AUTH` for the auth agent, `$DOMAIN_CONTEXT_BILLING` for the billing agent)
+5. If Phase 2.5 found broken assumptions, append them to the agent's prompt as "Pre-found integration issues to verify"
+6. Launch via `Task` tool with the resolved model (default `"sonnet"`, fallback `"opus"` if rate-limited)
 
 **CRITICAL**: Launch ALL selected agents in a SINGLE message using multiple Task tool calls. Each agent posts findings directly to the PR via `gh pr comment`.
 
@@ -711,10 +746,17 @@ Labels: `review-finding` + `needs-validation` + priority (`P1` CONFIRMED, `P2` L
 **Add to project board:**
 ```bash
 for FINDING_NUM in {numbers}; do
-  ITEM_ID=$(gh project item-add 1 --owner RapierCraft --url "https://github.com/RapierCraft/AlterLab/issues/${FINDING_NUM}" --format json --jq '.id' 2>/dev/null)
+  # GH_REPO and board IDs are read from forge.yaml → project_board section
+  # OWNER = forge.yaml → project_board.owner (or project.owner)
+  # PROJECT_NUMBER = forge.yaml → project_board.project_number
+  # PROJECT_ID = forge.yaml → project_board.project_id
+  # STATUS_FIELD_ID = forge.yaml → project_board.field_ids.status
+  # LANE_FIELD_ID = forge.yaml → project_board.field_ids.lane
+  # REVIEW_FINDING_OPTION_ID = forge.yaml → project_board.option_ids.status.in_review
+  ITEM_ID=$(gh project item-add ${PROJECT_NUMBER} --owner ${OWNER} --url "https://github.com/${GH_REPO}/issues/${FINDING_NUM}" --format json --jq '.id' 2>/dev/null)
   [ -n "$ITEM_ID" ] && {
-    gh project item-edit --project-id PVT_kwHOCx3gR84BSK2L --id "$ITEM_ID" --field-id PVTSSF_lAHOCx3gR84BSK2Lzg_yF6E --single-select-option-id f75ad846 2>/dev/null || true
-    gh project item-edit --project-id PVT_kwHOCx3gR84BSK2L --id "$ITEM_ID" --field-id PVTSSF_lAHOCx3gR84BSK2Lzg_yF98 --single-select-option-id 62864af4 2>/dev/null || true
+    [ -n "$STATUS_FIELD_ID" ] && gh project item-edit --project-id ${PROJECT_ID} --id "$ITEM_ID" --field-id ${STATUS_FIELD_ID} --single-select-option-id ${REVIEW_FINDING_OPTION_ID} 2>/dev/null || true
+    [ -n "$LANE_FIELD_ID" ] && gh project item-edit --project-id ${PROJECT_ID} --id "$ITEM_ID" --field-id ${LANE_FIELD_ID} --single-select-option-id ${LANE_OPTION_ID} 2>/dev/null || true
   }
 done
 ```

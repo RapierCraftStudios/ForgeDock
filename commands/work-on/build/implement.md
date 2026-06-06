@@ -19,8 +19,8 @@ argument-hint: [issue number] [--repo GH_REPO] [--gh-flag GH_FLAG] [--worktree P
 
 Parse from $ARGUMENTS:
 - `{NUMBER}` — issue number (required)
-- `--repo {GH_REPO}` — GitHub repo (e.g. `RapierCraft/AlterLab`)
-- `--gh-flag {GH_FLAG}` — gh CLI repo flag (e.g. `-R RapierCraft/AlterLab`)
+- `--repo {GH_REPO}` — GitHub repo (e.g. `{owner}/{repo}` — resolved from `forge.yaml → project`)
+- `--gh-flag {GH_FLAG}` — gh CLI repo flag (e.g. `-R {owner}/{repo}`)
 - `--worktree {WORKTREE_PATH}` — absolute path to the git worktree (set by caller)
 - `--branch {BRANCH}` — feature branch name (e.g. `feat/my-feature`)
 
@@ -145,7 +145,7 @@ if [ -n "$NEW_ENV_VARS" ]; then
 fi
 ```
 
-**If any MISSING line is printed**: add the var to the missing location before proceeding to Phase I4. If the file doesn't exist in this repo (e.g. `ENV_VARS.md` is an AlterLab file, not a Forge file), skip that check silently.
+**If any MISSING line is printed**: add the var to the missing location before proceeding to Phase I4. If a file listed above doesn't exist in this repo (e.g. `ENV_VARS.md` or `env_validation.py` may not be present in all projects), skip that check silently.
 
 ### Check 2 — Deploy/infra restart risk
 
