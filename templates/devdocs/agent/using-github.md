@@ -245,9 +245,9 @@ to pending state with retry scheduling.
 ### Creating Missing Labels
 
 ```bash
-gh label create "workflow:investigating" --color "ededed" -R $GH_REPO
+gh label create "workflow:investigating" --color "1D76DB" -R $GH_REPO
 gh label create "priority:P2" --color "FBCA04" -R $GH_REPO
-gh label create "review-finding" --color "e11d48" -R $GH_REPO
+gh label create "review-finding" --color "D93F0B" -R $GH_REPO
 ```
 
 ### Bulk Label Sync

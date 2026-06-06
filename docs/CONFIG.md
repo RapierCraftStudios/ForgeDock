@@ -321,7 +321,7 @@ devdocs:
 |-------|------|----------|-------------|
 | `path` | string (relative path) | No | Path to the devdocs tree, relative to project root. Default: `devdocs`. |
 
-**Commands that use this section**: `docs init`
+**Commands that use this section**: `docs init`, `work-on/build/context` (Phase C-1), `work-on/build/architect` (Phase A0)
 
 ### Migration from `review.context`
 

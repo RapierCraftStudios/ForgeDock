@@ -100,6 +100,8 @@ if [ ! -d "$DEVDOCS_PATH" ]; then
 fi
 ```
 
+> **Note**: `devdocs/` must be tracked in git for the worktree to contain it. If the project gitignores `devdocs/`, the path will not exist in the worktree and this phase silently skips — this is by design. Run `git check-ignore -v devdocs/` to confirm tracking status.
+
 ### Step 1: Priority read — custom instructions (HIGHEST PRECEDENCE)
 
 Always read `project/custom-instructions.md` first if it exists. Directives in this file are BINDING — they override everything else.
