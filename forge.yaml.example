@@ -331,3 +331,28 @@ branches:
 #   # When false (default), the billing audit phase is skipped — appropriate for
 #   # projects that do not process payments or have no Stripe integration.
 #   enabled: false
+
+# =============================================================================
+# DEVDOCS (OPTIONAL)
+# Path configuration for the devdocs knowledge tree scaffolded by
+# `npx forgedock docs init`. Pipeline agents (work-on, review-pr, etc.) read
+# these files as authoritative project knowledge before acting.
+# Commands: docs init
+# =============================================================================
+
+# devdocs:
+#   # Path to the devdocs knowledge tree, relative to the project root.
+#   # Default: "devdocs" — creates devdocs/ in the project root.
+#   # Run `npx forgedock docs init` to scaffold the tree from seed templates.
+#   path: "devdocs"
+#
+#   # Migration note: if you previously stored project context in
+#   # forge.yaml → review.context, move that content into the appropriate
+#   # devdocs file:
+#   #   - Architecture decisions  → devdocs/project/architecture.md
+#   #   - Tech stack details      → devdocs/project/stack.md
+#   #   - Coding conventions      → devdocs/project/conventions.md
+#   #   - Project terminology     → devdocs/project/glossary.md
+#   #   - ForgeDock usage notes   → devdocs/agent/using-forgedock.md
+#   # Agents read devdocs/ files as binding source-of-truth, so they receive
+#   # richer context than the single review.context string.

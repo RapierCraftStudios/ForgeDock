@@ -3489,6 +3489,123 @@ async function labelsSetup(repo) {
   return { created, failed };
 }
 
+// ---------------------------------------------------------------------------
+// docs init — scaffold devdocs knowledge tree into a project
+// ---------------------------------------------------------------------------
+
+/**
+ * Walk a directory tree and return all file paths (any extension).
+ * @param {string} dir
+ * @returns {Promise<string[]>}
+ */
+async function _findAllFiles(dir) {
+  const results = [];
+  const entries = await readdir(dir, { withFileTypes: true });
+  for (const entry of entries) {
+    const full = join(dir, entry.name);
+    if (entry.isDirectory()) {
+      results.push(...(await _findAllFiles(full)));
+    } else {
+      results.push(full);
+    }
+  }
+  return results.sort();
+}
+
+async function docsInit() {
+  const cwd = process.cwd();
+
+  // Resolve target devdocs path: forge.yaml → devdocs.path, default "devdocs/"
+  let devdocsRelPath = "devdocs";
+  const forgeYamlPath = join(cwd, "forge.yaml");
+  if (existsSync(forgeYamlPath)) {
+    try {
+      const raw = readFileSync(forgeYamlPath, "utf-8");
+      const parsed = _parseYamlKey(raw, "devdocs.path");
+      if (parsed && parsed.trim()) {
+        devdocsRelPath = _sanitizePathValue(parsed.trim().replace(/\/$/, ""));
+      }
+    } catch {
+      // forge.yaml unreadable — use default
+    }
+  }
+
+  const targetDir = isAbsolute(devdocsRelPath)
+    ? devdocsRelPath
+    : join(cwd, devdocsRelPath);
+
+  // Template source: templates/devdocs/ inside the ForgeDock package
+  const templatesDir = join(FORGE_HOME, "templates", "devdocs");
+
+  if (!existsSync(templatesDir)) {
+    console.log(
+      `${RED}DevDocs templates not found: ${templatesDir}${RESET}`,
+    );
+    console.log(
+      `  This usually means ForgeDock is not installed correctly.`,
+    );
+    console.log(
+      `  Try: ${CYAN}npm install -g forgedock${RESET} or ${CYAN}npx forgedock@latest docs init${RESET}`,
+    );
+    process.exit(1);
+  }
+
+  const templateFiles = await _findAllFiles(templatesDir);
+
+  console.log("");
+  console.log(`${BOLD}ForgeDock${RESET} — Scaffold DevDocs`);
+  console.log(`  Source:  ${dim(templatesDir + "/")}`);
+  console.log(`  Target:  ${dim(targetDir + "/")}`);
+  console.log(`  Files:   ${templateFiles.length} seed files`);
+  console.log("");
+
+  await mkdir(targetDir, { recursive: true });
+
+  let copied = 0;
+  let skipped = 0;
+
+  for (const srcFile of templateFiles) {
+    const rel = relative(templatesDir, srcFile);
+    const destFile = join(targetDir, rel);
+    const destDir = dirname(destFile);
+
+    await mkdir(destDir, { recursive: true });
+
+    if (existsSync(destFile)) {
+      skipped++;
+      console.log(`  ${dim("skip")}  ${dim(rel)}`);
+    } else {
+      await copyFile(srcFile, destFile);
+      copied++;
+      console.log(`  ${green("+")}     ${rel}`);
+    }
+  }
+
+  console.log("");
+  if (copied > 0 && skipped === 0) {
+    console.log(
+      `${green("DevDocs scaffolded!")} ${copied} file${copied !== 1 ? "s" : ""} created in ${cyan(devdocsRelPath + "/")}.`,
+    );
+  } else if (copied > 0) {
+    console.log(
+      `${green("DevDocs scaffolded!")} ${copied} file${copied !== 1 ? "s" : ""} created, ${skipped} already existed (skipped).`,
+    );
+  } else {
+    console.log(
+      `${yellow("DevDocs already up to date.")} All ${skipped} file${skipped !== 1 ? "s" : ""} already exist — nothing was overwritten.`,
+    );
+  }
+
+  console.log("");
+  console.log(
+    `  ${dim("Tip:")} Customise the files in ${cyan(devdocsRelPath + "/")} for your project.`,
+  );
+  console.log(
+    `  ${dim("Agents read these files as authoritative project knowledge.")}`,
+  );
+  console.log("");
+}
+
 function help() {
   console.log("");
   console.log(
@@ -3526,6 +3643,9 @@ function help() {
   );
   console.log(
     `  ${CYAN}npx forgedock integrate${RESET}  Inject/update ForgeDock usage block in project CLAUDE.md`,
+  );
+  console.log(
+    `  ${CYAN}npx forgedock docs init${RESET}  Scaffold devdocs knowledge tree into current project`,
   );
   console.log(`  ${CYAN}npx forgedock help${RESET}       Show this help`);
   console.log("");
@@ -3956,6 +4076,19 @@ if (!command) {
     case "integrate":
       await injectClaudeMd(process.cwd());
       break;
+    case "docs": {
+      const docsSubcommand = args[1];
+      if (!docsSubcommand || docsSubcommand === "init") {
+        await docsInit();
+      } else {
+        console.log(`${RED}Unknown docs subcommand: ${docsSubcommand}${RESET}`);
+        console.log(
+          `Usage: ${CYAN}npx forgedock docs init${RESET}`,
+        );
+        process.exit(1);
+      }
+      break;
+    }
     case "help":
     case "--help":
     case "-h":
