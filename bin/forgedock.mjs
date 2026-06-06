@@ -1,7 +1,8 @@
 #!/usr/bin/env node
 
+import os from "os";
 import { fileURLToPath } from "url";
-import { basename, dirname, join, relative, resolve } from "path";
+import { basename, dirname, isAbsolute, join, relative, resolve } from "path";
 import { mkdir, symlink, copyFile, readlink, lstat, readdir, stat, writeFile, unlink as fsUnlink } from "fs/promises";
 import { existsSync, appendFileSync, chmodSync, readFileSync, writeFileSync, renameSync, unlinkSync } from "fs";
 import { execSync, execFileSync } from "child_process";
@@ -2641,12 +2642,18 @@ async function connectExistingBot() {
   }
 
   const privateKeyPath = await input("Private key path (.pem):", "");
-  const HOME = process.env.HOME ?? "";
-  const expanded = privateKeyPath.trim().replace(/^~/, HOME);
+  const trimmedKeyPath = privateKeyPath.trim();
+  const home = os.homedir();
+  const expanded = trimmedKeyPath.startsWith("~")
+    ? join(home, trimmedKeyPath.slice(1))
+    : trimmedKeyPath;
   const resolvedKeyPath = resolve(expanded);
-  if (privateKeyPath.trim().startsWith("~") && HOME && !resolvedKeyPath.startsWith(HOME + "/") && resolvedKeyPath !== HOME) {
-    console.log(`  ${RED}Invalid path: cannot traverse outside home directory.${RESET}`);
-    return false;
+  if (trimmedKeyPath.startsWith("~")) {
+    const rel = relative(home, resolvedKeyPath);
+    if (rel.startsWith("..") || isAbsolute(rel)) {
+      console.log(`  ${RED}Invalid path: cannot traverse outside home directory.${RESET}`);
+      return false;
+    }
   }
   if (!existsSync(resolvedKeyPath)) {
     console.log(`  ${RED}File not found: ${resolvedKeyPath}${RESET}`);
