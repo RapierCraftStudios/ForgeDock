@@ -24,7 +24,6 @@ import {
   unlinkSync,
 } from "fs";
 import { execSync, execFileSync } from "child_process";
-import { createSign } from "crypto";
 import {
   BOLD,
   GREEN,
@@ -1221,15 +1220,8 @@ function queryNpmRegistry(pkg) {
 
 /**
  * Path to the update-check cache file.
- * Stored in ~/.forgedock/ alongside credentials.json.
- * Populated lazily — FORGEDOCK_HOME is defined later in the file, but this
- * constant is only resolved at module evaluation time so the ordering is fine.
+ * Stored in ~/.forgedock/update-check.json.
  */
-// NOTE: FORGEDOCK_HOME is declared later in the file (line ~2974). This const
-// is a forward reference that is only evaluated when the module finishes loading,
-// which is after FORGEDOCK_HOME is defined. Node ESM top-level await ensures
-// the module is fully evaluated before any exported binding is read.
-// We defer the join() call to avoid the forward-reference issue:
 function _getUpdateCheckCachePath() {
   return join(HOME, ".forgedock", "update-check.json");
 }
@@ -2731,21 +2723,6 @@ ${reviewSection}
 # =============================================================================
 
 ${verificationSection}
-
-# =============================================================================
-# BOT (OPTIONAL)
-# GitHub App bot identity for pipeline operations.
-# Credentials are stored separately in ~/.forgedock/credentials.json — not here.
-# Run: npx forgedock bot setup  to configure interactively.
-# Run: npx forgedock bot status to verify.
-# =============================================================================
-
-# bot:
-#   app_id: 12345
-#   installation_id: 67890
-#   private_key_path: "~/.forgedock/forgedock-bot.private-key.pem"
-#   # When configured, pipeline commands use the app token instead of personal token.
-#   # Bot-authored comments include <!-- forgedock-bot --> for audit filtering.
 `;
 }
 
@@ -3209,391 +3186,6 @@ function _renderValidationSummary(checks) {
   process.stdout.write(box(lines, { title: "Config Validation" }));
 }
 
-// ---------------------------------------------------------------------------
-// Bot credentials — store in ~/.forgedock/credentials.json (NOT forge.yaml)
-// ---------------------------------------------------------------------------
-
-const FORGEDOCK_HOME = join(HOME, ".forgedock");
-const CREDENTIALS_FILE = join(FORGEDOCK_HOME, "credentials.json");
-
-/**
- * Save bot credentials to ~/.forgedock/credentials.json.
- * The private key itself is NOT stored — only the path.
- *
- * @param {{ appId: string, installationId: string, privateKeyPath: string }} creds
- */
-async function saveBotCredentials(creds) {
-  await mkdir(FORGEDOCK_HOME, { recursive: true, mode: 0o700 });
-  // Tighten permissions on pre-existing installs: fs.mkdir({ recursive: true }) ignores
-  // mode when the directory already exists (Linux kernel behaviour). chmodSync enforces
-  // 0o700 unconditionally, matching the intent of the mode option above.
-  chmodSync(FORGEDOCK_HOME, 0o700);
-  const existing = loadBotCredentials() ?? {};
-  const updated = { ...existing, bot: creds };
-  writeFileSync(CREDENTIALS_FILE, JSON.stringify(updated, null, 2) + "\n", {
-    encoding: "utf-8",
-    mode: 0o600,
-  });
-  // Tighten permissions on files created before this fix (mode is only applied at creation time)
-  chmodSync(CREDENTIALS_FILE, 0o600);
-}
-
-/**
- * Load bot credentials from ~/.forgedock/credentials.json.
- * Returns null if the file is absent or malformed.
- *
- * @returns {{ appId: string, installationId: string, privateKeyPath: string } | null}
- */
-function loadBotCredentials() {
-  try {
-    const raw = readFileSync(CREDENTIALS_FILE, "utf-8");
-    const parsed = JSON.parse(raw);
-    return parsed.bot ?? null;
-  } catch {
-    return null;
-  }
-}
-
-// ---------------------------------------------------------------------------
-// GitHub App JWT — generates a short-lived RS256 JWT for App-level API calls
-// ---------------------------------------------------------------------------
-
-/**
- * Generate a GitHub App JWT (valid for 10 minutes).
- *
- * @param {string} appId      - GitHub App ID (numeric string)
- * @param {string} privateKey - PEM-encoded PKCS#8 or PKCS#1 RSA private key content
- * @returns {string} Signed JWT
- */
-function generateAppJwt(appId, privateKey) {
-  const now = Math.floor(Date.now() / 1000);
-  const payload = {
-    iat: now - 60, // issued 60s ago to account for clock skew
-    exp: now + 600, // expires in 10 minutes (GitHub max)
-    iss: appId,
-  };
-
-  const header = Buffer.from(
-    JSON.stringify({ alg: "RS256", typ: "JWT" }),
-  ).toString("base64url");
-  const body = Buffer.from(JSON.stringify(payload)).toString("base64url");
-  const unsigned = `${header}.${body}`;
-
-  const sign = createSign("RSA-SHA256");
-  sign.update(unsigned);
-  const signature = sign.sign(privateKey, "base64url");
-
-  return `${unsigned}.${signature}`;
-}
-
-// ---------------------------------------------------------------------------
-// Bot — connect existing GitHub App
-// ---------------------------------------------------------------------------
-
-/**
- * Interactive flow: prompt for App ID, private key path, installation ID.
- * Validates credentials against the GitHub API before saving.
- */
-async function connectExistingBot() {
-  console.log("");
-  console.log(
-    box(
-      [
-        `${bold("Connect an existing GitHub App")}`,
-        "",
-        "You'll need:",
-        `  • App ID  (GitHub → Settings → Developer settings → GitHub Apps → your app)`,
-        `  • Private key file  (.pem downloaded from app settings)`,
-        `  • Installation ID  (GitHub → your org → Settings → Installed Apps → your app → configure → URL)`,
-      ].join("\n"),
-      { title: "Connect GitHub App" },
-    ),
-  );
-  console.log("");
-
-  const appId = await input("App ID (numeric):", "");
-  if (!appId || !/^\d+$/.test(appId.trim())) {
-    console.log(`  ${RED}Invalid App ID — must be a numeric string.${RESET}`);
-    return false;
-  }
-
-  const privateKeyPath = await input("Private key path (.pem):", "");
-  const trimmedKeyPath = privateKeyPath.trim();
-  const home = os.homedir();
-  const expanded = trimmedKeyPath.startsWith("~")
-    ? join(home, trimmedKeyPath.slice(1))
-    : trimmedKeyPath;
-  const resolvedKeyPath = resolve(expanded);
-  if (trimmedKeyPath.startsWith("~")) {
-    const rel = relative(home, resolvedKeyPath);
-    if (rel.startsWith("..") || isAbsolute(rel)) {
-      console.log(
-        `  ${RED}Invalid path: cannot traverse outside home directory.${RESET}`,
-      );
-      return false;
-    }
-  }
-  if (!existsSync(resolvedKeyPath)) {
-    console.log(`  ${RED}File not found: ${resolvedKeyPath}${RESET}`);
-    return false;
-  }
-
-  const installationId = await input("Installation ID (numeric):", "");
-  if (!installationId || !/^\d+$/.test(installationId.trim())) {
-    console.log(
-      `  ${RED}Invalid Installation ID — must be a numeric string.${RESET}`,
-    );
-    return false;
-  }
-
-  // Validate credentials with GitHub API
-  console.log("");
-  console.log(`  Validating credentials…`);
-  let privateKey;
-  try {
-    privateKey = readFileSync(resolvedKeyPath, "utf-8");
-  } catch (err) {
-    console.log(`  ${RED}Cannot read private key: ${err.message}${RESET}`);
-    return false;
-  }
-
-  try {
-    const jwt = generateAppJwt(appId.trim(), privateKey);
-    const resp = await fetch("https://api.github.com/app", {
-      headers: {
-        Authorization: `Bearer ${jwt}`,
-        Accept: "application/vnd.github+json",
-        "X-GitHub-Api-Version": "2022-11-28",
-      },
-    });
-    if (!resp.ok) {
-      const body = await resp.json().catch(() => ({}));
-      console.log(
-        `  ${RED}GitHub API error ${resp.status}: ${body.message ?? "unknown"}${RESET}`,
-      );
-      return false;
-    }
-    const appData = await resp.json();
-    console.log(
-      `  ${GREEN}Connected!${RESET} App: ${bold(appData.name)} (id: ${appId.trim()})`,
-    );
-  } catch (err) {
-    console.log(`  ${RED}Validation failed: ${err.message}${RESET}`);
-    return false;
-  }
-
-  await saveBotCredentials({
-    appId: appId.trim(),
-    installationId: installationId.trim(),
-    privateKeyPath: resolvedKeyPath,
-  });
-
-  console.log(`  Credentials saved to ${cyan(CREDENTIALS_FILE)}`);
-  return true;
-}
-
-// ---------------------------------------------------------------------------
-// Bot — status command
-// ---------------------------------------------------------------------------
-
-/**
- * Show bot health, identity, and rate limit usage.
- * Gracefully handles missing credentials.
- */
-async function botStatus() {
-  console.log("");
-  console.log(`${BOLD}ForgeDock Bot Status${RESET}`);
-  console.log("");
-
-  const creds = loadBotCredentials();
-  if (!creds) {
-    console.log(
-      `  ${YELLOW}No bot credentials found.${RESET}\n` +
-        `  Run ${cyan("npx forgedock bot setup")} to configure a GitHub App, or\n` +
-        `  add credentials to ${cyan(CREDENTIALS_FILE)}.`,
-    );
-    console.log("");
-    return;
-  }
-
-  console.log(`  App ID:          ${cyan(creds.appId)}`);
-  console.log(`  Installation ID: ${cyan(creds.installationId)}`);
-  console.log(`  Private key:     ${cyan(creds.privateKeyPath)}`);
-  console.log("");
-
-  // Check private key file
-  if (!existsSync(creds.privateKeyPath)) {
-    console.log(
-      `  ${RED}Private key file not found: ${creds.privateKeyPath}${RESET}`,
-    );
-    console.log(`  Run ${cyan("npx forgedock bot setup")} to reconfigure.`);
-    console.log("");
-    return;
-  }
-
-  console.log("  Verifying with GitHub API…");
-  let privateKey;
-  try {
-    privateKey = readFileSync(creds.privateKeyPath, "utf-8");
-  } catch (err) {
-    console.log(`  ${RED}Cannot read private key: ${err.message}${RESET}`);
-    console.log("");
-    return;
-  }
-
-  try {
-    const jwt = generateAppJwt(creds.appId, privateKey);
-
-    // App identity
-    const appResp = await fetch("https://api.github.com/app", {
-      headers: {
-        Authorization: `Bearer ${jwt}`,
-        Accept: "application/vnd.github+json",
-        "X-GitHub-Api-Version": "2022-11-28",
-      },
-    });
-    if (!appResp.ok) {
-      const body = await appResp.json().catch(() => ({}));
-      console.log(
-        `  ${RED}GitHub API error ${appResp.status}: ${body.message ?? "unknown"}${RESET}`,
-      );
-      console.log("");
-      return;
-    }
-    const appData = await appResp.json();
-    console.log(
-      `  ${GREEN}Connected${RESET} — App: ${bold(appData.name)} (slug: @${appData.slug})`,
-    );
-
-    // Rate limit for app
-    const rlResp = await fetch("https://api.github.com/rate_limit", {
-      headers: {
-        Authorization: `Bearer ${jwt}`,
-        Accept: "application/vnd.github+json",
-        "X-GitHub-Api-Version": "2022-11-28",
-      },
-    });
-    if (rlResp.ok) {
-      const rl = await rlResp.json();
-      const core = rl.resources?.core;
-      if (core) {
-        const used = core.limit - core.remaining;
-        const resetTime = new Date(core.reset * 1000).toLocaleTimeString();
-        console.log(
-          `  Rate limit:      ${cyan(core.remaining)}/${core.limit} remaining (${used} used, resets ${resetTime})`,
-        );
-      }
-    }
-  } catch (err) {
-    console.log(`  ${RED}Error: ${err.message}${RESET}`);
-  }
-
-  console.log("");
-}
-
-// ---------------------------------------------------------------------------
-// Bot — setup TUI step (called from StepOrchestrator or directly)
-// ---------------------------------------------------------------------------
-
-/**
- * Interactive bot setup step.
- * Shows options: Create new app / Connect existing / Skip.
- * Called as an optional step in tuiOnboarding() or via `npx forgedock bot setup`.
- */
-async function botSetup() {
-  console.log("");
-  console.log(
-    box(
-      [
-        `${bold("GitHub Bot Setup")} ${dim("(Optional)")}`,
-        "",
-        "A GitHub App gives ForgeDock its own identity",
-        "for pipeline operations. Benefits:",
-        `  ${cyan("•")} Separate audit trail for bot actions`,
-        `  ${cyan("•")} Higher API rate limits`,
-        `  ${cyan("•")} Webhook-driven automation (future)`,
-        `  ${cyan("•")} Multi-user team support`,
-      ].join("\n"),
-      { title: "GitHub Bot" },
-    ),
-  );
-  console.log("");
-
-  const action = await select("How would you like to set up the bot?", [
-    { label: "Create new GitHub App (opens browser)", value: "create" },
-    { label: "Connect existing GitHub App", value: "connect" },
-    { label: "Skip — use personal token (current default)", value: "skip" },
-  ]);
-
-  if (action === "skip") {
-    console.log(
-      `  ${dim("Skipped.")} Run ${cyan("npx forgedock bot setup")} later to configure a bot identity.`,
-    );
-    return;
-  }
-
-  if (action === "create") {
-    // Build the GitHub App manifest URL — opens the browser-based creation flow
-    const manifestPath = join(dirname(__filename), "github-app-manifest.json");
-    let manifest;
-    try {
-      manifest = JSON.parse(readFileSync(manifestPath, "utf-8"));
-    } catch {
-      console.log(
-        `  ${RED}Could not read github-app-manifest.json — skipping.${RESET}`,
-      );
-      return;
-    }
-
-    const encodedManifest = encodeURIComponent(JSON.stringify(manifest));
-    const createUrl = `https://github.com/settings/apps/new?manifest=${encodedManifest}`;
-
-    console.log("");
-    console.log(
-      `  ${bold("Opening GitHub App registration in your browser…")}`,
-    );
-    console.log(`  URL: ${cyan(createUrl.substring(0, 80))}…`);
-    console.log("");
-
-    // Try to open the browser
-    try {
-      const opener =
-        process.platform === "win32"
-          ? "start"
-          : process.platform === "darwin"
-            ? "open"
-            : "xdg-open";
-      // On Windows, `start "url"` treats the first quoted arg as the window title.
-      // Pass an empty title placeholder so the URL is treated as the target: `start "" "url"`.
-      const cmd =
-        process.platform === "win32"
-          ? `start "" "${createUrl}"`
-          : `${opener} "${createUrl}"`;
-      execSync(cmd, { stdio: ["pipe", "pipe", "pipe"] });
-    } catch {
-      console.log(`  ${YELLOW}Could not open browser automatically.${RESET}`);
-      console.log(`  Please open this URL manually:`);
-      console.log(`  ${cyan(createUrl)}`);
-    }
-
-    console.log("");
-    console.log("  After creating the app in your browser:");
-    console.log(`  1. Download the private key (.pem) from the app settings`);
-    console.log(`  2. Note your App ID and Installation ID`);
-    console.log(
-      `  3. Run ${cyan("npx forgedock bot setup")} again and choose \"Connect existing\"`,
-    );
-    console.log("");
-    return;
-  }
-
-  // action === "connect"
-  const connected = await connectExistingBot();
-  if (!connected) {
-    throw new Error("Bot connection failed — credentials were not saved.");
-  }
-}
-
 function help() {
   console.log("");
   console.log(
@@ -3619,15 +3211,6 @@ function help() {
   );
   console.log(
     `  ${CYAN}npx forgedock update${RESET}     Pull latest & reinstall`,
-  );
-  console.log(
-    `  ${CYAN}npx forgedock bot${RESET}        Manage GitHub App bot identity`,
-  );
-  console.log(
-    `  ${CYAN}npx forgedock bot status${RESET} Show bot health and rate limit usage`,
-  );
-  console.log(
-    `  ${CYAN}npx forgedock bot setup${RESET}  Configure GitHub App bot (interactive)`,
   );
   console.log(`  ${CYAN}npx forgedock help${RESET}       Show this help`);
   console.log("");
@@ -3984,13 +3567,6 @@ async function tuiOnboarding() {
         await validate(forgeYamlPath);
       },
     },
-    {
-      name: "GitHub Bot Setup",
-      optional: true,
-      run: async () => {
-        await botSetup();
-      },
-    },
   ];
 
   const orchestrator = new StepOrchestrator(steps);
@@ -4040,19 +3616,6 @@ if (!command) {
     case "update":
       await update();
       break;
-    case "bot": {
-      const subcommand = args[1];
-      if (!subcommand || subcommand === "status") {
-        await botStatus();
-      } else if (subcommand === "setup") {
-        await botSetup();
-      } else {
-        console.log(`${RED}Unknown bot subcommand: ${subcommand}${RESET}`);
-        console.log(`Usage: ${CYAN}npx forgedock bot [status|setup]${RESET}`);
-        process.exit(1);
-      }
-      break;
-    }
     case "help":
     case "--help":
     case "-h":
