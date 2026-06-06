@@ -2275,23 +2275,37 @@ function _injectManagedBlock(filePath, blockContent, createIfMissing) {
   let existing = readFileSync(filePath, "utf-8");
 
   if (existing.includes(CLAUDE_BLOCK_BEGIN) && existing.includes(CLAUDE_BLOCK_END)) {
-    // Both markers present — replace existing block in place
+    // Both markers present — replace existing block in place.
+    // Guard: if markers are reversed (END before BEGIN) the regex finds no
+    // forward-spanning match; fall through to the repair path instead of
+    // writing the file unchanged and returning a false 'updated'. <!-- Added: forge#291 -->
     const escaped_begin = CLAUDE_BLOCK_BEGIN.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
     const escaped_end = CLAUDE_BLOCK_END.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
     const blockRegex = new RegExp(
       `${escaped_begin}[\\s\\S]*?${escaped_end}`,
       "g",
     );
-    existing = existing.replace(blockRegex, managed);
-    writeFileSync(filePath, existing, "utf-8");
-    return "updated";
-  }
-
-  if (existing.includes(CLAUDE_BLOCK_BEGIN)) {
+    const replaced = existing.replace(blockRegex, managed);
+    if (replaced !== existing) {
+      writeFileSync(filePath, replaced, "utf-8");
+      return "updated";
+    }
+    // Regex found no match (e.g. reversed markers) — strip both orphaned
+    // markers below and fall through to the append path to repair the file.
+    existing = existing
+      .replace(CLAUDE_BLOCK_BEGIN, "")
+      .replace(CLAUDE_BLOCK_END, "")
+      .trimEnd();
+  } else if (existing.includes(CLAUDE_BLOCK_BEGIN)) {
     // BEGIN present but END missing — file is truncated or malformed.
     // Strip the orphaned marker and everything after it, then fall through
     // to the append path below so the complete block is written correctly.
     existing = existing.slice(0, existing.indexOf(CLAUDE_BLOCK_BEGIN)).trimEnd();
+  } else if (existing.includes(CLAUDE_BLOCK_END)) {
+    // END present but BEGIN missing — orphaned END marker left by a previous
+    // failed write. Strip it and fall through to append the complete block.
+    // <!-- Added: forge#291 -->
+    existing = existing.replace(CLAUDE_BLOCK_END, "").trimEnd();
   }
 
   // Append block to existing content, separated by a blank line
