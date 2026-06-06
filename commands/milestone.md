@@ -26,13 +26,21 @@ REPO_PATH=$(yq '.paths.root' "$CONFIG_FILE")
 PROJECT_NAME=$(yq '.project.name' "$CONFIG_FILE")
 STAGING_BRANCH=$(yq '.branches.staging' "$CONFIG_FILE")
 PROJECT_BOARD_OWNER=$(yq '.project_board.owner // .project.owner' "$CONFIG_FILE")
-PROJECT_NUMBER=$(yq '.project_board.project_number // "1"' "$CONFIG_FILE")
-PROJECT_ID=$(yq '.project_board.project_id' "$CONFIG_FILE")
+PROJECT_NUMBER=$(yq '.project_board.project_number // empty' "$CONFIG_FILE" 2>/dev/null || echo "")
+PROJECT_ID=$(yq '.project_board.project_id // empty' "$CONFIG_FILE" 2>/dev/null || echo "")
+# Project board field and option IDs — empty string when project_board section is absent
+STATUS_FIELD_ID=$(yq '.project_board.field_ids.status // ""' "$CONFIG_FILE" 2>/dev/null || echo "")
+LANE_FIELD_ID=$(yq '.project_board.field_ids.lane // ""' "$CONFIG_FILE" 2>/dev/null || echo "")
+COMPONENT_FIELD_ID=$(yq '.project_board.field_ids.component // ""' "$CONFIG_FILE" 2>/dev/null || echo "")
+PRIORITY_FIELD_ID=$(yq '.project_board.field_ids.priority // ""' "$CONFIG_FILE" 2>/dev/null || echo "")
+STATUS_TODO_OPTION_ID=$(yq '.project_board.option_ids.status.todo // ""' "$CONFIG_FILE" 2>/dev/null || echo "")
+LANE_FEATURE_OPTION_ID=$(yq '.project_board.option_ids.lane.feature // ""' "$CONFIG_FILE" 2>/dev/null || echo "")
+PRIORITY_OPTION_ID=""  # Resolved per-issue from the issue's priority label — see Step 6B
 # Build satellite repo map from repos.satellites list
 # Each satellite: { prefix, repo, staging_branch }
 ```
 
-All `{GH_REPO}`, `{GH_FLAG}`, `{REPO_PATH}`, `{PROJECT_NAME}`, `{STAGING_BRANCH}`, `{PROJECT_BOARD_OWNER}`, `{PROJECT_NUMBER}`, and `{PROJECT_ID}` references below are populated from `forge.yaml`.
+All `{GH_REPO}`, `{GH_FLAG}`, `{REPO_PATH}`, `{PROJECT_NAME}`, `{STAGING_BRANCH}`, `{PROJECT_BOARD_OWNER}`, `{PROJECT_NUMBER}`, `{PROJECT_ID}`, `{STATUS_FIELD_ID}`, `{LANE_FIELD_ID}`, `{COMPONENT_FIELD_ID}`, `{PRIORITY_FIELD_ID}`, `{STATUS_TODO_OPTION_ID}`, and `{LANE_FEATURE_OPTION_ID}` references below are populated from `forge.yaml`.
 
 ---
 
@@ -223,19 +231,43 @@ BODY_EOF
 
 ### Step 6B: Add issues to Project board
 
-For each created issue, add it to the GitHub Project board with initial fields. Reference `forge.yaml → project_board` for field IDs, or `docs/CONFIG.md` → "Project Board" for lookup commands.
+**Skip if `project_board` is not configured** — check resolved vars before proceeding:
 
 ```bash
-for ISSUE_NUM in {created_issue_numbers}; do
-  ISSUE_URL="https://github.com/{GH_REPO}/issues/${ISSUE_NUM}"
-  ITEM_ID=$(gh project item-add {PROJECT_NUMBER} --owner {PROJECT_BOARD_OWNER} --url "$ISSUE_URL" --format json --jq '.id' 2>/dev/null)
-  if [ -n "$ITEM_ID" ]; then
-    gh project item-edit --project-id {PROJECT_ID} --id "$ITEM_ID" --field-id {PROJECT_BOARD_STATUS_FIELD_ID} --single-select-option-id {PROJECT_BOARD_STATUS_TODO_ID} 2>/dev/null || true  # Status=Todo
-    gh project item-edit --project-id {PROJECT_ID} --id "$ITEM_ID" --field-id {PROJECT_BOARD_LANE_FIELD_ID} --single-select-option-id {PROJECT_BOARD_LANE_FEATURE_ID} 2>/dev/null || true  # Lane=Feature
-    gh project item-edit --project-id {PROJECT_ID} --id "$ITEM_ID" --field-id {PROJECT_BOARD_COMPONENT_FIELD_ID} --single-select-option-id {COMPONENT_OPTION_ID} 2>/dev/null || true  # Component (from forge.yaml → project_board.field_ids)
-    gh project item-edit --project-id {PROJECT_ID} --id "$ITEM_ID" --field-id {PROJECT_BOARD_PRIORITY_FIELD_ID} --single-select-option-id {PRIORITY_OPTION_ID} 2>/dev/null || true  # Priority (from label)
-  fi
-done
+if [ -z "$PROJECT_BOARD_OWNER" ] || [ -z "$PROJECT_ID" ] || [ -z "$PROJECT_NUMBER" ]; then
+  echo "INFO: project_board not configured in forge.yaml — skipping board sync for created issues"
+else
+  # Resolve component option ID for this repo from forge.yaml → project_board.components
+  COMPONENT_OPTION_ID=$(yq '.project_board.components[] | select(.repo == "'"$GH_REPO"'") | .option_id' "$CONFIG_FILE" 2>/dev/null || echo "")
+
+  for ISSUE_NUM in {created_issue_numbers}; do
+    ISSUE_URL="https://github.com/$GH_REPO/issues/${ISSUE_NUM}"
+    ITEM_ID=$(gh project item-add "$PROJECT_NUMBER" --owner "$PROJECT_BOARD_OWNER" --url "$ISSUE_URL" --format json --jq '.id' 2>/dev/null)
+    if [ -n "$ITEM_ID" ]; then
+      # Resolve priority option ID from the issue's priority label
+      ISSUE_PRIORITY=$(gh issue view "$ISSUE_NUM" "$GH_FLAG" --json labels \
+        --jq '[.labels[].name | select(startswith("priority:"))] | .[0] | ltrimstr("priority:") | ascii_downcase' 2>/dev/null || echo "")
+      PRIORITY_OPTION_ID=$(yq '.project_board.option_ids.priority.'"$ISSUE_PRIORITY"' // ""' "$CONFIG_FILE" 2>/dev/null || echo "")
+
+      if [ -n "$STATUS_FIELD_ID" ] && [ -n "$STATUS_TODO_OPTION_ID" ]; then
+        gh project item-edit --project-id "$PROJECT_ID" --id "$ITEM_ID" \
+          --field-id "$STATUS_FIELD_ID" --single-select-option-id "$STATUS_TODO_OPTION_ID" 2>/dev/null || true  # Status=Todo
+      fi
+      if [ -n "$LANE_FIELD_ID" ] && [ -n "$LANE_FEATURE_OPTION_ID" ]; then
+        gh project item-edit --project-id "$PROJECT_ID" --id "$ITEM_ID" \
+          --field-id "$LANE_FIELD_ID" --single-select-option-id "$LANE_FEATURE_OPTION_ID" 2>/dev/null || true  # Lane=Feature
+      fi
+      if [ -n "$COMPONENT_FIELD_ID" ] && [ -n "$COMPONENT_OPTION_ID" ]; then
+        gh project item-edit --project-id "$PROJECT_ID" --id "$ITEM_ID" \
+          --field-id "$COMPONENT_FIELD_ID" --single-select-option-id "$COMPONENT_OPTION_ID" 2>/dev/null || true  # Component (from forge.yaml → project_board.components)
+      fi
+      if [ -n "$PRIORITY_FIELD_ID" ] && [ -n "$PRIORITY_OPTION_ID" ]; then
+        gh project item-edit --project-id "$PROJECT_ID" --id "$ITEM_ID" \
+          --field-id "$PRIORITY_FIELD_ID" --single-select-option-id "$PRIORITY_OPTION_ID" 2>/dev/null || true  # Priority (from issue label)
+      fi
+    fi
+  done
+fi
 ```
 
 ### Step 7: Report
