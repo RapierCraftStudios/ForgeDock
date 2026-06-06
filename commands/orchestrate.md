@@ -276,18 +276,19 @@ For each issue, estimate which domains it touches based on title, body, and labe
 for NUM in {issue_numbers}; do
   ISSUE=$(gh issue view $NUM --json title,body,labels --jq '{title: .title, labels: [.labels[].name], body: (.body[:300])}')
   echo "=== #$NUM ==="
-  echo "$ISSUE" | grep -qiE "credit|billing|pricing|stripe|tier.*cost|charge|refund" && echo "  BILLING" || true
+  echo "$ISSUE" | grep -qiE "credit|billing|pricing|stripe|charge|refund" && echo "  BILLING" || true
   echo "$ISSUE" | grep -qiE "auth|session|jwt|login|permission|oauth" && echo "  AUTH" || true
-  echo "$ISSUE" | grep -qiE "scrape|tier|proxy|playwright|playbook|worker|unified_consumer|penetrat" && echo "  SCRAPING" || true
+  echo "$ISSUE" | grep -qiE "worker|queue|job|task|background|consumer" && echo "  WORKER" || true
   echo "$ISSUE" | grep -qiE "migration|\.sql|database|postgres|alembic" && echo "  DATABASE" || true
   echo "$ISSUE" | grep -qiE "component|page|layout|dashboard|ui|ux|frontend|web/src" && echo "  FRONTEND" || true
   echo "$ISSUE" | grep -qiE "docker|deploy|traefik|nginx|ci|cd|infra|github.action" && echo "  INFRA" || true
-  echo "$ISSUE" | grep -qiE "cortex|llm|extract|schema|format" && echo "  CORTEX" || true
+  echo "$ISSUE" | grep -qiE "llm|extract|schema|format|embedding|model" && echo "  AI" || true
+  # For project-specific domains, configure keywords in forge.yaml → review.domains and extend above
 done
 ```
 
 **Use domain info for wave planning:**
-- Issues in the SAME domain (especially SCRAPING, BILLING, DATABASE) are more likely to touch the same files → prefer sequential within a wave or adjacent waves
+- Issues in the SAME domain (especially WORKER, BILLING, DATABASE) are more likely to touch the same files → prefer sequential within a wave or adjacent waves
 - Issues in DIFFERENT domains are more likely independent → safe to parallelize
 - BILLING + AUTH issues should be prioritized early (security-critical)
 - **DATABASE issues are ALWAYS serialized — hard rule, no exceptions.** Multiple agents writing migrations simultaneously will produce duplicate migration numbers (e.g., two `0067_*.sql` files), which breaks the migration runner. Every DATABASE issue must be in its own wave. If 3 DATABASE issues are in a batch: Wave 1 runs issue A, Wave 2 runs issue B, Wave 3 runs issue C.
@@ -365,15 +366,15 @@ When two issues modify different files that **import from the same utility/init 
 **Apply inferences:**
 ```
 # High-fan-in files — if ANY issue touches these, serialize it with all same-service issues.
-# Read layout paths from forge.yaml review.layout; fall back to AlterLab defaults.
+# Read layout paths from forge.yaml review.layout; fall back to sensible generic defaults.
 # Example (pseudo-code — adapt to your forge.yaml parsing method):
-#   API_MAIN   = forge_yaml.review.layout.api_main   ?? "services/api/app/main.py"
-#   WORKER_DIR = forge_yaml.review.layout.worker      ?? "services/worker"
-#   PAGES_ROOT = forge_yaml.review.layout.pages       ?? "web/src/app"
+#   API_MAIN    = forge_yaml.review.layout.api_main    ?? "services/api/app/main.py"
+#   WORKER_MAIN = forge_yaml.review.layout.worker_main ?? "services/worker/worker/main.py"
+#   PAGES_ROOT  = forge_yaml.review.layout.pages       ?? "web/src/app"
 
 HIGH_FAN_IN = [
   API_MAIN,                          # e.g. "services/api/app/main.py" — router/middleware registration
-  WORKER_DIR + "/unified_consumer.py",  # e.g. "services/worker/worker/unified_consumer.py" — adjust to your worker entrypoint
+  WORKER_MAIN,                       # e.g. "services/worker/worker/main.py" — worker entrypoint (set forge.yaml review.layout.worker_main)
   PAGES_ROOT + "/layout.tsx",        # e.g. "web/src/app/layout.tsx" — root layout for all pages
   "docker-compose.yml",
   "docker-compose.prod.yml",
@@ -410,7 +411,7 @@ Build the final conflict graph by merging signals from all four layers:
 | Layer 4: Low confidence + same domain | **Conservative** | Serialize |
 | Layer 4: Low confidence + no domain | **Conservative** | Serialize with prior wave |
 
-**This supplements, not replaces, the domain keyword estimation.** Domain tags still help with broad sequencing decisions. Multi-layer conflict detection catches the specific cases keywords miss (e.g., two issues that both modify files in `services/api/app/models/` where one is labeled SCRAPING and the other BILLING — Layer 2 catches this even though Layer 1 shows no direct file overlap).
+**This supplements, not replaces, the domain keyword estimation.** Domain tags still help with broad sequencing decisions. Multi-layer conflict detection catches the specific cases keywords miss (e.g., two issues that both modify files in `services/api/app/models/` where one is labeled WORKER and the other BILLING — Layer 2 catches this even though Layer 1 shows no direct file overlap).
 
 ### Step 3D: Build the execution plan
 
@@ -452,15 +453,15 @@ Wave 2 (after deps): #2634 (enable daemon — after #2633 fixes memory leak), #2
 ### Domain Distribution
 | Domain | Issues | Notes |
 |--------|--------|-------|
-| SCRAPING | {N} | {High overlap risk / Independent targets} |
 | FRONTEND | {N} | {Independent pages / Shared components} |
 | BILLING | {N} | {Critical — prioritize in Wave 1} |
 | DATABASE | {N} | {Sequential — migration order matters} |
 | AUTH | {N} | {Critical — Wave 1} |
+| WORKER | {N} | {High overlap risk within worker service} |
+| AI | {N} | {Independent} |
 | INFRA | {N} | {Independent} |
-| CORTEX | {N} | {Independent} |
 
-(Omit rows with 0 issues.)
+(Omit rows with 0 issues. Add project-specific domain rows from forge.yaml → review.domains.)
 
 ### Implementation Waves
 
@@ -1092,12 +1093,12 @@ Aggregate into the batch-level analytics for Step 6B.
 → Gets all unmilestoned bugs/fixes
 → Groups by independence, runs in waves
 
-### "orchestrate milestone cortex-recursive-loop"
-→ Fetches all open issues in "Cortex Recursive Loop" milestone
-→ Detects #2644 is an investigation issue (title: "Investigate: Complete the autonomous recursive loop...")
-→ Wave 0: Runs `/work-on 2644` — investigation creates 5 new issues (#2650-#2654)
-→ Re-fetches milestone issues, now includes #2650-#2654
-→ Wave 1: #2633 (P0 orphaned queues), #2636 (invalidation), #2650, #2651 (all independent)
-→ Wave 2: #2634 (enable daemon, after #2633), #2652 (depends on #2650)
+### "orchestrate milestone user-auth-v2"
+→ Fetches all open issues in "User Auth v2" milestone
+→ Detects #42 is an investigation issue (title: "Investigate: session expiry race condition under high concurrency")
+→ Wave 0: Runs `/work-on 42` — investigation creates 3 new issues (#55-#57)
+→ Re-fetches milestone issues, now includes #55-#57
+→ Wave 1: #38 (P0 token refresh bug), #41 (session store migration), #55, #56 (all independent)
+→ Wave 2: #39 (enable refresh rotation — after #38 fixes token bug), #57 (depends on #55)
 → Wave 3: remaining issues
 → Final report shows investigation spawned issues and their results

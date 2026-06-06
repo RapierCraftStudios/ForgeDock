@@ -987,7 +987,7 @@ done
 gh pr comment [PR_NUMBER] --body "$(cat <<'EOF'
 ## Scraper Logic Audit
 
-### Components Affected: [tiers/playbooks/cortex/validation/detection-keywords/capacity-constants/api-gate-semantics/cross-component-gate]
+### Components Affected: [list the specific service/worker/api components touched — e.g. job-queue/rate-limiter/validation/gate-semantics/cross-component-gate]
 
 ### Tier Flow Analysis
 [Trace the tier selection and escalation with file:line references]

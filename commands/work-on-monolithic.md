@@ -89,15 +89,19 @@ Mission: Validate whether the issue is real. Assume description is wrong until p
 
 **Domain file hints** (start search here):
 
-| Domain | Key files |
-|--------|-----------|
-| BILLING | `routers/billing.py`, `core/pricing.py`, `services/credit_service.py` |
-| SCRAPING | `unified_consumer.py`, `queues.py`, `domain_playbooks.json` |
+Configure domain-to-file mappings for your project in `forge.yaml → review.key_paths`. The table below shows the standard layout — override any entry that doesn't match your codebase:
+
+| Domain | Default key files (override via forge.yaml) |
+|--------|---------------------------------------------|
+| BILLING | `routers/billing.py`, `core/pricing.py`, `services/payment_service.py` |
+| WORKER | `worker/main.py`, `worker/queues.py`, `worker/tasks.py` |
 | AUTH | `core/auth.py`, `routers/auth.py`, `dependencies.py` |
 | DATABASE | `infra/migrations/`, `models/`, `db/` |
 | FRONTEND | `web/src/app/`, `web/src/components/`, `web/src/lib/` |
-| CORTEX | `cortex_client.py`, `routers/cortex.py` |
+| AI | `services/ai_client.py`, `routers/ai.py` |
 | INFRA | `.github/workflows/`, `docker-compose.yml`, `infra/traefik/` |
+
+If `forge.yaml → review.key_paths` is present, use those mappings instead of the defaults above.
 
 **Steps**: Check right branch → read domain files → verify claims → git blame → determine root cause → identify affected files → validate proposed fixes against full system stack.
 
