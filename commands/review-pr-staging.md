@@ -209,21 +209,65 @@ Create review chunks by priority: Billing/Pricing (CRITICAL) → Security/Auth (
 ## Phase 1: Automated Checks
 
 ### 1A: Python Linting
+
+Read `forge.yaml → verification.commands.python` for project-specific tool commands:
+
 ```bash
-cd services/api && poetry run black --check app/ && poetry run isort --check app/
-cd services/worker && poetry run black --check worker/ && poetry run isort --check worker/
+PYTHON_FORMAT=$(grep -A 20 'commands:' forge.yaml 2>/dev/null | grep -A 5 'python:' | grep 'format:' | head -1 | sed "s/.*format: *['\"]//;s/['\"].*//")
+PYTHON_LINT=$(grep -A 20 'commands:' forge.yaml 2>/dev/null | grep -A 5 'python:' | grep 'lint:' | head -1 | sed "s/.*lint: *['\"]//;s/['\"].*//")
+
+if [ -n "$PYTHON_FORMAT" ]; then
+    eval "$PYTHON_FORMAT" 2>&1 | head -30
+else
+    echo "SKIPPED — python.format not configured in verification.commands"
+fi
+
+if [ -n "$PYTHON_LINT" ]; then
+    eval "$PYTHON_LINT" 2>&1 | head -30
+else
+    echo "SKIPPED — python.lint not configured in verification.commands"
+fi
 ```
 
 ### 1B: TypeScript Type-Check + Build (MANDATORY)
+
+Read `forge.yaml → verification.commands.typescript` for project-specific tool commands:
+
 ```bash
-cd web && npx tsc --noEmit 2>&1
-cd web && npx next build 2>&1 | tail -50
+TS_TYPECHECK=$(grep -A 20 'commands:' forge.yaml 2>/dev/null | grep -A 5 'typescript:' | grep 'typecheck:' | head -1 | sed "s/.*typecheck: *['\"]//;s/['\"].*//")
+TS_BUILD=$(grep -A 20 'commands:' forge.yaml 2>/dev/null | grep -A 5 'typescript:' | grep 'build:' | head -1 | sed "s/.*build: *['\"]//;s/['\"].*//")
+
+if [ -n "$TS_TYPECHECK" ]; then
+    eval "$TS_TYPECHECK" 2>&1
+    TS_EXIT=$?
+    [ "$TS_EXIT" -ne 0 ] && echo "BLOCKING: typecheck failed — deploy WILL fail"
+else
+    echo "SKIPPED — typescript.typecheck not configured in verification.commands"
+    TS_EXIT=0
+fi
+
+if [ -n "$TS_BUILD" ]; then
+    eval "$TS_BUILD" 2>&1 | tail -50
+    BUILD_EXIT=$?
+    [ "$BUILD_EXIT" -ne 0 ] && echo "BLOCKING: build failed — deploy WILL fail"
+else
+    echo "SKIPPED — typescript.build not configured in verification.commands"
+fi
 ```
-`next build` failure is BLOCKING — deploy WILL fail. `tsc` alone misses SSG prerender failures.
+Build failure is BLOCKING — deploy WILL fail. Typecheck alone misses SSG/prerender failures — configure `typescript.build` in `verification.commands`.
 
 ### 1C: Python Tests
+
+Read `forge.yaml → verification.commands.python.test`:
+
 ```bash
-cd services/api && poetry run pytest tests/ -x -q --tb=short 2>&1 | tail -50
+PYTHON_TEST=$(grep -A 20 'commands:' forge.yaml 2>/dev/null | grep -A 5 'python:' | grep 'test:' | head -1 | sed "s/.*test: *['\"]//;s/['\"].*//")
+
+if [ -n "$PYTHON_TEST" ]; then
+    eval "$PYTHON_TEST" 2>&1 | tail -50
+else
+    echo "SKIPPED — python.test not configured in verification.commands"
+fi
 ```
 
 ### 1D: Secrets Scan

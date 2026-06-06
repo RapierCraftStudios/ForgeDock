@@ -156,27 +156,78 @@ Record: services touched, domains detected, PR scope (1-2 sentences), change cat
 ## Phase 2: Automated Checks (Run ALL in Parallel)
 
 ### 2A: Python Linting (if Python changed)
-```bash
-cd services/api && poetry run black --check app/
-cd services/api && poetry run isort --check app/
-cd services/worker && poetry run black --check worker/
-cd services/worker && poetry run isort --check worker/
-python3 -m py_compile <each-changed-python-file>
-```
-**IMPORTANT**: Always `cd` into service dir and `poetry run black`. Never `pipx run black`.
 
-### 2B: TypeScript/JS (if web/ changed)
+Read `forge.yaml → verification.commands.python` for project-specific tool commands:
+
 ```bash
-cd web && npx prettier --check "src/**/*.{ts,tsx}"
-cd web && npx tsc --noEmit
-cd web && npx next lint
+# Read toolchain commands from forge.yaml
+PYTHON_FORMAT=$(grep -A 20 'commands:' forge.yaml 2>/dev/null | grep -A 5 'python:' | grep 'format:' | head -1 | sed "s/.*format: *['\"]//;s/['\"].*//")
+PYTHON_LINT=$(grep -A 20 'commands:' forge.yaml 2>/dev/null | grep -A 5 'python:' | grep 'lint:' | head -1 | sed "s/.*lint: *['\"]//;s/['\"].*//")
+PYTHON_TYPECHECK=$(grep -A 20 'commands:' forge.yaml 2>/dev/null | grep -A 5 'python:' | grep 'typecheck:' | head -1 | sed "s/.*typecheck: *['\"]//;s/['\"].*//")
+
+# Run format check
+if [ -n "$PYTHON_FORMAT" ]; then
+    eval "$PYTHON_FORMAT" 2>&1 | head -30
+else
+    echo "SKIPPED — python.format not configured in verification.commands"
+fi
+
+# Run lint
+if [ -n "$PYTHON_LINT" ]; then
+    eval "$PYTHON_LINT" 2>&1 | head -30
+else
+    echo "SKIPPED — python.lint not configured in verification.commands"
+fi
+
+# Run typecheck
+if [ -n "$PYTHON_TYPECHECK" ]; then
+    eval "$PYTHON_TYPECHECK" 2>&1 | head -50
+else
+    echo "SKIPPED — python.typecheck not configured in verification.commands"
+fi
+
+# Always run compile check on changed Python files (fast, language-universal)
+for f in $(gh pr diff $ARGUMENTS --name-only | grep '\.py$'); do
+    python3 -m py_compile "$f" 2>&1
+done
+```
+
+### 2B: TypeScript/JS (if TypeScript/JS changed)
+
+Read `forge.yaml → verification.commands.typescript` for project-specific tool commands:
+
+```bash
+TS_FORMAT=$(grep -A 20 'commands:' forge.yaml 2>/dev/null | grep -A 5 'typescript:' | grep 'format:' | head -1 | sed "s/.*format: *['\"]//;s/['\"].*//")
+TS_LINT=$(grep -A 20 'commands:' forge.yaml 2>/dev/null | grep -A 5 'typescript:' | grep 'lint:' | head -1 | sed "s/.*lint: *['\"]//;s/['\"].*//")
+TS_TYPECHECK=$(grep -A 20 'commands:' forge.yaml 2>/dev/null | grep -A 5 'typescript:' | grep 'typecheck:' | head -1 | sed "s/.*typecheck: *['\"]//;s/['\"].*//")
+
+# Run format check
+if [ -n "$TS_FORMAT" ]; then
+    eval "$TS_FORMAT" 2>&1 | head -30
+else
+    echo "SKIPPED — typescript.format not configured in verification.commands"
+fi
+
+# Run lint
+if [ -n "$TS_LINT" ]; then
+    eval "$TS_LINT" 2>&1 | head -30
+else
+    echo "SKIPPED — typescript.lint not configured in verification.commands"
+fi
+
+# Run typecheck
+if [ -n "$TS_TYPECHECK" ]; then
+    eval "$TS_TYPECHECK" 2>&1 | head -50
+    TS_TYPECHECK_EXIT=$?
+else
+    echo "SKIPPED — typescript.typecheck not configured in verification.commands"
+    TS_TYPECHECK_EXIT=0
+fi
 ```
 
 ### 2C: Static Type Checking (if Python changed)
-```bash
-cd services/api && poetry run mypy app/ --ignore-missing-imports --no-error-summary 2>&1 | head -50
-cd services/api && poetry run ruff check app/ --select=E,W,F,B,S --ignore=E501 2>&1 | head -30
-```
+
+Covered by `PYTHON_TYPECHECK` command in 2A above. If `verification.commands.python.typecheck` is unset, this step is explicitly skipped with a log line — it does not silently pass.
 
 ### 2D: Environment Variable Audit
 ```bash
@@ -206,8 +257,27 @@ git diff origin/main...HEAD -- "**/package.json" | grep -E "^\+" | grep -v "^\+\
 ```
 
 ### 2H: Tests
+
+Read `forge.yaml → verification.commands.{lang}.test` for the project's test command:
+
 ```bash
-cd services/api && poetry run pytest tests/ -x -q --tb=short 2>&1 | tail -30
+# Check each configured language for a test command
+for lang in python typescript go rust; do
+    TEST_CMD=$(grep -A 20 'commands:' forge.yaml 2>/dev/null | grep -A 5 "${lang}:" | grep 'test:' | head -1 | sed "s/.*test: *['\"]//;s/['\"].*//")
+    if [ -n "$TEST_CMD" ]; then
+        echo "=== Running tests (${lang}): ${TEST_CMD} ==="
+        eval "$TEST_CMD" 2>&1 | tail -30
+        TEST_EXIT=$?
+        [ "$TEST_EXIT" -ne 0 ] && echo "BLOCKING: ${lang} tests failed (exit $TEST_EXIT)"
+    fi
+done
+
+# If no test commands were configured, log explicitly
+PYTHON_TEST=$(grep -A 20 'commands:' forge.yaml 2>/dev/null | grep -A 5 'python:' | grep 'test:' | head -1 | sed "s/.*test: *['\"]//;s/['\"].*//")
+TS_TEST=$(grep -A 20 'commands:' forge.yaml 2>/dev/null | grep -A 5 'typescript:' | grep 'test:' | head -1 | sed "s/.*test: *['\"]//;s/['\"].*//")
+if [ -z "$PYTHON_TEST" ] && [ -z "$TS_TEST" ]; then
+    echo "SKIPPED — no test commands configured in verification.commands"
+fi
 ```
 **BLOCKING if tests fail.**
 
@@ -223,30 +293,57 @@ REQUIRES_FULL_BUILD=$([[ "$IS_STAGING_TO_MAIN" == "true" || "$IS_MILESTONE_TO_ST
 ```
 
 **TypeScript files changed:**
+
+Read `forge.yaml → verification.commands.typescript.typecheck` and `.build`:
+
 ```bash
 gh pr checkout $ARGUMENTS --detach 2>/dev/null
-cd web && npx tsc --noEmit 2>&1
-TSC_EXIT=$?
-if [ "$REQUIRES_FULL_BUILD" = "true" ] || [ "$TSC_EXIT" -eq 0 ]; then
-    npx next build 2>&1 | tail -30
-    BUILD_EXIT=$?
+
+TS_TYPECHECK=$(grep -A 20 'commands:' forge.yaml 2>/dev/null | grep -A 5 'typescript:' | grep 'typecheck:' | head -1 | sed "s/.*typecheck: *['\"]//;s/['\"].*//")
+TS_BUILD=$(grep -A 20 'commands:' forge.yaml 2>/dev/null | grep -A 5 'typescript:' | grep 'build:' | head -1 | sed "s/.*build: *['\"]//;s/['\"].*//")
+
+if [ -n "$TS_TYPECHECK" ]; then
+    eval "$TS_TYPECHECK" 2>&1
+    TSC_EXIT=$?
+else
+    echo "SKIPPED — typescript.typecheck not configured in verification.commands"
+    TSC_EXIT=0
 fi
-cd .. && git checkout - 2>/dev/null
+
+if [ -n "$TS_BUILD" ] && { [ "$REQUIRES_FULL_BUILD" = "true" ] || [ "$TSC_EXIT" -eq 0 ]; }; then
+    eval "$TS_BUILD" 2>&1 | tail -30
+    BUILD_EXIT=$?
+elif [ -z "$TS_BUILD" ]; then
+    echo "SKIPPED — typescript.build not configured in verification.commands"
+fi
+
+git checkout - 2>/dev/null
 ```
 
 If `TSC_EXIT != 0`: **CONFIRMED blocking** — type errors.
-If `BUILD_EXIT != 0`: **CONFIRMED blocking** — SSG prerender failure.
+If `BUILD_EXIT != 0`: **CONFIRMED blocking** — build/prerender failure.
 
-**CRITICAL**: `tsc --noEmit` alone is NOT sufficient for staging→main or milestone→staging. PR #2565 passed tsc but failed next build. PR #11637 (Session Intelligence milestone) was APPROVED without any build check because milestone→staging was excluded — 4 build errors shipped to staging.
+**CRITICAL**: typecheck alone is NOT sufficient for staging→main or milestone→staging — configure `typescript.build` in `verification.commands` to catch SSG/prerender failures that typecheck misses.
 
 **Python files changed:**
+
+Read `forge.yaml → verification.commands.python.format` and `.build`:
+
 ```bash
 gh pr checkout $ARGUMENTS --detach 2>/dev/null
+
+# Compile-check all changed Python files (language-universal — no config needed)
 for f in $(echo "$CHANGED_FILES" | grep '\.py$'); do python3 -m py_compile "$f" 2>&1; done
+
 if [ "$REQUIRES_FULL_BUILD" = "true" ]; then
-    cd services/api && poetry run black --check app/ 2>&1
-    cd ../.. && cd services/worker && poetry run black --check worker/ 2>&1
+    PYTHON_FORMAT=$(grep -A 20 'commands:' forge.yaml 2>/dev/null | grep -A 5 'python:' | grep 'format:' | head -1 | sed "s/.*format: *['\"]//;s/['\"].*//")
+    if [ -n "$PYTHON_FORMAT" ]; then
+        eval "$PYTHON_FORMAT" 2>&1
+    else
+        echo "SKIPPED — python.format not configured in verification.commands (full-build format check skipped)"
+    fi
 fi
+
 git checkout - 2>/dev/null
 ```
 
