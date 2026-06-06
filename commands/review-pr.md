@@ -108,6 +108,22 @@ REVIEW_SHA=$(gh pr view $ARGUMENTS --json headRefOid --jq '.headRefOid')
 REVIEW_SHA_SHORT=$(echo "$REVIEW_SHA" | cut -c1-7)
 gh pr diff $ARGUMENTS --name-only
 gh pr diff $ARGUMENTS
+
+# Mergeability check — GitHub computes this asynchronously; retry up to 3× on UNKNOWN
+# <!-- Added: forge#194 -->
+MERGE_HEALTH_RESULT=$(gh pr view $ARGUMENTS --json mergeable,mergeStateStatus --jq '"\\(.mergeable)|\\(.mergeStateStatus)"')
+MERGE_HEALTH=${MERGE_HEALTH_RESULT%%|*}
+MERGE_HEALTH_STATE=${MERGE_HEALTH_RESULT##*|}
+MERGE_RETRY=0
+while [ "$MERGE_HEALTH" = "UNKNOWN" ] && [ "$MERGE_RETRY" -lt 3 ]; do
+    MERGE_RETRY=$((MERGE_RETRY + 1))
+    sleep 5
+    MERGE_HEALTH_RESULT=$(gh pr view $ARGUMENTS --json mergeable,mergeStateStatus --jq '"\\(.mergeable)|\\(.mergeStateStatus)"')
+    MERGE_HEALTH=${MERGE_HEALTH_RESULT%%|*}
+    MERGE_HEALTH_STATE=${MERGE_HEALTH_RESULT##*|}
+done
+# MERGE_HEALTH: MERGEABLE | CONFLICTING | UNKNOWN (still async after retries)
+# MERGE_HEALTH_STATE: CLEAN | DIRTY | BLOCKED | UNSTABLE | UNKNOWN
 ```
 
 ### 1B: Classify
@@ -836,16 +852,31 @@ Verdict determined by standard blocking criteria.
 1. Phase 2 automated checks failed (build error, type error, test failure)
 2. Agent finding is CONFIRMED at HIGH or CRITICAL severity
 3. **[Milestone PRs only]** Phase 7A Purpose Regression Gate flagged `HAS_PURPOSE_REGRESSION=true` for this finding — regardless of whether it causes a runtime error
+4. `MERGE_HEALTH == "CONFLICTING"` OR `MERGE_HEALTH_STATE` in {`DIRTY`, `BLOCKED`} — PR cannot be merged cleanly into its base branch <!-- Added: forge#194 -->
+   - Verdict: CHANGES REQUESTED. Message: "Merge conflict with `{base}`. Rebase `{head}` onto `origin/{base}`, resolve the conflicting files, then re-run /review-pr."
+   - If `MERGE_HEALTH == "UNKNOWN"` after retries: emit a WARNING in the verdict body (do NOT treat as a block — GitHub may still be computing it).
 
 ```bash
+# Determine if mergeability is a blocker (set in Phase 1A)
+HAS_MERGE_CONFLICT=false
+MERGE_CONFLICT_MSG=""
+if [ "$MERGE_HEALTH" = "CONFLICTING" ] || [ "$MERGE_HEALTH_STATE" = "DIRTY" ] || [ "$MERGE_HEALTH_STATE" = "BLOCKED" ]; then
+    HAS_MERGE_CONFLICT=true
+    MERGE_CONFLICT_MSG="Merge conflict with \`${BASE}\`. Rebase \`${HEAD}\` onto \`origin/${BASE}\`, resolve the conflicting files, then re-run /review-pr."
+fi
+
 # Stale review:
 gh pr review $ARGUMENTS --comment --body "Review of commit $REVIEW_SHA_SHORT is stale — PR HEAD changed. Re-run /review-pr."
 
 # Clean (no blocking issues):
-gh pr review $ARGUMENTS --comment --body "APPROVED: commit $REVIEW_SHA_SHORT after context-aware review ([N] agents: [names]). [M] findings created as issues. Safe to merge."
+gh pr review $ARGUMENTS --comment --body "APPROVED: commit $REVIEW_SHA_SHORT after context-aware review ([N] agents: [names]). [M] findings created as issues. Safe to merge.
+$([ "$MERGE_HEALTH" = "UNKNOWN" ] && echo "
+⚠ Mergeability: GitHub is still computing merge state (UNKNOWN after retries). Verify manually before merging.")"
 
-# Blocking issues (including purpose regressions):
+# Blocking issues (including merge conflicts and purpose regressions):
 gh pr review $ARGUMENTS --comment --body "CHANGES REQUESTED: commit $REVIEW_SHA_SHORT — [N] blocking issues found. See GitHub issues.
+$([ "$HAS_MERGE_CONFLICT" = "true" ] && echo "
+🔴 Merge Conflict: ${MERGE_CONFLICT_MSG}")
 $([ "$HAS_PURPOSE_REGRESSION" = "true" ] && echo "
 ⚠ Purpose Regression: [N] finding(s) contradict the milestone's stated goal and are automatically blocking regardless of runtime impact. See: ${PURPOSE_REGRESSION_FINDINGS[@]}")"
 ```
@@ -857,15 +888,28 @@ $([ "$HAS_PURPOSE_REGRESSION" = "true" ] && echo "
 **Skip if** `AUTO_MERGE=false`.
 
 ```bash
-# Checkpoint comment on issue
-gh issue comment {MERGE_ISSUE} {MERGE_GH_FLAG} --body "Review complete for PR #{PR_NUMBER}. Verdict: {VERDICT}. Proceeding to merge."
+# Pre-merge mergeability guard — re-fetch fresh state before attempting merge <!-- Added: forge#194 -->
+# A PR that was MERGEABLE at Phase 1A may have become CONFLICTING if the base branch
+# received commits while the review was running. Re-check before every auto-merge.
+PRE_MERGE_RESULT=$(gh pr view {PR_NUMBER} {MERGE_GH_FLAG} --json mergeable,mergeStateStatus --jq '"\\(.mergeable)|\\(.mergeStateStatus)"')
+PRE_MERGE_HEALTH=${PRE_MERGE_RESULT%%|*}
+PRE_MERGE_HEALTH_STATE=${PRE_MERGE_RESULT##*|}
 
-# Merge
-gh pr merge {PR_NUMBER} {MERGE_GH_FLAG} --merge
+if [ "$PRE_MERGE_HEALTH" = "CONFLICTING" ] || [ "$PRE_MERGE_HEALTH_STATE" = "DIRTY" ] || [ "$PRE_MERGE_HEALTH_STATE" = "BLOCKED" ]; then
+    gh issue comment {MERGE_ISSUE} {MERGE_GH_FLAG} --body "⛔ Auto-merge aborted for PR #{PR_NUMBER}: PR is not mergeable (\`mergeable=${PRE_MERGE_HEALTH}\`, \`mergeStateStatus=${PRE_MERGE_HEALTH_STATE}\`). Rebase the branch onto \`{MERGE_BASE}\` and resolve conflicts, then re-run /review-pr."
+    gh issue edit {MERGE_ISSUE} {MERGE_GH_FLAG} --add-label "needs-human" 2>/dev/null || true
+    # STOP — do not attempt gh pr merge on a CONFLICTING/DIRTY PR
+else
+    # Checkpoint comment on issue
+    gh issue comment {MERGE_ISSUE} {MERGE_GH_FLAG} --body "Review complete for PR #{PR_NUMBER}. Verdict: {VERDICT}. Proceeding to merge."
 
-# Verify
-MERGE_STATE=$(gh pr view {PR_NUMBER} {MERGE_GH_FLAG} --json state --jq '.state')
-[ "$MERGE_STATE" != "MERGED" ] && gh issue comment {MERGE_ISSUE} {MERGE_GH_FLAG} --body "PR #{PR_NUMBER} merge failed. State: $MERGE_STATE."
+    # Merge
+    gh pr merge {PR_NUMBER} {MERGE_GH_FLAG} --merge
+
+    # Verify
+    MERGE_STATE=$(gh pr view {PR_NUMBER} {MERGE_GH_FLAG} --json state --jq '.state')
+    [ "$MERGE_STATE" != "MERGED" ] && gh issue comment {MERGE_ISSUE} {MERGE_GH_FLAG} --body "PR #{PR_NUMBER} merge failed. State: $MERGE_STATE."
+fi
 ```
 
 **Important**: Phase 8 ONLY merges the PR. It does NOT close the issue, update labels, or clean up worktrees. When invoked via `/work-on`, those responsibilities belong to `work-on/close.md` — which runs after the router detects state 4 (MERGE_COMPLETE: PR merged + issue open). Doing them here would cause the router to hit TERMINAL_MERGED (state 1) and skip the close phase entirely.
