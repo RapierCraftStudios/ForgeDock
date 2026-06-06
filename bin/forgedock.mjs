@@ -1265,6 +1265,32 @@ async function checkForRemoteUpdate(force = false) {
       const cached = JSON.parse(raw);
       const age = Date.now() - (cached.checkedAt ?? 0);
       if (age < UPDATE_CHECK_INTERVAL_MS) {
+        // Cache is fresh — but for git installs, reconcile against the live
+        // local HEAD before trusting the stored flag. A manual `git pull` in
+        // FORGE_HOME (bypassing `forgedock update`) advances local HEAD to the
+        // cached remoteHead without refreshing the cache, which would otherwise
+        // keep showing a stale "Update available" notice until the TTL expires.
+        // This recheck is local-only (no fetch/network) and offline-safe.
+        if (cached.remoteHead && existsSync(join(FORGE_HOME, ".git"))) {
+          try {
+            const localHead = execFileSync("git", ["rev-parse", "HEAD"], {
+              cwd: FORGE_HOME,
+              encoding: "utf-8",
+              stdio: ["pipe", "pipe", "pipe"],
+              timeout: 5000,
+            }).trim();
+            if (localHead === cached.remoteHead) {
+              // Install has caught up out-of-band — no update available.
+              return {
+                updateAvailable: false,
+                latestVersion: cached.latestVersion ?? null,
+                remoteHead: cached.remoteHead,
+              };
+            }
+          } catch {
+            // git unavailable or not a repo — fall through to stored result.
+          }
+        }
         // Cache is fresh — return stored result
         return {
           updateAvailable: cached.updateAvailable ?? false,
