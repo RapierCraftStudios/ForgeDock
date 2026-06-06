@@ -434,6 +434,48 @@ Do **not** mix the two patterns for the same block of variables (e.g., `yq` with
 
 ---
 
+## CLAUDE.md Integration
+
+ForgeDock can inject a managed usage block into your project's `CLAUDE.md` so every Claude Code session opened in the repo automatically knows that ForgeDock drives development here and which commands to use.
+
+### How It Works
+
+Running `npx forgedock init` or `npx forgedock integrate` writes a marker-bounded block into `CLAUDE.md`:
+
+```
+<!-- BEGIN FORGEDOCK -->
+## ForgeDock — Autonomous Development Pipeline
+...command index and conventions...
+<!-- END FORGEDOCK -->
+```
+
+The block is **idempotent** — re-running replaces only the managed section and leaves all other `CLAUDE.md` content untouched. If `CLAUDE.md` does not exist, it is created.
+
+If `AGENTS.md` already exists in the project root, the same block is mirrored into it.
+
+### Commands
+
+| Command | Action |
+|---------|--------|
+| `npx forgedock init` | Generates `forge.yaml` **and** injects the CLAUDE.md block |
+| `npx forgedock integrate` | Injects/refreshes the block without modifying `forge.yaml` |
+
+### Opting Out
+
+To prevent ForgeDock from managing the block, remove the `<!-- BEGIN FORGEDOCK -->` / `<!-- END FORGEDOCK -->` markers from `CLAUDE.md`. Without the markers, subsequent runs will append a new block rather than replacing one — so if you want to opt out permanently, delete or omit the markers **and** do not run `integrate` again.
+
+Alternatively, keep the markers but edit the content between them freely — ForgeDock will replace that section on the next run, so any manual edits inside the markers will be overwritten.
+
+### Re-generating
+
+The command index inside the block is auto-generated from the `description:` frontmatter in each `commands/*.md` file. To refresh it after a ForgeDock update:
+
+```bash
+npx forgedock integrate
+```
+
+---
+
 ## Complete Example
 
 See [`forge.yaml.example`](../forge.yaml.example) at the repository root for a fully annotated example covering all sections.
