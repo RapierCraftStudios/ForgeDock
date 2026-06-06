@@ -2274,8 +2274,8 @@ function _injectManagedBlock(filePath, blockContent, createIfMissing) {
 
   let existing = readFileSync(filePath, "utf-8");
 
-  if (existing.includes(CLAUDE_BLOCK_BEGIN)) {
-    // Replace existing block — use non-greedy match to avoid eating surrounding content
+  if (existing.includes(CLAUDE_BLOCK_BEGIN) && existing.includes(CLAUDE_BLOCK_END)) {
+    // Both markers present — replace existing block in place
     const escaped_begin = CLAUDE_BLOCK_BEGIN.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
     const escaped_end = CLAUDE_BLOCK_END.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
     const blockRegex = new RegExp(
@@ -2287,8 +2287,15 @@ function _injectManagedBlock(filePath, blockContent, createIfMissing) {
     return "updated";
   }
 
+  if (existing.includes(CLAUDE_BLOCK_BEGIN)) {
+    // BEGIN present but END missing — file is truncated or malformed.
+    // Strip the orphaned marker and everything after it, then fall through
+    // to the append path below so the complete block is written correctly.
+    existing = existing.slice(0, existing.indexOf(CLAUDE_BLOCK_BEGIN)).trimEnd();
+  }
+
   // Append block to existing content, separated by a blank line
-  const separator = existing.endsWith("\n") ? "\n" : "\n\n";
+  const separator = existing.length === 0 || existing.endsWith("\n") ? "\n" : "\n\n";
   writeFileSync(filePath, `${existing}${separator}${managed}\n`, "utf-8");
   return "updated";
 }
