@@ -81,6 +81,7 @@ jobs:
           git push
 
       - name: Create GitHub Release
+        if: env.SKIP_PUBLISH != 'true'
         run: |
           # Idempotent: if the release already exists (e.g. on a re-run), skip gracefully.
           gh release create "v${{ env.VERSION }}" \
