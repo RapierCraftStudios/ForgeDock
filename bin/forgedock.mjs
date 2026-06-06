@@ -2002,6 +2002,9 @@ function buildForgeYamlContent({ owner, repo, projectName, description, root, wo
   defaultBranch = _sanitizeYamlValue(defaultBranch);
   stagingBranch = _sanitizeYamlValue(stagingBranch);
   // Path values: also escape backslashes so Windows paths are valid YAML.
+  // Preserve rawRoot for use in path.join() operations — join() expects raw OS paths,
+  // not YAML-escaped strings. Always apply _sanitizePathValue() to the join() result.
+  const rawRoot = root;
   root          = _sanitizePathValue(root);
   worktreeBase  = _sanitizePathValue(worktreeBase);
 
@@ -2034,7 +2037,7 @@ function buildForgeYamlContent({ owner, repo, projectName, description, root, wo
     - prefix: "${safeMultiRepo.prefix}"
       repo: "${owner}/${safeMultiRepo.satelliteRepo}"
       staging_branch: "${safeMultiRepo.satelliteBranch}"
-      local_path: "${join(root, "..", safeMultiRepo.satelliteRepo)}"`
+      local_path: "${_sanitizePathValue(join(rawRoot, "..", safeMultiRepo.satelliteRepo))}"`
     : `# repos:
 #   default:
 #     repo: "${owner}/${repo}"
@@ -2043,7 +2046,7 @@ function buildForgeYamlContent({ owner, repo, projectName, description, root, wo
 #     - prefix: "mcp"
 #       repo: "${owner}/your-satellite-repo"
 #       staging_branch: "main"
-#       local_path: "${join(root, "..", "your-satellite-repo")}"`;
+#       local_path: "${_sanitizePathValue(join(rawRoot, "..", "your-satellite-repo"))}"`;
 
   // --- project_board section ---
   // Build field_ids block — use resolved IDs where available, placeholders otherwise
