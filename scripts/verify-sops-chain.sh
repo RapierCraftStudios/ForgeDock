@@ -24,6 +24,24 @@ DIFF_INPUT="${1:--}"
 CHANGED_FILES_INPUT="${2:--}"
 REPO_ROOT="${3:-.}"
 
+# --- Secrets backend guard ---
+# This script only applies when the project uses SOPS as its secrets backend.
+# Read the configured backend from the FORGE_SECRETS_BACKEND env var (set by the
+# calling pipeline) or fall back to parsing forge.yaml in the repo root.
+#
+# If the backend is not "sops" (or is unset), exit 0 with a skip message.
+# This is a clean no-op — not a false-pass — so callers can distinguish
+# "SOPS configured and passed" from "SOPS not in use on this project".
+_SECRETS_BACKEND="${FORGE_SECRETS_BACKEND:-}"
+if [ -z "$_SECRETS_BACKEND" ] && [ -f "$REPO_ROOT/forge.yaml" ]; then
+    _SECRETS_BACKEND=$(grep -E '^\s*secrets_backend:' "$REPO_ROOT/forge.yaml" \
+        | head -1 | sed 's/.*secrets_backend:[[:space:]]*//' | tr -d '"' | tr -d "'" | xargs)
+fi
+if [ "$_SECRETS_BACKEND" != "sops" ]; then
+    echo "SKIP: verify-sops-chain — secrets_backend is '${_SECRETS_BACKEND:-none}' (not sops). Configure deploy.secrets_backend: sops in forge.yaml to enable SOPS chain verification."
+    exit 0
+fi
+
 if [ "$DIFF_INPUT" = "-" ]; then
     DIFF_CONTENT=$(cat)
 else

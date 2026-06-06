@@ -9,6 +9,7 @@ argument-hint: [PR number to revert, or "last" for most recent deploy]
 
 **Config variables used by this command** (set in `forge.yaml`):
 - `{REPO_PATH}` ← `paths.root` — project repository root
+- `{DEPLOY_WORKFLOW}` ← `deploy.workflow` (optional) — GitHub Actions workflow filename for fast-track deploys (e.g., `hotfix-deploy.yml`). When absent or empty, the workflow-trigger suggestion is omitted.
 
 You are the pipeline's emergency rollback system. When a shipped feature or fix causes production issues, this command creates a revert PR and fast-tracks it through the pipeline.
 
@@ -177,10 +178,11 @@ PR_EOF
 ```bash
 gh pr merge {REVERT_PR} --merge
 ```
-- Then trigger hotfix deploy:
+- Then trigger hotfix deploy (requires `deploy.workflow` set in `forge.yaml`):
 ```bash
 echo "Revert merged to main. CI/CD will deploy automatically."
-echo "For faster deploy, trigger hotfix: gh workflow run hotfix-deploy.yml --ref main -f services={affected} -f reason=\"Rollback PR #{PR_NUMBER}\""
+echo "For faster deploy, trigger deploy workflow: gh workflow run {deploy.workflow} --ref main -f {deploy.workflow_inputs.services}={affected} -f {deploy.workflow_inputs.reason}=\"Rollback PR #{PR_NUMBER}\""
+# If deploy.workflow is not configured in forge.yaml, CI/CD will deploy automatically on the next push to main.
 ```
 
 **If not urgent**:
