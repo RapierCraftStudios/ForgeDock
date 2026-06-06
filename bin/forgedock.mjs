@@ -4053,7 +4053,7 @@ if (!command) {
       break;
     case "labels": {
       const subcommand = args[1];
-      if (!subcommand || subcommand === "setup") {
+      if (!subcommand || subcommand === "setup" || subcommand.startsWith("--")) {
         const subArgs = args.slice(1);
         const repo = resolveLabelsRepo(subArgs);
         if (!repo) {
