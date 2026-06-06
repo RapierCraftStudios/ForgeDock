@@ -110,13 +110,14 @@ Update the project board to reflect the merged state. This replaces the old Phas
 
 ```bash
 # Read project board config from forge.yaml
-PROJECT_BOARD_OWNER=$(yq '.project_board.owner // ""' forge.yaml 2>/dev/null || echo "")
-PROJECT_ID=$(yq '.project_board.project_id // ""' forge.yaml 2>/dev/null || echo "")
-PROJECT_NUMBER=$(yq '.project_board.project_number // ""' forge.yaml 2>/dev/null || echo "")
-STATUS_FIELD_ID=$(yq '.project_board.field_ids.status // ""' forge.yaml 2>/dev/null || echo "")
-WORKFLOW_FIELD_ID=$(yq '.project_board.field_ids.workflow // ""' forge.yaml 2>/dev/null || echo "")
-STATUS_DONE_OPTION_ID=$(yq '.project_board.option_ids.status.done // ""' forge.yaml 2>/dev/null || echo "")
-WORKFLOW_MERGED_OPTION_ID=$(yq '.project_board.option_ids.workflow.merged // ""' forge.yaml 2>/dev/null || echo "")
+CONFIG_FILE="${FORGE_CONFIG:-forge.yaml}"
+PROJECT_BOARD_OWNER=$(yq '.project_board.owner // ""' "$CONFIG_FILE" 2>/dev/null || echo "")
+PROJECT_ID=$(yq '.project_board.project_id // ""' "$CONFIG_FILE" 2>/dev/null || echo "")
+PROJECT_NUMBER=$(yq '.project_board.project_number // ""' "$CONFIG_FILE" 2>/dev/null || echo "")
+STATUS_FIELD_ID=$(yq '.project_board.field_ids.status // ""' "$CONFIG_FILE" 2>/dev/null || echo "")
+WORKFLOW_FIELD_ID=$(yq '.project_board.field_ids.workflow // ""' "$CONFIG_FILE" 2>/dev/null || echo "")
+STATUS_DONE_OPTION_ID=$(yq '.project_board.option_ids.status.done // ""' "$CONFIG_FILE" 2>/dev/null || echo "")
+WORKFLOW_MERGED_OPTION_ID=$(yq '.project_board.option_ids.workflow.merged // ""' "$CONFIG_FILE" 2>/dev/null || echo "")
 
 if [ -z "$PROJECT_BOARD_OWNER" ] || [ -z "$PROJECT_ID" ] || [ -z "$STATUS_FIELD_ID" ]; then
   echo "INFO: project_board not configured in forge.yaml — skipping board update"

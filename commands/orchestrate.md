@@ -31,11 +31,12 @@ Read `forge.yaml` at the project root to resolve all project-specific variables 
 
 ```bash
 # Parse forge.yaml for project context
-GH_REPO=$(yq '.project.owner + "/" + .project.repo' forge.yaml)
+CONFIG_FILE="${FORGE_CONFIG:-forge.yaml}"
+GH_REPO=$(yq '.project.owner + "/" + .project.repo' "$CONFIG_FILE")
 GH_FLAG="-R $GH_REPO"
-REPO_PATH=$(yq '.paths.root' forge.yaml)
-PROJECT_NAME=$(yq '.project.name' forge.yaml)
-STAGING_BRANCH=$(yq '.branches.staging' forge.yaml)
+REPO_PATH=$(yq '.paths.root' "$CONFIG_FILE")
+PROJECT_NAME=$(yq '.project.name' "$CONFIG_FILE")
+STAGING_BRANCH=$(yq '.branches.staging' "$CONFIG_FILE")
 # Build satellite repo map from repos.satellites list
 # Each satellite: { prefix, repo, staging_branch }
 ```

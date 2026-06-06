@@ -741,9 +741,9 @@ if iteration == max_iterations AND not PASS:
     Add needs-human label → STOP
 ```
 
-<!-- FORGE:PHASE_COMPLETE — Quality gate done. See Universal Phase Dispatcher: next sub-phase is 3H. Not terminal — continue immediately. -->
+# MUST CONTINUE to sub-phase 3H (Format and verify) — quality gate PASS is intermediate, NOT terminal. <!-- Added: forge#220 -->
 
-**After quality gate completes (PASS or fixes applied): proceed to the next sub-phase per the Universal Phase Dispatcher. Quality gate is an intermediate check — "PASS" means the code is clean, NOT that the build is done.**
+**After quality gate completes (PASS or fixes applied): proceed immediately to sub-phase 3H below. Quality gate is an intermediate check — "PASS" means the code is clean, NOT that the build is done. Do NOT stop.**
 
 ### 3H: Format and verify
 
@@ -973,6 +973,8 @@ gh issue view {NUMBER} {GH_FLAG} --json state --jq '.state'
 - PR NOT MERGED → `gh pr merge {PR_NUMBER} {GH_FLAG} --merge --auto`. If fails → post comment, add `needs-human`, STOP.
 
 <!-- FORGE:PHASE_COMPLETE — Review done, PR merged. See Universal Phase Dispatcher: next phase is Phase 6 (Close & Cleanup). Not terminal — continue immediately. -->
+
+**After /review-pr returns and the PR is confirmed merged: immediately proceed to Phase 6 (Close & Cleanup). Do NOT stop here. `REVIEW_RESULT: status: COMPLETE` is an intermediate result — the pipeline is NOT done. Invoke Phase 6 now to close the issue, update labels, post the trajectory log, and clean up the worktree.**
 
 ---
 

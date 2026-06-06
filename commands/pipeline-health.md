@@ -14,8 +14,9 @@ You are the Forge pipeline's self-awareness layer. Your job is to measure how we
 Read project identity from `forge.yaml` before running any phase:
 
 ```bash
-FORGE_REPO=$(yq e '.project.owner + "/" + .project.repo' forge.yaml)
-FORGE_HOME=$(yq e '.paths.root' forge.yaml)
+CONFIG_FILE="${FORGE_CONFIG:-forge.yaml}"
+FORGE_REPO=$(yq e '.project.owner + "/" + .project.repo' "$CONFIG_FILE")
+FORGE_HOME=$(yq e '.paths.root' "$CONFIG_FILE")
 echo "Forge repo: $FORGE_REPO"
 echo "Forge home: $FORGE_HOME"
 ```

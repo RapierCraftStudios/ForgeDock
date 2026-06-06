@@ -219,7 +219,9 @@ gh issue view {NUMBER} {GH_FLAG} --json state --jq '.state'
 
 ## Output
 
-Output this structured block — the routing loop in `work-on.md` will read this result, re-evaluate state, and continue to the next phase. This subcommand is complete; control returns to the router's loop iteration.
+**After posting this result, immediately proceed to the close subcommand — do NOT stop here. `REVIEW_RESULT: status: COMPLETE` is an intermediate result, NOT a terminal state. The pipeline is not done. You MUST invoke `Skill("work-on:close", ...)` now to close the issue, update labels to `workflow:merged`, post the trajectory log, and clean up the worktree.**
+
+Output this structured block:
 
 ```
 REVIEW_RESULT:
