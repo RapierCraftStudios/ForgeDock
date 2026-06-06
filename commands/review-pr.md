@@ -857,7 +857,7 @@ Verdict determined by standard blocking criteria.
    - If `MERGE_HEALTH == "UNKNOWN"` after retries: emit a WARNING in the verdict body (do NOT treat as a block — GitHub may still be computing it).
 
 ```bash
-# Determine if mergeability is a blocker (set in Phase 1A)
+# Determine if mergeability is a blocker (MERGE_HEALTH/MERGE_HEALTH_STATE set in Phase 1A; BASE/HEAD set in Phase 0 Mode 3)
 HAS_MERGE_CONFLICT=false
 MERGE_CONFLICT_MSG=""
 if [ "$MERGE_HEALTH" = "CONFLICTING" ] || [ "$MERGE_HEALTH_STATE" = "DIRTY" ] || [ "$MERGE_HEALTH_STATE" = "BLOCKED" ]; then
