@@ -19,14 +19,15 @@ Read `forge.yaml` at the project root to resolve all project-specific variables 
 
 ```bash
 # Parse forge.yaml for project context
-GH_REPO=$(yq '.project.owner + "/" + .project.repo' forge.yaml)
+CONFIG_FILE="${FORGE_CONFIG:-forge.yaml}"
+GH_REPO=$(yq '.project.owner + "/" + .project.repo' "$CONFIG_FILE")
 GH_FLAG="-R $GH_REPO"
-REPO_PATH=$(yq '.paths.root' forge.yaml)
-PROJECT_NAME=$(yq '.project.name' forge.yaml)
-STAGING_BRANCH=$(yq '.branches.staging' forge.yaml)
-PROJECT_BOARD_OWNER=$(yq '.project_board.owner // .project.owner' forge.yaml)
-PROJECT_NUMBER=$(yq '.project_board.project_number // "1"' forge.yaml)
-PROJECT_ID=$(yq '.project_board.project_id' forge.yaml)
+REPO_PATH=$(yq '.paths.root' "$CONFIG_FILE")
+PROJECT_NAME=$(yq '.project.name' "$CONFIG_FILE")
+STAGING_BRANCH=$(yq '.branches.staging' "$CONFIG_FILE")
+PROJECT_BOARD_OWNER=$(yq '.project_board.owner // .project.owner' "$CONFIG_FILE")
+PROJECT_NUMBER=$(yq '.project_board.project_number // "1"' "$CONFIG_FILE")
+PROJECT_ID=$(yq '.project_board.project_id' "$CONFIG_FILE")
 # Build satellite repo map from repos.satellites list
 # Each satellite: { prefix, repo, staging_branch }
 ```
@@ -568,7 +569,7 @@ Syncs the milestone branch with the latest default branch to pick up fast-lane f
 
 ```bash
 cd {REPO_PATH}
-DEFAULT_BRANCH=$(yq '.branches.default' forge.yaml)
+DEFAULT_BRANCH=$(yq '.branches.default' "$CONFIG_FILE")
 git fetch origin $DEFAULT_BRANCH milestone/{slug}
 git checkout milestone/{slug}
 git merge origin/$DEFAULT_BRANCH --no-edit
