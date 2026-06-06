@@ -86,12 +86,6 @@ Each file declares an `authority` field in its frontmatter:
 
 If this directory was scaffolded by `npx forgedock docs init`, re-running that command will add any new template files introduced in newer ForgeDock versions. It will **not** overwrite files you have edited (idempotent).
 
-To update a specific file from the shipped template:
-
-```bash
-npx forgedock docs update agent/using-forgedock.md
-```
-
 ---
 
 ## Maintenance Notes
