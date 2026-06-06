@@ -10,6 +10,7 @@ import {
   readlink,
   lstat,
   readdir,
+  realpath,
   stat,
   writeFile,
   unlink as fsUnlink,
@@ -3541,8 +3542,16 @@ async function docsInit() {
     : join(cwd, devdocsRelPath);
 
   // Security: assert targetDir is confined to the project directory.
-  // Prevents path traversal via ../.. sequences or absolute paths in devdocs.path.
-  const resolvedTarget = resolve(targetDir);
+  // Prevents path traversal via ../.. sequences, absolute paths, and symlinks in devdocs.path.
+  // Use realpath() to dereference symlinks — resolve() does not follow them, so a symlink
+  // pre-placed inside the project (e.g. devdocs -> /etc) would bypass a resolve()-only check.
+  // Fall back to resolve() when targetDir does not yet exist (no symlink to dereference).
+  let resolvedTarget;
+  try {
+    resolvedTarget = await realpath(targetDir);
+  } catch {
+    resolvedTarget = resolve(targetDir);
+  }
   if (resolvedTarget !== cwd && !resolvedTarget.startsWith(cwd + sep)) {
     console.log(
       `${RED}Error: devdocs.path must be inside the project directory.${RESET}`,
