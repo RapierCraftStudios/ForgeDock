@@ -232,7 +232,7 @@ for ISSUE_NUM in {created_issue_numbers}; do
   if [ -n "$ITEM_ID" ]; then
     gh project item-edit --project-id {PROJECT_ID} --id "$ITEM_ID" --field-id {PROJECT_BOARD_STATUS_FIELD_ID} --single-select-option-id {PROJECT_BOARD_STATUS_TODO_ID} 2>/dev/null || true  # Status=Todo
     gh project item-edit --project-id {PROJECT_ID} --id "$ITEM_ID" --field-id {PROJECT_BOARD_LANE_FIELD_ID} --single-select-option-id {PROJECT_BOARD_LANE_FEATURE_ID} 2>/dev/null || true  # Lane=Feature
-    gh project item-edit --project-id {PROJECT_ID} --id "$ITEM_ID" --field-id {PROJECT_BOARD_COMPONENT_FIELD_ID} --single-select-option-id {COMPONENT_OPTION_ID} 2>/dev/null || true  # Component (from forge.yaml → project_board.fields)
+    gh project item-edit --project-id {PROJECT_ID} --id "$ITEM_ID" --field-id {PROJECT_BOARD_COMPONENT_FIELD_ID} --single-select-option-id {COMPONENT_OPTION_ID} 2>/dev/null || true  # Component (from forge.yaml → project_board.field_ids)
     gh project item-edit --project-id {PROJECT_ID} --id "$ITEM_ID" --field-id {PROJECT_BOARD_PRIORITY_FIELD_ID} --single-select-option-id {PRIORITY_OPTION_ID} 2>/dev/null || true  # Priority (from label)
   fi
 done

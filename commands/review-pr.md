@@ -524,7 +524,7 @@ Read the file: $FORGE_HOME/commands/review-pr-agents.md
 **>>> LOAD CONFIG: Read forge.yaml for project context:**
 ```bash
 # Read review config from forge.yaml (if present in project root)
-FORGE_YAML="${REPO_ROOT}/forge.yaml"
+FORGE_YAML="${FORGE_CONFIG:-$(git rev-parse --show-toplevel 2>/dev/null)/forge.yaml}"
 PROJECT_NAME=$(yq '.project.name' "$FORGE_YAML" 2>/dev/null || echo "this project")
 PROJECT_CONTEXT=$(yq '.review.context' "$FORGE_YAML" 2>/dev/null || echo "")
 TECH_STACK=$(yq '.review.tech_stack' "$FORGE_YAML" 2>/dev/null || echo "")

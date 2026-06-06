@@ -55,7 +55,7 @@ fi
 ### 1A: Locate and read
 
 ```bash
-FORGE_YAML="$(pwd)/forge.yaml"
+FORGE_YAML="${FORGE_CONFIG:-$(git rev-parse --show-toplevel 2>/dev/null)/forge.yaml}"
 if [ ! -f "$FORGE_YAML" ]; then
   echo "forge.yaml not found in current directory."
   echo ""
