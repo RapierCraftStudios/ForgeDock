@@ -974,6 +974,8 @@ gh issue view {NUMBER} {GH_FLAG} --json state --jq '.state'
 
 <!-- FORGE:PHASE_COMPLETE — Review done, PR merged. See Universal Phase Dispatcher: next phase is Phase 6 (Close & Cleanup). Not terminal — continue immediately. -->
 
+**After /review-pr returns and the PR is confirmed merged: immediately proceed to Phase 6 (Close & Cleanup). Do NOT stop here. `REVIEW_RESULT: status: COMPLETE` is an intermediate result — the pipeline is NOT done. Invoke Phase 6 now to close the issue, update labels, post the trajectory log, and clean up the worktree.**
+
 ---
 
 ## Phase 6: Close & Cleanup
