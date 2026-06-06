@@ -741,9 +741,9 @@ if iteration == max_iterations AND not PASS:
     Add needs-human label → STOP
 ```
 
-<!-- FORGE:PHASE_COMPLETE — Quality gate done. See Universal Phase Dispatcher: next sub-phase is 3H. Not terminal — continue immediately. -->
+# MUST CONTINUE to sub-phase 3H (Format and verify) — quality gate PASS is intermediate, NOT terminal. <!-- Added: forge#220 -->
 
-**After quality gate completes (PASS or fixes applied): proceed to the next sub-phase per the Universal Phase Dispatcher. Quality gate is an intermediate check — "PASS" means the code is clean, NOT that the build is done.**
+**After quality gate completes (PASS or fixes applied): proceed immediately to sub-phase 3H below. Quality gate is an intermediate check — "PASS" means the code is clean, NOT that the build is done. Do NOT stop.**
 
 ### 3H: Format and verify
 
