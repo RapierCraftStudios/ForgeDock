@@ -1535,7 +1535,12 @@ async function update() {
         try {
           const diffStat = execFileSync(
             "git",
-            ["diff", "--ignore-all-space", "--ignore-blank-lines", "--name-only"],
+            [
+              "diff",
+              "--ignore-all-space",
+              "--ignore-blank-lines",
+              "--name-only",
+            ],
             {
               cwd: FORGE_HOME,
               encoding: "utf-8",
@@ -1583,12 +1588,16 @@ async function update() {
         await mkdir(cacheDir, { recursive: true });
         writeFileSync(
           _getUpdateCheckCachePath(),
-          JSON.stringify({
-            checkedAt: Date.now(),
-            updateAvailable: false,
-            latestVersion: newVersion,
-            remoteHead: after,
-          }, null, 2) + "\n",
+          JSON.stringify(
+            {
+              checkedAt: Date.now(),
+              updateAvailable: false,
+              latestVersion: newVersion,
+              remoteHead: after,
+            },
+            null,
+            2,
+          ) + "\n",
           { encoding: "utf-8" },
         );
       } catch {
@@ -3579,27 +3588,54 @@ async function tuiOnboarding() {
   splash();
 
   // Non-TTY fallback: skip TUI and detection, run install directly.
-  // Still perform a proactive remote update check and print one line if behind.
+  // Print a prominent boxed notice so the user understands what happened and
+  // what to do next. Best-effort update/checkout hints are folded into the box.
   if (!process.stdout.isTTY) {
-    console.log(
-      dim("  Non-interactive environment detected — running install."),
-    );
-    console.log("");
-    // Best-effort remote check — never blocks install, never throws.
+    const noticeLines = [
+      "",
+      `  Non-interactive environment detected.`,
+      `  ForgeDock's setup wizard requires an interactive terminal (TTY).`,
+      "",
+      `  ${dim("To run the interactive TUI:")} open a terminal and run ${cyan("npx forgedock")}`,
+      "",
+    ];
+
+    // Best-effort remote check — fold results into the box, never block install.
     try {
       const remoteCheck = await checkForRemoteUpdate();
       if (remoteCheck?.updateAvailable) {
-        const versionHint = remoteCheck.latestVersion
-          ? ` (v${getVersion()} → v${remoteCheck.latestVersion})`
-          : "";
-        console.log(
-          `  Update available${versionHint} — run: npx forgedock update`,
-        );
-        console.log("");
+        const isGitCheckout = existsSync(join(FORGE_HOME, ".git"));
+        if (isGitCheckout) {
+          // User is running from the ForgeDock source checkout and it's behind remote.
+          noticeLines.push(
+            `  ${yellow("Stale local checkout:")} the working-tree bin is behind origin/main.`,
+          );
+          noticeLines.push(
+            `  ${dim("Run")} ${cyan(`git pull`)} ${dim(`in`)} ${dim(FORGE_HOME)}`,
+          );
+          noticeLines.push(
+            `  ${dim("Or use the published package:")} ${cyan("npx forgedock@latest")}`,
+          );
+        } else {
+          const versionHint = remoteCheck.latestVersion
+            ? ` (v${getVersion()} → v${remoteCheck.latestVersion})`
+            : "";
+          noticeLines.push(
+            `  ${yellow(`Update available${versionHint}`)} — run: ${cyan("npx forgedock update")}`,
+          );
+        }
+        noticeLines.push("");
       }
     } catch {
       // Best-effort — never block install
     }
+
+    noticeLines.push(`  Running ${cyan("install")} now...`);
+    noticeLines.push("");
+    process.stdout.write(
+      box(noticeLines, { title: "Non-interactive environment" }),
+    );
+    console.log("");
     await install();
     return;
   }
