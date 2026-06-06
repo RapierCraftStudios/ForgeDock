@@ -1215,6 +1215,140 @@ function queryNpmRegistry(pkg) {
   }
 }
 
+// ---------------------------------------------------------------------------
+// Proactive update check — cached remote version check
+// ---------------------------------------------------------------------------
+
+/**
+ * Path to the update-check cache file.
+ * Stored in ~/.forgedock/ alongside credentials.json.
+ * Populated lazily — FORGEDOCK_HOME is defined later in the file, but this
+ * constant is only resolved at module evaluation time so the ordering is fine.
+ */
+// NOTE: FORGEDOCK_HOME is declared later in the file (line ~2974). This const
+// is a forward reference that is only evaluated when the module finishes loading,
+// which is after FORGEDOCK_HOME is defined. Node ESM top-level await ensures
+// the module is fully evaluated before any exported binding is read.
+// We defer the join() call to avoid the forward-reference issue:
+function _getUpdateCheckCachePath() {
+  return join(HOME, ".forgedock", "update-check.json");
+}
+
+/** Default interval between automatic remote update checks (milliseconds). */
+const UPDATE_CHECK_INTERVAL_MS = 24 * 60 * 60 * 1000; // 24 hours
+
+/**
+ * Check whether a newer version of ForgeDock is available, using a local cache
+ * to avoid hitting the network on every invocation.
+ *
+ * For git installs: runs `git fetch origin main` (check-only, no merge) and
+ * compares the local HEAD SHA against origin/main.
+ * For npm installs: queries the npm registry via queryNpmRegistry().
+ *
+ * The cache file `~/.forgedock/update-check.json` stores the result with a
+ * timestamp. If the cache is fresh (< UPDATE_CHECK_INTERVAL_MS old) and
+ * `force` is false, the cached result is returned immediately without any
+ * network call.
+ *
+ * Always returns null on any error — never throws.
+ *
+ * @param {boolean} [force=false]  When true, bypass cache and always hit network.
+ * @returns {Promise<{updateAvailable: boolean, latestVersion: string|null, remoteHead: string|null} | null>}
+ */
+async function checkForRemoteUpdate(force = false) {
+  const cachePath = _getUpdateCheckCachePath();
+
+  // --- Read cache ---
+  if (!force) {
+    try {
+      const raw = readFileSync(cachePath, "utf-8");
+      const cached = JSON.parse(raw);
+      const age = Date.now() - (cached.checkedAt ?? 0);
+      if (age < UPDATE_CHECK_INTERVAL_MS) {
+        // Cache is fresh — return stored result
+        return {
+          updateAvailable: cached.updateAvailable ?? false,
+          latestVersion: cached.latestVersion ?? null,
+          remoteHead: cached.remoteHead ?? null,
+        };
+      }
+    } catch {
+      // Cache missing or malformed — proceed to network check
+    }
+  }
+
+  // --- Perform network check ---
+  const gitDir = join(FORGE_HOME, ".git");
+  let result;
+
+  if (existsSync(gitDir)) {
+    // Git install: fetch and compare SHAs
+    try {
+      // Fetch — short timeout, offline-safe
+      try {
+        execFileSync("git", ["fetch", "origin", "main", "--quiet"], {
+          cwd: FORGE_HOME,
+          stdio: ["pipe", "pipe", "pipe"],
+          timeout: 10000,
+        });
+      } catch {
+        // Offline or fetch failed — skip check, don't update cache
+        return null;
+      }
+
+      const localHead = execFileSync("git", ["rev-parse", "HEAD"], {
+        cwd: FORGE_HOME,
+        encoding: "utf-8",
+        stdio: ["pipe", "pipe", "pipe"],
+        timeout: 5000,
+      }).trim();
+
+      const remoteHead = execFileSync("git", ["rev-parse", "origin/main"], {
+        cwd: FORGE_HOME,
+        encoding: "utf-8",
+        stdio: ["pipe", "pipe", "pipe"],
+        timeout: 5000,
+      }).trim();
+
+      result = {
+        updateAvailable: localHead !== remoteHead,
+        latestVersion: null,
+        remoteHead,
+      };
+    } catch {
+      return null;
+    }
+  } else {
+    // npm install: query registry
+    const latestVersion = queryNpmRegistry("forgedock");
+    if (latestVersion === null) {
+      // Offline or registry unreachable — skip check, don't update cache
+      return null;
+    }
+    const currentVersion = getVersion();
+    result = {
+      updateAvailable: currentVersion !== latestVersion,
+      latestVersion,
+      remoteHead: null,
+    };
+  }
+
+  // --- Write cache ---
+  try {
+    const cacheDir = join(HOME, ".forgedock");
+    await mkdir(cacheDir, { recursive: true });
+    writeFileSync(
+      cachePath,
+      JSON.stringify({ checkedAt: Date.now(), ...result }, null, 2) + "\n",
+      { encoding: "utf-8" },
+    );
+  } catch {
+    // Best-effort — cache write failure is non-fatal
+  }
+
+  return result;
+}
+
 /**
  * Return a Set of relative paths for all ForgeDock-managed symlinks in TARGET_DIR.
  * Recursively walks subdirectories so commands installed under work-on/, work-on/build/,
@@ -1396,10 +1530,37 @@ async function update() {
           timeout: 15000,
         });
       } catch {
+        // Check if the only changes are whitespace/line-ending noise (CRLF drift, etc.)
+        let isWhitespaceOnly = false;
+        try {
+          const diffStat = execFileSync(
+            "git",
+            ["diff", "--ignore-all-space", "--ignore-blank-lines", "--name-only"],
+            {
+              cwd: FORGE_HOME,
+              encoding: "utf-8",
+              stdio: ["pipe", "pipe", "pipe"],
+              timeout: 5000,
+            },
+          ).trim();
+          isWhitespaceOnly = diffStat === "";
+        } catch {
+          // Diff check failed — fall back to generic message
+        }
+
         console.log(
           `  ${yellow("Cannot fast-forward")} — local changes exist. Skipping merge.`,
         );
-        console.log(`  ${dim("Stash or discard local changes and re-run.")}`);
+        if (isWhitespaceOnly) {
+          console.log(
+            `  ${dim("Only whitespace/line-ending differences detected.")}`,
+          );
+          console.log(
+            `  ${dim("Run")} ${cyan("git checkout -- .")} ${dim("to discard them, then re-run")} ${cyan("npx forgedock update")}${dim(".")}`,
+          );
+        } else {
+          console.log(`  ${dim("Stash or discard local changes and re-run.")}`);
+        }
         console.log("");
         return;
       }
@@ -1414,6 +1575,25 @@ async function update() {
       const newVersion = getVersion();
       console.log(`  ${green("Updated")} v${currentVersion} → v${newVersion}`);
       console.log("");
+
+      // Invalidate the update-check cache so the next tuiOnboarding() run
+      // reflects the freshly-applied update without hitting the network again.
+      try {
+        const cacheDir = join(HOME, ".forgedock");
+        await mkdir(cacheDir, { recursive: true });
+        writeFileSync(
+          _getUpdateCheckCachePath(),
+          JSON.stringify({
+            checkedAt: Date.now(),
+            updateAvailable: false,
+            latestVersion: newVersion,
+            remoteHead: after,
+          }, null, 2) + "\n",
+          { encoding: "utf-8" },
+        );
+      } catch {
+        // Best-effort — cache write failure is non-fatal
+      }
 
       // Re-run symlink installer to pick up new/removed commands
       await install();
@@ -3398,12 +3578,28 @@ function help() {
 async function tuiOnboarding() {
   splash();
 
-  // Non-TTY fallback: skip TUI and detection, run install directly
+  // Non-TTY fallback: skip TUI and detection, run install directly.
+  // Still perform a proactive remote update check and print one line if behind.
   if (!process.stdout.isTTY) {
     console.log(
       dim("  Non-interactive environment detected — running install."),
     );
     console.log("");
+    // Best-effort remote check — never blocks install, never throws.
+    try {
+      const remoteCheck = await checkForRemoteUpdate();
+      if (remoteCheck?.updateAvailable) {
+        const versionHint = remoteCheck.latestVersion
+          ? ` (v${getVersion()} → v${remoteCheck.latestVersion})`
+          : "";
+        console.log(
+          `  Update available${versionHint} — run: npx forgedock update`,
+        );
+        console.log("");
+      }
+    } catch {
+      // Best-effort — never block install
+    }
     await install();
     return;
   }
@@ -3424,16 +3620,57 @@ async function tuiOnboarding() {
     );
     console.log("");
 
-    const action = await select("What would you like to do?", [
+    // Proactive remote update check — cached, never blocks TUI startup
+    let remoteUpdateInfo = null;
+    try {
+      remoteUpdateInfo = await checkForRemoteUpdate();
+    } catch {
+      // Best-effort — ignore all errors
+    }
+
+    if (remoteUpdateInfo?.updateAvailable) {
+      // Surface a prominent notice when behind the remote
+      const noticeLines = [""];
+      if (remoteUpdateInfo.latestVersion) {
+        noticeLines.push(
+          `  ${yellow("Update available:")}  v${detection.currentVersion}  →  ${green(`v${remoteUpdateInfo.latestVersion}`)}`,
+        );
+      } else {
+        // Git install: no version string, but commits available
+        noticeLines.push(
+          `  ${yellow("Update available")} — new commits on origin/main`,
+        );
+      }
+      noticeLines.push(
+        "",
+        `  ${dim('Choose "Update now" below or run')} ${cyan("npx forgedock update")}`,
+        "",
+      );
+      process.stdout.write(box(noticeLines, { title: "Update available" }));
+      console.log("");
+    }
+
+    // Build the action menu — insert "Update now" as the first choice when behind
+    /** @type {Array<{label: string, value: string}>} */
+    const menuChoices = [];
+    if (remoteUpdateInfo?.updateAvailable) {
+      menuChoices.push({ label: "Update now", value: "update" });
+    }
+    menuChoices.push(
       { label: "Nothing — exit", value: "exit" },
       {
         label: "Reconfigure project (regenerate forge.yaml)",
         value: "reconfigure",
       },
       { label: "Reinstall commands", value: "reinstall" },
-    ]);
+    );
 
-    if (action === "reconfigure") {
+    const action = await select("What would you like to do?", menuChoices);
+
+    if (action === "update") {
+      console.log("");
+      await update();
+    } else if (action === "reconfigure") {
       console.log("");
       await init();
     } else if (action === "reinstall") {
