@@ -48,7 +48,7 @@ Read `forge.yaml → devdocs.path` from the project root. Default to `devdocs` i
 ```bash
 DEVDOCS_PATH=""
 
-# Read forge.yaml from repo root (REPO_PATH is the worktree path — walk up to find forge.yaml)
+# Read forge.yaml directly from repo root (REPO_PATH points to the project root — no directory walk)
 FORGE_YAML_PATH="{REPO_PATH}/forge.yaml"
 
 if [ -f "$FORGE_YAML_PATH" ]; then
@@ -70,6 +70,8 @@ if [ ! -d "$DEVDOCS_PATH" ]; then
   DEVDOCS_PATH=""
 fi
 ```
+
+> **Note**: `devdocs/` must be tracked in git for the worktree to contain it. If the project gitignores `devdocs/`, the path will not exist in the worktree and this phase silently skips — this is by design. Run `git check-ignore -v devdocs/` to confirm tracking status.
 
 ### Step 1: Enumerate and filter applicable files
 

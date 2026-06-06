@@ -17,7 +17,6 @@ import {
 import {
   existsSync,
   appendFileSync,
-  chmodSync,
   readFileSync,
   writeFileSync,
   renameSync,
