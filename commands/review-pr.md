@@ -548,9 +548,13 @@ if [ -n "$WORKFLOW_FILES" ] || [ "$IS_STAGING_PR" = "true" ]; then
             echo "--- Comparing '$JOB' job between ci.yml and deploy-production.yml ---"
 
             # Extract env vars from ALL steps in the job (not just pytest).
-            # awk range extraction replaces sed -n "/pat/,/pat/p" for portability.
-            CI_ENVS=$(awk "/^  ${JOB}:/,/^  [a-z]/" "$CI_WF" 2>/dev/null | grep -E "PYTHONPATH|DATABASE_URL|REDIS_URL|TESTING" | sed 's/^ *//' | sort)
-            DEPLOY_ENVS=$(awk "/^  ${JOB}:/,/^  [a-z]/" "$DEPLOY_WF" 2>/dev/null | grep -E "PYTHONPATH|DATABASE_URL|REDIS_URL|TESTING" | sed 's/^ *//' | sort)
+            # Flag-based awk avoids the range-collapse bug: /pat1/,/pat2/ collapses
+            # to a single line when the header (e.g. "  test-api:") matches both
+            # patterns simultaneously. The flag form sets p=1 on the header line,
+            # prints body lines while p=1, and clears p when the next sibling job
+            # header (same indentation, lowercase start) is seen. <!-- Added: forge#310 -->
+            CI_ENVS=$(awk -v pat="^  ${JOB}:" 'BEGIN{p=0} $0~pat{p=1; print; next} p && /^  [a-z]/{p=0} p{print}' "$CI_WF" 2>/dev/null | grep -E "PYTHONPATH|DATABASE_URL|REDIS_URL|TESTING" | sed 's/^ *//' | sort)
+            DEPLOY_ENVS=$(awk -v pat="^  ${JOB}:" 'BEGIN{p=0} $0~pat{p=1; print; next} p && /^  [a-z]/{p=0} p{print}' "$DEPLOY_WF" 2>/dev/null | grep -E "PYTHONPATH|DATABASE_URL|REDIS_URL|TESTING" | sed 's/^ *//' | sort)
 
             # Check for PYTHONPATH specifically — the exact var that caused the #11356 failure
             CI_PYPATH=$(echo "$CI_ENVS" | grep "PYTHONPATH" || echo "(not set)")
@@ -563,16 +567,16 @@ if [ -n "$WORKFLOW_FILES" ] || [ "$IS_STAGING_PR" = "true" ]; then
             fi
 
             # Check for dependency installation steps that exist in one but not the other
-            CI_INSTALLS=$(awk "/^  ${JOB}:/,/^  [a-z]/" "$CI_WF" 2>/dev/null | grep -c "poetry install\|pip install\|npm install" || echo 0)
-            DEPLOY_INSTALLS=$(awk "/^  ${JOB}:/,/^  [a-z]/" "$DEPLOY_WF" 2>/dev/null | grep -c "poetry install\|pip install\|npm install" || echo 0)
+            CI_INSTALLS=$(awk -v pat="^  ${JOB}:" 'BEGIN{p=0} $0~pat{p=1; print; next} p && /^  [a-z]/{p=0} p{print}' "$CI_WF" 2>/dev/null | grep -c "poetry install\|pip install\|npm install" || echo 0)
+            DEPLOY_INSTALLS=$(awk -v pat="^  ${JOB}:" 'BEGIN{p=0} $0~pat{p=1; print; next} p && /^  [a-z]/{p=0} p{print}' "$DEPLOY_WF" 2>/dev/null | grep -c "poetry install\|pip install\|npm install" || echo 0)
             if [ "$CI_INSTALLS" != "$DEPLOY_INSTALLS" ]; then
                 echo "  WARNING: Different number of dependency install steps in '$JOB' — ci.yml has $CI_INSTALLS, deploy has $DEPLOY_INSTALLS"
                 echo "  ACTION: Read both files and verify all dependencies needed by tests are installed in both workflows."
             fi
 
             # Check step names — if CI has a step that deploy doesn't, flag it
-            CI_STEPS=$(awk "/^  ${JOB}:/,/^  [a-z]/" "$CI_WF" 2>/dev/null | grep "- name:" | sed 's/.*- name: //' | sort)
-            DEPLOY_STEPS=$(awk "/^  ${JOB}:/,/^  [a-z]/" "$DEPLOY_WF" 2>/dev/null | grep "- name:" | sed 's/.*- name: //' | sort)
+            CI_STEPS=$(awk -v pat="^  ${JOB}:" 'BEGIN{p=0} $0~pat{p=1; print; next} p && /^  [a-z]/{p=0} p{print}' "$CI_WF" 2>/dev/null | grep "- name:" | sed 's/.*- name: //' | sort)
+            DEPLOY_STEPS=$(awk -v pat="^  ${JOB}:" 'BEGIN{p=0} $0~pat{p=1; print; next} p && /^  [a-z]/{p=0} p{print}' "$DEPLOY_WF" 2>/dev/null | grep "- name:" | sed 's/.*- name: //' | sort)
             MISSING_IN_DEPLOY=$(comm -23 <(echo "$CI_STEPS") <(echo "$DEPLOY_STEPS") 2>/dev/null || true)
             if [ -n "$MISSING_IN_DEPLOY" ]; then
                 echo "  WARNING: Steps in ci.yml '$JOB' missing from deploy-production.yml:"
