@@ -2,7 +2,7 @@
 
 import os from "os";
 import { fileURLToPath } from "url";
-import { basename, dirname, isAbsolute, join, relative, resolve } from "path";
+import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "path";
 import {
   mkdir,
   symlink,
@@ -3533,6 +3533,21 @@ async function docsInit() {
   const targetDir = isAbsolute(devdocsRelPath)
     ? devdocsRelPath
     : join(cwd, devdocsRelPath);
+
+  // Security: assert targetDir is confined to the project directory.
+  // Prevents path traversal via ../.. sequences or absolute paths in devdocs.path.
+  const resolvedTarget = resolve(targetDir);
+  if (resolvedTarget !== cwd && !resolvedTarget.startsWith(cwd + sep)) {
+    console.log(
+      `${RED}Error: devdocs.path must be inside the project directory.${RESET}`,
+    );
+    console.log(`  Resolved: ${resolvedTarget}`);
+    console.log(`  Project:  ${cwd}`);
+    console.log(
+      `  Fix: set ${CYAN}devdocs.path${RESET} to a relative path inside your project (e.g. "devdocs" or "docs/knowledge").`,
+    );
+    process.exit(1);
+  }
 
   // Template source: templates/devdocs/ inside the ForgeDock package
   const templatesDir = join(FORGE_HOME, "templates", "devdocs");
