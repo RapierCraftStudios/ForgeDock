@@ -29,9 +29,9 @@ From each changed file, follow imports and function calls. Trace data flows acro
 
 | Confidence | Criteria | Action |
 |------------|----------|--------|
-| CONFIRMED | Traced full code path, found specific proof | Report as P1 |
-| LIKELY | Pattern suggests issue, mitigations might exist | Report as P2 |
-| POSSIBLE | Suspicious but couldn't trace fully | Report as P3 |
+| CONFIRMED | Traced full code path, found specific proof | Report as priority:P1 |
+| LIKELY | Pattern suggests issue, mitigations might exist | Report as priority:P2 |
+| POSSIBLE | Suspicious but couldn't trace fully | Report as priority:P3 |
 | UNFOUNDED | Found correct handling | Do NOT report |
 
 ### Severity Decision Tree
@@ -364,7 +364,7 @@ Only assign milestone if reviewing a milestone/* branch. Plain staging reviews g
 Check for open review-finding issues at same file:line → skip. Closed issues at same location → potential regression (elevate priority).
 
 ### 7F: Create Issues
-Sequential creation. Title: `Staging Review: {summary} (staging → main)`. Labels: review-finding, needs-validation, staging-review, P1/P2/P3. Body includes: source branch context (`staging`), code context, evidence, validation checklist.
+Sequential creation. Title: `Staging Review: {summary} (staging → main)`. Labels: review-finding, needs-validation, staging-review, priority:P1/priority:P2/priority:P3. Body includes: source branch context (`staging`), code context, evidence, validation checklist.
 
 **For each finding** (that passes dedup), create issue:
 ```bash

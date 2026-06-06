@@ -1,6 +1,6 @@
 ---
 description: Orchestrate parallel work on multiple issues or an entire milestone — spawns sub-agents that each run the full /work-on pipeline
-argument-hint: [milestone <slug> | #1 #2 #3 | next <N> | fast-lane | P0]
+argument-hint: [milestone <slug> | #1 #2 #3 | next <N> | fast-lane | priority:P0]
 ---
 
 # /orchestrate — Multi-Issue Parallel Orchestrator
@@ -71,10 +71,10 @@ Parse `$ARGUMENTS` to determine which issues to work on:
 |-------|------------|
 | `milestone <slug>` | All open issues assigned to that GitHub milestone (default repo) |
 | `#1 #2 #3` or `1 2 3` | Specific issue numbers, optionally repo-prefixed (e.g., `#123 mcp:5 n8n:12`) |
-| `next <N>` | Top N priority open issues (P0 first, then P1, etc.) |
+| `next <N>` | Top N priority open issues (priority:P0 first, then priority:P1, etc.) |
 | `next <N> all-repos` | Top N across ALL ecosystem repos |
 | `fast-lane` or `fast` | All open fast-lane issues (no milestone, bugs/fixes) |
-| `P0` or `P1` | All open issues with that priority label |
+| `priority:P0` or `priority:P1` | All open issues with that priority label |
 | `mcp:fast` or `n8n:next 3` | Repo-scoped queries |
 | `<slug>` (no keyword) | Try milestone first, then fall back to label search |
 
