@@ -37,11 +37,12 @@ GH_FLAG="-R $GH_REPO"
 REPO_PATH=$(yq '.paths.root' "$CONFIG_FILE")
 PROJECT_NAME=$(yq '.project.name' "$CONFIG_FILE")
 STAGING_BRANCH=$(yq '.branches.staging' "$CONFIG_FILE")
+DEFAULT_BRANCH=$(yq '.branches.default' "$CONFIG_FILE")
 # Build satellite repo map from repos.satellites list
 # Each satellite: { prefix, repo, staging_branch }
 ```
 
-All `{GH_REPO}`, `{GH_FLAG}`, `{REPO_PATH}`, `{PROJECT_NAME}`, and `{STAGING_BRANCH}` references below are populated from `forge.yaml`.
+All `{GH_REPO}`, `{GH_FLAG}`, `{REPO_PATH}`, `{PROJECT_NAME}`, `{STAGING_BRANCH}`, and `{DEFAULT_BRANCH}` references below are populated from `forge.yaml`.
 
 ---
 
@@ -494,12 +495,18 @@ Proceed? (yes / adjust / pick specific issues)
 ```bash
 # Capture staging baseline before launching the wave
 git fetch origin
-STAGING_LINES_BEFORE=$(git diff --stat origin/main...origin/staging 2>/dev/null \
-  | tail -1 \
-  | grep -oP '\d+ insertion' \
-  | grep -oP '\d+' \
-  || echo "0")
-echo "Staging baseline before Wave {N}: ${STAGING_LINES_BEFORE} lines ahead of main"
+if [ "$DEFAULT_BRANCH" = "$STAGING_BRANCH" ]; then
+  # Single-branch repo — staging and default are the same; diff is always zero
+  STAGING_LINES_BEFORE=0
+  echo "Staging baseline before Wave {N}: skipped — single-branch repo (staging == default)"
+else
+  STAGING_LINES_BEFORE=$(git diff --stat origin/$DEFAULT_BRANCH...origin/$STAGING_BRANCH 2>/dev/null \
+    | tail -1 \
+    | grep -oP '\d+ insertion' \
+    | grep -oP '\d+' \
+    || echo "0")
+  echo "Staging baseline before Wave {N}: ${STAGING_LINES_BEFORE} lines ahead of $DEFAULT_BRANCH"
+fi
 ```
 
 Store `STAGING_LINES_BEFORE` per wave. After the wave completes (after Step 4C), run the integrity check:
@@ -507,27 +514,32 @@ Store `STAGING_LINES_BEFORE` per wave. After the wave completes (after Step 4C),
 ```bash
 # Check staging integrity after wave completes (run after Step 4C)
 git fetch origin
-STAGING_LINES_AFTER=$(git diff --stat origin/main...origin/staging 2>/dev/null \
-  | tail -1 \
-  | grep -oP '\d+ insertion' \
-  | grep -oP '\d+' \
-  || echo "0")
-STAGING_GROWTH=$((STAGING_LINES_AFTER - STAGING_LINES_BEFORE))
+if [ "$DEFAULT_BRANCH" = "$STAGING_BRANCH" ]; then
+  STAGING_LINES_AFTER=0
+  STAGING_GROWTH=0
+  echo "Staging integrity check: skipped — single-branch repo (staging == default)"
+else
+  STAGING_LINES_AFTER=$(git diff --stat origin/$DEFAULT_BRANCH...origin/$STAGING_BRANCH 2>/dev/null \
+    | tail -1 \
+    | grep -oP '\d+ insertion' \
+    | grep -oP '\d+' \
+    || echo "0")
+  STAGING_GROWTH=$((STAGING_LINES_AFTER - STAGING_LINES_BEFORE))
+  echo "Staging after Wave {N}: ${STAGING_LINES_AFTER} lines (+${STAGING_GROWTH} vs baseline)"
 
-echo "Staging after Wave {N}: ${STAGING_LINES_AFTER} lines (+${STAGING_GROWTH} vs baseline)"
-
-# Alert if growth exceeds expected delta
-# Expected: only the lines from PRs merged in this wave
-# Alert threshold: growth > 500 lines more than the sum of changed lines from wave PRs
-# (Use 0 as threshold if no PRs merged — any growth is unexpected)
-EXPECTED_DELTA={SUM_OF_PR_LINE_COUNTS_THIS_WAVE}  # set from PR diffs collected in 4B
-UNEXPECTED_GROWTH=$((STAGING_GROWTH - EXPECTED_DELTA))
-if [ "$UNEXPECTED_GROWTH" -gt 500 ]; then
-  echo "ALERT: Staging grew by ${STAGING_GROWTH} lines (+${UNEXPECTED_GROWTH} beyond expected ${EXPECTED_DELTA})."
-  echo "This may indicate milestone-code contamination via agent merge commits."
-  echo "Review: git log --oneline --merges origin/main..origin/staging"
-  echo "Do NOT merge staging → main until the unexpected growth is investigated."
-  # Do NOT auto-stop — alert the user and let them decide
+  # Alert if growth exceeds expected delta
+  # Expected: only the lines from PRs merged in this wave
+  # Alert threshold: growth > 500 lines more than the sum of changed lines from wave PRs
+  # (Use 0 as threshold if no PRs merged — any growth is unexpected)
+  EXPECTED_DELTA={SUM_OF_PR_LINE_COUNTS_THIS_WAVE}  # set from PR diffs collected in 4B
+  UNEXPECTED_GROWTH=$((STAGING_GROWTH - EXPECTED_DELTA))
+  if [ "$UNEXPECTED_GROWTH" -gt 500 ]; then
+    echo "ALERT: Staging grew by ${STAGING_GROWTH} lines (+${UNEXPECTED_GROWTH} beyond expected ${EXPECTED_DELTA})."
+    echo "This may indicate milestone-code contamination via agent merge commits."
+    echo "Review: git log --oneline --merges origin/$DEFAULT_BRANCH..origin/$STAGING_BRANCH"
+    echo "Do NOT merge $STAGING_BRANCH → $DEFAULT_BRANCH until the unexpected growth is investigated."
+    # Do NOT auto-stop — alert the user and let them decide
+  fi
 fi
 ```
 

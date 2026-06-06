@@ -18,8 +18,8 @@ Performs comprehensive review of `staging` before merging to `main`. Handles lar
 
 ### Diff-First Approach
 ```bash
-git fetch origin main staging
-git diff origin/main...origin/staging
+git fetch origin $DEFAULT_BRANCH $STAGING_BRANCH
+git diff origin/$DEFAULT_BRANCH...origin/$STAGING_BRANCH
 ```
 
 ### Dynamic Exploration
@@ -70,6 +70,22 @@ Include ALL findings (CONFIRMED, LIKELY, POSSIBLE). One line per finding, sequen
 
 ---
 
+## Config Resolution
+
+Read `forge.yaml` to resolve branch names before running any commands:
+
+```bash
+CONFIG_FILE="${FORGE_CONFIG:-forge.yaml}"
+GH_REPO=$(yq '.project.owner + "/" + .project.repo' "$CONFIG_FILE")
+GH_FLAG="-R $GH_REPO"
+DEFAULT_BRANCH=$(yq '.branches.default' "$CONFIG_FILE")
+STAGING_BRANCH=$(yq '.branches.staging' "$CONFIG_FILE")
+```
+
+All `$DEFAULT_BRANCH` and `$STAGING_BRANCH` references below are populated from `forge.yaml`.
+
+---
+
 ## Phase 0A: Open Review-Finding Gate (BLOCKING — runs before scope analysis)
 
 **Purpose**: Prevent deploying commits that have known, unfixed review findings. The review system catches bugs before merging; this gate ensures the merge path acts on that information.
@@ -77,17 +93,17 @@ Include ALL findings (CONFIRMED, LIKELY, POSSIBLE). One line per finding, sequen
 **Why this matters**: Review findings are filed before the originating PR merges to staging. Without this gate, a staging→main bundle can include commits with known unfixed bugs — the review system caught the issue, but the deploy path ignored it. This gate closes the gap between issue discovery and deploy execution. <!-- Added: forge#303 -->
 
 ```bash
-git fetch origin main staging
+git fetch origin $DEFAULT_BRANCH $STAGING_BRANCH
 
 # Step 1: Find all PR numbers in the staging→main bundle
 # These are the PRs whose commits are included in staging but not yet in main
-BUNDLE_PRS=$(git log origin/main..origin/staging --oneline \
+BUNDLE_PRS=$(git log origin/$DEFAULT_BRANCH..origin/$STAGING_BRANCH --oneline \
   | grep -oP '#\d+' \
   | sort -u \
   | tr -d '#')
 
 # Also extract PR numbers from merge commit subjects (most reliable)
-MERGE_PRS=$(git log origin/main..origin/staging --merges --oneline \
+MERGE_PRS=$(git log origin/$DEFAULT_BRANCH..origin/$STAGING_BRANCH --merges --oneline \
   | grep -oP '(?<=pull request #)\d+' \
   | sort -u)
 
@@ -178,10 +194,10 @@ If the gate exits with `RESULT: BLOCK DEPLOY` → **STOP**. Do NOT proceed to Ph
 ## Phase 0B: Scope Analysis
 
 ```bash
-git fetch origin main staging
-git diff origin/main...origin/staging --stat | tail -20
-git diff origin/main...origin/staging --numstat | awk '{add+=$1; del+=$2} END {print "Added:", add, "Deleted:", del, "Total:", add+del}'
-git diff origin/main...origin/staging --name-only | sort | uniq
+git fetch origin $DEFAULT_BRANCH $STAGING_BRANCH
+git diff origin/$DEFAULT_BRANCH...origin/$STAGING_BRANCH --stat | tail -20
+git diff origin/$DEFAULT_BRANCH...origin/$STAGING_BRANCH --numstat | awk '{add+=$1; del+=$2} END {print "Added:", add, "Deleted:", del, "Total:", add+del}'
+git diff origin/$DEFAULT_BRANCH...origin/$STAGING_BRANCH --name-only | sort | uniq
 ```
 
 Categorize by service (API, Worker, Web, Shared, Infra). Identify high-risk files (billing, credits, pricing, auth, security, migration, scraper).
@@ -212,7 +228,7 @@ cd services/api && poetry run pytest tests/ -x -q --tb=short 2>&1 | tail -50
 
 ### 1D: Secrets Scan
 ```bash
-git diff origin/main...origin/staging | grep -iE "(api[_-]?key|secret|password|token|credential)" | grep -vE "(#|//|\.example|placeholder)" | head -20
+git diff origin/$DEFAULT_BRANCH...origin/$STAGING_BRANCH | grep -iE "(api[_-]?key|secret|password|token|credential)" | grep -vE "(#|//|\.example|placeholder)" | head -20
 ```
 
 ### 1E: CI Status Gate (BLOCKING)

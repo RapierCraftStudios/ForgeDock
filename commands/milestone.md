@@ -25,6 +25,7 @@ GH_FLAG="-R $GH_REPO"
 REPO_PATH=$(yq '.paths.root' "$CONFIG_FILE")
 PROJECT_NAME=$(yq '.project.name' "$CONFIG_FILE")
 STAGING_BRANCH=$(yq '.branches.staging' "$CONFIG_FILE")
+DEFAULT_BRANCH=$(yq '.branches.default' "$CONFIG_FILE")
 PROJECT_BOARD_OWNER=$(yq '.project_board.owner // .project.owner' "$CONFIG_FILE")
 PROJECT_NUMBER=$(yq '.project_board.project_number // empty' "$CONFIG_FILE" 2>/dev/null || echo "")
 PROJECT_ID=$(yq '.project_board.project_id // empty' "$CONFIG_FILE" 2>/dev/null || echo "")
@@ -40,7 +41,7 @@ PRIORITY_OPTION_ID=""  # Resolved per-issue from the issue's priority label — 
 # Each satellite: { prefix, repo, staging_branch }
 ```
 
-All `{GH_REPO}`, `{GH_FLAG}`, `{REPO_PATH}`, `{PROJECT_NAME}`, `{STAGING_BRANCH}`, `{PROJECT_BOARD_OWNER}`, `{PROJECT_NUMBER}`, `{PROJECT_ID}`, `{STATUS_FIELD_ID}`, `{LANE_FIELD_ID}`, `{COMPONENT_FIELD_ID}`, `{PRIORITY_FIELD_ID}`, `{STATUS_TODO_OPTION_ID}`, and `{LANE_FEATURE_OPTION_ID}` references below are populated from `forge.yaml`.
+All `{GH_REPO}`, `{GH_FLAG}`, `{REPO_PATH}`, `{PROJECT_NAME}`, `{STAGING_BRANCH}`, `{DEFAULT_BRANCH}`, `{PROJECT_BOARD_OWNER}`, `{PROJECT_NUMBER}`, `{PROJECT_ID}`, `{STATUS_FIELD_ID}`, `{LANE_FIELD_ID}`, `{COMPONENT_FIELD_ID}`, `{PRIORITY_FIELD_ID}`, `{STATUS_TODO_OPTION_ID}`, and `{LANE_FEATURE_OPTION_ID}` references below are populated from `forge.yaml`.
 
 ---
 
@@ -109,8 +110,8 @@ Capture the milestone number from the response.
 
 ```bash
 cd {REPO_PATH}
-git fetch origin main
-git branch milestone/{slug} origin/main
+git fetch origin $DEFAULT_BRANCH
+git branch milestone/{slug} origin/$DEFAULT_BRANCH
 git push origin milestone/{slug}
 ```
 
