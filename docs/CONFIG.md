@@ -23,6 +23,7 @@ echo "forge.yaml" >> .gitignore  # if your credentials path is sensitive
 | [`project_board`](#project_board-optional) | No | GitHub Projects v2 integration |
 | [`services`](#services-optional) | No | External service URLs and IDs |
 | [`review`](#review-optional) | No | Context injected into review agents |
+| [`devdocs`](#devdocs-optional) | No | Devdocs knowledge tree path |
 | [`verification`](#verification-optional) | No | Health-check patterns |
 | [`billing`](#billing-optional) | No | Enable financial integrity audit phase |
 
@@ -302,6 +303,39 @@ review:
 | `key_paths` | map(string→list of strings) | No | Domain-to-file mapping used by `/work-on` investigation and `/review-pr` agents to quickly locate relevant files. Keys are domain names matching issue labels; values are lists of file path patterns (glob-style, relative to repo root). When present, agents use this table instead of inferring files from labels and issue body. |
 
 **Commands that use this section**: `review-pr`, `review-pr-agents` (all domain agents), `work-on` (Phase 1B investigation)
+
+---
+
+## `devdocs` (OPTIONAL)
+
+Path configuration for the devdocs knowledge tree. Pipeline agents (work-on, review-pr, etc.) read these files as **authoritative project knowledge** before acting.
+
+Run `npx forgedock docs init` to scaffold the tree from ForgeDock's seed templates into the configured path.
+
+```yaml
+devdocs:
+  path: "devdocs"
+```
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| `path` | string (relative path) | No | Path to the devdocs tree, relative to project root. Default: `devdocs`. |
+
+**Commands that use this section**: `docs init`
+
+### Migration from `review.context`
+
+If you previously stored project context in `forge.yaml → review.context`, move that content into the appropriate devdocs file after running `npx forgedock docs init`:
+
+| `review.context` content | Target devdocs file |
+|--------------------------|---------------------|
+| Architecture decisions | `devdocs/project/architecture.md` |
+| Tech stack details | `devdocs/project/stack.md` |
+| Coding conventions | `devdocs/project/conventions.md` |
+| Project terminology | `devdocs/project/glossary.md` |
+| ForgeDock usage notes | `devdocs/agent/using-forgedock.md` |
+
+Agents read devdocs files as binding source-of-truth, so they receive richer context than the single `review.context` string.
 
 ---
 
