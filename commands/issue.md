@@ -38,10 +38,11 @@ The user's input (`$ARGUMENTS`) can be:
 Read `forge.yaml` to build the routing table dynamically:
 
 ```bash
-GH_REPO=$(yq '.project.owner + "/" + .project.repo' forge.yaml)
+CONFIG_FILE="${FORGE_CONFIG:-forge.yaml}"
+GH_REPO=$(yq '.project.owner + "/" + .project.repo' "$CONFIG_FILE")
 GH_FLAG="-R $GH_REPO"
-REPO_PATH=$(yq '.paths.root' forge.yaml)
-STAGING_BRANCH=$(yq '.branches.staging' forge.yaml)
+REPO_PATH=$(yq '.paths.root' "$CONFIG_FILE")
+STAGING_BRANCH=$(yq '.branches.staging' "$CONFIG_FILE")
 # Satellite repos from forge.yaml → repos.satellites (each has: prefix, repo, staging_branch)
 ```
 
@@ -424,8 +425,8 @@ fi
 
 ```bash
 # Add to project board if forge.yaml → project_board is configured
-PROJECT_NUMBER=$(yq '.project_board.project_number // ""' forge.yaml)
-PROJECT_BOARD_OWNER=$(yq '.project_board.owner // .project.owner' forge.yaml)
+PROJECT_NUMBER=$(yq '.project_board.project_number // ""' "$CONFIG_FILE")
+PROJECT_BOARD_OWNER=$(yq '.project_board.owner // .project.owner' "$CONFIG_FILE")
 if [ -n "$PROJECT_NUMBER" ] && [ "$PROJECT_NUMBER" != "null" ]; then
   gh project item-add "$PROJECT_NUMBER" --owner "$PROJECT_BOARD_OWNER" --url "${ISSUE_URL}" 2>/dev/null || true
 fi

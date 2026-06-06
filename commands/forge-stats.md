@@ -14,7 +14,8 @@ Tracks the size of every Forge command file over time. Detects bloat by comparin
 Read project home from `forge.yaml` before running any mode:
 
 ```bash
-FORGE_HOME=$(yq e '.paths.root' forge.yaml)
+CONFIG_FILE="${FORGE_CONFIG:-forge.yaml}"
+FORGE_HOME=$(yq e '.paths.root' "$CONFIG_FILE")
 echo "Forge home: $FORGE_HOME"
 ```
 
