@@ -343,9 +343,11 @@ This step posts a structured `<!-- FORGE:AUDIT-AGENTS -->` summary comment to th
 **Step 4E.1 — Locate or create the tracking issue**:
 
 ```bash
-# Ensure the label exists before using it (gh issue create fails with GraphQL error if label is absent)
+# Ensure the label exists before using it (gh issue create fails with GraphQL error if label is absent).
+# Color and description match the canonical ForgeDock label manifest (bin/labels.json).
+# Run `npx forgedock labels setup` to bootstrap all managed labels at once.
 gh label create "orchestration-metrics" -R {FORGE_REPO} \
-  --color "5319E7" --description "Running log of persisted audit-agents efficiency summaries" \
+  --color "5319E7" --description "Running log of persisted audit-agents efficiency summaries. Managed by ForgeDock." \
   --force 2>/dev/null || true
 
 TRACKING_ISSUE=$(gh issue list -R {FORGE_REPO} \

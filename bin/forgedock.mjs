@@ -3186,6 +3186,139 @@ function _renderValidationSummary(checks) {
   process.stdout.write(box(lines, { title: "Config Validation" }));
 }
 
+// ---------------------------------------------------------------------------
+// Labels Bootstrap — idempotently create/update all ForgeDock-managed labels
+// ---------------------------------------------------------------------------
+
+/**
+ * Resolve the target repo for the labels command.
+ *
+ * Priority order:
+ *   1. --repo <owner/repo> passed on the CLI
+ *   2. forge.yaml → project.owner + project.repo in the current working directory
+ *   3. Returns null if neither is available (caller prints an error)
+ *
+ * @param {string[]} subArgs - CLI args after "labels [setup]"
+ * @returns {string|null} "owner/repo" string or null
+ */
+function resolveLabelsRepo(subArgs) {
+  // 1. Explicit --repo flag
+  const repoFlagIdx = subArgs.indexOf("--repo");
+  if (repoFlagIdx !== -1 && subArgs[repoFlagIdx + 1]) {
+    return subArgs[repoFlagIdx + 1];
+  }
+
+  // 2. forge.yaml in cwd
+  const forgeYamlPath = join(process.cwd(), "forge.yaml");
+  if (existsSync(forgeYamlPath)) {
+    try {
+      const raw = readFileSync(forgeYamlPath, "utf-8");
+      const ownerMatch = raw.match(/^\s*owner:\s*["']?([^\s"'#]+)["']?/m);
+      const repoMatch = raw.match(/^\s*repo:\s*["']?([^\s"'#]+)["']?/m);
+      if (ownerMatch && repoMatch) {
+        return `${ownerMatch[1]}/${repoMatch[1]}`;
+      }
+    } catch {
+      // fall through
+    }
+  }
+
+  return null;
+}
+
+/**
+ * Idempotently create or update all ForgeDock-managed labels on a GitHub repo.
+ *
+ * Reads the canonical manifest from bin/labels.json (co-located with this
+ * script). For each label entry, calls:
+ *
+ *   gh label create <name> --color <hex> --description <desc> --force --repo <repo>
+ *
+ * --force makes the call idempotent: it creates the label if absent, or updates
+ * its color and description if it already exists. Safe to re-run at any time.
+ *
+ * @param {string} repo - "owner/repo" string
+ * @returns {{ created: number, failed: string[] }}
+ */
+async function labelsSetup(repo) {
+  const manifestPath = join(__dirname, "labels.json");
+
+  if (!existsSync(manifestPath)) {
+    console.log(
+      `${RED}Label manifest not found: ${manifestPath}${RESET}`,
+    );
+    process.exit(1);
+  }
+
+  /** @type {Array<{name: string, color: string, description: string}>} */
+  let labels;
+  try {
+    labels = JSON.parse(readFileSync(manifestPath, "utf-8"));
+  } catch (err) {
+    console.log(`${RED}Failed to parse labels.json: ${err.message}${RESET}`);
+    process.exit(1);
+  }
+
+  console.log("");
+  console.log(`${BOLD}ForgeDock Label Bootstrap${RESET}`);
+  console.log(`  Repository: ${cyan(repo)}`);
+  console.log(`  Labels:     ${labels.length} managed labels`);
+  console.log("");
+
+  const bar = createProgressBar(labels.length, {
+    label: "  Bootstrapping labels...",
+  });
+
+  let created = 0;
+  const failed = [];
+
+  for (const { name, color, description } of labels) {
+    bar.tick(1, dim(name));
+    try {
+      execFileSync(
+        "gh",
+        [
+          "label",
+          "create",
+          name,
+          "--color",
+          color,
+          "--description",
+          description,
+          "--force",
+          "--repo",
+          repo,
+        ],
+        { stdio: ["pipe", "pipe", "pipe"] },
+      );
+      created++;
+    } catch (err) {
+      failed.push(name);
+      // Continue — don't abort the whole bootstrap for one failure
+    }
+  }
+
+  bar.done(
+    failed.length === 0
+      ? `${green("✔")} Bootstrapped ${created}/${labels.length} labels on ${cyan(repo)}`
+      : `${yellow("⚠")} Bootstrapped ${created}/${labels.length} labels — ${failed.length} failed`,
+  );
+
+  if (failed.length > 0) {
+    console.log("");
+    console.log(`  ${RED}Failed labels:${RESET}`);
+    for (const name of failed) {
+      console.log(`    ${dim("•")} ${name}`);
+    }
+    console.log(
+      `\n  Run ${cyan("gh auth status")} to verify GitHub authentication.`,
+    );
+  }
+
+  console.log("");
+  return { created, failed };
+}
+
 function help() {
   console.log("");
   console.log(
@@ -3211,6 +3344,15 @@ function help() {
   );
   console.log(
     `  ${CYAN}npx forgedock update${RESET}     Pull latest & reinstall`,
+  );
+  console.log(
+    `  ${CYAN}npx forgedock labels${RESET}     Bootstrap ForgeDock-managed labels on a GitHub repo`,
+  );
+  console.log(
+    `  ${CYAN}npx forgedock labels setup${RESET}  Create/update all managed labels (idempotent)`,
+  );
+  console.log(
+    `  ${CYAN}npx forgedock labels setup --repo owner/repo${RESET}  Target a specific repo`,
   );
   console.log(`  ${CYAN}npx forgedock help${RESET}       Show this help`);
   console.log("");
@@ -3616,6 +3758,28 @@ if (!command) {
     case "update":
       await update();
       break;
+    case "labels": {
+      const subcommand = args[1];
+      if (!subcommand || subcommand === "setup") {
+        const subArgs = args.slice(1);
+        const repo = resolveLabelsRepo(subArgs);
+        if (!repo) {
+          console.log(
+            `${RED}No repository specified.${RESET}\n` +
+              `  Pass ${cyan("--repo owner/repo")} or run from a directory with ${cyan("forge.yaml")}.`,
+          );
+          process.exit(1);
+        }
+        await labelsSetup(repo);
+      } else {
+        console.log(`${RED}Unknown labels subcommand: ${subcommand}${RESET}`);
+        console.log(
+          `Usage: ${CYAN}npx forgedock labels [setup] [--repo owner/repo]${RESET}`,
+        );
+        process.exit(1);
+      }
+      break;
+    }
     case "help":
     case "--help":
     case "-h":

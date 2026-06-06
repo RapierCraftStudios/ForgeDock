@@ -290,9 +290,11 @@ Keep ALL findings (CONFIRMED/LIKELY/POSSIBLE). Deduplicate by file:line (keep hi
 
 ### 7C: Ensure Labels
 ```bash
-gh label create "review-finding" --color "D93F0B" --force 2>/dev/null
-gh label create "needs-validation" --color "FBCA04" --force 2>/dev/null
-gh label create "staging-review" --color "1D76DB" --force 2>/dev/null
+# Colors match the canonical ForgeDock label manifest (bin/labels.json).
+# Run `npx forgedock labels setup` to bootstrap all managed labels at once.
+gh label create "review-finding" --color "D93F0B" --description "Defect or improvement found during automated PR review. Managed by ForgeDock." --force -R {GH_REPO} 2>/dev/null
+gh label create "needs-validation" --color "FBCA04" --description "Review finding awaiting human validation. Managed by ForgeDock." --force -R {GH_REPO} 2>/dev/null
+gh label create "staging-review" --color "1D76DB" --description "Finding from a staging branch review before deploy to main. Managed by ForgeDock." --force -R {GH_REPO} 2>/dev/null
 ```
 
 ### 7D: Milestone Detection
