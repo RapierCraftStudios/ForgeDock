@@ -1743,13 +1743,283 @@ async function update() {
   }
 }
 
+// ---------------------------------------------------------------------------
+// Backend-selection ladder helpers — detect, enrich via skill, enrich via API
+// ---------------------------------------------------------------------------
+
+/**
+ * Determine which enrichment backend is available.
+ *
+ * Ladder:
+ *   1. skill  — running inside a Claude Code session (CLAUDE_CODE_SESSION_ID set)
+ *               OR claude CLI is on PATH and stdin is non-TTY (piped subagent call)
+ *   2. api    — ANTHROPIC_API_KEY env var is present and non-empty
+ *   3. none   — fall through to deterministic baseline
+ *
+ * @returns {'skill'|'api'|'none'}
+ */
+function _detectBackend() {
+  // Primary signal: Claude Code sets CLAUDE_CODE_SESSION_ID in its environment.
+  if (process.env.CLAUDE_CODE_SESSION_ID) {
+    return "skill";
+  }
+
+  // Secondary signal: claude CLI is reachable and we are running non-interactively
+  // (piped subagent call from within a CC session).
+  if (!process.stdin.isTTY) {
+    try {
+      execFileSync("claude", ["--version"], {
+        stdio: ["pipe", "pipe", "pipe"],
+        timeout: 5000,
+      });
+      return "skill";
+    } catch {
+      // claude not on PATH — fall through
+    }
+  }
+
+  // API backend: BYO key present.
+  if (process.env.ANTHROPIC_API_KEY) {
+    return "api";
+  }
+
+  return "none";
+}
+
+/**
+ * Enrich a ConfigDraft by invoking the /forgedock-init skill backend via the
+ * Claude Code CLI (`claude -p /forgedock-init '<draftJSON>'`).
+ *
+ * Uses execFileSync (no shell) to pass the draft JSON safely as an argument —
+ * never interpolated into an execSync template literal (shell injection prevention).
+ *
+ * @param {object} draft  - ConfigDraft from detectConfig()
+ * @param {string} cwd    - Working directory for the claude invocation
+ * @returns {Promise<object>} Enriched ConfigDraft, or the original draft on failure
+ */
+async function _enrichViaSkill(draft, cwd) {
+  try {
+    const draftJson = JSON.stringify(draft);
+    const output = execFileSync(
+      "claude",
+      ["-p", `/forgedock-init ${draftJson}`],
+      {
+        cwd,
+        encoding: "utf-8",
+        timeout: 120000, // 2 minutes — enrichment may take a while for large repos
+        stdio: ["pipe", "pipe", "pipe"],
+      },
+    );
+
+    return _parseEnrichedDraft(output, draft);
+  } catch (err) {
+    // Log the failure at debug level but never surface to user — fall back silently.
+    if (process.env.FORGEDOCK_DEBUG) {
+      console.error(
+        `  ${dim("[debug]")} skill enrichment failed: ${err.message}`,
+      );
+    }
+    return draft;
+  }
+}
+
+/**
+ * Enrich a ConfigDraft by calling the Anthropic Messages API directly.
+ * Uses Node.js built-in fetch (Node 18+) — no SDK dependency required.
+ *
+ * @param {object} draft - ConfigDraft from detectConfig()
+ * @returns {Promise<object>} Enriched ConfigDraft, or the original draft on failure
+ */
+async function _enrichViaAPI(draft) {
+  try {
+    const apiKey = process.env.ANTHROPIC_API_KEY;
+    if (!apiKey) return draft;
+
+    // Build the prompt: same contract as the skill backend.
+    const draftJson = JSON.stringify(draft, null, 2);
+    const systemPrompt =
+      "You are the init-enrich backend for ForgeDock. Consume the ConfigDraft JSON, " +
+      "enrich the hard sections (project_board, repos.satellites, review, verification) " +
+      "by scanning the codebase identified in paths.root.value and querying GitHub via gh CLI, " +
+      "then return ONLY the enriched ConfigDraft as a valid JSON object. " +
+      "Every leaf must have shape { value, confidence, source, why }. " +
+      "Do not modify project, paths, branches, or meta sections. " +
+      "Output the JSON object alone with no surrounding prose.";
+
+    const response = await fetch("https://api.anthropic.com/v1/messages", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "x-api-key": apiKey,
+        "anthropic-version": "2023-06-01",
+      },
+      body: JSON.stringify({
+        model: "claude-haiku-4-5",
+        max_tokens: 4096,
+        system: systemPrompt,
+        messages: [
+          {
+            role: "user",
+            content: draftJson,
+          },
+        ],
+      }),
+    });
+
+    if (!response.ok) {
+      throw new Error(`Anthropic API returned ${response.status}`);
+    }
+
+    const data = await response.json();
+    const text =
+      data?.content?.[0]?.type === "text" ? data.content[0].text : "";
+    return _parseEnrichedDraft(text, draft);
+  } catch (err) {
+    if (process.env.FORGEDOCK_DEBUG) {
+      console.error(
+        `  ${dim("[debug]")} api enrichment failed: ${err.message}`,
+      );
+    }
+    return draft;
+  }
+}
+
+/**
+ * Extract and parse the enriched ConfigDraft JSON from a backend response string.
+ *
+ * Backends may emit human-readable prose before and after the JSON blob.
+ * This function finds the outermost JSON object in the output and parses it.
+ * Falls back to the original draft if extraction or parsing fails.
+ *
+ * @param {string} output  - Raw output from the enrichment backend
+ * @param {object} draft   - Original ConfigDraft (returned on failure)
+ * @returns {object} Enriched ConfigDraft, or original draft on failure
+ */
+function _parseEnrichedDraft(output, draft) {
+  if (!output || typeof output !== "string") return draft;
+
+  // Find the first '{' and the matching closing '}' (handles nested objects).
+  const start = output.indexOf("{");
+  if (start === -1) return draft;
+
+  let depth = 0;
+  let end = -1;
+  for (let i = start; i < output.length; i++) {
+    if (output[i] === "{") depth++;
+    else if (output[i] === "}") {
+      depth--;
+      if (depth === 0) {
+        end = i;
+        break;
+      }
+    }
+  }
+
+  if (end === -1) return draft;
+
+  try {
+    const enriched = JSON.parse(output.slice(start, end + 1));
+    // Basic sanity check: must have the required top-level sections from the original draft.
+    if (!enriched.project || !enriched.paths || !enriched.branches) {
+      return draft;
+    }
+    return enriched;
+  } catch {
+    return draft;
+  }
+}
+
+/**
+ * Build an optionalSections object from an enriched ConfigDraft, promoting
+ * sections that have medium-or-higher confidence to active (non-commented) YAML.
+ * Sections with only low-confidence fields are omitted so they remain commented out.
+ *
+ * @param {object} enrichedDraft - ConfigDraft returned by an enrichment backend
+ * @returns {object} optionalSections compatible with _writeForgeYaml / buildForgeYamlContent
+ */
+function _optionalSectionsFromDraft(enrichedDraft) {
+  const sections = {};
+
+  // project_board — include if project_number has at least medium confidence
+  const pb = enrichedDraft.project_board;
+  if (
+    pb &&
+    pb.project_number &&
+    pb.project_number.confidence !== "low" &&
+    pb.project_number.value
+  ) {
+    sections.projectBoard = {
+      projectNumber: parseInt(pb.project_number.value, 10) || 1,
+      projectId: pb.project_id?.value || "",
+      fieldIds: {
+        status: pb.field_ids?.status?.value || "",
+        lane: pb.field_ids?.lane?.value || "",
+        component: pb.field_ids?.component?.value || "",
+        priority: pb.field_ids?.priority?.value || "",
+        workflow: pb.field_ids?.workflow?.value || "",
+      },
+      optionIds: pb.option_ids || {},
+    };
+  }
+
+  // repos.satellites — include if at least one satellite found
+  const repos = enrichedDraft.repos;
+  if (
+    repos &&
+    repos.satellites &&
+    Array.isArray(repos.satellites) &&
+    repos.satellites.length > 0
+  ) {
+    const first = repos.satellites[0];
+    if (first && first.prefix && first.prefix.value) {
+      sections.multiRepo = {
+        prefix: first.prefix.value || "sat",
+        satelliteRepo: (first.repo?.value || "").split("/").pop() || "satellite",
+        satelliteBranch: first.staging_branch?.value || "main",
+      };
+    }
+  }
+
+  // review — include if tech_stack has at least medium confidence
+  const review = enrichedDraft.review;
+  if (
+    review &&
+    review.tech_stack &&
+    review.tech_stack.confidence !== "low" &&
+    review.tech_stack.value
+  ) {
+    sections.review = {
+      techStack: review.tech_stack.value,
+      context: review.context?.value || "",
+    };
+  }
+
+  // verification — include if health_endpoint has at least medium confidence
+  const verification = enrichedDraft.verification;
+  if (
+    verification &&
+    verification.health_endpoint &&
+    verification.health_endpoint.confidence !== "low" &&
+    verification.health_endpoint.value
+  ) {
+    sections.verification = {
+      healthEndpoint: verification.health_endpoint.value,
+    };
+  }
+
+  return sections;
+}
+
 async function init() {
   // init() generates forge.yaml from prompts and git remote detection.
   // It does NOT require gh CLI or gh auth for core operation (project board
   // auto-discovery is optional and guarded separately). Only warn if Claude
   // Code is missing — it's the primary consumer of the generated config.
   try {
-    execSync("claude --version", { stdio: ["pipe", "pipe", "pipe"] });
+    execFileSync("claude", ["--version"], {
+      stdio: ["pipe", "pipe", "pipe"],
+      timeout: 5000,
+    });
   } catch {
     console.log(`  ${YELLOW}!${RESET} Claude Code CLI not found on PATH.`);
     console.log(
@@ -1766,26 +2036,59 @@ async function init() {
   const outputPath = join(cwd, "forge.yaml");
 
   // ---------------------------------------------------------------------------
-  // Auto-detect defaults via init-detect module (silent — used as pre-fill
-  // values for prompts). Returns a ConfigDraft with per-field confidence.
+  // Step 1: Auto-detect defaults via init-detect module.
+  // Returns a ConfigDraft with per-field { value, confidence, source, why }.
   // ---------------------------------------------------------------------------
 
-  const draft = await detectConfig(cwd);
+  const baseDraft = await detectConfig(cwd);
+  const remoteDetected = baseDraft.meta.remoteDetected;
+
+  // ---------------------------------------------------------------------------
+  // Step 2: Backend-selection ladder — enrich the draft when possible.
+  // Ladder: skill (Claude Code session) → api (ANTHROPIC_API_KEY) → none (baseline)
+  // ---------------------------------------------------------------------------
+
+  const backend = _detectBackend();
+  let draft = baseDraft;
+
+  if (backend === "skill") {
+    const s = spinner("Enriching config via skill backend…");
+    draft = await _enrichViaSkill(baseDraft, cwd);
+    const enriched = draft !== baseDraft || draft.meta?.enriched;
+    s.stop(
+      enriched ? "success" : "warn",
+      enriched
+        ? `${green("[✓]")} Config enriched via Claude Code`
+        : `${yellow("[!]")} Skill enrichment unavailable — using detected baseline`,
+    );
+  } else if (backend === "api") {
+    const s = spinner("Enriching config via Anthropic API…");
+    draft = await _enrichViaAPI(baseDraft);
+    const enriched = draft !== baseDraft || draft.meta?.enriched;
+    s.stop(
+      enriched ? "success" : "warn",
+      enriched
+        ? `${green("[✓]")} Config enriched via Anthropic API`
+        : `${yellow("[!]")} API enrichment unavailable — using detected baseline`,
+    );
+  }
+  // backend === 'none': proceed silently with the deterministic baseline
+
   const detectedOwner = draft.project.owner.value;
   const detectedRepo = draft.project.repo.value;
   const detectedName = draft.project.name.value;
   const detectedDefault = draft.branches.default.value;
   const detectedStaging = draft.branches.staging.value;
-  const remoteDetected = draft.meta.remoteDetected;
 
-  // Non-TTY: skip interactive prompts and use detected values directly
+  // Non-TTY: enrich (done above) then silently write without interactive prompts.
   if (!process.stdin.isTTY) {
     if (!remoteDetected) {
       console.log(
         `  ${YELLOW}Warning${RESET}: No git remote found — using placeholder values`,
       );
     }
-    // Silent write — same as pre-interactive behavior
+    // Derive optional sections from the enriched draft for the silent write.
+    const enrichedSections = _optionalSectionsFromDraft(draft);
     _writeForgeYaml({
       outputPath,
       cwd,
@@ -1797,6 +2100,7 @@ async function init() {
       worktreeBase: join(cwd, ".claude", "worktrees"),
       defaultBranch: detectedDefault,
       stagingBranch: detectedStaging,
+      optionalSections: enrichedSections,
     });
     console.log(`  ${GREEN}Created${RESET}: forge.yaml`);
     console.log("");
@@ -1808,7 +2112,7 @@ async function init() {
   }
 
   // ---------------------------------------------------------------------------
-  // Annotated review screen — single screen replacing the per-field wizard
+  // Step 3: Annotated review screen — single screen replacing the per-field wizard
   // ---------------------------------------------------------------------------
 
   // Read existing content for diff-style display if forge.yaml already exists.
@@ -1822,8 +2126,9 @@ async function init() {
     }
   }
 
-  // Show the annotated review screen. Returns accepted/edited values plus
-  // the list of field keys that had low confidence (for TODO comment injection).
+  // Show the annotated review screen. The enriched draft populates confidence
+  // badges from both init-detect and init-enrich. Returns accepted/edited values
+  // plus the list of field keys that had low confidence (for TODO comment injection).
   const reviewed = await annotatedReviewScreen(draft, {
     hasExistingConfig,
     existingContent,
@@ -1839,144 +2144,308 @@ async function init() {
   const stagingBranchInput = _sanitizeYamlValue(reviewed.stagingBranch || detectedStaging);
 
   // -----------------------------------------------------------------------
-  // Optional sections — multi-select, then guided prompts per section
+  // Optional sections — pre-populate from enriched draft if available,
+  // otherwise fall back to interactive multi-select + guided prompts.
   // -----------------------------------------------------------------------
-  console.log("");
-  console.log(bold("  Optional Sections"));
-  console.log(
-    dim(
-      "  Select sections to configure now. Unselected sections are written as",
-    ),
-  );
-  console.log(
-    dim(
-      "  commented-out placeholders — you can enable them later by editing forge.yaml.",
-    ),
-  );
-  console.log("");
-
-  const OPTIONAL_SECTION_CHOICES = [
-    {
-      label:
-        "Project Board   — GitHub Projects v2 integration for workflow tracking",
-      value: "projectBoard",
-    },
-    {
-      label: "Multi-Repo      — Satellite repos for cross-repo milestones",
-      value: "multiRepo",
-    },
-    {
-      label:
-        "Review Context  — Tech stack and conventions for PR review agents",
-      value: "review",
-    },
-    {
-      label:
-        "Verification    — Health check endpoints and response patterns",
-      value: "verification",
-    },
-  ];
-
-  const selectedSections = await multiSelect(
-    "  Which optional sections would you like to configure?",
-    OPTIONAL_SECTION_CHOICES,
-  );
 
   /** @type {Record<string, object>} */
-  const optionalSections = {};
+  let optionalSections = {};
 
-  // --- Project Board prompts ---
-  if (selectedSections.includes("projectBoard")) {
-    const discovered = await discoverProjectBoard(ownerInput || detectedOwner);
-    if (discovered) {
-      // Auto-discovery succeeded — use resolved IDs
-      optionalSections.projectBoard = {
-        projectNumber: discovered.projectNumber,
-        projectId: discovered.projectId,
-        fieldIds: discovered.fieldIds,
-        optionIds: discovered.optionIds,
-      };
-    } else {
-      // Fallback: manual entry (no regression from previous behaviour)
+  // When enrichment succeeded, lift discovered sections directly from the draft.
+  // Only sections with medium-or-higher confidence are included; low-confidence
+  // sections remain commented-out in the output (no behaviour change for users
+  // without an enrichment backend).
+  const enrichmentSucceeded = backend !== "none" && draft !== baseDraft;
+
+  if (enrichmentSucceeded) {
+    optionalSections = _optionalSectionsFromDraft(draft);
+
+    // Surface which sections were auto-populated by enrichment.
+    const autoSections = Object.keys(optionalSections);
+    if (autoSections.length > 0) {
       console.log("");
-      console.log(bold("  Project Board (manual)"));
       console.log(
-        dim(
-          "  Find your project number: gh project list --owner " +
-            (ownerInput || detectedOwner),
-        ),
-      );
-      const projectNumber = await input(
-        "  GitHub Projects v2 project number",
-        "1",
-      );
-      optionalSections.projectBoard = {
-        projectNumber: parseInt(projectNumber, 10) || 1,
-      };
-      console.log(
-        dim(
-          "  Field IDs (PVT_/PVTSSF_ strings) must be added manually after generation.",
-        ),
-      );
-      console.log(
-        dim(
-          "  Run: gh project field-list " +
-            (projectNumber || "1") +
-            " --owner " +
-            (ownerInput || detectedOwner),
-        ),
+        `  ${GREEN}Auto-configured${RESET} by enrichment: ${autoSections
+          .map(
+            (s) =>
+              ({
+                projectBoard: "project_board",
+                multiRepo: "repos",
+                review: "review",
+                verification: "verification",
+              })[s],
+          )
+          .join(", ")}`,
       );
     }
-  }
 
-  // --- Multi-Repo prompts ---
-  if (selectedSections.includes("multiRepo")) {
+    // Still offer the multi-select so the user can add sections that enrichment
+    // couldn't discover (e.g. project_board when gh is unauthenticated).
+    const alreadyConfigured = new Set(autoSections);
+
+    const OPTIONAL_SECTION_CHOICES = [
+      {
+        label:
+          "Project Board   — GitHub Projects v2 integration for workflow tracking",
+        value: "projectBoard",
+      },
+      {
+        label: "Multi-Repo      — Satellite repos for cross-repo milestones",
+        value: "multiRepo",
+      },
+      {
+        label:
+          "Review Context  — Tech stack and conventions for PR review agents",
+        value: "review",
+      },
+      {
+        label:
+          "Verification    — Health check endpoints and response patterns",
+        value: "verification",
+      },
+    ].filter((c) => !alreadyConfigured.has(c.value));
+
+    if (OPTIONAL_SECTION_CHOICES.length > 0) {
+      console.log("");
+      console.log(bold("  Additional Optional Sections"));
+      console.log(
+        dim(
+          "  The following sections were not auto-discovered. Select any to configure now.",
+        ),
+      );
+      console.log("");
+
+      const selectedSections = await multiSelect(
+        "  Which additional sections would you like to configure?",
+        OPTIONAL_SECTION_CHOICES,
+      );
+
+      // --- Project Board prompts (manual, only when enrichment didn't find it) ---
+      if (selectedSections.includes("projectBoard")) {
+        const discovered = await discoverProjectBoard(ownerInput || detectedOwner);
+        if (discovered) {
+          optionalSections.projectBoard = {
+            projectNumber: discovered.projectNumber,
+            projectId: discovered.projectId,
+            fieldIds: discovered.fieldIds,
+            optionIds: discovered.optionIds,
+          };
+        } else {
+          console.log("");
+          console.log(bold("  Project Board (manual)"));
+          console.log(
+            dim(
+              "  Find your project number: gh project list --owner " +
+                (ownerInput || detectedOwner),
+            ),
+          );
+          const projectNumber = await input(
+            "  GitHub Projects v2 project number",
+            "1",
+          );
+          optionalSections.projectBoard = {
+            projectNumber: parseInt(projectNumber, 10) || 1,
+          };
+          console.log(
+            dim(
+              "  Field IDs (PVT_/PVTSSF_ strings) must be added manually after generation.",
+            ),
+          );
+          console.log(
+            dim(
+              "  Run: gh project field-list " +
+                (projectNumber || "1") +
+                " --owner " +
+                (ownerInput || detectedOwner),
+            ),
+          );
+        }
+      }
+
+      // --- Multi-Repo prompts ---
+      if (selectedSections.includes("multiRepo")) {
+        console.log("");
+        console.log(bold("  Multi-Repo"));
+        console.log(
+          dim(
+            "  Configure one satellite repo (add more by editing forge.yaml).",
+          ),
+        );
+        const prefix = await input(
+          "  Satellite repo prefix (e.g. 'mcp', 'sdk')",
+          "sat",
+        );
+        const satelliteRepo = await input(
+          "  Satellite repo name (just the name, owner will be reused)",
+          "your-satellite-repo",
+        );
+        const satelliteBranch = await input(
+          "  Satellite default/staging branch",
+          "main",
+        );
+        optionalSections.multiRepo = { prefix, satelliteRepo, satelliteBranch };
+      }
+
+      // --- Review Context prompts ---
+      if (selectedSections.includes("review")) {
+        console.log("");
+        console.log(bold("  Review Context"));
+        const techStack = await input(
+          "  Tech stack (e.g. Next.js, FastAPI, PostgreSQL)",
+          "Node.js, TypeScript",
+        );
+        const context = await input(
+          "  Architecture notes (one line; expand in forge.yaml later)",
+          "",
+        );
+        optionalSections.review = { techStack, context };
+      }
+
+      // --- Verification prompts ---
+      if (selectedSections.includes("verification")) {
+        console.log("");
+        console.log(bold("  Verification"));
+        const healthEndpoint = await input(
+          "  Health check endpoint URL",
+          `https://api.${repoInput || detectedRepo}.io/health`,
+        );
+        optionalSections.verification = { healthEndpoint };
+      }
+    }
+  } else {
+    // No enrichment — use the full interactive multi-select wizard (existing behaviour).
     console.log("");
-    console.log(bold("  Multi-Repo"));
+    console.log(bold("  Optional Sections"));
     console.log(
       dim(
-        "  Configure one satellite repo (add more by editing forge.yaml).",
+        "  Select sections to configure now. Unselected sections are written as",
       ),
     );
-    const prefix = await input(
-      "  Satellite repo prefix (e.g. 'mcp', 'sdk')",
-      "sat",
+    console.log(
+      dim(
+        "  commented-out placeholders — you can enable them later by editing forge.yaml.",
+      ),
     );
-    const satelliteRepo = await input(
-      "  Satellite repo name (just the name, owner will be reused)",
-      "your-satellite-repo",
-    );
-    const satelliteBranch = await input(
-      "  Satellite default/staging branch",
-      "main",
-    );
-    optionalSections.multiRepo = { prefix, satelliteRepo, satelliteBranch };
-  }
-
-  // --- Review Context prompts ---
-  if (selectedSections.includes("review")) {
     console.log("");
-    console.log(bold("  Review Context"));
-    const techStack = await input(
-      "  Tech stack (e.g. Next.js, FastAPI, PostgreSQL)",
-      "Node.js, TypeScript",
-    );
-    const context = await input(
-      "  Architecture notes (one line; expand in forge.yaml later)",
-      "",
-    );
-    optionalSections.review = { techStack, context };
-  }
 
-  // --- Verification prompts ---
-  if (selectedSections.includes("verification")) {
-    console.log("");
-    console.log(bold("  Verification"));
-    const healthEndpoint = await input(
-      "  Health check endpoint URL",
-      `https://api.${repoInput || detectedRepo}.io/health`,
+    const OPTIONAL_SECTION_CHOICES = [
+      {
+        label:
+          "Project Board   — GitHub Projects v2 integration for workflow tracking",
+        value: "projectBoard",
+      },
+      {
+        label: "Multi-Repo      — Satellite repos for cross-repo milestones",
+        value: "multiRepo",
+      },
+      {
+        label:
+          "Review Context  — Tech stack and conventions for PR review agents",
+        value: "review",
+      },
+      {
+        label:
+          "Verification    — Health check endpoints and response patterns",
+        value: "verification",
+      },
+    ];
+
+    const selectedSections = await multiSelect(
+      "  Which optional sections would you like to configure?",
+      OPTIONAL_SECTION_CHOICES,
     );
-    optionalSections.verification = { healthEndpoint };
+
+    // --- Project Board prompts ---
+    if (selectedSections.includes("projectBoard")) {
+      const discovered = await discoverProjectBoard(ownerInput || detectedOwner);
+      if (discovered) {
+        optionalSections.projectBoard = {
+          projectNumber: discovered.projectNumber,
+          projectId: discovered.projectId,
+          fieldIds: discovered.fieldIds,
+          optionIds: discovered.optionIds,
+        };
+      } else {
+        console.log("");
+        console.log(bold("  Project Board (manual)"));
+        console.log(
+          dim(
+            "  Find your project number: gh project list --owner " +
+              (ownerInput || detectedOwner),
+          ),
+        );
+        const projectNumber = await input(
+          "  GitHub Projects v2 project number",
+          "1",
+        );
+        optionalSections.projectBoard = {
+          projectNumber: parseInt(projectNumber, 10) || 1,
+        };
+        console.log(
+          dim(
+            "  Field IDs (PVT_/PVTSSF_ strings) must be added manually after generation.",
+          ),
+        );
+        console.log(
+          dim(
+            "  Run: gh project field-list " +
+              (projectNumber || "1") +
+              " --owner " +
+              (ownerInput || detectedOwner),
+          ),
+        );
+      }
+    }
+
+    // --- Multi-Repo prompts ---
+    if (selectedSections.includes("multiRepo")) {
+      console.log("");
+      console.log(bold("  Multi-Repo"));
+      console.log(
+        dim(
+          "  Configure one satellite repo (add more by editing forge.yaml).",
+        ),
+      );
+      const prefix = await input(
+        "  Satellite repo prefix (e.g. 'mcp', 'sdk')",
+        "sat",
+      );
+      const satelliteRepo = await input(
+        "  Satellite repo name (just the name, owner will be reused)",
+        "your-satellite-repo",
+      );
+      const satelliteBranch = await input(
+        "  Satellite default/staging branch",
+        "main",
+      );
+      optionalSections.multiRepo = { prefix, satelliteRepo, satelliteBranch };
+    }
+
+    // --- Review Context prompts ---
+    if (selectedSections.includes("review")) {
+      console.log("");
+      console.log(bold("  Review Context"));
+      const techStack = await input(
+        "  Tech stack (e.g. Next.js, FastAPI, PostgreSQL)",
+        "Node.js, TypeScript",
+      );
+      const context = await input(
+        "  Architecture notes (one line; expand in forge.yaml later)",
+        "",
+      );
+      optionalSections.review = { techStack, context };
+    }
+
+    // --- Verification prompts ---
+    if (selectedSections.includes("verification")) {
+      console.log("");
+      console.log(bold("  Verification"));
+      const healthEndpoint = await input(
+        "  Health check endpoint URL",
+        `https://api.${repoInput || detectedRepo}.io/health`,
+      );
+      optionalSections.verification = { healthEndpoint };
+    }
   }
 
   // -----------------------------------------------------------------------
@@ -2026,9 +2495,10 @@ async function init() {
 
   console.log("");
   console.log(`  ${GREEN}Created${RESET}: forge.yaml`);
-  if (selectedSections.length > 0) {
+  const configuredSectionKeys = Object.keys(optionalSections);
+  if (configuredSectionKeys.length > 0) {
     console.log(
-      `  ${GREEN}Configured${RESET}: ${selectedSections
+      `  ${GREEN}Configured${RESET}: ${configuredSectionKeys
         .map(
           (s) =>
             ({
@@ -2038,6 +2508,7 @@ async function init() {
               verification: "verification",
             })[s],
         )
+        .filter(Boolean)
         .join(", ")}`,
     );
   }
