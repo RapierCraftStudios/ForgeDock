@@ -2,6 +2,8 @@
 description: Audit agent outputs from an orchestration run — timeline analysis, stall detection, active vs idle time breakdown
 argument-hint: [session-id | latest | <agent-id>]
 ---
+<!-- SPDX-FileCopyrightText: Copyright (c) RapierCraft Studios -->
+<!-- SPDX-License-Identifier: AGPL-3.0-or-later -->
 
 # /audit-agents — Agent Output Auditor
 

@@ -2,6 +2,8 @@
 description: Detect API changes, sync satellite repos, and publish releases
 argument-hint: [check | auto | status | publish | PR-number]
 ---
+<!-- SPDX-FileCopyrightText: Copyright (c) RapierCraft Studios -->
+<!-- SPDX-License-Identifier: AGPL-3.0-or-later -->
 
 # /sync-ecosystem — Cross-Project Sync & Publish
 

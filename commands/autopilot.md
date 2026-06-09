@@ -2,6 +2,8 @@
 description: Autonomous platform improvement cycle — recon, triage, fix, report. Runs recon+triage by default; pass --fix to also pick up and fix top issues. Human gates all deploys.
 argument-hint: [--fix | --recon-only | --fix --limit 5 | --dry-run]
 ---
+<!-- SPDX-FileCopyrightText: Copyright (c) RapierCraft Studios -->
+<!-- SPDX-License-Identifier: AGPL-3.0-or-later -->
 
 # /autopilot — Recursive Platform Improvement Cycle
 

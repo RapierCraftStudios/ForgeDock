@@ -2,6 +2,8 @@
 description: Pre-implementation architecture planning — traces ALL affected code paths and produces an ordered implementation plan before any code is written
 argument-hint: [issue number] [--repo GH_REPO] [--gh-flag GH_FLAG] [--files AFFECTED_FILES]
 ---
+<!-- SPDX-FileCopyrightText: Copyright (c) RapierCraft Studios -->
+<!-- SPDX-License-Identifier: AGPL-3.0-or-later -->
 
 # work-on/build/architect — Multi-Path Implementation Planning
 

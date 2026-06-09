@@ -2,6 +2,8 @@
 description: Show what will deploy next — diff staging vs main with issue/PR summary, risk assessment, and deploy checklist
 argument-hint: [staging | milestone/{slug} | compare {branch}]
 ---
+<!-- SPDX-FileCopyrightText: Copyright (c) RapierCraft Studios -->
+<!-- SPDX-License-Identifier: AGPL-3.0-or-later -->
 
 # /deploy-info — Pre-Deploy Summary
 

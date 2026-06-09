@@ -3,6 +3,8 @@ description: Context-aware PR review — analyzes what the PR touches, spawns do
 argument-hint: [PR number, URL, "open", or "staging" for feature→main review]
 allowed-tools: Task, Bash, Read, Grep, Glob, WebFetch, Skill
 ---
+<!-- SPDX-FileCopyrightText: Copyright (c) RapierCraft Studios -->
+<!-- SPDX-License-Identifier: AGPL-3.0-or-later -->
 
 # PR Review — Orchestrator
 
