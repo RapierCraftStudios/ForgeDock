@@ -1111,7 +1111,11 @@ async function install() {
       ...conflicts.map((c) => `    ${red("✖")}  ${c}`),
       "",
       `  ${dim("To let ForgeDock manage these, remove or rename each file:")}`,
-      ...conflicts.map((c) => `    ${dim(`rm ~/.claude/commands/${c}`)}`),
+      ...conflicts.map((c) =>
+        process.platform === "win32"
+          ? `    ${dim(`Remove-Item ~\\.claude\\commands\\${c.replace(/\//g, "\\")}`)}`
+          : `    ${dim(`rm ~/.claude/commands/${c}`)}`,
+      ),
       "",
     ];
     process.stdout.write(
