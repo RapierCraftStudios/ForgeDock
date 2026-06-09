@@ -49,12 +49,25 @@ WARNINGS=0
 
 # --- Next.js Route Handler registration check ---
 while read -r f; do
-    URL_PATH=$(echo "$f" | sed "s|^${FORGE_PAGES_ROOT}||; s|/route\\.ts\$||; s|\\[.*\\]|*|g")
+    # Use shell parameter expansion instead of sed to avoid interpreting FORGE_PAGES_ROOT
+    # as a sed pattern (values containing | or other metacharacters break the substitution).
+    stripped="${f#${FORGE_PAGES_ROOT}/}"
+    stripped="${stripped%/route.ts}"
+    # Replace dynamic segments [param] with * using a loop (no regex needed)
+    URL_PATH=""
+    IFS='/' read -ra SEGMENTS <<< "$stripped"
+    for seg in "${SEGMENTS[@]}"; do
+        case "$seg" in
+            \[*\]) URL_PATH="${URL_PATH}/*" ;;
+            *)     URL_PATH="${URL_PATH}/${seg}" ;;
+        esac
+    done
     ROUTE_SEGMENT=$(echo "$URL_PATH" | sed 's|/api/v1/||; s|/.*||')
 
     # Check if next.config.js has a rewrite that might shadow this route
     if [ -f "$REPO_ROOT/web/next.config.js" ]; then
-        if grep -q "$ROUTE_SEGMENT" "$REPO_ROOT/web/next.config.js" 2>/dev/null; then
+        # Use -F (fixed string) so ROUTE_SEGMENT is not interpreted as a regex pattern
+        if grep -qF "$ROUTE_SEGMENT" "$REPO_ROOT/web/next.config.js" 2>/dev/null; then
             echo "WARNING: Route handler $f ($URL_PATH) — next.config.js references '$ROUTE_SEGMENT', may shadow this route"
             WARNINGS=$((WARNINGS + 1))
         else
@@ -64,12 +77,19 @@ while read -r f; do
 
     # Check if nginx routes this path to Next.js or directly to backend
     if [ -f "$REPO_ROOT/infra/nginx/nginx.conf" ]; then
-        if grep -q "location.*$ROUTE_SEGMENT" "$REPO_ROOT/infra/nginx/nginx.conf" 2>/dev/null; then
+        # Check for location blocks mentioning ROUTE_SEGMENT — use two -F searches to avoid
+        # embedding the variable in a regex: first find lines with "location", then filter
+        # for the literal segment. This avoids ROUTE_SEGMENT being interpreted as a BRE.
+        if grep -F "location" "$REPO_ROOT/infra/nginx/nginx.conf" 2>/dev/null | grep -qF "$ROUTE_SEGMENT"; then
             echo "WARNING: Route handler $f ($URL_PATH) — nginx.conf has a location block for '$ROUTE_SEGMENT', may bypass Next.js"
             WARNINGS=$((WARNINGS + 1))
         fi
     fi
-done < <(echo "$FILES" | grep -E "^${FORGE_PAGES_ROOT}/api/.*route\\.ts$") || true
+done < <(echo "$FILES" | while IFS= read -r line; do
+    case "$line" in
+        "${FORGE_PAGES_ROOT}/api/"*"route.ts") echo "$line" ;;
+    esac
+done) || true
 
 # --- Python API Router registration check ---
 while read -r f; do
@@ -77,7 +97,8 @@ while read -r f; do
     MAIN_PY="$REPO_ROOT/${FORGE_API_MAIN}"
 
     if [ -f "$MAIN_PY" ]; then
-        if grep -q "$ROUTER_NAME" "$MAIN_PY" 2>/dev/null; then
+        # Use -F (fixed string) so ROUTER_NAME is not interpreted as a regex pattern
+        if grep -qF "$ROUTER_NAME" "$MAIN_PY" 2>/dev/null; then
             echo "OK: API Router '$ROUTER_NAME' ($f) — registered in $(basename "$MAIN_PY")"
         else
             echo "BLOCKING: API Router '$ROUTER_NAME' ($f) — NOT found in $(basename "$MAIN_PY"). Router will not be reachable."
@@ -95,7 +116,8 @@ while read -r f; do
     MAIN_PY="$REPO_ROOT/${FORGE_API_MAIN}"
 
     if [ -f "$MAIN_PY" ]; then
-        if grep -q "$MIDDLEWARE_NAME" "$MAIN_PY" 2>/dev/null; then
+        # Use -F (fixed string) so MIDDLEWARE_NAME is not interpreted as a regex pattern
+        if grep -qF "$MIDDLEWARE_NAME" "$MAIN_PY" 2>/dev/null; then
             echo "OK: Middleware '$MIDDLEWARE_NAME' ($f) — registered in $(basename "$MAIN_PY")"
         else
             echo "WARNING: Middleware '$MIDDLEWARE_NAME' ($f) — not found in $(basename "$MAIN_PY"). May not be active."
@@ -108,7 +130,8 @@ done < <(echo "$FILES" | grep -E "^${FORGE_API_MIDDLEWARE_DIR}/.*\\.py$") || tru
 while read -r f; do
     MODULE_NAME=$(basename "$f" .py)
 
-    IMPORTERS=$(grep -rl "$MODULE_NAME" "$REPO_ROOT/${FORGE_API_SERVICES_DIR}/" "$REPO_ROOT/${FORGE_WORKER_DIR}/" 2>/dev/null | head -5)
+    # Use -F (fixed string) so MODULE_NAME is not interpreted as a regex pattern
+    IMPORTERS=$(grep -rlF "$MODULE_NAME" "$REPO_ROOT/${FORGE_API_SERVICES_DIR}/" "$REPO_ROOT/${FORGE_WORKER_DIR}/" 2>/dev/null | head -5)
     if [ -n "$IMPORTERS" ]; then
         echo "OK: Shared module '$MODULE_NAME' ($f) — imported by services"
     else
@@ -121,7 +144,9 @@ done < <(echo "$FILES" | grep -E "^shared/.*\.py$") || true
 while read -r f; do
     COMPONENT_NAME=$(basename "$f" .tsx)
 
-    IMPORTERS=$(grep -rl "$COMPONENT_NAME" "$REPO_ROOT/${FORGE_PAGES_ROOT}/" "$REPO_ROOT/${FORGE_COMPONENTS_DIR}/" 2>/dev/null | grep -v "$f" | head -3)
+    # Use -F (fixed string) for both the component name search and the self-exclusion
+    # to prevent file paths and component names from being interpreted as regex patterns
+    IMPORTERS=$(grep -rlF "$COMPONENT_NAME" "$REPO_ROOT/${FORGE_PAGES_ROOT}/" "$REPO_ROOT/${FORGE_COMPONENTS_DIR}/" 2>/dev/null | grep -vF "$f" | head -3)
     if [ -n "$IMPORTERS" ]; then
         echo "OK: Component '$COMPONENT_NAME' ($f) — imported by other files"
     else
