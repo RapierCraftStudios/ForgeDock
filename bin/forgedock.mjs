@@ -57,7 +57,10 @@ import {
   annotatedReviewScreen,
 } from "./tui.mjs";
 import { detectConfig } from "./init-detect.mjs";
-import { enrich as enrichViaAPI, parseEnrichedDraft } from "./init-enrich-api.mjs";
+import {
+  enrich as enrichViaAPI,
+  parseEnrichedDraft,
+} from "./init-enrich-api.mjs";
 import { resolveState, setOptOut } from "./registry.mjs";
 
 const __filename = fileURLToPath(import.meta.url);
@@ -163,7 +166,12 @@ const CLAUDE_SETTINGS_PATH = join(HOME, ".claude", "settings.json");
  * command string.
  */
 function sessionStartHookCommand() {
-  const hookPath = join(FORGE_HOME, "bin", "hooks", "session-start.mjs").replace(/\\/g, "/");
+  const hookPath = join(
+    FORGE_HOME,
+    "bin",
+    "hooks",
+    "session-start.mjs",
+  ).replace(/\\/g, "/");
   return `node "${hookPath}"`;
 }
 
@@ -297,17 +305,19 @@ async function removeSessionStartHook() {
     const originalLength = settings.hooks.SessionStart.length;
 
     // Filter out the ForgeDock-managed entry, keep everything else
-    settings.hooks.SessionStart = settings.hooks.SessionStart.filter((entry) => {
-      if (!entry || typeof entry !== "object") return true;
-      const hooks = Array.isArray(entry.hooks) ? entry.hooks : [];
-      const isForgeEntry = hooks.some(
-        (h) =>
-          h &&
-          typeof h.command === "string" &&
-          isForgeSessionStartHook(h.command),
-      );
-      return !isForgeEntry;
-    });
+    settings.hooks.SessionStart = settings.hooks.SessionStart.filter(
+      (entry) => {
+        if (!entry || typeof entry !== "object") return true;
+        const hooks = Array.isArray(entry.hooks) ? entry.hooks : [];
+        const isForgeEntry = hooks.some(
+          (h) =>
+            h &&
+            typeof h.command === "string" &&
+            isForgeSessionStartHook(h.command),
+        );
+        return !isForgeEntry;
+      },
+    );
 
     if (settings.hooks.SessionStart.length === originalLength) {
       return "not-present";
@@ -1131,27 +1141,48 @@ async function install() {
 
   console.log("");
   let forgeHomeSet = false;
-  for (const profile of [join(HOME, ".bashrc"), join(HOME, ".zshrc")]) {
-    if (existsSync(profile)) {
-      const content = readFileSync(profile, "utf-8");
-      if (!content.includes("FORGE_HOME")) {
-        appendFileSync(
-          profile,
-          `\n# ForgeDock — autonomous development pipeline\nexport FORGE_HOME="${FORGE_HOME}"\n`,
-        );
-        const profileShort = profile.replace(HOME, "~");
-        console.log(
-          `  ${green("✔")}  ${bold("FORGE_HOME")} set in ${cyan(profileShort)}`,
-        );
-        forgeHomeSet = true;
+  if (process.platform === "win32") {
+    // On Windows, ~/.bashrc and ~/.zshrc do not exist.
+    // Persist FORGE_HOME for the current user via setx (built-in, no elevation needed).
+    // If setx fails for any reason, print a PowerShell one-liner the user can run manually.
+    try {
+      execFileSync("setx", ["FORGE_HOME", FORGE_HOME], { stdio: "pipe" });
+      console.log(
+        `  ${green("✔")}  ${bold("FORGE_HOME")} set via ${cyan("setx")} ${dim("(restart your terminal to apply)")}`,
+      );
+    } catch {
+      // setx unavailable or failed — print manual guidance
+      console.log(
+        `  ${yellow("⚠")}  ${bold("FORGE_HOME")} not set automatically — run this in PowerShell:`,
+      );
+      console.log(
+        `     ${cyan(`[System.Environment]::SetEnvironmentVariable('FORGE_HOME', '${FORGE_HOME}', 'User')`)}`,
+      );
+    }
+    forgeHomeSet = true;
+  } else {
+    for (const profile of [join(HOME, ".bashrc"), join(HOME, ".zshrc")]) {
+      if (existsSync(profile)) {
+        const content = readFileSync(profile, "utf-8");
+        if (!content.includes("FORGE_HOME")) {
+          appendFileSync(
+            profile,
+            `\n# ForgeDock — autonomous development pipeline\nexport FORGE_HOME="${FORGE_HOME}"\n`,
+          );
+          const profileShort = profile.replace(HOME, "~");
+          console.log(
+            `  ${green("✔")}  ${bold("FORGE_HOME")} set in ${cyan(profileShort)}`,
+          );
+          forgeHomeSet = true;
+        }
       }
     }
-  }
 
-  if (!forgeHomeSet) {
-    console.log(
-      `  ${dim("✔")}  ${dim("FORGE_HOME already set in shell profile")}`,
-    );
+    if (!forgeHomeSet) {
+      console.log(
+        `  ${dim("✔")}  ${dim("FORGE_HOME already set in shell profile")}`,
+      );
+    }
   }
 
   console.log("");
@@ -1428,7 +1459,10 @@ async function uninstall() {
     console.log("");
     const removeHook = forceYes
       ? true
-      : await confirm("Remove SessionStart hook from ~/.claude/settings.json?", true);
+      : await confirm(
+          "Remove SessionStart hook from ~/.claude/settings.json?",
+          true,
+        );
 
     if (removeHook) {
       const hookRemoveResult = await removeSessionStartHook();
@@ -1446,7 +1480,9 @@ async function uninstall() {
         );
       }
     } else {
-      console.log(`  ${dim("Skipped — SessionStart hook left in settings.json.")}`);
+      console.log(
+        `  ${dim("Skipped — SessionStart hook left in settings.json.")}`,
+      );
     }
   }
 
@@ -2078,22 +2114,18 @@ function _detectBackend() {
 async function _enrichViaSkill(draft, cwd) {
   try {
     const draftJson = JSON.stringify(draft);
-    const output = execFileSync(
-      "claude",
-      ["-p"],
-      {
-        cwd,
-        encoding: "utf-8",
-        timeout: 120000, // 2 minutes — enrichment may take a while for large repos
-        input: `/forgedock-init ${draftJson}`,
-        stdio: ["pipe", "pipe", "pipe"],
-        // On Windows, npm-installed CLIs like `claude` are .cmd shims. execFileSync
-        // does not resolve .cmd extensions without a shell — shell: true enables the
-        // cmd.exe lookup that finds claude.cmd on PATH. Safe here: executable name is
-        // hardcoded, no user input is involved. (Ref: review-finding #382)
-        shell: process.platform === "win32",
-      },
-    );
+    const output = execFileSync("claude", ["-p"], {
+      cwd,
+      encoding: "utf-8",
+      timeout: 120000, // 2 minutes — enrichment may take a while for large repos
+      input: `/forgedock-init ${draftJson}`,
+      stdio: ["pipe", "pipe", "pipe"],
+      // On Windows, npm-installed CLIs like `claude` are .cmd shims. execFileSync
+      // does not resolve .cmd extensions without a shell — shell: true enables the
+      // cmd.exe lookup that finds claude.cmd on PATH. Safe here: executable name is
+      // hardcoded, no user input is involved. (Ref: review-finding #382)
+      shell: process.platform === "win32",
+    });
 
     return parseEnrichedDraft(output, draft);
   } catch (err) {
@@ -2152,7 +2184,8 @@ function _optionalSectionsFromDraft(enrichedDraft) {
     if (first && first.prefix && first.prefix.value) {
       sections.multiRepo = {
         prefix: first.prefix.value || "sat",
-        satelliteRepo: (first.repo?.value || "").split("/").pop() || "satellite",
+        satelliteRepo:
+          (first.repo?.value || "").split("/").pop() || "satellite",
         satelliteBranch: first.staging_branch?.value || "main",
       };
     }
@@ -2331,9 +2364,14 @@ async function init() {
   const nameInput = _sanitizeYamlValue(reviewed.name || detectedName);
   const descInput = _sanitizeYamlValue(reviewed.description || "");
   const rootInput = reviewed.root || cwd;
-  const worktreeInput = reviewed.worktreeBase || join(cwd, ".claude", "worktrees");
-  const defaultBranchInput = _sanitizeYamlValue(reviewed.defaultBranch || detectedDefault);
-  const stagingBranchInput = _sanitizeYamlValue(reviewed.stagingBranch || detectedStaging);
+  const worktreeInput =
+    reviewed.worktreeBase || join(cwd, ".claude", "worktrees");
+  const defaultBranchInput = _sanitizeYamlValue(
+    reviewed.defaultBranch || detectedDefault,
+  );
+  const stagingBranchInput = _sanitizeYamlValue(
+    reviewed.stagingBranch || detectedStaging,
+  );
 
   // -----------------------------------------------------------------------
   // Optional sections — pre-populate from enriched draft if available,
@@ -2349,7 +2387,9 @@ async function init() {
   // without an enrichment backend).
   // manualMode forces the full guided wizard regardless of enrichment backend.
   const enrichmentSucceeded =
-    !manualMode && backend !== "none" && (draft !== baseDraft || draft.meta?.enriched);
+    !manualMode &&
+    backend !== "none" &&
+    (draft !== baseDraft || draft.meta?.enriched);
 
   if (enrichmentSucceeded) {
     optionalSections = _optionalSectionsFromDraft(draft);
@@ -2393,8 +2433,7 @@ async function init() {
         value: "review",
       },
       {
-        label:
-          "Verification    — Health check endpoints and response patterns",
+        label: "Verification    — Health check endpoints and response patterns",
         value: "verification",
       },
     ].filter((c) => !alreadyConfigured.has(c.value));
@@ -2416,7 +2455,9 @@ async function init() {
 
       // --- Project Board prompts (manual, only when enrichment didn't find it) ---
       if (selectedSections.includes("projectBoard")) {
-        const discovered = await discoverProjectBoard(ownerInput || detectedOwner);
+        const discovered = await discoverProjectBoard(
+          ownerInput || detectedOwner,
+        );
         if (discovered) {
           optionalSections.projectBoard = {
             projectNumber: discovered.projectNumber,
@@ -2538,8 +2579,7 @@ async function init() {
         value: "review",
       },
       {
-        label:
-          "Verification    — Health check endpoints and response patterns",
+        label: "Verification    — Health check endpoints and response patterns",
         value: "verification",
       },
     ];
@@ -2551,7 +2591,9 @@ async function init() {
 
     // --- Project Board prompts ---
     if (selectedSections.includes("projectBoard")) {
-      const discovered = await discoverProjectBoard(ownerInput || detectedOwner);
+      const discovered = await discoverProjectBoard(
+        ownerInput || detectedOwner,
+      );
       if (discovered) {
         optionalSections.projectBoard = {
           projectNumber: discovered.projectNumber,
@@ -2596,9 +2638,7 @@ async function init() {
       console.log("");
       console.log(bold("  Multi-Repo"));
       console.log(
-        dim(
-          "  Configure one satellite repo (add more by editing forge.yaml).",
-        ),
+        dim("  Configure one satellite repo (add more by editing forge.yaml)."),
       );
       const prefix = await input(
         "  Satellite repo prefix (e.g. 'mcp', 'sdk')",
@@ -3408,7 +3448,7 @@ function buildForgeYamlContent({
     ? _buildOptionIdsBlock(resolvedOptionIds)
     : "";
 
-  const hasDiscoveredId = !!(safeProjectBoard?.projectId);
+  const hasDiscoveredId = !!safeProjectBoard?.projectId;
 
   const projectBoardSection = projectBoard
     ? `project_board:
@@ -3524,12 +3564,12 @@ ${verificationSection}
  * Each entry is the leading whitespace + key prefix that identifies the line.
  */
 const TODO_FIELD_YAML_KEYS = {
-  owner:         "  owner:",
-  repo:          "  repo:",
-  name:          "  name:",
-  description:   "  description:",
-  root:          "  root:",
-  worktreeBase:  "  worktree_base:",
+  owner: "  owner:",
+  repo: "  repo:",
+  name: "  name:",
+  description: "  description:",
+  root: "  root:",
+  worktreeBase: "  worktree_base:",
   defaultBranch: "  default:",
   stagingBranch: "  staging:",
 };
@@ -3560,7 +3600,9 @@ function _injectTodoComments(content, lowConfidenceKeys) {
       if (pattern && line.startsWith(pattern)) {
         // Insert the TODO comment above the key line (same indentation).
         const indent = line.match(/^(\s*)/)[1];
-        result.push(`${indent}# TODO(forgedock:${key}) — low-confidence: verify and update`);
+        result.push(
+          `${indent}# TODO(forgedock:${key}) — low-confidence: verify and update`,
+        );
         break;
       }
     }
@@ -4035,9 +4077,7 @@ async function _offerRemediations(checks, forgeYamlPath) {
     // ── 1. forge.yaml not found ─────────────────────────────────────────────
     if (label === "forge.yaml found") {
       console.log("");
-      console.log(
-        `  ${isError ? red("✗") : yellow("!")} ${bold(label)}`,
-      );
+      console.log(`  ${isError ? red("✗") : yellow("!")} ${bold(label)}`);
       console.log(
         `    ForgeDock reads ${cyan("forge.yaml")} from your project root to know which`,
       );
@@ -4071,8 +4111,7 @@ async function _offerRemediations(checks, forgeYamlPath) {
       );
       for (const field of fields.split(",").map((f) => f.trim())) {
         let hint = "";
-        if (field === "project.owner")
-          hint = `  # your GitHub org or username`;
+        if (field === "project.owner") hint = `  # your GitHub org or username`;
         else if (field === "project.repo")
           hint = `  # the repository name (without the owner prefix)`;
         else if (field === "paths.root")
@@ -4177,9 +4216,7 @@ async function _offerRemediations(checks, forgeYamlPath) {
         console.log(
           `    ${cyan(repoSlug)} to list issues, manage PRs, and run pipeline commands.`,
         );
-        console.log(
-          `    ${bold("Fix:")} Authenticate with the GitHub CLI:`,
-        );
+        console.log(`    ${bold("Fix:")} Authenticate with the GitHub CLI:`);
         console.log(`      ${cyan("gh auth login")}`);
 
         if (isTTY) {
@@ -4204,7 +4241,9 @@ async function _offerRemediations(checks, forgeYamlPath) {
           `    the repo may not exist, you may not have permission, or the owner/repo`,
         );
         console.log(`    values in forge.yaml are incorrect.`);
-        console.log(`    ${bold("Fix:")} Verify the repo exists and is accessible:`);
+        console.log(
+          `    ${bold("Fix:")} Verify the repo exists and is accessible:`,
+        );
         console.log(`      ${cyan(`gh repo view ${repoSlug}`)}`);
         console.log(
           `    Then update ${cyan("project.owner")} and ${cyan("project.repo")} in forge.yaml if needed.`,
@@ -4221,9 +4260,7 @@ async function _offerRemediations(checks, forgeYamlPath) {
       console.log(
         `    Branch ${cyan(branchName)} was not found on the remote. ForgeDock uses`,
       );
-      console.log(
-        `    this branch for PRs and as a base for new work.`,
-      );
+      console.log(`    this branch for PRs and as a base for new work.`);
       console.log(`    ${bold("Option A:")} Create and push the branch:`);
       console.log(
         `      ${cyan(`git checkout -b ${branchName} && git push -u origin ${branchName}`)}`,
@@ -4238,10 +4275,7 @@ async function _offerRemediations(checks, forgeYamlPath) {
     }
 
     // ── 7. Project board not configured or invalid ──────────────────────────
-    if (
-      label === "Project board configured" ||
-      label === "Project board"
-    ) {
+    if (label === "Project board configured" || label === "Project board") {
       if (note.includes("placeholder")) {
         console.log("");
         console.log(`  ${yellow("!")} ${bold(label)}`);
@@ -4313,9 +4347,7 @@ async function _offerRemediations(checks, forgeYamlPath) {
       const satRepo = label.replace("Satellite: ", "").trim();
       console.log("");
       console.log(`  ${yellow("!")} ${bold(label)}`);
-      console.log(
-        `    Cannot access satellite repo ${cyan(satRepo)}.`,
-      );
+      console.log(`    Cannot access satellite repo ${cyan(satRepo)}.`);
       console.log(
         `    Satellite repos are used when your project spans multiple repositories.`,
       );
@@ -4777,9 +4809,7 @@ async function enableCommand(dir) {
   if (!hasForgeYaml && !hasMarker) {
     try {
       await writeFile(join(absDir, ".forgedock"), "", "utf-8");
-      console.log(
-        `${GREEN}✓${RESET} ForgeDock enabled for ${cyan(absDir)}`,
-      );
+      console.log(`${GREEN}✓${RESET} ForgeDock enabled for ${cyan(absDir)}`);
       console.log(
         `  ${dim(".forgedock marker written — run")} ${cyan("npx forgedock init")} ${dim("to generate forge.yaml")}`,
       );
@@ -4792,13 +4822,15 @@ async function enableCommand(dir) {
       );
     }
   } else {
-    console.log(
-      `${GREEN}✓${RESET} ForgeDock enabled for ${cyan(absDir)}`,
-    );
+    console.log(`${GREEN}✓${RESET} ForgeDock enabled for ${cyan(absDir)}`);
     if (hasForgeYaml) {
-      console.log(`  ${dim("forge.yaml already present — directory is managed.")}`);
+      console.log(
+        `  ${dim("forge.yaml already present — directory is managed.")}`,
+      );
     } else {
-      console.log(`  ${dim(".forgedock marker already present — directory is managed.")}`);
+      console.log(
+        `  ${dim(".forgedock marker already present — directory is managed.")}`,
+      );
     }
   }
 }
@@ -4818,9 +4850,7 @@ async function disableCommand(dir) {
 
   await setOptOut(absDir, true);
 
-  console.log(
-    `${YELLOW}–${RESET} ForgeDock disabled for ${cyan(absDir)}`,
-  );
+  console.log(`${YELLOW}–${RESET} ForgeDock disabled for ${cyan(absDir)}`);
   console.log(
     `  ${dim("The SessionStart hook will be silent in this directory.")}`,
   );
@@ -4891,9 +4921,7 @@ async function statusCommand(dir) {
       console.log(
         `  ${dim("No forge.yaml or .forgedock marker found in this directory.")}`,
       );
-      console.log(
-        `  ${dim("ForgeDock is not active here.")}`,
-      );
+      console.log(`  ${dim("ForgeDock is not active here.")}`);
       console.log(
         `  ${dim("To enable:")} ${cyan(`npx forgedock enable "${absDir}"`)}`,
       );
