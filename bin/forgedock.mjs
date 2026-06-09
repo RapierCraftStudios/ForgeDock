@@ -57,6 +57,7 @@ import {
   annotatedReviewScreen,
 } from "./tui.mjs";
 import { detectConfig } from "./init-detect.mjs";
+import { enrich as enrichViaAPI } from "./init-enrich-api.mjs";
 import { resolveState, setOptOut } from "./registry.mjs";
 
 const __filename = fileURLToPath(import.meta.url);
@@ -2096,67 +2097,6 @@ async function _enrichViaSkill(draft, cwd) {
 }
 
 /**
- * Enrich a ConfigDraft by calling the Anthropic Messages API directly.
- * Uses Node.js built-in fetch (Node 18+) — no SDK dependency required.
- *
- * @param {object} draft - ConfigDraft from detectConfig()
- * @returns {Promise<object>} Enriched ConfigDraft, or the original draft on failure
- */
-async function _enrichViaAPI(draft) {
-  try {
-    const apiKey = process.env.ANTHROPIC_API_KEY;
-    if (!apiKey) return draft;
-
-    // Build the prompt: same contract as the skill backend.
-    const draftJson = JSON.stringify(draft, null, 2);
-    const systemPrompt =
-      "You are the init-enrich backend for ForgeDock. Consume the ConfigDraft JSON, " +
-      "enrich the hard sections (project_board, repos.satellites, review, verification) " +
-      "by scanning the codebase identified in paths.root.value and querying GitHub via gh CLI, " +
-      "then return ONLY the enriched ConfigDraft as a valid JSON object. " +
-      "Every leaf must have shape { value, confidence, source, why }. " +
-      "Do not modify project, paths, branches, or meta sections. " +
-      "Output the JSON object alone with no surrounding prose.";
-
-    const response = await fetch("https://api.anthropic.com/v1/messages", {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        "x-api-key": apiKey,
-        "anthropic-version": "2023-06-01",
-      },
-      body: JSON.stringify({
-        model: "claude-haiku-4-5",
-        max_tokens: 4096,
-        system: systemPrompt,
-        messages: [
-          {
-            role: "user",
-            content: draftJson,
-          },
-        ],
-      }),
-    });
-
-    if (!response.ok) {
-      throw new Error(`Anthropic API returned ${response.status}`);
-    }
-
-    const data = await response.json();
-    const text =
-      data?.content?.[0]?.type === "text" ? data.content[0].text : "";
-    return _parseEnrichedDraft(text, draft);
-  } catch (err) {
-    if (process.env.FORGEDOCK_DEBUG) {
-      console.error(
-        `  ${dim("[debug]")} api enrichment failed: ${err.message}`,
-      );
-    }
-    return draft;
-  }
-}
-
-/**
  * Extract and parse the enriched ConfigDraft JSON from a backend response string.
  *
  * Backends may emit human-readable prose before and after the JSON blob.
@@ -2343,7 +2283,7 @@ async function init() {
     );
   } else if (backend === "api") {
     const s = spinner("Enriching config via Anthropic API…");
-    draft = await _enrichViaAPI(baseDraft);
+    draft = await enrichViaAPI(baseDraft);
     const enriched = draft !== baseDraft || draft.meta?.enriched;
     s.stop(
       enriched ? "success" : "warn",
