@@ -318,6 +318,10 @@ branches:
 #   #   # Used by /deploy-info file categorization and /orchestrate high-fan-in detection.
 #   #   worker: "services/worker"
 #   #
+#   #   # Path to the worker service entrypoint (task registration, consumer setup).
+#   #   # High-fan-in file: /orchestrate serializes any issue that touches this file.
+#   #   worker_main: "services/worker/worker/main.py"
+#   #
 #   #   # Directory containing database migration files.
 #   #   # Used by /deploy-info to detect and list migration changes.
 #   #   migrations: "infra/migrations"
