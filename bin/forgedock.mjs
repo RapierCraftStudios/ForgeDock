@@ -2025,7 +2025,6 @@ async function update() {
  *
  * Ladder:
  *   1. skill  — running inside a Claude Code session (CLAUDE_CODE_SESSION_ID set)
- *               OR claude CLI is on PATH and stdin is non-TTY (piped subagent call)
  *   2. api    — ANTHROPIC_API_KEY env var is present and non-empty
  *   3. none   — fall through to deterministic baseline
  *
@@ -2033,22 +2032,10 @@ async function update() {
  */
 function _detectBackend() {
   // Primary signal: Claude Code sets CLAUDE_CODE_SESSION_ID in its environment.
+  // This is the only reliable indicator of an active CC session — non-TTY stdin
+  // alone is not sufficient (CI/CD and piped scripts also run non-interactively).
   if (process.env.CLAUDE_CODE_SESSION_ID) {
     return "skill";
-  }
-
-  // Secondary signal: claude CLI is reachable and we are running non-interactively
-  // (piped subagent call from within a CC session).
-  if (!process.stdin.isTTY) {
-    try {
-      execFileSync("claude", ["--version"], {
-        stdio: ["pipe", "pipe", "pipe"],
-        timeout: 5000,
-      });
-      return "skill";
-    } catch {
-      // claude not on PATH — fall through
-    }
   }
 
   // API backend: BYO key present.
