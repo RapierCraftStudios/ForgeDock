@@ -30,8 +30,12 @@ const SYSTEM_PROMPT =
 /**
  * Extract and parse the enriched ConfigDraft JSON from a backend response string.
  *
- * Backends may emit human-readable prose before and after the JSON blob.
- * This function finds the outermost JSON object in the output and parses it.
+ * Backends may emit human-readable prose before and/or after the JSON blob.
+ * This function finds the outermost JSON object in the output using a
+ * string-aware balanced-brace scanner: it tracks brace depth while skipping
+ * over string literal contents (including backslash-escaped characters), so
+ * braces inside JSON string values do not affect depth tracking and trailing
+ * prose with braces does not extend the match past the correct closing '}'.
  * Falls back to the original draft if extraction or parsing fails.
  *
  * @param {string} output  - Raw text from the API response content block
@@ -41,24 +45,56 @@ const SYSTEM_PROMPT =
 export function parseEnrichedDraft(output, draft) {
   if (!output || typeof output !== "string") return draft;
 
-  // Use a greedy regex to find the first '{' and the last '}' in the output.
-  // A brace-depth counter would misfire when JSON string values contain '{' or '}'
-  // (e.g. project.description mentioning Go templates, Windows paths with env-var
-  // syntax, or tech-stack notes). The regex finds the outermost boundaries and
-  // delegates structural validation to JSON.parse.
-  const jsonMatch = output.match(/\{[\s\S]*\}/);
-  if (!jsonMatch) return draft;
+  // Find the first '{' then walk forward tracking brace depth, skipping over
+  // string literal contents (with backslash-escape handling) so that:
+  //   - Braces inside JSON string values (e.g. Go template syntax in
+  //     project.description, Windows paths) do not affect depth.
+  //   - Trailing prose containing '{' or '}' after the JSON blob does not
+  //     extend the extraction past the correct top-level closing '}'.
+  const start = output.indexOf("{");
+  if (start === -1) return draft;
 
-  try {
-    const enriched = JSON.parse(jsonMatch[0]);
-    // Basic sanity check: must have the required top-level sections from the original draft.
-    if (!enriched.project || !enriched.paths || !enriched.branches) {
-      return draft;
+  let depth = 0;
+  let inString = false;
+  let escape = false;
+
+  for (let i = start; i < output.length; i++) {
+    const ch = output[i];
+    if (escape) {
+      escape = false;
+      continue;
     }
-    return enriched;
-  } catch {
-    return draft;
+    if (ch === "\\" && inString) {
+      escape = true;
+      continue;
+    }
+    if (ch === '"') {
+      inString = !inString;
+      continue;
+    }
+    if (inString) continue;
+    if (ch === "{") {
+      depth++;
+    } else if (ch === "}") {
+      depth--;
+      if (depth === 0) {
+        // Found the closing brace of the top-level object — parse the candidate.
+        try {
+          const enriched = JSON.parse(output.slice(start, i + 1));
+          // Basic sanity check: must have the required top-level sections.
+          if (!enriched.project || !enriched.paths || !enriched.branches) {
+            return draft;
+          }
+          return enriched;
+        } catch {
+          return draft;
+        }
+      }
+    }
   }
+
+  // No complete top-level JSON object found.
+  return draft;
 }
 
 /**
