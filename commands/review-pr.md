@@ -161,9 +161,9 @@ Read `forge.yaml → verification.commands.python` for project-specific tool com
 
 ```bash
 # Read toolchain commands from forge.yaml
-PYTHON_FORMAT=$(awk '/^  commands:/{f=1;next} f && /^[^ \t]/{exit} f' forge.yaml 2>/dev/null | awk '/^    python:/{f=1;next} f && /^    [^ \t]/{exit} f' | grep 'format:' | head -1 | sed "s/.*format: *['\"]//;s/['\"].*//")
-PYTHON_LINT=$(awk '/^  commands:/{f=1;next} f && /^[^ \t]/{exit} f' forge.yaml 2>/dev/null | awk '/^    python:/{f=1;next} f && /^    [^ \t]/{exit} f' | grep 'lint:' | head -1 | sed "s/.*lint: *['\"]//;s/['\"].*//")
-PYTHON_TYPECHECK=$(awk '/^  commands:/{f=1;next} f && /^[^ \t]/{exit} f' forge.yaml 2>/dev/null | awk '/^    python:/{f=1;next} f && /^    [^ \t]/{exit} f' | grep 'typecheck:' | head -1 | sed "s/.*typecheck: *['\"]//;s/['\"].*//")
+PYTHON_FORMAT=$(yq '.verification.commands.python.format // ""' forge.yaml 2>/dev/null || echo '')
+PYTHON_LINT=$(yq '.verification.commands.python.lint // ""' forge.yaml 2>/dev/null || echo '')
+PYTHON_TYPECHECK=$(yq '.verification.commands.python.typecheck // ""' forge.yaml 2>/dev/null || echo '')
 
 # Run format check
 if [ -n "$PYTHON_FORMAT" ]; then
@@ -197,9 +197,9 @@ done
 Read `forge.yaml → verification.commands.typescript` for project-specific tool commands:
 
 ```bash
-TS_FORMAT=$(awk '/^  commands:/{f=1;next} f && /^[^ \t]/{exit} f' forge.yaml 2>/dev/null | awk '/^    typescript:/{f=1;next} f && /^    [^ \t]/{exit} f' | grep 'format:' | head -1 | sed "s/.*format: *['\"]//;s/['\"].*//")
-TS_LINT=$(awk '/^  commands:/{f=1;next} f && /^[^ \t]/{exit} f' forge.yaml 2>/dev/null | awk '/^    typescript:/{f=1;next} f && /^    [^ \t]/{exit} f' | grep 'lint:' | head -1 | sed "s/.*lint: *['\"]//;s/['\"].*//")
-TS_TYPECHECK=$(awk '/^  commands:/{f=1;next} f && /^[^ \t]/{exit} f' forge.yaml 2>/dev/null | awk '/^    typescript:/{f=1;next} f && /^    [^ \t]/{exit} f' | grep 'typecheck:' | head -1 | sed "s/.*typecheck: *['\"]//;s/['\"].*//")
+TS_FORMAT=$(yq '.verification.commands.typescript.format // ""' forge.yaml 2>/dev/null || echo '')
+TS_LINT=$(yq '.verification.commands.typescript.lint // ""' forge.yaml 2>/dev/null || echo '')
+TS_TYPECHECK=$(yq '.verification.commands.typescript.typecheck // ""' forge.yaml 2>/dev/null || echo '')
 
 # Run format check
 if [ -n "$TS_FORMAT" ]; then
@@ -263,7 +263,7 @@ Read `forge.yaml → verification.commands.{lang}.test` for the project's test c
 ```bash
 # Check each configured language for a test command
 for lang in python typescript go rust; do
-    TEST_CMD=$(awk '/^  commands:/{f=1;next} f && /^[^ \t]/{exit} f' forge.yaml 2>/dev/null | awk "/^    ${lang}:/{f=1;next} f && /^    [^ \t]/{exit} f" | grep 'test:' | head -1 | sed "s/.*test: *['\"]//;s/['\"].*//")
+    TEST_CMD=$(yq ".verification.commands.${lang}.test // \"\"" forge.yaml 2>/dev/null || echo '')
     if [ -n "$TEST_CMD" ]; then
         echo "=== Running tests (${lang}): ${TEST_CMD} ==="
         eval "$TEST_CMD" 2>&1 | tail -30
@@ -273,8 +273,8 @@ for lang in python typescript go rust; do
 done
 
 # If no test commands were configured, log explicitly
-PYTHON_TEST=$(awk '/^  commands:/{f=1;next} f && /^[^ \t]/{exit} f' forge.yaml 2>/dev/null | awk '/^    python:/{f=1;next} f && /^    [^ \t]/{exit} f' | grep 'test:' | head -1 | sed "s/.*test: *['\"]//;s/['\"].*//")
-TS_TEST=$(awk '/^  commands:/{f=1;next} f && /^[^ \t]/{exit} f' forge.yaml 2>/dev/null | awk '/^    typescript:/{f=1;next} f && /^    [^ \t]/{exit} f' | grep 'test:' | head -1 | sed "s/.*test: *['\"]//;s/['\"].*//")
+PYTHON_TEST=$(yq '.verification.commands.python.test // ""' forge.yaml 2>/dev/null || echo '')
+TS_TEST=$(yq '.verification.commands.typescript.test // ""' forge.yaml 2>/dev/null || echo '')
 if [ -z "$PYTHON_TEST" ] && [ -z "$TS_TEST" ]; then
     echo "SKIPPED — no test commands configured in verification.commands"
 fi
@@ -303,8 +303,8 @@ Read `forge.yaml → verification.commands.typescript.typecheck` and `.build`:
 ```bash
 gh pr checkout $ARGUMENTS --detach 2>/dev/null
 
-TS_TYPECHECK=$(awk '/^  commands:/{f=1;next} f && /^[^ \t]/{exit} f' forge.yaml 2>/dev/null | awk '/^    typescript:/{f=1;next} f && /^    [^ \t]/{exit} f' | grep 'typecheck:' | head -1 | sed "s/.*typecheck: *['\"]//;s/['\"].*//")
-TS_BUILD=$(awk '/^  commands:/{f=1;next} f && /^[^ \t]/{exit} f' forge.yaml 2>/dev/null | awk '/^    typescript:/{f=1;next} f && /^    [^ \t]/{exit} f' | grep 'build:' | head -1 | sed "s/.*build: *['\"]//;s/['\"].*//")
+TS_TYPECHECK=$(yq '.verification.commands.typescript.typecheck // ""' forge.yaml 2>/dev/null || echo '')
+TS_BUILD=$(yq '.verification.commands.typescript.build // ""' forge.yaml 2>/dev/null || echo '')
 
 if [ -n "$TS_TYPECHECK" ]; then
     eval "$TS_TYPECHECK" 2>&1
@@ -340,7 +340,7 @@ gh pr checkout $ARGUMENTS --detach 2>/dev/null
 echo "$CHANGED_FILES" | grep '\.py$' | while IFS= read -r f; do python3 -m py_compile "$f" 2>&1; done
 
 if [ "$REQUIRES_FULL_BUILD" = "true" ]; then
-    PYTHON_FORMAT=$(awk '/^  commands:/{f=1;next} f && /^[^ \t]/{exit} f' forge.yaml 2>/dev/null | awk '/^    python:/{f=1;next} f && /^    [^ \t]/{exit} f' | grep 'format:' | head -1 | sed "s/.*format: *['\"]//;s/['\"].*//")
+    PYTHON_FORMAT=$(yq '.verification.commands.python.format // ""' forge.yaml 2>/dev/null || echo '')
     if [ -n "$PYTHON_FORMAT" ]; then
         eval "$PYTHON_FORMAT" 2>&1
     else
