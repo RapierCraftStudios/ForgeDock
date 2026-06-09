@@ -600,6 +600,63 @@ npx forgedock integrate
 
 ---
 
+## Per-Directory State Registry
+
+ForgeDock tracks per-directory opt-out state in a central registry file on the local machine.
+
+### Registry File Location
+
+```
+~/.claude/forgedock/registry.json
+```
+
+The directory (`~/.claude/forgedock/`) is created automatically on first use with mode `0700`. The file is never committed to version control — it is per-user, per-machine state.
+
+### Registry Schema
+
+```json
+{
+  "version": 1,
+  "optedOut": {
+    "/absolute/path/to/project": { "at": "2026-06-09T12:00:00.000Z" }
+  }
+}
+```
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `version` | number | Schema version — currently `1` |
+| `optedOut` | object | Map of absolute directory paths to opt-out metadata |
+| `optedOut[path].at` | string | ISO-8601 timestamp of when the opt-out was recorded |
+
+### State Resolution
+
+The `registry` module resolves one of three states for any directory:
+
+| State | Meaning |
+|-------|---------|
+| `managed-active` | Directory contains `forge.yaml` or `.forgedock` and is **not** opted out — ForgeDock is active here |
+| `managed-optedout` | Directory has a managed marker but the user has explicitly opted out — ForgeDock stays silent |
+| `unmanaged` | No `forge.yaml` or `.forgedock` marker found — ForgeDock has no presence here |
+
+**Opt-out wins over managed**: if a directory contains `forge.yaml` but its path is listed in `optedOut`, the state is `managed-optedout`.
+
+### Failure Behaviour
+
+A missing or corrupt `registry.json` is treated as an empty opt-out set. The registry always fails open — it never throws and never blocks a Claude Code session.
+
+### Managing Opt-Out State
+
+Use the `forgedock enable` and `forgedock disable` commands to add or remove a directory from the opt-out set:
+
+```bash
+npx forgedock enable [dir]   # Remove directory from opt-out set (default: cwd)
+npx forgedock disable [dir]  # Add directory to opt-out set (default: cwd)
+npx forgedock status [dir]   # Show resolved state for a directory
+```
+
+---
+
 ## Complete Example
 
 See [`forge.yaml.example`](../forge.yaml.example) at the repository root for a fully annotated example covering all sections.
