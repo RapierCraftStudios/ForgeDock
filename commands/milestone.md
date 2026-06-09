@@ -260,7 +260,11 @@ else
       # Resolve priority option ID from the issue's priority label
       ISSUE_PRIORITY=$(gh issue view "$ISSUE_NUM" "$GH_FLAG" --json labels \
         --jq '[.labels[].name | select(startswith("priority:"))] | .[0] | ltrimstr("priority:") | ascii_downcase' 2>/dev/null || echo "")
-      PRIORITY_OPTION_ID=$(yq '.project_board.option_ids.priority.'"$ISSUE_PRIORITY"' // ""' "$CONFIG_FILE" 2>/dev/null || echo "")
+      # Validate ISSUE_PRIORITY matches expected pattern before use as yq key path <!-- Added: forge#300 -->
+      PRIORITY_OPTION_ID=""
+      if [[ "$ISSUE_PRIORITY" =~ ^p[0-3]$ ]]; then
+        PRIORITY_OPTION_ID=$(yq '.project_board.option_ids.priority.'"$ISSUE_PRIORITY"' // ""' "$CONFIG_FILE" 2>/dev/null || echo "")
+      fi
 
       if [ -n "$STATUS_FIELD_ID" ] && [ -n "$STATUS_TODO_OPTION_ID" ]; then
         gh project item-edit --project-id "$PROJECT_ID" --id "$ITEM_ID" \
