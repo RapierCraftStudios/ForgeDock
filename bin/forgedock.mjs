@@ -13,6 +13,7 @@ import {
 } from "path";
 import {
   mkdir,
+  rm,
   symlink,
   copyFile,
   readlink,
@@ -3653,14 +3654,51 @@ async function docsInit() {
   console.log(`  Files:   ${templateFiles.length} seed files`);
   console.log("");
 
-  await mkdir(targetDir, { recursive: true });
+  // Use resolvedTarget (canonical path) rather than the raw targetDir string.  The
+  // containment check above already resolved symlinks and validated the path; using the
+  // canonical form here closes the TOCTOU window to the narrowest possible interval
+  // and ensures mkdir does not follow a symlink that was NOT present when we checked.
+  //
+  // TOCTOU residual: a narrow window remains between the realpath check and this mkdir
+  // on POSIX systems — a symlink planted at an intermediate path component during that
+  // window could cause mkdir to create directories outside the project boundary.
+  // Full elimination requires O_NOFOLLOW semantics (kernel-level, not available from
+  // Node.js user-space).  We mitigate with a post-create re-validation below (SEC-5).
+  await mkdir(resolvedTarget, { recursive: true });
+
+  // SEC-5: Post-create re-validation — detect symlink planted during the TOCTOU window.
+  // After mkdir succeeds, call realpath() on the now-existing directory to get its
+  // canonical on-disk location.  If that location lies outside the project root a
+  // symlink was planted between the containment check and the mkdir call.  In that case
+  // we remove the directory tree that was created (wherever it landed) and abort.
+  try {
+    const postMkdirReal = await realpath(resolvedTarget);
+    if (postMkdirReal !== realCwd && !postMkdirReal.startsWith(realCwd + sep)) {
+      await rm(postMkdirReal, { recursive: true, force: true }).catch(() => {});
+      console.log(
+        `${RED}Error: devdocs directory escaped the project boundary after creation (TOCTOU).${RESET}`,
+      );
+      console.log(`  Created at: ${postMkdirReal}`);
+      console.log(`  Project:    ${realCwd}`);
+      console.log(
+        `  A symlink was likely planted at an intermediate path component between the`,
+      );
+      console.log(
+        `  containment check and the mkdir call.  The created directory has been removed.`,
+      );
+      process.exit(1);
+    }
+  } catch {
+    // realpath() failure after a successful mkdir is unexpected; proceed — the directory
+    // was created by us and the normal containment check already passed.
+  }
 
   let copied = 0;
   let skipped = 0;
 
   for (const srcFile of templateFiles) {
     const rel = relative(templatesDir, srcFile);
-    const destFile = join(targetDir, rel);
+    const destFile = join(resolvedTarget, rel);
     const destDir = dirname(destFile);
 
     await mkdir(destDir, { recursive: true });

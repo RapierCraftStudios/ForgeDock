@@ -161,9 +161,9 @@ Read `forge.yaml → verification.commands.python` for project-specific tool com
 
 ```bash
 # Read toolchain commands from forge.yaml
-PYTHON_FORMAT=$(awk '/^  commands:/{f=1;next} f && /^[^ \t]/{exit} f' forge.yaml 2>/dev/null | awk '/^    python:/{f=1;next} f && /^    [^ \t]/{exit} f' | grep 'format:' | head -1 | sed "s/.*format: *['\"]//;s/['\"].*//")
-PYTHON_LINT=$(awk '/^  commands:/{f=1;next} f && /^[^ \t]/{exit} f' forge.yaml 2>/dev/null | awk '/^    python:/{f=1;next} f && /^    [^ \t]/{exit} f' | grep 'lint:' | head -1 | sed "s/.*lint: *['\"]//;s/['\"].*//")
-PYTHON_TYPECHECK=$(awk '/^  commands:/{f=1;next} f && /^[^ \t]/{exit} f' forge.yaml 2>/dev/null | awk '/^    python:/{f=1;next} f && /^    [^ \t]/{exit} f' | grep 'typecheck:' | head -1 | sed "s/.*typecheck: *['\"]//;s/['\"].*//")
+PYTHON_FORMAT=$(yq '.verification.commands.python.format // ""' forge.yaml 2>/dev/null || echo '')
+PYTHON_LINT=$(yq '.verification.commands.python.lint // ""' forge.yaml 2>/dev/null || echo '')
+PYTHON_TYPECHECK=$(yq '.verification.commands.python.typecheck // ""' forge.yaml 2>/dev/null || echo '')
 
 # Run format check
 if [ -n "$PYTHON_FORMAT" ]; then
@@ -187,7 +187,7 @@ else
 fi
 
 # Always run compile check on changed Python files (fast, language-universal)
-for f in $(gh pr diff $ARGUMENTS --name-only | grep '\.py$'); do
+gh pr diff $ARGUMENTS --name-only | grep '\.py$' | while IFS= read -r f; do
     python3 -m py_compile "$f" 2>&1
 done
 ```
@@ -197,9 +197,9 @@ done
 Read `forge.yaml → verification.commands.typescript` for project-specific tool commands:
 
 ```bash
-TS_FORMAT=$(awk '/^  commands:/{f=1;next} f && /^[^ \t]/{exit} f' forge.yaml 2>/dev/null | awk '/^    typescript:/{f=1;next} f && /^    [^ \t]/{exit} f' | grep 'format:' | head -1 | sed "s/.*format: *['\"]//;s/['\"].*//")
-TS_LINT=$(awk '/^  commands:/{f=1;next} f && /^[^ \t]/{exit} f' forge.yaml 2>/dev/null | awk '/^    typescript:/{f=1;next} f && /^    [^ \t]/{exit} f' | grep 'lint:' | head -1 | sed "s/.*lint: *['\"]//;s/['\"].*//")
-TS_TYPECHECK=$(awk '/^  commands:/{f=1;next} f && /^[^ \t]/{exit} f' forge.yaml 2>/dev/null | awk '/^    typescript:/{f=1;next} f && /^    [^ \t]/{exit} f' | grep 'typecheck:' | head -1 | sed "s/.*typecheck: *['\"]//;s/['\"].*//")
+TS_FORMAT=$(yq '.verification.commands.typescript.format // ""' forge.yaml 2>/dev/null || echo '')
+TS_LINT=$(yq '.verification.commands.typescript.lint // ""' forge.yaml 2>/dev/null || echo '')
+TS_TYPECHECK=$(yq '.verification.commands.typescript.typecheck // ""' forge.yaml 2>/dev/null || echo '')
 
 # Run format check
 if [ -n "$TS_FORMAT" ]; then
@@ -243,7 +243,7 @@ gh pr diff $ARGUMENTS | grep -oE "['\"][A-Za-z0-9+/=]{40,}['\"]" | head -10
 
 ### 2F: SQL Migration Validation (if *.sql changed)
 ```bash
-for sql_file in $(gh pr diff $ARGUMENTS --name-only | grep "\.sql$"); do
+gh pr diff $ARGUMENTS --name-only | grep "\.sql$" | while IFS= read -r sql_file; do
     grep -E "FOR UPDATE" "$sql_file" | grep -qE "(SUM|COUNT|AVG|MIN|MAX)\s*\(" && echo "ERROR: FOR UPDATE with aggregate"
     grep -qE "DROP (TABLE|COLUMN|INDEX)" "$sql_file" && ! grep -qE "IF EXISTS" "$sql_file" && echo "WARNING: DROP without IF EXISTS"
     grep -qE "ALTER TABLE.*ADD COLUMN.*NOT NULL" "$sql_file" && ! grep -qE "DEFAULT" "$sql_file" && echo "WARNING: NOT NULL without DEFAULT"
@@ -263,7 +263,7 @@ Read `forge.yaml → verification.commands.{lang}.test` for the project's test c
 ```bash
 # Check each configured language for a test command
 for lang in python typescript go rust; do
-    TEST_CMD=$(awk '/^  commands:/{f=1;next} f && /^[^ \t]/{exit} f' forge.yaml 2>/dev/null | awk "/^    ${lang}:/{f=1;next} f && /^    [^ \t]/{exit} f" | grep 'test:' | head -1 | sed "s/.*test: *['\"]//;s/['\"].*//")
+    TEST_CMD=$(yq ".verification.commands.${lang}.test // \"\"" forge.yaml 2>/dev/null || echo '')
     if [ -n "$TEST_CMD" ]; then
         echo "=== Running tests (${lang}): ${TEST_CMD} ==="
         eval "$TEST_CMD" 2>&1 | tail -30
@@ -273,8 +273,8 @@ for lang in python typescript go rust; do
 done
 
 # If no test commands were configured, log explicitly
-PYTHON_TEST=$(awk '/^  commands:/{f=1;next} f && /^[^ \t]/{exit} f' forge.yaml 2>/dev/null | awk '/^    python:/{f=1;next} f && /^    [^ \t]/{exit} f' | grep 'test:' | head -1 | sed "s/.*test: *['\"]//;s/['\"].*//")
-TS_TEST=$(awk '/^  commands:/{f=1;next} f && /^[^ \t]/{exit} f' forge.yaml 2>/dev/null | awk '/^    typescript:/{f=1;next} f && /^    [^ \t]/{exit} f' | grep 'test:' | head -1 | sed "s/.*test: *['\"]//;s/['\"].*//")
+PYTHON_TEST=$(yq '.verification.commands.python.test // ""' forge.yaml 2>/dev/null || echo '')
+TS_TEST=$(yq '.verification.commands.typescript.test // ""' forge.yaml 2>/dev/null || echo '')
 if [ -z "$PYTHON_TEST" ] && [ -z "$TS_TEST" ]; then
     echo "SKIPPED — no test commands configured in verification.commands"
 fi
@@ -303,8 +303,8 @@ Read `forge.yaml → verification.commands.typescript.typecheck` and `.build`:
 ```bash
 gh pr checkout $ARGUMENTS --detach 2>/dev/null
 
-TS_TYPECHECK=$(awk '/^  commands:/{f=1;next} f && /^[^ \t]/{exit} f' forge.yaml 2>/dev/null | awk '/^    typescript:/{f=1;next} f && /^    [^ \t]/{exit} f' | grep 'typecheck:' | head -1 | sed "s/.*typecheck: *['\"]//;s/['\"].*//")
-TS_BUILD=$(awk '/^  commands:/{f=1;next} f && /^[^ \t]/{exit} f' forge.yaml 2>/dev/null | awk '/^    typescript:/{f=1;next} f && /^    [^ \t]/{exit} f' | grep 'build:' | head -1 | sed "s/.*build: *['\"]//;s/['\"].*//")
+TS_TYPECHECK=$(yq '.verification.commands.typescript.typecheck // ""' forge.yaml 2>/dev/null || echo '')
+TS_BUILD=$(yq '.verification.commands.typescript.build // ""' forge.yaml 2>/dev/null || echo '')
 
 if [ -n "$TS_TYPECHECK" ]; then
     eval "$TS_TYPECHECK" 2>&1
@@ -337,10 +337,10 @@ Read `forge.yaml → verification.commands.python.format` and `.build`:
 gh pr checkout $ARGUMENTS --detach 2>/dev/null
 
 # Compile-check all changed Python files (language-universal — no config needed)
-for f in $(echo "$CHANGED_FILES" | grep '\.py$'); do python3 -m py_compile "$f" 2>&1; done
+echo "$CHANGED_FILES" | grep '\.py$' | while IFS= read -r f; do python3 -m py_compile "$f" 2>&1; done
 
 if [ "$REQUIRES_FULL_BUILD" = "true" ]; then
-    PYTHON_FORMAT=$(awk '/^  commands:/{f=1;next} f && /^[^ \t]/{exit} f' forge.yaml 2>/dev/null | awk '/^    python:/{f=1;next} f && /^    [^ \t]/{exit} f' | grep 'format:' | head -1 | sed "s/.*format: *['\"]//;s/['\"].*//")
+    PYTHON_FORMAT=$(yq '.verification.commands.python.format // ""' forge.yaml 2>/dev/null || echo '')
     if [ -n "$PYTHON_FORMAT" ]; then
         eval "$PYTHON_FORMAT" 2>&1
     else
@@ -495,7 +495,7 @@ fi
 # Python scoping hazard check — local imports that shadow module-level names
 # A local `import X` makes X a local variable for the ENTIRE function scope.
 # Any reference to X ABOVE the local import will crash with UnboundLocalError.
-for f in $(echo "$CHANGED_FILES" | grep -E '\.py$'); do
+echo "$CHANGED_FILES" | grep -E '\.py$' | while IFS= read -r f; do
     echo "=== Python Scoping Check: $f ==="
     # Find function-scoped imports (indented import statements)
     grep -nE "^\s+import [a-z]" "$f" 2>/dev/null | while read line; do
@@ -509,7 +509,7 @@ for f in $(echo "$CHANGED_FILES" | grep -E '\.py$'); do
 done
 
 # Config file assumption check (baked into Docker image vs volume-mounted)
-for f in $(echo "$CHANGED_FILES" | grep -E "config/.*\.(json|yaml|yml)$"); do
+echo "$CHANGED_FILES" | grep -E "config/.*\.(json|yaml|yml)$" | while IFS= read -r f; do
     echo "=== Config File: $f ==="
     grep -n "$(dirname $f)" docker-compose.yml 2>/dev/null || echo "WARNING: Config dir may not be mounted — changes may require --build"
     grep -n "$(dirname $f)" services/*/Dockerfile 2>/dev/null || true

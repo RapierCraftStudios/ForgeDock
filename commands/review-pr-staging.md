@@ -14,6 +14,22 @@ Performs comprehensive review of `staging` before merging to `main`. Handles lar
 
 ---
 
+## Config Resolution
+
+Read `forge.yaml` to resolve branch names before running any commands:
+
+```bash
+CONFIG_FILE="${FORGE_CONFIG:-forge.yaml}"
+GH_REPO=$(yq '.project.owner + "/" + .project.repo' "$CONFIG_FILE")
+GH_FLAG="-R $GH_REPO"
+DEFAULT_BRANCH=$(yq '.branches.default' "$CONFIG_FILE")
+STAGING_BRANCH=$(yq '.branches.staging' "$CONFIG_FILE")
+```
+
+All `$DEFAULT_BRANCH` and `$STAGING_BRANCH` references below are populated from `forge.yaml`.
+
+---
+
 ## Evidence-Based Review Protocol (ALL Agents)
 
 ### Diff-First Approach
@@ -67,22 +83,6 @@ Append at end of every agent comment:
 Include ALL findings (CONFIRMED, LIKELY, POSSIBLE). One line per finding, sequential numbering.
 
 **Prefixes**: SEC, AUTH, BILL, CONC, SCRP, FE, API, DB, INFRA, BUG, QA, REG
-
----
-
-## Config Resolution
-
-Read `forge.yaml` to resolve branch names before running any commands:
-
-```bash
-CONFIG_FILE="${FORGE_CONFIG:-forge.yaml}"
-GH_REPO=$(yq '.project.owner + "/" + .project.repo' "$CONFIG_FILE")
-GH_FLAG="-R $GH_REPO"
-DEFAULT_BRANCH=$(yq '.branches.default' "$CONFIG_FILE")
-STAGING_BRANCH=$(yq '.branches.staging' "$CONFIG_FILE")
-```
-
-All `$DEFAULT_BRANCH` and `$STAGING_BRANCH` references below are populated from `forge.yaml`.
 
 ---
 
@@ -213,8 +213,8 @@ Create review chunks by priority: Billing/Pricing (CRITICAL) → Security/Auth (
 Read `forge.yaml → verification.commands.python` for project-specific tool commands:
 
 ```bash
-PYTHON_FORMAT=$(awk '/^  commands:/{f=1;next} f && /^[^ \t]/{exit} f' forge.yaml 2>/dev/null | awk '/^    python:/{f=1;next} f && /^    [^ \t]/{exit} f' | grep 'format:' | head -1 | sed "s/.*format: *['\"]//;s/['\"].*//")
-PYTHON_LINT=$(awk '/^  commands:/{f=1;next} f && /^[^ \t]/{exit} f' forge.yaml 2>/dev/null | awk '/^    python:/{f=1;next} f && /^    [^ \t]/{exit} f' | grep 'lint:' | head -1 | sed "s/.*lint: *['\"]//;s/['\"].*//")
+PYTHON_FORMAT=$(yq '.verification.commands.python.format // ""' forge.yaml 2>/dev/null || echo '')
+PYTHON_LINT=$(yq '.verification.commands.python.lint // ""' forge.yaml 2>/dev/null || echo '')
 
 if [ -n "$PYTHON_FORMAT" ]; then
     eval "$PYTHON_FORMAT" 2>&1 | head -30
@@ -234,8 +234,8 @@ fi
 Read `forge.yaml → verification.commands.typescript` for project-specific tool commands:
 
 ```bash
-TS_TYPECHECK=$(awk '/^  commands:/{f=1;next} f && /^[^ \t]/{exit} f' forge.yaml 2>/dev/null | awk '/^    typescript:/{f=1;next} f && /^    [^ \t]/{exit} f' | grep 'typecheck:' | head -1 | sed "s/.*typecheck: *['\"]//;s/['\"].*//")
-TS_BUILD=$(awk '/^  commands:/{f=1;next} f && /^[^ \t]/{exit} f' forge.yaml 2>/dev/null | awk '/^    typescript:/{f=1;next} f && /^    [^ \t]/{exit} f' | grep 'build:' | head -1 | sed "s/.*build: *['\"]//;s/['\"].*//")
+TS_TYPECHECK=$(yq '.verification.commands.typescript.typecheck // ""' forge.yaml 2>/dev/null || echo '')
+TS_BUILD=$(yq '.verification.commands.typescript.build // ""' forge.yaml 2>/dev/null || echo '')
 
 if [ -n "$TS_TYPECHECK" ]; then
     eval "$TS_TYPECHECK" 2>&1
@@ -261,7 +261,7 @@ Build failure is BLOCKING — deploy WILL fail. Typecheck alone misses SSG/prere
 Read `forge.yaml → verification.commands.python.test`:
 
 ```bash
-PYTHON_TEST=$(awk '/^  commands:/{f=1;next} f && /^[^ \t]/{exit} f' forge.yaml 2>/dev/null | awk '/^    python:/{f=1;next} f && /^    [^ \t]/{exit} f' | grep 'test:' | head -1 | sed "s/.*test: *['\"]//;s/['\"].*//")
+PYTHON_TEST=$(yq '.verification.commands.python.test // ""' forge.yaml 2>/dev/null || echo '')
 
 if [ -n "$PYTHON_TEST" ]; then
     eval "$PYTHON_TEST" 2>&1 | tail -50

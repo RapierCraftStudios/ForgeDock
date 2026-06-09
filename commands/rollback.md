@@ -122,7 +122,7 @@ for f in {reverted_python_files}; do
 done
 
 # Python format check (config-driven)
-PYTHON_FORMAT=$(awk '/^  commands:/{f=1;next} f && /^[^ \t]/{exit} f' forge.yaml 2>/dev/null | awk '/^    python:/{f=1;next} f && /^    [^ \t]/{exit} f' | grep 'format:' | head -1 | sed "s/.*format: *['\"]//;s/['\"].*//")
+PYTHON_FORMAT=$(yq '.verification.commands.python.format // ""' forge.yaml 2>/dev/null || echo '')
 if [ -n "$PYTHON_FORMAT" ]; then
     eval "$PYTHON_FORMAT" 2>&1 | head -20
 else
@@ -130,7 +130,7 @@ else
 fi
 
 # TypeScript typecheck (config-driven)
-TS_TYPECHECK=$(awk '/^  commands:/{f=1;next} f && /^[^ \t]/{exit} f' forge.yaml 2>/dev/null | awk '/^    typescript:/{f=1;next} f && /^    [^ \t]/{exit} f' | grep 'typecheck:' | head -1 | sed "s/.*typecheck: *['\"]//;s/['\"].*//")
+TS_TYPECHECK=$(yq '.verification.commands.typescript.typecheck // ""' forge.yaml 2>/dev/null || echo '')
 if [ -n "$TS_TYPECHECK" ]; then
     eval "$TS_TYPECHECK" 2>&1 | head -20
 else
