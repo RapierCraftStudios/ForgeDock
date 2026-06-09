@@ -220,18 +220,18 @@ Analyze the deploy payload and flag risks:
 # Check for new env vars that might not be in the configured secrets backend
 NEW_ENV=$(git diff origin/$TARGET..origin/$SOURCE -- '.env.example' | grep "^+" | grep -v "^+++" | grep -v "^#")
 if [ -n "$NEW_ENV" ]; then
-  echo "⚠️ NEW ENVIRONMENT VARIABLES — verify they exist in your secrets backend ({deploy.secrets_backend}):"
+  echo "⚠️ NEW ENVIRONMENT VARIABLES — verify they exist in your secrets backend ({DEPLOY_SECRETS_BACKEND}):"
   echo "$NEW_ENV"
   # Cross-check with SOPS chain (only when deploy.secrets_backend == "sops")
   # If your project uses a different backend, skip this block and verify manually.
-  if [ "{deploy.secrets_backend}" = "sops" ]; then
+  if [ "{DEPLOY_SECRETS_BACKEND}" = "sops" ]; then
     for var in $(echo "$NEW_ENV" | grep -oP '^\+\K[A-Z_]+'); do
       if ! grep -q "$var" scripts/decrypt-secrets.sh 2>/dev/null; then
         echo "  ❌ $var NOT in decrypt-secrets.sh ENV_MAPPING"
       fi
     done
   else
-    echo "  ℹ️  SOPS chain check skipped — deploy.secrets_backend is '{deploy.secrets_backend}'. Verify new vars in your configured backend."
+    echo "  ℹ️  SOPS chain check skipped — deploy.secrets_backend is '{DEPLOY_SECRETS_BACKEND}'. Verify new vars in your configured backend."
   fi
 fi
 ```
@@ -249,7 +249,7 @@ Generate a checklist based on what's in the deploy:
 - [ ] All PRs in this deploy have been reviewed
 - [ ] No open `needs-human` issues blocking deploy
 - [ ] {If migrations} Database backup verified
-- [ ] {If new env vars} Secrets backend ({deploy.secrets_backend}) updated with new vars; verify via your configured secrets chain
+- [ ] {If new env vars} Secrets backend ({DEPLOY_SECRETS_BACKEND}) updated with new vars; verify via your configured secrets chain
 - [ ] {If traefik changes} Routing tested locally
 
 ### Deploy Command
