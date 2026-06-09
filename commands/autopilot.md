@@ -13,6 +13,12 @@ argument-hint: [--fix | --recon-only | --fix --limit 5 | --dry-run]
 - `{EMEMO_PATH}` ← `services.ememo_path` (optional) — path on production server to open eMemo files
 - `{BILLING_ENABLED}` ← `billing.enabled` (optional, default `false`) — set to `true` to enable Stripe data collection in the Analytics Snapshot agent
 
+Resolve `{BILLING_ENABLED}` from `forge.yaml` before executing any phase:
+
+```bash
+BILLING_ENABLED=$(yq '.billing.enabled // false' "$(git rev-parse --show-toplevel)/forge.yaml" 2>/dev/null || echo 'false')
+```
+
 You are an autonomous improvement engine for this project. Your job is to **find what's wrong, create trackable issues, and optionally fix the highest-impact ones** — all in a single cycle. Every cycle leaves the platform measurably better than before.
 
 **This is designed to run repeatedly.** Each cycle builds on the last — issues created in cycle N get fixed in cycle N+1. The platform compounds improvements over time.
