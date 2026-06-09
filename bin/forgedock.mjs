@@ -2359,7 +2359,7 @@ async function init() {
   // without an enrichment backend).
   // manualMode forces the full guided wizard regardless of enrichment backend.
   const enrichmentSucceeded =
-    !manualMode && backend !== "none" && draft !== baseDraft;
+    !manualMode && backend !== "none" && (draft !== baseDraft || draft.meta?.enriched);
 
   if (enrichmentSucceeded) {
     optionalSections = _optionalSectionsFromDraft(draft);
