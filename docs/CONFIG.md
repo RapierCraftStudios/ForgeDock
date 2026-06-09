@@ -12,6 +12,21 @@ echo "forge.yaml" >> .gitignore  # if your credentials path is sensitive
 
 ---
 
+## CLI Flags for `init`
+
+`npx forgedock init` accepts two optional flags that change how configuration is generated:
+
+| Flag | Behavior |
+|------|----------|
+| `--manual` | Skips AI autopilot enrichment entirely. Runs the full per-field guided wizard so power users can review and set every field by hand. Detection still runs to provide defaults, but no AI enrichment is applied. |
+| `--verbose` | Surfaces each field's detection source and confidence rationale during the init flow. Helpful for understanding where ForgeDock inferred values from (e.g. `git remote`, `package.json`, `gh api`). |
+
+The two flags can be combined: `npx forgedock init --manual --verbose` runs the full guided wizard with field provenance shown at each step.
+
+The default (`npx forgedock init` with no flags) remains the zero-question autopilot: AI enrichment fills in everything it can, and you review the result on a single annotated screen.
+
+---
+
 ## Schema Overview
 
 | Section | Required | Purpose |
