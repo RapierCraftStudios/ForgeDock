@@ -72,6 +72,10 @@ const TARGET_DIR = join(HOME, ".claude", "commands");
 const args = process.argv.slice(2);
 const command = args[0];
 const forceYes = args.includes("--yes") || args.includes("-y");
+// --manual: bypass autopilot enrichment and run the full per-field guided wizard.
+// --verbose: surface field detection sources and confidences during the init flow.
+const manualMode = args.includes("--manual");
+const verboseMode = args.includes("--verbose");
 
 // ---------------------------------------------------------------------------
 // Version — read dynamically from package.json
@@ -2314,12 +2318,20 @@ async function init() {
   // ---------------------------------------------------------------------------
   // Step 2: Backend-selection ladder — enrich the draft when possible.
   // Ladder: skill (Claude Code session) → api (ANTHROPIC_API_KEY) → none (baseline)
+  // --manual bypasses enrichment entirely: power users get the full guided wizard
+  // with unmodified detection results so they can review every field by hand.
   // ---------------------------------------------------------------------------
 
   const backend = _detectBackend();
   let draft = baseDraft;
 
-  if (backend === "skill") {
+  if (manualMode) {
+    // Escape hatch: skip all AI enrichment and force the full per-field wizard.
+    console.log(
+      `  ${CYAN}--manual${RESET} mode: skipping autopilot enrichment — full guided wizard`,
+    );
+    console.log("");
+  } else if (backend === "skill") {
     const s = spinner("Enriching config via skill backend…");
     draft = await _enrichViaSkill(baseDraft, cwd);
     const enriched = draft !== baseDraft || draft.meta?.enriched;
@@ -2340,7 +2352,7 @@ async function init() {
         : `${yellow("[!]")} API enrichment unavailable — using detected baseline`,
     );
   }
-  // backend === 'none': proceed silently with the deterministic baseline
+  // backend === 'none' (or manualMode): proceed silently with the deterministic baseline
 
   const detectedOwner = draft.project.owner.value;
   const detectedRepo = draft.project.repo.value;
@@ -2397,9 +2409,12 @@ async function init() {
   // Show the annotated review screen. The enriched draft populates confidence
   // badges from both init-detect and init-enrich. Returns accepted/edited values
   // plus the list of field keys that had low confidence (for TODO comment injection).
+  // --verbose: pass showSources:true so the screen surfaces each field's detection
+  // source and confidence rationale (the .source and .why metadata from ConfigDraft).
   const reviewed = await annotatedReviewScreen(draft, {
     hasExistingConfig,
     existingContent,
+    showSources: verboseMode,
   });
 
   const ownerInput = _sanitizeYamlValue(reviewed.owner || detectedOwner);
@@ -2423,7 +2438,9 @@ async function init() {
   // Only sections with medium-or-higher confidence are included; low-confidence
   // sections remain commented-out in the output (no behaviour change for users
   // without an enrichment backend).
-  const enrichmentSucceeded = backend !== "none" && draft !== baseDraft;
+  // manualMode forces the full guided wizard regardless of enrichment backend.
+  const enrichmentSucceeded =
+    !manualMode && backend !== "none" && draft !== baseDraft;
 
   if (enrichmentSucceeded) {
     optionalSections = _optionalSectionsFromDraft(draft);
@@ -4974,6 +4991,12 @@ function help() {
   console.log(`  ${CYAN}npx forgedock install${RESET}    Install commands`);
   console.log(
     `  ${CYAN}npx forgedock init${RESET}       Generate forge.yaml config for your project`,
+  );
+  console.log(
+    `  ${CYAN}npx forgedock init --manual${RESET}   Skip autopilot enrichment; run full per-field guided wizard`,
+  );
+  console.log(
+    `  ${CYAN}npx forgedock init --verbose${RESET}  Show detection sources and confidence during init`,
   );
   console.log(
     `  ${CYAN}npx forgedock validate${RESET}   Validate forge.yaml configuration`,
