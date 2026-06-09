@@ -14,6 +14,22 @@ Performs comprehensive review of `staging` before merging to `main`. Handles lar
 
 ---
 
+## Config Resolution
+
+Read `forge.yaml` to resolve branch names before running any commands:
+
+```bash
+CONFIG_FILE="${FORGE_CONFIG:-forge.yaml}"
+GH_REPO=$(yq '.project.owner + "/" + .project.repo' "$CONFIG_FILE")
+GH_FLAG="-R $GH_REPO"
+DEFAULT_BRANCH=$(yq '.branches.default' "$CONFIG_FILE")
+STAGING_BRANCH=$(yq '.branches.staging' "$CONFIG_FILE")
+```
+
+All `$DEFAULT_BRANCH` and `$STAGING_BRANCH` references below are populated from `forge.yaml`.
+
+---
+
 ## Evidence-Based Review Protocol (ALL Agents)
 
 ### Diff-First Approach
@@ -67,22 +83,6 @@ Append at end of every agent comment:
 Include ALL findings (CONFIRMED, LIKELY, POSSIBLE). One line per finding, sequential numbering.
 
 **Prefixes**: SEC, AUTH, BILL, CONC, SCRP, FE, API, DB, INFRA, BUG, QA, REG
-
----
-
-## Config Resolution
-
-Read `forge.yaml` to resolve branch names before running any commands:
-
-```bash
-CONFIG_FILE="${FORGE_CONFIG:-forge.yaml}"
-GH_REPO=$(yq '.project.owner + "/" + .project.repo' "$CONFIG_FILE")
-GH_FLAG="-R $GH_REPO"
-DEFAULT_BRANCH=$(yq '.branches.default' "$CONFIG_FILE")
-STAGING_BRANCH=$(yq '.branches.staging' "$CONFIG_FILE")
-```
-
-All `$DEFAULT_BRANCH` and `$STAGING_BRANCH` references below are populated from `forge.yaml`.
 
 ---
 
