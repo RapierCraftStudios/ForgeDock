@@ -1,30 +1,29 @@
 ---
-description: Show what will deploy next â€” diff staging vs main with issue/PR summary, risk assessment, and deploy checklist
+description: Show what will deploy next — diff staging vs main with issue/PR summary, risk assessment, and deploy checklist
 argument-hint: [staging | milestone/{slug} | compare {branch}]
 ---
-
 <!-- SPDX-FileCopyrightText: Copyright (c) RapierCraft Studios -->
 <!-- SPDX-License-Identifier: AGPL-3.0-or-later -->
 
-# /deploy-info â€” Pre-Deploy Summary
+# /deploy-info — Pre-Deploy Summary
 
 **Input**: $ARGUMENTS (default: `staging`)
 
 **Config variables used by this command** (set in `forge.yaml`):
-- `{REPO_PATH}` â† `paths.root` â€” project repository root
-- `{HEALTH_ENDPOINT}` â† `services.health_endpoint` (optional) â€” URL used in post-deploy health check
+- `{REPO_PATH}` ← `paths.root` — project repository root
+- `{HEALTH_ENDPOINT}` ← `services.health_endpoint` (optional) — URL used in post-deploy health check
 
-You are the pipeline's deploy awareness layer. Before the user merges staging â†’ main (triggering CI/CD deployment), this command shows exactly what's going out: which PRs, which issues, what changed, and what risks exist.
+You are the pipeline's deploy awareness layer. Before the user merges staging → main (triggering CI/CD deployment), this command shows exactly what's going out: which PRs, which issues, what changed, and what risks exist.
 
 **Agent model policy**: Default `model: "sonnet"`. If Sonnet is rate-limited, fall back to `model: "opus"`. User can override with `--model <name>`.
 
-**NEVER use plan mode (EnterPlanMode)** â€” it breaks execution context.
+**NEVER use plan mode (EnterPlanMode)** — it breaks execution context.
 
 ---
 
 ## Phase 0: Review-Finding Readiness Check
 
-**Purpose**: Surface open review-finding issues before the deploy workflow begins. Stagingâ†’main PRs that ship with open findings have a 50%+ failure rate â€” this check identifies the readiness gap at the earliest possible point. <!-- Added: forge#372 -->
+**Purpose**: Surface open review-finding issues before the deploy workflow begins. Staging→main PRs that ship with open findings have a 50%+ failure rate — this check identifies the readiness gap at the earliest possible point. <!-- Added: forge#372 -->
 
 **Non-blocking**: This phase emits a warning but does NOT block. Deploy-info is an informational tool. The authoritative gate is Phase 0A of `/review-pr-staging`.
 
@@ -48,7 +47,7 @@ MERGE_PRS=$(git log origin/$TARGET..origin/$SOURCE --merges --oneline \
 ALL_PR_NUMBERS=$(echo "$BUNDLE_PRS $MERGE_PRS" | tr ' ' '\n' | sort -u | grep -E '^[0-9]+$')
 
 if [ -z "$ALL_PR_NUMBERS" ]; then
-  echo "â„¹ï¸  No PRs detected in bundle â€” skipping review-finding readiness check."
+  echo "ℹ️  No PRs detected in bundle — skipping review-finding readiness check."
 else
   # Step 2: Check for open review-finding issues referencing each PR
   OPEN_FINDINGS_SUMMARY=""
@@ -71,25 +70,22 @@ ${OPEN_FINDINGS}"
   # Step 3: Report readiness state
   if [ -n "$OPEN_FINDINGS_SUMMARY" ]; then
     echo ""
-    echo "âš ï¸  READINESS WARNING â€” Open review-finding issues exist for PRs in this bundle."
+    echo "⚠️  READINESS WARNING — Open review-finding issues exist for PRs in this bundle."
     echo ""
     echo "$OPEN_FINDINGS_SUMMARY"
     echo ""
     echo "These findings will block deploy when /review-pr-staging runs (Phase 0A gate)."
     echo "Fix the open findings and merge fixes to staging before deploying."
-    echo "Or post 'OVERRIDE: shipping with open findings â€” <reason>' on the stagingâ†’main PR to bypass."
+    echo "Or post 'OVERRIDE: shipping with open findings — <reason>' on the staging→main PR to bypass."
     echo ""
-    echo "READINESS: NOT READY â€” open findings present"
+    echo "READINESS: NOT READY — open findings present"
   else
-    echo "âœ… Review-finding readiness: READY â€” no open findings for PRs in this bundle."
+    echo "✅ Review-finding readiness: READY — no open findings for PRs in this bundle."
   fi
 fi
 ```
 
 ---
-
-<!-- SPDX-FileCopyrightText: Copyright (c) RapierCraft Studios -->
-<!-- SPDX-License-Identifier: AGPL-3.0-or-later -->
 
 ## Phase 1: Resolve What to Compare
 
@@ -110,7 +106,7 @@ TARGET=${TARGET_BRANCH:-main}
 # Check if there are any differences
 AHEAD=$(git rev-list --count origin/$TARGET..origin/$SOURCE)
 if [ "$AHEAD" -eq 0 ]; then
-  echo "âœ… $SOURCE is up to date with $TARGET â€” nothing to deploy."
+  echo "✅ $SOURCE is up to date with $TARGET — nothing to deploy."
   exit 0
 fi
 echo "$AHEAD commits ahead"
@@ -179,7 +175,7 @@ done | sort
 # Are there new migrations?
 MIGRATIONS=$(git diff --name-only origin/$TARGET..origin/$SOURCE | grep "^infra/migrations/" | sort)
 if [ -n "$MIGRATIONS" ]; then
-  echo "âš ï¸ DATABASE MIGRATIONS INCLUDED:"
+  echo "⚠️ DATABASE MIGRATIONS INCLUDED:"
   echo "$MIGRATIONS"
   # Show migration content for review
   for m in $MIGRATIONS; do
@@ -190,9 +186,6 @@ fi
 ```
 
 ---
-
-<!-- SPDX-FileCopyrightText: Copyright (c) RapierCraft Studios -->
-<!-- SPDX-License-Identifier: AGPL-3.0-or-later -->
 
 ## Phase 3: Risk Assessment
 
@@ -206,9 +199,9 @@ Analyze the deploy payload and flag risks:
 | `shared/` changes | LOW | Restart-only deploy possible (no rebuild) |
 | `.env.example` changes | HIGH | Verify SOPS + decrypt-secrets has new vars |
 | `docker-compose.prod.yml` changes | HIGH | Review infrastructure changes carefully |
-| `infra/traefik/` changes | HIGH | Routing changes â€” test before full deploy |
+| `infra/traefik/` changes | HIGH | Routing changes — test before full deploy |
 | 10+ PRs in one deploy | MEDIUM | Consider deploying in smaller batches |
-| P0 fixes included | LOW | Good â€” these should deploy ASAP |
+| P0 fixes included | LOW | Good — these should deploy ASAP |
 | New endpoints added | MEDIUM | Verify auth model and proxy wiring |
 
 ### Automated Checks
@@ -217,12 +210,12 @@ Analyze the deploy payload and flag risks:
 # Check for new env vars that might not be in SOPS
 NEW_ENV=$(git diff origin/$TARGET..origin/$SOURCE -- '.env.example' | grep "^+" | grep -v "^+++" | grep -v "^#")
 if [ -n "$NEW_ENV" ]; then
-  echo "âš ï¸ NEW ENVIRONMENT VARIABLES â€” verify they exist in SOPS:"
+  echo "⚠️ NEW ENVIRONMENT VARIABLES — verify they exist in SOPS:"
   echo "$NEW_ENV"
   # Cross-check with decrypt-secrets.sh
   for var in $(echo "$NEW_ENV" | grep -oP '^\+\K[A-Z_]+'); do
     if ! grep -q "$var" scripts/decrypt-secrets.sh 2>/dev/null; then
-      echo "  âŒ $var NOT in decrypt-secrets.sh ENV_MAPPING"
+      echo "  ❌ $var NOT in decrypt-secrets.sh ENV_MAPPING"
     fi
   done
 fi
@@ -246,7 +239,7 @@ Generate a checklist based on what's in the deploy:
 
 ### Deploy Command
 ```
-# Standard deploy (merge staging â†’ main via GitHub web UI)
+# Standard deploy (merge staging → main via GitHub web UI)
 # CI/CD auto-triggers on push to main
 
 # Or manual trigger for specific services:
@@ -262,13 +255,10 @@ gh workflow run hotfix-deploy.yml --ref main -f services={affected_services} -f 
 
 ---
 
-<!-- SPDX-FileCopyrightText: Copyright (c) RapierCraft Studios -->
-<!-- SPDX-License-Identifier: AGPL-3.0-or-later -->
-
 ## Phase 5: Output Summary
 
 ```
-## Deploy Summary: {SOURCE} â†’ {TARGET}
+## Deploy Summary: {SOURCE} → {TARGET}
 
 **Commits**: {N} | **PRs**: {N} | **Issues closed**: {N} | **Files changed**: {N}
 
@@ -303,6 +293,6 @@ gh workflow run hotfix-deploy.yml --ref main -f services={affected_services} -f 
 
 ---
 
-**Ready to deploy?** Merge staging â†’ main via GitHub web UI, or run:
+**Ready to deploy?** Merge staging → main via GitHub web UI, or run:
 `gh workflow run hotfix-deploy.yml --ref staging -f services={services} -f reason="Batch deploy"`
 ```

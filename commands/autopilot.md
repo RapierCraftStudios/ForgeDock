@@ -1,27 +1,26 @@
 ---
-description: Autonomous platform improvement cycle â€” recon, triage, fix, report. Runs recon+triage by default; pass --fix to also pick up and fix top issues. Human gates all deploys.
+description: Autonomous platform improvement cycle — recon, triage, fix, report. Runs recon+triage by default; pass --fix to also pick up and fix top issues. Human gates all deploys.
 argument-hint: [--fix | --recon-only | --fix --limit 5 | --dry-run]
 ---
-
 <!-- SPDX-FileCopyrightText: Copyright (c) RapierCraft Studios -->
 <!-- SPDX-License-Identifier: AGPL-3.0-or-later -->
 
-# /autopilot â€” Recursive Platform Improvement Cycle
+# /autopilot — Recursive Platform Improvement Cycle
 
 **Input**: $ARGUMENTS (default: recon + triage + report, no fixing)
 
 **Config variables used by this command** (set in `forge.yaml`):
-- `{CREDENTIALS_FILE}` â† `paths.credentials.file` (optional) â€” path to credentials YAML for analytics APIs
-- `{SERVER_SSH}` â† `services.server_ssh` (optional) â€” SSH target for production server health checks (e.g., `ubuntu@1.2.3.4`)
-- `{EMEMO_PATH}` â† `services.ememo_path` (optional) â€” path on production server to open eMemo files
+- `{CREDENTIALS_FILE}` ← `paths.credentials.file` (optional) — path to credentials YAML for analytics APIs
+- `{SERVER_SSH}` ← `services.server_ssh` (optional) — SSH target for production server health checks (e.g., `ubuntu@1.2.3.4`)
+- `{EMEMO_PATH}` ← `services.ememo_path` (optional) — path on production server to open eMemo files
 
-You are an autonomous improvement engine for this project. Your job is to **find what's wrong, create trackable issues, and optionally fix the highest-impact ones** â€” all in a single cycle. Every cycle leaves the platform measurably better than before.
+You are an autonomous improvement engine for this project. Your job is to **find what's wrong, create trackable issues, and optionally fix the highest-impact ones** — all in a single cycle. Every cycle leaves the platform measurably better than before.
 
-**This is designed to run repeatedly.** Each cycle builds on the last â€” issues created in cycle N get fixed in cycle N+1. The platform compounds improvements over time.
+**This is designed to run repeatedly.** Each cycle builds on the last — issues created in cycle N get fixed in cycle N+1. The platform compounds improvements over time.
 
-**NEVER use plan mode (EnterPlanMode)** â€” it breaks execution context.
+**NEVER use plan mode (EnterPlanMode)** — it breaks execution context.
 
-**Agent model policy**: Default `model: "sonnet"`. If Sonnet is rate-limited, fall back to `model: "opus"`. User can override with `--model <name>`. Pass the resolved model in every `Agent`/`Task` tool call. Each agent prompt is scoped to a specific data source or issue â€” the model executes the explicit steps without needing broad inference.
+**Agent model policy**: Default `model: "sonnet"`. If Sonnet is rate-limited, fall back to `model: "opus"`. User can override with `--model <name>`. Pass the resolved model in every `Agent`/`Task` tool call. Each agent prompt is scoped to a specific data source or issue — the model executes the explicit steps without needing broad inference.
 
 ---
 
@@ -33,7 +32,7 @@ You are an autonomous improvement engine for this project. Your job is to **find
 | `--fix` | Also run Phase 4 (pick top issues, fix via /work-on) |
 | `--fix --limit N` | Fix at most N issues (default: 3) |
 | `--recon-only` | Phase 1 only (data collection, no issue creation) |
-| `--dry-run` | Run everything but don't create issues or PRs â€” just report what would happen |
+| `--dry-run` | Run everything but don't create issues or PRs — just report what would happen |
 
 Parse `$ARGUMENTS` and set these variables:
 ```
@@ -45,9 +44,6 @@ DRY_RUN = true if --dry-run present
 
 ---
 
-<!-- SPDX-FileCopyrightText: Copyright (c) RapierCraft Studios -->
-<!-- SPDX-License-Identifier: AGPL-3.0-or-later -->
-
 ## Phase 0: Cycle Context
 
 **Goal**: Understand what happened since the last cycle.
@@ -57,7 +53,7 @@ DRY_RUN = true if --dry-run present
 ```bash
 echo "=== Autopilot Cycle: $(date -u +%Y-%m-%dT%H:%M:%SZ) ==="
 
-# Recent closed issues (last 3 days) â€” what was fixed recently?
+# Recent closed issues (last 3 days) — what was fixed recently?
 gh issue list --state closed --json number,title,labels,closedAt \
   --jq '[.[] | select(.closedAt > "'$(date -u -d '3 days ago' +%Y-%m-%dT%H:%M:%SZ)'")] | length' 2>/dev/null || echo "0"
 
@@ -88,7 +84,7 @@ gh issue list --state open --label P0 --json number,title --jq '.[] | "#\(.numbe
 
 If any P0 issues exist:
 - **STOP the normal cycle**
-- Print: `P0 issue(s) open â€” autopilot prioritizing these above all else`
+- Print: `P0 issue(s) open — autopilot prioritizing these above all else`
 - Set `FIX_TARGETS` to the P0 issue numbers
 - Skip to Phase 4 (fix mode, regardless of flags)
 
@@ -105,7 +101,7 @@ Spawn these as **background agents** (all `run_in_background=true`, all `model="
 **Agent: Production Health**
 ```
 Check production system health:
-1. SSH to check for open eMemos: if {SERVER_SSH} is configured, run: ssh {SERVER_SSH} "ls {EMEMO_PATH}/*-open-* 2>/dev/null" â€” skip this step if SERVER_SSH or EMEMO_PATH is not set in forge.yaml
+1. SSH to check for open eMemos: if {SERVER_SSH} is configured, run: ssh {SERVER_SSH} "ls {EMEMO_PATH}/*-open-* 2>/dev/null" — skip this step if SERVER_SSH or EMEMO_PATH is not set in forge.yaml
 2. If any exist, cat each one and summarize
 3. Check container health via MCP: get_production_status, run_production_health_check
 4. Check recent error logs: get_production_logs for api and worker (last 100 lines), grep for ERROR/CRITICAL
@@ -124,8 +120,8 @@ Pull scraping performance data:
 **Agent: CI/CD Health**
 ```
 Check CI pipeline health:
-1. gh run list --limit 30 â€” count failures by workflow name
-2. For each failed run: gh run view {id} --json jobs â€” identify which job failed
+1. gh run list --limit 30 — count failures by workflow name
+2. For each failed run: gh run view {id} --json jobs — identify which job failed
 3. Check if ecosystem-sync is consistently failing (known issue vs new)
 4. Return: failure rate, recurring failures, new failures
 ```
@@ -133,7 +129,7 @@ Check CI pipeline health:
 **Agent: Issue Backlog Health**
 ```
 Analyze GitHub issue backlog:
-1. gh issue list --state open --limit 200 â€” full list with labels, milestones, dates
+1. gh issue list --state open --limit 200 — full list with labels, milestones, dates
 2. Count by: priority (P0-P3), type (bug/feature/etc), milestone, age
 3. Find stale issues: open > 14 days, no workflow label, no recent comments
 4. Find orphaned issues: workflow:in-review but no open PR
@@ -141,12 +137,12 @@ Analyze GitHub issue backlog:
 6. Return: backlog summary, stale issues list, orphans, blockers
 ```
 
-**Agent: Analytics Snapshot** (lightweight â€” not the full /analytics audit)
+**Agent: Analytics Snapshot** (lightweight — not the full /analytics audit)
 ```
-Quick analytics pulse â€” just the key metrics, not a full audit:
+Quick analytics pulse — just the key metrics, not a full audit:
 1. Read credentials from {CREDENTIALS_FILE} (set via paths.credentials.file in forge.yaml)
-2. GSC: mcp__gsc__search_analytics for last 7 days â€” total clicks, impressions, avg position
-3. Stripe: mcp__stripe__retrieve_balance â€” current balance
+2. GSC: mcp__gsc__search_analytics for last 7 days — total clicks, impressions, avg position
+3. Stripe: mcp__stripe__retrieve_balance — current balance
 4. Return: clicks trend (up/down), any revenue, notable changes
 ```
 
@@ -166,9 +162,6 @@ RECON_DATA = {
 If `MODE == "recon-only"`, print RECON_DATA as a formatted report and **stop here**.
 
 ---
-
-<!-- SPDX-FileCopyrightText: Copyright (c) RapierCraft Studios -->
-<!-- SPDX-License-Identifier: AGPL-3.0-or-later -->
 
 ## Phase 2: Triage & Issue Creation
 
@@ -197,8 +190,8 @@ For each finding from RECON_DATA, assign:
 | Error spike (>5x normal) | P1 | bug |
 | Tier degradation (>20% drop) | P2 | bug |
 | CI consistently failing | P2 | bug |
-| Stale issue (>14 days) | â€” | (comment, don't create new issue) |
-| Orphaned workflow state | â€” | (fix via /cleanup, not new issue) |
+| Stale issue (>14 days) | — | (comment, don't create new issue) |
+| Orphaned workflow state | — | (fix via /cleanup, not new issue) |
 | Analytics decline (>20% week-over-week) | P2 | improvement |
 | New anti-bot pattern detected | P2 | feature |
 
@@ -217,13 +210,13 @@ gh issue create \
 
 ## Root Cause (if known)
 
-{What's causing the issue â€” specific code path, config gap, or behavior. If unknown: "Root cause unknown â€” investigation needed."}
+{What's causing the issue — specific code path, config gap, or behavior. If unknown: "Root cause unknown — investigation needed."}
 
 ## Affected Files
 
 Files that need changes:
-1. `{filepath}` â€” {what needs to change}
-2. `{filepath}` â€” {what needs to change}
+1. `{filepath}` — {what needs to change}
+2. `{filepath}` — {what needs to change}
 
 ## Acceptance Criteria
 
@@ -236,11 +229,11 @@ Found by \`/autopilot\` cycle on {DATE}.
 
 ## Evidence
 
-{Logs, metrics, error messages â€” concrete data, not speculation}
+{Logs, metrics, error messages — concrete data, not speculation}
 
 ## Suggested Approach
 
-{Brief suggestion â€” the /work-on investigation will validate this}
+{Brief suggestion — the /work-on investigation will validate this}
 
 ---
 *Created by autopilot recon cycle. Will be validated before any fix is applied.*
@@ -270,9 +263,6 @@ Store list of created issues as `CREATED_ISSUES`.
 
 ---
 
-<!-- SPDX-FileCopyrightText: Copyright (c) RapierCraft Studios -->
-<!-- SPDX-License-Identifier: AGPL-3.0-or-later -->
-
 ## Phase 3: Cycle Report
 
 **Goal**: Present findings and actions taken to the user.
@@ -280,7 +270,7 @@ Store list of created issues as `CREATED_ISSUES`.
 Print a structured report:
 
 ```markdown
-## Autopilot Cycle Report â€” {DATE}
+## Autopilot Cycle Report — {DATE}
 
 ### Production Health
 - Containers: {all healthy / N unhealthy}
@@ -339,7 +329,7 @@ Pick the top `FIX_LIMIT` issues by this priority:
 
 **Exclude** from fix targets:
 - Issues with `needs-human` label
-- Issues in milestones (feature lane â€” don't autopilot feature work)
+- Issues in milestones (feature lane — don't autopilot feature work)
 - Issues already in `workflow:building` or `workflow:in-review`
 - Issues with open dependencies
 
@@ -351,7 +341,7 @@ gh issue list --state open --label "bug" --limit 50 --json number,title,labels,c
 
 ### 4B: Present fix plan to user
 
-**MANDATORY CHECKPOINT â€” do NOT proceed without user confirmation.**
+**MANDATORY CHECKPOINT — do NOT proceed without user confirmation.**
 
 ```markdown
 ## Autopilot Fix Plan
@@ -362,8 +352,8 @@ I'll run `/work-on` for these {N} issues:
 |---|-------|----------|-----------------|
 | {number} | {title} | {priority} | {small/medium/large} |
 
-Each issue goes through: investigate â†’ validate â†’ build â†’ review â†’ merge to staging.
-Nothing merges to `main` â€” you deploy when ready.
+Each issue goes through: investigate → validate → build → review → merge to staging.
+Nothing merges to `main` — you deploy when ready.
 
 **Proceed?** (yes / adjust / skip)
 ```
@@ -378,7 +368,7 @@ For each approved fix target, invoke `/work-on` via the Skill tool:
 Skill(skill: "work-on", args: "{ISSUE_NUMBER}")
 ```
 
-Run them **sequentially** (not parallel) â€” each `/work-on` invocation is heavyweight and benefits from full context. If one fails, continue to the next.
+Run them **sequentially** (not parallel) — each `/work-on` invocation is heavyweight and benefits from full context. If one fails, continue to the next.
 
 After each `/work-on` completes, record the result:
 ```
@@ -402,26 +392,23 @@ FIX_RESULTS.push({
 **Merged to staging**: {count}
 **Needs attention**: {list}
 
-When ready to deploy, merge `staging` â†’ `main` via GitHub.
+When ready to deploy, merge `staging` → `main` via GitHub.
 ```
 
 ---
 
-<!-- SPDX-FileCopyrightText: Copyright (c) RapierCraft Studios -->
-<!-- SPDX-License-Identifier: AGPL-3.0-or-later -->
-
 ## Safety Rules
 
-1. **NEVER merge to `main`** â€” all fixes go to `staging`. User deploys manually.
-2. **NEVER skip investigation** â€” every fix goes through full `/work-on` (investigate â†’ validate â†’ build â†’ review â†’ merge).
-3. **NEVER fix `needs-human` issues** â€” these require human judgment (legal, external services, etc.).
-4. **NEVER fix milestone issues** â€” feature work is scoped to milestones, not autopilot.
-5. **NEVER create duplicate issues** â€” always dedup against existing open issues first.
-6. **NEVER run more than FIX_LIMIT fixes per cycle** â€” prevent runaway resource consumption.
-7. **If a fix fails, move on** â€” don't retry. Log it and let the next cycle or human handle it.
-8. **DRY_RUN means NO side effects** â€” no issues created, no PRs, no label changes. Report only.
-9. **P0 overrides everything** â€” if P0 exists, skip normal recon and fix P0 immediately.
-10. **Always gate fixes on user approval** â€” Phase 4B checkpoint is non-negotiable.
+1. **NEVER merge to `main`** — all fixes go to `staging`. User deploys manually.
+2. **NEVER skip investigation** — every fix goes through full `/work-on` (investigate → validate → build → review → merge).
+3. **NEVER fix `needs-human` issues** — these require human judgment (legal, external services, etc.).
+4. **NEVER fix milestone issues** — feature work is scoped to milestones, not autopilot.
+5. **NEVER create duplicate issues** — always dedup against existing open issues first.
+6. **NEVER run more than FIX_LIMIT fixes per cycle** — prevent runaway resource consumption.
+7. **If a fix fails, move on** — don't retry. Log it and let the next cycle or human handle it.
+8. **DRY_RUN means NO side effects** — no issues created, no PRs, no label changes. Report only.
+9. **P0 overrides everything** — if P0 exists, skip normal recon and fix P0 immediately.
+10. **Always gate fixes on user approval** — Phase 4B checkpoint is non-negotiable.
 
 ---
 
@@ -429,27 +416,24 @@ When ready to deploy, merge `staging` â†’ `main` via GitHub.
 
 Each cycle feeds the next:
 ```
-Cycle N: CI recon detects recurring lint failures across 3 files â†’ autopilot triage creates issue #X
-Cycle N+1: autopilot picks up #X â†’ /work-on adds pre-commit hook â†’ merged to staging
-Cycle N+2: CI recon shows lint failures resolved â€” no new issue needed
+Cycle N: CI recon detects recurring lint failures across 3 files → autopilot triage creates issue #X
+Cycle N+1: autopilot picks up #X → /work-on adds pre-commit hook → merged to staging
+Cycle N+2: CI recon shows lint failures resolved — no new issue needed
 ```
 
 ```
-Cycle N: /analytics finds CTR dropped on /pricing â†’ creates issue #Y
-Cycle N+1: autopilot picks up #Y â†’ /work-on rewrites SERP snippet â†’ merged
-Cycle N+2: /analytics shows CTR recovered â†’ improvement confirmed
+Cycle N: /analytics finds CTR dropped on /pricing → creates issue #Y
+Cycle N+1: autopilot picks up #Y → /work-on rewrites SERP snippet → merged
+Cycle N+2: /analytics shows CTR recovered → improvement confirmed
 ```
 
-The platform gets better every cycle. Issues that aren't picked up age and rise in priority. Issues that keep recurring indicate a deeper structural problem â€” autopilot will eventually create a "meta" issue about the pattern.
+The platform gets better every cycle. Issues that aren't picked up age and rise in priority. Issues that keep recurring indicate a deeper structural problem — autopilot will eventually create a "meta" issue about the pattern.
 
 ---
-
-<!-- SPDX-FileCopyrightText: Copyright (c) RapierCraft Studios -->
-<!-- SPDX-License-Identifier: AGPL-3.0-or-later -->
 
 ## Operational Notes
 
 - **Runtime**: Recon-only ~3-5 min. Full cycle with fixes ~15-45 min depending on issue count.
 - **Token budget**: Recon is cheap (mostly MCP + API calls). Fixes are expensive (full /work-on per issue).
-- **Idempotent**: Safe to run multiple times â€” dedup prevents duplicate issues, /work-on resumes from checkpoints.
+- **Idempotent**: Safe to run multiple times — dedup prevents duplicate issues, /work-on resumes from checkpoints.
 - **Pairs with /loop**: Run `/loop 4h /autopilot` for continuous improvement, or `/loop 4h /autopilot --fix --limit 2` for autonomous fixing with a human checkpoint every cycle.
