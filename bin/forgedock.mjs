@@ -732,10 +732,14 @@ async function runPrerequisiteChecklist() {
       // Try to get primary org from gh api
       let orgLabel = "";
       try {
-        const orgsJson = execSync("gh api /user/orgs --jq '.[0].login'", {
-          encoding: "utf-8",
-          stdio: ["pipe", "pipe", "pipe"],
-        }).trim();
+        const orgsJson = execFileSync(
+          "gh",
+          ["api", "/user/orgs", "--jq", ".[0].login"],
+          {
+            encoding: "utf-8",
+            stdio: ["pipe", "pipe", "pipe"],
+          },
+        ).trim();
         if (orgsJson && orgsJson !== "null" && orgsJson !== "") {
           orgLabel = ` (${orgsJson})`;
         }
