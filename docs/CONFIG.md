@@ -468,6 +468,96 @@ Do **not** mix the two patterns for the same block of variables (e.g., `yq` with
 
 ---
 
+## ConfigDraft Contract
+
+`ConfigDraft` is the shared data structure emitted by `bin/init-detect.mjs` and consumed by the AI enrichment backends (`init-enrich`) and the annotated review renderer (`review-render`). It mirrors the required sections of `forge.yaml` at a per-field granularity, adding provenance and confidence metadata.
+
+### Field shape
+
+Every leaf value in a `ConfigDraft` is a **ConfigField** object:
+
+```ts
+{
+  value:      string,            // The detected or inferred value
+  confidence: "high" | "medium" | "low",  // How certain the detection was
+  source:     string,            // Human-readable label for where the value came from
+  why:        string,            // Plain-language explanation of why this value was chosen
+}
+```
+
+**Confidence levels:**
+
+| Level | Meaning |
+|-------|---------|
+| `"high"` | Verified from a concrete, unambiguous source (e.g., parsed from the git remote URL) |
+| `"medium"` | Inferred from available signals; likely correct but not guaranteed (e.g., current branch name, name derived from repo slug) |
+| `"low"` | Guessed default — no supporting evidence was found (e.g., no git remote, not a git repo) |
+
+### ConfigDraft shape
+
+```js
+{
+  project: {
+    owner: ConfigField,   // GitHub org or username
+    repo:  ConfigField,   // Repository name (without owner prefix)
+    name:  ConfigField,   // Human-readable project name
+  },
+  paths: {
+    root:         ConfigField,  // Absolute path to the project root
+    worktreeBase: ConfigField,  // Absolute path to the git worktree base dir
+  },
+  branches: {
+    default: ConfigField,  // Default branch (e.g. "main")
+    staging: ConfigField,  // Staging branch for fast-lane PRs
+  },
+  meta: {
+    remoteDetected: boolean,  // true iff a parseable git remote URL was found
+  },
+}
+```
+
+### Example output (high-confidence repo)
+
+```js
+{
+  project: {
+    owner: { value: "acme-org",    confidence: "high",   source: "git remote origin (SSH)",   why: "Parsed from SSH remote URL: git@github.com:acme-org/acme-platform.git" },
+    repo:  { value: "acme-platform", confidence: "high",   source: "git remote origin (SSH)",   why: "Parsed from SSH remote URL: git@github.com:acme-org/acme-platform.git" },
+    name:  { value: "Acme Platform", confidence: "medium", source: "derived from repo slug",     why: "Title-cased version of repo name 'acme-platform' (split on hyphens/underscores)" },
+  },
+  paths: {
+    root:         { value: "/home/user/acme",                      confidence: "high", source: "process.cwd()", why: "Absolute path passed to detectConfig — the project root" },
+    worktreeBase: { value: "/home/user/acme/.claude/worktrees",    confidence: "high", source: "derived from root", why: "Convention: {root}/.claude/worktrees" },
+  },
+  branches: {
+    default: { value: "main",    confidence: "high",   source: "git symbolic-ref refs/remotes/origin/HEAD", why: "Remote HEAD points to main" },
+    staging: { value: "staging", confidence: "high",   source: "git branch -r",                             why: "Found 'origin/staging' in the remote branch listing" },
+  },
+  meta: { remoteDetected: true },
+}
+```
+
+### Producing a ConfigDraft
+
+```js
+import { detectConfig } from "./bin/init-detect.mjs";
+
+const draft = await detectConfig(process.cwd());
+// draft.project.owner.value  → "acme-org"
+// draft.project.owner.confidence  → "high"
+```
+
+`detectConfig(cwd)` is the sole public API. It never throws — every error path produces a `low`-confidence default.
+
+### Consuming a ConfigDraft
+
+Downstream consumers read `field.value` for the raw value and `field.confidence` to decide how to handle it:
+
+- **`init-enrich`** (AI enrichment): passes `low`- and `medium`-confidence fields to the AI backend to raise their confidence; leaves `high`-confidence fields untouched.
+- **`review-render`** (TUI review screen): shows each field with its source and why; highlights `low`-confidence fields with a `# TODO(forgedock:<field>)` annotation in the generated YAML.
+
+---
+
 ## CLAUDE.md Integration
 
 ForgeDock can inject a managed usage block into your project's `CLAUDE.md` so every Claude Code session opened in the repo automatically knows that ForgeDock drives development here and which commands to use.
