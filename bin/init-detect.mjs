@@ -2,7 +2,7 @@
 /**
  * init-detect.mjs — Pure deterministic config detection for ForgeDock.
  *
- * Exports a single async function: detectConfig(cwd)
+ * Exports a single function: detectConfig(cwd)
  *
  * Returns a ConfigDraft: a structured object mirroring forge.yaml's required
  * sections (project, paths, branches) where every leaf is:
@@ -16,7 +16,7 @@
  * Contract guarantees:
  *   - Pure: no prompts, no writes; reads only git metadata and the filesystem
  *   - Safe: every try/catch degrades to "low" confidence defaults, never throws
- *   - Isolated: imports only Node builtins (child_process, path, os)
+ *   - Isolated: imports only Node builtins (child_process, path)
  *   - Testable: inject `cwd` to point at a fixture repo and assert the draft
  */
 
