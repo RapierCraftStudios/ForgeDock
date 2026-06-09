@@ -9,12 +9,17 @@
  * Exports:
  *   resolveState(dir)          → 'managed-active' | 'managed-optedout' | 'unmanaged'
  *   setOptOut(dir, optedOut)   → Promise<void>  (adds/removes dir from opt-out set)
+ *   nudgeSeen(dir)             → boolean  (true if nudge was already shown for dir)
+ *   markNudgeSeen(dir)         → Promise<void>  (records that nudge was shown for dir)
  *
  * Registry file: ~/.claude/forgedock/registry.json
  * Registry schema:
  *   {
  *     "version": 1,
  *     "optedOut": {
+ *       "/absolute/path/to/dir": { "at": "<ISO-8601 timestamp>" }
+ *     },
+ *     "nudgeSeen": {
  *       "/absolute/path/to/dir": { "at": "<ISO-8601 timestamp>" }
  *     }
  *   }
@@ -26,6 +31,8 @@
  *   - Opt-out wins over managed: a managed+opted-out directory is silenced.
  *   - Missing or corrupt registry.json is treated as an empty opt-out set — the
  *     registry always fails open (never blocks a Claude Code session).
+ *   - A nudge is shown at most once per unmanaged directory; `nudgeSeen` tracks
+ *     which directories have already received the nudge.
  *
  * Contract guarantees:
  *   - Safe: every try/catch degrades gracefully; resolveState never throws
@@ -64,10 +71,10 @@ const REGISTRY_PATH = join(REGISTRY_DIR, "registry.json");
  * Empty registry structure — returned whenever the file is missing or corrupt.
  * Using a factory function avoids shared mutable state across calls.
  *
- * @returns {{ version: number, optedOut: Record<string, { at: string }> }}
+ * @returns {{ version: number, optedOut: Record<string, { at: string }>, nudgeSeen: Record<string, { at: string }> }}
  */
 function emptyRegistry() {
-  return { version: 1, optedOut: {} };
+  return { version: 1, optedOut: {}, nudgeSeen: {} };
 }
 
 // ---------------------------------------------------------------------------
@@ -81,7 +88,7 @@ function emptyRegistry() {
  * throwing. This ensures that a corrupt or missing file never blocks a
  * Claude Code session.
  *
- * @returns {{ version: number, optedOut: Record<string, { at: string }> }}
+ * @returns {{ version: number, optedOut: Record<string, { at: string }>, nudgeSeen: Record<string, { at: string }> }}
  */
 function readRegistry() {
   try {
@@ -94,6 +101,10 @@ function readRegistry() {
       parsed.optedOut &&
       typeof parsed.optedOut === "object"
     ) {
+      // Ensure nudgeSeen is present (may be absent in older registry files)
+      if (!parsed.nudgeSeen || typeof parsed.nudgeSeen !== "object") {
+        parsed.nudgeSeen = {};
+      }
       return parsed;
     }
     // Schema mismatch — treat as empty (fail open)
@@ -111,7 +122,7 @@ function readRegistry() {
  * Writes to a .tmp sibling first, then renames to the final path.
  * Best-effort: errors are silently suppressed to avoid blocking callers.
  *
- * @param {{ version: number, optedOut: Record<string, { at: string }> }} data
+ * @param {{ version: number, optedOut: Record<string, { at: string }>, nudgeSeen: Record<string, { at: string }> }} data
  * @returns {Promise<void>}
  */
 async function writeRegistry(data) {
@@ -195,5 +206,42 @@ export async function setOptOut(dir, optedOut) {
     delete registry.optedOut[absDir];
   }
 
+  await writeRegistry(registry);
+}
+
+/**
+ * Check whether the one-time "Enable ForgeDock here?" nudge has already been
+ * shown for a given directory.
+ *
+ * Fail-open: returns false on any registry read error, so the nudge fires
+ * once more on the next session rather than never.
+ *
+ * @param {string} dir - Absolute path to the directory.
+ * @returns {boolean} true if the nudge has already been shown for this directory.
+ */
+export function nudgeSeen(dir) {
+  try {
+    const absDir = resolve(dir);
+    const registry = readRegistry();
+    return Object.prototype.hasOwnProperty.call(registry.nudgeSeen, absDir);
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Record that the one-time nudge has been shown for a directory so it is not
+ * shown again in future sessions.
+ *
+ * Best-effort: a failed write means the nudge may appear one extra time, which
+ * is acceptable — it never blocks a Claude Code session.
+ *
+ * @param {string} dir - Absolute path to the directory.
+ * @returns {Promise<void>}
+ */
+export async function markNudgeSeen(dir) {
+  const absDir = resolve(dir);
+  const registry = readRegistry();
+  registry.nudgeSeen[absDir] = { at: new Date().toISOString() };
   await writeRegistry(registry);
 }
