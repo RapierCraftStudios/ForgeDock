@@ -55,6 +55,7 @@ import {
   createProgressBar,
   spinner,
 } from "./tui.mjs";
+import { detectConfig } from "./init-detect.mjs";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
@@ -1763,83 +1764,17 @@ async function init() {
   const outputPath = join(cwd, "forge.yaml");
 
   // ---------------------------------------------------------------------------
-  // Auto-detect defaults (silent — used as pre-fill values for prompts)
+  // Auto-detect defaults via init-detect module (silent — used as pre-fill
+  // values for prompts). Returns a ConfigDraft with per-field confidence.
   // ---------------------------------------------------------------------------
 
-  // Detect git remote URL and parse owner/repo
-  let detectedOwner = "your-github-org";
-  let detectedRepo = "your-repo-name";
-  let remoteDetected = false;
-
-  try {
-    const remoteUrl = execSync("git remote get-url origin", {
-      cwd,
-      encoding: "utf-8",
-      stdio: ["pipe", "pipe", "pipe"],
-    }).trim();
-
-    // SSH: git@github.com:owner/repo.git
-    const sshMatch = remoteUrl.match(/^git@[^:]+:([^/]+)\/(.+?)(?:\.git)?$/);
-    // HTTPS: https://github.com/owner/repo.git
-    const httpsMatch = remoteUrl.match(
-      /^https?:\/\/[^/]+\/([^/]+)\/(.+?)(?:\.git)?$/,
-    );
-
-    if (sshMatch) {
-      detectedOwner = sshMatch[1];
-      detectedRepo = sshMatch[2];
-      remoteDetected = true;
-    } else if (httpsMatch) {
-      detectedOwner = httpsMatch[1];
-      detectedRepo = httpsMatch[2];
-      remoteDetected = true;
-    }
-  } catch {
-    // No remote — use placeholders
-  }
-
-  // Detect default branch
-  let detectedDefault = "main";
-  try {
-    const headRef = execSync("git symbolic-ref refs/remotes/origin/HEAD", {
-      cwd,
-      encoding: "utf-8",
-      stdio: ["pipe", "pipe", "pipe"],
-    }).trim();
-    detectedDefault = headRef.replace(/^refs\/remotes\/origin\//, "");
-  } catch {
-    try {
-      const cur = execSync("git rev-parse --abbrev-ref HEAD", {
-        cwd,
-        encoding: "utf-8",
-        stdio: ["pipe", "pipe", "pipe"],
-      }).trim();
-      if (cur && cur !== "HEAD") detectedDefault = cur;
-    } catch {
-      // Keep "main"
-    }
-  }
-
-  // Detect staging branch
-  let detectedStaging = detectedDefault;
-  try {
-    const remoteBranches = execSync("git branch -r", {
-      cwd,
-      encoding: "utf-8",
-      stdio: ["pipe", "pipe", "pipe"],
-    });
-    if (remoteBranches.includes("origin/staging")) {
-      detectedStaging = "staging";
-    }
-  } catch {
-    // Keep default
-  }
-
-  // Derive project name from repo slug
-  const detectedName = detectedRepo
-    .split(/[-_]/)
-    .map((w) => w.charAt(0).toUpperCase() + w.slice(1))
-    .join(" ");
+  const draft = await detectConfig(cwd);
+  const detectedOwner = draft.project.owner.value;
+  const detectedRepo = draft.project.repo.value;
+  const detectedName = draft.project.name.value;
+  const detectedDefault = draft.branches.default.value;
+  const detectedStaging = draft.branches.staging.value;
+  const remoteDetected = draft.meta.remoteDetected;
 
   // Non-TTY: skip interactive prompts and use detected values directly
   if (!process.stdin.isTTY) {
