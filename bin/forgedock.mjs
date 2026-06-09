@@ -155,9 +155,16 @@ const CLAUDE_SETTINGS_PATH = join(HOME, ".claude", "settings.json");
  * The command value written into the SessionStart hook entry.
  * Identifies the hook by a path suffix so it can be found even if
  * FORGE_HOME changes between install and uninstall runs.
+ *
+ * Uses forward slashes even on Windows — Node accepts them natively and
+ * they survive hook-runner invocations that do not go through a shell
+ * (e.g. execFile). Backslashes emitted by path.join() on Windows would
+ * be fragile when the hook runner has no shell to interpret the quoted
+ * command string.
  */
 function sessionStartHookCommand() {
-  return `node "${join(FORGE_HOME, "bin", "hooks", "session-start.mjs")}"`;
+  const hookPath = join(FORGE_HOME, "bin", "hooks", "session-start.mjs").replace(/\\/g, "/");
+  return `node "${hookPath}"`;
 }
 
 /**
