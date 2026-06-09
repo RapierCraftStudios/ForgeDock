@@ -94,7 +94,7 @@ Run after quality gate passes. All tool commands are read from `forge.yaml → v
 ```bash
 cd {WORKTREE_PATH}
 
-PYTHON_FORMAT=$(grep -A 20 'commands:' forge.yaml 2>/dev/null | grep -A 5 'python:' | grep 'format:' | head -1 | sed "s/.*format: *['\"]//;s/['\"].*//")
+PYTHON_FORMAT=$(awk '/^  commands:/{f=1;next} f && /^[^ \t]/{exit} f' forge.yaml 2>/dev/null | awk '/^    python:/{f=1;next} f && /^    [^ \t]/{exit} f' | grep 'format:' | head -1 | sed "s/.*format: *['\"]//;s/['\"].*//")
 if [ -n "$PYTHON_FORMAT" ]; then
     eval "$PYTHON_FORMAT" 2>&1
 else
@@ -110,9 +110,9 @@ Failures in `py_compile` are BLOCKING — fix before continuing.
 ```bash
 cd {WORKTREE_PATH}
 
-TS_FORMAT=$(grep -A 20 'commands:' forge.yaml 2>/dev/null | grep -A 5 'typescript:' | grep 'format:' | head -1 | sed "s/.*format: *['\"]//;s/['\"].*//")
-TS_TYPECHECK=$(grep -A 20 'commands:' forge.yaml 2>/dev/null | grep -A 5 'typescript:' | grep 'typecheck:' | head -1 | sed "s/.*typecheck: *['\"]//;s/['\"].*//")
-TS_BUILD=$(grep -A 20 'commands:' forge.yaml 2>/dev/null | grep -A 5 'typescript:' | grep 'build:' | head -1 | sed "s/.*build: *['\"]//;s/['\"].*//")
+TS_FORMAT=$(awk '/^  commands:/{f=1;next} f && /^[^ \t]/{exit} f' forge.yaml 2>/dev/null | awk '/^    typescript:/{f=1;next} f && /^    [^ \t]/{exit} f' | grep 'format:' | head -1 | sed "s/.*format: *['\"]//;s/['\"].*//")
+TS_TYPECHECK=$(awk '/^  commands:/{f=1;next} f && /^[^ \t]/{exit} f' forge.yaml 2>/dev/null | awk '/^    typescript:/{f=1;next} f && /^    [^ \t]/{exit} f' | grep 'typecheck:' | head -1 | sed "s/.*typecheck: *['\"]//;s/['\"].*//")
+TS_BUILD=$(awk '/^  commands:/{f=1;next} f && /^[^ \t]/{exit} f' forge.yaml 2>/dev/null | awk '/^    typescript:/{f=1;next} f && /^    [^ \t]/{exit} f' | grep 'build:' | head -1 | sed "s/.*build: *['\"]//;s/['\"].*//")
 
 if [ -n "$TS_FORMAT" ]; then
     eval "$TS_FORMAT" 2>&1

@@ -213,8 +213,8 @@ Create review chunks by priority: Billing/Pricing (CRITICAL) → Security/Auth (
 Read `forge.yaml → verification.commands.python` for project-specific tool commands:
 
 ```bash
-PYTHON_FORMAT=$(grep -A 20 'commands:' forge.yaml 2>/dev/null | grep -A 5 'python:' | grep 'format:' | head -1 | sed "s/.*format: *['\"]//;s/['\"].*//")
-PYTHON_LINT=$(grep -A 20 'commands:' forge.yaml 2>/dev/null | grep -A 5 'python:' | grep 'lint:' | head -1 | sed "s/.*lint: *['\"]//;s/['\"].*//")
+PYTHON_FORMAT=$(awk '/^  commands:/{f=1;next} f && /^[^ \t]/{exit} f' forge.yaml 2>/dev/null | awk '/^    python:/{f=1;next} f && /^    [^ \t]/{exit} f' | grep 'format:' | head -1 | sed "s/.*format: *['\"]//;s/['\"].*//")
+PYTHON_LINT=$(awk '/^  commands:/{f=1;next} f && /^[^ \t]/{exit} f' forge.yaml 2>/dev/null | awk '/^    python:/{f=1;next} f && /^    [^ \t]/{exit} f' | grep 'lint:' | head -1 | sed "s/.*lint: *['\"]//;s/['\"].*//")
 
 if [ -n "$PYTHON_FORMAT" ]; then
     eval "$PYTHON_FORMAT" 2>&1 | head -30
@@ -234,8 +234,8 @@ fi
 Read `forge.yaml → verification.commands.typescript` for project-specific tool commands:
 
 ```bash
-TS_TYPECHECK=$(grep -A 20 'commands:' forge.yaml 2>/dev/null | grep -A 5 'typescript:' | grep 'typecheck:' | head -1 | sed "s/.*typecheck: *['\"]//;s/['\"].*//")
-TS_BUILD=$(grep -A 20 'commands:' forge.yaml 2>/dev/null | grep -A 5 'typescript:' | grep 'build:' | head -1 | sed "s/.*build: *['\"]//;s/['\"].*//")
+TS_TYPECHECK=$(awk '/^  commands:/{f=1;next} f && /^[^ \t]/{exit} f' forge.yaml 2>/dev/null | awk '/^    typescript:/{f=1;next} f && /^    [^ \t]/{exit} f' | grep 'typecheck:' | head -1 | sed "s/.*typecheck: *['\"]//;s/['\"].*//")
+TS_BUILD=$(awk '/^  commands:/{f=1;next} f && /^[^ \t]/{exit} f' forge.yaml 2>/dev/null | awk '/^    typescript:/{f=1;next} f && /^    [^ \t]/{exit} f' | grep 'build:' | head -1 | sed "s/.*build: *['\"]//;s/['\"].*//")
 
 if [ -n "$TS_TYPECHECK" ]; then
     eval "$TS_TYPECHECK" 2>&1
@@ -261,7 +261,7 @@ Build failure is BLOCKING — deploy WILL fail. Typecheck alone misses SSG/prere
 Read `forge.yaml → verification.commands.python.test`:
 
 ```bash
-PYTHON_TEST=$(grep -A 20 'commands:' forge.yaml 2>/dev/null | grep -A 5 'python:' | grep 'test:' | head -1 | sed "s/.*test: *['\"]//;s/['\"].*//")
+PYTHON_TEST=$(awk '/^  commands:/{f=1;next} f && /^[^ \t]/{exit} f' forge.yaml 2>/dev/null | awk '/^    python:/{f=1;next} f && /^    [^ \t]/{exit} f' | grep 'test:' | head -1 | sed "s/.*test: *['\"]//;s/['\"].*//")
 
 if [ -n "$PYTHON_TEST" ]; then
     eval "$PYTHON_TEST" 2>&1 | tail -50

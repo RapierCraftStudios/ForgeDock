@@ -824,9 +824,9 @@ All tool commands are read from `forge.yaml → verification.commands`; each ste
 
 ```bash
 # Read toolchain commands from forge.yaml
-TS_TYPECHECK=$(grep -A 20 'commands:' forge.yaml 2>/dev/null | grep -A 5 'typescript:' | grep 'typecheck:' | head -1 | sed "s/.*typecheck: *['\"]//;s/['\"].*//")
-TS_BUILD=$(grep -A 20 'commands:' forge.yaml 2>/dev/null | grep -A 5 'typescript:' | grep 'build:' | head -1 | sed "s/.*build: *['\"]//;s/['\"].*//")
-PYTHON_FORMAT=$(grep -A 20 'commands:' forge.yaml 2>/dev/null | grep -A 5 'python:' | grep 'format:' | head -1 | sed "s/.*format: *['\"]//;s/['\"].*//")
+TS_TYPECHECK=$(awk '/^  commands:/{f=1;next} f && /^[^ \t]/{exit} f' forge.yaml 2>/dev/null | awk '/^    typescript:/{f=1;next} f && /^    [^ \t]/{exit} f' | grep 'typecheck:' | head -1 | sed "s/.*typecheck: *['\"]//;s/['\"].*//")
+TS_BUILD=$(awk '/^  commands:/{f=1;next} f && /^[^ \t]/{exit} f' forge.yaml 2>/dev/null | awk '/^    typescript:/{f=1;next} f && /^    [^ \t]/{exit} f' | grep 'build:' | head -1 | sed "s/.*build: *['\"]//;s/['\"].*//")
+PYTHON_FORMAT=$(awk '/^  commands:/{f=1;next} f && /^[^ \t]/{exit} f' forge.yaml 2>/dev/null | awk '/^    python:/{f=1;next} f && /^    [^ \t]/{exit} f' | grep 'format:' | head -1 | sed "s/.*format: *['\"]//;s/['\"].*//")
 
 # Check if this is a milestone batch with TypeScript changes
 MILESTONE_BRANCH="milestone/{milestone_slug}"
