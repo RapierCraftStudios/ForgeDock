@@ -156,9 +156,9 @@ done
 git diff --stat origin/$TARGET..origin/$SOURCE
 
 # Read layout paths from forge.yaml, fall back to AlterLab defaults
-LAYOUT_API=$(yq '.review.layout.api // "services/api"' $PROJECT_ROOT/forge.yaml 2>/dev/null || echo "services/api")
-LAYOUT_WORKER=$(yq '.review.layout.worker // "services/worker"' $PROJECT_ROOT/forge.yaml 2>/dev/null || echo "services/worker")
-LAYOUT_PAGES=$(yq '.review.layout.pages // "web/src/app"' $PROJECT_ROOT/forge.yaml 2>/dev/null || echo "web/src/app")
+LAYOUT_API=$(yq '.review.layout.api // "services/api"' forge.yaml 2>/dev/null || echo "services/api")
+LAYOUT_WORKER=$(yq '.review.layout.worker // "services/worker"' forge.yaml 2>/dev/null || echo "services/worker")
+LAYOUT_PAGES=$(yq '.review.layout.pages // "web/src/app"' forge.yaml 2>/dev/null || echo "web/src/app")
 # Derive web root from pages root (strip trailing /src/app or similar suffix if present)
 LAYOUT_WEB=$(echo "$LAYOUT_PAGES" | sed 's|/src/app$||; s|/src$||')
 
@@ -180,7 +180,7 @@ done | sort
 
 ```bash
 # Read migrations path from forge.yaml, fall back to infra/migrations
-LAYOUT_MIGRATIONS=$(yq '.review.layout.migrations // "infra/migrations"' $PROJECT_ROOT/forge.yaml 2>/dev/null || echo "infra/migrations")
+LAYOUT_MIGRATIONS=$(yq '.review.layout.migrations // "infra/migrations"' forge.yaml 2>/dev/null || echo "infra/migrations")
 
 # Are there new migrations?
 MIGRATIONS=$(git diff --name-only origin/$TARGET..origin/$SOURCE | grep "^${LAYOUT_MIGRATIONS}/" | sort)
