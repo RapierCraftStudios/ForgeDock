@@ -41,22 +41,35 @@ const __dirname = dirname(__filename);
 const FORGE_HOME = resolve(__dirname, "..", "..");
 
 // ---------------------------------------------------------------------------
-// Import registry helpers from the same installation
+// Registry helpers — populated inside the try block to honour fail-open
 // ---------------------------------------------------------------------------
 
-/** @type {import('../registry.mjs')} */
-// Use pathToFileURL() to convert the OS-native path to a file:// URL before
-// passing it to dynamic import(). On Windows, join() produces backslash paths
-// that import() rejects with ERR_UNSUPPORTED_ESM_URL_SCHEME.
-const { resolveState, nudgeSeen, markNudgeSeen } = await import(
-  pathToFileURL(join(FORGE_HOME, "bin", "registry.mjs")).href
-);
+// Declared at module scope so they are accessible from handler functions
+// (handleUnmanaged) called from within the try block. Assigned inside the
+// try/catch so that any import failure (missing file, permissions error,
+// syntax error) is caught and the hook still exits 0. <!-- fix: forge#383 -->
+let resolveState;
+let nudgeSeen;
+let markNudgeSeen;
 
 // ---------------------------------------------------------------------------
 // Main — wrapped in try/catch to guarantee fail-open
 // ---------------------------------------------------------------------------
 
 try {
+  // Import registry helpers from the same installation.
+  // Placed inside try/catch to honour the fail-open contract: if registry.mjs
+  // cannot be loaded (broken install, missing file, permissions error) the
+  // catch block below ensures we still exit 0 without blocking Claude Code.
+  //
+  // Use pathToFileURL() to convert the OS-native path to a file:// URL before
+  // passing it to dynamic import(). On Windows, join() produces backslash paths
+  // that import() rejects with ERR_UNSUPPORTED_ESM_URL_SCHEME.
+  /** @type {import('../registry.mjs')} */
+  ({ resolveState, nudgeSeen, markNudgeSeen } = await import(
+    pathToFileURL(join(FORGE_HOME, "bin", "registry.mjs")).href
+  ));
+
   const cwd = process.cwd();
   const state = resolveState(cwd);
 
