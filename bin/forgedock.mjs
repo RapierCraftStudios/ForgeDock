@@ -1492,6 +1492,7 @@ function queryNpmRegistry(pkg) {
       encoding: "utf-8",
       stdio: ["pipe", "pipe", "pipe"],
       timeout: 5000,
+      shell: true,
     });
     return result.trim() || null;
   } catch {
