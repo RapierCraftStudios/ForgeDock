@@ -80,7 +80,9 @@ if [ -n "$NEW_MAPPINGS" ]; then
 
     # For each new mapping, verify the SOPS path structure exists
     # (We can't decrypt SOPS to verify values, but we can check the mapping format is valid)
-    echo "$NEW_MAPPINGS" | while IFS= read -r mapping; do
+    # Use process substitution instead of a pipe so WARNINGS increments persist in the parent shell.
+    # (echo ... | while read creates a subshell — counter changes are lost on subshell exit.)
+    while IFS= read -r mapping; do
         VAR_NAME=$(echo "$mapping" | grep -oE '^"[A-Z_]+"' | tr -d '"')
         SOPS_SECTION=$(echo "$mapping" | grep -oE '\("([a-z_]+)"' | head -1 | tr -d '("')
         SOPS_KEY=$(echo "$mapping" | grep -oE ', "([a-z_]+)"\)' | tr -d ', ")')
@@ -91,7 +93,7 @@ if [ -n "$NEW_MAPPINGS" ]; then
             echo "WARNING: Malformed ENV_MAPPING entry: $mapping"
             WARNINGS=$((WARNINGS + 1))
         fi
-    done
+    done < <(echo "$NEW_MAPPINGS")
 else
     echo "OK: No new ENV_MAPPING entries in diff"
 fi
