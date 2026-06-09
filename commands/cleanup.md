@@ -1,18 +1,17 @@
 ---
-description: Sweep closed issues for stale labels, missing workflow state, and Project board gaps â€” plus prune worktrees, branches, and milestones
+description: Sweep closed issues for stale labels, missing workflow state, and Project board gaps — plus prune worktrees, branches, and milestones
 argument-hint: [labels | branches | milestones | board | orphans | all]
 ---
-
 <!-- SPDX-FileCopyrightText: Copyright (c) RapierCraft Studios -->
 <!-- SPDX-License-Identifier: AGPL-3.0-or-later -->
 
-# /cleanup â€” Full Hygiene Sweep
+# /cleanup — Full Hygiene Sweep
 
 **Input**: $ARGUMENTS
 
-Scan the entire development environment for rot and fix it. This is a maintenance command â€” run periodically or after large orchestration batches. It covers 6 domains: stale labels, orphaned issues, worktree/branch pruning, milestone hygiene, and Project board sync.
+Scan the entire development environment for rot and fix it. This is a maintenance command — run periodically or after large orchestration batches. It covers 6 domains: stale labels, orphaned issues, worktree/branch pruning, milestone hygiene, and Project board sync.
 
-**NEVER use plan mode (EnterPlanMode)** â€” it breaks execution context.
+**NEVER use plan mode (EnterPlanMode)** — it breaks execution context.
 
 ---
 
@@ -41,9 +40,6 @@ All `{GH_REPO}`, `{GH_FLAG}`, `{REPO_PATH}`, `{STAGING_BRANCH}`, `{PROJECT_BOARD
 
 ---
 
-<!-- SPDX-FileCopyrightText: Copyright (c) RapierCraft Studios -->
-<!-- SPDX-License-Identifier: AGPL-3.0-or-later -->
-
 ## Command Router
 
 | Input | Action |
@@ -65,23 +61,23 @@ These labels should only exist on OPEN issues. If a closed issue has them, the p
 
 ```bash
 echo "=== Stale workflow:in-review ==="
-gh issue list {GH_FLAG} --state closed --label "workflow:in-review" --limit 100 --json number,title --jq '.[] | "#\(.number) â€” \(.title)"'
+gh issue list {GH_FLAG} --state closed --label "workflow:in-review" --limit 100 --json number,title --jq '.[] | "#\(.number) — \(.title)"'
 
 echo "=== Stale workflow:building ==="
-gh issue list {GH_FLAG} --state closed --label "workflow:building" --limit 100 --json number,title --jq '.[] | "#\(.number) â€” \(.title)"'
+gh issue list {GH_FLAG} --state closed --label "workflow:building" --limit 100 --json number,title --jq '.[] | "#\(.number) — \(.title)"'
 
 echo "=== Stale workflow:investigating ==="
-gh issue list {GH_FLAG} --state closed --label "workflow:investigating" --limit 100 --json number,title --jq '.[] | "#\(.number) â€” \(.title)"'
+gh issue list {GH_FLAG} --state closed --label "workflow:investigating" --limit 100 --json number,title --jq '.[] | "#\(.number) — \(.title)"'
 
 echo "=== Stale needs-validation ==="
-gh issue list {GH_FLAG} --state closed --label "needs-validation" --limit 100 --json number,title --jq '.[] | "#\(.number) â€” \(.title)"'
+gh issue list {GH_FLAG} --state closed --label "needs-validation" --limit 100 --json number,title --jq '.[] | "#\(.number) — \(.title)"'
 ```
 
 ### 1B: Fix stale labels
 
 For each closed issue with a stale intermediate label:
 
-**Stale `workflow:in-review`, `workflow:building`** â€” these were merged but label wasn't updated:
+**Stale `workflow:in-review`, `workflow:building`** — these were merged but label wasn't updated:
 ```bash
 for NUM in {stale_issue_numbers}; do
   gh issue edit $NUM {GH_FLAG} --add-label "workflow:merged"
@@ -89,11 +85,11 @@ for NUM in {stale_issue_numbers}; do
 done
 ```
 
-**Stale `workflow:investigating`** â€” check if closed as invalid or completed:
-- If it has `workflow:invalid` already â†’ just remove `workflow:investigating`
-- If closed normally â†’ add `workflow:merged`, remove `workflow:investigating`
+**Stale `workflow:investigating`** — check if closed as invalid or completed:
+- If it has `workflow:invalid` already → just remove `workflow:investigating`
+- If closed normally → add `workflow:merged`, remove `workflow:investigating`
 
-**Stale `needs-validation`** â€” remove from all closed issues:
+**Stale `needs-validation`** — remove from all closed issues:
 ```bash
 for NUM in {needs_validation_numbers}; do
   gh issue edit $NUM {GH_FLAG} --remove-label "needs-validation" 2>/dev/null || true
@@ -104,19 +100,16 @@ done
 
 ```bash
 gh issue list {GH_FLAG} --state closed --limit 200 --json number,title,labels \
-  --jq '.[] | select([.labels[].name] | any(startswith("workflow:")) | not) | "#\(.number) â€” \(.title)"'
+  --jq '.[] | select([.labels[].name] | any(startswith("workflow:")) | not) | "#\(.number) — \(.title)"'
 ```
 
 These were closed outside the pipeline. Report count but don't fix (not necessarily wrong).
 
 ---
 
-<!-- SPDX-FileCopyrightText: Copyright (c) RapierCraft Studios -->
-<!-- SPDX-License-Identifier: AGPL-3.0-or-later -->
-
 ## Phase 2: Orphaned Issues (open issues with merged PRs)
 
-Find open issues whose fix PRs have already been merged â€” these slipped through because `Closes #N` doesn't auto-close when merging to `staging` (only works for default branch `main`).
+Find open issues whose fix PRs have already been merged — these slipped through because `Closes #N` doesn't auto-close when merging to `staging` (only works for default branch `main`).
 
 ### 2A: Detect orphans
 
@@ -139,12 +132,12 @@ done
 
 For each orphaned issue found:
 ```bash
-gh issue close $NUM {GH_FLAG} --comment "Closed by cleanup â€” PR #$MERGED_PR was already merged."
+gh issue close $NUM {GH_FLAG} --comment "Closed by cleanup — PR #$MERGED_PR was already merged."
 gh issue edit $NUM {GH_FLAG} --add-label "workflow:merged"
 gh issue edit $NUM {GH_FLAG} --remove-label "workflow:in-review" 2>/dev/null || true
 ```
 
-Also check open issues with `workflow:building` â€” same pattern (search for merged PRs referencing them).
+Also check open issues with `workflow:building` — same pattern (search for merged PRs referencing them).
 
 ---
 
@@ -199,9 +192,6 @@ fi
 
 ---
 
-<!-- SPDX-FileCopyrightText: Copyright (c) RapierCraft Studios -->
-<!-- SPDX-License-Identifier: AGPL-3.0-or-later -->
-
 ## Phase 4: Milestone Hygiene
 
 ### 4A: Find completed milestones
@@ -216,7 +206,7 @@ gh api repos/:owner/:repo/milestones --jq '.[] | select(.state == "open" and .op
 For each milestone with 0 open issues, verify the milestone branch has been merged to staging or main before closing:
 
 ```bash
-# Derive slug from milestone title (lowercase, spacesâ†’hyphens, strip non-alphanumeric except hyphens)
+# Derive slug from milestone title (lowercase, spaces→hyphens, strip non-alphanumeric except hyphens)
 SLUG=$(echo "$MILESTONE_TITLE" | tr '[:upper:]' '[:lower:]' | tr ' ' '-' | tr -cd 'a-z0-9-')
 
 # Check if milestone branch was merged to staging or main
@@ -224,16 +214,16 @@ SHIPPED_STAGING=$(gh pr list --base staging --head "milestone/$SLUG" --state mer
 SHIPPED_MAIN=$(gh pr list --base main --head "milestone/$SLUG" --state merged --json number --jq '.[0].number' 2>/dev/null)
 
 if [ -n "$SHIPPED_STAGING" ] || [ -n "$SHIPPED_MAIN" ]; then
-  # Safe to close â€” code has been shipped to staging or main
+  # Safe to close — code has been shipped to staging or main
   gh api repos/:owner/:repo/milestones/$MILESTONE_NUMBER -X PATCH -f state=closed
   echo "CLOSED milestone: $MILESTONE_TITLE (shipped via PR #${SHIPPED_STAGING:-$SHIPPED_MAIN})"
 else
-  # DO NOT close â€” code is only on the milestone branch, not yet shipped
-  echo "SKIPPED: $MILESTONE_TITLE â€” issues done but milestone branch not merged to staging or main"
+  # DO NOT close — code is only on the milestone branch, not yet shipped
+  echo "SKIPPED: $MILESTONE_TITLE — issues done but milestone branch not merged to staging or main"
 fi
 ```
 
-**Exception**: Don't close milestones that are intentionally kept open for future work (check if the milestone description says "ongoing" or "rolling"). If unsure, **SKIP it** â€” milestones are only closed by `/milestone ship` after code reaches staging. Incorrect closure destroys milestone state that cannot be trivially recovered.
+**Exception**: Don't close milestones that are intentionally kept open for future work (check if the milestone description says "ongoing" or "rolling"). If unsure, **SKIP it** — milestones are only closed by `/milestone ship` after code reaches staging. Incorrect closure destroys milestone state that cannot be trivially recovered.
 
 ---
 
@@ -266,9 +256,6 @@ fi
 
 ---
 
-<!-- SPDX-FileCopyrightText: Copyright (c) RapierCraft Studios -->
-<!-- SPDX-License-Identifier: AGPL-3.0-or-later -->
-
 ## Phase 6: Report
 
 ```
@@ -277,9 +264,9 @@ fi
 ### Labels Fixed
 | Action | Count |
 |--------|-------|
-| workflow:in-review â†’ workflow:merged | {N} |
-| workflow:building â†’ workflow:merged | {N} |
-| workflow:investigating â†’ cleaned | {N} |
+| workflow:in-review → workflow:merged | {N} |
+| workflow:building → workflow:merged | {N} |
+| workflow:investigating → cleaned | {N} |
 | needs-validation removed | {N} |
 
 ### Orphaned Issues Closed
@@ -297,19 +284,19 @@ fi
 ### Milestones Closed
 | Milestone | Issues (closed) | Shipped via |
 |-----------|-----------------|-------------|
-| {title} | {N} | PR #{M} â†’ staging/main |
+| {title} | {N} | PR #{M} → staging/main |
 
 ### Milestones Skipped (unshipped)
 | Milestone | Issues (closed) | Reason |
 |-----------|-----------------|--------|
-| {title} | {N} | No merged PR from milestone/{slug} â†’ staging or main |
+| {title} | {N} | No merged PR from milestone/{slug} → staging or main |
 
 ### Board Synced
 | Action | Count |
 |--------|-------|
-| Status â†’ Done | {N} |
-| Workflow â†’ Merged | {N} |
+| Status → Done | {N} |
+| Workflow → Merged | {N} |
 
 ### Still Missing Workflow Label
-{N} closed issues have no workflow label (closed outside pipeline â€” no action needed)
+{N} closed issues have no workflow label (closed outside pipeline — no action needed)
 ```
