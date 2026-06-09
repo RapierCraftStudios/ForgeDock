@@ -187,7 +187,7 @@ else
 fi
 
 # Always run compile check on changed Python files (fast, language-universal)
-for f in $(gh pr diff $ARGUMENTS --name-only | grep '\.py$'); do
+gh pr diff $ARGUMENTS --name-only | grep '\.py$' | while IFS= read -r f; do
     python3 -m py_compile "$f" 2>&1
 done
 ```
@@ -243,7 +243,7 @@ gh pr diff $ARGUMENTS | grep -oE "['\"][A-Za-z0-9+/=]{40,}['\"]" | head -10
 
 ### 2F: SQL Migration Validation (if *.sql changed)
 ```bash
-for sql_file in $(gh pr diff $ARGUMENTS --name-only | grep "\.sql$"); do
+gh pr diff $ARGUMENTS --name-only | grep "\.sql$" | while IFS= read -r sql_file; do
     grep -E "FOR UPDATE" "$sql_file" | grep -qE "(SUM|COUNT|AVG|MIN|MAX)\s*\(" && echo "ERROR: FOR UPDATE with aggregate"
     grep -qE "DROP (TABLE|COLUMN|INDEX)" "$sql_file" && ! grep -qE "IF EXISTS" "$sql_file" && echo "WARNING: DROP without IF EXISTS"
     grep -qE "ALTER TABLE.*ADD COLUMN.*NOT NULL" "$sql_file" && ! grep -qE "DEFAULT" "$sql_file" && echo "WARNING: NOT NULL without DEFAULT"
@@ -337,7 +337,7 @@ Read `forge.yaml → verification.commands.python.format` and `.build`:
 gh pr checkout $ARGUMENTS --detach 2>/dev/null
 
 # Compile-check all changed Python files (language-universal — no config needed)
-for f in $(echo "$CHANGED_FILES" | grep '\.py$'); do python3 -m py_compile "$f" 2>&1; done
+echo "$CHANGED_FILES" | grep '\.py$' | while IFS= read -r f; do python3 -m py_compile "$f" 2>&1; done
 
 if [ "$REQUIRES_FULL_BUILD" = "true" ]; then
     PYTHON_FORMAT=$(awk '/^  commands:/{f=1;next} f && /^[^ \t]/{exit} f' forge.yaml 2>/dev/null | awk '/^    python:/{f=1;next} f && /^    [^ \t]/{exit} f' | grep 'format:' | head -1 | sed "s/.*format: *['\"]//;s/['\"].*//")
@@ -495,7 +495,7 @@ fi
 # Python scoping hazard check — local imports that shadow module-level names
 # A local `import X` makes X a local variable for the ENTIRE function scope.
 # Any reference to X ABOVE the local import will crash with UnboundLocalError.
-for f in $(echo "$CHANGED_FILES" | grep -E '\.py$'); do
+echo "$CHANGED_FILES" | grep -E '\.py$' | while IFS= read -r f; do
     echo "=== Python Scoping Check: $f ==="
     # Find function-scoped imports (indented import statements)
     grep -nE "^\s+import [a-z]" "$f" 2>/dev/null | while read line; do
@@ -509,7 +509,7 @@ for f in $(echo "$CHANGED_FILES" | grep -E '\.py$'); do
 done
 
 # Config file assumption check (baked into Docker image vs volume-mounted)
-for f in $(echo "$CHANGED_FILES" | grep -E "config/.*\.(json|yaml|yml)$"); do
+echo "$CHANGED_FILES" | grep -E "config/.*\.(json|yaml|yml)$" | while IFS= read -r f; do
     echo "=== Config File: $f ==="
     grep -n "$(dirname $f)" docker-compose.yml 2>/dev/null || echo "WARNING: Config dir may not be mounted — changes may require --build"
     grep -n "$(dirname $f)" services/*/Dockerfile 2>/dev/null || true
