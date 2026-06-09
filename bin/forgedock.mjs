@@ -3764,6 +3764,7 @@ async function validate(forgeYamlPath) {
       note: `Not found: ${forgeYamlPath}`,
     });
     _renderValidationSummary(checks);
+    await _offerRemediations(checks, forgeYamlPath);
     return { passed: false, checks };
   }
 
@@ -3777,6 +3778,7 @@ async function validate(forgeYamlPath) {
       note: `Cannot read: ${err.message}`,
     });
     _renderValidationSummary(checks);
+    await _offerRemediations(checks, forgeYamlPath);
     return { passed: false, checks };
   }
 
@@ -4034,8 +4036,383 @@ async function validate(forgeYamlPath) {
   }
 
   _renderValidationSummary(checks);
+  await _offerRemediations(checks, forgeYamlPath);
   const hasError = checks.some((c) => c.status === "error");
   return { passed: !hasError, checks };
+}
+
+/**
+ * Offer plain-language explanations and optional auto-fixes for each failing check.
+ *
+ * Runs after _renderValidationSummary() so the summary is always visible first.
+ * For each check that is not 'ok':
+ *   - Prints a plain-language sentence explaining why it matters and what to do.
+ *   - Prints a copy-paste command where applicable.
+ *   - For safe, deterministic fixes (directory creation, gh auth), offers an
+ *     auto-apply step gated on a TTY confirmation prompt.
+ *
+ * Non-destructive policy:
+ *   - Never auto-edits forge.yaml values.
+ *   - Never auto-applies project board ID changes.
+ *   - Auto-mkdir is offered only when the user explicitly listed the path in forge.yaml.
+ *   - Spawning `gh auth login` is offered only in TTY environments.
+ *   - Non-TTY: prints copy-paste text only, skips all interactive prompts.
+ *
+ * @param {Array<{label: string, status: 'ok'|'warn'|'error', note: string}>} checks
+ * @param {string} forgeYamlPath - Absolute path to forge.yaml (used in explanations)
+ * @returns {Promise<void>}
+ */
+async function _offerRemediations(checks, forgeYamlPath) {
+  // Collect only failing checks — skip 'ok' and purely-optional skipped checks
+  // that have no actionable remediation (e.g. "Not configured (optional)").
+  const failing = checks.filter(
+    (c) =>
+      c.status !== "ok" &&
+      !c.note.endsWith("(optional)") &&
+      c.note !== "Not configured (optional)",
+  );
+
+  if (failing.length === 0) return;
+
+  /** Whether we're in an interactive terminal — gates all prompts. */
+  const isTTY = Boolean(process.stdin.isTTY);
+
+  // Print section header
+  console.log("");
+  console.log(`  ${bold("Remediation guide:")}`);
+
+  for (const check of failing) {
+    const label = check.label;
+    const note = check.note ?? "";
+    const isError = check.status === "error";
+
+    // ── 1. forge.yaml not found ─────────────────────────────────────────────
+    if (label === "forge.yaml found") {
+      console.log("");
+      console.log(
+        `  ${isError ? red("✗") : yellow("!")} ${bold(label)}`,
+      );
+      console.log(
+        `    ForgeDock reads ${cyan("forge.yaml")} from your project root to know which`,
+      );
+      console.log(
+        `    GitHub repo, branches, and paths to use. Without it, no pipeline commands`,
+      );
+      console.log(`    will function correctly.`);
+      console.log(
+        `    ${bold("Fix:")} Generate forge.yaml with AI assistance:`,
+      );
+      console.log(`      ${cyan("npx forgedock init")}`);
+      continue;
+    }
+
+    // ── 2. Required fields missing ──────────────────────────────────────────
+    if (label === "Required fields") {
+      // Extract the field names from the note
+      const missingMatch = note.match(/Missing or placeholder:\s*(.+)/);
+      const fields = missingMatch ? missingMatch[1] : note;
+      console.log("");
+      console.log(`  ${isError ? red("✗") : yellow("!")} ${bold(label)}`);
+      console.log(
+        `    The following fields are required but missing or still set to`,
+      );
+      console.log(`    placeholder values: ${cyan(fields)}`);
+      console.log(
+        `    ForgeDock uses these to route all GitHub API calls and git operations.`,
+      );
+      console.log(
+        `    ${bold("Fix:")} Open ${cyan("forge.yaml")} and fill in the real values:`,
+      );
+      for (const field of fields.split(",").map((f) => f.trim())) {
+        let hint = "";
+        if (field === "project.owner")
+          hint = `  # your GitHub org or username`;
+        else if (field === "project.repo")
+          hint = `  # the repository name (without the owner prefix)`;
+        else if (field === "paths.root")
+          hint = `  # absolute path to this project on your machine`;
+        else if (field === "branches.default")
+          hint = `  # usually "main" or "master"`;
+        console.log(`      ${cyan(field)}: "<value>"${dim(hint)}`);
+      }
+      continue;
+    }
+
+    // ── 3. paths.root does not exist ────────────────────────────────────────
+    if (label === "paths.root exists") {
+      const pathMatch = note.match(/Directory not found:\s*(.+)/);
+      const missingPath = pathMatch ? pathMatch[1].trim() : note;
+      console.log("");
+      console.log(`  ${yellow("!")} ${bold(label)}`);
+      console.log(
+        `    ForgeDock uses ${cyan("paths.root")} as the base directory for all git`,
+      );
+      console.log(
+        `    worktrees and file operations. The configured path does not exist:`,
+      );
+      console.log(`      ${dim(missingPath)}`);
+      console.log(
+        `    ${bold("Option A:")} If this is your project directory, create it:`,
+      );
+      console.log(`      ${cyan(`mkdir -p "${missingPath}"`)}`);
+      console.log(
+        `    ${bold("Option B:")} If the project already exists elsewhere, update forge.yaml:`,
+      );
+      console.log(
+        `      ${cyan("paths.root")}: "<correct absolute path to your project>"`,
+      );
+
+      // Offer auto-mkdir if TTY — safe because the user explicitly listed this path
+      if (isTTY) {
+        console.log("");
+        const shouldCreate = await confirm(
+          `  Create ${dim(missingPath)} now?`,
+          false,
+        );
+        if (shouldCreate) {
+          try {
+            await mkdir(missingPath, { recursive: true });
+            console.log(`    ${green("✔")} Created: ${dim(missingPath)}`);
+          } catch (mkdirErr) {
+            console.log(
+              `    ${red("✖")} Could not create directory: ${mkdirErr.message}`,
+            );
+          }
+        }
+      }
+      continue;
+    }
+
+    // ── 4. worktree_base cannot be created ──────────────────────────────────
+    if (label === "worktree_base exists" && note.startsWith("Cannot create:")) {
+      const errMsg = note.replace("Cannot create:", "").trim();
+      console.log("");
+      console.log(`  ${yellow("!")} ${bold(label)}`);
+      console.log(
+        `    ForgeDock could not create the worktree directory automatically.`,
+      );
+      console.log(`    Error: ${dim(errMsg)}`);
+      console.log(
+        `    Worktrees are temporary checkout directories used during builds.`,
+      );
+      console.log(
+        `    ${bold("Fix:")} Check that the parent directory is writable, or update`,
+      );
+      console.log(
+        `    ${cyan("paths.worktree_base")} in forge.yaml to a writable location.`,
+      );
+      continue;
+    }
+
+    // ── 5. GitHub repo inaccessible ─────────────────────────────────────────
+    if (label === "GitHub repo accessible") {
+      // Try to detect whether gh is unauthenticated vs wrong repo name
+      let isAuthIssue = false;
+      try {
+        execFileSync("gh", ["auth", "status"], {
+          stdio: ["pipe", "pipe", "pipe"],
+          timeout: 5000,
+        });
+      } catch {
+        isAuthIssue = true;
+      }
+
+      // Extract the repo slug from the note if possible
+      const repoMatch = note.match(/Cannot access ([^\s]+)/);
+      const repoSlug = repoMatch ? repoMatch[1] : "owner/repo";
+
+      console.log("");
+      console.log(`  ${yellow("!")} ${bold(label)}`);
+
+      if (isAuthIssue) {
+        console.log(
+          `    The GitHub CLI is not authenticated. ForgeDock needs read access to`,
+        );
+        console.log(
+          `    ${cyan(repoSlug)} to list issues, manage PRs, and run pipeline commands.`,
+        );
+        console.log(
+          `    ${bold("Fix:")} Authenticate with the GitHub CLI:`,
+        );
+        console.log(`      ${cyan("gh auth login")}`);
+
+        if (isTTY) {
+          console.log("");
+          const shouldAuth = await confirm(
+            `  Run ${cyan("gh auth login")} now?`,
+            false,
+          );
+          if (shouldAuth) {
+            try {
+              execSync("gh auth login", { stdio: "inherit" });
+            } catch {
+              // User may have cancelled — not an error from our side
+            }
+          }
+        }
+      } else {
+        console.log(
+          `    Cannot access ${cyan(repoSlug)}. The GitHub CLI is authenticated but`,
+        );
+        console.log(
+          `    the repo may not exist, you may not have permission, or the owner/repo`,
+        );
+        console.log(`    values in forge.yaml are incorrect.`);
+        console.log(`    ${bold("Fix:")} Verify the repo exists and is accessible:`);
+        console.log(`      ${cyan(`gh repo view ${repoSlug}`)}`);
+        console.log(
+          `    Then update ${cyan("project.owner")} and ${cyan("project.repo")} in forge.yaml if needed.`,
+        );
+      }
+      continue;
+    }
+
+    // ── 6. Branch not found on remote ───────────────────────────────────────
+    if (label.startsWith("Branch: ")) {
+      const branchName = label.replace("Branch: ", "").trim();
+      console.log("");
+      console.log(`  ${yellow("!")} ${bold(label)}`);
+      console.log(
+        `    Branch ${cyan(branchName)} was not found on the remote. ForgeDock uses`,
+      );
+      console.log(
+        `    this branch for PRs and as a base for new work.`,
+      );
+      console.log(`    ${bold("Option A:")} Create and push the branch:`);
+      console.log(
+        `      ${cyan(`git checkout -b ${branchName} && git push -u origin ${branchName}`)}`,
+      );
+      console.log(
+        `    ${bold("Option B:")} Update the branch name in forge.yaml to one that exists:`,
+      );
+      console.log(
+        `      ${cyan("branches.default")} or ${cyan("branches.staging")} → the correct branch name`,
+      );
+      continue;
+    }
+
+    // ── 7. Project board not configured or invalid ──────────────────────────
+    if (
+      label === "Project board configured" ||
+      label === "Project board"
+    ) {
+      if (note.includes("placeholder")) {
+        console.log("");
+        console.log(`  ${yellow("!")} ${bold(label)}`);
+        console.log(
+          `    The ${cyan("project_board.project_id")} in forge.yaml is still a placeholder.`,
+        );
+        console.log(
+          `    This ID is required for the pipeline to move issues across the board automatically.`,
+        );
+        console.log(
+          `    ${bold("Fix:")} Get your project ID from the GitHub CLI:`,
+        );
+        console.log(
+          `      ${cyan("gh project list --owner <your-org-or-username>")}`,
+        );
+        console.log(
+          `    Copy the ${cyan("PVT_...")} ID from the output and update ${cyan("project_board.project_id")} in forge.yaml.`,
+        );
+      } else if (isError) {
+        // Malformed project_id
+        console.log("");
+        console.log(`  ${red("✗")} ${bold(label)}`);
+        console.log(
+          `    The ${cyan("project_board.project_id")} value does not match the expected`,
+        );
+        console.log(
+          `    format (${cyan("PVT_...")} — a GitHub Projects GraphQL node ID).`,
+        );
+        console.log(`    ${bold("Fix:")} Look up your real project ID:`);
+        console.log(
+          `      ${cyan("gh project list --owner <your-org-or-username>")}`,
+        );
+        console.log(
+          `    Replace the value in forge.yaml with the ${cyan("PVT_...")} ID shown.`,
+        );
+      } else if (note.includes("may be invalid")) {
+        console.log("");
+        console.log(`  ${yellow("!")} ${bold(label)}`);
+        console.log(
+          `    The ${cyan("project_board.project_id")} could not be verified via the GitHub API.`,
+        );
+        console.log(
+          `    It may be invalid or the GitHub CLI may lack org-level permissions.`,
+        );
+        console.log(`    ${bold("Fix:")} Verify your project ID:`);
+        console.log(
+          `      ${cyan("gh project list --owner <your-org-or-username>")}`,
+        );
+      } else if (note.includes("gh error")) {
+        console.log("");
+        console.log(`  ${yellow("!")} ${bold(label)}`);
+        console.log(
+          `    Could not verify the project board ID — the GitHub API call failed.`,
+        );
+        console.log(
+          `    This is usually a transient network issue or a permissions gap.`,
+        );
+        console.log(`    ${bold("Fix:")} Check your auth and try again:`);
+        console.log(`      ${cyan("gh auth status")}`);
+        console.log(
+          `      ${cyan("gh project list --owner <your-org-or-username>")}`,
+        );
+      }
+      continue;
+    }
+
+    // ── 8. Satellite repo inaccessible ──────────────────────────────────────
+    if (label.startsWith("Satellite: ")) {
+      const satRepo = label.replace("Satellite: ", "").trim();
+      console.log("");
+      console.log(`  ${yellow("!")} ${bold(label)}`);
+      console.log(
+        `    Cannot access satellite repo ${cyan(satRepo)}.`,
+      );
+      console.log(
+        `    Satellite repos are used when your project spans multiple repositories.`,
+      );
+      console.log(`    ${bold("Fix:")} Verify the repo name and your access:`);
+      console.log(`      ${cyan(`gh repo view ${satRepo}`)}`);
+      console.log(
+        `    If the repo name is wrong, update ${cyan("repos.satellites")} in forge.yaml.`,
+      );
+      console.log(
+        `    If it is a private repo you cannot access, run: ${cyan("gh auth login")}`,
+      );
+      continue;
+    }
+
+    // ── 9. Satellite repos section misconfigured ─────────────────────────────
+    if (label === "Satellite repos" && note.includes("no satellites found")) {
+      console.log("");
+      console.log(`  ${yellow("!")} ${bold(label)}`);
+      console.log(
+        `    The ${cyan("repos:")} section in forge.yaml is active (uncommented) but`,
+      );
+      console.log(
+        `    contains no satellite entries. Either add satellites or comment out the section.`,
+      );
+      console.log(
+        `    ${bold("Fix:")} Add a satellite entry or comment out the repos: section.`,
+      );
+      continue;
+    }
+
+    // ── Fallback: generic remediation for unexpected checks ──────────────────
+    if (note && !note.endsWith("(optional)")) {
+      console.log("");
+      console.log(
+        `  ${isError ? red("✗") : yellow("!")} ${bold(label)}: ${dim(note)}`,
+      );
+      console.log(
+        `    Review the check above and update forge.yaml or run ${cyan("npx forgedock init")} to regenerate.`,
+      );
+    }
+  }
+
+  console.log("");
 }
 
 /**
