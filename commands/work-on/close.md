@@ -2,6 +2,8 @@
 description: Close subcommand — update project board, final issue body, parent tracker, summary report, trajectory log
 argument-hint: [issue number] [--repo GH_REPO] [--gh-flag GH_FLAG] [--pr PR_NUMBER] [--base PR_BASE] [--branch BRANCH] [--worktree WORKTREE_PATH]
 ---
+<!-- SPDX-FileCopyrightText: Copyright (c) RapierCraft Studios -->
+<!-- SPDX-License-Identifier: AGPL-3.0-or-later -->
 
 # work-on/close — Close & Trajectory Subcommand
 

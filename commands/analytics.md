@@ -1,20 +1,23 @@
 ---
-description: Pull production analytics from GSC, Bing Webmaster, Clarity, Umami, Cloudflare, Stripe, and GA4 — generate insights and create actionable GitHub issues. Trigger when user says things like "check analytics", "look at prod analytics", "make issues from analytics", "what's happening on the site", "audit the site", "check revenue", etc.
+description: Pull production analytics from GSC, Bing Webmaster, Clarity, Umami, Cloudflare, Stripe, and GA4 â€” generate insights and create actionable GitHub issues. Trigger when user says things like "check analytics", "look at prod analytics", "make issues from analytics", "what's happening on the site", "audit the site", "check revenue", etc.
 ---
 
-# /analytics — Production Analytics Audit & Issue Generator
+<!-- SPDX-FileCopyrightText: Copyright (c) RapierCraft Studios -->
+<!-- SPDX-License-Identifier: AGPL-3.0-or-later -->
+
+# /analytics â€” Production Analytics Audit & Issue Generator
 
 You are the analytics orchestrator. Pull data from ALL available analytics platforms (Google Search Console, Bing Webmaster, Microsoft Clarity, Umami, Cloudflare, Google Analytics 4), cross-reference the findings, generate actionable insights, and decompose them into concrete GitHub issues that the `/work-on` pipeline can pick up.
 
-**You have access to ALL tools** — MCP tools for GSC/Clarity/Stripe, Bash for Umami/Cloudflare/Bing APIs, Agent tool for parallel data collection.
+**You have access to ALL tools** â€” MCP tools for GSC/Clarity/Stripe, Bash for Umami/Cloudflare/Bing APIs, Agent tool for parallel data collection.
 
-**NEVER use plan mode (EnterPlanMode)** — it breaks execution context.
+**NEVER use plan mode (EnterPlanMode)** â€” it breaks execution context.
 
 **Agent model policy**: Default `model: "sonnet"`. If Sonnet is rate-limited, fall back to `model: "opus"`. User can override with `--model <name>`. Pass the resolved model in every `Agent` tool call. Each agent prompt includes specific queries, exact API endpoints, and the credentials file path so the model can execute without guessing.
 
 ---
 
-## Config Preamble (REQUIRED — run before anything else)
+## Config Preamble (REQUIRED â€” run before anything else)
 
 **Before any data collection, credentials access, or phase execution**, read `forge.yaml` from the project root and resolve all constants. If the config is missing or incomplete, stop and tell the user what to add.
 
@@ -32,7 +35,7 @@ if [ ! -f "$FORGE_YAML" ]; then
   exit 1
 fi
 
-# Read config with Python (YAML parser — values are shell-quoted via shlex.quote)
+# Read config with Python (YAML parser â€” values are shell-quoted via shlex.quote)
 ANALYTICS_CONFIG=$(python3 -c "
 import yaml, sys, shlex
 cfg = yaml.safe_load(open(sys.argv[1]))
@@ -81,7 +84,7 @@ if echo "$ANALYTICS_CONFIG" | grep -q "MISSING_ANALYTICS_CONFIG"; then
   exit 1
 fi
 
-# Export resolved constants — all downstream phases use these variables
+# Export resolved constants â€” all downstream phases use these variables
 # Values are shell-quoted by the Python block above; eval is safe against metacharacters in forge.yaml values
 eval "$ANALYTICS_CONFIG"
 ```
@@ -90,9 +93,12 @@ All downstream phases use these resolved constants: `{CREDENTIALS_FILE}`, `{DOMA
 
 ---
 
+<!-- SPDX-FileCopyrightText: Copyright (c) RapierCraft Studios -->
+<!-- SPDX-License-Identifier: AGPL-3.0-or-later -->
+
 ## Credentials
 
-**ALL credentials live in one file** at the path resolved from `forge.yaml → paths.credentials.file` (`{CREDENTIALS_FILE}`).
+**ALL credentials live in one file** at the path resolved from `forge.yaml â†’ paths.credentials.file` (`{CREDENTIALS_FILE}`).
 
 Agents MUST read this file for API keys, tokens, and login creds. Do NOT grep SOPS, do NOT hardcode tokens, do NOT look in `.mcp.json`.
 
@@ -106,19 +112,22 @@ python3 -c "import yaml; creds=yaml.safe_load(open('{CREDENTIALS_FILE}')); print
 ## Constants
 
 ```
-CREDENTIALS_FILE = {forge.yaml → paths.credentials.file}
-SITE_URL         = {forge.yaml → services.gsc_property}
-DOMAIN           = {forge.yaml → services.domain}
-HISTORY_FILE     = {forge.yaml → services.analytics.history_file}
+CREDENTIALS_FILE = {forge.yaml â†’ paths.credentials.file}
+SITE_URL         = {forge.yaml â†’ services.gsc_property}
+DOMAIN           = {forge.yaml â†’ services.domain}
+HISTORY_FILE     = {forge.yaml â†’ services.analytics.history_file}
 TODAY = (current date in YYYY-MM-DD)
 SEVEN_DAYS_AGO = (TODAY minus 7 days)
 TWENTY_EIGHT_DAYS_AGO = (TODAY minus 28 days)
 SEO_RECENT_CHANGE_DAYS = 30
 ```
 
-All platform-specific constants (project IDs, zone IDs, API keys, base URLs) are in `{CREDENTIALS_FILE}` — read them from there.
+All platform-specific constants (project IDs, zone IDs, API keys, base URLs) are in `{CREDENTIALS_FILE}` â€” read them from there.
 
 ---
+
+<!-- SPDX-FileCopyrightText: Copyright (c) RapierCraft Studios -->
+<!-- SPDX-License-Identifier: AGPL-3.0-or-later -->
 
 ## Phase 0: Load Audit History
 
@@ -129,7 +138,7 @@ HISTORY_FILE="{HISTORY_FILE}"
 
 if [ -f "$HISTORY_FILE" ]; then
   HISTORY_AVAILABLE=true
-  # Read last 5 audit snapshots (Python for YAML parsing — same pattern as credentials file)
+  # Read last 5 audit snapshots (Python for YAML parsing â€” same pattern as credentials file)
   python3 -c "
 import yaml, json, sys
 history = yaml.safe_load(open(sys.argv[1])) or []
@@ -139,7 +148,7 @@ print(json.dumps(recent, indent=2))
 " "$HISTORY_FILE"
 else
   HISTORY_AVAILABLE=false
-  echo 'First audit — no historical baseline. History file will be created at end of this run.'
+  echo 'First audit â€” no historical baseline. History file will be created at end of this run.'
 fi
 ```
 
@@ -148,13 +157,13 @@ fi
 - All `issues_created` entries from recent audits (for Phase 2.5 impact validation and Issue Quality Gate duplicate check)
 - Tracking integrity verdicts from past runs (context for interpreting current integrity)
 
-**Graceful degradation**: If the file is missing, corrupt, or unreadable — set `HISTORY_AVAILABLE=false`, note it in the report, and proceed. All history-dependent sections in Phase 3 are gated on `HISTORY_AVAILABLE` and will be omitted cleanly.
+**Graceful degradation**: If the file is missing, corrupt, or unreadable â€” set `HISTORY_AVAILABLE=false`, note it in the report, and proceed. All history-dependent sections in Phase 3 are gated on `HISTORY_AVAILABLE` and will be omitted cleanly.
 
 ---
 
 ## Phase 1: Data Collection (Parallel)
 
-Launch ALL 7 data collection agents simultaneously using `run_in_background=true`. Every audit pulls from every platform — no scoping, no arguments.
+Launch ALL 7 data collection agents simultaneously using `run_in_background=true`. Every audit pulls from every platform â€” no scoping, no arguments.
 
 ### Agent 1: GSC Data Collector
 
@@ -164,13 +173,13 @@ Launch as a background Agent (subagent_type: general-purpose, model: sonnet):
 
 **Queries to run:**
 
-1. **Overall performance (last 28 days)** — `mcp__gsc__enhanced_search_analytics` with dimensions: "date", rowLimit: 28
-2. **Top queries by impressions (last 28 days)** — dimensions: "query", rowLimit: 50
-3. **Top pages by clicks (last 28 days)** — dimensions: "page", rowLimit: 50
-4. **Device breakdown** — dimensions: "device"
-5. **Country breakdown** — dimensions: "country", rowLimit: 20
-6. **Quick wins** — `mcp__gsc__detect_quick_wins` with minImpressions: 30, positionRangeMin: 4, positionRangeMax: 20, maxCtr: 3
-7. **Previous 28 days** (for trend comparison) — same query/page queries but for the prior period
+1. **Overall performance (last 28 days)** â€” `mcp__gsc__enhanced_search_analytics` with dimensions: "date", rowLimit: 28
+2. **Top queries by impressions (last 28 days)** â€” dimensions: "query", rowLimit: 50
+3. **Top pages by clicks (last 28 days)** â€” dimensions: "page", rowLimit: 50
+4. **Device breakdown** â€” dimensions: "device"
+5. **Country breakdown** â€” dimensions: "country", rowLimit: 20
+6. **Quick wins** â€” `mcp__gsc__detect_quick_wins` with minImpressions: 30, positionRangeMin: 4, positionRangeMax: 20, maxCtr: 3
+7. **Previous 28 days** (for trend comparison) â€” same query/page queries but for the prior period
 
 All queries use `siteUrl: "{SITE_URL}"`.
 
@@ -218,14 +227,14 @@ python3 -c "import yaml; c=yaml.safe_load(open('{CREDENTIALS_FILE}')); print(c['
 ```
 
 **Queries** (all use website ID `{UMAMI_WEBSITE_ID}`, last 28 days):
-- `/api/websites/{id}/stats` — overall stats
-- `/api/websites/{id}/pageviews?unit=day` — daily trend
-- `/api/websites/{id}/metrics?type=url` — top pages
-- `/api/websites/{id}/metrics?type=referrer` — referrers
-- `/api/websites/{id}/metrics?type=country` — countries
-- `/api/websites/{id}/metrics?type=browser` — browsers
-- `/api/websites/{id}/metrics?type=device` — devices
-- `/api/websites/{id}/metrics?type=event` — custom events
+- `/api/websites/{id}/stats` â€” overall stats
+- `/api/websites/{id}/pageviews?unit=day` â€” daily trend
+- `/api/websites/{id}/metrics?type=url` â€” top pages
+- `/api/websites/{id}/metrics?type=referrer` â€” referrers
+- `/api/websites/{id}/metrics?type=country` â€” countries
+- `/api/websites/{id}/metrics?type=browser` â€” browsers
+- `/api/websites/{id}/metrics?type=device` â€” devices
+- `/api/websites/{id}/metrics?type=event` â€” custom events
 
 **If auth or API fails**: Report "Umami data unavailable" and return what you have. Do NOT block the audit.
 
@@ -243,12 +252,12 @@ CF_TOKEN=$(python3 -c "import yaml; print(yaml.safe_load(open('{CREDENTIALS_FILE
 CF_ZONE=$(python3 -c "import yaml; print(yaml.safe_load(open('{CREDENTIALS_FILE}'))['cloudflare']['zone_id'])")
 ```
 
-**GraphQL queries** (zone from `{CREDENTIALS_FILE} → cloudflare.zone_id`, last 7 days):
-1. HTTP requests daily — requests, pageViews, bytes, cachedBytes, threats, countryMap, uniques
-2. Status code breakdown — responseStatusMap
-3. Threats/bot traffic — threatPathingMap
-4. Bandwidth & cache — bytes, cachedBytes, encryptedBytes
-5. Content types — contentTypeMap
+**GraphQL queries** (zone from `{CREDENTIALS_FILE} â†’ cloudflare.zone_id`, last 7 days):
+1. HTTP requests daily â€” requests, pageViews, bytes, cachedBytes, threats, countryMap, uniques
+2. Status code breakdown â€” responseStatusMap
+3. Threats/bot traffic â€” threatPathingMap
+4. Bandwidth & cache â€” bytes, cachedBytes, encryptedBytes
+5. Content types â€” contentTypeMap
 
 **If API fails**: Report "Cloudflare data unavailable" and return what you have.
 
@@ -268,18 +277,18 @@ BING_BASE=$(python3 -c "import yaml; print(yaml.safe_load(open('{CREDENTIALS_FIL
 ```
 
 **Auth method**: Query param `?apikey={BING_KEY}`
-**Site URL**: URL-encode the site_url value from `{CREDENTIALS_FILE} → bing_webmaster.site_url` in siteUrl param
+**Site URL**: URL-encode the site_url value from `{CREDENTIALS_FILE} â†’ bing_webmaster.site_url` in siteUrl param
 
 **Queries to run:**
 
-1. **Query stats** — `GetQueryStats?siteUrl={site}&apikey={key}` — Bing search queries with impressions, clicks, position
-2. **Crawl stats** — `GetCrawlStats?siteUrl={site}&apikey={key}` — How well Bing is crawling the site
-3. **URL traffic info** — `GetUrlTrafficInfo?siteUrl={site}&apikey={key}` — Pages getting Bing traffic
-4. **Keyword data** — `GetKeywordData?siteUrl={site}&apikey={key}` — Keywords we rank for on Bing
+1. **Query stats** â€” `GetQueryStats?siteUrl={site}&apikey={key}` â€” Bing search queries with impressions, clicks, position
+2. **Crawl stats** â€” `GetCrawlStats?siteUrl={site}&apikey={key}` â€” How well Bing is crawling the site
+3. **URL traffic info** â€” `GetUrlTrafficInfo?siteUrl={site}&apikey={key}` â€” Pages getting Bing traffic
+4. **Keyword data** â€” `GetKeywordData?siteUrl={site}&apikey={key}` â€” Keywords we rank for on Bing
 
 **If any endpoint fails**: Log the error and continue with what you have. Bing API can be flaky.
 
-**Return**: Top Bing queries (impressions, clicks, position), crawl health (pages crawled, errors, crawl rate), top pages by Bing traffic, keyword rankings. Compare with GSC data where possible — Bing vs Google ranking differences are interesting (especially for ChatGPT discoverability).
+**Return**: Top Bing queries (impressions, clicks, position), crawl health (pages crawled, errors, crawl rate), top pages by Bing traffic, keyword rankings. Compare with GSC data where possible â€” Bing vs Google ranking differences are interesting (especially for ChatGPT discoverability).
 
 ### Agent 6: Stripe Revenue Collector
 
@@ -289,14 +298,14 @@ Launch as a background Agent (subagent_type: general-purpose, model: sonnet):
 
 **Data to collect:**
 
-1. **Active subscriptions** — list subscriptions with status=active, count and group by price/plan
-2. **MRR calculation** — sum of active subscription amounts (monthly normalized)
-3. **Recent charges (last 28 days)** — total revenue, successful vs failed count
-4. **Failed payments (last 28 days)** — list failed charges with failure reasons and customer info
-5. **Refunds/disputes (last 28 days)** — any refunds or disputes opened
-6. **New customers (last 28 days)** — count of customers created
-7. **Churned subscriptions (last 28 days)** — subscriptions canceled in the period
-8. **Balance** — current Stripe balance and pending payouts
+1. **Active subscriptions** â€” list subscriptions with status=active, count and group by price/plan
+2. **MRR calculation** â€” sum of active subscription amounts (monthly normalized)
+3. **Recent charges (last 28 days)** â€” total revenue, successful vs failed count
+4. **Failed payments (last 28 days)** â€” list failed charges with failure reasons and customer info
+5. **Refunds/disputes (last 28 days)** â€” any refunds or disputes opened
+6. **New customers (last 28 days)** â€” count of customers created
+7. **Churned subscriptions (last 28 days)** â€” subscriptions canceled in the period
+8. **Balance** â€” current Stripe balance and pending payouts
 
 **If Stripe MCP is unavailable**: Report "Stripe data unavailable" and return what you have. Do NOT block the audit.
 
@@ -332,15 +341,15 @@ If `jwt` (PyJWT) is not installed, use: `pip install PyJWT requests`
 
 **Reports to run** (all use POST with Bearer token, last 28 days):
 
-1. **Overall metrics** — metrics: `sessions`, `totalUsers`, `newUsers`, `screenPageViews`, `bounceRate`, `averageSessionDuration`, `engagedSessions`, `engagementRate`
-2. **Daily trend** — dimensions: `date`, metrics: `sessions`, `totalUsers`, `screenPageViews`
-3. **Top pages** — dimensions: `pagePath`, metrics: `screenPageViews`, `sessions`, `bounceRate`, `averageSessionDuration`, orderBy: screenPageViews desc, limit: 30
-4. **Traffic sources** — dimensions: `sessionDefaultChannelGroup`, metrics: `sessions`, `totalUsers`, `engagementRate`
-5. **Source/medium** — dimensions: `sessionSourceMedium`, metrics: `sessions`, `totalUsers`, limit: 20
-6. **Device category** — dimensions: `deviceCategory`, metrics: `sessions`, `totalUsers`, `bounceRate`
-7. **Country** — dimensions: `country`, metrics: `sessions`, `totalUsers`, limit: 20
-8. **Landing pages** — dimensions: `landingPage`, metrics: `sessions`, `bounceRate`, `engagementRate`, limit: 20
-9. **Events** — dimensions: `eventName`, metrics: `eventCount`, limit: 20
+1. **Overall metrics** â€” metrics: `sessions`, `totalUsers`, `newUsers`, `screenPageViews`, `bounceRate`, `averageSessionDuration`, `engagedSessions`, `engagementRate`
+2. **Daily trend** â€” dimensions: `date`, metrics: `sessions`, `totalUsers`, `screenPageViews`
+3. **Top pages** â€” dimensions: `pagePath`, metrics: `screenPageViews`, `sessions`, `bounceRate`, `averageSessionDuration`, orderBy: screenPageViews desc, limit: 30
+4. **Traffic sources** â€” dimensions: `sessionDefaultChannelGroup`, metrics: `sessions`, `totalUsers`, `engagementRate`
+5. **Source/medium** â€” dimensions: `sessionSourceMedium`, metrics: `sessions`, `totalUsers`, limit: 20
+6. **Device category** â€” dimensions: `deviceCategory`, metrics: `sessions`, `totalUsers`, `bounceRate`
+7. **Country** â€” dimensions: `country`, metrics: `sessions`, `totalUsers`, limit: 20
+8. **Landing pages** â€” dimensions: `landingPage`, metrics: `sessions`, `bounceRate`, `engagementRate`, limit: 20
+9. **Events** â€” dimensions: `eventName`, metrics: `eventCount`, limit: 20
 
 **Example request body:**
 ```json
@@ -359,7 +368,10 @@ If `jwt` (PyJWT) is not installed, use: `pip install PyJWT requests`
 
 ---
 
-## Phase 1.5: Tracking Integrity Check (REQUIRED — run before ANY analysis)
+<!-- SPDX-FileCopyrightText: Copyright (c) RapierCraft Studios -->
+<!-- SPDX-License-Identifier: AGPL-3.0-or-later -->
+
+## Phase 1.5: Tracking Integrity Check (REQUIRED â€” run before ANY analysis)
 
 Before drawing ANY conclusions from analytics data, validate that the tracking itself is trustworthy. Broken tracking produces confident-sounding but wrong findings.
 
@@ -369,20 +381,20 @@ Compare user/session counts across platforms. Write them side-by-side:
 
 ```
 Cloudflare uniques/day: ___
-GA4 sessions (28d):     ___  → ___/day
-Umami visits (28d):     ___  → ___/day
-Clarity sessions (Nd):  ___  → ___/day
+GA4 sessions (28d):     ___  â†’ ___/day
+Umami visits (28d):     ___  â†’ ___/day
+Clarity sessions (Nd):  ___  â†’ ___/day
 ```
 
 **Expected relationships** (for a developer-audience site):
 - Cloudflare >> all others (includes bots, crawlers, API traffic)
-- Umami ≈ 1.5-2.5x GA4 (self-hosted Umami dodges ad blockers; GA4 is blocked by ~30-50% of developer users)
-- Clarity ≈ GA4 (both are third-party scripts, similar blocking rate)
+- Umami â‰ˆ 1.5-2.5x GA4 (self-hosted Umami dodges ad blockers; GA4 is blocked by ~30-50% of developer users)
+- Clarity â‰ˆ GA4 (both are third-party scripts, similar blocking rate)
 
 **Red flags that BLOCK analysis until explained**:
-- GA4 users < 10% of Umami visitors → GA4 tag is broken. Mark ALL GA4 event data as "UNVERIFIED."
-- Clarity sessions < 20% of GA4 sessions → Clarity script not loading. Mark ALL Clarity UX data as "UNVERIFIED."
-- Umami and GA4 agree but both are < 1% of Cloudflare uniques AND Cloudflare threat count is low → tracking scripts only fire on some pages (partial instrumentation).
+- GA4 users < 10% of Umami visitors â†’ GA4 tag is broken. Mark ALL GA4 event data as "UNVERIFIED."
+- Clarity sessions < 20% of GA4 sessions â†’ Clarity script not loading. Mark ALL Clarity UX data as "UNVERIFIED."
+- Umami and GA4 agree but both are < 1% of Cloudflare uniques AND Cloudflare threat count is low â†’ tracking scripts only fire on some pages (partial instrumentation).
 
 If any platform is marked UNVERIFIED, do NOT create issues based solely on that platform's data.
 
@@ -404,35 +416,35 @@ Ratio (Umami/Stripe):             ___
 
 **If `begin_checkout` events < Stripe charges**: `begin_checkout` is under-instrumented (every purchase required beginning checkout). Flag as tracking gap.
 
-**If `begin_checkout` events > 3x Stripe charges**: `begin_checkout` is likely over-counting — firing on non-checkout actions (e.g., free CTA clicks, page loads). Investigate the event definition in code before using it in any funnel analysis.
+**If `begin_checkout` events > 3x Stripe charges**: `begin_checkout` is likely over-counting â€” firing on non-checkout actions (e.g., free CTA clicks, page loads). Investigate the event definition in code before using it in any funnel analysis.
 
-**If Stripe data is unavailable**: Downgrade ALL conversion/funnel/revenue findings to "Observation — unverified (no Stripe ground truth)." Do NOT create issues about checkout abandonment or funnel drop-off.
+**If Stripe data is unavailable**: Downgrade ALL conversion/funnel/revenue findings to "Observation â€” unverified (no Stripe ground truth)." Do NOT create issues about checkout abandonment or funnel drop-off.
 
 ### Step 3: Event Instrumentation Check
 
 For key funnel events (`begin_checkout`, `purchase`, `sign_up`, `generate_lead`), verify they measure what you think:
 
 1. Check the Umami/GA4 custom events list from the data collection agents.
-2. If the event exists, note its count. If it doesn't exist, note "NOT INSTRUMENTED" — you cannot compute a funnel ratio for an event that doesn't exist.
-3. If an event count seems implausible (e.g., `begin_checkout` > total sessions, or `purchase` = 0 when Stripe has charges), the event definition is wrong — it's a tracking issue, not a user behavior issue.
+2. If the event exists, note its count. If it doesn't exist, note "NOT INSTRUMENTED" â€” you cannot compute a funnel ratio for an event that doesn't exist.
+3. If an event count seems implausible (e.g., `begin_checkout` > total sessions, or `purchase` = 0 when Stripe has charges), the event definition is wrong â€” it's a tracking issue, not a user behavior issue.
 
 **Write down the tracking integrity verdict before proceeding:**
 ```
 Tracking Integrity:
-- GA4: ✓ Trusted / ⚠ Partially trusted / ✗ Unverified
-- Umami: ✓ / ⚠ / ✗
-- Clarity: ✓ / ⚠ / ✗
-- Stripe: ✓ / ✗ unavailable
-- Conversion events: ✓ verified against Stripe / ✗ broken (specify which)
+- GA4: âœ“ Trusted / âš  Partially trusted / âœ— Unverified
+- Umami: âœ“ / âš  / âœ—
+- Clarity: âœ“ / âš  / âœ—
+- Stripe: âœ“ / âœ— unavailable
+- Conversion events: âœ“ verified against Stripe / âœ— broken (specify which)
 ```
 
 ---
 
 ## Phase 2: Cross-Platform Analysis
 
-After tracking integrity is validated, synthesize findings. Write down key data points immediately — agent outputs may get compacted.
+After tracking integrity is validated, synthesize findings. Write down key data points immediately â€” agent outputs may get compacted.
 
-**CRITICAL RULE**: Every finding must be corroborated by at least 2 platforms, or explicitly labeled as "single-source — lower confidence." Single-source findings from an UNVERIFIED platform are not findings — they are noise.
+**CRITICAL RULE**: Every finding must be corroborated by at least 2 platforms, or explicitly labeled as "single-source â€” lower confidence." Single-source findings from an UNVERIFIED platform are not findings â€” they are noise.
 
 **Historical trend context (when HISTORY_AVAILABLE=true)**: For each key metric, compare the current value not just to the previous GSC period, but to the full multi-run trend from Phase 0 history. A metric declining for 3 consecutive audits is a persistent problem, not a one-time fluctuation. A metric that spiked last audit and recovered this audit is likely noise. Use trend direction to calibrate priority: persistent trends get P0/P1, single-period anomalies get P2/P3 unless corroborated by other signals.
 
@@ -440,7 +452,7 @@ After tracking integrity is validated, synthesize findings. Write down key data 
 
 **SEO + UX overlap**: Pages with high GSC impressions but low clicks AND Clarity rage clicks = broken UX killing rankings. Highest priority.
 
-**Quick wins (with git history check — hard gate)**: GSC queries at position 4-20 with decent impressions but low CTR = title/meta optimization. **BUT FIRST**: For every page you'd propose a title/meta rewrite, run the git history check using `SEO_RECENT_CHANGE_DAYS`:
+**Quick wins (with git history check â€” hard gate)**: GSC queries at position 4-20 with decent impressions but low CTR = title/meta optimization. **BUT FIRST**: For every page you'd propose a title/meta rewrite, run the git history check using `SEO_RECENT_CHANGE_DAYS`:
 ```bash
 git -C "{REPO_PATH}" log --since="${SEO_RECENT_CHANGE_DAYS} days ago" --oneline -- web/src/app/<page>/page.tsx
 ```
@@ -448,21 +460,21 @@ For blog posts stored in DB, check migration files:
 ```bash
 grep -rl "<slug>" "{REPO_PATH}/infra/migrations/" 2>/dev/null
 ```
-**If metadata changed within `SEO_RECENT_CHANGE_DAYS` days**: **Do NOT add to Proposed Actions.** Instead, add the page to the **"Recently Updated — Monitor"** section of the report (see Phase 3 template) with the note: "Updated {date} — allow 1 SEO cycle before re-evaluating. Current GSC data may reflect pre-change state." Only pages with stable metadata (unchanged for more than `SEO_RECENT_CHANGE_DAYS` days) may appear in Proposed Actions for SEO rewrites.
+**If metadata changed within `SEO_RECENT_CHANGE_DAYS` days**: **Do NOT add to Proposed Actions.** Instead, add the page to the **"Recently Updated â€” Monitor"** section of the report (see Phase 3 template) with the note: "Updated {date} â€” allow 1 SEO cycle before re-evaluating. Current GSC data may reflect pre-change state." Only pages with stable metadata (unchanged for more than `SEO_RECENT_CHANGE_DAYS` days) may appear in Proposed Actions for SEO rewrites.
 
-Quantify the opportunity (e.g., "500 impressions/month at 1.2% CTR → industry avg 5% at position 6 → ~19 extra clicks/month").
+Quantify the opportunity (e.g., "500 impressions/month at 1.2% CTR â†’ industry avg 5% at position 6 â†’ ~19 extra clicks/month").
 
-**Performance**: Clarity CWV ratings cross-referenced with GSC mobile data — poor mobile CWV hurts mobile rankings. Cloudflare cache hit ratio — **interpret in context**: API-first projects have low cache rates by design, so dynamic HTML+JSON responses should NOT be cached. Only flag cache issues if static assets (JS, CSS, images, fonts) have low cache rates. Check content type breakdown from Cloudflare data before claiming "low cache rate."
+**Performance**: Clarity CWV ratings cross-referenced with GSC mobile data â€” poor mobile CWV hurts mobile rankings. Cloudflare cache hit ratio â€” **interpret in context**: API-first projects have low cache rates by design, so dynamic HTML+JSON responses should NOT be cached. Only flag cache issues if static assets (JS, CSS, images, fonts) have low cache rates. Check content type breakdown from Cloudflare data before claiming "low cache rate."
 
 **Bing vs Google divergence**: Compare Bing Webmaster keyword rankings with GSC. Keywords ranking well on Bing but not Google (or vice versa) reveal optimization gaps. Bing rankings matter for ChatGPT search discoverability. **But**: only flag as actionable if the query has >50 impressions on the platform where ranking is weak. Below 50, position data is too noisy.
 
-**Revenue + Traffic correlation**: Cross-reference Stripe revenue/subscriber trends with traffic data. Rising traffic but flat revenue = conversion problem — **but only if Stripe ground truth was verified in Phase 1.5**. Failed payments spiking = billing infrastructure issue.
+**Revenue + Traffic correlation**: Cross-reference Stripe revenue/subscriber trends with traffic data. Rising traffic but flat revenue = conversion problem â€” **but only if Stripe ground truth was verified in Phase 1.5**. Failed payments spiking = billing infrastructure issue.
 
-For "signups vs customers" comparison: Only compute if Umami custom events include a `signup`, `register`, `sign_up`, or `auth-signup-complete` event. Check the events list first. If no such event exists, this comparison is meaningless — note "signup event not instrumented" and skip.
+For "signups vs customers" comparison: Only compute if Umami custom events include a `signup`, `register`, `sign_up`, or `auth-signup-complete` event. Check the events list first. If no such event exists, this comparison is meaningless â€” note "signup event not instrumented" and skip.
 
 **Churn signals**: Stripe canceled subscriptions cross-referenced with Clarity rage clicks on dashboard/billing pages = UX-driven churn. Failed payments with no retry success = involuntary churn needing dunning improvements.
 
-**Error signals**: Cloudflare 4xx/5xx spikes, Clarity JS errors, pages in Umami but missing from GSC (indexing gaps), Bing crawl errors. **For Cloudflare status codes**: Check if 4xx responses are intentional bot-blocking (WAF/firewall rules) before flagging as errors. For Bing crawl errors, check robots.txt and bot-handling middleware — 403s on auth-gated paths are correct behavior, not bugs.
+**Error signals**: Cloudflare 4xx/5xx spikes, Clarity JS errors, pages in Umami but missing from GSC (indexing gaps), Bing crawl errors. **For Cloudflare status codes**: Check if 4xx responses are intentional bot-blocking (WAF/firewall rules) before flagging as errors. For Bing crawl errors, check robots.txt and bot-handling middleware â€” 403s on auth-gated paths are correct behavior, not bugs.
 
 **Content**: Which blog posts drive traffic across all platforms? Which have UX issues? Which convert (Clarity smart events)?
 
@@ -473,14 +485,14 @@ Before treating any event count as meaningful:
 **Over-counting red flags**:
 - Event counts implausibly high vs session count (e.g., 50 `begin_checkout` with 30 sessions = double-fire or wrong trigger)
 - Same event name used for multiple actions (common: `begin_checkout` fires on both real purchases AND free-tier CTA clicks)
-- Rage/dead click counts > session count → bot interactions inflating behavioral data
-- Cloudflare threat count > 50% of total requests → subtract bot traffic from ALL per-request metrics
+- Rage/dead click counts > session count â†’ bot interactions inflating behavioral data
+- Cloudflare threat count > 50% of total requests â†’ subtract bot traffic from ALL per-request metrics
 
 **Under-counting awareness** (developer audience):
 - Developer-focused projects see ad blockers at 3-5x the general population rate.
 - GA4 event counts likely undercount true user actions by 20-50%.
-- Never create a "low conversion rate" issue if Stripe successful charges roughly match or exceed analytics purchase events — the funnel is healthy, tracking is lossy.
-- Self-hosted Umami is more reliable than GA4 for this audience — prefer Umami event counts when they diverge.
+- Never create a "low conversion rate" issue if Stripe successful charges roughly match or exceed analytics purchase events â€” the funnel is healthy, tracking is lossy.
+- Self-hosted Umami is more reliable than GA4 for this audience â€” prefer Umami event counts when they diverge.
 
 ### Prioritize Findings
 
@@ -499,13 +511,16 @@ Classify:
 
 ---
 
-## Issue Quality Gate (REQUIRED — run before building Proposed Actions table)
+<!-- SPDX-FileCopyrightText: Copyright (c) RapierCraft Studios -->
+<!-- SPDX-License-Identifier: AGPL-3.0-or-later -->
 
-Every candidate finding must pass this gate. If any check fails, downgrade to "Observation — monitor" or drop entirely. Do NOT add to Proposed Actions.
+## Issue Quality Gate (REQUIRED â€” run before building Proposed Actions table)
+
+Every candidate finding must pass this gate. If any check fails, downgrade to "Observation â€” monitor" or drop entirely. Do NOT add to Proposed Actions.
 
 ### For ALL findings:
 - [ ] **Multi-source corroboration**: Is this finding supported by at least 2 platforms? Single-source findings must include explicit uncertainty note and cannot be higher than P2.
-- [ ] **Sample size**: State N. If N < 10 affected sessions (UX) or N < 100 impressions (SEO), cap priority at P3 and add "(low sample — monitor first)".
+- [ ] **Sample size**: State N. If N < 10 affected sessions (UX) or N < 100 impressions (SEO), cap priority at P3 and add "(low sample â€” monitor first)".
 - [ ] **Not a tracking artifact**: Could this finding be explained by broken tracking rather than a real user problem? If yes, create a tracking-fix issue instead.
 
 ### For conversion/funnel findings:
@@ -513,11 +528,11 @@ Every candidate finding must pass this gate. If any check fails, downgrade to "O
 - [ ] **Event logic verified**: Does `begin_checkout` actually mean "started paying"? Does `purchase` fire reliably? If unsure, note "event definition unverified."
 
 ### For SEO/content findings:
-- [ ] **Git history checked (hard gate)**: Run `git log --since="${SEO_RECENT_CHANGE_DAYS} days ago"` on the page file (and migration files for DB-driven blog posts). If the page's title/meta changed within `SEO_RECENT_CHANGE_DAYS` days → **do NOT add to Proposed Actions**. Move it to the "Recently Updated — Monitor" section with the note: "Updated {date} — allow 1 SEO cycle before re-evaluating." This check covers both file-based pages (`web/src/app/<page>/page.tsx`) and DB-driven blog posts (grep migration files for slug). This gate cannot be skipped.
-- [ ] **Impression threshold**: >100 impressions for the query/page? Below 100, position/CTR data is noisy — one ranking fluctuation changes the average. Cap at P3.
+- [ ] **Git history checked (hard gate)**: Run `git log --since="${SEO_RECENT_CHANGE_DAYS} days ago"` on the page file (and migration files for DB-driven blog posts). If the page's title/meta changed within `SEO_RECENT_CHANGE_DAYS` days â†’ **do NOT add to Proposed Actions**. Move it to the "Recently Updated â€” Monitor" section with the note: "Updated {date} â€” allow 1 SEO cycle before re-evaluating." This check covers both file-based pages (`web/src/app/<page>/page.tsx`) and DB-driven blog posts (grep migration files for slug). This gate cannot be skipped.
+- [ ] **Impression threshold**: >100 impressions for the query/page? Below 100, position/CTR data is noisy â€” one ranking fluctuation changes the average. Cap at P3.
 
 ### For UX findings (dead clicks, rage clicks, bounce):
-- [ ] **Element identified**: Do you know WHICH specific element is being rage/dead-clicked? Page-level counts without element drill-down are not actionable — you can't fix what you can't identify.
+- [ ] **Element identified**: Do you know WHICH specific element is being rage/dead-clicked? Page-level counts without element drill-down are not actionable â€” you can't fix what you can't identify.
 - [ ] **Post-redesign data**: Has the page been redesigned recently? If so, is the data from before or after the redesign? Stale UX data about a page that's already changed is not an issue.
 
 ### For infra/performance findings:
@@ -528,9 +543,9 @@ Every candidate finding must pass this gate. If any check fails, downgrade to "O
   ```bash
   # For each issue number from history's issues_created:
   gh issue view {PAST_ISSUE_NUMBER} -R {GH_REPO} --json state,title --jq '{state, title}'
-  # If state=OPEN and the title/category matches the current finding → skip creation, note "Already tracked in #{PAST_ISSUE_NUMBER}"
+  # If state=OPEN and the title/category matches the current finding â†’ skip creation, note "Already tracked in #{PAST_ISSUE_NUMBER}"
   ```
-  If the past issue is closed (fixed), the finding may recur — create a new issue and note the recurrence.
+  If the past issue is closed (fixed), the finding may recur â€” create a new issue and note the recurrence.
 
 ---
 
@@ -548,9 +563,9 @@ THEN_VALUE="{value recorded in history snapshot}"
 NOW_VALUE="{current value from this audit's data collection}"
 
 # Compute verdict:
-# If NOW < THEN * 0.8 → "✓ improved"
-# If NOW > THEN * 1.2 → "⚠ worsened"
-# Otherwise → "→ unchanged"
+# If NOW < THEN * 0.8 â†’ "âœ“ improved"
+# If NOW > THEN * 1.2 â†’ "âš  worsened"
+# Otherwise â†’ "â†’ unchanged"
 ```
 
 Emit an impact table:
@@ -559,55 +574,58 @@ Emit an impact table:
 ### Impact of Previous Actions (from {LAST_AUDIT_DATE} audit)
 | Issue | Metric | Then | Now | Verdict |
 |-------|--------|------|-----|---------|
-| #{NUM} {title} | {metric} | {then} | {now} | ✓ improved / → unchanged / ⚠ worsened |
+| #{NUM} {title} | {metric} | {then} | {now} | âœ“ improved / â†’ unchanged / âš  worsened |
 ```
 
-**If metric mapping is ambiguous** (e.g. issue title doesn't clearly map to a single metric): use the `category` field from history to guess the most relevant metric (infra → cf_5xx_7d, seo → gsc_clicks, product → first_scrape). If no mapping is possible, mark verdict as "— unmeasured" and do not skip the row.
+**If metric mapping is ambiguous** (e.g. issue title doesn't clearly map to a single metric): use the `category` field from history to guess the most relevant metric (infra â†’ cf_5xx_7d, seo â†’ gsc_clicks, product â†’ first_scrape). If no mapping is possible, mark verdict as "â€” unmeasured" and do not skip the row.
 
-**If a past issue is still open and shows ⚠ worsened**: Escalate its priority in the current Proposed Actions table if it appears again as a current finding.
+**If a past issue is still open and shows âš  worsened**: Escalate its priority in the current Proposed Actions table if it appears again as a current finding.
 
 ---
+
+<!-- SPDX-FileCopyrightText: Copyright (c) RapierCraft Studios -->
+<!-- SPDX-License-Identifier: AGPL-3.0-or-later -->
 
 ## Phase 3: Present Report
 
 Show the user a structured report BEFORE creating issues. This is the checkpoint.
 
 ```markdown
-## Analytics Audit — {DATE}
+## Analytics Audit â€” {DATE}
 
 **Period**: Last 28 days (GSC/Umami) | Last 7 days (Clarity/CF)
-**Sources**: GSC ✓/✗ | GA4 ✓/✗ | Bing ✓/✗ | Clarity ✓/✗ | Umami ✓/✗ | Cloudflare ✓/✗ | Stripe ✓/✗
+**Sources**: GSC âœ“/âœ— | GA4 âœ“/âœ— | Bing âœ“/âœ— | Clarity âœ“/âœ— | Umami âœ“/âœ— | Cloudflare âœ“/âœ— | Stripe âœ“/âœ—
 
 ### Tracking Integrity
 | Platform | Status | Notes |
 |----------|--------|-------|
-| GA4 | ✓/⚠/✗ | {reason if not trusted} |
-| Umami | ✓/⚠/✗ | |
-| Clarity | ✓/⚠/✗ | |
-| Stripe | ✓/✗ | |
-| Conversion events | ✓/✗ | {Stripe charges vs analytics purchase events — ratio} |
+| GA4 | âœ“/âš /âœ— | {reason if not trusted} |
+| Umami | âœ“/âš /âœ— | |
+| Clarity | âœ“/âš /âœ— | |
+| Stripe | âœ“/âœ— | |
+| Conversion events | âœ“/âœ— | {Stripe charges vs analytics purchase events â€” ratio} |
 
-{If any conversion event tracking is broken, state it prominently here. E.g.: "purchase event fires 6% of the time (2 events vs 33 Stripe charges) — all funnel metrics from analytics are unreliable. Stripe is ground truth."}
+{If any conversion event tracking is broken, state it prominently here. E.g.: "purchase event fires 6% of the time (2 events vs 33 Stripe charges) â€” all funnel metrics from analytics are unreliable. Stripe is ground truth."}
 
 <!-- When HISTORY_AVAILABLE=true, insert the two sections below. When HISTORY_AVAILABLE=false, omit both sections entirely (no empty tables). -->
 
 ### Impact of Previous Actions _(omit when HISTORY_AVAILABLE=false)_
-{Paste the impact table from Phase 2.5 here. If all past issues are closed with no recurrence, write: "All tracked issues from last audit closed — no active follow-ups."}
+{Paste the impact table from Phase 2.5 here. If all past issues are closed with no recurrence, write: "All tracked issues from last audit closed â€” no active follow-ups."}
 
 ### Multi-Audit Trends _(omit when HISTORY_AVAILABLE=false)_
 | Metric | {DATE-3} | {DATE-2} | {DATE-1} | {TODAY} | Trend |
 |--------|----------|----------|----------|---------|-------|
-| GSC Clicks | | | | | ↑/↓/→ |
+| GSC Clicks | | | | | â†‘/â†“/â†’ |
 | GSC CTR | | | | | |
 | Umami Visitors | | | | | |
 | Stripe MRR | | | | | |
 | CF 5xx (7d) | | | | | |
 | Signups | | | | | |
 
-Fill in historical values from the Phase 0 history snapshots. Leave cells blank (—) for dates where a metric was not recorded. Use at most the 3 prior audit dates before today.
+Fill in historical values from the Phase 0 history snapshots. Leave cells blank (â€”) for dates where a metric was not recorded. Use at most the 3 prior audit dates before today.
 
 ### Executive Summary
-{3-5 sentences. Lead with the biggest opportunity or problem. If tracking is broken, lead with that — bad data is the #1 risk.}
+{3-5 sentences. Lead with the biggest opportunity or problem. If tracking is broken, lead with that â€” bad data is the #1 risk.}
 
 ### Key Metrics
 | Metric | Current | Previous | Change |
@@ -630,11 +648,11 @@ Fill in historical values from the Phase 0 history snapshots. Leave cells blank 
 {MRR, active subscribers, new customers, churn count, failed payments with top failure reasons, refunds/disputes. Flag involuntary churn risks (repeated failures). Revenue trend vs traffic trend.}
 
 ### SEO: Quick Wins
-{Top queries with position 4-20, high impressions, low CTR — with recommended actions. Only pages with stable metadata (unchanged for >`SEO_RECENT_CHANGE_DAYS` days) appear here.}
+{Top queries with position 4-20, high impressions, low CTR â€” with recommended actions. Only pages with stable metadata (unchanged for >`SEO_RECENT_CHANGE_DAYS` days) appear here.}
 
-### SEO: Recently Updated — Monitor
-{Pages skipped from Proposed Actions because their metadata changed within `SEO_RECENT_CHANGE_DAYS` days. Do NOT propose rewrites for these — current GSC data may reflect the pre-change state. Format each entry as:}
-- **{page path}**: Updated {date} — allow 1 SEO cycle before re-evaluating. Current GSC data may reflect pre-change state.
+### SEO: Recently Updated â€” Monitor
+{Pages skipped from Proposed Actions because their metadata changed within `SEO_RECENT_CHANGE_DAYS` days. Do NOT propose rewrites for these â€” current GSC data may reflect the pre-change state. Format each entry as:}
+- **{page path}**: Updated {date} â€” allow 1 SEO cycle before re-evaluating. Current GSC data may reflect pre-change state.
 {If no pages were recently updated: omit this section entirely.}
 
 ### Bing / ChatGPT Discoverability
@@ -644,7 +662,7 @@ Fill in historical values from the Phase 0 history snapshots. Leave cells blank 
 {Notable movers across both Google and Bing}
 
 ### UX: Problem Areas
-{Rage clicks, dead clicks, quick backs — with session recording links}
+{Rage clicks, dead clicks, quick backs â€” with session recording links}
 
 ### Performance
 {CWV ratings, cache efficiency, error rates}
@@ -661,15 +679,15 @@ Fill in historical values from the Phase 0 history snapshots. Leave cells blank 
 ```
 
 **Insight quality rules:**
-- Don't just list data — interpret it. "Position 7.2" is data. "Below the fold for your primary keyword, fixing title could yield +40% CTR" is an insight.
+- Don't just list data â€” interpret it. "Position 7.2" is data. "Below the fold for your primary keyword, fixing title could yield +40% CTR" is an insight.
 - Cross-reference is the superpower. Declining GSC clicks + Clarity rage clicks + high Umami bounce = a story no single platform tells.
 - Quantify every opportunity with numbers.
-- Be honest about uncertainty. Small sample sizes or ambiguous data — say so.
+- Be honest about uncertainty. Small sample sizes or ambiguous data â€” say so.
 
 **Hard thresholds for Proposed Actions (these are stops, not suggestions):**
 - **UX issues** (rage clicks, dead clicks, quick backs): minimum 10 affected sessions AND specific element identified. Page-level counts without element drill-down go to "Observations" not "Proposed Actions."
-- **SEO issues** (CTR, position): minimum 100 impressions for the query/page. Below 100: "Observation — insufficient data."
-- **Traffic source issues**: minimum 50 sessions from that source. Below 50: "Observation — monitor."
+- **SEO issues** (CTR, position): minimum 100 impressions for the query/page. Below 100: "Observation â€” insufficient data."
+- **Traffic source issues**: minimum 50 sessions from that source. Below 50: "Observation â€” monitor."
 - **Revenue/conversion issues**: ALWAYS require Stripe cross-validation. Analytics events alone are NEVER sufficient to create a conversion issue. If Stripe data contradicts analytics, Stripe wins.
 - **Infra/cache issues**: must include context (is the low cache rate expected for this traffic type?). API-first platforms have low cache rates by design.
 
@@ -677,7 +695,7 @@ Fill in historical values from the Phase 0 history snapshots. Leave cells blank 
 
 ## Phase 4: Create GitHub Issues
 
-**Only after user confirms.** If "adjust" — modify list. If they pick specific ones — only create those.
+**Only after user confirms.** If "adjust" â€” modify list. If they pick specific ones â€” only create those.
 
 For each approved action:
 
@@ -692,17 +710,17 @@ gh issue create \
 
 ## Root Cause (if known)
 
-{What's causing the metric gap — missing metadata, wrong implementation, infrastructure issue, etc. If unknown: "Root cause unknown — investigation needed."}
+{What's causing the metric gap â€” missing metadata, wrong implementation, infrastructure issue, etc. If unknown: "Root cause unknown â€” investigation needed."}
 
 ## Affected Files
 
 Files that need changes:
-1. `{filepath}` — {what needs to change}
-2. `{filepath}` — {what needs to change}
+1. `{filepath}` â€” {what needs to change}
+2. `{filepath}` â€” {what needs to change}
 
 ## Acceptance Criteria
 
-- [ ] {Measurable improvement criterion — include target metric value}
+- [ ] {Measurable improvement criterion â€” include target metric value}
 - [ ] Verified in next analytics audit
 
 ## Context
@@ -725,13 +743,13 @@ BODY_EOF
 )"
 ```
 
-**Label mapping**: SEO → `seo`, UX → `ux,frontend`, Performance → `performance,infra`, Bug → `bug`. Priority: `P0`-`P3`.
+**Label mapping**: SEO â†’ `seo`, UX â†’ `ux,frontend`, Performance â†’ `performance,infra`, Bug â†’ `bug`. Priority: `P0`-`P3`.
 
 If an open milestone fits, offer to assign issues to it.
 
 ### Add analytics issues to Project board
 
-For each created issue, add it to the GitHub Project. Field IDs are resolved from `forge.yaml → project_board.field_ids` (see the ForgeDock docs for the full project board configuration schema).
+For each created issue, add it to the GitHub Project. Field IDs are resolved from `forge.yaml â†’ project_board.field_ids` (see the ForgeDock docs for the full project board configuration schema).
 
 ```bash
 ISSUE_URL="https://github.com/{GH_REPO}/issues/${ISSUE_NUM}"
@@ -745,6 +763,9 @@ fi
 ```
 
 ---
+
+<!-- SPDX-FileCopyrightText: Copyright (c) RapierCraft Studios -->
+<!-- SPDX-License-Identifier: AGPL-3.0-or-later -->
 
 ## Phase 5: Summary & History Append
 
@@ -823,7 +844,7 @@ if os.path.exists(sys.argv[1]):
     try:
         history = yaml.safe_load(open(sys.argv[1])) or []
     except Exception:
-        history = []  # corrupt file — start fresh, do not fail
+        history = []  # corrupt file â€” start fresh, do not fail
 
 # Append and cap at 12 entries
 history.append(snapshot)
@@ -839,16 +860,16 @@ print(f'History updated: {len(history)} entries in {sys.argv[1]}')
 
 **Placeholder substitution**: Replace `{GSC_CLICKS}`, `{UMAMI_VISITORS}`, etc. with the actual numeric values from the data collection agents. For any platform that was unavailable this run, use `null` (Python None). For `{ISSUES_CREATED_LIST}`, use a list of dicts matching the schema: `[{'number': 123, 'title': '...', 'priority': 'P1', 'category': 'infra'}]`. For `{KEY_FINDINGS_LIST}`, use a list of the top 3-5 finding strings from the Executive Summary. For `{GA4_STATUS}` etc., use one of: `trusted`, `partially_trusted`, `unverified`, `unavailable`.
 
-**If the write fails** (permissions, disk full, etc.): Log the error and continue. A failed history write is non-fatal — the audit results are already shown to the user and issues created. Do NOT re-run or retry the entire audit.
+**If the write fails** (permissions, disk full, etc.): Log the error and continue. A failed history write is non-fatal â€” the audit results are already shown to the user and issues created. Do NOT re-run or retry the entire audit.
 
 ---
 
 ## Error Handling
 
 - **General rule**: Skip failed platforms, note in report, continue. Partial audit > no audit.
-- **Stripe unavailable**: Downgrade ALL conversion/funnel/revenue findings to "Observation — unverified (Stripe unavailable)." Do NOT create issues about checkout abandonment, low purchase rate, or funnel drop-off without Stripe ground truth.
+- **Stripe unavailable**: Downgrade ALL conversion/funnel/revenue findings to "Observation â€” unverified (Stripe unavailable)." Do NOT create issues about checkout abandonment, low purchase rate, or funnel drop-off without Stripe ground truth.
 - **GA4 unavailable**: Conversion event data is unverifiable unless Umami has the same events. Note that all event-based findings come from Umami only.
 - **GSC unavailable**: SEO quick wins cannot be computed. Skip all SEO Proposed Actions.
 - **Umami auth fails**: Read creds from `credentials.yaml`. If still broken, skip and note.
-- **No data / insufficient data**: Note "insufficient data" — don't manufacture insights from noise. Never create an issue from a single data point.
+- **No data / insufficient data**: Note "insufficient data" â€” don't manufacture insights from noise. Never create an issue from a single data point.
 - **Rate limits**: Note which queries were incomplete and whether the remaining sample is large enough to be meaningful.

@@ -1,9 +1,12 @@
 ---
-description: Audit agent outputs from an orchestration run — timeline analysis, stall detection, active vs idle time breakdown
+description: Audit agent outputs from an orchestration run â€” timeline analysis, stall detection, active vs idle time breakdown
 argument-hint: [session-id | latest | <agent-id>]
 ---
 
-# /audit-agents — Agent Output Auditor
+<!-- SPDX-FileCopyrightText: Copyright (c) RapierCraft Studios -->
+<!-- SPDX-License-Identifier: AGPL-3.0-or-later -->
+
+# /audit-agents â€” Agent Output Auditor
 
 **Input**: $ARGUMENTS
 
@@ -33,7 +36,7 @@ if [ -f "$CONFIG_FILE" ]; then
   FORGE_REPO=$(yq '.project.forge_repo // ""' "$CONFIG_FILE")
   [ -z "$FORGE_REPO" ] && FORGE_REPO="$GH_REPO"
 else
-  echo "WARNING: forge.yaml not found — commands will use placeholder values"
+  echo "WARNING: forge.yaml not found â€” commands will use placeholder values"
   echo "Run: cp forge.yaml.example forge.yaml  and fill in your project details"
   GH_REPO="your-org/your-repo"
   FORGE_REPO="$GH_REPO"
@@ -41,6 +44,9 @@ fi
 ```
 
 ---
+
+<!-- SPDX-FileCopyrightText: Copyright (c) RapierCraft Studios -->
+<!-- SPDX-License-Identifier: AGPL-3.0-or-later -->
 
 ## Phase 1: Locate Agent Outputs
 
@@ -63,10 +69,10 @@ done | sort -rn | head -5
 ```
 
 **Input resolution:**
-- `latest` or no argument → most recent session with agent outputs
-- A session UUID → that specific session
-- An agent ID (starts with `a`, 17+ hex chars) → find the session containing that agent
-- A project path fragment (e.g., `my-project`) → filter to sessions for that project
+- `latest` or no argument â†’ most recent session with agent outputs
+- A session UUID â†’ that specific session
+- An agent ID (starts with `a`, 17+ hex chars) â†’ find the session containing that agent
+- A project path fragment (e.g., `my-project`) â†’ filter to sessions for that project
 
 ### Step 1B: Collect agent JSONL files
 
@@ -225,12 +231,15 @@ def parse_agent(filepath, agent_id):
 
 ---
 
+<!-- SPDX-FileCopyrightText: Copyright (c) RapierCraft Studios -->
+<!-- SPDX-License-Identifier: AGPL-3.0-or-later -->
+
 ## Phase 3: Identify Issues
 
 For each agent, try to determine which GitHub issue it was working on:
 
 ```bash
-# Read the first user message in the JSONL — it contains the agent prompt with issue number
+# Read the first user message in the JSONL â€” it contains the agent prompt with issue number
 python3 -c "
 import json
 with open('$FILEPATH') as f:
@@ -259,17 +268,17 @@ Also extract the issue title from the prompt.
 For each agent, display:
 
 ```
-## Agent: #{ISSUE_NUMBER} — {ISSUE_TITLE}
-**Duration**: {total_min} min (active: {active_min} min, idle: {stall_min} min — {idle_pct}% idle)
+## Agent: #{ISSUE_NUMBER} â€” {ISSUE_TITLE}
+**Duration**: {total_min} min (active: {active_min} min, idle: {stall_min} min â€” {idle_pct}% idle)
 **Resume cycles**: {resume_cycles} (agent stopped and was resumed {resume_cycles} times)
 **JSONL lines**: {lines} | **Tool calls**: Bash:{N} Read:{N} Edit:{N} Skill:{N}
 
 ### Phase Timeline
 | Time | Phase | Duration | Gap | Status |
 |------|-------|----------|-----|--------|
-| 12:09:11 | work-on | — | — | start |
+| 12:09:11 | work-on | â€” | â€” | start |
 | 12:09:24 | investigate | 1m 3s | 13s | ok |
-| 12:17:46 | build | — | **7m 22s** | STALL |
+| 12:17:46 | build | â€” | **7m 22s** | STALL |
 | 12:18:28 | build:context | 42s | 42s | ok |
 | 12:42:13 | build:architect | 25s | **23m 45s** | STALL |
 | 12:42:38 | build:implement | 39s | 25s | ok |
@@ -293,12 +302,12 @@ For each agent, display:
 
 | Agent | Issue | Total | Active | Idle | Idle% | Resumes | Stall Points |
 |-------|-------|-------|--------|------|-------|---------|--------------|
-| afbc… | #14513 | 40m | 8m | 31m | 80% | 2 | investigate→build, context→architect |
-| a3b5… | #14508 | 23m | 23m | 0m | 0% | 0 | — |
-| adf5… | #14514 | 55m | 12m | 43m | 78% | 3 | investigate→build, context→architect, implement→validate |
+| afbcâ€¦ | #14513 | 40m | 8m | 31m | 80% | 2 | investigateâ†’build, contextâ†’architect |
+| a3b5â€¦ | #14508 | 23m | 23m | 0m | 0% | 0 | â€” |
+| adf5â€¦ | #14514 | 55m | 12m | 43m | 78% | 3 | investigateâ†’build, contextâ†’architect, implementâ†’validate |
 
 **Wave efficiency**: {avg_idle_pct}% idle time across all agents
-**Longest stall**: {max_stall_min} min ({agent_id} between {phase_a} → {phase_b})
+**Longest stall**: {max_stall_min} min ({agent_id} between {phase_a} â†’ {phase_b})
 **Clean agents**: {N} of {total} ran without stalls
 ```
 
@@ -312,27 +321,27 @@ Identify recurring stall patterns across agents:
 ### Common stall boundaries
 | Boundary | Agents affected | Avg gap |
 |----------|----------------|---------|
-| investigate → build | 4/5 | 7.5 min |
-| context → architect | 4/5 | 23.8 min |
-| implement → validate | 3/5 | 20.3 min |
+| investigate â†’ build | 4/5 | 7.5 min |
+| context â†’ architect | 4/5 | 23.8 min |
+| implement â†’ validate | 3/5 | 20.3 min |
 
 ### Root cause indicators
 - **Synchronized stall times**: 4 agents stalled at 12:17, 12:42, 13:03
-  → Orchestrator polling intervals, not agent-side issues
+  â†’ Orchestrator polling intervals, not agent-side issues
 - **end_turn at phase boundaries**: Agent outputs result text then stops
-  → LLM routing loop exits instead of continuing to next phase
+  â†’ LLM routing loop exits instead of continuing to next phase
 - **Resume replays**: Each resume re-sends full conversation history
-  → Context grows with each cycle, compounding the problem
+  â†’ Context grows with each cycle, compounding the problem
 ```
 
 ### Step 4D: Recommendations
 
 Based on the data, output specific recommendations:
 
-- If idle% > 50% across wave → "Orchestrator polling too slow — agents spend more time waiting than working"
-- If resume_cycles > 0 for most agents → "Routing loop in work-on.md not continuing past phase boundaries"
-- If specific boundary stalls repeatedly → "Phase {X} returns text with end_turn instead of continuing loop — check work-on.md routing instructions"
-- If one agent ran clean but others didn't → "Compare clean agent (#XXXX) vs stalled agents — what differs?"
+- If idle% > 50% across wave â†’ "Orchestrator polling too slow â€” agents spend more time waiting than working"
+- If resume_cycles > 0 for most agents â†’ "Routing loop in work-on.md not continuing past phase boundaries"
+- If specific boundary stalls repeatedly â†’ "Phase {X} returns text with end_turn instead of continuing loop â€” check work-on.md routing instructions"
+- If one agent ran clean but others didn't â†’ "Compare clean agent (#XXXX) vs stalled agents â€” what differs?"
 
 ### Step 4E: Persist summary (triggered by `--persist` flag)
 
@@ -340,7 +349,7 @@ Based on the data, output specific recommendations:
 
 This step posts a structured `<!-- FORGE:AUDIT-AGENTS -->` summary comment to the Forge orchestration-metrics tracking issue so that `/pipeline-health` can query historical efficiency data.
 
-**Step 4E.1 — Locate or create the tracking issue**:
+**Step 4E.1 â€” Locate or create the tracking issue**:
 
 ```bash
 # Ensure the label exists before using it (gh issue create fails with GraphQL error if label is absent)
@@ -355,15 +364,15 @@ TRACKING_ISSUE=$(gh issue list -R {FORGE_REPO} \
 if [ -z "$TRACKING_ISSUE" ]; then
   # Create the tracking issue on first use
   TRACKING_ISSUE=$(gh issue create -R {FORGE_REPO} \
-    --title "Orchestration Metrics — Running Log" \
+    --title "Orchestration Metrics â€” Running Log" \
     --label "orchestration-metrics" \
-    --body "This issue is a running log of persisted \`/audit-agents\` summaries. Each comment contains one session's efficiency metrics. Do not close this issue — \`/pipeline-health\` Phase 2K queries it to aggregate orchestration efficiency trends." \
+    --body "This issue is a running log of persisted \`/audit-agents\` summaries. Each comment contains one session's efficiency metrics. Do not close this issue â€” \`/pipeline-health\` Phase 2K queries it to aggregate orchestration efficiency trends." \
     --json number --jq '.number')
   echo "Created orchestration-metrics tracking issue #$TRACKING_ISSUE"
 fi
 ```
 
-**Step 4E.2 — Compute wave-level aggregate metrics** (from the data already parsed in Phase 2):
+**Step 4E.2 â€” Compute wave-level aggregate metrics** (from the data already parsed in Phase 2):
 
 ```bash
 # From the per-agent data computed in Phase 2, derive wave-level aggregates
@@ -373,7 +382,7 @@ AVG_RESUMES=$(echo "${AGENT_DATA[@]}" | jq '[.[].resume_cycles] | add / length |
 CLEAN_N=$(echo "${AGENT_DATA[@]}" | jq '[.[] | select(.idle_pct == 0 and .resume_cycles == 0)] | length')
 
 # Top stall boundaries: aggregate gap_from_prev_sec > 120 entries by skill transition label
-# Format: "investigate→build(4), context→architect(3), implement→validate(2)"
+# Format: "investigateâ†’build(4), contextâ†’architect(3), implementâ†’validate(2)"
 STALL_BOUNDARIES=$(echo "${AGENT_DATA[@]}" | jq -r '
   [.[].phases[] | select(.is_stall) | .skill] |
   group_by(.) | map({boundary: .[0], count: length}) |
@@ -382,13 +391,13 @@ STALL_BOUNDARIES=$(echo "${AGENT_DATA[@]}" | jq -r '
 ')
 ```
 
-**Step 4E.3 — Post the structured summary comment**:
+**Step 4E.3 â€” Post the structured summary comment**:
 
 ```bash
 SESSION_DATE=$(date -u +%Y-%m-%dT%H:%M:%SZ)
 
 gh issue comment $TRACKING_ISSUE -R {FORGE_REPO} --body "<!-- FORGE:AUDIT-AGENTS -->
-## Audit-Agents Summary — $SESSION_DATE
+## Audit-Agents Summary â€” $SESSION_DATE
 
 **Session**: \`$SESSION_ID\`
 **Date**: $SESSION_DATE
@@ -406,6 +415,9 @@ echo "Persisted audit summary to tracking issue #$TRACKING_ISSUE"
 ```
 
 ---
+
+<!-- SPDX-FileCopyrightText: Copyright (c) RapierCraft Studios -->
+<!-- SPDX-License-Identifier: AGPL-3.0-or-later -->
 
 ## Phase 5: Comparison Mode (optional)
 

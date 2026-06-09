@@ -2,6 +2,8 @@
 description: Review subcommand — push branch, create PR, invoke /review-pr with --auto-merge
 argument-hint: [issue number] [--repo GH_REPO] [--gh-flag GH_FLAG] [--worktree PATH] [--branch BRANCH] [--base PR_BASE]
 ---
+<!-- SPDX-FileCopyrightText: Copyright (c) RapierCraft Studios -->
+<!-- SPDX-License-Identifier: AGPL-3.0-or-later -->
 
 # work-on/review — Review & PR Creation Subcommand
 
