@@ -1,7 +1,7 @@
 {
   "name": "forgedock-bot",
   "description": "ForgeDock pipeline bot — manages labels, comments, project board, and PR operations on behalf of the AI agent pipeline.",
-  "url": "https://github.com/RapierCraftStudios/ForgeDock",
+  "url": "https://forgedock.dev",
   "hook_attributes": {
     "url": "https://example.com/webhook",
     "active": false
