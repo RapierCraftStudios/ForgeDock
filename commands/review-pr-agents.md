@@ -1,3 +1,6 @@
+<!-- SPDX-FileCopyrightText: Copyright (c) RapierCraft Studios -->
+<!-- SPDX-License-Identifier: AGPL-3.0-or-later -->
+
 # Agent Catalog for `/review-pr`
 
 This file is the Agent Catalog referenced by the `/review-pr` orchestrator. It is read via the `Read` tool during Phase 3C (agent dispatch). It contains:

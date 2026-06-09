@@ -79,6 +79,53 @@ All pull requests are checked by the [DCO GitHub Action](https://github.com/dcoo
 - Command prompts (`commands/*.md`) use the established pattern documented in [WORKFLOW.md](./docs/WORKFLOW.md).
 - No emojis in code or documentation unless they already exist in the file.
 
+## License Headers
+
+All source files must include SPDX license headers. Use the following patterns:
+
+**JavaScript / Node.js (`.mjs`, `.js`):**
+
+Place immediately after the shebang line (if present), otherwise at the top of the file:
+
+```js
+// SPDX-FileCopyrightText: Copyright (c) RapierCraft Studios
+// SPDX-License-Identifier: AGPL-3.0-or-later
+```
+
+**Markdown (`.md`) — files with YAML frontmatter:**
+
+Place immediately after the closing `---` of the frontmatter block:
+
+```md
+---
+description: ...
+---
+<!-- SPDX-FileCopyrightText: Copyright (c) RapierCraft Studios -->
+<!-- SPDX-License-Identifier: AGPL-3.0-or-later -->
+```
+
+**Markdown (`.md`) — files without frontmatter:**
+
+Place at the very top of the file:
+
+```md
+<!-- SPDX-FileCopyrightText: Copyright (c) RapierCraft Studios -->
+<!-- SPDX-License-Identifier: AGPL-3.0-or-later -->
+```
+
+**Files that cannot contain comments (`.json`, binary):**
+
+Create a sibling `.license` file with the same name plus `.license` extension (REUSE spec §5.2):
+
+```
+bin/github-app-manifest.json.license:
+
+SPDX-FileCopyrightText: Copyright (c) RapierCraft Studios
+SPDX-License-Identifier: AGPL-3.0-or-later
+```
+
+The `AGPL-3.0-or-later` identifier covers the open-source license. A separate [commercial license](./COMMERCIAL-LICENSE.md) is available for proprietary use — see COMMERCIAL-LICENSE.md for details.
+
 ## Questions?
 
 Open an issue or start a discussion on GitHub.

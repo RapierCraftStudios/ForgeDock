@@ -3,13 +3,16 @@ description: Trace a production issue or pipeline failure end-to-end through Git
 argument-hint: <description of what went wrong> [--issue N] [--pr N] [--repo prefix]
 ---
 
-# /audit — Pipeline Failure Trace & Self-Healing Issue
+<!-- SPDX-FileCopyrightText: Copyright (c) RapierCraft Studios -->
+<!-- SPDX-License-Identifier: AGPL-3.0-or-later -->
+
+# /audit â€” Pipeline Failure Trace & Self-Healing Issue
 
 **Input**: $ARGUMENTS
 
-You are Forge's post-mortem auditor. When something reaches production that shouldn't have, or an implementation didn't happen correctly, you trace the FULL chain of GitHub artifacts — from the original issue through every pipeline comment, PR, review, and merge — to find exactly where the pipeline broke down. You then file a detailed, evidence-backed improvement issue to the **Forge repository** so the pipeline can heal itself.
+You are Forge's post-mortem auditor. When something reaches production that shouldn't have, or an implementation didn't happen correctly, you trace the FULL chain of GitHub artifacts â€” from the original issue through every pipeline comment, PR, review, and merge â€” to find exactly where the pipeline broke down. You then file a detailed, evidence-backed improvement issue to the **Forge repository** so the pipeline can heal itself.
 
-**This command ALWAYS files issues to `{FORGE_REPO}`.** The target project is read-only — you only read its GitHub artifacts as evidence.
+**This command ALWAYS files issues to `{FORGE_REPO}`.** The target project is read-only â€” you only read its GitHub artifacts as evidence.
 
 **Agent model policy**: Default `model: "sonnet"`. If Sonnet is rate-limited, fall back to `model: "opus"`.
 
@@ -36,7 +39,7 @@ if [ -f "$CONFIG_FILE" ]; then
   FORGE_REPO=$(yq '.project.forge_repo // ""' "$CONFIG_FILE")
   [ -z "$FORGE_REPO" ] && FORGE_REPO="$GH_REPO"
 else
-  echo "WARNING: forge.yaml not found — commands will use placeholder values"
+  echo "WARNING: forge.yaml not found â€” commands will use placeholder values"
   echo "Run: cp forge.yaml.example forge.yaml  and fill in your project details"
   GH_REPO="your-org/your-repo"
   GH_FLAG="-R $GH_REPO"
@@ -46,6 +49,9 @@ fi
 ```
 
 ---
+
+<!-- SPDX-FileCopyrightText: Copyright (c) RapierCraft Studios -->
+<!-- SPDX-License-Identifier: AGPL-3.0-or-later -->
 
 ## Multi-Repo Support
 
@@ -70,7 +76,7 @@ if [ -n "$REPO_PREFIX" ]; then
     GH_FLAG="-R $GH_REPO"
     REPO_PATH=$(yq ".repos.satellites[] | select(.prefix == \"$REPO_PREFIX\") | .local_path" "$CONFIG_FILE" 2>/dev/null || echo "$REPO_PATH")
   else
-    echo "WARNING: --repo prefix '$REPO_PREFIX' not found in forge.yaml repos.satellites — using default repo"
+    echo "WARNING: --repo prefix '$REPO_PREFIX' not found in forge.yaml repos.satellites â€” using default repo"
   fi
 fi
 # GH_REPO, GH_FLAG, REPO_PATH are now set for the target repo
@@ -82,7 +88,7 @@ fi
 
 ### 1A: Parse the user's problem statement
 
-Read `$ARGUMENTS` carefully. The user is describing a failure — extract:
+Read `$ARGUMENTS` carefully. The user is describing a failure â€” extract:
 - **What went wrong**: the symptom (production bug, incomplete implementation, missed edge case, wrong behavior)
 - **Severity**: did it reach production? Was it caught in staging? Is it a near-miss?
 - **Affected area**: which part of the codebase / feature / service
@@ -92,13 +98,13 @@ Read `$ARGUMENTS` carefully. The user is describing a failure — extract:
 Start from whatever the user provides (issue number, PR number, or description) and expand outward:
 
 ```bash
-# If issue number(s) provided — load full issue context
+# If issue number(s) provided â€” load full issue context
 gh issue view {NUMBER} {GH_FLAG} --json number,title,body,labels,state,comments,milestone,assignees,createdAt,closedAt
 
-# If PR number(s) provided — load full PR context
+# If PR number(s) provided â€” load full PR context
 gh pr view {PR_NUMBER} {GH_FLAG} --json number,title,body,state,author,baseRefName,headRefName,mergedAt,mergeCommit,files,comments,reviews,reviewRequests,additions,deletions,labels
 
-# If only a description — search for related issues and PRs
+# If only a description â€” search for related issues and PRs
 gh issue list {GH_FLAG} --state all --limit 50 --json number,title,labels,state,createdAt \
   --jq '[.[] | select(.title | test("{KEYWORDS}"; "i"))]'
 
@@ -109,10 +115,10 @@ gh pr list {GH_FLAG} --state all --limit 50 --json number,title,state,mergedAt,h
 ### 1C: Build the artifact chain
 
 From the initial artifacts, trace connections:
-- Issue → linked PRs (from issue body, `Closes #N`, branch names)
-- PR → linked issues (from PR body, commit messages)
-- Issue → child issues (from `<!-- FORGE:DECOMPOSED -->` comments or parent tracker mentions)
-- PR → review-finding issues created from this PR's review
+- Issue â†’ linked PRs (from issue body, `Closes #N`, branch names)
+- PR â†’ linked issues (from PR body, commit messages)
+- Issue â†’ child issues (from `<!-- FORGE:DECOMPOSED -->` comments or parent tracker mentions)
+- PR â†’ review-finding issues created from this PR's review
 
 ```bash
 # Get all comments on the issue to find FORGE structured comments
@@ -133,6 +139,9 @@ gh issue list {GH_FLAG} --state all --label "review-finding" --limit 100 --json 
 
 ---
 
+<!-- SPDX-FileCopyrightText: Copyright (c) RapierCraft Studios -->
+<!-- SPDX-License-Identifier: AGPL-3.0-or-later -->
+
 ## Phase 2: Read Every Artifact in Full
 
 **CRITICAL: Read EVERY artifact completely. Do not skim. The devil is in the details.**
@@ -144,19 +153,19 @@ For each issue in the chain, read the complete body and ALL comments:
 ```bash
 gh issue view {NUMBER} {GH_FLAG} --json body --jq '.body'
 
-# Read ALL comments — these contain the pipeline's work product
+# Read ALL comments â€” these contain the pipeline's work product
 gh api repos/{GH_REPO}/issues/{NUMBER}/comments --paginate \
   --jq '.[] | "---\n**\(.user.login)** at \(.created_at):\n\(.body)\n"'
 ```
 
 Extract and catalog every structured comment:
-- `<!-- FORGE:INVESTIGATOR -->` — Investigation report (verdict, confidence, affected files)
-- `<!-- FORGE:CONTRACT -->` — Build contract (deliverables, acceptance criteria)
-- `<!-- FORGE:CONTEXT -->` — Pre-build context (historical findings, related code paths)
-- `<!-- FORGE:ARCHITECT -->` — Architecture plan (ordered implementation steps)
-- `<!-- FORGE:BUILDER -->` — Build report (what was done, files changed, commits)
-- `<!-- FORGE:TRAJECTORY -->` — Phase-by-phase results table
-- `<!-- FORGE:DECOMPOSED -->` — Decomposition into sub-issues
+- `<!-- FORGE:INVESTIGATOR -->` â€” Investigation report (verdict, confidence, affected files)
+- `<!-- FORGE:CONTRACT -->` â€” Build contract (deliverables, acceptance criteria)
+- `<!-- FORGE:CONTEXT -->` â€” Pre-build context (historical findings, related code paths)
+- `<!-- FORGE:ARCHITECT -->` â€” Architecture plan (ordered implementation steps)
+- `<!-- FORGE:BUILDER -->` â€” Build report (what was done, files changed, commits)
+- `<!-- FORGE:TRAJECTORY -->` â€” Phase-by-phase results table
+- `<!-- FORGE:DECOMPOSED -->` â€” Decomposition into sub-issues
 
 ### 2B: Read the full PR thread
 
@@ -172,7 +181,7 @@ gh api repos/{GH_REPO}/pulls/{PR_NUMBER}/comments --paginate \
 
 # All PR reviews (approve/request changes/comment)
 gh api repos/{GH_REPO}/pulls/{PR_NUMBER}/reviews --paginate \
-  --jq '.[] | "\(.user.login) — \(.state):\n\(.body)\n---"'
+  --jq '.[] | "\(.user.login) â€” \(.state):\n\(.body)\n---"'
 
 # PR timeline events (label changes, assignments, etc.)
 gh api repos/{GH_REPO}/issues/{PR_NUMBER}/timeline --paginate \
@@ -217,18 +226,18 @@ Reconstruct the exact sequence:
 
 ```
 Issue #{N} created
-  → Phase 1: Investigation — {verdict} ({confidence})
-  → Phase 2: Decomposition — {skipped / N sub-issues}
-  → Phase 3: Build
-    → 3C: Contract — {posted / missing}
-    → 3C.5: Context — {posted / missing}
-    → 3C.6: Architect — {posted / missing}
-    → 3F: Implementation — {commits}
-    → 3G: Quality Gate — {pass / fail, iterations}
-  → Phase 4: PR #{PR} created → base: {branch}
-  → Phase 5: Review — {agents triggered: SEC, AUTH, ...}
-    → Review findings: {N} created, {N} validated
-  → Phase 6: Close — {merged / still open}
+  â†’ Phase 1: Investigation â€” {verdict} ({confidence})
+  â†’ Phase 2: Decomposition â€” {skipped / N sub-issues}
+  â†’ Phase 3: Build
+    â†’ 3C: Contract â€” {posted / missing}
+    â†’ 3C.5: Context â€” {posted / missing}
+    â†’ 3C.6: Architect â€” {posted / missing}
+    â†’ 3F: Implementation â€” {commits}
+    â†’ 3G: Quality Gate â€” {pass / fail, iterations}
+  â†’ Phase 4: PR #{PR} created â†’ base: {branch}
+  â†’ Phase 5: Review â€” {agents triggered: SEC, AUTH, ...}
+    â†’ Review findings: {N} created, {N} validated
+  â†’ Phase 6: Close â€” {merged / still open}
 ```
 
 ### 3B: Identify the failure point
@@ -249,7 +258,7 @@ Classify where the breakdown occurred. Use these categories:
 | **MERGE_POLICY** | Merged despite signals that should have blocked | `commands/work-on.md` Phase 5 |
 | **DEPLOY_GATE** | Deploy-info should have flagged risk but didn't | `commands/deploy-info.md` |
 | **ORCHESTRATION** | Wave ordering wrong, dependency missed, stall | `commands/orchestrate.md` |
-| **ISSUE_SPEC** | Original issue was ambiguous/incomplete — pipeline followed it correctly but the spec was wrong | Not a pipeline fix — note for process improvement |
+| **ISSUE_SPEC** | Original issue was ambiguous/incomplete â€” pipeline followed it correctly but the spec was wrong | Not a pipeline fix â€” note for process improvement |
 
 ### 3C: Determine root cause vs contributing factors
 
@@ -260,14 +269,17 @@ Classify where the breakdown occurred. Use these categories:
 
 Before proposing a fix, check which layer it belongs to (from CLAUDE.md):
 
-- **Quality gate** → static analysis, grep-catchable patterns
-- **Review agents** → semantic reasoning, library API contracts, cross-service interactions
-- **Domain detection** → broad category matching, not per-bug-instance
-- **Builder rules** → prevention at write time, simple memorable rules
+- **Quality gate** â†’ static analysis, grep-catchable patterns
+- **Review agents** â†’ semantic reasoning, library API contracts, cross-service interactions
+- **Domain detection** â†’ broad category matching, not per-bug-instance
+- **Builder rules** â†’ prevention at write time, simple memorable rules
 
 **Do NOT propose a quality-gate grep check for a reasoning failure. Do NOT propose a review-agent prompt change for a pattern grep could catch.**
 
 ---
+
+<!-- SPDX-FileCopyrightText: Copyright (c) RapierCraft Studios -->
+<!-- SPDX-License-Identifier: AGPL-3.0-or-later -->
 
 ## Phase 4: File the Forge Issue
 
@@ -296,7 +308,7 @@ gh issue create -R {FORGE_REPO} \
 ## Root Cause
 
 **Failure point**: {FAILURE_POINT category from 3B}
-**Root cause**: {FAILURE_POINT} — {detailed explanation of why this pipeline link failed}
+**Root cause**: {FAILURE_POINT} â€” {detailed explanation of why this pipeline link failed}
 
 {Specific evidence: quote the relevant comment/diff/review that shows the gap}
 
@@ -306,7 +318,7 @@ gh issue create -R {FORGE_REPO} \
 ## Affected Files
 
 Files that need changes:
-1. `commands/{FILE}.md` — {Phase/Step reference} — {Fix type: New check | Tightened prompt | New builder rule | New review agent logic | New domain detection}
+1. `commands/{FILE}.md` â€” {Phase/Step reference} â€” {Fix type: New check | Tightened prompt | New builder rule | New review agent logic | New domain detection}
 
 ## Acceptance Criteria
 
@@ -325,7 +337,7 @@ Files that need changes:
 | Artifact | Link | Key Finding |
 |----------|------|-------------|
 | Issue | {GH_REPO}#{ISSUE_NUMBER} | {1-line summary of issue} |
-| Investigation | Comment on #{ISSUE_NUMBER} | Verdict: {verdict} — {was it correct?} |
+| Investigation | Comment on #{ISSUE_NUMBER} | Verdict: {verdict} â€” {was it correct?} |
 | Contract | Comment on #{ISSUE_NUMBER} | {was it complete?} |
 | Context | Comment on #{ISSUE_NUMBER} | {did it surface relevant prior work?} |
 | Architect | Comment on #{ISSUE_NUMBER} | {did it trace all code paths?} |
@@ -336,17 +348,17 @@ Files that need changes:
 | Review Findings | #{FINDING_NUMBERS} | {validated/false-positive/open} |
 | Trajectory | Comment on #{ISSUE_NUMBER} | {phase-by-phase results} |
 
-{Include only rows for artifacts that exist. Mark missing artifacts explicitly as "MISSING — not posted by pipeline"}
+{Include only rows for artifacts that exist. Mark missing artifacts explicitly as "MISSING â€” not posted by pipeline"}
 
 ### Pipeline Path Reconstruction
 
 ```
-{Full pipeline path from 3A — show what happened at each phase}
+{Full pipeline path from 3A â€” show what happened at each phase}
 ```
 
 ### What Should Have Happened
 
-{Describe what the pipeline SHOULD have done differently at the failure point. Be specific — reference the exact phase, step, and what check/reasoning was missing.}
+{Describe what the pipeline SHOULD have done differently at the failure point. Be specific â€” reference the exact phase, step, and what check/reasoning was missing.}
 
 ### Proposed Fix
 
@@ -398,10 +410,10 @@ gh issue list -R {FORGE_REPO} --state all --limit 100 --json number,title,body \
 ```
 
 If this is a **recurring pattern** (same failure point, same defect class, happened 2+ times):
-- Elevate priority by one level (P3→P2, P2→P1)
+- Elevate priority by one level (P3â†’P2, P2â†’P1)
 - Add label `recurring`
 - Reference all prior occurrences in the issue body
-- Note in the issue that single-instance fixes haven't worked — a structural change may be needed
+- Note in the issue that single-instance fixes haven't worked â€” a structural change may be needed
 
 ### 5B: Link back to target repo
 
@@ -424,6 +436,9 @@ EOF
 
 ---
 
+<!-- SPDX-FileCopyrightText: Copyright (c) RapierCraft Studios -->
+<!-- SPDX-License-Identifier: AGPL-3.0-or-later -->
+
 ## Phase 6: Summary
 
 Print to the user:
@@ -437,12 +452,12 @@ Print to the user:
 
 ### Failure Point: {CATEGORY}
 **Root cause**: {1-line}
-**Fix target**: commands/{FILE}.md — {section}
+**Fix target**: commands/{FILE}.md â€” {section}
 
 ### Forge Issue Filed
 {FORGE_ISSUE_URL}
 
 ### Evidence Chain
-{Issue} → {Investigation} → {Contract} → {Build} → {PR} → {Review} → {Merge}
-{Mark each link as ✅ (worked correctly) or ❌ (broke here) or ⚠️ (contributing factor)}
+{Issue} â†’ {Investigation} â†’ {Contract} â†’ {Build} â†’ {PR} â†’ {Review} â†’ {Merge}
+{Mark each link as âœ… (worked correctly) or âŒ (broke here) or âš ï¸ (contributing factor)}
 ```
