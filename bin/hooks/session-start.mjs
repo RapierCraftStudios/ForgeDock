@@ -27,7 +27,7 @@
  *   ForgeDock installation.
  */
 
-import { fileURLToPath } from "url";
+import { fileURLToPath, pathToFileURL } from "url";
 import { dirname, join, resolve } from "path";
 import { existsSync, readFileSync } from "fs";
 
@@ -45,8 +45,11 @@ const FORGE_HOME = resolve(__dirname, "..", "..");
 // ---------------------------------------------------------------------------
 
 /** @type {import('../registry.mjs')} */
+// Use pathToFileURL() to convert the OS-native path to a file:// URL before
+// passing it to dynamic import(). On Windows, join() produces backslash paths
+// that import() rejects with ERR_UNSUPPORTED_ESM_URL_SCHEME.
 const { resolveState, nudgeSeen, markNudgeSeen } = await import(
-  join(FORGE_HOME, "bin", "registry.mjs")
+  pathToFileURL(join(FORGE_HOME, "bin", "registry.mjs")).href
 );
 
 // ---------------------------------------------------------------------------
