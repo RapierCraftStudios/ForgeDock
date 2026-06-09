@@ -3345,6 +3345,26 @@ function buildForgeYamlContent({
   const resolvedFieldIds = projectBoard?.fieldIds ?? {};
   const resolvedOptionIds = projectBoard?.optionIds ?? {};
 
+  // Sanitize all LLM-derived project_board string values before YAML interpolation.
+  // projectId and fieldIds come from the LLM enrichment path (_optionalSectionsFromDraft)
+  // and must be treated as untrusted — a crafted response containing a double-quote or
+  // newline would break out of the YAML double-quoted scalar.
+  // projectNumber is numeric (unquoted in YAML) and does not need sanitization.
+  // <!-- Added: forge#384 -->
+  const safeProjectBoard = projectBoard
+    ? {
+        projectId: _sanitizeYamlValue(projectBoard.projectId ?? ""),
+        projectNumber: projectBoard.projectNumber,
+        fieldIds: Object.fromEntries(
+          FIELD_KEYS.map((k) => [
+            k,
+            _sanitizeYamlValue(resolvedFieldIds[k] ?? ""),
+          ]),
+        ),
+        optionIds: projectBoard.optionIds,
+      }
+    : null;
+
   /**
    * Build a YAML block for option_ids given a nested map of { fieldKey: { optionKey: id } }.
    * Only writes fields that have at least one mapped option.
@@ -3358,7 +3378,7 @@ function buildForgeYamlContent({
     for (const [fieldKey, opts] of entries) {
       lines.push(`    ${fieldKey}:`);
       for (const [optKey, optId] of Object.entries(opts)) {
-        lines.push(`      ${optKey}: "${optId}"`);
+        lines.push(`      ${optKey}: "${_sanitizeYamlValue(String(optId))}"`);
       }
     }
     return "\n" + lines.join("\n");
@@ -3366,20 +3386,20 @@ function buildForgeYamlContent({
 
   const fieldIdsBlock = FIELD_KEYS.map(
     (k) =>
-      `    ${k}: "${resolvedFieldIds[k] ?? "PVTSSF_xxxxxxxxxxxxxxxxxxxxxxxx"}"`,
+      `    ${k}: "${safeProjectBoard?.fieldIds[k] || "PVTSSF_xxxxxxxxxxxxxxxxxxxxxxxx"}"`,
   ).join("\n");
 
   const optionIdsBlock = projectBoard?.optionIds
     ? _buildOptionIdsBlock(resolvedOptionIds)
     : "";
 
-  const hasDiscoveredId = !!projectBoard?.projectId;
+  const hasDiscoveredId = !!(safeProjectBoard?.projectId);
 
   const projectBoardSection = projectBoard
     ? `project_board:
   owner: "${owner}"
   project_number: ${projectBoard.projectNumber || 1}
-  project_id: "${hasDiscoveredId ? projectBoard.projectId : "PVT_kwHOxxxxxxxxxxxxxxxx"}"
+  project_id: "${hasDiscoveredId ? safeProjectBoard.projectId : "PVT_kwHOxxxxxxxxxxxxxxxx"}"
   field_ids:
 ${fieldIdsBlock}${optionIdsBlock}${!hasDiscoveredId ? `\n# To find IDs: gh project field-list ${projectBoard.projectNumber || 1} --owner ${owner}` : ""}`
     : `# project_board:
