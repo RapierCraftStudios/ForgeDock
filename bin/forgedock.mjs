@@ -57,7 +57,7 @@ import {
   annotatedReviewScreen,
 } from "./tui.mjs";
 import { detectConfig } from "./init-detect.mjs";
-import { enrich as enrichViaAPI } from "./init-enrich-api.mjs";
+import { enrich as enrichViaAPI, parseEnrichedDraft } from "./init-enrich-api.mjs";
 import { resolveState, setOptOut } from "./registry.mjs";
 
 const __filename = fileURLToPath(import.meta.url);
@@ -2074,7 +2074,7 @@ async function _enrichViaSkill(draft, cwd) {
       },
     );
 
-    return _parseEnrichedDraft(output, draft);
+    return parseEnrichedDraft(output, draft);
   } catch (err) {
     // Log the failure at debug level but never surface to user — fall back silently.
     if (process.env.FORGEDOCK_DEBUG) {
@@ -2082,40 +2082,6 @@ async function _enrichViaSkill(draft, cwd) {
         `  ${dim("[debug]")} skill enrichment failed: ${err.message}`,
       );
     }
-    return draft;
-  }
-}
-
-/**
- * Extract and parse the enriched ConfigDraft JSON from a backend response string.
- *
- * Backends may emit human-readable prose before and after the JSON blob.
- * This function finds the outermost JSON object in the output and parses it.
- * Falls back to the original draft if extraction or parsing fails.
- *
- * @param {string} output  - Raw output from the enrichment backend
- * @param {object} draft   - Original ConfigDraft (returned on failure)
- * @returns {object} Enriched ConfigDraft, or original draft on failure
- */
-function _parseEnrichedDraft(output, draft) {
-  if (!output || typeof output !== "string") return draft;
-
-  // Use a greedy regex to find the first '{' and the last '}' in the output.
-  // A brace-depth counter would misfire when JSON string values contain '{' or '}'
-  // (e.g. project.description mentioning Go templates, Windows paths with env-var
-  // syntax, or tech-stack notes). The regex finds the outermost boundaries and
-  // delegates structural validation to JSON.parse.
-  const jsonMatch = output.match(/\{[\s\S]*\}/);
-  if (!jsonMatch) return draft;
-
-  try {
-    const enriched = JSON.parse(jsonMatch[0]);
-    // Basic sanity check: must have the required top-level sections from the original draft.
-    if (!enriched.project || !enriched.paths || !enriched.branches) {
-      return draft;
-    }
-    return enriched;
-  } catch {
     return draft;
   }
 }
