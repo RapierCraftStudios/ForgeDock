@@ -116,16 +116,39 @@ function readRegistry() {
 }
 
 /**
+ * Module-level write queue — serializes concurrent writeRegistry calls so that
+ * two callers (e.g. setOptOut + markNudgeSeen in the same tick) never race and
+ * produce a last-write-wins corruption. Each enqueued write waits for the
+ * previous one to resolve before executing. Errors are swallowed per the
+ * existing best-effort contract so a failed write never blocks the next caller.
+ */
+let _writeQueue = Promise.resolve();
+
+/**
  * Atomically write registry data to disk.
  *
  * Creates REGISTRY_DIR (mode 0o700) if it does not exist.
  * Writes to a .tmp sibling first, then renames to the final path.
  * Best-effort: errors are silently suppressed to avoid blocking callers.
+ * Calls are serialized through a module-level Promise queue.
  *
  * @param {{ version: number, optedOut: Record<string, { at: string }>, nudgeSeen: Record<string, { at: string }> }} data
  * @returns {Promise<void>}
  */
 async function writeRegistry(data) {
+  // Chain onto the existing queue; swallow errors so callers are never blocked
+  _writeQueue = _writeQueue.then(() => _doWriteRegistry(data)).catch(() => {});
+  return _writeQueue;
+}
+
+/**
+ * Inner implementation — performs the actual atomic write.
+ * Called exclusively through writeRegistry's queue chain.
+ *
+ * @param {{ version: number, optedOut: Record<string, { at: string }>, nudgeSeen: Record<string, { at: string }> }} data
+ * @returns {Promise<void>}
+ */
+async function _doWriteRegistry(data) {
   try {
     await mkdir(REGISTRY_DIR, { recursive: true, mode: 0o700 });
     const tmp = REGISTRY_PATH + ".tmp";

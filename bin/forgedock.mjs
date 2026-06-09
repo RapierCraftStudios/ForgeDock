@@ -1885,12 +1885,16 @@ async function update() {
       // Show changelog between current HEAD and remote HEAD
       let changelogLines = [];
       try {
-        const log = execSync(`git log --oneline ${before}..origin/main`, {
-          cwd: FORGE_HOME,
-          encoding: "utf-8",
-          stdio: ["pipe", "pipe", "pipe"],
-          timeout: 5000,
-        }).trim();
+        const log = execFileSync(
+          "git",
+          ["log", "--oneline", `${before}..origin/main`],
+          {
+            cwd: FORGE_HOME,
+            encoding: "utf-8",
+            stdio: ["pipe", "pipe", "pipe"],
+            timeout: 5000,
+          },
+        ).trim();
         if (log) {
           changelogLines = log.split("\n").map((l) => `  ${dim(l)}`);
         }
@@ -2221,6 +2225,19 @@ function _optionalSectionsFromDraft(enrichedDraft) {
   return sections;
 }
 
+/**
+ * Returns true if an enrichment backend produced enriched data for the draft.
+ * Used in three places: skill-backend spinner display, api-backend spinner display,
+ * and the enrichmentSucceeded gate that controls optional-section auto-population.
+ *
+ * @param {object} draft - The (possibly) enriched draft
+ * @param {object} baseDraft - The original un-enriched draft
+ * @returns {boolean}
+ */
+function _isEnriched(draft, baseDraft) {
+  return draft !== baseDraft || Boolean(draft.meta?.enriched);
+}
+
 async function init() {
   // init() generates forge.yaml from prompts and git remote detection.
   // It does NOT require gh CLI or gh auth for core operation (project board
@@ -2276,7 +2293,7 @@ async function init() {
   } else if (backend === "skill") {
     const s = spinner("Enriching config via skill backend…");
     draft = await _enrichViaSkill(baseDraft, cwd);
-    const enriched = draft !== baseDraft || draft.meta?.enriched;
+    const enriched = _isEnriched(draft, baseDraft);
     s.stop(
       enriched ? "success" : "warn",
       enriched
@@ -2286,7 +2303,7 @@ async function init() {
   } else if (backend === "api") {
     const s = spinner("Enriching config via Anthropic API…");
     draft = await enrichViaAPI(baseDraft);
-    const enriched = draft !== baseDraft || draft.meta?.enriched;
+    const enriched = _isEnriched(draft, baseDraft);
     s.stop(
       enriched ? "success" : "warn",
       enriched
@@ -2387,9 +2404,7 @@ async function init() {
   // without an enrichment backend).
   // manualMode forces the full guided wizard regardless of enrichment backend.
   const enrichmentSucceeded =
-    !manualMode &&
-    backend !== "none" &&
-    (draft !== baseDraft || draft.meta?.enriched);
+    !manualMode && backend !== "none" && _isEnriched(draft, baseDraft);
 
   if (enrichmentSucceeded) {
     optionalSections = _optionalSectionsFromDraft(draft);
@@ -3612,14 +3627,28 @@ function _injectTodoComments(content, lowConfidenceKeys) {
   return result.join("\n");
 }
 
-/** Write forge.yaml to disk. Accepts all params for buildForgeYamlContent plus outputPath and lowConfidenceKeys. */
+/** Write forge.yaml to disk. Accepts all params for buildForgeYamlContent plus outputPath and lowConfidenceKeys.
+ * Uses a tmp-file + renameSync pattern to ensure the write is atomic — consistent with how
+ * writeClaudeSettings() and shell-profile writes are done elsewhere in this file.
+ */
 function _writeForgeYaml(opts) {
   let content = buildForgeYamlContent(opts);
   // Inject TODO comments for low-confidence fields detected during review.
   if (opts.lowConfidenceKeys && opts.lowConfidenceKeys.length > 0) {
     content = _injectTodoComments(content, opts.lowConfidenceKeys);
   }
-  writeFileSync(opts.outputPath, content, "utf-8");
+  // Atomic write: write to a .tmp sibling then rename into place so a kill
+  // mid-write never leaves forge.yaml partially written (config is regenerable,
+  // but a partial file causes confusing validation errors).
+  const tmpPath = opts.outputPath + ".forgedock.tmp";
+  try {
+    writeFileSync(tmpPath, content, "utf-8");
+    renameSync(tmpPath, opts.outputPath);
+  } catch (err) {
+    // Clean up temp file if it was created before the error
+    try { unlinkSync(tmpPath); } catch { /* already gone or never created */ }
+    throw err;
+  }
 }
 
 /** Print next-steps guidance after forge.yaml is written. */
