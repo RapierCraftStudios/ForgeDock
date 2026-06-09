@@ -156,27 +156,78 @@ Record: services touched, domains detected, PR scope (1-2 sentences), change cat
 ## Phase 2: Automated Checks (Run ALL in Parallel)
 
 ### 2A: Python Linting (if Python changed)
-```bash
-cd services/api && poetry run black --check app/
-cd services/api && poetry run isort --check app/
-cd services/worker && poetry run black --check worker/
-cd services/worker && poetry run isort --check worker/
-python3 -m py_compile <each-changed-python-file>
-```
-**IMPORTANT**: Always `cd` into service dir and `poetry run black`. Never `pipx run black`.
 
-### 2B: TypeScript/JS (if web/ changed)
+Read `forge.yaml → verification.commands.python` for project-specific tool commands:
+
 ```bash
-cd web && npx prettier --check "src/**/*.{ts,tsx}"
-cd web && npx tsc --noEmit
-cd web && npx next lint
+# Read toolchain commands from forge.yaml
+PYTHON_FORMAT=$(awk '/^  commands:/{f=1;next} f && /^[^ \t]/{exit} f' forge.yaml 2>/dev/null | awk '/^    python:/{f=1;next} f && /^    [^ \t]/{exit} f' | grep 'format:' | head -1 | sed "s/.*format: *['\"]//;s/['\"].*//")
+PYTHON_LINT=$(awk '/^  commands:/{f=1;next} f && /^[^ \t]/{exit} f' forge.yaml 2>/dev/null | awk '/^    python:/{f=1;next} f && /^    [^ \t]/{exit} f' | grep 'lint:' | head -1 | sed "s/.*lint: *['\"]//;s/['\"].*//")
+PYTHON_TYPECHECK=$(awk '/^  commands:/{f=1;next} f && /^[^ \t]/{exit} f' forge.yaml 2>/dev/null | awk '/^    python:/{f=1;next} f && /^    [^ \t]/{exit} f' | grep 'typecheck:' | head -1 | sed "s/.*typecheck: *['\"]//;s/['\"].*//")
+
+# Run format check
+if [ -n "$PYTHON_FORMAT" ]; then
+    eval "$PYTHON_FORMAT" 2>&1 | head -30
+else
+    echo "SKIPPED — python.format not configured in verification.commands"
+fi
+
+# Run lint
+if [ -n "$PYTHON_LINT" ]; then
+    eval "$PYTHON_LINT" 2>&1 | head -30
+else
+    echo "SKIPPED — python.lint not configured in verification.commands"
+fi
+
+# Run typecheck
+if [ -n "$PYTHON_TYPECHECK" ]; then
+    eval "$PYTHON_TYPECHECK" 2>&1 | head -50
+else
+    echo "SKIPPED — python.typecheck not configured in verification.commands"
+fi
+
+# Always run compile check on changed Python files (fast, language-universal)
+for f in $(gh pr diff $ARGUMENTS --name-only | grep '\.py$'); do
+    python3 -m py_compile "$f" 2>&1
+done
+```
+
+### 2B: TypeScript/JS (if TypeScript/JS changed)
+
+Read `forge.yaml → verification.commands.typescript` for project-specific tool commands:
+
+```bash
+TS_FORMAT=$(awk '/^  commands:/{f=1;next} f && /^[^ \t]/{exit} f' forge.yaml 2>/dev/null | awk '/^    typescript:/{f=1;next} f && /^    [^ \t]/{exit} f' | grep 'format:' | head -1 | sed "s/.*format: *['\"]//;s/['\"].*//")
+TS_LINT=$(awk '/^  commands:/{f=1;next} f && /^[^ \t]/{exit} f' forge.yaml 2>/dev/null | awk '/^    typescript:/{f=1;next} f && /^    [^ \t]/{exit} f' | grep 'lint:' | head -1 | sed "s/.*lint: *['\"]//;s/['\"].*//")
+TS_TYPECHECK=$(awk '/^  commands:/{f=1;next} f && /^[^ \t]/{exit} f' forge.yaml 2>/dev/null | awk '/^    typescript:/{f=1;next} f && /^    [^ \t]/{exit} f' | grep 'typecheck:' | head -1 | sed "s/.*typecheck: *['\"]//;s/['\"].*//")
+
+# Run format check
+if [ -n "$TS_FORMAT" ]; then
+    eval "$TS_FORMAT" 2>&1 | head -30
+else
+    echo "SKIPPED — typescript.format not configured in verification.commands"
+fi
+
+# Run lint
+if [ -n "$TS_LINT" ]; then
+    eval "$TS_LINT" 2>&1 | head -30
+else
+    echo "SKIPPED — typescript.lint not configured in verification.commands"
+fi
+
+# Run typecheck
+if [ -n "$TS_TYPECHECK" ]; then
+    eval "$TS_TYPECHECK" 2>&1 | head -50
+    TS_TYPECHECK_EXIT=$?
+else
+    echo "SKIPPED — typescript.typecheck not configured in verification.commands"
+    TS_TYPECHECK_EXIT=0
+fi
 ```
 
 ### 2C: Static Type Checking (if Python changed)
-```bash
-cd services/api && poetry run mypy app/ --ignore-missing-imports --no-error-summary 2>&1 | head -50
-cd services/api && poetry run ruff check app/ --select=E,W,F,B,S --ignore=E501 2>&1 | head -30
-```
+
+Covered by `PYTHON_TYPECHECK` command in 2A above. If `verification.commands.python.typecheck` is unset, this step is explicitly skipped with a log line — it does not silently pass.
 
 ### 2D: Environment Variable Audit
 ```bash
@@ -206,8 +257,27 @@ git diff origin/main...HEAD -- "**/package.json" | grep -E "^\+" | grep -v "^\+\
 ```
 
 ### 2H: Tests
+
+Read `forge.yaml → verification.commands.{lang}.test` for the project's test command:
+
 ```bash
-cd services/api && poetry run pytest tests/ -x -q --tb=short 2>&1 | tail -30
+# Check each configured language for a test command
+for lang in python typescript go rust; do
+    TEST_CMD=$(awk '/^  commands:/{f=1;next} f && /^[^ \t]/{exit} f' forge.yaml 2>/dev/null | awk "/^    ${lang}:/{f=1;next} f && /^    [^ \t]/{exit} f" | grep 'test:' | head -1 | sed "s/.*test: *['\"]//;s/['\"].*//")
+    if [ -n "$TEST_CMD" ]; then
+        echo "=== Running tests (${lang}): ${TEST_CMD} ==="
+        eval "$TEST_CMD" 2>&1 | tail -30
+        TEST_EXIT=$?
+        [ "$TEST_EXIT" -ne 0 ] && echo "BLOCKING: ${lang} tests failed (exit $TEST_EXIT)"
+    fi
+done
+
+# If no test commands were configured, log explicitly
+PYTHON_TEST=$(awk '/^  commands:/{f=1;next} f && /^[^ \t]/{exit} f' forge.yaml 2>/dev/null | awk '/^    python:/{f=1;next} f && /^    [^ \t]/{exit} f' | grep 'test:' | head -1 | sed "s/.*test: *['\"]//;s/['\"].*//")
+TS_TEST=$(awk '/^  commands:/{f=1;next} f && /^[^ \t]/{exit} f' forge.yaml 2>/dev/null | awk '/^    typescript:/{f=1;next} f && /^    [^ \t]/{exit} f' | grep 'test:' | head -1 | sed "s/.*test: *['\"]//;s/['\"].*//")
+if [ -z "$PYTHON_TEST" ] && [ -z "$TS_TEST" ]; then
+    echo "SKIPPED — no test commands configured in verification.commands"
+fi
 ```
 **BLOCKING if tests fail.**
 
@@ -217,36 +287,67 @@ cd services/api && poetry run pytest tests/ -x -q --tb=short 2>&1 | tail -30
 CHANGED_FILES=$(gh pr diff $ARGUMENTS --name-only)
 HAS_TS=$(echo "$CHANGED_FILES" | grep -E '\.(tsx?|jsx?)$' | head -1)
 HAS_PY=$(echo "$CHANGED_FILES" | grep -E '\.py$' | head -1)
-IS_STAGING_TO_MAIN=$([[ "$HEAD" == "staging" && "$BASE" == "main" ]] && echo "true" || echo "false")
-IS_MILESTONE_TO_STAGING=$([[ "$HEAD" =~ ^milestone/ && "$BASE" == "staging" ]] && echo "true" || echo "false")
-REQUIRES_FULL_BUILD=$([[ "$IS_STAGING_TO_MAIN" == "true" || "$IS_MILESTONE_TO_STAGING" == "true" ]] && echo "true" || echo "false")
+# Use POSIX-portable if/else (avoid bash-only [[ ]])
+IS_STAGING_TO_MAIN="false"
+if [ "$HEAD" = "staging" ] && [ "$BASE" = "main" ]; then IS_STAGING_TO_MAIN="true"; fi
+IS_MILESTONE_TO_STAGING="false"
+case "$HEAD" in milestone/*) if [ "$BASE" = "staging" ]; then IS_MILESTONE_TO_STAGING="true"; fi ;; esac
+REQUIRES_FULL_BUILD="false"
+if [ "$IS_STAGING_TO_MAIN" = "true" ] || [ "$IS_MILESTONE_TO_STAGING" = "true" ]; then REQUIRES_FULL_BUILD="true"; fi
 ```
 
 **TypeScript files changed:**
+
+Read `forge.yaml → verification.commands.typescript.typecheck` and `.build`:
+
 ```bash
 gh pr checkout $ARGUMENTS --detach 2>/dev/null
-cd web && npx tsc --noEmit 2>&1
-TSC_EXIT=$?
-if [ "$REQUIRES_FULL_BUILD" = "true" ] || [ "$TSC_EXIT" -eq 0 ]; then
-    npx next build 2>&1 | tail -30
-    BUILD_EXIT=$?
+
+TS_TYPECHECK=$(awk '/^  commands:/{f=1;next} f && /^[^ \t]/{exit} f' forge.yaml 2>/dev/null | awk '/^    typescript:/{f=1;next} f && /^    [^ \t]/{exit} f' | grep 'typecheck:' | head -1 | sed "s/.*typecheck: *['\"]//;s/['\"].*//")
+TS_BUILD=$(awk '/^  commands:/{f=1;next} f && /^[^ \t]/{exit} f' forge.yaml 2>/dev/null | awk '/^    typescript:/{f=1;next} f && /^    [^ \t]/{exit} f' | grep 'build:' | head -1 | sed "s/.*build: *['\"]//;s/['\"].*//")
+
+if [ -n "$TS_TYPECHECK" ]; then
+    eval "$TS_TYPECHECK" 2>&1
+    TSC_EXIT=$?
+else
+    echo "SKIPPED — typescript.typecheck not configured in verification.commands"
+    TSC_EXIT=0
 fi
-cd .. && git checkout - 2>/dev/null
+
+if [ -n "$TS_BUILD" ] && { [ "$REQUIRES_FULL_BUILD" = "true" ] || [ "$TSC_EXIT" -eq 0 ]; }; then
+    eval "$TS_BUILD" 2>&1 | tail -30
+    BUILD_EXIT=$?
+elif [ -z "$TS_BUILD" ]; then
+    echo "SKIPPED — typescript.build not configured in verification.commands"
+fi
+
+git checkout - 2>/dev/null
 ```
 
 If `TSC_EXIT != 0`: **CONFIRMED blocking** — type errors.
-If `BUILD_EXIT != 0`: **CONFIRMED blocking** — SSG prerender failure.
+If `BUILD_EXIT != 0`: **CONFIRMED blocking** — build/prerender failure.
 
-**CRITICAL**: `tsc --noEmit` alone is NOT sufficient for staging→main or milestone→staging. PR #2565 passed tsc but failed next build. PR #11637 (Session Intelligence milestone) was APPROVED without any build check because milestone→staging was excluded — 4 build errors shipped to staging.
+**CRITICAL**: typecheck alone is NOT sufficient for staging→main or milestone→staging — configure `typescript.build` in `verification.commands` to catch SSG/prerender failures that typecheck misses.
 
 **Python files changed:**
+
+Read `forge.yaml → verification.commands.python.format` and `.build`:
+
 ```bash
 gh pr checkout $ARGUMENTS --detach 2>/dev/null
+
+# Compile-check all changed Python files (language-universal — no config needed)
 for f in $(echo "$CHANGED_FILES" | grep '\.py$'); do python3 -m py_compile "$f" 2>&1; done
+
 if [ "$REQUIRES_FULL_BUILD" = "true" ]; then
-    cd services/api && poetry run black --check app/ 2>&1
-    cd ../.. && cd services/worker && poetry run black --check worker/ 2>&1
+    PYTHON_FORMAT=$(awk '/^  commands:/{f=1;next} f && /^[^ \t]/{exit} f' forge.yaml 2>/dev/null | awk '/^    python:/{f=1;next} f && /^    [^ \t]/{exit} f' | grep 'format:' | head -1 | sed "s/.*format: *['\"]//;s/['\"].*//")
+    if [ -n "$PYTHON_FORMAT" ]; then
+        eval "$PYTHON_FORMAT" 2>&1
+    else
+        echo "SKIPPED — python.format not configured in verification.commands (full-build format check skipped)"
+    fi
 fi
+
 git checkout - 2>/dev/null
 ```
 
@@ -258,9 +359,9 @@ Check whether the PR's actual changes match what the builder committed to in its
 
 ```bash
 # Find the contract comment on the linked issue
-ISSUE_NUM=$(gh pr view $ARGUMENTS --json body --jq '.body' | grep -oP 'Closes #\K\d+|#\K\d+' | head -1)
+ISSUE_NUM=$(gh pr view $ARGUMENTS --json body --jq '.body | gsub("(?s).*?(?:Closes #|#)(?<n>[0-9]+).*"; "\(.n)") // empty' 2>/dev/null | head -1)
 if [ -n "$ISSUE_NUM" ]; then
-    CONTRACT_FILES=$(gh api repos/${REPO}/issues/${ISSUE_NUM}/comments --jq '[.[] | select(.body | contains("FORGE:CONTRACT"))] | .[0].body' 2>/dev/null | grep -oP '`[^`]+\.(py|tsx?|sql|sh|yml|yaml|json)`' | tr -d '`' | sort -u)
+    CONTRACT_FILES=$(gh api repos/${REPO}/issues/${ISSUE_NUM}/comments --jq '[.[] | select(.body | contains("FORGE:CONTRACT"))] | .[0].body' 2>/dev/null | grep -E '`[^`]+\.(py|tsx?|sql|sh|yml|yaml|json)`' | grep -oE '`[^`]+\.(py|tsx?|sql|sh|yml|yaml|json)`' | tr -d '`' | sort -u)
     PR_FILES=$(gh pr diff $ARGUMENTS --name-only | sort -u)
 
     # Files in PR but NOT in contract
@@ -289,17 +390,28 @@ For each changed file, identify its **activation path** — how does execution r
 
 ### Step 2.5A: Identify File Types and Their Registration Points
 
-Map each changed file to its activation requirements:
+Map each changed file to its activation requirements.
+
+**Layout path resolution** — Before applying the table below, read your project's layout from `forge.yaml → review.layout` and substitute the values into the pattern column. Defaults (used when the key is absent) match the AlterLab monorepo layout:
+
+| `forge.yaml` key | Default | Used in table as |
+|-----------------|---------|-----------------|
+| `review.layout.pages` | `web/src/app` | `{PAGES_ROOT}` |
+| `review.layout.api_routers` | `services/api/app/routers` | `{API_ROUTERS}` |
+| `review.layout.api_main` | `services/api/app/main.py` | `{API_MAIN}` |
+| `review.layout.api_middleware` | `services/api/app/middleware` | `{API_MIDDLEWARE}` |
+| `review.layout.migrations` | `infra/migrations` | `{MIGRATIONS}` |
+| `review.layout.worker` | `services/worker` | `{WORKER}` |
 
 | Changed File Pattern | Assumption | Verification Target |
 |---------------------|------------|---------------------|
-| `web/src/app/api/**/*.ts` (Route Handler) | Requests reach this handler | Check `web/next.config.js` rewrites don't shadow it; check `infra/nginx/nginx.conf` routes path to Next.js |
-| `services/api/app/routers/*.py` (API Router) | Router is registered in app | Check `services/api/app/main.py` includes this router |
-| `services/api/app/middleware/*.py` | Middleware is in the stack | Check `services/api/app/main.py` middleware registration order |
-| `infra/migrations/*.sql` | Migration runs on current schema | Check previous migration's end state matches assumptions |
+| `{PAGES_ROOT}/api/**/*.ts` (Route Handler) | Requests reach this handler | Check `web/next.config.js` rewrites don't shadow it; check `infra/nginx/nginx.conf` routes path to Next.js |
+| `{API_ROUTERS}/*.py` (API Router) | Router is registered in app | Check `{API_MAIN}` includes this router |
+| `{API_MIDDLEWARE}/*.py` | Middleware is in the stack | Check `{API_MAIN}` middleware registration order |
+| `{MIGRATIONS}/*.sql` | Migration runs on current schema | Check previous migration's end state matches assumptions |
 | `shared/**/*.py` | Imported by consumer services | Verify import paths exist in api/worker; check Docker volume mounts |
-| `services/worker/worker/*.py` (Consumer) | Queue consumer is registered | Check consumer registration in worker startup |
-| Any file using `os.getenv("NEW_VAR")` | Env var is set at runtime | Check `docker-compose.yml`, `.env.example`, `services/api/app/core/env_validation.py` |
+| `{WORKER}/**/*.py` (Consumer) | Queue consumer is registered | Check consumer registration in worker startup |
+| Any file using `os.getenv("NEW_VAR")` | Env var is set at runtime | Check `docker-compose.yml`, `.env.example`, `{API_MAIN}` env validation module |
 | `scripts/decrypt-secrets.sh` (ENV_MAPPING) | Secret reaches running container | Trace full chain: SOPS key → ENV_MAPPING → deploy workflow SCP target → merge script path → `docker-compose.prod.yml` env_file. See Step 2.5B SOPS deploy chain check. |
 | `.secrets/prod.enc.yaml` | SOPS key maps to ENV_MAPPING | Verify key path in YAML matches the tuple in `decrypt-secrets.sh` ENV_MAPPING |
 | `.github/workflows/deploy-production.yml` | Deploy paths are consistent | Verify SCP target + merge script `PROJECT` var resolve to same dir as `docker-compose.prod.yml` env_file |
@@ -317,48 +429,66 @@ Map each changed file to its activation requirements:
 
 For each changed file, execute the relevant checks using the standalone verification scripts in `$FORGE_HOME/scripts/`. These scripts can also be run independently outside the review context (e.g., from `/quality-gate` or `/work-on` builder steps).
 
+**Platform note**: The verify-*.sh scripts require bash and standard POSIX tools. On Windows without bash (Git Bash / WSL / MSYS2), these checks are skipped with an explicit message — the review continues without them.
+
 ```bash
 CHANGED_FILES=$(gh pr diff $ARGUMENTS --name-only)
 REPO_ROOT="."  # Assumes cwd is the repo root
 
-# Write changed files and diff to temp files for script consumption
-CHANGED_FILES_TMP=$(mktemp)
-DIFF_TMP=$(mktemp)
-echo "$CHANGED_FILES" > "$CHANGED_FILES_TMP"
-gh pr diff $ARGUMENTS > "$DIFF_TMP"
-
-# --- Script-based checks (reusable, testable, deterministic) ---
-# Each script exits 0 (pass), 1 (blocking findings), or 2 (warnings only).
-# Output is structured: "BLOCKING: ...", "WARNING: ...", "OK: ..." per line.
-
-# 1. Route/router/middleware/shared-module/component registration
-echo "=== Running: verify-route-registration.sh ==="
-$FORGE_HOME/scripts/verify-route-registration.sh "$CHANGED_FILES_TMP" "$REPO_ROOT" || true
-
-# 2. Environment variable wiring (checks .env.example, docker-compose, env_validation, SOPS mapping)
-echo "=== Running: verify-env-vars.sh ==="
-$FORGE_HOME/scripts/verify-env-vars.sh "$DIFF_TMP" "$REPO_ROOT" || true
-
-# 3. Host headers in shell scripts + client-side proxy bypass check
-# Read project-specific internal service patterns from forge.yaml (if present)
-FORGE_INTERNAL_PATTERNS=""
-if [ -f "$REPO_ROOT/forge.yaml" ]; then
-    FORGE_INTERNAL_PATTERNS=$(grep -A 999 'internal_service_patterns:' "$REPO_ROOT/forge.yaml" \
-        | grep -E '^\s*-\s+' \
-        | sed 's/^\s*-\s*//' \
-        | tr -d '"'"'" \
-        | paste -sd '|' -)
+# --- Platform / bash capability guard ---
+# The verify-*.sh scripts require bash. Detect availability before invoking.
+# On Windows without Git Bash/WSL, skip gracefully rather than crash.
+BASH_AVAILABLE=false
+if command -v bash >/dev/null 2>&1 && bash -c 'echo ok' >/dev/null 2>&1; then
+    BASH_AVAILABLE=true
 fi
-export FORGE_INTERNAL_PATTERNS
-echo "=== Running: verify-host-headers.sh ==="
-$FORGE_HOME/scripts/verify-host-headers.sh "$CHANGED_FILES_TMP" "$REPO_ROOT" || true
 
-# 4. SOPS deploy chain (ENV_MAPPING consistency, deploy path drift, hotfix sync)
-echo "=== Running: verify-sops-chain.sh ==="
-$FORGE_HOME/scripts/verify-sops-chain.sh "$DIFF_TMP" "$CHANGED_FILES_TMP" "$REPO_ROOT" || true
+if [ "$BASH_AVAILABLE" = "true" ]; then
+    # Write changed files and diff to temp files for script consumption.
+    # Use PID-based names instead of mktemp for cross-platform compatibility.
+    CHANGED_FILES_TMP="/tmp/forge-review-changed-$$.tmp"
+    DIFF_TMP="/tmp/forge-review-diff-$$.tmp"
+    echo "$CHANGED_FILES" > "$CHANGED_FILES_TMP"
+    gh pr diff $ARGUMENTS > "$DIFF_TMP"
 
-# Cleanup temp files
-rm -f "$CHANGED_FILES_TMP" "$DIFF_TMP"
+    # --- Script-based checks (reusable, testable, deterministic) ---
+    # Each script exits 0 (pass), 1 (blocking findings), or 2 (warnings only).
+    # Output is structured: "BLOCKING: ...", "WARNING: ...", "OK: ..." per line.
+
+    # 1. Route/router/middleware/shared-module/component registration
+    echo "=== Running: verify-route-registration.sh ==="
+    bash "$FORGE_HOME/scripts/verify-route-registration.sh" "$CHANGED_FILES_TMP" "$REPO_ROOT" || true
+
+    # 2. Environment variable wiring (checks .env.example, docker-compose, env_validation, SOPS mapping)
+    echo "=== Running: verify-env-vars.sh ==="
+    bash "$FORGE_HOME/scripts/verify-env-vars.sh" "$DIFF_TMP" "$REPO_ROOT" || true
+
+    # 3. Host headers in shell scripts + client-side proxy bypass check
+    # Read project-specific internal service patterns from forge.yaml (if present)
+    FORGE_INTERNAL_PATTERNS=""
+    if [ -f "$REPO_ROOT/forge.yaml" ]; then
+        FORGE_INTERNAL_PATTERNS=$(grep -A 999 'internal_service_patterns:' "$REPO_ROOT/forge.yaml" \
+            | grep -E '^\s*-\s+' \
+            | sed 's/^\s*-\s*//' \
+            | tr -d '"'"'" \
+            | awk 'NR>1{printf "|"}{printf $0}END{print ""}')
+    fi
+    export FORGE_INTERNAL_PATTERNS
+    echo "=== Running: verify-host-headers.sh ==="
+    bash "$FORGE_HOME/scripts/verify-host-headers.sh" "$CHANGED_FILES_TMP" "$REPO_ROOT" || true
+
+    # 4. SOPS deploy chain (ENV_MAPPING consistency, deploy path drift, hotfix sync)
+    echo "=== Running: verify-sops-chain.sh ==="
+    bash "$FORGE_HOME/scripts/verify-sops-chain.sh" "$DIFF_TMP" "$CHANGED_FILES_TMP" "$REPO_ROOT" || true
+
+    # Cleanup temp files
+    rm -f "$CHANGED_FILES_TMP" "$DIFF_TMP"
+else
+    echo "=== Phase 2.5B: verify-*.sh skipped — bash not available on this platform ==="
+    echo "    The verify-*.sh scripts require bash (POSIX shell)."
+    echo "    Install Git Bash (Windows) or WSL to enable these checks."
+    echo "    The review continues — integration assumptions should be verified manually."
+fi
 
 # --- Inline checks (not yet extracted to scripts) ---
 
@@ -396,7 +526,9 @@ done
 # diff. Pre-existing drift is the most dangerous kind — it lurks until
 # staging→main and then blocks the deploy.
 WORKFLOW_FILES=$(echo "$CHANGED_FILES" | grep -E "^\.github/workflows/.*\.yml$" || true)
-IS_STAGING_PR=$([[ "$HEAD" == "staging" && "$BASE" == "main" ]] && echo "true" || echo "false")
+# Use POSIX-portable conditional (avoid bash-only [[ ]])
+IS_STAGING_PR="false"
+if [ "$HEAD" = "staging" ] && [ "$BASE" = "main" ]; then IS_STAGING_PR="true"; fi
 
 if [ -n "$WORKFLOW_FILES" ] || [ "$IS_STAGING_PR" = "true" ]; then
     echo "=== Sibling Workflow Drift Check (MANDATORY for staging→main) ==="
@@ -415,9 +547,14 @@ if [ -n "$WORKFLOW_FILES" ] || [ "$IS_STAGING_PR" = "true" ]; then
 
             echo "--- Comparing '$JOB' job between ci.yml and deploy-production.yml ---"
 
-            # Extract env vars from ALL steps in the job (not just pytest)
-            CI_ENVS=$(sed -n "/^  ${JOB}:/,/^  [a-z]/p" "$CI_WF" 2>/dev/null | grep -E "PYTHONPATH|DATABASE_URL|REDIS_URL|TESTING" | sed 's/^ *//' | sort)
-            DEPLOY_ENVS=$(sed -n "/^  ${JOB}:/,/^  [a-z]/p" "$DEPLOY_WF" 2>/dev/null | grep -E "PYTHONPATH|DATABASE_URL|REDIS_URL|TESTING" | sed 's/^ *//' | sort)
+            # Extract env vars from ALL steps in the job (not just pytest).
+            # Flag-based awk avoids the range-collapse bug: /pat1/,/pat2/ collapses
+            # to a single line when the header (e.g. "  test-api:") matches both
+            # patterns simultaneously. The flag form sets p=1 on the header line,
+            # prints body lines while p=1, and clears p when the next sibling job
+            # header (same indentation, lowercase start) is seen. <!-- Added: forge#310 -->
+            CI_ENVS=$(awk -v pat="^  ${JOB}:" 'BEGIN{p=0} $0~pat{p=1; print; next} p && /^  [a-z]/{p=0} p{print}' "$CI_WF" 2>/dev/null | grep -E "PYTHONPATH|DATABASE_URL|REDIS_URL|TESTING" | sed 's/^ *//' | sort)
+            DEPLOY_ENVS=$(awk -v pat="^  ${JOB}:" 'BEGIN{p=0} $0~pat{p=1; print; next} p && /^  [a-z]/{p=0} p{print}' "$DEPLOY_WF" 2>/dev/null | grep -E "PYTHONPATH|DATABASE_URL|REDIS_URL|TESTING" | sed 's/^ *//' | sort)
 
             # Check for PYTHONPATH specifically — the exact var that caused the #11356 failure
             CI_PYPATH=$(echo "$CI_ENVS" | grep "PYTHONPATH" || echo "(not set)")
@@ -430,16 +567,16 @@ if [ -n "$WORKFLOW_FILES" ] || [ "$IS_STAGING_PR" = "true" ]; then
             fi
 
             # Check for dependency installation steps that exist in one but not the other
-            CI_INSTALLS=$(sed -n "/^  ${JOB}:/,/^  [a-z]/p" "$CI_WF" 2>/dev/null | grep -c "poetry install\|pip install\|npm install" || echo 0)
-            DEPLOY_INSTALLS=$(sed -n "/^  ${JOB}:/,/^  [a-z]/p" "$DEPLOY_WF" 2>/dev/null | grep -c "poetry install\|pip install\|npm install" || echo 0)
+            CI_INSTALLS=$(awk -v pat="^  ${JOB}:" 'BEGIN{p=0} $0~pat{p=1; print; next} p && /^  [a-z]/{p=0} p{print}' "$CI_WF" 2>/dev/null | grep -c "poetry install\|pip install\|npm install" || echo 0)
+            DEPLOY_INSTALLS=$(awk -v pat="^  ${JOB}:" 'BEGIN{p=0} $0~pat{p=1; print; next} p && /^  [a-z]/{p=0} p{print}' "$DEPLOY_WF" 2>/dev/null | grep -c "poetry install\|pip install\|npm install" || echo 0)
             if [ "$CI_INSTALLS" != "$DEPLOY_INSTALLS" ]; then
                 echo "  WARNING: Different number of dependency install steps in '$JOB' — ci.yml has $CI_INSTALLS, deploy has $DEPLOY_INSTALLS"
                 echo "  ACTION: Read both files and verify all dependencies needed by tests are installed in both workflows."
             fi
 
             # Check step names — if CI has a step that deploy doesn't, flag it
-            CI_STEPS=$(sed -n "/^  ${JOB}:/,/^  [a-z]/p" "$CI_WF" 2>/dev/null | grep "- name:" | sed 's/.*- name: //' | sort)
-            DEPLOY_STEPS=$(sed -n "/^  ${JOB}:/,/^  [a-z]/p" "$DEPLOY_WF" 2>/dev/null | grep "- name:" | sed 's/.*- name: //' | sort)
+            CI_STEPS=$(awk -v pat="^  ${JOB}:" 'BEGIN{p=0} $0~pat{p=1; print; next} p && /^  [a-z]/{p=0} p{print}' "$CI_WF" 2>/dev/null | grep "- name:" | sed 's/.*- name: //' | sort)
+            DEPLOY_STEPS=$(awk -v pat="^  ${JOB}:" 'BEGIN{p=0} $0~pat{p=1; print; next} p && /^  [a-z]/{p=0} p{print}' "$DEPLOY_WF" 2>/dev/null | grep "- name:" | sed 's/.*- name: //' | sort)
             MISSING_IN_DEPLOY=$(comm -23 <(echo "$CI_STEPS") <(echo "$DEPLOY_STEPS") 2>/dev/null || true)
             if [ -n "$MISSING_IN_DEPLOY" ]; then
                 echo "  WARNING: Steps in ci.yml '$JOB' missing from deploy-production.yml:"
@@ -568,7 +705,10 @@ gh api repos/{owner}/{repo}/issues/$ARGUMENTS/comments --jq '.[-10:] | .[].body[
 **Skip if**: Only 1 agent OR total findings ≤ 3.
 
 ```bash
-ALL_FINDINGS=$(gh api "repos/${REPO}/issues/${PR_NUMBER}/comments" --jq '.[].body' | grep -oP '(?<=<!-- FINDING:).*?(?= -->)')
+# Extract structured finding IDs from FINDING HTML comments.
+# Uses jq's scan() (POSIX-portable, no grep -oP required).
+ALL_FINDINGS=$(gh api "repos/${REPO}/issues/${PR_NUMBER}/comments" \
+    --jq '[.[].body | scan("<!-- FINDING:([^>]+) -->") | .[0]] | join("\n")')
 AGENT_COUNT=$(gh api "repos/${REPO}/issues/${PR_NUMBER}/comments" --jq '[.[] | select(.body | test("REVIEW-FINDINGS-START"))] | length')
 FINDING_COUNT=$(echo "$ALL_FINDINGS" | grep -c '.' || echo 0)
 ```
@@ -595,9 +735,13 @@ REPO=$(gh repo view --json nameWithOwner --jq '.nameWithOwner')
 HAS_SYNTHESIS=$(gh api "repos/${REPO}/issues/${PR_NUMBER}/comments" --jq '.[].body' | grep -c 'REVIEW-FINDINGS-SYNTHESIZED-START' || echo 0)
 
 if [ "$HAS_SYNTHESIS" -gt 0 ]; then
-    FINDINGS=$(gh api "repos/${REPO}/issues/${PR_NUMBER}/comments" --jq '.[] | select(.body | test("REVIEW-FINDINGS-SYNTHESIZED-START")) | .body' | grep -oP '(?<=<!-- FINDING:).*?(?= -->)')
+    # Extract finding IDs from synthesized block using jq scan() — no grep -oP needed
+    FINDINGS=$(gh api "repos/${REPO}/issues/${PR_NUMBER}/comments" \
+        --jq '[.[] | select(.body | test("REVIEW-FINDINGS-SYNTHESIZED-START")) | .body | scan("<!-- FINDING:([^>]+) -->") | .[0]] | join("\n")')
 else
-    FINDINGS=$(gh api "repos/${REPO}/issues/${PR_NUMBER}/comments" --jq '.[].body' | grep -oP '(?<=<!-- FINDING:).*?(?= -->)')
+    # Extract finding IDs from all agent comments using jq scan() — portable, no grep -oP
+    FINDINGS=$(gh api "repos/${REPO}/issues/${PR_NUMBER}/comments" \
+        --jq '[.[].body | scan("<!-- FINDING:([^>]+) -->") | .[0]] | join("\n")')
 fi
 ```
 
@@ -924,7 +1068,8 @@ fi
 
 ```bash
 CURRENT_SHA=$(gh pr view $ARGUMENTS --json headRefOid --jq '.headRefOid')
-REVIEW_IS_STALE=$([[ "$CURRENT_SHA" != "$REVIEW_SHA" ]] && echo "true" || echo "false")
+REVIEW_IS_STALE="false"
+if [ "$CURRENT_SHA" != "$REVIEW_SHA" ]; then REVIEW_IS_STALE="true"; fi
 ```
 
 ```bash

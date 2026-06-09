@@ -11,6 +11,7 @@ argument-hint: [--fix | --recon-only | --fix --limit 5 | --dry-run]
 - `{CREDENTIALS_FILE}` ← `paths.credentials.file` (optional) — path to credentials YAML for analytics APIs
 - `{SERVER_SSH}` ← `services.server_ssh` (optional) — SSH target for production server health checks (e.g., `ubuntu@1.2.3.4`)
 - `{EMEMO_PATH}` ← `services.ememo_path` (optional) — path on production server to open eMemo files
+- `{BILLING_ENABLED}` ← `billing.enabled` (optional, default `false`) — set to `true` to enable Stripe data collection in the Analytics Snapshot agent
 
 You are an autonomous improvement engine for this project. Your job is to **find what's wrong, create trackable issues, and optionally fix the highest-impact ones** — all in a single cycle. Every cycle leaves the platform measurably better than before.
 
@@ -51,9 +52,15 @@ DRY_RUN = true if --dry-run present
 ```bash
 echo "=== Autopilot Cycle: $(date -u +%Y-%m-%dT%H:%M:%SZ) ==="
 
+# Portable ISO-8601 date arithmetic using python3 (works on Windows, macOS, Linux).
+# Replaces GNU-only `date -u -d 'N days ago'` which fails on Windows and macOS.
+DATE_3D_AGO=$(python3 -c "from datetime import datetime, timedelta, timezone; print((datetime.now(timezone.utc) - timedelta(days=3)).strftime('%Y-%m-%dT%H:%M:%SZ'))")
+DATE_7D_AGO=$(python3 -c "from datetime import datetime, timedelta, timezone; print((datetime.now(timezone.utc) - timedelta(days=7)).strftime('%Y-%m-%dT%H:%M:%SZ'))")
+DATE_1D_AGO=$(python3 -c "from datetime import datetime, timedelta, timezone; print((datetime.now(timezone.utc) - timedelta(days=1)).strftime('%Y-%m-%dT%H:%M:%SZ'))")
+
 # Recent closed issues (last 3 days) — what was fixed recently?
 gh issue list --state closed --json number,title,labels,closedAt \
-  --jq '[.[] | select(.closedAt > "'$(date -u -d '3 days ago' +%Y-%m-%dT%H:%M:%SZ)'")] | length' 2>/dev/null || echo "0"
+  --jq '[.[] | select(.closedAt > "'"$DATE_3D_AGO"'")] | length' 2>/dev/null || echo "0"
 
 # Open issue count by priority
 gh issue list --state open --label "priority:P0" --json number --jq 'length'
@@ -64,12 +71,12 @@ gh issue list --state open --label "priority:P2" --json number --jq 'length'
 gh issue list --state open --limit 200 --json number,title,labels,createdAt \
   --jq '[.[] | select(
     (.labels | map(.name) | any(startswith("workflow:")) | not) and
-    (.createdAt < "'$(date -u -d '7 days ago' +%Y-%m-%dT%H:%M:%SZ)'")
+    (.createdAt < "'"$DATE_7D_AGO"'")
   )] | length'
 
 # Failed CI runs in last 24h
 gh run list --limit 30 --json conclusion,createdAt \
-  --jq '[.[] | select(.conclusion == "failure" and .createdAt > "'$(date -u -d '1 day ago' +%Y-%m-%dT%H:%M:%SZ)'")] | length'
+  --jq '[.[] | select(.conclusion == "failure" and .createdAt > "'"$DATE_1D_AGO"'")] | length'
 ```
 
 Store these as `BASELINE` metrics for the cycle report.
@@ -140,8 +147,9 @@ Analyze GitHub issue backlog:
 Quick analytics pulse — just the key metrics, not a full audit:
 1. Read credentials from {CREDENTIALS_FILE} (set via paths.credentials.file in forge.yaml)
 2. GSC: mcp__gsc__search_analytics for last 7 days — total clicks, impressions, avg position
-3. Stripe: mcp__stripe__retrieve_balance — current balance
-4. Return: clicks trend (up/down), any revenue, notable changes
+3. Stripe (only if {BILLING_ENABLED} is true): mcp__stripe__retrieve_balance — current balance.
+   Skip this step entirely if {BILLING_ENABLED} is false — do NOT call any Stripe MCP tools.
+4. Return: clicks trend (up/down), revenue (or "N/A — billing.enabled: false" if skipped), notable changes
 ```
 
 ### 1B: Collect results
@@ -291,7 +299,7 @@ Print a structured report:
 
 ### Analytics Pulse
 - Clicks (7d): {N} ({trend})
-- Revenue: ${N}
+- Revenue: ${N} (or "N/A — billing.enabled: false" if Stripe step was skipped)
 
 ### Actions Taken
 - Issues created: {count} ({list with numbers})

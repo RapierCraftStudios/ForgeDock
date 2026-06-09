@@ -2,7 +2,15 @@
 
 import os from "os";
 import { fileURLToPath } from "url";
-import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "path";
+import {
+  basename,
+  dirname,
+  isAbsolute,
+  join,
+  relative,
+  resolve,
+  sep,
+} from "path";
 import {
   mkdir,
   symlink,
@@ -2211,7 +2219,9 @@ async function _buildForgeDockBlock() {
     if (!description) continue;
 
     // Derive display name: relative path from COMMANDS_DIR, remove .md extension
-    const rel = relative(COMMANDS_DIR, file).replace(/\\/g, "/").replace(/\.md$/, "");
+    const rel = relative(COMMANDS_DIR, file)
+      .replace(/\\/g, "/")
+      .replace(/\.md$/, "");
     commands.push({ name: rel, description });
   }
 
@@ -2274,28 +2284,51 @@ function _injectManagedBlock(filePath, blockContent, createIfMissing) {
 
   let existing = readFileSync(filePath, "utf-8");
 
-  if (existing.includes(CLAUDE_BLOCK_BEGIN) && existing.includes(CLAUDE_BLOCK_END)) {
-    // Both markers present — replace existing block in place
-    const escaped_begin = CLAUDE_BLOCK_BEGIN.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  if (
+    existing.includes(CLAUDE_BLOCK_BEGIN) &&
+    existing.includes(CLAUDE_BLOCK_END)
+  ) {
+    // Both markers present — replace existing block in place.
+    // Guard: if markers are reversed (END before BEGIN) the regex finds no
+    // forward-spanning match; fall through to the repair path instead of
+    // writing the file unchanged and returning a false 'updated'. <!-- Added: forge#291 -->
+    const escaped_begin = CLAUDE_BLOCK_BEGIN.replace(
+      /[.*+?^${}()|[\]\\]/g,
+      "\\$&",
+    );
     const escaped_end = CLAUDE_BLOCK_END.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
     const blockRegex = new RegExp(
       `${escaped_begin}[\\s\\S]*?${escaped_end}`,
       "g",
     );
-    existing = existing.replace(blockRegex, managed);
-    writeFileSync(filePath, existing, "utf-8");
-    return "updated";
-  }
-
-  if (existing.includes(CLAUDE_BLOCK_BEGIN)) {
+    const replaced = existing.replace(blockRegex, managed);
+    if (replaced !== existing) {
+      writeFileSync(filePath, replaced, "utf-8");
+      return "updated";
+    }
+    // Regex found no match (e.g. reversed markers) — strip both orphaned
+    // markers below and fall through to the append path to repair the file.
+    existing = existing
+      .replace(CLAUDE_BLOCK_BEGIN, "")
+      .replace(CLAUDE_BLOCK_END, "")
+      .trimEnd();
+  } else if (existing.includes(CLAUDE_BLOCK_BEGIN)) {
     // BEGIN present but END missing — file is truncated or malformed.
     // Strip the orphaned marker and everything after it, then fall through
     // to the append path below so the complete block is written correctly.
-    existing = existing.slice(0, existing.indexOf(CLAUDE_BLOCK_BEGIN)).trimEnd();
+    existing = existing
+      .slice(0, existing.indexOf(CLAUDE_BLOCK_BEGIN))
+      .trimEnd();
+  } else if (existing.includes(CLAUDE_BLOCK_END)) {
+    // END present but BEGIN missing — orphaned END marker left by a previous
+    // failed write. Strip it and fall through to append the complete block.
+    // <!-- Added: forge#291 -->
+    existing = existing.replace(CLAUDE_BLOCK_END, "").trimEnd();
   }
 
   // Append block to existing content, separated by a blank line
-  const separator = existing.length === 0 || existing.endsWith("\n") ? "\n" : "\n\n";
+  const separator =
+    existing.length === 0 || existing.endsWith("\n") ? "\n" : "\n\n";
   writeFileSync(filePath, `${existing}${separator}${managed}\n`, "utf-8");
   return "updated";
 }
@@ -2324,9 +2357,13 @@ async function injectClaudeMd(cwd) {
 
   const claudeResult = _injectManagedBlock(claudePath, blockContent, true);
   if (claudeResult === "created") {
-    console.log(`  ${GREEN}✔${RESET}  CLAUDE.md created with ForgeDock integration block`);
+    console.log(
+      `  ${GREEN}✔${RESET}  CLAUDE.md created with ForgeDock integration block`,
+    );
   } else {
-    console.log(`  ${GREEN}✔${RESET}  CLAUDE.md updated — ForgeDock block refreshed`);
+    console.log(
+      `  ${GREEN}✔${RESET}  CLAUDE.md updated — ForgeDock block refreshed`,
+    );
   }
 
   if (existsSync(agentsPath)) {
@@ -3421,9 +3458,7 @@ async function labelsSetup(repo) {
   const manifestPath = join(__dirname, "labels.json");
 
   if (!existsSync(manifestPath)) {
-    console.log(
-      `${RED}Label manifest not found: ${manifestPath}${RESET}`,
-    );
+    console.log(`${RED}Label manifest not found: ${manifestPath}${RESET}`);
     process.exit(1);
   }
 
@@ -3543,21 +3578,54 @@ async function docsInit() {
 
   // Security: assert targetDir is confined to the project directory.
   // Prevents path traversal via ../.. sequences, absolute paths, and symlinks in devdocs.path.
-  // Use realpath() to dereference symlinks — resolve() does not follow them, so a symlink
-  // pre-placed inside the project (e.g. devdocs -> /etc) would bypass a resolve()-only check.
-  // Fall back to resolve() when targetDir does not yet exist (no symlink to dereference).
+  //
+  // Two hardening steps beyond the initial check:
+  //
+  // 1. realpath(cwd) — on Windows, process.cwd() may return a directory-junction path while
+  //    realpath() returns the canonical target.  Comparing a canonical resolvedTarget against
+  //    a non-canonical cwd would false-reject valid paths (BUG-3).
+  //
+  // 2. Walk-up-to-existing-ancestor resolution on ENOENT — when the target path does not yet
+  //    exist, falling back to lexical resolve() fails to follow intermediate symlinks.  A
+  //    symlink planted at "sub/" pointing outside the project would not be dereferenced, so
+  //    the lexical result would appear inside the project and the containment check would
+  //    pass, allowing mkdir() to write through the symlink (SEC-1).  Calling realpath() only
+  //    one level up ("parent-first") still fails when the parent also does not exist (e.g.,
+  //    devdocs.path = "sub/mid/leaf" where "sub" is a symlink but "sub/mid" is absent) —
+  //    realpath("sub/mid") follows sub then ENOENT-s on mid, and the lexical fallback does
+  //    not dereference sub (SEC-2).  Instead, walk up the directory hierarchy until finding
+  //    an ancestor that exists, realpath() it to dereference any symlinks at that level, then
+  //    reattach all collected suffix segments.
+  const realCwd = await realpath(cwd).catch(() => resolve(cwd));
   let resolvedTarget;
   try {
     resolvedTarget = await realpath(targetDir);
   } catch {
+    // targetDir does not exist — walk up the hierarchy to the nearest existing ancestor,
+    // dereference it via realpath() to follow any intermediate symlinks, then reattach the
+    // collected suffix segments.  Initialise resolvedTarget to the lexical path as a
+    // last-resort sentinel (overwritten by the loop on the first successful realpath call).
+    const trailSegments = [basename(targetDir)];
+    let ancestor = dirname(targetDir);
     resolvedTarget = resolve(targetDir);
+    while (true) {
+      const parent = dirname(ancestor);
+      if (parent === ancestor) break; // reached filesystem root — keep lexical sentinel
+      try {
+        resolvedTarget = join(await realpath(ancestor), ...trailSegments);
+        break;
+      } catch {
+        trailSegments.unshift(basename(ancestor));
+        ancestor = parent;
+      }
+    }
   }
-  if (resolvedTarget !== cwd && !resolvedTarget.startsWith(cwd + sep)) {
+  if (resolvedTarget !== realCwd && !resolvedTarget.startsWith(realCwd + sep)) {
     console.log(
       `${RED}Error: devdocs.path must be inside the project directory.${RESET}`,
     );
     console.log(`  Resolved: ${resolvedTarget}`);
-    console.log(`  Project:  ${cwd}`);
+    console.log(`  Project:  ${realCwd}`);
     console.log(
       `  Fix: set ${CYAN}devdocs.path${RESET} to a relative path inside your project (e.g. "devdocs" or "docs/knowledge").`,
     );
@@ -3568,12 +3636,8 @@ async function docsInit() {
   const templatesDir = join(FORGE_HOME, "templates", "devdocs");
 
   if (!existsSync(templatesDir)) {
-    console.log(
-      `${RED}DevDocs templates not found: ${templatesDir}${RESET}`,
-    );
-    console.log(
-      `  This usually means ForgeDock is not installed correctly.`,
-    );
+    console.log(`${RED}DevDocs templates not found: ${templatesDir}${RESET}`);
+    console.log(`  This usually means ForgeDock is not installed correctly.`);
     console.log(
       `  Try: ${CYAN}npm install -g forgedock${RESET} or ${CYAN}npx forgedock@latest docs init${RESET}`,
     );
@@ -4083,7 +4147,11 @@ if (!command) {
       break;
     case "labels": {
       const subcommand = args[1];
-      if (!subcommand || subcommand === "setup" || subcommand.startsWith("--")) {
+      if (
+        !subcommand ||
+        subcommand === "setup" ||
+        subcommand.startsWith("--")
+      ) {
         const subArgs = args.slice(1);
         const repo = resolveLabelsRepo(subArgs);
         if (!repo) {
@@ -4112,9 +4180,7 @@ if (!command) {
         await docsInit();
       } else {
         console.log(`${RED}Unknown docs subcommand: ${docsSubcommand}${RESET}`);
-        console.log(
-          `Usage: ${CYAN}npx forgedock docs init${RESET}`,
-        );
+        console.log(`Usage: ${CYAN}npx forgedock docs init${RESET}`);
         process.exit(1);
       }
       break;

@@ -10,7 +10,7 @@
 #   # Add forge.yaml to your .gitignore if it contains sensitive paths
 #
 # Required sections: project, paths, branches
-# Optional sections: repos, project_board, services, review, verification, billing
+# Optional sections: repos, project_board, services, review, verification, deploy, billing
 
 # =============================================================================
 # PROJECT (REQUIRED)
@@ -284,6 +284,47 @@ branches:
 #   #   auth: ["services/api/auth/**", "web/src/lib/auth/**"]
 #   #   billing: ["services/api/billing/**", "web/src/app/billing/**"]
 #   #   database: ["services/api/db/**", "migrations/**"]
+#
+#   # Layout paths used by pipeline commands for file discovery and classification.
+#   # These drive /qa-sweep page discovery, /deploy-info file categorization,
+#   # /orchestrate high-fan-in detection, /review-pr route-registration checks,
+#   # and the verify-route-registration.sh script. All values are relative to
+#   # the repository root. Defaults match the AlterLab monorepo layout — set
+#   # these if your project uses a different directory structure.
+#   #
+#   # layout:
+#   #   # Root directory of Next.js App Router pages (contains page.tsx / page.js files).
+#   #   # Used by /qa-sweep to discover pages. Agent fails loudly if zero pages are
+#   #   # found here and this key is not set.
+#   #   pages: "web/src/app"
+#   #
+#   #   # Root directory of the backend API service.
+#   #   # Used by /deploy-info file categorization and /review-pr integration checks.
+#   #   api: "services/api"
+#   #
+#   #   # Directory containing FastAPI router modules (.py files).
+#   #   # Used by /review-pr and verify-route-registration.sh to check router registration.
+#   #   api_routers: "services/api/app/routers"
+#   #
+#   #   # Path to the API application entrypoint (router/middleware registration).
+#   #   # High-fan-in file: /orchestrate serializes any issue that touches this file.
+#   #   api_main: "services/api/app/main.py"
+#   #
+#   #   # Directory containing API middleware modules.
+#   #   # Used by /review-pr and verify-route-registration.sh.
+#   #   api_middleware: "services/api/app/middleware"
+#   #
+#   #   # Root directory of the background worker service.
+#   #   # Used by /deploy-info file categorization and /orchestrate high-fan-in detection.
+#   #   worker: "services/worker"
+#   #
+#   #   # Directory containing database migration files.
+#   #   # Used by /deploy-info to detect and list migration changes.
+#   #   migrations: "infra/migrations"
+#   #
+#   #   # Root directory of shared frontend component library.
+#   #   # Used by verify-route-registration.sh to check component import coverage.
+#   #   frontend_components: "web/src/components"
 
 # =============================================================================
 # VERIFICATION (OPTIONAL)
@@ -318,6 +359,91 @@ branches:
 #   # Example: if your services are named "acme-api", "acme-worker", add "acme-"
 #   internal_service_patterns:
 #     - "acme-"
+#
+#   # Toolchain commands for lint, format, typecheck, test, and build steps.
+#   # Used by: review-pr, review-pr-staging, work-on (Phase 3H, validate), rollback,
+#   #          incident-response, orchestrate (integration build gate).
+#   #
+#   # Declare your project's actual toolchain here once. Pipeline stages read these
+#   # values and run your commands directly — they never assume poetry/npm/tsc.
+#   # When a key is absent or empty, the stage logs "SKIPPED — not configured in
+#   # verification.commands" and continues without failing. This means you can adopt
+#   # the schema incrementally: add only the steps your project actually uses.
+#   #
+#   # Each command is a shell string run from the repository root (or the worktree
+#   # root). Use relative paths or rely on $PATH. Commands may include flags.
+#   #
+#   # Language keys are arbitrary identifiers — name them after your stack.
+#   # Common keys: python, typescript, go, rust, java, node
+#   #
+#   # commands:
+#   #   # Python project using ruff + pytest
+#   #   python:
+#   #     format: "ruff format --check ."
+#   #     lint: "ruff check ."
+#   #     typecheck: "mypy src/ --ignore-missing-imports"
+#   #     test: "pytest tests/ -x -q --tb=short"
+#   #     build: ""   # omit or leave empty to skip
+#   #
+#   #   # TypeScript project using tsc + vitest
+#   #   typescript:
+#   #     format: "prettier --check \"src/**/*.{ts,tsx}\""
+#   #     lint: "eslint src/"
+#   #     typecheck: "tsc --noEmit"
+#   #     test: "vitest run"
+#   #     build: "npm run build"
+#   #
+#   #   # Go project
+#   #   go:
+#   #     format: "gofmt -l ."
+#   #     lint: "golangci-lint run"
+#   #     typecheck: ""   # Go compilation is the typecheck — set build instead
+#   #     test: "go test ./..."
+#   #     build: "go build ./..."
+#   #
+#   #   # Rust project
+#   #   rust:
+#   #     format: "cargo fmt --check"
+#   #     lint: "cargo clippy -- -D warnings"
+#   #     typecheck: ""
+#   #     test: "cargo test"
+#   #     build: "cargo build"
+
+# =============================================================================
+# DEPLOY (OPTIONAL)
+# Deployment model configuration. Used by deploy-info, incident-response,
+# rollback, and work-on to trigger and verify deploys without hardcoding
+# workflow names, secrets chains, or container naming conventions.
+# Commands: deploy-info, incident-response, rollback, work-on (Phase 3J)
+# =============================================================================
+
+# deploy:
+#   # Filename of the GitHub Actions workflow used to trigger deploys.
+#   # Referenced as: gh workflow run {deploy.workflow} --ref {branch} -f ...
+#   # Set to "" or omit to skip workflow-trigger steps (CI/CD deploys automatically).
+#   # Example: "hotfix-deploy.yml", "deploy.yml", "release.yml"
+#   workflow: "hotfix-deploy.yml"
+#
+#   # Input parameter names for the deploy workflow.
+#   # Keys are semantic names used by pipeline commands; values are the actual
+#   # workflow_dispatch input names declared in the workflow file.
+#   # Omit fields whose workflow does not declare the corresponding input.
+#   workflow_inputs:
+#     # Which services to rebuild/restart (comma-separated or "all")
+#     services: "services"
+#     # Human-readable deploy reason logged by the workflow
+#     reason: "reason"
+#
+#   # Secrets backend used to deliver runtime secrets to containers.
+#   # Controls which secret-chain checks run in work-on (Phase 3J) and deploy-info.
+#   # Values:
+#   #   sops     — Mozilla SOPS + decrypt-secrets.sh → .env.production chain
+#   #   aws-sm   — AWS Secrets Manager (verification steps skipped — configure separately)
+#   #   vault    — HashiCorp Vault (verification steps skipped — configure separately)
+#   #   ci-env   — Secrets injected directly by CI/CD runner environment variables
+#   #   none     — No secrets backend; all vars are operator-set in .env.production
+#   # Default: none (all secret-chain checks are skipped with an explicit log message)
+#   secrets_backend: "sops"
 
 # =============================================================================
 # BILLING (OPTIONAL)
