@@ -1,0 +1,22 @@
+name: DCO Check
+
+on:
+  pull_request_target:
+    types: [opened, synchronize, reopened]
+
+jobs:
+  dco:
+    name: DCO Sign-Off Verification
+    runs-on: ubuntu-latest
+    permissions:
+      pull-requests: read
+      statuses: write
+
+    steps:
+      - name: Check DCO sign-off
+        uses: dcoorg/gha-dco@v1
+        with:
+          # Allow these bots to skip the DCO requirement — they cannot sign off
+          allow_list: "github-actions[bot],dependabot[bot],dependabot-preview[bot]"
+          # Fail the check (block merge) when sign-off is missing
+          require_commit_email: false
