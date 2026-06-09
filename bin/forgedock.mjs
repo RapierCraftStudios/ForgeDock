@@ -54,6 +54,7 @@ import {
   input,
   createProgressBar,
   spinner,
+  annotatedReviewScreen,
 } from "./tui.mjs";
 import { detectConfig } from "./init-detect.mjs";
 
@@ -1806,304 +1807,259 @@ async function init() {
   }
 
   // ---------------------------------------------------------------------------
-  // Interactive flow — prompt for each required section
+  // Annotated review screen — single screen replacing the per-field wizard
   // ---------------------------------------------------------------------------
 
-  // Loop until user confirms the preview
-  let confirmed = false;
-
-  while (!confirmed) {
-    console.log(
-      dim(
-        "  Auto-detected values are shown as defaults. Press Enter to accept.",
-      ),
-    );
-    console.log("");
-
-    // --- Project section ---
-    console.log(bold("  Project"));
-
-    const ownerInput = await input(
-      "  GitHub owner (org or user)",
-      detectedOwner,
-    );
-    const repoInput = await input("  Repository name", detectedRepo);
-    const nameInput = await input(
-      "  Project name",
-      detectedName !== "Your-repo-name"
-        ? detectedName
-        : repoInput
-            .split(/[-_]/)
-            .map((w) => w.charAt(0).toUpperCase() + w.slice(1))
-            .join(" "),
-    );
-    const descInput = await input("  Brief description", "");
-
-    // --- Paths section ---
-    console.log("");
-    console.log(bold("  Paths"));
-
-    const rootInput = await input("  Repository root (absolute path)", cwd);
-    const worktreeInput = await input(
-      "  Worktree base (for git worktrees)",
-      join(rootInput || cwd, ".claude", "worktrees"),
-    );
-
-    // --- Branches section ---
-    console.log("");
-    console.log(bold("  Branches"));
-
-    const defaultBranchInput = await input("  Default branch", detectedDefault);
-    const stagingBranchInput = await input(
-      "  Staging branch (PR target for fast-lane changes)",
-      detectedStaging,
-    );
-
-    // --- Preview ---
-    console.log("");
-
-    const previewLines = buildForgeYamlContent({
-      owner: ownerInput,
-      repo: repoInput,
-      projectName: nameInput,
-      description: descInput,
-      root: rootInput || cwd,
-      worktreeBase: worktreeInput || join(cwd, ".claude", "worktrees"),
-      defaultBranch: defaultBranchInput,
-      stagingBranch: stagingBranchInput,
-    });
-
-    // Show preview in a box
-    const previewDisplay = previewLines
-      .split("\n")
-      .slice(0, 30) // show first 30 lines of required sections only
-      .join("\n");
-
-    process.stdout.write(
-      box(previewDisplay, {
-        title: "forge.yaml preview (required sections)",
-        padding: 1,
-      }),
-    );
-
-    confirmed = await confirm("  Write this forge.yaml?", true);
-
-    if (!confirmed) {
-      console.log("");
-      console.log(dim("  Starting over — re-enter values below."));
-      console.log("");
-    } else {
-      // -----------------------------------------------------------------------
-      // Optional sections — multi-select, then guided prompts per section
-      // -----------------------------------------------------------------------
-      console.log("");
-      console.log(bold("  Optional Sections"));
-      console.log(
-        dim(
-          "  Select sections to configure now. Unselected sections are written as",
-        ),
-      );
-      console.log(
-        dim(
-          "  commented-out placeholders — you can enable them later by editing forge.yaml.",
-        ),
-      );
-      console.log("");
-
-      const OPTIONAL_SECTION_CHOICES = [
-        {
-          label:
-            "Project Board   — GitHub Projects v2 integration for workflow tracking",
-          value: "projectBoard",
-        },
-        {
-          label: "Multi-Repo      — Satellite repos for cross-repo milestones",
-          value: "multiRepo",
-        },
-        {
-          label:
-            "Review Context  — Tech stack and conventions for PR review agents",
-          value: "review",
-        },
-        {
-          label:
-            "Verification    — Health check endpoints and response patterns",
-          value: "verification",
-        },
-      ];
-
-      const selectedSections = await multiSelect(
-        "  Which optional sections would you like to configure?",
-        OPTIONAL_SECTION_CHOICES,
-      );
-
-      /** @type {Record<string, object>} */
-      const optionalSections = {};
-
-      // --- Project Board prompts ---
-      if (selectedSections.includes("projectBoard")) {
-        const discovered = await discoverProjectBoard(
-          ownerInput || detectedOwner,
-        );
-        if (discovered) {
-          // Auto-discovery succeeded — use resolved IDs
-          optionalSections.projectBoard = {
-            projectNumber: discovered.projectNumber,
-            projectId: discovered.projectId,
-            fieldIds: discovered.fieldIds,
-            optionIds: discovered.optionIds,
-          };
-        } else {
-          // Fallback: manual entry (no regression from previous behaviour)
-          console.log("");
-          console.log(bold("  Project Board (manual)"));
-          console.log(
-            dim(
-              "  Find your project number: gh project list --owner " +
-                (ownerInput || detectedOwner),
-            ),
-          );
-          const projectNumber = await input(
-            "  GitHub Projects v2 project number",
-            "1",
-          );
-          optionalSections.projectBoard = {
-            projectNumber: parseInt(projectNumber, 10) || 1,
-          };
-          console.log(
-            dim(
-              "  Field IDs (PVT_/PVTSSF_ strings) must be added manually after generation.",
-            ),
-          );
-          console.log(
-            dim(
-              "  Run: gh project field-list " +
-                (projectNumber || "1") +
-                " --owner " +
-                (ownerInput || detectedOwner),
-            ),
-          );
-        }
-      }
-
-      // --- Multi-Repo prompts ---
-      if (selectedSections.includes("multiRepo")) {
-        console.log("");
-        console.log(bold("  Multi-Repo"));
-        console.log(
-          dim(
-            "  Configure one satellite repo (add more by editing forge.yaml).",
-          ),
-        );
-        const prefix = await input(
-          "  Satellite repo prefix (e.g. 'mcp', 'sdk')",
-          "sat",
-        );
-        const satelliteRepo = await input(
-          "  Satellite repo name (just the name, owner will be reused)",
-          "your-satellite-repo",
-        );
-        const satelliteBranch = await input(
-          "  Satellite default/staging branch",
-          "main",
-        );
-        optionalSections.multiRepo = { prefix, satelliteRepo, satelliteBranch };
-      }
-
-      // --- Review Context prompts ---
-      if (selectedSections.includes("review")) {
-        console.log("");
-        console.log(bold("  Review Context"));
-        const techStack = await input(
-          "  Tech stack (e.g. Next.js, FastAPI, PostgreSQL)",
-          "Node.js, TypeScript",
-        );
-        const context = await input(
-          "  Architecture notes (one line; expand in forge.yaml later)",
-          "",
-        );
-        optionalSections.review = { techStack, context };
-      }
-
-      // --- Verification prompts ---
-      if (selectedSections.includes("verification")) {
-        console.log("");
-        console.log(bold("  Verification"));
-        const healthEndpoint = await input(
-          "  Health check endpoint URL",
-          `https://api.${repoInput || detectedRepo}.io/health`,
-        );
-        optionalSections.verification = { healthEndpoint };
-      }
-
-      // -----------------------------------------------------------------------
-      // Handle existing forge.yaml with confirmation
-      // -----------------------------------------------------------------------
-      if (existsSync(outputPath)) {
-        console.log("");
-        console.log(`  ${YELLOW}forge.yaml already exists.${RESET}`);
-        const shouldOverwrite = await confirm(
-          "  Back up existing forge.yaml and overwrite?",
-          true,
-        );
-        if (!shouldOverwrite) {
-          console.log(`  ${dim("Cancelled.")} forge.yaml was not changed.`);
-          console.log("");
-          return;
-        }
-
-        // Backup with timestamped name if .bak already exists (fix from #36)
-        const baseBak = join(cwd, "forge.yaml.bak");
-        const backupPath = existsSync(baseBak)
-          ? join(
-              cwd,
-              `forge.yaml.bak.${new Date().toISOString().replace(/[:.]/g, "-")}`,
-            )
-          : baseBak;
-        const backupName = basename(backupPath);
-        renameSync(outputPath, backupPath);
-        console.log(`  ${YELLOW}Backed up${RESET}: forge.yaml → ${backupName}`);
-      }
-
-      // Write the file
-      _writeForgeYaml({
-        outputPath,
-        cwd,
-        owner: ownerInput,
-        repo: repoInput,
-        projectName: nameInput,
-        description: descInput,
-        root: rootInput || cwd,
-        worktreeBase: worktreeInput || join(cwd, ".claude", "worktrees"),
-        defaultBranch: defaultBranchInput,
-        stagingBranch: stagingBranchInput,
-        optionalSections,
-      });
-
-      console.log("");
-      console.log(`  ${GREEN}Created${RESET}: forge.yaml`);
-      if (selectedSections.length > 0) {
-        console.log(
-          `  ${GREEN}Configured${RESET}: ${selectedSections
-            .map(
-              (s) =>
-                ({
-                  projectBoard: "project_board",
-                  multiRepo: "repos",
-                  review: "review",
-                  verification: "verification",
-                })[s],
-            )
-            .join(", ")}`,
-        );
-      }
-      console.log("");
-      await injectClaudeMd(cwd);
-      console.log("");
-      _printNextSteps({ remoteDetected: ownerInput !== "your-github-org" });
-      await validate(outputPath);
+  // Read existing content for diff-style display if forge.yaml already exists.
+  let existingContent = "";
+  const hasExistingConfig = existsSync(outputPath);
+  if (hasExistingConfig) {
+    try {
+      existingContent = readFileSync(outputPath, "utf-8");
+    } catch {
+      // Best-effort — missing or unreadable existing file is handled below
     }
   }
+
+  // Show the annotated review screen. Returns accepted/edited values plus
+  // the list of field keys that had low confidence (for TODO comment injection).
+  const reviewed = await annotatedReviewScreen(draft, {
+    hasExistingConfig,
+    existingContent,
+  });
+
+  const ownerInput = _sanitizeYamlValue(reviewed.owner || detectedOwner);
+  const repoInput = _sanitizeYamlValue(reviewed.repo || detectedRepo);
+  const nameInput = _sanitizeYamlValue(reviewed.name || detectedName);
+  const descInput = _sanitizeYamlValue(reviewed.description || "");
+  const rootInput = reviewed.root || cwd;
+  const worktreeInput = reviewed.worktreeBase || join(cwd, ".claude", "worktrees");
+  const defaultBranchInput = _sanitizeYamlValue(reviewed.defaultBranch || detectedDefault);
+  const stagingBranchInput = _sanitizeYamlValue(reviewed.stagingBranch || detectedStaging);
+
+  // -----------------------------------------------------------------------
+  // Optional sections — multi-select, then guided prompts per section
+  // -----------------------------------------------------------------------
+  console.log("");
+  console.log(bold("  Optional Sections"));
+  console.log(
+    dim(
+      "  Select sections to configure now. Unselected sections are written as",
+    ),
+  );
+  console.log(
+    dim(
+      "  commented-out placeholders — you can enable them later by editing forge.yaml.",
+    ),
+  );
+  console.log("");
+
+  const OPTIONAL_SECTION_CHOICES = [
+    {
+      label:
+        "Project Board   — GitHub Projects v2 integration for workflow tracking",
+      value: "projectBoard",
+    },
+    {
+      label: "Multi-Repo      — Satellite repos for cross-repo milestones",
+      value: "multiRepo",
+    },
+    {
+      label:
+        "Review Context  — Tech stack and conventions for PR review agents",
+      value: "review",
+    },
+    {
+      label:
+        "Verification    — Health check endpoints and response patterns",
+      value: "verification",
+    },
+  ];
+
+  const selectedSections = await multiSelect(
+    "  Which optional sections would you like to configure?",
+    OPTIONAL_SECTION_CHOICES,
+  );
+
+  /** @type {Record<string, object>} */
+  const optionalSections = {};
+
+  // --- Project Board prompts ---
+  if (selectedSections.includes("projectBoard")) {
+    const discovered = await discoverProjectBoard(ownerInput || detectedOwner);
+    if (discovered) {
+      // Auto-discovery succeeded — use resolved IDs
+      optionalSections.projectBoard = {
+        projectNumber: discovered.projectNumber,
+        projectId: discovered.projectId,
+        fieldIds: discovered.fieldIds,
+        optionIds: discovered.optionIds,
+      };
+    } else {
+      // Fallback: manual entry (no regression from previous behaviour)
+      console.log("");
+      console.log(bold("  Project Board (manual)"));
+      console.log(
+        dim(
+          "  Find your project number: gh project list --owner " +
+            (ownerInput || detectedOwner),
+        ),
+      );
+      const projectNumber = await input(
+        "  GitHub Projects v2 project number",
+        "1",
+      );
+      optionalSections.projectBoard = {
+        projectNumber: parseInt(projectNumber, 10) || 1,
+      };
+      console.log(
+        dim(
+          "  Field IDs (PVT_/PVTSSF_ strings) must be added manually after generation.",
+        ),
+      );
+      console.log(
+        dim(
+          "  Run: gh project field-list " +
+            (projectNumber || "1") +
+            " --owner " +
+            (ownerInput || detectedOwner),
+        ),
+      );
+    }
+  }
+
+  // --- Multi-Repo prompts ---
+  if (selectedSections.includes("multiRepo")) {
+    console.log("");
+    console.log(bold("  Multi-Repo"));
+    console.log(
+      dim(
+        "  Configure one satellite repo (add more by editing forge.yaml).",
+      ),
+    );
+    const prefix = await input(
+      "  Satellite repo prefix (e.g. 'mcp', 'sdk')",
+      "sat",
+    );
+    const satelliteRepo = await input(
+      "  Satellite repo name (just the name, owner will be reused)",
+      "your-satellite-repo",
+    );
+    const satelliteBranch = await input(
+      "  Satellite default/staging branch",
+      "main",
+    );
+    optionalSections.multiRepo = { prefix, satelliteRepo, satelliteBranch };
+  }
+
+  // --- Review Context prompts ---
+  if (selectedSections.includes("review")) {
+    console.log("");
+    console.log(bold("  Review Context"));
+    const techStack = await input(
+      "  Tech stack (e.g. Next.js, FastAPI, PostgreSQL)",
+      "Node.js, TypeScript",
+    );
+    const context = await input(
+      "  Architecture notes (one line; expand in forge.yaml later)",
+      "",
+    );
+    optionalSections.review = { techStack, context };
+  }
+
+  // --- Verification prompts ---
+  if (selectedSections.includes("verification")) {
+    console.log("");
+    console.log(bold("  Verification"));
+    const healthEndpoint = await input(
+      "  Health check endpoint URL",
+      `https://api.${repoInput || detectedRepo}.io/health`,
+    );
+    optionalSections.verification = { healthEndpoint };
+  }
+
+  // -----------------------------------------------------------------------
+  // Handle existing forge.yaml with backup
+  // -----------------------------------------------------------------------
+  if (hasExistingConfig) {
+    console.log("");
+    const shouldOverwrite = await confirm(
+      "  Back up existing forge.yaml and overwrite?",
+      true,
+    );
+    if (!shouldOverwrite) {
+      console.log(`  ${dim("Cancelled.")} forge.yaml was not changed.`);
+      console.log("");
+      return;
+    }
+
+    // Backup with timestamped name if .bak already exists (fix from #36)
+    const baseBak = join(cwd, "forge.yaml.bak");
+    const backupPath = existsSync(baseBak)
+      ? join(
+          cwd,
+          `forge.yaml.bak.${new Date().toISOString().replace(/[:.]/g, "-")}`,
+        )
+      : baseBak;
+    const backupName = basename(backupPath);
+    renameSync(outputPath, backupPath);
+    console.log(`  ${YELLOW}Backed up${RESET}: forge.yaml → ${backupName}`);
+  }
+
+  // Write the file — passing lowConfidenceKeys so _writeForgeYaml can inject
+  // # TODO(forgedock:<field>) comments for fields that were low-confidence.
+  _writeForgeYaml({
+    outputPath,
+    cwd,
+    owner: ownerInput,
+    repo: repoInput,
+    projectName: nameInput,
+    description: descInput,
+    root: rootInput || cwd,
+    worktreeBase: worktreeInput || join(cwd, ".claude", "worktrees"),
+    defaultBranch: defaultBranchInput,
+    stagingBranch: stagingBranchInput,
+    optionalSections,
+    lowConfidenceKeys: reviewed.lowConfidenceKeys ?? [],
+  });
+
+  console.log("");
+  console.log(`  ${GREEN}Created${RESET}: forge.yaml`);
+  if (selectedSections.length > 0) {
+    console.log(
+      `  ${GREEN}Configured${RESET}: ${selectedSections
+        .map(
+          (s) =>
+            ({
+              projectBoard: "project_board",
+              multiRepo: "repos",
+              review: "review",
+              verification: "verification",
+            })[s],
+        )
+        .join(", ")}`,
+    );
+  }
+
+  // Show TODO flag summary for low-confidence fields written with comments
+  if (reviewed.lowConfidenceKeys && reviewed.lowConfidenceKeys.length > 0) {
+    console.log("");
+    console.log(
+      `  ${YELLOW}⚠${RESET}  ${reviewed.lowConfidenceKeys.length} field(s) written with ${CYAN}# TODO(forgedock:<field>)${RESET} comments:`,
+    );
+    for (const key of reviewed.lowConfidenceKeys) {
+      console.log(`     ${dim("·")} ${key}`);
+    }
+    console.log(
+      `  ${dim("Search for")} ${CYAN}TODO(forgedock:${RESET} ${dim("in forge.yaml to find them.")}`,
+    );
+  }
+
+  console.log("");
+  await injectClaudeMd(cwd);
+  console.log("");
+  _printNextSteps({ remoteDetected: ownerInput !== "your-github-org" });
+  await validate(outputPath);
 }
 
 // ---------------------------------------------------------------------------
@@ -2876,9 +2832,65 @@ ${verificationSection}
 `;
 }
 
-/** Write forge.yaml to disk. Accepts all params for buildForgeYamlContent plus outputPath. */
+/**
+ * Mapping from annotatedReviewScreen field keys to the YAML key patterns they
+ * correspond to in the generated forge.yaml. Used to inject TODO comments.
+ * Each entry is the leading whitespace + key prefix that identifies the line.
+ */
+const TODO_FIELD_YAML_KEYS = {
+  owner:         "  owner:",
+  repo:          "  repo:",
+  name:          "  name:",
+  description:   "  description:",
+  root:          "  root:",
+  worktreeBase:  "  worktree_base:",
+  defaultBranch: "  default:",
+  stagingBranch: "  staging:",
+};
+
+/**
+ * Inject `# TODO(forgedock:<fieldKey>)` comments above each low-confidence
+ * field line in the YAML content string.
+ *
+ * The comment is inserted as a full line above the matching key line.
+ * Example output:
+ *   # TODO(forgedock:owner) — low-confidence: verify and update
+ *   owner: "your-github-org"
+ *
+ * @param {string} content - Generated forge.yaml content
+ * @param {string[]} lowConfidenceKeys - Array of field key strings to flag
+ * @returns {string} - Content with TODO comments injected
+ */
+function _injectTodoComments(content, lowConfidenceKeys) {
+  if (!lowConfidenceKeys || lowConfidenceKeys.length === 0) return content;
+
+  const lines = content.split("\n");
+  const result = [];
+
+  for (const line of lines) {
+    // Check if this line matches any low-confidence field key pattern.
+    for (const key of lowConfidenceKeys) {
+      const pattern = TODO_FIELD_YAML_KEYS[key];
+      if (pattern && line.startsWith(pattern)) {
+        // Insert the TODO comment above the key line (same indentation).
+        const indent = line.match(/^(\s*)/)[1];
+        result.push(`${indent}# TODO(forgedock:${key}) — low-confidence: verify and update`);
+        break;
+      }
+    }
+    result.push(line);
+  }
+
+  return result.join("\n");
+}
+
+/** Write forge.yaml to disk. Accepts all params for buildForgeYamlContent plus outputPath and lowConfidenceKeys. */
 function _writeForgeYaml(opts) {
-  const content = buildForgeYamlContent(opts);
+  let content = buildForgeYamlContent(opts);
+  // Inject TODO comments for low-confidence fields detected during review.
+  if (opts.lowConfidenceKeys && opts.lowConfidenceKeys.length > 0) {
+    content = _injectTodoComments(content, opts.lowConfidenceKeys);
+  }
   writeFileSync(opts.outputPath, content, "utf-8");
 }
 
