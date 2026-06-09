@@ -2110,27 +2110,16 @@ async function _enrichViaSkill(draft, cwd) {
 function _parseEnrichedDraft(output, draft) {
   if (!output || typeof output !== "string") return draft;
 
-  // Find the first '{' and the matching closing '}' (handles nested objects).
-  const start = output.indexOf("{");
-  if (start === -1) return draft;
-
-  let depth = 0;
-  let end = -1;
-  for (let i = start; i < output.length; i++) {
-    if (output[i] === "{") depth++;
-    else if (output[i] === "}") {
-      depth--;
-      if (depth === 0) {
-        end = i;
-        break;
-      }
-    }
-  }
-
-  if (end === -1) return draft;
+  // Use a greedy regex to find the first '{' and the last '}' in the output.
+  // A brace-depth counter would misfire when JSON string values contain '{' or '}'
+  // (e.g. project.description mentioning Go templates, Windows paths with env-var
+  // syntax, or tech-stack notes). The regex finds the outermost boundaries and
+  // delegates structural validation to JSON.parse.
+  const jsonMatch = output.match(/\{[\s\S]*\}/);
+  if (!jsonMatch) return draft;
 
   try {
-    const enriched = JSON.parse(output.slice(start, end + 1));
+    const enriched = JSON.parse(jsonMatch[0]);
     // Basic sanity check: must have the required top-level sections from the original draft.
     if (!enriched.project || !enriched.paths || !enriched.branches) {
       return draft;
