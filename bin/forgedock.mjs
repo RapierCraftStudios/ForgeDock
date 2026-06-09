@@ -2072,6 +2072,11 @@ async function _enrichViaSkill(draft, cwd) {
         timeout: 120000, // 2 minutes — enrichment may take a while for large repos
         input: `/forgedock-init ${draftJson}`,
         stdio: ["pipe", "pipe", "pipe"],
+        // On Windows, npm-installed CLIs like `claude` are .cmd shims. execFileSync
+        // does not resolve .cmd extensions without a shell — shell: true enables the
+        // cmd.exe lookup that finds claude.cmd on PATH. Safe here: executable name is
+        // hardcoded, no user input is involved. (Ref: review-finding #382)
+        shell: process.platform === "win32",
       },
     );
 
@@ -2177,6 +2182,9 @@ async function init() {
     execFileSync("claude", ["--version"], {
       stdio: ["pipe", "pipe", "pipe"],
       timeout: 5000,
+      // On Windows, claude is a .cmd shim — execFileSync needs shell: true to find it.
+      // (Ref: review-finding #382)
+      shell: process.platform === "win32",
     });
   } catch {
     console.log(`  ${YELLOW}!${RESET} Claude Code CLI not found on PATH.`);
