@@ -214,7 +214,24 @@ Fix HIGH/MEDIUM findings. Max 2 iterations. Skip for 1-file config/docs edits.
 All client-side fetch/useSWR/apiFetch must use `/api/...` proxy routes, NEVER `/api/v1/...` directly.
 
 ### 3I: Deployment completeness check (MANDATORY)
-New env vars must be in: `.env.example` + SOPS `prod.enc.yaml` + `decrypt-secrets.sh` ENV_MAPPING + `env_validation.py` (if API).
+Skip if no new env vars introduced.
+
+For each new env var, verify present in ALL required locations:
+
+| Location | Required for |
+|----------|-------------|
+| `.env.example` | All new vars |
+| Secrets backend (see `deploy.secrets_backend`) | Secret vars — skip if backend is `none` or unset |
+| `app/env_validation.py` | API service vars (if project has one) |
+
+**Secrets backend check** *(trigger: `deploy.secrets_backend == "sops"`)*:
+
+If the project uses SOPS, verify the new var is present in all SOPS chain locations:
+- `infra/secrets/prod.enc.yaml` — SOPS-encrypted secret store
+- `infra/decrypt-secrets.sh` ENV_MAPPING — maps SOPS key to env var name
+
+If `deploy.secrets_backend` is absent or not `sops`, skip these checks and log:
+> `SKIP: SOPS chain check — deploy.secrets_backend is not "sops". Configure deploy.secrets_backend in forge.yaml to enable.`
 
 ### 3J: Commit
 Conventional prefix (fix/feat/refactor/docs). Reference #{NUMBER} in the commit message.
