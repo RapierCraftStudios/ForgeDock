@@ -14,9 +14,10 @@ jobs:
 
     steps:
       - name: Check DCO sign-off
-        uses: dcoorg/gha-dco@v1
+        uses: KineticCafe/actions-dco@1da04282bbf757dab7d92a5c8535dbfb8113da5c # v3.1.0
         with:
-          # Allow these bots to skip the DCO requirement — they cannot sign off
-          allow_list: "github-actions[bot],dependabot[bot],dependabot-preview[bot]"
-          # Fail the check (block merge) when sign-off is missing
-          require_commit_email: false
+          config: |
+            # Allow these bots to skip the DCO requirement — they cannot sign off
+            [bot]
+            policy = "allowlist"
+            allow = ["github-actions[bot]", "dependabot[bot]", "dependabot-preview[bot]"]
