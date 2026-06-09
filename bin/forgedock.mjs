@@ -2061,10 +2061,12 @@ function _detectBackend() {
 
 /**
  * Enrich a ConfigDraft by invoking the /forgedock-init skill backend via the
- * Claude Code CLI (`claude -p /forgedock-init '<draftJSON>'`).
+ * Claude Code CLI (`claude -p`), with the full prompt piped via stdin.
  *
- * Uses execFileSync (no shell) to pass the draft JSON safely as an argument —
- * never interpolated into an execSync template literal (shell injection prevention).
+ * Uses execFileSync with the `input` option to pipe the prompt
+ * (`/forgedock-init <draftJSON>`) to the claude process's stdin rather than
+ * embedding it in a CLI argument. This avoids OS ARG_MAX limits for large
+ * JSON payloads and keeps the argument list minimal.
  *
  * @param {object} draft  - ConfigDraft from detectConfig()
  * @param {string} cwd    - Working directory for the claude invocation
@@ -2075,11 +2077,12 @@ async function _enrichViaSkill(draft, cwd) {
     const draftJson = JSON.stringify(draft);
     const output = execFileSync(
       "claude",
-      ["-p", `/forgedock-init ${draftJson}`],
+      ["-p"],
       {
         cwd,
         encoding: "utf-8",
         timeout: 120000, // 2 minutes — enrichment may take a while for large repos
+        input: `/forgedock-init ${draftJson}`,
         stdio: ["pipe", "pipe", "pipe"],
       },
     );
