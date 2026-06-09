@@ -57,6 +57,7 @@ import {
   annotatedReviewScreen,
 } from "./tui.mjs";
 import { detectConfig } from "./init-detect.mjs";
+import { resolveState, setOptOut } from "./registry.mjs";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
@@ -3685,6 +3686,165 @@ async function docsInit() {
   console.log("");
 }
 
+// ---------------------------------------------------------------------------
+// enable / disable / status — per-directory state management
+// ---------------------------------------------------------------------------
+
+/**
+ * Enable ForgeDock for a directory.
+ *
+ * - Clears any existing opt-out entry in the registry (so the directory becomes
+ *   active again if it was previously disabled).
+ * - Writes a lightweight `.forgedock` marker file if neither `forge.yaml` nor
+ *   `.forgedock` already exists — this marks the directory as ForgeDock-managed
+ *   before a full config is generated.
+ *
+ * @param {string} dir - Absolute path to the directory to enable.
+ * @returns {Promise<void>}
+ */
+async function enableCommand(dir) {
+  const absDir = resolve(dir);
+
+  // Clear any opt-out entry so the directory becomes active
+  await setOptOut(absDir, false);
+
+  // Write .forgedock marker only if the directory is not already managed
+  const hasForgeYaml = existsSync(join(absDir, "forge.yaml"));
+  const hasMarker = existsSync(join(absDir, ".forgedock"));
+
+  if (!hasForgeYaml && !hasMarker) {
+    try {
+      await writeFile(join(absDir, ".forgedock"), "", "utf-8");
+      console.log(
+        `${GREEN}✓${RESET} ForgeDock enabled for ${cyan(absDir)}`,
+      );
+      console.log(
+        `  ${dim(".forgedock marker written — run")} ${cyan("npx forgedock init")} ${dim("to generate forge.yaml")}`,
+      );
+    } catch (err) {
+      console.log(
+        `${YELLOW}!${RESET} Could not write .forgedock marker: ${err.message}`,
+      );
+      console.log(
+        `  ${dim("Opt-out cleared — directory will be treated as active once a marker or forge.yaml is added.")}`,
+      );
+    }
+  } else {
+    console.log(
+      `${GREEN}✓${RESET} ForgeDock enabled for ${cyan(absDir)}`,
+    );
+    if (hasForgeYaml) {
+      console.log(`  ${dim("forge.yaml already present — directory is managed.")}`);
+    } else {
+      console.log(`  ${dim(".forgedock marker already present — directory is managed.")}`);
+    }
+  }
+}
+
+/**
+ * Disable ForgeDock for a directory.
+ *
+ * Records an explicit opt-out in the central registry so the SessionStart hook
+ * stays completely silent in this directory. The `.forgedock` marker (if present)
+ * is left untouched — re-enabling simply clears the opt-out entry.
+ *
+ * @param {string} dir - Absolute path to the directory to disable.
+ * @returns {Promise<void>}
+ */
+async function disableCommand(dir) {
+  const absDir = resolve(dir);
+
+  await setOptOut(absDir, true);
+
+  console.log(
+    `${YELLOW}–${RESET} ForgeDock disabled for ${cyan(absDir)}`,
+  );
+  console.log(
+    `  ${dim("The SessionStart hook will be silent in this directory.")}`,
+  );
+  console.log(
+    `  ${dim("Re-enable with:")} ${cyan(`npx forgedock enable "${absDir}"`)}`,
+  );
+}
+
+/**
+ * Print the resolved ForgeDock state for a directory.
+ *
+ * Maps the three states returned by resolveState() to a human-readable
+ * explanation of what ForgeDock will do in this directory.
+ *
+ * @param {string} dir - Absolute path to the directory to inspect.
+ * @returns {Promise<void>}
+ */
+async function statusCommand(dir) {
+  const absDir = resolve(dir);
+  const state = resolveState(absDir);
+
+  const hasForgeYaml = existsSync(join(absDir, "forge.yaml"));
+  const hasMarker = existsSync(join(absDir, ".forgedock"));
+
+  console.log("");
+  console.log(`${BOLD}ForgeDock status${RESET} — ${cyan(absDir)}`);
+  console.log("");
+
+  switch (state) {
+    case "managed-active":
+      console.log(`  ${GREEN}● Active${RESET}`);
+      console.log(
+        `  ${dim("ForgeDock is managed and active in this directory.")}`,
+      );
+      if (hasForgeYaml) {
+        console.log(`  ${dim("Managed via:")} forge.yaml`);
+      } else if (hasMarker) {
+        console.log(`  ${dim("Managed via:")} .forgedock marker`);
+        console.log(
+          `  ${dim("Run")} ${cyan("npx forgedock init")} ${dim("to generate a full forge.yaml.")}`,
+        );
+      }
+      console.log(
+        `  ${dim("To disable:")} ${cyan(`npx forgedock disable "${absDir}"`)}`,
+      );
+      break;
+
+    case "managed-optedout":
+      console.log(`  ${YELLOW}○ Disabled${RESET}`);
+      console.log(
+        `  ${dim("This directory is managed (has a forge.yaml or .forgedock marker)")}`,
+      );
+      console.log(
+        `  ${dim("but has been explicitly opted out — the SessionStart hook is silent here.")}`,
+      );
+      if (hasForgeYaml) {
+        console.log(`  ${dim("Managed via:")} forge.yaml`);
+      } else if (hasMarker) {
+        console.log(`  ${dim("Managed via:")} .forgedock marker`);
+      }
+      console.log(
+        `  ${dim("To re-enable:")} ${cyan(`npx forgedock enable "${absDir}"`)}`,
+      );
+      break;
+
+    case "unmanaged":
+      console.log(`  ${dim("◌ Unmanaged")}`);
+      console.log(
+        `  ${dim("No forge.yaml or .forgedock marker found in this directory.")}`,
+      );
+      console.log(
+        `  ${dim("ForgeDock is not active here.")}`,
+      );
+      console.log(
+        `  ${dim("To enable:")} ${cyan(`npx forgedock enable "${absDir}"`)}`,
+      );
+      break;
+
+    default:
+      console.log(`  ${dim("Unknown state:")} ${state}`);
+      break;
+  }
+
+  console.log("");
+}
+
 function help() {
   console.log("");
   console.log(
@@ -3725,6 +3885,15 @@ function help() {
   );
   console.log(
     `  ${CYAN}npx forgedock docs init${RESET}  Scaffold devdocs knowledge tree into current project`,
+  );
+  console.log(
+    `  ${CYAN}npx forgedock enable [dir]${RESET}   Enable ForgeDock for a directory (default: cwd)`,
+  );
+  console.log(
+    `  ${CYAN}npx forgedock disable [dir]${RESET}  Disable ForgeDock for a directory (default: cwd)`,
+  );
+  console.log(
+    `  ${CYAN}npx forgedock status [dir]${RESET}   Show ForgeDock state for a directory (default: cwd)`,
   );
   console.log(`  ${CYAN}npx forgedock help${RESET}       Show this help`);
   console.log("");
@@ -4170,6 +4339,15 @@ if (!command) {
       }
       break;
     }
+    case "enable":
+      await enableCommand(args[1] || process.cwd());
+      break;
+    case "disable":
+      await disableCommand(args[1] || process.cwd());
+      break;
+    case "status":
+      await statusCommand(args[1] || process.cwd());
+      break;
     case "help":
     case "--help":
     case "-h":
