@@ -757,6 +757,10 @@ const REVIEW_FIELDS = [
  *   be overwritten.
  * @param {string} [opts.existingContent=""]
  *   Serialized content of the existing forge.yaml for diff context display.
+ * @param {boolean} [opts.showSources=false]
+ *   When true (e.g. \`--verbose\` mode), renders the Notes/why block for ALL
+ *   fields — including high-confidence ones — so the user can see every
+ *   detection source and reasoning string.
  *
  * @returns {Promise<{
  *   owner:         string,
@@ -775,7 +779,7 @@ const REVIEW_FIELDS = [
  */
 export async function annotatedReviewScreen(
   draft,
-  { hasExistingConfig = false, existingContent = "" } = {},
+  { hasExistingConfig = false, existingContent = "", showSources = false } = {},
 ) {
   // Helper — pull a field from the draft by path, or return a low-confidence placeholder.
   function getField(draftPath) {
@@ -892,9 +896,9 @@ export async function annotatedReviewScreen(
     );
     process.stdout.write("\n");
 
-    // Why summary for non-high fields (helpful context)
+    // Why summary for non-high fields (or ALL fields when showSources is enabled)
     const interestingFields = REVIEW_FIELDS.filter(
-      (fd) => confidences[fd.key] !== "high" && whys[fd.key],
+      (fd) => (confidences[fd.key] !== "high" || showSources) && whys[fd.key],
     );
     if (interestingFields.length > 0) {
       process.stdout.write(`  ${bold("Notes:")}\n`);
