@@ -634,6 +634,9 @@ The directory (`~/.claude/forgedock/`) is created automatically on first use wit
   "version": 1,
   "optedOut": {
     "/absolute/path/to/project": { "at": "2026-06-09T12:00:00.000Z" }
+  },
+  "nudgeSeen": {
+    "/absolute/path/to/project": { "at": "2026-06-09T12:00:00.000Z" }
   }
 }
 ```
@@ -643,6 +646,8 @@ The directory (`~/.claude/forgedock/`) is created automatically on first use wit
 | `version` | number | Schema version — currently `1` |
 | `optedOut` | object | Map of absolute directory paths to opt-out metadata |
 | `optedOut[path].at` | string | ISO-8601 timestamp of when the opt-out was recorded |
+| `nudgeSeen` | object | Map of absolute directory paths where the one-time "Enable ForgeDock here?" nudge has already been shown |
+| `nudgeSeen[path].at` | string | ISO-8601 timestamp of when the nudge was shown for this directory |
 
 ### State Resolution
 
