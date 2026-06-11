@@ -141,7 +141,7 @@ export async function enrich(draft) {
   const apiKey = process.env.ANTHROPIC_API_KEY;
 
   if (!apiKey) {
-    console.log(
+    console.error(
       `  ${yellow("[!]")} No ANTHROPIC_API_KEY set — skipping API enrichment.` +
         ` ${dim("Set ANTHROPIC_API_KEY to enable BYO-key enrichment.")}${RESET}`,
     );
