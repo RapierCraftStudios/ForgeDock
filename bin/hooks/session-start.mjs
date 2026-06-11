@@ -66,9 +66,11 @@ try {
   // passing it to dynamic import(). On Windows, join() produces backslash paths
   // that import() rejects with ERR_UNSUPPORTED_ESM_URL_SCHEME.
   /** @type {import('../registry.mjs')} */
-  ({ resolveState, nudgeSeen, markNudgeSeen } = await import(
-    pathToFileURL(join(FORGE_HOME, "bin", "registry.mjs")).href
-  ));
+  (
+    { resolveState, nudgeSeen, markNudgeSeen } = await import(
+      pathToFileURL(join(FORGE_HOME, "bin", "registry.mjs")).href
+    )
+  );
 
   const cwd = process.cwd();
   const state = resolveState(cwd);
@@ -167,10 +169,9 @@ async function handleUnmanaged(dir) {
 function buildActiveContext(dir, forgeYaml) {
   const project = forgeYaml.project ?? {};
   const projectName = sanitizeContextValue(project.name ?? null, 200);
-  const repo =
-    project.owner && project.repo
-      ? `${project.owner}/${project.repo}`
-      : project.repo ?? null;
+  const owner = sanitizeContextValue(project.owner ?? null, 200);
+  const repoName = sanitizeContextValue(project.repo ?? null, 200);
+  const repo = owner && repoName ? `${owner}/${repoName}` : (repoName ?? null);
   const description = sanitizeContextValue(project.description ?? null, 400);
 
   const rawMilestone = sanitizeContextValue(forgeYaml.milestone ?? null, 200);
@@ -330,7 +331,11 @@ function parseForgeYaml(raw) {
       if (nestedMatch) {
         const key = nestedMatch[1] ?? nestedMatch[3];
         const value = nestedMatch[2] ?? nestedMatch[4]?.trim();
-        if (key && value !== undefined && typeof result[currentSection] === "object") {
+        if (
+          key &&
+          value !== undefined &&
+          typeof result[currentSection] === "object"
+        ) {
           result[currentSection][key] = value;
         }
       }
