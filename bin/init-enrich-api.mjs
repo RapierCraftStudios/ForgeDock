@@ -108,7 +108,8 @@ export function parseEnrichedDraft(output, draft) {
         try {
           const enriched = JSON.parse(output.slice(start, i + 1));
           // Basic sanity check: must have the required top-level sections and
-          // each section must be a plain object (not a truthy non-object scalar).
+          // each section must be a non-null object (typeof+null guard rejects null and
+          // primitives, but arrays also pass since typeof [] === 'object').
           if (
             typeof enriched.project !== "object" || enriched.project === null ||
             typeof enriched.paths !== "object" || enriched.paths === null ||
