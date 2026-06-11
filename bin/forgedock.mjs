@@ -3022,6 +3022,27 @@ function _sanitizePathValue(value) {
 }
 
 /**
+ * Sanitize a string for safe use as an unquoted YAML mapping key.
+ * Strips characters that are structurally significant in YAML outside of quoted scalars:
+ * newlines and carriage returns (would inject new YAML lines), colons (key separator),
+ * and '#' (comment marker). Sequences of unsafe characters are collapsed to a single
+ * underscore so the key remains readable. Falls back to "_" if the result is empty.
+ * <!-- Added: forge#396 -->
+ *
+ * @param {string} key
+ * @returns {string}
+ */
+function _sanitizeYamlKey(key) {
+  return (
+    String(key)
+      .replace(/[\r\n:#]+/g, "_") // structural YAML chars → underscore
+      .replace(/_+/g, "_") // collapse multiple underscores
+      .replace(/^_|_$/g, "") // strip leading/trailing underscores
+      .trim() || "_" // fallback if result is empty
+  );
+}
+
+/**
  * Attempt to auto-discover GitHub Projects v2 configuration for the given owner.
  *
  * Runs two gh CLI calls:
@@ -3446,9 +3467,11 @@ function buildForgeYamlContent({
     if (entries.length === 0) return "";
     const lines = ["  option_ids:"];
     for (const [fieldKey, opts] of entries) {
-      lines.push(`    ${fieldKey}:`);
+      lines.push(`    ${_sanitizeYamlKey(fieldKey)}:`);
       for (const [optKey, optId] of Object.entries(opts)) {
-        lines.push(`      ${optKey}: "${_sanitizeYamlValue(String(optId))}"`);
+        lines.push(
+          `      ${_sanitizeYamlKey(optKey)}: "${_sanitizeYamlValue(String(optId))}"`,
+        );
       }
     }
     return "\n" + lines.join("\n");
@@ -3646,7 +3669,11 @@ function _writeForgeYaml(opts) {
     renameSync(tmpPath, opts.outputPath);
   } catch (err) {
     // Clean up temp file if it was created before the error
-    try { unlinkSync(tmpPath); } catch { /* already gone or never created */ }
+    try {
+      unlinkSync(tmpPath);
+    } catch {
+      /* already gone or never created */
+    }
     throw err;
   }
 }
