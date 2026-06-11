@@ -236,6 +236,50 @@ describe("parseEnrichedDraft", () => {
     assert.equal(result, ORIGINAL_DRAFT);
   });
 
+  it("returns original draft when 'project' is an array (typeof [] === 'object' bypass)", () => {
+    const partial = {
+      project: [],
+      paths: ORIGINAL_DRAFT.paths,
+      branches: ORIGINAL_DRAFT.branches,
+      meta: ORIGINAL_DRAFT.meta,
+    };
+    const result = parseEnrichedDraft(JSON.stringify(partial), ORIGINAL_DRAFT);
+    assert.equal(result, ORIGINAL_DRAFT);
+  });
+
+  it("returns original draft when 'paths' is an array (typeof [] === 'object' bypass)", () => {
+    const partial = {
+      project: ORIGINAL_DRAFT.project,
+      paths: [],
+      branches: ORIGINAL_DRAFT.branches,
+      meta: ORIGINAL_DRAFT.meta,
+    };
+    const result = parseEnrichedDraft(JSON.stringify(partial), ORIGINAL_DRAFT);
+    assert.equal(result, ORIGINAL_DRAFT);
+  });
+
+  it("returns original draft when 'branches' is an array (typeof [] === 'object' bypass)", () => {
+    const partial = {
+      project: ORIGINAL_DRAFT.project,
+      paths: ORIGINAL_DRAFT.paths,
+      branches: [],
+      meta: ORIGINAL_DRAFT.meta,
+    };
+    const result = parseEnrichedDraft(JSON.stringify(partial), ORIGINAL_DRAFT);
+    assert.equal(result, ORIGINAL_DRAFT);
+  });
+
+  it("returns original draft when 'meta' is an array (typeof [] === 'object' bypass)", () => {
+    const partial = {
+      project: ORIGINAL_DRAFT.project,
+      paths: ORIGINAL_DRAFT.paths,
+      branches: ORIGINAL_DRAFT.branches,
+      meta: [],
+    };
+    const result = parseEnrichedDraft(JSON.stringify(partial), ORIGINAL_DRAFT);
+    assert.equal(result, ORIGINAL_DRAFT);
+  });
+
   it("accepts enriched draft when all four required sections are present including meta", () => {
     const enriched = buildEnrichedDraft();
     const result = parseEnrichedDraft(JSON.stringify(enriched), ORIGINAL_DRAFT);
