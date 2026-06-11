@@ -3737,10 +3737,17 @@ ${verificationSection}
 /**
  * Mapping from annotatedReviewScreen field keys to the YAML key patterns they
  * correspond to in the generated forge.yaml. Used to inject TODO comments.
- * Each entry is the leading whitespace + key prefix that identifies the line.
+ *
+ * Each entry is either:
+ *   - A plain string: the leading-whitespace + key prefix that identifies the line
+ *     (matches in any YAML section).
+ *   - An object `{ pattern: string, section: string }`: only matches when the
+ *     scanner is currently inside the named top-level YAML section. Use this form
+ *     when the same key name appears in multiple sections but should only be
+ *     annotated in one (e.g. `owner:` appears in both `project:` and `project_board:`).
  */
 const TODO_FIELD_YAML_KEYS = {
-  owner: "  owner:",
+  owner: { pattern: "  owner:", section: "project" },
   repo: "  repo:",
   name: "  name:",
   description: "  description:",
@@ -3759,6 +3766,13 @@ const TODO_FIELD_YAML_KEYS = {
  *   # TODO(forgedock:owner) — low-confidence: verify and update
  *   owner: "your-github-org"
  *
+ * Section tracking: the scanner maintains `currentSection` by detecting
+ * unindented top-level keys (lines matching `/^[a-z_]+:/`). Entries in
+ * TODO_FIELD_YAML_KEYS that specify a `section` constraint are only annotated
+ * when `currentSection` matches — preventing false annotations on keys that
+ * share the same name across multiple YAML sections (e.g. `owner:` appears in
+ * both `project:` and `project_board:`).
+ *
  * @param {string} content - Generated forge.yaml content
  * @param {string[]} lowConfidenceKeys - Array of field key strings to flag
  * @returns {string} - Content with TODO comments injected
@@ -3768,12 +3782,32 @@ function _injectTodoComments(content, lowConfidenceKeys) {
 
   const lines = content.split("\n");
   const result = [];
+  // Track the current top-level YAML section so section-scoped entries in
+  // TODO_FIELD_YAML_KEYS are only matched within their intended section.
+  let currentSection = null;
 
   for (const line of lines) {
+    // Detect top-level section headers: unindented lines of the form `word:` or `word_word:`.
+    // Ignore comment lines (starting with #) and blank lines.
+    const sectionMatch = line.match(/^([a-z][a-z0-9_]*):/);
+    if (sectionMatch) {
+      currentSection = sectionMatch[1];
+    }
+
     // Check if this line matches any low-confidence field key pattern.
     for (const key of lowConfidenceKeys) {
-      const pattern = TODO_FIELD_YAML_KEYS[key];
-      if (pattern && line.startsWith(pattern)) {
+      const entry = TODO_FIELD_YAML_KEYS[key];
+      if (!entry) continue;
+
+      // Support both plain-string entries and { pattern, section } object entries.
+      const pattern = typeof entry === "string" ? entry : entry.pattern;
+      const requiredSection =
+        typeof entry === "string" ? null : (entry.section ?? null);
+
+      if (
+        line.startsWith(pattern) &&
+        (requiredSection === null || currentSection === requiredSection)
+      ) {
         // Insert the TODO comment above the key line (same indentation).
         const indent = line.match(/^(\s*)/)[1];
         result.push(
