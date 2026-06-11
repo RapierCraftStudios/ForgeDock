@@ -159,6 +159,35 @@ describe("parseEnrichedDraft", () => {
     assert.equal(result, ORIGINAL_DRAFT);
   });
 
+  it("returns original draft when parsed object is missing 'meta' section", () => {
+    const partial = {
+      project: ORIGINAL_DRAFT.project,
+      paths: ORIGINAL_DRAFT.paths,
+      branches: ORIGINAL_DRAFT.branches,
+    };
+    const result = parseEnrichedDraft(JSON.stringify(partial), ORIGINAL_DRAFT);
+    assert.equal(result, ORIGINAL_DRAFT);
+  });
+
+  it("returns original draft when parsed object has null 'meta' section", () => {
+    const partial = {
+      project: ORIGINAL_DRAFT.project,
+      paths: ORIGINAL_DRAFT.paths,
+      branches: ORIGINAL_DRAFT.branches,
+      meta: null,
+    };
+    const result = parseEnrichedDraft(JSON.stringify(partial), ORIGINAL_DRAFT);
+    assert.equal(result, ORIGINAL_DRAFT);
+  });
+
+  it("accepts enriched draft when all four required sections are present including meta", () => {
+    const enriched = buildEnrichedDraft();
+    const result = parseEnrichedDraft(JSON.stringify(enriched), ORIGINAL_DRAFT);
+    // Must return the enriched draft (not the original) when all sections are present
+    assert.deepEqual(result.meta, enriched.meta);
+    assert.deepEqual(result.project, enriched.project);
+  });
+
   it("returns original draft when output has unclosed JSON (no matching '}')", () => {
     const output = '{ "project": { "owner": "acme"'; // no closing brace
     const result = parseEnrichedDraft(output, ORIGINAL_DRAFT);
