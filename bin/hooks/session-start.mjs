@@ -297,7 +297,7 @@ function parseForgeYaml(raw) {
   const result = {};
   let currentSection = null;
 
-  for (const line of raw.split("\n")) {
+  for (const line of raw.split(/\r?\n/)) {
     // Skip comments and blank lines
     if (/^\s*#/.test(line) || /^\s*$/.test(line)) continue;
 
