@@ -30,7 +30,6 @@
 import { fileURLToPath, pathToFileURL } from "url";
 import { dirname, join, resolve } from "path";
 import { existsSync, readFileSync } from "fs";
-import { parseForgeYaml, sanitizeContextValue } from "../forge-utils.mjs";
 
 // ---------------------------------------------------------------------------
 // Bootstrap — resolve paths from the hook's own location, not from cwd
@@ -54,6 +53,17 @@ let nudgeSeen;
 let markNudgeSeen;
 
 // ---------------------------------------------------------------------------
+// forge-utils helpers — populated inside the try block to honour fail-open
+// ---------------------------------------------------------------------------
+
+// Declared at module scope so they are accessible from context-builder
+// functions called from within the try block. Assigned inside the try/catch
+// so that any import failure (missing file, permissions error, syntax error)
+// is caught and the hook still exits 0. <!-- fix: forge#489 -->
+let parseForgeYaml;
+let sanitizeContextValue;
+
+// ---------------------------------------------------------------------------
 // Main — wrapped in try/catch to guarantee fail-open
 // ---------------------------------------------------------------------------
 
@@ -70,6 +80,21 @@ try {
   (
     { resolveState, nudgeSeen, markNudgeSeen } = await import(
       pathToFileURL(join(FORGE_HOME, "bin", "registry.mjs")).href
+    )
+  );
+
+  // Import forge-utils helpers from the same installation.
+  // Placed inside try/catch to honour the fail-open contract: if forge-utils.mjs
+  // cannot be loaded (broken install, missing file, permissions error) the
+  // catch block below ensures we still exit 0 without blocking Claude Code.
+  //
+  // Use pathToFileURL() to convert the OS-native path to a file:// URL before
+  // passing it to dynamic import(). On Windows, join() produces backslash paths
+  // that import() rejects with ERR_UNSUPPORTED_ESM_URL_SCHEME.
+  /** @type {import('../forge-utils.mjs')} */
+  (
+    { parseForgeYaml, sanitizeContextValue } = await import(
+      pathToFileURL(join(FORGE_HOME, "bin", "forge-utils.mjs")).href
     )
   );
 
@@ -288,4 +313,5 @@ function readForgeYaml(path) {
   return parseForgeYaml(raw);
 }
 
-// parseForgeYaml and sanitizeContextValue are imported from ../forge-utils.mjs above.
+// parseForgeYaml and sanitizeContextValue are dynamically imported from
+// ../forge-utils.mjs inside the try block to honour the fail-open contract.

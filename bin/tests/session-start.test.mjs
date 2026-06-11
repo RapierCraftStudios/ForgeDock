@@ -1,7 +1,8 @@
 /**
  * bin/tests/session-start.test.mjs
  *
- * Unit tests for parseForgeYaml and sanitizeContextValue from bin/forge-utils.mjs.
+ * Unit tests for parseForgeYaml and sanitizeContextValue from bin/forge-utils.mjs,
+ * plus fail-open integration tests for session-start.mjs.
  *
  * Covers:
  *   - parseForgeYaml: LF and CRLF line endings, top-level scalars, sections,
@@ -10,13 +11,29 @@
  *     HTML comment delimiter injection, triple backtick, heading markers,
  *     horizontal rules, single backtick bypass (fixed-point loop), maxLen cap,
  *     cwd passthrough (plain path not stripped).
+ *   - session-start fail-open: missing forge-utils.mjs must not block the hook
+ *     (hook must exit 0 with no stdout). <!-- fix: forge#489 -->
  *
  * Run with: node --test bin/tests/session-start.test.mjs
  */
 
-import { describe, it } from "node:test";
+import { describe, it, before, after } from "node:test";
 import assert from "node:assert/strict";
+import { mkdtempSync, mkdirSync, cpSync, renameSync, rmSync } from "node:fs";
+import { join, resolve, dirname } from "node:path";
+import { fileURLToPath } from "node:url";
+import { spawnSync } from "node:child_process";
+import os from "node:os";
 import { parseForgeYaml, sanitizeContextValue } from "../forge-utils.mjs";
+
+// ---------------------------------------------------------------------------
+// Paths used by fail-open integration tests
+// ---------------------------------------------------------------------------
+
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = dirname(__filename);
+/** bin/ directory of the real installation (parent of tests/) */
+const BIN_DIR = resolve(__dirname, "..");
 
 // =============================================================================
 // parseForgeYaml
@@ -246,5 +263,77 @@ describe("sanitizeContextValue", () => {
     assert.doesNotThrow(() => sanitizeContextValue({}, 100));
     assert.doesNotThrow(() => sanitizeContextValue([], 100));
     assert.doesNotThrow(() => sanitizeContextValue(true, 100));
+  });
+});
+
+// =============================================================================
+// session-start.mjs fail-open: missing forge-utils.mjs
+// <!-- fix: forge#489 -->
+// =============================================================================
+
+describe("session-start fail-open when forge-utils.mjs is missing", async () => {
+  let tmpBinDir;
+  let tmpHooksDir;
+  let hookPath;
+
+  before(() => {
+    // Create a temporary copy of the bin/ directory so we can rename
+    // forge-utils.mjs without touching the real installation.
+    tmpBinDir = mkdtempSync(join(os.tmpdir(), "forge-failopen-utils-"));
+    // Copy bin/ tree: hooks/, registry.mjs, forge-utils.mjs, init-detect.mjs, etc.
+    cpSync(BIN_DIR, tmpBinDir, { recursive: true });
+    tmpHooksDir = join(tmpBinDir, "hooks");
+    hookPath = join(tmpHooksDir, "session-start.mjs");
+
+    // Rename forge-utils.mjs to simulate a missing module
+    renameSync(
+      join(tmpBinDir, "forge-utils.mjs"),
+      join(tmpBinDir, "forge-utils.mjs.bak"),
+    );
+  });
+
+  after(() => {
+    rmSync(tmpBinDir, { recursive: true, force: true });
+  });
+
+  it("exits 0 when forge-utils.mjs is missing (fail-open contract)", () => {
+    // Run the hook with node --input-type=module so we can pass a file: URL.
+    // We spawn the hook directly; Claude Code's working directory is set to
+    // a temp dir (unmanaged) so there's no forge.yaml or .forgedock marker.
+    const result = spawnSync(
+      process.execPath,
+      [hookPath],
+      {
+        cwd: os.tmpdir(),
+        encoding: "utf-8",
+        timeout: 10000,
+        env: { ...process.env },
+      },
+    );
+    assert.equal(
+      result.status,
+      0,
+      `Hook must exit 0 when forge-utils.mjs is missing. ` +
+        `Got exit code ${result.status}. stderr: ${result.stderr}`,
+    );
+  });
+
+  it("produces no stdout when forge-utils.mjs is missing", () => {
+    const result = spawnSync(
+      process.execPath,
+      [hookPath],
+      {
+        cwd: os.tmpdir(),
+        encoding: "utf-8",
+        timeout: 10000,
+        env: { ...process.env },
+      },
+    );
+    assert.equal(
+      result.stdout,
+      "",
+      `Hook must produce no stdout when forge-utils.mjs is missing. ` +
+        `Got: ${JSON.stringify(result.stdout)}`,
+    );
   });
 });
