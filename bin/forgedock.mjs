@@ -2432,177 +2432,82 @@ const SECTION_KEY_TO_YAML_NAME = {
   verification: "verification",
 };
 
-async function init() {
-  // init() generates forge.yaml from prompts and git remote detection.
-  // It does NOT require gh CLI or gh auth for core operation (project board
-  // auto-discovery is optional and guarded separately). Only warn if Claude
-  // Code is missing — it's the primary consumer of the generated config.
-  try {
-    execFileSync("claude", ["--version"], {
-      stdio: ["pipe", "pipe", "pipe"],
-      timeout: 5000,
-      // On Windows, claude is a .cmd shim — execFileSync needs shell: true to find it.
-      // (Ref: review-finding #382)
-      shell: process.platform === "win32",
-    });
-  } catch {
-    console.log(`  ${YELLOW}!${RESET} Claude Code CLI not found on PATH.`);
+/**
+ * Non-TTY (headless) init path: enrich (already done), silently write forge.yaml,
+ * inject CLAUDE.md, print next steps, and validate.
+ *
+ * Extracted from init() to reduce its size.
+ *
+ * @param {object} draft - Enriched (or baseline) ConfigDraft
+ * @param {string} outputPath - Absolute path to forge.yaml
+ * @param {string} cwd - Current working directory
+ * @param {boolean} remoteDetected - Whether a git remote was detected
+ */
+async function _initNonTTY(draft, outputPath, cwd, remoteDetected) {
+  if (!remoteDetected) {
     console.log(
-      `    Install: ${CYAN}https://docs.anthropic.com/en/docs/claude-code${RESET}`,
-    );
-    console.log("");
-  }
-
-  console.log("");
-  console.log(`${BOLD}ForgeDock${RESET} — Generate forge.yaml`);
-  console.log("");
-
-  const cwd = process.cwd();
-  const outputPath = join(cwd, "forge.yaml");
-
-  // ---------------------------------------------------------------------------
-  // Step 1: Auto-detect defaults via init-detect module.
-  // Returns a ConfigDraft with per-field { value, confidence, source, why }.
-  // ---------------------------------------------------------------------------
-
-  const baseDraft = await detectConfig(cwd);
-  const remoteDetected = baseDraft.meta.remoteDetected;
-
-  // ---------------------------------------------------------------------------
-  // Step 2: Backend-selection ladder — enrich the draft when possible.
-  // Ladder: skill (Claude Code session) → api (ANTHROPIC_API_KEY) → none (baseline)
-  // --manual bypasses enrichment entirely: presents the annotated review screen
-  // with detection baseline values only — no AI-enriched suggestions applied.
-  // ---------------------------------------------------------------------------
-
-  const backend = _detectBackend();
-  let draft = baseDraft;
-
-  if (manualMode) {
-    // Escape hatch: skip all AI enrichment; review screen shows detection baseline.
-    console.log(
-      `  ${CYAN}--manual${RESET} mode: skipping autopilot enrichment — annotated review screen`,
-    );
-    console.log("");
-  } else if (backend === "skill") {
-    const s = spinner("Enriching config via skill backend…");
-    draft = await _enrichViaSkill(baseDraft, cwd);
-    const enriched = _isEnriched(draft, baseDraft);
-    s.stop(
-      enriched ? "success" : "warn",
-      enriched
-        ? `${green("[✓]")} Config enriched via Claude Code`
-        : `${yellow("[!]")} Skill enrichment unavailable — using detected baseline`,
-    );
-  } else if (backend === "api") {
-    const s = spinner("Enriching config via Anthropic API…");
-    draft = await enrichViaAPI(baseDraft);
-    const enriched = _isEnriched(draft, baseDraft);
-    s.stop(
-      enriched ? "success" : "warn",
-      enriched
-        ? `${green("[✓]")} Config enriched via Anthropic API`
-        : `${yellow("[!]")} API enrichment unavailable — using detected baseline`,
+      `  ${YELLOW}Warning${RESET}: No git remote found — using placeholder values`,
     );
   }
-  // backend === 'none' (or manualMode): proceed silently with the deterministic baseline
-
-  const detectedOwner = draft.project.owner.value;
-  const detectedRepo = draft.project.repo.value;
-  const detectedName = draft.project.name.value;
-  const detectedDefault = draft.branches.default.value;
-  const detectedStaging = draft.branches.staging.value;
-
-  // Non-TTY: enrich (done above) then silently write without interactive prompts.
-  if (!process.stdin.isTTY) {
-    if (!remoteDetected) {
-      console.log(
-        `  ${YELLOW}Warning${RESET}: No git remote found — using placeholder values`,
-      );
-    }
-    // Derive optional sections from the enriched draft for the silent write.
-    const enrichedSections = _optionalSectionsFromDraft(draft);
-    _writeForgeYaml({
-      outputPath,
-      cwd,
-      owner: detectedOwner,
-      repo: detectedRepo,
-      projectName: detectedName,
-      description: "",
-      root: cwd,
-      worktreeBase: join(cwd, ".claude", "worktrees"),
-      defaultBranch: detectedDefault,
-      stagingBranch: detectedStaging,
-      optionalSections: enrichedSections,
-    });
-    console.log(`  ${GREEN}Created${RESET}: forge.yaml`);
-    console.log("");
-    await injectClaudeMd(cwd);
-    console.log("");
-    _printNextSteps({ remoteDetected });
-    await validate(outputPath);
-    return;
-  }
-
-  // ---------------------------------------------------------------------------
-  // Step 3: Annotated review screen — single screen replacing the per-field wizard
-  // ---------------------------------------------------------------------------
-
-  // Read existing content for diff-style display if forge.yaml already exists.
-  let existingContent = "";
-  const hasExistingConfig = existsSync(outputPath);
-  if (hasExistingConfig) {
-    try {
-      existingContent = readFileSync(outputPath, "utf-8");
-    } catch {
-      // Best-effort — missing or unreadable existing file is handled below
-    }
-  }
-
-  // Show the annotated review screen. The enriched draft populates confidence
-  // badges from both init-detect and init-enrich. Returns accepted/edited values
-  // plus the list of field keys that had low confidence (for TODO comment injection).
-  // --verbose: pass showSources:true so the screen surfaces each field's detection
-  // source and confidence rationale (the .source and .why metadata from ConfigDraft).
-  const reviewed = await annotatedReviewScreen(draft, {
-    hasExistingConfig,
-    existingContent,
-    showSources: verboseMode,
+  // Derive optional sections from the enriched draft for the silent write.
+  const enrichedSections = _optionalSectionsFromDraft(draft);
+  _writeForgeYaml({
+    outputPath,
+    cwd,
+    owner: draft.project.owner.value,
+    repo: draft.project.repo.value,
+    projectName: draft.project.name.value,
+    description: "",
+    root: cwd,
+    worktreeBase: join(cwd, ".claude", "worktrees"),
+    defaultBranch: draft.branches.default.value,
+    stagingBranch: draft.branches.staging.value,
+    optionalSections: enrichedSections,
   });
+  console.log(`  ${GREEN}Created${RESET}: forge.yaml`);
+  console.log("");
+  await injectClaudeMd(cwd);
+  console.log("");
+  _printNextSteps({ remoteDetected });
+  await validate(outputPath);
+}
 
-  const ownerInput = _sanitizeYamlValue(reviewed.owner || detectedOwner);
-  const repoInput = _sanitizeYamlValue(reviewed.repo || detectedRepo);
-  const nameInput = _sanitizeYamlValue(reviewed.name || detectedName);
-  const descInput = _sanitizeYamlValue(reviewed.description || "");
-  const rootInput = reviewed.root || cwd;
-  const worktreeInput =
-    reviewed.worktreeBase || join(cwd, ".claude", "worktrees");
-  const defaultBranchInput = _sanitizeYamlValue(
-    reviewed.defaultBranch || detectedDefault,
-  );
-  const stagingBranchInput = _sanitizeYamlValue(
-    reviewed.stagingBranch || detectedStaging,
-  );
-
-  // -----------------------------------------------------------------------
-  // Optional sections — pre-populate from enriched draft if available,
-  // otherwise fall back to interactive multi-select + guided prompts.
-  // -----------------------------------------------------------------------
-
+/**
+ * Interactive optional-section collection wizard.
+ *
+ * When enrichmentSucceeded, pre-populates sections from the enriched draft and
+ * offers a multi-select for any remaining sections not auto-discovered.
+ * When enrichment is unavailable (manualMode or no backend), presents the full
+ * multi-select wizard for all sections.
+ *
+ * Returns the populated optionalSections record for use by _writeForgeYaml.
+ *
+ * @param {object} opts
+ * @param {string}  opts.ownerInput      - Sanitized owner value from review screen
+ * @param {string}  opts.detectedOwner   - Owner value from detection baseline
+ * @param {string}  opts.repoInput       - Sanitized repo value from review screen
+ * @param {string}  opts.detectedRepo    - Repo value from detection baseline
+ * @param {boolean} opts.enrichmentSucceeded - Whether AI enrichment produced a result
+ * @param {object}  opts.draft           - The (possibly enriched) ConfigDraft
+ * @returns {Promise<Record<string, object>>} Populated optional sections map
+ */
+async function _collectOptionalSections({
+  ownerInput,
+  detectedOwner,
+  repoInput,
+  detectedRepo,
+  enrichmentSucceeded,
+  draft,
+}) {
   /** @type {Record<string, object>} */
-  let optionalSections = {};
-
-  // When enrichment succeeded, lift discovered sections directly from the draft.
-  // Only sections with medium-or-higher confidence are included; low-confidence
-  // sections remain commented-out in the output (no behaviour change for users
-  // without an enrichment backend).
-  // manualMode skips enrichment — enrichmentSucceeded is false so optional sections
-  // use the interactive multi-select path rather than the enrichment-lifted path.
-  const enrichmentSucceeded =
-    !manualMode && backend !== "none" && _isEnriched(draft, baseDraft);
+  const optionalSections = {};
 
   if (enrichmentSucceeded) {
-    optionalSections = _optionalSectionsFromDraft(draft);
+    // Lift discovered sections directly from the enriched draft.
+    // Only sections with medium-or-higher confidence are included; low-confidence
+    // sections remain commented-out in the output (no behaviour change for users
+    // without an enrichment backend).
+    Object.assign(optionalSections, _optionalSectionsFromDraft(draft));
 
     // Surface which sections were auto-populated by enrichment.
     const autoSections = Object.keys(optionalSections);
@@ -2845,6 +2750,155 @@ async function init() {
       optionalSections.verification = { healthEndpoint };
     }
   }
+
+  return optionalSections;
+}
+
+async function init() {
+  // init() generates forge.yaml from prompts and git remote detection.
+  // It does NOT require gh CLI or gh auth for core operation (project board
+  // auto-discovery is optional and guarded separately). Only warn if Claude
+  // Code is missing — it's the primary consumer of the generated config.
+  try {
+    execFileSync("claude", ["--version"], {
+      stdio: ["pipe", "pipe", "pipe"],
+      timeout: 5000,
+      // On Windows, claude is a .cmd shim — execFileSync needs shell: true to find it.
+      // (Ref: review-finding #382)
+      shell: process.platform === "win32",
+    });
+  } catch {
+    console.log(`  ${YELLOW}!${RESET} Claude Code CLI not found on PATH.`);
+    console.log(
+      `    Install: ${CYAN}https://docs.anthropic.com/en/docs/claude-code${RESET}`,
+    );
+    console.log("");
+  }
+
+  console.log("");
+  console.log(`${BOLD}ForgeDock${RESET} — Generate forge.yaml`);
+  console.log("");
+
+  const cwd = process.cwd();
+  const outputPath = join(cwd, "forge.yaml");
+
+  // ---------------------------------------------------------------------------
+  // Step 1: Auto-detect defaults via init-detect module.
+  // Returns a ConfigDraft with per-field { value, confidence, source, why }.
+  // ---------------------------------------------------------------------------
+
+  const baseDraft = await detectConfig(cwd);
+  const remoteDetected = baseDraft.meta.remoteDetected;
+
+  // ---------------------------------------------------------------------------
+  // Step 2: Backend-selection ladder — enrich the draft when possible.
+  // Ladder: skill (Claude Code session) → api (ANTHROPIC_API_KEY) → none (baseline)
+  // --manual bypasses enrichment entirely: presents the annotated review screen
+  // with detection baseline values only — no AI-enriched suggestions applied.
+  // ---------------------------------------------------------------------------
+
+  const backend = _detectBackend();
+  let draft = baseDraft;
+
+  if (manualMode) {
+    // Escape hatch: skip all AI enrichment; review screen shows detection baseline.
+    console.log(
+      `  ${CYAN}--manual${RESET} mode: skipping autopilot enrichment — annotated review screen`,
+    );
+    console.log("");
+  } else if (backend === "skill") {
+    const s = spinner("Enriching config via skill backend…");
+    draft = await _enrichViaSkill(baseDraft, cwd);
+    const enriched = _isEnriched(draft, baseDraft);
+    s.stop(
+      enriched ? "success" : "warn",
+      enriched
+        ? `${green("[✓]")} Config enriched via Claude Code`
+        : `${yellow("[!]")} Skill enrichment unavailable — using detected baseline`,
+    );
+  } else if (backend === "api") {
+    const s = spinner("Enriching config via Anthropic API…");
+    draft = await enrichViaAPI(baseDraft);
+    const enriched = _isEnriched(draft, baseDraft);
+    s.stop(
+      enriched ? "success" : "warn",
+      enriched
+        ? `${green("[✓]")} Config enriched via Anthropic API`
+        : `${yellow("[!]")} API enrichment unavailable — using detected baseline`,
+    );
+  }
+  // backend === 'none' (or manualMode): proceed silently with the deterministic baseline
+
+  const detectedOwner = draft.project.owner.value;
+  const detectedRepo = draft.project.repo.value;
+  const detectedName = draft.project.name.value;
+  const detectedDefault = draft.branches.default.value;
+  const detectedStaging = draft.branches.staging.value;
+
+  // Non-TTY: enrich (done above) then silently write without interactive prompts.
+  if (!process.stdin.isTTY) {
+    await _initNonTTY(draft, outputPath, cwd, remoteDetected);
+    return;
+  }
+
+  // ---------------------------------------------------------------------------
+  // Step 3: Annotated review screen — single screen replacing the per-field wizard
+  // ---------------------------------------------------------------------------
+
+  // Read existing content for diff-style display if forge.yaml already exists.
+  let existingContent = "";
+  const hasExistingConfig = existsSync(outputPath);
+  if (hasExistingConfig) {
+    try {
+      existingContent = readFileSync(outputPath, "utf-8");
+    } catch {
+      // Best-effort — missing or unreadable existing file is handled below
+    }
+  }
+
+  // Show the annotated review screen. The enriched draft populates confidence
+  // badges from both init-detect and init-enrich. Returns accepted/edited values
+  // plus the list of field keys that had low confidence (for TODO comment injection).
+  // --verbose: pass showSources:true so the screen surfaces each field's detection
+  // source and confidence rationale (the .source and .why metadata from ConfigDraft).
+  const reviewed = await annotatedReviewScreen(draft, {
+    hasExistingConfig,
+    existingContent,
+    showSources: verboseMode,
+  });
+
+  const ownerInput = _sanitizeYamlValue(reviewed.owner || detectedOwner);
+  const repoInput = _sanitizeYamlValue(reviewed.repo || detectedRepo);
+  const nameInput = _sanitizeYamlValue(reviewed.name || detectedName);
+  const descInput = _sanitizeYamlValue(reviewed.description || "");
+  const rootInput = reviewed.root || cwd;
+  const worktreeInput =
+    reviewed.worktreeBase || join(cwd, ".claude", "worktrees");
+  const defaultBranchInput = _sanitizeYamlValue(
+    reviewed.defaultBranch || detectedDefault,
+  );
+  const stagingBranchInput = _sanitizeYamlValue(
+    reviewed.stagingBranch || detectedStaging,
+  );
+
+  // -----------------------------------------------------------------------
+  // Optional sections — pre-populate from enriched draft if available,
+  // otherwise fall back to interactive multi-select + guided prompts.
+  // -----------------------------------------------------------------------
+
+  // manualMode skips enrichment — enrichmentSucceeded is false so optional sections
+  // use the interactive multi-select path rather than the enrichment-lifted path.
+  const enrichmentSucceeded =
+    !manualMode && backend !== "none" && _isEnriched(draft, baseDraft);
+
+  const optionalSections = await _collectOptionalSections({
+    ownerInput,
+    detectedOwner,
+    repoInput,
+    detectedRepo,
+    enrichmentSucceeded,
+    draft,
+  });
 
   // -----------------------------------------------------------------------
   // Handle existing forge.yaml with backup
