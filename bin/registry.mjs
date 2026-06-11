@@ -202,8 +202,9 @@ let _writeQueue = Promise.resolve();
  * suppressed so callers are never blocked.
  *
  * @param {(registry: { version: number, optedOut: Record<string, { at: string }>, nudgeSeen: Record<string, { at: string }> }) => void} mutate
- *   Pure mutation function. Called with the current registry object; should
- *   modify it in place. Return value is ignored.
+ *   Mutation callback. Called with the current registry object; should
+ *   modify it in place. Return value is ignored. Callbacks may have side
+ *   effects (e.g. reading the clock) — they are not required to be pure.
  * @returns {Promise<void>}
  */
 async function writeRegistry(mutate) {
@@ -222,6 +223,8 @@ async function writeRegistry(mutate) {
  * mutation function, then writes the result via a .tmp file + renameSync.
  *
  * @param {(registry: { version: number, optedOut: Record<string, { at: string }>, nudgeSeen: Record<string, { at: string }> }) => void} mutate
+ *   Mutation callback — same contract as `writeRegistry`. Modifies the
+ *   registry object in place; return value is ignored.
  * @returns {Promise<void>}
  */
 async function _doWriteRegistryWith(mutate) {
