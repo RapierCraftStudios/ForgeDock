@@ -1493,9 +1493,10 @@ async function uninstall() {
   // -------------------------------------------------------------------------
 
   if (hasWindowsForgeHome) {
-    // Windows: remove FORGE_HOME from the user registry via setx.
-    // setx with an empty string removes the user-level env var (HKCU).
-    // Mirror of install() Phase 5 Windows branch.
+    // Windows: delete FORGE_HOME from HKCU\Environment via REG delete.
+    // setx cannot delete registry keys — `setx VAR ""` writes an empty REG_SZ
+    // entry rather than removing the key. REG delete is the correct approach
+    // for HKCU and requires no elevation.
     console.log("");
     const cleanWindows = forceYes
       ? true
@@ -1503,12 +1504,16 @@ async function uninstall() {
 
     if (cleanWindows) {
       try {
-        execFileSync("setx", ["FORGE_HOME", ""], { stdio: "pipe" });
+        execFileSync(
+          "REG",
+          ["delete", "HKCU\\Environment", "/v", "FORGE_HOME", "/f"],
+          { stdio: "pipe" },
+        );
         console.log(
           `  ${green("✔")} Removed FORGE_HOME from Windows user environment`,
         );
       } catch {
-        // setx unavailable or failed — print PowerShell fallback guidance
+        // REG delete unavailable or key not found — print PowerShell fallback
         console.log(
           `  ${yellow("⚠")}  Could not remove FORGE_HOME automatically — run this in PowerShell:`,
         );
