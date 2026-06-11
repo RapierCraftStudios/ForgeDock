@@ -3187,7 +3187,9 @@ async function injectClaudeMd(cwd) {
 /**
  * Sanitize a string value for safe insertion into a YAML double-quoted scalar.
  * Escapes backslashes (so a trailing \ does not corrupt the closing quote),
- * then strips double-quotes and newlines to prevent YAML injection.
+ * then strips C0/C1 Unicode control characters (\x00-\x08, \x0B, \x0C, \x0E-\x1F, \x7F-\x9F)
+ * that are invalid per YAML 1.2 in double-quoted scalars, then strips double-quotes
+ * and newlines to prevent YAML injection.
  * Backslash escaping MUST come first — before any other replacement.
  *
  * @param {string} value
@@ -3196,6 +3198,7 @@ async function injectClaudeMd(cwd) {
 function _sanitizeYamlValue(value) {
   return String(value)
     .replace(/\\/g, "\\\\")
+    .replace(/[\x00-\x08\x0B\x0C\x0E-\x1F\x7F-\x9F]/g, "")
     .replace(/"/g, "")
     .replace(/[\r\n]/g, " ")
     .trim();
