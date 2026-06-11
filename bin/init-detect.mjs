@@ -216,7 +216,8 @@ function detectStagingBranch(cwd, defaultBranch) {
         timeout: 5000,
       },
     );
-    if (remoteBranches.includes("origin/staging")) {
+    const branchLines = remoteBranches.split("\n").map((l) => l.trim());
+    if (branchLines.some((l) => l === "origin/staging")) {
       return high(
         "staging",
         "git branch -r",
