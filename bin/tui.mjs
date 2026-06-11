@@ -106,9 +106,6 @@ export function box(content, { title = "", padding = 1, width } = {}) {
   const lines = Array.isArray(content) ? content : String(content).split("\n");
   const pad = " ".repeat(padding);
 
-  // Strip ANSI codes to compute visual width
-  const stripAnsi = (s) => s.replace(/\x1b\[[0-9;]*[A-Za-z]/g, "");
-
   const contentWidth = lines.reduce(
     (max, l) => Math.max(max, stripAnsi(l).length),
     0,
@@ -658,8 +655,6 @@ export function table(
   { header = true, padding = 2, separator = "─" } = {},
 ) {
   if (!rows || rows.length === 0) return "";
-
-  const stripAnsi = (s) => s.replace(/\x1b\[[0-9;]*[A-Za-z]/g, "");
 
   // Compute column widths
   const colCount = Math.max(...rows.map((r) => r.length));
