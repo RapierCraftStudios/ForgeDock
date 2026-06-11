@@ -156,6 +156,14 @@ async function removeInstallModeMarker() {
 const CLAUDE_SETTINGS_PATH = join(HOME, ".claude", "settings.json");
 
 /**
+ * Timeout (in seconds) for the SessionStart hook entry written into
+ * ~/.claude/settings.json. Claude Code hook timeouts are in seconds —
+ * not milliseconds like the Node.js child_process timeouts elsewhere in
+ * this file.
+ */
+const SESSION_START_HOOK_TIMEOUT_SECONDS = 10;
+
+/**
  * The command value written into the SessionStart hook entry.
  * Identifies the hook by a path suffix so it can be found even if
  * FORGE_HOME changes between install and uninstall runs.
@@ -345,7 +353,7 @@ async function installSessionStartHook() {
         {
           type: "command",
           command,
-          timeout: 10,
+          timeout: SESSION_START_HOOK_TIMEOUT_SECONDS,
         },
       ],
     });
