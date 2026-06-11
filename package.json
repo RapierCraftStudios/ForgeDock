@@ -33,6 +33,7 @@
   },
   "files": [
     "bin/",
+    "!bin/tests/",
     "commands/",
     "docs/",
     "scripts/",
@@ -40,6 +41,9 @@
     "LICENSE",
     "README.md"
   ],
+  "scripts": {
+    "test": "node --test \"bin/tests/**/*.test.mjs\""
+  },
   "engines": {
     "node": ">=18"
   }

@@ -54,7 +54,14 @@ import {
   input,
   createProgressBar,
   spinner,
+  annotatedReviewScreen,
 } from "./tui.mjs";
+import { detectConfig } from "./init-detect.mjs";
+import {
+  enrich as enrichViaAPI,
+  parseEnrichedDraft,
+} from "./init-enrich-api.mjs";
+import { resolveState, setOptOut } from "./registry.mjs";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
@@ -69,6 +76,11 @@ const TARGET_DIR = join(HOME, ".claude", "commands");
 const args = process.argv.slice(2);
 const command = args[0];
 const forceYes = args.includes("--yes") || args.includes("-y");
+// --manual: bypass autopilot enrichment and present the annotated review screen
+// with detection baseline values only (no AI-enriched suggestions).
+// --verbose: surface field detection sources and confidences during the init flow.
+const manualMode = args.includes("--manual");
+const verboseMode = args.includes("--verbose");
 
 // ---------------------------------------------------------------------------
 // Version — read dynamically from package.json
@@ -130,6 +142,295 @@ async function removeInstallModeMarker() {
     await fsUnlink(INSTALL_MODE_MARKER);
   } catch {
     // Already absent — nothing to do
+  }
+}
+
+// ---------------------------------------------------------------------------
+// SessionStart hook — settings.json helpers
+// ---------------------------------------------------------------------------
+
+/**
+ * Path to the user-level Claude Code settings file.
+ * This is where the SessionStart hook entry is written/removed.
+ */
+const CLAUDE_SETTINGS_PATH = join(HOME, ".claude", "settings.json");
+
+/**
+ * Timeout (in seconds) for the SessionStart hook entry written into
+ * ~/.claude/settings.json. Claude Code hook timeouts are in seconds —
+ * not milliseconds like the Node.js child_process timeouts elsewhere in
+ * this file.
+ */
+const SESSION_START_HOOK_TIMEOUT_SECONDS = 10;
+
+/**
+ * The command value written into the SessionStart hook entry.
+ * Identifies the hook by a path suffix so it can be found even if
+ * FORGE_HOME changes between install and uninstall runs.
+ *
+ * Uses forward slashes even on Windows — Node accepts them natively and
+ * they survive hook-runner invocations that do not go through a shell
+ * (e.g. execFile). Backslashes emitted by path.join() on Windows would
+ * be fragile when the hook runner has no shell to interpret the quoted
+ * command string.
+ */
+function sessionStartHookCommand() {
+  const hookPath = join(
+    FORGE_HOME,
+    "bin",
+    "hooks",
+    "session-start.mjs",
+  ).replace(/\\/g, "/");
+  // Escape embedded double quotes so a crafted install path cannot break out
+  // of the quoted argument and inject shell tokens.
+  const safePath = hookPath.replace(/"/g, '\\"');
+  return `node "${safePath}"`;
+}
+
+/**
+ * Check whether a hook command string refers to the ForgeDock SessionStart hook.
+ *
+ * Uses a platform-safe RegExp that matches both POSIX forward-slash paths
+ * (Linux/macOS) and Windows backslash paths, so uninstall can locate and
+ * remove the hook even when FORGE_HOME was different at install time.
+ *
+ * @param {string} command - The command string from a hook entry.
+ * @returns {boolean}
+ */
+function isForgeSessionStartHook(command) {
+  // Match: ...bin[/\]hooks[/\]session-start.mjs (quote-terminated or EOL)
+  return /[/\\]bin[/\\]hooks[/\\]session-start\.mjs["']?\s*$/.test(command);
+}
+
+/**
+ * Strip JSONC syntax (single-line comments, block comments, trailing commas)
+ * from a raw JSON string, returning a plain JSON string that JSON.parse() accepts.
+ *
+ * The implementation is a single-pass character-walk state machine that correctly
+ * skips content inside string literals, so comment-like sequences embedded in
+ * JSON string values are preserved.
+ *
+ * Handles:
+ *   - Single-line comments:  // ... \n
+ *   - Block comments:        /* ... *\/
+ *   - Trailing commas:       ,\s*[}\]]
+ *
+ * @param {string} raw - Raw text of a JSONC file.
+ * @returns {string} - Valid JSON string.
+ */
+function stripJsonc(raw) {
+  let result = "";
+  let i = 0;
+  const len = raw.length;
+
+  while (i < len) {
+    const ch = raw[i];
+
+    // Inside a string literal — copy until unescaped closing quote
+    if (ch === '"') {
+      result += ch;
+      i++;
+      while (i < len) {
+        const sc = raw[i];
+        result += sc;
+        if (sc === "\\" && i + 1 < len) {
+          // Escaped character — copy the next char verbatim and advance past it
+          i++;
+          result += raw[i];
+        } else if (sc === '"') {
+          break; // End of string literal
+        }
+        i++;
+      }
+      i++;
+      continue;
+    }
+
+    // Single-line comment — skip until newline
+    if (ch === "/" && i + 1 < len && raw[i + 1] === "/") {
+      while (i < len && raw[i] !== "\n") i++;
+      continue;
+    }
+
+    // Block comment — skip until */
+    if (ch === "/" && i + 1 < len && raw[i + 1] === "*") {
+      i += 2;
+      while (i + 1 < len && !(raw[i] === "*" && raw[i + 1] === "/")) i++;
+      i += 2; // Skip closing */
+      continue;
+    }
+
+    result += ch;
+    i++;
+  }
+
+  // Remove trailing commas before } or ]
+  return result.replace(/,(\s*[}\]])/g, "$1");
+}
+
+/**
+ * Read ~/.claude/settings.json, returning a parsed object.
+ * Returns an empty object if the file does not exist.
+ * Tolerates JSONC syntax (comments, trailing commas) that Claude Code's
+ * own settings editor may insert into user-edited settings.json files.
+ * Throws if the file exists but cannot be parsed even after JSONC stripping.
+ *
+ * @returns {object}
+ */
+function readClaudeSettings() {
+  try {
+    const raw = readFileSync(CLAUDE_SETTINGS_PATH, "utf-8");
+    return JSON.parse(stripJsonc(raw));
+  } catch (err) {
+    if (err.code === "ENOENT") return {};
+    throw err;
+  }
+}
+
+/**
+ * Atomically write an object to ~/.claude/settings.json.
+ * Uses a .tmp sibling + renameSync to avoid partial writes.
+ *
+ * @param {object} settings
+ */
+function writeClaudeSettings(settings) {
+  const tmpPath = CLAUDE_SETTINGS_PATH + ".forgedock.tmp";
+  try {
+    writeFileSync(tmpPath, JSON.stringify(settings, null, 2) + "\n", "utf-8");
+    renameSync(tmpPath, CLAUDE_SETTINGS_PATH);
+  } catch (err) {
+    // Clean up temp file if it was created before the error
+    try {
+      unlinkSync(tmpPath);
+    } catch {
+      /* already gone or never created */
+    }
+    throw err;
+  }
+}
+
+/**
+ * Install the ForgeDock SessionStart hook into ~/.claude/settings.json
+ * idempotently. Does not modify any existing hooks unrelated to ForgeDock.
+ *
+ * Returns:
+ *   'installed'      — hook was newly added
+ *   'already-present' — hook was already there (idempotent)
+ *   'failed'         — an error occurred (non-fatal; install continues)
+ *
+ * @returns {Promise<'installed' | 'already-present' | 'failed'>}
+ */
+async function installSessionStartHook() {
+  try {
+    const settings = readClaudeSettings();
+
+    // Ensure the hooks section exists
+    if (!settings.hooks || typeof settings.hooks !== "object") {
+      settings.hooks = {};
+    }
+
+    // Ensure SessionStart array exists
+    if (!Array.isArray(settings.hooks.SessionStart)) {
+      settings.hooks.SessionStart = [];
+    }
+
+    const command = sessionStartHookCommand();
+
+    // Check if already present (idempotent — match by path suffix)
+    const alreadyPresent = settings.hooks.SessionStart.some((entry) => {
+      if (!entry || typeof entry !== "object") return false;
+      const hooks = Array.isArray(entry.hooks) ? entry.hooks : [];
+      return hooks.some(
+        (h) =>
+          h &&
+          typeof h.command === "string" &&
+          isForgeSessionStartHook(h.command),
+      );
+    });
+
+    if (alreadyPresent) return "already-present";
+
+    // Append the new hook entry
+    settings.hooks.SessionStart.push({
+      hooks: [
+        {
+          type: "command",
+          command,
+          timeout: SESSION_START_HOOK_TIMEOUT_SECONDS,
+        },
+      ],
+    });
+
+    writeClaudeSettings(settings);
+    return "installed";
+  } catch {
+    return "failed";
+  }
+}
+
+/**
+ * Remove the ForgeDock SessionStart hook from ~/.claude/settings.json
+ * idempotently. Only removes the entry written by installSessionStartHook().
+ * Unrelated hooks are preserved.
+ *
+ * Returns:
+ *   'removed'        — hook was found and removed
+ *   'not-present'    — hook was not in settings.json (already clean)
+ *   'failed'         — an error occurred (non-fatal; uninstall continues)
+ *
+ * @returns {Promise<'removed' | 'not-present' | 'failed'>}
+ */
+async function removeSessionStartHook() {
+  try {
+    const settings = readClaudeSettings();
+
+    if (
+      !settings.hooks ||
+      !Array.isArray(settings.hooks.SessionStart) ||
+      settings.hooks.SessionStart.length === 0
+    ) {
+      return "not-present";
+    }
+
+    const originalLength = settings.hooks.SessionStart.length;
+
+    // Filter out the ForgeDock-managed entry, keep everything else
+    settings.hooks.SessionStart = settings.hooks.SessionStart.filter(
+      (entry) => {
+        if (!entry || typeof entry !== "object") return true;
+        const hooks = Array.isArray(entry.hooks) ? entry.hooks : [];
+        const isForgeEntry = hooks.some(
+          (h) =>
+            h &&
+            typeof h.command === "string" &&
+            isForgeSessionStartHook(h.command),
+        );
+        return !isForgeEntry;
+      },
+    );
+
+    if (settings.hooks.SessionStart.length === originalLength) {
+      return "not-present";
+    }
+
+    // Clean up empty SessionStart array to leave settings.json tidy
+    if (settings.hooks.SessionStart.length === 0) {
+      delete settings.hooks.SessionStart;
+    }
+
+    // Clean up empty hooks object
+    if (
+      settings.hooks &&
+      typeof settings.hooks === "object" &&
+      Object.keys(settings.hooks).length === 0
+    ) {
+      delete settings.hooks;
+    }
+
+    writeClaudeSettings(settings);
+    return "removed";
+  } catch {
+    return "failed";
   }
 }
 
@@ -538,10 +839,14 @@ async function runPrerequisiteChecklist() {
       // Try to get primary org from gh api
       let orgLabel = "";
       try {
-        const orgsJson = execSync("gh api /user/orgs --jq '.[0].login'", {
-          encoding: "utf-8",
-          stdio: ["pipe", "pipe", "pipe"],
-        }).trim();
+        const orgsJson = execFileSync(
+          "gh",
+          ["api", "/user/orgs", "--jq", ".[0].login"],
+          {
+            encoding: "utf-8",
+            stdio: ["pipe", "pipe", "pipe"],
+          },
+        ).trim();
         if (orgsJson && orgsJson !== "null" && orgsJson !== "") {
           orgLabel = ` (${orgsJson})`;
         }
@@ -906,7 +1211,11 @@ async function install() {
       ...conflicts.map((c) => `    ${red("✖")}  ${c}`),
       "",
       `  ${dim("To let ForgeDock manage these, remove or rename each file:")}`,
-      ...conflicts.map((c) => `    ${dim(`rm ~/.claude/commands/${c}`)}`),
+      ...conflicts.map((c) =>
+        process.platform === "win32"
+          ? `    ${dim(`Remove-Item ~\\.claude\\commands\\${c.replace(/\//g, "\\")}`)}`
+          : `    ${dim(`rm ~/.claude/commands/${c}`)}`,
+      ),
       "",
     ];
     process.stdout.write(
@@ -922,33 +1231,88 @@ async function install() {
 
   console.log("");
   let forgeHomeSet = false;
-  for (const profile of [join(HOME, ".bashrc"), join(HOME, ".zshrc")]) {
-    if (existsSync(profile)) {
-      const content = readFileSync(profile, "utf-8");
-      if (!content.includes("FORGE_HOME")) {
-        appendFileSync(
-          profile,
-          `\n# ForgeDock — autonomous development pipeline\nexport FORGE_HOME="${FORGE_HOME}"\n`,
-        );
-        const profileShort = profile.replace(HOME, "~");
-        console.log(
-          `  ${green("✔")}  ${bold("FORGE_HOME")} set in ${cyan(profileShort)}`,
-        );
-        forgeHomeSet = true;
+  if (process.platform === "win32") {
+    // On Windows, ~/.bashrc and ~/.zshrc do not exist.
+    // Persist FORGE_HOME for the current user via setx (built-in, no elevation needed).
+    // If setx fails for any reason, print a PowerShell one-liner the user can run manually.
+    try {
+      // setx exits 0 even when it truncates; capture stdout and check for the truncation
+      // warning before declaring success. <!-- Added: forge#415 -->
+      const setxOut = execFileSync("setx", ["FORGE_HOME", FORGE_HOME], {
+        stdio: "pipe",
+      });
+      if (
+        setxOut.toString().includes("WARNING: Data being saved is truncated")
+      ) {
+        throw new Error("setx truncated the FORGE_HOME value");
+      }
+      console.log(
+        `  ${green("✔")}  ${bold("FORGE_HOME")} set via ${cyan("setx")} ${dim("(restart your terminal to apply)")}`,
+      );
+    } catch {
+      // setx unavailable, failed, or truncated — print manual guidance
+      console.log(
+        `  ${yellow("⚠")}  ${bold("FORGE_HOME")} not set automatically — run this in PowerShell:`,
+      );
+      console.log(
+        `     ${cyan(`[System.Environment]::SetEnvironmentVariable('FORGE_HOME', '${FORGE_HOME.replace(/'/g, "''")}', 'User')`)}`,
+      );
+    }
+    forgeHomeSet = true;
+  } else {
+    for (const profile of [join(HOME, ".bashrc"), join(HOME, ".zshrc")]) {
+      if (existsSync(profile)) {
+        const content = readFileSync(profile, "utf-8");
+        if (!content.includes("FORGE_HOME")) {
+          appendFileSync(
+            profile,
+            `\n# ForgeDock — autonomous development pipeline\nexport FORGE_HOME="${FORGE_HOME}"\n`,
+          );
+          const profileShort = profile.replace(HOME, "~");
+          console.log(
+            `  ${green("✔")}  ${bold("FORGE_HOME")} set in ${cyan(profileShort)}`,
+          );
+          forgeHomeSet = true;
+        }
       }
     }
-  }
 
-  if (!forgeHomeSet) {
-    console.log(
-      `  ${dim("✔")}  ${dim("FORGE_HOME already set in shell profile")}`,
-    );
+    if (!forgeHomeSet) {
+      console.log(
+        `  ${dim("✔")}  ${dim("FORGE_HOME already set in shell profile")}`,
+      );
+    }
   }
 
   console.log("");
   console.log(
     `${green("ForgeDock commands are now available as slash commands in any Claude Code session.")}`,
   );
+  console.log("");
+
+  // -------------------------------------------------------------------------
+  // Phase 6: SessionStart hook — install into ~/.claude/settings.json
+  // -------------------------------------------------------------------------
+
+  const hookResult = await installSessionStartHook();
+  if (hookResult === "installed") {
+    console.log(
+      `  ${green("✔")}  ${bold("SessionStart hook")} installed in ${cyan("~/.claude/settings.json")}`,
+    );
+  } else if (hookResult === "already-present") {
+    console.log(
+      `  ${dim("✔")}  ${dim("SessionStart hook already present in ~/.claude/settings.json")}`,
+    );
+  } else {
+    // "failed" — warning only, does not block install
+    console.log(
+      `  ${yellow("⚠")}  ${yellow("Could not write SessionStart hook to ~/.claude/settings.json")}`,
+    );
+    console.log(
+      `  ${dim("  Run")} ${cyan("npx forgedock install")} ${dim("again to retry.")}`,
+    );
+  }
+
   console.log("");
 
   // forge.yaml advisory — guide users to run init if config is missing
@@ -1012,9 +1376,38 @@ async function uninstall() {
     }
   });
 
+  // On Windows, always attempt FORGE_HOME cleanup — do not gate on process.env.FORGE_HOME.
+  // setx writes to HKCU\Environment (the registry) but does NOT update process.env in the
+  // current running process. If the user runs install then uninstall in the same terminal
+  // session, process.env.FORGE_HOME is undefined even though the registry key was written.
+  // The REG delete call in Phase 5 is already wrapped in try/catch and handles the
+  // key-not-found case gracefully, so unconditional detection is safe.
+  const hasWindowsForgeHome = process.platform === "win32";
+
   // Check for forge.yaml in cwd
   const forgeYamlPath = join(process.cwd(), "forge.yaml");
   const hasForgeYaml = existsSync(forgeYamlPath);
+
+  // Check whether the SessionStart hook is present in settings.json
+  let hasSessionStartHook = false;
+  try {
+    const settings = readClaudeSettings();
+    const sessionStartEntries = settings?.hooks?.SessionStart;
+    if (Array.isArray(sessionStartEntries)) {
+      hasSessionStartHook = sessionStartEntries.some((entry) => {
+        if (!entry || typeof entry !== "object") return false;
+        const hooks = Array.isArray(entry.hooks) ? entry.hooks : [];
+        return hooks.some(
+          (h) =>
+            h &&
+            typeof h.command === "string" &&
+            isForgeSessionStartHook(h.command),
+        );
+      });
+    }
+  } catch {
+    // settings.json unreadable — treat as not present
+  }
 
   // -------------------------------------------------------------------------
   // Phase 2: Pre-removal summary
@@ -1023,7 +1416,9 @@ async function uninstall() {
   if (
     toRemove.length === 0 &&
     profilesWithForgeHome.length === 0 &&
-    !hasForgeYaml
+    !hasWindowsForgeHome &&
+    !hasForgeYaml &&
+    !hasSessionStartHook
   ) {
     console.log(
       `  ${dim("Nothing to remove — ForgeDock does not appear to be installed.")}`,
@@ -1046,6 +1441,16 @@ async function uninstall() {
       `  ${yellow("Profiles")}:   FORGE_HOME export in ${bold(profilesWithForgeHome.map((p) => p.replace(HOME, "~")).join(", "))}`,
     );
   }
+  if (hasWindowsForgeHome) {
+    summaryLines.push(
+      `  ${yellow("Env var")}:    FORGE_HOME set in Windows user environment`,
+    );
+  }
+  if (hasSessionStartHook) {
+    summaryLines.push(
+      `  ${yellow("Hook")}:       SessionStart hook in ${dim("~/.claude/settings.json")}`,
+    );
+  }
   if (hasForgeYaml) {
     summaryLines.push(`  ${cyan("forge.yaml")}: present in current directory`);
   }
@@ -1063,7 +1468,9 @@ async function uninstall() {
   const profileLabel =
     profilesWithForgeHome.length > 0
       ? ` and FORGE_HOME from ${profilesWithForgeHome.length === 1 ? "shell profile" : "shell profiles"}`
-      : "";
+      : hasWindowsForgeHome
+        ? " and FORGE_HOME from Windows user environment"
+        : "";
 
   let confirmed = forceYes;
   if (!confirmed) {
@@ -1109,6 +1516,42 @@ async function uninstall() {
   // -------------------------------------------------------------------------
   // Phase 5: FORGE_HOME cleanup (only if detected)
   // -------------------------------------------------------------------------
+
+  if (hasWindowsForgeHome) {
+    // Windows: delete FORGE_HOME from HKCU\Environment via REG delete.
+    // setx cannot delete registry keys — `setx VAR ""` writes an empty REG_SZ
+    // entry rather than removing the key. REG delete is the correct approach
+    // for HKCU and requires no elevation.
+    console.log("");
+    const cleanWindows = forceYes
+      ? true
+      : await confirm("Remove FORGE_HOME from Windows user environment?", true);
+
+    if (cleanWindows) {
+      try {
+        execFileSync(
+          "REG",
+          ["delete", "HKCU\\Environment", "/v", "FORGE_HOME", "/f"],
+          { stdio: "pipe" },
+        );
+        console.log(
+          `  ${green("✔")} Removed FORGE_HOME from Windows user environment`,
+        );
+      } catch {
+        // REG delete unavailable or key not found — print PowerShell fallback
+        console.log(
+          `  ${yellow("⚠")}  Could not remove FORGE_HOME automatically — run this in PowerShell:`,
+        );
+        console.log(
+          `     ${cyan("[System.Environment]::SetEnvironmentVariable('FORGE_HOME', $null, 'User')")}`,
+        );
+      }
+    } else {
+      console.log(
+        `  ${dim("Skipped — FORGE_HOME left in Windows user environment.")}`,
+      );
+    }
+  }
 
   if (profilesWithForgeHome.length > 0) {
     console.log("");
@@ -1160,7 +1603,42 @@ async function uninstall() {
   }
 
   // -------------------------------------------------------------------------
-  // Phase 6: forge.yaml handling (default: keep)
+  // Phase 6: SessionStart hook removal
+  // -------------------------------------------------------------------------
+
+  if (hasSessionStartHook) {
+    console.log("");
+    const removeHook = forceYes
+      ? true
+      : await confirm(
+          "Remove SessionStart hook from ~/.claude/settings.json?",
+          true,
+        );
+
+    if (removeHook) {
+      const hookRemoveResult = await removeSessionStartHook();
+      if (hookRemoveResult === "removed") {
+        console.log(
+          `  ${green("✔")} Removed SessionStart hook from ${dim("~/.claude/settings.json")}`,
+        );
+      } else if (hookRemoveResult === "not-present") {
+        console.log(
+          `  ${dim("✔")} SessionStart hook already absent from ~/.claude/settings.json`,
+        );
+      } else {
+        console.log(
+          `  ${red("✖")} Could not update ~/.claude/settings.json — remove the hook manually.`,
+        );
+      }
+    } else {
+      console.log(
+        `  ${dim("Skipped — SessionStart hook left in settings.json.")}`,
+      );
+    }
+  }
+
+  // -------------------------------------------------------------------------
+  // Phase 7: forge.yaml handling (default: keep)
   // -------------------------------------------------------------------------
 
   if (hasForgeYaml) {
@@ -1184,16 +1662,21 @@ async function uninstall() {
   }
 
   // -------------------------------------------------------------------------
-  // Phase 7: Post-removal summary
+  // Phase 8: Post-removal summary
   // -------------------------------------------------------------------------
 
   console.log("");
   console.log(
     `${green("Uninstall complete.")} ForgeDock commands have been removed.`,
   );
-  if (profilesWithForgeHome.length > 0) {
+  if (profilesWithForgeHome.length > 0 && process.platform !== "win32") {
     console.log(
       `  ${dim("Restart your shell or run")} ${cyan("source ~/.bashrc")} ${dim("(or")} ${cyan("~/.zshrc")}${dim(")")} ${dim("to apply profile changes.")}`,
+    );
+  }
+  if (hasWindowsForgeHome) {
+    console.log(
+      `  ${dim("Restart your terminal to apply environment changes.")}`,
     );
   }
   console.log("");
@@ -1216,6 +1699,9 @@ function queryNpmRegistry(pkg) {
       encoding: "utf-8",
       stdio: ["pipe", "pipe", "pipe"],
       timeout: 5000,
+      // On Windows, npm is a .cmd shim — shell: true enables .cmd resolution.
+      // On POSIX, npm resolves directly — no shell needed. (Ref: review-finding #413)
+      shell: process.platform === "win32",
     });
     return result.trim() || null;
   } catch {
@@ -1557,12 +2043,16 @@ async function update() {
       // Show changelog between current HEAD and remote HEAD
       let changelogLines = [];
       try {
-        const log = execSync(`git log --oneline ${before}..origin/main`, {
-          cwd: FORGE_HOME,
-          encoding: "utf-8",
-          stdio: ["pipe", "pipe", "pipe"],
-          timeout: 5000,
-        }).trim();
+        const log = execFileSync(
+          "git",
+          ["log", "--oneline", `${before}..origin/main`],
+          {
+            cwd: FORGE_HOME,
+            encoding: "utf-8",
+            stdio: ["pipe", "pipe", "pipe"],
+            timeout: 5000,
+          },
+        ).trim();
         if (log) {
           changelogLines = log.split("\n").map((l) => `  ${dim(l)}`);
         }
@@ -1740,278 +2230,325 @@ async function update() {
   }
 }
 
-async function init() {
-  // init() generates forge.yaml from prompts and git remote detection.
-  // It does NOT require gh CLI or gh auth for core operation (project board
-  // auto-discovery is optional and guarded separately). Only warn if Claude
-  // Code is missing — it's the primary consumer of the generated config.
-  try {
-    execSync("claude --version", { stdio: ["pipe", "pipe", "pipe"] });
-  } catch {
-    console.log(`  ${YELLOW}!${RESET} Claude Code CLI not found on PATH.`);
-    console.log(
-      `    Install: ${CYAN}https://docs.anthropic.com/en/docs/claude-code${RESET}`,
-    );
-    console.log("");
+// ---------------------------------------------------------------------------
+// Backend-selection ladder helpers — detect, enrich via skill, enrich via API
+// ---------------------------------------------------------------------------
+
+/**
+ * Determine which enrichment backend is available.
+ *
+ * Ladder:
+ *   1. skill  — running inside a Claude Code session (CLAUDE_CODE_SESSION_ID set)
+ *   2. api    — ANTHROPIC_API_KEY env var is present and non-empty
+ *   3. none   — fall through to deterministic baseline
+ *
+ * @returns {'skill'|'api'|'none'}
+ */
+function _detectBackend() {
+  // Primary signal: Claude Code sets CLAUDE_CODE_SESSION_ID in its environment.
+  // This is the only reliable indicator of an active CC session — non-TTY stdin
+  // alone is not sufficient (CI/CD and piped scripts also run non-interactively).
+  if (process.env.CLAUDE_CODE_SESSION_ID) {
+    return "skill";
   }
 
-  console.log("");
-  console.log(`${BOLD}ForgeDock${RESET} — Generate forge.yaml`);
-  console.log("");
-
-  const cwd = process.cwd();
-  const outputPath = join(cwd, "forge.yaml");
-
-  // ---------------------------------------------------------------------------
-  // Auto-detect defaults (silent — used as pre-fill values for prompts)
-  // ---------------------------------------------------------------------------
-
-  // Detect git remote URL and parse owner/repo
-  let detectedOwner = "your-github-org";
-  let detectedRepo = "your-repo-name";
-  let remoteDetected = false;
-
-  try {
-    const remoteUrl = execSync("git remote get-url origin", {
-      cwd,
-      encoding: "utf-8",
-      stdio: ["pipe", "pipe", "pipe"],
-    }).trim();
-
-    // SSH: git@github.com:owner/repo.git
-    const sshMatch = remoteUrl.match(/^git@[^:]+:([^/]+)\/(.+?)(?:\.git)?$/);
-    // HTTPS: https://github.com/owner/repo.git
-    const httpsMatch = remoteUrl.match(
-      /^https?:\/\/[^/]+\/([^/]+)\/(.+?)(?:\.git)?$/,
-    );
-
-    if (sshMatch) {
-      detectedOwner = sshMatch[1];
-      detectedRepo = sshMatch[2];
-      remoteDetected = true;
-    } else if (httpsMatch) {
-      detectedOwner = httpsMatch[1];
-      detectedRepo = httpsMatch[2];
-      remoteDetected = true;
-    }
-  } catch {
-    // No remote — use placeholders
+  // API backend: BYO key present.
+  if (process.env.ANTHROPIC_API_KEY) {
+    return "api";
   }
 
-  // Detect default branch
-  let detectedDefault = "main";
-  try {
-    const headRef = execSync("git symbolic-ref refs/remotes/origin/HEAD", {
-      cwd,
-      encoding: "utf-8",
-      stdio: ["pipe", "pipe", "pipe"],
-    }).trim();
-    detectedDefault = headRef.replace(/^refs\/remotes\/origin\//, "");
-  } catch {
-    try {
-      const cur = execSync("git rev-parse --abbrev-ref HEAD", {
-        cwd,
-        encoding: "utf-8",
-        stdio: ["pipe", "pipe", "pipe"],
-      }).trim();
-      if (cur && cur !== "HEAD") detectedDefault = cur;
-    } catch {
-      // Keep "main"
-    }
-  }
+  return "none";
+}
 
-  // Detect staging branch
-  let detectedStaging = detectedDefault;
+/**
+ * Enrich a ConfigDraft by invoking the /forgedock-init skill backend via the
+ * Claude Code CLI (`claude -p`), with the full prompt piped via stdin.
+ *
+ * Uses execFileSync with the `input` option to pipe the prompt
+ * (`/forgedock-init <draftJSON>`) to the claude process's stdin rather than
+ * embedding it in a CLI argument. This avoids OS ARG_MAX limits for large
+ * JSON payloads and keeps the argument list minimal.
+ *
+ * @param {object} draft  - ConfigDraft from detectConfig()
+ * @param {string} cwd    - Working directory for the claude invocation
+ * @returns {Promise<object>} Enriched ConfigDraft, or the original draft on failure
+ */
+async function _enrichViaSkill(draft, cwd) {
   try {
-    const remoteBranches = execSync("git branch -r", {
+    const draftJson = JSON.stringify(draft);
+    const output = execFileSync("claude", ["-p"], {
       cwd,
       encoding: "utf-8",
+      timeout: 120000, // 2 minutes — enrichment may take a while for large repos
+      input: `/forgedock-init ${draftJson}`,
       stdio: ["pipe", "pipe", "pipe"],
+      // On Windows, npm-installed CLIs like `claude` are .cmd shims. execFileSync
+      // does not resolve .cmd extensions without a shell — shell: true enables the
+      // cmd.exe lookup that finds claude.cmd on PATH. Safe here: executable name is
+      // hardcoded, no user input is involved. (Ref: review-finding #382)
+      shell: process.platform === "win32",
     });
-    if (remoteBranches.includes("origin/staging")) {
-      detectedStaging = "staging";
-    }
-  } catch {
-    // Keep default
-  }
 
-  // Derive project name from repo slug
-  const detectedName = detectedRepo
-    .split(/[-_]/)
-    .map((w) => w.charAt(0).toUpperCase() + w.slice(1))
-    .join(" ");
-
-  // Non-TTY: skip interactive prompts and use detected values directly
-  if (!process.stdin.isTTY) {
-    if (!remoteDetected) {
-      console.log(
-        `  ${YELLOW}Warning${RESET}: No git remote found — using placeholder values`,
+    return parseEnrichedDraft(output, draft);
+  } catch (err) {
+    // Log the failure at debug level but never surface to user — fall back silently.
+    if (process.env.FORGEDOCK_DEBUG) {
+      console.error(
+        `  ${dim("[debug]")} skill enrichment failed: ${err.message}`,
       );
     }
-    // Silent write — same as pre-interactive behavior
-    _writeForgeYaml({
-      outputPath,
-      cwd,
-      owner: detectedOwner,
-      repo: detectedRepo,
-      projectName: detectedName,
-      description: "",
-      root: cwd,
-      worktreeBase: join(cwd, ".claude", "worktrees"),
-      defaultBranch: detectedDefault,
-      stagingBranch: detectedStaging,
-    });
-    console.log(`  ${GREEN}Created${RESET}: forge.yaml`);
-    console.log("");
-    await injectClaudeMd(cwd);
-    console.log("");
-    _printNextSteps({ remoteDetected });
-    await validate(outputPath);
-    return;
+    return draft;
+  }
+}
+
+/**
+ * Build an optionalSections object from an enriched ConfigDraft, promoting
+ * sections that have medium-or-higher confidence to active (non-commented) YAML.
+ * Sections with only low-confidence fields are omitted so they remain commented out.
+ *
+ * @param {object} enrichedDraft - ConfigDraft returned by an enrichment backend
+ * @returns {object} optionalSections compatible with _writeForgeYaml / buildForgeYamlContent
+ */
+function _optionalSectionsFromDraft(enrichedDraft) {
+  const sections = {};
+
+  // project_board — include if project_number has at least medium confidence
+  const pb = enrichedDraft.project_board;
+  if (
+    pb &&
+    pb.project_number &&
+    pb.project_number.confidence !== "low" &&
+    pb.project_number.value
+  ) {
+    sections.projectBoard = {
+      projectNumber: parseInt(pb.project_number.value, 10) || 1,
+      projectId: pb.project_id?.value || "",
+      fieldIds: {
+        status: pb.field_ids?.status?.value || "",
+        lane: pb.field_ids?.lane?.value || "",
+        component: pb.field_ids?.component?.value || "",
+        priority: pb.field_ids?.priority?.value || "",
+        workflow: pb.field_ids?.workflow?.value || "",
+      },
+      optionIds: pb.option_ids || {},
+    };
   }
 
-  // ---------------------------------------------------------------------------
-  // Interactive flow — prompt for each required section
-  // ---------------------------------------------------------------------------
+  // repos.satellites — include if at least one satellite found
+  const repos = enrichedDraft.repos;
+  if (
+    repos &&
+    repos.satellites &&
+    Array.isArray(repos.satellites) &&
+    repos.satellites.length > 0
+  ) {
+    const first = repos.satellites[0];
+    if (first && first.prefix && first.prefix.value) {
+      sections.multiRepo = {
+        prefix: first.prefix.value || "sat",
+        satelliteRepo:
+          (first.repo?.value || "").split("/").pop() || "satellite",
+        satelliteBranch: first.staging_branch?.value || "main",
+      };
+    }
+  }
 
-  // Loop until user confirms the preview
-  let confirmed = false;
+  // review — include if tech_stack has at least medium confidence
+  const review = enrichedDraft.review;
+  if (
+    review &&
+    review.tech_stack &&
+    review.tech_stack.confidence !== "low" &&
+    review.tech_stack.value
+  ) {
+    sections.review = {
+      techStack: review.tech_stack.value,
+      context: review.context?.value || "",
+    };
+  }
 
-  while (!confirmed) {
+  // verification — include if health_endpoint has at least medium confidence
+  const verification = enrichedDraft.verification;
+  if (
+    verification &&
+    verification.health_endpoint &&
+    verification.health_endpoint.confidence !== "low" &&
+    verification.health_endpoint.value
+  ) {
+    sections.verification = {
+      healthEndpoint: verification.health_endpoint.value,
+    };
+  }
+
+  return sections;
+}
+
+/**
+ * Returns true if an enrichment backend produced enriched data for the draft.
+ * Used in three places: skill-backend spinner display, api-backend spinner display,
+ * and the enrichmentSucceeded gate that controls optional-section auto-population.
+ *
+ * @param {object} draft - The (possibly) enriched draft
+ * @param {object} baseDraft - The original un-enriched draft
+ * @returns {boolean}
+ */
+function _isEnriched(draft, baseDraft) {
+  return draft !== baseDraft || Boolean(draft.meta?.enriched);
+}
+
+/**
+ * Module-level constant — single source of truth for the optional section
+ * choice list used in both the enrichment and manual branches of init().
+ * Add new sections here; all call sites update automatically.
+ */
+const OPTIONAL_SECTION_CHOICES = [
+  {
+    label:
+      "Project Board   — GitHub Projects v2 integration for workflow tracking",
+    value: "projectBoard",
+  },
+  {
+    label: "Multi-Repo      — Satellite repos for cross-repo milestones",
+    value: "multiRepo",
+  },
+  {
+    label: "Review Context  — Tech stack and conventions for PR review agents",
+    value: "review",
+  },
+  {
+    label: "Verification    — Health check endpoints and response patterns",
+    value: "verification",
+  },
+];
+
+/**
+ * Maps camelCase optional-section keys to their forge.yaml section names.
+ * Used for display messages after enrichment and after writing forge.yaml.
+ */
+const SECTION_KEY_TO_YAML_NAME = {
+  projectBoard: "project_board",
+  multiRepo: "repos",
+  review: "review",
+  verification: "verification",
+};
+
+/**
+ * Non-TTY (headless) init path: enrich (already done), silently write forge.yaml,
+ * inject CLAUDE.md, print next steps, and validate.
+ *
+ * Extracted from init() to reduce its size.
+ *
+ * @param {object} draft - Enriched (or baseline) ConfigDraft
+ * @param {string} outputPath - Absolute path to forge.yaml
+ * @param {string} cwd - Current working directory
+ * @param {boolean} remoteDetected - Whether a git remote was detected
+ */
+async function _initNonTTY(draft, outputPath, cwd, remoteDetected) {
+  if (!remoteDetected) {
     console.log(
-      dim(
-        "  Auto-detected values are shown as defaults. Press Enter to accept.",
-      ),
+      `  ${YELLOW}Warning${RESET}: No git remote found — using placeholder values`,
     );
-    console.log("");
+  }
+  // Derive optional sections from the enriched draft for the silent write.
+  const enrichedSections = _optionalSectionsFromDraft(draft);
+  _writeForgeYaml({
+    outputPath,
+    cwd,
+    owner: draft.project.owner.value,
+    repo: draft.project.repo.value,
+    projectName: draft.project.name.value,
+    description: "",
+    root: cwd,
+    worktreeBase: join(cwd, ".claude", "worktrees"),
+    defaultBranch: draft.branches.default.value,
+    stagingBranch: draft.branches.staging.value,
+    optionalSections: enrichedSections,
+  });
+  console.log(`  ${GREEN}Created${RESET}: forge.yaml`);
+  console.log("");
+  await injectClaudeMd(cwd);
+  console.log("");
+  _printNextSteps({ remoteDetected });
+  await validate(outputPath);
+}
 
-    // --- Project section ---
-    console.log(bold("  Project"));
+/**
+ * Interactive optional-section collection wizard.
+ *
+ * When enrichmentSucceeded, pre-populates sections from the enriched draft and
+ * offers a multi-select for any remaining sections not auto-discovered.
+ * When enrichment is unavailable (manualMode or no backend), presents the full
+ * multi-select wizard for all sections.
+ *
+ * Returns the populated optionalSections record for use by _writeForgeYaml.
+ *
+ * @param {object} opts
+ * @param {string}  opts.ownerInput      - Sanitized owner value from review screen
+ * @param {string}  opts.detectedOwner   - Owner value from detection baseline
+ * @param {string}  opts.repoInput       - Sanitized repo value from review screen
+ * @param {string}  opts.detectedRepo    - Repo value from detection baseline
+ * @param {boolean} opts.enrichmentSucceeded - Whether AI enrichment produced a result
+ * @param {object}  opts.draft           - The (possibly enriched) ConfigDraft
+ * @returns {Promise<Record<string, object>>} Populated optional sections map
+ */
+async function _collectOptionalSections({
+  ownerInput,
+  detectedOwner,
+  repoInput,
+  detectedRepo,
+  enrichmentSucceeded,
+  draft,
+}) {
+  /** @type {Record<string, object>} */
+  const optionalSections = {};
 
-    const ownerInput = await input(
-      "  GitHub owner (org or user)",
-      detectedOwner,
-    );
-    const repoInput = await input("  Repository name", detectedRepo);
-    const nameInput = await input(
-      "  Project name",
-      detectedName !== "Your-repo-name"
-        ? detectedName
-        : repoInput
-            .split(/[-_]/)
-            .map((w) => w.charAt(0).toUpperCase() + w.slice(1))
-            .join(" "),
-    );
-    const descInput = await input("  Brief description", "");
+  if (enrichmentSucceeded) {
+    // Lift discovered sections directly from the enriched draft.
+    // Only sections with medium-or-higher confidence are included; low-confidence
+    // sections remain commented-out in the output (no behaviour change for users
+    // without an enrichment backend).
+    Object.assign(optionalSections, _optionalSectionsFromDraft(draft));
 
-    // --- Paths section ---
-    console.log("");
-    console.log(bold("  Paths"));
-
-    const rootInput = await input("  Repository root (absolute path)", cwd);
-    const worktreeInput = await input(
-      "  Worktree base (for git worktrees)",
-      join(rootInput || cwd, ".claude", "worktrees"),
-    );
-
-    // --- Branches section ---
-    console.log("");
-    console.log(bold("  Branches"));
-
-    const defaultBranchInput = await input("  Default branch", detectedDefault);
-    const stagingBranchInput = await input(
-      "  Staging branch (PR target for fast-lane changes)",
-      detectedStaging,
-    );
-
-    // --- Preview ---
-    console.log("");
-
-    const previewLines = buildForgeYamlContent({
-      owner: ownerInput,
-      repo: repoInput,
-      projectName: nameInput,
-      description: descInput,
-      root: rootInput || cwd,
-      worktreeBase: worktreeInput || join(cwd, ".claude", "worktrees"),
-      defaultBranch: defaultBranchInput,
-      stagingBranch: stagingBranchInput,
-    });
-
-    // Show preview in a box
-    const previewDisplay = previewLines
-      .split("\n")
-      .slice(0, 30) // show first 30 lines of required sections only
-      .join("\n");
-
-    process.stdout.write(
-      box(previewDisplay, {
-        title: "forge.yaml preview (required sections)",
-        padding: 1,
-      }),
-    );
-
-    confirmed = await confirm("  Write this forge.yaml?", true);
-
-    if (!confirmed) {
+    // Surface which sections were auto-populated by enrichment.
+    const autoSections = Object.keys(optionalSections);
+    if (autoSections.length > 0) {
       console.log("");
-      console.log(dim("  Starting over — re-enter values below."));
+      console.log(
+        `  ${GREEN}Auto-configured${RESET} by enrichment: ${autoSections
+          .map((s) => SECTION_KEY_TO_YAML_NAME[s])
+          .join(", ")}`,
+      );
+    }
+
+    // Still offer the multi-select so the user can add sections that enrichment
+    // couldn't discover (e.g. project_board when gh is unauthenticated).
+    const alreadyConfigured = new Set(autoSections);
+
+    const remainingSectionChoices = OPTIONAL_SECTION_CHOICES.filter(
+      (c) => !alreadyConfigured.has(c.value),
+    );
+
+    if (remainingSectionChoices.length > 0) {
       console.log("");
-    } else {
-      // -----------------------------------------------------------------------
-      // Optional sections — multi-select, then guided prompts per section
-      // -----------------------------------------------------------------------
-      console.log("");
-      console.log(bold("  Optional Sections"));
+      console.log(bold("  Additional Optional Sections"));
       console.log(
         dim(
-          "  Select sections to configure now. Unselected sections are written as",
-        ),
-      );
-      console.log(
-        dim(
-          "  commented-out placeholders — you can enable them later by editing forge.yaml.",
+          "  The following sections were not auto-discovered. Select any to configure now.",
         ),
       );
       console.log("");
-
-      const OPTIONAL_SECTION_CHOICES = [
-        {
-          label:
-            "Project Board   — GitHub Projects v2 integration for workflow tracking",
-          value: "projectBoard",
-        },
-        {
-          label: "Multi-Repo      — Satellite repos for cross-repo milestones",
-          value: "multiRepo",
-        },
-        {
-          label:
-            "Review Context  — Tech stack and conventions for PR review agents",
-          value: "review",
-        },
-        {
-          label:
-            "Verification    — Health check endpoints and response patterns",
-          value: "verification",
-        },
-      ];
 
       const selectedSections = await multiSelect(
-        "  Which optional sections would you like to configure?",
-        OPTIONAL_SECTION_CHOICES,
+        "  Which additional sections would you like to configure?",
+        remainingSectionChoices,
       );
 
-      /** @type {Record<string, object>} */
-      const optionalSections = {};
-
-      // --- Project Board prompts ---
+      // --- Project Board prompts (manual, only when enrichment didn't find it) ---
       if (selectedSections.includes("projectBoard")) {
         const discovered = await discoverProjectBoard(
           ownerInput || detectedOwner,
         );
         if (discovered) {
-          // Auto-discovery succeeded — use resolved IDs
           optionalSections.projectBoard = {
             projectNumber: discovered.projectNumber,
             projectId: discovered.projectId,
@@ -2019,7 +2556,6 @@ async function init() {
             optionIds: discovered.optionIds,
           };
         } else {
-          // Fallback: manual entry (no regression from previous behaviour)
           console.log("");
           console.log(bold("  Project Board (manual)"));
           console.log(
@@ -2100,75 +2636,346 @@ async function init() {
         );
         optionalSections.verification = { healthEndpoint };
       }
+    }
+  } else {
+    // No enrichment — use the full interactive multi-select wizard (existing behaviour).
+    console.log("");
+    console.log(bold("  Optional Sections"));
+    console.log(
+      dim(
+        "  Select sections to configure now. Unselected sections are written as",
+      ),
+    );
+    console.log(
+      dim(
+        "  commented-out placeholders — you can enable them later by editing forge.yaml.",
+      ),
+    );
+    console.log("");
 
-      // -----------------------------------------------------------------------
-      // Handle existing forge.yaml with confirmation
-      // -----------------------------------------------------------------------
-      if (existsSync(outputPath)) {
+    const selectedSections = await multiSelect(
+      "  Which optional sections would you like to configure?",
+      OPTIONAL_SECTION_CHOICES,
+    );
+
+    // --- Project Board prompts ---
+    if (selectedSections.includes("projectBoard")) {
+      const discovered = await discoverProjectBoard(
+        ownerInput || detectedOwner,
+      );
+      if (discovered) {
+        optionalSections.projectBoard = {
+          projectNumber: discovered.projectNumber,
+          projectId: discovered.projectId,
+          fieldIds: discovered.fieldIds,
+          optionIds: discovered.optionIds,
+        };
+      } else {
         console.log("");
-        console.log(`  ${YELLOW}forge.yaml already exists.${RESET}`);
-        const shouldOverwrite = await confirm(
-          "  Back up existing forge.yaml and overwrite?",
-          true,
-        );
-        if (!shouldOverwrite) {
-          console.log(`  ${dim("Cancelled.")} forge.yaml was not changed.`);
-          console.log("");
-          return;
-        }
-
-        // Backup with timestamped name if .bak already exists (fix from #36)
-        const baseBak = join(cwd, "forge.yaml.bak");
-        const backupPath = existsSync(baseBak)
-          ? join(
-              cwd,
-              `forge.yaml.bak.${new Date().toISOString().replace(/[:.]/g, "-")}`,
-            )
-          : baseBak;
-        const backupName = basename(backupPath);
-        renameSync(outputPath, backupPath);
-        console.log(`  ${YELLOW}Backed up${RESET}: forge.yaml → ${backupName}`);
-      }
-
-      // Write the file
-      _writeForgeYaml({
-        outputPath,
-        cwd,
-        owner: ownerInput,
-        repo: repoInput,
-        projectName: nameInput,
-        description: descInput,
-        root: rootInput || cwd,
-        worktreeBase: worktreeInput || join(cwd, ".claude", "worktrees"),
-        defaultBranch: defaultBranchInput,
-        stagingBranch: stagingBranchInput,
-        optionalSections,
-      });
-
-      console.log("");
-      console.log(`  ${GREEN}Created${RESET}: forge.yaml`);
-      if (selectedSections.length > 0) {
+        console.log(bold("  Project Board (manual)"));
         console.log(
-          `  ${GREEN}Configured${RESET}: ${selectedSections
-            .map(
-              (s) =>
-                ({
-                  projectBoard: "project_board",
-                  multiRepo: "repos",
-                  review: "review",
-                  verification: "verification",
-                })[s],
-            )
-            .join(", ")}`,
+          dim(
+            "  Find your project number: gh project list --owner " +
+              (ownerInput || detectedOwner),
+          ),
+        );
+        const projectNumber = await input(
+          "  GitHub Projects v2 project number",
+          "1",
+        );
+        optionalSections.projectBoard = {
+          projectNumber: parseInt(projectNumber, 10) || 1,
+        };
+        console.log(
+          dim(
+            "  Field IDs (PVT_/PVTSSF_ strings) must be added manually after generation.",
+          ),
+        );
+        console.log(
+          dim(
+            "  Run: gh project field-list " +
+              (projectNumber || "1") +
+              " --owner " +
+              (ownerInput || detectedOwner),
+          ),
         );
       }
+    }
+
+    // --- Multi-Repo prompts ---
+    if (selectedSections.includes("multiRepo")) {
       console.log("");
-      await injectClaudeMd(cwd);
+      console.log(bold("  Multi-Repo"));
+      console.log(
+        dim("  Configure one satellite repo (add more by editing forge.yaml)."),
+      );
+      const prefix = await input(
+        "  Satellite repo prefix (e.g. 'mcp', 'sdk')",
+        "sat",
+      );
+      const satelliteRepo = await input(
+        "  Satellite repo name (just the name, owner will be reused)",
+        "your-satellite-repo",
+      );
+      const satelliteBranch = await input(
+        "  Satellite default/staging branch",
+        "main",
+      );
+      optionalSections.multiRepo = { prefix, satelliteRepo, satelliteBranch };
+    }
+
+    // --- Review Context prompts ---
+    if (selectedSections.includes("review")) {
       console.log("");
-      _printNextSteps({ remoteDetected: ownerInput !== "your-github-org" });
-      await validate(outputPath);
+      console.log(bold("  Review Context"));
+      const techStack = await input(
+        "  Tech stack (e.g. Next.js, FastAPI, PostgreSQL)",
+        "Node.js, TypeScript",
+      );
+      const context = await input(
+        "  Architecture notes (one line; expand in forge.yaml later)",
+        "",
+      );
+      optionalSections.review = { techStack, context };
+    }
+
+    // --- Verification prompts ---
+    if (selectedSections.includes("verification")) {
+      console.log("");
+      console.log(bold("  Verification"));
+      const healthEndpoint = await input(
+        "  Health check endpoint URL",
+        `https://api.${repoInput || detectedRepo}.io/health`,
+      );
+      optionalSections.verification = { healthEndpoint };
     }
   }
+
+  return optionalSections;
+}
+
+async function init() {
+  // init() generates forge.yaml from prompts and git remote detection.
+  // It does NOT require gh CLI or gh auth for core operation (project board
+  // auto-discovery is optional and guarded separately). Only warn if Claude
+  // Code is missing — it's the primary consumer of the generated config.
+  try {
+    execFileSync("claude", ["--version"], {
+      stdio: ["pipe", "pipe", "pipe"],
+      timeout: 5000,
+      // On Windows, claude is a .cmd shim — execFileSync needs shell: true to find it.
+      // (Ref: review-finding #382)
+      shell: process.platform === "win32",
+    });
+  } catch {
+    console.log(`  ${YELLOW}!${RESET} Claude Code CLI not found on PATH.`);
+    console.log(
+      `    Install: ${CYAN}https://docs.anthropic.com/en/docs/claude-code${RESET}`,
+    );
+    console.log("");
+  }
+
+  console.log("");
+  console.log(`${BOLD}ForgeDock${RESET} — Generate forge.yaml`);
+  console.log("");
+
+  const cwd = process.cwd();
+  const outputPath = join(cwd, "forge.yaml");
+
+  // ---------------------------------------------------------------------------
+  // Step 1: Auto-detect defaults via init-detect module.
+  // Returns a ConfigDraft with per-field { value, confidence, source, why }.
+  // ---------------------------------------------------------------------------
+
+  const baseDraft = await detectConfig(cwd);
+  const remoteDetected = baseDraft.meta.remoteDetected;
+
+  // ---------------------------------------------------------------------------
+  // Step 2: Backend-selection ladder — enrich the draft when possible.
+  // Ladder: skill (Claude Code session) → api (ANTHROPIC_API_KEY) → none (baseline)
+  // --manual bypasses enrichment entirely: presents the annotated review screen
+  // with detection baseline values only — no AI-enriched suggestions applied.
+  // ---------------------------------------------------------------------------
+
+  const backend = _detectBackend();
+  let draft = baseDraft;
+
+  if (manualMode) {
+    // Escape hatch: skip all AI enrichment; review screen shows detection baseline.
+    console.log(
+      `  ${CYAN}--manual${RESET} mode: skipping autopilot enrichment — annotated review screen`,
+    );
+    console.log("");
+  } else if (backend === "skill") {
+    const s = spinner("Enriching config via skill backend…");
+    draft = await _enrichViaSkill(baseDraft, cwd);
+    const enriched = _isEnriched(draft, baseDraft);
+    s.stop(
+      enriched ? "success" : "warn",
+      enriched
+        ? `${green("[✓]")} Config enriched via Claude Code`
+        : `${yellow("[!]")} Skill enrichment unavailable — using detected baseline`,
+    );
+  } else if (backend === "api") {
+    const s = spinner("Enriching config via Anthropic API…");
+    draft = await enrichViaAPI(baseDraft);
+    const enriched = _isEnriched(draft, baseDraft);
+    s.stop(
+      enriched ? "success" : "warn",
+      enriched
+        ? `${green("[✓]")} Config enriched via Anthropic API`
+        : `${yellow("[!]")} API enrichment unavailable — using detected baseline`,
+    );
+  }
+  // backend === 'none' (or manualMode): proceed silently with the deterministic baseline
+
+  const detectedOwner = draft.project.owner.value;
+  const detectedRepo = draft.project.repo.value;
+  const detectedName = draft.project.name.value;
+  const detectedDefault = draft.branches.default.value;
+  const detectedStaging = draft.branches.staging.value;
+
+  // Non-TTY: enrich (done above) then silently write without interactive prompts.
+  if (!process.stdin.isTTY) {
+    await _initNonTTY(draft, outputPath, cwd, remoteDetected);
+    return;
+  }
+
+  // ---------------------------------------------------------------------------
+  // Step 3: Annotated review screen — single screen replacing the per-field wizard
+  // ---------------------------------------------------------------------------
+
+  // Read existing content for diff-style display if forge.yaml already exists.
+  let existingContent = "";
+  const hasExistingConfig = existsSync(outputPath);
+  if (hasExistingConfig) {
+    try {
+      existingContent = readFileSync(outputPath, "utf-8");
+    } catch {
+      // Best-effort — missing or unreadable existing file is handled below
+    }
+  }
+
+  // Show the annotated review screen. The enriched draft populates confidence
+  // badges from both init-detect and init-enrich. Returns accepted/edited values
+  // plus the list of field keys that had low confidence (for TODO comment injection).
+  // --verbose: pass showSources:true so the screen surfaces each field's detection
+  // source and confidence rationale (the .source and .why metadata from ConfigDraft).
+  const reviewed = await annotatedReviewScreen(draft, {
+    hasExistingConfig,
+    existingContent,
+    showSources: verboseMode,
+  });
+
+  const ownerInput = _sanitizeYamlValue(reviewed.owner || detectedOwner);
+  const repoInput = _sanitizeYamlValue(reviewed.repo || detectedRepo);
+  const nameInput = _sanitizeYamlValue(reviewed.name || detectedName);
+  const descInput = _sanitizeYamlValue(reviewed.description || "");
+  const rootInput = reviewed.root || cwd;
+  const worktreeInput =
+    reviewed.worktreeBase || join(cwd, ".claude", "worktrees");
+  const defaultBranchInput = _sanitizeYamlValue(
+    reviewed.defaultBranch || detectedDefault,
+  );
+  const stagingBranchInput = _sanitizeYamlValue(
+    reviewed.stagingBranch || detectedStaging,
+  );
+
+  // -----------------------------------------------------------------------
+  // Optional sections — pre-populate from enriched draft if available,
+  // otherwise fall back to interactive multi-select + guided prompts.
+  // -----------------------------------------------------------------------
+
+  // manualMode skips enrichment — enrichmentSucceeded is false so optional sections
+  // use the interactive multi-select path rather than the enrichment-lifted path.
+  const enrichmentSucceeded =
+    !manualMode && backend !== "none" && _isEnriched(draft, baseDraft);
+
+  const optionalSections = await _collectOptionalSections({
+    ownerInput,
+    detectedOwner,
+    repoInput,
+    detectedRepo,
+    enrichmentSucceeded,
+    draft,
+  });
+
+  // -----------------------------------------------------------------------
+  // Handle existing forge.yaml with backup
+  // -----------------------------------------------------------------------
+  if (hasExistingConfig) {
+    console.log("");
+    const shouldOverwrite = await confirm(
+      "  Back up existing forge.yaml and overwrite?",
+      true,
+    );
+    if (!shouldOverwrite) {
+      console.log(`  ${dim("Cancelled.")} forge.yaml was not changed.`);
+      console.log("");
+      return;
+    }
+
+    // Backup with timestamped name if .bak already exists (fix from #36)
+    const baseBak = join(cwd, "forge.yaml.bak");
+    const backupPath = existsSync(baseBak)
+      ? join(
+          cwd,
+          `forge.yaml.bak.${new Date().toISOString().replace(/[:.]/g, "-")}`,
+        )
+      : baseBak;
+    const backupName = basename(backupPath);
+    renameSync(outputPath, backupPath);
+    console.log(`  ${YELLOW}Backed up${RESET}: forge.yaml → ${backupName}`);
+  }
+
+  // Write the file — passing lowConfidenceKeys so _writeForgeYaml can inject
+  // # TODO(forgedock:<field>) comments for fields that were low-confidence.
+  _writeForgeYaml({
+    outputPath,
+    cwd,
+    owner: ownerInput,
+    repo: repoInput,
+    projectName: nameInput,
+    description: descInput,
+    root: rootInput || cwd,
+    worktreeBase: worktreeInput || join(cwd, ".claude", "worktrees"),
+    defaultBranch: defaultBranchInput,
+    stagingBranch: stagingBranchInput,
+    optionalSections,
+    lowConfidenceKeys: reviewed.lowConfidenceKeys ?? [],
+  });
+
+  console.log("");
+  console.log(`  ${GREEN}Created${RESET}: forge.yaml`);
+  const configuredSectionKeys = Object.keys(optionalSections);
+  if (configuredSectionKeys.length > 0) {
+    console.log(
+      `  ${GREEN}Configured${RESET}: ${configuredSectionKeys
+        .map((s) => SECTION_KEY_TO_YAML_NAME[s])
+        .filter(Boolean)
+        .join(", ")}`,
+    );
+  }
+
+  // Show TODO flag summary for low-confidence fields written with comments
+  if (reviewed.lowConfidenceKeys && reviewed.lowConfidenceKeys.length > 0) {
+    console.log("");
+    console.log(
+      `  ${YELLOW}⚠${RESET}  ${reviewed.lowConfidenceKeys.length} field(s) written with ${CYAN}# TODO(forgedock:<field>)${RESET} comments:`,
+    );
+    for (const key of reviewed.lowConfidenceKeys) {
+      console.log(`     ${dim("·")} ${key}`);
+    }
+    console.log(
+      `  ${dim("Search for")} ${CYAN}TODO(forgedock:${RESET} ${dim("in forge.yaml to find them.")}`,
+    );
+  }
+
+  console.log("");
+  await injectClaudeMd(cwd);
+  console.log("");
+  _printNextSteps({ remoteDetected: ownerInput !== "your-github-org" });
+  await validate(outputPath);
 }
 
 // ---------------------------------------------------------------------------
@@ -2380,7 +3187,9 @@ async function injectClaudeMd(cwd) {
 /**
  * Sanitize a string value for safe insertion into a YAML double-quoted scalar.
  * Escapes backslashes (so a trailing \ does not corrupt the closing quote),
- * then strips double-quotes and newlines to prevent YAML injection.
+ * then strips C0/C1 Unicode control characters (\x00-\x08, \x0B, \x0C, \x0E-\x1F, \x7F-\x9F)
+ * that are invalid per YAML 1.2 in double-quoted scalars, then strips double-quotes
+ * and newlines to prevent YAML injection.
  * Backslash escaping MUST come first — before any other replacement.
  *
  * @param {string} value
@@ -2389,6 +3198,7 @@ async function injectClaudeMd(cwd) {
 function _sanitizeYamlValue(value) {
   return String(value)
     .replace(/\\/g, "\\\\")
+    .replace(/[\x00-\x08\x0B\x0C\x0E-\x1F\x7F-\x9F]/g, "")
     .replace(/"/g, "")
     .replace(/[\r\n]/g, " ")
     .trim();
@@ -2407,6 +3217,30 @@ function _sanitizePathValue(value) {
     .replace(/"/g, "")
     .replace(/[\r\n]/g, " ")
     .trim();
+}
+
+/**
+ * Sanitize a string for safe use as an unquoted YAML mapping key.
+ * Strips or normalizes characters that are structurally significant in YAML outside of
+ * quoted scalars, or that produce non-idiomatic key names:
+ *   - Whitespace (space, tab, newline, carriage return, and all Unicode whitespace) →
+ *     underscore, so LLM-derived names like "In Progress" become "In_Progress".
+ *   - Colon (key separator) and '#' (comment marker) → underscore.
+ * Sequences of replaced characters are collapsed to a single underscore so the key
+ * remains readable. Falls back to "_" if the result is empty.
+ * <!-- Added: forge#396 -->
+ *
+ * @param {string} key
+ * @returns {string}
+ */
+function _sanitizeYamlKey(key) {
+  return (
+    String(key)
+      .replace(/[\s:#]+/g, "_") // whitespace (incl. space) + structural YAML chars → underscore
+      .replace(/_+/g, "_") // collapse multiple underscores
+      .replace(/^_|_$/g, "") // strip leading/trailing underscores
+      .trim() || "_" // fallback if result is empty
+  );
 }
 
 /**
@@ -2761,10 +3595,15 @@ function buildForgeYamlContent({
         techStack: _sanitizeYamlValue(
           review.techStack || "Node.js, TypeScript, PostgreSQL",
         ),
-        // context uses a block scalar (|) — only strip double-quotes; newlines are handled by split/join
+        // context uses a block scalar (|) — normalize CR/CRLF to LF, strip C0/C1 control chars
+        // (excluding \t=\x09 and LF=\x0A which are valid in block scalars), then strip double-quotes.
+        // Must normalize \r first so split("\n") doesn't embed bare \r. split/join handles indentation.
         context: (
           review.context || "Add architecture notes and conventions here."
-        ).replace(/"/g, ""),
+        )
+          .replace(/\r\n|\r/g, "\n")
+          .replace(/[\x00-\x08\x0B\x0C\x0E-\x1F\x7F-\x9F]/g, "")
+          .replace(/"/g, ""),
       }
     : null;
 
@@ -2803,6 +3642,26 @@ function buildForgeYamlContent({
   const resolvedFieldIds = projectBoard?.fieldIds ?? {};
   const resolvedOptionIds = projectBoard?.optionIds ?? {};
 
+  // Sanitize all LLM-derived project_board string values before YAML interpolation.
+  // projectId and fieldIds come from the LLM enrichment path (_optionalSectionsFromDraft)
+  // and must be treated as untrusted — a crafted response containing a double-quote or
+  // newline would break out of the YAML double-quoted scalar.
+  // projectNumber is numeric (unquoted in YAML) and does not need sanitization.
+  // <!-- Added: forge#384 -->
+  const safeProjectBoard = projectBoard
+    ? {
+        projectId: _sanitizeYamlValue(projectBoard.projectId ?? ""),
+        projectNumber: projectBoard.projectNumber,
+        fieldIds: Object.fromEntries(
+          FIELD_KEYS.map((k) => [
+            k,
+            _sanitizeYamlValue(resolvedFieldIds[k] ?? ""),
+          ]),
+        ),
+        optionIds: projectBoard.optionIds,
+      }
+    : null;
+
   /**
    * Build a YAML block for option_ids given a nested map of { fieldKey: { optionKey: id } }.
    * Only writes fields that have at least one mapped option.
@@ -2814,9 +3673,11 @@ function buildForgeYamlContent({
     if (entries.length === 0) return "";
     const lines = ["  option_ids:"];
     for (const [fieldKey, opts] of entries) {
-      lines.push(`    ${fieldKey}:`);
+      lines.push(`    ${_sanitizeYamlKey(fieldKey)}:`);
       for (const [optKey, optId] of Object.entries(opts)) {
-        lines.push(`      ${optKey}: "${optId}"`);
+        lines.push(
+          `      ${_sanitizeYamlKey(optKey)}: "${_sanitizeYamlValue(String(optId))}"`,
+        );
       }
     }
     return "\n" + lines.join("\n");
@@ -2824,20 +3685,20 @@ function buildForgeYamlContent({
 
   const fieldIdsBlock = FIELD_KEYS.map(
     (k) =>
-      `    ${k}: "${resolvedFieldIds[k] ?? "PVTSSF_xxxxxxxxxxxxxxxxxxxxxxxx"}"`,
+      `    ${k}: "${safeProjectBoard?.fieldIds[k] || "PVTSSF_xxxxxxxxxxxxxxxxxxxxxxxx"}"`,
   ).join("\n");
 
   const optionIdsBlock = projectBoard?.optionIds
     ? _buildOptionIdsBlock(resolvedOptionIds)
     : "";
 
-  const hasDiscoveredId = !!projectBoard?.projectId;
+  const hasDiscoveredId = !!safeProjectBoard?.projectId;
 
   const projectBoardSection = projectBoard
     ? `project_board:
   owner: "${owner}"
   project_number: ${projectBoard.projectNumber || 1}
-  project_id: "${hasDiscoveredId ? projectBoard.projectId : "PVT_kwHOxxxxxxxxxxxxxxxx"}"
+  project_id: "${hasDiscoveredId ? safeProjectBoard.projectId : "PVT_kwHOxxxxxxxxxxxxxxxx"}"
   field_ids:
 ${fieldIdsBlock}${optionIdsBlock}${!hasDiscoveredId ? `\n# To find IDs: gh project field-list ${projectBoard.projectNumber || 1} --owner ${owner}` : ""}`
     : `# project_board:
@@ -2941,10 +3802,120 @@ ${verificationSection}
 `;
 }
 
-/** Write forge.yaml to disk. Accepts all params for buildForgeYamlContent plus outputPath. */
+/**
+ * Mapping from annotatedReviewScreen field keys to the YAML key patterns they
+ * correspond to in the generated forge.yaml. Used to inject TODO comments.
+ *
+ * Each entry is either:
+ *   - A plain string: the leading-whitespace + key prefix that identifies the line
+ *     (matches in any YAML section).
+ *   - An object `{ pattern: string, section: string }`: only matches when the
+ *     scanner is currently inside the named top-level YAML section. Use this form
+ *     when the same key name appears in multiple sections but should only be
+ *     annotated in one (e.g. `owner:` appears in both `project:` and `project_board:`).
+ */
+const TODO_FIELD_YAML_KEYS = {
+  owner: { pattern: "  owner:", section: "project" },
+  repo: "  repo:",
+  name: "  name:",
+  description: "  description:",
+  root: "  root:",
+  worktreeBase: "  worktree_base:",
+  defaultBranch: "  default:",
+  stagingBranch: "  staging:",
+};
+
+/**
+ * Inject `# TODO(forgedock:<fieldKey>)` comments above each low-confidence
+ * field line in the YAML content string.
+ *
+ * The comment is inserted as a full line above the matching key line.
+ * Example output:
+ *   # TODO(forgedock:owner) — low-confidence: verify and update
+ *   owner: "your-github-org"
+ *
+ * Section tracking: the scanner maintains `currentSection` by detecting
+ * unindented top-level keys (lines matching `/^[a-z_]+:/`). Entries in
+ * TODO_FIELD_YAML_KEYS that specify a `section` constraint are only annotated
+ * when `currentSection` matches — preventing false annotations on keys that
+ * share the same name across multiple YAML sections (e.g. `owner:` appears in
+ * both `project:` and `project_board:`).
+ *
+ * @param {string} content - Generated forge.yaml content
+ * @param {string[]} lowConfidenceKeys - Array of field key strings to flag
+ * @returns {string} - Content with TODO comments injected
+ */
+function _injectTodoComments(content, lowConfidenceKeys) {
+  if (!lowConfidenceKeys || lowConfidenceKeys.length === 0) return content;
+
+  const lines = content.split("\n");
+  const result = [];
+  // Track the current top-level YAML section so section-scoped entries in
+  // TODO_FIELD_YAML_KEYS are only matched within their intended section.
+  let currentSection = null;
+
+  for (const line of lines) {
+    // Detect top-level section headers: unindented lines of the form `word:` or `word_word:`.
+    // Ignore comment lines (starting with #) and blank lines.
+    const sectionMatch = line.match(/^([a-z][a-z0-9_]*):/);
+    if (sectionMatch) {
+      currentSection = sectionMatch[1];
+    }
+
+    // Check if this line matches any low-confidence field key pattern.
+    for (const key of lowConfidenceKeys) {
+      const entry = TODO_FIELD_YAML_KEYS[key];
+      if (!entry) continue;
+
+      // Support both plain-string entries and { pattern, section } object entries.
+      const pattern = typeof entry === "string" ? entry : entry.pattern;
+      const requiredSection =
+        typeof entry === "string" ? null : (entry.section ?? null);
+
+      if (
+        line.startsWith(pattern) &&
+        (requiredSection === null || currentSection === requiredSection)
+      ) {
+        // Insert the TODO comment above the key line (same indentation).
+        const indent = line.match(/^(\s*)/)[1];
+        result.push(
+          `${indent}# TODO(forgedock:${key}) — low-confidence: verify and update`,
+        );
+        break;
+      }
+    }
+    result.push(line);
+  }
+
+  return result.join("\n");
+}
+
+/** Write forge.yaml to disk. Accepts all params for buildForgeYamlContent plus outputPath and lowConfidenceKeys.
+ * Uses a tmp-file + renameSync pattern to ensure the write is atomic — consistent with how
+ * writeClaudeSettings() and shell-profile writes are done elsewhere in this file.
+ */
 function _writeForgeYaml(opts) {
-  const content = buildForgeYamlContent(opts);
-  writeFileSync(opts.outputPath, content, "utf-8");
+  let content = buildForgeYamlContent(opts);
+  // Inject TODO comments for low-confidence fields detected during review.
+  if (opts.lowConfidenceKeys && opts.lowConfidenceKeys.length > 0) {
+    content = _injectTodoComments(content, opts.lowConfidenceKeys);
+  }
+  // Atomic write: write to a .tmp sibling then rename into place so a kill
+  // mid-write never leaves forge.yaml partially written (config is regenerable,
+  // but a partial file causes confusing validation errors).
+  const tmpPath = opts.outputPath + ".forgedock.tmp";
+  try {
+    writeFileSync(tmpPath, content, "utf-8");
+    renameSync(tmpPath, opts.outputPath);
+  } catch (err) {
+    // Clean up temp file if it was created before the error
+    try {
+      unlinkSync(tmpPath);
+    } catch {
+      /* already gone or never created */
+    }
+    throw err;
+  }
 }
 
 /** Print next-steps guidance after forge.yaml is written. */
@@ -3077,6 +4048,7 @@ async function validate(forgeYamlPath) {
       note: `Not found: ${forgeYamlPath}`,
     });
     _renderValidationSummary(checks);
+    await _offerRemediations(checks, forgeYamlPath);
     return { passed: false, checks };
   }
 
@@ -3090,6 +4062,7 @@ async function validate(forgeYamlPath) {
       note: `Cannot read: ${err.message}`,
     });
     _renderValidationSummary(checks);
+    await _offerRemediations(checks, forgeYamlPath);
     return { passed: false, checks };
   }
 
@@ -3347,8 +4320,376 @@ async function validate(forgeYamlPath) {
   }
 
   _renderValidationSummary(checks);
+  await _offerRemediations(checks, forgeYamlPath);
   const hasError = checks.some((c) => c.status === "error");
   return { passed: !hasError, checks };
+}
+
+/**
+ * Offer plain-language explanations and optional auto-fixes for each failing check.
+ *
+ * Runs after _renderValidationSummary() so the summary is always visible first.
+ * For each check that is not 'ok':
+ *   - Prints a plain-language sentence explaining why it matters and what to do.
+ *   - Prints a copy-paste command where applicable.
+ *   - For safe, deterministic fixes (directory creation, gh auth), offers an
+ *     auto-apply step gated on a TTY confirmation prompt.
+ *
+ * Non-destructive policy:
+ *   - Never auto-edits forge.yaml values.
+ *   - Never auto-applies project board ID changes.
+ *   - Auto-mkdir is offered only when the user explicitly listed the path in forge.yaml.
+ *   - Spawning `gh auth login` is offered only in TTY environments.
+ *   - Non-TTY: prints copy-paste text only, skips all interactive prompts.
+ *
+ * @param {Array<{label: string, status: 'ok'|'warn'|'error', note: string}>} checks
+ * @param {string} forgeYamlPath - Absolute path to forge.yaml (used in explanations)
+ * @returns {Promise<void>}
+ */
+async function _offerRemediations(checks, forgeYamlPath) {
+  // Collect only failing checks — skip 'ok' and purely-optional skipped checks
+  // that have no actionable remediation (e.g. "Not configured (optional)").
+  const failing = checks.filter(
+    (c) =>
+      c.status !== "ok" &&
+      !c.note.endsWith("(optional)") &&
+      c.note !== "Not configured (optional)",
+  );
+
+  if (failing.length === 0) return;
+
+  /** Whether we're in an interactive terminal — gates all prompts. */
+  const isTTY = Boolean(process.stdin.isTTY);
+
+  // Print section header
+  console.log("");
+  console.log(`  ${bold("Remediation guide:")}`);
+
+  for (const check of failing) {
+    const label = check.label;
+    const note = check.note ?? "";
+    const isError = check.status === "error";
+
+    // ── 1. forge.yaml not found ─────────────────────────────────────────────
+    if (label === "forge.yaml found") {
+      console.log("");
+      console.log(`  ${isError ? red("✗") : yellow("!")} ${bold(label)}`);
+      console.log(
+        `    ForgeDock reads ${cyan("forge.yaml")} from your project root to know which`,
+      );
+      console.log(
+        `    GitHub repo, branches, and paths to use. Without it, no pipeline commands`,
+      );
+      console.log(`    will function correctly.`);
+      console.log(
+        `    ${bold("Fix:")} Generate forge.yaml with AI assistance:`,
+      );
+      console.log(`      ${cyan("npx forgedock init")}`);
+      continue;
+    }
+
+    // ── 2. Required fields missing ──────────────────────────────────────────
+    if (label === "Required fields") {
+      // Extract the field names from the note
+      const missingMatch = note.match(/Missing or placeholder:\s*(.+)/);
+      const fields = missingMatch ? missingMatch[1] : note;
+      console.log("");
+      console.log(`  ${isError ? red("✗") : yellow("!")} ${bold(label)}`);
+      console.log(
+        `    The following fields are required but missing or still set to`,
+      );
+      console.log(`    placeholder values: ${cyan(fields)}`);
+      console.log(
+        `    ForgeDock uses these to route all GitHub API calls and git operations.`,
+      );
+      console.log(
+        `    ${bold("Fix:")} Open ${cyan("forge.yaml")} and fill in the real values:`,
+      );
+      for (const field of fields.split(",").map((f) => f.trim())) {
+        let hint = "";
+        if (field === "project.owner") hint = `  # your GitHub org or username`;
+        else if (field === "project.repo")
+          hint = `  # the repository name (without the owner prefix)`;
+        else if (field === "paths.root")
+          hint = `  # absolute path to this project on your machine`;
+        else if (field === "branches.default")
+          hint = `  # usually "main" or "master"`;
+        console.log(`      ${cyan(field)}: "<value>"${dim(hint)}`);
+      }
+      continue;
+    }
+
+    // ── 3. paths.root does not exist ────────────────────────────────────────
+    if (label === "paths.root exists") {
+      const pathMatch = note.match(/Directory not found:\s*(.+)/);
+      const missingPath = pathMatch ? pathMatch[1].trim() : note;
+      console.log("");
+      console.log(`  ${yellow("!")} ${bold(label)}`);
+      console.log(
+        `    ForgeDock uses ${cyan("paths.root")} as the base directory for all git`,
+      );
+      console.log(
+        `    worktrees and file operations. The configured path does not exist:`,
+      );
+      console.log(`      ${dim(missingPath)}`);
+      console.log(
+        `    ${bold("Option A:")} If this is your project directory, create it:`,
+      );
+      console.log(`      ${cyan(`mkdir -p "${missingPath}"`)}`);
+      console.log(
+        `    ${bold("Option B:")} If the project already exists elsewhere, update forge.yaml:`,
+      );
+      console.log(
+        `      ${cyan("paths.root")}: "<correct absolute path to your project>"`,
+      );
+
+      // Offer auto-mkdir if TTY — safe because the user explicitly listed this path
+      if (isTTY) {
+        console.log("");
+        const shouldCreate = await confirm(
+          `  Create ${dim(missingPath)} now?`,
+          false,
+        );
+        if (shouldCreate) {
+          try {
+            await mkdir(missingPath, { recursive: true });
+            console.log(`    ${green("✔")} Created: ${dim(missingPath)}`);
+          } catch (mkdirErr) {
+            console.log(
+              `    ${red("✖")} Could not create directory: ${mkdirErr.message}`,
+            );
+          }
+        }
+      }
+      continue;
+    }
+
+    // ── 4. worktree_base cannot be created ──────────────────────────────────
+    if (label === "worktree_base exists" && note.startsWith("Cannot create:")) {
+      const errMsg = note.replace("Cannot create:", "").trim();
+      console.log("");
+      console.log(`  ${yellow("!")} ${bold(label)}`);
+      console.log(
+        `    ForgeDock could not create the worktree directory automatically.`,
+      );
+      console.log(`    Error: ${dim(errMsg)}`);
+      console.log(
+        `    Worktrees are temporary checkout directories used during builds.`,
+      );
+      console.log(
+        `    ${bold("Fix:")} Check that the parent directory is writable, or update`,
+      );
+      console.log(
+        `    ${cyan("paths.worktree_base")} in forge.yaml to a writable location.`,
+      );
+      continue;
+    }
+
+    // ── 5. GitHub repo inaccessible ─────────────────────────────────────────
+    if (label === "GitHub repo accessible") {
+      // Try to detect whether gh is unauthenticated vs wrong repo name
+      let isAuthIssue = false;
+      try {
+        execFileSync("gh", ["auth", "status"], {
+          stdio: ["pipe", "pipe", "pipe"],
+          timeout: 5000,
+        });
+      } catch {
+        isAuthIssue = true;
+      }
+
+      // Extract the repo slug from the note if possible
+      const repoMatch = note.match(/Cannot access ([^\s]+)/);
+      const repoSlug = repoMatch ? repoMatch[1] : "owner/repo";
+
+      console.log("");
+      console.log(`  ${yellow("!")} ${bold(label)}`);
+
+      if (isAuthIssue) {
+        console.log(
+          `    The GitHub CLI is not authenticated. ForgeDock needs read access to`,
+        );
+        console.log(
+          `    ${cyan(repoSlug)} to list issues, manage PRs, and run pipeline commands.`,
+        );
+        console.log(`    ${bold("Fix:")} Authenticate with the GitHub CLI:`);
+        console.log(`      ${cyan("gh auth login")}`);
+
+        if (isTTY) {
+          console.log("");
+          const shouldAuth = await confirm(
+            `  Run ${cyan("gh auth login")} now?`,
+            false,
+          );
+          if (shouldAuth) {
+            try {
+              execFileSync("gh", ["auth", "login"], {
+                stdio: "inherit",
+                shell: process.platform === "win32",
+              });
+            } catch {
+              // User may have cancelled — not an error from our side
+            }
+          }
+        }
+      } else {
+        console.log(
+          `    Cannot access ${cyan(repoSlug)}. The GitHub CLI is authenticated but`,
+        );
+        console.log(
+          `    the repo may not exist, you may not have permission, or the owner/repo`,
+        );
+        console.log(`    values in forge.yaml are incorrect.`);
+        console.log(
+          `    ${bold("Fix:")} Verify the repo exists and is accessible:`,
+        );
+        console.log(`      ${cyan(`gh repo view ${repoSlug}`)}`);
+        console.log(
+          `    Then update ${cyan("project.owner")} and ${cyan("project.repo")} in forge.yaml if needed.`,
+        );
+      }
+      continue;
+    }
+
+    // ── 6. Branch not found on remote ───────────────────────────────────────
+    if (label.startsWith("Branch: ")) {
+      const branchName = label.replace("Branch: ", "").trim();
+      console.log("");
+      console.log(`  ${yellow("!")} ${bold(label)}`);
+      console.log(
+        `    Branch ${cyan(branchName)} was not found on the remote. ForgeDock uses`,
+      );
+      console.log(`    this branch for PRs and as a base for new work.`);
+      console.log(`    ${bold("Option A:")} Create and push the branch:`);
+      console.log(
+        `      ${cyan(`git checkout -b ${branchName} && git push -u origin ${branchName}`)}`,
+      );
+      console.log(
+        `    ${bold("Option B:")} Update the branch name in forge.yaml to one that exists:`,
+      );
+      console.log(
+        `      ${cyan("branches.default")} or ${cyan("branches.staging")} → the correct branch name`,
+      );
+      continue;
+    }
+
+    // ── 7. Project board not configured or invalid ──────────────────────────
+    if (label === "Project board configured" || label === "Project board") {
+      if (note.includes("placeholder")) {
+        console.log("");
+        console.log(`  ${yellow("!")} ${bold(label)}`);
+        console.log(
+          `    The ${cyan("project_board.project_id")} in forge.yaml is still a placeholder.`,
+        );
+        console.log(
+          `    This ID is required for the pipeline to move issues across the board automatically.`,
+        );
+        console.log(
+          `    ${bold("Fix:")} Get your project ID from the GitHub CLI:`,
+        );
+        console.log(
+          `      ${cyan("gh project list --owner <your-org-or-username>")}`,
+        );
+        console.log(
+          `    Copy the ${cyan("PVT_...")} ID from the output and update ${cyan("project_board.project_id")} in forge.yaml.`,
+        );
+      } else if (isError) {
+        // Malformed project_id
+        console.log("");
+        console.log(`  ${red("✗")} ${bold(label)}`);
+        console.log(
+          `    The ${cyan("project_board.project_id")} value does not match the expected`,
+        );
+        console.log(
+          `    format (${cyan("PVT_...")} — a GitHub Projects GraphQL node ID).`,
+        );
+        console.log(`    ${bold("Fix:")} Look up your real project ID:`);
+        console.log(
+          `      ${cyan("gh project list --owner <your-org-or-username>")}`,
+        );
+        console.log(
+          `    Replace the value in forge.yaml with the ${cyan("PVT_...")} ID shown.`,
+        );
+      } else if (note.includes("may be invalid")) {
+        console.log("");
+        console.log(`  ${yellow("!")} ${bold(label)}`);
+        console.log(
+          `    The ${cyan("project_board.project_id")} could not be verified via the GitHub API.`,
+        );
+        console.log(
+          `    It may be invalid or the GitHub CLI may lack org-level permissions.`,
+        );
+        console.log(`    ${bold("Fix:")} Verify your project ID:`);
+        console.log(
+          `      ${cyan("gh project list --owner <your-org-or-username>")}`,
+        );
+      } else if (note.includes("gh error")) {
+        console.log("");
+        console.log(`  ${yellow("!")} ${bold(label)}`);
+        console.log(
+          `    Could not verify the project board ID — the GitHub API call failed.`,
+        );
+        console.log(
+          `    This is usually a transient network issue or a permissions gap.`,
+        );
+        console.log(`    ${bold("Fix:")} Check your auth and try again:`);
+        console.log(`      ${cyan("gh auth status")}`);
+        console.log(
+          `      ${cyan("gh project list --owner <your-org-or-username>")}`,
+        );
+      }
+      continue;
+    }
+
+    // ── 8. Satellite repo inaccessible ──────────────────────────────────────
+    if (label.startsWith("Satellite: ")) {
+      const satRepo = label.replace("Satellite: ", "").trim();
+      console.log("");
+      console.log(`  ${yellow("!")} ${bold(label)}`);
+      console.log(`    Cannot access satellite repo ${cyan(satRepo)}.`);
+      console.log(
+        `    Satellite repos are used when your project spans multiple repositories.`,
+      );
+      console.log(`    ${bold("Fix:")} Verify the repo name and your access:`);
+      console.log(`      ${cyan(`gh repo view ${satRepo}`)}`);
+      console.log(
+        `    If the repo name is wrong, update ${cyan("repos.satellites")} in forge.yaml.`,
+      );
+      console.log(
+        `    If it is a private repo you cannot access, run: ${cyan("gh auth login")}`,
+      );
+      continue;
+    }
+
+    // ── 9. Satellite repos section misconfigured ─────────────────────────────
+    if (label === "Satellite repos" && note.includes("no satellites found")) {
+      console.log("");
+      console.log(`  ${yellow("!")} ${bold(label)}`);
+      console.log(
+        `    The ${cyan("repos:")} section in forge.yaml is active (uncommented) but`,
+      );
+      console.log(
+        `    contains no satellite entries. Either add satellites or comment out the section.`,
+      );
+      console.log(
+        `    ${bold("Fix:")} Add a satellite entry or comment out the repos: section.`,
+      );
+      continue;
+    }
+
+    // ── Fallback: generic remediation for unexpected checks ──────────────────
+    if (note && !note.endsWith("(optional)")) {
+      console.log("");
+      console.log(
+        `  ${isError ? red("✗") : yellow("!")} ${bold(label)}: ${dim(note)}`,
+      );
+      console.log(
+        `    Review the check above and update forge.yaml or run ${cyan("npx forgedock init")} to regenerate.`,
+      );
+    }
+  }
+
+  console.log("");
 }
 
 /**
@@ -3738,6 +5079,161 @@ async function docsInit() {
   console.log("");
 }
 
+// ---------------------------------------------------------------------------
+// enable / disable / status — per-directory state management
+// ---------------------------------------------------------------------------
+
+/**
+ * Enable ForgeDock for a directory.
+ *
+ * - Clears any existing opt-out entry in the registry (so the directory becomes
+ *   active again if it was previously disabled).
+ * - Writes a lightweight `.forgedock` marker file if neither `forge.yaml` nor
+ *   `.forgedock` already exists — this marks the directory as ForgeDock-managed
+ *   before a full config is generated.
+ *
+ * @param {string} dir - Absolute path to the directory to enable.
+ * @returns {Promise<void>}
+ */
+async function enableCommand(dir) {
+  const absDir = resolve(dir);
+
+  // Clear any opt-out entry so the directory becomes active
+  await setOptOut(absDir, false);
+
+  // Write .forgedock marker only if the directory is not already managed
+  const hasForgeYaml = existsSync(join(absDir, "forge.yaml"));
+  const hasMarker = existsSync(join(absDir, ".forgedock"));
+
+  if (!hasForgeYaml && !hasMarker) {
+    try {
+      await writeFile(join(absDir, ".forgedock"), "", "utf-8");
+      console.log(`${GREEN}✓${RESET} ForgeDock enabled for ${cyan(absDir)}`);
+      console.log(
+        `  ${dim(".forgedock marker written — run")} ${cyan("npx forgedock init")} ${dim("to generate forge.yaml")}`,
+      );
+    } catch (err) {
+      console.log(
+        `${YELLOW}!${RESET} Could not write .forgedock marker: ${err.message}`,
+      );
+      console.log(
+        `  ${dim("Opt-out cleared — directory will be treated as active once a marker or forge.yaml is added.")}`,
+      );
+    }
+  } else {
+    console.log(`${GREEN}✓${RESET} ForgeDock enabled for ${cyan(absDir)}`);
+    if (hasForgeYaml) {
+      console.log(
+        `  ${dim("forge.yaml already present — directory is managed.")}`,
+      );
+    } else {
+      console.log(
+        `  ${dim(".forgedock marker already present — directory is managed.")}`,
+      );
+    }
+  }
+}
+
+/**
+ * Disable ForgeDock for a directory.
+ *
+ * Records an explicit opt-out in the central registry so the SessionStart hook
+ * stays completely silent in this directory. The `.forgedock` marker (if present)
+ * is left untouched — re-enabling simply clears the opt-out entry.
+ *
+ * @param {string} dir - Absolute path to the directory to disable.
+ * @returns {Promise<void>}
+ */
+async function disableCommand(dir) {
+  const absDir = resolve(dir);
+
+  await setOptOut(absDir, true);
+
+  console.log(`${YELLOW}–${RESET} ForgeDock disabled for ${cyan(absDir)}`);
+  console.log(
+    `  ${dim("The SessionStart hook will be silent in this directory.")}`,
+  );
+  console.log(
+    `  ${dim("Re-enable with:")} ${cyan(`npx forgedock enable "${absDir}"`)}`,
+  );
+}
+
+/**
+ * Print the resolved ForgeDock state for a directory.
+ *
+ * Maps the three states returned by resolveState() to a human-readable
+ * explanation of what ForgeDock will do in this directory.
+ *
+ * @param {string} dir - Absolute path to the directory to inspect.
+ * @returns {Promise<void>}
+ */
+async function statusCommand(dir) {
+  const absDir = resolve(dir);
+  const state = resolveState(absDir);
+
+  const hasForgeYaml = existsSync(join(absDir, "forge.yaml"));
+  const hasMarker = existsSync(join(absDir, ".forgedock"));
+
+  console.log("");
+  console.log(`${BOLD}ForgeDock status${RESET} — ${cyan(absDir)}`);
+  console.log("");
+
+  switch (state) {
+    case "managed-active":
+      console.log(`  ${GREEN}● Active${RESET}`);
+      console.log(
+        `  ${dim("ForgeDock is managed and active in this directory.")}`,
+      );
+      if (hasForgeYaml) {
+        console.log(`  ${dim("Managed via:")} forge.yaml`);
+      } else if (hasMarker) {
+        console.log(`  ${dim("Managed via:")} .forgedock marker`);
+        console.log(
+          `  ${dim("Run")} ${cyan("npx forgedock init")} ${dim("to generate a full forge.yaml.")}`,
+        );
+      }
+      console.log(
+        `  ${dim("To disable:")} ${cyan(`npx forgedock disable "${absDir}"`)}`,
+      );
+      break;
+
+    case "managed-optedout":
+      console.log(`  ${YELLOW}○ Disabled${RESET}`);
+      console.log(
+        `  ${dim("This directory is managed (has a forge.yaml or .forgedock marker)")}`,
+      );
+      console.log(
+        `  ${dim("but has been explicitly opted out — the SessionStart hook is silent here.")}`,
+      );
+      if (hasForgeYaml) {
+        console.log(`  ${dim("Managed via:")} forge.yaml`);
+      } else if (hasMarker) {
+        console.log(`  ${dim("Managed via:")} .forgedock marker`);
+      }
+      console.log(
+        `  ${dim("To re-enable:")} ${cyan(`npx forgedock enable "${absDir}"`)}`,
+      );
+      break;
+
+    case "unmanaged":
+      console.log(`  ${dim("◌ Unmanaged")}`);
+      console.log(
+        `  ${dim("No forge.yaml or .forgedock marker found in this directory.")}`,
+      );
+      console.log(`  ${dim("ForgeDock is not active here.")}`);
+      console.log(
+        `  ${dim("To enable:")} ${cyan(`npx forgedock enable "${absDir}"`)}`,
+      );
+      break;
+
+    default:
+      console.log(`  ${dim("Unknown state:")} ${state}`);
+      break;
+  }
+
+  console.log("");
+}
+
 function help() {
   console.log("");
   console.log(
@@ -3751,6 +5247,12 @@ function help() {
   console.log(`  ${CYAN}npx forgedock install${RESET}    Install commands`);
   console.log(
     `  ${CYAN}npx forgedock init${RESET}       Generate forge.yaml config for your project`,
+  );
+  console.log(
+    `  ${CYAN}npx forgedock init --manual${RESET}   Skip autopilot enrichment; review screen shows detection baseline only`,
+  );
+  console.log(
+    `  ${CYAN}npx forgedock init --verbose${RESET}  Show detection sources and confidence during init`,
   );
   console.log(
     `  ${CYAN}npx forgedock validate${RESET}   Validate forge.yaml configuration`,
@@ -3778,6 +5280,15 @@ function help() {
   );
   console.log(
     `  ${CYAN}npx forgedock docs init${RESET}  Scaffold devdocs knowledge tree into current project`,
+  );
+  console.log(
+    `  ${CYAN}npx forgedock enable [dir]${RESET}   Enable ForgeDock for a directory (default: cwd)`,
+  );
+  console.log(
+    `  ${CYAN}npx forgedock disable [dir]${RESET}  Disable ForgeDock for a directory (default: cwd)`,
+  );
+  console.log(
+    `  ${CYAN}npx forgedock status [dir]${RESET}   Show ForgeDock state for a directory (default: cwd)`,
   );
   console.log(`  ${CYAN}npx forgedock help${RESET}       Show this help`);
   console.log("");
@@ -4223,6 +5734,15 @@ if (!command) {
       }
       break;
     }
+    case "enable":
+      await enableCommand(args[1] || process.cwd());
+      break;
+    case "disable":
+      await disableCommand(args[1] || process.cwd());
+      break;
+    case "status":
+      await statusCommand(args[1] || process.cwd());
+      break;
     case "help":
     case "--help":
     case "-h":

@@ -107,7 +107,7 @@ export function box(content, { title = "", padding = 1, width } = {}) {
   const pad = " ".repeat(padding);
 
   // Strip ANSI codes to compute visual width
-  const stripAnsi = (s) => s.replace(/\x1b\[[0-9;]*m/g, "");
+  const stripAnsi = (s) => s.replace(/\x1b\[[0-9;]*[A-Za-z]/g, "");
 
   const contentWidth = lines.reduce(
     (max, l) => Math.max(max, stripAnsi(l).length),
@@ -659,7 +659,7 @@ export function table(
 ) {
   if (!rows || rows.length === 0) return "";
 
-  const stripAnsi = (s) => s.replace(/\x1b\[[0-9;]*m/g, "");
+  const stripAnsi = (s) => s.replace(/\x1b\[[0-9;]*[A-Za-z]/g, "");
 
   // Compute column widths
   const colCount = Math.max(...rows.map((r) => r.length));
@@ -699,4 +699,455 @@ export function table(
   });
 
   return lines.join("\n") + "\n";
+}
+
+// ---------------------------------------------------------------------------
+// Annotated Review Screen
+// ---------------------------------------------------------------------------
+
+/**
+ * Confidence badge — returns a short colored indicator string.
+ * Uses function wrappers (not raw ANSI constants) so NO_COLOR is respected.
+ *
+ * @param {'high'|'medium'|'low'} confidence
+ * @returns {string}
+ */
+function confidenceBadge(confidence) {
+  switch (confidence) {
+    case "high":
+      return green("[high]");
+    case "medium":
+      return yellow("[med] ");
+    case "low":
+      return red("[low] ");
+    default:
+      return dim("[???] ");
+  }
+}
+
+/**
+ * All ConfigDraft fields in display order with their human-readable labels
+ * and the forge.yaml key used for TODO comments.
+ */
+const REVIEW_FIELDS = [
+  { key: "owner",         label: "GitHub Owner",       section: "project",  draftPath: ["project", "owner"] },
+  { key: "repo",          label: "Repository Name",    section: "project",  draftPath: ["project", "repo"] },
+  { key: "name",          label: "Project Name",       section: "project",  draftPath: ["project", "name"] },
+  { key: "description",   label: "Description",        section: "project",  draftPath: null },
+  { key: "root",          label: "Repository Root",    section: "paths",    draftPath: ["paths", "root"] },
+  { key: "worktreeBase",  label: "Worktree Base",      section: "paths",    draftPath: ["paths", "worktreeBase"] },
+  { key: "defaultBranch", label: "Default Branch",     section: "branches", draftPath: ["branches", "default"] },
+  { key: "stagingBranch", label: "Staging Branch",     section: "branches", draftPath: ["branches", "staging"] },
+];
+
+/**
+ * Render the annotated review screen for a ConfigDraft.
+ *
+ * Shows every required forge.yaml field with its detected value, confidence
+ * badge, source, and a plain-language "why" explanation. The user presses
+ * Enter to accept all values, or types a field number to edit that field
+ * inline. Fields with low confidence are flagged — the caller can use the
+ * returned metadata to inject \`# TODO(forgedock:<field>)\` YAML comments.
+ *
+ * @param {import('./init-detect.mjs').ConfigDraft} draft
+ *   The ConfigDraft returned by detectConfig().
+ * @param {object} [opts]
+ * @param {boolean} [opts.hasExistingConfig=false]
+ *   When true, shows a "diff-style" header noting an existing forge.yaml will
+ *   be overwritten.
+ * @param {string} [opts.existingContent=""]
+ *   Serialized content of the existing forge.yaml for diff context display.
+ * @param {boolean} [opts.showSources=false]
+ *   When true (e.g. \`--verbose\` mode), renders the Notes/why block for ALL
+ *   fields — including high-confidence ones — so the user can see every
+ *   detection source and reasoning string.
+ *
+ * @returns {Promise<{
+ *   owner:         string,
+ *   repo:          string,
+ *   name:          string,
+ *   description:   string,
+ *   root:          string,
+ *   worktreeBase:  string,
+ *   defaultBranch: string,
+ *   stagingBranch: string,
+ *   lowConfidenceKeys: string[],
+ * }>}
+ * Resolves with the accepted (or edited) values, plus the list of field keys
+ * that had low confidence at the time of the screen render (so the caller can
+ * inject TODO comments).
+ */
+export async function annotatedReviewScreen(
+  draft,
+  { hasExistingConfig = false, existingContent = "", showSources = false } = {},
+) {
+  // Helper — pull a field from the draft by path, or return a low-confidence placeholder.
+  function getField(draftPath) {
+    if (!draftPath) return { value: "", confidence: "low", source: "none", why: "Not auto-detected" };
+    let node = draft;
+    for (const key of draftPath) {
+      if (node && typeof node === "object" && key in node) {
+        node = node[key];
+      } else {
+        return { value: "", confidence: "low", source: "none", why: "Not auto-detected" };
+      }
+    }
+    if (node && typeof node === "object" && "value" in node) return node;
+    return { value: "", confidence: "low", source: "none", why: "Not auto-detected" };
+  }
+
+  // Build the mutable values map (starts from draft detections).
+  // Description is not part of ConfigDraft — always starts empty with low confidence.
+  const values = {};
+  const confidences = {};
+  const sources = {};
+  const whys = {};
+
+  for (const fd of REVIEW_FIELDS) {
+    const field = getField(fd.draftPath);
+    values[fd.key] = field.value;
+    confidences[fd.key] = field.confidence;
+    sources[fd.key] = field.source;
+    whys[fd.key] = field.why;
+  }
+
+  // Non-TTY: return detect values directly without interaction.
+  if (!process.stdin.isTTY) {
+    return {
+      ...values,
+      lowConfidenceKeys: REVIEW_FIELDS.filter(
+        (fd) => confidences[fd.key] === "low",
+      ).map((fd) => fd.key),
+    };
+  }
+
+  const stripAnsi = (s) => s.replace(/\x1b\[[0-9;]*[A-Za-z]/g, "");
+
+  // Pad an ANSI-decorated string to `width` visible characters.
+  function padVisible(str, width) {
+    const visual = stripAnsi(str).length;
+    return str + " ".repeat(Math.max(0, width - visual));
+  }
+
+  // Truncate an ANSI-decorated string to at most `maxWidth` visible characters,
+  // never bisecting an escape sequence.
+  function truncateVisible(str, maxWidth) {
+    const ansiRe = /\x1b\[[0-9;]*[A-Za-z]/g;
+    let visible = 0;
+    let result = "";
+    let lastIndex = 0;
+    let m;
+    ansiRe.lastIndex = 0;
+    while ((m = ansiRe.exec(str)) !== null) {
+      // Consume plain-text chars before this ANSI token
+      const plain = str.slice(lastIndex, m.index);
+      const remaining = maxWidth - visible;
+      if (remaining > 0) {
+        result += plain.slice(0, remaining);
+        visible += Math.min(plain.length, remaining);
+      }
+      // Always include the ANSI token (zero visible width)
+      result += m[0];
+      lastIndex = ansiRe.lastIndex;
+    }
+    // Remaining plain text after last ANSI token
+    const remaining = maxWidth - visible;
+    if (remaining > 0) {
+      result += str.slice(lastIndex, lastIndex + remaining);
+    }
+    // If truncation occurred and the result contains any ANSI sequences,
+    // append a full reset to prevent color from bleeding into adjacent columns.
+    // Truncation is detected by checking whether the original string has more
+    // visible characters than maxWidth (i.e. stripAnsi(str).length > maxWidth).
+    if (stripAnsi(str).length > maxWidth && result.includes("\x1b[")) {
+      result += "\x1b[0m";
+    }
+    return result;
+  }
+
+  // ── Render the annotated table ────────────────────────────────────────────
+  function renderScreen() {
+    process.stdout.write("\n");
+
+    if (hasExistingConfig) {
+      process.stdout.write(
+        box(
+          [
+            "",
+            `  ${yellow("forge.yaml already exists.")} The values below will ${bold("overwrite")} it.`,
+            `  ${dim("A backup will be created before writing.")}`,
+            "",
+          ],
+          { title: "Overwrite Mode" },
+        ),
+      );
+    }
+
+    // Header
+    process.stdout.write(
+      `${bold("  forge.yaml configuration")}  ${dim("(detected from this repository)")}\n\n`,
+    );
+
+    // Table header
+    const NUM_W = 3;
+    const KEY_W = 16;
+    const VAL_W = 36;
+    const BADGE_W = 7; // "[high]" + space = 7 visible chars
+    const SOURCE_W = 32;
+
+    const hdr = [
+      dim("#".padEnd(NUM_W)),
+      dim("Field".padEnd(KEY_W)),
+      dim("Value".padEnd(VAL_W)),
+      dim("Conf".padEnd(BADGE_W)),
+      dim("Source"),
+    ].join("  ");
+    process.stdout.write("  " + hdr + "\n");
+    process.stdout.write(
+      "  " +
+        dim("─".repeat(NUM_W + KEY_W + VAL_W + BADGE_W + SOURCE_W + 8)) +
+        "\n",
+    );
+
+    for (let i = 0; i < REVIEW_FIELDS.length; i++) {
+      const fd = REVIEW_FIELDS[i];
+      const num = dim(String(i + 1).padEnd(NUM_W));
+      const key = fd.label.padEnd(KEY_W);
+      const rawVal = values[fd.key] || dim("(empty)");
+      // Pad/truncate on visible width only — ANSI escape bytes must not be counted.
+      const displayVal = stripAnsi(rawVal).length > VAL_W
+        ? truncateVisible(rawVal, VAL_W - 1) + dim("…")
+        : padVisible(rawVal, VAL_W);
+      const badge = confidenceBadge(confidences[fd.key]);
+      // Truncate long source strings
+      const rawSrc = sources[fd.key] || "";
+      const displaySrc = rawSrc.length > SOURCE_W
+        ? rawSrc.slice(0, SOURCE_W - 1) + "…"
+        : rawSrc;
+
+      process.stdout.write(
+        `  ${num}  ${key}  ${displayVal}  ${badge}  ${dim(displaySrc)}\n`,
+      );
+    }
+
+    process.stdout.write("\n");
+
+    // Legend
+    process.stdout.write(
+      `  ${dim("Confidence:")}  ${green("[high]")} detected  ${yellow("[med] ")} inferred  ${red("[low] ")} guessed\n`,
+    );
+    process.stdout.write("\n");
+
+    // Why summary for non-high fields (or ALL fields when showSources is enabled)
+    const interestingFields = REVIEW_FIELDS.filter(
+      (fd) => (confidences[fd.key] !== "high" || showSources) && whys[fd.key],
+    );
+    if (interestingFields.length > 0) {
+      process.stdout.write(`  ${bold("Notes:")}\n`);
+      for (const fd of interestingFields) {
+        const badge = confidenceBadge(confidences[fd.key]);
+        process.stdout.write(
+          `    ${badge}  ${bold(fd.label)}: ${dim(whys[fd.key])}\n`,
+        );
+      }
+      process.stdout.write("\n");
+    }
+
+    // TODO flag notice for low-confidence fields — derived live so it
+    // reflects any confidence promotions from interactive edits.
+    const liveLowKeys = REVIEW_FIELDS.filter(
+      (fd) => confidences[fd.key] === "low",
+    );
+    if (liveLowKeys.length > 0) {
+      const todoNames = liveLowKeys.map((fd) => fd.label).join(", ");
+      process.stdout.write(
+        `  ${red("⚠")}  ${bold("Low-confidence fields")} will be written with a ${cyan("# TODO(forgedock:<field>)")} comment:\n`,
+      );
+      process.stdout.write(`     ${dim(todoNames)}\n\n`);
+    }
+
+    process.stdout.write(
+      `  ${dim("Press")} ${bold("Enter")} ${dim("to accept all values, or enter a field number to edit it.")}\n\n`,
+    );
+  }
+
+  // ── Inline editor for a single field ─────────────────────────────────────
+  async function editField(index) {
+    const fd = REVIEW_FIELDS[index];
+    const current = values[fd.key];
+
+    // We need to temporarily use readline (cooked mode input).
+    // Exit raw mode first if it was active.
+    let wasRaw = false;
+    if (process.stdin.isRaw) {
+      try {
+        process.stdin.setRawMode(false);
+        wasRaw = true;
+      } catch {
+        /* ignore */
+      }
+    }
+    process.stdin.resume();
+    process.stdin.setEncoding("utf-8");
+
+    const rl = readline.createInterface({
+      input: process.stdin,
+      output: process.stdout,
+    });
+
+    const hint = current ? ` ${dim(`(current: ${current})`)}` : "";
+    const newValue = await new Promise((resolve) => {
+      rl.question(
+        `  ${cyan("?")} ${bold(fd.label)}${hint}: `,
+        (answer) => {
+          rl.close();
+          resolve(answer.trim() === "" ? current : answer.trim());
+        },
+      );
+    });
+
+    // Restore raw mode if it was active.
+    if (wasRaw) {
+      try {
+        process.stdin.setRawMode(true);
+      } catch {
+        /* ignore */
+      }
+    }
+
+    // Mark as user-edited (medium confidence).
+    values[fd.key] = newValue;
+    if (confidences[fd.key] !== "high") {
+      confidences[fd.key] = "medium";
+      sources[fd.key] = "user input";
+      whys[fd.key] = "Edited interactively during review";
+    }
+  }
+
+  // ── Interaction loop ──────────────────────────────────────────────────────
+  renderScreen();
+
+  // Set up raw mode for single-keypress interaction.
+  const wasRaw = process.stdin.isRaw;
+  try {
+    process.stdin.setRawMode(true);
+  } catch {
+    // Terminal doesn't support raw mode — fall back to accept-all.
+    return {
+      ...values,
+      lowConfidenceKeys: REVIEW_FIELDS.filter(
+        (fd) => confidences[fd.key] === "low",
+      ).map((fd) => fd.key),
+    };
+  }
+  process.stdin.resume();
+  process.stdin.setEncoding("utf-8");
+
+  let accepted = false;
+
+  // Buffer for multi-character field number input (1–8 fields).
+  let inputBuffer = "";
+
+  const sigintHandler = () => {
+    try {
+      process.stdin.setRawMode(wasRaw || false);
+    } catch {
+      /* ignore */
+    }
+    process.stdin.pause();
+    process.stdin.removeAllListeners("data");
+    if (process.stdout.isTTY) process.stdout.write("\x1b[?25h");
+    process.exit(130);
+  };
+  process.once("SIGINT", sigintHandler);
+
+  await new Promise((resolve) => {
+    function onData(key) {
+      if (key === "") {
+        // Ctrl+C
+        sigintHandler();
+        return;
+      }
+
+      if (key === "\r" || key === "\n") {
+        // Enter with no pending number → accept all
+        if (inputBuffer === "") {
+          accepted = true;
+          cleanup();
+          resolve();
+          return;
+        }
+        // Enter after typing a number → edit that field
+        const num = parseInt(inputBuffer, 10);
+        inputBuffer = "";
+        if (num >= 1 && num <= REVIEW_FIELDS.length) {
+          cleanup();
+          editField(num - 1).then(() => {
+            // Re-render and re-enter interaction loop
+            renderScreen();
+            try {
+              process.stdin.setRawMode(true);
+            } catch {
+              accepted = true;
+              resolve();
+              return;
+            }
+            process.stdin.resume();
+            process.stdin.setEncoding("utf-8");
+            process.stdin.on("data", onData);
+          });
+        } else {
+          // Invalid number — ignore
+          process.stdout.write(
+            `  ${red("Invalid field number")} — enter 1–${REVIEW_FIELDS.length} or press Enter to accept.\n`,
+          );
+        }
+        return;
+      }
+
+      // Digit key — accumulate field number
+      if (/^[0-9]$/.test(key)) {
+        inputBuffer += key;
+        process.stdout.write(key); // echo digit
+        return;
+      }
+
+      // Backspace
+      if (key === "" || key === "") {
+        if (inputBuffer.length > 0) {
+          inputBuffer = inputBuffer.slice(0, -1);
+          process.stdout.write(" "); // erase char
+        }
+        return;
+      }
+
+      // Any other key — ignore
+    }
+
+    function cleanup() {
+      try {
+        process.stdin.setRawMode(wasRaw || false);
+      } catch {
+        /* ignore */
+      }
+      process.stdin.pause();
+      process.stdin.removeListener("data", onData);
+      process.removeListener("SIGINT", sigintHandler);
+    }
+
+    process.stdin.on("data", onData);
+  });
+
+  if (accepted) {
+    process.stdout.write(
+      `\n  ${green("✔")} ${bold("All values accepted.")}\n\n`,
+    );
+  }
+
+  return {
+    ...values,
+    lowConfidenceKeys: REVIEW_FIELDS.filter(
+      (fd) => confidences[fd.key] === "low",
+    ).map((fd) => fd.key),
+  };
 }
