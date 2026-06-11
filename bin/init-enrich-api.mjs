@@ -108,7 +108,7 @@ export function parseEnrichedDraft(output, draft) {
         try {
           const enriched = JSON.parse(output.slice(start, i + 1));
           // Basic sanity check: must have the required top-level sections.
-          if (!enriched.project || !enriched.paths || !enriched.branches) {
+          if (!enriched.project || !enriched.paths || !enriched.branches || !enriched.meta) {
             return draft;
           }
           return enriched;
