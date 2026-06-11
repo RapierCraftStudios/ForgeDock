@@ -107,7 +107,7 @@ export function box(content, { title = "", padding = 1, width } = {}) {
   const pad = " ".repeat(padding);
 
   // Strip ANSI codes to compute visual width
-  const stripAnsi = (s) => s.replace(/\x1b\[[0-9;]*m/g, "");
+  const stripAnsi = (s) => s.replace(/\x1b\[[0-9;]*[A-Za-z]/g, "");
 
   const contentWidth = lines.reduce(
     (max, l) => Math.max(max, stripAnsi(l).length),
@@ -659,7 +659,7 @@ export function table(
 ) {
   if (!rows || rows.length === 0) return "";
 
-  const stripAnsi = (s) => s.replace(/\x1b\[[0-9;]*m/g, "");
+  const stripAnsi = (s) => s.replace(/\x1b\[[0-9;]*[A-Za-z]/g, "");
 
   // Compute column widths
   const colCount = Math.max(...rows.map((r) => r.length));
@@ -821,7 +821,7 @@ export async function annotatedReviewScreen(
     };
   }
 
-  const stripAnsi = (s) => s.replace(/\x1b\[[0-9;]*m/g, "");
+  const stripAnsi = (s) => s.replace(/\x1b\[[0-9;]*[A-Za-z]/g, "");
 
   // Pad an ANSI-decorated string to `width` visible characters.
   function padVisible(str, width) {
@@ -832,7 +832,7 @@ export async function annotatedReviewScreen(
   // Truncate an ANSI-decorated string to at most `maxWidth` visible characters,
   // never bisecting an escape sequence.
   function truncateVisible(str, maxWidth) {
-    const ansiRe = /\x1b\[[0-9;]*m/g;
+    const ansiRe = /\x1b\[[0-9;]*[A-Za-z]/g;
     let visible = 0;
     let result = "";
     let lastIndex = 0;
