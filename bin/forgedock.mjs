@@ -2391,8 +2391,7 @@ const OPTIONAL_SECTION_CHOICES = [
     value: "multiRepo",
   },
   {
-    label:
-      "Review Context  — Tech stack and conventions for PR review agents",
+    label: "Review Context  — Tech stack and conventions for PR review agents",
     value: "review",
   },
   {
@@ -3518,12 +3517,14 @@ function buildForgeYamlContent({
         techStack: _sanitizeYamlValue(
           review.techStack || "Node.js, TypeScript, PostgreSQL",
         ),
-        // context uses a block scalar (|) — normalize CR/CRLF to LF before stripping double-quotes;
-        // split/join handles indentation. Must normalize \r first so split("\n") doesn't embed bare \r.
+        // context uses a block scalar (|) — normalize CR/CRLF to LF, strip C0/C1 control chars
+        // (excluding \t=\x09 and LF=\x0A which are valid in block scalars), then strip double-quotes.
+        // Must normalize \r first so split("\n") doesn't embed bare \r. split/join handles indentation.
         context: (
           review.context || "Add architecture notes and conventions here."
         )
           .replace(/\r\n|\r/g, "\n")
+          .replace(/[\x00-\x08\x0B\x0C\x0E-\x1F\x7F-\x9F]/g, "")
           .replace(/"/g, ""),
       }
     : null;
