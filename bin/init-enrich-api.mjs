@@ -150,6 +150,11 @@ export async function enrich(draft) {
     }
 
     const data = await response.json();
+    if (data?.stop_reason === "max_tokens" && process.env.FORGEDOCK_DEBUG) {
+      console.error(
+        `  ${dim("[debug]")} api enrichment: response truncated by max_tokens — JSON parse may fail, falling back to baseline draft.`,
+      );
+    }
     const text =
       data?.content?.[0]?.type === "text" ? data.content[0].text : "";
     return parseEnrichedDraft(text, draft);
