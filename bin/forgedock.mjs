@@ -1354,10 +1354,13 @@ async function uninstall() {
     }
   });
 
-  // On Windows, detect whether FORGE_HOME is set in the user environment.
-  // install() writes it via setx; uninstall must remove it via the same mechanism.
-  const hasWindowsForgeHome =
-    process.platform === "win32" && Boolean(process.env.FORGE_HOME);
+  // On Windows, always attempt FORGE_HOME cleanup — do not gate on process.env.FORGE_HOME.
+  // setx writes to HKCU\Environment (the registry) but does NOT update process.env in the
+  // current running process. If the user runs install then uninstall in the same terminal
+  // session, process.env.FORGE_HOME is undefined even though the registry key was written.
+  // The REG delete call in Phase 5 is already wrapped in try/catch and handles the
+  // key-not-found case gracefully, so unconditional detection is safe.
+  const hasWindowsForgeHome = process.platform === "win32";
 
   // Check for forge.yaml in cwd
   const forgeYamlPath = join(process.cwd(), "forge.yaml");
@@ -3534,7 +3537,9 @@ function buildForgeYamlContent({
         // split/join handles indentation. Must normalize \r first so split("\n") doesn't embed bare \r.
         context: (
           review.context || "Add architecture notes and conventions here."
-        ).replace(/\r\n|\r/g, "\n").replace(/"/g, ""),
+        )
+          .replace(/\r\n|\r/g, "\n")
+          .replace(/"/g, ""),
       }
     : null;
 
