@@ -3035,7 +3035,7 @@ function _sanitizePathValue(value) {
 function _sanitizeYamlKey(key) {
   return (
     String(key)
-      .replace(/[\r\n:#]+/g, "_") // structural YAML chars → underscore
+      .replace(/[\r\n\t:#]+/g, "_") // structural YAML chars + tab → underscore
       .replace(/_+/g, "_") // collapse multiple underscores
       .replace(/^_|_$/g, "") // strip leading/trailing underscores
       .trim() || "_" // fallback if result is empty
