@@ -76,7 +76,8 @@ const TARGET_DIR = join(HOME, ".claude", "commands");
 const args = process.argv.slice(2);
 const command = args[0];
 const forceYes = args.includes("--yes") || args.includes("-y");
-// --manual: bypass autopilot enrichment and run the full per-field guided wizard.
+// --manual: bypass autopilot enrichment and present the annotated review screen
+// with detection baseline values only (no AI-enriched suggestions).
 // --verbose: surface field detection sources and confidences during the init flow.
 const manualMode = args.includes("--manual");
 const verboseMode = args.includes("--verbose");
@@ -2413,17 +2414,17 @@ async function init() {
   // ---------------------------------------------------------------------------
   // Step 2: Backend-selection ladder — enrich the draft when possible.
   // Ladder: skill (Claude Code session) → api (ANTHROPIC_API_KEY) → none (baseline)
-  // --manual bypasses enrichment entirely: power users get the full guided wizard
-  // with unmodified detection results so they can review every field by hand.
+  // --manual bypasses enrichment entirely: presents the annotated review screen
+  // with detection baseline values only — no AI-enriched suggestions applied.
   // ---------------------------------------------------------------------------
 
   const backend = _detectBackend();
   let draft = baseDraft;
 
   if (manualMode) {
-    // Escape hatch: skip all AI enrichment and force the full per-field wizard.
+    // Escape hatch: skip all AI enrichment; review screen shows detection baseline.
     console.log(
-      `  ${CYAN}--manual${RESET} mode: skipping autopilot enrichment — full guided wizard`,
+      `  ${CYAN}--manual${RESET} mode: skipping autopilot enrichment — annotated review screen`,
     );
     console.log("");
   } else if (backend === "skill") {
@@ -2538,7 +2539,8 @@ async function init() {
   // Only sections with medium-or-higher confidence are included; low-confidence
   // sections remain commented-out in the output (no behaviour change for users
   // without an enrichment backend).
-  // manualMode forces the full guided wizard regardless of enrichment backend.
+  // manualMode skips enrichment — enrichmentSucceeded is false so optional sections
+  // use the interactive multi-select path rather than the enrichment-lifted path.
   const enrichmentSucceeded =
     !manualMode && backend !== "none" && _isEnriched(draft, baseDraft);
 
@@ -5148,7 +5150,7 @@ function help() {
     `  ${CYAN}npx forgedock init${RESET}       Generate forge.yaml config for your project`,
   );
   console.log(
-    `  ${CYAN}npx forgedock init --manual${RESET}   Skip autopilot enrichment; run full per-field guided wizard`,
+    `  ${CYAN}npx forgedock init --manual${RESET}   Skip autopilot enrichment; review screen shows detection baseline only`,
   );
   console.log(
     `  ${CYAN}npx forgedock init --verbose${RESET}  Show detection sources and confidence during init`,
