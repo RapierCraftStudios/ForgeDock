@@ -107,8 +107,14 @@ export function parseEnrichedDraft(output, draft) {
         // Found the closing brace of the top-level object — parse the candidate.
         try {
           const enriched = JSON.parse(output.slice(start, i + 1));
-          // Basic sanity check: must have the required top-level sections.
-          if (!enriched.project || !enriched.paths || !enriched.branches || !enriched.meta) {
+          // Basic sanity check: must have the required top-level sections and
+          // each section must be a plain object (not a truthy non-object scalar).
+          if (
+            typeof enriched.project !== "object" || enriched.project === null ||
+            typeof enriched.paths !== "object" || enriched.paths === null ||
+            typeof enriched.branches !== "object" || enriched.branches === null ||
+            typeof enriched.meta !== "object" || enriched.meta === null
+          ) {
             return draft;
           }
           return enriched;
