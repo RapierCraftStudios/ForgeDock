@@ -401,7 +401,12 @@ function sanitizeContextValue(value, maxLen) {
         .replace(/<!--/g, "")
         .replace(/--!?>/g, "")
         // Strip triple backtick fenced code block markers
-        .replace(/`{3}/g, "");
+        .replace(/`{3}/g, "")
+        // Strip single backticks — values are interpolated inside inline-code
+        // spans (e.g. `${stagingBranch}`), so any backtick in the value would
+        // terminate the span prematurely and corrupt the rendered context.
+        // <!-- fix: forge#443 -->
+        .replace(/`/g, "");
     } while (stripped !== prev);
     const str = stripped.trim().slice(0, maxLen);
     return str.length > 0 ? str : null;
