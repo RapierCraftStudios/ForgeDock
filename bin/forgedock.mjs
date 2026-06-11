@@ -3525,10 +3525,11 @@ function buildForgeYamlContent({
         techStack: _sanitizeYamlValue(
           review.techStack || "Node.js, TypeScript, PostgreSQL",
         ),
-        // context uses a block scalar (|) — only strip double-quotes; newlines are handled by split/join
+        // context uses a block scalar (|) — normalize CR/CRLF to LF before stripping double-quotes;
+        // split/join handles indentation. Must normalize \r first so split("\n") doesn't embed bare \r.
         context: (
           review.context || "Add architecture notes and conventions here."
-        ).replace(/"/g, ""),
+        ).replace(/\r\n|\r/g, "\n").replace(/"/g, ""),
       }
     : null;
 
