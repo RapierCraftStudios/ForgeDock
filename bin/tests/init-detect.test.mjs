@@ -313,6 +313,41 @@ describe("detectConfig — staging branch detection", async () => {
     assert.equal(draft.branches.staging.confidence, "medium");
     assert.ok(draft.branches.staging.value.length > 0);
   });
+
+  it("does NOT falsely detect staging from origin/staging-v2 (substring false positive)", async () => {
+    // Regression guard: a repo with only 'staging-v2' must NOT produce a
+    // high-confidence 'staging' result — the old includes() check would have
+    // matched 'staging-v2' as a substring of 'origin/staging'.
+    const barePath = join(tmpDir, "bare-with-staging-v2");
+    makeBareRepo(barePath);
+    const initRepo = join(tmpDir, "init-repo-v2");
+    makeLocalRepo(initRepo, "main");
+    addRemote(initRepo, "origin", barePath);
+    git(["push", "-u", "origin", "main"], initRepo);
+    // Push staging-v2 but NOT staging
+    git(["checkout", "-b", "staging-v2"], initRepo);
+    git(["push", "-u", "origin", "staging-v2"], initRepo);
+
+    // Detect from a fresh local repo pointing at the same bare remote
+    const detectRepo = join(tmpDir, "detect-repo-v2");
+    makeLocalRepo(detectRepo, "main");
+    addRemote(detectRepo, "origin", barePath);
+    git(["fetch", "origin"], detectRepo);
+
+    const draft = await detectConfig(detectRepo);
+    // staging-v2 must NOT be mistaken for staging — result must NOT be high confidence
+    assert.notEqual(
+      draft.branches.staging.confidence,
+      "high",
+      "staging-v2 must not produce high-confidence staging detection (substring false positive)",
+    );
+    // Value must not be 'staging' from a false positive
+    assert.notEqual(
+      draft.branches.staging.value,
+      "staging",
+      "staging-v2 must not produce value 'staging' (substring false positive)",
+    );
+  });
 });
 
 // =============================================================================
