@@ -381,20 +381,29 @@ function sanitizeContextValue(value, maxLen) {
   try {
     if (value == null) return null;
     // eslint-disable-next-line no-control-regex
-    const str = String(value)
+    let stripped = String(value)
       // Strip control characters (C0 block U+0000-U+001F, DEL U+007F, C1 block U+0080-U+009F)
-      .replace(/[\x00-\x1F\x7F-\x9F]/g, "")
-      // Strip leading markdown headings (e.g. "## Title" → "Title")
-      .replace(/^#+\s+/g, "")
-      // Strip horizontal rule patterns at start of value
-      .replace(/^---+/g, "")
-      // Strip HTML comment delimiters
-      .replace(/<!--/g, "")
-      .replace(/-->/g, "")
-      // Strip triple backtick fenced code block markers
-      .replace(/`{3}/g, "")
-      .trim()
-      .slice(0, maxLen);
+      .replace(/[\x00-\x1F\x7F-\x9F]/g, "");
+    // Strip injection-capable token sequences until a fixed point. A single
+    // pass can re-form a token from adjacent fragments (e.g. "<!<!---->--"
+    // leaves "<!--"), and HTML parsers accept "--!>" as a comment close in
+    // addition to "-->". Each pass strictly shrinks the string, so the loop
+    // terminates.
+    let prev;
+    do {
+      prev = stripped;
+      stripped = stripped
+        // Strip leading markdown headings (e.g. "## Title" → "Title")
+        .replace(/^#+\s+/g, "")
+        // Strip horizontal rule patterns at start of value
+        .replace(/^---+/g, "")
+        // Strip HTML comment delimiters (open, and both close forms)
+        .replace(/<!--/g, "")
+        .replace(/--!?>/g, "")
+        // Strip triple backtick fenced code block markers
+        .replace(/`{3}/g, "");
+    } while (stripped !== prev);
+    const str = stripped.trim().slice(0, maxLen);
     return str.length > 0 ? str : null;
   } catch {
     return null;
