@@ -2375,6 +2375,43 @@ function _isEnriched(draft, baseDraft) {
   return draft !== baseDraft || Boolean(draft.meta?.enriched);
 }
 
+/**
+ * Module-level constant — single source of truth for the optional section
+ * choice list used in both the enrichment and manual branches of init().
+ * Add new sections here; all call sites update automatically.
+ */
+const OPTIONAL_SECTION_CHOICES = [
+  {
+    label:
+      "Project Board   — GitHub Projects v2 integration for workflow tracking",
+    value: "projectBoard",
+  },
+  {
+    label: "Multi-Repo      — Satellite repos for cross-repo milestones",
+    value: "multiRepo",
+  },
+  {
+    label:
+      "Review Context  — Tech stack and conventions for PR review agents",
+    value: "review",
+  },
+  {
+    label: "Verification    — Health check endpoints and response patterns",
+    value: "verification",
+  },
+];
+
+/**
+ * Maps camelCase optional-section keys to their forge.yaml section names.
+ * Used for display messages after enrichment and after writing forge.yaml.
+ */
+const SECTION_KEY_TO_YAML_NAME = {
+  projectBoard: "project_board",
+  multiRepo: "repos",
+  review: "review",
+  verification: "verification",
+};
+
 async function init() {
   // init() generates forge.yaml from prompts and git remote detection.
   // It does NOT require gh CLI or gh auth for core operation (project board
@@ -2553,15 +2590,7 @@ async function init() {
       console.log("");
       console.log(
         `  ${GREEN}Auto-configured${RESET} by enrichment: ${autoSections
-          .map(
-            (s) =>
-              ({
-                projectBoard: "project_board",
-                multiRepo: "repos",
-                review: "review",
-                verification: "verification",
-              })[s],
-          )
+          .map((s) => SECTION_KEY_TO_YAML_NAME[s])
           .join(", ")}`,
       );
     }
@@ -2570,28 +2599,11 @@ async function init() {
     // couldn't discover (e.g. project_board when gh is unauthenticated).
     const alreadyConfigured = new Set(autoSections);
 
-    const OPTIONAL_SECTION_CHOICES = [
-      {
-        label:
-          "Project Board   — GitHub Projects v2 integration for workflow tracking",
-        value: "projectBoard",
-      },
-      {
-        label: "Multi-Repo      — Satellite repos for cross-repo milestones",
-        value: "multiRepo",
-      },
-      {
-        label:
-          "Review Context  — Tech stack and conventions for PR review agents",
-        value: "review",
-      },
-      {
-        label: "Verification    — Health check endpoints and response patterns",
-        value: "verification",
-      },
-    ].filter((c) => !alreadyConfigured.has(c.value));
+    const remainingSectionChoices = OPTIONAL_SECTION_CHOICES.filter(
+      (c) => !alreadyConfigured.has(c.value),
+    );
 
-    if (OPTIONAL_SECTION_CHOICES.length > 0) {
+    if (remainingSectionChoices.length > 0) {
       console.log("");
       console.log(bold("  Additional Optional Sections"));
       console.log(
@@ -2603,7 +2615,7 @@ async function init() {
 
       const selectedSections = await multiSelect(
         "  Which additional sections would you like to configure?",
-        OPTIONAL_SECTION_CHOICES,
+        remainingSectionChoices,
       );
 
       // --- Project Board prompts (manual, only when enrichment didn't find it) ---
@@ -2715,27 +2727,6 @@ async function init() {
       ),
     );
     console.log("");
-
-    const OPTIONAL_SECTION_CHOICES = [
-      {
-        label:
-          "Project Board   — GitHub Projects v2 integration for workflow tracking",
-        value: "projectBoard",
-      },
-      {
-        label: "Multi-Repo      — Satellite repos for cross-repo milestones",
-        value: "multiRepo",
-      },
-      {
-        label:
-          "Review Context  — Tech stack and conventions for PR review agents",
-        value: "review",
-      },
-      {
-        label: "Verification    — Health check endpoints and response patterns",
-        value: "verification",
-      },
-    ];
 
     const selectedSections = await multiSelect(
       "  Which optional sections would you like to configure?",
@@ -2886,15 +2877,7 @@ async function init() {
   if (configuredSectionKeys.length > 0) {
     console.log(
       `  ${GREEN}Configured${RESET}: ${configuredSectionKeys
-        .map(
-          (s) =>
-            ({
-              projectBoard: "project_board",
-              multiRepo: "repos",
-              review: "review",
-              verification: "verification",
-            })[s],
-        )
+        .map((s) => SECTION_KEY_TO_YAML_NAME[s])
         .filter(Boolean)
         .join(", ")}`,
     );
