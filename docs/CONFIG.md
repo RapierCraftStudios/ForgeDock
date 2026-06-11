@@ -665,6 +665,24 @@ The `registry` module resolves one of three states for any directory:
 
 A missing or corrupt `registry.json` is treated as an empty opt-out set. The registry always fails open — it never throws and never blocks a Claude Code session.
 
+### Downgrade Behaviour
+
+Registry keys are the **real path** of a directory (resolved via `realpathSync`) rather than the raw `resolve()` path. This has been the case since v1.0.x (PR #467, which fixed symlinked-directory key mismatches).
+
+If you downgrade to a build older than PR #467 **and** your project is accessed via a symlinked directory path, the older build looks up registry entries using the pre-symlink `resolve()`-only key form. It will not find entries written by the newer build's real-path keys. The practical effect is benign:
+
+- Opt-outs set on the newer build briefly stop applying for one session.
+- The one-time "Enable ForgeDock here?" nudge may reappear once.
+- No data is lost. No crash. Fail-open behaviour holds throughout.
+
+**Recovery**: after downgrading, re-apply your opt-out with the older build:
+
+```bash
+npx forgedock disable [dir]
+```
+
+This re-writes the entry under the key form the older build expects.
+
 ### Managing Opt-Out State
 
 Use the `forgedock enable` and `forgedock disable` commands to add or remove a directory from the opt-out set:
