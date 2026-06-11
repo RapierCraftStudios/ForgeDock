@@ -64,25 +64,31 @@ while read -r f; do
     done
     ROUTE_SEGMENT=$(echo "$URL_PATH" | sed 's|/api/v1/||; s|/.*||')
 
-    # Check if next.config.js has a rewrite that might shadow this route
-    if [ -f "$REPO_ROOT/web/next.config.js" ]; then
-        # Use -F (fixed string) so ROUTE_SEGMENT is not interpreted as a regex pattern
-        if grep -qF "$ROUTE_SEGMENT" "$REPO_ROOT/web/next.config.js" 2>/dev/null; then
-            echo "WARNING: Route handler $f ($URL_PATH) — next.config.js references '$ROUTE_SEGMENT', may shadow this route"
-            WARNINGS=$((WARNINGS + 1))
-        else
-            echo "OK: Route handler $f ($URL_PATH) — no shadowing rewrites found in next.config.js"
+    # Guard: skip shadow checks when ROUTE_SEGMENT is empty (e.g. /api/ root handlers).
+    # An empty ROUTE_SEGMENT causes grep -qF "" to match every line — false-positive WARNINGs.
+    if [ -z "$ROUTE_SEGMENT" ]; then
+        echo "OK: Route handler $f ($URL_PATH) — root handler, no segment to match, skipping shadow checks"
+    else
+        # Check if next.config.js has a rewrite that might shadow this route
+        if [ -f "$REPO_ROOT/web/next.config.js" ]; then
+            # Use -F (fixed string) so ROUTE_SEGMENT is not interpreted as a regex pattern
+            if grep -qF "$ROUTE_SEGMENT" "$REPO_ROOT/web/next.config.js" 2>/dev/null; then
+                echo "WARNING: Route handler $f ($URL_PATH) — next.config.js references '$ROUTE_SEGMENT', may shadow this route"
+                WARNINGS=$((WARNINGS + 1))
+            else
+                echo "OK: Route handler $f ($URL_PATH) — no shadowing rewrites found in next.config.js"
+            fi
         fi
-    fi
 
-    # Check if nginx routes this path to Next.js or directly to backend
-    if [ -f "$REPO_ROOT/infra/nginx/nginx.conf" ]; then
-        # Check for location blocks mentioning ROUTE_SEGMENT — use two -F searches to avoid
-        # embedding the variable in a regex: first find lines with "location", then filter
-        # for the literal segment. This avoids ROUTE_SEGMENT being interpreted as a BRE.
-        if grep -F "location" "$REPO_ROOT/infra/nginx/nginx.conf" 2>/dev/null | grep -qF "$ROUTE_SEGMENT"; then
-            echo "WARNING: Route handler $f ($URL_PATH) — nginx.conf has a location block for '$ROUTE_SEGMENT', may bypass Next.js"
-            WARNINGS=$((WARNINGS + 1))
+        # Check if nginx routes this path to Next.js or directly to backend
+        if [ -f "$REPO_ROOT/infra/nginx/nginx.conf" ]; then
+            # Check for location blocks mentioning ROUTE_SEGMENT — use two -F searches to avoid
+            # embedding the variable in a regex: first find lines with "location", then filter
+            # for the literal segment. This avoids ROUTE_SEGMENT being interpreted as a BRE.
+            if grep -F "location" "$REPO_ROOT/infra/nginx/nginx.conf" 2>/dev/null | grep -qF "$ROUTE_SEGMENT"; then
+                echo "WARNING: Route handler $f ($URL_PATH) — nginx.conf has a location block for '$ROUTE_SEGMENT', may bypass Next.js"
+                WARNINGS=$((WARNINGS + 1))
+            fi
         fi
     fi
 done < <(echo "$FILES" | while IFS= read -r line; do
