@@ -180,6 +180,61 @@ describe("parseEnrichedDraft", () => {
     assert.equal(result, ORIGINAL_DRAFT);
   });
 
+  it("returns original draft when 'meta' is a truthy non-object string", () => {
+    const partial = {
+      project: ORIGINAL_DRAFT.project,
+      paths: ORIGINAL_DRAFT.paths,
+      branches: ORIGINAL_DRAFT.branches,
+      meta: "truthy-string",
+    };
+    const result = parseEnrichedDraft(JSON.stringify(partial), ORIGINAL_DRAFT);
+    assert.equal(result, ORIGINAL_DRAFT);
+  });
+
+  it("returns original draft when 'meta' is a truthy non-object number", () => {
+    const partial = {
+      project: ORIGINAL_DRAFT.project,
+      paths: ORIGINAL_DRAFT.paths,
+      branches: ORIGINAL_DRAFT.branches,
+      meta: 1,
+    };
+    const result = parseEnrichedDraft(JSON.stringify(partial), ORIGINAL_DRAFT);
+    assert.equal(result, ORIGINAL_DRAFT);
+  });
+
+  it("returns original draft when 'project' is a truthy non-object string", () => {
+    const partial = {
+      project: "truthy-string",
+      paths: ORIGINAL_DRAFT.paths,
+      branches: ORIGINAL_DRAFT.branches,
+      meta: ORIGINAL_DRAFT.meta,
+    };
+    const result = parseEnrichedDraft(JSON.stringify(partial), ORIGINAL_DRAFT);
+    assert.equal(result, ORIGINAL_DRAFT);
+  });
+
+  it("returns original draft when 'paths' is a truthy non-object number", () => {
+    const partial = {
+      project: ORIGINAL_DRAFT.project,
+      paths: 1,
+      branches: ORIGINAL_DRAFT.branches,
+      meta: ORIGINAL_DRAFT.meta,
+    };
+    const result = parseEnrichedDraft(JSON.stringify(partial), ORIGINAL_DRAFT);
+    assert.equal(result, ORIGINAL_DRAFT);
+  });
+
+  it("returns original draft when 'branches' is a truthy non-object string", () => {
+    const partial = {
+      project: ORIGINAL_DRAFT.project,
+      paths: ORIGINAL_DRAFT.paths,
+      branches: "main",
+      meta: ORIGINAL_DRAFT.meta,
+    };
+    const result = parseEnrichedDraft(JSON.stringify(partial), ORIGINAL_DRAFT);
+    assert.equal(result, ORIGINAL_DRAFT);
+  });
+
   it("accepts enriched draft when all four required sections are present including meta", () => {
     const enriched = buildEnrichedDraft();
     const result = parseEnrichedDraft(JSON.stringify(enriched), ORIGINAL_DRAFT);
