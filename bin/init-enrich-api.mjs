@@ -185,6 +185,14 @@ export async function enrich(draft) {
       data?.content?.[0]?.type === "text" ? data.content[0].text : "";
     return parseEnrichedDraft(text, draft);
   } catch (err) {
+    const errCategory = err.status
+      ? `HTTP ${err.status}`
+      : err.code
+        ? err.code
+        : err.message;
+    console.error(
+      `  ${yellow("[!]")} API enrichment unavailable: ${errCategory} — falling back to baseline draft.${RESET}`,
+    );
     if (process.env.FORGEDOCK_DEBUG) {
       console.error(
         `  ${dim("[debug]")} api enrichment failed: ${err.message}`,
