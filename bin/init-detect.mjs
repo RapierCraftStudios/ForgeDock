@@ -186,7 +186,7 @@ function detectDefaultBranch(cwd) {
       );
     }
   } catch {
-    // git not available or detached HEAD
+    // git unavailable or not a git repo
   }
 
   // Strategy 3: fall back
