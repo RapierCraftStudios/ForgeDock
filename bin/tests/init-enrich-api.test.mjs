@@ -11,6 +11,7 @@
  *   - Returns original draft for malformed JSON
  *   - Returns original draft when required sections are missing
  *   - Returns original draft when no '{' is found in output
+ *   - Accepts enriched draft when meta is a truthy empty object ({})
  *
  * Run with: node --test bin/tests/init-enrich-api.test.mjs
  */
@@ -241,6 +242,13 @@ describe("parseEnrichedDraft", () => {
     // Must return the enriched draft (not the original) when all sections are present
     assert.deepEqual(result.meta, enriched.meta);
     assert.deepEqual(result.project, enriched.project);
+  });
+
+  it("accepts enriched draft when meta is a truthy empty object", () => {
+    // {} is truthy and typeof {} === "object" — the guard must pass it through
+    const enriched = buildEnrichedDraft({ meta: {} });
+    const result = parseEnrichedDraft(JSON.stringify(enriched), ORIGINAL_DRAFT);
+    assert.deepEqual(result.meta, {});
   });
 
   it("returns original draft when output has unclosed JSON (no matching '}')", () => {
