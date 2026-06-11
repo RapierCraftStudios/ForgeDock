@@ -144,43 +144,66 @@ function readRegistry() {
 }
 
 /**
- * Module-level write queue — serializes concurrent writeRegistry calls so that
+ * Module-level write queue — serializes concurrent registry mutations so that
  * two callers (e.g. setOptOut + markNudgeSeen in the same tick) never race and
- * produce a last-write-wins corruption. Each enqueued write waits for the
+ * produce a last-write-wins corruption. Each enqueued mutation waits for the
  * previous one to resolve before executing. Errors are swallowed per the
  * existing best-effort contract so a failed write never blocks the next caller.
+ *
+ * The queue serializes the FULL read-modify-write cycle, not just the disk
+ * write. Each task reads the freshest on-disk state inside the critical section,
+ * applies the caller-supplied mutation, then writes atomically. This prevents
+ * the snapshot-before-enqueue race where two concurrent callers both read stale
+ * state and the second enqueued write silently stomps the first one's change.
+ * <!-- fix: forge#438 -->
  */
 let _writeQueue = Promise.resolve();
 
 /**
- * Atomically write registry data to disk.
+ * Enqueue a read-modify-write mutation against the registry.
  *
- * Creates REGISTRY_DIR (mode 0o700) if it does not exist.
- * Writes to a .tmp sibling first, then renames to the final path.
- * Best-effort: errors are silently suppressed to avoid blocking callers.
- * Calls are serialized through a module-level Promise queue.
+ * Accepts a `mutate` function rather than a pre-read data snapshot. The
+ * mutation is deferred until it reaches the head of the serial queue, at
+ * which point it reads the freshest on-disk registry state, applies the
+ * mutation, and writes the result atomically. This guarantees that concurrent
+ * callers each see the previous caller's changes rather than racing on a
+ * shared stale snapshot.
  *
- * @param {{ version: number, optedOut: Record<string, { at: string }>, nudgeSeen: Record<string, { at: string }> }} data
+ * Best-effort: errors inside the mutation or the disk write are silently
+ * suppressed so callers are never blocked.
+ *
+ * @param {(registry: { version: number, optedOut: Record<string, { at: string }>, nudgeSeen: Record<string, { at: string }> }) => void} mutate
+ *   Pure mutation function. Called with the current registry object; should
+ *   modify it in place. Return value is ignored.
  * @returns {Promise<void>}
  */
-async function writeRegistry(data) {
+async function writeRegistry(mutate) {
   // Chain onto the existing queue; swallow errors so callers are never blocked
-  _writeQueue = _writeQueue.then(() => _doWriteRegistry(data)).catch(() => {});
+  _writeQueue = _writeQueue
+    .then(() => _doWriteRegistryWith(mutate))
+    .catch(() => {});
   return _writeQueue;
 }
 
 /**
- * Inner implementation — performs the actual atomic write.
+ * Inner implementation — performs the atomic read-modify-write cycle.
  * Called exclusively through writeRegistry's queue chain.
  *
- * @param {{ version: number, optedOut: Record<string, { at: string }>, nudgeSeen: Record<string, { at: string }> }} data
+ * Reads the current registry from disk (fail-open), applies the caller's
+ * mutation function, then writes the result via a .tmp file + renameSync.
+ *
+ * @param {(registry: { version: number, optedOut: Record<string, { at: string }>, nudgeSeen: Record<string, { at: string }> }) => void} mutate
  * @returns {Promise<void>}
  */
-async function _doWriteRegistry(data) {
+async function _doWriteRegistryWith(mutate) {
   try {
     await mkdir(REGISTRY_DIR, { recursive: true, mode: 0o700 });
+    // Read the freshest on-disk state inside the critical section so that
+    // concurrent callers each build on the previous caller's committed write.
+    const registry = readRegistry();
+    mutate(registry);
     const tmp = REGISTRY_PATH + ".tmp";
-    writeFileSync(tmp, JSON.stringify(data, null, 2) + "\n", {
+    writeFileSync(tmp, JSON.stringify(registry, null, 2) + "\n", {
       encoding: "utf-8",
     });
     renameSync(tmp, REGISTRY_PATH);
@@ -250,15 +273,16 @@ export function resolveState(dir) {
  */
 export async function setOptOut(dir, optedOut) {
   const absDir = normalizeDir(dir);
-  const registry = readRegistry();
-
-  if (optedOut) {
-    registry.optedOut[absDir] = { at: new Date().toISOString() };
-  } else {
-    delete registry.optedOut[absDir];
-  }
-
-  await writeRegistry(registry);
+  // Pass a mutation closure rather than a pre-read snapshot. The actual
+  // readRegistry() call is deferred to inside the serial queue so that
+  // concurrent mutations each see the previous caller's committed write.
+  await writeRegistry((registry) => {
+    if (optedOut) {
+      registry.optedOut[absDir] = { at: new Date().toISOString() };
+    } else {
+      delete registry.optedOut[absDir];
+    }
+  });
 }
 
 /**
@@ -293,7 +317,10 @@ export function nudgeSeen(dir) {
  */
 export async function markNudgeSeen(dir) {
   const absDir = normalizeDir(dir);
-  const registry = readRegistry();
-  registry.nudgeSeen[absDir] = { at: new Date().toISOString() };
-  await writeRegistry(registry);
+  // Pass a mutation closure rather than a pre-read snapshot. The actual
+  // readRegistry() call is deferred to inside the serial queue so that
+  // concurrent mutations each see the previous caller's committed write.
+  await writeRegistry((registry) => {
+    registry.nudgeSeen[absDir] = { at: new Date().toISOString() };
+  });
 }
