@@ -823,6 +823,41 @@ export async function annotatedReviewScreen(
 
   const stripAnsi = (s) => s.replace(/\x1b\[[0-9;]*m/g, "");
 
+  // Pad an ANSI-decorated string to `width` visible characters.
+  function padVisible(str, width) {
+    const visual = stripAnsi(str).length;
+    return str + " ".repeat(Math.max(0, width - visual));
+  }
+
+  // Truncate an ANSI-decorated string to at most `maxWidth` visible characters,
+  // never bisecting an escape sequence.
+  function truncateVisible(str, maxWidth) {
+    const ansiRe = /\x1b\[[0-9;]*m/g;
+    let visible = 0;
+    let result = "";
+    let lastIndex = 0;
+    let m;
+    ansiRe.lastIndex = 0;
+    while ((m = ansiRe.exec(str)) !== null) {
+      // Consume plain-text chars before this ANSI token
+      const plain = str.slice(lastIndex, m.index);
+      const remaining = maxWidth - visible;
+      if (remaining > 0) {
+        result += plain.slice(0, remaining);
+        visible += Math.min(plain.length, remaining);
+      }
+      // Always include the ANSI token (zero visible width)
+      result += m[0];
+      lastIndex = ansiRe.lastIndex;
+    }
+    // Remaining plain text after last ANSI token
+    const remaining = maxWidth - visible;
+    if (remaining > 0) {
+      result += str.slice(lastIndex, lastIndex + remaining);
+    }
+    return result;
+  }
+
   // ── Render the annotated table ────────────────────────────────────────────
   function renderScreen() {
     process.stdout.write("\n");
@@ -872,10 +907,10 @@ export async function annotatedReviewScreen(
       const num = dim(String(i + 1).padEnd(NUM_W));
       const key = fd.label.padEnd(KEY_W);
       const rawVal = values[fd.key] || dim("(empty)");
-      // Truncate long values for table display
+      // Pad/truncate on visible width only — ANSI escape bytes must not be counted.
       const displayVal = stripAnsi(rawVal).length > VAL_W
-        ? rawVal.slice(0, VAL_W - 1) + dim("…")
-        : rawVal.padEnd(VAL_W - (stripAnsi(rawVal).length < VAL_W ? 0 : 0));
+        ? truncateVisible(rawVal, VAL_W - 1) + dim("…")
+        : padVisible(rawVal, VAL_W);
       const badge = confidenceBadge(confidences[fd.key]);
       // Truncate long source strings
       const rawSrc = sources[fd.key] || "";
