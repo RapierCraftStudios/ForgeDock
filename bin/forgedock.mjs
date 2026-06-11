@@ -4463,7 +4463,10 @@ async function _offerRemediations(checks, forgeYamlPath) {
           );
           if (shouldAuth) {
             try {
-              execSync("gh auth login", { stdio: "inherit" });
+              execFileSync("gh", ["auth", "login"], {
+                stdio: "inherit",
+                shell: process.platform === "win32",
+              });
             } catch {
               // User may have cancelled — not an error from our side
             }
