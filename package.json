@@ -1,6 +1,6 @@
 {
   "name": "forgedock",
-  "version": "1.0.8",
+  "version": "1.0.9",
   "description": "GitHub as a knowledge graph for AI agents. Autonomous dev pipeline for Claude Code.",
   "bin": {
     "forgedock": "bin/forgedock.mjs"
