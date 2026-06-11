@@ -43,7 +43,13 @@
 
 import os from "os";
 import { resolve, join } from "path";
-import { existsSync, readFileSync, writeFileSync, renameSync } from "fs";
+import {
+  existsSync,
+  readFileSync,
+  writeFileSync,
+  renameSync,
+  realpathSync,
+} from "fs";
 import { mkdir } from "fs/promises";
 
 // ---------------------------------------------------------------------------
@@ -84,29 +90,52 @@ function emptyRegistry() {
 /**
  * Resolve and normalize a directory path for use as a registry key.
  *
- * Calls `resolve()` to produce an absolute path, then — on Windows only —
- * lowercases the drive letter (the character before the first `:`). This
- * ensures that `C:\Users\foo` and `c:\Users\foo` hash to the same key,
- * since NTFS is case-insensitive but JavaScript string comparison is not.
+ * First resolves the path to an absolute path with `resolve()`, then
+ * dereferences any symbolic links with `realpathSync.native()` so that a
+ * project entered via a symlinked path and the same project entered via its
+ * real path produce the same registry key. A try/catch fallback to the
+ * `resolve()` result ensures fail-open behaviour for non-existent or
+ * inaccessible paths (ENOENT, EACCES, EPERM).
  *
- * On POSIX systems the resolved path is returned as-is; POSIX filesystems
+ * On Windows only, the drive letter of the resulting canonical path is
+ * lowercased (the character before the first `:`). This ensures that
+ * `C:\Users\foo` and `c:\Users\foo` hash to the same key, since NTFS is
+ * case-insensitive but JavaScript string comparison is not.
+ *
+ * On POSIX systems the canonical path is returned as-is; POSIX filesystems
  * are case-sensitive by convention and no normalization is needed.
  *
  * Only the drive letter is lowercased — the rest of the path is preserved
  * verbatim so that intentional casing in directory names is not altered.
  *
  * @param {string} dir - Directory path (absolute or relative).
- * @returns {string} Normalized absolute path suitable for use as a registry key.
+ * @returns {string} Normalized canonical absolute path suitable for use as a registry key.
  */
 function normalizeDir(dir) {
   const abs = resolve(dir);
+  // Dereference symbolic links so that a symlinked project path and its
+  // real path produce the same registry key. Fall back to the resolve()
+  // result for paths that do not exist yet (e.g. ENOENT) or are not
+  // accessible (EACCES/EPERM) — preserves the fail-open contract.
+  // realpathSync.native uses the OS-native implementation (available since
+  // Node 9.2) and avoids extra JS stat syscalls vs the JS fallback.
+  let canonical;
+  try {
+    canonical = realpathSync.native(abs);
+  } catch {
+    canonical = abs;
+  }
   // On Windows, drive letters vary in casing (C:\ vs c:\). Normalize to
   // lowercase so registry lookups are case-insensitive for drive letters.
-  // Detect: abs[1] === ':' is the Windows drive-letter pattern (e.g. C:\).
-  if (process.platform === "win32" && abs.length >= 2 && abs[1] === ":") {
-    return abs[0].toLowerCase() + abs.slice(1);
+  // Detect: canonical[1] === ':' is the Windows drive-letter pattern (e.g. C:\).
+  if (
+    process.platform === "win32" &&
+    canonical.length >= 2 &&
+    canonical[1] === ":"
+  ) {
+    return canonical[0].toLowerCase() + canonical.slice(1);
   }
-  return abs;
+  return canonical;
 }
 
 /**
