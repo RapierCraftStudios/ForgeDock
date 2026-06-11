@@ -855,6 +855,13 @@ export async function annotatedReviewScreen(
     if (remaining > 0) {
       result += str.slice(lastIndex, lastIndex + remaining);
     }
+    // If truncation occurred and the result contains any ANSI sequences,
+    // append a full reset to prevent color from bleeding into adjacent columns.
+    // Truncation is detected by checking whether the original string has more
+    // visible characters than maxWidth (i.e. stripAnsi(str).length > maxWidth).
+    if (stripAnsi(str).length > maxWidth && result.includes("\x1b[")) {
+      result += "\x1b[0m";
+    }
     return result;
   }
 
