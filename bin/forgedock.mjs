@@ -191,16 +191,84 @@ function isForgeSessionStartHook(command) {
 }
 
 /**
+ * Strip JSONC syntax (single-line comments, block comments, trailing commas)
+ * from a raw JSON string, returning a plain JSON string that JSON.parse() accepts.
+ *
+ * The implementation is a single-pass character-walk state machine that correctly
+ * skips content inside string literals, so comment-like sequences embedded in
+ * JSON string values are preserved.
+ *
+ * Handles:
+ *   - Single-line comments:  // ... \n
+ *   - Block comments:        /* ... *\/
+ *   - Trailing commas:       ,\s*[}\]]
+ *
+ * @param {string} raw - Raw text of a JSONC file.
+ * @returns {string} - Valid JSON string.
+ */
+function stripJsonc(raw) {
+  let result = "";
+  let i = 0;
+  const len = raw.length;
+
+  while (i < len) {
+    const ch = raw[i];
+
+    // Inside a string literal — copy until unescaped closing quote
+    if (ch === '"') {
+      result += ch;
+      i++;
+      while (i < len) {
+        const sc = raw[i];
+        result += sc;
+        if (sc === "\\" && i + 1 < len) {
+          // Escaped character — copy the next char verbatim and advance past it
+          i++;
+          result += raw[i];
+        } else if (sc === '"') {
+          break; // End of string literal
+        }
+        i++;
+      }
+      i++;
+      continue;
+    }
+
+    // Single-line comment — skip until newline
+    if (ch === "/" && i + 1 < len && raw[i + 1] === "/") {
+      while (i < len && raw[i] !== "\n") i++;
+      continue;
+    }
+
+    // Block comment — skip until */
+    if (ch === "/" && i + 1 < len && raw[i + 1] === "*") {
+      i += 2;
+      while (i + 1 < len && !(raw[i] === "*" && raw[i + 1] === "/")) i++;
+      i += 2; // Skip closing */
+      continue;
+    }
+
+    result += ch;
+    i++;
+  }
+
+  // Remove trailing commas before } or ]
+  return result.replace(/,(\s*[}\]])/g, "$1");
+}
+
+/**
  * Read ~/.claude/settings.json, returning a parsed object.
  * Returns an empty object if the file does not exist.
- * Throws if the file exists but cannot be parsed.
+ * Tolerates JSONC syntax (comments, trailing commas) that Claude Code's
+ * own settings editor may insert into user-edited settings.json files.
+ * Throws if the file exists but cannot be parsed even after JSONC stripping.
  *
  * @returns {object}
  */
 function readClaudeSettings() {
   try {
     const raw = readFileSync(CLAUDE_SETTINGS_PATH, "utf-8");
-    return JSON.parse(raw);
+    return JSON.parse(stripJsonc(raw));
   } catch (err) {
     if (err.code === "ENOENT") return {};
     throw err;
