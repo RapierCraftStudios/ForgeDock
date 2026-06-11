@@ -3023,10 +3023,13 @@ function _sanitizePathValue(value) {
 
 /**
  * Sanitize a string for safe use as an unquoted YAML mapping key.
- * Strips characters that are structurally significant in YAML outside of quoted scalars:
- * newlines and carriage returns (would inject new YAML lines), colons (key separator),
- * and '#' (comment marker). Sequences of unsafe characters are collapsed to a single
- * underscore so the key remains readable. Falls back to "_" if the result is empty.
+ * Strips or normalizes characters that are structurally significant in YAML outside of
+ * quoted scalars, or that produce non-idiomatic key names:
+ *   - Whitespace (space, tab, newline, carriage return, and all Unicode whitespace) →
+ *     underscore, so LLM-derived names like "In Progress" become "In_Progress".
+ *   - Colon (key separator) and '#' (comment marker) → underscore.
+ * Sequences of replaced characters are collapsed to a single underscore so the key
+ * remains readable. Falls back to "_" if the result is empty.
  * <!-- Added: forge#396 -->
  *
  * @param {string} key
@@ -3035,7 +3038,7 @@ function _sanitizePathValue(value) {
 function _sanitizeYamlKey(key) {
   return (
     String(key)
-      .replace(/[\r\n\t:#]+/g, "_") // structural YAML chars + tab → underscore
+      .replace(/[\s:#]+/g, "_") // whitespace (incl. space) + structural YAML chars → underscore
       .replace(/_+/g, "_") // collapse multiple underscores
       .replace(/^_|_$/g, "") // strip leading/trailing underscores
       .trim() || "_" // fallback if result is empty
