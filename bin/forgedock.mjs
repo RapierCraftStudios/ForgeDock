@@ -1345,6 +1345,11 @@ async function uninstall() {
     }
   });
 
+  // On Windows, detect whether FORGE_HOME is set in the user environment.
+  // install() writes it via setx; uninstall must remove it via the same mechanism.
+  const hasWindowsForgeHome =
+    process.platform === "win32" && Boolean(process.env.FORGE_HOME);
+
   // Check for forge.yaml in cwd
   const forgeYamlPath = join(process.cwd(), "forge.yaml");
   const hasForgeYaml = existsSync(forgeYamlPath);
@@ -1377,6 +1382,7 @@ async function uninstall() {
   if (
     toRemove.length === 0 &&
     profilesWithForgeHome.length === 0 &&
+    !hasWindowsForgeHome &&
     !hasForgeYaml &&
     !hasSessionStartHook
   ) {
@@ -1401,6 +1407,11 @@ async function uninstall() {
       `  ${yellow("Profiles")}:   FORGE_HOME export in ${bold(profilesWithForgeHome.map((p) => p.replace(HOME, "~")).join(", "))}`,
     );
   }
+  if (hasWindowsForgeHome) {
+    summaryLines.push(
+      `  ${yellow("Env var")}:    FORGE_HOME set in Windows user environment`,
+    );
+  }
   if (hasSessionStartHook) {
     summaryLines.push(
       `  ${yellow("Hook")}:       SessionStart hook in ${dim("~/.claude/settings.json")}`,
@@ -1423,7 +1434,9 @@ async function uninstall() {
   const profileLabel =
     profilesWithForgeHome.length > 0
       ? ` and FORGE_HOME from ${profilesWithForgeHome.length === 1 ? "shell profile" : "shell profiles"}`
-      : "";
+      : hasWindowsForgeHome
+        ? " and FORGE_HOME from Windows user environment"
+        : "";
 
   let confirmed = forceYes;
   if (!confirmed) {
@@ -1469,6 +1482,37 @@ async function uninstall() {
   // -------------------------------------------------------------------------
   // Phase 5: FORGE_HOME cleanup (only if detected)
   // -------------------------------------------------------------------------
+
+  if (hasWindowsForgeHome) {
+    // Windows: remove FORGE_HOME from the user registry via setx.
+    // setx with an empty string removes the user-level env var (HKCU).
+    // Mirror of install() Phase 5 Windows branch.
+    console.log("");
+    const cleanWindows = forceYes
+      ? true
+      : await confirm("Remove FORGE_HOME from Windows user environment?", true);
+
+    if (cleanWindows) {
+      try {
+        execFileSync("setx", ["FORGE_HOME", ""], { stdio: "pipe" });
+        console.log(
+          `  ${green("✔")} Removed FORGE_HOME from Windows user environment`,
+        );
+      } catch {
+        // setx unavailable or failed — print PowerShell fallback guidance
+        console.log(
+          `  ${yellow("⚠")}  Could not remove FORGE_HOME automatically — run this in PowerShell:`,
+        );
+        console.log(
+          `     ${cyan("[System.Environment]::SetEnvironmentVariable('FORGE_HOME', $null, 'User')")}`,
+        );
+      }
+    } else {
+      console.log(
+        `  ${dim("Skipped — FORGE_HOME left in Windows user environment.")}`,
+      );
+    }
+  }
 
   if (profilesWithForgeHome.length > 0) {
     console.log("");
@@ -1586,9 +1630,14 @@ async function uninstall() {
   console.log(
     `${green("Uninstall complete.")} ForgeDock commands have been removed.`,
   );
-  if (profilesWithForgeHome.length > 0) {
+  if (profilesWithForgeHome.length > 0 && process.platform !== "win32") {
     console.log(
       `  ${dim("Restart your shell or run")} ${cyan("source ~/.bashrc")} ${dim("(or")} ${cyan("~/.zshrc")}${dim(")")} ${dim("to apply profile changes.")}`,
+    );
+  }
+  if (hasWindowsForgeHome) {
+    console.log(
+      `  ${dim("Restart your terminal to apply environment changes.")}`,
     );
   }
   console.log("");
