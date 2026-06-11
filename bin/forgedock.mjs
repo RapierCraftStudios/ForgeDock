@@ -1214,12 +1214,21 @@ async function install() {
     // Persist FORGE_HOME for the current user via setx (built-in, no elevation needed).
     // If setx fails for any reason, print a PowerShell one-liner the user can run manually.
     try {
-      execFileSync("setx", ["FORGE_HOME", FORGE_HOME], { stdio: "pipe" });
+      // setx exits 0 even when it truncates; capture stdout and check for the truncation
+      // warning before declaring success. <!-- Added: forge#415 -->
+      const setxOut = execFileSync("setx", ["FORGE_HOME", FORGE_HOME], {
+        stdio: "pipe",
+      });
+      if (
+        setxOut.toString().includes("WARNING: Data being saved is truncated")
+      ) {
+        throw new Error("setx truncated the FORGE_HOME value");
+      }
       console.log(
         `  ${green("✔")}  ${bold("FORGE_HOME")} set via ${cyan("setx")} ${dim("(restart your terminal to apply)")}`,
       );
     } catch {
-      // setx unavailable or failed — print manual guidance
+      // setx unavailable, failed, or truncated — print manual guidance
       console.log(
         `  ${yellow("⚠")}  ${bold("FORGE_HOME")} not set automatically — run this in PowerShell:`,
       );
