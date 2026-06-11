@@ -166,23 +166,30 @@ async function handleUnmanaged(dir) {
  */
 function buildActiveContext(dir, forgeYaml) {
   const project = forgeYaml.project ?? {};
-  const projectName = project.name ?? null;
+  const projectName = sanitizeContextValue(project.name ?? null, 200);
   const repo =
     project.owner && project.repo
       ? `${project.owner}/${project.repo}`
       : project.repo ?? null;
-  const description = project.description ?? null;
+  const description = sanitizeContextValue(project.description ?? null, 400);
 
-  const milestoneNote = forgeYaml.milestone
-    ? `\n- **Active milestone**: ${forgeYaml.milestone}`
+  const rawMilestone = sanitizeContextValue(forgeYaml.milestone ?? null, 200);
+  const milestoneNote = rawMilestone
+    ? `\n- **Active milestone**: ${rawMilestone}`
     : "";
 
   const nameNote = projectName ? `\n- **Project**: ${projectName}` : "";
   const repoNote = repo ? `\n- **Repo**: ${repo}` : "";
   const descNote = description ? `\n- **Description**: ${description}` : "";
 
-  const stagingBranch = forgeYaml.branches?.staging ?? "staging";
-  const featurePattern = forgeYaml.branches?.feature_pattern ?? "milestone/{slug}";
+  const stagingBranch = sanitizeContextValue(
+    forgeYaml.branches?.staging ?? "staging",
+    200,
+  );
+  const featurePattern = sanitizeContextValue(
+    forgeYaml.branches?.feature_pattern ?? "milestone/{slug}",
+    200,
+  );
 
   return `\
 <!-- ForgeDock: managed-active -->
@@ -331,4 +338,60 @@ function parseForgeYaml(raw) {
   }
 
   return result;
+}
+
+// ---------------------------------------------------------------------------
+// Context value sanitizer
+// ---------------------------------------------------------------------------
+
+/**
+ * Sanitize a forge.yaml value before injecting it into the session context.
+ *
+ * A forge.yaml file may originate from a cloned repository rather than from
+ * ForgeDock's own sanitized writer. This function ensures that untrusted
+ * field values cannot inject markdown structural sequences or control
+ * characters into the LLM session context.
+ *
+ * Strips:
+ *   - Control characters U+0000-U+001F and U+007F-U+009F (including \r, \n, \t)
+ *   - Leading markdown heading markers (one or more `#` followed by space)
+ *   - YAML/Markdown horizontal rules (`---` at start of value)
+ *   - HTML comment delimiters (`<!--` and `-->`)
+ *   - Triple backtick sequences (fenced code block markers)
+ *
+ * Caps the value to `maxLen` characters after stripping.
+ * Trims leading/trailing whitespace.
+ *
+ * Returns `null` for null/undefined input (preserves existing null guards in
+ * the callers so that optional notes are omitted when the field is absent).
+ *
+ * Never throws — any internal error returns `null` so the hook stays fail-open.
+ * <!-- fix: forge#418 -->
+ *
+ * @param {string|null|undefined} value  - Raw value from forge.yaml.
+ * @param {number}                maxLen - Maximum allowed length after stripping.
+ * @returns {string|null}
+ */
+function sanitizeContextValue(value, maxLen) {
+  try {
+    if (value == null) return null;
+    // eslint-disable-next-line no-control-regex
+    const str = String(value)
+      // Strip control characters (C0 block U+0000-U+001F, DEL U+007F, C1 block U+0080-U+009F)
+      .replace(/[\x00-\x1F\x7F-\x9F]/g, "")
+      // Strip leading markdown headings (e.g. "## Title" → "Title")
+      .replace(/^#+\s+/g, "")
+      // Strip horizontal rule patterns at start of value
+      .replace(/^---+/g, "")
+      // Strip HTML comment delimiters
+      .replace(/<!--/g, "")
+      .replace(/-->/g, "")
+      // Strip triple backtick fenced code block markers
+      .replace(/`{3}/g, "")
+      .trim()
+      .slice(0, maxLen);
+    return str.length > 0 ? str : null;
+  } catch {
+    return null;
+  }
 }
