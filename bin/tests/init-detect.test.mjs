@@ -77,6 +77,8 @@ function makeLocalRepo(localPath, defaultBranch = "main") {
     env: {
       ...process.env,
       GIT_TERMINAL_PROMPT: "0",
+      // Suppress global git hooks (pre-commit, commit-msg) — mirrors git() helper
+      GIT_CONFIG_GLOBAL: "",
       GIT_AUTHOR_NAME: "Test",
       GIT_AUTHOR_EMAIL: "test@test.com",
       GIT_COMMITTER_NAME: "Test",
