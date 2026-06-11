@@ -7,7 +7,8 @@
  *   - stripAnsi: removes all CSI sequences, passthrough on plain strings.
  *   - truncateVisible: no-op when content fits, plain-text truncation,
  *     ANSI-decorated truncation mid-styled-run with no-token-leak assertion,
- *     trailing reset present after truncation, no spurious reset on no-truncation.
+ *     trailing reset present after truncation, no spurious reset on no-truncation,
+ *     boundary values (maxWidth=0, ANSI-only input).
  *
  * Run with: node --test bin/tests/tui.test.mjs
  */
@@ -209,5 +210,47 @@ describe("truncateVisible — ANSI-decorated truncation", () => {
     const resetCount = (result.match(/\x1b\[0m/g) || []).length;
     assert.equal(resetCount, 1,
       "exactly one reset — from post-loop guard, not forwarded from cut region");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// truncateVisible — boundary values (#506)
+// ---------------------------------------------------------------------------
+
+describe("truncateVisible — boundary values", () => {
+  it("returns empty string when maxWidth is 0 (plain text input)", () => {
+    // Zero budget means nothing fits — regardless of input content.
+    assert.equal(truncateVisible("hello world", 0), "",
+      "maxWidth=0 must return empty string for plain text input");
+  });
+
+  it("returns empty string when maxWidth is 0 (ANSI-decorated input)", () => {
+    // Zero budget: no visible characters fit; ANSI tokens are suppressed too
+    // because the loop never enters the visible < maxWidth branch.
+    const input = `${BOLD_OPEN}hello${RESET}`;
+    assert.equal(truncateVisible(input, 0), "",
+      "maxWidth=0 must return empty string even when input contains ANSI sequences");
+  });
+
+  it("returns input unchanged when input contains only ANSI sequences (zero visible chars)", () => {
+    // Input has zero visible characters — stripAnsi(input).length === 0.
+    // Since 0 is never > maxWidth (10), no truncation occurs and no trailing reset
+    // is appended by the guard. The result must be identical to the original input.
+    const input = `${BOLD_OPEN}${RESET}`;
+    const result = truncateVisible(input, 10);
+    assert.equal(result, input,
+      "ANSI-only input must be returned unchanged (no extra trailing reset)");
+  });
+
+  it("does NOT append a spurious trailing reset for ANSI-only input at any width", () => {
+    // The trailing-reset guard fires only when stripAnsi(str).length > maxWidth.
+    // For ANSI-only input, visible length is 0 — the guard must never fire.
+    const input = `${RED_OPEN}${RESET}`;
+    const result = truncateVisible(input, 0);
+    // maxWidth=0 with zero visible chars: nothing to truncate; result is ""
+    assert.equal(result, "",
+      "ANSI-only input with maxWidth=0 must return empty string, not a bare RESET");
+    assert.ok(!result.includes(ESC),
+      "no ANSI sequences must appear when result is empty");
   });
 });
