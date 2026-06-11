@@ -1156,7 +1156,7 @@ async function install() {
         `  ${yellow("⚠")}  ${bold("FORGE_HOME")} not set automatically — run this in PowerShell:`,
       );
       console.log(
-        `     ${cyan(`[System.Environment]::SetEnvironmentVariable('FORGE_HOME', '${FORGE_HOME}', 'User')`)}`,
+        `     ${cyan(`[System.Environment]::SetEnvironmentVariable('FORGE_HOME', '${FORGE_HOME.replace(/'/g, "''")}', 'User')`)}`,
       );
     }
     forgeHomeSet = true;
