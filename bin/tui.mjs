@@ -811,14 +811,14 @@ export async function annotatedReviewScreen(
     whys[fd.key] = field.why;
   }
 
-  // Collect keys that started with low confidence (for TODO flag injection).
-  const lowConfidenceKeys = REVIEW_FIELDS.filter(
-    (fd) => confidences[fd.key] === "low",
-  ).map((fd) => fd.key);
-
   // Non-TTY: return detect values directly without interaction.
   if (!process.stdin.isTTY) {
-    return { ...values, lowConfidenceKeys };
+    return {
+      ...values,
+      lowConfidenceKeys: REVIEW_FIELDS.filter(
+        (fd) => confidences[fd.key] === "low",
+      ).map((fd) => fd.key),
+    };
   }
 
   const stripAnsi = (s) => s.replace(/\x1b\[[0-9;]*m/g, "");
@@ -911,11 +911,13 @@ export async function annotatedReviewScreen(
       process.stdout.write("\n");
     }
 
-    // TODO flag notice for low-confidence fields
-    if (lowConfidenceKeys.length > 0) {
-      const todoNames = lowConfidenceKeys
-        .map((k) => REVIEW_FIELDS.find((f) => f.key === k)?.label ?? k)
-        .join(", ");
+    // TODO flag notice for low-confidence fields — derived live so it
+    // reflects any confidence promotions from interactive edits.
+    const liveLowKeys = REVIEW_FIELDS.filter(
+      (fd) => confidences[fd.key] === "low",
+    );
+    if (liveLowKeys.length > 0) {
+      const todoNames = liveLowKeys.map((fd) => fd.label).join(", ");
       process.stdout.write(
         `  ${red("⚠")}  ${bold("Low-confidence fields")} will be written with a ${cyan("# TODO(forgedock:<field>)")} comment:\n`,
       );
@@ -989,7 +991,12 @@ export async function annotatedReviewScreen(
     process.stdin.setRawMode(true);
   } catch {
     // Terminal doesn't support raw mode — fall back to accept-all.
-    return { ...values, lowConfidenceKeys };
+    return {
+      ...values,
+      lowConfidenceKeys: REVIEW_FIELDS.filter(
+        (fd) => confidences[fd.key] === "low",
+      ).map((fd) => fd.key),
+    };
   }
   process.stdin.resume();
   process.stdin.setEncoding("utf-8");
@@ -1095,5 +1102,10 @@ export async function annotatedReviewScreen(
     );
   }
 
-  return { ...values, lowConfidenceKeys };
+  return {
+    ...values,
+    lowConfidenceKeys: REVIEW_FIELDS.filter(
+      (fd) => confidences[fd.key] === "low",
+    ).map((fd) => fd.key),
+  };
 }
