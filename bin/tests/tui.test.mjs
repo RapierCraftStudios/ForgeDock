@@ -250,7 +250,5 @@ describe("truncateVisible — boundary values", () => {
     // maxWidth=0 with zero visible chars: nothing to truncate; result is ""
     assert.equal(result, "",
       "ANSI-only input with maxWidth=0 must return empty string, not a bare RESET");
-    assert.ok(!result.includes(ESC),
-      "no ANSI sequences must appear when result is empty");
   });
 });
