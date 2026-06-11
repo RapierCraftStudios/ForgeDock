@@ -167,6 +167,11 @@ async function handleUnmanaged(dir) {
  * @returns {string}
  */
 function buildActiveContext(dir, forgeYaml) {
+  // Sanitize the directory path before interpolating it into the context output.
+  // process.cwd() is user-controlled on Linux (directory names may contain <, >,
+  // or sequences that form <!-- -->), so it must be treated like any other
+  // untrusted value. <!-- fix: forge#450 -->
+  const safeDir = sanitizeContextValue(dir, 500) ?? "[project directory]";
   const project = forgeYaml.project ?? {};
   const projectName = sanitizeContextValue(project.name ?? null, 200);
   const owner = sanitizeContextValue(project.owner ?? null, 200);
@@ -194,7 +199,7 @@ function buildActiveContext(dir, forgeYaml) {
 
   return `\
 <!-- ForgeDock: managed-active -->
-**ForgeDock** is active in this directory (${dir}).
+**ForgeDock** is active in this directory (${safeDir}).
 ${nameNote}${repoNote}${descNote}${milestoneNote}
 - **Staging branch**: \`${stagingBranch}\`
 - **Feature branch pattern**: \`${featurePattern}\`
@@ -225,9 +230,11 @@ To disable ForgeDock in this directory: \`npx forgedock disable\``;
  * @returns {string}
  */
 function buildMissingConfigContext(dir) {
+  // Sanitize dir before display — see forge#450.
+  const safeDir = sanitizeContextValue(dir, 500) ?? "[project directory]";
   return `\
 <!-- ForgeDock: managed-active (no forge.yaml) -->
-**ForgeDock** is active in this directory (${dir}) but no \`forge.yaml\` was found.
+**ForgeDock** is active in this directory (${safeDir}) but no \`forge.yaml\` was found.
 
 Run autopilot init to generate your configuration automatically:
   \`npx forgedock init\`
@@ -243,9 +250,11 @@ from the codebase — then present a single annotated review screen for you to c
  * @returns {string}
  */
 function buildNudgeContext(dir) {
+  // Sanitize dir before display — see forge#450.
+  const safeDir = sanitizeContextValue(dir, 500) ?? "[project directory]";
   return `\
 <!-- ForgeDock: unmanaged nudge -->
-**ForgeDock** is installed but not active in this directory (${dir}).
+**ForgeDock** is installed but not active in this directory (${safeDir}).
 
 To enable the autonomous development pipeline here:
   \`npx forgedock enable\`   — mark this directory and stay silent until you run init
