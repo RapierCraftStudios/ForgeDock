@@ -82,6 +82,34 @@ function emptyRegistry() {
 // ---------------------------------------------------------------------------
 
 /**
+ * Resolve and normalize a directory path for use as a registry key.
+ *
+ * Calls `resolve()` to produce an absolute path, then — on Windows only —
+ * lowercases the drive letter (the character before the first `:`). This
+ * ensures that `C:\Users\foo` and `c:\Users\foo` hash to the same key,
+ * since NTFS is case-insensitive but JavaScript string comparison is not.
+ *
+ * On POSIX systems the resolved path is returned as-is; POSIX filesystems
+ * are case-sensitive by convention and no normalization is needed.
+ *
+ * Only the drive letter is lowercased — the rest of the path is preserved
+ * verbatim so that intentional casing in directory names is not altered.
+ *
+ * @param {string} dir - Directory path (absolute or relative).
+ * @returns {string} Normalized absolute path suitable for use as a registry key.
+ */
+function normalizeDir(dir) {
+  const abs = resolve(dir);
+  // On Windows, drive letters vary in casing (C:\ vs c:\). Normalize to
+  // lowercase so registry lookups are case-insensitive for drive letters.
+  // Detect: abs[1] === ':' is the Windows drive-letter pattern (e.g. C:\).
+  if (process.platform === "win32" && abs.length >= 2 && abs[1] === ":") {
+    return abs[0].toLowerCase() + abs.slice(1);
+  }
+  return abs;
+}
+
+/**
  * Read and parse the registry file.
  *
  * Fail-open: any read or parse error returns an empty registry rather than
@@ -188,7 +216,7 @@ async function _doWriteRegistry(data) {
  * @returns {'managed-active' | 'managed-optedout' | 'unmanaged'}
  */
 export function resolveState(dir) {
-  const absDir = resolve(dir);
+  const absDir = normalizeDir(dir);
 
   // Check for managed markers (forge.yaml or .forgedock)
   const hasForgeYaml = existsSync(join(absDir, "forge.yaml"));
@@ -212,15 +240,16 @@ export function resolveState(dir) {
 /**
  * Add or remove a directory from the opt-out set in the registry.
  *
- * The directory path is normalized with resolve() before being stored,
- * ensuring consistent key lookup regardless of trailing slashes or symlinks.
+ * The directory path is normalized with normalizeDir() before being stored,
+ * ensuring consistent key lookup regardless of trailing slashes, symlinks, or
+ * drive-letter casing on Windows.
  *
  * @param {string} dir        - Absolute path to the directory.
  * @param {boolean} optedOut  - true to opt out, false to remove from opt-out set.
  * @returns {Promise<void>}
  */
 export async function setOptOut(dir, optedOut) {
-  const absDir = resolve(dir);
+  const absDir = normalizeDir(dir);
   const registry = readRegistry();
 
   if (optedOut) {
@@ -244,7 +273,7 @@ export async function setOptOut(dir, optedOut) {
  */
 export function nudgeSeen(dir) {
   try {
-    const absDir = resolve(dir);
+    const absDir = normalizeDir(dir);
     const registry = readRegistry();
     return Object.prototype.hasOwnProperty.call(registry.nudgeSeen, absDir);
   } catch {
@@ -263,7 +292,7 @@ export function nudgeSeen(dir) {
  * @returns {Promise<void>}
  */
 export async function markNudgeSeen(dir) {
-  const absDir = resolve(dir);
+  const absDir = normalizeDir(dir);
   const registry = readRegistry();
   registry.nudgeSeen[absDir] = { at: new Date().toISOString() };
   await writeRegistry(registry);
