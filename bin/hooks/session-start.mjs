@@ -171,7 +171,7 @@ function buildActiveContext(dir, forgeYaml) {
   // process.cwd() is user-controlled on Linux (directory names may contain <, >,
   // or sequences that form <!-- -->), so it must be treated like any other
   // untrusted value. <!-- fix: forge#450 -->
-  const safeDir = sanitizeContextValue(dir, 500) ?? dir;
+  const safeDir = sanitizeContextValue(dir, 500) ?? "[project directory]";
   const project = forgeYaml.project ?? {};
   const projectName = sanitizeContextValue(project.name ?? null, 200);
   const owner = sanitizeContextValue(project.owner ?? null, 200);
@@ -231,7 +231,7 @@ To disable ForgeDock in this directory: \`npx forgedock disable\``;
  */
 function buildMissingConfigContext(dir) {
   // Sanitize dir before display — see forge#450.
-  const safeDir = sanitizeContextValue(dir, 500) ?? dir;
+  const safeDir = sanitizeContextValue(dir, 500) ?? "[project directory]";
   return `\
 <!-- ForgeDock: managed-active (no forge.yaml) -->
 **ForgeDock** is active in this directory (${safeDir}) but no \`forge.yaml\` was found.
@@ -251,7 +251,7 @@ from the codebase — then present a single annotated review screen for you to c
  */
 function buildNudgeContext(dir) {
   // Sanitize dir before display — see forge#450.
-  const safeDir = sanitizeContextValue(dir, 500) ?? dir;
+  const safeDir = sanitizeContextValue(dir, 500) ?? "[project directory]";
   return `\
 <!-- ForgeDock: unmanaged nudge -->
 **ForgeDock** is installed but not active in this directory (${safeDir}).
