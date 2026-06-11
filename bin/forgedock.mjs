@@ -284,8 +284,18 @@ function readClaudeSettings() {
  */
 function writeClaudeSettings(settings) {
   const tmpPath = CLAUDE_SETTINGS_PATH + ".forgedock.tmp";
-  writeFileSync(tmpPath, JSON.stringify(settings, null, 2) + "\n", "utf-8");
-  renameSync(tmpPath, CLAUDE_SETTINGS_PATH);
+  try {
+    writeFileSync(tmpPath, JSON.stringify(settings, null, 2) + "\n", "utf-8");
+    renameSync(tmpPath, CLAUDE_SETTINGS_PATH);
+  } catch (err) {
+    // Clean up temp file if it was created before the error
+    try {
+      unlinkSync(tmpPath);
+    } catch {
+      /* already gone or never created */
+    }
+    throw err;
+  }
 }
 
 /**
