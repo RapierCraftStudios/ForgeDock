@@ -181,7 +181,10 @@ function sessionStartHookCommand() {
     "hooks",
     "session-start.mjs",
   ).replace(/\\/g, "/");
-  return `node "${hookPath}"`;
+  // Escape embedded double quotes so a crafted install path cannot break out
+  // of the quoted argument and inject shell tokens.
+  const safePath = hookPath.replace(/"/g, '\\"');
+  return `node "${safePath}"`;
 }
 
 /**
