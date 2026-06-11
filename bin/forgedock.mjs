@@ -1660,7 +1660,9 @@ function queryNpmRegistry(pkg) {
       encoding: "utf-8",
       stdio: ["pipe", "pipe", "pipe"],
       timeout: 5000,
-      shell: true,
+      // On Windows, npm is a .cmd shim — shell: true enables .cmd resolution.
+      // On POSIX, npm resolves directly — no shell needed. (Ref: review-finding #413)
+      shell: process.platform === "win32",
     });
     return result.trim() || null;
   } catch {
