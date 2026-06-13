@@ -101,11 +101,11 @@ if [ "$OWNER_IS_PLACEHOLDER" = "true" ] || [ "$REPO_IS_PLACEHOLDER" = "true" ]; 
     # SSH format: git@github.com:owner/repo.git
     if echo "$REMOTE_URL" | grep -qE '^git@[^:]+:'; then
       DETECTED_OWNER=$(echo "$REMOTE_URL" | sed -E 's|^git@[^:]+:([^/]+)/.*|\1|')
-      DETECTED_REPO=$(echo "$REMOTE_URL" | sed -E 's|^git@[^:]+:[^/]+/(.+?)(\.git)?$|\1|')
+      DETECTED_REPO=$(echo "$REMOTE_URL" | sed -E 's|^git@[^:]+:[^/]+/||; s|\.git$||')
     # HTTPS format: https://github.com/owner/repo.git
     elif echo "$REMOTE_URL" | grep -qE '^https?://'; then
       DETECTED_OWNER=$(echo "$REMOTE_URL" | sed -E 's|^https?://[^/]+/([^/]+)/.*|\1|')
-      DETECTED_REPO=$(echo "$REMOTE_URL" | sed -E 's|^https?://[^/]+/[^/]+/(.+?)(\.git)?$|\1|')
+      DETECTED_REPO=$(echo "$REMOTE_URL" | sed -E 's|^https?://[^/]+/[^/]+/||; s|\.git$||')
     fi
   fi
 
