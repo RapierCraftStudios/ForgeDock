@@ -243,12 +243,38 @@ describe("truncateVisible — boundary values", () => {
   });
 
   it("does NOT append a spurious trailing reset for ANSI-only input at any width", () => {
-    // The trailing-reset guard fires only when stripAnsi(str).length > maxWidth.
+    // The trailing-reset guard fires only when stripAnsi(str).length >= maxWidth.
     // For ANSI-only input, visible length is 0 — the guard must never fire.
     const input = `${RED_OPEN}${RESET}`;
     const result = truncateVisible(input, 0);
     // maxWidth=0 with zero visible chars: nothing to truncate; result is ""
     assert.equal(result, "",
       "ANSI-only input with maxWidth=0 must return empty string, not a bare RESET");
+  });
+
+  it("preserves trailing RESET when visible length equals maxWidth exactly — fix for #519", () => {
+    // off-by-one boundary bug: when visible === maxWidth, the loop guard
+    // (visible < maxWidth) suppresses the original RESET token.  The post-loop
+    // reset guard must catch this case via >= rather than >.
+    //
+    // Input: BOLD_OPEN + "hi" + RESET — visible chars = 2, maxWidth = 2.
+    // The loop processes BOLD_OPEN (visible=0<2 → forwarded), "hi" (visible→2),
+    // then RESET (visible=2 is NOT < maxWidth=2 → suppressed by loop guard).
+    // Without the fix the result would be "\x1b[1mhi" — bold bleeds into next column.
+    const input = `${BOLD_OPEN}hi${RESET}`;
+    const result = truncateVisible(input, 2);
+
+    // Visible text must be preserved exactly
+    assert.equal(stripAnsi(result), "hi",
+      "visible content must be preserved when visible length equals maxWidth");
+
+    // The trailing RESET must be present — original was suppressed, guard must fire
+    assert.ok(result.endsWith(RESET),
+      "trailing RESET must be preserved when visible length === maxWidth (fix for #519)");
+
+    // Exactly one RESET (from post-loop guard — original was suppressed)
+    const resetCount = (result.match(/\x1b\[0m/g) || []).length;
+    assert.equal(resetCount, 1,
+      "trailing reset must appear exactly once — not duplicated");
   });
 });
