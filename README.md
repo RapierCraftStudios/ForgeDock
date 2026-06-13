@@ -251,6 +251,16 @@ npx forgedock help        # Show all commands
 
 ---
 
+## Documentation
+
+- [Getting Started in 5 Minutes](docs/site/getting-started.md) — install, configure, run your first pipeline
+- [How ForgeDock's Knowledge Graph Works](docs/site/how-it-works.md) — FORGE annotations, the pipeline relay, compaction resilience
+- [ForgeDock vs. Manual Claude Code Workflows](docs/site/vs-manual-workflows.md) — why structured pipelines beat ad-hoc prompting
+- [The FORGE Annotation Protocol](docs/site/forge-annotation-protocol.md) — technical spec, open standard for AI context passing
+- [Complete Command Reference](docs/site/command-reference.md) — all 25+ commands with usage and examples
+
+---
+
 ## Contributing
 
 PRs welcome. Every change goes through a PR, tested against 3+ scenarios, using conventional commits (`fix(command):`, `feat(command):`, `refactor(command):`).
