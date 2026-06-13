@@ -10,7 +10,7 @@
 #   # Add forge.yaml to your .gitignore if it contains sensitive paths
 #
 # Required sections: project, paths, branches
-# Optional sections: repos, project_board, services, review, verification, deploy, billing
+# Optional sections: repos, project_board, services, review, verification, deploy, billing, marketing
 
 # =============================================================================
 # PROJECT (REQUIRED)
@@ -486,3 +486,20 @@ branches:
 #   #   - ForgeDock usage notes   → devdocs/agent/using-forgedock.md
 #   # Agents read devdocs/ files as binding source-of-truth, so they receive
 #   # richer context than the single review.context string.
+
+# =============================================================================
+# MARKETING (OPTIONAL)
+# Controls opt-in growth features such as 'Powered by ForgeDock' footers on
+# PR descriptions created by the pipeline.
+# Commands: work-on (Phase 4 PR creation — when pr_footer is true)
+# NOTE: pr_footer injection requires future pipeline support. Set to true
+# to opt in once that support ships. Defaults to false (no-op).
+# =============================================================================
+
+# marketing:
+#   # When true, the pipeline appends a small 'Powered by ForgeDock' footer to
+#   # every PR description it creates. Opt-in only — set false to disable.
+#   # This is a one-line footer link, not a banner. Example:
+#   #   ---
+#   #   *Powered by [ForgeDock](https://github.com/RapierCraftStudios/ForgeDock)*
+#   pr_footer: false

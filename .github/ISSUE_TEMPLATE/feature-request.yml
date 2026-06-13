@@ -1,0 +1,60 @@
+name: Feature Request
+description: Suggest a new feature or improvement to ForgeDock
+labels: ["enhancement"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for taking the time to suggest an improvement! Please describe your idea clearly so we can evaluate and prioritize it.
+
+  - type: textarea
+    id: use-case
+    attributes:
+      label: Use case
+      description: What problem does this solve? What are you trying to accomplish?
+      placeholder: "When I'm working on large codebases, I often need to..."
+    validations:
+      required: true
+
+  - type: textarea
+    id: proposed-solution
+    attributes:
+      label: Proposed solution
+      description: Describe how you'd like this to work.
+      placeholder: "A new `/command-name` that..."
+    validations:
+      required: true
+
+  - type: dropdown
+    id: affected-commands
+    attributes:
+      label: Which command(s) would this affect?
+      multiple: true
+      options:
+        - /work-on
+        - /review-pr
+        - /quality-gate
+        - /orchestrate
+        - /autopilot
+        - forge.yaml config
+        - npx forgedock installer
+        - New command
+        - Not command-specific
+    validations:
+      required: false
+
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+      description: Have you considered any alternative approaches? Why is your proposal better?
+    validations:
+      required: false
+
+  - type: textarea
+    id: additional-context
+    attributes:
+      label: Additional context
+      description: Add any other context, screenshots, or examples here.
+    validations:
+      required: false
