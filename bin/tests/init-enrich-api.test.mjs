@@ -11,6 +11,7 @@
  *   - Returns original draft for malformed JSON
  *   - Returns original draft when required sections are missing
  *   - Returns original draft when no '{' is found in output
+ *   - Accepts enriched draft when meta is a truthy empty object ({})
  *
  * Run with: node --test bin/tests/init-enrich-api.test.mjs
  */
@@ -157,6 +158,141 @@ describe("parseEnrichedDraft", () => {
     const partial = { project: ORIGINAL_DRAFT.project, paths: ORIGINAL_DRAFT.paths };
     const result = parseEnrichedDraft(JSON.stringify(partial), ORIGINAL_DRAFT);
     assert.equal(result, ORIGINAL_DRAFT);
+  });
+
+  it("returns original draft when parsed object is missing 'meta' section", () => {
+    const partial = {
+      project: ORIGINAL_DRAFT.project,
+      paths: ORIGINAL_DRAFT.paths,
+      branches: ORIGINAL_DRAFT.branches,
+    };
+    const result = parseEnrichedDraft(JSON.stringify(partial), ORIGINAL_DRAFT);
+    assert.equal(result, ORIGINAL_DRAFT);
+  });
+
+  it("returns original draft when parsed object has null 'meta' section", () => {
+    const partial = {
+      project: ORIGINAL_DRAFT.project,
+      paths: ORIGINAL_DRAFT.paths,
+      branches: ORIGINAL_DRAFT.branches,
+      meta: null,
+    };
+    const result = parseEnrichedDraft(JSON.stringify(partial), ORIGINAL_DRAFT);
+    assert.equal(result, ORIGINAL_DRAFT);
+  });
+
+  it("returns original draft when 'meta' is a truthy non-object string", () => {
+    const partial = {
+      project: ORIGINAL_DRAFT.project,
+      paths: ORIGINAL_DRAFT.paths,
+      branches: ORIGINAL_DRAFT.branches,
+      meta: "truthy-string",
+    };
+    const result = parseEnrichedDraft(JSON.stringify(partial), ORIGINAL_DRAFT);
+    assert.equal(result, ORIGINAL_DRAFT);
+  });
+
+  it("returns original draft when 'meta' is a truthy non-object number", () => {
+    const partial = {
+      project: ORIGINAL_DRAFT.project,
+      paths: ORIGINAL_DRAFT.paths,
+      branches: ORIGINAL_DRAFT.branches,
+      meta: 1,
+    };
+    const result = parseEnrichedDraft(JSON.stringify(partial), ORIGINAL_DRAFT);
+    assert.equal(result, ORIGINAL_DRAFT);
+  });
+
+  it("returns original draft when 'project' is a truthy non-object string", () => {
+    const partial = {
+      project: "truthy-string",
+      paths: ORIGINAL_DRAFT.paths,
+      branches: ORIGINAL_DRAFT.branches,
+      meta: ORIGINAL_DRAFT.meta,
+    };
+    const result = parseEnrichedDraft(JSON.stringify(partial), ORIGINAL_DRAFT);
+    assert.equal(result, ORIGINAL_DRAFT);
+  });
+
+  it("returns original draft when 'paths' is a truthy non-object number", () => {
+    const partial = {
+      project: ORIGINAL_DRAFT.project,
+      paths: 1,
+      branches: ORIGINAL_DRAFT.branches,
+      meta: ORIGINAL_DRAFT.meta,
+    };
+    const result = parseEnrichedDraft(JSON.stringify(partial), ORIGINAL_DRAFT);
+    assert.equal(result, ORIGINAL_DRAFT);
+  });
+
+  it("returns original draft when 'branches' is a truthy non-object string", () => {
+    const partial = {
+      project: ORIGINAL_DRAFT.project,
+      paths: ORIGINAL_DRAFT.paths,
+      branches: "main",
+      meta: ORIGINAL_DRAFT.meta,
+    };
+    const result = parseEnrichedDraft(JSON.stringify(partial), ORIGINAL_DRAFT);
+    assert.equal(result, ORIGINAL_DRAFT);
+  });
+
+  it("returns original draft when 'project' is an array (typeof [] === 'object' bypass)", () => {
+    const partial = {
+      project: [],
+      paths: ORIGINAL_DRAFT.paths,
+      branches: ORIGINAL_DRAFT.branches,
+      meta: ORIGINAL_DRAFT.meta,
+    };
+    const result = parseEnrichedDraft(JSON.stringify(partial), ORIGINAL_DRAFT);
+    assert.equal(result, ORIGINAL_DRAFT);
+  });
+
+  it("returns original draft when 'paths' is an array (typeof [] === 'object' bypass)", () => {
+    const partial = {
+      project: ORIGINAL_DRAFT.project,
+      paths: [],
+      branches: ORIGINAL_DRAFT.branches,
+      meta: ORIGINAL_DRAFT.meta,
+    };
+    const result = parseEnrichedDraft(JSON.stringify(partial), ORIGINAL_DRAFT);
+    assert.equal(result, ORIGINAL_DRAFT);
+  });
+
+  it("returns original draft when 'branches' is an array (typeof [] === 'object' bypass)", () => {
+    const partial = {
+      project: ORIGINAL_DRAFT.project,
+      paths: ORIGINAL_DRAFT.paths,
+      branches: [],
+      meta: ORIGINAL_DRAFT.meta,
+    };
+    const result = parseEnrichedDraft(JSON.stringify(partial), ORIGINAL_DRAFT);
+    assert.equal(result, ORIGINAL_DRAFT);
+  });
+
+  it("returns original draft when 'meta' is an array (typeof [] === 'object' bypass)", () => {
+    const partial = {
+      project: ORIGINAL_DRAFT.project,
+      paths: ORIGINAL_DRAFT.paths,
+      branches: ORIGINAL_DRAFT.branches,
+      meta: [],
+    };
+    const result = parseEnrichedDraft(JSON.stringify(partial), ORIGINAL_DRAFT);
+    assert.equal(result, ORIGINAL_DRAFT);
+  });
+
+  it("accepts enriched draft when all four required sections are present including meta", () => {
+    const enriched = buildEnrichedDraft();
+    const result = parseEnrichedDraft(JSON.stringify(enriched), ORIGINAL_DRAFT);
+    // Must return the enriched draft (not the original) when all sections are present
+    assert.deepEqual(result.meta, enriched.meta);
+    assert.deepEqual(result.project, enriched.project);
+  });
+
+  it("accepts enriched draft when meta is a truthy empty object", () => {
+    // {} is truthy and typeof {} === "object" — the guard must pass it through
+    const enriched = buildEnrichedDraft({ meta: {} });
+    const result = parseEnrichedDraft(JSON.stringify(enriched), ORIGINAL_DRAFT);
+    assert.deepEqual(result.meta, {});
   });
 
   it("returns original draft when output has unclosed JSON (no matching '}')", () => {

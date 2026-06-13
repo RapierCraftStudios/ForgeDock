@@ -107,8 +107,16 @@ export function parseEnrichedDraft(output, draft) {
         // Found the closing brace of the top-level object — parse the candidate.
         try {
           const enriched = JSON.parse(output.slice(start, i + 1));
-          // Basic sanity check: must have the required top-level sections.
-          if (!enriched.project || !enriched.paths || !enriched.branches) {
+          // Basic sanity check: must have the required top-level sections and
+          // each section must be a plain non-null object. The typeof+null guard
+          // rejects null and primitives; Array.isArray() additionally rejects
+          // arrays since typeof [] === 'object' would otherwise pass them.
+          if (
+            typeof enriched.project !== "object" || enriched.project === null || Array.isArray(enriched.project) ||
+            typeof enriched.paths !== "object" || enriched.paths === null || Array.isArray(enriched.paths) ||
+            typeof enriched.branches !== "object" || enriched.branches === null || Array.isArray(enriched.branches) ||
+            typeof enriched.meta !== "object" || enriched.meta === null || Array.isArray(enriched.meta)
+          ) {
             return draft;
           }
           return enriched;

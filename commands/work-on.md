@@ -745,6 +745,8 @@ if iteration == max_iterations AND not PASS:
 
 **After quality gate completes (PASS or fixes applied): proceed immediately to sub-phase 3H below. Quality gate is an intermediate check — "PASS" means the code is clean, NOT that the build is done. Do NOT stop.**
 
+**After PASS: Do NOT re-read GitHub state, issue body, labels, or any file. Do NOT run any gh commands. Do NOT check PR status. Proceed directly to Phase 3H (Format and verify) below.** <!-- Added: forge#93 -->
+
 ### 3H: Format and verify
 
 All tool commands are read from `forge.yaml → verification.commands`. When a key is absent, the step logs `SKIPPED — not configured in verification.commands` and continues rather than silently passing.
@@ -999,8 +1001,22 @@ PR #${PR_NUMBER} created targeting \`{PR_BASE}\`. Invoking /review-pr with --aut
 ```
 
 ### 5C: Invoke /review-pr with --auto-merge
+
+**Context budget check** (run before invoking review-pr): <!-- Added: forge#93 -->
+
+Large-context sessions that accumulated significant build history cause review-pr to hit the token limit mid-review. Check the accumulated context before delegating:
+
+- If the build changed **≥6 files** OR this agent has made **≥20 Skill invocations** since it started: invoke `work-on/review` as a fresh sub-agent (via `Skill(skill="work-on/review", args="...")`) rather than calling review-pr directly. The sub-agent starts with a clean context window.
+- Otherwise (small build, few skill calls): invoke review-pr directly as below.
+
+**Direct invocation** (small builds — <6 changed files AND <20 Skill invocations):
 ```
 Skill(skill="review-pr", args="{PR_NUMBER} --auto-merge --issue {NUMBER} --base {PR_BASE} --gh-flag {GH_FLAG}")
+```
+
+**Sub-agent invocation** (large builds — ≥6 changed files OR ≥20 Skill invocations):
+```
+Skill(skill="work-on/review", args="{NUMBER} --repo {GH_REPO} --gh-flag {GH_FLAG} --worktree {WORKTREE_PATH} --branch {BRANCH} --base {PR_BASE}")
 ```
 
 Review-pr handles: full domain-agent review → post findings as separate issues → merge PR. It does NOT close the issue or clean up the worktree — those run in Phase 6.
@@ -1019,6 +1035,8 @@ gh issue view {NUMBER} {GH_FLAG} --json state --jq '.state'
 <!-- FORGE:PHASE_COMPLETE — Review done, PR merged. See Universal Phase Dispatcher: next phase is Phase 6 (Close & Cleanup). Not terminal — continue immediately. -->
 
 **After /review-pr returns and the PR is confirmed merged: immediately proceed to Phase 6 (Close & Cleanup). Do NOT stop here. `REVIEW_RESULT: status: COMPLETE` is an intermediate result — the pipeline is NOT done. Invoke Phase 6 now to close the issue, update labels, post the trajectory log, and clean up the worktree.**
+
+**Do NOT output any text describing this transition. Do NOT write phrases like "returning to work-on", "proceeding to close", "now invoking Phase 6", or any narrative summary of what comes next. Do NOT emit end_turn. Execute Phase 6 code immediately.** <!-- Added: forge#93 -->
 
 ---
 

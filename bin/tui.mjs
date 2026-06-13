@@ -106,9 +106,6 @@ export function box(content, { title = "", padding = 1, width } = {}) {
   const lines = Array.isArray(content) ? content : String(content).split("\n");
   const pad = " ".repeat(padding);
 
-  // Strip ANSI codes to compute visual width
-  const stripAnsi = (s) => s.replace(/\x1b\[[0-9;]*[A-Za-z]/g, "");
-
   const contentWidth = lines.reduce(
     (max, l) => Math.max(max, stripAnsi(l).length),
     0,
@@ -659,8 +656,6 @@ export function table(
 ) {
   if (!rows || rows.length === 0) return "";
 
-  const stripAnsi = (s) => s.replace(/\x1b\[[0-9;]*[A-Za-z]/g, "");
-
   // Compute column widths
   const colCount = Math.max(...rows.map((r) => r.length));
   const widths = Array.from({ length: colCount }, (_, c) =>
@@ -699,6 +694,63 @@ export function table(
   });
 
   return lines.join("\n") + "\n";
+}
+
+// ---------------------------------------------------------------------------
+// ANSI string utilities (exported for testing)
+// ---------------------------------------------------------------------------
+
+/** Strip all ANSI CSI sequences from a string, returning only visible text. */
+export function stripAnsi(s) {
+  return s.replace(/\x1b\[[0-9;]*[A-Za-z]/g, "");
+}
+
+/**
+ * Truncate an ANSI-decorated string to at most `maxWidth` visible characters,
+ * never bisecting an escape sequence.
+ *
+ * Tokens from the cut region are suppressed — only ANSI tokens encountered
+ * while the visible budget is still live are forwarded to the output.
+ * A trailing reset (\x1b[0m) is appended when truncation occurs and the
+ * result already contains ANSI sequences, preventing color bleed into
+ * adjacent columns.
+ */
+export function truncateVisible(str, maxWidth) {
+  const ansiRe = /\x1b\[[0-9;]*[A-Za-z]/g;
+  let visible = 0;
+  let result = "";
+  let lastIndex = 0;
+  let m;
+  ansiRe.lastIndex = 0;
+  while ((m = ansiRe.exec(str)) !== null) {
+    // Consume plain-text chars before this ANSI token
+    const plain = str.slice(lastIndex, m.index);
+    const remaining = maxWidth - visible;
+    if (remaining > 0) {
+      result += plain.slice(0, remaining);
+      visible += Math.min(plain.length, remaining);
+    }
+    // Only include the ANSI token while the visible budget is not yet exhausted.
+    // Once the cut point is reached, tokens from the removed region are suppressed;
+    // the post-loop reset guard below handles color-state cleanup.
+    if (visible < maxWidth) {
+      result += m[0];
+    }
+    lastIndex = ansiRe.lastIndex;
+  }
+  // Remaining plain text after last ANSI token
+  const remaining = maxWidth - visible;
+  if (remaining > 0) {
+    result += str.slice(lastIndex, lastIndex + remaining);
+  }
+  // If truncation occurred and the result contains any ANSI sequences,
+  // append a full reset to prevent color from bleeding into adjacent columns.
+  // Truncation is detected by checking whether the original string has more
+  // visible characters than maxWidth (i.e. stripAnsi(str).length > maxWidth).
+  if (stripAnsi(str).length > maxWidth && result.includes("\x1b[")) {
+    result += "\x1b[0m";
+  }
+  return result;
 }
 
 // ---------------------------------------------------------------------------
@@ -821,48 +873,10 @@ export async function annotatedReviewScreen(
     };
   }
 
-  const stripAnsi = (s) => s.replace(/\x1b\[[0-9;]*[A-Za-z]/g, "");
-
   // Pad an ANSI-decorated string to `width` visible characters.
   function padVisible(str, width) {
     const visual = stripAnsi(str).length;
     return str + " ".repeat(Math.max(0, width - visual));
-  }
-
-  // Truncate an ANSI-decorated string to at most `maxWidth` visible characters,
-  // never bisecting an escape sequence.
-  function truncateVisible(str, maxWidth) {
-    const ansiRe = /\x1b\[[0-9;]*[A-Za-z]/g;
-    let visible = 0;
-    let result = "";
-    let lastIndex = 0;
-    let m;
-    ansiRe.lastIndex = 0;
-    while ((m = ansiRe.exec(str)) !== null) {
-      // Consume plain-text chars before this ANSI token
-      const plain = str.slice(lastIndex, m.index);
-      const remaining = maxWidth - visible;
-      if (remaining > 0) {
-        result += plain.slice(0, remaining);
-        visible += Math.min(plain.length, remaining);
-      }
-      // Always include the ANSI token (zero visible width)
-      result += m[0];
-      lastIndex = ansiRe.lastIndex;
-    }
-    // Remaining plain text after last ANSI token
-    const remaining = maxWidth - visible;
-    if (remaining > 0) {
-      result += str.slice(lastIndex, lastIndex + remaining);
-    }
-    // If truncation occurred and the result contains any ANSI sequences,
-    // append a full reset to prevent color from bleeding into adjacent columns.
-    // Truncation is detected by checking whether the original string has more
-    // visible characters than maxWidth (i.e. stripAnsi(str).length > maxWidth).
-    if (stripAnsi(str).length > maxWidth && result.includes("\x1b[")) {
-      result += "\x1b[0m";
-    }
-    return result;
   }
 
   // ── Render the annotated table ────────────────────────────────────────────
