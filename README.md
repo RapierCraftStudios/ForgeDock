@@ -226,6 +226,8 @@ The path from here to there is incremental. Each piece — the knowledge store, 
 
 ## Install
 
+### Option A: npx (recommended)
+
 **Step 1: Install commands**
 
 ```bash
@@ -257,6 +259,17 @@ npx forgedock update      # Pull latest commands
 npx forgedock uninstall   # Remove all commands
 npx forgedock help        # Show all commands
 ```
+
+### Option B: Claude Code Plugin Marketplace
+
+If you're running Claude Code v2.1.143 or later, you can install ForgeDock directly through the plugin marketplace:
+
+```
+/plugin marketplace add RapierCraftStudios/ForgeDock
+/plugin install forgedock@forgedock
+```
+
+After install, commands are available as `/forgedock:work-on`, `/forgedock:review-pr`, etc. You still need to run `npx forgedock init` (or `/forgedock-init` inside Claude Code) to generate your `forge.yaml` config.
 
 ---
 
