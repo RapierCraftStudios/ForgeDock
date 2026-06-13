@@ -36,6 +36,42 @@ const YELLOW = "\x1b[33m";
 const CYAN = "\x1b[36m";
 const RED = "\x1b[31m";
 const RESET = "\x1b[0m";
+const DIM = "\x1b[2m";
+
+// ---------------------------------------------------------------------------
+// Splash — the ForgeDock wordmark shown at startup
+// ---------------------------------------------------------------------------
+
+const LOGO_LINES = [
+  "  ╔═╗╔═╗╦═╗╔═╗╔═╗╔╦╗╔═╗╔═╗╦╔═",
+  "  ╠╣ ║ ║╠╦╝║ ╦║╣  ║║║ ║║  ╠╩╗",
+  "  ╚  ╚═╝╩╚═╚═╝╚═╝═╩╝╚═╝╚═╝╩ ╩",
+];
+
+function getVersion() {
+  try {
+    const pkg = JSON.parse(
+      readFileSync(join(FORGE_HOME, "package.json"), "utf-8"),
+    );
+    return pkg.version || "";
+  } catch {
+    return "";
+  }
+}
+
+function splash() {
+  const version = getVersion();
+  console.log("");
+  for (const line of LOGO_LINES) {
+    console.log(`${BOLD}${CYAN}${line}${RESET}`);
+  }
+  console.log("");
+  console.log(`  ${DIM}GitHub as a knowledge graph for AI agents${RESET}`);
+  if (version) {
+    console.log(`  ${DIM}v${version}${RESET}`);
+  }
+  console.log("");
+}
 
 /**
  * Prompt the user for a yes/no confirmation.
@@ -688,6 +724,8 @@ function help() {
   console.log(`  ${CYAN}npx forgedock help${RESET}       Show this help`);
   console.log("");
 }
+
+splash();
 
 switch (command) {
   case "install":
