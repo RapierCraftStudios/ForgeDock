@@ -14,6 +14,13 @@
 <a href="https://github.com/RapierCraftStudios/ForgeDock/pulls"><img src="https://img.shields.io/badge/PRs-welcome-brightgreen.svg" alt="PRs Welcome" /></a>
 <a href="https://github.com/sponsors/RapierCraftStudios"><img src="https://img.shields.io/badge/Sponsor-❤-ea4aaa.svg" alt="Sponsor" /></a>
 
+<br /><br />
+
+<!-- demo-gif-placeholder: generate with `vhs docs/demo.tape` -->
+<img src="docs/demo.gif" alt="ForgeDock demo — zero to PR speedrun" width="900" />
+
+<p><em>Zero to PR in one command. Agent investigates → architects → builds → opens PR with full context chain.</em></p>
+
 </div>
 
 <br />
@@ -58,6 +65,8 @@ The result: agents that are **deterministic**, not guessing. They follow structu
 ---
 
 ## See It Working
+
+> **Generate the demo GIF**: Install [VHS](https://github.com/charmbracelet/vhs) and run `vhs docs/demo.tape` — it outputs `docs/demo.gif` from the tape script in this repo.
 
 Here's what a real pipeline run looks like. A user reports that an API endpoint is returning 500 errors — the pipeline takes it from there.
 
