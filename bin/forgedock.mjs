@@ -371,6 +371,53 @@ async function init(fromInstall = false) {
     );
   }
 
+  // --- Auto-detect project description from CLAUDE.md (fallback) ---
+  if (!description) {
+    try {
+      const claudePath = join(cwd, "CLAUDE.md");
+      if (existsSync(claudePath)) {
+        const claudeContent = readFileSync(claudePath, "utf-8").slice(0, 2048);
+        const lines = claudeContent.split("\n");
+        let inFirstParagraph = false;
+        const paragraphLines = [];
+        for (const line of lines) {
+          // Skip heading lines at the top
+          if (!inFirstParagraph && line.match(/^#/)) continue;
+          // Skip blank lines before paragraph starts
+          if (!inFirstParagraph && line.trim() === "") continue;
+          // Skip lines that are just badges, HTML comments, code fences, horizontal rules, or tables
+          if (!inFirstParagraph && line.match(/^[!<\[`|]/)) continue;
+          if (!inFirstParagraph && line.match(/^---/)) continue;
+          // Start collecting
+          if (!inFirstParagraph) {
+            inFirstParagraph = true;
+          }
+          // Stop at blank line (end of paragraph)
+          if (line.trim() === "") break;
+          paragraphLines.push(line.trim());
+        }
+        if (paragraphLines.length > 0) {
+          // Flatten to single line, strip markdown links/bold/inline code
+          description = paragraphLines
+            .join(" ")
+            .replace(/\[([^\]]+)\]\([^)]+\)/g, "$1")
+            .replace(/\*\*([^*]+)\*\*/g, "$1")
+            .replace(/`([^`]+)`/g, "$1")
+            .slice(0, 200)
+            .trim();
+        }
+      }
+    } catch {
+      // Best-effort only — silently fall back to empty description
+    }
+
+    if (description) {
+      console.log(
+        `  Description:     ${CYAN}${description.slice(0, 60)}${description.length > 60 ? "…" : ""}${RESET} (from CLAUDE.md)`,
+      );
+    }
+  }
+
   // --- Handle existing forge.yaml ---
   if (existsSync(outputPath)) {
     const baseBak = join(cwd, "forge.yaml.bak");
