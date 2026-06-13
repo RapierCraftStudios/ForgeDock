@@ -339,8 +339,9 @@ async function init(fromInstall = false) {
         if (!inFirstParagraph && line.match(/^#/)) continue;
         // Skip blank lines before paragraph starts
         if (!inFirstParagraph && line.trim() === "") continue;
-        // Skip lines that are just badges or HTML
-        if (!inFirstParagraph && line.match(/^[!<\[]/)) continue;
+        // Skip lines that are just badges, HTML, code fences, horizontal rules, or tables
+        if (!inFirstParagraph && line.match(/^[!<\[`|]/)) continue;
+        if (!inFirstParagraph && line.match(/^---/)) continue;
         // Start collecting
         if (!inFirstParagraph) {
           inFirstParagraph = true;
