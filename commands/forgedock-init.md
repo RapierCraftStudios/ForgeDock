@@ -113,7 +113,7 @@ if [ "$OWNER_IS_PLACEHOLDER" = "true" ] || [ "$REPO_IS_PLACEHOLDER" = "true" ]; 
     echo "Auto-detected: owner=\"$DETECTED_OWNER\" repo=\"$DETECTED_REPO\""
     # Update forge.yaml in-place with detected values
     [ "$OWNER_IS_PLACEHOLDER" = "true" ] && \
-      sed -i "s|^  owner:.*|  owner: \"$DETECTED_OWNER\"|" "$FORGE_YAML"
+      sed -i '/^project:/,/^[a-z]/{s|^  owner:.*|  owner: "'"$DETECTED_OWNER"'"|}' "$FORGE_YAML"
     [ "$REPO_IS_PLACEHOLDER" = "true" ] && \
       sed -i "s|^  repo:.*|  repo: \"$DETECTED_REPO\"|" "$FORGE_YAML"
     echo "forge.yaml updated with auto-detected values. Continuing..."
