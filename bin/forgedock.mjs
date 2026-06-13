@@ -129,14 +129,10 @@ async function install() {
   );
   console.log("");
 
-  // forge.yaml advisory — guide users to run init if config is missing
+  // Auto-generate forge.yaml if missing — no second command needed
   const forgeYamlPath = join(process.cwd(), "forge.yaml");
   if (!existsSync(forgeYamlPath)) {
-    console.log(`${YELLOW}No forge.yaml found in current directory.${RESET}`);
-    console.log(
-      `  Run ${CYAN}npx forgedock init${RESET} in your project root to generate forge.yaml`,
-    );
-    console.log("");
+    await init(true);
   }
 }
 
@@ -223,7 +219,7 @@ async function update() {
   console.log("");
 }
 
-async function init() {
+async function init(fromInstall = false) {
   console.log("");
   console.log(`${BOLD}ForgeDock${RESET} — Generating forge.yaml`);
   console.log("");
@@ -328,6 +324,52 @@ async function init() {
     stagingBranch = defaultBranch;
   }
 
+  // --- Auto-detect project description from README.md ---
+  let description = "";
+  try {
+    const readmePath = join(cwd, "README.md");
+    if (existsSync(readmePath)) {
+      const readmeContent = readFileSync(readmePath, "utf-8").slice(0, 2048);
+      // Skip the first heading line (# Title), grab the first non-empty paragraph
+      const lines = readmeContent.split("\n");
+      let inFirstParagraph = false;
+      const paragraphLines = [];
+      for (const line of lines) {
+        // Skip heading lines at the top
+        if (!inFirstParagraph && line.match(/^#/)) continue;
+        // Skip blank lines before paragraph starts
+        if (!inFirstParagraph && line.trim() === "") continue;
+        // Skip lines that are just badges or HTML
+        if (!inFirstParagraph && line.match(/^[!<\[]/)) continue;
+        // Start collecting
+        if (!inFirstParagraph) {
+          inFirstParagraph = true;
+        }
+        // Stop at blank line (end of paragraph)
+        if (line.trim() === "") break;
+        paragraphLines.push(line.trim());
+      }
+      if (paragraphLines.length > 0) {
+        // Flatten to single line, strip markdown links/bold/inline code
+        description = paragraphLines
+          .join(" ")
+          .replace(/\[([^\]]+)\]\([^)]+\)/g, "$1")
+          .replace(/\*\*([^*]+)\*\*/g, "$1")
+          .replace(/`([^`]+)`/g, "$1")
+          .slice(0, 200)
+          .trim();
+      }
+    }
+  } catch {
+    // Best-effort only — silently fall back to empty description
+  }
+
+  if (description) {
+    console.log(
+      `  Description:     ${CYAN}${description.slice(0, 60)}${description.length > 60 ? "…" : ""}${RESET} (from README.md)`,
+    );
+  }
+
   // --- Handle existing forge.yaml ---
   if (existsSync(outputPath)) {
     const baseBak = join(cwd, "forge.yaml.bak");
@@ -366,7 +408,7 @@ project:
   name: "${projectName}"
   owner: "${owner}"
   repo: "${repo}"
-  description: ""
+  description: "${description}"
 
 # =============================================================================
 # PATHS (REQUIRED)
@@ -442,23 +484,36 @@ branches:
 
   console.log(`  ${GREEN}Created${RESET}: forge.yaml`);
   console.log("");
-  console.log(`${BOLD}Next steps:${RESET}`);
-  console.log(
-    `  1. Edit ${CYAN}forge.yaml${RESET} — fill in your project details`,
-  );
-  console.log(`     Required: project.name, project.description`);
-  if (!remoteDetected) {
+
+  if (fromInstall) {
+    // Called automatically from install() — only print what still needs attention
+    if (!remoteDetected) {
+      console.log(`${YELLOW}Action required:${RESET}`);
+      console.log(
+        `  Edit ${CYAN}forge.yaml${RESET} — fill in ${CYAN}project.owner${RESET} and ${CYAN}project.repo${RESET} (git remote not detected)`,
+      );
+      console.log("");
+    }
+  } else {
+    // Called explicitly via `npx forgedock init` — print full next steps
+    console.log(`${BOLD}Next steps:${RESET}`);
+    if (!remoteDetected) {
+      console.log(
+        `  1. Edit ${CYAN}forge.yaml${RESET} — fill in ${CYAN}project.owner${RESET} and ${CYAN}project.repo${RESET}`,
+      );
+    } else {
+      console.log(
+        `  1. Review ${CYAN}forge.yaml${RESET} — all required fields were auto-detected`,
+      );
+    }
     console.log(
-      `     Required: project.owner, project.repo (could not auto-detect)`,
+      `  2. Add ${CYAN}forge.yaml${RESET} to ${CYAN}.gitignore${RESET} if it contains sensitive paths`,
     );
+    console.log(
+      `  3. Run ${CYAN}/forgedock-init${RESET} inside Claude Code for guided AI-powered setup`,
+    );
+    console.log("");
   }
-  console.log(
-    `  2. Add ${CYAN}forge.yaml${RESET} to ${CYAN}.gitignore${RESET} if it contains sensitive paths`,
-  );
-  console.log(
-    `  3. Run ${CYAN}/forgedock-init${RESET} inside Claude Code for guided AI-powered setup`,
-  );
-  console.log("");
 }
 
 function help() {
