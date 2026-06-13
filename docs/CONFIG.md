@@ -382,6 +382,25 @@ billing:
 
 ---
 
+## `marketing` (OPTIONAL)
+
+Controls opt-in growth features such as 'Powered by ForgeDock' footers on PR descriptions created by the pipeline.
+
+> **Note**: `pr_footer` injection requires future pipeline support in `/work-on`. Setting `pr_footer: true` today has no effect — it is a configuration interface that will be activated when the feature ships. When implemented, the pipeline will append a one-line footer to every PR body it creates.
+
+```yaml
+marketing:
+  pr_footer: false
+```
+
+| Field | Type | Required | Default | Description |
+|-------|------|----------|---------|-------------|
+| `pr_footer` | boolean | No | `false` | When `true`, the pipeline appends a 'Powered by ForgeDock' footer link to every PR description it creates. Opt-in only — non-intrusive one-line footer, not a banner. Requires pipeline support (not yet implemented). |
+
+**Commands that use this section**: `work-on` (Phase 4 PR creation — when `pr_footer: true`)
+
+---
+
 ## Config Reading Conventions
 
 ForgeDock commands use two accepted patterns for reading `forge.yaml`:
