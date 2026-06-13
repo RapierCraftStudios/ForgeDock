@@ -25,6 +25,32 @@
 
 <br />
 
+**Your AI coding agent forgets everything after every session. ForgeDock fixes that.**
+
+- Uses GitHub as structured memory — every pipeline stage writes findings agents can read later
+- Runs the full issue lifecycle autonomously: investigate → build → review → merge
+- False positive rate dropped from 44% to under 10% through a self-improving review loop
+
+```bash
+npx forgedock    # install in 10 seconds
+```
+
+> ⭐ **If ForgeDock saves you time, [star this repo](https://github.com/RapierCraftStudios/ForgeDock/stargazers)** — it helps more developers find it.
+
+---
+
+## Without ForgeDock vs. With ForgeDock
+
+| Without ForgeDock | With ForgeDock |
+|---|---|
+| Agent starts every session blind — no context from prior work | Agent reads structured investigation findings, root cause, and history from GitHub |
+| Same bugs get introduced repeatedly across PRs | Review agents surface known pitfalls from past PRs before you commit |
+| Investigation gets repeated after every compaction | GitHub is the memory — a new session picks up exactly where the last one left off |
+| Manual: you write the issue, plan the fix, open the PR, review it | Autonomous: `/work-on #42` → investigated, built, reviewed, merged |
+| Review depends on whoever has capacity | 9 domain-specialist agents (security, billing, DB, concurrency, etc.) review every PR |
+
+---
+
 ```
 You:        /work-on #42
 ForgeDock:  Investigates → Architects → Builds → Quality gates → Reviews → Opens PR
