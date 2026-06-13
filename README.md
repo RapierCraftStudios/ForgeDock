@@ -14,9 +14,42 @@
 <a href="https://github.com/RapierCraftStudios/ForgeDock/pulls"><img src="https://img.shields.io/badge/PRs-welcome-brightgreen.svg" alt="PRs Welcome" /></a>
 <a href="https://github.com/sponsors/RapierCraftStudios"><img src="https://img.shields.io/badge/Sponsor-❤-ea4aaa.svg" alt="Sponsor" /></a>
 
+<br /><br />
+
+<!-- demo-gif-placeholder: generate with `vhs docs/demo.tape` -->
+<img src="docs/demo.gif" alt="ForgeDock demo — zero to PR speedrun" width="900" />
+
+<p><em>Zero to PR in one command. Agent investigates → architects → builds → opens PR with full context chain.</em></p>
+
 </div>
 
 <br />
+
+**Your AI coding agent forgets everything after every session. ForgeDock fixes that.**
+
+- Uses GitHub as structured memory — every pipeline stage writes findings agents can read later
+- Runs the full issue lifecycle autonomously: investigate → build → review → merge
+- False positive rate dropped from 44% to under 10% through a self-improving review loop
+
+```bash
+npx forgedock    # install in 10 seconds
+```
+
+> ⭐ **If ForgeDock saves you time, [star this repo](https://github.com/RapierCraftStudios/ForgeDock/stargazers)** — it helps more developers find it.
+
+---
+
+## Without ForgeDock vs. With ForgeDock
+
+| Without ForgeDock | With ForgeDock |
+|---|---|
+| Agent starts every session blind — no context from prior work | Agent reads structured investigation findings, root cause, and history from GitHub |
+| Same bugs get introduced repeatedly across PRs | Review agents surface known pitfalls from past PRs before you commit |
+| Investigation gets repeated after every compaction | GitHub is the memory — a new session picks up exactly where the last one left off |
+| Manual: you write the issue, plan the fix, open the PR, review it | Autonomous: `/work-on #42` → investigated, built, reviewed, merged |
+| Review depends on whoever has capacity | 9 domain-specialist agents (security, billing, DB, concurrency, etc.) review every PR |
+
+---
 
 ```
 You:        /work-on #42
@@ -58,6 +91,8 @@ The result: agents that are **deterministic**, not guessing. They follow structu
 ---
 
 ## See It Working
+
+> **Generate the demo GIF**: Install [VHS](https://github.com/charmbracelet/vhs) and run `vhs docs/demo.tape` — it outputs `docs/demo.gif` from the tape script in this repo.
 
 Here's what a real pipeline run looks like. A user reports that an API endpoint is returning 500 errors — the pipeline takes it from there.
 
@@ -141,6 +176,8 @@ Every annotation is wrapped in an HTML comment tag (`<!-- FORGE:INVESTIGATOR -->
 
 Labels track workflow state (`workflow:investigating`, `workflow:building`, `workflow:in-review`, `workflow:merged`, `workflow:invalid`). The pipeline resumes from whatever state GitHub says it's in.
 
+The annotation format is an open standard. See [FORGE Annotation Protocol](docs/FORGE-PROTOCOL.md) for the full specification — annotation types, schemas, context-passing chain, and conformance tests.
+
 ### Review Agents
 
 PRs are reviewed by domain-specific agents, each with deep expertise:
@@ -217,6 +254,8 @@ The path from here to there is incremental. Each piece — the knowledge store, 
 
 ## Install
 
+### Option A: npx (recommended)
+
 **Step 1: Install commands**
 
 ```bash
@@ -256,6 +295,51 @@ npx forgedock update      # Pull latest commands
 npx forgedock uninstall   # Remove all commands
 npx forgedock help        # Show all commands
 ```
+
+### Option B: Claude Code Plugin Marketplace
+
+If you're running Claude Code v2.1.143 or later, you can install ForgeDock directly through the plugin marketplace:
+
+```
+/plugin marketplace add RapierCraftStudios/ForgeDock
+/plugin install forgedock@forgedock
+```
+
+After install, commands are available as `/forgedock:work-on`, `/forgedock:review-pr`, etc. You still need to run `npx forgedock init` (or `/forgedock-init` inside Claude Code) to generate your `forge.yaml` config.
+
+---
+
+## Show Your Support
+
+If you're using ForgeDock to power your development pipeline, add a badge to your README to let the community know:
+
+```markdown
+[![Built with ForgeDock](https://img.shields.io/badge/Built_with-ForgeDock-blue?logo=github)](https://github.com/RapierCraftStudios/ForgeDock)
+```
+
+Rendered: [![Built with ForgeDock](https://img.shields.io/badge/Built_with-ForgeDock-blue?logo=github)](https://github.com/RapierCraftStudios/ForgeDock)
+
+This creates a discovery channel — each badge is a backlink and a signal to other developers that the project is AI-pipeline driven.
+
+### Star History
+
+<a href="https://star-history.com/#RapierCraftStudios/ForgeDock&Date">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="https://api.star-history.com/svg?repos=RapierCraftStudios/ForgeDock&type=Date&theme=dark" />
+    <source media="(prefers-color-scheme: light)" srcset="https://api.star-history.com/svg?repos=RapierCraftStudios/ForgeDock&type=Date" />
+    <img alt="Star History Chart" src="https://api.star-history.com/svg?repos=RapierCraftStudios/ForgeDock&type=Date" />
+  </picture>
+</a>
+
+---
+
+## Documentation
+
+- [Getting Started in 5 Minutes](docs/site/getting-started.md) — install, configure, run your first pipeline
+- [How ForgeDock's Knowledge Graph Works](docs/site/how-it-works.md) — FORGE annotations, the pipeline relay, compaction resilience
+- [ForgeDock vs. Manual Claude Code Workflows](docs/site/vs-manual-workflows.md) — why structured pipelines beat ad-hoc prompting
+- [The FORGE Annotation Protocol](docs/site/forge-annotation-protocol.md) — technical spec, open standard for AI context passing
+- [Complete Command Reference](docs/site/command-reference.md) — all 25+ commands with usage and examples
 
 ---
 

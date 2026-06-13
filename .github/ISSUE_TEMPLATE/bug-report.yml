@@ -1,0 +1,83 @@
+name: Bug Report
+description: Something isn't working as expected
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for reporting a bug! Please fill out the sections below to help us reproduce and fix the issue.
+
+  - type: textarea
+    id: description
+    attributes:
+      label: What happened?
+      description: A clear description of what the bug is.
+      placeholder: "When I run `/work-on 123`, I expected X but got Y..."
+    validations:
+      required: true
+
+  - type: textarea
+    id: reproduce
+    attributes:
+      label: Steps to reproduce
+      description: How do we reproduce this bug?
+      placeholder: |
+        1. Run `npx forgedock`
+        2. Open Claude Code and run `/work-on 123`
+        3. See error...
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+      description: What did you expect to happen?
+    validations:
+      required: true
+
+  - type: textarea
+    id: environment
+    attributes:
+      label: Environment
+      description: Please complete the following information.
+      value: |
+        - Claude Code version:
+        - OS:
+        - Node version (`node --version`):
+        - ForgeDock version (`npx forgedock --version`):
+    validations:
+      required: true
+
+  - type: dropdown
+    id: command
+    attributes:
+      label: Which command is affected?
+      options:
+        - /work-on
+        - /review-pr
+        - /quality-gate
+        - /orchestrate
+        - /autopilot
+        - Other (specify in description)
+        - Not command-specific
+    validations:
+      required: false
+
+  - type: textarea
+    id: forge-yaml
+    attributes:
+      label: forge.yaml (optional)
+      description: Paste your forge.yaml if relevant (redact any secrets).
+      render: yaml
+    validations:
+      required: false
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: Relevant logs or output
+      description: Paste any relevant terminal output or error messages.
+      render: shell
+    validations:
+      required: false

@@ -1,0 +1,14 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Ask a question (Q&A)
+    url: https://github.com/RapierCraftStudios/ForgeDock/discussions/categories/q-a
+    about: Setup help, usage questions, and troubleshooting — get answers from the community.
+  - name: Show and Tell
+    url: https://github.com/RapierCraftStudios/ForgeDock/discussions/categories/show-and-tell
+    about: Share your ForgeDock workflows, automations, and what you've built.
+  - name: Ideas
+    url: https://github.com/RapierCraftStudios/ForgeDock/discussions/categories/ideas
+    about: Brainstorm feature ideas and discuss the future direction of ForgeDock.
+  - name: Documentation
+    url: https://github.com/RapierCraftStudios/ForgeDock#readme
+    about: Read the docs and setup guide before filing an issue.

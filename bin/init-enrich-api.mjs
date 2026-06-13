@@ -111,12 +111,22 @@ export function parseEnrichedDraft(output, draft) {
           // each section must be a plain non-null object. The typeof+null guard
           // rejects null and primitives; Array.isArray() additionally rejects
           // arrays since typeof [] === 'object' would otherwise pass them.
+          const isPlainObject = (v) =>
+            typeof v === "object" && v !== null && !Array.isArray(v);
           if (
-            typeof enriched.project !== "object" || enriched.project === null || Array.isArray(enriched.project) ||
-            typeof enriched.paths !== "object" || enriched.paths === null || Array.isArray(enriched.paths) ||
-            typeof enriched.branches !== "object" || enriched.branches === null || Array.isArray(enriched.branches) ||
-            typeof enriched.meta !== "object" || enriched.meta === null || Array.isArray(enriched.meta)
+            !isPlainObject(enriched.project) ||
+            !isPlainObject(enriched.paths) ||
+            !isPlainObject(enriched.branches) ||
+            !isPlainObject(enriched.meta)
           ) {
+            if (process.env.FORGEDOCK_DEBUG) {
+              const failing = ["project", "paths", "branches", "meta"]
+                .filter((k) => !isPlainObject(enriched[k]))
+                .join(", ");
+              console.error(
+                `  ${dim("[debug]")} api enrichment: parseEnrichedDraft rejected LLM output — missing/invalid sections: ${failing}. Falling back to baseline draft.`,
+              );
+            }
             return draft;
           }
           return enriched;
