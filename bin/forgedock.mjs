@@ -408,7 +408,7 @@ project:
   name: "${projectName}"
   owner: "${owner}"
   repo: "${repo}"
-  description: "${description}"
+  description: "${description.replace(/"/g, '\\"')}"
 
 # =============================================================================
 # PATHS (REQUIRED)
