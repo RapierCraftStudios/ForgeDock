@@ -59,7 +59,6 @@ body:
         - /quality-gate
         - /orchestrate
         - /autopilot
-        - /quality-gate
         - Other (specify in description)
         - Not command-specific
     validations:
