@@ -1,6 +1,6 @@
 ---
 description: AI-powered forge.yaml config generator — scans codebase, queries GitHub, auto-fills all optional sections from detection
-argument-hint: [--force | --interactive | --section <name>]
+argument-hint: [--preserve | --interactive | --section <name>]
 ---
 
 # /forgedock-init — AI-Powered Config Generator
@@ -18,19 +18,19 @@ You complete the `forge.yaml` configuration that `npx forgedock init` started. T
 
 | Flag | Effect |
 |------|--------|
-| (none) | Fill all optional sections — use detected values directly, skip sections with nothing detected |
-| `--force` | Overwrite ALL optional sections without asking |
+| (none) | Fill all optional sections — overwrite existing values with newly detected ones, skip sections with nothing detected |
+| `--preserve` | Keep existing active section values unchanged — only fill sections that are not yet configured |
 | `--interactive` | Ask confirmation for every detected value and present menus for optional features |
 | `--section <name>` | Fill only one section: `repos`, `project_board`, `services`, `review`, or `verification` |
 
 Parse `$ARGUMENTS` and set:
 ```
-FORCE = true if --force present
+PRESERVE = true if --preserve present
 INTERACTIVE = true if --interactive present (restores full questionnaire behavior for all sections)
 TARGET_SECTION = value from --section <name>, or "all"
 ```
 
-If both `--force` and `--interactive` are present, `--force` takes precedence (`INTERACTIVE = false`).
+If both `--preserve` and `--interactive` are present, `--interactive` takes precedence (`PRESERVE = false`).
 
 If `--section` was provided, validate the value immediately:
 
@@ -147,7 +147,9 @@ grep -q "^review:" "$FORGE_YAML" && HAS_REVIEW=true || HAS_REVIEW=false
 grep -q "^verification:" "$FORGE_YAML" && HAS_VERIFICATION=true || HAS_VERIFICATION=false
 ```
 
-If `FORCE=false` and a section is already active, skip it (unless `--section` targets it explicitly). Tell the user which sections were skipped and why.
+If `PRESERVE=true` and a section is already active, skip it (unless `--section` targets it explicitly). For skipped sections, tell the user: `{section}: already configured — skipped (--preserve). Use /forgedock-init --section {section} to update.`
+
+If `PRESERVE=false` (the default) and a section is already active, it will be overwritten with newly detected values in Phase 5C — no prompt needed.
 
 ---
 
@@ -495,17 +497,30 @@ verification:
     - "{SERVICE_PREFIX}"
 ```
 
-### 5C: Overwrite protection
+### 5C: Section merge strategy
 
 For each optional section that is ALREADY ACTIVE in forge.yaml (detected in Phase 1C):
 
-If `FORCE=false`:
-```
-forge.yaml already has an active {section}: section.
-Overwrite it with newly detected values? [y/N]
-```
+**Default behavior (`PRESERVE=false`)**:
+- Overwrite the section with newly detected values.
+- Record the old values before overwriting so the Phase 5D summary can show "was X → now Y".
+- No prompt. This is the expected behavior when re-running `/forgedock-init` to refresh config.
 
-If user says N: keep existing content for that section.
+**`--preserve` flag (`PRESERVE=true`)**:
+- Keep the existing section content unchanged. Skip generating new content for this section.
+- Phase 5D summary will show: `(preserved — existing values kept)`
+
+**`--interactive` flag (`INTERACTIVE=true`)**:
+- Show the detected new value alongside the existing value, then ask:
+  ```
+  {section}: section already configured.
+  Current value: {EXISTING_VALUE}
+  Detected value: {DETECTED_VALUE}
+  Overwrite? [Y/n]
+  ```
+- Default is Y (overwrite). If user says N, keep existing content.
+
+**`--section <name>` targeted mode**: Always overwrite the targeted section regardless of `PRESERVE` flag — the explicit targeting signals user intent to update that section.
 
 ### 5D: Write the file
 
@@ -517,7 +532,8 @@ echo "Backed up: forge.yaml → forge.yaml.bak"
 
 Write the complete new file: required sections (preserved verbatim) + active optional sections (newly generated) + inactive optional sections (left as commented-out blocks matching forge.yaml.example structure).
 
-Print a summary of what was written:
+Print a summary of what was written. For sections that were overwritten (existed before AND PRESERVE=false), show the old → new values for any field that changed. For sections that were newly added (did not exist before), show just the new values.
+
 ```
 forge.yaml updated:
 
@@ -527,15 +543,22 @@ forge.yaml updated:
     ✓ branches
 
   Optional sections (filled):
-    ✓ repos          — 2 satellite(s) configured
+    ✓ repos          — 2 satellite(s) configured (new)
     ✓ project_board  — field IDs from project "Acme Board" (#1)
-    ✗ services       — skipped (no analytics services)
-    ✓ review         — tech stack + context
-    ✓ verification   — health endpoint configured
+                       was: project_number: 2 → now: project_number: 1
+    ✓ review         — tech stack updated
+                       was: "Node.js" → now: "Node.js 20, TypeScript, PostgreSQL"
+    ✓ verification   — health endpoint configured (new)
+    ✗ services       — skipped (nothing detected)
 
   Optional sections (skipped — still commented out):
     - services
+
+  Optional sections (preserved — --preserve flag):
+    - {section}  — kept existing values unchanged
 ```
+
+If nothing changed for an overwritten section (detected values match existing values), show `(no change)` instead of a diff.
 
 ---
 
