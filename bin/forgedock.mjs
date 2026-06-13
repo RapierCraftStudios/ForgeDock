@@ -11,6 +11,7 @@ import {
   renameSync,
 } from "fs";
 import { execSync } from "child_process";
+import readline from "readline";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
@@ -35,6 +36,29 @@ const YELLOW = "\x1b[33m";
 const CYAN = "\x1b[36m";
 const RED = "\x1b[31m";
 const RESET = "\x1b[0m";
+
+/**
+ * Prompt the user for a yes/no confirmation.
+ * Returns false (safe default) when stdin is not a TTY (e.g. CI or piped input).
+ */
+async function confirmOverwrite(question) {
+  if (!process.stdin.isTTY) {
+    console.log(
+      `  ${YELLOW}Non-interactive environment detected — aborting to protect existing config.${RESET}`,
+    );
+    return false;
+  }
+  return new Promise((resolve) => {
+    const rl = readline.createInterface({
+      input: process.stdin,
+      output: process.stdout,
+    });
+    rl.question(question, (answer) => {
+      rl.close();
+      resolve(answer.trim().toLowerCase() === "y" || answer.trim().toLowerCase() === "yes");
+    });
+  });
+}
 
 async function findMarkdownFiles(dir) {
   const results = [];
@@ -432,6 +456,25 @@ async function init(fromInstall = false) {
 
   // --- Handle existing forge.yaml ---
   if (existsSync(outputPath)) {
+    if (!fromInstall) {
+      console.log(
+        `  ${YELLOW}Warning:${RESET} forge.yaml already exists at ${outputPath}`,
+      );
+      console.log(
+        `  Continuing will back up your existing config and replace it with a freshly generated one.`,
+      );
+      console.log(``);
+      const confirmed = await confirmOverwrite(`  Overwrite? [y/N] `);
+      if (!confirmed) {
+        console.log(``);
+        console.log(
+          `  ${YELLOW}Aborted.${RESET} Your forge.yaml was not modified.`,
+        );
+        console.log(``);
+        return;
+      }
+      console.log(``);
+    }
     const baseBak = join(cwd, "forge.yaml.bak");
     const backupPath = existsSync(baseBak)
       ? join(
