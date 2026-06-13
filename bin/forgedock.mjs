@@ -91,7 +91,13 @@ async function install() {
         );
         skipped++;
       }
-    } catch {
+    } catch (err) {
+      if (err.code !== "ENOENT") {
+        console.error(
+          `  ${RED}Error${RESET}: Cannot access ${rel} — ${err.code ?? err.message}`,
+        );
+        throw err;
+      }
       // Doesn't exist — create symlink
       await symlink(file, target);
       console.log(`  ${GREEN}Installed${RESET}: ${rel}`);
@@ -159,7 +165,13 @@ async function uninstall() {
           removed++;
         }
       }
-    } catch {
+    } catch (err) {
+      if (err.code !== "ENOENT") {
+        console.error(
+          `  ${RED}Error${RESET}: Cannot access ${rel} — ${err.code ?? err.message}`,
+        );
+        throw err;
+      }
       // Doesn't exist — nothing to do
     }
   }
