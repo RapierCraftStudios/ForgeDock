@@ -518,8 +518,8 @@ project:
 # =============================================================================
 
 paths:
-  root: "${cwd}"
-  worktree_base: "${worktreeBase}"
+  root: "${cwd.replace(/\\/g, '\\\\').replace(/"/g, '\\"')}"
+  worktree_base: "${worktreeBase.replace(/\\/g, '\\\\').replace(/"/g, '\\"')}"
 
 # =============================================================================
 # BRANCHES (REQUIRED)
