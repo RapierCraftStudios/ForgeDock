@@ -1006,15 +1006,16 @@ PR #${PR_NUMBER} created targeting \`{PR_BASE}\`. Invoking /review-pr with --aut
 
 Large-context sessions that accumulated significant build history cause review-pr to hit the token limit mid-review. Check the accumulated context before delegating:
 
-- If the build changed **≥6 files** OR this agent has made **≥20 Skill invocations** since it started: invoke `work-on/review` as a fresh sub-agent (via `Skill(skill="work-on/review", args="...")`) rather than calling review-pr directly. The sub-agent starts with a clean context window.
+- If the build changed **≥10 files** OR this agent has made **≥20 Skill invocations** since it started: invoke `work-on/review` as a fresh sub-agent (via `Skill(skill="work-on/review", args="...")`) rather than calling review-pr directly. The sub-agent starts with a clean context window.
 - Otherwise (small build, few skill calls): invoke review-pr directly as below.
+- **Fallback**: if `work-on/review` is not available (partial install), invoke review-pr directly regardless of file count and add a note that context may be large.
 
-**Direct invocation** (small builds — <6 changed files AND <20 Skill invocations):
+**Direct invocation** (small builds — <10 changed files AND <20 Skill invocations):
 ```
 Skill(skill="review-pr", args="{PR_NUMBER} --auto-merge --issue {NUMBER} --base {PR_BASE} --gh-flag {GH_FLAG}")
 ```
 
-**Sub-agent invocation** (large builds — ≥6 changed files OR ≥20 Skill invocations):
+**Sub-agent invocation** (large builds — ≥10 changed files OR ≥20 Skill invocations):
 ```
 Skill(skill="work-on/review", args="{NUMBER} --repo {GH_REPO} --gh-flag {GH_FLAG} --worktree {WORKTREE_PATH} --branch {BRANCH} --base {PR_BASE}")
 ```
