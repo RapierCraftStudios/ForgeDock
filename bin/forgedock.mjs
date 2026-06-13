@@ -9,6 +9,7 @@ import {
   readFileSync,
   writeFileSync,
   renameSync,
+  copyFileSync,
 } from "fs";
 import { execSync } from "child_process";
 import readline from "readline";
@@ -169,10 +170,17 @@ async function install() {
           updated++;
         }
       } else {
-        console.log(
-          `  ${YELLOW}WARNING${RESET}: ${rel} is a regular file — skipping (remove it manually to let ForgeDock manage it)`,
-        );
-        skipped++;
+        // Existing regular file — a ForgeDock-shipped command copied by a prior
+        // install (common on Windows, where symlinks aren't permitted). It is
+        // ForgeDock-managed (we only iterate shipped command names), so refresh
+        // it: skip if already current, otherwise overwrite with a fresh copy.
+        if (readFileSync(file, "utf-8") === readFileSync(target, "utf-8")) {
+          skipped++;
+        } else {
+          copyFileSync(file, target);
+          console.log(`  ${YELLOW}Updated${RESET}: ${rel}`);
+          updated++;
+        }
       }
     } catch (err) {
       if (err.code !== "ENOENT") {
@@ -181,9 +189,20 @@ async function install() {
         );
         throw err;
       }
-      // Doesn't exist — create symlink
-      await symlink(file, target);
-      console.log(`  ${GREEN}Installed${RESET}: ${rel}`);
+      // Doesn't exist — create it. Prefer a symlink; fall back to a copy on
+      // systems where symlink creation is not permitted (e.g. Windows without
+      // Developer Mode / admin), which would otherwise throw EPERM. See #587.
+      try {
+        await symlink(file, target);
+        console.log(`  ${GREEN}Installed${RESET}: ${rel}`);
+      } catch (linkErr) {
+        if (linkErr.code === "EPERM" || linkErr.code === "EACCES") {
+          copyFileSync(file, target);
+          console.log(`  ${GREEN}Installed${RESET} (copy): ${rel}`);
+        } else {
+          throw linkErr;
+        }
+      }
       installed++;
     }
   }
@@ -253,14 +272,23 @@ async function uninstall() {
 
     try {
       const stats = await lstat(target);
+      const { unlink } = await import("fs/promises");
       if (stats.isSymbolicLink()) {
         const current = await readlink(target);
         if (current === file) {
-          const { unlink } = await import("fs/promises");
           await unlink(target);
           console.log(`  ${RED}Removed${RESET}: ${rel}`);
           removed++;
         }
+      } else if (
+        readFileSync(file, "utf-8") === readFileSync(target, "utf-8")
+      ) {
+        // Regular file installed by ForgeDock in copy mode (content matches the
+        // shipped command). Safe to remove. Content-differing files are left
+        // in place in case the user edited them.
+        await unlink(target);
+        console.log(`  ${RED}Removed${RESET}: ${rel}`);
+        removed++;
       }
     } catch (err) {
       if (err.code !== "ENOENT") {
