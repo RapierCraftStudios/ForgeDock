@@ -55,9 +55,32 @@ async function confirmOverwrite(question) {
     });
     rl.question(question, (answer) => {
       rl.close();
-      resolve(answer.trim().toLowerCase() === "y" || answer.trim().toLowerCase() === "yes");
+      resolve(
+        answer.trim().toLowerCase() === "y" ||
+          answer.trim().toLowerCase() === "yes",
+      );
     });
   });
+}
+
+/**
+ * Returns true if `dir` is inside a git work tree. Used to avoid generating
+ * forge.yaml in non-project directories — e.g. when npx defaults cwd to a
+ * system folder (C:\Windows) because the launching shell sat on an
+ * unsupported UNC/WSL path. The command is a fixed string with no
+ * interpolated input, so there is no shell-injection surface (ref #151).
+ */
+function isGitWorkTree(dir) {
+  try {
+    const out = execSync("git rev-parse --is-inside-work-tree", {
+      cwd: dir,
+      stdio: ["ignore", "pipe", "ignore"],
+      encoding: "utf-8",
+    });
+    return out.trim() === "true";
+  } catch {
+    return false;
+  }
 }
 
 async function findMarkdownFiles(dir) {
@@ -159,10 +182,24 @@ async function install() {
   );
   console.log("");
 
-  // Auto-generate forge.yaml if missing — no second command needed
-  const forgeYamlPath = join(process.cwd(), "forge.yaml");
+  // Auto-generate forge.yaml if missing — no second command needed.
+  // Only do this inside a real git project; otherwise cwd may be a system or
+  // read-only directory (e.g. C:\Windows when npx is launched from a WSL path),
+  // and writing forge.yaml there would crash. See #585.
+  const cwd = process.cwd();
+  const forgeYamlPath = join(cwd, "forge.yaml");
   if (!existsSync(forgeYamlPath)) {
-    await init(true);
+    if (isGitWorkTree(cwd)) {
+      await init(true);
+    } else {
+      console.log(
+        `  ${YELLOW}Skipping forge.yaml generation${RESET} — current directory is not a git project.`,
+      );
+      console.log(
+        `  Run ${CYAN}npx forgedock init${RESET} inside your project directory to generate it.`,
+      );
+      console.log("");
+    }
   }
 }
 
@@ -511,15 +548,15 @@ project:
   name: "${projectName}"
   owner: "${owner}"
   repo: "${repo}"
-  description: "${description.replace(/\\/g, '\\\\').replace(/"/g, '\\"')}"
+  description: "${description.replace(/\\/g, "\\\\").replace(/"/g, '\\"')}"
 
 # =============================================================================
 # PATHS (REQUIRED)
 # =============================================================================
 
 paths:
-  root: "${cwd.replace(/\\/g, '\\\\').replace(/"/g, '\\"')}"
-  worktree_base: "${worktreeBase.replace(/\\/g, '\\\\').replace(/"/g, '\\"')}"
+  root: "${cwd.replace(/\\/g, "\\\\").replace(/"/g, '\\"')}"
+  worktree_base: "${worktreeBase.replace(/\\/g, "\\\\").replace(/"/g, '\\"')}"
 
 # =============================================================================
 # BRANCHES (REQUIRED)
@@ -583,7 +620,18 @@ branches:
 #     - '"status": "ok"'
 `;
 
-  writeFileSync(outputPath, content, "utf-8");
+  try {
+    writeFileSync(outputPath, content, "utf-8");
+  } catch (err) {
+    console.error("");
+    console.error(
+      `  ${RED}Error${RESET}: Could not write forge.yaml to ${outputPath} — ${err.code ?? err.message}`,
+    );
+    console.error(
+      `  Run ${CYAN}npx forgedock init${RESET} from a writable project directory.`,
+    );
+    process.exit(1);
+  }
 
   console.log(`  ${GREEN}Created${RESET}: forge.yaml`);
   console.log("");
