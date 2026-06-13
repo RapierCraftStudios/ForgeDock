@@ -82,29 +82,55 @@ REPO      = project.repo
 REPO_ROOT = paths.root
 ```
 
-After extracting these values, validate that OWNER and REPO are non-empty and do not contain placeholder values before proceeding:
+After extracting these values, validate that OWNER and REPO are non-empty and do not contain placeholder values. If placeholders are found, attempt auto-detection from the git remote before erroring:
 
 ```bash
-if [ -z "$OWNER" ] || [ "$OWNER" = "your-github-org" ]; then
-  echo "Error: project.owner is not set in forge.yaml."
-  echo ""
-  echo "Open forge.yaml and fill in the 'project:' section:"
-  echo "  project:"
-  echo "    owner: \"your-actual-github-org-or-username\""
-  echo ""
-  echo "Then re-run /forgedock-init."
-  exit 1
-fi
+OWNER_IS_PLACEHOLDER=false
+REPO_IS_PLACEHOLDER=false
+[ -z "$OWNER" ] || [ "$OWNER" = "your-github-org" ] && OWNER_IS_PLACEHOLDER=true
+[ -z "$REPO" ] || [ "$REPO" = "your-repo-name" ] && REPO_IS_PLACEHOLDER=true
 
-if [ -z "$REPO" ] || [ "$REPO" = "your-repo-name" ]; then
-  echo "Error: project.repo is not set in forge.yaml."
-  echo ""
-  echo "Open forge.yaml and fill in the 'project:' section:"
-  echo "  project:"
-  echo "    repo: \"your-actual-repo-name\""
-  echo ""
-  echo "Then re-run /forgedock-init."
-  exit 1
+if [ "$OWNER_IS_PLACEHOLDER" = "true" ] || [ "$REPO_IS_PLACEHOLDER" = "true" ]; then
+  echo "Placeholder values detected in forge.yaml — attempting auto-detection from git remote..."
+
+  REMOTE_URL=$(git -C "$REPO_ROOT" remote get-url origin 2>/dev/null || true)
+  DETECTED_OWNER=""
+  DETECTED_REPO=""
+
+  if [ -n "$REMOTE_URL" ]; then
+    # SSH format: git@github.com:owner/repo.git
+    if echo "$REMOTE_URL" | grep -qE '^git@[^:]+:'; then
+      DETECTED_OWNER=$(echo "$REMOTE_URL" | sed -E 's|^git@[^:]+:([^/]+)/.*|\1|')
+      DETECTED_REPO=$(echo "$REMOTE_URL" | sed -E 's|^git@[^:]+:[^/]+/(.+?)(\.git)?$|\1|')
+    # HTTPS format: https://github.com/owner/repo.git
+    elif echo "$REMOTE_URL" | grep -qE '^https?://'; then
+      DETECTED_OWNER=$(echo "$REMOTE_URL" | sed -E 's|^https?://[^/]+/([^/]+)/.*|\1|')
+      DETECTED_REPO=$(echo "$REMOTE_URL" | sed -E 's|^https?://[^/]+/[^/]+/(.+?)(\.git)?$|\1|')
+    fi
+  fi
+
+  if [ -n "$DETECTED_OWNER" ] && [ -n "$DETECTED_REPO" ]; then
+    echo "Auto-detected: owner=\"$DETECTED_OWNER\" repo=\"$DETECTED_REPO\""
+    # Update forge.yaml in-place with detected values
+    [ "$OWNER_IS_PLACEHOLDER" = "true" ] && \
+      sed -i "s|^  owner:.*|  owner: \"$DETECTED_OWNER\"|" "$FORGE_YAML"
+    [ "$REPO_IS_PLACEHOLDER" = "true" ] && \
+      sed -i "s|^  repo:.*|  repo: \"$DETECTED_REPO\"|" "$FORGE_YAML"
+    echo "forge.yaml updated with auto-detected values. Continuing..."
+    # Re-read the corrected values
+    OWNER="$DETECTED_OWNER"
+    REPO="$DETECTED_REPO"
+  else
+    echo "Error: project.owner/project.repo contain placeholder values and auto-detection failed."
+    echo ""
+    echo "Could not detect owner/repo from git remote. Open forge.yaml and fill in the 'project:' section:"
+    echo "  project:"
+    echo "    owner: \"your-actual-github-org-or-username\""
+    echo "    repo: \"your-actual-repo-name\""
+    echo ""
+    echo "Then re-run /forgedock-init."
+    exit 1
+  fi
 fi
 ```
 
