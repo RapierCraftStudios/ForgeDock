@@ -141,6 +141,8 @@ Every annotation is wrapped in an HTML comment tag (`<!-- FORGE:INVESTIGATOR -->
 
 Labels track workflow state (`workflow:investigating`, `workflow:building`, `workflow:in-review`, `workflow:merged`, `workflow:invalid`). The pipeline resumes from whatever state GitHub says it's in.
 
+The annotation format is an open standard. See [FORGE Annotation Protocol](docs/FORGE-PROTOCOL.md) for the full specification — annotation types, schemas, context-passing chain, and conformance tests.
+
 ### Review Agents
 
 PRs are reviewed by domain-specific agents, each with deep expertise:
