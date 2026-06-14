@@ -1297,6 +1297,14 @@ export async function runSteps(steps, opts = {}) {
   // Hide cursor
   stream.write("\x1b[?25l");
 
+  // SIGINT: restore cursor before exit so the terminal is not left broken
+  const sigintHandler = () => {
+    stream.write("\x1b[?25h");
+    process.removeListener("SIGINT", sigintHandler);
+    process.kill(process.pid, "SIGINT");
+  };
+  process.once("SIGINT", sigintHandler);
+
   let cursorAtBottom = true; // after the last row
 
   // Move cursor up N rows (relative)
@@ -1418,6 +1426,8 @@ export async function runSteps(steps, opts = {}) {
       }
     }
   } finally {
+    // Remove SIGINT handler before restoring cursor to avoid double-fire
+    process.removeListener("SIGINT", sigintHandler);
     // Always restore cursor
     stream.write("\x1b[?25h");
   }
