@@ -1168,3 +1168,268 @@ export async function annotatedReviewScreen(
     ).map((fd) => fd.key),
   };
 }
+
+// ---------------------------------------------------------------------------
+// runSteps — live-checklist orchestrator
+// ---------------------------------------------------------------------------
+
+/**
+ * Run an ordered list of async steps and render a live animated checklist.
+ *
+ * @param {Array<{label: string, run: (step: StepAPI) => Promise<void>}>} steps
+ *   Each entry has a human-readable `label` and an async `run` function that
+ *   receives a {@link StepAPI} object.
+ *
+ * @param {object} [opts]
+ * @param {NodeJS.WritableStream} [opts.stream=process.stderr]
+ *   Output stream. Defaults to stderr (consistent with spinner / progressBar).
+ * @param {number} [opts.spinnerInterval=80]
+ *   Braille frame interval in milliseconds (TTY only).
+ * @param {boolean} [opts._forceNoAnsi]
+ *   Internal override for testing: treat output as non-TTY / no-ANSI regardless
+ *   of the runtime environment.
+ *
+ * @returns {Promise<RunStepsResult>}
+ *
+ * @typedef {{
+ *   progress(current: number, total: number): void,
+ *   note(text: string): void,
+ *   skip(reason?: string): void,
+ * }} StepAPI
+ *
+ * @typedef {{
+ *   ok: true,
+ *   elapsed: number,
+ * } | {
+ *   ok: false,
+ *   failedStep: number,
+ *   error: Error,
+ *   elapsed: number,
+ * }} RunStepsResult
+ */
+export async function runSteps(steps, opts = {}) {
+  const {
+    stream = process.stderr,
+    spinnerInterval = 80,
+    _forceNoAnsi = false,
+  } = opts;
+
+  const t0 = Date.now();
+  const count = steps.length;
+
+  // ── Helper: format elapsed seconds to 1 dp ────────────────────────────────
+  function elapsedStr() {
+    return ((Date.now() - t0) / 1000).toFixed(1) + "s";
+  }
+
+  // ── Non-TTY / no-ANSI path ─────────────────────────────────────────────────
+  const useAnsi = !_forceNoAnsi && USE_ANSI && stream.isTTY;
+
+  if (!useAnsi) {
+    for (let i = 0; i < count; i++) {
+      const step = steps[i];
+      let skipped = false;
+      let skipReason = "";
+
+      const stepApi = {
+        progress(_current, _total) {
+          // No-op in non-TTY mode
+        },
+        note(_text) {
+          // No-op in non-TTY mode
+        },
+        skip(reason = "") {
+          skipped = true;
+          skipReason = reason;
+        },
+      };
+
+      try {
+        await step.run(stepApi);
+      } catch (err) {
+        const elapsed = elapsedStr();
+        stream.write(`✖ ${step.label} — ${err.message}\n`);
+        stream.write(`✖ Failed in ${elapsed}\n`);
+        return { ok: false, failedStep: i, error: err, elapsed: Date.now() - t0 };
+      }
+
+      if (skipped) {
+        const suffix = skipReason ? ` — ${skipReason}` : "";
+        stream.write(`— ${step.label}${suffix}\n`);
+      } else {
+        stream.write(`✔ ${step.label}\n`);
+      }
+    }
+
+    const elapsed = elapsedStr();
+    stream.write(`✔ Done in ${elapsed}\n`);
+    return { ok: true, elapsed: Date.now() - t0 };
+  }
+
+  // ── TTY / ANSI path ────────────────────────────────────────────────────────
+
+  // Track per-step state
+  const statuses = steps.map(() => "pending"); // 'pending'|'active'|'done'|'failed'|'skipped'
+  const annotations = steps.map(() => ""); // inline note or progress bar string
+
+  // Render a single step row (no newline — caller moves cursor)
+  function renderRow(i) {
+    const status = statuses[i];
+    const icon =
+      status === "pending"  ? dim("○") :
+      status === "done"     ? green("✔") :
+      status === "failed"   ? red("✖") :
+      status === "skipped"  ? dim("—") :
+      /* active spinner handled separately */ dim("○");
+    const label =
+      status === "done" || status === "skipped" ? dim(steps[i].label) :
+      status === "failed"                       ? red(steps[i].label) :
+      steps[i].label;
+    const ann = annotations[i] ? `  ${dim(annotations[i])}` : "";
+    return `${icon}  ${label}${ann}`;
+  }
+
+  // Print all rows initially (pending)
+  for (let i = 0; i < count; i++) {
+    stream.write(renderRow(i) + "\n");
+  }
+
+  // Hide cursor
+  stream.write("\x1b[?25l");
+
+  let cursorAtBottom = true; // after the last row
+
+  // Move cursor up N rows (relative)
+  function cursorUp(n) {
+    if (n > 0) stream.write(`\x1b[${n}A`);
+  }
+
+  // Move cursor back to the bottom (below all rows)
+  function cursorToBottom() {
+    if (!cursorAtBottom) {
+      // We're somewhere in the middle; go to end
+      stream.write(`\x1b[${count}B`);
+      cursorAtBottom = true;
+    }
+  }
+
+  // Rewrite a single row in-place (cursor must be on that row already)
+  function overwriteRow(i) {
+    stream.write(`\r\x1b[K${renderRow(i)}`);
+  }
+
+  let result;
+
+  try {
+    for (let i = 0; i < count; i++) {
+      statuses[i] = "active";
+      annotations[i] = "";
+
+      // Move cursor up from bottom to row i, overwrite, return to bottom
+      const rowsFromBottom = count - i; // rows below row i (including row i itself)
+      cursorUp(rowsFromBottom);
+      cursorAtBottom = false;
+
+      let frame = 0;
+      let currentProgressBar = "";
+      let currentNote = "";
+
+      // Draw the active spinner frame
+      function drawActive() {
+        const f = BRAILLE_FRAMES[frame % BRAILLE_FRAMES.length];
+        frame++;
+        const label = bold(steps[i].label);
+        const ann = (currentProgressBar || currentNote)
+          ? `  ${dim(currentProgressBar || currentNote)}`
+          : "";
+        stream.write(`\r\x1b[K${cyan(f)}  ${label}${ann}`);
+      }
+
+      drawActive();
+
+      // Move back to bottom
+      // rowsFromBottom - 1 rows below the current row i
+      const rowsBelow = rowsFromBottom - 1;
+      if (rowsBelow > 0) stream.write(`\x1b[${rowsBelow}B`);
+      cursorAtBottom = true;
+
+      // Spinner interval updates row i in-place
+      const timer = setInterval(() => {
+        const savedCursorAtBottom = cursorAtBottom;
+        cursorUp(rowsFromBottom);
+        drawActive();
+        if (rowsBelow > 0) stream.write(`\x1b[${rowsBelow}B`);
+        cursorAtBottom = savedCursorAtBottom;
+      }, spinnerInterval);
+      timer.unref();
+
+      let skipped = false;
+      let skipReason = "";
+
+      const stepApi = {
+        progress(current, total) {
+          currentProgressBar = progressBar(current, total, { width: 12 });
+          currentNote = "";
+        },
+        note(text) {
+          currentNote = text;
+          currentProgressBar = "";
+        },
+        skip(reason = "") {
+          skipped = true;
+          skipReason = reason;
+        },
+      };
+
+      let stepError = null;
+      try {
+        await steps[i].run(stepApi);
+      } catch (err) {
+        stepError = err;
+      }
+
+      clearInterval(timer);
+
+      // Final state for this step
+      if (stepError) {
+        statuses[i] = "failed";
+        annotations[i] = stepError.message;
+      } else if (skipped) {
+        statuses[i] = "skipped";
+        annotations[i] = skipReason;
+      } else {
+        statuses[i] = "done";
+        annotations[i] = "";
+      }
+
+      // Redraw final state for row i
+      cursorUp(rowsFromBottom);
+      cursorAtBottom = false;
+      overwriteRow(i);
+      stream.write("\n");
+      // Move down to bottom (rowsBelow rows remaining after the newline)
+      if (rowsBelow > 0) stream.write(`\x1b[${rowsBelow}B`);
+      cursorAtBottom = true;
+
+      if (stepError) {
+        // Failure: stop run
+        result = { ok: false, failedStep: i, error: stepError, elapsed: Date.now() - t0 };
+        break;
+      }
+    }
+  } finally {
+    // Always restore cursor
+    stream.write("\x1b[?25h");
+  }
+
+  const elapsed = elapsedStr();
+
+  if (result) {
+    // Failed
+    stream.write(`${red("✖")} ${dim("Failed in")} ${elapsed}\n`);
+    return result;
+  }
+
+  stream.write(`${green("✔")} ${dim("Done in")} ${elapsed}\n`);
+  return { ok: true, elapsed: Date.now() - t0 };
+}
