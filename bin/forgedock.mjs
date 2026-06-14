@@ -13,6 +13,7 @@ import {
 } from "fs";
 import { execSync } from "child_process";
 import readline from "readline";
+import { renderLogo } from "./tui.mjs";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
@@ -40,14 +41,8 @@ const RESET = "\x1b[0m";
 const DIM = "\x1b[2m";
 
 // ---------------------------------------------------------------------------
-// Splash — the ForgeDock wordmark shown at startup
+// Splash — the ForgeDock F-monogram logo shown at startup
 // ---------------------------------------------------------------------------
-
-const LOGO_LINES = [
-  "  ╔═╗╔═╗╦═╗╔═╗╔═╗╔╦╗╔═╗╔═╗╦╔═",
-  "  ╠╣ ║ ║╠╦╝║ ╦║╣  ║║║ ║║  ╠╩╗",
-  "  ╚  ╚═╝╩╚═╚═╝╚═╝═╩╝╚═╝╚═╝╩ ╩",
-];
 
 function getVersion() {
   try {
@@ -62,16 +57,7 @@ function getVersion() {
 
 function splash() {
   const version = getVersion();
-  console.log("");
-  for (const line of LOGO_LINES) {
-    console.log(`${BOLD}${CYAN}${line}${RESET}`);
-  }
-  console.log("");
-  console.log(`  ${DIM}GitHub as a knowledge graph for AI agents${RESET}`);
-  if (version) {
-    console.log(`  ${DIM}v${version}${RESET}`);
-  }
-  console.log("");
+  console.log(renderLogo({ version }));
 }
 
 /**
