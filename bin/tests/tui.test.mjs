@@ -10,6 +10,7 @@
  *     trailing reset present after truncation, no spurious reset on no-truncation,
  *     boundary values (maxWidth=0, ANSI-only input).
  *   - runSteps: ordering, skip, failure-stop, non-TTY plain output, elapsed-time line.
+ *   - renderLogo: plain-text fallback when NO_COLOR is set / non-TTY environment.
  *
  * Run with: node --test bin/tests/tui.test.mjs
  */
@@ -30,7 +31,7 @@ const __dirname = dirname(__filename);
 //
 // Use pathToFileURL to produce a valid file:// URL on Windows (raw C:\ paths are
 // not valid ESM specifiers on Windows — see ERR_UNSUPPORTED_ESM_URL_SCHEME).
-const { stripAnsi, truncateVisible, runSteps } = await import(
+const { stripAnsi, truncateVisible, runSteps, renderLogo } = await import(
   pathToFileURL(join(__dirname, "..", "tui.mjs")).href
 );
 
@@ -505,5 +506,55 @@ describe("runSteps — non-TTY: step.note() is a no-op", () => {
       ], { stream, _forceNoAnsi: true }),
       "step.note() must not throw in non-TTY mode",
     );
+  });
+});
+
+// ---------------------------------------------------------------------------
+// renderLogo — fallback chain (NO_COLOR / non-TTY environment)
+//
+// In the test runner, process.stdout.isTTY is false (non-TTY), so USE_ANSI
+// and USE_TRUECOLOR in tui.mjs are both false. renderLogo() must return plain
+// text with no ANSI escape codes in this environment.
+// ---------------------------------------------------------------------------
+
+describe("renderLogo — plain-text fallback in non-TTY/NO_COLOR environment", () => {
+  it("returns a non-empty string", () => {
+    const result = renderLogo({});
+    assert.ok(typeof result === "string" && result.length > 0,
+      "renderLogo() must return a non-empty string");
+  });
+
+  it("contains no ANSI escape sequences in non-TTY environment (USE_TRUECOLOR=false)", () => {
+    // In the test runner process.stdout.isTTY is false, so USE_ANSI and
+    // USE_TRUECOLOR are both false. renderLogo() must return plain text only.
+    const result = renderLogo({});
+    assert.ok(!result.includes("\x1b["),
+      "renderLogo() must not contain ANSI escape sequences when USE_TRUECOLOR is false");
+  });
+
+  it("includes 'ForgeDock' in the plain-text output", () => {
+    const result = renderLogo({});
+    assert.ok(result.includes("ForgeDock"),
+      "plain-text output must include the word 'ForgeDock'");
+  });
+
+  it("includes version string when version is provided", () => {
+    const result = renderLogo({ version: "1.2.3" });
+    assert.ok(result.includes("1.2.3"),
+      "plain-text output must include the provided version string");
+  });
+
+  it("includes tagline in the plain-text output", () => {
+    const result = renderLogo({});
+    assert.ok(result.includes("GitHub as a knowledge graph for AI agents"),
+      "plain-text output must include the tagline");
+  });
+
+  it("works with no arguments (version defaults to empty string)", () => {
+    assert.doesNotThrow(() => renderLogo(),
+      "renderLogo() must not throw when called with no arguments");
+    const result = renderLogo();
+    assert.ok(result.includes("ForgeDock"),
+      "renderLogo() with no args must still include 'ForgeDock'");
   });
 });

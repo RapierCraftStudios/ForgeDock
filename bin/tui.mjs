@@ -1433,3 +1433,141 @@ export async function runSteps(steps, opts = {}) {
   stream.write(`${green("✔")} ${dim("Done in")} ${elapsed}\n`);
   return { ok: true, elapsed: Date.now() - t0 };
 }
+
+// ---------------------------------------------------------------------------
+// Logo rendering — ForgeDock F-monogram in half-block ANSI art
+// ---------------------------------------------------------------------------
+
+/**
+ * Truecolor detection — distinct from USE_ANSI (which only checks for any ANSI support).
+ * Half-block art requires 24-bit color for the RGB fg/bg per-cell approach.
+ * Falls back to plain text on 256-color or less terminals.
+ */
+const USE_TRUECOLOR =
+  USE_ANSI &&
+  (process.env.COLORTERM === "truecolor" ||
+    process.env.COLORTERM === "24bit" ||
+    // Windows Terminal and most modern Linux terminals set COLORTERM=truecolor
+    // iTerm2 sets TERM_PROGRAM=iTerm.app (supports 24-bit)
+    process.env.TERM_PROGRAM === "iTerm.app" ||
+    process.env.TERM_PROGRAM === "vscode" ||
+    // tmux passes through truecolor from the outer terminal if configured
+    (process.env.TERM || "").startsWith("xterm-256") ||
+    (process.env.TERM || "").startsWith("screen-256"));
+
+/**
+ * Brand-blue ForgeDock F-monogram, pre-rendered as Unicode half-block art.
+ *
+ * Each line uses ▀ (U+2580 UPPER HALF BLOCK) with ANSI 24-bit color:
+ *   \x1b[38;2;R;G;Bm  — foreground (upper pixel pair)
+ *   \x1b[48;2;R;G;Bm  — background (lower pixel pair)
+ *   \x1b[0m            — reset
+ *
+ * Brand color: #58a6ff = RGB(88, 166, 255)
+ * Background:  #0d1117 = RGB(13, 17, 23)  (GitHub dark canvas — renders as "off" pixels)
+ *
+ * The art is 20 characters wide × 10 rows tall (represents a 20×20 pixel F monogram
+ * at 2:1 aspect, each row pair compressed into one terminal row via ▀).
+ *
+ * To regenerate this art from a source PNG: scripts/gen-logo.mjs <input.png>
+ */
+// prettier-ignore
+const LOGO_ART_TRUECOLOR = (() => {
+  // Brand blue: RGB(88, 166, 255)  — #58a6ff
+  // Dark bg:    RGB(13, 17, 23)    — #0d1117
+  const B  = "38;2;88;166;255";   // fg: brand blue
+  const bg = "48;2;88;166;255";   // bg: brand blue
+  const X  = "38;2;13;17;23";     // fg: dark (off)
+  const Xb = "48;2;13;17;23";     // bg: dark (off)
+  const R  = "\x1b[0m";           // reset
+
+  // half-block helper: upper=fg, lower=bg
+  function px(upper, lower) {
+    return `\x1b[${upper};${lower}m▀${R}`;
+  }
+
+  // F-monogram pixel map (20 wide × 20 tall, represented as 10 rows of ▀ pairs)
+  // 1 = brand-blue pixel, 0 = dark background
+  //
+  // Row layout (each entry = [upper_row, lower_row] of a ▀ pair):
+  //
+  //   ████████████████████   (full top border)
+  //   ██                ██   (left bar)
+  //   ██                ██
+  //   ██████████████         (top crossbar — full width minus right margin)
+  //   ██████████████
+  //   ██                     (left bar only)
+  //   ██
+  //   ██████                 (short lower crossbar)
+  //   ██████
+  //   ██                     (left bar only — bottom)
+
+  // Pixel rows (each row is 20 booleans)
+  const rows = [
+    [1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1],  //  0: top border
+    [1,1,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,1,1],  //  1: top inner
+    [1,1,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],  //  2: left bar
+    [1,1,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],  //  3: left bar
+    [1,1,1,1,1,1,1,1,1,1,1,1,1,1,0,0,0,0,0,0],  //  4: top crossbar
+    [1,1,1,1,1,1,1,1,1,1,1,1,1,1,0,0,0,0,0,0],  //  5: top crossbar (repeat)
+    [1,1,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],  //  6: left bar
+    [1,1,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],  //  7: left bar
+    [1,1,1,1,1,1,1,1,0,0,0,0,0,0,0,0,0,0,0,0],  //  8: lower crossbar
+    [1,1,1,1,1,1,1,1,0,0,0,0,0,0,0,0,0,0,0,0],  //  9: lower crossbar (repeat)
+    [1,1,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],  // 10: left bar
+    [1,1,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],  // 11: left bar
+    [1,1,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],  // 12: left bar
+    [1,1,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],  // 13: left bar
+    [1,1,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],  // 14: left bar
+    [1,1,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],  // 15: left bar
+    [1,1,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],  // 16: left bar
+    [1,1,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],  // 17: left bar
+    [1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1],  // 18: bottom border
+    [1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1],  // 19: bottom border (repeat)
+  ];
+
+  const lines = [];
+  for (let r = 0; r < rows.length; r += 2) {
+    const top = rows[r];
+    const bot = rows[r + 1];
+    let line = "";
+    for (let c = 0; c < top.length; c++) {
+      const upper = top[c] ? B  : X;
+      const lower = bot[c] ? bg : Xb;
+      line += px(upper, lower);
+    }
+    lines.push(line);
+  }
+  return lines;
+})();
+
+/**
+ * Render the ForgeDock logo for display in the terminal.
+ *
+ * Returns a multi-line string. On truecolor TTY: F-monogram half-block art
+ * followed by a caption line. On non-TTY / NO_COLOR / 256-color: plain text.
+ *
+ * @param {object} [opts]
+ * @param {string} [opts.version]  - Package version string (e.g. "1.0.8")
+ * @returns {string} Rendered logo string (may contain ANSI sequences)
+ */
+export function renderLogo({ version = "" } = {}) {
+  const tagline = "GitHub as a knowledge graph for AI agents";
+  const versionStr = version ? `ForgeDock · v${version}` : "ForgeDock";
+
+  if (!USE_TRUECOLOR) {
+    // Plain text fallback — NO_COLOR, non-TTY, or 256-color terminal
+    return `${versionStr}\n${tagline}`;
+  }
+
+  // Truecolor: half-block art + caption
+  const lines = [
+    "",
+    ...LOGO_ART_TRUECOLOR.map((l) => "  " + l),
+    "",
+    `  \x1b[1m\x1b[38;2;88;166;255m${versionStr}\x1b[0m`,
+    `  \x1b[2m${tagline}\x1b[0m`,
+    "",
+  ];
+  return lines.join("\n");
+}
