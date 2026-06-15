@@ -12,11 +12,12 @@
 # Exit codes: 0 = success, 1 = error (invalid issue, gh auth failure, branch missing, etc.)
 #
 # Branch existence validation:
-#   For feature-lane outputs (milestone/{slug}), the script verifies the branch exists
-#   on the remote via `git ls-remote`. If the branch does not exist, exits 1 with a
-#   descriptive error. This prevents agents from creating PRs targeting phantom branches.
-#   Fast-lane output (staging) is returned without branch validation — staging is assumed
-#   to always exist as it is the primary integration branch.
+#   Both fast-lane (staging) and feature-lane (milestone/{slug}) outputs are validated
+#   against the remote via `git ls-remote`. If the target branch does not exist, the
+#   script exits 1 with a descriptive error. This prevents agents from creating PRs
+#   targeting phantom branches and catches misconfigured branches.staging values early.
+#   Fast-lane staging branch name is read from forge.yaml (branches.staging key),
+#   defaulting to "staging" when forge.yaml is absent or yq is unavailable.
 
 set -euo pipefail
 
@@ -73,9 +74,30 @@ FORGEDOCK_SCRIPTS="$(cd "$(dirname "$0")" && pwd)"
 export FORGEDOCK_HOME
 FORGEDOCK_HOME="$(cd "$(dirname "$0")/.." && pwd)"
 
+# Resolve staging branch name from forge.yaml (branches.staging), defaulting to "staging".
+# Uses yq if available; falls back gracefully when forge.yaml is absent or yq is not installed.
+STAGING_BRANCH=$(yq '.branches.staging // "staging"' forge.yaml 2>/dev/null || echo 'staging')
+# yq returns literal "null" when the key exists but is null-valued — treat as default
+[ "$STAGING_BRANCH" = "null" ] && STAGING_BRANCH="staging"
+# Trim any surrounding whitespace or quotes that yq might emit
+STAGING_BRANCH=$(echo "$STAGING_BRANCH" | tr -d '"' | xargs)
+# Final safety net: if somehow empty, use default
+[ -z "$STAGING_BRANCH" ] && STAGING_BRANCH="staging"
+
 # Classify lane based on milestone presence
 if [ -z "$MILESTONE_TITLE" ]; then
-  echo "staging"
+  # Fast lane: validate staging branch exists on remote before returning it.
+  # This mirrors the feature-lane validation below and catches misconfigured
+  # branches.staging values early, with a descriptive error instead of an
+  # opaque failure in the subsequent git worktree add or gh pr create call.
+  if ! git ls-remote --exit-code origin "$STAGING_BRANCH" >/dev/null 2>&1; then
+    echo "ERROR: Fast-lane PR target branch '$STAGING_BRANCH' does not exist on remote 'origin'." >&2
+    echo "       This branch is configured via forge.yaml → branches.staging (default: staging)." >&2
+    echo "       Create the branch first, or update forge.yaml to point to an existing branch." >&2
+    echo "       Run: git push origin HEAD:$STAGING_BRANCH  (from the default branch)" >&2
+    exit 1
+  fi
+  echo "$STAGING_BRANCH"
 else
   # Slugify: lowercase, spaces → hyphens, strip git-invalid chars, collapse multiple hyphens,
   # strip leading/trailing hyphens.
