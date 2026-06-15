@@ -62,6 +62,11 @@ let markNudgeSeen;
 // is caught and the hook still exits 0. <!-- fix: forge#489 -->
 let parseForgeYaml;
 let sanitizeContextValue;
+// detectClaudeVersion: async utility that detects installed vs latest Claude Code
+// version and caches the result with a 24h TTL. Declared at module scope for
+// the same reason as the above helpers — must be inside the try/catch.
+// <!-- fix: forge#680 -->
+let detectClaudeVersion;
 
 // ---------------------------------------------------------------------------
 // Main — wrapped in try/catch to guarantee fail-open
@@ -93,7 +98,7 @@ try {
   // that import() rejects with ERR_UNSUPPORTED_ESM_URL_SCHEME.
   /** @type {import('../forge-utils.mjs')} */
   (
-    { parseForgeYaml, sanitizeContextValue } = await import(
+    { parseForgeYaml, sanitizeContextValue, detectClaudeVersion } = await import(
       pathToFileURL(join(FORGE_HOME, "bin", "forge-utils.mjs")).href
     )
   );
@@ -136,10 +141,22 @@ process.exit(0);
  * Prints a concise forge.yaml summary plus the list of available pipeline
  * commands. If forge.yaml is absent, prints a suggestion to run init instead.
  *
+ * When the installed Claude Code version is detected as stale (installed
+ * differs from the latest npm release), a version advisory line is appended
+ * to the context output. This is informational only — it never blocks the
+ * session.
+ *
  * @param {string} dir - Absolute path to the project directory.
  */
 async function handleManagedActive(dir) {
   const forgeYamlPath = join(dir, "forge.yaml");
+
+  // Detect installed vs latest Claude Code version. The function is
+  // fail-open — it never throws and returns {version: 'unknown'} on error.
+  // Run this concurrently with forge.yaml loading so it doesn't add latency
+  // on the cache-hit path.
+  // <!-- fix: forge#680 -->
+  const versionPromise = detectClaudeVersion();
 
   if (!existsSync(forgeYamlPath)) {
     // Directory is managed (has .forgedock marker) but has no forge.yaml yet
@@ -156,7 +173,10 @@ async function handleManagedActive(dir) {
     return;
   }
 
-  console.log(buildActiveContext(dir, forgeYaml));
+  // Await the version result (typically already resolved by now on cache hit)
+  const versionInfo = await versionPromise.catch(() => ({ version: "unknown" }));
+
+  console.log(buildActiveContext(dir, forgeYaml, versionInfo));
 }
 
 /**
@@ -188,11 +208,15 @@ async function handleUnmanaged(dir) {
  * Build the context string injected for a managed-active directory with a
  * valid forge.yaml.
  *
- * @param {string} dir       - Absolute path to the project directory.
- * @param {object} forgeYaml - Parsed forge.yaml object.
+ * When versionInfo.stale is true, a version advisory line is appended to
+ * the output. Version strings are sanitized before injection.
+ *
+ * @param {string} dir         - Absolute path to the project directory.
+ * @param {object} forgeYaml   - Parsed forge.yaml object.
+ * @param {object} versionInfo - Result from detectClaudeVersion(), or {version: 'unknown'}.
  * @returns {string}
  */
-function buildActiveContext(dir, forgeYaml) {
+function buildActiveContext(dir, forgeYaml, versionInfo) {
   // Sanitize the directory path before interpolating it into the context output.
   // process.cwd() is user-controlled on Linux (directory names may contain <, >,
   // or sequences that form <!-- -->), so it must be treated like any other
@@ -223,10 +247,24 @@ function buildActiveContext(dir, forgeYaml) {
     200,
   );
 
+  // Build the version advisory line when the installed Claude Code version is
+  // behind the latest npm release. Version strings from detectClaudeVersion()
+  // are external (CLI stdout / npm registry) and MUST be sanitized before
+  // injection into the session context. <!-- fix: forge#680, forge#418 -->
+  let versionNote = "";
+  if (versionInfo && versionInfo.stale === true) {
+    // Sanitize both version strings before interpolating into stdout
+    const safeInstalled =
+      sanitizeContextValue(versionInfo.installed ?? null, 50) ?? "unknown";
+    const safeLatest =
+      sanitizeContextValue(versionInfo.latest ?? null, 50) ?? "unknown";
+    versionNote = `\n- **Claude Code update available**: ${safeInstalled} → ${safeLatest} (run \`npm install -g @anthropic-ai/claude-code\` to update)`;
+  }
+
   return `\
 <!-- ForgeDock: managed-active -->
 **ForgeDock** is active in this directory (${safeDir}).
-${nameNote}${repoNote}${descNote}${milestoneNote}
+${nameNote}${repoNote}${descNote}${milestoneNote}${versionNote}
 - **Staging branch**: \`${stagingBranch}\`
 - **Feature branch pattern**: \`${featurePattern}\`
 
@@ -313,5 +351,6 @@ function readForgeYaml(path) {
   return parseForgeYaml(raw);
 }
 
-// parseForgeYaml and sanitizeContextValue are dynamically imported from
-// ../forge-utils.mjs inside the try block to honour the fail-open contract.
+// parseForgeYaml, sanitizeContextValue, and detectClaudeVersion are dynamically
+// imported from ../forge-utils.mjs inside the try block to honour the fail-open
+// contract.
