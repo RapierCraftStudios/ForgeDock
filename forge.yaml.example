@@ -10,7 +10,7 @@
 #   # Add forge.yaml to your .gitignore if it contains sensitive paths
 #
 # Required sections: project, paths, branches
-# Optional sections: repos, project_board, services, review, verification, deploy, billing, marketing
+# Optional sections: repos, project_board, services, review, verification, deploy, billing, devdocs, adaptive_scripts, marketing
 
 # =============================================================================
 # PROJECT (REQUIRED)
@@ -486,6 +486,36 @@ branches:
 #   #   - ForgeDock usage notes   → devdocs/agent/using-forgedock.md
 #   # Agents read devdocs/ files as binding source-of-truth, so they receive
 #   # richer context than the single review.context string.
+
+# =============================================================================
+# ADAPTIVE_SCRIPTS (OPTIONAL)
+# Per-repo scripts that ForgeDock generates and updates as it learns your
+# project's patterns. These scripts live in .forgedock/scripts/ and take
+# precedence over universal scripts shipped with ForgeDock.
+#
+# The directory is scaffolded automatically by `npx forgedock init` and is
+# gitignored by default. Remove the .forgedock/scripts/ line from .gitignore
+# to commit scripts to version control and share them with your team.
+#
+# Commands: work-on (script discovery), optimize (script generation — #668)
+# =============================================================================
+
+# adaptive_scripts:
+#   # Enable or disable per-repo adaptive scripts.
+#   # When false, pipeline agents use only universal scripts shipped with ForgeDock.
+#   # Default: true
+#   enabled: true
+#
+#   # Directory where per-repo scripts are stored, relative to the project root.
+#   # Scaffolded by `npx forgedock init` if it doesn't exist.
+#   # Default: ".forgedock/scripts"
+#   directory: ".forgedock/scripts"
+#
+#   # Whether per-repo scripts are committed to version control.
+#   # false (default): .forgedock/scripts/ is gitignored — scripts are local only
+#   # true: remove .forgedock/scripts/ from .gitignore to share scripts with your team
+#   # To opt in: remove the .forgedock/scripts/ entry from .gitignore
+#   commit: false
 
 # =============================================================================
 # MARKETING (OPTIONAL)
