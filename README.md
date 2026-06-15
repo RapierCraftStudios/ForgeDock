@@ -4,11 +4,9 @@
 
 <h1>ForgeDock</h1>
 
-<p><strong>Give Claude Code a memory that survives every session.</strong></p>
+<p><strong>Autonomous software development for Claude Code.</strong></p>
 
-<p>Your AI coding agent starts every session blind. It re-investigates bugs it already found, misses context from last week's PRs, and repeats mistakes that were caught and fixed three days ago.</p>
-
-<p>ForgeDock builds a persistent knowledge graph across your GitHub issues and PRs — so agents get more accurate, more deterministic, and cheaper to run the longer you use it. Tested across 20,000+ issues on production codebases.</p>
+<p>ForgeDock turns every bug found, every fix shipped, and every review finding into structured context that makes the next agent smarter. It catches integration bugs that code review can't see — missing route registrations, env vars present in CI but absent in deploy, Docker permission mismatches, sibling code paths left unfixed. Every finding feeds back as a prevention rule for future builds. After 20,000+ issues on production codebases, the system catches bugs before they reach a testing branch.</p>
 
 <a href="https://www.npmjs.com/package/forgedock"><img src="https://img.shields.io/npm/dm/forgedock?label=npm%20downloads&style=flat-square&color=CB3837" alt="npm downloads/month" /></a>&nbsp;
 <a href="https://www.npmjs.com/package/forgedock"><img src="https://img.shields.io/npm/v/forgedock?style=flat-square&color=CB3837" alt="npm version" /></a>&nbsp;
