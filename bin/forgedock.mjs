@@ -42,6 +42,8 @@ const COMMANDS_DIR = join(FORGE_HOME, "commands");
 const HOME = homedir();
 
 const TARGET_DIR = join(HOME, ".claude", "commands");
+const SCRIPTS_DIR = join(FORGE_HOME, "scripts");
+const SCRIPTS_TARGET_DIR = join(HOME, ".claude", "scripts");
 
 const args = process.argv.slice(2);
 const command = args[0] || "install";
@@ -719,6 +721,106 @@ async function linkCommands(step) {
   return { installed, updated, skipped };
 }
 
+/**
+ * Enumerate all executable scripts in SCRIPTS_DIR (*.sh, *.mjs).
+ * Subdirectories are not traversed — scripts/ is a flat directory.
+ *
+ * @param {string} dir - Absolute path to the scripts source directory.
+ * @returns {Promise<string[]>} Sorted list of absolute file paths.
+ */
+async function findScriptFiles(dir) {
+  const results = [];
+  let entries;
+  try {
+    entries = await readdir(dir, { withFileTypes: true });
+  } catch (err) {
+    if (err.code === "ENOENT") return results; // scripts/ dir absent — skip silently
+    throw err;
+  }
+  for (const entry of entries) {
+    if (
+      entry.isFile() &&
+      (entry.name.endsWith(".sh") || entry.name.endsWith(".mjs"))
+    ) {
+      results.push(join(dir, entry.name));
+    }
+  }
+  return results.sort();
+}
+
+/**
+ * Link or copy all scripts from SCRIPTS_DIR into SCRIPTS_TARGET_DIR (~/.claude/scripts/).
+ * Mirrors linkCommands() behaviour: symlink where permitted, copy on EPERM/EACCES (Windows).
+ * Called inside a runSteps() step — uses step.progress() and step.note().
+ *
+ * @param {object} step - StepAPI from runSteps
+ * @returns {Promise<{installed: number, updated: number, skipped: number}>}
+ */
+async function linkScripts(step) {
+  const files = await findScriptFiles(SCRIPTS_DIR);
+  const total = files.length;
+
+  if (total === 0) {
+    step.skip("no scripts to link");
+    return { installed: 0, updated: 0, skipped: 0 };
+  }
+
+  await mkdir(SCRIPTS_TARGET_DIR, { recursive: true });
+
+  let installed = 0;
+  let updated = 0;
+  let skipped = 0;
+
+  for (let idx = 0; idx < files.length; idx++) {
+    const file = files[idx];
+    const rel = relative(SCRIPTS_DIR, file);
+    const target = join(SCRIPTS_TARGET_DIR, rel);
+
+    step.progress(idx + 1, total);
+
+    try {
+      const stats = await lstat(target);
+
+      if (stats.isSymbolicLink()) {
+        const current = await readlink(target);
+        if (current === file) {
+          skipped++;
+        } else {
+          await symlink(file, target + ".tmp");
+          const { rename } = await import("fs/promises");
+          await rename(target + ".tmp", target);
+          updated++;
+        }
+      } else {
+        // Existing regular file — refresh if contents differ.
+        if (readFileSync(file, "utf-8") === readFileSync(target, "utf-8")) {
+          skipped++;
+        } else {
+          const { copyFile } = await import("fs/promises");
+          await copyFile(file, target);
+          updated++;
+        }
+      }
+    } catch (err) {
+      if (err.code !== "ENOENT") throw err;
+      // Doesn't exist — create symlink; fall back to copy on Windows EPERM/EACCES.
+      try {
+        await symlink(file, target);
+      } catch (linkErr) {
+        if (linkErr.code === "EPERM" || linkErr.code === "EACCES") {
+          const { copyFile } = await import("fs/promises");
+          await copyFile(file, target);
+        } else {
+          throw linkErr;
+        }
+      }
+      installed++;
+    }
+  }
+
+  return { installed, updated, skipped };
+}
+
 async function install() {
   const result = await runSteps([
     {
@@ -736,6 +838,17 @@ async function install() {
         step.note(
           `${green(String(installed))} installed, ${updated} updated, ${dim(String(skipped))} skipped  (${total} commands total)`,
         );
+      },
+    },
+    {
+      label: "Linking scripts",
+      async run(step) {
+        const { installed, updated, skipped } = await linkScripts(step);
+        if (installed + updated + skipped > 0) {
+          step.note(
+            `${green(String(installed))} installed, ${updated} updated, ${dim(String(skipped))} skipped`,
+          );
+        }
       },
     },
     {
@@ -839,6 +952,7 @@ async function install() {
           `${green("✔")} ${bold("ForgeDock is ready")}`,
           "",
           `Commands installed to ${cyan(TARGET_DIR)}`,
+          `Scripts installed to  ${cyan(SCRIPTS_TARGET_DIR)}`,
           `Next: ${cyan("cd <your-project>")} then ${cyan("npx forgedock init")}`,
         ],
         { title: "ForgeDock Installed" },
@@ -878,6 +992,44 @@ async function uninstall() {
   console.log("");
   console.log(`Done. Removed: ${removed} commands.`);
   console.log("");
+
+  // Remove scripts installed by ForgeDock from ~/.claude/scripts/
+  const scriptFiles = await findScriptFiles(SCRIPTS_DIR);
+  let scriptsRemoved = 0;
+
+  for (const file of scriptFiles) {
+    const rel = relative(SCRIPTS_DIR, file);
+    const target = join(SCRIPTS_TARGET_DIR, rel);
+
+    try {
+      const stats = await lstat(target);
+      const { unlink } = await import("fs/promises");
+      if (stats.isSymbolicLink()) {
+        const current = await readlink(target);
+        if (current === file) {
+          await unlink(target);
+          console.log(`  ${RED}Removed${RESET}: scripts/${rel}`);
+          scriptsRemoved++;
+        }
+      } else if (
+        readFileSync(file, "utf-8") === readFileSync(target, "utf-8")
+      ) {
+        // Regular file installed by ForgeDock in copy mode — content matches.
+        await unlink(target);
+        console.log(`  ${RED}Removed${RESET}: scripts/${rel}`);
+        scriptsRemoved++;
+      }
+    } catch (err) {
+      if (err.code !== "ENOENT") throw err;
+      // Doesn't exist — nothing to do
+    }
+  }
+
+  if (scriptFiles.length > 0) {
+    console.log("");
+    console.log(`Done. Removed: ${scriptsRemoved} scripts.`);
+    console.log("");
+  }
 
   // Remove the SessionStart hook from ~/.claude/settings.json
   const hookRemoveResult = await removeSessionStartHook();
