@@ -117,10 +117,40 @@ export FORGEDOCK_HOME
 FORGEDOCK_HOME="$(cd "$(dirname "$0")/.." && pwd)"
 
 # ---------------------------------------------------------------------------
+# FORGE_LABEL_MAP — optional env var (JSON object) from forge.yaml → learned.label_map
+#
+# If set and non-empty (not '{}'), look up "workflow:$TARGET_STATE" in the map.
+# If a mapping exists, use the mapped label name instead of the canonical one.
+# This allows repos with non-standard label naming to use ForgeDock without
+# renaming their labels to match the canonical workflow:* format.
+#
+# Set by work-on.md Phase 0B.1: export FORGE_LABEL_MAP="$LEARNED_LABEL_MAP"
+# Falls back to canonical label if: FORGE_LABEL_MAP is unset/empty/{}, jq
+# is not available, or no mapping exists for the target state.
+#
+# Note: --remove-label always uses canonical workflow:* format — it clears all
+# canonical labels regardless of mapping, which is correct cleanup behavior.
+# ---------------------------------------------------------------------------
+CANONICAL_LABEL="workflow:$TARGET_STATE"
+EFFECTIVE_LABEL="$CANONICAL_LABEL"
+
+if [ -n "${FORGE_LABEL_MAP:-}" ] && [ "${FORGE_LABEL_MAP:-}" != "{}" ]; then
+  if command -v jq >/dev/null 2>&1; then
+    MAPPED=$(echo "$FORGE_LABEL_MAP" | jq -r --arg key "$CANONICAL_LABEL" '.[$key] // empty' 2>/dev/null || true)
+    if [ -n "$MAPPED" ]; then
+      EFFECTIVE_LABEL="$MAPPED"
+      echo "Label map override: $CANONICAL_LABEL → $EFFECTIVE_LABEL"
+    fi
+  else
+    echo "WARNING: FORGE_LABEL_MAP is set but jq is not available — using canonical label ($CANONICAL_LABEL)" >&2
+  fi
+fi
+
+# ---------------------------------------------------------------------------
 # Add target label
 # ---------------------------------------------------------------------------
-echo "Adding workflow:$TARGET_STATE to issue #$ISSUE_NUMBER..."
-gh issue edit "$ISSUE_NUMBER" "${GH_ARGS[@]}" --add-label "workflow:$TARGET_STATE"
+echo "Adding $EFFECTIVE_LABEL to issue #$ISSUE_NUMBER..."
+gh issue edit "$ISSUE_NUMBER" "${GH_ARGS[@]}" --add-label "$EFFECTIVE_LABEL"
 
 # ---------------------------------------------------------------------------
 # Remove all other workflow:* labels (best-effort — labels may not all exist)
@@ -128,4 +158,4 @@ gh issue edit "$ISSUE_NUMBER" "${GH_ARGS[@]}" --add-label "workflow:$TARGET_STAT
 echo "Removing stale workflow:* labels ($REMOVE_LABELS)..."
 gh issue edit "$ISSUE_NUMBER" "${GH_ARGS[@]}" --remove-label "$REMOVE_LABELS" 2>/dev/null || true
 
-echo "OK: workflow:$TARGET_STATE set on issue #$ISSUE_NUMBER"
+echo "OK: $EFFECTIVE_LABEL set on issue #$ISSUE_NUMBER"
