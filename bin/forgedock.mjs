@@ -1462,6 +1462,398 @@ async function status(dir) {
   console.log("");
 }
 
+/**
+ * Run installation health checks and report pass/fail for each.
+ *
+ * Checks (in order):
+ *   1. Command symlinks — TARGET_DIR entries point to correct COMMANDS_DIR files
+ *   2. gh CLI installed and authenticated
+ *   3. git configured (user.name + user.email)
+ *   4. forge.yaml exists and has required keys
+ *   5. SessionStart hook registered in ~/.claude/settings.json
+ *   6. CLAUDE.md has the ForgeDock behavioral block (cwd)
+ *   7. Required workflow labels exist on the GitHub repo (needs forge.yaml + gh auth)
+ *   8. FORGE_HOME environment variable is set
+ *
+ * Exits with code 0 if all checks pass, code 1 if any fail.
+ */
+async function doctor() {
+  console.log("");
+  console.log(`${BOLD}ForgeDock Doctor${RESET} — Installation Health Check`);
+  console.log("");
+
+  let failures = 0;
+  let warnings = 0;
+
+  /**
+   * Print a pass line.
+   * @param {string} label
+   * @param {string} [detail]
+   */
+  function pass(label, detail) {
+    const suffix = detail ? `  ${detail}` : "";
+    console.log(`  ${GREEN}✔${RESET}  ${label}${suffix}`);
+  }
+
+  /**
+   * Print a fail line with a remediation hint.
+   * @param {string} label
+   * @param {string} hint
+   */
+  function fail(label, hint) {
+    failures++;
+    console.log(`  ${RED}✗${RESET}  ${BOLD}${label}${RESET}`);
+    console.log(`       Fix: ${hint}`);
+  }
+
+  /**
+   * Print a warning line (informational, does not count as failure).
+   * @param {string} label
+   * @param {string} hint
+   */
+  function warn(label, hint) {
+    warnings++;
+    console.log(`  ${YELLOW}⚠${RESET}  ${label}`);
+    console.log(`       Note: ${hint}`);
+  }
+
+  // ── Check 1: Command symlinks ──────────────────────────────────────────────
+  {
+    let symlinkOk = true;
+    let checked = 0;
+    let broken = 0;
+    const brokenLinks = [];
+
+    try {
+      // Collect all .md files from COMMANDS_DIR recursively
+      const collectMd = async (dir) => {
+        const results = [];
+        let entries;
+        try {
+          entries = await readdir(dir, { withFileTypes: true });
+        } catch {
+          return results;
+        }
+        for (const entry of entries) {
+          const full = join(dir, entry.name);
+          if (entry.isDirectory()) {
+            results.push(...(await collectMd(full)));
+          } else if (entry.name.endsWith(".md")) {
+            results.push(full);
+          }
+        }
+        return results;
+      };
+
+      const sourceFiles = await collectMd(COMMANDS_DIR);
+
+      for (const src of sourceFiles) {
+        const rel = relative(COMMANDS_DIR, src);
+        const tgt = join(TARGET_DIR, rel);
+        checked++;
+        try {
+          const lstats = await lstat(tgt);
+          if (lstats.isSymbolicLink()) {
+            const dest = await readlink(tgt);
+            if (dest !== src) {
+              broken++;
+              brokenLinks.push(rel);
+              symlinkOk = false;
+            }
+          } else {
+            // Regular file — not a symlink (install left a copy)
+            broken++;
+            brokenLinks.push(`${rel} (not a symlink)`);
+            symlinkOk = false;
+          }
+        } catch {
+          // Symlink missing
+          broken++;
+          brokenLinks.push(`${rel} (missing)`);
+          symlinkOk = false;
+        }
+      }
+
+      if (symlinkOk) {
+        pass("Command symlinks", `${checked} symlinks valid`);
+      } else {
+        fail(
+          "Command symlinks",
+          `Run: npx forgedock install  (${broken}/${checked} broken: ${brokenLinks.slice(0, 3).join(", ")}${brokenLinks.length > 3 ? "…" : ""})`,
+        );
+      }
+    } catch (err) {
+      fail("Command symlinks", `Could not read commands directory: ${err.message}`);
+    }
+  }
+
+  // ── Check 2: gh CLI installed + authenticated ──────────────────────────────
+  let ghAvailable = false;
+  {
+    let ghInstalled = false;
+    let ghAuthed = false;
+    try {
+      execSync("gh --version", { stdio: ["ignore", "pipe", "ignore"] });
+      ghInstalled = true;
+    } catch {
+      // gh not installed
+    }
+
+    if (!ghInstalled) {
+      fail("gh CLI", "Install the GitHub CLI: https://cli.github.com/");
+    } else {
+      try {
+        execSync("gh auth status", { stdio: ["ignore", "pipe", "ignore"] });
+        ghAuthed = true;
+      } catch {
+        // Not authenticated
+      }
+
+      if (ghAuthed) {
+        pass("gh CLI", "installed and authenticated");
+        ghAvailable = true;
+      } else {
+        fail("gh CLI", "Run: gh auth login");
+      }
+    }
+  }
+
+  // ── Check 3: git configured ────────────────────────────────────────────────
+  {
+    let gitName = "";
+    let gitEmail = "";
+    try {
+      gitName = execSync("git config --global user.name", {
+        stdio: ["ignore", "pipe", "ignore"],
+        encoding: "utf-8",
+      }).trim();
+    } catch {
+      /* not set */
+    }
+    try {
+      gitEmail = execSync("git config --global user.email", {
+        stdio: ["ignore", "pipe", "ignore"],
+        encoding: "utf-8",
+      }).trim();
+    } catch {
+      /* not set */
+    }
+
+    if (gitName && gitEmail) {
+      pass("git config", `user.name="${gitName}", user.email="${gitEmail}"`);
+    } else {
+      const missing = [
+        !gitName && "user.name",
+        !gitEmail && "user.email",
+      ].filter(Boolean).join(", ");
+      fail(
+        "git config",
+        `Run: git config --global user.name "Your Name"  and  git config --global user.email "you@example.com"  (missing: ${missing})`,
+      );
+    }
+  }
+
+  // ── Check 4: forge.yaml exists + has required keys ─────────────────────────
+  let forgeOwner = null;
+  let forgeRepo = null;
+  {
+    const forgeYamlPath = join(process.cwd(), "forge.yaml");
+    if (!existsSync(forgeYamlPath)) {
+      warn(
+        "forge.yaml",
+        "No forge.yaml in current directory. Run: npx forgedock init",
+      );
+    } else {
+      let content = "";
+      try {
+        content = readFileSync(forgeYamlPath, "utf-8");
+      } catch (err) {
+        fail("forge.yaml", `Cannot read forge.yaml: ${err.message}`);
+      }
+
+      if (content) {
+        const hasProject = /^project:/m.test(content);
+        const hasPaths = /^paths:/m.test(content);
+        const hasBranches = /^branches:/m.test(content);
+        const missing = [
+          !hasProject && "project",
+          !hasPaths && "paths",
+          !hasBranches && "branches",
+        ].filter(Boolean);
+
+        if (missing.length === 0) {
+          pass("forge.yaml", "exists with required keys");
+          // Extract owner and repo for the label check (simple regex, no YAML parser needed)
+          const ownerMatch = content.match(/^\s+owner:\s+"?([^"\n]+)"?\s*$/m);
+          const repoMatch = content.match(/^\s+repo:\s+"?([^"\n]+)"?\s*$/m);
+          if (ownerMatch) forgeOwner = ownerMatch[1].trim();
+          if (repoMatch) forgeRepo = repoMatch[1].trim();
+        } else {
+          fail("forge.yaml", `Missing required keys: ${missing.join(", ")}. Edit forge.yaml or run: npx forgedock init`);
+        }
+      }
+    }
+  }
+
+  // ── Check 5: SessionStart hook registered ─────────────────────────────────
+  {
+    try {
+      const settings = readClaudeSettings();
+      const sessionStartEntries = Array.isArray(settings?.hooks?.SessionStart)
+        ? settings.hooks.SessionStart
+        : [];
+      const hookPresent = sessionStartEntries.some((entry) => {
+        if (!entry || typeof entry !== "object") return false;
+        const hooks = Array.isArray(entry.hooks) ? entry.hooks : [];
+        return hooks.some(
+          (h) =>
+            h &&
+            typeof h.command === "string" &&
+            isForgeSessionStartHook(h.command),
+        );
+      });
+
+      if (hookPresent) {
+        pass("SessionStart hook", "registered in ~/.claude/settings.json");
+      } else {
+        fail(
+          "SessionStart hook",
+          "Run: npx forgedock install  (writes hook entry to ~/.claude/settings.json)",
+        );
+      }
+    } catch (err) {
+      fail("SessionStart hook", `Cannot read ~/.claude/settings.json: ${err.message}. Run: npx forgedock install`);
+    }
+  }
+
+  // ── Check 6: CLAUDE.md has ForgeDock block (cwd) ──────────────────────────
+  {
+    const claudeMdPath = join(process.cwd(), "CLAUDE.md");
+    if (!existsSync(claudeMdPath)) {
+      warn(
+        "CLAUDE.md behavioral block",
+        `No CLAUDE.md found in ${process.cwd()}. Run: npx forgedock install  (from your project directory)`,
+      );
+    } else {
+      try {
+        const content = readFileSync(claudeMdPath, "utf-8");
+        if (
+          content.includes(CLAUDE_BLOCK_BEGIN) &&
+          content.includes(CLAUDE_BLOCK_END)
+        ) {
+          pass("CLAUDE.md behavioral block", `found in ${claudeMdPath}`);
+        } else {
+          fail(
+            "CLAUDE.md behavioral block",
+            `Run: npx forgedock install  (from ${process.cwd()}) to inject the ForgeDock pipeline rules block`,
+          );
+        }
+      } catch (err) {
+        fail("CLAUDE.md behavioral block", `Cannot read CLAUDE.md: ${err.message}`);
+      }
+    }
+  }
+
+  // ── Check 7: Required workflow labels on GitHub repo ───────────────────────
+  {
+    if (!forgeOwner || !forgeRepo) {
+      warn(
+        "GitHub workflow labels",
+        "Skipped — could not resolve owner/repo from forge.yaml",
+      );
+    } else if (!ghAvailable) {
+      warn(
+        "GitHub workflow labels",
+        "Skipped — gh CLI not authenticated (see check 2 above)",
+      );
+    } else {
+      // Read expected labels from labels.json (co-located in bin/)
+      const labelsJsonPath = join(__dirname, "labels.json");
+      let expectedLabels = [];
+      let labelsJsonOk = false;
+      try {
+        const labelsRaw = readFileSync(labelsJsonPath, "utf-8");
+        const allLabels = JSON.parse(labelsRaw);
+        expectedLabels = allLabels
+          .filter((l) => l.name.startsWith("workflow:"))
+          .map((l) => l.name);
+        labelsJsonOk = true;
+      } catch {
+        warn(
+          "GitHub workflow labels",
+          "Could not read bin/labels.json — skipping label check",
+        );
+      }
+
+      if (labelsJsonOk && expectedLabels.length > 0) {
+        let existingLabels = [];
+        let ghLabelOk = false;
+        try {
+          const out = execSync(
+            `gh label list -R ${forgeOwner}/${forgeRepo} --json name --limit 200`,
+            { stdio: ["ignore", "pipe", "ignore"], encoding: "utf-8" },
+          );
+          const parsed = JSON.parse(out);
+          existingLabels = parsed.map((l) => l.name);
+          ghLabelOk = true;
+        } catch {
+          warn(
+            "GitHub workflow labels",
+            `Could not fetch labels from ${forgeOwner}/${forgeRepo}. Ensure gh is authenticated and repo is accessible.`,
+          );
+        }
+
+        if (ghLabelOk) {
+          const missingLabels = expectedLabels.filter(
+            (l) => !existingLabels.includes(l),
+          );
+          if (missingLabels.length === 0) {
+            pass(
+              "GitHub workflow labels",
+              `all ${expectedLabels.length} workflow labels present on ${forgeOwner}/${forgeRepo}`,
+            );
+          } else {
+            fail(
+              "GitHub workflow labels",
+              `Run: npx forgedock labels setup  (missing: ${missingLabels.join(", ")})`,
+            );
+          }
+        }
+      }
+    }
+  }
+
+  // ── Check 8: FORGE_HOME environment variable ───────────────────────────────
+  {
+    const envForgeHome = process.env.FORGE_HOME;
+    if (envForgeHome) {
+      pass("FORGE_HOME env var", `set to "${envForgeHome}"`);
+    } else {
+      fail(
+        "FORGE_HOME env var",
+        `Add to your shell profile: export FORGE_HOME="${FORGE_HOME}"  then restart your shell (or run: source ~/.bashrc)`,
+      );
+    }
+  }
+
+  // ── Summary ────────────────────────────────────────────────────────────────
+  console.log("");
+  if (failures === 0 && warnings === 0) {
+    console.log(`${GREEN}${BOLD}All checks passed.${RESET} ForgeDock installation is healthy.`);
+  } else if (failures === 0) {
+    console.log(`${YELLOW}${BOLD}${warnings} warning(s).${RESET} Checks passed with notes above.`);
+  } else {
+    console.log(
+      `${RED}${BOLD}${failures} check(s) failed${warnings > 0 ? `, ${warnings} warning(s)` : ""}.${RESET} See fix hints above.`,
+    );
+  }
+  console.log("");
+
+  if (failures > 0) {
+    process.exit(1);
+  }
+}
+
 function help() {
   console.log("");
   console.log(
@@ -1483,6 +1875,7 @@ function help() {
   console.log(`  ${CYAN}npx forgedock enable [dir]${RESET}  Mark directory as ForgeDock-managed`);
   console.log(`  ${CYAN}npx forgedock disable [dir]${RESET} Opt directory out of ForgeDock`);
   console.log(`  ${CYAN}npx forgedock status [dir]${RESET}  Show resolved state for a directory`);
+  console.log(`  ${CYAN}npx forgedock doctor${RESET}     Check installation health`);
   console.log(`  ${CYAN}npx forgedock help${RESET}       Show this help`);
   console.log("");
 }
@@ -1508,6 +1901,9 @@ switch (command) {
     break;
   case "status":
     await status(args[1]);
+    break;
+  case "doctor":
+    await doctor();
     break;
   case "help":
   case "--help":
