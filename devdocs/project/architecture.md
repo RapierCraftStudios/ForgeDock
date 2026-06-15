@@ -186,9 +186,7 @@ Active milestone tracking all work toward one-shot reliable task completion.
 
 | # | Issue | Priority | Track |
 |---|-------|----------|-------|
-| #619 | Token optimization (stub pattern) | P0 | Context efficiency |
 | #651 | Scripts layer architecture | P0 | Execution determinism |
-| #635 | Version intelligence | P1 | Compatibility |
 | #652 | DevDocs redesign (parent tracker) | P1 | Knowledge determinism |
 | #653 | Per-repo adaptive scripts (investigation) | P1 | Execution determinism |
 | #667 | Per-repo script generation — forge.yaml learning | P1 | Execution determinism |
