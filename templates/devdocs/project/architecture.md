@@ -2,6 +2,9 @@
 authority: required
 scope: project
 applies_to: [work-on, review-pr, issue, orchestrate]
+domain: architecture
+last_validated: "YYYY-MM-DD"
+version: "0.0.0"
 ---
 
 # System Architecture

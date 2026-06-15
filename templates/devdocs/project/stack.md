@@ -2,6 +2,9 @@
 authority: required
 scope: project
 applies_to: [work-on, review-pr, issue]
+domain: stack
+last_validated: "YYYY-MM-DD"
+version: "0.0.0"
 ---
 
 # Tech Stack
