@@ -30,6 +30,7 @@ import {
   YELLOW,
   CYAN,
 } from "./tui.mjs";
+import { detectClaudeVersion } from "./forge-utils.mjs";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
@@ -1537,7 +1538,7 @@ async function status(dir) {
  *
  * Exits with code 0 if all checks pass, code 1 if any fail.
  */
-async function doctor() {
+async function doctor({ forceRefresh = false } = {}) {
   console.log("");
   console.log(`${BOLD}ForgeDock Doctor${RESET} — Installation Health Check`);
   console.log("");
@@ -1896,6 +1897,42 @@ async function doctor() {
     }
   }
 
+  // ── Check 9: Claude Code version ──────────────────────────────────────────
+  {
+    try {
+      const versionInfo = await detectClaudeVersion({ forceRefresh });
+
+      if ("version" in versionInfo && versionInfo.version === "unknown") {
+        // detectClaudeVersion could not determine the installed version.
+        // Likely cause: `claude` is not on PATH (not installed).
+        fail(
+          "Claude Code version",
+          "Could not detect Claude Code version. Install with: npm install -g @anthropic-ai/claude-code",
+        );
+      } else if (versionInfo.stale === true) {
+        // Installed version differs from latest — advisory warning, not a blocker.
+        // Version strings come from CLI stdout / npm registry and are treated as
+        // opaque identifiers. They are sliced to a safe display length before output.
+        const safeInstalled = String(versionInfo.installed ?? "unknown").slice(0, 50);
+        const safeLatest = String(versionInfo.latest ?? "unknown").slice(0, 50);
+        warn(
+          `Claude Code version  ${safeInstalled} → ${safeLatest} (update available)`,
+          `Run: npm install -g @anthropic-ai/claude-code  to update to ${safeLatest}`,
+        );
+      } else {
+        const safeInstalled = String(versionInfo.installed ?? "unknown").slice(0, 50);
+        pass("Claude Code version", safeInstalled);
+      }
+    } catch {
+      // Unexpected error from detectClaudeVersion (should not happen — it's fail-open,
+      // but guard here to keep doctor() fail-open too).
+      warn(
+        "Claude Code version",
+        "Version check failed unexpectedly. Re-run with: npx forgedock doctor --refresh",
+      );
+    }
+  }
+
   // ── Summary ────────────────────────────────────────────────────────────────
   console.log("");
   if (failures === 0 && warnings === 0) {
@@ -1926,7 +1963,7 @@ function help() {
     ["npx forgedock enable [dir]", "Mark directory as ForgeDock-managed"],
     ["npx forgedock disable [dir]", "Opt directory out of ForgeDock"],
     ["npx forgedock status [dir]", "Show resolved state for a directory"],
-    ["npx forgedock doctor", "Check installation health"],
+    ["npx forgedock doctor [--refresh]", "Check installation health"],
     ["npx forgedock help", "Show this help"],
   ];
 
@@ -1959,9 +1996,11 @@ switch (command) {
   case "status":
     await status(args[1]);
     break;
-  case "doctor":
-    await doctor();
+  case "doctor": {
+    const forceRefresh = args.includes("--refresh");
+    await doctor({ forceRefresh });
     break;
+  }
   case "help":
   case "--help":
   case "-h":
