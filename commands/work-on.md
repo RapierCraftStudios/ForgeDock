@@ -955,6 +955,17 @@ PR_BASE=$(bash scripts/classify-lane.sh {NUMBER} -R {GH_REPO})
 ```
 Output is authoritative — no prose fallback. Script exits 1 on error (invalid issue, `gh` auth failure); treat non-zero exit as `needs-human` and STOP. <!-- Added: forge#669 -->
 
+### 4C.5: Validate PR target against classified lane
+```bash
+bash scripts/validate-pr-target.sh {PR_BASE} {CLASSIFIED_LANE}
+```
+`{CLASSIFIED_LANE}` is the value returned by `classify-lane.sh` in Phase 4C. `{PR_BASE}` is the branch the PR will target. If exit code is 1 (mismatch):
+```bash
+gh issue comment {NUMBER} {GH_FLAG} --body "BLOCKING: validate-pr-target.sh — PR base \`{PR_BASE}\` does not match classified lane \`{CLASSIFIED_LANE}\`. Manual intervention required."
+gh issue edit {NUMBER} {GH_FLAG} --add-label "needs-human"
+```
+→ STOP. Do NOT proceed to Phase 4D. <!-- Added: forge#671 -->
+
 ### 4D: Create PR
 ```bash
 gh pr create {GH_FLAG} --base {PR_BASE} --head {BRANCH} \
