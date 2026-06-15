@@ -950,7 +950,10 @@ cd {WORKTREE_PATH} && git push -u origin {BRANCH}
 If fails: try `--force-with-lease`. If still fails: post comment, add `needs-human`, STOP.
 
 ### 4C: Determine PR target
-No milestone → `staging`. Has milestone → `milestone/{slug}`. NEVER `main`.
+```bash
+PR_BASE=$(bash scripts/classify-lane.sh {NUMBER} -R {GH_REPO})
+```
+Output is authoritative — no prose fallback. Script exits 1 on error (invalid issue, `gh` auth failure); treat non-zero exit as `needs-human` and STOP. <!-- Added: forge#669 -->
 
 ### 4D: Create PR
 ```bash
