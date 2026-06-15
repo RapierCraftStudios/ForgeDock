@@ -149,7 +149,6 @@ extract_forge() {
 }
 
 INVESTIGATOR=$(echo "$ALL_COMMENTS" | awk '/<!-- FORGE:INVESTIGATOR -->/{found=1} found{print} /<!-- INVESTIGATION:COMPLETE -->/{found=0}')
-CONTRACT=$(echo "$ALL_COMMENTS" | awk '/<!-- FORGE:CONTRACT -->/{found=1} found{print} /<!-- FORGE:CONTRACT:COMPLETE -->|^## [A-Z]/{if(found && NR>1)found=0} found{next}' 2>/dev/null || true)
 CONTRACT=$(echo "$ALL_COMMENTS" | grep -A 1000 "<!-- FORGE:CONTRACT -->" | head -80)
 CONTEXT_COMMENT=$(echo "$ALL_COMMENTS" | grep -A 1000 "<!-- FORGE:CONTEXT -->" | head -80)
 ARCHITECT=$(echo "$ALL_COMMENTS" | grep -A 1000 "<!-- FORGE:ARCHITECT -->" | head -100)
