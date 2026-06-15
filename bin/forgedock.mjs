@@ -554,6 +554,92 @@ async function findMarkdownFiles(dir) {
   return results.sort();
 }
 
+// ---------------------------------------------------------------------------
+// Shell profile FORGE_HOME removal
+// ---------------------------------------------------------------------------
+
+/**
+ * The sentinel comment line written by install() immediately before the
+ * `export FORGE_HOME=` line. This is the reliable anchor for removal —
+ * it is never present in organic shell profiles.
+ */
+const FORGE_HOME_COMMENT = "# ForgeDock — autonomous development pipeline";
+
+/**
+ * Remove the ForgeDock FORGE_HOME block from a single shell profile file.
+ *
+ * install() appends exactly this 2-line block (preceded by a blank line):
+ *
+ *   # ForgeDock — autonomous development pipeline
+ *   export FORGE_HOME="<path>"
+ *
+ * This function strips that block (and any orphaned `export FORGE_HOME=...`
+ * lines immediately following the comment, or any standalone
+ * `export FORGE_HOME=...` lines that have no paired comment). All other
+ * content is preserved.
+ *
+ * Uses an atomic write (tmp file + rename) to avoid partial writes.
+ *
+ * Returns:
+ *   'removed'     — block was found and removed
+ *   'not-present' — block not found in file (or file does not exist)
+ *   'failed'      — write error (non-fatal; callers warn and continue)
+ *
+ * @param {string} profilePath - Absolute path to .bashrc or .zshrc
+ * @returns {'removed' | 'not-present' | 'failed'}
+ */
+function removeForgeHomeFromProfile(profilePath) {
+  if (!existsSync(profilePath)) return "not-present";
+
+  let content;
+  try {
+    content = readFileSync(profilePath, "utf-8");
+  } catch {
+    return "failed";
+  }
+
+  if (!content.includes(FORGE_HOME_COMMENT) && !content.includes("export FORGE_HOME=")) {
+    return "not-present";
+  }
+
+  // Step 1: Remove the 2-line ForgeDock block (comment + export), preceded
+  // by an optional leading blank line that install() inserts.
+  // The \r? handles profiles with CRLF line endings.
+  let cleaned = content.replace(
+    /\r?\n[ \t]*# ForgeDock — autonomous development pipeline\r?\nexport FORGE_HOME="[^"]*"\r?\n/g,
+    "\n",
+  );
+
+  // Step 2: Remove any orphaned `export FORGE_HOME=...` lines that may
+  // remain if the comment line was already manually deleted.
+  cleaned = cleaned.replace(/^export FORGE_HOME=.*\r?\n/gm, "");
+
+  // Step 3: Trim trailing blank lines introduced by the removal, but
+  // preserve a single trailing newline if the original file had one.
+  const hadTrailingNewline = content.endsWith("\n");
+  cleaned = cleaned.replace(/\n{3,}/g, "\n\n").trimEnd();
+  if (cleaned.length > 0 && hadTrailingNewline) {
+    cleaned += "\n";
+  }
+
+  if (cleaned === content) return "not-present";
+
+  const tmpPath = profilePath + ".forgedock.tmp";
+  try {
+    writeFileSync(tmpPath, cleaned, "utf-8");
+    renameSync(tmpPath, profilePath);
+  } catch {
+    try {
+      unlinkSync(tmpPath);
+    } catch {
+      /* already gone or never created */
+    }
+    return "failed";
+  }
+
+  return "removed";
+}
+
 async function install() {
   console.log("");
   console.log(`${BOLD}ForgeDock${RESET} — Installing pipeline commands`);
@@ -776,6 +862,63 @@ async function uninstall() {
       console.log(`  ✔  No ForgeDock block in AGENTS.md — nothing to remove`);
     }
   }
+  console.log("");
+
+  // Remove FORGE_HOME export from shell profiles (.bashrc, .zshrc)
+  for (const profileName of [".bashrc", ".zshrc"]) {
+    const profilePath = join(process.env.HOME, profileName);
+    const profileResult = removeForgeHomeFromProfile(profilePath);
+    if (profileResult === "removed") {
+      console.log(
+        `  ${GREEN}✔${RESET}  Removed FORGE_HOME export from ${CYAN}~/${profileName}${RESET}`,
+      );
+    } else if (profileResult === "not-present") {
+      console.log(`  ✔  No FORGE_HOME entry in ~/${profileName} — nothing to remove`);
+    } else {
+      console.log(
+        `  ${YELLOW}⚠${RESET}  Could not update ~/${profileName} — remove the FORGE_HOME export manually.`,
+      );
+    }
+  }
+  console.log("");
+
+  // Remove .forgedock marker file from cwd (created by `npx forgedock enable`)
+  const markerPath = join(uninstallCwd, ".forgedock");
+  if (existsSync(markerPath)) {
+    try {
+      unlinkSync(markerPath);
+      console.log(
+        `  ${GREEN}✔${RESET}  Removed ${CYAN}.forgedock${RESET} marker from ${CYAN}${uninstallCwd}${RESET}`,
+      );
+    } catch {
+      console.log(
+        `  ${YELLOW}⚠${RESET}  Could not remove .forgedock marker — remove it manually: ${markerPath}`,
+      );
+    }
+  } else {
+    console.log(`  ✔  No .forgedock marker in current directory — nothing to remove`);
+  }
+  console.log("");
+
+  // Clean up registry nudgeSeen entry for cwd (written by the session-start hook)
+  try {
+    const { clearNudgeSeen } = await import(
+      pathToFileURL(join(FORGE_HOME, "bin", "registry.mjs")).href
+    );
+    await clearNudgeSeen(uninstallCwd);
+    console.log(
+      `  ${GREEN}✔${RESET}  Cleaned registry entries for ${CYAN}${uninstallCwd}${RESET}`,
+    );
+  } catch {
+    // Non-fatal — registry is best-effort
+    console.log(
+      `  ${YELLOW}⚠${RESET}  Could not clean registry entries — safe to ignore.`,
+    );
+  }
+  console.log("");
+
+  console.log(`${GREEN}ForgeDock uninstalled.${RESET} No residue remains from this directory.`);
+  console.log(`  Re-install at any time with: ${CYAN}npx forgedock${RESET}`);
   console.log("");
 }
 
