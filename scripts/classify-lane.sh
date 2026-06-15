@@ -34,6 +34,11 @@ shift
 while [ $# -gt 0 ]; do
   case "$1" in
     -R)
+      if [ $# -lt 2 ]; then
+        echo "ERROR: -R requires a value <owner/repo>" >&2
+        echo "Usage: classify-lane.sh <issue_number> [-R <owner/repo>]" >&2
+        exit 1
+      fi
       GH_REPO_FLAG="-R $2"
       shift 2
       ;;
