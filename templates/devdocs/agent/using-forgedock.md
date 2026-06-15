@@ -2,6 +2,9 @@
 authority: required
 scope: agent
 applies_to: [work-on, review-pr, orchestrate, quality-gate, issue, milestone]
+domain: pipeline
+last_validated: "YYYY-MM-DD"
+version: "0.0.0"
 ---
 
 # Using ForgeDock — Authoritative Pipeline Reference
