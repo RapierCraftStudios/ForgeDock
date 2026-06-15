@@ -8,7 +8,7 @@
  * Exports:
  *   parseForgeYaml(raw)               → object  (parse a forge.yaml string)
  *   sanitizeContextValue(value, max)  → string|null  (sanitize before injection)
- *   detectClaudeVersion()             → Promise<VersionResult>  (detect installed vs latest)
+ *   detectClaudeVersion([opts])       → Promise<VersionResult>  (detect installed vs latest; opts.forceRefresh bypasses cache)
  *
  * Contract guarantees:
  *   - parseForgeYaml and sanitizeContextValue: Pure — no I/O, no side effects, no global state
@@ -239,16 +239,22 @@ const VERSION_CACHE_PATH = join(
  * stdout/session context. This function returns raw strings — sanitization
  * (via sanitizeContextValue) is the caller's responsibility.
  *
+ * @param {object} [opts]
+ * @param {boolean} [opts.forceRefresh=false] - When true, bypass the 24h cache
+ *   and query the npm registry directly. Use for `forgedock doctor --refresh`.
+ *
  * <!-- fix: forge#680 -->
  *
  * @returns {Promise<VersionResult | UnknownVersionResult>}
  */
-export async function detectClaudeVersion() {
+export async function detectClaudeVersion({ forceRefresh = false } = {}) {
   try {
-    // --- Cache read ---
-    const cached = readVersionCache();
-    if (cached !== null) {
-      return cached;
+    // --- Cache read (skipped when forceRefresh is true) ---
+    if (!forceRefresh) {
+      const cached = readVersionCache();
+      if (cached !== null) {
+        return cached;
+      }
     }
 
     // --- Installed version ---
