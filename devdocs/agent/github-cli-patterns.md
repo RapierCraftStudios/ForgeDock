@@ -2,6 +2,9 @@
 authority: reference
 scope: agent
 applies_to: [work-on, review-pr, orchestrate, quality-gate]
+domain: github
+last_validated: "2026-06-15"
+version: "1.0.15"
 ---
 
 # GitHub CLI Patterns — Pipeline Cheat Sheet
