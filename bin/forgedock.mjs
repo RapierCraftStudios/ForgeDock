@@ -880,6 +880,114 @@ async function init(fromInstall = false) {
   await scaffoldAdaptiveScriptsDir(cwd);
 }
 
+/**
+ * Scaffold the devdocs tree from ForgeDock's seed templates into the project's
+ * configured devdocs path. Reads forge.yaml to determine the target path.
+ * Idempotent: skips files that already exist so user edits are preserved.
+ *
+ * This implements the `npx forgedock docs init` command referenced in CONFIG.md
+ * and the devdocs loading phases of work-on/build/context and architect.
+ */
+async function docsInit() {
+  const cwd = process.cwd();
+
+  // --- Resolve target devdocs path from forge.yaml ---
+  let devdocsRel = "devdocs";
+  const forgeYamlPath = join(cwd, "forge.yaml");
+
+  if (existsSync(forgeYamlPath)) {
+    try {
+      const yaml = readFileSync(forgeYamlPath, "utf-8");
+      const match = yaml.match(/^devdocs:\s*\n(?:\s+[^\n]*\n)*?\s+path:\s*["']?([^"'\n]+)["']?/m);
+      if (match) {
+        devdocsRel = match[1].trim();
+      }
+    } catch {
+      // Best-effort; use default
+    }
+  }
+
+  const devdocsTarget = join(cwd, devdocsRel);
+  const templatesSource = join(FORGE_HOME, "templates", "devdocs");
+
+  if (!existsSync(templatesSource)) {
+    process.stderr.write(
+      `${RED}Error: templates/devdocs not found at ${templatesSource}${RESET}\n` +
+      `This usually means ForgeDock was installed via npm but the template directory is missing.\n` +
+      `Try reinstalling: ${cyan("npm install -g forgedock")}\n`,
+    );
+    process.exit(1);
+  }
+
+  /**
+   * Recursively copy files from src to dest.
+   * Skips files that already exist at dest (idempotent — user edits preserved).
+   * Returns { copied, skipped }.
+   */
+  async function copyTree(src, dest, step) {
+    let copied = 0;
+    let skipped = 0;
+
+    await mkdir(dest, { recursive: true });
+
+    const entries = await readdir(src, { withFileTypes: true });
+    for (const entry of entries) {
+      const srcPath = join(src, entry.name);
+      const destPath = join(dest, entry.name);
+
+      if (entry.isDirectory()) {
+        const result = await copyTree(srcPath, destPath, step);
+        copied += result.copied;
+        skipped += result.skipped;
+      } else {
+        if (existsSync(destPath)) {
+          skipped++;
+        } else {
+          copyFileSync(srcPath, destPath);
+          copied++;
+        }
+      }
+    }
+
+    return { copied, skipped };
+  }
+
+  const result = await runSteps([
+    {
+      label: `Scaffolding devdocs → ${cyan(devdocsRel + "/")}`,
+      async run(step) {
+        const { copied, skipped } = await copyTree(
+          templatesSource,
+          devdocsTarget,
+          step,
+        );
+        step.note(
+          `${green(String(copied))} created, ${dim(String(skipped))} already exist (skipped)`,
+        );
+      },
+    },
+  ]);
+
+  if (result.ok) {
+    process.stderr.write(
+      box(
+        [
+          `${green("✔")} DevDocs scaffolded to ${cyan(devdocsRel + "/")}`,
+          "",
+          `  ${green("→")} Edit ${cyan(devdocsRel + "/project/*.md")} with your project's stack, architecture, and conventions`,
+          `  ${green("→")} Edit ${cyan(devdocsRel + "/project/custom-instructions.md")} for binding agent directives`,
+          `  ${green("→")} Review ${cyan(devdocsRel + "/index.yaml")} to configure selective domain loading`,
+          `  ${dim("→")} ${cyan(devdocsRel + "/agent/*.md")} — ForgeDock defaults; edit only to override pipeline behavior`,
+          "",
+          `  Docs are gitignored by default if ${cyan("devdocs/")} is in ${cyan(".gitignore")}.`,
+          `  Commit ${cyan(devdocsRel + "/")} to share conventions with your team.`,
+        ],
+        { title: "DevDocs Initialised" },
+      ) + "\n",
+    );
+  }
+}
+
 function help() {
   // renderLogo already shown by splash() above — show the command table
   const commands = [
@@ -887,6 +995,7 @@ function help() {
     ["npx forgedock", "Install commands (default)"],
     ["npx forgedock install", "Install commands"],
     ["npx forgedock init", "Generate forge.yaml config for your project"],
+    ["npx forgedock docs init", "Scaffold devdocs/ knowledge tree from seed templates"],
     ["npx forgedock uninstall", "Remove commands"],
     ["npx forgedock update", "Pull latest & reinstall"],
     ["npx forgedock help", "Show this help"],
@@ -906,6 +1015,19 @@ switch (command) {
   case "init":
     await init();
     break;
+  case "docs": {
+    const subcommand = args[1];
+    if (subcommand === "init") {
+      await docsInit();
+    } else {
+      process.stderr.write(
+        `${RED}Unknown docs subcommand: ${subcommand ?? "(none)"}${RESET}\n` +
+        `Available: ${cyan("npx forgedock docs init")}\n`,
+      );
+      process.exit(1);
+    }
+    break;
+  }
   case "uninstall":
     await uninstall();
     break;
