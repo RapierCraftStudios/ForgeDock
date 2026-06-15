@@ -36,6 +36,7 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
 const FORGE_HOME = dirname(__dirname);
 const COMMANDS_DIR = join(FORGE_HOME, "commands");
+const SCRIPTS_DIR = join(FORGE_HOME, "scripts");
 
 if (!process.env.HOME) {
   process.stderr.write(
@@ -45,6 +46,7 @@ if (!process.env.HOME) {
 }
 
 const TARGET_DIR = join(process.env.HOME, ".claude", "commands");
+const SCRIPTS_TARGET_DIR = join(process.env.HOME, ".claude", "scripts");
 
 const args = process.argv.slice(2);
 const command = args[0] || "install";
@@ -185,6 +187,98 @@ async function linkCommands(step) {
       // Doesn't exist — create it. Prefer a symlink; fall back to a copy on
       // systems where symlink creation is not permitted (e.g. Windows without
       // Developer Mode / admin), which would otherwise throw EPERM. See #587.
+      try {
+        await symlink(file, target);
+      } catch (linkErr) {
+        if (linkErr.code === "EPERM" || linkErr.code === "EACCES") {
+          copyFileSync(file, target);
+        } else {
+          throw linkErr;
+        }
+      }
+      installed++;
+    }
+
+    step.progress(idx + 1, total);
+  }
+
+  return { installed, updated, skipped };
+}
+
+/**
+ * Enumerate all executable scripts in SCRIPTS_DIR (*.sh, *.mjs).
+ * Subdirectories are not traversed — scripts/ is a flat directory.
+ */
+async function findScriptFiles(dir) {
+  const results = [];
+  let entries;
+  try {
+    entries = await readdir(dir, { withFileTypes: true });
+  } catch (err) {
+    if (err.code === "ENOENT") return results; // scripts/ dir absent — skip silently
+    throw err;
+  }
+  for (const entry of entries) {
+    if (entry.isFile() && (entry.name.endsWith(".sh") || entry.name.endsWith(".mjs"))) {
+      results.push(join(dir, entry.name));
+    }
+  }
+  return results.sort();
+}
+
+/**
+ * Link or copy all scripts from SCRIPTS_DIR into SCRIPTS_TARGET_DIR (~/.claude/scripts/).
+ * Mirrors linkCommands() behaviour: symlink where permitted, copy on EPERM/EACCES (Windows).
+ * Calls step.progress(idx+1, total) on each file.
+ * Returns { installed, updated, skipped }.
+ */
+async function linkScripts(step) {
+  const files = await findScriptFiles(SCRIPTS_DIR);
+  const total = files.length;
+
+  if (total === 0) {
+    step.skip("no scripts to link");
+    return { installed: 0, updated: 0, skipped: 0 };
+  }
+
+  await mkdir(SCRIPTS_TARGET_DIR, { recursive: true });
+
+  let installed = 0;
+  let updated = 0;
+  let skipped = 0;
+
+  for (let idx = 0; idx < files.length; idx++) {
+    const file = files[idx];
+    const rel = relative(SCRIPTS_DIR, file);
+    const target = join(SCRIPTS_TARGET_DIR, rel);
+
+    try {
+      const stats = await lstat(target);
+
+      if (stats.isSymbolicLink()) {
+        const current = await readlink(target);
+        if (current === file) {
+          skipped++;
+        } else {
+          await symlink(file, target + ".tmp");
+          const { rename } = await import("fs/promises");
+          await rename(target + ".tmp", target);
+          updated++;
+        }
+      } else {
+        // Existing regular file — refresh if contents differ.
+        if (readFileSync(file, "utf-8") === readFileSync(target, "utf-8")) {
+          skipped++;
+        } else {
+          copyFileSync(file, target);
+          updated++;
+        }
+      }
+    } catch (err) {
+      if (err.code !== "ENOENT") {
+        throw err;
+      }
+      // Doesn't exist — create symlink; fall back to copy on Windows EPERM/EACCES.
       try {
         await symlink(file, target);
       } catch (linkErr) {
@@ -473,6 +567,17 @@ async function install() {
       },
     },
     {
+      label: "Linking scripts",
+      async run(step) {
+        const { installed, updated, skipped } = await linkScripts(step);
+        if (installed + updated + skipped > 0) {
+          step.note(
+            `${green(String(installed))} installed, ${updated} updated, ${dim(String(skipped))} skipped`,
+          );
+        }
+      },
+    },
+    {
       label: "Configuring session hook",
       async run(step) {
         let profileUpdated = false;
@@ -534,6 +639,7 @@ async function install() {
           `${green("✔")} ${bold("ForgeDock is ready")}`,
           "",
           `Commands installed to ${cyan(TARGET_DIR)}`,
+          `Scripts installed to  ${cyan(SCRIPTS_TARGET_DIR)}`,
           `Next: ${cyan("cd <your-project>")} then ${cyan("npx forgedock init")}`,
         ],
         { title: "ForgeDock Installed" },
@@ -683,6 +789,25 @@ async function update() {
         step.note(
           `${green(String(installed))} installed, ${updated} updated, ${dim(String(skipped))} skipped`,
         );
+      },
+    },
+    {
+      label: "Reinstalling scripts",
+      async run(step) {
+        const branch = execSync("git rev-parse --abbrev-ref HEAD", {
+          cwd: FORGE_HOME,
+          encoding: "utf-8",
+        }).trim();
+        if (branch !== "main") {
+          step.skip("skipped — not on main");
+          return;
+        }
+        const { installed, updated, skipped } = await linkScripts(step);
+        if (installed + updated + skipped > 0) {
+          step.note(
+            `${green(String(installed))} installed, ${updated} updated, ${dim(String(skipped))} skipped`,
+          );
+        }
       },
     },
   ]);
