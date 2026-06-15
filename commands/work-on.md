@@ -41,7 +41,7 @@ Orchestrator for the full issue lifecycle: investigate → decompose (if needed)
 
 3A → 3B → [3C → 3C.5* → 3C.6*] → 3D → 3E → 3F → 3F.5 → 3G → 3H → 3I → 3I.5 → 3J → 3K → 3L → 3M
 
-*3C.5 and 3C.6 are skipped for TRIVIAL tasks. Investigation tasks exit at 3B before 3C.
+*3C.5 and 3C.6 are skipped for TRIVIAL tasks; 3C (Builder Contract) is still required. Investigation tasks exit at 3B before 3C.
 
 **Universal continuation rule**: After ANY phase or sub-phase completes, check whether a terminal state has been reached. Terminal states are:
 - `workflow:merged` label is set
@@ -720,7 +720,7 @@ gh issue comment {NUMBER} {GH_FLAG} --body "<!-- FORGE:FAST_PATH -->
 
 **Resume path**: If `EXISTING_FAST_PATH` was read in Phase 3A, extract COMPLEXITY_BAND from it and skip re-classification.
 
-**TRIVIAL tasks**: After posting FORGE:FAST_PATH, skip Phase 3C.5 (Context Gathering) and Phase 3C.6 (Architecture Plan). Continue: 3C (Builder Contract) → 3D → 3E → 3F → 3F.5 → 3G → 3H onward.
+**TRIVIAL tasks**: After posting FORGE:FAST_PATH, skip Phase 3C.5 (Context Gathering) and Phase 3C.6 (Architecture Plan) only. Phase 3C (Builder Contract) is **retained** — it still runs. Continue: 3C (Builder Contract) → 3D → 3E → 3F → 3F.5 → 3G → 3H onward. When filling in **Phases skipped** in the FORGE:FAST_PATH comment, write: `3C.5, 3C.6`.
 
 **STANDARD and COMPLEX tasks**: Run full pipeline — 3C → 3C.5 → 3C.6 → 3D onward. No phases skipped.
 
