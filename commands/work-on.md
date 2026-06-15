@@ -210,12 +210,14 @@ LEARNED_COMMIT_STYLE=$(yq '.learned.commit_style // ""' forge.yaml 2>/dev/null |
    echo "Learned test commands: $LEARNED_TEST_COMMANDS"
    ```
 
-3. **Label map** — If `LEARNED_LABEL_MAP` is non-empty, apply it before any `gh issue edit --add-label` call. When a canonical label (e.g. `workflow:investigating`) appears as a key in the map, use the mapped value instead:
+3. **Label map** — If `LEARNED_LABEL_MAP` is non-empty, export it as `FORGE_LABEL_MAP` so that all subsequent `bash scripts/transition-label.sh` invocations (which are child processes) can read it. The script performs the substitution internally: if the canonical label (e.g. `workflow:investigating`) appears as a key in the map, it uses the mapped value instead.
    ```bash
-   # Example: if label_map has "workflow:investigating": "needs-triage"
-   # then all subsequent gh issue edit --add-label "workflow:investigating" calls
-   # use "needs-triage" instead. Apply substitution at each label operation site.
-   echo "Label map active: $LEARNED_LABEL_MAP"
+   # Export as FORGE_LABEL_MAP so child processes (transition-label.sh) can read it.
+   # All 8 transition-label.sh call sites in this command inherit this env var automatically.
+   # The script substitutes the canonical workflow:* label with the mapped value when found.
+   export FORGE_LABEL_MAP="$LEARNED_LABEL_MAP"
+   [ -n "$LEARNED_LABEL_MAP" ] && [ "$LEARNED_LABEL_MAP" != "{}" ] && \
+     echo "Learned override: FORGE_LABEL_MAP active — label_map will be applied by transition-label.sh"
    ```
 
 4. **Commit style** — If `LEARNED_COMMIT_STYLE` is non-empty, use it in Phase 3M:
