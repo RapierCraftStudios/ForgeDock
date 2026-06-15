@@ -158,7 +158,7 @@ if [ -f "$BREAKPOINTS_FILE" ]; then
   BREAKPOINTS_JSON=$(cat "$BREAKPOINTS_FILE" 2>/dev/null || echo "")
 else
   echo "NOTE: docs/claude-breakpoints.json not found at ${FORGE_HOME_PATH}/docs/."
-  echo "This file is included in ForgeDock v1.x+. Run: npm update -g @anthropic-ai/claude-code forgedock"
+  echo "This file is included in ForgeDock v1.x+. Run: npx forgedock update"
 fi
 ```
 
@@ -300,7 +300,7 @@ Breakpoints
 Breakpoints
 ───────────
   ? Breakpoints registry not found (docs/claude-breakpoints.json).
-  Run: npm update -g @anthropic-ai/claude-code  (to install latest ForgeDock with registry)
+  Run: npx forgedock update  # to get latest ForgeDock commands (includes breakpoints)
 ```
 
 ---
