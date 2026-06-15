@@ -123,7 +123,7 @@ fi
 TOTAL_OPEN=$(gh issue list ${GH_FLAG} --state open --limit 1 --json number --jq '. | length' 2>/dev/null || echo "0")
 # More accurate count via API
 TOTAL_OPEN=$(gh api "repos/${GH_REPO}/issues?state=open&per_page=1" -i 2>/dev/null \
-  | grep -i "^link:" | grep -oP 'page=\K\d+(?=>; rel="last")' | tail -1 || echo "$TOTAL_OPEN")
+  | grep -i "^link:" | grep -oE 'page=[0-9]+>; rel="last"' | grep -oE '[0-9]+' | tail -1 || echo "$TOTAL_OPEN")
 echo "Open issues in ${GH_REPO}: ${TOTAL_OPEN}"
 echo "Will process up to ${ISSUE_LIMIT} issues."
 ```
@@ -172,7 +172,7 @@ If `LEGACY_COUNT == 0`:
 All ${READY_COUNT} open issues already have pipeline labels. Nothing to adopt.
 Run /work-on next to start working on the highest-priority issue.
 ```
-→ Skip to Phase 5 (Summary).
+→ Skip to Phase 6 (Summary).
 
 ---
 
@@ -188,7 +188,7 @@ For each issue in `LEGACY_ISSUES`, analyze the title and body to determine:
 | Feature | `feature` | "add", "support", "implement", "new", "create", "enable", "feat" prefix |
 | Enhancement | `enhancement` | "improve", "better", "update", "upgrade", "enhance" |
 | Refactor | `refactor` | "clean", "refactor", "extract", "rename", "simplify", "dead code", "remove" |
-| Investigation | `documentation` | "investigate", "audit", "research", "evaluate", "why does", "figure out" |
+| Investigation | `feature` | "investigate", "audit", "research", "evaluate", "why does", "figure out" |
 | Documentation | `documentation` | "docs", "document", "README", "guide", "write up" |
 | Infrastructure | `bug` (infra) | "deploy", "CI", "docker", "workflow", "pipeline", "kubernetes", "nginx" |
 
