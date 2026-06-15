@@ -37,9 +37,11 @@ Orchestrator for the full issue lifecycle: investigate → decompose (if needed)
 | 8 | Phase 6: Close & Cleanup | PR merged | No |
 | 9 | Phase 7: Trajectory | Issue closed | Yes |
 
-**Phase 3 sub-phase sequence** (all mandatory, execute in order):
+**Phase 3 sub-phase sequence** (execute in order; 3C.5 and 3C.6 are conditional — see Phase 3B):
 
-3A → 3B → 3C → 3C.5 → 3C.6 → 3D → 3E → 3F → 3F.5 → 3G → 3H → 3I → 3I.5 → 3J → 3K → 3L → 3M
+3A → 3B → [3C → 3C.5* → 3C.6*] → 3D → 3E → 3F → 3F.5 → 3G → 3H → 3I → 3I.5 → 3J → 3K → 3L → 3M
+
+*3C.5 and 3C.6 are skipped for TRIVIAL tasks. Investigation tasks exit at 3B before 3C.
 
 **Universal continuation rule**: After ANY phase or sub-phase completes, check whether a terminal state has been reached. Terminal states are:
 - `workflow:merged` label is set
@@ -591,7 +593,7 @@ bash scripts/transition-label.sh {NUMBER} {GH_FLAG} decomposed
 
 **Skip if**: `<!-- FORGE:BUILDER -->` exists.
 
-**CRITICAL: You MUST execute ALL sub-phases 3A–3M in order. Do NOT skip phases 3C.5 (context) or 3C.6 (architect) — they post mandatory `FORGE:CONTEXT` and `FORGE:ARCHITECT` comments that Phase 3F reads as its primary input. Skipping them degrades build quality and causes review findings. After each sub-phase, continue to the next — no sub-phase is terminal.**
+**CRITICAL: You MUST execute ALL sub-phases 3A–3M in order. Sub-phases 3C.5 (context) and 3C.6 (architect) are skipped ONLY for TRIVIAL tasks and Investigation tasks — see Phase 3B for classification. For STANDARD and COMPLEX tasks they post mandatory `FORGE:CONTEXT` and `FORGE:ARCHITECT` comments that Phase 3F reads as its primary input. Skipping them without a TRIVIAL/Investigation classification degrades build quality and causes review findings. After each sub-phase, continue to the next — no sub-phase is terminal.**
 
 ### 3A: Re-read state from GitHub (MANDATORY)
 ```bash
@@ -604,17 +606,23 @@ gh api repos/{GH_REPO}/issues/{NUMBER}/comments \
 # Check if build already completed
 gh api repos/{GH_REPO}/issues/{NUMBER}/comments \
   --jq '.[] | select(.body | contains("FORGE:BUILDER")) | .body'
+
+# Check for existing COMPLEXITY_BAND from a prior run (resume path)
+EXISTING_FAST_PATH=$(gh api repos/{GH_REPO}/issues/{NUMBER}/comments \
+  --jq '.[] | select(.body | contains("FORGE:FAST_PATH")) | .body' 2>/dev/null | head -1)
 ```
 
 If no investigation comment with `<!-- INVESTIGATION:COMPLETE -->` → STOP (investigation not complete).
 
 Extract from investigation: affected files, root cause, recommendation, task type.
 
-### 3B: Classify task type
+### 3B: Classify task type and complexity
+
+**Step 1 — Task type classification:**
 
 | Signal | Type | Approach |
 |--------|------|----------|
-| Title: "Investigate"/"Audit"/"Research" | Investigation | Produce issues as deliverables |
+| Title starts with "Investigate:"/"Audit:"/"Research:" | Investigation | Produce issues as deliverables |
 | UI/UX, feature + web/ files | UI/UX | `frontend-design` skill |
 | Feature + services/ | Backend Feature | Implement directly |
 | Feature + both | Full-Stack | Backend first, then frontend-design |
@@ -622,7 +630,49 @@ Extract from investigation: affected files, root cause, recommendation, task typ
 | Bug + services/ | Backend Fix | Direct |
 | Refactor/docs | Maintenance | Direct |
 
-**Investigation tasks**: Research deeply, create GitHub issues for each finding, post deliverables comment, close issue, skip to Phase 7.
+**Investigation tasks — early exit (BEFORE Phase 3C):** If task type = Investigation, skip Phases 3C, 3C.5, and 3C.6 entirely. Post `<!-- FORGE:FAST_PATH -->` comment, then jump directly to Phase 3F (implement → issue creation path). Do NOT run the Builder Contract, Context Gathering, or Architecture Plan for investigation tasks.
+
+```bash
+# Post fast-path comment for investigation tasks
+gh issue comment {NUMBER} {GH_FLAG} --body "<!-- FORGE:FAST_PATH -->
+## Fast-Path Classification
+
+**COMPLEXITY_BAND**: INVESTIGATION
+**Task type**: Investigation
+**Rationale**: Title prefix 'Investigate:' (or task type = Investigation from investigator report) — skipping Builder Contract (3C), Context Gathering (3C.5), and Architecture Plan (3C.6). Jumping directly to Phase 3F (issue creation).
+**Phases skipped**: 3C, 3C.5, 3C.6"
+```
+
+→ Jump to Phase 3F immediately. Do not continue to Phase 3C.
+
+**Step 2 — Complexity classification (for non-Investigation tasks):**
+
+Classify COMPLEXITY_BAND based on affected file count and task nature:
+
+| Condition | COMPLEXITY_BAND |
+|-----------|-----------------|
+| Single file, doc/config/markdown only, no logic changes expected | TRIVIAL |
+| 1–5 files, existing patterns, no cross-service impact | STANDARD |
+| 6+ files, new abstractions, cross-service, migration, schema changes | COMPLEX |
+
+Post `<!-- FORGE:FAST_PATH -->` comment immediately after classification:
+
+```bash
+gh issue comment {NUMBER} {GH_FLAG} --body "<!-- FORGE:FAST_PATH -->
+## Fast-Path Classification
+
+**COMPLEXITY_BAND**: {TRIVIAL|STANDARD|COMPLEX}
+**Task type**: {TASK_TYPE}
+**Affected file count**: {N}
+**Rationale**: {one-sentence explanation of classification decision}
+**Phases skipped**: {list phases skipped, or 'none — full pipeline' for STANDARD/COMPLEX}"
+```
+
+**Resume path**: If `EXISTING_FAST_PATH` was read in Phase 3A, extract COMPLEXITY_BAND from it and skip re-classification.
+
+**TRIVIAL tasks**: After posting FORGE:FAST_PATH, skip Phase 3C.5 (Context Gathering) and Phase 3C.6 (Architecture Plan). Continue: 3C (Builder Contract) → 3D → 3E → 3F → 3F.5 → 3G → 3H onward.
+
+**STANDARD and COMPLEX tasks**: Run full pipeline — 3C → 3C.5 → 3C.6 → 3D onward. No phases skipped.
 
 ### 3C: Builder Contract (MANDATORY)
 
@@ -654,9 +704,11 @@ gh issue comment {NUMBER} {GH_FLAG} --body "<!-- FORGE:CONTRACT -->
 
 Contract must be grounded in the investigation report. Adversarially validate proposed fixes against adjacent system layers.
 
-### 3C.5: Context Gathering (MANDATORY — max 2 minutes)
+### 3C.5: Context Gathering (MANDATORY for STANDARD/COMPLEX — skip for TRIVIAL)
 
-**This phase is NOT optional.** Always run it regardless of issue size or complexity. Do NOT skip it — trivial cases return quickly on their own.
+**Skip if COMPLEXITY_BAND: TRIVIAL** (classified in Phase 3B) — post nothing, proceed directly to Phase 3C.6. Trivial single-file changes have no institutional memory value to surface.
+
+**For STANDARD and COMPLEX tasks**: This phase is NOT optional. Run it regardless. Do NOT skip it without a TRIVIAL classification from Phase 3B.
 
 Surface institutional memory before writing code. Extract function names from the contract deliverables table:
 
@@ -735,13 +787,15 @@ gh issue comment {NUMBER} {GH_FLAG} --body "<!-- FORGE:CONTEXT -->
 
 If total time exceeds 2 minutes, post partial results with `<!-- FORGE:CONTEXT:PARTIAL -->`.
 
-### 3C.6: Architecture Plan (MANDATORY)
+### 3C.6: Architecture Plan (MANDATORY for STANDARD/COMPLEX — skip for TRIVIAL)
 
-**This phase is NOT optional.** Always run it regardless of issue size or complexity. Even a 1-file fix benefits from cross-path consistency checks. Do NOT invent skip heuristics — the phase handles simple changes gracefully and returns quickly.
+**Skip if COMPLEXITY_BAND: TRIVIAL** (classified in Phase 3B) — post nothing, proceed directly to Phase 3D. Trivial single-file changes have no multi-path consistency risk.
+
+**For STANDARD and COMPLEX tasks**: This phase is NOT optional. Always run it. Even a 1-file STANDARD fix benefits from cross-path consistency checks. Do NOT skip without a TRIVIAL classification from Phase 3B.
 
 Trace ALL affected code paths before writing code.
 
-**The ONLY acceptable skip conditions** (all must be true): Issue creates ONLY new files with no existing callers AND title starts with "docs:" or "chore:".
+**Additional skip condition** (STANDARD tasks only): Issue creates ONLY new files with no existing callers AND title starts with "docs:" or "chore:".
 
 **A1: Read Entry Points** — For each affected file: identify the primary function, all callers (grep), and sibling implementations. Read 3–5 most relevant files, max 8 total.
 
