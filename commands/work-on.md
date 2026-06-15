@@ -95,6 +95,8 @@ Satellite repos (those without a `staging` branch) receive fast-lane PRs directl
 ### 0A: Parse input
 Extract project prefix and issue number. If `next`/`pick`: list open issues sorted by priority, skip `needs-human` and `workflow:decomposed`, pick highest priority.
 
+**Optional pre-flight**: Before committing to the full pipeline, run `/scope {NUMBER}` to get a complexity estimate (affected files, blast radius, risk flags, and decomposition recommendation). Especially useful for large or ambiguous issues.
+
 ### 0B: Load issue + existing context
 ```bash
 gh issue view {NUMBER} {GH_FLAG} --json number,title,body,labels,state,comments,milestone
