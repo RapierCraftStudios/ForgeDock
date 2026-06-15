@@ -6,7 +6,7 @@
 
 <p><strong>Autonomous software development for Claude Code.</strong></p>
 
-<p>A sub-agent orchestration layer with a deterministic pipeline that converts developer intent into structured GitHub issues — giving each agent a tightly scoped prompt with GitHub as its secondary context layer. Builds, fixes, researches, and ships end-to-end — with a strict code quality bar that raises the baseline of your entire codebase over time. Fewer tokens, less time, better software. Built for production systems and security from the ground up. Benchmarked across 20,000+ GitHub issues on production codebases.</p>
+<p>A sub-agent orchestration layer with a deterministic pipeline that converts developer intent into structured GitHub issues, giving each agent a tightly scoped prompt with GitHub as its secondary context layer. Builds, fixes, researches, and ships end-to-end with a strict code quality bar that raises the baseline of your entire codebase over time. Fewer tokens, less time, better software. Built for production systems and security from the ground up. Benchmarked across 20,000+ GitHub issues on production codebases.</p>
 
 <a href="https://www.npmjs.com/package/forgedock"><img src="https://img.shields.io/npm/dm/forgedock?label=npm%20downloads&style=flat-square&color=CB3837" alt="npm downloads/month" /></a>&nbsp;
 <a href="https://www.npmjs.com/package/forgedock"><img src="https://img.shields.io/npm/v/forgedock?style=flat-square&color=CB3837" alt="npm version" /></a>&nbsp;
