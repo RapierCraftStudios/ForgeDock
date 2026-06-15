@@ -1459,33 +1459,38 @@ const USE_TRUECOLOR =
 /**
  * Angular F-monogram pixel map — hand-crafted to match the ForgeDock brand mark.
  *
- * The logo is two forward-leaning parallelogram strokes forming an F:
- * - Upper arm: sweeps diagonally from center-left to upper-right
- * - Lower arm: shorter, sweeps from lower-left to center
- * - Vertical stem continues below
+ * Two forward-leaning parallelogram arms forming a stylized italic F:
+ * - Upper arm: wide, sweeps from center-left to upper-right (rows 0-6)
+ * - Notch: triangular gap opening right between the two arms (rows 7-8)
+ * - Lower arm: shorter, same lean angle (rows 9-12)
+ * - Stem: tapers to a point at bottom-left (rows 13-19)
  *
- * 16 columns × 16 rows → 16 wide × 8 terminal rows (half-block pairs).
+ * 18 columns × 20 rows → 18 wide × 10 terminal rows (half-block pairs).
  * 1 = filled pixel, 0 = transparent (uses terminal default background).
  */
 // prettier-ignore
 const LOGO_PIXELS = [
-  //0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5
-  [0,0,0,0,0,0,0,0,1,1,1,1,1,1,1,0],  //  0: tip of upper arm
-  [0,0,0,0,0,0,0,1,1,1,1,1,1,1,1,0],  //  1
-  [0,0,0,0,0,0,1,1,1,1,1,1,1,1,0,0],  //  2
-  [0,0,0,0,0,1,1,1,1,1,1,1,1,0,0,0],  //  3
-  [0,0,0,0,1,1,1,1,1,1,1,1,0,0,0,0],  //  4
-  [0,0,0,1,1,1,1,1,0,0,0,0,0,0,0,0],  //  5: bend to stem
-  [0,0,1,1,1,1,0,0,0,0,0,0,0,0,0,0],  //  6: gap
-  [0,0,1,1,1,0,0,0,0,0,0,0,0,0,0,0],  //  7: stem
-  [0,1,1,1,1,1,1,1,1,1,0,0,0,0,0,0],  //  8: middle arm top
-  [0,1,1,1,1,1,1,1,1,0,0,0,0,0,0,0],  //  9
-  [1,1,1,1,1,1,1,1,0,0,0,0,0,0,0,0],  // 10
-  [1,1,1,1,1,0,0,0,0,0,0,0,0,0,0,0],  // 11: bend back to stem
-  [1,1,1,1,0,0,0,0,0,0,0,0,0,0,0,0],  // 12: stem
-  [1,1,1,0,0,0,0,0,0,0,0,0,0,0,0,0],  // 13
-  [1,1,0,0,0,0,0,0,0,0,0,0,0,0,0,0],  // 14
-  [1,1,0,0,0,0,0,0,0,0,0,0,0,0,0,0],  // 15
+  //0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7
+  [0,0,0,0,0,0,0,1,1,1,1,1,1,1,1,1,1,0],  //  0: upper arm top
+  [0,0,0,0,0,0,1,1,1,1,1,1,1,1,1,1,0,0],  //  1
+  [0,0,0,0,0,1,1,1,1,1,1,1,1,1,1,0,0,0],  //  2
+  [0,0,0,0,1,1,1,1,1,1,1,1,1,1,0,0,0,0],  //  3
+  [0,0,0,1,1,1,1,1,1,1,1,1,1,0,0,0,0,0],  //  4
+  [0,0,1,1,1,1,1,1,1,1,1,1,0,0,0,0,0,0],  //  5
+  [0,0,1,1,1,1,1,1,1,0,0,0,0,0,0,0,0,0],  //  6: upper arm bottom
+  [0,1,1,1,1,0,0,0,0,0,0,0,0,0,0,0,0,0],  //  7: stem only (notch)
+  [0,1,1,1,0,0,0,0,0,0,0,0,0,0,0,0,0,0],  //  8: stem only (notch)
+  [1,1,1,1,1,1,1,1,1,1,1,0,0,0,0,0,0,0],  //  9: lower arm top
+  [1,1,1,1,1,1,1,1,1,1,0,0,0,0,0,0,0,0],  // 10
+  [1,1,1,1,1,1,1,1,0,0,0,0,0,0,0,0,0,0],  // 11
+  [1,1,1,1,1,1,1,0,0,0,0,0,0,0,0,0,0,0],  // 12: lower arm bottom
+  [1,1,1,1,1,0,0,0,0,0,0,0,0,0,0,0,0,0],  // 13: stem
+  [1,1,1,1,0,0,0,0,0,0,0,0,0,0,0,0,0,0],  // 14
+  [1,1,1,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],  // 15
+  [1,1,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],  // 16
+  [1,1,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],  // 17
+  [1,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],  // 18
+  [1,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],  // 19
 ];
 
 /**
@@ -1496,20 +1501,22 @@ const LOGO_PIXELS = [
  */
 const LOGO_GRADIENT = [
   [150, 215, 255],  // rows  0-1: ice blue (highlight)
-  [130, 200, 255],  // rows  2-3
-  [110, 185, 255],  // rows  4-5
-  [88, 166, 255],   // rows  6-7: brand blue
-  [75, 150, 245],   // rows  8-9
-  [60, 130, 230],   // rows 10-11
-  [45, 110, 210],   // rows 12-13
-  [35, 95, 190],    // rows 14-15: deep blue
+  [140, 208, 255],  // rows  2-3
+  [128, 198, 255],  // rows  4-5
+  [115, 185, 255],  // rows  6-7
+  [100, 172, 250],  // rows  8-9: brand blue
+  [85, 158, 240],   // rows 10-11
+  [68, 140, 228],   // rows 12-13
+  [52, 122, 215],   // rows 14-15
+  [40, 108, 200],   // rows 16-17
+  [35, 95, 190],    // rows 18-19: deep blue
 ];
 
 /**
  * Render the F-monogram as half-block art with per-row gradient colors.
  * Uses transparent background (no bg color set — inherits terminal default).
  *
- * @returns {string[]} Array of ANSI-decorated terminal lines (8 lines)
+ * @returns {string[]} Array of ANSI-decorated terminal lines (10 lines)
  */
 function renderLogoArt() {
   const RST = "\x1b[0m";
@@ -1597,7 +1604,7 @@ export function renderLogo({ version = "" } = {}) {
   }
 
   // Truecolor: side-by-side layout — logo on left, text on right
-  const art = renderLogoArt(); // 8 lines, each 16 chars wide (visible)
+  const art = renderLogoArt(); // 10 lines, each 18 chars wide (visible)
   const pad = "  "; // gap between logo and text
 
   // Text lines to appear to the right of the logo (vertically centered)
@@ -1611,17 +1618,19 @@ export function renderLogo({ version = "" } = {}) {
     : "";
   const taglineLine = `\x1b[2m${tagline}\x1b[0m`;
 
-  // Place text starting at row 2 (0-indexed) for vertical centering
-  // art has 8 rows; text block occupies rows 2-5
+  // Place text starting at row 3 (0-indexed) for vertical centering
+  // art has 10 rows; text block occupies rows 3-6
   const textRows = [
     "",           // row 0
     "",           // row 1
-    brandLine,    // row 2: FORGEDOCK
-    versionLine,  // row 3: v1.0.14
-    "",           // row 4
-    taglineLine,  // row 5: tagline
-    "",           // row 6
+    "",           // row 2
+    brandLine,    // row 3: FORGEDOCK
+    versionLine,  // row 4: v1.0.14
+    "",           // row 5
+    taglineLine,  // row 6: tagline
     "",           // row 7
+    "",           // row 8
+    "",           // row 9
   ];
 
   const lines = [""];
