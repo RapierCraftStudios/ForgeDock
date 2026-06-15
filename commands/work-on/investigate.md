@@ -352,8 +352,13 @@ ${INDEX_ENTRY}"
     fi
 
     # Update the Gist
-    echo "$UPDATED_INDEX" | gh gist edit "$INDEX_GIST_ID" -f "$INDEX_FILENAME" - 2>/dev/null
-    if [ $? -eq 0 ]; then
+    # gh gist edit does not support stdin via '-'; use a temp file instead
+    TMPFILE=$(mktemp --suffix=.md)
+    echo "$UPDATED_INDEX" > "$TMPFILE"
+    gh gist edit "$INDEX_GIST_ID" -f "$INDEX_FILENAME" "$TMPFILE" 2>/dev/null
+    EDIT_EXIT=$?
+    rm -f "$TMPFILE"
+    if [ $EDIT_EXIT -eq 0 ]; then
       INDEX_URL="$EXISTING_INDEX_URL"
       echo "Milestone index Gist updated: ${INDEX_URL}"
     else
