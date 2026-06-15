@@ -6,7 +6,7 @@
 
 <p><strong>Give Claude Code a memory that survives every session.</strong></p>
 
-<p>An open-source command suite for Claude Code. Say <code>/work-on #42</code> and it investigates the issue, writes a fix, opens a PR, and reviews it — all with full context from every past session.</p>
+<p>An autonomous development pipeline for Claude Code that uses GitHub issues, PRs, commits, and blame as structured memory — so every agent knows what happened before it, why the code looks the way it does, and what to do next.</p>
 
 <a href="https://www.npmjs.com/package/forgedock"><img src="https://img.shields.io/npm/dm/forgedock?label=npm%20downloads&style=flat-square&color=CB3837" alt="npm downloads/month" /></a>&nbsp;
 <a href="https://www.npmjs.com/package/forgedock"><img src="https://img.shields.io/npm/v/forgedock?style=flat-square&color=CB3837" alt="npm version" /></a>&nbsp;
