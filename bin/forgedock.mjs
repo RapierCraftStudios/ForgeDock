@@ -12,6 +12,7 @@ import {
   unlinkSync,
 } from "fs";
 import { execSync } from "child_process";
+import { homedir } from "os";
 import {
   renderLogo,
   runSteps,
@@ -36,14 +37,11 @@ const __dirname = dirname(__filename);
 const FORGE_HOME = dirname(__dirname);
 const COMMANDS_DIR = join(FORGE_HOME, "commands");
 
-if (!process.env.HOME) {
-  console.error(
-    "Error: HOME environment variable is not set. Cannot determine install location.",
-  );
-  process.exit(1);
-}
+// Resolve home directory cross-platform: HOME on Unix, USERPROFILE on Windows.
+// os.homedir() handles all supported platforms without a hard exit — see #744.
+const HOME = homedir();
 
-const TARGET_DIR = join(process.env.HOME, ".claude", "commands");
+const TARGET_DIR = join(HOME, ".claude", "commands");
 
 const args = process.argv.slice(2);
 const command = args[0] || "install";
@@ -56,7 +54,7 @@ const command = args[0] || "install";
  * Path to the user-level Claude Code settings file.
  * This is where the SessionStart hook entry is written/removed.
  */
-const CLAUDE_SETTINGS_PATH = join(process.env.HOME, ".claude", "settings.json");
+const CLAUDE_SETTINGS_PATH = join(HOME, ".claude", "settings.json");
 
 /**
  * Timeout (in seconds) for the SessionStart hook entry written into
@@ -746,8 +744,8 @@ async function install() {
         // Set FORGE_HOME in shell profiles
         let profileUpdated = false;
         for (const profile of [
-          join(process.env.HOME, ".bashrc"),
-          join(process.env.HOME, ".zshrc"),
+          join(HOME, ".bashrc"),
+          join(HOME, ".zshrc"),
         ]) {
           if (existsSync(profile)) {
             const content = readFileSync(profile, "utf-8");
@@ -926,7 +924,7 @@ async function uninstall() {
 
   // Remove FORGE_HOME export from shell profiles (.bashrc, .zshrc)
   for (const profileName of [".bashrc", ".zshrc"]) {
-    const profilePath = join(process.env.HOME, profileName);
+    const profilePath = join(HOME, profileName);
     const profileResult = removeForgeHomeFromProfile(profilePath);
     if (profileResult === "removed") {
       console.log(
