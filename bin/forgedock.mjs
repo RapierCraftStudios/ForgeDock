@@ -881,9 +881,15 @@ See: https://github.com/RapierCraftStudios/ForgeDock for full documentation.
   }
 
   // 3. Append .gitignore entry only if not already present
+  // Use a line-by-line check that excludes comment lines (starting with #) and blank
+  // lines — String.prototype.includes() would match commented-out entries and
+  // silently skip appending the active rule. <!-- Added: forge#708 -->
   if (existsSync(gitignorePath)) {
     const current = readFileSync(gitignorePath, "utf-8");
-    if (!current.includes(GITIGNORE_ENTRY)) {
+    const activeLines = current
+      .split("\n")
+      .filter((line) => line.trim() !== "" && !line.trim().startsWith("#"));
+    if (!activeLines.some((line) => line.trim() === GITIGNORE_ENTRY.trim())) {
       appendFileSync(
         gitignorePath,
         `\n${GITIGNORE_COMMENT}\n${GITIGNORE_ENTRY}\n`,
