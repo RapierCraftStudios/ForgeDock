@@ -137,6 +137,49 @@ resolve_script() {
 
 When invoking a resolved script, log the tier in the FORGE annotation: `Script tier: {adaptive|universal|prose} ({path})`. This provides full pipeline observability. <!-- Added: forge#670 -->
 
+### 0B.1: Apply learned overrides (MANDATORY — run after 0B, before any routing)
+
+Read `forge.yaml → learned:` and override runtime variables. If the `learned:` key is absent or empty, all steps below are no-ops — continue to 0C.
+
+```bash
+# Read learned section — all reads use // "" fallback so absent keys are silent no-ops
+LEARNED_STAGING=$(yq '.learned.branch_targets.staging // ""' forge.yaml 2>/dev/null || echo '')
+LEARNED_TEST_COMMANDS=$(yq '.learned.test_commands // []' forge.yaml 2>/dev/null || echo '[]')
+LEARNED_LABEL_MAP=$(yq '.learned.label_map // {}' forge.yaml 2>/dev/null || echo '{}')
+LEARNED_COMMIT_STYLE=$(yq '.learned.commit_style // ""' forge.yaml 2>/dev/null || echo '')
+```
+
+**Apply overrides**:
+
+1. **Branch target override** — If `LEARNED_STAGING` is non-empty, replace `STAGING_BRANCH` with its value:
+   ```bash
+   [ -n "$LEARNED_STAGING" ] && STAGING_BRANCH="$LEARNED_STAGING" && \
+     echo "Learned override: STAGING_BRANCH → $STAGING_BRANCH (from learned.branch_targets.staging)"
+   ```
+
+2. **Test commands** — Store `LEARNED_TEST_COMMANDS` for use in Phase 3H (validate). These are appended to the `verification.commands` runs, not replaced:
+   ```bash
+   # Pass LEARNED_TEST_COMMANDS to Phase 3H as additional commands to run after verification.commands
+   # (consumed in 3H — store as env var or carry forward in context)
+   echo "Learned test commands: $LEARNED_TEST_COMMANDS"
+   ```
+
+3. **Label map** — If `LEARNED_LABEL_MAP` is non-empty, apply it before any `gh issue edit --add-label` call. When a canonical label (e.g. `workflow:investigating`) appears as a key in the map, use the mapped value instead:
+   ```bash
+   # Example: if label_map has "workflow:investigating": "needs-triage"
+   # then all subsequent gh issue edit --add-label "workflow:investigating" calls
+   # use "needs-triage" instead. Apply substitution at each label operation site.
+   echo "Label map active: $LEARNED_LABEL_MAP"
+   ```
+
+4. **Commit style** — If `LEARNED_COMMIT_STYLE` is non-empty, use it in Phase 3M:
+   ```bash
+   [ -n "$LEARNED_COMMIT_STYLE" ] && COMMIT_STYLE="$LEARNED_COMMIT_STYLE" && \
+     echo "Learned override: COMMIT_STYLE → $COMMIT_STYLE"
+   ```
+
+<!-- Added: forge#667 — learned section reader -->
+
 ### 0C: Sync to Project board
 Add issue to project, set Status=In Progress, Lane, Component, Priority, Workflow=Investigating.
 
@@ -308,6 +351,70 @@ gh issue comment {NUMBER} {GH_FLAG} --body "<!-- FORGE:INVESTIGATOR -->
 
 <!-- INVESTIGATION:COMPLETE -->"
 ```
+
+### 1D: Correction capture (MANDATORY — run before label update)
+
+Before routing, scan all non-agent comments for correction signals from the repository owner. Correction signals are owner comments that contain phrases like "no, use", "actually use", "use X instead", "not X, use Y", or "wrong branch". If found, write the correction to `forge.yaml → learned:` and emit a `FORGE:LEARNED` annotation.
+
+**Scan for correction signals**:
+```bash
+# Get repo owner login for filtering
+REPO_OWNER=$(yq '.project.owner' forge.yaml 2>/dev/null || echo '')
+
+# Fetch all comments, filter to owner-only, look for correction signals
+CORRECTIONS=$(gh api repos/{GH_REPO}/issues/{NUMBER}/comments \
+  --jq --arg owner "$REPO_OWNER" \
+  '.[] | select(.user.login == $owner) | select(
+    (.body | test("no,? use|actually use|use .+ instead|not .+, use|wrong branch"; "i"))
+  ) | .body' 2>/dev/null || echo '')
+```
+
+**If correction signals found** — extract and write each correction:
+
+```bash
+# Example: extract branch target correction "use develop not staging"
+# Adjust regex to the correction pattern detected
+
+if [ -n "$CORRECTIONS" ]; then
+  echo "Correction signals detected — writing to forge.yaml → learned:"
+  echo "$CORRECTIONS"
+
+  # Write to forge.yaml using yq in-place merge (idempotent — yq merge overwrites existing keys)
+  # Always use env variable injection to avoid YAML injection from comment content
+  # Example for branch target correction:
+  #   BRANCH_VALUE="develop"
+  #   yq eval '.learned.branch_targets.staging = env(BRANCH_VALUE)' -i forge.yaml
+
+  # After writing, emit FORGE:LEARNED annotation
+  LEARNED_KEYS="branch_targets.staging"  # replace with actual extracted keys
+  CAPTURED_AT=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+
+  # Update captured_at and captured_by metadata
+  CAPTURED_AT_VAL="$CAPTURED_AT" yq eval '.learned.captured_at = env(CAPTURED_AT_VAL)' -i forge.yaml
+  CAPTURED_BY_VAL="work-on/{NUMBER}" yq eval '.learned.captured_by = env(CAPTURED_BY_VAL)' -i forge.yaml
+
+  gh issue comment {NUMBER} {GH_FLAG} --body "<!-- FORGE:LEARNED -->
+## Learned Pattern Captured
+
+**Source**: Owner correction in comment on issue #{NUMBER}
+**Captured at**: $CAPTURED_AT
+**Keys written**: \`$LEARNED_KEYS\`
+
+The following project-specific pattern was detected from owner feedback and written to \`forge.yaml → learned:\`. Future sessions will use this override automatically (read in Phase 0B.1).
+
+\`\`\`yaml
+# Written to forge.yaml
+learned:
+  # {key}: {value}
+\`\`\`
+
+**Idempotency**: yq merge-write — re-running will not duplicate entries."
+
+  echo "FORGE:LEARNED annotation posted."
+fi
+```
+
+**Idempotency guarantee**: Use `yq eval '.learned.key = env(VAR)' -i forge.yaml` — yq overwrites existing keys rather than appending. Re-running the capture step on the same comment produces the same forge.yaml state. <!-- Added: forge#667 -->
 
 ### 1D: Update labels & route
 
@@ -829,6 +936,30 @@ else
 fi
 ```
 Typecheck or build failures are BLOCKING.
+
+**Learned test commands** — After all `verification.commands` steps complete, run any commands from `learned.test_commands` (captured from owner corrections in Phase 1D or set manually in forge.yaml):
+
+```bash
+# LEARNED_TEST_COMMANDS was set in Phase 0B.1 from forge.yaml → learned.test_commands
+# If empty/null, this block is a no-op
+if [ -n "$LEARNED_TEST_COMMANDS" ] && [ "$LEARNED_TEST_COMMANDS" != "[]" ]; then
+  echo "Running learned test commands..."
+  # yq outputs each entry on its own line with -r flag
+  echo "$LEARNED_TEST_COMMANDS" | yq '.[]' | while IFS= read -r cmd; do
+    [ -z "$cmd" ] && continue
+    echo "Running learned command: $cmd"
+    eval "$cmd" 2>&1 | tail -30
+    CMD_EXIT=$?
+    if [ $CMD_EXIT -ne 0 ]; then
+      echo "FAILED (exit $CMD_EXIT): $cmd"
+      exit $CMD_EXIT
+    fi
+  done
+else
+  echo "No learned test commands configured — skipping"
+fi
+```
+Learned test command failures are BLOCKING (same as verification.commands failures). <!-- Added: forge#667 -->
 
 ### 3I: Frontend proxy wiring check (MANDATORY)
 

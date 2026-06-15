@@ -448,7 +448,7 @@ async function detectAndBuildForgeYaml(cwd, opts = {}) {
 # Edit this file with your project details.
 #
 # Required sections: project, paths, branches
-# Optional sections: repos, project_board, services, review, verification
+# Optional sections: repos, project_board, services, review, verification, learned
 #
 # See docs/CONFIG.md for full reference.
 
@@ -530,6 +530,17 @@ branches:
 #   health_endpoint: "https://api.${repo}.io/health"
 #   health_patterns:
 #     - '"status": "ok"'
+
+# =============================================================================
+# LEARNED (OPTIONAL)
+# Agent-writable section for project-specific patterns captured across sessions.
+# Pipeline agents read this section at startup (Phase 0B) and write to it when
+# they detect correction signals in owner comments (Phase 1D).
+# You can also edit this section manually.
+# See forge.yaml.example for the full schema with all supported keys.
+# =============================================================================
+
+learned: {}
 `;
 
   try {
