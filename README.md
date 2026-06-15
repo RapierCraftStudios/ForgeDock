@@ -95,7 +95,7 @@ The context phase surfaced two historical bugs (#577, #587) in the same module â
 
 ## Install
 
-**Requirements:** [Node.js 18+](https://nodejs.org/) and [Claude Code](https://docs.anthropic.com/en/docs/claude-code)
+**Requirements:** [Node.js 18+](https://nodejs.org/), [Claude Code](https://docs.anthropic.com/en/docs/claude-code), [GitHub CLI (`gh`)](https://cli.github.com/), and [`yq`](https://github.com/mikefarah/yq) (YAML parser used by pipeline commands to read `forge.yaml`)
 
 ```bash
 # Install pipeline commands
