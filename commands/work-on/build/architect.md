@@ -191,15 +191,18 @@ if [ -n "$DEVDOCS_PATH" ] && [ -f "$INDEX_PATH" ]; then
   for label in $ISSUE_LABELS; do
     KEYWORD=$(echo "$label" | sed 's/^workflow://; s/^priority://; s/^review-finding$//')
     [ -z "$KEYWORD" ] && continue
+    # Sanitize KEYWORD before AWK injection — strip chars that would break awk regex delimiters
+    SAFE_KEYWORD=$(printf '%s' "$KEYWORD" | tr -cd 'a-zA-Z0-9_-')
+    [ -z "$SAFE_KEYWORD" ] && continue
 
     BLOCK_PATHS=$(echo "$INDEX_CONTENT" \
-      | awk "/^  ${KEYWORD}:/{found=1; next} found && /^  [a-z]/{found=0} found && /^\s*-\s*path:/{print}" \
+      | awk "/^  ${SAFE_KEYWORD}:/{found=1; next} found && /^  [a-z]/{found=0} found && /^\s*-\s*path:/{print}" \
       | sed 's/.*path:\s*//' \
       | tr -d '"'"'"' \
       | tr -d '[:space:]')
 
     if [ -n "$BLOCK_PATHS" ]; then
-      echo "Domain '${KEYWORD}' matched — adding docs: $(echo "$BLOCK_PATHS" | tr '\n' ' ')"
+      echo "Domain '${SAFE_KEYWORD}' matched — adding docs: $(echo "$BLOCK_PATHS" | tr '\n' ' ')"
       DOMAIN_PATHS="${DOMAIN_PATHS}${BLOCK_PATHS}"$'\n'
     fi
   done
