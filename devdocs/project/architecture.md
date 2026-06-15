@@ -109,8 +109,10 @@ Proposed (deterministic):
 | Branch name determination | ~350 tokens (gh + LLM inference) | ~170 tokens (branch-targets.sh) | ~180 |
 | Commit style detection | ~200 tokens (git log + LLM) | ~100 tokens (format-commit.sh) | ~100 |
 | Test command discovery | ~400 tokens (package.json + grep) | ~80 tokens (run-tests.sh) | ~320 |
-| Test location + label discovery | ~550 tokens | ~0 (handled by scripts above) | ~550 |
+| Test location + label discovery | ~550 tokens | ~0 discovery¹ | ~550 |
 | **Session total** | **~2,550 tokens** | **~450 tokens** | **~2,100 tokens** |
+
+¹ The prose-discovery calls for test locations and label schemes are eliminated (replaced by `find-tests.sh` and `label-map.sh`). Script execution costs (~80–100 tokens each) are already included in the ~450 session total above — they are not additive.
 
 Savings range: 1,200 tokens (simple fast-lane issues) to 3,500 tokens (complex multi-file builds).
 At claude-sonnet-4-5 pricing ($3.00/M tokens): ~$0.0063/session saved, ~$1.89/month per repo at 300 sessions/month.
