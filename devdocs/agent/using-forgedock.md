@@ -217,8 +217,8 @@ project:
   repo: "forgedock"
 
 paths:
-  root: "/home/mrdubey/projects/forgedock"
-  worktree_base: "/home/mrdubey/projects/forgedock/.claude/worktrees"
+  root: "/path/to/your/project"
+  worktree_base: "/path/to/your/project/.claude/worktrees"
 
 branches:
   default: "main"
