@@ -33,6 +33,7 @@
   },
   "files": [
     "bin/",
+    "!bin/tests/",
     "commands/",
     "docs/",
     "scripts/",
