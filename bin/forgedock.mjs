@@ -2,7 +2,7 @@
 
 import { fileURLToPath } from "url";
 import { dirname, join, relative } from "path";
-import { mkdir, readlink, lstat, readdir, stat, writeFile, unlink as unlinkAsync } from "fs/promises";
+import { mkdir, readlink, lstat, readdir, stat, writeFile, unlink as unlinkAsync, rename } from "fs/promises";
 import {
   existsSync,
   appendFileSync,
@@ -703,7 +703,6 @@ async function install() {
 
       if (stats.isSymbolicLink()) {
         // Legacy symlink install — upgrade to stub file
-        const { rename } = await import("fs/promises");
         const tmpPath = target + ".forgedock.tmp";
         await writeFile(tmpPath, stubContent, "utf-8");
         await rename(tmpPath, target);
@@ -723,7 +722,6 @@ async function install() {
           if (existing === stubContent) {
             skipped++;
           } else {
-            const { rename } = await import("fs/promises");
             const tmpPath = target + ".forgedock.tmp";
             await writeFile(tmpPath, stubContent, "utf-8");
             await rename(tmpPath, target);
