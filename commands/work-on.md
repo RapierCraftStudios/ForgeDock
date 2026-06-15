@@ -404,8 +404,23 @@ Before routing, scan all non-agent comments for correction signals from the repo
 
 **Scan for correction signals**:
 ```bash
-# Get repo owner login for filtering
-REPO_OWNER=$(yq '.project.owner' forge.yaml 2>/dev/null || echo '')
+# Get repo owner login for filtering.
+# Tiered resolution — necessary because project.owner is the GitHub org/user NAME,
+# but comment .user.login is always a personal account login. For org-owned repos
+# these are structurally different (e.g. org="RapierCraftStudios", commenter="mrdubey"),
+# so using project.owner directly silently disables correction capture for all org repos.
+#
+# Resolution order:
+#   1. project.owner_login (explicit override — required for org repos where owner ≠ personal login)
+#   2. gh api repos/{GH_REPO} --jq '.owner.login' (auto-resolves correctly for personal repos)
+#   3. project.owner (backward-compat fallback — still broken for org repos, but avoids hard failure)
+REPO_OWNER=$(yq '.project.owner_login // ""' forge.yaml 2>/dev/null || echo '')
+if [ -z "$REPO_OWNER" ]; then
+  REPO_OWNER=$(gh api repos/{GH_REPO} --jq '.owner.login' 2>/dev/null || echo '')
+fi
+if [ -z "$REPO_OWNER" ]; then
+  REPO_OWNER=$(yq '.project.owner' forge.yaml 2>/dev/null || echo '')
+fi
 
 # Fetch all comments, filter to owner-only, look for correction signals
 CORRECTIONS=$(gh api repos/{GH_REPO}/issues/{NUMBER}/comments \
