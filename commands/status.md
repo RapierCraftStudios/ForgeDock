@@ -25,14 +25,22 @@ STAGING_BRANCH=$(yq '.branches.staging' "$CONFIG_FILE")
 
 # Optional: --repo flag overrides the default repo
 if echo "$ARGUMENTS" | grep -q -- "--repo"; then
-    GH_REPO=$(echo "$ARGUMENTS" | sed 's/.*--repo[[:space:]]\([^[:space:]]*\).*/\1/')
-    GH_FLAG="-R $GH_REPO"
+    _REPO_VAL=$(echo "$ARGUMENTS" | sed -n 's/.*--repo[[:space:]]\([^[:space:]]*\).*/\1/p' | head -1)
+    # Guard: if sed returned nothing or a flag (no value provided), keep default
+    if [ -n "$_REPO_VAL" ] && [ "${_REPO_VAL#--}" = "$_REPO_VAL" ]; then
+        GH_REPO="$_REPO_VAL"
+        GH_FLAG="-R $GH_REPO"
+    fi
 fi
 
 # Optional: --stale-days flag (default: 7)
 STALE_DAYS=7
 if echo "$ARGUMENTS" | grep -q -- "--stale-days"; then
-    STALE_DAYS=$(echo "$ARGUMENTS" | sed 's/.*--stale-days[[:space:]]\([^[:space:]]*\).*/\1/')
+    _DAYS_VAL=$(echo "$ARGUMENTS" | sed -n 's/.*--stale-days[[:space:]]\([^[:space:]]*\).*/\1/p' | head -1)
+    # Guard: if sed returned nothing or a flag (no value provided), keep default 7
+    if [ -n "$_DAYS_VAL" ] && [ "${_DAYS_VAL#--}" = "$_DAYS_VAL" ]; then
+        STALE_DAYS="$_DAYS_VAL"
+    fi
 fi
 
 STALE_THRESHOLD=$(date -d "${STALE_DAYS} days ago" +%Y-%m-%dT%H:%M:%SZ 2>/dev/null \
