@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 
-import { fileURLToPath } from "url";
-import { dirname, join, relative } from "path";
+import { fileURLToPath, pathToFileURL } from "url";
+import { dirname, join, relative, resolve } from "path";
 import { mkdir, symlink, readlink, lstat, readdir, stat } from "fs/promises";
 import {
   existsSync,
@@ -1174,6 +1174,151 @@ branches:
   }
 }
 
+/**
+ * Mark a directory as ForgeDock-managed by removing it from the opt-out
+ * registry and creating a .forgedock marker file.
+ *
+ * @param {string} [dir] - Directory to enable (default: process.cwd()).
+ */
+async function enable(dir) {
+  const targetDir = resolve(dir || process.cwd());
+
+  let setOptOut;
+  try {
+    ({ setOptOut } = await import(
+      pathToFileURL(join(FORGE_HOME, "bin", "registry.mjs")).href
+    ));
+  } catch (err) {
+    console.error(`${RED}Error: could not load registry module: ${err.message}${RESET}`);
+    process.exit(1);
+  }
+
+  // Remove from opt-out registry
+  try {
+    await setOptOut(targetDir, false);
+  } catch (err) {
+    console.error(`${RED}Error updating registry: ${err.message}${RESET}`);
+    process.exit(1);
+  }
+
+  // Create .forgedock marker file so the directory is treated as managed
+  // even without a forge.yaml (user can run `npx forgedock init` next)
+  const markerPath = join(targetDir, ".forgedock");
+  if (!existsSync(markerPath)) {
+    try {
+      writeFileSync(markerPath, "", "utf-8");
+      console.log(`  ${GREEN}Created${RESET}: .forgedock marker in ${targetDir}`);
+    } catch (err) {
+      console.log(`  ${YELLOW}Warning${RESET}: could not create .forgedock marker: ${err.message}`);
+    }
+  } else {
+    console.log(`  ✔  .forgedock marker already present in ${targetDir}`);
+  }
+
+  console.log(`  ${GREEN}✔${RESET}  ForgeDock ${GREEN}enabled${RESET} in: ${CYAN}${targetDir}${RESET}`);
+  console.log(`     Removed from opt-out registry. Run ${CYAN}npx forgedock init${RESET} to generate forge.yaml.`);
+  console.log("");
+}
+
+/**
+ * Opt a directory out of ForgeDock by adding it to the opt-out registry.
+ * The session-start hook will be silent for this directory in future sessions.
+ *
+ * @param {string} [dir] - Directory to disable (default: process.cwd()).
+ */
+async function disable(dir) {
+  const targetDir = resolve(dir || process.cwd());
+
+  let setOptOut;
+  try {
+    ({ setOptOut } = await import(
+      pathToFileURL(join(FORGE_HOME, "bin", "registry.mjs")).href
+    ));
+  } catch (err) {
+    console.error(`${RED}Error: could not load registry module: ${err.message}${RESET}`);
+    process.exit(1);
+  }
+
+  try {
+    await setOptOut(targetDir, true);
+  } catch (err) {
+    console.error(`${RED}Error updating registry: ${err.message}${RESET}`);
+    process.exit(1);
+  }
+
+  console.log(`  ${GREEN}✔${RESET}  ForgeDock ${YELLOW}disabled${RESET} in: ${CYAN}${targetDir}${RESET}`);
+  console.log(`     Added to opt-out registry. The session-start hook will be silent here.`);
+  console.log(`     To re-enable: ${CYAN}npx forgedock enable${RESET}`);
+  console.log("");
+}
+
+/**
+ * Show the resolved ForgeDock state for a directory.
+ * Prints human-readable state (managed-active, managed-optedout, unmanaged)
+ * with relevant detail about what markers or registry entries were found.
+ *
+ * @param {string} [dir] - Directory to inspect (default: process.cwd()).
+ */
+async function status(dir) {
+  const targetDir = resolve(dir || process.cwd());
+
+  let resolveState;
+  try {
+    ({ resolveState } = await import(
+      pathToFileURL(join(FORGE_HOME, "bin", "registry.mjs")).href
+    ));
+  } catch (err) {
+    console.error(`${RED}Error: could not load registry module: ${err.message}${RESET}`);
+    process.exit(1);
+  }
+
+  let state;
+  try {
+    state = resolveState(targetDir);
+  } catch (err) {
+    console.error(`${RED}Error resolving state: ${err.message}${RESET}`);
+    process.exit(1);
+  }
+
+  const hasForgeYaml = existsSync(join(targetDir, "forge.yaml"));
+  const hasMarker = existsSync(join(targetDir, ".forgedock"));
+
+  console.log("");
+  console.log(`${BOLD}ForgeDock Status${RESET}`);
+  console.log(`  Directory: ${CYAN}${targetDir}${RESET}`);
+  console.log("");
+
+  switch (state) {
+    case "managed-active":
+      console.log(`  State: ${GREEN}managed-active${RESET}`);
+      console.log(`  ForgeDock is active in this directory.`);
+      if (hasForgeYaml) console.log(`  ${GREEN}✔${RESET}  forge.yaml found`);
+      if (hasMarker)    console.log(`  ${GREEN}✔${RESET}  .forgedock marker found`);
+      console.log(`  The session-start hook will inject context on session start.`);
+      console.log(`  To disable: ${CYAN}npx forgedock disable${RESET}`);
+      break;
+
+    case "managed-optedout":
+      console.log(`  State: ${YELLOW}managed-optedout${RESET}`);
+      console.log(`  ForgeDock is installed but opted out for this directory.`);
+      if (hasForgeYaml) console.log(`  ${GREEN}✔${RESET}  forge.yaml found`);
+      if (hasMarker)    console.log(`  ${GREEN}✔${RESET}  .forgedock marker found`);
+      console.log(`  The session-start hook is silent here (opt-out registry entry present).`);
+      console.log(`  To re-enable: ${CYAN}npx forgedock enable${RESET}`);
+      break;
+
+    case "unmanaged":
+    default:
+      console.log(`  State: ${RED}unmanaged${RESET}`);
+      console.log(`  ForgeDock is not active in this directory.`);
+      console.log(`  No forge.yaml or .forgedock marker found.`);
+      console.log(`  To enable: ${CYAN}npx forgedock enable${RESET}`);
+      console.log(`  To set up:  ${CYAN}npx forgedock init${RESET}`);
+      break;
+  }
+  console.log("");
+}
+
 function help() {
   console.log("");
   console.log(
@@ -1192,6 +1337,9 @@ function help() {
   console.log(
     `  ${CYAN}npx forgedock update${RESET}     Pull latest & reinstall`,
   );
+  console.log(`  ${CYAN}npx forgedock enable [dir]${RESET}  Mark directory as ForgeDock-managed`);
+  console.log(`  ${CYAN}npx forgedock disable [dir]${RESET} Opt directory out of ForgeDock`);
+  console.log(`  ${CYAN}npx forgedock status [dir]${RESET}  Show resolved state for a directory`);
   console.log(`  ${CYAN}npx forgedock help${RESET}       Show this help`);
   console.log("");
 }
@@ -1208,6 +1356,15 @@ switch (command) {
     break;
   case "update":
     await update();
+    break;
+  case "enable":
+    await enable(args[1]);
+    break;
+  case "disable":
+    await disable(args[1]);
+    break;
+  case "status":
+    await status(args[1]);
     break;
   case "help":
   case "--help":
