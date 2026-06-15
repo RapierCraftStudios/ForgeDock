@@ -11,6 +11,23 @@ argument-hint: [issue number] [affected_files...] [--functions function_names...
 
 ---
 
+## COMPLEXITY_BAND Guard (check BEFORE all phases)
+
+Read COMPLEXITY_BAND from the `<!-- FORGE:FAST_PATH -->` comment on the issue:
+
+```bash
+COMPLEXITY_BAND=$(gh api repos/{GH_REPO}/issues/{NUMBER}/comments \
+  --jq '.[] | select(.body | contains("FORGE:FAST_PATH")) | .body' 2>/dev/null \
+  | grep -oP '(?<=\*\*COMPLEXITY_BAND\*\*: )\w+' | head -1)
+COMPLEXITY_BAND="${COMPLEXITY_BAND:-STANDARD}"
+```
+
+**If COMPLEXITY_BAND: TRIVIAL** → skip all phases (C-1 through C4), post NO comment, return empty briefing to caller immediately. Do not query GitHub, do not read files. This is not an error — trivial single-file changes have no institutional memory to surface. <!-- Added: forge#679 -->
+
+**If COMPLEXITY_BAND: STANDARD or COMPLEX** → proceed to Phase C-1 below.
+
+---
+
 ## Mission
 
 Surface what went wrong in this area before the builder writes a single line of code. The builder starts with the investigator report and contract — this step adds institutional memory: what did review agents catch last time someone touched these files, what bugs recurred, what other paths must stay consistent. When prior investigation Gists are linked in the issue body, fetch and summarize them so the builder has cross-issue context without manual lookups. When a milestone-level index Gist exists, use it to discover all investigation Gists for the milestone — providing full cross-issue context from a single URL. <!-- Updated: forge#341 -->
@@ -538,6 +555,7 @@ gh issue comment {NUMBER} -R {GH_REPO} --body "<!-- FORGE:CONTEXT -->
 ## Skip Conditions
 
 Skip this entire step (post nothing, return empty briefing) if:
+- **COMPLEXITY_BAND: TRIVIAL** — checked via FORGE:FAST_PATH comment at entry (see guard above) <!-- Primary skip path: forge#679 -->
 - Issue is a 1-file config or docs edit with no code logic
 - The affected files have zero git history (new files being created)
 - `{AFFECTED_FILES}` is empty (investigation produced no file list)

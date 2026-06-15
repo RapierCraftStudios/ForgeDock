@@ -11,6 +11,23 @@ argument-hint: [issue number] [--repo GH_REPO] [--gh-flag GH_FLAG] [--files AFFE
 
 ---
 
+## COMPLEXITY_BAND Guard (check BEFORE all phases)
+
+Read COMPLEXITY_BAND from the `<!-- FORGE:FAST_PATH -->` comment on the issue:
+
+```bash
+COMPLEXITY_BAND=$(gh api repos/{GH_REPO}/issues/{NUMBER}/comments \
+  --jq '.[] | select(.body | contains("FORGE:FAST_PATH")) | .body' 2>/dev/null \
+  | grep -oP '(?<=\*\*COMPLEXITY_BAND\*\*: )\w+' | head -1)
+COMPLEXITY_BAND="${COMPLEXITY_BAND:-STANDARD}"
+```
+
+**If COMPLEXITY_BAND: TRIVIAL** → skip all phases (A0 through A5), post NO comment, return empty plan to caller immediately. Do not read any files. This is not an error — trivial single-file changes have no cross-path consistency risk. <!-- Added: forge#679 -->
+
+**If COMPLEXITY_BAND: STANDARD or COMPLEX** → proceed to Phase A0 below.
+
+---
+
 ## Mission
 
 Eliminate cross-path inconsistency bugs before any code is written. The single biggest class of production bugs is a change applied to one code path but not all sibling paths that share the same logic. This agent traces the FULL request/data flow from every entry point, identifies every file that must change, and produces an ordered implementation plan the builder follows exactly.
@@ -498,6 +515,7 @@ gh issue comment {NUMBER} {GH_FLAG} --body "<!-- FORGE:ARCHITECT -->
 ## Skip Conditions
 
 Skip this entire step (post nothing, return empty plan to caller) if:
+- **COMPLEXITY_BAND: TRIVIAL** — checked via FORGE:FAST_PATH comment at entry (see guard above) <!-- Primary skip path: forge#679 -->
 - Issue creates only **new files** with no callers to find (e.g. a new command file with no existing integration point yet)
 - Issue is a 1-file config or docs edit with no code logic
 - Issue title starts with "docs:" or "chore:"
