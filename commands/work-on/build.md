@@ -229,8 +229,17 @@ Skill("work-on:build:validate", args="{NUMBER} --repo {GH_REPO} --gh-flag {GH_FL
 Where `{CHANGED_FILES}` is the space-separated list of files changed by the implement subcommand (read from `IMPLEMENT_RESULT` or from the `<!-- FORGE:BUILDER -->` comment).
 
 **After subcommand returns**:
-- `VALIDATE_RESULT: gate_passed: true` → build complete, return `BUILD_RESULT: status: COMPLETE`
+- `VALIDATE_RESULT: gate_passed: true` → write checkpoint, then return `BUILD_RESULT: status: COMPLETE`
 - `VALIDATE_RESULT: gate_passed: false` → subcommand has already posted comment and added `needs-human` label; return `BUILD_RESULT: status: BLOCKED`
+
+**When gate_passed is true — write machine-readable phase checkpoint before returning (MANDATORY)**:
+```bash
+CHECKPOINT_TIMESTAMP=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+gh issue comment {NUMBER} {GH_FLAG} --body "<!-- FORGE:CHECKPOINT -->
+\`\`\`json
+{\"phase\": \"BUILD\", \"status\": \"COMPLETE\", \"next_phase\": \"REVIEW\", \"timestamp\": \"${CHECKPOINT_TIMESTAMP}\"}
+\`\`\`"
+```
 
 ---
 
