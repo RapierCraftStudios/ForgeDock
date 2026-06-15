@@ -107,6 +107,34 @@ gh api repos/{GH_REPO}/issues/{NUMBER}/comments --jq '.[] | {id: .id, author: .u
 
 **Determine resume point**: No comments → Phase 1. Investigation exists + ready-to-build → Phase 3. Builder + no PR → Phase 4. Builder + PR open → Phase 5. PR merged + issue open → Phase 6.
 
+### 0B.5: Read Phase Checkpoint (MANDATORY — executes before any phase-skip decision)
+
+Query for the latest `<!-- FORGE:CHECKPOINT -->` comment. This is the machine-readable source of truth for the pipeline's current phase position — it takes priority over all prose-based resume heuristics above.
+
+```bash
+CHECKPOINT=$(gh api repos/{GH_REPO}/issues/{NUMBER}/comments \
+  --jq '[.[] | select(.body | contains("FORGE:CHECKPOINT"))] | last | .body // ""')
+
+if [ -n "$CHECKPOINT" ]; then
+  # Extract next_phase from the JSON block inside the comment
+  NEXT_PHASE=$(echo "$CHECKPOINT" | grep -A5 '```json' | grep '"next_phase"' \
+    | grep -oP '(?<="next_phase": ")[^"]+')
+  echo "Checkpoint found: next_phase=${NEXT_PHASE}"
+fi
+```
+
+**Routing from checkpoint** (overrides prose heuristics above when a checkpoint exists):
+
+| `next_phase` value | Resume at |
+|--------------------|-----------|
+| `BUILD` | Phase 3 (skip Phase 1 investigation) |
+| `DECOMPOSE` | Phase 2 (skip Phase 1 investigation) |
+| `REVIEW` | Phase 4 (skip Phase 1–3) |
+| `CLOSE` | Phase 6 (skip Phase 1–5) |
+| *(absent or unrecognized)* | Fall back to prose heuristics above |
+
+**If no checkpoint exists**: fall back to prose resume heuristics in Phase 0B above — treat as fresh start at Phase 1.
+
 **Classify lane**: Milestone → feature lane (`milestone/{slug}`). No milestone → fast lane (`staging`).
 
 **Source branch for review-findings**: Parse `**Code branch**: \`{branch}\`` from body. Branch from there, not main.
@@ -315,12 +343,30 @@ gh issue comment {NUMBER} {GH_FLAG} --body "<!-- FORGE:INVESTIGATOR -->
 ```bash
 bash scripts/transition-label.sh {NUMBER} {GH_FLAG} ready-to-build
 ```
+
+Write machine-readable phase checkpoint (MUST execute immediately after label transition, before continuing):
+```bash
+CHECKPOINT_TIMESTAMP=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+gh issue comment {NUMBER} {GH_FLAG} --body "<!-- FORGE:CHECKPOINT -->
+\`\`\`json
+{\"phase\": \"INVESTIGATION\", \"status\": \"COMPLETE\", \"next_phase\": \"BUILD\", \"timestamp\": \"${CHECKPOINT_TIMESTAMP}\"}
+\`\`\`"
+```
 <!-- FORGE:PHASE_COMPLETE — Investigation routed to build. See Universal Phase Dispatcher: next phase is Phase 3. Not terminal — continue immediately. -->
 → Continue to Phase 3.
 
 **CONFIRMED or PARTIAL with decompose: YES**:
 ```bash
 bash scripts/transition-label.sh {NUMBER} {GH_FLAG} decomposed
+```
+
+Write machine-readable phase checkpoint (MUST execute immediately after label transition, before continuing):
+```bash
+CHECKPOINT_TIMESTAMP=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+gh issue comment {NUMBER} {GH_FLAG} --body "<!-- FORGE:CHECKPOINT -->
+\`\`\`json
+{\"phase\": \"INVESTIGATION\", \"status\": \"COMPLETE\", \"next_phase\": \"DECOMPOSE\", \"timestamp\": \"${CHECKPOINT_TIMESTAMP}\"}
+\`\`\`"
 ```
 <!-- FORGE:PHASE_COMPLETE — Investigation routed to decomposition. See Universal Phase Dispatcher: next phase is Phase 2. Not terminal — continue immediately. -->
 → Continue to Phase 2 (Decomposition).
@@ -330,7 +376,7 @@ bash scripts/transition-label.sh {NUMBER} {GH_FLAG} decomposed
 bash scripts/transition-label.sh {NUMBER} {GH_FLAG} invalid
 gh issue close {NUMBER} {GH_FLAG} --comment "Closing as invalid: {reason from investigation}"
 ```
-→ STOP.
+→ STOP. No checkpoint written — INVALID is terminal.
 
 ---
 
@@ -964,6 +1010,15 @@ gh issue comment {NUMBER} {GH_FLAG} --body "<!-- FORGE:BUILDER -->
 <!-- FORGE:BUILDER:COMPLETE -->"
 ```
 
+Write machine-readable phase checkpoint (MUST execute immediately after FORGE:BUILDER comment is posted, before Phase 4):
+```bash
+CHECKPOINT_TIMESTAMP=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+gh issue comment {NUMBER} {GH_FLAG} --body "<!-- FORGE:CHECKPOINT -->
+\`\`\`json
+{\"phase\": \"BUILD\", \"status\": \"COMPLETE\", \"next_phase\": \"REVIEW\", \"timestamp\": \"${CHECKPOINT_TIMESTAMP}\"}
+\`\`\`"
+```
+
 ---
 
 ## Phase 4: PR Creation
@@ -1080,9 +1135,18 @@ gh pr view {PR_NUMBER} {GH_FLAG} --json state,mergedAt --jq '{state: .state, mer
 gh issue view {NUMBER} {GH_FLAG} --json state --jq '.state'
 ```
 
-- PR MERGED + issue CLOSED → proceed to Phase 6
-- PR MERGED + issue OPEN → close issue manually
+- PR MERGED + issue CLOSED → write checkpoint, then proceed to Phase 6
+- PR MERGED + issue OPEN → close issue manually, write checkpoint, proceed to Phase 6
 - PR NOT MERGED → `gh pr merge {PR_NUMBER} {GH_FLAG} --merge --auto`. If fails → post comment, add `needs-human`, STOP.
+
+**When PR is MERGED — write machine-readable phase checkpoint (MANDATORY)**:
+```bash
+CHECKPOINT_TIMESTAMP=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+gh issue comment {NUMBER} {GH_FLAG} --body "<!-- FORGE:CHECKPOINT -->
+\`\`\`json
+{\"phase\": \"REVIEW\", \"status\": \"COMPLETE\", \"next_phase\": \"CLOSE\", \"timestamp\": \"${CHECKPOINT_TIMESTAMP}\"}
+\`\`\`"
+```
 
 <!-- FORGE:PHASE_COMPLETE — Review done, PR merged. See Universal Phase Dispatcher: next phase is Phase 6 (Close & Cleanup). Not terminal — continue immediately. -->
 
