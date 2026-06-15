@@ -1347,19 +1347,17 @@ export async function runSteps(steps, opts = {}) {
 
       drawActive();
 
-      // Move back to bottom
-      // rowsFromBottom - 1 rows below the current row i
-      const rowsBelow = rowsFromBottom - 1;
-      if (rowsBelow > 0) stream.write(`\x1b[${rowsBelow}B`);
+      // Move back to bottom (the empty line AFTER the last step row).
+      // drawActive() leaves the cursor on row i with no trailing newline,
+      // so we need rowsFromBottom (not -1) to reach the line below row count-1.
+      if (rowsFromBottom > 0) stream.write(`\x1b[${rowsFromBottom}B`);
       cursorAtBottom = true;
 
       // Spinner interval updates row i in-place
       const timer = setInterval(() => {
-        const savedCursorAtBottom = cursorAtBottom;
         cursorUp(rowsFromBottom);
         drawActive();
-        if (rowsBelow > 0) stream.write(`\x1b[${rowsBelow}B`);
-        cursorAtBottom = savedCursorAtBottom;
+        if (rowsFromBottom > 0) stream.write(`\x1b[${rowsFromBottom}B`);
       }, spinnerInterval);
       timer.unref();
 
@@ -1407,8 +1405,9 @@ export async function runSteps(steps, opts = {}) {
       cursorAtBottom = false;
       overwriteRow(i);
       stream.write("\n");
-      // Move down to bottom (rowsBelow rows remaining after the newline)
-      if (rowsBelow > 0) stream.write(`\x1b[${rowsBelow}B`);
+      // After the \n, cursor is on row i+1. Distance to bottom = rowsFromBottom - 1.
+      const rowsBelowAfterNl = rowsFromBottom - 1;
+      if (rowsBelowAfterNl > 0) stream.write(`\x1b[${rowsBelowAfterNl}B`);
       cursorAtBottom = true;
 
       if (stepError) {
@@ -1426,11 +1425,11 @@ export async function runSteps(steps, opts = {}) {
 
   if (result) {
     // Failed
-    stream.write(`${red("✖")} ${dim("Failed in")} ${elapsed}\n`);
+    stream.write(`\r\x1b[K${red("✖")} ${dim("Failed in")} ${elapsed}\n`);
     return result;
   }
 
-  stream.write(`${green("✔")} ${dim("Done in")} ${elapsed}\n`);
+  stream.write(`\r\x1b[K${green("✔")} ${dim("Done in")} ${elapsed}\n`);
   return { ok: true, elapsed: Date.now() - t0 };
 }
 
