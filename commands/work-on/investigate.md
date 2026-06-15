@@ -352,8 +352,13 @@ ${INDEX_ENTRY}"
     fi
 
     # Update the Gist
-    echo "$UPDATED_INDEX" | gh gist edit "$INDEX_GIST_ID" -f "$INDEX_FILENAME" - 2>/dev/null
-    if [ $? -eq 0 ]; then
+    # gh gist edit does not support stdin via '-'; use a temp file instead
+    TMPFILE=$(mktemp --suffix=.md)
+    echo "$UPDATED_INDEX" > "$TMPFILE"
+    gh gist edit "$INDEX_GIST_ID" -f "$INDEX_FILENAME" "$TMPFILE" 2>/dev/null
+    EDIT_EXIT=$?
+    rm -f "$TMPFILE"
+    if [ $EDIT_EXIT -eq 0 ]; then
       INDEX_URL="$EXISTING_INDEX_URL"
       echo "Milestone index Gist updated: ${INDEX_URL}"
     else
@@ -400,6 +405,16 @@ fi
 ```bash
 gh issue edit {NUMBER} {GH_FLAG} --add-label "workflow:ready-to-build" --remove-label "workflow:investigating"
 ```
+
+Write machine-readable phase checkpoint (MUST execute immediately after label update, before returning):
+```bash
+CHECKPOINT_TIMESTAMP=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+gh issue comment {NUMBER} {GH_FLAG} --body "<!-- FORGE:CHECKPOINT -->
+\`\`\`json
+{\"phase\": \"INVESTIGATION\", \"status\": \"COMPLETE\", \"next_phase\": \"BUILD\", \"timestamp\": \"${CHECKPOINT_TIMESTAMP}\"}
+\`\`\`"
+```
+
 Return verdict to caller (work-on routing loop proceeds to build).
 
 **CONFIRMED or PARTIAL with decompose: YES**:
@@ -407,6 +422,16 @@ Return verdict to caller (work-on routing loop proceeds to build).
 gh issue edit {NUMBER} {GH_FLAG} --remove-label "workflow:investigating"
 ```
 Do NOT add `workflow:ready-to-build` — the routing loop will invoke `work-on:decompose` based on the `decompose: YES` return value.
+
+Write machine-readable phase checkpoint (MUST execute immediately after label update, before returning):
+```bash
+CHECKPOINT_TIMESTAMP=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+gh issue comment {NUMBER} {GH_FLAG} --body "<!-- FORGE:CHECKPOINT -->
+\`\`\`json
+{\"phase\": \"INVESTIGATION\", \"status\": \"COMPLETE\", \"next_phase\": \"DECOMPOSE\", \"timestamp\": \"${CHECKPOINT_TIMESTAMP}\"}
+\`\`\`"
+```
+
 Return verdict to caller (work-on routing loop proceeds to decompose).
 
 **INVALID**:
@@ -414,7 +439,7 @@ Return verdict to caller (work-on routing loop proceeds to decompose).
 gh issue edit {NUMBER} {GH_FLAG} --add-label "workflow:invalid" --remove-label "workflow:investigating"
 gh issue close {NUMBER} {GH_FLAG} --comment "Closing as invalid: {reason from investigation}"
 ```
-Return INVALID to caller (work-on stops).
+Return INVALID to caller (work-on stops). No checkpoint written — INVALID is terminal.
 
 ---
 

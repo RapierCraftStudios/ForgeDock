@@ -37,9 +37,11 @@ Orchestrator for the full issue lifecycle: investigate → decompose (if needed)
 | 8 | Phase 6: Close & Cleanup | PR merged | No |
 | 9 | Phase 7: Trajectory | Issue closed | Yes |
 
-**Phase 3 sub-phase sequence** (all mandatory, execute in order):
+**Phase 3 sub-phase sequence** (execute in order; 3C.5 and 3C.6 are conditional — see Phase 3B):
 
-3A → 3B → 3C → 3C.5 → 3C.6 → 3D → 3E → 3F → 3F.5 → 3G → 3H → 3I → 3I.5 → 3J → 3K → 3L → 3M
+3A → 3B → [3C → 3C.5* → 3C.6*] → 3D → 3E → 3F → 3F.5 → 3G → 3H → 3I → 3I.5 → 3J → 3K → 3L → 3M
+
+*3C.5 and 3C.6 are skipped for TRIVIAL tasks. Investigation tasks exit at 3B before 3C.
 
 **Universal continuation rule**: After ANY phase or sub-phase completes, check whether a terminal state has been reached. Terminal states are:
 - `workflow:merged` label is set
@@ -95,6 +97,8 @@ Satellite repos (those without a `staging` branch) receive fast-lane PRs directl
 ### 0A: Parse input
 Extract project prefix and issue number. If `next`/`pick`: list open issues sorted by priority, skip `needs-human` and `workflow:decomposed`, pick highest priority.
 
+**Optional pre-flight**: Before committing to the full pipeline, run `/scope {NUMBER}` to get a complexity estimate (affected files, blast radius, risk flags, and decomposition recommendation). Especially useful for large or ambiguous issues.
+
 ### 0A.5: Post Heartbeat Annotation
 
 Post a lightweight activity signal immediately after resolving the issue number. This gives the stall detector (orchestrate Step 4B.5) a fresh timestamp to compare against `STALL_TIMEOUT`. Without this, the stall detector can only see the last structured comment (INVESTIGATOR, BUILDER, etc.) which may be hours old during a valid long-running phase.
@@ -121,9 +125,106 @@ gh api repos/{GH_REPO}/issues/{NUMBER}/comments --jq '.[] | {id: .id, author: .u
 
 **Determine resume point**: No comments → Phase 1. Investigation exists + ready-to-build → Phase 3. Builder + no PR → Phase 4. Builder + PR open → Phase 5. PR merged + issue open → Phase 6.
 
+### 0B.5: Read Phase Checkpoint (MANDATORY — executes before any phase-skip decision)
+
+Query for the latest `<!-- FORGE:CHECKPOINT -->` comment. This is the machine-readable source of truth for the pipeline's current phase position — it takes priority over all prose-based resume heuristics above.
+
+```bash
+CHECKPOINT=$(gh api repos/{GH_REPO}/issues/{NUMBER}/comments \
+  --jq '[.[] | select(.body | contains("FORGE:CHECKPOINT"))] | last | .body // ""')
+
+if [ -n "$CHECKPOINT" ]; then
+  # Extract next_phase from the JSON block inside the comment
+  NEXT_PHASE=$(echo "$CHECKPOINT" | grep -A5 '```json' | grep '"next_phase"' \
+    | grep -oP '(?<="next_phase": ")[^"]+')
+  echo "Checkpoint found: next_phase=${NEXT_PHASE}"
+fi
+```
+
+**Routing from checkpoint** (overrides prose heuristics above when a checkpoint exists):
+
+| `next_phase` value | Resume at |
+|--------------------|-----------|
+| `BUILD` | Phase 3 (skip Phase 1 investigation) |
+| `DECOMPOSE` | Phase 2 (skip Phase 1 investigation) |
+| `REVIEW` | Phase 4 (skip Phase 1–3) |
+| `CLOSE` | Phase 6 (skip Phase 1–5) |
+| *(absent or unrecognized)* | Fall back to prose heuristics above |
+
+**If no checkpoint exists**: fall back to prose resume heuristics in Phase 0B above — treat as fresh start at Phase 1.
+
 **Classify lane**: Milestone → feature lane (`milestone/{slug}`). No milestone → fast lane (`staging`).
 
 **Source branch for review-findings**: Parse `**Code branch**: \`{branch}\`` from body. Branch from there, not main.
+
+**Script resolution** — Use the following `resolve_script()` function whenever calling a pipeline script. It enforces the 4-level precedence hierarchy (see `devdocs/project/architecture.md → Script Precedence`):
+
+```bash
+ADAPTIVE_DIR="${REPO_PATH}/$(yq '.adaptive_scripts.directory // ".forgedock/scripts"' forge.yaml 2>/dev/null || echo '.forgedock/scripts')"
+ADAPTIVE_ENABLED=$(yq '.adaptive_scripts.enabled // "true"' forge.yaml 2>/dev/null || echo 'true')
+UNIVERSAL_DIR="${FORGEDOCK_HOME:-$(dirname "$(which classify-lane.sh 2>/dev/null || echo 'scripts')")}/scripts"
+
+resolve_script() {
+  local operation="$1"
+  # Tier 2: per-repo adaptive (skip if disabled)
+  if [ "$ADAPTIVE_ENABLED" != "false" ] && [ -f "${ADAPTIVE_DIR}/${operation}.sh" ]; then
+    echo "adaptive:${ADAPTIVE_DIR}/${operation}.sh"
+    return
+  fi
+  # Tier 3: universal script
+  if [ -f "${UNIVERSAL_DIR}/${operation}.sh" ]; then
+    echo "universal:${UNIVERSAL_DIR}/${operation}.sh"
+    return
+  fi
+  # Tier 4: prose fallback
+  echo "prose:"
+}
+```
+
+When invoking a resolved script, log the tier in the FORGE annotation: `Script tier: {adaptive|universal|prose} ({path})`. This provides full pipeline observability. <!-- Added: forge#670 -->
+
+### 0B.1: Apply learned overrides (MANDATORY — run after 0B, before any routing)
+
+Read `forge.yaml → learned:` and override runtime variables. If the `learned:` key is absent or empty, all steps below are no-ops — continue to 0C.
+
+```bash
+# Read learned section — all reads use // "" fallback so absent keys are silent no-ops
+LEARNED_STAGING=$(yq '.learned.branch_targets.staging // ""' forge.yaml 2>/dev/null || echo '')
+LEARNED_TEST_COMMANDS=$(yq '.learned.test_commands // []' forge.yaml 2>/dev/null || echo '[]')
+LEARNED_LABEL_MAP=$(yq '.learned.label_map // {}' forge.yaml 2>/dev/null || echo '{}')
+LEARNED_COMMIT_STYLE=$(yq '.learned.commit_style // ""' forge.yaml 2>/dev/null || echo '')
+```
+
+**Apply overrides**:
+
+1. **Branch target override** — If `LEARNED_STAGING` is non-empty, replace `STAGING_BRANCH` with its value:
+   ```bash
+   [ -n "$LEARNED_STAGING" ] && STAGING_BRANCH="$LEARNED_STAGING" && \
+     echo "Learned override: STAGING_BRANCH → $STAGING_BRANCH (from learned.branch_targets.staging)"
+   ```
+
+2. **Test commands** — Store `LEARNED_TEST_COMMANDS` for use in Phase 3H (validate). These are appended to the `verification.commands` runs, not replaced:
+   ```bash
+   # Pass LEARNED_TEST_COMMANDS to Phase 3H as additional commands to run after verification.commands
+   # (consumed in 3H — store as env var or carry forward in context)
+   echo "Learned test commands: $LEARNED_TEST_COMMANDS"
+   ```
+
+3. **Label map** — If `LEARNED_LABEL_MAP` is non-empty, apply it before any `gh issue edit --add-label` call. When a canonical label (e.g. `workflow:investigating`) appears as a key in the map, use the mapped value instead:
+   ```bash
+   # Example: if label_map has "workflow:investigating": "needs-triage"
+   # then all subsequent gh issue edit --add-label "workflow:investigating" calls
+   # use "needs-triage" instead. Apply substitution at each label operation site.
+   echo "Label map active: $LEARNED_LABEL_MAP"
+   ```
+
+4. **Commit style** — If `LEARNED_COMMIT_STYLE` is non-empty, use it in Phase 3M:
+   ```bash
+   [ -n "$LEARNED_COMMIT_STYLE" ] && COMMIT_STYLE="$LEARNED_COMMIT_STYLE" && \
+     echo "Learned override: COMMIT_STYLE → $COMMIT_STYLE"
+   ```
+
+<!-- Added: forge#667 — learned section reader -->
 
 ### 0C: Sync to Project board
 Add issue to project, set Status=In Progress, Lane, Component, Priority, Workflow=Investigating.
@@ -143,8 +244,7 @@ gh api repos/{GH_REPO}/issues/comments/$COMMENT_ID -X DELETE
 
 ### 1A: Set label
 ```bash
-gh issue edit {NUMBER} {GH_FLAG} --add-label "workflow:investigating"
-gh issue edit {NUMBER} {GH_FLAG} --remove-label "workflow:ready-to-build,workflow:building,workflow:in-review" 2>/dev/null || true
+bash scripts/transition-label.sh {NUMBER} {GH_FLAG} investigating
 ```
 
 ### 1A.5: Normalize Issue Body (MANDATORY)
@@ -298,28 +398,110 @@ gh issue comment {NUMBER} {GH_FLAG} --body "<!-- FORGE:INVESTIGATOR -->
 <!-- INVESTIGATION:COMPLETE -->"
 ```
 
+### 1D: Correction capture (MANDATORY — run before label update)
+
+Before routing, scan all non-agent comments for correction signals from the repository owner. Correction signals are owner comments that contain phrases like "no, use", "actually use", "use X instead", "not X, use Y", or "wrong branch". If found, write the correction to `forge.yaml → learned:` and emit a `FORGE:LEARNED` annotation.
+
+**Scan for correction signals**:
+```bash
+# Get repo owner login for filtering
+REPO_OWNER=$(yq '.project.owner' forge.yaml 2>/dev/null || echo '')
+
+# Fetch all comments, filter to owner-only, look for correction signals
+CORRECTIONS=$(gh api repos/{GH_REPO}/issues/{NUMBER}/comments \
+  --jq --arg owner "$REPO_OWNER" \
+  '.[] | select(.user.login == $owner) | select(
+    (.body | test("no,? use|actually use|use .+ instead|not .+, use|wrong branch"; "i"))
+  ) | .body' 2>/dev/null || echo '')
+```
+
+**If correction signals found** — extract and write each correction:
+
+```bash
+# Example: extract branch target correction "use develop not staging"
+# Adjust regex to the correction pattern detected
+
+if [ -n "$CORRECTIONS" ]; then
+  echo "Correction signals detected — writing to forge.yaml → learned:"
+  echo "$CORRECTIONS"
+
+  # Write to forge.yaml using yq in-place merge (idempotent — yq merge overwrites existing keys)
+  # Always use env variable injection to avoid YAML injection from comment content
+  # Example for branch target correction:
+  #   BRANCH_VALUE="develop"
+  #   yq eval '.learned.branch_targets.staging = env(BRANCH_VALUE)' -i forge.yaml
+
+  # After writing, emit FORGE:LEARNED annotation
+  LEARNED_KEYS="branch_targets.staging"  # replace with actual extracted keys
+  CAPTURED_AT=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+
+  # Update captured_at and captured_by metadata
+  CAPTURED_AT_VAL="$CAPTURED_AT" yq eval '.learned.captured_at = env(CAPTURED_AT_VAL)' -i forge.yaml
+  CAPTURED_BY_VAL="work-on/{NUMBER}" yq eval '.learned.captured_by = env(CAPTURED_BY_VAL)' -i forge.yaml
+
+  gh issue comment {NUMBER} {GH_FLAG} --body "<!-- FORGE:LEARNED -->
+## Learned Pattern Captured
+
+**Source**: Owner correction in comment on issue #{NUMBER}
+**Captured at**: $CAPTURED_AT
+**Keys written**: \`$LEARNED_KEYS\`
+
+The following project-specific pattern was detected from owner feedback and written to \`forge.yaml → learned:\`. Future sessions will use this override automatically (read in Phase 0B.1).
+
+\`\`\`yaml
+# Written to forge.yaml
+learned:
+  # {key}: {value}
+\`\`\`
+
+**Idempotency**: yq merge-write — re-running will not duplicate entries."
+
+  echo "FORGE:LEARNED annotation posted."
+fi
+```
+
+**Idempotency guarantee**: Use `yq eval '.learned.key = env(VAR)' -i forge.yaml` — yq overwrites existing keys rather than appending. Re-running the capture step on the same comment produces the same forge.yaml state. <!-- Added: forge#667 -->
+
 ### 1D: Update labels & route
 
 **CONFIRMED or PARTIAL with decompose: NO**:
 ```bash
-gh issue edit {NUMBER} {GH_FLAG} --add-label "workflow:ready-to-build" --remove-label "workflow:investigating"
+bash scripts/transition-label.sh {NUMBER} {GH_FLAG} ready-to-build
+```
+
+Write machine-readable phase checkpoint (MUST execute immediately after label transition, before continuing):
+```bash
+CHECKPOINT_TIMESTAMP=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+gh issue comment {NUMBER} {GH_FLAG} --body "<!-- FORGE:CHECKPOINT -->
+\`\`\`json
+{\"phase\": \"INVESTIGATION\", \"status\": \"COMPLETE\", \"next_phase\": \"BUILD\", \"timestamp\": \"${CHECKPOINT_TIMESTAMP}\"}
+\`\`\`"
 ```
 <!-- FORGE:PHASE_COMPLETE — Investigation routed to build. See Universal Phase Dispatcher: next phase is Phase 3. Not terminal — continue immediately. -->
 → Continue to Phase 3.
 
 **CONFIRMED or PARTIAL with decompose: YES**:
 ```bash
-gh issue edit {NUMBER} {GH_FLAG} --remove-label "workflow:investigating"
+bash scripts/transition-label.sh {NUMBER} {GH_FLAG} decomposed
+```
+
+Write machine-readable phase checkpoint (MUST execute immediately after label transition, before continuing):
+```bash
+CHECKPOINT_TIMESTAMP=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+gh issue comment {NUMBER} {GH_FLAG} --body "<!-- FORGE:CHECKPOINT -->
+\`\`\`json
+{\"phase\": \"INVESTIGATION\", \"status\": \"COMPLETE\", \"next_phase\": \"DECOMPOSE\", \"timestamp\": \"${CHECKPOINT_TIMESTAMP}\"}
+\`\`\`"
 ```
 <!-- FORGE:PHASE_COMPLETE — Investigation routed to decomposition. See Universal Phase Dispatcher: next phase is Phase 2. Not terminal — continue immediately. -->
 → Continue to Phase 2 (Decomposition).
 
 **INVALID**:
 ```bash
-gh issue edit {NUMBER} {GH_FLAG} --add-label "workflow:invalid" --remove-label "workflow:investigating"
+bash scripts/transition-label.sh {NUMBER} {GH_FLAG} invalid
 gh issue close {NUMBER} {GH_FLAG} --comment "Closing as invalid: {reason from investigation}"
 ```
-→ STOP.
+→ STOP. No checkpoint written — INVALID is terminal.
 
 ---
 
@@ -414,9 +596,7 @@ gh issue comment {NUMBER} {GH_FLAG} --body "<!-- FORGE:DECOMPOSED -->
 
 ### 2F: Update labels
 ```bash
-gh issue edit {NUMBER} {GH_FLAG} \
-  --add-label "workflow:decomposed" \
-  --remove-label "workflow:ready-to-build,workflow:building,workflow:investigating" 2>/dev/null || true
+bash scripts/transition-label.sh {NUMBER} {GH_FLAG} decomposed
 ```
 
 → STOP. Each sub-issue runs its own `/work-on`.
@@ -429,7 +609,7 @@ gh issue edit {NUMBER} {GH_FLAG} \
 
 **Skip if**: `<!-- FORGE:BUILDER -->` exists.
 
-**CRITICAL: You MUST execute ALL sub-phases 3A–3M in order. Do NOT skip phases 3C.5 (context) or 3C.6 (architect) — they post mandatory `FORGE:CONTEXT` and `FORGE:ARCHITECT` comments that Phase 3F reads as its primary input. Skipping them degrades build quality and causes review findings. After each sub-phase, continue to the next — no sub-phase is terminal.**
+**CRITICAL: You MUST execute ALL sub-phases 3A–3M in order. Sub-phases 3C.5 (context) and 3C.6 (architect) are skipped ONLY for TRIVIAL tasks and Investigation tasks — see Phase 3B for classification. For STANDARD and COMPLEX tasks they post mandatory `FORGE:CONTEXT` and `FORGE:ARCHITECT` comments that Phase 3F reads as its primary input. Skipping them without a TRIVIAL/Investigation classification degrades build quality and causes review findings. After each sub-phase, continue to the next — no sub-phase is terminal.**
 
 ### 3A: Re-read state from GitHub (MANDATORY)
 ```bash
@@ -442,17 +622,23 @@ gh api repos/{GH_REPO}/issues/{NUMBER}/comments \
 # Check if build already completed
 gh api repos/{GH_REPO}/issues/{NUMBER}/comments \
   --jq '.[] | select(.body | contains("FORGE:BUILDER")) | .body'
+
+# Check for existing COMPLEXITY_BAND from a prior run (resume path)
+EXISTING_FAST_PATH=$(gh api repos/{GH_REPO}/issues/{NUMBER}/comments \
+  --jq '.[] | select(.body | contains("FORGE:FAST_PATH")) | .body' 2>/dev/null | head -1)
 ```
 
 If no investigation comment with `<!-- INVESTIGATION:COMPLETE -->` → STOP (investigation not complete).
 
 Extract from investigation: affected files, root cause, recommendation, task type.
 
-### 3B: Classify task type
+### 3B: Classify task type and complexity
+
+**Step 1 — Task type classification:**
 
 | Signal | Type | Approach |
 |--------|------|----------|
-| Title: "Investigate"/"Audit"/"Research" | Investigation | Produce issues as deliverables |
+| Title starts with "Investigate:"/"Audit:"/"Research:" | Investigation | Produce issues as deliverables |
 | UI/UX, feature + web/ files | UI/UX | `frontend-design` skill |
 | Feature + services/ | Backend Feature | Implement directly |
 | Feature + both | Full-Stack | Backend first, then frontend-design |
@@ -460,7 +646,49 @@ Extract from investigation: affected files, root cause, recommendation, task typ
 | Bug + services/ | Backend Fix | Direct |
 | Refactor/docs | Maintenance | Direct |
 
-**Investigation tasks**: Research deeply, create GitHub issues for each finding, post deliverables comment, close issue, skip to Phase 7.
+**Investigation tasks — early exit (BEFORE Phase 3C):** If task type = Investigation, skip Phases 3C, 3C.5, and 3C.6 entirely. Post `<!-- FORGE:FAST_PATH -->` comment, then jump directly to Phase 3F (implement → issue creation path). Do NOT run the Builder Contract, Context Gathering, or Architecture Plan for investigation tasks.
+
+```bash
+# Post fast-path comment for investigation tasks
+gh issue comment {NUMBER} {GH_FLAG} --body "<!-- FORGE:FAST_PATH -->
+## Fast-Path Classification
+
+**COMPLEXITY_BAND**: INVESTIGATION
+**Task type**: Investigation
+**Rationale**: Title prefix 'Investigate:' (or task type = Investigation from investigator report) — skipping Builder Contract (3C), Context Gathering (3C.5), and Architecture Plan (3C.6). Jumping directly to Phase 3F (issue creation).
+**Phases skipped**: 3C, 3C.5, 3C.6"
+```
+
+→ Jump to Phase 3F immediately. Do not continue to Phase 3C.
+
+**Step 2 — Complexity classification (for non-Investigation tasks):**
+
+Classify COMPLEXITY_BAND based on affected file count and task nature:
+
+| Condition | COMPLEXITY_BAND |
+|-----------|-----------------|
+| Single file, doc/config/markdown only, no logic changes expected | TRIVIAL |
+| 1–5 files, existing patterns, no cross-service impact | STANDARD |
+| 6+ files, new abstractions, cross-service, migration, schema changes | COMPLEX |
+
+Post `<!-- FORGE:FAST_PATH -->` comment immediately after classification:
+
+```bash
+gh issue comment {NUMBER} {GH_FLAG} --body "<!-- FORGE:FAST_PATH -->
+## Fast-Path Classification
+
+**COMPLEXITY_BAND**: {TRIVIAL|STANDARD|COMPLEX}
+**Task type**: {TASK_TYPE}
+**Affected file count**: {N}
+**Rationale**: {one-sentence explanation of classification decision}
+**Phases skipped**: {list phases skipped, or 'none — full pipeline' for STANDARD/COMPLEX}"
+```
+
+**Resume path**: If `EXISTING_FAST_PATH` was read in Phase 3A, extract COMPLEXITY_BAND from it and skip re-classification.
+
+**TRIVIAL tasks**: After posting FORGE:FAST_PATH, skip Phase 3C.5 (Context Gathering) and Phase 3C.6 (Architecture Plan). Continue: 3C (Builder Contract) → 3D → 3E → 3F → 3F.5 → 3G → 3H onward.
+
+**STANDARD and COMPLEX tasks**: Run full pipeline — 3C → 3C.5 → 3C.6 → 3D onward. No phases skipped.
 
 ### 3C: Builder Contract (MANDATORY)
 
@@ -492,9 +720,11 @@ gh issue comment {NUMBER} {GH_FLAG} --body "<!-- FORGE:CONTRACT -->
 
 Contract must be grounded in the investigation report. Adversarially validate proposed fixes against adjacent system layers.
 
-### 3C.5: Context Gathering (MANDATORY — max 2 minutes)
+### 3C.5: Context Gathering (MANDATORY for STANDARD/COMPLEX — skip for TRIVIAL)
 
-**This phase is NOT optional.** Always run it regardless of issue size or complexity. Do NOT skip it — trivial cases return quickly on their own.
+**Skip if COMPLEXITY_BAND: TRIVIAL** (classified in Phase 3B) — post nothing, proceed directly to Phase 3C.6. Trivial single-file changes have no institutional memory value to surface.
+
+**For STANDARD and COMPLEX tasks**: This phase is NOT optional. Run it regardless. Do NOT skip it without a TRIVIAL classification from Phase 3B.
 
 Surface institutional memory before writing code. Extract function names from the contract deliverables table:
 
@@ -573,13 +803,15 @@ gh issue comment {NUMBER} {GH_FLAG} --body "<!-- FORGE:CONTEXT -->
 
 If total time exceeds 2 minutes, post partial results with `<!-- FORGE:CONTEXT:PARTIAL -->`.
 
-### 3C.6: Architecture Plan (MANDATORY)
+### 3C.6: Architecture Plan (MANDATORY for STANDARD/COMPLEX — skip for TRIVIAL)
 
-**This phase is NOT optional.** Always run it regardless of issue size or complexity. Even a 1-file fix benefits from cross-path consistency checks. Do NOT invent skip heuristics — the phase handles simple changes gracefully and returns quickly.
+**Skip if COMPLEXITY_BAND: TRIVIAL** (classified in Phase 3B) — post nothing, proceed directly to Phase 3D. Trivial single-file changes have no multi-path consistency risk.
+
+**For STANDARD and COMPLEX tasks**: This phase is NOT optional. Always run it. Even a 1-file STANDARD fix benefits from cross-path consistency checks. Do NOT skip without a TRIVIAL classification from Phase 3B.
 
 Trace ALL affected code paths before writing code.
 
-**The ONLY acceptable skip conditions** (all must be true): Issue creates ONLY new files with no existing callers AND title starts with "docs:" or "chore:".
+**Additional skip condition** (STANDARD tasks only): Issue creates ONLY new files with no existing callers AND title starts with "docs:" or "chore:".
 
 **A1: Read Entry Points** — For each affected file: identify the primary function, all callers (grep), and sibling implementations. Read 3–5 most relevant files, max 8 total.
 
@@ -649,25 +881,36 @@ If budget exceeded (3 min), use `<!-- FORGE:ARCHITECT:PARTIAL -->`.
 
 ### 3D: Set building label
 ```bash
-gh issue edit {NUMBER} {GH_FLAG} --add-label "workflow:building" --remove-label "workflow:ready-to-build,workflow:investigating"
+bash scripts/transition-label.sh {NUMBER} {GH_FLAG} building
 ```
 
 ### 3E: Create worktree
 
 Branch slug from title (lowercase, hyphenated, max 40 chars). Prefix: `fix/` (bugs) or `feat/` (features).
 
+**Compute `PR_BASE` before worktree creation** — the source branch for the worktree MUST match the PR target. Compute `PR_BASE` now using `classify-lane.sh` so both worktree creation and Phase 4C use the same deterministic value. <!-- Added: forge#639 -->
+
+```bash
+# Compute PR_BASE deterministically from issue milestone — no LLM interpretation
+if ! PR_BASE=$(bash scripts/classify-lane.sh {NUMBER} -R {GH_REPO}); then
+  gh issue comment {NUMBER} {GH_FLAG} --body "BLOCKER: classify-lane.sh failed to compute PR target — see script error above. Adding needs-human."
+  gh issue edit {NUMBER} {GH_FLAG} --add-label "needs-human"
+  exit 1
+fi
+```
+
 **Determine source branch**:
 - Review-finding → parse `**Code branch**: \`{branch}\`` from issue body; branch from `origin/{branch}`
   - **Milestone review-finding hybrid lane** (Code branch matches `milestone/*`): High-risk lane. NEVER use `git merge` to resolve conflicts — use `git rebase` or `git cherry-pick` only. If conflicts can't be resolved without merge, post comment, add `needs-human`, STOP.
-- Feature lane (has milestone) → branch from `origin/{PR_BASE}`
-- Fast lane (no milestone) → branch from `origin/{STAGING_BRANCH}`
+- Feature lane (has milestone) → branch from `origin/{PR_BASE}` (PR_BASE now set above)
+- Fast lane (no milestone) → branch from `origin/{PR_BASE}` (PR_BASE = `{STAGING_BRANCH}`)
 
 ```bash
 cd {REPO_PATH}
 git fetch origin
 BRANCH="fix/{slug}-{NUMBER}"
 WORKTREE_PATH="{REPO_PATH}/.claude/worktrees/{BRANCH_SLUG}"
-git worktree add {WORKTREE_PATH} -b {BRANCH} origin/{SOURCE_BRANCH}
+git worktree add {WORKTREE_PATH} -b {BRANCH} origin/{PR_BASE}
 ```
 
 If worktree already exists: verify correct branch, reuse or remove and recreate.
@@ -810,6 +1053,30 @@ fi
 ```
 Typecheck or build failures are BLOCKING.
 
+**Learned test commands** — After all `verification.commands` steps complete, run any commands from `learned.test_commands` (captured from owner corrections in Phase 1D or set manually in forge.yaml):
+
+```bash
+# LEARNED_TEST_COMMANDS was set in Phase 0B.1 from forge.yaml → learned.test_commands
+# If empty/null, this block is a no-op
+if [ -n "$LEARNED_TEST_COMMANDS" ] && [ "$LEARNED_TEST_COMMANDS" != "[]" ]; then
+  echo "Running learned test commands..."
+  # yq outputs each entry on its own line with -r flag
+  echo "$LEARNED_TEST_COMMANDS" | yq '.[]' | while IFS= read -r cmd; do
+    [ -z "$cmd" ] && continue
+    echo "Running learned command: $cmd"
+    eval "$cmd" 2>&1 | tail -30
+    CMD_EXIT=$?
+    if [ $CMD_EXIT -ne 0 ]; then
+      echo "FAILED (exit $CMD_EXIT): $cmd"
+      exit $CMD_EXIT
+    fi
+  done
+else
+  echo "No learned test commands configured — skipping"
+fi
+```
+Learned test command failures are BLOCKING (same as verification.commands failures). <!-- Added: forge#667 -->
+
 ### 3I: Frontend proxy wiring check (MANDATORY)
 
 Skip if no TS/TSX files changed.
@@ -944,6 +1211,15 @@ gh issue comment {NUMBER} {GH_FLAG} --body "<!-- FORGE:BUILDER -->
 <!-- FORGE:BUILDER:COMPLETE -->"
 ```
 
+Write machine-readable phase checkpoint (MUST execute immediately after FORGE:BUILDER comment is posted, before Phase 4):
+```bash
+CHECKPOINT_TIMESTAMP=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+gh issue comment {NUMBER} {GH_FLAG} --body "<!-- FORGE:CHECKPOINT -->
+\`\`\`json
+{\"phase\": \"BUILD\", \"status\": \"COMPLETE\", \"next_phase\": \"REVIEW\", \"timestamp\": \"${CHECKPOINT_TIMESTAMP}\"}
+\`\`\`"
+```
+
 ---
 
 ## Phase 4: PR Creation
@@ -967,7 +1243,22 @@ cd {WORKTREE_PATH} && git push -u origin {BRANCH}
 If fails: try `--force-with-lease`. If still fails: post comment, add `needs-human`, STOP.
 
 ### 4C: Determine PR target
-No milestone → `staging`. Has milestone → `milestone/{slug}`. NEVER `main`.
+`PR_BASE` was computed in Phase 3E. If somehow unset (e.g., resumed session after compaction), recompute:
+```bash
+PR_BASE=$(bash scripts/classify-lane.sh {NUMBER} -R {GH_REPO})
+```
+Output is authoritative — no prose fallback. Script exits 1 on error (invalid issue, `gh` auth failure, or milestone branch absent on remote); treat non-zero exit as `needs-human` and STOP. <!-- Added: forge#669, forge#639 -->
+
+### 4C.5: Validate PR target against classified lane
+```bash
+bash scripts/validate-pr-target.sh {PR_BASE} {CLASSIFIED_LANE}
+```
+`{CLASSIFIED_LANE}` is the value returned by `classify-lane.sh` in Phase 4C. `{PR_BASE}` is the branch the PR will target. If exit code is 1 (mismatch):
+```bash
+gh issue comment {NUMBER} {GH_FLAG} --body "BLOCKING: validate-pr-target.sh — PR base \`{PR_BASE}\` does not match classified lane \`{CLASSIFIED_LANE}\`. Manual intervention required."
+gh issue edit {NUMBER} {GH_FLAG} --add-label "needs-human"
+```
+→ STOP. Do NOT proceed to Phase 4D. <!-- Added: forge#671 -->
 
 ### 4D: Create PR
 ```bash
@@ -994,7 +1285,7 @@ If PR already exists for this branch, use the existing PR number.
 
 ### 4E: Update labels
 ```bash
-gh issue edit {NUMBER} {GH_FLAG} --add-label "workflow:in-review" --remove-label "workflow:building"
+bash scripts/transition-label.sh {NUMBER} {GH_FLAG} in-review
 ```
 
 ---
@@ -1045,9 +1336,18 @@ gh pr view {PR_NUMBER} {GH_FLAG} --json state,mergedAt --jq '{state: .state, mer
 gh issue view {NUMBER} {GH_FLAG} --json state --jq '.state'
 ```
 
-- PR MERGED + issue CLOSED → proceed to Phase 6
-- PR MERGED + issue OPEN → close issue manually
+- PR MERGED + issue CLOSED → write checkpoint, then proceed to Phase 6
+- PR MERGED + issue OPEN → close issue manually, write checkpoint, proceed to Phase 6
 - PR NOT MERGED → `gh pr merge {PR_NUMBER} {GH_FLAG} --merge --auto`. If fails → post comment, add `needs-human`, STOP.
+
+**When PR is MERGED — write machine-readable phase checkpoint (MANDATORY)**:
+```bash
+CHECKPOINT_TIMESTAMP=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+gh issue comment {NUMBER} {GH_FLAG} --body "<!-- FORGE:CHECKPOINT -->
+\`\`\`json
+{\"phase\": \"REVIEW\", \"status\": \"COMPLETE\", \"next_phase\": \"CLOSE\", \"timestamp\": \"${CHECKPOINT_TIMESTAMP}\"}
+\`\`\`"
+```
 
 <!-- FORGE:PHASE_COMPLETE — Review done, PR merged. See Universal Phase Dispatcher: next phase is Phase 6 (Close & Cleanup). Not terminal — continue immediately. -->
 
@@ -1093,9 +1393,7 @@ If all phases complete:
 ```bash
 gh issue close {NUMBER} {GH_FLAG} \
   --comment "Closed: PR #{PR_NUMBER} merged to \`{PR_BASE}\`. Closes #{NUMBER}."
-gh issue edit {NUMBER} {GH_FLAG} \
-  --add-label "workflow:merged" \
-  --remove-label "workflow:in-review,workflow:building,workflow:investigating" 2>/dev/null || true
+bash scripts/transition-label.sh {NUMBER} {GH_FLAG} merged
 ```
 
 ### 6D: Parent tracker update (sub-issues only)

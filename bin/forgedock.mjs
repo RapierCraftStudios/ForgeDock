@@ -36,6 +36,7 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
 const FORGE_HOME = dirname(__dirname);
 const COMMANDS_DIR = join(FORGE_HOME, "commands");
+const SCRIPTS_DIR = join(FORGE_HOME, "scripts");
 
 if (!process.env.HOME) {
   process.stderr.write(
@@ -45,6 +46,7 @@ if (!process.env.HOME) {
 }
 
 const TARGET_DIR = join(process.env.HOME, ".claude", "commands");
+const SCRIPTS_TARGET_DIR = join(process.env.HOME, ".claude", "scripts");
 
 const args = process.argv.slice(2);
 const command = args[0] || "install";
@@ -185,6 +187,98 @@ async function linkCommands(step) {
       // Doesn't exist — create it. Prefer a symlink; fall back to a copy on
       // systems where symlink creation is not permitted (e.g. Windows without
       // Developer Mode / admin), which would otherwise throw EPERM. See #587.
+      try {
+        await symlink(file, target);
+      } catch (linkErr) {
+        if (linkErr.code === "EPERM" || linkErr.code === "EACCES") {
+          copyFileSync(file, target);
+        } else {
+          throw linkErr;
+        }
+      }
+      installed++;
+    }
+
+    step.progress(idx + 1, total);
+  }
+
+  return { installed, updated, skipped };
+}
+
+/**
+ * Enumerate all executable scripts in SCRIPTS_DIR (*.sh, *.mjs).
+ * Subdirectories are not traversed — scripts/ is a flat directory.
+ */
+async function findScriptFiles(dir) {
+  const results = [];
+  let entries;
+  try {
+    entries = await readdir(dir, { withFileTypes: true });
+  } catch (err) {
+    if (err.code === "ENOENT") return results; // scripts/ dir absent — skip silently
+    throw err;
+  }
+  for (const entry of entries) {
+    if (entry.isFile() && (entry.name.endsWith(".sh") || entry.name.endsWith(".mjs"))) {
+      results.push(join(dir, entry.name));
+    }
+  }
+  return results.sort();
+}
+
+/**
+ * Link or copy all scripts from SCRIPTS_DIR into SCRIPTS_TARGET_DIR (~/.claude/scripts/).
+ * Mirrors linkCommands() behaviour: symlink where permitted, copy on EPERM/EACCES (Windows).
+ * Calls step.progress(idx+1, total) on each file.
+ * Returns { installed, updated, skipped }.
+ */
+async function linkScripts(step) {
+  const files = await findScriptFiles(SCRIPTS_DIR);
+  const total = files.length;
+
+  if (total === 0) {
+    step.skip("no scripts to link");
+    return { installed: 0, updated: 0, skipped: 0 };
+  }
+
+  await mkdir(SCRIPTS_TARGET_DIR, { recursive: true });
+
+  let installed = 0;
+  let updated = 0;
+  let skipped = 0;
+
+  for (let idx = 0; idx < files.length; idx++) {
+    const file = files[idx];
+    const rel = relative(SCRIPTS_DIR, file);
+    const target = join(SCRIPTS_TARGET_DIR, rel);
+
+    try {
+      const stats = await lstat(target);
+
+      if (stats.isSymbolicLink()) {
+        const current = await readlink(target);
+        if (current === file) {
+          skipped++;
+        } else {
+          await symlink(file, target + ".tmp");
+          const { rename } = await import("fs/promises");
+          await rename(target + ".tmp", target);
+          updated++;
+        }
+      } else {
+        // Existing regular file — refresh if contents differ.
+        if (readFileSync(file, "utf-8") === readFileSync(target, "utf-8")) {
+          skipped++;
+        } else {
+          copyFileSync(file, target);
+          updated++;
+        }
+      }
+    } catch (err) {
+      if (err.code !== "ENOENT") {
+        throw err;
+      }
+      // Doesn't exist — create symlink; fall back to copy on Windows EPERM/EACCES.
       try {
         await symlink(file, target);
       } catch (linkErr) {
@@ -354,7 +448,7 @@ async function detectAndBuildForgeYaml(cwd, opts = {}) {
 # Edit this file with your project details.
 #
 # Required sections: project, paths, branches
-# Optional sections: repos, project_board, services, review, verification
+# Optional sections: repos, project_board, services, review, verification, learned
 #
 # See docs/CONFIG.md for full reference.
 
@@ -436,6 +530,17 @@ branches:
 #   health_endpoint: "https://api.${repo}.io/health"
 #   health_patterns:
 #     - '"status": "ok"'
+
+# =============================================================================
+# LEARNED (OPTIONAL)
+# Agent-writable section for project-specific patterns captured across sessions.
+# Pipeline agents read this section at startup (Phase 0B) and write to it when
+# they detect correction signals in owner comments (Phase 1D).
+# You can also edit this section manually.
+# See forge.yaml.example for the full schema with all supported keys.
+# =============================================================================
+
+learned: {}
 `;
 
   try {
@@ -470,6 +575,17 @@ async function install() {
         step.note(
           `${green(String(installed))} installed, ${updated} updated, ${dim(String(skipped))} skipped`,
         );
+      },
+    },
+    {
+      label: "Linking scripts",
+      async run(step) {
+        const { installed, updated, skipped } = await linkScripts(step);
+        if (installed + updated + skipped > 0) {
+          step.note(
+            `${green(String(installed))} installed, ${updated} updated, ${dim(String(skipped))} skipped`,
+          );
+        }
       },
     },
     {
@@ -534,6 +650,7 @@ async function install() {
           `${green("✔")} ${bold("ForgeDock is ready")}`,
           "",
           `Commands installed to ${cyan(TARGET_DIR)}`,
+          `Scripts installed to  ${cyan(SCRIPTS_TARGET_DIR)}`,
           `Next: ${cyan("cd <your-project>")} then ${cyan("npx forgedock init")}`,
         ],
         { title: "ForgeDock Installed" },
@@ -685,6 +802,25 @@ async function update() {
         );
       },
     },
+    {
+      label: "Reinstalling scripts",
+      async run(step) {
+        const branch = execSync("git rev-parse --abbrev-ref HEAD", {
+          cwd: FORGE_HOME,
+          encoding: "utf-8",
+        }).trim();
+        if (branch !== "main") {
+          step.skip("skipped — not on main");
+          return;
+        }
+        const { installed, updated, skipped } = await linkScripts(step);
+        if (installed + updated + skipped > 0) {
+          step.note(
+            `${green(String(installed))} installed, ${updated} updated, ${dim(String(skipped))} skipped`,
+          );
+        }
+      },
+    },
   ]);
 
   if (result.ok) {
@@ -692,6 +828,72 @@ async function update() {
       box([`${green("✔")} ForgeDock is up to date`], {
         title: "ForgeDock Updated",
       }) + "\n",
+    );
+  }
+}
+
+/**
+ * Scaffold the .forgedock/scripts/ directory in the project root.
+ *
+ * Idempotent — safe to call on every `npx forgedock init` run:
+ *   - mkdir uses { recursive: true } so it never errors if the dir exists
+ *   - README.md is only written if it doesn't already exist
+ *   - .gitignore entry is only appended if not already present
+ */
+async function scaffoldAdaptiveScriptsDir(cwd) {
+  const scriptsDir = join(cwd, ".forgedock", "scripts");
+  const readmePath = join(scriptsDir, "README.md");
+  const gitignorePath = join(cwd, ".gitignore");
+  const GITIGNORE_ENTRY = ".forgedock/scripts/";
+  const GITIGNORE_COMMENT =
+    "# Per-repo adaptive scripts — gitignored by default.\n# Remove the line below to commit scripts to version control.";
+
+  const README_CONTENT = `# .forgedock/scripts/
+
+Per-repo adaptive scripts for this project. Generated and maintained by ForgeDock.
+
+## Purpose
+
+This directory stores project-specific scripts that encode patterns ForgeDock has
+learned about this repository — branch naming conventions, label schemes, test paths,
+commit formats, and other recurring workflow details.
+
+## Gitignore behaviour
+
+This directory is gitignored by default. To commit scripts to version control, remove
+the \`.forgedock/scripts/\` line from your \`.gitignore\`.
+
+## Usage
+
+Scripts here are discovered automatically by ForgeDock pipeline agents. They take
+precedence over universal scripts shipped with ForgeDock, so you can override any
+default behaviour by adding a same-named script here.
+
+See: https://github.com/RapierCraftStudios/ForgeDock for full documentation.
+`;
+
+  // 1. Create directory (idempotent)
+  await mkdir(scriptsDir, { recursive: true });
+
+  // 2. Write README.md only if not already present
+  if (!existsSync(readmePath)) {
+    writeFileSync(readmePath, README_CONTENT, "utf-8");
+  }
+
+  // 3. Append .gitignore entry only if not already present
+  if (existsSync(gitignorePath)) {
+    const current = readFileSync(gitignorePath, "utf-8");
+    if (!current.includes(GITIGNORE_ENTRY)) {
+      appendFileSync(
+        gitignorePath,
+        `\n${GITIGNORE_COMMENT}\n${GITIGNORE_ENTRY}\n`,
+      );
+    }
+  } else {
+    writeFileSync(
+      gitignorePath,
+      `${GITIGNORE_COMMENT}\n${GITIGNORE_ENTRY}\n`,
+      "utf-8",
     );
   }
 }
@@ -716,6 +918,7 @@ async function init(fromInstall = false) {
         ) + "\n",
       );
     }
+    await scaffoldAdaptiveScriptsDir(cwd);
     return;
   }
 
@@ -809,6 +1012,116 @@ async function init(fromInstall = false) {
   process.stderr.write(
     box(summaryLines, { title: "forge.yaml Generated" }) + "\n",
   );
+
+  await scaffoldAdaptiveScriptsDir(cwd);
+}
+
+/**
+ * Scaffold the devdocs tree from ForgeDock's seed templates into the project's
+ * configured devdocs path. Reads forge.yaml to determine the target path.
+ * Idempotent: skips files that already exist so user edits are preserved.
+ *
+ * This implements the `npx forgedock docs init` command referenced in CONFIG.md
+ * and the devdocs loading phases of work-on/build/context and architect.
+ */
+async function docsInit() {
+  const cwd = process.cwd();
+
+  // --- Resolve target devdocs path from forge.yaml ---
+  let devdocsRel = "devdocs";
+  const forgeYamlPath = join(cwd, "forge.yaml");
+
+  if (existsSync(forgeYamlPath)) {
+    try {
+      const yaml = readFileSync(forgeYamlPath, "utf-8");
+      const match = yaml.match(/^devdocs:\s*\n(?:\s+[^\n]*\n)*?\s+path:\s*["']?([^"'\n]+)["']?/m);
+      if (match) {
+        devdocsRel = match[1].trim();
+      }
+    } catch {
+      // Best-effort; use default
+    }
+  }
+
+  const devdocsTarget = join(cwd, devdocsRel);
+  const templatesSource = join(FORGE_HOME, "templates", "devdocs");
+
+  if (!existsSync(templatesSource)) {
+    process.stderr.write(
+      `${RED}Error: templates/devdocs not found at ${templatesSource}${RESET}\n` +
+      `This usually means ForgeDock was installed via npm but the template directory is missing.\n` +
+      `Try reinstalling: ${cyan("npm install -g forgedock")}\n`,
+    );
+    process.exit(1);
+  }
+
+  /**
+   * Recursively copy files from src to dest.
+   * Skips files that already exist at dest (idempotent — user edits preserved).
+   * Returns { copied, skipped }.
+   */
+  async function copyTree(src, dest, step) {
+    let copied = 0;
+    let skipped = 0;
+
+    await mkdir(dest, { recursive: true });
+
+    const entries = await readdir(src, { withFileTypes: true });
+    for (const entry of entries) {
+      const srcPath = join(src, entry.name);
+      const destPath = join(dest, entry.name);
+
+      if (entry.isDirectory()) {
+        const result = await copyTree(srcPath, destPath, step);
+        copied += result.copied;
+        skipped += result.skipped;
+      } else {
+        if (existsSync(destPath)) {
+          skipped++;
+        } else {
+          copyFileSync(srcPath, destPath);
+          copied++;
+        }
+      }
+    }
+
+    return { copied, skipped };
+  }
+
+  const result = await runSteps([
+    {
+      label: `Scaffolding devdocs → ${cyan(devdocsRel + "/")}`,
+      async run(step) {
+        const { copied, skipped } = await copyTree(
+          templatesSource,
+          devdocsTarget,
+          step,
+        );
+        step.note(
+          `${green(String(copied))} created, ${dim(String(skipped))} already exist (skipped)`,
+        );
+      },
+    },
+  ]);
+
+  if (result.ok) {
+    process.stderr.write(
+      box(
+        [
+          `${green("✔")} DevDocs scaffolded to ${cyan(devdocsRel + "/")}`,
+          "",
+          `  ${green("→")} Edit ${cyan(devdocsRel + "/project/*.md")} with your project's stack, architecture, and conventions`,
+          `  ${green("→")} Edit ${cyan(devdocsRel + "/project/custom-instructions.md")} for binding agent directives`,
+          `  ${green("→")} Review ${cyan(devdocsRel + "/index.yaml")} to configure selective domain loading`,
+          `  ${dim("→")} ${cyan(devdocsRel + "/agent/*.md")} — ForgeDock defaults; edit only to override pipeline behavior`,
+          "",
+          `  Docs are gitignored by default if ${cyan("devdocs/")} is in ${cyan(".gitignore")}.`,
+          `  Commit ${cyan(devdocsRel + "/")} to share conventions with your team.`,
+        ],
+        { title: "DevDocs Initialised" },
+      ) + "\n",
+    );
+  }
 }
 
 function help() {
@@ -818,6 +1131,7 @@ function help() {
     ["npx forgedock", "Install commands (default)"],
     ["npx forgedock install", "Install commands"],
     ["npx forgedock init", "Generate forge.yaml config for your project"],
+    ["npx forgedock docs init", "Scaffold devdocs/ knowledge tree from seed templates"],
     ["npx forgedock uninstall", "Remove commands"],
     ["npx forgedock update", "Pull latest & reinstall"],
     ["npx forgedock help", "Show this help"],
@@ -837,6 +1151,19 @@ switch (command) {
   case "init":
     await init();
     break;
+  case "docs": {
+    const subcommand = args[1];
+    if (subcommand === "init") {
+      await docsInit();
+    } else {
+      process.stderr.write(
+        `${RED}Unknown docs subcommand: ${subcommand ?? "(none)"}${RESET}\n` +
+        `Available: ${cyan("npx forgedock docs init")}\n`,
+      );
+      process.exit(1);
+    }
+    break;
+  }
   case "uninstall":
     await uninstall();
     break;
