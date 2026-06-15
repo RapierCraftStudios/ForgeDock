@@ -45,6 +45,23 @@ const TARGET_DIR = join(HOME, ".claude", "commands");
 const SCRIPTS_DIR = join(FORGE_HOME, "scripts");
 const SCRIPTS_TARGET_DIR = join(HOME, ".claude", "scripts");
 
+/**
+ * Allowlist of pipeline-agent scripts that get installed to ~/.claude/scripts/.
+ * Only these files are symlinked (or copied on Windows) during install/update.
+ *
+ * Internal tooling (gen-logo.mjs, verify-*.sh) lives in scripts/ but is NOT
+ * installed — those scripts are invoked directly via $FORGE_HOME/scripts/ by
+ * review-pr.md and quality-gate.md and should not pollute the user's Claude
+ * scripts namespace.
+ *
+ * When adding a new pipeline-agent script, add its filename here.
+ */
+const PIPELINE_SCRIPTS = new Set([
+  "classify-lane.sh",
+  "transition-label.sh",
+  "validate-pr-target.sh",
+]);
+
 const args = process.argv.slice(2);
 const command = args[0] || "install";
 
@@ -722,7 +739,8 @@ async function linkCommands(step) {
 }
 
 /**
- * Enumerate all executable scripts in SCRIPTS_DIR (*.sh, *.mjs).
+ * Enumerate pipeline-agent scripts in SCRIPTS_DIR that should be installed
+ * to ~/.claude/scripts/. Only files present in PIPELINE_SCRIPTS are returned.
  * Subdirectories are not traversed — scripts/ is a flat directory.
  *
  * @param {string} dir - Absolute path to the scripts source directory.
@@ -738,10 +756,7 @@ async function findScriptFiles(dir) {
     throw err;
   }
   for (const entry of entries) {
-    if (
-      entry.isFile() &&
-      (entry.name.endsWith(".sh") || entry.name.endsWith(".mjs"))
-    ) {
+    if (entry.isFile() && PIPELINE_SCRIPTS.has(entry.name)) {
       results.push(join(dir, entry.name));
     }
   }
