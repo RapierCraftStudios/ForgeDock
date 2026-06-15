@@ -101,6 +101,24 @@ Proposed (deterministic):
 - Replace repeated per-session re-discovery with cached operational knowledge
 - User can opt-in to committing them to the repo
 
+**Measured token savings** (from #673 — based on 5 representative ForgeDock sessions):
+
+| Operation | Baseline (rediscovery) | With adaptive scripts | Saving |
+|-----------|------------------------|----------------------|--------|
+| forge.yaml full read | ~1,050 tokens | ~100 tokens (learned: section only) | ~950 |
+| Branch name determination | ~350 tokens (gh + LLM inference) | ~170 tokens (branch-targets.sh) | ~180 |
+| Commit style detection | ~200 tokens (git log + LLM) | ~100 tokens (format-commit.sh) | ~100 |
+| Test command discovery | ~400 tokens (package.json + grep) | ~80 tokens (run-tests.sh) | ~320 |
+| Test location + label discovery | ~550 tokens | ~0 (handled by scripts above) | ~550 |
+| **Session total** | **~2,550 tokens** | **~450 tokens** | **~2,100 tokens** |
+
+Savings range: 1,200 tokens (simple fast-lane issues) to 3,500 tokens (complex multi-file builds).
+At claude-sonnet-4-5 pricing ($3.00/M tokens): ~$0.0063/session saved, ~$1.89/month per repo at 300 sessions/month.
+
+The primary value is **reliability**, not cost: scripts eliminate LLM inference from deterministic operations. An agent running `branch-targets.sh` cannot hallucinate the branch name (see #639 — hallucinated `milestone/project-agnostic` caused 6-day pipeline misrouting).
+
+Full methodology and data: `docs/articles/per-repo-adaptive-scripts-token-savings.md`
+
 ### Script Precedence
 
 When resolving which script to run for a given operation, agents apply the following hierarchy (highest to lowest authority):
