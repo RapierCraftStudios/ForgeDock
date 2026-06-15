@@ -550,6 +550,38 @@ If `UNEXPECTED_GROWTH > 500`, report the alert clearly before launching the next
 
 ---
 
+### Step 4A.pre: Classify lane for each issue (MANDATORY before spawning agents)
+
+Before building agent prompts, run `classify-lane.sh` for every issue in the current wave to compute `{LANE}` and `{PR_BASE}` deterministically. The script output is authoritative — the LLM MUST NOT override or reason around it.
+
+```bash
+# Requires classify-lane.sh to be available at ~/.claude/scripts/classify-lane.sh
+# (installed by `npx forgedock` — see bin/forgedock.mjs linkScripts step)
+# Fallback: bash "$FORGE_HOME/scripts/classify-lane.sh" if ~/.claude/scripts/ is unavailable
+
+declare -A ISSUE_LANE
+declare -A ISSUE_PR_BASE
+
+for NUM in {wave_issue_numbers}; do
+  PR_BASE=$(bash ~/.claude/scripts/classify-lane.sh "$NUM" -R {GH_REPO}) || {
+    echo "ERROR: classify-lane.sh failed for #$NUM — adding needs-human label and skipping" >&2
+    gh issue edit "$NUM" -R {GH_REPO} --add-label "needs-human" 2>/dev/null || true
+    continue
+  }
+  # Derive LANE label from PR_BASE
+  if [ "$PR_BASE" = "staging" ]; then
+    LANE="fast-lane"
+  else
+    LANE="feature-lane"
+  fi
+  ISSUE_LANE[$NUM]="$LANE"
+  ISSUE_PR_BASE[$NUM]="$PR_BASE"
+  echo "#$NUM → lane=$LANE, PR_BASE=$PR_BASE"
+done
+```
+
+Use `${ISSUE_LANE[$NUM]}` and `${ISSUE_PR_BASE[$NUM]}` to populate `{LANE}` and `{PR_BASE}` in the agent template below. Never substitute prose guesses for these values — the script output is the only valid source. <!-- Added: forge#677 -->
+
 ### Step 4A: Launch a wave
 
 **REMINDER: You MUST use the template below verbatim. Only fill in `{VARIABLES}`. Do NOT rewrite the agent prompt. Do NOT write custom implementation instructions. The agent MUST invoke `/work-on` via the Skill tool — this is the HARD RULE from the top of this file.**
