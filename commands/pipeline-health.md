@@ -546,35 +546,44 @@ fi
 Query issues that received a `<!-- FORGE:STALL_DETECTED -->` comment within the analysis window. This measures how often the orchestrator's time-based stall detector fired — distinct from the resume-cycle count (which comes from completion-event stalls).
 
 ```bash
-# Find all issues with FORGE:STALL_DETECTED comments in the analysis window
-STALL_DETECTED_ISSUES=$(gh issue list -R $GH_REPO \
+# Denominator: issues that entered the pipeline in the window (have any workflow:* label)
+# Using pipeline-active issues avoids inflating the denominator with all 500 issues in window
+BATCH_TOTAL=$(gh issue list -R $GH_REPO \
   --state all --limit 500 \
-  --json number,title,labels,createdAt \
-  --jq "[.[] | select(.createdAt > \"$SINCE\") | .number]" 2>/dev/null || echo "[]")
+  --json number,createdAt,labels \
+  --jq "[.[] | select(.createdAt > \"$SINCE\") | select(.labels | map(.name) | any(startswith(\"workflow:\")))] | length" \
+  2>/dev/null || echo 0)
 
-BATCH_TOTAL=$(echo "$STALL_DETECTED_ISSUES" | jq 'length')
+# Enumerate pipeline-active issue numbers for per-issue comment queries
+PIPELINE_ISSUE_NUMS=$(gh issue list -R $GH_REPO \
+  --state all --limit 500 \
+  --json number,createdAt,labels \
+  --jq "[.[] | select(.createdAt > \"$SINCE\") | select(.labels | map(.name) | any(startswith(\"workflow:\"))) | .number]" \
+  2>/dev/null || echo "[]")
 
-# Count how many have at least one FORGE:STALL_DETECTED comment
-STALL_COUNT=0
-ESCALATED_COUNT=0
-echo "$STALL_DETECTED_ISSUES" | jq -r '.[]' | while read -r NUM; do
+# Count issues with at least one FORGE:STALL_DETECTED comment
+# Use wc -l pattern (not variable accumulation) to avoid bash subshell scope loss
+STALL_COUNT=$(echo "$PIPELINE_ISSUE_NUMS" | jq -r '.[]' | while read -r NUM; do
   STALL_COMMENTS=$(gh api repos/$GH_REPO/issues/${NUM}/comments \
     --jq '[.[] | select(.body | contains("FORGE:STALL_DETECTED"))] | length' 2>/dev/null || echo 0)
-  if [ "$STALL_COMMENTS" -gt 0 ]; then
-    STALL_COUNT=$((STALL_COUNT + 1))
-    # Check if it escalated to needs-human (2+ stall comments)
-    [ "$STALL_COMMENTS" -ge 2 ] && ESCALATED_COUNT=$((ESCALATED_COUNT + 1))
-  fi
-done
+  [ "$STALL_COMMENTS" -gt 0 ] && echo "$NUM"
+done | wc -l)
+
+# Count issues that escalated (2+ stall comments = auto-resume exhausted)
+ESCALATED_COUNT=$(echo "$PIPELINE_ISSUE_NUMS" | jq -r '.[]' | while read -r NUM; do
+  STALL_COMMENTS=$(gh api repos/$GH_REPO/issues/${NUM}/comments \
+    --jq '[.[] | select(.body | contains("FORGE:STALL_DETECTED"))] | length' 2>/dev/null || echo 0)
+  [ "$STALL_COMMENTS" -ge 2 ] && echo "$NUM"
+done | wc -l)
 
 # Compute batch stall rate
 if [ "$BATCH_TOTAL" -gt 0 ]; then
   BATCH_STALL_RATE=$(echo "scale=1; $STALL_COUNT * 100 / $BATCH_TOTAL" | bc 2>/dev/null || echo "N/A")
-  echo "Batch stall rate: ${BATCH_STALL_RATE}% (${STALL_COUNT}/${BATCH_TOTAL} issues stalled) — target: < 10%"
+  echo "Batch stall rate: ${BATCH_STALL_RATE}% (${STALL_COUNT}/${BATCH_TOTAL} pipeline issues stalled) — target: < 10%"
   echo "Escalated to needs-human: ${ESCALATED_COUNT} issues"
 else
   BATCH_STALL_RATE="N/A"
-  echo "Batch stall rate: N/A (no issues in window or FORGE:STALL_DETECTED not yet deployed)"
+  echo "Batch stall rate: N/A (no pipeline issues in window or FORGE:STALL_DETECTED not yet deployed)"
 fi
 export BATCH_STALL_RATE STALL_COUNT BATCH_TOTAL ESCALATED_COUNT
 ```
