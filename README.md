@@ -6,7 +6,9 @@
 
 <p><strong>Give Claude Code a memory that survives every session.</strong></p>
 
-<p>An autonomous development pipeline for Claude Code that uses GitHub issues, PRs, commits, and blame as structured memory — so every agent knows what happened before it, why the code looks the way it does, and what to do next.</p>
+<p>Your AI coding agent starts every session blind. It re-investigates bugs it already found, misses context from last week's PRs, and repeats mistakes that were caught and fixed three days ago.</p>
+
+<p>ForgeDock builds a persistent knowledge graph across your GitHub issues and PRs — so agents get more accurate, more deterministic, and cheaper to run the longer you use it. Tested across 20,000+ issues on production codebases.</p>
 
 <a href="https://www.npmjs.com/package/forgedock"><img src="https://img.shields.io/npm/dm/forgedock?label=npm%20downloads&style=flat-square&color=CB3837" alt="npm downloads/month" /></a>&nbsp;
 <a href="https://www.npmjs.com/package/forgedock"><img src="https://img.shields.io/npm/v/forgedock?style=flat-square&color=CB3837" alt="npm version" /></a>&nbsp;
