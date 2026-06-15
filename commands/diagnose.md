@@ -252,7 +252,7 @@ IF FORGE:INVESTIGATOR absent AND issue state == OPEN:
 ### F3: Build never started (stuck at ready-to-build)
 
 ```
-IF FORGE:INVESTIGATOR:COMPLETE present
+IF INVESTIGATION:COMPLETE present
    AND FORGE:CONTRACT absent
    AND workflow:ready-to-build label present:
   → DIAGNOSIS: Investigation completed but build phase never started.
@@ -264,7 +264,7 @@ IF FORGE:INVESTIGATOR:COMPLETE present
 ### F4: Build interrupted at contract phase
 
 ```
-IF FORGE:INVESTIGATOR:COMPLETE present
+IF INVESTIGATION:COMPLETE present
    AND FORGE:CONTRACT absent
    AND workflow:building label present:
   → DIAGNOSIS: Build phase started (building label set) but builder contract was never posted.

@@ -318,6 +318,228 @@ const CYAN = "\x1b[36m";
 const RED = "\x1b[31m";
 const RESET = "\x1b[0m";
 
+// ---------------------------------------------------------------------------
+// CLAUDE.md / AGENTS.md managed-block injection
+// ---------------------------------------------------------------------------
+
+/**
+ * Marker strings that delimit the ForgeDock-managed block in CLAUDE.md / AGENTS.md.
+ * Must be exact — used for both detection and regex anchoring.
+ */
+const CLAUDE_BLOCK_BEGIN = "<!-- BEGIN FORGEDOCK -->";
+const CLAUDE_BLOCK_END = "<!-- END FORGEDOCK -->";
+
+/**
+ * The behavioral rules block injected into the project's CLAUDE.md.
+ * Kept ≤30 lines (per issue #607 requirement).
+ * Content is fixed — this is NOT documentation, it is behavioral guidance.
+ */
+const FORGEDOCK_MANAGED_BLOCK = `${CLAUDE_BLOCK_BEGIN}
+## ForgeDock Pipeline Rules
+
+This project uses ForgeDock for structured development. Follow these rules:
+
+1. **Issue-first**: When the user describes a bug, feature, or task conversationally — create a GitHub issue with \`/issue\` before writing any code. Never inline-fix without an issue number.
+2. **Pipeline flow**: All implementation goes through \`/work-on <issue#>\`. This runs: investigate → architect → build → review → merge.
+3. **Traceability**: Every code change must link to a GitHub issue. Use FORGE annotations to pass context between pipeline phases.
+4. **Findings become issues**: When you discover bugs, inconsistencies, or improvements during other work — create a GitHub issue (\`gh issue create\`), don't fix inline.
+5. **Available commands**: \`/work-on\`, \`/issue\`, \`/review-pr\`, \`/orchestrate\`, \`/quality-gate\`, \`/milestone\`, \`/autopilot\`
+
+For full documentation, see: [ForgeDock docs](https://forgedock.com/docs)
+${CLAUDE_BLOCK_END}`;
+
+/**
+ * Returns true if `dir` is inside a git work tree.
+ * Used to guard CLAUDE.md injection against non-project directories.
+ *
+ * @param {string} dir
+ * @returns {boolean}
+ */
+function isGitWorkTree(dir) {
+  try {
+    const out = execSync("git rev-parse --is-inside-work-tree", {
+      cwd: dir,
+      stdio: ["ignore", "pipe", "ignore"],
+      encoding: "utf-8",
+    });
+    return out.trim() === "true";
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Idempotently inject the ForgeDock managed block into a single file.
+ *
+ * Handles all corrupt marker states (ref: forge#269, forge#291):
+ *   - File missing            → create file containing block only
+ *   - No markers              → append block to existing content
+ *   - BEGIN + END (correct)   → replace content between markers
+ *   - BEGIN only              → strip orphaned BEGIN, re-append full block
+ *   - END only                → strip orphaned END, re-append full block
+ *   - END before BEGIN        → strip both + content between, re-append full block
+ *   - Block already current   → return 'unchanged'
+ *
+ * Returns:
+ *   'created'   — file was created with block
+ *   'updated'   — existing block was replaced with new content
+ *   'unchanged' — block was already present and current
+ *   'appended'  — block was appended (no prior markers)
+ *
+ * @param {string} filePath - Absolute path to CLAUDE.md or AGENTS.md
+ * @returns {'created' | 'updated' | 'unchanged' | 'appended'}
+ */
+function injectManagedBlock(filePath) {
+  const managed = FORGEDOCK_MANAGED_BLOCK;
+
+  // File does not exist — create it with the block
+  if (!existsSync(filePath)) {
+    writeFileSync(filePath, managed + "\n", "utf-8");
+    return "created";
+  }
+
+  let existing = readFileSync(filePath, "utf-8");
+
+  const hasBegin = existing.includes(CLAUDE_BLOCK_BEGIN);
+  const hasEnd = existing.includes(CLAUDE_BLOCK_END);
+
+  if (hasBegin && hasEnd) {
+    // Determine marker order
+    const beginIdx = existing.indexOf(CLAUDE_BLOCK_BEGIN);
+    const endIdx = existing.indexOf(CLAUDE_BLOCK_END);
+
+    if (beginIdx < endIdx) {
+      // Normal order — replace content between markers (inclusive)
+      // Non-greedy match so we don't over-consume if someone manually
+      // duplicated the markers.
+      const blockRegex = new RegExp(
+        escapeRegExp(CLAUDE_BLOCK_BEGIN) +
+          "[\\s\\S]*?" +
+          escapeRegExp(CLAUDE_BLOCK_END),
+      );
+      const replaced = existing.replace(blockRegex, managed);
+      if (replaced === existing) {
+        // Regex matched but content was already identical
+        return "unchanged";
+      }
+      writeFileSync(filePath, replaced, "utf-8");
+      return "updated";
+    } else {
+      // Reversed markers (END before BEGIN) — strip both markers + everything
+      // between them, then fall through to append. (ref: forge#291 BUG-2)
+      const strippedReversed = existing
+        .replace(
+          new RegExp(
+            escapeRegExp(CLAUDE_BLOCK_END) +
+              "[\\s\\S]*?" +
+              escapeRegExp(CLAUDE_BLOCK_BEGIN),
+          ),
+          "",
+        )
+        // Strip any leftover isolated markers
+        .replace(new RegExp(escapeRegExp(CLAUDE_BLOCK_BEGIN), "g"), "")
+        .replace(new RegExp(escapeRegExp(CLAUDE_BLOCK_END), "g"), "");
+      existing = strippedReversed.trimEnd();
+      // Fall through to append
+    }
+  } else if (hasBegin) {
+    // Orphaned BEGIN — strip it, then fall through to append. (ref: forge#269)
+    existing = existing
+      .replace(new RegExp(escapeRegExp(CLAUDE_BLOCK_BEGIN), "g"), "")
+      .trimEnd();
+    // Fall through to append
+  } else if (hasEnd) {
+    // Orphaned END — strip it, then fall through to append. (ref: forge#291 BUG-1)
+    existing = existing
+      .replace(new RegExp(escapeRegExp(CLAUDE_BLOCK_END), "g"), "")
+      .trimEnd();
+    // Fall through to append
+  }
+
+  // No valid block present — append
+  const separator = existing.length > 0 ? "\n\n" : "";
+  writeFileSync(filePath, existing + separator + managed + "\n", "utf-8");
+  return hasBegin || hasEnd ? "updated" : "appended";
+}
+
+/**
+ * Remove the ForgeDock managed block from a single file.
+ * Strips only the marker-bounded section; all surrounding content is preserved.
+ * No-ops if the file doesn't exist or contains no markers.
+ *
+ * Returns:
+ *   'removed'     — block was found and removed
+ *   'not-present' — no block in file (or file doesn't exist)
+ *
+ * @param {string} filePath - Absolute path to CLAUDE.md or AGENTS.md
+ * @returns {'removed' | 'not-present'}
+ */
+function removeManagedBlock(filePath) {
+  if (!existsSync(filePath)) return "not-present";
+
+  const existing = readFileSync(filePath, "utf-8");
+  const hasBegin = existing.includes(CLAUDE_BLOCK_BEGIN);
+  const hasEnd = existing.includes(CLAUDE_BLOCK_END);
+
+  if (!hasBegin && !hasEnd) return "not-present";
+
+  let cleaned = existing;
+
+  if (hasBegin && hasEnd) {
+    const beginIdx = existing.indexOf(CLAUDE_BLOCK_BEGIN);
+    const endIdx = existing.indexOf(CLAUDE_BLOCK_END);
+
+    if (beginIdx < endIdx) {
+      // Normal block — remove it
+      cleaned = existing
+        .replace(
+          new RegExp(
+            escapeRegExp(CLAUDE_BLOCK_BEGIN) +
+              "[\\s\\S]*?" +
+              escapeRegExp(CLAUDE_BLOCK_END),
+          ),
+          "",
+        )
+        .trimEnd();
+    } else {
+      // Reversed — strip both and content between
+      cleaned = existing
+        .replace(
+          new RegExp(
+            escapeRegExp(CLAUDE_BLOCK_END) +
+              "[\\s\\S]*?" +
+              escapeRegExp(CLAUDE_BLOCK_BEGIN),
+          ),
+          "",
+        )
+        .replace(new RegExp(escapeRegExp(CLAUDE_BLOCK_BEGIN), "g"), "")
+        .replace(new RegExp(escapeRegExp(CLAUDE_BLOCK_END), "g"), "")
+        .trimEnd();
+    }
+  } else {
+    // Orphaned markers — strip them
+    cleaned = cleaned
+      .replace(new RegExp(escapeRegExp(CLAUDE_BLOCK_BEGIN), "g"), "")
+      .replace(new RegExp(escapeRegExp(CLAUDE_BLOCK_END), "g"), "")
+      .trimEnd();
+  }
+
+  if (cleaned === existing.trimEnd()) return "not-present";
+
+  writeFileSync(filePath, cleaned.length > 0 ? cleaned + "\n" : "", "utf-8");
+  return "removed";
+}
+
+/**
+ * Escape a string for use inside a RegExp constructor.
+ *
+ * @param {string} str
+ * @returns {string}
+ */
+function escapeRegExp(str) {
+  return str.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
 async function findMarkdownFiles(dir) {
   const results = [];
   const entries = await readdir(dir, { withFileTypes: true });
@@ -437,6 +659,48 @@ async function install() {
   if (!existsSync(forgeYamlPath)) {
     await init(true);
   }
+
+  // Inject behavioral rules into CLAUDE.md (and AGENTS.md if present).
+  // Only inside a git project — guards against non-project cwd (ref: forge#585).
+  const installCwd = process.cwd();
+  if (isGitWorkTree(installCwd)) {
+    const claudeMdPath = join(installCwd, "CLAUDE.md");
+    const agentsMdPath = join(installCwd, "AGENTS.md");
+
+    const claudeResult = injectManagedBlock(claudeMdPath);
+    if (claudeResult === "created") {
+      console.log(
+        `  ${GREEN}✔${RESET}  ${BOLD}CLAUDE.md${RESET} created with ForgeDock pipeline rules`,
+      );
+    } else if (claudeResult === "updated") {
+      console.log(
+        `  ${GREEN}✔${RESET}  ${BOLD}CLAUDE.md${RESET} updated — ForgeDock block refreshed`,
+      );
+    } else if (claudeResult === "appended") {
+      console.log(
+        `  ${GREEN}✔${RESET}  ${BOLD}CLAUDE.md${RESET} updated — ForgeDock pipeline rules appended`,
+      );
+    } else {
+      // unchanged
+      console.log(
+        `  ✔  CLAUDE.md already contains current ForgeDock pipeline rules`,
+      );
+    }
+
+    // Mirror to AGENTS.md only if it already exists (never create it)
+    if (existsSync(agentsMdPath)) {
+      const agentsResult = injectManagedBlock(agentsMdPath);
+      if (agentsResult === "created") {
+        // Should not happen since we checked existsSync, but handle gracefully
+        console.log(`  ${GREEN}✔${RESET}  AGENTS.md created with ForgeDock pipeline rules`);
+      } else if (agentsResult === "updated" || agentsResult === "appended") {
+        console.log(`  ${GREEN}✔${RESET}  AGENTS.md updated — ForgeDock pipeline rules mirrored`);
+      } else {
+        console.log(`  ✔  AGENTS.md already contains current ForgeDock pipeline rules`);
+      }
+    }
+    console.log("");
+  }
 }
 
 async function uninstall() {
@@ -485,6 +749,32 @@ async function uninstall() {
     console.log(
       `  ${YELLOW}⚠${RESET}  Could not update ~/.claude/settings.json — remove the hook manually.`,
     );
+  }
+  console.log("");
+
+  // Remove ForgeDock managed block from CLAUDE.md and AGENTS.md (if present)
+  const uninstallCwd = process.cwd();
+  const claudeMdPath = join(uninstallCwd, "CLAUDE.md");
+  const agentsMdPath = join(uninstallCwd, "AGENTS.md");
+
+  const claudeRemoveResult = removeManagedBlock(claudeMdPath);
+  if (claudeRemoveResult === "removed") {
+    console.log(
+      `  ${GREEN}✔${RESET}  Removed ForgeDock pipeline rules from ${CYAN}CLAUDE.md${RESET}`,
+    );
+  } else {
+    console.log(`  ✔  No ForgeDock block in CLAUDE.md — nothing to remove`);
+  }
+
+  if (existsSync(agentsMdPath)) {
+    const agentsRemoveResult = removeManagedBlock(agentsMdPath);
+    if (agentsRemoveResult === "removed") {
+      console.log(
+        `  ${GREEN}✔${RESET}  Removed ForgeDock pipeline rules from ${CYAN}AGENTS.md${RESET}`,
+      );
+    } else {
+      console.log(`  ✔  No ForgeDock block in AGENTS.md — nothing to remove`);
+    }
   }
   console.log("");
 }
