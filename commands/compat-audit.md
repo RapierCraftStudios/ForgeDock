@@ -71,37 +71,37 @@ CACHED_AT=""
 DAYS_SINCE_REFRESH="unknown"
 
 if [ -f "$VERSION_CACHE" ]; then
-  INSTALLED=$(node -e "
+  INSTALLED=$(CACHE_PATH="$VERSION_CACHE" node -e "
     try {
-      const c = JSON.parse(require('fs').readFileSync('$VERSION_CACHE', 'utf8'));
+      const c = JSON.parse(require('fs').readFileSync(process.env.CACHE_PATH, 'utf8'));
       process.stdout.write(c.installed || 'unknown');
     } catch { process.stdout.write('unknown'); }
   " 2>/dev/null || echo "unknown")
 
-  LATEST=$(node -e "
+  LATEST=$(CACHE_PATH="$VERSION_CACHE" node -e "
     try {
-      const c = JSON.parse(require('fs').readFileSync('$VERSION_CACHE', 'utf8'));
+      const c = JSON.parse(require('fs').readFileSync(process.env.CACHE_PATH, 'utf8'));
       process.stdout.write(c.latest || 'unknown');
     } catch { process.stdout.write('unknown'); }
   " 2>/dev/null || echo "unknown")
 
-  STALE=$(node -e "
+  STALE=$(CACHE_PATH="$VERSION_CACHE" node -e "
     try {
-      const c = JSON.parse(require('fs').readFileSync('$VERSION_CACHE', 'utf8'));
+      const c = JSON.parse(require('fs').readFileSync(process.env.CACHE_PATH, 'utf8'));
       process.stdout.write(c.stale === true ? 'true' : 'false');
     } catch { process.stdout.write('false'); }
   " 2>/dev/null || echo "false")
 
-  DELTA=$(node -e "
+  DELTA=$(CACHE_PATH="$VERSION_CACHE" node -e "
     try {
-      const c = JSON.parse(require('fs').readFileSync('$VERSION_CACHE', 'utf8'));
+      const c = JSON.parse(require('fs').readFileSync(process.env.CACHE_PATH, 'utf8'));
       process.stdout.write(c.delta || '');
     } catch { process.stdout.write(''); }
   " 2>/dev/null || echo "")
 
-  DAYS_SINCE_REFRESH=$(node -e "
+  DAYS_SINCE_REFRESH=$(CACHE_PATH="$VERSION_CACHE" node -e "
     try {
-      const c = JSON.parse(require('fs').readFileSync('$VERSION_CACHE', 'utf8'));
+      const c = JSON.parse(require('fs').readFileSync(process.env.CACHE_PATH, 'utf8'));
       if (typeof c.cachedAt === 'number') {
         const days = Math.floor((Date.now() - c.cachedAt) / 86400000);
         process.stdout.write(days.toString());
