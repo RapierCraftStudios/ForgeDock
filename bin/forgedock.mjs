@@ -9,6 +9,7 @@ import {
   readFileSync,
   writeFileSync,
   renameSync,
+  unlinkSync,
 } from "fs";
 import { execSync } from "child_process";
 
@@ -28,6 +29,287 @@ const TARGET_DIR = join(process.env.HOME, ".claude", "commands");
 
 const args = process.argv.slice(2);
 const command = args[0] || "install";
+
+// ---------------------------------------------------------------------------
+// SessionStart hook — settings.json helpers
+// ---------------------------------------------------------------------------
+
+/**
+ * Path to the user-level Claude Code settings file.
+ * This is where the SessionStart hook entry is written/removed.
+ */
+const CLAUDE_SETTINGS_PATH = join(process.env.HOME, ".claude", "settings.json");
+
+/**
+ * Timeout (in seconds) for the SessionStart hook entry written into
+ * ~/.claude/settings.json. Claude Code hook timeouts are in seconds —
+ * not milliseconds like the Node.js child_process timeouts elsewhere in
+ * this file.
+ */
+const SESSION_START_HOOK_TIMEOUT_SECONDS = 10;
+
+/**
+ * The command value written into the SessionStart hook entry.
+ * Uses forward slashes even on Windows — Node accepts them natively and
+ * they survive hook-runner invocations that do not go through a shell.
+ * Backslashes emitted by path.join() on Windows would be fragile when the
+ * hook runner has no shell to interpret the quoted command string.
+ *
+ * @returns {string}
+ */
+function sessionStartHookCommand() {
+  const hookPath = join(
+    FORGE_HOME,
+    "bin",
+    "hooks",
+    "session-start.mjs",
+  ).replace(/\\/g, "/");
+  // Escape embedded double quotes so a crafted install path cannot break out
+  // of the quoted argument and inject shell tokens. (ref: forge#451)
+  const safePath = hookPath.replace(/"/g, '\\"');
+  return `node "${safePath}"`;
+}
+
+/**
+ * Check whether a hook command string refers to the ForgeDock SessionStart hook.
+ *
+ * Uses a platform-safe RegExp that matches both POSIX forward-slash paths
+ * (Linux/macOS) and Windows backslash paths, so uninstall can locate and
+ * remove the hook even when FORGE_HOME was different at install time.
+ *
+ * @param {string} command - The command string from a hook entry.
+ * @returns {boolean}
+ */
+function isForgeSessionStartHook(command) {
+  // Match: ...bin[/\]hooks[/\]session-start.mjs (quote-terminated or EOL)
+  return /[/\\]bin[/\\]hooks[/\\]session-start\.mjs["']?\s*$/.test(command);
+}
+
+/**
+ * Strip JSONC syntax (single-line comments, block comments, trailing commas)
+ * from a raw JSON string, returning a plain JSON string that JSON.parse() accepts.
+ *
+ * Handles settings.json files that Claude Code's own editor may annotate
+ * with comments and trailing commas.
+ *
+ * @param {string} raw - Raw text of a JSONC file.
+ * @returns {string} - Valid JSON string.
+ */
+function stripJsonc(raw) {
+  let result = "";
+  let i = 0;
+  const len = raw.length;
+
+  while (i < len) {
+    const ch = raw[i];
+
+    // Inside a string literal — copy until unescaped closing quote
+    if (ch === '"') {
+      result += ch;
+      i++;
+      while (i < len) {
+        const sc = raw[i];
+        result += sc;
+        if (sc === "\\" && i + 1 < len) {
+          i++;
+          result += raw[i];
+        } else if (sc === '"') {
+          break;
+        }
+        i++;
+      }
+      i++;
+      continue;
+    }
+
+    // Single-line comment — skip until newline
+    if (ch === "/" && i + 1 < len && raw[i + 1] === "/") {
+      while (i < len && raw[i] !== "\n") i++;
+      continue;
+    }
+
+    // Block comment — skip until */
+    if (ch === "/" && i + 1 < len && raw[i + 1] === "*") {
+      i += 2;
+      while (i + 1 < len && !(raw[i] === "*" && raw[i + 1] === "/")) i++;
+      i += 2;
+      continue;
+    }
+
+    result += ch;
+    i++;
+  }
+
+  // Remove trailing commas before } or ]
+  return result.replace(/,(\s*[}\]])/g, "$1");
+}
+
+/**
+ * Read ~/.claude/settings.json, returning a parsed object.
+ * Returns an empty object if the file does not exist.
+ * Tolerates JSONC syntax (comments, trailing commas) that Claude Code's
+ * own settings editor may insert.
+ * Throws if the file exists but cannot be parsed even after JSONC stripping.
+ *
+ * @returns {object}
+ */
+function readClaudeSettings() {
+  try {
+    const raw = readFileSync(CLAUDE_SETTINGS_PATH, "utf-8");
+    return JSON.parse(stripJsonc(raw));
+  } catch (err) {
+    if (err.code === "ENOENT") return {};
+    throw err;
+  }
+}
+
+/**
+ * Atomically write an object to ~/.claude/settings.json.
+ * Uses a .tmp sibling + renameSync to avoid partial writes.
+ * Cleans up the tmp file on failure. (ref: forge#444)
+ *
+ * @param {object} settings
+ */
+function writeClaudeSettings(settings) {
+  const tmpPath = CLAUDE_SETTINGS_PATH + ".forgedock.tmp";
+  try {
+    writeFileSync(tmpPath, JSON.stringify(settings, null, 2) + "\n", "utf-8");
+    renameSync(tmpPath, CLAUDE_SETTINGS_PATH);
+  } catch (err) {
+    try {
+      unlinkSync(tmpPath);
+    } catch {
+      /* already gone or never created */
+    }
+    throw err;
+  }
+}
+
+/**
+ * Install the ForgeDock SessionStart hook into ~/.claude/settings.json
+ * idempotently. Does not modify any existing hooks unrelated to ForgeDock.
+ *
+ * Returns:
+ *   'installed'       — hook was newly added
+ *   'already-present' — hook was already there (idempotent)
+ *   'failed'          — an error occurred (non-fatal; install continues)
+ *
+ * @returns {Promise<'installed' | 'already-present' | 'failed'>}
+ */
+async function installSessionStartHook() {
+  try {
+    const settings = readClaudeSettings();
+
+    // Ensure the hooks section exists
+    if (!settings.hooks || typeof settings.hooks !== "object") {
+      settings.hooks = {};
+    }
+
+    // Ensure SessionStart array exists
+    if (!Array.isArray(settings.hooks.SessionStart)) {
+      settings.hooks.SessionStart = [];
+    }
+
+    const cmd = sessionStartHookCommand();
+
+    // Check if already present — match by path suffix so uninstall/reinstall
+    // across different FORGE_HOME paths still works correctly. (ref: forge#537)
+    const alreadyPresent = settings.hooks.SessionStart.some((entry) => {
+      if (!entry || typeof entry !== "object") return false;
+      const hooks = Array.isArray(entry.hooks) ? entry.hooks : [];
+      return hooks.some(
+        (h) =>
+          h &&
+          typeof h.command === "string" &&
+          isForgeSessionStartHook(h.command),
+      );
+    });
+
+    if (alreadyPresent) return "already-present";
+
+    // Append the new hook entry (matcher omitted — fires on every session start)
+    settings.hooks.SessionStart.push({
+      hooks: [
+        {
+          type: "command",
+          command: cmd,
+          timeout: SESSION_START_HOOK_TIMEOUT_SECONDS,
+        },
+      ],
+    });
+
+    writeClaudeSettings(settings);
+    return "installed";
+  } catch {
+    return "failed";
+  }
+}
+
+/**
+ * Remove the ForgeDock SessionStart hook from ~/.claude/settings.json
+ * idempotently. Only removes the entry written by installSessionStartHook().
+ * Unrelated hooks are preserved.
+ *
+ * Returns:
+ *   'removed'     — hook was found and removed
+ *   'not-present' — hook was not in settings.json (already clean)
+ *   'failed'      — an error occurred (non-fatal; uninstall continues)
+ *
+ * @returns {Promise<'removed' | 'not-present' | 'failed'>}
+ */
+async function removeSessionStartHook() {
+  try {
+    const settings = readClaudeSettings();
+
+    if (
+      !settings.hooks ||
+      !Array.isArray(settings.hooks.SessionStart) ||
+      settings.hooks.SessionStart.length === 0
+    ) {
+      return "not-present";
+    }
+
+    const originalLength = settings.hooks.SessionStart.length;
+
+    // Filter out the ForgeDock-managed entry, keep everything else
+    settings.hooks.SessionStart = settings.hooks.SessionStart.filter(
+      (entry) => {
+        if (!entry || typeof entry !== "object") return true;
+        const hooks = Array.isArray(entry.hooks) ? entry.hooks : [];
+        const isForgeEntry = hooks.some(
+          (h) =>
+            h &&
+            typeof h.command === "string" &&
+            isForgeSessionStartHook(h.command),
+        );
+        return !isForgeEntry;
+      },
+    );
+
+    if (settings.hooks.SessionStart.length === originalLength) {
+      return "not-present";
+    }
+
+    // Clean up empty SessionStart array to leave settings.json tidy
+    if (settings.hooks.SessionStart.length === 0) {
+      delete settings.hooks.SessionStart;
+    }
+
+    // Clean up empty hooks object
+    if (
+      settings.hooks &&
+      typeof settings.hooks === "object" &&
+      Object.keys(settings.hooks).length === 0
+    ) {
+      delete settings.hooks;
+    }
+
+    writeClaudeSettings(settings);
+    return "removed";
+  } catch {
+    return "failed";
+  }
+}
 
 const BOLD = "\x1b[1m";
 const GREEN = "\x1b[32m";
@@ -129,6 +411,27 @@ async function install() {
   );
   console.log("");
 
+  // Register session-start.mjs as a SessionStart hook in ~/.claude/settings.json
+  const hookResult = await installSessionStartHook();
+  if (hookResult === "installed") {
+    console.log(
+      `  ${GREEN}✔${RESET}  ${BOLD}SessionStart hook${RESET} installed in ${CYAN}~/.claude/settings.json${RESET}`,
+    );
+  } else if (hookResult === "already-present") {
+    console.log(
+      `  ✔  SessionStart hook already present in ~/.claude/settings.json`,
+    );
+  } else {
+    // "failed" — warning only, does not block install
+    console.log(
+      `  ${YELLOW}⚠${RESET}  Could not write SessionStart hook to ~/.claude/settings.json`,
+    );
+    console.log(
+      `     Run ${CYAN}npx forgedock install${RESET} again to retry.`,
+    );
+  }
+  console.log("");
+
   // Auto-generate forge.yaml if missing — no second command needed
   const forgeYamlPath = join(process.cwd(), "forge.yaml");
   if (!existsSync(forgeYamlPath)) {
@@ -166,6 +469,23 @@ async function uninstall() {
 
   console.log("");
   console.log(`Done. Removed: ${removed} commands.`);
+  console.log("");
+
+  // Remove the SessionStart hook from ~/.claude/settings.json
+  const hookRemoveResult = await removeSessionStartHook();
+  if (hookRemoveResult === "removed") {
+    console.log(
+      `  ${GREEN}✔${RESET}  Removed SessionStart hook from ${CYAN}~/.claude/settings.json${RESET}`,
+    );
+  } else if (hookRemoveResult === "not-present") {
+    console.log(
+      `  ✔  SessionStart hook already absent from ~/.claude/settings.json`,
+    );
+  } else {
+    console.log(
+      `  ${YELLOW}⚠${RESET}  Could not update ~/.claude/settings.json — remove the hook manually.`,
+    );
+  }
   console.log("");
 }
 
