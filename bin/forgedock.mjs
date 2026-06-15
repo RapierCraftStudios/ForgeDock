@@ -2,7 +2,7 @@
 
 import { fileURLToPath } from "url";
 import { dirname, join, relative } from "path";
-import { mkdir, symlink, readlink, lstat, readdir, stat } from "fs/promises";
+import { mkdir, readlink, lstat, readdir, stat, writeFile, unlink as unlinkAsync } from "fs/promises";
 import {
   existsSync,
   appendFileSync,
@@ -540,6 +540,115 @@ function escapeRegExp(str) {
   return str.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
+// ---------------------------------------------------------------------------
+// Stub generation helpers
+// ---------------------------------------------------------------------------
+
+/**
+ * Marker string embedded in every stub file written to ~/.claude/commands/.
+ * Presence of this string is the ONLY signal used to identify ForgeDock-managed
+ * stub files — it must be unique enough that user-authored command files will
+ * never contain it incidentally.
+ */
+const STUB_MARKER = "<!-- FORGEDOCK:STUB -->";
+
+/**
+ * Parse YAML frontmatter from a markdown file's content string.
+ *
+ * Extracts only the fields ForgeDock needs for stubs:
+ *   - `description` — one-line command description shown to Claude
+ *   - `argument-hint` — optional argument format hint
+ *
+ * Handles the standard `---\nkey: value\n---` frontmatter block.
+ * Returns empty strings for any field not found — stub generation is
+ * best-effort; a stub with no description still works.
+ *
+ * @param {string} content - Raw markdown file content.
+ * @returns {{ description: string, argumentHint: string }}
+ */
+function parseFrontmatter(content) {
+  // Frontmatter must start at the very beginning of the file
+  if (!content.startsWith("---")) {
+    return { description: "", argumentHint: "" };
+  }
+
+  // Find the closing ---
+  const closingIdx = content.indexOf("\n---", 3);
+  if (closingIdx === -1) {
+    return { description: "", argumentHint: "" };
+  }
+
+  const block = content.slice(3, closingIdx); // between the two ---
+
+  let description = "";
+  let argumentHint = "";
+
+  for (const line of block.split("\n")) {
+    // Match `key: value` — value may be quoted or unquoted
+    const m = line.match(/^([\w-]+):\s*(.+)$/);
+    if (!m) continue;
+
+    const key = m[1].toLowerCase();
+    // Strip surrounding quotes if present (single or double)
+    const val = m[2].trim().replace(/^["']|["']$/g, "");
+
+    if (key === "description") description = val;
+    else if (key === "argument-hint") argumentHint = val;
+  }
+
+  return { description, argumentHint };
+}
+
+/**
+ * Generate the content of a stub file for a given command spec.
+ *
+ * The stub is a minimal markdown file that:
+ *   1. Carries the same frontmatter Claude Code reads for slash-command
+ *      metadata (description, argument-hint).
+ *   2. Contains a single body instruction telling Claude to read the full
+ *      spec from its canonical FORGE_HOME path when the command is invoked.
+ *   3. Embeds the STUB_MARKER so the installer can recognize and manage it.
+ *
+ * @param {string} rel       - Relative path from COMMANDS_DIR (e.g. "work-on.md").
+ * @param {string} fullPath  - Absolute path to the full spec file in FORGE_HOME.
+ * @param {string} description   - Command description (from frontmatter).
+ * @param {string} argumentHint  - Argument hint string (from frontmatter, may be empty).
+ * @returns {string} Stub file content.
+ */
+function generateStubContent(rel, fullPath, description, argumentHint) {
+  const argHintLine = argumentHint
+    ? `argument-hint: ${argumentHint}\n`
+    : "";
+
+  // Use forward slashes in the displayed path for readability on all platforms
+  const displayPath = fullPath.replace(/\\/g, "/");
+
+  return `---
+description: ${description || rel}
+${argHintLine}---
+${STUB_MARKER}
+
+When this command is invoked, read the full spec using the Read tool:
+**Spec path**: \`${displayPath}\`
+
+Then follow all instructions in that file exactly.
+`;
+}
+
+/**
+ * Return true if the given file content was written by ForgeDock as a stub.
+ *
+ * Uses the STUB_MARKER as the sole detection signal — this is more robust
+ * than checking file type (which would break on Windows where symlinks are
+ * unavailable) and more precise than checking the file path pattern.
+ *
+ * @param {string} content - File content to check.
+ * @returns {boolean}
+ */
+function isForgeStub(content) {
+  return content.includes(STUB_MARKER);
+}
+
 async function findMarkdownFiles(dir) {
   const results = [];
   const entries = await readdir(dir, { withFileTypes: true });
@@ -575,29 +684,69 @@ async function install() {
 
     await mkdir(targetDir, { recursive: true });
 
+    // Read the full spec to extract frontmatter for stub generation
+    let specContent = "";
+    try {
+      specContent = readFileSync(file, "utf-8");
+    } catch {
+      // Unreadable spec — skip with warning
+      console.log(`  ${YELLOW}WARNING${RESET}: ${rel} — could not read source spec, skipping`);
+      skipped++;
+      continue;
+    }
+
+    const { description, argumentHint } = parseFrontmatter(specContent);
+    const stubContent = generateStubContent(rel, file, description, argumentHint);
+
     try {
       const stats = await lstat(target);
 
       if (stats.isSymbolicLink()) {
-        const current = await readlink(target);
-        if (current === file) {
-          skipped++;
+        // Legacy symlink install — upgrade to stub file
+        const { rename } = await import("fs/promises");
+        const tmpPath = target + ".forgedock.tmp";
+        await writeFile(tmpPath, stubContent, "utf-8");
+        await rename(tmpPath, target);
+        console.log(`  ${YELLOW}Updated${RESET}: ${rel} (symlink → stub)`);
+        updated++;
+      } else if (stats.isFile()) {
+        // Regular file — check if it's a ForgeDock-managed stub
+        let existing = "";
+        try {
+          existing = readFileSync(target, "utf-8");
+        } catch {
+          // Can't read — treat as unmanaged
+        }
+
+        if (isForgeStub(existing)) {
+          // ForgeDock stub — check if it needs regeneration
+          if (existing === stubContent) {
+            skipped++;
+          } else {
+            const { rename } = await import("fs/promises");
+            const tmpPath = target + ".forgedock.tmp";
+            await writeFile(tmpPath, stubContent, "utf-8");
+            await rename(tmpPath, target);
+            console.log(`  ${YELLOW}Updated${RESET}: ${rel}`);
+            updated++;
+          }
         } else {
-          await symlink(file, target + ".tmp");
-          const { rename } = await import("fs/promises");
-          await rename(target + ".tmp", target);
-          console.log(`  ${YELLOW}Updated${RESET}: ${rel}`);
-          updated++;
+          // Non-ForgeDock regular file — do not overwrite
+          console.log(
+            `  ${YELLOW}WARNING${RESET}: ${rel} is a user file — skipping (remove it manually to let ForgeDock manage it)`,
+          );
+          skipped++;
         }
       } else {
+        // Directory or other — skip
         console.log(
-          `  ${YELLOW}WARNING${RESET}: ${rel} is a regular file — skipping (remove it manually to let ForgeDock manage it)`,
+          `  ${YELLOW}WARNING${RESET}: ${rel} exists but is not a file — skipping`,
         );
         skipped++;
       }
     } catch {
-      // Doesn't exist — create symlink
-      await symlink(file, target);
+      // Doesn't exist — write new stub file
+      await writeFile(target, stubContent, "utf-8");
       console.log(`  ${GREEN}Installed${RESET}: ${rel}`);
       installed++;
     }
@@ -718,10 +867,23 @@ async function uninstall() {
     try {
       const stats = await lstat(target);
       if (stats.isSymbolicLink()) {
+        // Legacy symlink install
         const current = await readlink(target);
         if (current === file) {
-          const { unlink } = await import("fs/promises");
-          await unlink(target);
+          await unlinkAsync(target);
+          console.log(`  ${RED}Removed${RESET}: ${rel}`);
+          removed++;
+        }
+      } else if (stats.isFile()) {
+        // Check if it's a ForgeDock-managed stub
+        let content = "";
+        try {
+          content = readFileSync(target, "utf-8");
+        } catch {
+          // Can't read — skip
+        }
+        if (isForgeStub(content)) {
+          await unlinkAsync(target);
           console.log(`  ${RED}Removed${RESET}: ${rel}`);
           removed++;
         }
