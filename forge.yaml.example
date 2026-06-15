@@ -34,6 +34,21 @@ project:
   # Used in issue templates and pipeline reports
   description: "SaaS platform for automated data processing"
 
+  # Personal GitHub login of the person who controls this project.
+  # Used by work-on Phase 1D (correction capture) to filter issue comments
+  # for owner-specific correction signals (e.g. "no, use staging not develop").
+  #
+  # When to set this:
+  #   - REQUIRED for org-owned repos: GitHub comment .user.login is always a
+  #     personal account (e.g. "mrdubey"), never the org name (e.g. "acme-org").
+  #     Without this field, correction capture is silently disabled for org repos.
+  #   - Optional for personal repos: omit it and the pipeline will auto-resolve
+  #     via `gh api repos/{GH_REPO} --jq '.owner.login'`.
+  #
+  # Example (org repo owned by "acme-org", controlled by "alice"):
+  #   owner_login: "alice"
+  # owner_login: "alice"
+
   # Pipeline repository — optional. Set this if the ForgeDock pipeline itself
   # lives in a different repo than the project being developed.
   # Used by audit.md, audit-agents.md, and security-audit.md to resolve {FORGE_REPO}
