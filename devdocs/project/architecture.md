@@ -142,15 +142,16 @@ When resolving which script to run for a given operation, agents apply the follo
 
 ```bash
 # Paths derived from forge.yaml
-SCRIPT_DIR="${REPO_PATH}/$(yq '.adaptive_scripts.directory // ".forgedock/scripts"' forge.yaml)"
+ADAPTIVE_DIR="${REPO_PATH}/$(yq '.adaptive_scripts.directory // ".forgedock/scripts"' forge.yaml)"
+ADAPTIVE_ENABLED=$(yq '.adaptive_scripts.enabled // "true"' forge.yaml 2>/dev/null || echo 'true')
 UNIVERSAL_DIR="${FORGEDOCK_HOME}/scripts"
 
 resolve_script() {
   local operation="$1"
   # Tier 1: forge.yaml → learned: (handled by caller before calling resolve_script)
-  # Tier 2: per-repo adaptive script
-  if [ -f "${SCRIPT_DIR}/${operation}.sh" ]; then
-    echo "adaptive:${SCRIPT_DIR}/${operation}.sh"
+  # Tier 2: per-repo adaptive script (skip if adaptive_scripts.enabled is false)
+  if [ "$ADAPTIVE_ENABLED" != "false" ] && [ -f "${ADAPTIVE_DIR}/${operation}.sh" ]; then
+    echo "adaptive:${ADAPTIVE_DIR}/${operation}.sh"
     return
   fi
   # Tier 3: universal script
@@ -179,8 +180,6 @@ esac
 ```
 
 **Logging tier in FORGE annotations**: When a script resolution runs, log the tier used (`adaptive`, `universal`, or `prose`) in the corresponding FORGE annotation comment. This gives the pipeline trace full observability into which script tier handled each operation.
-
-**When `adaptive_scripts.enabled` is `false`** in `forge.yaml`: skip Tier 2 entirely. Always use Tier 3 (universal) or fall back to Tier 4 (prose). The resolution algorithm should check this flag before searching `.forgedock/scripts/`.
 
 ## Milestone: Deterministic Pipeline v2
 
