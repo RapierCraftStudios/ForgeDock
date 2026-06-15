@@ -665,18 +665,29 @@ bash scripts/transition-label.sh {NUMBER} {GH_FLAG} building
 
 Branch slug from title (lowercase, hyphenated, max 40 chars). Prefix: `fix/` (bugs) or `feat/` (features).
 
+**Compute `PR_BASE` before worktree creation** — the source branch for the worktree MUST match the PR target. Compute `PR_BASE` now using `classify-lane.sh` so both worktree creation and Phase 4C use the same deterministic value. <!-- Added: forge#639 -->
+
+```bash
+# Compute PR_BASE deterministically from issue milestone — no LLM interpretation
+if ! PR_BASE=$(bash scripts/classify-lane.sh {NUMBER} -R {GH_REPO}); then
+  gh issue comment {NUMBER} {GH_FLAG} --body "BLOCKER: classify-lane.sh failed to compute PR target — see script error above. Adding needs-human."
+  gh issue edit {NUMBER} {GH_FLAG} --add-label "needs-human"
+  exit 1
+fi
+```
+
 **Determine source branch**:
 - Review-finding → parse `**Code branch**: \`{branch}\`` from issue body; branch from `origin/{branch}`
   - **Milestone review-finding hybrid lane** (Code branch matches `milestone/*`): High-risk lane. NEVER use `git merge` to resolve conflicts — use `git rebase` or `git cherry-pick` only. If conflicts can't be resolved without merge, post comment, add `needs-human`, STOP.
-- Feature lane (has milestone) → branch from `origin/{PR_BASE}`
-- Fast lane (no milestone) → branch from `origin/{STAGING_BRANCH}`
+- Feature lane (has milestone) → branch from `origin/{PR_BASE}` (PR_BASE now set above)
+- Fast lane (no milestone) → branch from `origin/{PR_BASE}` (PR_BASE = `{STAGING_BRANCH}`)
 
 ```bash
 cd {REPO_PATH}
 git fetch origin
 BRANCH="fix/{slug}-{NUMBER}"
 WORKTREE_PATH="{REPO_PATH}/.claude/worktrees/{BRANCH_SLUG}"
-git worktree add {WORKTREE_PATH} -b {BRANCH} origin/{SOURCE_BRANCH}
+git worktree add {WORKTREE_PATH} -b {BRANCH} origin/{PR_BASE}
 ```
 
 If worktree already exists: verify correct branch, reuse or remove and recreate.
@@ -976,10 +987,11 @@ cd {WORKTREE_PATH} && git push -u origin {BRANCH}
 If fails: try `--force-with-lease`. If still fails: post comment, add `needs-human`, STOP.
 
 ### 4C: Determine PR target
+`PR_BASE` was computed in Phase 3E. If somehow unset (e.g., resumed session after compaction), recompute:
 ```bash
 PR_BASE=$(bash scripts/classify-lane.sh {NUMBER} -R {GH_REPO})
 ```
-Output is authoritative — no prose fallback. Script exits 1 on error (invalid issue, `gh` auth failure); treat non-zero exit as `needs-human` and STOP. <!-- Added: forge#669 -->
+Output is authoritative — no prose fallback. Script exits 1 on error (invalid issue, `gh` auth failure, or milestone branch absent on remote); treat non-zero exit as `needs-human` and STOP. <!-- Added: forge#669, forge#639 -->
 
 ### 4C.5: Validate PR target against classified lane
 ```bash

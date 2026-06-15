@@ -9,7 +9,14 @@
 #   staging              — issue has no milestone (fast lane)
 #   milestone/{slug}     — issue has a milestone (feature lane, slug = lowercased, spaces→hyphens)
 #
-# Exit codes: 0 = success, 1 = error (invalid issue, gh auth failure, etc.)
+# Exit codes: 0 = success, 1 = error (invalid issue, gh auth failure, branch missing, etc.)
+#
+# Branch existence validation:
+#   For feature-lane outputs (milestone/{slug}), the script verifies the branch exists
+#   on the remote via `git ls-remote`. If the branch does not exist, exits 1 with a
+#   descriptive error. This prevents agents from creating PRs targeting phantom branches.
+#   Fast-lane output (staging) is returned without branch validation — staging is assumed
+#   to always exist as it is the primary integration branch.
 
 set -euo pipefail
 
@@ -71,5 +78,19 @@ else
     | tr ' ' '-' \
     | sed 's/--*/-/g' \
     | sed 's/^-//;s/-$//')
-  echo "milestone/$SLUG"
+  LANE="milestone/$SLUG"
+
+  # Validate that the computed milestone branch exists on the remote.
+  # A non-existent branch means either: (a) the milestone slug was hallucinated, or
+  # (b) the milestone branch has not been created yet. Either way, targeting it would
+  # strand the PR on a phantom branch — hard-fail so a human can investigate.
+  if ! git ls-remote --exit-code origin "$LANE" >/dev/null 2>&1; then
+    echo "ERROR: PR target branch '$LANE' does not exist on remote 'origin'." >&2
+    echo "       Milestone: '$MILESTONE_TITLE' → slug: '$SLUG'" >&2
+    echo "       Create the branch first, or check that the milestone title is correct." >&2
+    echo "       Run: git push origin HEAD:$LANE  (from the base branch)" >&2
+    exit 1
+  fi
+
+  echo "$LANE"
 fi
