@@ -726,6 +726,90 @@ You will be automatically notified when each background agent completes. **Do NO
 - Reading agent JSONL output files to check progress — use GitHub labels as the source of truth
 - Polling the same status check repeatedly on a timer
 
+### Step 4B.5: Time-Based Stall Detection
+
+**Purpose**: Catches agents that have stopped responding WITHOUT exiting (e.g., rate-limited, context-frozen, or silently hung). The reactive check in Step 4B only fires on agent completion — this check catches agents that never complete at all.
+
+**When to run** (NOT a sleep loop — two trigger points only):
+1. On every background agent completion event (run BEFORE the terminal-state check in Step 4B)
+2. Before posting any "waiting for wave..." status update to the user
+
+**Do NOT poll on a timer. Do NOT use sleep. Run at these two trigger points only.**
+
+**Read stall timeout from config**:
+```bash
+STALL_TIMEOUT=$(yq '.pipeline.stall_timeout_minutes // 15' forge.yaml 2>/dev/null || echo 15)
+```
+
+**For each non-terminal agent in the current wave**:
+```bash
+for NUM in {active_wave_issue_numbers}; do
+  # Skip issues already in terminal state
+  TERMINAL=$(gh issue view $NUM -R {GH_REPO} --json labels \
+    --jq '[.labels[].name | select(. == "workflow:merged" or . == "workflow:invalid" or . == "needs-human")] | length')
+  [ "$TERMINAL" -gt 0 ] && continue
+
+  # Get last activity timestamp — prefer last comment (catches FORGE:HEARTBEAT updates)
+  LAST_ACTIVITY=$(gh api repos/{GH_REPO}/issues/${NUM}/comments \
+    --jq '.[-1].updated_at // empty' 2>/dev/null)
+  # Fall back to issue updated_at if no comments
+  if [ -z "$LAST_ACTIVITY" ]; then
+    LAST_ACTIVITY=$(gh issue view $NUM -R {GH_REPO} --json updatedAt --jq '.updatedAt')
+  fi
+
+  # Compute elapsed minutes (GNU date — adjust for macOS: date -j -f "%Y-%m-%dT%H:%M:%SZ")
+  LAST_EPOCH=$(date -d "$LAST_ACTIVITY" +%s 2>/dev/null \
+    || date -j -f "%Y-%m-%dT%H:%M:%SZ" "$LAST_ACTIVITY" +%s 2>/dev/null)
+  NOW_EPOCH=$(date +%s)
+  ELAPSED_MIN=$(( (NOW_EPOCH - LAST_EPOCH) / 60 ))
+
+  if [ "$ELAPSED_MIN" -gt "$STALL_TIMEOUT" ]; then
+    # Count prior stall events on this issue
+    STALL_COUNT=$(gh api repos/{GH_REPO}/issues/${NUM}/comments \
+      --jq '[.[] | select(.body | contains("FORGE:STALL_DETECTED"))] | length')
+
+    CURRENT_STATE=$(gh issue view $NUM -R {GH_REPO} --json labels \
+      --jq '[.labels[].name | select(startswith("workflow:"))] | .[0] // "unknown"')
+
+    if [ "$STALL_COUNT" -lt 2 ]; then
+      # Auto-resume: post stall annotation and re-invoke /work-on
+      RESUME_ATTEMPT=$(( STALL_COUNT + 1 ))
+      gh issue comment $NUM -R {GH_REPO} --body "<!-- FORGE:STALL_DETECTED -->
+## Stall Detected
+
+**Issue**: #${NUM}
+**Elapsed since last activity**: ${ELAPSED_MIN} min (threshold: ${STALL_TIMEOUT} min)
+**Current workflow state**: ${CURRENT_STATE}
+**Auto-resume attempt**: ${RESUME_ATTEMPT} of 2
+**Timestamp**: $(date -u +%Y-%m-%dT%H:%M:%SZ)"
+
+      # Resume the agent — collect all resumes and launch in a single message (see Step 4B rule)
+      # STALL_RESUME_LIST is accumulated and launched in parallel after the loop
+      STALL_RESUME_LIST="$STALL_RESUME_LIST $NUM"
+    else
+      # 2+ prior stalls — auto-resume exhausted, escalate to needs-human
+      gh issue edit $NUM -R {GH_REPO} --add-label "needs-human"
+      gh issue comment $NUM -R {GH_REPO} --body "<!-- FORGE:STALL_DETECTED -->
+## Stall Escalated — Needs Human Intervention
+
+Issue #${NUM} has been auto-resumed ${STALL_COUNT} times without reaching a terminal state. Auto-resume limit (2) exhausted. Manual intervention required.
+
+**Last workflow state**: ${CURRENT_STATE}
+**Total elapsed since last activity**: ${ELAPSED_MIN} min
+**Timestamp**: $(date -u +%Y-%m-%dT%H:%M:%SZ)"
+      echo "STALL ESCALATED: #{NUM} → needs-human (${STALL_COUNT} prior resumes)"
+    fi
+  fi
+done
+
+# Launch all stall resumes in parallel (single message — same rule as Step 4B)
+# For each NUM in $STALL_RESUME_LIST, call Agent(resume="{AGENT_ID}", run_in_background=true, ...)
+```
+
+**Resume all stalled agents in a single message** (parallel). Use the same `Agent(resume=...)` pattern as Step 4B — do not wait between individual resumes.
+
+**Track stall resume cycles separately** from completion-event resumes (Step 4B). If the same issue accumulates ≥ 2 `FORGE:STALL_DETECTED` comments AND still hasn't reached terminal state, do not resume again — the `needs-human` label is already set.
+
 ### Step 4C: Collect review-finding issues from completed wave
 
 When ALL agents in the current wave have completed, check if any `/work-on` runs spawned review-finding issues during their review phase. These are new work items that should be folded into the remaining waves.
