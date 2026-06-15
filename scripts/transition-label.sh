@@ -109,6 +109,13 @@ for state in "${VALID_STATES[@]}"; do
   fi
 done
 
+# Export universal script environment so per-repo scripts can call back into universal scripts.
+# Per-repo scripts (.forgedock/scripts/{operation}.sh) source these to delegate to universal ones.
+export FORGEDOCK_SCRIPTS
+FORGEDOCK_SCRIPTS="$(cd "$(dirname "$0")" && pwd)"
+export FORGEDOCK_HOME
+FORGEDOCK_HOME="$(cd "$(dirname "$0")/.." && pwd)"
+
 # ---------------------------------------------------------------------------
 # Add target label
 # ---------------------------------------------------------------------------
