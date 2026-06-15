@@ -1688,6 +1688,16 @@ async function doctor() {
           const repoMatch = content.match(/^\s+repo:\s+"?([^"\n]+)"?\s*$/m);
           if (ownerMatch) forgeOwner = ownerMatch[1].trim();
           if (repoMatch) forgeRepo = repoMatch[1].trim();
+          // Validate against shell-safe identifier pattern before use in execSync
+          const SAFE_ID = /^[A-Za-z0-9._-]+$/;
+          if (forgeOwner && !SAFE_ID.test(forgeOwner)) {
+            warn("forge.yaml", `Invalid characters in project.owner — skipping label check`);
+            forgeOwner = null;
+          }
+          if (forgeRepo && !SAFE_ID.test(forgeRepo)) {
+            warn("forge.yaml", `Invalid characters in project.repo — skipping label check`);
+            forgeRepo = null;
+          }
         } else {
           fail("forge.yaml", `Missing required keys: ${missing.join(", ")}. Edit forge.yaml or run: npx forgedock init`);
         }
