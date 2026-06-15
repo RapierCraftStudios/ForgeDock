@@ -2,7 +2,7 @@
 
 import { fileURLToPath } from "url";
 import { dirname, join, relative } from "path";
-import { mkdir, symlink, readlink, lstat, readdir, stat } from "fs/promises";
+import { mkdir, symlink, readlink, lstat, readdir } from "fs/promises";
 import {
   existsSync,
   appendFileSync,
@@ -13,6 +13,24 @@ import {
 } from "fs";
 import { execSync } from "child_process";
 import readline from "readline";
+import {
+  renderLogo,
+  runSteps,
+  box,
+  table,
+  bold,
+  dim,
+  green,
+  red,
+  yellow,
+  cyan,
+  RESET,
+  BOLD,
+  GREEN,
+  RED,
+  YELLOW,
+  CYAN,
+} from "./tui.mjs";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
@@ -20,8 +38,8 @@ const FORGE_HOME = dirname(__dirname);
 const COMMANDS_DIR = join(FORGE_HOME, "commands");
 
 if (!process.env.HOME) {
-  console.error(
-    "Error: HOME environment variable is not set. Cannot determine install location.",
+  process.stderr.write(
+    "Error: HOME environment variable is not set. Cannot determine install location.\n",
   );
   process.exit(1);
 }
@@ -31,23 +49,9 @@ const TARGET_DIR = join(process.env.HOME, ".claude", "commands");
 const args = process.argv.slice(2);
 const command = args[0] || "install";
 
-const BOLD = "\x1b[1m";
-const GREEN = "\x1b[32m";
-const YELLOW = "\x1b[33m";
-const CYAN = "\x1b[36m";
-const RED = "\x1b[31m";
-const RESET = "\x1b[0m";
-const DIM = "\x1b[2m";
-
 // ---------------------------------------------------------------------------
-// Splash — the ForgeDock wordmark shown at startup
+// Splash — the ForgeDock F-monogram logo shown at startup
 // ---------------------------------------------------------------------------
-
-const LOGO_LINES = [
-  "  ╔═╗╔═╗╦═╗╔═╗╔═╗╔╦╗╔═╗╔═╗╦╔═",
-  "  ╠╣ ║ ║╠╦╝║ ╦║╣  ║║║ ║║  ╠╩╗",
-  "  ╚  ╚═╝╩╚═╚═╝╚═╝═╩╝╚═╝╚═╝╩ ╩",
-];
 
 function getVersion() {
   try {
@@ -62,16 +66,7 @@ function getVersion() {
 
 function splash() {
   const version = getVersion();
-  console.log("");
-  for (const line of LOGO_LINES) {
-    console.log(`${BOLD}${CYAN}${line}${RESET}`);
-  }
-  console.log("");
-  console.log(`  ${DIM}GitHub as a knowledge graph for AI agents${RESET}`);
-  if (version) {
-    console.log(`  ${DIM}v${version}${RESET}`);
-  }
-  console.log("");
+  process.stderr.write(renderLogo({ version }) + "\n");
 }
 
 /**
@@ -80,15 +75,15 @@ function splash() {
  */
 async function confirmOverwrite(question) {
   if (!process.stdin.isTTY) {
-    console.log(
-      `  ${YELLOW}Non-interactive environment detected — aborting to protect existing config.${RESET}`,
+    process.stderr.write(
+      `  ${YELLOW}Non-interactive environment detected — aborting to protect existing config.${RESET}\n`,
     );
     return false;
   }
   return new Promise((resolve) => {
     const rl = readline.createInterface({
       input: process.stdin,
-      output: process.stdout,
+      output: process.stderr,
     });
     rl.question(question, (answer) => {
       rl.close();
@@ -134,21 +129,24 @@ async function findMarkdownFiles(dir) {
   return results.sort();
 }
 
-async function install() {
-  console.log("");
-  console.log(`${BOLD}ForgeDock${RESET} — Installing pipeline commands`);
-  console.log(`  Source: ${CYAN}${COMMANDS_DIR}/${RESET}`);
-  console.log(`  Target: ${CYAN}${TARGET_DIR}/${RESET}`);
-  console.log("");
+// ---------------------------------------------------------------------------
+// Shared file-linking logic — used by both install() and update()
+// ---------------------------------------------------------------------------
 
-  await mkdir(TARGET_DIR, { recursive: true });
-
+/**
+ * Link or copy all commands from COMMANDS_DIR into TARGET_DIR.
+ * Calls step.progress(idx+1, total) on each file.
+ * Returns { installed, updated, skipped }.
+ */
+async function linkCommands(step) {
   const files = await findMarkdownFiles(COMMANDS_DIR);
+  const total = files.length;
   let installed = 0;
   let updated = 0;
   let skipped = 0;
 
-  for (const file of files) {
+  for (let idx = 0; idx < files.length; idx++) {
+    const file = files[idx];
     const rel = relative(COMMANDS_DIR, file);
     const target = join(TARGET_DIR, rel);
     const targetDir = dirname(target);
@@ -166,7 +164,6 @@ async function install() {
           await symlink(file, target + ".tmp");
           const { rename } = await import("fs/promises");
           await rename(target + ".tmp", target);
-          console.log(`  ${YELLOW}Updated${RESET}: ${rel}`);
           updated++;
         }
       } else {
@@ -178,15 +175,11 @@ async function install() {
           skipped++;
         } else {
           copyFileSync(file, target);
-          console.log(`  ${YELLOW}Updated${RESET}: ${rel}`);
           updated++;
         }
       }
     } catch (err) {
       if (err.code !== "ENOENT") {
-        console.error(
-          `  ${RED}Error${RESET}: Cannot access ${rel} — ${err.code ?? err.message}`,
-        );
         throw err;
       }
       // Doesn't exist — create it. Prefer a symlink; fall back to a copy on
@@ -194,182 +187,51 @@ async function install() {
       // Developer Mode / admin), which would otherwise throw EPERM. See #587.
       try {
         await symlink(file, target);
-        console.log(`  ${GREEN}Installed${RESET}: ${rel}`);
       } catch (linkErr) {
         if (linkErr.code === "EPERM" || linkErr.code === "EACCES") {
           copyFileSync(file, target);
-          console.log(`  ${GREEN}Installed${RESET} (copy): ${rel}`);
         } else {
           throw linkErr;
         }
       }
       installed++;
     }
+
+    step.progress(idx + 1, total);
   }
 
-  console.log("");
-  console.log(
-    `Done. ${GREEN}Installed: ${installed}${RESET}, Updated: ${updated}, Skipped: ${skipped}`,
-  );
-  console.log("");
-
-  // Set FORGE_HOME in shell profiles
-  let profileUpdated = false;
-  for (const profile of [
-    join(process.env.HOME, ".bashrc"),
-    join(process.env.HOME, ".zshrc"),
-  ]) {
-    if (existsSync(profile)) {
-      const content = readFileSync(profile, "utf-8");
-      if (!content.includes("FORGE_HOME")) {
-        appendFileSync(
-          profile,
-          `\n# ForgeDock — autonomous development pipeline\nexport FORGE_HOME="${FORGE_HOME}"\n`,
-        );
-        console.log(`  Added FORGE_HOME to ${profile}`);
-        profileUpdated = true;
-      }
-    }
-  }
-
-  console.log(
-    `${GREEN}ForgeDock commands are now available as slash commands in any Claude Code session.${RESET}`,
-  );
-  console.log("");
-
-  // Auto-generate forge.yaml if missing — no second command needed.
-  // Only do this inside a real git project; otherwise cwd may be a system or
-  // read-only directory (e.g. C:\Windows when npx is launched from a WSL path),
-  // and writing forge.yaml there would crash. See #585.
-  const cwd = process.cwd();
-  const forgeYamlPath = join(cwd, "forge.yaml");
-  if (!existsSync(forgeYamlPath)) {
-    if (isGitWorkTree(cwd)) {
-      await init(true);
-    } else {
-      console.log(
-        `  ${YELLOW}Skipping forge.yaml generation${RESET} — current directory is not a git project.`,
-      );
-      console.log(
-        `  Run ${CYAN}npx forgedock init${RESET} inside your project directory to generate it.`,
-      );
-      console.log("");
-    }
-  }
+  return { installed, updated, skipped };
 }
 
-async function uninstall() {
-  console.log("");
-  console.log(`${BOLD}ForgeDock${RESET} — Removing pipeline commands`);
-  console.log("");
+// ---------------------------------------------------------------------------
+// Core forge.yaml detection + write — used by both install() and init()
+// ---------------------------------------------------------------------------
 
-  const files = await findMarkdownFiles(COMMANDS_DIR);
-  let removed = 0;
-
-  for (const file of files) {
-    const rel = relative(COMMANDS_DIR, file);
-    const target = join(TARGET_DIR, rel);
-
-    try {
-      const stats = await lstat(target);
-      const { unlink } = await import("fs/promises");
-      if (stats.isSymbolicLink()) {
-        const current = await readlink(target);
-        if (current === file) {
-          await unlink(target);
-          console.log(`  ${RED}Removed${RESET}: ${rel}`);
-          removed++;
-        }
-      } else if (
-        readFileSync(file, "utf-8") === readFileSync(target, "utf-8")
-      ) {
-        // Regular file installed by ForgeDock in copy mode (content matches the
-        // shipped command). Safe to remove. Content-differing files are left
-        // in place in case the user edited them.
-        await unlink(target);
-        console.log(`  ${RED}Removed${RESET}: ${rel}`);
-        removed++;
-      }
-    } catch (err) {
-      if (err.code !== "ENOENT") {
-        console.error(
-          `  ${RED}Error${RESET}: Cannot access ${rel} — ${err.code ?? err.message}`,
-        );
-        throw err;
-      }
-      // Doesn't exist — nothing to do
-    }
-  }
-
-  console.log("");
-  console.log(`Done. Removed: ${removed} commands.`);
-  console.log("");
-}
-
-async function update() {
-  console.log("");
-  console.log(`${BOLD}ForgeDock${RESET} — Checking for updates`);
-  console.log("");
-
-  // Check if installed via npm (no .git directory) or via git clone
-  const gitDir = join(FORGE_HOME, ".git");
-  if (existsSync(gitDir)) {
-    try {
-      const branch = execSync("git rev-parse --abbrev-ref HEAD", {
-        cwd: FORGE_HOME,
-        encoding: "utf-8",
-      }).trim();
-      if (branch !== "main") {
-        console.log(`  Not on main branch (${branch}) — skipping`);
-        return;
-      }
-
-      const before = execSync("git rev-parse HEAD", {
-        cwd: FORGE_HOME,
-        encoding: "utf-8",
-      }).trim();
-      execSync("git fetch origin main --quiet", { cwd: FORGE_HOME });
-      execSync("git merge --ff-only origin/main --quiet", {
-        cwd: FORGE_HOME,
-      });
-      const after = execSync("git rev-parse HEAD", {
-        cwd: FORGE_HOME,
-        encoding: "utf-8",
-      }).trim();
-
-      if (before === after) {
-        console.log(`  Already up to date.`);
-      } else {
-        console.log(`  ${GREEN}Updated to latest.${RESET}`);
-        await install();
-      }
-    } catch (err) {
-      console.log(
-        `  ${YELLOW}Cannot fast-forward — local changes exist. Skipping.${RESET}`,
-      );
-    }
-  } else {
-    console.log(
-      `  Installed via npm. Run ${CYAN}npm update -g forgedock${RESET} to update.`,
-    );
-  }
-  console.log("");
-}
-
-async function init(fromInstall = false) {
-  console.log("");
-  console.log(`${BOLD}ForgeDock${RESET} — Generating forge.yaml`);
-  console.log("");
-
-  const cwd = process.cwd();
+/**
+ * Detect project info from the current working directory and write forge.yaml.
+ * Returns the detected config object.
+ * This is pure logic — no TUI output. Called from inside step callbacks.
+ *
+ * @param {string} cwd - Current working directory
+ * @param {object} [opts]
+ * @param {(text: string) => void} [opts.onNote] - Called with incremental progress notes
+ * @returns {Promise<{owner, repo, remoteDetected, defaultBranch, stagingBranch, description, outputPath, wrote: boolean, skipped: boolean, skipReason: string}>}
+ */
+async function detectAndBuildForgeYaml(cwd, opts = {}) {
+  const { onNote = () => {} } = opts;
   const worktreeBase = join(cwd, ".claude", "worktrees");
   const outputPath = join(cwd, "forge.yaml");
 
-  // --- Detect git remote URL and parse owner/repo ---
-  let owner = "your-github-org";
-  let repo = "your-repo-name";
-  let remoteDetected = false;
+  const detected = {
+    owner: "your-github-org",
+    repo: "your-repo-name",
+    remoteDetected: false,
+    defaultBranch: "main",
+    stagingBranch: "staging",
+    description: "",
+  };
 
+  // --- Detect git remote URL and parse owner/repo ---
   try {
     const remoteUrl = execSync("git remote get-url origin", {
       cwd,
@@ -385,210 +247,102 @@ async function init(fromInstall = false) {
     );
 
     if (sshMatch) {
-      owner = sshMatch[1];
-      repo = sshMatch[2];
-      remoteDetected = true;
+      detected.owner = sshMatch[1];
+      detected.repo = sshMatch[2];
+      detected.remoteDetected = true;
     } else if (httpsMatch) {
-      owner = httpsMatch[1];
-      repo = httpsMatch[2];
-      remoteDetected = true;
-    } else {
-      console.log(
-        `  ${YELLOW}Warning${RESET}: Could not parse git remote URL — using placeholder values`,
-      );
+      detected.owner = httpsMatch[1];
+      detected.repo = httpsMatch[2];
+      detected.remoteDetected = true;
     }
   } catch {
-    console.log(
-      `  ${YELLOW}Warning${RESET}: No git remote found — using placeholder values`,
-    );
+    // No git remote — use placeholders
   }
 
-  if (remoteDetected) {
-    console.log(`  Detected repo:   ${CYAN}${owner}/${repo}${RESET}`);
-  }
+  onNote(
+    detected.remoteDetected
+      ? `${detected.owner}/${detected.repo}`
+      : "no git remote — using placeholders",
+  );
 
   // --- Detect default branch ---
-  let defaultBranch = "main";
   try {
     const headRef = execSync("git symbolic-ref refs/remotes/origin/HEAD", {
       cwd,
       encoding: "utf-8",
       stdio: ["pipe", "pipe", "pipe"],
     }).trim();
-    // refs/remotes/origin/main → main
-    defaultBranch = headRef.replace(/^refs\/remotes\/origin\//, "");
-    console.log(`  Default branch:  ${CYAN}${defaultBranch}${RESET}`);
+    detected.defaultBranch = headRef.replace(/^refs\/remotes\/origin\//, "");
   } catch {
-    // Fallback: try git rev-parse
     try {
-      defaultBranch = execSync("git rev-parse --abbrev-ref HEAD", {
+      detected.defaultBranch = execSync("git rev-parse --abbrev-ref HEAD", {
         cwd,
         encoding: "utf-8",
         stdio: ["pipe", "pipe", "pipe"],
       }).trim();
-      if (defaultBranch === "HEAD") defaultBranch = "main";
-      console.log(
-        `  Default branch:  ${CYAN}${defaultBranch}${RESET} (from current branch)`,
-      );
+      if (detected.defaultBranch === "HEAD") detected.defaultBranch = "main";
     } catch {
-      console.log(
-        `  ${YELLOW}Warning${RESET}: Could not detect default branch — defaulting to "main"`,
-      );
+      // Use default "main"
     }
   }
 
   // --- Detect staging branch ---
-  let stagingBranch = "staging";
   try {
     const remoteBranches = execSync("git branch -r", {
       cwd,
       encoding: "utf-8",
       stdio: ["pipe", "pipe", "pipe"],
     });
-    if (remoteBranches.includes("origin/staging")) {
-      stagingBranch = "staging";
-      console.log(`  Staging branch:  ${CYAN}staging${RESET} (detected)`);
-    } else {
-      stagingBranch = defaultBranch;
-      console.log(
-        `  Staging branch:  ${CYAN}${defaultBranch}${RESET} (no staging branch found — using default)`,
-      );
-    }
+    detected.stagingBranch = remoteBranches.includes("origin/staging")
+      ? "staging"
+      : detected.defaultBranch;
   } catch {
-    console.log(
-      `  ${YELLOW}Warning${RESET}: Could not read remote branches — defaulting staging to "${defaultBranch}"`,
-    );
-    stagingBranch = defaultBranch;
+    detected.stagingBranch = detected.defaultBranch;
   }
 
-  // --- Auto-detect project description from README.md ---
-  let description = "";
-  try {
-    const readmePath = join(cwd, "README.md");
-    if (existsSync(readmePath)) {
-      const readmeContent = readFileSync(readmePath, "utf-8").slice(0, 2048);
-      // Skip the first heading line (# Title), grab the first non-empty paragraph
-      const lines = readmeContent.split("\n");
-      let inFirstParagraph = false;
-      const paragraphLines = [];
-      for (const line of lines) {
-        // Skip heading lines at the top
-        if (!inFirstParagraph && line.match(/^#/)) continue;
-        // Skip blank lines before paragraph starts
-        if (!inFirstParagraph && line.trim() === "") continue;
-        // Skip lines that are just badges, HTML, code fences, horizontal rules, or tables
-        if (!inFirstParagraph && line.match(/^[!<\[`|]/)) continue;
-        if (!inFirstParagraph && line.match(/^---/)) continue;
-        // Start collecting
-        if (!inFirstParagraph) {
-          inFirstParagraph = true;
-        }
-        // Stop at blank line (end of paragraph)
-        if (line.trim() === "") break;
-        paragraphLines.push(line.trim());
+  // --- Auto-detect project description from README.md / CLAUDE.md ---
+  function extractFirstParagraph(text) {
+    const lines = text.split("\n");
+    let inFirstParagraph = false;
+    const paragraphLines = [];
+    for (const line of lines) {
+      if (!inFirstParagraph && line.match(/^#/)) continue;
+      if (!inFirstParagraph && line.trim() === "") continue;
+      if (!inFirstParagraph && line.match(/^[!<\[`|]/)) continue;
+      if (!inFirstParagraph && line.match(/^---/)) continue;
+      if (!inFirstParagraph) {
+        inFirstParagraph = true;
       }
-      if (paragraphLines.length > 0) {
-        // Flatten to single line, strip markdown links/bold/inline code
-        description = paragraphLines
-          .join(" ")
-          .replace(/\[([^\]]+)\]\([^)]+\)/g, "$1")
-          .replace(/\*\*([^*]+)\*\*/g, "$1")
-          .replace(/`([^`]+)`/g, "$1")
-          .slice(0, 200)
-          .trim();
-      }
+      if (line.trim() === "") break;
+      paragraphLines.push(line.trim());
     }
-  } catch {
-    // Best-effort only — silently fall back to empty description
+    if (paragraphLines.length === 0) return "";
+    return paragraphLines
+      .join(" ")
+      .replace(/\[([^\]]+)\]\([^)]+\)/g, "$1")
+      .replace(/\*\*([^*]+)\*\*/g, "$1")
+      .replace(/`([^`]+)`/g, "$1")
+      .slice(0, 200)
+      .trim();
   }
 
-  if (description) {
-    console.log(
-      `  Description:     ${CYAN}${description.slice(0, 60)}${description.length > 60 ? "…" : ""}${RESET} (from README.md)`,
-    );
-  }
-
-  // --- Auto-detect project description from CLAUDE.md (fallback) ---
-  if (!description) {
+  for (const fname of ["README.md", "CLAUDE.md"]) {
+    if (detected.description) break;
     try {
-      const claudePath = join(cwd, "CLAUDE.md");
-      if (existsSync(claudePath)) {
-        const claudeContent = readFileSync(claudePath, "utf-8").slice(0, 2048);
-        const lines = claudeContent.split("\n");
-        let inFirstParagraph = false;
-        const paragraphLines = [];
-        for (const line of lines) {
-          // Skip heading lines at the top
-          if (!inFirstParagraph && line.match(/^#/)) continue;
-          // Skip blank lines before paragraph starts
-          if (!inFirstParagraph && line.trim() === "") continue;
-          // Skip lines that are just badges, HTML comments, code fences, horizontal rules, or tables
-          if (!inFirstParagraph && line.match(/^[!<\[`|]/)) continue;
-          if (!inFirstParagraph && line.match(/^---/)) continue;
-          // Start collecting
-          if (!inFirstParagraph) {
-            inFirstParagraph = true;
-          }
-          // Stop at blank line (end of paragraph)
-          if (line.trim() === "") break;
-          paragraphLines.push(line.trim());
-        }
-        if (paragraphLines.length > 0) {
-          // Flatten to single line, strip markdown links/bold/inline code
-          description = paragraphLines
-            .join(" ")
-            .replace(/\[([^\]]+)\]\([^)]+\)/g, "$1")
-            .replace(/\*\*([^*]+)\*\*/g, "$1")
-            .replace(/`([^`]+)`/g, "$1")
-            .slice(0, 200)
-            .trim();
-        }
+      const fpath = join(cwd, fname);
+      if (existsSync(fpath)) {
+        detected.description = extractFirstParagraph(
+          readFileSync(fpath, "utf-8").slice(0, 2048),
+        );
       }
     } catch {
-      // Best-effort only — silently fall back to empty description
-    }
-
-    if (description) {
-      console.log(
-        `  Description:     ${CYAN}${description.slice(0, 60)}${description.length > 60 ? "…" : ""}${RESET} (from CLAUDE.md)`,
-      );
+      // Best-effort only
     }
   }
 
-  // --- Handle existing forge.yaml ---
-  if (existsSync(outputPath)) {
-    if (!fromInstall) {
-      console.log(
-        `  ${YELLOW}Warning:${RESET} forge.yaml already exists at ${outputPath}`,
-      );
-      console.log(
-        `  Continuing will back up your existing config and replace it with a freshly generated one.`,
-      );
-      console.log(``);
-      const confirmed = await confirmOverwrite(`  Overwrite? [y/N] `);
-      if (!confirmed) {
-        console.log(``);
-        console.log(
-          `  ${YELLOW}Aborted.${RESET} Your forge.yaml was not modified.`,
-        );
-        console.log(``);
-        return;
-      }
-      console.log(``);
-    }
-    const baseBak = join(cwd, "forge.yaml.bak");
-    const backupPath = existsSync(baseBak)
-      ? join(
-          cwd,
-          `forge.yaml.bak.${new Date().toISOString().replace(/[:.]/g, "-")}`,
-        )
-      : baseBak;
-    const backupName = backupPath.split("/").pop();
-    renameSync(outputPath, backupPath);
-    console.log(`  ${YELLOW}Backed up${RESET}: forge.yaml → ${backupName}`);
-  }
+  // --- Build forge.yaml content ---
+  const { owner, repo, defaultBranch, stagingBranch, description } = detected;
 
-  // --- Generate forge.yaml content ---
   const projectName = repo
     .split(/[-_]/)
     .map((w) => w.charAt(0).toUpperCase() + w.slice(1))
@@ -687,70 +441,391 @@ branches:
   try {
     writeFileSync(outputPath, content, "utf-8");
   } catch (err) {
-    console.error("");
-    console.error(
-      `  ${RED}Error${RESET}: Could not write forge.yaml to ${outputPath} — ${err.code ?? err.message}`,
+    throw new Error(
+      `Could not write forge.yaml to ${outputPath} — ${err.code ?? err.message}. ` +
+        `Run npx forgedock init from a writable project directory.`,
     );
-    console.error(
-      `  Run ${CYAN}npx forgedock init${RESET} from a writable project directory.`,
-    );
-    process.exit(1);
   }
 
-  console.log(`  ${GREEN}Created${RESET}: forge.yaml`);
-  console.log("");
+  return { ...detected, outputPath, wrote: true };
+}
 
-  if (fromInstall) {
-    // Called automatically from install() — only print what still needs attention
-    if (!remoteDetected) {
-      console.log(`${YELLOW}Action required:${RESET}`);
-      console.log(
-        `  Edit ${CYAN}forge.yaml${RESET} — fill in ${CYAN}project.owner${RESET} and ${CYAN}project.repo${RESET} (git remote not detected)`,
-      );
-      console.log("");
-    }
-  } else {
-    // Called explicitly via `npx forgedock init` — print full next steps
-    console.log(`${BOLD}Next steps:${RESET}`);
-    if (!remoteDetected) {
-      console.log(
-        `  1. Edit ${CYAN}forge.yaml${RESET} — fill in ${CYAN}project.owner${RESET} and ${CYAN}project.repo${RESET}`,
-      );
-    } else {
-      console.log(
-        `  1. Review ${CYAN}forge.yaml${RESET} — all required fields were auto-detected`,
-      );
-    }
-    console.log(
-      `  2. Add ${CYAN}forge.yaml${RESET} to ${CYAN}.gitignore${RESET} if it contains sensitive paths`,
+// ---------------------------------------------------------------------------
+// Subcommands
+// ---------------------------------------------------------------------------
+
+async function install() {
+  const result = await runSteps([
+    {
+      label: "Checking environment",
+      async run(step) {
+        await mkdir(TARGET_DIR, { recursive: true });
+        step.note(cyan(TARGET_DIR));
+      },
+    },
+    {
+      label: "Linking commands",
+      async run(step) {
+        const { installed, updated, skipped } = await linkCommands(step);
+        step.note(
+          `${green(String(installed))} installed, ${updated} updated, ${dim(String(skipped))} skipped`,
+        );
+      },
+    },
+    {
+      label: "Configuring session hook",
+      async run(step) {
+        let profileUpdated = false;
+        for (const profile of [
+          join(process.env.HOME, ".bashrc"),
+          join(process.env.HOME, ".zshrc"),
+        ]) {
+          if (existsSync(profile)) {
+            const content = readFileSync(profile, "utf-8");
+            if (!content.includes("FORGE_HOME")) {
+              appendFileSync(
+                profile,
+                `\n# ForgeDock — autonomous development pipeline\nexport FORGE_HOME="${FORGE_HOME}"\n`,
+              );
+              profileUpdated = true;
+            }
+          }
+        }
+        if (!profileUpdated) {
+          step.skip("FORGE_HOME already set");
+        }
+      },
+    },
+    {
+      label: "Generating forge.yaml",
+      async run(step) {
+        // Auto-generate forge.yaml if missing — no second command needed.
+        // Only do this inside a real git project; otherwise cwd may be a system or
+        // read-only directory (e.g. C:\Windows when npx is launched from a WSL path),
+        // and writing forge.yaml there would crash. See #585.
+        const cwd = process.cwd();
+        const forgeYamlPath = join(cwd, "forge.yaml");
+        if (existsSync(forgeYamlPath)) {
+          step.skip("forge.yaml already exists");
+          return;
+        }
+        if (!isGitWorkTree(cwd)) {
+          step.skip(
+            "not a git project — run npx forgedock init inside your project",
+          );
+          return;
+        }
+        const detected = await detectAndBuildForgeYaml(cwd, {
+          onNote: () => {},
+        });
+        if (!detected.remoteDetected) {
+          step.note("created — fill in project.owner and project.repo");
+        } else {
+          step.note(`created for ${detected.owner}/${detected.repo}`);
+        }
+      },
+    },
+  ]);
+
+  if (result.ok) {
+    process.stderr.write(
+      box(
+        [
+          `${green("✔")} ${bold("ForgeDock is ready")}`,
+          "",
+          `Commands installed to ${cyan(TARGET_DIR)}`,
+          `Next: ${cyan("cd <your-project>")} then ${cyan("npx forgedock init")}`,
+        ],
+        { title: "ForgeDock Installed" },
+      ) + "\n",
     );
-    console.log(
-      `  3. Run ${CYAN}/forgedock-init${RESET} inside Claude Code for guided AI-powered setup`,
-    );
-    console.log("");
   }
 }
 
+async function uninstall() {
+  const result = await runSteps([
+    {
+      label: "Removing commands",
+      async run(step) {
+        const files = await findMarkdownFiles(COMMANDS_DIR);
+        const total = files.length;
+        let removed = 0;
+
+        for (let idx = 0; idx < files.length; idx++) {
+          const file = files[idx];
+          const rel = relative(COMMANDS_DIR, file);
+          const target = join(TARGET_DIR, rel);
+
+          try {
+            const stats = await lstat(target);
+            const { unlink } = await import("fs/promises");
+            if (stats.isSymbolicLink()) {
+              const current = await readlink(target);
+              if (current === file) {
+                await unlink(target);
+                removed++;
+              }
+            } else if (
+              readFileSync(file, "utf-8") === readFileSync(target, "utf-8")
+            ) {
+              // Regular file installed by ForgeDock in copy mode (content matches the
+              // shipped command). Safe to remove. Content-differing files are left
+              // in place in case the user edited them.
+              await unlink(target);
+              removed++;
+            }
+          } catch (err) {
+            if (err.code !== "ENOENT") {
+              throw err;
+            }
+            // Doesn't exist — nothing to do
+          }
+
+          step.progress(idx + 1, total);
+        }
+
+        step.note(`${red(String(removed))} removed`);
+      },
+    },
+  ]);
+
+  if (result.ok) {
+    process.stderr.write(
+      box(
+        [
+          `${green("✔")} ForgeDock commands removed`,
+          "",
+          `Re-install anytime: ${cyan("npx forgedock")}`,
+        ],
+        { title: "ForgeDock Uninstalled" },
+      ) + "\n",
+    );
+  }
+}
+
+async function update() {
+  // Check if installed via npm (no .git directory) or via git clone
+  const gitDir = join(FORGE_HOME, ".git");
+  if (!existsSync(gitDir)) {
+    await runSteps([
+      {
+        label: "Checking update path",
+        async run(step) {
+          step.skip(`installed via npm — run ${cyan("npm update -g forgedock")}`);
+        },
+      },
+    ]);
+    return;
+  }
+
+  const result = await runSteps([
+    {
+      label: "Checking current branch",
+      async run(step) {
+        const branch = execSync("git rev-parse --abbrev-ref HEAD", {
+          cwd: FORGE_HOME,
+          encoding: "utf-8",
+        }).trim();
+        if (branch !== "main") {
+          step.skip(`not on main (${branch})`);
+        } else {
+          step.note("on main");
+        }
+      },
+    },
+    {
+      label: "Fetching latest",
+      async run(step) {
+        const branch = execSync("git rev-parse --abbrev-ref HEAD", {
+          cwd: FORGE_HOME,
+          encoding: "utf-8",
+        }).trim();
+        if (branch !== "main") {
+          step.skip("skipped — not on main");
+          return;
+        }
+        const before = execSync("git rev-parse HEAD", {
+          cwd: FORGE_HOME,
+          encoding: "utf-8",
+        }).trim();
+        try {
+          execSync("git fetch origin main --quiet", { cwd: FORGE_HOME });
+          execSync("git merge --ff-only origin/main --quiet", {
+            cwd: FORGE_HOME,
+          });
+        } catch {
+          step.skip("cannot fast-forward — local changes exist");
+          return;
+        }
+        const after = execSync("git rev-parse HEAD", {
+          cwd: FORGE_HOME,
+          encoding: "utf-8",
+        }).trim();
+        if (before === after) {
+          step.skip("already up to date");
+        } else {
+          step.note(`${before.slice(0, 7)} → ${after.slice(0, 7)}`);
+        }
+      },
+    },
+    {
+      label: "Reinstalling commands",
+      async run(step) {
+        const branch = execSync("git rev-parse --abbrev-ref HEAD", {
+          cwd: FORGE_HOME,
+          encoding: "utf-8",
+        }).trim();
+        if (branch !== "main") {
+          step.skip("skipped — not on main");
+          return;
+        }
+        const { installed, updated, skipped } = await linkCommands(step);
+        step.note(
+          `${green(String(installed))} installed, ${updated} updated, ${dim(String(skipped))} skipped`,
+        );
+      },
+    },
+  ]);
+
+  if (result.ok) {
+    process.stderr.write(
+      box([`${green("✔")} ForgeDock is up to date`], {
+        title: "ForgeDock Updated",
+      }) + "\n",
+    );
+  }
+}
+
+async function init(fromInstall = false) {
+  const cwd = process.cwd();
+  const outputPath = join(cwd, "forge.yaml");
+
+  // When called from install(), we already know forge.yaml doesn't exist
+  // and cwd is a git work tree — go straight to detection and write.
+  if (fromInstall) {
+    const detected = await detectAndBuildForgeYaml(cwd, { onNote: () => {} });
+    if (!detected.remoteDetected) {
+      process.stderr.write(
+        box(
+          [
+            `${yellow("Action required:")}`,
+            `Edit ${cyan("forge.yaml")} — fill in ${cyan("project.owner")} and ${cyan("project.repo")}`,
+            "(git remote not detected)",
+          ],
+          { title: "forge.yaml Generated" },
+        ) + "\n",
+      );
+    }
+    return;
+  }
+
+  // Interactive path — run as a step-checklist with a full summary box.
+  let detected = null;
+  let aborted = false;
+
+  // Handle existing forge.yaml before entering runSteps (needs interactive prompt)
+  if (existsSync(outputPath)) {
+    process.stderr.write(
+      `\n  ${YELLOW}Warning:${RESET} forge.yaml already exists at ${outputPath}\n`,
+    );
+    process.stderr.write(
+      `  Continuing will back up your existing config and replace it.\n\n`,
+    );
+    const confirmed = await confirmOverwrite(`  Overwrite? [y/N] `);
+    if (!confirmed) {
+      process.stderr.write(
+        `\n  ${YELLOW}Aborted.${RESET} Your forge.yaml was not modified.\n\n`,
+      );
+      return;
+    }
+    process.stderr.write("\n");
+
+    // Back up existing file before proceeding
+    const baseBak = join(cwd, "forge.yaml.bak");
+    const backupPath = existsSync(baseBak)
+      ? join(
+          cwd,
+          `forge.yaml.bak.${new Date().toISOString().replace(/[:.]/g, "-")}`,
+        )
+      : baseBak;
+    const backupName = backupPath.split("/").pop();
+    renameSync(outputPath, backupPath);
+    process.stderr.write(`  ${YELLOW}Backed up${RESET}: forge.yaml → ${backupName}\n\n`);
+  }
+
+  const result = await runSteps([
+    {
+      label: "Detecting project",
+      async run(step) {
+        detected = await detectAndBuildForgeYaml(cwd, {
+          onNote: (msg) => step.note(msg),
+        });
+      },
+    },
+  ]);
+
+  if (!result.ok || !detected) return;
+
+  const {
+    owner,
+    repo,
+    defaultBranch,
+    stagingBranch,
+    remoteDetected,
+    description,
+  } = detected;
+
+  const summaryLines = [
+    `${green("✔")} forge.yaml generated`,
+    "",
+    `  repo:     ${cyan(owner + "/" + repo)}`,
+    `  default:  ${cyan(defaultBranch)}`,
+    `  staging:  ${cyan(stagingBranch)}`,
+  ];
+  if (description) {
+    summaryLines.push(
+      `  desc:     ${dim(
+        description.slice(0, 60) + (description.length > 60 ? "…" : ""),
+      )}`,
+    );
+  }
+  summaryLines.push("");
+  if (!remoteDetected) {
+    summaryLines.push(
+      `${yellow("→")} Edit ${cyan("forge.yaml")} — fill in ${cyan("project.owner")} and ${cyan("project.repo")}`,
+    );
+  } else {
+    summaryLines.push(
+      `${green("→")} Review ${cyan("forge.yaml")} — all required fields were auto-detected`,
+    );
+  }
+  summaryLines.push(
+    `${green("→")} Add ${cyan("forge.yaml")} to ${cyan(".gitignore")} if it contains sensitive paths`,
+  );
+  summaryLines.push(
+    `${green("→")} Run ${cyan("/forgedock-init")} inside Claude Code for guided AI-powered setup`,
+  );
+
+  process.stderr.write(
+    box(summaryLines, { title: "forge.yaml Generated" }) + "\n",
+  );
+}
+
 function help() {
-  console.log("");
-  console.log(
-    `${BOLD}ForgeDock${RESET} — GitHub as a knowledge graph for AI agents`,
+  // renderLogo already shown by splash() above — show the command table
+  const commands = [
+    ["Command", "Description"],
+    ["npx forgedock", "Install commands (default)"],
+    ["npx forgedock install", "Install commands"],
+    ["npx forgedock init", "Generate forge.yaml config for your project"],
+    ["npx forgedock uninstall", "Remove commands"],
+    ["npx forgedock update", "Pull latest & reinstall"],
+    ["npx forgedock help", "Show this help"],
+  ];
+
+  process.stderr.write(
+    box(table(commands, { header: true }), { title: "Usage" }) + "\n",
   );
-  console.log("");
-  console.log("Usage:");
-  console.log(
-    `  ${CYAN}npx forgedock${RESET}            Install commands (default)`,
-  );
-  console.log(`  ${CYAN}npx forgedock install${RESET}    Install commands`);
-  console.log(
-    `  ${CYAN}npx forgedock init${RESET}       Generate forge.yaml config for your project`,
-  );
-  console.log(`  ${CYAN}npx forgedock uninstall${RESET}  Remove commands`);
-  console.log(
-    `  ${CYAN}npx forgedock update${RESET}     Pull latest & reinstall`,
-  );
-  console.log(`  ${CYAN}npx forgedock help${RESET}       Show this help`);
-  console.log("");
 }
 
 splash();
@@ -774,7 +849,7 @@ switch (command) {
     help();
     break;
   default:
-    console.log(`${RED}Unknown command: ${command}${RESET}`);
+    process.stderr.write(`${RED}Unknown command: ${command}${RESET}\n`);
     help();
     process.exit(1);
 }

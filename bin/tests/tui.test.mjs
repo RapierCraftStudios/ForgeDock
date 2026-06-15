@@ -9,6 +9,8 @@
  *     ANSI-decorated truncation mid-styled-run with no-token-leak assertion,
  *     trailing reset present after truncation, no spurious reset on no-truncation,
  *     boundary values (maxWidth=0, ANSI-only input).
+ *   - runSteps: ordering, skip, failure-stop, non-TTY plain output, elapsed-time line.
+ *   - renderLogo: plain-text fallback when NO_COLOR is set / non-TTY environment.
  *
  * Run with: node --test bin/tests/tui.test.mjs
  */
@@ -29,7 +31,7 @@ const __dirname = dirname(__filename);
 //
 // Use pathToFileURL to produce a valid file:// URL on Windows (raw C:\ paths are
 // not valid ESM specifiers on Windows — see ERR_UNSUPPORTED_ESM_URL_SCHEME).
-const { stripAnsi, truncateVisible } = await import(
+const { stripAnsi, truncateVisible, runSteps, renderLogo } = await import(
   pathToFileURL(join(__dirname, "..", "tui.mjs")).href
 );
 
@@ -276,5 +278,283 @@ describe("truncateVisible — boundary values", () => {
     const resetCount = (result.match(/\x1b\[0m/g) || []).length;
     assert.equal(resetCount, 1,
       "trailing reset must appear exactly once — not duplicated");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// runSteps — non-TTY / no-ANSI mode (uses _forceNoAnsi: true)
+//
+// All tests use a mock writable stream to capture output without requiring a
+// real TTY. _forceNoAnsi: true forces the non-TTY code path regardless of
+// the test runner's TTY state.
+// ---------------------------------------------------------------------------
+
+/**
+ * Create a lightweight writable stream mock that collects written chunks.
+ * @returns {{ write(chunk: string): void, output(): string, isTTY: boolean }}
+ */
+function makeStream() {
+  const chunks = [];
+  return {
+    isTTY: false, // non-TTY
+    write(chunk) { chunks.push(chunk); },
+    output() { return chunks.join(""); },
+  };
+}
+
+describe("runSteps — non-TTY: ordering and success", () => {
+  it("runs steps in order and prints ✔ for each", async () => {
+    const order = [];
+    const stream = makeStream();
+    const result = await runSteps([
+      { label: "Step A", run: async () => { order.push("A"); } },
+      { label: "Step B", run: async () => { order.push("B"); } },
+      { label: "Step C", run: async () => { order.push("C"); } },
+    ], { stream, _forceNoAnsi: true });
+
+    assert.deepEqual(order, ["A", "B", "C"], "steps must run in order A→B→C");
+    assert.equal(result.ok, true, "result.ok must be true on success");
+  });
+
+  it("prints ✔ <label> for each completed step", async () => {
+    const stream = makeStream();
+    await runSteps([
+      { label: "Alpha", run: async () => {} },
+      { label: "Beta",  run: async () => {} },
+    ], { stream, _forceNoAnsi: true });
+
+    const out = stream.output();
+    assert.ok(out.includes("✔ Alpha\n"), "output must include ✔ Alpha");
+    assert.ok(out.includes("✔ Beta\n"),  "output must include ✔ Beta");
+  });
+
+  it("prints elapsed-time summary line on success", async () => {
+    const stream = makeStream();
+    await runSteps([
+      { label: "Only step", run: async () => {} },
+    ], { stream, _forceNoAnsi: true });
+
+    const out = stream.output();
+    assert.ok(
+      /✔ Done in \d+\.\d+s/.test(out),
+      "output must include '✔ Done in X.Xs' elapsed summary",
+    );
+  });
+
+  it("returns { ok: true, elapsed } on success", async () => {
+    const stream = makeStream();
+    const result = await runSteps([
+      { label: "Fast step", run: async () => {} },
+    ], { stream, _forceNoAnsi: true });
+
+    assert.equal(result.ok, true);
+    assert.equal(typeof result.elapsed, "number", "elapsed must be a number (ms)");
+    assert.ok(result.elapsed >= 0, "elapsed must be non-negative");
+  });
+});
+
+describe("runSteps — non-TTY: skip behavior", () => {
+  it("marks a step as skipped (—) when step.skip() is called", async () => {
+    const stream = makeStream();
+    await runSteps([
+      { label: "Optional step", run: async (step) => { step.skip("not needed"); } },
+    ], { stream, _forceNoAnsi: true });
+
+    const out = stream.output();
+    assert.ok(out.includes("— Optional step — not needed\n"),
+      "skipped step must print '— <label> — <reason>'");
+  });
+
+  it("prints '— <label>' (no reason suffix) when skip() called with no argument", async () => {
+    const stream = makeStream();
+    await runSteps([
+      { label: "No reason", run: async (step) => { step.skip(); } },
+    ], { stream, _forceNoAnsi: true });
+
+    const out = stream.output();
+    assert.ok(out.includes("— No reason\n"),
+      "skip with no reason must print '— <label>' with no trailing dash");
+  });
+
+  it("continues to next step after a skip", async () => {
+    const order = [];
+    const stream = makeStream();
+    await runSteps([
+      { label: "First",  run: async (step) => { step.skip("skip"); order.push("skip"); } },
+      { label: "Second", run: async () => { order.push("second"); } },
+    ], { stream, _forceNoAnsi: true });
+
+    assert.deepEqual(order, ["skip", "second"],
+      "execution must continue after a skipped step");
+  });
+});
+
+describe("runSteps — non-TTY: failure behavior", () => {
+  it("stops on first thrown error and returns ok: false", async () => {
+    const order = [];
+    const stream = makeStream();
+    const err = new Error("boom");
+    const result = await runSteps([
+      { label: "OK step",   run: async () => { order.push("ok"); } },
+      { label: "Bad step",  run: async () => { order.push("bad"); throw err; } },
+      { label: "Last step", run: async () => { order.push("last"); } },
+    ], { stream, _forceNoAnsi: true });
+
+    assert.deepEqual(order, ["ok", "bad"], "run must stop after the failing step");
+    assert.equal(result.ok, false, "result.ok must be false");
+    assert.equal(result.failedStep, 1, "failedStep must be the index of the bad step");
+    assert.equal(result.error, err, "result.error must be the thrown error");
+  });
+
+  it("prints ✖ <label> — <message> on failure", async () => {
+    const stream = makeStream();
+    await runSteps([
+      { label: "Crash step", run: async () => { throw new Error("connection refused"); } },
+    ], { stream, _forceNoAnsi: true });
+
+    const out = stream.output();
+    assert.ok(out.includes("✖ Crash step — connection refused\n"),
+      "failure output must include '✖ <label> — <message>'");
+  });
+
+  it("does NOT print a stack trace on failure", async () => {
+    const stream = makeStream();
+    const err = new Error("oops");
+    await runSteps([
+      { label: "Erroring step", run: async () => { throw err; } },
+    ], { stream, _forceNoAnsi: true });
+
+    const out = stream.output();
+    assert.ok(!out.includes("at "), "stack trace lines ('at ...') must not appear in output");
+  });
+
+  it("prints elapsed-time failure summary line", async () => {
+    const stream = makeStream();
+    await runSteps([
+      { label: "Fail", run: async () => { throw new Error("err"); } },
+    ], { stream, _forceNoAnsi: true });
+
+    const out = stream.output();
+    assert.ok(
+      /✖ Failed in \d+\.\d+s/.test(out),
+      "output must include '✖ Failed in X.Xs' elapsed summary on failure",
+    );
+  });
+
+  it("returns elapsed on failure", async () => {
+    const stream = makeStream();
+    const result = await runSteps([
+      { label: "Fail", run: async () => { throw new Error("err"); } },
+    ], { stream, _forceNoAnsi: true });
+
+    assert.equal(typeof result.elapsed, "number");
+    assert.ok(result.elapsed >= 0);
+  });
+});
+
+describe("runSteps — non-TTY: no ANSI escape codes in output", () => {
+  it("output contains no ANSI CSI sequences", async () => {
+    const stream = makeStream();
+    await runSteps([
+      { label: "Step 1", run: async () => {} },
+      { label: "Step 2", run: async (step) => { step.skip("skipping"); } },
+    ], { stream, _forceNoAnsi: true });
+
+    const out = stream.output();
+    assert.ok(!/\x1b\[/.test(out),
+      "non-TTY output must contain no ANSI escape sequences");
+  });
+
+  it("failure output contains no ANSI CSI sequences", async () => {
+    const stream = makeStream();
+    await runSteps([
+      { label: "Bad step", run: async () => { throw new Error("nope"); } },
+    ], { stream, _forceNoAnsi: true });
+
+    const out = stream.output();
+    assert.ok(!/\x1b\[/.test(out),
+      "non-TTY failure output must contain no ANSI escape sequences");
+  });
+});
+
+describe("runSteps — non-TTY: step.progress() is a no-op", () => {
+  it("does not throw when step.progress() is called", async () => {
+    const stream = makeStream();
+    await assert.doesNotReject(
+      () => runSteps([
+        {
+          label: "Progress step",
+          run: async (step) => {
+            for (let i = 0; i <= 10; i++) step.progress(i, 10);
+          },
+        },
+      ], { stream, _forceNoAnsi: true }),
+      "step.progress() must not throw in non-TTY mode",
+    );
+  });
+});
+
+describe("runSteps — non-TTY: step.note() is a no-op", () => {
+  it("does not throw when step.note() is called", async () => {
+    const stream = makeStream();
+    await assert.doesNotReject(
+      () => runSteps([
+        {
+          label: "Note step",
+          run: async (step) => { step.note("loading config…"); },
+        },
+      ], { stream, _forceNoAnsi: true }),
+      "step.note() must not throw in non-TTY mode",
+    );
+  });
+});
+
+// ---------------------------------------------------------------------------
+// renderLogo — fallback chain (NO_COLOR / non-TTY environment)
+//
+// In the test runner, process.stdout.isTTY is false (non-TTY), so USE_ANSI
+// and USE_TRUECOLOR in tui.mjs are both false. renderLogo() must return plain
+// text with no ANSI escape codes in this environment.
+// ---------------------------------------------------------------------------
+
+describe("renderLogo — plain-text fallback in non-TTY/NO_COLOR environment", () => {
+  it("returns a non-empty string", () => {
+    const result = renderLogo({});
+    assert.ok(typeof result === "string" && result.length > 0,
+      "renderLogo() must return a non-empty string");
+  });
+
+  it("contains no ANSI escape sequences in non-TTY environment (USE_TRUECOLOR=false)", () => {
+    // In the test runner process.stdout.isTTY is false, so USE_ANSI and
+    // USE_TRUECOLOR are both false. renderLogo() must return plain text only.
+    const result = renderLogo({});
+    assert.ok(!result.includes("\x1b["),
+      "renderLogo() must not contain ANSI escape sequences when USE_TRUECOLOR is false");
+  });
+
+  it("includes 'ForgeDock' in the plain-text output", () => {
+    const result = renderLogo({});
+    assert.ok(result.includes("ForgeDock"),
+      "plain-text output must include the word 'ForgeDock'");
+  });
+
+  it("includes version string when version is provided", () => {
+    const result = renderLogo({ version: "1.2.3" });
+    assert.ok(result.includes("1.2.3"),
+      "plain-text output must include the provided version string");
+  });
+
+  it("includes tagline in the plain-text output", () => {
+    const result = renderLogo({});
+    assert.ok(result.includes("GitHub as a knowledge graph for AI agents"),
+      "plain-text output must include the tagline");
+  });
+
+  it("works with no arguments (version defaults to empty string)", () => {
+    assert.doesNotThrow(() => renderLogo(),
+      "renderLogo() must not throw when called with no arguments");
+    const result = renderLogo();
+    assert.ok(result.includes("ForgeDock"),
+      "renderLogo() with no args must still include 'ForgeDock'");
   });
 });

@@ -1168,3 +1168,403 @@ export async function annotatedReviewScreen(
     ).map((fd) => fd.key),
   };
 }
+
+// ---------------------------------------------------------------------------
+// runSteps — live-checklist orchestrator
+// ---------------------------------------------------------------------------
+
+/**
+ * Run an ordered list of async steps and render a live animated checklist.
+ *
+ * @param {Array<{label: string, run: (step: StepAPI) => Promise<void>}>} steps
+ *   Each entry has a human-readable `label` and an async `run` function that
+ *   receives a {@link StepAPI} object.
+ *
+ * @param {object} [opts]
+ * @param {NodeJS.WritableStream} [opts.stream=process.stderr]
+ *   Output stream. Defaults to stderr (consistent with spinner / progressBar).
+ * @param {number} [opts.spinnerInterval=80]
+ *   Braille frame interval in milliseconds (TTY only).
+ * @param {boolean} [opts._forceNoAnsi]
+ *   Internal override for testing: treat output as non-TTY / no-ANSI regardless
+ *   of the runtime environment.
+ *
+ * @returns {Promise<RunStepsResult>}
+ *
+ * @typedef {{
+ *   progress(current: number, total: number): void,
+ *   note(text: string): void,
+ *   skip(reason?: string): void,
+ * }} StepAPI
+ *
+ * @typedef {{
+ *   ok: true,
+ *   elapsed: number,
+ * } | {
+ *   ok: false,
+ *   failedStep: number,
+ *   error: Error,
+ *   elapsed: number,
+ * }} RunStepsResult
+ */
+export async function runSteps(steps, opts = {}) {
+  const {
+    stream = process.stderr,
+    spinnerInterval = 80,
+    _forceNoAnsi = false,
+  } = opts;
+
+  const t0 = Date.now();
+  const count = steps.length;
+
+  // ── Helper: format elapsed seconds to 1 dp ────────────────────────────────
+  function elapsedStr() {
+    return ((Date.now() - t0) / 1000).toFixed(1) + "s";
+  }
+
+  // ── Non-TTY / no-ANSI path ─────────────────────────────────────────────────
+  const useAnsi = !_forceNoAnsi && USE_ANSI && stream.isTTY;
+
+  if (!useAnsi) {
+    for (let i = 0; i < count; i++) {
+      const step = steps[i];
+      let skipped = false;
+      let skipReason = "";
+
+      const stepApi = {
+        progress(_current, _total) {
+          // No-op in non-TTY mode
+        },
+        note(_text) {
+          // No-op in non-TTY mode
+        },
+        skip(reason = "") {
+          skipped = true;
+          skipReason = reason;
+        },
+      };
+
+      try {
+        await step.run(stepApi);
+      } catch (err) {
+        const elapsed = elapsedStr();
+        stream.write(`✖ ${step.label} — ${err.message}\n`);
+        stream.write(`✖ Failed in ${elapsed}\n`);
+        return { ok: false, failedStep: i, error: err, elapsed: Date.now() - t0 };
+      }
+
+      if (skipped) {
+        const suffix = skipReason ? ` — ${skipReason}` : "";
+        stream.write(`— ${step.label}${suffix}\n`);
+      } else {
+        stream.write(`✔ ${step.label}\n`);
+      }
+    }
+
+    const elapsed = elapsedStr();
+    stream.write(`✔ Done in ${elapsed}\n`);
+    return { ok: true, elapsed: Date.now() - t0 };
+  }
+
+  // ── TTY / ANSI path ────────────────────────────────────────────────────────
+
+  // Track per-step state
+  const statuses = steps.map(() => "pending"); // 'pending'|'active'|'done'|'failed'|'skipped'
+  const annotations = steps.map(() => ""); // inline note or progress bar string
+
+  // Render a single step row (no newline — caller moves cursor)
+  function renderRow(i) {
+    const status = statuses[i];
+    const icon =
+      status === "pending"  ? dim("○") :
+      status === "done"     ? green("✔") :
+      status === "failed"   ? red("✖") :
+      status === "skipped"  ? dim("—") :
+      /* active spinner handled separately */ dim("○");
+    const label =
+      status === "done" || status === "skipped" ? dim(steps[i].label) :
+      status === "failed"                       ? red(steps[i].label) :
+      steps[i].label;
+    const ann = annotations[i] ? `  ${dim(annotations[i])}` : "";
+    return `${icon}  ${label}${ann}`;
+  }
+
+  // Print all rows initially (pending)
+  for (let i = 0; i < count; i++) {
+    stream.write(renderRow(i) + "\n");
+  }
+
+  // Hide cursor
+  stream.write("\x1b[?25l");
+
+  let cursorAtBottom = true; // after the last row
+
+  // Move cursor up N rows (relative)
+  function cursorUp(n) {
+    if (n > 0) stream.write(`\x1b[${n}A`);
+  }
+
+  // Move cursor back to the bottom (below all rows)
+  function cursorToBottom() {
+    if (!cursorAtBottom) {
+      // We're somewhere in the middle; go to end
+      stream.write(`\x1b[${count}B`);
+      cursorAtBottom = true;
+    }
+  }
+
+  // Rewrite a single row in-place (cursor must be on that row already)
+  function overwriteRow(i) {
+    stream.write(`\r\x1b[K${renderRow(i)}`);
+  }
+
+  let result;
+
+  try {
+    for (let i = 0; i < count; i++) {
+      statuses[i] = "active";
+      annotations[i] = "";
+
+      // Move cursor up from bottom to row i, overwrite, return to bottom
+      const rowsFromBottom = count - i; // rows below row i (including row i itself)
+      cursorUp(rowsFromBottom);
+      cursorAtBottom = false;
+
+      let frame = 0;
+      let currentProgressBar = "";
+      let currentNote = "";
+
+      // Draw the active spinner frame
+      function drawActive() {
+        const f = BRAILLE_FRAMES[frame % BRAILLE_FRAMES.length];
+        frame++;
+        const label = bold(steps[i].label);
+        const ann = (currentProgressBar || currentNote)
+          ? `  ${dim(currentProgressBar || currentNote)}`
+          : "";
+        stream.write(`\r\x1b[K${cyan(f)}  ${label}${ann}`);
+      }
+
+      drawActive();
+
+      // Move back to bottom
+      // rowsFromBottom - 1 rows below the current row i
+      const rowsBelow = rowsFromBottom - 1;
+      if (rowsBelow > 0) stream.write(`\x1b[${rowsBelow}B`);
+      cursorAtBottom = true;
+
+      // Spinner interval updates row i in-place
+      const timer = setInterval(() => {
+        const savedCursorAtBottom = cursorAtBottom;
+        cursorUp(rowsFromBottom);
+        drawActive();
+        if (rowsBelow > 0) stream.write(`\x1b[${rowsBelow}B`);
+        cursorAtBottom = savedCursorAtBottom;
+      }, spinnerInterval);
+      timer.unref();
+
+      let skipped = false;
+      let skipReason = "";
+
+      const stepApi = {
+        progress(current, total) {
+          currentProgressBar = progressBar(current, total, { width: 12 });
+          currentNote = "";
+        },
+        note(text) {
+          currentNote = text;
+          currentProgressBar = "";
+        },
+        skip(reason = "") {
+          skipped = true;
+          skipReason = reason;
+        },
+      };
+
+      let stepError = null;
+      try {
+        await steps[i].run(stepApi);
+      } catch (err) {
+        stepError = err;
+      }
+
+      clearInterval(timer);
+
+      // Final state for this step
+      if (stepError) {
+        statuses[i] = "failed";
+        annotations[i] = stepError.message;
+      } else if (skipped) {
+        statuses[i] = "skipped";
+        annotations[i] = skipReason;
+      } else {
+        statuses[i] = "done";
+        annotations[i] = "";
+      }
+
+      // Redraw final state for row i
+      cursorUp(rowsFromBottom);
+      cursorAtBottom = false;
+      overwriteRow(i);
+      stream.write("\n");
+      // Move down to bottom (rowsBelow rows remaining after the newline)
+      if (rowsBelow > 0) stream.write(`\x1b[${rowsBelow}B`);
+      cursorAtBottom = true;
+
+      if (stepError) {
+        // Failure: stop run
+        result = { ok: false, failedStep: i, error: stepError, elapsed: Date.now() - t0 };
+        break;
+      }
+    }
+  } finally {
+    // Always restore cursor
+    stream.write("\x1b[?25h");
+  }
+
+  const elapsed = elapsedStr();
+
+  if (result) {
+    // Failed
+    stream.write(`${red("✖")} ${dim("Failed in")} ${elapsed}\n`);
+    return result;
+  }
+
+  stream.write(`${green("✔")} ${dim("Done in")} ${elapsed}\n`);
+  return { ok: true, elapsed: Date.now() - t0 };
+}
+
+// ---------------------------------------------------------------------------
+// Logo rendering — ForgeDock F-monogram in half-block ANSI art
+// ---------------------------------------------------------------------------
+
+/**
+ * Truecolor detection — distinct from USE_ANSI (which only checks for any ANSI support).
+ * Half-block art requires 24-bit color for the RGB fg/bg per-cell approach.
+ * Falls back to plain text on 256-color or less terminals.
+ */
+const USE_TRUECOLOR =
+  USE_ANSI &&
+  (process.env.COLORTERM === "truecolor" ||
+    process.env.COLORTERM === "24bit" ||
+    // Windows Terminal and most modern Linux terminals set COLORTERM=truecolor
+    // iTerm2 sets TERM_PROGRAM=iTerm.app (supports 24-bit)
+    process.env.TERM_PROGRAM === "iTerm.app" ||
+    process.env.TERM_PROGRAM === "vscode");
+
+/**
+ * Brand-blue ForgeDock F-monogram, pre-rendered as Unicode half-block art.
+ *
+ * Each line uses ▀ (U+2580 UPPER HALF BLOCK) with ANSI 24-bit color:
+ *   \x1b[38;2;R;G;Bm  — foreground (upper pixel pair)
+ *   \x1b[48;2;R;G;Bm  — background (lower pixel pair)
+ *   \x1b[0m            — reset
+ *
+ * Brand color: #58a6ff = RGB(88, 166, 255)
+ * Background:  #0d1117 = RGB(13, 17, 23)  (GitHub dark canvas — renders as "off" pixels)
+ *
+ * The art is 20 characters wide × 10 rows tall (represents a 20×20 pixel F monogram
+ * at 2:1 aspect, each row pair compressed into one terminal row via ▀).
+ *
+ * To regenerate this art from a source PNG: scripts/gen-logo.mjs <input.png>
+ */
+// prettier-ignore
+const LOGO_ART_TRUECOLOR = (() => {
+  // Brand blue: RGB(88, 166, 255)  — #58a6ff
+  // Dark bg:    RGB(13, 17, 23)    — #0d1117
+  const B  = "38;2;88;166;255";   // fg: brand blue
+  const bg = "48;2;88;166;255";   // bg: brand blue
+  const X  = "38;2;13;17;23";     // fg: dark (off)
+  const Xb = "48;2;13;17;23";     // bg: dark (off)
+  const R  = "\x1b[0m";           // reset
+
+  // half-block helper: upper=fg, lower=bg
+  function px(upper, lower) {
+    return `\x1b[${upper};${lower}m▀${R}`;
+  }
+
+  // F-monogram pixel map (20 wide × 20 tall, represented as 10 rows of ▀ pairs)
+  // 1 = brand-blue pixel, 0 = dark background
+  //
+  // Row layout (each entry = [upper_row, lower_row] of a ▀ pair):
+  //
+  //   ████████████████████   (full top border)
+  //   ██                ██   (left bar)
+  //   ██                ██
+  //   ██████████████         (top crossbar — full width minus right margin)
+  //   ██████████████
+  //   ██                     (left bar only)
+  //   ██
+  //   ██████                 (short lower crossbar)
+  //   ██████
+  //   ██                     (left bar only — bottom)
+
+  // Pixel rows (each row is 20 booleans)
+  const rows = [
+    [1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1],  //  0: top border
+    [1,1,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,1,1],  //  1: top inner
+    [1,1,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],  //  2: left bar
+    [1,1,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],  //  3: left bar
+    [1,1,1,1,1,1,1,1,1,1,1,1,1,1,0,0,0,0,0,0],  //  4: top crossbar
+    [1,1,1,1,1,1,1,1,1,1,1,1,1,1,0,0,0,0,0,0],  //  5: top crossbar (repeat)
+    [1,1,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],  //  6: left bar
+    [1,1,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],  //  7: left bar
+    [1,1,1,1,1,1,1,1,0,0,0,0,0,0,0,0,0,0,0,0],  //  8: lower crossbar
+    [1,1,1,1,1,1,1,1,0,0,0,0,0,0,0,0,0,0,0,0],  //  9: lower crossbar (repeat)
+    [1,1,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],  // 10: left bar
+    [1,1,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],  // 11: left bar
+    [1,1,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],  // 12: left bar
+    [1,1,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],  // 13: left bar
+    [1,1,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],  // 14: left bar
+    [1,1,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],  // 15: left bar
+    [1,1,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],  // 16: left bar
+    [1,1,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],  // 17: left bar
+    [1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1],  // 18: bottom border
+    [1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1],  // 19: bottom border (repeat)
+  ];
+
+  const lines = [];
+  for (let r = 0; r < rows.length; r += 2) {
+    const top = rows[r];
+    const bot = rows[r + 1];
+    let line = "";
+    for (let c = 0; c < top.length; c++) {
+      const upper = top[c] ? B  : X;
+      const lower = bot[c] ? bg : Xb;
+      line += px(upper, lower);
+    }
+    lines.push(line);
+  }
+  return lines;
+})();
+
+/**
+ * Render the ForgeDock logo for display in the terminal.
+ *
+ * Returns a multi-line string. On truecolor TTY: F-monogram half-block art
+ * followed by a caption line. On non-TTY / NO_COLOR / 256-color: plain text.
+ *
+ * @param {object} [opts]
+ * @param {string} [opts.version]  - Package version string (e.g. "1.0.8")
+ * @returns {string} Rendered logo string (may contain ANSI sequences)
+ */
+export function renderLogo({ version = "" } = {}) {
+  const tagline = "GitHub as a knowledge graph for AI agents";
+  const versionStr = version ? `ForgeDock · v${version}` : "ForgeDock";
+
+  if (!USE_TRUECOLOR) {
+    // Plain text fallback — NO_COLOR, non-TTY, or 256-color terminal
+    return `${versionStr}\n${tagline}`;
+  }
+
+  // Truecolor: half-block art + caption
+  const lines = [
+    "",
+    ...LOGO_ART_TRUECOLOR.map((l) => "  " + l),
+    "",
+    `  \x1b[1m\x1b[38;2;88;166;255m${versionStr}\x1b[0m`,
+    `  \x1b[2m${tagline}\x1b[0m`,
+    "",
+  ];
+  return lines.join("\n");
+}
