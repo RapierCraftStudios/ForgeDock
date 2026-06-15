@@ -148,10 +148,10 @@ echo "$FORGE_COMMENTS" | jq -c '.[]' | while IFS= read -r COMMENT; do
   echo "├─────────────────────────────────────────────────────────────"
 
   # Extract key fields per annotation type
-  python3 - <<PYEOF
-import re, sys
+  ANNOTATION="$ANNOTATION" BODY_CONTENT="$BODY" python3 - <<'PYEOF'
+import re, sys, os
 
-body = """$BODY"""
+body = os.environ.get('BODY_CONTENT', '')
 
 def extract(pattern, default="—"):
     m = re.search(pattern, body, re.MULTILINE | re.DOTALL)
@@ -162,7 +162,7 @@ def count_lines(header):
     if not m: return 0
     return len([l for l in m.group(1).strip().splitlines() if l.strip()])
 
-annotation = "$ANNOTATION"
+annotation = os.environ.get('ANNOTATION', '')
 
 if annotation == "FORGE:INVESTIGATOR":
     verdict    = extract(r'\*\*Verdict\*\*:\s*(\S+)')
