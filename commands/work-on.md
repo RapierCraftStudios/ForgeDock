@@ -129,8 +129,7 @@ gh api repos/{GH_REPO}/issues/comments/$COMMENT_ID -X DELETE
 
 ### 1A: Set label
 ```bash
-gh issue edit {NUMBER} {GH_FLAG} --add-label "workflow:investigating"
-gh issue edit {NUMBER} {GH_FLAG} --remove-label "workflow:ready-to-build,workflow:building,workflow:in-review" 2>/dev/null || true
+bash scripts/transition-label.sh {NUMBER} {GH_FLAG} investigating
 ```
 
 ### 1A.5: Normalize Issue Body (MANDATORY)
@@ -288,21 +287,21 @@ gh issue comment {NUMBER} {GH_FLAG} --body "<!-- FORGE:INVESTIGATOR -->
 
 **CONFIRMED or PARTIAL with decompose: NO**:
 ```bash
-gh issue edit {NUMBER} {GH_FLAG} --add-label "workflow:ready-to-build" --remove-label "workflow:investigating"
+bash scripts/transition-label.sh {NUMBER} {GH_FLAG} ready-to-build
 ```
 <!-- FORGE:PHASE_COMPLETE — Investigation routed to build. See Universal Phase Dispatcher: next phase is Phase 3. Not terminal — continue immediately. -->
 → Continue to Phase 3.
 
 **CONFIRMED or PARTIAL with decompose: YES**:
 ```bash
-gh issue edit {NUMBER} {GH_FLAG} --remove-label "workflow:investigating"
+bash scripts/transition-label.sh {NUMBER} {GH_FLAG} decomposed
 ```
 <!-- FORGE:PHASE_COMPLETE — Investigation routed to decomposition. See Universal Phase Dispatcher: next phase is Phase 2. Not terminal — continue immediately. -->
 → Continue to Phase 2 (Decomposition).
 
 **INVALID**:
 ```bash
-gh issue edit {NUMBER} {GH_FLAG} --add-label "workflow:invalid" --remove-label "workflow:investigating"
+bash scripts/transition-label.sh {NUMBER} {GH_FLAG} invalid
 gh issue close {NUMBER} {GH_FLAG} --comment "Closing as invalid: {reason from investigation}"
 ```
 → STOP.
@@ -400,9 +399,7 @@ gh issue comment {NUMBER} {GH_FLAG} --body "<!-- FORGE:DECOMPOSED -->
 
 ### 2F: Update labels
 ```bash
-gh issue edit {NUMBER} {GH_FLAG} \
-  --add-label "workflow:decomposed" \
-  --remove-label "workflow:ready-to-build,workflow:building,workflow:investigating" 2>/dev/null || true
+bash scripts/transition-label.sh {NUMBER} {GH_FLAG} decomposed
 ```
 
 → STOP. Each sub-issue runs its own `/work-on`.
@@ -635,7 +632,7 @@ If budget exceeded (3 min), use `<!-- FORGE:ARCHITECT:PARTIAL -->`.
 
 ### 3D: Set building label
 ```bash
-gh issue edit {NUMBER} {GH_FLAG} --add-label "workflow:building" --remove-label "workflow:ready-to-build,workflow:investigating"
+bash scripts/transition-label.sh {NUMBER} {GH_FLAG} building
 ```
 
 ### 3E: Create worktree
@@ -980,7 +977,7 @@ If PR already exists for this branch, use the existing PR number.
 
 ### 4E: Update labels
 ```bash
-gh issue edit {NUMBER} {GH_FLAG} --add-label "workflow:in-review" --remove-label "workflow:building"
+bash scripts/transition-label.sh {NUMBER} {GH_FLAG} in-review
 ```
 
 ---
@@ -1079,9 +1076,7 @@ If all phases complete:
 ```bash
 gh issue close {NUMBER} {GH_FLAG} \
   --comment "Closed: PR #{PR_NUMBER} merged to \`{PR_BASE}\`. Closes #{NUMBER}."
-gh issue edit {NUMBER} {GH_FLAG} \
-  --add-label "workflow:merged" \
-  --remove-label "workflow:in-review,workflow:building,workflow:investigating" 2>/dev/null || true
+bash scripts/transition-label.sh {NUMBER} {GH_FLAG} merged
 ```
 
 ### 6D: Parent tracker update (sub-issues only)
