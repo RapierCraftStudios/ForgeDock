@@ -29,6 +29,7 @@ fi
 if [ -z "$FORGE_HOME_PATH" ] || [ ! -d "$FORGE_HOME_PATH" ]; then
   FORGE_HOME_PATH="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")/.." 2>/dev/null && pwd)"
 fi
+export FORGE_HOME_PATH
 ```
 
 ---
