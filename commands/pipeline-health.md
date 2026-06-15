@@ -541,6 +541,48 @@ fi
 
 **Why this matters**: Outcome metrics (findings per PR, fix-up rate) measure what the pipeline produces. Orchestration efficiency measures how much wasted motion occurs getting there. An agent that takes 40 minutes to do 8 minutes of actual work has 80% idle time — all of which is pipeline overhead. Reducing stall time directly improves throughput without changing code quality. This is the only metric that reveals whether the routing loop in `work-on.md` is functioning or causing agents to stop and wait.
 
+**Step 4 — Batch stall rate (from FORGE:STALL_DETECTED annotations)**:
+
+Query issues that received a `<!-- FORGE:STALL_DETECTED -->` comment within the analysis window. This measures how often the orchestrator's time-based stall detector fired — distinct from the resume-cycle count (which comes from completion-event stalls).
+
+```bash
+# Find all issues with FORGE:STALL_DETECTED comments in the analysis window
+STALL_DETECTED_ISSUES=$(gh issue list -R $GH_REPO \
+  --state all --limit 500 \
+  --json number,title,labels,createdAt \
+  --jq "[.[] | select(.createdAt > \"$SINCE\") | .number]" 2>/dev/null || echo "[]")
+
+BATCH_TOTAL=$(echo "$STALL_DETECTED_ISSUES" | jq 'length')
+
+# Count how many have at least one FORGE:STALL_DETECTED comment
+STALL_COUNT=0
+ESCALATED_COUNT=0
+echo "$STALL_DETECTED_ISSUES" | jq -r '.[]' | while read -r NUM; do
+  STALL_COMMENTS=$(gh api repos/$GH_REPO/issues/${NUM}/comments \
+    --jq '[.[] | select(.body | contains("FORGE:STALL_DETECTED"))] | length' 2>/dev/null || echo 0)
+  if [ "$STALL_COMMENTS" -gt 0 ]; then
+    STALL_COUNT=$((STALL_COUNT + 1))
+    # Check if it escalated to needs-human (2+ stall comments)
+    [ "$STALL_COMMENTS" -ge 2 ] && ESCALATED_COUNT=$((ESCALATED_COUNT + 1))
+  fi
+done
+
+# Compute batch stall rate
+if [ "$BATCH_TOTAL" -gt 0 ]; then
+  BATCH_STALL_RATE=$(echo "scale=1; $STALL_COUNT * 100 / $BATCH_TOTAL" | bc 2>/dev/null || echo "N/A")
+  echo "Batch stall rate: ${BATCH_STALL_RATE}% (${STALL_COUNT}/${BATCH_TOTAL} issues stalled) — target: < 10%"
+  echo "Escalated to needs-human: ${ESCALATED_COUNT} issues"
+else
+  BATCH_STALL_RATE="N/A"
+  echo "Batch stall rate: N/A (no issues in window or FORGE:STALL_DETECTED not yet deployed)"
+fi
+export BATCH_STALL_RATE STALL_COUNT BATCH_TOTAL ESCALATED_COUNT
+```
+
+**Target**: `BATCH_STALL_RATE` < 10% (stalled issues / total issues in window). A rate above 10% indicates systemic pipeline unreliability — agents stopping without reaching terminal state frequently enough to require orchestrator intervention.
+
+**Note**: `BATCH_STALL_RATE` requires `FORGE:STALL_DETECTED` comments, which are written by the stall detector in `/orchestrate` Step 4B.5. If the stall detector is not deployed, this metric returns N/A and falls back to the resume-cycle proxy from Step 3.
+
 ### 2L: Post-deploy failure metrics (pipeline escape signal)
 
 `/audit` creates `audit-finding` labeled issues in the Forge repo whenever a defect escapes the pipeline and reaches staging or production. Each finding is tagged with a `**Failure point**:` field indicating which pipeline phase failed (INVESTIGATION, IMPLEMENTATION, REVIEW, REVIEW_FALSE_NEG, DEPLOY_GATE, etc.). Aggregating these reveals the post-deploy defect rate and review escape rate — signals invisible to the pre-merge metrics above.
@@ -2100,6 +2142,8 @@ gh issue create -R $FORGE_REPO \
 | — Avg agent idle% | ?% | < 30% | ✅/⚠️/❌ |
 | — Avg resume cycles per agent | ? | < 1 | ✅/⚠️/❌ |
 | — Clean agent rate | ?% | > 60% | ✅/⚠️/❌ |
+| — Batch stall rate | ?% (?/? issues) | < 10% | ✅/⚠️/❌ |
+| — Escalated to needs-human | ? issues | 0 | ✅/⚠️/❌ |
 | Original work ratio | ?% | > 70% | ✅/⚠️/❌ |
 | Milestone merge success | ?% | 80%+ | ✅/⚠️/❌ |
 | Issue close velocity | ? days | < 2 days | ✅/⚠️/❌ |
@@ -2123,13 +2167,15 @@ _If no trajectory data available in window: "No FORGE:TRAJECTORY comments found 
 
 ## Orchestration Efficiency
 
-_From Phase 2K — persisted FORGE:AUDIT-AGENTS summaries ([N] sessions, [M] agents total)_
+_From Phase 2K — persisted FORGE:AUDIT-AGENTS summaries ([N] sessions, [M] agents total) + FORGE:STALL_DETECTED annotations_
 
 | Metric | Value | Target | Status |
 |--------|-------|--------|--------|
 | Avg agent idle% | ?% | < 30% | ✅/⚠️/❌ |
 | Avg resume cycles per agent | ? | < 1 | ✅/⚠️/❌ |
 | Clean agent rate | ?% | > 60% | ✅/⚠️/❌ |
+| Batch stall rate | ?% (?/? issues) | < 10% | ✅/⚠️/❌ |
+| Escalated to needs-human | ? issues | 0 | ✅/⚠️/❌ |
 
 **Top stall boundaries** (phase transitions causing the most stalls):
 | Boundary | Occurrences |
@@ -2139,6 +2185,8 @@ _From Phase 2K — persisted FORGE:AUDIT-AGENTS summaries ([N] sessions, [M] age
 | [boundary_3] | [N] |
 
 _If no FORGE:AUDIT-AGENTS data available: "No persisted audit-agents summaries found in window. Run \`audit-agents --persist\` after orchestration runs to enable this metric. Proxy: [N] issues had resume/stall anomalies in trajectory data."_
+
+_Batch stall rate: sourced from \`FORGE:STALL_DETECTED\` comments (requires \`/orchestrate\` Step 4B.5 to be active). N/A if stall detector is not deployed._
 
 ## Transcript Flow Metrics
 

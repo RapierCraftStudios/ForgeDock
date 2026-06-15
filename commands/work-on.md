@@ -95,6 +95,22 @@ Satellite repos (those without a `staging` branch) receive fast-lane PRs directl
 ### 0A: Parse input
 Extract project prefix and issue number. If `next`/`pick`: list open issues sorted by priority, skip `needs-human` and `workflow:decomposed`, pick highest priority.
 
+### 0A.5: Post Heartbeat Annotation
+
+Post a lightweight activity signal immediately after resolving the issue number. This gives the stall detector (orchestrate Step 4B.5) a fresh timestamp to compare against `STALL_TIMEOUT`. Without this, the stall detector can only see the last structured comment (INVESTIGATOR, BUILDER, etc.) which may be hours old during a valid long-running phase.
+
+```bash
+PHASE_START_TIMESTAMP=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+gh issue comment {NUMBER} {GH_FLAG} --body "<!-- FORGE:HEARTBEAT -->
+**Phase**: Phase 0 — starting pipeline
+**Timestamp**: ${PHASE_START_TIMESTAMP}
+**Issue**: #{NUMBER}"
+```
+
+**Also post at major phase entry points** (Phases 1, 3, and 5) — replace `Phase 0` with the correct phase name in each case. These mid-pipeline heartbeats ensure the stall detector sees recent activity during long phases (e.g., a build phase running for 20 minutes is not falsely classified as stalled).
+
+**Skip if**: Issue already has a terminal label (`workflow:merged`, `workflow:invalid`, `needs-human`) — no heartbeat needed on a completed issue.
+
 ### 0B: Load issue + existing context
 ```bash
 gh issue view {NUMBER} {GH_FLAG} --json number,title,body,labels,state,comments,milestone
