@@ -7,7 +7,7 @@
 #
 # Output: lane string written to stdout
 #   staging              — issue has no milestone (fast lane)
-#   milestone/{slug}     — issue has a milestone (feature lane, slug = lowercased, spaces→hyphens)
+#   milestone/{slug}     — issue has a milestone (feature lane, slug = lowercased, spaces→hyphens, git-invalid chars stripped)
 #
 # Exit codes: 0 = success, 1 = error (invalid issue, gh auth failure, branch missing, etc.)
 #
@@ -77,10 +77,17 @@ FORGEDOCK_HOME="$(cd "$(dirname "$0")/.." && pwd)"
 if [ -z "$MILESTONE_TITLE" ]; then
   echo "staging"
 else
-  # Slugify: lowercase, spaces → hyphens, collapse multiple hyphens, strip leading/trailing hyphens
+  # Slugify: lowercase, spaces → hyphens, strip git-invalid chars, collapse multiple hyphens,
+  # strip leading/trailing hyphens.
+  # `tr -cd 'a-z0-9-'` removes every character that is not a lowercase letter, digit, or hyphen —
+  # this covers all chars forbidden by git-check-ref-format (colons, brackets, parens, etc.).
+  # It runs after space→hyphen so that word boundaries become hyphens before the strip pass,
+  # and before the hyphen-collapse step so consecutive hyphens (produced by stripping special
+  # chars between words) are collapsed into a single hyphen.
   SLUG=$(echo "$MILESTONE_TITLE" \
     | tr '[:upper:]' '[:lower:]' \
     | tr ' ' '-' \
+    | tr -cd 'a-z0-9-' \
     | sed 's/--*/-/g' \
     | sed 's/^-//;s/-$//')
   LANE="milestone/$SLUG"
