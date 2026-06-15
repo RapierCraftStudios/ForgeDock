@@ -172,7 +172,7 @@ If `LEGACY_COUNT == 0`:
 All ${READY_COUNT} open issues already have pipeline labels. Nothing to adopt.
 Run /work-on next to start working on the highest-priority issue.
 ```
-→ Skip to Phase 5 (Summary).
+→ Skip to Phase 6 (Summary).
 
 ---
 
