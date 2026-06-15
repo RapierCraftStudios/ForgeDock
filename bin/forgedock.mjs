@@ -12,6 +12,24 @@ import {
   unlinkSync,
 } from "fs";
 import { execSync } from "child_process";
+import {
+  renderLogo,
+  runSteps,
+  box,
+  table,
+  bold,
+  dim,
+  green,
+  red,
+  yellow,
+  cyan,
+  RESET,
+  BOLD,
+  GREEN,
+  RED,
+  YELLOW,
+  CYAN,
+} from "./tui.mjs";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
@@ -311,12 +329,25 @@ async function removeSessionStartHook() {
   }
 }
 
-const BOLD = "\x1b[1m";
-const GREEN = "\x1b[32m";
-const YELLOW = "\x1b[33m";
-const CYAN = "\x1b[36m";
-const RED = "\x1b[31m";
-const RESET = "\x1b[0m";
+// ---------------------------------------------------------------------------
+// Version + splash — read package.json version and render branded logo
+// ---------------------------------------------------------------------------
+
+function getVersion() {
+  try {
+    const pkg = JSON.parse(
+      readFileSync(join(FORGE_HOME, "package.json"), "utf-8"),
+    );
+    return pkg.version || "";
+  } catch {
+    return "";
+  }
+}
+
+function splash() {
+  const version = getVersion();
+  process.stderr.write(renderLogo({ version }) + "\n");
+}
 
 // ---------------------------------------------------------------------------
 // CLAUDE.md / AGENTS.md managed-block injection
@@ -640,26 +671,28 @@ function removeForgeHomeFromProfile(profilePath) {
   return "removed";
 }
 
-async function install() {
-  console.log("");
-  console.log(`${BOLD}ForgeDock${RESET} — Installing pipeline commands`);
-  console.log(`  Source: ${CYAN}${COMMANDS_DIR}/${RESET}`);
-  console.log(`  Target: ${CYAN}${TARGET_DIR}/${RESET}`);
-  console.log("");
-
-  await mkdir(TARGET_DIR, { recursive: true });
-
+/**
+ * Link (symlink) all commands from COMMANDS_DIR to TARGET_DIR.
+ * Called inside a runSteps() step — uses step.progress() and step.note().
+ *
+ * @param {object} step - StepAPI from runSteps
+ * @returns {Promise<{installed: number, updated: number, skipped: number}>}
+ */
+async function linkCommands(step) {
   const files = await findMarkdownFiles(COMMANDS_DIR);
+  const total = files.length;
   let installed = 0;
   let updated = 0;
   let skipped = 0;
 
-  for (const file of files) {
+  for (let i = 0; i < files.length; i++) {
+    const file = files[i];
     const rel = relative(COMMANDS_DIR, file);
     const target = join(TARGET_DIR, rel);
     const targetDir = dirname(target);
 
     await mkdir(targetDir, { recursive: true });
+    step.progress(i + 1, total);
 
     try {
       const stats = await lstat(target);
@@ -672,120 +705,147 @@ async function install() {
           await symlink(file, target + ".tmp");
           const { rename } = await import("fs/promises");
           await rename(target + ".tmp", target);
-          console.log(`  ${YELLOW}Updated${RESET}: ${rel}`);
           updated++;
         }
       } else {
-        console.log(
-          `  ${YELLOW}WARNING${RESET}: ${rel} is a regular file — skipping (remove it manually to let ForgeDock manage it)`,
-        );
+        // Regular file — skip; user must remove manually
         skipped++;
       }
     } catch {
       // Doesn't exist — create symlink
       await symlink(file, target);
-      console.log(`  ${GREEN}Installed${RESET}: ${rel}`);
       installed++;
     }
   }
 
-  console.log("");
-  console.log(
-    `Done. ${GREEN}Installed: ${installed}${RESET}, Updated: ${updated}, Skipped: ${skipped}`,
-  );
-  console.log("");
+  return { installed, updated, skipped };
+}
 
-  // Set FORGE_HOME in shell profiles
-  let profileUpdated = false;
-  for (const profile of [
-    join(process.env.HOME, ".bashrc"),
-    join(process.env.HOME, ".zshrc"),
-  ]) {
-    if (existsSync(profile)) {
-      const content = readFileSync(profile, "utf-8");
-      if (!content.includes("FORGE_HOME")) {
-        appendFileSync(
-          profile,
-          `\n# ForgeDock — autonomous development pipeline\nexport FORGE_HOME="${FORGE_HOME}"\n`,
+async function install() {
+  const result = await runSteps([
+    {
+      label: "Checking environment",
+      async run(step) {
+        await mkdir(TARGET_DIR, { recursive: true });
+        step.note(cyan(TARGET_DIR));
+      },
+    },
+    {
+      label: "Linking commands",
+      async run(step) {
+        const { installed, updated, skipped } = await linkCommands(step);
+        const total = installed + updated + skipped;
+        step.note(
+          `${green(String(installed))} installed, ${updated} updated, ${dim(String(skipped))} skipped  (${total} commands total)`,
         );
-        console.log(`  Added FORGE_HOME to ${profile}`);
-        profileUpdated = true;
-      }
-    }
-  }
+      },
+    },
+    {
+      label: "Configuring shell profile",
+      async run(step) {
+        // Set FORGE_HOME in shell profiles
+        let profileUpdated = false;
+        for (const profile of [
+          join(process.env.HOME, ".bashrc"),
+          join(process.env.HOME, ".zshrc"),
+        ]) {
+          if (existsSync(profile)) {
+            const content = readFileSync(profile, "utf-8");
+            if (!content.includes("FORGE_HOME")) {
+              appendFileSync(
+                profile,
+                `\n# ForgeDock — autonomous development pipeline\nexport FORGE_HOME="${FORGE_HOME}"\n`,
+              );
+              profileUpdated = true;
+            }
+          }
+        }
+        if (!profileUpdated) {
+          step.skip("FORGE_HOME already set");
+        }
+      },
+    },
+    {
+      label: "Registering SessionStart hook",
+      async run(step) {
+        const hookResult = await installSessionStartHook();
+        if (hookResult === "already-present") {
+          step.skip("already present");
+        } else if (hookResult === "failed") {
+          // Non-fatal — warn but don't throw
+          step.note("could not write — run npx forgedock install again to retry");
+        }
+      },
+    },
+    {
+      label: "Generating forge.yaml",
+      async run(step) {
+        // Auto-generate forge.yaml if missing — no second command needed.
+        // Only do this inside a real git project (ref: forge#585).
+        const cwd = process.cwd();
+        const forgeYamlPath = join(cwd, "forge.yaml");
+        if (existsSync(forgeYamlPath)) {
+          step.skip("forge.yaml already exists");
+          return;
+        }
+        if (!isGitWorkTree(cwd)) {
+          step.skip("not a git project — run npx forgedock init inside your project");
+          return;
+        }
+        await init(true);
+      },
+    },
+    {
+      label: "Updating CLAUDE.md",
+      async run(step) {
+        // Inject behavioral rules into CLAUDE.md (and AGENTS.md if present).
+        // Only inside a git project — guards against non-project cwd (ref: forge#585).
+        const installCwd = process.cwd();
+        if (!isGitWorkTree(installCwd)) {
+          step.skip("not a git project");
+          return;
+        }
 
-  console.log(
-    `${GREEN}ForgeDock commands are now available as slash commands in any Claude Code session.${RESET}`,
-  );
-  console.log("");
+        const claudeMdPath = join(installCwd, "CLAUDE.md");
+        const agentsMdPath = join(installCwd, "AGENTS.md");
 
-  // Register session-start.mjs as a SessionStart hook in ~/.claude/settings.json
-  const hookResult = await installSessionStartHook();
-  if (hookResult === "installed") {
-    console.log(
-      `  ${GREEN}✔${RESET}  ${BOLD}SessionStart hook${RESET} installed in ${CYAN}~/.claude/settings.json${RESET}`,
+        const claudeResult = injectManagedBlock(claudeMdPath);
+        let note = "";
+        if (claudeResult === "created") {
+          note = "CLAUDE.md created";
+        } else if (claudeResult === "updated") {
+          note = "CLAUDE.md block refreshed";
+        } else if (claudeResult === "appended") {
+          note = "CLAUDE.md rules appended";
+        } else {
+          note = "CLAUDE.md already current";
+        }
+
+        // Mirror to AGENTS.md only if it already exists (never create it)
+        if (existsSync(agentsMdPath)) {
+          const agentsResult = injectManagedBlock(agentsMdPath);
+          if (agentsResult === "updated" || agentsResult === "appended") {
+            note += " · AGENTS.md mirrored";
+          }
+        }
+
+        step.note(note);
+      },
+    },
+  ]);
+
+  if (result.ok) {
+    process.stderr.write(
+      box(
+        [
+          `${green("✔")} ${bold("ForgeDock is ready")}`,
+          "",
+          `Commands installed to ${cyan(TARGET_DIR)}`,
+          `Next: ${cyan("cd <your-project>")} then ${cyan("npx forgedock init")}`,
+        ],
+        { title: "ForgeDock Installed" },
+      ) + "\n",
     );
-  } else if (hookResult === "already-present") {
-    console.log(
-      `  ✔  SessionStart hook already present in ~/.claude/settings.json`,
-    );
-  } else {
-    // "failed" — warning only, does not block install
-    console.log(
-      `  ${YELLOW}⚠${RESET}  Could not write SessionStart hook to ~/.claude/settings.json`,
-    );
-    console.log(
-      `     Run ${CYAN}npx forgedock install${RESET} again to retry.`,
-    );
-  }
-  console.log("");
-
-  // Auto-generate forge.yaml if missing — no second command needed
-  const forgeYamlPath = join(process.cwd(), "forge.yaml");
-  if (!existsSync(forgeYamlPath)) {
-    await init(true);
-  }
-
-  // Inject behavioral rules into CLAUDE.md (and AGENTS.md if present).
-  // Only inside a git project — guards against non-project cwd (ref: forge#585).
-  const installCwd = process.cwd();
-  if (isGitWorkTree(installCwd)) {
-    const claudeMdPath = join(installCwd, "CLAUDE.md");
-    const agentsMdPath = join(installCwd, "AGENTS.md");
-
-    const claudeResult = injectManagedBlock(claudeMdPath);
-    if (claudeResult === "created") {
-      console.log(
-        `  ${GREEN}✔${RESET}  ${BOLD}CLAUDE.md${RESET} created with ForgeDock pipeline rules`,
-      );
-    } else if (claudeResult === "updated") {
-      console.log(
-        `  ${GREEN}✔${RESET}  ${BOLD}CLAUDE.md${RESET} updated — ForgeDock block refreshed`,
-      );
-    } else if (claudeResult === "appended") {
-      console.log(
-        `  ${GREEN}✔${RESET}  ${BOLD}CLAUDE.md${RESET} updated — ForgeDock pipeline rules appended`,
-      );
-    } else {
-      // unchanged
-      console.log(
-        `  ✔  CLAUDE.md already contains current ForgeDock pipeline rules`,
-      );
-    }
-
-    // Mirror to AGENTS.md only if it already exists (never create it)
-    if (existsSync(agentsMdPath)) {
-      const agentsResult = injectManagedBlock(agentsMdPath);
-      if (agentsResult === "created") {
-        // Should not happen since we checked existsSync, but handle gracefully
-        console.log(`  ${GREEN}✔${RESET}  AGENTS.md created with ForgeDock pipeline rules`);
-      } else if (agentsResult === "updated" || agentsResult === "appended") {
-        console.log(`  ${GREEN}✔${RESET}  AGENTS.md updated — ForgeDock pipeline rules mirrored`);
-      } else {
-        console.log(`  ✔  AGENTS.md already contains current ForgeDock pipeline rules`);
-      }
-    }
-    console.log("");
   }
 }
 
@@ -1855,30 +1915,27 @@ async function doctor() {
 }
 
 function help() {
-  console.log("");
-  console.log(
-    `${BOLD}ForgeDock${RESET} — GitHub as a knowledge graph for AI agents`,
+  // renderLogo already shown by splash() above — show the command table
+  const commands = [
+    ["Command", "Description"],
+    ["npx forgedock", "Install commands (default)"],
+    ["npx forgedock install", "Install commands"],
+    ["npx forgedock init", "Generate forge.yaml config for your project"],
+    ["npx forgedock uninstall", "Remove commands"],
+    ["npx forgedock update", "Pull latest & reinstall"],
+    ["npx forgedock enable [dir]", "Mark directory as ForgeDock-managed"],
+    ["npx forgedock disable [dir]", "Opt directory out of ForgeDock"],
+    ["npx forgedock status [dir]", "Show resolved state for a directory"],
+    ["npx forgedock doctor", "Check installation health"],
+    ["npx forgedock help", "Show this help"],
+  ];
+
+  process.stderr.write(
+    box(table(commands, { header: true }), { title: "Usage" }) + "\n",
   );
-  console.log("");
-  console.log("Usage:");
-  console.log(
-    `  ${CYAN}npx forgedock${RESET}            Install commands (default)`,
-  );
-  console.log(`  ${CYAN}npx forgedock install${RESET}    Install commands`);
-  console.log(
-    `  ${CYAN}npx forgedock init${RESET}       Generate forge.yaml config for your project`,
-  );
-  console.log(`  ${CYAN}npx forgedock uninstall${RESET}  Remove commands`);
-  console.log(
-    `  ${CYAN}npx forgedock update${RESET}     Pull latest & reinstall`,
-  );
-  console.log(`  ${CYAN}npx forgedock enable [dir]${RESET}  Mark directory as ForgeDock-managed`);
-  console.log(`  ${CYAN}npx forgedock disable [dir]${RESET} Opt directory out of ForgeDock`);
-  console.log(`  ${CYAN}npx forgedock status [dir]${RESET}  Show resolved state for a directory`);
-  console.log(`  ${CYAN}npx forgedock doctor${RESET}     Check installation health`);
-  console.log(`  ${CYAN}npx forgedock help${RESET}       Show this help`);
-  console.log("");
 }
+
+splash();
 
 switch (command) {
   case "install":
@@ -1911,7 +1968,7 @@ switch (command) {
     help();
     break;
   default:
-    console.log(`${RED}Unknown command: ${command}${RESET}`);
+    process.stderr.write(`${RED}Unknown command: ${command}${RESET}\n`);
     help();
     process.exit(1);
 }
