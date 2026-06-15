@@ -25,14 +25,14 @@ STAGING_BRANCH=$(yq '.branches.staging' "$CONFIG_FILE")
 
 # Optional: --repo flag overrides the default repo
 if echo "$ARGUMENTS" | grep -q -- "--repo"; then
-    GH_REPO=$(echo "$ARGUMENTS" | grep -oP '(?<=--repo\s)\S+')
+    GH_REPO=$(echo "$ARGUMENTS" | sed 's/.*--repo[[:space:]]\([^[:space:]]*\).*/\1/')
     GH_FLAG="-R $GH_REPO"
 fi
 
 # Optional: --stale-days flag (default: 7)
 STALE_DAYS=7
 if echo "$ARGUMENTS" | grep -q -- "--stale-days"; then
-    STALE_DAYS=$(echo "$ARGUMENTS" | grep -oP '(?<=--stale-days\s)\d+')
+    STALE_DAYS=$(echo "$ARGUMENTS" | sed 's/.*--stale-days[[:space:]]\([^[:space:]]*\).*/\1/')
 fi
 
 STALE_THRESHOLD=$(date -d "${STALE_DAYS} days ago" +%Y-%m-%dT%H:%M:%SZ 2>/dev/null \
