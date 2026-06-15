@@ -1450,10 +1450,7 @@ const USE_TRUECOLOR =
     // Windows Terminal and most modern Linux terminals set COLORTERM=truecolor
     // iTerm2 sets TERM_PROGRAM=iTerm.app (supports 24-bit)
     process.env.TERM_PROGRAM === "iTerm.app" ||
-    process.env.TERM_PROGRAM === "vscode" ||
-    // tmux passes through truecolor from the outer terminal if configured
-    (process.env.TERM || "").startsWith("xterm-256") ||
-    (process.env.TERM || "").startsWith("screen-256"));
+    process.env.TERM_PROGRAM === "vscode");
 
 /**
  * Brand-blue ForgeDock F-monogram, pre-rendered as Unicode half-block art.
