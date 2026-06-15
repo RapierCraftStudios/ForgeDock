@@ -696,6 +696,72 @@ async function update() {
   }
 }
 
+/**
+ * Scaffold the .forgedock/scripts/ directory in the project root.
+ *
+ * Idempotent — safe to call on every `npx forgedock init` run:
+ *   - mkdir uses { recursive: true } so it never errors if the dir exists
+ *   - README.md is only written if it doesn't already exist
+ *   - .gitignore entry is only appended if not already present
+ */
+async function scaffoldAdaptiveScriptsDir(cwd) {
+  const scriptsDir = join(cwd, ".forgedock", "scripts");
+  const readmePath = join(scriptsDir, "README.md");
+  const gitignorePath = join(cwd, ".gitignore");
+  const GITIGNORE_ENTRY = ".forgedock/scripts/";
+  const GITIGNORE_COMMENT =
+    "# Per-repo adaptive scripts — gitignored by default.\n# Remove the line below to commit scripts to version control.";
+
+  const README_CONTENT = `# .forgedock/scripts/
+
+Per-repo adaptive scripts for this project. Generated and maintained by ForgeDock.
+
+## Purpose
+
+This directory stores project-specific scripts that encode patterns ForgeDock has
+learned about this repository — branch naming conventions, label schemes, test paths,
+commit formats, and other recurring workflow details.
+
+## Gitignore behaviour
+
+This directory is gitignored by default. To commit scripts to version control, remove
+the \`.forgedock/scripts/\` line from your \`.gitignore\`.
+
+## Usage
+
+Scripts here are discovered automatically by ForgeDock pipeline agents. They take
+precedence over universal scripts shipped with ForgeDock, so you can override any
+default behaviour by adding a same-named script here.
+
+See: https://github.com/RapierCraftStudios/ForgeDock for full documentation.
+`;
+
+  // 1. Create directory (idempotent)
+  await mkdir(scriptsDir, { recursive: true });
+
+  // 2. Write README.md only if not already present
+  if (!existsSync(readmePath)) {
+    writeFileSync(readmePath, README_CONTENT, "utf-8");
+  }
+
+  // 3. Append .gitignore entry only if not already present
+  if (existsSync(gitignorePath)) {
+    const current = readFileSync(gitignorePath, "utf-8");
+    if (!current.includes(GITIGNORE_ENTRY)) {
+      appendFileSync(
+        gitignorePath,
+        `\n${GITIGNORE_COMMENT}\n${GITIGNORE_ENTRY}\n`,
+      );
+    }
+  } else {
+    writeFileSync(
+      gitignorePath,
+      `${GITIGNORE_COMMENT}\n${GITIGNORE_ENTRY}\n`,
+      "utf-8",
+    );
+  }
+}
+
 async function init(fromInstall = false) {
   const cwd = process.cwd();
   const outputPath = join(cwd, "forge.yaml");
@@ -716,6 +782,7 @@ async function init(fromInstall = false) {
         ) + "\n",
       );
     }
+    await scaffoldAdaptiveScriptsDir(cwd);
     return;
   }
 
@@ -809,6 +876,8 @@ async function init(fromInstall = false) {
   process.stderr.write(
     box(summaryLines, { title: "forge.yaml Generated" }) + "\n",
   );
+
+  await scaffoldAdaptiveScriptsDir(cwd);
 }
 
 function help() {
