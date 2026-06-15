@@ -111,7 +111,7 @@ gh issue comment {NUMBER} {GH_FLAG} --body "<!-- FORGE:HEARTBEAT -->
 **Issue**: #{NUMBER}"
 ```
 
-**Also post at major phase entry points** (Phases 1, 3, and 5) — replace `Phase 0` with the correct phase name in each case. These mid-pipeline heartbeats ensure the stall detector sees recent activity during long phases (e.g., a build phase running for 20 minutes is not falsely classified as stalled).
+**Also post at major phase entry points** (Phases 1, 3, and 5) — replace `Phase 0` with the correct phase name in each case. These mid-pipeline heartbeats ensure the stall detector sees recent activity during long phases (e.g., a build phase running for 20 minutes is not falsely classified as stalled). Inline snippets are embedded at Phase 1A, Phase 3A, and Phase 5A — agents resuming mid-pipeline encounter them without reading this section. <!-- Added: forge#740 -->
 
 **Skip if**: Issue already has a terminal label (`workflow:merged`, `workflow:invalid`, `needs-human`) — no heartbeat needed on a completed issue.
 
@@ -245,6 +245,15 @@ gh api repos/{GH_REPO}/issues/comments/$COMMENT_ID -X DELETE
 ### 1A: Set label
 ```bash
 bash scripts/transition-label.sh {NUMBER} {GH_FLAG} investigating
+```
+
+**Post Phase 1 heartbeat** (skip if issue already has a terminal label — `workflow:merged`, `workflow:invalid`, `needs-human`):
+```bash
+PHASE_START_TIMESTAMP=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+gh issue comment {NUMBER} {GH_FLAG} --body "<!-- FORGE:HEARTBEAT -->
+**Phase**: Phase 1 — Investigation
+**Timestamp**: ${PHASE_START_TIMESTAMP}
+**Issue**: #{NUMBER}"
 ```
 
 ### 1A.5: Normalize Issue Body (MANDATORY)
@@ -612,6 +621,16 @@ bash scripts/transition-label.sh {NUMBER} {GH_FLAG} decomposed
 **CRITICAL: You MUST execute ALL sub-phases 3A–3M in order. Sub-phases 3C.5 (context) and 3C.6 (architect) are skipped ONLY for TRIVIAL tasks and Investigation tasks — see Phase 3B for classification. For STANDARD and COMPLEX tasks they post mandatory `FORGE:CONTEXT` and `FORGE:ARCHITECT` comments that Phase 3F reads as its primary input. Skipping them without a TRIVIAL/Investigation classification degrades build quality and causes review findings. After each sub-phase, continue to the next — no sub-phase is terminal.**
 
 ### 3A: Re-read state from GitHub (MANDATORY)
+
+**Post Phase 3 heartbeat** (skip if issue already has a terminal label — `workflow:merged`, `workflow:invalid`, `needs-human`):
+```bash
+PHASE_START_TIMESTAMP=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+gh issue comment {NUMBER} {GH_FLAG} --body "<!-- FORGE:HEARTBEAT -->
+**Phase**: Phase 3 — Build
+**Timestamp**: ${PHASE_START_TIMESTAMP}
+**Issue**: #{NUMBER}"
+```
+
 ```bash
 gh issue view {NUMBER} {GH_FLAG} --json number,title,body,labels,state,milestone
 
@@ -1293,6 +1312,16 @@ bash scripts/transition-label.sh {NUMBER} {GH_FLAG} in-review
 ## Phase 5: Auto-Review
 
 ### 5A: Re-read state from GitHub (MANDATORY)
+
+**Post Phase 5 heartbeat** (skip if issue already has a terminal label — `workflow:merged`, `workflow:invalid`, `needs-human`):
+```bash
+PHASE_START_TIMESTAMP=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+gh issue comment {NUMBER} {GH_FLAG} --body "<!-- FORGE:HEARTBEAT -->
+**Phase**: Phase 5 — Review
+**Timestamp**: ${PHASE_START_TIMESTAMP}
+**Issue**: #{NUMBER}"
+```
+
 ```bash
 gh issue view {NUMBER} {GH_FLAG} --json number,title,body,labels,state
 PR_NUMBER=$(gh pr list {GH_FLAG} --head {BRANCH} --json number --jq '.[0].number')
