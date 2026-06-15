@@ -567,18 +567,22 @@ const STUB_MARKER = "<!-- FORGEDOCK:STUB -->";
  * @returns {{ description: string, argumentHint: string }}
  */
 function parseFrontmatter(content) {
+  // Strip UTF-8 BOM if present — Node.js readFileSync('utf-8') does not strip it,
+  // and startsWith("---") returns false on BOM-prefixed files, causing silent fallback.
+  const stripped = content.replace(/^\uFEFF/, "");
+
   // Frontmatter must start at the very beginning of the file
-  if (!content.startsWith("---")) {
+  if (!stripped.startsWith("---")) {
     return { description: "", argumentHint: "" };
   }
 
   // Find the closing ---
-  const closingIdx = content.indexOf("\n---", 3);
+  const closingIdx = stripped.indexOf("\n---", 3);
   if (closingIdx === -1) {
     return { description: "", argumentHint: "" };
   }
 
-  const block = content.slice(3, closingIdx); // between the two ---
+  const block = stripped.slice(3, closingIdx); // between the two ---
 
   let description = "";
   let argumentHint = "";
