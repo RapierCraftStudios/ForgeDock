@@ -113,7 +113,7 @@ fi
 
 ## Phase 2: Active PRs
 
-Show open PRs targeting `staging` or any `milestone/*` branch, with age and review status.
+Show all open PRs, with age and review status.
 
 ```bash
 echo "=== Active PRs ==="
