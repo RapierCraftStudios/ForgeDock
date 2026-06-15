@@ -54,6 +54,13 @@ MILESTONE_TITLE=$(gh issue view "$ISSUE_NUMBER" $GH_REPO_FLAG --json milestone -
 }
 rm -f "$GH_STDERR_TMP"
 
+# Export universal script environment so per-repo scripts can call back into universal scripts.
+# Per-repo scripts (.forgedock/scripts/{operation}.sh) source these to delegate to universal ones.
+export FORGEDOCK_SCRIPTS
+FORGEDOCK_SCRIPTS="$(cd "$(dirname "$0")" && pwd)"
+export FORGEDOCK_HOME
+FORGEDOCK_HOME="$(cd "$(dirname "$0")/.." && pwd)"
+
 # Classify lane based on milestone presence
 if [ -z "$MILESTONE_TITLE" ]; then
   echo "staging"

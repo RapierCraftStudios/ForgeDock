@@ -41,6 +41,7 @@ The default (`npx forgedock init` with no flags) remains the zero-question autop
 | [`devdocs`](#devdocs-optional) | No | Devdocs knowledge tree path |
 | [`verification`](#verification-optional) | No | Health-check patterns |
 | [`billing`](#billing-optional) | No | Enable financial integrity audit phase |
+| [`adaptive_scripts`](#adaptive_scripts-optional) | No | Per-repo script override configuration |
 
 ---
 
@@ -428,6 +429,75 @@ billing:
 | `enabled` | boolean | No | `false` | Set to `true` to enable Phase 4 (Financial Integrity) in `/security-audit`. When `false`, the billing audit phase is skipped — appropriate for projects that do not process payments or have no Stripe integration. |
 
 **Commands that use this section**: `security-audit` (Phase 4 — Financial Integrity)
+
+---
+
+## `adaptive_scripts` (OPTIONAL)
+
+Per-repo script override configuration. Controls whether ForgeDock looks for project-specific scripts in `.forgedock/scripts/` before falling back to universal scripts.
+
+```yaml
+adaptive_scripts:
+  enabled: true
+  directory: ".forgedock/scripts"
+  commit: false
+```
+
+| Field | Type | Required | Default | Description |
+|-------|------|----------|---------|-------------|
+| `enabled` | boolean | No | `true` | When `true`, pipeline agents check `.forgedock/scripts/` for a per-repo script before using the universal one. Set to `false` to disable per-repo overrides entirely and always use universal scripts. |
+| `directory` | string (relative path) | No | `".forgedock/scripts"` | Directory where per-repo adaptive scripts live, relative to the project root. Scaffolded by `npx forgedock init`. |
+| `commit` | boolean | No | `false` | When `false`, `.forgedock/scripts/` is `.gitignore`d — scripts are local-only and not shared with the team. Set to `true` (and remove the `.gitignore` entry) to commit per-repo scripts to version control. |
+
+**Commands that use this section**: `work-on` (Phase 0B script resolution), any pipeline command that calls a deterministic script
+
+### Script Precedence
+
+ForgeDock resolves which script handles each operation using a strict 4-level hierarchy (highest to lowest authority):
+
+```
+1. forge.yaml → learned: (machine-captured corrections)        ← highest
+2. .forgedock/scripts/{operation}.sh  (per-repo adaptive)
+3. scripts/{operation}.sh             (universal, ships with npm)
+4. Prose instructions in command specs (fallback)              ← lowest
+```
+
+### Override Semantics
+
+- **Per-repo scripts completely replace** the universal script for that operation — there is no partial inheritance or merging.
+- **Per-repo scripts may call universal scripts** via the `$FORGEDOCK_SCRIPTS/{operation}.sh` path. Every universal script exports `FORGEDOCK_SCRIPTS` (absolute path to the universal scripts directory) and `FORGEDOCK_HOME` (absolute path to the ForgeDock installation root) so that per-repo scripts can delegate back to them.
+- **No circular dependencies**: per-repo scripts may call universal scripts but must NOT call other per-repo scripts. One level of delegation only.
+- **`forge.yaml → learned:`** overrides take precedence over everything. They represent explicit user corrections captured by the pipeline.
+
+### Example: per-repo script that delegates to universal
+
+```bash
+#!/usr/bin/env bash
+# .forgedock/scripts/classify-lane.sh
+# Override: this repo uses 'develop' instead of 'staging' for the fast lane.
+
+set -euo pipefail
+
+# Delegate to universal classify-lane.sh to get the standard result
+UNIVERSAL_RESULT=$(bash "$FORGEDOCK_SCRIPTS/classify-lane.sh" "$@")
+
+# Override only the fast-lane output for this project
+if [ "$UNIVERSAL_RESULT" = "staging" ]; then
+  echo "develop"
+else
+  echo "$UNIVERSAL_RESULT"
+fi
+```
+
+### Logging
+
+When a pipeline agent resolves a script tier, it logs the result in the FORGE annotation:
+
+```
+Script tier: adaptive (.forgedock/scripts/classify-lane.sh)
+Script tier: universal (scripts/classify-lane.sh)
+Script tier: prose (no script found — using spec instructions)
+```
 
 ---
 

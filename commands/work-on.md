@@ -111,6 +111,32 @@ gh api repos/{GH_REPO}/issues/{NUMBER}/comments --jq '.[] | {id: .id, author: .u
 
 **Source branch for review-findings**: Parse `**Code branch**: \`{branch}\`` from body. Branch from there, not main.
 
+**Script resolution** — Use the following `resolve_script()` function whenever calling a pipeline script. It enforces the 4-level precedence hierarchy (see `devdocs/project/architecture.md → Script Precedence`):
+
+```bash
+ADAPTIVE_DIR="${REPO_PATH}/$(yq '.adaptive_scripts.directory // ".forgedock/scripts"' forge.yaml 2>/dev/null || echo '.forgedock/scripts')"
+ADAPTIVE_ENABLED=$(yq '.adaptive_scripts.enabled // "true"' forge.yaml 2>/dev/null || echo 'true')
+UNIVERSAL_DIR="${FORGEDOCK_HOME:-$(dirname "$(which classify-lane.sh 2>/dev/null || echo 'scripts')")}/scripts"
+
+resolve_script() {
+  local operation="$1"
+  # Tier 2: per-repo adaptive (skip if disabled)
+  if [ "$ADAPTIVE_ENABLED" != "false" ] && [ -f "${ADAPTIVE_DIR}/${operation}.sh" ]; then
+    echo "adaptive:${ADAPTIVE_DIR}/${operation}.sh"
+    return
+  fi
+  # Tier 3: universal script
+  if [ -f "${UNIVERSAL_DIR}/${operation}.sh" ]; then
+    echo "universal:${UNIVERSAL_DIR}/${operation}.sh"
+    return
+  fi
+  # Tier 4: prose fallback
+  echo "prose:"
+}
+```
+
+When invoking a resolved script, log the tier in the FORGE annotation: `Script tier: {adaptive|universal|prose} ({path})`. This provides full pipeline observability. <!-- Added: forge#670 -->
+
 ### 0C: Sync to Project board
 Add issue to project, set Status=In Progress, Lane, Component, Priority, Workflow=Investigating.
 
