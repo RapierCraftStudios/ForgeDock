@@ -1066,7 +1066,7 @@ async function docsInit() {
    * Skips files that already exist at dest (idempotent — user edits preserved).
    * Returns { copied, skipped }.
    */
-  async function copyTree(src, dest, step) {
+  async function copyTree(src, dest) {
     let copied = 0;
     let skipped = 0;
 
@@ -1078,7 +1078,7 @@ async function docsInit() {
       const destPath = join(dest, entry.name);
 
       if (entry.isDirectory()) {
-        const result = await copyTree(srcPath, destPath, step);
+        const result = await copyTree(srcPath, destPath);
         copied += result.copied;
         skipped += result.skipped;
       } else {
@@ -1101,7 +1101,6 @@ async function docsInit() {
         const { copied, skipped } = await copyTree(
           templatesSource,
           devdocsTarget,
-          step,
         );
         step.note(
           `${green(String(copied))} created, ${dim(String(skipped))} already exist (skipped)`,
