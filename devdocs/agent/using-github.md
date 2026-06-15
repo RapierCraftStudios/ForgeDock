@@ -203,7 +203,7 @@ Issues MUST have these four sections for pipeline compatibility:
 ForgeDock uses git worktrees for isolation. Each issue gets its own worktree under `.claude/worktrees/`:
 
 ```bash
-WORKTREE_BASE="/home/mrdubey/projects/forgedock/.claude/worktrees"
+WORKTREE_BASE="$(yq '.paths.worktree_base' forge.yaml)"
 BRANCH="feat/{slug}-{issue_number}"
 WORKTREE_PATH="${WORKTREE_BASE}/${BRANCH}"
 git worktree add "$WORKTREE_PATH" -b "$BRANCH" "origin/{source_branch}"
