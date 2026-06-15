@@ -144,6 +144,12 @@ case "$MODE" in
     ;;
 esac
 
+# Empty-state guard: if no PRs matched the range, emit informative message and exit cleanly
+if [ -z "$PR_JSON" ]; then
+  echo "No merged PRs found for this range."
+  exit 0
+fi
+
 # Write PR list to a temp file so we can iterate without subshell word-splitting
 TMPFILE=$(mktemp)
 echo "$PR_JSON" > "$TMPFILE"
