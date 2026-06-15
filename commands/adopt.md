@@ -188,7 +188,7 @@ For each issue in `LEGACY_ISSUES`, analyze the title and body to determine:
 | Feature | `feature` | "add", "support", "implement", "new", "create", "enable", "feat" prefix |
 | Enhancement | `enhancement` | "improve", "better", "update", "upgrade", "enhance" |
 | Refactor | `refactor` | "clean", "refactor", "extract", "rename", "simplify", "dead code", "remove" |
-| Investigation | `documentation` | "investigate", "audit", "research", "evaluate", "why does", "figure out" |
+| Investigation | `feature` | "investigate", "audit", "research", "evaluate", "why does", "figure out" |
 | Documentation | `documentation` | "docs", "document", "README", "guide", "write up" |
 | Infrastructure | `bug` (infra) | "deploy", "CI", "docker", "workflow", "pipeline", "kubernetes", "nginx" |
 
