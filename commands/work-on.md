@@ -233,12 +233,12 @@ LEARNED_COMMIT_STYLE=$(yq '.learned.commit_style // ""' forge.yaml 2>/dev/null |
 
 3. **Label map** — If `LEARNED_LABEL_MAP` is non-empty, export it as `FORGE_LABEL_MAP` so that all subsequent `resolve_script 'transition-label'` invocations (which are child processes) can read it. The script performs the substitution internally: if the canonical label (e.g. `workflow:investigating`) appears as a key in the map, it uses the mapped value instead.
    ```bash
-   # Export as FORGE_LABEL_MAP so child processes (transition-label.sh) can read it.
-   # All 8 transition-label.sh call sites in this command inherit this env var automatically.
+   # Export as FORGE_LABEL_MAP so child processes (resolve_script 'transition-label') can read it.
+   # All 8 resolve_script 'transition-label' call sites in this command inherit this env var automatically.
    # The script substitutes the canonical workflow:* label with the mapped value when found.
    export FORGE_LABEL_MAP="$LEARNED_LABEL_MAP"
    [ -n "$LEARNED_LABEL_MAP" ] && [ "$LEARNED_LABEL_MAP" != "{}" ] && \
-     echo "Learned override: FORGE_LABEL_MAP active — label_map will be applied by transition-label.sh"
+     echo "Learned override: FORGE_LABEL_MAP active — label_map will be applied by resolve_script 'transition-label'"
    ```
 
 4. **Commit style** — If `LEARNED_COMMIT_STYLE` is non-empty, use it in Phase 3M:
