@@ -179,6 +179,27 @@ resolve_script() {
   # Tier 4: prose fallback
   echo "prose:"
 }
+
+# run_script OPERATION [ARGS...] — canonical tier-dispatch wrapper for resolve_script().
+#
+# Resolves OPERATION through the 4-tier hierarchy and executes it.  The prose
+# tier is handled per-operation by the caller (see each call site below).
+# Returns the script's exit code for adaptive/universal tiers; the caller is
+# responsible for the prose branch.
+#
+# Usage pattern at each call site:
+#   RESOLUTION=$(resolve_script 'op')
+#   TIER="${RESOLUTION%%:*}"
+#   SCRIPT_PATH="${RESOLUTION#*:}"
+#   case "$TIER" in
+#     adaptive|universal) bash "$SCRIPT_PATH" ARGS ;;
+#     prose)              # inline fallback here ;;
+#   esac
+#
+# The case pattern is inlined at every call site (rather than centralised here)
+# because each operation has a different prose fallback — transition-label falls
+# back to inline gh issue edit, while classify-lane and validate-pr-target have
+# no valid prose fallback and must exit 1. <!-- Added: forge#822 -->
 ```
 
 When invoking a resolved script, log the tier in the FORGE annotation: `Script tier: {adaptive|universal|prose} ({path})`. This provides full pipeline observability. <!-- Added: forge#670 -->
@@ -246,7 +267,15 @@ gh api repos/{GH_REPO}/issues/comments/$COMMENT_ID -X DELETE
 
 ### 1A: Set label
 ```bash
-bash "$(resolve_script 'transition-label' | cut -d: -f2-)" {NUMBER} {GH_FLAG} investigating
+RESOLUTION=$(resolve_script 'transition-label')
+TIER="${RESOLUTION%%:*}"; SCRIPT_PATH="${RESOLUTION#*:}"
+case "$TIER" in
+  adaptive|universal) bash "$SCRIPT_PATH" {NUMBER} {GH_FLAG} investigating ;;
+  prose)
+    gh issue edit {NUMBER} {GH_FLAG} --add-label "workflow:investigating" \
+      --remove-label "workflow:ready-to-build,workflow:building,workflow:in-review,workflow:merged,workflow:invalid,workflow:decomposed" 2>/dev/null || true
+    ;;
+esac
 ```
 
 **Post Phase 1 heartbeat** (skip if issue already has a terminal label — `workflow:merged`, `workflow:invalid`, `needs-human`):
@@ -492,7 +521,15 @@ fi
 
 **CONFIRMED or PARTIAL with decompose: NO**:
 ```bash
-bash "$(resolve_script 'transition-label' | cut -d: -f2-)" {NUMBER} {GH_FLAG} ready-to-build
+RESOLUTION=$(resolve_script 'transition-label')
+TIER="${RESOLUTION%%:*}"; SCRIPT_PATH="${RESOLUTION#*:}"
+case "$TIER" in
+  adaptive|universal) bash "$SCRIPT_PATH" {NUMBER} {GH_FLAG} ready-to-build ;;
+  prose)
+    gh issue edit {NUMBER} {GH_FLAG} --add-label "workflow:ready-to-build" \
+      --remove-label "workflow:investigating,workflow:building,workflow:in-review,workflow:merged,workflow:invalid,workflow:decomposed" 2>/dev/null || true
+    ;;
+esac
 ```
 
 Write machine-readable phase checkpoint (MUST execute immediately after label transition, before continuing):
@@ -508,7 +545,15 @@ gh issue comment {NUMBER} {GH_FLAG} --body "<!-- FORGE:CHECKPOINT -->
 
 **CONFIRMED or PARTIAL with decompose: YES**:
 ```bash
-bash "$(resolve_script 'transition-label' | cut -d: -f2-)" {NUMBER} {GH_FLAG} decomposed
+RESOLUTION=$(resolve_script 'transition-label')
+TIER="${RESOLUTION%%:*}"; SCRIPT_PATH="${RESOLUTION#*:}"
+case "$TIER" in
+  adaptive|universal) bash "$SCRIPT_PATH" {NUMBER} {GH_FLAG} decomposed ;;
+  prose)
+    gh issue edit {NUMBER} {GH_FLAG} --add-label "workflow:decomposed" \
+      --remove-label "workflow:investigating,workflow:ready-to-build,workflow:building,workflow:in-review,workflow:merged,workflow:invalid" 2>/dev/null || true
+    ;;
+esac
 ```
 
 Write machine-readable phase checkpoint (MUST execute immediately after label transition, before continuing):
@@ -524,7 +569,15 @@ gh issue comment {NUMBER} {GH_FLAG} --body "<!-- FORGE:CHECKPOINT -->
 
 **INVALID**:
 ```bash
-bash "$(resolve_script 'transition-label' | cut -d: -f2-)" {NUMBER} {GH_FLAG} invalid
+RESOLUTION=$(resolve_script 'transition-label')
+TIER="${RESOLUTION%%:*}"; SCRIPT_PATH="${RESOLUTION#*:}"
+case "$TIER" in
+  adaptive|universal) bash "$SCRIPT_PATH" {NUMBER} {GH_FLAG} invalid ;;
+  prose)
+    gh issue edit {NUMBER} {GH_FLAG} --add-label "workflow:invalid" \
+      --remove-label "workflow:investigating,workflow:ready-to-build,workflow:building,workflow:in-review,workflow:merged,workflow:decomposed" 2>/dev/null || true
+    ;;
+esac
 gh issue close {NUMBER} {GH_FLAG} --comment "Closing as invalid: {reason from investigation}"
 ```
 → STOP. No checkpoint written — INVALID is terminal.
@@ -622,7 +675,15 @@ gh issue comment {NUMBER} {GH_FLAG} --body "<!-- FORGE:DECOMPOSED -->
 
 ### 2F: Update labels
 ```bash
-bash "$(resolve_script 'transition-label' | cut -d: -f2-)" {NUMBER} {GH_FLAG} decomposed
+RESOLUTION=$(resolve_script 'transition-label')
+TIER="${RESOLUTION%%:*}"; SCRIPT_PATH="${RESOLUTION#*:}"
+case "$TIER" in
+  adaptive|universal) bash "$SCRIPT_PATH" {NUMBER} {GH_FLAG} decomposed ;;
+  prose)
+    gh issue edit {NUMBER} {GH_FLAG} --add-label "workflow:decomposed" \
+      --remove-label "workflow:investigating,workflow:ready-to-build,workflow:building,workflow:in-review,workflow:merged,workflow:invalid" 2>/dev/null || true
+    ;;
+esac
 ```
 
 → STOP. Each sub-issue runs its own `/work-on`.
@@ -917,7 +978,15 @@ If budget exceeded (3 min), use `<!-- FORGE:ARCHITECT:PARTIAL -->`.
 
 ### 3D: Set building label
 ```bash
-bash "$(resolve_script 'transition-label' | cut -d: -f2-)" {NUMBER} {GH_FLAG} building
+RESOLUTION=$(resolve_script 'transition-label')
+TIER="${RESOLUTION%%:*}"; SCRIPT_PATH="${RESOLUTION#*:}"
+case "$TIER" in
+  adaptive|universal) bash "$SCRIPT_PATH" {NUMBER} {GH_FLAG} building ;;
+  prose)
+    gh issue edit {NUMBER} {GH_FLAG} --add-label "workflow:building" \
+      --remove-label "workflow:investigating,workflow:ready-to-build,workflow:in-review,workflow:merged,workflow:invalid,workflow:decomposed" 2>/dev/null || true
+    ;;
+esac
 ```
 
 ### 3E: Create worktree
@@ -928,11 +997,24 @@ Branch slug from title (lowercase, hyphenated, max 40 chars). Prefix: `fix/` (bu
 
 ```bash
 # Compute PR_BASE deterministically from issue milestone — no LLM interpretation
-if ! PR_BASE=$(bash "$(resolve_script 'classify-lane' | cut -d: -f2-)" {NUMBER} -R {GH_REPO}); then
-  gh issue comment {NUMBER} {GH_FLAG} --body "BLOCKER: classify-lane.sh failed to compute PR target — see script error above. Adding needs-human."
-  gh issue edit {NUMBER} {GH_FLAG} --add-label "needs-human"
-  exit 1
-fi
+RESOLUTION=$(resolve_script 'classify-lane')
+TIER="${RESOLUTION%%:*}"; SCRIPT_PATH="${RESOLUTION#*:}"
+case "$TIER" in
+  adaptive|universal)
+    if ! PR_BASE=$(bash "$SCRIPT_PATH" {NUMBER} -R {GH_REPO}); then
+      gh issue comment {NUMBER} {GH_FLAG} --body "BLOCKER: classify-lane.sh failed to compute PR target — see script error above. Adding needs-human."
+      gh issue edit {NUMBER} {GH_FLAG} --add-label "needs-human"
+      exit 1
+    fi
+    ;;
+  prose)
+    # classify-lane has no valid prose fallback — the script output is authoritative.
+    # Without it, PR target cannot be determined safely. Add needs-human and stop.
+    gh issue comment {NUMBER} {GH_FLAG} --body "BLOCKER: classify-lane.sh not installed (prose tier). Cannot compute PR target deterministically. Adding needs-human."
+    gh issue edit {NUMBER} {GH_FLAG} --add-label "needs-human"
+    exit 1
+    ;;
+esac
 ```
 
 **Determine source branch**:
@@ -1281,13 +1363,35 @@ If fails: try `--force-with-lease`. If still fails: post comment, add `needs-hum
 ### 4C: Determine PR target
 `PR_BASE` was computed in Phase 3E. If somehow unset (e.g., resumed session after compaction), recompute:
 ```bash
-PR_BASE=$(bash "$(resolve_script 'classify-lane' | cut -d: -f2-)" {NUMBER} -R {GH_REPO})
+RESOLUTION=$(resolve_script 'classify-lane')
+TIER="${RESOLUTION%%:*}"; SCRIPT_PATH="${RESOLUTION#*:}"
+case "$TIER" in
+  adaptive|universal) PR_BASE=$(bash "$SCRIPT_PATH" {NUMBER} -R {GH_REPO}) ;;
+  prose)
+    # No valid prose fallback — see Phase 3E note.
+    gh issue comment {NUMBER} {GH_FLAG} --body "BLOCKER: classify-lane.sh not installed (prose tier). Cannot recompute PR target. Adding needs-human."
+    gh issue edit {NUMBER} {GH_FLAG} --add-label "needs-human"
+    exit 1
+    ;;
+esac
 ```
 Output is authoritative — no prose fallback. Script exits 1 on error (invalid issue, `gh` auth failure, or milestone branch absent on remote); treat non-zero exit as `needs-human` and STOP. <!-- Added: forge#669, forge#639 -->
 
 ### 4C.5: Validate PR target against classified lane
 ```bash
-bash "$(resolve_script 'validate-pr-target' | cut -d: -f2-)" {PR_BASE} {CLASSIFIED_LANE}
+RESOLUTION=$(resolve_script 'validate-pr-target')
+TIER="${RESOLUTION%%:*}"; SCRIPT_PATH="${RESOLUTION#*:}"
+case "$TIER" in
+  adaptive|universal)
+    bash "$SCRIPT_PATH" {PR_BASE} {CLASSIFIED_LANE}
+    ;;
+  prose)
+    # validate-pr-target has no safe prose fallback — silently skipping validation risks
+    # merging to the wrong branch. Log a warning but do NOT block the pipeline; the PR
+    # review step will catch a mismatched target before merge.
+    echo "WARNING: validate-pr-target.sh not installed (prose tier) — skipping lane validation. Confirm PR base manually." >&2
+    ;;
+esac
 ```
 `{CLASSIFIED_LANE}` is the value returned by `classify-lane.sh` in Phase 4C. `{PR_BASE}` is the branch the PR will target. If exit code is 1 (mismatch):
 ```bash
@@ -1321,7 +1425,15 @@ If PR already exists for this branch, use the existing PR number.
 
 ### 4E: Update labels
 ```bash
-bash "$(resolve_script 'transition-label' | cut -d: -f2-)" {NUMBER} {GH_FLAG} in-review
+RESOLUTION=$(resolve_script 'transition-label')
+TIER="${RESOLUTION%%:*}"; SCRIPT_PATH="${RESOLUTION#*:}"
+case "$TIER" in
+  adaptive|universal) bash "$SCRIPT_PATH" {NUMBER} {GH_FLAG} in-review ;;
+  prose)
+    gh issue edit {NUMBER} {GH_FLAG} --add-label "workflow:in-review" \
+      --remove-label "workflow:investigating,workflow:ready-to-build,workflow:building,workflow:merged,workflow:invalid,workflow:decomposed" 2>/dev/null || true
+    ;;
+esac
 ```
 
 ---
@@ -1439,7 +1551,15 @@ If all phases complete:
 ```bash
 gh issue close {NUMBER} {GH_FLAG} \
   --comment "Closed: PR #{PR_NUMBER} merged to \`{PR_BASE}\`. Closes #{NUMBER}."
-bash "$(resolve_script 'transition-label' | cut -d: -f2-)" {NUMBER} {GH_FLAG} merged
+RESOLUTION=$(resolve_script 'transition-label')
+TIER="${RESOLUTION%%:*}"; SCRIPT_PATH="${RESOLUTION#*:}"
+case "$TIER" in
+  adaptive|universal) bash "$SCRIPT_PATH" {NUMBER} {GH_FLAG} merged ;;
+  prose)
+    gh issue edit {NUMBER} {GH_FLAG} --add-label "workflow:merged" \
+      --remove-label "workflow:investigating,workflow:ready-to-build,workflow:building,workflow:in-review,workflow:invalid,workflow:decomposed" 2>/dev/null || true
+    ;;
+esac
 ```
 
 ### 6D: Parent tracker update (sub-issues only)
