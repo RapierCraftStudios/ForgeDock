@@ -20,5 +20,8 @@ forge.yaml.bak.*
 .claude/
 CLAUDE.md
 
+# Marketing (local only, not published to npm)
+marketing/
+
 # Node
 node_modules/
