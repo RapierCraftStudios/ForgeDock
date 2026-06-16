@@ -1,0 +1,145 @@
+#!/usr/bin/env bash
+# classify-lane.sh — Deterministic lane routing from issue milestone
+#
+# Usage: classify-lane.sh <issue_number> [-R <owner/repo>]
+#   issue_number: GitHub issue number (required)
+#   -R <owner/repo>: GitHub repository (optional, defaults to current repo)
+#
+# Output: lane string written to stdout
+#   staging              — issue has no milestone (fast lane)
+#   milestone/{slug}     — issue has a milestone (feature lane, slug = lowercased, spaces→hyphens, git-invalid chars stripped)
+#
+# Exit codes: 0 = success, 1 = error (invalid issue, gh auth failure, branch missing, etc.)
+#
+# Branch existence validation:
+#   Both fast-lane (staging) and feature-lane (milestone/{slug}) outputs are validated
+#   against the remote via `git ls-remote`. If the target branch does not exist, the
+#   script exits 1 with a descriptive error. This prevents agents from creating PRs
+#   targeting phantom branches and catches misconfigured branches.staging values early.
+#   Fast-lane staging branch name is read from forge.yaml (branches.staging key),
+#   defaulting to "staging" when forge.yaml is absent or yq is unavailable.
+
+set -euo pipefail
+
+ISSUE_NUMBER="${1:-}"
+GH_REPO_ARGS=()
+
+# Parse arguments: issue number + optional -R flag
+if [ -z "$ISSUE_NUMBER" ]; then
+  echo "ERROR: issue number is required" >&2
+  echo "Usage: classify-lane.sh <issue_number> [-R <owner/repo>]" >&2
+  exit 1
+fi
+
+shift
+while [ $# -gt 0 ]; do
+  case "$1" in
+    -R)
+      if [ $# -lt 2 ]; then
+        echo "ERROR: -R requires a value <owner/repo>" >&2
+        echo "Usage: classify-lane.sh <issue_number> [-R <owner/repo>]" >&2
+        exit 1
+      fi
+      if ! [[ "$2" =~ ^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$ ]]; then
+        echo "ERROR: -R value must be owner/repo format, got: $2" >&2
+        exit 1
+      fi
+      GH_REPO_ARGS=(-R "$2")
+      shift 2
+      ;;
+    *)
+      echo "ERROR: unknown argument: $1" >&2
+      exit 1
+      ;;
+  esac
+done
+
+# Validate issue number is numeric
+if ! [[ "$ISSUE_NUMBER" =~ ^[0-9]+$ ]]; then
+  echo "ERROR: issue number must be numeric, got: $ISSUE_NUMBER" >&2
+  exit 1
+fi
+
+# Fetch milestone title from GitHub
+# gh issue view exits non-zero if the issue does not exist or auth fails
+GH_STDERR_TMP=$(mktemp)
+MILESTONE_TITLE=$(gh issue view "$ISSUE_NUMBER" "${GH_REPO_ARGS[@]}" --json milestone --jq '.milestone.title // empty' 2>"$GH_STDERR_TMP") || {
+  echo "ERROR: failed to fetch issue #$ISSUE_NUMBER — check issue number and repo flag" >&2
+  cat "$GH_STDERR_TMP" >&2
+  rm -f "$GH_STDERR_TMP"
+  exit 1
+}
+rm -f "$GH_STDERR_TMP"
+
+# Export universal script environment so per-repo scripts can call back into universal scripts.
+# Per-repo scripts (.forgedock/scripts/{operation}.sh) source these to delegate to universal ones.
+export FORGEDOCK_SCRIPTS
+FORGEDOCK_SCRIPTS="$(cd "$(dirname "$0")" && pwd)"
+export FORGEDOCK_HOME
+FORGEDOCK_HOME="$(cd "$(dirname "$0")/.." && pwd)"
+
+# Resolve staging branch name from forge.yaml (branches.staging), defaulting to "staging".
+# Uses yq if available; falls back gracefully when forge.yaml is absent or yq is not installed.
+STAGING_BRANCH=$(yq '.branches.staging // "staging"' forge.yaml 2>/dev/null || echo 'staging')
+# yq returns literal "null" when the key exists but is null-valued — treat as default
+[ "$STAGING_BRANCH" = "null" ] && STAGING_BRANCH="staging"
+# Trim any surrounding whitespace or quotes that yq might emit
+STAGING_BRANCH=$(echo "$STAGING_BRANCH" | tr -d '"' | xargs)
+# Final safety net: if somehow empty, use default
+[ -z "$STAGING_BRANCH" ] && STAGING_BRANCH="staging"
+
+# Classify lane based on milestone presence
+if [ -z "$MILESTONE_TITLE" ]; then
+  # Fast lane: validate staging branch exists on remote before returning it.
+  # This mirrors the feature-lane validation below and catches misconfigured
+  # branches.staging values early, with a descriptive error instead of an
+  # opaque failure in the subsequent git worktree add or gh pr create call.
+  if ! git ls-remote --exit-code origin "$STAGING_BRANCH" >/dev/null 2>&1; then
+    echo "ERROR: Fast-lane PR target branch '$STAGING_BRANCH' does not exist on remote 'origin'." >&2
+    echo "       This branch is configured via forge.yaml → branches.staging (default: staging)." >&2
+    echo "       Create the branch first, or update forge.yaml to point to an existing branch." >&2
+    echo "       Run: git push origin HEAD:$STAGING_BRANCH  (from the default branch)" >&2
+    exit 1
+  fi
+  echo "$STAGING_BRANCH"
+else
+  # Slugify: lowercase, spaces → hyphens, strip git-invalid chars, collapse multiple hyphens,
+  # strip leading/trailing hyphens.
+  # `tr -cd 'a-z0-9-'` removes every character that is not a lowercase letter, digit, or hyphen —
+  # this covers all chars forbidden by git-check-ref-format (colons, brackets, parens, etc.).
+  # It runs after space→hyphen so that word boundaries become hyphens before the strip pass,
+  # and before the hyphen-collapse step so consecutive hyphens (produced by stripping special
+  # chars between words) are collapsed into a single hyphen.
+  SLUG=$(echo "$MILESTONE_TITLE" \
+    | tr '[:upper:]' '[:lower:]' \
+    | tr ' ' '-' \
+    | tr -cd 'a-z0-9-' \
+    | sed 's/--*/-/g' \
+    | sed 's/^-//;s/-$//')
+
+  # Guard: empty slug means the milestone title contained no ASCII letters, digits, or hyphens
+  # (e.g. purely Unicode/emoji titles like "🚀✨"). An empty slug would produce LANE="milestone/"
+  # which is an invalid branch reference — catch this early with an actionable error.
+  if [ -z "$SLUG" ]; then
+    echo "ERROR: Milestone title '$MILESTONE_TITLE' produced an empty slug after slugification." >&2
+    echo "       Milestone titles must contain at least one ASCII letter, digit, or hyphen." >&2
+    echo "       Rename the milestone to include an ASCII-safe name (e.g. add a short English suffix)." >&2
+    exit 1
+  fi
+
+  LANE="milestone/$SLUG"
+
+  # Validate that the computed milestone branch exists on the remote.
+  # A non-existent branch means either: (a) the milestone slug was hallucinated, or
+  # (b) the milestone branch has not been created yet. Either way, targeting it would
+  # strand the PR on a phantom branch — hard-fail so a human can investigate.
+  if ! git ls-remote --exit-code origin "$LANE" >/dev/null 2>&1; then
+    echo "ERROR: PR target branch '$LANE' does not exist on remote 'origin'." >&2
+    echo "       Milestone: '$MILESTONE_TITLE' → slug: '$SLUG'" >&2
+    echo "       Create the branch first, or check that the milestone title is correct." >&2
+    echo "       Run: git push origin HEAD:$LANE  (from the base branch)" >&2
+    exit 1
+  fi
+
+  echo "$LANE"
+fi

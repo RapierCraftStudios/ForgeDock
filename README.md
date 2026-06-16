@@ -6,7 +6,7 @@
 
 <p><strong>Autonomous software development for Claude Code.</strong></p>
 
-<p>A sub-agent orchestration layer with a deterministic pipeline that converts developer intent into structured GitHub issues, giving each agent a tightly scoped prompt with GitHub as its secondary context layer. Builds, fixes, researches, and ships end-to-end with a strict code quality bar that raises the baseline of your entire codebase over time. Fewer tokens, less time, better software. Built for production systems and security from the ground up. Benchmarked across 20,000+ GitHub issues on production codebases.</p>
+<p>ForgeDock turns every bug found, every fix shipped, and every review finding into structured context that makes the next agent smarter. It catches integration bugs that code review can't see — missing route registrations, env vars present in CI but absent in deploy, Docker permission mismatches, sibling code paths left unfixed. Every finding feeds back as a prevention rule for future builds. After thousands of issues on production codebases, the system catches bugs before they reach a testing branch.</p>
 
 <a href="https://www.npmjs.com/package/forgedock"><img src="https://img.shields.io/npm/dm/forgedock?label=npm%20downloads&style=flat-square&color=CB3837" alt="npm downloads/month" /></a>&nbsp;
 <a href="https://www.npmjs.com/package/forgedock"><img src="https://img.shields.io/npm/v/forgedock?style=flat-square&color=CB3837" alt="npm version" /></a>&nbsp;
@@ -95,7 +95,7 @@ The context phase surfaced two historical bugs (#577, #587) in the same module �
 
 ## Install
 
-**Requirements:** [Node.js 18+](https://nodejs.org/) and [Claude Code](https://docs.anthropic.com/en/docs/claude-code)
+**Requirements:** [Node.js 18+](https://nodejs.org/), [Claude Code](https://docs.anthropic.com/en/docs/claude-code), [GitHub CLI (`gh`)](https://cli.github.com/), and [`yq`](https://github.com/mikefarah/yq) (YAML parser used by pipeline commands to read `forge.yaml`)
 
 ```bash
 # Install pipeline commands
@@ -200,13 +200,31 @@ Removes all ForgeDock command symlinks from `~/.claude/commands/`. Your `forge.y
 
 ---
 
+## Star History
+
+<a href="https://star-history.com/#RapierCraftStudios/ForgeDock&Date">
+ <picture>
+   <source media="(prefers-color-scheme: dark)" srcset="https://api.star-history.com/svg?repos=RapierCraftStudios/ForgeDock&type=Date&theme=dark" />
+   <source media="(prefers-color-scheme: light)" srcset="https://api.star-history.com/svg?repos=RapierCraftStudios/ForgeDock&type=Date" />
+   <img alt="Star History Chart" src="https://api.star-history.com/svg?repos=RapierCraftStudios/ForgeDock&type=Date" />
+ </picture>
+</a>
+
+---
+
 ## Contributing
 
 PRs welcome. Every change goes through a PR, tested against 3+ scenarios, using conventional commits (`fix(command):`, `feat(command):`, `refactor(command):`).
 
 ## License
 
-[AGPL-3.0](LICENSE) — free to use, modify, and distribute. If you modify ForgeDock and offer it as a service, you must open-source your modifications under the same license.
+ForgeDock uses a **dual-licensing model**:
+
+- **[AGPL-3.0](LICENSE)** — free to use, modify, and distribute for open-source and personal use. If you modify ForgeDock and offer it as a service (including over a network), you must open-source your modifications under AGPL-3.0.
+
+- **[Commercial License](COMMERCIAL-LICENSE.md)** — for organizations that need to use ForgeDock in proprietary workflows or products without AGPL-3.0 copyleft obligations. [Contact RapierCraft Studios](mailto:licensing@rapiercraft.studio) to obtain a commercial license.
+
+The open-source core remains free under AGPL-3.0. The commercial license is an exception for customers who cannot meet the copyleft requirements.
 
 ---
 

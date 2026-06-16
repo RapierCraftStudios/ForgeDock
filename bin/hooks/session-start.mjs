@@ -245,7 +245,7 @@ ${nameNote}${repoNote}${descNote}${milestoneNote}
 | /autopilot | Autonomous platform improvement cycle |
 
 Run \`/help\` to see the full command list.
-To disable ForgeDock in this directory: \`npx forgedock disable\``;
+To remove ForgeDock commands: \`npx forgedock uninstall\``;
 }
 
 /**
@@ -282,12 +282,11 @@ function buildNudgeContext(dir) {
 <!-- ForgeDock: unmanaged nudge -->
 **ForgeDock** is installed but not active in this directory (${safeDir}).
 
-To enable the autonomous development pipeline here:
-  \`npx forgedock enable\`   — mark this directory and stay silent until you run init
-  \`npx forgedock init\`     — immediately generate forge.yaml with AI autopilot
+To activate the autonomous development pipeline here:
+  \`npx forgedock init\`   — generate forge.yaml and activate ForgeDock for this project
 
 This message will not appear again in this directory.
-To suppress it globally, run: \`npx forgedock disable\``;
+To remove ForgeDock commands globally, run: \`npx forgedock uninstall\``;
 }
 
 // ---------------------------------------------------------------------------

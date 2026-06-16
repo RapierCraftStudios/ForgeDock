@@ -2,6 +2,9 @@
 authority: required
 scope: project
 applies_to: [work-on, review-pr, issue, orchestrate, quality-gate]
+domain: pipeline
+last_validated: "YYYY-MM-DD"
+version: "0.0.0"
 ---
 
 # Custom Instructions — Binding Project Directives

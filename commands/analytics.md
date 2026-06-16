@@ -1,6 +1,8 @@
 ---
 description: Pull production analytics from GSC, Bing Webmaster, Clarity, Umami, Cloudflare, Stripe, and GA4 — generate insights and create actionable GitHub issues. Trigger when user says things like "check analytics", "look at prod analytics", "make issues from analytics", "what's happening on the site", "audit the site", "check revenue", etc.
 ---
+<!-- SPDX-FileCopyrightText: Copyright (c) RapierCraft Studios -->
+<!-- SPDX-License-Identifier: AGPL-3.0-or-later -->
 
 # /analytics — Production Analytics Audit & Issue Generator
 

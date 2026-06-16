@@ -2,6 +2,8 @@
 description: Pre-commit quality check — catches defects the review would flag, so the builder can fix them before committing
 argument-hint: (invoked by /work-on, not directly)
 ---
+<!-- SPDX-FileCopyrightText: Copyright (c) RapierCraft Studios -->
+<!-- SPDX-License-Identifier: AGPL-3.0-or-later -->
 
 # /quality-gate — Pre-Commit Quality Check
 
@@ -12,6 +14,41 @@ You are a quality gate that runs AFTER implementation but BEFORE commit. Your jo
 You do NOT post to GitHub. You do NOT create issues. You return findings directly to the builder agent that spawned you.
 
 **Agent model policy**: Default `model: "sonnet"`. If Sonnet is rate-limited, fall back to `model: "opus"`.
+
+---
+
+## Adaptive Design
+
+This quality gate uses **domain detection** to adapt to your project's actual tech stack. Checks are not one-size-fits-all — they are selectively triggered based on the file types and patterns present in each change.
+
+**How it works**:
+1. Changed files are classified into domains (AUTH, DEPLOY, DATABASE, FRONTEND, etc.) by pattern-matching against file paths, extensions, and diff content
+2. Only checks for detected domains are executed — irrelevant checks are skipped entirely
+3. A project that only changes markdown files runs zero domain checks; a project that changes only TypeScript components runs only SECURITY, FRONTEND, and PROXY checks
+
+**Universal check** (always runs for any code file):
+- **SECURITY** — SQL injection, SSRF, path traversal, hardcoded secrets, XSS, command injection
+
+**Conditional checks** (triggered only when relevant patterns are detected):
+
+| Domain | Triggered when |
+|--------|----------------|
+| AUTH | Files matching `*router*` or `route.ts` handlers |
+| DEPLOY | Files referencing `os.getenv` or `process.env` |
+| DATABASE | `.sql` files or files under `migrations/` |
+| FRONTEND | `.tsx`/`.ts` files in client component paths |
+| PROXY | Client components using `fetch`/`useSWR`/`apiFetch` |
+| SHELL | `.sh` files or scripts using `curl`/`wget` |
+| STRING_SETS | Python files in anti-detection or browser automation paths |
+| CONCURRENCY | Python files using `asyncio.shield`, `asyncio.wait_for`, or `Task.cancel` |
+| STATE | Python files with new module-level mutable variable assignments |
+| CAPACITY | Worker/infra Python files with new size/limit/threshold constants |
+| WORKFLOW | `.yml` files in `.github/workflows/` |
+| IMPORT_RESOLUTION | Python files with new `from app.*` imports added outside `try:` blocks |
+| INFRA | Dockerfiles or entrypoints with runtime UID changes |
+| ROUTER_BUG | Router Python files where gate conditions are narrowed |
+
+**Stack-agnostic coverage**: The example domains above reflect common patterns caught in production; they are not requirements. A Go or Ruby project benefits from SECURITY checks. A Node.js project benefits from FRONTEND, PROXY, and DEPLOY checks. Any project benefits from DATABASE and WORKFLOW checks when those file types are present. The stack-specific examples (Python routers, SOPS secrets chain, FastAPI layouts, appleboy SSH deploys) are illustrative — the domain detection system applies the applicable subset to any codebase.
 
 ---
 

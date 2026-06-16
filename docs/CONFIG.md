@@ -41,6 +41,7 @@ The default (`npx forgedock init` with no flags) remains the zero-question autop
 | [`devdocs`](#devdocs-optional) | No | Devdocs knowledge tree path |
 | [`verification`](#verification-optional) | No | Health-check patterns |
 | [`billing`](#billing-optional) | No | Enable financial integrity audit phase |
+| [`adaptive_scripts`](#adaptive_scripts-optional) | No | Per-repo script override configuration |
 
 ---
 
@@ -330,13 +331,37 @@ Run `npx forgedock docs init` to scaffold the tree from ForgeDock's seed templat
 ```yaml
 devdocs:
   path: "devdocs"
+  # index_path: "devdocs/index.yaml"   # optional; defaults to {path}/index.yaml
 ```
 
 | Field | Type | Required | Description |
 |-------|------|----------|-------------|
 | `path` | string (relative path) | No | Path to the devdocs tree, relative to project root. Default: `devdocs`. |
+| `index_path` | string (relative or absolute path) | No | Path to the selective loading index file. Default: `{path}/index.yaml`. When the index file exists at this path, agents read it first (~400 tokens) and load only docs whose domain matches the current issue's labels. When absent, agents fall back to loading all docs with `applies_to: work-on` (backward compatible). Scaffold the index with `npx forgedock docs init`. |
 
 **Commands that use this section**: `docs init`, `work-on/build/context` (Phase C-1), `work-on/build/architect` (Phase A0)
+
+### Selective Loading (index.yaml)
+
+When `devdocs/index.yaml` exists, agents use **domain-filtered selective loading** instead of reading all applicable devdocs:
+
+1. Read `index.yaml` (~400 tokens)
+2. Extract issue labels (e.g. `billing`, `infra`, `auth`)
+3. Load only docs in matching domains + all `always_load` entries
+4. When no labels match any domain key: load only `always_load` entries
+
+**Domain matching**: GitHub issue labels map directly to domain keys in `index.yaml`. For example, a label `billing` matches `domains.billing`. Prefixes like `workflow:`, `priority:`, and `review-finding` are stripped before matching.
+
+**`always_load` entries** are loaded for every task regardless of domain. Use for `project/custom-instructions.md` and other files every agent must read.
+
+**Token savings**: A typical task loads 1-3 docs (~1,500-3,000 tokens) instead of all docs (~8,000-12,000 tokens). The index itself costs ~400 tokens — break-even at 1 file avoided.
+
+**Backward compatibility**: If `index.yaml` is absent, behavior is unchanged — all docs with `applies_to: work-on` are loaded. No migration required for existing devdocs trees.
+
+Scaffold the index with:
+```bash
+npx forgedock docs init
+```
 
 ### Migration from `review.context`
 
@@ -428,6 +453,75 @@ billing:
 | `enabled` | boolean | No | `false` | Set to `true` to enable Phase 4 (Financial Integrity) in `/security-audit`. When `false`, the billing audit phase is skipped — appropriate for projects that do not process payments or have no Stripe integration. |
 
 **Commands that use this section**: `security-audit` (Phase 4 — Financial Integrity)
+
+---
+
+## `adaptive_scripts` (OPTIONAL)
+
+Per-repo script override configuration. Controls whether ForgeDock looks for project-specific scripts in `.forgedock/scripts/` before falling back to universal scripts.
+
+```yaml
+adaptive_scripts:
+  enabled: true
+  directory: ".forgedock/scripts"
+  commit: false
+```
+
+| Field | Type | Required | Default | Description |
+|-------|------|----------|---------|-------------|
+| `enabled` | boolean | No | `true` | When `true`, pipeline agents check `.forgedock/scripts/` for a per-repo script before using the universal one. Set to `false` to disable per-repo overrides entirely and always use universal scripts. |
+| `directory` | string (relative path) | No | `".forgedock/scripts"` | Directory where per-repo adaptive scripts live, relative to the project root. Scaffolded by `npx forgedock init`. |
+| `commit` | boolean | No | `false` | When `false`, `.forgedock/scripts/` is `.gitignore`d — scripts are local-only and not shared with the team. Set to `true` (and remove the `.gitignore` entry) to commit per-repo scripts to version control. |
+
+**Commands that use this section**: `work-on` (Phase 0B script resolution), any pipeline command that calls a deterministic script
+
+### Script Precedence
+
+ForgeDock resolves which script handles each operation using a strict 4-level hierarchy (highest to lowest authority):
+
+```
+1. forge.yaml → learned: (machine-captured corrections)        ← highest
+2. .forgedock/scripts/{operation}.sh  (per-repo adaptive)
+3. scripts/{operation}.sh             (universal, ships with npm)
+4. Prose instructions in command specs (fallback)              ← lowest
+```
+
+### Override Semantics
+
+- **Per-repo scripts completely replace** the universal script for that operation — there is no partial inheritance or merging.
+- **Per-repo scripts may call universal scripts** via the `$FORGEDOCK_SCRIPTS/{operation}.sh` path. Every universal script exports `FORGEDOCK_SCRIPTS` (absolute path to the universal scripts directory) and `FORGEDOCK_HOME` (absolute path to the ForgeDock installation root) so that per-repo scripts can delegate back to them.
+- **No circular dependencies**: per-repo scripts may call universal scripts but must NOT call other per-repo scripts. One level of delegation only.
+- **`forge.yaml → learned:`** overrides take precedence over everything. They represent explicit user corrections captured by the pipeline.
+
+### Example: per-repo script that delegates to universal
+
+```bash
+#!/usr/bin/env bash
+# .forgedock/scripts/classify-lane.sh
+# Override: this repo uses 'develop' instead of 'staging' for the fast lane.
+
+set -euo pipefail
+
+# Delegate to universal classify-lane.sh to get the standard result
+UNIVERSAL_RESULT=$(bash "$FORGEDOCK_SCRIPTS/classify-lane.sh" "$@")
+
+# Override only the fast-lane output for this project
+if [ "$UNIVERSAL_RESULT" = "staging" ]; then
+  echo "develop"
+else
+  echo "$UNIVERSAL_RESULT"
+fi
+```
+
+### Logging
+
+When a pipeline agent resolves a script tier, it logs the result in the FORGE annotation:
+
+```
+Script tier: adaptive (.forgedock/scripts/classify-lane.sh)
+Script tier: universal (scripts/classify-lane.sh)
+Script tier: prose (no script found — using spec instructions)
+```
 
 ---
 

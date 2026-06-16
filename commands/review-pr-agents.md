@@ -1,3 +1,6 @@
+<!-- SPDX-FileCopyrightText: Copyright (c) RapierCraft Studios -->
+<!-- SPDX-License-Identifier: AGPL-3.0-or-later -->
+
 # Agent Catalog for `/review-pr`
 
 This file is the Agent Catalog referenced by the `/review-pr` orchestrator. It is read via the `Read` tool during Phase 3C (agent dispatch). It contains:
@@ -1171,9 +1174,10 @@ If no API context is configured above, derive conventions from the changed files
     BASE=$(gh pr view [PR_NUMBER] --json baseRefName --jq '.baseRefName')
 
     # Find PRs merged to this base in the last 48 hours
+    CUTOFF="$(date -u -d '48 hours ago' +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || date -u -v-48H +%Y-%m-%dT%H:%M:%SZ)"
     RECENT_MERGED=$(gh pr list --base "$BASE" --state merged --limit 20 \
       --json number,title,mergedAt,files \
-      --jq --arg cutoff "$(date -u -d '48 hours ago' +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || date -u -v-48H +%Y-%m-%dT%H:%M:%SZ)" \
+      2>/dev/null | jq --arg cutoff "$CUTOFF" \
       '.[] | select(.mergedAt > $cutoff) | {number, title, schema_files: [.files[].path | select(test("schemas?/|scrape\\.py|models\\.py"))]}' \
       2>/dev/null | head -40)
 

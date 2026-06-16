@@ -2,6 +2,8 @@
 description: Review subcommand — push branch, create PR, invoke /review-pr with --auto-merge
 argument-hint: [issue number] [--repo GH_REPO] [--gh-flag GH_FLAG] [--worktree PATH] [--branch BRANCH] [--base PR_BASE]
 ---
+<!-- SPDX-FileCopyrightText: Copyright (c) RapierCraft Studios -->
+<!-- SPDX-License-Identifier: AGPL-3.0-or-later -->
 
 # work-on/review — Review & PR Creation Subcommand
 
@@ -208,7 +210,17 @@ gh issue view {NUMBER} {GH_FLAG} --json state --jq '.state'
 ```
 
 **Cases**:
-- PR MERGED (issue OPEN or CLOSED) → `REVIEW_RESULT: status: COMPLETE` — do NOT close the issue or add labels here; the router will route to `work-on:close` which handles issue closure, label updates, project board, trajectory log, and worktree cleanup.
+- PR MERGED (issue OPEN or CLOSED) → write checkpoint, then return `REVIEW_RESULT: status: COMPLETE` — do NOT close the issue or add labels here; the router will route to `work-on:close` which handles issue closure, label updates, project board, trajectory log, and worktree cleanup.
+
+  Write machine-readable phase checkpoint before returning (MANDATORY when PR is MERGED):
+  ```bash
+  CHECKPOINT_TIMESTAMP=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+  gh issue comment {NUMBER} {GH_FLAG} --body "<!-- FORGE:CHECKPOINT -->
+  \`\`\`json
+  {\"phase\": \"REVIEW\", \"status\": \"COMPLETE\", \"next_phase\": \"CLOSE\", \"timestamp\": \"${CHECKPOINT_TIMESTAMP}\"}
+  \`\`\`"
+  ```
+
 - PR NOT MERGED → attempt manual merge:
   ```bash
   gh pr merge {PR_NUMBER} {GH_FLAG} --merge --auto

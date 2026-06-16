@@ -1,0 +1,94 @@
+# devdocs/index.yaml — ForgeDock Selective Loading Index
+#
+# Agents read this file (~400 tokens) first, then load only the docs that match
+# the current task's domain labels. Avoids loading all devdocs files when only
+# 1-2 are relevant — mirrors the stub+invoke pattern from token optimization.
+#
+# domain: matches a GitHub issue label or keyword.
+# authority:
+#   required    — Agent MUST load this file for the domain
+#   recommended — Agent SHOULD load (improves output quality)
+#   reference   — Agent MAY consult (informational)
+# token_cost: approximate token count when fully loaded.
+#
+# Backward compatibility: if this file is absent, agents fall back to loading
+# ALL devdocs files with applies_to matching the current command.
+
+version: 2
+
+# ---------------------------------------------------------------------------
+# Domains — each key maps to a GitHub issue label or keyword
+# ---------------------------------------------------------------------------
+
+domains:
+  pipeline:
+    description: "ForgeDock pipeline conventions, phase sequence, lane routing, FORGE annotations, command reference"
+    docs:
+      - path: agent/using-forgedock.md
+        authority: required
+        token_cost: 1400
+
+  github:
+    description: "GitHub CLI usage, branch naming, PR conventions, label management, commit format"
+    docs:
+      - path: agent/using-github.md
+        authority: required
+        token_cost: 1200
+      - path: agent/github-cli-patterns.md
+        authority: reference
+        token_cost: 1000
+
+  architecture:
+    description: "System architecture, open-core model, platform boundary, scripts layer, milestone tracking"
+    docs:
+      - path: project/architecture.md
+        authority: required
+        token_cost: 1100
+
+  devdocs:
+    description: "Devdocs system, frontmatter schema, selective loading, index format"
+    docs:
+      - path: project/architecture.md
+        authority: required
+        token_cost: 1100
+      - path: agent/using-forgedock.md
+        authority: recommended
+        token_cost: 1400
+
+  scripts:
+    description: "Scripts layer, classify-lane.sh, transition-label.sh, validate-pr-target.sh, per-repo adaptive scripts"
+    docs:
+      - path: project/architecture.md
+        authority: required
+        token_cost: 1100
+      - path: agent/using-forgedock.md
+        authority: recommended
+        token_cost: 1400
+
+  bin:
+    description: "npm installer, npx forgedock CLI, TUI, forgedock.mjs"
+    docs:
+      - path: project/architecture.md
+        authority: recommended
+        token_cost: 1100
+
+  infra:
+    description: "CI/CD, GitHub Actions, npm publishing, OIDC trusted publishing"
+    docs:
+      - path: project/architecture.md
+        authority: recommended
+        token_cost: 1100
+      - path: agent/using-github.md
+        authority: reference
+        token_cost: 1200
+
+# ---------------------------------------------------------------------------
+# Always Load
+# Loaded for EVERY task regardless of domain label match.
+# Keep short — every entry adds tokens to every task.
+# ---------------------------------------------------------------------------
+
+always_load: []
+# Note: ForgeDock's own devdocs have no custom-instructions.md that overrides
+# agent behavior. The command specs in commands/ serve that role directly.
+# Add entries here only when a doc must be read for ALL tasks unconditionally.

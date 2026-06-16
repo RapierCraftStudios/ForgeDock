@@ -28,6 +28,9 @@ jobs:
           node-version: 24
           registry-url: 'https://registry.npmjs.org'
 
+      - name: Run tests
+        run: npm test
+
       - name: Bump patch version
         run: |
           git config user.name "github-actions[bot]"

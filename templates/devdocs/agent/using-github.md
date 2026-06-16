@@ -2,6 +2,9 @@
 authority: required
 scope: agent
 applies_to: [work-on, review-pr, issue, orchestrate, quality-gate, cleanup]
+domain: github
+last_validated: "YYYY-MM-DD"
+version: "0.0.0"
 ---
 
 # Using GitHub — Authoritative Conventions Reference

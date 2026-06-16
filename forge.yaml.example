@@ -10,7 +10,7 @@
 #   # Add forge.yaml to your .gitignore if it contains sensitive paths
 #
 # Required sections: project, paths, branches
-# Optional sections: repos, project_board, services, review, verification, deploy, billing, marketing
+# Optional sections: repos, project_board, services, review, verification, deploy, billing, devdocs, adaptive_scripts, learned, marketing
 
 # =============================================================================
 # PROJECT (REQUIRED)
@@ -33,6 +33,21 @@ project:
   # One-line description of what this project does
   # Used in issue templates and pipeline reports
   description: "SaaS platform for automated data processing"
+
+  # Personal GitHub login of the person who controls this project.
+  # Used by work-on Phase 1D (correction capture) to filter issue comments
+  # for owner-specific correction signals (e.g. "no, use staging not develop").
+  #
+  # When to set this:
+  #   - REQUIRED for org-owned repos: GitHub comment .user.login is always a
+  #     personal account (e.g. "mrdubey"), never the org name (e.g. "acme-org").
+  #     Without this field, correction capture is silently disabled for org repos.
+  #   - Optional for personal repos: omit it and the pipeline will auto-resolve
+  #     via `gh api repos/{GH_REPO} --jq '.owner.login'`.
+  #
+  # Example (org repo owned by "acme-org", controlled by "alice"):
+  #   owner_login: "alice"
+  # owner_login: "alice"
 
   # Pipeline repository — optional. Set this if the ForgeDock pipeline itself
   # lives in a different repo than the project being developed.
@@ -486,6 +501,85 @@ branches:
 #   #   - ForgeDock usage notes   → devdocs/agent/using-forgedock.md
 #   # Agents read devdocs/ files as binding source-of-truth, so they receive
 #   # richer context than the single review.context string.
+
+# =============================================================================
+# ADAPTIVE_SCRIPTS (OPTIONAL)
+# Per-repo scripts that ForgeDock generates and updates as it learns your
+# project's patterns. These scripts live in .forgedock/scripts/ and take
+# precedence over universal scripts shipped with ForgeDock.
+#
+# The directory is scaffolded automatically by `npx forgedock init` and is
+# gitignored by default. Remove the .forgedock/scripts/ line from .gitignore
+# to commit scripts to version control and share them with your team.
+#
+# Commands: work-on (script discovery), optimize (script generation — #668)
+# =============================================================================
+
+# adaptive_scripts:
+#   # Enable or disable per-repo adaptive scripts.
+#   # When false, pipeline agents use only universal scripts shipped with ForgeDock.
+#   # Default: true
+#   enabled: true
+#
+#   # Directory where per-repo scripts are stored, relative to the project root.
+#   # Scaffolded by `npx forgedock init` if it doesn't exist.
+#   # Default: ".forgedock/scripts"
+#   directory: ".forgedock/scripts"
+#
+#   # Whether per-repo scripts are committed to version control.
+#   # false (default): .forgedock/scripts/ is gitignored — scripts are local only
+#   # true: remove .forgedock/scripts/ from .gitignore to share scripts with your team
+#   # To opt in: remove the .forgedock/scripts/ entry from .gitignore
+#   commit: false
+
+# =============================================================================
+# LEARNED (OPTIONAL)
+# Agent-writable section for project-specific patterns captured across sessions.
+# Pipeline agents read this section at startup (Phase 0B) and use it to override
+# default routing decisions and toolchain commands. Agents write to this section
+# when they detect correction signals in owner comments (Phase 1D).
+#
+# You can also edit this section manually after reviewing what agents have learned.
+#
+# All keys are optional — omit any key to use the pipeline default.
+# Commands: work-on (Phase 0B reads; Phase 1D writes)
+# =============================================================================
+
+# learned:
+#   # Branch target overrides — keyed by branch role, value is the actual branch name.
+#   # These override branches.staging and similar fields when present.
+#   # Example: if your project uses "develop" as the integration branch instead of "staging":
+#   branch_targets:
+#     staging: "develop"        # overrides branches.staging for fast-lane PR targeting
+#
+#   # Custom test commands to run during Phase 3H (validate) in addition to
+#   # verification.commands entries. Appended to the verification step, not replaced.
+#   # Use when the agent has learned repo-specific pre-PR checks:
+#   test_commands:
+#     - "pnpm typecheck"        # run before PR
+#     - "pnpm test --run"
+#
+#   # Test location hints — overrides default assumption of tests/ directory.
+#   # Used by Phase 3F to locate tests when writing or updating test files:
+#   test_locations:
+#     - "__tests__/"            # actual test directory for this repo
+#     - "src/**/*.test.ts"      # additional test file pattern
+#
+#   # Label name remapping — use when this repo has custom workflow label names.
+#   # Keys are canonical ForgeDock label names; values are the labels actually
+#   # present in this repo. Agents apply this map to all gh issue edit calls:
+#   label_map:
+#     "workflow:investigating": "needs-triage"   # repo uses custom label name
+#     "workflow:building":      "in-progress"
+#
+#   # Commit message style convention for this repo.
+#   # Used by Phase 3M (commit) to format commit messages.
+#   # Values: "conventional" | "conventional-with-scope" | "plain"
+#   commit_style: "conventional-with-scope"
+#
+#   # Metadata written by the pipeline when this section was last updated:
+#   captured_at: "2026-03-15T10:30:00Z"  # ISO 8601 timestamp
+#   captured_by: "work-on/667"           # command + issue number that wrote it
 
 # =============================================================================
 # MARKETING (OPTIONAL)

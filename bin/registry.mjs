@@ -356,3 +356,23 @@ export async function markNudgeSeen(dir) {
     registry.nudgeSeen[absDir] = { at: new Date().toISOString() };
   });
 }
+
+/**
+ * Remove the nudgeSeen entry for a directory from the registry.
+ *
+ * Called by `npx forgedock uninstall` to clean up per-directory state
+ * written by the session-start hook. After uninstall, the nudge will fire
+ * once more if ForgeDock is later reinstalled in the same directory —
+ * consistent with a fresh install experience.
+ *
+ * Best-effort: a failed write is non-fatal and leaves the registry as-is.
+ *
+ * @param {string} dir - Absolute path to the directory.
+ * @returns {Promise<void>}
+ */
+export async function clearNudgeSeen(dir) {
+  const absDir = normalizeDir(dir);
+  await writeRegistry((registry) => {
+    delete registry.nudgeSeen[absDir];
+  });
+}

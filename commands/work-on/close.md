@@ -2,6 +2,8 @@
 description: Close subcommand — update project board, final issue body, parent tracker, summary report, trajectory log
 argument-hint: [issue number] [--repo GH_REPO] [--gh-flag GH_FLAG] [--pr PR_NUMBER] [--base PR_BASE] [--branch BRANCH] [--worktree WORKTREE_PATH]
 ---
+<!-- SPDX-FileCopyrightText: Copyright (c) RapierCraft Studios -->
+<!-- SPDX-License-Identifier: AGPL-3.0-or-later -->
 
 # work-on/close — Close & Trajectory Subcommand
 
@@ -314,6 +316,88 @@ Where:
 
 ---
 
+## Phase C5.5: Graph Decision Record (MANDATORY when PR exists)
+
+**Skip if**: `{PR_NUMBER}` is empty OR `<!-- FORGE:DECISION_RECORD -->` already posted on the PR.
+
+Post a consolidated provenance artifact to the PR that proves the merge was backed by citable evidence. Mirrors the Phase 7C step in `work-on.md` — must stay in sync.
+
+**Idempotency check**:
+```bash
+GDR_EXISTS=$(gh api repos/{GH_REPO}/issues/{PR_NUMBER}/comments \
+  --jq '[.[] | select(.body | contains("FORGE:DECISION_RECORD"))] | length > 0' 2>/dev/null || echo "false")
+```
+
+**Extract context edge counts** from FORGE:CONTEXT comment:
+```bash
+CONTEXT_COMMENT=$(gh api repos/{GH_REPO}/issues/{NUMBER}/comments \
+  --jq '.[] | select(.body | contains("FORGE:CONTEXT")) | .body' 2>/dev/null | head -1)
+REVIEW_FINDING_COUNT=$(echo "$CONTEXT_COMMENT" | grep -oP '#\d+' | wc -l | tr -d ' ')
+REVIEW_FINDING_COUNT=${REVIEW_FINDING_COUNT:-0}
+```
+
+**Extract review verdict** from PR review summary:
+```bash
+REVIEW_SUMMARY=$(gh api repos/{GH_REPO}/issues/{PR_NUMBER}/comments \
+  --jq '[.[] | select(.body | contains("FORGE:REVIEWER") or (.body | test("APPROVED:|CHANGES REQUESTED:"; "i")))] | last | .body // ""' 2>/dev/null || echo '')
+REVIEW_VERDICT=$(echo "$REVIEW_SUMMARY" | grep -oP '(?<=Verdict: )(APPROVED|CHANGES REQUESTED)' | head -1 || echo "APPROVED")
+FINDINGS_COUNT=$(echo "$REVIEW_SUMMARY" | grep -oP '\d+(?= findings)' | head -1 || echo "0")
+AGENTS_RUN=$(echo "$REVIEW_SUMMARY" | grep -oP '\d+(?= agents)' | head -1 || echo "0")
+```
+
+**Post GDR to PR** (not to issue — PR comment is the permanent artifact):
+```bash
+if [ "$GDR_EXISTS" != "true" ] && [ -n "{PR_NUMBER}" ]; then
+  GDR_TIMESTAMP=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+  HEAD_SHA=$(gh pr view {PR_NUMBER} {GH_FLAG} --json headRefOid --jq '.headRefOid' 2>/dev/null || echo "")
+  MERGE_COMMIT=$(gh pr view {PR_NUMBER} {GH_FLAG} --json mergeCommit --jq '.mergeCommit.oid // ""' 2>/dev/null || echo "")
+
+  gh pr comment {PR_NUMBER} {GH_FLAG} --body "<!-- FORGE:DECISION_RECORD -->
+## Graph Decision Record — Issue #${NUMBER} / PR #${PR_NUMBER}
+
+\`\`\`json
+{
+  \"schema_version\": \"1\",
+  \"issue\": ${NUMBER},
+  \"pr\": ${PR_NUMBER},
+  \"repo\": \"{GH_REPO}\",
+  \"lane\": \"feature\",
+  \"pr_base\": \"{PR_BASE}\",
+  \"branch\": \"{BRANCH}\",
+  \"head_sha\": \"${HEAD_SHA}\",
+  \"merge_commit\": \"${MERGE_COMMIT}\",
+  \"investigation\": {
+    \"verdict\": \"{VERDICT}\",
+    \"confidence\": \"{CONFIDENCE}\",
+    \"task_type\": \"{TASK_TYPE}\"
+  },
+  \"context\": {
+    \"historical_edges_referenced\": ${REVIEW_FINDING_COUNT},
+    \"forge_annotations_read\": [\"FORGE:INVESTIGATOR\", \"FORGE:CONTRACT\", \"FORGE:CONTEXT\", \"FORGE:ARCHITECT\", \"FORGE:BUILDER\"]
+  },
+  \"build\": {
+    \"files_changed\": {FILES_CHANGED},
+    \"quality_gate\": \"{pass|fail}\",
+    \"quality_gate_iterations\": {GATE_ITERATIONS}
+  },
+  \"review\": {
+    \"verdict\": \"${REVIEW_VERDICT:-APPROVED}\",
+    \"findings_created\": ${FINDINGS_COUNT},
+    \"agents_run\": ${AGENTS_RUN}
+  },
+  \"merge\": {
+    \"merged_at\": \"${GDR_TIMESTAMP}\",
+    \"justification\": \"Investigation confirmed ({VERDICT}/{CONFIDENCE}), quality gate passed, review ${REVIEW_VERDICT:-approved}\"
+  }
+}
+\`\`\`"
+fi
+```
+
+<!-- Added: forge#776 -->
+
+---
+
 ## Phase C6: Worktree & Branch Cleanup
 
 Remove the git worktree and delete the local feature branch after the PR has merged. This prevents worktree accumulation across pipeline runs.
@@ -360,6 +444,7 @@ CLOSE_RESULT:
   status: COMPLETE | ALREADY_DONE | PHASE_COMPLETE
   issue_state: closed | open
   trajectory_url: {url of FORGE:TRAJECTORY comment}
+  decision_record_url: {url of FORGE:DECISION_RECORD comment on PR, or "" if skipped}
   parent_updated: {true|false}
   parent_closed: {true|false}
 ```

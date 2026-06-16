@@ -2,12 +2,31 @@
 description: Pre-implementation architecture planning — traces ALL affected code paths and produces an ordered implementation plan before any code is written
 argument-hint: [issue number] [--repo GH_REPO] [--gh-flag GH_FLAG] [--files AFFECTED_FILES]
 ---
+<!-- SPDX-FileCopyrightText: Copyright (c) RapierCraft Studios -->
+<!-- SPDX-License-Identifier: AGPL-3.0-or-later -->
 
 # work-on/build/architect — Multi-Path Implementation Planning
 
 **Invoked by**: `work-on.md` Step 3C.6, between Context Gathering and Implement.
 **Time budget**: Max 3 minutes. Skip any file read that times out.
 **Output**: Post `<!-- FORGE:ARCHITECT -->` comment on the issue, then return structured plan to caller.
+
+---
+
+## COMPLEXITY_BAND Guard (check BEFORE all phases)
+
+Read COMPLEXITY_BAND from the `<!-- FORGE:FAST_PATH -->` comment on the issue:
+
+```bash
+COMPLEXITY_BAND=$(gh api repos/{GH_REPO}/issues/{NUMBER}/comments \
+  --jq '.[] | select(.body | contains("FORGE:FAST_PATH")) | .body' 2>/dev/null \
+  | sed -n 's/.*\*\*COMPLEXITY_BAND\*\*: \([A-Z_]*\).*/\1/p' | head -1)
+COMPLEXITY_BAND="${COMPLEXITY_BAND:-STANDARD}"
+```
+
+**If COMPLEXITY_BAND: TRIVIAL** → skip all phases (A0 through A5), post NO comment, return empty plan to caller immediately. Do not read any files. This is not an error — trivial single-file changes have no cross-path consistency risk. <!-- Added: forge#679 -->
+
+**If COMPLEXITY_BAND: STANDARD or COMPLEX** → proceed to Phase A0 below.
 
 ---
 
@@ -127,12 +146,103 @@ fi
 
 ### Step 2: Secondary reads — other applicable project files
 
-Read all other `*.md` files under `DEVDOCS_PATH` where `applies_to` contains `work-on`. Skip `project/custom-instructions.md` (already read). Sort by authority (`required` first).
+**Index-first path** (preferred when `index.yaml` exists): Use domain-filtered selective loading instead of O(N) enumerate. Falls back to full enumerate when index is absent. Skip `project/custom-instructions.md` (already read in Step 1). Sort by authority (`required` first).
 
 ```bash
 PROJECT_CONVENTIONS=""
+INDEX_PATH="${DEVDOCS_PATH}/index.yaml"
 
-if [ -n "$DEVDOCS_PATH" ]; then
+# --- Read devdocs.index_path override from forge.yaml (optional) ---
+if [ -f "$FORGE_YAML_PATH" ]; then
+  INDEX_PATH_OVERRIDE=$(grep -A5 '^devdocs:' "$FORGE_YAML_PATH" \
+    | grep '^\s*index_path:' \
+    | head -1 \
+    | sed 's/.*index_path:\s*//' \
+    | tr -d '"'"'"' \
+    | tr -d '[:space:]')
+  if [ -n "$INDEX_PATH_OVERRIDE" ]; then
+    case "$INDEX_PATH_OVERRIDE" in
+      /*) INDEX_PATH="$INDEX_PATH_OVERRIDE" ;;
+      *)  INDEX_PATH="{REPO_PATH}/${INDEX_PATH_OVERRIDE}" ;;
+    esac
+  fi
+fi
+
+if [ -n "$DEVDOCS_PATH" ] && [ -f "$INDEX_PATH" ]; then
+  # --- Index-first loading path ---
+  echo "Devdocs index found at ${INDEX_PATH} — using selective domain loading"
+
+  # Read issue labels to determine domain(s)
+  ISSUE_LABELS=$(gh issue view {NUMBER} -R {GH_REPO} --json labels \
+    --jq '[.labels[].name] | join(" ")' 2>/dev/null || echo "")
+  echo "Issue labels: ${ISSUE_LABELS:-none}"
+
+  # Read index content
+  INDEX_CONTENT=$(cat "$INDEX_PATH" 2>/dev/null || echo "")
+
+  # Extract always_load paths (lines with "path:" under "always_load:" block)
+  ALWAYS_LOAD_PATHS=$(echo "$INDEX_CONTENT" \
+    | awk '/^always_load:/,/^[a-z]/' \
+    | grep '^\s*-\s*path:' \
+    | sed 's/.*path:\s*//' \
+    | tr -d '"'"'"' \
+    | tr -d '[:space:]')
+
+  # Extract domain blocks matching any issue label keyword
+  DOMAIN_PATHS=""
+  for label in $ISSUE_LABELS; do
+    KEYWORD=$(echo "$label" | sed 's/^workflow://; s/^priority://; s/^review-finding$//')
+    [ -z "$KEYWORD" ] && continue
+    # Sanitize KEYWORD before AWK injection — strip chars that would break awk regex delimiters
+    SAFE_KEYWORD=$(printf '%s' "$KEYWORD" | tr -cd 'a-zA-Z0-9_-')
+    [ -z "$SAFE_KEYWORD" ] && continue
+
+    BLOCK_PATHS=$(echo "$INDEX_CONTENT" \
+      | awk "/^  ${SAFE_KEYWORD}:/{found=1; next} found && /^  [a-z]/{found=0} found && /^\s*-\s*path:/{print}" \
+      | sed 's/.*path:\s*//' \
+      | tr -d '"'"'"' \
+      | tr -d '[:space:]')
+
+    if [ -n "$BLOCK_PATHS" ]; then
+      echo "Domain '${SAFE_KEYWORD}' matched — adding docs: $(echo "$BLOCK_PATHS" | tr '\n' ' ')"
+      DOMAIN_PATHS="${DOMAIN_PATHS}${BLOCK_PATHS}"$'\n'
+    fi
+  done
+
+  # Combine always_load + domain paths (deduplicate)
+  ALL_PATHS=$(printf "%s\n%s" "$ALWAYS_LOAD_PATHS" "$DOMAIN_PATHS" \
+    | grep -v '^$' | sort -u)
+
+  # When no domain labels matched, load only always_load entries
+  if [ -z "$DOMAIN_PATHS" ]; then
+    echo "No domain labels matched index — loading always_load entries only"
+    ALL_PATHS="$ALWAYS_LOAD_PATHS"
+  fi
+
+  APPLICABLE_FILES=""
+  while IFS= read -r rel_path; do
+    [ -z "$rel_path" ] && continue
+    # Skip custom-instructions — already read in Step 1
+    [ "$rel_path" = "project/custom-instructions.md" ] && continue
+    ABS_PATH="${DEVDOCS_PATH}/${rel_path}"
+    [ -f "$ABS_PATH" ] || { echo "WARN: index references missing file: ${rel_path} — skipping"; continue; }
+
+    FRONTMATTER=$(awk '/^---/{c++; if(c==1){next} if(c==2){exit}} c==1{print}' "$ABS_PATH" 2>/dev/null)
+    AUTHORITY=$(echo "$FRONTMATTER" | grep 'authority:' | head -1 | sed 's/.*authority:\s*//' | tr -d ' ')
+    case "$AUTHORITY" in
+      required)    SORT_KEY="1" ;;
+      recommended) SORT_KEY="2" ;;
+      *)           SORT_KEY="3" ;;
+    esac
+    APPLICABLE_FILES="${APPLICABLE_FILES}${SORT_KEY}|${ABS_PATH}"$'\n'
+  done <<< "$ALL_PATHS"
+
+  APPLICABLE_FILES=$(printf "%s" "$APPLICABLE_FILES" | sort | cut -d'|' -f2-)
+
+elif [ -n "$DEVDOCS_PATH" ]; then
+  # --- Fallback: O(N) enumerate (backward compatible — no index.yaml present) ---
+  echo "No index.yaml found at ${INDEX_PATH} — falling back to full enumerate (backward compatible)"
+
   APPLICABLE_FILES=""
 
   while IFS= read -r -d '' mdfile; do
@@ -148,32 +258,31 @@ if [ -n "$DEVDOCS_PATH" ]; then
         recommended) SORT_KEY="2" ;;
         *)           SORT_KEY="3" ;;
       esac
-      APPLICABLE_FILES="${APPLICABLE_FILES}${SORT_KEY}|${mdfile}\n"
+      APPLICABLE_FILES="${APPLICABLE_FILES}${SORT_KEY}|${mdfile}"$'\n'
     fi
   done < <(find "$DEVDOCS_PATH" -name "*.md" -print0 2>/dev/null)
 
   APPLICABLE_FILES=$(printf "$APPLICABLE_FILES" | sort | cut -d'|' -f2-)
+fi
 
-  while IFS= read -r mdfile; do
-    [ -z "$mdfile" ] && continue
-    TOTAL_LINES=$(wc -l < "$mdfile" 2>/dev/null || echo 0)
-    if [ "$TOTAL_LINES" -gt 200 ]; then
-      FILE_CONTENT=$(head -200 "$mdfile")
-      TRUNCATION_NOTE="_[Truncated at 200 lines — ${TOTAL_LINES} total.]_"
-    else
-      FILE_CONTENT=$(cat "$mdfile")
-      TRUNCATION_NOTE=""
-    fi
+while IFS= read -r mdfile; do
+  [ -z "$mdfile" ] && continue
+  TOTAL_LINES=$(wc -l < "$mdfile" 2>/dev/null || echo 0)
+  if [ "$TOTAL_LINES" -gt 200 ]; then
+    FILE_CONTENT=$(head -200 "$mdfile")
+    TRUNCATION_NOTE="_[Truncated at 200 lines — ${TOTAL_LINES} total.]_"
+  else
+    FILE_CONTENT=$(cat "$mdfile")
+    TRUNCATION_NOTE=""
+  fi
 
-    REL_PATH="${mdfile#${DEVDOCS_PATH}/}"
-    PROJECT_CONVENTIONS="${PROJECT_CONVENTIONS}
+  REL_PATH="${mdfile#${DEVDOCS_PATH}/}"
+  PROJECT_CONVENTIONS="${PROJECT_CONVENTIONS}
 
 #### \`${REL_PATH}\`
 ${FILE_CONTENT}
 ${TRUNCATION_NOTE}"
-  done <<< "$APPLICABLE_FILES"
-fi
-```
+done <<< "$APPLICABLE_FILES"
 
 ### Step 3: Precedence rules to enforce
 
@@ -411,6 +520,7 @@ gh issue comment {NUMBER} {GH_FLAG} --body "<!-- FORGE:ARCHITECT -->
 ## Skip Conditions
 
 Skip this entire step (post nothing, return empty plan to caller) if:
+- **COMPLEXITY_BAND: TRIVIAL** — checked via FORGE:FAST_PATH comment at entry (see guard above) <!-- Primary skip path: forge#679 -->
 - Issue creates only **new files** with no callers to find (e.g. a new command file with no existing integration point yet)
 - Issue is a 1-file config or docs edit with no code logic
 - Issue title starts with "docs:" or "chore:"

@@ -3,6 +3,8 @@ description: Context-aware PR review — analyzes what the PR touches, spawns do
 argument-hint: [PR number, URL, "open", or "staging" for feature→main review]
 allowed-tools: Task, Bash, Read, Grep, Glob, WebFetch, Skill
 ---
+<!-- SPDX-FileCopyrightText: Copyright (c) RapierCraft Studios -->
+<!-- SPDX-License-Identifier: AGPL-3.0-or-later -->
 
 # PR Review — Orchestrator
 
@@ -124,6 +126,9 @@ while [ "$MERGE_HEALTH" = "UNKNOWN" ] && [ "$MERGE_RETRY" -lt 3 ]; do
 done
 # MERGE_HEALTH: MERGEABLE | CONFLICTING | UNKNOWN (still async after retries)
 # MERGE_HEALTH_STATE: CLEAN | DIRTY | BLOCKED | UNSTABLE | UNKNOWN
+
+# Resolve repo name early — used in Phases 5, 6, 8B, 9A (clean-review skip path bypasses Phase 6A) <!-- Added: forge#820 -->
+REPO=$(gh repo view --json nameWithOwner --jq '.nameWithOwner')
 ```
 
 ### 1B: Classify
@@ -731,7 +736,6 @@ If synthesis needed, launch a `general-purpose` Task (model: resolved per policy
 ### 6A: Extract Findings
 
 ```bash
-REPO=$(gh repo view --json nameWithOwner --jq '.nameWithOwner')
 HAS_SYNTHESIS=$(gh api "repos/${REPO}/issues/${PR_NUMBER}/comments" --jq '.[].body' | grep -c 'REVIEW-FINDINGS-SYNTHESIZED-START' || echo 0)
 
 if [ "$HAS_SYNTHESIS" -gt 0 ]; then
@@ -786,8 +790,8 @@ fi
 
 if [ -n "$MILESTONE_BRANCH" ]; then
     BRANCH_SLUG=$(echo "$MILESTONE_BRANCH" | sed 's|^milestone/||')
-    MILESTONE_NUMBER=$(gh api repos/${REPO}/milestones --jq --arg slug "$BRANCH_SLUG" '.[] | select((.title | ascii_downcase | gsub("[^a-z0-9]+"; "-")) == $slug) | .number' 2>/dev/null | head -1)
-    [ -z "$MILESTONE_NUMBER" ] && MILESTONE_NUMBER=$(gh api repos/${REPO}/milestones --jq --arg slug "$BRANCH_SLUG" '.[] | select((.title | ascii_downcase | gsub("[^a-z0-9]+"; "-")) | test($slug)) | .number' 2>/dev/null | head -1)
+    MILESTONE_NUMBER=$(gh api repos/${REPO}/milestones 2>/dev/null | jq --arg slug "$BRANCH_SLUG" '.[] | select((.title | ascii_downcase | gsub("[^a-z0-9]+"; "-")) == $slug) | .number' 2>/dev/null | head -1)
+    [ -z "$MILESTONE_NUMBER" ] && MILESTONE_NUMBER=$(gh api repos/${REPO}/milestones 2>/dev/null | jq --arg slug "$BRANCH_SLUG" '.[] | select((.title | ascii_downcase | gsub("[^a-z0-9]+"; "-")) | test($slug)) | .number' 2>/dev/null | head -1)
     [ -n "$MILESTONE_NUMBER" ] && MILESTONE_FLAG="--milestone $(gh api repos/${REPO}/milestones/${MILESTONE_NUMBER} --jq '.title')"
 fi
 ```
@@ -1060,11 +1064,88 @@ fi
 
 **Important**: Phase 8 ONLY merges the PR. It does NOT close the issue, update labels, or clean up worktrees. When invoked via `/work-on`, those responsibilities belong to `work-on/close.md` — which runs after the router detects state 4 (MERGE_COMPLETE: PR merged + issue open). Doing them here would cause the router to hit TERMINAL_MERGED (state 1) and skip the close phase entirely.
 
+### 8B: Post-Merge Review Finding Demilestoning (Milestone PRs Only)
+
+**Skip if**: `IS_MILESTONE_TO_STAGING` is false or `MERGE_STATE != "MERGED"`. Runs only when a milestone→staging PR was just successfully merged.
+
+**Purpose**: Review-finding issues created during a milestone PR review (Phase 6C) inherit the milestone. Once the milestone PR merges, those findings should flow through the fast lane independently — not remain stranded on a closed milestone. This step clears their milestone assignment automatically.
+
+```bash
+if [ "${IS_MILESTONE_TO_STAGING:-false}" = "true" ] && [ "${MERGE_STATE:-}" = "MERGED" ]; then
+    echo "Phase 8B: Clearing milestone from open review-finding issues referencing PR #${PR_NUMBER}..."
+
+    # Find open review-finding issues whose body references this PR number
+    # The title template in Phase 6C always includes: "review finding — PR #${PR_NUMBER}"
+    FINDINGS_TO_DEMILESTONE=$(gh issue list -R "${REPO}" \
+        --state open \
+        --label "review-finding" \
+        --limit 200 \
+        --json number,title,milestone \
+        --jq ".[] | select(.milestone != null) | select(.title | test(\"PR #${PR_NUMBER}\")) | .number" \
+        2>/dev/null || echo "")
+
+    if [ -z "$FINDINGS_TO_DEMILESTONE" ]; then
+        echo "Phase 8B: No open review-finding issues with milestones found referencing PR #${PR_NUMBER}."
+    else
+        MOVED_COUNT=0
+        echo "$FINDINGS_TO_DEMILESTONE" | while IFS= read -r FINDING_NUM; do
+            [ -z "$FINDING_NUM" ] && continue
+            FINDING_TITLE=$(gh issue view "$FINDING_NUM" -R "${REPO}" --json title --jq '.title' 2>/dev/null || echo "#${FINDING_NUM}")
+            gh issue edit "$FINDING_NUM" -R "${REPO}" --milestone "" 2>/dev/null && \
+                echo "  Moved to fast lane: #${FINDING_NUM} — ${FINDING_TITLE}" || \
+                echo "  WARNING: Failed to clear milestone for #${FINDING_NUM}"
+            MOVED_COUNT=$((MOVED_COUNT + 1))
+        done
+        echo "Phase 8B: Review finding demilestoning complete."
+    fi
+fi
+```
+
+<!-- Added: forge#815 -->
+
 ---
 
 ## Phase 9: Integrity Check & Summary (LAST)
 
 **Run AFTER Phase 6 (issues created), Phase 7 (verdict posted), Phase 8 (merge if applicable).**
+
+### 9A: Post-Merge Review Finding Demilestoning Fallback (Milestone PRs Only)
+
+**Skip if**: `IS_MILESTONE_TO_STAGING` is false. Runs when `AUTO_MERGE=false` but the PR was merged manually — Phase 8B did not run in this case, so Phase 9 handles cleanup.
+
+**Detection**: Check if the PR is now MERGED. If so and `IS_MILESTONE_TO_STAGING=true`, run the same demilestoning logic as Phase 8B.
+
+```bash
+if [ "${IS_MILESTONE_TO_STAGING:-false}" = "true" ]; then
+    PR_MERGE_STATE=$(gh pr view $ARGUMENTS --json state --jq '.state' 2>/dev/null || echo "")
+    if [ "$PR_MERGE_STATE" = "MERGED" ]; then
+        echo "Phase 9A: Checking for open review-finding issues to demilestone (fallback — manual merge path)..."
+
+        FINDINGS_TO_DEMILESTONE=$(gh issue list -R "${REPO}" \
+            --state open \
+            --label "review-finding" \
+            --limit 200 \
+            --json number,title,milestone \
+            --jq ".[] | select(.milestone != null) | select(.title | test(\"PR #${PR_NUMBER}\")) | .number" \
+            2>/dev/null || echo "")
+
+        if [ -z "$FINDINGS_TO_DEMILESTONE" ]; then
+            echo "Phase 9A: No open review-finding issues with milestones found referencing PR #${PR_NUMBER} (already cleared or none created)."
+        else
+            echo "$FINDINGS_TO_DEMILESTONE" | while IFS= read -r FINDING_NUM; do
+                [ -z "$FINDING_NUM" ] && continue
+                FINDING_TITLE=$(gh issue view "$FINDING_NUM" -R "${REPO}" --json title --jq '.title' 2>/dev/null || echo "#${FINDING_NUM}")
+                gh issue edit "$FINDING_NUM" -R "${REPO}" --milestone "" 2>/dev/null && \
+                    echo "  Moved to fast lane: #${FINDING_NUM} — ${FINDING_TITLE}" || \
+                    echo "  WARNING: Failed to clear milestone for #${FINDING_NUM}"
+            done
+            echo "Phase 9A: Fallback demilestoning complete."
+        fi
+    fi
+fi
+```
+
+<!-- Added: forge#815 -->
 
 ```bash
 CURRENT_SHA=$(gh pr view $ARGUMENTS --json headRefOid --jq '.headRefOid')
@@ -1118,4 +1199,5 @@ Review complete for PR #X. Verdict: [VERDICT].
 - Integration checks: [pass/N broken paths found]
 - Issues created: [M]
 {IF AUTO_MERGE: "PR merged and issue closed." / "Merge FAILED — see issue."}
+{IF IS_MILESTONE_TO_STAGING: "Review findings demilestoned: [N] issues moved to fast lane." / ""}
 ```
