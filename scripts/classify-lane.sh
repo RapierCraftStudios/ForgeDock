@@ -22,7 +22,7 @@
 set -euo pipefail
 
 ISSUE_NUMBER="${1:-}"
-GH_REPO_FLAG=""
+GH_REPO_ARGS=()
 
 # Parse arguments: issue number + optional -R flag
 if [ -z "$ISSUE_NUMBER" ]; then
@@ -40,7 +40,7 @@ while [ $# -gt 0 ]; do
         echo "Usage: classify-lane.sh <issue_number> [-R <owner/repo>]" >&2
         exit 1
       fi
-      GH_REPO_FLAG="-R $2"
+      GH_REPO_ARGS=(-R "$2")
       shift 2
       ;;
     *)
@@ -59,7 +59,7 @@ fi
 # Fetch milestone title from GitHub
 # gh issue view exits non-zero if the issue does not exist or auth fails
 GH_STDERR_TMP=$(mktemp)
-MILESTONE_TITLE=$(gh issue view "$ISSUE_NUMBER" $GH_REPO_FLAG --json milestone --jq '.milestone.title // empty' 2>"$GH_STDERR_TMP") || {
+MILESTONE_TITLE=$(gh issue view "$ISSUE_NUMBER" "${GH_REPO_ARGS[@]}" --json milestone --jq '.milestone.title // empty' 2>"$GH_STDERR_TMP") || {
   echo "ERROR: failed to fetch issue #$ISSUE_NUMBER — check issue number and repo flag" >&2
   cat "$GH_STDERR_TMP" >&2
   rm -f "$GH_STDERR_TMP"
