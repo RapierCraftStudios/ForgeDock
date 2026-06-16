@@ -112,6 +112,17 @@ else
     | tr -cd 'a-z0-9-' \
     | sed 's/--*/-/g' \
     | sed 's/^-//;s/-$//')
+
+  # Guard: empty slug means the milestone title contained no ASCII letters, digits, or hyphens
+  # (e.g. purely Unicode/emoji titles like "🚀✨"). An empty slug would produce LANE="milestone/"
+  # which is an invalid branch reference — catch this early with an actionable error.
+  if [ -z "$SLUG" ]; then
+    echo "ERROR: Milestone title '$MILESTONE_TITLE' produced an empty slug after slugification." >&2
+    echo "       Milestone titles must contain at least one ASCII letter, digit, or hyphen." >&2
+    echo "       Rename the milestone to include an ASCII-safe name (e.g. add a short English suffix)." >&2
+    exit 1
+  fi
+
   LANE="milestone/$SLUG"
 
   # Validate that the computed milestone branch exists on the remote.
