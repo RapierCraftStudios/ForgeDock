@@ -1552,15 +1552,15 @@ project:
   name: "${projectName}"
   owner: "${owner}"
   repo: "${repo}"
-  description: "${description.replace(/"/g, '\\"')}"
+  description: "${description.replace(/\\/g, '\\\\').replace(/"/g, '\\"')}"
 
 # =============================================================================
 # PATHS (REQUIRED)
 # =============================================================================
 
 paths:
-  root: "${cwd}"
-  worktree_base: "${worktreeBase}"
+  root: "${cwd.replace(/\\/g, '\\\\').replace(/"/g, '\\"')}"
+  worktree_base: "${worktreeBase.replace(/\\/g, '\\\\').replace(/"/g, '\\"')}"
 
 # =============================================================================
 # BRANCHES (REQUIRED)
@@ -1584,7 +1584,7 @@ branches:
 #     - prefix: "mcp"
 #       repo: "${owner}/your-satellite-repo"
 #       staging_branch: "main"
-#       local_path: "${join(cwd, "..", "your-satellite-repo")}"
+#       local_path: "${join(cwd, "..", "your-satellite-repo").replace(/\\/g, '\\\\').replace(/"/g, '\\"')}"
 
 # =============================================================================
 # PROJECT BOARD (OPTIONAL)
