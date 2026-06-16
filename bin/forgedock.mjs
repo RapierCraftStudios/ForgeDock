@@ -108,6 +108,7 @@ const SESSION_START_HOOK_TIMEOUT_SECONDS = 10;
  */
 function shellEscapeDoubleQuotedPath(path) {
   return path
+    .replace(/\\/g, '\\\\') // backslash — must be first to avoid double-escaping
     .replace(/"/g, '\\"')   // double quote — breaks out of the argument
     .replace(/\$/g, '\\$')  // dollar sign — variable/command substitution
     .replace(/`/g, '\\`')   // backtick — legacy command substitution
