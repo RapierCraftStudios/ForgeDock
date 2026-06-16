@@ -11,7 +11,7 @@ import {
   renameSync,
   unlinkSync,
 } from "fs";
-import { execSync } from "child_process";
+import { execSync, execFileSync } from "child_process";
 import { homedir } from "os";
 import {
   renderLogo,
@@ -2014,8 +2014,9 @@ async function doctor() {
         let existingLabels = [];
         let ghLabelOk = false;
         try {
-          const out = execSync(
-            `gh label list -R ${forgeOwner}/${forgeRepo} --json name --limit 200`,
+          const out = execFileSync(
+            "gh",
+            ["label", "list", "-R", `${forgeOwner}/${forgeRepo}`, "--json", "name", "--limit", "200"],
             { stdio: ["ignore", "pipe", "ignore"], encoding: "utf-8" },
           );
           const parsed = JSON.parse(out);
