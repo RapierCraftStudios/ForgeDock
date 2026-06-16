@@ -52,7 +52,7 @@
   },
   "peerDependenciesMeta": {
     "@anthropic-ai/claude-code": {
-      "optional": false
+      "optional": true
     }
   }
 }
