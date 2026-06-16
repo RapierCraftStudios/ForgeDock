@@ -296,6 +296,29 @@ function writeClaudeSettings(settings) {
 }
 
 /**
+ * Atomically write text content to a file.
+ * Uses a .forgedock.tmp sibling + renameSync to avoid partial writes on
+ * crash or SIGINT. Cleans up the tmp file on failure. (ref: forge#813)
+ *
+ * @param {string} filePath - Absolute path to write
+ * @param {string} content  - UTF-8 string content
+ */
+function atomicWriteFile(filePath, content) {
+  const tmpPath = filePath + ".forgedock.tmp";
+  try {
+    writeFileSync(tmpPath, content, "utf-8");
+    renameSync(tmpPath, filePath);
+  } catch (err) {
+    try {
+      unlinkSync(tmpPath);
+    } catch {
+      /* already gone or never created */
+    }
+    throw err;
+  }
+}
+
+/**
  * Install the ForgeDock SessionStart hook into ~/.claude/settings.json
  * idempotently. Does not modify any existing hooks unrelated to ForgeDock.
  *
@@ -517,7 +540,7 @@ function injectManagedBlock(filePath) {
 
   // File does not exist — create it with the block
   if (!existsSync(filePath)) {
-    writeFileSync(filePath, managed + "\n", "utf-8");
+    atomicWriteFile(filePath, managed + "\n");
     return "created";
   }
 
@@ -545,7 +568,7 @@ function injectManagedBlock(filePath) {
         // Regex matched but content was already identical
         return "unchanged";
       }
-      writeFileSync(filePath, replaced, "utf-8");
+      atomicWriteFile(filePath, replaced);
       return "updated";
     } else {
       // Reversed markers (END before BEGIN) — strip both markers + everything
@@ -581,7 +604,7 @@ function injectManagedBlock(filePath) {
 
   // No valid block present — append
   const separator = existing.length > 0 ? "\n\n" : "";
-  writeFileSync(filePath, existing + separator + managed + "\n", "utf-8");
+  atomicWriteFile(filePath, existing + separator + managed + "\n");
   return hasBegin || hasEnd ? "updated" : "appended";
 }
 
@@ -649,7 +672,7 @@ function removeManagedBlock(filePath) {
 
   if (cleaned === existing.trimEnd()) return "not-present";
 
-  writeFileSync(filePath, cleaned.length > 0 ? cleaned + "\n" : "", "utf-8");
+  atomicWriteFile(filePath, cleaned.length > 0 ? cleaned + "\n" : "");
   return "removed";
 }
 
@@ -1628,7 +1651,7 @@ branches:
 #     - '"status": "ok"'
 `;
 
-  writeFileSync(outputPath, content, "utf-8");
+  atomicWriteFile(outputPath, content);
 
   log(`  ${GREEN}Created${RESET}: forge.yaml`);
   log("");
