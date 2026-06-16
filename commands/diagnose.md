@@ -43,7 +43,7 @@ Parse `$ARGUMENTS` for:
 - **`--repo prefix`** — satellite repo prefix (optional). Look up in `forge.yaml → repos.satellites[]`.
 
 ```bash
-NUMBER=$(echo "$ARGUMENTS" | grep -oP '^\d+' | head -1)
+NUMBER=$(echo "$ARGUMENTS" | grep -oE '^[0-9]+' | head -1)
 if [ -z "$NUMBER" ]; then
   echo "Usage: /diagnose {issue-number} [--repo prefix]"
   echo "Example: /diagnose 611"
@@ -51,7 +51,7 @@ if [ -z "$NUMBER" ]; then
 fi
 
 # Optional satellite repo routing
-REPO_PREFIX=$(echo "$ARGUMENTS" | grep -oP '(?<=--repo )\S+' | head -1)
+REPO_PREFIX=$(echo "$ARGUMENTS" | grep -oE -- '--repo [^ ]+' | sed 's/--repo //' | head -1)
 if [ -n "$REPO_PREFIX" ]; then
   SATELLITE_REPO=$(yq ".repos.satellites[] | select(.prefix == \"$REPO_PREFIX\") | .repo" "$CONFIG_FILE" 2>/dev/null)
   if [ -n "$SATELLITE_REPO" ] && [ "$SATELLITE_REPO" != "null" ]; then

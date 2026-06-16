@@ -54,7 +54,7 @@ INPUT="$ARGUMENTS"
 INPUT=$(echo "$INPUT" | sed 's/^#//')
 
 # Check for repo prefix (e.g. "mcp:616")
-REPO_PREFIX=$(echo "$INPUT" | grep -oP '^[a-z]+(?=:)')
+REPO_PREFIX=$(echo "$INPUT" | grep -oE '^[a-z]+:' | sed 's/://')
 if [ -n "$REPO_PREFIX" ]; then
   INPUT=$(echo "$INPUT" | sed "s/^${REPO_PREFIX}://")
   # Look up satellite repo from forge.yaml
@@ -69,11 +69,11 @@ fi
 
 # Determine if this is an issue or PR
 IS_PR=false
-if echo "$INPUT" | grep -qiP '^pr\s*#?\s*\d+$'; then
-  NUMBER=$(echo "$INPUT" | grep -oP '\d+')
+if echo "$INPUT" | grep -qiE '^pr[[:space:]]*#?[[:space:]]*[0-9]+$'; then
+  NUMBER=$(echo "$INPUT" | grep -oE '[0-9]+')
   IS_PR=true
 else
-  NUMBER=$(echo "$INPUT" | grep -oP '^\d+')
+  NUMBER=$(echo "$INPUT" | grep -oE '^[0-9]+')
 fi
 
 if [ -z "$NUMBER" ]; then
@@ -103,7 +103,7 @@ if [ "$IS_PR" = "true" ]; then
   ISSUE_COMMENTS=$(gh api repos/$GH_REPO/issues/$NUMBER/comments --jq '.[].body' 2>/dev/null)
   ALL_COMMENTS=$(printf '%s\n%s' "$COMMENTS" "$ISSUE_COMMENTS")
   # Also check if this PR closes an issue, and fetch that issue's comments
-  CLOSES_ISSUE=$(gh pr view "$NUMBER" $GH_FLAG --json body --jq '.body' 2>/dev/null | grep -oP '(?i)Closes\s+#\K\d+' | head -1)
+  CLOSES_ISSUE=$(gh pr view "$NUMBER" $GH_FLAG --json body --jq '.body' 2>/dev/null | grep -oiE 'Closes[[:space:]]+#[0-9]+' | grep -oE '[0-9]+' | head -1)
   if [ -n "$CLOSES_ISSUE" ]; then
     ISSUE_COMMENTS_FROM_LINKED=$(gh api repos/$GH_REPO/issues/$CLOSES_ISSUE/comments --jq '.[].body' 2>/dev/null)
     ALL_COMMENTS=$(printf '%s\n%s' "$ALL_COMMENTS" "$ISSUE_COMMENTS_FROM_LINKED")
