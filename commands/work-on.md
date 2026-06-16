@@ -210,7 +210,7 @@ LEARNED_COMMIT_STYLE=$(yq '.learned.commit_style // ""' forge.yaml 2>/dev/null |
    echo "Learned test commands: $LEARNED_TEST_COMMANDS"
    ```
 
-3. **Label map** — If `LEARNED_LABEL_MAP` is non-empty, export it as `FORGE_LABEL_MAP` so that all subsequent `bash scripts/transition-label.sh` invocations (which are child processes) can read it. The script performs the substitution internally: if the canonical label (e.g. `workflow:investigating`) appears as a key in the map, it uses the mapped value instead.
+3. **Label map** — If `LEARNED_LABEL_MAP` is non-empty, export it as `FORGE_LABEL_MAP` so that all subsequent `resolve_script 'transition-label'` invocations (which are child processes) can read it. The script performs the substitution internally: if the canonical label (e.g. `workflow:investigating`) appears as a key in the map, it uses the mapped value instead.
    ```bash
    # Export as FORGE_LABEL_MAP so child processes (transition-label.sh) can read it.
    # All 8 transition-label.sh call sites in this command inherit this env var automatically.
@@ -246,7 +246,7 @@ gh api repos/{GH_REPO}/issues/comments/$COMMENT_ID -X DELETE
 
 ### 1A: Set label
 ```bash
-bash scripts/transition-label.sh {NUMBER} {GH_FLAG} investigating
+bash "$(resolve_script 'transition-label' | cut -d: -f2-)" {NUMBER} {GH_FLAG} investigating
 ```
 
 **Post Phase 1 heartbeat** (skip if issue already has a terminal label — `workflow:merged`, `workflow:invalid`, `needs-human`):
@@ -492,7 +492,7 @@ fi
 
 **CONFIRMED or PARTIAL with decompose: NO**:
 ```bash
-bash scripts/transition-label.sh {NUMBER} {GH_FLAG} ready-to-build
+bash "$(resolve_script 'transition-label' | cut -d: -f2-)" {NUMBER} {GH_FLAG} ready-to-build
 ```
 
 Write machine-readable phase checkpoint (MUST execute immediately after label transition, before continuing):
@@ -508,7 +508,7 @@ gh issue comment {NUMBER} {GH_FLAG} --body "<!-- FORGE:CHECKPOINT -->
 
 **CONFIRMED or PARTIAL with decompose: YES**:
 ```bash
-bash scripts/transition-label.sh {NUMBER} {GH_FLAG} decomposed
+bash "$(resolve_script 'transition-label' | cut -d: -f2-)" {NUMBER} {GH_FLAG} decomposed
 ```
 
 Write machine-readable phase checkpoint (MUST execute immediately after label transition, before continuing):
@@ -524,7 +524,7 @@ gh issue comment {NUMBER} {GH_FLAG} --body "<!-- FORGE:CHECKPOINT -->
 
 **INVALID**:
 ```bash
-bash scripts/transition-label.sh {NUMBER} {GH_FLAG} invalid
+bash "$(resolve_script 'transition-label' | cut -d: -f2-)" {NUMBER} {GH_FLAG} invalid
 gh issue close {NUMBER} {GH_FLAG} --comment "Closing as invalid: {reason from investigation}"
 ```
 → STOP. No checkpoint written — INVALID is terminal.
@@ -622,7 +622,7 @@ gh issue comment {NUMBER} {GH_FLAG} --body "<!-- FORGE:DECOMPOSED -->
 
 ### 2F: Update labels
 ```bash
-bash scripts/transition-label.sh {NUMBER} {GH_FLAG} decomposed
+bash "$(resolve_script 'transition-label' | cut -d: -f2-)" {NUMBER} {GH_FLAG} decomposed
 ```
 
 → STOP. Each sub-issue runs its own `/work-on`.
@@ -917,7 +917,7 @@ If budget exceeded (3 min), use `<!-- FORGE:ARCHITECT:PARTIAL -->`.
 
 ### 3D: Set building label
 ```bash
-bash scripts/transition-label.sh {NUMBER} {GH_FLAG} building
+bash "$(resolve_script 'transition-label' | cut -d: -f2-)" {NUMBER} {GH_FLAG} building
 ```
 
 ### 3E: Create worktree
@@ -928,7 +928,7 @@ Branch slug from title (lowercase, hyphenated, max 40 chars). Prefix: `fix/` (bu
 
 ```bash
 # Compute PR_BASE deterministically from issue milestone — no LLM interpretation
-if ! PR_BASE=$(bash scripts/classify-lane.sh {NUMBER} -R {GH_REPO}); then
+if ! PR_BASE=$(bash "$(resolve_script 'classify-lane' | cut -d: -f2-)" {NUMBER} -R {GH_REPO}); then
   gh issue comment {NUMBER} {GH_FLAG} --body "BLOCKER: classify-lane.sh failed to compute PR target — see script error above. Adding needs-human."
   gh issue edit {NUMBER} {GH_FLAG} --add-label "needs-human"
   exit 1
@@ -1281,13 +1281,13 @@ If fails: try `--force-with-lease`. If still fails: post comment, add `needs-hum
 ### 4C: Determine PR target
 `PR_BASE` was computed in Phase 3E. If somehow unset (e.g., resumed session after compaction), recompute:
 ```bash
-PR_BASE=$(bash scripts/classify-lane.sh {NUMBER} -R {GH_REPO})
+PR_BASE=$(bash "$(resolve_script 'classify-lane' | cut -d: -f2-)" {NUMBER} -R {GH_REPO})
 ```
 Output is authoritative — no prose fallback. Script exits 1 on error (invalid issue, `gh` auth failure, or milestone branch absent on remote); treat non-zero exit as `needs-human` and STOP. <!-- Added: forge#669, forge#639 -->
 
 ### 4C.5: Validate PR target against classified lane
 ```bash
-bash scripts/validate-pr-target.sh {PR_BASE} {CLASSIFIED_LANE}
+bash "$(resolve_script 'validate-pr-target' | cut -d: -f2-)" {PR_BASE} {CLASSIFIED_LANE}
 ```
 `{CLASSIFIED_LANE}` is the value returned by `classify-lane.sh` in Phase 4C. `{PR_BASE}` is the branch the PR will target. If exit code is 1 (mismatch):
 ```bash
@@ -1321,7 +1321,7 @@ If PR already exists for this branch, use the existing PR number.
 
 ### 4E: Update labels
 ```bash
-bash scripts/transition-label.sh {NUMBER} {GH_FLAG} in-review
+bash "$(resolve_script 'transition-label' | cut -d: -f2-)" {NUMBER} {GH_FLAG} in-review
 ```
 
 ---
@@ -1439,7 +1439,7 @@ If all phases complete:
 ```bash
 gh issue close {NUMBER} {GH_FLAG} \
   --comment "Closed: PR #{PR_NUMBER} merged to \`{PR_BASE}\`. Closes #{NUMBER}."
-bash scripts/transition-label.sh {NUMBER} {GH_FLAG} merged
+bash "$(resolve_script 'transition-label' | cut -d: -f2-)" {NUMBER} {GH_FLAG} merged
 ```
 
 ### 6D: Parent tracker update (sub-issues only)
