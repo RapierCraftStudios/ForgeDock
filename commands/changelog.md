@@ -57,19 +57,19 @@ if [ -z "$ARGUMENTS" ]; then
   COUNT=30
   echo "Mode: last $COUNT merged PRs (default)"
 
-elif echo "$ARGUMENTS" | grep -qP '^last-\d+$'; then
+elif echo "$ARGUMENTS" | grep -qE '^last-[0-9]+$'; then
   # last-N: last N merged PRs
-  COUNT=$(echo "$ARGUMENTS" | grep -oP '\d+')
+  COUNT=$(echo "$ARGUMENTS" | grep -oE '[0-9]+')
   MODE="count"
   echo "Mode: last $COUNT merged PRs"
 
-elif echo "$ARGUMENTS" | grep -qP '^since:\d{4}-\d{2}-\d{2}'; then
+elif echo "$ARGUMENTS" | grep -qE '^since:[0-9]{4}-[0-9]{2}-[0-9]{2}'; then
   # since:YYYY-MM-DD: all PRs merged after this date
-  SINCE_DATE=$(echo "$ARGUMENTS" | grep -oP '\d{4}-\d{2}-\d{2}')
+  SINCE_DATE=$(echo "$ARGUMENTS" | grep -oE '[0-9]{4}-[0-9]{2}-[0-9]{2}')
   MODE="since"
   echo "Mode: since $SINCE_DATE"
 
-elif echo "$ARGUMENTS" | grep -qP '^v?[\w.]+ *\.\. *v?[\w.]+'; then
+elif echo "$ARGUMENTS" | grep -qE '^v?[A-Za-z0-9._-]+ *\.\. *v?[A-Za-z0-9._-]+'; then
   # tag-to-tag: v1.0.0..v1.1.0
   TAG_FROM=$(echo "$ARGUMENTS" | sed 's/ *\.\..*//')
   TAG_TO=$(echo "$ARGUMENTS" | sed 's/.*\.\. *//')
@@ -187,11 +187,11 @@ while IFS= read -r PR_OBJ; do
 
   # Extract conventional commit prefix from title
   # Matches: fix(scope): ..., feat: ..., refactor(scope): ..., etc.
-  PREFIX=$(echo "$PR_TITLE" | grep -oP '^(feat|fix|refactor|docs|chore|test|ci|build|perf|style)(?:\([^)]+\))?' | grep -oP '^[a-z]+' | head -1)
+  PREFIX=$(echo "$PR_TITLE" | grep -oE '^(feat|fix|refactor|docs|chore|test|ci|build|perf|style)(\([^)]+\))?' | grep -oE '^[a-z]+' | head -1)
   [ -z "$PREFIX" ] && PREFIX="other"
 
   # Extract linked issue number from PR body (Closes #N, Fixes #N, Refs #N)
-  ISSUE_NUM=$(echo "$PR_BODY" | grep -oiP '(?:closes?|fixes?|resolves?|refs?)\s+#\K\d+' | head -1)
+  ISSUE_NUM=$(echo "$PR_BODY" | grep -oiE '(closes?|fixes?|resolves?|refs?)[[:space:]]+#[0-9]+' | grep -oE '[0-9]+' | head -1)
 
   # Read FORGE:TRAJECTORY from linked issue (when present)
   TASK_TYPE=""
@@ -202,14 +202,14 @@ while IFS= read -r PR_OBJ; do
 
     if [ -n "$TRAJ" ]; then
       # Extract task type from "Task type: Feature" in the Notes column
-      TASK_TYPE=$(echo "$TRAJ" | grep -oP '(?<=Task type: )[^\|<\n]+' | tr -d ' ' | head -1)
+      TASK_TYPE=$(echo "$TRAJ" | grep -oE 'Task type: [^|<]+' | sed 's/Task type: //' | tr -d ' ' | head -1)
       # Extract verdict from "✅ CONFIRMED (HIGH)" or "✅ PARTIAL (MEDIUM)"
-      VERDICT=$(echo "$TRAJ" | grep -oP '(?<=Investigation \| ✅ )(CONFIRMED|PARTIAL|INVALID)' | head -1)
+      VERDICT=$(echo "$TRAJ" | grep -oE 'Investigation \| ✅ (CONFIRMED|PARTIAL|INVALID)' | grep -oE '(CONFIRMED|PARTIAL|INVALID)' | head -1)
     fi
   fi
 
   # Build entry line: "- prefix(scope): description (#PR_NUM) — closes #ISSUE_NUM [TASK_TYPE]"
-  SCOPE_PART=$(echo "$PR_TITLE" | grep -oP '^\w+\([^)]+\)' | head -1)
+  SCOPE_PART=$(echo "$PR_TITLE" | grep -oE '^[a-zA-Z0-9_]+\([^)]+\)' | head -1)
   if [ -n "$SCOPE_PART" ]; then
     DESCRIPTION=$(echo "$PR_TITLE" | sed "s|^${SCOPE_PART}: *||")
   else
