@@ -435,7 +435,7 @@ fi
 
 # Fetch all comments, filter to owner-only, look for correction signals
 CORRECTIONS=$(gh api repos/{GH_REPO}/issues/{NUMBER}/comments \
-  --jq --arg owner "$REPO_OWNER" \
+  | jq -r --arg owner "$REPO_OWNER" \
   '.[] | select(.user.login == $owner) | select(
     (.body | test("no,? use|actually use|use .+ instead|not .+, use|wrong branch"; "i"))
   ) | .body' 2>/dev/null || echo '')
