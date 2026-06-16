@@ -1545,9 +1545,9 @@ REVIEW_SUMMARY=$(gh api repos/{GH_REPO}/issues/{PR_NUMBER}/comments \
 
 REVIEW_VERDICT=$(echo "$REVIEW_SUMMARY" | sed -n 's/.*Verdict: \(APPROVED\|CHANGES REQUESTED\).*/\1/p' | head -1 || echo "APPROVED")
 REVIEW_VERDICT="${REVIEW_VERDICT:-APPROVED}"
-FINDINGS_COUNT=$(echo "$REVIEW_SUMMARY" | sed -n 's/.*\([0-9][0-9]*\) findings.*/\1/p' | head -1 || echo "0")
+FINDINGS_COUNT=$(echo "$REVIEW_SUMMARY" | grep -oE '[0-9]+ findings' | grep -oE '[0-9]+' | head -1 || echo "0")
 FINDINGS_COUNT="${FINDINGS_COUNT:-0}"
-AGENTS_RUN=$(echo "$REVIEW_SUMMARY" | sed -n 's/.*\([0-9][0-9]*\) agents.*/\1/p' | head -1 || echo "0")
+AGENTS_RUN=$(echo "$REVIEW_SUMMARY" | grep -oE '[0-9]+ agents' | grep -oE '[0-9]+' | head -1 || echo "0")
 AGENTS_RUN="${AGENTS_RUN:-0}"
 ```
 
