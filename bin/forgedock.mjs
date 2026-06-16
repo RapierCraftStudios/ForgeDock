@@ -84,6 +84,35 @@ const CLAUDE_SETTINGS_PATH = join(HOME, ".claude", "settings.json");
 const SESSION_START_HOOK_TIMEOUT_SECONDS = 10;
 
 /**
+ * Escape all shell metacharacters that receive special treatment inside
+ * POSIX double-quoted strings.  Apply this to any filesystem path before
+ * embedding it in a double-quoted shell assignment or command argument.
+ *
+ * Characters escaped and why:
+ *   "  → \"   (closes the double-quoted context — ref: forge#451)
+ *   $  → \$   (variable expansion and $(...) command substitution — ref: forge#792)
+ *   `  → \`   (legacy backtick command substitution — ref: forge#792)
+ *   !  → \!   (bash history expansion — harmless in sh but risky in bash — ref: forge#792)
+ *
+ * Backslash (\) is intentionally NOT escaped here: path.join() backslashes
+ * must be converted to forward slashes by the caller before this function
+ * is applied (see sessionStartHookCommand below).  On POSIX systems,
+ * paths never contain backslashes, so this is a no-op for shell profiles.
+ *
+ * <!-- Added: forge#808 -->
+ *
+ * @param {string} path - Filesystem path to escape for shell double-quote context.
+ * @returns {string} - Path safe for embedding inside a double-quoted shell string.
+ */
+function shellEscapeDoubleQuotedPath(path) {
+  return path
+    .replace(/"/g, '\\"')   // double quote — breaks out of the argument
+    .replace(/\$/g, '\\$')  // dollar sign — variable/command substitution
+    .replace(/`/g, '\\`')   // backtick — legacy command substitution
+    .replace(/!/g, '\\!');  // exclamation mark — bash history expansion
+}
+
+/**
  * The command value written into the SessionStart hook entry.
  * Uses forward slashes even on Windows — Node accepts them natively and
  * they avoid any backslash-related issues in the hook command string.
@@ -92,14 +121,7 @@ const SESSION_START_HOOK_TIMEOUT_SECONDS = 10;
  *
  * When Claude Code's hook runner passes the command string through a POSIX
  * shell (sh -c), the following characters receive special treatment inside
- * double-quoted strings and must be escaped:
- *   "  → \"   (closes the double-quoted argument — ref: forge#451)
- *   $  → \$   (variable expansion and $(...) command substitution)
- *   `  → \`   (legacy backtick command substitution)
- *   !  → \!   (bash history expansion — harmless in sh but risky in bash)
- *
- * Backslash (\) does not need escaping here because path.join() backslashes
- * are already converted to forward slashes before this escaping runs.
+ * double-quoted strings and must be escaped — see shellEscapeDoubleQuotedPath().
  *
  * `node --` is used to terminate Node.js option parsing so that a path
  * component beginning with `-` cannot be misinterpreted as a CLI flag.
@@ -113,14 +135,7 @@ function sessionStartHookCommand() {
     "hooks",
     "session-start.mjs",
   ).replace(/\\/g, "/");
-  // Escape all shell metacharacters that expand inside double-quoted strings.
-  // Each replace() targets one character class to keep the intent explicit.
-  // (ref: forge#451 for ", forge#792 for $, `, !)
-  const safePath = hookPath
-    .replace(/"/g, '\\"')   // double quote — breaks out of the argument
-    .replace(/\$/g, '\\$')  // dollar sign — variable/command substitution
-    .replace(/`/g, '\\`')   // backtick — legacy command substitution
-    .replace(/!/g, '\\!');  // exclamation mark — bash history expansion
+  const safePath = shellEscapeDoubleQuotedPath(hookPath);
   return `node -- "${safePath}"`;
 }
 
@@ -956,7 +971,14 @@ async function install() {
         ]) {
           if (existsSync(profile)) {
             const content = readFileSync(profile, "utf-8");
-            const exactExport = `export FORGE_HOME="${FORGE_HOME}"`;
+            // Escape shell metacharacters in FORGE_HOME before embedding it in
+            // a double-quoted shell assignment.  A crafted install path
+            // containing $(...), backticks, or " characters would otherwise
+            // inject arbitrary shell commands executed on the user's next login.
+            // shellEscapeDoubleQuotedPath() applies the same escaping used for
+            // the SessionStart hook command (ref: forge#808, forge#792, forge#451).
+            const safeForgeHome = shellEscapeDoubleQuotedPath(FORGE_HOME);
+            const exactExport = `export FORGE_HOME="${safeForgeHome}"`;
             if (content.includes(exactExport)) {
               // Already set to the current path — no update needed.
             } else {
@@ -967,7 +989,7 @@ async function install() {
               }
               appendFileSync(
                 profile,
-                `\n# ForgeDock — autonomous development pipeline\nexport FORGE_HOME="${FORGE_HOME}"\n`,
+                `\n# ForgeDock — autonomous development pipeline\nexport FORGE_HOME="${safeForgeHome}"\n`,
               );
               profileUpdated = true;
             }
