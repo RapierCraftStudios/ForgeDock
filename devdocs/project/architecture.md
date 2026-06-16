@@ -190,12 +190,5 @@ Active milestone tracking all work toward one-shot reliable task completion.
 | #651 | Scripts layer architecture | P0 | Execution determinism |
 | #652 | DevDocs redesign (parent tracker) | P1 | Knowledge determinism |
 | #653 | Per-repo adaptive scripts (investigation) | P1 | Execution determinism |
-| #667 | Per-repo script generation — forge.yaml learning | P1 | Execution determinism |
-| #668 | /optimize command — generate per-repo scripts | P1 | Execution determinism |
-| #673 | Token savings measurement for adaptive scripts | P2 | Context efficiency |
-| #676 | DevDocs self-dogfooding — scaffold own devdocs/ | P1 | Knowledge determinism |
-| #678 | Machine-readable phase checkpoint — deterministic resume | P1 | Reliability |
-| #679 | Complexity-proportional fast-path — skip phases for simple tasks | P1 | Reliability |
-| #683 | Stall detection and structured auto-resume | P1 | Reliability |
 
 **Core promise**: Task in → result out, one shot, no waste. No stalls, no reruns, no shortcuts, no overcomplication.
