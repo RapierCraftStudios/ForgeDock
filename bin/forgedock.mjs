@@ -2,7 +2,7 @@
 
 import { fileURLToPath, pathToFileURL } from "url";
 import { dirname, join, relative, resolve } from "path";
-import { mkdir, symlink, readlink, lstat, readdir, stat } from "fs/promises";
+import { mkdir, symlink, readlink, lstat, readdir, stat, unlink } from "fs/promises";
 import {
   existsSync,
   appendFileSync,
@@ -760,16 +760,26 @@ async function linkCommands(step) {
         if (current === file) {
           skipped++;
         } else {
-          await symlink(file, target + ".tmp");
-          const { rename } = await import("fs/promises");
-          await rename(target + ".tmp", target);
-          updated++;
+          try {
+            await symlink(file, target + ".tmp");
+            const { rename } = await import("fs/promises");
+            await rename(target + ".tmp", target);
+            updated++;
+          } catch (renameErr) {
+            try {
+              await unlink(target + ".tmp");
+            } catch {
+              /* .tmp already gone or was never created */
+            }
+            throw renameErr;
+          }
         }
       } else {
         // Regular file — skip; user must remove manually
         skipped++;
       }
-    } catch {
+    } catch (err) {
+      if (err.code !== "ENOENT") throw err;
       // Doesn't exist — create symlink
       await symlink(file, target);
       installed++;
@@ -842,10 +852,19 @@ async function linkScripts(step) {
         if (current === file) {
           skipped++;
         } else {
-          await symlink(file, target + ".tmp");
-          const { rename } = await import("fs/promises");
-          await rename(target + ".tmp", target);
-          updated++;
+          try {
+            await symlink(file, target + ".tmp");
+            const { rename } = await import("fs/promises");
+            await rename(target + ".tmp", target);
+            updated++;
+          } catch (renameErr) {
+            try {
+              await unlink(target + ".tmp");
+            } catch {
+              /* .tmp already gone or was never created */
+            }
+            throw renameErr;
+          }
         }
       } else {
         // Existing regular file — refresh if contents differ.
