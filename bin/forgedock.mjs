@@ -937,7 +937,15 @@ async function install() {
         ]) {
           if (existsSync(profile)) {
             const content = readFileSync(profile, "utf-8");
-            if (!content.includes("FORGE_HOME")) {
+            const exactExport = `export FORGE_HOME="${FORGE_HOME}"`;
+            if (content.includes(exactExport)) {
+              // Already set to the current path — no update needed.
+            } else {
+              // Either not present, or set to a stale path — refresh it.
+              if (content.includes("FORGE_HOME")) {
+                // Strip the old block before appending the updated one.
+                removeForgeHomeFromProfile(profile);
+              }
               appendFileSync(
                 profile,
                 `\n# ForgeDock — autonomous development pipeline\nexport FORGE_HOME="${FORGE_HOME}"\n`,
