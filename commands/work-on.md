@@ -182,12 +182,11 @@ resolve_script() {
   echo "prose:"
 }
 
-# run_script OPERATION [ARGS...] — canonical tier-dispatch wrapper for resolve_script().
+# Canonical tier-dispatch usage pattern — inline at every resolve_script() call site:
 #
-# Resolves OPERATION through the 4-tier hierarchy and executes it.  The prose
-# tier is handled per-operation by the caller (see each call site below).
-# Returns the script's exit code for adaptive/universal tiers; the caller is
-# responsible for the prose branch.
+# There is no centralised run_script() function. The pattern below is inlined
+# directly at each call site because each operation has a different prose
+# fallback. Copy and adapt this block wherever resolve_script() is called.
 #
 # Usage pattern at each call site:
 #   RESOLUTION=$(resolve_script 'op')
