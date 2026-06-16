@@ -40,6 +40,10 @@ while [ $# -gt 0 ]; do
         echo "Usage: classify-lane.sh <issue_number> [-R <owner/repo>]" >&2
         exit 1
       fi
+      if ! [[ "$2" =~ ^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$ ]]; then
+        echo "ERROR: -R value must be owner/repo format, got: $2" >&2
+        exit 1
+      fi
       GH_REPO_ARGS=(-R "$2")
       shift 2
       ;;
