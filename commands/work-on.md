@@ -1368,7 +1368,13 @@ If fails: try `--force-with-lease`. If still fails: post comment, add `needs-hum
 RESOLUTION=$(resolve_script 'classify-lane')
 TIER="${RESOLUTION%%:*}"; SCRIPT_PATH="${RESOLUTION#*:}"
 case "$TIER" in
-  adaptive|universal) PR_BASE=$(bash "$SCRIPT_PATH" {NUMBER} -R {GH_REPO}) ;;
+  adaptive|universal)
+    if ! PR_BASE=$(bash "$SCRIPT_PATH" {NUMBER} -R {GH_REPO}); then
+      gh issue comment {NUMBER} {GH_FLAG} --body "BLOCKER: classify-lane.sh failed to recompute PR target — see script error above. Adding needs-human."
+      gh issue edit {NUMBER} {GH_FLAG} --add-label "needs-human"
+      exit 1
+    fi
+    ;;
   prose)
     # No valid prose fallback — see Phase 3E note.
     gh issue comment {NUMBER} {GH_FLAG} --body "BLOCKER: classify-lane.sh not installed (prose tier). Cannot recompute PR target. Adding needs-human."
