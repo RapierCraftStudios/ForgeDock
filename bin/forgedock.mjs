@@ -828,7 +828,15 @@ async function linkCommands(step) {
             } catch {
               /* .tmp already gone or was never created */
             }
-            throw renameErr;
+            if (renameErr.code === "EPERM" || renameErr.code === "EACCES") {
+              // Windows without Developer Mode: symlink() throws EPERM/EACCES.
+              // Fall back to a direct copy (matches new-install fallback behaviour).
+              const { copyFile } = await import("fs/promises");
+              await copyFile(file, target);
+              updated++;
+            } else {
+              throw renameErr;
+            }
           }
         }
       } else {
@@ -929,7 +937,15 @@ async function linkScripts(step) {
             } catch {
               /* .tmp already gone or was never created */
             }
-            throw renameErr;
+            if (renameErr.code === "EPERM" || renameErr.code === "EACCES") {
+              // Windows without Developer Mode: symlink() throws EPERM/EACCES.
+              // Fall back to a direct copy (matches new-install fallback behaviour).
+              const { copyFile } = await import("fs/promises");
+              await copyFile(file, target);
+              updated++;
+            } else {
+              throw renameErr;
+            }
           }
         }
       } else {
