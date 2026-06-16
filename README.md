@@ -200,6 +200,18 @@ Removes all ForgeDock command symlinks from `~/.claude/commands/`. Your `forge.y
 
 ---
 
+## Star History
+
+<a href="https://star-history.com/#RapierCraftStudios/ForgeDock&Date">
+ <picture>
+   <source media="(prefers-color-scheme: dark)" srcset="https://api.star-history.com/svg?repos=RapierCraftStudios/ForgeDock&type=Date&theme=dark" />
+   <source media="(prefers-color-scheme: light)" srcset="https://api.star-history.com/svg?repos=RapierCraftStudios/ForgeDock&type=Date" />
+   <img alt="Star History Chart" src="https://api.star-history.com/svg?repos=RapierCraftStudios/ForgeDock&type=Date" />
+ </picture>
+</a>
+
+---
+
 ## Contributing
 
 PRs welcome. Every change goes through a PR, tested against 3+ scenarios, using conventional commits (`fix(command):`, `feat(command):`, `refactor(command):`).
