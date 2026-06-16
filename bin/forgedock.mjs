@@ -171,12 +171,53 @@ function stripJsonc(raw) {
       continue;
     }
 
+    // Trailing comma — skip if next structural char (past whitespace and
+    // comments) is } or ].
+    // This must run OUTSIDE the string-literal branch above so string content
+    // containing ",}" or ",]" is never touched.
+    // The lookahead skips whitespace AND inline comments so that patterns like
+    //   `value, /* note */ }` or `value, // note\n}` are handled correctly.
+    if (ch === ",") {
+      let j = i + 1;
+      // Advance j past whitespace and comments
+      let advanced = true;
+      while (advanced && j < len) {
+        advanced = false;
+        // Skip whitespace
+        while (
+          j < len &&
+          (raw[j] === " " ||
+            raw[j] === "\t" ||
+            raw[j] === "\r" ||
+            raw[j] === "\n")
+        ) {
+          j++;
+          advanced = true;
+        }
+        // Skip single-line comment
+        if (j + 1 < len && raw[j] === "/" && raw[j + 1] === "/") {
+          while (j < len && raw[j] !== "\n") j++;
+          advanced = true;
+        }
+        // Skip block comment
+        if (j + 1 < len && raw[j] === "/" && raw[j + 1] === "*") {
+          j += 2;
+          while (j + 1 < len && !(raw[j] === "*" && raw[j + 1] === "/")) j++;
+          j += 2;
+          advanced = true;
+        }
+      }
+      if (j < len && (raw[j] === "}" || raw[j] === "]")) {
+        i++;
+        continue; // skip trailing comma
+      }
+    }
+
     result += ch;
     i++;
   }
 
-  // Remove trailing commas before } or ]
-  return result.replace(/,(\s*[}\]])/g, "$1");
+  return result;
 }
 
 /**
