@@ -1316,9 +1316,13 @@ async function update() {
 }
 
 async function init(fromInstall = false) {
-  console.log("");
-  console.log(`${BOLD}ForgeDock${RESET} — Generating forge.yaml`);
-  console.log("");
+  // When called from install() via runSteps(), suppress stdout to prevent
+  // interleaving with the TUI spinner on stderr. runSteps() provides the
+  // "Generating forge.yaml" step label as visual feedback. (#812)
+  const log = fromInstall ? () => {} : console.log;
+  log("");
+  log(`${BOLD}ForgeDock${RESET} — Generating forge.yaml`);
+  log("");
 
   const cwd = process.cwd();
   const worktreeBase = join(cwd, ".claude", "worktrees");
@@ -1352,18 +1356,18 @@ async function init(fromInstall = false) {
       repo = httpsMatch[2];
       remoteDetected = true;
     } else {
-      console.log(
+      log(
         `  ${YELLOW}Warning${RESET}: Could not parse git remote URL — using placeholder values`,
       );
     }
   } catch {
-    console.log(
+    log(
       `  ${YELLOW}Warning${RESET}: No git remote found — using placeholder values`,
     );
   }
 
   if (remoteDetected) {
-    console.log(`  Detected repo:   ${CYAN}${owner}/${repo}${RESET}`);
+    log(`  Detected repo:   ${CYAN}${owner}/${repo}${RESET}`);
   }
 
   // --- Detect default branch ---
@@ -1376,7 +1380,7 @@ async function init(fromInstall = false) {
     }).trim();
     // refs/remotes/origin/main → main
     defaultBranch = headRef.replace(/^refs\/remotes\/origin\//, "");
-    console.log(`  Default branch:  ${CYAN}${defaultBranch}${RESET}`);
+    log(`  Default branch:  ${CYAN}${defaultBranch}${RESET}`);
   } catch {
     // Fallback: try git rev-parse
     try {
@@ -1386,11 +1390,11 @@ async function init(fromInstall = false) {
         stdio: ["pipe", "pipe", "pipe"],
       }).trim();
       if (defaultBranch === "HEAD") defaultBranch = "main";
-      console.log(
+      log(
         `  Default branch:  ${CYAN}${defaultBranch}${RESET} (from current branch)`,
       );
     } catch {
-      console.log(
+      log(
         `  ${YELLOW}Warning${RESET}: Could not detect default branch — defaulting to "main"`,
       );
     }
@@ -1406,15 +1410,15 @@ async function init(fromInstall = false) {
     });
     if (remoteBranches.includes("origin/staging")) {
       stagingBranch = "staging";
-      console.log(`  Staging branch:  ${CYAN}staging${RESET} (detected)`);
+      log(`  Staging branch:  ${CYAN}staging${RESET} (detected)`);
     } else {
       stagingBranch = defaultBranch;
-      console.log(
+      log(
         `  Staging branch:  ${CYAN}${defaultBranch}${RESET} (no staging branch found — using default)`,
       );
     }
   } catch {
-    console.log(
+    log(
       `  ${YELLOW}Warning${RESET}: Could not read remote branches — defaulting staging to "${defaultBranch}"`,
     );
     stagingBranch = defaultBranch;
@@ -1462,7 +1466,7 @@ async function init(fromInstall = false) {
   }
 
   if (description) {
-    console.log(
+    log(
       `  Description:     ${CYAN}${description.slice(0, 60)}${description.length > 60 ? "…" : ""}${RESET} (from README.md)`,
     );
   }
@@ -1508,7 +1512,7 @@ async function init(fromInstall = false) {
     }
 
     if (description) {
-      console.log(
+      log(
         `  Description:     ${CYAN}${description.slice(0, 60)}${description.length > 60 ? "…" : ""}${RESET} (from CLAUDE.md)`,
       );
     }
@@ -1525,7 +1529,7 @@ async function init(fromInstall = false) {
       : baseBak;
     const backupName = backupPath.split("/").pop();
     renameSync(outputPath, backupPath);
-    console.log(`  ${YELLOW}Backed up${RESET}: forge.yaml → ${backupName}`);
+    log(`  ${YELLOW}Backed up${RESET}: forge.yaml → ${backupName}`);
   }
 
   // --- Generate forge.yaml content ---
@@ -1626,37 +1630,40 @@ branches:
 
   writeFileSync(outputPath, content, "utf-8");
 
-  console.log(`  ${GREEN}Created${RESET}: forge.yaml`);
-  console.log("");
+  log(`  ${GREEN}Created${RESET}: forge.yaml`);
+  log("");
 
   if (fromInstall) {
-    // Called automatically from install() — only print what still needs attention
+    // Called automatically from install() — only print what still needs attention.
+    // NOTE: log() is a no-op when fromInstall=true (stdout suppressed to avoid
+    // interleaving with TUI spinner on stderr). If git remote was not detected,
+    // the user will see the incomplete placeholder values in forge.yaml directly. (#812)
     if (!remoteDetected) {
-      console.log(`${YELLOW}Action required:${RESET}`);
-      console.log(
+      log(`${YELLOW}Action required:${RESET}`);
+      log(
         `  Edit ${CYAN}forge.yaml${RESET} — fill in ${CYAN}project.owner${RESET} and ${CYAN}project.repo${RESET} (git remote not detected)`,
       );
-      console.log("");
+      log("");
     }
   } else {
     // Called explicitly via `npx forgedock init` — print full next steps
-    console.log(`${BOLD}Next steps:${RESET}`);
+    log(`${BOLD}Next steps:${RESET}`);
     if (!remoteDetected) {
-      console.log(
+      log(
         `  1. Edit ${CYAN}forge.yaml${RESET} — fill in ${CYAN}project.owner${RESET} and ${CYAN}project.repo${RESET}`,
       );
     } else {
-      console.log(
+      log(
         `  1. Review ${CYAN}forge.yaml${RESET} — all required fields were auto-detected`,
       );
     }
-    console.log(
+    log(
       `  2. Add ${CYAN}forge.yaml${RESET} to ${CYAN}.gitignore${RESET} if it contains sensitive paths`,
     );
-    console.log(
+    log(
       `  3. Run ${CYAN}/forgedock-init${RESET} inside Claude Code for guided AI-powered setup`,
     );
-    console.log("");
+    log("");
   }
 }
 
