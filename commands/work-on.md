@@ -1172,8 +1172,12 @@ GDR_EXISTS=$(gh api repos/{GH_REPO}/issues/{PR_NUMBER}/comments \
 CONTEXT_COMMENT=$(gh api repos/{GH_REPO}/issues/{NUMBER}/comments \
   --jq '.[] | select(.body | contains("FORGE:CONTEXT")) | .body' 2>/dev/null | head -1)
 
-# Count historical review-finding issue references (#NNN patterns in Context comment)
-REVIEW_FINDING_COUNT=$(echo "$CONTEXT_COMMENT" | grep -oP '#\d+' | wc -l | tr -d ' ')
+# Count #NNN patterns from historical sections only (review-finding refs + past-bug refs).
+# Scope: "### Historical Findings on These Files" and "### Past Bugs in This Module" sections.
+# Excludes: current issue number in header, PR refs in "Successful Similar Implementations", incidental prose.
+REVIEW_FINDING_COUNT=$(echo "$CONTEXT_COMMENT" \
+  | awk '/^### Historical Findings on These Files/{p=1} /^### Past Bugs in This Module/{p=1} /^### /{if (!/Historical Findings|Past Bugs/) p=0} p' \
+  | grep -oP '#\d+' | wc -l | tr -d ' ')
 REVIEW_FINDING_COUNT=${REVIEW_FINDING_COUNT:-0}
 ```
 
