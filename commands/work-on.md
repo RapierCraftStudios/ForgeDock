@@ -1203,7 +1203,7 @@ if [ "$GDR_EXISTS" != "true" ] && [ -n "{PR_NUMBER}" ]; then
   \"issue\": ${NUMBER},
   \"pr\": ${PR_NUMBER},
   \"repo\": \"{GH_REPO}\",
-  \"lane\": \"{FAST_LANE|FEATURE_LANE}\",
+  \"lane\": \"{lane}\",
   \"pr_base\": \"{PR_BASE}\",
   \"branch\": \"{BRANCH}\",
   \"head_sha\": \"${HEAD_SHA}\",
