@@ -218,7 +218,13 @@ PRs welcome. Every change goes through a PR, tested against 3+ scenarios, using 
 
 ## License
 
-[AGPL-3.0](LICENSE) — free to use, modify, and distribute. If you modify ForgeDock and offer it as a service, you must open-source your modifications under the same license.
+ForgeDock uses a **dual-licensing model**:
+
+- **[AGPL-3.0](LICENSE)** — free to use, modify, and distribute for open-source and personal use. If you modify ForgeDock and offer it as a service (including over a network), you must open-source your modifications under AGPL-3.0.
+
+- **[Commercial License](COMMERCIAL-LICENSE.md)** — for organizations that need to use ForgeDock in proprietary workflows or products without AGPL-3.0 copyleft obligations. [Contact RapierCraft Studios](mailto:licensing@rapiercraft.studio) to obtain a commercial license.
+
+The open-source core remains free under AGPL-3.0. The commercial license is an exception for customers who cannot meet the copyleft requirements.
 
 ---
 

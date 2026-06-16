@@ -1,4 +1,6 @@
 #!/usr/bin/env node
+// SPDX-FileCopyrightText: Copyright (c) RapierCraft Studios
+// SPDX-License-Identifier: AGPL-3.0-or-later
 
 import { fileURLToPath, pathToFileURL } from "url";
 import { dirname, join, relative, resolve } from "path";

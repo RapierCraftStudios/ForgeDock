@@ -2,6 +2,8 @@
 description: Validation agent — quality gate loop, format/verify, proxy check, deploy check
 argument-hint: [issue number] [--repo GH_REPO] [--gh-flag GH_FLAG] [--worktree PATH] [--files FILE1 FILE2...]
 ---
+<!-- SPDX-FileCopyrightText: Copyright (c) RapierCraft Studios -->
+<!-- SPDX-License-Identifier: AGPL-3.0-or-later -->
 
 # work-on/build/validate — Validation Subcommand
 

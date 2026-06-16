@@ -1,6 +1,8 @@
 ---
 description: "Run a GEO audit — check AI referral traffic, page compliance, and auto-create improvement issues"
 ---
+<!-- SPDX-FileCopyrightText: Copyright (c) RapierCraft Studios -->
+<!-- SPDX-License-Identifier: AGPL-3.0-or-later -->
 
 # /geo-audit — GEO Discoverability Audit & Issue Generator
 
