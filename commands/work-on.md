@@ -136,7 +136,7 @@ CHECKPOINT=$(gh api repos/{GH_REPO}/issues/{NUMBER}/comments \
 if [ -n "$CHECKPOINT" ]; then
   # Extract next_phase from the JSON block inside the comment
   NEXT_PHASE=$(echo "$CHECKPOINT" | grep -A5 '```json' | grep '"next_phase"' \
-    | grep -oP '(?<="next_phase": ")[^"]+')
+    | sed -n 's/.*"next_phase": "\([^"]*\)".*/\1/p')
   echo "Checkpoint found: next_phase=${NEXT_PHASE}"
 fi
 ```
@@ -349,7 +349,7 @@ Use `forge.yaml → review.tech_stack` and the issue domain labels to identify e
 4.5. **Rogue commit pre-state comparison (conditional)**: If the issue body references a specific commit as rogue, bad, or unintended (e.g., "rogue commit `abc1234`", "bad commit", "this was never intended"), MUST run `git show {commit}^:{file}` to see the file before that commit. Compare the pre-commit state against the current file. Any block present in the current file but absent in the pre-commit state was introduced by that commit chain and is a candidate for full reversion — not just partial editing. Report the delta (pre vs. current) in the investigation report. Do NOT assume surrounding code near a named import/bug is correct simply because the issue only named a specific sub-problem. (Ref: forge#278 — investigator confirmed the broken import but never ran `git show 18a3a2cf3^:batch.py`; the surrounding 50-line feature gate was also rogue and was preserved by the fix PR, causing a P1 access regression for all non-Scale users)
 5. Domain context discovery (narrow scope only, 1–5 files):
    ```bash
-   git log --oneline --all -30 -- {affected_files} | grep -oP '#\d+' | sort -u
+   git log --oneline --all -30 -- {affected_files} | grep -oE '#[0-9]+' | sort -u
    gh issue list -R {GH_REPO} --state closed --limit 8 --search "{function_name}"
    ```
    Keep only file/function-level overlap. Max 5 related issues.
@@ -768,7 +768,7 @@ Surface institutional memory before writing code. Extract function names from th
 FUNCTION_NAMES=$(gh api repos/{GH_REPO}/issues/{NUMBER}/comments \
   --jq '.[] | select(.body | contains("FORGE:CONTRACT")) | .body' \
   | awk '/^### Deliverables/{p=1; next} /^### /{p=0} p' \
-  | grep -oP '`[A-Za-z_][A-Za-z0-9_]*`' \
+  | grep -oE '`[A-Za-z_][A-Za-z0-9_]*`' \
   | tr -d '`' | sort -u | tr '\n' ' ' | xargs)
 ```
 
@@ -793,7 +793,7 @@ done
 
 **C2: Past Bugs in the Same Module**
 ```bash
-git log --oneline -30 -- {AFFECTED_FILES} | grep -oP '#\d+' | sort -u | head -8
+git log --oneline -30 -- {AFFECTED_FILES} | grep -oE '#[0-9]+' | sort -u | head -8
 # For each issue: fetch title + root cause, keep only bug/fix/review-finding labeled. Max 5.
 ```
 
@@ -1448,7 +1448,8 @@ bash scripts/transition-label.sh {NUMBER} {GH_FLAG} merged
 
 ```bash
 PARENT_REF=$(gh issue view {NUMBER} {GH_FLAG} --json body --jq '.body' \
-  | grep -oP '(?i)(part of|spawned from|sub-issue of|parent issue[:]?|parent[:])\s*#\K\d+' | head -1)
+  | grep -iE '(part of|spawned from|sub-issue of|parent issue:?|parent:)\s*#[0-9]+' \
+  | sed -n 's/.*#\([0-9][0-9]*\).*/\1/p' | head -1)
 ```
 
 If parent found: check off this sub-issue in parent body. If ALL sub-issues checked off → close parent with `workflow:merged`.
@@ -1533,7 +1534,7 @@ CONTEXT_COMMENT=$(gh api repos/{GH_REPO}/issues/{NUMBER}/comments \
   --jq '.[] | select(.body | contains("FORGE:CONTEXT")) | .body' 2>/dev/null | head -1)
 
 # Count historical review-finding issue references (#NNN patterns in Context comment)
-REVIEW_FINDING_COUNT=$(echo "$CONTEXT_COMMENT" | grep -oP '#\d+' | wc -l | tr -d ' ')
+REVIEW_FINDING_COUNT=$(echo "$CONTEXT_COMMENT" | grep -oE '#[0-9]+' | wc -l | tr -d ' ')
 REVIEW_FINDING_COUNT=${REVIEW_FINDING_COUNT:-0}
 ```
 
@@ -1542,9 +1543,12 @@ REVIEW_FINDING_COUNT=${REVIEW_FINDING_COUNT:-0}
 REVIEW_SUMMARY=$(gh api repos/{GH_REPO}/issues/{PR_NUMBER}/comments \
   --jq '[.[] | select(.body | contains("FORGE:REVIEWER") or (.body | test("APPROVED:|CHANGES REQUESTED:"; "i")))] | last | .body // ""' 2>/dev/null || echo '')
 
-REVIEW_VERDICT=$(echo "$REVIEW_SUMMARY" | grep -oP '(?<=Verdict: )(APPROVED|CHANGES REQUESTED)' | head -1 || echo "APPROVED")
-FINDINGS_COUNT=$(echo "$REVIEW_SUMMARY" | grep -oP '\d+(?= findings)' | head -1 || echo "0")
-AGENTS_RUN=$(echo "$REVIEW_SUMMARY" | grep -oP '\d+(?= agents)' | head -1 || echo "0")
+REVIEW_VERDICT=$(echo "$REVIEW_SUMMARY" | sed -n 's/.*Verdict: \(APPROVED\|CHANGES REQUESTED\).*/\1/p' | head -1 || echo "APPROVED")
+REVIEW_VERDICT="${REVIEW_VERDICT:-APPROVED}"
+FINDINGS_COUNT=$(echo "$REVIEW_SUMMARY" | sed -n 's/.*\([0-9][0-9]*\) findings.*/\1/p' | head -1 || echo "0")
+FINDINGS_COUNT="${FINDINGS_COUNT:-0}"
+AGENTS_RUN=$(echo "$REVIEW_SUMMARY" | sed -n 's/.*\([0-9][0-9]*\) agents.*/\1/p' | head -1 || echo "0")
+AGENTS_RUN="${AGENTS_RUN:-0}"
 ```
 
 **Post GDR to PR** (not to issue — PR comment survives as permanent artifact on the merged diff):
