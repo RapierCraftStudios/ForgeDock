@@ -814,8 +814,17 @@ async function linkCommands(step) {
       }
     } catch (err) {
       if (err.code !== "ENOENT") throw err;
-      // Doesn't exist — create symlink
-      await symlink(file, target);
+      // Doesn't exist — create symlink; fall back to copy on Windows EPERM/EACCES.
+      try {
+        await symlink(file, target);
+      } catch (linkErr) {
+        if (linkErr.code === "EPERM" || linkErr.code === "EACCES") {
+          const { copyFile } = await import("fs/promises");
+          await copyFile(file, target);
+        } else {
+          throw linkErr;
+        }
+      }
       installed++;
     }
   }
