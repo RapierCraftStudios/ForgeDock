@@ -86,9 +86,23 @@ const SESSION_START_HOOK_TIMEOUT_SECONDS = 10;
 /**
  * The command value written into the SessionStart hook entry.
  * Uses forward slashes even on Windows — Node accepts them natively and
- * they survive hook-runner invocations that do not go through a shell.
- * Backslashes emitted by path.join() on Windows would be fragile when the
- * hook runner has no shell to interpret the quoted command string.
+ * they avoid any backslash-related issues in the hook command string.
+ * Backslashes emitted by path.join() on Windows are normalised to forward
+ * slashes on line 101 before any escaping is applied.
+ *
+ * When Claude Code's hook runner passes the command string through a POSIX
+ * shell (sh -c), the following characters receive special treatment inside
+ * double-quoted strings and must be escaped:
+ *   "  → \"   (closes the double-quoted argument — ref: forge#451)
+ *   $  → \$   (variable expansion and $(...) command substitution)
+ *   `  → \`   (legacy backtick command substitution)
+ *   !  → \!   (bash history expansion — harmless in sh but risky in bash)
+ *
+ * Backslash (\) does not need escaping here because path.join() backslashes
+ * are already converted to forward slashes before this escaping runs.
+ *
+ * `node --` is used to terminate Node.js option parsing so that a path
+ * component beginning with `-` cannot be misinterpreted as a CLI flag.
  *
  * @returns {string}
  */
@@ -99,10 +113,15 @@ function sessionStartHookCommand() {
     "hooks",
     "session-start.mjs",
   ).replace(/\\/g, "/");
-  // Escape embedded double quotes so a crafted install path cannot break out
-  // of the quoted argument and inject shell tokens. (ref: forge#451)
-  const safePath = hookPath.replace(/"/g, '\\"');
-  return `node "${safePath}"`;
+  // Escape all shell metacharacters that expand inside double-quoted strings.
+  // Each replace() targets one character class to keep the intent explicit.
+  // (ref: forge#451 for ", forge#792 for $, `, !)
+  const safePath = hookPath
+    .replace(/"/g, '\\"')   // double quote — breaks out of the argument
+    .replace(/\$/g, '\\$')  // dollar sign — variable/command substitution
+    .replace(/`/g, '\\`')   // backtick — legacy command substitution
+    .replace(/!/g, '\\!');  // exclamation mark — bash history expansion
+  return `node -- "${safePath}"`;
 }
 
 /**
