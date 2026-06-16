@@ -199,8 +199,9 @@ resolve_script() {
 #
 # The case pattern is inlined at every call site (rather than centralised here)
 # because each operation has a different prose fallback — transition-label falls
-# back to inline gh issue edit, while classify-lane and validate-pr-target have
-# no valid prose fallback and must exit 1. <!-- Added: forge#822 -->
+# back to inline gh issue edit; classify-lane has no valid prose fallback and
+# must exit 1; validate-pr-target emits a WARNING and continues (the PR review
+# step catches any mismatch before merge). <!-- Added: forge#822 -->
 ```
 
 When invoking a resolved script, log the tier in the FORGE annotation: `Script tier: {adaptive|universal|prose} ({path})`. This provides full pipeline observability. <!-- Added: forge#670 -->
