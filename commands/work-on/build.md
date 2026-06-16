@@ -57,7 +57,7 @@ Extract from investigation report:
 ```bash
 COMPLEXITY_BAND=$(gh api repos/{GH_REPO}/issues/{NUMBER}/comments \
   --jq '.[] | select(.body | contains("FORGE:FAST_PATH")) | .body' 2>/dev/null \
-  | grep -oP '(?<=\*\*COMPLEXITY_BAND\*\*: )\w+' | head -1)
+  | sed -n 's/.*\*\*COMPLEXITY_BAND\*\*: \([A-Z_]*\).*/\1/p' | head -1)
 # Default to STANDARD if not found (conservative — runs full pipeline)
 COMPLEXITY_BAND="${COMPLEXITY_BAND:-STANDARD}"
 echo "COMPLEXITY_BAND: $COMPLEXITY_BAND"
@@ -156,7 +156,7 @@ After posting the Builder Contract, extract the primary function/class names fro
 FUNCTION_NAMES=$(gh api repos/{GH_REPO}/issues/{NUMBER}/comments \
   --jq '.[] | select(.body | contains("FORGE:CONTRACT")) | .body' \
   | awk '/^### Deliverables/{p=1; next} /^### /{p=0} p' \
-  | grep -oP '`[A-Za-z_][A-Za-z0-9_]*`' \
+  | grep -oE '`[A-Za-z_][A-Za-z0-9_]*`' \
   | tr -d '`' \
   | sort -u \
   | tr '\n' ' ' \

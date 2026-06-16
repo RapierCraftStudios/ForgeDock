@@ -18,7 +18,7 @@ Read COMPLEXITY_BAND from the `<!-- FORGE:FAST_PATH -->` comment on the issue:
 ```bash
 COMPLEXITY_BAND=$(gh api repos/{GH_REPO}/issues/{NUMBER}/comments \
   --jq '.[] | select(.body | contains("FORGE:FAST_PATH")) | .body' 2>/dev/null \
-  | grep -oP '(?<=\*\*COMPLEXITY_BAND\*\*: )\w+' | head -1)
+  | sed -n 's/.*\*\*COMPLEXITY_BAND\*\*: \([A-Z_]*\).*/\1/p' | head -1)
 COMPLEXITY_BAND="${COMPLEXITY_BAND:-STANDARD}"
 ```
 

@@ -18,7 +18,7 @@ Read COMPLEXITY_BAND from the `<!-- FORGE:FAST_PATH -->` comment on the issue:
 ```bash
 COMPLEXITY_BAND=$(gh api repos/{GH_REPO}/issues/{NUMBER}/comments \
   --jq '.[] | select(.body | contains("FORGE:FAST_PATH")) | .body' 2>/dev/null \
-  | grep -oP '(?<=\*\*COMPLEXITY_BAND\*\*: )\w+' | head -1)
+  | sed -n 's/.*\*\*COMPLEXITY_BAND\*\*: \([A-Z_]*\).*/\1/p' | head -1)
 COMPLEXITY_BAND="${COMPLEXITY_BAND:-STANDARD}"
 ```
 
@@ -275,26 +275,26 @@ INDEX_GIST_URLS=""
 
 # Check issue body for milestone index annotation
 MILESTONE_INDEX_URL=$(echo "$ISSUE_BODY" \
-  | grep -oP '(?<=<!-- FORGE:MILESTONE_INDEX: )https://[^ ]+(?= -->)' \
+  | sed -n 's/.*<!-- FORGE:MILESTONE_INDEX: \(https:\/\/[^ ]*\) -->.*/\1/p' \
   | head -1)
 
 # If not in issue body, check milestone description
 if [ -z "$MILESTONE_INDEX_URL" ] && [ -n "$MILESTONE_NUM" ]; then
   MILESTONE_DESC=$(gh api repos/{GH_REPO}/milestones/${MILESTONE_NUM} --jq '.description // ""' 2>/dev/null)
   MILESTONE_INDEX_URL=$(echo "$MILESTONE_DESC" \
-    | grep -oP '(?<=<!-- FORGE:MILESTONE_INDEX: )https://[^ ]+(?= -->)' \
+    | sed -n 's/.*<!-- FORGE:MILESTONE_INDEX: \(https:\/\/[^ ]*\) -->.*/\1/p' \
     | head -1)
 fi
 
 # If found, fetch the index and extract individual Gist URLs from table rows
 if [ -n "$MILESTONE_INDEX_URL" ]; then
-  INDEX_GIST_ID=$(echo "$MILESTONE_INDEX_URL" | grep -oP '[a-f0-9]{20,}' | tail -1)
+  INDEX_GIST_ID=$(echo "$MILESTONE_INDEX_URL" | grep -oE '[a-f0-9]{20,}' | tail -1)
   if [ -n "$INDEX_GIST_ID" ]; then
     INDEX_CONTENT=$(timeout 15 gh gist view "$INDEX_GIST_ID" --raw 2>/dev/null)
     if [ -n "$INDEX_CONTENT" ]; then
       # Extract Gist URLs from table rows (format: | ... | https://gist.github.com/... | ... |)
       INDEX_GIST_URLS=$(echo "$INDEX_CONTENT" \
-        | grep -oP 'https://gist\.github\.com/[a-f0-9/]+' \
+        | grep -oE 'https://gist\.github\.com/[a-f0-9/]+' \
         | head -10)
       echo "Milestone index fetched: found $(echo "$INDEX_GIST_URLS" | wc -l) investigation Gist(s)"
     else
@@ -308,7 +308,7 @@ fi
 
 ```bash
 GIST_URLS=$(echo "$ISSUE_BODY" \
-  | grep -oP '(?<=<!-- FORGE:PRIOR_GIST: )https://[^ ]+(?= -->)' \
+  | sed -n 's/.*<!-- FORGE:PRIOR_GIST: \(https:\/\/[^ ]*\) -->.*/\1/p' \
   | head -5)
 
 # Merge with any URLs discovered from milestone index (deduplicate)
@@ -333,7 +333,7 @@ GIST_SUMMARIES=""
 
 for url in $GIST_URLS; do
   # Extract Gist ID from URL (last path segment, strip any trailing slash)
-  GIST_ID=$(echo "$url" | grep -oP '[a-f0-9]{20,}' | tail -1)
+  GIST_ID=$(echo "$url" | grep -oE '[a-f0-9]{20,}' | tail -1)
 
   if [ -z "$GIST_ID" ]; then
     echo "WARNING: Could not extract Gist ID from URL: $url — skipping"
@@ -351,10 +351,10 @@ for url in $GIST_URLS; do
   fi
 
   # Extract key sections for summary (~2K chars target per Gist)
-  VERDICT=$(echo "$GIST_CONTENT" | grep -oP '(?<=verdict: )\w+' | head -1)
-  TASK_TYPE=$(echo "$GIST_CONTENT" | grep -oP '(?<=task_type: ).+' | head -1)
-  SEVERITY=$(echo "$GIST_CONTENT" | grep -oP '(?<=severity: )\w+' | head -1)
-  SOURCE_ISSUE=$(echo "$GIST_CONTENT" | grep -oP '(?<=issue: )\d+' | head -1)
+  VERDICT=$(echo "$GIST_CONTENT" | sed -n 's/.*verdict: \([A-Za-z_]*\).*/\1/p' | head -1)
+  TASK_TYPE=$(echo "$GIST_CONTENT" | sed -n 's/.*task_type: \(.*\)/\1/p' | head -1)
+  SEVERITY=$(echo "$GIST_CONTENT" | sed -n 's/.*severity: \([A-Za-z_]*\).*/\1/p' | head -1)
+  SOURCE_ISSUE=$(echo "$GIST_CONTENT" | sed -n 's/.*issue: \([0-9]*\).*/\1/p' | head -1)
 
   # Extract structured sections: Root Cause, Recommendation, Affected Files
   ROOT_CAUSE=$(echo "$GIST_CONTENT" \
@@ -428,7 +428,7 @@ Mine git log for commit messages referencing issues, then fetch those issues:
 ```bash
 # Step 1: find issue numbers from git history on affected files
 git log --oneline -30 -- {AFFECTED_FILES} \
-  | grep -oP '#\d+' \
+  | grep -oE '#[0-9]+' \
   | sort -u \
   | head -8
 
