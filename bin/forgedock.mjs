@@ -171,12 +171,30 @@ function stripJsonc(raw) {
       continue;
     }
 
+    // Trailing comma — skip if next non-whitespace structural char is } or ]
+    // This must run OUTSIDE the string-literal branch above so string content
+    // containing ",}" or ",]" is never touched.
+    if (ch === ",") {
+      let j = i + 1;
+      while (
+        j < len &&
+        (raw[j] === " " ||
+          raw[j] === "\t" ||
+          raw[j] === "\r" ||
+          raw[j] === "\n")
+      )
+        j++;
+      if (j < len && (raw[j] === "}" || raw[j] === "]")) {
+        i++;
+        continue; // skip trailing comma
+      }
+    }
+
     result += ch;
     i++;
   }
 
-  // Remove trailing commas before } or ]
-  return result.replace(/,(\s*[}\]])/g, "$1");
+  return result;
 }
 
 /**
