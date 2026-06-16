@@ -121,7 +121,7 @@ gh issue view {NUMBER} {GH_FLAG} --json number,title,body,labels,state,comments,
 gh api repos/{GH_REPO}/issues/{NUMBER}/comments --jq '.[] | {id: .id, author: .user.login, body: .body}'
 ```
 
-**Check**: state (closed → STOP), terminal labels (`workflow:merged`/`workflow:invalid` → STOP), existing agent comments (`FORGE:INVESTIGATOR`, `FORGE:DECOMPOSED`, `FORGE:CONTRACT`, `FORGE:BUILDER`, `FORGE:TRAJECTORY`), parent tracker status, sub-issue status.
+**Check**: state (closed → STOP), terminal labels (`workflow:merged`/`workflow:invalid` → STOP), existing agent comments (`FORGE:INVESTIGATOR`, `FORGE:DECOMPOSED`, `FORGE:CONTRACT`, `FORGE:BUILDER`, `FORGE:TRAJECTORY`, `FORGE:DECISION_RECORD`), parent tracker status, sub-issue status.
 
 **Determine resume point**: No comments → Phase 1. Investigation exists + ready-to-build → Phase 3. Builder + no PR → Phase 4. Builder + PR open → Phase 5. PR merged + issue open → Phase 6.
 
@@ -1514,6 +1514,102 @@ gh issue comment {NUMBER} {GH_FLAG} --body "<!-- FORGE:TRAJECTORY -->
 **Anomalies**: {anomalies or None}
 **Pipeline completed**: {TIMESTAMP}"
 ```
+
+### 7C: Graph Decision Record (MANDATORY when PR exists)
+
+**Skip if**: `{PR_NUMBER}` is empty (investigation-only tasks with no PR) OR `<!-- FORGE:DECISION_RECORD -->` already posted on the PR.
+
+**Purpose**: Post a single consolidated provenance artifact to the PR that proves the merge was backed by citable evidence. Enables downstream benchmarking queries (repeated-mistake rate, stale-edge hit rate, review escape rate) by making every pipeline run queryable via `gh api`.
+
+**Idempotency check**:
+```bash
+GDR_EXISTS=$(gh api repos/{GH_REPO}/issues/{PR_NUMBER}/comments \
+  --jq '[.[] | select(.body | contains("FORGE:DECISION_RECORD"))] | length > 0' 2>/dev/null || echo "false")
+```
+
+**Extract context edge counts** from FORGE:CONTEXT comment (already posted on issue):
+```bash
+CONTEXT_COMMENT=$(gh api repos/{GH_REPO}/issues/{NUMBER}/comments \
+  --jq '.[] | select(.body | contains("FORGE:CONTEXT")) | .body' 2>/dev/null | head -1)
+
+# Count historical review-finding issue references (#NNN patterns in Context comment)
+REVIEW_FINDING_COUNT=$(echo "$CONTEXT_COMMENT" | grep -oP '#\d+' | wc -l | tr -d ' ')
+REVIEW_FINDING_COUNT=${REVIEW_FINDING_COUNT:-0}
+```
+
+**Extract review verdict and findings count** from PR review summary (Phase 9 of review-pr):
+```bash
+REVIEW_SUMMARY=$(gh api repos/{GH_REPO}/issues/{PR_NUMBER}/comments \
+  --jq '[.[] | select(.body | contains("FORGE:REVIEWER") or (.body | test("APPROVED:|CHANGES REQUESTED:"; "i")))] | last | .body // ""' 2>/dev/null || echo '')
+
+REVIEW_VERDICT=$(echo "$REVIEW_SUMMARY" | grep -oP '(?<=Verdict: )(APPROVED|CHANGES REQUESTED)' | head -1 || echo "APPROVED")
+FINDINGS_COUNT=$(echo "$REVIEW_SUMMARY" | grep -oP '\d+(?= findings)' | head -1 || echo "0")
+AGENTS_RUN=$(echo "$REVIEW_SUMMARY" | grep -oP '\d+(?= agents)' | head -1 || echo "0")
+```
+
+**Post GDR to PR** (not to issue — PR comment survives as permanent artifact on the merged diff):
+```bash
+if [ "$GDR_EXISTS" != "true" ] && [ -n "{PR_NUMBER}" ]; then
+  GDR_TIMESTAMP=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+  HEAD_SHA=$(gh pr view {PR_NUMBER} {GH_FLAG} --json headRefOid --jq '.headRefOid' 2>/dev/null || echo "")
+  MERGE_COMMIT=$(gh pr view {PR_NUMBER} {GH_FLAG} --json mergeCommit --jq '.mergeCommit.oid // ""' 2>/dev/null || echo "")
+
+  gh pr comment {PR_NUMBER} {GH_FLAG} --body "<!-- FORGE:DECISION_RECORD -->
+## Graph Decision Record — Issue #${NUMBER} / PR #${PR_NUMBER}
+
+\`\`\`json
+{
+  \"schema_version\": \"1\",
+  \"issue\": ${NUMBER},
+  \"pr\": ${PR_NUMBER},
+  \"repo\": \"{GH_REPO}\",
+  \"lane\": \"{FAST_LANE|FEATURE_LANE}\",
+  \"pr_base\": \"{PR_BASE}\",
+  \"branch\": \"{BRANCH}\",
+  \"head_sha\": \"${HEAD_SHA}\",
+  \"merge_commit\": \"${MERGE_COMMIT}\",
+  \"investigation\": {
+    \"verdict\": \"{VERDICT}\",
+    \"confidence\": \"{CONFIDENCE}\",
+    \"task_type\": \"{TASK_TYPE}\"
+  },
+  \"context\": {
+    \"historical_edges_referenced\": ${REVIEW_FINDING_COUNT},
+    \"forge_annotations_read\": [\"FORGE:INVESTIGATOR\", \"FORGE:CONTRACT\", \"FORGE:CONTEXT\", \"FORGE:ARCHITECT\", \"FORGE:BUILDER\"]
+  },
+  \"build\": {
+    \"files_changed\": {FILES_CHANGED},
+    \"quality_gate\": \"{pass|fail}\",
+    \"quality_gate_iterations\": {GATE_ITERATIONS}
+  },
+  \"review\": {
+    \"verdict\": \"${REVIEW_VERDICT:-APPROVED}\",
+    \"findings_created\": ${FINDINGS_COUNT},
+    \"agents_run\": ${AGENTS_RUN}
+  },
+  \"merge\": {
+    \"merged_at\": \"${GDR_TIMESTAMP}\",
+    \"justification\": \"Investigation confirmed ({VERDICT}/{CONFIDENCE}), quality gate passed, review ${REVIEW_VERDICT:-approved}\"
+  }
+}
+\`\`\`
+
+**Queryable**: \`gh api repos/{GH_REPO}/issues/{PR_NUMBER}/comments --jq '[.[] | select(.body | contains(\"FORGE:DECISION_RECORD\"))] | .[0].body\`"
+fi
+```
+
+**Benchmarking**: Query all GDRs for a repo to compute pipeline metrics:
+```bash
+# Fetch all merged PRs and extract their GDR JSON blocks for metric computation
+# (used by /pipeline-health to measure repeated-mistake rate, stale-edge hit rate, etc.)
+gh pr list -R {GH_REPO} --state merged --limit 100 --json number \
+  --jq '.[].number' | while read pr; do
+    gh api repos/{GH_REPO}/issues/$pr/comments \
+      --jq '.[] | select(.body | contains("FORGE:DECISION_RECORD")) | .body' 2>/dev/null
+  done
+```
+
+<!-- Added: forge#776 -->
 
 ---
 

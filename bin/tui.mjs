@@ -1347,19 +1347,17 @@ export async function runSteps(steps, opts = {}) {
 
       drawActive();
 
-      // Move back to bottom
-      // rowsFromBottom - 1 rows below the current row i
-      const rowsBelow = rowsFromBottom - 1;
-      if (rowsBelow > 0) stream.write(`\x1b[${rowsBelow}B`);
+      // Move back to bottom (the empty line AFTER the last step row).
+      // drawActive() leaves the cursor on row i with no trailing newline,
+      // so we need rowsFromBottom (not -1) to reach the line below row count-1.
+      if (rowsFromBottom > 0) stream.write(`\x1b[${rowsFromBottom}B`);
       cursorAtBottom = true;
 
       // Spinner interval updates row i in-place
       const timer = setInterval(() => {
-        const savedCursorAtBottom = cursorAtBottom;
         cursorUp(rowsFromBottom);
         drawActive();
-        if (rowsBelow > 0) stream.write(`\x1b[${rowsBelow}B`);
-        cursorAtBottom = savedCursorAtBottom;
+        if (rowsFromBottom > 0) stream.write(`\x1b[${rowsFromBottom}B`);
       }, spinnerInterval);
       timer.unref();
 
@@ -1407,8 +1405,9 @@ export async function runSteps(steps, opts = {}) {
       cursorAtBottom = false;
       overwriteRow(i);
       stream.write("\n");
-      // Move down to bottom (rowsBelow rows remaining after the newline)
-      if (rowsBelow > 0) stream.write(`\x1b[${rowsBelow}B`);
+      // After the \n, cursor is on row i+1. Distance to bottom = rowsFromBottom - 1.
+      const rowsBelowAfterNl = rowsFromBottom - 1;
+      if (rowsBelowAfterNl > 0) stream.write(`\x1b[${rowsBelowAfterNl}B`);
       cursorAtBottom = true;
 
       if (stepError) {
@@ -1426,11 +1425,11 @@ export async function runSteps(steps, opts = {}) {
 
   if (result) {
     // Failed
-    stream.write(`${red("✖")} ${dim("Failed in")} ${elapsed}\n`);
+    stream.write(`\r\x1b[K${red("✖")} ${dim("Failed in")} ${elapsed}\n`);
     return result;
   }
 
-  stream.write(`${green("✔")} ${dim("Done in")} ${elapsed}\n`);
+  stream.write(`\r\x1b[K${green("✔")} ${dim("Done in")} ${elapsed}\n`);
   return { ok: true, elapsed: Date.now() - t0 };
 }
 
@@ -1447,105 +1446,152 @@ const USE_TRUECOLOR =
   USE_ANSI &&
   (process.env.COLORTERM === "truecolor" ||
     process.env.COLORTERM === "24bit" ||
-    // Windows Terminal and most modern Linux terminals set COLORTERM=truecolor
-    // iTerm2 sets TERM_PROGRAM=iTerm.app (supports 24-bit)
+    // Windows Terminal sets WT_SESSION but not always COLORTERM
+    !!process.env.WT_SESSION ||
     process.env.TERM_PROGRAM === "iTerm.app" ||
-    process.env.TERM_PROGRAM === "vscode");
+    process.env.TERM_PROGRAM === "vscode" ||
+    process.env.TERM_PROGRAM === "WezTerm" ||
+    process.env.TERM_PROGRAM === "Hyper" ||
+    // Ghostty, Alacritty, kitty — modern GPU-accelerated terminals
+    process.env.TERM_PROGRAM === "ghostty" ||
+    process.env.TERM === "xterm-kitty");
 
 /**
- * Brand-blue ForgeDock F-monogram, pre-rendered as Unicode half-block art.
+ * Angular F-monogram pixel map — hand-crafted to match the ForgeDock brand mark.
  *
- * Each line uses ▀ (U+2580 UPPER HALF BLOCK) with ANSI 24-bit color:
- *   \x1b[38;2;R;G;Bm  — foreground (upper pixel pair)
- *   \x1b[48;2;R;G;Bm  — background (lower pixel pair)
- *   \x1b[0m            — reset
+ * Two forward-leaning parallelogram arms forming a stylized italic F:
+ * - Upper arm: wide, sweeps from center-left to upper-right (rows 0-6)
+ * - Notch: triangular gap opening right between the two arms (rows 7-8)
+ * - Lower arm: shorter, same lean angle (rows 9-12)
+ * - Stem: tapers to a point at bottom-left (rows 13-19)
  *
- * Brand color: #58a6ff = RGB(88, 166, 255)
- * Background:  #0d1117 = RGB(13, 17, 23)  (GitHub dark canvas — renders as "off" pixels)
- *
- * The art is 20 characters wide × 10 rows tall (represents a 20×20 pixel F monogram
- * at 2:1 aspect, each row pair compressed into one terminal row via ▀).
- *
- * To regenerate this art from a source PNG: scripts/gen-logo.mjs <input.png>
+ * 18 columns × 20 rows → 18 wide × 10 terminal rows (half-block pairs).
+ * 1 = filled pixel, 0 = transparent (uses terminal default background).
  */
 // prettier-ignore
-const LOGO_ART_TRUECOLOR = (() => {
-  // Brand blue: RGB(88, 166, 255)  — #58a6ff
-  // Dark bg:    RGB(13, 17, 23)    — #0d1117
-  const B  = "38;2;88;166;255";   // fg: brand blue
-  const bg = "48;2;88;166;255";   // bg: brand blue
-  const X  = "38;2;13;17;23";     // fg: dark (off)
-  const Xb = "48;2;13;17;23";     // bg: dark (off)
-  const R  = "\x1b[0m";           // reset
+const LOGO_PIXELS = [
+  //0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7
+  [0,0,0,0,0,0,0,1,1,1,1,1,1,1,1,1,1,0],  //  0: upper arm top
+  [0,0,0,0,0,0,1,1,1,1,1,1,1,1,1,1,0,0],  //  1
+  [0,0,0,0,0,1,1,1,1,1,1,1,1,1,1,0,0,0],  //  2
+  [0,0,0,0,1,1,1,1,1,1,1,1,1,1,0,0,0,0],  //  3
+  [0,0,0,1,1,1,1,1,1,1,1,1,1,0,0,0,0,0],  //  4
+  [0,0,1,1,1,1,1,1,1,1,1,1,0,0,0,0,0,0],  //  5
+  [0,0,1,1,1,1,1,1,1,0,0,0,0,0,0,0,0,0],  //  6: upper arm bottom
+  [0,1,1,1,1,0,0,0,0,0,0,0,0,0,0,0,0,0],  //  7: stem only (notch)
+  [0,1,1,1,0,0,0,0,0,0,0,0,0,0,0,0,0,0],  //  8: stem only (notch)
+  [1,1,1,1,1,1,1,1,1,1,1,0,0,0,0,0,0,0],  //  9: lower arm top
+  [1,1,1,1,1,1,1,1,1,1,0,0,0,0,0,0,0,0],  // 10
+  [1,1,1,1,1,1,1,1,0,0,0,0,0,0,0,0,0,0],  // 11
+  [1,1,1,1,1,1,1,0,0,0,0,0,0,0,0,0,0,0],  // 12: lower arm bottom
+  [1,1,1,1,1,0,0,0,0,0,0,0,0,0,0,0,0,0],  // 13: stem
+  [1,1,1,1,0,0,0,0,0,0,0,0,0,0,0,0,0,0],  // 14
+  [1,1,1,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],  // 15
+  [1,1,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],  // 16
+  [1,1,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],  // 17
+  [1,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],  // 18
+  [1,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],  // 19
+];
 
-  // half-block helper: upper=fg, lower=bg
-  function px(upper, lower) {
-    return `\x1b[${upper};${lower}m▀${R}`;
-  }
+/**
+ * Gradient palette for the F-monogram — interpolates from bright ice-blue
+ * at the top to deep ocean-blue at the bottom, creating a metallic sheen.
+ *
+ * Each entry is [R, G, B] for the corresponding pixel row pair.
+ */
+const LOGO_GRADIENT = [
+  [150, 215, 255],  // rows  0-1: ice blue (highlight)
+  [140, 208, 255],  // rows  2-3
+  [128, 198, 255],  // rows  4-5
+  [115, 185, 255],  // rows  6-7
+  [100, 172, 250],  // rows  8-9: brand blue
+  [85, 158, 240],   // rows 10-11
+  [68, 140, 228],   // rows 12-13
+  [52, 122, 215],   // rows 14-15
+  [40, 108, 200],   // rows 16-17
+  [35, 95, 190],    // rows 18-19: deep blue
+];
 
-  // F-monogram pixel map (20 wide × 20 tall, represented as 10 rows of ▀ pairs)
-  // 1 = brand-blue pixel, 0 = dark background
-  //
-  // Row layout (each entry = [upper_row, lower_row] of a ▀ pair):
-  //
-  //   ████████████████████   (full top border)
-  //   ██                ██   (left bar)
-  //   ██                ██
-  //   ██████████████         (top crossbar — full width minus right margin)
-  //   ██████████████
-  //   ██                     (left bar only)
-  //   ██
-  //   ██████                 (short lower crossbar)
-  //   ██████
-  //   ██                     (left bar only — bottom)
-
-  // Pixel rows (each row is 20 booleans)
-  const rows = [
-    [1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1],  //  0: top border
-    [1,1,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,1,1],  //  1: top inner
-    [1,1,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],  //  2: left bar
-    [1,1,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],  //  3: left bar
-    [1,1,1,1,1,1,1,1,1,1,1,1,1,1,0,0,0,0,0,0],  //  4: top crossbar
-    [1,1,1,1,1,1,1,1,1,1,1,1,1,1,0,0,0,0,0,0],  //  5: top crossbar (repeat)
-    [1,1,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],  //  6: left bar
-    [1,1,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],  //  7: left bar
-    [1,1,1,1,1,1,1,1,0,0,0,0,0,0,0,0,0,0,0,0],  //  8: lower crossbar
-    [1,1,1,1,1,1,1,1,0,0,0,0,0,0,0,0,0,0,0,0],  //  9: lower crossbar (repeat)
-    [1,1,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],  // 10: left bar
-    [1,1,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],  // 11: left bar
-    [1,1,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],  // 12: left bar
-    [1,1,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],  // 13: left bar
-    [1,1,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],  // 14: left bar
-    [1,1,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],  // 15: left bar
-    [1,1,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],  // 16: left bar
-    [1,1,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],  // 17: left bar
-    [1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1],  // 18: bottom border
-    [1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1],  // 19: bottom border (repeat)
-  ];
-
+/**
+ * Render the F-monogram as half-block art with per-row gradient colors.
+ * Uses transparent background (no bg color set — inherits terminal default).
+ *
+ * @returns {string[]} Array of ANSI-decorated terminal lines (10 lines)
+ */
+function renderLogoArt() {
+  const RST = "\x1b[0m";
   const lines = [];
-  for (let r = 0; r < rows.length; r += 2) {
-    const top = rows[r];
-    const bot = rows[r + 1];
+
+  for (let r = 0; r < LOGO_PIXELS.length; r += 2) {
+    const top = LOGO_PIXELS[r];
+    const bot = LOGO_PIXELS[r + 1];
+    const pairIdx = r / 2; // 0..7
+    const [tR, tG, tB] = LOGO_GRADIENT[pairIdx];
+
+    // Slightly darker shade for the lower pixel row (depth effect)
+    const bR = Math.max(0, tR - 15);
+    const bG = Math.max(0, tG - 15);
+    const bB = Math.max(0, tB - 15);
+
     let line = "";
     for (let c = 0; c < top.length; c++) {
-      const upper = top[c] ? B  : X;
-      const lower = bot[c] ? bg : Xb;
-      line += px(upper, lower);
+      const hasTop = top[c];
+      const hasBot = bot[c];
+
+      if (hasTop && hasBot) {
+        // Both filled: fg=top color, bg=bot color, print ▀
+        line += `\x1b[38;2;${tR};${tG};${tB}m\x1b[48;2;${bR};${bG};${bB}m▀${RST}`;
+      } else if (hasTop && !hasBot) {
+        // Only top filled: fg=top color, no bg (transparent), print ▀
+        line += `\x1b[38;2;${tR};${tG};${tB}m▀${RST}`;
+      } else if (!hasTop && hasBot) {
+        // Only bottom filled: fg=bot color, no bg, print ▄ (lower half block)
+        line += `\x1b[38;2;${bR};${bG};${bB}m▄${RST}`;
+      } else {
+        // Both empty: space
+        line += " ";
+      }
     }
     lines.push(line);
   }
   return lines;
-})();
+}
+
+/**
+ * Render text with a horizontal gradient (per-character 24-bit color).
+ *
+ * @param {string} text
+ * @param {[number,number,number]} start - Start RGB
+ * @param {[number,number,number]} end - End RGB
+ * @returns {string} ANSI-colored string
+ */
+function gradientText(text, start, end) {
+  const RST = "\x1b[0m";
+  let result = "\x1b[1m"; // bold
+  const len = text.length;
+  for (let i = 0; i < len; i++) {
+    if (text[i] === " ") {
+      result += " ";
+      continue;
+    }
+    const t = len === 1 ? 0 : i / (len - 1);
+    const r = Math.round(start[0] + (end[0] - start[0]) * t);
+    const g = Math.round(start[1] + (end[1] - start[1]) * t);
+    const b = Math.round(start[2] + (end[2] - start[2]) * t);
+    result += `\x1b[38;2;${r};${g};${b}m${text[i]}`;
+  }
+  return result + RST;
+}
 
 /**
  * Render the ForgeDock logo for display in the terminal.
  *
- * Returns a multi-line string. On truecolor TTY: F-monogram half-block art
- * followed by a caption line. On non-TTY / NO_COLOR / 256-color: plain text.
+ * On truecolor TTY: angular F-monogram with gradient, brand name with gradient
+ * text, and tagline — rendered side-by-side (logo left, text right).
+ * On non-TTY / NO_COLOR / 256-color: plain text.
  *
  * @param {object} [opts]
- * @param {string} [opts.version]  - Package version string (e.g. "1.0.8")
+ * @param {string} [opts.version]  - Package version string (e.g. "1.0.14")
  * @returns {string} Rendered logo string (may contain ANSI sequences)
  */
 export function renderLogo({ version = "" } = {}) {
@@ -1557,14 +1603,41 @@ export function renderLogo({ version = "" } = {}) {
     return `${versionStr}\n${tagline}`;
   }
 
-  // Truecolor: half-block art + caption
-  const lines = [
-    "",
-    ...LOGO_ART_TRUECOLOR.map((l) => "  " + l),
-    "",
-    `  \x1b[1m\x1b[38;2;88;166;255m${versionStr}\x1b[0m`,
-    `  \x1b[2m${tagline}\x1b[0m`,
-    "",
+  // Truecolor: side-by-side layout — logo on left, text on right
+  const art = renderLogoArt(); // 10 lines, each 18 chars wide (visible)
+  const pad = "  "; // gap between logo and text
+
+  // Text lines to appear to the right of the logo (vertically centered)
+  const brandLine = gradientText(
+    "FORGEDOCK",
+    [150, 215, 255], // ice blue
+    [35, 95, 190],   // deep blue
+  );
+  const versionLine = version
+    ? `\x1b[2m\x1b[38;2;88;166;255mv${version}\x1b[0m`
+    : "";
+  const taglineLine = `\x1b[2m${tagline}\x1b[0m`;
+
+  // Place text starting at row 3 (0-indexed) for vertical centering
+  // art has 10 rows; text block occupies rows 3-6
+  const textRows = [
+    "",           // row 0
+    "",           // row 1
+    "",           // row 2
+    brandLine,    // row 3: FORGEDOCK
+    versionLine,  // row 4: v1.0.14
+    "",           // row 5
+    taglineLine,  // row 6: tagline
+    "",           // row 7
+    "",           // row 8
+    "",           // row 9
   ];
+
+  const lines = [""];
+  for (let i = 0; i < art.length; i++) {
+    const textPart = textRows[i] || "";
+    lines.push(`  ${art[i]}${pad}${textPart}`);
+  }
+  lines.push("");
   return lines.join("\n");
 }

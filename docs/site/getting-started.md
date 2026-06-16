@@ -17,6 +17,27 @@ This tutorial gets you from zero to your first autonomous pipeline run in under 
 - [Claude Code](https://docs.anthropic.com/en/docs/claude-code) installed and authenticated
 - Git and GitHub CLI (`gh`) installed and authenticated (`gh auth login`)
 - Node.js 18 or higher
+- [`yq`](https://github.com/mikefarah/yq) — YAML parser used by all pipeline commands to read `forge.yaml`
+
+**Install `yq`:**
+
+```bash
+# macOS
+brew install yq
+
+# Ubuntu / Debian
+sudo apt-get install yq
+# or: sudo snap install yq
+
+# Windows
+winget install mikefarah.yq
+# or: choco install yq
+
+# Any platform (via Go)
+go install github.com/mikefarah/yq/v4@latest
+```
+
+> **Note:** Without `yq`, pipeline commands that read `forge.yaml` (including `/work-on`, `/scope`, `/orchestrate`, and most others) will fall back to defaults or skip config-driven steps silently.
 
 ---
 
