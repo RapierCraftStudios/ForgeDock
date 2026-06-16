@@ -2,6 +2,9 @@
 authority: recommended
 scope: templates
 applies_to: [work-on, review-pr]
+domain: pipeline
+last_validated: "YYYY-MM-DD"
+version: "0.0.0"
 ---
 
 # Pull Request Template

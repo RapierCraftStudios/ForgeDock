@@ -13,7 +13,7 @@ argument-hint: [issue number] [--repo GH_REPO] [--gh-flag GH_FLAG] [--base PR_BA
 **Agent model policy**: Default `model: "sonnet"`. If Sonnet is rate-limited, fall back to `model: "opus"`.
 **NEVER use plan mode (EnterPlanMode).**
 
-**CRITICAL: You MUST execute ALL phases B0–B6 in order. After each Skill() call returns, you MUST continue to the next phase. Do NOT skip phases B3 (context) or B4 (architect) — they post mandatory `FORGE:CONTEXT` and `FORGE:ARCHITECT` comments that the implement phase reads as its primary input. Skipping them degrades build quality.**
+**CRITICAL: You MUST execute ALL phases B0–B6 in order. After each Skill() call returns, you MUST continue to the next phase. Phases B3 (context) and B4 (architect) are skipped ONLY when COMPLEXITY_BAND: TRIVIAL (read from FORGE:FAST_PATH comment in Phase B0). For STANDARD and COMPLEX tasks they are NOT optional — skipping them degrades build quality.**
 
 ---
 
@@ -52,6 +52,16 @@ Extract from investigation report:
 - Root cause
 - Recommendation
 - Task type (Bug Fix / Feature / Refactor / Maintenance / UI/UX / Full-Stack)
+
+**Read COMPLEXITY_BAND** (from FORGE:FAST_PATH comment posted by Phase 3B):
+```bash
+COMPLEXITY_BAND=$(gh api repos/{GH_REPO}/issues/{NUMBER}/comments \
+  --jq '.[] | select(.body | contains("FORGE:FAST_PATH")) | .body' 2>/dev/null \
+  | sed -n 's/.*\*\*COMPLEXITY_BAND\*\*: \([A-Z_]*\).*/\1/p' | head -1)
+# Default to STANDARD if not found (conservative — runs full pipeline)
+COMPLEXITY_BAND="${COMPLEXITY_BAND:-STANDARD}"
+echo "COMPLEXITY_BAND: $COMPLEXITY_BAND"
+```
 
 ---
 
@@ -146,7 +156,7 @@ After posting the Builder Contract, extract the primary function/class names fro
 FUNCTION_NAMES=$(gh api repos/{GH_REPO}/issues/{NUMBER}/comments \
   --jq '.[] | select(.body | contains("FORGE:CONTRACT")) | .body' \
   | awk '/^### Deliverables/{p=1; next} /^### /{p=0} p' \
-  | grep -oP '`[A-Za-z_][A-Za-z0-9_]*`' \
+  | grep -oE '`[A-Za-z_][A-Za-z0-9_]*`' \
   | tr -d '`' \
   | sort -u \
   | tr '\n' ' ' \
@@ -161,9 +171,11 @@ If `FUNCTION_NAMES` is non-empty, it will be passed via `--functions` to the con
 
 ---
 
-## Phase B3: Context Gathering (MANDATORY Subcommand)
+## Phase B3: Context Gathering (MANDATORY for STANDARD/COMPLEX — skip for TRIVIAL)
 
-**This phase is NOT optional.** Always invoke it regardless of issue size or complexity. Do NOT invent skip heuristics (e.g. "FAST_PATH") — the context subcommand handles trivial cases gracefully and returns quickly.
+**Skip if COMPLEXITY_BAND: TRIVIAL** (read from FORGE:FAST_PATH in Phase B0) — do not invoke the context subcommand. Proceed directly to Phase B4.
+
+**For STANDARD and COMPLEX tasks**: Always invoke. Do NOT skip without a TRIVIAL COMPLEXITY_BAND.
 
 Invoke the context subcommand to surface historical review findings and bug patterns:
 
@@ -184,9 +196,11 @@ Skill("work-on:build:context", args="{NUMBER} --repo {GH_REPO} --gh-flag {GH_FLA
 
 ---
 
-## Phase B4: Architecture Planning (MANDATORY Subcommand)
+## Phase B4: Architecture Planning (MANDATORY for STANDARD/COMPLEX — skip for TRIVIAL)
 
-**This phase is NOT optional.** Always invoke it regardless of issue size or complexity. Do NOT invent skip heuristics — the architect subcommand handles simple changes gracefully and returns quickly. Even a 1-file fix benefits from cross-path consistency checks.
+**Skip if COMPLEXITY_BAND: TRIVIAL** (read from FORGE:FAST_PATH in Phase B0) — do not invoke the architect subcommand. Proceed directly to Phase B5.
+
+**For STANDARD and COMPLEX tasks**: Always invoke. Even a 1-file STANDARD fix benefits from cross-path consistency checks. Do NOT skip without a TRIVIAL COMPLEXITY_BAND.
 
 Invoke the architect subcommand to trace all affected code paths and produce an ordered implementation plan:
 
@@ -229,8 +243,17 @@ Skill("work-on:build:validate", args="{NUMBER} --repo {GH_REPO} --gh-flag {GH_FL
 Where `{CHANGED_FILES}` is the space-separated list of files changed by the implement subcommand (read from `IMPLEMENT_RESULT` or from the `<!-- FORGE:BUILDER -->` comment).
 
 **After subcommand returns**:
-- `VALIDATE_RESULT: gate_passed: true` → build complete, return `BUILD_RESULT: status: COMPLETE`
+- `VALIDATE_RESULT: gate_passed: true` → write checkpoint, then return `BUILD_RESULT: status: COMPLETE`
 - `VALIDATE_RESULT: gate_passed: false` → subcommand has already posted comment and added `needs-human` label; return `BUILD_RESULT: status: BLOCKED`
+
+**When gate_passed is true — write machine-readable phase checkpoint before returning (MANDATORY)**:
+```bash
+CHECKPOINT_TIMESTAMP=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+gh issue comment {NUMBER} {GH_FLAG} --body "<!-- FORGE:CHECKPOINT -->
+\`\`\`json
+{\"phase\": \"BUILD\", \"status\": \"COMPLETE\", \"next_phase\": \"REVIEW\", \"timestamp\": \"${CHECKPOINT_TIMESTAMP}\"}
+\`\`\`"
+```
 
 ---
 

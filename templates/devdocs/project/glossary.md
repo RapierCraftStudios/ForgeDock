@@ -2,6 +2,9 @@
 authority: reference
 scope: project
 applies_to: [work-on, review-pr, issue]
+domain: glossary
+last_validated: "YYYY-MM-DD"
+version: "0.0.0"
 ---
 
 # Domain Glossary

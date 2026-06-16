@@ -2,6 +2,9 @@
 authority: recommended
 scope: templates
 applies_to: [review-pr, work-on]
+domain: pipeline
+last_validated: "YYYY-MM-DD"
+version: "0.0.0"
 ---
 
 # Review-Finding Issue Template

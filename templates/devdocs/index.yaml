@@ -1,0 +1,162 @@
+# devdocs/index.yaml — Selective Loading Index
+#
+# Agents read this file (~400 tokens) first, then load only the docs that match
+# the current task's domain labels. This avoids loading all devdocs files when
+# only 1-2 are relevant — mirrors the stub+invoke pattern from token optimization.
+#
+# Usage:
+#   1. Add a domain key that matches your GitHub issue label (e.g. label "billing" → domain "billing")
+#   2. List the doc paths under that domain with authority and token_cost estimates
+#   3. Add always_load entries for docs that must be read regardless of domain
+#
+# token_cost: approximate number of tokens when the file is fully loaded.
+#             Used by agents to estimate context budget before loading.
+#
+# authority:
+#   required    — Agent MUST load this file for the domain (highest precedence)
+#   recommended — Agent SHOULD load this file (improves output quality)
+#   reference   — Agent MAY consult this file (informational only)
+#
+# Backward compatibility: if this file is absent, agents fall back to loading
+# ALL devdocs files with applies_to matching the current command (existing behavior).
+
+version: 2
+
+# ---------------------------------------------------------------------------
+# Domains
+# Each key maps directly to a GitHub issue label or keyword.
+# When an issue has label "billing", the "billing" domain docs are loaded.
+# When no labels match any domain, only always_load entries are loaded.
+# ---------------------------------------------------------------------------
+
+domains:
+  pipeline:
+    description: "ForgeDock pipeline conventions, phase sequence, lane routing, FORGE annotations"
+    docs:
+      - path: agent/using-forgedock.md
+        authority: required
+        token_cost: 1200
+
+  github:
+    description: "GitHub CLI usage, branch naming, label management, PR conventions"
+    docs:
+      - path: agent/using-github.md
+        authority: required
+        token_cost: 900
+
+  architecture:
+    description: "System architecture, domain boundaries, deployment model, open-core strategy"
+    docs:
+      - path: project/architecture.md
+        authority: required
+        token_cost: 800
+
+  conventions:
+    description: "Coding standards, anti-patterns, testing requirements, commit discipline"
+    docs:
+      - path: project/conventions.md
+        authority: required
+        token_cost: 1100
+
+  stack:
+    description: "Tech stack reference — frameworks, services, languages, infrastructure"
+    docs:
+      - path: project/stack.md
+        authority: recommended
+        token_cost: 600
+
+  glossary:
+    description: "Domain terminology, business logic terms, abbreviations"
+    docs:
+      - path: project/glossary.md
+        authority: reference
+        token_cost: 500
+
+  billing:
+    description: "Payment processing, financial integrity, Stripe integration, subscription logic"
+    docs:
+      - path: project/architecture.md
+        authority: required
+        token_cost: 800
+      - path: project/conventions.md
+        authority: recommended
+        token_cost: 1100
+
+  auth:
+    description: "Authentication, authorization, session management, JWT, permissions"
+    docs:
+      - path: project/architecture.md
+        authority: required
+        token_cost: 800
+      - path: project/conventions.md
+        authority: recommended
+        token_cost: 1100
+
+  database:
+    description: "Database schema, migrations, query patterns, ORM usage"
+    docs:
+      - path: project/stack.md
+        authority: required
+        token_cost: 600
+      - path: project/conventions.md
+        authority: recommended
+        token_cost: 1100
+
+  infra:
+    description: "Infrastructure, deployment, Docker, CI/CD, environment configuration"
+    docs:
+      - path: project/stack.md
+        authority: required
+        token_cost: 600
+      - path: project/architecture.md
+        authority: recommended
+        token_cost: 800
+
+  security:
+    description: "Security audit, vulnerability patterns, secrets management, access control"
+    docs:
+      - path: project/conventions.md
+        authority: required
+        token_cost: 1100
+      - path: project/architecture.md
+        authority: recommended
+        token_cost: 800
+
+  frontend:
+    description: "Frontend/UI/UX, component architecture, state management, API integration"
+    docs:
+      - path: project/stack.md
+        authority: required
+        token_cost: 600
+      - path: project/conventions.md
+        authority: recommended
+        token_cost: 1100
+
+  templates:
+    description: "Issue templates, PR templates, commit conventions, review-finding structure"
+    docs:
+      - path: templates/issue.md
+        authority: reference
+        token_cost: 200
+      - path: templates/pull-request.md
+        authority: reference
+        token_cost: 200
+      - path: templates/commit-convention.md
+        authority: reference
+        token_cost: 300
+      - path: templates/review-finding.md
+        authority: reference
+        token_cost: 200
+
+# ---------------------------------------------------------------------------
+# Always Load
+# These entries are loaded for EVERY task, regardless of domain label match.
+# Use for binding directives that override all other sources.
+# Keep this list short — every entry adds tokens to every task.
+# ---------------------------------------------------------------------------
+
+always_load:
+  - path: project/custom-instructions.md
+    authority: required
+    reason: "HIGHEST PRECEDENCE — binding directives that override all other sources"
+    token_cost: 500

@@ -11,6 +11,23 @@ argument-hint: [issue number] [affected_files...] [--functions function_names...
 
 ---
 
+## COMPLEXITY_BAND Guard (check BEFORE all phases)
+
+Read COMPLEXITY_BAND from the `<!-- FORGE:FAST_PATH -->` comment on the issue:
+
+```bash
+COMPLEXITY_BAND=$(gh api repos/{GH_REPO}/issues/{NUMBER}/comments \
+  --jq '.[] | select(.body | contains("FORGE:FAST_PATH")) | .body' 2>/dev/null \
+  | sed -n 's/.*\*\*COMPLEXITY_BAND\*\*: \([A-Z_]*\).*/\1/p' | head -1)
+COMPLEXITY_BAND="${COMPLEXITY_BAND:-STANDARD}"
+```
+
+**If COMPLEXITY_BAND: TRIVIAL** → skip all phases (C-1 through C4), post NO comment, return empty briefing to caller immediately. Do not query GitHub, do not read files. This is not an error — trivial single-file changes have no institutional memory to surface. <!-- Added: forge#679 -->
+
+**If COMPLEXITY_BAND: STANDARD or COMPLEX** → proceed to Phase C-1 below.
+
+---
+
 ## Mission
 
 Surface what went wrong in this area before the builder writes a single line of code. The builder starts with the investigator report and contract — this step adds institutional memory: what did review agents catch last time someone touched these files, what bugs recurred, what other paths must stay consistent. When prior investigation Gists are linked in the issue body, fetch and summarize them so the builder has cross-issue context without manual lookups. When a milestone-level index Gist exists, use it to discover all investigation Gists for the milestone — providing full cross-issue context from a single URL. <!-- Updated: forge#341 -->
@@ -75,13 +92,106 @@ fi
 
 ### Step 1: Enumerate and filter applicable files
 
-Find all `.md` files under `DEVDOCS_PATH`, parse YAML frontmatter, keep those with `work-on` in `applies_to`. Sort by authority (`required` first, then `recommended`, then `reference`).
+**Index-first path** (preferred when `index.yaml` exists): Read the lightweight index, extract issue labels to filter by domain, load only matching docs. Falls back to O(N) enumerate when index is absent.
 
 ```bash
 DEVDOCS_APPLICABLE=""  # list of paths that apply
+INDEX_PATH="${DEVDOCS_PATH}/index.yaml"
 
-if [ -n "$DEVDOCS_PATH" ]; then
-  # Find all markdown files recursively
+# --- Read devdocs.index_path override from forge.yaml (optional) ---
+if [ -f "$FORGE_YAML_PATH" ]; then
+  INDEX_PATH_OVERRIDE=$(grep -A5 '^devdocs:' "$FORGE_YAML_PATH" \
+    | grep '^\s*index_path:' \
+    | head -1 \
+    | sed 's/.*index_path:\s*//' \
+    | tr -d '"'"'"' \
+    | tr -d '[:space:]')
+  if [ -n "$INDEX_PATH_OVERRIDE" ]; then
+    # Resolve relative to REPO_PATH if not absolute
+    case "$INDEX_PATH_OVERRIDE" in
+      /*) INDEX_PATH="$INDEX_PATH_OVERRIDE" ;;
+      *)  INDEX_PATH="{REPO_PATH}/${INDEX_PATH_OVERRIDE}" ;;
+    esac
+  fi
+fi
+
+if [ -n "$DEVDOCS_PATH" ] && [ -f "$INDEX_PATH" ]; then
+  # --- Index-first loading path ---
+  echo "Devdocs index found at ${INDEX_PATH} — using selective domain loading"
+
+  # Read issue labels to determine domain(s)
+  ISSUE_LABELS=$(gh issue view {NUMBER} -R {GH_REPO} --json labels \
+    --jq '[.labels[].name] | join(" ")' 2>/dev/null || echo "")
+  echo "Issue labels: ${ISSUE_LABELS:-none}"
+
+  # Read index content
+  INDEX_CONTENT=$(cat "$INDEX_PATH" 2>/dev/null || echo "")
+
+  # Extract always_load paths (lines with "path:" under "always_load:" block)
+  ALWAYS_LOAD_PATHS=$(echo "$INDEX_CONTENT" \
+    | awk '/^always_load:/,/^[a-z]/' \
+    | grep '^\s*-\s*path:' \
+    | sed 's/.*path:\s*//' \
+    | tr -d '"'"'"' \
+    | tr -d '[:space:]')
+
+  # Extract domain blocks matching any issue label keyword
+  DOMAIN_PATHS=""
+  for label in $ISSUE_LABELS; do
+    # Strip workflow:, priority:, review-finding prefixes — use bare keyword
+    KEYWORD=$(echo "$label" | sed 's/^workflow://; s/^priority://; s/^review-finding$//')
+    [ -z "$KEYWORD" ] && continue
+    # Sanitize KEYWORD before AWK injection — strip chars that would break awk regex delimiters
+    SAFE_KEYWORD=$(printf '%s' "$KEYWORD" | tr -cd 'a-zA-Z0-9_-')
+    [ -z "$SAFE_KEYWORD" ] && continue
+
+    # Find the domain block matching this keyword, extract its doc paths
+    BLOCK_PATHS=$(echo "$INDEX_CONTENT" \
+      | awk "/^  ${SAFE_KEYWORD}:/{found=1; next} found && /^  [a-z]/{found=0} found && /^\s*-\s*path:/{print}" \
+      | sed 's/.*path:\s*//' \
+      | tr -d '"'"'"' \
+      | tr -d '[:space:]')
+
+    if [ -n "$BLOCK_PATHS" ]; then
+      echo "Domain '${SAFE_KEYWORD}' matched — adding docs: $(echo "$BLOCK_PATHS" | tr '\n' ' ')"
+      DOMAIN_PATHS="${DOMAIN_PATHS}${BLOCK_PATHS}"$'\n'
+    fi
+  done
+
+  # Combine always_load + domain paths (deduplicate)
+  ALL_PATHS=$(printf "%s\n%s" "$ALWAYS_LOAD_PATHS" "$DOMAIN_PATHS" \
+    | grep -v '^$' | sort -u)
+
+  # When no domain labels matched, load only authority:required files from always_load
+  if [ -z "$DOMAIN_PATHS" ]; then
+    echo "No domain labels matched index — loading always_load entries only"
+    ALL_PATHS="$ALWAYS_LOAD_PATHS"
+  fi
+
+  # Build DEVDOCS_APPLICABLE list with sort keys
+  while IFS= read -r rel_path; do
+    [ -z "$rel_path" ] && continue
+    ABS_PATH="${DEVDOCS_PATH}/${rel_path}"
+    [ -f "$ABS_PATH" ] || { echo "WARN: index references missing file: ${rel_path} — skipping"; continue; }
+
+    # Extract authority from frontmatter for sort key
+    FRONTMATTER=$(awk '/^---/{c++; if(c==1){next} if(c==2){exit}} c==1{print}' "$ABS_PATH" 2>/dev/null)
+    AUTHORITY=$(echo "$FRONTMATTER" | grep 'authority:' | head -1 | sed 's/.*authority:\s*//' | tr -d ' ')
+    case "$AUTHORITY" in
+      required)    SORT_KEY="1" ;;
+      recommended) SORT_KEY="2" ;;
+      reference)   SORT_KEY="3" ;;
+      *)           SORT_KEY="4" ;;
+    esac
+    DEVDOCS_APPLICABLE="${DEVDOCS_APPLICABLE}${SORT_KEY}|${ABS_PATH}"$'\n'
+  done <<< "$ALL_PATHS"
+
+  DEVDOCS_APPLICABLE=$(printf "%s" "$DEVDOCS_APPLICABLE" | sort | cut -d'|' -f2-)
+
+elif [ -n "$DEVDOCS_PATH" ]; then
+  # --- Fallback: O(N) enumerate (backward compatible — no index.yaml present) ---
+  echo "No index.yaml found at ${INDEX_PATH} — falling back to full enumerate (backward compatible)"
+
   while IFS= read -r -d '' mdfile; do
     # Extract frontmatter block (between first two --- markers)
     FRONTMATTER=$(awk '/^---/{c++; if(c==1){next} if(c==2){exit}} c==1{print}' "$mdfile" 2>/dev/null)
@@ -96,16 +206,16 @@ if [ -n "$DEVDOCS_PATH" ]; then
         reference)   SORT_KEY="3" ;;
         *)           SORT_KEY="4" ;;
       esac
-      DEVDOCS_APPLICABLE="${DEVDOCS_APPLICABLE}${SORT_KEY}|${mdfile}\n"
+      DEVDOCS_APPLICABLE="${DEVDOCS_APPLICABLE}${SORT_KEY}|${mdfile}"$'\n'
     fi
   done < <(find "$DEVDOCS_PATH" -name "*.md" -print0 2>/dev/null)
 
   # Sort by authority key and extract paths
-  DEVDOCS_APPLICABLE=$(printf "$DEVDOCS_APPLICABLE" | sort | cut -d'|' -f2-)
+  DEVDOCS_APPLICABLE=$(printf "%s" "$DEVDOCS_APPLICABLE" | sort | cut -d'|' -f2-)
 fi
 
 if [ -z "$DEVDOCS_APPLICABLE" ]; then
-  echo "No devdocs files with 'applies_to: work-on' found — skipping Phase C-1 content read"
+  echo "No applicable devdocs files found — skipping Phase C-1 content read"
 fi
 ```
 
@@ -165,26 +275,26 @@ INDEX_GIST_URLS=""
 
 # Check issue body for milestone index annotation
 MILESTONE_INDEX_URL=$(echo "$ISSUE_BODY" \
-  | grep -oP '(?<=<!-- FORGE:MILESTONE_INDEX: )https://[^ ]+(?= -->)' \
+  | sed -n 's/.*<!-- FORGE:MILESTONE_INDEX: \(https:\/\/[^ ]*\) -->.*/\1/p' \
   | head -1)
 
 # If not in issue body, check milestone description
 if [ -z "$MILESTONE_INDEX_URL" ] && [ -n "$MILESTONE_NUM" ]; then
   MILESTONE_DESC=$(gh api repos/{GH_REPO}/milestones/${MILESTONE_NUM} --jq '.description // ""' 2>/dev/null)
   MILESTONE_INDEX_URL=$(echo "$MILESTONE_DESC" \
-    | grep -oP '(?<=<!-- FORGE:MILESTONE_INDEX: )https://[^ ]+(?= -->)' \
+    | sed -n 's/.*<!-- FORGE:MILESTONE_INDEX: \(https:\/\/[^ ]*\) -->.*/\1/p' \
     | head -1)
 fi
 
 # If found, fetch the index and extract individual Gist URLs from table rows
 if [ -n "$MILESTONE_INDEX_URL" ]; then
-  INDEX_GIST_ID=$(echo "$MILESTONE_INDEX_URL" | grep -oP '[a-f0-9]{20,}' | tail -1)
+  INDEX_GIST_ID=$(echo "$MILESTONE_INDEX_URL" | grep -oE '[a-f0-9]{20,}' | tail -1)
   if [ -n "$INDEX_GIST_ID" ]; then
     INDEX_CONTENT=$(timeout 15 gh gist view "$INDEX_GIST_ID" --raw 2>/dev/null)
     if [ -n "$INDEX_CONTENT" ]; then
       # Extract Gist URLs from table rows (format: | ... | https://gist.github.com/... | ... |)
       INDEX_GIST_URLS=$(echo "$INDEX_CONTENT" \
-        | grep -oP 'https://gist\.github\.com/[a-f0-9/]+' \
+        | grep -oE 'https://gist\.github\.com/[a-f0-9/]+' \
         | head -10)
       echo "Milestone index fetched: found $(echo "$INDEX_GIST_URLS" | wc -l) investigation Gist(s)"
     else
@@ -198,7 +308,7 @@ fi
 
 ```bash
 GIST_URLS=$(echo "$ISSUE_BODY" \
-  | grep -oP '(?<=<!-- FORGE:PRIOR_GIST: )https://[^ ]+(?= -->)' \
+  | sed -n 's/.*<!-- FORGE:PRIOR_GIST: \(https:\/\/[^ ]*\) -->.*/\1/p' \
   | head -5)
 
 # Merge with any URLs discovered from milestone index (deduplicate)
@@ -223,7 +333,7 @@ GIST_SUMMARIES=""
 
 for url in $GIST_URLS; do
   # Extract Gist ID from URL (last path segment, strip any trailing slash)
-  GIST_ID=$(echo "$url" | grep -oP '[a-f0-9]{20,}' | tail -1)
+  GIST_ID=$(echo "$url" | grep -oE '[a-f0-9]{20,}' | tail -1)
 
   if [ -z "$GIST_ID" ]; then
     echo "WARNING: Could not extract Gist ID from URL: $url — skipping"
@@ -241,10 +351,10 @@ for url in $GIST_URLS; do
   fi
 
   # Extract key sections for summary (~2K chars target per Gist)
-  VERDICT=$(echo "$GIST_CONTENT" | grep -oP '(?<=verdict: )\w+' | head -1)
-  TASK_TYPE=$(echo "$GIST_CONTENT" | grep -oP '(?<=task_type: ).+' | head -1)
-  SEVERITY=$(echo "$GIST_CONTENT" | grep -oP '(?<=severity: )\w+' | head -1)
-  SOURCE_ISSUE=$(echo "$GIST_CONTENT" | grep -oP '(?<=issue: )\d+' | head -1)
+  VERDICT=$(echo "$GIST_CONTENT" | sed -n 's/.*verdict: \([A-Za-z_]*\).*/\1/p' | head -1)
+  TASK_TYPE=$(echo "$GIST_CONTENT" | sed -n 's/.*task_type: \(.*\)/\1/p' | head -1)
+  SEVERITY=$(echo "$GIST_CONTENT" | sed -n 's/.*severity: \([A-Za-z_]*\).*/\1/p' | head -1)
+  SOURCE_ISSUE=$(echo "$GIST_CONTENT" | sed -n 's/.*issue: \([0-9]*\).*/\1/p' | head -1)
 
   # Extract structured sections: Root Cause, Recommendation, Affected Files
   ROOT_CAUSE=$(echo "$GIST_CONTENT" \
@@ -318,7 +428,7 @@ Mine git log for commit messages referencing issues, then fetch those issues:
 ```bash
 # Step 1: find issue numbers from git history on affected files
 git log --oneline -30 -- {AFFECTED_FILES} \
-  | grep -oP '#\d+' \
+  | grep -oE '#[0-9]+' \
   | sort -u \
   | head -8
 
@@ -448,6 +558,7 @@ gh issue comment {NUMBER} -R {GH_REPO} --body "<!-- FORGE:CONTEXT -->
 ## Skip Conditions
 
 Skip this entire step (post nothing, return empty briefing) if:
+- **COMPLEXITY_BAND: TRIVIAL** — checked via FORGE:FAST_PATH comment at entry (see guard above) <!-- Primary skip path: forge#679 -->
 - Issue is a 1-file config or docs edit with no code logic
 - The affected files have zero git history (new files being created)
 - `{AFFECTED_FILES}` is empty (investigation produced no file list)

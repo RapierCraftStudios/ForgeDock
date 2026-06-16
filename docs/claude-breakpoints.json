@@ -1,0 +1,47 @@
+{
+  "_comment": "claude-breakpoints.json — structured registry of known Claude Code version breakpoints. Each entry documents a version where Claude Code changed behavior that ForgeDock depends on, introduced a feature ForgeDock leverages, or broke a capability ForgeDock uses. Format is append-only and human-editable. Consumers: detectClaudeVersion() (issue #680), /compat-audit (issue #686), forgedock doctor (issue #682).",
+  "schema": {
+    "version": "Claude Code version string where the breakpoint was introduced (e.g. '2.1.157')",
+    "type": "Category of change: 'feature' | 'behavior_change' | 'compatibility' | 'deprecation'",
+    "description": "Human-readable description of what changed in Claude Code at this version",
+    "forgedock_impact": "How this change affects ForgeDock — what commands, scripts, or behaviors are affected",
+    "severity": "Impact level if a user is on this version or older: 'high' | 'medium' | 'low' | 'info'"
+  },
+  "breakpoints": [
+    {
+      "version": "2.1.157",
+      "type": "behavior_change",
+      "description": "EnterWorktree now unlocks worktrees automatically when the agent session finishes",
+      "forgedock_impact": "ForgeDock no longer needs --force on worktree cleanup commands. The cleanup phase in work-on.md can use standard git worktree remove without the force flag.",
+      "severity": "low"
+    },
+    {
+      "version": "2.1.157",
+      "type": "feature",
+      "description": "Plugins in .claude/skills are auto-loaded without requiring marketplace installation",
+      "forgedock_impact": "Symlink-based install (the original forgedock install method) remains valid but is no longer required for skill discovery. The stub file install pattern introduced in #619 is the preferred approach and works the same way.",
+      "severity": "info"
+    },
+    {
+      "version": "2.1.163",
+      "type": "compatibility",
+      "description": "requiredMinimumVersion and requiredMaximumVersion managed settings added for enterprise deployments",
+      "forgedock_impact": "ForgeDock's own version check (forgedock doctor, #682) is the OSS equivalent of this enterprise feature. No conflict — enterprise users with managed settings may have stricter version constraints than ForgeDock requires.",
+      "severity": "info"
+    },
+    {
+      "version": "2.1.172",
+      "type": "feature",
+      "description": "Sub-agents can spawn sub-agents up to 5 levels deep (increased nesting depth)",
+      "forgedock_impact": "ForgeDock's orchestrate.md uses multi-agent orchestration. The 5-level nesting limit is compatible with ForgeDock's orchestration patterns. No changes needed.",
+      "severity": "info"
+    },
+    {
+      "version": "2.1.154",
+      "type": "compatibility",
+      "description": "Native /workflows dynamic workflows introduced as a built-in Claude Code feature",
+      "forgedock_impact": "Parallel to ForgeDock's orchestrate.md. ForgeDock's approach adds GitHub persistence (FORGE: annotations, label-state machine, compaction resilience) that native /workflows lacks. Both can coexist — ForgeDock is the orchestration layer with state, not a replacement for native workflows.",
+      "severity": "info"
+    }
+  ]
+}
