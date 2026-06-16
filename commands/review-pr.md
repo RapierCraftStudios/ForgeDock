@@ -124,6 +124,9 @@ while [ "$MERGE_HEALTH" = "UNKNOWN" ] && [ "$MERGE_RETRY" -lt 3 ]; do
 done
 # MERGE_HEALTH: MERGEABLE | CONFLICTING | UNKNOWN (still async after retries)
 # MERGE_HEALTH_STATE: CLEAN | DIRTY | BLOCKED | UNSTABLE | UNKNOWN
+
+# Resolve repo name early — used in Phases 5, 6, 8B, 9A (clean-review skip path bypasses Phase 6A) <!-- Added: forge#820 -->
+REPO=$(gh repo view --json nameWithOwner --jq '.nameWithOwner')
 ```
 
 ### 1B: Classify
@@ -731,7 +734,6 @@ If synthesis needed, launch a `general-purpose` Task (model: resolved per policy
 ### 6A: Extract Findings
 
 ```bash
-REPO=$(gh repo view --json nameWithOwner --jq '.nameWithOwner')
 HAS_SYNTHESIS=$(gh api "repos/${REPO}/issues/${PR_NUMBER}/comments" --jq '.[].body' | grep -c 'REVIEW-FINDINGS-SYNTHESIZED-START' || echo 0)
 
 if [ "$HAS_SYNTHESIS" -gt 0 ]; then
