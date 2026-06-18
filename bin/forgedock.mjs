@@ -566,9 +566,18 @@ function injectManagedBlock(filePath) {
           "[\\s\\S]*?" +
           escapeRegExp(CLAUDE_BLOCK_END),
       );
+      if (!blockRegex.test(existing)) {
+        // Should not happen: both markers were confirmed above via includes() and
+        // indexOf() ordering. Guard against silent misclassification — if the regex
+        // somehow fails to match, replaced === existing would incorrectly return
+        // 'unchanged' instead of surfacing the broken state.
+        throw new Error(
+          `injectManagedBlock: regex failed to match markers in ${filePath}`,
+        );
+      }
       const replaced = existing.replace(blockRegex, managed);
       if (replaced === existing) {
-        // Regex matched but content was already identical
+        // Content between markers was already identical to the managed block
         return "unchanged";
       }
       atomicWriteFile(filePath, replaced);
