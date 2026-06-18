@@ -204,7 +204,7 @@ function stripJsonc(raw) {
     if (ch === "/" && i + 1 < len && raw[i + 1] === "*") {
       i += 2;
       while (i + 1 < len && !(raw[i] === "*" && raw[i + 1] === "/")) i++;
-      i += 2;
+      if (i + 1 < len) i += 2; // only advance past */ if terminator was found
       continue;
     }
 
@@ -240,7 +240,7 @@ function stripJsonc(raw) {
         if (j + 1 < len && raw[j] === "/" && raw[j + 1] === "*") {
           j += 2;
           while (j + 1 < len && !(raw[j] === "*" && raw[j + 1] === "/")) j++;
-          j += 2;
+          if (j + 1 < len) j += 2; // only advance past */ if terminator was found
           advanced = true;
         }
       }
