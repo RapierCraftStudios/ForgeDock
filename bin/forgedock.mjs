@@ -754,8 +754,12 @@ function removeForgeHomeFromProfile(profilePath) {
   // Step 1: Remove the 2-line ForgeDock block (comment + export), preceded
   // by an optional leading blank line that install() inserts.
   // The \r? handles profiles with CRLF line endings.
+  // The value pattern (?:[^"\\]|\\.)*  matches a double-quoted shell string
+  // that may contain backslash-escape sequences (e.g. \" or \\) written by
+  // shellEscapeDoubleQuotedPath(). The simpler [^"]* would stop prematurely
+  // at the escaped-quote character inside \", failing to match the full line.
   let cleaned = content.replace(
-    /\r?\n[ \t]*# ForgeDock — autonomous development pipeline\r?\nexport FORGE_HOME="[^"]*"\r?\n/g,
+    /\r?\n[ \t]*# ForgeDock — autonomous development pipeline\r?\nexport FORGE_HOME="(?:[^"\\]|\\.)*"\r?\n/g,
     "\n",
   );
 
