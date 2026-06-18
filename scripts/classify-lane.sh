@@ -71,13 +71,6 @@ MILESTONE_TITLE=$(gh issue view "$ISSUE_NUMBER" "${GH_REPO_ARGS[@]}" --json mile
 }
 rm -f "$GH_STDERR_TMP"
 
-# Export universal script environment so per-repo scripts can call back into universal scripts.
-# Per-repo scripts (.forgedock/scripts/{operation}.sh) source these to delegate to universal ones.
-export FORGEDOCK_SCRIPTS
-FORGEDOCK_SCRIPTS="$(cd "$(dirname "$0")" && pwd)"
-export FORGEDOCK_HOME
-FORGEDOCK_HOME="$(cd "$(dirname "$0")/.." && pwd)"
-
 # Resolve staging branch name from forge.yaml (branches.staging), defaulting to "staging".
 # Uses yq if available; falls back gracefully when forge.yaml is absent or yq is not installed.
 STAGING_BRANCH=$(yq '.branches.staging // "staging"' forge.yaml 2>/dev/null || echo 'staging')
