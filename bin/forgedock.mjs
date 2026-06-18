@@ -1158,8 +1158,17 @@ async function uninstall() {
           console.log(`  ${RED}Removed${RESET}: ${rel}`);
           removed++;
         }
+      } else if (
+        readFileSync(file, "utf-8") === readFileSync(target, "utf-8")
+      ) {
+        // Regular file installed by ForgeDock in copy mode — content matches.
+        const { unlink } = await import("fs/promises");
+        await unlink(target);
+        console.log(`  ${RED}Removed${RESET}: ${rel}`);
+        removed++;
       }
-    } catch {
+    } catch (err) {
+      if (err.code !== "ENOENT") throw err;
       // Doesn't exist — nothing to do
     }
   }
