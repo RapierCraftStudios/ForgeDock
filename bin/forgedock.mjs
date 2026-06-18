@@ -1036,7 +1036,12 @@ async function install() {
               // Either not present, or set to a stale path — refresh it.
               if (content.includes("FORGE_HOME")) {
                 // Strip the old block before appending the updated one.
-                removeForgeHomeFromProfile(profile);
+                const removeResult = removeForgeHomeFromProfile(profile);
+                if (removeResult === "failed") {
+                  // Removal failed — old export still present. Skip append to
+                  // avoid writing a duplicate FORGE_HOME export. (ref: forge#846)
+                  continue;
+                }
               }
               appendFileSync(
                 profile,
