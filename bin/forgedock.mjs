@@ -448,6 +448,146 @@ async function removeSessionStartHook() {
 }
 
 // ---------------------------------------------------------------------------
+// Playwright MCP — mcp_servers.json helpers
+// ---------------------------------------------------------------------------
+
+/**
+ * Path to the user-level Claude Code MCP servers configuration file.
+ * This is where user-scoped MCP server entries are written/removed.
+ */
+const CLAUDE_MCP_PATH = join(HOME, ".claude", "mcp_servers.json");
+
+/**
+ * The key used to identify the ForgeDock-managed Playwright MCP entry.
+ * Using a stable key lets idempotency detection work across reinstalls.
+ */
+const PLAYWRIGHT_MCP_KEY = "playwright";
+
+/**
+ * The MCP server entry written for Playwright.
+ * Uses `npx` so it works without a global install — Node's npx resolves
+ * the package on demand. `@playwright/mcp@latest` always fetches the
+ * latest published version.
+ */
+const PLAYWRIGHT_MCP_ENTRY = {
+  command: "npx",
+  args: ["@playwright/mcp@latest"],
+};
+
+/**
+ * Read ~/.claude/mcp_servers.json, returning a parsed object.
+ * Returns `{"mcpServers": {}}` if the file does not exist.
+ * Throws if the file exists but cannot be parsed as JSON.
+ *
+ * @returns {object}
+ */
+function readMcpServers() {
+  try {
+    const raw = readFileSync(CLAUDE_MCP_PATH, "utf-8");
+    return JSON.parse(raw);
+  } catch (err) {
+    if (err.code === "ENOENT") return { mcpServers: {} };
+    throw err;
+  }
+}
+
+/**
+ * Atomically write an MCP servers object to ~/.claude/mcp_servers.json.
+ * Uses a .tmp sibling + renameSync to avoid partial writes.
+ * Cleans up the tmp file on failure. (ref: forge#813)
+ *
+ * @param {object} data
+ */
+function writeMcpServers(data) {
+  atomicWriteFile(CLAUDE_MCP_PATH, JSON.stringify(data, null, 2) + "\n");
+}
+
+/**
+ * Detect whether `npx` is available in PATH.
+ * Uses `which` on Unix and `where` on Windows; returns false if neither
+ * is found or if both commands fail (e.g., PATH too narrow in nvm shells).
+ *
+ * @returns {boolean}
+ */
+function detectNpx() {
+  // Try Unix `which` first; fall back to Windows `where`.
+  for (const [cmd, arg] of [["which", "npx"], ["where", "npx"]]) {
+    try {
+      execFileSync(cmd, [arg], { stdio: ["ignore", "pipe", "ignore"] });
+      return true;
+    } catch {
+      // Try next
+    }
+  }
+  return false;
+}
+
+/**
+ * Register the Playwright MCP server in ~/.claude/mcp_servers.json
+ * idempotently. Does not modify any existing server entries unrelated
+ * to ForgeDock's Playwright key.
+ *
+ * Returns:
+ *   'installed'       — entry was newly added
+ *   'already-present' — entry was already there (idempotent)
+ *   'failed'          — an error occurred (non-fatal; install continues)
+ *
+ * @returns {'installed' | 'already-present' | 'failed'}
+ */
+function installPlaywrightMcp() {
+  try {
+    const data = readMcpServers();
+
+    // Ensure mcpServers object exists
+    if (!data.mcpServers || typeof data.mcpServers !== "object") {
+      data.mcpServers = {};
+    }
+
+    if (PLAYWRIGHT_MCP_KEY in data.mcpServers) {
+      return "already-present";
+    }
+
+    data.mcpServers[PLAYWRIGHT_MCP_KEY] = PLAYWRIGHT_MCP_ENTRY;
+    writeMcpServers(data);
+    return "installed";
+  } catch {
+    return "failed";
+  }
+}
+
+/**
+ * Remove the ForgeDock Playwright MCP entry from ~/.claude/mcp_servers.json
+ * idempotently. Only removes the entry written by installPlaywrightMcp().
+ * All other server entries are preserved.
+ *
+ * Returns:
+ *   'removed'     — entry was found and removed
+ *   'not-present' — entry was not in the file (already clean)
+ *   'failed'      — an error occurred (non-fatal; uninstall continues)
+ *
+ * @returns {'removed' | 'not-present' | 'failed'}
+ */
+function removePlaywrightMcp() {
+  try {
+    const data = readMcpServers();
+
+    if (
+      !data.mcpServers ||
+      typeof data.mcpServers !== "object" ||
+      !(PLAYWRIGHT_MCP_KEY in data.mcpServers)
+    ) {
+      return "not-present";
+    }
+
+    delete data.mcpServers[PLAYWRIGHT_MCP_KEY];
+    writeMcpServers(data);
+    return "removed";
+  } catch {
+    return "failed";
+  }
+}
+
+// ---------------------------------------------------------------------------
 // Version + splash — read package.json version and render branded logo
 // ---------------------------------------------------------------------------
 
@@ -1082,6 +1222,49 @@ async function install() {
       },
     },
     {
+      label: "Registering Playwright MCP",
+      async run(step) {
+        // Check whether npx is available before attempting registration.
+        // Playwright MCP runs via `npx @playwright/mcp@latest` — without npx
+        // the server cannot start even if the entry is written. (ref: #873)
+        if (!detectNpx()) {
+          step.skip(
+            "npx not found — install Node.js (https://nodejs.org) then re-run: npx forgedock install",
+          );
+          return;
+        }
+
+        const mcpResult = installPlaywrightMcp();
+        if (mcpResult === "already-present") {
+          step.skip("already registered");
+          return;
+        }
+        if (mcpResult === "failed") {
+          // Non-fatal — installation continues without Playwright MCP
+          step.note(
+            "could not write ~/.claude/mcp_servers.json — re-run: npx forgedock install",
+          );
+          return;
+        }
+
+        // Lightweight verification: confirm the package is reachable.
+        // Non-fatal — if the network is offline or npx cache is cold this
+        // should not block the rest of the install.
+        try {
+          execFileSync("npx", ["--yes", "@playwright/mcp@latest", "--version"], {
+            stdio: ["ignore", "pipe", "ignore"],
+            timeout: 10000,
+          });
+          step.note("registered and verified");
+        } catch {
+          // Registered but could not verify — still functional on next session start.
+          step.note(
+            "registered (verification skipped — run: npx @playwright/mcp@latest --version to verify manually)",
+          );
+        }
+      },
+    },
+    {
       label: "Generating forge.yaml",
       async run(step) {
         // Auto-generate forge.yaml if missing — no second command needed.
@@ -1246,6 +1429,23 @@ async function uninstall() {
   } else {
     console.log(
       `  ${YELLOW}⚠${RESET}  Could not update ~/.claude/settings.json — remove the hook manually.`,
+    );
+  }
+  console.log("");
+
+  // Remove the Playwright MCP entry from ~/.claude/mcp_servers.json
+  const mcpRemoveResult = removePlaywrightMcp();
+  if (mcpRemoveResult === "removed") {
+    console.log(
+      `  ${GREEN}✔${RESET}  Removed Playwright MCP from ${CYAN}~/.claude/mcp_servers.json${RESET}`,
+    );
+  } else if (mcpRemoveResult === "not-present") {
+    console.log(
+      `  ✔  Playwright MCP already absent from ~/.claude/mcp_servers.json`,
+    );
+  } else {
+    console.log(
+      `  ${YELLOW}⚠${RESET}  Could not update ~/.claude/mcp_servers.json — remove the "playwright" entry manually.`,
     );
   }
   console.log("");
@@ -2260,6 +2460,31 @@ async function doctor() {
       fail(
         "FORGE_HOME env var",
         `Add to your shell profile: export FORGE_HOME="${FORGE_HOME}"  then restart your shell (or run: source ~/.bashrc)`,
+      );
+    }
+  }
+
+  // ── Check 9: Playwright MCP registered ────────────────────────────────────
+  {
+    try {
+      const mcpData = readMcpServers();
+      const playwrightRegistered =
+        mcpData.mcpServers &&
+        typeof mcpData.mcpServers === "object" &&
+        PLAYWRIGHT_MCP_KEY in mcpData.mcpServers;
+
+      if (playwrightRegistered) {
+        pass("Playwright MCP", "registered in ~/.claude/mcp_servers.json");
+      } else {
+        fail(
+          "Playwright MCP",
+          "Run: npx forgedock install  (registers Playwright MCP in ~/.claude/mcp_servers.json)",
+        );
+      }
+    } catch (err) {
+      fail(
+        "Playwright MCP",
+        `Cannot read ~/.claude/mcp_servers.json: ${err.message}. Run: npx forgedock install`,
       );
     }
   }
