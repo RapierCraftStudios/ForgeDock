@@ -16,9 +16,26 @@ You are the QA orchestrator. Auto-discover every page across the platform (dashb
 
 ---
 
+## Playwright MCP Prerequisite (MANDATORY — check before proceeding)
+
+Playwright MCP is a **guaranteed ForgeDock dependency** for all browser automation commands. Before running any qa-sweep phase, verify it is available:
+
+**Check**: Confirm `mcp__playwright__*` tools are available in your tool context (e.g., `mcp__playwright__browser_navigate`, `mcp__playwright__browser_snapshot`).
+
+**If Playwright MCP tools are NOT available**: STOP immediately. Do not attempt to run qa-sweep — all browser automation steps will fail silently.
+
+**Fix**:
+1. Register Playwright MCP: `claude mcp add playwright npx @playwright/mcp@latest`
+2. Restart Claude Code to reload MCP servers
+3. Verify with: `npx forgedock doctor` (Check 9 confirms registration)
+
+See README.md Requirements section for full setup instructions.
+
+---
+
 ## Browser Tool Reference
 
-All browser automation uses Playwright MCP tools (`mcp__playwright__*`).
+All browser automation uses Playwright MCP tools (`mcp__playwright__*`). Playwright MCP is a guaranteed ForgeDock dependency — see the Playwright MCP Prerequisite section above.
 
 | Action | Tool | Key param |
 |--------|------|-----------|
@@ -97,7 +114,25 @@ Depth-first, workflow-driven:
 
 ## Phase 0: Setup & Auth
 
-**Load config from forge.yaml** before running any checks:
+**Playwright MCP prerequisite guard** — run BEFORE loading forge.yaml config:
+
+Confirm `mcp__playwright__browser_navigate` (or any `mcp__playwright__*` tool) is available in your tool context. If Playwright MCP tools are absent:
+
+```
+STOP. Playwright MCP is not registered in this Claude Code session.
+
+Register it with:  claude mcp add playwright npx @playwright/mcp@latest
+Then restart Claude Code and run /qa-sweep again.
+
+Verify installation with: npx forgedock doctor (Check 9 confirms Playwright MCP status)
+See: README.md Requirements section for full setup instructions.
+```
+
+Do not proceed past this guard if Playwright MCP tools are unavailable — all browser automation steps will fail silently without clear error messages.
+
+---
+
+**Load config from forge.yaml** after confirming Playwright MCP is available:
 
 ```bash
 QA_CONFIG=$(python3 - <<'PYEOF'
