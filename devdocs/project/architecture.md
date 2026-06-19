@@ -3,8 +3,8 @@ authority: required
 scope: project
 applies_to: [work-on, review-pr, issue, orchestrate, quality-gate, autopilot]
 domain: architecture
-last_validated: "2026-06-15"
-version: "1.0.15"
+last_validated: "2026-06-19"
+version: "1.0.16"
 ---
 
 # ForgeDock Architecture & Strategy
@@ -26,6 +26,23 @@ ForgeDock uses a strict two-repo model:
 - The only connection is the **data contract**: HTTP endpoints, structured JSON payloads, GitHub issue/PR annotations, and the `forge.yaml` schema.
 - If shared utility code is ever needed by both sides, it goes in a separately published MIT/Apache-2.0 SDK package — never copied across.
 - When building features, always ask: does this belong in the CLI (open) or Platform (commercial)?
+
+### Third-Party MCP Dependencies
+
+External tools that ForgeDock configures or launches as separate processes over the MCP protocol are governed by the same data-contract rule — they do **not** introduce AGPL contamination, regardless of their own license.
+
+**Playwright MCP** ([`@playwright/mcp`](https://github.com/microsoft/playwright-mcp)) is the canonical example:
+
+| Property | Value |
+|----------|-------|
+| License | MIT |
+| Runtime boundary | Separate process, launched independently |
+| Integration contract | MCP protocol only (tool calls, structured JSON responses) |
+| Code coupling | None — no import, no vendor, no static link |
+| AGPL contamination | **No** — data contract only |
+| Platform side | May consume emitted metrics (screenshots, console events, perf traces) for observability |
+
+**Decision rule**: If a tool (a) runs as a separate process, (b) communicates exclusively over the MCP protocol, and (c) is never imported or vendored into this repo's codebase — it is AGPL-safe to configure, launch, and depend on, regardless of its own license.
 
 ### What Lives Where
 
