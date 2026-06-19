@@ -95,7 +95,13 @@ The context phase surfaced two historical bugs (#577, #587) in the same module â
 
 ## Install
 
-**Requirements:** [Node.js 18+](https://nodejs.org/), [Claude Code](https://docs.anthropic.com/en/docs/claude-code), [GitHub CLI (`gh`)](https://cli.github.com/), and [`yq`](https://github.com/mikefarah/yq) (YAML parser used by pipeline commands to read `forge.yaml`)
+**Requirements:** [Node.js 18+](https://nodejs.org/), [Claude Code](https://docs.anthropic.com/en/docs/claude-code), [GitHub CLI (`gh`)](https://cli.github.com/), [`yq`](https://github.com/mikefarah/yq) (YAML parser used by pipeline commands to read `forge.yaml`), and **[Playwright MCP](https://github.com/microsoft/playwright-mcp)** (browser automation for `/qa-sweep` and visual testing commands)
+
+> **Playwright MCP** is a guaranteed ForgeDock dependency for browser automation commands. Register it in Claude Code after installing ForgeDock:
+> ```bash
+> claude mcp add playwright npx @playwright/mcp@latest
+> ```
+> Verify with `npx forgedock doctor` â€” Check 9 confirms Playwright MCP is registered.
 
 ```bash
 # Install pipeline commands

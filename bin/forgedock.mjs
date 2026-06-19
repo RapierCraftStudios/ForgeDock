@@ -1901,6 +1901,7 @@ async function status(dir) {
  *   6. CLAUDE.md has the ForgeDock behavioral block (cwd)
  *   7. Required workflow labels exist on the GitHub repo (needs forge.yaml + gh auth)
  *   8. FORGE_HOME environment variable is set
+ *   9. Playwright MCP registered in ~/.claude/mcp_servers.json (advisory warn — required for /qa-sweep)
  *
  * Exits with code 0 if all checks pass, code 1 if any fail.
  */
@@ -2260,6 +2261,54 @@ async function doctor() {
       fail(
         "FORGE_HOME env var",
         `Add to your shell profile: export FORGE_HOME="${FORGE_HOME}"  then restart your shell (or run: source ~/.bashrc)`,
+      );
+    }
+  }
+
+  // ── Check 9: Playwright MCP registered ────────────────────────────────────
+  // Playwright MCP is a guaranteed ForgeDock dependency for browser automation
+  // commands (/qa-sweep). This check is advisory (warn, not fail) because MCP
+  // server presence is orthogonal to the core ForgeDock install — but missing
+  // it causes /qa-sweep to silently fail mid-sweep.
+  {
+    const mcpServersPath = join(HOME, ".claude", "mcp_servers.json");
+    let playwrightFound = false;
+    let mcpReadable = false;
+
+    try {
+      const mcpRaw = readFileSync(mcpServersPath, "utf-8");
+      const mcpConfig = JSON.parse(mcpRaw);
+      const servers = mcpConfig?.mcpServers;
+      if (servers && typeof servers === "object") {
+        mcpReadable = true;
+        // Search for a registered server whose name or command references playwright
+        for (const [name, entry] of Object.entries(servers)) {
+          const nameLower = name.toLowerCase();
+          const cmdStr = [
+            entry?.command ?? "",
+            ...(Array.isArray(entry?.args) ? entry.args : []),
+          ].join(" ").toLowerCase();
+          if (nameLower.includes("playwright") || cmdStr.includes("playwright")) {
+            playwrightFound = true;
+            break;
+          }
+        }
+      }
+    } catch {
+      // File absent or unreadable — treat as no MCP servers configured
+    }
+
+    if (!mcpReadable) {
+      warn(
+        "Playwright MCP",
+        "No MCP servers file found (~/.claude/mcp_servers.json). Register Playwright MCP to enable /qa-sweep: claude mcp add playwright npx @playwright/mcp@latest",
+      );
+    } else if (playwrightFound) {
+      pass("Playwright MCP", "registered in Claude Code MCP servers");
+    } else {
+      warn(
+        "Playwright MCP",
+        "Not registered — /qa-sweep and browser automation commands will fail. Run: claude mcp add playwright npx @playwright/mcp@latest",
       );
     }
   }
