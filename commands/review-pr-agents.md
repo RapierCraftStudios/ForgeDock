@@ -1089,6 +1089,35 @@ If no frontend context is configured above, derive conventions from the changed 
 9. **Performance**: Large bundles, unnecessary client-side rendering, missing dynamic imports
 10. **Hook provider scope**: For any new `useX()` hook call added to a component, verify the hook is safe to call outside its provider. If `useX` internally calls `useContext(XContext)` and throws when context is undefined (i.e., the hook contains `if (!ctx) throw new Error(...)`), check ALL mount sites of the component across the codebase. If the component is used in both authenticated routes (e.g., `app/dashboard/`) AND public routes (e.g., `app/(public)/`, `app/playground/`) that do not wrap children in the provider, the hook call will crash the public route with a React error boundary cascade. Flag as CONFIRMED HIGH if a public mount site exists without the provider. <!-- Added: forge#381 -->
 
+## Browser Signal Check (Conditional)
+
+**Skip if**: `forge.yaml → services.app_url` is absent or empty — log `"SKIPPED — services.app_url not configured"` and continue to Post Findings.
+
+When `services.app_url` is configured, run a live browser check against the changed route(s) using Playwright MCP tools. Derive the page route from changed files (e.g., `web/src/app/dashboard/page.tsx` → `/dashboard`). If no specific route can be derived, check the root URL.
+
+**Step 1 — Navigate**
+Use `browser_navigate` to load `{APP_URL}/{DERIVED_ROUTE}`.
+
+**Step 2 — Console errors**
+Use `browser_console_messages` and check for `error`-level entries. Each error-level message → **CONFIRMED MEDIUM** finding: `FE-CONSOLE | MEDIUM | {message}`. Warn-level → LOW advisory.
+
+**Step 3 — Network failures**
+Use `browser_network_requests filter="static:false"` and check for 4xx or 5xx responses. Each failure → **CONFIRMED HIGH** finding: `FE-NETWORK | HIGH | {url} returned {status}`.
+
+**Step 4 — Performance (load time)**
+Use `browser_evaluate` with:
+```
+() => {
+  const nav = performance.getEntriesByType('navigation')[0];
+  const paint = performance.getEntriesByType('paint');
+  const fcp = paint.find(e => e.name === 'first-contentful-paint');
+  return { loadTime: nav ? Math.round(nav.loadEventEnd) : null, fcp: fcp ? Math.round(fcp.startTime) : null };
+}
+```
+Classify: `loadTime > 4000` ms → HIGH; `loadTime > 2500` ms → MEDIUM; `fcp > 1800` ms → LOW advisory.
+
+Include a "Browser Signals" section in your findings comment (even when empty, log "No console errors, no network failures detected").
+
 ## Post Findings
 ```bash
 gh pr comment [PR_NUMBER] --body "$(cat <<'EOF'
@@ -1104,6 +1133,9 @@ gh pr comment [PR_NUMBER] --body "$(cat <<'EOF'
 
 ### Component Architecture
 [Server vs Client component usage assessment]
+
+### Browser Signals
+[Results from live Playwright check — console errors, network failures, perf metrics. Write "No console errors, no network failures detected" if clean. Write "SKIPPED — services.app_url not configured" if browser check was skipped.]
 
 ### Files Reviewed
 [List files checked]
@@ -1136,6 +1168,9 @@ EOF
 | Accessibility (labels, keyboard nav) | Item 8 | COVERED | |
 | Performance (bundle size, dynamic imports) | Item 9 | COVERED | |
 | Hook outside provider scope (crash on public routes) | Item 10 | COVERED | forge#381 |
+| Console errors on changed route (live browser check) | Browser Signal Check | COVERED | forge#875 |
+| Failed network requests on changed route | Browser Signal Check | COVERED | forge#875 |
+| Page load time / FCP regression | Browser Signal Check | COVERED | forge#875 |
 | Server Component data leakage to client | — | GAP | |
 | Next.js App Router caching pitfalls | — | GAP | |
 
