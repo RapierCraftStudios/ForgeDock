@@ -35,10 +35,10 @@ External tools that ForgeDock configures or launches as separate processes over 
 
 | Property | Value |
 |----------|-------|
-| License | MIT |
+| License | Apache-2.0 |
 | Runtime boundary | Separate process, launched independently |
 | Integration contract | MCP protocol only (tool calls, structured JSON responses) |
-| Code coupling | None — no import, no vendor, no static link |
+| Code coupling | None in ForgeDock's usage — we never import, vendor, or statically link it (the package does expose an importable JS API, but ForgeDock does not use it) |
 | AGPL contamination | **No** — data contract only |
 | Platform side | May consume emitted metrics (screenshots, console events, perf traces) for observability |
 
