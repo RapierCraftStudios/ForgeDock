@@ -312,6 +312,7 @@ Print a structured report:
 - Issues commented: {count}
 - Orphans closed: {count}
 - Stale labels fixed: {count}
+- Spec-edit impact analyses logged: {count} (FORGE:AUTOPILOT_IMPACT — blast radius surfaced before spec fixes)
 
 ### Recommended Next Steps
 {Prioritized list of what the user should look at or deploy}
@@ -372,6 +373,81 @@ Nothing merges to `main` — you deploy when ready.
 
 Wait for user response. If they adjust, re-select. If they skip, end the cycle.
 
+### 4B.5: Spec-Edit Impact Analysis (MANDATORY before any spec-touching fix) <!-- Added: forge#870 -->
+
+**Goal**: Before autopilot dispatches a fix that edits ForgeDock's own command specs (`commands/*.md`), surface the blast radius of the change so the edit doesn't silently break downstream consumers (every spec that reads a changed FORGE annotation, every command in a changed sub-phase chain, every script/label a touched node feeds).
+
+This step **consumes the read-only query interface** shipped by the Spec Knowledge Graph (`scripts/graph-query.sh`, subcommand `impact`). It does **not** reimplement graph traversal — the blast radius is computed once, in `graph-query.sh`, and autopilot only reads its output.
+
+**When it runs**: for each approved fix target whose affected files (from the issue body's `## Affected Files` section, or the recon finding that created it) include any path matching `commands/*.md`. Non-spec fixes skip this step entirely.
+
+**Graceful degradation**: `graph-query.sh` ships only with the Spec Knowledge Graph. If it is absent (fast-lane repos, or a checkout predating the milestone), **skip with a noted reason — never block the cycle**.
+
+```bash
+GRAPH_QUERY="$(git rev-parse --show-toplevel)/scripts/graph-query.sh"
+
+# For each approved fix target that edits commands/*.md:
+for issue in $SPEC_FIX_TARGETS; do
+  if [ ! -x "$GRAPH_QUERY" ]; then
+    echo "skip impact analysis for #$issue — graph-query.sh not present (Spec Knowledge Graph not installed)"
+    continue
+  fi
+
+  # Derive the spec node(s) the fix changes. Prefer the FORGE annotation or
+  # command/sub-phase named in the issue's Affected Files / recon finding.
+  # graph-query.sh normalizes all of these forms:
+  #   FORGE:CONTRACT  ==  CONTRACT  ==  ann:FORGE:CONTRACT
+  #   work-on:build:implement  ==  cmd:work-on:build:implement
+  #   classify-lane.sh  ==  script:classify-lane.sh
+  #   workflow:merged  ==  label:workflow:merged
+  for node in $CHANGED_SPEC_NODES; do
+    echo "### Impact of changing $node (fix #$issue)"
+    bash "$GRAPH_QUERY" impact "$node" --human
+  done
+done
+```
+
+**Log the result in a FORGE annotation.** Post one `FORGE:AUTOPILOT_IMPACT` comment per spec-touching fix target on its issue, BEFORE invoking `/work-on` in 4C:
+
+```bash
+gh issue comment $issue --body "<!-- FORGE:AUTOPILOT_IMPACT -->
+## Spec-Edit Impact Analysis
+
+**Changed spec node(s)**: \`$CHANGED_SPEC_NODES\`
+**Query**: \`graph-query.sh impact <node> --human\` (Spec Knowledge Graph, read-only)
+
+### Blast Radius (downstream consumers of this change)
+\`\`\`
+$IMPACT_OUTPUT
+\`\`\`
+
+Every command/spec listed above reads the changed annotation or sits in the changed sub-phase chain. The \`/work-on\` build for this fix MUST keep these consumers working — verify the changed field/marker is still produced in the shape they expect.
+
+<!-- FORGE:AUTOPILOT_IMPACT:COMPLETE -->"
+```
+
+If `graph-query.sh` was absent, post the same annotation with the blast-radius block set to `(skipped — Spec Knowledge Graph not installed)` so the skip is auditable.
+
+**Worked example** — autopilot picks up a fix that renames a field inside the `FORGE:CONTRACT` annotation. Before dispatching `/work-on`, it runs:
+
+```bash
+$ graph-query.sh impact FORGE:CONTRACT --human
+Impact (blast radius) of changing ann:FORGE:CONTRACT:
+  cmd:milestone
+  cmd:orchestrate
+  cmd:resume
+  cmd:review-pr
+  cmd:work-on
+  cmd:work-on-monolithic
+  cmd:work-on:build
+  cmd:work-on:build:implement
+  cmd:work-on:review
+```
+
+The summary makes the nine downstream consumers explicit before the edit lands, so the contract-field rename is reviewed against every reader — not discovered as a broken consumer later.
+
+**`FORGE:AUTOPILOT_IMPACT`** is a leaf annotation: autopilot is its only writer and no downstream pipeline phase consumes it. It exists to record the blast radius on the issue thread for human and reviewer visibility.
+
 ### 4C: Execute fixes
 
 For each approved fix target, invoke `/work-on` via the Skill tool:
@@ -403,6 +479,7 @@ FIX_RESULTS.push({
 
 **Merged to staging**: {count}
 **Needs attention**: {list}
+**Spec-edit impact analyses**: {count} blast-radius summaries logged (FORGE:AUTOPILOT_IMPACT) before spec fixes
 
 When ready to deploy, merge `staging` → `main` via GitHub.
 ```
