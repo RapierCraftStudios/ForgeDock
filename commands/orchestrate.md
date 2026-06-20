@@ -552,6 +552,69 @@ If `UNEXPECTED_GROWTH > 500`, report the alert clearly before launching the next
 
 ---
 
+### Step 4A.pre.0: Pre-create milestone branches for the wave (MANDATORY before classify-lane) <!-- Added: forge#901 -->
+
+**WHY THIS EXISTS**: Feature-lane milestone branches were created lazily — by whichever feature-lane agent reached its build phase first. When a wave launches N feature-lane agents in parallel, they each run the lane check at roughly the same time. Every agent that runs before the branch is first pushed observes "branch absent" and is misrouted (hard-fail / `needs-human`, or fallback to staging in older code paths). The result is a single milestone's PRs scattered across the milestone branch and staging — a branch-routing nondeterminism that recurs under parallelism.
+
+The fix is deterministic: create every milestone branch the wave will target **once, up front, before any agent runs `classify-lane.sh`**. After this step, every agent's lane check sees the branch and routes consistently.
+
+**When to run**: Before the classify-lane loop in Step 4A.pre, for every wave. The step is a no-op for pure fast-lane waves (no issue in the wave has a milestone).
+
+```bash
+# Pre-create the origin milestone branch for every distinct milestone referenced by the wave.
+# Slugification MUST byte-match scripts/classify-lane.sh — otherwise a branch is created that
+# the classifier will not select. Keep these two slug pipelines identical.
+git fetch origin
+
+# Collect distinct milestone titles among the wave's issues
+declare -A SEEN_MILESTONE_SLUG
+for NUM in {wave_issue_numbers}; do
+  MILESTONE_TITLE=$(gh issue view "$NUM" -R {GH_REPO} --json milestone --jq '.milestone.title // empty' 2>/dev/null || echo "")
+  [ -z "$MILESTONE_TITLE" ] && continue  # fast-lane issue — no milestone branch needed
+
+  # Slugify — IDENTICAL to classify-lane.sh: lowercase → spaces-to-hyphens →
+  # strip non-[a-z0-9-] → collapse hyphens → strip leading/trailing hyphens.
+  SLUG=$(echo "$MILESTONE_TITLE" \
+    | tr '[:upper:]' '[:lower:]' \
+    | tr ' ' '-' \
+    | tr -cd 'a-z0-9-' \
+    | sed 's/--*/-/g' \
+    | sed 's/^-//;s/-$//')
+
+  # Empty-slug guard (matches classify-lane.sh): a title with no ASCII letters/digits/hyphens
+  # would produce "milestone/", an invalid ref. Skip and let classify-lane surface the error.
+  if [ -z "$SLUG" ]; then
+    echo "WARN: milestone title '$MILESTONE_TITLE' (issue #$NUM) produced an empty slug — skipping pre-creation; classify-lane will hard-fail." >&2
+    continue
+  fi
+
+  # De-dupe: only attempt creation once per milestone
+  [ -n "${SEEN_MILESTONE_SLUG[$SLUG]:-}" ] && continue
+  SEEN_MILESTONE_SLUG[$SLUG]=1
+
+  LANE="milestone/$SLUG"
+  if git ls-remote --exit-code origin "$LANE" >/dev/null 2>&1; then
+    echo "Milestone branch '$LANE' already exists on origin — no action."
+    continue
+  fi
+
+  # Create-if-absent from the default branch (matches /milestone create).
+  # $DEFAULT_BRANCH is resolved from forge.yaml at the top of this command.
+  echo "Pre-creating milestone branch '$LANE' from origin/$DEFAULT_BRANCH …"
+  if git push origin "origin/$DEFAULT_BRANCH:refs/heads/$LANE" 2>/dev/null; then
+    echo "Created milestone branch '$LANE'."
+  elif git ls-remote --exit-code origin "$LANE" >/dev/null 2>&1; then
+    # A concurrent orchestrator (or an agent) created it first — harmless. Never force-push.
+    echo "Milestone branch '$LANE' was created concurrently — proceeding with the existing branch."
+  else
+    echo "ERROR: failed to pre-create milestone branch '$LANE' from origin/$DEFAULT_BRANCH." >&2
+    echo "       classify-lane.sh will hard-fail for issues in this milestone until the branch exists." >&2
+  fi
+done
+```
+
+This step is the deterministic counterpart to fix #2 (atomic create-if-absent in the classifier): by guaranteeing the branch exists before the wave's lane checks run, no agent can observe a missing branch. `classify-lane.sh`'s hard-fail is intentionally preserved as the phantom-slug gate for any path that bypasses this step.
+
 ### Step 4A.pre: Classify lane for each issue (MANDATORY before spawning agents)
 
 Before building agent prompts, run `classify-lane.sh` for every issue in the current wave to compute `{LANE}` and `{PR_BASE}` deterministically. The script output is authoritative — the LLM MUST NOT override or reason around it.
@@ -931,6 +994,58 @@ done
 They remain open in GitHub — they will be picked up by future `/orchestrate` or `/work-on` runs. Log them in the final batch summary under "deferred" so they are visible. Do NOT close or label them — leave them for the next pipeline pass.
 
 **If no review-finding issues were spawned:** Continue to next wave normally.
+
+### Step 4C.5: Milestone lane-consistency check (run after each wave) <!-- Added: forge#901 -->
+
+**WHY THIS EXISTS**: A milestone's feature-lane PRs must all target the same milestone branch. If a branch-routing race ever scatters them — some on the milestone branch, some on staging — the milestone branch becomes incomplete relative to staging, and the split is otherwise invisible until the milestone tries to ship. Step 4A.pre.0 prevents the split deterministically; this check detects any residual split so it surfaces immediately instead of at ship time.
+
+**When to run**: After each wave completes, for any batch where at least one issue has a milestone. Skip for pure fast-lane batches. This check is **non-blocking** — it alerts; it does not auto-resolve or stop the pipeline.
+
+```bash
+# For each distinct milestone in the batch, assert all of its feature-lane PRs share one base.
+for NUM in {all_batch_issue_numbers}; do
+  MILESTONE_TITLE=$(gh issue view "$NUM" -R {GH_REPO} --json milestone --jq '.milestone.title // empty' 2>/dev/null || echo "")
+  [ -z "$MILESTONE_TITLE" ] && continue
+
+  SLUG=$(echo "$MILESTONE_TITLE" \
+    | tr '[:upper:]' '[:lower:]' \
+    | tr ' ' '-' \
+    | tr -cd 'a-z0-9-' \
+    | sed 's/--*/-/g' \
+    | sed 's/^-//;s/-$//')
+  [ -z "$SLUG" ] && continue
+  EXPECTED_BASE="milestone/$SLUG"
+
+  # Collect the base branch of every PR that closes an issue in this milestone.
+  # Iterate the milestone's issues and read each one's linked PR base.
+  BASES=$(gh pr list -R {GH_REPO} --state all --search "milestone:\"$MILESTONE_TITLE\"" \
+    --json baseRefName --jq '.[].baseRefName' 2>/dev/null | sort -u)
+  # Fallback: if PR search by milestone is unavailable, derive from the issues' linked PRs.
+  if [ -z "$BASES" ]; then
+    BASES=$(for IN in {all_batch_issue_numbers}; do
+      IM=$(gh issue view "$IN" -R {GH_REPO} --json milestone --jq '.milestone.title // empty' 2>/dev/null)
+      [ "$IM" = "$MILESTONE_TITLE" ] || continue
+      gh pr list -R {GH_REPO} --state all --search "$IN in:body" \
+        --json baseRefName --jq '.[].baseRefName' 2>/dev/null
+    done | sort -u)
+  fi
+
+  STRAY_BASES=$(echo "$BASES" | grep -v "^${EXPECTED_BASE}\$" | grep -v '^$' || true)
+  if [ -n "$STRAY_BASES" ]; then
+    echo "ALERT: milestone '$MILESTONE_TITLE' has feature-lane PRs split across multiple base branches." >&2
+    echo "       Expected base: $EXPECTED_BASE" >&2
+    echo "       Found bases:" >&2
+    echo "$BASES" | sed 's/^/         - /' >&2
+    echo "       This indicates a branch-routing split — reconcile the stray PRs onto $EXPECTED_BASE" >&2
+    echo "       (rebase/cherry-pick the stray branch onto the milestone branch) before the milestone ships." >&2
+    # Do NOT auto-stop or auto-resolve — surface the alert and let the user decide.
+  else
+    echo "Lane-consistency OK: all '$MILESTONE_TITLE' PRs target $EXPECTED_BASE."
+  fi
+done
+```
+
+Report any `ALERT` lines prominently before advancing to the next wave. Reconciliation of an existing split is a manual/`/milestone`-assisted step — this check only ensures the split is never silent.
 
 ### Step 4D: Milestone integration build gate (MANDATORY between waves)
 
