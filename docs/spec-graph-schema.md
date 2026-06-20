@@ -69,6 +69,70 @@ jq -r '.graph.edges[] | select(.type=="READS" and .to=="ann:FORGE:CONTRACT") | .
 jq -r '.graph.edges[] | select(.type=="TRANSITIONS" and .to=="label:workflow:merged") | .from' "$GRAPH"
 ```
 
+## Querying the graph (`graph-query.sh`)
+
+`scripts/graph-query.sh` is the consumer-facing query API over the graph, so
+agents (and humans) don't hand-write `jq`. It is a **universal-tier**,
+**read-only** script: `bash` + `jq`, with `node` only used to auto-build the
+graph when the (gitignored) JSON is absent. No committed graph is required.
+
+```bash
+graph-query.sh <subcommand> <arg> [--human] [--graph <path>]
+```
+
+| Subcommand            | Returns                                                            |
+|-----------------------|-------------------------------------------------------------------|
+| `readers <annotation>`| commands/specs that **READ** the annotation                       |
+| `writers <annotation>`| commands/specs that **WRITE** (post) the annotation               |
+| `impact  <node>`      | blast radius — everything transitively affected if `<node>` changes |
+| `deps    <command>`   | a command's full input/output set, grouped by edge type           |
+| `search  <term>`      | substring lookup over node ids / names / paths                    |
+
+Arguments are normalized, so all of these resolve to the same node:
+
+```bash
+graph-query.sh readers CONTRACT             # == readers FORGE:CONTRACT == readers ann:FORGE:CONTRACT
+graph-query.sh deps work-on                 # == deps cmd:work-on
+graph-query.sh deps work-on:build:implement # sub-phases use the Skill() `:`-delimited form
+graph-query.sh impact classify-lane.sh      # == impact script:classify-lane.sh
+graph-query.sh impact workflow:merged       # == impact label:workflow:merged
+```
+
+`impact` is **transitive reverse-reachability**: it seeds at `<node>` and
+collects every command that (directly or transitively) `READS`/`WRITES`/
+`INVOKES`/`REQUIRES`/`CONTAINS` it, walking up parent commands via `CONTAINS`.
+So `impact FORGE:CONTRACT` returns not only its direct readers/writers but also
+the parent commands that contain them (e.g. `cmd:orchestrate`, `cmd:milestone`).
+
+### Output
+
+Default output is **compact, agent-consumable JSON** — a JSON array for
+`readers`/`writers`/`impact`/`search`, and a JSON object keyed by edge type for
+`deps`. Pass `--human` for an aligned table instead.
+
+```bash
+$ graph-query.sh writers FORGE:CONTRACT
+["cmd:work-on","cmd:work-on:build"]
+
+$ graph-query.sh deps work-on:build:implement
+{"READS":["ann:FORGE:ARCHITECT","ann:FORGE:CONTEXT","ann:FORGE:CONTRACT","ann:FORGE:INVESTIGATOR"],"WRITES":["ann:FORGE:BUILDER"]}
+
+$ graph-query.sh writers FORGE:CONTRACT --human
+Specs that WRITE ann:FORGE:CONTRACT:
+  cmd:work-on
+  cmd:work-on:build
+```
+
+### Flags & behavior
+
+- `--graph <path>` — query a specific graph JSON (default:
+  `.forgedock/graph/spec-graph.json`). When the default path is absent (it is
+  gitignored), the graph is **auto-built on the fly** via `build-spec-graph.mjs`
+  into a temp file (cleaned up on exit).
+- `--human` — render an aligned table instead of compact JSON.
+- Exit codes: `0` on success, `1` on bad args, missing `jq`/`node`, or an
+  unknown node (the error suggests `graph-query.sh search <term>`).
+
 ## Node types
 
 | `type`       | `id` shape                       | Source                                  |
