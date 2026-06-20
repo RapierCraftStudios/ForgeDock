@@ -96,7 +96,7 @@ from nowhere. Rationale → spec → page.
 
 1. **architect** (#886) emits this spec from the rationale.
 2. **generate** produces HTML constrained by it.
-3. **linter** (#884) checks deterministic fields (palette, spacing, radius, layout skeleton).
+3. **linter** ([`design-system-lint.mjs`](design-system-lint.md), #884) checks deterministic fields (palette, spacing, radius, layout skeleton).
 4. **critique loop** (#882) renders + checks `negatives`, `effects_plan` justification, and `acceptance` against the
    rendered result; iterates until pass.
 5. **close** writes the realized spec + outcome to [design-memory](design-memory.md) (#887).
