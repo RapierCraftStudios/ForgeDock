@@ -29,7 +29,7 @@ ForgeDock uses a strict two-repo model:
 
 ### Third-Party MCP Dependencies
 
-External tools that ForgeDock configures or launches as separate processes over the MCP protocol are governed by the same data-contract rule — they do **not** introduce AGPL contamination, regardless of their own license.
+External tools that ForgeDock configures or launches as separate processes over the MCP protocol are governed by the same data-contract rule — they do **not** introduce AGPL (or other linking-based copyleft) contamination, because there is no linking, importing, or vendoring across the process boundary. This covers contamination only; it is not a blanket clearance on the tool's own license terms (see the caveat below).
 
 **Playwright MCP** ([`@playwright/mcp`](https://github.com/microsoft/playwright-mcp)) is the canonical example:
 
@@ -42,7 +42,9 @@ External tools that ForgeDock configures or launches as separate processes over 
 | AGPL contamination | **No** — data contract only |
 | Platform side | May consume emitted metrics (screenshots, console events, perf traces) for observability |
 
-**Decision rule**: If a tool (a) runs as a separate process, (b) communicates exclusively over the MCP protocol, and (c) is never imported or vendored into this repo's codebase — it is AGPL-safe to configure, launch, and depend on, regardless of its own license.
+**Decision rule**: If a tool (a) runs as a separate process, (b) communicates exclusively over the MCP protocol, and (c) is never imported or vendored into this repo's codebase — configuring, launching, and depending on it introduces **no linking-based copyleft (AGPL) contamination** of this repo's code, irrespective of the tool's own license.
+
+This clears the *contamination* concern only. It is **not** a blanket clearance to adopt any copyleft-licensed tool: strong-copyleft licenses (GPL/AGPL and similar) can carry obligations beyond linking — around distribution, bundling, redistribution, or how the tool is shipped to users — that process isolation does not dissolve. Before adopting a GPL/AGPL/strong-copyleft MCP tool, do a separate, deliberate license review of those non-linking obligations rather than treating the contamination-safe verdict as full clearance.
 
 ### What Lives Where
 
