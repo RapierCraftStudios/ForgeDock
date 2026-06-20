@@ -42,6 +42,7 @@ A single JSON document:
     "schemaVersion": 1,
     "generator": "build-spec-graph.mjs",
     "root": ".",
+    "builtFromHash": "716dae74…",  // sha256 of the scanned spec corpus
     "stats": {
       "nodes": 92,
       "edges": 120,
@@ -69,15 +70,37 @@ jq -r '.graph.edges[] | select(.type=="READS" and .to=="ann:FORGE:CONTRACT") | .
 jq -r '.graph.edges[] | select(.type=="TRANSITIONS" and .to=="label:workflow:merged") | .from' "$GRAPH"
 ```
 
+### `builtFromHash` — input fingerprint
+
+`graph.builtFromHash` is a **sha256 fingerprint of the input corpus** the graph
+was built from: every `commands/**/*.md`, `scripts/*.sh`, and `devdocs/**/*.md`
+file's repo-relative path + content, hashed in sorted order. It is **purely
+input-derived** — no timestamps, mtimes, or absolute paths — so identical inputs
+always produce the same hash and the emitted graph stays byte-identical
+(idempotency is preserved).
+
+It is the basis for **staleness detection without a daemon**. Recompute it
+cheaply at any time with the builder's `--hash` mode (no full graph build):
+
+```bash
+node scripts/build-spec-graph.mjs --hash      # prints just the sha256, exits
+```
+
+If `node scripts/build-spec-graph.mjs --hash` differs from the persisted
+graph's `builtFromHash`, the spec corpus changed since the graph was built — the
+graph is stale. `graph-query.sh` performs exactly this comparison on every query
+(see below).
+
 ## Querying the graph (`graph-query.sh`)
 
 `scripts/graph-query.sh` is the consumer-facing query API over the graph, so
 agents (and humans) don't hand-write `jq`. It is a **universal-tier**,
-**read-only** script: `bash` + `jq`, with `node` only used to auto-build the
-graph when the (gitignored) JSON is absent. No committed graph is required.
+**read-only** script: `bash` + `jq`, with `node` used to recompute the staleness
+fingerprint and to auto-build/rebuild the graph (to a temp file) when the
+persisted JSON is absent or stale. No committed graph is required.
 
 ```bash
-graph-query.sh <subcommand> <arg> [--human] [--graph <path>]
+graph-query.sh <subcommand> <arg> [--human] [--graph <path>] [--strict-stale] [--no-stale-check]
 ```
 
 | Subcommand            | Returns                                                            |
@@ -130,8 +153,54 @@ Specs that WRITE ann:FORGE:CONTRACT:
   gitignored), the graph is **auto-built on the fly** via `build-spec-graph.mjs`
   into a temp file (cleaned up on exit).
 - `--human` — render an aligned table instead of compact JSON.
-- Exit codes: `0` on success, `1` on bad args, missing `jq`/`node`, or an
-  unknown node (the error suggests `graph-query.sh search <term>`).
+- `--strict-stale` — do **not** auto-rebuild a stale persisted graph; error
+  (exit 1) instead. Useful in CI to assert a committed graph is fresh.
+- `--no-stale-check` — skip the staleness check entirely and query the persisted
+  graph as-is, even if the spec corpus has changed.
+- Exit codes: `0` on success, `1` on bad args, missing `jq`/`node`, an unknown
+  node (the error suggests `graph-query.sh search <term>`), or a stale graph
+  under `--strict-stale`.
+
+### Staleness detection (no daemon)
+
+ForgeDock targets non-coders, so there is **no file-watcher daemon**. Staleness
+is detected **pull-based, on query**:
+
+1. When a query uses a **persisted** graph (the default
+   `.forgedock/graph/spec-graph.json`, or an explicit `--graph <path>`),
+   `graph-query.sh` recomputes the current corpus fingerprint via
+   `build-spec-graph.mjs --hash` and compares it to the graph's stored
+   `builtFromHash`.
+2. **Match** → the persisted graph is used as-is. The no-change path is a single
+   cheap hash compare — no rebuild, no perceptible latency, no background
+   process.
+3. **Mismatch** (or a graph predating `builtFromHash`) → the graph is stale. By
+   default a `stale-graph` banner is printed to **stderr** and the graph is
+   transparently **rebuilt** for this query; **stdout stays pure JSON**. With
+   `--strict-stale` the query errors instead; with `--no-stale-check` the check
+   is skipped.
+4. When **no persisted graph exists** (the common case — the graph is
+   gitignored), `graph-query.sh` auto-builds a fresh graph to a temp file. A
+   freshly built graph is current by construction, so no staleness check runs.
+
+This means editing any `commands/*.md` (or `scripts/*.sh` / `devdocs/**`) is
+detected on the next query and the rebuild produces a fresh hash — with no daemon
+and no cost on the no-change path.
+
+### Optional: rebuild-on-commit hook
+
+For contributors who choose to keep a **committed** graph in sync, an **opt-in**
+git pre-commit hook ships at `.githooks/pre-commit`. It is never auto-installed.
+Enable it with:
+
+```bash
+git config core.hooksPath .githooks
+```
+
+When enabled, the hook rebuilds `.forgedock/graph/spec-graph.json` and stages it
+**only if** (a) a persisted graph already exists and (b) the commit stages a file
+under `commands/`, `scripts/`, or `devdocs/`. If no persisted graph exists (the
+default), the hook is a no-op. It never blocks a commit on rebuild failure.
 
 ## Node types
 
@@ -207,11 +276,12 @@ verified by the builder's self-check.
 
 ## Self-check
 
-On every run the builder asserts two acceptance spot-checks and exits non-zero
-if either fails:
+On every run the builder asserts three acceptance spot-checks and exits non-zero
+if any fails:
 
 1. `work-on` **WRITES** `FORGE:TRAJECTORY`.
 2. `review-pr` **READS** `FORGE:CONTRACT`.
+3. `builtFromHash` is present and is a 64-char sha256 hex digest.
 
 ## Adding new node or edge types
 

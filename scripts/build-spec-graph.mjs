@@ -17,12 +17,15 @@
  * done in-process so the builder is a single portable artifact.
  *
  * Usage:
- *   node scripts/build-spec-graph.mjs [--root <repo-root>] [--out <path>] [--stdout] [--quiet] [--help]
+ *   node scripts/build-spec-graph.mjs [--root <repo-root>] [--out <path>] [--stdout] [--hash] [--quiet] [--help]
  *
  * Options:
  *   --root <dir>   Repo root to scan (default: parent of this script's dir)
  *   --out <path>   Output JSON path (default: <root>/.forgedock/graph/spec-graph.json)
  *   --stdout       Print the graph JSON to stdout instead of writing a file
+ *   --hash         Print ONLY the input fingerprint (sha256 of the scanned spec
+ *                  corpus) to stdout and exit. No graph is built or written.
+ *                  This is the cheap staleness-probe used by graph-query.sh.
  *   --quiet        Suppress the summary + self-check output on stderr
  *   --help         Show this help
  *
@@ -45,11 +48,20 @@
  * Determinism: all node/edge arrays are sorted by a stable composite key and
  * JSON is emitted with sorted object keys, so re-runs produce byte-identical
  * output (idempotent). See docs/spec-graph-schema.md for the full schema.
+ *
+ * Staleness: the graph carries `builtFromHash`, a sha256 fingerprint of the
+ * scanned input corpus (every commands/scripts/devdocs file's repo-relative
+ * path + content, in sorted order). It is purely input-derived — no timestamps
+ * or absolute paths — so identical inputs yield an identical hash and the output
+ * stays byte-identical. graph-query.sh recomputes this hash (via `--hash`) on
+ * query and rebuilds the graph if the persisted fingerprint no longer matches.
+ * No daemon / file-watcher: staleness is checked pull-based, on demand.
  */
 
 import { readFileSync, writeFileSync, mkdirSync, readdirSync, statSync } from "node:fs";
 import { join, dirname, relative, basename, sep } from "node:path";
 import { fileURLToPath } from "node:url";
+import { createHash } from "node:crypto";
 
 const SCHEMA_VERSION = 1;
 
@@ -58,7 +70,7 @@ const SCHEMA_VERSION = 1;
 // ---------------------------------------------------------------------------
 
 const args = process.argv.slice(2);
-const opts = { root: null, out: null, stdout: false, quiet: false };
+const opts = { root: null, out: null, stdout: false, quiet: false, hash: false };
 for (let i = 0; i < args.length; i++) {
   const a = args[i];
   if (a === "--help" || a === "-h") {
@@ -70,6 +82,8 @@ for (let i = 0; i < args.length; i++) {
     opts.out = args[++i];
   } else if (a === "--stdout") {
     opts.stdout = true;
+  } else if (a === "--hash") {
+    opts.hash = true;
   } else if (a === "--quiet") {
     opts.quiet = true;
   } else {
@@ -147,6 +161,46 @@ function exists(rel) {
 }
 
 // ---------------------------------------------------------------------------
+// Input discovery + fingerprint (shared by the full build and `--hash` mode)
+// ---------------------------------------------------------------------------
+
+/**
+ * Discover the three input corpora the graph is built from. The full build and
+ * the `--hash` staleness probe MUST call this same helper so their file sets
+ * can never drift (drift would make every query false-positive as stale).
+ * Returns { commandFiles, scriptFiles, devdocFiles } — each a sorted array of
+ * repo-relative POSIX paths.
+ */
+function discoverInputFiles() {
+  return {
+    commandFiles: walk(join(ROOT, "commands"), (rel) => rel.endsWith(".md")),
+    scriptFiles: walk(join(ROOT, "scripts"), (rel) => rel.endsWith(".sh")),
+    devdocFiles: walk(join(ROOT, "devdocs"), (rel) => rel.endsWith(".md")),
+  };
+}
+
+/**
+ * Compute the deterministic input fingerprint over a discovered file set.
+ *
+ * The hash is sha256 over each file's repo-relative path + content, in a single
+ * sorted order across all three corpora, with NUL separators so no path/content
+ * boundary is ambiguous. It is purely input-derived: no timestamps, no mtimes,
+ * no absolute paths — so identical inputs always yield the same hash and the
+ * emitted graph stays byte-identical (idempotent).
+ */
+function computeInputHash(files) {
+  const allRel = [...files.commandFiles, ...files.scriptFiles, ...files.devdocFiles].sort();
+  const h = createHash("sha256");
+  for (const rel of allRel) {
+    h.update(rel);
+    h.update("\0");
+    h.update(readFile(rel));
+    h.update("\0");
+  }
+  return h.digest("hex");
+}
+
+// ---------------------------------------------------------------------------
 // Node-id derivation
 // ---------------------------------------------------------------------------
 
@@ -198,9 +252,13 @@ function build() {
   }
 
   // --- Discover files -------------------------------------------------------
-  const commandFiles = walk(join(ROOT, "commands"), (rel) => rel.endsWith(".md"));
-  const scriptFiles = walk(join(ROOT, "scripts"), (rel) => rel.endsWith(".sh"));
-  const devdocFiles = walk(join(ROOT, "devdocs"), (rel) => rel.endsWith(".md"));
+  // Use the shared discovery helper so the full build and the `--hash` probe
+  // operate on an identical file set (otherwise queries false-positive stale).
+  const inputFiles = discoverInputFiles();
+  const { commandFiles, scriptFiles, devdocFiles } = inputFiles;
+
+  // Input fingerprint — sha256 of the scanned corpus (path+content, sorted).
+  const builtFromHash = computeInputHash(inputFiles);
 
   // Known real script basenames (for INVOKES resolution).
   const realScripts = new Set(scriptFiles.map((rel) => basename(rel)));
@@ -336,6 +394,7 @@ function build() {
       schemaVersion: SCHEMA_VERSION,
       generator: "build-spec-graph.mjs",
       root: toPosix(relative(ROOT, ROOT)) || ".",
+      builtFromHash,
       stats: {
         nodes: nodeArr.length,
         edges: edgeArr.length,
@@ -381,9 +440,11 @@ function selfCheck(graph, quiet) {
   const has = (from, type, to) =>
     edges.some((e) => e.from === from && e.type === type && e.to === to);
 
+  const hash = graph.graph.builtFromHash;
   const checks = [
     ["work-on WRITES FORGE:TRAJECTORY", has("cmd:work-on", "WRITES", "ann:FORGE:TRAJECTORY")],
     ["review-pr READS FORGE:CONTRACT", has("cmd:review-pr", "READS", "ann:FORGE:CONTRACT")],
+    ["builtFromHash is a sha256 hex digest", typeof hash === "string" && /^[0-9a-f]{64}$/.test(hash)],
   ];
 
   let allPass = true;
@@ -397,6 +458,14 @@ function selfCheck(graph, quiet) {
 // ---------------------------------------------------------------------------
 // Main
 // ---------------------------------------------------------------------------
+
+// `--hash`: cheap staleness probe — print just the input fingerprint and exit.
+// No graph is built or written. graph-query.sh uses this to detect a stale
+// persisted graph without paying for a full build on the no-change path.
+if (opts.hash) {
+  process.stdout.write(computeInputHash(discoverInputFiles()) + "\n");
+  process.exit(0);
+}
 
 const t0 = Date.now();
 const graph = build();
