@@ -1,0 +1,49 @@
+#!/usr/bin/env bash
+# SPDX-FileCopyrightText: Copyright (c) RapierCraft Studios
+# SPDX-License-Identifier: AGPL-3.0-or-later
+#
+# .githooks/pre-commit — opt-in spec-graph rebuild-on-commit
+#
+# ForgeDock targets non-coders, so there is NO file-watcher daemon. Staleness is
+# normally detected pull-based by graph-query.sh (it recomputes the spec-corpus
+# fingerprint and rebuilds on demand). This hook is an OPTIONAL convenience for
+# contributors who choose to keep a committed/persisted graph in sync at commit
+# time. It is never auto-installed.
+#
+# Enable (opt-in):
+#   git config core.hooksPath .githooks
+# Disable:
+#   git config --unset core.hooksPath
+#
+# Behavior: if this commit stages any file under commands/, scripts/, or
+# devdocs/ AND a persisted graph already exists at
+# .forgedock/graph/spec-graph.json, rebuild it and `git add` the result so the
+# committed graph matches the staged specs. If no persisted graph exists (the
+# default — the graph is gitignored), the hook is a no-op. The hook never blocks
+# the commit on rebuild failure; it warns and proceeds.
+
+set -euo pipefail
+
+REPO_ROOT="$(git rev-parse --show-toplevel 2>/dev/null || pwd)"
+BUILDER="$REPO_ROOT/scripts/build-spec-graph.mjs"
+GRAPH="$REPO_ROOT/.forgedock/graph/spec-graph.json"
+
+# Only act when a persisted graph is being tracked/kept in sync.
+[ -f "$GRAPH" ] || exit 0
+[ -f "$BUILDER" ] || exit 0
+command -v node >/dev/null 2>&1 || exit 0
+
+# Did this commit stage any spec-corpus file?
+STAGED="$(git diff --cached --name-only --diff-filter=ACMR 2>/dev/null || true)"
+if ! echo "$STAGED" | grep -qE '^(commands/|scripts/|devdocs/)'; then
+  exit 0
+fi
+
+echo "spec-graph: spec corpus changed — rebuilding $GRAPH" >&2
+if node "$BUILDER" --root "$REPO_ROOT" --quiet >/dev/null 2>&1; then
+  git add "$GRAPH" 2>/dev/null || true
+else
+  echo "spec-graph: rebuild failed — committing without refreshing the graph" >&2
+fi
+
+exit 0
