@@ -452,6 +452,49 @@ gh api repos/{OWNER}/{REPO}/issues/{NUMBER}/comments \
 
 ---
 
+#### `FORGE:BENCH_SCORECARD`
+
+**Phase**: Design — Benchmark (`/design-bench`, #878)
+**Written by**: Benchmark rig (`/design-bench` command)
+**Read by**: Harness developers (the fitness signal — "did arm A's win-rate vs C go up?"), milestone tracker, pipeline-health
+
+The result of one ABC benchmark run. Arm A is the ForgeDock harness output, arm B is a raw one-shot model, and arm C is the real reference page (gold standard). The annotation carries the **win-rate of each arm against C**, the **A-vs-B harness delta**, rubric **distributions** (mean + stdev) across n runs, mean slop counts, and the **judge-calibration check** (C must beat A and B; otherwise the judge is miscalibrated and the result is suspect).
+
+The scorecard is the fitness function for the UI Taste Harness milestone — it is built before the harness so each lever the harness adds is a measurable hypothesis. The methodology (three arms, same-model rule, three-layer judging, n>=3) lives in [`design/abc-benchmark.md`](design/abc-benchmark.md); the deterministic aggregator is [`../scripts/bench-scorecard.mjs`](../scripts/bench-scorecard.mjs).
+
+Two invariants this annotation encodes: **n>=3** (taste output is high-variance — distributions, never a single number) and **judge independence** from the harness critique loop (#882) (anti-Goodhart).
+
+**Schema** (annotation envelope):
+
+````
+<!-- FORGE:BENCH_SCORECARD -->
+## ABC Benchmark Scorecard
+
+**Corpus version**: {ver} · **Generation model (A & B)**: {model} · **Judge model**: {independent judge}
+**Products**: {n_products} · **Runs/product**: {n}
+
+| Arm | Win-rate vs C | A-vs-B | Mean slop |
+|-----|---------------|--------|-----------|
+| A   | {wr}          | {a_vs_b} | {slop_A} |
+| B   | {wr}          | —        | {slop_B} |
+
+**Judge calibration**: {ok | MISCALIBRATED — N runs where C lost (suspect)}
+
+```json
+{scorecard.json from bench-scorecard.mjs}
+```
+
+<!-- FORGE:BENCH_SCORECARD:COMPLETE -->
+````
+
+**Detection query**:
+```bash
+gh api repos/{OWNER}/{REPO}/issues/{NUMBER}/comments \
+  --jq '.[] | select(.body | contains("FORGE:BENCH_SCORECARD")) | .body'
+```
+
+---
+
 ### Orchestration / Milestone Annotations
 
 These annotations transfer investigation context across issue boundaries in decomposed or multi-issue milestone workflows.
