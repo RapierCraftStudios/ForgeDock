@@ -560,6 +560,8 @@ The fix is deterministic: create every milestone branch the wave will target **o
 
 **When to run**: Before the classify-lane loop in Step 4A.pre, for every wave. The step is a no-op for pure fast-lane waves (no issue in the wave has a milestone).
 
+**Requires bash 4+**: This snippet uses an associative array (`declare -A SEEN_MILESTONE_SLUG`) to de-dupe milestone slugs, so it must run under bash 4 or newer. Under a non-bash POSIX shell (`sh`/dash), `declare -A` fails and the de-dupe silently no-ops. This degrades gracefully — branch creation stays correct because the `git ls-remote --exit-code` exists-check below still skips any milestone branch that already exists; the only effect is redundant, idempotent `ls-remote`/`push` attempts for milestones referenced by more than one issue in the wave. Run this command's blocks under bash 4+. <!-- Added: forge#901 -->
+
 ```bash
 # Pre-create the origin milestone branch for every distinct milestone referenced by the wave.
 # Slugification MUST byte-match scripts/classify-lane.sh — otherwise a branch is created that
