@@ -433,7 +433,7 @@ The full field-by-field schema (JSON shape, the per-field slop-tell defense tabl
   "shadow":        { "tokens": […] },
   "motion":        { "vocabulary": […], "reduced_motion": "required" },
   "layout_grammar":{ "sections": [ { "id": "…", "purpose": "…", "density": "…" } ], "rhythm": "…" },
-  "effects_plan":  { "per_section": [ … ], "budget": { … }, "never": [ … ] },
+  "effects_plan":  { "per_section": [ … ], "budget": { … }, "never": [ … ] }, // doctrine: docs/design/effects-appropriateness.md (#885)
   "negatives":     [ … ],
   "acceptance":    { "perf_budget": { … }, "a11y": { … }, "divergence_ref": "…" }
 }
