@@ -404,6 +404,40 @@ These annotations drive the UI Taste Harness — the design-generation pipeline 
 
 ---
 
+#### `FORGE:DESIGN_CONTEXT`
+
+**Phase**: Design — Investigate (`/design` stage 1, #888) — the first `FORGE:DESIGN_*` annotation in the chain
+**Written by**: `/design` design-investigate stage
+**Read by**: Design-architect stage (grounds the rationale), Close phase (audit trail)
+**Location**: Issue comment
+
+The design analog of `FORGE:CONTEXT`: the parsed brief (message / audience / single objection), the grammar pulled
+from the [reference corpus](design/reference-corpus.md) (#880), and the recent signature moves / archetypes / palettes
+pulled from [design-memory](design/design-memory.md) (#887) that this design must **diverge** from. Opens the
+`FORGE:DESIGN_*` chain that `FORGE:DESIGN_RATIONALE` → `FORGE:DESIGN_CANDIDATES` → `FORGE:DESIGN_SPEC` → `FORGE:CRITIQUE`
+→ `FORGE:DESIGN_SHIPPED` continues. See [`commands/design.md`](../commands/design.md).
+
+**Schema**:
+
+```markdown
+<!-- FORGE:DESIGN_CONTEXT -->
+## Design Context — {product}
+
+**Message:** {one thing the page must say}
+**Audience / objection:** {who} — must overcome: {objection}
+**Corpus grammar:** {relevant traits / archetype priors from #880}
+**Diverge from (memory):** {recent signature moves / archetypes / palettes to avoid — #887}
+<!-- FORGE:DESIGN_CONTEXT:COMPLETE -->
+```
+
+**Detection query**:
+```bash
+gh api repos/{OWNER}/{REPO}/issues/{NUMBER}/comments \
+  --jq '.[] | select(.body | contains("FORGE:DESIGN_CONTEXT")) | .body'
+```
+
+---
+
 #### `FORGE:DESIGN_RATIONALE`
 
 **Phase**: Design — Architecture (design-architect, #886) — emitted *before* `FORGE:DESIGN_SPEC`
@@ -597,6 +631,40 @@ Two invariants this annotation encodes: **n>=3** (taste output is high-variance 
 ```bash
 gh api repos/{OWNER}/{REPO}/issues/{NUMBER}/comments \
   --jq '.[] | select(.body | contains("FORGE:BENCH_SCORECARD")) | .body'
+```
+
+---
+
+#### `FORGE:DESIGN_SHIPPED`
+
+**Phase**: Design — Close (`/design` stage 5, #888) — the terminal `FORGE:DESIGN_*` annotation
+**Written by**: `/design` design-close stage
+**Read by**: [design-memory](design/design-memory.md) (#887, persists the realized outcome), milestone tracker, pipeline-health
+**Location**: Issue comment
+
+Closes the design pipeline. Posted only when the design passes the full definition of done — critique-rubric threshold,
+perf budget (#875), a11y check, and the divergence check (#887). Records the final scorecard and the realized outcome
+(archetype, signature move, palette/type/effects, learnings) that is written to design-memory so the *next* design can
+diverge from it. The design analog of closing a code issue at `workflow:merged`; its label is `design:shipped` (the
+rejected counterpart is `design:rejected`, set without this annotation). See [`commands/design.md`](../commands/design.md).
+
+**Schema**:
+
+```markdown
+<!-- FORGE:DESIGN_SHIPPED -->
+## Design Shipped — {product}
+
+**Archetype:** {committed id} · **Signature move:** {the hook}
+**Gates:** rubric {pass} · perf {pass} · a11y {pass} · divergence {distinct from prior — #887}
+**Critique iterations:** {n}
+**Written to memory:** {palette/type/effects/learnings summary}
+<!-- FORGE:DESIGN_SHIPPED:COMPLETE -->
+```
+
+**Detection query**:
+```bash
+gh api repos/{OWNER}/{REPO}/issues/{NUMBER}/comments \
+  --jq '.[] | select(.body | contains("FORGE:DESIGN_SHIPPED")) | .body'
 ```
 
 ---
