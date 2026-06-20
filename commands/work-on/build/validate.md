@@ -215,6 +215,14 @@ fi
 **Step 1 — Navigate**
 Use `browser_navigate` to load `{APP_URL}`. If the changed files include a specific page route (e.g., `web/src/app/dashboard/page.tsx`), derive the route path and navigate there instead (e.g., `{APP_URL}/dashboard`).
 
+**Navigation-failure branch** (distinct from the config-absent skip and from a network-fail finding): If `browser_navigate` returns an error or the page never loads — connection refused, timeout, DNS/host unreachable, app crashed, or the Playwright MCP tools are unavailable — do NOT abort the validate run and do NOT silently pass. Instead, log a single advisory line and stop the browser check here:
+
+```
+BROWSER-SIGNAL-SKIPPED — could not reach {APP_URL}: {error}
+```
+
+Then skip Steps 2–4 (do not attempt to read console, network, or performance signals against a page that never loaded) and continue to the Advisory scope summary with `GATE_PASSED` unchanged. A navigation failure is advisory and non-blocking: it does NOT set `GATE_PASSED=false`, and it does NOT count as a `BROWSER-NETWORK-FAIL` finding. `BROWSER-NETWORK-FAIL` is reserved for a 4xx/5xx HTTP response on a page that DID load (Step 3). Surface the `BROWSER-SIGNAL-SKIPPED` line in the V5 summary so reviewers can distinguish "app unreachable → skipped" from "checked and clean". <!-- Added: forge#898 -->
+
 **Step 2 — Capture console messages**
 ```
 browser_console_messages
