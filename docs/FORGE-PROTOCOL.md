@@ -418,7 +418,7 @@ The full field-by-field schema (JSON shape, the per-field slop-tell defense tabl
 
 **Schema** (annotation envelope):
 
-```
+````
 <!-- FORGE:DESIGN_SPEC -->
 ## Design Spec — {product}
 
@@ -440,7 +440,7 @@ The full field-by-field schema (JSON shape, the per-field slop-tell defense tabl
 ```
 
 → Produced by FORGE:DESIGN_RATIONALE: {link}
-```
+````
 
 **Field reference**: see [`design/design-spec-schema.md`](design/design-spec-schema.md) for the complete schema, the "How each field defends against slop" table, and the lifecycle.
 
