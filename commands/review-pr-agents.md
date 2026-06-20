@@ -1093,6 +1093,16 @@ If no frontend context is configured above, derive conventions from the changed 
 
 **Skip if**: `forge.yaml → services.app_url` is absent or empty — log `"SKIPPED — services.app_url not configured"` and continue to Post Findings.
 
+Read the gating value with the canonical `forge.yaml` idiom (parity with `work-on/build/validate.md` Phase V3.6):
+
+```bash
+APP_URL=$(yq '.services.app_url // ""' forge.yaml 2>/dev/null || echo '')
+if [ -z "$APP_URL" ]; then
+    echo "SKIPPED — services.app_url not configured"
+    # continue to Post Findings
+fi
+```
+
 When `services.app_url` is configured, run a live browser check against the changed route(s) using Playwright MCP tools. Derive the page route from changed files (e.g., `web/src/app/dashboard/page.tsx` → `/dashboard`). If no specific route can be derived, check the root URL.
 
 **Step 1 — Navigate**
