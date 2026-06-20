@@ -63,7 +63,7 @@ from nowhere. Rationale → spec → page.
     "rhythm": "alternating-density",
     "intentional_breaks": ["asymmetric hero", "full-bleed product shot"]
   },
-  "effects_plan": {                  // see #885 — reasoned in the rationale, not chosen blindly
+  "effects_plan": {                  // see effects-appropriateness.md (#885) — reasoned via the effects doctrine, not chosen blindly
     "per_section": [
       { "section": "hero", "effect": "subtle-technical-visualization", "intensity": "low",
         "justification": "product is GPU-compute; one earned hero centerpiece" }
@@ -89,7 +89,7 @@ from nowhere. Rationale → spec → page.
 | `color.rules: no-default-tailwind-palette` | slate/indigo "AI gradient" tell |
 | `spacing.scale` (on-scale only) | arbitrary padding / no rhythm |
 | `layout_grammar` (non-boilerplate) | the hero→3-cards→testimonial→CTA skeleton |
-| `effects_plan` (justified + budgeted) | gratuitous 3D/parallax; perf blowups |
+| `effects_plan` (justified + budgeted) — doctrine: [effects-appropriateness](effects-appropriateness.md) (#885) | gratuitous 3D/parallax; perf blowups |
 | `acceptance.perf_budget` | "earned its milliseconds" becomes objective (via Playwright, #875) |
 
 ## Lifecycle

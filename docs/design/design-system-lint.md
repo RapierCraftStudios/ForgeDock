@@ -36,6 +36,8 @@ deterministic ones; the rest are left to the vision critic.
 **Out of scope** (vision-critic-owned, #882): N3 (everything centered), N8 (stock illustration / generic 3D),
 N9 (glassmorphism overuse), N10 (no visual hierarchy), N11 (abstract copy / no product shown),
 N12 (decorative effects that serve nothing). These require perceptual judgement and are not deterministically checkable.
+N12 / effect justification specifically is governed by the [effects-appropriateness doctrine](effects-appropriateness.md) (#885)
+and judged by the vision critic (#882) against the per-section `justification`; the perf gate (#875) owns the hard `budget`. The linter stays out.
 
 ## Spec-driven gating
 
