@@ -33,6 +33,8 @@ ForgeDock uses a strict two-repo model:
 |---------|------|-----|
 | Pipeline commands (`/work-on`, `/orchestrate`, etc.) | ForgeDock (this repo) | Core product, AGPL |
 | Deterministic scripts (lane routing, validation) | ForgeDock (this repo) | Core execution, AGPL |
+| Spec graph builder / store / queries (`build-spec-graph.mjs`, `graph-query.sh`, `validate-spec-graph.sh`) | ForgeDock (this repo) | Local CLI, AGPL — runs on-disk, emits structured JSON only |
+| Spec-graph observability view (pipeline self-map: runs / timelines) | Platform | Commercial value-add — renders the CLI's emitted JSON, never imports the code |
 | Observability dashboard | Platform | Commercial value-add |
 | Billing / license management | Platform | Commercial |
 | Hosted script API (faster, validated, versioned) | Platform | Commercial premium |

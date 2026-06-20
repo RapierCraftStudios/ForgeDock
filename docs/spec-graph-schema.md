@@ -360,3 +360,38 @@ Extend `commandNodeFromPath()` / the node-discovery passes for new node types,
 and add a new heuristic block in the per-line loop of `build()` for new edge
 types. Keep all output sorted to preserve idempotency, and add a self-check
 assertion for any new invariant.
+
+## Open-core boundary
+
+The graph is **open-core, CLI-side, local-only**. The builder, store, and query
+tools (`build-spec-graph.mjs`, `graph-query.sh`, `validate-spec-graph.sh`) are
+AGPL code in this repo; they run entirely on-disk and emit a structured JSON
+artifact (`.forgedock/graph/spec-graph.json`, gitignored by default).
+
+That JSON is the boundary. The Platform's L1 observability dashboard *renders*
+the graph as a pipeline self-map (runs, timelines, stall detection) — that
+visualization is the **commercial value-add**. The Platform consumes the emitted
+JSON; it never imports, embeds, vendors, or links the AGPL builder/query code
+(see `devdocs/project/architecture.md` → Boundary Rules). The CLI does not know
+or care whether the Platform exists — emitting the JSON is the entire contract.
+
+## Optional context hook (deferred — off by default)
+
+A future opt-in Claude Code `PreToolUse` hook can use the graph to inject
+"relevant specs per graph" as context when an agent greps `commands/`, mirroring
+codegraph's `PreToolUse` pattern. It would shell out to
+`graph-query.sh load-set <command>` (or `readers`/`deps`) and surface the
+task-relevant spec set instead of letting the agent load blindly.
+
+**Decision: deferred — not shipped in this milestone.** It must be:
+
+- **Opt-in, off by default** — gated behind an explicit setting (e.g. a
+  `hooks.spec_graph_context` flag in `forge.yaml` or the user's Claude Code
+  settings), so the graph imposes nothing on users who do not enable it.
+- **Non-blocking** — a `PreToolUse` hook that only *adds* context and never
+  rejects a tool call; a missing or stale graph degrades to a no-op.
+- **CLI-side** — the hook reads the local JSON via the AGPL query scripts; it
+  introduces no Platform dependency.
+
+Shipping the wiring is deferred because no hook-infrastructure layer exists in
+the repo yet; this section is the spec that a later issue implements against.
