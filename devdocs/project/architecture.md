@@ -31,6 +31,8 @@ ForgeDock uses a strict two-repo model:
 
 External tools that ForgeDock configures or launches as separate processes over the MCP protocol are governed by the same data-contract rule — they do **not** introduce AGPL (or other linking-based copyleft) contamination, because there is no linking, importing, or vendoring across the process boundary. This covers contamination only; it is not a blanket clearance on the tool's own license terms (see the caveat below).
 
+Note the direction of concern here. **Boundary Rules** above guard the *outbound* direction — keeping this repo's AGPL code from copyleft-contaminating the proprietary Platform. This section guards the *inbound* direction — whether an external tool's license could copyleft-contaminate **this** AGPL repo. The two are distinct, and the same process-isolation reasoning resolves both.
+
 **Playwright MCP** ([`@playwright/mcp`](https://github.com/microsoft/playwright-mcp)) is the canonical example:
 
 | Property | Value |
