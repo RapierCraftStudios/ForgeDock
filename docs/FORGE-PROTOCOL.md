@@ -398,6 +398,60 @@ gh api repos/{OWNER}/{REPO}/issues/{NUMBER}/comments \
 
 ---
 
+### Design Pipeline Annotations
+
+These annotations drive the UI Taste Harness — the design-generation pipeline that produces a landing page from a design-blind product brief. They carry design intent across the architect → generate → critique → close stages, exactly as the issue-pipeline annotations carry code-context across investigate → build → review.
+
+---
+
+#### `FORGE:DESIGN_SPEC`
+
+**Phase**: Design — Architecture (design-architect, #886)
+**Written by**: Design-architect agent
+**Read by**: Generate agent (constrains output), deterministic anti-slop linter (#884), render → vision-critique loop (#882), Close phase agent (persists realized spec to design-memory, #887)
+
+A structured, **machine-checkable** representation of one page's design language. Carried across design-pipeline stages as a `FORGE:DESIGN_SPEC` annotation so taste decisions **persist** instead of being re-rolled per generation, and so a deterministic linter and a vision critic both check the rendered output against the *same* committed intent.
+
+Critically, the spec is **produced by** a `FORGE:DESIGN_RATIONALE` (the reasoning) — not authored from nowhere. The flow is rationale → spec → page.
+
+The full field-by-field schema (JSON shape, the per-field slop-tell defense table, and the lifecycle) lives in [`design/design-spec-schema.md`](design/design-spec-schema.md). The annotation body embeds that schema as a fenced `jsonc` block.
+
+**Schema** (annotation envelope):
+
+```
+<!-- FORGE:DESIGN_SPEC -->
+## Design Spec — {product}
+
+```jsonc
+{
+  "meta":          { "product": "…", "archetype": "…", "corpus_version": "…", "rationale_ref": "…" },
+  "typography":    { "display_family": "…", "body_family": "…", "scale_ratio": …, "weights": […] },
+  "color":         { "mode": "…", "background": "#…", "foreground": "#…", "accent": "#…",
+                     "rules": ["no-default-tailwind-palette", "contrast>=4.5"] },
+  "spacing":       { "base_unit_px": …, "scale": […] },
+  "radius":        { "scale": […] },
+  "shadow":        { "tokens": […] },
+  "motion":        { "vocabulary": […], "reduced_motion": "required" },
+  "layout_grammar":{ "sections": [ { "id": "…", "purpose": "…", "density": "…" } ], "rhythm": "…" },
+  "effects_plan":  { "per_section": [ … ], "budget": { … }, "never": [ … ] },
+  "negatives":     [ … ],
+  "acceptance":    { "perf_budget": { … }, "a11y": { … }, "divergence_ref": "…" }
+}
+```
+
+→ Produced by FORGE:DESIGN_RATIONALE: {link}
+```
+
+**Field reference**: see [`design/design-spec-schema.md`](design/design-spec-schema.md) for the complete schema, the "How each field defends against slop" table, and the lifecycle.
+
+**Detection query**:
+```bash
+gh api repos/{OWNER}/{REPO}/issues/{NUMBER}/comments \
+  --jq '.[] | select(.body | contains("FORGE:DESIGN_SPEC")) | .body'
+```
+
+---
+
 ### Orchestration / Milestone Annotations
 
 These annotations transfer investigation context across issue boundaries in decomposed or multi-issue milestone workflows.
