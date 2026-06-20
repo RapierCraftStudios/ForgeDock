@@ -220,6 +220,59 @@ When enabled, the hook rebuilds `.forgedock/graph/spec-graph.json` and stages it
 under `commands/`, `scripts/`, or `devdocs/`. If no persisted graph exists (the
 default), the hook is a no-op. It never blocks a commit on rebuild failure.
 
+## Validating the graph (`validate-spec-graph.sh`)
+
+`scripts/validate-spec-graph.sh` is the **self-consistency validator** over the
+graph. It catches drift that is invisible in the ~1.2 MB prose corpus and is
+wired into `quality-gate` (the `FORGE_GRAPH` domain) so it runs whenever
+`commands/*.md` or `scripts/*` files change. Like `graph-query.sh`, it is a
+**universal-tier**, **read-only** script (`bash` + `jq`, `node` only for the
+on-the-fly auto-build) that auto-builds the graph when the gitignored JSON is
+absent — no committed graph is required.
+
+```bash
+validate-spec-graph.sh [--soft] [--graph <path>] [--root <dir>] [--quiet] [--json]
+```
+
+It performs three checks, partitioned by severity:
+
+| Check                     | Severity     | Detects                                                                 |
+|---------------------------|--------------|-------------------------------------------------------------------------|
+| **Orphan annotations**    | SOFT (warn)  | a `FORGE:*` marker WRITTEN but never READ, or READ but never WRITTEN     |
+| **Dangling cross-refs**   | HARD (fail)  | a `Skill(skill="X")` whose target is no real command/sub-phase node      |
+| **Broken transitions**    | HARD (fail)  | a `workflow:*` label set by **no** command (no `--add-label` edge)        |
+
+Inline doc-scaffolding markers (`FORGE:DISPATCHER`, `FORGE:PHASE_COMPLETE`,
+`FORGE:TYPE`, …) legitimately have neither a WRITES nor a READS edge — they
+annotate the spec prose itself and are never posted via `gh ... comment`. They
+are reported as **INFO** (via a curated allowlist in the script), never as
+orphans. A non-allowlisted isolated marker is surfaced as SOFT so new
+scaffolding gets triaged.
+
+**Why dangling refs are scanned from prose, not edges**: the builder *drops*
+unresolved `Skill()`/script/devdoc references (it only emits an edge when the
+target resolves to a real node — see `if (nodes.has(targetId))` in
+`build-spec-graph.mjs`). So a dangling reference never appears as a graph edge.
+The validator therefore scans `commands/**/*.md` for `Skill(skill="X")`
+directly and cross-checks each `X` against the command/sub-phase node set. Only
+the structured `Skill()` form is checked — loose `.sh`/filename mentions in
+prose are illustrative and are intentionally not flagged.
+
+### Flags & exit codes
+
+- `--soft` — warn-only mode: HARD findings are still reported, but the exit code
+  is forced to `0`. Used when first wiring into CI so the documented baseline
+  orphans/refs do not break the build before triage. `quality-gate` invokes the
+  validator with `--soft` and re-surfaces any `[HARD]` line as a HIGH finding.
+- `--graph <path>` — validate a specific graph JSON (default
+  `.forgedock/graph/spec-graph.json`, auto-built when absent).
+- `--root <dir>` — repo root to scan for `Skill()` refs and to auto-build from.
+- `--quiet` — print only the summary line. `--json` — emit findings as a single
+  JSON object (`{summary:{hard,soft,info}, findings:[{severity,class,message}]}`).
+- Exit codes: `0` when there are no HARD findings (or `--soft`); `1` on a HARD
+  inconsistency, bad args, or a missing dependency. Output is deterministic
+  (findings sorted by severity → class → message), so re-runs are byte-stable.
+
 ## Node types
 
 | `type`       | `id` shape                       | Source                                  |

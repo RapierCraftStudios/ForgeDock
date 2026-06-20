@@ -47,6 +47,7 @@ This quality gate uses **domain detection** to adapt to your project's actual te
 | IMPORT_RESOLUTION | Python files with new `from app.*` imports added outside `try:` blocks |
 | INFRA | Dockerfiles or entrypoints with runtime UID changes |
 | ROUTER_BUG | Router Python files where gate conditions are narrowed |
+| FORGE_GRAPH | `commands/*.md` specs or `scripts/*` files change (ForgeDock self-consistency) |
 
 **Stack-agnostic coverage**: The example domains above reflect common patterns caught in production; they are not requirements. A Go or Ruby project benefits from SECURITY checks. A Node.js project benefits from FRONTEND, PROXY, and DEPLOY checks. Any project benefits from DATABASE and WORKFLOW checks when those file types are present. The stack-specific examples (Python routers, SOPS secrets chain, FastAPI layouts, appleboy SSH deploys) are illustrative — the domain detection system applies the applicable subset to any codebase.
 
@@ -98,6 +99,7 @@ Before running checks, classify the changed files into domains. This avoids runn
 | `*.py` with new `from app.` import statements added outside `try:` blocks | IMPORT_RESOLUTION |
 | `Dockerfile*` or `entrypoint*.sh` with added/changed `USER`, `su-exec`, `gosu`, or `setuid` | INFRA |
 | `*.py` in `routers/` where the diff removes a line containing an or-gate condition (lines starting with `-` containing `if.*or`) | ROUTER_BUG |
+| `commands/*.md` or `scripts/*` files (ForgeDock repo only — dogfoods its own spec graph) | FORGE_GRAPH |
 
 **Apply the classification:**
 
@@ -124,6 +126,9 @@ for f in {CHANGED_FILES}; do
         *anti_detection/*|*consumers/*|*browser/*|*shared/detection/*)
             echo "$f" | grep -qE '\.py$' && DOMAINS="$DOMAINS STRING_SETS"
             ;;
+    esac
+    case "$f" in
+        commands/*.md|scripts/*) DOMAINS="$DOMAINS FORGE_GRAPH" ;;
     esac
     case "$f" in
         .github/workflows/*.yml) DOMAINS="$DOMAINS WORKFLOW" ;;
@@ -411,6 +416,31 @@ done
 ```
 
 Report any hit as **HIGH** — the DB connection will fail in any environment where PostgreSQL is not on `127.0.0.1:5432`.
+
+### 2G.6: Spec graph self-consistency (FORGE_GRAPH domain)
+
+**Triggered when**: changed files include `commands/*.md` specs or `scripts/*` files (ForgeDock repo only — it dogfoods its own Spec Knowledge Graph). Skips silently in any project without `scripts/validate-spec-graph.sh`.
+
+**Why this matters**: ForgeDock's pipeline behavior is encoded in a ~1.2 MB prose spec corpus where drift is invisible — a `FORGE:*` annotation written but never read, a `Skill(skill="X")` referencing a sub-phase that no longer exists, or a `workflow:*` label set by no command. The Spec Knowledge Graph (`build-spec-graph.mjs`) makes this queryable; `validate-spec-graph.sh` consumes it and partitions findings into HARD (dangling cross-refs, broken label transitions) and SOFT (orphan annotations).
+
+```bash
+# Run only when commands/*.md or scripts/* changed and the validator ships in this repo.
+VALIDATOR="$FORGEDOCK_SCRIPTS/validate-spec-graph.sh"
+[ -f "$VALIDATOR" ] || VALIDATOR="{WORKTREE_PATH}/scripts/validate-spec-graph.sh"
+if [ -f "$VALIDATOR" ]; then
+    # The graph is auto-built from the worktree (gitignored JSON not required).
+    # --soft keeps the gate non-blocking on the documented baseline orphans;
+    # HARD findings are still reported below and surfaced as gate findings.
+    GRAPH_REPORT=$(bash "$VALIDATOR" --root "{WORKTREE_PATH}" --soft 2>&1 || true)
+    echo "$GRAPH_REPORT"
+    # Map any HARD finding to a quality-gate finding (dangling ref / broken transition).
+    echo "$GRAPH_REPORT" | grep -E '^\s*\[HARD\]' | while IFS= read -r hit; do
+        echo "FORGE_GRAPH | HIGH | spec-graph | ${hit#*] }"
+    done
+fi
+```
+
+Report each `[HARD]` line as **HIGH** — a dangling `Skill()` target or a label set by no command is a real pipeline break (an agent will invoke a phase that does not exist, or a state will never be entered/exited). Orphan-annotation `[SOFT]` lines are advisory: surface them in the report for periodic triage but do NOT block the commit. Scaffolding `[INFO]` lines are expected and need no action. To gate on HARD findings (fail the build), drop `--soft`; the default keeps existing baseline orphans from blocking until they are triaged. <!-- Added: forge#869 -->
 
 ### 2H: Asyncio cancellation safety (Python async code)
 
