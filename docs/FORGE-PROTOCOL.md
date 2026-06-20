@@ -439,6 +439,42 @@ gh api repos/{OWNER}/{REPO}/issues/{NUMBER}/comments \
 
 ---
 
+#### `FORGE:DESIGN_CANDIDATES`
+
+**Phase**: Design — Divergent generation (#883) — emitted *after* `FORGE:DESIGN_RATIONALE`, *before* `FORGE:DESIGN_SPEC`
+**Written by**: Generate agent (divergent-generation step)
+**Read by**: Taste-judge (selects the winner), Close phase (audit trail), design-memory (#887, to diverge from past winners)
+**Location**: Issue comment
+
+The variance lever's audit record: the one **committed archetype** (one of the five corpus ids — #880, never blended),
+the **N distinct directions** generated within it, and the **independent taste-judge's** scores + selection. The
+winner hands off into `FORGE:DESIGN_SPEC`. The selection judge is deliberately distinct from the critique loop (#882)
+and the benchmark judge (#878) — anti-Goodhart. See [`docs/design/divergent-generation.md`](design/divergent-generation.md).
+
+**Schema**:
+
+```markdown
+<!-- FORGE:DESIGN_CANDIDATES -->
+## Design Candidates — {product}
+
+**Archetype (committed):** {one of the 5 corpus ids}
+**Directions:**
+1. {concept} — signature: {move} — {distinguishing grammar/tokens}
+2. {concept} — signature: {move} — {…}
+**Judge scores:** 1) {score} 2) {score} …
+**Selected:** #{n} — because {reason}
+
+→ Winner produces DESIGN_SPEC: {link}
+```
+
+**Detection query**:
+```bash
+gh api repos/{OWNER}/{REPO}/issues/{NUMBER}/comments \
+  --jq '.[] | select(.body | contains("FORGE:DESIGN_CANDIDATES")) | .body'
+```
+
+---
+
 #### `FORGE:DESIGN_SPEC`
 
 **Phase**: Design — Architecture (design-architect, #886)
