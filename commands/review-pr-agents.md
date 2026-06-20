@@ -1108,6 +1108,8 @@ When `services.app_url` is configured, run a live browser check against the chan
 **Step 1 — Navigate**
 Use `browser_navigate` to load `{APP_URL}/{DERIVED_ROUTE}`.
 
+**Navigation-failure branch** (distinct from the config-absent skip and from an `FE-NETWORK` finding): If `browser_navigate` returns an error or the page never loads — connection refused, timeout, DNS/host unreachable, app crashed, or the Playwright MCP tools are unavailable — do NOT abort the review and do NOT silently report a clean check. Skip Steps 2–4 (do not read console, network, or performance signals against a page that never loaded) and continue to Post Findings. Record the failure in the "Browser Signals" section as `BROWSER-SIGNAL-SKIPPED — could not reach {APP_URL}/{DERIVED_ROUTE}: {error}` so reviewers can distinguish "app unreachable → skipped" from "checked and clean". A navigation failure is advisory: it does NOT produce an `FE-NETWORK` HIGH finding (that is reserved for a 4xx/5xx HTTP response on a page that DID load, Step 3). <!-- Added: forge#898 -->
+
 **Step 2 — Console errors**
 Use `browser_console_messages` and check for `error`-level entries. Each error-level message → **CONFIRMED MEDIUM** finding: `FE-CONSOLE | MEDIUM | {message}`. Warn-level → LOW advisory.
 
@@ -1145,7 +1147,7 @@ gh pr comment [PR_NUMBER] --body "$(cat <<'EOF'
 [Server vs Client component usage assessment]
 
 ### Browser Signals
-[Results from live Playwright check — console errors, network failures, perf metrics. Write "No console errors, no network failures detected" if clean. Write "SKIPPED — services.app_url not configured" if browser check was skipped.]
+[Results from live Playwright check — console errors, network failures, perf metrics. Write "No console errors, no network failures detected" if clean. Write "SKIPPED — services.app_url not configured" if browser check was skipped due to missing config. Write "BROWSER-SIGNAL-SKIPPED — could not reach {url}: {error}" if the app URL was configured but navigation failed (unreachable / timeout / MCP unavailable).]
 
 ### Files Reviewed
 [List files checked]
