@@ -198,7 +198,7 @@ fi
 
 **Skip if**: No TypeScript/TSX files were changed, OR `forge.yaml → services.app_url` is absent or empty.
 
-After static proxy checks, run a lightweight live browser check using Playwright MCP tools to surface console errors, failed network requests, and basic performance metrics for any changed UI routes. This check is advisory — findings are surfaced as warnings in the V5 summary but do NOT block the gate unless the browser session is available AND returns ERROR-level console output.
+After static proxy checks, run a lightweight live browser check using Playwright MCP tools to surface console errors, failed network requests, and basic performance metrics for any changed UI routes. The blocking rule is narrow: a `BROWSER-NETWORK-FAIL` HIGH finding on the primary app URL sets `GATE_PASSED=false` (the app is broken for that route). Every other browser signal — console errors, performance, console warnings — is advisory: surfaced as warnings in the V5 summary, with `GATE_PASSED` staying true.
 
 ```bash
 cd {WORKTREE_PATH}
@@ -249,7 +249,7 @@ Classify:
 - `loadTime > 2500` ms → **MEDIUM** finding: `BROWSER-PERF | MEDIUM | performance | page load time {loadTime}ms exceeds 2.5s threshold`
 - `fcp > 1800` ms → **LOW** advisory: `BROWSER-PERF | LOW | performance | FCP {fcp}ms — consider lazy-loading or code splitting`
 
-**Advisory scope**: Browser signal findings are included in the V5 summary under "Browser Signals". They do NOT block the gate (GATE_PASSED stays true) unless a BROWSER-NETWORK-FAIL HIGH finding is present on the primary app URL (indicating the app is completely broken for that route). Console ERROR findings are MEDIUM — surfaced for human review, not blocking.
+**Advisory scope**: Exactly one browser signal blocks the gate — a `BROWSER-NETWORK-FAIL` HIGH finding on the primary app URL sets `GATE_PASSED=false` (the app is completely broken for that route). All other browser signal findings are advisory and do NOT block the gate (`GATE_PASSED` stays true): console errors are MEDIUM, performance findings are MEDIUM/LOW, and console warnings are LOW. Advisory findings are included in the V5 summary under "Browser Signals" for human review only.
 
 ---
 
