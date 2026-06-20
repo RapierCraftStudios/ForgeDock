@@ -122,7 +122,9 @@ vision critic (#882). Any hit is a finding. Each item is phrased so it maps to a
 ## Effect-usage patterns (feeds the effects layer, #885)
 
 Extracted from the corpus: *where* and *how intensely* real pages use heavy techniques. This is how the harness
-*learns* effect-appropriateness from exemplars rather than inventing it.
+*learns* effect-appropriateness from exemplars rather than inventing it. The governing doctrine that turns these
+patterns into per-section authoring rules lives in [effects-appropriateness](effects-appropriateness.md) (#885) — the
+canonical consumer of this table and of N12.
 
 | Effect | Observed pattern in corpus | Earns its place when… | Slop when… |
 |---|---|---|---|
