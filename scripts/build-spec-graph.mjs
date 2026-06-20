@@ -315,15 +315,23 @@ function build() {
         // Only count a FORGE marker that appears inside an HTML comment posted
         // as the comment body (i.e. immediately after --body, possibly quoted).
         const bodyTail = window.slice(window.indexOf("--body"));
-        for (const m of bodyTail.matchAll(/<!--\s*(FORGE:[A-Z][A-Z0-9_]*)\s*-->/g)) {
+        // Match both the plain marker `<!-- FORGE:X -->` and the value-carrying
+        // handshake form `<!-- FORGE:X: <value> -->` (e.g. FORGE:KNOWLEDGE_GIST,
+        // FORGE:MILESTONE_INDEX, FORGE:PRIOR_GIST). The `:\s+` (colon + space)
+        // requirement distinguishes a value handshake from a `:COMPLETE`/`:PARTIAL`
+        // sentinel suffix (e.g. `FORGE:PHASE:COMPLETE`), which is NOT a write.
+        for (const m of bodyTail.matchAll(/<!--\s*(FORGE:[A-Z][A-Z0-9_]*)\s*(?::\s+[^>]*?)?\s*-->/g)) {
           addEdge(fromId, "WRITES", `ann:${m[1]}`, { file: rel, line: li + 1 });
         }
       }
 
       // READS: command consumes a FORGE annotation.
-      //   jq form:   contains("FORGE:X")
+      //   jq forms:  contains("FORGE:X"), contains("FORGE:X:"),
+      //              test("<!-- FORGE:X: ..."), capture("<!-- FORGE:X: ...")
       //   prose form: read[s]/re-read the FORGE:X
-      for (const m of line.matchAll(/contains\(\s*["'](FORGE:[A-Z][A-Z0-9_]*)["']/g)) {
+      // The `[^"']*?` prefix lets the value-carrying handshake forms (which embed
+      // the marker after `<!-- `) be recognized, not just bare contains().
+      for (const m of line.matchAll(/\b(?:contains|test|capture)\(\s*["'][^"']*?(FORGE:[A-Z][A-Z0-9_]*)/g)) {
         addEdge(fromId, "READS", `ann:${m[1]}`, { file: rel, line: li + 1 });
       }
       for (const m of line.matchAll(/\bre-?reads?\b[^.\n]*?(FORGE:[A-Z][A-Z0-9_]*)/gi)) {
