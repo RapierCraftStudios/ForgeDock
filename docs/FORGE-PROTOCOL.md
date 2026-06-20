@@ -523,6 +523,41 @@ gh api repos/{OWNER}/{REPO}/issues/{NUMBER}/comments \
 
 ---
 
+#### `FORGE:CRITIQUE`
+
+**Phase**: Design — Render → vision-critique loop (`/design-render-critique-loop`, #882) — after `FORGE:DESIGN_SPEC`
+**Written by**: Vision-critique loop (one per iteration)
+**Read by**: The iterate step (consumes its own findings), Close phase (improvement trajectory audit), `/design` (#888)
+**Location**: Issue comment
+
+One annotation per render→critique iteration — the page's improvement trajectory as an auditable trail. Records the
+deterministic lint floor result (#884), the desktop+mobile render, the perceptual findings (N3, N8–N12 — the negatives
+the linter declares out of scope), and the verdict (`PASS` | `ITERATE` | `BUDGET-EXHAUSTED`). The critic is strictly
+independent from the ABC benchmark judge (#878) — anti-Goodhart. See
+[`docs/design/render-critique-loop.md`](design/render-critique-loop.md).
+
+**Schema**:
+
+```markdown
+<!-- FORGE:CRITIQUE -->
+## Critique — {product} · iteration {i}/{max}
+
+**Lint floor:** {PASS | fixed N hard findings}
+**Render:** desktop + mobile captured
+**Perceptual findings:**
+- N{n}: {what was observed in the render} → {correction}
+**Verdict:** {PASS | ITERATE | BUDGET-EXHAUSTED}
+<!-- FORGE:CRITIQUE:COMPLETE -->
+```
+
+**Detection query**:
+```bash
+gh api repos/{OWNER}/{REPO}/issues/{NUMBER}/comments \
+  --jq '.[] | select(.body | contains("FORGE:CRITIQUE")) | .body'
+```
+
+---
+
 #### `FORGE:BENCH_SCORECARD`
 
 **Phase**: Design — Benchmark (`/design-bench`, #878)
