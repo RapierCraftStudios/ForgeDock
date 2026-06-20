@@ -1018,15 +1018,19 @@ for NUM in {all_batch_issue_numbers}; do
 
   # Collect the base branch of every PR that closes an issue in this milestone.
   # Iterate the milestone's issues and read each one's linked PR base.
+  # Exclude CLOSED-unmerged PRs: a closed-but-not-merged PR is a superseded/abandoned
+  # routing attempt and does NOT reflect the live lane. Keep only OPEN (in-flight) and
+  # MERGED (landed) PRs. `gh pr list --state` cannot combine open+merged, so query all
+  # and drop CLOSED in jq.
   BASES=$(gh pr list -R {GH_REPO} --state all --search "milestone:\"$MILESTONE_TITLE\"" \
-    --json baseRefName --jq '.[].baseRefName' 2>/dev/null | sort -u)
+    --json baseRefName,state --jq '.[] | select(.state != "CLOSED") | .baseRefName' 2>/dev/null | sort -u)
   # Fallback: if PR search by milestone is unavailable, derive from the issues' linked PRs.
   if [ -z "$BASES" ]; then
     BASES=$(for IN in {all_batch_issue_numbers}; do
       IM=$(gh issue view "$IN" -R {GH_REPO} --json milestone --jq '.milestone.title // empty' 2>/dev/null)
       [ "$IM" = "$MILESTONE_TITLE" ] || continue
       gh pr list -R {GH_REPO} --state all --search "$IN in:body" \
-        --json baseRefName --jq '.[].baseRefName' 2>/dev/null
+        --json baseRefName,state --jq '.[] | select(.state != "CLOSED") | .baseRefName' 2>/dev/null
     done | sort -u)
   fi
 
