@@ -109,6 +109,7 @@ graph-query.sh <subcommand> <arg> [--human] [--graph <path>] [--strict-stale] [-
 | `writers <annotation>`| commands/specs that **WRITE** (post) the annotation               |
 | `impact  <node>`      | blast radius — everything transitively affected if `<node>` changes |
 | `deps    <command>`   | a command's full input/output set, grouped by edge type           |
+| `load-set <command>`  | minimal spec set to read for a command — the command plus its transitively reachable sub-phases (`CONTAINS`) and required devdocs (`REQUIRES`), as a flat list of repo-relative file paths |
 | `search  <term>`      | substring lookup over node ids / names / paths                    |
 
 Arguments are normalized, so all of these resolve to the same node:
@@ -117,6 +118,7 @@ Arguments are normalized, so all of these resolve to the same node:
 graph-query.sh readers CONTRACT             # == readers FORGE:CONTRACT == readers ann:FORGE:CONTRACT
 graph-query.sh deps work-on                 # == deps cmd:work-on
 graph-query.sh deps work-on:build:implement # sub-phases use the Skill() `:`-delimited form
+graph-query.sh load-set work-on             # == load-set cmd:work-on
 graph-query.sh impact classify-lane.sh      # == impact script:classify-lane.sh
 graph-query.sh impact workflow:merged       # == impact label:workflow:merged
 ```
@@ -127,11 +129,24 @@ collects every command that (directly or transitively) `READS`/`WRITES`/
 So `impact FORGE:CONTRACT` returns not only its direct readers/writers but also
 the parent commands that contain them (e.g. `cmd:orchestrate`, `cmd:milestone`).
 
+`load-set` is the **forward inverse of `impact`**: it seeds at `<command>` and
+walks `CONTAINS` (sub-phases) and `REQUIRES` (devdocs) edges in the *forward*
+direction to a fixpoint, then maps the reachable nodes to their repo-relative
+file `path`s. The result is the **minimal spec set** an agent must read to run
+that command — the command itself plus only the sub-phases and devdocs actually
+reachable from it, never the full ~27-command corpus. It is the resolver that
+powers selective spec loading (Phase 0 of `work-on`). `READS`/`WRITES`/
+`TRANSITIONS`/`INVOKES` edges are *not* followed — annotations and labels have
+no spec file, and scripts are resolved separately at invoke time. The walk shares
+`impact`'s cycle-safe termination, so a self-referential `CONTAINS` edge cannot
+loop forever.
+
 ### Output
 
 Default output is **compact, agent-consumable JSON** — a JSON array for
-`readers`/`writers`/`impact`/`search`, and a JSON object keyed by edge type for
-`deps`. Pass `--human` for an aligned table instead.
+`readers`/`writers`/`impact`/`search`, a JSON object keyed by edge type for
+`deps`, and a sorted, de-duplicated JSON array of file paths for `load-set`.
+Pass `--human` for an aligned table instead.
 
 ```bash
 $ graph-query.sh writers FORGE:CONTRACT
@@ -139,6 +154,9 @@ $ graph-query.sh writers FORGE:CONTRACT
 
 $ graph-query.sh deps work-on:build:implement
 {"READS":["ann:FORGE:ARCHITECT","ann:FORGE:CONTEXT","ann:FORGE:CONTRACT","ann:FORGE:INVESTIGATOR"],"WRITES":["ann:FORGE:BUILDER"]}
+
+$ graph-query.sh load-set work-on
+["commands/review-pr.md","commands/work-on.md","commands/work-on/build.md","commands/work-on/build/architect.md","commands/work-on/build/context.md","commands/work-on/build/implement.md","commands/work-on/build/validate.md","commands/work-on/close.md","commands/work-on/decompose.md","commands/work-on/investigate.md","commands/work-on/review.md"]
 
 $ graph-query.sh writers FORGE:CONTRACT --human
 Specs that WRITE ann:FORGE:CONTRACT:

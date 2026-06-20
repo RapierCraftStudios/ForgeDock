@@ -20,12 +20,19 @@
 #                           <node> changes (annotation | label | script | command/spec)
 #   deps    <command>     — what a command reads/invokes/requires/contains
 #                           (its full input + output set), grouped by edge type
+#   load-set <command>    — minimal spec set to read for a command: the command
+#                           itself plus its transitively reachable sub-phases
+#                           (CONTAINS) and required devdocs (REQUIRES), as a flat
+#                           list of repo-relative file paths. This is the inverse
+#                           of `impact` (forward instead of reverse reachability)
+#                           and powers selective spec loading in the pipeline.
 #   search  <term>        — substring lookup over node ids / names / paths
 #
 # Arguments are normalized, so all of these are accepted:
 #   readers CONTRACT  ==  readers FORGE:CONTRACT  ==  readers ann:FORGE:CONTRACT
 #   deps work-on      ==  deps cmd:work-on
 #   deps work-on:build:implement  ==  deps cmd:work-on:build:implement
+#   load-set work-on  ==  load-set cmd:work-on
 #   impact classify-lane.sh  ==  impact script:classify-lane.sh
 #   impact workflow:merged   ==  impact label:workflow:merged
 #
@@ -52,8 +59,9 @@
 #
 # Output:
 #   Default is compact, agent-consumable JSON (a JSON array for
-#   readers/writers/impact/search; a JSON object keyed by edge type for deps).
-#   With --human, an aligned text table is printed instead.
+#   readers/writers/impact/search/load-set; a JSON object keyed by edge type
+#   for deps). load-set returns a sorted, de-duplicated array of repo-relative
+#   file paths. With --human, an aligned text table is printed instead.
 #
 # Exit codes: 0 = success, 1 = error (bad args, missing deps, unknown node).
 #
@@ -154,11 +162,11 @@ if [ "${#POSITIONAL[@]}" -gt 2 ]; then
   die "too many arguments: expected '<subcommand> <arg>', got ${#POSITIONAL[@]} positionals"
 fi
 
-[ -n "$SUBCMD" ] || die "no subcommand given (one of: readers writers impact deps search)"
+[ -n "$SUBCMD" ] || die "no subcommand given (one of: readers writers impact deps load-set search)"
 
 case "$SUBCMD" in
-  readers|writers|impact|deps|search) ;;
-  *) die "unknown subcommand '$SUBCMD' (one of: readers writers impact deps search)" ;;
+  readers|writers|impact|deps|load-set|search) ;;
+  *) die "unknown subcommand '$SUBCMD' (one of: readers writers impact deps load-set search)" ;;
 esac
 
 [ -n "$ARG" ] || die "subcommand '$SUBCMD' requires an argument"
@@ -336,6 +344,33 @@ query_impact() {
   ' "$GRAPH"
 }
 
+# Transitive FORWARD-reachability: the minimal spec set to read for a command.
+# Seeds at the command node, then walks CONTAINS (sub-phases) and REQUIRES
+# (devdocs) edges in the forward direction (.from in frontier -> collect .to) to
+# a fixpoint. The resolved node ids are mapped to their repo-relative `.path`
+# (nodes without a path — e.g. annotations — are dropped). Includes the seed
+# command's own path. Output is a sorted, de-duplicated JSON array of paths.
+#
+# This is the inverse of query_impact (forward instead of reverse) and shares
+# its cycle-safe length-equality termination, so a spurious self-CONTAINS edge
+# cannot cause a non-terminating walk. Only CONTAINS/REQUIRES are followed —
+# READS/WRITES/TRANSITIONS/INVOKES are NOT part of the spec-read set (annotations
+# and labels have no spec file; scripts are resolved separately at invoke time).
+query_load_set() {
+  local seed="$1"
+  jq -c --arg seed "$seed" '
+    [.graph.edges[] | select(.type == "CONTAINS" or .type == "REQUIRES")] as $edges
+    | (reduce .graph.nodes[] as $n ({}; .[$n.id] = ($n.path // null))) as $path
+    | def step(set):
+        ( [ $edges[] | select(.from as $f | set | index($f)) | .to ] ) as $tos
+        | (set + $tos | unique) as $next
+        | if ($next | length) == (set | length) then set else step($next) end;
+      step([$seed])
+      | map($path[.] // empty)
+      | unique
+  ' "$GRAPH"
+}
+
 # Substring search over node id / name / path. JSON array of {id,type,name}.
 query_search() {
   local term="$1"
@@ -416,6 +451,16 @@ case "$SUBCMD" in
     if [ "$HUMAN" -eq 1 ]; then
       echo "Dependencies of $from:"
       echo "$result" | render_deps_human
+    else
+      echo "$result"
+    fi
+    ;;
+  load-set)
+    from="$(normalize_cmd "$ARG")"
+    node_exists "$from" || die "no command/spec node '$from' in the graph (try: graph-query.sh search ${ARG})"
+    result="$(query_load_set "$from")"
+    if [ "$HUMAN" -eq 1 ]; then
+      echo "$result" | render_list_human "Minimal spec set for $from:"
     else
       echo "$result"
     fi
