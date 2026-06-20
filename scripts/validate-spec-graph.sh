@@ -273,9 +273,11 @@ check_orphans() {
 
 check_dangling() {
   # The builder DROPS unresolved Skill()/script/devdoc refs, so we scan the spec
-  # corpus directly. We restrict to Skill(skill="X") — the only *structured*
-  # cross-reference form — to avoid false positives on illustrative filename
-  # mentions in prose.
+  # corpus directly. We match every structured Skill() invocation form —
+  # positional Skill("X"), keyword Skill(skill="X"), and colon Skill(skill: "X")
+  # — with `/`-delimited sub-phases and uppercase/leading-digit targets, kept in
+  # sync with the builder's CONTAINS regex in build-spec-graph.mjs. The quoted
+  # target form keeps this off illustrative filename mentions in prose.
   local commands_dir="$REPO_ROOT/commands"
   [ -d "$commands_dir" ] || return 0
 
@@ -286,21 +288,29 @@ check_dangling() {
   # Extract every Skill(skill="X") / Skill(skill='X') target with file+line.
   # grep -rn over the whole tree (no fixed -A/-m window that could truncate).
   local hits
-  hits="$(grep -rnoE "Skill\(\s*skill\s*=\s*[\"'][a-z][a-z0-9:_-]*[\"']" "$commands_dir" 2>/dev/null || true)"
+  hits="$(grep -rnoE "Skill\(\s*(skill\s*[:=]\s*)?[\"'][A-Za-z0-9][A-Za-z0-9:_/-]*[\"']" "$commands_dir" 2>/dev/null || true)"
 
   [ -n "$hits" ] || return 0
 
+  # Illustrative placeholder targets used in Skill() example snippets in prose —
+  # these are documentation stand-ins, never real command references.
+  local placeholder_targets=" X subcommand "
   local line target relpath
   while IFS= read -r line; do
     [ -n "$line" ] || continue
-    # line form: <path>:<lineno>:Skill( skill = "X" )
+    # line form: <path>:<lineno>:Skill( ... "X" )
     relpath="${line%%:*}"
     relpath="${relpath#"$REPO_ROOT"/}"
     # Pull the quoted target.
-    target="$(printf '%s' "$line" | grep -oE "[\"'][a-z][a-z0-9:_-]*[\"']" | head -1 | tr -d "\"'")"
+    target="$(printf '%s' "$line" | grep -oE "[\"'][A-Za-z0-9][A-Za-z0-9:_/-]*[\"']" | head -1 | tr -d "\"'")"
     [ -n "$target" ] || continue
+    # Normalize the `/`-delimited sub-phase form (work-on/review) to the graph's
+    # `:` form (work-on:review) before resolution — kept in sync with the builder.
+    target="${target//\//:}"
+    # Skip known illustrative placeholders.
+    case "$placeholder_targets" in *" $target "*) continue ;; esac
     if ! printf '%s\n' "$known" | grep -qxF "$target"; then
-      add_finding HARD dangling-ref "$relpath references Skill(skill=\"$target\") but no command/sub-phase node \"$target\" exists in the graph."
+      add_finding HARD dangling-ref "$relpath references Skill(\"$target\") but no command/sub-phase node \"$target\" exists in the graph."
     fi
   done <<< "$hits"
 }
