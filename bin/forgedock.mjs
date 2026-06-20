@@ -2273,14 +2273,17 @@ async function doctor() {
   {
     const mcpServersPath = join(HOME, ".claude", "mcp_servers.json");
     let playwrightFound = false;
-    let mcpReadable = false;
+    let fileReadable = false;
+    let hasMcpServers = false;
 
     try {
       const mcpRaw = readFileSync(mcpServersPath, "utf-8");
       const mcpConfig = JSON.parse(mcpRaw);
+      // Read + parse succeeded — the file exists and contains valid JSON.
+      fileReadable = true;
       const servers = mcpConfig?.mcpServers;
       if (servers && typeof servers === "object") {
-        mcpReadable = true;
+        hasMcpServers = true;
         // Search for a registered server whose name or command references playwright
         for (const [name, entry] of Object.entries(servers)) {
           const nameLower = name.toLowerCase();
@@ -2298,10 +2301,15 @@ async function doctor() {
       // File absent or unreadable — treat as no MCP servers configured
     }
 
-    if (!mcpReadable) {
+    if (!fileReadable) {
       warn(
         "Playwright MCP",
         "No MCP servers file found (~/.claude/mcp_servers.json). Register Playwright MCP to enable /qa-sweep: claude mcp add playwright npx @playwright/mcp@latest",
+      );
+    } else if (!hasMcpServers) {
+      warn(
+        "Playwright MCP",
+        "MCP servers file found (~/.claude/mcp_servers.json) but it has no 'mcpServers' key. Register Playwright MCP to enable /qa-sweep: claude mcp add playwright npx @playwright/mcp@latest",
       );
     } else if (playwrightFound) {
       pass("Playwright MCP", "registered in Claude Code MCP servers");
