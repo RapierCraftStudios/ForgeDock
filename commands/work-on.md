@@ -165,8 +165,11 @@ fi
 ADAPTIVE_DIR_RAW="${REPO_PATH}/$(yq '.adaptive_scripts.directory // ".forgedock/scripts"' forge.yaml 2>/dev/null || echo '.forgedock/scripts')"
 ADAPTIVE_DIR=$(realpath -m "$ADAPTIVE_DIR_RAW" 2>/dev/null || echo "$ADAPTIVE_DIR_RAW")
 ADAPTIVE_ENABLED=$(yq '.adaptive_scripts.enabled // "true"' forge.yaml 2>/dev/null || echo 'true')
-# Bounds check: reject adaptive_scripts.directory values that escape the repo root
-if [[ "$ADAPTIVE_DIR" != "${REPO_PATH}/"* ]]; then
+# Bounds check: reject adaptive_scripts.directory values that escape the repo root.
+# Normalize REPO_PATH the same way ADAPTIVE_DIR is normalized (realpath -m) so a trailing
+# slash in paths.root does not inject a '//' into the glob and trigger a false positive.
+REPO_PATH_NORM=$(realpath -m "$REPO_PATH" 2>/dev/null || echo "$REPO_PATH")
+if [[ "$ADAPTIVE_DIR" != "${REPO_PATH_NORM}/"* ]]; then
   echo "WARNING: adaptive_scripts.directory resolves outside repo root ('$ADAPTIVE_DIR') — adaptive tier disabled" >&2
   ADAPTIVE_ENABLED=false
 fi
