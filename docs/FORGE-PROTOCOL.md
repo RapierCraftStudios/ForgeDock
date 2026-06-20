@@ -404,6 +404,41 @@ These annotations drive the UI Taste Harness — the design-generation pipeline 
 
 ---
 
+#### `FORGE:DESIGN_RATIONALE`
+
+**Phase**: Design — Architecture (design-architect, #886) — emitted *before* `FORGE:DESIGN_SPEC`
+**Written by**: Design-architect agent
+**Read by**: Generate agent (the spec it produces), render → vision-critique loop (#882), and a non-designer reviewer (the reasoning is reviewable without judging pixels)
+**Location**: Issue comment
+
+The designer's diary — the reasoning-before-generation step. Captures the seven-element chain of thought (intent/feeling, audience/objection, communication hierarchy, direction + rejected alternatives, signature move, what's being tried this time, non-goals) and **produces** the `FORGE:DESIGN_SPEC` rather than letting the spec appear from nowhere. The format is the structured contract: it MUST carry at least one explicitly **rejected alternative**, a named **signature move**, and a **produces-DESIGN_SPEC link**. See [`docs/design/design-architect-rationale.md`](design/design-architect-rationale.md) for the full doctrine.
+
+**Schema**:
+
+```markdown
+<!-- FORGE:DESIGN_RATIONALE -->
+## Design Rationale — {product}
+
+**Intent / feeling:** {one message} · {one feeling}
+**Audience / objection:** {who} — must overcome: {objection}
+**Communication hierarchy:** 1) {…} 2) {…} 3) {…}
+**Direction:** {archetype} — because {reasoning}
+  - Considered & rejected: {alt A} (because {…}); {alt B} (because {…})
+**Signature move:** {the one non-obvious idea}
+**Trying this time:** {technique/learning} (from memory: avoiding {prior move})
+**Non-goals:** {what this won't do}
+
+→ Produces DESIGN_SPEC: {link}
+```
+
+**Detection query**:
+```bash
+gh api repos/{OWNER}/{REPO}/issues/{NUMBER}/comments \
+  --jq '.[] | select(.body | contains("FORGE:DESIGN_RATIONALE")) | .body'
+```
+
+---
+
 #### `FORGE:DESIGN_SPEC`
 
 **Phase**: Design — Architecture (design-architect, #886)
