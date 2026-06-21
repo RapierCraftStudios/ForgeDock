@@ -882,6 +882,17 @@ function main() {
     );
     process.exit(2);
   }
+  // JSON.parse accepts null/primitives/arrays as valid JSON; the check functions
+  // all dereference spec.<field>, so a non-object spec (e.g. a literal `null`)
+  // would throw an uncaught TypeError. Degrade to the documented exit-2/WARNING.
+  if (!spec || typeof spec !== "object" || Array.isArray(spec)) {
+    const kind =
+      spec === null ? "null" : Array.isArray(spec) ? "array" : typeof spec;
+    process.stderr.write(
+      `WARNING: --spec ${opts.spec} is not a design-spec object (got ${kind}); skipping deterministic checks.\n`,
+    );
+    process.exit(2);
+  }
   try {
     htmlRaw = readFileSync(opts.html, "utf8");
   } catch (e) {
