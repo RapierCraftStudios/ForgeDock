@@ -390,7 +390,7 @@ Print a structured report at the end of every run:
 | pip       | {N}      | {N}      | {N}                      | {N}               | {N}                  |
 
 ### Issues Created
-{list with issue numbers and titles, or "None — use --fix=false dry-run or no --fix flag"}
+{list with issue numbers and titles, or "None — without --fix, or use --dry-run"}
 
 ### Major Upgrades (Human Review Required)
 {list: package: current → latest [major], or "None detected"}
