@@ -592,6 +592,59 @@ gh api repos/{OWNER}/{REPO}/issues/{NUMBER}/comments \
 
 ---
 
+#### `FORGE:USER_FEEDBACK`
+
+<!-- Added: forge#1044 — user-feedback loop -->
+
+**Phase**: Design — User-feedback loop (`/design` stage 4.5, #1044) — after `FORGE:CRITIQUE`, before `FORGE:DESIGN_SHIPPED`
+**Written by**: `/design` user-feedback stage (Stage 4.5) — records structured user input after the automated critique loop
+**Read by**: Surgical re-generation step (same stage 4.5, consumes `section_target` + `modification`), Close phase (audit trail of user-driven changes)
+**Location**: Issue comment
+
+The structured record of one user-feedback round in Stage 4.5 of the `/design` pipeline. Posted once per feedback
+exchange — there may be multiple `FORGE:USER_FEEDBACK` annotations on a single issue if the user iterates several
+times. Each annotation carries a `section_target` (the section ID from `layout_grammar.sections` to re-generate), the
+`feedback_type` (asset / emotion / direction / freeform), any asset URL, the structured modification derived from the
+feedback, and a `satisfied` flag indicating whether the user is done iterating.
+
+The annotation is **not produced** in automated (benchmark) runs — Stage 4.5 is bypassed when no user is present.
+See [`docs/design/design-spec-schema.md`](design/design-spec-schema.md) for the section modularity contract that
+governs surgical re-generation. See [`commands/design.md`](../commands/design.md) for the full Stage 4.5 procedure.
+
+**Constraint**: `FORGE:USER_FEEDBACK` may modify a section's visual execution but MUST NOT change the committed
+`meta.archetype` or the signature move from `FORGE:DESIGN_RATIONALE` — those choices are locked once the spec is
+committed in Stage 2.
+
+**Schema**:
+
+````markdown
+<!-- FORGE:USER_FEEDBACK -->
+## User Feedback — {product} · round {n}
+
+**Section target:** {section ID from layout_grammar.sections, e.g. "hero" | "all" for page-wide feedback}
+**Feedback type:** {asset | emotion | direction | freeform}
+**Asset URL:** {URL or "none"}
+**Modification:** {structured description of what to change — derived from user's natural-language input}
+**Emotion target:** {trust | speed | power | craft | play | unchanged} — maps to motion vocabulary
+**Satisfied:** {yes | no — "no" loops back to 4.5 after re-generation}
+**Freeform notes:** {verbatim user input not captured in the structured fields above}
+<!-- FORGE:USER_FEEDBACK:COMPLETE -->
+````
+
+**Field notes**:
+- `section_target`: must match an `id` in the committed `FORGE:DESIGN_SPEC → layout_grammar.sections`. Use `"all"` only for page-wide color/typography changes that cannot be scoped to one section.
+- `feedback_type`: `asset` = user provided a URL (video/logo/image/colors); `emotion` = user described a feeling to change; `direction` = user described a layout or composition change; `freeform` = catch-all for input that doesn't fit the above.
+- `modification`: the parsed, actionable version of the user's words — e.g., user says "make the hero feel more urgent" → modification: `"increase motion intensity in hero scroll-reveal; tighten headline tracking"`.
+- `satisfied: yes` means no further feedback iteration — proceed to Stage 5 (design-close).
+
+**Detection query**:
+```bash
+gh api repos/{OWNER}/{REPO}/issues/{NUMBER}/comments \
+  --jq '[.[] | select(.body | contains("FORGE:USER_FEEDBACK"))] | last | .body'
+```
+
+---
+
 #### `FORGE:BENCH_SCORECARD`
 
 **Phase**: Design — Benchmark (`/design-bench`, #878)
