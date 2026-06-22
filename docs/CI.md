@@ -145,8 +145,7 @@ The `claude --print` invocation accepts `/review-pr` arguments. For example, to 
 ```yaml
 run: |
   claude --print "/review-pr $PR_NUMBER --model opus" \
-    --dangerously-skip-permissions \
-    --output-format text
+    --dangerously-skip-permissions
 ```
 
 ### Enable commit status badge
@@ -171,3 +170,6 @@ Uncomment the `Set Commit Status` step in the workflow template to add a pass/fa
 
 **`npx forgedock install` reports `command not found: forgedock`**
 → `npx forgedock install` runs the installer from npm. If it fails, verify the ForgeDock package name is correct: `npm show forgedock version` should return a version number.
+
+**`claude: unknown flag --output-format` or similar unrecognized flag error**
+→ Your local Claude Code installation is outdated. The `--output-format` flag is available in all recent versions of Claude Code. Run `npm update -g @anthropic-ai/claude-code` to update to the latest version. Note: the workflow template itself no longer passes `--output-format` (the flag was redundant — `--print` defaults to text output). If you copied the template before this fix, remove the `--output-format text` line from your workflow file.
