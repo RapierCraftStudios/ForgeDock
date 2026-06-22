@@ -14,7 +14,8 @@
 <a href="https://docs.anthropic.com/en/docs/claude-code"><img src="https://img.shields.io/badge/Built%20for-Claude%20Code-7C3AED?style=flat-square" alt="Claude Code" /></a>
 <br />
 <a href="LICENSE"><img src="https://img.shields.io/badge/License-AGPL--3.0-blue.svg?style=flat-square" alt="License: AGPL-3.0" /></a>&nbsp;
-<a href="https://github.com/RapierCraftStudios/ForgeDock/pulls"><img src="https://img.shields.io/badge/PRs-welcome-brightgreen.svg?style=flat-square" alt="PRs Welcome" /></a>
+<a href="https://github.com/RapierCraftStudios/ForgeDock/pulls"><img src="https://img.shields.io/badge/PRs-welcome-brightgreen.svg?style=flat-square" alt="PRs Welcome" /></a>&nbsp;
+<a href="https://github.com/RapierCraftStudios/ForgeDock/stargazers"><img src="https://img.shields.io/github/stars/RapierCraftStudios/ForgeDock?style=flat-square&color=yellow" alt="GitHub Stars" /></a>
 
 <br /><br />
 
@@ -215,6 +216,18 @@ Removes all ForgeDock command symlinks from `~/.claude/commands/`. Your `forge.y
    <img alt="Star History Chart" src="https://api.star-history.com/svg?repos=RapierCraftStudios/ForgeDock&type=Date" />
  </picture>
 </a>
+
+---
+
+## Use in Your Project
+
+If you use ForgeDock in your own project, add a badge to your README:
+
+```markdown
+[![Built with ForgeDock](https://img.shields.io/badge/pipeline-ForgeDock-blue?style=flat-square)](https://github.com/RapierCraftStudios/ForgeDock)
+```
+
+[![Built with ForgeDock](https://img.shields.io/badge/pipeline-ForgeDock-blue?style=flat-square)](https://github.com/RapierCraftStudios/ForgeDock)
 
 ---
 
