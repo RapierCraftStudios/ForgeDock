@@ -1,0 +1,529 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Voltage — Serverless Compute for the AI Era</title>
+<link href="https://fonts.googleapis.com/css2?family=Source+Code+Pro:wght@400;500;600&family=Space+Grotesk:wght@400;500;600;700&display=swap" rel="stylesheet">
+<style>
+  *, *::before, *::after { margin: 0; padding: 0; box-sizing: border-box; }
+  :root {
+    --bg: #0d1117;
+    --surface: #161b22;
+    --surface2: #1c2129;
+    --border: #30363d;
+    --text: #e6edf3;
+    --text-muted: #7d8590;
+    --electric: #58a6ff;
+    --electric-bg: #58a6ff15;
+    --volt-green: #3fb950;
+    --volt-orange: #d29922;
+    --volt-purple: #bc8cff;
+    --volt-red: #f85149;
+  }
+  body {
+    font-family: 'Space Grotesk', sans-serif;
+    background: var(--bg);
+    color: var(--text);
+    line-height: 1.6;
+  }
+  a { text-decoration: none; color: var(--electric); }
+
+  /* NAV — minimal, transparent */
+  header {
+    position: fixed; top: 0; width: 100%; z-index: 100;
+    background: rgba(13,17,23,0.8);
+    backdrop-filter: blur(16px);
+    border-bottom: 1px solid var(--border);
+  }
+  .header-inner {
+    max-width: 1280px; margin: 0 auto;
+    padding: 0 40px; height: 56px;
+    display: flex; align-items: center; justify-content: space-between;
+  }
+  .logo {
+    font-weight: 700; font-size: 20px; color: var(--text);
+    display: flex; align-items: center; gap: 6px;
+  }
+  .logo-bolt {
+    display: inline-flex; align-items: center; justify-content: center;
+    width: 24px; height: 24px;
+    background: linear-gradient(135deg, var(--electric), var(--volt-purple));
+    border-radius: 5px; color: #fff; font-size: 14px; font-weight: 700;
+  }
+  .nav-links { display: flex; gap: 24px; align-items: center; }
+  .nav-links a { color: var(--text-muted); font-size: 14px; font-weight: 500; }
+  .nav-links a:hover { color: var(--text); }
+  .btn-ghost {
+    padding: 6px 16px; border: 1px solid var(--border);
+    border-radius: 6px; font-size: 13px; font-weight: 600;
+    color: var(--text); background: transparent;
+  }
+  .btn-ghost:hover { border-color: var(--text-muted); }
+  .btn-solid {
+    padding: 6px 16px; border: 1px solid var(--electric);
+    border-radius: 6px; font-size: 13px; font-weight: 600;
+    color: #fff; background: var(--electric);
+  }
+  .btn-solid:hover { opacity: 0.9; }
+
+  /* HERO — split diagonal with glowing code */
+  .hero {
+    max-width: 1280px; margin: 0 auto;
+    padding: 140px 40px 60px;
+    display: grid; grid-template-columns: 1fr; gap: 0;
+    text-align: center;
+  }
+  .hero h1 {
+    font-size: 64px; font-weight: 700; letter-spacing: -2.5px;
+    line-height: 1.08; margin-bottom: 20px;
+  }
+  .hero h1 .gradient {
+    background: linear-gradient(90deg, var(--electric), var(--volt-purple), var(--volt-green));
+    -webkit-background-clip: text; -webkit-text-fill-color: transparent;
+    background-clip: text;
+  }
+  .hero > p {
+    font-size: 18px; color: var(--text-muted); max-width: 580px;
+    margin: 0 auto 36px; line-height: 1.7;
+  }
+  .hero-actions {
+    display: flex; gap: 12px; justify-content: center; align-items: center;
+    margin-bottom: 16px;
+  }
+  .btn-lg {
+    padding: 14px 32px; border-radius: 8px;
+    font-size: 15px; font-weight: 700; display: inline-block;
+  }
+  .btn-lg.primary { background: var(--electric); color: #fff; border: none; }
+  .btn-lg.primary:hover { opacity: 0.9; }
+  .btn-lg.outline {
+    background: transparent; color: var(--text);
+    border: 1px solid var(--border);
+  }
+  .btn-lg.outline:hover { border-color: var(--text-muted); }
+  .hero-install {
+    font-family: 'Source Code Pro', monospace; font-size: 14px;
+    color: var(--text-muted); margin-top: 12px;
+  }
+  .hero-install span { color: var(--volt-green); }
+
+  /* TRIPLE CODE PANEL */
+  .code-trio {
+    max-width: 1280px; margin: 0 auto;
+    padding: 60px 40px 100px;
+    display: grid; grid-template-columns: repeat(3, 1fr); gap: 16px;
+  }
+  .code-card {
+    background: var(--surface); border: 1px solid var(--border);
+    border-radius: 10px; overflow: hidden;
+    transition: border-color 0.3s;
+  }
+  .code-card:hover { border-color: var(--electric); }
+  .code-card-header {
+    padding: 12px 16px; border-bottom: 1px solid var(--border);
+    display: flex; align-items: center; justify-content: space-between;
+  }
+  .code-card-header .label {
+    font-size: 11px; font-weight: 600; text-transform: uppercase;
+    letter-spacing: 0.5px; color: var(--text-muted);
+  }
+  .code-card-header .tag {
+    font-size: 10px; font-weight: 600; padding: 2px 8px;
+    border-radius: 100px; background: var(--electric-bg);
+    color: var(--electric);
+  }
+  .code-card pre {
+    padding: 20px; font-family: 'Source Code Pro', monospace;
+    font-size: 12.5px; line-height: 1.8; color: #adbac7;
+    overflow-x: auto; margin: 0;
+  }
+  .code-card pre .kw { color: var(--volt-purple); }
+  .code-card pre .fn { color: var(--electric); }
+  .code-card pre .str { color: var(--volt-green); }
+  .code-card pre .dec { color: var(--volt-orange); }
+  .code-card pre .cm { color: var(--text-muted); }
+  .code-card pre .num { color: var(--volt-red); }
+  .code-card-footer {
+    padding: 12px 16px; border-top: 1px solid var(--border);
+    font-size: 13px; color: var(--text-muted);
+  }
+
+  /* CAPABILITIES — horizontal scroll-like row */
+  .capabilities {
+    max-width: 1280px; margin: 0 auto;
+    padding: 80px 40px;
+    border-top: 1px solid var(--border);
+  }
+  .cap-header {
+    display: flex; justify-content: space-between; align-items: flex-end;
+    margin-bottom: 48px;
+  }
+  .cap-header h2 {
+    font-size: 36px; font-weight: 700; letter-spacing: -1.5px;
+  }
+  .cap-header p {
+    font-size: 14px; color: var(--text-muted); max-width: 400px;
+    text-align: right;
+  }
+  .cap-grid {
+    display: grid; grid-template-columns: repeat(4, 1fr); gap: 1px;
+    background: var(--border); border-radius: 12px; overflow: hidden;
+  }
+  .cap-item {
+    background: var(--surface); padding: 32px 28px;
+  }
+  .cap-item .cap-icon {
+    font-size: 28px; margin-bottom: 16px; display: block;
+  }
+  .cap-item h3 {
+    font-size: 16px; font-weight: 700; margin-bottom: 8px;
+  }
+  .cap-item p {
+    font-size: 13px; color: var(--text-muted); line-height: 1.6;
+  }
+
+  /* COMPARISON TABLE */
+  .comparison {
+    max-width: 1280px; margin: 0 auto;
+    padding: 80px 40px;
+    border-top: 1px solid var(--border);
+  }
+  .comparison h2 {
+    font-size: 36px; font-weight: 700; letter-spacing: -1.5px;
+    margin-bottom: 12px;
+  }
+  .comparison > p {
+    font-size: 16px; color: var(--text-muted); margin-bottom: 40px;
+  }
+  .comp-table {
+    width: 100%; border-collapse: collapse;
+    font-size: 14px;
+  }
+  .comp-table th {
+    text-align: left; padding: 12px 20px;
+    border-bottom: 2px solid var(--border);
+    font-weight: 600; font-size: 13px;
+    color: var(--text-muted); text-transform: uppercase;
+    letter-spacing: 0.5px;
+  }
+  .comp-table th:last-child {
+    color: var(--electric); border-bottom-color: var(--electric);
+  }
+  .comp-table td {
+    padding: 14px 20px;
+    border-bottom: 1px solid var(--border);
+    color: var(--text-muted);
+  }
+  .comp-table td:first-child { color: var(--text); font-weight: 500; }
+  .comp-table td:last-child { color: var(--volt-green); font-weight: 600; }
+  .comp-table tr:last-child td { border-bottom: none; }
+
+  /* TESTIMONIALS / SOCIAL PROOF */
+  .proof {
+    max-width: 1280px; margin: 0 auto;
+    padding: 80px 40px;
+    border-top: 1px solid var(--border);
+    display: grid; grid-template-columns: repeat(3, 1fr); gap: 20px;
+  }
+  .proof-card {
+    background: var(--surface); border: 1px solid var(--border);
+    border-radius: 10px; padding: 28px;
+  }
+  .proof-card blockquote {
+    font-size: 14px; color: var(--text-muted); line-height: 1.7;
+    margin-bottom: 16px; font-style: italic;
+  }
+  .proof-card .author {
+    font-size: 13px; font-weight: 600; color: var(--text);
+  }
+  .proof-card .role {
+    font-size: 12px; color: var(--text-muted);
+  }
+
+  /* FINAL CTA */
+  .final {
+    max-width: 1280px; margin: 0 auto;
+    padding: 100px 40px 80px;
+    border-top: 1px solid var(--border);
+    text-align: center;
+  }
+  .final h2 {
+    font-size: 48px; font-weight: 700; letter-spacing: -2px;
+    margin-bottom: 16px;
+  }
+  .final h2 .gradient {
+    background: linear-gradient(90deg, var(--electric), var(--volt-green));
+    -webkit-background-clip: text; -webkit-text-fill-color: transparent;
+    background-clip: text;
+  }
+  .final p {
+    font-size: 16px; color: var(--text-muted);
+    max-width: 480px; margin: 0 auto 32px;
+  }
+  .final .btn-lg { margin-bottom: 16px; }
+  .final .links {
+    display: flex; gap: 24px; justify-content: center;
+    margin-top: 20px;
+  }
+  .final .links a {
+    font-size: 14px; color: var(--text-muted);
+    border-bottom: 1px solid var(--border);
+    padding-bottom: 2px;
+  }
+  .final .links a:hover { color: var(--text); border-color: var(--text); }
+
+  /* FOOTER */
+  footer {
+    border-top: 1px solid var(--border);
+    max-width: 1280px; margin: 0 auto;
+    padding: 32px 40px;
+    display: flex; justify-content: space-between; align-items: center;
+  }
+  footer span { font-size: 12px; color: var(--text-muted); }
+  footer .foot-links { display: flex; gap: 20px; }
+  footer .foot-links a { font-size: 12px; color: var(--text-muted); }
+  footer .foot-links a:hover { color: var(--text); }
+</style>
+</head>
+<body>
+
+<header>
+  <div class="header-inner">
+    <div class="logo">
+      <span class="logo-bolt">V</span> Voltage
+    </div>
+    <div class="nav-links">
+      <a href="#capabilities">Platform</a>
+      <a href="#comparison">Compare</a>
+      <a href="#">Pricing</a>
+      <a href="#">Docs</a>
+      <a href="#" class="btn-ghost">Log in</a>
+      <a href="#" class="btn-solid">Sign up</a>
+    </div>
+  </div>
+</header>
+
+<section class="hero">
+  <h1>Serverless compute<br>for the <span class="gradient">AI era</span></h1>
+  <p>Write Python. Attach GPUs. Deploy in seconds. Voltage runs your functions in the cloud and scales them from zero to thousands of containers automatically. No clusters, no containers, no YAML.</p>
+  <div class="hero-actions">
+    <a href="#" class="btn-lg primary">Run your first function</a>
+    <a href="#" class="btn-lg outline">View documentation</a>
+  </div>
+  <div class="hero-install">
+    <span>$</span> pip install voltage
+  </div>
+</section>
+
+<section class="code-trio">
+  <div class="code-card">
+    <div class="code-card-header">
+      <span class="label">Batch inference</span>
+      <span class="tag">GPU</span>
+    </div>
+    <pre>
+<span class="kw">import</span> voltage
+
+<span class="dec">@voltage.function</span>(gpu=<span class="str">"A100"</span>)
+<span class="kw">def</span> <span class="fn">classify</span>(images: list[bytes]):
+    <span class="kw">import</span> torch
+    <span class="kw">from</span> torchvision <span class="kw">import</span> models
+
+    model = models.resnet50(
+        weights=<span class="str">"IMAGENET1K_V2"</span>
+    ).cuda().eval()
+
+    <span class="cm"># process batch on GPU</span>
+    <span class="kw">return</span> [predict(model, img)
+            <span class="kw">for</span> img <span class="kw">in</span> images]</pre>
+    <div class="code-card-footer">Runs on cloud A100 -- called like a local function</div>
+  </div>
+
+  <div class="code-card">
+    <div class="code-card-header">
+      <span class="label">Inference endpoint</span>
+      <span class="tag">HTTPS</span>
+    </div>
+    <pre>
+<span class="dec">@voltage.endpoint</span>(
+    gpu=<span class="str">"T4"</span>,
+    concurrency=<span class="num">50</span>,
+)
+<span class="kw">def</span> <span class="fn">generate</span>(prompt: str):
+    <span class="kw">from</span> vllm <span class="kw">import</span> LLM
+
+    llm = LLM(
+        model=<span class="str">"mistralai/Mistral-7B"</span>
+    )
+    output = llm.generate(prompt)
+    <span class="kw">return</span> {
+        <span class="str">"text"</span>: output[<span class="num">0</span>].text
+    }</pre>
+    <div class="code-card-footer">Auto-scaling HTTPS API with auth built in</div>
+  </div>
+
+  <div class="code-card">
+    <div class="code-card-header">
+      <span class="label">Scheduled job</span>
+      <span class="tag">CRON</span>
+    </div>
+    <pre>
+<span class="dec">@voltage.schedule</span>(
+    cron=<span class="str">"0 3 * * *"</span>,
+    memory=<span class="num">16384</span>,
+    cpu=<span class="num">4</span>,
+)
+<span class="kw">def</span> <span class="fn">nightly_etl</span>():
+    <span class="kw">import</span> polars <span class="kw">as</span> pl
+
+    df = pl.read_parquet(<span class="str">"s3://..."</span>)
+    result = (
+        df.filter(pl.col(<span class="str">"date"</span>) ==
+                  yesterday())
+          .group_by(<span class="str">"region"</span>)
+          .agg(pl.col(<span class="str">"revenue"</span>).sum())
+    )
+    result.write_delta(<span class="str">"s3://..."</span>)</pre>
+    <div class="code-card-footer">Runs at 3 AM daily, scales to zero between runs</div>
+  </div>
+</section>
+
+<section class="capabilities" id="capabilities">
+  <div class="cap-header">
+    <h2>Platform capabilities</h2>
+    <p>Everything you need to run compute-heavy workloads in production, with nothing you need to manage.</p>
+  </div>
+  <div class="cap-grid">
+    <div class="cap-item">
+      <span class="cap-icon">&#9889;</span>
+      <h3>GPU fleet</h3>
+      <p>T4, L4, A100, H100. Single or multi-GPU. Select per-function. Available in seconds, not minutes.</p>
+    </div>
+    <div class="cap-item">
+      <span class="cap-icon">&#8596;</span>
+      <h3>Autoscale 0 to N</h3>
+      <p>Scale from zero to 10,000+ containers based on load. Pay nothing when idle. Configure min/max replicas.</p>
+    </div>
+    <div class="cap-item">
+      <span class="cap-icon">&#128274;</span>
+      <h3>Secrets &amp; auth</h3>
+      <p>Inject secrets at runtime. API keys, tokens, and certificates are encrypted at rest and in transit.</p>
+    </div>
+    <div class="cap-item">
+      <span class="cap-icon">&#128190;</span>
+      <h3>Persistent volumes</h3>
+      <p>Attach network storage to any function. Share model weights, datasets, and checkpoints across runs.</p>
+    </div>
+    <div class="cap-item">
+      <span class="cap-icon">&#127760;</span>
+      <h3>HTTPS endpoints</h3>
+      <p>Expose functions as APIs with one decorator. Request queuing, batching, auth, and streaming included.</p>
+    </div>
+    <div class="cap-item">
+      <span class="cap-icon">&#128337;</span>
+      <h3>Cron scheduling</h3>
+      <p>Schedule recurring workloads. Nightly retraining, batch scoring, ETL pipelines. Fully managed retries.</p>
+    </div>
+    <div class="cap-item">
+      <span class="cap-icon">&#128200;</span>
+      <h3>Observability</h3>
+      <p>Real-time logs, GPU utilization, cost per function. OpenTelemetry export. Alerts on errors and latency.</p>
+    </div>
+    <div class="cap-item">
+      <span class="cap-icon">&#128187;</span>
+      <h3>Local dev loop</h3>
+      <p>Run and test locally, deploy to cloud. Hot-reload functions. SSH into running containers when needed.</p>
+    </div>
+  </div>
+</section>
+
+<section class="comparison" id="comparison">
+  <h2>Why teams switch to Voltage</h2>
+  <p>Compared to traditional infrastructure, Voltage eliminates entire categories of work.</p>
+  <table class="comp-table">
+    <thead>
+      <tr>
+        <th>Concern</th>
+        <th>Traditional (K8s / EC2)</th>
+        <th>Voltage</th>
+      </tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td>GPU provisioning</td>
+        <td>Manual quota requests, hours to days</td>
+        <td>One parameter, seconds</td>
+      </tr>
+      <tr>
+        <td>Container images</td>
+        <td>Write Dockerfiles, push to registry</td>
+        <td>Auto-detected from imports</td>
+      </tr>
+      <tr>
+        <td>Scaling</td>
+        <td>Configure HPA, node autoscaler</td>
+        <td>Automatic, zero to 10K</td>
+      </tr>
+      <tr>
+        <td>Idle costs</td>
+        <td>Paying for reserved instances 24/7</td>
+        <td>$0 when not running</td>
+      </tr>
+      <tr>
+        <td>Cold starts</td>
+        <td>Minutes for GPU nodes</td>
+        <td>Sub-second for most workloads</td>
+      </tr>
+      <tr>
+        <td>Config surface area</td>
+        <td>YAML, Terraform, Helm, CI/CD</td>
+        <td>One Python decorator</td>
+      </tr>
+    </tbody>
+  </table>
+</section>
+
+<section class="proof">
+  <div class="proof-card">
+    <blockquote>"We replaced our 12-node GPU cluster with 40 lines of Voltage code. Our inference costs dropped 70% because we stopped paying for idle GPUs overnight."</blockquote>
+    <div class="author">Sarah Chen</div>
+    <div class="role">ML Platform Lead, Series B startup</div>
+  </div>
+  <div class="proof-card">
+    <blockquote>"The cold start times are genuinely impressive. We serve real-time model predictions and our p99 latency is under 200ms including container spin-up."</blockquote>
+    <div class="author">Marcus Webb</div>
+    <div class="role">Senior Backend Engineer</div>
+  </div>
+  <div class="proof-card">
+    <blockquote>"I went from 'I need to train a model' to a deployed training pipeline in 20 minutes. No DevOps ticket, no Kubernetes config, no waiting for GPU quota."</blockquote>
+    <div class="author">Priya Raghavan</div>
+    <div class="role">Data Scientist</div>
+  </div>
+</section>
+
+<section class="final">
+  <h2>Start shipping <span class="gradient">GPU workloads</span> today</h2>
+  <p>Free tier includes 10 GPU-hours and unlimited CPU function invocations. No credit card required.</p>
+  <a href="#" class="btn-lg primary">Get started free</a>
+  <div class="links">
+    <a href="#">Documentation</a>
+    <a href="#">Examples on GitHub</a>
+    <a href="#">Join Discord</a>
+  </div>
+</section>
+
+<footer>
+  <span>&copy; 2026 Voltage, Inc.</span>
+  <div class="foot-links">
+    <a href="#">Docs</a>
+    <a href="#">Blog</a>
+    <a href="#">Status</a>
+    <a href="#">GitHub</a>
+    <a href="#">Privacy</a>
+    <a href="#">Terms</a>
+  </div>
+</footer>
+
+</body>
+</html>

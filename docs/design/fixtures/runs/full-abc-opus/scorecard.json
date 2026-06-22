@@ -1,0 +1,144 @@
+{
+  "corpus_version": "seed-v1",
+  "generation_model": "claude-opus-4-6",
+  "judge_model": "claude-opus-4-6",
+  "n_products": 5,
+  "n_runs_per_product": 3,
+  "win_rate_vs_C": {
+    "A": {
+      "mean": 0.333,
+      "by_product": {
+        "cadence": 0.167,
+        "tender": 0.333,
+        "slipstream": 0.167,
+        "voltage": 0.167,
+        "plume": 0.833
+      }
+    },
+    "B": {
+      "mean": 0.067,
+      "by_product": {
+        "cadence": 0,
+        "tender": 0,
+        "slipstream": 0,
+        "voltage": 0,
+        "plume": 0.333
+      }
+    }
+  },
+  "a_vs_b_win_rate": 0.9,
+  "rubric": {
+    "A": {
+      "hierarchy": {
+        "mean": 4.4,
+        "stdev": 0.737
+      },
+      "typography": {
+        "mean": 4.467,
+        "stdev": 0.64
+      },
+      "color": {
+        "mean": 3.933,
+        "stdev": 0.594
+      },
+      "whitespace": {
+        "mean": 4.133,
+        "stdev": 0.743
+      },
+      "originality": {
+        "mean": 4.267,
+        "stdev": 0.961
+      },
+      "mobile": {
+        "mean": 3.467,
+        "stdev": 0.64
+      }
+    },
+    "B": {
+      "hierarchy": {
+        "mean": 3.267,
+        "stdev": 0.704
+      },
+      "typography": {
+        "mean": 3.267,
+        "stdev": 0.458
+      },
+      "color": {
+        "mean": 3.133,
+        "stdev": 0.64
+      },
+      "whitespace": {
+        "mean": 3.467,
+        "stdev": 0.64
+      },
+      "originality": {
+        "mean": 2.467,
+        "stdev": 0.834
+      },
+      "mobile": {
+        "mean": 3.467,
+        "stdev": 0.516
+      }
+    },
+    "C": {
+      "hierarchy": {
+        "mean": 5,
+        "stdev": 0
+      },
+      "typography": {
+        "mean": 5,
+        "stdev": 0
+      },
+      "color": {
+        "mean": 4.8,
+        "stdev": 0.414
+      },
+      "whitespace": {
+        "mean": 5,
+        "stdev": 0
+      },
+      "originality": {
+        "mean": 4.8,
+        "stdev": 0.414
+      },
+      "mobile": {
+        "mean": 4.6,
+        "stdev": 0.507
+      }
+    }
+  },
+  "slop": {
+    "A": 1.2,
+    "B": 3.8,
+    "C": 0
+  },
+  "judge_calibration": {
+    "miscalibrated_runs": [
+      {
+        "product": "tender",
+        "run": 2,
+        "comparison": "A_vs_C",
+        "winner": "A"
+      },
+      {
+        "product": "plume",
+        "run": 1,
+        "comparison": "A_vs_C",
+        "winner": "A"
+      },
+      {
+        "product": "plume",
+        "run": 2,
+        "comparison": "A_vs_C",
+        "winner": "A"
+      },
+      {
+        "product": "plume",
+        "run": 2,
+        "comparison": "B_vs_C",
+        "winner": "B"
+      }
+    ],
+    "ok": false
+  }
+}

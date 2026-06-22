@@ -1,0 +1,190 @@
+{
+  "corpus_version": "seed-v1",
+  "generation_model": "claude-opus-4-6",
+  "judge_model": "claude-opus-4-6",
+  "benchmark_date": "2026-06-22",
+  "note": "Full A-vs-B-vs-C benchmark with Opus for both generation and judging. Arm A = ForgeDock harness (archetype sampling + anti-slop + critique). Arm B = raw one-shot. Slipstream arm C viewport-only (vercel.com rendering issue).",
+  "products": [
+    {
+      "product": "cadence",
+      "reference": "resend.com",
+      "runs": [
+        {
+          "run": 1,
+          "pairwise": {"A_vs_C": "C", "B_vs_C": "C", "A_vs_B": "A"},
+          "rubric": {
+            "A": {"hierarchy": 5, "typography": 5, "color": 4, "whitespace": 4, "originality": 5, "mobile": 4},
+            "B": {"hierarchy": 3, "typography": 3, "color": 3, "whitespace": 3, "originality": 2, "mobile": 3},
+            "C": {"hierarchy": 5, "typography": 5, "color": 5, "whitespace": 5, "originality": 5, "mobile": 5}
+          },
+          "slop": {"A": 1, "B": 4, "C": 0}
+        },
+        {
+          "run": 2,
+          "pairwise": {"A_vs_C": "C", "B_vs_C": "C", "A_vs_B": "A"},
+          "rubric": {
+            "A": {"hierarchy": 4, "typography": 4, "color": 4, "whitespace": 4, "originality": 4, "mobile": 4},
+            "B": {"hierarchy": 2, "typography": 3, "color": 3, "whitespace": 2, "originality": 1, "mobile": 3},
+            "C": {"hierarchy": 5, "typography": 5, "color": 5, "whitespace": 5, "originality": 5, "mobile": 5}
+          },
+          "slop": {"A": 1, "B": 6, "C": 0}
+        },
+        {
+          "run": 3,
+          "pairwise": {"A_vs_C": "tie", "B_vs_C": "C", "A_vs_B": "A"},
+          "rubric": {
+            "A": {"hierarchy": 5, "typography": 5, "color": 4, "whitespace": 4, "originality": 5, "mobile": 3},
+            "B": {"hierarchy": 3, "typography": 3, "color": 3, "whitespace": 3, "originality": 3, "mobile": 3},
+            "C": {"hierarchy": 5, "typography": 5, "color": 5, "whitespace": 5, "originality": 5, "mobile": 5}
+          },
+          "slop": {"A": 0, "B": 3, "C": 0}
+        }
+      ]
+    },
+    {
+      "product": "tender",
+      "reference": "stripe.com",
+      "runs": [
+        {
+          "run": 1,
+          "pairwise": {"A_vs_C": "C", "B_vs_C": "C", "A_vs_B": "A"},
+          "rubric": {
+            "A": {"hierarchy": 4, "typography": 4, "color": 3, "whitespace": 4, "originality": 4, "mobile": 3},
+            "B": {"hierarchy": 3, "typography": 3, "color": 2, "whitespace": 3, "originality": 2, "mobile": 3},
+            "C": {"hierarchy": 5, "typography": 5, "color": 5, "whitespace": 5, "originality": 5, "mobile": 4}
+          },
+          "slop": {"A": 2, "B": 7, "C": 0}
+        },
+        {
+          "run": 2,
+          "pairwise": {"A_vs_C": "A", "B_vs_C": "C", "A_vs_B": "A"},
+          "rubric": {
+            "A": {"hierarchy": 5, "typography": 5, "color": 5, "whitespace": 5, "originality": 5, "mobile": 4},
+            "B": {"hierarchy": 3, "typography": 3, "color": 3, "whitespace": 3, "originality": 2, "mobile": 3},
+            "C": {"hierarchy": 5, "typography": 5, "color": 5, "whitespace": 5, "originality": 5, "mobile": 4}
+          },
+          "slop": {"A": 0, "B": 5, "C": 0}
+        },
+        {
+          "run": 3,
+          "pairwise": {"A_vs_C": "C", "B_vs_C": "C", "A_vs_B": "tie"},
+          "rubric": {
+            "A": {"hierarchy": 4, "typography": 4, "color": 3, "whitespace": 4, "originality": 3, "mobile": 3},
+            "B": {"hierarchy": 3, "typography": 3, "color": 3, "whitespace": 3, "originality": 3, "mobile": 3},
+            "C": {"hierarchy": 5, "typography": 5, "color": 5, "whitespace": 5, "originality": 5, "mobile": 4}
+          },
+          "slop": {"A": 3, "B": 4, "C": 0}
+        }
+      ]
+    },
+    {
+      "product": "slipstream",
+      "reference": "vercel.com",
+      "note": "Arm C viewport-only (vercel.com rendering timeout). A_vs_C and B_vs_C comparisons may be miscalibrated.",
+      "runs": [
+        {
+          "run": 1,
+          "pairwise": {"A_vs_C": "C", "B_vs_C": "C", "A_vs_B": "A"},
+          "rubric": {
+            "A": {"hierarchy": 4, "typography": 4, "color": 4, "whitespace": 4, "originality": 5, "mobile": 3},
+            "B": {"hierarchy": 3, "typography": 3, "color": 3, "whitespace": 3, "originality": 2, "mobile": 4},
+            "C": {"hierarchy": 5, "typography": 5, "color": 4, "whitespace": 5, "originality": 4, "mobile": 4}
+          },
+          "slop": {"A": 1, "B": 5, "C": 0}
+        },
+        {
+          "run": 2,
+          "pairwise": {"A_vs_C": "tie", "B_vs_C": "C", "A_vs_B": "A"},
+          "rubric": {
+            "A": {"hierarchy": 5, "typography": 5, "color": 4, "whitespace": 5, "originality": 5, "mobile": 4},
+            "B": {"hierarchy": 4, "typography": 4, "color": 4, "whitespace": 4, "originality": 3, "mobile": 4},
+            "C": {"hierarchy": 5, "typography": 5, "color": 4, "whitespace": 5, "originality": 4, "mobile": 4}
+          },
+          "slop": {"A": 0, "B": 2, "C": 0}
+        },
+        {
+          "run": 3,
+          "pairwise": {"A_vs_C": "C", "B_vs_C": "C", "A_vs_B": "A"},
+          "rubric": {
+            "A": {"hierarchy": 3, "typography": 4, "color": 4, "whitespace": 2, "originality": 4, "mobile": 2},
+            "B": {"hierarchy": 3, "typography": 3, "color": 3, "whitespace": 4, "originality": 2, "mobile": 4},
+            "C": {"hierarchy": 5, "typography": 5, "color": 4, "whitespace": 5, "originality": 4, "mobile": 4}
+          },
+          "slop": {"A": 3, "B": 3, "C": 0}
+        }
+      ]
+    },
+    {
+      "product": "voltage",
+      "reference": "modal.com",
+      "runs": [
+        {
+          "run": 1,
+          "pairwise": {"A_vs_C": "C", "B_vs_C": "C", "A_vs_B": "A"},
+          "rubric": {
+            "A": {"hierarchy": 4, "typography": 4, "color": 4, "whitespace": 4, "originality": 3, "mobile": 4},
+            "B": {"hierarchy": 4, "typography": 4, "color": 3, "whitespace": 4, "originality": 3, "mobile": 4},
+            "C": {"hierarchy": 5, "typography": 5, "color": 5, "whitespace": 5, "originality": 5, "mobile": 5}
+          },
+          "slop": {"A": 1, "B": 2, "C": 0}
+        },
+        {
+          "run": 2,
+          "pairwise": {"A_vs_C": "tie", "B_vs_C": "C", "A_vs_B": "A"},
+          "rubric": {
+            "A": {"hierarchy": 5, "typography": 5, "color": 4, "whitespace": 4, "originality": 5, "mobile": 3},
+            "B": {"hierarchy": 3, "typography": 3, "color": 3, "whitespace": 4, "originality": 2, "mobile": 4},
+            "C": {"hierarchy": 5, "typography": 5, "color": 5, "whitespace": 5, "originality": 5, "mobile": 5}
+          },
+          "slop": {"A": 1, "B": 3, "C": 0}
+        },
+        {
+          "run": 3,
+          "pairwise": {"A_vs_C": "C", "B_vs_C": "C", "A_vs_B": "B"},
+          "rubric": {
+            "A": {"hierarchy": 3, "typography": 3, "color": 3, "whitespace": 4, "originality": 2, "mobile": 4},
+            "B": {"hierarchy": 5, "typography": 4, "color": 5, "whitespace": 4, "originality": 4, "mobile": 4},
+            "C": {"hierarchy": 5, "typography": 5, "color": 5, "whitespace": 5, "originality": 5, "mobile": 5}
+          },
+          "slop": {"A": 2, "B": 2, "C": 0}
+        }
+      ]
+    },
+    {
+      "product": "plume",
+      "reference": "linear.app",
+      "runs": [
+        {
+          "run": 1,
+          "pairwise": {"A_vs_C": "A", "B_vs_C": "C", "A_vs_B": "A"},
+          "rubric": {
+            "A": {"hierarchy": 5, "typography": 5, "color": 4, "whitespace": 5, "originality": 4, "mobile": 4},
+            "B": {"hierarchy": 3, "typography": 3, "color": 3, "whitespace": 4, "originality": 2, "mobile": 3},
+            "C": {"hierarchy": 5, "typography": 5, "color": 5, "whitespace": 5, "originality": 5, "mobile": 5}
+          },
+          "slop": {"A": 1, "B": 4, "C": 0}
+        },
+        {
+          "run": 2,
+          "pairwise": {"A_vs_C": "A", "B_vs_C": "B", "A_vs_B": "A"},
+          "rubric": {
+            "A": {"hierarchy": 5, "typography": 5, "color": 5, "whitespace": 5, "originality": 5, "mobile": 4},
+            "B": {"hierarchy": 4, "typography": 4, "color": 3, "whitespace": 4, "originality": 4, "mobile": 4},
+            "C": {"hierarchy": 5, "typography": 5, "color": 5, "whitespace": 5, "originality": 5, "mobile": 5}
+          },
+          "slop": {"A": 1, "B": 2, "C": 0}
+        },
+        {
+          "run": 3,
+          "pairwise": {"A_vs_C": "tie", "B_vs_C": "C", "A_vs_B": "A"},
+          "rubric": {
+            "A": {"hierarchy": 5, "typography": 5, "color": 4, "whitespace": 4, "originality": 5, "mobile": 3},
+            "B": {"hierarchy": 3, "typography": 3, "color": 3, "whitespace": 4, "originality": 2, "mobile": 3},
+            "C": {"hierarchy": 5, "typography": 5, "color": 5, "whitespace": 5, "originality": 5, "mobile": 5}
+          },
+          "slop": {"A": 1, "B": 5, "C": 0}
+        }
+      ]
+    }
+  ]
+}
