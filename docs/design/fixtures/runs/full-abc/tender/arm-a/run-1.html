@@ -1,0 +1,622 @@
+<!--
+ARCHETYPE: technical-dense
+SIGNATURE MOVE: The "live request log" — a persistent left-rail terminal feed showing real API calls
+  scrolling in real time, making the integration feel alive before a user writes a line of code.
+  Paired with a floating "latency badge" (e.g. "p99: 47ms") that pulses on each new entry.
+EFFECTS PLAN:
+  - Typewriter cursor blink on terminal lines (CSS animation, no JS heavy lifting)
+  - Subtle scan-line overlay on the terminal panel (CSS repeating-gradient)
+  - Number counter animation on stats (Intersection Observer + JS)
+  - Horizontal rule hover-reveals on nav links (transform: scaleX)
+  - Code block syntax highlighting via inline spans (no library)
+NEGATIVES CHECKED:
+  N1: No purple/blue gradient hero — dark slate + amber accent
+  N2: No Inter defaults — JetBrains Mono + IBM Plex Sans
+  N3: Not everything centered — left-aligned copy, ragged right, terminal rail left
+  N4: No 3 identical icon cards — feature rows with varying density and layout
+  N5: Mixed radius: 0px on terminal, 4px on cards, 2px on inputs, 12px on CTA pill
+  N6: No Tailwind palette as brand — custom amber #E8A020 + slate #0C1117
+  N7: Not hero→3cards→testimonial→CTA — hero split, log rail, prose specs, table, footer
+  N8: No blobs
+  N9: No glassmorphism
+  N10: Strong hierarchy throughout
+  N11: Concrete numbers and specifics, not abstract promises
+  N12: Motion only on terminal feed + counter — no gratuitous effects
+-->
+<!DOCTYPE html>
+<html lang="en" class="bg-[#0C1117] text-[#E2E8F0]">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Tender — Payments API for Internet Businesses</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@300;400;500;600&family=JetBrains+Mono:wght@400;500;700&display=swap" rel="stylesheet" />
+  <script>
+    tailwind.config = {
+      theme: {
+        extend: {
+          fontFamily: {
+            sans: ['IBM Plex Sans', 'sans-serif'],
+            mono: ['JetBrains Mono', 'monospace'],
+          },
+          colors: {
+            brand: {
+              amber: '#E8A020',
+              amberDim: '#A06B0E',
+              bg: '#0C1117',
+              surface: '#111820',
+              border: '#1E2A38',
+              muted: '#3A4A5C',
+              text: '#E2E8F0',
+              subtle: '#8A9BAD',
+            }
+          }
+        }
+      }
+    }
+  </script>
+  <style>
+    body { font-family: 'IBM Plex Sans', sans-serif; }
+    code, .mono { font-family: 'JetBrains Mono', monospace; }
+
+    /* Scan-line effect on terminal */
+    .scanlines::after {
+      content: '';
+      position: absolute;
+      inset: 0;
+      background: repeating-linear-gradient(
+        0deg,
+        transparent,
+        transparent 2px,
+        rgba(0,0,0,0.06) 2px,
+        rgba(0,0,0,0.06) 4px
+      );
+      pointer-events: none;
+      z-index: 1;
+    }
+
+    /* Blinking cursor */
+    .cursor::after {
+      content: '▋';
+      color: #E8A020;
+      animation: blink 1.1s step-end infinite;
+    }
+    @keyframes blink {
+      0%, 100% { opacity: 1; }
+      50% { opacity: 0; }
+    }
+
+    /* Terminal scroll animation */
+    @keyframes slideUp {
+      from { transform: translateY(100%); opacity: 0; }
+      to { transform: translateY(0); opacity: 1; }
+    }
+    .log-line {
+      animation: slideUp 0.3s ease-out forwards;
+    }
+
+    /* Latency pulse */
+    @keyframes pulse-amber {
+      0%, 100% { box-shadow: 0 0 0 0 rgba(232,160,32,0.4); }
+      50% { box-shadow: 0 0 0 6px rgba(232,160,32,0); }
+    }
+    .latency-badge { animation: pulse-amber 2s ease-in-out infinite; }
+
+    /* Nav underline hover */
+    .nav-link {
+      position: relative;
+    }
+    .nav-link::after {
+      content: '';
+      position: absolute;
+      bottom: -2px;
+      left: 0;
+      width: 100%;
+      height: 1px;
+      background: #E8A020;
+      transform: scaleX(0);
+      transform-origin: left;
+      transition: transform 0.2s ease;
+    }
+    .nav-link:hover::after { transform: scaleX(1); }
+
+    /* Counter animation */
+    .counter { transition: all 0.1s; }
+
+    /* Grid background for hero */
+    .grid-bg {
+      background-image:
+        linear-gradient(rgba(30,42,56,0.5) 1px, transparent 1px),
+        linear-gradient(90deg, rgba(30,42,56,0.5) 1px, transparent 1px);
+      background-size: 40px 40px;
+    }
+
+    /* Horizontal rules */
+    hr.tender { border-color: #1E2A38; }
+  </style>
+</head>
+<body class="bg-[#0C1117] font-sans antialiased">
+
+  <!-- NAV -->
+  <nav class="sticky top-0 z-50 border-b border-[#1E2A38] bg-[#0C1117]/95 backdrop-blur-sm">
+    <div class="max-w-7xl mx-auto px-6 h-14 flex items-center justify-between">
+      <div class="flex items-center gap-8">
+        <a href="#" class="flex items-center gap-2.5">
+          <div class="w-6 h-6 rounded-[3px] bg-[#E8A020] flex items-center justify-center">
+            <svg width="14" height="14" viewBox="0 0 14 14" fill="none">
+              <path d="M2 4h10M2 7h7M2 10h10" stroke="#0C1117" stroke-width="1.5" stroke-linecap="round"/>
+            </svg>
+          </div>
+          <span class="font-semibold text-[15px] tracking-tight text-[#E2E8F0]">Tender</span>
+        </a>
+        <div class="hidden md:flex items-center gap-6">
+          <a href="#" class="nav-link text-[13px] text-[#8A9BAD] hover:text-[#E2E8F0] transition-colors">Products</a>
+          <a href="#" class="nav-link text-[13px] text-[#8A9BAD] hover:text-[#E2E8F0] transition-colors">Pricing</a>
+          <a href="#" class="nav-link text-[13px] text-[#8A9BAD] hover:text-[#E2E8F0] transition-colors">Docs</a>
+          <a href="#" class="nav-link text-[13px] text-[#8A9BAD] hover:text-[#E2E8F0] transition-colors">Changelog</a>
+          <a href="#" class="nav-link text-[13px] text-[#8A9BAD] hover:text-[#E2E8F0] transition-colors">Status</a>
+        </div>
+      </div>
+      <div class="flex items-center gap-3">
+        <a href="#" class="text-[13px] text-[#8A9BAD] hover:text-[#E2E8F0] transition-colors">Sign in</a>
+        <a href="#" class="mono text-[12px] font-medium bg-[#E8A020] text-[#0C1117] px-4 py-1.5 rounded-sm hover:bg-[#F0B030] transition-colors">Start building →</a>
+      </div>
+    </div>
+  </nav>
+
+  <!-- HERO — SPLIT LAYOUT -->
+  <section class="grid-bg border-b border-[#1E2A38] relative overflow-hidden">
+    <div class="max-w-7xl mx-auto px-6 py-20 grid grid-cols-1 lg:grid-cols-2 gap-16 items-start">
+
+      <!-- Left: Copy -->
+      <div class="pt-4">
+        <div class="inline-flex items-center gap-2 border border-[#1E2A38] rounded-sm px-3 py-1 mb-8">
+          <span class="w-1.5 h-1.5 rounded-full bg-[#E8A020]"></span>
+          <span class="mono text-[11px] text-[#8A9BAD] tracking-widest uppercase">v3.4 · Now with Usage Billing</span>
+        </div>
+
+        <h1 class="text-[42px] leading-[1.1] font-semibold tracking-[-0.02em] text-[#E2E8F0] mb-6">
+          One API.<br/>
+          Every payment<br/>
+          <span class="text-[#E8A020]">your business takes.</span>
+        </h1>
+
+        <p class="text-[16px] leading-[1.7] text-[#8A9BAD] max-w-[420px] mb-8">
+          Cards, local methods, subscriptions, usage billing, marketplace payouts — unified under a single integration. Fraud screening and compliance included. Deployed in 47 countries.
+        </p>
+
+        <div class="flex flex-col sm:flex-row gap-3 mb-12">
+          <a href="#" class="mono text-[13px] font-medium bg-[#E8A020] text-[#0C1117] px-6 py-3 rounded-sm hover:bg-[#F0B030] transition-colors inline-flex items-center gap-2">
+            Start integrating
+            <svg width="14" height="14" viewBox="0 0 14 14" fill="none"><path d="M3 7h8M8 4l3 3-3 3" stroke="#0C1117" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg>
+          </a>
+          <a href="#" class="mono text-[13px] font-medium border border-[#1E2A38] text-[#E2E8F0] px-6 py-3 rounded-sm hover:border-[#3A4A5C] transition-colors inline-flex items-center gap-2">
+            <svg width="14" height="14" viewBox="0 0 14 14" fill="none"><rect x="2" y="2" width="10" height="10" rx="1" stroke="#8A9BAD" stroke-width="1.2"/><path d="M5 5h4M5 7h2" stroke="#8A9BAD" stroke-width="1.2" stroke-linecap="round"/></svg>
+            View the docs
+          </a>
+        </div>
+
+        <!-- Stats row -->
+        <div class="grid grid-cols-3 gap-0 border border-[#1E2A38] rounded-sm overflow-hidden">
+          <div class="px-5 py-4 border-r border-[#1E2A38]">
+            <div class="mono text-[22px] font-bold text-[#E2E8F0] counter" data-target="47">$0</div>
+            <div class="text-[11px] text-[#8A9BAD] mt-0.5">Countries</div>
+          </div>
+          <div class="px-5 py-4 border-r border-[#1E2A38]">
+            <div class="mono text-[22px] font-bold text-[#E8A020] counter" data-target="99.99">0</div>
+            <div class="text-[11px] text-[#8A9BAD] mt-0.5">Uptime SLA</div>
+          </div>
+          <div class="px-5 py-4">
+            <div class="mono text-[22px] font-bold text-[#E2E8F0] counter" data-target="47">—</div>
+            <div class="text-[11px] text-[#8A9BAD] mt-0.5">p99 latency ms</div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Right: Live terminal log -->
+      <div class="relative">
+        <!-- Latency badge -->
+        <div class="latency-badge absolute top-4 right-4 z-10 mono text-[11px] bg-[#111820] border border-[#E8A020]/40 text-[#E8A020] px-3 py-1 rounded-full flex items-center gap-2">
+          <span class="w-1.5 h-1.5 rounded-full bg-[#E8A020] inline-block"></span>
+          p99: 47ms
+        </div>
+
+        <div class="scanlines relative border border-[#1E2A38] rounded-sm overflow-hidden bg-[#080D12]">
+          <!-- Terminal header -->
+          <div class="flex items-center justify-between px-4 py-2.5 border-b border-[#1E2A38] bg-[#0C1117]">
+            <div class="flex items-center gap-2">
+              <div class="w-2.5 h-2.5 rounded-full bg-[#3A4A5C]"></div>
+              <div class="w-2.5 h-2.5 rounded-full bg-[#3A4A5C]"></div>
+              <div class="w-2.5 h-2.5 rounded-full bg-[#3A4A5C]"></div>
+            </div>
+            <span class="mono text-[11px] text-[#3A4A5C]">tender · request log · live</span>
+            <span class="mono text-[11px] text-[#E8A020]">● LIVE</span>
+          </div>
+
+          <!-- Log lines -->
+          <div class="p-4 space-y-2 font-mono text-[12px] leading-relaxed" id="log-container" style="min-height:420px;">
+            <div class="flex gap-3 text-[#3A4A5C]">
+              <span>09:14:22.003</span>
+              <span class="text-[#5A9B6A]">POST</span>
+              <span class="text-[#8A9BAD]">/v1/payment_intents</span>
+              <span class="text-[#5A9B6A] ml-auto">201</span>
+            </div>
+            <div class="flex gap-3 text-[#3A4A5C]">
+              <span>09:14:22.419</span>
+              <span class="text-[#5A9B6A]">GET&nbsp;</span>
+              <span class="text-[#8A9BAD]">/v1/customers/cus_9xK2...</span>
+              <span class="text-[#5A9B6A] ml-auto">200</span>
+            </div>
+            <div class="flex gap-3 text-[#3A4A5C]">
+              <span>09:14:23.118</span>
+              <span class="text-[#5A9B6A]">POST</span>
+              <span class="text-[#8A9BAD]">/v1/subscriptions</span>
+              <span class="text-[#5A9B6A] ml-auto">201</span>
+            </div>
+            <div class="flex gap-3 text-[#3A4A5C]">
+              <span>09:14:24.002</span>
+              <span class="text-[#9B7B5A]">POST</span>
+              <span class="text-[#8A9BAD]">/v1/payouts</span>
+              <span class="text-[#9B7B5A] ml-auto">202</span>
+            </div>
+            <div class="flex gap-3 text-[#3A4A5C]">
+              <span>09:14:24.551</span>
+              <span class="text-[#5A9B6A]">GET&nbsp;</span>
+              <span class="text-[#8A9BAD]">/v1/fraud/signals/pi_...</span>
+              <span class="text-[#5A9B6A] ml-auto">200</span>
+            </div>
+            <div class="flex gap-3 text-[#3A4A5C]">
+              <span>09:14:25.009</span>
+              <span class="text-[#5A9B6A]">POST</span>
+              <span class="text-[#8A9BAD]">/v1/fx/convert</span>
+              <span class="text-[#5A9B6A] ml-auto">200</span>
+            </div>
+            <div class="flex gap-3 text-[#3A4A5C]">
+              <span>09:14:25.781</span>
+              <span class="text-[#9B5A5A]">POST</span>
+              <span class="text-[#8A9BAD]">/v1/payment_intents</span>
+              <span class="text-[#9B5A5A] ml-auto">402</span>
+            </div>
+            <div class="mt-2 px-3 py-2 border border-[#9B5A5A]/30 bg-[#9B5A5A]/5 rounded-sm">
+              <div class="mono text-[11px] text-[#9B5A5A]">fraud_score: 94 · blocked · card_fingerprint: fp_7Xq...</div>
+            </div>
+            <div class="flex gap-3 text-[#3A4A5C] mt-2">
+              <span>09:14:26.120</span>
+              <span class="text-[#5A9B6A]">GET&nbsp;</span>
+              <span class="text-[#8A9BAD]">/v1/invoices?status=open</span>
+              <span class="text-[#5A9B6A] ml-auto">200</span>
+            </div>
+            <div class="flex gap-3 text-[#3A4A5C]">
+              <span>09:14:26.884</span>
+              <span class="text-[#5A9B6A]">POST</span>
+              <span class="text-[#8A9BAD]">/v1/meters/usage</span>
+              <span class="text-[#5A9B6A] ml-auto">200</span>
+            </div>
+            <div class="flex gap-3 text-[#3A4A5C]">
+              <span>09:14:27.201</span>
+              <span class="text-[#5A9B6A]">POST</span>
+              <span class="text-[#8A9BAD]">/v1/payment_intents</span>
+              <span class="text-[#5A9B6A] ml-auto">201</span>
+            </div>
+            <div class="flex gap-3 text-[#3A4A5C]">
+              <span>09:14:27.902</span>
+              <span class="text-[#5A9B6A]">GET&nbsp;</span>
+              <span class="text-[#8A9BAD]">/v1/balance</span>
+              <span class="text-[#5A9B6A] ml-auto">200</span>
+            </div>
+            <!-- Active line with cursor -->
+            <div class="flex gap-3 text-[#8A9BAD]">
+              <span>09:14:28.441</span>
+              <span class="text-[#5A9B6A]">POST</span>
+              <span>/v1/transfer_groups</span>
+              <span class="cursor ml-auto"></span>
+            </div>
+          </div>
+        </div>
+
+        <!-- Code snippet below terminal -->
+        <div class="mt-4 border border-[#1E2A38] rounded-sm bg-[#080D12] p-4">
+          <div class="mono text-[11px] text-[#3A4A5C] mb-3">Quick start · Node.js</div>
+          <pre class="mono text-[12px] leading-relaxed overflow-x-auto"><code><span class="text-[#8A9BAD]">const</span> <span class="text-[#E2E8F0]">tender</span> <span class="text-[#8A9BAD]">=</span> <span class="text-[#E2E8F0]">require</span><span class="text-[#E8A020]">(</span><span class="text-[#5A9B6A]">'@tender/node'</span><span class="text-[#E8A020]">)</span><span class="text-[#8A9BAD]">(</span><span class="text-[#5A9B6A]">'sk_live_...'</span><span class="text-[#8A9BAD]">)</span><span class="text-[#3A4A5C]">;</span>
+
+<span class="text-[#8A9BAD]">const</span> <span class="text-[#E2E8F0]">intent</span> <span class="text-[#8A9BAD]">=</span> <span class="text-[#8A9BAD]">await</span> <span class="text-[#E2E8F0]">tender</span><span class="text-[#3A4A5C]">.</span><span class="text-[#9B7B5A]">paymentIntents</span><span class="text-[#3A4A5C]">.</span><span class="text-[#E8A020]">create</span><span class="text-[#3A4A5C]">({</span>
+  <span class="text-[#8A9BAD]">amount</span><span class="text-[#3A4A5C]">:</span> <span class="text-[#9B7B5A]">2400</span><span class="text-[#3A4A5C]">,</span>
+  <span class="text-[#8A9BAD]">currency</span><span class="text-[#3A4A5C]">:</span> <span class="text-[#5A9B6A]">'usd'</span><span class="text-[#3A4A5C]">,</span>
+  <span class="text-[#8A9BAD]">fraud_screen</span><span class="text-[#3A4A5C]">:</span> <span class="text-[#9B7B5A]">true</span><span class="text-[#3A4A5C]">,</span>
+<span class="text-[#3A4A5C]">});</span></code></pre>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- FEATURE TABLE — CAPABILITY MATRIX -->
+  <section class="border-b border-[#1E2A38]">
+    <div class="max-w-7xl mx-auto px-6 py-16">
+      <div class="flex items-end justify-between mb-10">
+        <div>
+          <div class="mono text-[11px] text-[#E8A020] tracking-widest uppercase mb-3">Platform capabilities</div>
+          <h2 class="text-[28px] font-semibold tracking-tight text-[#E2E8F0]">Everything under one integration</h2>
+        </div>
+        <a href="#" class="mono text-[12px] text-[#8A9BAD] hover:text-[#E8A020] transition-colors">Full API reference →</a>
+      </div>
+
+      <!-- Dense feature rows -->
+      <div class="space-y-0 border border-[#1E2A38] rounded-sm overflow-hidden">
+
+        <!-- Payments -->
+        <div class="grid grid-cols-12 border-b border-[#1E2A38] hover:bg-[#111820] transition-colors">
+          <div class="col-span-1 p-5 flex items-start pt-5">
+            <div class="w-8 h-8 rounded-sm bg-[#E8A020]/10 border border-[#E8A020]/20 flex items-center justify-center flex-shrink-0">
+              <svg width="16" height="16" viewBox="0 0 16 16" fill="none"><rect x="2" y="4" width="12" height="8" rx="1" stroke="#E8A020" stroke-width="1.2"/><path d="M2 7h12" stroke="#E8A020" stroke-width="1.2"/></svg>
+            </div>
+          </div>
+          <div class="col-span-3 p-5 border-l border-[#1E2A38]">
+            <div class="font-semibold text-[14px] text-[#E2E8F0] mb-1">Global Payments</div>
+            <div class="mono text-[11px] text-[#3A4A5C]">payments · fx · methods</div>
+          </div>
+          <div class="col-span-8 p-5 border-l border-[#1E2A38]">
+            <p class="text-[13px] text-[#8A9BAD] leading-relaxed mb-3">Cards (Visa, Mastercard, Amex), 80+ local payment methods (SEPA, UPI, PIX, GrabPay), automatic currency conversion at mid-market rates with transparent 0.5% FX spread.</p>
+            <div class="flex flex-wrap gap-2">
+              <span class="mono text-[10px] border border-[#1E2A38] text-[#3A4A5C] px-2 py-0.5 rounded-sm">SEPA</span>
+              <span class="mono text-[10px] border border-[#1E2A38] text-[#3A4A5C] px-2 py-0.5 rounded-sm">UPI</span>
+              <span class="mono text-[10px] border border-[#1E2A38] text-[#3A4A5C] px-2 py-0.5 rounded-sm">PIX</span>
+              <span class="mono text-[10px] border border-[#1E2A38] text-[#3A4A5C] px-2 py-0.5 rounded-sm">GrabPay</span>
+              <span class="mono text-[10px] border border-[#1E2A38] text-[#3A4A5C] px-2 py-0.5 rounded-sm">BACS</span>
+              <span class="mono text-[10px] border border-[#1E2A38] text-[#3A4A5C] px-2 py-0.5 rounded-sm">+75 more</span>
+            </div>
+          </div>
+        </div>
+
+        <!-- Billing -->
+        <div class="grid grid-cols-12 border-b border-[#1E2A38] hover:bg-[#111820] transition-colors">
+          <div class="col-span-1 p-5 flex items-start pt-5">
+            <div class="w-8 h-8 rounded-sm bg-[#5A9B6A]/10 border border-[#5A9B6A]/20 flex items-center justify-center flex-shrink-0">
+              <svg width="16" height="16" viewBox="0 0 16 16" fill="none"><path d="M4 2v12M4 8h8M12 5v6" stroke="#5A9B6A" stroke-width="1.2" stroke-linecap="round"/></svg>
+            </div>
+          </div>
+          <div class="col-span-3 p-5 border-l border-[#1E2A38]">
+            <div class="font-semibold text-[14px] text-[#E2E8F0] mb-1">Subscription & Usage Billing</div>
+            <div class="mono text-[11px] text-[#3A4A5C]">billing · meters · invoices</div>
+          </div>
+          <div class="col-span-8 p-5 border-l border-[#1E2A38]">
+            <p class="text-[13px] text-[#8A9BAD] leading-relaxed mb-3">Flat-rate, tiered, per-seat, and metered usage billing. Real-time usage meters with sub-second ingestion. Automated invoice generation, dunning, and retry logic with configurable schedules.</p>
+            <div class="mono text-[12px] bg-[#080D12] border border-[#1E2A38] rounded-sm px-3 py-2 text-[#5A9B6A] inline-block">
+              tender.meters.ingest({ event: 'api_call', quantity: 1 })
+            </div>
+          </div>
+        </div>
+
+        <!-- Payouts -->
+        <div class="grid grid-cols-12 border-b border-[#1E2A38] hover:bg-[#111820] transition-colors">
+          <div class="col-span-1 p-5 flex items-start pt-5">
+            <div class="w-8 h-8 rounded-sm bg-[#9B7B5A]/10 border border-[#9B7B5A]/20 flex items-center justify-center flex-shrink-0">
+              <svg width="16" height="16" viewBox="0 0 16 16" fill="none"><path d="M8 2v12M5 11l3 3 3-3M3 6h10" stroke="#9B7B5A" stroke-width="1.2" stroke-linecap="round" stroke-linejoin="round"/></svg>
+            </div>
+          </div>
+          <div class="col-span-3 p-5 border-l border-[#1E2A38]">
+            <div class="font-semibold text-[14px] text-[#E2E8F0] mb-1">Marketplace Payouts</div>
+            <div class="mono text-[11px] text-[#3A4A5C]">connect · transfers · splits</div>
+          </div>
+          <div class="col-span-8 p-5 border-l border-[#1E2A38]">
+            <p class="text-[13px] text-[#8A9BAD] leading-relaxed">Connect accounts to onboard sellers/vendors. Configurable split rules (percentage, fixed, tiered). Same-day payouts in USD/EUR/GBP. Automatic 1099/W-9 collection and tax reporting.</p>
+          </div>
+        </div>
+
+        <!-- Fraud -->
+        <div class="grid grid-cols-12 hover:bg-[#111820] transition-colors">
+          <div class="col-span-1 p-5 flex items-start pt-5">
+            <div class="w-8 h-8 rounded-sm bg-[#9B5A5A]/10 border border-[#9B5A5A]/20 flex items-center justify-center flex-shrink-0">
+              <svg width="16" height="16" viewBox="0 0 16 16" fill="none"><path d="M8 2L3 5v4c0 3 2.5 5 5 6 2.5-1 5-3 5-6V5L8 2z" stroke="#9B5A5A" stroke-width="1.2" stroke-linejoin="round"/></svg>
+            </div>
+          </div>
+          <div class="col-span-3 p-5 border-l border-[#1E2A38]">
+            <div class="font-semibold text-[14px] text-[#E2E8F0] mb-1">Fraud & Compliance</div>
+            <div class="mono text-[11px] text-[#3A4A5C]">ml-screening · kyc · pci</div>
+          </div>
+          <div class="col-span-8 p-5 border-l border-[#1E2A38]">
+            <p class="text-[13px] text-[#8A9BAD] leading-relaxed mb-3">ML fraud scoring on every transaction. 3DS2 adaptive authentication. Built-in KYC/AML checks for regulated markets. PCI DSS Level 1 certified — card data never touches your servers.</p>
+            <div class="flex gap-4">
+              <div class="text-[12px]"><span class="text-[#E2E8F0] font-medium">0.03%</span><span class="text-[#8A9BAD]"> fraud rate avg</span></div>
+              <div class="text-[12px]"><span class="text-[#E2E8F0] font-medium">PCI DSS L1</span><span class="text-[#8A9BAD]"> certified</span></div>
+              <div class="text-[12px]"><span class="text-[#E2E8F0] font-medium">SOC 2 Type II</span><span class="text-[#8A9BAD]"> audit</span></div>
+            </div>
+          </div>
+        </div>
+
+      </div>
+    </div>
+  </section>
+
+  <!-- ENTERPRISE TRUST BAR -->
+  <section class="border-b border-[#1E2A38] bg-[#111820]">
+    <div class="max-w-7xl mx-auto px-6 py-8">
+      <div class="flex flex-col md:flex-row items-center justify-between gap-6">
+        <div class="mono text-[11px] text-[#3A4A5C] tracking-widest uppercase">Trusted in production by</div>
+        <div class="flex items-center gap-10 flex-wrap justify-center">
+          <span class="mono text-[13px] text-[#3A4A5C] font-medium">Cartlane</span>
+          <span class="mono text-[13px] text-[#3A4A5C] font-medium">Vesper</span>
+          <span class="mono text-[13px] text-[#3A4A5C] font-medium">Quorum</span>
+          <span class="mono text-[13px] text-[#3A4A5C] font-medium">Archway</span>
+          <span class="mono text-[13px] text-[#3A4A5C] font-medium">Northloop</span>
+          <span class="mono text-[13px] text-[#3A4A5C] font-medium">Fulcrum</span>
+        </div>
+        <div class="flex items-center gap-3">
+          <div class="w-1.5 h-1.5 rounded-full bg-[#5A9B6A]"></div>
+          <span class="mono text-[11px] text-[#5A9B6A]">All systems operational</span>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- DEVELOPER EXPERIENCE SECTION -->
+  <section class="border-b border-[#1E2A38]">
+    <div class="max-w-7xl mx-auto px-6 py-16 grid grid-cols-1 lg:grid-cols-2 gap-16">
+      <div>
+        <div class="mono text-[11px] text-[#E8A020] tracking-widest uppercase mb-3">Developer experience</div>
+        <h2 class="text-[28px] font-semibold tracking-tight text-[#E2E8F0] mb-5">
+          Built for the<br/>engineers who<br/>ship the checkout.
+        </h2>
+        <p class="text-[14px] text-[#8A9BAD] leading-relaxed mb-8">
+          Idiomatic SDKs in Node, Python, Ruby, Go, Java, and PHP. Webhooks with automatic retries. Test mode with simulated card numbers for every failure case. A dashboard that surfaces the same data your code sees.
+        </p>
+        <div class="space-y-4">
+          <div class="flex gap-4 items-start">
+            <div class="mono text-[11px] text-[#E8A020] mt-0.5 w-16 flex-shrink-0">SDK</div>
+            <div class="text-[13px] text-[#8A9BAD]">Node · Python · Ruby · Go · Java · PHP</div>
+          </div>
+          <div class="flex gap-4 items-start border-t border-[#1E2A38] pt-4">
+            <div class="mono text-[11px] text-[#E8A020] mt-0.5 w-16 flex-shrink-0">WEBHOOK</div>
+            <div class="text-[13px] text-[#8A9BAD]">250+ event types · automatic retry · signed payloads</div>
+          </div>
+          <div class="flex gap-4 items-start border-t border-[#1E2A38] pt-4">
+            <div class="mono text-[11px] text-[#E8A020] mt-0.5 w-16 flex-shrink-0">TEST</div>
+            <div class="text-[13px] text-[#8A9BAD]">Sandbox with card number fixtures, fraud simulation, clock control</div>
+          </div>
+          <div class="flex gap-4 items-start border-t border-[#1E2A38] pt-4">
+            <div class="mono text-[11px] text-[#E8A020] mt-0.5 w-16 flex-shrink-0">CLI</div>
+            <div class="text-[13px] text-[#8A9BAD]">tender listen · tender trigger · tender logs tail</div>
+          </div>
+        </div>
+      </div>
+
+      <div class="space-y-4">
+        <!-- Webhook payload example -->
+        <div class="border border-[#1E2A38] rounded-sm bg-[#080D12]">
+          <div class="flex items-center justify-between px-4 py-2.5 border-b border-[#1E2A38]">
+            <span class="mono text-[11px] text-[#3A4A5C]">Webhook · payment_intent.succeeded</span>
+            <span class="mono text-[10px] bg-[#5A9B6A]/10 text-[#5A9B6A] border border-[#5A9B6A]/20 px-2 py-0.5 rounded-sm">DELIVERED</span>
+          </div>
+          <pre class="p-4 mono text-[12px] leading-relaxed overflow-x-auto"><code><span class="text-[#3A4A5C]">{</span>
+  <span class="text-[#9B7B5A]">"id"</span><span class="text-[#3A4A5C]">:</span> <span class="text-[#5A9B6A]">"pi_3PkX9..."</span><span class="text-[#3A4A5C]">,</span>
+  <span class="text-[#9B7B5A]">"type"</span><span class="text-[#3A4A5C]">:</span> <span class="text-[#5A9B6A]">"payment_intent.succeeded"</span><span class="text-[#3A4A5C]">,</span>
+  <span class="text-[#9B7B5A]">"data"</span><span class="text-[#3A4A5C]">: {</span>
+    <span class="text-[#9B7B5A]">"amount"</span><span class="text-[#3A4A5C]">:</span> <span class="text-[#E8A020]">2400</span><span class="text-[#3A4A5C]">,</span>
+    <span class="text-[#9B7B5A]">"currency"</span><span class="text-[#3A4A5C]">:</span> <span class="text-[#5A9B6A]">"usd"</span><span class="text-[#3A4A5C]">,</span>
+    <span class="text-[#9B7B5A]">"fraud_score"</span><span class="text-[#3A4A5C]">:</span> <span class="text-[#E8A020]">12</span><span class="text-[#3A4A5C]">,</span>
+    <span class="text-[#9B7B5A]">"status"</span><span class="text-[#3A4A5C]">:</span> <span class="text-[#5A9B6A]">"succeeded"</span>
+  <span class="text-[#3A4A5C]">}</span>
+<span class="text-[#3A4A5C]">}</span></code></pre>
+        </div>
+
+        <!-- CLI example -->
+        <div class="border border-[#1E2A38] rounded-sm bg-[#080D12] p-4">
+          <div class="mono text-[11px] text-[#3A4A5C] mb-3">CLI · listen mode</div>
+          <div class="space-y-1.5 mono text-[12px]">
+            <div><span class="text-[#E8A020]">$</span> <span class="text-[#E2E8F0]">tender listen --forward-to localhost:3000/webhooks</span></div>
+            <div class="text-[#3A4A5C] pl-4">Ready! Forwarding to http://localhost:3000...</div>
+            <div class="text-[#5A9B6A] pl-4">→ payment_intent.created <span class="text-[#3A4A5C]">pi_3PkX9...</span></div>
+            <div class="text-[#5A9B6A] pl-4">→ charge.succeeded <span class="text-[#3A4A5C]">ch_3PkX9...</span></div>
+            <div class="text-[#5A9B6A] pl-4">→ payment_intent.succeeded <span class="text-[#3A4A5C]">pi_3PkX9...</span></div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- FOOTER -->
+  <footer class="border-t border-[#1E2A38]">
+    <div class="max-w-7xl mx-auto px-6 py-12 grid grid-cols-2 md:grid-cols-5 gap-8">
+      <div class="col-span-2 md:col-span-1">
+        <div class="flex items-center gap-2.5 mb-4">
+          <div class="w-6 h-6 rounded-[3px] bg-[#E8A020] flex items-center justify-center">
+            <svg width="14" height="14" viewBox="0 0 14 14" fill="none">
+              <path d="M2 4h10M2 7h7M2 10h10" stroke="#0C1117" stroke-width="1.5" stroke-linecap="round"/>
+            </svg>
+          </div>
+          <span class="font-semibold text-[14px] text-[#E2E8F0]">Tender</span>
+        </div>
+        <p class="text-[12px] text-[#3A4A5C] leading-relaxed">Payments API for internet businesses.</p>
+      </div>
+      <div>
+        <div class="mono text-[10px] text-[#3A4A5C] uppercase tracking-widest mb-3">Products</div>
+        <div class="space-y-2">
+          <a href="#" class="block text-[12px] text-[#8A9BAD] hover:text-[#E2E8F0] transition-colors">Payments</a>
+          <a href="#" class="block text-[12px] text-[#8A9BAD] hover:text-[#E2E8F0] transition-colors">Billing</a>
+          <a href="#" class="block text-[12px] text-[#8A9BAD] hover:text-[#E2E8F0] transition-colors">Connect</a>
+          <a href="#" class="block text-[12px] text-[#8A9BAD] hover:text-[#E2E8F0] transition-colors">Radar (Fraud)</a>
+        </div>
+      </div>
+      <div>
+        <div class="mono text-[10px] text-[#3A4A5C] uppercase tracking-widest mb-3">Developers</div>
+        <div class="space-y-2">
+          <a href="#" class="block text-[12px] text-[#8A9BAD] hover:text-[#E2E8F0] transition-colors">API Reference</a>
+          <a href="#" class="block text-[12px] text-[#8A9BAD] hover:text-[#E2E8F0] transition-colors">SDKs</a>
+          <a href="#" class="block text-[12px] text-[#8A9BAD] hover:text-[#E2E8F0] transition-colors">Webhooks</a>
+          <a href="#" class="block text-[12px] text-[#8A9BAD] hover:text-[#E2E8F0] transition-colors">Changelog</a>
+        </div>
+      </div>
+      <div>
+        <div class="mono text-[10px] text-[#3A4A5C] uppercase tracking-widest mb-3">Company</div>
+        <div class="space-y-2">
+          <a href="#" class="block text-[12px] text-[#8A9BAD] hover:text-[#E2E8F0] transition-colors">About</a>
+          <a href="#" class="block text-[12px] text-[#8A9BAD] hover:text-[#E2E8F0] transition-colors">Blog</a>
+          <a href="#" class="block text-[12px] text-[#8A9BAD] hover:text-[#E2E8F0] transition-colors">Careers</a>
+          <a href="#" class="block text-[12px] text-[#8A9BAD] hover:text-[#E2E8F0] transition-colors">Status</a>
+        </div>
+      </div>
+      <div>
+        <div class="mono text-[10px] text-[#3A4A5C] uppercase tracking-widest mb-3">Legal</div>
+        <div class="space-y-2">
+          <a href="#" class="block text-[12px] text-[#8A9BAD] hover:text-[#E2E8F0] transition-colors">Privacy</a>
+          <a href="#" class="block text-[12px] text-[#8A9BAD] hover:text-[#E2E8F0] transition-colors">Terms</a>
+          <a href="#" class="block text-[12px] text-[#8A9BAD] hover:text-[#E2E8F0] transition-colors">PCI DSS</a>
+          <a href="#" class="block text-[12px] text-[#8A9BAD] hover:text-[#E2E8F0] transition-colors">SOC 2</a>
+        </div>
+      </div>
+    </div>
+    <div class="border-t border-[#1E2A38]">
+      <div class="max-w-7xl mx-auto px-6 py-4 flex items-center justify-between">
+        <span class="mono text-[11px] text-[#3A4A5C]">© 2026 Tender Payments Inc.</span>
+        <span class="mono text-[11px] text-[#3A4A5C]">PCI DSS L1 · SOC 2 Type II · ISO 27001</span>
+      </div>
+    </div>
+  </footer>
+
+  <script>
+    // Live terminal feed — new lines every few seconds
+    const logContainer = document.getElementById('log-container');
+    const entries = [
+      { method: 'POST', path: '/v1/payment_intents', status: '201', color: '5A9B6A' },
+      { method: 'GET ', path: '/v1/balance/history', status: '200', color: '5A9B6A' },
+      { method: 'POST', path: '/v1/refunds', status: '200', color: '5A9B6A' },
+      { method: 'GET ', path: '/v1/disputes?status=needs_response', status: '200', color: '5A9B6A' },
+      { method: 'POST', path: '/v1/subscriptions/sub_.../cancel', status: '200', color: '9B7B5A' },
+      { method: 'POST', path: '/v1/meters/usage', status: '200', color: '5A9B6A' },
+    ];
+    let ei = 0;
+
+    function pad(n) { return n < 10 ? '0' + n : n; }
+    function getTime() {
+      const now = new Date();
+      return `${pad(now.getHours())}:${pad(now.getMinutes())}:${pad(now.getSeconds())}.${String(now.getMilliseconds()).padStart(3,'0')}`;
+    }
+
+    setInterval(() => {
+      const e = entries[ei % entries.length];
+      ei++;
+      // Remove cursor line, add new real line, re-add cursor
+      const cursorLine = logContainer.querySelector('.cursor')?.parentElement;
+      if (cursorLine) cursorLine.remove();
+
+      const line = document.createElement('div');
+      line.className = 'flex gap-3 text-[#3A4A5C] log-line';
+      line.innerHTML = `<span>${getTime()}</span><span class="text-[#${e.color}]">${e.method}</span><span class="text-[#8A9BAD]">${e.path}</span><span class="text-[#${e.color}] ml-auto">${e.status}</span>`;
+      logContainer.appendChild(line);
+
+      const cursor = document.createElement('div');
+      cursor.className = 'flex gap-3 text-[#8A9BAD]';
+      cursor.innerHTML = `<span>${getTime()}</span><span class="text-[#5A9B6A]">POST</span><span>/v1/...</span><span class="cursor ml-auto"></span>`;
+      logContainer.appendChild(cursor);
+
+      // Keep scrolled
+      logContainer.scrollTop = logContainer.scrollHeight;
+
+      // Trim old lines
+      const lines = logContainer.querySelectorAll('div');
+      if (lines.length > 20) lines[0].remove();
+    }, 1800);
+  </script>
+</body>
+</html>
