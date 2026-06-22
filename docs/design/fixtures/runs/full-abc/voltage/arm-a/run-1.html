@@ -1,0 +1,525 @@
+<!--
+ARCHETYPE: technical-dense
+RATIONALE: ML engineers and data scientists live in terminals and dashboards. They distrust
+  marketing fluff and trust code. technical-dense signals "built by people who code" — the
+  density itself communicates capability. Dark-first matches the IDE context they're already in.
+SIGNATURE MOVE: The hero IS a live terminal session — a scrolling fake shell that shows
+  a Voltage function being decorated, invoked, and returning GPU metrics. The product demo
+  IS the headline.
+EFFECTS PLAN:
+  - Dark background (#0a0e14) with electric-blue (#3b82f6) and phosphor-green (#22c55e) accents
+  - Monospace (JetBrains Mono) for all code, Inter for prose
+  - Animated terminal cursor blink on hero shell
+  - Stat counters: "0→ N containers" with counting animation on scroll
+  - Grid-density layout: feature cards packed tight, not spaced out luxuriously
+  - Horizontal rule separators as thick #3b82f6 bars (engineering aesthetic)
+  - Code blocks with syntax highlighting done in pure CSS spans
+  - Subtle scanline overlay on terminal for CRT depth
+NEGATIVES CHECKED:
+  N1 - No lorem ipsum
+  N2 - No generic hero ("Welcome to the future" avoided — headline is specific)
+  N3 - No stock photo placeholders
+  N4 - No mismatched archetype signals (no warm rounded cards in a dark dense grid)
+  N5 - No centered-everything layout (left-aligned content, grid structures)
+  N6 - Color palette constrained: #0a0e14 bg, #111827 surface, #3b82f6 blue, #22c55e green, #f8fafc text
+  N7 - No more than 2 typefaces (JetBrains Mono + Inter)
+  N8 - CTA is specific ("Run your first function") not generic ("Get started")
+  N9 - No wall-of-text paragraphs — prose broken into short bursts
+  N10 - Hero communicates VALUE not category (shows what it does, not just what it is)
+  N11 - Spacing is intentional density, not cramped accident
+  N12 - Mobile-considered (stack at sm, readable mono at 13px min)
+-->
+<!DOCTYPE html>
+<html lang="en" class="scroll-smooth">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Voltage — Serverless GPU Compute for AI/ML</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500;700&display=swap" rel="stylesheet" />
+  <script>
+    tailwind.config = {
+      theme: {
+        extend: {
+          fontFamily: {
+            sans: ['Inter', 'system-ui', 'sans-serif'],
+            mono: ['JetBrains Mono', 'Fira Code', 'monospace'],
+          },
+          colors: {
+            volt: {
+              bg:       '#0a0e14',
+              surface:  '#111827',
+              border:   '#1f2937',
+              blue:     '#3b82f6',
+              'blue-dim':'#1d4ed8',
+              green:    '#22c55e',
+              'green-dim':'#15803d',
+              amber:    '#f59e0b',
+              text:     '#f8fafc',
+              muted:    '#94a3b8',
+              subtle:   '#475569',
+            }
+          },
+          animation: {
+            'blink': 'blink 1s step-end infinite',
+            'slide-up': 'slideUp 0.4s ease-out forwards',
+            'fade-in': 'fadeIn 0.6s ease-out forwards',
+          },
+          keyframes: {
+            blink: { '0%,100%': { opacity: '1' }, '50%': { opacity: '0' } },
+            slideUp: { from: { opacity: '0', transform: 'translateY(12px)' }, to: { opacity: '1', transform: 'translateY(0)' } },
+            fadeIn: { from: { opacity: '0' }, to: { opacity: '1' } },
+          }
+        }
+      }
+    }
+  </script>
+  <style>
+    body { background: #0a0e14; color: #f8fafc; font-family: 'Inter', sans-serif; }
+
+    /* Scanline effect on terminal */
+    .scanlines::before {
+      content: '';
+      position: absolute;
+      inset: 0;
+      background: repeating-linear-gradient(
+        to bottom,
+        transparent 0px,
+        transparent 2px,
+        rgba(0,0,0,0.15) 2px,
+        rgba(0,0,0,0.15) 4px
+      );
+      pointer-events: none;
+      z-index: 10;
+      border-radius: inherit;
+    }
+
+    .terminal-line { opacity: 0; }
+    .terminal-line.visible { animation: slideUp 0.3s ease-out forwards; }
+
+    /* Syntax colors */
+    .kw   { color: #c084fc; } /* keyword */
+    .dec  { color: #3b82f6; } /* decorator */
+    .fn   { color: #22c55e; } /* function name */
+    .str  { color: #f59e0b; } /* string */
+    .num  { color: #fb923c; } /* number */
+    .cm   { color: #475569; } /* comment */
+    .cls  { color: #67e8f9; } /* class */
+    .pun  { color: #94a3b8; } /* punctuation */
+
+    /* Thick blue rule */
+    .rule-blue { border: none; height: 2px; background: #3b82f6; opacity: 0.4; }
+
+    .stat-num { font-variant-numeric: tabular-nums; }
+
+    /* Green pulse on the live indicator */
+    @keyframes livePulse {
+      0%, 100% { box-shadow: 0 0 0 0 rgba(34,197,94,0.6); }
+      50%       { box-shadow: 0 0 0 5px rgba(34,197,94,0); }
+    }
+    .live-dot { animation: livePulse 2s ease-in-out infinite; }
+  </style>
+</head>
+<body class="antialiased">
+
+  <!-- NAV -->
+  <nav class="fixed top-0 left-0 right-0 z-50 border-b border-volt-border bg-volt-bg/90 backdrop-blur-md">
+    <div class="max-w-7xl mx-auto px-4 sm:px-6 flex items-center justify-between h-14">
+      <div class="flex items-center gap-6">
+        <a href="#" class="font-mono font-bold text-lg tracking-tight text-volt-text flex items-center gap-2">
+          <span class="text-volt-blue">⚡</span>voltage
+        </a>
+        <div class="hidden md:flex items-center gap-5 text-sm text-volt-muted font-mono">
+          <a href="#" class="hover:text-volt-text transition-colors">docs</a>
+          <a href="#" class="hover:text-volt-text transition-colors">pricing</a>
+          <a href="#" class="hover:text-volt-text transition-colors">examples</a>
+          <a href="#" class="hover:text-volt-text transition-colors">changelog</a>
+        </div>
+      </div>
+      <div class="flex items-center gap-3">
+        <a href="#" class="text-sm font-mono text-volt-muted hover:text-volt-text transition-colors hidden sm:block">sign in</a>
+        <a href="#" class="text-sm font-mono font-medium bg-volt-blue text-white px-4 py-1.5 rounded hover:bg-volt-blue-dim transition-colors">
+          get started →
+        </a>
+      </div>
+    </div>
+  </nav>
+
+  <!-- HERO -->
+  <section class="pt-28 pb-16 px-4 sm:px-6 max-w-7xl mx-auto">
+    <div class="grid lg:grid-cols-2 gap-12 items-start">
+
+      <!-- LEFT: headline + stats -->
+      <div>
+        <!-- Status badge -->
+        <div class="flex items-center gap-2 mb-6">
+          <span class="w-2 h-2 rounded-full bg-volt-green live-dot inline-block"></span>
+          <span class="font-mono text-xs text-volt-green uppercase tracking-widest">Production · 99.97% uptime</span>
+        </div>
+
+        <h1 class="text-4xl sm:text-5xl font-bold text-volt-text leading-tight mb-4">
+          Serverless compute<br/>
+          <span class="text-volt-blue">for serious ML work.</span>
+        </h1>
+
+        <p class="text-volt-muted text-base sm:text-lg leading-relaxed mb-8 max-w-md">
+          Decorate a Python function. Attach a GPU. It runs in the cloud —
+          scaling from zero to thousands of containers and back to zero.
+          No Docker. No YAML. No cluster ops.
+        </p>
+
+        <div class="flex flex-wrap gap-3 mb-10">
+          <a href="#" class="font-mono text-sm font-medium bg-volt-blue text-white px-5 py-2.5 rounded hover:bg-volt-blue-dim transition-colors">
+            $ pip install voltage
+          </a>
+          <a href="#" class="font-mono text-sm font-medium border border-volt-border text-volt-muted px-5 py-2.5 rounded hover:border-volt-blue hover:text-volt-text transition-colors">
+            read the docs →
+          </a>
+        </div>
+
+        <!-- Stats row -->
+        <div class="grid grid-cols-3 gap-4 border border-volt-border rounded-lg p-4 bg-volt-surface">
+          <div>
+            <div class="font-mono text-2xl font-bold text-volt-text stat-num" id="stat-containers">0</div>
+            <div class="text-xs text-volt-muted mt-0.5">containers/job max</div>
+          </div>
+          <div class="border-l border-volt-border pl-4">
+            <div class="font-mono text-2xl font-bold text-volt-green stat-num">&lt;200ms</div>
+            <div class="text-xs text-volt-muted mt-0.5">cold start</div>
+          </div>
+          <div class="border-l border-volt-border pl-4">
+            <div class="font-mono text-2xl font-bold text-volt-amber stat-num">$0</div>
+            <div class="text-xs text-volt-muted mt-0.5">when idle</div>
+          </div>
+        </div>
+      </div>
+
+      <!-- RIGHT: Terminal -->
+      <div class="relative">
+        <!-- Terminal chrome -->
+        <div class="rounded-lg overflow-hidden border border-volt-border bg-[#0d1117] shadow-2xl shadow-black/60 relative scanlines">
+          <!-- Title bar -->
+          <div class="flex items-center gap-2 px-4 py-3 border-b border-volt-border bg-[#161b22]">
+            <span class="w-3 h-3 rounded-full bg-[#ff5f56]"></span>
+            <span class="w-3 h-3 rounded-full bg-[#ffbd2e]"></span>
+            <span class="w-3 h-3 rounded-full bg-[#27c93f]"></span>
+            <span class="flex-1 text-center font-mono text-xs text-volt-subtle">train.py — voltage</span>
+          </div>
+
+          <!-- Code content -->
+          <div class="p-5 font-mono text-sm leading-relaxed overflow-x-auto" id="terminal-code">
+            <div class="cm"># pip install voltage</div>
+            <div class="mt-3">
+              <span class="kw">import</span> <span class="cls">voltage</span>
+            </div>
+            <div class="mt-3">
+              <span class="dec">@voltage.function</span><span class="pun">(</span>
+            </div>
+            <div class="pl-4">
+              <span class="pun">gpu=</span><span class="str">"A100"</span><span class="pun">,</span>
+            </div>
+            <div class="pl-4">
+              <span class="pun">memory=</span><span class="str">"80GB"</span><span class="pun">,</span>
+            </div>
+            <div class="pl-4">
+              <span class="pun">concurrency=</span><span class="num">512</span><span class="pun">,</span>
+            </div>
+            <div><span class="pun">)</span></div>
+            <div class="mt-1">
+              <span class="kw">def</span> <span class="fn">train_model</span><span class="pun">(</span><span class="cls">dataset_path</span><span class="pun">:</span> <span class="cls">str</span><span class="pun">):</span>
+            </div>
+            <div class="pl-4 text-volt-muted">
+              <span class="cm"># Your existing code, unchanged.</span>
+            </div>
+            <div class="pl-4">
+              <span class="cm"># Voltage handles the rest.</span>
+            </div>
+            <div class="pl-4 mt-1">
+              <span class="kw">return</span> <span class="fn">run_training_loop</span><span class="pun">(</span><span class="cls">dataset_path</span><span class="pun">)</span>
+            </div>
+
+            <div class="mt-5 border-t border-volt-border pt-4">
+              <div class="text-volt-subtle text-xs mb-2">— invoke from anywhere —</div>
+              <div>
+                <span class="text-volt-subtle">$ </span>
+                <span class="kw">python</span> <span class="pun">-c</span> <span class="str">"from train import train_model; train_model.remote('/data/imagenet')"</span>
+              </div>
+            </div>
+
+            <div class="mt-4 space-y-1 text-xs">
+              <div>
+                <span class="text-volt-green">✓</span>
+                <span class="text-volt-muted"> container provisioned </span>
+                <span class="text-volt-subtle">(138ms)</span>
+              </div>
+              <div>
+                <span class="text-volt-green">✓</span>
+                <span class="text-volt-muted"> A100 attached </span>
+                <span class="text-volt-subtle">(GPU util: 0% → 94%)</span>
+              </div>
+              <div>
+                <span class="text-volt-green">✓</span>
+                <span class="text-volt-muted"> streaming logs → </span>
+                <span class="text-volt-blue">voltage logs --follow</span>
+              </div>
+              <div class="flex items-center gap-1 mt-2">
+                <span class="text-volt-green font-bold">→</span>
+                <span class="text-volt-text">epoch 1/10 · loss: 2.847 · acc: 0.312</span>
+                <span class="animate-blink text-volt-green font-bold ml-1">█</span>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <!-- GPU pill overlay -->
+        <div class="absolute -bottom-3 -right-3 bg-volt-surface border border-volt-green/40 rounded-md px-3 py-1.5 font-mono text-xs">
+          <span class="text-volt-green">●</span>
+          <span class="text-volt-muted ml-1.5">A100 · 94% util · $0.0023/min</span>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <hr class="rule-blue max-w-7xl mx-auto" />
+
+  <!-- FEATURE GRID -->
+  <section class="py-16 px-4 sm:px-6 max-w-7xl mx-auto">
+    <div class="flex items-center gap-3 mb-10">
+      <span class="font-mono text-xs text-volt-subtle uppercase tracking-widest">capabilities</span>
+      <div class="flex-1 border-t border-volt-border"></div>
+    </div>
+
+    <div class="grid sm:grid-cols-2 lg:grid-cols-3 gap-4">
+
+      <!-- Card 1 -->
+      <div class="border border-volt-border rounded-lg p-5 bg-volt-surface hover:border-volt-blue/50 transition-colors group">
+        <div class="font-mono text-volt-blue text-xs mb-3 uppercase tracking-widest">compute</div>
+        <h3 class="font-semibold text-volt-text mb-2">On-demand GPUs</h3>
+        <p class="text-volt-muted text-sm leading-relaxed mb-4">
+          A100s, H100s, L40s. Pick in a decorator argument. Billed per second while your
+          function runs — not per hour, not per reservation.
+        </p>
+        <div class="font-mono text-xs bg-[#0a0e14] rounded p-2 border border-volt-border">
+          <span class="dec">@voltage.function</span><span class="pun">(gpu=</span><span class="str">"H100"</span><span class="pun">)</span>
+        </div>
+      </div>
+
+      <!-- Card 2 -->
+      <div class="border border-volt-border rounded-lg p-5 bg-volt-surface hover:border-volt-blue/50 transition-colors group">
+        <div class="font-mono text-volt-blue text-xs mb-3 uppercase tracking-widest">scale</div>
+        <h3 class="font-semibold text-volt-text mb-2">Zero to thousands</h3>
+        <p class="text-volt-muted text-sm leading-relaxed mb-4">
+          Submit 5,000 tasks. Voltage spins up containers in parallel, fans out work,
+          collects results. No queue configuration. No autoscaling policy YAML.
+        </p>
+        <div class="font-mono text-xs bg-[#0a0e14] rounded p-2 border border-volt-border">
+          <span class="fn">results</span> <span class="pun">= </span><span class="fn">process.map</span><span class="pun">(dataset, concurrency=</span><span class="num">5000</span><span class="pun">)</span>
+        </div>
+      </div>
+
+      <!-- Card 3 -->
+      <div class="border border-volt-border rounded-lg p-5 bg-volt-surface hover:border-volt-blue/50 transition-colors group">
+        <div class="font-mono text-volt-green text-xs mb-3 uppercase tracking-widest">inference</div>
+        <h3 class="font-semibold text-volt-text mb-2">Inference endpoints</h3>
+        <p class="text-volt-muted text-sm leading-relaxed mb-4">
+          One decorator converts any function into a persistent HTTP endpoint.
+          Auto-scales to traffic, scales to zero at idle. No Kubernetes.
+        </p>
+        <div class="font-mono text-xs bg-[#0a0e14] rounded p-2 border border-volt-border">
+          <span class="dec">@voltage.endpoint</span><span class="pun">(min_replicas=</span><span class="num">0</span><span class="pun">)</span>
+        </div>
+      </div>
+
+      <!-- Card 4 -->
+      <div class="border border-volt-border rounded-lg p-5 bg-volt-surface hover:border-volt-blue/50 transition-colors group">
+        <div class="font-mono text-volt-amber text-xs mb-3 uppercase tracking-widest">scheduling</div>
+        <h3 class="font-semibold text-volt-text mb-2">Cron + job scheduling</h3>
+        <p class="text-volt-muted text-sm leading-relaxed mb-4">
+          Schedule retraining pipelines, data processing jobs, or nightly evals.
+          Trigger from CI, webhooks, or a cron expression — all in Python.
+        </p>
+        <div class="font-mono text-xs bg-[#0a0e14] rounded p-2 border border-volt-border">
+          <span class="dec">@voltage.cron</span><span class="pun">(schedule=</span><span class="str">"0 2 * * *"</span><span class="pun">)</span>
+        </div>
+      </div>
+
+      <!-- Card 5 -->
+      <div class="border border-volt-border rounded-lg p-5 bg-volt-surface hover:border-volt-blue/50 transition-colors group">
+        <div class="font-mono text-volt-blue text-xs mb-3 uppercase tracking-widest">cold start</div>
+        <h3 class="font-semibold text-volt-text mb-2">Sub-200ms cold starts</h3>
+        <p class="text-volt-muted text-sm leading-relaxed mb-4">
+          Image layers are cached at the network edge. Container memory snapshots
+          cut cold start to under 200ms — even for PyTorch environments.
+        </p>
+        <div class="font-mono text-xs text-volt-green bg-[#0a0e14] rounded p-2 border border-volt-border">
+          container ready in 138ms ✓
+        </div>
+      </div>
+
+      <!-- Card 6 -->
+      <div class="border border-volt-border rounded-lg p-5 bg-volt-surface hover:border-volt-blue/50 transition-colors group">
+        <div class="font-mono text-volt-green text-xs mb-3 uppercase tracking-widest">storage</div>
+        <h3 class="font-semibold text-volt-text mb-2">Attached volumes</h3>
+        <p class="text-volt-muted text-sm leading-relaxed mb-4">
+          Mount persistent volumes, S3 buckets, or distributed file systems.
+          Model weights, datasets, checkpoints — available inside your function
+          as a regular path.
+        </p>
+        <div class="font-mono text-xs bg-[#0a0e14] rounded p-2 border border-volt-border">
+          <span class="pun">volume=</span><span class="fn">voltage.Volume</span><span class="pun">(</span><span class="str">"/data"</span><span class="pun">)</span>
+        </div>
+      </div>
+
+    </div>
+  </section>
+
+  <hr class="rule-blue max-w-7xl mx-auto" />
+
+  <!-- COMPARISON / POSITIONING -->
+  <section class="py-16 px-4 sm:px-6 max-w-7xl mx-auto">
+    <div class="flex items-center gap-3 mb-10">
+      <span class="font-mono text-xs text-volt-subtle uppercase tracking-widest">vs. the alternatives</span>
+      <div class="flex-1 border-t border-volt-border"></div>
+    </div>
+
+    <div class="grid sm:grid-cols-3 gap-6">
+      <div class="border border-volt-border rounded-lg p-5 bg-volt-surface">
+        <div class="font-mono text-xs text-volt-subtle mb-3">BEFORE: Cloud VMs</div>
+        <ul class="space-y-2 text-sm text-volt-muted">
+          <li class="flex gap-2"><span class="text-red-400 mt-0.5">✗</span> Provision instance manually</li>
+          <li class="flex gap-2"><span class="text-red-400 mt-0.5">✗</span> Pay 24/7 even when idle</li>
+          <li class="flex gap-2"><span class="text-red-400 mt-0.5">✗</span> SSH, tmux, pray</li>
+          <li class="flex gap-2"><span class="text-red-400 mt-0.5">✗</span> Can't parallelize easily</li>
+          <li class="flex gap-2"><span class="text-red-400 mt-0.5">✗</span> No reproducible environments</li>
+        </ul>
+      </div>
+      <div class="border border-volt-border rounded-lg p-5 bg-volt-surface">
+        <div class="font-mono text-xs text-volt-subtle mb-3">BEFORE: Kubernetes</div>
+        <ul class="space-y-2 text-sm text-volt-muted">
+          <li class="flex gap-2"><span class="text-red-400 mt-0.5">✗</span> Write YAML manifests</li>
+          <li class="flex gap-2"><span class="text-red-400 mt-0.5">✗</span> Manage node pools</li>
+          <li class="flex gap-2"><span class="text-red-400 mt-0.5">✗</span> Helm charts, operators</li>
+          <li class="flex gap-2"><span class="text-red-400 mt-0.5">✗</span> GPU device plugins</li>
+          <li class="flex gap-2"><span class="text-red-400 mt-0.5">✗</span> Months of cluster ops work</li>
+        </ul>
+      </div>
+      <div class="border border-volt-blue/40 rounded-lg p-5 bg-volt-blue/5">
+        <div class="font-mono text-xs text-volt-blue mb-3">WITH VOLTAGE</div>
+        <ul class="space-y-2 text-sm text-volt-text">
+          <li class="flex gap-2"><span class="text-volt-green mt-0.5">✓</span> Decorator on a Python function</li>
+          <li class="flex gap-2"><span class="text-volt-green mt-0.5">✓</span> Pay only while it runs</li>
+          <li class="flex gap-2"><span class="text-volt-green mt-0.5">✓</span> GPU attached in &lt;200ms</li>
+          <li class="flex gap-2"><span class="text-volt-green mt-0.5">✓</span> .map() for parallel jobs</li>
+          <li class="flex gap-2"><span class="text-volt-green mt-0.5">✓</span> Reproducible, versioned envs</li>
+        </ul>
+      </div>
+    </div>
+  </section>
+
+  <hr class="rule-blue max-w-7xl mx-auto" />
+
+  <!-- PRICING SIGNAL -->
+  <section class="py-16 px-4 sm:px-6 max-w-7xl mx-auto">
+    <div class="flex items-center gap-3 mb-10">
+      <span class="font-mono text-xs text-volt-subtle uppercase tracking-widest">pricing model</span>
+      <div class="flex-1 border-t border-volt-border"></div>
+    </div>
+
+    <div class="grid sm:grid-cols-3 gap-4 mb-8">
+      <div class="border border-volt-border rounded-lg p-5 bg-volt-surface text-center">
+        <div class="font-mono text-3xl font-bold text-volt-text mb-1">$0</div>
+        <div class="font-mono text-xs text-volt-muted">when containers are idle</div>
+      </div>
+      <div class="border border-volt-border rounded-lg p-5 bg-volt-surface text-center">
+        <div class="font-mono text-3xl font-bold text-volt-blue mb-1">per-second</div>
+        <div class="font-mono text-xs text-volt-muted">billing granularity</div>
+      </div>
+      <div class="border border-volt-border rounded-lg p-5 bg-volt-surface text-center">
+        <div class="font-mono text-3xl font-bold text-volt-green mb-1">no minimum</div>
+        <div class="font-mono text-xs text-volt-muted">commit or reservation</div>
+      </div>
+    </div>
+
+    <div class="font-mono text-sm text-volt-muted text-center">
+      A100 · <span class="text-volt-text">$2.49/hr</span> &nbsp;|&nbsp;
+      H100 · <span class="text-volt-text">$3.89/hr</span> &nbsp;|&nbsp;
+      L40S · <span class="text-volt-text">$1.79/hr</span> &nbsp;|&nbsp;
+      CPU · <span class="text-volt-text">$0.018/hr per vCPU</span>
+    </div>
+  </section>
+
+  <!-- CTA -->
+  <section class="py-20 px-4 sm:px-6 max-w-7xl mx-auto">
+    <div class="border border-volt-blue/30 rounded-xl bg-volt-surface p-10 text-center">
+      <div class="font-mono text-xs text-volt-blue uppercase tracking-widest mb-4">get started in 60 seconds</div>
+      <h2 class="text-3xl font-bold text-volt-text mb-3">Run your first function.</h2>
+      <p class="text-volt-muted mb-8 max-w-md mx-auto text-sm leading-relaxed">
+        Install the SDK, add a decorator, call <code class="text-volt-green bg-[#0a0e14] px-1.5 py-0.5 rounded text-xs">.remote()</code>.
+        Your GPU is running in the cloud before you finish the sentence.
+      </p>
+
+      <div class="font-mono text-sm bg-[#0a0e14] border border-volt-border rounded-lg p-4 max-w-sm mx-auto mb-6 text-left">
+        <div class="text-volt-subtle mb-1">$ install</div>
+        <div class="text-volt-green">pip install voltage</div>
+        <div class="text-volt-subtle mt-3 mb-1">$ run</div>
+        <div class="text-volt-text">python train.py<span class="animate-blink text-volt-green">▌</span></div>
+      </div>
+
+      <div class="flex flex-wrap justify-center gap-3">
+        <a href="#" class="font-mono text-sm font-medium bg-volt-blue text-white px-6 py-3 rounded hover:bg-volt-blue-dim transition-colors">
+          Run your first function →
+        </a>
+        <a href="#" class="font-mono text-sm border border-volt-border text-volt-muted px-6 py-3 rounded hover:border-volt-blue hover:text-volt-text transition-colors">
+          view examples on GitHub
+        </a>
+      </div>
+    </div>
+  </section>
+
+  <!-- FOOTER -->
+  <footer class="border-t border-volt-border py-10 px-4 sm:px-6 max-w-7xl mx-auto">
+    <div class="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4">
+      <div class="font-mono font-bold text-volt-text flex items-center gap-2">
+        <span class="text-volt-blue">⚡</span>voltage
+      </div>
+      <div class="flex flex-wrap gap-5 font-mono text-xs text-volt-subtle">
+        <a href="#" class="hover:text-volt-muted transition-colors">docs</a>
+        <a href="#" class="hover:text-volt-muted transition-colors">status</a>
+        <a href="#" class="hover:text-volt-muted transition-colors">pricing</a>
+        <a href="#" class="hover:text-volt-muted transition-colors">github</a>
+        <a href="#" class="hover:text-volt-muted transition-colors">discord</a>
+        <a href="#" class="hover:text-volt-muted transition-colors">privacy</a>
+      </div>
+      <div class="font-mono text-xs text-volt-subtle">© 2024 Voltage Inc.</div>
+    </div>
+  </footer>
+
+  <script>
+    // Animate stat counter
+    function animateCounter(el, target, suffix = '', duration = 1200) {
+      let start = 0;
+      const step = target / (duration / 16);
+      const interval = setInterval(() => {
+        start = Math.min(start + step, target);
+        el.textContent = Math.floor(start).toLocaleString() + suffix;
+        if (start >= target) clearInterval(interval);
+      }, 16);
+    }
+
+    const observer = new IntersectionObserver((entries) => {
+      entries.forEach(e => {
+        if (e.isIntersecting) {
+          const el = document.getElementById('stat-containers');
+          if (el) animateCounter(el, 10000, '+');
+          observer.disconnect();
+        }
+      });
+    }, { threshold: 0.5 });
+
+    const statEl = document.getElementById('stat-containers');
+    if (statEl) observer.observe(statEl);
+  </script>
+</body>
+</html>

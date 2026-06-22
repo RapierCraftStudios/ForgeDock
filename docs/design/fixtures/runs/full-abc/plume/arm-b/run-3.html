@@ -1,0 +1,817 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Plume — Project management for engineers</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script>
+    tailwind.config = {
+      theme: {
+        extend: {
+          fontFamily: {
+            display: ['"Syne"', 'system-ui', 'sans-serif'],
+            body: ['"Outfit"', 'system-ui', 'sans-serif'],
+            mono: ['"Fira Code"', 'monospace'],
+          },
+        },
+      },
+    }
+  </script>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Syne:wght@700;800&family=Outfit:wght@300;400;500;600;700&family=Fira+Code:wght@400;500&display=swap" rel="stylesheet" />
+  <style>
+    :root {
+      --bg: #ffffff;
+      --fg: #0a0a0a;
+      --teal: #0d9488;
+      --teal-light: #14b8a6;
+      --teal-pale: #f0fdfa;
+      --teal-border: #99f6e4;
+      --gray-50: #f9fafb;
+      --gray-100: #f3f4f6;
+      --gray-200: #e5e7eb;
+      --gray-400: #9ca3af;
+      --gray-500: #6b7280;
+      --gray-700: #374151;
+      --gray-900: #111827;
+    }
+    * { box-sizing: border-box; }
+    body {
+      background: var(--bg);
+      color: var(--fg);
+      font-family: 'Outfit', system-ui, sans-serif;
+    }
+    .display { font-family: 'Syne', system-ui, sans-serif; }
+    .mono { font-family: 'Fira Code', monospace; }
+    .teal-text { color: var(--teal); }
+    .teal-bg { background: var(--teal); }
+    .teal-border { border-color: var(--teal-border); }
+    .btn-primary {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      padding: 13px 26px;
+      background: var(--teal);
+      color: white;
+      font-weight: 600;
+      font-size: 15px;
+      border-radius: 8px;
+      text-decoration: none;
+      transition: background 0.15s, transform 0.1s;
+    }
+    .btn-primary:hover { background: #0f766e; }
+    .btn-outline {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      padding: 12px 26px;
+      background: transparent;
+      color: var(--gray-700);
+      font-weight: 500;
+      font-size: 15px;
+      border-radius: 8px;
+      border: 1.5px solid var(--gray-200);
+      text-decoration: none;
+      transition: border-color 0.15s, background 0.15s;
+    }
+    .btn-outline:hover { border-color: var(--teal); color: var(--teal); }
+    .feature-card {
+      border: 1.5px solid var(--gray-200);
+      border-radius: 16px;
+      padding: 28px;
+      background: white;
+      transition: border-color 0.2s, box-shadow 0.2s;
+    }
+    .feature-card:hover {
+      border-color: var(--teal-border);
+      box-shadow: 0 0 0 4px rgba(20,184,166,0.06);
+    }
+    .tag {
+      display: inline-flex;
+      align-items: center;
+      gap: 4px;
+      padding: 3px 10px;
+      border-radius: 100px;
+      font-size: 12px;
+      font-weight: 500;
+    }
+    .tag-teal { background: var(--teal-pale); color: var(--teal); border: 1px solid var(--teal-border); }
+    .tag-gray { background: var(--gray-100); color: var(--gray-500); border: 1px solid var(--gray-200); }
+    .tag-amber { background: #fffbeb; color: #92400e; border: 1px solid #fde68a; }
+    .tag-blue { background: #eff6ff; color: #1e40af; border: 1px solid #bfdbfe; }
+    .tag-green { background: #f0fdf4; color: #15803d; border: 1px solid #bbf7d0; }
+    .kbd {
+      display: inline-block;
+      padding: 2px 7px;
+      background: var(--gray-100);
+      border: 1px solid var(--gray-200);
+      border-bottom: 2px solid var(--gray-300);
+      border-radius: 4px;
+      font-family: 'Fira Code', monospace;
+      font-size: 11px;
+      color: var(--gray-500);
+    }
+    .section-label {
+      font-size: 12px;
+      font-weight: 600;
+      text-transform: uppercase;
+      letter-spacing: 0.1em;
+      color: var(--teal);
+    }
+    .issue-row {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      padding: 10px 16px;
+      border-bottom: 1px solid var(--gray-100);
+      transition: background 0.1s;
+      cursor: pointer;
+    }
+    .issue-row:hover { background: var(--gray-50); }
+    .issue-row:last-child { border-bottom: none; }
+    .priority-critical { color: #dc2626; }
+    .priority-high { color: #d97706; }
+    .priority-medium { color: #6b7280; }
+    .avatar {
+      width: 22px; height: 22px; border-radius: 50%;
+      display: flex; align-items: center; justify-content: center;
+      font-size: 9px; font-weight: 700; flex-shrink: 0;
+    }
+    .cycle-bar {
+      height: 6px;
+      border-radius: 100px;
+      background: var(--gray-200);
+      overflow: hidden;
+    }
+    .cycle-fill {
+      height: 100%;
+      border-radius: 100px;
+      background: linear-gradient(90deg, var(--teal) 0%, var(--teal-light) 100%);
+    }
+    .faq-item { border-bottom: 1px solid var(--gray-200); }
+    .faq-item:last-child { border-bottom: none; }
+    .scroll-fade {
+      background: linear-gradient(to right, transparent 0%, white 15%, white 85%, transparent 100%);
+    }
+  </style>
+</head>
+<body class="antialiased">
+
+  <!-- Top banner -->
+  <div class="teal-bg text-white text-center py-2.5 text-sm font-medium">
+    Now in public beta. Free for teams up to 10.
+    <a href="#signup" class="underline ml-2 opacity-80 hover:opacity-100">Get started →</a>
+  </div>
+
+  <!-- Nav -->
+  <nav class="sticky top-0 z-50 bg-white border-b border-gray-200">
+    <div class="max-w-6xl mx-auto px-6 h-16 flex items-center justify-between">
+      <div class="flex items-center gap-10">
+        <div class="flex items-center gap-2.5">
+          <svg width="28" height="28" viewBox="0 0 28 28" fill="none">
+            <rect width="28" height="28" rx="8" fill="#0d9488"/>
+            <circle cx="14" cy="14" r="4" fill="white"/>
+            <path d="M14 6C9.58 6 6 9.58 6 14" stroke="white" stroke-width="2" stroke-linecap="round"/>
+            <path d="M14 22C18.42 22 22 18.42 22 14" stroke="white" stroke-width="2" stroke-linecap="round" opacity="0.5"/>
+          </svg>
+          <span class="display font-bold text-lg tracking-tight" style="color: var(--gray-900);">Plume</span>
+        </div>
+        <div class="hidden md:flex items-center gap-1">
+          <a href="#product" class="text-sm px-3 py-1.5 rounded-lg hover:bg-gray-100 transition-colors" style="color: var(--gray-500);">Product</a>
+          <a href="#cycles" class="text-sm px-3 py-1.5 rounded-lg hover:bg-gray-100 transition-colors" style="color: var(--gray-500);">Cycles</a>
+          <a href="#integrations" class="text-sm px-3 py-1.5 rounded-lg hover:bg-gray-100 transition-colors" style="color: var(--gray-500);">Integrations</a>
+          <a href="#pricing" class="text-sm px-3 py-1.5 rounded-lg hover:bg-gray-100 transition-colors" style="color: var(--gray-500);">Pricing</a>
+        </div>
+      </div>
+      <div class="flex items-center gap-3">
+        <a href="#" class="text-sm hidden sm:block" style="color: var(--gray-500);">Log in</a>
+        <a href="#signup" class="btn-primary" style="padding: 9px 20px; font-size: 13px; border-radius: 8px;">Get started free</a>
+      </div>
+    </div>
+  </nav>
+
+  <!-- Hero — centered, clean, modern -->
+  <section class="max-w-5xl mx-auto px-6 pt-20 pb-16 text-center">
+    <div class="tag tag-teal mb-6 mx-auto w-fit">
+      <svg class="w-3 h-3" viewBox="0 0 12 12" fill="none"><circle cx="6" cy="6" r="4" stroke="currentColor" stroke-width="1.5"/><circle cx="6" cy="6" r="1.5" fill="currentColor"/></svg>
+      Built for engineering teams
+    </div>
+
+    <h1 class="display text-6xl md:text-7xl lg:text-8xl font-extrabold tracking-tight leading-none mb-6" style="color: var(--gray-900);">
+      Issue tracking<br/>
+      <span style="color: var(--teal);">without the drag.</span>
+    </h1>
+
+    <p class="text-xl max-w-xl mx-auto leading-relaxed mb-8" style="color: var(--gray-500);">
+      Plume is keyboard-driven project management for software teams. Plan cycles, ship issues, and see your roadmap — without the overhead.
+    </p>
+
+    <div class="flex flex-col sm:flex-row items-center justify-center gap-3 mb-12">
+      <a href="#signup" class="btn-primary w-full sm:w-auto justify-center">
+        Start for free
+        <svg class="w-4 h-4" viewBox="0 0 16 16" fill="none"><path d="M3 8h10M9 4l4 4-4 4" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg>
+      </a>
+      <a href="#demo" class="btn-outline w-full sm:w-auto justify-center">
+        <svg class="w-4 h-4" viewBox="0 0 16 16" fill="none"><path d="M5 3.5l8 4.5-8 4.5V3.5z" fill="currentColor"/></svg>
+        Watch the demo
+      </a>
+    </div>
+
+    <!-- Social proof line -->
+    <div class="flex flex-wrap items-center justify-center gap-4 text-sm" style="color: var(--gray-400);">
+      <span class="flex items-center gap-1.5">
+        <svg class="w-4 h-4" viewBox="0 0 16 16" fill="currentColor" style="color: var(--teal);"><path d="M8 .25a.75.75 0 01.673.418l1.882 3.815 4.21.612a.75.75 0 01.416 1.279l-3.046 2.97.719 4.192a.75.75 0 01-1.088.791L8 11.771l-3.766 1.98a.75.75 0 01-1.088-.79l.72-4.194L.818 6.374a.75.75 0 01.416-1.28l4.21-.611L7.327.668A.75.75 0 018 .25z"/></svg>
+        4.9 on Product Hunt
+      </span>
+      <span>·</span>
+      <span>Free for teams under 10</span>
+      <span>·</span>
+      <span>No credit card required</span>
+      <span>·</span>
+      <span>Setup in 2 minutes</span>
+    </div>
+  </section>
+
+  <!-- Main UI Mockup -->
+  <section class="max-w-6xl mx-auto px-6 pb-24">
+    <div class="rounded-2xl overflow-hidden shadow-xl" style="border: 1.5px solid var(--gray-200);">
+      <!-- Chrome bar -->
+      <div class="flex items-center gap-3 px-4 h-11 border-b" style="background: var(--gray-50); border-color: var(--gray-200);">
+        <div class="flex gap-1.5 flex-shrink-0">
+          <div class="w-3 h-3 rounded-full bg-red-400"></div>
+          <div class="w-3 h-3 rounded-full bg-yellow-400"></div>
+          <div class="w-3 h-3 rounded-full bg-green-400"></div>
+        </div>
+        <div class="flex-1 flex items-center justify-center">
+          <div class="flex items-center gap-1.5 bg-white border border-gray-200 rounded-md px-3 h-6 text-xs text-gray-400">
+            <svg class="w-3 h-3" viewBox="0 0 12 12" fill="none"><path d="M10.5 10.5l-2.25-2.25M8.5 5.5A3 3 0 112.5 5.5a3 3 0 016 0z" stroke="currentColor" stroke-width="1" stroke-linecap="round"/></svg>
+            app.plume.dev/acme
+          </div>
+        </div>
+        <div class="flex-shrink-0 flex items-center gap-2">
+          <div class="avatar" style="background: #0d9488; color: white;">J</div>
+          <div class="avatar" style="background: #8b5cf6; color: white;">S</div>
+          <div class="avatar" style="background: #f59e0b; color: white;">M</div>
+        </div>
+      </div>
+
+      <div class="flex bg-white" style="min-height: 480px;">
+        <!-- Sidebar -->
+        <div class="w-56 flex-shrink-0 border-r py-3" style="border-color: var(--gray-200);">
+          <!-- Workspace -->
+          <div class="px-3 mb-4">
+            <div class="flex items-center gap-2 px-2 py-1.5 rounded-lg text-sm font-semibold" style="color: var(--gray-900);">
+              <div class="w-5 h-5 rounded" style="background: var(--teal);"></div>
+              Acme Corp
+            </div>
+          </div>
+
+          <div class="px-3 mb-1">
+            <div class="text-xs font-semibold uppercase tracking-wider px-2 py-1" style="color: var(--gray-400);">Workspace</div>
+          </div>
+          <div class="px-3 space-y-0.5 mb-4">
+            <div class="flex items-center justify-between px-2 py-1.5 rounded-lg text-sm cursor-pointer hover:bg-gray-50 font-medium" style="color: var(--teal); background: var(--teal-pale);">
+              <div class="flex items-center gap-2">
+                <svg class="w-4 h-4" viewBox="0 0 16 16" fill="none"><rect x="2" y="2" width="5" height="5" rx="1" fill="currentColor" opacity="0.7"/><rect x="9" y="2" width="5" height="5" rx="1" fill="currentColor" opacity="0.7"/><rect x="2" y="9" width="5" height="5" rx="1" fill="currentColor" opacity="0.4"/><rect x="9" y="9" width="5" height="5" rx="1" fill="currentColor" opacity="0.4"/></svg>
+                Issues
+              </div>
+              <span class="text-xs" style="color: var(--gray-400);">47</span>
+            </div>
+            <div class="flex items-center justify-between px-2 py-1.5 rounded-lg text-sm cursor-pointer hover:bg-gray-50" style="color: var(--gray-500);">
+              <div class="flex items-center gap-2">
+                <svg class="w-4 h-4" viewBox="0 0 16 16" fill="none"><circle cx="8" cy="8" r="6" stroke="currentColor" stroke-width="1.5"/><path d="M8 5v3l2 1.5" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg>
+                Cycles
+              </div>
+              <span class="text-xs bg-teal-100 text-teal-700 px-1.5 rounded font-medium">S12</span>
+            </div>
+            <div class="flex items-center gap-2 px-2 py-1.5 rounded-lg text-sm cursor-pointer hover:bg-gray-50" style="color: var(--gray-500);">
+              <svg class="w-4 h-4" viewBox="0 0 16 16" fill="none"><path d="M2 12L5 5l3 4 3-6 3 7" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg>
+              Roadmap
+            </div>
+          </div>
+
+          <div class="px-3 mb-1">
+            <div class="text-xs font-semibold uppercase tracking-wider px-2 py-1" style="color: var(--gray-400);">Projects</div>
+          </div>
+          <div class="px-3 space-y-0.5">
+            <div class="flex items-center gap-2 px-2 py-1.5 rounded-lg text-sm cursor-pointer hover:bg-gray-50" style="color: var(--gray-600);">
+              <span class="w-2.5 h-2.5 rounded-sm flex-shrink-0" style="background: #3b82f6;"></span> API v3
+            </div>
+            <div class="flex items-center gap-2 px-2 py-1.5 rounded-lg text-sm cursor-pointer hover:bg-gray-50" style="color: var(--gray-600);">
+              <span class="w-2.5 h-2.5 rounded-sm flex-shrink-0" style="background: #8b5cf6;"></span> Dashboard
+            </div>
+            <div class="flex items-center gap-2 px-2 py-1.5 rounded-lg text-sm cursor-pointer hover:bg-gray-50" style="color: var(--gray-600);">
+              <span class="w-2.5 h-2.5 rounded-sm flex-shrink-0" style="background: #f59e0b;"></span> Mobile app
+            </div>
+            <div class="flex items-center gap-2 px-2 py-1.5 rounded-lg text-sm cursor-pointer hover:bg-gray-50" style="color: var(--gray-400);">
+              <span class="w-2.5 h-2.5 rounded-sm flex-shrink-0 border-2 border-dashed border-gray-300"></span> + New project
+            </div>
+          </div>
+        </div>
+
+        <!-- Main panel -->
+        <div class="flex-1 flex flex-col">
+          <!-- Toolbar -->
+          <div class="flex items-center justify-between px-5 py-3 border-b" style="border-color: var(--gray-200);">
+            <div class="flex items-center gap-3">
+              <h2 class="font-semibold text-sm" style="color: var(--gray-900);">All issues</h2>
+              <span class="tag tag-gray text-xs">47</span>
+            </div>
+            <div class="flex items-center gap-2">
+              <button class="text-xs flex items-center gap-1.5 px-3 py-1.5 rounded-lg border hover:bg-gray-50 transition-colors" style="border-color: var(--gray-200); color: var(--gray-500);">
+                <svg class="w-3.5 h-3.5" viewBox="0 0 14 14" fill="none"><path d="M1 3.5h12M3 7h8M5 10.5h4" stroke="currentColor" stroke-width="1.2" stroke-linecap="round"/></svg>
+                Filter
+              </button>
+              <button class="text-xs flex items-center gap-1.5 px-3 py-1.5 rounded-lg border hover:bg-gray-50 transition-colors" style="border-color: var(--gray-200); color: var(--gray-500);">
+                Group: Status
+                <svg class="w-3 h-3" viewBox="0 0 12 12" fill="none"><path d="M3 5l3 3 3-3" stroke="currentColor" stroke-width="1.2" stroke-linecap="round"/></svg>
+              </button>
+              <kbd class="kbd hidden md:inline">C</kbd>
+            </div>
+          </div>
+
+          <!-- Status group: In Progress -->
+          <div>
+            <div class="flex items-center gap-2 px-5 py-2 border-b" style="border-color: var(--gray-100); background: var(--gray-50);">
+              <span class="w-2 h-2 rounded-full bg-amber-400 flex-shrink-0"></span>
+              <span class="text-xs font-semibold" style="color: var(--gray-600);">In Progress</span>
+              <span class="text-xs" style="color: var(--gray-400);">3</span>
+            </div>
+            <div class="issue-row">
+              <span class="priority-critical flex-shrink-0">
+                <svg class="w-4 h-4" viewBox="0 0 16 16" fill="currentColor"><path d="M7.493 0.015a.75.75 0 01.762.066 8.751 8.751 0 011.735 13.373 8.75 8.75 0 01-13.373-1.734.75.75 0 01.128-.847l.99-1.006a.75.75 0 01.876-.153A6.25 6.25 0 0014 8.25 6.237 6.237 0 009.54 2.2a.75.75 0 01-.047-1.186z" transform="translate(0, 0)"/><path d="M8 4.75a.75.75 0 01.75.75v3.5a.75.75 0 01-1.5 0v-3.5A.75.75 0 018 4.75zM8 11a1 1 0 110 2 1 1 0 010-2z"/></svg>
+              </span>
+              <span class="mono text-xs flex-shrink-0" style="color: var(--gray-400);">PLM-47</span>
+              <span class="text-sm font-medium flex-1 truncate" style="color: var(--gray-900);">Fix rate limiting on GraphQL subscriptions</span>
+              <div class="flex items-center gap-2 flex-shrink-0">
+                <span class="tag tag-amber hidden sm:flex">S12</span>
+                <div class="avatar" style="background: #0d9488; color: white;">J</div>
+              </div>
+            </div>
+            <div class="issue-row">
+              <span class="priority-high flex-shrink-0">
+                <svg class="w-4 h-4" viewBox="0 0 16 16" fill="currentColor"><path d="M8 2a.75.75 0 01.75.75v7.5a.75.75 0 01-1.5 0v-7.5A.75.75 0 018 2zm0 10.5a1 1 0 110 2 1 1 0 010-2z"/></svg>
+              </span>
+              <span class="mono text-xs flex-shrink-0" style="color: var(--gray-400);">PLM-45</span>
+              <span class="text-sm font-medium flex-1 truncate" style="color: var(--gray-900);">Webhook delivery retry queue overflow</span>
+              <div class="flex items-center gap-2 flex-shrink-0">
+                <span class="tag tag-amber hidden sm:flex">S12</span>
+                <div class="avatar" style="background: #0d9488; color: white;">J</div>
+              </div>
+            </div>
+            <div class="issue-row" style="background: rgba(13,148,136,0.03); border-left: 3px solid var(--teal);">
+              <span class="priority-high flex-shrink-0">
+                <svg class="w-4 h-4" viewBox="0 0 16 16" fill="currentColor"><path d="M8 2a.75.75 0 01.75.75v7.5a.75.75 0 01-1.5 0v-7.5A.75.75 0 018 2zm0 10.5a1 1 0 110 2 1 1 0 010-2z"/></svg>
+              </span>
+              <span class="mono text-xs flex-shrink-0" style="color: var(--gray-400);">PLM-43</span>
+              <span class="text-sm font-medium flex-1 truncate" style="color: var(--gray-900);">Keyboard shortcut conflicts in issue modal</span>
+              <div class="flex items-center gap-2 flex-shrink-0">
+                <span class="tag tag-blue hidden sm:flex">In Review</span>
+                <div class="avatar" style="background: #8b5cf6; color: white;">S</div>
+              </div>
+            </div>
+          </div>
+
+          <!-- Status group: Todo -->
+          <div>
+            <div class="flex items-center gap-2 px-5 py-2 border-b border-t" style="border-color: var(--gray-100); background: var(--gray-50);">
+              <span class="w-2 h-2 rounded-full flex-shrink-0" style="background: var(--gray-400);"></span>
+              <span class="text-xs font-semibold" style="color: var(--gray-600);">Todo</span>
+              <span class="text-xs" style="color: var(--gray-400);">12</span>
+            </div>
+            <div class="issue-row">
+              <span class="priority-medium flex-shrink-0">
+                <svg class="w-4 h-4" viewBox="0 0 16 16" fill="none"><rect x="2" y="7" width="12" height="2" rx="1" fill="currentColor"/></svg>
+              </span>
+              <span class="mono text-xs flex-shrink-0" style="color: var(--gray-400);">PLM-42</span>
+              <span class="text-sm flex-1 truncate" style="color: var(--gray-700);">Add bulk reassign to triage view</span>
+              <div class="flex items-center gap-2 flex-shrink-0">
+                <span class="text-xs" style="color: var(--gray-400);">unassigned</span>
+              </div>
+            </div>
+            <div class="issue-row">
+              <span class="priority-medium flex-shrink-0">
+                <svg class="w-4 h-4" viewBox="0 0 16 16" fill="none"><rect x="2" y="7" width="12" height="2" rx="1" fill="currentColor"/></svg>
+              </span>
+              <span class="mono text-xs flex-shrink-0" style="color: var(--gray-400);">PLM-41</span>
+              <span class="text-sm flex-1 truncate" style="color: var(--gray-700);">Roadmap export to PDF</span>
+              <div class="flex items-center gap-2 flex-shrink-0">
+                <div class="avatar" style="background: #f59e0b; color: white;">M</div>
+              </div>
+            </div>
+          </div>
+
+          <!-- Done group - collapsed indicator -->
+          <div class="flex items-center gap-2 px-5 py-2 border-t cursor-pointer hover:bg-gray-50 transition-colors" style="border-color: var(--gray-100);">
+            <svg class="w-3.5 h-3.5" viewBox="0 0 14 14" fill="none" style="color: var(--gray-400);"><path d="M5 3l4 4-4 4" stroke="currentColor" stroke-width="1.2" stroke-linecap="round"/></svg>
+            <span class="w-2 h-2 rounded-full flex-shrink-0 bg-green-500"></span>
+            <span class="text-xs font-semibold" style="color: var(--gray-500);">Done</span>
+            <span class="text-xs" style="color: var(--gray-400);">32 issues</span>
+          </div>
+        </div>
+
+        <!-- Right detail panel (abbreviated) -->
+        <div class="w-72 flex-shrink-0 border-l hidden lg:block" style="border-color: var(--gray-200);">
+          <div class="p-4 border-b" style="border-color: var(--gray-200);">
+            <div class="flex items-start justify-between gap-2 mb-3">
+              <span class="mono text-xs" style="color: var(--gray-400);">PLM-43</span>
+              <span class="tag tag-blue">In Review</span>
+            </div>
+            <h3 class="text-sm font-semibold leading-snug" style="color: var(--gray-900);">Keyboard shortcut conflicts in issue modal</h3>
+          </div>
+          <div class="p-4 space-y-4">
+            <div>
+              <div class="text-xs font-medium mb-1.5" style="color: var(--gray-400);">Priority</div>
+              <div class="flex items-center gap-1.5 text-sm priority-high">
+                <svg class="w-4 h-4" viewBox="0 0 16 16" fill="currentColor"><path d="M8 2a.75.75 0 01.75.75v7.5a.75.75 0 01-1.5 0v-7.5A.75.75 0 018 2zm0 10.5a1 1 0 110 2 1 1 0 010-2z"/></svg>
+                High
+              </div>
+            </div>
+            <div>
+              <div class="text-xs font-medium mb-1.5" style="color: var(--gray-400);">Assignee</div>
+              <div class="flex items-center gap-2">
+                <div class="avatar" style="background: #8b5cf6; color: white; width: 24px; height: 24px; font-size: 10px;">S</div>
+                <span class="text-sm" style="color: var(--gray-700);">Sarah Chen</span>
+              </div>
+            </div>
+            <div>
+              <div class="text-xs font-medium mb-1.5" style="color: var(--gray-400);">Cycle</div>
+              <div class="flex items-center gap-2 text-sm" style="color: var(--gray-700);">
+                <svg class="w-4 h-4" viewBox="0 0 16 16" fill="none" style="color: var(--teal);"><circle cx="8" cy="8" r="6" stroke="currentColor" stroke-width="1.5"/></svg>
+                Sprint 12
+              </div>
+            </div>
+            <div>
+              <div class="text-xs font-medium mb-1.5" style="color: var(--gray-400);">Linked PR</div>
+              <div class="flex items-center gap-2 text-sm text-blue-600 cursor-pointer hover:text-blue-800">
+                <svg class="w-4 h-4" viewBox="0 0 16 16" fill="none"><circle cx="4" cy="4" r="2" stroke="currentColor" stroke-width="1.3"/><circle cx="12" cy="12" r="2" stroke="currentColor" stroke-width="1.3"/><circle cx="12" cy="4" r="2" stroke="currentColor" stroke-width="1.3"/><path d="M6 4h4M4 6v4" stroke="currentColor" stroke-width="1.3"/></svg>
+                #238 — fix keyboard modal
+              </div>
+            </div>
+            <div>
+              <div class="text-xs font-medium mb-1.5" style="color: var(--gray-400);">Labels</div>
+              <div class="flex flex-wrap gap-1">
+                <span class="tag tag-gray">bug</span>
+                <span class="tag tag-gray">keyboard</span>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- Logos -->
+  <section class="border-y py-10" style="border-color: var(--gray-200); background: var(--gray-50);">
+    <div class="max-w-5xl mx-auto px-6 text-center">
+      <p class="text-xs uppercase tracking-widest font-semibold mb-6" style="color: var(--gray-400);">Used by teams at</p>
+      <div class="flex flex-wrap items-center justify-center gap-8 md:gap-12">
+        <span class="text-sm font-semibold" style="color: var(--gray-300);">Vercel</span>
+        <span class="text-sm font-semibold" style="color: var(--gray-300);">Supabase</span>
+        <span class="text-sm font-semibold" style="color: var(--gray-300);">Railway</span>
+        <span class="text-sm font-semibold" style="color: var(--gray-300);">Liveblocks</span>
+        <span class="text-sm font-semibold" style="color: var(--gray-300);">Resend</span>
+        <span class="text-sm font-semibold" style="color: var(--gray-300);">Trigger.dev</span>
+        <span class="text-sm font-semibold" style="color: var(--gray-300);">Deno</span>
+      </div>
+    </div>
+  </section>
+
+  <!-- Three column feature strip -->
+  <section id="product" class="max-w-6xl mx-auto px-6 py-20">
+    <div class="text-center mb-14">
+      <div class="section-label mb-3">Features</div>
+      <h2 class="display text-5xl font-extrabold tracking-tight mb-4" style="color: var(--gray-900);">Designed around how<br/>engineering teams actually work.</h2>
+      <p class="text-lg max-w-lg mx-auto" style="color: var(--gray-500);">Every feature in Plume exists to save time or eliminate a meeting. Nothing else made the cut.</p>
+    </div>
+
+    <div class="grid md:grid-cols-2 lg:grid-cols-3 gap-5">
+      <div class="feature-card">
+        <div class="w-10 h-10 rounded-xl flex items-center justify-center mb-4" style="background: var(--teal-pale);">
+          <svg class="w-5 h-5" viewBox="0 0 20 20" fill="none" style="color: var(--teal);">
+            <path d="M3 6a3 3 0 013-3h8a3 3 0 013 3v8a3 3 0 01-3 3H6a3 3 0 01-3-3V6z" stroke="currentColor" stroke-width="1.5"/>
+            <path d="M7 10h6M7 7h3" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>
+          </svg>
+        </div>
+        <h3 class="font-semibold text-base mb-2" style="color: var(--gray-900);">Keyboard-first navigation</h3>
+        <p class="text-sm leading-relaxed" style="color: var(--gray-500);">Every action is reachable from the keyboard. Create, assign, prioritize, move to cycle — without leaving the home row.</p>
+      </div>
+
+      <div class="feature-card">
+        <div class="w-10 h-10 rounded-xl flex items-center justify-center mb-4" style="background: var(--teal-pale);">
+          <svg class="w-5 h-5" viewBox="0 0 20 20" fill="none" style="color: var(--teal);">
+            <circle cx="10" cy="10" r="7" stroke="currentColor" stroke-width="1.5"/>
+            <path d="M10 6v4l2.5 2.5" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>
+          </svg>
+        </div>
+        <h3 class="font-semibold text-base mb-2" style="color: var(--gray-900);">Cycles without the ceremony</h3>
+        <p class="text-sm leading-relaxed" style="color: var(--gray-500);">Time-boxed sprints that auto-carry incomplete work. Start a new cycle in one click. Analytics roll up automatically.</p>
+      </div>
+
+      <div class="feature-card">
+        <div class="w-10 h-10 rounded-xl flex items-center justify-center mb-4" style="background: var(--teal-pale);">
+          <svg class="w-5 h-5" viewBox="0 0 20 20" fill="none" style="color: var(--teal);">
+            <path d="M3 14l4-5 3 3 3-4 4 6" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
+          </svg>
+        </div>
+        <h3 class="font-semibold text-base mb-2" style="color: var(--gray-900);">Live roadmap for leads</h3>
+        <p class="text-sm leading-relaxed" style="color: var(--gray-500);">Quarter and year views with real-time progress from issues. No manual status updates. No deck to maintain the night before planning.</p>
+      </div>
+
+      <div class="feature-card">
+        <div class="w-10 h-10 rounded-xl flex items-center justify-center mb-4" style="background: var(--teal-pale);">
+          <svg class="w-5 h-5" viewBox="0 0 20 20" fill="none" style="color: var(--teal);">
+            <circle cx="7" cy="7" r="3" stroke="currentColor" stroke-width="1.5"/>
+            <circle cx="14" cy="14" r="3" stroke="currentColor" stroke-width="1.5"/>
+            <path d="M10 7h2v2" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>
+          </svg>
+        </div>
+        <h3 class="font-semibold text-base mb-2" style="color: var(--gray-900);">GitHub, GitLab, Bitbucket</h3>
+        <p class="text-sm leading-relaxed" style="color: var(--gray-500);">Branch names auto-link. PRs surface in issue context. Status changes on open, review, merge, and CI pass or fail.</p>
+      </div>
+
+      <div class="feature-card">
+        <div class="w-10 h-10 rounded-xl flex items-center justify-center mb-4" style="background: var(--teal-pale);">
+          <svg class="w-5 h-5" viewBox="0 0 20 20" fill="none" style="color: var(--teal);">
+            <path d="M4 8h12M4 12h8" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>
+            <rect x="2" y="4" width="16" height="13" rx="2" stroke="currentColor" stroke-width="1.5"/>
+          </svg>
+        </div>
+        <h3 class="font-semibold text-base mb-2" style="color: var(--gray-900);">Projects with milestones</h3>
+        <p class="text-sm leading-relaxed" style="color: var(--gray-500);">Group ongoing work into projects. Milestones track delivery dates. Issues belong to a project and a cycle at the same time.</p>
+      </div>
+
+      <div class="feature-card">
+        <div class="w-10 h-10 rounded-xl flex items-center justify-center mb-4" style="background: var(--teal-pale);">
+          <svg class="w-5 h-5" viewBox="0 0 20 20" fill="none" style="color: var(--teal);">
+            <path d="M10 2v16M2 10h16" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>
+          </svg>
+        </div>
+        <h3 class="font-semibold text-base mb-2" style="color: var(--gray-900);">Command palette</h3>
+        <p class="text-sm leading-relaxed" style="color: var(--gray-500);">Hit <span class="kbd">⌘K</span> from anywhere. Search issues, jump to projects, run bulk actions, navigate views. Two keystrokes to anything.</p>
+      </div>
+    </div>
+  </section>
+
+  <!-- Cycles deep dive -->
+  <section id="cycles" class="border-t py-20" style="border-color: var(--gray-200);">
+    <div class="max-w-6xl mx-auto px-6 grid md:grid-cols-2 gap-16 items-center">
+      <div>
+        <div class="section-label mb-3">Cycles</div>
+        <h2 class="display text-5xl font-extrabold tracking-tight mb-5" style="color: var(--gray-900);">Sprint planning without the planning meeting.</h2>
+        <p class="text-base leading-relaxed mb-6" style="color: var(--gray-500);">Cycles are time-boxed containers for issues. Start one with a click, drag in what matters, and Plume tracks progress automatically. When the cycle ends, incomplete work carries over — nothing falls through the cracks.</p>
+        <div class="space-y-3">
+          <div class="flex items-center gap-3 text-sm" style="color: var(--gray-600);">
+            <div class="w-5 h-5 rounded-full flex items-center justify-center flex-shrink-0" style="background: var(--teal-pale); border: 1.5px solid var(--teal-border);">
+              <svg class="w-3 h-3" viewBox="0 0 12 12" fill="none" style="color: var(--teal);"><path d="M2 6l2.5 2.5L10 3" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg>
+            </div>
+            Automatic carryover of incomplete issues
+          </div>
+          <div class="flex items-center gap-3 text-sm" style="color: var(--gray-600);">
+            <div class="w-5 h-5 rounded-full flex items-center justify-center flex-shrink-0" style="background: var(--teal-pale); border: 1.5px solid var(--teal-border);">
+              <svg class="w-3 h-3" viewBox="0 0 12 12" fill="none" style="color: var(--teal);"><path d="M2 6l2.5 2.5L10 3" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg>
+            </div>
+            Burndown charts and velocity tracking
+          </div>
+          <div class="flex items-center gap-3 text-sm" style="color: var(--gray-600);">
+            <div class="w-5 h-5 rounded-full flex items-center justify-center flex-shrink-0" style="background: var(--teal-pale); border: 1.5px solid var(--teal-border);">
+              <svg class="w-3 h-3" viewBox="0 0 12 12" fill="none" style="color: var(--teal);"><path d="M2 6l2.5 2.5L10 3" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg>
+            </div>
+            Issues can span cycles and projects simultaneously
+          </div>
+          <div class="flex items-center gap-3 text-sm" style="color: var(--gray-600);">
+            <div class="w-5 h-5 rounded-full flex items-center justify-center flex-shrink-0" style="background: var(--teal-pale); border: 1.5px solid var(--teal-border);">
+              <svg class="w-3 h-3" viewBox="0 0 12 12" fill="none" style="color: var(--teal);"><path d="M2 6l2.5 2.5L10 3" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg>
+            </div>
+            One-click cycle start — no sprint ceremony required
+          </div>
+        </div>
+      </div>
+
+      <!-- Cycle widget mockup -->
+      <div class="space-y-4">
+        <div class="rounded-2xl overflow-hidden" style="border: 1.5px solid var(--gray-200);">
+          <div class="px-5 py-4 border-b" style="border-color: var(--gray-200);">
+            <div class="flex items-center justify-between mb-1">
+              <div class="flex items-center gap-2">
+                <svg class="w-4 h-4" viewBox="0 0 16 16" fill="none" style="color: var(--teal);"><circle cx="8" cy="8" r="6" stroke="currentColor" stroke-width="1.5"/><path d="M8 5v3l2 1.5" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg>
+                <span class="text-sm font-semibold" style="color: var(--gray-900);">Sprint 12</span>
+                <span class="tag tag-green">Active</span>
+              </div>
+              <span class="text-xs" style="color: var(--gray-400);">Jun 16 – Jun 30</span>
+            </div>
+            <div class="flex items-center justify-between text-xs mb-2 mt-3" style="color: var(--gray-400);">
+              <span>9 of 14 completed</span>
+              <span>64%</span>
+            </div>
+            <div class="cycle-bar">
+              <div class="cycle-fill" style="width: 64%;"></div>
+            </div>
+          </div>
+          <div class="px-5 py-3 grid grid-cols-3 gap-3 text-center border-b" style="border-color: var(--gray-100);">
+            <div>
+              <div class="text-2xl font-bold display" style="color: var(--gray-900);">3</div>
+              <div class="text-xs" style="color: var(--gray-400);">In progress</div>
+            </div>
+            <div>
+              <div class="text-2xl font-bold display" style="color: var(--gray-900);">2</div>
+              <div class="text-xs" style="color: var(--gray-400);">Blocked</div>
+            </div>
+            <div>
+              <div class="text-2xl font-bold display" style="color: var(--teal);">9</div>
+              <div class="text-xs" style="color: var(--gray-400);">Done</div>
+            </div>
+          </div>
+          <div class="px-5 py-3 flex items-center justify-between text-sm" style="color: var(--gray-500);">
+            <span>4 days remaining</span>
+            <button class="text-xs text-blue-600 hover:text-blue-800 font-medium">View cycle →</button>
+          </div>
+        </div>
+
+        <!-- Upcoming cycle -->
+        <div class="rounded-2xl px-5 py-4" style="border: 1.5px solid var(--gray-200);">
+          <div class="flex items-center justify-between mb-2">
+            <div class="flex items-center gap-2">
+              <svg class="w-4 h-4" viewBox="0 0 16 16" fill="none" style="color: var(--gray-300);"><circle cx="8" cy="8" r="6" stroke="currentColor" stroke-width="1.5"/></svg>
+              <span class="text-sm font-medium" style="color: var(--gray-600);">Sprint 13</span>
+              <span class="tag tag-gray">Upcoming</span>
+            </div>
+            <span class="text-xs" style="color: var(--gray-400);">Jul 1 – Jul 14</span>
+          </div>
+          <div class="text-xs" style="color: var(--gray-400);">0 issues added yet · <span class="teal-text cursor-pointer hover:underline">Add issues to cycle</span></div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- Testimonials – horizontal scrolling cards -->
+  <section class="py-20 border-t" style="border-color: var(--gray-200);">
+    <div class="max-w-6xl mx-auto px-6 mb-10">
+      <div class="section-label mb-3">What teams say</div>
+      <h2 class="display text-4xl font-extrabold tracking-tight" style="color: var(--gray-900);">Used by teams who ship.</h2>
+    </div>
+    <div class="grid md:grid-cols-3 gap-5 max-w-6xl mx-auto px-6">
+      <div class="rounded-2xl p-6" style="background: var(--gray-50); border: 1.5px solid var(--gray-200);">
+        <p class="text-base leading-relaxed mb-5" style="color: var(--gray-700);">"We dropped Jira the week we tried Plume. No migration ceremony, no change management — the team just switched and velocity went up."</p>
+        <div class="flex items-center gap-3">
+          <div class="avatar" style="background: linear-gradient(135deg, #0d9488, #0891b2); color: white; width: 36px; height: 36px; font-size: 13px;">A</div>
+          <div>
+            <div class="font-semibold text-sm" style="color: var(--gray-900);">Ana Sokolović</div>
+            <div class="text-xs" style="color: var(--gray-400);">Engineering Lead, Loom</div>
+          </div>
+        </div>
+      </div>
+      <div class="rounded-2xl p-6" style="background: var(--gray-50); border: 1.5px solid var(--gray-200);">
+        <p class="text-base leading-relaxed mb-5" style="color: var(--gray-700);">"Keyboard shortcuts are not an afterthought — they're the product. I go through 30 issues in triage in under 5 minutes."</p>
+        <div class="flex items-center gap-3">
+          <div class="avatar" style="background: linear-gradient(135deg, #7c3aed, #2563eb); color: white; width: 36px; height: 36px; font-size: 13px;">T</div>
+          <div>
+            <div class="font-semibold text-sm" style="color: var(--gray-900);">Thomas Müller</div>
+            <div class="text-xs" style="color: var(--gray-400);">Staff Engineer, Deno</div>
+          </div>
+        </div>
+      </div>
+      <div class="rounded-2xl p-6" style="background: var(--gray-50); border: 1.5px solid var(--gray-200);">
+        <p class="text-base leading-relaxed mb-5" style="color: var(--gray-700);">"Our sprint retros went from 90 minutes to 20 because everything is already written down in the cycle history. It's like the meetings do themselves."</p>
+        <div class="flex items-center gap-3">
+          <div class="avatar" style="background: linear-gradient(135deg, #dc2626, #d97706); color: white; width: 36px; height: 36px; font-size: 13px;">P</div>
+          <div>
+            <div class="font-semibold text-sm" style="color: var(--gray-900);">Priya Nair</div>
+            <div class="text-xs" style="color: var(--gray-400);">Head of Product, Basehub</div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- Pricing -->
+  <section id="pricing" class="border-t py-20" style="border-color: var(--gray-200);">
+    <div class="max-w-5xl mx-auto px-6">
+      <div class="text-center mb-14">
+        <div class="section-label mb-3">Pricing</div>
+        <h2 class="display text-5xl font-extrabold tracking-tight mb-4" style="color: var(--gray-900);">No per-feature tiers. No surprises.</h2>
+        <p class="text-lg" style="color: var(--gray-500);">Full access at every plan. Pay for what you use.</p>
+      </div>
+
+      <div class="grid md:grid-cols-3 gap-5">
+        <div class="rounded-2xl p-7" style="border: 1.5px solid var(--gray-200);">
+          <div class="text-sm font-semibold uppercase tracking-wide mb-4" style="color: var(--gray-500);">Starter</div>
+          <div class="mb-1">
+            <span class="display text-5xl font-extrabold" style="color: var(--gray-900);">$0</span>
+          </div>
+          <p class="text-sm mb-6" style="color: var(--gray-400);">Up to 10 team members</p>
+          <a href="#signup" class="btn-outline block text-center mb-6" style="font-size: 14px; padding: 11px;">Get started free</a>
+          <ul class="space-y-2.5 text-sm" style="color: var(--gray-500);">
+            <li class="flex items-center gap-2"><svg class="w-4 h-4 flex-shrink-0" viewBox="0 0 16 16" fill="none" style="color: var(--teal);"><path d="M2.5 8l4 4 7-7" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg>Unlimited issues</li>
+            <li class="flex items-center gap-2"><svg class="w-4 h-4 flex-shrink-0" viewBox="0 0 16 16" fill="none" style="color: var(--teal);"><path d="M2.5 8l4 4 7-7" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg>3 active cycles</li>
+            <li class="flex items-center gap-2"><svg class="w-4 h-4 flex-shrink-0" viewBox="0 0 16 16" fill="none" style="color: var(--teal);"><path d="M2.5 8l4 4 7-7" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg>GitHub integration</li>
+            <li class="flex items-center gap-2"><svg class="w-4 h-4 flex-shrink-0" viewBox="0 0 16 16" fill="none" style="color: var(--teal);"><path d="M2.5 8l4 4 7-7" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg>Roadmap view</li>
+          </ul>
+        </div>
+
+        <div class="rounded-2xl p-7 relative overflow-hidden" style="border: 2px solid var(--teal); background: var(--teal-pale);">
+          <div class="absolute top-0 right-0 bg-teal-600 text-white text-xs font-bold px-3 py-1 rounded-bl-xl">Popular</div>
+          <div class="text-sm font-semibold uppercase tracking-wide mb-4" style="color: var(--teal);">Pro</div>
+          <div class="mb-1">
+            <span class="display text-5xl font-extrabold" style="color: var(--gray-900);">$12</span>
+            <span class="text-lg" style="color: var(--gray-400);">/user/mo</span>
+          </div>
+          <p class="text-sm mb-6" style="color: var(--gray-400);">Billed annually</p>
+          <a href="#signup" class="btn-primary block text-center justify-center mb-6" style="font-size: 14px; padding: 11px;">Start 14-day trial</a>
+          <ul class="space-y-2.5 text-sm" style="color: var(--gray-600);">
+            <li class="flex items-center gap-2"><svg class="w-4 h-4 flex-shrink-0" viewBox="0 0 16 16" fill="none" style="color: var(--teal);"><path d="M2.5 8l4 4 7-7" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg>Everything in Starter</li>
+            <li class="flex items-center gap-2"><svg class="w-4 h-4 flex-shrink-0" viewBox="0 0 16 16" fill="none" style="color: var(--teal);"><path d="M2.5 8l4 4 7-7" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg>Unlimited cycles &amp; projects</li>
+            <li class="flex items-center gap-2"><svg class="w-4 h-4 flex-shrink-0" viewBox="0 0 16 16" fill="none" style="color: var(--teal);"><path d="M2.5 8l4 4 7-7" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg>GitLab &amp; Bitbucket</li>
+            <li class="flex items-center gap-2"><svg class="w-4 h-4 flex-shrink-0" viewBox="0 0 16 16" fill="none" style="color: var(--teal);"><path d="M2.5 8l4 4 7-7" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg>Advanced analytics</li>
+            <li class="flex items-center gap-2"><svg class="w-4 h-4 flex-shrink-0" viewBox="0 0 16 16" fill="none" style="color: var(--teal);"><path d="M2.5 8l4 4 7-7" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg>Priority support</li>
+          </ul>
+        </div>
+
+        <div class="rounded-2xl p-7" style="border: 1.5px solid var(--gray-200);">
+          <div class="text-sm font-semibold uppercase tracking-wide mb-4" style="color: var(--gray-500);">Enterprise</div>
+          <div class="mb-1">
+            <span class="display text-5xl font-extrabold" style="color: var(--gray-900);">Custom</span>
+          </div>
+          <p class="text-sm mb-6" style="color: var(--gray-400);">100+ seat teams</p>
+          <a href="mailto:sales@plume.dev" class="btn-outline block text-center mb-6" style="font-size: 14px; padding: 11px;">Contact sales</a>
+          <ul class="space-y-2.5 text-sm" style="color: var(--gray-500);">
+            <li class="flex items-center gap-2"><svg class="w-4 h-4 flex-shrink-0" viewBox="0 0 16 16" fill="none" style="color: var(--teal);"><path d="M2.5 8l4 4 7-7" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg>Everything in Pro</li>
+            <li class="flex items-center gap-2"><svg class="w-4 h-4 flex-shrink-0" viewBox="0 0 16 16" fill="none" style="color: var(--teal);"><path d="M2.5 8l4 4 7-7" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg>SSO / SAML 2.0</li>
+            <li class="flex items-center gap-2"><svg class="w-4 h-4 flex-shrink-0" viewBox="0 0 16 16" fill="none" style="color: var(--teal);"><path d="M2.5 8l4 4 7-7" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg>Audit logs</li>
+            <li class="flex items-center gap-2"><svg class="w-4 h-4 flex-shrink-0" viewBox="0 0 16 16" fill="none" style="color: var(--teal);"><path d="M2.5 8l4 4 7-7" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg>Dedicated SLA</li>
+          </ul>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- FAQ -->
+  <section class="border-t py-20" style="border-color: var(--gray-200);">
+    <div class="max-w-3xl mx-auto px-6">
+      <div class="text-center mb-12">
+        <h2 class="display text-4xl font-extrabold tracking-tight" style="color: var(--gray-900);">Common questions</h2>
+      </div>
+      <div class="divide-y" style="border-color: var(--gray-200);">
+        <div class="py-5">
+          <h3 class="font-semibold text-base mb-2" style="color: var(--gray-900);">How is Plume different from Linear or Jira?</h3>
+          <p class="text-sm leading-relaxed" style="color: var(--gray-500);">Plume is more opinionated than Linear and far leaner than Jira. We made deliberate choices about what to leave out. There are no points, no boards unless you want them, no 12-step issue creation flows. If you want to add a ticket in under 3 seconds, Plume was built for that.</p>
+        </div>
+        <div class="py-5">
+          <h3 class="font-semibold text-base mb-2" style="color: var(--gray-900);">Can I import from Jira or GitHub Issues?</h3>
+          <p class="text-sm leading-relaxed" style="color: var(--gray-500);">Yes. We support one-click import from Jira, GitHub Issues, Linear, Asana, and CSV. Imports preserve titles, descriptions, assignees, labels, and statuses. Most teams are fully migrated in under 30 minutes.</p>
+        </div>
+        <div class="py-5">
+          <h3 class="font-semibold text-base mb-2" style="color: var(--gray-900);">Do product and design people use it too?</h3>
+          <p class="text-sm leading-relaxed" style="color: var(--gray-500);">Yes — and this is intentional. Plume is built so engineering, product, and design share one source of truth. PMs manage the backlog and roadmap; designers track work in the same issues as engineering. No translation layer needed.</p>
+        </div>
+        <div class="py-5">
+          <h3 class="font-semibold text-base mb-2" style="color: var(--gray-900);">Is there an API?</h3>
+          <p class="text-sm leading-relaxed" style="color: var(--gray-500);">Yes. Plume has a full REST API and webhooks. You can create issues, update statuses, query cycles, and build integrations. SDKs for TypeScript and Python are available. Docs live at api.plume.dev.</p>
+        </div>
+        <div class="py-5">
+          <h3 class="font-semibold text-base mb-2" style="color: var(--gray-900);">What happens if my team grows past 10?</h3>
+          <p class="text-sm leading-relaxed" style="color: var(--gray-500);">You get a 14-day heads-up and can upgrade to Pro at any time. There's no data loss, no migration, no interruption. You pick a billing date that works for your team.</p>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- CTA banner -->
+  <section id="signup" class="border-t" style="border-color: var(--gray-200); background: var(--gray-900);">
+    <div class="max-w-4xl mx-auto px-6 py-24 text-center">
+      <h2 class="display text-6xl font-extrabold tracking-tight mb-4 text-white">Start shipping faster.</h2>
+      <p class="text-xl mb-10" style="color: rgba(255,255,255,0.5);">Free for teams under 10. Set up in 2 minutes. No credit card.</p>
+      <div class="flex flex-col sm:flex-row gap-3 max-w-sm mx-auto">
+        <input type="email" placeholder="you@company.com" class="flex-1 px-4 py-3 rounded-lg text-sm outline-none focus:ring-2 focus:ring-teal-400 transition-shadow" style="background: rgba(255,255,255,0.08); border: 1px solid rgba(255,255,255,0.12); color: white;" />
+        <button class="btn-primary whitespace-nowrap">Get started</button>
+      </div>
+      <p class="text-xs mt-4" style="color: rgba(255,255,255,0.25);">By signing up you agree to our Terms of Service and Privacy Policy.</p>
+    </div>
+  </section>
+
+  <!-- Footer -->
+  <footer class="border-t py-10" style="border-color: var(--gray-200);">
+    <div class="max-w-6xl mx-auto px-6 flex flex-col md:flex-row items-start md:items-center justify-between gap-6">
+      <div class="flex items-center gap-2.5">
+        <svg width="24" height="24" viewBox="0 0 28 28" fill="none">
+          <rect width="28" height="28" rx="8" fill="#0d9488"/>
+          <circle cx="14" cy="14" r="4" fill="white"/>
+          <path d="M14 6C9.58 6 6 9.58 6 14" stroke="white" stroke-width="2" stroke-linecap="round"/>
+        </svg>
+        <span class="display font-bold text-base" style="color: var(--gray-900);">Plume</span>
+      </div>
+      <div class="flex flex-wrap gap-6 text-sm" style="color: var(--gray-400);">
+        <a href="#" class="hover:text-gray-600">Privacy</a>
+        <a href="#" class="hover:text-gray-600">Terms</a>
+        <a href="#" class="hover:text-gray-600">Changelog</a>
+        <a href="#" class="hover:text-gray-600">Docs</a>
+        <a href="#" class="hover:text-gray-600">Status</a>
+        <a href="mailto:hi@plume.dev" class="hover:text-gray-600">Contact</a>
+      </div>
+      <div class="text-xs" style="color: var(--gray-300);">© 2026 Plume, Inc.</div>
+    </div>
+  </footer>
+</body>
+</html>
