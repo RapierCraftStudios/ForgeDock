@@ -93,7 +93,6 @@ json_str() {
 COMMAND="${1:-}"
 ISSUE_NUMBER="${2:-}"
 GH_REPO_ARGS=()
-GH_REPO_FLAG=""
 
 if [ -z "$COMMAND" ]; then
   die "MISSING_COMMAND" "command is required. Usage: forge-run.sh <command> <issue_number> [-R <owner/repo>]"
@@ -128,7 +127,6 @@ while [ $# -gt 0 ]; do
         die "INVALID_REPO" "-R value must be owner/repo format, got: ${2}"
       fi
       GH_REPO_ARGS=(-R "$2")
-      GH_REPO_FLAG="-R $2"
       shift 2
       ;;
     *)
