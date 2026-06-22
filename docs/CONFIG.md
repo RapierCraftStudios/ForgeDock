@@ -164,6 +164,9 @@ repos:
 | `satellites[].local_path` | string | No | Absolute local path to the satellite repo's checkout |
 | `satellites[].subpaths` | map(string→string) | No | Named sub-directory paths within `local_path`, for monorepo satellites that publish multiple packages. Each key is a logical name; the value is the relative path to that package's root. Used by `/sync-ecosystem` to locate per-package version files and publish workflows. |
 | `satellites[].billing_enabled` | boolean | No | Set to `true` to run Phase 4 (Financial Integrity) of `/security-audit` against this satellite repo. Mirrors the top-level [`billing.enabled`](#billing-optional) flag but scoped per-satellite. Defaults to `false` when absent. |
+| `satellites[].trigger_on_merge` | boolean | No | When `true`, fires a cross-repo trigger when a PR merges in the parent repo and touches paths matching `trigger_paths`. Set to `false` to disable triggering for this satellite. Defaults to `true` when `trigger_paths` is present; otherwise has no effect until runtime trigger support is configured. |
+| `satellites[].trigger_paths` | list of strings | No | Path glob patterns that constrain when the trigger fires. Uses GitHub Actions glob syntax (same as `on: push: paths:`). The trigger fires only when at least one changed file matches a pattern in this list. When omitted, the trigger fires on every merge (if `trigger_on_merge: true`). |
+| `satellites[].auto_run` | boolean | No | When `true`, automatically invokes `/work-on` on the satellite issue when the cross-repo trigger fires. Requires a running Claude Code session with ForgeDock installed in the satellite repo. Advanced opt-in — defaults to `false`. Do not set to `true` unless a persistent Claude Code session is available in the satellite repo. |
 
 **Routing syntax in commands**: `<prefix>:<issue_number>` — e.g., `mcp:5`, `sdk:12`
 
