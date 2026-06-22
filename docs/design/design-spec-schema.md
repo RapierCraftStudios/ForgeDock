@@ -206,6 +206,8 @@ page.
    receives: the full current HTML + the FORGE:DESIGN_SPEC + the feedback for that section ID only. It produces a
    replacement for that section's markup and nothing else.
 
+1.5. **`"all"` is the page-wide sentinel.** When `section_target == "all"`, the re-generation agent applies the modification as a global pass — updating CSS custom properties (color palette, typography scale) that span all sections — without replacing any individual section's markup. <!-- Added: forge#1057 -->
+
 2. **Committed archetype and signature move are locked.** User feedback can modify a section's visual execution
    (motion, layout detail, asset placement, color treatment) but MUST NOT change the committed `meta.archetype` or the
    signature move recorded in `FORGE:DESIGN_RATIONALE`. Those choices were the architect's and are fixed once the spec
