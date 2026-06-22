@@ -41,6 +41,7 @@
     "bin/",
     "!bin/tests/",
     "commands/",
+    ".claude-plugin/",
     "docs/",
     "scripts/",
     "templates/",
