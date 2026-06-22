@@ -148,6 +148,49 @@ The `craft` and `surface_depth` dimensions are new in `corpus_version: 2026.3` (
 scored under a 4-dimension rubric (no `surface_depth`, no `craft`). Comparison across versions must note
 the rubric change.
 
+## Section-level surgical re-generation contract
+
+<!-- Added: forge#1044 — user-feedback loop -->
+
+The `layout_grammar.sections` array is the structural hook for **targeted, section-only edits**. Each section carries
+an `id` (e.g. `"hero"`, `"features"`, `"pricing"`), a `purpose`, and a `density`. This structure enables Stage 4.5 of
+the `/design` pipeline (user-feedback loop, #1044) to re-generate a single section without touching the rest of the
+page.
+
+### Rules for surgical re-generation
+
+1. **Section IDs are the targeting key.** When `FORGE:USER_FEEDBACK` names a `section_target`, the re-generation agent
+   receives: the full current HTML + the FORGE:DESIGN_SPEC + the feedback for that section ID only. It produces a
+   replacement for that section's markup and nothing else.
+
+2. **Committed archetype and signature move are locked.** User feedback can modify a section's visual execution
+   (motion, layout detail, asset placement, color treatment) but MUST NOT change the committed `meta.archetype` or the
+   signature move recorded in `FORGE:DESIGN_RATIONALE`. Those choices were the architect's and are fixed once the spec
+   is committed. If a user requests a direction change that would require a different archetype, the feedback loop
+   should note the constraint and suggest the closest achievable variation within the committed direction.
+
+3. **The spec is the source of truth for all non-targeted sections.** Sections not named in `section_target` are
+   reproduced from the committed spec unchanged — no style drift, no re-rolling of other sections' taste decisions.
+
+4. **`effects_plan.per_section` updates are allowed.** If feedback changes the hero's visual treatment (e.g., adds a
+   product video, changes the motion vocabulary), the `effects_plan.per_section` entry for that section may be updated
+   in a revised FORGE:DESIGN_SPEC annotation — this is the only part of the spec a feedback iteration may mutate.
+
+5. **Benchmark bypass.** Section-level re-generation is triggered by user presence (Stage 4.5). The ABC benchmark arm A
+   runs non-interactively and bypasses Stage 4.5 entirely — automated runs proceed directly from Stage 4 to Stage 5.
+
+### Asset integration via section targeting
+
+When `FORGE:USER_FEEDBACK` carries an asset, the re-generation agent applies it to the `section_target`:
+
+| Asset type | Section target | Integration |
+|---|---|---|
+| Video URL (mp4/webm) | `hero` | Replace or augment hero visual with `<video autoplay loop muted playsinline>` scaffold; adjust hero layout to accommodate |
+| Video embed URL (YouTube/Vimeo) | `hero` | `<iframe>` with `loading="lazy"`, aspect-ratio container, no autoplay |
+| Logo SVG | `nav` / `hero` | Replace text logo node; adjust `width`/`height` to maintain proportional sizing; verify contrast against background |
+| Brand hex colors | any | Update `color.*` CSS custom properties matching the section; run contrast check (WCAG AA ≥ 4.5:1) before emitting |
+| Product screenshot/image | `hero` / `features` | Replace placeholder with `<img>` or `background-image`; maintain existing sizing/aspect-ratio tokens |
+
 ## Lifecycle
 
 1. **architect** (#886) emits this spec from the rationale.
@@ -155,4 +198,6 @@ the rubric change.
 3. **linter** ([`design-system-lint.mjs`](design-system-lint.md), #884) checks deterministic fields (palette, spacing, radius, layout skeleton, craft.radius_system, craft.button.depth, craft.micro_details).
 4. **critique loop** (#882) renders + checks `negatives`, `effects_plan` justification, and `acceptance` against the
    rendered result; iterates until pass.
+4.5. **user-feedback loop** (#1044) prompts for hero-specific user input; applies surgical section-level re-generation
+   using section IDs as targeting keys; bypassed in automated (benchmark) runs.
 5. **close** writes the realized spec + outcome to [design-memory](design-memory.md) (#887).
