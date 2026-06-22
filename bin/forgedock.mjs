@@ -62,6 +62,7 @@ const PIPELINE_SCRIPTS = new Set([
   "classify-lane.sh",
   "transition-label.sh",
   "validate-pr-target.sh",
+  "forge-run.sh",
 ]);
 
 const args = process.argv.slice(2);
