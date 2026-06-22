@@ -601,6 +601,9 @@ if [ "$TRIGGER_COUNT" -eq 0 ]; then
 fi
 
 echo "Found $TRIGGER_COUNT open trigger issue(s). Processing..."
+
+# Export trigger issues under the name T3 expects
+export TRIGGER_ISSUES_JSON="$TRIGGER_ISSUES"
 ```
 
 ### T3: Validate and process each trigger issue
@@ -752,7 +755,7 @@ for issue in trigger_issues:
         processed += 1
 
 print(f'{NL}Trigger processing complete: {processed} processed, {skipped} skipped.')
-" <<< ""
+"
 ```
 
 **Usage note**: Call this subcommand with the `TRIGGER_ISSUES_JSON` environment variable set to the JSON output from step T2, or use the shell pipeline pattern below:
