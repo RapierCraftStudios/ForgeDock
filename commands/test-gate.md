@@ -80,6 +80,7 @@ if [ "${TEST_COUNT:-0}" -eq 0 ]; then
   echo "      posture: \"blocking\""
   echo "      override_phrase: \"OVERRIDE: shipping with test failures —\""
   # Emit structured SKIP verdict and exit
+  echo "<!-- FORGE:TEST_GATE:SKIP|reason=no-tests-configured -->"
   echo "<!-- FORGE:TEST_GATE:RESULT=SKIP -->"
   exit 0
 fi
@@ -89,9 +90,12 @@ fi
 
 ## Phase 0: Triage — Test-or-Skip
 
-**Purpose**: Intelligently decide whether this bundle needs runtime testing. Skip docs-only, config-only, or no-executable-change bundles to avoid unnecessary provisioning overhead.
+**Purpose**: Decide test-or-skip before any provisioning. Three ordered checks:
+1. **0A** — no PRs in bundle → SKIP
+2. **0B** — no executable file changes → SKIP (docs/config/markdown-only)
+3. **0C** — no runtime-testable acceptance criteria → SKIP (all-manual or no criteria)
 
-<!-- EXPAND: This phase is intentionally minimal. A full triage heuristic (detecting docs-only bundles, no-executable-change patterns, etc.) is tracked as a dedicated sub-issue: #945. The current implementation applies a basic diff-based filter. -->
+Every SKIP emits both a machine-readable verdict (`FORGE:TEST_GATE:RESULT=SKIP`) and a logged reason annotation (`FORGE:TEST_GATE:SKIP|reason=...`) so the caller and pipeline-health see a deliberate skip, not a silent gap.
 
 ### 0A: Resolve bundle PRs
 
@@ -112,6 +116,7 @@ fi
 
 if [ -z "$BUNDLE_PRS" ]; then
   echo "No PRs found in bundle. Emitting SKIP verdict."
+  echo "<!-- FORGE:TEST_GATE:SKIP|reason=no-bundle-prs -->"
   echo "<!-- FORGE:TEST_GATE:RESULT=SKIP -->"
   exit 0
 fi
@@ -129,13 +134,90 @@ if [ -z "$EXECUTABLE_FILES" ]; then
   echo "Files changed:"
   echo "$BUNDLE_DIFF"
   echo "RESULT: SKIP (no executable changes in bundle)"
+  echo "<!-- FORGE:TEST_GATE:SKIP|reason=no-executable-changes -->"
   echo "<!-- FORGE:TEST_GATE:RESULT=SKIP -->"
   exit 0
 fi
 
 echo "Executable files changed in bundle:"
 echo "$EXECUTABLE_FILES"
-echo "Proceeding with runtime testing."
+```
+
+### 0C: Criteria pre-check — test-or-skip before provisioning
+
+Check whether any solved issue in the bundle carries at least one runtime-testable acceptance criterion (`[type:api]`, `[type:unit]`, or `[type:e2e]`, or an unannotated criterion that does not match `[type:manual]`). Skip provisioning entirely if all criteria are manual-only or no criteria exist.
+
+```bash
+echo "=== Phase 0C: Criteria pre-check ==="
+
+TRIAGE_HAS_TESTABLE_CRITERIA=false
+TRIAGE_ALL_ISSUES=""
+TRIAGE_CRITERIA_COUNT=0
+TRIAGE_MANUAL_COUNT=0
+
+for pr_num in $BUNDLE_PRS; do
+  # Extract closing issue references from PR body and GitHub API
+  PR_BODY=$(gh pr view "$pr_num" ${GH_FLAG} --json body --jq '.body' 2>/dev/null || echo "")
+  CLOSED_ISSUES=$(echo "$PR_BODY" | grep -iP '(closes|fixes|resolves)\s+#\d+' | grep -oP '#\d+' | tr -d '#' || true)
+  LINKED_ISSUES=$(gh pr view "$pr_num" ${GH_FLAG} --json closingIssuesReferences \
+    --jq '.closingIssuesReferences[].number' 2>/dev/null || true)
+  ALL_ISSUES_FOR_PR=$(echo "${CLOSED_ISSUES} ${LINKED_ISSUES}" | tr ' ' '\n' | sort -u | grep -E '^[0-9]+$' || true)
+  TRIAGE_ALL_ISSUES="${TRIAGE_ALL_ISSUES} ${ALL_ISSUES_FOR_PR}"
+
+  for issue_num in $ALL_ISSUES_FOR_PR; do
+    CRITERIA=$(gh issue view "$issue_num" ${GH_FLAG} --json body \
+      --jq '.body' 2>/dev/null \
+      | awk '/^## Acceptance Criteria/{found=1; next} /^## /{if(found) exit} found{print}' \
+      | grep -E '^- \[' || true)
+
+    if [ -z "$CRITERIA" ]; then
+      continue
+    fi
+
+    # Check for any non-manual criterion — exit early as soon as one is found
+    while IFS= read -r criterion; do
+      [ -z "$criterion" ] && continue
+      TRIAGE_CRITERIA_COUNT=$((TRIAGE_CRITERIA_COUNT + 1))
+      if echo "$criterion" | grep -qP '\[type:(api|unit|e2e)\]'; then
+        # Explicit automated annotation found
+        TRIAGE_HAS_TESTABLE_CRITERIA=true
+        echo "  Testable criterion found in issue #${issue_num}: ${criterion}"
+        break 3  # Break out of criterion loop, issue loop, and PR loop
+      elif echo "$criterion" | grep -qP '\[type:manual\]'; then
+        TRIAGE_MANUAL_COUNT=$((TRIAGE_MANUAL_COUNT + 1))
+      else
+        # Unannotated criterion — apply same regex heuristics as Phase 2
+        if echo "$criterion" | grep -qP '(endpoint|request|response|status\s+\d{3}|curl|API|HTTP|unit|function|return|assert|throws|browser|click|navigate|render|page|user flow)'; then
+          TRIAGE_HAS_TESTABLE_CRITERIA=true
+          echo "  Testable criterion found (inferred) in issue #${issue_num}: ${criterion}"
+          break 3  # Break out of all loops
+        else
+          # No type signal — treat as manual for triage purposes
+          TRIAGE_MANUAL_COUNT=$((TRIAGE_MANUAL_COUNT + 1))
+        fi
+      fi
+    done <<< "$CRITERIA"
+  done
+done
+
+TRIAGE_ISSUE_COUNT=$(echo "$TRIAGE_ALL_ISSUES" | tr ' ' '\n' | sort -u | grep -cE '^[0-9]+$' || echo 0)
+echo "Triage summary: ${TRIAGE_ISSUE_COUNT} solved issue(s), ${TRIAGE_CRITERIA_COUNT} criterion/criteria found, ${TRIAGE_MANUAL_COUNT} manual"
+
+if [ "$TRIAGE_HAS_TESTABLE_CRITERIA" = "false" ]; then
+  if [ "${TRIAGE_CRITERIA_COUNT}" -eq 0 ]; then
+    SKIP_REASON="no-acceptance-criteria"
+    echo "No acceptance criteria found in any solved issue. No automated tests to run."
+  else
+    SKIP_REASON="no-testable-criteria"
+    echo "All ${TRIAGE_CRITERIA_COUNT} acceptance criteria are manual-only. No automated tests to run."
+  fi
+  echo "Emitting SKIP verdict (triage: ${SKIP_REASON})."
+  echo "<!-- FORGE:TEST_GATE:SKIP|reason=${SKIP_REASON} -->"
+  echo "<!-- FORGE:TEST_GATE:RESULT=SKIP -->"
+  exit 0
+fi
+
+echo "Runtime-testable criteria confirmed. Proceeding with provisioning."
 ```
 
 ---
@@ -228,7 +310,8 @@ echo "Manual criteria: $(echo -e "$MANUAL_CRITERIA" | grep -c '^\-' || echo 0)"
 AUTOMATED_CRITERIA="${API_CRITERIA}${UNIT_CRITERIA}${E2E_CRITERIA}"
 if [ -z "$(echo -e "$AUTOMATED_CRITERIA" | grep -E '^-')" ]; then
   echo "All criteria are manual — no automated test clusters to run."
-  echo "Emitting SKIP verdict (manual-only bundle)."
+  echo "Emitting SKIP verdict (manual-only bundle — defense-in-depth check after Phase 0C)."
+  echo "<!-- FORGE:TEST_GATE:SKIP|reason=manual-only-criteria -->"
   echo "<!-- FORGE:TEST_GATE:RESULT=SKIP -->"
   exit 0
 fi
