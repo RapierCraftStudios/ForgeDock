@@ -1,13 +1,13 @@
 # Reference Corpus, Grammar & Negatives
 
-> **Status:** Committed foundation — corpus + grammar + craft vocabulary + negatives spec for the UI Taste Harness (milestone #13).
+> **Status:** Committed foundation — corpus + grammar + craft vocabulary + hero motion vocabulary + negatives spec for the UI Taste Harness (milestone #13).
 > Source of the design vocabulary drawn on by the [design-spec-schema](design-spec-schema.md) (#881),
 > the [design-architect rationale](design-architect-rationale.md) (#886), and [design-memory](design-memory.md) (#887).
 > The negatives below feed the deterministic linter (#884) and the vision critic (#882); the effect-usage patterns feed
 > the effects-appropriateness layer (#885); the corpus pages are the benchmark's arm **C** (#878);
-> the craft vocabulary feeds the CSS component library (#1048).
+> the craft vocabulary feeds the CSS component library (#1048); the hero motion vocabulary feeds `motion` in the schema (#881).
 >
-> Issues: #880 (initial corpus), #1047 (craft vocabulary extension — `corpus_version` `2026.3`).
+> Issues: #880 (initial corpus), #1047 (craft vocabulary extension — `corpus_version` `2026.3`), #1043 (hero motion vocabulary — `corpus_version` `2026.4`).
 
 ## Purpose
 
@@ -23,7 +23,7 @@ and every revision bumps a `corpus_version` so [design-memory](design-memory.md)
 now vs. then." The `corpus_version` here is the same anchor the [schema](design-spec-schema.md) records in
 `meta.corpus_version` for every generated page.
 
-**Current `corpus_version`: `2026.3`**
+**Current `corpus_version`: `2026.4`**
 
 ---
 
@@ -241,6 +241,457 @@ These are the details visible only when you look closely, but collectively signa
 
 ---
 
+## Hero motion vocabulary — making the hero feel alive
+
+A static hero is the single biggest gap between AI-generated pages and real funded-SaaS pages. The craft vocabulary
+(above) addresses element-level polish; the hero motion vocabulary addresses **section-level vitality** — whether
+the hero *moves*. This layer slots beside the craft vocabulary and is governed by the same principle: match
+technique to archetype, commit deliberately, never add motion for its own sake.
+
+The [effects-appropriateness doctrine](effects-appropriateness.md) (#885) already covers when to use *heavy* effects
+(3D/WebGL/parallax). This vocabulary covers the *lighter* tier: CSS-only animations, SVG motion, and video
+placeholders — achievable in a single HTML file with zero or minimal JavaScript. Heavy effects are an upgrade path
+from Tier 2; they are not documented here.
+
+The `motion` object in the [schema](design-spec-schema.md) (#881) carries the committed tier and technique.
+The [architect phase](design-architect-rationale.md) (#886) selects both alongside the archetype.
+
+### Tier 1 — CSS-only motion (default; no JS required)
+
+These are achievable in a single HTML file. They are the **default motion posture** for the harness — every
+generated page should include at least one Tier 1 technique unless the archetype explicitly calls for restraint
+(see per-archetype motion profiles below).
+
+**All Tier 1 patterns MUST include a `prefers-reduced-motion` fallback.**
+
+#### 1A. Gradient background animation
+
+Animates `background-position` on a large gradient, creating a slow-shifting color field behind the hero.
+
+```css
+/* CSS-only gradient shift — zero JS */
+.hero {
+  background: linear-gradient(135deg, var(--bg-1), var(--bg-2), var(--bg-3));
+  background-size: 300% 300%;
+  animation: gradient-shift 12s ease infinite;
+}
+@keyframes gradient-shift {
+  0%   { background-position: 0% 50%; }
+  50%  { background-position: 100% 50%; }
+  100% { background-position: 0% 50%; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .hero { animation: none; background-position: 0% 50%; }
+}
+```
+
+Archetype fit: `editorial-typographic` (warm gradient shifts), `technical-dense` (dark cool shift),
+`minimal-luxury` (monochrome gradient — very slow, near-imperceptible).
+
+#### 1B. Text reveal / entrance animation
+
+Staggered entrance of hero headline, subline, and CTA using `clip-path` or `opacity` + `translateY`.
+No JS required — use CSS animation-delay for stagger.
+
+```css
+.hero-headline { animation: reveal-up 600ms cubic-bezier(.2,.0,.0,1) both; }
+.hero-subline  { animation: reveal-up 600ms cubic-bezier(.2,.0,.0,1) 120ms both; }
+.hero-cta      { animation: reveal-up 600ms cubic-bezier(.2,.0,.0,1) 240ms both; }
+
+@keyframes reveal-up {
+  from { opacity: 0; transform: translateY(16px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+@media (prefers-reduced-motion: reduce) {
+  .hero-headline, .hero-subline, .hero-cta { animation: none; }
+}
+```
+
+Archetype fit: all archetypes. Stagger duration scales with archetype energy —
+`bold-brutalist` uses faster, snappier timing (200ms); `minimal-luxury` uses slower, more deliberate timing (800ms).
+
+#### 1C. Floating / breathing element
+
+A subtle looping translate + scale on a background shape, blob, or decorative element. Creates the impression
+of depth and life without demanding attention.
+
+```css
+.hero-float {
+  animation: float 6s ease-in-out infinite;
+}
+@keyframes float {
+  0%, 100% { transform: translateY(0) scale(1); }
+  50%       { transform: translateY(-12px) scale(1.02); }
+}
+@media (prefers-reduced-motion: reduce) {
+  .hero-float { animation: none; }
+}
+```
+
+Archetype fit: `warm-photographic` (floating soft shapes), `minimal-luxury` (single refined element).
+Not appropriate for `bold-brutalist` (restraint is the statement).
+
+#### 1D. Typewriter / typing effect
+
+CSS-only typing using `steps()` and `ch` units. A cursor blinks using `border-right` animation.
+No JS — a single static phrase only (multiple phrases require JS and belong in Tier 2).
+
+```css
+.typewriter {
+  width: 0;
+  overflow: hidden;
+  white-space: nowrap;
+  border-right: 2px solid var(--accent);
+  animation:
+    typing   3s steps(30, end) forwards,
+    blink  0.7s step-end infinite;
+}
+@keyframes typing { from { width: 0; } to { width: 100%; } }
+@keyframes blink  { 50% { border-color: transparent; } }
+@media (prefers-reduced-motion: reduce) {
+  .typewriter { width: 100%; animation: none; border-right: none; }
+}
+```
+
+Archetype fit: `technical-dense` (code-typing effect), `editorial-typographic` (elegant phrase reveal).
+Avoid for `minimal-luxury` — too busy for the premium posture.
+
+#### 1E. Shimmer / glow on CTA
+
+A moving highlight gradient over the primary CTA button, creating a premium luster without JavaScript.
+
+```css
+.btn-primary {
+  position: relative;
+  overflow: hidden;
+}
+.btn-primary::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  background: linear-gradient(105deg, transparent 40%, rgba(255,255,255,.18) 50%, transparent 60%);
+  background-size: 200% 100%;
+  animation: shimmer 2.4s linear infinite;
+}
+@keyframes shimmer { from { background-position: 200% 0; } to { background-position: -200% 0; } }
+@media (prefers-reduced-motion: reduce) {
+  .btn-primary::after { animation: none; }
+}
+```
+
+Archetype fit: `minimal-luxury`, `editorial-typographic`. Skip for `bold-brutalist` (contradicts flat CTA posture).
+
+#### 1F. Scroll-triggered fade-in (IntersectionObserver + CSS)
+
+Below-the-fold sections use a minimal IntersectionObserver to add an `.is-visible` class, triggering a CSS
+transition. This is Tier 1 because the JS is trivial (~10 lines) and contains no dependencies.
+
+```html
+<!-- Markup: add data-reveal to any section -->
+<section data-reveal>…</section>
+```
+
+```css
+[data-reveal] { opacity: 0; transform: translateY(24px); transition: opacity 500ms ease, transform 500ms ease; }
+[data-reveal].is-visible { opacity: 1; transform: none; }
+@media (prefers-reduced-motion: reduce) {
+  [data-reveal] { opacity: 1; transform: none; transition: none; }
+}
+```
+
+```js
+// ~10 lines, no dependencies
+const io = new IntersectionObserver(entries =>
+  entries.forEach(e => e.isIntersecting && e.target.classList.add('is-visible')),
+  { threshold: 0.15 }
+);
+document.querySelectorAll('[data-reveal]').forEach(el => io.observe(el));
+```
+
+Archetype fit: all archetypes for below-the-fold sections. Not a *hero* technique — use for feature grids,
+social proof, pricing sections below the fold.
+
+#### 1G. Staggered grid entrance
+
+Feature card grids animate in with staggered delays, creating a ripple of content appearance.
+
+```css
+.feature-grid .card { animation: reveal-up 500ms cubic-bezier(.2,.0,.0,1) both; }
+.feature-grid .card:nth-child(1) { animation-delay: 0ms; }
+.feature-grid .card:nth-child(2) { animation-delay: 80ms; }
+.feature-grid .card:nth-child(3) { animation-delay: 160ms; }
+@media (prefers-reduced-motion: reduce) {
+  .feature-grid .card { animation: none; }
+}
+```
+
+Archetype fit: `technical-dense`, `editorial-typographic`. Skip for `minimal-luxury` — stagger reads too busy
+against premium negative space.
+
+---
+
+### Tier 2 — SVG + lightweight JS motion
+
+These require SVG or ~50–200 lines of vanilla JS. No framework dependencies.
+Performance budget: `max_js_kb: 50` for Tier 2 additions (within the `lcp_ms: 2000` budget from the schema).
+
+**All Tier 2 patterns MUST include a `prefers-reduced-motion` check in JS.**
+
+#### 2A. SVG path drawing animation
+
+Animates `stroke-dashoffset` to draw a path progressively — a logo tracing, a connector line, or an
+abstract shape drawing itself in.
+
+```css
+.svg-path {
+  stroke-dasharray: var(--path-length);
+  stroke-dashoffset: var(--path-length);
+  animation: draw-path 1.8s cubic-bezier(.4,0,.2,1) forwards;
+}
+@keyframes draw-path { to { stroke-dashoffset: 0; } }
+@media (prefers-reduced-motion: reduce) {
+  .svg-path { animation: none; stroke-dashoffset: 0; }
+}
+```
+
+*Note*: `--path-length` is computed at render time via `path.getTotalLength()` (3 lines of JS), or pre-computed
+and set as a CSS custom property in the SVG's `style` attribute.
+
+Archetype fit: `editorial-typographic` (logo or editorial mark drawing in), `technical-dense` (connector
+lines between diagram nodes), `minimal-luxury` (single refined mark).
+
+#### 2B. CSS clip-path morphing
+
+Transitions between two `clip-path: polygon()` shapes on hover or entrance, creating a morphing edge
+effect without JavaScript.
+
+```css
+.hero-shape {
+  clip-path: polygon(0 0, 100% 0, 100% 85%, 85% 100%, 0 100%);
+  transition: clip-path 600ms cubic-bezier(.4,0,.2,1);
+}
+.hero-shape:hover {
+  clip-path: polygon(0 0, 100% 0, 100% 100%, 0 100%, 0 15%);
+}
+@media (prefers-reduced-motion: reduce) {
+  .hero-shape { transition: none; }
+}
+```
+
+Archetype fit: `bold-brutalist` (sharp shape transformations), `technical-dense` (geometric transitions).
+
+#### 2C. Animated counter (number roll-up)
+
+Numbers count up from 0 to their final value on entrance. Used in social proof ("10M+ deployments"),
+metric showcases, or pricing comparisons.
+
+```js
+// ~30 lines, no dependencies
+function animateCounter(el) {
+  if (window.matchMedia('(prefers-reduced-motion: reduce)').matches) return;
+  const target = parseInt(el.dataset.target, 10);
+  const duration = 1200;
+  const start = performance.now();
+  const tick = now => {
+    const progress = Math.min((now - start) / duration, 1);
+    el.textContent = Math.floor(progress * target).toLocaleString();
+    if (progress < 1) requestAnimationFrame(tick);
+    else el.textContent = target.toLocaleString();
+  };
+  requestAnimationFrame(tick);
+}
+document.querySelectorAll('[data-counter]').forEach(el => {
+  new IntersectionObserver(([e]) => e.isIntersecting && animateCounter(el), { threshold: 0.5 }).observe(el);
+});
+```
+
+Archetype fit: `technical-dense` (metric-forward hero), `editorial-typographic` (impact numbers).
+Not appropriate for `minimal-luxury` (undermines the premium calm).
+
+#### 2D. Simple scroll parallax (transform only)
+
+A lightweight parallax using `scroll` event + CSS `transform: translateY()` — no library. Moves a
+background layer at a fraction of the scroll rate to create depth.
+
+```js
+// ~15 lines, no dependencies
+const layer = document.querySelector('.parallax-layer');
+if (!window.matchMedia('(prefers-reduced-motion: reduce)').matches) {
+  window.addEventListener('scroll', () => {
+    layer.style.transform = `translateY(${window.scrollY * 0.3}px)`;
+  }, { passive: true });
+}
+```
+
+Performance note: use `transform` only — never animate `top`/`left`/`background-position` in JS (triggers layout).
+
+Archetype fit: `warm-photographic` (photo layer parallax), `editorial-typographic` (text + image depth separation).
+Inappropriate for `bold-brutalist` (contradicts zero-decoration posture) and `minimal-luxury` (too active for
+premium restraint).
+
+---
+
+### Tier 3 — Video / asset placeholders (user-supplied content)
+
+The harness **cannot generate video content**, but it can scaffold the integration so dropping in a real
+product demo video is a one-line replacement. Tier 3 is appropriate whenever a `warm-photographic` or
+`technical-dense` archetype brief implies a demo or product experience exists.
+
+**Default behavior**: the scaffold renders an animated CSS gradient as a poster frame. The visitor sees motion
+before the user has supplied the actual video.
+
+#### 3A. Full-bleed video hero scaffold
+
+```html
+<!-- Replace the <source> src with your product demo video -->
+<!-- The .video-poster CSS gradient shows until the video loads -->
+<div class="hero-video-wrap">
+  <video
+    class="hero-video"
+    autoplay
+    loop
+    muted
+    playsinline
+    poster=""
+    aria-hidden="true">
+    <!-- Replace with your product demo video -->
+    <source src="" type="video/mp4">
+  </video>
+  <!-- Animated CSS gradient poster — visible before video loads, or if no src -->
+  <div class="video-poster" aria-hidden="true"></div>
+  <!-- Hero copy overlay -->
+  <div class="hero-content">
+    <!-- headline, subline, CTA here -->
+  </div>
+</div>
+```
+
+```css
+.hero-video-wrap {
+  position: relative;
+  width: 100%;
+  aspect-ratio: 16 / 9;
+  overflow: hidden;
+  background: #000;
+}
+.hero-video {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+/* Animated gradient poster — shows until video src is filled in */
+.video-poster {
+  position: absolute;
+  inset: 0;
+  background: linear-gradient(135deg, var(--bg-1, #0f0f14), var(--bg-2, #1a1a2e), var(--bg-3, #0d1117));
+  background-size: 300% 300%;
+  animation: gradient-shift 12s ease infinite;
+}
+/* Hide poster when video has loaded */
+.hero-video[src]:not([src=""]) ~ .video-poster { opacity: 0; transition: opacity 400ms ease; }
+.hero-content {
+  position: relative;
+  z-index: 2;
+  /* overlay text — position absolutely over the video */
+}
+@media (prefers-reduced-motion: reduce) {
+  .video-poster { animation: none; }
+}
+```
+
+*Drop-in instruction* (left as an HTML comment in generated output):
+```
+<!-- Replace <source src=""> with your product demo video path.
+     Recommended: MP4 H.264, ≤10MB for above-the-fold autoplay.
+     The gradient poster above shows until the video loads. -->
+```
+
+Archetype fit: `warm-photographic` (product lifestyle video), `technical-dense` (product demo screencast).
+
+#### 3B. Windowed product screenshot with motion overlay
+
+For archetypes that use a product screenshot rather than video, scaffold a browser-chrome wrapper with
+a subtle looping CSS animation simulating UI activity (a blinking cursor, a progress bar, a pulsing indicator).
+
+```html
+<!-- Replace the inner content with a real product screenshot or iframe -->
+<div class="product-window">
+  <div class="window-chrome" aria-hidden="true">
+    <span class="chrome-dot dot-red"></span>
+    <span class="chrome-dot dot-yellow"></span>
+    <span class="chrome-dot dot-green"></span>
+  </div>
+  <div class="window-body">
+    <!-- Replace with your product screenshot: <img src="screenshot.png" alt="…"> -->
+    <!-- Placeholder: animated terminal cursor -->
+    <div class="terminal-placeholder" aria-hidden="true">
+      <span class="terminal-cursor"></span>
+    </div>
+  </div>
+</div>
+```
+
+```css
+.product-window {
+  border-radius: 12px;
+  overflow: hidden;
+  box-shadow: 0 24px 64px rgba(0,0,0,.3), 0 0 0 1px rgba(255,255,255,.06);
+}
+.window-chrome {
+  display: flex;
+  gap: 6px;
+  padding: 12px 16px;
+  background: rgba(255,255,255,.04);
+  border-bottom: 1px solid rgba(255,255,255,.06);
+}
+.chrome-dot { width: 12px; height: 12px; border-radius: 50%; }
+.dot-red    { background: #ff5f57; }
+.dot-yellow { background: #febc2e; }
+.dot-green  { background: #28c840; }
+.terminal-cursor {
+  display: inline-block;
+  width: 8px;
+  height: 1.2em;
+  background: var(--accent);
+  animation: blink 1s step-end infinite;
+  vertical-align: text-bottom;
+}
+@keyframes blink { 50% { opacity: 0; } }
+@media (prefers-reduced-motion: reduce) {
+  .terminal-cursor { animation: none; }
+}
+```
+
+*Drop-in instruction* (left as an HTML comment in generated output):
+```
+<!-- Replace .terminal-placeholder with: <img src="screenshot.png" alt="Product interface"> -->
+```
+
+Archetype fit: `technical-dense` (terminal/code UI), `editorial-typographic` (app UI in a clean frame).
+
+---
+
+### Per-archetype motion profiles
+
+Each archetype has a preferred motion tier and technique. The architect phase commits to one; the schema
+carries it in `motion.tier` and `motion.hero_technique`. The generator applies it.
+
+| Archetype | Preferred tier | Default hero technique | Notes |
+|---|---|---|---|
+| `editorial-typographic` | Tier 1 | `text-reveal` (1B) + optional `gradient-shift` (1A) | Type-led; motion serves the reading experience, never distracts |
+| `technical-dense` | Tier 1–2 | `typewriter` (1D) or `svg-path-draw` (2A) or `video-scaffold` (3A) | Code/terminal motion earns its place; counters (2C) for metric heroes |
+| `minimal-luxury` | Tier 1 (minimal) | `gradient-shift` (1A) at very slow timing (20s+), or `text-reveal` (1B) | One technique only; restraint is the signal — two or more = slop |
+| `bold-brutalist` | Tier 1 (sharp) | `text-reveal` (1B) with fast, hard timing (150–200ms) or none | Hard cuts preferred; looping animations are anti-brutalist |
+| `warm-photographic` | Tier 1–3 | `float` (1C) + `video-scaffold` (3A), or `scroll-parallax` (2D) | Image and video motion earns its place; gradient poster doubles as animation before video loads |
+
+**Motion restraint rule**: regardless of tier, a hero should have **at most two simultaneous motion elements**.
+A gradient-shifting background + a text-reveal is the maximum for Tier 1. Adding floating elements on top
+of both reads as busy, not polished.
+
+---
+
 ## The axes of variation — the *archetypes* (this is where variance comes from)
 
 The corpus is **not one aesthetic**. Variance is achieved by sampling a coherent *archetype* per design and
@@ -303,6 +754,9 @@ vision critic (#882). Any hit is a finding. Each item is phrased so it maps to a
 | N18 | Missing branded micro-details: no custom `::selection`, no custom scrollbar, no custom focus rings on interactive elements | linter (CSS rule presence) |
 | N19 | All sections same visual weight: uniform padding and background — no spacing-as-divider, no color shifts, no grid breaks | critic (layout rhythm) |
 | N20 | No hover/active/focus states on interactive elements beyond color change | linter (transition + transform properties on interactive selectors) |
+| N21 | Static hero with no motion or visual interest — a poster, not an experience; inappropriate for archetype | critic (vision) |
+| N22 | Motion that fights readability: looping animations over primary text, excessive parallax, or more than two simultaneous motion elements in the hero | critic (vision + motion layer) |
+| N23 | jQuery-era motion effects: bouncing, sliding content in from offscreen, accordion animations everywhere, spinning decorative elements | critic (vision) |
 
 ---
 
@@ -358,3 +812,4 @@ Per the design-bench "same model" rule: both arm A and arm B use the same genera
 |---|---|---|
 | `2026.2` | 2026-06 | Initial committed corpus: 5 seed references, 5 archetypes, 12 negatives, 4 effect-usage patterns. |
 | `2026.3` | 2026-06 | Added craft vocabulary (8 categories with CSS examples), per-archetype craft profiles table, negatives N13–N20 (#1047). Schema extended with `craft` object and `surface_depth` rubric dimension. |
+| `2026.4` | 2026-06 | Added hero motion vocabulary (Tier 1 CSS-only, Tier 2 SVG+JS, Tier 3 video placeholders with CSS examples), per-archetype motion profiles table, negatives N21–N23 (#1043). Schema extended with `motion.tier`, `motion.hero_technique`, `motion.video_placeholder` fields and `motion` rubric dimension. |
