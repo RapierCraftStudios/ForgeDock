@@ -190,7 +190,7 @@ jobs:
               parts = pattern.split('**')
               prefix = parts[0].rstrip('/')
               suffix = parts[-1].lstrip('/')
-              if prefix and not path.startswith(prefix):
+              if prefix and not (path.startswith(prefix + '/') or path == prefix):
                   return False
               if suffix and not (fnmatch.fnmatch(path, suffix) or '/' + suffix in path):
                   return False
