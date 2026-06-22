@@ -1,8 +1,9 @@
 # Design-Architect Phase & FORGE:DESIGN_RATIONALE — the designer's diary
 
-> **Status:** DRAFT for review — foundation spec for issue #886 (milestone #13).
+> **Status:** Committed foundation — design-architect phase spec for issue #886 (milestone #13).
 > The reasoning-before-generation phase. Produces the [DESIGN_SPEC](design-spec-schema.md) (#881);
 > queries [design-memory](design-memory.md) (#887); read by generate + the critique loop (#882).
+> Extended: motion tier selection added as diary step 5 (#1043).
 
 ## Why this exists
 
@@ -24,7 +25,7 @@ The architect phase's output is a `FORGE:DESIGN_RATIONALE` annotation — the di
 
 ## The diary — structured chain of thought
 
-The phase must reason through all seven, in order. This is what a designer's diary actually contains.
+The phase must reason through all eight, in order. This is what a designer's diary actually contains.
 
 1. **Intent & emotional register** — One core message. One feeling to evoke (trust / speed / power / craft / play).
    What should the visitor feel, and what should they do?
@@ -34,10 +35,19 @@ The phase must reason through all seven, in order. This is what a designer's dia
    meaning, not chosen as decoration. (Feeds `layout_grammar.sections` in the spec.)
 4. **Direction & why** — The chosen archetype/concept *and the reasoning for it* — why it serves this message for this
    audience. **Plus the alternatives considered and explicitly rejected, and why.** (Rejection is where taste shows.)
-5. **The signature move** — The one memorable, non-obvious idea that makes it *this* page and not a template. The "hook."
-6. **What I'm trying this time** — A technique or learning being deliberately applied. Queries
+5. **Motion tier & hero technique** — Which motion tier (1–3) from the [corpus hero motion vocabulary](reference-corpus.md#hero-motion-vocabulary--making-the-hero-feel-alive)
+   is appropriate for this archetype and product nature? Which specific technique? Commit to both. The default per-archetype
+   motion profile in the corpus is the starting point; deviation requires explicit reasoning. Every page requires a
+   committed motion posture — "no motion" for `bold-brutalist` or `minimal-luxury` is a valid deliberate choice, but
+   it must be stated, not omitted.
+   - Feeds `motion.tier` and `motion.hero_technique` in the [DESIGN_SPEC](design-spec-schema.md).
+   - If a video placeholder is appropriate (Tier 3): set `motion.video_placeholder: true` — the generator scaffolds
+     the HTML and CSS gradient poster.
+   - State the `prefers-reduced-motion` fallback explicitly (e.g., "gradient-shift pauses; text remains visible").
+6. **The signature move** — The one memorable, non-obvious idea that makes it *this* page and not a template. The "hook."
+7. **What I'm trying this time** — A technique or learning being deliberately applied. Queries
    [design-memory](design-memory.md) so it builds on, and diverges from, prior work.
-7. **Non-goals** — What this page deliberately will *not* do. Restraint stated as a decision, not an omission.
+8. **Non-goals** — What this page deliberately will *not* do. Restraint stated as a decision, not an omission.
 
 ## FORGE:DESIGN_RATIONALE — annotation format
 
@@ -52,6 +62,9 @@ Posted to the design issue at the architect stage (see the `/design` pipeline, #
 **Communication hierarchy:** 1) {…} 2) {…} 3) {…}
 **Direction:** {archetype} — because {reasoning}
   - Considered & rejected: {alt A} (because {…}); {alt B} (because {…})
+**Motion:** Tier {1|2|3} — technique: {hero_technique} — because {reasoning}
+  - `prefers-reduced-motion` fallback: {what degrades gracefully}
+  - Video placeholder: {yes — Tier 3 scaffold generated | no}
 **Signature move:** {the one non-obvious idea}
 **Trying this time:** {technique/learning} (from memory: avoiding {prior move})
 **Non-goals:** {what this won't do}
@@ -68,7 +81,9 @@ This is the review checkpoint that makes the whole pipeline trustworthy.
 
 ## Acceptance
 
-- Every generated page is preceded by a DESIGN_RATIONALE covering all 7 elements, with ≥1 explicitly rejected
-  alternative and a named signature move.
-- On the seed set, rationales for Voltage / Plume / Slipstream show genuinely different intent, hierarchy, and
-  signature moves — derived from the briefs alone (no design hints in the brief).
+- Every generated page is preceded by a DESIGN_RATIONALE covering all 8 elements, with ≥1 explicitly rejected
+  alternative, a committed motion tier + technique, and a named signature move.
+- The `**Motion:**` line must be present in every rationale — "no motion" is acceptable only for `bold-brutalist`
+  and `minimal-luxury` archetypes, and must be stated with reasoning, not left absent.
+- On the seed set, rationales for Voltage / Plume / Slipstream show genuinely different intent, hierarchy,
+  motion techniques, and signature moves — derived from the briefs alone (no design hints in the brief).
