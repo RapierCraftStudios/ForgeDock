@@ -631,3 +631,38 @@ branches:
 #   # Batching reduces issue noise for low-risk patch bumps.
 #   # Default: 5
 #   issue_batch_size: 5
+
+# =============================================================================
+# COMMUNITY (OPTIONAL)
+# Controls automated contributor onboarding in PR comments.
+# When a first-time contributor opens a PR, /review-pr detects that they have
+# no prior merged PRs and (when enabled) posts a welcome comment with:
+#   - a greeting and project name
+#   - key repo conventions (DCO sign-off, commit style, issue tracking)
+#   - a link to the contributing guide
+#   - an explanation of what the automated review pipeline does
+#
+# Detection: gh pr list --author "$PR_AUTHOR" --state merged --limit 1
+# If the result is empty → first-time contributor → welcome comment is posted.
+#
+# Commands: review-pr (Phase 9 — new contributor welcome)
+# =============================================================================
+
+# community:
+#   # When true (default), /review-pr posts a welcome comment for first-time contributors.
+#   # Set to false to disable the welcome comment entirely.
+#   welcome_new_contributors: true
+#
+#   # Path or URL to the contributing guide linked in the welcome comment.
+#   # Relative paths resolve from the repo root (GitHub renders CONTRIBUTING.md as a link).
+#   # Default: "CONTRIBUTING.md"
+#   contributing_url: "CONTRIBUTING.md"
+#
+#   # Optional: custom conventions block to include in the welcome comment.
+#   # Replaces the default DCO + conventional-commits conventions text.
+#   # Use a YAML literal block scalar (|) to preserve line breaks.
+#   # If omitted, the default conventions text is used.
+#   # conventions: |
+#   #   - Conventional commits: fix(scope):, feat(scope):, refactor(scope):
+#   #   - Sign off commits with git commit -s (DCO required)
+#   #   - Open a GitHub issue before fixing a bug inline
