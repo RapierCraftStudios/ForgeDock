@@ -1,0 +1,305 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Cadence — Email API for developers</title>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+<style>
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+body { font-family: 'Inter', -apple-system, sans-serif; color: #1a1a2e; background: #fff; line-height: 1.6; }
+.container { max-width: 1200px; margin: 0 auto; padding: 0 40px; }
+
+/* Nav */
+nav { padding: 20px 0; border-bottom: 1px solid #eee; }
+nav .container { display: flex; align-items: center; justify-content: space-between; }
+.logo { font-size: 22px; font-weight: 700; color: #1a1a2e; letter-spacing: -0.5px; }
+.logo span { color: #6366f1; }
+.nav-links { display: flex; gap: 32px; align-items: center; }
+.nav-links a { text-decoration: none; color: #555; font-size: 14px; font-weight: 500; }
+.nav-links a:hover { color: #1a1a2e; }
+.btn-nav { background: #6366f1; color: #fff !important; padding: 8px 20px; border-radius: 6px; font-size: 14px; }
+.btn-nav:hover { background: #4f46e5; }
+
+/* Hero */
+.hero { padding: 100px 0 80px; }
+.hero-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 60px; align-items: center; }
+.hero h1 { font-size: 48px; font-weight: 700; line-height: 1.15; letter-spacing: -1.5px; margin-bottom: 20px; }
+.hero h1 span { color: #6366f1; }
+.hero p { font-size: 18px; color: #555; line-height: 1.7; margin-bottom: 32px; max-width: 480px; }
+.btn-primary { display: inline-block; background: #6366f1; color: #fff; padding: 14px 32px; border-radius: 8px; font-size: 16px; font-weight: 600; text-decoration: none; border: none; cursor: pointer; }
+.btn-primary:hover { background: #4f46e5; }
+.btn-secondary { display: inline-block; color: #6366f1; padding: 14px 32px; font-size: 16px; font-weight: 600; text-decoration: none; margin-left: 8px; }
+.btn-secondary:hover { color: #4f46e5; }
+
+/* Code block */
+.code-panel { background: #0f0f1a; border-radius: 12px; padding: 0; overflow: hidden; box-shadow: 0 25px 60px rgba(0,0,0,0.15); }
+.code-tabs { display: flex; background: #1a1a2e; padding: 0; }
+.code-tab { padding: 10px 20px; font-size: 13px; font-family: 'Inter', sans-serif; color: #888; cursor: pointer; border-bottom: 2px solid transparent; }
+.code-tab.active { color: #c4b5fd; border-bottom-color: #6366f1; }
+.code-content { padding: 24px; font-family: 'JetBrains Mono', monospace; font-size: 13px; line-height: 1.8; color: #e2e8f0; overflow-x: auto; }
+.code-content .kw { color: #c084fc; }
+.code-content .str { color: #86efac; }
+.code-content .fn { color: #93c5fd; }
+.code-content .cm { color: #64748b; }
+.code-content .num { color: #fbbf24; }
+
+/* Trust bar */
+.trust-bar { padding: 40px 0; border-top: 1px solid #f0f0f0; border-bottom: 1px solid #f0f0f0; background: #fafafa; }
+.trust-bar .container { display: flex; align-items: center; justify-content: center; gap: 48px; flex-wrap: wrap; }
+.trust-stat { text-align: center; }
+.trust-stat .num { font-size: 28px; font-weight: 700; color: #1a1a2e; }
+.trust-stat .label { font-size: 13px; color: #888; margin-top: 2px; }
+
+/* Features */
+.features { padding: 100px 0; }
+.section-label { font-size: 13px; font-weight: 600; text-transform: uppercase; letter-spacing: 1.5px; color: #6366f1; margin-bottom: 12px; }
+.section-title { font-size: 36px; font-weight: 700; letter-spacing: -1px; margin-bottom: 16px; }
+.section-sub { font-size: 17px; color: #666; max-width: 560px; margin-bottom: 60px; }
+.feature-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 40px; }
+.feature-card { padding: 32px; border: 1px solid #eee; border-radius: 12px; transition: box-shadow 0.2s; }
+.feature-card:hover { box-shadow: 0 8px 30px rgba(0,0,0,0.06); }
+.feature-icon { width: 44px; height: 44px; border-radius: 10px; display: flex; align-items: center; justify-content: center; font-size: 20px; margin-bottom: 20px; }
+.feature-card h3 { font-size: 18px; font-weight: 600; margin-bottom: 10px; }
+.feature-card p { font-size: 14px; color: #666; line-height: 1.7; }
+.icon-api { background: #ede9fe; color: #6366f1; }
+.icon-deliver { background: #dcfce7; color: #16a34a; }
+.icon-template { background: #fef3c7; color: #d97706; }
+.icon-analytics { background: #dbeafe; color: #2563eb; }
+.icon-test { background: #fce7f3; color: #db2777; }
+.icon-team { background: #f0fdfa; color: #0d9488; }
+
+/* Deliverability section */
+.deliverability { padding: 100px 0; background: #f8f7ff; }
+.deliv-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 60px; align-items: center; }
+.deliv-list { list-style: none; }
+.deliv-list li { padding: 16px 0; border-bottom: 1px solid #e5e3f0; display: flex; gap: 16px; align-items: flex-start; }
+.deliv-list li:last-child { border-bottom: none; }
+.check { width: 24px; height: 24px; border-radius: 50%; background: #6366f1; color: #fff; display: flex; align-items: center; justify-content: center; font-size: 13px; flex-shrink: 0; margin-top: 2px; }
+.deliv-list strong { display: block; font-size: 15px; margin-bottom: 2px; }
+.deliv-list span { font-size: 14px; color: #666; }
+
+/* Workflow section */
+.workflow { padding: 100px 0; }
+.workflow-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 80px; margin-top: 60px; }
+.workflow-side h3 { font-size: 22px; font-weight: 600; margin-bottom: 12px; }
+.workflow-side p { font-size: 15px; color: #666; line-height: 1.7; margin-bottom: 24px; }
+.workflow-tag { display: inline-block; background: #ede9fe; color: #6366f1; font-size: 12px; font-weight: 600; padding: 4px 12px; border-radius: 20px; margin-bottom: 16px; }
+.mini-code { background: #0f0f1a; border-radius: 8px; padding: 20px; font-family: 'JetBrains Mono', monospace; font-size: 12px; line-height: 1.8; color: #e2e8f0; overflow-x: auto; }
+
+/* CTA */
+.cta-section { padding: 100px 0; text-align: center; background: linear-gradient(135deg, #1a1a2e 0%, #2d2b55 100%); color: #fff; }
+.cta-section h2 { font-size: 40px; font-weight: 700; letter-spacing: -1px; margin-bottom: 16px; }
+.cta-section p { font-size: 17px; color: #a5a3c9; margin-bottom: 36px; max-width: 500px; margin-left: auto; margin-right: auto; }
+.btn-white { display: inline-block; background: #fff; color: #1a1a2e; padding: 14px 36px; border-radius: 8px; font-size: 16px; font-weight: 600; text-decoration: none; }
+.btn-white:hover { background: #f0f0f0; }
+.cta-note { font-size: 13px; color: #8886af; margin-top: 16px; }
+
+/* Footer */
+footer { padding: 40px 0; border-top: 1px solid #eee; }
+footer .container { display: flex; justify-content: space-between; align-items: center; }
+footer p { font-size: 13px; color: #999; }
+footer .footer-links { display: flex; gap: 24px; }
+footer .footer-links a { font-size: 13px; color: #999; text-decoration: none; }
+</style>
+</head>
+<body>
+
+<nav>
+  <div class="container">
+    <div class="logo">cadence<span>.</span></div>
+    <div class="nav-links">
+      <a href="#">Docs</a>
+      <a href="#">Pricing</a>
+      <a href="#">Templates</a>
+      <a href="#">Status</a>
+      <a href="#" class="btn-nav">Get API Key</a>
+    </div>
+  </div>
+</nav>
+
+<section class="hero">
+  <div class="container">
+    <div class="hero-grid">
+      <div>
+        <h1>Send email from your app.<br><span>In five lines of code.</span></h1>
+        <p>Cadence is a developer-first email API. Send transactional and marketing email with a simple REST call, and let your content team manage templates without deploying code.</p>
+        <a href="#" class="btn-primary">Get your API key</a>
+        <a href="#" class="btn-secondary">Read the docs &rarr;</a>
+      </div>
+      <div class="code-panel">
+        <div class="code-tabs">
+          <div class="code-tab active">Node.js</div>
+          <div class="code-tab">Python</div>
+          <div class="code-tab">cURL</div>
+        </div>
+        <div class="code-content">
+<span class="kw">import</span> { Cadence } <span class="kw">from</span> <span class="str">'@cadence/sdk'</span>;<br><br>
+<span class="kw">const</span> cadence = <span class="kw">new</span> <span class="fn">Cadence</span>(<span class="str">'cd_live_9k3m...'</span>);<br><br>
+<span class="kw">await</span> cadence.<span class="fn">send</span>({<br>
+&nbsp;&nbsp;from: <span class="str">'hello@yourapp.com'</span>,<br>
+&nbsp;&nbsp;to: <span class="str">'user@example.com'</span>,<br>
+&nbsp;&nbsp;template: <span class="str">'welcome-email'</span>,<br>
+&nbsp;&nbsp;data: { name: <span class="str">'Jamie'</span>, plan: <span class="str">'Pro'</span> }<br>
+});<br><br>
+<span class="cm">// Returns: { id: "msg_8f2x...", status: "sent" }</span>
+        </div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<section class="trust-bar">
+  <div class="container">
+    <div class="trust-stat">
+      <div class="num">2.1B+</div>
+      <div class="label">Emails delivered monthly</div>
+    </div>
+    <div class="trust-stat">
+      <div class="num">99.98%</div>
+      <div class="label">API uptime (90-day)</div>
+    </div>
+    <div class="trust-stat">
+      <div class="num">&lt;300ms</div>
+      <div class="label">Median API latency</div>
+    </div>
+    <div class="trust-stat">
+      <div class="num">12,000+</div>
+      <div class="label">Teams shipping email</div>
+    </div>
+  </div>
+</section>
+
+<section class="features">
+  <div class="container">
+    <div class="section-label">Platform</div>
+    <h2 class="section-title">Everything you need to send email well</h2>
+    <p class="section-sub">A single API that handles sending, deliverability, templates, and analytics. No third-party SMTP relays to configure.</p>
+    <div class="feature-grid">
+      <div class="feature-card">
+        <div class="feature-icon icon-api">&#123;&#125;</div>
+        <h3>REST API &amp; SDKs</h3>
+        <p>First-class SDKs for Node.js, Python, Ruby, Go, and PHP. Send email with a single function call. Webhook support for delivery events.</p>
+      </div>
+      <div class="feature-card">
+        <div class="feature-icon icon-deliver">&#10003;</div>
+        <h3>Deliverability built in</h3>
+        <p>Automated SPF, DKIM, and DMARC setup. Dedicated IPs with warm-up. Suppression lists managed for you. Your email lands in the inbox.</p>
+      </div>
+      <div class="feature-card">
+        <div class="feature-icon icon-template">&#9998;</div>
+        <h3>Template engine</h3>
+        <p>Author emails as React components or use the visual editor. Non-engineers can edit copy and preview without touching code or deploying.</p>
+      </div>
+      <div class="feature-card">
+        <div class="feature-icon icon-analytics">&#9679;</div>
+        <h3>Real-time analytics</h3>
+        <p>Track opens, clicks, deliveries, bounces, and complaints per message or in aggregate. Export to your data warehouse via S3 or webhook.</p>
+      </div>
+      <div class="feature-card">
+        <div class="feature-icon icon-test">&#9881;</div>
+        <h3>Test &amp; preview mode</h3>
+        <p>Send to a sandbox that captures every email without delivering. Preview rendered HTML with real template data before going live.</p>
+      </div>
+      <div class="feature-card">
+        <div class="feature-icon icon-team">&#9734;</div>
+        <h3>Team roles</h3>
+        <p>Engineers get API keys and logs. Content owners get the template editor and scheduling UI. Everyone works from the same dashboard.</p>
+      </div>
+    </div>
+  </div>
+</section>
+
+<section class="deliverability">
+  <div class="container">
+    <div class="deliv-grid">
+      <div>
+        <div class="section-label">Deliverability</div>
+        <h2 class="section-title">The hard part of email,<br>handled for you</h2>
+        <p class="section-sub">Getting email to the inbox is an infrastructure problem. Cadence solves it so you can focus on what the email says.</p>
+      </div>
+      <ul class="deliv-list">
+        <li>
+          <div class="check">&#10003;</div>
+          <div><strong>Domain authentication</strong><span>One-click SPF, DKIM, and DMARC records. We verify configuration on every send.</span></div>
+        </li>
+        <li>
+          <div class="check">&#10003;</div>
+          <div><strong>Bounce &amp; complaint tracking</strong><span>Hard bounces and spam complaints are automatically suppressed. View them in the dashboard or via API.</span></div>
+        </li>
+        <li>
+          <div class="check">&#10003;</div>
+          <div><strong>Dedicated IP pools</strong><span>Isolate transactional and marketing traffic. Automated warm-up schedules for new IPs.</span></div>
+        </li>
+        <li>
+          <div class="check">&#10003;</div>
+          <div><strong>Suppression management</strong><span>Global and per-account suppression lists. Unsubscribe handling that complies with CAN-SPAM, GDPR, and CASL.</span></div>
+        </li>
+      </ul>
+    </div>
+  </div>
+</section>
+
+<section class="workflow">
+  <div class="container">
+    <div class="section-label">Workflow</div>
+    <h2 class="section-title">Built for the whole team, not just the backend</h2>
+    <p class="section-sub">Engineers integrate the API. Content owners write the emails. Both work from the same system.</p>
+    <div class="workflow-grid">
+      <div class="workflow-side">
+        <div class="workflow-tag">For engineers</div>
+        <h3>Integrate in minutes</h3>
+        <p>Install the SDK, set your API key, and call <code>cadence.send()</code>. Templates are referenced by slug, so you never hardcode HTML in application code.</p>
+        <div class="mini-code">
+<span style="color:#c084fc;">npm install</span> @cadence/sdk<br><br>
+<span style="color:#64748b;"># Send a test email</span><br>
+<span style="color:#c084fc;">npx</span> cadence send \<br>
+&nbsp;&nbsp;--to test@example.com \<br>
+&nbsp;&nbsp;--template welcome-email \<br>
+&nbsp;&nbsp;--data '{"name": "Test"}'
+        </div>
+      </div>
+      <div class="workflow-side">
+        <div class="workflow-tag">For content teams</div>
+        <h3>Edit without deploying</h3>
+        <p>Open the template editor, change the subject line or body copy, and preview with real data. Schedule sends or trigger them from the dashboard. No pull request required.</p>
+        <div style="background: #f8f7ff; border: 1px solid #e5e3f0; border-radius: 8px; padding: 24px;">
+          <div style="display:flex; gap:12px; margin-bottom:16px;">
+            <div style="background:#6366f1; color:#fff; padding:6px 14px; border-radius:6px; font-size:13px; font-weight:500;">Visual editor</div>
+            <div style="background:#fff; border:1px solid #ddd; padding:6px 14px; border-radius:6px; font-size:13px; color:#666;">HTML</div>
+          </div>
+          <div style="background:#fff; border:1px solid #eee; border-radius:6px; padding:16px; font-size:14px; color:#333;">
+            <div style="font-weight:600; margin-bottom:8px;">Subject: Welcome to {{plan}}, {{name}}!</div>
+            <div style="color:#888; font-size:13px;">Body: Your account is ready. Here's what to do next...</div>
+          </div>
+          <div style="margin-top:12px; font-size:12px; color:#888;">Last edited by Sarah K. &middot; 2 hours ago</div>
+        </div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<section class="cta-section">
+  <div class="container">
+    <h2>Start sending in under five minutes</h2>
+    <p>Create a free account, get your API key, and send your first email. No credit card. 10,000 emails/month free.</p>
+    <a href="#" class="btn-white">Get your API key</a>
+    <div class="cta-note">Free tier includes full API access, template editor, and analytics.</div>
+  </div>
+</section>
+
+<footer>
+  <div class="container">
+    <p>&copy; 2026 Cadence, Inc.</p>
+    <div class="footer-links">
+      <a href="#">Documentation</a>
+      <a href="#">API Reference</a>
+      <a href="#">Status</a>
+      <a href="#">Privacy</a>
+      <a href="#">Terms</a>
+    </div>
+  </div>
+</footer>
+
+</body>
+</html>
