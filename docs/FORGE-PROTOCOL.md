@@ -761,3 +761,182 @@ Annotations do not carry an explicit version field. Conformant readers MUST tole
 - [`work-on.md`](../commands/work-on.md) — Full pipeline implementation reference
 - [`review-pr.md`](../commands/review-pr.md) — Review phase implementation reference
 - [`autopilot.md`](../commands/autopilot.md) — Orchestration and milestone index implementation
+
+---
+
+## Shell Entry Point
+
+`forge-run.sh` is the universal shell-script entry point for non-Claude agents. It enables any agent runtime that can execute bash — Aider `/run`, Cursor terminal, OpenCode shell, CI runners — to query the ForgeDock pipeline state deterministically, without re-implementing phase routing logic.
+
+### Installation
+
+`forge-run.sh` ships with the npm package and installs to `~/.claude/scripts/` when you run `npx forgedock`:
+
+```bash
+npx forgedock
+# Installs to ~/.claude/scripts/forge-run.sh
+```
+
+### Usage
+
+```bash
+# Query pipeline state for issue #42
+forge-run.sh work-on 42
+
+# With explicit repository
+forge-run.sh work-on 42 -R owner/repo
+```
+
+### What It Does
+
+`forge-run.sh` does NOT invoke LLM agents or run pipeline phases. It:
+
+1. Reads `workflow:*` labels from the GitHub issue
+2. Reads FORGE annotation comments (`FORGE:INVESTIGATOR`, `FORGE:BUILDER`, etc.) to check completion sentinels
+3. Determines the current pipeline phase from that state
+4. Calls `classify-lane.sh --json` to get structured lane information
+5. Emits structured JSON events to stdout (newline-delimited JSON)
+
+### JSON Event Schema
+
+All output is newline-delimited JSON (NDJSON) — one JSON object per line. Consumers can `while read -r line; do ... done` over the output.
+
+#### `phase_detected`
+
+Emitted first. Describes which pipeline phase the issue is currently in.
+
+```json
+{
+  "event": "phase_detected",
+  "command": "work-on",
+  "issue": 42,
+  "phase": "<phase>",
+  "ts": "2026-01-01T00:00:00Z"
+}
+```
+
+#### `phase_detail`
+
+Emitted second. Adds lane routing context.
+
+```json
+{
+  "event": "phase_detail",
+  "phase": "<phase>",
+  "lane": "milestone/developer-experience-distribution",
+  "branch": "milestone/developer-experience-distribution",
+  "labels": ["workflow:ready-to-build"]
+}
+```
+
+#### `action_required`
+
+Emitted third (for active, non-terminal phases). Describes what the calling agent should do next.
+
+```json
+{
+  "event": "action_required",
+  "phase": "ready-to-build",
+  "action": "Investigation complete. Invoke /work-on 42 to continue to build phase.",
+  "ts": "2026-01-01T00:00:00Z"
+}
+```
+
+#### `terminal`
+
+Emitted when the issue is in a terminal state. No `action_required` event follows.
+
+```json
+{
+  "event": "terminal",
+  "phase": "workflow:merged",
+  "label": "workflow:merged",
+  "issue": 42,
+  "ts": "2026-01-01T00:00:00Z"
+}
+```
+
+#### `error`
+
+Emitted on failure (exit code 1).
+
+```json
+{
+  "event": "error",
+  "code": "GH_FETCH_FAILED",
+  "message": "failed to fetch issue #42: ...",
+  "ts": "2026-01-01T00:00:00Z"
+}
+```
+
+### Phase Values
+
+| Phase | Meaning | Next Action |
+|-------|---------|-------------|
+| `no-comments` | No pipeline activity | Invoke `/work-on {N}` to start |
+| `investigating` | Investigation in progress or interrupted | Invoke `/work-on {N}` to continue |
+| `ready-to-build` | Investigation complete, build not started | Invoke `/work-on {N}` to build |
+| `building` | Build phase active, no builder comment yet | Invoke `/work-on {N}` to continue |
+| `awaiting-pr` | Builder complete, no PR created | Invoke `/work-on {N}` to create PR |
+| `in-review` | PR created, review in progress | `/review-pr` handles merge |
+| `merged` | Terminal: PR merged | Issue complete |
+| `invalid` | Terminal: investigation found issue invalid | Issue closed |
+| `decomposed` | Terminal: issue split into sub-issues | Work sub-issues independently |
+| `needs-human` | Terminal: pipeline blocked | Human intervention required |
+
+### Agent Integration Examples
+
+#### Aider
+
+```bash
+# In Aider session — query state before acting
+/run forge-run.sh work-on 42 -R owner/repo | jq -c '.'
+```
+
+#### CI / GitHub Actions
+
+```yaml
+- name: Check pipeline state
+  run: |
+    STATE=$(forge-run.sh work-on ${{ github.event.issue.number }} -R ${{ github.repository }})
+    PHASE=$(echo "$STATE" | jq -r 'select(.event=="phase_detected") | .phase')
+    echo "Current phase: $PHASE"
+    if echo "$STATE" | jq -e 'select(.event=="terminal")' > /dev/null; then
+      echo "Issue already in terminal state — skipping"
+      exit 0
+    fi
+```
+
+#### Cursor Terminal
+
+```bash
+# Check what phase issue #42 is in before continuing
+forge-run.sh work-on 42 | jq 'select(.event=="action_required") | .action'
+```
+
+#### OpenCode Shell
+
+```bash
+# Get structured lane information
+forge-run.sh work-on 42 -R owner/repo | jq 'select(.event=="phase_detail") | {phase, lane, branch}'
+```
+
+### `classify-lane.sh --json` Extension
+
+`classify-lane.sh` supports a `--json` flag (used internally by `forge-run.sh`) that emits a structured object instead of the plain lane string:
+
+```bash
+# Default (plain text — backwards-compatible)
+classify-lane.sh 42 -R owner/repo
+# Output: milestone/developer-experience-distribution
+
+# JSON output
+classify-lane.sh 42 -R owner/repo --json
+# Output: {"lane":"milestone/developer-experience-distribution","branch":"milestone/developer-experience-distribution","source":"feature-lane","milestone":"Developer Experience & Distribution","slug":"developer-experience-distribution"}
+
+# Fast lane (no milestone)
+classify-lane.sh 99 -R owner/repo --json
+# Output: {"lane":"staging","branch":"staging","source":"fast-lane","milestone":null}
+```
+
+The `--json` flag is purely additive — existing callers that omit `--json` receive the same plain text output as before.
