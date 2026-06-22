@@ -30,7 +30,7 @@ deterministic ones; the rest are left to the vision critic.
 | **N5** | A single radius applied to everything, or off-scale radii | BLOCKING when a multi-token `radius.scale` exists | `checkRadius` |
 | **N6** | Default Tailwind palette (slate/gray/zinc/neutral/indigo/violet) used as the brand color | BLOCKING when `no-default-tailwind-palette` is set | `checkPalette` |
 | **N7** | The boilerplate skeleton: hero → 3-cards → testimonial → CTA, in that order | BLOCKING when `layout_grammar.sections` exists | `checkSectionSkeleton` |
-| **N24** | Static product mock: `product_mock.type` is committed (not `"none"`) but the rendered hero has a `.product-window` or `.mock-*` element with no `animation`, `transition`, or JS `addEventListener` present | BLOCKING when `product_mock.type` is set and not `"none"` | `checkProductMock` | <!-- Added: forge#1045 --> |
+| **N24** | Static product mock: `product_mock.type` is committed (not `"none"`) but the rendered hero has a `.product-window` or `.mock-*` element with no `animation`, `transition`, or JS `addEventListener` present <!-- Added: forge#1045 --> | BLOCKING when `product_mock.type` is set and not `"none"` | `checkProductMock` |
 | — | Off-scale spacing (padding/margin/gap not on `spacing.scale`) | WARNING | `checkSpacing` |
 | — | Contrast: `color.foreground` vs `color.background` below `acceptance.a11y.contrast_min` | BLOCKING when a contrast floor is declared | `checkContrast` |
 
