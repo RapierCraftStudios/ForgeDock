@@ -279,6 +279,208 @@ Output to stdout (returned to calling agent):
 
 ---
 
+## Phase C4.5: Shareable Pipeline Summary
+
+Generate a comprehensive, stakeholder-readable pipeline run report and post it as a `<!-- FORGE:SUMMARY -->` comment on the issue. Optionally write a local markdown file.
+
+**Skip if**: `<!-- FORGE:SUMMARY -->` already exists on the issue (idempotency guard).
+
+### Idempotency check
+```bash
+SUMMARY_EXISTS=$(gh api repos/{GH_REPO}/issues/{NUMBER}/comments \
+  --jq '[.[] | select(.body | contains("FORGE:SUMMARY"))] | length > 0' 2>/dev/null || echo "false")
+
+if [ "$SUMMARY_EXISTS" = "true" ]; then
+  echo "INFO: FORGE:SUMMARY already exists on issue #{NUMBER} — skipping Phase C4.5"
+  # → proceed to Phase C5
+fi
+```
+
+### Extract pipeline data from FORGE annotations
+
+All data is reconstructed from comments already posted during the pipeline run:
+
+```bash
+# Issue metadata
+ISSUE_TITLE=$(gh issue view {NUMBER} {GH_FLAG} --json title --jq '.title' 2>/dev/null || echo "")
+ISSUE_MILESTONE=$(gh issue view {NUMBER} {GH_FLAG} --json milestone --jq '.milestone.title // "none"' 2>/dev/null || echo "none")
+
+# From FORGE:INVESTIGATOR
+INVESTIGATOR_BODY=$(gh api repos/{GH_REPO}/issues/{NUMBER}/comments \
+  --jq '.[] | select(.body | contains("FORGE:INVESTIGATOR")) | .body' 2>/dev/null | head -c 10000)
+VERDICT=$(echo "$INVESTIGATOR_BODY" | grep -oE '\*\*Verdict\*\*: [A-Z]+' | sed 's/\*\*Verdict\*\*: //' | head -1)
+CONFIDENCE=$(echo "$INVESTIGATOR_BODY" | grep -oE '\*\*Confidence\*\*: [A-Z]+' | sed 's/\*\*Confidence\*\*: //' | head -1)
+TASK_TYPE=$(echo "$INVESTIGATOR_BODY" | grep -oE '\*\*Task Type\*\*: [^\n]+' | sed 's/\*\*Task Type\*\*: //' | head -1)
+SEVERITY=$(echo "$INVESTIGATOR_BODY" | grep -oE '\*\*Severity\*\*: [A-Z]+' | sed 's/\*\*Severity\*\*: //' | head -1)
+
+# From FORGE:BUILDER
+BUILDER_BODY=$(gh api repos/{GH_REPO}/issues/{NUMBER}/comments \
+  --jq '.[] | select(.body | contains("FORGE:BUILDER")) | .body' 2>/dev/null | head -c 10000)
+BUILD_BRANCH=$(echo "$BUILDER_BODY" | grep -oE '\*\*Branch\*\*: `[^`]+`' | sed "s/\*\*Branch\*\*: \`//;s/\`//" | head -1)
+BUILD_COMMITS=$(echo "$BUILDER_BODY" | grep -oE '\*\*Commits\*\*: [^\n]+' | sed 's/\*\*Commits\*\*: //' | head -1)
+BUILD_FILES_CHANGED=$(echo "$BUILDER_BODY" | grep -oE '\*\*Files changed\*\*: [0-9]+' | sed 's/\*\*Files changed\*\*: //' | head -1)
+
+# Lane classification (from FORGE:CONTRACT or milestone)
+if [ "$ISSUE_MILESTONE" != "none" ] && [ -n "$ISSUE_MILESTONE" ]; then
+  LANE="Feature lane (milestone: ${ISSUE_MILESTONE})"
+else
+  LANE="Fast lane (staging)"
+fi
+
+# Review findings (from PR review comment — optional, may not exist)
+REVIEW_SUMMARY=""
+if [ -n "{PR_NUMBER}" ]; then
+  REVIEW_SUMMARY=$(gh api repos/{GH_REPO}/issues/{PR_NUMBER}/comments \
+    --jq '[.[] | select(.body | (contains("FORGE:REVIEWER") or test("APPROVED:|CHANGES REQUESTED:"; "i")))] | last | .body // ""' \
+    2>/dev/null || echo "")
+fi
+REVIEW_VERDICT=$(echo "$REVIEW_SUMMARY" | grep -oE 'Verdict: (APPROVED|CHANGES REQUESTED)' | sed 's/Verdict: //' | head -1)
+REVIEW_VERDICT="${REVIEW_VERDICT:-APPROVED}"
+FINDINGS_COUNT=$(echo "$REVIEW_SUMMARY" | grep -oE '[0-9]+ findings' | grep -oE '[0-9]+' | head -1 || echo "0")
+FINDINGS_COUNT="${FINDINGS_COUNT:-0}"
+AGENTS_RUN=$(echo "$REVIEW_SUMMARY" | grep -oE '[0-9]+ agents' | grep -oE '[0-9]+' | head -1 || echo "0")
+AGENTS_RUN="${AGENTS_RUN:-0}"
+
+# Quality gate result (from FORGE:BUILDER or FORGE:TRAJECTORY if already posted)
+QUALITY_GATE_RESULT=$(echo "$BUILDER_BODY" | grep -oiE 'quality gate[: ]+[a-z]+' | head -1 || echo "")
+
+# Decompose routing decision (from FORGE:INVESTIGATOR)
+DECOMPOSE=$(echo "$INVESTIGATOR_BODY" | grep -oE '\*\*(YES|NO)\*\* —[^\n]+' | sed 's/\*\*//g' | head -1)
+
+# Summary timestamp
+SUMMARY_TIMESTAMP=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+```
+
+### Post FORGE:SUMMARY comment
+
+```bash
+gh issue comment {NUMBER} {GH_FLAG} --body "<!-- FORGE:SUMMARY -->
+## Pipeline Run Summary — #${NUMBER}: ${ISSUE_TITLE}
+
+> Generated at **${SUMMARY_TIMESTAMP}** | [View PR #${PR_NUMBER}](https://github.com/{GH_REPO}/pull/${PR_NUMBER}) | [View Issue](https://github.com/{GH_REPO}/issues/${NUMBER})
+
+---
+
+### Pipeline Overview
+
+| Field | Value |
+|-------|-------|
+| **Issue** | #${NUMBER} — ${ISSUE_TITLE} |
+| **Lane** | ${LANE} |
+| **PR** | #${PR_NUMBER} → \`{PR_BASE}\` |
+| **Branch** | \`${BUILD_BRANCH:-{BRANCH}}\` |
+| **Terminal state** | \`workflow:merged\` |
+
+---
+
+### Agent Decisions
+
+| Decision Point | Outcome |
+|---------------|---------|
+| **Lane classification** | ${LANE} |
+| **Investigation verdict** | ${VERDICT:-—} (${CONFIDENCE:-—} confidence, severity: ${SEVERITY:-—}) |
+| **Task type** | ${TASK_TYPE:-—} |
+| **Decompose routing** | ${DECOMPOSE:-NO — single-concern change} |
+| **Review verdict** | ${REVIEW_VERDICT} (${AGENTS_RUN} agents, ${FINDINGS_COUNT} finding(s) created) |
+
+---
+
+### Build Summary
+
+| Field | Value |
+|-------|-------|
+| **Branch** | \`${BUILD_BRANCH:-{BRANCH}}\` |
+| **Commits** | ${BUILD_COMMITS:-—} |
+| **Files changed** | ${BUILD_FILES_CHANGED:-—} |
+| **Quality gate** | ${QUALITY_GATE_RESULT:-see trajectory} |
+
+---
+
+### Review Findings
+
+$(if [ -n "$REVIEW_SUMMARY" ] && [ "$FINDINGS_COUNT" != "0" ]; then
+  echo "${FINDINGS_COUNT} finding(s) created during review by ${AGENTS_RUN} agents. Each finding was filed as a separate issue for traceability."
+else
+  echo "No review findings created (${AGENTS_RUN} agents run, 0 findings)."
+fi)
+
+---
+
+### What Was Not Captured
+
+- **Token usage**: Not available — Claude Code does not expose per-session token counts via API during pipeline execution.
+- **Phase durations**: FORGE annotations do not include machine-readable start/end timestamps. Use \`/replay ${NUMBER}\` for chronological annotation display.
+
+---
+
+*Generated by ForgeDock \`/work-on\` Phase C4.5. Full pipeline trace: \`FORGE:TRAJECTORY\` comment on this issue. Queryable artifact: \`FORGE:DECISION_RECORD\` on PR #${PR_NUMBER}.*"
+```
+
+### Optional: Write local report file
+
+**Skip if**: `forge.yaml → reports.save_local` is not set to `true`.
+
+```bash
+# Read forge.yaml using FORGE_CONFIG env override (never hardcode path)
+CONFIG_FILE="${FORGE_CONFIG:-forge.yaml}"
+SAVE_LOCAL=""
+if command -v yq >/dev/null 2>&1 && [ -f "$CONFIG_FILE" ]; then
+  SAVE_LOCAL=$(yq '.reports.save_local // ""' "$CONFIG_FILE" 2>/dev/null || echo "")
+fi
+
+if [ "$SAVE_LOCAL" = "true" ]; then
+  REPORTS_DIR="${REPO_PATH}/.forgedock/reports"
+  mkdir -p "$REPORTS_DIR"
+  REPORT_FILE="${REPORTS_DIR}/${NUMBER}.md"
+
+  cat > "$REPORT_FILE" << REPORT_CONTENT_EOF
+# Pipeline Run Report — Issue #${NUMBER}
+
+**Title**: ${ISSUE_TITLE}
+**Generated**: ${SUMMARY_TIMESTAMP}
+**Lane**: ${LANE}
+**PR**: #${PR_NUMBER} → \`{PR_BASE}\`
+**Branch**: \`${BUILD_BRANCH:-{BRANCH}}\`
+**Terminal state**: \`workflow:merged\`
+
+## Agent Decisions
+
+| Decision | Outcome |
+|----------|---------|
+| Investigation verdict | ${VERDICT:-—} (${CONFIDENCE:-—} confidence) |
+| Severity | ${SEVERITY:-—} |
+| Task type | ${TASK_TYPE:-—} |
+| Decompose routing | ${DECOMPOSE:-NO — single-concern change} |
+| Review verdict | ${REVIEW_VERDICT} |
+
+## Build Summary
+
+- **Commits**: ${BUILD_COMMITS:-—}
+- **Files changed**: ${BUILD_FILES_CHANGED:-—}
+- **Quality gate**: ${QUALITY_GATE_RESULT:-see trajectory}
+
+## Review
+
+- **Agents run**: ${AGENTS_RUN}
+- **Findings created**: ${FINDINGS_COUNT}
+
+## Links
+
+- Issue: https://github.com/{GH_REPO}/issues/${NUMBER}
+- PR: https://github.com/{GH_REPO}/pull/${PR_NUMBER}
+REPORT_CONTENT_EOF
+
+  echo "Local report saved: ${REPORT_FILE}"
+else
+  echo "INFO: reports.save_local not set — skipping local file write"
+  echo "      To enable: add 'reports:\n  save_local: true' to forge.yaml"
+fi
+```
+
+<!-- Added: forge#951 -->
+
+---
+
 ## Phase C5: Trajectory Log (MANDATORY)
 
 Post the `<!-- FORGE:TRAJECTORY -->` comment as the final pipeline record:
