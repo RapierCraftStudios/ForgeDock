@@ -11,7 +11,7 @@ Run [`/autopilot`](../commands/autopilot.md) on a schedule so your repo gets bet
    ```bash
    mkdir -p .github/workflows
    curl -o .github/workflows/forgedock-autopilot.yml \
-     https://raw.githubusercontent.com/RapierCraftStudios/ForgeDock/main/templates/github-actions/forgedock-autopilot.yml
+     https://raw.githubusercontent.com/RapierCraftStudios/ForgeDock/milestone/developer-experience-distribution/templates/github-actions/forgedock-autopilot.yml
    ```
 
 2. **Add your Anthropic API key** as a repository secret:
