@@ -1795,6 +1795,34 @@ branches:
 #   health_endpoint: "https://api.${safeRepo}.io/health"
 #   health_patterns:
 #     - '"status": "ok"'
+#
+#   # Integration test suites run by /test-gate against the provisioned cluster.
+#   # Each entry specifies a logical cluster (matched to test_services), the shell
+#   # command to execute, and the working directory (relative to project root).
+#   # Used by: test-gate (Phase 3 Provision + Phase 4 Fan out)
+#   #
+#   # integration_tests:
+#   #   - cluster: "api"
+#   #     command: "pytest tests/integration/ -q --tb=short"
+#   #     working_dir: "."
+#
+#   # Maps logical cluster names (from integration_tests) to running container
+#   # names. /test-gate checks these containers are live before running tests.
+#   # Omit entries for clusters that do not use Docker.
+#   # Used by: test-gate (Phase 3 Provision)
+#   #
+#   # test_services:
+#   #   api: "${safeRepo}-api-blue"
+#   #   worker: "${safeRepo}-worker-blue"
+#
+#   # Controls /test-gate posture at the staging-to-main deploy boundary.
+#   # posture: blocking (default) or advisory.
+#   # override_phrase: exact comment text an operator posts to bypass a BLOCK.
+#   # Used by: test-gate (Phase 7 Verdict), review-pr-staging (Phase 6.5)
+#   #
+#   # test_gate:
+#   #   posture: "blocking"
+#   #   override_phrase: "OVERRIDE: shipping with test failures \u2014"
 `;
 
   atomicWriteFile(outputPath, content);
