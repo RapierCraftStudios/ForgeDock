@@ -743,6 +743,63 @@ Cursor's Agent mode supports static Markdown rules files in `.cursor/rules/`. Th
 
 ---
 
+## Quick Start: Third-Party Agents
+
+The FORGE annotation protocol is transport-agnostic. Any agent that can write
+to the GitHub API can produce and consume FORGE annotations. ForgeDock provides
+first-class adapters for Claude Code, OpenAI Codex CLI, and Aider.
+
+### Aider
+
+**Feasibility**: HIGH — Aider's `--read` flag loads instruction files at session
+start, and `/run` provides shell execution for all `gh` CLI operations.
+
+**Install**:
+
+```bash
+cd /path/to/forgedock
+./install-aider.sh
+```
+
+Or via `npx forgedock` when `aider` is detected on PATH.
+
+**First run**:
+
+```bash
+aider --read ~/.aider-forge.md
+```
+
+Inside the Aider session:
+
+```
+/read /path/to/forgedock/commands/work-on.md
+```
+
+Then follow the command spec, using `/run gh ...` for all GitHub operations.
+
+**Reference**: [`docs/AIDER.md`](AIDER.md)
+
+### OpenAI Codex CLI
+
+**Feasibility**: HIGH — Codex CLI supports skills (`~/.codex/skills/`) that
+wrap ForgeDock command specs with Codex-native tool translations.
+
+**Install**:
+
+```bash
+cd /path/to/forgedock
+./install-codex.sh
+```
+
+**First run**: Use the installed `forge` skill or any `forge-*` skill:
+
+```
+forge-work-on 123
+```
+
+**Reference**: [`docs/CODEX.md`](CODEX.md)
+
+
 ## Versioning
 
 This document describes FORGE Protocol **version 1.0**. Future revisions will:
