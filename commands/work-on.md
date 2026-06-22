@@ -412,6 +412,13 @@ Use `forge.yaml → review.tech_stack` and the issue domain labels to identify e
 
 The comment MUST include `<!-- INVESTIGATION:COMPLETE -->` at the very end.
 
+**Before posting, read the attribution config**:
+```bash
+SHOW_ATTRIBUTION=$(yq '.branding.show_attribution // "true"' forge.yaml 2>/dev/null || echo "true")
+[ "$SHOW_ATTRIBUTION" = "false" ] && ATTRIBUTION_LINE="" || ATTRIBUTION_LINE="
+> Pipeline powered by [ForgeDock](https://github.com/RapierCraftStudios/ForgeDock)"
+```
+
 ```bash
 gh issue comment {NUMBER} {GH_FLAG} --body "<!-- FORGE:INVESTIGATOR -->
 ## Investigation Report
@@ -445,7 +452,7 @@ gh issue comment {NUMBER} {GH_FLAG} --body "<!-- FORGE:INVESTIGATOR -->
 ### Decomposition Assessment
 **{YES|NO}** — {reason}
 {if YES: proposed sub-issues with titles and dependencies}
-
+${ATTRIBUTION_LINE}
 <!-- INVESTIGATION:COMPLETE -->"
 ```
 
@@ -671,6 +678,14 @@ SUB_BODY_EOF
 Add tracker checklist with all sub-issues in dependency order.
 
 ### 2E: Post decomposition comment
+
+**Before posting, read the attribution config**:
+```bash
+SHOW_ATTRIBUTION=$(yq '.branding.show_attribution // "true"' forge.yaml 2>/dev/null || echo "true")
+[ "$SHOW_ATTRIBUTION" = "false" ] && ATTRIBUTION_LINE="" || ATTRIBUTION_LINE="
+> Pipeline powered by [ForgeDock](https://github.com/RapierCraftStudios/ForgeDock)"
+```
+
 ```bash
 gh issue comment {NUMBER} {GH_FLAG} --body "<!-- FORGE:DECOMPOSED -->
 ## Decomposition Complete
@@ -680,7 +695,7 @@ gh issue comment {NUMBER} {GH_FLAG} --body "<!-- FORGE:DECOMPOSED -->
 
 ### Decomposition Rationale
 {brief summary}
-
+${ATTRIBUTION_LINE}
 <!-- FORGE:DECOMPOSED:COMPLETE -->"
 ```
 
@@ -802,6 +817,13 @@ gh issue comment {NUMBER} {GH_FLAG} --body "<!-- FORGE:FAST_PATH -->
 
 Post `<!-- FORGE:CONTRACT -->` comment with: task type, proposed approach, deliverables table (file/change/why), acceptance criteria, quality considerations (auth model, new env vars, SQL safety, security surface), out of scope, alternatives.
 
+**Before posting, read the attribution config**:
+```bash
+SHOW_ATTRIBUTION=$(yq '.branding.show_attribution // "true"' forge.yaml 2>/dev/null || echo "true")
+[ "$SHOW_ATTRIBUTION" = "false" ] && ATTRIBUTION_LINE="" || ATTRIBUTION_LINE="
+> Pipeline powered by [ForgeDock](https://github.com/RapierCraftStudios/ForgeDock)"
+```
+
 ```bash
 gh issue comment {NUMBER} {GH_FLAG} --body "<!-- FORGE:CONTRACT -->
 ## Builder Contract
@@ -823,7 +845,8 @@ gh issue comment {NUMBER} {GH_FLAG} --body "<!-- FORGE:CONTRACT -->
 {AUTH_MODEL_NEW_ENV_VARS_SQL_SAFETY_SECURITY_SURFACE}
 
 ### Out of Scope
-{OUT_OF_SCOPE_ITEMS}"
+{OUT_OF_SCOPE_ITEMS}
+${ATTRIBUTION_LINE}"
 ```
 
 Contract must be grounded in the investigation report. Adversarially validate proposed fixes against adjacent system layers.
@@ -1316,6 +1339,14 @@ fi
 Check off completed items, mark phases complete, add PR references.
 
 ### 3M: Post implementation comment
+
+**Before posting, read the attribution config**:
+```bash
+SHOW_ATTRIBUTION=$(yq '.branding.show_attribution // "true"' forge.yaml 2>/dev/null || echo "true")
+[ "$SHOW_ATTRIBUTION" = "false" ] && ATTRIBUTION_LINE="" || ATTRIBUTION_LINE="
+> Pipeline powered by [ForgeDock](https://github.com/RapierCraftStudios/ForgeDock)"
+```
+
 ```bash
 gh issue comment {NUMBER} {GH_FLAG} --body "<!-- FORGE:BUILDER -->
 ## Implementation Complete
@@ -1336,7 +1367,7 @@ gh issue comment {NUMBER} {GH_FLAG} --body "<!-- FORGE:BUILDER -->
 ### Testing Checklist
 - [ ] {scenario 1}
 - [ ] {scenario 2}
-
+${ATTRIBUTION_LINE}
 <!-- FORGE:BUILDER:COMPLETE -->"
 ```
 
@@ -1634,6 +1665,13 @@ This check is **audit-only** — it annotates the trajectory for visibility. It 
 
 Post `<!-- FORGE:TRAJECTORY -->` comment with phase-by-phase results table:
 
+**Before posting, read the attribution config**:
+```bash
+SHOW_ATTRIBUTION=$(yq '.branding.show_attribution // "true"' forge.yaml 2>/dev/null || echo "true")
+[ "$SHOW_ATTRIBUTION" = "false" ] && ATTRIBUTION_LINE="" || ATTRIBUTION_LINE="
+> Pipeline powered by [ForgeDock](https://github.com/RapierCraftStudios/ForgeDock)"
+```
+
 ```bash
 gh issue comment {NUMBER} {GH_FLAG} --body "<!-- FORGE:TRAJECTORY -->
 ## Pipeline Trajectory — #{NUMBER}
@@ -1650,7 +1688,8 @@ gh issue comment {NUMBER} {GH_FLAG} --body "<!-- FORGE:TRAJECTORY -->
 
 **Decisions**: {key decisions}
 **Anomalies**: {anomalies or None}
-**Pipeline completed**: {TIMESTAMP}"
+**Pipeline completed**: {TIMESTAMP}
+${ATTRIBUTION_LINE}"
 ```
 
 ### 7C: Graph Decision Record (MANDATORY when PR exists)

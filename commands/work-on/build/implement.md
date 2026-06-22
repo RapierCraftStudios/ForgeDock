@@ -225,6 +225,13 @@ gh issue edit {NUMBER} {GH_FLAG} --body "{UPDATED_BODY}"
 
 ## Phase I6: Post FORGE:BUILDER Comment
 
+**Before posting, read the attribution config**:
+```bash
+SHOW_ATTRIBUTION=$(yq '.branding.show_attribution // "true"' forge.yaml 2>/dev/null || echo "true")
+[ "$SHOW_ATTRIBUTION" = "false" ] && ATTRIBUTION_LINE="" || ATTRIBUTION_LINE="
+> Pipeline powered by [ForgeDock](https://github.com/RapierCraftStudios/ForgeDock)"
+```
+
 ```bash
 gh issue comment {NUMBER} {GH_FLAG} --body "<!-- FORGE:BUILDER -->
 ## Implementation Complete
@@ -246,7 +253,7 @@ gh issue comment {NUMBER} {GH_FLAG} --body "<!-- FORGE:BUILDER -->
 - [ ] {Test scenario 1}
 - [ ] {Test scenario 2}
 - [ ] {Test scenario 3}
-
+${ATTRIBUTION_LINE}
 <!-- FORGE:BUILDER:COMPLETE -->"
 ```
 

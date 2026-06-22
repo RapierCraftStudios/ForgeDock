@@ -666,3 +666,27 @@ branches:
 #   #   - Conventional commits: fix(scope):, feat(scope):, refactor(scope):
 #   #   - Sign off commits with git commit -s (DCO required)
 #   #   - Open a GitHub issue before fixing a bug inline
+
+# =============================================================================
+# BRANDING (OPTIONAL)
+# Controls attribution in FORGE annotation comments posted to GitHub issues
+# and PRs by pipeline commands (FORGE:INVESTIGATOR, FORGE:BUILDER,
+# FORGE:CONTRACT, FORGE:TRAJECTORY, FORGE:DECOMPOSED, etc.).
+#
+# When show_attribution is true (the default), each annotation comment ends
+# with a one-line footer:
+#   > Pipeline powered by [ForgeDock](https://github.com/RapierCraftStudios/ForgeDock)
+#
+# This follows the pattern established by Dependabot, Renovate, and other
+# GitHub-integrated tools that include a small attribution in automated
+# comments. It helps new users discover the tooling while remaining
+# unobtrusive. Set to false to suppress the attribution entirely.
+#
+# Commands: work-on (all phases that post FORGE: annotation comments)
+# =============================================================================
+
+# branding:
+#   # When true (default), annotation comments posted by the pipeline include a
+#   # one-line attribution footer linking back to ForgeDock. Set to false to
+#   # suppress the attribution entirely.
+#   show_attribution: true

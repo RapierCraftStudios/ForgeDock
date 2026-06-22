@@ -89,6 +89,13 @@ If the issue specifies a **Code branch** (`**Code branch**: \`{branch}\``), chec
 
 The comment MUST include `<!-- INVESTIGATION:COMPLETE -->` at the very end, AFTER all required sections are present. This marker signals the investigation finished successfully.
 
+**Before posting, read the attribution config**:
+```bash
+SHOW_ATTRIBUTION=$(yq '.branding.show_attribution // "true"' forge.yaml 2>/dev/null || echo "true")
+[ "$SHOW_ATTRIBUTION" = "false" ] && ATTRIBUTION_LINE="" || ATTRIBUTION_LINE="
+> Pipeline powered by [ForgeDock](https://github.com/RapierCraftStudios/ForgeDock)"
+```
+
 ```bash
 gh issue comment {NUMBER} {GH_FLAG} --body "<!-- FORGE:INVESTIGATOR -->
 ## Investigation Report
@@ -122,7 +129,7 @@ gh issue comment {NUMBER} {GH_FLAG} --body "<!-- FORGE:INVESTIGATOR -->
 ### Decomposition Assessment
 **{YES|NO}** — {reason}
 {if YES: proposed sub-issues with titles and dependencies}
-
+${ATTRIBUTION_LINE}
 <!-- INVESTIGATION:COMPLETE -->"
 ```
 

@@ -566,6 +566,38 @@ Colors are grouped by semantic meaning:
 
 ---
 
+## `branding` (OPTIONAL)
+
+Controls attribution in FORGE annotation comments posted to GitHub issues and PRs by pipeline commands.
+
+When `show_attribution` is `true` (the default), every annotation comment (`FORGE:INVESTIGATOR`, `FORGE:CONTRACT`, `FORGE:BUILDER`, `FORGE:TRAJECTORY`, `FORGE:DECOMPOSED`, etc.) ends with a one-line footer:
+
+```
+> Pipeline powered by [ForgeDock](https://github.com/RapierCraftStudios/ForgeDock)
+```
+
+This follows the pattern established by Dependabot, Renovate, and similar tools. It helps new users discover the tooling when they encounter FORGE: annotations in a public thread. Set to `false` to suppress the attribution entirely.
+
+```yaml
+branding:
+  show_attribution: true
+```
+
+| Field | Type | Required | Default | Description |
+|-------|------|----------|---------|-------------|
+| `show_attribution` | boolean | No | `true` | When `true`, annotation comments posted by the pipeline include a one-line attribution footer. Set to `false` to suppress it entirely. Opt-out model — attribution is on by default. |
+
+**Commands that use this section**: `work-on` (all phases that post FORGE: annotation comments)
+
+**Config read pattern** (yq, with default-true fallback):
+
+```bash
+SHOW_ATTRIBUTION=$(yq '.branding.show_attribution // "true"' forge.yaml 2>/dev/null || echo "true")
+[ "$SHOW_ATTRIBUTION" = "false" ] && ATTRIBUTION_LINE="" || ATTRIBUTION_LINE="\n> Pipeline powered by [ForgeDock](https://github.com/RapierCraftStudios/ForgeDock)"
+```
+
+---
+
 ## `marketing` (OPTIONAL)
 
 Controls opt-in growth features such as 'Powered by ForgeDock' footers on PR descriptions created by the pipeline.
