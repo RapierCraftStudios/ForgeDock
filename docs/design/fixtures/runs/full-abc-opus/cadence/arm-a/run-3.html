@@ -1,0 +1,1245 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>CADENCE — Send email. Ship faster.</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Cabinet+Grotesk:wght@400;500;700;800;900&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+<style>
+  @font-face {
+    font-family: 'Cabinet Grotesk';
+    src: url('https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;700;800&display=swap');
+  }
+
+  *, *::before, *::after { margin: 0; padding: 0; box-sizing: border-box; }
+
+  :root {
+    --black: #0A0A0A;
+    --white: #F5F5F0;
+    --off-white: #E8E8E2;
+    --mid: #999990;
+    --dim: #666660;
+    --accent: #FF3D00;
+    --accent-dark: #CC3100;
+    --border: #2A2A2A;
+    --border-light: #D0D0C8;
+    --code-bg: #111111;
+  }
+
+  html { font-size: 16px; scroll-behavior: smooth; }
+
+  body {
+    font-family: 'Plus Jakarta Sans', 'Cabinet Grotesk', sans-serif;
+    background: var(--white);
+    color: var(--black);
+    -webkit-font-smoothing: antialiased;
+  }
+
+  /* NAV */
+  nav {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 20px 48px;
+    border-bottom: 2px solid var(--black);
+    position: sticky;
+    top: 0;
+    background: var(--white);
+    z-index: 100;
+  }
+
+  .nav-logo {
+    font-size: 1rem;
+    font-weight: 800;
+    letter-spacing: 0.2em;
+    text-transform: uppercase;
+    color: var(--black);
+    text-decoration: none;
+  }
+
+  .nav-center {
+    display: flex;
+    gap: 32px;
+    list-style: none;
+  }
+
+  .nav-center a {
+    text-decoration: none;
+    color: var(--dim);
+    font-size: 0.78rem;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    transition: color 0.15s;
+  }
+
+  .nav-center a:hover { color: var(--black); }
+
+  .btn-brutal {
+    display: inline-block;
+    background: var(--accent);
+    color: var(--white);
+    padding: 12px 28px;
+    font-family: inherit;
+    font-size: 0.78rem;
+    font-weight: 800;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    text-decoration: none;
+    border: 2px solid var(--black);
+    cursor: pointer;
+    transition: all 0.15s;
+    box-shadow: 3px 3px 0 var(--black);
+  }
+
+  .btn-brutal:hover {
+    box-shadow: 1px 1px 0 var(--black);
+    transform: translate(2px, 2px);
+  }
+
+  .btn-outline {
+    display: inline-block;
+    background: transparent;
+    color: var(--black);
+    padding: 12px 28px;
+    font-family: inherit;
+    font-size: 0.78rem;
+    font-weight: 800;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    text-decoration: none;
+    border: 2px solid var(--black);
+    cursor: pointer;
+    transition: all 0.15s;
+  }
+
+  .btn-outline:hover {
+    background: var(--black);
+    color: var(--white);
+  }
+
+  /* HERO — massive type with scale shift */
+  .hero {
+    border-bottom: 2px solid var(--black);
+    display: grid;
+    grid-template-columns: 1fr 480px;
+    min-height: 90vh;
+  }
+
+  .hero-type {
+    padding: 80px 48px 48px;
+    display: flex;
+    flex-direction: column;
+    justify-content: space-between;
+  }
+
+  .hero-overline {
+    font-size: 0.72rem;
+    font-weight: 800;
+    text-transform: uppercase;
+    letter-spacing: 0.15em;
+    color: var(--accent);
+    margin-bottom: 24px;
+  }
+
+  .hero-h1 {
+    font-size: 7.5rem;
+    font-weight: 900;
+    line-height: 0.88;
+    letter-spacing: -0.06em;
+    text-transform: uppercase;
+    margin-bottom: 32px;
+  }
+
+  .hero-h1 .thin {
+    font-weight: 400;
+    display: block;
+  }
+
+  .hero-h1 .accent {
+    color: var(--accent);
+  }
+
+  .hero-sub {
+    font-size: 1.1rem;
+    color: var(--dim);
+    max-width: 480px;
+    line-height: 1.65;
+    margin-bottom: 40px;
+    font-weight: 500;
+  }
+
+  .hero-actions {
+    display: flex;
+    gap: 16px;
+    align-items: center;
+    margin-bottom: 48px;
+  }
+
+  .hero-stats {
+    display: flex;
+    gap: 48px;
+    padding-top: 32px;
+    border-top: 2px solid var(--black);
+  }
+
+  .hero-stat {
+    display: flex;
+    flex-direction: column;
+  }
+
+  .hero-stat-value {
+    font-size: 2.4rem;
+    font-weight: 900;
+    letter-spacing: -0.04em;
+    line-height: 1;
+  }
+
+  .hero-stat-label {
+    font-size: 0.68rem;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.1em;
+    color: var(--dim);
+    margin-top: 4px;
+  }
+
+  /* HERO RIGHT — code showcase with vertical label */
+  .hero-code-side {
+    background: var(--code-bg);
+    border-left: 2px solid var(--black);
+    display: flex;
+    position: relative;
+    overflow: hidden;
+  }
+
+  .vertical-label {
+    writing-mode: vertical-rl;
+    text-orientation: mixed;
+    transform: rotate(180deg);
+    font-size: 0.65rem;
+    font-weight: 800;
+    text-transform: uppercase;
+    letter-spacing: 0.15em;
+    color: #333;
+    padding: 24px 16px;
+    border-right: 1px solid #222;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    flex-shrink: 0;
+  }
+
+  .hero-code-content {
+    flex: 1;
+    padding: 48px 32px;
+    overflow: auto;
+    display: flex;
+    flex-direction: column;
+    gap: 24px;
+  }
+
+  .code-card {
+    border: 1px solid #222;
+    border-radius: 0;
+    overflow: hidden;
+  }
+
+  .code-card-bar {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 8px 16px;
+    background: #1A1A1A;
+    border-bottom: 1px solid #222;
+  }
+
+  .code-card-lang {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 0.6rem;
+    font-weight: 500;
+    color: #555;
+    text-transform: uppercase;
+    letter-spacing: 0.1em;
+  }
+
+  .code-card-tag {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 0.55rem;
+    padding: 2px 8px;
+    background: rgba(255,61,0,0.15);
+    color: var(--accent);
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+  }
+
+  .code-card pre {
+    padding: 20px 16px;
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 0.72rem;
+    line-height: 1.8;
+    color: #CCC;
+    overflow-x: auto;
+  }
+
+  .code-card pre .kw { color: var(--accent); }
+  .code-card pre .str { color: #A78BFA; }
+  .code-card pre .fn { color: #7DAECC; }
+  .code-card pre .cm { color: #444; }
+  .code-card pre .num { color: #FF9F43; }
+  .code-card pre .res { color: #4CAF50; }
+
+  /* MARQUEE STRIP */
+  .marquee-strip {
+    border-bottom: 2px solid var(--black);
+    padding: 14px 0;
+    overflow: hidden;
+    white-space: nowrap;
+    background: var(--accent);
+    color: var(--white);
+  }
+
+  .marquee-inner {
+    display: inline-block;
+    animation: marquee 30s linear infinite;
+  }
+
+  .marquee-inner span {
+    font-size: 0.75rem;
+    font-weight: 800;
+    text-transform: uppercase;
+    letter-spacing: 0.12em;
+    margin-right: 48px;
+  }
+
+  @keyframes marquee {
+    0% { transform: translateX(0); }
+    100% { transform: translateX(-50%); }
+  }
+
+  /* SECTION with big number */
+  .big-section {
+    display: grid;
+    grid-template-columns: 120px 1fr;
+    border-bottom: 2px solid var(--black);
+  }
+
+  .big-section-num {
+    display: flex;
+    align-items: flex-start;
+    justify-content: center;
+    padding-top: 64px;
+    font-size: 5rem;
+    font-weight: 900;
+    color: var(--off-white);
+    border-right: 2px solid var(--black);
+    position: relative;
+  }
+
+  .big-section-num::after {
+    content: '';
+    position: absolute;
+    bottom: 0;
+    left: 0;
+    right: 0;
+    height: 3px;
+    background: var(--accent);
+  }
+
+  .big-section-content {
+    padding: 64px 48px;
+  }
+
+  .big-section-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: flex-start;
+    gap: 48px;
+    margin-bottom: 48px;
+  }
+
+  .big-section-title {
+    font-size: 3rem;
+    font-weight: 900;
+    letter-spacing: -0.04em;
+    line-height: 1;
+    text-transform: uppercase;
+    max-width: 500px;
+  }
+
+  .big-section-desc {
+    font-size: 0.95rem;
+    color: var(--dim);
+    max-width: 380px;
+    line-height: 1.65;
+    font-weight: 500;
+    padding-top: 8px;
+  }
+
+  /* FEATURE BLOCKS — brutalist grid */
+  .brutal-grid {
+    display: grid;
+    grid-template-columns: repeat(3, 1fr);
+    gap: 0;
+    border: 2px solid var(--black);
+  }
+
+  .brutal-cell {
+    padding: 40px 32px;
+    border-right: 2px solid var(--black);
+    border-bottom: 2px solid var(--black);
+  }
+
+  .brutal-cell:nth-child(3n) { border-right: none; }
+  .brutal-cell:nth-last-child(-n+3) { border-bottom: none; }
+
+  .brutal-cell h4 {
+    font-size: 1rem;
+    font-weight: 800;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    margin-bottom: 10px;
+  }
+
+  .brutal-cell p {
+    font-size: 0.85rem;
+    color: var(--dim);
+    line-height: 1.6;
+    font-weight: 500;
+  }
+
+  .brutal-cell .cell-tag {
+    display: inline-block;
+    font-size: 0.6rem;
+    font-weight: 800;
+    text-transform: uppercase;
+    letter-spacing: 0.1em;
+    color: var(--accent);
+    margin-bottom: 16px;
+  }
+
+  /* FULL-WIDTH CODE */
+  .fw-code-section {
+    background: var(--code-bg);
+    border-bottom: 2px solid var(--black);
+    padding: 64px 48px;
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 32px;
+  }
+
+  .fw-code-intro {
+    color: #999;
+    display: flex;
+    flex-direction: column;
+    justify-content: center;
+  }
+
+  .fw-code-intro h3 {
+    font-size: 2.4rem;
+    font-weight: 900;
+    letter-spacing: -0.04em;
+    color: var(--white);
+    text-transform: uppercase;
+    line-height: 1;
+    margin-bottom: 20px;
+  }
+
+  .fw-code-intro p {
+    font-size: 0.92rem;
+    line-height: 1.65;
+    max-width: 400px;
+    font-weight: 500;
+  }
+
+  .fw-code-intro .accent-line {
+    width: 48px;
+    height: 3px;
+    background: var(--accent);
+    margin: 24px 0;
+  }
+
+  .fw-code-intro ul {
+    list-style: none;
+    margin-top: 8px;
+  }
+
+  .fw-code-intro ul li {
+    padding: 6px 0;
+    font-size: 0.82rem;
+    color: #777;
+    font-weight: 500;
+  }
+
+  .fw-code-intro ul li strong {
+    color: #BBB;
+    font-weight: 700;
+  }
+
+  /* DELIVERABILITY */
+  .deliv-section {
+    border-bottom: 2px solid var(--black);
+  }
+
+  .deliv-header {
+    padding: 64px 48px 0;
+    display: flex;
+    justify-content: space-between;
+    align-items: flex-end;
+    margin-bottom: 48px;
+  }
+
+  .deliv-header h2 {
+    font-size: 3rem;
+    font-weight: 900;
+    letter-spacing: -0.04em;
+    text-transform: uppercase;
+    line-height: 0.95;
+    max-width: 500px;
+  }
+
+  .deliv-header p {
+    font-size: 0.9rem;
+    color: var(--dim);
+    max-width: 360px;
+    text-align: right;
+    line-height: 1.6;
+    font-weight: 500;
+  }
+
+  .deliv-strip {
+    display: grid;
+    grid-template-columns: repeat(4, 1fr);
+    border-top: 2px solid var(--black);
+  }
+
+  .deliv-stat-cell {
+    padding: 40px 48px;
+    border-right: 2px solid var(--black);
+  }
+
+  .deliv-stat-cell:last-child { border-right: none; }
+
+  .deliv-stat-cell .val {
+    font-size: 3.5rem;
+    font-weight: 900;
+    letter-spacing: -0.04em;
+    line-height: 1;
+    margin-bottom: 4px;
+  }
+
+  .deliv-stat-cell .val.accent { color: var(--accent); }
+
+  .deliv-stat-cell .label {
+    font-size: 0.68rem;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.1em;
+    color: var(--dim);
+  }
+
+  .deliv-details {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    border-top: 2px solid var(--black);
+  }
+
+  .deliv-detail-cell {
+    padding: 40px 48px;
+    border-right: 2px solid var(--black);
+  }
+
+  .deliv-detail-cell:last-child { border-right: none; }
+
+  .deliv-detail-cell h4 {
+    font-size: 1rem;
+    font-weight: 800;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    margin-bottom: 10px;
+  }
+
+  .deliv-detail-cell p {
+    font-size: 0.85rem;
+    color: var(--dim);
+    line-height: 1.6;
+    font-weight: 500;
+  }
+
+  /* ANALYTICS — dense row */
+  .analytics-section {
+    border-bottom: 2px solid var(--black);
+    padding: 64px 48px;
+  }
+
+  .analytics-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: flex-end;
+    margin-bottom: 32px;
+  }
+
+  .analytics-header h2 {
+    font-size: 2.4rem;
+    font-weight: 900;
+    letter-spacing: -0.04em;
+    text-transform: uppercase;
+    line-height: 1;
+  }
+
+  .analytics-table {
+    width: 100%;
+    border-collapse: collapse;
+    border: 2px solid var(--black);
+  }
+
+  .analytics-table th {
+    text-align: left;
+    font-size: 0.62rem;
+    font-weight: 800;
+    text-transform: uppercase;
+    letter-spacing: 0.1em;
+    padding: 12px 20px;
+    border-bottom: 2px solid var(--black);
+    border-right: 2px solid var(--black);
+    background: var(--off-white);
+  }
+
+  .analytics-table th:last-child { border-right: none; }
+
+  .analytics-table td {
+    padding: 14px 20px;
+    border-bottom: 1px solid var(--border-light);
+    border-right: 2px solid var(--black);
+    font-size: 0.82rem;
+    font-weight: 500;
+  }
+
+  .analytics-table td:last-child { border-right: none; }
+  .analytics-table tr:last-child td { border-bottom: none; }
+
+  .analytics-table td:first-child {
+    font-weight: 800;
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 0.75rem;
+  }
+
+  .analytics-table .num-cell {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 0.78rem;
+    font-weight: 500;
+  }
+
+  .analytics-table .good { color: #16A34A; font-weight: 700; }
+  .analytics-table .warn { color: #D97706; font-weight: 700; }
+
+  /* CTA */
+  .cta-brutal {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    border-bottom: 2px solid var(--black);
+  }
+
+  .cta-left {
+    background: var(--black);
+    color: var(--white);
+    padding: 80px 48px;
+    display: flex;
+    flex-direction: column;
+    justify-content: center;
+  }
+
+  .cta-left h2 {
+    font-size: 4rem;
+    font-weight: 900;
+    letter-spacing: -0.05em;
+    text-transform: uppercase;
+    line-height: 0.9;
+    margin-bottom: 24px;
+  }
+
+  .cta-left h2 .accent { color: var(--accent); }
+
+  .cta-left p {
+    color: #888;
+    font-size: 0.95rem;
+    line-height: 1.65;
+    max-width: 400px;
+    margin-bottom: 32px;
+    font-weight: 500;
+  }
+
+  .cta-left .btn-brutal {
+    align-self: flex-start;
+    box-shadow: 3px 3px 0 #444;
+  }
+
+  .cta-right-panel {
+    padding: 80px 48px;
+    display: flex;
+    flex-direction: column;
+    justify-content: center;
+  }
+
+  .cta-step {
+    display: grid;
+    grid-template-columns: 48px 1fr;
+    gap: 16px;
+    padding: 20px 0;
+    border-bottom: 2px solid var(--black);
+  }
+
+  .cta-step:last-child { border-bottom: none; }
+
+  .cta-step-num {
+    font-size: 1.8rem;
+    font-weight: 900;
+    color: var(--accent);
+    letter-spacing: -0.04em;
+  }
+
+  .cta-step-text {
+    padding-top: 4px;
+  }
+
+  .cta-step-text strong {
+    display: block;
+    font-weight: 800;
+    text-transform: uppercase;
+    font-size: 0.82rem;
+    letter-spacing: 0.04em;
+    margin-bottom: 4px;
+  }
+
+  .cta-step-text span {
+    font-size: 0.82rem;
+    color: var(--dim);
+    line-height: 1.5;
+    font-weight: 500;
+  }
+
+  .cta-step-text code {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 0.72rem;
+    background: var(--off-white);
+    padding: 2px 8px;
+    border: 1px solid var(--border-light);
+    color: var(--black);
+  }
+
+  /* FOOTER */
+  footer {
+    padding: 32px 48px;
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+  }
+
+  .footer-brand {
+    font-size: 0.82rem;
+    font-weight: 800;
+    letter-spacing: 0.15em;
+    text-transform: uppercase;
+    color: var(--dim);
+  }
+
+  .footer-nav {
+    display: flex;
+    gap: 24px;
+    list-style: none;
+  }
+
+  .footer-nav a {
+    font-size: 0.72rem;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    color: var(--dim);
+    text-decoration: none;
+    transition: color 0.15s;
+  }
+
+  .footer-nav a:hover { color: var(--black); }
+
+  /* RESPONSIVE */
+  @media (max-width: 1024px) {
+    .hero { grid-template-columns: 1fr; }
+    .hero-h1 { font-size: 4.5rem; }
+    .hero-code-side { border-left: none; border-top: 2px solid var(--black); min-height: 500px; }
+    .big-section { grid-template-columns: 1fr; }
+    .big-section-num { display: none; }
+    .brutal-grid { grid-template-columns: 1fr 1fr; }
+    .brutal-cell:nth-child(2n) { border-right: none; }
+    .fw-code-section { grid-template-columns: 1fr; }
+    .deliv-strip { grid-template-columns: 1fr 1fr; }
+    .deliv-stat-cell:nth-child(2) { border-right: none; }
+    .deliv-details { grid-template-columns: 1fr; }
+    .deliv-detail-cell { border-right: none; border-bottom: 2px solid var(--black); }
+    .deliv-detail-cell:last-child { border-bottom: none; }
+    .cta-brutal { grid-template-columns: 1fr; }
+    .cta-left h2 { font-size: 3rem; }
+  }
+
+  @media (max-width: 640px) {
+    nav { padding: 16px 20px; }
+    .nav-center { display: none; }
+    .hero-type { padding: 40px 20px 32px; }
+    .hero-h1 { font-size: 3rem; }
+    .hero-stats { flex-direction: column; gap: 16px; }
+    .hero-code-content { padding: 24px 16px; }
+    .big-section-content { padding: 40px 20px; }
+    .big-section-header { flex-direction: column; gap: 16px; }
+    .big-section-title { font-size: 2rem; }
+    .brutal-grid { grid-template-columns: 1fr; }
+    .brutal-cell { border-right: none !important; }
+    .fw-code-section { padding: 40px 20px; }
+    .deliv-header { padding: 40px 20px 0; flex-direction: column; align-items: flex-start; gap: 16px; }
+    .deliv-header h2 { font-size: 2rem; }
+    .deliv-header p { text-align: left; }
+    .deliv-strip { grid-template-columns: 1fr; }
+    .deliv-stat-cell { border-right: none; border-bottom: 2px solid var(--black); }
+    .deliv-stat-cell:last-child { border-bottom: none; }
+    .analytics-section { padding: 40px 20px; }
+    .analytics-header h2 { font-size: 1.8rem; }
+    .analytics-table { font-size: 0.75rem; }
+    .cta-left { padding: 48px 20px; }
+    .cta-left h2 { font-size: 2.5rem; }
+    .cta-right-panel { padding: 48px 20px; }
+    footer { flex-direction: column; gap: 16px; padding: 24px 20px; }
+  }
+</style>
+</head>
+<body>
+
+<nav>
+  <a href="#" class="nav-logo">Cadence</a>
+  <ul class="nav-center">
+    <li><a href="#api">API</a></li>
+    <li><a href="#features">Features</a></li>
+    <li><a href="#deliverability">Deliverability</a></li>
+    <li><a href="#analytics">Analytics</a></li>
+    <li><a href="#">Docs</a></li>
+    <li><a href="#">Pricing</a></li>
+  </ul>
+  <a href="#" class="btn-brutal">Get API Key</a>
+</nav>
+
+<!-- HERO: massive typography with scale shift -->
+<section class="hero">
+  <div class="hero-type">
+    <div>
+      <div class="hero-overline">Email API for developers</div>
+      <h1 class="hero-h1">
+        SEND<br>
+        <span class="thin">EMAIL</span><br>
+        FROM <span class="accent">CODE</span>
+      </h1>
+      <p class="hero-sub">A REST API that handles transactional and marketing email. Domain auth, deliverability monitoring, templates your content team can edit. Production infrastructure, not a wrapper.</p>
+      <div class="hero-actions">
+        <a href="#" class="btn-brutal">Get Started Free</a>
+        <a href="#" class="btn-outline">Read the Docs</a>
+      </div>
+    </div>
+    <div class="hero-stats">
+      <div class="hero-stat">
+        <span class="hero-stat-value">99.1%</span>
+        <span class="hero-stat-label">Inbox Rate</span>
+      </div>
+      <div class="hero-stat">
+        <span class="hero-stat-value">1.2s</span>
+        <span class="hero-stat-label">Avg Delivery</span>
+      </div>
+      <div class="hero-stat">
+        <span class="hero-stat-value">99.97%</span>
+        <span class="hero-stat-label">Uptime</span>
+      </div>
+      <div class="hero-stat">
+        <span class="hero-stat-value">5</span>
+        <span class="hero-stat-label">SDKs</span>
+      </div>
+    </div>
+  </div>
+
+  <div class="hero-code-side">
+    <div class="vertical-label">Quick Start</div>
+    <div class="hero-code-content">
+      <div class="code-card">
+        <div class="code-card-bar">
+          <span class="code-card-lang">Node.js</span>
+          <span class="code-card-tag">Send</span>
+        </div>
+        <pre><span class="kw">import</span> { Cadence } <span class="kw">from</span> <span class="str">'@cadence/node'</span>;
+
+<span class="kw">const</span> cadence = <span class="kw">new</span> <span class="fn">Cadence</span>(<span class="str">'cd_live_9x8f...'</span>);
+
+<span class="kw">await</span> cadence.<span class="fn">send</span>({
+  from:     <span class="str">'team@yourapp.com'</span>,
+  to:       <span class="str">'jane@customer.io'</span>,
+  template: <span class="str">'welcome-v2'</span>,
+  data:     {
+    first_name: <span class="str">'Jane'</span>,
+    plan:       <span class="str">'Pro'</span>,
+  },
+});
+<span class="cm">// => { id: 'msg_8xK2p', status: 'queued' }</span></pre>
+      </div>
+
+      <div class="code-card">
+        <div class="code-card-bar">
+          <span class="code-card-lang">Response</span>
+          <span class="code-card-tag">202</span>
+        </div>
+        <pre>{
+  <span class="str">"id"</span>: <span class="str">"msg_8xK2pRw4n"</span>,
+  <span class="str">"status"</span>: <span class="res">"queued"</span>,
+  <span class="str">"estimated_delivery"</span>: <span class="str">"1.1s"</span>,
+  <span class="str">"template"</span>: <span class="str">"welcome-v2"</span>,
+  <span class="str">"recipient"</span>: <span class="str">"jane@customer.io"</span>
+}</pre>
+      </div>
+
+      <div class="code-card">
+        <div class="code-card-bar">
+          <span class="code-card-lang">cURL</span>
+          <span class="code-card-tag">Batch</span>
+        </div>
+        <pre>curl <span class="kw">-X POST</span> https://api.cadence.dev/v1/emails/batch \
+  <span class="kw">-H</span> <span class="str">"Authorization: Bearer cd_live_..."</span> \
+  <span class="kw">-d</span> <span class="str">'{
+    "template": "invoice-receipt",
+    "recipients": 2847,
+    "scheduled_for": "2024-11-14T14:00:00Z"
+  }'</span>
+
+<span class="cm">// => 2847 emails queued</span></pre>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- MARQUEE -->
+<div class="marquee-strip">
+  <div class="marquee-inner">
+    <span>REST API</span>
+    <span>Node / Python / Go / Ruby / PHP</span>
+    <span>SPF / DKIM / DMARC</span>
+    <span>React-style templates</span>
+    <span>Real-time webhooks</span>
+    <span>Batch send</span>
+    <span>Inbox placement testing</span>
+    <span>Bounce management</span>
+    <span>SOC 2 Type II</span>
+    <span>99.97% uptime</span>
+    <span>REST API</span>
+    <span>Node / Python / Go / Ruby / PHP</span>
+    <span>SPF / DKIM / DMARC</span>
+    <span>React-style templates</span>
+    <span>Real-time webhooks</span>
+    <span>Batch send</span>
+    <span>Inbox placement testing</span>
+    <span>Bounce management</span>
+    <span>SOC 2 Type II</span>
+    <span>99.97% uptime</span>
+  </div>
+</div>
+
+<!-- SECTION 01: FEATURES -->
+<section class="big-section" id="features">
+  <div class="big-section-num">01</div>
+  <div class="big-section-content">
+    <div class="big-section-header">
+      <h2 class="big-section-title">Everything you need. Nothing you don't.</h2>
+      <p class="big-section-desc">One API, one dashboard, one billing line item. Every feature below ships on every plan. Volume-based pricing, no feature gates.</p>
+    </div>
+
+    <div class="brutal-grid">
+      <div class="brutal-cell">
+        <span class="cell-tag">Core</span>
+        <h4>Transactional Send</h4>
+        <p>Single POST, single recipient. Template or inline HTML. Attachments, inline images, custom headers, reply-to. Queued and delivered in under 2 seconds.</p>
+      </div>
+      <div class="brutal-cell">
+        <span class="cell-tag">Scale</span>
+        <h4>Batch Send</h4>
+        <p>Up to 10,000 recipients per call with per-recipient data merge. Schedule for later or send immediately. Progress tracked via webhook events.</p>
+      </div>
+      <div class="brutal-cell">
+        <span class="cell-tag">Content</span>
+        <h4>Template Engine</h4>
+        <p>React-style components for engineers. Visual drag-and-drop editor for content owners. Version history, preview with test data, deploy via API or dashboard.</p>
+      </div>
+      <div class="brutal-cell">
+        <span class="cell-tag">Auth</span>
+        <h4>Domain Setup</h4>
+        <p>One API call generates SPF, DKIM, and DMARC records. Continuous DNS monitoring with alerts on drift. BIMI support for brand logos in inbox.</p>
+      </div>
+      <div class="brutal-cell">
+        <span class="cell-tag">Safety</span>
+        <h4>Suppression Lists</h4>
+        <p>Global and per-account suppression. Auto-add on hard bounce, complaint, or unsubscribe. CSV import/export. Never send to a bad address twice.</p>
+      </div>
+      <div class="brutal-cell">
+        <span class="cell-tag">Events</span>
+        <h4>Webhook Stream</h4>
+        <p>Real-time events for delivery, open, click, bounce, complaint, and unsubscribe. Retry with exponential backoff. Filterable by type, template, and tag.</p>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- TEMPLATES CODE SECTION -->
+<section class="fw-code-section" id="api">
+  <div class="fw-code-intro">
+    <h3>Templates as&nbsp;components</h3>
+    <div class="accent-line"></div>
+    <p>Write email templates as React-like JSX components. Import shared layouts, buttons, and sections. Your content team edits copy and images in a visual tool that compiles to the same component tree.</p>
+    <ul>
+      <li><strong>Component library</strong> &mdash; Email, Section, Button, Text, Image, Divider, Spacer</li>
+      <li><strong>Variables</strong> &mdash; Dynamic data injection with type-safe schemas</li>
+      <li><strong>Conditionals</strong> &mdash; Show/hide blocks based on recipient data</li>
+      <li><strong>Loops</strong> &mdash; Iterate over arrays (line items, notifications)</li>
+      <li><strong>Preview</strong> &mdash; Render with test data, inspect HTML and plain text</li>
+      <li><strong>Version control</strong> &mdash; Full history, rollback, branch previews</li>
+    </ul>
+  </div>
+
+  <div class="code-card">
+    <div class="code-card-bar">
+      <span class="code-card-lang">Template JSX</span>
+      <span class="code-card-tag">welcome-v2</span>
+    </div>
+    <pre><span class="kw">import</span> { Email, Section, Button, Text, Image }
+  <span class="kw">from</span> <span class="str">'@cadence/components'</span>;
+
+<span class="kw">export default function</span> <span class="fn">WelcomeEmail</span>({
+  first_name,
+  plan,
+  login_url,
+  features,
+}) {
+  <span class="kw">return</span> (
+    &lt;<span class="fn">Email</span>
+      subject={<span class="str">`Welcome, ${first_name}`</span>}
+      preview=<span class="str">"Your account is ready"</span>
+    &gt;
+      &lt;<span class="fn">Section</span> padding=<span class="str">"32"</span> bg=<span class="str">"#ffffff"</span>&gt;
+        &lt;<span class="fn">Image</span>
+          src=<span class="str">"https://cdn.yourapp.com/logo.png"</span>
+          width=<span class="num">120</span>
+          alt=<span class="str">"YourApp"</span>
+        /&gt;
+        &lt;<span class="fn">Text</span> size=<span class="str">"xl"</span> weight=<span class="str">"bold"</span> mt=<span class="str">"24"</span>&gt;
+          Welcome aboard, {first_name}
+        &lt;/<span class="fn">Text</span>&gt;
+        &lt;<span class="fn">Text</span> color=<span class="str">"muted"</span> mt=<span class="str">"12"</span>&gt;
+          You're on the {plan} plan.
+        &lt;/<span class="fn">Text</span>&gt;
+
+        {features.<span class="fn">map</span>(f =&gt; (
+          &lt;<span class="fn">Text</span> key={f} size=<span class="str">"sm"</span>&gt;
+            {f}
+          &lt;/<span class="fn">Text</span>&gt;
+        ))}
+
+        &lt;<span class="fn">Button</span>
+          href={login_url}
+          bg=<span class="str">"#FF3D00"</span>
+          mt=<span class="str">"24"</span>
+        &gt;
+          Open Your Dashboard
+        &lt;/<span class="fn">Button</span>&gt;
+      &lt;/<span class="fn">Section</span>&gt;
+    &lt;/<span class="fn">Email</span>&gt;
+  );
+}</pre>
+  </div>
+</section>
+
+<!-- DELIVERABILITY -->
+<section class="deliv-section" id="deliverability">
+  <div class="deliv-header">
+    <h2>Deliverability is not optional</h2>
+    <p>Inbox placement monitoring across Gmail, Outlook, Yahoo, and Apple Mail. Reputation tracking. Content scanning. All automated.</p>
+  </div>
+
+  <div class="deliv-strip">
+    <div class="deliv-stat-cell">
+      <div class="val accent">99.1%</div>
+      <div class="label">Inbox Placement</div>
+    </div>
+    <div class="deliv-stat-cell">
+      <div class="val">0.12%</div>
+      <div class="label">Bounce Rate</div>
+    </div>
+    <div class="deliv-stat-cell">
+      <div class="val">97</div>
+      <div class="label">Sender Score</div>
+    </div>
+    <div class="deliv-stat-cell">
+      <div class="val">42</div>
+      <div class="label">ISP Feedback Loops</div>
+    </div>
+  </div>
+
+  <div class="deliv-details">
+    <div class="deliv-detail-cell">
+      <h4>Inbox Placement Testing</h4>
+      <p>Seed-list tests across 30+ mailbox providers. See where your email lands: inbox, promotions, spam, or missing. Run on-demand or scheduled. Results in under 3 minutes.</p>
+    </div>
+    <div class="deliv-detail-cell">
+      <h4>Reputation Monitoring</h4>
+      <p>Aggregate sender score, domain rep, and IP rep from Google Postmaster Tools, Microsoft SNDS, and proprietary signals. Alerts when anything drifts below threshold.</p>
+    </div>
+  </div>
+  <div class="deliv-details">
+    <div class="deliv-detail-cell">
+      <h4>Content Scanning</h4>
+      <p>Pre-send checks against known spam triggers: link shorteners, excessive images, missing unsubscribe headers, broken authentication. Catches problems before they reach ISPs.</p>
+    </div>
+    <div class="deliv-detail-cell">
+      <h4>Dedicated IPs</h4>
+      <p>Starter plans use Cadence's shared pool maintained at 95+ reputation. Scaling plans get dedicated IPs with automated warm-up over 14 days and per-IP analytics.</p>
+    </div>
+  </div>
+</section>
+
+<!-- ANALYTICS TABLE -->
+<section class="analytics-section" id="analytics">
+  <div class="analytics-header">
+    <h2>Analytics by template</h2>
+    <span style="font-size:0.72rem;font-weight:700;text-transform:uppercase;letter-spacing:0.08em;color:var(--dim);">Last 30 days</span>
+  </div>
+
+  <table class="analytics-table">
+    <thead>
+      <tr>
+        <th>Template</th>
+        <th>Sent</th>
+        <th>Delivered</th>
+        <th>Open Rate</th>
+        <th>Click Rate</th>
+        <th>Bounce</th>
+        <th>Unsub</th>
+      </tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td>welcome-v2</td>
+        <td class="num-cell">48,291</td>
+        <td class="num-cell good">99.4%</td>
+        <td class="num-cell">42.1%</td>
+        <td class="num-cell">12.8%</td>
+        <td class="num-cell good">0.08%</td>
+        <td class="num-cell good">0.3%</td>
+      </tr>
+      <tr>
+        <td>invoice-receipt</td>
+        <td class="num-cell">31,847</td>
+        <td class="num-cell good">99.7%</td>
+        <td class="num-cell">67.3%</td>
+        <td class="num-cell">8.1%</td>
+        <td class="num-cell good">0.04%</td>
+        <td class="num-cell good">0.1%</td>
+      </tr>
+      <tr>
+        <td>password-reset</td>
+        <td class="num-cell">12,493</td>
+        <td class="num-cell good">99.8%</td>
+        <td class="num-cell">89.2%</td>
+        <td class="num-cell">71.4%</td>
+        <td class="num-cell good">0.02%</td>
+        <td class="num-cell">&mdash;</td>
+      </tr>
+      <tr>
+        <td>onboarding-3</td>
+        <td class="num-cell">8,714</td>
+        <td class="num-cell good">99.1%</td>
+        <td class="num-cell">38.7%</td>
+        <td class="num-cell">15.2%</td>
+        <td class="num-cell good">0.11%</td>
+        <td class="num-cell warn">1.2%</td>
+      </tr>
+      <tr>
+        <td>newsletter-42</td>
+        <td class="num-cell">24,102</td>
+        <td class="num-cell good">98.9%</td>
+        <td class="num-cell">31.4%</td>
+        <td class="num-cell">6.8%</td>
+        <td class="num-cell good">0.19%</td>
+        <td class="num-cell warn">0.8%</td>
+      </tr>
+      <tr>
+        <td>alert-critical</td>
+        <td class="num-cell">3,291</td>
+        <td class="num-cell good">99.9%</td>
+        <td class="num-cell">94.1%</td>
+        <td class="num-cell">45.7%</td>
+        <td class="num-cell good">0.01%</td>
+        <td class="num-cell">&mdash;</td>
+      </tr>
+    </tbody>
+  </table>
+</section>
+
+<!-- CTA -->
+<section class="cta-brutal">
+  <div class="cta-left">
+    <h2>START<br>SENDING<br><span class="accent">NOW</span></h2>
+    <p>Free tier: 10,000 emails/month, all features, no credit card. Dedicated IPs and higher volume when you're ready.</p>
+    <a href="#" class="btn-brutal">Get Your API Key</a>
+  </div>
+  <div class="cta-right-panel">
+    <div class="cta-step">
+      <span class="cta-step-num">01</span>
+      <div class="cta-step-text">
+        <strong>Sign up</strong>
+        <span>Create an account and copy your API key from the dashboard.</span>
+      </div>
+    </div>
+    <div class="cta-step">
+      <span class="cta-step-num">02</span>
+      <div class="cta-step-text">
+        <strong>Verify domain</strong>
+        <span>Add DNS records Cadence generates. SPF, DKIM, DMARC in one step.</span>
+      </div>
+    </div>
+    <div class="cta-step">
+      <span class="cta-step-num">03</span>
+      <div class="cta-step-text">
+        <strong>Install SDK</strong>
+        <span><code>npm i @cadence/node</code> or pip, go get, gem install, composer require.</span>
+      </div>
+    </div>
+    <div class="cta-step">
+      <span class="cta-step-num">04</span>
+      <div class="cta-step-text">
+        <strong>Send test email</strong>
+        <span>Use test mode to capture without delivering. Inspect headers and rendering.</span>
+      </div>
+    </div>
+    <div class="cta-step">
+      <span class="cta-step-num">05</span>
+      <div class="cta-step-text">
+        <strong>Go live</strong>
+        <span>Remove test header, start sending. Monitor delivery in real time.</span>
+      </div>
+    </div>
+  </div>
+</section>
+
+<footer>
+  <span class="footer-brand">Cadence</span>
+  <ul class="footer-nav">
+    <li><a href="#">Docs</a></li>
+    <li><a href="#">API Reference</a></li>
+    <li><a href="#">Status</a></li>
+    <li><a href="#">Changelog</a></li>
+    <li><a href="#">GitHub</a></li>
+    <li><a href="#">Pricing</a></li>
+  </ul>
+</footer>
+
+</body>
+</html>

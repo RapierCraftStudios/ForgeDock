@@ -1,0 +1,342 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Plume -- The issue tracker for teams who build</title>
+<link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500&family=Space+Grotesk:wght@400;500;600;700&display=swap" rel="stylesheet">
+<style>
+  *, *::before, *::after { margin: 0; padding: 0; box-sizing: border-box; }
+  html { font-size: 16px; }
+  body { font-family: 'Space Grotesk', sans-serif; background: #fafaf9; color: #1c1917; -webkit-font-smoothing: antialiased; }
+
+  /* Utilities */
+  .container { max-width: 1200px; margin: 0 auto; padding: 0 64px; }
+  .mono { font-family: 'JetBrains Mono', monospace; }
+
+  /* Nav */
+  header { padding: 24px 64px; display: flex; align-items: center; justify-content: space-between; max-width: 1200px; margin: 0 auto; }
+  .logo { font-weight: 700; font-size: 1.25rem; letter-spacing: -0.03em; }
+  .logo em { font-style: normal; color: #0d9488; }
+  header nav { display: flex; gap: 36px; align-items: center; }
+  header nav a { text-decoration: none; color: #78716c; font-size: 0.875rem; font-weight: 500; transition: color 0.15s; }
+  header nav a:hover { color: #1c1917; }
+  .header-cta { background: #0d9488; color: #fff; padding: 10px 24px; border-radius: 8px; font-weight: 600; font-size: 0.875rem; text-decoration: none; transition: background 0.15s; }
+  .header-cta:hover { background: #0f766e; }
+
+  /* Hero — asymmetric split */
+  .hero { display: grid; grid-template-columns: 1fr 1.1fr; gap: 64px; padding: 100px 64px 80px; max-width: 1200px; margin: 0 auto; align-items: center; }
+  .hero-left h1 { font-size: 3.5rem; font-weight: 700; line-height: 1.1; letter-spacing: -0.035em; margin-bottom: 24px; }
+  .hero-left h1 .accent { color: #0d9488; }
+  .hero-left p { font-size: 1.125rem; color: #57534e; line-height: 1.7; margin-bottom: 36px; max-width: 440px; }
+  .hero-left .cta-row { display: flex; gap: 12px; align-items: center; }
+  .cta-main { background: #1c1917; color: #fafaf9; padding: 14px 32px; border-radius: 10px; font-weight: 600; font-size: 0.9375rem; text-decoration: none; transition: background 0.15s; }
+  .cta-main:hover { background: #292524; }
+  .cta-ghost { color: #78716c; font-size: 0.875rem; text-decoration: none; padding: 14px 20px; }
+  .cta-ghost:hover { color: #1c1917; }
+
+  /* Hero right — Terminal card */
+  .terminal { background: #1c1917; border-radius: 14px; overflow: hidden; box-shadow: 0 24px 64px rgba(0,0,0,0.12); }
+  .terminal-bar { height: 40px; background: #292524; display: flex; align-items: center; padding: 0 16px; gap: 7px; }
+  .terminal-dot { width: 11px; height: 11px; border-radius: 50%; }
+  .terminal-dot.r { background: #ef4444; }
+  .terminal-dot.y { background: #eab308; }
+  .terminal-dot.g { background: #22c55e; }
+  .terminal-body { padding: 24px; font-family: 'JetBrains Mono', monospace; font-size: 0.8125rem; line-height: 1.9; color: #a8a29e; }
+  .terminal-body .prompt { color: #0d9488; }
+  .terminal-body .flag { color: #fbbf24; }
+  .terminal-body .str { color: #34d399; }
+  .terminal-body .comment { color: #57534e; }
+  .terminal-body .white { color: #e7e5e4; }
+
+  /* Metrics strip */
+  .metrics { display: grid; grid-template-columns: repeat(4, 1fr); gap: 1px; background: #e7e5e4; border-radius: 14px; overflow: hidden; max-width: 1200px; margin: 0 auto 0; }
+  .metric-card { background: #fafaf9; padding: 40px 32px; text-align: center; }
+  .metric-card .number { font-size: 2.5rem; font-weight: 700; letter-spacing: -0.03em; color: #1c1917; }
+  .metric-card .unit { font-size: 0.8125rem; color: #78716c; margin-top: 6px; }
+
+  /* Features — stacked horizontal sections */
+  .feature-sections { padding: 120px 64px; max-width: 1200px; margin: 0 auto; }
+  .feature-row { display: grid; grid-template-columns: 1fr 1fr; gap: 80px; align-items: center; margin-bottom: 100px; }
+  .feature-row:last-child { margin-bottom: 0; }
+  .feature-row.reverse .feature-text { order: 2; }
+  .feature-row.reverse .feature-visual { order: 1; }
+  .feature-text h2 { font-size: 2rem; font-weight: 700; letter-spacing: -0.03em; margin-bottom: 16px; }
+  .feature-text p { color: #57534e; font-size: 1rem; line-height: 1.7; margin-bottom: 20px; }
+  .feature-list { list-style: none; display: flex; flex-direction: column; gap: 10px; }
+  .feature-list li { display: flex; align-items: flex-start; gap: 10px; font-size: 0.9375rem; color: #44403c; }
+  .feature-list li::before { content: "->"; font-family: 'JetBrains Mono', monospace; font-size: 0.75rem; color: #0d9488; margin-top: 3px; flex-shrink: 0; }
+
+  /* Feature visual — cards */
+  .feature-visual { background: #f5f5f4; border: 1px solid #e7e5e4; border-radius: 14px; padding: 32px; min-height: 320px; }
+
+  /* Cycle visual */
+  .cycle-bar-group { display: flex; flex-direction: column; gap: 14px; }
+  .cycle-row { display: flex; align-items: center; gap: 14px; }
+  .cycle-label { font-size: 0.75rem; color: #78716c; width: 80px; flex-shrink: 0; }
+  .cycle-track { flex: 1; height: 28px; background: #e7e5e4; border-radius: 6px; overflow: hidden; position: relative; }
+  .cycle-fill { height: 100%; border-radius: 6px; }
+  .fill-teal { background: #0d9488; }
+  .fill-amber { background: #f59e0b; }
+  .fill-rose { background: #f43f5e; }
+  .cycle-pct { font-size: 0.75rem; color: #57534e; width: 36px; text-align: right; font-family: 'JetBrains Mono', monospace; }
+
+  /* Roadmap visual */
+  .roadmap-grid { display: flex; flex-direction: column; gap: 12px; }
+  .roadmap-item { background: #fff; border: 1px solid #e7e5e4; border-radius: 8px; padding: 14px 18px; display: flex; align-items: center; justify-content: space-between; }
+  .roadmap-item-left { display: flex; align-items: center; gap: 12px; }
+  .roadmap-dot { width: 10px; height: 10px; border-radius: 50%; }
+  .dot-done { background: #0d9488; }
+  .dot-progress { background: #f59e0b; }
+  .dot-planned { background: #d6d3d1; }
+  .roadmap-name { font-size: 0.875rem; font-weight: 500; }
+  .roadmap-meta { font-size: 0.75rem; color: #a8a29e; font-family: 'JetBrains Mono', monospace; }
+
+  /* Integration logos strip */
+  .integrations { padding: 80px 64px; max-width: 1200px; margin: 0 auto; text-align: center; }
+  .integrations h3 { font-size: 0.8125rem; font-weight: 600; text-transform: uppercase; letter-spacing: 0.1em; color: #a8a29e; margin-bottom: 36px; }
+  .integration-logos { display: flex; justify-content: center; gap: 48px; align-items: center; }
+  .int-logo { width: 40px; height: 40px; background: #e7e5e4; border-radius: 10px; display: flex; align-items: center; justify-content: center; font-size: 0.75rem; color: #78716c; font-weight: 600; font-family: 'JetBrains Mono', monospace; }
+
+  /* Bottom CTA */
+  .bottom-cta { background: #1c1917; padding: 100px 64px; text-align: center; }
+  .bottom-cta h2 { font-size: 2.75rem; font-weight: 700; letter-spacing: -0.035em; color: #fafaf9; margin-bottom: 16px; }
+  .bottom-cta p { color: #a8a29e; font-size: 1.0625rem; margin-bottom: 40px; }
+  .bottom-cta .cta-main { background: #0d9488; }
+  .bottom-cta .cta-main:hover { background: #0f766e; }
+
+  /* Footer */
+  footer { padding: 40px 64px; max-width: 1200px; margin: 0 auto; display: flex; justify-content: space-between; align-items: center; border-top: 1px solid #e7e5e4; }
+  footer span { font-size: 0.8125rem; color: #a8a29e; }
+  footer nav { display: flex; gap: 24px; }
+  footer nav a { font-size: 0.8125rem; color: #78716c; text-decoration: none; }
+  footer nav a:hover { color: #1c1917; }
+</style>
+</head>
+<body>
+
+<header>
+  <div class="logo"><em>~</em> Plume</div>
+  <nav>
+    <a href="#">Product</a>
+    <a href="#">Integrations</a>
+    <a href="#">Pricing</a>
+    <a href="#">Changelog</a>
+    <a href="#" class="header-cta">Sign up</a>
+  </nav>
+</header>
+
+<section class="hero">
+  <div class="hero-left">
+    <h1>Issue tracking at the <span class="accent">speed of thought</span></h1>
+    <p>Plume gives your team a single place to plan, prioritize, and ship -- without the process tax. Keyboard-driven, developer-native, ruthlessly lean.</p>
+    <div class="cta-row">
+      <a href="#" class="cta-main">Get started free</a>
+      <a href="#" class="cta-ghost">Read the docs &rarr;</a>
+    </div>
+  </div>
+  <div class="hero-right">
+    <div class="terminal">
+      <div class="terminal-bar">
+        <div class="terminal-dot r"></div>
+        <div class="terminal-dot y"></div>
+        <div class="terminal-dot g"></div>
+      </div>
+      <div class="terminal-body">
+        <div><span class="comment"># create an issue from your terminal</span></div>
+        <div><span class="prompt">$</span> <span class="white">plume issue create</span> <span class="flag">--title</span> <span class="str">"Add rate limiting to /api/v2"</span> \</div>
+        <div>&nbsp;&nbsp;<span class="flag">--priority</span> <span class="str">urgent</span> <span class="flag">--assign</span> <span class="str">@sarah</span> <span class="flag">--cycle</span> <span class="str">current</span></div>
+        <br>
+        <div><span class="white">Created PLM-284</span> <span class="comment">in 42ms</span></div>
+        <br>
+        <div><span class="comment"># list your active work</span></div>
+        <div><span class="prompt">$</span> <span class="white">plume issues</span> <span class="flag">--mine</span> <span class="flag">--status</span> <span class="str">in-progress</span></div>
+        <br>
+        <div><span class="white">PLM-284</span>  <span class="str">Add rate limiting</span>       urgent  in-progress</div>
+        <div><span class="white">PLM-271</span>  <span class="str">Fix WS reconnect</span>       high    in-progress</div>
+        <div><span class="white">PLM-265</span>  <span class="str">SCIM provisioning</span>      medium  in-progress</div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<section class="container">
+  <div class="metrics">
+    <div class="metric-card">
+      <div class="number">48ms</div>
+      <div class="unit">median interaction latency</div>
+    </div>
+    <div class="metric-card">
+      <div class="number">200+</div>
+      <div class="unit">keyboard shortcuts</div>
+    </div>
+    <div class="metric-card">
+      <div class="number">0</div>
+      <div class="unit">mandatory fields on issue creation</div>
+    </div>
+    <div class="metric-card">
+      <div class="number">12s</div>
+      <div class="unit">average time to file a bug</div>
+    </div>
+  </div>
+</section>
+
+<section class="feature-sections">
+
+  <div class="feature-row">
+    <div class="feature-text">
+      <h2>Cycles that match how you actually sprint</h2>
+      <p>Group work into time-boxed cycles. See progress in real time. Roll incomplete work forward automatically at cycle end.</p>
+      <ul class="feature-list">
+        <li>Automated scope tracking and burndown</li>
+        <li>One-click rollover for unfinished issues</li>
+        <li>Velocity trends across cycles for honest retros</li>
+      </ul>
+    </div>
+    <div class="feature-visual">
+      <div class="cycle-bar-group">
+        <div style="font-size:0.8125rem;font-weight:600;margin-bottom:8px;color:#44403c">Cycle 14 &mdash; Week 3 of 3</div>
+        <div class="cycle-row">
+          <div class="cycle-label">Completed</div>
+          <div class="cycle-track"><div class="cycle-fill fill-teal" style="width:68%"></div></div>
+          <div class="cycle-pct">68%</div>
+        </div>
+        <div class="cycle-row">
+          <div class="cycle-label">In progress</div>
+          <div class="cycle-track"><div class="cycle-fill fill-amber" style="width:22%"></div></div>
+          <div class="cycle-pct">22%</div>
+        </div>
+        <div class="cycle-row">
+          <div class="cycle-label">Not started</div>
+          <div class="cycle-track"><div class="cycle-fill fill-rose" style="width:10%"></div></div>
+          <div class="cycle-pct">10%</div>
+        </div>
+        <div style="border-top:1px solid #d6d3d1;margin-top:16px;padding-top:16px;font-size:0.75rem;color:#78716c">24 of 35 issues closed &middot; 3 days remaining</div>
+      </div>
+    </div>
+  </div>
+
+  <div class="feature-row reverse">
+    <div class="feature-text">
+      <h2>Projects and roadmaps, without the gantt charts</h2>
+      <p>Longer-running initiatives get their own project view. Track progress across multiple cycles and see the big picture at a glance.</p>
+      <ul class="feature-list">
+        <li>Projects span cycles -- work flows naturally</li>
+        <li>Progress rolls up from issue status automatically</li>
+        <li>Target dates, not deadlines. Soft guidance, not hard gates.</li>
+      </ul>
+    </div>
+    <div class="feature-visual">
+      <div class="roadmap-grid">
+        <div class="roadmap-item">
+          <div class="roadmap-item-left">
+            <div class="roadmap-dot dot-done"></div>
+            <div class="roadmap-name">Auth v2</div>
+          </div>
+          <div class="roadmap-meta">32/32</div>
+        </div>
+        <div class="roadmap-item">
+          <div class="roadmap-item-left">
+            <div class="roadmap-dot dot-progress"></div>
+            <div class="roadmap-name">Billing rewrite</div>
+          </div>
+          <div class="roadmap-meta">18/27</div>
+        </div>
+        <div class="roadmap-item">
+          <div class="roadmap-item-left">
+            <div class="roadmap-dot dot-progress"></div>
+            <div class="roadmap-name">API platform</div>
+          </div>
+          <div class="roadmap-meta">9/41</div>
+        </div>
+        <div class="roadmap-item">
+          <div class="roadmap-item-left">
+            <div class="roadmap-dot dot-planned"></div>
+            <div class="roadmap-name">Mobile SDK</div>
+          </div>
+          <div class="roadmap-meta">0/16</div>
+        </div>
+        <div class="roadmap-item">
+          <div class="roadmap-item-left">
+            <div class="roadmap-dot dot-planned"></div>
+            <div class="roadmap-name">SOC 2 compliance</div>
+          </div>
+          <div class="roadmap-meta">0/23</div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div class="feature-row">
+    <div class="feature-text">
+      <h2>Your codebase, connected</h2>
+      <p>Plume integrates deeply with GitHub and GitLab. Issues update when branches are created, PRs are opened, and deployments land.</p>
+      <ul class="feature-list">
+        <li>Auto-link PRs to issues via branch naming</li>
+        <li>Close issues when PRs merge to main</li>
+        <li>See deployment status directly on the issue</li>
+        <li>Slack and Discord notifications on state changes</li>
+      </ul>
+    </div>
+    <div class="feature-visual" style="display:flex;flex-direction:column;gap:16px;justify-content:center">
+      <div style="background:#fff;border:1px solid #e7e5e4;border-radius:8px;padding:14px 18px;font-size:0.8125rem">
+        <div style="display:flex;align-items:center;gap:8px;margin-bottom:8px">
+          <span style="color:#0d9488;font-weight:600">PLM-284</span>
+          <span style="color:#78716c">&rarr;</span>
+          <span class="mono" style="font-size:0.75rem;color:#57534e">sarah/plm-284-rate-limiting</span>
+        </div>
+        <div style="color:#78716c;font-size:0.75rem">Branch created 2 min ago</div>
+      </div>
+      <div style="background:#fff;border:1px solid #e7e5e4;border-radius:8px;padding:14px 18px;font-size:0.8125rem">
+        <div style="display:flex;align-items:center;gap:8px;margin-bottom:8px">
+          <span style="color:#0d9488;font-weight:600">PLM-284</span>
+          <span style="color:#78716c">&rarr;</span>
+          <span class="mono" style="font-size:0.75rem;color:#57534e">PR #412 opened</span>
+        </div>
+        <div style="color:#78716c;font-size:0.75rem">Status changed to In Review</div>
+      </div>
+      <div style="background:#fff;border:1px solid #e7e5e4;border-radius:8px;padding:14px 18px;font-size:0.8125rem">
+        <div style="display:flex;align-items:center;gap:8px;margin-bottom:8px">
+          <span style="color:#0d9488;font-weight:600">PLM-284</span>
+          <span style="color:#78716c">&rarr;</span>
+          <span class="mono" style="font-size:0.75rem;color:#57534e">Deployed to production</span>
+        </div>
+        <div style="color:#78716c;font-size:0.75rem">Issue closed automatically</div>
+      </div>
+    </div>
+  </div>
+
+</section>
+
+<section class="integrations">
+  <h3>Works with your stack</h3>
+  <div class="integration-logos">
+    <div class="int-logo">GH</div>
+    <div class="int-logo">GL</div>
+    <div class="int-logo">SL</div>
+    <div class="int-logo">FG</div>
+    <div class="int-logo">SE</div>
+    <div class="int-logo">ZP</div>
+    <div class="int-logo">DS</div>
+  </div>
+</section>
+
+<section class="bottom-cta">
+  <h2>Your team deserves better tools</h2>
+  <p>Free for small teams. Upgrade when you're ready.</p>
+  <a href="#" class="cta-main">Get started</a>
+</section>
+
+<footer>
+  <span>&copy; 2026 Plume Technologies</span>
+  <nav>
+    <a href="#">Privacy</a>
+    <a href="#">Terms</a>
+    <a href="#">Security</a>
+    <a href="#">Changelog</a>
+    <a href="#">Twitter</a>
+  </nav>
+</footer>
+
+</body>
+</html>
