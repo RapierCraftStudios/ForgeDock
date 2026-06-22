@@ -1334,8 +1334,10 @@ gh issue comment {NUMBER} {GH_FLAG} --body "<!-- FORGE:BUILDER -->
 {checklist from contract, marked pass/fail}
 
 ### Testing Checklist
-- [ ] {scenario 1}
-- [ ] {scenario 2}
+- [ ] {scenario 1} [type:api]
+- [ ] {scenario 2} [type:unit]
+
+> **Test-type annotation** (optional): Append `[type:api]`, `[type:unit]`, `[type:e2e]`, or `[type:manual]` to each checklist item. The test gate reads this annotation directly and skips regex inference. Omit it to rely on regex classification fallback.
 
 <!-- FORGE:BUILDER:COMPLETE -->"
 ```
