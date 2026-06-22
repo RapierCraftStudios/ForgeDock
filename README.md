@@ -231,6 +231,17 @@ If you use ForgeDock in your own project, add a badge to your README:
 
 ---
 
+## Community
+
+Questions, ideas, and workflows — [GitHub Discussions](https://github.com/RapierCraftStudios/ForgeDock/discussions) is the place for conversation that doesn't belong in the issue tracker.
+
+| Category | For |
+|----------|-----|
+| [Q&A](https://github.com/RapierCraftStudios/ForgeDock/discussions/categories/q-a) | Setup help, usage questions, troubleshooting |
+| [Show and Tell](https://github.com/RapierCraftStudios/ForgeDock/discussions/categories/show-and-tell) | Share your ForgeDock workflows and results |
+| [Ideas](https://github.com/RapierCraftStudios/ForgeDock/discussions/categories/ideas) | Feature suggestions and brainstorming |
+| [Announcements](https://github.com/RapierCraftStudios/ForgeDock/discussions/categories/announcements) | Release notes and breaking changes |
+
 ## Contributing
 
 PRs welcome. Every change goes through a PR, tested against 3+ scenarios, using conventional commits (`fix(command):`, `feat(command):`, `refactor(command):`).
