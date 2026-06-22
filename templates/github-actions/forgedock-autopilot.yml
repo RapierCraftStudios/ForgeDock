@@ -92,6 +92,9 @@ jobs:
           # CI=true tells /autopilot Phase 4B to skip the interactive confirmation
           # gate. The workflow_dispatch mode=fix input serves as the human opt-in.
           CI: "true"
+          # Pass step output via env var — never inline ${{ }} in run: scripts.
+          # Inline expressions are substituted before the shell sees them, making
+          # it impossible to distinguish injected content from legitimate arguments.
+          AUTOPILOT_ARGS: ${{ steps.args.outputs.args }}
         run: |
-          claude --dangerously-skip-permissions \
-            -p "/autopilot ${{ steps.args.outputs.args }}"
+          claude --dangerously-skip-permissions -p "/autopilot $AUTOPILOT_ARGS"
