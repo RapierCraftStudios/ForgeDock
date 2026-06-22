@@ -5,6 +5,8 @@
 > render-critique loop (#882); enforced by the anti-slop linter (#884); persisted to
 > [design-memory](design-memory.md) (#887) at close. Draws its vocabulary from the
 > [reference corpus](reference-corpus.md) (#880).
+> Extended: `craft` object + `surface_depth` rubric dimension (#1047); `motion.tier`, `motion.hero_technique`,
+> `motion.video_placeholder` fields + `motion` rubric dimension (#1043).
 >
 > Registered as a FORGE annotation type in [`../FORGE-PROTOCOL.md`](../FORGE-PROTOCOL.md).
 
@@ -82,9 +84,12 @@ from nowhere. Rationale → spec → page.
     "dividers": "spacing-only"           // spacing-only | gradient-fade | hairline | color-shift
   },
   "motion": {
-    "vocabulary": ["scroll-reveal", "micro-hover"],
+    "tier": 1,                        // 1 = CSS-only | 2 = SVG+JS | 3 = video placeholder — from corpus hero motion vocabulary (#1043)
+    "hero_technique": "text-reveal",  // specific technique id from the corpus tier (e.g. "gradient-shift", "typewriter", "svg-path-draw", "video-scaffold")
+    "video_placeholder": false,       // true = Tier 3 scaffold included — CSS gradient poster generated, drop-in comment in HTML
+    "vocabulary": ["scroll-reveal", "micro-hover"],  // below-fold motion tokens (Tier 1F: scroll-triggered fade-in)
     "default_ms": 200, "easing": "cubic-bezier(.2,.0,.0,1)",
-    "reduced_motion": "required"     // MUST honor prefers-reduced-motion
+    "reduced_motion": "required"      // MUST honor prefers-reduced-motion — @media (prefers-reduced-motion: reduce) on all animated elements
   },
   "layout_grammar": {
     // ordered sections with purpose + density — MUST NOT be the boilerplate skeleton
@@ -129,11 +134,14 @@ from nowhere. Rationale → spec → page.
 | `craft.micro_details.custom_selection` + `custom_focus_rings` | missing branded micro-details (N18) |
 | `craft.icons.size_context` (distinct sizes by context) | default uniform icon treatment (N16) |
 | `craft.links.treatment` (not `color-only`) | bare color-only or browser-default link treatment (N17) |
+| `motion.tier` + `motion.hero_technique` (committed) | static hero with no motion — the "poster" tell (N21); jQuery-era effects (N23) |
+| `motion.reduced_motion: "required"` | motion that ignores `prefers-reduced-motion` — accessibility violation |
+| `motion.video_placeholder: true` (when applicable) | video-shaped hero gap: empty space where a demo would go, or placeholder image with no scaffolding |
 
 ## Benchmark rubric dimensions
 
-The ABC benchmark (#878) evaluates generated pages on a 1–5 rubric. The `craft` field extension (#1047) adds
-two new dimensions to the rubric, splitting the original `color` dimension.
+The ABC benchmark (#878) evaluates generated pages on a 1–5 rubric. The `craft` field extension (#1047) added
+two dimensions (`surface_depth`, `craft`); the `motion` field extension (#1043) adds a seventh dimension.
 
 | Dimension | What it measures | 1 (worst) | 5 (best) |
 |---|---|---|---|
@@ -143,10 +151,11 @@ two new dimensions to the rubric, splitting the original `color` dimension.
 | `craft` | Micro-detail quality — buttons, links, icons, forms, micro-details | All framework defaults, no custom states | Custom depth on buttons, animated links, tinted icon containers, branded micro-details |
 | `layout` | Grid, asymmetry, negative space, section rhythm | Centered columns, uniform padding, boilerplate skeleton | Deliberate grid breaks, asymmetry, spacing-as-divider |
 | `effects` | Effect appropriateness and restraint | Gratuitous 3D/parallax on non-visual product | Effects justified by product nature, performance-budgeted |
+| `motion` | Hero vitality — appropriate motion technique committed and executed per archetype | Static hero (poster) — N21 hit; or jQuery-era effects — N23 hit | Archetype-appropriate tier selected, `prefers-reduced-motion` honored, at most 2 simultaneous motion elements |
 
-The `craft` and `surface_depth` dimensions are new in `corpus_version: 2026.3` (#1047). Past benchmark runs
-scored under a 4-dimension rubric (no `surface_depth`, no `craft`). Comparison across versions must note
-the rubric change.
+The `craft` and `surface_depth` dimensions are new in `corpus_version: 2026.3` (#1047). The `motion` dimension
+is new in `corpus_version: 2026.4` (#1043). Past benchmark runs scored under a 4-dimension rubric (no
+`surface_depth`, `craft`, or `motion`). Comparison across versions must note the rubric version.
 
 ## Lifecycle
 
