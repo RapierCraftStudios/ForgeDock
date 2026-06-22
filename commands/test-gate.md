@@ -569,46 +569,258 @@ fi
 
 ## Phase 6: Criteria-Adequacy Check
 
-Reconcile the executed test plan against each solved issue's acceptance criteria. Flag uncovered or untestable criteria so coverage gaps cannot masquerade as passes.
-
-<!-- EXPAND: Full criteria-adequacy logic (mapping individual acceptance criteria to executed test clusters, detecting uncovered criteria, and surfacing coverage gaps) is tracked as a dedicated sub-issue: #946. The current implementation produces a coverage summary report. -->
+Reconcile the executed test plan against each solved issue's acceptance criteria. For each solved issue, map individual acceptance criteria to the clusters that ran. Flag uncovered criteria (runtime-testable, no cluster maps to them) and untestable-as-written criteria (vague oracle, no deterministic verification) as distinct finding classes. Coverage gaps contribute to the BLOCK verdict.
 
 ```bash
 echo "=== Phase 6: Criteria-adequacy check ==="
 
-COVERED_CRITERIA=0
-UNCOVERED_CRITERIA=0
-MANUAL_CRITERIA_COUNT=$(echo -e "$MANUAL_CRITERIA" | grep -c '^-' || echo 0)
-AUTOMATED_CRITERIA_COUNT=$(echo -e "$AUTOMATED_CRITERIA" | grep -c '^-' || echo 0)
+# Initialize adequacy state — all variables must be set before Phase 7 reads them
+COVERAGE_BLOCK=false
+UNCOVERED_BLOCK_COUNT=0
+ADEQUACY_COVERED_LIST=""
+ADEQUACY_UNCOVERED_LIST=""
+ADEQUACY_UNTESTABLE_LIST=""
+ADEQUACY_MANUAL_LIST=""
 
-echo "Criteria coverage summary:"
-echo "  Automated criteria: ${AUTOMATED_CRITERIA_COUNT} (api + unit + e2e)"
-echo "  Manual criteria:    ${MANUAL_CRITERIA_COUNT} (require human validation)"
+# Build a flat list of cluster names that passed, for mapping lookup
+PASSING_CLUSTERS=$(echo -e "$CLUSTER_RESULTS" | grep ": PASS" | grep -oP '^- \K[^:]+' | tr '\n' ' ' || true)
+ALL_CLUSTERS=$(yq '.verification.integration_tests[].cluster' "$CONFIG_FILE" 2>/dev/null | tr '\n' ' ' || true)
 
-if [ "${AUTOMATED_CRITERIA_COUNT}" -gt 0 ]; then
-  # Check whether any cluster actually ran
-  PASSED_CLUSTERS=$(echo -e "$CLUSTER_RESULTS" | grep "PASS" | wc -l || echo 0)
-  if [ "${PASSED_CLUSTERS}" -gt 0 ]; then
-    COVERED_CRITERIA="${AUTOMATED_CRITERIA_COUNT}"
-    echo "  Coverage: ${COVERED_CRITERIA}/${AUTOMATED_CRITERIA_COUNT} automated criteria exercised by passing clusters"
+echo "Passing clusters: ${PASSING_CLUSTERS:-none}"
+echo "All configured clusters: ${ALL_CLUSTERS:-none}"
+echo ""
+
+# Helper: classify a single criterion line into one of four buckets:
+#   covered, uncovered, untestable, manual
+# Arguments: $1 = criterion text, $2 = source_issue, $3 = source_pr
+classify_criterion() {
+  local criterion="$1"
+  local source_issue="$2"
+  local source_pr="$3"
+
+  # --- Step 1: Detect explicitly manual criteria ---
+  if echo "$criterion" | grep -qP '\[type:manual\]'; then
+    ADEQUACY_MANUAL_LIST="${ADEQUACY_MANUAL_LIST}\n  [manual] Issue #${source_issue} (PR #${source_pr}): ${criterion}"
+    return
+  fi
+
+  # --- Step 2: Detect untestable-as-written criteria ---
+  # Vague oracles: subjective language, pure process requirements, non-deterministic assertions
+  if echo "$criterion" | grep -qiP '(should feel|must be appropriate|is good|as needed|where applicable|adequacy findings are filed|filed as tracked|flow back through|human validation|manual review|out-of-band|up to the reviewer|at the discretion|be reasonable|be sufficient|when possible|if applicable)'; then
+    ADEQUACY_UNTESTABLE_LIST="${ADEQUACY_UNTESTABLE_LIST}\n  [untestable-as-written] Issue #${source_issue} (PR #${source_pr}): ${criterion}"
+    return
+  fi
+
+  # --- Step 3: Determine if criterion is runtime-testable ---
+  local is_automated=false
+  local inferred_type=""
+
+  if echo "$criterion" | grep -qP '\[type:(api|unit|e2e)\]'; then
+    is_automated=true
+    inferred_type=$(echo "$criterion" | grep -oP '\[type:\K(api|unit|e2e)' || echo "automated")
+  elif echo "$criterion" | grep -qP '(endpoint|request|response|status\s+\d{3}|curl|API|HTTP)'; then
+    is_automated=true
+    inferred_type="api"
+  elif echo "$criterion" | grep -qP '(unit|function|return|assert|throws)'; then
+    is_automated=true
+    inferred_type="unit"
+  elif echo "$criterion" | grep -qP '(browser|click|navigate|render|page|user flow)'; then
+    is_automated=true
+    inferred_type="e2e"
+  fi
+
+  if [ "$is_automated" = "false" ]; then
+    # No automation signal — treat as manual (inferred)
+    ADEQUACY_MANUAL_LIST="${ADEQUACY_MANUAL_LIST}\n  [manual/inferred] Issue #${source_issue} (PR #${source_pr}): ${criterion}"
+    return
+  fi
+
+  # --- Step 4: Map automated criterion to a cluster ---
+  # A criterion is "covered" if at least one passing cluster name or cluster type
+  # matches the criterion's inferred type or the criterion text.
+  local is_covered=false
+
+  for cluster in $PASSING_CLUSTERS; do
+    # Match: cluster name substring appears in criterion text, OR
+    #        cluster name matches the inferred test type (api/unit/e2e)
+    if echo "$criterion" | grep -qiF "$cluster"; then
+      is_covered=true
+      break
+    fi
+    if [ "$inferred_type" = "$cluster" ]; then
+      is_covered=true
+      break
+    fi
+    # Broad type-level match: if a passing cluster name contains the type keyword
+    if echo "$cluster" | grep -qiF "$inferred_type"; then
+      is_covered=true
+      break
+    fi
+  done
+
+  if [ "$is_covered" = "true" ]; then
+    ADEQUACY_COVERED_LIST="${ADEQUACY_COVERED_LIST}\n  [covered:${inferred_type}] Issue #${source_issue} (PR #${source_pr}): ${criterion}"
   else
-    UNCOVERED_CRITERIA="${AUTOMATED_CRITERIA_COUNT}"
-    echo "  Coverage gap: ${UNCOVERED_CRITERIA}/${AUTOMATED_CRITERIA_COUNT} automated criteria were NOT covered (all clusters failed)"
+    ADEQUACY_UNCOVERED_LIST="${ADEQUACY_UNCOVERED_LIST}\n  [UNCOVERED:${inferred_type}] Issue #${source_issue} (PR #${source_pr}): ${criterion}"
+    UNCOVERED_BLOCK_COUNT=$((UNCOVERED_BLOCK_COUNT + 1))
+  fi
+}
+
+# --- Iterate COLLATED_CRITERIA by issue section ---
+# COLLATED_CRITERIA format:
+#   ### Issue #N (PR #M)
+#   - [ ] criterion text
+#   - [x] completed criterion
+CURRENT_ISSUE=""
+CURRENT_PR=""
+
+while IFS= read -r line; do
+  # Detect section header: ### Issue #N (PR #M)
+  if echo "$line" | grep -qP '^### Issue #\d+'; then
+    CURRENT_ISSUE=$(echo "$line" | grep -oP '(?<=Issue #)\d+' | head -1)
+    CURRENT_PR=$(echo "$line" | grep -oP '(?<=PR #)\d+' | head -1)
+    continue
+  fi
+
+  # Process criterion lines (both checked and unchecked)
+  if echo "$line" | grep -qP '^- \['; then
+    [ -z "$CURRENT_ISSUE" ] && continue
+    classify_criterion "$line" "$CURRENT_ISSUE" "$CURRENT_PR"
+  fi
+done <<< "$(echo -e "$COLLATED_CRITERIA")"
+
+# --- Report adequacy findings ---
+COVERED_COUNT=$(echo -e "$ADEQUACY_COVERED_LIST" | grep -c '^\s*\[covered' || echo 0)
+UNCOVERED_COUNT=$(echo -e "$ADEQUACY_UNCOVERED_LIST" | grep -c '^\s*\[UNCOVERED' || echo 0)
+UNTESTABLE_COUNT=$(echo -e "$ADEQUACY_UNTESTABLE_LIST" | grep -c '^\s*\[untestable' || echo 0)
+MANUAL_COUNT=$(echo -e "$ADEQUACY_MANUAL_LIST" | grep -c '^\s*\[manual' || echo 0)
+
+echo "Criteria-adequacy summary:"
+echo "  Covered (mapped to a passing cluster): ${COVERED_COUNT}"
+echo "  Uncovered (runtime-testable, no cluster maps):  ${UNCOVERED_COUNT}"
+echo "  Untestable-as-written (vague oracle):           ${UNTESTABLE_COUNT}"
+echo "  Manual (require human validation):              ${MANUAL_COUNT}"
+echo ""
+
+if [ "${COVERED_COUNT}" -gt 0 ]; then
+  echo "Covered criteria:"
+  echo -e "$ADEQUACY_COVERED_LIST"
+  echo ""
+fi
+
+if [ "${UNCOVERED_COUNT}" -gt 0 ]; then
+  echo "UNCOVERED criteria (coverage gaps — no passing cluster maps to these):"
+  echo -e "$ADEQUACY_UNCOVERED_LIST"
+  echo ""
+fi
+
+if [ "${UNTESTABLE_COUNT}" -gt 0 ]; then
+  echo "Untestable-as-written criteria (flagged — not counted as failures):"
+  echo -e "$ADEQUACY_UNTESTABLE_LIST"
+  echo ""
+fi
+
+if [ "${MANUAL_COUNT}" -gt 0 ]; then
+  echo "Manual criteria (require human validation — not covered by /test-gate):"
+  echo -e "$ADEQUACY_MANUAL_LIST"
+  echo ""
+fi
+
+# --- Set COVERAGE_BLOCK if uncovered runtime-testable criteria exist ---
+if [ "${UNCOVERED_BLOCK_COUNT}" -gt 0 ]; then
+  if [ "$GATE_POSTURE" = "blocking" ]; then
+    COVERAGE_BLOCK=true
+    echo "COVERAGE BLOCK: ${UNCOVERED_BLOCK_COUNT} runtime-testable criterion/criteria have no mapped test cluster."
+    echo "Coverage gaps cannot produce a clean PASS verdict (posture: blocking)."
+  else
+    echo "COVERAGE ADVISORY: ${UNCOVERED_BLOCK_COUNT} runtime-testable criterion/criteria have no mapped test cluster."
+    echo "(posture: advisory — surfaced but deploy is not blocked by coverage gaps)"
   fi
 fi
 
-if [ "${MANUAL_CRITERIA_COUNT}" -gt 0 ]; then
-  echo ""
-  echo "NOTE: ${MANUAL_CRITERIA_COUNT} manual criteria require human validation and are not covered by /test-gate."
-  echo "These are not counted as failures — they must be validated out-of-band."
+# --- File test-gap issues for uncovered runtime-testable criteria ---
+if [ "${UNCOVERED_COUNT}" -gt 0 ]; then
+  # Ensure test-gap label exists
+  gh label create "test-gap" --color "E4E669" \
+    --description "Acceptance criterion not covered by any /test-gate cluster. Filed by ForgeDock." \
+    --force ${GH_FLAG} 2>/dev/null || true
+
+  while IFS= read -r gap_line; do
+    [ -z "$(echo "$gap_line" | grep -E '\S')" ] && continue
+
+    # Extract issue and criterion from gap line format: [UNCOVERED:type] Issue #N (PR #M): criterion
+    GAP_ISSUE=$(echo "$gap_line" | grep -oP '(?<=Issue #)\d+' | head -1)
+    GAP_PR=$(echo "$gap_line" | grep -oP '(?<=PR #)\d+' | head -1)
+    GAP_TYPE=$(echo "$gap_line" | grep -oP '(?<=UNCOVERED:)[^\]]+' | head -1)
+    GAP_CRITERION=$(echo "$gap_line" | grep -oP '(?<=: )- \[.+' | head -1 || echo "$gap_line")
+
+    [ -z "$GAP_ISSUE" ] && continue
+
+    # Duplicate prevention: check for open test-gap issues referencing this issue+criterion
+    EXISTING_GAP=$(gh issue list ${GH_FLAG} \
+      --label "test-gap" \
+      --state open \
+      --search "test-gap issue #${GAP_ISSUE}" \
+      --limit 5 \
+      --json number,title \
+      --jq '.[0].number // empty' 2>/dev/null || true)
+
+    if [ -n "$EXISTING_GAP" ]; then
+      echo "Skipping test-gap issue creation — open issue already exists: #${EXISTING_GAP} (source: #${GAP_ISSUE})"
+      continue
+    fi
+
+    GAP_ISSUE_NUM=$(gh issue create ${GH_FLAG} \
+      --title "fix: test-gap — uncovered criterion in issue #${GAP_ISSUE} (${GAP_TYPE})" \
+      --label "test-gap" \
+      --body "$(cat <<TGAP_EOF
+## Problem
+
+The \`/test-gate\` criteria-adequacy check (Phase 6) found a runtime-testable acceptance criterion in issue #${GAP_ISSUE} that is not covered by any configured test cluster. Coverage gaps cannot produce a clean PASS verdict — this criterion must be covered before the staging→${DEFAULT_BRANCH} bundle can pass the deploy gate.
+
+## Root Cause (if known)
+
+No test cluster in \`forge.yaml verification.integration_tests\` maps to this criterion. Either:
+1. The test cluster that would cover this criterion does not exist yet (gap in test suite), or
+2. The cluster name does not match the criterion's keywords (mapping heuristic miss).
+
+## Affected Files
+
+Files to be identified during investigation. Start with the test suite for the \`${GAP_TYPE}\` cluster.
+
+## Acceptance Criteria
+
+- [ ] A test cluster that covers this criterion is identified or created
+- [ ] The criterion maps to the cluster in a /test-gate run
+- [ ] /test-gate Phase 6 reports this criterion as covered (not uncovered) for this bundle
+
+## Context
+
+**Detected by**: \`/test-gate\` — Phase 6 criteria-adequacy check
+**Source issue**: #${GAP_ISSUE}
+**Source PR**: #${GAP_PR}
+**Bundle PRs**: ${BUNDLE_PRS}
+**Criterion type**: \`${GAP_TYPE}\`
+**Uncovered criterion**:
+\`\`\`
+${GAP_CRITERION}
+\`\`\`
+TGAP_EOF
+)" --json number --jq '.number' 2>/dev/null || echo "FAILED")
+
+    if [ "$GAP_ISSUE_NUM" != "FAILED" ] && [ -n "$GAP_ISSUE_NUM" ]; then
+      echo "Filed test-gap issue #${GAP_ISSUE_NUM} for uncovered criterion in #${GAP_ISSUE} (${GAP_TYPE})"
+    else
+      echo "WARNING: Failed to create test-gap issue for uncovered criterion in #${GAP_ISSUE}"
+    fi
+  done <<< "$(echo -e "$ADEQUACY_UNCOVERED_LIST")"
 fi
-```
 
 ---
 
 ## Phase 7: Verdict — Emit Machine-Readable Result
 
-Determine BLOCK / PASS / SKIP based on batch-introduced failures, cluster results, and posture config.
+Determine BLOCK / PASS / SKIP based on batch-introduced failures, cluster results, coverage gaps, and posture config.
 
 ```bash
 echo "=== Phase 7: Emitting verdict ==="
@@ -617,16 +829,26 @@ BATCH_FAILURE_COUNT=$(echo -e "$BATCH_FAILURES" | grep -c '\S' || echo 0)
 TOTAL_PASS=$(echo -e "$CLUSTER_RESULTS" | grep -c "PASS" || echo 0)
 TOTAL_FAIL=$(echo -e "$CLUSTER_RESULTS" | grep -c "FAIL" || echo 0)
 
+# COVERAGE_BLOCK is set by Phase 6 when uncovered runtime-testable criteria exist
+# and posture is blocking. It is initialized to false if Phase 6 found no gaps.
+COVERAGE_BLOCK="${COVERAGE_BLOCK:-false}"
+UNCOVERED_BLOCK_COUNT="${UNCOVERED_BLOCK_COUNT:-0}"
+
 if [ "${BATCH_FAILURE_COUNT}" -gt 0 ]; then
   VERDICT="BLOCK"
   VERDICT_REASON="${BATCH_FAILURE_COUNT} cluster(s) failed with batch-introduced regressions: $(echo -e "$BATCH_FAILURES" | tr '\n' ', ' | sed 's/,\s*$//')"
+elif [ "$COVERAGE_BLOCK" = "true" ]; then
+  # Coverage gaps: runtime-testable criteria exist but no cluster maps to them.
+  # A gate that runs some tests but skips verifying specific criteria is not a clean pass.
+  VERDICT="BLOCK"
+  VERDICT_REASON="${UNCOVERED_BLOCK_COUNT} runtime-testable acceptance criterion/criteria not covered by any test cluster. Coverage gaps cannot produce a clean PASS verdict."
 elif [ "${TOTAL_FAIL}" -gt 0 ]; then
   # All failures are pre-existing (baseline also failed) — not blocking
   VERDICT="PASS"
   VERDICT_REASON="${TOTAL_FAIL} pre-existing failure(s) detected (also failed on ${BASE_BRANCH} baseline — not introduced by this batch). ${TOTAL_PASS} cluster(s) passed."
 else
   VERDICT="PASS"
-  VERDICT_REASON="All ${TOTAL_PASS} cluster(s) passed. No batch-introduced failures."
+  VERDICT_REASON="All ${TOTAL_PASS} cluster(s) passed. No batch-introduced failures. All runtime-testable criteria covered."
 fi
 
 echo ""
@@ -640,6 +862,9 @@ echo " Solved issues: $(echo $SOLVED_ISSUES | tr ' ' '\n' | sort -u | tr '\n' ' 
 echo ""
 echo "Cluster summary:"
 echo -e "$CLUSTER_RESULTS"
+echo ""
+echo "Adequacy summary:"
+echo "  Covered: ${COVERED_COUNT:-0} | Uncovered: ${UNCOVERED_COUNT:-0} | Untestable-as-written: ${UNTESTABLE_COUNT:-0} | Manual: ${MANUAL_COUNT:-0}"
 echo "============================================="
 
 # Emit machine-readable verdict marker (consumed by review-pr-staging Phase 6.5)
