@@ -485,6 +485,13 @@ fi
 
 Post the `<!-- FORGE:TRAJECTORY -->` comment as the final pipeline record:
 
+**Before posting, read the attribution config**:
+```bash
+SHOW_ATTRIBUTION=$(yq '.branding.show_attribution // "true"' forge.yaml 2>/dev/null || echo "true")
+[ "$SHOW_ATTRIBUTION" = "false" ] && ATTRIBUTION_LINE="" || ATTRIBUTION_LINE="
+> Pipeline powered by [ForgeDock](https://github.com/RapierCraftStudios/ForgeDock)"
+```
+
 ```bash
 gh issue comment {NUMBER} {GH_FLAG} --body "<!-- FORGE:TRAJECTORY -->
 ## Pipeline Trajectory — #{NUMBER}
@@ -507,7 +514,8 @@ gh issue comment {NUMBER} {GH_FLAG} --body "<!-- FORGE:TRAJECTORY -->
 
 **Anomalies**: None
 
-**Pipeline completed**: {TIMESTAMP}"
+**Pipeline completed**: {TIMESTAMP}
+${ATTRIBUTION_LINE}"
 ```
 
 Where:
