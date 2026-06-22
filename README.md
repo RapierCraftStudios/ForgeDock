@@ -59,6 +59,7 @@ ForgeDock is **not another AI coding agent.** It's a set of prompt-engineered co
 | **Cross-issue knowledge graph** | Agent fixing issue #43 reads the investigation from #42 and applies the known pattern — no re-investigation. |
 | **Self-improving pipeline** | Review agents learn from past findings — recurring patterns automatically become new quality gate checks. |
 | **Parallel orchestration** | `/orchestrate` decomposes milestones into waves and runs `/work-on` on each in parallel. |
+| **Continuous improvement via cron** | Copy the [GitHub Actions template](templates/github-actions/forgedock-autopilot.yml) into your repo — `/autopilot` runs on a schedule, finds issues while you sleep, and optionally fixes them. |
 
 > **Cost note:** ForgeDock itself is free and open-source. It orchestrates Claude Code sessions, so you pay your normal Anthropic API usage. A typical `/work-on` run on a straightforward bug uses roughly the same tokens as a 15–20 minute manual Claude Code session.
 
