@@ -425,8 +425,7 @@ Report any hit as **HIGH** — the DB connection will fail in any environment wh
 
 ```bash
 # Run only when commands/*.md or scripts/* changed and the validator ships in this repo.
-VALIDATOR="$FORGEDOCK_SCRIPTS/validate-spec-graph.sh"
-[ -f "$VALIDATOR" ] || VALIDATOR="{WORKTREE_PATH}/scripts/validate-spec-graph.sh"
+VALIDATOR="{WORKTREE_PATH}/scripts/validate-spec-graph.sh"
 if [ -f "$VALIDATOR" ]; then
     # The graph is auto-built from the worktree (gitignored JSON not required).
     # --soft keeps the gate non-blocking on the documented baseline orphans;
@@ -435,7 +434,7 @@ if [ -f "$VALIDATOR" ]; then
     echo "$GRAPH_REPORT"
     # Map any HARD finding to a quality-gate finding (dangling ref / broken transition).
     echo "$GRAPH_REPORT" | grep -E '^\s*\[HARD\]' | while IFS= read -r hit; do
-        echo "FORGE_GRAPH | HIGH | spec-graph | ${hit#*] }"
+        echo "FORGE_GRAPH | HIGH | spec-graph | $(echo "$hit" | sed 's/^\s*\[HARD\]\s\+\S\+\s\+//')"
     done
 fi
 ```
