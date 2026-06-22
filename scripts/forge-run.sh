@@ -154,7 +154,7 @@ fi
 # Fetch issue: state, labels
 GH_STDERR_TMP=$(mktemp)
 ISSUE_JSON=$(gh issue view "$ISSUE_NUMBER" "${GH_REPO_ARGS[@]}" \
-  --json number,state,labels,title \
+  --json number,state,labels \
   2>"$GH_STDERR_TMP") || {
   MSG=$(cat "$GH_STDERR_TMP")
   rm -f "$GH_STDERR_TMP"
@@ -165,7 +165,6 @@ rm -f "$GH_STDERR_TMP"
 # Extract state and labels
 ISSUE_STATE=$(printf '%s' "$ISSUE_JSON" | jq -r '.state')
 LABELS_JSON=$(printf '%s' "$ISSUE_JSON" | jq -c '[.labels[].name]')
-ISSUE_TITLE=$(printf '%s' "$ISSUE_JSON" | jq -r '.title')
 
 # Check if issue is closed
 if [ "$ISSUE_STATE" = "CLOSED" ]; then
