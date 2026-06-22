@@ -94,7 +94,7 @@ fi
 
 ```bash
 # Filter to comments that contain a FORGE pipeline annotation
-FORGE_COMMENTS=$(echo "$ALL_COMMENTS" | jq -c '[.[] | select(.body | test("<!-- FORGE:(INVESTIGATOR|CONTRACT|CONTEXT|ARCHITECT|BUILDER|DECOMPOSED|TRAJECTORY)"))]')
+FORGE_COMMENTS=$(echo "$ALL_COMMENTS" | jq -c '[.[] | select(.body | test("<!-- FORGE:(INVESTIGATOR|CONTRACT|CONTEXT|ARCHITECT|BUILDER|DECOMPOSED|SUMMARY|TRAJECTORY)"))]')
 FORGE_COUNT=$(echo "$FORGE_COMMENTS" | jq 'length')
 
 if [ "$FORGE_COUNT" -eq 0 ]; then
@@ -114,7 +114,7 @@ echo ""
 
 ## Step 5: Display Each Annotation
 
-Phase mapping (inline): `INVESTIGATOR`→Phase 1, `CONTRACT`→Phase 3C, `CONTEXT`→Phase 3C.5, `ARCHITECT`→Phase 3C.6, `BUILDER`→Phase 3M, `DECOMPOSED`→Phase 2, `TRAJECTORY`→Phase 7.
+Phase mapping (inline): `INVESTIGATOR`→Phase 1, `CONTRACT`→Phase 3C, `CONTEXT`→Phase 3C.5, `ARCHITECT`→Phase 3C.6, `BUILDER`→Phase 3M, `DECOMPOSED`→Phase 2, `SUMMARY`→Phase C4.5, `TRAJECTORY`→Phase 7.
 
 For each FORGE comment in chronological order, print a formatted block. Use Python for robust multiline extraction from the comment body.
 
@@ -135,6 +135,7 @@ echo "$FORGE_COMMENTS" | jq -c '.[]' | while IFS= read -r COMMENT; do
     "FORGE:ARCHITECT")    PHASE_LABEL="Phase 3C.6 — Architecture Plan" ;;
     "FORGE:BUILDER")      PHASE_LABEL="Phase 3M — Implementation" ;;
     "FORGE:DECOMPOSED")   PHASE_LABEL="Phase 2 — Decomposition" ;;
+    "FORGE:SUMMARY")      PHASE_LABEL="Phase C4.5 — Shareable Summary" ;;
     "FORGE:TRAJECTORY")   PHASE_LABEL="Phase 7 — Pipeline Trajectory" ;;
     *)                    PHASE_LABEL="$ANNOTATION" ;;
   esac
@@ -214,6 +215,19 @@ elif annotation == "FORGE:DECOMPOSED":
     print(f"│  Sub-issues : {len(subs)}")
     for s in subs[:5]:
         print(f"│    {s}")
+
+elif annotation == "FORGE:SUMMARY":
+    lane       = extract(r'\*\*Lane\*\*\s*\|\s*([^\|]+)')
+    verdict    = extract(r'\*\*Investigation verdict\*\*\s*\|\s*([^\|]+)')
+    task_type  = extract(r'\*\*Task type\*\*\s*\|\s*([^\|]+)')
+    review     = extract(r'\*\*Review verdict\*\*\s*\|\s*([^\|]+)')
+    files      = extract(r'\*\*Files changed\*\*\s*\|\s*([^\|]+)')
+    pr_link    = extract(r'\[View PR #(\d+)\]')
+    print(f"│  Lane       : {lane.strip()[:60]}")
+    print(f"│  Verdict    : {verdict.strip()[:60]}")
+    print(f"│  Task type  : {task_type.strip()[:60]}")
+    print(f"│  Review     : {review.strip()[:60]}")
+    print(f"│  Files      : {files.strip()[:30]}  |  PR: #{pr_link}")
 
 elif annotation == "FORGE:TRAJECTORY":
     # Print the phase table lines verbatim (they're already formatted)
