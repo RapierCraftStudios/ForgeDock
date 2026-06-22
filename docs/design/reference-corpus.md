@@ -673,6 +673,558 @@ Archetype fit: `technical-dense` (terminal/code UI), `editorial-typographic` (ap
 
 ---
 
+### Interactive product mock vocabulary <!-- Added: forge#1045 -->
+
+A product mock is **not a screenshot**. It is a lightweight simulation of the product's UI — rendered in HTML/CSS
+directly in the hero — that has at least two micro-interactions so it feels like a **living interface**, not a poster.
+This is distinct from Tier 3A (video) and from a plain windowed screenshot (3B baseline). The architect commits
+the mock type in `product_mock.type`; the generator applies the corresponding pattern from this vocabulary.
+
+**Restraint rule**: a product mock should have **at most 2 simultaneous interactions**. More reads as demo, not
+polish. The interactions should be subtle — status badges pulse, cards lift on hover, a cursor blinks in an input.
+Never animate primary text or copy.
+
+**CSS-only preferred**: all 5 patterns below are CSS-only by default. Lightweight vanilla JS (no dependencies,
+≤20 lines) is permitted only for timed sequences (auto-typing, looping state transitions) that CSS alone cannot drive.
+
+**`prefers-reduced-motion` required**: every animation in this section MUST be wrapped in a
+`@media (prefers-reduced-motion: reduce)` block that disables or replaces the motion.
+
+#### Product type: `issue-tracker`
+
+Cards with hover lift and a pulsing status badge. Suitable for project management, issue tracking, and task board
+products.
+
+**Interactions**: card hover lift (`card-hover-lift`), status badge pulse (`status-badge-pulse`)
+
+```html
+<div class="mock-board" aria-hidden="true">
+  <div class="mock-card mock-card--in-progress">
+    <span class="mock-badge mock-badge--in-progress">In Progress</span>
+    <span class="mock-card-title">Redesign onboarding flow</span>
+  </div>
+  <div class="mock-card mock-card--review">
+    <span class="mock-badge mock-badge--review">In Review</span>
+    <span class="mock-card-title">Fix auth token refresh</span>
+  </div>
+  <div class="mock-card mock-card--done">
+    <span class="mock-badge mock-badge--done">Done</span>
+    <span class="mock-card-title">Update billing integration</span>
+  </div>
+</div>
+```
+
+```css
+.mock-board {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 16px;
+}
+.mock-card {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 12px 14px;
+  background: rgba(255,255,255,.04);
+  border: 1px solid rgba(255,255,255,.07);
+  border-radius: 8px;
+  transition: transform 160ms cubic-bezier(.2,0,.0,1),
+              box-shadow 160ms cubic-bezier(.2,0,.0,1);
+  cursor: default;
+}
+.mock-card:hover {
+  transform: translateY(-2px);
+  box-shadow: 0 8px 24px rgba(0,0,0,.18);
+}
+.mock-badge {
+  font-size: 11px;
+  font-weight: 500;
+  padding: 2px 8px;
+  border-radius: 9999px;
+  letter-spacing: .02em;
+}
+.mock-badge--in-progress {
+  background: rgba(251,191,36,.15);
+  color: #fbbf24;
+  animation: badge-pulse 2.4s ease-in-out infinite;
+}
+.mock-badge--review {
+  background: rgba(139,92,246,.15);
+  color: #a78bfa;
+}
+.mock-badge--done {
+  background: rgba(34,197,94,.12);
+  color: #4ade80;
+}
+@keyframes badge-pulse {
+  0%, 100% { opacity: 1; }
+  50%       { opacity: .55; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .mock-card { transition: none; }
+  .mock-card:hover { transform: none; box-shadow: none; }
+  .mock-badge--in-progress { animation: none; }
+}
+```
+
+Archetype fit: `technical-dense`, `editorial-typographic`. Not appropriate for `minimal-luxury` (too much activity
+for a premium calm hero).
+
+#### Product type: `payment-fintech`
+
+An input field with a typing cursor animation and an amount counter. Suitable for payment, invoicing, and fintech
+products.
+
+**Interactions**: typing cursor in input (`input-typing-cursor`), amount fill-in animation (`amount-counter`)
+
+```html
+<div class="mock-payment" aria-hidden="true">
+  <div class="mock-input-wrap">
+    <span class="mock-input-label">Send to</span>
+    <div class="mock-input">
+      <span class="mock-input-text" data-typing="alex@acme.com"></span><span class="mock-input-cursor"></span>
+    </div>
+  </div>
+  <div class="mock-amount-wrap">
+    <span class="mock-input-label">Amount</span>
+    <div class="mock-input">
+      <span class="mock-currency">$</span>
+      <span class="mock-amount" data-target="2400">0</span>
+    </div>
+  </div>
+  <button class="mock-send-btn" tabindex="-1" aria-hidden="true">Send payment</button>
+</div>
+```
+
+```css
+.mock-payment {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding: 20px;
+  background: rgba(255,255,255,.04);
+  border: 1px solid rgba(255,255,255,.08);
+  border-radius: 12px;
+  min-width: 260px;
+}
+.mock-input-label {
+  display: block;
+  font-size: 11px;
+  color: rgba(255,255,255,.4);
+  margin-bottom: 4px;
+  letter-spacing: .04em;
+  text-transform: uppercase;
+}
+.mock-input {
+  display: flex;
+  align-items: center;
+  padding: 9px 12px;
+  background: rgba(255,255,255,.06);
+  border: 1px solid rgba(255,255,255,.1);
+  border-radius: 6px;
+  font-size: 14px;
+  gap: 2px;
+}
+.mock-input-cursor {
+  display: inline-block;
+  width: 1.5px;
+  height: 1.1em;
+  background: var(--accent, #818cf8);
+  animation: cursor-blink 1.1s step-end infinite;
+  vertical-align: text-bottom;
+  margin-left: 1px;
+}
+@keyframes cursor-blink { 50% { opacity: 0; } }
+.mock-send-btn {
+  padding: 10px;
+  background: var(--accent, #818cf8);
+  color: #fff;
+  border: none;
+  border-radius: 8px;
+  font-size: 14px;
+  font-weight: 500;
+  cursor: default;
+  transition: transform 120ms, box-shadow 120ms;
+}
+.mock-send-btn:hover {
+  transform: translateY(-1px);
+  box-shadow: 0 4px 12px rgba(129,140,248,.4);
+}
+@media (prefers-reduced-motion: reduce) {
+  .mock-input-cursor { animation: none; }
+  .mock-send-btn { transition: none; }
+  .mock-send-btn:hover { transform: none; box-shadow: none; }
+}
+```
+
+```js
+// ~15 lines — auto-types the recipient field and counts up the amount
+// No dependencies. Runs once on load; restarts after a pause to loop.
+(function initPaymentMock() {
+  if (window.matchMedia('(prefers-reduced-motion: reduce)').matches) return;
+  const textEl  = document.querySelector('[data-typing]');
+  const amtEl   = document.querySelector('[data-target]');
+  if (!textEl || !amtEl) return;
+  const full    = textEl.dataset.typing;
+  const target  = +amtEl.dataset.target;
+  let i = 0;
+  const typeInterval = setInterval(() => {
+    textEl.textContent = full.slice(0, ++i);
+    if (i >= full.length) clearInterval(typeInterval);
+  }, 60);
+  let count = 0;
+  const countInterval = setInterval(() => {
+    count = Math.min(count + Math.ceil(target / 30), target);
+    amtEl.textContent = count.toLocaleString();
+    if (count >= target) clearInterval(countInterval);
+  }, 40);
+})();
+```
+
+Archetype fit: `warm-photographic`, `editorial-typographic`. Restrained for `minimal-luxury` — use the cursor only,
+skip the counter.
+
+#### Product type: `deploy-infra`
+
+Animated deploy pipeline with status indicators that transition from "building" to "deployed". Suitable for CI/CD,
+infrastructure, and platform products.
+
+**Interactions**: status indicator pulse while building (`status-building-pulse`), deploy step progress
+(`deploy-step-progress`)
+
+```html
+<div class="mock-pipeline" aria-hidden="true">
+  <div class="mock-step mock-step--done">
+    <span class="mock-step-dot mock-step-dot--done"></span>
+    <span class="mock-step-label">Build</span>
+    <span class="mock-step-time">12s</span>
+  </div>
+  <div class="mock-step mock-step--building">
+    <span class="mock-step-dot mock-step-dot--building"></span>
+    <span class="mock-step-label">Deploy</span>
+    <span class="mock-step-time">running…</span>
+  </div>
+  <div class="mock-step mock-step--pending">
+    <span class="mock-step-dot mock-step-dot--pending"></span>
+    <span class="mock-step-label">Health check</span>
+    <span class="mock-step-time">—</span>
+  </div>
+  <div class="mock-progress-bar" role="progressbar" aria-valuenow="60" aria-valuemin="0" aria-valuemax="100">
+    <div class="mock-progress-fill"></div>
+  </div>
+</div>
+```
+
+```css
+.mock-pipeline {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 16px 20px;
+  background: rgba(255,255,255,.03);
+  border: 1px solid rgba(255,255,255,.06);
+  border-radius: 10px;
+  font-size: 13px;
+  font-family: var(--mono, monospace);
+}
+.mock-step {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+.mock-step-dot {
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  flex-shrink: 0;
+}
+.mock-step-dot--done     { background: #4ade80; }
+.mock-step-dot--building {
+  background: #fbbf24;
+  animation: building-pulse 1.2s ease-in-out infinite;
+}
+.mock-step-dot--pending  { background: rgba(255,255,255,.2); }
+.mock-step-label { flex: 1; color: rgba(255,255,255,.8); }
+.mock-step-time  { color: rgba(255,255,255,.35); font-size: 11px; }
+@keyframes building-pulse {
+  0%, 100% { box-shadow: 0 0 0 0 rgba(251,191,36,.5); }
+  50%       { box-shadow: 0 0 0 5px rgba(251,191,36,.0); }
+}
+.mock-progress-bar {
+  height: 3px;
+  background: rgba(255,255,255,.08);
+  border-radius: 9999px;
+  overflow: hidden;
+  margin-top: 4px;
+}
+.mock-progress-fill {
+  height: 100%;
+  width: 0;
+  background: linear-gradient(90deg, var(--accent, #818cf8), #a78bfa);
+  border-radius: 9999px;
+  animation: progress-fill 3s cubic-bezier(.4,0,.2,1) infinite;
+}
+@keyframes progress-fill {
+  0%   { width: 0%; }
+  80%  { width: 100%; }
+  100% { width: 100%; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .mock-step-dot--building { animation: none; }
+  .mock-progress-fill { animation: none; width: 60%; }
+}
+```
+
+Archetype fit: `technical-dense`. Acceptable for `editorial-typographic` with slower timing. Not appropriate for
+`minimal-luxury` or `warm-photographic`.
+
+#### Product type: `api-developer`
+
+A code editor pane with a syntax-highlighted snippet and a typing animation, plus a response panel that populates.
+Suitable for API, SDK, and developer tool products.
+
+**Interactions**: code editor typing animation (`code-typing`), response panel reveal (`response-reveal`)
+
+```html
+<div class="mock-editor" aria-hidden="true">
+  <div class="mock-editor-chrome">
+    <span class="mock-editor-dot" style="background:#ff5f57"></span>
+    <span class="mock-editor-dot" style="background:#febc2e"></span>
+    <span class="mock-editor-dot" style="background:#28c840"></span>
+    <span class="mock-editor-lang">javascript</span>
+  </div>
+  <div class="mock-editor-body">
+    <pre class="mock-code"><span class="mock-kw">const</span> result = <span class="mock-fn">await</span> forge.<span class="mock-fn">run</span>(<span class="mock-str">"build"</span>, {
+  issue: <span class="mock-num">1045</span>,
+  model: <span class="mock-str">"opus"</span>
+});<span class="mock-cursor-code"></span></pre>
+  </div>
+  <div class="mock-response">
+    <span class="mock-response-label">Response</span>
+    <span class="mock-response-body">{ status: <span class="mock-str">"merged"</span>, pr: <span class="mock-num">1049</span> }</span>
+  </div>
+</div>
+```
+
+```css
+.mock-editor {
+  border-radius: 10px;
+  overflow: hidden;
+  background: #0d1117;
+  border: 1px solid rgba(255,255,255,.08);
+  font-family: var(--mono, 'JetBrains Mono', monospace);
+  font-size: 13px;
+  min-width: 280px;
+}
+.mock-editor-chrome {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 10px 14px;
+  background: rgba(255,255,255,.03);
+  border-bottom: 1px solid rgba(255,255,255,.06);
+}
+.mock-editor-dot { width: 10px; height: 10px; border-radius: 50%; }
+.mock-editor-lang {
+  margin-left: auto;
+  font-size: 10px;
+  color: rgba(255,255,255,.25);
+  text-transform: uppercase;
+  letter-spacing: .08em;
+}
+.mock-editor-body { padding: 16px; line-height: 1.7; }
+.mock-code { margin: 0; color: rgba(255,255,255,.85); white-space: pre-wrap; }
+.mock-kw   { color: #ff79c6; }
+.mock-fn   { color: #8be9fd; }
+.mock-str  { color: #f1fa8c; }
+.mock-num  { color: #bd93f9; }
+.mock-cursor-code {
+  display: inline-block;
+  width: 7px;
+  height: 1em;
+  background: rgba(255,255,255,.7);
+  animation: blink 1s step-end infinite;
+  vertical-align: text-bottom;
+  margin-left: 1px;
+}
+.mock-response {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 12px 16px;
+  border-top: 1px solid rgba(255,255,255,.06);
+  background: rgba(255,255,255,.02);
+  animation: response-fade-in 600ms ease 2.5s both;
+}
+.mock-response-label {
+  font-size: 10px;
+  color: rgba(255,255,255,.3);
+  text-transform: uppercase;
+  letter-spacing: .06em;
+}
+.mock-response-body { color: rgba(255,255,255,.7); }
+@keyframes response-fade-in {
+  from { opacity: 0; transform: translateY(4px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+@media (prefers-reduced-motion: reduce) {
+  .mock-cursor-code { animation: none; }
+  .mock-response { animation: none; }
+}
+```
+
+Archetype fit: `technical-dense` (primary), `bold-brutalist` (remove color tints, use stark monochrome). Not
+appropriate for `warm-photographic` or `minimal-luxury`.
+
+#### Product type: `email-messaging`
+
+Inbox items that slide in with staggered animation, and a compose area with a blinking cursor. Suitable for
+email, messaging, and communication products.
+
+**Interactions**: inbox item staggered reveal (`inbox-item-reveal`), compose cursor blink (`compose-cursor`)
+
+```html
+<div class="mock-inbox" aria-hidden="true">
+  <div class="mock-inbox-header">
+    <span class="mock-inbox-title">Inbox</span>
+    <span class="mock-inbox-count">3 new</span>
+  </div>
+  <div class="mock-inbox-items">
+    <div class="mock-inbox-item mock-inbox-item--unread" style="--delay:0ms">
+      <span class="mock-avatar">A</span>
+      <div class="mock-item-body">
+        <span class="mock-sender">Alex Kim</span>
+        <span class="mock-subject">Re: Q3 roadmap sync</span>
+      </div>
+      <span class="mock-unread-dot"></span>
+    </div>
+    <div class="mock-inbox-item mock-inbox-item--unread" style="--delay:120ms">
+      <span class="mock-avatar">S</span>
+      <div class="mock-item-body">
+        <span class="mock-sender">Sarah Lin</span>
+        <span class="mock-subject">Dashboard redesign feedback</span>
+      </div>
+      <span class="mock-unread-dot"></span>
+    </div>
+    <div class="mock-inbox-item" style="--delay:240ms">
+      <span class="mock-avatar" style="opacity:.5">T</span>
+      <div class="mock-item-body">
+        <span class="mock-sender" style="opacity:.5">Tyler Owens</span>
+        <span class="mock-subject" style="opacity:.4">Shipped: auth refactor</span>
+      </div>
+    </div>
+  </div>
+  <div class="mock-compose">
+    <span class="mock-compose-placeholder">Reply to Alex<span class="mock-compose-cursor"></span></span>
+  </div>
+</div>
+```
+
+```css
+.mock-inbox {
+  display: flex;
+  flex-direction: column;
+  background: rgba(255,255,255,.03);
+  border: 1px solid rgba(255,255,255,.07);
+  border-radius: 12px;
+  overflow: hidden;
+  min-width: 280px;
+}
+.mock-inbox-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 12px 16px;
+  border-bottom: 1px solid rgba(255,255,255,.06);
+  font-size: 13px;
+  font-weight: 500;
+}
+.mock-inbox-count {
+  font-size: 11px;
+  color: var(--accent, #818cf8);
+  background: rgba(129,140,248,.1);
+  padding: 2px 8px;
+  border-radius: 9999px;
+}
+.mock-inbox-items { display: flex; flex-direction: column; }
+.mock-inbox-item {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 16px;
+  border-bottom: 1px solid rgba(255,255,255,.04);
+  animation: item-slide-in 300ms cubic-bezier(.2,0,.0,1) var(--delay, 0ms) both;
+}
+.mock-inbox-item--unread { background: rgba(255,255,255,.02); }
+@keyframes item-slide-in {
+  from { opacity: 0; transform: translateX(-8px); }
+  to   { opacity: 1; transform: translateX(0); }
+}
+.mock-avatar {
+  width: 28px; height: 28px;
+  border-radius: 50%;
+  background: rgba(129,140,248,.2);
+  color: var(--accent, #818cf8);
+  font-size: 12px; font-weight: 600;
+  display: flex; align-items: center; justify-content: center;
+  flex-shrink: 0;
+}
+.mock-item-body { display: flex; flex-direction: column; gap: 2px; overflow: hidden; }
+.mock-sender { font-size: 13px; font-weight: 500; color: rgba(255,255,255,.85); }
+.mock-subject { font-size: 12px; color: rgba(255,255,255,.4); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.mock-unread-dot {
+  width: 6px; height: 6px;
+  background: var(--accent, #818cf8);
+  border-radius: 50%;
+  flex-shrink: 0;
+  margin-left: auto;
+}
+.mock-compose {
+  padding: 10px 16px;
+  background: rgba(255,255,255,.02);
+  border-top: 1px solid rgba(255,255,255,.06);
+  font-size: 13px;
+  color: rgba(255,255,255,.3);
+}
+.mock-compose-cursor {
+  display: inline-block;
+  width: 1.5px; height: 1em;
+  background: var(--accent, #818cf8);
+  animation: blink 1s step-end infinite;
+  vertical-align: text-bottom;
+  margin-left: 1px;
+}
+@media (prefers-reduced-motion: reduce) {
+  .mock-inbox-item { animation: none; }
+  .mock-compose-cursor { animation: none; }
+}
+```
+
+Archetype fit: `warm-photographic`, `editorial-typographic`. Avoid for `bold-brutalist` (inbox UI conflicts with
+the brutalist posture).
+
+---
+
+### Per-product-type mock profiles
+
+The architect phase commits `product_mock.type` and selects 2 interactions from the available list. This table
+is the default selection — deviate with explicit rationale.
+
+| Product type | `type` id | Default interactions | Archetype fit | Not appropriate for |
+|---|---|---|---|---|
+| Issue tracker / PM | `issue-tracker` | `card-hover-lift`, `status-badge-pulse` | `technical-dense`, `editorial-typographic` | `minimal-luxury` |
+| Payment / fintech | `payment-fintech` | `input-typing-cursor`, `amount-counter` | `warm-photographic`, `editorial-typographic` | `bold-brutalist` |
+| Deploy / infra | `deploy-infra` | `status-building-pulse`, `deploy-step-progress` | `technical-dense` | `minimal-luxury`, `warm-photographic` |
+| API / developer tool | `api-developer` | `code-typing`, `response-reveal` | `technical-dense`, `bold-brutalist` | `warm-photographic`, `minimal-luxury` |
+| Email / messaging | `email-messaging` | `inbox-item-reveal`, `compose-cursor` | `warm-photographic`, `editorial-typographic` | `bold-brutalist` |
+
+**Mock restraint rule**: the mock should feel **alive**, not be a full interactive demo. Select exactly 2 interactions.
+Never animate primary copy. Mock UI text is placeholder — it should represent the product category authentically
+but not copy any real product's UI verbatim.
+
+---
+
 ### Per-archetype motion profiles
 
 Each archetype has a preferred motion tier and technique. The architect phase commits to one; the schema
@@ -757,6 +1309,7 @@ vision critic (#882). Any hit is a finding. Each item is phrased so it maps to a
 | N21 | Static hero with no motion or visual interest — a poster, not an experience; inappropriate for archetype | critic (vision) |
 | N22 | Motion that fights readability: looping animations over primary text, excessive parallax, or more than two simultaneous motion elements in the hero | critic (vision + motion layer) |
 | N23 | jQuery-era motion effects: bouncing, sliding content in from offscreen, accordion animations everywhere, spinning decorative elements | critic (vision) |
+| N24 | Static product mock: `product_mock.type` committed in spec but the rendered hero has a browser-chrome wrapper with no CSS animation, hover state, or JS-driven state change | linter (`checkProductMock`) + critic (vision) | <!-- Added: forge#1045 -->
 
 ---
 
@@ -813,3 +1366,4 @@ Per the design-bench "same model" rule: both arm A and arm B use the same genera
 | `2026.2` | 2026-06 | Initial committed corpus: 5 seed references, 5 archetypes, 12 negatives, 4 effect-usage patterns. |
 | `2026.3` | 2026-06 | Added craft vocabulary (8 categories with CSS examples), per-archetype craft profiles table, negatives N13–N20 (#1047). Schema extended with `craft` object and `surface_depth` rubric dimension. |
 | `2026.4` | 2026-06 | Added hero motion vocabulary (Tier 1 CSS-only, Tier 2 SVG+JS, Tier 3 video placeholders with CSS examples), per-archetype motion profiles table, negatives N21–N23 (#1043). Schema extended with `motion.tier`, `motion.hero_technique`, `motion.video_placeholder` fields and `motion` rubric dimension. |
+| `2026.5` | 2026-06 | Added interactive product mock vocabulary (5 product types with CSS/JS interaction examples), per-product-type mock profiles table, negative N24 (#1045). Schema extended with `product_mock` field. |

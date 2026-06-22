@@ -30,12 +30,18 @@ deterministic ones; the rest are left to the vision critic.
 | **N5** | A single radius applied to everything, or off-scale radii | BLOCKING when a multi-token `radius.scale` exists | `checkRadius` |
 | **N6** | Default Tailwind palette (slate/gray/zinc/neutral/indigo/violet) used as the brand color | BLOCKING when `no-default-tailwind-palette` is set | `checkPalette` |
 | **N7** | The boilerplate skeleton: hero → 3-cards → testimonial → CTA, in that order | BLOCKING when `layout_grammar.sections` exists | `checkSectionSkeleton` |
+| **N24** | Static product mock: `product_mock.type` is committed (not `"none"`) but the rendered hero has a `.product-window` or `.mock-*` element with no `animation`, `transition`, or JS `addEventListener` present <!-- Added: forge#1045 --> | BLOCKING when `product_mock.type` is set and not `"none"` | `checkProductMock` |
 | — | Off-scale spacing (padding/margin/gap not on `spacing.scale`) | WARNING | `checkSpacing` |
 | — | Contrast: `color.foreground` vs `color.background` below `acceptance.a11y.contrast_min` | BLOCKING when a contrast floor is declared | `checkContrast` |
 
+**Opt-in trigger for N24**: `product_mock.type` present in spec and not `"none"`. When `product_mock.type: "none"`,
+N24 is skipped entirely — the architect deliberately opted out of a mock, and no check is needed.
+
 **Out of scope** (vision-critic-owned, #882): N3 (everything centered), N8 (stock illustration / generic 3D),
 N9 (glassmorphism overuse), N10 (no visual hierarchy), N11 (abstract copy / no product shown),
-N12 (decorative effects that serve nothing). These require perceptual judgement and are not deterministically checkable.
+N12 (decorative effects that serve nothing), N24 perceptual quality (whether the 2 interactions feel right — the critic
+judges that; the linter only checks that interaction signals are present at all). These require perceptual judgement
+and are not deterministically checkable.
 N12 / effect justification specifically is governed by the [effects-appropriateness doctrine](effects-appropriateness.md) (#885)
 and judged by the vision critic (#882) against the per-section `justification`; the perf gate (#875) owns the hard `budget`. The linter stays out.
 
@@ -47,7 +53,8 @@ archetype. A check escalates to `BLOCKING` when the spec opts in via:
 - `color.rules` — e.g. `"no-default-tailwind-palette"` (gates N6/N1), `"contrast>=4.5"` (gates contrast).
 - `negatives[]` — e.g. `"N6"`, `"N7"` (raw IDs, `{ "id": "N6" }` objects, or descriptive strings are all accepted).
 - Presence of the relevant token field — a multi-entry `radius.scale` opts N5 in; `layout_grammar.sections` opts N7 in;
-  a committed non-default `typography.display_family` opts N2 in; `acceptance.a11y.contrast_min` opts contrast in.
+  a committed non-default `typography.display_family` opts N2 in; `acceptance.a11y.contrast_min` opts contrast in;
+  `product_mock.type` set to any value other than `"none"` opts N24 in.
 
 `--strict` forces **every** deterministic check to block regardless of spec opt-in.
 
