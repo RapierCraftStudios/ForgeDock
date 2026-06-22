@@ -7,7 +7,7 @@
 > the effects-appropriateness layer (#885); the corpus pages are the benchmark's arm **C** (#878);
 > the craft vocabulary feeds the CSS component library (#1048); the hero motion vocabulary feeds `motion` in the schema (#881).
 >
-> Issues: #880 (initial corpus), #1047 (craft vocabulary extension — `corpus_version` `2026.3`), #1043 (hero motion vocabulary — `corpus_version` `2026.4`), #1046 (scroll-driven narrative vocabulary — `corpus_version` `2026.6`).
+> Issues: #880 (initial corpus), #1047 (craft vocabulary extension — `corpus_version` `2026.3`), #1043 (hero motion vocabulary — `corpus_version` `2026.4`), #1046 (scroll-driven narrative vocabulary — `corpus_version` `2026.6`), #1048 (CSS component library foundations — foundation file column in per-archetype table).
 
 ## Purpose
 
@@ -1621,13 +1621,13 @@ Each archetype has a specific craft posture across four dimensions. These are th
 commits to them and deviates only with explicit rationale. The `craft` object in the
 [schema](design-spec-schema.md) carries these values.
 
-| Archetype | Radius system | Button style | Divider style | Icon treatment |
-|---|---|---|---|---|
-| `editorial-typographic` | generous (16px card / 12px input / 8px button) | serif-label text button or outlined; subtle warm shadow | gradient fade to transparent at edges | tinted squares or rectangles at low opacity |
-| `technical-dense` | tight (8px card / 6px input / 4px button) | sharp, mono-label; no gradient; high-contrast border on ghost | hairline 1px solid at 8% opacity | monochrome, small (16px), uniform |
-| `minimal-luxury` | mixed (20px card / 12px input / 8px button) | ghost or borderless; minimal fill; no visible shadow | spacing only — no visible line between sections | none or near-invisible; no colored backgrounds |
-| `bold-brutalist` | zero or max (0px or 9999px — never in between) | high-contrast; heavy border (2px+); flat fill; no shadow | bold solid line (2–3px) or full color-block section break | bold, oversized (32px+); high contrast; no tinted backgrounds |
-| `warm-photographic` | soft (12px card / 8px input / 6px button) | rounded; warm-tinted shadow; soft fill matching photo palette | photo-edge bleed or subtle warm-tinted rule | warm-tinted circles; 24px; soft drop shadow |
+| Archetype | Radius system | Button style | Divider style | Icon treatment | Foundation file |
+|---|---|---|---|---|---|
+| `editorial-typographic` | generous (16px card / 12px input / 8px button) | serif-label text button or outlined; subtle warm shadow | gradient fade to transparent at edges | tinted squares or rectangles at low opacity | [`editorial.css`](foundations/editorial.css) <!-- Added: forge#1048 --> |
+| `technical-dense` | tight (8px card / 6px input / 4px button) | sharp, mono-label; no gradient; high-contrast border on ghost | hairline 1px solid at 8% opacity | monochrome, small (16px), uniform | [`technical.css`](foundations/technical.css) <!-- Added: forge#1048 --> |
+| `minimal-luxury` | mixed (20px card / 12px input / 8px button) | ghost or borderless; minimal fill; no visible shadow | spacing only — no visible line between sections | none or near-invisible; no colored backgrounds | [`minimal-luxury.css`](foundations/minimal-luxury.css) <!-- Added: forge#1048 --> |
+| `bold-brutalist` | zero or max (0px or 9999px — never in between) | high-contrast; heavy border (2px+); flat fill; no shadow | bold solid line (2–3px) or full color-block section break | bold, oversized (32px+); high contrast; no tinted backgrounds | [`brutalist.css`](foundations/brutalist.css) <!-- Added: forge#1048 --> |
+| `warm-photographic` | soft (12px card / 8px input / 6px button) | rounded; warm-tinted shadow; soft fill matching photo palette | photo-edge bleed or subtle warm-tinted rule | warm-tinted circles; 24px; soft drop shadow | [`warm-photo.css`](foundations/warm-photo.css) <!-- Added: forge#1048 --> |
 
 ---
 

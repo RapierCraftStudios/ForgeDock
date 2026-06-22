@@ -4,6 +4,7 @@
 > Consumes the [`FORGE:DESIGN_SPEC` schema](design-spec-schema.md) (#881); enforces the machine-checkable
 > negatives from the [reference corpus](reference-corpus.md) (#880); invoked by the
 > render → critique loop (#882) and/or quality-gate.
+> Extended: `checkFoundationUsage` check for per-archetype CSS foundation class usage (#1048).
 
 ## Purpose
 
@@ -34,6 +35,7 @@ deterministic ones; the rest are left to the vision critic.
 | **N25** | Truncated narrative: `scroll_narrative` is committed in spec but the rendered page has ≤1 below-fold section (`<section>` or `<div role="region">` elements outside the first/hero section) <!-- Added: forge#1046 — spec only; .mjs implementation follows --> | BLOCKING when `scroll_narrative.section_count_min` is set | `checkScrollNarrative` |
 | **N26** | Missing social proof: `scroll_narrative.social_proof_section` is committed (not `"none"`) but no element with class `section-social-proof`, `social-proof`, or `[data-section="social-proof"]` is present <!-- Added: forge#1046 — spec only; .mjs implementation follows --> | BLOCKING when `scroll_narrative.social_proof_section` is set and not `"none"` | `checkSocialProof` |
 | **N27** | Single CTA: `scroll_narrative.cta_placements_min` is ≥ 2 but the rendered page has fewer than 2 elements matching `.btn-primary`, `.cta-button`, `[data-cta]`, or `<a>` with class containing `cta` <!-- Added: forge#1046 — spec only; .mjs implementation follows --> | BLOCKING when `scroll_narrative.cta_placements_min` ≥ 2 | `checkCTACount` |
+| — | Foundation class usage: a foundation CSS file was injected (Stage 3, #1048) but none of `.btn`, `.card`, `.badge`, `.input` appear in the generated HTML — generator replaced foundation classes with Tailwind equivalents <!-- Added: forge#1048 --> | WARNING when `meta.archetype` maps to a known foundation file | `checkFoundationUsage` |
 | — | Off-scale spacing (padding/margin/gap not on `spacing.scale`) | WARNING | `checkSpacing` |
 | — | Contrast: `color.foreground` vs `color.background` below `acceptance.a11y.contrast_min` | BLOCKING when a contrast floor is declared | `checkContrast` |
 
@@ -74,7 +76,8 @@ archetype. A check escalates to `BLOCKING` when the spec opts in via:
   `product_mock.type` set to any value other than `"none"` opts N24 in;
   `scroll_narrative.section_count_min` present opts N25 in;
   `scroll_narrative.social_proof_section` set to any value other than `"none"` opts N26 in;
-  `scroll_narrative.cta_placements_min` ≥ 2 opts N27 in.
+  `scroll_narrative.cta_placements_min` ≥ 2 opts N27 in;
+  `meta.archetype` matching a known foundation archetype opts `checkFoundationUsage` in (WARNING only — see #1048). <!-- Added: forge#1048 -->
 
 `--strict` forces **every** deterministic check to block regardless of spec opt-in.
 
