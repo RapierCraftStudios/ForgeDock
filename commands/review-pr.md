@@ -1180,7 +1180,7 @@ if [ "$IS_FIRST_TIME_CONTRIBUTOR" = "true" ] && [ "$WELCOME_ENABLED" != "false" 
 
     gh pr comment "$ARGUMENTS" --body "## Welcome to ${PROJECT_NAME_WELCOME}! 🎉
 
-Hi @${PR_AUTHOR} — this looks like your first merged contribution here. Thanks for opening a PR!
+Hi @${PR_AUTHOR} — this looks like your first contribution here. Thanks for opening a PR!
 
 ### What just happened
 
