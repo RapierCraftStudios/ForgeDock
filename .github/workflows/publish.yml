@@ -6,6 +6,7 @@ on:
     paths:
       - 'commands/**'
       - 'bin/**'
+      - '.claude-plugin/**'
       - 'docs/**'
       - 'scripts/**'
       - 'templates/**'
