@@ -1,0 +1,44 @@
+name: Cross-Publish Articles
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'docs/articles/**'
+
+jobs:
+  publish:
+    # Prevent re-trigger from the commit-back step in this workflow
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Use Node.js 24
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24
+
+      - name: Publish articles to dev.to and Hashnode
+        env:
+          DEVTO_API_KEY: ${{ secrets.DEVTO_API_KEY }}
+          HASHNODE_ACCESS_TOKEN: ${{ secrets.HASHNODE_ACCESS_TOKEN }}
+          HASHNODE_PUBLICATION_ID: ${{ secrets.HASHNODE_PUBLICATION_ID }}
+        run: node bin/cross-publish.mjs
+
+      - name: Commit updated frontmatter and publish log
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+          git add docs/articles/ content/publish-log.json
+
+          if git diff --cached --quiet; then
+            echo "No changes to commit — all articles were already published"
+          else
+            git commit -m "chore(content): mark articles as published, update publish log [skip ci]"
+            git push
+          fi
