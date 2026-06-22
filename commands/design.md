@@ -149,6 +149,7 @@ the structured fields:
 | Pastes a video URL | `feedback_type: asset`, `asset_url: <url>`, `section_target: "hero"` |
 | "make it feel faster / more urgent" | `feedback_type: emotion`, `emotion_target: speed`, `modification: "increase motion intensity; tighten headline tracking"` |
 | "add our logo" + SVG URL | `feedback_type: asset`, `asset_url: <url>`, `section_target: "nav"`, `modification: "replace text logo with SVG; adjust sizing"` |
+| Provides brand hex colors (e.g. "#1a1a2e") | `feedback_type: asset`, `asset_url: none`, `section_target: "all"`, `modification: "update CSS custom properties: --color-accent: #… --color-bg: #…"` |
 | Describes a layout change | `feedback_type: direction`, `modification: <parsed description>` |
 | Freeform complaint | `feedback_type: freeform`, `freeform_notes: <verbatim>`, `modification: <best-effort parse>` |
 | "looks good" / "ship it" / affirmative | `satisfied: yes` → proceed to Stage 5 without re-generation |
