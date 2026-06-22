@@ -1176,6 +1176,92 @@ async function install() {
         step.note(cyan(destPath));
       },
     },
+    {
+      label: "Writing Aider conventions file",
+      async run(step) {
+        // Write ~/.aider-forge.md if aider is on PATH.
+        // Non-fatal — skip gracefully when aider is not installed.
+        let aiderFound = false;
+        try {
+          execSync("aider --version", { stdio: "ignore", timeout: 5000 });
+          aiderFound = true;
+        } catch {
+          // aider not found or errored — skip
+        }
+        if (!aiderFound) {
+          step.skip("aider not found on PATH");
+          return;
+        }
+
+        const AIDER_FORGE_PATH = join(HOME, ".aider-forge.md");
+        const AIDER_FORGE_SENTINEL =
+          "<!-- ForgeDock managed — do not remove this line -->";
+
+        // Skip if already present (content not stale — sentinel check only).
+        if (existsSync(AIDER_FORGE_PATH)) {
+          const existing = readFileSync(AIDER_FORGE_PATH, "utf-8");
+          if (existing.includes(AIDER_FORGE_SENTINEL)) {
+            // Regenerate to pick up FORGE_HOME path changes.
+            // Falls through to write below.
+          } else {
+            step.skip("~/.aider-forge.md exists but was not written by ForgeDock — skipping");
+            return;
+          }
+        }
+
+        const safeForgeHome = shellEscapeDoubleQuotedPath(FORGE_HOME);
+        const conventionsContent = [
+          AIDER_FORGE_SENTINEL,
+          "# ForgeDock — Aider Conventions",
+          "",
+          "You are an AI coding agent running the ForgeDock autonomous development",
+          "pipeline. ForgeDock uses GitHub as a structured knowledge graph: every",
+          "pipeline stage writes a structured annotation (FORGE:INVESTIGATOR,",
+          "FORGE:CONTRACT, FORGE:BUILDER, etc.) to GitHub issue comments and reads",
+          "prior annotations to reconstruct context after compaction or session restart.",
+          "",
+          "## Runtime: Aider",
+          "",
+          "You are operating as an Aider agent. ForgeDock was designed for Claude Code,",
+          "but the FORGE annotation protocol is transport-agnostic. Translate Claude",
+          "Code tool invocations as follows:",
+          "",
+          "| Claude Code | Aider equivalent |",
+          "|-------------|-----------------|",
+          `| \`Skill(\"work-on\", args=\"123\")\` | \`/read ${safeForgeHome}/commands/work-on.md\` then execute |`,
+          `| \`Skill(\"review-pr\", args=\"456\")\` | \`/read ${safeForgeHome}/commands/review-pr.md\` then execute |`,
+          `| \`Skill(\"quality-gate\")\` | \`/read ${safeForgeHome}/commands/quality-gate.md\` then execute |`,
+          "| `Bash(\"...\")` | `/run ...` in Aider |",
+          "| `Read(\'path\')` | Read file directly |",
+          "| `Grep(pattern)` | `/run rg 'pattern' path` |",
+          "| `Glob(\"**/*.md\")` | `/run find . -name \"*.md\"` |",
+          "| `WebFetch(url)` | `/run curl -s url` |",
+          "| `Agent(...)` | Continue the sub-task yourself |",
+          "",
+          "## Entry Points",
+          "",
+          "Load a pipeline command on demand with `/read`:",
+          "",
+          "```",
+          `/read ${safeForgeHome}/commands/work-on.md`,
+          "```",
+          "",
+          "## GitHub Operations",
+          "",
+          "Use `/run gh ...` for every GitHub operation. See `docs/AIDER.md` for full",
+          "examples of label management and FORGE annotation writing.",
+          "",
+          "## Reference",
+          "",
+          `- Full pipeline spec: \`${safeForgeHome}/commands/work-on.md\``,
+          `- Annotation protocol: \`${safeForgeHome}/docs/FORGE-PROTOCOL.md\``,
+          `- Aider adapter guide: \`${safeForgeHome}/docs/AIDER.md\``,
+        ].join("\n");
+
+        atomicWriteFile(AIDER_FORGE_PATH, conventionsContent + "\n");
+        step.note(cyan(AIDER_FORGE_PATH));
+      },
+    },
   ]);
 
   if (result.ok) {
@@ -1271,6 +1357,31 @@ async function uninstall() {
     console.log("");
     console.log(`Done. Removed: ${scriptsRemoved} scripts.`);
     console.log("");
+  }
+
+  // Remove ~/.aider-forge.md if written by ForgeDock (identified by sentinel line).
+  const aiderForgePath = join(HOME, ".aider-forge.md");
+  const aiderForgeSentinel = "<!-- ForgeDock managed — do not remove this line -->";
+  try {
+    if (existsSync(aiderForgePath)) {
+      const aiderContent = readFileSync(aiderForgePath, "utf-8");
+      if (aiderContent.includes(aiderForgeSentinel)) {
+        unlinkSync(aiderForgePath);
+        console.log(
+          `  ${RED}Removed${RESET}: ~/.aider-forge.md`,
+        );
+      } else {
+        console.log(
+          `  ✔  ~/.aider-forge.md not managed by ForgeDock — skipping`,
+        );
+      }
+    }
+  } catch (err) {
+    if (err.code !== "ENOENT") {
+      console.log(
+        `  ${YELLOW}⚠${RESET}  Could not remove ~/.aider-forge.md — remove it manually.`,
+      );
+    }
   }
 
   // Remove the SessionStart hook from ~/.claude/settings.json
