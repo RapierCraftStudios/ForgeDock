@@ -345,6 +345,8 @@ Pick the top `FIX_LIMIT` issues by this priority:
 - Issues already in `workflow:building` or `workflow:in-review`
 - Issues with open dependencies
 
+> **Dependency upgrades**: `/autopilot` does not detect outdated packages. Use `/upgrade-deps` for dependency freshness — it runs the same `/work-on` pipeline but sources from package registries (npm, pip, cargo) rather than production health signals.
+
 ```bash
 # Get candidates
 gh issue list --state open --label "bug" --limit 50 --json number,title,labels,createdAt \

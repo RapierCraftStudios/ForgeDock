@@ -178,6 +178,7 @@ Labels track workflow state (`workflow:investigating`, `workflow:building`, `wor
 | `/rollback` | Automated revert PR for production incidents |
 | `/incident-response` | P0 coordination: hotfix, timeline, postmortem |
 | `/autopilot` | Autonomous improvement: recon → triage → fix |
+| `/upgrade-deps` | Autonomous dependency upgrade pipeline: detect → issue → /work-on → merge |
 | `/pipeline-health` | Self-analysis and prompt tuning |
 | `/security-audit` | 4-phase security posture audit |
 | `/qa-sweep` | Full platform QA via browser automation |
