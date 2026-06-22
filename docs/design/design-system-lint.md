@@ -31,17 +31,34 @@ deterministic ones; the rest are left to the vision critic.
 | **N6** | Default Tailwind palette (slate/gray/zinc/neutral/indigo/violet) used as the brand color | BLOCKING when `no-default-tailwind-palette` is set | `checkPalette` |
 | **N7** | The boilerplate skeleton: hero → 3-cards → testimonial → CTA, in that order | BLOCKING when `layout_grammar.sections` exists | `checkSectionSkeleton` |
 | **N24** | Static product mock: `product_mock.type` is committed (not `"none"`) but the rendered hero has a `.product-window` or `.mock-*` element with no `animation`, `transition`, or JS `addEventListener` present <!-- Added: forge#1045 --> | BLOCKING when `product_mock.type` is set and not `"none"` | `checkProductMock` |
+| **N25** | Truncated narrative: `scroll_narrative` is committed in spec but the rendered page has ≤1 below-fold section (`<section>` or `<div role="region">` elements outside the first/hero section) <!-- Added: forge#1046 — spec only; .mjs implementation follows --> | BLOCKING when `scroll_narrative.section_count_min` is set | `checkScrollNarrative` |
+| **N26** | Missing social proof: `scroll_narrative.social_proof_section` is committed (not `"none"`) but no element with class `section-social-proof`, `social-proof`, or `[data-section="social-proof"]` is present <!-- Added: forge#1046 — spec only; .mjs implementation follows --> | BLOCKING when `scroll_narrative.social_proof_section` is set and not `"none"` | `checkSocialProof` |
+| **N27** | Single CTA: `scroll_narrative.cta_placements_min` is ≥ 2 but the rendered page has fewer than 2 elements matching `.btn-primary`, `.cta-button`, `[data-cta]`, or `<a>` with class containing `cta` <!-- Added: forge#1046 — spec only; .mjs implementation follows --> | BLOCKING when `scroll_narrative.cta_placements_min` ≥ 2 | `checkCTACount` |
 | — | Off-scale spacing (padding/margin/gap not on `spacing.scale`) | WARNING | `checkSpacing` |
 | — | Contrast: `color.foreground` vs `color.background` below `acceptance.a11y.contrast_min` | BLOCKING when a contrast floor is declared | `checkContrast` |
 
 **Opt-in trigger for N24**: `product_mock.type` present in spec and not `"none"`. When `product_mock.type: "none"`,
 N24 is skipped entirely — the architect deliberately opted out of a mock, and no check is needed.
 
+**Opt-in trigger for N25**: `scroll_narrative.section_count_min` present in spec. The check counts `<section>`
+(and `<div role="region">`) elements in the rendered HTML; when the count is below `section_count_min`, the check
+blocks. When `scroll_narrative` is absent from the spec, N25 is skipped.
+
+**Opt-in trigger for N26**: `scroll_narrative.social_proof_section` present in spec and not `"none"`. Checks for
+social proof element presence using class-name patterns (`section-social-proof`, `social-proof`) and
+`[data-section="social-proof"]` attribute. When `social_proof_section: "none"`, the architect deliberately opted
+out and N26 is skipped.
+
+**Opt-in trigger for N27**: `scroll_narrative.cta_placements_min` ≥ 2. Counts CTA elements using class-name
+patterns (`.btn-primary`, `.cta-button`, `[data-cta]`, and `<a>` elements with class containing `cta`). When
+`cta_placements_min` is absent or < 2, N27 is skipped.
+
 **Out of scope** (vision-critic-owned, #882): N3 (everything centered), N8 (stock illustration / generic 3D),
 N9 (glassmorphism overuse), N10 (no visual hierarchy), N11 (abstract copy / no product shown),
 N12 (decorative effects that serve nothing), N24 perceptual quality (whether the 2 interactions feel right — the critic
-judges that; the linter only checks that interaction signals are present at all). These require perceptual judgement
-and are not deterministically checkable.
+judges that; the linter only checks that interaction signals are present at all), N25/N26/N27 narrative quality
+(whether the section content is compelling — the critic judges that; the linter only checks structural presence).
+These require perceptual judgement and are not deterministically checkable.
 N12 / effect justification specifically is governed by the [effects-appropriateness doctrine](effects-appropriateness.md) (#885)
 and judged by the vision critic (#882) against the per-section `justification`; the perf gate (#875) owns the hard `budget`. The linter stays out.
 
@@ -54,7 +71,10 @@ archetype. A check escalates to `BLOCKING` when the spec opts in via:
 - `negatives[]` — e.g. `"N6"`, `"N7"` (raw IDs, `{ "id": "N6" }` objects, or descriptive strings are all accepted).
 - Presence of the relevant token field — a multi-entry `radius.scale` opts N5 in; `layout_grammar.sections` opts N7 in;
   a committed non-default `typography.display_family` opts N2 in; `acceptance.a11y.contrast_min` opts contrast in;
-  `product_mock.type` set to any value other than `"none"` opts N24 in.
+  `product_mock.type` set to any value other than `"none"` opts N24 in;
+  `scroll_narrative.section_count_min` present opts N25 in;
+  `scroll_narrative.social_proof_section` set to any value other than `"none"` opts N26 in;
+  `scroll_narrative.cta_placements_min` ≥ 2 opts N27 in.
 
 `--strict` forces **every** deterministic check to block regardless of spec opt-in.
 

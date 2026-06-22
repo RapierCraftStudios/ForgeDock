@@ -7,7 +7,7 @@
 > [reference corpus](reference-corpus.md) (#880).
 > Extended: `craft` object + `surface_depth` rubric dimension (#1047); `motion.tier`, `motion.hero_technique`,
 > `motion.video_placeholder` fields + `motion` rubric dimension (#1043); `product_mock` field + `product_mock`
-> rubric dimension (#1045).
+> rubric dimension (#1045); `scroll_narrative` object + `scroll_narrative` rubric dimension (#1046).
 >
 > Registered as a FORGE annotation type in [`../FORGE-PROTOCOL.md`](../FORGE-PROTOCOL.md).
 
@@ -28,7 +28,7 @@ from nowhere. Rationale → spec → page.
   "meta": {
     "product": "Voltage",            // anonymized brief name
     "archetype": "technical-dense",  // one of the corpus archetypes — committed, not blended
-    "corpus_version": "2026.2",      // which grammar snapshot this was designed against
+    "corpus_version": "2026.6",      // which grammar snapshot this was designed against
     "rationale_ref": "<issue/comment URL of the FORGE:DESIGN_RATIONALE that produced this>"
   },
   "typography": {
@@ -100,6 +100,19 @@ from nowhere. Rationale → spec → page.
     ],
     "css_only": true                 // true = CSS-only interactions (preferred) | false = lightweight vanilla JS required (e.g. typing animation, counter)
   },
+  "scroll_narrative": {              // see reference-corpus.md#below-the-fold-narrative-vocabulary — #1046
+    "section_sequence": [            // committed section order below the fold (derived from rationale step 3 — communication hierarchy)
+      "problem-context",             // section type ids from the corpus scroll narrative vocabulary
+      "solution-showcase",
+      "social-proof",
+      "deep-features",
+      "final-cta"
+    ],
+    "section_count_min": 5,          // total sections including hero — MUST be ≥5 (triggers N25 when < 5)
+    "sticky_nav": true,              // true = nav transforms on scroll (transparent → solid); false = static nav
+    "social_proof_section": "metrics", // logos | metrics | testimonials | none — "none" skips N26 check
+    "cta_placements_min": 2          // minimum CTA count across the full page — must be ≥2 (triggers N27 when < 2)
+  },
   "layout_grammar": {
     // ordered sections with purpose + density — MUST NOT be the boilerplate skeleton
     // (hero → 3 cards → testimonial → CTA). Sections derive from the rationale's communication hierarchy.
@@ -149,11 +162,16 @@ from nowhere. Rationale → spec → page.
 | `product_mock.type` (committed, not `none`) | static product screenshot in a browser frame with no interactions — the "screenshot poster" tell (N24) |
 | `product_mock.interactions` (exactly 2 selected) | mock with too many interactions (demo feel) or zero interactions (static poster) |
 | `product_mock.css_only: false` acknowledged explicitly | lightweight JS used without acknowledgement; framework dependency creeping in |
+| `scroll_narrative.section_count_min` (≥5) | hero-only page with no narrative arc — the "above-the-fold only" tell (N25) |
+| `scroll_narrative.social_proof_section` (committed, not `none`) | missing social proof section — page makes claims without third-party validation (N26) |
+| `scroll_narrative.cta_placements_min` (≥2) | single CTA at hero only — convinced visitors at the bottom of the page have nowhere to convert (N27) |
+| `scroll_narrative.sticky_nav` (committed) | nav disappears on scroll — brand and primary CTA lost mid-narrative |
 
 ## Benchmark rubric dimensions
 
 The ABC benchmark (#878) evaluates generated pages on a 1–5 rubric. The `craft` field extension (#1047) added
-two dimensions (`surface_depth`, `craft`); the `motion` field extension (#1043) adds a seventh dimension.
+two dimensions (`surface_depth`, `craft`); the `motion` field extension (#1043) adds a seventh dimension;
+the `scroll_narrative` field extension (#1046) adds a ninth dimension.
 
 | Dimension | What it measures | 1 (worst) | 5 (best) |
 |---|---|---|---|
@@ -165,11 +183,13 @@ two dimensions (`surface_depth`, `craft`); the `motion` field extension (#1043) 
 | `effects` | Effect appropriateness and restraint | Gratuitous 3D/parallax on non-visual product | Effects justified by product nature, performance-budgeted |
 | `motion` | Hero vitality — appropriate motion technique committed and executed per archetype | Static hero (poster) — N21 hit; or jQuery-era effects — N23 hit | Archetype-appropriate tier selected, `prefers-reduced-motion` honored, at most 2 simultaneous motion elements |
 | `product_mock` | Product mock interactivity — browser-chrome wrapper with live micro-interactions vs. static screenshot | No mock present, or mock with no interaction — N24 hit | Product type correctly identified, 2 interactions committed from vocabulary, CSS-only preferred, `prefers-reduced-motion` honored |
+| `scroll_narrative` | Full-page narrative completeness — below-fold section depth, social proof presence, CTA rhythm | Hero-only page, no below-fold narrative, single CTA — N25/N26/N27 hit | ≥5 sections committed and generated, social proof section present and animated, ≥2 CTAs placed at narrative milestones |
 
 The `craft` and `surface_depth` dimensions are new in `corpus_version: 2026.3` (#1047). The `motion` dimension
 is new in `corpus_version: 2026.4` (#1043). The `product_mock` dimension is new in `corpus_version: 2026.5`
-(#1045). Past benchmark runs scored under a 4-dimension rubric (no `surface_depth`, `craft`, `motion`, or
-`product_mock`). Comparison across versions must note the rubric version.
+(#1045). The `scroll_narrative` dimension is new in `corpus_version: 2026.6` (#1046). Past benchmark runs scored
+under a 4-dimension rubric (no `surface_depth`, `craft`, `motion`, `product_mock`, or `scroll_narrative`).
+Comparison across versions must note the rubric version.
 
 ## Section-level surgical re-generation contract
 

@@ -7,7 +7,7 @@
 > the effects-appropriateness layer (#885); the corpus pages are the benchmark's arm **C** (#878);
 > the craft vocabulary feeds the CSS component library (#1048); the hero motion vocabulary feeds `motion` in the schema (#881).
 >
-> Issues: #880 (initial corpus), #1047 (craft vocabulary extension — `corpus_version` `2026.3`), #1043 (hero motion vocabulary — `corpus_version` `2026.4`).
+> Issues: #880 (initial corpus), #1047 (craft vocabulary extension — `corpus_version` `2026.3`), #1043 (hero motion vocabulary — `corpus_version` `2026.4`), #1046 (scroll-driven narrative vocabulary — `corpus_version` `2026.6`).
 
 ## Purpose
 
@@ -23,7 +23,7 @@ and every revision bumps a `corpus_version` so [design-memory](design-memory.md)
 now vs. then." The `corpus_version` here is the same anchor the [schema](design-spec-schema.md) records in
 `meta.corpus_version` for every generated page.
 
-**Current `corpus_version`: `2026.4`**
+**Current `corpus_version`: `2026.6`**
 
 ---
 
@@ -1244,6 +1244,359 @@ of both reads as busy, not polished.
 
 ---
 
+## Below-the-fold narrative vocabulary — scroll-driven full-page structure <!-- Added: forge#1046 -->
+
+> **Status:** Committed extension — `corpus_version: 2026.6` (#1046).
+> Defines the scroll-driven narrative grammar for below-the-fold sections. Carried in the
+> `scroll_narrative` field of the [schema](design-spec-schema.md). Enforced by linter negatives N25–N27.
+> Committed by the architect at diary step 7.5 in the [rationale](design-architect-rationale.md).
+
+The hero hooks attention. The page builds a story. Every well-funded SaaS landing page that converts is a
+**scroll-driven narrative** — a sequence of sections that progressively reveal capability, social proof, and
+differentiation. A harness that only generates a hero is measuring one sentence of a speech.
+
+**The canonical narrative arc**:
+
+```
+Hero (hook) → Problem/context → Solution showcase → Social proof → Deep features → Final CTA
+```
+
+This is not the boilerplate skeleton (N7) — the boilerplate is `hero → 3-cards → testimonial → CTA`, a structural
+shortcut with no narrative logic. The scroll narrative is a **communication hierarchy made spatial**: each section
+exists because it answers the question raised by the previous one. The sections and their motion transitions are
+derived from the rationale's step 3 (communication hierarchy) — not chosen as decoration.
+
+**Below-the-fold motion rule**: all below-fold sections use Technique 1F (scroll-triggered fade-in) as the minimum.
+The motion vocabulary in `motion.vocabulary` carries the committed below-fold technique tokens; the hero technique
+in `motion.hero_technique` is separate and does not govern below-fold sections.
+
+**Minimum section count**: a generated page MUST include at least 4 sections below the fold (i.e., ≥5 sections
+total including the hero). Fewer sections means the narrative arc is truncated — the page is a hero with an
+afterthought, not a story.
+
+---
+
+### Scroll narrative section vocabulary
+
+Each section type in the narrative arc has a committed purpose and motion pattern. The architect selects from
+these in diary step 7.5 and records the chosen sequence in `scroll_narrative.section_sequence`.
+
+#### Section: `problem-context`
+
+**Purpose**: make the visitor feel seen — name the friction they live with. This is not a list of features;
+it is a reframe of the visitor's world before they discovered the product. High-density copy is appropriate here;
+this section earns the visitor's continued scroll.
+
+**Motion pattern**: `data-reveal` on the section container (Technique 1F). The contrast from the hero's kinetic
+energy to a sober, high-contrast statement section creates a felt transition — no additional motion needed.
+
+```html
+<section class="section-problem" data-reveal>
+  <div class="problem-statement">
+    <span class="problem-label">The problem</span>
+    <h2 class="problem-heading">…</h2>
+    <p class="problem-body">…</p>
+  </div>
+</section>
+```
+
+```css
+.section-problem { background: var(--bg-alt, rgba(0,0,0,.03)); }
+.problem-label {
+  display: block;
+  font-size: 0.75rem;
+  font-weight: 600;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--accent);
+  margin-bottom: 0.75rem;
+}
+```
+
+Archetype fit: all archetypes. Not skippable — the problem section is the narrative hinge.
+
+#### Section: `solution-showcase`
+
+**Purpose**: product enters. The product mock (committed in `product_mock`) and/or the core capability claim.
+This section should feel like a reveal — the solution arriving on screen in response to the named problem.
+
+**Motion pattern**: Staggered entrance for the feature grid (Technique 1G, `data-reveal` with `animation-delay`
+on each card). If a product mock is present, combine with mock entrance animations.
+
+```html
+<section class="section-solution" data-reveal>
+  <h2 class="solution-heading">…</h2>
+  <div class="feature-grid">
+    <div class="card" style="--card-delay: 0ms">…</div>
+    <div class="card" style="--card-delay: 80ms">…</div>
+    <div class="card" style="--card-delay: 160ms">…</div>
+    <div class="card" style="--card-delay: 240ms">…</div>
+  </div>
+</section>
+```
+
+```css
+.feature-grid .card {
+  animation: card-reveal 500ms cubic-bezier(.2,0,.0,1) var(--card-delay, 0ms) both;
+}
+@keyframes card-reveal {
+  from { opacity: 0; transform: translateY(20px); }
+  to   { opacity: 1; transform: none; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .feature-grid .card { animation: none; }
+}
+```
+
+Archetype fit: all archetypes. The stagger density scales with archetype — `minimal-luxury` uses 2–3 cards with
+generous spacing; `technical-dense` may use 4–6 compact rows.
+
+#### Section: `social-proof`
+
+**Purpose**: third-party validation. Logos, metrics, or testimonials — depending on the product's sales motion.
+Developer tools use logos + metrics (concrete, peer-validated); consumer-facing products use testimonials
+(emotional, relatable).
+
+**Motion patterns**: three sub-patterns, committed individually in `scroll_narrative.social_proof_type`:
+
+**Social proof type: `logos`** — a horizontal logo bar. Logos in grayscale on entry, color on hover.
+
+```html
+<section class="section-social-proof" data-reveal>
+  <p class="social-label">Trusted by teams at</p>
+  <div class="logo-bar">
+    <img class="logo" src="logo-a.svg" alt="Company A" width="80" height="24">
+    <img class="logo" src="logo-b.svg" alt="Company B" width="80" height="24">
+    <!-- … -->
+  </div>
+</section>
+```
+
+```css
+.logo-bar { display: flex; align-items: center; gap: 2.5rem; flex-wrap: wrap; }
+.logo {
+  filter: grayscale(1) opacity(.45);
+  transition: filter 300ms ease;
+}
+.logo:hover { filter: grayscale(0) opacity(1); }
+@media (prefers-reduced-motion: reduce) {
+  .logo { transition: none; }
+}
+```
+
+**Social proof type: `metrics`** — animated counters (Technique 2C) in a 3-column stat bar. Counters roll up
+on section entrance.
+
+```html
+<section class="section-social-proof" data-reveal>
+  <div class="metric-bar">
+    <div class="metric">
+      <span class="metric-value" data-counter data-target="50000">0</span>
+      <span class="metric-suffix">+</span>
+      <span class="metric-label">deployments per day</span>
+    </div>
+    <!-- … -->
+  </div>
+</section>
+```
+
+```css
+.metric-bar { display: grid; grid-template-columns: repeat(3, 1fr); gap: 2rem; }
+.metric-value {
+  font-size: 2.5rem;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+  letter-spacing: -0.03em;
+  color: var(--accent);
+}
+.metric-label { font-size: 0.875rem; color: rgba(var(--fg-rgb), .55); }
+```
+
+Counter JS: use Technique 2C from the [hero motion vocabulary](#2c-animated-counter-number-roll-up) — applies
+identically to below-fold sections via IntersectionObserver. No duplication of implementation.
+
+**Social proof type: `testimonials`** — a 2-column testimonial grid. Quote + attribution + company logo.
+
+```html
+<section class="section-social-proof" data-reveal>
+  <div class="testimonial-grid">
+    <figure class="testimonial-card">
+      <blockquote class="testimonial-quote">"…"</blockquote>
+      <figcaption class="testimonial-attr">
+        <img class="testimonial-avatar" src="avatar.jpg" alt="" width="32" height="32">
+        <span class="testimonial-name">Name</span>
+        <span class="testimonial-title">Title, Company</span>
+      </figcaption>
+    </figure>
+    <!-- … -->
+  </div>
+</section>
+```
+
+```css
+.testimonial-grid { display: grid; grid-template-columns: repeat(2, 1fr); gap: 1.5rem; }
+.testimonial-card {
+  padding: 1.5rem;
+  border: 1px solid rgba(var(--fg-rgb), .07);
+  border-radius: var(--radius-card, 16px);
+}
+.testimonial-quote {
+  font-size: 1rem;
+  line-height: 1.6;
+  color: rgba(var(--fg-rgb), .8);
+  margin: 0 0 1rem;
+}
+.testimonial-attr { display: flex; align-items: center; gap: 0.625rem; }
+.testimonial-avatar { border-radius: 50%; }
+.testimonial-name { font-weight: 500; font-size: 0.875rem; }
+.testimonial-title { font-size: 0.8125rem; color: rgba(var(--fg-rgb), .45); }
+```
+
+Archetype social proof defaults: `technical-dense` → `metrics` + `logos`; `warm-photographic` → `testimonials`;
+`editorial-typographic` → `testimonials` or `metrics`; `minimal-luxury` → `logos` (restrained, no counters);
+`bold-brutalist` → `metrics` (hard numbers, no softening quotes).
+
+#### Section: `deep-features`
+
+**Purpose**: capability depth for the already-convinced visitor. Higher density, more detail — this section
+converts the evaluator who scrolled past social proof and needs specifics.
+
+**Motion pattern**: `data-reveal` on the section; individual feature rows animate with alternating left/right
+entrance (staggered, 100ms apart). The alternation creates directional rhythm — not the same-direction stagger
+used in `solution-showcase`.
+
+```css
+[data-reveal-left] {
+  opacity: 0;
+  transform: translateX(-20px);
+  transition: opacity 500ms ease, transform 500ms ease;
+}
+[data-reveal-right] {
+  opacity: 0;
+  transform: translateX(20px);
+  transition: opacity 500ms ease, transform 500ms ease;
+}
+[data-reveal-left].is-visible,
+[data-reveal-right].is-visible { opacity: 1; transform: none; }
+@media (prefers-reduced-motion: reduce) {
+  [data-reveal-left], [data-reveal-right] { opacity: 1; transform: none; transition: none; }
+}
+```
+
+Archetype fit: `technical-dense` (high density, code examples, spec tables), `editorial-typographic`
+(prose + image alternating rhythm). Lighter treatment for `minimal-luxury` — 2 features max, generous spacing.
+
+#### Section: `final-cta`
+
+**Purpose**: the close. The second CTA placement in the scroll narrative — the visitor who reaches here
+is the most qualified. This section should feel like a resolved chord: the narrative arc has delivered, and now
+the invitation is clear and calm.
+
+**Motion pattern**: background color shift from page background to a tinted block on entrance; the CTA
+button receives a subtle pulse animation on first entrance only (not looping — looping reads as anxiety, not
+confidence).
+
+```html
+<section class="section-final-cta" data-reveal>
+  <h2 class="cta-heading">…</h2>
+  <p class="cta-subhead">…</p>
+  <a href="#" class="btn-primary btn-cta-final">Get started</a>
+</section>
+```
+
+```css
+.section-final-cta {
+  background: rgba(var(--accent-rgb), .04);
+  border-top: 1px solid rgba(var(--accent-rgb), .12);
+}
+.btn-cta-final {
+  animation: cta-entrance 600ms cubic-bezier(.2,0,.0,1) 300ms both;
+}
+@keyframes cta-entrance {
+  from { opacity: 0; transform: scale(.97); }
+  to   { opacity: 1; transform: none; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .btn-cta-final { animation: none; }
+}
+```
+
+**CTA rhythm rule**: every generated page MUST have at least 2 CTA placements — one in the hero section
+and one in the final-cta section. A page with a CTA only in the hero forces the convinced visitor to scroll
+back to convert. The `scroll_narrative.cta_placements_min` field enforces this constraint.
+
+---
+
+### Sticky navigation vocabulary
+
+The nav transforms on scroll: transparent → solid background, optionally with a height reduction and a shadow.
+This signals page depth and keeps the brand and primary CTA visible at all scroll positions.
+
+**Pattern**: a `scroll` event listener adds `.nav--scrolled` class when `scrollY > threshold`. The threshold
+is typically 80px (one viewport header height). CSS handles all the visual transitions — the JS is trivial.
+
+```html
+<nav class="site-nav" id="site-nav">
+  <a class="nav-logo" href="/">Brand</a>
+  <ul class="nav-links">…</ul>
+  <a href="#" class="nav-cta btn-primary">Get started</a>
+</nav>
+```
+
+```css
+.site-nav {
+  position: sticky;
+  top: 0;
+  z-index: 100;
+  padding: 1.25rem 2rem;
+  background: transparent;
+  border-bottom: 1px solid transparent;
+  transition: background 250ms ease, padding 250ms ease, border-color 250ms ease, box-shadow 250ms ease;
+}
+.site-nav.nav--scrolled {
+  background: rgba(var(--bg-rgb), .92);
+  backdrop-filter: blur(12px);
+  -webkit-backdrop-filter: blur(12px);
+  border-bottom-color: rgba(var(--fg-rgb), .07);
+  box-shadow: 0 1px 3px rgba(0,0,0,.06);
+  padding: 0.875rem 2rem;        /* shrinks on scroll */
+}
+@media (prefers-reduced-motion: reduce) {
+  .site-nav { transition: none; }
+}
+```
+
+```js
+// ~10 lines, no dependencies
+const nav = document.getElementById('site-nav');
+const THRESHOLD = 80;
+window.addEventListener('scroll', () => {
+  nav.classList.toggle('nav--scrolled', window.scrollY > THRESHOLD);
+}, { passive: true });
+```
+
+**Sticky nav decision rule**: sticky nav is appropriate for all archetypes when the page is longer than the
+viewport (i.e., when `scroll_narrative.section_count >= 5`). For `minimal-luxury` archetype: skip the
+`backdrop-filter` blur — it reads as glassmorphism, contradicting the clean-surface posture. Use a
+fully-opaque background instead.
+
+---
+
+### Per-archetype scroll narrative defaults
+
+Each archetype has a preferred below-fold narrative structure. These are defaults — deviate with explicit
+rationale. The architect commits the actual sequence in diary step 7.5.
+
+| Archetype | Default section sequence | Social proof type | Notes |
+|---|---|---|---|
+| `editorial-typographic` | hero → problem → solution → testimonials → deep-features → final-cta | `testimonials` | Narrative-forward; deep-features section is essay-style, not a grid |
+| `technical-dense` | hero → problem → solution → metrics+logos → deep-features → final-cta | `metrics` + `logos` | Spec and capability depth in deep-features; counters add social proof energy |
+| `minimal-luxury` | hero → solution → logos → final-cta | `logos` | Shorter is more premium; skip problem section if the brand is already known; ≤4 total sections acceptable |
+| `bold-brutalist` | hero → problem → solution → metrics → final-cta | `metrics` | No testimonials — softness contradicts the brutalist posture; hard numbers only |
+| `warm-photographic` | hero → problem → solution → testimonials → deep-features → final-cta | `testimonials` | Human narrative arc; testimonials are the emotional peak |
+
+---
+
 ## The axes of variation — the *archetypes* (this is where variance comes from)
 
 The corpus is **not one aesthetic**. Variance is achieved by sampling a coherent *archetype* per design and
@@ -1310,6 +1663,9 @@ vision critic (#882). Any hit is a finding. Each item is phrased so it maps to a
 | N22 | Motion that fights readability: looping animations over primary text, excessive parallax, or more than two simultaneous motion elements in the hero | critic (vision + motion layer) |
 | N23 | jQuery-era motion effects: bouncing, sliding content in from offscreen, accordion animations everywhere, spinning decorative elements | critic (vision) |
 | N24 | Static product mock: `product_mock.type` committed in spec but the rendered hero has a browser-chrome wrapper with no CSS animation, hover state, or JS-driven state change | linter (`checkProductMock`) + critic (vision) | <!-- Added: forge#1045 -->
+| N25 | Truncated narrative: page has ≤1 below-fold section — hero with an afterthought, not a scroll-driven story; `scroll_narrative` committed in spec | linter (`checkScrollNarrative`) <!-- Added: forge#1046 — spec only; .mjs implementation follows --> |
+| N26 | Missing social proof: `scroll_narrative.social_proof_section` is committed in spec but no social proof section is present in the rendered output | linter (`checkSocialProof`) <!-- Added: forge#1046 — spec only; .mjs implementation follows --> |
+| N27 | Single CTA: page has only one CTA element — `scroll_narrative.cta_placements_min` is ≥ 2 but only the hero CTA is present | linter (`checkCTACount`) <!-- Added: forge#1046 — spec only; .mjs implementation follows --> |
 
 ---
 
@@ -1367,3 +1723,4 @@ Per the design-bench "same model" rule: both arm A and arm B use the same genera
 | `2026.3` | 2026-06 | Added craft vocabulary (8 categories with CSS examples), per-archetype craft profiles table, negatives N13–N20 (#1047). Schema extended with `craft` object and `surface_depth` rubric dimension. |
 | `2026.4` | 2026-06 | Added hero motion vocabulary (Tier 1 CSS-only, Tier 2 SVG+JS, Tier 3 video placeholders with CSS examples), per-archetype motion profiles table, negatives N21–N23 (#1043). Schema extended with `motion.tier`, `motion.hero_technique`, `motion.video_placeholder` fields and `motion` rubric dimension. |
 | `2026.5` | 2026-06 | Added interactive product mock vocabulary (5 product types with CSS/JS interaction examples), per-product-type mock profiles table, negative N24 (#1045). Schema extended with `product_mock` field. |
+| `2026.6` | 2026-06 | Added below-the-fold narrative vocabulary (scroll narrative grammar, canonical section sequence, sticky nav pattern, social proof section types, CTA rhythm rule), per-archetype scroll narrative defaults table, negatives N25–N27 (#1046). Schema extended with `scroll_narrative` object and `scroll_narrative` rubric dimension. |
