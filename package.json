@@ -1,7 +1,7 @@
 {
   "name": "forgedock",
   "version": "1.0.16",
-  "description": "GitHub as a knowledge graph for AI agents. Autonomous dev pipeline for Claude Code.",
+  "description": "Structured autonomous pipeline commands for Claude Code — investigate, build, review, merge.",
   "bin": {
     "forgedock": "bin/forgedock.mjs"
   },
@@ -19,7 +19,13 @@
     "anthropic",
     "agentic-ai",
     "devtools",
-    "automation"
+    "automation",
+    "pipeline",
+    "cli",
+    "slash-commands",
+    "github-workflow",
+    "ai-development",
+    "agentic"
   ],
   "author": "RapierCraft Studios",
   "license": "AGPL-3.0",
