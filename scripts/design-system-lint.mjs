@@ -39,7 +39,8 @@
  *
  * Exit codes (matches scripts/verify-env-vars.sh):
  *   0 = pass (no blocking findings)   1 = blocking findings   2 = warnings only
- *   --baseline always exits 0.
+ *   --baseline always exits 0, including when the spec is unreadable or malformed.
+ *   --json always emits a JSON object on stdout, including on bad-spec errors (adds an "error" field).
  *
  * Example:
  *   node scripts/design-system-lint.mjs --spec design-spec.json --html out/index.html
@@ -846,6 +847,38 @@ function selftest() {
 }
 
 // ---------------------------------------------------------------------------
+// Exit helpers
+// ---------------------------------------------------------------------------
+
+/**
+ * Exits for an unusable-spec error while honoring the --baseline and --json contracts.
+ * Always writes `message` to stderr so the error is visible regardless of flags.
+ * If --json: writes a JSON error payload to stdout before exiting so consumers always
+ *   receive parseable output (shape matches the normal --json output plus an "error" field).
+ * If --baseline: exits 0 (the documented contract: "--baseline always exits 0").
+ * Otherwise: exits 2.
+ */
+function badSpecExit(opts, message) {
+  process.stderr.write(message + "\n");
+  if (opts.json) {
+    process.stdout.write(
+      JSON.stringify(
+        {
+          blocking: 0,
+          warnings: 0,
+          baseline: opts.baseline,
+          findings: [],
+          error: message,
+        },
+        null,
+        2,
+      ) + "\n",
+    );
+  }
+  process.exit(opts.baseline ? 0 : 2);
+}
+
+// ---------------------------------------------------------------------------
 // Main
 // ---------------------------------------------------------------------------
 
@@ -877,21 +910,22 @@ function main() {
   try {
     spec = JSON.parse(readFileSync(opts.spec, "utf8"));
   } catch (e) {
-    process.stderr.write(
-      `ERROR: could not read/parse --spec ${opts.spec}: ${e.message}\n`,
+    badSpecExit(
+      opts,
+      `ERROR: could not read/parse --spec ${opts.spec}: ${e.message}`,
     );
-    process.exit(2);
   }
   // JSON.parse accepts null/primitives/arrays as valid JSON; the check functions
   // all dereference spec.<field>, so a non-object spec (e.g. a literal `null`)
-  // would throw an uncaught TypeError. Degrade to the documented exit-2/WARNING.
+  // would throw an uncaught TypeError. Degrade gracefully via badSpecExit so that
+  // --baseline and --json contracts are honored (see badSpecExit above).
   if (!spec || typeof spec !== "object" || Array.isArray(spec)) {
     const kind =
       spec === null ? "null" : Array.isArray(spec) ? "array" : typeof spec;
-    process.stderr.write(
-      `WARNING: --spec ${opts.spec} is not a design-spec object (got ${kind}); skipping deterministic checks.\n`,
+    badSpecExit(
+      opts,
+      `WARNING: --spec ${opts.spec} is not a design-spec object (got ${kind}); skipping deterministic checks.`,
     );
-    process.exit(2);
   }
   try {
     htmlRaw = readFileSync(opts.html, "utf8");
