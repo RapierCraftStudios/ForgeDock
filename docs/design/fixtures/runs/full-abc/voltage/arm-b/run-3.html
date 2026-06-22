@@ -1,0 +1,568 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Voltage — Serverless AI Infrastructure</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <link href="https://fonts.googleapis.com/css2?family=DM+Sans:ital,opsz,wght@0,9..40,300;0,9..40,400;0,9..40,500;0,9..40,600;0,9..40,700;0,9..40,800;1,9..40,400&family=DM+Mono:wght@300;400;500&display=swap" rel="stylesheet" />
+  <style>
+    body { font-family: 'DM Sans', sans-serif; background: #050a14; color: #e8ecf4; }
+    .mono { font-family: 'DM Mono', monospace; }
+    .gradient-text {
+      background: linear-gradient(135deg, #38bdf8 0%, #818cf8 50%, #e879f9 100%);
+      -webkit-background-clip: text;
+      -webkit-text-fill-color: transparent;
+      background-clip: text;
+    }
+    .gradient-text-warm {
+      background: linear-gradient(135deg, #fb923c 0%, #f472b6 100%);
+      -webkit-background-clip: text;
+      -webkit-text-fill-color: transparent;
+      background-clip: text;
+    }
+    .surface { background: rgba(255,255,255,0.03); border: 1px solid rgba(255,255,255,0.08); }
+    .surface-hover:hover { background: rgba(255,255,255,0.05); border-color: rgba(255,255,255,0.14); }
+    .glow-blue { box-shadow: 0 0 30px rgba(56,189,248,0.2); }
+    .glow-purple { box-shadow: 0 0 30px rgba(129,140,248,0.2); }
+    .btn-cta {
+      background: linear-gradient(135deg, #38bdf8, #818cf8);
+      transition: all 0.2s;
+    }
+    .btn-cta:hover {
+      background: linear-gradient(135deg, #7dd3fc, #a5b4fc);
+      transform: translateY(-1px);
+      box-shadow: 0 8px 25px rgba(56,189,248,0.35);
+    }
+    .code-surface {
+      background: #090d1a;
+      border: 1px solid rgba(56,189,248,0.15);
+    }
+    /* Syntax */
+    .t-k { color: #c084fc; }   /* keyword */
+    .t-d { color: #f472b6; }   /* decorator */
+    .t-s { color: #4ade80; }   /* string */
+    .t-c { color: #374151; }   /* comment */
+    .t-f { color: #60a5fa; }   /* function */
+    .t-n { color: #fb923c; }   /* number */
+    .t-t { color: #22d3ee; }   /* type */
+    .t-p { color: #a78bfa; }   /* punctuation */
+    .gpu-badge {
+      background: linear-gradient(135deg, rgba(56,189,248,0.1), rgba(129,140,248,0.1));
+      border: 1px solid rgba(56,189,248,0.25);
+    }
+    .stat-card {
+      background: linear-gradient(135deg, rgba(56,189,248,0.05), rgba(129,140,248,0.05));
+      border: 1px solid rgba(129,140,248,0.2);
+    }
+    @keyframes scan {
+      0% { transform: translateY(-100%); }
+      100% { transform: translateY(400%); }
+    }
+    .scan-line {
+      animation: scan 3s linear infinite;
+      background: linear-gradient(to bottom, transparent, rgba(56,189,248,0.15), transparent);
+    }
+    @keyframes blink {
+      0%, 100% { opacity: 1; }
+      50% { opacity: 0; }
+    }
+    .cursor { animation: blink 1s step-end infinite; }
+    .timeline-dot { background: linear-gradient(135deg, #38bdf8, #818cf8); }
+    .feature-number {
+      background: linear-gradient(135deg, rgba(56,189,248,0.15), rgba(129,140,248,0.15));
+      border: 1px solid rgba(56,189,248,0.2);
+    }
+    .gradient-border {
+      position: relative;
+    }
+    .gradient-border::before {
+      content: '';
+      position: absolute;
+      inset: 0;
+      border-radius: inherit;
+      padding: 1px;
+      background: linear-gradient(135deg, #38bdf8, #818cf8, #e879f9);
+      -webkit-mask: linear-gradient(#fff 0 0) content-box, linear-gradient(#fff 0 0);
+      mask: linear-gradient(#fff 0 0) content-box, linear-gradient(#fff 0 0);
+      -webkit-mask-composite: xor;
+      mask-composite: exclude;
+    }
+    .noise {
+      background-image: url("data:image/svg+xml,%3Csvg viewBox='0 0 200 200' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.75' numOctaves='4' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)' opacity='0.04'/%3E%3C/svg%3E");
+    }
+    .tag-pill {
+      background: rgba(56,189,248,0.1);
+      border: 1px solid rgba(56,189,248,0.2);
+      color: #7dd3fc;
+    }
+  </style>
+</head>
+<body class="noise antialiased">
+
+  <!-- Nav -->
+  <nav class="fixed top-0 w-full z-50 border-b border-white/5 bg-[#050a14]/90 backdrop-blur-xl">
+    <div class="max-w-7xl mx-auto px-6 h-16 flex items-center justify-between">
+      <div class="flex items-center gap-8">
+        <div class="flex items-center gap-2.5">
+          <div class="w-8 h-8 rounded-lg btn-cta flex items-center justify-center">
+            <svg width="14" height="14" viewBox="0 0 14 14" fill="none"><path d="M7 1L1 8h5l1 5 6-7H8L7 1z" fill="white"/></svg>
+          </div>
+          <span class="font-bold text-white text-lg tracking-tight">Voltage</span>
+        </div>
+        <div class="hidden lg:flex items-center gap-1">
+          <a href="#" class="px-3 py-1.5 text-sm text-gray-400 hover:text-white transition-colors rounded-lg hover:bg-white/5">Platform</a>
+          <a href="#" class="px-3 py-1.5 text-sm text-gray-400 hover:text-white transition-colors rounded-lg hover:bg-white/5">Docs</a>
+          <a href="#" class="px-3 py-1.5 text-sm text-gray-400 hover:text-white transition-colors rounded-lg hover:bg-white/5">Pricing</a>
+          <a href="#" class="px-3 py-1.5 text-sm text-gray-400 hover:text-white transition-colors rounded-lg hover:bg-white/5">Blog</a>
+          <a href="#" class="px-3 py-1.5 text-sm text-gray-400 hover:text-white transition-colors rounded-lg hover:bg-white/5">Changelog</a>
+        </div>
+      </div>
+      <div class="flex items-center gap-3">
+        <a href="#" class="text-sm text-gray-400 hover:text-white transition-colors px-3 py-1.5">Sign in</a>
+        <a href="#" class="btn-cta text-sm font-semibold text-white px-5 py-2 rounded-lg">Get started free</a>
+      </div>
+    </div>
+  </nav>
+
+  <!-- Hero -->
+  <section class="relative pt-32 pb-24 overflow-hidden">
+    <!-- Background glows -->
+    <div class="absolute top-0 left-1/2 -translate-x-1/2 w-[800px] h-[500px] rounded-full bg-blue-500/5 blur-[120px] pointer-events-none"></div>
+    <div class="absolute top-32 left-1/4 w-[400px] h-[300px] rounded-full bg-purple-500/8 blur-[100px] pointer-events-none"></div>
+    <div class="absolute top-32 right-1/4 w-[400px] h-[300px] rounded-full bg-pink-500/6 blur-[100px] pointer-events-none"></div>
+
+    <div class="max-w-7xl mx-auto px-6 relative">
+      <!-- Badge -->
+      <div class="flex justify-center mb-8">
+        <div class="tag-pill mono text-xs px-4 py-1.5 rounded-full flex items-center gap-2">
+          <span class="w-1.5 h-1.5 rounded-full bg-sky-400 animate-pulse"></span>
+          Public beta · H100 GPUs now available
+        </div>
+      </div>
+
+      <h1 class="text-center text-6xl lg:text-7xl font-bold tracking-tight leading-[1.05] mb-8">
+        <span class="text-white">AI infrastructure</span><br />
+        <span class="gradient-text">that disappears.</span>
+      </h1>
+
+      <p class="text-center text-xl text-gray-400 max-w-2xl mx-auto leading-relaxed mb-12">
+        Voltage runs your Python functions on GPUs in the cloud — triggered by a decorator, billed by the second, scaled to zero when idle. No clusters. No ops. No surprises on your bill.
+      </p>
+
+      <div class="flex flex-col sm:flex-row items-center justify-center gap-4 mb-20">
+        <a href="#" class="btn-cta text-white font-semibold px-8 py-3.5 rounded-xl text-base w-full sm:w-auto text-center">
+          Run your first function
+        </a>
+        <a href="#" class="surface surface-hover text-gray-300 font-semibold px-8 py-3.5 rounded-xl text-base transition-all w-full sm:w-auto text-center">
+          View the docs
+        </a>
+      </div>
+
+      <!-- Stats -->
+      <div class="grid grid-cols-2 md:grid-cols-4 gap-4 max-w-3xl mx-auto mb-20">
+        <div class="stat-card rounded-xl p-4 text-center">
+          <div class="text-2xl font-bold gradient-text">$0</div>
+          <div class="text-xs text-gray-500 mt-1">idle cost</div>
+        </div>
+        <div class="stat-card rounded-xl p-4 text-center">
+          <div class="text-2xl font-bold gradient-text">&lt;3s</div>
+          <div class="text-xs text-gray-500 mt-1">cold start</div>
+        </div>
+        <div class="stat-card rounded-xl p-4 text-center">
+          <div class="text-2xl font-bold gradient-text">1000+</div>
+          <div class="text-xs text-gray-500 mt-1">parallel containers</div>
+        </div>
+        <div class="stat-card rounded-xl p-4 text-center">
+          <div class="text-2xl font-bold gradient-text">A100</div>
+          <div class="text-xs text-gray-500 mt-1">→ H100 on demand</div>
+        </div>
+      </div>
+
+      <!-- Hero code -->
+      <div class="max-w-3xl mx-auto gradient-border rounded-2xl overflow-hidden">
+        <div class="code-surface rounded-2xl overflow-hidden">
+          <div class="flex items-center gap-2 px-5 py-3.5 border-b border-white/5">
+            <div class="flex gap-1.5">
+              <div class="w-3 h-3 rounded-full bg-red-500/60"></div>
+              <div class="w-3 h-3 rounded-full bg-yellow-500/60"></div>
+              <div class="w-3 h-3 rounded-full bg-green-500/60"></div>
+            </div>
+            <div class="flex-1 text-center">
+              <span class="mono text-xs text-gray-500">inference_server.py</span>
+            </div>
+            <div class="gpu-badge mono text-[10px] text-sky-300 px-2 py-0.5 rounded">A10G · 24GB VRAM</div>
+          </div>
+          <div class="relative overflow-hidden">
+            <div class="scan-line absolute inset-x-0 h-16 pointer-events-none"></div>
+            <pre class="p-6 text-sm mono leading-[1.8] overflow-x-auto"><code><span class="t-k">import</span> voltage
+<span class="t-k">from</span> vllm <span class="t-k">import</span> LLM, SamplingParams
+<span class="t-k">from</span> typing <span class="t-k">import</span> Iterator
+
+
+<span class="t-d">@voltage.endpoint</span>(
+    gpu<span class="t-k">=</span><span class="t-s">"A10G"</span>,
+    min_containers<span class="t-k">=</span><span class="t-n">1</span>,         <span class="t-c"># keep one warm for low-latency</span>
+    max_containers<span class="t-k">=</span><span class="t-n">20</span>,        <span class="t-c"># burst under traffic</span>
+    scaledown_window<span class="t-k">=</span><span class="t-n">300</span>,    <span class="t-c"># 5 min grace period</span>
+)
+<span class="t-k">class</span> <span class="t-t">LlamaServer</span>:
+    <span class="t-k">def</span> <span class="t-f">__init__</span>(self):
+        <span class="t-c"># Runs once — model loaded into warm container</span>
+        self.llm <span class="t-k">=</span> LLM(
+            model<span class="t-k">=</span><span class="t-s">"meta-llama/Llama-3.1-8B-Instruct"</span>,
+            tensor_parallel_size<span class="t-k">=</span><span class="t-n">1</span>,
+            dtype<span class="t-k">=</span><span class="t-s">"bfloat16"</span>,
+        )
+        self.params <span class="t-k">=</span> SamplingParams(temperature<span class="t-k">=</span><span class="t-n">0.7</span>, max_tokens<span class="t-k">=</span><span class="t-n">512</span>)
+
+    <span class="t-d">@voltage.web_endpoint</span>(method<span class="t-k">=</span><span class="t-s">"POST"</span>, streaming<span class="t-k">=</span><span class="t-n">True</span>)
+    <span class="t-k">def</span> <span class="t-f">generate</span>(self, prompt: <span class="t-t">str</span>) <span class="t-k">-></span> Iterator[<span class="t-t">str</span>]:
+        <span class="t-k">for</span> output <span class="t-k">in</span> self.llm.generate_streaming([prompt], self.params):
+            <span class="t-k">yield</span> output.outputs[<span class="t-n">0</span>].text
+
+
+<span class="t-c"># Deploy — returns a live HTTPS endpoint</span>
+<span class="t-c"># $ voltage deploy inference_server.py::LlamaServer</span>
+<span class="t-c"># → https://api.voltage.run/org/llama-server/generate</span></code></pre>
+          </div>
+          <div class="border-t border-white/5 px-5 py-3 flex items-center justify-between">
+            <div class="flex items-center gap-3">
+              <div class="flex items-center gap-1.5">
+                <span class="w-2 h-2 rounded-full bg-green-400 animate-pulse"></span>
+                <span class="mono text-xs text-green-400">deployed · 1 warm replica</span>
+              </div>
+            </div>
+            <div class="mono text-xs text-gray-600">p50 latency: 82ms · cost: $0.00038/req</div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- Architecture strip -->
+  <section class="border-y border-white/5 py-16 bg-gradient-to-r from-sky-500/3 via-purple-500/3 to-pink-500/3">
+    <div class="max-w-7xl mx-auto px-6">
+      <div class="flex flex-col md:flex-row items-center justify-between gap-8">
+        <div class="text-center md:text-left">
+          <h2 class="text-2xl font-bold text-white mb-2">The full stack, managed.</h2>
+          <p class="text-gray-400 text-sm max-w-sm">From your Python function to a running GPU container — Voltage handles every layer below your code.</p>
+        </div>
+        <div class="flex items-center gap-3 flex-wrap justify-center">
+          <div class="surface rounded-lg px-4 py-2.5 text-sm text-gray-300">Your Python code</div>
+          <svg class="w-4 h-4 text-sky-500" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 5l7 7-7 7"/></svg>
+          <div class="surface rounded-lg px-4 py-2.5 text-sm text-gray-300">Container image</div>
+          <svg class="w-4 h-4 text-sky-500" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 5l7 7-7 7"/></svg>
+          <div class="surface rounded-lg px-4 py-2.5 text-sm text-gray-300">GPU scheduler</div>
+          <svg class="w-4 h-4 text-sky-500" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 5l7 7-7 7"/></svg>
+          <div class="gpu-badge rounded-lg px-4 py-2.5 text-sm text-sky-300">Running GPU</div>
+          <svg class="w-4 h-4 text-sky-500" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 5l7 7-7 7"/></svg>
+          <div class="surface rounded-lg px-4 py-2.5 text-sm text-gray-300">Result + logs</div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- Features -->
+  <section class="py-28 max-w-7xl mx-auto px-6">
+    <div class="text-center mb-20">
+      <h2 class="text-4xl font-bold text-white mb-4">Everything ML teams need.<br /><span class="gradient-text">Nothing they don't.</span></h2>
+      <p class="text-gray-400 max-w-xl mx-auto">Voltage ships the primitives you actually use. No sprawling configuration surfaces. No YAML pipelines.</p>
+    </div>
+
+    <div class="space-y-6">
+
+      <!-- Feature 1 -->
+      <div class="grid lg:grid-cols-2 gap-6 items-center">
+        <div class="surface rounded-2xl p-8 surface-hover transition-all">
+          <div class="feature-number w-10 h-10 rounded-xl flex items-center justify-center mono text-sky-300 font-bold text-sm mb-6">01</div>
+          <h3 class="text-xl font-bold text-white mb-3">On-demand GPUs with one decorator</h3>
+          <p class="text-gray-400 leading-relaxed mb-6">Declare hardware requirements inline with your code. Voltage provisions exactly what you ask for — no cluster sizing, no instance family research, no reserved capacity planning.</p>
+          <div class="flex flex-wrap gap-2">
+            <span class="gpu-badge mono text-xs text-sky-300 px-3 py-1.5 rounded-lg">NVIDIA T4</span>
+            <span class="gpu-badge mono text-xs text-sky-300 px-3 py-1.5 rounded-lg">A10G</span>
+            <span class="gpu-badge mono text-xs text-sky-300 px-3 py-1.5 rounded-lg">A100-40GB</span>
+            <span class="gpu-badge mono text-xs text-sky-300 px-3 py-1.5 rounded-lg">A100-80GB</span>
+            <span class="gpu-badge mono text-xs text-sky-300 px-3 py-1.5 rounded-lg">H100</span>
+          </div>
+        </div>
+        <div class="code-surface rounded-2xl overflow-hidden glow-blue">
+          <div class="flex items-center gap-2 px-5 py-3.5 border-b border-white/5">
+            <div class="flex gap-1.5"><div class="w-2.5 h-2.5 rounded-full bg-red-500/60"></div><div class="w-2.5 h-2.5 rounded-full bg-yellow-500/60"></div><div class="w-2.5 h-2.5 rounded-full bg-green-500/60"></div></div>
+            <span class="mono text-xs text-gray-500 ml-2">train_diffusion.py</span>
+          </div>
+          <pre class="p-5 text-sm mono leading-relaxed overflow-x-auto"><code><span class="t-k">import</span> voltage
+<span class="t-k">from</span> diffusers <span class="t-k">import</span> DDPMPipeline
+
+
+<span class="t-d">@voltage.function</span>(
+    gpu<span class="t-k">=</span><span class="t-s">"A100-80GB"</span>,
+    memory<span class="t-k">=</span><span class="t-s">"96GB"</span>,
+    cpu<span class="t-k">=</span><span class="t-n">8</span>,
+    timeout<span class="t-k">=</span><span class="t-n">14400</span>,  <span class="t-c"># 4 hours</span>
+)
+<span class="t-k">def</span> <span class="t-f">train_diffusion_model</span>(
+    config_path: <span class="t-t">str</span>,
+    output_path: <span class="t-t">str</span>,
+) <span class="t-k">-></span> <span class="t-t">dict</span>:
+    pipeline <span class="t-k">=</span> DDPMPipeline.from_pretrained(config_path)
+    pipeline.train(output_dir<span class="t-k">=</span>output_path)
+    <span class="t-k">return</span> pipeline.metrics()
+
+
+<span class="t-c"># $ python train_diffusion.py</span>
+metrics <span class="t-k">=</span> train_diffusion_model.remote(
+    config_path<span class="t-k">=</span><span class="t-s">"./configs/sd-xl.yaml"</span>,
+    output_path<span class="t-k">=</span><span class="t-s">"s3://models/sd-xl-v2"</span>,
+)</code></pre>
+        </div>
+      </div>
+
+      <!-- Feature 2 -->
+      <div class="grid lg:grid-cols-2 gap-6 items-center">
+        <div class="code-surface rounded-2xl overflow-hidden glow-purple order-2 lg:order-1">
+          <div class="flex items-center gap-2 px-5 py-3.5 border-b border-white/5">
+            <div class="flex gap-1.5"><div class="w-2.5 h-2.5 rounded-full bg-red-500/60"></div><div class="w-2.5 h-2.5 rounded-full bg-yellow-500/60"></div><div class="w-2.5 h-2.5 rounded-full bg-green-500/60"></div></div>
+            <span class="mono text-xs text-gray-500 ml-2">hyperparam_sweep.py</span>
+          </div>
+          <pre class="p-5 text-sm mono leading-relaxed overflow-x-auto"><code><span class="t-k">import</span> itertools, voltage
+
+
+<span class="t-d">@voltage.function</span>(gpu<span class="t-k">=</span><span class="t-s">"T4"</span>, memory<span class="t-k">=</span><span class="t-s">"16GB"</span>)
+<span class="t-k">def</span> <span class="t-f">train_run</span>(lr: <span class="t-t">float</span>, dropout: <span class="t-t">float</span>, layers: <span class="t-t">int</span>) <span class="t-k">-></span> <span class="t-t">float</span>:
+    model <span class="t-k">=</span> build_model(layers, dropout)
+    <span class="t-k">return</span> fit(model, lr<span class="t-k">=</span>lr).best_val_loss
+
+
+<span class="t-c"># 180 hyperparameter combinations</span>
+grid <span class="t-k">=</span> [
+    {<span class="t-s">"lr"</span>: lr, <span class="t-s">"dropout"</span>: d, <span class="t-s">"layers"</span>: l}
+    <span class="t-k">for</span> lr, d, l <span class="t-k">in</span> itertools.product(
+        [<span class="t-n">1e-4</span>, <span class="t-n">3e-4</span>, <span class="t-n">1e-3</span>],
+        [<span class="t-n">0.0</span>, <span class="t-n">0.1</span>, <span class="t-n">0.2</span>, <span class="t-n">0.3</span>],
+        [<span class="t-n">4</span>, <span class="t-n">6</span>, <span class="t-n">8</span>, <span class="t-n">12</span>, <span class="t-n">16</span>],
+    )
+]
+
+<span class="t-c"># All 180 run in parallel on separate GPU containers</span>
+results <span class="t-k">=</span> voltage.map(train_run, grid)
+best <span class="t-k">=</span> <span class="t-f">min</span>(results, key<span class="t-k">=</span><span class="t-k">lambda</span> r: r)
+<span class="t-f">print</span>(<span class="t-s">f"Best val loss: </span>{best:.4f}<span class="t-s">"</span>)
+<span class="t-c"># 180 runs · 47 minutes · $12.40</span></code></pre>
+        </div>
+        <div class="surface rounded-2xl p-8 surface-hover transition-all order-1 lg:order-2">
+          <div class="feature-number w-10 h-10 rounded-xl flex items-center justify-center mono text-purple-300 font-bold text-sm mb-6">02</div>
+          <h3 class="text-xl font-bold text-white mb-3">Parallel sweep — not a queue</h3>
+          <p class="text-gray-400 leading-relaxed mb-6">Pass a list to <code class="mono text-sky-300">voltage.map()</code> and every item gets its own container, launched simultaneously. What would be an 8-hour sequential sweep becomes a 47-minute parallel one.</p>
+          <div class="space-y-3">
+            <div class="flex items-center gap-3 text-sm text-gray-400">
+              <div class="w-6 h-6 rounded-full bg-purple-500/20 border border-purple-500/30 flex items-center justify-center flex-shrink-0">
+                <svg class="w-3 h-3 text-purple-400" fill="currentColor" viewBox="0 0 20 20"><path d="M16.707 5.293a1 1 0 010 1.414l-8 8a1 1 0 01-1.414 0l-4-4a1 1 0 011.414-1.414L8 12.586l7.293-7.293a1 1 0 011.414 0z"/></svg>
+              </div>
+              True parallelism — not thread-based concurrency
+            </div>
+            <div class="flex items-center gap-3 text-sm text-gray-400">
+              <div class="w-6 h-6 rounded-full bg-purple-500/20 border border-purple-500/30 flex items-center justify-center flex-shrink-0">
+                <svg class="w-3 h-3 text-purple-400" fill="currentColor" viewBox="0 0 20 20"><path d="M16.707 5.293a1 1 0 010 1.414l-8 8a1 1 0 01-1.414 0l-4-4a1 1 0 011.414-1.414L8 12.586l7.293-7.293a1 1 0 011.414 0z"/></svg>
+              </div>
+              Collect results as futures or wait for all
+            </div>
+            <div class="flex items-center gap-3 text-sm text-gray-400">
+              <div class="w-6 h-6 rounded-full bg-purple-500/20 border border-purple-500/30 flex items-center justify-center flex-shrink-0">
+                <svg class="w-3 h-3 text-purple-400" fill="currentColor" viewBox="0 0 20 20"><path d="M16.707 5.293a1 1 0 010 1.414l-8 8a1 1 0 01-1.414 0l-4-4a1 1 0 011.414-1.414L8 12.586l7.293-7.293a1 1 0 011.414 0z"/></svg>
+              </div>
+              Built-in retry on spot instance interruption
+            </div>
+          </div>
+        </div>
+      </div>
+
+    </div>
+  </section>
+
+  <!-- Use cases -->
+  <section class="border-t border-white/5 py-24 bg-gradient-to-b from-transparent to-sky-500/3">
+    <div class="max-w-7xl mx-auto px-6">
+      <h2 class="text-3xl font-bold text-white text-center mb-4">What teams build on Voltage</h2>
+      <p class="text-gray-400 text-center max-w-xl mx-auto mb-16">Designed for the workloads that overwhelm serverless functions and overprovision Kubernetes clusters.</p>
+      <div class="grid md:grid-cols-2 lg:grid-cols-3 gap-5">
+        <div class="surface surface-hover rounded-xl p-6 transition-all cursor-default">
+          <div class="w-10 h-10 rounded-xl bg-sky-500/10 border border-sky-500/20 flex items-center justify-center mb-4">
+            <svg class="w-5 h-5 text-sky-400" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M9.663 17h4.673M12 3v1m6.364 1.636l-.707.707M21 12h-1M4 12H3m3.343-5.657l-.707-.707m2.828 9.9a5 5 0 117.072 0l-.548.547A3.374 3.374 0 0014 18.469V19a2 2 0 11-4 0v-.531c0-.895-.356-1.754-.988-2.386l-.548-.547z"/></svg>
+          </div>
+          <h3 class="font-semibold text-white mb-2">LLM Fine-tuning</h3>
+          <p class="text-gray-500 text-sm leading-relaxed">Fine-tune Llama, Mistral, or custom architectures with LoRA or full-parameter training. A100 or H100. Checkpoints written to persistent volumes.</p>
+        </div>
+        <div class="surface surface-hover rounded-xl p-6 transition-all cursor-default">
+          <div class="w-10 h-10 rounded-xl bg-purple-500/10 border border-purple-500/20 flex items-center justify-center mb-4">
+            <svg class="w-5 h-5 text-purple-400" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M13 10V3L4 14h7v7l9-11h-7z"/></svg>
+          </div>
+          <h3 class="font-semibold text-white mb-2">Inference Serving</h3>
+          <p class="text-gray-500 text-sm leading-relaxed">Deploy vLLM, TGI, or custom serving code as an HTTPS endpoint. Keep a warm replica; burst on traffic. Pay per token served, not per GPU-hour reserved.</p>
+        </div>
+        <div class="surface surface-hover rounded-xl p-6 transition-all cursor-default">
+          <div class="w-10 h-10 rounded-xl bg-pink-500/10 border border-pink-500/20 flex items-center justify-center mb-4">
+            <svg class="w-5 h-5 text-pink-400" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M4 7v10c0 2.21 3.582 4 8 4s8-1.79 8-4V7M4 7c0 2.21 3.582 4 8 4s8-1.79 8-4M4 7c0-2.21 3.582-4 8-4s8 1.79 8 4"/></svg>
+          </div>
+          <h3 class="font-semibold text-white mb-2">Embedding Pipelines</h3>
+          <p class="text-gray-500 text-sm leading-relaxed">Embed millions of documents for RAG indexes. Fan out across hundreds of GPU containers in parallel. Write results to S3, Pinecone, or pgvector.</p>
+        </div>
+        <div class="surface surface-hover rounded-xl p-6 transition-all cursor-default">
+          <div class="w-10 h-10 rounded-xl bg-orange-500/10 border border-orange-500/20 flex items-center justify-center mb-4">
+            <svg class="w-5 h-5 text-orange-400" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z"/></svg>
+          </div>
+          <h3 class="font-semibold text-white mb-2">Scheduled Batch Jobs</h3>
+          <p class="text-gray-500 text-sm leading-relaxed">Run nightly retraining, daily data processing, or weekly evals on a cron schedule. No separate orchestration layer. Logs and results stored automatically.</p>
+        </div>
+        <div class="surface surface-hover rounded-xl p-6 transition-all cursor-default">
+          <div class="w-10 h-10 rounded-xl bg-green-500/10 border border-green-500/20 flex items-center justify-center mb-4">
+            <svg class="w-5 h-5 text-green-400" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M9 19v-6a2 2 0 00-2-2H5a2 2 0 00-2 2v6a2 2 0 002 2h2a2 2 0 002-2zm0 0V9a2 2 0 012-2h2a2 2 0 012 2v10m-6 0a2 2 0 002 2h2a2 2 0 002-2m0 0V5a2 2 0 012-2h2a2 2 0 012 2v14a2 2 0 01-2 2h-2a2 2 0 01-2-2z"/></svg>
+          </div>
+          <h3 class="font-semibold text-white mb-2">Hyperparameter Sweeps</h3>
+          <p class="text-gray-500 text-sm leading-relaxed">Run hundreds of training variants in true parallel. Each configuration gets its own isolated container. Cut sweep time from days to hours.</p>
+        </div>
+        <div class="surface surface-hover rounded-xl p-6 transition-all cursor-default">
+          <div class="w-10 h-10 rounded-xl bg-cyan-500/10 border border-cyan-500/20 flex items-center justify-center mb-4">
+            <svg class="w-5 h-5 text-cyan-400" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M15 12a3 3 0 11-6 0 3 3 0 016 0z"/><path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M2.458 12C3.732 7.943 7.523 5 12 5c4.478 0 8.268 2.943 9.542 7-1.274 4.057-5.064 7-9.542 7-4.477 0-8.268-2.943-9.542-7z"/></svg>
+          </div>
+          <h3 class="font-semibold text-white mb-2">Model Evaluation</h3>
+          <p class="text-gray-500 text-sm leading-relaxed">Run eval benchmarks across multiple model checkpoints in parallel. Stream results back as they complete. Integrated with W&amp;B, MLflow, and custom logging.</p>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- Pricing -->
+  <section class="py-24 border-t border-white/5">
+    <div class="max-w-4xl mx-auto px-6">
+      <div class="text-center mb-16">
+        <h2 class="text-3xl font-bold text-white mb-3">Transparent pricing. Zero idle waste.</h2>
+        <p class="text-gray-400 max-w-lg mx-auto">We bill to the second. When your container stops, billing stops. No reservation required.</p>
+      </div>
+      <div class="grid md:grid-cols-2 gap-4 mb-6">
+        <div class="surface rounded-2xl p-6">
+          <div class="text-xs mono text-gray-500 uppercase tracking-widest mb-4">GPU compute</div>
+          <div class="space-y-3">
+            <div class="flex items-center justify-between py-2 border-b border-white/5">
+              <div class="flex items-center gap-3">
+                <div class="gpu-badge px-2 py-0.5 rounded text-xs mono text-sky-300">T4</div>
+                <span class="text-sm text-gray-300">16 GB VRAM</span>
+              </div>
+              <span class="mono text-sm text-white">$0.00042<span class="text-gray-500 text-xs">/sec</span></span>
+            </div>
+            <div class="flex items-center justify-between py-2 border-b border-white/5">
+              <div class="flex items-center gap-3">
+                <div class="gpu-badge px-2 py-0.5 rounded text-xs mono text-sky-300">A10G</div>
+                <span class="text-sm text-gray-300">24 GB VRAM</span>
+              </div>
+              <span class="mono text-sm text-white">$0.00093<span class="text-gray-500 text-xs">/sec</span></span>
+            </div>
+            <div class="flex items-center justify-between py-2 border-b border-white/5">
+              <div class="flex items-center gap-3">
+                <div class="gpu-badge px-2 py-0.5 rounded text-xs mono text-sky-300">A100-40</div>
+                <span class="text-sm text-gray-300">40 GB VRAM</span>
+              </div>
+              <span class="mono text-sm text-white">$0.0018<span class="text-gray-500 text-xs">/sec</span></span>
+            </div>
+            <div class="flex items-center justify-between py-2 border-b border-white/5">
+              <div class="flex items-center gap-3">
+                <div class="gpu-badge px-2 py-0.5 rounded text-xs mono text-sky-300">A100-80</div>
+                <span class="text-sm text-gray-300">80 GB VRAM</span>
+              </div>
+              <span class="mono text-sm text-white">$0.0028<span class="text-gray-500 text-xs">/sec</span></span>
+            </div>
+            <div class="flex items-center justify-between py-2">
+              <div class="flex items-center gap-3">
+                <div class="gpu-badge px-2 py-0.5 rounded text-xs mono text-sky-300">H100</div>
+                <span class="text-sm text-gray-300">80 GB HBM3</span>
+              </div>
+              <span class="mono text-sm text-white">$0.0055<span class="text-gray-500 text-xs">/sec</span></span>
+            </div>
+          </div>
+        </div>
+        <div class="surface rounded-2xl p-6">
+          <div class="text-xs mono text-gray-500 uppercase tracking-widest mb-4">CPU &amp; Memory</div>
+          <div class="space-y-3">
+            <div class="flex items-center justify-between py-2 border-b border-white/5">
+              <span class="text-sm text-gray-300">vCPU</span>
+              <span class="mono text-sm text-white">$0.000012<span class="text-gray-500 text-xs">/vCPU·sec</span></span>
+            </div>
+            <div class="flex items-center justify-between py-2 border-b border-white/5">
+              <span class="text-sm text-gray-300">Memory</span>
+              <span class="mono text-sm text-white">$0.0000015<span class="text-gray-500 text-xs">/GB·sec</span></span>
+            </div>
+            <div class="flex items-center justify-between py-2 border-b border-white/5">
+              <span class="text-sm text-gray-300">Egress</span>
+              <span class="mono text-sm text-white">$0.09<span class="text-gray-500 text-xs">/GB</span></span>
+            </div>
+            <div class="flex items-center justify-between py-2">
+              <span class="text-sm text-gray-300">Volume storage</span>
+              <span class="mono text-sm text-white">$0.20<span class="text-gray-500 text-xs">/GB·month</span></span>
+            </div>
+          </div>
+          <div class="mt-6 bg-gradient-to-r from-sky-500/10 to-purple-500/10 border border-sky-500/20 rounded-xl p-4">
+            <div class="text-sm font-semibold text-white mb-1">Free tier</div>
+            <div class="text-xs text-gray-400 leading-relaxed">100 CPU·hours/month included. No credit card required for the first 30 days. Usage alerts available.</div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- Final CTA -->
+  <section class="py-24 relative overflow-hidden">
+    <div class="absolute inset-0 bg-gradient-to-t from-sky-500/8 via-purple-500/5 to-transparent pointer-events-none"></div>
+    <div class="max-w-3xl mx-auto px-6 text-center relative">
+      <h2 class="text-5xl font-bold text-white mb-6 leading-tight">
+        Write Python.<br />
+        <span class="gradient-text">Run on GPUs.</span>
+      </h2>
+      <p class="text-xl text-gray-400 mb-10 max-w-xl mx-auto leading-relaxed">
+        Install the SDK and run your first GPU function in under two minutes. No infrastructure decisions required.
+      </p>
+      <div class="flex flex-col sm:flex-row items-center justify-center gap-4 mb-6">
+        <div class="code-surface border border-white/10 rounded-xl px-6 py-3 mono text-sm text-gray-300 select-all">
+          pip install voltage
+        </div>
+        <a href="#" class="btn-cta text-white font-bold px-8 py-3 rounded-xl text-base">
+          Run your first function →
+        </a>
+      </div>
+      <p class="text-gray-600 text-sm mono">No credit card · Free tier included · Docs in 5 minutes</p>
+    </div>
+  </section>
+
+  <!-- Footer -->
+  <footer class="border-t border-white/5 py-12">
+    <div class="max-w-7xl mx-auto px-6">
+      <div class="flex flex-col md:flex-row items-center justify-between gap-8 mb-10">
+        <div class="flex items-center gap-2.5">
+          <div class="w-8 h-8 rounded-lg btn-cta flex items-center justify-center">
+            <svg width="14" height="14" viewBox="0 0 14 14" fill="none"><path d="M7 1L1 8h5l1 5 6-7H8L7 1z" fill="white"/></svg>
+          </div>
+          <span class="font-bold text-white text-lg tracking-tight">Voltage</span>
+        </div>
+        <div class="flex flex-wrap justify-center gap-6 text-sm text-gray-500">
+          <a href="#" class="hover:text-gray-300 transition-colors">Platform</a>
+          <a href="#" class="hover:text-gray-300 transition-colors">Docs</a>
+          <a href="#" class="hover:text-gray-300 transition-colors">Pricing</a>
+          <a href="#" class="hover:text-gray-300 transition-colors">Blog</a>
+          <a href="#" class="hover:text-gray-300 transition-colors">Changelog</a>
+          <a href="#" class="hover:text-gray-300 transition-colors">Status</a>
+          <a href="#" class="hover:text-gray-300 transition-colors">GitHub</a>
+          <a href="#" class="hover:text-gray-300 transition-colors">Discord</a>
+        </div>
+      </div>
+      <div class="border-t border-white/5 pt-6 flex flex-col md:flex-row items-center justify-between gap-4 text-xs text-gray-600">
+        <span>© 2025 Voltage Inc. All rights reserved.</span>
+        <div class="flex gap-6">
+          <a href="#" class="hover:text-gray-400 transition-colors">Privacy Policy</a>
+          <a href="#" class="hover:text-gray-400 transition-colors">Terms of Service</a>
+          <a href="#" class="hover:text-gray-400 transition-colors">Security</a>
+        </div>
+      </div>
+    </div>
+  </footer>
+
+</body>
+</html>

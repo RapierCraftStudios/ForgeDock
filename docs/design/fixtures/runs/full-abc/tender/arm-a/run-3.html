@@ -1,0 +1,660 @@
+<!--
+ARCHETYPE: editorial-typographic
+SIGNATURE MOVE: "The routing diagram" — instead of a product screenshot, the hero contains a
+  hand-crafted SVG topology diagram showing a payment flowing from merchant → Tender → fraud
+  engine → local method network → bank, with each node labeled in mono type and animated paths
+  that trace the flow on load. It treats the API infrastructure as the visual subject matter,
+  the way a magazine spread would use an infographic as its hero. This is the non-obvious move:
+  the product IS the infrastructure, so we show the infrastructure itself as art.
+EFFECTS PLAN:
+  - SVG stroke-dashoffset animation traces payment flow paths on load (CSS, 1.2s sequential)
+  - Node dots pulse subtly once the path reaches them (animation-delay chained)
+  - Pull-quote rotated slightly (-1.5deg) like a physical clipping pinned to a mood board
+  - Section labels in micro caps with generous tracking, used as structural dividers
+  - Hover on feature rows: left border grows from 0 to full height via scaleY
+NEGATIVES CHECKED:
+  N1: No purple/blue gradient — cream background, deep ink, warm terracotta #C4502A accent
+  N2: No Inter — Fraunces (display, variable), Space Grotesk (body), Space Mono (code)
+  N3: Not centered — hard left, editorial column grid, pull-quote pinned to right margin
+  N4: Not 3 icon cards — routing diagram, numbered capability items, spec comparison columns
+  N5: Radius: 0 on borders, 1px on code blocks, full circle on flow nodes
+  N6: Not Tailwind palette — terracotta #C4502A, ink #1A1612, ivory #FAF8F4
+  N7: Not the skeleton — routing art → pull-quote → numbered capabilities → dev specs → CTA
+  N8: No blobs
+  N9: No glass
+  N10: Extreme hierarchy from display sizes down to 10px mono labels
+  N11: Named specifics: 80+ local methods, 0.5% FX spread, 47 countries, $0 setup
+  N12: Effects serve meaning — the animated path shows money moving
+-->
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Tender — Payments API</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Fraunces:ital,opsz,wght@0,9..144,300;0,9..144,500;0,9..144,700;1,9..144,300;1,9..144,500&family=Space+Grotesk:wght@300;400;500;600&family=Space+Mono:wght@400;700&display=swap" rel="stylesheet" />
+  <script>
+    tailwind.config = {
+      theme: {
+        extend: {
+          fontFamily: {
+            display: ['Fraunces', 'serif'],
+            body: ['Space Grotesk', 'sans-serif'],
+            mono: ['Space Mono', 'monospace'],
+          },
+          colors: {
+            ink: '#1A1612',
+            ivory: '#FAF8F4',
+            cream: '#F0EDE6',
+            terra: '#C4502A',
+            terraDark: '#8A3519',
+            terraLight: '#D97850',
+            mist: '#8A8178',
+            faint: '#C8C4BC',
+            rule: '#DDD9D1',
+          }
+        }
+      }
+    }
+  </script>
+  <style>
+    body { font-family: 'Space Grotesk', sans-serif; background: #FAF8F4; color: #1A1612; }
+    .font-display { font-family: 'Fraunces', serif; }
+    .font-mono { font-family: 'Space Mono', monospace; }
+
+    /* Flow path animation */
+    .flow-path {
+      stroke-dasharray: 600;
+      stroke-dashoffset: 600;
+    }
+    .flow-path.animate {
+      animation: drawPath 1.2s cubic-bezier(0.4,0,0.2,1) forwards;
+    }
+    @keyframes drawPath {
+      to { stroke-dashoffset: 0; }
+    }
+
+    /* Node pulse */
+    .flow-node { opacity: 0; transition: opacity 0.3s; }
+    .flow-node.visible { opacity: 1; }
+
+    @keyframes nodePulse {
+      0%, 100% { r: 5; opacity: 0.9; }
+      50% { r: 7; opacity: 1; }
+    }
+    .node-dot.pulsing { animation: nodePulse 2s ease-in-out infinite; }
+
+    /* Feature row hover border */
+    .feature-row {
+      position: relative;
+      padding-left: 20px;
+    }
+    .feature-row::before {
+      content: '';
+      position: absolute;
+      left: 0;
+      top: 0;
+      bottom: 0;
+      width: 2px;
+      background: #C4502A;
+      transform: scaleY(0);
+      transform-origin: top;
+      transition: transform 0.3s cubic-bezier(0.77,0,0.175,1);
+    }
+    .feature-row:hover::before { transform: scaleY(1); }
+
+    /* Pull quote pin */
+    .pull-quote {
+      transform: rotate(-1.5deg);
+      transform-origin: top left;
+    }
+
+    /* Micro caps section labels */
+    .section-label {
+      font-family: 'Space Mono', monospace;
+      font-size: 10px;
+      letter-spacing: 0.18em;
+      text-transform: uppercase;
+      color: #C4502A;
+    }
+
+    /* Nav underline */
+    .nav-link { position: relative; }
+    .nav-link::after {
+      content: '';
+      position: absolute;
+      bottom: -1px;
+      left: 0;
+      right: 0;
+      height: 1px;
+      background: #1A1612;
+      transform: scaleX(0);
+      transition: transform 0.2s ease;
+    }
+    .nav-link:hover::after { transform: scaleX(1); }
+
+    /* Editorial column lines */
+    .col-rule { border-left: 1px solid #DDD9D1; }
+  </style>
+</head>
+<body class="bg-[#FAF8F4]">
+
+  <!-- NAV — EDITORIAL MASTHEAD -->
+  <header class="border-b border-[#DDD9D1]">
+    <!-- Top strip -->
+    <div class="bg-[#1A1612] text-[#FAF8F4]">
+      <div class="max-w-7xl mx-auto px-8 h-8 flex items-center justify-between">
+        <span class="font-mono text-[10px] tracking-widest">TENDER PAYMENTS — API PLATFORM</span>
+        <div class="flex items-center gap-4">
+          <span class="font-mono text-[10px] text-[#8A8178]">PCI DSS L1 · SOC 2 Type II</span>
+          <span class="font-mono text-[10px] text-[#C4502A]">● 99.99% uptime</span>
+        </div>
+      </div>
+    </div>
+    <!-- Main nav -->
+    <nav class="max-w-7xl mx-auto px-8 h-14 flex items-center justify-between">
+      <a href="#" class="font-display text-[22px] font-medium tracking-[-0.02em] text-[#1A1612]">
+        Tender<span class="text-[#C4502A]">.</span>
+      </a>
+      <div class="hidden md:flex items-center gap-8">
+        <a href="#" class="nav-link font-body text-[13px] text-[#8A8178] hover:text-[#1A1612] transition-colors">Products</a>
+        <a href="#" class="nav-link font-body text-[13px] text-[#8A8178] hover:text-[#1A1612] transition-colors">Pricing</a>
+        <a href="#" class="nav-link font-body text-[13px] text-[#8A8178] hover:text-[#1A1612] transition-colors">Docs</a>
+        <a href="#" class="nav-link font-body text-[13px] text-[#8A8178] hover:text-[#1A1612] transition-colors">Changelog</a>
+        <a href="#" class="nav-link font-body text-[13px] text-[#8A8178] hover:text-[#1A1612] transition-colors">Status</a>
+      </div>
+      <div class="flex items-center gap-4">
+        <a href="#" class="font-body text-[13px] text-[#8A8178] hover:text-[#1A1612] transition-colors">Sign in</a>
+        <a href="#" class="font-body text-[13px] font-medium bg-[#C4502A] text-white px-5 py-2 hover:bg-[#8A3519] transition-colors">Start building →</a>
+      </div>
+    </nav>
+  </header>
+
+  <!-- HERO — ROUTING DIAGRAM + TYPE -->
+  <section class="border-b border-[#DDD9D1]">
+    <div class="max-w-7xl mx-auto px-8 py-16 grid grid-cols-1 lg:grid-cols-12 gap-12 items-start">
+
+      <!-- Left: Headline -->
+      <div class="lg:col-span-5">
+        <div class="section-label mb-6">The payments API</div>
+        <h1 class="font-display text-[54px] md:text-[66px] font-medium leading-[1.05] tracking-[-0.02em] text-[#1A1612] mb-6">
+          Payments,<br/>
+          billing,<br/>
+          <em class="font-light text-[#C4502A]">payouts —</em><br/>
+          one&nbsp;API.
+        </h1>
+        <p class="font-body text-[16px] font-light leading-[1.75] text-[#8A8178] max-w-[380px] mb-8">
+          Accept cards and 80+ local methods globally, run subscription or usage-based billing, and send marketplace payouts — all through a single integration. Fraud screening and compliance handled for you.
+        </p>
+        <div class="flex flex-col sm:flex-row gap-3">
+          <a href="#" class="font-mono text-[12px] font-bold bg-[#1A1612] text-[#FAF8F4] px-6 py-3 hover:bg-[#C4502A] transition-colors inline-flex items-center gap-2">
+            START INTEGRATING →
+          </a>
+          <a href="#" class="font-mono text-[12px] border border-[#DDD9D1] text-[#1A1612] px-6 py-3 hover:border-[#1A1612] transition-colors inline-flex items-center gap-2">
+            VIEW THE DOCS
+          </a>
+        </div>
+
+        <!-- Stat row -->
+        <div class="mt-10 pt-8 border-t border-[#DDD9D1] grid grid-cols-3 gap-6">
+          <div>
+            <div class="font-display text-[32px] font-medium text-[#1A1612] leading-none">47</div>
+            <div class="font-mono text-[10px] text-[#8A8178] tracking-wider uppercase mt-1">Countries</div>
+          </div>
+          <div class="col-rule pl-6">
+            <div class="font-display text-[32px] font-medium text-[#C4502A] leading-none">47<span class="text-[18px]">ms</span></div>
+            <div class="font-mono text-[10px] text-[#8A8178] tracking-wider uppercase mt-1">p99 API</div>
+          </div>
+          <div class="col-rule pl-6">
+            <div class="font-display text-[32px] font-medium text-[#1A1612] leading-none">80<span class="text-[18px]">+</span></div>
+            <div class="font-mono text-[10px] text-[#8A8178] tracking-wider uppercase mt-1">Pay methods</div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Right: Routing diagram -->
+      <div class="lg:col-span-7">
+        <div class="border border-[#DDD9D1] bg-[#F0EDE6] p-8 relative">
+          <div class="section-label mb-6">Payment flow — live topology</div>
+          <!-- SVG routing diagram -->
+          <svg viewBox="0 0 560 340" fill="none" xmlns="http://www.w3.org/2000/svg" class="w-full">
+            <!-- Background grid -->
+            <defs>
+              <pattern id="grid" width="28" height="28" patternUnits="userSpaceOnUse">
+                <path d="M 28 0 L 0 0 0 28" fill="none" stroke="#DDD9D1" stroke-width="0.5" opacity="0.5"/>
+              </pattern>
+            </defs>
+            <rect width="560" height="340" fill="url(#grid)" />
+
+            <!-- NODES -->
+            <!-- Merchant (left) -->
+            <g class="flow-node visible" id="node-merchant">
+              <rect x="20" y="140" width="90" height="52" rx="0" fill="#FAF8F4" stroke="#1A1612" stroke-width="1.2"/>
+              <text x="65" y="162" text-anchor="middle" font-family="Space Mono" font-size="8" fill="#8A8178" letter-spacing="0.08em">MERCHANT</text>
+              <text x="65" y="178" text-anchor="middle" font-family="Space Mono" font-size="8" fill="#1A1612" letter-spacing="0.04em">checkout</text>
+              <circle cx="110" cy="166" r="4" fill="#1A1612" class="node-dot pulsing"/>
+            </g>
+
+            <!-- Tender hub (center) -->
+            <g class="flow-node" id="node-tender">
+              <rect x="200" y="120" width="110" height="100" rx="0" fill="#1A1612" stroke="#1A1612" stroke-width="1.2"/>
+              <text x="255" y="155" text-anchor="middle" font-family="Space Mono" font-size="9" fill="#C4502A" letter-spacing="0.1em">TENDER</text>
+              <text x="255" y="172" text-anchor="middle" font-family="Space Grotesk" font-size="8" fill="#8A8178">route · screen</text>
+              <text x="255" y="187" text-anchor="middle" font-family="Space Grotesk" font-size="8" fill="#8A8178">convert · settle</text>
+              <circle cx="200" cy="170" r="4" fill="#C4502A" class="node-dot"/>
+              <circle cx="310" cy="170" r="4" fill="#C4502A" class="node-dot"/>
+            </g>
+
+            <!-- Fraud engine (top right area) -->
+            <g class="flow-node" id="node-fraud">
+              <rect x="370" y="30" width="90" height="52" rx="0" fill="#FAF8F4" stroke="#C4502A" stroke-width="1"/>
+              <text x="415" y="52" text-anchor="middle" font-family="Space Mono" font-size="8" fill="#C4502A" letter-spacing="0.08em">FRAUD</text>
+              <text x="415" y="67" text-anchor="middle" font-family="Space Mono" font-size="8" fill="#8A8178" letter-spacing="0.04em">ML SCORE</text>
+              <circle cx="370" cy="56" r="3.5" fill="#C4502A" class="node-dot"/>
+            </g>
+
+            <!-- Card networks (right mid) -->
+            <g class="flow-node" id="node-cards">
+              <rect x="370" y="120" width="90" height="52" rx="0" fill="#FAF8F4" stroke="#1A1612" stroke-width="1"/>
+              <text x="415" y="142" text-anchor="middle" font-family="Space Mono" font-size="8" fill="#8A8178" letter-spacing="0.08em">NETWORKS</text>
+              <text x="415" y="157" text-anchor="middle" font-family="Space Mono" font-size="8" fill="#1A1612" letter-spacing="0.04em">Visa · MC · UPI</text>
+              <circle cx="370" cy="146" r="3.5" fill="#1A1612" class="node-dot"/>
+            </g>
+
+            <!-- Local methods (right lower) -->
+            <g class="flow-node" id="node-local">
+              <rect x="370" y="210" width="90" height="52" rx="0" fill="#FAF8F4" stroke="#1A1612" stroke-width="1"/>
+              <text x="415" y="232" text-anchor="middle" font-family="Space Mono" font-size="8" fill="#8A8178" letter-spacing="0.08em">LOCAL</text>
+              <text x="415" y="247" text-anchor="middle" font-family="Space Mono" font-size="8" fill="#1A1612" letter-spacing="0.04em">SEPA · PIX · UPI</text>
+              <circle cx="370" cy="236" r="3.5" fill="#1A1612" class="node-dot"/>
+            </g>
+
+            <!-- Bank (far right) -->
+            <g class="flow-node" id="node-bank">
+              <rect x="465" y="165" width="80" height="52" rx="0" fill="#FAF8F4" stroke="#1A1612" stroke-width="1.2"/>
+              <text x="505" y="187" text-anchor="middle" font-family="Space Mono" font-size="8" fill="#8A8178" letter-spacing="0.08em">ISSUER</text>
+              <text x="505" y="202" text-anchor="middle" font-family="Space Mono" font-size="8" fill="#1A1612" letter-spacing="0.04em">bank settle</text>
+              <circle cx="465" cy="191" r="3.5" fill="#1A1612" class="node-dot"/>
+            </g>
+
+            <!-- FX label -->
+            <g class="flow-node" id="node-fx">
+              <rect x="200" y="255" width="110" height="42" rx="0" fill="#FAF8F4" stroke="#C4502A" stroke-width="1" stroke-dasharray="4 2"/>
+              <text x="255" y="272" text-anchor="middle" font-family="Space Mono" font-size="8" fill="#C4502A" letter-spacing="0.08em">FX CONVERT</text>
+              <text x="255" y="287" text-anchor="middle" font-family="Space Mono" font-size="8" fill="#8A8178" letter-spacing="0.04em">0.5% spread</text>
+            </g>
+
+            <!-- PATHS -->
+            <!-- Merchant → Tender -->
+            <path class="flow-path" id="path-1"
+              d="M 110 166 L 200 166"
+              stroke="#1A1612" stroke-width="1.5" stroke-linecap="round"/>
+            <polygon id="arrow-1" points="196,162 204,166 196,170" fill="#1A1612" opacity="0"/>
+
+            <!-- Tender → Fraud -->
+            <path class="flow-path" id="path-2"
+              d="M 255 120 L 255 82 L 370 56"
+              stroke="#C4502A" stroke-width="1.2" stroke-linecap="round" stroke-dasharray="5 3"/>
+            <polygon id="arrow-2" points="366,52 374,56 366,60" fill="#C4502A" opacity="0"/>
+
+            <!-- Tender → Cards -->
+            <path class="flow-path" id="path-3"
+              d="M 310 155 L 370 146"
+              stroke="#1A1612" stroke-width="1.5" stroke-linecap="round"/>
+            <polygon id="arrow-3" points="366,142 374,146 366,150" fill="#1A1612" opacity="0"/>
+
+            <!-- Tender → Local -->
+            <path class="flow-path" id="path-4"
+              d="M 310 180 L 370 236"
+              stroke="#1A1612" stroke-width="1.5" stroke-linecap="round"/>
+            <polygon id="arrow-4" points="366,232 374,236 366,240" fill="#1A1612" opacity="0"/>
+
+            <!-- Cards → Bank -->
+            <path class="flow-path" id="path-5"
+              d="M 460 146 L 505 165"
+              stroke="#1A1612" stroke-width="1.5" stroke-linecap="round"/>
+
+            <!-- Local → Bank -->
+            <path class="flow-path" id="path-6"
+              d="M 460 236 L 505 217"
+              stroke="#1A1612" stroke-width="1.5" stroke-linecap="round"/>
+
+            <!-- Tender ↔ FX (vertical) -->
+            <path class="flow-path" id="path-7"
+              d="M 255 220 L 255 255"
+              stroke="#C4502A" stroke-width="1" stroke-linecap="round" stroke-dasharray="4 2"/>
+
+            <!-- Path labels -->
+            <text x="150" y="158" font-family="Space Mono" font-size="8" fill="#8A8178" class="flow-node">payment intent</text>
+            <text x="270" y="100" font-family="Space Mono" font-size="7" fill="#C4502A" class="flow-node">screen</text>
+            <text x="328" y="144" font-family="Space Mono" font-size="7" fill="#8A8178" class="flow-node">route →</text>
+            <text x="320" y="220" font-family="Space Mono" font-size="7" fill="#8A8178" class="flow-node">route →</text>
+          </svg>
+        </div>
+        <!-- Caption under diagram -->
+        <div class="mt-3 flex items-center gap-6">
+          <div class="flex items-center gap-2">
+            <div class="w-8 border-t border-[#1A1612]"></div>
+            <span class="font-mono text-[10px] text-[#8A8178]">payment path</span>
+          </div>
+          <div class="flex items-center gap-2">
+            <div class="w-8 border-t border-dashed border-[#C4502A]"></div>
+            <span class="font-mono text-[10px] text-[#8A8178]">fraud & fx signals</span>
+          </div>
+          <div class="flex items-center gap-2">
+            <div class="w-2 h-2 rounded-full bg-[#C4502A]"></div>
+            <span class="font-mono text-[10px] text-[#8A8178]">Tender-owned layer</span>
+          </div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- PULL QUOTE + CAPABILITIES — ASYMMETRIC EDITORIAL -->
+  <section class="border-b border-[#DDD9D1]">
+    <div class="max-w-7xl mx-auto px-8 py-20 grid grid-cols-1 lg:grid-cols-12 gap-12">
+
+      <!-- Left: Pull quote -->
+      <div class="lg:col-span-4">
+        <div class="pull-quote border-l-4 border-[#C4502A] pl-6 py-2">
+          <blockquote class="font-display text-[24px] font-light italic leading-[1.4] text-[#1A1612] mb-4">
+            "A 47ms p99 isn't a benchmark. It's a constraint every payment flows through."
+          </blockquote>
+          <div class="font-mono text-[10px] text-[#8A8178] tracking-wider">TENDER ENGINEERING — 2026</div>
+        </div>
+        <div class="mt-10">
+          <div class="section-label mb-4">Trusted by</div>
+          <div class="space-y-2">
+            <div class="font-body text-[14px] text-[#1A1612] border-b border-[#DDD9D1] pb-2">Cartlane — marketplace</div>
+            <div class="font-body text-[14px] text-[#1A1612] border-b border-[#DDD9D1] pb-2">Vesper — SaaS platform</div>
+            <div class="font-body text-[14px] text-[#1A1612] border-b border-[#DDD9D1] pb-2">Quorum — fintech</div>
+            <div class="font-body text-[14px] text-[#1A1612] border-b border-[#DDD9D1] pb-2">Archway — e-commerce</div>
+            <div class="font-body text-[14px] text-[#1A1612]">Northloop — subscriptions</div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Right: Numbered capabilities -->
+      <div class="lg:col-span-8 col-rule lg:pl-12">
+        <div class="section-label mb-8">Platform capabilities</div>
+        <div class="space-y-0">
+
+          <div class="feature-row py-7 border-t border-[#DDD9D1]">
+            <div class="grid grid-cols-12 gap-6">
+              <div class="col-span-1">
+                <span class="font-mono text-[11px] text-[#C8C4BC]">01</span>
+              </div>
+              <div class="col-span-3">
+                <h3 class="font-display text-[18px] font-medium leading-tight text-[#1A1612]">Global<br/>Payments</h3>
+              </div>
+              <div class="col-span-8">
+                <p class="font-body text-[14px] font-light leading-relaxed text-[#8A8178] mb-3">
+                  Visa, Mastercard, Amex, Discover, SEPA Direct Debit, UPI, PIX, GrabPay, iDEAL, Klarna, and 70+ more. A single Checkout element renders the right method per customer region. Automatic currency conversion at mid-market rate plus a transparent 0.5% FX spread.
+                </p>
+                <div class="flex flex-wrap gap-1.5">
+                  <span class="font-mono text-[10px] bg-[#F0EDE6] text-[#8A8178] border border-[#DDD9D1] px-2 py-0.5">SEPA</span>
+                  <span class="font-mono text-[10px] bg-[#F0EDE6] text-[#8A8178] border border-[#DDD9D1] px-2 py-0.5">UPI</span>
+                  <span class="font-mono text-[10px] bg-[#F0EDE6] text-[#8A8178] border border-[#DDD9D1] px-2 py-0.5">PIX</span>
+                  <span class="font-mono text-[10px] bg-[#F0EDE6] text-[#8A8178] border border-[#DDD9D1] px-2 py-0.5">GrabPay</span>
+                  <span class="font-mono text-[10px] bg-[#F0EDE6] text-[#8A8178] border border-[#DDD9D1] px-2 py-0.5">iDEAL</span>
+                  <span class="font-mono text-[10px] bg-[#F0EDE6] text-[#C4502A] border border-[#C4502A]/30 px-2 py-0.5">+75 local</span>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <div class="feature-row py-7 border-t border-[#DDD9D1]">
+            <div class="grid grid-cols-12 gap-6">
+              <div class="col-span-1">
+                <span class="font-mono text-[11px] text-[#C8C4BC]">02</span>
+              </div>
+              <div class="col-span-3">
+                <h3 class="font-display text-[18px] font-medium leading-tight text-[#1A1612]">Subscription<br/>&amp; Usage Billing</h3>
+              </div>
+              <div class="col-span-8">
+                <p class="font-body text-[14px] font-light leading-relaxed text-[#8A8178]">
+                  Flat-rate, tiered, per-seat, metered, and hybrid billing models. Real-time usage meters with sub-second ingestion latency. Automated dunning, configurable retry schedules, prorated upgrades. Tax calculation built in. Invoices emailed and stored automatically.
+                </p>
+              </div>
+            </div>
+          </div>
+
+          <div class="feature-row py-7 border-t border-[#DDD9D1]">
+            <div class="grid grid-cols-12 gap-6">
+              <div class="col-span-1">
+                <span class="font-mono text-[11px] text-[#C8C4BC]">03</span>
+              </div>
+              <div class="col-span-3">
+                <h3 class="font-display text-[18px] font-medium leading-tight text-[#1A1612]">Marketplace<br/>Payouts</h3>
+              </div>
+              <div class="col-span-8">
+                <p class="font-body text-[14px] font-light leading-relaxed text-[#8A8178]">
+                  Onboard sellers and vendors as connected accounts. Configure split rules — percentage, fixed fee, or tiered by volume. Same-day payouts in USD, EUR, and GBP. Automatic 1099/W-9 collection and IRS filing integration.
+                </p>
+              </div>
+            </div>
+          </div>
+
+          <div class="feature-row py-7 border-t border-[#DDD9D1] border-b border-[#DDD9D1]">
+            <div class="grid grid-cols-12 gap-6">
+              <div class="col-span-1">
+                <span class="font-mono text-[11px] text-[#C8C4BC]">04</span>
+              </div>
+              <div class="col-span-3">
+                <h3 class="font-display text-[18px] font-medium leading-tight text-[#1A1612]">Fraud &amp;<br/>Compliance</h3>
+              </div>
+              <div class="col-span-8">
+                <p class="font-body text-[14px] font-light leading-relaxed text-[#8A8178] mb-3">
+                  ML fraud scoring fires on every payment intent — median response 8ms. Adaptive 3DS2 challenges high-risk transactions. KYC/AML screening for regulated markets. PCI DSS Level 1: card data never touches your servers or logs.
+                </p>
+                <div class="flex gap-6">
+                  <div><span class="font-display text-[18px] font-medium text-[#1A1612]">0.03%</span><span class="font-body text-[12px] text-[#8A8178] ml-1">fraud rate</span></div>
+                  <div><span class="font-display text-[18px] font-medium text-[#1A1612]">PCI L1</span><span class="font-body text-[12px] text-[#8A8178] ml-1">certified</span></div>
+                  <div><span class="font-display text-[18px] font-medium text-[#1A1612]">SOC 2</span><span class="font-body text-[12px] text-[#8A8178] ml-1">Type II</span></div>
+                </div>
+              </div>
+            </div>
+          </div>
+
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- DEV SPECS — TWO COLUMN COMPARISON -->
+  <section class="border-b border-[#DDD9D1] bg-[#F0EDE6]">
+    <div class="max-w-7xl mx-auto px-8 py-16">
+      <div class="section-label mb-10">Developer integration</div>
+      <div class="grid grid-cols-1 lg:grid-cols-2 gap-8">
+        <!-- Quick start -->
+        <div class="bg-[#1A1612] p-6">
+          <div class="font-mono text-[10px] text-[#8A8178] tracking-wider uppercase mb-4">Quick start · 5 minutes to first payment</div>
+          <div class="space-y-1 font-mono text-[12px] leading-relaxed">
+            <div><span class="text-[#8A8178]"># Install</span></div>
+            <div><span class="text-[#C4502A]">$</span> <span class="text-[#FAF8F4]">npm install @tender/node</span></div>
+            <div class="mt-3 text-[#8A8178]">// Create a payment intent</div>
+            <div><span class="text-[#8A8178]">const</span> <span class="text-[#FAF8F4]">tender</span> <span class="text-[#8A8178]">=</span> <span class="text-[#C4502A]">require</span><span class="text-[#FAF8F4]">(<span class="text-[#7BA87B]">'@tender/node'</span>)</span><span class="text-[#FAF8F4]">(<span class="text-[#7BA87B]">'sk_live_...'</span>);</span></div>
+            <div class="mt-2"><span class="text-[#8A8178]">const</span> <span class="text-[#FAF8F4]">intent</span> <span class="text-[#8A8178]">=</span> <span class="text-[#8A8178]">await</span> <span class="text-[#FAF8F4]">tender</span><span class="text-[#C4502A]">.</span><span class="text-[#C8A870]">paymentIntents</span><span class="text-[#C4502A]">.</span><span class="text-[#C4502A]">create</span><span class="text-[#FAF8F4]">({</span></div>
+            <div class="pl-4"><span class="text-[#C8A870]">amount</span><span class="text-[#FAF8F4]">:</span> <span class="text-[#C8A870]">4999</span><span class="text-[#FAF8F4]">,</span></div>
+            <div class="pl-4"><span class="text-[#C8A870]">currency</span><span class="text-[#FAF8F4]">:</span> <span class="text-[#7BA87B]">'gbp'</span><span class="text-[#FAF8F4]">,</span></div>
+            <div class="pl-4"><span class="text-[#C8A870]">fraud_screen</span><span class="text-[#FAF8F4]">:</span> <span class="text-[#C8A870]">true</span><span class="text-[#FAF8F4]">,</span></div>
+            <div><span class="text-[#FAF8F4]">});</span></div>
+          </div>
+        </div>
+        <!-- SDK + features -->
+        <div class="space-y-0">
+          <div class="section-label mb-4">Available in</div>
+          <div class="grid grid-cols-3 gap-2 mb-6">
+            <div class="border border-[#DDD9D1] bg-[#FAF8F4] p-3 text-center">
+              <div class="font-mono text-[11px] text-[#1A1612] font-bold">Node</div>
+            </div>
+            <div class="border border-[#DDD9D1] bg-[#FAF8F4] p-3 text-center">
+              <div class="font-mono text-[11px] text-[#1A1612] font-bold">Python</div>
+            </div>
+            <div class="border border-[#DDD9D1] bg-[#FAF8F4] p-3 text-center">
+              <div class="font-mono text-[11px] text-[#1A1612] font-bold">Ruby</div>
+            </div>
+            <div class="border border-[#DDD9D1] bg-[#FAF8F4] p-3 text-center">
+              <div class="font-mono text-[11px] text-[#1A1612] font-bold">Go</div>
+            </div>
+            <div class="border border-[#DDD9D1] bg-[#FAF8F4] p-3 text-center">
+              <div class="font-mono text-[11px] text-[#1A1612] font-bold">Java</div>
+            </div>
+            <div class="border border-[#DDD9D1] bg-[#FAF8F4] p-3 text-center">
+              <div class="font-mono text-[11px] text-[#1A1612] font-bold">PHP</div>
+            </div>
+          </div>
+          <div class="section-label mb-4">Platform features</div>
+          <div class="space-y-3">
+            <div class="flex items-start gap-3 py-3 border-t border-[#DDD9D1]">
+              <div class="w-4 h-4 flex-shrink-0 mt-0.5 border border-[#C4502A] flex items-center justify-center">
+                <div class="w-2 h-2 bg-[#C4502A]"></div>
+              </div>
+              <div>
+                <div class="font-body text-[13px] font-medium text-[#1A1612]">250+ webhook event types</div>
+                <div class="font-body text-[12px] text-[#8A8178]">Signed payloads · automatic retry · 72hr delivery window</div>
+              </div>
+            </div>
+            <div class="flex items-start gap-3 py-3 border-t border-[#DDD9D1]">
+              <div class="w-4 h-4 flex-shrink-0 mt-0.5 border border-[#C4502A] flex items-center justify-center">
+                <div class="w-2 h-2 bg-[#C4502A]"></div>
+              </div>
+              <div>
+                <div class="font-body text-[13px] font-medium text-[#1A1612]">Full test mode</div>
+                <div class="font-body text-[12px] text-[#8A8178]">Card fixtures for every failure · fraud simulation · clock control</div>
+              </div>
+            </div>
+            <div class="flex items-start gap-3 py-3 border-t border-[#DDD9D1]">
+              <div class="w-4 h-4 flex-shrink-0 mt-0.5 border border-[#C4502A] flex items-center justify-center">
+                <div class="w-2 h-2 bg-[#C4502A]"></div>
+              </div>
+              <div>
+                <div class="font-body text-[13px] font-medium text-[#1A1612]">CLI tooling</div>
+                <div class="font-body text-[12px] text-[#8A8178]">tender listen · tender trigger · tender logs tail</div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- FINAL CTA -->
+  <section class="border-b border-[#DDD9D1]">
+    <div class="max-w-7xl mx-auto px-8 py-24">
+      <div class="grid grid-cols-1 lg:grid-cols-12 items-end gap-12">
+        <div class="lg:col-span-7">
+          <div class="section-label mb-6">Ready to start</div>
+          <h2 class="font-display text-[50px] font-medium leading-[1.08] tracking-[-0.02em] text-[#1A1612]">
+            Free to start.<br/>
+            No setup fees.<br/>
+            <em class="font-light text-[#C4502A]">Ship this weekend.</em>
+          </h2>
+        </div>
+        <div class="lg:col-span-5 col-rule lg:pl-12">
+          <p class="font-body text-[15px] font-light leading-relaxed text-[#8A8178] mb-8">
+            Create an account, grab your test key, and process your first payment in under five minutes. Full test mode with no time limit. Pricing is transparent and usage-based — no minimums.
+          </p>
+          <div class="flex flex-col gap-3">
+            <a href="#" class="font-mono text-[12px] font-bold bg-[#1A1612] text-[#FAF8F4] px-8 py-4 hover:bg-[#C4502A] transition-colors inline-flex items-center gap-2 w-fit">
+              START INTEGRATING →
+            </a>
+            <a href="#" class="font-mono text-[12px] border border-[#DDD9D1] text-[#8A8178] px-8 py-4 hover:border-[#1A1612] hover:text-[#1A1612] transition-colors inline-flex items-center gap-2 w-fit">
+              VIEW THE DOCS
+            </a>
+          </div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- FOOTER -->
+  <footer class="max-w-7xl mx-auto px-8 py-12">
+    <div class="grid grid-cols-2 md:grid-cols-5 gap-8 mb-10">
+      <div class="col-span-2 md:col-span-1">
+        <span class="font-display text-[20px] font-medium text-[#1A1612] block mb-3">Tender<span class="text-[#C4502A]">.</span></span>
+        <p class="font-body text-[12px] text-[#8A8178] leading-relaxed">Payments API for internet businesses.</p>
+      </div>
+      <div>
+        <div class="section-label mb-3">Products</div>
+        <div class="space-y-2">
+          <a href="#" class="block font-body text-[12px] text-[#8A8178] hover:text-[#1A1612] transition-colors">Payments</a>
+          <a href="#" class="block font-body text-[12px] text-[#8A8178] hover:text-[#1A1612] transition-colors">Billing</a>
+          <a href="#" class="block font-body text-[12px] text-[#8A8178] hover:text-[#1A1612] transition-colors">Connect</a>
+          <a href="#" class="block font-body text-[12px] text-[#8A8178] hover:text-[#1A1612] transition-colors">Fraud</a>
+        </div>
+      </div>
+      <div>
+        <div class="section-label mb-3">Developers</div>
+        <div class="space-y-2">
+          <a href="#" class="block font-body text-[12px] text-[#8A8178] hover:text-[#1A1612] transition-colors">API Reference</a>
+          <a href="#" class="block font-body text-[12px] text-[#8A8178] hover:text-[#1A1612] transition-colors">SDKs</a>
+          <a href="#" class="block font-body text-[12px] text-[#8A8178] hover:text-[#1A1612] transition-colors">Webhooks</a>
+          <a href="#" class="block font-body text-[12px] text-[#8A8178] hover:text-[#1A1612] transition-colors">Changelog</a>
+        </div>
+      </div>
+      <div>
+        <div class="section-label mb-3">Company</div>
+        <div class="space-y-2">
+          <a href="#" class="block font-body text-[12px] text-[#8A8178] hover:text-[#1A1612] transition-colors">About</a>
+          <a href="#" class="block font-body text-[12px] text-[#8A8178] hover:text-[#1A1612] transition-colors">Blog</a>
+          <a href="#" class="block font-body text-[12px] text-[#8A8178] hover:text-[#1A1612] transition-colors">Careers</a>
+          <a href="#" class="block font-body text-[12px] text-[#8A8178] hover:text-[#1A1612] transition-colors">Status</a>
+        </div>
+      </div>
+      <div>
+        <div class="section-label mb-3">Legal</div>
+        <div class="space-y-2">
+          <a href="#" class="block font-body text-[12px] text-[#8A8178] hover:text-[#1A1612] transition-colors">Privacy</a>
+          <a href="#" class="block font-body text-[12px] text-[#8A8178] hover:text-[#1A1612] transition-colors">Terms</a>
+          <a href="#" class="block font-body text-[12px] text-[#8A8178] hover:text-[#1A1612] transition-colors">PCI Cert</a>
+          <a href="#" class="block font-body text-[12px] text-[#8A8178] hover:text-[#1A1612] transition-colors">SOC 2 Report</a>
+        </div>
+      </div>
+    </div>
+    <div class="border-t border-[#DDD9D1] pt-6 flex items-center justify-between">
+      <span class="font-mono text-[10px] text-[#C8C4BC]">© 2026 Tender Payments Inc.</span>
+      <span class="font-mono text-[10px] text-[#C8C4BC]">PCI DSS L1 · SOC 2 Type II · ISO 27001 · GDPR</span>
+    </div>
+  </footer>
+
+  <script>
+    // Sequential path + node animation on load
+    const paths = [
+      { path: 'path-1', arrow: 'arrow-1', nodes: ['node-tender'], delay: 300 },
+      { path: 'path-2', arrow: 'arrow-2', nodes: ['node-fraud'], delay: 700 },
+      { path: 'path-3', arrow: 'arrow-3', nodes: ['node-cards'], delay: 1100 },
+      { path: 'path-4', arrow: 'arrow-4', nodes: ['node-local'], delay: 1300 },
+      { path: 'path-5', arrow: null, nodes: ['node-bank'], delay: 1600 },
+      { path: 'path-6', arrow: null, nodes: [], delay: 1700 },
+      { path: 'path-7', arrow: null, nodes: ['node-fx'], delay: 1900 },
+    ];
+
+    paths.forEach(({ path, arrow, nodes, delay }) => {
+      setTimeout(() => {
+        const el = document.getElementById(path);
+        if (el) el.classList.add('animate');
+        if (arrow) {
+          const a = document.getElementById(arrow);
+          if (a) {
+            a.style.transition = 'opacity 0.3s';
+            a.style.opacity = '1';
+          }
+        }
+        nodes.forEach(nodeId => {
+          const n = document.getElementById(nodeId);
+          if (n) n.classList.add('visible');
+        });
+      }, delay);
+    });
+
+    // Add pulsing to nodes that appear
+    setTimeout(() => {
+      document.querySelectorAll('.node-dot').forEach(dot => dot.classList.add('pulsing'));
+    }, 2200);
+  </script>
+</body>
+</html>

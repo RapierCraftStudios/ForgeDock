@@ -398,6 +398,330 @@ gh api repos/{OWNER}/{REPO}/issues/{NUMBER}/comments \
 
 ---
 
+### Design Pipeline Annotations
+
+These annotations drive the UI Taste Harness — the design-generation pipeline that produces a landing page from a design-blind product brief. They carry design intent across the architect → generate → critique → close stages, exactly as the issue-pipeline annotations carry code-context across investigate → build → review.
+
+---
+
+#### `FORGE:DESIGN_CONTEXT`
+
+**Phase**: Design — Investigate (`/design` stage 1, #888) — the first `FORGE:DESIGN_*` annotation in the chain
+**Written by**: `/design` design-investigate stage
+**Read by**: Design-architect stage (grounds the rationale), Close phase (audit trail)
+**Location**: Issue comment
+
+The design analog of `FORGE:CONTEXT`: the parsed brief (message / audience / single objection), the grammar pulled
+from the [reference corpus](design/reference-corpus.md) (#880), and the recent signature moves / archetypes / palettes
+pulled from [design-memory](design/design-memory.md) (#887) that this design must **diverge** from. Opens the
+`FORGE:DESIGN_*` chain that `FORGE:DESIGN_RATIONALE` → `FORGE:DESIGN_CANDIDATES` → `FORGE:DESIGN_SPEC` → `FORGE:CRITIQUE`
+→ `FORGE:DESIGN_SHIPPED` continues. See [`commands/design.md`](../commands/design.md).
+
+**Schema**:
+
+```markdown
+<!-- FORGE:DESIGN_CONTEXT -->
+## Design Context — {product}
+
+**Message:** {one thing the page must say}
+**Audience / objection:** {who} — must overcome: {objection}
+**Corpus grammar:** {relevant traits / archetype priors from #880}
+**Diverge from (memory):** {recent signature moves / archetypes / palettes to avoid — #887}
+<!-- FORGE:DESIGN_CONTEXT:COMPLETE -->
+```
+
+**Detection query**:
+```bash
+gh api repos/{OWNER}/{REPO}/issues/{NUMBER}/comments \
+  --jq '.[] | select(.body | contains("FORGE:DESIGN_CONTEXT")) | .body'
+```
+
+---
+
+#### `FORGE:DESIGN_RATIONALE`
+
+**Phase**: Design — Architecture (design-architect, #886) — emitted *before* `FORGE:DESIGN_SPEC`
+**Written by**: Design-architect agent
+**Read by**: Generate agent (the spec it produces), render → vision-critique loop (#882), and a non-designer reviewer (the reasoning is reviewable without judging pixels)
+**Location**: Issue comment
+
+The designer's diary — the reasoning-before-generation step. Captures the seven-element chain of thought (intent/feeling, audience/objection, communication hierarchy, direction + rejected alternatives, signature move, what's being tried this time, non-goals) and **produces** the `FORGE:DESIGN_SPEC` rather than letting the spec appear from nowhere. The format is the structured contract: it MUST carry at least one explicitly **rejected alternative**, a named **signature move**, and a **produces-DESIGN_SPEC link**. See [`docs/design/design-architect-rationale.md`](design/design-architect-rationale.md) for the full doctrine.
+
+**Schema**:
+
+```markdown
+<!-- FORGE:DESIGN_RATIONALE -->
+## Design Rationale — {product}
+
+**Intent / feeling:** {one message} · {one feeling}
+**Audience / objection:** {who} — must overcome: {objection}
+**Communication hierarchy:** 1) {…} 2) {…} 3) {…}
+**Direction:** {archetype} — because {reasoning}
+  - Considered & rejected: {alt A} (because {…}); {alt B} (because {…})
+**Signature move:** {the one non-obvious idea}
+**Trying this time:** {technique/learning} (from memory: avoiding {prior move})
+**Non-goals:** {what this won't do}
+
+→ Produces DESIGN_SPEC: {link}
+```
+
+**Detection query**:
+```bash
+gh api repos/{OWNER}/{REPO}/issues/{NUMBER}/comments \
+  --jq '.[] | select(.body | contains("FORGE:DESIGN_RATIONALE")) | .body'
+```
+
+---
+
+#### `FORGE:DESIGN_CANDIDATES`
+
+**Phase**: Design — Divergent generation (#883) — emitted *after* `FORGE:DESIGN_RATIONALE`, *before* `FORGE:DESIGN_SPEC`
+**Written by**: Generate agent (divergent-generation step)
+**Read by**: Taste-judge (selects the winner), Close phase (audit trail), design-memory (#887, to diverge from past winners)
+**Location**: Issue comment
+
+The variance lever's audit record: the one **committed archetype** (one of the five corpus ids — #880, never blended),
+the **N distinct directions** generated within it, and the **independent taste-judge's** scores + selection. The
+winner hands off into `FORGE:DESIGN_SPEC`. The selection judge is deliberately distinct from the critique loop (#882)
+and the benchmark judge (#878) — anti-Goodhart. See [`docs/design/divergent-generation.md`](design/divergent-generation.md).
+
+**Schema**:
+
+```markdown
+<!-- FORGE:DESIGN_CANDIDATES -->
+## Design Candidates — {product}
+
+**Archetype (committed):** {one of the 5 corpus ids}
+**Directions:**
+1. {concept} — signature: {move} — {distinguishing grammar/tokens}
+2. {concept} — signature: {move} — {…}
+**Judge scores:** 1) {score} 2) {score} …
+**Selected:** #{n} — because {reason}
+
+→ Winner produces DESIGN_SPEC: {link}
+```
+
+**Detection query**:
+```bash
+gh api repos/{OWNER}/{REPO}/issues/{NUMBER}/comments \
+  --jq '.[] | select(.body | contains("FORGE:DESIGN_CANDIDATES")) | .body'
+```
+
+---
+
+#### `FORGE:DESIGN_SPEC`
+
+**Phase**: Design — Architecture (design-architect, #886)
+**Written by**: Design-architect agent
+**Read by**: Generate agent (constrains output), deterministic anti-slop linter (#884), render → vision-critique loop (#882), Close phase agent (persists realized spec to design-memory, #887)
+
+A structured, **machine-checkable** representation of one page's design language. Carried across design-pipeline stages as a `FORGE:DESIGN_SPEC` annotation so taste decisions **persist** instead of being re-rolled per generation, and so a deterministic linter and a vision critic both check the rendered output against the *same* committed intent.
+
+Critically, the spec is **produced by** a `FORGE:DESIGN_RATIONALE` (the reasoning) — not authored from nowhere. The flow is rationale → spec → page.
+
+The full field-by-field schema (JSON shape, the per-field slop-tell defense table, and the lifecycle) lives in [`design/design-spec-schema.md`](design/design-spec-schema.md). The annotation body embeds that schema as a fenced `jsonc` block.
+
+**Schema** (annotation envelope):
+
+````
+<!-- FORGE:DESIGN_SPEC -->
+## Design Spec — {product}
+
+```jsonc
+{
+  "meta":          { "product": "…", "archetype": "…", "corpus_version": "…", "rationale_ref": "…" },
+  "typography":    { "display_family": "…", "body_family": "…", "scale_ratio": …, "weights": […] },
+  "color":         { "mode": "…", "background": "#…", "foreground": "#…", "accent": "#…",
+                     "rules": ["no-default-tailwind-palette", "contrast>=4.5"] },
+  "spacing":       { "base_unit_px": …, "scale": […] },
+  "radius":        { "scale": […] },
+  "shadow":        { "tokens": […] },
+  "motion":        { "vocabulary": […], "reduced_motion": "required" },
+  "layout_grammar":{ "sections": [ { "id": "…", "purpose": "…", "density": "…" } ], "rhythm": "…" },
+  "effects_plan":  { "per_section": [ … ], "budget": { … }, "never": [ … ] }, // doctrine: docs/design/effects-appropriateness.md (#885)
+  "negatives":     [ … ],
+  "acceptance":    { "perf_budget": { … }, "a11y": { … }, "divergence_ref": "…" }
+}
+```
+
+→ Produced by FORGE:DESIGN_RATIONALE: {link}
+````
+
+**Field reference**: see [`design/design-spec-schema.md`](design/design-spec-schema.md) for the complete schema, the "How each field defends against slop" table, and the lifecycle.
+
+**Detection query**:
+```bash
+gh api repos/{OWNER}/{REPO}/issues/{NUMBER}/comments \
+  --jq '.[] | select(.body | contains("FORGE:DESIGN_SPEC")) | .body'
+```
+
+---
+
+#### `FORGE:CRITIQUE`
+
+**Phase**: Design — Render → vision-critique loop (`/design-render-critique-loop`, #882) — after `FORGE:DESIGN_SPEC`
+**Written by**: Vision-critique loop (one per iteration)
+**Read by**: The iterate step (consumes its own findings), Close phase (improvement trajectory audit), `/design` (#888)
+**Location**: Issue comment
+
+One annotation per render→critique iteration — the page's improvement trajectory as an auditable trail. Records the
+deterministic lint floor result (#884), the desktop+mobile render, the perceptual findings (N3, N8–N12 — the negatives
+the linter declares out of scope), and the verdict (`PASS` | `ITERATE` | `BUDGET-EXHAUSTED`). The critic is strictly
+independent from the ABC benchmark judge (#878) — anti-Goodhart. See
+[`docs/design/render-critique-loop.md`](design/render-critique-loop.md).
+
+**Schema**:
+
+```markdown
+<!-- FORGE:CRITIQUE -->
+## Critique — {product} · iteration {i}/{max}
+
+**Lint floor:** {PASS | fixed N hard findings}
+**Render:** desktop + mobile captured
+**Perceptual findings:**
+- N{n}: {what was observed in the render} → {correction}
+**Verdict:** {PASS | ITERATE | BUDGET-EXHAUSTED}
+<!-- FORGE:CRITIQUE:COMPLETE -->
+```
+
+**Detection query**:
+```bash
+gh api repos/{OWNER}/{REPO}/issues/{NUMBER}/comments \
+  --jq '.[] | select(.body | contains("FORGE:CRITIQUE")) | .body'
+```
+
+---
+
+#### `FORGE:USER_FEEDBACK`
+
+<!-- Added: forge#1044 — user-feedback loop -->
+
+**Phase**: Design — User-feedback loop (`/design` stage 4.5, #1044) — after `FORGE:CRITIQUE`, before `FORGE:DESIGN_SHIPPED`
+**Written by**: `/design` user-feedback stage (Stage 4.5) — records structured user input after the automated critique loop
+**Read by**: Surgical re-generation step (same stage 4.5, consumes `section_target` + `modification`), Close phase (audit trail of user-driven changes)
+**Location**: Issue comment
+
+The structured record of one user-feedback round in Stage 4.5 of the `/design` pipeline. Posted once per feedback
+exchange — there may be multiple `FORGE:USER_FEEDBACK` annotations on a single issue if the user iterates several
+times. Each annotation carries a `section_target` (the section ID from `layout_grammar.sections` to re-generate), the
+`feedback_type` (asset / emotion / direction / freeform), any asset URL, the structured modification derived from the
+feedback, and a `satisfied` flag indicating whether the user is done iterating.
+
+The annotation is **not produced** in automated (benchmark) runs — Stage 4.5 is bypassed when no user is present.
+See [`docs/design/design-spec-schema.md`](design/design-spec-schema.md) for the section modularity contract that
+governs surgical re-generation. See [`commands/design.md`](../commands/design.md) for the full Stage 4.5 procedure.
+
+**Constraint**: `FORGE:USER_FEEDBACK` may modify a section's visual execution but MUST NOT change the committed
+`meta.archetype` or the signature move from `FORGE:DESIGN_RATIONALE` — those choices are locked once the spec is
+committed in Stage 2.
+
+**Schema**:
+
+````markdown
+<!-- FORGE:USER_FEEDBACK -->
+## User Feedback — {product} · round {n}
+
+**Section target:** {section ID from layout_grammar.sections, e.g. "hero" | "all" for page-wide feedback}
+**Feedback type:** {asset | emotion | direction | freeform}
+**Asset URL:** {URL or "none"}
+**Modification:** {structured description of what to change — derived from user's natural-language input}
+**Emotion target:** {trust | speed | power | craft | play | unchanged} — maps to motion vocabulary
+**Satisfied:** {yes | no — "no" loops back to 4.5 after re-generation}
+**Freeform notes:** {verbatim user input not captured in the structured fields above}
+<!-- FORGE:USER_FEEDBACK:COMPLETE -->
+````
+
+**Field notes**:
+- `section_target`: must match an `id` in the committed `FORGE:DESIGN_SPEC → layout_grammar.sections`. Use `"all"` only for page-wide color/typography changes that cannot be scoped to one section.
+- `feedback_type`: `asset` = user provided a URL (video/logo/image/colors); `emotion` = user described a feeling to change; `direction` = user described a layout or composition change; `freeform` = catch-all for input that doesn't fit the above.
+- `modification`: the parsed, actionable version of the user's words — e.g., user says "make the hero feel more urgent" → modification: `"increase motion intensity in hero scroll-reveal; tighten headline tracking"`.
+- `satisfied: yes` means no further feedback iteration — proceed to Stage 5 (design-close).
+
+**Detection query**:
+```bash
+gh api repos/{OWNER}/{REPO}/issues/{NUMBER}/comments \
+  --jq '[.[] | select(.body | contains("FORGE:USER_FEEDBACK"))] | last | .body'
+```
+
+---
+
+#### `FORGE:BENCH_SCORECARD`
+
+**Phase**: Design — Benchmark (`/design-bench`, #878)
+**Written by**: Benchmark rig (`/design-bench` command)
+**Read by**: Harness developers (the fitness signal — "did arm A's win-rate vs C go up?"), milestone tracker, pipeline-health
+
+The result of one ABC benchmark run. Arm A is the ForgeDock harness output, arm B is a raw one-shot model, and arm C is the real reference page (gold standard). The annotation carries the **win-rate of each arm against C**, the **A-vs-B harness delta**, rubric **distributions** (mean + stdev) across n runs, mean slop counts, and the **judge-calibration check** (C must beat A and B; otherwise the judge is miscalibrated and the result is suspect).
+
+The scorecard is the fitness function for the UI Taste Harness milestone — it is built before the harness so each lever the harness adds is a measurable hypothesis. The methodology (three arms, same-model rule, three-layer judging, n>=3) lives in [`design/abc-benchmark.md`](design/abc-benchmark.md); the deterministic aggregator is [`../scripts/bench-scorecard.mjs`](../scripts/bench-scorecard.mjs).
+
+Two invariants this annotation encodes: **n>=3** (taste output is high-variance — distributions, never a single number) and **judge independence** from the harness critique loop (#882) (anti-Goodhart).
+
+**Schema** (annotation envelope):
+
+````
+<!-- FORGE:BENCH_SCORECARD -->
+## ABC Benchmark Scorecard
+
+**Corpus version**: {ver} · **Generation model (A & B)**: {model} · **Judge model**: {independent judge}
+**Products**: {n_products} · **Runs/product**: {n}
+
+| Arm | Win-rate vs C | A-vs-B | Mean slop |
+|-----|---------------|--------|-----------|
+| A   | {wr}          | {a_vs_b} | {slop_A} |
+| B   | {wr}          | —        | {slop_B} |
+
+**Judge calibration**: {ok | MISCALIBRATED — N runs where C lost (suspect)}
+
+```json
+{scorecard.json from bench-scorecard.mjs}
+```
+
+<!-- FORGE:BENCH_SCORECARD:COMPLETE -->
+````
+
+**Detection query**:
+```bash
+gh api repos/{OWNER}/{REPO}/issues/{NUMBER}/comments \
+  --jq '.[] | select(.body | contains("FORGE:BENCH_SCORECARD")) | .body'
+```
+
+---
+
+#### `FORGE:DESIGN_SHIPPED`
+
+**Phase**: Design — Close (`/design` stage 5, #888) — the terminal `FORGE:DESIGN_*` annotation
+**Written by**: `/design` design-close stage
+**Read by**: [design-memory](design/design-memory.md) (#887, persists the realized outcome), milestone tracker, pipeline-health
+**Location**: Issue comment
+
+Closes the design pipeline. Posted only when the design passes the full definition of done — critique-rubric threshold,
+perf budget (#875), a11y check, and the divergence check (#887). Records the final scorecard and the realized outcome
+(archetype, signature move, palette/type/effects, learnings) that is written to design-memory so the *next* design can
+diverge from it. The design analog of closing a code issue at `workflow:merged`; its label is `design:shipped` (the
+rejected counterpart is `design:rejected`, set without this annotation). See [`commands/design.md`](../commands/design.md).
+
+**Schema**:
+
+```markdown
+<!-- FORGE:DESIGN_SHIPPED -->
+## Design Shipped — {product}
+
+**Archetype:** {committed id} · **Signature move:** {the hook}
+**Gates:** rubric {pass} · perf {pass} · a11y {pass} · divergence {distinct from prior — #887}
+**Critique iterations:** {n}
+**Written to memory:** {palette/type/effects/learnings summary}
+<!-- FORGE:DESIGN_SHIPPED:COMPLETE -->
+```
+
+**Detection query**:
+```bash
+gh api repos/{OWNER}/{REPO}/issues/{NUMBER}/comments \
+  --jq '.[] | select(.body | contains("FORGE:DESIGN_SHIPPED")) | .body'
+```
+
+---
+
 ### Orchestration / Milestone Annotations
 
 These annotations transfer investigation context across issue boundaries in decomposed or multi-issue milestone workflows.

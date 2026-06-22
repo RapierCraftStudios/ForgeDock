@@ -1,0 +1,407 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Voltage — Serverless GPU Compute for AI</title>
+<link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;700&family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+<style>
+  *, *::before, *::after { margin: 0; padding: 0; box-sizing: border-box; }
+  :root {
+    --bg: #0a0a0f;
+    --surface: #12121a;
+    --border: #1e1e2e;
+    --text: #e4e4ef;
+    --text-muted: #8888a0;
+    --accent: #f0c040;
+    --accent-dim: #f0c04020;
+    --green: #4ade80;
+    --blue: #60a5fa;
+    --purple: #a78bfa;
+    --pink: #f472b6;
+  }
+  body {
+    font-family: 'Inter', sans-serif;
+    background: var(--bg);
+    color: var(--text);
+    line-height: 1.6;
+    overflow-x: hidden;
+  }
+  a { color: var(--accent); text-decoration: none; }
+
+  /* NAV */
+  nav {
+    position: fixed; top: 0; left: 0; right: 0; z-index: 100;
+    display: flex; align-items: center; justify-content: space-between;
+    padding: 16px 48px;
+    background: rgba(10,10,15,0.85);
+    backdrop-filter: blur(12px);
+    border-bottom: 1px solid var(--border);
+  }
+  .logo {
+    font-weight: 800; font-size: 20px; letter-spacing: -0.5px;
+    display: flex; align-items: center; gap: 8px;
+  }
+  .logo-icon {
+    width: 28px; height: 28px; background: var(--accent);
+    border-radius: 6px; display: flex; align-items: center; justify-content: center;
+    font-size: 16px; color: #000; font-weight: 800;
+  }
+  nav ul { list-style: none; display: flex; gap: 32px; }
+  nav ul a { color: var(--text-muted); font-size: 14px; font-weight: 500; transition: color 0.2s; }
+  nav ul a:hover { color: var(--text); }
+  .nav-cta {
+    background: var(--accent); color: #000; padding: 8px 20px;
+    border-radius: 6px; font-weight: 600; font-size: 14px; transition: opacity 0.2s;
+  }
+  .nav-cta:hover { opacity: 0.85; }
+
+  /* HERO */
+  .hero {
+    min-height: 100vh; display: flex; align-items: center;
+    padding: 120px 48px 80px;
+    max-width: 1440px; margin: 0 auto;
+    gap: 64px;
+  }
+  .hero-left { flex: 1; max-width: 540px; }
+  .hero-right { flex: 1; min-width: 0; }
+  .hero-badge {
+    display: inline-flex; align-items: center; gap: 8px;
+    background: var(--accent-dim); border: 1px solid var(--accent);
+    border-radius: 100px; padding: 6px 16px;
+    font-size: 13px; font-weight: 600; color: var(--accent);
+    margin-bottom: 28px;
+  }
+  .hero h1 {
+    font-size: 56px; font-weight: 800; line-height: 1.1;
+    letter-spacing: -2px; margin-bottom: 24px;
+  }
+  .hero h1 span { color: var(--accent); }
+  .hero p {
+    font-size: 18px; color: var(--text-muted); line-height: 1.7;
+    margin-bottom: 36px; max-width: 480px;
+  }
+  .cta-group { display: flex; gap: 16px; align-items: center; }
+  .btn-primary {
+    background: var(--accent); color: #000; padding: 14px 32px;
+    border-radius: 8px; font-weight: 700; font-size: 16px;
+    border: none; cursor: pointer; transition: transform 0.15s, opacity 0.2s;
+    display: inline-block;
+  }
+  .btn-primary:hover { transform: translateY(-1px); opacity: 0.9; }
+  .btn-secondary {
+    background: transparent; color: var(--text); padding: 14px 32px;
+    border-radius: 8px; font-weight: 600; font-size: 16px;
+    border: 1px solid var(--border); cursor: pointer; transition: border-color 0.2s;
+    display: inline-block;
+  }
+  .btn-secondary:hover { border-color: var(--text-muted); }
+
+  /* CODE BLOCK */
+  .code-window {
+    background: var(--surface); border: 1px solid var(--border);
+    border-radius: 12px; overflow: hidden;
+    box-shadow: 0 24px 80px rgba(0,0,0,0.5);
+  }
+  .code-titlebar {
+    display: flex; align-items: center; gap: 8px;
+    padding: 12px 16px; border-bottom: 1px solid var(--border);
+  }
+  .dot { width: 10px; height: 10px; border-radius: 50%; }
+  .dot-r { background: #ef4444; }
+  .dot-y { background: #eab308; }
+  .dot-g { background: #22c55e; }
+  .code-filename {
+    margin-left: 12px; font-family: 'JetBrains Mono', monospace;
+    font-size: 12px; color: var(--text-muted);
+  }
+  .code-body {
+    padding: 24px; font-family: 'JetBrains Mono', monospace;
+    font-size: 13.5px; line-height: 1.8; overflow-x: auto;
+  }
+  .code-body .kw { color: var(--purple); }
+  .code-body .fn { color: var(--blue); }
+  .code-body .str { color: var(--green); }
+  .code-body .dec { color: var(--accent); }
+  .code-body .cm { color: var(--text-muted); }
+  .code-body .num { color: var(--pink); }
+
+  /* METRICS BAR */
+  .metrics {
+    max-width: 1440px; margin: 0 auto;
+    padding: 0 48px 80px;
+    display: grid; grid-template-columns: repeat(4, 1fr); gap: 1px;
+    background: var(--border); border-radius: 12px; overflow: hidden;
+  }
+  .metric {
+    background: var(--surface); padding: 40px 32px; text-align: center;
+  }
+  .metric-value {
+    font-size: 42px; font-weight: 800; letter-spacing: -2px;
+    color: var(--accent);
+  }
+  .metric-label {
+    font-size: 14px; color: var(--text-muted); margin-top: 8px; font-weight: 500;
+  }
+
+  /* FEATURES */
+  .features {
+    max-width: 1440px; margin: 0 auto;
+    padding: 80px 48px 100px;
+  }
+  .features-header {
+    text-align: center; margin-bottom: 64px;
+  }
+  .features-header h2 {
+    font-size: 40px; font-weight: 800; letter-spacing: -1.5px; margin-bottom: 16px;
+  }
+  .features-header p {
+    font-size: 18px; color: var(--text-muted); max-width: 560px; margin: 0 auto;
+  }
+  .features-grid {
+    display: grid; grid-template-columns: repeat(3, 1fr); gap: 24px;
+  }
+  .feature-card {
+    background: var(--surface); border: 1px solid var(--border);
+    border-radius: 12px; padding: 36px 32px;
+    transition: border-color 0.3s;
+  }
+  .feature-card:hover { border-color: var(--accent); }
+  .feature-icon {
+    width: 44px; height: 44px; border-radius: 10px;
+    display: flex; align-items: center; justify-content: center;
+    font-size: 20px; margin-bottom: 20px;
+    background: var(--accent-dim); color: var(--accent);
+  }
+  .feature-card h3 {
+    font-size: 18px; font-weight: 700; margin-bottom: 12px;
+  }
+  .feature-card p {
+    font-size: 14px; color: var(--text-muted); line-height: 1.7;
+  }
+
+  /* HOW IT WORKS */
+  .how-section {
+    max-width: 1440px; margin: 0 auto;
+    padding: 80px 48px 100px;
+    border-top: 1px solid var(--border);
+  }
+  .how-section h2 {
+    font-size: 40px; font-weight: 800; letter-spacing: -1.5px;
+    text-align: center; margin-bottom: 64px;
+  }
+  .steps {
+    display: grid; grid-template-columns: repeat(3, 1fr); gap: 48px;
+  }
+  .step-num {
+    font-size: 64px; font-weight: 800; color: var(--accent);
+    opacity: 0.3; line-height: 1; margin-bottom: 16px;
+  }
+  .step h3 { font-size: 20px; font-weight: 700; margin-bottom: 12px; }
+  .step p { font-size: 14px; color: var(--text-muted); line-height: 1.7; }
+  .step code {
+    display: inline-block; margin-top: 12px;
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 13px; background: var(--surface);
+    border: 1px solid var(--border); border-radius: 6px;
+    padding: 4px 10px; color: var(--green);
+  }
+
+  /* CTA */
+  .cta-section {
+    max-width: 1440px; margin: 0 auto;
+    padding: 100px 48px;
+    text-align: center;
+  }
+  .cta-box {
+    background: linear-gradient(135deg, #1a1a2e, #16162a);
+    border: 1px solid var(--border);
+    border-radius: 20px; padding: 80px 48px;
+  }
+  .cta-box h2 {
+    font-size: 44px; font-weight: 800; letter-spacing: -1.5px;
+    margin-bottom: 16px;
+  }
+  .cta-box p {
+    font-size: 18px; color: var(--text-muted); max-width: 500px;
+    margin: 0 auto 36px;
+  }
+  .cta-box .install-cmd {
+    display: inline-block; font-family: 'JetBrains Mono', monospace;
+    font-size: 15px; background: var(--surface);
+    border: 1px solid var(--border); border-radius: 8px;
+    padding: 12px 24px; color: var(--green); margin-top: 20px;
+  }
+
+  /* FOOTER */
+  footer {
+    border-top: 1px solid var(--border);
+    padding: 40px 48px; max-width: 1440px; margin: 0 auto;
+    display: flex; justify-content: space-between; align-items: center;
+  }
+  footer span { font-size: 13px; color: var(--text-muted); }
+  footer ul { list-style: none; display: flex; gap: 24px; }
+  footer ul a { font-size: 13px; color: var(--text-muted); }
+  footer ul a:hover { color: var(--text); }
+</style>
+</head>
+<body>
+
+<nav>
+  <div class="logo">
+    <div class="logo-icon">V</div>
+    Voltage
+  </div>
+  <ul>
+    <li><a href="#features">Features</a></li>
+    <li><a href="#how">How it works</a></li>
+    <li><a href="#">Docs</a></li>
+    <li><a href="#">Pricing</a></li>
+  </ul>
+  <a href="#" class="nav-cta">Get Started</a>
+</nav>
+
+<section class="hero">
+  <div class="hero-left">
+    <div class="hero-badge">Now available: H100 &amp; A100 GPUs on demand</div>
+    <h1>GPU compute that feels like <span>local Python</span></h1>
+    <p>Write a function. Add a decorator. Voltage runs it on cloud GPUs, scales to thousands of containers, and bills you only while code is executing. No clusters. No YAML. No idle costs.</p>
+    <div class="cta-group">
+      <a href="#" class="btn-primary">Run your first function</a>
+      <a href="#" class="btn-secondary">Read the docs</a>
+    </div>
+  </div>
+  <div class="hero-right">
+    <div class="code-window">
+      <div class="code-titlebar">
+        <div class="dot dot-r"></div>
+        <div class="dot dot-y"></div>
+        <div class="dot dot-g"></div>
+        <span class="code-filename">inference.py</span>
+      </div>
+      <div class="code-body">
+<span class="kw">import</span> voltage<br>
+<br>
+<span class="dec">@voltage.function</span>(<br>
+&nbsp;&nbsp;&nbsp;&nbsp;gpu=<span class="str">"A100-80GB"</span>,<br>
+&nbsp;&nbsp;&nbsp;&nbsp;memory=<span class="num">32768</span>,<br>
+&nbsp;&nbsp;&nbsp;&nbsp;timeout=<span class="num">300</span>,<br>
+)<br>
+<span class="kw">def</span> <span class="fn">generate_embeddings</span>(texts: list[str]):<br>
+&nbsp;&nbsp;&nbsp;&nbsp;<span class="cm"># Runs on a cloud A100 — not your laptop</span><br>
+&nbsp;&nbsp;&nbsp;&nbsp;<span class="kw">from</span> sentence_transformers <span class="kw">import</span> SentenceTransformer<br>
+&nbsp;&nbsp;&nbsp;&nbsp;model = SentenceTransformer(<span class="str">"all-MiniLM-L6-v2"</span>)<br>
+&nbsp;&nbsp;&nbsp;&nbsp;<span class="kw">return</span> model.encode(texts).tolist()<br>
+<br>
+<span class="cm"># Call it like any Python function</span><br>
+result = generate_embeddings([<span class="str">"hello world"</span>])<br>
+<span class="kw">print</span>(result)  <span class="cm"># [[0.012, -0.034, ...]]</span>
+      </div>
+    </div>
+  </div>
+</section>
+
+<section class="metrics">
+  <div class="metric">
+    <div class="metric-value">&lt;500ms</div>
+    <div class="metric-label">Cold start (GPU containers)</div>
+  </div>
+  <div class="metric">
+    <div class="metric-value">10,000+</div>
+    <div class="metric-label">Concurrent containers</div>
+  </div>
+  <div class="metric">
+    <div class="metric-value">$0</div>
+    <div class="metric-label">Cost when idle</div>
+  </div>
+  <div class="metric">
+    <div class="metric-value">5 min</div>
+    <div class="metric-label">From pip install to production</div>
+  </div>
+</section>
+
+<section class="features" id="features">
+  <div class="features-header">
+    <h2>Everything you need. Nothing you don't.</h2>
+    <p>Voltage replaces your cluster, your container registry, and your infrastructure team with one Python decorator.</p>
+  </div>
+  <div class="features-grid">
+    <div class="feature-card">
+      <div class="feature-icon">&#9889;</div>
+      <h3>On-demand GPUs</h3>
+      <p>A100, H100, or T4 GPUs attached to your function with a single parameter. No reservations, no capacity planning. Available instantly.</p>
+    </div>
+    <div class="feature-card">
+      <div class="feature-icon">&#8734;</div>
+      <h3>Scale to zero</h3>
+      <p>Your functions run only when called. Between invocations, you pay nothing. Scale from zero to thousands of containers and back automatically.</p>
+    </div>
+    <div class="feature-card">
+      <div class="feature-icon">&#128640;</div>
+      <h3>Fast cold starts</h3>
+      <p>Container snapshots and smart image caching keep cold starts under 500ms for most workloads, even with large ML model weights.</p>
+    </div>
+    <div class="feature-card">
+      <div class="feature-icon">&#128336;</div>
+      <h3>Scheduled jobs</h3>
+      <p>Cron-style scheduling for batch pipelines, retraining loops, and data processing. Set it and forget it — Voltage handles the infra.</p>
+    </div>
+    <div class="feature-card">
+      <div class="feature-icon">&#127760;</div>
+      <h3>Inference endpoints</h3>
+      <p>Expose any function as an HTTPS endpoint with built-in auth and auto-scaling. Deploy a model-serving API in one line.</p>
+    </div>
+    <div class="feature-card">
+      <div class="feature-icon">&#128269;</div>
+      <h3>Full observability</h3>
+      <p>Structured logs, GPU utilization metrics, and cost tracking per function. Traces and spans out of the box, with OpenTelemetry export.</p>
+    </div>
+  </div>
+</section>
+
+<section class="how-section" id="how">
+  <h2>Three steps to cloud compute</h2>
+  <div class="steps">
+    <div class="step">
+      <div class="step-num">01</div>
+      <h3>Install the SDK</h3>
+      <p>One pip install gives you the Voltage decorator and CLI. Works with any Python 3.9+ environment.</p>
+      <code>pip install voltage</code>
+    </div>
+    <div class="step">
+      <div class="step-num">02</div>
+      <h3>Decorate your function</h3>
+      <p>Specify GPU type, memory, and timeout. Your function's dependencies are detected automatically from your imports.</p>
+      <code>@voltage.function(gpu="A100")</code>
+    </div>
+    <div class="step">
+      <div class="step-num">03</div>
+      <h3>Run it</h3>
+      <p>Call your function normally or deploy it as an endpoint. Voltage provisions the hardware, runs the code, and tears it down.</p>
+      <code>voltage deploy inference.py</code>
+    </div>
+  </div>
+</section>
+
+<section class="cta-section">
+  <div class="cta-box">
+    <h2>Ship your first GPU workload in five minutes</h2>
+    <p>No credit card required. Free tier includes 10 GPU-hours per month and unlimited CPU functions.</p>
+    <a href="#" class="btn-primary">Get started free</a>
+    <div class="install-cmd">$ pip install voltage && voltage login</div>
+  </div>
+</section>
+
+<footer>
+  <span>&copy; 2026 Voltage, Inc.</span>
+  <ul>
+    <li><a href="#">Documentation</a></li>
+    <li><a href="#">GitHub</a></li>
+    <li><a href="#">Status</a></li>
+    <li><a href="#">Privacy</a></li>
+    <li><a href="#">Terms</a></li>
+  </ul>
+</footer>
+
+</body>
+</html>

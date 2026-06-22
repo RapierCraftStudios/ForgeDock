@@ -1,0 +1,721 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Tender — Payments, Simplified</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@300;400;500;600;700;800&family=IBM+Plex+Mono:wght@400;500&display=swap" rel="stylesheet">
+<style>
+  *, *::before, *::after { margin: 0; padding: 0; box-sizing: border-box; }
+
+  :root {
+    --bg: #fcfcfc;
+    --surface: #f6f6f6;
+    --ink: #111111;
+    --ink-50: #555555;
+    --ink-30: #999999;
+    --ink-15: #cccccc;
+    --ink-08: #e5e5e5;
+    --ink-04: #f0f0f0;
+    --accent: #1a6bff;
+    --accent-soft: #1a6bff0c;
+    --font: 'Plus Jakarta Sans', sans-serif;
+    --mono: 'IBM Plex Mono', monospace;
+  }
+
+  html { font-size: 16px; background: var(--bg); color: var(--ink); }
+  body { font-family: var(--font); -webkit-font-smoothing: antialiased; line-height: 1.5; }
+
+  /* Nav */
+  nav {
+    max-width: 1120px; margin: 0 auto;
+    padding: 24px 40px;
+    display: flex; align-items: center; justify-content: space-between;
+  }
+  .logo { font-size: 20px; font-weight: 800; letter-spacing: -0.8px; }
+  nav .links { display: flex; gap: 36px; align-items: center; }
+  nav .links a {
+    font-size: 14px; font-weight: 500; color: var(--ink-50);
+    text-decoration: none; transition: color 0.15s;
+  }
+  nav .links a:hover { color: var(--ink); }
+  .nav-btn {
+    font-family: var(--font); font-size: 13px; font-weight: 600;
+    background: var(--ink); color: #fff; border: none;
+    padding: 10px 22px; cursor: pointer; letter-spacing: -0.2px;
+  }
+
+  /* Hero — extreme whitespace, left-aligned */
+  .hero {
+    max-width: 1120px; margin: 0 auto;
+    padding: 120px 40px 100px;
+  }
+  .hero-label {
+    font-family: var(--mono); font-size: 12px; font-weight: 500;
+    color: var(--accent); letter-spacing: 0.5px; margin-bottom: 28px;
+  }
+  .hero h1 {
+    font-size: clamp(48px, 6vw, 80px);
+    font-weight: 800; line-height: 1.0;
+    letter-spacing: -3px; margin-bottom: 32px;
+    max-width: 700px;
+  }
+  .hero h1 .thin { font-weight: 300; color: var(--ink-50); }
+  .hero .sub {
+    font-size: 18px; font-weight: 400; color: var(--ink-50);
+    max-width: 520px; line-height: 1.7; margin-bottom: 48px;
+  }
+  .hero-actions { display: flex; gap: 16px; align-items: center; }
+  .btn-primary {
+    font-family: var(--font); font-size: 15px; font-weight: 600;
+    background: var(--ink); color: #fff; border: none;
+    padding: 16px 32px; cursor: pointer; text-decoration: none;
+    display: inline-block; letter-spacing: -0.3px;
+  }
+  .btn-ghost {
+    font-family: var(--font); font-size: 15px; font-weight: 500;
+    color: var(--ink-50); background: none; border: 1px solid var(--ink-08);
+    padding: 15px 32px; cursor: pointer; text-decoration: none;
+  }
+  .btn-ghost:hover { border-color: var(--ink-30); }
+
+  /* Signature Move: Split-screen code/result */
+  .split-demo {
+    max-width: 1120px; margin: 0 auto;
+    padding: 0 40px 100px;
+  }
+  .split-container {
+    display: grid; grid-template-columns: 1fr 1fr;
+    border: 1px solid var(--ink-08);
+    overflow: hidden;
+  }
+  .split-left {
+    padding: 0;
+    border-right: 1px solid var(--ink-08);
+    position: relative;
+  }
+  .split-right {
+    padding: 0;
+    background: var(--ink);
+    color: #e0e0e0;
+  }
+  .split-tab-bar {
+    display: flex; border-bottom: 1px solid var(--ink-08);
+  }
+  .split-tab {
+    font-family: var(--mono); font-size: 11px; font-weight: 500;
+    padding: 12px 20px; color: var(--ink-30);
+    border-right: 1px solid var(--ink-08);
+    cursor: pointer; background: var(--ink-04);
+  }
+  .split-tab.active { color: var(--ink); background: var(--bg); }
+  .split-tab-bar-dark {
+    display: flex; border-bottom: 1px solid #222;
+  }
+  .split-tab-dark {
+    font-family: var(--mono); font-size: 11px; font-weight: 500;
+    padding: 12px 20px; color: #666;
+    border-right: 1px solid #222;
+    cursor: pointer; background: #0a0a0a;
+  }
+  .split-tab-dark.active { color: #aaa; background: var(--ink); }
+
+  .split-code {
+    padding: 24px; font-family: var(--mono); font-size: 13px;
+    line-height: 2; overflow-x: auto; min-height: 380px;
+  }
+  .split-code .kw { color: var(--accent); }
+  .split-code .str { color: #16803c; }
+  .split-code .num { color: #b35309; }
+  .split-code .cm { color: var(--ink-30); }
+  .split-code-dark {
+    padding: 24px; font-family: var(--mono); font-size: 13px;
+    line-height: 2; overflow-x: auto; color: #888; min-height: 380px;
+  }
+  .split-code-dark .kw { color: #6ea8fe; }
+  .split-code-dark .str { color: #63e6a0; }
+  .split-code-dark .num { color: #f5a623; }
+  .split-code-dark .cm { color: #444; }
+  .split-code-dark .key { color: #aaa; }
+
+  .split-label {
+    position: absolute; top: 16px; right: 16px;
+    font-family: var(--mono); font-size: 10px; font-weight: 500;
+    color: var(--ink-30); text-transform: uppercase; letter-spacing: 1px;
+  }
+  .split-meta {
+    position: absolute; bottom: 0; left: 0; right: 0;
+    padding: 10px 24px;
+    font-family: var(--mono); font-size: 11px; color: var(--ink-30);
+    border-top: 1px solid var(--ink-08);
+    background: var(--ink-04);
+    display: flex; justify-content: space-between;
+  }
+
+  /* Numbers strip */
+  .numbers {
+    max-width: 1120px; margin: 0 auto;
+    padding: 0 40px 100px;
+    display: grid; grid-template-columns: repeat(4, 1fr); gap: 40px;
+  }
+  .num-block {}
+  .num-block .value {
+    font-size: 48px; font-weight: 800; letter-spacing: -2px;
+    line-height: 1;
+  }
+  .num-block .value .unit { font-weight: 300; color: var(--ink-30); }
+  .num-block .label {
+    font-size: 13px; color: var(--ink-50); margin-top: 8px;
+    font-weight: 500;
+  }
+  .num-divider {
+    height: 2px; background: var(--ink-08); margin-bottom: 20px;
+  }
+
+  /* Features — stacked horizontal bands */
+  .feature-bands {
+    max-width: 1120px; margin: 0 auto;
+    padding: 0 40px 80px;
+  }
+  .band-header {
+    font-family: var(--mono); font-size: 11px; font-weight: 500;
+    color: var(--ink-30); text-transform: uppercase; letter-spacing: 1.5px;
+    padding-bottom: 16px; border-bottom: 1px solid var(--ink-08);
+    margin-bottom: 0;
+  }
+  .band {
+    display: grid; grid-template-columns: 240px 1fr;
+    gap: 0;
+    border-bottom: 1px solid var(--ink-08);
+    padding: 32px 0;
+    align-items: start;
+  }
+  .band-title {
+    font-size: 18px; font-weight: 700; letter-spacing: -0.5px;
+    padding-right: 40px;
+  }
+  .band-body {
+    display: grid; grid-template-columns: 1fr 1fr;
+    gap: 20px;
+  }
+  .band-body p {
+    font-size: 14px; color: var(--ink-50); line-height: 1.7;
+  }
+  .band-body .highlight {
+    font-family: var(--mono); font-size: 12px; color: var(--accent);
+    margin-top: 4px; display: block;
+  }
+
+  /* Dashboard preview */
+  .dash-preview {
+    max-width: 1120px; margin: 0 auto;
+    padding: 0 40px 100px;
+  }
+  .dash-preview-header {
+    display: flex; justify-content: space-between; align-items: baseline;
+    margin-bottom: 40px;
+  }
+  .dash-preview-header h2 {
+    font-size: 36px; font-weight: 800; letter-spacing: -1.5px;
+  }
+  .dash-preview-header p {
+    font-size: 14px; color: var(--ink-50); max-width: 360px;
+    text-align: right; line-height: 1.6;
+  }
+  .dash-frame {
+    border: 1px solid var(--ink-08);
+    background: var(--bg);
+  }
+  .dash-top {
+    display: flex; align-items: center; gap: 8px;
+    padding: 10px 16px; border-bottom: 1px solid var(--ink-08);
+  }
+  .dash-dot {
+    width: 8px; height: 8px; border-radius: 50%;
+    background: var(--ink-08);
+  }
+  .dash-url {
+    flex: 1; font-family: var(--mono); font-size: 11px;
+    color: var(--ink-30); margin-left: 8px;
+  }
+  .dash-content {
+    display: grid; grid-template-columns: 180px 1fr;
+  }
+  .dash-sidebar {
+    border-right: 1px solid var(--ink-08);
+    padding: 16px 0;
+  }
+  .dash-nav-item {
+    font-size: 13px; font-weight: 500; padding: 8px 20px;
+    color: var(--ink-30); cursor: pointer;
+  }
+  .dash-nav-item.active { color: var(--ink); background: var(--ink-04); border-left: 2px solid var(--accent); }
+  .dash-main { padding: 24px; }
+  .dash-kpis {
+    display: grid; grid-template-columns: repeat(3, 1fr); gap: 16px;
+    margin-bottom: 24px;
+  }
+  .kpi {
+    padding: 16px; border: 1px solid var(--ink-08);
+  }
+  .kpi .kpi-val { font-size: 28px; font-weight: 800; letter-spacing: -1px; }
+  .kpi .kpi-label { font-size: 11px; color: var(--ink-30); font-weight: 500; margin-top: 2px; }
+  .kpi .kpi-delta { font-family: var(--mono); font-size: 11px; color: var(--accent); margin-top: 4px; }
+
+  .dash-table { width: 100%; border-collapse: collapse; font-size: 13px; }
+  .dash-table th {
+    font-family: var(--mono); font-size: 10px; font-weight: 500;
+    color: var(--ink-30); text-transform: uppercase; letter-spacing: 1px;
+    text-align: left; padding: 8px 12px;
+    border-bottom: 1px solid var(--ink-08);
+  }
+  .dash-table td {
+    padding: 10px 12px; border-bottom: 1px solid var(--ink-04);
+    color: var(--ink-50);
+  }
+  .dash-table td:first-child { font-family: var(--mono); font-size: 12px; color: var(--ink-30); }
+  .dash-table .amount { text-align: right; font-weight: 600; color: var(--ink); font-family: var(--mono); font-size: 12px; }
+  .dash-table .status-ok { color: #16803c; font-family: var(--mono); font-size: 11px; }
+  .dash-table .status-pend { color: var(--ink-30); font-family: var(--mono); font-size: 11px; }
+
+  /* Two-column feature highlight */
+  .feature-highlight {
+    max-width: 1120px; margin: 0 auto;
+    padding: 0 40px 100px;
+    display: grid; grid-template-columns: 1fr 1fr;
+    gap: 80px;
+  }
+  .fh-block h3 {
+    font-size: 28px; font-weight: 800; letter-spacing: -1px;
+    margin-bottom: 16px; line-height: 1.15;
+  }
+  .fh-block p {
+    font-size: 14px; color: var(--ink-50); line-height: 1.7;
+    margin-bottom: 16px;
+  }
+  .fh-list {
+    list-style: none; display: flex; flex-direction: column; gap: 8px;
+  }
+  .fh-list li {
+    font-size: 13px; color: var(--ink-50);
+    padding-left: 20px; position: relative;
+  }
+  .fh-list li::before {
+    content: '';
+    position: absolute; left: 0; top: 7px;
+    width: 8px; height: 1px; background: var(--accent);
+  }
+
+  /* Install strip */
+  .install-strip {
+    max-width: 1120px; margin: 0 auto;
+    padding: 0 40px 100px;
+  }
+  .install-grid {
+    display: grid; grid-template-columns: repeat(4, 1fr); gap: 1px;
+    background: var(--ink-08);
+  }
+  .install-cell {
+    background: var(--bg); padding: 24px;
+  }
+  .install-cell .lang {
+    font-family: var(--mono); font-size: 11px; font-weight: 500;
+    color: var(--ink-30); text-transform: uppercase; letter-spacing: 1px;
+    margin-bottom: 12px;
+  }
+  .install-cell .cmd {
+    font-family: var(--mono); font-size: 12px; color: var(--ink-50);
+    background: var(--ink-04); padding: 10px 14px;
+  }
+  .install-cell .cmd span { color: var(--accent); }
+
+  /* CTA */
+  .cta {
+    max-width: 1120px; margin: 0 auto;
+    padding: 100px 40px;
+    border-top: 2px solid var(--ink);
+  }
+  .cta h2 {
+    font-size: 44px; font-weight: 800; letter-spacing: -2px;
+    margin-bottom: 16px; max-width: 600px; line-height: 1.05;
+  }
+  .cta p {
+    font-size: 15px; color: var(--ink-50); margin-bottom: 36px;
+    max-width: 480px; line-height: 1.7;
+  }
+
+  /* Footer */
+  footer {
+    max-width: 1120px; margin: 0 auto;
+    padding: 40px;
+    border-top: 1px solid var(--ink-08);
+    display: flex; justify-content: space-between; align-items: center;
+  }
+  footer .f-brand { font-weight: 800; font-size: 15px; }
+  footer .f-links { display: flex; gap: 28px; }
+  footer .f-links a {
+    font-size: 13px; color: var(--ink-30); text-decoration: none;
+    font-weight: 500;
+  }
+  footer .f-links a:hover { color: var(--ink); }
+  footer .f-copy { font-size: 12px; color: var(--ink-30); }
+
+  /* Mobile */
+  @media (max-width: 900px) {
+    .hero { padding: 80px 24px 60px; }
+    .hero h1 { font-size: 48px; letter-spacing: -2px; }
+    .split-container { grid-template-columns: 1fr; }
+    .split-left { border-right: none; border-bottom: 1px solid var(--ink-08); }
+    .numbers { grid-template-columns: repeat(2, 1fr); gap: 24px; }
+    .band { grid-template-columns: 1fr; gap: 12px; }
+    .band-body { grid-template-columns: 1fr; }
+    .dash-content { grid-template-columns: 1fr; }
+    .dash-sidebar { display: none; }
+    .dash-kpis { grid-template-columns: 1fr; }
+    .feature-highlight { grid-template-columns: 1fr; gap: 48px; }
+    .install-grid { grid-template-columns: 1fr 1fr; }
+    .dash-preview-header { flex-direction: column; gap: 16px; }
+    .dash-preview-header p { text-align: left; }
+    nav .links a:not(:last-child) { display: none; }
+    .split-meta { position: static; }
+    .split-left { position: static; }
+  }
+  @media (max-width: 560px) {
+    nav { padding: 16px 20px; }
+    .hero { padding: 60px 20px 48px; }
+    .hero h1 { font-size: 36px; letter-spacing: -1.5px; }
+    .numbers { grid-template-columns: 1fr; }
+    .num-block .value { font-size: 36px; }
+    .install-grid { grid-template-columns: 1fr; }
+    .cta h2 { font-size: 32px; }
+    footer { flex-direction: column; gap: 16px; align-items: flex-start; }
+  }
+</style>
+</head>
+<body>
+
+<nav>
+  <div class="logo">Tender</div>
+  <div class="links">
+    <a href="#">Products</a>
+    <a href="#">Docs</a>
+    <a href="#">Pricing</a>
+    <button class="nav-btn">Get started</button>
+  </div>
+</nav>
+
+<!-- HERO -->
+<section class="hero">
+  <div class="hero-label">Payments infrastructure</div>
+  <h1>Accept payments.<br><span class="thin">Handle everything else.</span></h1>
+  <p class="sub">A single API for charges, subscriptions, payouts, and fraud. Tender manages the financial complexity so your team focuses on the product your customers actually see.</p>
+  <div class="hero-actions">
+    <a href="#" class="btn-primary">Start integrating</a>
+    <a href="#" class="btn-ghost">View documentation</a>
+  </div>
+</section>
+
+<!-- SPLIT DEMO (Signature Move) -->
+<section class="split-demo">
+  <div class="split-container">
+    <div class="split-left">
+      <div class="split-tab-bar">
+        <div class="split-tab active">payment.js</div>
+        <div class="split-tab">subscription.js</div>
+        <div class="split-tab">payout.js</div>
+      </div>
+      <div class="split-code">
+<span class="cm">// Charge a customer</span>
+<span class="kw">const</span> tender = require(<span class="str">'@tender/node'</span>)(
+  process.env.TENDER_SECRET_KEY
+);
+
+<span class="kw">const</span> payment = <span class="kw">await</span> tender.payments.create({
+  amount: <span class="num">9900</span>,
+  currency: <span class="str">'usd'</span>,
+  customer: <span class="str">'cus_4f8a2b'</span>,
+  payment_method: <span class="str">'pm_card_visa'</span>,
+  description: <span class="str">'Pro plan upgrade'</span>,
+  metadata: {
+    order_id: <span class="str">'ord_7721'</span>,
+    campaign: <span class="str">'q2_launch'</span>,
+  },
+  fraud_check: <span class="kw">true</span>,
+});
+
+console.log(payment.status);
+<span class="cm">// =&gt; "succeeded"</span>
+      </div>
+      <div class="split-meta">
+        <span>Node.js &middot; @tender/node v4.12.0</span>
+        <span>17 lines</span>
+      </div>
+    </div>
+    <div class="split-right">
+      <div class="split-tab-bar-dark">
+        <div class="split-tab-dark active">Response</div>
+        <div class="split-tab-dark">Webhook</div>
+      </div>
+      <div class="split-code-dark">
+<span class="cm">// 200 OK &middot; 38ms</span>
+{
+  <span class="key">"id"</span>: <span class="str">"pay_8Nq2xR4v"</span>,
+  <span class="key">"object"</span>: <span class="str">"payment"</span>,
+  <span class="key">"amount"</span>: <span class="num">9900</span>,
+  <span class="key">"currency"</span>: <span class="str">"usd"</span>,
+  <span class="key">"status"</span>: <span class="str">"succeeded"</span>,
+  <span class="key">"fraud_score"</span>: <span class="num">0.01</span>,
+  <span class="key">"fraud_decision"</span>: <span class="str">"allow"</span>,
+  <span class="key">"payment_method"</span>: {
+    <span class="key">"type"</span>: <span class="str">"card"</span>,
+    <span class="key">"brand"</span>: <span class="str">"visa"</span>,
+    <span class="key">"last4"</span>: <span class="str">"4242"</span>,
+    <span class="key">"exp_month"</span>: <span class="num">12</span>,
+    <span class="key">"exp_year"</span>: <span class="num">2028</span>
+  },
+  <span class="key">"receipt_url"</span>: <span class="str">"https://tender.io/r/pay_8Nq2xR4v"</span>,
+  <span class="key">"created"</span>: <span class="num">1750608000</span>
+}
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- NUMBERS -->
+<section class="numbers">
+  <div class="num-block">
+    <div class="num-divider"></div>
+    <div class="value">99.997<span class="unit">%</span></div>
+    <div class="label">API uptime, trailing 90 days</div>
+  </div>
+  <div class="num-block">
+    <div class="num-divider"></div>
+    <div class="value">135<span class="unit">+</span></div>
+    <div class="label">Currencies accepted</div>
+  </div>
+  <div class="num-block">
+    <div class="num-divider"></div>
+    <div class="value">38<span class="unit">ms</span></div>
+    <div class="label">Median API response</div>
+  </div>
+  <div class="num-block">
+    <div class="num-divider"></div>
+    <div class="value">$410<span class="unit">B</span></div>
+    <div class="label">Processed per year</div>
+  </div>
+</section>
+
+<!-- FEATURE BANDS -->
+<section class="feature-bands">
+  <div class="band-header">Capabilities</div>
+
+  <div class="band">
+    <div class="band-title">Payments</div>
+    <div class="band-body">
+      <p>Accept cards, wallets, bank debits, BNPL, and 50+ local methods through a single integration. Intelligent routing picks the cheapest acquirer with the highest authorization rate.</p>
+      <p>Automatic 3D Secure for SCA-regulated markets. Network tokenization for returning customers. Retry logic on soft declines that recovers revenue without customer friction.
+        <span class="highlight">50+ payment methods, 1 API</span>
+      </p>
+    </div>
+  </div>
+
+  <div class="band">
+    <div class="band-title">Subscriptions</div>
+    <div class="band-body">
+      <p>Flat-rate, per-seat, tiered, and usage-based models. Proration calculated to the second on mid-cycle plan changes. Automated dunning with configurable retry schedules and grace periods.</p>
+      <p>Generate tax-compliant invoices with line-item detail. Revenue recognition schedules for your finance team. Trial periods, coupons, and add-ons without custom code.
+        <span class="highlight">Billing that scales with your pricing model</span>
+      </p>
+    </div>
+  </div>
+
+  <div class="band">
+    <div class="band-title">Payouts</div>
+    <div class="band-body">
+      <p>Send funds to bank accounts in 45+ countries. Marketplace split payments distribute revenue to sellers automatically. Real-time payout tracking with webhook notifications at every stage.</p>
+      <p>Automatic currency conversion at competitive FX rates. Batch payouts for high-volume platforms. Configurable payout schedules: daily, weekly, monthly, or manual.
+        <span class="highlight">45+ countries, local rails</span>
+      </p>
+    </div>
+  </div>
+
+  <div class="band">
+    <div class="band-title">Fraud</div>
+    <div class="band-body">
+      <p>Machine-learned risk scoring on every transaction using network-wide behavioral signals. Custom rules engine for business-specific fraud patterns. Adaptive 3D Secure triggered only when needed.</p>
+      <p>Chargeback management with automated evidence submission. Dispute analytics to identify fraud vectors. Radar updates continuously with data from the entire Tender network.
+        <span class="highlight">ML-powered, real-time, adaptive</span>
+      </p>
+    </div>
+  </div>
+</section>
+
+<!-- DASHBOARD -->
+<section class="dash-preview">
+  <div class="dash-preview-header">
+    <h2>Built for finance teams too</h2>
+    <p>Real-time visibility into every transaction, payout, and dispute. Role-based access. Export to your ERP.</p>
+  </div>
+  <div class="dash-frame">
+    <div class="dash-top">
+      <div class="dash-dot"></div>
+      <div class="dash-dot"></div>
+      <div class="dash-dot"></div>
+      <div class="dash-url">dashboard.tender.io/payments</div>
+    </div>
+    <div class="dash-content">
+      <div class="dash-sidebar">
+        <div class="dash-nav-item active">Payments</div>
+        <div class="dash-nav-item">Subscriptions</div>
+        <div class="dash-nav-item">Payouts</div>
+        <div class="dash-nav-item">Customers</div>
+        <div class="dash-nav-item">Disputes</div>
+        <div class="dash-nav-item">Reports</div>
+      </div>
+      <div class="dash-main">
+        <div class="dash-kpis">
+          <div class="kpi">
+            <div class="kpi-val">$1.82M</div>
+            <div class="kpi-label">Gross volume (MTD)</div>
+            <div class="kpi-delta">+14.2% vs last month</div>
+          </div>
+          <div class="kpi">
+            <div class="kpi-val">97.3%</div>
+            <div class="kpi-label">Authorization rate</div>
+            <div class="kpi-delta">+0.8pp vs last month</div>
+          </div>
+          <div class="kpi">
+            <div class="kpi-val">0.03%</div>
+            <div class="kpi-label">Dispute rate</div>
+            <div class="kpi-delta">-0.02pp vs last month</div>
+          </div>
+        </div>
+        <table class="dash-table">
+          <thead>
+            <tr>
+              <th>ID</th>
+              <th>Customer</th>
+              <th>Description</th>
+              <th>Status</th>
+              <th style="text-align:right">Amount</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td>pay_9xK2m</td>
+              <td>Acme Corp</td>
+              <td>Enterprise annual</td>
+              <td><span class="status-ok">succeeded</span></td>
+              <td class="amount">$48,000.00</td>
+            </tr>
+            <tr>
+              <td>pay_8wJ1n</td>
+              <td>DataFlow Inc</td>
+              <td>Usage billing</td>
+              <td><span class="status-ok">succeeded</span></td>
+              <td class="amount">$2,847.63</td>
+            </tr>
+            <tr>
+              <td>pay_7vH0p</td>
+              <td>ShipFast</td>
+              <td>Marketplace fee</td>
+              <td><span class="status-ok">succeeded</span></td>
+              <td class="amount">$1,240.00</td>
+            </tr>
+            <tr>
+              <td>pay_6uG9q</td>
+              <td>Nomad Labs</td>
+              <td>Pro monthly</td>
+              <td><span class="status-pend">processing</span></td>
+              <td class="amount">$99.00</td>
+            </tr>
+            <tr>
+              <td>pay_5tF8r</td>
+              <td>Kai Studios</td>
+              <td>Team upgrade</td>
+              <td><span class="status-ok">succeeded</span></td>
+              <td class="amount">$4,500.00</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- TWO-COLUMN HIGHLIGHTS -->
+<section class="feature-highlight">
+  <div class="fh-block">
+    <h3>Platform and marketplace tools</h3>
+    <p>Build multi-sided platforms without becoming a money transmitter. Connected accounts handle KYC. Split payments, delayed settlements, and platform fees built in.</p>
+    <ul class="fh-list">
+      <li>Connected account onboarding with KYC/KYB</li>
+      <li>Configurable fee structures and revenue splits</li>
+      <li>1099-K and VAT reporting automation</li>
+      <li>Delayed payouts for quality assurance windows</li>
+      <li>Per-account dashboard access for sellers</li>
+    </ul>
+  </div>
+  <div class="fh-block">
+    <h3>Compliance you inherit, not build</h3>
+    <p>Tender holds the certifications. You inherit the compliance posture through our API without touching raw card data or managing audit cycles.</p>
+    <ul class="fh-list">
+      <li>PCI DSS Level 1 certified</li>
+      <li>SOC 2 Type II audited annually</li>
+      <li>PSD2 SCA handled automatically</li>
+      <li>GDPR-compliant data handling</li>
+      <li>ISO 27001 information security</li>
+      <li>SOX-ready reporting exports</li>
+    </ul>
+  </div>
+</section>
+
+<!-- INSTALL -->
+<section class="install-strip">
+  <div class="install-grid">
+    <div class="install-cell">
+      <div class="lang">Node.js</div>
+      <div class="cmd"><span>$</span> npm install @tender/node</div>
+    </div>
+    <div class="install-cell">
+      <div class="lang">Python</div>
+      <div class="cmd"><span>$</span> pip install tender</div>
+    </div>
+    <div class="install-cell">
+      <div class="lang">Go</div>
+      <div class="cmd"><span>$</span> go get tender.io/go/v2</div>
+    </div>
+    <div class="install-cell">
+      <div class="lang">Ruby</div>
+      <div class="cmd"><span>$</span> gem install tender</div>
+    </div>
+  </div>
+</section>
+
+<!-- CTA -->
+<section class="cta">
+  <h2>Your first payment in under an hour</h2>
+  <p>Tender's test mode mirrors production exactly. No sandbox surprises. Move to live when you're ready with a single key swap.</p>
+  <div class="hero-actions">
+    <a href="#" class="btn-primary">Create your account</a>
+    <a href="#" class="btn-ghost">Read the quickstart</a>
+  </div>
+</section>
+
+<!-- FOOTER -->
+<footer>
+  <div class="f-brand">Tender</div>
+  <div class="f-links">
+    <a href="#">Products</a>
+    <a href="#">Docs</a>
+    <a href="#">Pricing</a>
+    <a href="#">Status</a>
+    <a href="#">Security</a>
+    <a href="#">Careers</a>
+  </div>
+  <div class="f-copy">&copy; 2026 Tender Inc.</div>
+</footer>
+
+</body>
+</html>

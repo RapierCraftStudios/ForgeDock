@@ -1,0 +1,446 @@
+<!--
+ARCHETYPE: bold-brutalist
+RATIONALE: Voltage's value proposition is confident and clear — serious compute, zero ops
+  overhead. Brutalism externalizes that confidence. The stark geometry and heavy type
+  signal "we know what we are" — which earns trust with ML engineers who are skeptical
+  of over-polished marketing. The loudness IS the message: this thing is powerful.
+SIGNATURE MOVE: The page opens with a massive, full-bleed typographic hero where the
+  headline is split across color blocks — "SERIOUS" on black, "COMPUTE." on electric
+  yellow. Below it, a single code sample is printed at hero-scale, treated as artwork.
+  The layout uses visible grid lines as structural elements (neo-brutalist ruled lines).
+EFFECTS PLAN:
+  - Color: #0d0d0d near-black, #F5FF3C electric yellow (the single loud accent), #FFFFFF white
+  - Type: Space Grotesk (heavy, blunt) for display — it has brutalist personality without
+    being unreadable. JetBrains Mono for all code.
+  - Layout: explicit 8-column grid with visible column rules as thin yellow lines
+  - Hover states: yellow underlines that animate width 0→100% left-to-right
+  - Section separators: thick #F5FF3C bars at full viewport width (not contained)
+  - The code block is oversized, treated as an image not a sidebar element
+  - No gradients, no shadows, no rounded corners (except where functionally necessary)
+  - Button: solid yellow, black text, no border-radius — punchy rectangle
+NEGATIVES CHECKED:
+  N1 - No lorem ipsum — all copy is product-specific
+  N2 - Hero not generic — "Serious compute. Zero ops." is specific, arguable, ownable
+  N3 - No placeholder images — code IS the imagery
+  N4 - Archetype signals consistent — no soft drop shadows or pastel gradients
+  N5 - Not centered-everything — hero and content is left-anchored
+  N6 - Palette disciplined: #0d0d0d, #F5FF3C, #FFFFFF only. No blues, no grays beyond #666
+  N7 - Two typefaces only: Space Grotesk + JetBrains Mono
+  N8 - CTA is "Run your first function" not "Get started" or "Learn more"
+  N9 - No wall of text — copy is punchy, declarative, short sentences
+  N10 - Hero communicates OUTCOME: "write Python, get GPU compute" is immediately clear
+  N11 - Brutalist density is intentional — every dense element earns its place
+  N12 - Mobile-considered: stack columns, font sizes scale down responsively
+-->
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Voltage — GPU Compute Without the Ops</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;700&display=swap" rel="stylesheet" />
+  <script>
+    tailwind.config = {
+      theme: {
+        extend: {
+          fontFamily: {
+            display: ['Space Grotesk', 'sans-serif'],
+            mono: ['JetBrains Mono', 'monospace'],
+          },
+          colors: {
+            brut: {
+              black: '#0d0d0d',
+              yellow: '#F5FF3C',
+              white: '#FFFFFF',
+              gray: '#666666',
+              lightgray: '#AAAAAA',
+            }
+          }
+        }
+      }
+    }
+  </script>
+  <style>
+    * { box-sizing: border-box; }
+    body {
+      background: #0d0d0d;
+      color: #FFFFFF;
+      font-family: 'Space Grotesk', sans-serif;
+      overflow-x: hidden;
+    }
+
+    /* Syntax highlighting */
+    .k  { color: #F5FF3C; }   /* keyword / decorator */
+    .fn { color: #FFFFFF; font-weight: 700; } /* function name */
+    .s  { color: #AAAAAA; }   /* string */
+    .n  { color: #F5FF3C; }   /* number */
+    .c  { color: #555555; }   /* comment */
+    .p  { color: #888888; }   /* punctuation */
+
+    /* Animated underline on links */
+    .brut-link {
+      position: relative;
+      text-decoration: none;
+    }
+    .brut-link::after {
+      content: '';
+      position: absolute;
+      bottom: -2px;
+      left: 0;
+      width: 0;
+      height: 2px;
+      background: #F5FF3C;
+      transition: width 0.2s ease-out;
+    }
+    .brut-link:hover::after { width: 100%; }
+
+    /* Full-bleed yellow bar */
+    .full-bleed-bar {
+      width: 100vw;
+      margin-left: calc(-50vw + 50%);
+      background: #F5FF3C;
+      height: 4px;
+    }
+
+    /* Thin column rules */
+    .col-rule {
+      border-left: 1px solid rgba(245, 255, 60, 0.15);
+    }
+
+    /* Cursor blink */
+    @keyframes blink { 50% { opacity: 0; } }
+    .cursor { animation: blink 1s step-end infinite; color: #F5FF3C; }
+
+    /* Hover state: feature boxes */
+    .feat-box {
+      border: 1px solid #333;
+      transition: border-color 0.15s ease, background 0.15s ease;
+    }
+    .feat-box:hover {
+      border-color: #F5FF3C;
+      background: #111;
+    }
+
+    /* Big code block */
+    .hero-code {
+      font-family: 'JetBrains Mono', monospace;
+      line-height: 1.65;
+      tab-size: 4;
+    }
+  </style>
+</head>
+<body class="antialiased">
+
+  <!-- NAV -->
+  <nav class="border-b-2 border-[#F5FF3C] px-6 sm:px-10 h-14 flex items-center justify-between">
+    <a href="#" class="font-display font-bold text-lg tracking-tight text-white flex items-center gap-2">
+      <span class="text-[#F5FF3C]">⚡</span> VOLTAGE
+    </a>
+    <div class="flex items-center gap-6">
+      <div class="hidden md:flex gap-6 font-mono text-xs text-[#666]">
+        <a href="#" class="brut-link hover:text-white transition-colors">docs</a>
+        <a href="#" class="brut-link hover:text-white transition-colors">pricing</a>
+        <a href="#" class="brut-link hover:text-white transition-colors">examples</a>
+      </div>
+      <a href="#" class="font-mono text-xs font-bold bg-[#F5FF3C] text-[#0d0d0d] px-4 py-2 hover:bg-white transition-colors">
+        START FREE →
+      </a>
+    </div>
+  </nav>
+
+  <!-- HERO -->
+  <section class="px-6 sm:px-10 pt-16 pb-0">
+
+    <!-- Massive typographic hero -->
+    <div class="mb-0">
+      <div class="flex flex-col sm:flex-row sm:items-start gap-0 sm:gap-8 mb-4">
+        <div>
+          <div class="font-display font-bold leading-none text-[clamp(3rem,9vw,8rem)] text-white tracking-tight">
+            SERIOUS
+          </div>
+          <div class="font-display font-bold leading-none text-[clamp(3rem,9vw,8rem)] text-[#F5FF3C] tracking-tight">
+            COMPUTE.
+          </div>
+          <div class="font-display font-bold leading-none text-[clamp(3rem,9vw,8rem)] text-white tracking-tight">
+            ZERO OPS.
+          </div>
+        </div>
+      </div>
+
+      <div class="max-w-xl mt-8 mb-10">
+        <p class="font-display text-base sm:text-lg text-[#AAAAAA] leading-relaxed">
+          Python functions running on GPUs in the cloud. Write ordinary code.
+          Add a decorator. Call <code class="font-mono text-[#F5FF3C] text-sm">.remote()</code>.
+          It scales from zero to 10,000 containers. Billed by the second.
+        </p>
+      </div>
+
+      <div class="flex flex-wrap gap-4 mb-16">
+        <a href="#" class="font-mono text-sm font-bold bg-[#F5FF3C] text-[#0d0d0d] px-8 py-4 hover:bg-white transition-colors">
+          RUN YOUR FIRST FUNCTION →
+        </a>
+        <a href="#" class="font-mono text-sm border border-[#333] text-[#666] px-8 py-4 hover:border-[#F5FF3C] hover:text-white transition-colors">
+          VIEW EXAMPLES
+        </a>
+      </div>
+    </div>
+  </section>
+
+  <!-- FULL BLEED BAR -->
+  <div class="full-bleed-bar"></div>
+
+  <!-- HERO CODE — full section, code as art -->
+  <section class="bg-[#111] border-b-2 border-[#F5FF3C]">
+    <div class="px-6 sm:px-10 py-12">
+      <div class="flex items-center justify-between mb-6">
+        <span class="font-mono text-xs text-[#555] uppercase tracking-widest">train.py</span>
+        <span class="font-mono text-xs text-[#F5FF3C]">← this is all you write</span>
+      </div>
+
+      <!-- Big code block -->
+      <div class="hero-code text-sm sm:text-base overflow-x-auto">
+        <div class="c"># Voltage: serverless GPU compute for Python</div>
+        <div class="c"># pip install voltage</div>
+        <div class="mt-4"><span class="k">import</span> <span class="fn">voltage</span></div>
+        <div class="mt-4">
+          <span class="k">@voltage.function(</span>
+        </div>
+        <div class="pl-8"><span class="k">gpu=</span><span class="s">"A100"</span><span class="p">,</span>
+          <span class="c">    # A100, H100, L40S</span>
+        </div>
+        <div class="pl-8"><span class="k">memory=</span><span class="s">"80GB"</span><span class="p">,</span></div>
+        <div class="pl-8"><span class="k">concurrency=</span><span class="n">512</span><span class="p">,</span>
+          <span class="c">  # up to 10,000</span>
+        </div>
+        <div><span class="k">)</span></div>
+        <div class="mt-1">
+          <span class="k">def</span> <span class="fn">train_model</span><span class="p">(</span><span class="fn">dataset</span><span class="p">:</span> <span class="fn">str</span><span class="p">)</span> <span class="p">-></span> <span class="fn">dict</span><span class="p">:</span>
+        </div>
+        <div class="pl-8 text-[#AAAAAA]">model = <span class="fn">load_model</span><span class="p">()</span></div>
+        <div class="pl-8 text-[#AAAAAA]"><span class="k">return</span> <span class="fn">model.fit</span><span class="p">(</span>dataset<span class="p">)</span></div>
+
+        <div class="mt-6 border-t border-[#222] pt-6">
+          <div class="c"># Invoke from anywhere — laptop, CI, another function</div>
+          <div class="mt-2 text-[#AAAAAA]">result = <span class="fn">train_model</span><span class="p">.</span><span class="k">remote</span><span class="p">(</span><span class="s">"/data/imagenet"</span><span class="p">)</span></div>
+          <div class="mt-1 text-[#AAAAAA]">results = <span class="fn">train_model</span><span class="p">.</span><span class="k">map</span><span class="p">(</span>dataset_shards<span class="p">, </span><span class="k">concurrency=</span><span class="n">1000</span><span class="p">)</span></div>
+        </div>
+
+        <div class="mt-6 border-t border-[#222] pt-6 text-sm">
+          <div class="text-[#F5FF3C]">✓ container provisioned (138ms)</div>
+          <div class="text-[#F5FF3C] mt-1">✓ A100 attached — 0% → 94% GPU utilization</div>
+          <div class="text-[#F5FF3C] mt-1">✓ training... epoch 1/10 · loss: 2.847<span class="cursor">▌</span></div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- STATS BAR -->
+  <section class="border-b border-[#222] bg-[#0d0d0d]">
+    <div class="px-6 sm:px-10 py-10">
+      <div class="grid grid-cols-2 sm:grid-cols-4 gap-0">
+        <div class="border-r border-[#222] pr-8 pb-6 sm:pb-0">
+          <div class="font-display font-bold text-4xl text-white">10K</div>
+          <div class="font-mono text-xs text-[#555] mt-1">max containers per job</div>
+        </div>
+        <div class="border-r border-[#222] px-8 pb-6 sm:pb-0">
+          <div class="font-display font-bold text-4xl text-[#F5FF3C]">&lt;200</div>
+          <div class="font-mono text-xs text-[#555] mt-1">millisecond cold start</div>
+        </div>
+        <div class="border-r border-[#222] px-8 pt-6 sm:pt-0">
+          <div class="font-display font-bold text-4xl text-white">$0</div>
+          <div class="font-mono text-xs text-[#555] mt-1">cost when idle</div>
+        </div>
+        <div class="pl-8 pt-6 sm:pt-0">
+          <div class="font-display font-bold text-4xl text-white">1s</div>
+          <div class="font-mono text-xs text-[#555] mt-1">billing granularity</div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- FULL BLEED BAR -->
+  <div class="full-bleed-bar"></div>
+
+  <!-- FEATURES -->
+  <section class="px-6 sm:px-10 py-16">
+    <div class="mb-10">
+      <span class="font-mono text-xs text-[#F5FF3C] uppercase tracking-widest">what it does</span>
+    </div>
+
+    <div class="grid sm:grid-cols-2 gap-4">
+
+      <div class="feat-box p-6">
+        <div class="font-mono text-xs text-[#F5FF3C] mb-3 uppercase">GPU compute</div>
+        <h3 class="font-display font-bold text-xl text-white mb-2">A100s. H100s. L40S.<br/>Pick in a decorator.</h3>
+        <p class="text-[#666] text-sm leading-relaxed">
+          No GPU instances to reserve. No hours-long setup. Specify the GPU you need
+          as a string argument. Voltage provisions it in under 200ms, attaches it to your
+          function, and bills to the second.
+        </p>
+      </div>
+
+      <div class="feat-box p-6">
+        <div class="font-mono text-xs text-[#F5FF3C] mb-3 uppercase">Parallel scale</div>
+        <h3 class="font-display font-bold text-xl text-white mb-2">5,000 containers.<br/>One .map() call.</h3>
+        <p class="text-[#666] text-sm leading-relaxed">
+          Submit a list of inputs. Voltage fans them across thousands of parallel containers,
+          collects results, returns them in order. No queue infrastructure. No autoscaling
+          policy. No retry logic to write.
+        </p>
+      </div>
+
+      <div class="feat-box p-6">
+        <div class="font-mono text-xs text-[#F5FF3C] mb-3 uppercase">Inference endpoints</div>
+        <h3 class="font-display font-bold text-xl text-white mb-2">One decorator.<br/>One HTTP endpoint.</h3>
+        <p class="text-[#666] text-sm leading-relaxed">
+          Swap <code class="font-mono text-[#F5FF3C] text-xs">@voltage.function</code> for
+          <code class="font-mono text-[#F5FF3C] text-xs">@voltage.endpoint</code>. Your model
+          gets a URL. Scales to traffic. Scales to zero at idle. No load balancers to
+          configure, no Kubernetes operators.
+        </p>
+      </div>
+
+      <div class="feat-box p-6">
+        <div class="font-mono text-xs text-[#F5FF3C] mb-3 uppercase">Scheduling</div>
+        <h3 class="font-display font-bold text-xl text-white mb-2">Cron jobs.<br/>Nightly retraining.</h3>
+        <p class="text-[#666] text-sm leading-relaxed">
+          Schedule any Voltage function with a cron expression. Trigger from CI, webhooks,
+          or other functions. Data pipelines, model evals, batch embedding jobs — all in
+          Python, all tracked in the Voltage dashboard.
+        </p>
+      </div>
+
+    </div>
+  </section>
+
+  <!-- FULL BLEED BAR -->
+  <div class="full-bleed-bar"></div>
+
+  <!-- WHO IS IT FOR -->
+  <section class="px-6 sm:px-10 py-16 bg-[#111]">
+    <div class="mb-10">
+      <span class="font-mono text-xs text-[#F5FF3C] uppercase tracking-widest">who uses voltage</span>
+    </div>
+
+    <div class="grid sm:grid-cols-3 gap-8">
+      <div>
+        <div class="font-display font-bold text-lg text-white mb-3">ML Engineers</div>
+        <p class="text-[#666] text-sm leading-relaxed">
+          Training runs, hyperparameter sweeps, distributed fine-tuning.
+          No more "can I borrow the GPU cluster" conversations.
+        </p>
+      </div>
+      <div class="sm:border-l border-[#222] sm:pl-8">
+        <div class="font-display font-bold text-lg text-white mb-3">Data Scientists</div>
+        <p class="text-[#666] text-sm leading-relaxed">
+          Parallelize data processing, feature engineering, model evaluation.
+          Write Python. Let Voltage handle the infrastructure.
+        </p>
+      </div>
+      <div class="sm:border-l border-[#222] sm:pl-8">
+        <div class="font-display font-bold text-lg text-white mb-3">Backend Engineers</div>
+        <p class="text-[#666] text-sm leading-relaxed">
+          Offload compute-heavy work — embedding generation, image processing,
+          PDF parsing — without standing up dedicated worker infrastructure.
+        </p>
+      </div>
+    </div>
+  </section>
+
+  <!-- FULL BLEED BAR -->
+  <div class="full-bleed-bar"></div>
+
+  <!-- PRICING SIGNAL -->
+  <section class="px-6 sm:px-10 py-16">
+    <div class="mb-10">
+      <span class="font-mono text-xs text-[#F5FF3C] uppercase tracking-widest">pricing</span>
+    </div>
+    <div class="max-w-2xl">
+      <p class="font-display font-bold text-2xl sm:text-3xl text-white mb-4">
+        You pay while it runs.<br/>
+        Not while it sits idle.
+      </p>
+      <p class="text-[#666] mb-8 leading-relaxed">
+        Per-second billing. No reserved instances. No minimum spend.
+        GPUs from $2.49/hr, billed to the millisecond when your function
+        is executing. $0 when it's not.
+      </p>
+
+      <div class="font-mono text-sm border border-[#222] divide-y divide-[#222]">
+        <div class="flex justify-between px-5 py-3">
+          <span class="text-[#666]">NVIDIA A100 (80GB)</span>
+          <span class="text-white">$2.49 / hr</span>
+        </div>
+        <div class="flex justify-between px-5 py-3">
+          <span class="text-[#666]">NVIDIA H100 (80GB)</span>
+          <span class="text-white">$3.89 / hr</span>
+        </div>
+        <div class="flex justify-between px-5 py-3">
+          <span class="text-[#666]">NVIDIA L40S (48GB)</span>
+          <span class="text-white">$1.79 / hr</span>
+        </div>
+        <div class="flex justify-between px-5 py-3">
+          <span class="text-[#666]">CPU (per vCPU)</span>
+          <span class="text-white">$0.018 / hr</span>
+        </div>
+        <div class="flex justify-between px-5 py-3 bg-[#111]">
+          <span class="text-[#F5FF3C]">Idle cost</span>
+          <span class="text-[#F5FF3C] font-bold">$0.00</span>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- CTA -->
+  <section class="border-t-2 border-[#F5FF3C] bg-[#F5FF3C]">
+    <div class="px-6 sm:px-10 py-16">
+      <div class="max-w-3xl">
+        <div class="font-mono text-xs text-[#0d0d0d] uppercase tracking-widest mb-4">
+          get started
+        </div>
+        <h2 class="font-display font-bold text-4xl sm:text-5xl text-[#0d0d0d] mb-6 leading-tight">
+          Run your first<br/>function today.
+        </h2>
+        <p class="font-display text-[#333] text-base mb-8 max-w-lg">
+          Install the SDK. Decorate a function. Call <code class="font-mono text-sm">.remote()</code>.
+          Your code is running on a GPU in the cloud. That's it.
+        </p>
+
+        <div class="font-mono text-sm bg-[#0d0d0d] text-[#F5FF3C] p-4 rounded mb-6 inline-block">
+          $ pip install voltage
+        </div>
+
+        <div class="flex flex-wrap gap-4">
+          <a href="#" class="font-mono text-sm font-bold bg-[#0d0d0d] text-[#F5FF3C] px-8 py-4 hover:bg-[#111] transition-colors">
+            RUN YOUR FIRST FUNCTION →
+          </a>
+          <a href="#" class="font-mono text-sm font-bold border-2 border-[#0d0d0d] text-[#0d0d0d] px-8 py-4 hover:bg-[#0d0d0d] hover:text-[#F5FF3C] transition-colors">
+            READ THE DOCS
+          </a>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- FOOTER -->
+  <footer class="border-t border-[#222] px-6 sm:px-10 py-10 bg-[#0d0d0d]">
+    <div class="flex flex-col sm:flex-row justify-between items-start sm:items-center gap-4">
+      <div class="font-display font-bold text-white flex items-center gap-2">
+        <span class="text-[#F5FF3C]">⚡</span> VOLTAGE
+      </div>
+      <div class="flex flex-wrap gap-6 font-mono text-xs text-[#555]">
+        <a href="#" class="brut-link hover:text-[#AAA] transition-colors">docs</a>
+        <a href="#" class="brut-link hover:text-[#AAA] transition-colors">status</a>
+        <a href="#" class="brut-link hover:text-[#AAA] transition-colors">pricing</a>
+        <a href="#" class="brut-link hover:text-[#AAA] transition-colors">github</a>
+        <a href="#" class="brut-link hover:text-[#AAA] transition-colors">discord</a>
+      </div>
+      <div class="font-mono text-xs text-[#333]">© 2024 Voltage Inc.</div>
+    </div>
+  </footer>
+
+</body>
+</html>

@@ -1,0 +1,1172 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Plume - The issue tracker for teams who care</title>
+<link href="https://fonts.googleapis.com/css2?family=Fraunces:ital,opsz,wght@0,9..144,300;0,9..144,400;0,9..144,600;0,9..144,700;0,9..144,900;1,9..144,400&family=Instrument+Sans:wght@400;500;600;700&display=swap" rel="stylesheet">
+<style>
+  *, *::before, *::after { margin: 0; padding: 0; box-sizing: border-box; }
+
+  :root {
+    --ink: #1b1916;
+    --ink-2: #4a453e;
+    --ink-3: #8a847b;
+    --cream: #f7f4ef;
+    --cream-dark: #eee9e0;
+    --white: #fffdf9;
+    --rule: #ddd7cc;
+    --rule-light: #eae5dc;
+    --red: #c4402a;
+    --green-dark: #3a5a32;
+  }
+
+  html { font-size: 16px; -webkit-font-smoothing: antialiased; }
+
+  body {
+    font-family: 'Instrument Sans', sans-serif;
+    background: var(--cream);
+    color: var(--ink);
+    line-height: 1.6;
+  }
+
+  /* UTILITIES */
+  .container { max-width: 1320px; margin: 0 auto; padding: 0 48px; }
+
+  /* NAV */
+  .nav {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 32px 48px;
+    max-width: 1320px;
+    margin: 0 auto;
+  }
+
+  .nav-logo {
+    font-family: 'Fraunces', serif;
+    font-size: 1.625rem;
+    font-weight: 700;
+    letter-spacing: -0.03em;
+  }
+
+  .nav-center {
+    display: flex;
+    gap: 36px;
+    list-style: none;
+  }
+
+  .nav-center a {
+    text-decoration: none;
+    font-size: 0.875rem;
+    color: var(--ink-2);
+    font-weight: 500;
+  }
+
+  .nav-center a:hover { color: var(--ink); }
+
+  .nav-right { display: flex; align-items: center; gap: 24px; }
+
+  .nav-sign-in {
+    font-size: 0.875rem;
+    color: var(--ink-2);
+    text-decoration: none;
+    font-weight: 500;
+  }
+
+  .nav-cta {
+    background: var(--ink);
+    color: var(--cream);
+    padding: 10px 28px;
+    border-radius: 6px;
+    font-size: 0.875rem;
+    font-weight: 600;
+    text-decoration: none;
+    transition: opacity 0.2s;
+  }
+
+  .nav-cta:hover { opacity: 0.85; }
+
+  /* HERO — editorial asymmetric split */
+  .hero {
+    max-width: 1320px;
+    margin: 0 auto;
+    padding: 72px 48px 0;
+    display: grid;
+    grid-template-columns: 5fr 7fr;
+    gap: 64px;
+    align-items: end;
+    min-height: 70vh;
+  }
+
+  .hero-left {
+    padding-bottom: 72px;
+  }
+
+  .hero-eyebrow {
+    font-family: 'Fraunces', serif;
+    font-style: italic;
+    font-size: 1rem;
+    color: var(--red);
+    margin-bottom: 24px;
+  }
+
+  .hero h1 {
+    font-family: 'Fraunces', serif;
+    font-size: clamp(2.75rem, 5vw, 4.5rem);
+    font-weight: 900;
+    line-height: 1.05;
+    letter-spacing: -0.035em;
+    margin-bottom: 28px;
+  }
+
+  .hero-body {
+    font-size: 1.125rem;
+    color: var(--ink-2);
+    line-height: 1.75;
+    max-width: 420px;
+    margin-bottom: 40px;
+  }
+
+  .hero-cta {
+    display: inline-block;
+    background: var(--ink);
+    color: var(--cream);
+    padding: 16px 40px;
+    border-radius: 6px;
+    font-weight: 600;
+    font-size: 1rem;
+    text-decoration: none;
+    transition: opacity 0.2s;
+  }
+
+  .hero-cta:hover { opacity: 0.85; }
+
+  .hero-note {
+    margin-top: 16px;
+    font-size: 0.8125rem;
+    color: var(--ink-3);
+  }
+
+  /* Hero right — cycle timeline visualization (signature move) */
+  .hero-right {
+    position: relative;
+  }
+
+  .cycle-timeline {
+    background: var(--white);
+    border: 1px solid var(--rule);
+    border-radius: 12px 12px 0 0;
+    overflow: hidden;
+    box-shadow: 0 -4px 40px rgba(0,0,0,0.04);
+  }
+
+  .ct-header {
+    padding: 20px 28px;
+    border-bottom: 1px solid var(--rule-light);
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+  }
+
+  .ct-title {
+    font-family: 'Fraunces', serif;
+    font-weight: 700;
+    font-size: 1.125rem;
+  }
+
+  .ct-nav {
+    display: flex;
+    gap: 4px;
+  }
+
+  .ct-nav-btn {
+    width: 28px;
+    height: 28px;
+    border: 1px solid var(--rule);
+    border-radius: 4px;
+    background: transparent;
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 0.75rem;
+    color: var(--ink-3);
+  }
+
+  .ct-body {
+    padding: 24px 28px;
+  }
+
+  /* Timeline rows */
+  .tl-row {
+    display: grid;
+    grid-template-columns: 100px 1fr;
+    gap: 16px;
+    align-items: center;
+    margin-bottom: 12px;
+  }
+
+  .tl-label {
+    font-size: 0.75rem;
+    font-weight: 600;
+    color: var(--ink-2);
+    text-align: right;
+  }
+
+  .tl-track {
+    height: 32px;
+    background: var(--cream);
+    border-radius: 4px;
+    position: relative;
+    overflow: hidden;
+  }
+
+  .tl-bar {
+    position: absolute;
+    top: 4px;
+    bottom: 4px;
+    border-radius: 3px;
+    display: flex;
+    align-items: center;
+    padding-left: 10px;
+    font-size: 0.6875rem;
+    font-weight: 600;
+    color: white;
+    white-space: nowrap;
+  }
+
+  .tl-bar-active { background: var(--green-dark); }
+  .tl-bar-done { background: var(--ink-3); opacity: 0.5; }
+  .tl-bar-next { background: var(--red); opacity: 0.7; }
+
+  .tl-dates {
+    display: grid;
+    grid-template-columns: 100px 1fr;
+    gap: 16px;
+    margin-top: 8px;
+  }
+
+  .tl-date-track {
+    display: flex;
+    justify-content: space-between;
+    font-size: 0.625rem;
+    color: var(--ink-3);
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+  }
+
+  .ct-stats {
+    display: grid;
+    grid-template-columns: repeat(3, 1fr);
+    gap: 1px;
+    background: var(--rule-light);
+    border-top: 1px solid var(--rule-light);
+  }
+
+  .ct-stat {
+    background: var(--white);
+    padding: 16px 20px;
+    text-align: center;
+  }
+
+  .ct-stat-value {
+    font-family: 'Fraunces', serif;
+    font-size: 1.5rem;
+    font-weight: 700;
+  }
+
+  .ct-stat-label {
+    font-size: 0.6875rem;
+    color: var(--ink-3);
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    margin-top: 2px;
+  }
+
+  /* DIVIDER */
+  .editorial-divider {
+    max-width: 1320px;
+    margin: 0 auto;
+    padding: 0 48px;
+  }
+
+  .editorial-divider hr {
+    border: none;
+    border-top: 1px solid var(--rule);
+    margin: 80px 0;
+  }
+
+  /* FEATURES — magazine columns */
+  .features-section {
+    max-width: 1320px;
+    margin: 0 auto;
+    padding: 0 48px 80px;
+  }
+
+  .features-header {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 64px;
+    margin-bottom: 72px;
+    align-items: end;
+  }
+
+  .features-header h2 {
+    font-family: 'Fraunces', serif;
+    font-size: clamp(2rem, 4vw, 3.25rem);
+    font-weight: 900;
+    line-height: 1.1;
+    letter-spacing: -0.03em;
+  }
+
+  .features-header p {
+    font-size: 1.0625rem;
+    color: var(--ink-2);
+    line-height: 1.75;
+  }
+
+  .features-grid {
+    display: grid;
+    grid-template-columns: repeat(2, 1fr);
+    gap: 0;
+    border-top: 1px solid var(--rule);
+  }
+
+  .feature-card {
+    padding: 48px 40px 48px 0;
+    border-bottom: 1px solid var(--rule);
+  }
+
+  .feature-card:nth-child(even) {
+    padding-left: 40px;
+    padding-right: 0;
+    border-left: 1px solid var(--rule);
+  }
+
+  .feature-number {
+    font-family: 'Fraunces', serif;
+    font-size: 2rem;
+    color: var(--rule);
+    font-weight: 300;
+    margin-bottom: 16px;
+  }
+
+  .feature-title {
+    font-family: 'Fraunces', serif;
+    font-size: 1.375rem;
+    font-weight: 700;
+    margin-bottom: 12px;
+    letter-spacing: -0.01em;
+  }
+
+  .feature-body {
+    font-size: 0.9375rem;
+    color: var(--ink-2);
+    line-height: 1.75;
+    margin-bottom: 16px;
+  }
+
+  .feature-detail {
+    font-size: 0.8125rem;
+    color: var(--ink-3);
+    line-height: 1.65;
+    font-style: italic;
+  }
+
+  /* PRODUCT UI SECTION */
+  .product-section {
+    background: var(--ink);
+    padding: 100px 48px;
+  }
+
+  .product-inner {
+    max-width: 1320px;
+    margin: 0 auto;
+  }
+
+  .product-intro {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 64px;
+    margin-bottom: 64px;
+    align-items: end;
+  }
+
+  .product-intro h2 {
+    font-family: 'Fraunces', serif;
+    font-size: clamp(2rem, 3.5vw, 2.75rem);
+    font-weight: 900;
+    color: var(--cream);
+    line-height: 1.1;
+    letter-spacing: -0.03em;
+  }
+
+  .product-intro p {
+    color: rgba(247,244,239,0.6);
+    font-size: 1.0625rem;
+    line-height: 1.75;
+  }
+
+  .product-mock {
+    background: #232019;
+    border: 1px solid rgba(247,244,239,0.08);
+    border-radius: 12px;
+    overflow: hidden;
+  }
+
+  .pm-bar {
+    display: flex;
+    align-items: center;
+    padding: 12px 20px;
+    gap: 8px;
+    border-bottom: 1px solid rgba(247,244,239,0.06);
+  }
+
+  .pm-dot { width: 8px; height: 8px; border-radius: 50%; }
+  .pm-dot-r { background: #e85d4a; }
+  .pm-dot-y { background: #e8b84a; }
+  .pm-dot-g { background: #5ab552; }
+
+  .pm-content {
+    display: grid;
+    grid-template-columns: 200px 1fr;
+    min-height: 380px;
+  }
+
+  .pm-sidebar {
+    border-right: 1px solid rgba(247,244,239,0.06);
+    padding: 16px 0;
+  }
+
+  .pm-nav-group {
+    padding: 0 16px;
+    margin-bottom: 20px;
+  }
+
+  .pm-nav-label {
+    font-size: 0.625rem;
+    text-transform: uppercase;
+    letter-spacing: 0.1em;
+    color: rgba(247,244,239,0.3);
+    font-weight: 600;
+    margin-bottom: 8px;
+  }
+
+  .pm-nav-item {
+    padding: 6px 10px;
+    border-radius: 4px;
+    font-size: 0.8125rem;
+    color: rgba(247,244,239,0.5);
+    cursor: pointer;
+    margin-bottom: 2px;
+  }
+
+  .pm-nav-item.active {
+    background: rgba(247,244,239,0.08);
+    color: var(--cream);
+    font-weight: 600;
+  }
+
+  .pm-main {
+    padding: 20px 24px;
+  }
+
+  .pm-main-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    margin-bottom: 20px;
+  }
+
+  .pm-main-title {
+    font-family: 'Fraunces', serif;
+    font-size: 1rem;
+    color: var(--cream);
+    font-weight: 700;
+  }
+
+  .pm-filters {
+    display: flex;
+    gap: 8px;
+  }
+
+  .pm-filter {
+    font-size: 0.6875rem;
+    padding: 4px 10px;
+    border-radius: 4px;
+    background: rgba(247,244,239,0.06);
+    color: rgba(247,244,239,0.5);
+    font-weight: 500;
+  }
+
+  .pm-issues { list-style: none; }
+
+  .pm-issue {
+    display: grid;
+    grid-template-columns: 18px 56px 1fr auto auto auto;
+    gap: 12px;
+    align-items: center;
+    padding: 10px 0;
+    border-bottom: 1px solid rgba(247,244,239,0.05);
+    font-size: 0.8125rem;
+  }
+
+  .pm-check {
+    width: 13px;
+    height: 13px;
+    border-radius: 50%;
+    border: 1.5px solid rgba(247,244,239,0.2);
+  }
+
+  .pm-check.done {
+    background: var(--green-dark);
+    border-color: var(--green-dark);
+  }
+
+  .pm-issue-id {
+    color: rgba(247,244,239,0.3);
+    font-size: 0.75rem;
+    font-family: 'Instrument Sans', monospace;
+  }
+
+  .pm-issue-title {
+    color: rgba(247,244,239,0.85);
+    font-weight: 500;
+  }
+
+  .pm-issue-label {
+    font-size: 0.6875rem;
+    padding: 2px 8px;
+    border-radius: 10px;
+    font-weight: 500;
+  }
+
+  .lbl-bug { background: rgba(196,64,42,0.2); color: #e8755f; }
+  .lbl-feat { background: rgba(58,90,50,0.25); color: #7ab872; }
+  .lbl-dx { background: rgba(200,170,100,0.2); color: #c8a850; }
+  .lbl-api { background: rgba(120,130,200,0.2); color: #9ca3e8; }
+
+  .pm-issue-priority {
+    font-size: 0.6875rem;
+    font-weight: 700;
+    width: 18px;
+    height: 18px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    border-radius: 3px;
+    color: white;
+  }
+
+  .pri-urg { background: #c4402a; }
+  .pri-hi { background: #c47a2a; }
+  .pri-md { background: #8a7a3a; }
+  .pri-lo { background: rgba(247,244,239,0.15); color: rgba(247,244,239,0.4); }
+
+  .pm-issue-avatar {
+    width: 22px;
+    height: 22px;
+    border-radius: 50%;
+    background: rgba(247,244,239,0.1);
+    font-size: 0.5rem;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    color: rgba(247,244,239,0.5);
+    font-weight: 700;
+  }
+
+  /* KEYBOARD SHORTCUTS — editorial layout */
+  .shortcuts-section {
+    max-width: 1320px;
+    margin: 0 auto;
+    padding: 100px 48px;
+  }
+
+  .shortcuts-columns {
+    display: grid;
+    grid-template-columns: 1fr 2fr;
+    gap: 80px;
+    align-items: start;
+  }
+
+  .shortcuts-left h2 {
+    font-family: 'Fraunces', serif;
+    font-size: clamp(1.75rem, 3vw, 2.5rem);
+    font-weight: 900;
+    line-height: 1.1;
+    letter-spacing: -0.02em;
+    margin-bottom: 20px;
+  }
+
+  .shortcuts-left p {
+    color: var(--ink-2);
+    font-size: 1rem;
+    line-height: 1.75;
+  }
+
+  .shortcuts-left .pull-quote {
+    font-family: 'Fraunces', serif;
+    font-style: italic;
+    font-size: 1.25rem;
+    color: var(--red);
+    margin-top: 32px;
+    line-height: 1.5;
+    border-left: 3px solid var(--red);
+    padding-left: 20px;
+  }
+
+  .shortcuts-right {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 40px;
+  }
+
+  .sc-group-title {
+    font-family: 'Fraunces', serif;
+    font-size: 0.9375rem;
+    font-weight: 700;
+    margin-bottom: 16px;
+    padding-bottom: 8px;
+    border-bottom: 2px solid var(--ink);
+  }
+
+  .sc-row {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 8px 0;
+    border-bottom: 1px solid var(--rule-light);
+    font-size: 0.8125rem;
+  }
+
+  .sc-action { color: var(--ink-2); }
+
+  .sc-keys {
+    display: flex;
+    gap: 3px;
+  }
+
+  .kbd {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    min-width: 26px;
+    height: 24px;
+    padding: 0 7px;
+    background: var(--white);
+    border: 1px solid var(--rule);
+    border-bottom-width: 2px;
+    border-radius: 4px;
+    font-size: 0.6875rem;
+    font-weight: 700;
+    color: var(--ink-2);
+    font-family: 'Instrument Sans', sans-serif;
+  }
+
+  /* TESTIMONIAL / SOCIAL PROOF */
+  .social-section {
+    border-top: 1px solid var(--rule);
+    border-bottom: 1px solid var(--rule);
+    padding: 80px 48px;
+  }
+
+  .social-inner {
+    max-width: 1320px;
+    margin: 0 auto;
+    display: grid;
+    grid-template-columns: repeat(3, 1fr);
+    gap: 1px;
+    background: var(--rule);
+  }
+
+  .testimonial {
+    background: var(--cream);
+    padding: 40px 36px;
+  }
+
+  .testimonial-text {
+    font-family: 'Fraunces', serif;
+    font-size: 1.125rem;
+    font-style: italic;
+    line-height: 1.6;
+    margin-bottom: 24px;
+    color: var(--ink);
+  }
+
+  .testimonial-author {
+    font-size: 0.8125rem;
+    font-weight: 600;
+  }
+
+  .testimonial-role {
+    font-size: 0.75rem;
+    color: var(--ink-3);
+    margin-top: 2px;
+  }
+
+  /* CTA */
+  .cta-section {
+    max-width: 1320px;
+    margin: 0 auto;
+    padding: 100px 48px;
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 64px;
+    align-items: center;
+  }
+
+  .cta-section h2 {
+    font-family: 'Fraunces', serif;
+    font-size: clamp(2rem, 4vw, 3.5rem);
+    font-weight: 900;
+    line-height: 1.08;
+    letter-spacing: -0.03em;
+  }
+
+  .cta-right p {
+    font-size: 1.0625rem;
+    color: var(--ink-2);
+    line-height: 1.75;
+    margin-bottom: 32px;
+  }
+
+  .cta-features {
+    list-style: none;
+    margin-bottom: 40px;
+  }
+
+  .cta-features li {
+    padding: 8px 0;
+    font-size: 0.9375rem;
+    display: flex;
+    gap: 12px;
+    align-items: center;
+    border-bottom: 1px solid var(--rule-light);
+  }
+
+  .cta-check {
+    color: var(--green-dark);
+    font-weight: 700;
+    font-size: 0.875rem;
+  }
+
+  .cta-btn {
+    display: inline-block;
+    background: var(--ink);
+    color: var(--cream);
+    padding: 16px 44px;
+    border-radius: 6px;
+    font-weight: 600;
+    font-size: 1rem;
+    text-decoration: none;
+    transition: opacity 0.2s;
+  }
+
+  .cta-btn:hover { opacity: 0.85; }
+
+  /* FOOTER */
+  .footer {
+    border-top: 1px solid var(--rule);
+    padding: 40px 48px;
+    max-width: 1320px;
+    margin: 0 auto;
+    display: grid;
+    grid-template-columns: 1fr auto auto;
+    gap: 40px;
+    align-items: center;
+  }
+
+  .footer-brand {
+    font-family: 'Fraunces', serif;
+    font-size: 1.125rem;
+    font-weight: 700;
+  }
+
+  .footer-links {
+    display: flex;
+    gap: 28px;
+    list-style: none;
+  }
+
+  .footer-links a {
+    text-decoration: none;
+    font-size: 0.8125rem;
+    color: var(--ink-3);
+    transition: color 0.2s;
+  }
+
+  .footer-links a:hover { color: var(--ink); }
+
+  .footer-copy {
+    font-size: 0.75rem;
+    color: var(--ink-3);
+  }
+
+  /* MOBILE */
+  @media (max-width: 1024px) {
+    .hero { grid-template-columns: 1fr; min-height: auto; }
+    .hero-left { padding-bottom: 40px; }
+    .features-header { grid-template-columns: 1fr; gap: 24px; }
+    .features-grid { grid-template-columns: 1fr; }
+    .feature-card:nth-child(even) { padding-left: 0; border-left: none; }
+    .product-intro { grid-template-columns: 1fr; gap: 32px; }
+    .pm-content { grid-template-columns: 1fr; }
+    .pm-sidebar { display: none; }
+    .shortcuts-columns { grid-template-columns: 1fr; gap: 48px; }
+    .shortcuts-right { grid-template-columns: 1fr 1fr; }
+    .social-inner { grid-template-columns: 1fr; }
+    .cta-section { grid-template-columns: 1fr; }
+  }
+
+  @media (max-width: 640px) {
+    .nav { padding: 20px 24px; }
+    .nav-center { display: none; }
+    .container, .features-section, .shortcuts-section, .social-section, .cta-section { padding-left: 24px; padding-right: 24px; }
+    .hero { padding: 48px 24px 0; }
+    .product-section { padding: 80px 24px; }
+    .shortcuts-right { grid-template-columns: 1fr; }
+    .footer { padding: 32px 24px; grid-template-columns: 1fr; text-align: center; }
+    .footer-links { justify-content: center; flex-wrap: wrap; }
+    .ct-stats { grid-template-columns: 1fr; }
+  }
+</style>
+</head>
+<body>
+
+<!-- NAV -->
+<nav class="nav">
+  <div class="nav-logo">Plume</div>
+  <ul class="nav-center">
+    <li><a href="#features">Features</a></li>
+    <li><a href="#product">Product</a></li>
+    <li><a href="#shortcuts">Keyboard</a></li>
+    <li><a href="#pricing">Pricing</a></li>
+    <li><a href="#">Changelog</a></li>
+  </ul>
+  <div class="nav-right">
+    <a href="#" class="nav-sign-in">Sign in</a>
+    <a href="#" class="nav-cta">Get started</a>
+  </div>
+</nav>
+
+<!-- HERO — asymmetric split with cycle timeline -->
+<section class="hero">
+  <div class="hero-left">
+    <div class="hero-eyebrow">For teams who ship</div>
+    <h1>Track work.<br>Keep cadence.<br>Ship software.</h1>
+    <p class="hero-body">Plume organizes your team's work into issues, cycles, and projects. It's fast, keyboard-driven, and opinionated about what matters: getting things done without ceremony.</p>
+    <a href="#" class="hero-cta">Start for free</a>
+    <p class="hero-note">Free for teams up to 5. No credit card required.</p>
+  </div>
+
+  <div class="hero-right">
+    <div class="cycle-timeline">
+      <div class="ct-header">
+        <div class="ct-title">Cycle Timeline</div>
+        <div class="ct-nav">
+          <button class="ct-nav-btn">&larr;</button>
+          <button class="ct-nav-btn">&rarr;</button>
+        </div>
+      </div>
+      <div class="ct-body">
+        <div class="tl-row">
+          <div class="tl-label">Cycle 22</div>
+          <div class="tl-track">
+            <div class="tl-bar tl-bar-done" style="left: 0; width: 85%;">Auth Rewrite &middot; 14 closed</div>
+          </div>
+        </div>
+        <div class="tl-row">
+          <div class="tl-label">Cycle 23</div>
+          <div class="tl-track">
+            <div class="tl-bar tl-bar-done" style="left: 5%; width: 90%;">API v3 &middot; 18 closed</div>
+          </div>
+        </div>
+        <div class="tl-row">
+          <div class="tl-label">Cycle 24</div>
+          <div class="tl-track">
+            <div class="tl-bar tl-bar-active" style="left: 10%; width: 60%;">Mobile App &middot; 9 / 16</div>
+          </div>
+        </div>
+        <div class="tl-row">
+          <div class="tl-label">Cycle 25</div>
+          <div class="tl-track">
+            <div class="tl-bar tl-bar-next" style="left: 60%; width: 35%;">Planned &middot; 12 issues</div>
+          </div>
+        </div>
+        <div class="tl-dates">
+          <div></div>
+          <div class="tl-date-track">
+            <span>Oct 14</span>
+            <span>Nov 4</span>
+            <span>Nov 25</span>
+            <span>Dec 16</span>
+          </div>
+        </div>
+      </div>
+      <div class="ct-stats">
+        <div class="ct-stat">
+          <div class="ct-stat-value">56%</div>
+          <div class="ct-stat-label">Cycle progress</div>
+        </div>
+        <div class="ct-stat">
+          <div class="ct-stat-value">14.2</div>
+          <div class="ct-stat-label">Avg. velocity</div>
+        </div>
+        <div class="ct-stat">
+          <div class="ct-stat-value">+2</div>
+          <div class="ct-stat-label">Scope change</div>
+        </div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<div class="editorial-divider"><hr></div>
+
+<!-- FEATURES — magazine grid -->
+<section class="features-section" id="features">
+  <div class="features-header">
+    <h2>Everything a software team needs. Nothing it doesn't.</h2>
+    <p>Plume is opinionated about workflow so your team can focus on building. Issues, cycles, projects, roadmaps, and integrations &mdash; in a single, fast workspace that respects your time.</p>
+  </div>
+  <div class="features-grid">
+    <div class="feature-card">
+      <div class="feature-number">I</div>
+      <div class="feature-title">Issues</div>
+      <div class="feature-body">The atomic unit of work. Each issue carries a status, priority, assignee, labels, and a rich description. Create one in under a second with a single keystroke. Update everything inline &mdash; no modals, no save buttons.</div>
+      <div class="feature-detail">Sub-issues for decomposition. Markdown with syntax highlighting. Image paste. Custom fields per workspace. Bulk operations on any filtered set.</div>
+    </div>
+    <div class="feature-card">
+      <div class="feature-number">II</div>
+      <div class="feature-title">Cycles</div>
+      <div class="feature-body">Time-boxed iterations that give your team rhythm. Drag issues in, track progress against scope, review what shipped. Unfinished work rolls forward automatically. No stand-up ceremony required.</div>
+      <div class="feature-detail">Configurable duration: 1, 2, or 4 weeks. Burndown charts. Velocity tracking across cycles. Scope-change protection that flags mid-sprint additions.</div>
+    </div>
+    <div class="feature-card">
+      <div class="feature-number">III</div>
+      <div class="feature-title">Projects</div>
+      <div class="feature-body">Long-running initiatives that span multiple cycles. Set milestones, track completion percentage, and see exactly which sprints contributed. Projects give you the strategic view without a separate planning tool.</div>
+      <div class="feature-detail">Roadmap timeline. Status updates with rich text. Automatic progress aggregation from child issues. Project-scoped filters and views.</div>
+    </div>
+    <div class="feature-card">
+      <div class="feature-number">IV</div>
+      <div class="feature-title">Integrations</div>
+      <div class="feature-body">Plume connects to GitHub, GitLab, Slack, Figma, and Sentry. PRs link to issues automatically by branch name. Statuses transition on merge. Errors become issues without manual triage.</div>
+      <div class="feature-detail">GitHub: bi-directional PR/commit sync. Slack: create issues from messages, slash commands. Sentry: auto-create issues, close on deploy. Figma: design previews inline.</div>
+    </div>
+    <div class="feature-card">
+      <div class="feature-number">V</div>
+      <div class="feature-title">Views &amp; Filters</div>
+      <div class="feature-body">Board, list, and timeline. Filter by any combination of status, priority, assignee, label, cycle, or project. Save views for your team or just yourself. Every view loads instantly.</div>
+      <div class="feature-detail">Custom saved views. Shareable filter URLs. Group by any field. Sort by priority, updated date, or custom order. Keyboard navigation through all views.</div>
+    </div>
+    <div class="feature-card">
+      <div class="feature-number">VI</div>
+      <div class="feature-title">Speed</div>
+      <div class="feature-body">Plume is engineered to be fast. The interface responds in under 50ms. Navigation is instant. Search results appear as you type. We obsess over perceived performance because your attention matters.</div>
+      <div class="feature-detail">Optimistic UI updates. Local-first data layer. Incremental sync. Sub-second page loads on any connection. No spinners, no loading states that linger.</div>
+    </div>
+  </div>
+</section>
+
+<!-- PRODUCT UI MOCK — dark mode -->
+<section class="product-section" id="product">
+  <div class="product-inner">
+    <div class="product-intro">
+      <h2>A workspace that<br>stays out of your way</h2>
+      <p>Everything you need. Nothing you don't. The interface is information-dense where it matters and minimal everywhere else. Dark mode included because engineers live here.</p>
+    </div>
+
+    <div class="product-mock">
+      <div class="pm-bar">
+        <div class="pm-dot pm-dot-r"></div>
+        <div class="pm-dot pm-dot-y"></div>
+        <div class="pm-dot pm-dot-g"></div>
+      </div>
+      <div class="pm-content">
+        <div class="pm-sidebar">
+          <div class="pm-nav-group">
+            <div class="pm-nav-label">Workspace</div>
+            <div class="pm-nav-item">My Issues</div>
+            <div class="pm-nav-item active">All Issues</div>
+            <div class="pm-nav-item">Activity</div>
+          </div>
+          <div class="pm-nav-group">
+            <div class="pm-nav-label">Cycles</div>
+            <div class="pm-nav-item">Cycle 24 &middot; Active</div>
+            <div class="pm-nav-item">Cycle 25</div>
+          </div>
+          <div class="pm-nav-group">
+            <div class="pm-nav-label">Projects</div>
+            <div class="pm-nav-item">Mobile App</div>
+            <div class="pm-nav-item">API v3</div>
+            <div class="pm-nav-item">Design System</div>
+          </div>
+        </div>
+        <div class="pm-main">
+          <div class="pm-main-header">
+            <div class="pm-main-title">All Issues</div>
+            <div class="pm-filters">
+              <div class="pm-filter">Status: Active</div>
+              <div class="pm-filter">Assignee: All</div>
+              <div class="pm-filter">+ Filter</div>
+            </div>
+          </div>
+          <ul class="pm-issues">
+            <li class="pm-issue">
+              <div class="pm-check done"></div>
+              <span class="pm-issue-id">PLM-182</span>
+              <span class="pm-issue-title">Add touch gesture support for mobile cards</span>
+              <span class="pm-issue-label lbl-feat">feature</span>
+              <span class="pm-issue-priority pri-hi">H</span>
+              <span class="pm-issue-avatar">MS</span>
+            </li>
+            <li class="pm-issue">
+              <div class="pm-check"></div>
+              <span class="pm-issue-id">PLM-185</span>
+              <span class="pm-issue-title">Fix race condition in optimistic status update</span>
+              <span class="pm-issue-label lbl-bug">bug</span>
+              <span class="pm-issue-priority pri-urg">!</span>
+              <span class="pm-issue-avatar">AC</span>
+            </li>
+            <li class="pm-issue">
+              <div class="pm-check"></div>
+              <span class="pm-issue-id">PLM-189</span>
+              <span class="pm-issue-title">Implement groupBy in list view</span>
+              <span class="pm-issue-label lbl-feat">feature</span>
+              <span class="pm-issue-priority pri-md">M</span>
+              <span class="pm-issue-avatar">JP</span>
+            </li>
+            <li class="pm-issue">
+              <div class="pm-check"></div>
+              <span class="pm-issue-id">PLM-191</span>
+              <span class="pm-issue-title">Keyboard shortcut overlay (? key)</span>
+              <span class="pm-issue-label lbl-dx">dx</span>
+              <span class="pm-issue-priority pri-md">M</span>
+              <span class="pm-issue-avatar">SL</span>
+            </li>
+            <li class="pm-issue">
+              <div class="pm-check done"></div>
+              <span class="pm-issue-id">PLM-193</span>
+              <span class="pm-issue-title">REST API v2: pagination + cursor support</span>
+              <span class="pm-issue-label lbl-api">api</span>
+              <span class="pm-issue-priority pri-hi">H</span>
+              <span class="pm-issue-avatar">AC</span>
+            </li>
+            <li class="pm-issue">
+              <div class="pm-check"></div>
+              <span class="pm-issue-id">PLM-196</span>
+              <span class="pm-issue-title">Slack: support /plume create from threads</span>
+              <span class="pm-issue-label lbl-feat">feature</span>
+              <span class="pm-issue-priority pri-lo">L</span>
+              <span class="pm-issue-avatar">MS</span>
+            </li>
+            <li class="pm-issue">
+              <div class="pm-check"></div>
+              <span class="pm-issue-id">PLM-198</span>
+              <span class="pm-issue-title">Add cycle velocity sparkline to sidebar</span>
+              <span class="pm-issue-label lbl-feat">feature</span>
+              <span class="pm-issue-priority pri-lo">L</span>
+              <span class="pm-issue-avatar">JP</span>
+            </li>
+          </ul>
+        </div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- KEYBOARD SHORTCUTS -->
+<section class="shortcuts-section" id="shortcuts">
+  <div class="shortcuts-columns">
+    <div class="shortcuts-left">
+      <h2>Built for the keyboard</h2>
+      <p>Every action in Plume is reachable without a mouse. Navigate, triage, assign, and close &mdash; all from the home row. The command palette gives you instant access to any issue, project, or action in your workspace.</p>
+      <div class="pull-quote">"It's the first project tool where I don't reach for the trackpad."</div>
+    </div>
+    <div class="shortcuts-right">
+      <div>
+        <div class="sc-group-title">Navigation</div>
+        <div class="sc-row"><span class="sc-action">Command palette</span><div class="sc-keys"><span class="kbd">&#8984;</span><span class="kbd">K</span></div></div>
+        <div class="sc-row"><span class="sc-action">My Issues</span><div class="sc-keys"><span class="kbd">G</span><span class="kbd">M</span></div></div>
+        <div class="sc-row"><span class="sc-action">Active Cycle</span><div class="sc-keys"><span class="kbd">G</span><span class="kbd">C</span></div></div>
+        <div class="sc-row"><span class="sc-action">Projects</span><div class="sc-keys"><span class="kbd">G</span><span class="kbd">P</span></div></div>
+        <div class="sc-row"><span class="sc-action">Search</span><div class="sc-keys"><span class="kbd">/</span></div></div>
+        <div class="sc-row"><span class="sc-action">Next issue</span><div class="sc-keys"><span class="kbd">J</span></div></div>
+        <div class="sc-row"><span class="sc-action">Previous issue</span><div class="sc-keys"><span class="kbd">K</span></div></div>
+        <div class="sc-row"><span class="sc-action">Open issue</span><div class="sc-keys"><span class="kbd">Enter</span></div></div>
+      </div>
+      <div>
+        <div class="sc-group-title">Actions</div>
+        <div class="sc-row"><span class="sc-action">New issue</span><div class="sc-keys"><span class="kbd">C</span></div></div>
+        <div class="sc-row"><span class="sc-action">Set priority</span><div class="sc-keys"><span class="kbd">P</span></div></div>
+        <div class="sc-row"><span class="sc-action">Change status</span><div class="sc-keys"><span class="kbd">S</span></div></div>
+        <div class="sc-row"><span class="sc-action">Assign</span><div class="sc-keys"><span class="kbd">A</span></div></div>
+        <div class="sc-row"><span class="sc-action">Assign to me</span><div class="sc-keys"><span class="kbd">I</span></div></div>
+        <div class="sc-row"><span class="sc-action">Add label</span><div class="sc-keys"><span class="kbd">L</span></div></div>
+        <div class="sc-row"><span class="sc-action">Add to cycle</span><div class="sc-keys"><span class="kbd">Shift</span><span class="kbd">C</span></div></div>
+        <div class="sc-row"><span class="sc-action">Delete</span><div class="sc-keys"><span class="kbd">&#9003;</span></div></div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- TESTIMONIALS -->
+<section class="social-section">
+  <div class="social-inner">
+    <div class="testimonial">
+      <div class="testimonial-text">"We moved from Jira and our cycle time dropped by 40%. The keyboard shortcuts alone save us hours every week."</div>
+      <div class="testimonial-author">Elena Vasquez</div>
+      <div class="testimonial-role">Engineering Lead, Meridian</div>
+    </div>
+    <div class="testimonial">
+      <div class="testimonial-text">"Plume gets out of the way. I spend my time building, not updating tickets. The GitHub integration means issues basically manage themselves."</div>
+      <div class="testimonial-author">David Kim</div>
+      <div class="testimonial-role">Senior Engineer, Archway</div>
+    </div>
+    <div class="testimonial">
+      <div class="testimonial-text">"Finally a planning tool that designers and engineers both want to use. The speed is remarkable &mdash; it feels like a native app."</div>
+      <div class="testimonial-author">Priya Sharma</div>
+      <div class="testimonial-role">Head of Product, Canopy</div>
+    </div>
+  </div>
+</section>
+
+<!-- CTA -->
+<section class="cta-section" id="pricing">
+  <div>
+    <h2>Your team deserves better tools.</h2>
+  </div>
+  <div class="cta-right">
+    <p>Plume is free for teams up to 5. No feature gates on the free plan &mdash; you get issues, cycles, projects, integrations, and the full keyboard-driven experience. Upgrade when you need priority support, SSO, or advanced analytics.</p>
+    <ul class="cta-features">
+      <li><span class="cta-check">&#10003;</span> Unlimited issues, cycles, and projects</li>
+      <li><span class="cta-check">&#10003;</span> GitHub, GitLab, Slack integrations</li>
+      <li><span class="cta-check">&#10003;</span> Full keyboard navigation</li>
+      <li><span class="cta-check">&#10003;</span> Command palette</li>
+      <li><span class="cta-check">&#10003;</span> Roadmap and progress views</li>
+      <li><span class="cta-check">&#10003;</span> API access</li>
+    </ul>
+    <a href="#" class="cta-btn">Get started free</a>
+  </div>
+</section>
+
+<!-- FOOTER -->
+<footer class="footer">
+  <div class="footer-brand">Plume</div>
+  <ul class="footer-links">
+    <li><a href="#">Features</a></li>
+    <li><a href="#">Pricing</a></li>
+    <li><a href="#">Docs</a></li>
+    <li><a href="#">Changelog</a></li>
+    <li><a href="#">Blog</a></li>
+    <li><a href="#">Twitter</a></li>
+    <li><a href="#">GitHub</a></li>
+  </ul>
+  <div class="footer-copy">&copy; 2026 Plume</div>
+</footer>
+
+</body>
+</html>
