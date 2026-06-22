@@ -1,0 +1,396 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Slipstream - Deploy at the speed of push</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+<style>
+  *,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
+  :root{
+    --bg:#fafaf8;--fg:#111;--muted:#777;--border:#e0e0dc;--accent:#111;--accentSoft:#d4d4cf;--subtle:#f0f0ec;
+  }
+  html{font-size:16px;scroll-behavior:smooth}
+  body{font-family:'Plus Jakarta Sans',sans-serif;background:var(--bg);color:var(--fg);line-height:1.55;-webkit-font-smoothing:antialiased}
+  a{color:inherit;text-decoration:none}
+
+  .container{max-width:1120px;margin:0 auto;padding:0 2.5rem}
+  .mono{font-family:'JetBrains Mono',monospace}
+
+  /* NAV */
+  nav{padding:2rem 2.5rem;display:flex;justify-content:space-between;align-items:center;max-width:1120px;margin:0 auto}
+  nav .logo{font-weight:700;font-size:1.1rem;letter-spacing:-.01em}
+  nav ul{list-style:none;display:flex;gap:2.5rem;font-size:.85rem;color:var(--muted);font-weight:500}
+  nav ul a:hover{color:var(--fg)}
+  nav .cta-nav{border:1.5px solid var(--fg);padding:.55rem 1.5rem;font-weight:600;font-size:.8rem;letter-spacing:.03em;transition:all .15s}
+  nav .cta-nav:hover{background:var(--fg);color:var(--bg)}
+
+  /* HERO — Signature move: asymmetric split, massive type left, deployment state cards right */
+  .hero{padding:8rem 0 6rem;border-bottom:1px solid var(--border)}
+  .hero-grid{display:grid;grid-template-columns:1.1fr .9fr;gap:4rem;align-items:end}
+  .hero h1{font-size:clamp(2.5rem,5.5vw,4.5rem);font-weight:700;letter-spacing:-.045em;line-height:1.05}
+  .hero h1 .thin{font-weight:300;color:var(--muted)}
+  .hero-body{margin-top:2rem;max-width:420px}
+  .hero-body p{font-size:1.05rem;color:var(--muted);line-height:1.65;margin-bottom:2rem}
+  .hero-cta{display:inline-block;background:var(--fg);color:var(--bg);padding:1rem 2.5rem;font-weight:600;font-size:.9rem;letter-spacing:.02em;transition:opacity .15s}
+  .hero-cta:hover{opacity:.85}
+  .hero-note{display:block;margin-top:.75rem;font-size:.78rem;color:var(--muted)}
+
+  /* Deployment state cards — right column */
+  .deploy-states{display:flex;flex-direction:column;gap:.75rem}
+  .state-card{border:1px solid var(--border);padding:1.25rem 1.5rem;display:grid;grid-template-columns:auto 1fr auto;gap:1rem;align-items:center;background:var(--bg)}
+  .state-dot{width:8px;height:8px;border-radius:50%}
+  .state-dot.live{background:#22c55e}
+  .state-dot.building{background:#f59e0b}
+  .state-dot.queued{background:var(--accentSoft)}
+  .state-info .branch{font-family:'JetBrains Mono',monospace;font-size:.8rem;font-weight:500}
+  .state-info .status{font-size:.72rem;color:var(--muted);margin-top:.15rem}
+  .state-time{font-family:'JetBrains Mono',monospace;font-size:.72rem;color:var(--muted)}
+
+  /* HOW IT WORKS — horizontal scroll-like 3 panels */
+  .how{padding:6rem 0;border-bottom:1px solid var(--border)}
+  .how-header{display:flex;justify-content:space-between;align-items:baseline;margin-bottom:3.5rem}
+  .how-header h2{font-size:clamp(1.5rem,3vw,2.25rem);font-weight:700;letter-spacing:-.03em}
+  .how-header span{font-size:.78rem;color:var(--muted);text-transform:uppercase;letter-spacing:.12em}
+  .how-panels{display:grid;grid-template-columns:repeat(3,1fr);gap:0}
+  .how-panel{padding:2.5rem;border:1px solid var(--border);border-right:none}
+  .how-panel:last-child{border-right:1px solid var(--border)}
+  .how-panel .num{font-family:'JetBrains Mono',monospace;font-size:.72rem;color:var(--muted);margin-bottom:1.25rem}
+  .how-panel h3{font-size:1.15rem;font-weight:600;margin-bottom:.75rem;letter-spacing:-.01em}
+  .how-panel p{font-size:.88rem;color:var(--muted);line-height:1.6;margin-bottom:1.25rem}
+  .how-panel code{font-family:'JetBrains Mono',monospace;font-size:.75rem;background:var(--subtle);padding:.35rem .65rem;display:inline-block;border:1px solid var(--border)}
+
+  /* TERMINAL SECTION */
+  .terminal-section{padding:6rem 0;border-bottom:1px solid var(--border)}
+  .terminal-layout{display:grid;grid-template-columns:.45fr .55fr;gap:4rem;align-items:start}
+  .terminal-copy h2{font-size:clamp(1.5rem,3vw,2.25rem);font-weight:700;letter-spacing:-.03em;margin-bottom:1.25rem}
+  .terminal-copy p{color:var(--muted);font-size:.95rem;line-height:1.65;margin-bottom:1.5rem}
+  .terminal-copy ul{list-style:none;display:flex;flex-direction:column;gap:.75rem}
+  .terminal-copy li{font-size:.88rem;padding-left:1.25rem;position:relative;color:var(--muted)}
+  .terminal-copy li::before{content:'';position:absolute;left:0;top:.55em;width:6px;height:1px;background:var(--fg)}
+  .terminal-box{background:var(--fg);color:var(--bg);padding:2rem;font-family:'JetBrains Mono',monospace;font-size:.78rem;line-height:1.9;overflow-x:auto;position:relative}
+  .terminal-box .t-muted{color:#666}
+  .terminal-box .t-green{color:#86efac}
+  .terminal-box .t-amber{color:#fcd34d}
+  .terminal-box .t-url{color:#93c5fd}
+  .terminal-box::before{content:'TERMINAL';position:absolute;top:.75rem;right:1rem;font-size:.6rem;letter-spacing:.15em;color:#444}
+
+  /* FRAMEWORKS */
+  .frameworks{padding:6rem 0;border-bottom:1px solid var(--border)}
+  .frameworks h2{font-size:clamp(1.5rem,3vw,2.25rem);font-weight:700;letter-spacing:-.03em;margin-bottom:.75rem}
+  .frameworks .sub{color:var(--muted);font-size:.95rem;margin-bottom:3rem;max-width:480px}
+  .fw-list{display:grid;grid-template-columns:repeat(4,1fr);gap:0}
+  .fw-item{padding:1.75rem;border:1px solid var(--border);border-right:none;border-bottom:none}
+  .fw-item:nth-child(4n){border-right:1px solid var(--border)}
+  .fw-item:nth-child(n+5){border-bottom:0}
+  .fw-item:nth-child(-n+4){border-top:1px solid var(--border)}
+  .fw-list .fw-item:last-child{border-right:1px solid var(--border)}
+  .fw-item .name{font-weight:600;font-size:.95rem;margin-bottom:.25rem}
+  .fw-item .detail{font-size:.78rem;color:var(--muted)}
+
+  /* PERFORMANCE */
+  .perf{padding:6rem 0;border-bottom:1px solid var(--border)}
+  .perf-header{margin-bottom:3rem}
+  .perf-header h2{font-size:clamp(1.5rem,3vw,2.25rem);font-weight:700;letter-spacing:-.03em;margin-bottom:.5rem}
+  .perf-header p{color:var(--muted);font-size:.9rem}
+  .perf-grid{display:grid;grid-template-columns:repeat(4,1fr);gap:2.5rem}
+  .perf-stat .number{font-size:clamp(2rem,4vw,3rem);font-weight:700;letter-spacing:-.04em;line-height:1}
+  .perf-stat .unit{font-weight:300;color:var(--muted)}
+  .perf-stat .desc{font-size:.78rem;color:var(--muted);margin-top:.5rem;line-height:1.5}
+
+  /* EDGE FUNCTIONS */
+  .edge{padding:6rem 0;border-bottom:1px solid var(--border)}
+  .edge-split{display:grid;grid-template-columns:1fr 1fr;gap:4rem;align-items:start}
+  .edge h2{font-size:clamp(1.5rem,3vw,2.25rem);font-weight:700;letter-spacing:-.03em;margin-bottom:1rem}
+  .edge p{color:var(--muted);font-size:.92rem;line-height:1.65;margin-bottom:1.5rem}
+  .edge-code{background:var(--subtle);border:1px solid var(--border);padding:1.75rem;font-family:'JetBrains Mono',monospace;font-size:.75rem;line-height:1.8;overflow-x:auto}
+  .edge-code .kw{color:#6366f1}
+  .edge-code .fn{color:var(--fg);font-weight:500}
+  .edge-code .str{color:#059669}
+  .edge-code .cmt{color:#aaa}
+  .edge-regions{display:flex;flex-wrap:wrap;gap:.5rem;margin-top:1rem}
+  .edge-regions span{font-family:'JetBrains Mono',monospace;font-size:.7rem;padding:.3rem .6rem;border:1px solid var(--border);color:var(--muted)}
+
+  /* CTA */
+  .cta-final{padding:8rem 0 6rem}
+  .cta-final h2{font-size:clamp(2rem,5vw,3.5rem);font-weight:700;letter-spacing:-.04em;line-height:1.1;margin-bottom:1.25rem}
+  .cta-final h2 .thin{font-weight:300;color:var(--muted)}
+  .cta-final p{color:var(--muted);font-size:1rem;margin-bottom:2.5rem;max-width:440px;line-height:1.6}
+  .cta-final .btn{display:inline-block;background:var(--fg);color:var(--bg);padding:1rem 2.5rem;font-weight:600;font-size:.9rem;letter-spacing:.02em;transition:opacity .15s}
+  .cta-final .btn:hover{opacity:.85}
+  .cta-final .terms{font-size:.75rem;color:var(--muted);margin-top:.75rem}
+
+  /* FOOTER */
+  footer{border-top:1px solid var(--border);padding:2rem 0;font-size:.75rem;color:var(--muted);display:flex;justify-content:space-between}
+
+  @media(max-width:900px){
+    .hero-grid,.terminal-layout,.edge-split{grid-template-columns:1fr}
+    .how-panels{grid-template-columns:1fr}
+    .how-panel{border-right:1px solid var(--border)!important;border-bottom:none}
+    .how-panel:last-child{border-bottom:1px solid var(--border)}
+    .fw-list{grid-template-columns:repeat(2,1fr)}
+    .fw-item:nth-child(2n){border-right:1px solid var(--border)}
+    .fw-item:nth-child(4n){border-right:none}
+    .perf-grid{grid-template-columns:repeat(2,1fr)}
+    nav ul{display:none}
+    .deploy-states{margin-top:2rem}
+  }
+  @media(max-width:600px){
+    .container{padding:0 1.25rem}
+    .fw-list,.perf-grid{grid-template-columns:1fr}
+    .fw-item{border-right:1px solid var(--border)!important}
+  }
+</style>
+</head>
+<body>
+
+<nav>
+  <div class="logo">Slipstream</div>
+  <ul>
+    <li><a href="#how">How it works</a></li>
+    <li><a href="#frameworks">Frameworks</a></li>
+    <li><a href="#edge">Edge</a></li>
+    <li><a href="#performance">Performance</a></li>
+  </ul>
+  <a href="#" class="cta-nav">Start free</a>
+</nav>
+
+<!-- HERO: Signature move = asymmetric split with live deployment state cards -->
+<section class="hero">
+  <div class="container">
+    <div class="hero-grid">
+      <div>
+        <h1>Deploy at the<br>speed of <span class="thin">push</span></h1>
+        <div class="hero-body">
+          <p>Connect your repo. Push your code. Slipstream handles the build, the CDN, the SSL, the scaling. You handle the product.</p>
+          <a href="#" class="hero-cta">Start for free</a>
+          <span class="hero-note">No credit card. No configuration. Deploy in 30 seconds.</span>
+        </div>
+      </div>
+      <div class="deploy-states">
+        <div class="state-card">
+          <span class="state-dot live"></span>
+          <div class="state-info">
+            <div class="branch">main</div>
+            <div class="status">Production -- app.example.com</div>
+          </div>
+          <div class="state-time">3m ago</div>
+        </div>
+        <div class="state-card">
+          <span class="state-dot live"></span>
+          <div class="state-info">
+            <div class="branch">feat/new-onboarding</div>
+            <div class="status">Preview -- feat-new-onboarding.slipstream.app</div>
+          </div>
+          <div class="state-time">12m ago</div>
+        </div>
+        <div class="state-card">
+          <span class="state-dot building"></span>
+          <div class="state-info">
+            <div class="branch">fix/checkout-validation</div>
+            <div class="status">Building... 67% complete</div>
+          </div>
+          <div class="state-time">now</div>
+        </div>
+        <div class="state-card">
+          <span class="state-dot live"></span>
+          <div class="state-info">
+            <div class="branch">staging</div>
+            <div class="status">Preview -- staging.slipstream.app</div>
+          </div>
+          <div class="state-time">1h ago</div>
+        </div>
+        <div class="state-card">
+          <span class="state-dot queued"></span>
+          <div class="state-info">
+            <div class="branch">refactor/api-layer</div>
+            <div class="status">Queued</div>
+          </div>
+          <div class="state-time">queued</div>
+        </div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- HOW IT WORKS -->
+<section class="how" id="how">
+  <div class="container">
+    <div class="how-header">
+      <h2>How it works</h2>
+      <span>3 steps</span>
+    </div>
+    <div class="how-panels">
+      <div class="how-panel">
+        <div class="num">01</div>
+        <h3>Connect your repo</h3>
+        <p>Import from GitHub, GitLab, or Bitbucket. Slipstream detects your framework and configures the build.</p>
+        <code>$ slipstream init</code>
+      </div>
+      <div class="how-panel">
+        <div class="num">02</div>
+        <h3>Push to any branch</h3>
+        <p>Every branch gets a preview deployment. Every pull request gets a unique URL with its own environment.</p>
+        <code>$ git push origin feature/auth</code>
+      </div>
+      <div class="how-panel">
+        <div class="num">03</div>
+        <h3>Merge and ship</h3>
+        <p>Merge to main. Production updates in seconds. Atomic deploys with instant rollback if needed.</p>
+        <code>$ gh pr merge --squash</code>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- TERMINAL -->
+<section class="terminal-section">
+  <div class="container">
+    <div class="terminal-layout">
+      <div class="terminal-copy">
+        <h2>Watch your deploy happen</h2>
+        <p>Every deployment streams real-time build logs. See exactly what Slipstream is doing at every step.</p>
+        <ul>
+          <li>Automatic framework detection</li>
+          <li>Dependency caching across builds</li>
+          <li>Parallel edge propagation</li>
+          <li>SSL provisioning included</li>
+          <li>Custom domain mapping</li>
+        </ul>
+      </div>
+      <div class="terminal-box">
+        <div class="t-muted"># Deploy triggered by push to main (a4f29c1)</div>
+        <br>
+        <div>Cloning repository...</div>
+        <div class="t-green">Done (0.8s)</div>
+        <br>
+        <div>Framework: <span class="t-amber">Next.js 14.2.3</span></div>
+        <div>Node: 20.11.0 | pnpm 8.15.4</div>
+        <br>
+        <div>Installing dependencies...</div>
+        <div class="t-muted">Restored from cache: node_modules (1,891 packages)</div>
+        <div class="t-green">Done (0.4s) -- cache hit</div>
+        <br>
+        <div>Running build...</div>
+        <div class="t-muted">Creating optimized production build</div>
+        <div class="t-muted">Compiled 247 pages</div>
+        <div class="t-muted">Generated static pages: 182</div>
+        <div class="t-muted">Server-side routes: 65</div>
+        <div class="t-green">Build complete (5.2s)</div>
+        <br>
+        <div>Deploying to edge...</div>
+        <div class="t-muted">Propagating to 42 regions</div>
+        <div class="t-green">All regions healthy (1.1s)</div>
+        <br>
+        <div class="t-muted">SSL: valid (auto-renewed)</div>
+        <div class="t-muted">CDN: purged and warmed</div>
+        <br>
+        <div class="t-url">https://app.example.com</div>
+        <div class="t-green">Deploy successful -- 7.5s total</div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- FRAMEWORKS -->
+<section class="frameworks" id="frameworks">
+  <div class="container">
+    <h2>Built for your stack</h2>
+    <p class="sub">Zero-config support for every major framework. Automatic build detection, optimized output, edge-aware rendering.</p>
+    <div class="fw-list">
+      <div class="fw-item"><div class="name">Next.js</div><div class="detail">App Router, Pages, ISR, SSR</div></div>
+      <div class="fw-item"><div class="name">Remix</div><div class="detail">Full-stack, nested routes</div></div>
+      <div class="fw-item"><div class="name">Astro</div><div class="detail">Islands, SSG, SSR hybrid</div></div>
+      <div class="fw-item"><div class="name">SvelteKit</div><div class="detail">SSR, prerendering, adapters</div></div>
+      <div class="fw-item"><div class="name">Nuxt</div><div class="detail">Vue 3, Nitro server</div></div>
+      <div class="fw-item"><div class="name">React + Vite</div><div class="detail">SPA, client-side</div></div>
+      <div class="fw-item"><div class="name">Angular</div><div class="detail">SSR, prerender, hydration</div></div>
+      <div class="fw-item"><div class="name">Gatsby</div><div class="detail">SSG, DSG, functions</div></div>
+    </div>
+  </div>
+</section>
+
+<!-- PERFORMANCE -->
+<section class="perf" id="performance">
+  <div class="container">
+    <div class="perf-header">
+      <h2>Performance at scale</h2>
+      <p>Global infrastructure built for speed. Every metric measured, every millisecond earned.</p>
+    </div>
+    <div class="perf-grid">
+      <div class="perf-stat">
+        <div class="number">&lt;50<span class="unit">ms</span></div>
+        <div class="desc">Median time to first byte across all 42 edge regions</div>
+      </div>
+      <div class="perf-stat">
+        <div class="number">8<span class="unit">s</span></div>
+        <div class="desc">Average build-to-live time for production deployments</div>
+      </div>
+      <div class="perf-stat">
+        <div class="number">99.99<span class="unit">%</span></div>
+        <div class="desc">Uptime SLA for Pro and Enterprise plans</div>
+      </div>
+      <div class="perf-stat">
+        <div class="number">0<span class="unit">ms</span></div>
+        <div class="desc">Cold start for edge functions with pre-warmed isolates</div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- EDGE -->
+<section class="edge" id="edge">
+  <div class="container">
+    <div class="edge-split">
+      <div>
+        <h2>Server logic at the edge</h2>
+        <p>Write API routes and middleware that run in the region closest to your user. Standard Web APIs, no proprietary runtime.</p>
+        <p>Deployed automatically alongside your frontend. No separate infrastructure to manage.</p>
+        <div class="edge-regions">
+          <span>us-east-1</span><span>us-west-2</span><span>eu-west-1</span><span>eu-central-1</span><span>ap-northeast-1</span><span>ap-southeast-1</span><span>sa-east-1</span><span>ap-south-1</span>
+        </div>
+      </div>
+      <div class="edge-code">
+        <span class="cmt">// api/user.ts</span>
+<span class="kw">import</span> { db } <span class="kw">from</span> <span class="str">'@/lib/db'</span>;
+
+<span class="kw">export async function</span> <span class="fn">GET</span>(req: Request) {
+  <span class="kw">const</span> session = <span class="kw">await</span> auth(req);
+
+  <span class="kw">if</span> (!session) {
+    <span class="kw">return new</span> Response(<span class="str">'Unauthorized'</span>, {
+      status: 401,
+    });
+  }
+
+  <span class="kw">const</span> user = <span class="kw">await</span> db.user.findUnique({
+    where: { id: session.userId },
+  });
+
+  <span class="kw">return</span> Response.json(user);
+}
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- CTA -->
+<section class="cta-final">
+  <div class="container">
+    <h2>Your code<br>deserves <span class="thin">better infra</span></h2>
+    <p>Free for hobby projects. Scale to millions of requests. No infrastructure to manage, ever.</p>
+    <a href="#" class="btn">Deploy now</a>
+    <div class="terms">Free tier: 100GB bandwidth, unlimited deploys, custom domains, SSL.</div>
+  </div>
+</section>
+
+<footer>
+  <div class="container" style="display:flex;justify-content:space-between;width:100%">
+    <span>Slipstream 2026</span>
+    <span>Push. Build. Live.</span>
+  </div>
+</footer>
+
+</body>
+</html>
