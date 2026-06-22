@@ -120,8 +120,7 @@ Post `<!-- FORGE:CONTRACT -->` comment documenting what will be built and why:
 **Before posting, read the attribution config**:
 ```bash
 SHOW_ATTRIBUTION=$(yq '.branding.show_attribution // "true"' forge.yaml 2>/dev/null || echo "true")
-[ "$SHOW_ATTRIBUTION" = "false" ] && ATTRIBUTION_LINE="" || ATTRIBUTION_LINE="
-> Pipeline powered by [ForgeDock](https://github.com/RapierCraftStudios/ForgeDock)"
+[ "$SHOW_ATTRIBUTION" = "false" ] && ATTRIBUTION_LINE="" || ATTRIBUTION_LINE="> Pipeline powered by [ForgeDock](https://github.com/RapierCraftStudios/ForgeDock)"
 ```
 
 ```bash
@@ -151,7 +150,7 @@ gh issue comment {NUMBER} {GH_FLAG} --body "<!-- FORGE:CONTRACT -->
 ### Out of Scope
 
 {OUT_OF_SCOPE_ITEMS}
-${ATTRIBUTION_LINE}"
+${ATTRIBUTION_LINE:+\n$ATTRIBUTION_LINE}"
 ```
 
 Contract must be grounded in the investigation report. Every deliverable file must appear in the affected files list from the investigator. Adversarially validate the proposed fix against adjacent system layers before posting.

@@ -200,8 +200,7 @@ gh issue edit {NUMBER} {GH_FLAG} --body "${CURRENT_BODY}${TRACKER}"
 **Before posting, read the attribution config**:
 ```bash
 SHOW_ATTRIBUTION=$(yq '.branding.show_attribution // "true"' forge.yaml 2>/dev/null || echo "true")
-[ "$SHOW_ATTRIBUTION" = "false" ] && ATTRIBUTION_LINE="" || ATTRIBUTION_LINE="
-> Pipeline powered by [ForgeDock](https://github.com/RapierCraftStudios/ForgeDock)"
+[ "$SHOW_ATTRIBUTION" = "false" ] && ATTRIBUTION_LINE="" || ATTRIBUTION_LINE="> Pipeline powered by [ForgeDock](https://github.com/RapierCraftStudios/ForgeDock)"
 ```
 
 ```bash
@@ -218,7 +217,7 @@ This issue has been broken into sub-issues. Each sub-issue runs through its own 
 ### Decomposition Rationale
 
 {brief summary of why this issue was decomposed and the dependency ordering chosen}
-${ATTRIBUTION_LINE}
+${ATTRIBUTION_LINE:+\n$ATTRIBUTION_LINE}
 <!-- FORGE:DECOMPOSED:COMPLETE -->"
 ```
 
