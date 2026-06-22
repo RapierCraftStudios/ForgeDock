@@ -48,6 +48,39 @@ from nowhere. Rationale → spec → page.
   "spacing":  { "base_unit_px": 8, "scale": [4,8,12,16,24,32,48,64,96] }, // all spacing on-scale
   "radius":   { "scale": [4, 8, 16] },   // deliberate system, NOT uniform rounded-everything
   "shadow":   { "tokens": ["0 1px 2px rgba(0,0,0,.06)", "0 8px 24px rgba(0,0,0,.12)"] }, // soft, low-spread
+  "craft": {                             // see reference-corpus.md#the-craft-vocabulary — #1047
+    "radius_system": {
+      "card_px": 16,                     // CONSTRAINT: distinct_count >= 3 across card/button/badge/input
+      "button_px": 8,
+      "badge_px": 9999,                  // 9999 = pill
+      "input_px": 6
+    },
+    "button": {
+      "depth": "shadow-lift",            // shadow-lift | gradient | flat — flat triggers N14
+      "hover": "shadow+translate",       // how hover is signaled — must not be color-only
+      "active": "press-down",            // translateY(1px) + reduced shadow
+      "focus": "custom-ring"             // custom-ring | none — none triggers N18
+    },
+    "links": {
+      "treatment": "animated-underline", // animated-underline | static-underline | color-only
+      "underline_offset_px": 3,
+      "underline_thickness_px": 1
+    },
+    "icons": {
+      "container": "tinted-square",      // tinted-circle | tinted-square | none
+      "size_context": {                  // different sizes by context — uniform triggers N16
+        "feature_px": 24,
+        "nav_px": 18,
+        "inline_px": 16
+      }
+    },
+    "micro_details": {
+      "custom_selection": true,          // ::selection — false triggers N18
+      "custom_scrollbar": true,          // thin, theme-matched scrollbar
+      "custom_focus_rings": true         // branded focus rings on all interactive elements
+    },
+    "dividers": "spacing-only"           // spacing-only | gradient-fade | hairline | color-shift
+  },
   "motion": {
     "vocabulary": ["scroll-reveal", "micro-hover"],
     "default_ms": 200, "easing": "cubic-bezier(.2,.0,.0,1)",
@@ -91,12 +124,35 @@ from nowhere. Rationale → spec → page.
 | `layout_grammar` (non-boilerplate) | the hero→3-cards→testimonial→CTA skeleton |
 | `effects_plan` (justified + budgeted) — doctrine: [effects-appropriateness](effects-appropriateness.md) (#885) | gratuitous 3D/parallax; perf blowups |
 | `acceptance.perf_budget` | "earned its milliseconds" becomes objective (via Playwright, #875) |
+| `craft.radius_system` (`distinct_count >= 3`) | one-radius-fits-all AI tell (N13) |
+| `craft.button.depth` (not `flat`) | flat Tailwind button with no depth (N14) |
+| `craft.micro_details.custom_selection` + `custom_focus_rings` | missing branded micro-details (N18) |
+| `craft.icons.size_context` (distinct sizes by context) | default uniform icon treatment (N16) |
+| `craft.links.treatment` (not `color-only`) | bare color-only or browser-default link treatment (N17) |
+
+## Benchmark rubric dimensions
+
+The ABC benchmark (#878) evaluates generated pages on a 1–5 rubric. The `craft` field extension (#1047) adds
+two new dimensions to the rubric, splitting the original `color` dimension.
+
+| Dimension | What it measures | 1 (worst) | 5 (best) |
+|---|---|---|---|
+| `typography` | Type hierarchy, scale, non-default faces | System font, single weight, no scale | Non-default face, confident scale ratio, tight tracking |
+| `color` | Palette restraint, accent discipline, contrast | Default Tailwind palette, multiple loud accents | Near-monochrome + one disciplined accent, ≥4.5 contrast |
+| `surface_depth` | Shadows, borders, radius system, layering | Flat, no depth cues, uniform radius | Soft multi-token shadows, 3+ distinct radii, clear z-layering |
+| `craft` | Micro-detail quality — buttons, links, icons, forms, micro-details | All framework defaults, no custom states | Custom depth on buttons, animated links, tinted icon containers, branded micro-details |
+| `layout` | Grid, asymmetry, negative space, section rhythm | Centered columns, uniform padding, boilerplate skeleton | Deliberate grid breaks, asymmetry, spacing-as-divider |
+| `effects` | Effect appropriateness and restraint | Gratuitous 3D/parallax on non-visual product | Effects justified by product nature, performance-budgeted |
+
+The `craft` and `surface_depth` dimensions are new in `corpus_version: 2026.3` (#1047). Past benchmark runs
+scored under a 4-dimension rubric (no `surface_depth`, no `craft`). Comparison across versions must note
+the rubric change.
 
 ## Lifecycle
 
 1. **architect** (#886) emits this spec from the rationale.
 2. **generate** produces HTML constrained by it.
-3. **linter** ([`design-system-lint.mjs`](design-system-lint.md), #884) checks deterministic fields (palette, spacing, radius, layout skeleton).
+3. **linter** ([`design-system-lint.mjs`](design-system-lint.md), #884) checks deterministic fields (palette, spacing, radius, layout skeleton, craft.radius_system, craft.button.depth, craft.micro_details).
 4. **critique loop** (#882) renders + checks `negatives`, `effects_plan` justification, and `acceptance` against the
    rendered result; iterates until pass.
 5. **close** writes the realized spec + outcome to [design-memory](design-memory.md) (#887).
