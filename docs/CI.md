@@ -42,10 +42,10 @@ Copy `templates/workflows/forgedock-review.yml` from your ForgeDock installation
 ```bash
 # From your repository root
 mkdir -p .github/workflows
-cp "$(npx forgedock which-dir)/templates/workflows/forgedock-review.yml" .github/workflows/forgedock-review.yml
+cp "$FORGE_HOME/templates/workflows/forgedock-review.yml" .github/workflows/forgedock-review.yml
 ```
 
-Or copy it manually — the file is in `~/.claude/commands/../templates/workflows/forgedock-review.yml` after running `npx forgedock install`.
+Or copy it manually — the file is in `$FORGE_HOME/templates/workflows/forgedock-review.yml` after running `npx forgedock install`.
 
 ### 3. Commit and push
 
