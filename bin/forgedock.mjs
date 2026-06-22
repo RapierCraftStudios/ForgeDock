@@ -322,6 +322,51 @@ function atomicWriteFile(filePath, content) {
 }
 
 /**
+ * Idempotently write a `.symlink-source` sentinel file to TARGET_DIR
+ * (~/.claude/commands/) so other installers can detect that ForgeDock
+ * owns this namespace.
+ *
+ * The sentinel is a plain UTF-8 text file (not a symlink) containing
+ * the source path, a reinstall hint, and the install timestamp.  It is
+ * updated on every install so the timestamp stays fresh.  Write failures
+ * are non-fatal — the function returns 'failed' and the caller logs a
+ * warning; install continues regardless.
+ *
+ * Calling convention matches the other state-write helpers:
+ *   'written'  — sentinel was newly created or refreshed
+ *   'failed'   — an error occurred (non-fatal; install continues)
+ *
+ * <!-- Added: forge#1038 -->
+ *
+ * @returns {'written' | 'failed'}
+ */
+function writeSymlinkSentinel() {
+  const sentinelPath = join(TARGET_DIR, ".symlink-source");
+  const timestamp = new Date().toISOString().replace("T", " ").slice(0, 19);
+  const content =
+    `# ForgeDock command symlinks — DO NOT REPOINT\n` +
+    `# Source: ${COMMANDS_DIR}\n` +
+    `#\n` +
+    `# These symlinks are managed by ForgeDock (https://forgedock.com).\n` +
+    `# ForgeDock owns the global ~/.claude/commands/ namespace.\n` +
+    `# Project-specific commands should install to the project's\n` +
+    `# .claude/commands/ directory instead (Claude Code merges both;\n` +
+    `# project-local commands win on name collisions).\n` +
+    `#\n` +
+    `# Running another installer here will silently repoint these\n` +
+    `# symlinks, breaking all ForgeDock commands globally.\n` +
+    `#\n` +
+    `# To reinstall ForgeDock: npx forgedock install\n` +
+    `# Last installed: ${timestamp}\n`;
+  try {
+    atomicWriteFile(sentinelPath, content);
+    return "written";
+  } catch {
+    return "failed";
+  }
+}
+
+/**
  * Install the ForgeDock SessionStart hook into ~/.claude/settings.json
  * idempotently. Does not modify any existing hooks unrelated to ForgeDock.
  *
@@ -833,6 +878,16 @@ async function linkCommands(step) {
         if (current === file) {
           skipped++;
         } else {
+          // Symlink points to a different source — warn if it appears to belong
+          // to another Forge/ForgeDock installation (i.e. not a broken link that
+          // already pointed here under a different absolute path).
+          // Only emit the warning once per install to avoid log spam.
+          // <!-- Added: forge#1038 -->
+          if (!current.startsWith(COMMANDS_DIR)) {
+            step.note(
+              yellow(`collision: ${rel} was → ${current} — repointing to ForgeDock`),
+            );
+          }
           try {
             await symlink(file, target + ".tmp");
             const { rename } = await import("fs/promises");
@@ -1034,6 +1089,20 @@ async function install() {
         step.note(
           `${green(String(installed))} installed, ${updated} updated, ${dim(String(skipped))} skipped  (${total} commands total)`,
         );
+      },
+    },
+    {
+      label: "Writing namespace sentinel",
+      async run(step) {
+        // Write .symlink-source to ~/.claude/commands/ so other installers
+        // can detect that ForgeDock owns this namespace. Non-fatal on failure.
+        // <!-- Added: forge#1038 -->
+        const result = writeSymlinkSentinel();
+        if (result === "failed") {
+          step.note("could not write .symlink-source — run npx forgedock install again to retry");
+        } else {
+          step.note(cyan(join(TARGET_DIR, ".symlink-source")));
+        }
       },
     },
     {
