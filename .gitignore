@@ -20,6 +20,10 @@ forge.yaml.bak.*
 .claude/
 CLAUDE.md
 
+# Spec Knowledge Graph (generated; gitignored by default — opt-in to commit,
+# mirroring per-repo adaptive scripts)
+.forgedock/graph/
+
 # Marketing (local only, not published to npm)
 marketing/
 
