@@ -1,0 +1,282 @@
+# ForgeDock Cross-Repo Trigger — Workflow Template
+#
+# Installation
+# ─────────────
+# Copy this file into your PARENT repo at:
+#   .github/workflows/cross-repo-trigger.yml
+#
+# When a PR merges in this repo, the workflow reads forge.yaml to find satellite
+# repos that have trigger_on_merge: true, checks whether touched files match each
+# satellite's trigger_paths globs, and creates a structured investigation issue in
+# every matching satellite repo.
+#
+# Token requirements
+# ──────────────────
+# GITHUB_TOKEN (provided automatically by GitHub Actions) only has write access
+# to THIS repo. To create issues in satellite repos you need a Personal Access
+# Token (PAT) with "issues: write" scope on each satellite repo:
+#
+#   Repo Settings → Secrets and variables → Actions → New repository secret
+#   Name:  FORGE_PAT
+#   Value: ghp_... (your PAT)
+#
+# The workflow uses FORGE_PAT when set; it falls back to GITHUB_TOKEN otherwise.
+# For same-org repos you may not need a PAT if GITHUB_TOKEN already has cross-repo
+# write access (org-level permission inheritance). Cross-org or private satellite
+# repos always require a PAT.
+#
+# forge.yaml configuration
+# ─────────────────────────
+# Each satellite that should receive cross-repo triggers must set trigger_on_merge:
+#
+#   repos:
+#     satellites:
+#       - prefix: "sdk"
+#         repo: "acme-org/acme-python-sdk"
+#         staging_branch: "main"
+#         local_path: "/home/youruser/projects/acme-python-sdk"
+#         trigger_on_merge: true
+#         trigger_paths:
+#           - "src/api/**"
+#           - "types/**"
+#         auto_run: false    # reserved — see ForgeDock docs for auto_run setup
+#
+# Fields:
+#   trigger_on_merge  — boolean; set true to enable triggering for this satellite
+#   trigger_paths     — list of glob strings (GitHub Actions glob syntax); trigger
+#                       fires only when at least one changed file matches; omit to
+#                       trigger on every merge
+#   auto_run          — boolean; reserved for future auto_run handler; currently no-op
+#
+# Limits and guards
+# ─────────────────
+# - Max 10 satellite issues created per merge event (rate limit guard)
+# - Circular dependency guard: skips satellites whose repo matches this repo
+# - Satellites with trigger_on_merge: false (or absent) are skipped
+# - If forge.yaml is absent, the workflow exits cleanly with an informational log
+
+name: ForgeDock Cross-Repo Trigger
+
+on:
+  pull_request:
+    types: [closed]
+
+jobs:
+  trigger:
+    name: Fire cross-repo satellite triggers
+    runs-on: ubuntu-latest
+
+    # Only run when the PR was actually merged (not just closed)
+    if: github.event.pull_request.merged == true
+
+    permissions:
+      contents: read    # Required: read forge.yaml from checked-out repo
+      issues: write     # Required: fallback if this repo is a self-referencing satellite
+
+    env:
+      # Use FORGE_PAT when set (cross-repo access); fall back to GITHUB_TOKEN.
+      # Assign via env so it is available to all steps without repeating the expression.
+      FORGE_TOKEN: ${{ secrets.FORGE_PAT || github.token }}
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Check forge.yaml exists
+        id: forge_check
+        run: |
+          if [ -f "forge.yaml" ]; then
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+            echo "forge.yaml found"
+          else
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+            echo "forge.yaml not found — no satellite configuration to process. Exiting cleanly."
+          fi
+
+      - name: Parse forge.yaml and get changed files
+        id: forge_parse
+        if: steps.forge_check.outputs.exists == 'true'
+        env:
+          GH_TOKEN: ${{ env.FORGE_TOKEN }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          UPSTREAM_REPO: ${{ github.repository }}
+        run: |
+          # Get changed files from the merged PR
+          CHANGED_FILES_JSON=$(gh pr view "$PR_NUMBER" -R "$UPSTREAM_REPO" --json files --jq '[.files[].path]')
+          echo "Changed files: $CHANGED_FILES_JSON"
+          echo "changed_files_json=$CHANGED_FILES_JSON" >> "$GITHUB_OUTPUT"
+
+          # Parse satellite list from forge.yaml using Python3 (always available on ubuntu-latest)
+          SATELLITES_JSON=$(python3 -c "
+          import yaml, json, sys
+
+          try:
+              with open('forge.yaml', 'r') as f:
+                  config = yaml.safe_load(f)
+          except Exception as e:
+              print(json.dumps([]), end='')
+              sys.exit(0)
+
+          repos = config.get('repos', {}) or {}
+          satellites = repos.get('satellites', []) or []
+
+          result = []
+          for sat in satellites:
+              if not isinstance(sat, dict):
+                  continue
+              repo = sat.get('repo', '')
+              trigger_on_merge = sat.get('trigger_on_merge', False)
+              trigger_paths = sat.get('trigger_paths', []) or []
+              auto_run = sat.get('auto_run', False)
+              if not repo or not trigger_on_merge:
+                  continue
+              result.append({
+                  'repo': repo,
+                  'trigger_paths': trigger_paths,
+                  'auto_run': bool(auto_run),
+              })
+
+          print(json.dumps(result), end='')
+          ")
+          echo "Satellites with trigger_on_merge=true: $SATELLITES_JSON"
+          echo "satellites_json=$SATELLITES_JSON" >> "$GITHUB_OUTPUT"
+
+      - name: Fire satellite triggers
+        if: steps.forge_check.outputs.exists == 'true'
+        env:
+          GH_TOKEN: ${{ env.FORGE_TOKEN }}
+          UPSTREAM_REPO: ${{ github.repository }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          MERGED_BRANCH: ${{ github.event.pull_request.head.ref }}
+          PR_URL: ${{ github.event.pull_request.html_url }}
+          PR_TITLE: ${{ github.event.pull_request.title }}
+          SATELLITES_JSON: ${{ steps.forge_parse.outputs.satellites_json }}
+          CHANGED_FILES_JSON: ${{ steps.forge_parse.outputs.changed_files_json }}
+        run: |
+          python3 -c "
+          import json, os, subprocess, sys, fnmatch
+
+          upstream_repo      = os.environ['UPSTREAM_REPO']
+          pr_number          = os.environ['PR_NUMBER']
+          merged_branch      = os.environ['MERGED_BRANCH']
+          pr_url             = os.environ['PR_URL']
+          pr_title           = os.environ['PR_TITLE']
+          satellites_json    = os.environ.get('SATELLITES_JSON', '[]')
+          changed_files_json = os.environ.get('CHANGED_FILES_JSON', '[]')
+
+          try:
+              satellites = json.loads(satellites_json) if satellites_json else []
+          except json.JSONDecodeError:
+              satellites = []
+
+          try:
+              changed_files = json.loads(changed_files_json) if changed_files_json else []
+          except json.JSONDecodeError:
+              changed_files = []
+
+          if not satellites:
+              print('No satellites with trigger_on_merge: true found in forge.yaml')
+              sys.exit(0)
+
+          if not changed_files:
+              print('No changed files found in merged PR — nothing to match against trigger_paths')
+              sys.exit(0)
+
+          def matches_glob(path, pattern):
+              if fnmatch.fnmatch(path, pattern):
+                  return True
+              if '**' not in pattern:
+                  return False
+              parts = pattern.split('**')
+              prefix = parts[0].rstrip('/')
+              suffix = parts[-1].lstrip('/')
+              if prefix and not path.startswith(prefix):
+                  return False
+              if suffix and not (fnmatch.fnmatch(path, suffix) or '/' + suffix in path):
+                  return False
+              return True
+
+          issues_created = 0
+          MAX_ISSUES = 10
+          NL = chr(10)
+
+          for sat in satellites:
+              if issues_created >= MAX_ISSUES:
+                  print(f'Rate limit reached: {MAX_ISSUES} satellite issues created. Stopping.')
+                  break
+
+              sat_repo      = sat.get('repo', '')
+              trigger_paths = sat.get('trigger_paths', [])
+              auto_run      = sat.get('auto_run', False)
+
+              if not sat_repo:
+                  continue
+
+              # Circular dependency guard
+              if sat_repo == upstream_repo:
+                  print(f'Skipping {sat_repo}: circular dependency guard (satellite == upstream repo)')
+                  continue
+
+              # Glob matching against trigger_paths
+              if trigger_paths:
+                  matched_files = [
+                      f for f in changed_files
+                      if any(matches_glob(f, p) for p in trigger_paths)
+                  ]
+                  if not matched_files:
+                      print(f'Skipping {sat_repo}: no changed files match trigger_paths {trigger_paths}')
+                      continue
+              else:
+                  matched_files = list(changed_files)
+                  print(f'{sat_repo}: no trigger_paths set — triggering on all {len(matched_files)} changed file(s)')
+
+              print(f'Creating issue in {sat_repo}: {len(matched_files)} matched file(s)')
+
+              matched_list = NL.join(f'- {f}' for f in matched_files)
+              auto_run_note = (
+                  NL + '> **auto_run** is set for this satellite. '
+                  'Run /work-on on this issue number to begin automated investigation.' + NL
+                  if auto_run else ''
+              )
+
+              issue_body = (
+                  '<!-- FORGE:CROSS_REPO_TRIGGER -->' + NL +
+                  '## Cross-Repo Trigger' + NL + NL +
+                  f'A PR merged in **{upstream_repo}** touches paths relevant to this satellite repo.' + NL + NL +
+                  '### Upstream Event' + NL +
+                  f'- Upstream repo: {upstream_repo}' + NL +
+                  f'- Merged PR: #{pr_number} ({pr_url})' + NL +
+                  f'- PR title: {pr_title}' + NL +
+                  f'- Merged branch: {merged_branch}' + NL + NL +
+                  '### Matched Files' + NL +
+                  f'These changed files matched this satellites trigger_paths:' + NL + NL +
+                  matched_list + NL + NL +
+                  '### Recommended Action' + NL +
+                  'Investigate whether these changes affect this satellite repos contracts, types, or integrations.' + NL + NL +
+                  f'Review the diff at {pr_url} or run /work-on on this issue to begin automated investigation.' + NL +
+                  auto_run_note + NL +
+                  '### Context' + NL +
+                  'Created automatically by the ForgeDock cross-repo trigger workflow.' + NL +
+                  'See https://github.com/RapierCraftStudios/ForgeDock for documentation.' + NL
+              )
+
+              issue_title = f'feat(cross-repo): upstream merge in {upstream_repo} (PR #{pr_number}) — investigate impact'
+
+              result = subprocess.run(
+                  ['gh', 'issue', 'create',
+                   '-R', sat_repo,
+                   '--title', issue_title,
+                   '--body', issue_body],
+                  capture_output=True, text=True
+              )
+
+              if result.returncode == 0:
+                  issue_url = result.stdout.strip()
+                  print(f'Created issue in {sat_repo}: {issue_url}')
+                  issues_created += 1
+              else:
+                  print(f'ERROR creating issue in {sat_repo}: {result.stderr.strip()}')
+                  print('Hint: Ensure FORGE_PAT has issues:write access to this satellite repo.')
+
+          print(f'Done: {issues_created} satellite issue(s) created.')
+          "
