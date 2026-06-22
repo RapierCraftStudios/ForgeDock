@@ -427,6 +427,41 @@ branches:
 #   #     typecheck: ""
 #   #     test: "cargo test"
 #   #     build: "cargo build"
+#
+#   # Integration test suites run by /test-gate against the provisioned cluster.
+#   # Each entry specifies a logical cluster (matched to test_services), the shell
+#   # command to execute, and the working directory (relative to project root).
+#   # Used by: test-gate (Phase 3 — Provision + Phase 4 — Fan out)
+#   #
+#   # integration_tests:
+#   #   - cluster: "api"
+#   #     command: "pytest tests/integration/ -q --tb=short"
+#   #     working_dir: "."
+#   #   - cluster: "worker"
+#   #     command: "pytest tests/worker/ -q --tb=short"
+#   #     working_dir: "."
+#
+#   # Maps logical cluster names (from integration_tests[].cluster) to running
+#   # container names. /test-gate uses these to verify the cluster is live before
+#   # executing the test command. Omit entries for clusters that do not use Docker.
+#   # Used by: test-gate (Phase 3 — Provision)
+#   #
+#   # test_services:
+#   #   api: "acme-api-blue"
+#   #   worker: "acme-worker-blue"
+#
+#   # Controls /test-gate posture at the staging-to-main deploy boundary.
+#   # posture:
+#   #   blocking  — a BLOCK verdict prevents the merge (override_phrase bypasses).
+#   #   advisory  — a BLOCK verdict is surfaced in the summary but does not block.
+#   # override_phrase — exact string an operator must include in a PR comment to
+#   #   bypass a blocking BLOCK verdict (mirrors the Phase 0A open-finding gate).
+#   # Defaults: posture: "blocking", override_phrase as shown below.
+#   # Used by: test-gate (Phase 7 — Verdict), review-pr-staging (Phase 6.5)
+#   #
+#   # test_gate:
+#   #   posture: "blocking"
+#   #   override_phrase: "OVERRIDE: shipping with test failures —"
 
 # =============================================================================
 # DEPLOY (OPTIONAL)
