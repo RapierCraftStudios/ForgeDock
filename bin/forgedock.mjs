@@ -999,6 +999,29 @@ async function install() {
     {
       label: "Checking environment",
       async run(step) {
+        // Worktree guard — refuse to install when FORGE_HOME is a git worktree.
+        // In a worktree, FORGE_HOME/.git is a regular file (not a directory).
+        // Installing from a worktree would bake an ephemeral path into the
+        // symlinks and SessionStart hook; the path breaks when the worktree
+        // is cleaned up, taking all Forge commands offline globally.
+        // <!-- Added: forge#1037 -->
+        const gitPath = join(FORGE_HOME, ".git");
+        let gitStat = null;
+        try {
+          gitStat = await lstat(gitPath);
+        } catch (err) {
+          if (err.code !== "ENOENT") throw err;
+          // .git absent — npm install or detached checkout; not a worktree.
+        }
+        if (gitStat !== null && gitStat.isFile()) {
+          throw new Error(
+            `install() is running from a git worktree (${FORGE_HOME}).\n` +
+            `  Installing from a worktree would repoint ~/.claude/commands/ symlinks\n` +
+            `  to an ephemeral path that breaks when the worktree is deleted.\n` +
+            `  Run \`npx forgedock install\` from the main repository clone instead.`,
+          );
+        }
+
         await mkdir(TARGET_DIR, { recursive: true });
         step.note(cyan(TARGET_DIR));
       },
