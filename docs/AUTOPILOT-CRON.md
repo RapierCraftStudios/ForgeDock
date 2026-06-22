@@ -64,6 +64,20 @@ The workflow requires these GitHub token permissions (already set in the templat
 
 `GITHUB_TOKEN` is provided automatically — no extra setup needed.
 
+### `--dangerously-skip-permissions` flag
+
+The workflow invokes Claude Code with `--dangerously-skip-permissions`:
+
+```yaml
+claude --dangerously-skip-permissions -p "/autopilot ..."
+```
+
+This flag bypasses Claude Code's interactive permission prompts for filesystem reads/writes, shell commands, and network requests. It is required in CI because GitHub Actions runners have no terminal — interactive prompts would hang the job indefinitely.
+
+**What this means for your security posture**: Claude Code runs with whatever permissions the GitHub Actions runner process has. In practice, that is the checkout of your repository on the runner's ephemeral filesystem. The flag removes Claude Code's own prompt-based gate; the sandbox boundary is GitHub Actions' runner isolation (ephemeral VM, scoped `GITHUB_TOKEN`, no persistent state between runs).
+
+This is standard practice for any non-interactive Claude Code invocation in CI. If you prefer a prompt-based approval model, run `/autopilot` locally instead of via scheduled workflow.
+
 ---
 
 ## Adjusting the Schedule
