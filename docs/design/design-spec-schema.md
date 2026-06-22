@@ -6,7 +6,8 @@
 > [design-memory](design-memory.md) (#887) at close. Draws its vocabulary from the
 > [reference corpus](reference-corpus.md) (#880).
 > Extended: `craft` object + `surface_depth` rubric dimension (#1047); `motion.tier`, `motion.hero_technique`,
-> `motion.video_placeholder` fields + `motion` rubric dimension (#1043).
+> `motion.video_placeholder` fields + `motion` rubric dimension (#1043); `product_mock` field + `product_mock`
+> rubric dimension (#1045).
 >
 > Registered as a FORGE annotation type in [`../FORGE-PROTOCOL.md`](../FORGE-PROTOCOL.md).
 
@@ -91,6 +92,14 @@ from nowhere. Rationale → spec → page.
     "default_ms": 200, "easing": "cubic-bezier(.2,.0,.0,1)",
     "reduced_motion": "required"      // MUST honor prefers-reduced-motion — @media (prefers-reduced-motion: reduce) on all animated elements
   },
+  "product_mock": {                  // see reference-corpus.md#interactive-product-mock-vocabulary — #1045
+    "type": "deploy-infra",          // issue-tracker | payment-fintech | deploy-infra | api-developer | email-messaging | none
+    "interactions": [                // select exactly 2 from the per-type list in the corpus
+      "status-building-pulse",       // CSS animation — pulsing dot while deploy is running
+      "deploy-step-progress"         // CSS animation — progress bar filling
+    ],
+    "css_only": true                 // true = CSS-only interactions (preferred) | false = lightweight vanilla JS required (e.g. typing animation, counter)
+  },
   "layout_grammar": {
     // ordered sections with purpose + density — MUST NOT be the boilerplate skeleton
     // (hero → 3 cards → testimonial → CTA). Sections derive from the rationale's communication hierarchy.
@@ -137,6 +146,9 @@ from nowhere. Rationale → spec → page.
 | `motion.tier` + `motion.hero_technique` (committed) | static hero with no motion — the "poster" tell (N21); jQuery-era effects (N23) |
 | `motion.reduced_motion: "required"` | motion that ignores `prefers-reduced-motion` — accessibility violation |
 | `motion.video_placeholder: true` (when applicable) | video-shaped hero gap: empty space where a demo would go, or placeholder image with no scaffolding |
+| `product_mock.type` (committed, not `none`) | static product screenshot in a browser frame with no interactions — the "screenshot poster" tell (N24) |
+| `product_mock.interactions` (exactly 2 selected) | mock with too many interactions (demo feel) or zero interactions (static poster) |
+| `product_mock.css_only: false` acknowledged explicitly | lightweight JS used without acknowledgement; framework dependency creeping in |
 
 ## Benchmark rubric dimensions
 
@@ -152,10 +164,12 @@ two dimensions (`surface_depth`, `craft`); the `motion` field extension (#1043) 
 | `layout` | Grid, asymmetry, negative space, section rhythm | Centered columns, uniform padding, boilerplate skeleton | Deliberate grid breaks, asymmetry, spacing-as-divider |
 | `effects` | Effect appropriateness and restraint | Gratuitous 3D/parallax on non-visual product | Effects justified by product nature, performance-budgeted |
 | `motion` | Hero vitality — appropriate motion technique committed and executed per archetype | Static hero (poster) — N21 hit; or jQuery-era effects — N23 hit | Archetype-appropriate tier selected, `prefers-reduced-motion` honored, at most 2 simultaneous motion elements |
+| `product_mock` | Product mock interactivity — browser-chrome wrapper with live micro-interactions vs. static screenshot | No mock present, or mock with no interaction — N24 hit | Product type correctly identified, 2 interactions committed from vocabulary, CSS-only preferred, `prefers-reduced-motion` honored |
 
 The `craft` and `surface_depth` dimensions are new in `corpus_version: 2026.3` (#1047). The `motion` dimension
-is new in `corpus_version: 2026.4` (#1043). Past benchmark runs scored under a 4-dimension rubric (no
-`surface_depth`, `craft`, or `motion`). Comparison across versions must note the rubric version.
+is new in `corpus_version: 2026.4` (#1043). The `product_mock` dimension is new in `corpus_version: 2026.5`
+(#1045). Past benchmark runs scored under a 4-dimension rubric (no `surface_depth`, `craft`, `motion`, or
+`product_mock`). Comparison across versions must note the rubric version.
 
 ## Section-level surgical re-generation contract
 

@@ -3,7 +3,7 @@
 > **Status:** Committed foundation — design-architect phase spec for issue #886 (milestone #13).
 > The reasoning-before-generation phase. Produces the [DESIGN_SPEC](design-spec-schema.md) (#881);
 > queries [design-memory](design-memory.md) (#887); read by generate + the critique loop (#882).
-> Extended: motion tier selection added as diary step 5 (#1043).
+> Extended: motion tier selection added as diary step 5 (#1043); product mock decision added as diary step 6 (#1045).
 
 ## Why this exists
 
@@ -25,7 +25,7 @@ The architect phase's output is a `FORGE:DESIGN_RATIONALE` annotation — the di
 
 ## The diary — structured chain of thought
 
-The phase must reason through all eight, in order. This is what a designer's diary actually contains.
+The phase must reason through all nine, in order. This is what a designer's diary actually contains.
 
 1. **Intent & emotional register** — One core message. One feeling to evoke (trust / speed / power / craft / play).
    What should the visitor feel, and what should they do?
@@ -44,10 +44,22 @@ The phase must reason through all eight, in order. This is what a designer's dia
    - If a video placeholder is appropriate (Tier 3): set `motion.video_placeholder: true` — the generator scaffolds
      the HTML and CSS gradient poster.
    - State the `prefers-reduced-motion` fallback explicitly (e.g., "gradient-shift pauses; text remains visible").
-6. **The signature move** — The one memorable, non-obvious idea that makes it *this* page and not a template. The "hook."
-7. **What I'm trying this time** — A technique or learning being deliberately applied. Queries
+6. **Product mock decision** — Does this brief imply a product interface that can be shown live in the hero? <!-- Added: forge#1045 -->
+   Consult the [interactive product mock vocabulary](reference-corpus.md#interactive-product-mock-vocabulary) to
+   identify the matching product type.
+   - **Decision signals**: does the brief describe a dashboard, issue board, payment flow, deploy pipeline, code
+     API, or inbox? → commit a product mock. Does the product have no single canonical interface, is it image-driven
+     (e.g. physical device, marketplace), or is the archetype `minimal-luxury` and restraint is the move? → commit
+     `product_mock.type: "none"` with explicit reasoning.
+   - If committing a mock: select exactly 2 interactions from the per-type defaults table in the corpus. State
+     whether they are CSS-only or require lightweight JS. State the `prefers-reduced-motion` fallback.
+   - Feeds `product_mock.type`, `product_mock.interactions`, and `product_mock.css_only` in the
+     [DESIGN_SPEC](design-spec-schema.md).
+   - Restraint rule: 2 interactions only. The mock should feel alive, not be a demo. Never animate primary copy.
+7. **The signature move** — The one memorable, non-obvious idea that makes it *this* page and not a template. The "hook."
+8. **What I'm trying this time** — A technique or learning being deliberately applied. Queries
    [design-memory](design-memory.md) so it builds on, and diverges from, prior work.
-8. **Non-goals** — What this page deliberately will *not* do. Restraint stated as a decision, not an omission.
+9. **Non-goals** — What this page deliberately will *not* do. Restraint stated as a decision, not an omission.
 
 ## FORGE:DESIGN_RATIONALE — annotation format
 
@@ -65,6 +77,10 @@ Posted to the design issue at the architect stage (see the `/design` pipeline, #
 **Motion:** Tier {1|2|3} — technique: {hero_technique} — because {reasoning}
   - `prefers-reduced-motion` fallback: {what degrades gracefully}
   - Video placeholder: {yes — Tier 3 scaffold generated | no}
+**Product mock:** {type id | none} — because {reasoning}
+  - Interactions: {interaction-id-1}, {interaction-id-2} (or "n/a — type: none")
+  - CSS-only: {yes | no — lightweight JS for {reason}}
+  - `prefers-reduced-motion` fallback: {what degrades gracefully, or "n/a"}
 **Signature move:** {the one non-obvious idea}
 **Trying this time:** {technique/learning} (from memory: avoiding {prior move})
 **Non-goals:** {what this won't do}
@@ -81,9 +97,13 @@ This is the review checkpoint that makes the whole pipeline trustworthy.
 
 ## Acceptance
 
-- Every generated page is preceded by a DESIGN_RATIONALE covering all 8 elements, with ≥1 explicitly rejected
-  alternative, a committed motion tier + technique, and a named signature move.
+- Every generated page is preceded by a DESIGN_RATIONALE covering all 9 elements, with ≥1 explicitly rejected
+  alternative, a committed motion tier + technique, a product mock decision, and a named signature move.
 - The `**Motion:**` line must be present in every rationale — "no motion" is acceptable only for `bold-brutalist`
   and `minimal-luxury` archetypes, and must be stated with reasoning, not left absent.
+- The `**Product mock:**` line must be present in every rationale — `type: none` is acceptable when the product
+  has no single canonical interface or when archetype restraint is the deliberate choice, but must be stated with
+  reasoning, not left absent.
 - On the seed set, rationales for Voltage / Plume / Slipstream show genuinely different intent, hierarchy,
-  motion techniques, and signature moves — derived from the briefs alone (no design hints in the brief).
+  motion techniques, product mock decisions, and signature moves — derived from the briefs alone (no design hints
+  in the brief).
