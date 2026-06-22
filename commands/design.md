@@ -1,5 +1,5 @@
 ---
-description: Route a design GitHub issue through the UI Taste Harness — investigate → architect → implement → critique loop → close — accumulating FORGE:DESIGN_* annotations and driving the design:* label state machine to design:shipped.
+description: Route a design GitHub issue through the UI Taste Harness — investigate → architect → implement → critique loop → user-feedback loop → close — accumulating FORGE:DESIGN_* annotations and driving the design:* label state machine to design:shipped.
 argument-hint: <issue-number> | <brief-name>
 ---
 <!-- SPDX-FileCopyrightText: Copyright (c) RapierCraft Studios -->
@@ -31,16 +31,19 @@ it does not reimplement them. The only executable helper in the chain is the det
 
 <!-- This is the single source of truth for design:* transitions, mirroring /work-on's Universal Phase Dispatcher. -->
 
-| Stage | design:* label | Reads | Produces | Spec it sequences |
-|-------|----------------|-------|----------|-------------------|
-| 1. design-investigate | `design:investigating` | the brief | `FORGE:DESIGN_CONTEXT` | corpus #880 (grammar) + memory #887 (what to diverge from) |
-| 2. design-architect | `design:architecting` | `FORGE:DESIGN_CONTEXT` | `FORGE:DESIGN_RATIONALE` → `FORGE:DESIGN_CANDIDATES` → `FORGE:DESIGN_SPEC` | rationale #886, divergent generation #883, effects #885, schema #881 |
-| 3. design-implement | `design:generating` | `FORGE:DESIGN_SPEC` | the generated page (artifact) | — (generate from the committed spec) |
-| 4. design-critique | `design:critiquing` | the render + `FORGE:DESIGN_SPEC` | `FORGE:CRITIQUE` (per pass) | render→critique loop #882 (lint #884 floor + perf #875 + a11y) |
-| 5. design-close | `design:shipped` / `design:rejected` | the final critique | `FORGE:DESIGN_SHIPPED` | scorecard + write outcome to memory #887 |
+| Stage | design:* label | Terminal? | Reads | Produces | Spec it sequences |
+|-------|----------------|-----------|-------|----------|-------------------|
+| 1. design-investigate | `design:investigating` | No | the brief | `FORGE:DESIGN_CONTEXT` | corpus #880 (grammar) + memory #887 (what to diverge from) |
+| 2. design-architect | `design:architecting` | No | `FORGE:DESIGN_CONTEXT` | `FORGE:DESIGN_RATIONALE` → `FORGE:DESIGN_CANDIDATES` → `FORGE:DESIGN_SPEC` | rationale #886, divergent generation #883, effects #885, schema #881 |
+| 3. design-implement | `design:generating` | No | `FORGE:DESIGN_SPEC` | the generated page (artifact) | — (generate from the committed spec) |
+| 4. design-critique | `design:critiquing` | No | the render + `FORGE:DESIGN_SPEC` | `FORGE:CRITIQUE` (per pass) | render→critique loop #882 (lint #884 floor + perf #875 + a11y) |
+| 4.5. user-feedback | `design:awaiting-feedback` | No | `FORGE:CRITIQUE` + user input | `FORGE:USER_FEEDBACK` (per round) | this spec (#1044); bypassed in automated/benchmark runs |
+| 5. design-close | `design:shipped` / `design:rejected` | **Yes** | `FORGE:USER_FEEDBACK` (latest) or `FORGE:CRITIQUE` | `FORGE:DESIGN_SHIPPED` | scorecard + write outcome to memory #887 |
 
 **Continuation rule** (mirrors `/work-on`): after any stage completes, if the issue is not at a terminal label
 (`design:shipped` or `design:rejected`), proceed to the next stage immediately. No intermediate stage is terminal.
+`design:awaiting-feedback` is **non-terminal** — it resolves to Stage 5 when `FORGE:USER_FEEDBACK.satisfied == "yes"`
+or when no user is present (automated runs bypass Stage 4.5 entirely).
 
 ---
 
@@ -69,6 +72,129 @@ Run [`/design-render-critique-loop`](design-render-critique-loop.md) (#882): det
 render (desktop + mobile, #875/#878) → vision critique of the perceptual negatives → iterate. Each pass posts a
 `FORGE:CRITIQUE`. The loop continues until PASS or budget.
 
+## Stage 4.5 — user-feedback loop (`design:awaiting-feedback`) <!-- Added: forge#1044 -->
+
+**Entry condition**: Stage 4 (design-critique) has completed — `FORGE:CRITIQUE` posted with verdict `PASS` or
+`BUDGET-EXHAUSTED`. **Automated/benchmark bypass**: if no user is present (e.g., running as part of the ABC benchmark
+arm A), skip this stage entirely and proceed to Stage 5.
+
+**Purpose**: The automated critique loop (#882) closes the perceptual-quality loop. This stage closes the **brand
+fit** loop — the part only the user can judge. Brand assets are user-supplied, emotional register is subjective, and
+the best heroes are refined, not generated once. Stage 4.5 collects that input in a structured way and routes it to
+surgical section-level re-generation rather than full-page regeneration.
+
+### Step 1 — Set label
+
+```bash
+gh issue edit {NUMBER} {GH_FLAG} --add-label "design:awaiting-feedback" \
+  --remove-label "design:critiquing" 2>/dev/null || true
+```
+
+### Step 2 — Prompt the user with structured hero-specific questions
+
+After Stage 4 completes, post a comment on the design issue asking the user the following questions. Present them
+clearly — the user's answer drives the `FORGE:USER_FEEDBACK` structured fields.
+
+```
+## Hero feedback — your turn
+
+The automated critique is complete. Now it's yours to shape.
+
+Please answer any or all of the following:
+
+1. **Demo video or animation** — Do you have a product demo video or animation to feature in the hero?
+   (paste a URL, or say "none")
+
+2. **Primary emotion** — What's the primary feeling you want the hero to evoke?
+   Options: trust / speed / power / craft / play — or describe in your own words.
+
+3. **Brand assets** — Any assets to integrate?
+   - Logo SVG (paste URL or say "none")
+   - Brand hex colors (e.g. "#1a1a2e, #e94560" or "none")
+   - Product screenshots (paste URLs or say "none")
+
+4. **Anything that feels off?** — Any section, element, or overall impression that feels wrong or
+   off-brand? Describe it.
+
+If you're happy with the design as-is, reply: **"looks good, ship it"** (or any affirmative) — that
+sets `satisfied: yes` and moves to Stage 5 without re-generation.
+```
+
+### Step 3 — Parse the user's response into `FORGE:USER_FEEDBACK`
+
+Read the user's reply and produce a structured `FORGE:USER_FEEDBACK` annotation. Map natural-language input to
+the structured fields:
+
+| User says | Maps to |
+|---|---|
+| Pastes a video URL | `feedback_type: asset`, `asset_url: <url>`, `section_target: "hero"` |
+| "make it feel faster / more urgent" | `feedback_type: emotion`, `emotion_target: speed`, `modification: "increase motion intensity; tighten headline tracking"` |
+| "add our logo" + SVG URL | `feedback_type: asset`, `asset_url: <url>`, `section_target: "nav"`, `modification: "replace text logo with SVG; adjust sizing"` |
+| Describes a layout change | `feedback_type: direction`, `modification: <parsed description>` |
+| Freeform complaint | `feedback_type: freeform`, `freeform_notes: <verbatim>`, `modification: <best-effort parse>` |
+| "looks good" / "ship it" / affirmative | `satisfied: yes` → proceed to Stage 5 without re-generation |
+
+```bash
+gh issue comment {NUMBER} {GH_FLAG} --body "<!-- FORGE:USER_FEEDBACK -->
+## User Feedback — {product} · round {n}
+
+**Section target:** {section_target}
+**Feedback type:** {asset | emotion | direction | freeform}
+**Asset URL:** {URL or "none"}
+**Modification:** {structured description of what to change}
+**Emotion target:** {trust | speed | power | craft | play | unchanged}
+**Satisfied:** {yes | no}
+**Freeform notes:** {verbatim user input not captured above}
+<!-- FORGE:USER_FEEDBACK:COMPLETE -->"
+```
+
+### Step 4 — Route on `satisfied`
+
+**If `satisfied: yes`** (user approved, or no feedback given): proceed immediately to Stage 5 (design-close).
+No re-generation needed.
+
+**If `satisfied: no`** (feedback given): proceed to Step 5 (surgical re-generation), then loop back to Step 2
+for another feedback round.
+
+### Step 5 — Surgical re-generation (only when `satisfied: no`)
+
+Use the `section_target` from `FORGE:USER_FEEDBACK` and the section IDs in `FORGE:DESIGN_SPEC →
+layout_grammar.sections` to re-generate only the targeted section. See
+[`docs/design/design-spec-schema.md`](../docs/design/design-spec-schema.md) for the full surgical re-generation
+contract.
+
+**Inputs for the re-generation agent**:
+1. The full current HTML page
+2. `FORGE:DESIGN_SPEC` (the committed spec — defines what all non-targeted sections must look like)
+3. `FORGE:USER_FEEDBACK` (the modification + asset URL for the targeted section)
+
+**Re-generation rules**:
+- Modify **only** the targeted section's markup and styles
+- Do NOT change any other section's content, layout, or CSS
+- Do NOT re-roll the committed `meta.archetype` or the signature move from `FORGE:DESIGN_RATIONALE`
+- If the feedback requires an archetype change, note the constraint and propose the closest variant within the committed direction
+- After re-generation, run the deterministic linter on the modified section to catch any regressions (#884)
+
+**Asset integration**:
+
+| Asset | Integration procedure |
+|---|---|
+| Video URL (mp4/webm) | Add `<video autoplay loop muted playsinline>` scaffold in the hero visual area; adjust hero layout CSS to accommodate; keep LCP budget ≤ 2000ms |
+| Video embed URL (YouTube/Vimeo) | `<iframe>` with `loading="lazy"` and aspect-ratio container (`padding-top: 56.25%`); no autoplay |
+| Logo SVG | Fetch the SVG; inline or `<img>` it at the nav/hero logo node; remove the text logo; set `width`/`height` to maintain proportional sizing; verify contrast against background (WCAG AA ≥ 4.5:1) |
+| Brand hex colors | Update the relevant CSS custom properties (`--color-accent`, `--color-bg`, etc.); run contrast check on all text/background pairs; record the update in `effects_plan.per_section` if it affects a hero effect |
+| Product screenshot/image | Replace the placeholder with `<img loading="lazy" decoding="async">` or a `background-image`; maintain existing aspect-ratio and sizing tokens from the spec |
+
+**After re-generation**: loop back to Step 2 — prompt the user again for the next round.
+
+### Budget
+
+Maximum **3 user-feedback rounds** per design issue (configurable). If the budget is exhausted with `satisfied: no`,
+post a summary of the rounds and proceed to Stage 5 with the best version. The design was not fully approved by the
+user — note this in the `FORGE:DESIGN_SHIPPED` annotation.
+
+---
+
 ## Stage 5 — design-close (`design:shipped` | `design:rejected`)
 
 Apply the **definition of done**: critique-rubric threshold met **and** perf budget (#875) **and** a11y check **and**
@@ -82,11 +208,16 @@ exhausted with residual findings, set `design:rejected` with the reasons on the 
 ## Label state machine
 
 ```
-design:investigating → design:architecting → design:generating → design:critiquing → design:shipped
-                                                                          └────────────→ design:rejected
+design:investigating → design:architecting → design:generating → design:critiquing → design:awaiting-feedback → design:shipped
+                                                                                              │                       ↑
+                                                                                              └──── (loop ≤ 3) ───────┘
+                                                                                  (automated bypass: skip awaiting-feedback)
+                                                                          └──────────────────────────────────────────→ design:rejected
 ```
 
-Terminal labels: `design:shipped`, `design:rejected`. These mirror `workflow:merged` / `workflow:invalid` on the code track.
+Terminal labels: `design:shipped`, `design:rejected`. These mirror `workflow:merged` / `workflow:invalid` on the code
+track. `design:awaiting-feedback` is **non-terminal** — it resolves to `design:shipped` (via Stage 5) when the user
+approves or the feedback budget is exhausted.
 
 ## Definition of done
 
@@ -97,9 +228,12 @@ outcome, pass or fail, is auditable on the GitHub issue.
 ## Why it matters
 
 1. **Traceability** — every design's thinking (`FORGE:DESIGN_RATIONALE`), the candidate set and the choice
-   (`FORGE:DESIGN_CANDIDATES`), each critique iteration (`FORGE:CRITIQUE`), and the final outcome
-   (`FORGE:DESIGN_SHIPPED`) live on the issue. You can read *why* a page looks the way it does — the designer's diary,
-   made auditable, reviewable by a non-designer.
+   (`FORGE:DESIGN_CANDIDATES`), each critique iteration (`FORGE:CRITIQUE`), each user-feedback round
+   (`FORGE:USER_FEEDBACK`), and the final outcome (`FORGE:DESIGN_SHIPPED`) live on the issue. You can read *why* a
+   page looks the way it does — the designer's diary, made auditable, reviewable by a non-designer.
 2. **It is arm A.** Driving the seed briefs (Cadence / Tender / Slipstream / Voltage / Plume) through `/design`
    produces the arm-A outputs the benchmark (#878) scores against the real references — so building this makes the ABC
    benchmark runnable end to end.
+3. **Brand fit.** The automated critique loop (#882) closes the perceptual-quality loop. Stage 4.5 closes the brand-fit
+   loop — the part only the user can judge. Brand assets are user-supplied, emotional register is subjective, and the
+   best heroes are refined through iteration. The feedback annotations make that iteration traceable and repeatable.
