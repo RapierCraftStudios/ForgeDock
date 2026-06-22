@@ -1,0 +1,148 @@
+---
+description: ForgeDock pipeline adapter for Cursor Agent mode
+alwaysApply: false
+---
+
+# ForgeDock Pipeline — Cursor Adapter
+
+This file is part of the [ForgeDock](https://github.com/RapierCraftStudios/ForgeDock) autonomous AI development pipeline. It adapts the ForgeDock pipeline for execution within Cursor's Agent mode.
+
+## What ForgeDock Is
+
+ForgeDock is a structured development pipeline that uses GitHub as a knowledge graph. Each pipeline phase (investigate → build → review → merge) writes machine-readable annotations (FORGE: HTML comments) to GitHub issue and PR comments. Downstream phases read those annotations to reconstruct context — without relying on conversation history.
+
+**Key principle**: GitHub issues/PRs are the persistent context layer. All state lives there, not in this conversation.
+
+## Prerequisites
+
+Before running any pipeline phase, verify these tools are available in the terminal:
+
+```bash
+gh auth status          # GitHub CLI — authenticated
+git --version           # Git — available
+```
+
+ForgeDock command specs live in the repo at `commands/` (if this repo uses ForgeDock) or are available globally after `npx forgedock` install.
+
+## Running the Pipeline
+
+### Start a Pipeline Run
+
+To work on a GitHub issue, invoke the `work-on` command spec directly:
+
+```bash
+# Read the full work-on spec first
+cat commands/work-on.md
+
+# Then execute the pipeline for issue #NUMBER following the spec exactly
+# Phase sequence: Phase 0 (load) → Phase 1 (investigate) → Phase 3 (build) → Phase 4 (PR) → Phase 5 (review) → Phase 6 (close)
+```
+
+**Critical**: After reading `commands/work-on.md`, follow the Universal Phase Dispatcher section exactly. Execute all phases in sequence — do not stop between phases unless a terminal label is set (`workflow:merged`, `workflow:invalid`, `needs-human`).
+
+### Load Issue Context
+
+```bash
+# Load issue state (always do this first — GitHub is the source of truth)
+gh issue view NUMBER -R OWNER/REPO --json number,title,body,labels,state,comments,milestone
+
+# Read existing pipeline annotations
+gh api repos/OWNER/REPO/issues/NUMBER/comments \
+  --jq '.[] | {id: .id, author: .user.login, body: .body}'
+```
+
+### Check Terminal State
+
+After every phase, check whether a terminal label is set before continuing:
+
+```bash
+gh issue view NUMBER -R OWNER/REPO --json labels --jq '[.labels[].name]'
+```
+
+**Terminal labels** (stop if any are present):
+- `workflow:merged`
+- `workflow:invalid`
+- `needs-human`
+- `workflow:decomposed`
+
+### Write FORGE Annotations
+
+Each pipeline phase writes a structured annotation to GitHub. Use exact format from `docs/FORGE-PROTOCOL.md`:
+
+```bash
+# Post investigation report (Phase 1C)
+gh issue comment NUMBER -R OWNER/REPO --body "<!-- FORGE:INVESTIGATOR -->
+## Investigation Report
+...
+<!-- INVESTIGATION:COMPLETE -->"
+
+# Post builder report (Phase 3M)
+gh issue comment NUMBER -R OWNER/REPO --body "<!-- FORGE:BUILDER -->
+## Implementation Complete
+...
+<!-- FORGE:BUILDER:COMPLETE -->"
+```
+
+### Git Workflow
+
+```bash
+# Create a worktree for the branch (Phase 3E)
+git fetch origin
+git worktree add .claude/worktrees/BRANCH_NAME -b BRANCH_NAME origin/STAGING_OR_MILESTONE_BRANCH
+
+# Commit changes (Phase 3K)
+cd .claude/worktrees/BRANCH_NAME
+git add -u
+git commit -m "feat(scope): description (#NUMBER)"
+
+# Push and create PR (Phase 4B-4D)
+git push -u origin BRANCH_NAME
+gh pr create -R OWNER/REPO --base PR_BASE --head BRANCH_NAME \
+  --title "Feat: description" --body "..."
+```
+
+### Labels
+
+ForgeDock uses `workflow:*` labels to track pipeline state:
+
+```bash
+# Transition labels as you progress through phases
+gh issue edit NUMBER -R OWNER/REPO --add-label "workflow:investigating"
+gh issue edit NUMBER -R OWNER/REPO --add-label "workflow:ready-to-build" --remove-label "workflow:investigating"
+gh issue edit NUMBER -R OWNER/REPO --add-label "workflow:building" --remove-label "workflow:ready-to-build"
+gh issue edit NUMBER -R OWNER/REPO --add-label "workflow:in-review" --remove-label "workflow:building"
+gh issue edit NUMBER -R OWNER/REPO --add-label "workflow:merged" --remove-label "workflow:in-review"
+```
+
+## Limitations vs. Claude Code
+
+| Capability | Claude Code | Cursor (this adapter) |
+|------------|-------------|----------------------|
+| Skill loading | Dynamic (`~/.claude/commands/`) | Static (this rules file) |
+| Multi-phase pipeline | Automatic (single session) | Manual (re-invoke agent per phase) |
+| Sub-skill invocation | `Skill("review-pr")` | Read `commands/review-pr.md` directly |
+| Session continuity | Native compaction resilience | Re-read GitHub state each invocation |
+
+**Multi-phase pipeline**: Cursor Agent mode does not persist between invocations. After each phase completes, you must manually re-invoke the agent for the next phase. The pipeline's compaction resilience (reading GitHub state at the start of each phase) handles this correctly — each new agent invocation re-reads the issue and picks up from the current label state.
+
+**Sub-skill invocation**: When the pipeline spec calls `Skill("review-pr")` or similar, read the referenced command spec file directly:
+
+```bash
+cat commands/review-pr.md  # Then follow the spec
+```
+
+## Configuration
+
+Your project's ForgeDock configuration is in `forge.yaml`. The pipeline reads `project.github.repo`, `project.github.owner`, and `branches.staging` from this file.
+
+```bash
+cat forge.yaml  # Review project configuration
+```
+
+## Reference
+
+- `commands/work-on.md` — Full pipeline spec (investigate → build → review → merge)
+- `commands/review-pr.md` — PR review spec
+- `commands/quality-gate.md` — Pre-commit quality checks
+- `docs/FORGE-PROTOCOL.md` — FORGE annotation protocol reference
+- `docs/CURSOR.md` — Cursor-specific installation and usage guide

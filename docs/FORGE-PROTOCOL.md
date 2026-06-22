@@ -718,6 +718,29 @@ To make your AI coding tool FORGE-compatible:
 
 5. **Use the `gh` CLI** as the primary query interface. All FORGE implementations can assume `gh` is available.
 
+### Tool-Specific Adapters
+
+ForgeDock ships adapters for each supported agent runtime. These adapters translate the shared command specs in `commands/` into the runtime's native execution model.
+
+| Runtime | Adapter | Install model | Notes |
+|---------|---------|---------------|-------|
+| Claude Code | Built-in (slash commands) | `~/.claude/commands/` symlinks | Full dynamic skill loading |
+| Codex CLI | `install-codex.sh` | `~/.codex/skills/` generated wrappers | Dynamic skill invocation |
+| Cursor | `templates/cursor/forge.mdc` | Repo-local `.cursor/rules/` file | Static rules injection |
+
+#### Cursor
+
+Cursor's Agent mode supports static Markdown rules files in `.cursor/rules/`. The ForgeDock Cursor adapter (`templates/cursor/forge.mdc`) instructs Cursor Agent to:
+
+- Read command specs from `commands/` at runtime
+- Execute pipeline phases using `gh` CLI and shell commands
+- Write FORGE annotations to GitHub after each phase
+- Follow the label state machine to determine pipeline state
+
+**Installation**: Run `npx forgedock` in a project that has a `.cursor/` directory — the installer auto-writes the template to `.cursor/rules/forge.mdc`. See `docs/CURSOR.md` for manual install instructions.
+
+**Key limitation**: Cursor uses static rules injection, not dynamic skill loading. The multi-phase pipeline requires manual phase advancement — users must re-invoke Cursor Agent between phases. Compaction resilience (re-reading GitHub state at phase start) handles session boundaries transparently.
+
 ---
 
 ## Versioning
