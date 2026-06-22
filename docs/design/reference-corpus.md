@@ -140,6 +140,24 @@ may make restraint itself the move. The harness must infer this **from the brief
 
 ---
 
+## Generation Model
+
+**Validated generation model**: `claude-opus-4-6`
+
+Benchmark #878 ran the full ABC benchmark with both Sonnet and Opus as the generation model. Results were conclusive:
+
+| Metric | Sonnet (`claude-sonnet-4-6`) | Opus (`claude-opus-4-6`) |
+|--------|------------------------------|--------------------------|
+| A vs B pairwise win-rate | 54.2% | **90.0%** |
+| A rubric mean | 3.40/5 | **4.11/5** |
+| A slop count (avg) | 1.8 | **1.2** |
+
+The gap is a tier difference, not marginal. Opus is the validated generation model for the harness going forward. The Opus run (`docs/design/fixtures/runs/full-abc-opus/`) is the canonical benchmark baseline. The Sonnet run (`docs/design/fixtures/runs/full-abc/`) is preserved as historical comparison data.
+
+Per the design-bench "same model" rule: both arm A and arm B use the same generation model. Changing the canonical model for a benchmark run requires running both arms with the new model.
+
+---
+
 ## Maintenance
 
 - Revise quarterly or when a clear taste shift is observed.

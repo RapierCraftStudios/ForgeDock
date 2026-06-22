@@ -19,6 +19,8 @@ knowledge graph" model, not a new paradigm.
 rig (`/design-bench`) feeds briefs in and screenshots the result, so this command is what makes the benchmark runnable
 end to end.
 
+**Agent model policy**: `model: "claude-opus-4-6"` — Opus is the validated generation model. Benchmark #878 (90% A-vs-B pairwise win-rate with Opus vs 54% with Sonnet) confirms a tier-level quality difference. Both arm A and arm B MUST use the same model to keep the benchmark valid (see [design-bench](design-bench.md)).
+
 **No application runtime.** ForgeDock is a set of command specs. `/design` *sequences* the already-built stage specs —
 it does not reimplement them. The only executable helper in the chain is the deterministic linter
 `scripts/design-system-lint.mjs` (#884).

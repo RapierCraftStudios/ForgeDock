@@ -1,5 +1,36 @@
 # Full A-vs-B-vs-C Benchmark Scorecard
 
+> **Note**: This document covers two benchmark runs. The **Opus run is the canonical baseline** going forward.
+> The Sonnet run below is preserved as historical comparison data.
+
+---
+
+## Opus Run — Canonical Baseline
+
+> **Benchmark date**: 2026-06-22
+> **Rig**: `/design-bench` (#878)
+> **Generation model (A & B)**: claude-opus-4-6
+> **Judge model**: claude-opus-4-6 (independent)
+> **Corpus version**: seed-v1
+> **Products**: 5 (Cadence, Tender, Slipstream, Voltage, Plume)
+> **Runs per product**: 3
+> **Raw data**: `docs/design/fixtures/runs/full-abc-opus/`
+
+| Metric | Value |
+|--------|-------|
+| **A vs B pairwise win-rate** | **90.0%** |
+| **A rubric mean** | **4.11/5** |
+| **B rubric mean** | 3.18/5 |
+| **A slop count (avg)** | **1.2** |
+| **B slop count (avg)** | 3.8 |
+| **Judge calibration flags** | 4 (3 from Linear viewport artifact; 1 genuine) |
+
+**Conclusion**: Opus produces tier-level better designs when guided by the harness. The 90% win-rate and 4.11 rubric mean against raw Opus output (arm B) confirm the harness itself is the improvement driver — Opus simply amplifies every layer of the harness more effectively than Sonnet. `claude-opus-4-6` is the validated generation model going forward.
+
+---
+
+## Sonnet Run — Historical Comparison
+
 > **Benchmark date**: 2026-06-22
 > **Rig**: `/design-bench` (#878)
 > **Generation model (A & B)**: claude-sonnet-4-6
@@ -160,6 +191,13 @@ Same sparse-page failure. Run 2 (bold-brutalist, black+yellow) was the exception
 
 ## Raw Data
 
+### Opus run (canonical baseline)
+- Runs: `docs/design/fixtures/runs/full-abc-opus/runs.json`
+- Scorecard: `docs/design/fixtures/runs/full-abc-opus/scorecard.json`
+- Arm A HTML: `docs/design/fixtures/runs/full-abc-opus/{product}/arm-a/run-{1,2,3}.html`
+- Arm B HTML: `docs/design/fixtures/runs/full-abc-opus/{product}/arm-b/run-{1,2,3}.html`
+
+### Sonnet run (historical comparison)
 - Runs: `docs/design/fixtures/runs/full-abc/runs.json`
 - Scorecard: `docs/design/fixtures/runs/full-abc/scorecard.json`
 - Arm A HTML: `docs/design/fixtures/runs/full-abc/{product}/arm-a/run-{1,2,3}.html`
