@@ -131,6 +131,24 @@ branches:
 #       # billing.enabled flag but scoped per-satellite.
 #       # billing_enabled: false
 #
+#       # Cross-repo trigger fields (declarative — runtime support via GitHub Actions):
+#
+#       # Fire a cross-repo trigger when a PR merges in THIS (parent) repo touching
+#       # paths listed in trigger_paths. Set false to disable triggering for this satellite.
+#       # trigger_on_merge: true
+#
+#       # Path globs that constrain when the trigger fires. Uses GitHub Actions glob syntax
+#       # (same as `on: push: paths:`). The trigger fires only when at least one changed
+#       # file matches a pattern in this list. Omit to trigger on every merge.
+#       # trigger_paths:
+#       #   - "src/api/**"
+#       #   - "types/**"
+#
+#       # Set true to automatically invoke /work-on on the satellite issue when the trigger
+#       # fires. Requires a running Claude Code session with ForgeDock installed in the
+#       # satellite repo. Advanced opt-in — leave false unless you have a persistent session.
+#       # auto_run: false
+#
 #     # Monorepo satellite: multiple packages in a single repo.
 #     # Use subpaths to name each package root relative to local_path.
 #     # /sync-ecosystem uses these to locate per-package version files and
