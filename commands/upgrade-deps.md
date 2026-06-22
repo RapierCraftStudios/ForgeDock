@@ -109,11 +109,12 @@ Run dependency detection for each configured ecosystem. Skip an ecosystem if its
 ### 1A: npm
 
 ```bash
-if echo "$ECOSYSTEMS_CONFIG" | grep -q "npm" && command -v npm >/dev/null 2>&1; then
-  echo "--- npm ecosystem ---"
-  cd "$REPO_PATH"
-  NPM_OUTDATED=$(npm outdated --json 2>/dev/null || echo "{}")
-  echo "$NPM_OUTDATED" | python3 -c "
+if echo "$ECOSYSTEMS_CONFIG" | grep -q "npm"; then
+  if command -v npm >/dev/null 2>&1; then
+    echo "--- npm ecosystem ---"
+    cd "$REPO_PATH"
+    NPM_OUTDATED=$(npm outdated --json 2>/dev/null || echo "{}")
+    echo "$NPM_OUTDATED" | python3 -c "
 import json, sys
 data = json.load(sys.stdin)
 for pkg, info in data.items():
@@ -122,9 +123,9 @@ for pkg, info in data.items():
     latest = info.get('latest', 'N/A')
     print(f'{pkg}|{current}|{wanted}|{latest}')
 " 2>/dev/null || true
-else
-  [ ! -f "$REPO_PATH/package.json" ] && echo "No package.json found — skipping npm"
-  command -v npm >/dev/null 2>&1 || echo "npm not installed — skipping npm ecosystem"
+  else
+    echo "npm not installed — skipping npm ecosystem"
+  fi
 fi
 ```
 
