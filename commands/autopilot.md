@@ -355,6 +355,8 @@ gh issue list --state open --label "bug" --limit 50 --json number,title,labels,c
 
 **MANDATORY CHECKPOINT — do NOT proceed without user confirmation.**
 
+**Non-interactive bypass (GitHub Actions / CI)**: When `CI=true` is set in the environment (always true in GitHub Actions), skip the confirmation prompt and proceed directly to 4C. The workflow_dispatch `mode: fix` input — or the `fix` mode embedded in a scheduled workflow YAML — serves as the standing human opt-in. All other Safety Rules remain in force. See [docs/AUTOPILOT-CRON.md](../docs/AUTOPILOT-CRON.md) for GHA setup.
+
 ```markdown
 ## Autopilot Fix Plan
 
@@ -420,7 +422,7 @@ When ready to deploy, merge `staging` → `main` via GitHub.
 7. **If a fix fails, move on** — don't retry. Log it and let the next cycle or human handle it.
 8. **DRY_RUN means NO side effects** — no issues created, no PRs, no label changes. Report only.
 9. **P0 overrides everything** — if P0 exists, skip normal recon and fix P0 immediately.
-10. **Always gate fixes on user approval** — Phase 4B checkpoint is non-negotiable.
+10. **Always gate fixes on user approval** — Phase 4B checkpoint is non-negotiable in interactive sessions. In GitHub Actions (`CI=true`), the workflow `mode: fix` input or YAML configuration serves as the standing opt-in — see Phase 4B for the narrow bypass rule.
 
 ---
 
