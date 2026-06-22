@@ -597,3 +597,37 @@ branches:
 #   #   ---
 #   #   *Powered by [ForgeDock](https://github.com/RapierCraftStudios/ForgeDock)*
 #   pr_footer: false
+
+# =============================================================================
+# UPGRADE_DEPS (OPTIONAL)
+# Controls /upgrade-deps — the autonomous dependency upgrade pipeline.
+# /upgrade-deps detects outdated packages (npm, pip, cargo), creates GitHub
+# issues for eligible upgrades, and optionally runs /work-on on each so every
+# upgrade is investigated, tested, reviewed, and merged — not blindly bumped.
+# Commands: upgrade-deps
+# =============================================================================
+
+# upgrade_deps:
+#   # Ecosystems to check for outdated packages.
+#   # Supported: "npm", "pip", "cargo" (cargo requires: cargo install cargo-outdated)
+#   # Default: ["npm"]
+#   ecosystems:
+#     - npm
+#     # - pip
+#     # - cargo
+#
+#   # Whether to create issues for major version upgrades (default: false).
+#   # Major upgrades carry breaking-change risk — review manually before enabling.
+#   # When false, major upgrades appear in the summary report for human review only.
+#   allow_major: false
+#
+#   # Packages to never auto-upgrade (excluded from issue creation and /work-on).
+#   # Use for intentional version pins or packages with known breaking changes.
+#   exclude:
+#     # - "some-legacy-package"   # pinned at 1.x for compatibility
+#     # - "internal-fork"         # forked version, do not auto-bump
+#
+#   # How many patch packages to group into one batch issue when --batch is used.
+#   # Batching reduces issue noise for low-risk patch bumps.
+#   # Default: 5
+#   issue_batch_size: 5
