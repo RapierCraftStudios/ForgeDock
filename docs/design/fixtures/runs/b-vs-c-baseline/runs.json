@@ -1,0 +1,175 @@
+{
+  "corpus_version": "seed-v1",
+  "generation_model": "claude-sonnet-4-6",
+  "judge_model": "claude-sonnet-4-6",
+  "benchmark_date": "2026-06-22",
+  "note": "B-vs-C baseline only — no arm A. Slipstream arm C was viewport-only (vercel.com rendering timeout), flagged as calibration artifact.",
+  "products": [
+    {
+      "product": "cadence",
+      "reference": "resend.com",
+      "runs": [
+        {
+          "run": 1,
+          "pairwise": {"B_vs_C": "C"},
+          "rubric": {
+            "B": {"hierarchy": 3, "typography": 3, "color": 3, "whitespace": 3, "originality": 3, "mobile": 3},
+            "C": {"hierarchy": 5, "typography": 5, "color": 5, "whitespace": 5, "originality": 5, "mobile": 4}
+          },
+          "slop": {"B": 5, "C": 0}
+        },
+        {
+          "run": 2,
+          "pairwise": {"B_vs_C": "C"},
+          "rubric": {
+            "B": {"hierarchy": 3, "typography": 3, "color": 3, "whitespace": 3, "originality": 3, "mobile": 3},
+            "C": {"hierarchy": 5, "typography": 5, "color": 5, "whitespace": 5, "originality": 5, "mobile": 4}
+          },
+          "slop": {"B": 4, "C": 0}
+        },
+        {
+          "run": 3,
+          "pairwise": {"B_vs_C": "C"},
+          "rubric": {
+            "B": {"hierarchy": 3, "typography": 3, "color": 3, "whitespace": 3, "originality": 3, "mobile": 3},
+            "C": {"hierarchy": 5, "typography": 5, "color": 5, "whitespace": 5, "originality": 5, "mobile": 4}
+          },
+          "slop": {"B": 5, "C": 0}
+        }
+      ]
+    },
+    {
+      "product": "tender",
+      "reference": "stripe.com",
+      "runs": [
+        {
+          "run": 1,
+          "pairwise": {"B_vs_C": "C"},
+          "rubric": {
+            "B": {"hierarchy": 4, "typography": 4, "color": 4, "whitespace": 4, "originality": 3, "mobile": 3},
+            "C": {"hierarchy": 5, "typography": 5, "color": 5, "whitespace": 5, "originality": 5, "mobile": 4}
+          },
+          "slop": {"B": 4, "C": 1}
+        },
+        {
+          "run": 2,
+          "pairwise": {"B_vs_C": "C"},
+          "rubric": {
+            "B": {"hierarchy": 3, "typography": 3, "color": 3, "whitespace": 3, "originality": 3, "mobile": 3},
+            "C": {"hierarchy": 5, "typography": 5, "color": 5, "whitespace": 5, "originality": 5, "mobile": 4}
+          },
+          "slop": {"B": 6, "C": 1}
+        },
+        {
+          "run": 3,
+          "pairwise": {"B_vs_C": "C"},
+          "rubric": {
+            "B": {"hierarchy": 4, "typography": 4, "color": 3, "whitespace": 3, "originality": 3, "mobile": 3},
+            "C": {"hierarchy": 5, "typography": 5, "color": 5, "whitespace": 5, "originality": 5, "mobile": 4}
+          },
+          "slop": {"B": 5, "C": 1}
+        }
+      ]
+    },
+    {
+      "product": "slipstream",
+      "reference": "vercel.com",
+      "note": "CALIBRATION ARTIFACT: Arm C screenshot was viewport-only (vercel.com rendering timeout produced 54KB vs 1-3MB for other references). Judge rated B > C due to incomplete C capture, not genuine design superiority. Exclude from aggregate metrics or treat as suspect.",
+      "runs": [
+        {
+          "run": 1,
+          "pairwise": {"B_vs_C": "B"},
+          "rubric": {
+            "B": {"hierarchy": 4, "typography": 4, "color": 4, "whitespace": 4, "originality": 3, "mobile": 4},
+            "C": {"hierarchy": 4, "typography": 4, "color": 3, "whitespace": 3, "originality": 4, "mobile": 3}
+          },
+          "slop": {"B": 4, "C": 2}
+        },
+        {
+          "run": 2,
+          "pairwise": {"B_vs_C": "B"},
+          "rubric": {
+            "B": {"hierarchy": 4, "typography": 4, "color": 3, "whitespace": 4, "originality": 3, "mobile": 4},
+            "C": {"hierarchy": 4, "typography": 4, "color": 3, "whitespace": 3, "originality": 4, "mobile": 3}
+          },
+          "slop": {"B": 5, "C": 2}
+        },
+        {
+          "run": 3,
+          "pairwise": {"B_vs_C": "B"},
+          "rubric": {
+            "B": {"hierarchy": 5, "typography": 5, "color": 4, "whitespace": 4, "originality": 4, "mobile": 4},
+            "C": {"hierarchy": 4, "typography": 4, "color": 3, "whitespace": 3, "originality": 4, "mobile": 3}
+          },
+          "slop": {"B": 3, "C": 2}
+        }
+      ]
+    },
+    {
+      "product": "voltage",
+      "reference": "modal.com",
+      "runs": [
+        {
+          "run": 1,
+          "pairwise": {"B_vs_C": "C"},
+          "rubric": {
+            "B": {"hierarchy": 3, "typography": 3, "color": 3, "whitespace": 3, "originality": 2, "mobile": 3},
+            "C": {"hierarchy": 5, "typography": 5, "color": 5, "whitespace": 4, "originality": 5, "mobile": 4}
+          },
+          "slop": {"B": 5, "C": 1}
+        },
+        {
+          "run": 2,
+          "pairwise": {"B_vs_C": "C"},
+          "rubric": {
+            "B": {"hierarchy": 3, "typography": 3, "color": 3, "whitespace": 3, "originality": 3, "mobile": 3},
+            "C": {"hierarchy": 5, "typography": 5, "color": 5, "whitespace": 4, "originality": 5, "mobile": 4}
+          },
+          "slop": {"B": 6, "C": 1}
+        },
+        {
+          "run": 3,
+          "pairwise": {"B_vs_C": "C"},
+          "rubric": {
+            "B": {"hierarchy": 2, "typography": 2, "color": 2, "whitespace": 3, "originality": 2, "mobile": 3},
+            "C": {"hierarchy": 5, "typography": 5, "color": 5, "whitespace": 4, "originality": 5, "mobile": 4}
+          },
+          "slop": {"B": 7, "C": 1}
+        }
+      ]
+    },
+    {
+      "product": "plume",
+      "reference": "linear.app",
+      "runs": [
+        {
+          "run": 1,
+          "pairwise": {"B_vs_C": "C"},
+          "rubric": {
+            "B": {"hierarchy": 3, "typography": 3, "color": 3, "whitespace": 3, "originality": 2, "mobile": 3},
+            "C": {"hierarchy": 5, "typography": 5, "color": 5, "whitespace": 5, "originality": 5, "mobile": 4}
+          },
+          "slop": {"B": 6, "C": 1}
+        },
+        {
+          "run": 2,
+          "pairwise": {"B_vs_C": "C"},
+          "rubric": {
+            "B": {"hierarchy": 4, "typography": 4, "color": 4, "whitespace": 4, "originality": 4, "mobile": 4},
+            "C": {"hierarchy": 5, "typography": 5, "color": 5, "whitespace": 5, "originality": 5, "mobile": 4}
+          },
+          "slop": {"B": 2, "C": 1}
+        },
+        {
+          "run": 3,
+          "pairwise": {"B_vs_C": "C"},
+          "rubric": {
+            "B": {"hierarchy": 3, "typography": 4, "color": 3, "whitespace": 3, "originality": 3, "mobile": 3},
+            "C": {"hierarchy": 5, "typography": 5, "color": 5, "whitespace": 5, "originality": 5, "mobile": 4}
+          },
+          "slop": {"B": 5, "C": 1}
+        }
+      ]
+    }
+  ]
+}

@@ -1,0 +1,373 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Slipstream — Deploy at the speed of git push</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script>
+    tailwind.config = {
+      theme: {
+        extend: {
+          fontFamily: {
+            mono: ['JetBrains Mono', 'Fira Code', 'monospace'],
+            sans: ['Inter', 'system-ui', 'sans-serif'],
+          },
+          colors: {
+            slip: {
+              50:  '#f0f9ff',
+              100: '#e0f2fe',
+              400: '#38bdf8',
+              500: '#0ea5e9',
+              600: '#0284c7',
+              900: '#0c4a6e',
+            }
+          }
+        }
+      }
+    }
+  </script>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800;900&family=JetBrains+Mono:wght@400;500;700&display=swap" rel="stylesheet" />
+  <style>
+    body { background: #080c10; color: #e2e8f0; }
+    .grid-bg {
+      background-image:
+        linear-gradient(rgba(14,165,233,0.05) 1px, transparent 1px),
+        linear-gradient(90deg, rgba(14,165,233,0.05) 1px, transparent 1px);
+      background-size: 40px 40px;
+    }
+    .glow-blue {
+      box-shadow: 0 0 80px rgba(14,165,233,0.15), 0 0 160px rgba(14,165,233,0.05);
+    }
+    .terminal-glow {
+      box-shadow: 0 0 0 1px rgba(14,165,233,0.2), 0 20px 60px rgba(0,0,0,0.6);
+    }
+    .status-dot::before {
+      content: '';
+      display: inline-block;
+      width: 7px;
+      height: 7px;
+      border-radius: 50%;
+      background: #22c55e;
+      margin-right: 8px;
+      box-shadow: 0 0 8px #22c55e;
+      animation: pulse 2s infinite;
+    }
+    @keyframes pulse {
+      0%, 100% { opacity: 1; }
+      50% { opacity: 0.4; }
+    }
+    .shimmer {
+      background: linear-gradient(90deg, transparent, rgba(14,165,233,0.1), transparent);
+      background-size: 200% 100%;
+      animation: shimmer 2.5s infinite;
+    }
+    @keyframes shimmer {
+      0% { background-position: -200% 0; }
+      100% { background-position: 200% 0; }
+    }
+    .code-token-keyword { color: #7dd3fc; }
+    .code-token-string  { color: #86efac; }
+    .code-token-comment { color: #475569; }
+    .code-token-fn      { color: #c084fc; }
+    .code-token-num     { color: #fda4af; }
+  </style>
+</head>
+<body class="antialiased font-sans">
+
+  <!-- NAV -->
+  <nav class="fixed top-0 left-0 right-0 z-50 border-b border-white/5 backdrop-blur-md bg-[#080c10]/80">
+    <div class="max-w-6xl mx-auto px-6 h-14 flex items-center justify-between">
+      <div class="flex items-center gap-8">
+        <span class="text-white font-bold text-lg tracking-tight">Slipstream</span>
+        <div class="hidden md:flex items-center gap-6 text-sm text-slate-400">
+          <a href="#" class="hover:text-white transition-colors">Docs</a>
+          <a href="#" class="hover:text-white transition-colors">Pricing</a>
+          <a href="#" class="hover:text-white transition-colors">Blog</a>
+          <a href="#" class="hover:text-white transition-colors">Changelog</a>
+        </div>
+      </div>
+      <div class="flex items-center gap-3">
+        <a href="#" class="text-sm text-slate-400 hover:text-white transition-colors px-3 py-1.5">Log in</a>
+        <a href="#" class="text-sm bg-sky-500 hover:bg-sky-400 text-white font-medium px-4 py-1.5 rounded-md transition-colors">Deploy now</a>
+      </div>
+    </div>
+  </nav>
+
+  <!-- HERO -->
+  <section class="grid-bg min-h-screen flex flex-col items-center justify-center pt-14 px-6 relative overflow-hidden">
+    <!-- Radial glow -->
+    <div class="absolute inset-0 flex items-center justify-center pointer-events-none">
+      <div class="w-[600px] h-[600px] rounded-full bg-sky-500/5 blur-3xl"></div>
+    </div>
+
+    <div class="relative max-w-4xl mx-auto text-center">
+      <div class="inline-flex items-center gap-2 text-xs font-mono text-sky-400 bg-sky-500/10 border border-sky-500/20 rounded-full px-3 py-1 mb-8">
+        <span class="status-dot"></span>
+        All systems operational — 99.99% uptime
+      </div>
+
+      <h1 class="text-5xl md:text-7xl font-black tracking-tight text-white mb-6 leading-none">
+        Push code.<br />
+        <span class="text-transparent bg-clip-text bg-gradient-to-r from-sky-400 to-blue-500">Ship instantly.</span><br />
+        Done.
+      </h1>
+
+      <p class="text-lg md:text-xl text-slate-400 max-w-2xl mx-auto mb-10 leading-relaxed">
+        Connect your repo. Every push deploys to a global edge network in seconds.
+        No servers. No ops. No waiting around.
+      </p>
+
+      <div class="flex flex-col sm:flex-row items-center justify-center gap-3 mb-16">
+        <a href="#" class="w-full sm:w-auto bg-sky-500 hover:bg-sky-400 text-white font-semibold px-8 py-3 rounded-md text-base transition-all hover:shadow-lg hover:shadow-sky-500/25">
+          Start for free
+        </a>
+        <a href="#" class="w-full sm:w-auto border border-white/10 hover:border-white/20 text-slate-300 hover:text-white font-medium px-8 py-3 rounded-md text-base transition-all">
+          Read the docs →
+        </a>
+      </div>
+
+      <!-- Terminal -->
+      <div class="terminal-glow rounded-xl bg-[#0d1117] border border-white/8 text-left overflow-hidden max-w-2xl mx-auto">
+        <div class="flex items-center gap-2 px-4 py-3 border-b border-white/5 bg-white/2">
+          <div class="w-3 h-3 rounded-full bg-red-500/60"></div>
+          <div class="w-3 h-3 rounded-full bg-yellow-500/60"></div>
+          <div class="w-3 h-3 rounded-full bg-green-500/60"></div>
+          <span class="ml-3 text-xs text-slate-500 font-mono">bash</span>
+        </div>
+        <div class="p-5 font-mono text-sm space-y-1">
+          <div class="text-slate-500">$ git push origin main</div>
+          <div class="text-slate-400 mt-2">Enumerating objects: 5, done.</div>
+          <div class="text-slate-400">Counting objects: 100% (5/5), done.</div>
+          <div class="text-slate-400">Writing objects: 100% (3/3), 847 bytes, done.</div>
+          <div class="mt-3 text-sky-400">remote: Slipstream — Build triggered</div>
+          <div class="text-sky-400">remote: ✓ Installing dependencies    <span class="text-slate-500">3.2s</span></div>
+          <div class="text-sky-400">remote: ✓ Building application        <span class="text-slate-500">12.1s</span></div>
+          <div class="text-sky-400">remote: ✓ Deploying to edge network   <span class="text-slate-500">1.8s</span></div>
+          <div class="mt-3 text-green-400 font-bold">remote: Production: https://myapp.slipstream.app ✓</div>
+          <div class="text-slate-500">remote: Deploy complete in 17.1s</div>
+          <div class="mt-2 text-slate-500 shimmer">█</div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- LOGOS -->
+  <section class="border-y border-white/5 py-12 px-6">
+    <div class="max-w-5xl mx-auto">
+      <p class="text-center text-xs font-mono text-slate-600 uppercase tracking-widest mb-8">Trusted by teams shipping on</p>
+      <div class="flex flex-wrap items-center justify-center gap-x-12 gap-y-4">
+        <span class="text-slate-600 font-semibold text-lg tracking-tight">Next.js</span>
+        <span class="text-slate-600 font-semibold text-lg tracking-tight">SvelteKit</span>
+        <span class="text-slate-600 font-semibold text-lg tracking-tight">Astro</span>
+        <span class="text-slate-600 font-semibold text-lg tracking-tight">Remix</span>
+        <span class="text-slate-600 font-semibold text-lg tracking-tight">Nuxt</span>
+        <span class="text-slate-600 font-semibold text-lg tracking-tight">Vite</span>
+        <span class="text-slate-600 font-semibold text-lg tracking-tight">SolidStart</span>
+      </div>
+    </div>
+  </section>
+
+  <!-- FEATURES -->
+  <section class="py-28 px-6" id="features">
+    <div class="max-w-6xl mx-auto">
+      <div class="mb-16">
+        <p class="text-xs font-mono text-sky-400 uppercase tracking-widest mb-4">How it works</p>
+        <h2 class="text-4xl md:text-5xl font-black text-white tracking-tight">Your repo is the control plane.</h2>
+        <p class="mt-4 text-lg text-slate-400 max-w-xl">Slipstream watches your branches. You write code, we handle everything else.</p>
+      </div>
+
+      <div class="grid grid-cols-1 md:grid-cols-3 gap-px bg-white/5 rounded-xl overflow-hidden">
+        <!-- F1 -->
+        <div class="bg-[#080c10] p-8 hover:bg-[#0d1117] transition-colors group">
+          <div class="w-10 h-10 rounded-lg bg-sky-500/10 border border-sky-500/20 flex items-center justify-center mb-6 group-hover:bg-sky-500/20 transition-colors">
+            <svg class="w-5 h-5 text-sky-400" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="1.5">
+              <path stroke-linecap="round" stroke-linejoin="round" d="M3 7.5L7.5 3m0 0L12 7.5M7.5 3v13.5m13.5 0L16.5 21m0 0L12 16.5m4.5 4.5V7.5" />
+            </svg>
+          </div>
+          <h3 class="text-white font-bold text-lg mb-3">Git-connected deploys</h3>
+          <p class="text-slate-400 text-sm leading-relaxed">Push to any branch, get a live HTTPS URL. Merge to main, production updates. No dashboards to navigate, no manual triggers.</p>
+          <div class="mt-5 font-mono text-xs bg-white/3 rounded-lg p-3 border border-white/5">
+            <div class="text-slate-500"># That's it.</div>
+            <div class="mt-1"><span class="text-purple-400">git</span> <span class="text-sky-300">push</span> <span class="text-slate-300">origin main</span></div>
+          </div>
+        </div>
+        <!-- F2 -->
+        <div class="bg-[#080c10] p-8 hover:bg-[#0d1117] transition-colors group">
+          <div class="w-10 h-10 rounded-lg bg-sky-500/10 border border-sky-500/20 flex items-center justify-center mb-6 group-hover:bg-sky-500/20 transition-colors">
+            <svg class="w-5 h-5 text-sky-400" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="1.5">
+              <path stroke-linecap="round" stroke-linejoin="round" d="M9 12.75L11.25 15 15 9.75M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
+            </svg>
+          </div>
+          <h3 class="text-white font-bold text-lg mb-3">Preview environments</h3>
+          <p class="text-slate-400 text-sm leading-relaxed">Every pull request gets its own isolated deployment. Share a link with your team before anything touches production. Automatic teardown on merge.</p>
+          <div class="mt-5 font-mono text-xs bg-white/3 rounded-lg p-3 border border-white/5">
+            <div class="text-green-400">✓ Preview ready</div>
+            <div class="text-sky-400 mt-1">https://pr-142.myapp.slipstream.app</div>
+          </div>
+        </div>
+        <!-- F3 -->
+        <div class="bg-[#080c10] p-8 hover:bg-[#0d1117] transition-colors group">
+          <div class="w-10 h-10 rounded-lg bg-sky-500/10 border border-sky-500/20 flex items-center justify-center mb-6 group-hover:bg-sky-500/20 transition-colors">
+            <svg class="w-5 h-5 text-sky-400" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="1.5">
+              <path stroke-linecap="round" stroke-linejoin="round" d="M12 21a9.004 9.004 0 008.716-6.747M12 21a9.004 9.004 0 01-8.716-6.747M12 21c2.485 0 4.5-4.03 4.5-9S14.485 3 12 3m0 18c-2.485 0-4.5-4.03-4.5-9S9.515 3 12 3m0 0a8.997 8.997 0 017.843 4.582M12 3a8.997 8.997 0 00-7.843 4.582m15.686 0A11.953 11.953 0 0112 10.5c-2.998 0-5.74-1.1-7.843-2.918m15.686 0A8.959 8.959 0 0121 12c0 .778-.099 1.533-.284 2.253" />
+            </svg>
+          </div>
+          <h3 class="text-white font-bold text-lg mb-3">Global edge network</h3>
+          <p class="text-slate-400 text-sm leading-relaxed">Assets cached at 300+ PoPs worldwide. Edge functions run at the node closest to your user. Sub-50ms TTFB from anywhere on earth.</p>
+          <div class="mt-5 font-mono text-xs bg-white/3 rounded-lg p-3 border border-white/5">
+            <div class="text-slate-500">TTFB from Singapore</div>
+            <div class="text-green-400 mt-1 text-base font-bold">23ms</div>
+          </div>
+        </div>
+      </div>
+
+      <div class="grid grid-cols-1 md:grid-cols-2 gap-px bg-white/5 rounded-xl overflow-hidden mt-px">
+        <!-- F4 -->
+        <div class="bg-[#080c10] p-8 hover:bg-[#0d1117] transition-colors">
+          <div class="w-10 h-10 rounded-lg bg-sky-500/10 border border-sky-500/20 flex items-center justify-center mb-6">
+            <svg class="w-5 h-5 text-sky-400" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="1.5">
+              <path stroke-linecap="round" stroke-linejoin="round" d="M5.25 14.25h13.5m-13.5 0a3 3 0 01-3-3m3 3a3 3 0 100 6h13.5a3 3 0 100-6m-16.5-3a3 3 0 013-3h13.5a3 3 0 013 3m-19.5 0a4.5 4.5 0 01.9-2.7L5.737 5.1a3.375 3.375 0 012.7-1.35h7.126c1.062 0 2.062.5 2.7 1.35l2.587 3.45a4.5 4.5 0 01.9 2.7m0 0a3 3 0 01-3 3m0 3h.008v.008h-.008v-.008zm0-6h.008v.008h-.008v-.008zm-3 6h.008v.008h-.008v-.008zm0-6h.008v.008h-.008v-.008z" />
+            </svg>
+          </div>
+          <h3 class="text-white font-bold text-lg mb-3">Serverless & edge functions</h3>
+          <p class="text-slate-400 text-sm leading-relaxed mb-5">Write backend logic alongside your frontend. Deploy as serverless functions that auto-scale to zero. Run at the edge for latency-critical paths.</p>
+          <div class="font-mono text-xs bg-white/3 rounded-lg p-4 border border-white/5">
+            <div class="text-slate-500 mb-2">// app/api/user/route.ts</div>
+            <div><span class="code-token-keyword">export</span> <span class="code-token-keyword">const</span> <span class="text-white">runtime</span> <span class="text-slate-400">=</span> <span class="code-token-string">'edge'</span></div>
+            <div class="mt-1"><span class="code-token-keyword">export async function</span> <span class="code-token-fn">GET</span><span class="text-slate-300">(req: Request) {"{"}  </span></div>
+            <div class="ml-4"><span class="code-token-keyword">return</span> <span class="code-token-fn">Response</span><span class="text-slate-300">.</span><span class="code-token-fn">json</span><span class="text-slate-300">({"{"}user: <span class="code-token-string">'...'</span>{"}"}) </span></div>
+            <div><span class="text-slate-300">{"}"}</span></div>
+          </div>
+        </div>
+        <!-- F5 -->
+        <div class="bg-[#080c10] p-8 hover:bg-[#0d1117] transition-colors">
+          <div class="w-10 h-10 rounded-lg bg-sky-500/10 border border-sky-500/20 flex items-center justify-center mb-6">
+            <svg class="w-5 h-5 text-sky-400" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="1.5">
+              <path stroke-linecap="round" stroke-linejoin="round" d="M18 18.72a9.094 9.094 0 003.741-.479 3 3 0 00-4.682-2.72m.94 3.198l.001.031c0 .225-.012.447-.037.666A11.944 11.944 0 0112 21c-2.17 0-4.207-.576-5.963-1.584A6.062 6.062 0 016 18.719m12 0a5.971 5.971 0 00-.941-3.197m0 0A5.995 5.995 0 0012 12.75a5.995 5.995 0 00-5.058 2.772m0 0a3 3 0 00-4.681 2.72 8.986 8.986 0 003.74.477m.94-3.197a5.971 5.971 0 00-.94 3.197M15 6.75a3 3 0 11-6 0 3 3 0 016 0zm6 3a2.25 2.25 0 11-4.5 0 2.25 2.25 0 014.5 0zm-13.5 0a2.25 2.25 0 11-4.5 0 2.25 2.25 0 014.5 0z" />
+            </svg>
+          </div>
+          <h3 class="text-white font-bold text-lg mb-3">Built for teams</h3>
+          <p class="text-slate-400 text-sm leading-relaxed mb-5">Role-based access, shared environment variables, audit logs, and PR comments with live preview links. Everyone on the same page, no one stepping on each other.</p>
+          <div class="space-y-3">
+            <div class="flex items-center gap-3 p-3 bg-white/3 rounded-lg border border-white/5">
+              <div class="w-7 h-7 rounded-full bg-purple-500/30 border border-purple-500/20 flex items-center justify-center text-xs font-bold text-purple-300">A</div>
+              <div class="flex-1">
+                <div class="text-xs text-slate-300 font-medium">alex@corp.io</div>
+                <div class="text-xs text-slate-500">Owner</div>
+              </div>
+              <span class="text-xs text-sky-400 font-mono">prod access</span>
+            </div>
+            <div class="flex items-center gap-3 p-3 bg-white/3 rounded-lg border border-white/5">
+              <div class="w-7 h-7 rounded-full bg-green-500/30 border border-green-500/20 flex items-center justify-center text-xs font-bold text-green-300">S</div>
+              <div class="flex-1">
+                <div class="text-xs text-slate-300 font-medium">sam@corp.io</div>
+                <div class="text-xs text-slate-500">Developer</div>
+              </div>
+              <span class="text-xs text-slate-400 font-mono">preview only</span>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- STATS -->
+  <section class="py-20 px-6 border-y border-white/5 bg-white/2">
+    <div class="max-w-4xl mx-auto grid grid-cols-2 md:grid-cols-4 gap-8 text-center">
+      <div>
+        <div class="text-4xl font-black text-white mb-1">300+</div>
+        <div class="text-sm text-slate-500">Edge locations</div>
+      </div>
+      <div>
+        <div class="text-4xl font-black text-white mb-1">&lt;20s</div>
+        <div class="text-sm text-slate-500">Avg deploy time</div>
+      </div>
+      <div>
+        <div class="text-4xl font-black text-white mb-1">99.99%</div>
+        <div class="text-sm text-slate-500">Uptime SLA</div>
+      </div>
+      <div>
+        <div class="text-4xl font-black text-white mb-1">0</div>
+        <div class="text-sm text-slate-500">Servers to manage</div>
+      </div>
+    </div>
+  </section>
+
+  <!-- PRICING TEASE -->
+  <section class="py-28 px-6">
+    <div class="max-w-3xl mx-auto">
+      <div class="mb-12 text-center">
+        <h2 class="text-4xl font-black text-white mb-4">Start free. Scale without friction.</h2>
+        <p class="text-slate-400">No credit card required. Generous free tier covers most personal projects and side work.</p>
+      </div>
+      <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
+        <div class="rounded-xl border border-white/8 bg-[#0d1117] p-8">
+          <div class="text-xs font-mono text-slate-500 uppercase tracking-widest mb-3">Hobby</div>
+          <div class="text-3xl font-black text-white mb-1">Free</div>
+          <div class="text-sm text-slate-500 mb-6">Forever</div>
+          <ul class="space-y-3 text-sm text-slate-400">
+            <li class="flex items-center gap-2"><span class="text-green-400">✓</span> Unlimited deployments</li>
+            <li class="flex items-center gap-2"><span class="text-green-400">✓</span> 100 GB bandwidth/month</li>
+            <li class="flex items-center gap-2"><span class="text-green-400">✓</span> Preview deployments</li>
+            <li class="flex items-center gap-2"><span class="text-green-400">✓</span> Edge functions</li>
+            <li class="flex items-center gap-2"><span class="text-green-400">✓</span> 3 projects</li>
+          </ul>
+          <a href="#" class="mt-8 block text-center border border-white/10 hover:border-white/20 text-white font-medium py-2.5 rounded-lg transition-colors">Get started</a>
+        </div>
+        <div class="rounded-xl border border-sky-500/30 bg-sky-500/5 p-8 relative overflow-hidden">
+          <div class="absolute top-4 right-4 text-xs bg-sky-500 text-white font-mono px-2 py-0.5 rounded">Popular</div>
+          <div class="text-xs font-mono text-sky-400 uppercase tracking-widest mb-3">Pro</div>
+          <div class="text-3xl font-black text-white mb-1">$20<span class="text-lg font-normal text-slate-400">/mo</span></div>
+          <div class="text-sm text-slate-500 mb-6">Per member</div>
+          <ul class="space-y-3 text-sm text-slate-400">
+            <li class="flex items-center gap-2"><span class="text-sky-400">✓</span> Everything in Hobby</li>
+            <li class="flex items-center gap-2"><span class="text-sky-400">✓</span> 1 TB bandwidth/month</li>
+            <li class="flex items-center gap-2"><span class="text-sky-400">✓</span> Unlimited projects</li>
+            <li class="flex items-center gap-2"><span class="text-sky-400">✓</span> Team collaboration</li>
+            <li class="flex items-center gap-2"><span class="text-sky-400">✓</span> Priority support</li>
+          </ul>
+          <a href="#" class="mt-8 block text-center bg-sky-500 hover:bg-sky-400 text-white font-semibold py-2.5 rounded-lg transition-colors">Deploy now</a>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- FINAL CTA -->
+  <section class="py-28 px-6 border-t border-white/5 relative overflow-hidden">
+    <div class="absolute inset-0 flex items-center justify-center pointer-events-none">
+      <div class="w-[800px] h-[300px] rounded-full bg-sky-500/5 blur-3xl"></div>
+    </div>
+    <div class="relative max-w-2xl mx-auto text-center">
+      <h2 class="text-5xl font-black text-white mb-6 tracking-tight">Your next deploy<br />is one push away.</h2>
+      <p class="text-slate-400 mb-10 text-lg">Stop thinking about infrastructure. Start shipping.</p>
+      <div class="flex flex-col sm:flex-row items-center justify-center gap-3">
+        <a href="#" class="w-full sm:w-auto bg-sky-500 hover:bg-sky-400 text-white font-semibold px-10 py-4 rounded-md text-base transition-all hover:shadow-lg hover:shadow-sky-500/25">
+          Start for free
+        </a>
+        <a href="#" class="w-full sm:w-auto text-slate-400 hover:text-white font-medium px-8 py-4 text-base transition-colors">
+          View documentation →
+        </a>
+      </div>
+    </div>
+  </section>
+
+  <!-- FOOTER -->
+  <footer class="border-t border-white/5 py-12 px-6">
+    <div class="max-w-6xl mx-auto flex flex-col md:flex-row items-center justify-between gap-6">
+      <div class="flex items-center gap-6">
+        <span class="text-white font-bold">Slipstream</span>
+        <span class="text-slate-600 text-sm">© 2025</span>
+      </div>
+      <div class="flex items-center gap-6 text-sm text-slate-500">
+        <a href="#" class="hover:text-slate-300 transition-colors">Privacy</a>
+        <a href="#" class="hover:text-slate-300 transition-colors">Terms</a>
+        <a href="#" class="hover:text-slate-300 transition-colors">Status</a>
+        <a href="#" class="hover:text-slate-300 transition-colors">GitHub</a>
+      </div>
+    </div>
+  </footer>
+
+</body>
+</html>
