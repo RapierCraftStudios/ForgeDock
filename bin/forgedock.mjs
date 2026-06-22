@@ -1136,6 +1136,45 @@ async function install() {
         step.note(note);
       },
     },
+    {
+      label: "Installing Cursor rules",
+      async run(step) {
+        // Write the ForgeDock Cursor rules template into the project's
+        // .cursor/rules/ directory — but ONLY if the user has already opted
+        // into Cursor by creating the .cursor/ directory.  Never create
+        // .cursor/ speculatively.  (ref: forge#964)
+        const installCwd = process.cwd();
+        if (!isGitWorkTree(installCwd)) {
+          step.skip("not a git project");
+          return;
+        }
+
+        const cursorDir = join(installCwd, ".cursor");
+        if (!existsSync(cursorDir)) {
+          step.skip("no .cursor/ directory found");
+          return;
+        }
+
+        const rulesDir = join(cursorDir, "rules");
+        const destPath = join(rulesDir, "forge.mdc");
+
+        if (existsSync(destPath)) {
+          step.skip("forge.mdc already present");
+          return;
+        }
+
+        const templatePath = join(FORGE_HOME, "templates", "cursor", "forge.mdc");
+        if (!existsSync(templatePath)) {
+          step.note("template not found — skipping");
+          return;
+        }
+
+        await mkdir(rulesDir, { recursive: true });
+        const templateContent = readFileSync(templatePath, "utf-8");
+        atomicWriteFile(destPath, templateContent);
+        step.note(cyan(destPath));
+      },
+    },
   ]);
 
   if (result.ok) {
