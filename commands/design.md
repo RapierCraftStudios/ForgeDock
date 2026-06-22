@@ -66,6 +66,25 @@ committed into `FORGE:DESIGN_SPEC` ([schema](../docs/design/design-spec-schema.m
 Generate the page from the committed `FORGE:DESIGN_SPEC`. The spec is the contract — no taste decisions are re-rolled
 here; generation realizes the committed intent.
 
+### Foundation CSS injection <!-- Added: forge#1048 -->
+
+Before generating the page, inject the archetype's pre-built CSS foundation as the starting stylesheet. Foundation files live in `docs/design/foundations/` and are keyed by `meta.archetype` from `FORGE:DESIGN_SPEC`:
+
+| `meta.archetype` | Foundation file |
+|---|---|
+| `editorial-typographic` | `docs/design/foundations/editorial.css` |
+| `technical-dense` | `docs/design/foundations/technical.css` |
+| `minimal-luxury` | `docs/design/foundations/minimal-luxury.css` |
+| `bold-brutalist` | `docs/design/foundations/brutalist.css` |
+| `warm-photographic` | `docs/design/foundations/warm-photo.css` |
+
+**Injection pattern**: read the foundation file content and include it in the generation prompt as the starting `<style>` block. Instruct the generator to:
+1. Use the foundation's component classes (`.btn`, `.card`, `.badge`, `.input`, `.reveal`) where applicable — do NOT replace them with generic Tailwind equivalents.
+2. Override `--color-accent` and `--color-bg` custom properties with the spec's `color.accent` and `color.background` values to apply the committed palette to the foundation.
+3. Extend, don't replace — additional styles may be added on top of the foundation, but the foundation's radius system, component state management (hover/active/focus), and micro-detail rules (::selection, scrollbar, focus rings) must be preserved.
+
+The foundation is the professional baseline. The generator adds layout and content on top.
+
 ## Stage 4 — design-critique (`design:critiquing`)
 
 Run [`/design-render-critique-loop`](design-render-critique-loop.md) (#882): deterministic lint floor (#884) → Playwright
