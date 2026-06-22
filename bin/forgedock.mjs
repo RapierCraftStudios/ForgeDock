@@ -1262,6 +1262,176 @@ async function install() {
         step.note(cyan(AIDER_FORGE_PATH));
       },
     },
+    {
+      label: "Writing OpenCode conventions file",
+      async run(step) {
+        // Write ~/.opencode-forge.md and patch ~/.config/opencode/opencode.json
+        // if opencode is on PATH. Non-fatal — skip gracefully when not installed.
+        let opencodeFound = false;
+        try {
+          execSync("opencode --version", { stdio: "ignore", timeout: 5000 });
+          opencodeFound = true;
+        } catch {
+          // opencode not found or errored — skip
+        }
+        if (!opencodeFound) {
+          step.skip("opencode not found on PATH");
+          return;
+        }
+
+        const OPENCODE_FORGE_PATH = join(HOME, ".opencode-forge.md");
+        const OPENCODE_FORGE_SENTINEL =
+          "<!-- ForgeDock managed — do not remove this line -->";
+
+        // Skip if already present (content not stale — sentinel check only).
+        if (existsSync(OPENCODE_FORGE_PATH)) {
+          const existing = readFileSync(OPENCODE_FORGE_PATH, "utf-8");
+          if (existing.includes(OPENCODE_FORGE_SENTINEL)) {
+            // Regenerate to pick up FORGE_HOME path changes.
+            // Falls through to write below.
+          } else {
+            step.skip("~/.opencode-forge.md exists but was not written by ForgeDock — skipping");
+            return;
+          }
+        }
+
+        const safeForgeHome = shellEscapeDoubleQuotedPath(FORGE_HOME);
+        const conventionsContent = [
+          OPENCODE_FORGE_SENTINEL,
+          "# ForgeDock — OpenCode Conventions",
+          "",
+          "You are an AI coding agent running the ForgeDock autonomous development",
+          "pipeline. ForgeDock uses GitHub as a structured knowledge graph: every",
+          "pipeline stage writes a structured annotation (FORGE:INVESTIGATOR,",
+          "FORGE:CONTRACT, FORGE:BUILDER, etc.) to GitHub issue comments and reads",
+          "prior annotations to reconstruct context after compaction or session restart.",
+          "",
+          "## Runtime: OpenCode",
+          "",
+          "You are operating as an OpenCode agent. ForgeDock was designed for Claude Code,",
+          "but the FORGE annotation protocol is transport-agnostic. OpenCode shares the",
+          "same tool names as Claude Code (Bash, Read, Write, Edit, Glob, Grep, WebFetch),",
+          "so most pipeline operations run without translation.",
+          "",
+          "| Claude Code | OpenCode equivalent | Notes |",
+          "|-------------|---------------------|-------|",
+          "| `Bash(\"...\")` | `Bash(\"...\")` | Direct — same tool name |",
+          "| `Read(\"path\")` | `Read(\"path\")` | Direct — same tool name |",
+          "| `Write(\"path\")` | `Write(\"path\")` | Direct — same tool name |",
+          "| `Edit(\"path\")` | `Edit(\"path\")` | Direct — same tool name |",
+          "| `Glob(\"**/*.md\")` | `Glob(\"**/*.md\")` | Direct — same tool name |",
+          "| `Grep(pattern)` | `Grep(pattern)` | Direct — same tool name |",
+          "| `WebFetch(url)` | `WebFetch(url)` | Direct — same tool name |",
+          `| \`Skill("work-on", args="123")\` | Read \`${safeForgeHome}/commands/work-on.md\` then execute | No native skill loader |`,
+          `| \`Skill("review-pr", args="456")\` | Read \`${safeForgeHome}/commands/review-pr.md\` then execute | No native skill loader |`,
+          "| `Agent(...)` | Continue the sub-task yourself | No sub-agent model; inline it |",
+          "",
+          "## Entry Points",
+          "",
+          "Use native slash commands (if registered by install-opencode.sh):",
+          "",
+          "```",
+          "/work-on 967",
+          "/review-pr 123",
+          "/quality-gate",
+          "```",
+          "",
+          "Or load a pipeline command directly:",
+          "",
+          "```",
+          `Read("${safeForgeHome}/commands/work-on.md")`,
+          "```",
+          "",
+          "## Reference",
+          "",
+          `- Full pipeline spec: \`${safeForgeHome}/commands/work-on.md\``,
+          `- Annotation protocol: \`${safeForgeHome}/docs/FORGE-PROTOCOL.md\``,
+          `- OpenCode adapter guide: \`${safeForgeHome}/docs/OPENCODE.md\``,
+        ].join("\n");
+
+        atomicWriteFile(OPENCODE_FORGE_PATH, conventionsContent + "\n");
+        step.note(cyan(OPENCODE_FORGE_PATH));
+
+        // Patch ~/.config/opencode/opencode.json with instructions entry and
+        // ForgeDock command registrations. Non-fatal on parse/write error.
+        const OPENCODE_CONFIG_DIR = join(HOME, ".config", "opencode");
+        const OPENCODE_CONFIG_PATH = join(OPENCODE_CONFIG_DIR, "opencode.json");
+
+        try {
+          // Ensure config directory exists
+          await mkdir(OPENCODE_CONFIG_DIR, { recursive: true });
+
+          let config = {};
+          if (existsSync(OPENCODE_CONFIG_PATH)) {
+            try {
+              const raw = readFileSync(OPENCODE_CONFIG_PATH, "utf-8");
+              // stripJsonc is defined earlier in this file — handles JSONC syntax
+              config = JSON.parse(stripJsonc(raw));
+            } catch (parseErr) {
+              step.note(
+                `${yellow("⚠")}  Could not parse opencode.json — skipping config patch (${parseErr.message})`,
+              );
+              return;
+            }
+          }
+
+          // Add conventions file to instructions array
+          if (!Array.isArray(config.instructions)) {
+            config.instructions = [];
+          }
+          if (!config.instructions.includes(OPENCODE_FORGE_PATH)) {
+            config.instructions.push(OPENCODE_FORGE_PATH);
+          }
+
+          // Register ForgeDock pipeline commands (only if not already defined)
+          if (
+            typeof config.command !== "object" ||
+            config.command === null ||
+            Array.isArray(config.command)
+          ) {
+            config.command = {};
+          }
+
+          const forgeCmds = {
+            "work-on": {
+              description:
+                "Run the ForgeDock full issue pipeline (investigate → build → review → merge)",
+              template: `Read ${FORGE_HOME}/commands/work-on.md and execute the pipeline for issue {{args}}.`,
+            },
+            "review-pr": {
+              description: "Run the ForgeDock PR review pipeline",
+              template: `Read ${FORGE_HOME}/commands/review-pr.md and execute the PR review for PR {{args}}.`,
+            },
+            "quality-gate": {
+              description: "Run ForgeDock pre-commit quality checks",
+              template: `Read ${FORGE_HOME}/commands/quality-gate.md and run all quality gate checks.`,
+            },
+            orchestrate: {
+              description: "Run ForgeDock parallel multi-issue orchestration",
+              template: `Read ${FORGE_HOME}/commands/orchestrate.md and orchestrate the issues: {{args}}.`,
+            },
+          };
+
+          for (const [name, def] of Object.entries(forgeCmds)) {
+            if (!config.command[name]) {
+              config.command[name] = def;
+            }
+          }
+
+          atomicWriteFile(
+            OPENCODE_CONFIG_PATH,
+            JSON.stringify(config, null, 4) + "\n",
+          );
+          step.note(cyan(OPENCODE_CONFIG_PATH));
+        } catch (configErr) {
+          // Non-fatal — conventions file already written; config patch failure
+          // is a degraded-mode outcome, not a hard install failure.
+          step.note(
+            `${yellow("⚠")}  Could not patch opencode.json (${configErr.message}) — conventions file installed, but slash commands not registered`,
+          );
+        }
+      },
+    },
   ]);
 
   if (result.ok) {
@@ -1380,6 +1550,88 @@ async function uninstall() {
     if (err.code !== "ENOENT") {
       console.log(
         `  ${YELLOW}⚠${RESET}  Could not remove ~/.aider-forge.md — remove it manually.`,
+      );
+    }
+  }
+
+  // Remove ~/.opencode-forge.md if written by ForgeDock (identified by sentinel line).
+  // Also remove ForgeDock entries from ~/.config/opencode/opencode.json.
+  const opencodeForgePath = join(HOME, ".opencode-forge.md");
+  const opencodeForgeSentinel = "<!-- ForgeDock managed — do not remove this line -->";
+  try {
+    if (existsSync(opencodeForgePath)) {
+      const opencodeContent = readFileSync(opencodeForgePath, "utf-8");
+      if (opencodeContent.includes(opencodeForgeSentinel)) {
+        unlinkSync(opencodeForgePath);
+        console.log(
+          `  ${RED}Removed${RESET}: ~/.opencode-forge.md`,
+        );
+      } else {
+        console.log(
+          `  ✔  ~/.opencode-forge.md not managed by ForgeDock — skipping`,
+        );
+      }
+    }
+  } catch (err) {
+    if (err.code !== "ENOENT") {
+      console.log(
+        `  ${YELLOW}⚠${RESET}  Could not remove ~/.opencode-forge.md — remove it manually.`,
+      );
+    }
+  }
+
+  // Remove ForgeDock entries from ~/.config/opencode/opencode.json if present.
+  const opencodeConfigPath = join(HOME, ".config", "opencode", "opencode.json");
+  if (existsSync(opencodeConfigPath)) {
+    try {
+      const raw = readFileSync(opencodeConfigPath, "utf-8");
+      let config = JSON.parse(stripJsonc(raw));
+      let changed = false;
+
+      // Remove conventions file from instructions array
+      if (Array.isArray(config.instructions)) {
+        const before = config.instructions.length;
+        config.instructions = config.instructions.filter(
+          (entry) => entry !== opencodeForgePath,
+        );
+        if (config.instructions.length !== before) changed = true;
+        // Remove empty instructions array to keep config clean
+        if (config.instructions.length === 0) {
+          delete config.instructions;
+        }
+      }
+
+      // Remove ForgeDock-registered commands
+      if (typeof config.command === "object" && config.command !== null) {
+        for (const name of ["work-on", "review-pr", "quality-gate", "orchestrate"]) {
+          if (
+            config.command[name] &&
+            typeof config.command[name].template === "string" &&
+            config.command[name].template.includes("commands/")
+          ) {
+            delete config.command[name];
+            changed = true;
+          }
+        }
+        // Remove empty command object to keep config clean
+        if (Object.keys(config.command).length === 0) {
+          delete config.command;
+        }
+      }
+
+      if (changed) {
+        atomicWriteFile(opencodeConfigPath, JSON.stringify(config, null, 4) + "\n");
+        console.log(
+          `  ${RED}Removed${RESET}: ForgeDock entries from ~/.config/opencode/opencode.json`,
+        );
+      } else {
+        console.log(
+          `  ✔  No ForgeDock entries in opencode.json — nothing to remove`,
+        );
+      }
+    } catch (err) {
+      console.log(
+        `  ${YELLOW}⚠${RESET}  Could not update opencode.json — remove ForgeDock entries manually.`,
       );
     }
   }
