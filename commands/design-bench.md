@@ -34,6 +34,8 @@ agent executes; the only executable helper is the deterministic aggregator `scri
 **Hard rule — same generation model for A and B.** The harness is the ONLY difference between A and B; that is
 what makes the A-vs-B delta attributable to the harness. Different models benchmark models, not the harness.
 
+**Validated generation model: `claude-opus-4-6`.** Benchmark results (#878) show a tier-level quality difference: 90% A-vs-B pairwise win-rate with Opus vs 54% with Sonnet, rubric mean 4.11 vs 3.40, slop 1.2 vs 1.8. The canonical baseline going forward is the Opus run. Raw data: `docs/design/fixtures/runs/full-abc-opus/`. Use Opus for both arm A and arm B unless explicitly testing a different model.
+
 ---
 
 ## Phase 0: Resolve inputs
@@ -131,7 +133,7 @@ Post the result as a `FORGE:BENCH_SCORECARD` annotation (registered in
 gh issue comment <ISSUE> --body "<!-- FORGE:BENCH_SCORECARD -->
 ## ABC Benchmark Scorecard
 
-**Corpus version**: <ver> · **Generation model (A & B)**: <model> · **Judge model**: <independent judge>
+**Corpus version**: <ver> · **Generation model (A & B)**: <model> (canonical: claude-opus-4-6) · **Judge model**: <independent judge>
 **Products**: <n_products> · **Runs/product**: <n>
 
 | Arm | Win-rate vs C | A-vs-B | Mean slop |
