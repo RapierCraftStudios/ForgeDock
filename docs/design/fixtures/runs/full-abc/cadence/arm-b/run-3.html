@@ -1,0 +1,506 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Cadence — Email API</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link href="https://fonts.googleapis.com/css2?family=Syne:wght@400;500;600;700;800&family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans:wght@400;500&display=swap" rel="stylesheet" />
+  <style>
+    :root {
+      --ink: #0a0a0a;
+      --paper: #fafaf8;
+      --accent: #5b4fff;
+      --accent-light: #ede9ff;
+      --muted: #71717a;
+      --border: #e4e4e7;
+    }
+    body { font-family: 'IBM Plex Sans', sans-serif; background: var(--paper); color: var(--ink); }
+    h1, h2, h3, h4, .syne { font-family: 'Syne', sans-serif; }
+    code, pre, .mono { font-family: 'IBM Plex Mono', monospace; }
+    .accent { color: var(--accent); }
+    .bg-accent { background: var(--accent); }
+    .border-accent { border-color: var(--accent); }
+
+    .hero-grid {
+      background-image:
+        linear-gradient(rgba(91,79,255,0.04) 1px, transparent 1px),
+        linear-gradient(90deg, rgba(91,79,255,0.04) 1px, transparent 1px);
+      background-size: 48px 48px;
+    }
+    .code-dark {
+      background: #0d0d0f;
+      border: 1px solid #27272a;
+    }
+    .kw  { color: #a78bfa; }
+    .str { color: #6ee7b7; }
+    .fn  { color: #fbbf24; }
+    .pr  { color: #93c5fd; }
+    .cm  { color: #52525b; }
+    .pl  { color: #d4d4d8; }
+    .num { color: #f9a8d4; }
+
+    .tag {
+      display: inline-block;
+      font-family: 'IBM Plex Mono', monospace;
+      font-size: 11px;
+      font-weight: 500;
+      letter-spacing: 0.04em;
+      border: 1.5px solid var(--border);
+      border-radius: 4px;
+      padding: 2px 8px;
+      color: var(--muted);
+    }
+    .feature-number {
+      font-family: 'Syne', sans-serif;
+      font-size: 48px;
+      font-weight: 800;
+      color: transparent;
+      -webkit-text-stroke: 2px #e4e4e7;
+      line-height: 1;
+    }
+    .divider-v {
+      width: 1px;
+      background: var(--border);
+      align-self: stretch;
+    }
+    .check {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      width: 20px; height: 20px;
+      background: var(--accent-light);
+      border-radius: 50%;
+      flex-shrink: 0;
+    }
+    .check svg { width: 11px; height: 11px; color: var(--accent); }
+    .nav-link { color: #52525b; font-size: 14px; transition: color 0.15s; }
+    .nav-link:hover { color: var(--ink); }
+    .btn-primary {
+      background: var(--accent);
+      color: white;
+      font-weight: 600;
+      border-radius: 8px;
+      padding: 10px 22px;
+      font-size: 14px;
+      transition: background 0.15s, transform 0.1s;
+      display: inline-block;
+      font-family: 'IBM Plex Sans', sans-serif;
+    }
+    .btn-primary:hover { background: #4a3ee8; transform: translateY(-1px); }
+    .btn-outline {
+      border: 1.5px solid var(--border);
+      color: var(--ink);
+      font-weight: 500;
+      border-radius: 8px;
+      padding: 10px 22px;
+      font-size: 14px;
+      transition: border-color 0.15s;
+      display: inline-block;
+      font-family: 'IBM Plex Sans', sans-serif;
+    }
+    .btn-outline:hover { border-color: #a1a1aa; }
+    .marquee {
+      overflow: hidden;
+      white-space: nowrap;
+    }
+    .marquee-inner {
+      display: inline-block;
+      animation: marquee 24s linear infinite;
+    }
+    @keyframes marquee {
+      0% { transform: translateX(0); }
+      100% { transform: translateX(-50%); }
+    }
+    .inset-border {
+      box-shadow: inset 0 0 0 1px var(--border);
+    }
+  </style>
+</head>
+<body>
+
+  <!-- Nav -->
+  <header class="border-b border-zinc-200 bg-paper/90 backdrop-blur-sm sticky top-0 z-50" style="background: rgba(250,250,248,0.92)">
+    <div class="max-w-6xl mx-auto px-6 h-14 flex items-center justify-between">
+      <div class="flex items-center gap-8">
+        <div class="syne font-bold text-lg tracking-tight">
+          <span style="color: var(--accent)">▸</span> cadence
+        </div>
+        <nav class="hidden md:flex items-center gap-6">
+          <a href="#" class="nav-link">Docs</a>
+          <a href="#" class="nav-link">API Reference</a>
+          <a href="#" class="nav-link">Templates</a>
+          <a href="#" class="nav-link">Pricing</a>
+        </nav>
+      </div>
+      <div class="flex items-center gap-3">
+        <a href="#" class="nav-link">Sign in</a>
+        <a href="#" class="btn-primary">Get API key</a>
+      </div>
+    </div>
+  </header>
+
+  <!-- Hero -->
+  <section class="hero-grid pt-20 pb-24 px-6 relative overflow-hidden">
+    <div class="max-w-6xl mx-auto relative">
+      <div class="max-w-3xl">
+        <div class="flex flex-wrap gap-2 mb-8">
+          <span class="tag">REST API</span>
+          <span class="tag">11 SDKs</span>
+          <span class="tag">React Email</span>
+          <span class="tag">Transactional + Marketing</span>
+        </div>
+
+        <h1 class="syne text-[64px] font-extrabold leading-[1.02] tracking-tight mb-7" style="line-height: 1.04">
+          Email that lands,<br />
+          <span style="color: var(--accent)">infrastructure you don't babysit.</span>
+        </h1>
+
+        <p class="text-lg text-zinc-500 leading-relaxed mb-10 max-w-xl">
+          Cadence is a sending API for engineering teams. Three lines of code gets you into production. Domain auth, suppression lists, and bounce handling are included — not an upsell.
+        </p>
+
+        <div class="flex flex-wrap gap-3 items-center">
+          <a href="#" class="btn-primary text-base px-7 py-3.5">Get started free →</a>
+          <a href="#" class="btn-outline text-base px-7 py-3.5">Read the docs</a>
+        </div>
+        <p class="text-sm text-zinc-400 mt-4 mono">5,000 emails/month free — no credit card</p>
+      </div>
+
+      <!-- Floating code card -->
+      <div class="mt-14 lg:mt-0 lg:absolute lg:right-0 lg:top-0 lg:w-[480px]">
+        <div class="code-dark rounded-xl overflow-hidden">
+          <div class="flex items-center justify-between px-4 py-3 border-b border-zinc-800">
+            <div class="flex items-center gap-1.5">
+              <div class="w-3 h-3 rounded-full bg-zinc-700"></div>
+              <div class="w-3 h-3 rounded-full bg-zinc-700"></div>
+              <div class="w-3 h-3 rounded-full bg-zinc-700"></div>
+            </div>
+            <span class="mono text-xs text-zinc-600">notify.ts</span>
+            <div class="w-16"></div>
+          </div>
+          <pre class="px-5 py-5 text-[13px] mono leading-7 overflow-x-auto"><code><span class="kw">import</span> <span class="pl">{ Cadence } </span><span class="kw">from</span> <span class="str">'@cadence/sdk'</span>
+
+<span class="kw">const</span> <span class="pl">mail = </span><span class="kw">new</span> <span class="fn">Cadence</span><span class="pl">({</span>
+  <span class="pr">apiKey</span><span class="pl">: process.env.</span><span class="pr">CADENCE_KEY</span>
+<span class="pl">})</span>
+
+<span class="cm">// Send a transactional email</span>
+<span class="kw">await</span> <span class="pl">mail.email.</span><span class="fn">send</span><span class="pl">({</span>
+  <span class="pr">to</span><span class="pl">:       </span><span class="str">'user@example.com'</span><span class="pl">,</span>
+  <span class="pr">from</span><span class="pl">:     </span><span class="str">'app@yourco.com'</span><span class="pl">,</span>
+  <span class="pr">template</span><span class="pl">: </span><span class="str">'invite-accepted'</span><span class="pl">,</span>
+  <span class="pr">data</span><span class="pl">:     { inviterName: </span><span class="str">'Priya'</span> <span class="pl">},</span>
+<span class="pl">})</span>
+
+<span class="cm">// Schedule a marketing send</span>
+<span class="kw">await</span> <span class="pl">mail.email.</span><span class="fn">send</span><span class="pl">({</span>
+  <span class="pr">to</span><span class="pl">:          </span><span class="str">'segment:active-trial'</span><span class="pl">,</span>
+  <span class="pr">from</span><span class="pl">:        </span><span class="str">'growth@yourco.com'</span><span class="pl">,</span>
+  <span class="pr">template</span><span class="pl">:   </span><span class="str">'trial-expiry-reminder'</span><span class="pl">,</span>
+  <span class="pr">scheduleAt</span><span class="pl">: </span><span class="str">'2026-07-01T09:00:00Z'</span><span class="pl">,</span>
+<span class="pl">})</span></code></pre>
+          <div class="border-t border-zinc-800 px-5 py-3 flex items-center gap-2">
+            <div class="w-2 h-2 rounded-full bg-green-400"></div>
+            <span class="mono text-xs text-zinc-500">msg_01HXQP8… queued — est. delivery &lt;120ms</span>
+          </div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- Marquee -->
+  <div class="border-y border-zinc-200 py-3 marquee bg-white">
+    <div class="marquee-inner">
+      <span class="text-zinc-400 text-sm mono mx-8">SPF · DKIM · DMARC</span>
+      <span class="text-zinc-300 mx-2">◆</span>
+      <span class="text-zinc-400 text-sm mono mx-8">Bounce tracking</span>
+      <span class="text-zinc-300 mx-2">◆</span>
+      <span class="text-zinc-400 text-sm mono mx-8">Suppression lists</span>
+      <span class="text-zinc-300 mx-2">◆</span>
+      <span class="text-zinc-400 text-sm mono mx-8">React Email templates</span>
+      <span class="text-zinc-300 mx-2">◆</span>
+      <span class="text-zinc-400 text-sm mono mx-8">Open &amp; click tracking</span>
+      <span class="text-zinc-300 mx-2">◆</span>
+      <span class="text-zinc-400 text-sm mono mx-8">Webhook events</span>
+      <span class="text-zinc-300 mx-2">◆</span>
+      <span class="text-zinc-400 text-sm mono mx-8">Test &amp; preview mode</span>
+      <span class="text-zinc-300 mx-2">◆</span>
+      <span class="text-zinc-400 text-sm mono mx-8">Dedicated IPs</span>
+      <span class="text-zinc-300 mx-2">◆</span>
+      <span class="text-zinc-400 text-sm mono mx-8">Scheduled sends</span>
+      <span class="text-zinc-300 mx-2">◆</span>
+      <span class="text-zinc-400 text-sm mono mx-8">99.97% deliverability</span>
+      <span class="text-zinc-300 mx-2">◆</span>
+      <span class="text-zinc-400 text-sm mono mx-8">SPF · DKIM · DMARC</span>
+      <span class="text-zinc-300 mx-2">◆</span>
+      <span class="text-zinc-400 text-sm mono mx-8">Bounce tracking</span>
+      <span class="text-zinc-300 mx-2">◆</span>
+      <span class="text-zinc-400 text-sm mono mx-8">Suppression lists</span>
+      <span class="text-zinc-300 mx-2">◆</span>
+      <span class="text-zinc-400 text-sm mono mx-8">React Email templates</span>
+      <span class="text-zinc-300 mx-2">◆</span>
+      <span class="text-zinc-400 text-sm mono mx-8">Open &amp; click tracking</span>
+      <span class="text-zinc-300 mx-2">◆</span>
+      <span class="text-zinc-400 text-sm mono mx-8">Webhook events</span>
+      <span class="text-zinc-300 mx-2">◆</span>
+      <span class="text-zinc-400 text-sm mono mx-8">Test &amp; preview mode</span>
+      <span class="text-zinc-300 mx-2">◆</span>
+      <span class="text-zinc-400 text-sm mono mx-8">Dedicated IPs</span>
+      <span class="text-zinc-300 mx-2">◆</span>
+    </div>
+  </div>
+
+  <!-- Features grid — numbered editorial style -->
+  <section class="py-24 px-6 bg-white">
+    <div class="max-w-6xl mx-auto">
+      <div class="mb-16">
+        <div class="mono text-xs text-zinc-400 uppercase tracking-widest mb-3">// What Cadence does</div>
+        <h2 class="syne text-4xl font-extrabold">Everything email. Nothing extraneous.</h2>
+      </div>
+
+      <div class="grid md:grid-cols-2 lg:grid-cols-3 gap-px bg-zinc-200">
+
+        <div class="bg-white p-8">
+          <div class="feature-number mb-3">01</div>
+          <h3 class="syne text-xl font-bold mb-3">Simple sending API</h3>
+          <p class="text-zinc-500 text-sm leading-relaxed">REST API and SDKs for 11 languages. Call <code class="text-violet-600 bg-violet-50 px-1 rounded text-xs">email.send()</code> with a template name and data object. That's it for the common case.</p>
+        </div>
+
+        <div class="bg-white p-8">
+          <div class="feature-number mb-3">02</div>
+          <h3 class="syne text-xl font-bold mb-3">Deliverability tooling</h3>
+          <p class="text-zinc-500 text-sm leading-relaxed">SPF, DKIM, DMARC with guided DNS setup. Suppression lists maintained automatically. Reputation monitoring with proactive alerts. No deliverability consultant needed.</p>
+        </div>
+
+        <div class="bg-white p-8">
+          <div class="feature-number mb-3">03</div>
+          <h3 class="syne text-xl font-bold mb-3">React component templates</h3>
+          <p class="text-zinc-500 text-sm leading-relaxed">Write email in JSX. Render to battle-tested HTML. Version-control your templates in git. Engineers own the structure; content teams own the words.</p>
+        </div>
+
+        <div class="bg-white p-8">
+          <div class="feature-number mb-3">04</div>
+          <h3 class="syne text-xl font-bold mb-3">Preview &amp; test mode</h3>
+          <p class="text-zinc-500 text-sm leading-relaxed">Render any template with real or mock data in the browser before a single production send. Test mode captures sends without delivering them — perfect for staging environments.</p>
+        </div>
+
+        <div class="bg-white p-8">
+          <div class="feature-number mb-3">05</div>
+          <h3 class="syne text-xl font-bold mb-3">Analytics per message</h3>
+          <p class="text-zinc-500 text-sm leading-relaxed">Opens, clicks, deliveries, bounces, and unsubscribes tracked at the message level and rolled up by template. Exportable via webhook or the Events API.</p>
+        </div>
+
+        <div class="bg-white p-8">
+          <div class="feature-number mb-3">06</div>
+          <h3 class="syne text-xl font-bold mb-3">Dashboard for non-engineers</h3>
+          <p class="text-zinc-500 text-sm leading-relaxed">Content editors update copy, preview results, and schedule campaigns without a deploy. Role-based access means they never touch API credentials.</p>
+        </div>
+
+      </div>
+    </div>
+  </section>
+
+  <!-- Deliverability deep-dive -->
+  <section class="py-24 px-6" style="background: var(--paper)">
+    <div class="max-w-6xl mx-auto">
+      <div class="grid lg:grid-cols-[1fr_2fr] gap-16 items-start">
+        <div>
+          <div class="mono text-xs text-zinc-400 uppercase tracking-widest mb-4">// Deliverability</div>
+          <h2 class="syne text-3xl font-extrabold mb-5 leading-snug">The hard, invisible part of email. Handled.</h2>
+          <p class="text-zinc-500 leading-relaxed text-sm mb-6">Getting email into the inbox — rather than spam — requires constant, un-glamorous infrastructure work. Most teams discover this the hard way when their welcome email starts hitting promotions folders. Cadence ships with everything required, configured correctly, from the first send.</p>
+          <a href="#" class="mono text-sm accent font-medium">Read the deliverability guide →</a>
+        </div>
+
+        <div class="space-y-0 border border-zinc-200 rounded-xl overflow-hidden divide-y divide-zinc-200">
+          <div class="p-6 flex gap-5 bg-white hover:bg-zinc-50 transition-colors">
+            <div class="check mt-0.5 shrink-0">
+              <svg viewBox="0 0 12 12" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="2 6 5 9 10 3" /></svg>
+            </div>
+            <div>
+              <div class="font-semibold mb-1">Guided SPF, DKIM, and DMARC setup</div>
+              <p class="text-sm text-zinc-500">Step-by-step DNS instructions per domain. We verify records after you add them and monitor continuously — if a record drifts or gets deleted, we alert you within minutes.</p>
+            </div>
+          </div>
+          <div class="p-6 flex gap-5 bg-white hover:bg-zinc-50 transition-colors">
+            <div class="check mt-0.5 shrink-0">
+              <svg viewBox="0 0 12 12" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="2 6 5 9 10 3" /></svg>
+            </div>
+            <div>
+              <div class="font-semibold mb-1">Automatic bounce and complaint handling</div>
+              <p class="text-sm text-zinc-500">Hard bounces and spam complaints come back via feedback loop. Cadence suppresses the address immediately and removes it from future sends — no manual intervention required.</p>
+            </div>
+          </div>
+          <div class="p-6 flex gap-5 bg-white hover:bg-zinc-50 transition-colors">
+            <div class="check mt-0.5 shrink-0">
+              <svg viewBox="0 0 12 12" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="2 6 5 9 10 3" /></svg>
+            </div>
+            <div>
+              <div class="font-semibold mb-1">Managed IP warm-up</div>
+              <p class="text-sm text-zinc-500">New accounts start on shared sending pools with established reputation. As volume grows, we move senders to dedicated IPs with a managed warm-up schedule.</p>
+            </div>
+          </div>
+          <div class="p-6 flex gap-5 bg-white hover:bg-zinc-50 transition-colors">
+            <div class="check mt-0.5 shrink-0">
+              <svg viewBox="0 0 12 12" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="2 6 5 9 10 3" /></svg>
+            </div>
+            <div>
+              <div class="font-semibold mb-1">Reputation dashboard</div>
+              <p class="text-sm text-zinc-500">Real-time view of your sender reputation, complaint rates, and bounce rates. Thresholds alert you before ISPs start filtering your mail.</p>
+            </div>
+          </div>
+          <div class="p-6 flex gap-5 bg-white hover:bg-zinc-50 transition-colors">
+            <div class="check mt-0.5 shrink-0">
+              <svg viewBox="0 0 12 12" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="2 6 5 9 10 3" /></svg>
+            </div>
+            <div>
+              <div class="font-semibold mb-1">Smart throttling and retry logic</div>
+              <p class="text-sm text-zinc-500">Cadence detects temporary delivery failures (soft bounces, rate limits from receiving servers) and retries with correct backoff — without requiring you to implement it.</p>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- SDK snippet strip -->
+  <section class="py-20 px-6 bg-white border-t border-zinc-200">
+    <div class="max-w-6xl mx-auto">
+      <div class="text-center mb-12">
+        <div class="mono text-xs text-zinc-400 uppercase tracking-widest mb-3">// One API, eleven SDKs</div>
+        <h2 class="syne text-3xl font-extrabold">Works in the language you're already using.</h2>
+      </div>
+      <div class="grid md:grid-cols-2 gap-4">
+        <div class="code-dark rounded-xl overflow-hidden">
+          <div class="px-4 py-2.5 border-b border-zinc-800 mono text-xs text-zinc-500">Ruby</div>
+          <pre class="px-5 py-4 text-sm mono leading-7"><code><span class="pl">client = </span><span class="fn">Cadence</span><span class="pl">::</span><span class="fn">Client</span><span class="pl">.</span><span class="fn">new</span><span class="pl">(api_key: ENV[</span><span class="str">'CADENCE_KEY'</span><span class="pl">])</span>
+
+<span class="pl">client.email.</span><span class="fn">send</span><span class="pl">(</span>
+  <span class="pr">to</span><span class="pl">:       </span><span class="str">'user@example.com'</span><span class="pl">,</span>
+  <span class="pr">from</span><span class="pl">:     </span><span class="str">'app@yourco.com'</span><span class="pl">,</span>
+  <span class="pr">template</span><span class="pl">: </span><span class="str">'subscription-renewed'</span><span class="pl">,</span>
+  <span class="pr">data</span><span class="pl">:     { plan: </span><span class="str">'pro'</span><span class="pl">, amount: </span><span class="num">49</span> <span class="pl">}</span>
+<span class="pl">)</span></code></pre>
+        </div>
+        <div class="code-dark rounded-xl overflow-hidden">
+          <div class="px-4 py-2.5 border-b border-zinc-800 mono text-xs text-zinc-500">Python</div>
+          <pre class="px-5 py-4 text-sm mono leading-7"><code><span class="kw">from</span> <span class="pl">cadence </span><span class="kw">import</span> <span class="pl">Cadence</span>
+
+<span class="pl">client = </span><span class="fn">Cadence</span><span class="pl">(api_key=os.environ[</span><span class="str">"CADENCE_KEY"</span><span class="pl">])</span>
+
+<span class="pl">client.email.</span><span class="fn">send</span><span class="pl">(</span>
+    <span class="pr">to</span><span class="pl">=</span><span class="str">"user@example.com"</span><span class="pl">,</span>
+    <span class="pr">from_</span><span class="pl">=</span><span class="str">"app@yourco.com"</span><span class="pl">,</span>
+    <span class="pr">template</span><span class="pl">=</span><span class="str">"invoice-ready"</span><span class="pl">,</span>
+    <span class="pr">data</span><span class="pl">={</span><span class="str">"invoice_url"</span><span class="pl">: invoice_link},</span>
+<span class="pl">)</span></code></pre>
+        </div>
+        <div class="code-dark rounded-xl overflow-hidden">
+          <div class="px-4 py-2.5 border-b border-zinc-800 mono text-xs text-zinc-500">Go</div>
+          <pre class="px-5 py-4 text-sm mono leading-7"><code><span class="pl">c := cadence.</span><span class="fn">New</span><span class="pl">(os.</span><span class="fn">Getenv</span><span class="pl">(</span><span class="str">"CADENCE_KEY"</span><span class="pl">))</span>
+
+<span class="pl">_, err := c.Email.</span><span class="fn">Send</span><span class="pl">(ctx, cadence.SendParams{</span>
+    <span class="pr">To</span><span class="pl">:       </span><span class="str">"user@example.com"</span><span class="pl">,</span>
+    <span class="pr">From</span><span class="pl">:     </span><span class="str">"app@yourco.com"</span><span class="pl">,</span>
+    <span class="pr">Template</span><span class="pl">: </span><span class="str">"plan-downgraded"</span><span class="pl">,</span>
+    <span class="pr">Data</span><span class="pl">:     map[</span><span class="kw">string</span><span class="pl">]</span><span class="kw">any</span><span class="pl">{</span><span class="str">"plan"</span><span class="pl">: </span><span class="str">"free"</span><span class="pl">},</span>
+<span class="pl">})</span></code></pre>
+        </div>
+        <div class="code-dark rounded-xl overflow-hidden">
+          <div class="px-4 py-2.5 border-b border-zinc-800 mono text-xs text-zinc-500">cURL</div>
+          <pre class="px-5 py-4 text-sm mono leading-7"><code><span class="pl">curl -X POST https://api.cadencemail.com/v1/email/send \</span>
+  <span class="pl">-H </span><span class="str">"Authorization: Bearer $CADENCE_KEY"</span><span class="pl"> \</span>
+  <span class="pl">-H </span><span class="str">"Content-Type: application/json"</span><span class="pl"> \</span>
+  <span class="pl">-d </span><span class="str">'{</span>
+<span class="str">    "to":       "user@example.com",</span>
+<span class="str">    "from":     "app@yourco.com",</span>
+<span class="str">    "template": "password-reset",</span>
+<span class="str">    "data":     { "reset_url": "https://..." }</span>
+<span class="str">  }'</span></code></pre>
+        </div>
+      </div>
+      <div class="text-center mt-6">
+        <a href="#" class="mono text-sm accent font-medium">See all 11 SDKs in the docs →</a>
+      </div>
+    </div>
+  </section>
+
+  <!-- Who it's for -->
+  <section class="py-24 px-6 border-t border-zinc-200" style="background: var(--paper)">
+    <div class="max-w-6xl mx-auto">
+      <div class="mono text-xs text-zinc-400 uppercase tracking-widest mb-4">// Who uses Cadence</div>
+      <h2 class="syne text-3xl font-extrabold mb-12">Two teams. One platform.</h2>
+      <div class="grid md:grid-cols-2 gap-8">
+
+        <div class="border border-zinc-200 rounded-xl p-8 bg-white">
+          <div class="inline-flex items-center gap-2 mb-5">
+            <div class="w-8 h-8 rounded bg-zinc-900 flex items-center justify-center">
+              <svg class="w-4 h-4 text-white" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M10 20l4-16m4 4l4 4-4 4M6 16l-4-4 4-4" /></svg>
+            </div>
+            <span class="syne font-bold text-lg">Engineers</span>
+          </div>
+          <p class="text-zinc-500 text-sm mb-6 leading-relaxed">You integrate Cadence once and it stays out of your way. The API behaves like you'd expect: correct HTTP status codes, typed SDKs, idempotency keys, structured error objects.</p>
+          <div class="space-y-2 text-sm">
+            <div class="flex items-center gap-2.5"><div class="check"><svg viewBox="0 0 12 12" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="2 6 5 9 10 3" /></svg></div><span class="text-zinc-700">SDKs in Node, Python, Go, Ruby, PHP, Elixir, Java, .NET</span></div>
+            <div class="flex items-center gap-2.5"><div class="check"><svg viewBox="0 0 12 12" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="2 6 5 9 10 3" /></svg></div><span class="text-zinc-700">Idempotency keys — safe to retry on network error</span></div>
+            <div class="flex items-center gap-2.5"><div class="check"><svg viewBox="0 0 12 12" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="2 6 5 9 10 3" /></svg></div><span class="text-zinc-700">Webhook delivery for all events</span></div>
+            <div class="flex items-center gap-2.5"><div class="check"><svg viewBox="0 0 12 12" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="2 6 5 9 10 3" /></svg></div><span class="text-zinc-700">React Email support — templates are components</span></div>
+            <div class="flex items-center gap-2.5"><div class="check"><svg viewBox="0 0 12 12" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="2 6 5 9 10 3" /></svg></div><span class="text-zinc-700">Test mode — sends intercepted, not delivered</span></div>
+          </div>
+        </div>
+
+        <div class="border border-zinc-200 rounded-xl p-8 bg-white">
+          <div class="inline-flex items-center gap-2 mb-5">
+            <div class="w-8 h-8 rounded flex items-center justify-center" style="background: var(--accent-light)">
+              <svg class="w-4 h-4" style="color: var(--accent)" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M15.232 5.232l3.536 3.536m-2.036-5.036a2.5 2.5 0 113.536 3.536L6.5 21.036H3v-3.572L16.732 3.732z" /></svg>
+            </div>
+            <span class="syne font-bold text-lg">Content &amp; Product</span>
+          </div>
+          <p class="text-zinc-500 text-sm mb-6 leading-relaxed">You can write, update, and schedule emails directly in the Cadence dashboard. No pull request. No waiting for a deploy. Your changes go live when you publish them.</p>
+          <div class="space-y-2 text-sm">
+            <div class="flex items-center gap-2.5"><div class="check"><svg viewBox="0 0 12 12" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="2 6 5 9 10 3" /></svg></div><span class="text-zinc-700">Visual template editor with live preview</span></div>
+            <div class="flex items-center gap-2.5"><div class="check"><svg viewBox="0 0 12 12" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="2 6 5 9 10 3" /></svg></div><span class="text-zinc-700">Preview any template with real subscriber data</span></div>
+            <div class="flex items-center gap-2.5"><div class="check"><svg viewBox="0 0 12 12" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="2 6 5 9 10 3" /></svg></div><span class="text-zinc-700">Schedule campaigns — no cron, no engineer needed</span></div>
+            <div class="flex items-center gap-2.5"><div class="check"><svg viewBox="0 0 12 12" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="2 6 5 9 10 3" /></svg></div><span class="text-zinc-700">Per-template analytics: opens, clicks, unsubscribes</span></div>
+            <div class="flex items-center gap-2.5"><div class="check"><svg viewBox="0 0 12 12" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="2 6 5 9 10 3" /></svg></div><span class="text-zinc-700">Version history — revert to any previous version</span></div>
+          </div>
+        </div>
+
+      </div>
+    </div>
+  </section>
+
+  <!-- CTA -->
+  <section class="py-24 px-6 border-t border-zinc-200" style="background: var(--accent)">
+    <div class="max-w-4xl mx-auto text-center text-white">
+      <div class="mono text-sm opacity-60 mb-4">// Get started</div>
+      <h2 class="syne text-5xl font-extrabold mb-5 tracking-tight">Email that lands.<br />Infrastructure you won't touch.</h2>
+      <p class="text-violet-200 text-lg mb-10 max-w-xl mx-auto leading-relaxed">Free plan: 5,000 emails/month. Full API access. No credit card. You can be sending in production before lunch.</p>
+      <div class="flex flex-col sm:flex-row gap-4 justify-center">
+        <a href="#" class="inline-block bg-white text-violet-700 font-bold px-8 py-4 rounded-xl text-base hover:bg-violet-50 transition-colors">Get your API key →</a>
+        <a href="#" class="inline-block bg-violet-700/50 text-white font-medium px-8 py-4 rounded-xl text-base hover:bg-violet-700 transition-colors border border-violet-400/30">Read the docs</a>
+      </div>
+      <p class="mt-6 text-violet-300 text-sm mono">Trusted by 3,000+ engineering teams · 4.2B emails/year · 99.97% deliverability</p>
+    </div>
+  </section>
+
+  <!-- Footer -->
+  <footer class="bg-zinc-950 text-zinc-500 py-10 px-6">
+    <div class="max-w-6xl mx-auto flex flex-col md:flex-row items-center justify-between gap-4">
+      <div class="syne font-bold text-zinc-300 text-base">
+        <span class="text-violet-400">▸</span> cadence
+      </div>
+      <div class="flex gap-6 text-sm">
+        <a href="#" class="hover:text-zinc-300 transition-colors">Docs</a>
+        <a href="#" class="hover:text-zinc-300 transition-colors">API Reference</a>
+        <a href="#" class="hover:text-zinc-300 transition-colors">Status</a>
+        <a href="#" class="hover:text-zinc-300 transition-colors">Security</a>
+        <a href="#" class="hover:text-zinc-300 transition-colors">Privacy</a>
+        <a href="#" class="hover:text-zinc-300 transition-colors">Terms</a>
+      </div>
+    </div>
+  </footer>
+
+</body>
+</html>

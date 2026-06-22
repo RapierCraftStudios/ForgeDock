@@ -1,0 +1,398 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Slipstream — The deployment platform for serious teams</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link href="https://fonts.googleapis.com/css2?family=DM+Sans:ital,opsz,wght@0,9..40,300;0,9..40,400;0,9..40,500;0,9..40,700;0,9..40,900;1,9..40,400&family=DM+Mono:wght@400;500&display=swap" rel="stylesheet" />
+  <style>
+    * { box-sizing: border-box; }
+    body {
+      font-family: 'DM Sans', sans-serif;
+      background: #fafaf9;
+      color: #1c1917;
+    }
+    .font-mono { font-family: 'DM Mono', monospace; }
+    .hero-gradient {
+      background: linear-gradient(135deg, #f0fdf4 0%, #fafaf9 40%, #fefce8 100%);
+    }
+    .accent { color: #16a34a; }
+    .card-shadow {
+      box-shadow: 0 1px 3px rgba(0,0,0,0.06), 0 4px 20px rgba(0,0,0,0.05);
+    }
+    .deploy-card {
+      box-shadow: 0 0 0 1px rgba(0,0,0,0.06), 0 8px 32px rgba(0,0,0,0.08);
+    }
+    .step-line::after {
+      content: '';
+      position: absolute;
+      left: 19px;
+      top: 40px;
+      bottom: -20px;
+      width: 1px;
+      background: linear-gradient(to bottom, #d1d5db, transparent);
+    }
+    .feature-hover { transition: all 0.2s; }
+    .feature-hover:hover { transform: translateY(-2px); box-shadow: 0 8px 40px rgba(0,0,0,0.1); }
+  </style>
+</head>
+<body class="antialiased">
+
+  <!-- NAV -->
+  <nav class="sticky top-0 z-50 bg-white/90 backdrop-blur-sm border-b border-stone-200">
+    <div class="max-w-6xl mx-auto px-6 h-16 flex items-center justify-between">
+      <div class="flex items-center gap-10">
+        <div class="flex items-center gap-2">
+          <div class="w-7 h-7 rounded-lg bg-green-600 flex items-center justify-center">
+            <svg class="w-4 h-4 text-white" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2.5">
+              <path stroke-linecap="round" stroke-linejoin="round" d="M3 8l7.89 5.26a2 2 0 002.22 0L21 8M5 19h14a2 2 0 002-2V7a2 2 0 00-2-2H5a2 2 0 00-2 2v10a2 2 0 002 2z" />
+            </svg>
+          </div>
+          <span class="font-bold text-lg text-stone-900">Slipstream</span>
+        </div>
+        <div class="hidden md:flex items-center gap-8 text-sm text-stone-500 font-medium">
+          <a href="#" class="hover:text-stone-900 transition-colors">Product</a>
+          <a href="#" class="hover:text-stone-900 transition-colors">Docs</a>
+          <a href="#" class="hover:text-stone-900 transition-colors">Pricing</a>
+          <a href="#" class="hover:text-stone-900 transition-colors">Enterprise</a>
+          <a href="#" class="hover:text-stone-900 transition-colors">Blog</a>
+        </div>
+      </div>
+      <div class="flex items-center gap-3">
+        <a href="#" class="text-sm text-stone-600 hover:text-stone-900 font-medium px-3 py-2 transition-colors">Sign in</a>
+        <a href="#" class="text-sm bg-stone-900 hover:bg-stone-700 text-white font-semibold px-5 py-2 rounded-lg transition-colors">Start for free</a>
+      </div>
+    </div>
+  </nav>
+
+  <!-- HERO -->
+  <section class="hero-gradient pt-24 pb-20 px-6">
+    <div class="max-w-5xl mx-auto">
+      <div class="max-w-3xl">
+        <div class="inline-flex items-center gap-2 text-sm font-medium text-green-700 bg-green-50 border border-green-200 rounded-full px-4 py-1.5 mb-8">
+          <span class="w-2 h-2 rounded-full bg-green-500 inline-block"></span>
+          New: Edge Functions GA — deploy compute at the edge
+        </div>
+
+        <h1 class="text-6xl md:text-7xl font-black tracking-tight leading-none text-stone-900 mb-6">
+          Deploy web apps<br />
+          like you mean it.
+        </h1>
+
+        <p class="text-xl text-stone-500 font-normal leading-relaxed max-w-2xl mb-10">
+          Connect your repository. Push your code. That's all you do.
+          Slipstream handles builds, preview environments, and global distribution — automatically.
+        </p>
+
+        <div class="flex flex-col sm:flex-row items-start gap-3 mb-14">
+          <a href="#" class="bg-stone-900 hover:bg-stone-700 text-white font-bold px-8 py-3.5 rounded-xl text-base transition-colors shadow-sm">
+            Deploy now — it's free
+          </a>
+          <a href="#" class="flex items-center gap-2 text-stone-700 hover:text-stone-900 font-semibold px-6 py-3.5 text-base transition-colors">
+            <svg class="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="1.5">
+              <path stroke-linecap="round" stroke-linejoin="round" d="M5.25 5.653c0-.856.917-1.398 1.667-.986l11.54 6.348a1.125 1.125 0 010 1.971l-11.54 6.347a1.125 1.125 0 01-1.667-.985V5.653z" />
+            </svg>
+            Watch 2-min demo
+          </a>
+        </div>
+
+        <!-- Deploy status card -->
+        <div class="deploy-card rounded-2xl bg-white p-1 max-w-lg">
+          <div class="bg-stone-50 rounded-xl p-5">
+            <div class="flex items-center justify-between mb-4">
+              <div class="flex items-center gap-3">
+                <div class="w-8 h-8 rounded-lg bg-stone-900 flex items-center justify-center">
+                  <svg class="w-4 h-4 text-white" fill="currentColor" viewBox="0 0 24 24">
+                    <path d="M12 0c-6.626 0-12 5.373-12 12 0 5.302 3.438 9.8 8.207 11.387.599.111.793-.261.793-.577v-2.234c-3.338.726-4.033-1.416-4.033-1.416-.546-1.387-1.333-1.756-1.333-1.756-1.089-.745.083-.729.083-.729 1.205.084 1.839 1.237 1.839 1.237 1.07 1.834 2.807 1.304 3.492.997.107-.775.418-1.305.762-1.604-2.665-.305-5.467-1.334-5.467-5.931 0-1.311.469-2.381 1.236-3.221-.124-.303-.535-1.524.117-3.176 0 0 1.008-.322 3.301 1.23.957-.266 1.983-.399 3.003-.404 1.02.005 2.047.138 3.006.404 2.291-1.552 3.297-1.23 3.297-1.23.653 1.653.242 2.874.118 3.176.77.84 1.235 1.911 1.235 3.221 0 4.609-2.807 5.624-5.479 5.921.43.372.823 1.102.823 2.222v3.293c0 .319.192.694.801.576 4.765-1.589 8.199-6.086 8.199-11.386 0-6.627-5.373-12-12-12z"/>
+                  </svg>
+                </div>
+                <div>
+                  <div class="text-sm font-semibold text-stone-800">feat/redesign-homepage</div>
+                  <div class="text-xs text-stone-400 font-mono">a3f9c2b — 2 minutes ago</div>
+                </div>
+              </div>
+              <div class="flex items-center gap-1.5 text-xs font-semibold text-green-700 bg-green-50 border border-green-200 rounded-full px-3 py-1">
+                <svg class="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2">
+                  <path stroke-linecap="round" stroke-linejoin="round" d="M9 12.75L11.25 15 15 9.75M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
+                </svg>
+                Ready
+              </div>
+            </div>
+            <div class="space-y-2.5">
+              <div class="flex items-center justify-between text-sm">
+                <span class="text-stone-500 flex items-center gap-2">
+                  <svg class="w-3.5 h-3.5 text-green-500" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M5 13l4 4L19 7" /></svg>
+                  Build
+                </span>
+                <span class="text-stone-400 font-mono text-xs">14.3s</span>
+              </div>
+              <div class="flex items-center justify-between text-sm">
+                <span class="text-stone-500 flex items-center gap-2">
+                  <svg class="w-3.5 h-3.5 text-green-500" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M5 13l4 4L19 7" /></svg>
+                  Deploy to edge
+                </span>
+                <span class="text-stone-400 font-mono text-xs">2.1s</span>
+              </div>
+              <div class="pt-2 border-t border-stone-200">
+                <div class="text-xs text-stone-400 mb-1">Preview URL</div>
+                <a href="#" class="text-sm text-green-700 font-mono hover:underline">https://pr-88.acme.slipstream.app</a>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- FRAMEWORK LOGOS -->
+  <section class="py-14 px-6 border-y border-stone-100">
+    <div class="max-w-5xl mx-auto">
+      <p class="text-center text-xs font-mono text-stone-400 uppercase tracking-widest mb-7">Works with every modern framework</p>
+      <div class="flex flex-wrap items-center justify-center gap-x-10 gap-y-4">
+        <div class="flex items-center gap-2 text-stone-400 hover:text-stone-700 transition-colors cursor-pointer">
+          <svg class="w-5 h-5" fill="currentColor" viewBox="0 0 24 24"><path d="M11.572 0c-.176 0-.31.001-.358.007a19.76 19.76 0 01-.364.033C7.443.346 4.25 2.185 2.228 5.012a11.875 11.875 0 00-2.119 5.243c-.096.659-.108.854-.108 1.747s.012 1.089.108 1.748c.652 4.506 3.86 8.292 8.209 9.695.779.25 1.6.422 2.534.525.363.04 1.935.04 2.299 0 1.611-.178 2.977-.577 4.323-1.264.207-.106.247-.134.219-.158-.02-.013-.9-1.193-1.955-2.62l-1.919-2.592-2.404-3.558a338.739 338.739 0 00-2.422-3.556c-.009-.002-.018 1.579-.023 3.51-.007 3.38-.01 3.515-.052 3.595a.426.426 0 01-.206.214c-.075.037-.14.044-.495.044H7.81l-.108-.068a.438.438 0 01-.157-.171l-.05-.106.006-4.703.007-4.705.072-.092a.645.645 0 01.174-.143c.096-.047.134-.051.54-.051.478 0 .558.018.682.154.035.038 1.337 1.999 2.895 4.361a10760.433 10760.433 0 004.735 7.17l1.9 2.879.096-.063a12.317 12.317 0 002.466-2.163 11.944 11.944 0 002.824-6.134c.096-.66.108-.854.108-1.748 0-.893-.012-1.088-.108-1.747-.652-4.506-3.859-8.292-8.208-9.695a12.597 12.597 0 00-2.499-.523A33.119 33.119 0 0011.573 0zm4.069 7.217c.347 0 .408.005.486.047a.473.473 0 01.237.277c.018.06.023 1.365.018 4.304l-.006 4.218-.744-1.14-.746-1.14v-3.066c0-1.982.01-3.097.023-3.15a.478.478 0 01.233-.296c.096-.05.13-.054.5-.054z"/></svg>
+          <span class="text-sm font-semibold">Next.js</span>
+        </div>
+        <div class="flex items-center gap-2 text-stone-400 hover:text-stone-700 transition-colors cursor-pointer">
+          <span class="text-sm font-semibold">SvelteKit</span>
+        </div>
+        <div class="flex items-center gap-2 text-stone-400 hover:text-stone-700 transition-colors cursor-pointer">
+          <span class="text-sm font-semibold">Astro</span>
+        </div>
+        <div class="flex items-center gap-2 text-stone-400 hover:text-stone-700 transition-colors cursor-pointer">
+          <span class="text-sm font-semibold">Remix</span>
+        </div>
+        <div class="flex items-center gap-2 text-stone-400 hover:text-stone-700 transition-colors cursor-pointer">
+          <span class="text-sm font-semibold">Nuxt</span>
+        </div>
+        <div class="flex items-center gap-2 text-stone-400 hover:text-stone-700 transition-colors cursor-pointer">
+          <span class="text-sm font-semibold">Vite</span>
+        </div>
+        <div class="flex items-center gap-2 text-stone-400 hover:text-stone-700 transition-colors cursor-pointer">
+          <span class="text-sm font-semibold">Gatsby</span>
+        </div>
+        <div class="flex items-center gap-2 text-stone-400 hover:text-stone-700 transition-colors cursor-pointer">
+          <span class="text-sm font-semibold">SolidStart</span>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- HOW IT WORKS -->
+  <section class="py-24 px-6">
+    <div class="max-w-5xl mx-auto grid grid-cols-1 md:grid-cols-2 gap-16 items-center">
+      <div>
+        <p class="text-xs font-mono text-green-600 uppercase tracking-widest mb-5">Setup in 3 steps</p>
+        <h2 class="text-4xl font-black text-stone-900 tracking-tight mb-10">From zero to production<br />in under 2 minutes.</h2>
+
+        <div class="space-y-8">
+          <div class="flex gap-5 relative step-line">
+            <div class="w-10 h-10 shrink-0 rounded-full bg-stone-900 text-white flex items-center justify-center text-sm font-black">1</div>
+            <div>
+              <h3 class="font-bold text-stone-800 mb-1">Connect your repository</h3>
+              <p class="text-stone-500 text-sm leading-relaxed">Authorize Slipstream on GitHub, GitLab, or Bitbucket. Select a repo. Done.</p>
+            </div>
+          </div>
+          <div class="flex gap-5 relative step-line">
+            <div class="w-10 h-10 shrink-0 rounded-full bg-stone-900 text-white flex items-center justify-center text-sm font-black">2</div>
+            <div>
+              <h3 class="font-bold text-stone-800 mb-1">Configure (or don't)</h3>
+              <p class="text-stone-500 text-sm leading-relaxed">We detect your framework and set build settings automatically. Override anything you want.</p>
+            </div>
+          </div>
+          <div class="flex gap-5">
+            <div class="w-10 h-10 shrink-0 rounded-full bg-green-600 text-white flex items-center justify-center text-sm font-black">3</div>
+            <div>
+              <h3 class="font-bold text-stone-800 mb-1">Push and ship</h3>
+              <p class="text-stone-500 text-sm leading-relaxed">Every push triggers a build and deploy. Every PR gets a preview URL. Production stays separate from previews.</p>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Code block -->
+      <div class="card-shadow rounded-2xl overflow-hidden bg-stone-900">
+        <div class="flex items-center gap-2 px-5 py-3 bg-stone-800">
+          <div class="w-3 h-3 rounded-full bg-red-400"></div>
+          <div class="w-3 h-3 rounded-full bg-yellow-400"></div>
+          <div class="w-3 h-3 rounded-full bg-green-400"></div>
+          <span class="ml-2 text-xs text-stone-400 font-mono">slipstream.yml</span>
+        </div>
+        <div class="p-6 font-mono text-sm text-stone-300 leading-7">
+          <div class="text-stone-500"># Optional config — most projects need none.</div>
+          <div class="mt-2"><span class="text-green-400">name</span><span class="text-stone-400">:</span> my-app</div>
+          <div><span class="text-green-400">framework</span><span class="text-stone-400">:</span> nextjs  <span class="text-stone-600"># auto-detected</span></div>
+          <div class="mt-2"><span class="text-green-400">build</span><span class="text-stone-400">:</span></div>
+          <div class="ml-4"><span class="text-green-400">command</span><span class="text-stone-400">:</span> npm run build</div>
+          <div class="ml-4"><span class="text-green-400">output</span><span class="text-stone-400">:</span> .next</div>
+          <div class="mt-2"><span class="text-green-400">env</span><span class="text-stone-400">:</span></div>
+          <div class="ml-4"><span class="text-green-400">DATABASE_URL</span><span class="text-stone-400">:</span> <span class="text-amber-300">$DATABASE_URL</span></div>
+          <div class="ml-4"><span class="text-green-400">NEXT_PUBLIC_API</span><span class="text-stone-400">:</span> <span class="text-amber-300">$API_URL</span></div>
+          <div class="mt-3 pt-3 border-t border-stone-700 text-stone-500"># That's everything. Push to deploy.</div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- FEATURES GRID -->
+  <section class="py-20 px-6 bg-stone-50 border-y border-stone-100">
+    <div class="max-w-5xl mx-auto">
+      <div class="text-center mb-14">
+        <h2 class="text-4xl font-black text-stone-900 tracking-tight">Everything you need. Nothing you don't.</h2>
+        <p class="text-stone-500 mt-3 text-lg">We made deliberate choices about what belongs in a deployment platform.</p>
+      </div>
+
+      <div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
+        <div class="feature-hover bg-white rounded-2xl p-7 card-shadow">
+          <div class="w-11 h-11 rounded-xl bg-green-50 flex items-center justify-center mb-5">
+            <svg class="w-6 h-6 text-green-600" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="1.5">
+              <path stroke-linecap="round" stroke-linejoin="round" d="M3.75 13.5l10.5-11.25L12 10.5h8.25L9.75 21.75 12 13.5H3.75z" />
+            </svg>
+          </div>
+          <h3 class="font-bold text-stone-900 mb-2">Instant deploys</h3>
+          <p class="text-sm text-stone-500 leading-relaxed">Build and deploy in under 20 seconds for most projects. No queue, no waiting.</p>
+        </div>
+
+        <div class="feature-hover bg-white rounded-2xl p-7 card-shadow">
+          <div class="w-11 h-11 rounded-xl bg-green-50 flex items-center justify-center mb-5">
+            <svg class="w-6 h-6 text-green-600" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="1.5">
+              <path stroke-linecap="round" stroke-linejoin="round" d="M9 12.75L11.25 15 15 9.75m-3-7.036A11.959 11.959 0 013.598 6 11.99 11.99 0 003 9.749c0 5.592 3.824 10.29 9 11.623 5.176-1.332 9-6.03 9-11.622 0-1.31-.21-2.571-.598-3.751h-.152c-3.196 0-6.1-1.248-8.25-3.285z" />
+            </svg>
+          </div>
+          <h3 class="font-bold text-stone-900 mb-2">PR Preview environments</h3>
+          <p class="text-sm text-stone-500 leading-relaxed">Every pull request gets an isolated deployment. Review changes before they go live.</p>
+        </div>
+
+        <div class="feature-hover bg-white rounded-2xl p-7 card-shadow">
+          <div class="w-11 h-11 rounded-xl bg-green-50 flex items-center justify-center mb-5">
+            <svg class="w-6 h-6 text-green-600" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="1.5">
+              <path stroke-linecap="round" stroke-linejoin="round" d="M12 21a9.004 9.004 0 008.716-6.747M12 21a9.004 9.004 0 01-8.716-6.747M12 21c2.485 0 4.5-4.03 4.5-9S14.485 3 12 3m0 18c-2.485 0-4.5-4.03-4.5-9S9.515 3 12 3m0 0a8.997 8.997 0 017.843 4.582M12 3a8.997 8.997 0 00-7.843 4.582m15.686 0A11.953 11.953 0 0112 10.5c-2.998 0-5.74-1.1-7.843-2.918m15.686 0A8.959 8.959 0 0121 12c0 .778-.099 1.533-.284 2.253" />
+            </svg>
+          </div>
+          <h3 class="font-bold text-stone-900 mb-2">Global edge CDN</h3>
+          <p class="text-sm text-stone-500 leading-relaxed">300+ PoPs worldwide. Static assets served from the node closest to your users.</p>
+        </div>
+
+        <div class="feature-hover bg-white rounded-2xl p-7 card-shadow">
+          <div class="w-11 h-11 rounded-xl bg-green-50 flex items-center justify-center mb-5">
+            <svg class="w-6 h-6 text-green-600" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="1.5">
+              <path stroke-linecap="round" stroke-linejoin="round" d="M5.25 14.25h13.5m-13.5 0a3 3 0 01-3-3m3 3a3 3 0 100 6h13.5a3 3 0 100-6m-16.5-3a3 3 0 013-3h13.5a3 3 0 013 3m-19.5 0a4.5 4.5 0 01.9-2.7L5.737 5.1a3.375 3.375 0 012.7-1.35h7.126c1.062 0 2.062.5 2.7 1.35l2.587 3.45a4.5 4.5 0 01.9 2.7m0 0a3 3 0 01-3 3m0 3h.008v.008h-.008v-.008zm0-6h.008v.008h-.008v-.008zm-3 6h.008v.008h-.008v-.008zm0-6h.008v.008h-.008v-.008z" />
+            </svg>
+          </div>
+          <h3 class="font-bold text-stone-900 mb-2">Edge functions</h3>
+          <p class="text-sm text-stone-500 leading-relaxed">Run serverless JavaScript at the edge. Sub-10ms cold starts, infinite scale.</p>
+        </div>
+
+        <div class="feature-hover bg-white rounded-2xl p-7 card-shadow">
+          <div class="w-11 h-11 rounded-xl bg-green-50 flex items-center justify-center mb-5">
+            <svg class="w-6 h-6 text-green-600" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="1.5">
+              <path stroke-linecap="round" stroke-linejoin="round" d="M16.5 10.5V6.75a4.5 4.5 0 10-9 0v3.75m-.75 11.25h10.5a2.25 2.25 0 002.25-2.25v-6.75a2.25 2.25 0 00-2.25-2.25H6.75a2.25 2.25 0 00-2.25 2.25v6.75a2.25 2.25 0 002.25 2.25z" />
+            </svg>
+          </div>
+          <h3 class="font-bold text-stone-900 mb-2">Env variable management</h3>
+          <p class="text-sm text-stone-500 leading-relaxed">Scoped secrets per environment. Inject at build time or runtime. Encrypted at rest.</p>
+        </div>
+
+        <div class="feature-hover bg-white rounded-2xl p-7 card-shadow">
+          <div class="w-11 h-11 rounded-xl bg-green-50 flex items-center justify-center mb-5">
+            <svg class="w-6 h-6 text-green-600" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="1.5">
+              <path stroke-linecap="round" stroke-linejoin="round" d="M18 18.72a9.094 9.094 0 003.741-.479 3 3 0 00-4.682-2.72m.94 3.198l.001.031c0 .225-.012.447-.037.666A11.944 11.944 0 0112 21c-2.17 0-4.207-.576-5.963-1.584A6.062 6.062 0 016 18.719m12 0a5.971 5.971 0 00-.941-3.197m0 0A5.995 5.995 0 0012 12.75a5.995 5.995 0 00-5.058 2.772m0 0a3 3 0 00-4.681 2.72 8.986 8.986 0 003.74.477m.94-3.197a5.971 5.971 0 00-.94 3.197M15 6.75a3 3 0 11-6 0 3 3 0 016 0zm6 3a2.25 2.25 0 11-4.5 0 2.25 2.25 0 014.5 0zm-13.5 0a2.25 2.25 0 11-4.5 0 2.25 2.25 0 014.5 0z" />
+            </svg>
+          </div>
+          <h3 class="font-bold text-stone-900 mb-2">Team collaboration</h3>
+          <p class="text-sm text-stone-500 leading-relaxed">Roles, permissions, audit logs, and PR comments with preview links built in.</p>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- QUOTE -->
+  <section class="py-24 px-6">
+    <div class="max-w-3xl mx-auto text-center">
+      <blockquote class="text-3xl font-bold text-stone-800 leading-snug mb-8">
+        "We eliminated our entire ops rotation the week we switched to Slipstream. Not an exaggeration — there was nothing left to operate."
+      </blockquote>
+      <div class="flex items-center justify-center gap-3">
+        <div class="w-10 h-10 rounded-full bg-stone-200 flex items-center justify-center font-bold text-stone-600">MK</div>
+        <div class="text-left">
+          <div class="text-sm font-semibold text-stone-800">Marcus Kim</div>
+          <div class="text-sm text-stone-400">CTO, Layers</div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- CTA -->
+  <section class="py-20 px-6 bg-stone-900">
+    <div class="max-w-2xl mx-auto text-center">
+      <h2 class="text-4xl font-black text-white mb-4">Stop managing servers.<br />Start shipping software.</h2>
+      <p class="text-stone-400 mb-10 text-lg">Free to start. No credit card required. Production-ready in 2 minutes.</p>
+      <div class="flex flex-col sm:flex-row items-center justify-center gap-4">
+        <a href="#" class="w-full sm:w-auto bg-green-500 hover:bg-green-400 text-white font-bold px-10 py-4 rounded-xl text-base transition-colors">
+          Deploy now — free forever
+        </a>
+        <a href="#" class="w-full sm:w-auto text-stone-400 hover:text-white font-medium px-8 py-4 text-base transition-colors">
+          Talk to sales →
+        </a>
+      </div>
+    </div>
+  </section>
+
+  <!-- FOOTER -->
+  <footer class="bg-stone-900 border-t border-stone-800 py-14 px-6">
+    <div class="max-w-6xl mx-auto">
+      <div class="grid grid-cols-2 md:grid-cols-5 gap-8 mb-12">
+        <div class="col-span-2">
+          <div class="flex items-center gap-2 mb-4">
+            <div class="w-7 h-7 rounded-lg bg-green-600 flex items-center justify-center">
+              <svg class="w-4 h-4 text-white" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2.5">
+                <path stroke-linecap="round" stroke-linejoin="round" d="M3 8l7.89 5.26a2 2 0 002.22 0L21 8M5 19h14a2 2 0 002-2V7a2 2 0 00-2-2H5a2 2 0 00-2 2v10a2 2 0 002 2z" />
+              </svg>
+            </div>
+            <span class="font-bold text-white">Slipstream</span>
+          </div>
+          <p class="text-sm text-stone-500 leading-relaxed">The deployment platform for modern frontend teams.</p>
+        </div>
+        <div>
+          <div class="text-xs font-mono text-stone-500 uppercase tracking-widest mb-4">Product</div>
+          <ul class="space-y-2.5 text-sm text-stone-400">
+            <li><a href="#" class="hover:text-white transition-colors">Features</a></li>
+            <li><a href="#" class="hover:text-white transition-colors">Pricing</a></li>
+            <li><a href="#" class="hover:text-white transition-colors">Changelog</a></li>
+            <li><a href="#" class="hover:text-white transition-colors">Roadmap</a></li>
+          </ul>
+        </div>
+        <div>
+          <div class="text-xs font-mono text-stone-500 uppercase tracking-widest mb-4">Docs</div>
+          <ul class="space-y-2.5 text-sm text-stone-400">
+            <li><a href="#" class="hover:text-white transition-colors">Get started</a></li>
+            <li><a href="#" class="hover:text-white transition-colors">CLI reference</a></li>
+            <li><a href="#" class="hover:text-white transition-colors">Edge functions</a></li>
+            <li><a href="#" class="hover:text-white transition-colors">Integrations</a></li>
+          </ul>
+        </div>
+        <div>
+          <div class="text-xs font-mono text-stone-500 uppercase tracking-widest mb-4">Company</div>
+          <ul class="space-y-2.5 text-sm text-stone-400">
+            <li><a href="#" class="hover:text-white transition-colors">Blog</a></li>
+            <li><a href="#" class="hover:text-white transition-colors">About</a></li>
+            <li><a href="#" class="hover:text-white transition-colors">Careers</a></li>
+            <li><a href="#" class="hover:text-white transition-colors">Status</a></li>
+          </ul>
+        </div>
+      </div>
+      <div class="border-t border-stone-800 pt-8 flex flex-col md:flex-row items-center justify-between gap-4 text-sm text-stone-500">
+        <span>© 2025 Slipstream, Inc.</span>
+        <div class="flex gap-6">
+          <a href="#" class="hover:text-stone-300 transition-colors">Privacy</a>
+          <a href="#" class="hover:text-stone-300 transition-colors">Terms</a>
+          <a href="#" class="hover:text-stone-300 transition-colors">Security</a>
+        </div>
+      </div>
+    </div>
+  </footer>
+
+</body>
+</html>
