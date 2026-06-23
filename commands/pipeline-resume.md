@@ -3,7 +3,7 @@ description: Recover full pipeline context after compaction — find the last ac
 argument-hint: [issue number (optional — auto-detects if omitted)]
 ---
 
-# /resume — Context Recovery After Compaction
+# /pipeline-resume — Context Recovery After Compaction
 
 **Input**: $ARGUMENTS
 
@@ -110,7 +110,7 @@ for NUMBER in $(echo "$RECENT_ISSUES" | jq -r '.number'); do
 done
 ```
 
-If still no candidate: display `No recent active issues found. To resume work on a specific issue, run: /resume {issue-number}` and STOP.
+If still no candidate: display `No recent active issues found. To resume work on a specific issue, run: /pipeline-resume {issue-number}` and STOP.
 
 ---
 
@@ -247,7 +247,7 @@ Invoke `/work-on` to re-enter the pipeline. Work-on reads GitHub state independe
 Skill("work-on", args="{TARGET_NUMBER}")
 ```
 
-**Why delegation works**: `/work-on` Phase 0B already implements "Determine resume point" — it reads issue labels and FORGE annotations to route to the correct phase. `/resume` provides the human-readable context summary, then hands off to `/work-on` for execution.
+**Why delegation works**: `/work-on` Phase 0B already implements "Determine resume point" — it reads issue labels and FORGE annotations to route to the correct phase. `/pipeline-resume` provides the human-readable context summary, then hands off to `/work-on` for execution.
 
 **Do NOT re-implement pipeline logic here.** The context summary above is for the agent's working memory only — the actual phase routing and execution is owned by `/work-on`.
 
@@ -258,7 +258,7 @@ Skill("work-on", args="{TARGET_NUMBER}")
 | Condition | Response |
 |-----------|----------|
 | `forge.yaml` missing | Stop: "Run \`npx forgedock init\` to generate forge.yaml" |
-| No active issues + no FORGE annotations found | Stop: "No recent active issues found. Run \`/resume {number}\` with an explicit issue number, or \`/work-on next\` to start a new issue." |
+| No active issues + no FORGE annotations found | Stop: "No recent active issues found. Run \`/pipeline-resume {number}\` with an explicit issue number, or \`/work-on next\` to start a new issue." |
 | Issue is closed with `workflow:merged` | Stop: "Issue #{number} is already merged. Nothing to resume." |
 | Issue is closed with `workflow:invalid` | Stop: "Issue #{number} was closed as invalid. Nothing to resume." |
 | Issue has `needs-human` label | Stop: "Issue #{number} is blocked (needs-human). Review the blocking comment and resolve it manually before resuming." |
