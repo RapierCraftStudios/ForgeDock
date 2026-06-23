@@ -2,6 +2,8 @@
 
 This guide explains how to integrate ForgeDock's `/review-pr` pipeline into GitHub Actions so every PR gets automatic multi-domain AI review without requiring a manual Claude Code session.
 
+<!-- publish trigger: bot-token merges do not fire path-filtered workflows -->
+
 ---
 
 ## What This Does
