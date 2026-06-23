@@ -442,6 +442,33 @@ fi
 
 Report each `[HARD]` line as **HIGH** — a dangling `Skill()` target or a label set by no command is a real pipeline break (an agent will invoke a phase that does not exist, or a state will never be entered/exited). Orphan-annotation `[SOFT]` lines are advisory: surface them in the report for periodic triage but do NOT block the commit. Scaffolding `[INFO]` lines are expected and need no action. To gate on HARD findings (fail the build), drop `--soft`; the default keeps existing baseline orphans from blocking until they are triaged. <!-- Added: forge#869 -->
 
+### 2G.7: Native command conflict check (FORGE_GRAPH domain)
+
+**Triggered when**: changed files include `commands/*.md` files (top-level, not sub-phase subdirectories). Skips silently in any project without `scripts/check-native-conflicts.sh`.
+
+**Why this matters**: ForgeDock commands are installed into `~/.claude/commands/`, the same namespace as native Claude Code built-in slash commands. A top-level command file whose basename matches a native command name (e.g. `resume.md` → `/resume`, `status.md` → `/status`) completely shadows the native command — users lose access to core Claude Code functionality with no error message. This check prevents the bug class from ever reaching `staging` or `npm publish`. <!-- Added: forge#1074 -->
+
+```bash
+# Run only when top-level commands/*.md files changed and the script ships in this repo.
+# Sub-phase files in subdirectories (commands/work-on/*.md) are installed with their
+# relative path preserved and resolve to namespaced commands — they cannot shadow
+# root-level native commands and are not scanned.
+CONFLICT_CHECKER="$FORGEDOCK_SCRIPTS/check-native-conflicts.sh"
+[ -f "$CONFLICT_CHECKER" ] || CONFLICT_CHECKER="{WORKTREE_PATH}/scripts/check-native-conflicts.sh"
+if [ -f "$CONFLICT_CHECKER" ]; then
+    CONFLICT_REPORT=$(bash "$CONFLICT_CHECKER" "{WORKTREE_PATH}/commands" 2>&1) || CONFLICT_EXIT=$?
+    echo "$CONFLICT_REPORT"
+    if [ "${CONFLICT_EXIT:-0}" -ne 0 ]; then
+        # Extract each conflicting file from the report and emit a gate finding.
+        echo "$CONFLICT_REPORT" | grep -E '^\s+commands/' | while IFS= read -r hit; do
+            echo "FORGE_GRAPH | HIGH | native-conflict | ${hit#*  }"
+        done
+    fi
+fi
+```
+
+Report each conflict as **HIGH** — a shadowed native command is a silent user-facing regression (the native command becomes unreachable without warning). The builder must rename the conflicting file before the commit. Blocklist updates are in `scripts/check-native-conflicts.sh` (NATIVE_COMMANDS array).
+
 ### 2H: Asyncio cancellation safety (Python async code)
 
 **Triggered when**: changed Python files contain `asyncio.shield`, `asyncio.wait_for`, or `Task.cancel`.

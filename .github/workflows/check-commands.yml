@@ -1,0 +1,18 @@
+name: Check Command Conflicts
+
+on:
+  pull_request:
+    paths:
+      - 'commands/**'
+      - 'scripts/check-native-conflicts.sh'
+
+jobs:
+  check-native-conflicts:
+    name: Native command conflict check
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Check native command conflicts
+        run: bash scripts/check-native-conflicts.sh commands/
