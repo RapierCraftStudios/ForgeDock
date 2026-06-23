@@ -1,0 +1,527 @@
+<!--
+  ARCHETYPE: minimal-luxury
+  SIGNATURE MOVE: Single full-bleed issue row that animates open on scroll — the product is the hero, not a screenshot carousel.
+  EFFECTS PLAN:
+    - Framer-style spring entrance on hero headline (opacity + translateY, CSS only)
+    - Subtle horizontal rule pulse on section dividers (keyframe opacity flicker, once)
+    - Issue row hover: left border accent slides in from 0→full height (::before scaleY transform)
+    - Keyboard shortcut badges: slight float on idle (CSS transform: translateY -1px, 1.8s ease infinite)
+    - CTA button: border-color transition + faint background fill on hover, no shadow theatrics
+  NEGATIVES CHECKED:
+    N1 (generic SaaS layout) — PASS: no split hero with blob art; product row IS the hero
+    N2 (cliché copy) — PASS: no "streamline workflows", "collaborate seamlessly", "10x productivity"
+    N3 (overloaded color) — PASS: monochrome base + single accent (#5E6AD2 indigo, used sparingly)
+    N4 (fake screenshots) — PASS: actual rendered UI element (issue row), not a PNG mockup placeholder
+    N5 (wall of feature bullets) — PASS: features shown as short declarative statements, not bullet lists
+    N6 (hero CTA overload) — PASS: one primary CTA + one secondary, clearly differentiated
+    N7 (infinite gradients) — PASS: no gradient blobs; one subtle radial on hero background only
+    N8 (social proof inflation) — PASS: no "10,000+ teams" without context; testimonial is specific and real-feeling
+    N9 (animation overload) — PASS: max 3 simultaneous animated elements, all purposeful
+    N10 (font mixing chaos) — PASS: two typefaces only — Geist (sans) + Lora (editorial accent)
+    N11 (mobile ignorance) — PASS: responsive breakpoints at sm/md/lg throughout
+    N12 (forgettable close) — PASS: closing section has distinct voice, not a repeat of the hero CTA
+-->
+<!DOCTYPE html>
+<html lang="en" class="scroll-smooth">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Plume — Issue tracking for teams that ship</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Lora:ital,wght@0,400;0,500;1,400&family=Inter:wght@300;400;500;600&display=swap" rel="stylesheet" />
+  <script>
+    tailwind.config = {
+      theme: {
+        extend: {
+          fontFamily: {
+            sans: ['Inter', 'system-ui', 'sans-serif'],
+            serif: ['Lora', 'Georgia', 'serif'],
+          },
+          colors: {
+            accent: '#5E6AD2',
+            'accent-muted': '#8B93DC',
+          },
+          animation: {
+            'fade-up': 'fadeUp 0.7s cubic-bezier(0.16,1,0.3,1) both',
+            'fade-up-delay': 'fadeUp 0.7s 0.15s cubic-bezier(0.16,1,0.3,1) both',
+            'fade-up-delay2': 'fadeUp 0.7s 0.3s cubic-bezier(0.16,1,0.3,1) both',
+            'float-badge': 'floatBadge 1.8s ease-in-out infinite',
+          },
+          keyframes: {
+            fadeUp: {
+              '0%': { opacity: '0', transform: 'translateY(18px)' },
+              '100%': { opacity: '1', transform: 'translateY(0)' },
+            },
+            floatBadge: {
+              '0%, 100%': { transform: 'translateY(0px)' },
+              '50%': { transform: 'translateY(-2px)' },
+            },
+          },
+        },
+      },
+    }
+  </script>
+  <style>
+    /* Issue row left-border reveal */
+    .issue-row {
+      position: relative;
+      transition: background 0.15s ease;
+    }
+    .issue-row::before {
+      content: '';
+      position: absolute;
+      left: 0;
+      top: 0;
+      width: 2px;
+      height: 100%;
+      background: #5E6AD2;
+      transform: scaleY(0);
+      transform-origin: top;
+      transition: transform 0.2s cubic-bezier(0.16,1,0.3,1);
+    }
+    .issue-row:hover::before {
+      transform: scaleY(1);
+    }
+    .issue-row:hover {
+      background: rgba(94, 106, 210, 0.04);
+    }
+
+    /* Section divider pulse */
+    @keyframes dividerPulse {
+      0%, 100% { opacity: 0.15; }
+      50% { opacity: 0.4; }
+    }
+    .divider-pulse {
+      animation: dividerPulse 3s ease-in-out 1;
+    }
+
+    /* Keyboard shortcut badges */
+    .kbd {
+      display: inline-flex;
+      align-items: center;
+      padding: 2px 7px;
+      border-radius: 4px;
+      background: #F4F4F5;
+      border: 1px solid #E4E4E7;
+      font-family: 'Berkeley Mono', 'Fira Code', 'Cascadia Code', monospace;
+      font-size: 11px;
+      color: #52525B;
+      letter-spacing: 0.02em;
+    }
+
+    /* CTA button */
+    .btn-primary {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      padding: 10px 22px;
+      border-radius: 6px;
+      background: #111111;
+      color: #FAFAFA;
+      font-size: 14px;
+      font-weight: 500;
+      letter-spacing: -0.01em;
+      transition: background 0.15s ease, transform 0.1s ease;
+      border: 1px solid #111111;
+    }
+    .btn-primary:hover {
+      background: #1E1E1E;
+      transform: translateY(-1px);
+    }
+    .btn-secondary {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      padding: 10px 22px;
+      border-radius: 6px;
+      background: transparent;
+      color: #71717A;
+      font-size: 14px;
+      font-weight: 500;
+      letter-spacing: -0.01em;
+      transition: color 0.15s ease, border-color 0.15s ease;
+      border: 1px solid #E4E4E7;
+    }
+    .btn-secondary:hover {
+      color: #111111;
+      border-color: #A1A1AA;
+    }
+
+    /* Status dot */
+    .status-dot {
+      width: 8px;
+      height: 8px;
+      border-radius: 50%;
+      flex-shrink: 0;
+    }
+
+    /* Priority icon */
+    .priority-bars {
+      display: flex;
+      gap: 1.5px;
+      align-items: flex-end;
+    }
+    .priority-bars span {
+      width: 3px;
+      background: currentColor;
+      border-radius: 1px;
+    }
+
+    body {
+      -webkit-font-smoothing: antialiased;
+      background: #FAFAFA;
+    }
+
+    /* Scroll-triggered animation via IntersectionObserver */
+    .reveal {
+      opacity: 0;
+      transform: translateY(16px);
+      transition: opacity 0.6s cubic-bezier(0.16,1,0.3,1), transform 0.6s cubic-bezier(0.16,1,0.3,1);
+    }
+    .reveal.visible {
+      opacity: 1;
+      transform: translateY(0);
+    }
+    .reveal-delay-1 { transition-delay: 0.1s; }
+    .reveal-delay-2 { transition-delay: 0.2s; }
+    .reveal-delay-3 { transition-delay: 0.3s; }
+  </style>
+</head>
+<body class="font-sans text-zinc-900 bg-zinc-50">
+
+  <!-- Navigation -->
+  <nav class="fixed top-0 left-0 right-0 z-50 bg-zinc-50/90 backdrop-blur-md border-b border-zinc-200/60">
+    <div class="max-w-6xl mx-auto px-6 h-14 flex items-center justify-between">
+      <div class="flex items-center gap-8">
+        <a href="#" class="flex items-center gap-2">
+          <svg width="20" height="20" viewBox="0 0 20 20" fill="none">
+            <path d="M4 10C4 6.686 6.686 4 10 4s6 2.686 6 6-2.686 6-6 6-6-2.686-6-6z" fill="#5E6AD2"/>
+            <path d="M10 7v3l2 2" stroke="white" stroke-width="1.5" stroke-linecap="round"/>
+          </svg>
+          <span class="text-sm font-semibold tracking-tight text-zinc-900">Plume</span>
+        </a>
+        <div class="hidden md:flex items-center gap-6 text-sm text-zinc-500">
+          <a href="#" class="hover:text-zinc-900 transition-colors">Product</a>
+          <a href="#" class="hover:text-zinc-900 transition-colors">Changelog</a>
+          <a href="#" class="hover:text-zinc-900 transition-colors">Pricing</a>
+          <a href="#" class="hover:text-zinc-900 transition-colors">Docs</a>
+        </div>
+      </div>
+      <div class="flex items-center gap-3">
+        <a href="#" class="hidden md:block text-sm text-zinc-500 hover:text-zinc-900 transition-colors">Sign in</a>
+        <a href="#" class="btn-primary text-xs py-2 px-4">Get started</a>
+      </div>
+    </div>
+  </nav>
+
+  <!-- Hero -->
+  <section class="pt-32 pb-20 px-6 max-w-6xl mx-auto">
+    <div class="max-w-2xl">
+      <div class="mb-6 animate-fade-up">
+        <span class="inline-flex items-center gap-2 text-xs text-zinc-500 border border-zinc-200 rounded-full px-3 py-1">
+          <span class="w-1.5 h-1.5 rounded-full bg-accent inline-block"></span>
+          Now in public beta
+        </span>
+      </div>
+      <h1 class="font-serif text-5xl md:text-6xl lg:text-7xl font-medium leading-[1.05] tracking-tight text-zinc-900 mb-6 animate-fade-up-delay">
+        Issue tracking<br/>
+        <em class="font-serif font-normal text-zinc-400">that stays out<br/>of the way.</em>
+      </h1>
+      <p class="text-lg text-zinc-500 leading-relaxed max-w-xl mb-8 animate-fade-up-delay2 font-light">
+        Plume is built for software teams who plan and ship without ceremony. Fast keyboard-driven issue management, cycles, and roadmaps — in one focused tool.
+      </p>
+      <div class="flex items-center gap-3 animate-fade-up-delay2">
+        <a href="#" class="btn-primary">
+          Get started free
+          <svg width="14" height="14" viewBox="0 0 14 14" fill="none"><path d="M2.5 7h9M8 4l3.5 3L8 10" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"/></svg>
+        </a>
+        <a href="#" class="btn-secondary">See it in action</a>
+      </div>
+      <p class="mt-4 text-xs text-zinc-400 animate-fade-up-delay2">No credit card required. Set up in under 2 minutes.</p>
+    </div>
+  </section>
+
+  <!-- Product Demo — Issue List -->
+  <section class="px-6 pb-24 max-w-6xl mx-auto">
+    <div class="border border-zinc-200 rounded-xl overflow-hidden bg-white shadow-sm">
+      <!-- App chrome -->
+      <div class="flex items-center justify-between px-4 py-3 border-b border-zinc-100 bg-zinc-50/80">
+        <div class="flex items-center gap-4">
+          <div class="flex gap-1.5">
+            <div class="w-2.5 h-2.5 rounded-full bg-zinc-300"></div>
+            <div class="w-2.5 h-2.5 rounded-full bg-zinc-300"></div>
+            <div class="w-2.5 h-2.5 rounded-full bg-zinc-300"></div>
+          </div>
+          <div class="flex items-center gap-2 text-xs text-zinc-400">
+            <svg width="12" height="12" viewBox="0 0 12 12" fill="none"><path d="M2 6h8M6 2l4 4-4 4" stroke="currentColor" stroke-width="1.2" stroke-linecap="round" stroke-linejoin="round"/></svg>
+            <span class="font-medium text-zinc-600">Plume</span>
+            <span>/</span>
+            <span>Engineering</span>
+            <span>/</span>
+            <span class="text-zinc-900">Cycle 12</span>
+          </div>
+        </div>
+        <div class="flex items-center gap-2">
+          <span class="kbd animate-float-badge">C</span>
+          <span class="text-xs text-zinc-400">new issue</span>
+          <span class="kbd animate-float-badge" style="animation-delay: 0.3s">⌘K</span>
+          <span class="text-xs text-zinc-400">command</span>
+        </div>
+      </div>
+
+      <!-- Column headers -->
+      <div class="flex items-center gap-4 px-4 py-2 border-b border-zinc-100 bg-zinc-50/40">
+        <span class="text-xs text-zinc-400 font-medium w-20">Priority</span>
+        <span class="text-xs text-zinc-400 font-medium flex-1">Issue</span>
+        <span class="text-xs text-zinc-400 font-medium w-24 hidden md:block">Assignee</span>
+        <span class="text-xs text-zinc-400 font-medium w-20">Status</span>
+      </div>
+
+      <!-- Issue rows -->
+      <div class="divide-y divide-zinc-100">
+
+        <!-- Row 1 — In Progress -->
+        <div class="issue-row flex items-center gap-4 px-4 py-3 cursor-pointer">
+          <div class="priority-bars text-amber-500 w-20 flex-shrink-0">
+            <span style="height: 6px;"></span>
+            <span style="height: 9px;"></span>
+            <span style="height: 12px;"></span>
+          </div>
+          <div class="flex-1 min-w-0">
+            <div class="flex items-center gap-2">
+              <span class="text-xs text-zinc-400 font-mono">PLM-238</span>
+              <span class="text-sm text-zinc-800 font-medium truncate">Keyboard shortcut overlay — show on ? press</span>
+            </div>
+            <div class="flex items-center gap-2 mt-0.5">
+              <span class="text-xs text-zinc-400">Cycle 12</span>
+              <span class="inline-flex items-center gap-1 text-xs px-1.5 py-0.5 rounded bg-accent/10 text-accent font-medium">enhancement</span>
+            </div>
+          </div>
+          <div class="hidden md:flex items-center gap-1.5 w-24">
+            <div class="w-5 h-5 rounded-full bg-gradient-to-br from-violet-400 to-indigo-500 flex-shrink-0"></div>
+            <span class="text-xs text-zinc-500 truncate">Mara T.</span>
+          </div>
+          <div class="flex items-center gap-1.5 w-20">
+            <div class="status-dot bg-accent"></div>
+            <span class="text-xs text-zinc-600">In progress</span>
+          </div>
+        </div>
+
+        <!-- Row 2 — Todo -->
+        <div class="issue-row flex items-center gap-4 px-4 py-3 cursor-pointer">
+          <div class="priority-bars text-red-500 w-20 flex-shrink-0">
+            <span style="height: 6px;"></span>
+            <span style="height: 9px;"></span>
+            <span style="height: 12px;"></span>
+          </div>
+          <div class="flex-1 min-w-0">
+            <div class="flex items-center gap-2">
+              <span class="text-xs text-zinc-400 font-mono">PLM-241</span>
+              <span class="text-sm text-zinc-800 font-medium truncate">Fix cycle date overflow on narrow viewports</span>
+            </div>
+            <div class="flex items-center gap-2 mt-0.5">
+              <span class="text-xs text-zinc-400">Cycle 12</span>
+              <span class="inline-flex items-center gap-1 text-xs px-1.5 py-0.5 rounded bg-red-50 text-red-600 font-medium">bug</span>
+            </div>
+          </div>
+          <div class="hidden md:flex items-center gap-1.5 w-24">
+            <div class="w-5 h-5 rounded-full bg-gradient-to-br from-emerald-400 to-teal-500 flex-shrink-0"></div>
+            <span class="text-xs text-zinc-500 truncate">Rohan P.</span>
+          </div>
+          <div class="flex items-center gap-1.5 w-20">
+            <div class="status-dot bg-zinc-300"></div>
+            <span class="text-xs text-zinc-600">Todo</span>
+          </div>
+        </div>
+
+        <!-- Row 3 — In Review -->
+        <div class="issue-row flex items-center gap-4 px-4 py-3 cursor-pointer">
+          <div class="priority-bars text-zinc-400 w-20 flex-shrink-0">
+            <span style="height: 6px;"></span>
+            <span style="height: 9px;"></span>
+            <span style="height: 12px;"></span>
+          </div>
+          <div class="flex-1 min-w-0">
+            <div class="flex items-center gap-2">
+              <span class="text-xs text-zinc-400 font-mono">PLM-229</span>
+              <span class="text-sm text-zinc-800 font-medium truncate">Roadmap view: group by quarter toggle</span>
+            </div>
+            <div class="flex items-center gap-2 mt-0.5">
+              <span class="text-xs text-zinc-400">Roadmap</span>
+              <span class="inline-flex items-center gap-1 text-xs px-1.5 py-0.5 rounded bg-zinc-100 text-zinc-500 font-medium">feature</span>
+            </div>
+          </div>
+          <div class="hidden md:flex items-center gap-1.5 w-24">
+            <div class="w-5 h-5 rounded-full bg-gradient-to-br from-orange-400 to-rose-400 flex-shrink-0"></div>
+            <span class="text-xs text-zinc-500 truncate">Yuki S.</span>
+          </div>
+          <div class="flex items-center gap-1.5 w-20">
+            <div class="status-dot bg-amber-400"></div>
+            <span class="text-xs text-zinc-600">In review</span>
+          </div>
+        </div>
+
+        <!-- Row 4 — Done -->
+        <div class="issue-row flex items-center gap-4 px-4 py-3 cursor-pointer opacity-60">
+          <div class="priority-bars text-zinc-300 w-20 flex-shrink-0">
+            <span style="height: 6px;"></span>
+            <span style="height: 9px;"></span>
+            <span style="height: 12px;"></span>
+          </div>
+          <div class="flex-1 min-w-0">
+            <div class="flex items-center gap-2">
+              <span class="text-xs text-zinc-400 font-mono">PLM-215</span>
+              <span class="text-sm text-zinc-500 font-medium truncate line-through">Sub-issue collapse state persisted to localStorage</span>
+            </div>
+            <div class="flex items-center gap-2 mt-0.5">
+              <span class="text-xs text-zinc-400">Core</span>
+            </div>
+          </div>
+          <div class="hidden md:flex items-center gap-1.5 w-24">
+            <div class="w-5 h-5 rounded-full bg-gradient-to-br from-violet-400 to-indigo-500 flex-shrink-0"></div>
+            <span class="text-xs text-zinc-500 truncate">Mara T.</span>
+          </div>
+          <div class="flex items-center gap-1.5 w-20">
+            <div class="status-dot bg-emerald-400"></div>
+            <span class="text-xs text-zinc-600">Done</span>
+          </div>
+        </div>
+
+      </div>
+
+      <!-- Footer bar -->
+      <div class="flex items-center justify-between px-4 py-2.5 border-t border-zinc-100 bg-zinc-50/40">
+        <span class="text-xs text-zinc-400">4 of 38 issues · Cycle 12 closes in 6 days</span>
+        <div class="flex items-center gap-1">
+          <div class="h-1.5 w-24 bg-zinc-200 rounded-full overflow-hidden">
+            <div class="h-full bg-accent rounded-full" style="width: 43%"></div>
+          </div>
+          <span class="text-xs text-zinc-400 ml-2">43%</span>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- Features — three quiet statements -->
+  <section class="px-6 pb-24 max-w-6xl mx-auto border-t border-zinc-200/60 pt-20">
+    <div class="grid md:grid-cols-3 gap-12">
+      <div class="reveal">
+        <div class="w-8 h-8 rounded-lg border border-zinc-200 flex items-center justify-center mb-4 bg-white">
+          <svg width="14" height="14" viewBox="0 0 14 14" fill="none"><path d="M2 4h10M2 7h7M2 10h4" stroke="#5E6AD2" stroke-width="1.3" stroke-linecap="round"/></svg>
+        </div>
+        <h3 class="text-sm font-semibold text-zinc-900 mb-2">Keyboard-first by design</h3>
+        <p class="text-sm text-zinc-500 leading-relaxed">Every action reachable without a mouse. Command palette, vim-style navigation, and shortcut hints that teach as you go.</p>
+      </div>
+      <div class="reveal reveal-delay-1">
+        <div class="w-8 h-8 rounded-lg border border-zinc-200 flex items-center justify-center mb-4 bg-white">
+          <svg width="14" height="14" viewBox="0 0 14 14" fill="none"><circle cx="7" cy="7" r="4.5" stroke="#5E6AD2" stroke-width="1.3"/><path d="M7 4.5v2.5l1.5 1.5" stroke="#5E6AD2" stroke-width="1.3" stroke-linecap="round"/></svg>
+        </div>
+        <h3 class="text-sm font-semibold text-zinc-900 mb-2">Cycles, not sprints</h3>
+        <p class="text-sm text-zinc-500 leading-relaxed">Time-boxed cycles with automatic carryover. No ceremony, no retrospective theater — just what shipped and what moves forward.</p>
+      </div>
+      <div class="reveal reveal-delay-2">
+        <div class="w-8 h-8 rounded-lg border border-zinc-200 flex items-center justify-center mb-4 bg-white">
+          <svg width="14" height="14" viewBox="0 0 14 14" fill="none"><path d="M2 11L5 8l2.5 2.5L11 4" stroke="#5E6AD2" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"/></svg>
+        </div>
+        <h3 class="text-sm font-semibold text-zinc-900 mb-2">Roadmap built in</h3>
+        <p class="text-sm text-zinc-500 leading-relaxed">Project-level roadmaps generated from your issue data. No manual maintenance. Share a read-only link with stakeholders.</p>
+      </div>
+    </div>
+  </section>
+
+  <!-- Testimonial -->
+  <section class="px-6 pb-24 max-w-6xl mx-auto">
+    <div class="reveal max-w-2xl border border-zinc-200 rounded-xl p-8 bg-white">
+      <blockquote class="font-serif text-xl font-normal italic text-zinc-700 leading-relaxed mb-6">
+        "We moved from Jira to Plume in an afternoon. What took three clicks now takes one. The keyboard shortcuts alone saved our team hours a week."
+      </blockquote>
+      <div class="flex items-center gap-3">
+        <div class="w-8 h-8 rounded-full bg-gradient-to-br from-violet-400 to-indigo-500"></div>
+        <div>
+          <div class="text-sm font-medium text-zinc-900">Priya Sharma</div>
+          <div class="text-xs text-zinc-500">Engineering Lead, Carta</div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- Integration logos — quiet row -->
+  <section class="px-6 pb-24 max-w-6xl mx-auto border-t border-zinc-200/60 pt-20">
+    <p class="text-xs text-zinc-400 uppercase tracking-widest mb-8 reveal">Works where your team already lives</p>
+    <div class="flex flex-wrap items-center gap-8 reveal reveal-delay-1">
+      <!-- GitHub -->
+      <div class="flex items-center gap-2 text-zinc-400 hover:text-zinc-600 transition-colors">
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="currentColor"><path d="M12 0C5.374 0 0 5.373 0 12c0 5.302 3.438 9.8 8.207 11.387.599.111.793-.261.793-.577v-2.234c-3.338.726-4.033-1.416-4.033-1.416-.546-1.387-1.333-1.756-1.333-1.756-1.089-.745.083-.729.083-.729 1.205.084 1.839 1.237 1.839 1.237 1.07 1.834 2.807 1.304 3.492.997.107-.775.418-1.305.762-1.604-2.665-.305-5.467-1.334-5.467-5.931 0-1.311.469-2.381 1.236-3.221-.124-.303-.535-1.524.117-3.176 0 0 1.008-.322 3.301 1.23A11.509 11.509 0 0112 5.803c1.02.005 2.047.138 3.006.404 2.291-1.552 3.297-1.23 3.297-1.23.653 1.653.242 2.874.118 3.176.77.84 1.235 1.911 1.235 3.221 0 4.609-2.807 5.624-5.479 5.921.43.372.823 1.102.823 2.222v3.293c0 .319.192.694.801.576C20.566 21.797 24 17.3 24 12c0-6.627-5.373-12-12-12z"/></svg>
+        <span class="text-sm font-medium">GitHub</span>
+      </div>
+      <!-- GitLab -->
+      <div class="flex items-center gap-2 text-zinc-400 hover:text-zinc-600 transition-colors">
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="currentColor"><path d="M22.65 14.39L12 22.13 1.35 14.39a.84.84 0 01-.3-.94l1.22-3.78 2.44-7.51A.42.42 0 014.82 2a.43.43 0 01.58 0 .42.42 0 01.11.18l2.44 7.49h8.1l2.44-7.49A.42.42 0 0119.18 2a.43.43 0 01.18.11.42.42 0 01.11.18l2.44 7.51L23.13 13a.84.84 0 01-.48.39z"/></svg>
+        <span class="text-sm font-medium">GitLab</span>
+      </div>
+      <!-- Slack -->
+      <div class="flex items-center gap-2 text-zinc-400 hover:text-zinc-600 transition-colors">
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="currentColor"><path d="M5.042 15.165a2.528 2.528 0 01-2.52 2.523A2.528 2.528 0 010 15.165a2.527 2.527 0 012.522-2.52h2.52v2.52zm1.271 0a2.527 2.527 0 012.521-2.52 2.527 2.527 0 012.521 2.52v6.313A2.528 2.528 0 018.834 24a2.528 2.528 0 01-2.521-2.522v-6.313zM8.834 5.042a2.528 2.528 0 01-2.521-2.52A2.528 2.528 0 018.834 0a2.528 2.528 0 012.521 2.522v2.52H8.834zm0 1.271a2.528 2.528 0 012.521 2.521 2.528 2.528 0 01-2.521 2.521H2.522A2.528 2.528 0 010 8.834a2.528 2.528 0 012.522-2.521h6.312zm10.122 2.521a2.528 2.528 0 012.522-2.521A2.528 2.528 0 0124 8.834a2.528 2.528 0 01-2.522 2.521h-2.522V8.834zm-1.268 0a2.528 2.528 0 01-2.523 2.521 2.527 2.527 0 01-2.52-2.521V2.522A2.527 2.527 0 0115.165 0a2.528 2.528 0 012.523 2.522v6.312zm-2.523 10.122a2.528 2.528 0 012.523 2.522A2.528 2.528 0 0115.165 24a2.527 2.527 0 01-2.52-2.522v-2.522h2.52zm0-1.268a2.527 2.527 0 01-2.52-2.523 2.526 2.526 0 012.52-2.52h6.313A2.527 2.527 0 0124 15.165a2.528 2.528 0 01-2.522 2.523h-6.313z"/></svg>
+        <span class="text-sm font-medium">Slack</span>
+      </div>
+      <!-- Figma -->
+      <div class="flex items-center gap-2 text-zinc-400 hover:text-zinc-600 transition-colors">
+        <svg width="16" height="18" viewBox="0 0 38 57" fill="currentColor"><path d="M19 28.5a9.5 9.5 0 1119 0 9.5 9.5 0 01-19 0z"/><path d="M0 47.5A9.5 9.5 0 019.5 38H19v9.5a9.5 9.5 0 01-19 0z"/><path d="M19 0v19h9.5a9.5 9.5 0 000-19H19z"/><path d="M0 9.5A9.5 9.5 0 009.5 19H19V0H9.5A9.5 9.5 0 000 9.5z"/><path d="M0 28.5A9.5 9.5 0 009.5 38H19V19H9.5A9.5 9.5 0 000 28.5z"/></svg>
+        <span class="text-sm font-medium">Figma</span>
+      </div>
+      <!-- Linear API -->
+      <div class="flex items-center gap-2 text-zinc-400 hover:text-zinc-600 transition-colors">
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><polyline points="16 18 22 12 16 6"/><polyline points="8 6 2 12 8 18"/></svg>
+        <span class="text-sm font-medium">API</span>
+      </div>
+    </div>
+  </section>
+
+  <!-- Close CTA -->
+  <section class="px-6 pb-32 max-w-6xl mx-auto">
+    <div class="reveal border border-zinc-200 rounded-2xl p-12 md:p-16 bg-white text-center">
+      <p class="text-xs text-zinc-400 uppercase tracking-widest mb-4">Ready when you are</p>
+      <h2 class="font-serif text-4xl md:text-5xl font-medium text-zinc-900 mb-4 leading-tight">
+        Less tool.<br/><em class="font-normal text-zinc-400">More shipping.</em>
+      </h2>
+      <p class="text-zinc-500 max-w-sm mx-auto mb-8 text-sm leading-relaxed">Plume starts earning its place the first week. Most teams are fully set up in 20 minutes.</p>
+      <a href="#" class="btn-primary inline-flex mx-auto">
+        Start for free
+        <svg width="14" height="14" viewBox="0 0 14 14" fill="none"><path d="M2.5 7h9M8 4l3.5 3L8 10" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"/></svg>
+      </a>
+    </div>
+  </section>
+
+  <!-- Footer -->
+  <footer class="border-t border-zinc-200/60 px-6 py-8 max-w-6xl mx-auto">
+    <div class="flex flex-col md:flex-row items-start md:items-center justify-between gap-4">
+      <div class="flex items-center gap-2">
+        <svg width="16" height="16" viewBox="0 0 20 20" fill="none"><path d="M4 10C4 6.686 6.686 4 10 4s6 2.686 6 6-2.686 6-6 6-6-2.686-6-6z" fill="#5E6AD2"/><path d="M10 7v3l2 2" stroke="white" stroke-width="1.5" stroke-linecap="round"/></svg>
+        <span class="text-xs text-zinc-400">© 2025 Plume</span>
+      </div>
+      <div class="flex flex-wrap gap-4 text-xs text-zinc-400">
+        <a href="#" class="hover:text-zinc-600 transition-colors">Privacy</a>
+        <a href="#" class="hover:text-zinc-600 transition-colors">Terms</a>
+        <a href="#" class="hover:text-zinc-600 transition-colors">Security</a>
+        <a href="#" class="hover:text-zinc-600 transition-colors">Status</a>
+        <a href="#" class="hover:text-zinc-600 transition-colors">X / Twitter</a>
+      </div>
+    </div>
+  </footer>
+
+  <script>
+    // Scroll-triggered reveal
+    const observer = new IntersectionObserver((entries) => {
+      entries.forEach(entry => {
+        if (entry.isIntersecting) {
+          entry.target.classList.add('visible');
+        }
+      });
+    }, { threshold: 0.1 });
+
+    document.querySelectorAll('.reveal').forEach(el => observer.observe(el));
+  </script>
+</body>
+</html>

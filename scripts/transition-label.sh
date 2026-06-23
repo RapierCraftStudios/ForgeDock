@@ -138,8 +138,16 @@ if [ -n "${FORGE_LABEL_MAP:-}" ] && [ "${FORGE_LABEL_MAP:-}" != "{}" ]; then
   if command -v jq >/dev/null 2>&1; then
     MAPPED=$(echo "$FORGE_LABEL_MAP" | jq -r --arg key "$CANONICAL_LABEL" '.[$key] // empty' 2>/dev/null || true)
     if [ -n "$MAPPED" ]; then
-      EFFECTIVE_LABEL="$MAPPED"
-      echo "Label map override: $CANONICAL_LABEL → $EFFECTIVE_LABEL"
+      # Validate: reject any mapped value starting with '-' to prevent CLI flag injection.
+      # A forge.yaml learned.label_map entry like "workflow:investigating": "--json" would
+      # otherwise be passed directly to gh issue edit --add-label, interpreted as a flag.
+      if [[ "$MAPPED" == -* ]]; then
+        echo "ERROR: FORGE_LABEL_MAP value for '$CANONICAL_LABEL' is not a valid label name: '$MAPPED'" >&2
+        echo "       Label names must not start with '-'. Using canonical label fallback: $CANONICAL_LABEL" >&2
+      else
+        EFFECTIVE_LABEL="$MAPPED"
+        echo "Label map override: $CANONICAL_LABEL → $EFFECTIVE_LABEL"
+      fi
     fi
   else
     echo "WARNING: FORGE_LABEL_MAP is set but jq is not available — using canonical label ($CANONICAL_LABEL)" >&2

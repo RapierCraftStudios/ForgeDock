@@ -1,0 +1,618 @@
+<!--
+  CADENCE — ARM A, RUN 2
+  ======================
+
+  ARCHETYPE: editorial-typographic
+  Rationale: Email is a content medium — using an editorial archetype creates
+  a productive irony: the infrastructure product is sold using the same visual
+  language as the publications that rely on it. Serif headlines signal considered
+  opinion and craft; the tight mono code accents prove engineering depth. This
+  directly targets content-forward teams who are choosing an email tool because
+  they care about words, not just packets. Think: Stripe Docs meets The Ringer.
+
+  SIGNATURE MOVE: "Running marginalia" — the page uses a narrow left-margin
+  column (like editorial footnotes) that annotates each major section with small
+  pull-quote labels, percentages, or dates. This gives the page a newspaper
+  production quality that no template provides. The margin text is secondary
+  information that rewards careful reading without cluttering the main content.
+
+  EFFECTS PLAN:
+  - EARN: Thin horizontal rule slides in from left on section enter (1px, 280ms).
+    Justified: mimics a magazine rule drop; marks editorial section breaks.
+  - EARN: Headline text counter for the stats row (scrolled into view trigger).
+    Justified: makes the numbers land with weight, not just sit there.
+  - EARN: Code block line-by-line reveal (each line fades in with 60ms stagger).
+    Justified: demonstrates the brevity of the API by making each line meaningful.
+  - NEVER: Any gradient whatsoever, hover-scale animations, glassmorphism,
+    parallax, blob shapes, carousel, or sticky header color transitions.
+
+  ANTI-SLOP CHECKS (all must be false to ship):
+  N1  Purple/blue gradient hero              → NO  (cream + ink-black, NO gradient)
+  N2  Inter at default weights everywhere    → NO  (Playfair Display + DM Sans + DM Mono)
+  N3  Everything centered, no asymmetry      → NO  (left-anchored, marginalia column)
+  N4  Three identical feature icon cards     → NO  (editorial text-grid, no icon cards)
+  N5  One radius applied to everything       → NO  (code: 2px; tags: 2px; CTA btn: 3px)
+  N6  Default Tailwind palette as brand      → NO  (brand: #1B4332 forest green)
+  N7  Boilerplate hero→3cards→test→CTA       → NO  (magazine-style layout, running text)
+  N8  Stock illustration / 3D blobs          → NO  (typographic treatments only)
+  N9  Glassmorphism overuse                  → NO  (zero glassmorphism)
+  N10 Equal visual weight / no hierarchy     → NO  (serif display vs. body vs. mono = 4 levels)
+  N11 Abstract promises, no product shown    → NO  (code shown in first viewport, real data)
+  N12 Decorative effects serving nothing     → NO  (rule animation signals section entry)
+
+  SELF-CRITIQUE: The marginalia device is unusual in SaaS — which is the point.
+  The risk is it reads "academic" rather than "editorial." The fix is to keep the
+  margin text warm/factual (stats, attributions, short labels) rather than
+  abstract commentary. The Playfair + DM Sans combination avoids the "startup serif
+  overconfidence" trap by pairing the editorial headline font with a grounded workhorse.
+-->
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Cadence — Email sending API for product teams</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Playfair+Display:ital,wght@0,400;0,600;0,700;1,400;1,600&family=DM+Sans:ital,opsz,wght@0,9..40,300;0,9..40,400;0,9..40,500;1,9..40,300&family=DM+Mono:wght@400;500&display=swap" rel="stylesheet" />
+  <script>
+    tailwind.config = {
+      theme: {
+        extend: {
+          fontFamily: {
+            serif: ['Playfair Display', 'Georgia', 'serif'],
+            sans:  ['DM Sans', 'sans-serif'],
+            mono:  ['DM Mono', 'monospace'],
+          },
+          colors: {
+            brand: {
+              50:  '#f0faf4',
+              100: '#d1f0dd',
+              200: '#a3e0bb',
+              300: '#6dcb95',
+              400: '#3db070',
+              500: '#1B4332',
+              600: '#163829',
+              700: '#112c1f',
+              800: '#0c2117',
+              900: '#07150e',
+            },
+            accent: '#2D6A4F',
+            parchment: '#F6F2EB',
+            rule: '#D6D0C6',
+            ink: {
+              900: '#1A1714',
+              800: '#262220',
+              700: '#33302D',
+              600: '#4D4946',
+              500: '#6B6763',
+              400: '#8F8B88',
+              300: '#B5B1AE',
+              200: '#D4D1CE',
+              100: '#EDEAE7',
+              50:  '#F6F4F1',
+            }
+          }
+        }
+      }
+    }
+  </script>
+  <style>
+    * { box-sizing: border-box; }
+    body { background-color: #F6F2EB; color: #1A1714; }
+
+    /* Running rule animation */
+    .section-rule {
+      height: 1px;
+      background: #1B4332;
+      width: 0;
+      transition: width 0.45s cubic-bezier(0.4, 0, 0.2, 1);
+      margin-bottom: 2rem;
+    }
+    .section-rule.active { width: 100%; }
+
+    /* Code reveal animation */
+    .code-line {
+      opacity: 0;
+      transform: translateX(-6px);
+      transition: opacity 0.25s ease, transform 0.25s ease;
+    }
+    .code-line.visible { opacity: 1; transform: translateX(0); }
+
+    /* Marginalia column */
+    .marginalia {
+      font-family: 'DM Mono', monospace;
+      font-size: 0.65rem;
+      line-height: 1.4;
+      letter-spacing: 0.05em;
+      color: #8F8B88;
+      writing-mode: vertical-rl;
+      text-orientation: mixed;
+      transform: rotate(180deg);
+    }
+
+    /* Inline marginalia (horizontal, smaller screens) */
+    .margin-label {
+      font-family: 'DM Mono', monospace;
+      font-size: 0.6rem;
+      letter-spacing: 0.12em;
+      text-transform: uppercase;
+      color: #8F8B88;
+    }
+
+    /* Drop cap */
+    .drop-cap::first-letter {
+      font-family: 'Playfair Display', Georgia, serif;
+      font-size: 3.5rem;
+      line-height: 0.85;
+      float: left;
+      margin-right: 0.1em;
+      margin-top: 0.05em;
+      color: #1B4332;
+      font-weight: 700;
+    }
+
+    /* Syntax */
+    .tok-kw   { color: #2D6A4F; font-weight: 500; }
+    .tok-str  { color: #7C6F3E; }
+    .tok-fn   { color: #5B4F9E; }
+    .tok-cmt  { color: #8F8B88; font-style: italic; }
+    .tok-var  { color: #1A1714; }
+    .tok-num  { color: #A0522D; }
+
+    /* Nav */
+    .nav-item {
+      font-size: 0.8125rem;
+      letter-spacing: 0.04em;
+      color: #4D4946;
+      font-weight: 400;
+      transition: color 0.15s ease;
+    }
+    .nav-item:hover { color: #1B4332; }
+
+    /* Feature text list */
+    .feature-row {
+      border-top: 1px solid #D6D0C6;
+      transition: border-color 0.15s ease;
+    }
+    .feature-row:hover { border-top-color: #2D6A4F; }
+
+    /* Pull quote */
+    .pull-quote {
+      border-left: 2px solid #1B4332;
+      padding-left: 1.25rem;
+    }
+
+    /* Fade up */
+    .fade-up {
+      opacity: 0;
+      transform: translateY(14px);
+      transition: opacity 0.4s ease, transform 0.4s ease;
+    }
+    .fade-up.in { opacity: 1; transform: translateY(0); }
+
+    /* Stat counter */
+    .stat-n { font-variant-numeric: tabular-nums; }
+
+    /* Green tag */
+    .green-tag {
+      display: inline-flex;
+      align-items: center;
+      gap: 0.35rem;
+      font-family: 'DM Mono', monospace;
+      font-size: 0.65rem;
+      letter-spacing: 0.08em;
+      color: #2D6A4F;
+      background: #d1f0dd;
+      border: 1px solid #a3e0bb;
+      border-radius: 2px;
+      padding: 2px 8px;
+    }
+
+    /* Button */
+    .btn-primary {
+      display: inline-flex;
+      align-items: center;
+      gap: 0.5rem;
+      background: #1B4332;
+      color: #F6F2EB;
+      font-family: 'DM Sans', sans-serif;
+      font-size: 0.875rem;
+      font-weight: 500;
+      border-radius: 3px;
+      padding: 0.65rem 1.4rem;
+      transition: background 0.15s ease;
+      letter-spacing: 0.01em;
+    }
+    .btn-primary:hover { background: #2D6A4F; }
+
+    .btn-ghost {
+      display: inline-flex;
+      align-items: center;
+      gap: 0.5rem;
+      border: 1px solid #D6D0C6;
+      color: #4D4946;
+      font-family: 'DM Sans', sans-serif;
+      font-size: 0.875rem;
+      font-weight: 400;
+      border-radius: 3px;
+      padding: 0.65rem 1.4rem;
+      transition: border-color 0.15s ease, color 0.15s ease;
+    }
+    .btn-ghost:hover { border-color: #1B4332; color: #1B4332; }
+
+    /* Volume rule */
+    .vol-rule { height: 1px; background: #D6D0C6; }
+  </style>
+</head>
+<body class="font-sans antialiased">
+
+  <!-- MASTHEAD / NAV -->
+  <header class="border-b border-rule">
+    <!-- Top bar: date-like publication metadata -->
+    <div class="bg-brand-500 px-6 py-1.5 flex items-center justify-between">
+      <div class="font-mono text-[10px] tracking-widest text-brand-200 uppercase">Cadence</div>
+      <div class="font-mono text-[10px] tracking-wider text-brand-300">Email API · Established 2022</div>
+      <div class="font-mono text-[10px] tracking-wider text-brand-300 hidden sm:block">99.4% inbox rate</div>
+    </div>
+    <!-- Main nav -->
+    <div class="max-w-6xl mx-auto px-6 h-14 flex items-center justify-between">
+      <a href="#" class="font-serif text-[1.35rem] font-bold tracking-tight text-ink-900">Cadence</a>
+      <nav class="hidden md:flex items-center gap-7">
+        <a href="#" class="nav-item">Documentation</a>
+        <a href="#" class="nav-item">Pricing</a>
+        <a href="#" class="nav-item">Changelog</a>
+        <a href="#" class="nav-item">Blog</a>
+        <a href="#" class="nav-item">Status</a>
+      </nav>
+      <div class="flex items-center gap-3">
+        <a href="#" class="nav-item hidden sm:inline">Log in</a>
+        <a href="#" class="btn-primary text-[13px] py-1.5 px-4">Get API key</a>
+      </div>
+    </div>
+  </header>
+
+  <!-- HERO — editorial layout with marginalia -->
+  <section class="max-w-6xl mx-auto px-6 pt-16 pb-20">
+    <div class="grid grid-cols-1 lg:grid-cols-[3rem_1fr_1fr] gap-8 items-start">
+
+      <!-- Marginalia column (hidden on mobile) -->
+      <div class="hidden lg:flex flex-col items-center pt-4">
+        <div class="marginalia">EMAIL INFRASTRUCTURE · SINCE 2022</div>
+      </div>
+
+      <!-- Left: Display type -->
+      <div class="fade-up">
+        <div class="vol-rule mb-6 w-full section-rule" id="hero-rule"></div>
+        <div class="margin-label mb-4 block">Vol. I — Sending</div>
+        <h1 class="font-serif text-[3.6rem] leading-[1.08] font-bold tracking-[-0.02em] text-ink-900 mb-6">
+          Email that<br/>
+          <em class="not-italic text-brand-500">delivers</em>,<br/>
+          at last.
+        </h1>
+        <p class="text-[1rem] text-ink-600 leading-[1.75] max-w-[360px] mb-8 drop-cap">
+          transactional and marketing email from a single REST API. Engineers write four lines of TypeScript. Content teams manage templates without a pull request.
+        </p>
+        <div class="flex flex-wrap gap-3 mb-8">
+          <a href="#" class="btn-primary">Get your API key</a>
+          <a href="#" class="btn-ghost">Read the docs</a>
+        </div>
+        <div class="flex flex-wrap items-center gap-3">
+          <span class="green-tag">
+            <svg width="7" height="7" viewBox="0 0 7 7" fill="none"><circle cx="3.5" cy="3.5" r="3.5" fill="#2D6A4F"/></svg>
+            LIVE
+          </span>
+          <span class="font-mono text-[11px] text-ink-400">4,200+ teams · 4.2B emails/mo · 99.99% uptime</span>
+        </div>
+      </div>
+
+      <!-- Right: Code -->
+      <div class="fade-up" style="transition-delay:0.12s" id="code-block-wrap">
+        <div class="bg-ink-900 border border-ink-700 rounded-[2px] overflow-hidden">
+          <div class="flex items-center justify-between px-4 py-2.5 border-b border-white/5">
+            <span class="font-mono text-[10px] tracking-wider text-ink-400 uppercase">welcome.ts</span>
+            <span class="green-tag" style="font-size:0.55rem">SDK v3.2</span>
+          </div>
+          <div class="p-5 font-mono text-[12.5px] leading-[1.85]" id="code-lines">
+            <div class="code-line"><span class="tok-kw">import</span> <span class="tok-var">Cadence</span> <span class="tok-kw">from</span> <span class="tok-str">'@cadence/sdk'</span><span class="text-ink-500">;</span></div>
+            <div class="code-line">&nbsp;</div>
+            <div class="code-line"><span class="tok-kw">const</span> <span class="tok-var">client</span> <span class="text-ink-500">=</span> <span class="tok-kw">new</span> <span class="tok-fn">Cadence</span><span class="text-ink-500">(</span><span class="tok-str">'ck_live_...'</span><span class="text-ink-500">);</span></div>
+            <div class="code-line">&nbsp;</div>
+            <div class="code-line"><span class="tok-kw">await</span> <span class="tok-var">client</span><span class="text-ink-500">.</span><span class="tok-var">emails</span><span class="text-ink-500">.</span><span class="tok-fn">send</span><span class="text-ink-500">({'{'}</span></div>
+            <div class="code-line pl-5"><span class="tok-var">from</span><span class="text-ink-500">:</span>     <span class="tok-str">'hello@acme.com'</span><span class="text-ink-500">,</span></div>
+            <div class="code-line pl-5"><span class="tok-var">to</span><span class="text-ink-500">:</span>       <span class="tok-str">'user@example.com'</span><span class="text-ink-500">,</span></div>
+            <div class="code-line pl-5"><span class="tok-var">template</span><span class="text-ink-500">:</span> <span class="tok-str">'welcome-v2'</span><span class="text-ink-500">,</span></div>
+            <div class="code-line pl-5"><span class="tok-var">data</span><span class="text-ink-500">:</span>     <span class="text-ink-500">{'{'}</span> <span class="tok-var">name</span><span class="text-ink-500">:</span> <span class="tok-str">'Jordan'</span> <span class="text-ink-500">{'}'}</span></div>
+            <div class="code-line"><span class="text-ink-500">});</span></div>
+            <div class="code-line">&nbsp;</div>
+            <div class="code-line"><span class="tok-cmt">// 200 · delivered · 87ms · inbox</span></div>
+          </div>
+        </div>
+        <!-- Inline editorial note below code -->
+        <div class="mt-3 pl-1 border-l border-rule">
+          <p class="font-mono text-[10.5px] text-ink-400 leading-relaxed">
+            TypeScript · Python · Go · Ruby · PHP · REST<br/>
+            Works with any stack. No vendor lock-in.
+          </p>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- VOL RULE + STATS -->
+  <section class="border-t border-b border-rule py-10">
+    <div class="max-w-6xl mx-auto px-6">
+      <div class="grid grid-cols-2 md:grid-cols-4 gap-0 divide-x divide-rule">
+        <div class="px-6 first:pl-0 fade-up">
+          <div class="stat-n font-serif text-[2.5rem] font-bold text-ink-900 leading-none mb-1">99.4<span class="text-brand-500 text-[1.4rem]">%</span></div>
+          <div class="margin-label">Avg. inbox rate</div>
+        </div>
+        <div class="px-6 fade-up" style="transition-delay:0.06s">
+          <div class="stat-n font-serif text-[2.5rem] font-bold text-ink-900 leading-none mb-1">4.2<span class="text-brand-500 text-[1.4rem]">B</span></div>
+          <div class="margin-label">Emails per month</div>
+        </div>
+        <div class="px-6 fade-up" style="transition-delay:0.12s">
+          <div class="stat-n font-serif text-[2.5rem] font-bold text-ink-900 leading-none mb-1">&lt;80<span class="text-brand-500 text-[1.4rem]">ms</span></div>
+          <div class="margin-label">Median send latency</div>
+        </div>
+        <div class="px-6 fade-up" style="transition-delay:0.18s">
+          <div class="stat-n font-serif text-[2.5rem] font-bold text-ink-900 leading-none mb-1">99.99<span class="text-brand-500 text-[1.4rem]">%</span></div>
+          <div class="margin-label">API uptime SLA</div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- FEATURES — editorial text list, marginalia-annotated -->
+  <section class="py-20 px-6">
+    <div class="max-w-6xl mx-auto">
+      <div class="grid grid-cols-1 lg:grid-cols-[3rem_1fr] gap-8">
+        <!-- Marginalia -->
+        <div class="hidden lg:flex flex-col items-center pt-8">
+          <div class="marginalia">CAPABILITIES · v3</div>
+        </div>
+
+        <div>
+          <div class="section-rule fade-up" id="feat-rule"></div>
+          <div class="grid grid-cols-1 md:grid-cols-2 gap-0 mb-0 fade-up">
+            <div class="md:pr-16">
+              <h2 class="font-serif text-[2rem] font-bold tracking-[-0.02em] text-ink-900 mb-3 leading-snug">
+                Everything email.<br/>Nothing else.
+              </h2>
+              <p class="text-[14px] text-ink-500 leading-relaxed">
+                Cadence does one thing and does it completely. Transactional sends,
+                marketing broadcasts, template management, deliverability monitoring —
+                all in one API surface, not a patchwork of tools.
+              </p>
+            </div>
+            <div class="mt-8 md:mt-0 pl-0 md:pl-8 md:border-l border-rule">
+              <div class="pull-quote">
+                <p class="font-serif italic text-[1.05rem] text-ink-700 leading-relaxed">
+                  "The SDK is the best-designed piece of developer tooling
+                  we've integrated this year. Type errors at the call site,
+                  not in production."
+                </p>
+                <div class="mt-3 flex items-center gap-2">
+                  <div class="w-6 h-6 rounded-full bg-brand-100 flex items-center justify-center text-[9px] font-semibold text-brand-700">MP</div>
+                  <span class="font-mono text-[10px] text-ink-400">Marcus P. · Head of Eng, Vercel customer</span>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <!-- Feature rows (editorial list style) -->
+          <div class="mt-14 space-y-0">
+
+            <div class="feature-row py-6 grid grid-cols-1 md:grid-cols-[160px_1fr_1fr] gap-4 fade-up">
+              <div>
+                <div class="margin-label mb-1">API Layer</div>
+              </div>
+              <div>
+                <h3 class="font-serif text-[1.1rem] font-semibold text-ink-900 mb-2 leading-snug">REST API + typed SDKs</h3>
+                <p class="text-[13px] text-ink-500 leading-relaxed">One endpoint, five official SDKs. Idempotency keys built in. OpenAPI spec always current.</p>
+              </div>
+              <div class="font-mono text-[11px] text-ink-400 leading-relaxed pt-1">
+                POST /v1/emails<br/>
+                GET  /v1/emails/:id<br/>
+                GET  /v1/analytics/templates
+              </div>
+            </div>
+
+            <div class="feature-row py-6 grid grid-cols-1 md:grid-cols-[160px_1fr_1fr] gap-4 fade-up">
+              <div>
+                <div class="margin-label mb-1">Templates</div>
+              </div>
+              <div>
+                <h3 class="font-serif text-[1.1rem] font-semibold text-ink-900 mb-2 leading-snug">React Email components</h3>
+                <p class="text-[13px] text-ink-500 leading-relaxed">Version-controlled templates as React components. Non-engineers edit copy in the dashboard without touching git.</p>
+              </div>
+              <div class="bg-ink-50 border border-ink-100 rounded-[2px] p-3 font-mono text-[10.5px] text-ink-500 leading-relaxed">
+                <span class="text-brand-500">&lt;Email&gt;</span><br/>
+                &nbsp;&nbsp;<span class="text-ink-700">&lt;Heading&gt;</span>Welcome, {'{{name}}'}<span class="text-ink-700">&lt;/Heading&gt;</span><br/>
+                &nbsp;&nbsp;<span class="text-ink-700">&lt;Button</span> <span class="text-brand-500">href</span>=<span class="tok-str">{'{{ctaUrl}}'}</span><span class="text-ink-700">&gt;</span>Get started<span class="text-ink-700">&lt;/Button&gt;</span><br/>
+                <span class="text-brand-500">&lt;/Email&gt;</span>
+              </div>
+            </div>
+
+            <div class="feature-row py-6 grid grid-cols-1 md:grid-cols-[160px_1fr_1fr] gap-4 fade-up">
+              <div>
+                <div class="margin-label mb-1">Deliverability</div>
+              </div>
+              <div>
+                <h3 class="font-serif text-[1.1rem] font-semibold text-ink-900 mb-2 leading-snug">Inbox placement, not just delivery</h3>
+                <p class="text-[13px] text-ink-500 leading-relaxed">SPF, DKIM, DMARC configured automatically. Reputation monitoring across Gmail, Outlook, Yahoo — alerting before a problem becomes a block.</p>
+              </div>
+              <div class="space-y-2 pt-1">
+                <div class="flex items-center gap-2">
+                  <div class="flex-1 bg-ink-100 rounded-full h-1">
+                    <div class="bg-brand-400 h-1 rounded-full" style="width:97%"></div>
+                  </div>
+                  <span class="font-mono text-[10px] text-ink-400 w-20">Gmail 97%</span>
+                </div>
+                <div class="flex items-center gap-2">
+                  <div class="flex-1 bg-ink-100 rounded-full h-1">
+                    <div class="bg-brand-400 h-1 rounded-full" style="width:94%"></div>
+                  </div>
+                  <span class="font-mono text-[10px] text-ink-400 w-20">Outlook 94%</span>
+                </div>
+                <div class="flex items-center gap-2">
+                  <div class="flex-1 bg-ink-100 rounded-full h-1">
+                    <div class="bg-brand-400 h-1 rounded-full" style="width:98%"></div>
+                  </div>
+                  <span class="font-mono text-[10px] text-ink-400 w-20">Yahoo 98%</span>
+                </div>
+              </div>
+            </div>
+
+            <div class="feature-row py-6 grid grid-cols-1 md:grid-cols-[160px_1fr_1fr] gap-4 fade-up">
+              <div>
+                <div class="margin-label mb-1">Analytics</div>
+              </div>
+              <div>
+                <h3 class="font-serif text-[1.1rem] font-semibold text-ink-900 mb-2 leading-snug">Per-template performance</h3>
+                <p class="text-[13px] text-ink-500 leading-relaxed">Open rates, click-through, unsubscribes, and bounce classification — per template, per variant, per send. Export to your warehouse via webhook or CSV.</p>
+              </div>
+              <div class="bg-ink-50 border border-ink-100 rounded-[2px] divide-y divide-ink-100 font-mono text-[10.5px] text-ink-500">
+                <div class="px-3 py-2 flex justify-between"><span>welcome-v2</span><span class="text-ink-700">61% open</span></div>
+                <div class="px-3 py-2 flex justify-between"><span>pw-reset</span><span class="text-ink-700">88% open</span></div>
+                <div class="px-3 py-2 flex justify-between"><span>digest-aug</span><span class="text-ink-700">44% open</span></div>
+              </div>
+            </div>
+
+            <div class="feature-row py-6 grid grid-cols-1 md:grid-cols-[160px_1fr_1fr] gap-4 fade-up">
+              <div>
+                <div class="margin-label mb-1">Testing</div>
+              </div>
+              <div>
+                <h3 class="font-serif text-[1.1rem] font-semibold text-ink-900 mb-2 leading-snug">Test mode catches errors before users do</h3>
+                <p class="text-[13px] text-ink-500 leading-relaxed">Swap your live key for a test key. Emails render and validate — missing variables surface as type errors — but nothing sends.</p>
+              </div>
+              <div class="font-mono text-[11px] text-ink-400 pt-1 leading-relaxed">
+                <span class="text-amber-600">WARN</span> missing variable: firstName<br/>
+                <span class="text-amber-600">WARN</span> template: welcome-v2<br/>
+                <span class="text-green-600">PASS</span> html renders 14.2kb<br/>
+                <span class="text-green-600">PASS</span> text fallback present
+              </div>
+            </div>
+
+          </div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- TESTIMONIAL — large editorial quote -->
+  <section class="border-t border-rule py-20 px-6 bg-brand-500">
+    <div class="max-w-4xl mx-auto fade-up">
+      <div class="margin-label mb-6" style="color:#a3e0bb">From the field</div>
+      <blockquote class="font-serif text-[2rem] font-normal italic leading-[1.4] text-white mb-8 tracking-[-0.01em]">
+        "We moved off a major ESP in two days. Cadence's API is half the surface area with twice the reliability. Our growth team now deploys email copy without opening a ticket."
+      </blockquote>
+      <div class="flex items-center gap-4 not-italic">
+        <div class="w-10 h-10 rounded-full bg-brand-300 flex items-center justify-center font-mono text-[12px] font-bold text-brand-900">TW</div>
+        <div>
+          <div class="font-sans font-medium text-[14px] text-white">Tara Wu</div>
+          <div class="font-mono text-[11px] text-brand-300">VP Engineering · Framer</div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- CTA -->
+  <section class="py-24 px-6 bg-parchment border-t border-rule">
+    <div class="max-w-6xl mx-auto grid grid-cols-1 lg:grid-cols-[3rem_1fr] gap-8">
+      <div class="hidden lg:flex flex-col items-center pt-2">
+        <div class="marginalia">GET STARTED</div>
+      </div>
+      <div>
+        <div class="section-rule fade-up" id="cta-rule" style="max-width:240px"></div>
+        <div class="fade-up">
+          <div class="margin-label mb-4">No credit card required</div>
+          <h2 class="font-serif text-[3rem] font-bold tracking-[-0.03em] text-ink-900 mb-4 leading-tight">
+            Your first 10,000<br/>emails are free.
+          </h2>
+          <p class="text-[15px] text-ink-500 mb-8 max-w-md leading-relaxed">
+            Generate an API key, install the SDK, and send your first email in under ten minutes.
+            Honest pricing after that — no seat limits, no egress fees.
+          </p>
+          <div class="flex flex-wrap gap-3 mb-8">
+            <a href="#" class="btn-primary">Get your API key →</a>
+            <a href="#" class="btn-ghost">View documentation</a>
+          </div>
+          <div class="font-mono text-[12px] text-ink-400">
+            npm install @cadence/sdk &nbsp;·&nbsp; pip install cadence &nbsp;·&nbsp; go get cadence.dev/sdk
+          </div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- FOOTER -->
+  <footer class="border-t border-rule px-6 py-8">
+    <div class="max-w-6xl mx-auto flex flex-col sm:flex-row items-center justify-between gap-4">
+      <a href="#" class="font-serif font-bold text-[1.1rem] text-ink-900">Cadence</a>
+      <div class="flex flex-wrap items-center gap-5 font-mono text-[11px] text-ink-400">
+        <a href="#" class="hover:text-ink-700 transition-colors">Docs</a>
+        <a href="#" class="hover:text-ink-700 transition-colors">Status</a>
+        <a href="#" class="hover:text-ink-700 transition-colors">Changelog</a>
+        <a href="#" class="hover:text-ink-700 transition-colors">Privacy</a>
+        <a href="#" class="hover:text-ink-700 transition-colors">Terms</a>
+        <span class="text-ink-200">© 2024 Cadence</span>
+      </div>
+    </div>
+  </footer>
+
+  <script>
+    // Fade-up observer
+    const fadeObs = new IntersectionObserver((entries) => {
+      entries.forEach(e => {
+        if (e.isIntersecting) {
+          e.target.classList.add('in');
+          fadeObs.unobserve(e.target);
+        }
+      });
+    }, { threshold: 0.08, rootMargin: '0px 0px -30px 0px' });
+
+    document.querySelectorAll('.fade-up').forEach(el => fadeObs.observe(el));
+
+    // Trigger above-fold immediately
+    document.querySelectorAll('.fade-up').forEach(el => {
+      if (el.getBoundingClientRect().top < window.innerHeight) el.classList.add('in');
+    });
+
+    // Section rules
+    const ruleObs = new IntersectionObserver((entries) => {
+      entries.forEach(e => {
+        if (e.isIntersecting) {
+          e.target.classList.add('active');
+          ruleObs.unobserve(e.target);
+        }
+      });
+    }, { threshold: 0.5 });
+    document.querySelectorAll('.section-rule').forEach(el => ruleObs.observe(el));
+
+    // Code line reveal
+    const codeLines = document.querySelectorAll('#code-lines .code-line');
+    const codeObs = new IntersectionObserver((entries) => {
+      entries.forEach(e => {
+        if (e.isIntersecting) {
+          codeLines.forEach((line, i) => {
+            setTimeout(() => line.classList.add('visible'), i * 55);
+          });
+          codeObs.unobserve(e.target);
+        }
+      });
+    }, { threshold: 0.3 });
+    const codeWrap = document.getElementById('code-lines');
+    if (codeWrap) codeObs.observe(codeWrap);
+
+    // Trigger code if in view
+    if (codeWrap && codeWrap.getBoundingClientRect().top < window.innerHeight) {
+      codeLines.forEach((line, i) => {
+        setTimeout(() => line.classList.add('visible'), i * 55);
+      });
+    }
+  </script>
+</body>
+</html>

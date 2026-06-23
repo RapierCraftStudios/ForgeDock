@@ -1,0 +1,138 @@
+{
+  "corpus_version": "seed-v1",
+  "generation_model": "claude-sonnet-4-6",
+  "judge_model": "claude-sonnet-4-6",
+  "n_products": 5,
+  "n_runs_per_product": 3,
+  "win_rate_vs_C": {
+    "A": {
+      "mean": null,
+      "by_product": {
+        "cadence": null,
+        "tender": null,
+        "slipstream": null,
+        "voltage": null,
+        "plume": null
+      }
+    },
+    "B": {
+      "mean": 0.2,
+      "by_product": {
+        "cadence": 0,
+        "tender": 0,
+        "slipstream": 1,
+        "voltage": 0,
+        "plume": 0
+      }
+    }
+  },
+  "a_vs_b_win_rate": null,
+  "rubric": {
+    "A": {
+      "hierarchy": {
+        "mean": null,
+        "stdev": null
+      },
+      "typography": {
+        "mean": null,
+        "stdev": null
+      },
+      "color": {
+        "mean": null,
+        "stdev": null
+      },
+      "whitespace": {
+        "mean": null,
+        "stdev": null
+      },
+      "originality": {
+        "mean": null,
+        "stdev": null
+      },
+      "mobile": {
+        "mean": null,
+        "stdev": null
+      }
+    },
+    "B": {
+      "hierarchy": {
+        "mean": 3.4,
+        "stdev": 0.737
+      },
+      "typography": {
+        "mean": 3.467,
+        "stdev": 0.743
+      },
+      "color": {
+        "mean": 3.2,
+        "stdev": 0.561
+      },
+      "whitespace": {
+        "mean": 3.333,
+        "stdev": 0.488
+      },
+      "originality": {
+        "mean": 2.933,
+        "stdev": 0.594
+      },
+      "mobile": {
+        "mean": 3.267,
+        "stdev": 0.458
+      }
+    },
+    "C": {
+      "hierarchy": {
+        "mean": 4.8,
+        "stdev": 0.414
+      },
+      "typography": {
+        "mean": 4.8,
+        "stdev": 0.414
+      },
+      "color": {
+        "mean": 4.6,
+        "stdev": 0.828
+      },
+      "whitespace": {
+        "mean": 4.4,
+        "stdev": 0.828
+      },
+      "originality": {
+        "mean": 4.8,
+        "stdev": 0.414
+      },
+      "mobile": {
+        "mean": 3.8,
+        "stdev": 0.414
+      }
+    }
+  },
+  "slop": {
+    "A": null,
+    "B": 4.8,
+    "C": 1
+  },
+  "judge_calibration": {
+    "miscalibrated_runs": [
+      {
+        "product": "slipstream",
+        "run": 1,
+        "comparison": "B_vs_C",
+        "winner": "B"
+      },
+      {
+        "product": "slipstream",
+        "run": 2,
+        "comparison": "B_vs_C",
+        "winner": "B"
+      },
+      {
+        "product": "slipstream",
+        "run": 3,
+        "comparison": "B_vs_C",
+        "winner": "B"
+      }
+    ],
+    "ok": false
+  }
+}

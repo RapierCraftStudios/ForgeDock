@@ -95,7 +95,13 @@ The context phase surfaced two historical bugs (#577, #587) in the same module �
 
 ## Install
 
-**Requirements:** [Node.js 18+](https://nodejs.org/), [Claude Code](https://docs.anthropic.com/en/docs/claude-code), [GitHub CLI (`gh`)](https://cli.github.com/), and [`yq`](https://github.com/mikefarah/yq) (YAML parser used by pipeline commands to read `forge.yaml`)
+**Requirements:** [Node.js 18+](https://nodejs.org/), [Claude Code](https://docs.anthropic.com/en/docs/claude-code), [GitHub CLI (`gh`)](https://cli.github.com/), [`yq`](https://github.com/mikefarah/yq) (YAML parser used by pipeline commands to read `forge.yaml`), and **[Playwright MCP](https://github.com/microsoft/playwright-mcp)** (browser automation for `/qa-sweep` and visual testing commands)
+
+> **Playwright MCP** is a guaranteed ForgeDock dependency for browser automation commands. Register it in Claude Code after installing ForgeDock:
+> ```bash
+> claude mcp add playwright npx @playwright/mcp@latest
+> ```
+> Verify with `npx forgedock doctor` — Check 9 confirms Playwright MCP is registered.
 
 ```bash
 # Install pipeline commands
@@ -129,6 +135,33 @@ npx forgedock help         # Show all available commands
 ```
 
 </details>
+
+---
+
+## Global Command Namespace
+
+ForgeDock owns the **global** `~/.claude/commands/` namespace. When `npx forgedock` runs, it symlinks all pipeline commands there and writes a `.symlink-source` sentinel file so other installers can detect the owner:
+
+```
+~/.claude/commands/
+  .symlink-source       ← sentinel: "ForgeDock owns this namespace"
+  work-on.md            → /path/to/forgedock/commands/work-on.md
+  review-pr.md          → /path/to/forgedock/commands/review-pr.md
+  ...
+```
+
+**Project-specific commands** should install to the **project-local** `.claude/commands/` directory instead:
+
+```
+your-project/
+  .claude/
+    commands/
+      my-custom-command.md   ← project-local — Claude Code merges these in
+```
+
+Claude Code merges global (`~/.claude/commands/`) and project-local (`.claude/commands/`) automatically. Project-local commands win on name collisions.
+
+If another tool runs its own install script that targets `~/.claude/commands/`, it will silently repoint ForgeDock's symlinks to its own source path — breaking all ForgeDock commands globally. The `.symlink-source` sentinel is a machine-readable warning to other installers; ForgeDock also emits a per-command warning during `npx forgedock install` when it detects a collision.
 
 ---
 

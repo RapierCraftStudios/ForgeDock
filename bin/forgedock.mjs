@@ -204,7 +204,7 @@ function stripJsonc(raw) {
     if (ch === "/" && i + 1 < len && raw[i + 1] === "*") {
       i += 2;
       while (i + 1 < len && !(raw[i] === "*" && raw[i + 1] === "/")) i++;
-      i += 2;
+      if (i + 1 < len) i += 2; // only advance past */ if terminator was found
       continue;
     }
 
@@ -240,7 +240,7 @@ function stripJsonc(raw) {
         if (j + 1 < len && raw[j] === "/" && raw[j + 1] === "*") {
           j += 2;
           while (j + 1 < len && !(raw[j] === "*" && raw[j + 1] === "/")) j++;
-          j += 2;
+          if (j + 1 < len) j += 2; // only advance past */ if terminator was found
           advanced = true;
         }
       }
@@ -318,6 +318,51 @@ function atomicWriteFile(filePath, content) {
       /* already gone or never created */
     }
     throw err;
+  }
+}
+
+/**
+ * Idempotently write a `.symlink-source` sentinel file to TARGET_DIR
+ * (~/.claude/commands/) so other installers can detect that ForgeDock
+ * owns this namespace.
+ *
+ * The sentinel is a plain UTF-8 text file (not a symlink) containing
+ * the source path, a reinstall hint, and the install timestamp.  It is
+ * updated on every install so the timestamp stays fresh.  Write failures
+ * are non-fatal — the function returns 'failed' and the caller logs a
+ * warning; install continues regardless.
+ *
+ * Calling convention matches the other state-write helpers:
+ *   'written'  — sentinel was newly created or refreshed
+ *   'failed'   — an error occurred (non-fatal; install continues)
+ *
+ * <!-- Added: forge#1038 -->
+ *
+ * @returns {'written' | 'failed'}
+ */
+function writeSymlinkSentinel() {
+  const sentinelPath = join(TARGET_DIR, ".symlink-source");
+  const timestamp = new Date().toISOString().replace("T", " ").slice(0, 19);
+  const content =
+    `# ForgeDock command symlinks — DO NOT REPOINT\n` +
+    `# Source: ${COMMANDS_DIR}\n` +
+    `#\n` +
+    `# These symlinks are managed by ForgeDock (https://forgedock.com).\n` +
+    `# ForgeDock owns the global ~/.claude/commands/ namespace.\n` +
+    `# Project-specific commands should install to the project's\n` +
+    `# .claude/commands/ directory instead (Claude Code merges both;\n` +
+    `# project-local commands win on name collisions).\n` +
+    `#\n` +
+    `# Running another installer here will silently repoint these\n` +
+    `# symlinks, breaking all ForgeDock commands globally.\n` +
+    `#\n` +
+    `# To reinstall ForgeDock: npx forgedock install\n` +
+    `# Last installed: ${timestamp}\n`;
+  try {
+    atomicWriteFile(sentinelPath, content);
+    return "written";
+  } catch {
+    return "failed";
   }
 }
 
@@ -566,9 +611,18 @@ function injectManagedBlock(filePath) {
           "[\\s\\S]*?" +
           escapeRegExp(CLAUDE_BLOCK_END),
       );
+      if (!blockRegex.test(existing)) {
+        // Should not happen: both markers were confirmed above via includes() and
+        // indexOf() ordering. Guard against silent misclassification — if the regex
+        // somehow fails to match, replaced === existing would incorrectly return
+        // 'unchanged' instead of surfacing the broken state.
+        throw new Error(
+          `injectManagedBlock: regex failed to match markers in ${filePath}`,
+        );
+      }
       const replaced = existing.replace(blockRegex, managed);
       if (replaced === existing) {
-        // Regex matched but content was already identical
+        // Content between markers was already identical to the managed block
         return "unchanged";
       }
       atomicWriteFile(filePath, replaced);
@@ -754,8 +808,12 @@ function removeForgeHomeFromProfile(profilePath) {
   // Step 1: Remove the 2-line ForgeDock block (comment + export), preceded
   // by an optional leading blank line that install() inserts.
   // The \r? handles profiles with CRLF line endings.
+  // The value pattern (?:[^"\\]|\\.)*  matches a double-quoted shell string
+  // that may contain backslash-escape sequences (e.g. \" or \\) written by
+  // shellEscapeDoubleQuotedPath(). The simpler [^"]* would stop prematurely
+  // at the escaped-quote character inside \", failing to match the full line.
   let cleaned = content.replace(
-    /\r?\n[ \t]*# ForgeDock — autonomous development pipeline\r?\nexport FORGE_HOME="[^"]*"\r?\n/g,
+    /\r?\n[ \t]*# ForgeDock — autonomous development pipeline\r?\nexport FORGE_HOME="(?:[^"\\]|\\.)*"\r?\n/g,
     "\n",
   );
 
@@ -820,6 +878,16 @@ async function linkCommands(step) {
         if (current === file) {
           skipped++;
         } else {
+          // Symlink points to a different source — warn if it appears to belong
+          // to another Forge/ForgeDock installation (i.e. not a broken link that
+          // already pointed here under a different absolute path).
+          // Only emit the warning once per install to avoid log spam.
+          // <!-- Added: forge#1038 -->
+          if (!current.startsWith(COMMANDS_DIR)) {
+            step.note(
+              yellow(`collision: ${rel} was → ${current} — repointing to ForgeDock`),
+            );
+          }
           try {
             await symlink(file, target + ".tmp");
             const { rename } = await import("fs/promises");
@@ -986,6 +1054,29 @@ async function install() {
     {
       label: "Checking environment",
       async run(step) {
+        // Worktree guard — refuse to install when FORGE_HOME is a git worktree.
+        // In a worktree, FORGE_HOME/.git is a regular file (not a directory).
+        // Installing from a worktree would bake an ephemeral path into the
+        // symlinks and SessionStart hook; the path breaks when the worktree
+        // is cleaned up, taking all Forge commands offline globally.
+        // <!-- Added: forge#1037 -->
+        const gitPath = join(FORGE_HOME, ".git");
+        let gitStat = null;
+        try {
+          gitStat = await lstat(gitPath);
+        } catch (err) {
+          if (err.code !== "ENOENT") throw err;
+          // .git absent — npm install or detached checkout; not a worktree.
+        }
+        if (gitStat !== null && gitStat.isFile()) {
+          throw new Error(
+            `install() is running from a git worktree (${FORGE_HOME}).\n` +
+            `  Installing from a worktree would repoint ~/.claude/commands/ symlinks\n` +
+            `  to an ephemeral path that breaks when the worktree is deleted.\n` +
+            `  Run \`npx forgedock install\` from the main repository clone instead.`,
+          );
+        }
+
         await mkdir(TARGET_DIR, { recursive: true });
         step.note(cyan(TARGET_DIR));
       },
@@ -998,6 +1089,20 @@ async function install() {
         step.note(
           `${green(String(installed))} installed, ${updated} updated, ${dim(String(skipped))} skipped  (${total} commands total)`,
         );
+      },
+    },
+    {
+      label: "Writing namespace sentinel",
+      async run(step) {
+        // Write .symlink-source to ~/.claude/commands/ so other installers
+        // can detect that ForgeDock owns this namespace. Non-fatal on failure.
+        // <!-- Added: forge#1038 -->
+        const result = writeSymlinkSentinel();
+        if (result === "failed") {
+          step.note("could not write .symlink-source — run npx forgedock install again to retry");
+        } else {
+          step.note(cyan(join(TARGET_DIR, ".symlink-source")));
+        }
       },
     },
     {
@@ -1036,7 +1141,12 @@ async function install() {
               // Either not present, or set to a stale path — refresh it.
               if (content.includes("FORGE_HOME")) {
                 // Strip the old block before appending the updated one.
-                removeForgeHomeFromProfile(profile);
+                const removeResult = removeForgeHomeFromProfile(profile);
+                if (removeResult === "failed") {
+                  // Removal failed — old export still present. Skip append to
+                  // avoid writing a duplicate FORGE_HOME export. (ref: forge#846)
+                  continue;
+                }
               }
               appendFileSync(
                 profile,
@@ -1158,8 +1268,17 @@ async function uninstall() {
           console.log(`  ${RED}Removed${RESET}: ${rel}`);
           removed++;
         }
+      } else if (
+        readFileSync(file, "utf-8") === readFileSync(target, "utf-8")
+      ) {
+        // Regular file installed by ForgeDock in copy mode — content matches.
+        const { unlink } = await import("fs/promises");
+        await unlink(target);
+        console.log(`  ${RED}Removed${RESET}: ${rel}`);
+        removed++;
       }
-    } catch {
+    } catch (err) {
+      if (err.code !== "ENOENT") throw err;
       // Doesn't exist — nothing to do
     }
   }
@@ -1580,6 +1699,14 @@ async function init(fromInstall = false) {
     .map((w) => w.charAt(0).toUpperCase() + w.slice(1))
     .join(" ");
 
+  // Pre-escape values for embedding in YAML double-quoted strings.
+  // Backslash must be escaped first to avoid double-escaping.
+  const safeOwner = owner.replace(/\\/g, '\\\\').replace(/"/g, '\\"');
+  const safeRepo = repo.replace(/\\/g, '\\\\').replace(/"/g, '\\"');
+  const safeProjectName = projectName.replace(/\\/g, '\\\\').replace(/"/g, '\\"');
+  const safeDefaultBranch = defaultBranch.replace(/\\/g, '\\\\').replace(/"/g, '\\"');
+  const safeStagingBranch = stagingBranch.replace(/\\/g, '\\\\').replace(/"/g, '\\"');
+
   const content = `# forge.yaml — ForgeDock Configuration
 #
 # Auto-generated by: npx forgedock init
@@ -1595,9 +1722,9 @@ async function init(fromInstall = false) {
 # =============================================================================
 
 project:
-  name: "${projectName}"
-  owner: "${owner}"
-  repo: "${repo}"
+  name: "${safeProjectName}"
+  owner: "${safeOwner}"
+  repo: "${safeRepo}"
   description: "${description.replace(/\\/g, '\\\\').replace(/"/g, '\\"')}"
 
 # =============================================================================
@@ -1613,8 +1740,8 @@ paths:
 # =============================================================================
 
 branches:
-  default: "${defaultBranch}"
-  staging: "${stagingBranch}"
+  default: "${safeDefaultBranch}"
+  staging: "${safeStagingBranch}"
   feature_pattern: "milestone/{slug}"
 
 # =============================================================================
@@ -1624,22 +1751,22 @@ branches:
 
 # repos:
 #   default:
-#     repo: "${owner}/${repo}"
-#     staging_branch: "${stagingBranch}"
+#     repo: "${safeOwner}/${safeRepo}"
+#     staging_branch: "${safeStagingBranch}"
 #   satellites:
 #     - prefix: "mcp"
-#       repo: "${owner}/your-satellite-repo"
+#       repo: "${safeOwner}/your-satellite-repo"
 #       staging_branch: "main"
 #       local_path: "${join(cwd, "..", "your-satellite-repo").replace(/\\/g, '\\\\').replace(/"/g, '\\"')}"
 
 # =============================================================================
 # PROJECT BOARD (OPTIONAL)
 # GitHub Projects v2 integration.
-# To find IDs: gh project list --owner ${owner}
+# To find IDs: gh project list --owner ${safeOwner}
 # =============================================================================
 
 # project_board:
-#   owner: "${owner}"
+#   owner: "${safeOwner}"
 #   project_number: 1
 #   project_id: "PVT_kwHOxxxxxxxxxxxxxxxx"
 #   field_ids:
@@ -1665,9 +1792,37 @@ branches:
 # =============================================================================
 
 # verification:
-#   health_endpoint: "https://api.${repo}.io/health"
+#   health_endpoint: "https://api.${safeRepo}.io/health"
 #   health_patterns:
 #     - '"status": "ok"'
+#
+#   # Integration test suites run by /test-gate against the provisioned cluster.
+#   # Each entry specifies a logical cluster (matched to test_services), the shell
+#   # command to execute, and the working directory (relative to project root).
+#   # Used by: test-gate (Phase 3 Provision + Phase 4 Fan out)
+#   #
+#   # integration_tests:
+#   #   - cluster: "api"
+#   #     command: "pytest tests/integration/ -q --tb=short"
+#   #     working_dir: "."
+#
+#   # Maps logical cluster names (from integration_tests) to running container
+#   # names. /test-gate checks these containers are live before running tests.
+#   # Omit entries for clusters that do not use Docker.
+#   # Used by: test-gate (Phase 3 Provision)
+#   #
+#   # test_services:
+#   #   api: "${safeRepo}-api-blue"
+#   #   worker: "${safeRepo}-worker-blue"
+#
+#   # Controls /test-gate posture at the staging-to-main deploy boundary.
+#   # posture: blocking (default) or advisory.
+#   # override_phrase: exact comment text an operator posts to bypass a BLOCK.
+#   # Used by: test-gate (Phase 7 Verdict), review-pr-staging (Phase 6.5)
+#   #
+#   # test_gate:
+#   #   posture: "blocking"
+#   #   override_phrase: "OVERRIDE: shipping with test failures \u2014"
 `;
 
   atomicWriteFile(outputPath, content);
@@ -1866,6 +2021,7 @@ async function status(dir) {
  *   6. CLAUDE.md has the ForgeDock behavioral block (cwd)
  *   7. Required workflow labels exist on the GitHub repo (needs forge.yaml + gh auth)
  *   8. FORGE_HOME environment variable is set
+ *   9. Playwright MCP registered in ~/.claude/mcp_servers.json (advisory warn — required for /qa-sweep)
  *
  * Exits with code 0 if all checks pass, code 1 if any fail.
  */
@@ -2225,6 +2381,62 @@ async function doctor() {
       fail(
         "FORGE_HOME env var",
         `Add to your shell profile: export FORGE_HOME="${FORGE_HOME}"  then restart your shell (or run: source ~/.bashrc)`,
+      );
+    }
+  }
+
+  // ── Check 9: Playwright MCP registered ────────────────────────────────────
+  // Playwright MCP is a guaranteed ForgeDock dependency for browser automation
+  // commands (/qa-sweep). This check is advisory (warn, not fail) because MCP
+  // server presence is orthogonal to the core ForgeDock install — but missing
+  // it causes /qa-sweep to silently fail mid-sweep.
+  {
+    const mcpServersPath = join(HOME, ".claude", "mcp_servers.json");
+    let playwrightFound = false;
+    let fileReadable = false;
+    let hasMcpServers = false;
+
+    try {
+      const mcpRaw = readFileSync(mcpServersPath, "utf-8");
+      const mcpConfig = JSON.parse(mcpRaw);
+      // Read + parse succeeded — the file exists and contains valid JSON.
+      fileReadable = true;
+      const servers = mcpConfig?.mcpServers;
+      if (servers && typeof servers === "object") {
+        hasMcpServers = true;
+        // Search for a registered server whose name or command references playwright
+        for (const [name, entry] of Object.entries(servers)) {
+          const nameLower = name.toLowerCase();
+          const cmdStr = [
+            entry?.command ?? "",
+            ...(Array.isArray(entry?.args) ? entry.args : []),
+          ].join(" ").toLowerCase();
+          if (nameLower.includes("playwright") || cmdStr.includes("playwright")) {
+            playwrightFound = true;
+            break;
+          }
+        }
+      }
+    } catch {
+      // File absent or unreadable — treat as no MCP servers configured
+    }
+
+    if (!fileReadable) {
+      warn(
+        "Playwright MCP",
+        "No MCP servers file found (~/.claude/mcp_servers.json). Register Playwright MCP to enable /qa-sweep: claude mcp add playwright npx @playwright/mcp@latest",
+      );
+    } else if (!hasMcpServers) {
+      warn(
+        "Playwright MCP",
+        "MCP servers file found (~/.claude/mcp_servers.json) but it has no 'mcpServers' key. Register Playwright MCP to enable /qa-sweep: claude mcp add playwright npx @playwright/mcp@latest",
+      );
+    } else if (playwrightFound) {
+      pass("Playwright MCP", "registered in Claude Code MCP servers");
+    } else {
+      warn(
+        "Playwright MCP",
+        "Not registered — /qa-sweep and browser automation commands will fail. Run: claude mcp add playwright npx @playwright/mcp@latest",
       );
     }
   }

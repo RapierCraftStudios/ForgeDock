@@ -1,0 +1,836 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>VOLTAGE — Cloud Compute</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Syne:wght@400;600;700;800&family=IBM+Plex+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+<style>
+*, *::before, *::after { margin: 0; padding: 0; box-sizing: border-box; }
+
+:root {
+  --black: #000000;
+  --white: #ffffff;
+  --off-white: #f0f0ec;
+  --gray: #888888;
+  --gray-dark: #333333;
+  --gray-light: #cccccc;
+  --volt: #c8ff00;
+  --volt-dark: #9ecc00;
+  --display: 'Syne', sans-serif;
+  --mono: 'IBM Plex Mono', monospace;
+}
+
+body {
+  background: var(--off-white);
+  color: var(--black);
+  font-family: var(--display);
+  -webkit-font-smoothing: antialiased;
+}
+
+/* ── NAV ── */
+.nav {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 20px 40px;
+  border-bottom: 3px solid var(--black);
+}
+
+.nav-logo {
+  font-weight: 800;
+  font-size: 20px;
+  letter-spacing: 6px;
+  text-transform: uppercase;
+}
+
+.nav-links { display: flex; gap: 32px; align-items: center; }
+.nav-links a {
+  font-family: var(--mono);
+  font-size: 12px;
+  color: var(--black);
+  text-decoration: none;
+  text-transform: uppercase;
+  letter-spacing: 1.5px;
+}
+.nav-links a:hover { text-decoration: underline; text-underline-offset: 4px; }
+
+.nav-cta {
+  background: var(--black) !important;
+  color: var(--volt) !important;
+  padding: 10px 24px !important;
+  font-weight: 600 !important;
+  letter-spacing: 2px !important;
+}
+
+/* ── HERO: NEWSPAPER SCALE ── */
+.hero {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  border-bottom: 3px solid var(--black);
+}
+
+.hero-left {
+  padding: 80px 48px 60px;
+  border-right: 3px solid var(--black);
+  display: flex;
+  flex-direction: column;
+  justify-content: space-between;
+}
+
+.hero-headline {
+  font-size: clamp(56px, 8vw, 120px);
+  font-weight: 800;
+  line-height: 0.9;
+  letter-spacing: -4px;
+  text-transform: uppercase;
+}
+
+.hero-headline .volt-text {
+  color: var(--black);
+  background: var(--volt);
+  padding: 0 12px;
+  display: inline;
+}
+
+.hero-subhead {
+  font-family: var(--mono);
+  font-size: 14px;
+  line-height: 1.8;
+  color: var(--gray-dark);
+  max-width: 480px;
+  margin-top: 32px;
+}
+
+.hero-bottom {
+  display: flex;
+  gap: 24px;
+  margin-top: 48px;
+  padding-top: 24px;
+  border-top: 1px solid var(--gray-light);
+}
+
+.hero-metric {
+  flex: 1;
+}
+
+.hero-metric-value {
+  font-size: 36px;
+  font-weight: 800;
+  letter-spacing: -1px;
+}
+
+.hero-metric-label {
+  font-family: var(--mono);
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 2px;
+  color: var(--gray);
+  margin-top: 4px;
+}
+
+/* ── HERO RIGHT: TERMINAL ON LIGHT ── */
+.hero-right {
+  background: var(--black);
+  color: var(--white);
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.term-chrome {
+  padding: 16px 24px;
+  border-bottom: 1px solid #222;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  font-family: var(--mono);
+  font-size: 11px;
+  color: var(--gray);
+}
+
+.term-dots { display: flex; gap: 6px; }
+.term-dots span { width: 10px; height: 10px; border-radius: 50%; border: 1px solid #444; }
+.term-dots span:first-child { background: #ff5f57; border-color: #ff5f57; }
+
+.term-body {
+  flex: 1;
+  padding: 32px 28px;
+  font-family: var(--mono);
+  font-size: 13px;
+  line-height: 2;
+  overflow: auto;
+}
+
+.t-comment { color: #555; }
+.t-kw { color: var(--volt); }
+.t-str { color: #7ec8e3; }
+.t-fn { color: #fff; }
+.t-dec { color: #ff9f43; }
+.t-num { color: #ff6b6b; }
+.t-param { color: var(--gray-light); }
+
+/* ── CTA BAR ── */
+.cta-bar {
+  display: flex;
+  border-bottom: 3px solid var(--black);
+}
+
+.cta-bar-left {
+  flex: 1;
+  background: var(--volt);
+  padding: 28px 48px;
+  font-weight: 800;
+  font-size: 20px;
+  text-transform: uppercase;
+  letter-spacing: 4px;
+  display: flex;
+  align-items: center;
+}
+
+.cta-bar-right {
+  background: var(--black);
+  color: var(--volt);
+  padding: 28px 48px;
+  font-family: var(--mono);
+  font-size: 14px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  cursor: pointer;
+  text-decoration: none;
+}
+
+.cta-bar-right:hover { background: #111; }
+
+/* ── CONTENT BLOCKS ── */
+.split-section {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  border-bottom: 3px solid var(--black);
+}
+
+.split-left {
+  padding: 64px 48px;
+  border-right: 3px solid var(--black);
+}
+
+.split-right {
+  padding: 64px 48px;
+}
+
+.block-label {
+  font-family: var(--mono);
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 3px;
+  color: var(--gray);
+  margin-bottom: 20px;
+}
+
+.block-title {
+  font-size: 32px;
+  font-weight: 800;
+  line-height: 1.1;
+  letter-spacing: -1px;
+  text-transform: uppercase;
+  margin-bottom: 16px;
+}
+
+.block-text {
+  font-family: var(--mono);
+  font-size: 13px;
+  line-height: 1.8;
+  color: var(--gray-dark);
+}
+
+/* ── GPU TABLE ── */
+.gpu-section {
+  border-bottom: 3px solid var(--black);
+  padding: 64px 48px;
+}
+
+.gpu-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-family: var(--mono);
+  font-size: 13px;
+  margin-top: 32px;
+}
+
+.gpu-table th {
+  text-align: left;
+  padding: 12px 16px;
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 2px;
+  color: var(--gray);
+  border-bottom: 3px solid var(--black);
+  font-weight: 500;
+}
+
+.gpu-table td {
+  padding: 14px 16px;
+  border-bottom: 1px solid var(--gray-light);
+}
+
+.gpu-table tr:hover td {
+  background: var(--volt);
+  color: var(--black);
+}
+
+.gpu-name { font-weight: 600; }
+.gpu-price { font-weight: 600; }
+
+/* ── FEATURES: STACKED BLOCKS ── */
+.features-stack {
+  border-bottom: 3px solid var(--black);
+}
+
+.feature-row {
+  display: grid;
+  grid-template-columns: 200px 1fr 1fr;
+  border-bottom: 1px solid var(--gray-light);
+}
+
+.feature-row:last-child { border-bottom: none; }
+
+.feature-num {
+  padding: 28px 32px;
+  font-weight: 800;
+  font-size: 48px;
+  color: var(--gray-light);
+  border-right: 3px solid var(--black);
+  display: flex;
+  align-items: center;
+}
+
+.feature-title-col {
+  padding: 28px 32px;
+  border-right: 1px solid var(--gray-light);
+  display: flex;
+  align-items: center;
+}
+
+.feature-row-title {
+  font-size: 20px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: -0.5px;
+}
+
+.feature-desc-col {
+  padding: 28px 32px;
+  display: flex;
+  align-items: center;
+}
+
+.feature-row-desc {
+  font-family: var(--mono);
+  font-size: 13px;
+  color: var(--gray-dark);
+  line-height: 1.6;
+}
+
+/* ── CODE EXAMPLES ── */
+.code-section {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  border-bottom: 3px solid var(--black);
+}
+
+.code-panel {
+  border-right: 3px solid var(--black);
+  background: var(--black);
+  color: var(--white);
+}
+
+.code-panel:last-child { border-right: none; }
+
+.code-panel-header {
+  padding: 16px 24px;
+  border-bottom: 1px solid #222;
+  font-family: var(--mono);
+  font-size: 11px;
+  color: var(--gray);
+  display: flex;
+  justify-content: space-between;
+}
+
+.code-panel-body {
+  padding: 24px;
+  font-family: var(--mono);
+  font-size: 12.5px;
+  line-height: 1.9;
+}
+
+/* ── PRICING STRIP ── */
+.pricing-strip {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  border-bottom: 3px solid var(--black);
+}
+
+.pricing-cell {
+  padding: 40px 32px;
+  border-right: 3px solid var(--black);
+}
+
+.pricing-cell:last-child { border-right: none; }
+
+.pricing-cell.featured {
+  background: var(--black);
+  color: var(--white);
+}
+
+.pricing-cell.featured .pricing-cell-label { color: var(--volt); }
+.pricing-cell.featured .pricing-cell-price { color: var(--white); }
+
+.pricing-cell-label {
+  font-family: var(--mono);
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 2px;
+  color: var(--gray);
+  margin-bottom: 12px;
+}
+
+.pricing-cell-price {
+  font-size: 40px;
+  font-weight: 800;
+  letter-spacing: -2px;
+}
+
+.pricing-cell-unit {
+  font-family: var(--mono);
+  font-size: 11px;
+  color: var(--gray);
+  margin-bottom: 20px;
+}
+
+.pricing-cell-list {
+  list-style: none;
+  font-family: var(--mono);
+  font-size: 12px;
+  line-height: 2;
+}
+
+.pricing-cell-list li::before {
+  content: "--";
+  margin-right: 6px;
+  color: var(--gray);
+}
+
+.pricing-cell.featured .pricing-cell-list li::before { color: var(--volt); }
+
+/* ── BOTTOM CTA ── */
+.bottom-cta {
+  display: grid;
+  grid-template-columns: 2fr 1fr;
+  border-bottom: 3px solid var(--black);
+}
+
+.bottom-cta-left {
+  padding: 80px 48px;
+  border-right: 3px solid var(--black);
+}
+
+.bottom-cta-title {
+  font-size: 56px;
+  font-weight: 800;
+  text-transform: uppercase;
+  letter-spacing: -2px;
+  line-height: 1;
+  margin-bottom: 24px;
+}
+
+.bottom-cta-sub {
+  font-family: var(--mono);
+  font-size: 14px;
+  color: var(--gray-dark);
+  margin-bottom: 32px;
+}
+
+.bottom-cta-right {
+  background: var(--volt);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-direction: column;
+  padding: 48px;
+  text-align: center;
+  cursor: pointer;
+}
+
+.bottom-cta-right:hover { background: var(--volt-dark); }
+
+.bottom-cta-action {
+  font-size: 20px;
+  font-weight: 800;
+  text-transform: uppercase;
+  letter-spacing: 4px;
+}
+
+.bottom-cta-hint {
+  font-family: var(--mono);
+  font-size: 12px;
+  margin-top: 8px;
+  color: var(--gray-dark);
+}
+
+/* ── FOOTER ── */
+.footer {
+  display: flex;
+  justify-content: space-between;
+  padding: 24px 48px;
+  font-family: var(--mono);
+  font-size: 11px;
+  color: var(--gray);
+  text-transform: uppercase;
+  letter-spacing: 1px;
+}
+
+/* ── MOBILE ── */
+@media (max-width: 900px) {
+  .hero { grid-template-columns: 1fr; }
+  .hero-left { border-right: none; border-bottom: 3px solid var(--black); padding: 48px 24px; }
+  .hero-right { min-height: 400px; }
+  .hero-headline { font-size: 48px; letter-spacing: -2px; }
+  .split-section { grid-template-columns: 1fr; }
+  .split-left { border-right: none; border-bottom: 1px solid var(--gray-light); }
+  .feature-row { grid-template-columns: 60px 1fr; }
+  .feature-num { font-size: 24px; padding: 16px; }
+  .feature-desc-col { display: none; }
+  .code-section { grid-template-columns: 1fr; }
+  .code-panel { border-right: none; border-bottom: 3px solid var(--black); }
+  .pricing-strip { grid-template-columns: 1fr 1fr; }
+  .pricing-cell { border-bottom: 3px solid var(--black); }
+  .bottom-cta { grid-template-columns: 1fr; }
+  .bottom-cta-left { border-right: none; }
+  .cta-bar { flex-direction: column; }
+  .nav-links { gap: 16px; }
+}
+
+@media (max-width: 600px) {
+  .pricing-strip { grid-template-columns: 1fr; }
+  .nav-links a:not(.nav-cta) { display: none; }
+  .hero-bottom { flex-direction: column; gap: 16px; }
+}
+</style>
+</head>
+<body>
+
+<!-- NAV -->
+<nav class="nav">
+  <div class="nav-logo">VOLTAGE</div>
+  <div class="nav-links">
+    <a href="#">Docs</a>
+    <a href="#">Pricing</a>
+    <a href="#">Changelog</a>
+    <a href="#" class="nav-cta">Get started</a>
+  </div>
+</nav>
+
+<!-- HERO -->
+<section class="hero">
+  <div class="hero-left">
+    <div>
+      <h1 class="hero-headline">
+        YOUR<br>CODE.<br><span class="volt-text">OUR</span><br>GPUS.
+      </h1>
+      <p class="hero-subhead">
+        Serverless compute for AI workloads. Write ordinary Python, attach GPUs with a decorator, scale from zero to thousands of containers. No Dockerfiles. No YAML. No clusters.
+      </p>
+    </div>
+    <div class="hero-bottom">
+      <div class="hero-metric">
+        <div class="hero-metric-value">&lt;300ms</div>
+        <div class="hero-metric-label">Cold start</div>
+      </div>
+      <div class="hero-metric">
+        <div class="hero-metric-value">10K+</div>
+        <div class="hero-metric-label">Max containers</div>
+      </div>
+      <div class="hero-metric">
+        <div class="hero-metric-value">$0</div>
+        <div class="hero-metric-label">When idle</div>
+      </div>
+    </div>
+  </div>
+
+  <div class="hero-right">
+    <div class="term-chrome">
+      <div class="term-dots"><span></span><span></span><span></span></div>
+      <div>inference.py</div>
+    </div>
+    <div class="term-body">
+      <div><span class="t-kw">import</span> voltage</div>
+      <div>&nbsp;</div>
+      <div><span class="t-fn">app</span> = voltage.<span class="t-fn">App</span>(<span class="t-str">"llm-service"</span>)</div>
+      <div>&nbsp;</div>
+      <div><span class="t-comment"># Container image with dependencies baked in</span></div>
+      <div><span class="t-fn">image</span> = (</div>
+      <div>&nbsp;&nbsp;voltage.<span class="t-fn">Image</span>.debian_slim(python=<span class="t-str">"3.11"</span>)</div>
+      <div>&nbsp;&nbsp;.<span class="t-fn">pip_install</span>(<span class="t-str">"vllm"</span>, <span class="t-str">"torch"</span>)</div>
+      <div>)</div>
+      <div>&nbsp;</div>
+      <div><span class="t-dec">@app.cls</span>(gpu=<span class="t-str">"H100"</span>, image=image)</div>
+      <div><span class="t-kw">class</span> <span class="t-fn">LLM</span>:</div>
+      <div>&nbsp;&nbsp;<span class="t-dec">@voltage.enter</span>()</div>
+      <div>&nbsp;&nbsp;<span class="t-kw">def</span> <span class="t-fn">load</span>(self):</div>
+      <div>&nbsp;&nbsp;&nbsp;&nbsp;<span class="t-kw">from</span> vllm <span class="t-kw">import</span> LLM</div>
+      <div>&nbsp;&nbsp;&nbsp;&nbsp;self.engine = LLM(<span class="t-str">"meta-llama/Llama-3-70B"</span>)</div>
+      <div>&nbsp;</div>
+      <div>&nbsp;&nbsp;<span class="t-dec">@voltage.method</span>()</div>
+      <div>&nbsp;&nbsp;<span class="t-kw">def</span> <span class="t-fn">generate</span>(self, prompt: <span class="t-param">str</span>) -> <span class="t-param">str</span>:</div>
+      <div>&nbsp;&nbsp;&nbsp;&nbsp;output = self.engine.generate(prompt)</div>
+      <div>&nbsp;&nbsp;&nbsp;&nbsp;<span class="t-kw">return</span> output[<span class="t-num">0</span>].outputs[<span class="t-num">0</span>].text</div>
+      <div>&nbsp;</div>
+      <div><span class="t-dec">@app.endpoint</span>(method=<span class="t-str">"POST"</span>)</div>
+      <div><span class="t-kw">def</span> <span class="t-fn">serve</span>(prompt: <span class="t-param">str</span>):</div>
+      <div>&nbsp;&nbsp;<span class="t-kw">return</span> LLM().<span class="t-fn">generate</span>.remote(prompt)</div>
+    </div>
+  </div>
+</section>
+
+<!-- CTA BAR -->
+<div class="cta-bar">
+  <div class="cta-bar-left">pip install voltage && voltage deploy</div>
+  <a href="#" class="cta-bar-right">RUN YOUR FIRST FUNCTION &#8594;</a>
+</div>
+
+<!-- SPLIT: HOW IT WORKS -->
+<section class="split-section">
+  <div class="split-left">
+    <div class="block-label">How it works</div>
+    <h2 class="block-title">Write Python.<br>Add a decorator.<br>Deploy.</h2>
+    <p class="block-text">
+      Voltage serializes your function, builds a container image with your dependencies, and deploys it to our global fleet. When a request comes in, we boot a container in under 300ms, run your code on the GPU you specified, and shut it down when done. You only pay for the seconds your code is actually running.
+    </p>
+  </div>
+  <div class="split-right">
+    <div class="block-label">What you don't need</div>
+    <h2 class="block-title">No Dockerfiles.<br>No K8s manifests.<br>No Terraform.</h2>
+    <p class="block-text">
+      No cluster provisioning. No autoscaler configuration. No load balancer setup. No container registry management. No GPU driver installation. No CUDA version juggling. No spot instance bidding. No capacity reservations. Your Python function is the entire deployment artifact.
+    </p>
+  </div>
+</section>
+
+<!-- GPU TABLE -->
+<section class="gpu-section">
+  <div class="block-label">GPU Catalog</div>
+  <h2 class="block-title">Every GPU. On demand. Per second.</h2>
+
+  <table class="gpu-table">
+    <thead>
+      <tr>
+        <th>GPU</th>
+        <th>VRAM</th>
+        <th>FP16 TFLOPS</th>
+        <th>Best for</th>
+        <th>$/hr</th>
+      </tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td class="gpu-name">T4</td>
+        <td>16 GB</td>
+        <td>65</td>
+        <td>Inference, embeddings</td>
+        <td class="gpu-price">$0.59</td>
+      </tr>
+      <tr>
+        <td class="gpu-name">L4</td>
+        <td>24 GB</td>
+        <td>121</td>
+        <td>Inference, video</td>
+        <td class="gpu-price">$0.73</td>
+      </tr>
+      <tr>
+        <td class="gpu-name">A10G</td>
+        <td>24 GB</td>
+        <td>125</td>
+        <td>Training, inference</td>
+        <td class="gpu-price">$1.10</td>
+      </tr>
+      <tr>
+        <td class="gpu-name">A100-40GB</td>
+        <td>40 GB</td>
+        <td>312</td>
+        <td>Training, large models</td>
+        <td class="gpu-price">$2.78</td>
+      </tr>
+      <tr>
+        <td class="gpu-name">A100-80GB</td>
+        <td>80 GB</td>
+        <td>312</td>
+        <td>Large model training</td>
+        <td class="gpu-price">$3.64</td>
+      </tr>
+      <tr>
+        <td class="gpu-name">H100</td>
+        <td>80 GB</td>
+        <td>989</td>
+        <td>Frontier models</td>
+        <td class="gpu-price">$4.25</td>
+      </tr>
+    </tbody>
+  </table>
+</section>
+
+<!-- FEATURES -->
+<section class="features-stack">
+  <div class="feature-row">
+    <div class="feature-num">01</div>
+    <div class="feature-title-col"><div class="feature-row-title">Scale to zero</div></div>
+    <div class="feature-desc-col"><div class="feature-row-desc">No traffic, no cost. Containers spin down automatically. When requests return, cold starts under 300ms bring you back instantly.</div></div>
+  </div>
+  <div class="feature-row">
+    <div class="feature-num">02</div>
+    <div class="feature-title-col"><div class="feature-row-title">Burst to thousands</div></div>
+    <div class="feature-desc-col"><div class="feature-row-desc">Process millions of items with .map() across 10,000+ parallel containers. Batch inference, ETL, data processing at massive scale.</div></div>
+  </div>
+  <div class="feature-row">
+    <div class="feature-num">03</div>
+    <div class="feature-title-col"><div class="feature-row-title">Inference endpoints</div></div>
+    <div class="feature-desc-col"><div class="feature-row-desc">Turn any model into an auto-scaling HTTP API. Built-in request batching, GPU warmup pools, and global edge routing.</div></div>
+  </div>
+  <div class="feature-row">
+    <div class="feature-num">04</div>
+    <div class="feature-title-col"><div class="feature-row-title">Scheduled compute</div></div>
+    <div class="feature-desc-col"><div class="feature-row-desc">Cron-scheduled training runs, nightly pipelines, periodic batch jobs. GPU provisioned only for the duration of execution.</div></div>
+  </div>
+  <div class="feature-row">
+    <div class="feature-num">05</div>
+    <div class="feature-title-col"><div class="feature-row-title">Persistent storage</div></div>
+    <div class="feature-desc-col"><div class="feature-row-desc">Mount shared volumes across functions. Cache model weights, store training checkpoints, share data between pipeline stages.</div></div>
+  </div>
+  <div class="feature-row">
+    <div class="feature-num">06</div>
+    <div class="feature-title-col"><div class="feature-row-title">Local dev loop</div></div>
+    <div class="feature-desc-col"><div class="feature-row-desc">Interactive shells on remote containers. Hot-reload code. Stream logs. Debug in production with the same tools you use locally.</div></div>
+  </div>
+</section>
+
+<!-- CODE EXAMPLES -->
+<section class="code-section">
+  <div class="code-panel">
+    <div class="code-panel-header">
+      <span>batch_embed.py</span>
+      <span>Parallel processing</span>
+    </div>
+    <div class="code-panel-body">
+      <div><span class="t-dec">@app.function</span>(gpu=<span class="t-str">"T4"</span>)</div>
+      <div><span class="t-kw">def</span> <span class="t-fn">embed</span>(texts: list[<span class="t-param">str</span>]):</div>
+      <div>&nbsp;&nbsp;<span class="t-kw">from</span> sentence_transformers <span class="t-kw">import</span> (</div>
+      <div>&nbsp;&nbsp;&nbsp;&nbsp;SentenceTransformer</div>
+      <div>&nbsp;&nbsp;)</div>
+      <div>&nbsp;&nbsp;model = SentenceTransformer(</div>
+      <div>&nbsp;&nbsp;&nbsp;&nbsp;<span class="t-str">"all-MiniLM-L6-v2"</span></div>
+      <div>&nbsp;&nbsp;)</div>
+      <div>&nbsp;&nbsp;<span class="t-kw">return</span> model.encode(texts)</div>
+      <div>&nbsp;</div>
+      <div><span class="t-comment"># Fan out across 500 containers</span></div>
+      <div><span class="t-comment"># Process 5M docs in 4 minutes</span></div>
+      <div>results = list(</div>
+      <div>&nbsp;&nbsp;embed.<span class="t-fn">map</span>(batches, </div>
+      <div>&nbsp;&nbsp;&nbsp;&nbsp;order=<span class="t-kw">True</span>)</div>
+      <div>)</div>
+    </div>
+  </div>
+  <div class="code-panel">
+    <div class="code-panel-header">
+      <span>train_nightly.py</span>
+      <span>Scheduled GPU job</span>
+    </div>
+    <div class="code-panel-body">
+      <div><span class="t-fn">vol</span> = voltage.<span class="t-fn">Volume</span>.from_name(</div>
+      <div>&nbsp;&nbsp;<span class="t-str">"training-data"</span>,</div>
+      <div>&nbsp;&nbsp;create_if_missing=<span class="t-kw">True</span></div>
+      <div>)</div>
+      <div>&nbsp;</div>
+      <div><span class="t-dec">@app.function</span>(</div>
+      <div>&nbsp;&nbsp;gpu=<span class="t-str">"A100-80GB"</span>,</div>
+      <div>&nbsp;&nbsp;volumes={<span class="t-str">"/data"</span>: vol},</div>
+      <div>&nbsp;&nbsp;schedule=voltage.Cron(</div>
+      <div>&nbsp;&nbsp;&nbsp;&nbsp;<span class="t-str">"0 3 * * *"</span></div>
+      <div>&nbsp;&nbsp;),</div>
+      <div>&nbsp;&nbsp;timeout=<span class="t-num">7200</span>,</div>
+      <div>)</div>
+      <div><span class="t-kw">def</span> <span class="t-fn">finetune</span>():</div>
+      <div>&nbsp;&nbsp;train(load(<span class="t-str">"/data/new"</span>))</div>
+      <div>&nbsp;&nbsp;push_model()</div>
+    </div>
+  </div>
+</section>
+
+<!-- PRICING -->
+<section class="pricing-strip">
+  <div class="pricing-cell">
+    <div class="pricing-cell-label">CPU compute</div>
+    <div class="pricing-cell-price">$0.024</div>
+    <div class="pricing-cell-unit">per vCPU/hr</div>
+    <ul class="pricing-cell-list">
+      <li>Up to 64 vCPUs</li>
+      <li>256 GB RAM max</li>
+      <li>Per-second billing</li>
+      <li>Scale to zero</li>
+    </ul>
+  </div>
+  <div class="pricing-cell featured">
+    <div class="pricing-cell-label">GPU compute</div>
+    <div class="pricing-cell-price">$0.59</div>
+    <div class="pricing-cell-unit">per GPU/hr (from T4)</div>
+    <ul class="pricing-cell-list">
+      <li>T4 through H100</li>
+      <li>Multi-GPU support</li>
+      <li>Per-second billing</li>
+      <li>Preemptible: 60% off</li>
+    </ul>
+  </div>
+  <div class="pricing-cell">
+    <div class="pricing-cell-label">Storage</div>
+    <div class="pricing-cell-price">$0.10</div>
+    <div class="pricing-cell-unit">per GB/month</div>
+    <ul class="pricing-cell-list">
+      <li>Persistent volumes</li>
+      <li>Cross-function sharing</li>
+      <li>Snapshots included</li>
+      <li>NFS compatible</li>
+    </ul>
+  </div>
+  <div class="pricing-cell">
+    <div class="pricing-cell-label">Network</div>
+    <div class="pricing-cell-price">$0.00</div>
+    <div class="pricing-cell-unit">ingress always free</div>
+    <ul class="pricing-cell-list">
+      <li>Unlimited ingress</li>
+      <li>$0.05/GB egress</li>
+      <li>Private VPC peering</li>
+      <li>Global edge</li>
+    </ul>
+  </div>
+</section>
+
+<!-- BOTTOM CTA -->
+<section class="bottom-cta">
+  <div class="bottom-cta-left">
+    <h2 class="bottom-cta-title">STOP MANAGING<br>INFRASTRUCTURE.</h2>
+    <p class="bottom-cta-sub">pip install voltage. Write a function. Ship it. The cloud is a decorator away.</p>
+  </div>
+  <a href="#" class="bottom-cta-right">
+    <div class="bottom-cta-action">Get started</div>
+    <div class="bottom-cta-hint">Free tier available</div>
+  </a>
+</section>
+
+<!-- FOOTER -->
+<footer class="footer">
+  <span>VOLTAGE 2026</span>
+  <span>DOCS / PRICING / STATUS / GITHUB</span>
+</footer>
+
+</body>
+</html>

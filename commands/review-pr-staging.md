@@ -26,9 +26,13 @@ GH_REPO=$(yq '.project.owner + "/" + .project.repo' "$CONFIG_FILE")
 GH_FLAG="-R $GH_REPO"
 DEFAULT_BRANCH=$(yq '.branches.default' "$CONFIG_FILE")
 STAGING_BRANCH=$(yq '.branches.staging' "$CONFIG_FILE")
+
+# Test-gate config (Phase 6.5) — read here so vars are available before first use
+GATE_POSTURE=$(yq '.verification.test_gate.posture // "blocking"' "$CONFIG_FILE" 2>/dev/null || echo "blocking")
+OVERRIDE_PHRASE=$(yq '.verification.test_gate.override_phrase // "OVERRIDE: shipping with test failures —"' "$CONFIG_FILE" 2>/dev/null || echo "OVERRIDE: shipping with test failures —")
 ```
 
-All `$DEFAULT_BRANCH` and `$STAGING_BRANCH` references below are populated from `forge.yaml`.
+All `$DEFAULT_BRANCH`, `$STAGING_BRANCH`, `$GATE_POSTURE`, and `$OVERRIDE_PHRASE` references below are populated from `forge.yaml`.
 
 ---
 
@@ -342,6 +346,132 @@ Agent maps dependencies, assesses integration points (service boundaries, env va
 
 ---
 
+## Phase 6.5: Runtime Test Gate (BLOCKING — runs after static analysis, before finding triage)
+
+**Purpose**: Verify the integrated bundle's acceptance criteria against running code before the deploy verdict. Catches runtime defects (cross-PR interactions, container/startup failures, regression in tested behaviour) that static review cannot surface.
+
+**Why here**: Phase 6 completes all static analysis (regression risk, security, quality). Phase 6.5 adds the runtime dimension before Phase 7 triages findings — so any test-gate failures can be filed as `test-failure` issues by `/test-gate` itself, then surface in Phase 7's triage pass.
+
+**Posture**: Controlled by `verification.test_gate.posture` in `forge.yaml` (resolved in Config Resolution as `$GATE_POSTURE`). Default: `blocking`. Set to `advisory` to surface failures without preventing deploy. <!-- Added: forge#906 -->
+
+```bash
+echo "=== Phase 6.5: Runtime Test Gate ==="
+echo "Bundle PRs: $(echo $ALL_PR_NUMBERS | tr '\n' ' ')"
+echo "Posture: ${GATE_POSTURE}"
+
+# Initialize test-gate verdict (default SKIP — safe if Phase 6.5 is bypassed)
+TEST_GATE_VERDICT="SKIP"
+TEST_GATE_REASON="Phase 6.5 not yet run"
+
+# Invoke /test-gate with the bundle PRs already computed in Phase 0A
+# ALL_PR_NUMBERS is the de-duplicated union of both scan methods (commit log + merge subjects)
+GATE_OUTPUT=$(Skill("test-gate", "--prs \"$(echo $ALL_PR_NUMBERS | tr '\n' ' ' | xargs)\" --base $DEFAULT_BRANCH"))
+
+# Extract machine-readable verdict from Skill output
+TEST_GATE_VERDICT=$(echo "$GATE_OUTPUT" | grep -oP '(?<=FORGE:TEST_GATE:RESULT=)(BLOCK|PASS|SKIP)' | tail -1 || echo "SKIP")
+
+echo "Test-gate verdict: ${TEST_GATE_VERDICT}"
+```
+
+**Verdict handling**:
+
+```bash
+case "$TEST_GATE_VERDICT" in
+
+  SKIP)
+    echo "ℹ️  Test gate: SKIP — no executable changes or tests not configured."
+    echo "   This gap will appear in the Phase 8 summary. No deploy impact."
+    TEST_GATE_REASON="SKIP — no runtime tests ran (docs-only bundle, no integration tests configured, or manual-only criteria)"
+    ;;
+
+  PASS)
+    echo "✅ Test gate: PASS — all test clusters passed. Deploy may proceed."
+    TEST_GATE_REASON="PASS — all automated test clusters passed"
+    ;;
+
+  BLOCK)
+    # Check for override comment on the staging→main PR (mirrors Phase 0A pattern)
+    if [ -n "$PR_NUMBER" ]; then
+      TG_OVERRIDE=$(gh pr view "$PR_NUMBER" ${GH_FLAG} \
+        --json comments \
+        --jq "[.comments[].body | select(startswith(\"${OVERRIDE_PHRASE}\"))] | length" 2>/dev/null || echo 0)
+    else
+      TG_OVERRIDE=0
+    fi
+
+    if [ "${TG_OVERRIDE:-0}" -gt 0 ]; then
+      OVERRIDE_REASON=$(gh pr view "$PR_NUMBER" ${GH_FLAG} \
+        --json comments \
+        --jq "[.comments[].body | select(startswith(\"${OVERRIDE_PHRASE}\"))] | last" 2>/dev/null || echo "(reason not captured)")
+      echo "⚠️  Test gate: BLOCK — but override comment detected on PR #${PR_NUMBER}."
+      echo "   Override: ${OVERRIDE_REASON}"
+      echo "   Proceeding with deploy. Override is logged in Phase 8 summary."
+      TEST_GATE_VERDICT="PASS"
+      TEST_GATE_REASON="BLOCK downgraded to PASS by override: ${OVERRIDE_REASON}"
+
+    elif [ "$GATE_POSTURE" = "advisory" ]; then
+      echo "⚠️  Test gate: BLOCK (advisory posture) — runtime failures detected but deploy is NOT prevented."
+      echo "   Switch verification.test_gate.posture to 'blocking' in forge.yaml to enforce this gate."
+      TEST_GATE_REASON="BLOCK (advisory) — runtime failures detected; deploy allowed by advisory posture"
+
+    else
+      # blocking posture (default) — STOP
+      echo "⛔ DEPLOY BLOCKED — /test-gate returned BLOCK verdict."
+      echo ""
+      echo "Runtime failures were detected in the staging→${DEFAULT_BRANCH} bundle."
+      echo "The failures were batch-introduced (not pre-existing on ${DEFAULT_BRANCH} baseline)."
+      echo ""
+      echo "Options:"
+      echo "  1. Fix the failing tests and merge fixes to staging before retrying the deploy."
+      echo "  2. Post a comment on this PR starting with \"${OVERRIDE_PHRASE} <reason>\" to bypass this gate."
+      echo "  3. Set verification.test_gate.posture: advisory in forge.yaml to downgrade to a warning."
+      echo ""
+      echo "RESULT: BLOCK DEPLOY"
+
+      # Post structured FORGE:GATE_FAILURE comment for pipeline-health tracking
+      GATE_TIMESTAMP=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+      if [ -n "$PR_NUMBER" ]; then
+        gh pr comment "$PR_NUMBER" ${GH_FLAG} --body "<!-- FORGE:GATE_FAILURE -->
+## Deploy Gate: BLOCKED
+
+**Gate**: test-gate
+**Timestamp**: ${GATE_TIMESTAMP}
+**Bundle PRs**: $(echo $ALL_PR_NUMBERS | tr '\n' ' ')
+**Posture**: ${GATE_POSTURE}
+
+### What Happened
+
+\`/test-gate\` detected runtime failures in the staging→\`${DEFAULT_BRANCH}\` bundle that were NOT present on the \`${DEFAULT_BRANCH}\` baseline. These are batch-introduced regressions.
+
+\`/test-gate\` has filed \`test-failure\` issues for each failing cluster — check the issue tracker for details.
+
+### Resolution
+
+1. Fix the failing tests and merge fixes to staging.
+2. Retry the staging→\`${DEFAULT_BRANCH}\` deploy.
+
+To override (ship known failures with documented reason), post a comment containing:
+\`${OVERRIDE_PHRASE} <reason>\`
+
+<!-- FORGE:GATE_FAILURE:TYPE=test-gate|BUNDLE=$(echo $ALL_PR_NUMBERS | tr '\n' ' ' | xargs) -->" 2>/dev/null || true
+      fi
+      exit 1
+    fi
+    ;;
+
+  *)
+    echo "⚠️  Test gate: unrecognised verdict '${TEST_GATE_VERDICT}' — treating as SKIP."
+    TEST_GATE_VERDICT="SKIP"
+    TEST_GATE_REASON="SKIP — unrecognised verdict from /test-gate (treated as SKIP)"
+    ;;
+
+esac
+```
+
+If the gate exits with `RESULT: BLOCK DEPLOY` → **STOP**. A `<!-- FORGE:GATE_FAILURE -->` structured comment is automatically posted on the staging→main PR (if `$PR_NUMBER` is set) for pipeline-health tracking. `/test-gate` will have filed `test-failure` issues for each failing cluster before returning BLOCK.
+
+---
+
 ## Phase 7: Finding Triage & Issue Creation
 
 ### 7A: Extract Findings
@@ -424,10 +554,36 @@ Labels: `review-finding` + `needs-validation` + `staging-review` + priority (`pr
 Post summary with verdict:
 1. CI failed + autofix failed → BLOCK DEPLOY
 2. CI failed + autofix succeeded → continue
+2.5. Test gate returned BLOCK (blocking posture, no override) → BLOCK DEPLOY *(handled in Phase 6.5 — if Phase 8 is reached, BLOCK was either overridden or posture is advisory)*
 3. CONFIRMED CRITICAL (non-CI) → BLOCK DEPLOY
 4. CONFIRMED HIGH blocking (crashes, data loss) → NEEDS FIXES FIRST
 5. All else → APPROVE FOR DEPLOY
 
-Include: Material Changes Summary, Risk Matrix (CI, Build, Bugs, Security, Billing, Quality, Regression), Finding Triage Results, Blocking Issues, Deployment Checklist (pre-deploy, deploy, post-deploy verification, rollback triggers), Stats.
+Include: Material Changes Summary, Risk Matrix (CI, Build, Bugs, Security, Billing, Quality, Regression, **Test Gate**), Finding Triage Results, Blocking Issues, Deployment Checklist (pre-deploy, deploy, post-deploy verification, rollback triggers), Stats.
+
+**Risk Matrix must include a Test Gate row** (use `$TEST_GATE_VERDICT` and `$TEST_GATE_REASON` set in Phase 6.5):
+
+| Domain | Result | Notes |
+|--------|--------|-------|
+| CI | ... | ... |
+| Build | ... | ... |
+| Bugs | ... | ... |
+| Security | ... | ... |
+| Billing | ... | ... |
+| Quality | ... | ... |
+| Regression | ... | ... |
+| **Test Gate** | `${TEST_GATE_VERDICT:-SKIP}` | `${TEST_GATE_REASON:-Phase 6.5 not run}` |
+
+If `TEST_GATE_VERDICT` is `SKIP`, surface the gap explicitly in the summary:
+
+> **Test Gate: SKIP** — No runtime tests ran for this bundle. This means acceptance criteria were NOT verified against running code before deploy. Cause: `${TEST_GATE_REASON}`. To enable runtime testing, configure `verification.integration_tests` in `forge.yaml`.
+
+If `TEST_GATE_VERDICT` is `PASS`, note it as a positive signal:
+
+> **Test Gate: PASS** — Acceptance criteria verified against running code. No batch-introduced runtime failures detected.
+
+If `TEST_GATE_VERDICT` is `BLOCK` and Phase 8 was reached (advisory posture or override active), note it as a risk:
+
+> **Test Gate: BLOCK (override/advisory)** — Runtime failures were detected but deploy is proceeding. Reason: `${TEST_GATE_REASON}`. Filed `test-failure` issues track the failures.
 
 **CRITICAL**: This review NEVER merges staging → main. User makes deploy decision via GitHub web UI.

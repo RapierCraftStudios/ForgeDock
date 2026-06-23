@@ -162,8 +162,17 @@ fi
 **Script resolution** — Use the following `resolve_script()` function whenever calling a pipeline script. It enforces the 4-level precedence hierarchy (see `devdocs/project/architecture.md → Script Precedence`):
 
 ```bash
-ADAPTIVE_DIR="${REPO_PATH}/$(yq '.adaptive_scripts.directory // ".forgedock/scripts"' forge.yaml 2>/dev/null || echo '.forgedock/scripts')"
+ADAPTIVE_DIR_RAW="${REPO_PATH}/$(yq '.adaptive_scripts.directory // ".forgedock/scripts"' forge.yaml 2>/dev/null || echo '.forgedock/scripts')"
+ADAPTIVE_DIR=$(realpath -m "$ADAPTIVE_DIR_RAW" 2>/dev/null || echo "$ADAPTIVE_DIR_RAW")
 ADAPTIVE_ENABLED=$(yq '.adaptive_scripts.enabled // "true"' forge.yaml 2>/dev/null || echo 'true')
+# Bounds check: reject adaptive_scripts.directory values that escape the repo root.
+# Normalize REPO_PATH the same way ADAPTIVE_DIR is normalized (realpath -m) so a trailing
+# slash in paths.root does not inject a '//' into the glob and trigger a false positive.
+REPO_PATH_NORM=$(realpath -m "$REPO_PATH" 2>/dev/null || echo "$REPO_PATH")
+if [[ "$ADAPTIVE_DIR" != "${REPO_PATH_NORM}/"* ]]; then
+  echo "WARNING: adaptive_scripts.directory resolves outside repo root ('$ADAPTIVE_DIR') — adaptive tier disabled" >&2
+  ADAPTIVE_ENABLED=false
+fi
 UNIVERSAL_DIR="${FORGEDOCK_HOME:-$(dirname "$(which classify-lane.sh 2>/dev/null || echo 'scripts')")}/scripts"
 
 resolve_script() {
@@ -253,6 +262,45 @@ LEARNED_COMMIT_STYLE=$(yq '.learned.commit_style // ""' forge.yaml 2>/dev/null |
 
 ### 0C: Sync to Project board
 Add issue to project, set Status=In Progress, Lane, Component, Priority, Workflow=Investigating.
+
+### 0C.5: Resolve minimal spec set (selective spec loading)
+
+Rather than loading the full ~27-command corpus (~1.1 MB / ~276K tokens) into
+context, resolve the **minimal spec set** this run actually needs from the spec
+knowledge graph. Use the universal-tier `graph-query` script via the canonical
+`resolve_script` tier-dispatch pattern:
+
+```bash
+# Forward-transitive reachability: work-on + its reachable sub-phases (CONTAINS)
+# + required devdocs (REQUIRES), as repo-relative file paths.
+RESOLUTION=$(resolve_script 'graph-query')
+TIER="${RESOLUTION%%:*}"
+SCRIPT_PATH="${RESOLUTION#*:}"
+case "$TIER" in
+  adaptive|universal)
+    SPEC_SET=$(bash "$SCRIPT_PATH" load-set work-on 2>/dev/null || echo '[]')
+    echo "$SPEC_SET" | jq -r '.[]'
+    ;;
+  prose)
+    # Prose fallback: graph-query.sh unavailable — read specs on demand as each
+    # Skill(...) is invoked. Selective loading is an optimization, not required.
+    : ;;
+esac
+```
+
+**Read ONLY the files returned by `load-set work-on`** when you need full spec
+text during this run — these are the work-on orchestrator plus the sub-phases
+and devdocs reachable from it (e.g. `commands/work-on/build/*`, `commands/work-on/review.md`,
+`commands/review-pr.md`). Do **not** broadly read unrelated command specs
+(`pipeline-health.md`, `audit.md`, `geo-audit.md`, …) that are not in the set.
+Sub-phases are still invoked normally via their existing `Skill(...)` calls; this
+step only narrows what is *pre-read* into context, it does not remove any phase.
+
+This is the inverse of `graph-query.sh impact` (forward instead of reverse
+reachability). It is read-only and auto-builds the graph if the gitignored JSON
+is absent — no committed graph is required. The prose tier above handles older
+installs without the scripts layer: selective loading is an optimization, never
+a hard dependency.
 
 ---
 
@@ -1325,8 +1373,10 @@ gh issue comment {NUMBER} {GH_FLAG} --body "<!-- FORGE:BUILDER -->
 {checklist from contract, marked pass/fail}
 
 ### Testing Checklist
-- [ ] {scenario 1}
-- [ ] {scenario 2}
+- [ ] {scenario 1} [type:api]
+- [ ] {scenario 2} [type:unit]
+
+> **Test-type annotation** (optional): Append `[type:api]`, `[type:unit]`, `[type:e2e]`, or `[type:manual]` to each checklist item. The test gate reads this annotation directly and skips regex inference. Omit it to rely on regex classification fallback.
 
 <!-- FORGE:BUILDER:COMPLETE -->"
 ```
