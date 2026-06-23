@@ -28,6 +28,9 @@ jobs:
           node-version: 24
           registry-url: 'https://registry.npmjs.org'
 
+      - name: Check native command conflicts
+        run: bash scripts/check-native-conflicts.sh commands/
+
       - name: Run tests
         run: npm test
 
