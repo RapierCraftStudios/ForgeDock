@@ -3,7 +3,7 @@ description: Pipeline-wide situational awareness — groups open issues by workf
 argument-hint: [--repo <owner/repo> | --stale-days <N>]
 ---
 
-# /status — Pipeline Status
+# /pipeline-status — Pipeline Status
 
 **Input**: $ARGUMENTS (optional: `--repo <owner/repo>`, `--stale-days <N>`)
 
