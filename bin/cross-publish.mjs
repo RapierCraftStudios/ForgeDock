@@ -262,8 +262,15 @@ async function main() {
       continue;
     }
 
-    // Strip HTML comments (demo gif placeholders etc.) from body for publishing
-    const cleanBody = body.replace(/<!--[\s\S]*?-->/g, '').trim();
+    // Strip HTML comments (demo gif placeholders etc.) from body for publishing.
+    // Loop until stable to avoid incomplete sanitization when nested fragments re-form.
+    let cleanBody = body;
+    let prev;
+    do {
+      prev = cleanBody;
+      cleanBody = cleanBody.replace(/<!--[\s\S]*?-->/g, '');
+    } while (cleanBody !== prev);
+    cleanBody = cleanBody.trim();
 
     const article = { title, description, tags, canonical_url, markdown: cleanBody };
     const slug = filename.replace(/\.md$/, '');
