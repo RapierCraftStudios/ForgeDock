@@ -117,7 +117,6 @@ NATIVE_COMMANDS=(
   usage
   extra-usage
   usage-credits
-  deploy-info
 
   # UI and display
   theme
