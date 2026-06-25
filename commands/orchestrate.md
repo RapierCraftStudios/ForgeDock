@@ -815,7 +815,7 @@ done
    ```
    **Resume ALL stalled agents in a single message** (parallel resume). Do not wait between resumes.
 
-3. **Track resume cycles per agent.** If an agent has been resumed 3+ times and still hasn't reached a terminal state, report it as a failure — do not resume again.
+3. **Track resume cycles per agent.** If an agent has been resumed 2+ times and still hasn't reached a terminal state, report it as a failure — do not resume again.
 
 4. **Record completed results**: Success (PR merged), Invalid (issue closed), Blocked (needs human), or Error
 
