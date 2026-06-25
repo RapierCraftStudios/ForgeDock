@@ -453,6 +453,91 @@ Initial dispatch: #2633, #2636, #2645, #2646 (all ready — launched simultaneou
 
 **Key advantage over waves**: When #2633 completes, #2634 dispatches immediately — it does not wait for #2636, #2645, or #2646 to finish. Similarly, when #2645 completes, #2647 dispatches immediately regardless of other issues' status.
 
+### Step 3D.5: Cycle Detection (MANDATORY) <!-- Added: forge#1085 -->
+
+**Run immediately after Step 3D's DAG edge construction, before presenting the plan (Step 3E).** This step validates that the predecessor graph is acyclic. Without it, mutual `Depends on` declarations (e.g., A depends on B AND B depends on A) cause both issues to remain permanently blocked in Step 4B's dispatch loop — no error, no timeout, indefinite deadlock.
+
+**Algorithm**: Kahn's topological sort. Runs in O(V+E) — negligible overhead for typical batch sizes.
+
+```bash
+# --- Step 3D.5: Cycle Detection ---
+# Inputs:
+#   ISSUES[]         — array of all issue numbers in the DAG
+#   PREDECESSORS[N]  — space-separated list of predecessor issue numbers for issue N
+
+# Step 1: Compute in-degree for each issue
+declare -A IN_DEGREE
+for NUM in "${ISSUES[@]}"; do
+  IN_DEGREE[$NUM]=0
+done
+for NUM in "${ISSUES[@]}"; do
+  for PRED in ${PREDECESSORS[$NUM]:-}; do
+    IN_DEGREE[$NUM]=$(( ${IN_DEGREE[$NUM]:-0} + 1 ))
+  done
+done
+
+# Step 2: Seed the queue with zero-in-degree issues (no predecessors)
+KAHN_QUEUE=()
+for NUM in "${ISSUES[@]}"; do
+  [ "${IN_DEGREE[$NUM]}" -eq 0 ] && KAHN_QUEUE+=("$NUM")
+done
+
+# Step 3: Process queue — reduce successor in-degrees, enqueue newly freed issues
+PROCESSED_COUNT=0
+PROCESSED_ORDER=()
+while [ "${#KAHN_QUEUE[@]}" -gt 0 ]; do
+  # Dequeue
+  CURRENT="${KAHN_QUEUE[0]}"
+  KAHN_QUEUE=("${KAHN_QUEUE[@]:1}")
+  PROCESSED_ORDER+=("$CURRENT")
+  PROCESSED_COUNT=$(( PROCESSED_COUNT + 1 ))
+
+  # Reduce in-degree of all issues that depend on CURRENT (i.e., CURRENT is in their PREDECESSORS)
+  for SUCCESSOR in "${ISSUES[@]}"; do
+    for PRED in ${PREDECESSORS[$SUCCESSOR]:-}; do
+      if [ "$PRED" = "$CURRENT" ]; then
+        IN_DEGREE[$SUCCESSOR]=$(( ${IN_DEGREE[$SUCCESSOR]} - 1 ))
+        [ "${IN_DEGREE[$SUCCESSOR]}" -eq 0 ] && KAHN_QUEUE+=("$SUCCESSOR")
+      fi
+    done
+  done
+done
+
+# Step 4: Any issue not processed has in-degree > 0 — part of a cycle
+CYCLE_ISSUES=()
+for NUM in "${ISSUES[@]}"; do
+  FOUND=false
+  for P in "${PROCESSED_ORDER[@]}"; do [ "$P" = "$NUM" ] && FOUND=true && break; done
+  [ "$FOUND" = "false" ] && CYCLE_ISSUES+=("$NUM")
+done
+
+# Step 5: Handle cycles
+if [ "${#CYCLE_ISSUES[@]}" -gt 0 ]; then
+  echo "CYCLE DETECTED in dependency graph — the following issues form a circular dependency:"
+  for C in "${CYCLE_ISSUES[@]}"; do
+    echo "  #${C}: predecessors=[${PREDECESSORS[$C]}]"
+    # Label each cyclic issue needs-human
+    gh issue edit "$C" -R {GH_REPO} --add-label "needs-human" 2>/dev/null || true
+    gh issue comment "$C" -R {GH_REPO} --body "**Cycle detected by /orchestrate**: This issue is part of a circular dependency chain involving issues: ${CYCLE_ISSUES[*]/#/#}. The orchestrator cannot dispatch it automatically. Please fix the \`Depends on\` declarations so that no cycle exists, then re-run /orchestrate." 2>/dev/null || true
+    # Remove from DAG — store in EXCLUDED_CYCLE for Step 3E reporting
+    EXCLUDED_CYCLE+=("$C")
+    # Remove from ISSUES array for all downstream processing
+    ISSUES=("${ISSUES[@]/$C}")
+  done
+  echo ""
+  echo "These issues have been labeled needs-human and excluded from the DAG."
+  echo "Fix their dependency declarations and re-run /orchestrate."
+else
+  echo "DAG cycle check: PASS — no cycles detected. Proceeding with ${#PROCESSED_ORDER[@]} issues."
+fi
+# --- End Step 3D.5 ---
+```
+
+**After this step**:
+- `ISSUES[]` contains only acyclic issues — safe to dispatch
+- `EXCLUDED_CYCLE[]` contains cyclic issue numbers — reported in Step 3E, never dispatched
+- If `EXCLUDED_CYCLE` is non-empty, report it clearly in the Step 3E plan before asking for user confirmation
+
 ### Step 3E: Present the plan to the user
 
 ```
@@ -503,6 +588,18 @@ Initial dispatch: #2633, #2636, #2645, #2646 (all ready — launched simultaneou
 
 **Excluded** (already in progress / ineligible):
 - #{X} — {reason}
+
+{IF EXCLUDED_CYCLE is non-empty:}
+### ⚠ Circular Dependencies Detected — Manual Fix Required
+
+The following issues form a circular dependency chain and **cannot be dispatched** until the cycle is resolved:
+
+| Issue | Depends On | Problem |
+|-------|------------|---------|
+{rows: each EXCLUDED_CYCLE issue, its predecessor list, "mutual dependency — forms cycle with #{other}"}
+
+**Action required**: Edit each issue's body to remove or correct the `Depends on` / `Blocked by` declarations so no cycle exists. Each issue has been labeled `needs-human`. After fixing, re-run `/orchestrate` to dispatch them.
+{END IF}
 
 Proceed? (yes / adjust / pick specific issues)
 ```
