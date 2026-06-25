@@ -758,6 +758,15 @@ fi
 
 If `GIST_CONTEXT` is empty (no parent investigation or milestone index found), the variable resolves to a blank line in the template — no impact on the agent prompt. <!-- Updated: forge#341 -->
 
+**Capture agent IDs at spawn time (MANDATORY)**: Each `Agent(...)` call returns an agent ID. Store it in `AGENT_ISSUE_MAP` keyed by issue number immediately after the spawn. This map is the only way to resume a stalled agent by ID in Steps 4B and 4B.5:
+
+```
+# After each Agent() spawn, capture the returned ID:
+AGENT_ISSUE_MAP[{NUMBER}] = <agent_id returned by Agent()>
+```
+
+`AGENT_ISSUE_MAP` starts empty and accumulates entries as agents are spawned. For multiple simultaneous spawns (parallel dispatch), capture each ID immediately after the corresponding spawn call before invoking the next one. Without this capture, `resume=` calls in Steps 4B and 4B.5 will have no agent ID to reference and the resume will fail. <!-- Added: forge#1083 -->
+
 **Launch all ready agents simultaneously** by putting multiple Agent tool calls in a single message. Use `run_in_background=true` so they execute in parallel.
 
 ### Step 4B: Monitor completions and dispatch newly ready issues
@@ -798,7 +807,7 @@ done
 2. **If the issue is NOT in a terminal state** (`workflow:merged`, `workflow:invalid`, or `needs-human`), the agent stalled mid-pipeline. **Resume it immediately**:
    ```
    Agent(
-     resume="{AGENT_ID}",
+     resume=AGENT_ISSUE_MAP[{NUMBER}],
      description="Resume #{NUMBER} pipeline",
      run_in_background=true,
      prompt="The previous /work-on invocation stopped before completing the full pipeline. The issue is currently at {CURRENT_WORKFLOW_STATE}. Continue — invoke Skill(skill='work-on', args='{NUMBER}') to resume the routing loop from the current state. /work-on will re-read GitHub state and pick up where it left off."
@@ -921,7 +930,7 @@ Issue #${NUM} has been auto-resumed ${STALL_COUNT} times without reaching a term
 done
 
 # Launch all stall resumes in parallel (single message — same rule as Step 4B)
-# For each NUM in $STALL_RESUME_LIST, call Agent(resume="{AGENT_ID}", run_in_background=true, ...)
+# For each NUM in $STALL_RESUME_LIST, call Agent(resume=AGENT_ISSUE_MAP[NUM], run_in_background=true, ...)
 ```
 
 **Resume all stalled agents in a single message** (parallel). Use the same `Agent(resume=...)` pattern as Step 4B — do not wait between individual resumes.
