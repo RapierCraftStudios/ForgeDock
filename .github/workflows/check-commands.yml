@@ -5,6 +5,13 @@ on:
     paths:
       - 'commands/**'
       - 'scripts/check-native-conflicts.sh'
+  push:
+    branches:
+      - staging
+      - main
+    paths:
+      - 'commands/**'
+      - 'scripts/check-native-conflicts.sh'
 
 jobs:
   check-native-conflicts:
