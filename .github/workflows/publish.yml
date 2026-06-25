@@ -10,6 +10,7 @@ on:
       - 'scripts/**'
       - 'templates/**'
       - 'package.json'
+  workflow_dispatch:  # Manual retrigger for bot-token merges
 
 jobs:
   publish:
