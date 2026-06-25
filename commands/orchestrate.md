@@ -13,9 +13,9 @@ argument-hint: [milestone <slug> | #1 #2 #3 | next <N> | fast-lane | priority:P0
 
 1. **Every agent MUST invoke `/work-on` via the Skill tool.** You do NOT write implementation prompts. You copy the Phase 4A template verbatim and fill in the `{VARIABLES}`. Nothing else. No custom prompts. No "just read and edit" shortcuts. The Skill tool invocation is what triggers labels, investigation comments, structured review, and trajectory tracking. Without it, the agent's work has no paper trail and is worthless.
 
-2. **You are a dispatcher, not a builder.** You resolve issues, plan waves, spawn agents, and report results. You NEVER read code, edit files, or implement fixes yourself.
+2. **You are a dispatcher, not a builder.** You resolve issues, build the dependency DAG, spawn agents, and report results. You NEVER read code, edit files, or implement fixes yourself.
 
-3. **After each wave, verify agents used `/work-on`.** Check that completed issues have `workflow:*` labels and structured comments. If an agent bypassed the pipeline, report it as a failure.
+3. **After each agent completes, verify it used `/work-on`.** Check that completed issues have `workflow:*` labels and structured comments. If an agent bypassed the pipeline, report it as a failure.
 
 ---
 
@@ -131,7 +131,7 @@ If a `workflow:decomposed` issue is found, automatically expand it to its open s
 **What the orchestrator SHOULD do:**
 - If two issues look related, add a note in the agent prompt: "Note: #{OTHER} has similar symptoms — investigate whether this is the same root cause or a different code path"
 - Let both agents run independently — if one finds it's truly a duplicate, `/work-on`'s investigation phase will close it as invalid with evidence
-- Flag potential overlap in the wave plan for the user's awareness, but NEVER act on it
+- Flag potential overlap in the DAG plan for the user's awareness, but NEVER act on it
 
 **Why**: Surface-level similarity hides critical differences. #3842 (api_key.id lazy load) and #4039 (user.id lazy load) had identical error messages but targeted completely different ORM objects. Closing #4039 as a "duplicate" would have left a customer-impacting P0 bug unfixed.
 
@@ -274,7 +274,7 @@ done
 
 ### Step 3B: Domain estimation
 
-For each issue, estimate which domains it touches based on title, body, and labels. This improves wave planning — issues in the same domain likely touch the same files and should be sequential.
+For each issue, estimate which domains it touches based on title, body, and labels. This improves DAG construction — issues in the same domain likely touch the same files and should be serialized (one becomes a predecessor of the other).
 
 ```bash
 for NUM in {issue_numbers}; do
@@ -291,11 +291,11 @@ for NUM in {issue_numbers}; do
 done
 ```
 
-**Use domain info for wave planning:**
-- Issues in the SAME domain (especially WORKER, BILLING, DATABASE) are more likely to touch the same files → prefer sequential within a wave or adjacent waves
+**Use domain info for DAG edge construction:**
+- Issues in the SAME domain (especially WORKER, BILLING, DATABASE) are more likely to touch the same files → add predecessor edges to serialize them
 - Issues in DIFFERENT domains are more likely independent → safe to parallelize
 - BILLING + AUTH issues should be prioritized early (security-critical)
-- **DATABASE issues are ALWAYS serialized — hard rule, no exceptions.** Multiple agents writing migrations simultaneously will produce duplicate migration numbers (e.g., two `0067_*.sql` files), which breaks the migration runner. Every DATABASE issue must be in its own wave. If 3 DATABASE issues are in a batch: Wave 1 runs issue A, Wave 2 runs issue B, Wave 3 runs issue C.
+- **DATABASE issues are ALWAYS serialized — hard rule, no exceptions.** Multiple agents writing migrations simultaneously will produce duplicate migration numbers (e.g., two `0067_*.sql` files), which breaks the migration runner. DATABASE issues form a linear predecessor chain in the DAG. If 3 DATABASE issues are in a batch: A has no predecessors, B has {A} as predecessor, C has {B} as predecessor.
 
 **Store domain tags per issue** for use in the plan presentation (Step 3E).
 
@@ -323,9 +323,9 @@ gh issue view $NUM --json body --jq '.body' | grep -oP '`[^`]*\.(py|tsx?|jsx?|sq
 ```
 
 **Cross-reference all extracted file lists:**
-- If two issues share ANY affected file → they MUST be in separate waves (sequential)
+- If two issues share ANY affected file → one MUST be a predecessor of the other (serialized)
 - The issue with lower issue number goes first (stable ordering), unless an explicit `Depends on #` says otherwise
-- Add a conflict note to the wave plan: "#{A} and #{B} both modify `{file}` — serialized"
+- Add a conflict note to the DAG plan: "#{A} and #{B} both modify `{file}` — #{A} is predecessor of #{B}"
 
 #### Layer 2: Directory-proximity detection
 
@@ -395,10 +395,10 @@ When file extraction yields **fewer than 2 file paths** for an issue (common for
 
 **Rules:**
 - If an issue has 0-1 extracted file paths AND shares a domain tag (from Step 3B) with another issue → serialize them
-- If an issue has 0 extracted file paths AND no domain tag could be determined → serialize it with the immediately preceding wave (safest default)
+- If an issue has 0 extracted file paths AND no domain tag could be determined → add it as a predecessor of the next same-domain issue, or if no domain match exists, serialize it after the most recently added issue (safest default)
 - Add a note to the plan: "#{N} — low file-extraction confidence, serialized conservatively"
 
-**Rationale**: The cost of a false-negative (two agents conflict → one fails with merge error, wasting the full agent run) far exceeds the cost of a false-positive (an issue waits one extra wave before starting). Always err toward serialization when uncertain.
+**Rationale**: The cost of a false-negative (two agents conflict → one fails with merge error, wasting the full agent run) far exceeds the cost of a false-positive (an issue waits for one predecessor before starting). Always err toward serialization when uncertain.
 
 #### Combining all layers
 
@@ -413,28 +413,45 @@ Build the final conflict graph by merging signals from all four layers:
 | Layer 3: High-fan-in file touched | **Probable conflict** | Serialize with same-service issues |
 | Layer 3: Shared model/init pattern | **Probable conflict** | Serialize |
 | Layer 4: Low confidence + same domain | **Conservative** | Serialize |
-| Layer 4: Low confidence + no domain | **Conservative** | Serialize with prior wave |
+| Layer 4: Low confidence + no domain | **Conservative** | Add predecessor edge to most recent issue |
 
 **This supplements, not replaces, the domain keyword estimation.** Domain tags still help with broad sequencing decisions. Multi-layer conflict detection catches the specific cases keywords miss (e.g., two issues that both modify files in `services/api/app/models/` where one is labeled WORKER and the other BILLING — Layer 2 catches this even though Layer 1 shows no direct file overlap).
 
-### Step 3D: Build the execution plan
+### Step 3D: Build the dependency DAG
 
-Organize issues into **waves** (groups that can run in parallel):
+Build a **directed acyclic graph (DAG)** of per-issue dependencies. Each issue gets a `predecessors` set — the specific issues that must reach a terminal state before this issue can dispatch. This replaces the previous wave-grouping model where all issues in a wave had to complete before any issue in the next wave could start.
 
-**Wave rules:**
-- Investigation issues already ran in Wave 0 (Phase 2) — they are NOT included in these waves
-- Issues with NO dependencies and NO file overlap → same wave (parallel)
-- Issues that depend on other issues in the set → later wave (after dependency completes)
-- **No artificial agent limit per wave** — spawn as many parallel agents as there are independent issues. The only constraint is file overlap and explicit dependencies.
-- Issues that touch the **same files** must be in separate waves (sequential) to avoid merge conflicts
-- If unsure about conflicts, err on the side of parallel — each agent works in its own worktree
+**DAG construction rules:**
+- Investigation issues already ran in Phase 2 — they are NOT included in this DAG
+- Each issue starts with an empty predecessor set
+- **Explicit dependencies**: If issue B says "Depends on #A" or "Blocked by #A", add A to B's predecessors
+- **File-conflict edges**: If two issues share affected files (from Step 3C Layer 1), add a directed edge: lower issue number → higher issue number (unless explicit deps say otherwise). The later issue has the earlier issue in its predecessors.
+- **Domain serialization edges**: DATABASE issues form a linear chain (each has the previous DATABASE issue as its predecessor). Same-small-directory issues (Layer 2) and high-fan-in file issues (Layer 3) get directed edges as per Step 3C rules.
+- **Conservative fallback edges**: Low-confidence issues (Layer 4) get edges to same-domain issues as per Step 3C rules.
+- **No artificial concurrency limit** — all issues with empty predecessor sets dispatch simultaneously. The only constraints are file overlap and explicit dependencies.
 
-**Example plan:**
+**Terminology:**
+- **Ready issues**: Issues whose predecessor set is empty (all predecessors have reached terminal state or were never added)
+- **Blocked issues**: Issues with one or more unresolved predecessors
+- **Critical path**: The longest chain of dependent issues in the DAG — determines minimum wall-clock time
+
+**Example DAG:**
 ```
-Wave 0 (already done): #2644 (investigation) → spawned #2645, #2646, #2647
-Wave 1 (parallel): #2633 (orphaned queues), #2636 (invalidation sub), #2645 (new finding), #2646 (new finding)
-Wave 2 (after deps): #2634 (enable daemon — after #2633 fixes memory leak), #2647 (depends on #2645)
+Phase 2 (already done): #2644 (investigation) → spawned #2645, #2646, #2647
+
+Dependency graph:
+  #2633 (orphaned queues)     → predecessors: {}          ← READY
+  #2636 (invalidation sub)    → predecessors: {}          ← READY
+  #2645 (new finding)         → predecessors: {}          ← READY
+  #2646 (new finding)         → predecessors: {}          ← READY
+  #2634 (enable daemon)       → predecessors: {#2633}     ← blocked until #2633 completes
+  #2647 (depends on #2645)    → predecessors: {#2645}     ← blocked until #2645 completes
+
+Critical path: #2633 → #2634 (2 steps) or #2645 → #2647 (2 steps)
+Initial dispatch: #2633, #2636, #2645, #2646 (all ready — launched simultaneously)
 ```
+
+**Key advantage over waves**: When #2633 completes, #2634 dispatches immediately — it does not wait for #2636, #2645, or #2646 to finish. Similarly, when #2645 completes, #2647 dispatches immediately regardless of other issues' status.
 
 ### Step 3E: Present the plan to the user
 
@@ -443,39 +460,46 @@ Wave 2 (after deps): #2634 (enable daemon — after #2633 fixes memory leak), #2
 
 **Scope**: {milestone name / "N issues" / "fast-lane"}
 **Total issues**: {count} ({investigation_count} investigations + {implementation_count} implementations)
-**Estimated waves**: {wave_count} (Wave 0 = investigations, then implementation waves)
+**Execution model**: Dependency-graph streaming (issues dispatch as predecessors complete)
 
 {IF investigations exist:}
-### Wave 0 — Investigations (run first, may spawn new issues)
+### Investigations (run first, may spawn new issues)
 | # | Title | Expected Output |
 |---|-------|----------------|
-| #{INV1} | {title} | New issues → folded into subsequent waves |
+| #{INV1} | {title} | New issues → folded into dependency graph |
 
-### Implementation Waves (after investigations complete)
+### Implementation (after investigations complete)
 {END IF}
 
 ### Domain Distribution
 | Domain | Issues | Notes |
 |--------|--------|-------|
 | FRONTEND | {N} | {Independent pages / Shared components} |
-| BILLING | {N} | {Critical — prioritize in Wave 1} |
-| DATABASE | {N} | {Sequential — migration order matters} |
-| AUTH | {N} | {Critical — Wave 1} |
+| BILLING | {N} | {Critical — dispatches immediately} |
+| DATABASE | {N} | {Serialized chain — migration order matters} |
+| AUTH | {N} | {Critical — dispatches immediately} |
 | WORKER | {N} | {High overlap risk within worker service} |
 | AI | {N} | {Independent} |
 | INFRA | {N} | {Independent} |
 
 (Omit rows with 0 issues. Add project-specific domain rows from forge.yaml → review.domains.)
 
-### Implementation Waves
+### Dependency Graph
 
-| Wave | Issues | Strategy |
-|------|--------|----------|
-| 1 | #{A}, #{B}, #{C} | Parallel (no deps, different domains) |
-| 2 | #{D} (after #{A}), #{E} | Parallel (D waits for A) |
-| 3 | #{F} (after #{D}) | Sequential |
+| Issue | Predecessors | Domain | Status |
+|-------|-------------|--------|--------|
+| #{A} | — | FRONTEND | Ready (dispatches immediately) |
+| #{B} | — | BILLING | Ready (dispatches immediately) |
+| #{C} | — | WORKER | Ready (dispatches immediately) |
+| #{D} | #{A} | FRONTEND | Blocked (waits for #{A} only) |
+| #{E} | — | DATABASE | Ready (dispatches immediately) |
+| #{F} | #{E} | DATABASE | Blocked (serialized — waits for #{E}) |
 
-**Note**: Wave 0 investigations may create additional issues that will be automatically added to the implementation waves. The final wave plan will be confirmed after investigations complete.
+**Critical path**: #{E} → #{F} (2 steps, determines minimum wall-clock time)
+**Initial dispatch**: #{A}, #{B}, #{C}, #{E} (all predecessors resolved)
+**Streaming**: #{D} dispatches as soon as #{A} completes — does NOT wait for #{B}, #{C}, or #{E}
+
+**Note**: Investigations may create additional issues that will be automatically added to the dependency graph. The final graph will be confirmed after investigations complete.
 
 **Excluded** (already in progress / ineligible):
 - #{X} — {reason}
@@ -485,61 +509,56 @@ Proceed? (yes / adjust / pick specific issues)
 
 **Wait for user confirmation before spawning agents.** This is the checkpoint — once agents launch, they run autonomously.
 
-**After confirmation**: If Wave 0 exists, execute Phase 2B-E first. Then re-present the expanded plan (with newly spawned issues slotted into waves) for a quick confirmation before launching implementation waves.
+**After confirmation**: If investigations exist, execute Phase 2B-E first. Then re-present the expanded plan (with newly spawned issues added to the dependency graph) for a quick confirmation before launching implementation.
 
 ---
 
-## Phase 4: Execute Waves
+## Phase 4: Streaming DAG Execution
 
-### Step 4A-pre: Capture staging baseline (MANDATORY before each wave)
+### Step 4A-pre: Staging baseline tracking (MANDATORY — continuous)
 
-**WHY THIS EXISTS**: Milestone-code-onto-staging contamination incidents (see issue #150) produce unexpected growth on the staging branch that is otherwise invisible until after a deploy. Capturing a line-count baseline before each wave and re-checking after allows early detection of any contamination by agents in that wave.
+**WHY THIS EXISTS**: Milestone-code-onto-staging contamination incidents (see issue #150) produce unexpected growth on the staging branch that is otherwise invisible until after a deploy. In the streaming DAG model, there are no discrete wave boundaries — instead, track a running baseline and check after each agent completion.
 
-**When to run**: Before launching EVERY wave in batches that target `staging` (fast-lane or milestone→staging). Skip only for pure milestone-branch batches where `{PR_BASE}` is `milestone/*` and staging is not involved.
+**When to run**: Capture the initial baseline before the first dispatch. Then re-check after every agent that merges a PR targeting `staging`. Skip for pure milestone-branch batches where all issues target `milestone/*`.
 
 ```bash
-# Capture staging baseline before launching the wave
+# Capture initial staging baseline before first dispatch
 git fetch origin
 if [ "$DEFAULT_BRANCH" = "$STAGING_BRANCH" ]; then
-  # Single-branch repo — staging and default are the same; diff is always zero
-  STAGING_LINES_BEFORE=0
-  echo "Staging baseline before Wave {N}: skipped — single-branch repo (staging == default)"
+  STAGING_LINES_BASELINE=0
+  echo "Staging baseline: skipped — single-branch repo (staging == default)"
 else
-  STAGING_LINES_BEFORE=$(git diff --stat origin/$DEFAULT_BRANCH...origin/$STAGING_BRANCH 2>/dev/null \
+  STAGING_LINES_BASELINE=$(git diff --stat origin/$DEFAULT_BRANCH...origin/$STAGING_BRANCH 2>/dev/null \
     | tail -1 \
     | grep -oP '\d+ insertion' \
     | grep -oP '\d+' \
     || echo "0")
-  echo "Staging baseline before Wave {N}: ${STAGING_LINES_BEFORE} lines ahead of $DEFAULT_BRANCH"
+  echo "Staging baseline: ${STAGING_LINES_BASELINE} lines ahead of $DEFAULT_BRANCH"
 fi
+
+# Track cumulative expected growth from merged PRs
+CUMULATIVE_EXPECTED_DELTA=0
 ```
 
-Store `STAGING_LINES_BEFORE` per wave. After the wave completes (after Step 4C), run the integrity check:
+**Per-agent-completion integrity check** (run in Step 4B after each agent merges a PR targeting staging):
 
 ```bash
-# Check staging integrity after wave completes (run after Step 4C)
+# After agent completes and its PR merges to staging:
 git fetch origin
-if [ "$DEFAULT_BRANCH" = "$STAGING_BRANCH" ]; then
-  STAGING_LINES_AFTER=0
-  STAGING_GROWTH=0
-  echo "Staging integrity check: skipped — single-branch repo (staging == default)"
-else
-  STAGING_LINES_AFTER=$(git diff --stat origin/$DEFAULT_BRANCH...origin/$STAGING_BRANCH 2>/dev/null \
+if [ "$DEFAULT_BRANCH" != "$STAGING_BRANCH" ]; then
+  STAGING_LINES_NOW=$(git diff --stat origin/$DEFAULT_BRANCH...origin/$STAGING_BRANCH 2>/dev/null \
     | tail -1 \
     | grep -oP '\d+ insertion' \
     | grep -oP '\d+' \
     || echo "0")
-  STAGING_GROWTH=$((STAGING_LINES_AFTER - STAGING_LINES_BEFORE))
-  echo "Staging after Wave {N}: ${STAGING_LINES_AFTER} lines (+${STAGING_GROWTH} vs baseline)"
+  STAGING_TOTAL_GROWTH=$((STAGING_LINES_NOW - STAGING_LINES_BASELINE))
 
-  # Alert if growth exceeds expected delta
-  # Expected: only the lines from PRs merged in this wave
-  # Alert threshold: growth > 500 lines more than the sum of changed lines from wave PRs
-  # (Use 0 as threshold if no PRs merged — any growth is unexpected)
-  EXPECTED_DELTA={SUM_OF_PR_LINE_COUNTS_THIS_WAVE}  # set from PR diffs collected in 4B
-  UNEXPECTED_GROWTH=$((STAGING_GROWTH - EXPECTED_DELTA))
+  # Add this PR's line count to cumulative expected delta
+  CUMULATIVE_EXPECTED_DELTA=$((CUMULATIVE_EXPECTED_DELTA + {THIS_PR_LINE_COUNT}))
+
+  UNEXPECTED_GROWTH=$((STAGING_TOTAL_GROWTH - CUMULATIVE_EXPECTED_DELTA))
   if [ "$UNEXPECTED_GROWTH" -gt 500 ]; then
-    echo "ALERT: Staging grew by ${STAGING_GROWTH} lines (+${UNEXPECTED_GROWTH} beyond expected ${EXPECTED_DELTA})."
+    echo "ALERT: Staging grew by ${STAGING_TOTAL_GROWTH} lines (+${UNEXPECTED_GROWTH} beyond expected ${CUMULATIVE_EXPECTED_DELTA})."
     echo "This may indicate milestone-code contamination via agent merge commits."
     echo "Review: git log --oneline --merges origin/$DEFAULT_BRANCH..origin/$STAGING_BRANCH"
     echo "Do NOT merge $STAGING_BRANCH → $DEFAULT_BRANCH until the unexpected growth is investigated."
@@ -548,29 +567,29 @@ else
 fi
 ```
 
-If `UNEXPECTED_GROWTH > 500`, report the alert clearly before launching the next wave. The user confirms whether to continue.
+If `UNEXPECTED_GROWTH > 500`, report the alert clearly before dispatching any more agents. The user confirms whether to continue.
 
 ---
 
-### Step 4A.pre.0: Pre-create milestone branches for the wave (MANDATORY before classify-lane) <!-- Added: forge#901 -->
+### Step 4A.pre.0: Pre-create milestone branches for ready issues (MANDATORY before classify-lane) <!-- Added: forge#901 -->
 
-**WHY THIS EXISTS**: Feature-lane milestone branches were created lazily — by whichever feature-lane agent reached its build phase first. When a wave launches N feature-lane agents in parallel, they each run the lane check at roughly the same time. Every agent that runs before the branch is first pushed observes "branch absent" and is misrouted (hard-fail / `needs-human`, or fallback to staging in older code paths). The result is a single milestone's PRs scattered across the milestone branch and staging — a branch-routing nondeterminism that recurs under parallelism.
+**WHY THIS EXISTS**: Feature-lane milestone branches were created lazily — by whichever feature-lane agent reached its build phase first. When multiple agents are dispatched simultaneously, they each run the lane check at roughly the same time. Every agent that runs before the branch is first pushed observes "branch absent" and is misrouted (hard-fail / `needs-human`, or fallback to staging in older code paths). The result is a single milestone's PRs scattered across the milestone branch and staging — a branch-routing nondeterminism that recurs under parallelism.
 
-The fix is deterministic: create every milestone branch the wave will target **once, up front, before any agent runs `classify-lane.sh`**. After this step, every agent's lane check sees the branch and routes consistently.
+The fix is deterministic: create every milestone branch the ready issues will target **once, up front, before any agent runs `classify-lane.sh`**. After this step, every agent's lane check sees the branch and routes consistently.
 
-**When to run**: Before the classify-lane loop in Step 4A.pre, for every wave. The step is a no-op for pure fast-lane waves (no issue in the wave has a milestone).
+**When to run**: Before the classify-lane loop in Step 4A.pre, for every dispatch group (initial ready set + each subsequent batch of newly unblocked issues). The step is a no-op for pure fast-lane issues (no issue in the group has a milestone).
 
-**Requires bash 4+**: This snippet uses an associative array (`declare -A SEEN_MILESTONE_SLUG`) to de-dupe milestone slugs, so it must run under bash 4 or newer. Under a non-bash POSIX shell (`sh`/dash), `declare -A` fails and the de-dupe silently no-ops. This degrades gracefully — branch creation stays correct because the `git ls-remote --exit-code` exists-check below still skips any milestone branch that already exists; the only effect is redundant, idempotent `ls-remote`/`push` attempts for milestones referenced by more than one issue in the wave. Run this command's blocks under bash 4+. <!-- Added: forge#901 -->
+**Requires bash 4+**: This snippet uses an associative array (`declare -A SEEN_MILESTONE_SLUG`) to de-dupe milestone slugs, so it must run under bash 4 or newer. Under a non-bash POSIX shell (`sh`/dash), `declare -A` fails and the de-dupe silently no-ops. This degrades gracefully — branch creation stays correct because the `git ls-remote --exit-code` exists-check below still skips any milestone branch that already exists; the only effect is redundant, idempotent `ls-remote`/`push` attempts for milestones referenced by more than one issue. Run this command's blocks under bash 4+. <!-- Added: forge#901 -->
 
 ```bash
-# Pre-create the origin milestone branch for every distinct milestone referenced by the wave.
+# Pre-create the origin milestone branch for every distinct milestone referenced by ready issues.
 # Slugification MUST byte-match scripts/classify-lane.sh — otherwise a branch is created that
 # the classifier will not select. Keep these two slug pipelines identical.
 git fetch origin
 
-# Collect distinct milestone titles among the wave's issues
+# Collect distinct milestone titles among the ready issues
 declare -A SEEN_MILESTONE_SLUG
-for NUM in {wave_issue_numbers}; do
+for NUM in {ready_issue_numbers}; do
   MILESTONE_TITLE=$(gh issue view "$NUM" -R {GH_REPO} --json milestone --jq '.milestone.title // empty' 2>/dev/null || echo "")
   [ -z "$MILESTONE_TITLE" ] && continue  # fast-lane issue — no milestone branch needed
 
@@ -615,11 +634,11 @@ for NUM in {wave_issue_numbers}; do
 done
 ```
 
-This step is the deterministic counterpart to fix #2 (atomic create-if-absent in the classifier): by guaranteeing the branch exists before the wave's lane checks run, no agent can observe a missing branch. `classify-lane.sh`'s hard-fail is intentionally preserved as the phantom-slug gate for any path that bypasses this step.
+This step is the deterministic counterpart to fix #2 (atomic create-if-absent in the classifier): by guaranteeing the branch exists before the lane checks run, no agent can observe a missing branch. `classify-lane.sh`'s hard-fail is intentionally preserved as the phantom-slug gate for any path that bypasses this step.
 
-### Step 4A.pre: Classify lane for each issue (MANDATORY before spawning agents)
+### Step 4A.pre: Classify lane for each issue (MANDATORY before dispatching agents)
 
-Before building agent prompts, run `classify-lane.sh` for every issue in the current wave to compute `{LANE}` and `{PR_BASE}` deterministically. The script output is authoritative — the LLM MUST NOT override or reason around it.
+Before building agent prompts, run `classify-lane.sh` for every issue in the current dispatch group to compute `{LANE}` and `{PR_BASE}` deterministically. The script output is authoritative — the LLM MUST NOT override or reason around it.
 
 ```bash
 # Requires classify-lane.sh to be available at ~/.claude/scripts/classify-lane.sh
@@ -629,7 +648,7 @@ Before building agent prompts, run `classify-lane.sh` for every issue in the cur
 declare -A ISSUE_LANE
 declare -A ISSUE_PR_BASE
 
-for NUM in {wave_issue_numbers}; do
+for NUM in {ready_issue_numbers}; do
   PR_BASE=$(bash ~/.claude/scripts/classify-lane.sh "$NUM" -R {GH_REPO}) || {
     echo "ERROR: classify-lane.sh failed for #$NUM — adding needs-human label and skipping" >&2
     gh issue edit "$NUM" -R {GH_REPO} --add-label "needs-human" 2>/dev/null || true
@@ -649,11 +668,11 @@ done
 
 Use `${ISSUE_LANE[$NUM]}` and `${ISSUE_PR_BASE[$NUM]}` to populate `{LANE}` and `{PR_BASE}` in the agent template below. Never substitute prose guesses for these values — the script output is the only valid source. <!-- Added: forge#677 -->
 
-### Step 4A: Launch a wave
+### Step 4A: Dispatch ready issues
 
 **REMINDER: You MUST use the template below verbatim. Only fill in `{VARIABLES}`. Do NOT rewrite the agent prompt. Do NOT write custom implementation instructions. The agent MUST invoke `/work-on` via the Skill tool — this is the HARD RULE from the top of this file.**
 
-For each issue in the current wave, spawn an Agent sub-agent that runs the full `/work-on` pipeline.
+For each **ready** issue (all predecessors resolved or no predecessors), spawn an Agent sub-agent that runs the full `/work-on` pipeline. On the initial dispatch, this is every issue with an empty predecessor set. On subsequent dispatches (triggered by agent completions in Step 4B), this is every newly-unblocked issue.
 
 **One agent per issue.** Do NOT group multiple issues into a single agent. `/work-on` handles branching, labels, and PRs per-issue.
 
@@ -712,7 +731,7 @@ If the label is NOT terminal (e.g., `workflow:investigating`, `workflow:ready-to
 )
 ```
 
-**`{GIST_CONTEXT}` generation**: For each issue in the wave, check if it was spawned by an investigation that has a Knowledge Gist (from Step 2C.5). If so, include the Gist URL(s) in the agent prompt:
+**`{GIST_CONTEXT}` generation**: For each issue being dispatched, check if it was spawned by an investigation that has a Knowledge Gist (from Step 2C.5). If so, include the Gist URL(s) in the agent prompt:
 
 ```bash
 # Build GIST_CONTEXT for an issue
@@ -739,11 +758,33 @@ fi
 
 If `GIST_CONTEXT` is empty (no parent investigation or milestone index found), the variable resolves to a blank line in the template — no impact on the agent prompt. <!-- Updated: forge#341 -->
 
-**Launch all agents in the current wave simultaneously** by putting multiple Agent tool calls in a single message. Use `run_in_background=true` so they execute in parallel.
+**Launch all ready agents simultaneously** by putting multiple Agent tool calls in a single message. Use `run_in_background=true` so they execute in parallel.
 
-### Step 4B: Monitor wave completion
+### Step 4B: Monitor completions and dispatch newly ready issues
 
 You will be automatically notified when each background agent completes. **Do NOT use `sleep` loops to poll for completion.** Instead, wait for the automatic notification. When you receive a notification that an agent completed, immediately process it.
+
+**Core streaming dispatch loop**: After processing each agent completion, check the DAG for newly unblocked issues. If any issue now has all predecessors in a terminal state, dispatch it immediately (run Steps 4A.pre.0, 4A.pre, and 4A for the newly ready issues). This is the key difference from the wave model — issues dispatch as soon as their specific predecessors complete, not after an entire group finishes.
+
+```bash
+# After each agent completion, check for newly ready issues:
+for BLOCKED_NUM in {all_blocked_issue_numbers}; do
+  ALL_PREDS_DONE=true
+  for PRED in {predecessors_of_BLOCKED_NUM}; do
+    PRED_STATE=$(gh issue view $PRED -R {GH_REPO} --json labels,state --jq '{state: .state, workflow: [.labels[].name | select(startswith("workflow:"))]}')
+    # Terminal states: workflow:merged, workflow:invalid, needs-human, or state=CLOSED
+    if ! echo "$PRED_STATE" | grep -qE 'workflow:merged|workflow:invalid|needs-human|CLOSED'; then
+      ALL_PREDS_DONE=false
+      break
+    fi
+  done
+  if [ "$ALL_PREDS_DONE" = "true" ]; then
+    echo "#{BLOCKED_NUM} is now READY — all predecessors resolved. Dispatching."
+    # Add to dispatch batch for this completion cycle
+  fi
+done
+# Run Steps 4A.pre.0 → 4A.pre → 4A for newly ready issues (batch them in a single message)
+```
 
 **CRITICAL — Stall detection and recovery**: Background agents sometimes stop mid-pipeline (`stop_reason=end_turn`) after completing a sub-phase (e.g., investigation completes but build never starts). This causes the agent to "complete" from the Agent tool's perspective even though the `/work-on` pipeline is only partially done. When you receive a completion notification:
 
@@ -769,7 +810,11 @@ You will be automatically notified when each background agent completes. **Do NO
 
 4. **Record completed results**: Success (PR merged), Invalid (issue closed), Blocked (needs human), or Error
 
-5. **Verify pipeline compliance** — for each truly completed issue, check that the agent used `/work-on`:
+5. **Check for newly unblocked issues** — run the DAG readiness check above. If any issues are now ready, dispatch them immediately (Steps 4A.pre.0 → 4A.pre → 4A). Batch all newly ready issues into a single dispatch message.
+
+6. **Handle predecessor failures** — if a completed agent's issue FAILED (needs-human, invalid, or error), check for dependent issues in the DAG. Mark all transitive dependents as "skipped — dependency #{X} failed" and report them. Do NOT dispatch them.
+
+7. **Verify pipeline compliance** — for each truly completed issue, check that the agent used `/work-on`:
    ```bash
    LABELS=$(gh issue view $NUM -R {GH_REPO} --json labels --jq '[.labels[].name | select(startswith("workflow:"))] | length')
    COMMENTS=$(gh api repos/{GH_REPO}/issues/${NUM}/comments --jq '[.[] | select(.body | test("FORGE:INVESTIGATOR|FORGE:BUILDER"))] | length')
@@ -779,19 +824,25 @@ You will be automatically notified when each background agent completes. **Do NO
    ```
    If an agent bypassed the pipeline, report it as a **failure** regardless of whether a PR exists.
 
-6. **Post a brief status update** to the user after each agent reaches terminal state:
+8. **Post a brief status update** to the user after each agent reaches terminal state:
    ```
    ✓ #{NUMBER} — {title} → PR #{PR} merged to {target}
    ✗ #{NUMBER} — {title} → {reason for failure}
    ⚠ #{NUMBER} — {title} → PIPELINE BYPASS (no /work-on — PR invalid)
-   ⏳ Wave 1: 2/3 complete (1 resumed after stall)...
+   ⏳ Progress: {completed}/{total} complete, {active} active, {blocked} blocked
+   → Dispatched #{NEWLY_READY} (predecessor #{PRED} completed)
    ```
+
+9. **Run staging integrity check** (from Step 4A-pre) if the completed agent merged a PR targeting staging.
+
+**Termination condition**: All issues in the DAG are in a terminal state (merged, invalid, needs-human, or skipped due to dependency failure). When this condition is met, proceed to Phase 5.
 
 **Anti-pattern — DO NOT DO THIS:**
 - `sleep 60/120/180/300` loops to check status — you will be notified automatically
 - Spawning separate "progress check" agents — they waste tokens and add noise
 - Reading agent JSONL output files to check progress — use GitHub labels as the source of truth
 - Polling the same status check repeatedly on a timer
+- Waiting for a "batch" of completions before checking for newly ready issues — check after EVERY completion
 
 ### Step 4B.5: Time-Based Stall Detection
 
@@ -799,7 +850,7 @@ You will be automatically notified when each background agent completes. **Do NO
 
 **When to run** (NOT a sleep loop — two trigger points only):
 1. On every background agent completion event (run BEFORE the terminal-state check in Step 4B)
-2. Before posting any "waiting for wave..." status update to the user
+2. Before posting any "waiting for agents..." status update to the user
 
 **Do NOT poll on a timer. Do NOT use sleep. Run at these two trigger points only.**
 
@@ -808,9 +859,9 @@ You will be automatically notified when each background agent completes. **Do NO
 STALL_TIMEOUT=$(yq '.pipeline.stall_timeout_minutes // 15' forge.yaml 2>/dev/null || echo 15)
 ```
 
-**For each non-terminal agent in the current wave**:
+**For each non-terminal agent in the current batch**:
 ```bash
-for NUM in {active_wave_issue_numbers}; do
+for NUM in {active_issue_numbers}; do
   # Skip issues already in terminal state
   TERMINAL=$(gh issue view $NUM -R {GH_REPO} --json labels \
     --jq '[.labels[].name | select(. == "workflow:merged" or . == "workflow:invalid" or . == "needs-human")] | length')
@@ -877,19 +928,19 @@ done
 
 **Track stall resume cycles separately** from completion-event resumes (Step 4B). If the same issue accumulates ≥ 2 `FORGE:STALL_DETECTED` comments AND still hasn't reached terminal state, do not resume again — the `needs-human` label is already set.
 
-### Step 4C: Collect review-finding issues from completed wave
+### Step 4C: Collect review-finding issues from completed agents
 
-When ALL agents in the current wave have completed, check if any `/work-on` runs spawned review-finding issues during their review phase. These are new work items that should be folded into the remaining waves.
+After each agent reaches a terminal state, check if its `/work-on` run spawned review-finding issues during the review phase. These are new work items that should be added to the dependency DAG and dispatched when ready.
 
 ```bash
 # Method 1: Read TRAJECTORY comments from completed issues for "Finding issues" row
-for NUM in {completed_issue_numbers_this_wave}; do
+for NUM in {completed_issue_number}; do
   gh api repos/{GH_REPO}/issues/${NUM}/comments \
     --jq '.[] | select(.body | contains("FORGE:TRAJECTORY")) | .body' 2>/dev/null \
     | grep -oP 'Finding issues\s*\|\s*#?\K\d+[^|]*' | grep -oP '\d+' | sort -u
 done
 
-# Method 2 (fallback): Check for recently created review-finding issues that reference PRs from this wave
+# Method 2 (fallback): Check for recently created review-finding issues that reference PRs from this batch
 gh issue list -R {GH_REPO} --state open --label "review-finding" --limit 20 \
   --json number,title,body,createdAt \
   --jq "[.[] | select(.createdAt > \"$(date -u -d '2 hours ago' +%Y-%m-%dT%H:%M:%SZ)\")]"
@@ -897,7 +948,7 @@ gh issue list -R {GH_REPO} --state open --label "review-finding" --limit 20 \
 
 **If review-finding issues were spawned:**
 
-**Cascade control (MANDATORY — run before folding findings into waves):**
+**Cascade control (MANDATORY — run before folding findings into the DAG):**
 
 For each spawned finding, determine whether it should be **executed** or **deferred**:
 
@@ -905,17 +956,17 @@ For each spawned finding, determine whether it should be **executed** or **defer
 1. **Generation ≥ 2** (always defer, even for P1/P2): Finding was spawned by an issue that was itself a review-finding. Check the source issue's labels for `review-finding` — if the source has that label, the new finding is generation 2. Always defer. Rationale: gen-2+ cascade is theoretically unbounded — cap it here.
 2. **Priority override** (P1 or P2 → always execute): If the finding is labeled P1 or P2, skip all remaining heuristics and execute. Rationale: high-priority findings must never be suppressed by keyword matching.
 3. **Comment/typo heuristic** (P3 and below only): Finding title contains the word "comment" or "typo" (case-insensitive). These are 1-line cosmetic fixes that do not block other work.
-4. **P3 + same-file overlap**: Finding is labeled `P3` AND the file it targets overlaps with ANY file already in the current or remaining batch waves. Rationale: same-file P3 findings serialize the entire remaining batch — one finding per original issue doubles wall-clock time with no proportional value.
+4. **P3 + same-file overlap**: Finding is labeled `P3` AND the file it targets overlaps with ANY file already in the current batch (active or queued in the DAG). Rationale: same-file P3 findings add predecessor edges that serialize agents — one finding per original issue increases wall-clock time with no proportional value.
 
-**Defer** (do NOT add to wave queue) if rules 1, 3, or 4 match.
+**Defer** (do NOT add to the DAG) if rules 1, 3, or 4 match.
 
-**Execute** (add to wave queue) if:
+**Execute** (add to the DAG) if:
 - Rule 2 matches (P1 or P2)
 - None of the defer rules matched (generation 1, P3 with no file overlap, not a keyword match)
 
 **Before running the loop, build the batch file list (MANDATORY for Heuristic 3):**
 
-Collect all file paths from every issue in the current batch — both completed waves and remaining queued waves. This produces `ALL_BATCH_FILES`, a newline-separated list of file paths used by Heuristic 3 to test same-file overlap.
+Collect all file paths from every issue in the current batch — both completed and remaining queued issues in the DAG. This produces `ALL_BATCH_FILES`, a newline-separated list of file paths used by Heuristic 3 to test same-file overlap.
 
 ```bash
 # Build ALL_BATCH_FILES: collect file paths from ALL batch issues (completed + queued)
@@ -980,28 +1031,27 @@ done
 
 **For queued (non-deferred) findings:**
 
-1. **Add them to the remaining wave plan.** They are implementation issues — same as issues spawned by investigations in Phase 2.
+1. **Add them to the dependency DAG.** They are implementation issues — same as issues spawned by investigations in Phase 2. Compute their predecessor sets using the same conflict detection (Step 3C Layers 1-4) against all remaining blocked/active issues.
 2. **Respect source branch context.** Review-finding issues have `**Code branch**: \`{branch}\`` in their body — the `/work-on` agent will read this and branch from the right origin. No special handling needed from the orchestrator.
 3. **Report to user:**
    ```
-   Wave {N} review spawned {count} new finding issues: #{A}, #{B}
-   Queued for execution: #{A}, #{B}
+   Agent #{COMPLETED} spawned {count} new finding issues: #{A}, #{B}
+   Added to DAG: #{A} (predecessors: {}), #{B} (predecessors: {#{X}})
    Deferred (cascade control): #{C} (P3 same-file), #{D} (comment heuristic)
-   Adding queued findings to Wave {N+1} (or new wave if no remaining waves).
    ```
-4. **Re-run file-overlap detection** (Step 3C) on the expanded issue set — finding issues may conflict with planned issues that touch the same files.
+4. **Re-run file-overlap detection** (Step 3C) on the expanded issue set — finding issues may conflict with active or queued issues that touch the same files. Ready findings dispatch immediately via the standard Step 4B dispatch loop.
 
 **For deferred findings:**
 
 They remain open in GitHub — they will be picked up by future `/orchestrate` or `/work-on` runs. Log them in the final batch summary under "deferred" so they are visible. Do NOT close or label them — leave them for the next pipeline pass.
 
-**If no review-finding issues were spawned:** Continue to next wave normally.
+**If no review-finding issues were spawned:** Continue monitoring for the next agent completion.
 
-### Step 4C.5: Milestone lane-consistency check (run after each wave) <!-- Added: forge#901 -->
+### Step 4C.5: Milestone lane-consistency check (periodic) <!-- Added: forge#901 -->
 
 **WHY THIS EXISTS**: A milestone's feature-lane PRs must all target the same milestone branch. If a branch-routing race ever scatters them — some on the milestone branch, some on staging — the milestone branch becomes incomplete relative to staging, and the split is otherwise invisible until the milestone tries to ship. Step 4A.pre.0 prevents the split deterministically; this check detects any residual split so it surfaces immediately instead of at ship time.
 
-**When to run**: After each wave completes, for any batch where at least one issue has a milestone. Skip for pure fast-lane batches. This check is **non-blocking** — it alerts; it does not auto-resolve or stop the pipeline.
+**When to run**: After every 3rd agent completion (or after all agents complete, whichever comes first), for any batch where at least one issue has a milestone. Skip for pure fast-lane batches. This check is **non-blocking** — it alerts; it does not auto-resolve or stop the pipeline.
 
 ```bash
 # For each distinct milestone in the batch, assert all of its feature-lane PRs share one base.
@@ -1051,13 +1101,13 @@ for NUM in {all_batch_issue_numbers}; do
 done
 ```
 
-Report any `ALERT` lines prominently before advancing to the next wave. Reconciliation of an existing split is a manual/`/milestone`-assisted step — this check only ensures the split is never silent.
+Report any `ALERT` lines prominently before dispatching more agents. Reconciliation of an existing split is a manual/`/milestone`-assisted step — this check only ensures the split is never silent.
 
-### Step 4D: Milestone integration build gate (MANDATORY between waves)
+### Step 4D: Milestone integration build gate (MANDATORY — periodic for milestone batches)
 
-**WHY THIS EXISTS**: Session Intelligence milestone shipped 116 PRs across multiple waves with zero integration testing. Each PR built in isolation — type errors from cross-PR interactions (wrong prop types, missing components, incompatible interfaces) were invisible until the milestone→staging merge broke the build with 4 distinct errors. This gate catches those failures early.
+**WHY THIS EXISTS**: Session Intelligence milestone shipped 116 PRs across multiple dispatches with zero integration testing. Each PR built in isolation — type errors from cross-PR interactions (wrong prop types, missing components, incompatible interfaces) were invisible until the milestone→staging merge broke the build with 4 distinct errors. This gate catches those failures early.
 
-**When to run**: After each wave completes, IF the batch targets a milestone branch AND any `.tsx`/`.ts` files were changed by agents in the completed wave.
+**When to run**: After every 3rd milestone-targeted agent completion (or when all milestone issues are complete), IF the batch targets a milestone branch AND any `.tsx`/`.ts` files were changed by agents in the completed set. Running after every single agent would be too frequent — batch the check to reduce overhead while still catching integration errors before they accumulate.
 
 All tool commands are read from `forge.yaml → verification.commands`; each step logs `SKIPPED — not configured` when the corresponding key is absent rather than silently passing.
 
@@ -1072,7 +1122,7 @@ MILESTONE_BRANCH="milestone/{milestone_slug}"
 TS_CHANGED=$(git diff origin/{DEFAULT_BRANCH}...origin/${MILESTONE_BRANCH} --name-only | grep -E '\.(tsx?|jsx?)$' | head -1)
 
 if [ -n "$TS_CHANGED" ]; then
-    echo "=== Integration Build Gate (TypeScript): Wave {N} ==="
+    echo "=== Integration Build Gate (TypeScript): batch checkpoint ==="
     cd {REPO_PATH}
     git fetch origin ${MILESTONE_BRANCH}
     git checkout origin/${MILESTONE_BRANCH} --detach 2>/dev/null
@@ -1096,18 +1146,18 @@ if [ -n "$TS_CHANGED" ]; then
     git checkout - 2>/dev/null
 
     if [ "$TSC_EXIT" -ne 0 ]; then
-        echo "BLOCKING: TypeScript errors on ${MILESTONE_BRANCH} after Wave {N}."
-        echo "Fix type errors before starting next wave."
+        echo "BLOCKING: TypeScript errors on ${MILESTONE_BRANCH} after batch checkpoint."
+        echo "Fix type errors before dispatching more milestone agents."
     elif [ "${BUILD_EXIT:-0}" -ne 0 ]; then
-        echo "BLOCKING: build failed on ${MILESTONE_BRANCH} after Wave {N}."
-        echo "Build/prerender errors — fix before starting next wave."
+        echo "BLOCKING: build failed on ${MILESTONE_BRANCH} after batch checkpoint."
+        echo "Build/prerender errors — fix before dispatching more milestone agents."
     fi
 fi
 
 # Python format check
 PY_CHANGED=$(git diff origin/{DEFAULT_BRANCH}...origin/${MILESTONE_BRANCH} --name-only | grep -E '\.py$' | head -1)
 if [ -n "$PY_CHANGED" ]; then
-    echo "=== Integration Build Gate (Python): Wave {N} ==="
+    echo "=== Integration Build Gate (Python): batch checkpoint ==="
     cd {REPO_PATH}
     git checkout origin/${MILESTONE_BRANCH} --detach 2>/dev/null
 
@@ -1122,29 +1172,22 @@ if [ -n "$PY_CHANGED" ]; then
     git checkout - 2>/dev/null
 
     if [ "$FORMAT_EXIT" -ne 0 ]; then
-        echo "WARNING: Python formatting issues on ${MILESTONE_BRANCH} after Wave {N}."
+        echo "WARNING: Python formatting issues on ${MILESTONE_BRANCH} after batch checkpoint."
         echo "Not blocking but should be fixed before milestone→staging."
     fi
 fi
 ```
 
-**If the gate fails**: Report the errors to the user. Do NOT proceed to the next wave. The accumulated milestone branch has integration errors that will only get worse with more PRs on top. Build failures are BLOCKING — SSG/prerender crashes are invisible to typecheck alone — configure `typescript.build` in `verification.commands` to catch them.
+**If the gate fails**: Report the errors to the user. Do NOT dispatch any more milestone-targeted agents until the integration errors are resolved. The accumulated milestone branch has integration errors that will only get worse with more PRs on top. Build failures are BLOCKING — SSG/prerender crashes are invisible to typecheck alone — configure `typescript.build` in `verification.commands` to catch them. Non-milestone (fast-lane) agents may continue dispatching normally.
 
-### Step 4E: Advance to next wave
-
-When wave results are processed, the integration gate passes (or is not applicable), and any new finding issues are folded in:
-
-1. Check if any failures in the current wave block the next wave (dependency failures)
-2. If a dependency failed, skip dependent issues in the next wave and report them as "skipped — dependency #{X} failed"
-3. Launch the next wave (same process as Step 4A)
-
-### Step 4F: Handle individual agent failures
+### Step 4E: Handle individual agent failures
 
 If an agent reports failure or error:
 - **Merge conflict**: Report to user, mark issue as needing human attention
 - **Invalid issue**: Already handled by the agent (closed with comment) — just report it
 - **Build/test failure**: Report the error, suggest manual intervention
 - **Agent timeout**: Report which issue timed out, suggest re-running with `/work-on #{N}`
+- **Dependency cascade**: Mark all transitive dependents in the DAG as "skipped — dependency #{X} failed"
 
 **Do NOT retry failed agents automatically.** Report the failure and let the user decide.
 
@@ -1191,7 +1234,7 @@ Include the cleanup summary in the final report (Phase 6). If cleanup found prob
 
 ## Phase 6: Consolidated Report
 
-After ALL waves AND cleanup complete, present a final summary.
+After ALL issues reach terminal state AND cleanup completes, present a final summary.
 
 ### Step 6A: Collect trajectory data
 
@@ -1212,7 +1255,7 @@ Aggregate into the batch-level analytics for Step 6B.
 **Scope**: {milestone / issue list}
 **Duration**: {approximate time}
 
-### Wave 0: Investigations
+### Investigations (Phase 2)
 {IF investigations ran:}
 | # | Investigation | Issues Created | Result |
 |---|-------------|---------------|--------|
@@ -1232,10 +1275,10 @@ Aggregate into the batch-level analytics for Step 6B.
 
 ### Review-Spawned Issues
 
-{IF review findings were created during any wave:}
+{IF review findings were created during any agent run:}
 | # | Finding | Source Issue | Source PR | Status |
 |---|---------|-------------|-----------|--------|
-| #{F1} | {title} | #{A} | PR #{PR} | ✓ Merged (wave {N}) / ⏳ Open (deferred) |
+| #{F1} | {title} | #{A} | PR #{PR} | ✓ Merged (in-batch) / ⏳ Open (deferred) |
 
 {ELSE: "No review findings created during this batch."}
 
@@ -1259,7 +1302,7 @@ Aggregate into the batch-level analytics for Step 6B.
 |-------|-------|-------|--------|-------|---------|--------------|
 {per-agent rows from audit}
 
-**Wave efficiency**: {avg_idle_pct}% idle time
+**Batch efficiency**: {avg_idle_pct}% idle time
 **Total resume cycles**: {sum_resumes} across {agent_count} agents
 **Clean agents** (no stalls): {clean_count}/{agent_count}
 
@@ -1283,7 +1326,7 @@ Aggregate into the batch-level analytics for Step 6B.
 **Systematic issues** (flag if detected):
 - False positive rate > 30% → review agents may need tuning
 - Invalidation rate < 10% or > 35% → investigation calibration off
-- Same-domain merge conflicts in 2+ waves → domain sequencing too aggressive
+- Same-domain merge conflicts between concurrent agents → domain serialization edges too loose
 - Contract divergences > 20% → investigation quality may need improvement
 - **Idle% > 50%** → agents stalling at phase boundaries; check work-on routing loop
 - **Avg resumes > 1** → orchestrator having to compensate for agent stops
@@ -1304,10 +1347,10 @@ Aggregate into the batch-level analytics for Step 6B.
 4. **Always confirm with user before launching** — Step 3E is the mandatory checkpoint
 5. **No retries** — if an agent fails, report it and move on
 6. **Respect existing work** — skip issues already being worked on (`workflow:building`, `workflow:in-review`)
-7. **Dependency failures cascade** — if A fails and B depends on A, B is skipped (not attempted)
+7. **Dependency failures cascade** — if A fails and B depends on A, all transitive dependents of A are skipped (not attempted)
 8. **Always run post-batch cleanup** — Phase 5 is mandatory. Never skip `/cleanup all` after orchestration.
 9. **NEVER close/skip issues as duplicates** — only `/work-on` investigation agents can make that call after examining the actual code. The orchestrator delegates, it does not adjudicate.
-10. **Post-wave verification** — after each wave, check that every completed issue has `workflow:*` labels and structured comments. If an agent bypassed `/work-on`, report it as a pipeline failure.
+10. **Per-completion verification** — after each agent completes, check that it has `workflow:*` labels and structured comments. If an agent bypassed `/work-on`, report it as a pipeline failure.
 
 ---
 
@@ -1315,31 +1358,38 @@ Aggregate into the batch-level analytics for Step 6B.
 
 ### "orchestrate milestone api-expansion"
 → Fetches all open issues in "API Expansion v1" milestone
-→ Analyzes deps (#1526 → #1527 → #1528 → #1529, #1530 independent)
-→ Plans 3 waves, confirms with user, executes
+→ Builds DAG: #1526 → #1527 → #1528 → #1529 (chain), #1530 (no predecessors)
+→ Confirms with user, dispatches #1526 + #1530 immediately
+→ When #1526 completes, dispatches #1527 immediately (doesn't wait for #1530)
+→ Streaming continues until all issues reach terminal state
 
 ### "orchestrate #1533 #1250"
 → Fetches those 2 issues, no deps between them
-→ Single wave, both parallel, confirms, executes
+→ DAG: both have empty predecessor sets
+→ Confirms, dispatches both simultaneously
 
 ### "orchestrate next 5"
-→ Gets top 5 priority issues, checks deps
-→ Plans waves, confirms, executes
+→ Gets top 5 priority issues, builds DAG
+→ Confirms, dispatches all ready issues immediately
+→ Dependent issues dispatch as predecessors complete
 
 ### "orchestrate P0"
 → Gets all P0 issues, runs them all (presumably urgent)
-→ Single wave if possible, confirms, executes
+→ DAG: likely all independent — dispatches simultaneously
+→ Confirms, executes
 
 ### "orchestrate fast-lane"
 → Gets all unmilestoned bugs/fixes
-→ Groups by independence, runs in waves
+→ Builds DAG from file-conflict and domain-serialization edges
+→ Dispatches all ready issues, streams dependent issues as predecessors complete
 
 ### "orchestrate milestone user-auth-v2"
 → Fetches all open issues in "User Auth v2" milestone
 → Detects #42 is an investigation issue (title: "Investigate: session expiry race condition under high concurrency")
-→ Wave 0: Runs `/work-on 42` — investigation creates 3 new issues (#55-#57)
+→ Phase 2: Runs `/work-on 42` — investigation creates 3 new issues (#55-#57)
 → Re-fetches milestone issues, now includes #55-#57
-→ Wave 1: #38 (P0 token refresh bug), #41 (session store migration), #55, #56 (all independent)
-→ Wave 2: #39 (enable refresh rotation — after #38 fixes token bug), #57 (depends on #55)
-→ Wave 3: remaining issues
-→ Final report shows investigation spawned issues and their results
+→ Builds DAG: #38, #41, #55, #56 have no predecessors (ready); #39 depends on #38; #57 depends on #55
+→ Dispatches #38, #41, #55, #56 simultaneously
+→ When #38 completes, #39 dispatches immediately (doesn't wait for #41, #55, or #56)
+→ When #55 completes, #57 dispatches immediately (doesn't wait for others)
+→ Final report shows investigation spawned issues and streaming execution results
