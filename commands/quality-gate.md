@@ -190,7 +190,7 @@ Run ONLY the checks whose domain was identified in Step 1.5. Skip checks for dom
 - **2D (Database)**: Run if `DATABASE` in DOMAINS
 - **2E (Frontend lifecycle)**: Run if `FRONTEND` in DOMAINS
 - **2F (Frontend proxy)**: Run if `PROXY` in DOMAINS
-- **2G (Cross-service integration)**: Run if `SHELL` in DOMAINS
+- **2G (Cross-service integration)**: Run if `SHELL` or `FORGE_GRAPH` in DOMAINS
 - **2H (Asyncio cancellation)**: Run if `CONCURRENCY` in DOMAINS
 - **2I (State completeness)**: Run if `STATE` in DOMAINS
 - **2J (String literal consistency)**: Run if `STRING_SETS` in DOMAINS
