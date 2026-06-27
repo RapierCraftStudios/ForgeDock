@@ -522,7 +522,13 @@ if [ "${#CYCLE_ISSUES[@]}" -gt 0 ]; then
     # Remove from DAG — store in EXCLUDED_CYCLE for Step 3E reporting
     EXCLUDED_CYCLE+=("$C")
     # Remove from ISSUES array for all downstream processing
-    ISSUES=("${ISSUES[@]/$C}")
+    # Use exact-match filter loop — pattern substitution (${array[@]/pattern}) leaves blank
+    # slots and corrupts partial matches (e.g., removing 100 changes 1000 to 0).
+    NEW_ISSUES=()
+    for I in "${ISSUES[@]}"; do
+      [ "$I" != "$C" ] && NEW_ISSUES+=("$I")
+    done
+    ISSUES=("${NEW_ISSUES[@]}")
   done
   echo ""
   echo "These issues have been labeled needs-human and excluded from the DAG."
