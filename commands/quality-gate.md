@@ -48,6 +48,7 @@ This quality gate uses **domain detection** to adapt to your project's actual te
 | INFRA | Dockerfiles or entrypoints with runtime UID changes |
 | ROUTER_BUG | Router Python files where gate conditions are narrowed |
 | FORGE_GRAPH | `commands/*.md` specs or `scripts/*` files change (ForgeDock self-consistency) |
+| CONFIG_SCHEMA | Config files for external tools (`traefik/`, `infra/nginx/`, `k8s/`, `terraform/`, `*.conf`, `*.toml` in infra paths, or `docker-compose*.yml` with service definition changes) |
 
 **Stack-agnostic coverage**: The example domains above reflect common patterns caught in production; they are not requirements. A Go or Ruby project benefits from SECURITY checks. A Node.js project benefits from FRONTEND, PROXY, and DEPLOY checks. Any project benefits from DATABASE and WORKFLOW checks when those file types are present. The stack-specific examples (Python routers, SOPS secrets chain, FastAPI layouts, appleboy SSH deploys) are illustrative — the domain detection system applies the applicable subset to any codebase.
 
@@ -100,6 +101,7 @@ Before running checks, classify the changed files into domains. This avoids runn
 | `Dockerfile*` or `entrypoint*.sh` with added/changed `USER`, `su-exec`, `gosu`, or `setuid` | INFRA |
 | `*.py` in `routers/` where the diff removes a line containing an or-gate condition (lines starting with `-` containing `if.*or`) | ROUTER_BUG |
 | `commands/*.md` or `scripts/*` files (ForgeDock repo only — dogfoods its own spec graph) | FORGE_GRAPH |
+| Files under `traefik/`, `infra/nginx/`, `k8s/`, `terraform/`, or files matching `*.conf`, `*.toml` in infra paths, or `docker-compose*.yml` with service definition changes | CONFIG_SCHEMA |
 
 **Apply the classification:**
 
@@ -168,6 +170,19 @@ for f in $(echo {CHANGED_FILES} | tr ' ' '\n' | grep -E '\.py$' | grep -E 'route
     git diff HEAD -- "$f" 2>/dev/null | grep -E '^-.*\bif\b.*\bor\b' | grep -v '^---' | grep -q . && DOMAINS="$DOMAINS ROUTER_BUG" && break
 done
 
+# Check for external tool config files (structural schema validation advisory)
+for f in {CHANGED_FILES}; do
+    case "$f" in
+        traefik/*|infra/nginx/*|k8s/*|terraform/*)
+            DOMAINS="$DOMAINS CONFIG_SCHEMA" && break ;;
+        *.conf|*.toml)
+            echo "$f" | grep -qE 'infra/|traefik/|nginx/|k8s/|terraform/' && DOMAINS="$DOMAINS CONFIG_SCHEMA" && break ;;
+        docker-compose*.yml)
+            # Trigger only if service definitions changed (not just env vars or labels)
+            git diff HEAD -- "$f" 2>/dev/null | grep -E '^\+\s+(image:|command:|entrypoint:)' | grep -q . && DOMAINS="$DOMAINS CONFIG_SCHEMA" && break ;;
+    esac
+done
+
 # SECURITY is always included for any code file
 DOMAINS="SECURITY $DOMAINS"
 
@@ -199,6 +214,7 @@ Run ONLY the checks whose domain was identified in Step 1.5. Skip checks for dom
 - **2M (Import resolution)**: Run if `IMPORT_RESOLUTION` in DOMAINS
 - **2N (Runtime UID × filesystem write)**: Run if `INFRA` in DOMAINS
 - **2O (Residual pattern check)**: Run if `ROUTER_BUG` in DOMAINS
+- **2P (External tool config schema)**: Run if `CONFIG_SCHEMA` in DOMAINS
 
 ### 2A: Security (ALL files)
 
@@ -835,6 +851,67 @@ done
 - Only runs on files in a `routers/` path
 - Only triggers when a condition line was actually removed in the diff (not just modified)
 - Reports file:line matches from sibling files only (excludes the fixed file itself)
+
+### 2P: External Tool Config Schema Advisory (external tool config files)
+
+**Triggered when**: CONFIG_SCHEMA domain is set (config files for external tools are in the diff).
+
+**Why this matters**: External tools with strict config schemas (Traefik, nginx, Kubernetes, Terraform, Docker Compose) silently ignore or reject structurally incorrect config — no startup crash, no error log, the feature simply does not activate. The quality gate cannot run `traefik validate` / `nginx -t` / `terraform validate` (those belong in CI), but it can verify that CI validation steps exist for the tool and remind the builder that structural validation is CI's responsibility. <!-- Added: forge#1104 -->
+
+```bash
+# Identify which external tools have config files in the diff
+TOOL_FILES=$(echo {CHANGED_FILES} | tr ' ' '\n' | grep -E \
+    "(traefik/|infra/nginx/|k8s/|terraform/|docker-compose.*\.yml$|.*\.(conf|toml)$)" | head -20)
+
+if [ -n "$TOOL_FILES" ]; then
+    echo "CONFIG_SCHEMA: External tool config files detected in diff:"
+    echo "$TOOL_FILES"
+    echo ""
+
+    # Check whether CI has a validation step for each detected tool
+    WORKFLOW_DIR="{WORKTREE_PATH}/.github/workflows"
+    CI_MISSING=""
+
+    for f in $TOOL_FILES; do
+        case "$f" in
+            traefik/*)
+                grep -rlE "traefik.*validate|traefik.*check" "$WORKFLOW_DIR" 2>/dev/null | grep -q . || \
+                    CI_MISSING="$CI_MISSING traefik"
+                ;;
+            infra/nginx/*|*nginx*.conf)
+                grep -rlE "nginx.*-t|nginx.*test|nginx.*configtest" "$WORKFLOW_DIR" 2>/dev/null | grep -q . || \
+                    CI_MISSING="$CI_MISSING nginx"
+                ;;
+            k8s/*|*.yaml)
+                grep -rlE "kubectl.*--dry-run|kubeval|kustomize.*build|helm.*lint" "$WORKFLOW_DIR" 2>/dev/null | grep -q . || \
+                    echo "k8s" | grep -qF "$(echo $f | grep -oE 'k8s/')" && CI_MISSING="$CI_MISSING kubernetes"
+                ;;
+            terraform/*)
+                grep -rlE "terraform.*validate|terraform.*plan|tflint" "$WORKFLOW_DIR" 2>/dev/null | grep -q . || \
+                    CI_MISSING="$CI_MISSING terraform"
+                ;;
+        esac
+    done
+
+    # Deduplicate
+    CI_MISSING=$(echo "$CI_MISSING" | tr ' ' '\n' | sort -u | grep -v '^$' | tr '\n' ' ')
+
+    if [ -n "$CI_MISSING" ]; then
+        for tool in $CI_MISSING; do
+            echo "CFG-1 | MEDIUM | .github/workflows/ | No CI validation step found for $tool config changes — add structural validation (e.g., 'traefik validate', 'nginx -t', 'terraform validate') to CI so structural errors are caught before merge. The INFRA review agent verifies logical correctness; CI must verify structural correctness."
+        done
+    else
+        echo "CFG: CI validation steps detected for modified tool configs — structural validation covered by CI."
+    fi
+fi
+```
+
+**Flag as findings**:
+- No CI validation step for a tool whose config files changed: **MEDIUM** — structural config errors will not be caught before deploy. The fix is a CI-layer addition (see `/ci-audit` for a comprehensive CI gap audit), not a quality gate fix.
+
+**This check is advisory (MEDIUM), not blocking (HIGH)**. The quality gate cannot substitute for CI-level validators (`traefik validate`, `nginx -t`, `terraform validate`). Its role is to detect when those validators are absent from CI and surface that gap to the builder. Actual structural validation belongs in GitHub Actions.
+
+**Separation of concerns**: ForgeDock reasons about architecture, logic, and security; CI runs deterministic tool validators with zero token cost. The quality gate enforces that the CI layer is complete — it does not replace it.
 
 ## Step 3: Compile findings
 
