@@ -142,6 +142,7 @@ Append this block at the very end of your comment (after the `---` footer line, 
 | API Design | `API` |
 | Database & Migration | `DB` |
 | Infrastructure | `INFRA` |
+| Config Schema | `CFG` |
 
 ### Example
 
@@ -1605,6 +1606,52 @@ If no infra context is configured above, derive the deployment model from the ch
 
    Host-side port bindings to Docker containers are unreliable in SSH deploy contexts. Deploy scripts that invoke database tools directly cannot depend on `localhost:5432` being reachable; the same operation via `docker exec` bypasses the host network entirely and always succeeds when the container is running. <!-- Added: forge#322 -->
 
+15. **External tool config schema validation** (when any config file consumed by an external tool is in the diff — trigger: files under `traefik/`, `infra/nginx/`, `k8s/`, `terraform/`, `*.conf`, `*.toml`, or any `docker-compose*.yml` with non-trivial changes to service definitions):
+
+   **Principle: Logical correctness ≠ structural correctness.** A config can have the right values in the wrong nesting and be silently rejected by the external tool — producing zero error logs in some tools (e.g. Traefik v3 ignores unrecognized nesting silently). The INFRA agent must verify both dimensions:
+   - **Logical correctness** (covered by existing checks): Are the values coherent? Do names match across files? Is the wiring consistent with the deploy pipeline?
+   - **Structural correctness** (this check): Does the YAML/TOML/HCL structure match what the tool's actual schema expects? Are directives nested at the correct depth? Do required parent keys exist?
+
+   **For each external tool config file in the diff**:
+
+   1. **Identify the tool and version**: Read the `image:` tag in `docker-compose*.yml` for the tool (e.g., `traefik:v3.1`, `nginx:1.25`). If the tool version cannot be determined from the diff, note it as unknown.
+
+   2. **Reason about the schema**: Ask — "Does this change's structure match what `{tool} {version}` actually expects?" Key questions:
+      - Is this directive/key nested under the correct parent section?
+      - Does this version of the tool use a different config syntax than a prior version? (Version migrations often change required nesting — e.g., Traefik v2 → v3 moved many config keys to different parent sections)
+      - Are any required sibling keys missing from the changed section?
+      - Does the tool expect this value at file scope, or under a named block?
+
+   3. **Cross-reference against sibling config files**: If the project uses dynamic config loading (e.g., `traefik/dynamic/`), verify that a key defined in the static config is not also required in the dynamic config (or vice versa) for the feature to activate.
+
+   4. **Flag structural mismatches**: If any key or nesting does not match the tool's expected schema for the declared version, flag as **CONFIRMED HIGH**. Structural config mismatches are silently rejected at runtime — no startup crash, no error log, the feature simply does not activate.
+
+   ```bash
+   # Identify tool config files in the diff
+   CONFIG_TOOL_FILES=$(gh pr diff [PR_NUMBER] --name-only | grep -E \
+     "(traefik/|infra/nginx/|k8s/|terraform/|.*\.conf$|.*\.toml$)" | head -20)
+   COMPOSE_INFRA_FILES=$(gh pr diff [PR_NUMBER] --name-only | grep -E "docker-compose.*\.yml$")
+
+   # For each config file: read the full file (not just the diff) to understand the structure
+   for f in $CONFIG_TOOL_FILES; do
+       echo "=== Reading full config structure: $f ==="
+       cat "$f"
+   done
+
+   # Identify tool version from docker-compose (for version-aware schema reasoning)
+   for f in $COMPOSE_INFRA_FILES; do
+       grep -E "image:\s*(traefik|nginx|haproxy|envoy|caddy|terraform):" "$f" 2>/dev/null && echo "  ^ in $f"
+   done
+   ```
+
+   **Severity classification**:
+   - Config key present but under wrong parent section: **CONFIRMED HIGH** — key is silently ignored; feature does not activate
+   - Required sibling key missing from changed section: **CONFIRMED HIGH** — partial config is silently incomplete
+   - Version mismatch (config uses v2 syntax on v3 tool): **CONFIRMED HIGH** — v3 silently ignores v2 keys in most tools
+   - Structural ambiguity (key could plausibly be correct but version cannot be determined): **LIKELY MEDIUM** — flag for human verification with schema reference
+
+   **Do NOT rely solely on logical correctness checks when structural correctness has not been verified.** A config that names services correctly, uses coherent values, and matches the deploy script's expectations can still be silently rejected if the nesting does not match the tool's schema. Both dimensions must be verified independently. <!-- Added: forge#1104 -->
+
 ## Post Findings
 ```bash
 gh pr comment [PR_NUMBER] --body "$(cat <<'EOF'
@@ -1679,5 +1726,6 @@ EOF
 | appleboy/ssh-action Go template safety | Item 12 | COVERED | #226 |
 | Insecure config file defaults | Item 13 | COVERED | #301 |
 | Host-side database tool invocations | Item 14 | COVERED | #322 |
+| External tool config schema validation (structural correctness) | Item 15 | COVERED | #1104 |
 | Docker image tag pinning (mutable tags) | — | GAP | |
 | Network policy / inter-container isolation | — | GAP | |

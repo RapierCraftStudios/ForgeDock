@@ -55,7 +55,7 @@ ForgeDock is **not another AI coding agent.** It's a set of prompt-engineered co
 | **Full-lifecycle automation** | `/work-on #42` — investigates the issue, architects a fix, builds it, runs quality gates, opens a PR, and reviews it. You click merge. |
 | **Persistent agent memory** | Structured `FORGE:` annotations on GitHub issues/PRs survive context resets and session boundaries. Agents never start blind. |
 | **9 specialist review agents** | Security, billing, database, concurrency, auth, frontend, API, performance, infrastructure — every PR gets domain-expert review. |
-| **Cross-issue knowledge graph** | Agent fixing issue #43 reads the investigation from #42 and applies the known pattern — no re-investigation. |
+| **Institutional memory that compounds** | Agent fixing issue #43 reads the investigation from #42 and applies the known pattern — no re-investigation. |
 | **Self-improving pipeline** | Review agents learn from past findings — recurring patterns automatically become new quality gate checks. |
 | **Parallel orchestration** | `/orchestrate` decomposes milestones into waves and runs `/work-on` on each in parallel. |
 
@@ -223,11 +223,26 @@ Removes all ForgeDock command symlinks from `~/.claude/commands/`. Your `forge.y
 
 ---
 
+## FAQ — How is ForgeDock different from X?
+
+**vs. DeepWiki (Devin)** — DeepWiki generates a read-only wiki from your codebase once. ForgeDock's FORGE annotations are written by pipeline agents during every issue run — capturing root causes, architectural decisions, and review findings as they happen, not as a snapshot of static code.
+
+**vs. AGENTS.md / CLAUDE.md** — These files are written and maintained by you. They capture conventions and rules. ForgeDock annotations are written automatically by pipeline agents and capture execution history — what bugs were confirmed, what fixes were shipped, what review findings recurred. Use both: CLAUDE.md for conventions, ForgeDock for institutional memory.
+
+**vs. Cursor Memories** — Cursor Memories are scoped to the Cursor IDE's backend and don't survive a Claude Code context reset. ForgeDock annotations live on GitHub — any agent, any tool, any human can read them. When Claude's context window compacts mid-session, a ForgeDock agent queries GitHub and resumes exactly where it left off.
+
+**vs. Devin Knowledge Base** — Devin's KB is proprietary, opaque, and vendor-locked. ForgeDock context is plain GitHub issue comments — readable, editable, and queryable with `gh api`. No vendor lock-in, no black box.
+
+[Full comparison →](docs/comparison.md)
+
+---
+
 ## Documentation
 
 - [Getting Started in 5 Minutes](docs/site/getting-started.md) — install, configure, first pipeline run
 - [How the Knowledge Graph Works](docs/site/how-it-works.md) — FORGE annotations, context relay, compaction resilience
 - [ForgeDock vs. Manual Workflows](docs/site/vs-manual-workflows.md) — structured pipelines vs. ad-hoc prompting
+- [ForgeDock vs. DeepWiki, AGENTS.md, and Cursor Memories](docs/comparison.md) — structural differences between context tools
 - [FORGE Annotation Protocol](docs/site/forge-annotation-protocol.md) — open standard spec for AI context passing
 - [Command Reference](docs/site/command-reference.md) — all 25+ commands with usage and examples
 

@@ -453,6 +453,108 @@ Initial dispatch: #2633, #2636, #2645, #2646 (all ready — launched simultaneou
 
 **Key advantage over waves**: When #2633 completes, #2634 dispatches immediately — it does not wait for #2636, #2645, or #2646 to finish. Similarly, when #2645 completes, #2647 dispatches immediately regardless of other issues' status.
 
+### Step 3D.5: Cycle Detection (MANDATORY) <!-- Added: forge#1085 -->
+
+**Run immediately after Step 3D's DAG edge construction, before presenting the plan (Step 3E).** This step validates that the predecessor graph is acyclic. Without it, mutual `Depends on` declarations (e.g., A depends on B AND B depends on A) cause both issues to remain permanently blocked in Step 4B's dispatch loop — no error, no timeout, indefinite deadlock.
+
+**Algorithm**: Kahn's topological sort. Runs in O(V+E) — negligible overhead for typical batch sizes.
+
+```bash
+# --- Step 3D.5: Cycle Detection ---
+# Inputs:
+#   ISSUES[]         — array of all issue numbers in the DAG
+#   PREDECESSORS[N]  — space-separated list of predecessor issue numbers for issue N
+
+# Step 1: Compute in-degree for each issue
+declare -A IN_DEGREE
+for NUM in "${ISSUES[@]}"; do
+  IN_DEGREE[$NUM]=0
+done
+for NUM in "${ISSUES[@]}"; do
+  for PRED in ${PREDECESSORS[$NUM]:-}; do
+    IN_DEGREE[$NUM]=$(( ${IN_DEGREE[$NUM]:-0} + 1 ))
+  done
+done
+
+# Step 2: Seed the queue with zero-in-degree issues (no predecessors)
+KAHN_QUEUE=()
+for NUM in "${ISSUES[@]}"; do
+  [ "${IN_DEGREE[$NUM]}" -eq 0 ] && KAHN_QUEUE+=("$NUM")
+done
+
+# Step 3: Process queue — reduce successor in-degrees, enqueue newly freed issues
+PROCESSED_COUNT=0
+PROCESSED_ORDER=()
+while [ "${#KAHN_QUEUE[@]}" -gt 0 ]; do
+  # Dequeue
+  CURRENT="${KAHN_QUEUE[0]}"
+  KAHN_QUEUE=("${KAHN_QUEUE[@]:1}")
+  PROCESSED_ORDER+=("$CURRENT")
+  PROCESSED_COUNT=$(( PROCESSED_COUNT + 1 ))
+
+  # Reduce in-degree of all issues that depend on CURRENT (i.e., CURRENT is in their PREDECESSORS)
+  for SUCCESSOR in "${ISSUES[@]}"; do
+    for PRED in ${PREDECESSORS[$SUCCESSOR]:-}; do
+      if [ "$PRED" = "$CURRENT" ]; then
+        IN_DEGREE[$SUCCESSOR]=$(( ${IN_DEGREE[$SUCCESSOR]} - 1 ))
+        [ "${IN_DEGREE[$SUCCESSOR]}" -eq 0 ] && KAHN_QUEUE+=("$SUCCESSOR")
+      fi
+    done
+  done
+done
+
+# Step 4: Any issue not processed has in-degree > 0 — part of a cycle
+CYCLE_ISSUES=()
+EXCLUDED_CYCLE=()
+for NUM in "${ISSUES[@]}"; do
+  FOUND=false
+  for P in "${PROCESSED_ORDER[@]}"; do [ "$P" = "$NUM" ] && FOUND=true && break; done
+  [ "$FOUND" = "false" ] && CYCLE_ISSUES+=("$NUM")
+done
+
+# Step 5: Handle cycles
+if [ "${#CYCLE_ISSUES[@]}" -gt 0 ]; then
+  echo "CYCLE DETECTED in dependency graph — the following issues form a circular dependency:"
+  for C in "${CYCLE_ISSUES[@]}"; do
+    echo "  #${C}: predecessors=[${PREDECESSORS[$C]}]"
+    # Label each cyclic issue needs-human
+    gh issue edit "$C" -R {GH_REPO} --add-label "needs-human" 2>/dev/null || true
+    gh issue comment "$C" -R {GH_REPO} --body "**Cycle detected by /orchestrate**: This issue is part of a circular dependency chain involving issues: ${CYCLE_ISSUES[*]/#/#}. The orchestrator cannot dispatch it automatically. Please fix the \`Depends on\` declarations so that no cycle exists, then re-run /orchestrate." 2>/dev/null || true
+    # Remove from DAG — store in EXCLUDED_CYCLE for Step 3E reporting
+    EXCLUDED_CYCLE+=("$C")
+    # Remove from ISSUES array for all downstream processing
+    # Use exact-match filter loop — pattern substitution (${array[@]/pattern}) leaves blank
+    # slots and corrupts partial matches (e.g., removing 100 changes 1000 to 0).
+    NEW_ISSUES=()
+    for I in "${ISSUES[@]}"; do
+      [ "$I" != "$C" ] && NEW_ISSUES+=("$I")
+    done
+    ISSUES=("${NEW_ISSUES[@]}")
+  done
+  echo ""
+  echo "These issues have been labeled needs-human and excluded from the DAG."
+  echo "Fix their dependency declarations and re-run /orchestrate."
+else
+  echo "DAG cycle check: PASS — no cycles detected. Proceeding with ${#PROCESSED_ORDER[@]} issues."
+fi
+
+# Guard: if all issues were cyclic, ISSUES[] is now empty — abort before presenting an empty plan
+if [ "${#ISSUES[@]}" -eq 0 ]; then
+  echo ""
+  echo "ERROR: All issues in this batch form circular dependencies and have been excluded."
+  echo "Every issue has been labeled needs-human."
+  echo "Fix the Depends on / Blocked by declarations so no cycle exists, then re-run /orchestrate."
+  exit 1
+fi
+# --- End Step 3D.5 ---
+```
+
+**After this step**:
+- `ISSUES[]` contains only acyclic issues — safe to dispatch
+- `EXCLUDED_CYCLE[]` contains cyclic issue numbers — reported in Step 3E, never dispatched
+- If `EXCLUDED_CYCLE` is non-empty, report it clearly in the Step 3E plan before asking for user confirmation
+- If `ISSUES[]` is empty after cycle exclusion (all issues were cyclic), the guard above aborts with `exit 1` — Step 3E is never reached with an empty plan <!-- Added: forge#1110 -->
+
 ### Step 3E: Present the plan to the user
 
 ```
@@ -503,6 +605,18 @@ Initial dispatch: #2633, #2636, #2645, #2646 (all ready — launched simultaneou
 
 **Excluded** (already in progress / ineligible):
 - #{X} — {reason}
+
+{IF EXCLUDED_CYCLE is non-empty:}
+### ⚠ Circular Dependencies Detected — Manual Fix Required
+
+The following issues form a circular dependency chain and **cannot be dispatched** until the cycle is resolved:
+
+| Issue | Depends On | Problem |
+|-------|------------|---------|
+{rows: each EXCLUDED_CYCLE issue, its predecessor list, "mutual dependency — forms cycle with #{other}"}
+
+**Action required**: Edit each issue's body to remove or correct the `Depends on` / `Blocked by` declarations so no cycle exists. Each issue has been labeled `needs-human`. After fixing, re-run `/orchestrate` to dispatch them.
+{END IF}
 
 Proceed? (yes / adjust / pick specific issues)
 ```
@@ -648,6 +762,14 @@ Before building agent prompts, run `classify-lane.sh` for every issue in the cur
 declare -A ISSUE_LANE
 declare -A ISSUE_PR_BASE
 
+# Batch-level accumulators for review-finding cascade control (Step 4C) and
+# Completion Sweep (Step 4F). Declared here so they persist across ALL agent
+# completions — Step 4C runs per-agent and must NOT re-initialize these.
+DEFERRED_FINDINGS=()
+QUEUED_FINDINGS=()
+declare -A DEFERRED_REASONS
+declare -A AGENT_ISSUE_MAP
+
 for NUM in {ready_issue_numbers}; do
   PR_BASE=$(bash ~/.claude/scripts/classify-lane.sh "$NUM" -R {GH_REPO}) || {
     echo "ERROR: classify-lane.sh failed for #$NUM — adding needs-human label and skipping" >&2
@@ -758,6 +880,15 @@ fi
 
 If `GIST_CONTEXT` is empty (no parent investigation or milestone index found), the variable resolves to a blank line in the template — no impact on the agent prompt. <!-- Updated: forge#341 -->
 
+**Capture agent IDs after the batch spawn (MANDATORY)**: Each `Agent(...)` call returns an agent ID. Store each returned ID in `AGENT_ISSUE_MAP` keyed by issue number. This map is the only way to resume a stalled agent by ID in Steps 4B and 4B.5:
+
+```
+# After the single-message batch spawn, capture each returned ID:
+AGENT_ISSUE_MAP[{NUMBER}] = <agent_id returned by Agent()>
+```
+
+`AGENT_ISSUE_MAP` starts empty and accumulates entries as agents are spawned. For parallel dispatch (all Agent() calls in one message), capture the returned IDs from the batch response — one entry per issue — before entering Step 4B's monitoring loop. Without this capture, `resume=` calls in Steps 4B and 4B.5 will have no agent ID to reference and the resume will fail. <!-- Added: forge#1083 -->
+
 **Launch all ready agents simultaneously** by putting multiple Agent tool calls in a single message. Use `run_in_background=true` so they execute in parallel.
 
 ### Step 4B: Monitor completions and dispatch newly ready issues
@@ -798,7 +929,7 @@ done
 2. **If the issue is NOT in a terminal state** (`workflow:merged`, `workflow:invalid`, or `needs-human`), the agent stalled mid-pipeline. **Resume it immediately**:
    ```
    Agent(
-     resume="{AGENT_ID}",
+     resume=AGENT_ISSUE_MAP[{NUMBER}],
      description="Resume #{NUMBER} pipeline",
      run_in_background=true,
      prompt="The previous /work-on invocation stopped before completing the full pipeline. The issue is currently at {CURRENT_WORKFLOW_STATE}. Continue — invoke Skill(skill='work-on', args='{NUMBER}') to resume the routing loop from the current state. /work-on will re-read GitHub state and pick up where it left off."
@@ -806,7 +937,7 @@ done
    ```
    **Resume ALL stalled agents in a single message** (parallel resume). Do not wait between resumes.
 
-3. **Track resume cycles per agent.** If an agent has been resumed 3+ times and still hasn't reached a terminal state, report it as a failure — do not resume again.
+3. **Track resume cycles per agent.** If an agent has been resumed 2+ times and still hasn't reached a terminal state, report it as a failure — do not resume again.
 
 4. **Record completed results**: Success (PR merged), Invalid (issue closed), Blocked (needs human), or Error
 
@@ -835,7 +966,7 @@ done
 
 9. **Run staging integrity check** (from Step 4A-pre) if the completed agent merged a PR targeting staging.
 
-**Termination condition**: All issues in the DAG are in a terminal state (merged, invalid, needs-human, or skipped due to dependency failure). When this condition is met, proceed to Phase 5.
+**Termination condition**: All issues in the DAG are in a terminal state (merged, invalid, needs-human, or skipped due to dependency failure). When this condition is met, check whether deferred review-spawned findings exist (accumulated in `DEFERRED_FINDINGS` during Step 4C). If deferred findings exist → proceed to Step 4F (Completion Sweep). If no deferred findings → proceed to Phase 5.
 
 **Anti-pattern — DO NOT DO THIS:**
 - `sleep 60/120/180/300` loops to check status — you will be notified automatically
@@ -921,7 +1052,7 @@ Issue #${NUM} has been auto-resumed ${STALL_COUNT} times without reaching a term
 done
 
 # Launch all stall resumes in parallel (single message — same rule as Step 4B)
-# For each NUM in $STALL_RESUME_LIST, call Agent(resume="{AGENT_ID}", run_in_background=true, ...)
+# For each NUM in $STALL_RESUME_LIST, call Agent(resume=AGENT_ISSUE_MAP[NUM], run_in_background=true, ...)
 ```
 
 **Resume all stalled agents in a single message** (parallel). Use the same `Agent(resume=...)` pattern as Step 4B — do not wait between individual resumes.
@@ -989,6 +1120,8 @@ ALL_BATCH_FILES=$(echo "$ALL_BATCH_FILES" | sort -u | grep -v '^$')
 
 ```bash
 # For each finding, check its priority label and generation
+# NOTE: DEFERRED_FINDINGS, QUEUED_FINDINGS, and DEFERRED_REASONS are declared at
+# batch scope in Step 4A.pre — do NOT re-initialize them here (Step 4C runs per-agent).
 for FINDING_NUM in {spawned_finding_numbers}; do
   FINDING_DATA=$(gh issue view $FINDING_NUM -R {GH_REPO} --json labels,title,body \
     --jq '{labels: [.labels[].name], title: .title, body: .body}')
@@ -1022,6 +1155,7 @@ for FINDING_NUM in {spawned_finding_numbers}; do
 
   if [ "$DEFER" = "true" ]; then
     DEFERRED_FINDINGS+=($FINDING_NUM)
+    DEFERRED_REASONS[$FINDING_NUM]="$DEFER_REASON"
     echo "Deferred #${FINDING_NUM}: $DEFER_REASON"
   else
     QUEUED_FINDINGS+=($FINDING_NUM)
@@ -1043,7 +1177,7 @@ done
 
 **For deferred findings:**
 
-They remain open in GitHub — they will be picked up by future `/orchestrate` or `/work-on` runs. Log them in the final batch summary under "deferred" so they are visible. Do NOT close or label them — leave them for the next pipeline pass.
+Track them in `DEFERRED_FINDINGS` for re-evaluation in Step 4F (Completion Sweep) after the DAG drains. Do NOT close or label them yet — the sweep will determine their final disposition.
 
 **If no review-finding issues were spawned:** Continue monitoring for the next agent completion.
 
@@ -1191,6 +1325,215 @@ If an agent reports failure or error:
 
 **Do NOT retry failed agents automatically.** Report the failure and let the user decide.
 
+### Step 4F: Completion Sweep (deferred review-spawned findings) <!-- Added: forge#1105 -->
+
+**When to run**: After all DAG issues reach terminal state AND `DEFERRED_FINDINGS` is non-empty. Skip if no findings were deferred during this batch.
+
+**WHY THIS EXISTS**: Deferred findings accumulate during the batch because of file-overlap and cascade-control heuristics (Step 4C). But once the DAG drains, the conditions that caused deferral often no longer apply — completed issues no longer occupy files, so same-file overlap vanishes. Without this sweep, deferred findings silently pile up across runs and never get resolved.
+
+**Step 4F.1: Classify deferred findings into permanent vs re-evaluable**
+
+```bash
+PERMANENT_DEFERRED=()
+SWEEP_CANDIDATES=()
+
+for FINDING_NUM in "${DEFERRED_FINDINGS[@]}"; do
+  DEFER_REASON="${DEFERRED_REASONS[$FINDING_NUM]}"
+
+  # Generation >= 2 deferrals are PERMANENT — unbounded cascade prevention
+  if echo "$DEFER_REASON" | grep -qi "generation"; then
+    PERMANENT_DEFERRED+=($FINDING_NUM)
+  else
+    # All other deferrals (comment/typo, P3 same-file) are re-evaluable
+    SWEEP_CANDIDATES+=($FINDING_NUM)
+  fi
+done
+
+echo "Completion sweep: ${#SWEEP_CANDIDATES[@]} re-evaluable, ${#PERMANENT_DEFERRED[@]} permanent"
+```
+
+**Step 4F.2: Re-evaluate sweep candidates**
+
+Re-run the Step 4C heuristics against the now-empty DAG. Since all original batch issues are in terminal state, the `ALL_BATCH_FILES` list for file-overlap detection is empty — P3 same-file deferrals will now pass.
+
+```bash
+SWEEP_EXECUTE=()
+SWEEP_STILL_DEFERRED=()
+
+for FINDING_NUM in "${SWEEP_CANDIDATES[@]}"; do
+  FINDING_DATA=$(gh issue view $FINDING_NUM -R {GH_REPO} --json labels,title,body,state \
+    --jq '{labels: [.labels[].name], title: .title, body: .body, state: .state}')
+
+  # Skip if already closed (resolved by another process)
+  STATE=$(echo "$FINDING_DATA" | jq -r '.state')
+  [ "$STATE" = "CLOSED" ] && continue
+
+  PRIORITY=$(echo "$FINDING_DATA" | jq -r '.labels[] | select(startswith("priority:P")) | ltrimstr("priority:")' | head -1)
+  TITLE=$(echo "$FINDING_DATA" | jq -r '.title')
+
+  # Re-apply heuristics against the drained DAG (no active batch files)
+  # Comment/typo heuristic still applies — these are cosmetic regardless of DAG state
+  if echo "$TITLE" | grep -qi "comment\|typo"; then
+    SWEEP_STILL_DEFERRED+=($FINDING_NUM)
+    echo "Sweep: #${FINDING_NUM} still deferred (comment/typo — cosmetic)"
+  else
+    # P3 same-file overlap no longer applies (DAG is drained, no active files)
+    # All other findings are safe to execute
+    SWEEP_EXECUTE+=($FINDING_NUM)
+    echo "Sweep: #${FINDING_NUM} cleared for execution (file overlap resolved)"
+  fi
+done
+```
+
+**Step 4F.3: Dispatch cleared findings**
+
+For each finding in `SWEEP_EXECUTE`, add it to a fresh sweep DAG and dispatch using the same Steps 4A.pre.0, 4A.pre, and 4A logic. Run file-overlap detection between the swept findings themselves (they may conflict with each other).
+
+**MANDATORY**: Use the full Step 4A agent template verbatim for each swept finding. Do NOT use a bare `prompt="Run /work-on N"` — that bypasses the label-state loop contract, source branch detection, and all pipeline enforcement rules. Swept findings are always `review-finding` issues that require source branch detection to route correctly.
+
+**Step 4F.3.pre: Classify lane for each sweep finding (MANDATORY before dispatching)**
+
+Run `classify-lane.sh` per finding — same pattern as Step 4A.pre:
+
+```bash
+declare -A SWEEP_LANE
+declare -A SWEEP_PR_BASE
+
+for FINDING_NUM in "${SWEEP_EXECUTE[@]}"; do
+  SWEEP_BASE=$(bash ~/.claude/scripts/classify-lane.sh "$FINDING_NUM" -R {GH_REPO}) || {
+    echo "ERROR: classify-lane.sh failed for #$FINDING_NUM — adding needs-human and skipping" >&2
+    gh issue edit "$FINDING_NUM" -R {GH_REPO} --add-label "needs-human" 2>/dev/null || true
+    continue
+  }
+  if [ "$SWEEP_BASE" = "staging" ]; then
+    SWEEP_LANE[$FINDING_NUM]="fast-lane"
+  else
+    SWEEP_LANE[$FINDING_NUM]="feature-lane"
+  fi
+  SWEEP_PR_BASE[$FINDING_NUM]="$SWEEP_BASE"
+  echo "#$FINDING_NUM → lane=${SWEEP_LANE[$FINDING_NUM]}, PR_BASE=$SWEEP_BASE"
+done
+```
+
+**Step 4F.3.dispatch: Dispatch with full Step 4A template**
+
+```bash
+if [ ${#SWEEP_EXECUTE[@]} -gt 0 ]; then
+  echo "Completion sweep: dispatching ${#SWEEP_EXECUTE[@]} cleared findings"
+
+  # Build sweep DAG — same conflict detection as Step 3C Layers 1-4
+  # but only among the swept findings (no original batch issues remain active)
+  # Dispatch ready findings, monitor completions using the same Step 4B loop
+  # This is a SINGLE pass — findings spawned during the sweep are NOT swept again
+  # (they follow the standard Step 4C triage: queued or deferred for next run)
+
+  # NOTE: Step 4A.pre.0 (milestone branch pre-creation) is intentionally skipped here.
+  # Swept findings are always review-finding issues that target an already-existing branch
+  # (staging or a milestone branch). The branch was created when the original batch ran —
+  # it always exists by the time the sweep runs.
+
+  for FINDING_NUM in "${SWEEP_EXECUTE[@]}"; do
+    # Skip any finding whose classify-lane call failed (needs-human already set above)
+    [ -z "${SWEEP_PR_BASE[$FINDING_NUM]:-}" ] && continue
+
+    FINDING_TITLE=$(gh issue view "$FINDING_NUM" -R {GH_REPO} --json title --jq '.title' 2>/dev/null || echo "")
+
+    # Build GIST_CONTEXT for sweep finding — same as Step 4A generation block
+    GIST_CONTEXT=""
+    PARENT_INV=$(gh issue view "$FINDING_NUM" -R {GH_REPO} --json body --jq '.body' \
+      | grep -oP '(?i)parent[: ]*#\K\d+|spawned from[: ]*#\K\d+' | head -1)
+
+    if [ -n "$PARENT_INV" ] && [ -n "${INVESTIGATION_GISTS[$PARENT_INV]:-}" ]; then
+      GIST_CONTEXT="
+**CONTEXT FROM PRIOR INVESTIGATION**: Investigation #${PARENT_INV} produced Knowledge Gist(s) with findings relevant to this issue:
+$(echo "${INVESTIGATION_GISTS[$PARENT_INV]}" | while IFS= read -r url; do echo "- ${url}"; done)
+Fetch the Gist content during the context-gathering phase for implementation guidance."
+    fi
+
+    if [ -n "$MILESTONE_INDEX_URL" ]; then
+      GIST_CONTEXT="${GIST_CONTEXT}
+
+**MILESTONE KNOWLEDGE INDEX**: All investigation findings for this milestone are aggregated in a single index Gist:
+- ${MILESTONE_INDEX_URL}
+The context-gathering phase can fetch this index to discover all investigation Gists for the milestone."
+    fi
+
+    # Use the full Step 4A template verbatim — copied here so sweep agents receive
+    # the complete pipeline contract. Keep in sync with Step 4A when the template changes.
+    Agent(
+      subagent_type="general-purpose",
+      model="sonnet",
+      description="Work on {PROJECT_PREFIX}#${FINDING_NUM}",
+      run_in_background=true,
+      prompt="You are working on GitHub issue #${FINDING_NUM} for the {PROJECT_NAME} project.
+
+**Project**: {PROJECT_NAME}
+**Repository**: {GH_REPO}
+**Repo path**: {REPO_PATH}
+
+**YOUR MISSION**: Invoke \`/work-on\` via the Skill tool and let it run to completion. \`/work-on\` is a self-contained routing loop that handles the ENTIRE pipeline: investigate → build (context → architect → implement → validate) → review (push → PR → /review-pr --auto-merge) → close (project board → trajectory log → worktree cleanup). Do NOT intervene, compensate, or manually close issues — \`/work-on\` handles everything including issue closure and label updates in its close phase.
+
+**CRITICAL — DO NOT STOP EARLY**: /work-on runs as a multi-phase routing loop. Each phase (investigate, build, review, close) returns an intermediate result — these are NOT completion signals. You are NOT done until the issue reaches a terminal state: \`workflow:merged\`, \`workflow:invalid\`, or \`needs-human\`. If /work-on returns after only one phase (e.g., investigation), you MUST invoke it again immediately — it will re-read GitHub state and continue to the next phase. Keep invoking /work-on until it reaches a terminal state. Never output 'done' or stop after an intermediate result.
+
+**HOW REVIEW FINDINGS WORK**: /review-pr may create GitHub issues (with \`review-finding\` label) for findings it discovers. These are NOT blockers — they are separate work items that will go through their own /work-on pipeline later. The original PR should ALWAYS merge after review. The only exception is build errors (code doesn't compile) — those must be fixed before merging.
+
+**IMPORTANT RULES**:
+- **MANDATORY**: You MUST use the Skill tool to invoke 'work-on' with args '${FINDING_NUM}'. Do NOT implement manually — /work-on handles the full pipeline including label state machine (workflow:investigating → workflow:building → workflow:in-review → workflow:merged), investigation reports, PR creation, and cleanup.
+  - For default repo issues: \`Skill(skill='work-on', args='${FINDING_NUM}')\`
+  - For satellite repo issues: \`Skill(skill='work-on', args='{SATELLITE_PREFIX}:${FINDING_NUM}')\` (prefix from forge.yaml → repos.satellites)
+- NEVER bypass /work-on with manual git/gh commands — the label updates and structured comments are critical for tracking
+- NEVER target \`main\` for PRs targeting the default repo. Use \`{STAGING_BRANCH}\` for fast-lane issues, or \`milestone/{slug}\` for milestone issues.
+- Satellite repos (MCP, n8n) have no staging branch — fast-lane PRs go to \`main\` for those.
+- If the issue is INVALID after investigation, close it with a comment explaining why
+- If you hit merge conflicts or blockers, post a comment on the issue and STOP — do not force anything
+- Do not interact with the user — you are running autonomously in the background
+- **NEVER ask the user questions** — you are a background agent. If review finds issues, auto-fix simple ones and proceed. For complex findings, merge anyway and create follow-up issues.
+
+**LABEL-STATE LOOP CONTRACT — enforce after EVERY Skill return**:
+After EVERY \`Skill(skill='work-on', ...)\` call returns, immediately check the issue's current workflow label:
+\`\`\`bash
+gh issue view ${FINDING_NUM} -R {GH_REPO} --json labels --jq '[.labels[].name | select(startswith(\"workflow:\"))]'
+\`\`\`
+**Terminal labels** (only these allow you to stop): \`workflow:merged\`, \`workflow:invalid\`
+**Terminal condition also**: \`needs-human\` label present OR issue state is \`closed\`
+If the label is NOT terminal (e.g., \`workflow:investigating\`, \`workflow:ready-to-build\`, \`workflow:building\`, \`workflow:in-review\`), invoke \`Skill(skill='work-on', args='${FINDING_NUM}')\` again immediately. The \`/work-on\` skill will re-read GitHub state and advance to the next phase. Do NOT output a summary, do NOT pause, do NOT ask for confirmation — just invoke it again.
+
+**CRITICAL — SOURCE BRANCH DETECTION**:
+- If the issue has the \`review-finding\` label, read the issue body for \`**Code branch**: \\\`{branch}\\\`\`
+- If found, that is the SOURCE_BRANCH — the code ONLY exists on that branch (e.g., \`staging\`), NOT on \`origin/main\`
+- Investigation MUST use \`git show origin/{SOURCE_BRANCH}:{filepath}\` to verify the code exists
+- Worktree MUST branch from \`origin/{SOURCE_BRANCH}\`, NOT \`origin/main\`
+- PR target is \`{SOURCE_BRANCH}\` (the fix goes back to where the code lives)
+
+**LANE**: ${SWEEP_LANE[$FINDING_NUM]} (PR target: ${SWEEP_PR_BASE[$FINDING_NUM]})
+**Issue title**: ${FINDING_TITLE}
+${GIST_CONTEXT}
+"
+    )
+  done
+
+  # Monitor sweep agents using the same Step 4B completion loop
+  # IMPORTANT: Findings spawned by sweep agents are NOT re-swept —
+  # they follow standard Step 4C triage to prevent recursive cascades
+fi
+```
+
+**Step 4F.4: Report sweep results**
+
+```
+Completion Sweep Results:
+  Dispatched: #{A}, #{B} (file overlap cleared after DAG drain)
+  Still deferred (cosmetic): #{C} (comment/typo)
+  Permanently deferred (gen2): #{D} (generation >= 2 cascade cap)
+```
+
+**After sweep agents complete** (or if no findings were dispatched): proceed to Phase 5.
+
+**Anti-patterns — DO NOT DO THIS:**
+- Re-sweeping findings spawned during the sweep itself — this creates unbounded recursion. Sweep is a single pass.
+- Overriding generation >= 2 deferrals — the cascade cap is absolute.
+- Skipping the sweep because "there are only a few" deferred findings — even one deferred finding represents unresolved work.
+
 ---
 
 ## Phase 5: Post-Batch Cleanup
@@ -1278,14 +1621,28 @@ Aggregate into the batch-level analytics for Step 6B.
 {IF review findings were created during any agent run:}
 | # | Finding | Source Issue | Source PR | Status |
 |---|---------|-------------|-----------|--------|
-| #{F1} | {title} | #{A} | PR #{PR} | ✓ Merged (in-batch) / ⏳ Open (deferred) |
+| #{F1} | {title} | #{A} | PR #{PR} | ✓ Merged (in-batch) / ✓ Swept (completion sweep) / ⏳ Deferred (cosmetic) / ⛔ Deferred (gen2 cascade cap) |
 
 {ELSE: "No review findings created during this batch."}
 
+### Completion Sweep <!-- Added: forge#1105 -->
+- **Re-evaluated**: {N} deferred findings re-checked after DAG drain
+- **Dispatched**: {N} findings cleared and executed (file overlap resolved)
+- **Still deferred (cosmetic)**: {N} comment/typo findings (low-value, safe to leave)
+- **Permanently deferred (gen2)**: {N} generation >= 2 findings (cascade cap — requires manual `/work-on`)
+
+{IF permanently deferred > 0:}
+**Action required**: The following findings were permanently deferred due to the generation >= 2 cascade cap. They will NOT be picked up automatically — run `/work-on #{N}` manually or include them in the next `/orchestrate` batch:
+{list of permanently deferred issue numbers and titles}
+
+{IF cosmetic deferred > 0:}
+**Low-priority leftovers**: The following cosmetic findings remain open. They will be picked up by future runs or can be batched with `/orchestrate #{N1} #{N2}`:
+{list of cosmetic deferred issue numbers and titles}
+
 ### Summary
 - **Investigations**: {N} completed, spawned {M} new issues
-- **Review findings**: {N} spawned, {M} resolved in-batch, {K} deferred
-- **Succeeded**: {N} issues resolved (implementation)
+- **Review findings**: {N} spawned, {M} resolved in-batch, {K} swept, {J} deferred (cosmetic), {L} deferred (gen2)
+- **Succeeded**: {N} issues resolved (implementation + sweep)
 - **Failed**: {N} issues need attention
 - **Skipped**: {N} issues (dependency failures)
 

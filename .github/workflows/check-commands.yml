@@ -5,6 +5,17 @@ on:
     paths:
       - 'commands/**'
       - 'scripts/check-native-conflicts.sh'
+  push:
+    branches:
+      - staging
+      - main
+    paths:
+      - 'commands/**'
+      - 'scripts/check-native-conflicts.sh'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.sha }}
+  cancel-in-progress: true
 
 jobs:
   check-native-conflicts:
