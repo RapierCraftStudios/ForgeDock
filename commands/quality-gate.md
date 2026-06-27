@@ -883,8 +883,9 @@ if [ -n "$TOOL_FILES" ]; then
                     CI_MISSING="$CI_MISSING nginx"
                 ;;
             k8s/*|*.yaml)
-                grep -rlE "kubectl.*--dry-run|kubeval|kustomize.*build|helm.*lint" "$WORKFLOW_DIR" 2>/dev/null | grep -q . || \
-                    echo "k8s" | grep -qF "$(echo $f | grep -oE 'k8s/')" && CI_MISSING="$CI_MISSING kubernetes"
+                if ! grep -rlE "kubectl.*--dry-run|kubeval|kustomize.*build|helm.*lint" "$WORKFLOW_DIR" 2>/dev/null | grep -q .; then
+                    echo "$f" | grep -qE '^k8s/' && CI_MISSING="$CI_MISSING kubernetes"
+                fi
                 ;;
             terraform/*)
                 grep -rlE "terraform.*validate|terraform.*plan|tflint" "$WORKFLOW_DIR" 2>/dev/null | grep -q . || \
