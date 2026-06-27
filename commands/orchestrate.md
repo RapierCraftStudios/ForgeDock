@@ -1358,7 +1358,7 @@ for FINDING_NUM in "${SWEEP_CANDIDATES[@]}"; do
   STATE=$(echo "$FINDING_DATA" | jq -r '.state')
   [ "$STATE" = "CLOSED" ] && continue
 
-  PRIORITY=$(echo "$FINDING_DATA" | jq -r '.labels[] | select(startswith("P")) | .' | head -1)
+  PRIORITY=$(echo "$FINDING_DATA" | jq -r '.labels[] | select(startswith("priority:P")) | ltrimstr("priority:")' | head -1)
   TITLE=$(echo "$FINDING_DATA" | jq -r '.title')
 
   # Re-apply heuristics against the drained DAG (no active batch files)
