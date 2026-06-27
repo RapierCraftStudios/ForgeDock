@@ -28,7 +28,7 @@ Show HN: ForgeDock – Open-source pipeline that turns Claude Code into a determ
 
 **Option B** (problem-first):
 ```
-Show HN: ForgeDock – Structured autonomous dev pipeline using GitHub as a knowledge graph
+Show HN: ForgeDock – GitHub as institutional memory for AI coding agents
 ```
 
 **Option C** (concise):
