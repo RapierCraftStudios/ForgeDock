@@ -537,6 +537,15 @@ if [ "${#CYCLE_ISSUES[@]}" -gt 0 ]; then
 else
   echo "DAG cycle check: PASS — no cycles detected. Proceeding with ${#PROCESSED_ORDER[@]} issues."
 fi
+
+# Guard: if all issues were cyclic, ISSUES[] is now empty — abort before presenting an empty plan
+if [ "${#ISSUES[@]}" -eq 0 ]; then
+  echo ""
+  echo "ERROR: All issues in this batch form circular dependencies and have been excluded."
+  echo "Every issue has been labeled needs-human."
+  echo "Fix the Depends on / Blocked by declarations so no cycle exists, then re-run /orchestrate."
+  exit 1
+fi
 # --- End Step 3D.5 ---
 ```
 
@@ -544,6 +553,7 @@ fi
 - `ISSUES[]` contains only acyclic issues — safe to dispatch
 - `EXCLUDED_CYCLE[]` contains cyclic issue numbers — reported in Step 3E, never dispatched
 - If `EXCLUDED_CYCLE` is non-empty, report it clearly in the Step 3E plan before asking for user confirmation
+- If `ISSUES[]` is empty after cycle exclusion (all issues were cyclic), the guard above aborts with `exit 1` — Step 3E is never reached with an empty plan <!-- Added: forge#1110 -->
 
 ### Step 3E: Present the plan to the user
 
