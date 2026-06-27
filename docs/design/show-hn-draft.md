@@ -1,9 +1,10 @@
 # Show HN Draft
 
 <!-- Updated by #1092: messaging angles research (2026-06-25) -->
+<!-- Updated by #1099: context-rot pain framing (2026-06-27) -->
 <!-- Research: "LLM Wiki" vocabulary = 17M views / 5K stars (Karpathy gist, April 2026).
-     "Agent memory" is dominant pain framing (Mem0 48K stars, SO survey: 66% cite context as #1 frustration).
-     Lead with memory pain; use LLM Wiki vocabulary as the HN title hook. Full research: docs/design/messaging-angles-research.md -->
+     "Context rot" is now mainstream community vocabulary (MindStudio, Augment Code, Stack Overflow, 2025-2026).
+     Lead with context rot pain; use LLM Wiki vocabulary as the HN title hook. Full research: docs/design/messaging-angles-research.md -->
 
 ## Title (choose one)
 
@@ -46,11 +47,13 @@ https://github.com/RapierCraftStudios/ForgeDock
 
 ## Maker Comment (post immediately after submission)
 
-Hi HN, I built ForgeDock because AI coding agents have a memory problem.
+Hi HN. AI coding agents suffer from context rot: the gradual degradation of output quality as context fills with noise, stale file contents, and conventions re-explained from scratch every session. Every context reset, the agent forgets what it investigated, what decisions it made, what it already tried. You end up re-explaining your codebase every time.
 
-Every time Claude Code's context resets, you lose everything — what it investigated, what decisions it made, what it already tried. You end up re-explaining your codebase every session. The agent is a goldfish.
+Most teams try to fight context rot with config files — CLAUDE.md, AGENTS.md, .cursorrules, Copilot instructions, Kiro steering. Five files, five formats, five things to keep in sync, and the agent still can't reconstruct what happened in the last PR.
 
-ForgeDock solves this by turning GitHub itself into the agent's persistent wiki. When the pipeline runs on an issue, each stage (investigate, build, review, merge) posts a machine-readable FORGE: annotation to the issue/PR. Downstream stages read what upstream stages wrote. When context compacts, the agent runs `gh issue view` and reconstructs full state from GitHub alone — no external memory layer, no proprietary database, no vendor lock-in.
+ForgeDock takes a different approach: it turns GitHub itself into the agent's persistent memory. When the pipeline runs on an issue, each stage (investigate, build, review, merge) posts a machine-readable FORGE: annotation to the issue/PR. Downstream stages read what upstream stages wrote. When context compacts, the agent runs `gh issue view` and reconstructs full state from GitHub alone — no external memory layer, no proprietary database, no vendor lock-in.
+
+Unlike DeepWiki (which generates a documentation snapshot of your codebase once), ForgeDock writes structured annotations during each pipeline execution — so context reflects the current state of every open issue and in-flight decision, not a snapshot that goes stale.
 
 It's the LLM Wiki pattern (Karpathy's April 2026 gist), but applied to your entire development pipeline: issues are the wiki entries, FORGE: annotations are the structured knowledge, and GitHub's API is the query interface.
 
@@ -79,4 +82,5 @@ I'm a solo developer building this to solve my own problems. Happy to answer que
 - **Tone**: Technical, honest, no marketing language
 - **If asked about monetization**: "Open-core model — the pipeline is AGPL and always free. Planning a commercial dashboard for pipeline observability."
 - **If compared to Devin**: "Devin is a cloud service; ForgeDock runs locally with your own API key. Different trade-offs — Devin is turnkey, ForgeDock gives you full control and traceability."
+- **If compared to DeepWiki**: "DeepWiki generates a documentation snapshot of your repo. ForgeDock writes structured annotations during each pipeline run — context stays current with your actual work, not a snapshot."
 - **If asked about scale**: Be honest about current adoption. Don't inflate numbers.
