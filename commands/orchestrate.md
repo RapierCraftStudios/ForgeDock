@@ -505,6 +505,7 @@ done
 
 # Step 4: Any issue not processed has in-degree > 0 — part of a cycle
 CYCLE_ISSUES=()
+EXCLUDED_CYCLE=()
 for NUM in "${ISSUES[@]}"; do
   FOUND=false
   for P in "${PROCESSED_ORDER[@]}"; do [ "$P" = "$NUM" ] && FOUND=true && break; done
