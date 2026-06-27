@@ -23,6 +23,31 @@ jobs:
 
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0  # Full history needed for git describe --tags (path-guard check)
+
+      - name: Check if publishable files changed (workflow_dispatch only)
+        if: github.event_name == 'workflow_dispatch'
+        run: |
+          # workflow_dispatch has no paths: filter (GitHub limitation).
+          # Mirror the push trigger's path filter manually: skip publish if no
+          # relevant files changed since the last release tag.
+          LAST_TAG=$(git describe --tags --abbrev=0 2>/dev/null || echo "")
+          if [ -z "$LAST_TAG" ]; then
+            echo "No previous tag found — proceeding with publish"
+            echo "SKIP_PUBLISH=false" >> $GITHUB_ENV
+          else
+            CHANGED=$(git diff --name-only "$LAST_TAG"..HEAD -- \
+              commands/ bin/ docs/ scripts/ templates/ package.json 2>/dev/null || echo "")
+            if [ -z "$CHANGED" ]; then
+              echo "No publish-relevant files changed since $LAST_TAG — skipping spurious dispatch"
+              echo "SKIP_PUBLISH=true" >> $GITHUB_ENV
+            else
+              echo "Publish-relevant changes detected since $LAST_TAG:"
+              echo "$CHANGED"
+              echo "SKIP_PUBLISH=false" >> $GITHUB_ENV
+            fi
+          fi
 
       - name: Use Node.js 24
         uses: actions/setup-node@v4
@@ -37,6 +62,7 @@ jobs:
         run: npm test
 
       - name: Bump patch version
+        if: env.SKIP_PUBLISH != 'true'
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
