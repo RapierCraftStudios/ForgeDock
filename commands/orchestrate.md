@@ -941,7 +941,7 @@ done
 
 9. **Run staging integrity check** (from Step 4A-pre) if the completed agent merged a PR targeting staging.
 
-**Termination condition**: All issues in the DAG are in a terminal state (merged, invalid, needs-human, or skipped due to dependency failure). When this condition is met, proceed to Phase 5.
+**Termination condition**: All issues in the DAG are in a terminal state (merged, invalid, needs-human, or skipped due to dependency failure). When this condition is met, check whether deferred review-spawned findings exist (accumulated in `DEFERRED_FINDINGS` during Step 4C). If deferred findings exist → proceed to Step 4F (Completion Sweep). If no deferred findings → proceed to Phase 5.
 
 **Anti-pattern — DO NOT DO THIS:**
 - `sleep 60/120/180/300` loops to check status — you will be notified automatically
@@ -1128,6 +1128,7 @@ for FINDING_NUM in {spawned_finding_numbers}; do
 
   if [ "$DEFER" = "true" ]; then
     DEFERRED_FINDINGS+=($FINDING_NUM)
+    DEFERRED_REASONS[$FINDING_NUM]="$DEFER_REASON"
     echo "Deferred #${FINDING_NUM}: $DEFER_REASON"
   else
     QUEUED_FINDINGS+=($FINDING_NUM)
@@ -1149,7 +1150,7 @@ done
 
 **For deferred findings:**
 
-They remain open in GitHub — they will be picked up by future `/orchestrate` or `/work-on` runs. Log them in the final batch summary under "deferred" so they are visible. Do NOT close or label them — leave them for the next pipeline pass.
+Track them in `DEFERRED_FINDINGS` for re-evaluation in Step 4F (Completion Sweep) after the DAG drains. Do NOT close or label them yet — the sweep will determine their final disposition.
 
 **If no review-finding issues were spawned:** Continue monitoring for the next agent completion.
 
@@ -1297,6 +1298,109 @@ If an agent reports failure or error:
 
 **Do NOT retry failed agents automatically.** Report the failure and let the user decide.
 
+### Step 4F: Completion Sweep (deferred review-spawned findings) <!-- Added: forge#1105 -->
+
+**When to run**: After all DAG issues reach terminal state AND `DEFERRED_FINDINGS` is non-empty. Skip if no findings were deferred during this batch.
+
+**WHY THIS EXISTS**: Deferred findings accumulate during the batch because of file-overlap and cascade-control heuristics (Step 4C). But once the DAG drains, the conditions that caused deferral often no longer apply — completed issues no longer occupy files, so same-file overlap vanishes. Without this sweep, deferred findings silently pile up across runs and never get resolved.
+
+**Step 4F.1: Classify deferred findings into permanent vs re-evaluable**
+
+```bash
+PERMANENT_DEFERRED=()
+SWEEP_CANDIDATES=()
+
+for FINDING_NUM in "${DEFERRED_FINDINGS[@]}"; do
+  DEFER_REASON="${DEFERRED_REASONS[$FINDING_NUM]}"
+
+  # Generation >= 2 deferrals are PERMANENT — unbounded cascade prevention
+  if echo "$DEFER_REASON" | grep -qi "generation"; then
+    PERMANENT_DEFERRED+=($FINDING_NUM)
+  else
+    # All other deferrals (comment/typo, P3 same-file) are re-evaluable
+    SWEEP_CANDIDATES+=($FINDING_NUM)
+  fi
+done
+
+echo "Completion sweep: ${#SWEEP_CANDIDATES[@]} re-evaluable, ${#PERMANENT_DEFERRED[@]} permanent"
+```
+
+**Step 4F.2: Re-evaluate sweep candidates**
+
+Re-run the Step 4C heuristics against the now-empty DAG. Since all original batch issues are in terminal state, the `ALL_BATCH_FILES` list for file-overlap detection is empty — P3 same-file deferrals will now pass.
+
+```bash
+SWEEP_EXECUTE=()
+SWEEP_STILL_DEFERRED=()
+
+for FINDING_NUM in "${SWEEP_CANDIDATES[@]}"; do
+  FINDING_DATA=$(gh issue view $FINDING_NUM -R {GH_REPO} --json labels,title,body,state \
+    --jq '{labels: [.labels[].name], title: .title, body: .body, state: .state}')
+
+  # Skip if already closed (resolved by another process)
+  STATE=$(echo "$FINDING_DATA" | jq -r '.state')
+  [ "$STATE" = "CLOSED" ] && continue
+
+  PRIORITY=$(echo "$FINDING_DATA" | jq -r '.labels[] | select(startswith("P")) | .' | head -1)
+  TITLE=$(echo "$FINDING_DATA" | jq -r '.title')
+
+  # Re-apply heuristics against the drained DAG (no active batch files)
+  # Comment/typo heuristic still applies — these are cosmetic regardless of DAG state
+  if echo "$TITLE" | grep -qi "comment\|typo"; then
+    SWEEP_STILL_DEFERRED+=($FINDING_NUM)
+    echo "Sweep: #${FINDING_NUM} still deferred (comment/typo — cosmetic)"
+  else
+    # P3 same-file overlap no longer applies (DAG is drained, no active files)
+    # All other findings are safe to execute
+    SWEEP_EXECUTE+=($FINDING_NUM)
+    echo "Sweep: #${FINDING_NUM} cleared for execution (file overlap resolved)"
+  fi
+done
+```
+
+**Step 4F.3: Dispatch cleared findings**
+
+For each finding in `SWEEP_EXECUTE`, add it to a fresh sweep DAG and dispatch using the same Steps 4A.pre.0, 4A.pre, and 4A logic. Run file-overlap detection between the swept findings themselves (they may conflict with each other).
+
+```bash
+if [ ${#SWEEP_EXECUTE[@]} -gt 0 ]; then
+  echo "Completion sweep: dispatching ${#SWEEP_EXECUTE[@]} cleared findings"
+
+  # Build sweep DAG — same conflict detection as Step 3C Layers 1-4
+  # but only among the swept findings (no original batch issues remain active)
+  # Dispatch ready findings, monitor completions using the same Step 4B loop
+  # This is a SINGLE pass — findings spawned during the sweep are NOT swept again
+  # (they follow the standard Step 4C triage: queued or deferred for next run)
+
+  for FINDING_NUM in "${SWEEP_EXECUTE[@]}"; do
+    # Standard dispatch — same as Step 4A
+    Agent(subagent_type="general-purpose",
+      prompt="Run /work-on ${FINDING_NUM}",
+      run_in_background=true)
+  done
+
+  # Monitor sweep agents using the same Step 4B completion loop
+  # IMPORTANT: Findings spawned by sweep agents are NOT re-swept —
+  # they follow standard Step 4C triage to prevent recursive cascades
+fi
+```
+
+**Step 4F.4: Report sweep results**
+
+```
+Completion Sweep Results:
+  Dispatched: #{A}, #{B} (file overlap cleared after DAG drain)
+  Still deferred (cosmetic): #{C} (comment/typo)
+  Permanently deferred (gen2): #{D} (generation >= 2 cascade cap)
+```
+
+**After sweep agents complete** (or if no findings were dispatched): proceed to Phase 5.
+
+**Anti-patterns — DO NOT DO THIS:**
+- Re-sweeping findings spawned during the sweep itself — this creates unbounded recursion. Sweep is a single pass.
+- Overriding generation >= 2 deferrals — the cascade cap is absolute.
+- Skipping the sweep because "there are only a few" deferred findings — even one deferred finding represents unresolved work.
+
 ---
 
 ## Phase 5: Post-Batch Cleanup
@@ -1384,14 +1488,28 @@ Aggregate into the batch-level analytics for Step 6B.
 {IF review findings were created during any agent run:}
 | # | Finding | Source Issue | Source PR | Status |
 |---|---------|-------------|-----------|--------|
-| #{F1} | {title} | #{A} | PR #{PR} | ✓ Merged (in-batch) / ⏳ Open (deferred) |
+| #{F1} | {title} | #{A} | PR #{PR} | ✓ Merged (in-batch) / ✓ Swept (completion sweep) / ⏳ Deferred (cosmetic) / ⛔ Deferred (gen2 cascade cap) |
 
 {ELSE: "No review findings created during this batch."}
 
+### Completion Sweep <!-- Added: forge#1105 -->
+- **Re-evaluated**: {N} deferred findings re-checked after DAG drain
+- **Dispatched**: {N} findings cleared and executed (file overlap resolved)
+- **Still deferred (cosmetic)**: {N} comment/typo findings (low-value, safe to leave)
+- **Permanently deferred (gen2)**: {N} generation >= 2 findings (cascade cap — requires manual `/work-on`)
+
+{IF permanently deferred > 0:}
+**Action required**: The following findings were permanently deferred due to the generation >= 2 cascade cap. They will NOT be picked up automatically — run `/work-on #{N}` manually or include them in the next `/orchestrate` batch:
+{list of permanently deferred issue numbers and titles}
+
+{IF cosmetic deferred > 0:}
+**Low-priority leftovers**: The following cosmetic findings remain open. They will be picked up by future runs or can be batched with `/orchestrate #{N1} #{N2}`:
+{list of cosmetic deferred issue numbers and titles}
+
 ### Summary
 - **Investigations**: {N} completed, spawned {M} new issues
-- **Review findings**: {N} spawned, {M} resolved in-batch, {K} deferred
-- **Succeeded**: {N} issues resolved (implementation)
+- **Review findings**: {N} spawned, {M} resolved in-batch, {K} swept, {J} deferred (cosmetic), {L} deferred (gen2)
+- **Succeeded**: {N} issues resolved (implementation + sweep)
 - **Failed**: {N} issues need attention
 - **Skipped**: {N} issues (dependency failures)
 
