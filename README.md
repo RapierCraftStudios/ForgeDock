@@ -55,7 +55,7 @@ ForgeDock is **not another AI coding agent.** It's a set of prompt-engineered co
 | **Full-lifecycle automation** | `/work-on #42` — investigates the issue, architects a fix, builds it, runs quality gates, opens a PR, and reviews it. You click merge. |
 | **Persistent agent memory** | Structured `FORGE:` annotations on GitHub issues/PRs survive context resets and session boundaries. Agents never start blind. |
 | **9 specialist review agents** | Security, billing, database, concurrency, auth, frontend, API, performance, infrastructure — every PR gets domain-expert review. |
-| **Cross-issue knowledge graph** | Agent fixing issue #43 reads the investigation from #42 and applies the known pattern — no re-investigation. |
+| **Institutional memory that compounds** | Agent fixing issue #43 reads the investigation from #42 and applies the known pattern — no re-investigation. |
 | **Self-improving pipeline** | Review agents learn from past findings — recurring patterns automatically become new quality gate checks. |
 | **Parallel orchestration** | `/orchestrate` decomposes milestones into waves and runs `/work-on` on each in parallel. |
 
