@@ -1388,6 +1388,34 @@ done
 
 For each finding in `SWEEP_EXECUTE`, add it to a fresh sweep DAG and dispatch using the same Steps 4A.pre.0, 4A.pre, and 4A logic. Run file-overlap detection between the swept findings themselves (they may conflict with each other).
 
+**MANDATORY**: Use the full Step 4A agent template verbatim for each swept finding. Do NOT use a bare `prompt="Run /work-on N"` — that bypasses the label-state loop contract, source branch detection, and all pipeline enforcement rules. Swept findings are always `review-finding` issues that require source branch detection to route correctly.
+
+**Step 4F.3.pre: Classify lane for each sweep finding (MANDATORY before dispatching)**
+
+Run `classify-lane.sh` per finding — same pattern as Step 4A.pre:
+
+```bash
+declare -A SWEEP_LANE
+declare -A SWEEP_PR_BASE
+
+for FINDING_NUM in "${SWEEP_EXECUTE[@]}"; do
+  SWEEP_BASE=$(bash ~/.claude/scripts/classify-lane.sh "$FINDING_NUM" -R {GH_REPO}) || {
+    echo "ERROR: classify-lane.sh failed for #$FINDING_NUM — adding needs-human and skipping" >&2
+    gh issue edit "$FINDING_NUM" -R {GH_REPO} --add-label "needs-human" 2>/dev/null || true
+    continue
+  }
+  if [ "$SWEEP_BASE" = "staging" ]; then
+    SWEEP_LANE[$FINDING_NUM]="fast-lane"
+  else
+    SWEEP_LANE[$FINDING_NUM]="feature-lane"
+  fi
+  SWEEP_PR_BASE[$FINDING_NUM]="$SWEEP_BASE"
+  echo "#$FINDING_NUM → lane=${SWEEP_LANE[$FINDING_NUM]}, PR_BASE=$SWEEP_BASE"
+done
+```
+
+**Step 4F.3.dispatch: Dispatch with full Step 4A template**
+
 ```bash
 if [ ${#SWEEP_EXECUTE[@]} -gt 0 ]; then
   echo "Completion sweep: dispatching ${#SWEEP_EXECUTE[@]} cleared findings"
@@ -1398,11 +1426,68 @@ if [ ${#SWEEP_EXECUTE[@]} -gt 0 ]; then
   # This is a SINGLE pass — findings spawned during the sweep are NOT swept again
   # (they follow the standard Step 4C triage: queued or deferred for next run)
 
+  # NOTE: Step 4A.pre.0 (milestone branch pre-creation) is intentionally skipped here.
+  # Swept findings are always review-finding issues that target an already-existing branch
+  # (staging or a milestone branch). The branch was created when the original batch ran —
+  # it always exists by the time the sweep runs.
+
   for FINDING_NUM in "${SWEEP_EXECUTE[@]}"; do
-    # Standard dispatch — same as Step 4A
-    Agent(subagent_type="general-purpose",
-      prompt="Run /work-on ${FINDING_NUM}",
-      run_in_background=true)
+    # Skip any finding whose classify-lane call failed (needs-human already set above)
+    [ -z "${SWEEP_PR_BASE[$FINDING_NUM]:-}" ] && continue
+
+    FINDING_TITLE=$(gh issue view "$FINDING_NUM" -R {GH_REPO} --json title --jq '.title' 2>/dev/null || echo "")
+
+    # Use the full Step 4A template verbatim — copied here so sweep agents receive
+    # the complete pipeline contract. Keep in sync with Step 4A when the template changes.
+    Agent(
+      subagent_type="general-purpose",
+      model="sonnet",
+      description="Work on {PROJECT_PREFIX}#${FINDING_NUM}",
+      run_in_background=true,
+      prompt="You are working on GitHub issue #${FINDING_NUM} for the {PROJECT_NAME} project.
+
+**Project**: {PROJECT_NAME}
+**Repository**: {GH_REPO}
+**Repo path**: {REPO_PATH}
+
+**YOUR MISSION**: Invoke \`/work-on\` via the Skill tool and let it run to completion. \`/work-on\` is a self-contained routing loop that handles the ENTIRE pipeline: investigate → build (context → architect → implement → validate) → review (push → PR → /review-pr --auto-merge) → close (project board → trajectory log → worktree cleanup). Do NOT intervene, compensate, or manually close issues — \`/work-on\` handles everything including issue closure and label updates in its close phase.
+
+**CRITICAL — DO NOT STOP EARLY**: /work-on runs as a multi-phase routing loop. Each phase (investigate, build, review, close) returns an intermediate result — these are NOT completion signals. You are NOT done until the issue reaches a terminal state: \`workflow:merged\`, \`workflow:invalid\`, or \`needs-human\`. If /work-on returns after only one phase (e.g., investigation), you MUST invoke it again immediately — it will re-read GitHub state and continue to the next phase. Keep invoking /work-on until it reaches a terminal state. Never output 'done' or stop after an intermediate result.
+
+**HOW REVIEW FINDINGS WORK**: /review-pr may create GitHub issues (with \`review-finding\` label) for findings it discovers. These are NOT blockers — they are separate work items that will go through their own /work-on pipeline later. The original PR should ALWAYS merge after review. The only exception is build errors (code doesn't compile) — those must be fixed before merging.
+
+**IMPORTANT RULES**:
+- **MANDATORY**: You MUST use the Skill tool to invoke 'work-on' with args '${FINDING_NUM}'. Do NOT implement manually — /work-on handles the full pipeline including label state machine (workflow:investigating → workflow:building → workflow:in-review → workflow:merged), investigation reports, PR creation, and cleanup.
+  - For default repo issues: \`Skill(skill='work-on', args='${FINDING_NUM}')\`
+  - For satellite repo issues: \`Skill(skill='work-on', args='{SATELLITE_PREFIX}:${FINDING_NUM}')\` (prefix from forge.yaml → repos.satellites)
+- NEVER bypass /work-on with manual git/gh commands — the label updates and structured comments are critical for tracking
+- NEVER target \`main\` for PRs targeting the default repo. Use \`{STAGING_BRANCH}\` for fast-lane issues, or \`milestone/{slug}\` for milestone issues.
+- Satellite repos (MCP, n8n) have no staging branch — fast-lane PRs go to \`main\` for those.
+- If the issue is INVALID after investigation, close it with a comment explaining why
+- If you hit merge conflicts or blockers, post a comment on the issue and STOP — do not force anything
+- Do not interact with the user — you are running autonomously in the background
+- **NEVER ask the user questions** — you are a background agent. If review finds issues, auto-fix simple ones and proceed. For complex findings, merge anyway and create follow-up issues.
+
+**LABEL-STATE LOOP CONTRACT — enforce after EVERY Skill return**:
+After EVERY \`Skill(skill='work-on', ...)\` call returns, immediately check the issue's current workflow label:
+\`\`\`bash
+gh issue view ${FINDING_NUM} -R {GH_REPO} --json labels --jq '[.labels[].name | select(startswith(\"workflow:\"))]'
+\`\`\`
+**Terminal labels** (only these allow you to stop): \`workflow:merged\`, \`workflow:invalid\`
+**Terminal condition also**: \`needs-human\` label present OR issue state is \`closed\`
+If the label is NOT terminal (e.g., \`workflow:investigating\`, \`workflow:ready-to-build\`, \`workflow:building\`, \`workflow:in-review\`), invoke \`Skill(skill='work-on', args='${FINDING_NUM}')\` again immediately. The \`/work-on\` skill will re-read GitHub state and advance to the next phase. Do NOT output a summary, do NOT pause, do NOT ask for confirmation — just invoke it again.
+
+**CRITICAL — SOURCE BRANCH DETECTION**:
+- If the issue has the \`review-finding\` label, read the issue body for \`**Code branch**: \\\`{branch}\\\`\`
+- If found, that is the SOURCE_BRANCH — the code ONLY exists on that branch (e.g., \`staging\`), NOT on \`origin/main\`
+- Investigation MUST use \`git show origin/{SOURCE_BRANCH}:{filepath}\` to verify the code exists
+- Worktree MUST branch from \`origin/{SOURCE_BRANCH}\`, NOT \`origin/main\`
+- PR target is \`{SOURCE_BRANCH}\` (the fix goes back to where the code lives)
+
+**LANE**: ${SWEEP_LANE[$FINDING_NUM]} (PR target: ${SWEEP_PR_BASE[$FINDING_NUM]})
+**Issue title**: ${FINDING_TITLE}
+"
+    )
   done
 
   # Monitor sweep agents using the same Step 4B completion loop
