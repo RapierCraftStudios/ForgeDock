@@ -762,6 +762,13 @@ Before building agent prompts, run `classify-lane.sh` for every issue in the cur
 declare -A ISSUE_LANE
 declare -A ISSUE_PR_BASE
 
+# Batch-level accumulators for review-finding cascade control (Step 4C) and
+# Completion Sweep (Step 4F). Declared here so they persist across ALL agent
+# completions — Step 4C runs per-agent and must NOT re-initialize these.
+DEFERRED_FINDINGS=()
+QUEUED_FINDINGS=()
+declare -A DEFERRED_REASONS
+
 for NUM in {ready_issue_numbers}; do
   PR_BASE=$(bash ~/.claude/scripts/classify-lane.sh "$NUM" -R {GH_REPO}) || {
     echo "ERROR: classify-lane.sh failed for #$NUM — adding needs-human label and skipping" >&2
@@ -1112,8 +1119,8 @@ ALL_BATCH_FILES=$(echo "$ALL_BATCH_FILES" | sort -u | grep -v '^$')
 
 ```bash
 # For each finding, check its priority label and generation
-DEFERRED_FINDINGS=()
-declare -A DEFERRED_REASONS
+# NOTE: DEFERRED_FINDINGS, QUEUED_FINDINGS, and DEFERRED_REASONS are declared at
+# batch scope in Step 4A.pre — do NOT re-initialize them here (Step 4C runs per-agent).
 for FINDING_NUM in {spawned_finding_numbers}; do
   FINDING_DATA=$(gh issue view $FINDING_NUM -R {GH_REPO} --json labels,title,body \
     --jq '{labels: [.labels[].name], title: .title, body: .body}')
