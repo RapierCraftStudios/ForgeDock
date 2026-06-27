@@ -1112,6 +1112,8 @@ ALL_BATCH_FILES=$(echo "$ALL_BATCH_FILES" | sort -u | grep -v '^$')
 
 ```bash
 # For each finding, check its priority label and generation
+DEFERRED_FINDINGS=()
+declare -A DEFERRED_REASONS
 for FINDING_NUM in {spawned_finding_numbers}; do
   FINDING_DATA=$(gh issue view $FINDING_NUM -R {GH_REPO} --json labels,title,body \
     --jq '{labels: [.labels[].name], title: .title, body: .body}')
