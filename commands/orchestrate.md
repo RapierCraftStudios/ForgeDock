@@ -768,6 +768,7 @@ declare -A ISSUE_PR_BASE
 DEFERRED_FINDINGS=()
 QUEUED_FINDINGS=()
 declare -A DEFERRED_REASONS
+declare -A AGENT_ISSUE_MAP
 
 for NUM in {ready_issue_numbers}; do
   PR_BASE=$(bash ~/.claude/scripts/classify-lane.sh "$NUM" -R {GH_REPO}) || {
@@ -879,14 +880,14 @@ fi
 
 If `GIST_CONTEXT` is empty (no parent investigation or milestone index found), the variable resolves to a blank line in the template — no impact on the agent prompt. <!-- Updated: forge#341 -->
 
-**Capture agent IDs at spawn time (MANDATORY)**: Each `Agent(...)` call returns an agent ID. Store it in `AGENT_ISSUE_MAP` keyed by issue number immediately after the spawn. This map is the only way to resume a stalled agent by ID in Steps 4B and 4B.5:
+**Capture agent IDs after the batch spawn (MANDATORY)**: Each `Agent(...)` call returns an agent ID. Store each returned ID in `AGENT_ISSUE_MAP` keyed by issue number. This map is the only way to resume a stalled agent by ID in Steps 4B and 4B.5:
 
 ```
-# After each Agent() spawn, capture the returned ID:
+# After the single-message batch spawn, capture each returned ID:
 AGENT_ISSUE_MAP[{NUMBER}] = <agent_id returned by Agent()>
 ```
 
-`AGENT_ISSUE_MAP` starts empty and accumulates entries as agents are spawned. For multiple simultaneous spawns (parallel dispatch), capture each ID immediately after the corresponding spawn call before invoking the next one. Without this capture, `resume=` calls in Steps 4B and 4B.5 will have no agent ID to reference and the resume will fail. <!-- Added: forge#1083 -->
+`AGENT_ISSUE_MAP` starts empty and accumulates entries as agents are spawned. For parallel dispatch (all Agent() calls in one message), capture the returned IDs from the batch response — one entry per issue — before entering Step 4B's monitoring loop. Without this capture, `resume=` calls in Steps 4B and 4B.5 will have no agent ID to reference and the resume will fail. <!-- Added: forge#1083 -->
 
 **Launch all ready agents simultaneously** by putting multiple Agent tool calls in a single message. Use `run_in_background=true` so they execute in parallel.
 
