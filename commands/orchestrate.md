@@ -1438,6 +1438,26 @@ if [ ${#SWEEP_EXECUTE[@]} -gt 0 ]; then
 
     FINDING_TITLE=$(gh issue view "$FINDING_NUM" -R {GH_REPO} --json title --jq '.title' 2>/dev/null || echo "")
 
+    # Build GIST_CONTEXT for sweep finding — same as Step 4A generation block
+    GIST_CONTEXT=""
+    PARENT_INV=$(gh issue view "$FINDING_NUM" -R {GH_REPO} --json body --jq '.body' \
+      | grep -oP '(?i)parent[: ]*#\K\d+|spawned from[: ]*#\K\d+' | head -1)
+
+    if [ -n "$PARENT_INV" ] && [ -n "${INVESTIGATION_GISTS[$PARENT_INV]:-}" ]; then
+      GIST_CONTEXT="
+**CONTEXT FROM PRIOR INVESTIGATION**: Investigation #${PARENT_INV} produced Knowledge Gist(s) with findings relevant to this issue:
+$(echo "${INVESTIGATION_GISTS[$PARENT_INV]}" | while IFS= read -r url; do echo "- ${url}"; done)
+Fetch the Gist content during the context-gathering phase for implementation guidance."
+    fi
+
+    if [ -n "$MILESTONE_INDEX_URL" ]; then
+      GIST_CONTEXT="${GIST_CONTEXT}
+
+**MILESTONE KNOWLEDGE INDEX**: All investigation findings for this milestone are aggregated in a single index Gist:
+- ${MILESTONE_INDEX_URL}
+The context-gathering phase can fetch this index to discover all investigation Gists for the milestone."
+    fi
+
     # Use the full Step 4A template verbatim — copied here so sweep agents receive
     # the complete pipeline contract. Keep in sync with Step 4A when the template changes.
     Agent(
@@ -1487,6 +1507,7 @@ If the label is NOT terminal (e.g., \`workflow:investigating\`, \`workflow:ready
 
 **LANE**: ${SWEEP_LANE[$FINDING_NUM]} (PR target: ${SWEEP_PR_BASE[$FINDING_NUM]})
 **Issue title**: ${FINDING_TITLE}
+${GIST_CONTEXT}
 "
     )
   done
