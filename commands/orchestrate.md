@@ -1599,7 +1599,7 @@ CARDS=""
 for NUM in {all_completed_issue_numbers}; do
   CARD=$(gh api repos/{GH_REPO}/issues/${NUM}/comments \
     --jq '.[] | select(.body | contains("FORGE:CARD")) | .body' 2>/dev/null \
-    | grep -oP '(?<=<!-- FORGE:CARD ).*(?= -->)' | head -1)
+    | sed -n 's/.*<!-- FORGE:CARD \(.*\) -->.*/\1/p' | head -1)
   [ -n "$CARD" ] && CARDS="${CARDS}${CARD}"$'\n'
 done
 # CARDS is now a newline-delimited list of per-issue JSON objects (skip any issue whose

@@ -320,7 +320,9 @@ fi
 FIRST_TS=$(gh api repos/{GH_REPO}/issues/{NUMBER}/comments \
   --jq '[.[] | select(.body | contains("FORGE:")) | .created_at] | sort | .[0] // empty' 2>/dev/null)
 if [ -n "$FIRST_TS" ]; then
-  START_EPOCH=$(date -u -d "$FIRST_TS" +%s 2>/dev/null || echo "")
+  START_EPOCH=$(date -u -d "$FIRST_TS" +%s 2>/dev/null \
+    || python3 -c "import sys,datetime; ts=sys.argv[1].rstrip('Z'); print(int(datetime.datetime.fromisoformat(ts+'+00:00').timestamp()))" "$FIRST_TS" 2>/dev/null \
+    || echo "")
   NOW_EPOCH=$(date -u +%s)
   if [ -n "$START_EPOCH" ]; then
     ELAPSED_SECS=$((NOW_EPOCH - START_EPOCH))

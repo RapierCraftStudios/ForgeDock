@@ -3,7 +3,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 
 import { fileURLToPath, pathToFileURL } from "url";
-import { dirname, join, relative, resolve } from "path";
+import { basename, dirname, join, relative, resolve } from "path";
 import { mkdir, symlink, readlink, lstat, readdir, stat, unlink } from "fs/promises";
 import {
   existsSync,
@@ -1765,7 +1765,7 @@ async function init(fromInstall = false, minimal = false) {
           `forge.yaml.bak.${new Date().toISOString().replace(/[:.]/g, "-")}`,
         )
       : baseBak;
-    const backupName = backupPath.split("/").pop();
+    const backupName = basename(backupPath);
     renameSync(outputPath, backupPath);
     log(`  ${YELLOW}Backed up${RESET}: forge.yaml → ${backupName}`);
   }

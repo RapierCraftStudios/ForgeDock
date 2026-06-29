@@ -200,7 +200,7 @@ export function renderNextSteps({ target, source, claudeAvailable }) {
   const lines = [
     "",
     `✔ Demo repo ready at ${target}`,
-    sourceNote ? `  (${sourceNote})` : "",
+    ...(sourceNote ? [`  (${sourceNote})`] : []),
     "",
     "Next: open Claude Code in that directory and run:",
     "",
@@ -213,7 +213,7 @@ export function renderNextSteps({ target, source, claudeAvailable }) {
     claudeAvailable
       ? "  claude            # open Claude Code here (or re-run with --open)"
       : "  # then open Claude Code in this directory",
-  ].filter((l) => l !== "");
+  ];
   return lines.join("\n");
 }
 
