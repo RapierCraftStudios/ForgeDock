@@ -2525,6 +2525,7 @@ async function doctor() {
       yqVersion = execSync("yq --version", {
         stdio: ["ignore", "pipe", "ignore"],
         encoding: "utf-8",
+        timeout: 5000,
       }).trim();
     } catch {
       // yq not installed or not on PATH
@@ -2567,6 +2568,7 @@ async function doctor() {
       claudeRaw = execSync("claude --version", {
         stdio: ["ignore", "pipe", "ignore"],
         encoding: "utf-8",
+        timeout: 5000,
       }).trim();
       claudeInstalled = true;
     } catch {
