@@ -39,6 +39,7 @@ command -v gh >/dev/null || { echo "ERROR: gh CLI not found"; exit 1; }
 gh auth status >/dev/null || { echo "ERROR: run 'gh auth login' first"; exit 1; }
 
 # ---- 1. create the repo -----------------------------------------------------
+REPO_CREATED=false
 if gh repo view "$REPO_SLUG" >/dev/null 2>&1; then
   echo "==> Repo already exists, skipping creation."
 else
@@ -46,6 +47,7 @@ else
   gh repo create "$REPO_SLUG" $VISIBILITY \
     --description "Try ForgeDock risk-free — a tiny Notes API with pre-written issues." \
     --disable-wiki
+  REPO_CREATED=true
 fi
 
 # ---- 2. push the scaffold ---------------------------------------------------
@@ -64,7 +66,18 @@ cp -r issues "$TMP_DIR/issues"
   git -c user.name="forgedock-demo" -c user.email="demo@forgedock.dev" \
       commit -q -m "chore: initial demo scaffold"
   git remote add origin "https://github.com/${REPO_SLUG}.git"
-  git push -q -u origin main --force
+  if [ "$REPO_CREATED" = "true" ]; then
+    # Fresh repo we just created — safe to push.
+    git push -q -u origin main
+  else
+    # Repo pre-existed. Never force-push over someone's existing main; do a
+    # non-destructive push and let it fail loudly if the repo already has commits.
+    if ! git push -q -u origin main 2>/dev/null; then
+      echo "ERROR: '$REPO_SLUG' already has content on main. Refusing to overwrite it." >&2
+      echo "       Use a fresh/empty repo, or push manually if you intend to replace it." >&2
+      exit 1
+    fi
+  fi
 )
 echo "==> Pushed scaffold to $REPO_SLUG"
 
