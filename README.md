@@ -255,6 +255,7 @@ Removes all ForgeDock command symlinks from `~/.claude/commands/`. Your `forge.y
 
 ## Documentation
 
+- [Try ForgeDock Risk-Free](examples/forgedock-demo/) — a tiny demo repo with 5 pre-written issues; clone, `npx forgedock`, `/work-on 1`, and watch a full pipeline run without touching your real code
 - [Getting Started in 5 Minutes](docs/site/getting-started.md) — install, configure, first pipeline run
 - [How the Knowledge Graph Works](docs/site/how-it-works.md) — FORGE annotations, context relay, compaction resilience
 - [What Are Those FORGE Comments?](docs/site/annotations-explained.md) — 2-minute newcomer explainer for the annotations on your issues
