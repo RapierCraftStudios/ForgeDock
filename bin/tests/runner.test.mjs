@@ -91,9 +91,14 @@ describe("resolveSpecPath", () => {
     assert.equal(resolveSpecPath(COMMANDS_DIR, "does-not-exist"), null);
   });
 
-  it("rejects path traversal", () => {
+  it("rejects path traversal (forward slash)", () => {
     assert.equal(resolveSpecPath(COMMANDS_DIR, "../secrets"), null);
     assert.equal(resolveSpecPath(COMMANDS_DIR, "work-on/../../etc/passwd"), null);
+  });
+
+  it("rejects path traversal via backslash (Windows)", () => {
+    assert.equal(resolveSpecPath(COMMANDS_DIR, "..\\secrets"), null);
+    assert.equal(resolveSpecPath(COMMANDS_DIR, "work-on\\..\\..\\etc\\passwd"), null);
   });
 
   it("returns null for empty / non-string input", () => {
@@ -227,6 +232,22 @@ describe("getToolHandlers", () => {
   it("run_bash throws on non-zero exit", () => {
     const handlers = getToolHandlers(TMP);
     assert.throws(() => handlers.run_bash({ command: "node -e \"process.exit(3)\"" }), /exit 3/);
+  });
+
+  it("run_bash scrubs ANTHROPIC_API_KEY from the child env", () => {
+    const orig = process.env.ANTHROPIC_API_KEY;
+    process.env.ANTHROPIC_API_KEY = "sk-ant-should-not-leak";
+    try {
+      const handlers = getToolHandlers(TMP);
+      const out = handlers.run_bash({
+        command: "node -e \"process.stdout.write(process.env.ANTHROPIC_API_KEY || 'ABSENT')\"",
+      });
+      assert.match(out, /ABSENT/);
+      assert.doesNotMatch(out, /should-not-leak/);
+    } finally {
+      if (orig === undefined) delete process.env.ANTHROPIC_API_KEY;
+      else process.env.ANTHROPIC_API_KEY = orig;
+    }
   });
 
   it("handlers validate required input", () => {

@@ -70,13 +70,20 @@ export function resolveSpecPath(commandsDir, commandName) {
   if (typeof commandName !== "string" || commandName.trim() === "") return null;
   const clean = commandName
     .trim()
-    .replace(/^\/+/, "")
+    .replace(/^[\\/]+/, "")
     .replace(/\.md$/i, "");
-  const segments = clean.split("/").filter(Boolean);
+  // Split on BOTH separators — on Windows a backslash in the name would
+  // otherwise survive as a single segment and be re-normalized by path.join,
+  // bypassing the traversal check below.
+  const segments = clean.split(/[\\/]/).filter(Boolean);
   if (segments.length === 0) return null;
   // Reject path traversal — command names must stay within commands/.
   if (segments.some((s) => s === ".." || s === ".")) return null;
   const candidate = join(commandsDir, ...segments) + ".md";
+  // Defense-in-depth: the resolved path must remain inside commandsDir even
+  // if a segment slipped through (belt-and-suspenders with the check above).
+  const rel = relative(commandsDir, candidate);
+  if (rel.startsWith("..") || isAbsolute(rel)) return null;
   return existsSync(candidate) ? candidate : null;
 }
 
@@ -259,12 +266,20 @@ export function getToolHandlers(cwd) {
     },
     run_bash: ({ command }) => {
       if (!command) throw new Error("run_bash requires a 'command'");
+      // Scrub the Anthropic API key from the child environment. The runner is
+      // designed to feed untrusted third-party content (issue/PR bodies via gh)
+      // into the model loop, so a prompt-injection payload could otherwise issue
+      // a run_bash command that exfiltrates the key. gh/git auth tokens
+      // (GH_TOKEN/GITHUB_TOKEN) are intentionally left intact.
+      const childEnv = { ...process.env };
+      delete childEnv.ANTHROPIC_API_KEY;
       try {
         return execSync(command, {
           cwd,
           encoding: "utf-8",
           stdio: ["pipe", "pipe", "pipe"],
           maxBuffer: 50 * 1024 * 1024,
+          env: childEnv,
         });
       } catch (e) {
         // Surface the command's output AND exit status to the model so it can
