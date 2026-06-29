@@ -108,7 +108,7 @@ branches:
 
 That's the whole config. Run `npx forgedock doctor` to confirm it's valid.
 
-> **Only `project` and `branches` are conceptually required for GitHub operations** — `paths` is auto-detected so worktrees land in the right place. Everything else (project board, review context, verification commands, multi-repo routing) is optional. Browse [`forge.yaml.example`](https://github.com/RapierCraftStudios/ForgeDock/blob/main/forge.yaml.example) and [`docs/CONFIG.md`](https://github.com/RapierCraftStudios/ForgeDock/blob/main/docs/CONFIG.md) when you're ready to customize.
+> **The three required sections are `project`, `paths`, and `branches`** — `npx forgedock init --minimal` auto-detects `paths` for you (so worktrees land in the right place) and you rarely need to touch it. Everything else (project board, review context, verification commands, multi-repo routing) is optional and falls back to sensible defaults. Browse [`forge.yaml.example`](https://github.com/RapierCraftStudios/ForgeDock/blob/main/forge.yaml.example) and [`docs/CONFIG.md`](https://github.com/RapierCraftStudios/ForgeDock/blob/main/docs/CONFIG.md) when you're ready to customize.
 
 **Prefer guided, AI-powered setup?** Open Claude Code in your project directory and run `/forgedock-init` instead — it scans your repo and fills in the optional sections (repo owner/name, worktree path, branch strategy, project board) for you. Plain `npx forgedock init` (no flag) generates the full annotated template with every optional section commented out.
 
