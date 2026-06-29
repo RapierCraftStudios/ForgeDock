@@ -118,6 +118,22 @@ npx forgedock uninstall    # Remove all ForgeDock commands from ~/.claude/comman
 npx forgedock help         # Show all available commands
 ```
 
+**Standalone runner** (run pipelines outside Claude Code — CI/CD, headless batch):
+```bash
+# Preview the assembled prompt + tool plan (no API key needed)
+npx forgedock run work-on 42 --dry-run
+
+# Execute headlessly via the Anthropic API directly
+export ANTHROPIC_API_KEY=sk-ant-...
+npm install @anthropic-ai/sdk        # optional dependency — only needed for live runs
+npx forgedock run work-on 42
+```
+`forgedock run` loads the same `commands/*.md` specs and drives an Anthropic
+tool-use loop directly, so the pipeline no longer depends on the Claude Code
+agent loop. Claude Code remains the recommended interactive experience; the
+runner adds CI/CD and non-Claude-Code paths. Flags: `--dry-run`, `--model <id>`,
+`--max-iterations <n>`.
+
 **AI-powered setup** (inside Claude Code):
 ```
 /forgedock-init            # Guided config walkthrough — scans your repo, queries GitHub, auto-fills forge.yaml
