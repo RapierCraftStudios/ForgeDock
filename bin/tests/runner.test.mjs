@@ -29,6 +29,8 @@ import {
   buildSystemPrompt,
   buildUserMessage,
   TOOL_DEFINITIONS,
+  truncateToolResult,
+  resolveBashShell,
   getToolHandlers,
   renderDryRun,
   renderSummaryCard,
@@ -255,6 +257,68 @@ describe("getToolHandlers", () => {
     assert.throws(() => handlers.read_file({}), /requires a 'path'/);
     assert.throws(() => handlers.write_file({ content: "x" }), /requires a 'path'/);
     assert.throws(() => handlers.run_bash({}), /requires a 'command'/);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// truncateToolResult — SEC-4b: tool-result truncation marker
+// ---------------------------------------------------------------------------
+
+describe("truncateToolResult", () => {
+  it("leaves short content unchanged (byte-identical, no marker)", () => {
+    const short = "x".repeat(1000);
+    assert.equal(truncateToolResult(short), short);
+    assert.doesNotMatch(truncateToolResult(short), /truncated/);
+  });
+
+  it("leaves content at exactly the cap unchanged", () => {
+    const exact = "y".repeat(100_000);
+    assert.equal(truncateToolResult(exact), exact);
+    assert.doesNotMatch(truncateToolResult(exact), /truncated/);
+  });
+
+  it("appends a truncation marker when content exceeds the cap", () => {
+    const big = "z".repeat(100_001);
+    const out = truncateToolResult(big);
+    assert.match(out, /…\[truncated\]$/);
+    // 100k cap retained + marker appended, original length not preserved.
+    assert.ok(out.length < big.length + 32);
+    assert.ok(out.startsWith("z".repeat(100_000)));
+  });
+
+  it("coerces nullish input to an empty string", () => {
+    assert.equal(truncateToolResult(undefined), "");
+    assert.equal(truncateToolResult(null), "");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// resolveBashShell — SEC-5: explicit cross-platform shell for run_bash
+// ---------------------------------------------------------------------------
+
+describe("resolveBashShell", () => {
+  it("honors the FORGEDOCK_SHELL override", () => {
+    const orig = process.env.FORGEDOCK_SHELL;
+    process.env.FORGEDOCK_SHELL = "/custom/path/to/bash";
+    try {
+      assert.equal(resolveBashShell(), "/custom/path/to/bash");
+    } finally {
+      if (orig === undefined) delete process.env.FORGEDOCK_SHELL;
+      else process.env.FORGEDOCK_SHELL = orig;
+    }
+  });
+
+  it("returns a string path or undefined (graceful fallback), never throws", () => {
+    const orig = process.env.FORGEDOCK_SHELL;
+    delete process.env.FORGEDOCK_SHELL;
+    try {
+      const shell = resolveBashShell();
+      assert.ok(shell === undefined || typeof shell === "string");
+      // When a path is returned it must actually exist on disk.
+      if (typeof shell === "string") assert.ok(existsSync(shell));
+    } finally {
+      if (orig !== undefined) process.env.FORGEDOCK_SHELL = orig;
+    }
   });
 });
 
