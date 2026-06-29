@@ -79,22 +79,16 @@ It exits `0` when everything passes and `1` if any check fails, so you can also 
 
 ## Step 2: Configure Your Repository
 
-In your project root, initialize a `forge.yaml` config file:
+ForgeDock reads a single `forge.yaml` in your project root. **Start minimal** — only the `project`, `paths`, and `branches` sections are required. Everything else is optional and falls back to sensible defaults; add sections as you need them.
+
+The fastest way to get a working config is the `--minimal` flag, which scans your repo and writes just the required sections with detected values:
 
 ```bash
 cd /path/to/your/project
-# Open Claude Code in this directory, then run:
-/forgedock-init
+npx forgedock init --minimal
 ```
 
-The `/forgedock-init` command scans your repo and generates a `forge.yaml` with:
-
-- Your GitHub repo owner and name
-- Worktree base path
-- Branch strategy (staging vs. feature lanes)
-- Project board connection (optional)
-
-**Minimal `forge.yaml` example:**
+This produces a short, readable `forge.yaml` like the one below — this is essentially ForgeDock's own real-world config:
 
 ```yaml
 project:
@@ -107,9 +101,16 @@ paths:
   worktree_base: "/path/to/my-app/.claude/worktrees"
 
 branches:
+  default: "main"
   staging: "staging"
-  default: "staging"
+  feature_pattern: "milestone/{slug}"
 ```
+
+That's the whole config. Run `npx forgedock doctor` to confirm it's valid.
+
+> **Only `project` and `branches` are conceptually required for GitHub operations** — `paths` is auto-detected so worktrees land in the right place. Everything else (project board, review context, verification commands, multi-repo routing) is optional. Browse [`forge.yaml.example`](https://github.com/RapierCraftStudios/ForgeDock/blob/main/forge.yaml.example) and [`docs/CONFIG.md`](https://github.com/RapierCraftStudios/ForgeDock/blob/main/docs/CONFIG.md) when you're ready to customize.
+
+**Prefer guided, AI-powered setup?** Open Claude Code in your project directory and run `/forgedock-init` instead — it scans your repo and fills in the optional sections (repo owner/name, worktree path, branch strategy, project board) for you. Plain `npx forgedock init` (no flag) generates the full annotated template with every optional section commented out.
 
 ---
 
