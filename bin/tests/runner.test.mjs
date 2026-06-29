@@ -30,6 +30,7 @@ import {
   buildUserMessage,
   TOOL_DEFINITIONS,
   truncateToolResult,
+  isWindowsBashShim,
   resolveBashShell,
   getToolHandlers,
   renderDryRun,
@@ -387,6 +388,56 @@ describe("truncateToolResult", () => {
   it("coerces nullish input to an empty string", () => {
     assert.equal(truncateToolResult(undefined), "");
     assert.equal(truncateToolResult(null), "");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// isWindowsBashShim — shim detection helper (fix #1189)
+// ---------------------------------------------------------------------------
+
+describe("isWindowsBashShim", () => {
+  it("identifies WindowsApps paths as shims", () => {
+    assert.ok(
+      isWindowsBashShim(
+        "C:\\Users\\user\\AppData\\Local\\Microsoft\\WindowsApps\\bash.exe",
+      ),
+    );
+    // forward-slash separators are normalised before matching
+    assert.ok(
+      isWindowsBashShim(
+        "C:/Users/user/AppData/Local/Microsoft/WindowsApps/bash.exe",
+      ),
+    );
+  });
+
+  it("identifies System32 bash as a shim", () => {
+    assert.ok(isWindowsBashShim("C:\\Windows\\System32\\bash.exe"));
+    // matching is case-insensitive
+    assert.ok(isWindowsBashShim("C:\\WINDOWS\\SYSTEM32\\BASH.EXE"));
+  });
+
+  it("does not flag real Git-for-Windows bash as a shim", () => {
+    assert.equal(
+      isWindowsBashShim("C:\\Program Files\\Git\\bin\\bash.exe"),
+      false,
+    );
+    assert.equal(
+      isWindowsBashShim(
+        "C:\\Users\\user\\scoop\\apps\\git\\current\\bin\\bash.exe",
+      ),
+      false,
+    );
+    assert.equal(
+      isWindowsBashShim("C:\\Program Files (x86)\\Git\\bin\\bash.exe"),
+      false,
+    );
+  });
+
+  it("returns false for non-string inputs without throwing", () => {
+    assert.equal(isWindowsBashShim(null), false);
+    assert.equal(isWindowsBashShim(undefined), false);
+    assert.equal(isWindowsBashShim(42), false);
+    assert.equal(isWindowsBashShim({}), false);
   });
 });
 

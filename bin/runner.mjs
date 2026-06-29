@@ -300,6 +300,46 @@ function resolveConfinedPath(cwd, p) {
   return resolved;
 }
 
+// ---------------------------------------------------------------------------
+// Windows bash shim detection
+// ---------------------------------------------------------------------------
+
+/**
+ * Path fragments that identify Windows bash shims — executables that exist on
+ * disk but are launchers or redirectors rather than real bash installations.
+ * On systems without WSL these shims either fail or open the Windows Store UI.
+ *
+ * Used by resolveBashShell() to skip shim paths returned by `where bash.exe`,
+ * so that a real bash installation (e.g. Git for Windows) is preferred over a
+ * shim that happens to appear earlier on PATH.
+ *
+ * Fragments are matched case-insensitively against the normalised (backslash)
+ * form of each candidate path.
+ */
+const WINDOWS_BASH_SHIM_FRAGMENTS = [
+  "\\WindowsApps\\", // Windows Store app shim tree (opens Store if WSL absent)
+  "\\System32\\bash.exe", // WSL inbox launcher (fails without WSL)
+];
+
+/**
+ * Return true when a Windows path points to a known bash shim rather than a
+ * real bash installation. Shims pass existsSync() but will fail or open the
+ * Windows Store UI when WSL is not installed.
+ *
+ * Matching is case-insensitive and tolerates forward-slash separators so the
+ * helper works correctly regardless of how the path was produced.
+ *
+ * @param {string} p - Candidate path to test.
+ * @returns {boolean}
+ */
+export function isWindowsBashShim(p) {
+  if (typeof p !== "string") return false;
+  const normalised = p.replace(/\//g, "\\").toLowerCase();
+  return WINDOWS_BASH_SHIM_FRAGMENTS.some((frag) =>
+    normalised.includes(frag.toLowerCase()),
+  );
+}
+
 // Guard so the "no bash found" warning fires at most once per process, even
 // when run_bash is invoked many times in a single runner session.
 let _bashWarningEmitted = false;
@@ -316,6 +356,9 @@ let _bashWarningEmitted = false;
  * On Windows, discovery order is:
  *   1. FORGEDOCK_SHELL env var (override — wins unconditionally)
  *   2. PATH lookup via `where bash.exe` (catches Scoop, winget, custom prefixes)
+ *      Known shim paths (WindowsApps, System32\bash.exe) are filtered out so
+ *      that a real bash installation is preferred over a stub that may fail or
+ *      open the Windows Store UI if WSL is not installed.
  *   3. Hardcoded candidates: standard Git for Windows (x64 + x86) + Scoop + WSL
  *   4. undefined → platform default shell (cmd.exe); emits a one-time stderr warning
  *
@@ -331,6 +374,8 @@ export function resolveBashShell() {
     //    prefixes that place bash.exe on PATH but not under Program Files.
     //    `where.exe` is a standalone tool in System32; run it via the default
     //    shell so restricted environments that lack `where` degrade gracefully.
+    //    All results are filtered to skip known shim paths before the first
+    //    real bash candidate is accepted (see isWindowsBashShim).
     try {
       const fromPath = execSync("where bash.exe", {
         encoding: "utf-8",
@@ -340,8 +385,9 @@ export function resolveBashShell() {
       })
         .split(/\r?\n/)
         .map((l) => l.trim())
-        .find((l) => l.length > 0);
-      if (fromPath && existsSync(fromPath)) return fromPath;
+        .filter((l) => l.length > 0 && !isWindowsBashShim(l))
+        .find((l) => existsSync(l));
+      if (fromPath) return fromPath;
     } catch {
       // `where` failed or returned no results — fall through to hardcoded list.
     }
@@ -349,6 +395,9 @@ export function resolveBashShell() {
     // 2. Hardcoded candidates: standard Git for Windows (machine-wide x64 + x86),
     //    Scoop convention (%USERPROFILE%\scoop\apps\git\current\bin\bash.exe),
     //    and WSL bash (%SystemRoot%\System32\bash.exe).
+    //    Note: System32\bash.exe is the WSL inbox launcher — it works when WSL is
+    //    installed but is a shim that fails without WSL.  It is listed last so
+    //    real Git-for-Windows paths take priority.
     const candidates = [
       join(process.env.ProgramFiles || "C:\\Program Files", "Git", "bin", "bash.exe"),
       join(
