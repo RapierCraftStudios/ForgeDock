@@ -54,31 +54,41 @@ This symlinks all 25+ ForgeDock command specs into `~/.claude/commands/` — mak
 **Verify the install:**
 
 ```bash
-ls ~/.claude/commands/ | grep -E "work-on|review-pr|quality-gate"
+npx forgedock doctor
 ```
 
-You should see `work-on.md`, `review-pr.md`, and `quality-gate.md`.
+`doctor` runs an installation health check across six categories — command symlinks, `forge.yaml`, required tools (`gh`, `yq`, Claude Code), GitHub workflow labels, and Playwright MCP — and prints a pass/fail/warn line with a fix hint for each:
+
+```
+ForgeDock Doctor — Installation Health Check
+
+  ✔  Command symlinks  25 symlinks valid
+  ✔  gh CLI  installed and authenticated
+  ✔  yq  yq (https://github.com/mikefarah/yq/) version v4.x
+  ✔  Claude Code  v2.x (compatible, >= v2.0.0)
+  ⚠  Playwright MCP  Not registered — needed for /qa-sweep
+
+  All checks passed. ForgeDock installation is healthy.
+```
+
+It exits `0` when everything passes and `1` if any check fails, so you can also use it in CI. The `forge.yaml` and GitHub-label checks will fully pass once you finish Step 2 below — re-run `doctor` any time your setup feels off.
+
+> Prefer a quick spot-check? `ls ~/.claude/commands/ | grep -E "work-on|review-pr|quality-gate"` should list `work-on.md`, `review-pr.md`, and `quality-gate.md`.
 
 ---
 
 ## Step 2: Configure Your Repository
 
-In your project root, initialize a `forge.yaml` config file:
+ForgeDock reads a single `forge.yaml` in your project root. **Start minimal** — only the `project`, `paths`, and `branches` sections are required. Everything else is optional and falls back to sensible defaults; add sections as you need them.
+
+The fastest way to get a working config is the `--minimal` flag, which scans your repo and writes just the required sections with detected values:
 
 ```bash
 cd /path/to/your/project
-# Open Claude Code in this directory, then run:
-/forgedock-init
+npx forgedock init --minimal
 ```
 
-The `/forgedock-init` command scans your repo and generates a `forge.yaml` with:
-
-- Your GitHub repo owner and name
-- Worktree base path
-- Branch strategy (staging vs. feature lanes)
-- Project board connection (optional)
-
-**Minimal `forge.yaml` example:**
+This produces a short, readable `forge.yaml` like the one below — this is essentially ForgeDock's own real-world config:
 
 ```yaml
 project:
@@ -91,9 +101,16 @@ paths:
   worktree_base: "/path/to/my-app/.claude/worktrees"
 
 branches:
+  default: "main"
   staging: "staging"
-  default: "staging"
+  feature_pattern: "milestone/{slug}"
 ```
+
+That's the whole config. Run `npx forgedock doctor` to confirm it's valid.
+
+> **The three required sections are `project`, `paths`, and `branches`** — `npx forgedock init --minimal` auto-detects `paths` for you (so worktrees land in the right place) and you rarely need to touch it. Everything else (project board, review context, verification commands, multi-repo routing) is optional and falls back to sensible defaults. Browse [`forge.yaml.example`](https://github.com/RapierCraftStudios/ForgeDock/blob/main/forge.yaml.example) and [`docs/CONFIG.md`](https://github.com/RapierCraftStudios/ForgeDock/blob/main/docs/CONFIG.md) when you're ready to customize.
+
+**Prefer guided, AI-powered setup?** Open Claude Code in your project directory and run `/forgedock-init` instead — it scans your repo and fills in the optional sections (repo owner/name, worktree path, branch strategy, project board) for you. Plain `npx forgedock init` (no flag) generates the full annotated template with every optional section commented out.
 
 ---
 
@@ -164,13 +181,18 @@ For a deep dive into how this works, read [How ForgeDock's Knowledge Graph Works
 
 ## Next Steps
 
+- [Command Learning Path](./command-learning-path.md) — which commands to learn next, tiered by when you need them
 - [How ForgeDock's Knowledge Graph Works](./how-it-works.md) — understand the architecture
+- [What Are Those FORGE Comments?](./annotations-explained.md) — a 2-minute explainer for the annotations on your issues
 - [ForgeDock vs. Manual Claude Code Workflows](./vs-manual-workflows.md) — why this beats ad-hoc prompting
 - [Complete Command Reference](./command-reference.md) — all 25 commands with examples
+- [Troubleshooting & Recovery Guide](./troubleshooting.md) — diagnose and recover from common pipeline failures
 
 ---
 
 ## Troubleshooting
+
+The quick fixes below cover the most common first-run issues. For the full list of failure modes — quality gate failures, worktree conflicts, stale labels, rate limits, and more — see the [Troubleshooting & Recovery Guide](./troubleshooting.md).
 
 **`/work-on` not found in Claude Code**
 

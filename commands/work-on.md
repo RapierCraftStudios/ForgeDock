@@ -96,6 +96,67 @@ Satellite repos (those without a `staging` branch) receive fast-lane PRs directl
 
 ## Phase 0: Resolve Issue & Load Context
 
+### 0.0: Pre-Flight Checks (MANDATORY — run before any other Phase 0 step)
+
+Validate the environment before the pipeline spends tokens. Each check fails fast with an actionable error and a pointer to the troubleshooting guide (`docs/site/troubleshooting.md`). Run all checks; report every failure, then STOP if any HARD check fails. <!-- Added: forge#1149 -->
+
+```bash
+PREFLIGHT_FAILED=0
+
+# Check 1 — forge.yaml present (HARD)
+if [ ! -f forge.yaml ]; then
+  echo "ERROR: forge.yaml not found in the repository root."
+  echo "  Fix: run \`npx forgedock init\` to generate one, or copy forge.yaml.example."
+  echo "  See: docs/site/troubleshooting.md#1-forgeyaml-not-found"
+  PREFLIGHT_FAILED=1
+fi
+
+# Check 2 — forge.yaml is valid YAML (HARD, only if present)
+if [ -f forge.yaml ] && ! yq '.' forge.yaml >/dev/null 2>&1; then
+  echo "ERROR: forge.yaml has a YAML syntax error."
+  echo "  Fix: run \`yq '.' forge.yaml\` to locate the offending line, then correct the indentation/quoting."
+  echo "  See: docs/site/troubleshooting.md#2-forgeyaml-has-a-syntax-error"
+  PREFLIGHT_FAILED=1
+fi
+
+# Check 3 — gh CLI authenticated (HARD)
+if ! gh auth status >/dev/null 2>&1; then
+  echo "ERROR: gh CLI is not authenticated. The pipeline cannot read or write GitHub state."
+  echo "  Fix: run \`gh auth login\` (ensure repo scope), then \`gh auth status\` to confirm."
+  echo "  See: docs/site/troubleshooting.md#3-gh-cli-not-authenticated"
+  PREFLIGHT_FAILED=1
+fi
+
+# Check 4 — workflow labels exist on the repo (SOFT — warn, auto-recoverable)
+if [ -f forge.yaml ] && gh auth status >/dev/null 2>&1; then
+  GH_REPO_PF="$(yq -r '.project.owner + "/" + .project.repo' forge.yaml 2>/dev/null)"
+  if [ -n "$GH_REPO_PF" ] && ! gh label list -R "$GH_REPO_PF" --search "workflow:" 2>/dev/null | grep -q "workflow:"; then
+    echo "WARNING: ForgeDock workflow:* labels not found on $GH_REPO_PF."
+    echo "  Fix: run \`npx forgedock labels setup\` (or \`--repo $GH_REPO_PF\`) to bootstrap them."
+    echo "  See: docs/site/troubleshooting.md#9-missing-workflow-labels"
+  fi
+fi
+
+# Check 5 — GitHub API rate limit headroom (SOFT — warn)
+if gh auth status >/dev/null 2>&1; then
+  RL_REMAINING="$(gh api rate_limit --jq '.resources.core.remaining' 2>/dev/null || echo '')"
+  if [ -n "$RL_REMAINING" ] && [ "$RL_REMAINING" -lt 100 ] 2>/dev/null; then
+    RL_RESET="$(gh api rate_limit --jq '.resources.core.reset' 2>/dev/null)"
+    echo "WARNING: GitHub API rate limit low ($RL_REMAINING remaining; resets at epoch $RL_RESET)."
+    echo "  Fix: wait for the reset, reduce orchestration parallelism, or use a higher-limit PAT."
+    echo "  See: docs/site/troubleshooting.md#10-github-api-rate-limit-exceeded"
+  fi
+fi
+
+if [ "$PREFLIGHT_FAILED" -eq 1 ]; then
+  echo "Pre-flight checks failed. Resolve the errors above and re-run /work-on {NUMBER}."
+  echo "Full recovery guide: docs/site/troubleshooting.md"
+  exit 1
+fi
+```
+
+Worktree/branch-already-exists and stale-label conditions are surfaced later (Phase 3E worktree creation and the `## Error Handling` section) with their own recovery guidance in `docs/site/troubleshooting.md`.
+
 ### 0A: Parse input
 Extract project prefix and issue number. If `next`/`pick`: list open issues sorted by priority, skip `needs-human` and `workflow:decomposed`, pick highest priority.
 
@@ -1649,7 +1710,14 @@ fi
 
 ## Phase 7: Summary & Trajectory
 
-### 7A: Report
+### 7A: Report + Pipeline Summary Card
+
+Output the terse report, then render the shareable **Pipeline Summary Card** — the shareable
+moment a developer screenshots. Gather real stats (commits, additions/deletions, PR target,
+review summary, elapsed time) and render exactly as specified in `work-on/close.md` Phase C4.5
+(`C4.5a` stats gathering → `C4.5b` box-drawing card to stdout → `C4.5c` machine-readable twin).
+This inline path and the delegated `close.md` path MUST produce an identical card.
+
 ```
 ## Done: #{NUMBER} — {TITLE}
 - Investigation: {VERDICT} ({CONFIDENCE})
@@ -1657,6 +1725,28 @@ fi
 - Fix: {BRANCH} → PR #{PR_NUMBER} → merged to `{PR_BASE}`
 - Files changed: {COUNT}
 ```
+
+Then print the card to stdout (inner width 51; truncate long titles with `…`; missing stats
+render `—`; pipeline line reflects the actual terminal state — merged / decomposed / invalid /
+blocked; draft PRs append `(draft)`):
+
+```
+╔═══════════════════════════════════════════════════╗
+║  ForgeDock Pipeline Complete                      ║
+╠═══════════════════════════════════════════════════╣
+║                                                   ║
+║  Issue:    #{NUMBER} — {TITLE}                    ║
+║  Pipeline: investigate → architect → build →      ║
+║            review → merge ✓                       ║
+║  Commits:  {COMMITS} ({ADDITIONS} additions, {DELETIONS} deletions) ║
+║  PR:       #{PR_NUMBER} (merged to {PR_BASE})     ║
+║  Review:   {REVIEW_SUMMARY}                       ║
+║  Time:     {ELAPSED}                              ║
+║                                                   ║
+╚═══════════════════════════════════════════════════╝
+```
+
+The machine-readable twin (`CARD_JSON` from C4.5c) is embedded in the trajectory comment by 7B.
 
 ### 7B: Trajectory Log (MANDATORY)
 
@@ -1691,8 +1781,15 @@ gh issue comment {NUMBER} {GH_FLAG} --body "<!-- FORGE:TRAJECTORY -->
 
 **Decisions**: {key decisions}
 **Anomalies**: {anomalies or None}
-**Pipeline completed**: {TIMESTAMP}"
+**Pipeline completed**: {TIMESTAMP}
+
+<!-- FORGE:CARD ${CARD_JSON} -->"
 ```
+
+Append the `<!-- FORGE:CARD {...} -->` block (machine-readable twin from 7A / close.md C4.5c)
+as the last line of the trajectory comment. It is HTML-comment-wrapped so it stays hidden in
+the rendered view but greppable for platform consumption (`/orchestrate` Phase 6 reads it for
+per-issue cards). Additive — does not affect existing `FORGE:TRAJECTORY` table consumers.
 
 ### 7C: Graph Decision Record (MANDATORY when PR exists)
 
