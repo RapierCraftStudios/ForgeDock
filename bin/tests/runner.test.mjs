@@ -272,11 +272,18 @@ describe("getToolHandlers", () => {
       () => handlers.read_file({ path: "/proc/self/environ" }),
       /Absolute paths are not permitted/,
     );
-    // Windows-style absolute path
+    // Cross-platform absolute path — os.tmpdir() is absolute on both Windows and Linux
     assert.throws(
-      () => handlers.read_file({ path: "C:\\Windows\\system.ini" }),
+      () => handlers.read_file({ path: os.tmpdir() }),
       /Absolute paths are not permitted/,
     );
+    // Windows drive-letter path (only absolute on Windows — skip on POSIX)
+    if (process.platform === "win32") {
+      assert.throws(
+        () => handlers.read_file({ path: "C:\\Windows\\system.ini" }),
+        /Absolute paths are not permitted/,
+      );
+    }
   });
 
   it("read_file rejects '../' path escape (SEC: working-directory confinement)", () => {
