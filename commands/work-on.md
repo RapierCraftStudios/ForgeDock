@@ -111,12 +111,19 @@ if [ ! -f forge.yaml ]; then
   PREFLIGHT_FAILED=1
 fi
 
-# Check 2 — forge.yaml is valid YAML (HARD, only if present)
-if [ -f forge.yaml ] && ! yq '.' forge.yaml >/dev/null 2>&1; then
-  echo "ERROR: forge.yaml has a YAML syntax error."
-  echo "  Fix: run \`yq '.' forge.yaml\` to locate the offending line, then correct the indentation/quoting."
-  echo "  See: docs/site/troubleshooting.md#2-forgeyaml-has-a-syntax-error"
-  PREFLIGHT_FAILED=1
+# Check 2 — yq installed; forge.yaml is valid YAML (HARD, only if present)
+if [ -f forge.yaml ]; then
+  if ! command -v yq >/dev/null 2>&1; then
+    echo "ERROR: yq is not installed. The pipeline requires yq to parse forge.yaml."
+    echo "  Fix: install yq — https://github.com/mikefarah/yq#install"
+    echo "  See: docs/site/troubleshooting.md#2-forgeyaml-has-a-syntax-error"
+    PREFLIGHT_FAILED=1
+  elif ! yq '.' forge.yaml >/dev/null 2>&1; then
+    echo "ERROR: forge.yaml has a YAML syntax error."
+    echo "  Fix: run \`yq '.' forge.yaml\` to locate the offending line, then correct the indentation/quoting."
+    echo "  See: docs/site/troubleshooting.md#2-forgeyaml-has-a-syntax-error"
+    PREFLIGHT_FAILED=1
+  fi
 fi
 
 # Check 3 — gh CLI authenticated (HARD)
