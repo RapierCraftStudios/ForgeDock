@@ -48,6 +48,10 @@ import { execSync } from "child_process";
 const DEFAULT_MODEL = "claude-sonnet-4-5";
 const DEFAULT_MAX_ITERATIONS = 50;
 const DEFAULT_MAX_TOKENS = 8192;
+// Default wall-clock limit for a single run_bash command. Chosen to be
+// generous enough for CI steps (git clones, test suites) while bounding
+// the worst-case hang to 5 minutes. Override via FORGEDOCK_BASH_TIMEOUT (ms).
+const DEFAULT_BASH_TIMEOUT_MS = 5 * 60 * 1000;
 // Cap tool-result payloads so a large file read or verbose command does not
 // blow the context window in a single turn.
 const MAX_TOOL_RESULT_CHARS = 100_000;
@@ -365,20 +369,45 @@ export function getToolHandlers(cwd) {
       // (heredocs, scripts/*.sh, single-quote semantics) behave consistently
       // across platforms. `undefined` lets execSync use the platform default.
       const shell = resolveBashShell();
+      // Resolve wall-clock timeout. FORGEDOCK_BASH_TIMEOUT overrides the
+      // module default so operators can tune per-repo or per-CI-job without
+      // touching source. NaN / non-positive values fall back to the default.
+      const rawTimeout = parseInt(process.env.FORGEDOCK_BASH_TIMEOUT, 10);
+      const timeoutMs =
+        Number.isFinite(rawTimeout) && rawTimeout > 0
+          ? rawTimeout
+          : DEFAULT_BASH_TIMEOUT_MS;
+      const startMs = Date.now();
       try {
         return execSync(command, {
           cwd,
           encoding: "utf-8",
           stdio: ["pipe", "pipe", "pipe"],
           maxBuffer: 50 * 1024 * 1024,
+          timeout: timeoutMs,
           env: childEnv,
           ...(shell ? { shell } : {}),
         });
       } catch (e) {
-        // Surface the command's output AND exit status to the model so it can
-        // react to failures rather than silently swallowing them.
         const stdout = e.stdout ? String(e.stdout) : "";
         const stderr = e.stderr ? String(e.stderr) : "";
+        // Detect timeout: e.killed is the primary indicator (set by Node.js on
+        // most POSIX platforms), but on Windows execSync uses TerminateProcess()
+        // which may not set e.killed reliably. Fall back to elapsed wall time —
+        // if we spent at least as long as the timeout, the timer must have fired,
+        // since a voluntarily-exiting process would have returned before then.
+        const elapsedMs = Date.now() - startMs;
+        if (e.killed || elapsedMs >= timeoutMs) {
+          const timeoutSecs = Math.round(timeoutMs / 1000);
+          const partial = (stdout + stderr).trim();
+          throw new Error(
+            `Command timed out after ${timeoutSecs}s and was killed. ` +
+              `Set FORGEDOCK_BASH_TIMEOUT (ms) to adjust.` +
+              (partial ? `\nPartial output:\n${partial}` : ""),
+          );
+        }
+        // Surface the command's output AND exit status to the model so it can
+        // react to failures rather than silently swallowing them.
         throw new Error(
           `Command failed (exit ${e.status ?? "?"}):\n${stdout}${stderr}`.trim(),
         );
