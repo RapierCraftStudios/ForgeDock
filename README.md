@@ -245,6 +245,7 @@ Removes all ForgeDock command symlinks from `~/.claude/commands/`. Your `forge.y
 - [ForgeDock vs. Manual Workflows](docs/site/vs-manual-workflows.md) — structured pipelines vs. ad-hoc prompting
 - [ForgeDock vs. DeepWiki, AGENTS.md, and Cursor Memories](docs/comparison.md) — structural differences between context tools
 - [FORGE Annotation Protocol](docs/site/forge-annotation-protocol.md) — open standard spec for AI context passing
+- [FORGE Annotation Protocol v1.0 (formal spec)](docs/spec/forge-protocol-v1.md) — standalone, versioned, CC-BY-4.0 specification you can implement in any agent pipeline
 - [Command Reference](docs/site/command-reference.md) — all 25+ commands with usage and examples
 
 ---
