@@ -1649,7 +1649,14 @@ fi
 
 ## Phase 7: Summary & Trajectory
 
-### 7A: Report
+### 7A: Report + Pipeline Summary Card
+
+Output the terse report, then render the shareable **Pipeline Summary Card** — the shareable
+moment a developer screenshots. Gather real stats (commits, additions/deletions, PR target,
+review summary, elapsed time) and render exactly as specified in `work-on/close.md` Phase C4.5
+(`C4.5a` stats gathering → `C4.5b` box-drawing card to stdout → `C4.5c` machine-readable twin).
+This inline path and the delegated `close.md` path MUST produce an identical card.
+
 ```
 ## Done: #{NUMBER} — {TITLE}
 - Investigation: {VERDICT} ({CONFIDENCE})
@@ -1657,6 +1664,28 @@ fi
 - Fix: {BRANCH} → PR #{PR_NUMBER} → merged to `{PR_BASE}`
 - Files changed: {COUNT}
 ```
+
+Then print the card to stdout (inner width 51; truncate long titles with `…`; missing stats
+render `—`; pipeline line reflects the actual terminal state — merged / decomposed / invalid /
+blocked; draft PRs append `(draft)`):
+
+```
+╔═══════════════════════════════════════════════════╗
+║  ForgeDock Pipeline Complete                      ║
+╠═══════════════════════════════════════════════════╣
+║                                                   ║
+║  Issue:    #{NUMBER} — {TITLE}                    ║
+║  Pipeline: investigate → architect → build →      ║
+║            review → merge ✓                       ║
+║  Commits:  {COMMITS} ({ADDITIONS} additions, {DELETIONS} deletions) ║
+║  PR:       #{PR_NUMBER} (merged to {PR_BASE})     ║
+║  Review:   {REVIEW_SUMMARY}                       ║
+║  Time:     {ELAPSED}                              ║
+║                                                   ║
+╚═══════════════════════════════════════════════════╝
+```
+
+The machine-readable twin (`CARD_JSON` from C4.5c) is embedded in the trajectory comment by 7B.
 
 ### 7B: Trajectory Log (MANDATORY)
 
@@ -1691,8 +1720,15 @@ gh issue comment {NUMBER} {GH_FLAG} --body "<!-- FORGE:TRAJECTORY -->
 
 **Decisions**: {key decisions}
 **Anomalies**: {anomalies or None}
-**Pipeline completed**: {TIMESTAMP}"
+**Pipeline completed**: {TIMESTAMP}
+
+<!-- FORGE:CARD ${CARD_JSON} -->"
 ```
+
+Append the `<!-- FORGE:CARD {...} -->` block (machine-readable twin from 7A / close.md C4.5c)
+as the last line of the trajectory comment. It is HTML-comment-wrapped so it stays hidden in
+the rendered view but greppable for platform consumption (`/orchestrate` Phase 6 reads it for
+per-issue cards). Additive — does not affect existing `FORGE:TRAJECTORY` table consumers.
 
 ### 7C: Graph Decision Record (MANDATORY when PR exists)
 
