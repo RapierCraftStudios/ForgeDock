@@ -2468,6 +2468,7 @@ function help() {
     ["npx forgedock init", "Generate forge.yaml config for your project"],
     ["npx forgedock uninstall", "Remove commands"],
     ["npx forgedock update", "Pull latest & reinstall"],
+    ["npx forgedock run <cmd> [args]", "Run a command headlessly via the Anthropic API"],
     ["npx forgedock enable [dir]", "Mark directory as ForgeDock-managed"],
     ["npx forgedock disable [dir]", "Opt directory out of ForgeDock"],
     ["npx forgedock status [dir]", "Show resolved state for a directory"],
@@ -2478,6 +2479,73 @@ function help() {
   process.stderr.write(
     box(table(commands, { header: true }), { title: "Usage" }) + "\n",
   );
+}
+
+/**
+ * `forgedock run <command> [args...]` — execute a ForgeDock command spec
+ * directly via the Anthropic API, outside of Claude Code (headless / CI).
+ *
+ * Flags:
+ *   --dry-run               Preview the assembled prompt + tool plan; no API call.
+ *   --model <id>            Override the model (default: claude-sonnet-4-5 or $FORGEDOCK_MODEL).
+ *   --max-iterations <n>    Bound the tool-use loop (default: 50).
+ *
+ * The live loop requires ANTHROPIC_API_KEY and the optional @anthropic-ai/sdk
+ * dependency. The runtime itself lives in bin/runner.mjs.
+ */
+async function run() {
+  const runArgs = args.slice(1);
+  let dryRun = false;
+  let model;
+  let maxIterations;
+  const positional = [];
+  for (let i = 0; i < runArgs.length; i++) {
+    const a = runArgs[i];
+    if (a === "--dry-run") {
+      dryRun = true;
+    } else if (a === "--model") {
+      model = runArgs[++i];
+    } else if (a.startsWith("--model=")) {
+      model = a.slice("--model=".length);
+    } else if (a === "--max-iterations") {
+      maxIterations = parseInt(runArgs[++i], 10);
+    } else if (a.startsWith("--max-iterations=")) {
+      maxIterations = parseInt(a.slice("--max-iterations=".length), 10);
+    } else {
+      positional.push(a);
+    }
+  }
+
+  const commandName = positional[0];
+  const commandArgs = positional.slice(1);
+
+  if (!commandName) {
+    process.stderr.write(
+      `${RED}Usage: forgedock run <command> [args...] [--dry-run] [--model <id>] [--max-iterations <n>]${RESET}\n`,
+    );
+    process.exit(1);
+  }
+
+  const { runCommand } = await import("./runner.mjs");
+  try {
+    const result = await runCommand({
+      commandsDir: COMMANDS_DIR,
+      commandName,
+      args: commandArgs,
+      cwd: process.cwd(),
+      dryRun,
+      ...(model ? { model } : {}),
+      ...(Number.isInteger(maxIterations) && maxIterations > 0
+        ? { maxIterations }
+        : {}),
+    });
+    if (result && result.status === "max-iterations") {
+      process.exitCode = 1;
+    }
+  } catch (err) {
+    process.stderr.write(`${RED}${err.message}${RESET}\n`);
+    process.exit(1);
+  }
 }
 
 splash();
@@ -2494,6 +2562,9 @@ switch (command) {
     break;
   case "update":
     await update();
+    break;
+  case "run":
+    await run();
     break;
   case "enable":
     await enable(args[1]);
