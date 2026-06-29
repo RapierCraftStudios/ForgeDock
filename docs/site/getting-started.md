@@ -169,10 +169,13 @@ For a deep dive into how this works, read [How ForgeDock's Knowledge Graph Works
 - [What Are Those FORGE Comments?](./annotations-explained.md) — a 2-minute explainer for the annotations on your issues
 - [ForgeDock vs. Manual Claude Code Workflows](./vs-manual-workflows.md) — why this beats ad-hoc prompting
 - [Complete Command Reference](./command-reference.md) — all 25 commands with examples
+- [Troubleshooting & Recovery Guide](./troubleshooting.md) — diagnose and recover from common pipeline failures
 
 ---
 
 ## Troubleshooting
+
+The quick fixes below cover the most common first-run issues. For the full list of failure modes — quality gate failures, worktree conflicts, stale labels, rate limits, and more — see the [Troubleshooting & Recovery Guide](./troubleshooting.md).
 
 **`/work-on` not found in Claude Code**
 
