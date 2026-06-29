@@ -2469,6 +2469,7 @@ function help() {
     ["npx forgedock uninstall", "Remove commands"],
     ["npx forgedock update", "Pull latest & reinstall"],
     ["npx forgedock run <cmd> [args]", "Run a command headlessly via the Anthropic API"],
+    ["npx forgedock demo", "Set up a risk-free demo repo and print next steps"],
     ["npx forgedock enable [dir]", "Mark directory as ForgeDock-managed"],
     ["npx forgedock disable [dir]", "Opt directory out of ForgeDock"],
     ["npx forgedock status [dir]", "Show resolved state for a directory"],
@@ -2559,6 +2560,32 @@ async function run() {
   }
 }
 
+/**
+ * `forgedock demo` — one-command demo mode (issue #1145).
+ *
+ * Stands up a runnable ForgeDock demo at a predictable location (default
+ * ~/forgedock-demo) with zero required decisions, then prints the exact next
+ * steps. Clones the live demo repo when available, otherwise falls back to the
+ * bundled scaffold at FORGE_HOME/examples/forgedock-demo. The runtime lives in
+ * bin/demo.mjs.
+ */
+async function demo() {
+  const { runDemo } = await import("./demo.mjs");
+  try {
+    const result = await runDemo({
+      forgeHome: FORGE_HOME,
+      args: args.slice(1),
+      cwd: process.cwd(),
+    });
+    if (result && result.status === "error") {
+      process.exitCode = 1;
+    }
+  } catch (err) {
+    process.stderr.write(`${RED}${err.message}${RESET}\n`);
+    process.exit(1);
+  }
+}
+
 splash();
 
 switch (command) {
@@ -2576,6 +2603,9 @@ switch (command) {
     break;
   case "run":
     await run();
+    break;
+  case "demo":
+    await demo();
     break;
   case "enable":
     await enable(args[1]);
