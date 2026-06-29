@@ -173,6 +173,20 @@ The context phase surfaced two historical bugs (#577, #587) in the same module �
 
 ---
 
+## Where to Start
+
+ForgeDock installs 25+ commands, but **you only need three to start.** They cover the entire issue-to-merge loop:
+
+| Command | What it does |
+|---|---|
+| `/issue` | Describe what you want — get a pipeline-ready issue |
+| **`/work-on #N`** | Investigate, build, review, and merge it automatically |
+| `/review-pr` | Review a PR with domain-specialist agents |
+
+Everything else is additive — add commands as your workflow grows: **Team Workflows** (`/orchestrate`, `/milestone`) when you run work in parallel, **Operations** (`/rollback`, `/incident-response`) when production needs it, and **Pipeline Tuning** (`/autopilot`, `/pipeline-health`) once it's routine. See the [Command Learning Path](docs/site/command-learning-path.md) for the full tiered guide.
+
+---
+
 ## Commands
 
 | Command | What it does |
@@ -279,6 +293,7 @@ Removes all ForgeDock command symlinks from `~/.claude/commands/`. Your `forge.y
 - [ForgeDock vs. DeepWiki, AGENTS.md, and Cursor Memories](docs/comparison.md) — structural differences between context tools
 - [FORGE Annotation Protocol](docs/site/forge-annotation-protocol.md) — open standard spec for AI context passing
 - [FORGE Annotation Protocol v1.0 (formal spec)](docs/spec/forge-protocol-v1.md) — standalone, versioned, CC-BY-4.0 specification you can implement in any agent pipeline
+- [Command Learning Path](docs/site/command-learning-path.md) — which commands to learn first, tiered by when you need them
 - [Command Reference](docs/site/command-reference.md) — all 25+ commands with usage and examples
 
 ---
