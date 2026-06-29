@@ -280,6 +280,7 @@ Removes all ForgeDock command symlinks from `~/.claude/commands/`. Your `forge.y
 - [FORGE Annotation Protocol](docs/site/forge-annotation-protocol.md) — open standard spec for AI context passing
 - [FORGE Annotation Protocol v1.0 (formal spec)](docs/spec/forge-protocol-v1.md) — standalone, versioned, CC-BY-4.0 specification you can implement in any agent pipeline
 - [Command Reference](docs/site/command-reference.md) — all 25+ commands with usage and examples
+- [Troubleshooting & Recovery Guide](docs/site/troubleshooting.md) — symptom, cause, and fix for the most common pipeline failures
 
 ---
 
