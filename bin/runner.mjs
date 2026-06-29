@@ -300,6 +300,10 @@ function resolveConfinedPath(cwd, p) {
   return resolved;
 }
 
+// Guard so the "no bash found" warning fires at most once per process, even
+// when run_bash is invoked many times in a single runner session.
+let _bashWarningEmitted = false;
+
 /**
  * Resolve an explicit bash shell for run_bash, or undefined to fall back to the
  * platform default shell. The system prompt instructs the model to use
@@ -309,6 +313,12 @@ function resolveConfinedPath(cwd, p) {
  * return undefined so execSync falls back to the platform default and non-bash
  * hosts still work.
  *
+ * On Windows, discovery order is:
+ *   1. FORGEDOCK_SHELL env var (override — wins unconditionally)
+ *   2. PATH lookup via `where bash.exe` (catches Scoop, winget, custom prefixes)
+ *   3. Hardcoded candidates: standard Git for Windows (x64 + x86) + Scoop + WSL
+ *   4. undefined → platform default shell (cmd.exe); emits a one-time stderr warning
+ *
  * @returns {string|undefined} Absolute path to a bash shell, or undefined.
  */
 export function resolveBashShell() {
@@ -317,7 +327,28 @@ export function resolveBashShell() {
   if (override && override.trim()) return override.trim();
 
   if (process.platform === "win32") {
-    // Prefer Git Bash / WSL bash; fall back to the platform default if absent.
+    // 1. PATH-based discovery — covers Scoop, winget, and custom install
+    //    prefixes that place bash.exe on PATH but not under Program Files.
+    //    `where.exe` is a standalone tool in System32; run it via the default
+    //    shell so restricted environments that lack `where` degrade gracefully.
+    try {
+      const fromPath = execSync("where bash.exe", {
+        encoding: "utf-8",
+        stdio: ["pipe", "pipe", "pipe"],
+        timeout: 3000,
+        shell: true,
+      })
+        .split(/\r?\n/)
+        .map((l) => l.trim())
+        .find((l) => l.length > 0);
+      if (fromPath && existsSync(fromPath)) return fromPath;
+    } catch {
+      // `where` failed or returned no results — fall through to hardcoded list.
+    }
+
+    // 2. Hardcoded candidates: standard Git for Windows (machine-wide x64 + x86),
+    //    Scoop convention (%USERPROFILE%\scoop\apps\git\current\bin\bash.exe),
+    //    and WSL bash (%SystemRoot%\System32\bash.exe).
     const candidates = [
       join(process.env.ProgramFiles || "C:\\Program Files", "Git", "bin", "bash.exe"),
       join(
@@ -326,9 +357,36 @@ export function resolveBashShell() {
         "bin",
         "bash.exe",
       ),
+      // Scoop installs Git under %USERPROFILE%\scoop\apps\git\current\.
+      join(
+        process.env.USERPROFILE || "",
+        "scoop",
+        "apps",
+        "git",
+        "current",
+        "bin",
+        "bash.exe",
+      ),
       join(process.env.SystemRoot || "C:\\Windows", "System32", "bash.exe"),
     ];
-    return candidates.find((c) => existsSync(c));
+    const found = candidates.find((c) => c && existsSync(c));
+    if (found) return found;
+
+    // 3. No bash found anywhere — warn the operator once so the silent cmd.exe
+    //    fallback does not go unnoticed. Writing to stderr keeps stdout clean
+    //    for callers that pipe or parse runner output.
+    if (!_bashWarningEmitted) {
+      _bashWarningEmitted = true;
+      process.stderr.write(
+        "[ForgeDock] Warning: bash not found on this system. run_bash commands " +
+          "will execute under cmd.exe, which may not support bash idioms " +
+          "(heredocs, scripts/*.sh, single-quote semantics). Install Git for " +
+          "Windows (https://gitforwindows.org) or Scoop (`scoop install git`), " +
+          "or set FORGEDOCK_SHELL to the absolute path of bash.exe to suppress " +
+          "this warning.\n",
+      );
+    }
+    return undefined;
   }
   // POSIX: prefer bash, fall back to /bin/sh (bash-compatible enough).
   return ["/bin/bash", "/usr/bin/bash", "/bin/sh"].find((c) => existsSync(c));
