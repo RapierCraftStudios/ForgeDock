@@ -316,6 +316,39 @@ describe("getToolHandlers", () => {
       /Path escape detected/,
     );
   });
+
+  // -------------------------------------------------------------------------
+  // Timeout: run_bash must not hang indefinitely (issue #1175)
+  // A stalled command (slow git fetch, test suite waiting on stdin, etc.)
+  // must be killed and surfaced as a clear error — not block the event loop.
+  // -------------------------------------------------------------------------
+
+  it("run_bash kills commands that exceed FORGEDOCK_BASH_TIMEOUT and surfaces a timeout error", () => {
+    const orig = process.env.FORGEDOCK_BASH_TIMEOUT;
+    process.env.FORGEDOCK_BASH_TIMEOUT = "500"; // 500ms — short but safe
+    try {
+      // Use os.tmpdir() as cwd (not TMP) so that any orphaned subprocess on
+      // Windows — bash child processes inherit cwd but may not be killed when
+      // their parent shell is terminated — does not hold TMP locked and break
+      // the after() rmSync cleanup.
+      const handlers = getToolHandlers(os.tmpdir());
+      assert.throws(
+        () =>
+          handlers.run_bash({
+            // node -e "setTimeout" holds the process open beyond the 500ms limit.
+            command: "node -e \"setTimeout(() => {}, 30000)\"",
+          }),
+        (err) => {
+          assert.match(err.message, /timed out/i);
+          assert.match(err.message, /FORGEDOCK_BASH_TIMEOUT/);
+          return true;
+        },
+      );
+    } finally {
+      if (orig === undefined) delete process.env.FORGEDOCK_BASH_TIMEOUT;
+      else process.env.FORGEDOCK_BASH_TIMEOUT = orig;
+    }
+  });
 });
 
 // ---------------------------------------------------------------------------
