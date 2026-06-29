@@ -1,0 +1,16 @@
+{
+  "name": "forgedock-demo",
+  "version": "1.0.0",
+  "description": "A tiny, dependency-free Notes API used as a risk-free playground for trying ForgeDock.",
+  "type": "commonjs",
+  "main": "src/server.js",
+  "scripts": {
+    "start": "node src/server.js",
+    "smoke": "node scripts/smoke.js"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "license": "MIT",
+  "private": true
+}
