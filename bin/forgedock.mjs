@@ -346,6 +346,9 @@ function writeSymlinkSentinel() {
   const content =
     `# ForgeDock command symlinks — DO NOT REPOINT\n` +
     `# Source: ${COMMANDS_DIR}\n` +
+    // Machine-readable version line — read by install() on the next run to
+    // detect first-time vs. update installs and render a version diff (#1146).
+    `# Version: ${getVersion()}\n` +
     `#\n` +
     `# These symlinks are managed by ForgeDock (https://forgedock.com).\n` +
     `# ForgeDock owns the global ~/.claude/commands/ namespace.\n` +
@@ -1050,6 +1053,28 @@ async function linkScripts(step) {
 }
 
 async function install() {
+  // Detect first-time vs. update install by inspecting the namespace sentinel
+  // BEFORE the install steps overwrite it. A missing sentinel means this is a
+  // first install; a present one carries the previously installed version (if
+  // it was written by a build that records `# Version:`). Reading is non-fatal:
+  // any error is treated as a first install so guidance still renders. (#1146)
+  const sentinelPath = join(TARGET_DIR, ".symlink-source");
+  let priorSentinel = null;
+  try {
+    priorSentinel = readFileSync(sentinelPath, "utf-8");
+  } catch {
+    priorSentinel = null;
+  }
+  const isFirstInstall = priorSentinel === null;
+  const priorVersion = priorSentinel
+    ? priorSentinel.match(/^# Version:\s*(.+)$/m)?.[1]?.trim() || null
+    : null;
+  const currentVersion = getVersion();
+
+  // Captured from the "Linking commands" step so the post-install summary can
+  // report how many commands were installed/changed without recounting.
+  let linkStats = { installed: 0, updated: 0, skipped: 0 };
+
   const result = await runSteps([
     {
       label: "Checking environment",
@@ -1086,6 +1111,8 @@ async function install() {
       async run(step) {
         const { installed, updated, skipped } = await linkCommands(step);
         const total = installed + updated + skipped;
+        // Hoist for the post-install summary box (#1146).
+        linkStats = { installed, updated, skipped };
         step.note(
           `${green(String(installed))} installed, ${updated} updated, ${dim(String(skipped))} skipped  (${total} commands total)`,
         );
@@ -1231,18 +1258,65 @@ async function install() {
   ]);
 
   if (result.ok) {
-    process.stderr.write(
-      box(
-        [
-          `${green("✔")} ${bold("ForgeDock is ready")}`,
-          "",
-          `Commands installed to ${cyan(TARGET_DIR)}`,
-          `Scripts installed to  ${cyan(SCRIPTS_TARGET_DIR)}`,
-          `Next: ${cyan("cd <your-project>")} then ${cyan("npx forgedock init")}`,
-        ],
-        { title: "ForgeDock Installed" },
-      ) + "\n",
-    );
+    const totalCommands =
+      linkStats.installed + linkStats.updated + linkStats.skipped;
+    const changedCommands = linkStats.installed + linkStats.updated;
+    const versionLabel = currentVersion ? `v${currentVersion}` : "";
+
+    if (isFirstInstall) {
+      // First-time install — show the full guided next-steps box so the user
+      // has a prioritized path from "installed" to "using it". (#1146)
+      const cmd = (text) => cyan(text.padEnd(22));
+      process.stderr.write(
+        box(
+          [
+            `${green("✔")} ${bold(`ForgeDock ${versionLabel}`.trim())} installed`,
+            `${green("✔")} ${totalCommands} commands → ${cyan(TARGET_DIR)}`,
+            "",
+            bold("What's next?"),
+            "",
+            dim("First time?"),
+            `  ${cmd("npx forgedock demo")}${dim("Try the pipeline risk-free")}`,
+            "",
+            dim("Setting up your repo?"),
+            `  ${cmd("npx forgedock init")}${dim("Configure forge.yaml")}`,
+            `  ${cmd("npx forgedock doctor")}${dim("Verify your setup")}`,
+            "",
+            dim("Ready to go?"),
+            `  ${cyan("/work-on #N".padEnd(22))}${dim("Run it in Claude Code")}`,
+          ],
+          { title: "ForgeDock Installed" },
+        ) + "\n",
+      );
+    } else {
+      // Update install — show a compact version diff and what changed, with a
+      // changelog link instead of the full first-run guidance. (#1146)
+      let headline;
+      if (priorVersion && currentVersion && priorVersion !== currentVersion) {
+        headline = `Updated from ${bold(`v${priorVersion}`)} → ${bold(`v${currentVersion}`)}.`;
+      } else if (currentVersion && priorVersion === currentVersion) {
+        headline = `Reinstalled ${bold(`v${currentVersion}`)}.`;
+      } else if (currentVersion) {
+        headline = `Updated to ${bold(`v${currentVersion}`)}.`;
+      } else {
+        headline = "Update complete.";
+      }
+      const changeNote =
+        changedCommands > 0
+          ? ` ${changedCommands} new/changed command${changedCommands === 1 ? "" : "s"}.`
+          : " Commands already up to date.";
+      process.stderr.write(
+        box(
+          [
+            `${green("✔")} ${headline}${changeNote}`,
+            "",
+            `Changelog: ${cyan("https://github.com/RapierCraftStudios/ForgeDock/releases")}`,
+            `Verify:    ${cyan("npx forgedock doctor")}`,
+          ],
+          { title: "ForgeDock Updated" },
+        ) + "\n",
+      );
+    }
   }
 }
 
