@@ -2209,13 +2209,27 @@ async function doctor() {
               symlinkOk = false;
             }
           } else {
-            // Regular file — not a symlink (install left a copy)
-            broken++;
-            brokenLinks.push(`${rel} (not a symlink)`);
-            symlinkOk = false;
+            // Regular file — copy-mode install (Windows without Developer Mode).
+            // linkCommands() falls back to copyFile() on EPERM/EACCES, so a regular
+            // file is valid as long as its content matches the source. <!-- Added: forge#1174 -->
+            try {
+              const srcContent = readFileSync(src, "utf-8");
+              const tgtContent = readFileSync(tgt, "utf-8");
+              if (srcContent !== tgtContent) {
+                broken++;
+                brokenLinks.push(`${rel} (stale copy)`);
+                symlinkOk = false;
+              }
+              // else: content matches — valid copy-mode install, not broken
+            } catch {
+              // Could not read one of the files — treat as broken.
+              broken++;
+              brokenLinks.push(`${rel} (unreadable)`);
+              symlinkOk = false;
+            }
           }
         } catch {
-          // Symlink missing
+          // File missing
           broken++;
           brokenLinks.push(`${rel} (missing)`);
           symlinkOk = false;
@@ -2223,15 +2237,15 @@ async function doctor() {
       }
 
       if (symlinkOk) {
-        pass("Command symlinks", `${checked} symlinks valid`);
+        pass("Command files", `${checked} files installed`);
       } else {
         fail(
-          "Command symlinks",
+          "Command files",
           `Run: npx forgedock install  (${broken}/${checked} broken: ${brokenLinks.slice(0, 3).join(", ")}${brokenLinks.length > 3 ? "…" : ""})`,
         );
       }
     } catch (err) {
-      fail("Command symlinks", `Could not read commands directory: ${err.message}`);
+      fail("Command files", `Could not read commands directory: ${err.message}`);
     }
   }
 
