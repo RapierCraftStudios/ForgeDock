@@ -302,11 +302,14 @@ IS_DRAFT=$(echo "$PR_STATS"  | jq -r '.isDraft // false' 2>/dev/null)
 # Review summary — count domain-agent verdicts posted by /review-pr on the PR.
 REVIEW_BODIES=$(gh pr view {PR_NUMBER} {GH_FLAG} --json reviews,comments \
   --jq '[.reviews[].body // ""] + [.comments[].body // ""] | .[]' 2>/dev/null)
-APPROVED=$(echo "$REVIEW_BODIES" | grep -cE 'APPROVED:' 2>/dev/null || echo 0)
-CHANGES=$(echo  "$REVIEW_BODIES" | grep -cE 'CHANGES REQUESTED:' 2>/dev/null || echo 0)
+# NOTE: `grep -c` already prints `0` on no match (and exits non-zero) — do NOT add
+# `|| echo 0`, which would append a second line ("0\n0") and break the arithmetic
+# and `--argjson` below. Swallow the non-zero exit with `|| true`, then default.
+APPROVED=$(echo "$REVIEW_BODIES" | grep -cE 'APPROVED:' 2>/dev/null || true); APPROVED=${APPROVED:-0}
+CHANGES=$(echo  "$REVIEW_BODIES" | grep -cE 'CHANGES REQUESTED:' 2>/dev/null || true); CHANGES=${CHANGES:-0}
 TOTAL_AGENTS=$((APPROVED + CHANGES))
 # Blockers = review-finding issues created by this PR that are still open (best-effort).
-BLOCKERS=$(echo "$REVIEW_BODIES" | grep -ciE 'blocker|merge.?block' 2>/dev/null || echo 0)
+BLOCKERS=$(echo "$REVIEW_BODIES" | grep -ciE 'blocker|merge.?block' 2>/dev/null || true); BLOCKERS=${BLOCKERS:-0}
 if [ "$TOTAL_AGENTS" -gt 0 ]; then
   REVIEW_SUMMARY="${APPROVED}/${TOTAL_AGENTS} agents passed, ${BLOCKERS} blockers"
 else
