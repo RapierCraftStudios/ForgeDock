@@ -54,10 +54,26 @@ This symlinks all 25+ ForgeDock command specs into `~/.claude/commands/` — mak
 **Verify the install:**
 
 ```bash
-ls ~/.claude/commands/ | grep -E "work-on|review-pr|quality-gate"
+npx forgedock doctor
 ```
 
-You should see `work-on.md`, `review-pr.md`, and `quality-gate.md`.
+`doctor` runs an installation health check across six categories — command symlinks, `forge.yaml`, required tools (`gh`, `yq`, Claude Code), GitHub workflow labels, and Playwright MCP — and prints a pass/fail/warn line with a fix hint for each:
+
+```
+ForgeDock Doctor — Installation Health Check
+
+  ✔  Command symlinks  25 symlinks valid
+  ✔  gh CLI  installed and authenticated
+  ✔  yq  yq (https://github.com/mikefarah/yq/) version v4.x
+  ✔  Claude Code  v2.x (compatible, >= v2.0.0)
+  ⚠  Playwright MCP  Not registered — needed for /qa-sweep
+
+  All checks passed. ForgeDock installation is healthy.
+```
+
+It exits `0` when everything passes and `1` if any check fails, so you can also use it in CI. The `forge.yaml` and GitHub-label checks will fully pass once you finish Step 2 below — re-run `doctor` any time your setup feels off.
+
+> Prefer a quick spot-check? `ls ~/.claude/commands/ | grep -E "work-on|review-pr|quality-gate"` should list `work-on.md`, `review-pr.md`, and `quality-gate.md`.
 
 ---
 

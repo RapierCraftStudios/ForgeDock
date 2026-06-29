@@ -96,9 +96,12 @@ npx forgedock
 
 # Generate config for your repo
 npx forgedock init
+
+# Verify everything is wired up correctly
+npx forgedock doctor
 ```
 
-This symlinks 25+ pipeline commands into `~/.claude/commands/` and generates a `forge.yaml` config in your project root. That's it — open Claude Code and run `/work-on #42`.
+This symlinks 25+ pipeline commands into `~/.claude/commands/` and generates a `forge.yaml` config in your project root. `npx forgedock doctor` runs an installation health check — command symlinks, `forge.yaml`, required tools (`gh`, `yq`, Claude Code), GitHub workflow labels, and Playwright MCP — printing a clear pass/fail/warn line with a fix hint for each, and exiting non-zero if anything is broken. Run it any time your setup feels off. That's it — open Claude Code and run `/work-on #42`.
 
 **Try it risk-free:** Follow the [5-minute Getting Started walkthrough](docs/site/getting-started.md) to install, configure, and run your first pipeline end-to-end. New to the commands? Start with the [Command Reference](docs/site/command-reference.md) for a guided tour of what each one does.
 

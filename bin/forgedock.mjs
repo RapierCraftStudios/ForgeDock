@@ -2515,6 +2515,104 @@ async function doctor() {
     }
   }
 
+  // ── Check 10: yq installed ────────────────────────────────────────────────
+  // yq is a hard dependency: pipeline commands (work-on, review-pr, orchestrate)
+  // read forge.yaml via yq. Without it, those commands fail. Fixed literal
+  // command — no interpolation, so no injection surface (cf. #663/#789/#807).
+  {
+    let yqVersion = "";
+    try {
+      yqVersion = execSync("yq --version", {
+        stdio: ["ignore", "pipe", "ignore"],
+        encoding: "utf-8",
+      }).trim();
+    } catch {
+      // yq not installed or not on PATH
+    }
+
+    if (yqVersion) {
+      pass("yq", yqVersion);
+    } else {
+      fail(
+        "yq",
+        "Install the YAML processor (used to read forge.yaml): https://github.com/mikefarah/yq#install",
+      );
+    }
+  }
+
+  // ── Check 11: Claude Code installed + version compatible ───────────────────
+  // The compatibility floor is the @anthropic-ai/claude-code peerDependency in
+  // package.json (read dynamically so it never drifts from the declared floor).
+  // Not-on-PATH is a warning, not a failure: Claude Code may run as the host
+  // process without exposing the `claude` CLI on PATH, so a hard fail would be a
+  // false negative. Only an installed-but-too-old version is a hard failure.
+  {
+    // Resolve the minimum compatible version from package.json peerDependencies.
+    let minClaudeVersion = "2.0.0";
+    try {
+      const pkgRaw = readFileSync(join(FORGE_HOME, "package.json"), "utf-8");
+      const pkg = JSON.parse(pkgRaw);
+      const range = pkg?.peerDependencies?.["@anthropic-ai/claude-code"];
+      if (typeof range === "string") {
+        const m = range.match(/(\d+\.\d+\.\d+)/);
+        if (m) minClaudeVersion = m[1];
+      }
+    } catch {
+      // package.json unreadable — keep the hardcoded fallback floor.
+    }
+
+    let claudeRaw = "";
+    let claudeInstalled = false;
+    try {
+      claudeRaw = execSync("claude --version", {
+        stdio: ["ignore", "pipe", "ignore"],
+        encoding: "utf-8",
+      }).trim();
+      claudeInstalled = true;
+    } catch {
+      // claude CLI not on PATH
+    }
+
+    if (!claudeInstalled) {
+      warn(
+        "Claude Code",
+        `\`claude\` CLI not found on PATH (need >= v${minClaudeVersion}). If you run Claude Code without the CLI on PATH this is fine; otherwise install it: https://docs.anthropic.com/en/docs/claude-code`,
+      );
+    } else {
+      const verMatch = claudeRaw.match(/(\d+)\.(\d+)\.(\d+)/);
+      if (!verMatch) {
+        warn(
+          "Claude Code",
+          `installed but version string could not be parsed ("${claudeRaw}"). Expected >= v${minClaudeVersion}.`,
+        );
+      } else {
+        const found = [
+          Number(verMatch[1]),
+          Number(verMatch[2]),
+          Number(verMatch[3]),
+        ];
+        const floor = minClaudeVersion.split(".").map(Number);
+        // Lexicographic semver comparison: found >= floor ?
+        let compatible = true;
+        for (let i = 0; i < 3; i++) {
+          if (found[i] > floor[i]) break;
+          if (found[i] < floor[i]) {
+            compatible = false;
+            break;
+          }
+        }
+        if (compatible) {
+          pass("Claude Code", `v${found.join(".")} (compatible, >= v${minClaudeVersion})`);
+        } else {
+          fail(
+            "Claude Code",
+            `v${found.join(".")} is below the supported floor v${minClaudeVersion}. Update Claude Code: https://docs.anthropic.com/en/docs/claude-code`,
+          );
+        }
+      }
+    }
+  }
+
   // ── Summary ────────────────────────────────────────────────────────────────
   console.log("");
   if (failures === 0 && warnings === 0) {
