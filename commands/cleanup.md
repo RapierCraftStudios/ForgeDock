@@ -47,7 +47,7 @@ All `{GH_REPO}`, `{GH_FLAG}`, `{REPO_PATH}`, `{STAGING_BRANCH}`, `{PROJECT_BOARD
 | `labels` or empty | Fix stale/missing workflow labels on closed issues |
 | `orphans` | Close open issues whose PRs are already merged |
 | `branches` | Prune worktrees and remote branches for merged PRs |
-| `milestones` | Close milestones with 0 open issues |
+| `milestones` | Report milestones with 0 open issues (advisory — never closes) |
 | `board` | Sync closed issues to Project board with correct terminal state |
 | `all` | All of the above, in order |
 
@@ -192,38 +192,28 @@ fi
 
 ---
 
-## Phase 4: Milestone Hygiene
+## Phase 4: Milestone Hygiene (Advisory Only)
 
-### 4A: Find completed milestones
+**NEVER close milestones in this phase.** Milestones are only closed by `/milestone ship` (human-gated) or `/milestone close` (explicit abandonment). Incorrect closure destroys milestone state that cannot be trivially recovered. <!-- fix: forge#1160 -->
+
+### 4A: Find milestones with 0 open issues
 
 ```bash
 # List open milestones with 0 remaining issues
 gh api repos/:owner/:repo/milestones --jq '.[] | select(.state == "open" and .open_issues == 0) | "\(.number) | \(.title) | open:\(.open_issues) closed:\(.closed_issues)"'
 ```
 
-### 4B: Close completed milestones (shipping-verified only)
+### 4B: Report findings (DO NOT close)
 
-For each milestone with 0 open issues, verify the milestone branch has been merged to staging or main before closing:
+For each milestone with 0 open issues, report it as a candidate for shipping or closing — but take no action:
 
 ```bash
-# Derive slug from milestone title (lowercase, spaces→hyphens, strip non-alphanumeric except hyphens)
-SLUG=$(echo "$MILESTONE_TITLE" | tr '[:upper:]' '[:lower:]' | tr ' ' '-' | tr -cd 'a-z0-9-')
-
-# Check if milestone branch was merged to staging or main
-SHIPPED_STAGING=$(gh pr list --base staging --head "milestone/$SLUG" --state merged --json number --jq '.[0].number' 2>/dev/null)
-SHIPPED_MAIN=$(gh pr list --base main --head "milestone/$SLUG" --state merged --json number --jq '.[0].number' 2>/dev/null)
-
-if [ -n "$SHIPPED_STAGING" ] || [ -n "$SHIPPED_MAIN" ]; then
-  # Safe to close — code has been shipped to staging or main
-  gh api repos/:owner/:repo/milestones/$MILESTONE_NUMBER -X PATCH -f state=closed
-  echo "CLOSED milestone: $MILESTONE_TITLE (shipped via PR #${SHIPPED_STAGING:-$SHIPPED_MAIN})"
-else
-  # DO NOT close — code is only on the milestone branch, not yet shipped
-  echo "SKIPPED: $MILESTONE_TITLE — issues done but milestone branch not merged to staging or main"
-fi
+echo "ADVISORY: $MILESTONE_TITLE — 0 open issues, $CLOSED_ISSUES closed"
+echo "  → To ship: /milestone ship $SLUG"
+echo "  → To abandon: /milestone close $SLUG"
 ```
 
-**Exception**: Don't close milestones that are intentionally kept open for future work (check if the milestone description says "ongoing" or "rolling"). If unsure, **SKIP it** — milestones are only closed by `/milestone ship` after code reaches staging. Incorrect closure destroys milestone state that cannot be trivially recovered.
+Do NOT call `gh api ... -X PATCH -f state=closed` on any milestone. This phase is informational only.
 
 ---
 
@@ -281,15 +271,10 @@ fi
 | Local branches deleted | {N} |
 | Remote branches deleted | {N} |
 
-### Milestones Closed
-| Milestone | Issues (closed) | Shipped via |
-|-----------|-----------------|-------------|
-| {title} | {N} | PR #{M} → staging/main |
-
-### Milestones Skipped (unshipped)
-| Milestone | Issues (closed) | Reason |
-|-----------|-----------------|--------|
-| {title} | {N} | No merged PR from milestone/{slug} → staging or main |
+### Milestones Ready to Ship (advisory — no action taken)
+| Milestone | Issues (closed) | Recommended Action |
+|-----------|-----------------|-------------------|
+| {title} | {N} | `/milestone ship {slug}` or `/milestone close {slug}` |
 
 ### Board Synced
 | Action | Count |
