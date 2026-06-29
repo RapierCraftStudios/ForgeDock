@@ -1753,7 +1753,75 @@ blocked; draft PRs append `(draft)`):
 ╚═══════════════════════════════════════════════════╝
 ```
 
-The machine-readable twin (`CARD_JSON` from C4.5c) is embedded in the trajectory comment by 7B.
+**Gather real stats** (C4.5a — this block MUST run on the inline path to populate card variables;
+do NOT rely on the cross-reference to `close.md` alone):
+
+```bash
+PR_STATS=$(gh pr view {PR_NUMBER} {GH_FLAG} --json commits,additions,deletions,baseRefName,isDraft 2>/dev/null)
+COMMITS=$(echo "$PR_STATS"   | jq -r '(.commits | length) // empty' 2>/dev/null); COMMITS=${COMMITS:-—}
+ADDITIONS=$(echo "$PR_STATS" | jq -r '.additions // empty' 2>/dev/null); ADDITIONS=${ADDITIONS:-—}
+DELETIONS=$(echo "$PR_STATS" | jq -r '.deletions // empty' 2>/dev/null); DELETIONS=${DELETIONS:-—}
+PR_TARGET=$(echo "$PR_STATS" | jq -r '.baseRefName // empty' 2>/dev/null); PR_TARGET=${PR_TARGET:-{PR_BASE}}
+IS_DRAFT=$(echo "$PR_STATS"  | jq -r '.isDraft // false' 2>/dev/null)
+
+REVIEW_BODIES=$(gh pr view {PR_NUMBER} {GH_FLAG} --json reviews,comments \
+  --jq '[.reviews[].body // ""] + [.comments[].body // ""] | .[]' 2>/dev/null)
+# NOTE: `grep -c` already prints `0` on no match (and exits non-zero) — do NOT add
+# `|| echo 0`, which would append a second line ("0\n0") and break the arithmetic
+# and `--argjson` below. Swallow the non-zero exit with `|| true`, then default.
+APPROVED=$(echo "$REVIEW_BODIES" | grep -cE 'APPROVED:' 2>/dev/null || true); APPROVED=${APPROVED:-0}
+CHANGES=$(echo  "$REVIEW_BODIES" | grep -cE 'CHANGES REQUESTED:' 2>/dev/null || true); CHANGES=${CHANGES:-0}
+TOTAL_AGENTS=$((APPROVED + CHANGES))
+BLOCKERS=$(echo "$REVIEW_BODIES" | grep -ciE 'blocker|merge.?block' 2>/dev/null || true); BLOCKERS=${BLOCKERS:-0}
+if [ "$TOTAL_AGENTS" -gt 0 ]; then
+  REVIEW_SUMMARY="${APPROVED}/${TOTAL_AGENTS} agents passed, ${BLOCKERS} blockers"
+else
+  REVIEW_SUMMARY="—"   # review data unavailable (e.g. review skipped)
+fi
+
+FIRST_TS=$(gh api repos/{GH_REPO}/issues/{NUMBER}/comments \
+  --jq '[.[] | select(.body | contains("FORGE:")) | .created_at] | sort | .[0] // empty' 2>/dev/null)
+if [ -n "$FIRST_TS" ]; then
+  START_EPOCH=$(date -u -d "$FIRST_TS" +%s 2>/dev/null || echo "")
+  NOW_EPOCH=$(date -u +%s)
+  if [ -n "$START_EPOCH" ]; then
+    ELAPSED_SECS=$((NOW_EPOCH - START_EPOCH))
+    ELAPSED=$(printf '%dm %02ds' $((ELAPSED_SECS / 60)) $((ELAPSED_SECS % 60)))
+  else ELAPSED="—"; ELAPSED_SECS=0; fi
+else ELAPSED="—"; ELAPSED_SECS=0; fi
+
+case "{TERMINAL_STATE}" in
+  decomposed) PIPELINE_LINE="investigate → decompose ⏹"; CARD_STATUS="decomposed" ;;
+  invalid)    PIPELINE_LINE="investigate → invalid ✗";   CARD_STATUS="invalid" ;;
+  blocked)    PIPELINE_LINE="investigate → build → blocked ⚠"; CARD_STATUS="blocked" ;;
+  *)          PIPELINE_LINE="investigate → architect → build → review → merge ✓"; CARD_STATUS="merged" ;;
+esac
+[ "$IS_DRAFT" = "true" ] && PIPELINE_LINE="${PIPELINE_LINE} (draft)"
+```
+
+**Build the machine-readable twin** (C4.5c — MUST run this block to assign `CARD_JSON` before
+Phase 7B embeds it; the cross-reference to `close.md` above is insufficient on the inline path): <!-- forge#1178 -->
+
+```bash
+CARD_JSON=$(jq -nc \
+  --argjson issue {NUMBER} \
+  --arg title "{TITLE}" \
+  --arg status "$CARD_STATUS" \
+  --arg pipeline "$PIPELINE_LINE" \
+  --arg pr "{PR_NUMBER}" \
+  --arg target "$PR_TARGET" \
+  --arg commits "$COMMITS" --arg adds "$ADDITIONS" --arg dels "$DELETIONS" \
+  --arg review "$REVIEW_SUMMARY" --argjson blockers "${BLOCKERS:-0}" \
+  --argjson elapsed "${ELAPSED_SECS:-0}" \
+  '{issue:$issue, title:$title, status:$status, pipeline:$pipeline,
+    pr:($pr|tonumber? // null), pr_target:$target,
+    commits:($commits|tonumber? // null),
+    additions:($adds|tonumber? // null),
+    deletions:($dels|tonumber? // null),
+    review:$review, blockers:$blockers, elapsed_seconds:$elapsed}')
+```
+
+`CARD_JSON` is now set and embedded in the trajectory comment by 7B.
 
 ### 7B: Trajectory Log (MANDATORY)
 
