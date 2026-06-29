@@ -164,6 +164,7 @@ For a deep dive into how this works, read [How ForgeDock's Knowledge Graph Works
 
 ## Next Steps
 
+- [Command Learning Path](./command-learning-path.md) — which commands to learn next, tiered by when you need them
 - [How ForgeDock's Knowledge Graph Works](./how-it-works.md) — understand the architecture
 - [What Are Those FORGE Comments?](./annotations-explained.md) — a 2-minute explainer for the annotations on your issues
 - [ForgeDock vs. Manual Claude Code Workflows](./vs-manual-workflows.md) — why this beats ad-hoc prompting
