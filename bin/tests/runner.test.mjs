@@ -258,6 +258,64 @@ describe("getToolHandlers", () => {
     assert.throws(() => handlers.write_file({ content: "x" }), /requires a 'path'/);
     assert.throws(() => handlers.run_bash({}), /requires a 'command'/);
   });
+
+  // -------------------------------------------------------------------------
+  // SEC: read_file and write_file path confinement (issue #1172)
+  // A prompt-injection payload must not be able to read /proc/self/environ or
+  // any file outside the working directory via model-controlled path input.
+  // -------------------------------------------------------------------------
+
+  it("read_file rejects absolute paths (SEC: arbitrary host file read)", () => {
+    const handlers = getToolHandlers(TMP);
+    // Simulate a prompt-injection payload: read_file("/proc/self/environ")
+    assert.throws(
+      () => handlers.read_file({ path: "/proc/self/environ" }),
+      /Absolute paths are not permitted/,
+    );
+    // Windows-style absolute path
+    assert.throws(
+      () => handlers.read_file({ path: "C:\\Windows\\system.ini" }),
+      /Absolute paths are not permitted/,
+    );
+  });
+
+  it("read_file rejects '../' path escape (SEC: working-directory confinement)", () => {
+    const handlers = getToolHandlers(TMP);
+    assert.throws(
+      () => handlers.read_file({ path: "../etc/passwd" }),
+      /Path escape detected/,
+    );
+    assert.throws(
+      () => handlers.read_file({ path: "subdir/../../secret" }),
+      /Path escape detected/,
+    );
+  });
+
+  it("read_file allows valid relative paths (regression: confinement must not break normal use)", () => {
+    const handlers = getToolHandlers(COMMANDS_DIR);
+    // work-on.md was written in the before() fixture
+    const out = handlers.read_file({ path: "work-on.md" });
+    assert.match(out, /Do the work/);
+    // nested path inside cwd
+    const out2 = handlers.read_file({ path: "work-on/build.md" });
+    assert.match(out2, /build spec/);
+  });
+
+  it("write_file rejects absolute paths (SEC: arbitrary host file write)", () => {
+    const handlers = getToolHandlers(TMP);
+    assert.throws(
+      () => handlers.write_file({ path: "/tmp/evil.sh", content: "rm -rf /" }),
+      /Absolute paths are not permitted/,
+    );
+  });
+
+  it("write_file rejects '../' path escape (SEC: working-directory confinement)", () => {
+    const handlers = getToolHandlers(TMP);
+    assert.throws(
+      () => handlers.write_file({ path: "../outside.txt", content: "escaped" }),
+      /Path escape detected/,
+    );
+  });
 });
 
 // ---------------------------------------------------------------------------

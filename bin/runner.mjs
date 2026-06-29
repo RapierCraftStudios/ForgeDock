@@ -216,11 +216,11 @@ export const TOOL_DEFINITIONS = [
   {
     name: "read_file",
     description:
-      "Read the contents of a file. Path may be absolute or relative to the working directory.",
+      "Read the contents of a file. Path must be relative to the working directory. Absolute paths and paths that escape the working directory (e.g. '../') are rejected.",
     input_schema: {
       type: "object",
       properties: {
-        path: { type: "string", description: "File path to read." },
+        path: { type: "string", description: "File path to read (relative to working directory)." },
       },
       required: ["path"],
     },
@@ -228,11 +228,11 @@ export const TOOL_DEFINITIONS = [
   {
     name: "write_file",
     description:
-      "Create or overwrite a file with the given content. Parent directories are created as needed. Path may be absolute or relative to the working directory.",
+      "Create or overwrite a file with the given content. Parent directories are created as needed. Path must be relative to the working directory. Absolute paths and paths that escape the working directory (e.g. '../') are rejected.",
     input_schema: {
       type: "object",
       properties: {
-        path: { type: "string", description: "File path to write." },
+        path: { type: "string", description: "File path to write (relative to working directory)." },
         content: { type: "string", description: "Full file content." },
       },
       required: ["path", "content"],
@@ -259,6 +259,41 @@ export const TOOL_DEFINITIONS = [
  */
 function resolvePath(cwd, p) {
   return isAbsolute(p) ? p : join(cwd, p);
+}
+
+/**
+ * Resolve a model-controlled path, confining it to cwd.
+ *
+ * Absolute paths are rejected outright — the runner is designed to feed
+ * untrusted third-party content into the model loop (prompt injection is
+ * explicitly in scope), so model-controlled paths must never escape the working
+ * directory. A prompt-injection payload could otherwise call
+ * read_file("/proc/self/environ") to leak ANTHROPIC_API_KEY into model context,
+ * or write_file("/etc/cron.d/evil") for privilege escalation.
+ *
+ * Mirrors the guard used by resolveSpecPath (the positive example already in
+ * this file): reject when relative(cwd, resolved) starts with ".." or is
+ * absolute.
+ *
+ * @param {string} cwd   - Absolute path to the allowed root directory.
+ * @param {string} p     - Model-supplied path (must be relative).
+ * @returns {string}     - Absolute resolved path (guaranteed inside cwd).
+ * @throws {Error}       - If p is absolute or resolves outside cwd.
+ */
+function resolveConfinedPath(cwd, p) {
+  if (isAbsolute(p)) {
+    throw new Error(
+      `Absolute paths are not permitted. Use a path relative to the working directory. Got: ${p}`,
+    );
+  }
+  const resolved = join(cwd, p);
+  const rel = relative(cwd, resolved);
+  if (rel.startsWith("..") || isAbsolute(rel)) {
+    throw new Error(
+      `Path escape detected: "${p}" resolves outside the working directory. Use a path relative to the working directory.`,
+    );
+  }
+  return resolved;
 }
 
 /**
@@ -308,11 +343,11 @@ export function getToolHandlers(cwd) {
   return {
     read_file: ({ path }) => {
       if (!path) throw new Error("read_file requires a 'path'");
-      return readFileSync(resolvePath(cwd, path), "utf-8");
+      return readFileSync(resolveConfinedPath(cwd, path), "utf-8");
     },
     write_file: ({ path, content }) => {
       if (!path) throw new Error("write_file requires a 'path'");
-      const target = resolvePath(cwd, path);
+      const target = resolveConfinedPath(cwd, path);
       mkdirSync(dirname(target), { recursive: true });
       writeFileSync(target, content ?? "", "utf-8");
       return `Wrote ${Buffer.byteLength(content ?? "", "utf-8")} bytes to ${path}`;
