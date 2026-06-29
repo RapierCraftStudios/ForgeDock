@@ -1590,6 +1590,22 @@ done
 
 Aggregate into the batch-level analytics for Step 6B.
 
+**Also collect the machine-readable summary cards** (`<!-- FORGE:CARD {json} -->`, embedded in
+each issue's `FORGE:TRAJECTORY` comment by `/work-on` close phase). These power the per-issue and
+batch cards in Step 6C:
+
+```bash
+CARDS=""
+for NUM in {all_completed_issue_numbers}; do
+  CARD=$(gh api repos/{GH_REPO}/issues/${NUM}/comments \
+    --jq '.[] | select(.body | contains("FORGE:CARD")) | .body' 2>/dev/null \
+    | grep -oP '(?<=<!-- FORGE:CARD ).*(?= -->)' | head -1)
+  [ -n "$CARD" ] && CARDS="${CARDS}${CARD}"$'\n'
+done
+# CARDS is now a newline-delimited list of per-issue JSON objects (skip any issue whose
+# card is absent — pre-card runs or non-merged terminal states degrade gracefully).
+```
+
 ### Step 6B: Present consolidated report
 
 ```
@@ -1693,6 +1709,56 @@ Aggregate into the batch-level analytics for Step 6B.
 {If some failed: "Issues #{X}, #{Y} need manual attention. Re-run with `/work-on #{X}` after resolving blockers."}
 {If fast-lane: "All fixes merged to staging. Merge staging → main via GitHub web UI when ready to deploy."}
 ```
+
+### Step 6C: Pipeline Summary Cards (the shareable moment)
+
+Render one compact summary card per completed issue (from the `CARDS` JSON collected in Step 6A),
+then a single batch-level summary card. These are the shareable artifacts a developer screenshots
+after an orchestration run. Print all cards to stdout.
+
+**Per-issue card** — emit one for each JSON object in `CARDS`. Use the same box-drawing style and
+51-column inner width as `work-on/close.md` Phase C4.5b. Read fields directly from the JSON
+(`issue`, `title`, `pipeline`, `commits`, `additions`, `deletions`, `pr`, `pr_target`, `review`,
+`elapsed_seconds`). Truncate long titles with `…`; render `null` numeric fields as `—`. The
+`pipeline`/`status` field already encodes skipped phases (decomposed/invalid/blocked), so reflect
+it verbatim. Skip issues with no card (graceful — pre-card or non-merged runs).
+
+**Batch summary card** — aggregate across all collected cards:
+
+```
+╔═══════════════════════════════════════════════════╗
+║  ForgeDock Orchestration Complete                 ║
+╠═══════════════════════════════════════════════════╣
+║                                                   ║
+║  Scope:    {milestone / issue list}               ║
+║  Issues:   {N} merged · {M} blocked · {K} invalid ║
+║  Commits:  {SUM_COMMITS} ({SUM_ADD} additions, {SUM_DEL} deletions) ║
+║  PRs:      {N} merged                             ║
+║  Findings: {N} spawned · {M} resolved             ║
+║  Time:     {BATCH_ELAPSED}                        ║
+║                                                   ║
+╚═══════════════════════════════════════════════════╝
+```
+
+Aggregate with `jq` over the collected cards (every sum degrades gracefully — `null`/missing
+fields are treated as 0; never fabricate):
+
+```bash
+echo "$CARDS" | grep -v '^$' | jq -s '{
+  merged:   (map(select(.status=="merged"))   | length),
+  blocked:  (map(select(.status=="blocked"))  | length),
+  invalid:  (map(select(.status=="invalid"))  | length),
+  commits:  (map(.commits   // 0) | add),
+  adds:     (map(.additions // 0) | add),
+  dels:     (map(.deletions // 0) | add),
+  prs:      (map(select(.pr != null)) | length),
+  elapsed:  (map(.elapsed_seconds // 0) | add)
+}'
+```
+
+The batch card's `Findings:` line is filled from the review-finding counts already computed in
+the Summary section above. `BATCH_ELAPSED` is the wall-clock duration of the orchestration run
+(Step 6B `Duration`), not the sum of per-issue elapsed times.
 
 ---
 
