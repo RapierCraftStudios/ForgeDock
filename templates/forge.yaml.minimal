@@ -1,0 +1,44 @@
+# forge.yaml — ForgeDock Configuration (minimal)
+#
+# The smallest config that runs the full pipeline. Copy it to your project root:
+#
+#   cp forge.yaml.minimal forge.yaml
+#
+# ...or generate one with detected values automatically:
+#
+#   npx forgedock init --minimal
+#
+# Only project, paths, and branches are required — everything else is optional
+# and falls back to sensible defaults. Start here and add sections as you need
+# them. See forge.yaml.example and docs/CONFIG.md for the full reference.
+#
+# This mirrors ForgeDock's own real-world config: a handful of lines is enough.
+
+# =============================================================================
+# PROJECT (REQUIRED)
+# =============================================================================
+
+project:
+  name: "My Project"
+  owner: "my-github-org"
+  repo: "my-repo"
+
+# =============================================================================
+# PATHS (REQUIRED)
+# Local paths used for git worktrees. worktree_base defaults to
+# {root}/.claude/worktrees.
+# =============================================================================
+
+paths:
+  root: "/path/to/my-repo"
+  worktree_base: "/path/to/my-repo/.claude/worktrees"
+
+# =============================================================================
+# BRANCHES (REQUIRED)
+# Set staging to your default branch if you have no separate staging branch.
+# =============================================================================
+
+branches:
+  default: "main"
+  staging: "staging"
+  feature_pattern: "milestone/{slug}"
