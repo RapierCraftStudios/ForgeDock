@@ -26,25 +26,17 @@
 
 <br />
 
-## Why ForgeDock
+## What ForgeDock Does
 
-AI coding agents forget everything between sessions. They re-investigate the same bugs, miss context from past PRs, and make mistakes that were already caught and fixed last week. There's no institutional memory.
+ForgeDock runs the full issue lifecycle inside Claude Code — **investigate, architect, build, quality-gate, review, and merge** — autonomously. You open an issue, run `/work-on #42`, and click merge. Every stage writes structured context back to GitHub, so the next agent starts smart, not blind.
 
-ForgeDock fixes this by using **GitHub itself** as the memory layer. Every pipeline stage writes structured `FORGE:` annotations to issues and PRs. Every downstream agent reads them. When a new session starts — even after Claude's context resets — the agent queries GitHub and picks up exactly where the last one left off.
+```
+You:        /work-on #42
+ForgeDock:  Investigate → Architect → Build → Quality Gate → Review → open PR
+You:        click merge
+```
 
----
-
-## How Is This Different
-
-ForgeDock is **not another AI coding agent.** It's a set of prompt-engineered command specs (`.md` files) that run inside Claude Code. No new runtime, no separate process, no vendor lock-in beyond what you already use.
-
-| | ForgeDock | Plain Claude Code | Cursor / Windsurf | Devin / Sweep |
-|---|---|---|---|---|
-| Memory across sessions | Structured annotations on GitHub | CLAUDE.md + manual notes | Per-project context | Proprietary cloud state |
-| Autonomous pipeline | Full lifecycle: investigate → merge | Manual, step by step | Autocomplete + chat | Autonomous but opaque |
-| Review quality | 9 domain-specialist agents | You review everything | Basic suggestions | Varies |
-| Infrastructure needed | None — just `npx forgedock` | None | IDE-specific | Cloud service |
-| Codebase visibility | Everything stays on GitHub | Local | Local + cloud sync | Cloud-only |
+No new runtime, no separate process, no cloud service — just prompt-engineered command specs that run inside the Claude Code you already use.
 
 ---
 
@@ -60,6 +52,78 @@ ForgeDock is **not another AI coding agent.** It's a set of prompt-engineered co
 | **Parallel orchestration** | `/orchestrate` decomposes milestones into waves and runs `/work-on` on each in parallel. |
 
 > **Cost note:** ForgeDock itself is free and open-source. It orchestrates Claude Code sessions, so you pay your normal Anthropic API usage. A typical `/work-on` run on a straightforward bug uses roughly the same tokens as a 15–20 minute manual Claude Code session.
+
+---
+
+## How It Works
+
+```
+Issue → Investigate → Architect → Build → Quality Gate → Review → Merge
+              ↓            ↓         ↓          ↓            ↓
+        writes to     reads from  reads from  reads from   writes to
+         GitHub        GitHub      GitHub      GitHub       GitHub
+```
+
+Each stage writes a structured annotation (`<!-- FORGE:INVESTIGATOR -->`, `<!-- FORGE:CONTRACT -->`, etc.) to the GitHub issue or PR. Each downstream stage reads what came before. The `gh` CLI is the query interface.
+
+| Stage | What it does |
+|---|---|
+| **Investigate** | Traces root cause via `git blame`, related issues/PRs. Writes verdict, affected files, severity. |
+| **Context** | Surfaces historical bugs and known pitfalls from the same module. Institutional memory. |
+| **Architect** | Produces ordered implementation plan with exact file/function/line targets. |
+| **Build** | Writes code, creates branch, makes commits. Follows the architect's plan. |
+| **Quality Gate** | 14+ domain-specific checks (security, auth, DB, concurrency, etc.) |
+| **Review** | 9 specialist agents review the PR diff with confidence-rated findings. |
+| **Close** | Records full audit trail as `FORGE:TRAJECTORY`. |
+
+Labels track workflow state (`workflow:investigating`, `workflow:building`, `workflow:in-review`, `workflow:merged`). The pipeline resumes from whatever state GitHub says it's in — restart-safe by design.
+
+---
+
+## Install
+
+**Requirements:** [Node.js 18+](https://nodejs.org/), [Claude Code](https://docs.anthropic.com/en/docs/claude-code), [GitHub CLI (`gh`)](https://cli.github.com/), [`yq`](https://github.com/mikefarah/yq) (YAML parser used by pipeline commands to read `forge.yaml`), and **[Playwright MCP](https://github.com/microsoft/playwright-mcp)** (browser automation for `/qa-sweep` and visual testing commands)
+
+> **Playwright MCP** is a guaranteed ForgeDock dependency for browser automation commands. Register it in Claude Code after installing ForgeDock:
+> ```bash
+> claude mcp add playwright npx @playwright/mcp@latest
+> ```
+> Verify with `npx forgedock doctor` — Check 9 confirms Playwright MCP is registered.
+
+```bash
+# Install pipeline commands
+npx forgedock
+
+# Generate config for your repo
+npx forgedock init
+```
+
+This symlinks 25+ pipeline commands into `~/.claude/commands/` and generates a `forge.yaml` config in your project root. That's it — open Claude Code and run `/work-on #42`.
+
+**Try it risk-free:** Follow the [5-minute Getting Started walkthrough](docs/site/getting-started.md) to install, configure, and run your first pipeline end-to-end. New to the commands? Start with the [Command Reference](docs/site/command-reference.md) for a guided tour of what each one does.
+
+<details>
+<summary><strong>Other install methods & commands</strong></summary>
+
+**Claude Code Plugin Marketplace** (v2.1.143+):
+```
+/plugin marketplace add RapierCraftStudios/ForgeDock
+/plugin install forgedock@forgedock
+```
+
+**CLI commands:**
+```bash
+npx forgedock update       # Pull latest commands
+npx forgedock uninstall    # Remove all ForgeDock commands from ~/.claude/commands/
+npx forgedock help         # Show all available commands
+```
+
+**AI-powered setup** (inside Claude Code):
+```
+/forgedock-init            # Guided config walkthrough — scans your repo, queries GitHub, auto-fills forge.yaml
+```
+
+</details>
 
 <details>
 <summary><strong>See a real pipeline run</strong></summary>
@@ -93,48 +157,26 @@ The context phase surfaced two historical bugs (#577, #587) in the same module �
 
 ---
 
-## Install
+## Commands
 
-**Requirements:** [Node.js 18+](https://nodejs.org/), [Claude Code](https://docs.anthropic.com/en/docs/claude-code), [GitHub CLI (`gh`)](https://cli.github.com/), [`yq`](https://github.com/mikefarah/yq) (YAML parser used by pipeline commands to read `forge.yaml`), and **[Playwright MCP](https://github.com/microsoft/playwright-mcp)** (browser automation for `/qa-sweep` and visual testing commands)
-
-> **Playwright MCP** is a guaranteed ForgeDock dependency for browser automation commands. Register it in Claude Code after installing ForgeDock:
-> ```bash
-> claude mcp add playwright npx @playwright/mcp@latest
-> ```
-> Verify with `npx forgedock doctor` — Check 9 confirms Playwright MCP is registered.
-
-```bash
-# Install pipeline commands
-npx forgedock
-
-# Generate config for your repo
-npx forgedock init
-```
-
-This symlinks 25+ pipeline commands into `~/.claude/commands/` and generates a `forge.yaml` config in your project root. That's it — open Claude Code and run `/work-on #42`.
-
-<details>
-<summary><strong>Other install methods & commands</strong></summary>
-
-**Claude Code Plugin Marketplace** (v2.1.143+):
-```
-/plugin marketplace add RapierCraftStudios/ForgeDock
-/plugin install forgedock@forgedock
-```
-
-**CLI commands:**
-```bash
-npx forgedock update       # Pull latest commands
-npx forgedock uninstall    # Remove all ForgeDock commands from ~/.claude/commands/
-npx forgedock help         # Show all available commands
-```
-
-**AI-powered setup** (inside Claude Code):
-```
-/forgedock-init            # Guided config walkthrough — scans your repo, queries GitHub, auto-fills forge.yaml
-```
-
-</details>
+| Command | What it does |
+|---|---|
+| **`/work-on #N`** | Full issue lifecycle: investigate → build → review → merge |
+| `/issue` | Create a pipeline-ready GitHub issue |
+| `/orchestrate` | Parallel execution across a milestone's issues |
+| `/review-pr` | PR review with 9 domain-specialist agents |
+| `/quality-gate` | Pre-commit checks across 14+ domains |
+| `/milestone` | Plan and ship milestones |
+| `/deploy-info` | Staging vs main diff with risk assessment |
+| `/review-pr-staging` | Staging-to-main review gate |
+| `/rollback` | Automated revert PR for production incidents |
+| `/incident-response` | P0 coordination: hotfix, timeline, postmortem |
+| `/autopilot` | Autonomous improvement: recon → triage → fix |
+| `/pipeline-health` | Self-analysis and prompt tuning |
+| `/security-audit` | 4-phase security posture audit |
+| `/qa-sweep` | Full platform QA via browser automation |
+| `/analytics` | Pull metrics from GSC, Clarity, Umami, Stripe |
+| `/cleanup` | Sweep stale issues, branches, worktrees |
 
 ---
 
@@ -165,61 +207,25 @@ If another tool runs its own install script that targets `~/.claude/commands/`, 
 
 ---
 
-## How It Works
+## Why ForgeDock
 
-```
-Issue → Investigate → Architect → Build → Quality Gate → Review → Merge
-              ↓            ↓         ↓          ↓            ↓
-        writes to     reads from  reads from  reads from   writes to
-         GitHub        GitHub      GitHub      GitHub       GitHub
-```
+AI coding agents forget everything between sessions. They re-investigate the same bugs, miss context from past PRs, and make mistakes that were already caught and fixed last week. There's no institutional memory.
 
-Each stage writes a structured annotation (`<!-- FORGE:INVESTIGATOR -->`, `<!-- FORGE:CONTRACT -->`, etc.) to the GitHub issue or PR. Each downstream stage reads what came before. The `gh` CLI is the query interface.
-
-| Stage | What it does |
-|---|---|
-| **Investigate** | Traces root cause via `git blame`, related issues/PRs. Writes verdict, affected files, severity. |
-| **Context** | Surfaces historical bugs and known pitfalls from the same module. Institutional memory. |
-| **Architect** | Produces ordered implementation plan with exact file/function/line targets. |
-| **Build** | Writes code, creates branch, makes commits. Follows the architect's plan. |
-| **Quality Gate** | 14+ domain-specific checks (security, auth, DB, concurrency, etc.) |
-| **Review** | 9 specialist agents review the PR diff with confidence-rated findings. |
-| **Close** | Records full audit trail as `FORGE:TRAJECTORY`. |
-
-Labels track workflow state (`workflow:investigating`, `workflow:building`, `workflow:in-review`, `workflow:merged`). The pipeline resumes from whatever state GitHub says it's in — restart-safe by design.
+ForgeDock fixes this by using **GitHub itself** as the memory layer. Every pipeline stage writes structured `FORGE:` annotations to issues and PRs. Every downstream agent reads them. When a new session starts — even after Claude's context resets — the agent queries GitHub and picks up exactly where the last one left off.
 
 ---
 
-## Commands
+## How Is This Different
 
-| Command | What it does |
-|---|---|
-| **`/work-on #N`** | Full issue lifecycle: investigate → build → review → merge |
-| `/issue` | Create a pipeline-ready GitHub issue |
-| `/orchestrate` | Parallel execution across a milestone's issues |
-| `/review-pr` | PR review with 9 domain-specialist agents |
-| `/quality-gate` | Pre-commit checks across 14+ domains |
-| `/milestone` | Plan and ship milestones |
-| `/deploy-info` | Staging vs main diff with risk assessment |
-| `/review-pr-staging` | Staging-to-main review gate |
-| `/rollback` | Automated revert PR for production incidents |
-| `/incident-response` | P0 coordination: hotfix, timeline, postmortem |
-| `/autopilot` | Autonomous improvement: recon → triage → fix |
-| `/pipeline-health` | Self-analysis and prompt tuning |
-| `/security-audit` | 4-phase security posture audit |
-| `/qa-sweep` | Full platform QA via browser automation |
-| `/analytics` | Pull metrics from GSC, Clarity, Umami, Stripe |
-| `/cleanup` | Sweep stale issues, branches, worktrees |
+ForgeDock is **not another AI coding agent.** It's a set of prompt-engineered command specs (`.md` files) that run inside Claude Code. No new runtime, no separate process, no vendor lock-in beyond what you already use.
 
----
-
-## Uninstall
-
-```bash
-npx forgedock uninstall
-```
-
-Removes all ForgeDock command symlinks from `~/.claude/commands/`. Your `forge.yaml` config and any `FORGE:` annotations on GitHub issues/PRs are left untouched.
+| | ForgeDock | Plain Claude Code | Cursor / Windsurf | Devin / Sweep |
+|---|---|---|---|---|
+| Memory across sessions | Structured annotations on GitHub | CLAUDE.md + manual notes | Per-project context | Proprietary cloud state |
+| Autonomous pipeline | Full lifecycle: investigate → merge | Manual, step by step | Autocomplete + chat | Autonomous but opaque |
+| Review quality | 9 domain-specialist agents | You review everything | Basic suggestions | Varies |
+| Infrastructure needed | None — just `npx forgedock` | None | IDE-specific | Cloud service |
+| Codebase visibility | Everything stays on GitHub | Local | Local + cloud sync | Cloud-only |
 
 ---
 
@@ -234,6 +240,16 @@ Removes all ForgeDock command symlinks from `~/.claude/commands/`. Your `forge.y
 **vs. Devin Knowledge Base** — Devin's KB is proprietary, opaque, and vendor-locked. ForgeDock context is plain GitHub issue comments — readable, editable, and queryable with `gh api`. No vendor lock-in, no black box.
 
 [Full comparison →](docs/comparison.md)
+
+---
+
+## Uninstall
+
+```bash
+npx forgedock uninstall
+```
+
+Removes all ForgeDock command symlinks from `~/.claude/commands/`. Your `forge.yaml` config and any `FORGE:` annotations on GitHub issues/PRs are left untouched.
 
 ---
 
