@@ -18,6 +18,8 @@
  *   buildSystemPrompt(spec, opts)           → string
  *   buildUserMessage(name, args)            → string
  *   TOOL_DEFINITIONS                        → object[]      (Anthropic tool schemas)
+ *   truncateToolResult(content)             → string        (cap + truncation marker)
+ *   resolveBashShell()                      → string|undefined (explicit shell for run_bash)
  *   getToolHandlers(cwd)                    → Record<string, fn>
  *   renderDryRun(ctx)                       → string
  *   renderSummaryCard(ctx)                  → string
@@ -49,6 +51,23 @@ const DEFAULT_MAX_TOKENS = 8192;
 // Cap tool-result payloads so a large file read or verbose command does not
 // blow the context window in a single turn.
 const MAX_TOOL_RESULT_CHARS = 100_000;
+// Sentinel appended to a tool result that was sliced to MAX_TOOL_RESULT_CHARS,
+// so the model can tell its input was cut rather than treating it as complete.
+const TRUNCATION_MARKER = "\n…[truncated]";
+
+/**
+ * Cap a tool-result string to MAX_TOOL_RESULT_CHARS, appending a visible
+ * truncation marker when (and only when) the content was actually sliced.
+ * Short results are returned unchanged.
+ *
+ * @param {string} content
+ * @returns {string}
+ */
+export function truncateToolResult(content) {
+  const str = String(content ?? "");
+  if (str.length <= MAX_TOOL_RESULT_CHARS) return str;
+  return str.slice(0, MAX_TOOL_RESULT_CHARS) + TRUNCATION_MARKER;
+}
 
 // ---------------------------------------------------------------------------
 // Command spec resolution
@@ -243,6 +262,40 @@ function resolvePath(cwd, p) {
 }
 
 /**
+ * Resolve an explicit bash shell for run_bash, or undefined to fall back to the
+ * platform default shell. The system prompt instructs the model to use
+ * bash-style git/gh/scripts invocations, so executing under bash keeps behavior
+ * consistent across platforms rather than following the host default (cmd.exe
+ * on Windows). A FORGEDOCK_SHELL override always wins. When no bash is found we
+ * return undefined so execSync falls back to the platform default and non-bash
+ * hosts still work.
+ *
+ * @returns {string|undefined} Absolute path to a bash shell, or undefined.
+ */
+export function resolveBashShell() {
+  // Explicit override always wins (even cmd.exe, if the operator insists).
+  const override = process.env.FORGEDOCK_SHELL;
+  if (override && override.trim()) return override.trim();
+
+  if (process.platform === "win32") {
+    // Prefer Git Bash / WSL bash; fall back to the platform default if absent.
+    const candidates = [
+      join(process.env.ProgramFiles || "C:\\Program Files", "Git", "bin", "bash.exe"),
+      join(
+        process.env["ProgramFiles(x86)"] || "C:\\Program Files (x86)",
+        "Git",
+        "bin",
+        "bash.exe",
+      ),
+      join(process.env.SystemRoot || "C:\\Windows", "System32", "bash.exe"),
+    ];
+    return candidates.find((c) => existsSync(c));
+  }
+  // POSIX: prefer bash, fall back to /bin/sh (bash-compatible enough).
+  return ["/bin/bash", "/usr/bin/bash", "/bin/sh"].find((c) => existsSync(c));
+}
+
+/**
  * Build the concrete tool handlers bound to a working directory.
  *
  * Each handler returns a string (the tool_result content). Handlers may throw;
@@ -273,6 +326,10 @@ export function getToolHandlers(cwd) {
       // (GH_TOKEN/GITHUB_TOKEN) are intentionally left intact.
       const childEnv = { ...process.env };
       delete childEnv.ANTHROPIC_API_KEY;
+      // Run under bash when available so bash-style commands the model emits
+      // (heredocs, scripts/*.sh, single-quote semantics) behave consistently
+      // across platforms. `undefined` lets execSync use the platform default.
+      const shell = resolveBashShell();
       try {
         return execSync(command, {
           cwd,
@@ -280,6 +337,7 @@ export function getToolHandlers(cwd) {
           stdio: ["pipe", "pipe", "pipe"],
           maxBuffer: 50 * 1024 * 1024,
           env: childEnv,
+          ...(shell ? { shell } : {}),
         });
       } catch (e) {
         // Surface the command's output AND exit status to the model so it can
@@ -426,6 +484,10 @@ export async function runCommand(opts = {}) {
     }
 
     if (response.stop_reason !== "tool_use") {
+      // `max_tokens` is a TRUNCATED assistant turn, not a clean finish — report
+      // it distinctly so callers (and CI) don't treat a cut-off run as success.
+      const status =
+        response.stop_reason === "max_tokens" ? "incomplete" : "complete";
       logger.log(
         renderSummaryCard({
           command: spec.name,
@@ -435,7 +497,7 @@ export async function runCommand(opts = {}) {
         }),
       );
       return {
-        status: "complete",
+        status,
         command: spec.name,
         iterations,
         stopReason: response.stop_reason,
@@ -458,7 +520,7 @@ export async function runCommand(opts = {}) {
       toolResults.push({
         type: "tool_result",
         tool_use_id: block.id,
-        content: content.slice(0, MAX_TOOL_RESULT_CHARS),
+        content: truncateToolResult(content),
         is_error: isError,
       });
     }

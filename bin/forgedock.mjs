@@ -2492,6 +2492,12 @@ function help() {
  *
  * The live loop requires ANTHROPIC_API_KEY and the optional @anthropic-ai/sdk
  * dependency. The runtime itself lives in bin/runner.mjs.
+ *
+ * Env:
+ *   FORGEDOCK_MODEL   Default model id when --model is omitted.
+ *   FORGEDOCK_SHELL   Override the shell used by run_bash. Defaults to bash when
+ *                     found (Git Bash / WSL on Windows, /bin/bash on POSIX),
+ *                     falling back to the platform default shell otherwise.
  */
 async function run() {
   const runArgs = args.slice(1);
@@ -2539,7 +2545,12 @@ async function run() {
         ? { maxIterations }
         : {}),
     });
-    if (result && result.status === "max-iterations") {
+    // Treat a non-clean stop (iteration cap hit, or a max_tokens-truncated
+    // turn) as a failed run so CI/headless callers notice.
+    if (
+      result &&
+      (result.status === "max-iterations" || result.status === "incomplete")
+    ) {
       process.exitCode = 1;
     }
   } catch (err) {
