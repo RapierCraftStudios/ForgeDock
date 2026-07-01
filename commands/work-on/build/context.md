@@ -125,6 +125,11 @@ if [ -n "$DEVDOCS_PATH" ] && [ -f "$INDEX_PATH" ]; then
   ISSUE_LABELS=$(gh issue view {NUMBER} -R {GH_REPO} --json labels \
     --jq '[.labels[].name] | join(" ")' 2>/dev/null || echo "")
   echo "Issue labels: ${ISSUE_LABELS:-none}"
+  # Separate newline-joined list for the loop below — GitHub label names CAN
+  # contain spaces (e.g. "good first issue"), so the space-joined $ISSUE_LABELS
+  # above is only safe for display, never for iteration.
+  ISSUE_LABELS_LIST=$(gh issue view {NUMBER} -R {GH_REPO} --json labels \
+    --jq '.labels[].name' 2>/dev/null || echo "")
 
   # Read index content
   INDEX_CONTENT=$(cat "$INDEX_PATH" 2>/dev/null || echo "")
@@ -139,7 +144,12 @@ if [ -n "$DEVDOCS_PATH" ] && [ -f "$INDEX_PATH" ]; then
 
   # Extract domain blocks matching any issue label keyword
   DOMAIN_PATHS=""
-  for label in $ISSUE_LABELS; do
+  # $ISSUE_LABELS_LIST is one label per line — herestring (not a piped
+  # `| while read`, which would run the loop body in a subshell and discard
+  # DOMAIN_PATHS once the loop exits) preserves newline-safety for labels
+  # containing spaces.
+  while IFS= read -r label; do
+    [ -z "$label" ] && continue
     # Strip workflow:, priority:, review-finding prefixes — use bare keyword
     KEYWORD=$(echo "$label" | sed 's/^workflow://; s/^priority://; s/^review-finding$//')
     [ -z "$KEYWORD" ] && continue
@@ -158,7 +168,7 @@ if [ -n "$DEVDOCS_PATH" ] && [ -f "$INDEX_PATH" ]; then
       echo "Domain '${SAFE_KEYWORD}' matched — adding docs: $(echo "$BLOCK_PATHS" | tr '\n' ' ')"
       DOMAIN_PATHS="${DOMAIN_PATHS}${BLOCK_PATHS}"$'\n'
     fi
-  done
+  done <<< "$ISSUE_LABELS_LIST"
 
   # Combine always_load + domain paths (deduplicate)
   ALL_PATHS=$(printf "%s\n%s" "$ALWAYS_LOAD_PATHS" "$DOMAIN_PATHS" \
@@ -397,7 +407,12 @@ If `GIST_SUMMARIES` is non-empty, it will be included in the `### Prior Investig
 Query closed issues with `review-finding` label, searching by filename:
 
 ```bash
-for file in {AFFECTED_FILES}; do
+# {AFFECTED_FILES} is a space-separated file path list (see contract note above)
+# — split explicitly on IFS=' ' into an array instead of a bare
+# `for file in {AFFECTED_FILES}`, which word-splits on the shell's default IFS
+# (space, tab, AND newline) and would corrupt any path containing a space.
+IFS=' ' read -ra AFFECTED_FILES_ARR <<< "{AFFECTED_FILES}"
+for file in "${AFFECTED_FILES_ARR[@]}"; do
   basename=$(basename "$file" .py)
   gh issue list -R {GH_REPO} \
     --state closed \

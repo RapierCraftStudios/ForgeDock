@@ -176,6 +176,11 @@ if [ -n "$DEVDOCS_PATH" ] && [ -f "$INDEX_PATH" ]; then
   ISSUE_LABELS=$(gh issue view {NUMBER} -R {GH_REPO} --json labels \
     --jq '[.labels[].name] | join(" ")' 2>/dev/null || echo "")
   echo "Issue labels: ${ISSUE_LABELS:-none}"
+  # Separate newline-joined list for the loop below — GitHub label names CAN
+  # contain spaces (e.g. "good first issue"), so the space-joined $ISSUE_LABELS
+  # above is only safe for display, never for iteration.
+  ISSUE_LABELS_LIST=$(gh issue view {NUMBER} -R {GH_REPO} --json labels \
+    --jq '.labels[].name' 2>/dev/null || echo "")
 
   # Read index content
   INDEX_CONTENT=$(cat "$INDEX_PATH" 2>/dev/null || echo "")
@@ -190,7 +195,12 @@ if [ -n "$DEVDOCS_PATH" ] && [ -f "$INDEX_PATH" ]; then
 
   # Extract domain blocks matching any issue label keyword
   DOMAIN_PATHS=""
-  for label in $ISSUE_LABELS; do
+  # $ISSUE_LABELS_LIST is one label per line — herestring (not a piped
+  # `| while read`, which would run the loop body in a subshell and discard
+  # DOMAIN_PATHS once the loop exits) preserves newline-safety for labels
+  # containing spaces.
+  while IFS= read -r label; do
+    [ -z "$label" ] && continue
     KEYWORD=$(echo "$label" | sed 's/^workflow://; s/^priority://; s/^review-finding$//')
     [ -z "$KEYWORD" ] && continue
     # Sanitize KEYWORD before AWK injection — strip chars that would break awk regex delimiters
@@ -207,7 +217,7 @@ if [ -n "$DEVDOCS_PATH" ] && [ -f "$INDEX_PATH" ]; then
       echo "Domain '${SAFE_KEYWORD}' matched — adding docs: $(echo "$BLOCK_PATHS" | tr '\n' ' ')"
       DOMAIN_PATHS="${DOMAIN_PATHS}${BLOCK_PATHS}"$'\n'
     fi
-  done
+  done <<< "$ISSUE_LABELS_LIST"
 
   # Combine always_load + domain paths (deduplicate)
   ALL_PATHS=$(printf "%s\n%s" "$ALWAYS_LOAD_PATHS" "$DOMAIN_PATHS" \
