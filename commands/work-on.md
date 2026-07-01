@@ -492,7 +492,16 @@ Use `forge.yaml → review.tech_stack` and the issue domain labels to identify e
    grep -rn '\.field_name\s*=' services/   # Attribute assignments
    ```
    If the field is written with different types in different code paths (e.g. dict in the standard path, string in the auth-gated path), document ALL variants. The fix must handle every variant — not just the one on the primary investigated code path. A type guard like `or {}` only protects against falsy values; a non-empty string is truthy and bypasses it.
-4. Git blame — trace when/why the relevant code was written
+4. Git blame — trace when/why the relevant code was written. Run bounded, local commands (no network round-trip):
+   ```bash
+   # Introducing commit for each affected file (first commit that added it)
+   git log --reverse --format='%h %an %ad %s' --date=short -- {affected_file} | head -1
+   # Last-touch commit (most recent change)
+   git log -1 --format='%h %an %ad %s' --date=short -- {affected_file}
+   # Line-level blame for a specific suspect hunk, if the issue names one
+   git blame -L {start},{end} -- {affected_file}
+   ```
+   Record the introducing commit and last-touch commit for each primary affected file — this feeds the mandatory **History findings** field in Phase 1C.
 4.5. **Rogue commit pre-state comparison (conditional)**: If the issue body references a specific commit as rogue, bad, or unintended (e.g., "rogue commit `abc1234`", "bad commit", "this was never intended"), MUST run `git show {commit}^:{file}` to see the file before that commit. Compare the pre-commit state against the current file. Any block present in the current file but absent in the pre-commit state was introduced by that commit chain and is a candidate for full reversion — not just partial editing. Report the delta (pre vs. current) in the investigation report. Do NOT assume surrounding code near a named import/bug is correct simply because the issue only named a specific sub-problem. (Ref: forge#278 — investigator confirmed the broken import but never ran `git show 18a3a2cf3^:batch.py`; the surrounding 50-line feature gate was also rogue and was preserved by the fix PR, causing a P1 access regression for all non-Scale users)
 5. Domain context discovery (narrow scope only, 1–5 files):
    ```bash
@@ -500,6 +509,14 @@ Use `forge.yaml → review.tech_stack` and the issue domain labels to identify e
    gh issue list -R {GH_REPO} --state closed --limit 8 --search "{function_name}"
    ```
    Keep only file/function-level overlap. Max 5 related issues.
+
+   **Pickaxe pass (prior fix / regression detection)** — bounded to one pass, capped at 5 hits: search for prior additions/removals of the suspected symbol or literal string named in the issue, independent of whether that fix was ever linked to a filed issue:
+   ```bash
+   git log -S"{suspected_symbol_or_string}" --oneline -- {affected_files} | head -5
+   # Use -G instead of -S when the target is a regex pattern rather than a literal string
+   git log -G"{pattern}" --oneline -- {affected_files} | head -5
+   ```
+   Any hit here is a candidate prior fix or reintroduced defect — read the commit body (`git show {hash}`) to confirm before citing it. Feed confirmed hits into the History findings field and let them inform the verdict (e.g. a defect being reintroduced raises severity).
 6. Determine root cause
 7. Identify affected files — full list of files that need changes
 7.5. **Sibling Pattern Sweep** *(conditional — when the bug is a condition, gated function call, or field presence check)*: After identifying the affected files, grep for the same pattern in sibling files within the same directory. The issue spec may name only the file where the error was first observed — but the same commit or PR that introduced the bug often applied it uniformly across related handlers.
@@ -542,6 +559,12 @@ gh issue comment {NUMBER} {GH_FLAG} --body "<!-- FORGE:INVESTIGATOR -->
 
 ### Evidence
 {specific findings — function names, line numbers, behavior observed}
+
+### History Findings
+**Introducing commit**: {hash — author — date — subject, per primary affected file}
+**Last touched**: {hash — author — date — subject}
+**Pickaxe hits (prior fixes / regressions)**: {commit(s) found via \`git log -S\`/\`-G\`, or 'None found' — max 5}
+{This field is MANDATORY — populate from the git blame + pickaxe commands in step 4/5. If a file is newly created (no history), write 'New file — no history.'}
 
 ### Recommendation
 {what to build/fix, concrete and actionable}
@@ -976,6 +999,20 @@ git log --oneline -30 -- {AFFECTED_FILES} | grep -oE '#[0-9]+' | sort -u | head 
 # For each issue: fetch title + root cause, keep only bug/fix/review-finding labeled. Max 5.
 ```
 
+**Direct commit-body read (bounded, prefer over `gh api` when it already answers "why")**: read the top 5 commit subjects+bodies on the affected files directly — local git is near-free relative to `gh api` round-trips, and commit bodies often explain the "why" without needing to fetch a linked issue at all:
+```bash
+git log -5 --format='%h %ad %s%n%b' --date=short -- {AFFECTED_FILES}
+```
+If a commit body fully explains a prior bug/fix (common for squashed or fix-up commits with no `#NNN` reference), use it directly as a "Past Bug in This Module" entry — do not require a linked GitHub issue to exist.
+
+**Pickaxe pass (has this exact area been fixed before?)** — one bounded pass, capped at 5 hits, keyed on the suspected symbol/string from the Builder Contract or investigation report:
+```bash
+git log -S"{suspected_symbol_or_string}" --oneline -- {AFFECTED_FILES} | head -5
+# Use -G instead of -S for regex patterns
+git log -G"{pattern}" --oneline -- {AFFECTED_FILES} | head -5
+```
+Any hit is a candidate prior fix or reintroduced defect for this exact code area — read `git show {hash}` to confirm scope before including it in the output. This catches regressions the issue-number harvest above misses (e.g. a defect fixed via a squashed commit with no `#NNN` reference).
+
 **C3: Related Code Paths** (callers/importers of FUNCTION_NAMES)
 ```bash
 for fn in {FUNCTION_NAMES}; do
@@ -1002,7 +1039,8 @@ gh issue comment {NUMBER} {GH_FLAG} --body "<!-- FORGE:CONTEXT -->
 {past review-finding issues}
 
 ### Past Bugs in This Module
-{closed bug issues from git log mining}
+{closed bug issues from git log mining, PLUS pickaxe-derived findings (commits with no linked issue, or commit
+ bodies read directly per the C2 direct-commit-body step)}
 
 ### Related Code Paths (must stay consistent)
 {files that import/call changed functions}

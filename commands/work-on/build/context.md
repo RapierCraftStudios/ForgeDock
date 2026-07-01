@@ -425,7 +425,7 @@ Keep findings where the filename or function name appears in the title or body. 
 
 ## Phase C2: Past Bugs in the Same Module
 
-Mine git log for commit messages referencing issues, then fetch those issues:
+Mine git log for commit messages referencing issues, then fetch those issues. Also read commit bodies/diffs directly — local git history is near-free relative to `gh api` round-trips, and commit bodies often explain the "why" without needing to fetch the linked issue at all.
 
 ```bash
 # Step 1: find issue numbers from git history on affected files
@@ -443,6 +443,20 @@ gh issue view {RELATED_NUMBER} -R {GH_REPO} \
 Filter: keep only `bug`, `fix`, or `review-finding` labeled issues. Skip feature issues — they add noise without bug signal.
 
 **Max results**: 5 issues.
+
+**Direct commit-body read (bounded, prefer over `gh api` when it already answers "why")**: For the top 5 commits touching `{AFFECTED_FILES}`, read the commit subject + body directly instead of round-tripping to `gh issue view` when the body already explains the change:
+```bash
+git log -5 --format='%h %ad %s%n%b' --date=short -- {AFFECTED_FILES}
+```
+If a commit body fully explains the prior bug/fix (common for squashed or fix-up commits with no `#NNN` reference), use it directly as a "Past Bug in This Module" entry — do not require a linked GitHub issue to exist.
+
+**Pickaxe pass (has this exact area been fixed before?)** — one bounded pass, capped at 5 hits, keyed on the suspected symbol/string from the Builder Contract or investigation report:
+```bash
+git log -S"{suspected_symbol_or_string}" --oneline -- {AFFECTED_FILES} | head -5
+# Use -G instead of -S for regex patterns
+git log -G"{pattern}" --oneline -- {AFFECTED_FILES} | head -5
+```
+Any hit is a candidate prior fix or reintroduced defect for this exact code area — read `git show {hash}` to confirm scope before including it in the output. This catches regressions the issue-number harvest above misses (e.g. a defect fixed via a squashed commit with no `#NNN` reference).
 
 ---
 
@@ -526,8 +540,10 @@ gh issue comment {NUMBER} -R {GH_REPO} --body "<!-- FORGE:CONTEXT -->
 - #{NUM}: \"{TITLE}\" — root cause: {ROOT_CAUSE}
 
 ### Past Bugs in This Module
-<!-- List of closed bug issues from git log mining. If none: 'No prior bugs found in git history.' -->
+<!-- List of closed bug issues from git log mining, PLUS pickaxe-derived findings (commits with no linked issue, or
+     commit bodies read directly per the C2 direct-commit-body step). If none: 'No prior bugs found in git history.' -->
 - #{NUM}: \"{TITLE}\" — root cause: {SNIPPET}
+- {COMMIT_HASH} (no linked issue): {COMMIT_SUBJECT} — {WHY_RELEVANT, from commit body or pickaxe hit}
 
 ### Related Code Paths (must stay consistent)
 <!-- Files that import or call the changed functions. Builder must read and validate these. -->
