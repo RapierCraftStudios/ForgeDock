@@ -1737,7 +1737,7 @@ This will:
 - Fix stale workflow labels on any issues the agents left behind
 - Close orphaned open issues whose PRs were merged (common when merging to `staging`)
 - Remove worktrees created by agents in this batch
-- Delete local/remote branches for merged PRs
+- Delete local/remote `fix/*` and `feat/*` branches whose PR has merged — detection uses merged-PR state (`gh pr list --state merged`) as the source of truth, so it covers feature-lane branches merged into a milestone branch as well as squash-merged branches, not just branches merged directly to staging
 - Report milestones that hit 0 open issues — these are ready for `/milestone ship` (staging review + merge). Do NOT close them; closure happens after code reaches staging.
 - Sync Project board state
 

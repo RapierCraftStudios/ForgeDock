@@ -172,23 +172,42 @@ echo "Removed: $WORKTREE_PATH ($BRANCH_NAME)"
 
 ### 3C: Prune merged remote branches
 
-Delete remote `fix/` and `feat/` branches that are fully merged into `{STAGING_BRANCH}`:
+Delete remote `fix/` and `feat/` branches whose PR has merged — using **GitHub PR state as the source of truth**, not local git ancestry.
+
+**Why not `git branch -r --merged {STAGING_BRANCH}`**: an ancestry check only catches branches whose tip commit is reachable from `{STAGING_BRANCH}`. This misses two common cases:
+- **Feature-lane branches merged into a milestone branch.** Per `work-on.md` Phase 3E, milestone issues branch from and PR into `origin/milestone/{slug}`, not `{STAGING_BRANCH}`. Once such a branch's own PR merges into the milestone branch, it's fully absorbed and safe to delete — but it won't show up as "merged into staging" until the milestone itself ships (which may be days later, or never, if abandoned). This is the dominant cause of `feat/*` branches accumulating for a milestone/feature cluster.
+- **Squash merges.** If a branch was merged via squash (manual UI merge, or org/branch-protection settings that force squash-only), the resulting commit is a brand-new SHA that is never an ancestor of the original branch — so ancestry-based detection never matches it, even though the PR is clearly `MERGED` on GitHub.
+
+Both gaps disappear when merged-PR head-refs (regardless of base branch or merge strategy) are used directly as the deletion set:
 
 ```bash
 cd {REPO_PATH}
 git fetch --prune origin
 
-# Count first
-MERGED_COUNT=$(git branch -r --merged origin/{STAGING_BRANCH} | grep -E "origin/(fix|feat)/" | wc -l)
-echo "Found $MERGED_COUNT merged remote branches to delete"
+# All remote fix/* and feat/* branches currently on origin
+REMOTE_BRANCHES=$(git branch -r | grep -E "origin/(fix|feat)/" | sed 's|origin/||' | tr -d ' ')
 
-# Delete them
-if [ "$MERGED_COUNT" -gt 0 ]; then
-  git branch -r --merged origin/{STAGING_BRANCH} | grep -E "origin/(fix|feat)/" | sed 's|origin/||' | xargs -I{} git push origin --delete {} 2>&1
-fi
+# Head-ref names of every merged PR, regardless of base branch (staging, milestone/*, main)
+# or merge strategy (merge-commit vs. squash) — this is GitHub's own merge bookkeeping,
+# not local ref topology, so it's immune to both gaps above.
+# --limit is set high to avoid silent truncation; repos with more historical merged PRs
+# than this should re-run `/cleanup branches` incrementally to catch the remainder.
+MERGED_HEADS=$(gh pr list {GH_FLAG} --state merged --limit 1000 --json headRefName --jq '.[].headRefName')
+
+DELETE_COUNT=0
+for branch in $REMOTE_BRANCHES; do
+  if printf '%s\n' "$MERGED_HEADS" | grep -qxF "$branch"; then
+    if git push origin --delete "$branch" 2>&1; then
+      DELETE_COUNT=$((DELETE_COUNT + 1))
+    fi
+  fi
+done
+echo "Deleted $DELETE_COUNT merged remote branches (source of truth: gh pr list --state merged)"
 ```
 
-**Note**: This can take a while for large batches (1 network call per branch). Run in background if > 20 branches.
+**Note**: This can take a while for large batches (1 network call per deleted branch, plus one batched `gh pr list` call). Run in background if > 20 branches.
+
+**One-time backfill for existing stale branches**: repos that adopted this fix after already accumulating stale `feat/*`/`fix/*` branches (e.g. from milestones that shipped long ago) should run `/cleanup branches` once manually — the PR-state query above will catch the full backlog in a single pass since it isn't scoped to "this batch" or "this session," it queries all merged PRs on the repo.
 
 ---
 
