@@ -980,7 +980,12 @@ Run these queries (20s timeout each, 2 min total budget):
 
 **C1: Past Review Findings on These Files**
 ```bash
-for file in {AFFECTED_FILES}; do
+# {AFFECTED_FILES} is a space-separated argument (see --files contract) — split
+# explicitly on IFS=' ' into an array instead of a bare `for file in {AFFECTED_FILES}`,
+# which word-splits on the shell's default IFS (space, tab, AND newline) and
+# would corrupt any path containing a space.
+IFS=' ' read -ra AFFECTED_FILES_ARR <<< "{AFFECTED_FILES}"
+for file in "${AFFECTED_FILES_ARR[@]}"; do
   basename=$(basename "$file" .py)
   gh issue list -R {GH_REPO} --state closed --label "review-finding" \
     --search "$basename" --limit 10 \

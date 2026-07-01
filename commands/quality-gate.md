@@ -109,7 +109,12 @@ Before running checks, classify the changed files into domains. This avoids runn
 # Initialize domain flags
 DOMAINS=""
 
-for f in {CHANGED_FILES}; do
+# {CHANGED_FILES} is a space-separated argument (same contract as {AFFECTED_FILES}
+# in architect.md) — split explicitly on IFS=' ' into an array instead of relying
+# on a bare `for f in {CHANGED_FILES}`, which word-splits on the shell's default
+# IFS (space, tab, AND newline) and would corrupt any path containing a space.
+IFS=' ' read -ra CHANGED_FILES_ARR <<< "{CHANGED_FILES}"
+for f in "${CHANGED_FILES_ARR[@]}"; do
     case "$f" in
         *.sql|*migrations/*) DOMAINS="$DOMAINS DATABASE" ;;
     esac
@@ -171,7 +176,9 @@ for f in $(echo {CHANGED_FILES} | tr ' ' '\n' | grep -E '\.py$' | grep -E 'route
 done
 
 # Check for external tool config files (structural schema validation advisory)
-for f in {CHANGED_FILES}; do
+# {CHANGED_FILES} is space-separated (see array-split note above) — reuse the
+# same CHANGED_FILES_ARR built above instead of re-splitting.
+for f in "${CHANGED_FILES_ARR[@]}"; do
     case "$f" in
         traefik/*|infra/nginx/*|k8s/*|terraform/*)
             DOMAINS="$DOMAINS CONFIG_SCHEMA" && break ;;
@@ -228,7 +235,11 @@ For every changed file, check:
 
 ```bash
 # Quick automated checks
-for f in {CHANGED_FILES}; do
+# {CHANGED_FILES} is a space-separated argument — split explicitly on IFS=' '
+# into an array instead of a bare `for f in {CHANGED_FILES}` (see Step 1.5 for
+# the full rationale; this is a separate bash block so the array is rebuilt here).
+IFS=' ' read -ra CHANGED_FILES_ARR <<< "{CHANGED_FILES}"
+for f in "${CHANGED_FILES_ARR[@]}"; do
     # f-string SQL
     grep -nE "f['\"].*SELECT|f['\"].*INSERT|f['\"].*UPDATE|f['\"].*DELETE|f['\"].*WHERE" "$f" 2>/dev/null && echo "SEC: f-string SQL in $f"
     # Hardcoded secrets
@@ -618,7 +629,11 @@ for f in $(echo {CHANGED_FILES} | tr ' ' '\n' | grep -E '\.py$' | grep -E 'anti_
     # Extract detection set names from the changed file
     SET_NAMES=$(grep -oE "^[A-Z_]+ = (frozenset|tuple|set)" "$f" 2>/dev/null | grep -oE "^[A-Z_]+")
 
-    for sib in $SIBLINGS; do
+    # $SIBLINGS is one file path per line (`find`) — herestring (not a piped
+    # `| while read`, which would run the loop body in a subshell and discard
+    # any accumulator set inside it) preserves newline-safety for paths with spaces.
+    while IFS= read -r sib; do
+        [ -z "$sib" ] && continue
         # Extract strings from sibling detection sets
         SIB_STRINGS=$(grep -oE "'[a-z_][a-z0-9_-]*'" "$sib" 2>/dev/null | tr -d "'" | sort -u)
 
@@ -629,7 +644,7 @@ for f in $(echo {CHANGED_FILES} | tr ' ' '\n' | grep -E '\.py$' | grep -E 'anti_
             echo "$SIB_STRINGS" | grep -q "^${s}$" || \
                 echo "STR: '$s' in $f not found in sibling file $sib — verify if cross-module consistency is required"
         done
-    done
+    done <<< "$SIBLINGS"
 done
 ```
 
@@ -784,11 +799,14 @@ if [ -n "$SERVICE_DIR" ]; then
     # Step 2: Find volume mount points for this service in any docker-compose*.yml
     COMPOSE_FILES=$(find . -maxdepth 3 -name "docker-compose*.yml" 2>/dev/null | sort)
     VOLUME_MOUNTS=""
-    for cf in $COMPOSE_FILES; do
+    # $COMPOSE_FILES is one path per line (`find`) — herestring, not a piped
+    # `| while read`, so VOLUME_MOUNTS remains visible after the loop exits.
+    while IFS= read -r cf; do
+        [ -z "$cf" ] && continue
         # Extract named volume mount points (lines like: - volume_name:/container/path)
         MOUNTS=$(grep -oE '[a-z_-]+:/[^: ]+' "$cf" 2>/dev/null | grep -v '^#' | cut -d: -f2)
         VOLUME_MOUNTS="$VOLUME_MOUNTS $MOUNTS"
-    done
+    done <<< "$COMPOSE_FILES"
 
     # Step 3: Grep the service directory for filesystem write operations
     WRITE_OPS=$(grep -rn "mkdir\|write_bytes\|open(.*['\"]w\|makedirs\|shutil\.copy\|shutil\.move" \
@@ -872,7 +890,11 @@ if [ -n "$TOOL_FILES" ]; then
     WORKFLOW_DIR="{WORKTREE_PATH}/.github/workflows"
     CI_MISSING=""
 
-    for f in $TOOL_FILES; do
+    # $TOOL_FILES is one path per line (already newline-split above via `tr`) —
+    # herestring, not a piped `| while read`, so CI_MISSING remains visible
+    # after the loop exits.
+    while IFS= read -r f; do
+        [ -z "$f" ] && continue
         case "$f" in
             traefik/*)
                 grep -rlE "traefik.*validate|traefik.*check" "$WORKFLOW_DIR" 2>/dev/null | grep -q . || \
@@ -892,7 +914,7 @@ if [ -n "$TOOL_FILES" ]; then
                     CI_MISSING="$CI_MISSING terraform"
                 ;;
         esac
-    done
+    done <<< "$TOOL_FILES"
 
     # Deduplicate
     CI_MISSING=$(echo "$CI_MISSING" | tr ' ' '\n' | sort -u | grep -v '^$' | tr '\n' ' ')
