@@ -548,11 +548,11 @@ When file extraction yields **fewer than 2 file paths** for an issue (common for
 
 **Rationale**: The cost of a false-negative (two agents conflict → one fails with merge error, wasting the full agent run) far exceeds the cost of a false-positive (an issue waits for one predecessor before starting). Always err toward serialization when uncertain.
 
-#### Layer 5: Historical co-change coupling <!-- Added: forge#1196 -->
+#### Layer 5: Historical co-change coupling <!-- Added: forge#1196 --> <!-- Empty-set guard: forge#1206 -->
 
 Layers 1-4 infer conflict risk from structure — path overlap, directory nesting, hard-coded high-fan-in lists. They miss the case where two files with no directory or naming relationship have historically changed together in the same commits (e.g. `models/user.py` and `services/billing/charge.py`), and they over-serialize the inverse case where files merely sit near each other but have never actually co-changed. Git commit history answers both questions directly and empirically. This layer reads **commit metadata only** — the list of files touched per commit — never file contents, so it does not violate Hard Rule 2 ("dispatcher, not a builder... never read code"). This is the same category of operation already established as compliant in `commands/work-on/investigate.md` and `commands/work-on/build/context.md`, which mine `git log` for issue cross-referencing.
 
-**Bounded query** — restrict both the time window and the file set so this stays a small, deterministic, single-shot lookup (never a full-repo co-change matrix):
+**Bounded query** — restrict both the time window and the file set so this stays a small, deterministic, single-shot lookup (never a full-repo co-change matrix). An empty `ALL_AFFECTED_FILES` set MUST short-circuit before the query runs — passing an empty array to `git log --` does not mean "match nothing", it means "no pathspec restriction", which would silently widen the query to the entire repo:
 
 ```bash
 # Union of affected files across all issues in the CURRENT batch only (already
@@ -563,18 +563,27 @@ Layers 1-4 infer conflict risk from structure — path overlap, directory nestin
 # path containing a space or glob metacharacter.
 mapfile -t ALL_AFFECTED_FILES < <(printf '%s\n' "${LAYER1_FILES[@]}" | sort -u)
 
-# Bounded window: last 90 days, capped at 200 commits — whichever is smaller.
-# Each commit's file list is delimited by a marker so co-occurring files can be
-# grouped per-commit in a single pass. The array is expanded quoted
-# ("${ALL_AFFECTED_FILES[@]}") so every path is passed as one literal argument.
-git log --name-only --since="90 days ago" --max-count=200 \
-  --pretty=format:'---%H---' -- "${ALL_AFFECTED_FILES[@]}" \
-  > /tmp/cochange_log.txt
+# Guard: an empty array expands to nothing after `--`, which git interprets as
+# "no pathspec restriction" (i.e. the whole repo) rather than "match nothing".
+# Skip the query entirely in that case instead of letting it silently widen to
+# a full-repo scan — this can happen when upstream file-extraction (Layer 1)
+# yields zero paths for every issue in the batch.
+if [ "${#ALL_AFFECTED_FILES[@]}" -eq 0 ]; then
+  echo "Layer 5: no affected files extracted by Layer 1 for this batch — skipping co-change query, falling back to Layers 1-4."
+else
+  # Bounded window: last 90 days, capped at 200 commits — whichever is smaller.
+  # Each commit's file list is delimited by a marker so co-occurring files can be
+  # grouped per-commit in a single pass. The array is expanded quoted
+  # ("${ALL_AFFECTED_FILES[@]}") so every path is passed as one literal argument.
+  git log --name-only --since="90 days ago" --max-count=200 \
+    --pretty=format:'---%H---' -- "${ALL_AFFECTED_FILES[@]}" \
+    > /tmp/cochange_log.txt
 
-# Parse into commit → file-set groups, then increment a co-occurrence counter
-# for every unordered pair of files that appear in the SAME commit's file list.
-# (Illustrative — an agent executing this reads /tmp/cochange_log.txt and tallies
-# pairs; no separate script is shipped, matching the pseudo-code style of Layers 1-4.)
+  # Parse into commit → file-set groups, then increment a co-occurrence counter
+  # for every unordered pair of files that appear in the SAME commit's file list.
+  # (Illustrative — an agent executing this reads /tmp/cochange_log.txt and tallies
+  # pairs; no separate script is shipped, matching the pseudo-code style of Layers 1-4.)
+fi
 ```
 
 **Scoring rule**: A file pair is **co-change coupled** when it appears together in **3 or more** of the commits captured by the bounded query above. A pair with **zero** co-occurrences across the entire window is **verified independent**.
@@ -582,7 +591,7 @@ git log --name-only --since="90 days ago" --max-count=200 \
 **Apply the signal:**
 - **High co-change pair spans two different issues in the batch** → add a serialization edge between them (same directed-edge convention as Layers 1-4: lower issue number is predecessor), OR, if the pair also carries competing investigation recommendations, flag it for Phase 2.5 arbitration instead of a blind serialization edge (see cross-reference in Step 2.5B below).
 - **Verified-independent pair** → MAY be used to downgrade an existing Layer 2 "broad directory + different domain" or Layer 4 "conservative fallback" serialization to parallel. This downgrade is **never** applied to Layer 1 (same-file hard conflict, which is ground truth from the current batch, not historical inference) or to Layer 3 high-fan-in-file edges (a file can be structurally high-risk even with a thin history window, e.g. a newly added `main.py`).
-- If the bounded query returns no commits (e.g. brand-new files, or window/pair-set too small to have history) → Layer 5 contributes nothing; fall back silently to Layers 1-4's existing verdict for that pair.
+- If `ALL_AFFECTED_FILES` is empty, the guard above skips the query and Layer 5 contributes nothing for the entire batch. If the bounded query runs but returns no commits (e.g. brand-new files, or window/pair-set too small to have history) → Layer 5 contributes nothing; fall back silently to Layers 1-4's existing verdict for that pair.
 
 **Rationale**: Empirical co-change is a strictly stronger signal than directory proximity or naming convention — it is the actual observed outcome the other layers are trying to approximate. Bounding the window and pair-set keeps the query cheap and deterministic while still catching the cross-directory conflicts Layers 1-4 structurally cannot see.
 
