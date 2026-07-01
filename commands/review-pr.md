@@ -629,12 +629,17 @@ echo "$FILES" | grep -cE "^sdk/|openapi.*\.json$|openapi-versions/" && echo "  S
 ```bash
 CHURN_WINDOW="90 days ago"   # named constant — must match the same window used in architect.md Phase A5
 CHURN_CONTEXT=""
-for FILE in $FILES; do
+# Herestring (not a piped `| while read`) — a pipe would run the loop body in a
+# subshell in bash, silently discarding CHURN_CONTEXT once the loop exits. $FILES
+# is one path per line (gh pr diff --name-only), so `read -r` per line is safe
+# even when a path contains embedded spaces.
+while IFS= read -r FILE; do
+  [ -z "$FILE" ] && continue
   COMMITS=$(git log --oneline --since="$CHURN_WINDOW" -- "$FILE" 2>/dev/null | wc -l)
   if [ "$COMMITS" -ge 15 ]; then
     CHURN_CONTEXT="${CHURN_CONTEXT}${FILE} (${COMMITS} commits in last 90 days — HOT)\n"
   fi
-done
+done <<< "$FILES"
 if [ -z "$CHURN_CONTEXT" ]; then
   CHURN_CONTEXT="No hot-spot files detected (all changed files under 15 commits in the last 90 days)."
 fi
