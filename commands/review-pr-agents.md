@@ -31,6 +31,11 @@ gh pr diff [PR_NUMBER] --name-only
 gh pr diff [PR_NUMBER]
 ```
 
+**Hot-spot prior**:
+[CHURN_CONTEXT]
+
+If a file you are reviewing is listed above as a hot-spot, apply deeper scrutiny to it — high historical churn correlates with defect density. Prefer tracing that file's full code paths (Evidence-Based Review Protocol §2) over a quick pattern scan, and weight ambiguous findings in hot-spot files toward LIKELY rather than POSSIBLE.
+
 ### 2. Dynamic Exploration
 - From each changed file, follow imports and function calls
 - Trace data flows across service boundaries (API → Redis → Worker)
