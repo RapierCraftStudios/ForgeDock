@@ -309,6 +309,8 @@ done
 
 **Cluster rule**: Two investigations are in the same cluster when they share a target subsystem (overlapping affected-file directories OR the same domain tag from Step 3B applied to their recommendations). Clustering is by **conceptual surface**, deliberately coarser than Step 3C's file-level analysis — the goal is to surface plan-level contradictions the file layer cannot see.
 
+**Available prior signal** <!-- Added: forge#1196 -->: Step 3C Layer 5 (historical co-change coupling, computed later in Phase 3) is a strong empirical prior for this clustering step — two investigations whose affected files have historically co-changed are good candidates for the same subsystem cluster. Layer 5 itself still executes in Phase 3, after this step runs; this is a forward reference for readers extending this clustering rule, not a functional dependency or phase-reordering.
+
 ### Step 2.5C: Detect and resolve competing recommendations
 
 Within each cluster (2+ investigations on the same subsystem), compare the **Recommendation** sections for incompatibility — e.g. one recommends adding a cache layer while another recommends removing caching from the same path; one proposes a new abstraction another proposes to delete. This is a semantic comparison of *proposed approaches*, read purely from the annotation prose.
@@ -524,22 +526,57 @@ When file extraction yields **fewer than 2 file paths** for an issue (common for
 
 **Rationale**: The cost of a false-negative (two agents conflict → one fails with merge error, wasting the full agent run) far exceeds the cost of a false-positive (an issue waits for one predecessor before starting). Always err toward serialization when uncertain.
 
+#### Layer 5: Historical co-change coupling <!-- Added: forge#1196 -->
+
+Layers 1-4 infer conflict risk from structure — path overlap, directory nesting, hard-coded high-fan-in lists. They miss the case where two files with no directory or naming relationship have historically changed together in the same commits (e.g. `models/user.py` and `services/billing/charge.py`), and they over-serialize the inverse case where files merely sit near each other but have never actually co-changed. Git commit history answers both questions directly and empirically. This layer reads **commit metadata only** — the list of files touched per commit — never file contents, so it does not violate Hard Rule 2 ("dispatcher, not a builder... never read code"). This is the same category of operation already established as compliant in `commands/work-on/investigate.md` and `commands/work-on/build/context.md`, which mine `git log` for issue cross-referencing.
+
+**Bounded query** — restrict both the time window and the file set so this stays a small, deterministic, single-shot lookup (never a full-repo co-change matrix):
+
+```bash
+# Union of affected files across all issues in the CURRENT batch only (already
+# extracted per-issue in Layer 1) — never the whole repo.
+ALL_AFFECTED_FILES=$(printf '%s\n' "${LAYER1_FILES[@]}" | sort -u)
+
+# Bounded window: last 90 days, capped at 200 commits — whichever is smaller.
+# Each commit's file list is delimited by a marker so co-occurring files can be
+# grouped per-commit in a single pass.
+git log --name-only --since="90 days ago" --max-count=200 \
+  --pretty=format:'---%H---' -- $ALL_AFFECTED_FILES \
+  > /tmp/cochange_log.txt
+
+# Parse into commit → file-set groups, then increment a co-occurrence counter
+# for every unordered pair of files that appear in the SAME commit's file list.
+# (Illustrative — an agent executing this reads /tmp/cochange_log.txt and tallies
+# pairs; no separate script is shipped, matching the pseudo-code style of Layers 1-4.)
+```
+
+**Scoring rule**: A file pair is **co-change coupled** when it appears together in **3 or more** of the commits captured by the bounded query above. A pair with **zero** co-occurrences across the entire window is **verified independent**.
+
+**Apply the signal:**
+- **High co-change pair spans two different issues in the batch** → add a serialization edge between them (same directed-edge convention as Layers 1-4: lower issue number is predecessor), OR, if the pair also carries competing investigation recommendations, flag it for Phase 2.5 arbitration instead of a blind serialization edge (see cross-reference in Step 2.5B below).
+- **Verified-independent pair** → MAY be used to downgrade an existing Layer 2 "broad directory + different domain" or Layer 4 "conservative fallback" serialization to parallel. This downgrade is **never** applied to Layer 1 (same-file hard conflict, which is ground truth from the current batch, not historical inference) or to Layer 3 high-fan-in-file edges (a file can be structurally high-risk even with a thin history window, e.g. a newly added `main.py`).
+- If the bounded query returns no commits (e.g. brand-new files, or window/pair-set too small to have history) → Layer 5 contributes nothing; fall back silently to Layers 1-4's existing verdict for that pair.
+
+**Rationale**: Empirical co-change is a strictly stronger signal than directory proximity or naming convention — it is the actual observed outcome the other layers are trying to approximate. Bounding the window and pair-set keeps the query cheap and deterministic while still catching the cross-directory conflicts Layers 1-4 structurally cannot see.
+
 #### Combining all layers
 
-Build the final conflict graph by merging signals from all four layers:
+Build the final conflict graph by merging signals from all five layers:
 
 | Signal | Strength | Action |
 |--------|----------|--------|
 | Layer 1: Same file | **Hard conflict** | Always serialize |
 | Layer 2: Same small directory | **Probable conflict** | Serialize |
 | Layer 2: Same broad directory + same domain | **Probable conflict** | Serialize |
-| Layer 2: Same broad directory + different domain | **Possible conflict** | Parallelize (accept risk) |
+| Layer 2: Same broad directory + different domain | **Possible conflict** | Parallelize (accept risk) — unless Layer 5 shows high co-change, then serialize |
 | Layer 3: High-fan-in file touched | **Probable conflict** | Serialize with same-service issues |
 | Layer 3: Shared model/init pattern | **Probable conflict** | Serialize |
 | Layer 4: Low confidence + same domain | **Conservative** | Serialize |
-| Layer 4: Low confidence + no domain | **Conservative** | Add predecessor edge to most recent issue |
+| Layer 4: Low confidence + no domain | **Conservative** | Add predecessor edge to most recent issue — unless Layer 5 shows verified independence, then parallelize |
+| Layer 5: High co-change (3+ shared commits, cross-issue file pair) | **Probable conflict** | Serialize (or route to Phase 2.5 arbitration if a competing-recommendation conflict is also present) |
+| Layer 5: Verified independent (zero shared commits) | **Downgrade signal** | Permits downgrading a Layer 2 "broad directory + different domain" or Layer 4 verdict to parallel — never overrides Layer 1 or Layer 3 |
 
-**This supplements, not replaces, the domain keyword estimation.** Domain tags still help with broad sequencing decisions. Multi-layer conflict detection catches the specific cases keywords miss (e.g., two issues that both modify files in `services/api/app/models/` where one is labeled WORKER and the other BILLING — Layer 2 catches this even though Layer 1 shows no direct file overlap).
+**This supplements, not replaces, the domain keyword estimation.** Domain tags still help with broad sequencing decisions. Multi-layer conflict detection catches the specific cases keywords miss (e.g., two issues that both modify files in `services/api/app/models/` where one is labeled WORKER and the other BILLING — Layer 2 catches this even though Layer 1 shows no direct file overlap; or two issues touching files in unrelated directories that Layer 5 shows have co-changed in 4 of the last 12 commits touching either file).
 
 ### Step 3D: Build the dependency DAG
 
@@ -552,7 +589,8 @@ Build a **directed acyclic graph (DAG)** of per-issue dependencies. Each issue g
 - **File-conflict edges**: If two issues share affected files (from Step 3C Layer 1), add a directed edge: lower issue number → higher issue number (unless explicit deps say otherwise). The later issue has the earlier issue in its predecessors.
 - **Domain serialization edges**: DATABASE issues form a linear chain (each has the previous DATABASE issue as its predecessor). Same-small-directory issues (Layer 2) and high-fan-in file issues (Layer 3) get directed edges as per Step 3C rules.
 - **Conservative fallback edges**: Low-confidence issues (Layer 4) get edges to same-domain issues as per Step 3C rules.
-- **No artificial concurrency limit** — all issues with empty predecessor sets dispatch simultaneously. The only constraints are file overlap and explicit dependencies.
+- **Co-change coupling edges** <!-- Added: forge#1196 -->: High co-change file pairs (Layer 5, 3+ shared commits in the bounded window) that span two different issues get a directed edge using the same lower-issue-number-is-predecessor convention as Layer 1. Verified-independent pairs (Layer 5, zero shared commits) may instead REMOVE an edge that Layer 2 or Layer 4 would otherwise have added for that pair — Layer 1 and Layer 3 edges are never removed by a Layer 5 downgrade.
+- **No artificial concurrency limit** — all issues with empty predecessor sets dispatch simultaneously. The only constraints are file overlap, explicit dependencies, and co-change coupling.
 
 **Terminology:**
 - **Ready issues**: Issues whose predecessor set is empty (all predecessors have reached terminal state or were never added)
