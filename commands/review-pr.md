@@ -637,13 +637,19 @@ while IFS= read -r FILE; do
   [ -z "$FILE" ] && continue
   COMMITS=$(git log --oneline --since="$CHURN_WINDOW" -- "$FILE" 2>/dev/null | wc -l)
   if [ "$COMMITS" -ge 15 ]; then
-    CHURN_CONTEXT="${CHURN_CONTEXT}${FILE} (${COMMITS} commits in last 90 days — HOT)\n"
+    # Real newline appended via $'\n' (ANSI-C quoting), not a literal backslash-n.
+    # A literal "\n" would only be interpreted by `echo -e` — it survives
+    # unprocessed into Phase 3C's raw template substitution ([CHURN_CONTEXT] ->
+    # $CHURN_CONTEXT), which does not reprocess escapes, so with 2+ HOT files
+    # multi-hotspot PRs would render squished in the agent prompt. A real
+    # newline here makes the variable correct for every consumer.
+    CHURN_CONTEXT="${CHURN_CONTEXT}${FILE} (${COMMITS} commits in last 90 days — HOT)"$'\n'
   fi
 done <<< "$FILES"
 if [ -z "$CHURN_CONTEXT" ]; then
   CHURN_CONTEXT="No hot-spot files detected (all changed files under 15 commits in the last 90 days)."
 fi
-echo -e "$CHURN_CONTEXT"
+echo "$CHURN_CONTEXT"
 ```
 
 Tiers (fixed thresholds, identical to `architect.md` Phase A5): **HOT** = 15+ commits / 90 days, **MEDIUM** = 5–14, **LOW** = 0–4. Only HOT-tier files are listed in `CHURN_CONTEXT` — this keeps the agent prompt signal short and high-value rather than dumping a churn count for every file. This does not change agent selection (3B) — it is a scrutiny prior surfaced to whichever agents are already selected, substituted as `[CHURN_CONTEXT]` in Phase 3C.
