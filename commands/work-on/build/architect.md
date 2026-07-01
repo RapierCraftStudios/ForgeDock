@@ -462,7 +462,15 @@ For each file in `{AFFECTED_FILES}` (never repo-wide — this must stay O(affect
 ```bash
 CHURN_WINDOW="90 days ago"   # named constant — must match the same window used in review-pr.md Phase 3A
 
-for FILE in {AFFECTED_FILES}; do
+# {AFFECTED_FILES} is a space-separated argument (see --files contract at the top
+# of this file), not newline-separated like review-pr.md's $FILES — so a herestring
+# `while read` line-loop would misparse it as a single line. Split explicitly on
+# IFS=' ' into an array instead of relying on a bare `for FILE in {AFFECTED_FILES}`
+# (which word-splits on the shell's default IFS — space, tab, AND newline). This
+# keeps the existing space-separated contract intact while narrowing the splitting
+# surface to spaces only.
+IFS=' ' read -ra AFFECTED_FILES_ARR <<< "{AFFECTED_FILES}"
+for FILE in "${AFFECTED_FILES_ARR[@]}"; do
   COMMITS=$(git log --oneline --since="$CHURN_WINDOW" -- "$FILE" | wc -l)
   if [ "$COMMITS" -ge 15 ]; then TIER="HOT"
   elif [ "$COMMITS" -ge 5 ]; then TIER="MEDIUM"
