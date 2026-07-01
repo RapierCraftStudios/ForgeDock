@@ -338,7 +338,7 @@ for CONFLICT in "${DETECTED_CONFLICTS[@]}"; do
     # instead, so both issues still run.
     FIRST_BODY=$(gh issue view $FIRST -R {GH_REPO} --json body --jq '.body')
     if echo "$FIRST_BODY" | grep -qiE "depends on #${SECOND}\b"; then
-      echo "Phase 2.5: skipping serialization edge #${SECOND} -> #${FIRST}: reverse edge #${FIRST} -> #${SECOND} already exists (would create a cycle). Falling back to arbitration-in-place."
+      echo "Phase 2.5: skipping serialization edge #${FIRST} -> #${SECOND}: reverse edge #${SECOND} -> #${FIRST} already exists (would create a cycle). Falling back to arbitration-in-place."
       RESOLUTION="arbitrate"
     else
       SECOND_BODY=$(gh issue view $SECOND -R {GH_REPO} --json body --jq '.body')
