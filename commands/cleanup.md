@@ -239,7 +239,7 @@ echo "Deleted $DELETE_COUNT merged remote branches, skipped $SKIP_COUNT name-mat
 
 **Recovery: restoring an accidentally pruned branch**
 
-Phase 3C only ever deletes a branch whose (name, SHA) pair matched a merged PR's `headRefOid`, so the commit is never lost — it's still reachable from the PR's merge commit, and the branch's pre-deletion tip SHA is echoed in the run log above (`Deleted origin/$branch (was $CURRENT_SHA) ...`). If a branch is pruned in error (or needs to be recreated for any reason), restore it with:
+Phase 3C only ever deletes a branch whose (name, SHA) pair matched a merged PR's `headRefOid`, so the exact deleted commit is always recoverable: its SHA is echoed in the run log above (`Deleted origin/$branch (was $CURRENT_SHA) ...`), and the commit object survives in the remote's object store until garbage collection (for merge-commit merges it also remains reachable from the PR's merge commit; for squash merges the original tip becomes a dangling commit — not reachable by ancestry, but still restorable by SHA for as long as it hasn't been GC'd). If a branch is pruned in error (or needs to be recreated for any reason), restore it with:
 
 ```bash
 # Using the SHA logged at deletion time (or from `gh pr view {PR_NUMBER} --json headRefOid`
