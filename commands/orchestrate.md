@@ -255,6 +255,130 @@ Proceeding to dependency analysis with the expanded issue set...
 
 ---
 
+## Phase 2.5: Investigation Synthesis
+
+<!-- Added: forge#1192 -->
+
+**Purpose**: Reconcile *competing recommendations* across investigation outputs BEFORE they fan out to implementation agents. Phase 3's conflict detection (Step 3C) deconflicts issues at the **file** layer only — it prevents git merge conflicts. It performs **zero semantic deconfliction**: two issues can touch entirely different files while proposing **contradictory approaches to the same problem**, and the file-overlap detector passes both straight to parallel dispatch. This phase closes that gap by clustering investigations semantically (by target subsystem, not by file) and arbitrating incompatible plans into a single decision — or serializing them so the second agent inherits the first's decision.
+
+**This phase operates ONLY on FORGE annotations and issue bodies. It NEVER reads code, and it NEVER closes, skips, or merges issues.** Reconciling plans/annotations is distinct from adjudicating *duplicate validity* (Safety Rule 9, the #3842/#4039 scar): the anti-dedup rule forbids the orchestrator from deciding two issues are the same bug and closing one — that call belongs to `/work-on` investigation agents examining actual code. Plan reconciliation touches neither code nor issue state; it only writes a synthesis brief annotation and adds `Depends on #X` serialization edges. It therefore does not violate Hard Rule 2 (dispatcher, not builder) or Safety Rule 9.
+
+**No-op guard**: This entire phase is skipped when the batch contains **0 or 1 investigations** — there is nothing to reconcile against. Proceed directly to Phase 3.
+
+### Step 2.5A: No-op guard
+
+```bash
+# Count investigations that completed in Wave 0 (Phase 2), regardless of whether each
+# emitted a Knowledge Gist. Use the full completed-investigation set (the same
+# {investigation_numbers} that Steps 2C.5, 2.5B and 2.5C iterate) — NOT the
+# INVESTIGATION_GISTS map, which only holds gist-producing investigations and would
+# undercount when a genuine investigation reached a recommendation without a gist.
+# If < 2, skip synthesis entirely.
+INVESTIGATION_NUMS=( {investigation_numbers} )
+INVESTIGATION_COUNT=${#INVESTIGATION_NUMS[@]}
+if [ "$INVESTIGATION_COUNT" -lt 2 ]; then
+  echo "Phase 2.5 skipped: ${INVESTIGATION_COUNT} investigation(s) in batch — nothing to reconcile. Proceeding to Phase 3."
+  SYNTHESIS_RAN=false
+  RECONCILED_COUNT=0
+  # Skip to Phase 3.
+else
+  SYNTHESIS_RAN=true
+fi
+```
+
+If `SYNTHESIS_RAN` is false, do NOT execute Steps 2.5B–2.5D — proceed directly to Phase 3. Step 4A's `{GIST_CONTEXT}` generation will fall back to the existing raw-gist behavior (no synthesis brief exists).
+
+### Step 2.5B: Cluster investigations by target subsystem
+
+For each investigation that completed in Wave 0, read its `FORGE:INVESTIGATOR` comment (and the newly spawned implementation issue bodies from Step 2D) and extract its **Recommendation** and **Affected Files / target subsystem** — NOT to compare files for merge conflicts, but to group investigations that operate on the **same conceptual surface** (e.g. "auth session lifecycle", "credit metering", "orchestrate DAG construction").
+
+```bash
+# For each investigation, pull its recommendation + affected-files block (annotations only — no code reads)
+declare -A INV_RECOMMENDATION
+declare -A INV_SUBSYSTEM
+for INV_NUM in {investigation_numbers}; do
+  INV_BODY=$(gh api repos/{GH_REPO}/issues/${INV_NUM}/comments \
+    --jq '.[] | select(.body | contains("FORGE:INVESTIGATOR")) | .body' 2>/dev/null | head -1)
+  # Extract the Recommendation section (annotation prose only)
+  INV_RECOMMENDATION[$INV_NUM]=$(echo "$INV_BODY" | awk '/^### Recommendation/{p=1;next}/^### /{p=0}p')
+  # Derive a coarse subsystem tag from Affected Files directories + title keywords
+  INV_SUBSYSTEM[$INV_NUM]=$(echo "$INV_BODY" \
+    | grep -oP '`[^`]+/[^`]+`' | xargs -r -n1 dirname 2>/dev/null | sort | uniq -c | sort -rn | head -1)
+done
+```
+
+**Cluster rule**: Two investigations are in the same cluster when they share a target subsystem (overlapping affected-file directories OR the same domain tag from Step 3B applied to their recommendations). Clustering is by **conceptual surface**, deliberately coarser than Step 3C's file-level analysis — the goal is to surface plan-level contradictions the file layer cannot see.
+
+### Step 2.5C: Detect and resolve competing recommendations
+
+Within each cluster (2+ investigations on the same subsystem), compare the **Recommendation** sections for incompatibility — e.g. one recommends adding a cache layer while another recommends removing caching from the same path; one proposes a new abstraction another proposes to delete. This is a semantic comparison of *proposed approaches*, read purely from the annotation prose.
+
+For each detected conflict, resolve it in exactly ONE of two ways:
+
+1. **Arbitration decision** — When the two recommendations are directly incompatible and one is clearly correct given the combined evidence, record a single deconflicted decision for BOTH issues. State which approach wins and why. This decision is written into each affected issue's `FORGE:SYNTHESIS_BRIEF` (Step 2.5D) — it does NOT close either issue; both still run, but against a reconciled plan.
+2. **Serialization edge** — When the approaches are interdependent (the second issue's correct approach depends on what the first decides) or arbitration cannot pick a winner from annotations alone, add a `Depends on #{FIRST}` marker to the SECOND issue's body so the two serialize. The second agent then inherits the first's merged result during its own investigation/context phase.
+
+```bash
+# Serialization is expressed as a standard "Depends on #X" edge so Step 3A consumes it
+# with no new plumbing (see Step 3A dependency-marker parsing).
+RECONCILED_COUNT=0
+for CONFLICT in "${DETECTED_CONFLICTS[@]}"; do
+  # CONFLICT = "FIRST SECOND RESOLUTION" where RESOLUTION is "arbitrate" or "serialize"
+  set -- $CONFLICT; FIRST=$1; SECOND=$2; RESOLUTION=$3
+  if [ "$RESOLUTION" = "serialize" ]; then
+    SECOND_BODY=$(gh issue view $SECOND -R {GH_REPO} --json body --jq '.body')
+    if ! echo "$SECOND_BODY" | grep -qiE "depends on #${FIRST}\b"; then
+      gh issue edit $SECOND -R {GH_REPO} \
+        --body "${SECOND_BODY}
+
+Depends on #${FIRST}
+<!-- Serialized by orchestrate Phase 2.5: competing recommendation reconciled via dependency edge. -->"
+    fi
+  fi
+  RECONCILED_COUNT=$((RECONCILED_COUNT + 1))
+done
+echo "Phase 2.5 reconciled ${RECONCILED_COUNT} competing recommendation(s)."
+```
+
+**MUST NOT**: close, skip, or merge any issue on the basis of a detected conflict. Two issues with competing recommendations are BOTH valid work items — Phase 2.5 makes their plans coherent, it does not eliminate either. (This is the Safety Rule 9 boundary — see the Purpose note above.)
+
+### Step 2.5D: Emit one deconflicted brief per issue
+
+For each implementation issue about to be dispatched, write a single `FORGE:SYNTHESIS_BRIEF` annotation containing ONLY the reconciled context relevant to *that* issue — the arbitration decisions affecting it and pointers to the specific sibling investigation Gists it actually needs. This replaces injecting the entire aggregated milestone-index gist (which forces each agent to independently re-arbitrate the same contradictions, wasting tokens and producing nondeterministic cross-PR incoherence).
+
+```bash
+for ISSUE_NUM in {implementation_issue_numbers}; do
+  # Assemble the per-issue brief: arbitration decisions touching this issue's subsystem +
+  # only the relevant sibling gist URLs (not the full milestone-index dump)
+  BRIEF_BODY="Reconciled context for this issue (see orchestrate Phase 2.5):
+${PER_ISSUE_DECISIONS[$ISSUE_NUM]}"
+  gh issue comment $ISSUE_NUM -R {GH_REPO} --body "<!-- FORGE:SYNTHESIS_BRIEF -->
+## Synthesis Brief
+
+${BRIEF_BODY}
+
+<!-- FORGE:SYNTHESIS_BRIEF:COMPLETE -->"
+done
+```
+
+The `FORGE:SYNTHESIS_BRIEF` annotation is consumed by Step 4A's `{GIST_CONTEXT}` generation (which prefers it over the raw milestone-index gist when present) and its reconciled count (`RECONCILED_COUNT`) feeds the Step 6B `Competing recommendations reconciled (Phase 2.5)` metric.
+
+**Report**: Post a brief Phase 2.5 summary to the user before proceeding to Phase 3:
+
+```
+## Phase 2.5: Investigation Synthesis
+
+**Investigations reconciled**: {INVESTIGATION_COUNT}
+**Competing recommendations detected**: {RECONCILED_COUNT}
+  - Arbitrated in place: {N_arbitrated}
+  - Serialized via dependency edge: {N_serialized}
+**Per-issue synthesis briefs emitted**: {N_briefs}
+
+Proceeding to dependency analysis with a deconflicted plan set...
+```
+
+---
+
 ## Phase 3: Dependency Analysis & Execution Plan
 
 ### Step 3A: Analyze explicit dependencies
@@ -853,32 +977,46 @@ If the label is NOT terminal (e.g., `workflow:investigating`, `workflow:ready-to
 )
 ```
 
-**`{GIST_CONTEXT}` generation**: For each issue being dispatched, check if it was spawned by an investigation that has a Knowledge Gist (from Step 2C.5). If so, include the Gist URL(s) in the agent prompt:
+**`{GIST_CONTEXT}` generation**: For each issue being dispatched, build the context block. **Prefer the deconflicted `FORGE:SYNTHESIS_BRIEF` (from Phase 2.5) when one exists** — it is a per-issue, already-reconciled brief that carries only the arbitration decisions and sibling investigation Gists relevant to *this* issue. Injecting it instead of the full aggregated milestone-index gist means the agent does not re-arbitrate the same contradictions (less token spend, less nondeterminism). Only when Phase 2.5 did not run (0/1 investigations — no brief exists) does this fall back to the raw parent-investigation + milestone-index gist behavior. <!-- Added: forge#1192 -->
 
 ```bash
 # Build GIST_CONTEXT for an issue
 GIST_CONTEXT=""
-PARENT_INV=$(gh issue view {NUMBER} -R {GH_REPO} --json body --jq '.body' \
-  | grep -oP '(?i)parent[: ]*#\K\d+|spawned from[: ]*#\K\d+' | head -1)
 
-if [ -n "$PARENT_INV" ] && [ -n "${INVESTIGATION_GISTS[$PARENT_INV]:-}" ]; then
+# Preferred path: a deconflicted per-issue synthesis brief from Phase 2.5.
+SYNTHESIS_BRIEF=$(gh api repos/{GH_REPO}/issues/{NUMBER}/comments \
+  --jq '[.[] | select(.body | contains("<!-- FORGE:SYNTHESIS_BRIEF -->"))] | last | .body // ""' 2>/dev/null)
+
+if [ -n "$SYNTHESIS_BRIEF" ]; then
+  # Phase 2.5 ran and reconciled competing recommendations for this issue.
+  # Inject the deconflicted brief INSTEAD of the raw milestone-index gist dump.
   GIST_CONTEXT="
+**RECONCILED CONTEXT (orchestrate Phase 2.5 synthesis brief)**: Competing investigation recommendations affecting this issue have already been reconciled. Use this deconflicted brief as your primary cross-investigation context — do NOT independently re-arbitrate the underlying investigations.
+${SYNTHESIS_BRIEF}"
+else
+  # Fallback: Phase 2.5 did not run (0/1 investigations). Use the raw gist behavior.
+  PARENT_INV=$(gh issue view {NUMBER} -R {GH_REPO} --json body --jq '.body' \
+    | grep -oP '(?i)parent[: ]*#\K\d+|spawned from[: ]*#\K\d+' | head -1)
+
+  if [ -n "$PARENT_INV" ] && [ -n "${INVESTIGATION_GISTS[$PARENT_INV]:-}" ]; then
+    GIST_CONTEXT="
 **CONTEXT FROM PRIOR INVESTIGATION**: Investigation #${PARENT_INV} produced Knowledge Gist(s) with findings relevant to this issue:
 $(echo "${INVESTIGATION_GISTS[$PARENT_INV]}" | while IFS= read -r url; do echo "- ${url}"; done)
 Fetch the Gist content during the context-gathering phase for implementation guidance."
-fi
+  fi
 
-# Include milestone index URL if available (from Step 2C.5)
-if [ -n "$MILESTONE_INDEX_URL" ]; then
-  GIST_CONTEXT="${GIST_CONTEXT}
+  # Include milestone index URL if available (from Step 2C.5)
+  if [ -n "$MILESTONE_INDEX_URL" ]; then
+    GIST_CONTEXT="${GIST_CONTEXT}
 
 **MILESTONE KNOWLEDGE INDEX**: All investigation findings for this milestone are aggregated in a single index Gist:
 - ${MILESTONE_INDEX_URL}
 The context-gathering phase can fetch this index to discover all investigation Gists for the milestone."
+  fi
 fi
 ```
 
-If `GIST_CONTEXT` is empty (no parent investigation or milestone index found), the variable resolves to a blank line in the template — no impact on the agent prompt. <!-- Updated: forge#341 -->
+If `GIST_CONTEXT` is empty (no synthesis brief, no parent investigation, and no milestone index found), the variable resolves to a blank line in the template — no impact on the agent prompt. <!-- Updated: forge#341, forge#1192 -->
 
 **Capture agent IDs after the batch spawn (MANDATORY)**: Each `Agent(...)` call returns an agent ID. Store each returned ID in `AGENT_ISSUE_MAP` keyed by issue number. This map is the only way to resume a stalled agent by ID in Steps 4B and 4B.5:
 
@@ -1438,7 +1576,11 @@ if [ ${#SWEEP_EXECUTE[@]} -gt 0 ]; then
 
     FINDING_TITLE=$(gh issue view "$FINDING_NUM" -R {GH_REPO} --json title --jq '.title' 2>/dev/null || echo "")
 
-    # Build GIST_CONTEXT for sweep finding — same as Step 4A generation block
+    # Build GIST_CONTEXT for sweep finding — same as Step 4A's *fallback* (raw-gist) path.
+    # The Phase 2.5 FORGE:SYNTHESIS_BRIEF preference is intentionally NOT applied here:
+    # sweep findings are freshly-created review-finding issues that never received a
+    # synthesis brief (Phase 2.5 runs only over the original batch's investigations), so
+    # there is nothing to prefer. Keep this block in sync with 4A's fallback branch only.
     GIST_CONTEXT=""
     PARENT_INV=$(gh issue view "$FINDING_NUM" -R {GH_REPO} --json body --jq '.body' \
       | grep -oP '(?i)parent[: ]*#\K\d+|spawned from[: ]*#\K\d+' | head -1)
@@ -1688,13 +1830,16 @@ done
 | Contracts posted | {N} |
 | Contract→code divergences | {N} (agents that updated contract mid-build) |
 | Review findings created | {N_total} |
-| Findings after synthesis | {N} (deduplicated/arbitrated) |
+| Findings after synthesis | {N} (review findings after dedup/arbitration) |
+| Competing recommendations reconciled (Phase 2.5) | {RECONCILED_COUNT} (investigation plans arbitrated in place + serialized) |
 | Findings validated | {N} |
 | False positives | {N} ({%}) |
 | Anomalies flagged | {N} |
 
 **Domain breakdown**: {N} scraping, {N} frontend, {N} billing, ...
 **Routing**: {N} fast-lane, {N} feature-lane
+
+> `Competing recommendations reconciled` is populated by Phase 2.5 (`RECONCILED_COUNT`). It is `0` when the batch had 0–1 investigations (synthesis is a no-op). <!-- Added: forge#1192 -->
 
 **Systematic issues** (flag if detected):
 - False positive rate > 30% → review agents may need tuning
@@ -1772,7 +1917,7 @@ the Summary section above. `BATCH_ELAPSED` is the wall-clock duration of the orc
 6. **Respect existing work** — skip issues already being worked on (`workflow:building`, `workflow:in-review`)
 7. **Dependency failures cascade** — if A fails and B depends on A, all transitive dependents of A are skipped (not attempted)
 8. **Always run post-batch cleanup** — Phase 5 is mandatory. Never skip `/cleanup all` after orchestration.
-9. **NEVER close/skip issues as duplicates** — only `/work-on` investigation agents can make that call after examining the actual code. The orchestrator delegates, it does not adjudicate.
+9. **NEVER close/skip issues as duplicates** — only `/work-on` investigation agents can make that call after examining the actual code. The orchestrator delegates, it does not adjudicate. **This is distinct from Phase 2.5 plan reconciliation**: reconciling *competing recommendations* across investigation annotations (arbitrating incompatible plans, adding `Depends on #X` serialization edges) operates only on FORGE annotations and issue bodies — it never reads code and never closes/skips/merges an issue. Both issues in a reconciled conflict still run. Adjudicating *duplicate validity* (deciding two issues are the same bug and closing one) remains forbidden. <!-- Added: forge#1192 -->
 10. **Per-completion verification** — after each agent completes, check that it has `workflow:*` labels and structured comments. If an agent bypassed `/work-on`, report it as a pipeline failure.
 
 ---
