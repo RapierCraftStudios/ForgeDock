@@ -96,6 +96,74 @@ Satellite repos (those without a `staging` branch) receive fast-lane PRs directl
 
 ## Phase 0: Resolve Issue & Load Context
 
+### 0.0: Pre-Flight Checks (MANDATORY — run before any other Phase 0 step)
+
+Validate the environment before the pipeline spends tokens. Each check fails fast with an actionable error and a pointer to the troubleshooting guide (`docs/site/troubleshooting.md`). Run all checks; report every failure, then STOP if any HARD check fails. <!-- Added: forge#1149 -->
+
+```bash
+PREFLIGHT_FAILED=0
+
+# Check 1 — forge.yaml present (HARD)
+if [ ! -f forge.yaml ]; then
+  echo "ERROR: forge.yaml not found in the repository root."
+  echo "  Fix: run \`npx forgedock init\` to generate one, or copy forge.yaml.example."
+  echo "  See: docs/site/troubleshooting.md#1-forgeyaml-not-found"
+  PREFLIGHT_FAILED=1
+fi
+
+# Check 2 — yq installed; forge.yaml is valid YAML (HARD, only if present)
+if [ -f forge.yaml ]; then
+  if ! command -v yq >/dev/null 2>&1; then
+    echo "ERROR: yq is not installed. The pipeline requires yq to parse forge.yaml."
+    echo "  Fix: install yq — https://github.com/mikefarah/yq#install"
+    echo "  See: docs/site/troubleshooting.md#2-forgeyaml-has-a-syntax-error"
+    PREFLIGHT_FAILED=1
+  elif ! yq '.' forge.yaml >/dev/null 2>&1; then
+    echo "ERROR: forge.yaml has a YAML syntax error."
+    echo "  Fix: run \`yq '.' forge.yaml\` to locate the offending line, then correct the indentation/quoting."
+    echo "  See: docs/site/troubleshooting.md#2-forgeyaml-has-a-syntax-error"
+    PREFLIGHT_FAILED=1
+  fi
+fi
+
+# Check 3 — gh CLI authenticated (HARD)
+if ! gh auth status >/dev/null 2>&1; then
+  echo "ERROR: gh CLI is not authenticated. The pipeline cannot read or write GitHub state."
+  echo "  Fix: run \`gh auth login\` (ensure repo scope), then \`gh auth status\` to confirm."
+  echo "  See: docs/site/troubleshooting.md#3-gh-cli-not-authenticated"
+  PREFLIGHT_FAILED=1
+fi
+
+# Check 4 — workflow labels exist on the repo (SOFT — warn, auto-recoverable)
+if [ -f forge.yaml ] && gh auth status >/dev/null 2>&1; then
+  GH_REPO_PF="$(yq -r '.project.owner + "/" + .project.repo' forge.yaml 2>/dev/null)"
+  if [ -n "$GH_REPO_PF" ] && ! gh label list -R "$GH_REPO_PF" --search "workflow:" 2>/dev/null | grep -q "workflow:"; then
+    echo "WARNING: ForgeDock workflow:* labels not found on $GH_REPO_PF."
+    echo "  Fix: run \`npx forgedock labels setup\` (or \`--repo $GH_REPO_PF\`) to bootstrap them."
+    echo "  See: docs/site/troubleshooting.md#9-missing-workflow-labels"
+  fi
+fi
+
+# Check 5 — GitHub API rate limit headroom (SOFT — warn)
+if gh auth status >/dev/null 2>&1; then
+  RL_REMAINING="$(gh api rate_limit --jq '.resources.core.remaining' 2>/dev/null || echo '')"
+  if [ -n "$RL_REMAINING" ] && [ "$RL_REMAINING" -lt 100 ] 2>/dev/null; then
+    RL_RESET="$(gh api rate_limit --jq '.resources.core.reset' 2>/dev/null)"
+    echo "WARNING: GitHub API rate limit low ($RL_REMAINING remaining; resets at epoch $RL_RESET)."
+    echo "  Fix: wait for the reset, reduce orchestration parallelism, or use a higher-limit PAT."
+    echo "  See: docs/site/troubleshooting.md#10-github-api-rate-limit-exceeded"
+  fi
+fi
+
+if [ "$PREFLIGHT_FAILED" -eq 1 ]; then
+  echo "Pre-flight checks failed. Resolve the errors above and re-run /work-on {NUMBER}."
+  echo "Full recovery guide: docs/site/troubleshooting.md"
+  exit 1
+fi
+```
+
+Worktree/branch-already-exists and stale-label conditions are surfaced later (Phase 3E worktree creation and the `## Error Handling` section) with their own recovery guidance in `docs/site/troubleshooting.md`.
+
 ### 0A: Parse input
 Extract project prefix and issue number. If `next`/`pick`: list open issues sorted by priority, skip `needs-human` and `workflow:decomposed`, pick highest priority.
 
@@ -424,7 +492,16 @@ Use `forge.yaml → review.tech_stack` and the issue domain labels to identify e
    grep -rn '\.field_name\s*=' services/   # Attribute assignments
    ```
    If the field is written with different types in different code paths (e.g. dict in the standard path, string in the auth-gated path), document ALL variants. The fix must handle every variant — not just the one on the primary investigated code path. A type guard like `or {}` only protects against falsy values; a non-empty string is truthy and bypasses it.
-4. Git blame — trace when/why the relevant code was written
+4. Git blame — trace when/why the relevant code was written. Run bounded, local commands (no network round-trip):
+   ```bash
+   # Introducing commit for each affected file (first commit that added it)
+   git log --reverse --format='%h %an %ad %s' --date=short -- {affected_file} | head -1
+   # Last-touch commit (most recent change)
+   git log -1 --format='%h %an %ad %s' --date=short -- {affected_file}
+   # Line-level blame for a specific suspect hunk, if the issue names one
+   git blame -L {start},{end} -- {affected_file}
+   ```
+   Record the introducing commit and last-touch commit for each primary affected file — this feeds the mandatory **History findings** field in Phase 1C.
 4.5. **Rogue commit pre-state comparison (conditional)**: If the issue body references a specific commit as rogue, bad, or unintended (e.g., "rogue commit `abc1234`", "bad commit", "this was never intended"), MUST run `git show {commit}^:{file}` to see the file before that commit. Compare the pre-commit state against the current file. Any block present in the current file but absent in the pre-commit state was introduced by that commit chain and is a candidate for full reversion — not just partial editing. Report the delta (pre vs. current) in the investigation report. Do NOT assume surrounding code near a named import/bug is correct simply because the issue only named a specific sub-problem. (Ref: forge#278 — investigator confirmed the broken import but never ran `git show 18a3a2cf3^:batch.py`; the surrounding 50-line feature gate was also rogue and was preserved by the fix PR, causing a P1 access regression for all non-Scale users)
 5. Domain context discovery (narrow scope only, 1–5 files):
    ```bash
@@ -432,6 +509,14 @@ Use `forge.yaml → review.tech_stack` and the issue domain labels to identify e
    gh issue list -R {GH_REPO} --state closed --limit 8 --search "{function_name}"
    ```
    Keep only file/function-level overlap. Max 5 related issues.
+
+   **Pickaxe pass (prior fix / regression detection)** — bounded to one pass, capped at 5 hits: search for prior additions/removals of the suspected symbol or literal string named in the issue, independent of whether that fix was ever linked to a filed issue:
+   ```bash
+   git log -S"{suspected_symbol_or_string}" --oneline -- {affected_files} | head -5
+   # Use -G instead of -S when the target is a regex pattern rather than a literal string
+   git log -G"{pattern}" --oneline -- {affected_files} | head -5
+   ```
+   Any hit here is a candidate prior fix or reintroduced defect — read the commit body (`git show {hash}`) to confirm before citing it. Feed confirmed hits into the History findings field and let them inform the verdict (e.g. a defect being reintroduced raises severity).
 6. Determine root cause
 7. Identify affected files — full list of files that need changes
 7.5. **Sibling Pattern Sweep** *(conditional — when the bug is a condition, gated function call, or field presence check)*: After identifying the affected files, grep for the same pattern in sibling files within the same directory. The issue spec may name only the file where the error was first observed — but the same commit or PR that introduced the bug often applied it uniformly across related handlers.
@@ -474,6 +559,12 @@ gh issue comment {NUMBER} {GH_FLAG} --body "<!-- FORGE:INVESTIGATOR -->
 
 ### Evidence
 {specific findings — function names, line numbers, behavior observed}
+
+### History Findings
+**Introducing commit**: {hash — author — date — subject, per primary affected file}
+**Last touched**: {hash — author — date — subject}
+**Pickaxe hits (prior fixes / regressions)**: {commit(s) found via \`git log -S\`/\`-G\`, or 'None found' — max 5}
+{This field is MANDATORY — populate from the git blame + pickaxe commands in step 4/5. If a file is newly created (no history), write 'New file — no history.'}
 
 ### Recommendation
 {what to build/fix, concrete and actionable}
@@ -889,7 +980,12 @@ Run these queries (20s timeout each, 2 min total budget):
 
 **C1: Past Review Findings on These Files**
 ```bash
-for file in {AFFECTED_FILES}; do
+# {AFFECTED_FILES} is a space-separated argument (see --files contract) — split
+# explicitly on IFS=' ' into an array instead of a bare `for file in {AFFECTED_FILES}`,
+# which word-splits on the shell's default IFS (space, tab, AND newline) and
+# would corrupt any path containing a space.
+IFS=' ' read -ra AFFECTED_FILES_ARR <<< "{AFFECTED_FILES}"
+for file in "${AFFECTED_FILES_ARR[@]}"; do
   basename=$(basename "$file" .py)
   gh issue list -R {GH_REPO} --state closed --label "review-finding" \
     --search "$basename" --limit 10 \
@@ -907,6 +1003,20 @@ done
 git log --oneline -30 -- {AFFECTED_FILES} | grep -oE '#[0-9]+' | sort -u | head -8
 # For each issue: fetch title + root cause, keep only bug/fix/review-finding labeled. Max 5.
 ```
+
+**Direct commit-body read (bounded, prefer over `gh api` when it already answers "why")**: read the top 5 commit subjects+bodies on the affected files directly — local git is near-free relative to `gh api` round-trips, and commit bodies often explain the "why" without needing to fetch a linked issue at all:
+```bash
+git log -5 --format='%h %ad %s%n%b' --date=short -- {AFFECTED_FILES}
+```
+If a commit body fully explains a prior bug/fix (common for squashed or fix-up commits with no `#NNN` reference), use it directly as a "Past Bug in This Module" entry — do not require a linked GitHub issue to exist.
+
+**Pickaxe pass (has this exact area been fixed before?)** — one bounded pass, capped at 5 hits, keyed on the suspected symbol/string from the Builder Contract or investigation report:
+```bash
+git log -S"{suspected_symbol_or_string}" --oneline -- {AFFECTED_FILES} | head -5
+# Use -G instead of -S for regex patterns
+git log -G"{pattern}" --oneline -- {AFFECTED_FILES} | head -5
+```
+Any hit is a candidate prior fix or reintroduced defect for this exact code area — read `git show {hash}` to confirm scope before including it in the output. This catches regressions the issue-number harvest above misses (e.g. a defect fixed via a squashed commit with no `#NNN` reference).
 
 **C3: Related Code Paths** (callers/importers of FUNCTION_NAMES)
 ```bash
@@ -934,7 +1044,8 @@ gh issue comment {NUMBER} {GH_FLAG} --body "<!-- FORGE:CONTEXT -->
 {past review-finding issues}
 
 ### Past Bugs in This Module
-{closed bug issues from git log mining}
+{closed bug issues from git log mining, PLUS pickaxe-derived findings (commits with no linked issue, or commit
+ bodies read directly per the C2 direct-commit-body step)}
 
 ### Related Code Paths (must stay consistent)
 {files that import/call changed functions}
@@ -1257,10 +1368,11 @@ Skip if no changed Python files contain DB engine/session/pool patterns.
 
 ```bash
 cd {WORKTREE_PATH}
-for f in $(echo {CHANGED_FILES} | tr ' ' '\n' | grep -E '\.py$'); do
+while IFS= read -r f; do
+    [ -z "$f" ] && continue
     grep -qE "create_async_engine|AsyncSession|connect_args|pool_size|prepared_statement|engine_from_config|sessionmaker" "$f" 2>/dev/null && \
         echo "DB CONFIG CHANGE DETECTED in: $f"
-done
+done < <(echo {CHANGED_FILES} | tr ' ' '\n' | grep -E '\.py$')
 ```
 
 Advisory only — does not block build. Check for lambda/callable in connect_args (the exact bug class from PR #14391).
@@ -1335,7 +1447,7 @@ Stage all changes and commit:
 ```bash
 cd {WORKTREE_PATH}
 git add -u
-git commit -m "fix({SCOPE}): {description} (#{NUMBER})"
+git commit -s -m "fix({SCOPE}): {description} (#{NUMBER})"
 ```
 
 Conventional prefix: `fix`/`feat`/`refactor`/`docs`. Reference `#{NUMBER}` in message.
@@ -1649,7 +1761,14 @@ fi
 
 ## Phase 7: Summary & Trajectory
 
-### 7A: Report
+### 7A: Report + Pipeline Summary Card
+
+Output the terse report, then render the shareable **Pipeline Summary Card** — the shareable
+moment a developer screenshots. Gather real stats (commits, additions/deletions, PR target,
+review summary, elapsed time) and render exactly as specified in `work-on/close.md` Phase C4.5
+(`C4.5a` stats gathering → `C4.5b` box-drawing card to stdout → `C4.5c` machine-readable twin).
+This inline path and the delegated `close.md` path MUST produce an identical card.
+
 ```
 ## Done: #{NUMBER} — {TITLE}
 - Investigation: {VERDICT} ({CONFIDENCE})
@@ -1657,6 +1776,98 @@ fi
 - Fix: {BRANCH} → PR #{PR_NUMBER} → merged to `{PR_BASE}`
 - Files changed: {COUNT}
 ```
+
+Then print the card to stdout (inner width 51; truncate long titles with `…`; missing stats
+render `—`; pipeline line reflects the actual terminal state — merged / decomposed / invalid /
+blocked; draft PRs append `(draft)`):
+
+```
+╔═══════════════════════════════════════════════════╗
+║  ForgeDock Pipeline Complete                      ║
+╠═══════════════════════════════════════════════════╣
+║                                                   ║
+║  Issue:    #{NUMBER} — {TITLE}                    ║
+║  Pipeline: investigate → architect → build →      ║
+║            review → merge ✓                       ║
+║  Commits:  {COMMITS} ({ADDITIONS} additions, {DELETIONS} deletions) ║
+║  PR:       #{PR_NUMBER} (merged to {PR_BASE})     ║
+║  Review:   {REVIEW_SUMMARY}                       ║
+║  Time:     {ELAPSED}                              ║
+║                                                   ║
+╚═══════════════════════════════════════════════════╝
+```
+
+**Gather real stats** (C4.5a — this block MUST run on the inline path to populate card variables;
+do NOT rely on the cross-reference to `close.md` alone):
+
+```bash
+PR_STATS=$(gh pr view {PR_NUMBER} {GH_FLAG} --json commits,additions,deletions,baseRefName,isDraft 2>/dev/null)
+COMMITS=$(echo "$PR_STATS"   | jq -r '(.commits | length) // empty' 2>/dev/null); COMMITS=${COMMITS:-—}
+ADDITIONS=$(echo "$PR_STATS" | jq -r '.additions // empty' 2>/dev/null); ADDITIONS=${ADDITIONS:-—}
+DELETIONS=$(echo "$PR_STATS" | jq -r '.deletions // empty' 2>/dev/null); DELETIONS=${DELETIONS:-—}
+PR_TARGET=$(echo "$PR_STATS" | jq -r '.baseRefName // empty' 2>/dev/null); PR_TARGET=${PR_TARGET:-{PR_BASE}}
+IS_DRAFT=$(echo "$PR_STATS"  | jq -r '.isDraft // false' 2>/dev/null)
+
+REVIEW_BODIES=$(gh pr view {PR_NUMBER} {GH_FLAG} --json reviews,comments \
+  --jq '[.reviews[].body // ""] + [.comments[].body // ""] | .[]' 2>/dev/null)
+# NOTE: `grep -c` already prints `0` on no match (and exits non-zero) — do NOT add
+# `|| echo 0`, which would append a second line ("0\n0") and break the arithmetic
+# and `--argjson` below. Swallow the non-zero exit with `|| true`, then default.
+APPROVED=$(echo "$REVIEW_BODIES" | grep -cE 'APPROVED:' 2>/dev/null || true); APPROVED=${APPROVED:-0}
+CHANGES=$(echo  "$REVIEW_BODIES" | grep -cE 'CHANGES REQUESTED:' 2>/dev/null || true); CHANGES=${CHANGES:-0}
+TOTAL_AGENTS=$((APPROVED + CHANGES))
+BLOCKERS=$(echo "$REVIEW_BODIES" | grep -ciE 'blocker|merge.?block' 2>/dev/null || true); BLOCKERS=${BLOCKERS:-0}
+if [ "$TOTAL_AGENTS" -gt 0 ]; then
+  REVIEW_SUMMARY="${APPROVED}/${TOTAL_AGENTS} agents passed, ${BLOCKERS} blockers"
+else
+  REVIEW_SUMMARY="—"   # review data unavailable (e.g. review skipped)
+fi
+
+FIRST_TS=$(gh api repos/{GH_REPO}/issues/{NUMBER}/comments \
+  --jq '[.[] | select(.body | contains("FORGE:")) | .created_at] | sort | .[0] // empty' 2>/dev/null)
+if [ -n "$FIRST_TS" ]; then
+  START_EPOCH=$(date -u -d "$FIRST_TS" +%s 2>/dev/null \
+    || python3 -c "import sys,datetime; ts=sys.argv[1].rstrip('Z'); print(int(datetime.datetime.fromisoformat(ts+'+00:00').timestamp()))" "$FIRST_TS" 2>/dev/null \
+    || echo "")
+  NOW_EPOCH=$(date -u +%s)
+  if [ -n "$START_EPOCH" ]; then
+    ELAPSED_SECS=$((NOW_EPOCH - START_EPOCH))
+    ELAPSED=$(printf '%dm %02ds' $((ELAPSED_SECS / 60)) $((ELAPSED_SECS % 60)))
+  else ELAPSED="—"; ELAPSED_SECS=0; fi
+else ELAPSED="—"; ELAPSED_SECS=0; fi
+
+case "{TERMINAL_STATE}" in
+  decomposed) PIPELINE_LINE="investigate → decompose ⏹"; CARD_STATUS="decomposed" ;;
+  invalid)    PIPELINE_LINE="investigate → invalid ✗";   CARD_STATUS="invalid" ;;
+  blocked)    PIPELINE_LINE="investigate → build → blocked ⚠"; CARD_STATUS="blocked" ;;
+  *)          PIPELINE_LINE="investigate → architect → build → review → merge ✓"; CARD_STATUS="merged" ;;
+esac
+[ "$IS_DRAFT" = "true" ] && PIPELINE_LINE="${PIPELINE_LINE} (draft)"
+```
+
+**Build the machine-readable twin** (C4.5c — MUST run this block to assign `CARD_JSON` before
+Phase 7B embeds it; the cross-reference to `close.md` above is insufficient on the inline path): <!-- forge#1178 -->
+
+```bash
+CARD_JSON=$(jq -nc \
+  --argjson issue {NUMBER} \
+  --arg title "{TITLE}" \
+  --arg status "$CARD_STATUS" \
+  --arg pipeline "$PIPELINE_LINE" \
+  --arg pr "{PR_NUMBER}" \
+  --arg target "$PR_TARGET" \
+  --arg commits "$COMMITS" --arg adds "$ADDITIONS" --arg dels "$DELETIONS" \
+  --arg review "$REVIEW_SUMMARY" --argjson blockers "${BLOCKERS:-0}" \
+  --argjson elapsed "${ELAPSED_SECS:-0}" \
+  '{issue:$issue, title:$title, status:$status, pipeline:$pipeline,
+    pr:($pr|tonumber? // null), pr_target:$target,
+    commits:($commits|tonumber? // null),
+    additions:($adds|tonumber? // null),
+    deletions:($dels|tonumber? // null),
+    review:$review, blockers:$blockers, elapsed_seconds:$elapsed}')
+```
+
+`CARD_JSON` is now set and embedded in the trajectory comment by 7B.
 
 ### 7B: Trajectory Log (MANDATORY)
 
@@ -1691,8 +1902,15 @@ gh issue comment {NUMBER} {GH_FLAG} --body "<!-- FORGE:TRAJECTORY -->
 
 **Decisions**: {key decisions}
 **Anomalies**: {anomalies or None}
-**Pipeline completed**: {TIMESTAMP}"
+**Pipeline completed**: {TIMESTAMP}
+
+<!-- FORGE:CARD ${CARD_JSON} -->"
 ```
+
+Append the `<!-- FORGE:CARD {...} -->` block (machine-readable twin from 7A / close.md C4.5c)
+as the last line of the trajectory comment. It is HTML-comment-wrapped so it stays hidden in
+the rendered view but greppable for platform consumption (`/orchestrate` Phase 6 reads it for
+per-issue cards). Additive — does not affect existing `FORGE:TRAJECTORY` table consumers.
 
 ### 7C: Graph Decision Record (MANDATORY when PR exists)
 

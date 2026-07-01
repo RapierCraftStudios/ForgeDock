@@ -3,7 +3,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 
 import { fileURLToPath, pathToFileURL } from "url";
-import { dirname, join, relative, resolve } from "path";
+import { basename, dirname, join, relative, resolve } from "path";
 import { mkdir, symlink, readlink, lstat, readdir, stat, unlink } from "fs/promises";
 import {
   existsSync,
@@ -33,6 +33,7 @@ import {
   YELLOW,
   CYAN,
 } from "./tui.mjs";
+import { buildMinimalForgeYaml } from "./init-detect.mjs";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
@@ -346,6 +347,9 @@ function writeSymlinkSentinel() {
   const content =
     `# ForgeDock command symlinks — DO NOT REPOINT\n` +
     `# Source: ${COMMANDS_DIR}\n` +
+    // Machine-readable version line — read by install() on the next run to
+    // detect first-time vs. update installs and render a version diff (#1146).
+    `# Version: ${getVersion()}\n` +
     `#\n` +
     `# These symlinks are managed by ForgeDock (https://forgedock.com).\n` +
     `# ForgeDock owns the global ~/.claude/commands/ namespace.\n` +
@@ -1050,6 +1054,28 @@ async function linkScripts(step) {
 }
 
 async function install() {
+  // Detect first-time vs. update install by inspecting the namespace sentinel
+  // BEFORE the install steps overwrite it. A missing sentinel means this is a
+  // first install; a present one carries the previously installed version (if
+  // it was written by a build that records `# Version:`). Reading is non-fatal:
+  // any error is treated as a first install so guidance still renders. (#1146)
+  const sentinelPath = join(TARGET_DIR, ".symlink-source");
+  let priorSentinel = null;
+  try {
+    priorSentinel = readFileSync(sentinelPath, "utf-8");
+  } catch {
+    priorSentinel = null;
+  }
+  const isFirstInstall = priorSentinel === null;
+  const priorVersion = priorSentinel
+    ? priorSentinel.match(/^# Version:\s*(.+)$/m)?.[1]?.trim() || null
+    : null;
+  const currentVersion = getVersion();
+
+  // Captured from the "Linking commands" step so the post-install summary can
+  // report how many commands were installed/changed without recounting.
+  let linkStats = { installed: 0, updated: 0, skipped: 0 };
+
   const result = await runSteps([
     {
       label: "Checking environment",
@@ -1086,6 +1112,8 @@ async function install() {
       async run(step) {
         const { installed, updated, skipped } = await linkCommands(step);
         const total = installed + updated + skipped;
+        // Hoist for the post-install summary box (#1146).
+        linkStats = { installed, updated, skipped };
         step.note(
           `${green(String(installed))} installed, ${updated} updated, ${dim(String(skipped))} skipped  (${total} commands total)`,
         );
@@ -1231,18 +1259,65 @@ async function install() {
   ]);
 
   if (result.ok) {
-    process.stderr.write(
-      box(
-        [
-          `${green("✔")} ${bold("ForgeDock is ready")}`,
-          "",
-          `Commands installed to ${cyan(TARGET_DIR)}`,
-          `Scripts installed to  ${cyan(SCRIPTS_TARGET_DIR)}`,
-          `Next: ${cyan("cd <your-project>")} then ${cyan("npx forgedock init")}`,
-        ],
-        { title: "ForgeDock Installed" },
-      ) + "\n",
-    );
+    const totalCommands =
+      linkStats.installed + linkStats.updated + linkStats.skipped;
+    const changedCommands = linkStats.installed + linkStats.updated;
+    const versionLabel = currentVersion ? `v${currentVersion}` : "";
+
+    if (isFirstInstall) {
+      // First-time install — show the full guided next-steps box so the user
+      // has a prioritized path from "installed" to "using it". (#1146)
+      const cmd = (text) => cyan(text.padEnd(22));
+      process.stderr.write(
+        box(
+          [
+            `${green("✔")} ${bold(`ForgeDock ${versionLabel}`.trim())} installed`,
+            `${green("✔")} ${totalCommands} commands → ${cyan(TARGET_DIR)}`,
+            "",
+            bold("What's next?"),
+            "",
+            dim("First time?"),
+            `  ${cmd("npx forgedock demo")}${dim("Try the pipeline risk-free")}`,
+            "",
+            dim("Setting up your repo?"),
+            `  ${cmd("npx forgedock init")}${dim("Configure forge.yaml")}`,
+            `  ${cmd("npx forgedock doctor")}${dim("Verify your setup")}`,
+            "",
+            dim("Ready to go?"),
+            `  ${cyan("/work-on #N".padEnd(22))}${dim("Run it in Claude Code")}`,
+          ],
+          { title: "ForgeDock Installed" },
+        ) + "\n",
+      );
+    } else {
+      // Update install — show a compact version diff and what changed, with a
+      // changelog link instead of the full first-run guidance. (#1146)
+      let headline;
+      if (priorVersion && currentVersion && priorVersion !== currentVersion) {
+        headline = `Updated from ${bold(`v${priorVersion}`)} → ${bold(`v${currentVersion}`)}.`;
+      } else if (currentVersion && priorVersion === currentVersion) {
+        headline = `Reinstalled ${bold(`v${currentVersion}`)}.`;
+      } else if (currentVersion) {
+        headline = `Updated to ${bold(`v${currentVersion}`)}.`;
+      } else {
+        headline = "Update complete.";
+      }
+      const changeNote =
+        changedCommands > 0
+          ? ` ${changedCommands} new/changed command${changedCommands === 1 ? "" : "s"}.`
+          : " Commands already up to date.";
+      process.stderr.write(
+        box(
+          [
+            `${green("✔")} ${headline}${changeNote}`,
+            "",
+            `Changelog: ${cyan("https://github.com/RapierCraftStudios/ForgeDock/releases")}`,
+            `Verify:    ${cyan("npx forgedock doctor")}`,
+          ],
+          { title: "ForgeDock Updated" },
+        ) + "\n",
+      );
+    }
   }
 }
 
@@ -1476,13 +1551,15 @@ async function update() {
   console.log("");
 }
 
-async function init(fromInstall = false) {
+async function init(fromInstall = false, minimal = false) {
   // When called from install() via runSteps(), suppress stdout to prevent
   // interleaving with the TUI spinner on stderr. runSteps() provides the
   // "Generating forge.yaml" step label as visual feedback. (#812)
   const log = fromInstall ? () => {} : console.log;
   log("");
-  log(`${BOLD}ForgeDock${RESET} — Generating forge.yaml`);
+  log(
+    `${BOLD}ForgeDock${RESET} — Generating forge.yaml${minimal ? " (minimal)" : ""}`,
+  );
   log("");
 
   const cwd = process.cwd();
@@ -1688,7 +1765,7 @@ async function init(fromInstall = false) {
           `forge.yaml.bak.${new Date().toISOString().replace(/[:.]/g, "-")}`,
         )
       : baseBak;
-    const backupName = backupPath.split("/").pop();
+    const backupName = basename(backupPath);
     renameSync(outputPath, backupPath);
     log(`  ${YELLOW}Backed up${RESET}: forge.yaml → ${backupName}`);
   }
@@ -1707,7 +1784,7 @@ async function init(fromInstall = false) {
   const safeDefaultBranch = defaultBranch.replace(/\\/g, '\\\\').replace(/"/g, '\\"');
   const safeStagingBranch = stagingBranch.replace(/\\/g, '\\\\').replace(/"/g, '\\"');
 
-  const content = `# forge.yaml — ForgeDock Configuration
+  const fullContent = `# forge.yaml — ForgeDock Configuration
 #
 # Auto-generated by: npx forgedock init
 # Edit this file with your project details.
@@ -1825,9 +1902,26 @@ branches:
 #   #   override_phrase: "OVERRIDE: shipping with test failures \u2014"
 `;
 
+  // When --minimal is requested, emit only the three required sections
+  // (project, paths, branches) — no commented optional blocks. The minimal
+  // output still passes `forgedock doctor` and drives `/work-on`, while staying
+  // ~20 lines instead of ~200. (#1148)
+  const content = minimal
+    ? buildMinimalForgeYaml({
+        projectName,
+        owner,
+        repo,
+        description,
+        root: cwd,
+        worktreeBase,
+        defaultBranch,
+        stagingBranch,
+      })
+    : fullContent;
+
   atomicWriteFile(outputPath, content);
 
-  log(`  ${GREEN}Created${RESET}: forge.yaml`);
+  log(`  ${GREEN}Created${RESET}: forge.yaml${minimal ? " (minimal)" : ""}`);
   log("");
 
   if (fromInstall) {
@@ -1857,9 +1951,15 @@ branches:
     log(
       `  2. Add ${CYAN}forge.yaml${RESET} to ${CYAN}.gitignore${RESET} if it contains sensitive paths`,
     );
-    log(
-      `  3. Run ${CYAN}/forgedock-init${RESET} inside Claude Code for guided AI-powered setup`,
-    );
+    if (minimal) {
+      log(
+        `  3. Need more? Add optional sections from ${CYAN}forge.yaml.example${RESET} (see ${CYAN}docs/CONFIG.md${RESET})`,
+      );
+    } else {
+      log(
+        `  3. Run ${CYAN}/forgedock-init${RESET} inside Claude Code for guided AI-powered setup`,
+      );
+    }
     log("");
   }
 }
@@ -2109,13 +2209,27 @@ async function doctor() {
               symlinkOk = false;
             }
           } else {
-            // Regular file — not a symlink (install left a copy)
-            broken++;
-            brokenLinks.push(`${rel} (not a symlink)`);
-            symlinkOk = false;
+            // Regular file — copy-mode install (Windows without Developer Mode).
+            // linkCommands() falls back to copyFile() on EPERM/EACCES, so a regular
+            // file is valid as long as its content matches the source. <!-- Added: forge#1174 -->
+            try {
+              const srcContent = readFileSync(src, "utf-8");
+              const tgtContent = readFileSync(tgt, "utf-8");
+              if (srcContent !== tgtContent) {
+                broken++;
+                brokenLinks.push(`${rel} (stale copy)`);
+                symlinkOk = false;
+              }
+              // else: content matches — valid copy-mode install, not broken
+            } catch {
+              // Could not read one of the files — treat as broken.
+              broken++;
+              brokenLinks.push(`${rel} (unreadable)`);
+              symlinkOk = false;
+            }
           }
         } catch {
-          // Symlink missing
+          // File missing
           broken++;
           brokenLinks.push(`${rel} (missing)`);
           symlinkOk = false;
@@ -2123,15 +2237,15 @@ async function doctor() {
       }
 
       if (symlinkOk) {
-        pass("Command symlinks", `${checked} symlinks valid`);
+        pass("Command files", `${checked} files installed`);
       } else {
         fail(
-          "Command symlinks",
+          "Command files",
           `Run: npx forgedock install  (${broken}/${checked} broken: ${brokenLinks.slice(0, 3).join(", ")}${brokenLinks.length > 3 ? "…" : ""})`,
         );
       }
     } catch (err) {
-      fail("Command symlinks", `Could not read commands directory: ${err.message}`);
+      fail("Command files", `Could not read commands directory: ${err.message}`);
     }
   }
 
@@ -2441,6 +2555,106 @@ async function doctor() {
     }
   }
 
+  // ── Check 10: yq installed ────────────────────────────────────────────────
+  // yq is a hard dependency: pipeline commands (work-on, review-pr, orchestrate)
+  // read forge.yaml via yq. Without it, those commands fail. Fixed literal
+  // command — no interpolation, so no injection surface (cf. #663/#789/#807).
+  {
+    let yqVersion = "";
+    try {
+      yqVersion = execSync("yq --version", {
+        stdio: ["ignore", "pipe", "ignore"],
+        encoding: "utf-8",
+        timeout: 5000,
+      }).trim();
+    } catch {
+      // yq not installed or not on PATH
+    }
+
+    if (yqVersion) {
+      pass("yq", yqVersion);
+    } else {
+      fail(
+        "yq",
+        "Install the YAML processor (used to read forge.yaml): https://github.com/mikefarah/yq#install",
+      );
+    }
+  }
+
+  // ── Check 11: Claude Code installed + version compatible ───────────────────
+  // The compatibility floor is the @anthropic-ai/claude-code peerDependency in
+  // package.json (read dynamically so it never drifts from the declared floor).
+  // Not-on-PATH is a warning, not a failure: Claude Code may run as the host
+  // process without exposing the `claude` CLI on PATH, so a hard fail would be a
+  // false negative. Only an installed-but-too-old version is a hard failure.
+  {
+    // Resolve the minimum compatible version from package.json peerDependencies.
+    let minClaudeVersion = "2.0.0";
+    try {
+      const pkgRaw = readFileSync(join(FORGE_HOME, "package.json"), "utf-8");
+      const pkg = JSON.parse(pkgRaw);
+      const range = pkg?.peerDependencies?.["@anthropic-ai/claude-code"];
+      if (typeof range === "string") {
+        const m = range.match(/(\d+\.\d+\.\d+)/);
+        if (m) minClaudeVersion = m[1];
+      }
+    } catch {
+      // package.json unreadable — keep the hardcoded fallback floor.
+    }
+
+    let claudeRaw = "";
+    let claudeInstalled = false;
+    try {
+      claudeRaw = execSync("claude --version", {
+        stdio: ["ignore", "pipe", "ignore"],
+        encoding: "utf-8",
+        timeout: 5000,
+      }).trim();
+      claudeInstalled = true;
+    } catch {
+      // claude CLI not on PATH
+    }
+
+    if (!claudeInstalled) {
+      warn(
+        "Claude Code",
+        `\`claude\` CLI not found on PATH (need >= v${minClaudeVersion}). If you run Claude Code without the CLI on PATH this is fine; otherwise install it: https://docs.anthropic.com/en/docs/claude-code`,
+      );
+    } else {
+      const verMatch = claudeRaw.match(/(\d+)\.(\d+)\.(\d+)/);
+      if (!verMatch) {
+        warn(
+          "Claude Code",
+          `installed but version string could not be parsed ("${claudeRaw}"). Expected >= v${minClaudeVersion}.`,
+        );
+      } else {
+        const found = [
+          Number(verMatch[1]),
+          Number(verMatch[2]),
+          Number(verMatch[3]),
+        ];
+        const floor = minClaudeVersion.split(".").map(Number);
+        // Lexicographic semver comparison: found >= floor ?
+        let compatible = true;
+        for (let i = 0; i < 3; i++) {
+          if (found[i] > floor[i]) break;
+          if (found[i] < floor[i]) {
+            compatible = false;
+            break;
+          }
+        }
+        if (compatible) {
+          pass("Claude Code", `v${found.join(".")} (compatible, >= v${minClaudeVersion})`);
+        } else {
+          fail(
+            "Claude Code",
+            `v${found.join(".")} is below the supported floor v${minClaudeVersion}. Update Claude Code: https://docs.anthropic.com/en/docs/claude-code`,
+          );
+        }
+      }
+    }
+  }
+
   // ── Summary ────────────────────────────────────────────────────────────────
   console.log("");
   if (failures === 0 && warnings === 0) {
@@ -2466,8 +2680,11 @@ function help() {
     ["npx forgedock", "Install commands (default)"],
     ["npx forgedock install", "Install commands"],
     ["npx forgedock init", "Generate forge.yaml config for your project"],
+    ["npx forgedock init --minimal", "Generate a minimal forge.yaml (required sections only)"],
     ["npx forgedock uninstall", "Remove commands"],
     ["npx forgedock update", "Pull latest & reinstall"],
+    ["npx forgedock run <cmd> [args]", "Run a command headlessly via the Anthropic API"],
+    ["npx forgedock demo", "Set up a risk-free demo repo and print next steps"],
     ["npx forgedock enable [dir]", "Mark directory as ForgeDock-managed"],
     ["npx forgedock disable [dir]", "Opt directory out of ForgeDock"],
     ["npx forgedock status [dir]", "Show resolved state for a directory"],
@@ -2480,6 +2697,110 @@ function help() {
   );
 }
 
+/**
+ * `forgedock run <command> [args...]` — execute a ForgeDock command spec
+ * directly via the Anthropic API, outside of Claude Code (headless / CI).
+ *
+ * Flags:
+ *   --dry-run               Preview the assembled prompt + tool plan; no API call.
+ *   --model <id>            Override the model (default: claude-sonnet-4-5 or $FORGEDOCK_MODEL).
+ *   --max-iterations <n>    Bound the tool-use loop (default: 50).
+ *
+ * The live loop requires ANTHROPIC_API_KEY and the optional @anthropic-ai/sdk
+ * dependency. The runtime itself lives in bin/runner.mjs.
+ *
+ * Env:
+ *   FORGEDOCK_MODEL   Default model id when --model is omitted.
+ *   FORGEDOCK_SHELL   Override the shell used by run_bash. Defaults to bash when
+ *                     found (Git Bash / WSL on Windows, /bin/bash on POSIX),
+ *                     falling back to the platform default shell otherwise.
+ */
+async function run() {
+  const runArgs = args.slice(1);
+  let dryRun = false;
+  let model;
+  let maxIterations;
+  const positional = [];
+  for (let i = 0; i < runArgs.length; i++) {
+    const a = runArgs[i];
+    if (a === "--dry-run") {
+      dryRun = true;
+    } else if (a === "--model") {
+      model = runArgs[++i];
+    } else if (a.startsWith("--model=")) {
+      model = a.slice("--model=".length);
+    } else if (a === "--max-iterations") {
+      maxIterations = parseInt(runArgs[++i], 10);
+    } else if (a.startsWith("--max-iterations=")) {
+      maxIterations = parseInt(a.slice("--max-iterations=".length), 10);
+    } else {
+      positional.push(a);
+    }
+  }
+
+  const commandName = positional[0];
+  const commandArgs = positional.slice(1);
+
+  if (!commandName) {
+    process.stderr.write(
+      `${RED}Usage: forgedock run <command> [args...] [--dry-run] [--model <id>] [--max-iterations <n>]${RESET}\n`,
+    );
+    process.exit(1);
+  }
+
+  const { runCommand } = await import("./runner.mjs");
+  try {
+    const result = await runCommand({
+      commandsDir: COMMANDS_DIR,
+      commandName,
+      args: commandArgs,
+      cwd: process.cwd(),
+      dryRun,
+      ...(model ? { model } : {}),
+      ...(Number.isInteger(maxIterations) && maxIterations > 0
+        ? { maxIterations }
+        : {}),
+    });
+    // Treat a non-clean stop (iteration cap hit, or a max_tokens-truncated
+    // turn) as a failed run so CI/headless callers notice.
+    if (
+      result &&
+      (result.status === "max-iterations" || result.status === "incomplete")
+    ) {
+      process.exitCode = 1;
+    }
+  } catch (err) {
+    process.stderr.write(`${RED}${err.message}${RESET}\n`);
+    process.exit(1);
+  }
+}
+
+/**
+ * `forgedock demo` — one-command demo mode (issue #1145).
+ *
+ * Stands up a runnable ForgeDock demo at a predictable location (default
+ * ~/forgedock-demo) with zero required decisions, then prints the exact next
+ * steps. Clones the live demo repo when available, otherwise falls back to the
+ * bundled scaffold at FORGE_HOME/examples/forgedock-demo. The runtime lives in
+ * bin/demo.mjs.
+ */
+async function demo() {
+  const { runDemo } = await import("./demo.mjs");
+  try {
+    const result = await runDemo({
+      forgeHome: FORGE_HOME,
+      args: args.slice(1),
+      cwd: process.cwd(),
+    });
+    if (result && result.status === "error") {
+      process.exitCode = 1;
+    }
+  } catch (err) {
+    process.stderr.write(`${RED}${err.message}${RESET}\n`);
+    process.exit(1);
+  }
+}
+
 splash();
 
 switch (command) {
@@ -2487,13 +2808,19 @@ switch (command) {
     await install();
     break;
   case "init":
-    await init();
+    await init(false, args.includes("--minimal"));
     break;
   case "uninstall":
     await uninstall();
     break;
   case "update":
     await update();
+    break;
+  case "run":
+    await run();
+    break;
+  case "demo":
+    await demo();
     break;
   case "enable":
     await enable(args[1]);

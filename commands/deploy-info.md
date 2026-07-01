@@ -189,10 +189,14 @@ if [ -n "$MIGRATIONS" ]; then
   echo "⚠️ DATABASE MIGRATIONS INCLUDED:"
   echo "$MIGRATIONS"
   # Show migration content for review
-  for m in $MIGRATIONS; do
+  # $MIGRATIONS is one path per line (`git diff --name-only`) — herestring,
+  # not a piped `| while read`, for consistency with the newline-safe pattern
+  # used elsewhere in this sweep.
+  while IFS= read -r m; do
+    [ -z "$m" ] && continue
     echo "--- $m ---"
     git show origin/$SOURCE:$m 2>/dev/null | head -30
-  done
+  done <<< "$MIGRATIONS"
 fi
 ```
 

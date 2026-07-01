@@ -172,21 +172,30 @@ When changed files touch database engine configuration, flag for manual connecti
 ```bash
 cd {WORKTREE_PATH}
 DB_CONFIG_FILES=""
-for f in $(echo {CHANGED_FILES} | tr ' ' '\n' | grep -E '\.py$'); do
+# Process substitution (< <(...)), NOT a piped `| while read`, so DB_CONFIG_FILES
+# set inside the loop body survives past the loop (a piped while-read would run
+# in a subshell and silently discard the accumulator).
+while IFS= read -r f; do
+    [ -z "$f" ] && continue
     grep -qE "create_async_engine|AsyncSession|connect_args|pool_size|prepared_statement|engine_from_config|sessionmaker" "$f" 2>/dev/null && \
-        DB_CONFIG_FILES="$DB_CONFIG_FILES $f"
-done
+        DB_CONFIG_FILES="${DB_CONFIG_FILES}${f}"$'\n'
+done < <(echo {CHANGED_FILES} | tr ' ' '\n' | grep -E '\.py$')
 
 if [ -n "$DB_CONFIG_FILES" ]; then
-    echo "DB CONFIG CHANGE DETECTED in:$DB_CONFIG_FILES"
+    echo "DB CONFIG CHANGE DETECTED in:"
+    echo "$DB_CONFIG_FILES"
     echo "ACTION: Verify database connectivity after deploy — changes to engine config, connect_args, or session factories can cause silent runtime failures."
     echo "RECOMMENDED: Run a minimal connectivity test (e.g., SELECT 1) through the modified session/engine path."
 
     # Check for lambda/callable in connect_args — the exact bug class from PR #14391
-    for f in $DB_CONFIG_FILES; do
+    # $DB_CONFIG_FILES is one path per line (built above) — herestring, not a
+    # piped `| while read`, so behavior stays consistent with the other fixes
+    # in this sweep even though no accumulator is set inside this particular loop.
+    while IFS= read -r f; do
+        [ -z "$f" ] && continue
         grep -nE "lambda.*:.*['\"]|=lambda" "$f" 2>/dev/null | grep -iE "connect_args|prepared_statement|pool|engine" && \
             echo "WARNING: Lambda/callable in database configuration in $f — verify callback signature matches library's expected calling convention"
-    done
+    done <<< "$DB_CONFIG_FILES"
 fi
 ```
 
@@ -234,7 +243,7 @@ After the gate passes, commit all staged changes in a single commit. This includ
 ```bash
 cd {WORKTREE_PATH}
 git add -u
-git commit -m "fix({SCOPE}): {description} (#NUMBER)"
+git commit -s -m "fix({SCOPE}): {description} (#NUMBER)"
 ```
 
 Where `{SCOPE}` is the command or module scope from the contract (e.g. `work-on`, `quality-gate`), and `{description}` summarises the implementation. Use the commit convention from the contract:

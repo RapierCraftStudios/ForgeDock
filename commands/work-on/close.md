@@ -279,6 +279,125 @@ Output to stdout (returned to calling agent):
 
 ---
 
+## Phase C4.5: Pipeline Summary Card (MANDATORY)
+
+The shareable artifact. After the close completes, render a box-drawing summary card to
+stdout (terminal screenshot moment) AND compute a machine-readable twin that Phase C5
+embeds in the `FORGE:TRAJECTORY` comment for platform consumption.
+
+**All stats are real — pulled from `gh`/`git`. Every lookup degrades gracefully: a missing
+value renders as `—` and NEVER aborts the card. Do NOT fabricate stats.**
+
+### C4.5a: Gather real stats
+
+```bash
+# Commit / diff stats from the merged PR (single API call). Fallbacks to "—" if absent.
+PR_STATS=$(gh pr view {PR_NUMBER} {GH_FLAG} --json commits,additions,deletions,baseRefName,isDraft 2>/dev/null)
+COMMITS=$(echo "$PR_STATS"   | jq -r '(.commits | length) // empty' 2>/dev/null); COMMITS=${COMMITS:-—}
+ADDITIONS=$(echo "$PR_STATS" | jq -r '.additions // empty' 2>/dev/null); ADDITIONS=${ADDITIONS:-—}
+DELETIONS=$(echo "$PR_STATS" | jq -r '.deletions // empty' 2>/dev/null); DELETIONS=${DELETIONS:-—}
+PR_TARGET=$(echo "$PR_STATS" | jq -r '.baseRefName // empty' 2>/dev/null); PR_TARGET=${PR_TARGET:-{PR_BASE}}
+IS_DRAFT=$(echo "$PR_STATS"  | jq -r '.isDraft // false' 2>/dev/null)
+
+# Review summary — count domain-agent verdicts posted by /review-pr on the PR.
+REVIEW_BODIES=$(gh pr view {PR_NUMBER} {GH_FLAG} --json reviews,comments \
+  --jq '[.reviews[].body // ""] + [.comments[].body // ""] | .[]' 2>/dev/null)
+# NOTE: `grep -c` already prints `0` on no match (and exits non-zero) — do NOT add
+# `|| echo 0`, which would append a second line ("0\n0") and break the arithmetic
+# and `--argjson` below. Swallow the non-zero exit with `|| true`, then default.
+APPROVED=$(echo "$REVIEW_BODIES" | grep -cE 'APPROVED:' 2>/dev/null || true); APPROVED=${APPROVED:-0}
+CHANGES=$(echo  "$REVIEW_BODIES" | grep -cE 'CHANGES REQUESTED:' 2>/dev/null || true); CHANGES=${CHANGES:-0}
+TOTAL_AGENTS=$((APPROVED + CHANGES))
+# Blockers = review-finding issues created by this PR that are still open (best-effort).
+BLOCKERS=$(echo "$REVIEW_BODIES" | grep -ciE 'blocker|merge.?block' 2>/dev/null || true); BLOCKERS=${BLOCKERS:-0}
+if [ "$TOTAL_AGENTS" -gt 0 ]; then
+  REVIEW_SUMMARY="${APPROVED}/${TOTAL_AGENTS} agents passed, ${BLOCKERS} blockers"
+else
+  REVIEW_SUMMARY="—"   # review data unavailable (e.g. review skipped)
+fi
+
+# Elapsed wall-clock: first FORGE agent comment → now.
+FIRST_TS=$(gh api repos/{GH_REPO}/issues/{NUMBER}/comments \
+  --jq '[.[] | select(.body | contains("FORGE:")) | .created_at] | sort | .[0] // empty' 2>/dev/null)
+if [ -n "$FIRST_TS" ]; then
+  START_EPOCH=$(date -u -d "$FIRST_TS" +%s 2>/dev/null \
+    || python3 -c "import sys,datetime; ts=sys.argv[1].rstrip('Z'); print(int(datetime.datetime.fromisoformat(ts+'+00:00').timestamp()))" "$FIRST_TS" 2>/dev/null \
+    || echo "")
+  NOW_EPOCH=$(date -u +%s)
+  if [ -n "$START_EPOCH" ]; then
+    ELAPSED_SECS=$((NOW_EPOCH - START_EPOCH))
+    ELAPSED=$(printf '%dm %02ds' $((ELAPSED_SECS / 60)) $((ELAPSED_SECS % 60)))
+  else ELAPSED="—"; ELAPSED_SECS=0; fi
+else ELAPSED="—"; ELAPSED_SECS=0; fi
+
+# Pipeline line + status — reflect the ACTUAL terminal state.
+#   merged    → investigate → architect → build → review → merge ✓
+#   decomposed→ investigate → decompose ⏹ (sub-issues spawned)
+#   invalid   → investigate → invalid ✗
+#   blocked   → investigate → … → blocked ⚠ (needs-human)
+#   draft PR  → append "(draft)" to the merge segment
+case "{TERMINAL_STATE}" in
+  decomposed) PIPELINE_LINE="investigate → decompose ⏹"; CARD_STATUS="decomposed" ;;
+  invalid)    PIPELINE_LINE="investigate → invalid ✗";   CARD_STATUS="invalid" ;;
+  blocked)    PIPELINE_LINE="investigate → build → blocked ⚠"; CARD_STATUS="blocked" ;;
+  *)          PIPELINE_LINE="investigate → architect → build → review → merge ✓"; CARD_STATUS="merged" ;;
+esac
+[ "$IS_DRAFT" = "true" ] && PIPELINE_LINE="${PIPELINE_LINE} (draft)"
+```
+
+### C4.5b: Render the card to stdout
+
+Print the card to stdout (the calling agent surfaces it in the terminal). Card inner
+width is **51** columns. Truncate the title with an ellipsis (`…`) if `#{NUMBER} — {TITLE}`
+exceeds the field; pad shorter lines with spaces so the right border `║` stays aligned.
+
+```
+╔═══════════════════════════════════════════════════╗
+║  ForgeDock Pipeline Complete                      ║
+╠═══════════════════════════════════════════════════╣
+║                                                   ║
+║  Issue:    #{NUMBER} — {TITLE}                    ║
+║  Pipeline: {PIPELINE_LINE}                        ║
+║  Commits:  {COMMITS} ({ADDITIONS} additions, {DELETIONS} deletions) ║
+║  PR:       #{PR_NUMBER} (merged to {PR_TARGET})   ║
+║  Review:   {REVIEW_SUMMARY}                       ║
+║  Time:     {ELAPSED}                              ║
+║                                                   ║
+╚═══════════════════════════════════════════════════╝
+```
+
+**Edge-case rendering**:
+- Decomposed: title line stays; `Pipeline:` shows `investigate → decompose ⏹`; `PR:`, `Review:`, `Commits:` render `—`; the header reads `ForgeDock Pipeline — Decomposed`.
+- Invalid: header `ForgeDock Pipeline — Closed (invalid)`; `Pipeline:` shows `investigate → invalid ✗`; downstream stats `—`.
+- Blocked / needs-human: header `ForgeDock Pipeline — Blocked`; `Review:`/`PR:` reflect last known state; remaining stats `—`.
+- Draft PR: `PR:` line appends `(draft)` and the merge segment is not marked `✓`.
+
+### C4.5c: Build the machine-readable twin
+
+Assemble the JSON object below (used verbatim by Phase C5). Numeric stats that were `—`
+become `null` in JSON; never emit `"—"` as a number.
+
+```bash
+CARD_JSON=$(jq -nc \
+  --argjson issue {NUMBER} \
+  --arg title "{TITLE}" \
+  --arg status "$CARD_STATUS" \
+  --arg pipeline "$PIPELINE_LINE" \
+  --arg pr "{PR_NUMBER}" \
+  --arg target "$PR_TARGET" \
+  --arg commits "$COMMITS" --arg adds "$ADDITIONS" --arg dels "$DELETIONS" \
+  --arg review "$REVIEW_SUMMARY" --argjson blockers "${BLOCKERS:-0}" \
+  --argjson elapsed "${ELAPSED_SECS:-0}" \
+  '{issue:$issue, title:$title, status:$status, pipeline:$pipeline,
+    pr:($pr|tonumber? // null), pr_target:$target,
+    commits:($commits|tonumber? // null),
+    additions:($adds|tonumber? // null),
+    deletions:($dels|tonumber? // null),
+    review:$review, blockers:$blockers, elapsed_seconds:$elapsed}')
+```
+
+---
+
 ## Phase C5: Trajectory Log (MANDATORY)
 
 Post the `<!-- FORGE:TRAJECTORY -->` comment as the final pipeline record:
@@ -305,8 +424,17 @@ gh issue comment {NUMBER} {GH_FLAG} --body "<!-- FORGE:TRAJECTORY -->
 
 **Anomalies**: None
 
-**Pipeline completed**: {TIMESTAMP}"
+**Pipeline completed**: {TIMESTAMP}
+
+<!-- FORGE:CARD ${CARD_JSON} -->"
 ```
+
+The `<!-- FORGE:CARD {...} -->` block carries the machine-readable summary computed in
+Phase C4.5c. It is wrapped in an HTML comment so it stays hidden in GitHub's rendered view
+(keeping the trajectory comment clean) while remaining greppable in the raw body for platform
+consumption — `/orchestrate` reads it to build per-issue cards. This block is **additive**:
+all existing `FORGE:TRAJECTORY` consumers select via `contains("FORGE:TRAJECTORY")` and parse
+the markdown table, so the embedded JSON does not affect them.
 
 Where:
 - `{PARENT_STATUS}` = `⏭ Skipped` (if no parent) or `✅ Complete` (if parent updated)

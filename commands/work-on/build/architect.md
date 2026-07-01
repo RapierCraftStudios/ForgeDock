@@ -176,6 +176,11 @@ if [ -n "$DEVDOCS_PATH" ] && [ -f "$INDEX_PATH" ]; then
   ISSUE_LABELS=$(gh issue view {NUMBER} -R {GH_REPO} --json labels \
     --jq '[.labels[].name] | join(" ")' 2>/dev/null || echo "")
   echo "Issue labels: ${ISSUE_LABELS:-none}"
+  # Separate newline-joined list for the loop below — GitHub label names CAN
+  # contain spaces (e.g. "good first issue"), so the space-joined $ISSUE_LABELS
+  # above is only safe for display, never for iteration.
+  ISSUE_LABELS_LIST=$(gh issue view {NUMBER} -R {GH_REPO} --json labels \
+    --jq '.labels[].name' 2>/dev/null || echo "")
 
   # Read index content
   INDEX_CONTENT=$(cat "$INDEX_PATH" 2>/dev/null || echo "")
@@ -190,7 +195,12 @@ if [ -n "$DEVDOCS_PATH" ] && [ -f "$INDEX_PATH" ]; then
 
   # Extract domain blocks matching any issue label keyword
   DOMAIN_PATHS=""
-  for label in $ISSUE_LABELS; do
+  # $ISSUE_LABELS_LIST is one label per line — herestring (not a piped
+  # `| while read`, which would run the loop body in a subshell and discard
+  # DOMAIN_PATHS once the loop exits) preserves newline-safety for labels
+  # containing spaces.
+  while IFS= read -r label; do
+    [ -z "$label" ] && continue
     KEYWORD=$(echo "$label" | sed 's/^workflow://; s/^priority://; s/^review-finding$//')
     [ -z "$KEYWORD" ] && continue
     # Sanitize KEYWORD before AWK injection — strip chars that would break awk regex delimiters
@@ -207,7 +217,7 @@ if [ -n "$DEVDOCS_PATH" ] && [ -f "$INDEX_PATH" ]; then
       echo "Domain '${SAFE_KEYWORD}' matched — adding docs: $(echo "$BLOCK_PATHS" | tr '\n' ' ')"
       DOMAIN_PATHS="${DOMAIN_PATHS}${BLOCK_PATHS}"$'\n'
     fi
-  done
+  done <<< "$ISSUE_LABELS_LIST"
 
   # Combine always_load + domain paths (deduplicate)
   ALL_PATHS=$(printf "%s\n%s" "$ALWAYS_LOAD_PATHS" "$DOMAIN_PATHS" \
@@ -448,10 +458,44 @@ For each non-obvious interaction or potential failure mode:
 - Suggest a mitigation or check
 
 Focus on:
-- Files that have changed recently (check `git log --oneline -10 -- {FILE}`)
+- Churn / hot-spot files (see below) — high historical change frequency correlates with defect density
 - Paths that are called in both sync and async contexts
 - Any place where the change touches a serialization boundary (JSON in/out, DB read/write)
 - Unused or dormant code that the change might activate
+
+### Churn (Hot-Spot) Signal
+
+Recency alone (did the file appear in the last N commits?) is a weak, binary proxy. Compute a bounded per-file **churn tier** instead — how often each affected file has actually changed over a fixed window — and fold it into the risk table below.
+
+For each file in `{AFFECTED_FILES}` (never repo-wide — this must stay O(affected files) to fit the Phase A0–A5 time budget):
+
+```bash
+CHURN_WINDOW="90 days ago"   # named constant — must match the same window used in review-pr.md Phase 3A
+
+# {AFFECTED_FILES} is a space-separated argument (see --files contract at the top
+# of this file), not newline-separated like review-pr.md's $FILES — so a herestring
+# `while read` line-loop would misparse it as a single line. Split explicitly on
+# IFS=' ' into an array instead of relying on a bare `for FILE in {AFFECTED_FILES}`
+# (which word-splits on the shell's default IFS — space, tab, AND newline). This
+# keeps the existing space-separated contract intact while narrowing the splitting
+# surface to spaces only.
+IFS=' ' read -ra AFFECTED_FILES_ARR <<< "{AFFECTED_FILES}"
+for FILE in "${AFFECTED_FILES_ARR[@]}"; do
+  COMMITS=$(git log --oneline --since="$CHURN_WINDOW" -- "$FILE" | wc -l)
+  if [ "$COMMITS" -ge 15 ]; then TIER="HOT"
+  elif [ "$COMMITS" -ge 5 ]; then TIER="MEDIUM"
+  else TIER="LOW"
+  fi
+  echo "$FILE: $TIER ($COMMITS commits in last 90 days)"
+done
+```
+
+**Tiers** (fixed thresholds — keep identical to `review-pr.md` Phase 3A so both phases agree on what "hot" means):
+- **HOT**: 15+ commits in the window
+- **MEDIUM**: 5–14 commits in the window
+- **LOW**: 0–4 commits in the window
+
+Any file classified **HOT** MUST get an explicit row in the Risk Assessment table below (e.g. "High historical churn — {N} commits in last 90 days — changes here have a higher defect-density prior"), rated at least MEDIUM severity, with a mitigation such as "extra reviewer scrutiny" or "prefer smaller, isolated diffs to this file." MEDIUM-tier files may be noted inline without a dedicated row. LOW-tier files need no mention.
 
 ---
 

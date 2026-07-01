@@ -36,6 +36,7 @@
     "!bin/tests/",
     "commands/",
     "docs/",
+    "examples/",
     "scripts/",
     "templates/",
     "LICENSE",
@@ -46,6 +47,9 @@
   },
   "engines": {
     "node": ">=18"
+  },
+  "optionalDependencies": {
+    "@anthropic-ai/sdk": ">=0.30.0"
   },
   "peerDependencies": {
     "@anthropic-ai/claude-code": ">=2.0.0"

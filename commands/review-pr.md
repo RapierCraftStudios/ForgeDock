@@ -624,6 +624,36 @@ echo "$DIFF" | grep -cE "subprocess|os\.system|eval\(|exec\(|pickle|yaml\.load[^
 echo "$FILES" | grep -cE "^sdk/|openapi.*\.json$|openapi-versions/" && echo "  SDK_OPENAPI" || true
 ```
 
+**Churn (hot-spot) signal**: The signals above are all derived from the current diff content — none of them measure historical change frequency, which is one of the strongest empirical predictors of defect density. Compute a bounded per-file churn tier for the PR's changed files only (never repo-wide) and carry it forward as `CHURN_CONTEXT` for Phase 3C:
+
+```bash
+CHURN_WINDOW="90 days ago"   # named constant — must match the same window used in architect.md Phase A5
+CHURN_CONTEXT=""
+# Herestring (not a piped `| while read`) — a pipe would run the loop body in a
+# subshell in bash, silently discarding CHURN_CONTEXT once the loop exits. $FILES
+# is one path per line (gh pr diff --name-only), so `read -r` per line is safe
+# even when a path contains embedded spaces.
+while IFS= read -r FILE; do
+  [ -z "$FILE" ] && continue
+  COMMITS=$(git log --oneline --since="$CHURN_WINDOW" -- "$FILE" 2>/dev/null | wc -l)
+  if [ "$COMMITS" -ge 15 ]; then
+    # Real newline appended via $'\n' (ANSI-C quoting), not a literal backslash-n.
+    # A literal "\n" would only be interpreted by `echo -e` — it survives
+    # unprocessed into Phase 3C's raw template substitution ([CHURN_CONTEXT] ->
+    # $CHURN_CONTEXT), which does not reprocess escapes, so with 2+ HOT files
+    # multi-hotspot PRs would render squished in the agent prompt. A real
+    # newline here makes the variable correct for every consumer.
+    CHURN_CONTEXT="${CHURN_CONTEXT}${FILE} (${COMMITS} commits in last 90 days — HOT)"$'\n'
+  fi
+done <<< "$FILES"
+if [ -z "$CHURN_CONTEXT" ]; then
+  CHURN_CONTEXT="No hot-spot files detected (all changed files under 15 commits in the last 90 days)."
+fi
+echo "$CHURN_CONTEXT"
+```
+
+Tiers (fixed thresholds, identical to `architect.md` Phase A5): **HOT** = 15+ commits / 90 days, **MEDIUM** = 5–14, **LOW** = 0–4. Only HOT-tier files are listed in `CHURN_CONTEXT` — this keeps the agent prompt signal short and high-value rather than dumping a churn count for every file. This does not change agent selection (3B) — it is a scrutiny prior surfaced to whichever agents are already selected, substituted as `[CHURN_CONTEXT]` in Phase 3C.
+
 ### 3B: Select Agents
 
 | Risk Signal | Required Agents |
@@ -687,8 +717,9 @@ This file contains the Evidence-Based Review Protocol, Structured Findings Proto
 2. Substitute: `[PR_NUMBER]`, `[REVIEW_SHA]`, `[REVIEW_SHA_SHORT]`, `[TITLE]`, relevant files list
 3. Substitute: `[PROJECT_NAME]` → `$PROJECT_NAME`, `[PROJECT_CONTEXT]` → `$PROJECT_CONTEXT`, `[TECH_STACK]` → `$TECH_STACK`
 4. Substitute per-agent domain context: `[DOMAIN_CONTEXT]` → the agent's matching key from `forge.yaml → review.domains` (e.g., `$DOMAIN_CONTEXT_AUTH` for the auth agent, `$DOMAIN_CONTEXT_BILLING` for the billing agent)
-5. If Phase 2.5 found broken assumptions, append them to the agent's prompt as "Pre-found integration issues to verify"
-6. Launch via `Task` tool with the resolved model (default `"sonnet"`, fallback `"opus"` if rate-limited)
+5. Substitute the shared hot-spot prior: `[CHURN_CONTEXT]` → `$CHURN_CONTEXT` (computed once in Phase 3A, same value for every agent — this is a PR-level fact, not a per-domain config value, so it is NOT read from `forge.yaml`)
+6. If Phase 2.5 found broken assumptions, append them to the agent's prompt as "Pre-found integration issues to verify"
+7. Launch via `Task` tool with the resolved model (default `"sonnet"`, fallback `"opus"` if rate-limited)
 
 **CRITICAL**: Launch ALL selected agents in a SINGLE message using multiple Task tool calls. Each agent posts findings directly to the PR via `gh pr comment`.
 

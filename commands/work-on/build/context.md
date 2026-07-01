@@ -125,6 +125,11 @@ if [ -n "$DEVDOCS_PATH" ] && [ -f "$INDEX_PATH" ]; then
   ISSUE_LABELS=$(gh issue view {NUMBER} -R {GH_REPO} --json labels \
     --jq '[.labels[].name] | join(" ")' 2>/dev/null || echo "")
   echo "Issue labels: ${ISSUE_LABELS:-none}"
+  # Separate newline-joined list for the loop below — GitHub label names CAN
+  # contain spaces (e.g. "good first issue"), so the space-joined $ISSUE_LABELS
+  # above is only safe for display, never for iteration.
+  ISSUE_LABELS_LIST=$(gh issue view {NUMBER} -R {GH_REPO} --json labels \
+    --jq '.labels[].name' 2>/dev/null || echo "")
 
   # Read index content
   INDEX_CONTENT=$(cat "$INDEX_PATH" 2>/dev/null || echo "")
@@ -139,7 +144,12 @@ if [ -n "$DEVDOCS_PATH" ] && [ -f "$INDEX_PATH" ]; then
 
   # Extract domain blocks matching any issue label keyword
   DOMAIN_PATHS=""
-  for label in $ISSUE_LABELS; do
+  # $ISSUE_LABELS_LIST is one label per line — herestring (not a piped
+  # `| while read`, which would run the loop body in a subshell and discard
+  # DOMAIN_PATHS once the loop exits) preserves newline-safety for labels
+  # containing spaces.
+  while IFS= read -r label; do
+    [ -z "$label" ] && continue
     # Strip workflow:, priority:, review-finding prefixes — use bare keyword
     KEYWORD=$(echo "$label" | sed 's/^workflow://; s/^priority://; s/^review-finding$//')
     [ -z "$KEYWORD" ] && continue
@@ -158,7 +168,7 @@ if [ -n "$DEVDOCS_PATH" ] && [ -f "$INDEX_PATH" ]; then
       echo "Domain '${SAFE_KEYWORD}' matched — adding docs: $(echo "$BLOCK_PATHS" | tr '\n' ' ')"
       DOMAIN_PATHS="${DOMAIN_PATHS}${BLOCK_PATHS}"$'\n'
     fi
-  done
+  done <<< "$ISSUE_LABELS_LIST"
 
   # Combine always_load + domain paths (deduplicate)
   ALL_PATHS=$(printf "%s\n%s" "$ALWAYS_LOAD_PATHS" "$DOMAIN_PATHS" \
@@ -397,7 +407,12 @@ If `GIST_SUMMARIES` is non-empty, it will be included in the `### Prior Investig
 Query closed issues with `review-finding` label, searching by filename:
 
 ```bash
-for file in {AFFECTED_FILES}; do
+# {AFFECTED_FILES} is a space-separated file path list (see contract note above)
+# — split explicitly on IFS=' ' into an array instead of a bare
+# `for file in {AFFECTED_FILES}`, which word-splits on the shell's default IFS
+# (space, tab, AND newline) and would corrupt any path containing a space.
+IFS=' ' read -ra AFFECTED_FILES_ARR <<< "{AFFECTED_FILES}"
+for file in "${AFFECTED_FILES_ARR[@]}"; do
   basename=$(basename "$file" .py)
   gh issue list -R {GH_REPO} \
     --state closed \
@@ -425,7 +440,7 @@ Keep findings where the filename or function name appears in the title or body. 
 
 ## Phase C2: Past Bugs in the Same Module
 
-Mine git log for commit messages referencing issues, then fetch those issues:
+Mine git log for commit messages referencing issues, then fetch those issues. Also read commit bodies/diffs directly — local git history is near-free relative to `gh api` round-trips, and commit bodies often explain the "why" without needing to fetch the linked issue at all.
 
 ```bash
 # Step 1: find issue numbers from git history on affected files
@@ -443,6 +458,20 @@ gh issue view {RELATED_NUMBER} -R {GH_REPO} \
 Filter: keep only `bug`, `fix`, or `review-finding` labeled issues. Skip feature issues — they add noise without bug signal.
 
 **Max results**: 5 issues.
+
+**Direct commit-body read (bounded, prefer over `gh api` when it already answers "why")**: For the top 5 commits touching `{AFFECTED_FILES}`, read the commit subject + body directly instead of round-tripping to `gh issue view` when the body already explains the change:
+```bash
+git log -5 --format='%h %ad %s%n%b' --date=short -- {AFFECTED_FILES}
+```
+If a commit body fully explains the prior bug/fix (common for squashed or fix-up commits with no `#NNN` reference), use it directly as a "Past Bug in This Module" entry — do not require a linked GitHub issue to exist.
+
+**Pickaxe pass (has this exact area been fixed before?)** — one bounded pass, capped at 5 hits, keyed on the suspected symbol/string from the Builder Contract or investigation report:
+```bash
+git log -S"{suspected_symbol_or_string}" --oneline -- {AFFECTED_FILES} | head -5
+# Use -G instead of -S for regex patterns
+git log -G"{pattern}" --oneline -- {AFFECTED_FILES} | head -5
+```
+Any hit is a candidate prior fix or reintroduced defect for this exact code area — read `git show {hash}` to confirm scope before including it in the output. This catches regressions the issue-number harvest above misses (e.g. a defect fixed via a squashed commit with no `#NNN` reference).
 
 ---
 
@@ -526,8 +555,10 @@ gh issue comment {NUMBER} -R {GH_REPO} --body "<!-- FORGE:CONTEXT -->
 - #{NUM}: \"{TITLE}\" — root cause: {ROOT_CAUSE}
 
 ### Past Bugs in This Module
-<!-- List of closed bug issues from git log mining. If none: 'No prior bugs found in git history.' -->
+<!-- List of closed bug issues from git log mining, PLUS pickaxe-derived findings (commits with no linked issue, or
+     commit bodies read directly per the C2 direct-commit-body step). If none: 'No prior bugs found in git history.' -->
 - #{NUM}: \"{TITLE}\" — root cause: {SNIPPET}
+- {COMMIT_HASH} (no linked issue): {COMMIT_SUBJECT} — {WHY_RELEVANT, from commit body or pickaxe hit}
 
 ### Related Code Paths (must stay consistent)
 <!-- Files that import or call the changed functions. Builder must read and validate these. -->

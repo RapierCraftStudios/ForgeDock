@@ -255,6 +255,154 @@ Proceeding to dependency analysis with the expanded issue set...
 
 ---
 
+## Phase 2.5: Investigation Synthesis
+
+<!-- Added: forge#1192 -->
+
+**Purpose**: Reconcile *competing recommendations* across investigation outputs BEFORE they fan out to implementation agents. Phase 3's conflict detection (Step 3C) deconflicts issues at the **file** layer only — it prevents git merge conflicts. It performs **zero semantic deconfliction**: two issues can touch entirely different files while proposing **contradictory approaches to the same problem**, and the file-overlap detector passes both straight to parallel dispatch. This phase closes that gap by clustering investigations semantically (by target subsystem, not by file) and arbitrating incompatible plans into a single decision — or serializing them so the second agent inherits the first's decision.
+
+**This phase operates ONLY on FORGE annotations and issue bodies. It NEVER reads code, and it NEVER closes, skips, or merges issues.** Reconciling plans/annotations is distinct from adjudicating *duplicate validity* (Safety Rule 9, the #3842/#4039 scar): the anti-dedup rule forbids the orchestrator from deciding two issues are the same bug and closing one — that call belongs to `/work-on` investigation agents examining actual code. Plan reconciliation touches neither code nor issue state; it only writes a synthesis brief annotation and adds `Depends on #X` serialization edges. It therefore does not violate Hard Rule 2 (dispatcher, not builder) or Safety Rule 9.
+
+**No-op guard**: This entire phase is skipped when the batch contains **0 or 1 investigations** — there is nothing to reconcile against. Proceed directly to Phase 3.
+
+### Step 2.5A: No-op guard
+
+```bash
+# Count investigations that completed in Wave 0 (Phase 2), regardless of whether each
+# emitted a Knowledge Gist. Use the full completed-investigation set (the same
+# {investigation_numbers} that Steps 2C.5, 2.5B and 2.5C iterate) — NOT the
+# INVESTIGATION_GISTS map, which only holds gist-producing investigations and would
+# undercount when a genuine investigation reached a recommendation without a gist.
+# If < 2, skip synthesis entirely.
+INVESTIGATION_NUMS=( {investigation_numbers} )
+INVESTIGATION_COUNT=${#INVESTIGATION_NUMS[@]}
+if [ "$INVESTIGATION_COUNT" -lt 2 ]; then
+  echo "Phase 2.5 skipped: ${INVESTIGATION_COUNT} investigation(s) in batch — nothing to reconcile. Proceeding to Phase 3."
+  SYNTHESIS_RAN=false
+  RECONCILED_COUNT=0
+  # Skip to Phase 3.
+else
+  SYNTHESIS_RAN=true
+fi
+```
+
+If `SYNTHESIS_RAN` is false, do NOT execute Steps 2.5B–2.5D — proceed directly to Phase 3. Step 4A's `{GIST_CONTEXT}` generation will fall back to the existing raw-gist behavior (no synthesis brief exists).
+
+### Step 2.5B: Cluster investigations by target subsystem
+
+For each investigation that completed in Wave 0, read its `FORGE:INVESTIGATOR` comment (and the newly spawned implementation issue bodies from Step 2D) and extract its **Recommendation** and **Affected Files / target subsystem** — NOT to compare files for merge conflicts, but to group investigations that operate on the **same conceptual surface** (e.g. "auth session lifecycle", "credit metering", "orchestrate DAG construction").
+
+```bash
+# For each investigation, pull its recommendation + affected-files block (annotations only — no code reads)
+declare -A INV_RECOMMENDATION
+declare -A INV_SUBSYSTEM
+for INV_NUM in {investigation_numbers}; do
+  INV_BODY=$(gh api repos/{GH_REPO}/issues/${INV_NUM}/comments \
+    --jq '.[] | select(.body | contains("FORGE:INVESTIGATOR")) | .body' 2>/dev/null | head -1)
+  # Extract the Recommendation section (annotation prose only)
+  INV_RECOMMENDATION[$INV_NUM]=$(echo "$INV_BODY" | awk '/^### Recommendation/{p=1;next}/^### /{p=0}p')
+  # Derive a coarse subsystem tag from Affected Files directories + title keywords
+  INV_SUBSYSTEM[$INV_NUM]=$(echo "$INV_BODY" \
+    | grep -oP '`[^`]+/[^`]+`' | xargs -r -n1 dirname 2>/dev/null | sort | uniq -c | sort -rn | head -1)
+done
+```
+
+**Cluster rule**: Two investigations are in the same cluster when they share a target subsystem (overlapping affected-file directories OR the same domain tag from Step 3B applied to their recommendations). Clustering is by **conceptual surface**, deliberately coarser than Step 3C's file-level analysis — the goal is to surface plan-level contradictions the file layer cannot see.
+
+**Forward reference — related future signal** <!-- Added: forge#1196 -->: This clustering step (Step 2.5B) runs before Phase 3, so no Layer 5 data exists yet at this point — do not treat it as an input here. For readers extending this clustering rule in the future: Step 3C Layer 5 (historical co-change coupling, computed later in Phase 3) is a related signal worth reusing — two investigations whose affected files have historically co-changed would be good candidates for the same subsystem cluster. This is purely a forward reference, not a functional dependency or phase-reordering.
+
+### Step 2.5C: Detect and resolve competing recommendations
+
+Within each cluster (2+ investigations on the same subsystem), compare the **Recommendation** sections for incompatibility — e.g. one recommends adding a cache layer while another recommends removing caching from the same path; one proposes a new abstraction another proposes to delete. This is a semantic comparison of *proposed approaches*, read purely from the annotation prose.
+
+For each detected conflict, resolve it in exactly ONE of two ways:
+
+1. **Arbitration decision** — When the two recommendations are directly incompatible and one is clearly correct given the combined evidence, record a single deconflicted decision for BOTH issues. State which approach wins and why. This decision is written into each affected issue's `FORGE:SYNTHESIS_BRIEF` (Step 2.5D) — it does NOT close either issue; both still run, but against a reconciled plan.
+2. **Serialization edge** — When the approaches are interdependent (the second issue's correct approach depends on what the first decides) or arbitration cannot pick a winner from annotations alone, add a `Depends on #{FIRST}` marker to the SECOND issue's body so the two serialize. The second agent then inherits the first's merged result during its own investigation/context phase.
+
+```bash
+# Serialization is expressed as a standard "Depends on #X" edge so Step 3A consumes it
+# with no new plumbing (see Step 3A dependency-marker parsing).
+RECONCILED_COUNT=0
+N_ARBITRATED=0
+N_SERIALIZED=0
+for CONFLICT in "${DETECTED_CONFLICTS[@]}"; do
+  # CONFLICT = "FIRST SECOND RESOLUTION" where RESOLUTION is "arbitrate" or "serialize"
+  set -- $CONFLICT; FIRST=$1; SECOND=$2; RESOLUTION=$3
+  if [ "$RESOLUTION" = "serialize" ]; then
+    # Reverse-direction cycle guard: before adding "#SECOND depends on #FIRST", check
+    # whether #FIRST already declares "Depends on #SECOND". If it does, the requested
+    # edge would close a 2-node cycle (#FIRST -> #SECOND -> #FIRST) that Step 3D.5's
+    # cycle detector would later have to exclude from dispatch entirely (both issues
+    # stuck behind needs-human). Skip the edge and fall back to arbitration-in-place
+    # instead, so both issues still run.
+    FIRST_BODY=$(gh issue view $FIRST -R {GH_REPO} --json body --jq '.body')
+    if echo "$FIRST_BODY" | grep -qiE "depends on #${SECOND}\b"; then
+      echo "Phase 2.5: skipping serialization edge #${FIRST} -> #${SECOND}: reverse edge #${SECOND} -> #${FIRST} already exists (would create a cycle). Falling back to arbitration-in-place."
+      RESOLUTION="arbitrate"
+    else
+      SECOND_BODY=$(gh issue view $SECOND -R {GH_REPO} --json body --jq '.body')
+      if ! echo "$SECOND_BODY" | grep -qiE "depends on #${FIRST}\b"; then
+        gh issue edit $SECOND -R {GH_REPO} \
+          --body "${SECOND_BODY}
+
+Depends on #${FIRST}
+<!-- Serialized by orchestrate Phase 2.5: competing recommendation reconciled via dependency edge. -->"
+      fi
+    fi
+  fi
+  # Re-check RESOLUTION (may have been downgraded from "serialize" to "arbitrate" above)
+  # so the breakdown counters and the Step 2.5D per-issue decision recording both reflect
+  # the resolution that was actually applied, not the one originally proposed.
+  if [ "$RESOLUTION" = "serialize" ]; then
+    N_SERIALIZED=$((N_SERIALIZED + 1))
+  else
+    N_ARBITRATED=$((N_ARBITRATED + 1))
+  fi
+  RECONCILED_COUNT=$((RECONCILED_COUNT + 1))
+done
+echo "Phase 2.5 reconciled ${RECONCILED_COUNT} competing recommendation(s) (${N_ARBITRATED} arbitrated, ${N_SERIALIZED} serialized)."
+```
+
+**MUST NOT**: close, skip, or merge any issue on the basis of a detected conflict. Two issues with competing recommendations are BOTH valid work items — Phase 2.5 makes their plans coherent, it does not eliminate either. (This is the Safety Rule 9 boundary — see the Purpose note above.)
+
+### Step 2.5D: Emit one deconflicted brief per issue
+
+For each implementation issue about to be dispatched, write a single `FORGE:SYNTHESIS_BRIEF` annotation containing ONLY the reconciled context relevant to *that* issue — the arbitration decisions affecting it and pointers to the specific sibling investigation Gists it actually needs. This replaces injecting the entire aggregated milestone-index gist (which forces each agent to independently re-arbitrate the same contradictions, wasting tokens and producing nondeterministic cross-PR incoherence).
+
+```bash
+for ISSUE_NUM in {implementation_issue_numbers}; do
+  # Assemble the per-issue brief: arbitration decisions touching this issue's subsystem +
+  # only the relevant sibling gist URLs (not the full milestone-index dump)
+  BRIEF_BODY="Reconciled context for this issue (see orchestrate Phase 2.5):
+${PER_ISSUE_DECISIONS[$ISSUE_NUM]}"
+  gh issue comment $ISSUE_NUM -R {GH_REPO} --body "<!-- FORGE:SYNTHESIS_BRIEF -->
+## Synthesis Brief
+
+${BRIEF_BODY}
+
+<!-- FORGE:SYNTHESIS_BRIEF:COMPLETE -->"
+done
+```
+
+The `FORGE:SYNTHESIS_BRIEF` annotation is consumed by Step 4A's `{GIST_CONTEXT}` generation (which prefers it over the raw milestone-index gist when present) and its reconciled count (`RECONCILED_COUNT`) feeds the Step 6B `Competing recommendations reconciled (Phase 2.5)` metric.
+
+**Report**: Post a brief Phase 2.5 summary to the user before proceeding to Phase 3:
+
+```
+## Phase 2.5: Investigation Synthesis
+
+**Investigations reconciled**: {INVESTIGATION_COUNT}
+**Competing recommendations detected**: {RECONCILED_COUNT}
+  - Arbitrated in place: {N_ARBITRATED} (includes any serialization edges downgraded by the reverse-cycle guard)
+  - Serialized via dependency edge: {N_SERIALIZED}
+**Per-issue synthesis briefs emitted**: {N_briefs}
+
+Proceeding to dependency analysis with a deconflicted plan set...
+```
+
+---
+
 ## Phase 3: Dependency Analysis & Execution Plan
 
 ### Step 3A: Analyze explicit dependencies
@@ -305,21 +453,30 @@ Domain estimation (above) catches broad category overlap but misses cases where 
 
 #### Layer 1: Explicit file-overlap extraction
 
-**For issues that already have an INVESTIGATOR comment** (from Wave 0 or a prior session), extract their Affected Files list:
+**For issues that already have an INVESTIGATOR comment** (from Wave 0 or a prior session), extract their Affected Files list. **For issues WITHOUT an investigation comment**, fall back to parsing the issue body for file paths. Both code paths accumulate into a single `LAYER1_FILES` array (declared once, before the loop) — this is the batch-wide file set that Layer 5's co-change query (below) reuses, per the "file list already extracted in Layer 1" reference in Layer 2 and Layer 5:
 
 ```bash
+LAYER1_FILES=()
 for NUM in {issue_numbers}; do
   echo "=== #$NUM ==="
-  gh api repos/{GH_REPO}/issues/${NUM}/comments \
+  FILES_FOR_NUM=$(gh api repos/{GH_REPO}/issues/${NUM}/comments \
     --jq '.[] | select(.body | contains("FORGE:INVESTIGATOR")) | .body' 2>/dev/null \
-    | grep -oP '`[^`]*\.(py|tsx?|jsx?|sql|json|ya?ml)`' | sort -u
+    | grep -oP '`[^`]*\.(py|tsx?|jsx?|sql|json|ya?ml)`' | tr -d '`' | sort -u)
+
+  # Fall back to parsing the issue body directly when no INVESTIGATOR comment exists yet.
+  if [ -z "$FILES_FOR_NUM" ]; then
+    FILES_FOR_NUM=$(gh issue view $NUM --json body --jq '.body' \
+      | grep -oP '`[^`]*\.(py|tsx?|jsx?|sql|json|ya?ml)`' | tr -d '`' | sort -u)
+  fi
+
+  echo "$FILES_FOR_NUM"
+
+  # Accumulate into the batch-wide array — read line-by-line so each extracted path
+  # becomes one array element (paths here don't contain spaces, but this stays robust).
+  while IFS= read -r f; do
+    [ -n "$f" ] && LAYER1_FILES+=("$f")
+  done <<< "$FILES_FOR_NUM"
 done
-```
-
-**For issues WITHOUT an investigation comment**, fall back to parsing the issue body for file paths:
-
-```bash
-gh issue view $NUM --json body --jq '.body' | grep -oP '`[^`]*\.(py|tsx?|jsx?|sql|json|ya?ml)`' | sort -u
 ```
 
 **Cross-reference all extracted file lists:**
@@ -400,22 +557,71 @@ When file extraction yields **fewer than 2 file paths** for an issue (common for
 
 **Rationale**: The cost of a false-negative (two agents conflict → one fails with merge error, wasting the full agent run) far exceeds the cost of a false-positive (an issue waits for one predecessor before starting). Always err toward serialization when uncertain.
 
+#### Layer 5: Historical co-change coupling <!-- Added: forge#1196 --> <!-- Empty-set guard: forge#1206 -->
+
+Layers 1-4 infer conflict risk from structure — path overlap, directory nesting, hard-coded high-fan-in lists. They miss the case where two files with no directory or naming relationship have historically changed together in the same commits (e.g. `models/user.py` and `services/billing/charge.py`), and they over-serialize the inverse case where files merely sit near each other but have never actually co-changed. Git commit history answers both questions directly and empirically. This layer reads **commit metadata only** — the list of files touched per commit — never file contents, so it does not violate Hard Rule 2 ("dispatcher, not a builder... never read code"). This is the same category of operation already established as compliant in `commands/work-on/investigate.md` and `commands/work-on/build/context.md`, which mine `git log` for issue cross-referencing.
+
+**Bounded query** — restrict both the time window and the file set so this stays a small, deterministic, single-shot lookup (never a full-repo co-change matrix). An empty `ALL_AFFECTED_FILES` set MUST short-circuit before the query runs — passing an empty array to `git log --` does not mean "match nothing", it means "no pathspec restriction", which would silently widen the query to the entire repo:
+
+```bash
+# Union of affected files across all issues in the CURRENT batch only (already
+# extracted per-issue in Layer 1) — never the whole repo. Built as an array
+# (not a newline-joined scalar) so each path survives as a single pathspec
+# argument below — a plain string here would be word-split and glob-expanded
+# by the shell when handed to `git log --`, silently mangling or dropping any
+# path containing a space or glob metacharacter.
+mapfile -t ALL_AFFECTED_FILES < <(printf '%s\n' "${LAYER1_FILES[@]}" | sort -u)
+
+# Guard: an empty array expands to nothing after `--`, which git interprets as
+# "no pathspec restriction" (i.e. the whole repo) rather than "match nothing".
+# Skip the query entirely in that case instead of letting it silently widen to
+# a full-repo scan — this can happen when upstream file-extraction (Layer 1)
+# yields zero paths for every issue in the batch.
+if [ "${#ALL_AFFECTED_FILES[@]}" -eq 0 ]; then
+  echo "Layer 5: no affected files extracted by Layer 1 for this batch — skipping co-change query, falling back to Layers 1-4."
+else
+  # Bounded window: last 90 days, capped at 200 commits — whichever is smaller.
+  # Each commit's file list is delimited by a marker so co-occurring files can be
+  # grouped per-commit in a single pass. The array is expanded quoted
+  # ("${ALL_AFFECTED_FILES[@]}") so every path is passed as one literal argument.
+  git log --name-only --since="90 days ago" --max-count=200 \
+    --pretty=format:'---%H---' -- "${ALL_AFFECTED_FILES[@]}" \
+    > /tmp/cochange_log.txt
+
+  # Parse into commit → file-set groups, then increment a co-occurrence counter
+  # for every unordered pair of files that appear in the SAME commit's file list.
+  # (Illustrative — an agent executing this reads /tmp/cochange_log.txt and tallies
+  # pairs; no separate script is shipped, matching the pseudo-code style of Layers 1-4.)
+fi
+```
+
+**Scoring rule**: A file pair is **co-change coupled** when it appears together in **3 or more** of the commits captured by the bounded query above. A pair with **zero** co-occurrences across the entire window is **verified independent**.
+
+**Apply the signal:**
+- **High co-change pair spans two different issues in the batch** → add a serialization edge between them (same directed-edge convention as Layers 1-4: lower issue number is predecessor), OR, if the pair also carries competing investigation recommendations, flag it for Phase 2.5 arbitration instead of a blind serialization edge (see cross-reference in Step 2.5B below).
+- **Verified-independent pair** → MAY be used to downgrade an existing Layer 2 "broad directory + different domain" or Layer 4 "conservative fallback" serialization to parallel. This downgrade is **never** applied to Layer 1 (same-file hard conflict, which is ground truth from the current batch, not historical inference) or to Layer 3 high-fan-in-file edges (a file can be structurally high-risk even with a thin history window, e.g. a newly added `main.py`).
+- If `ALL_AFFECTED_FILES` is empty, the guard above skips the query and Layer 5 contributes nothing for the entire batch. If the bounded query runs but returns no commits (e.g. brand-new files, or window/pair-set too small to have history) → Layer 5 contributes nothing; fall back silently to Layers 1-4's existing verdict for that pair.
+
+**Rationale**: Empirical co-change is a strictly stronger signal than directory proximity or naming convention — it is the actual observed outcome the other layers are trying to approximate. Bounding the window and pair-set keeps the query cheap and deterministic while still catching the cross-directory conflicts Layers 1-4 structurally cannot see.
+
 #### Combining all layers
 
-Build the final conflict graph by merging signals from all four layers:
+Build the final conflict graph by merging signals from all five layers:
 
 | Signal | Strength | Action |
 |--------|----------|--------|
 | Layer 1: Same file | **Hard conflict** | Always serialize |
 | Layer 2: Same small directory | **Probable conflict** | Serialize |
 | Layer 2: Same broad directory + same domain | **Probable conflict** | Serialize |
-| Layer 2: Same broad directory + different domain | **Possible conflict** | Parallelize (accept risk) |
+| Layer 2: Same broad directory + different domain | **Possible conflict** | Parallelize (accept risk) — unless Layer 5 shows high co-change, then serialize |
 | Layer 3: High-fan-in file touched | **Probable conflict** | Serialize with same-service issues |
 | Layer 3: Shared model/init pattern | **Probable conflict** | Serialize |
 | Layer 4: Low confidence + same domain | **Conservative** | Serialize |
-| Layer 4: Low confidence + no domain | **Conservative** | Add predecessor edge to most recent issue |
+| Layer 4: Low confidence + no domain | **Conservative** | Add predecessor edge to most recent issue — unless Layer 5 shows verified independence, then parallelize |
+| Layer 5: High co-change (3+ shared commits, cross-issue file pair) | **Probable conflict** | Serialize (or route to Phase 2.5 arbitration if a competing-recommendation conflict is also present) |
+| Layer 5: Verified independent (zero shared commits) | **Downgrade signal** | Permits downgrading a Layer 2 "broad directory + different domain" or Layer 4 verdict to parallel — never overrides Layer 1 or Layer 3 |
 
-**This supplements, not replaces, the domain keyword estimation.** Domain tags still help with broad sequencing decisions. Multi-layer conflict detection catches the specific cases keywords miss (e.g., two issues that both modify files in `services/api/app/models/` where one is labeled WORKER and the other BILLING — Layer 2 catches this even though Layer 1 shows no direct file overlap).
+**This supplements, not replaces, the domain keyword estimation.** Domain tags still help with broad sequencing decisions. Multi-layer conflict detection catches the specific cases keywords miss (e.g., two issues that both modify files in `services/api/app/models/` where one is labeled WORKER and the other BILLING — Layer 2 catches this even though Layer 1 shows no direct file overlap; or two issues touching files in unrelated directories that Layer 5 shows have co-changed in 4 of the last 12 commits touching either file).
 
 ### Step 3D: Build the dependency DAG
 
@@ -428,7 +634,8 @@ Build a **directed acyclic graph (DAG)** of per-issue dependencies. Each issue g
 - **File-conflict edges**: If two issues share affected files (from Step 3C Layer 1), add a directed edge: lower issue number → higher issue number (unless explicit deps say otherwise). The later issue has the earlier issue in its predecessors.
 - **Domain serialization edges**: DATABASE issues form a linear chain (each has the previous DATABASE issue as its predecessor). Same-small-directory issues (Layer 2) and high-fan-in file issues (Layer 3) get directed edges as per Step 3C rules.
 - **Conservative fallback edges**: Low-confidence issues (Layer 4) get edges to same-domain issues as per Step 3C rules.
-- **No artificial concurrency limit** — all issues with empty predecessor sets dispatch simultaneously. The only constraints are file overlap and explicit dependencies.
+- **Co-change coupling edges** <!-- Added: forge#1196 -->: High co-change file pairs (Layer 5, 3+ shared commits in the bounded window) that span two different issues get a directed edge using the same lower-issue-number-is-predecessor convention as Layer 1. Verified-independent pairs (Layer 5, zero shared commits) may instead REMOVE an edge that Layer 2 or Layer 4 would otherwise have added for that pair — Layer 1 and Layer 3 edges are never removed by a Layer 5 downgrade.
+- **No artificial concurrency limit** — all issues with empty predecessor sets dispatch simultaneously. The only constraints are file overlap, explicit dependencies, and co-change coupling.
 
 **Terminology:**
 - **Ready issues**: Issues whose predecessor set is empty (all predecessors have reached terminal state or were never added)
@@ -853,32 +1060,46 @@ If the label is NOT terminal (e.g., `workflow:investigating`, `workflow:ready-to
 )
 ```
 
-**`{GIST_CONTEXT}` generation**: For each issue being dispatched, check if it was spawned by an investigation that has a Knowledge Gist (from Step 2C.5). If so, include the Gist URL(s) in the agent prompt:
+**`{GIST_CONTEXT}` generation**: For each issue being dispatched, build the context block. **Prefer the deconflicted `FORGE:SYNTHESIS_BRIEF` (from Phase 2.5) when one exists** — it is a per-issue, already-reconciled brief that carries only the arbitration decisions and sibling investigation Gists relevant to *this* issue. Injecting it instead of the full aggregated milestone-index gist means the agent does not re-arbitrate the same contradictions (less token spend, less nondeterminism). Only when Phase 2.5 did not run (0/1 investigations — no brief exists) does this fall back to the raw parent-investigation + milestone-index gist behavior. <!-- Added: forge#1192 -->
 
 ```bash
 # Build GIST_CONTEXT for an issue
 GIST_CONTEXT=""
-PARENT_INV=$(gh issue view {NUMBER} -R {GH_REPO} --json body --jq '.body' \
-  | grep -oP '(?i)parent[: ]*#\K\d+|spawned from[: ]*#\K\d+' | head -1)
 
-if [ -n "$PARENT_INV" ] && [ -n "${INVESTIGATION_GISTS[$PARENT_INV]:-}" ]; then
+# Preferred path: a deconflicted per-issue synthesis brief from Phase 2.5.
+SYNTHESIS_BRIEF=$(gh api repos/{GH_REPO}/issues/{NUMBER}/comments \
+  --jq '[.[] | select(.body | contains("<!-- FORGE:SYNTHESIS_BRIEF -->"))] | last | .body // ""' 2>/dev/null)
+
+if [ -n "$SYNTHESIS_BRIEF" ]; then
+  # Phase 2.5 ran and reconciled competing recommendations for this issue.
+  # Inject the deconflicted brief INSTEAD of the raw milestone-index gist dump.
   GIST_CONTEXT="
+**RECONCILED CONTEXT (orchestrate Phase 2.5 synthesis brief)**: Competing investigation recommendations affecting this issue have already been reconciled. Use this deconflicted brief as your primary cross-investigation context — do NOT independently re-arbitrate the underlying investigations.
+${SYNTHESIS_BRIEF}"
+else
+  # Fallback: Phase 2.5 did not run (0/1 investigations). Use the raw gist behavior.
+  PARENT_INV=$(gh issue view {NUMBER} -R {GH_REPO} --json body --jq '.body' \
+    | grep -oP '(?i)parent[: ]*#\K\d+|spawned from[: ]*#\K\d+' | head -1)
+
+  if [ -n "$PARENT_INV" ] && [ -n "${INVESTIGATION_GISTS[$PARENT_INV]:-}" ]; then
+    GIST_CONTEXT="
 **CONTEXT FROM PRIOR INVESTIGATION**: Investigation #${PARENT_INV} produced Knowledge Gist(s) with findings relevant to this issue:
 $(echo "${INVESTIGATION_GISTS[$PARENT_INV]}" | while IFS= read -r url; do echo "- ${url}"; done)
 Fetch the Gist content during the context-gathering phase for implementation guidance."
-fi
+  fi
 
-# Include milestone index URL if available (from Step 2C.5)
-if [ -n "$MILESTONE_INDEX_URL" ]; then
-  GIST_CONTEXT="${GIST_CONTEXT}
+  # Include milestone index URL if available (from Step 2C.5)
+  if [ -n "$MILESTONE_INDEX_URL" ]; then
+    GIST_CONTEXT="${GIST_CONTEXT}
 
 **MILESTONE KNOWLEDGE INDEX**: All investigation findings for this milestone are aggregated in a single index Gist:
 - ${MILESTONE_INDEX_URL}
 The context-gathering phase can fetch this index to discover all investigation Gists for the milestone."
+  fi
 fi
 ```
 
-If `GIST_CONTEXT` is empty (no parent investigation or milestone index found), the variable resolves to a blank line in the template — no impact on the agent prompt. <!-- Updated: forge#341 -->
+If `GIST_CONTEXT` is empty (no synthesis brief, no parent investigation, and no milestone index found), the variable resolves to a blank line in the template — no impact on the agent prompt. <!-- Updated: forge#341, forge#1192 -->
 
 **Capture agent IDs after the batch spawn (MANDATORY)**: Each `Agent(...)` call returns an agent ID. Store each returned ID in `AGENT_ISSUE_MAP` keyed by issue number. This map is the only way to resume a stalled agent by ID in Steps 4B and 4B.5:
 
@@ -1438,7 +1659,11 @@ if [ ${#SWEEP_EXECUTE[@]} -gt 0 ]; then
 
     FINDING_TITLE=$(gh issue view "$FINDING_NUM" -R {GH_REPO} --json title --jq '.title' 2>/dev/null || echo "")
 
-    # Build GIST_CONTEXT for sweep finding — same as Step 4A generation block
+    # Build GIST_CONTEXT for sweep finding — same as Step 4A's *fallback* (raw-gist) path.
+    # The Phase 2.5 FORGE:SYNTHESIS_BRIEF preference is intentionally NOT applied here:
+    # sweep findings are freshly-created review-finding issues that never received a
+    # synthesis brief (Phase 2.5 runs only over the original batch's investigations), so
+    # there is nothing to prefer. Keep this block in sync with 4A's fallback branch only.
     GIST_CONTEXT=""
     PARENT_INV=$(gh issue view "$FINDING_NUM" -R {GH_REPO} --json body --jq '.body' \
       | grep -oP '(?i)parent[: ]*#\K\d+|spawned from[: ]*#\K\d+' | head -1)
@@ -1552,7 +1777,7 @@ This will:
 - Fix stale workflow labels on any issues the agents left behind
 - Close orphaned open issues whose PRs were merged (common when merging to `staging`)
 - Remove worktrees created by agents in this batch
-- Delete local/remote branches for merged PRs
+- Delete local/remote `fix/*` and `feat/*` branches whose PR has merged — detection uses merged-PR state (`gh pr list --state merged`) as the source of truth, so it covers feature-lane branches merged into a milestone branch as well as squash-merged branches, not just branches merged directly to staging
 - Report milestones that hit 0 open issues — these are ready for `/milestone ship` (staging review + merge). Do NOT close them; closure happens after code reaches staging.
 - Sync Project board state
 
@@ -1589,6 +1814,22 @@ done
 ```
 
 Aggregate into the batch-level analytics for Step 6B.
+
+**Also collect the machine-readable summary cards** (`<!-- FORGE:CARD {json} -->`, embedded in
+each issue's `FORGE:TRAJECTORY` comment by `/work-on` close phase). These power the per-issue and
+batch cards in Step 6C:
+
+```bash
+CARDS=""
+for NUM in {all_completed_issue_numbers}; do
+  CARD=$(gh api repos/{GH_REPO}/issues/${NUM}/comments \
+    --jq '.[] | select(.body | contains("FORGE:CARD")) | .body' 2>/dev/null \
+    | sed -n 's/.*<!-- FORGE:CARD \(.*\) -->.*/\1/p' | head -1)
+  [ -n "$CARD" ] && CARDS="${CARDS}${CARD}"$'\n'
+done
+# CARDS is now a newline-delimited list of per-issue JSON objects (skip any issue whose
+# card is absent — pre-card runs or non-merged terminal states degrade gracefully).
+```
 
 ### Step 6B: Present consolidated report
 
@@ -1672,13 +1913,16 @@ Aggregate into the batch-level analytics for Step 6B.
 | Contracts posted | {N} |
 | Contract→code divergences | {N} (agents that updated contract mid-build) |
 | Review findings created | {N_total} |
-| Findings after synthesis | {N} (deduplicated/arbitrated) |
+| Findings queued after cascade control | {N_queued}/{N_total} ({N_deferred} deferred — see Step 4C) |
+| Competing recommendations reconciled (Phase 2.5) | {RECONCILED_COUNT} (investigation plans arbitrated in place + serialized) |
 | Findings validated | {N} |
 | False positives | {N} ({%}) |
 | Anomalies flagged | {N} |
 
 **Domain breakdown**: {N} scraping, {N} frontend, {N} billing, ...
 **Routing**: {N} fast-lane, {N} feature-lane
+
+> `Findings queued after cascade control` reports Step 4C's defer/execute triage split (`QUEUED_FINDINGS` vs `DEFERRED_FINDINGS`) — it is NOT a dedup/arbitration computation; no such step exists for review findings. `Competing recommendations reconciled` is populated by Phase 2.5 (`RECONCILED_COUNT`), which reconciles investigation plans, not review findings. It is `0` when the batch had 0–1 investigations (synthesis is a no-op). <!-- Added: forge#1192, forge#1193 -->
 
 **Systematic issues** (flag if detected):
 - False positive rate > 30% → review agents may need tuning
@@ -1694,6 +1938,56 @@ Aggregate into the batch-level analytics for Step 6B.
 {If fast-lane: "All fixes merged to staging. Merge staging → main via GitHub web UI when ready to deploy."}
 ```
 
+### Step 6C: Pipeline Summary Cards (the shareable moment)
+
+Render one compact summary card per completed issue (from the `CARDS` JSON collected in Step 6A),
+then a single batch-level summary card. These are the shareable artifacts a developer screenshots
+after an orchestration run. Print all cards to stdout.
+
+**Per-issue card** — emit one for each JSON object in `CARDS`. Use the same box-drawing style and
+51-column inner width as `work-on/close.md` Phase C4.5b. Read fields directly from the JSON
+(`issue`, `title`, `pipeline`, `commits`, `additions`, `deletions`, `pr`, `pr_target`, `review`,
+`elapsed_seconds`). Truncate long titles with `…`; render `null` numeric fields as `—`. The
+`pipeline`/`status` field already encodes skipped phases (decomposed/invalid/blocked), so reflect
+it verbatim. Skip issues with no card (graceful — pre-card or non-merged runs).
+
+**Batch summary card** — aggregate across all collected cards:
+
+```
+╔═══════════════════════════════════════════════════╗
+║  ForgeDock Orchestration Complete                 ║
+╠═══════════════════════════════════════════════════╣
+║                                                   ║
+║  Scope:    {milestone / issue list}               ║
+║  Issues:   {N} merged · {M} blocked · {K} invalid ║
+║  Commits:  {SUM_COMMITS} ({SUM_ADD} additions, {SUM_DEL} deletions) ║
+║  PRs:      {N} merged                             ║
+║  Findings: {N} spawned · {M} resolved             ║
+║  Time:     {BATCH_ELAPSED}                        ║
+║                                                   ║
+╚═══════════════════════════════════════════════════╝
+```
+
+Aggregate with `jq` over the collected cards (every sum degrades gracefully — `null`/missing
+fields are treated as 0; never fabricate):
+
+```bash
+echo "$CARDS" | grep -v '^$' | jq -s '{
+  merged:   (map(select(.status=="merged"))   | length),
+  blocked:  (map(select(.status=="blocked"))  | length),
+  invalid:  (map(select(.status=="invalid"))  | length),
+  commits:  (map(.commits   // 0) | add),
+  adds:     (map(.additions // 0) | add),
+  dels:     (map(.deletions // 0) | add),
+  prs:      (map(select(.pr != null)) | length),
+  elapsed:  (map(.elapsed_seconds // 0) | add)
+}'
+```
+
+The batch card's `Findings:` line is filled from the review-finding counts already computed in
+the Summary section above. `BATCH_ELAPSED` is the wall-clock duration of the orchestration run
+(Step 6B `Duration`), not the sum of per-issue elapsed times.
+
 ---
 
 ## Safety Rules
@@ -1706,7 +2000,7 @@ Aggregate into the batch-level analytics for Step 6B.
 6. **Respect existing work** — skip issues already being worked on (`workflow:building`, `workflow:in-review`)
 7. **Dependency failures cascade** — if A fails and B depends on A, all transitive dependents of A are skipped (not attempted)
 8. **Always run post-batch cleanup** — Phase 5 is mandatory. Never skip `/cleanup all` after orchestration.
-9. **NEVER close/skip issues as duplicates** — only `/work-on` investigation agents can make that call after examining the actual code. The orchestrator delegates, it does not adjudicate.
+9. **NEVER close/skip issues as duplicates** — only `/work-on` investigation agents can make that call after examining the actual code. The orchestrator delegates, it does not adjudicate. **This is distinct from Phase 2.5 plan reconciliation**: reconciling *competing recommendations* across investigation annotations (arbitrating incompatible plans, adding `Depends on #X` serialization edges) operates only on FORGE annotations and issue bodies — it never reads code and never closes/skips/merges an issue. Both issues in a reconciled conflict still run. Adjudicating *duplicate validity* (deciding two issues are the same bug and closing one) remains forbidden. <!-- Added: forge#1192 -->
 10. **Per-completion verification** — after each agent completes, check that it has `workflow:*` labels and structured comments. If an agent bypassed `/work-on`, report it as a pipeline failure.
 
 ---
