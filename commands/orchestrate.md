@@ -453,21 +453,30 @@ Domain estimation (above) catches broad category overlap but misses cases where 
 
 #### Layer 1: Explicit file-overlap extraction
 
-**For issues that already have an INVESTIGATOR comment** (from Wave 0 or a prior session), extract their Affected Files list:
+**For issues that already have an INVESTIGATOR comment** (from Wave 0 or a prior session), extract their Affected Files list. **For issues WITHOUT an investigation comment**, fall back to parsing the issue body for file paths. Both code paths accumulate into a single `LAYER1_FILES` array (declared once, before the loop) — this is the batch-wide file set that Layer 5's co-change query (below) reuses, per the "file list already extracted in Layer 1" reference in Layer 2 and Layer 5:
 
 ```bash
+LAYER1_FILES=()
 for NUM in {issue_numbers}; do
   echo "=== #$NUM ==="
-  gh api repos/{GH_REPO}/issues/${NUM}/comments \
+  FILES_FOR_NUM=$(gh api repos/{GH_REPO}/issues/${NUM}/comments \
     --jq '.[] | select(.body | contains("FORGE:INVESTIGATOR")) | .body' 2>/dev/null \
-    | grep -oP '`[^`]*\.(py|tsx?|jsx?|sql|json|ya?ml)`' | sort -u
+    | grep -oP '`[^`]*\.(py|tsx?|jsx?|sql|json|ya?ml)`' | sort -u)
+
+  # Fall back to parsing the issue body directly when no INVESTIGATOR comment exists yet.
+  if [ -z "$FILES_FOR_NUM" ]; then
+    FILES_FOR_NUM=$(gh issue view $NUM --json body --jq '.body' \
+      | grep -oP '`[^`]*\.(py|tsx?|jsx?|sql|json|ya?ml)`' | sort -u)
+  fi
+
+  echo "$FILES_FOR_NUM"
+
+  # Accumulate into the batch-wide array — read line-by-line so each extracted path
+  # becomes one array element (paths here don't contain spaces, but this stays robust).
+  while IFS= read -r f; do
+    [ -n "$f" ] && LAYER1_FILES+=("$f")
+  done <<< "$FILES_FOR_NUM"
 done
-```
-
-**For issues WITHOUT an investigation comment**, fall back to parsing the issue body for file paths:
-
-```bash
-gh issue view $NUM --json body --jq '.body' | grep -oP '`[^`]*\.(py|tsx?|jsx?|sql|json|ya?ml)`' | sort -u
 ```
 
 **Cross-reference all extracted file lists:**
