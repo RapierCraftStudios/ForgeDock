@@ -44,7 +44,7 @@ import {
   realpathSync,
 } from "fs";
 import { join, dirname, basename, relative, isAbsolute } from "path";
-import { execSync } from "child_process";
+import { execSync, spawnSync } from "child_process";
 
 const DEFAULT_MODEL = "claude-sonnet-4-5";
 const DEFAULT_MAX_ITERATIONS = 50;
@@ -515,7 +515,8 @@ export function getToolHandlers(cwd) {
       delete childEnv.ANTHROPIC_API_KEY;
       // Run under bash when available so bash-style commands the model emits
       // (heredocs, scripts/*.sh, single-quote semantics) behave consistently
-      // across platforms. `undefined` lets execSync use the platform default.
+      // across platforms. `undefined` lets spawnSync fall back to the platform
+      // default shell (see `shell: shell || true` below).
       const shell = resolveBashShell();
       // Resolve wall-clock timeout. FORGEDOCK_BASH_TIMEOUT overrides the
       // module default so operators can tune per-repo or per-CI-job without
@@ -526,40 +527,68 @@ export function getToolHandlers(cwd) {
           ? rawTimeout
           : DEFAULT_BASH_TIMEOUT_MS;
       const startMs = Date.now();
-      try {
-        return execSync(command, {
-          cwd,
-          encoding: "utf-8",
-          stdio: ["pipe", "pipe", "pipe"],
-          maxBuffer: 50 * 1024 * 1024,
-          timeout: timeoutMs,
-          env: childEnv,
-          ...(shell ? { shell } : {}),
-        });
-      } catch (e) {
-        const stdout = e.stdout ? String(e.stdout) : "";
-        const stderr = e.stderr ? String(e.stderr) : "";
-        // Detect timeout: e.killed is the primary indicator (set by Node.js on
-        // most POSIX platforms), but on Windows execSync uses TerminateProcess()
-        // which may not set e.killed reliably. Fall back to elapsed wall time —
-        // if we spent at least as long as the timeout, the timer must have fired,
-        // since a voluntarily-exiting process would have returned before then.
-        const elapsedMs = Date.now() - startMs;
-        if (e.killed || elapsedMs >= timeoutMs) {
-          const timeoutSecs = Math.round(timeoutMs / 1000);
-          const partial = (stdout + stderr).trim();
-          throw new Error(
-            `Command timed out after ${timeoutSecs}s and was killed. ` +
-              `Set FORGEDOCK_BASH_TIMEOUT (ms) to adjust.` +
-              (partial ? `\nPartial output:\n${partial}` : ""),
-          );
-        }
-        // Surface the command's output AND exit status to the model so it can
-        // react to failures rather than silently swallowing them.
+      // Use spawnSync (not execSync) so stderr is captured on BOTH the success
+      // and failure paths. execSync only ever *returns* stdout on success —
+      // stderr is only exposed via the thrown error's `.stderr` on a nonzero
+      // exit — even though the tool schema above promises combined
+      // stdout/stderr and the failure path below already concatenates both.
+      // That meant diagnostics a command writes to stderr while still exiting
+      // 0 (git/npm/linter warnings) silently vanished from what the agent
+      // loop sees. spawnSync returns { stdout, stderr, status, signal, error }
+      // uniformly regardless of exit status, so both streams are always
+      // available. `shell: shell || true` preserves execSync's implicit
+      // "always run via a shell" behavior for compound commands (&&, pipes,
+      // heredocs) when resolveBashShell() returns undefined.
+      const result = spawnSync(command, {
+        cwd,
+        encoding: "utf-8",
+        maxBuffer: 50 * 1024 * 1024,
+        timeout: timeoutMs,
+        env: childEnv,
+        shell: shell || true,
+      });
+      const stdout = result.stdout ? String(result.stdout) : "";
+      const stderr = result.stderr ? String(result.stderr) : "";
+      // Detect timeout: result.error.code === "ETIMEDOUT" and/or
+      // result.signal === "SIGTERM" are the primary indicators (set by
+      // Node.js when the timeout fires and the process is killed), but on
+      // Windows signal reporting may not be reliable. Fall back to elapsed
+      // wall time — if we spent at least as long as the timeout, the timer
+      // must have fired, since a voluntarily-exiting process would have
+      // returned before then. Gate all of this on `result.status === null`
+      // so a legitimately-completed process near the timeout boundary is
+      // never misreported as timed out.
+      const elapsedMs = Date.now() - startMs;
+      const timedOut =
+        result.status === null &&
+        (result.error?.code === "ETIMEDOUT" ||
+          result.signal === "SIGTERM" ||
+          elapsedMs >= timeoutMs);
+      if (timedOut) {
+        const timeoutSecs = Math.round(timeoutMs / 1000);
+        const partial = (stdout + stderr).trim();
         throw new Error(
-          `Command failed (exit ${e.status ?? "?"}):\n${stdout}${stderr}`.trim(),
+          `Command timed out after ${timeoutSecs}s and was killed. ` +
+            `Set FORGEDOCK_BASH_TIMEOUT (ms) to adjust.` +
+            (partial ? `\nPartial output:\n${partial}` : ""),
         );
       }
+      if (result.error) {
+        // spawnSync-level failure to even launch the process (e.g. ENOENT
+        // for a missing shell binary) — distinct from a nonzero exit status
+        // below.
+        throw new Error(`Command failed to start: ${result.error.message}`);
+      }
+      if (result.status !== 0) {
+        // Surface the command's output AND exit status to the model so it
+        // can react to failures rather than silently swallowing them.
+        throw new Error(
+          `Command failed (exit ${result.status ?? "?"}):\n${stdout}${stderr}`.trim(),
+        );
+      }
+      // Combined stdout/stderr on success — matches the tool schema's
+      // documented contract.
+      return stdout + stderr;
     },
   };
 }
