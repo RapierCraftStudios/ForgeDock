@@ -461,12 +461,12 @@ for NUM in {issue_numbers}; do
   echo "=== #$NUM ==="
   FILES_FOR_NUM=$(gh api repos/{GH_REPO}/issues/${NUM}/comments \
     --jq '.[] | select(.body | contains("FORGE:INVESTIGATOR")) | .body' 2>/dev/null \
-    | grep -oP '`[^`]*\.(py|tsx?|jsx?|sql|json|ya?ml)`' | sort -u)
+    | grep -oP '`[^`]*\.(py|tsx?|jsx?|sql|json|ya?ml)`' | tr -d '`' | sort -u)
 
   # Fall back to parsing the issue body directly when no INVESTIGATOR comment exists yet.
   if [ -z "$FILES_FOR_NUM" ]; then
     FILES_FOR_NUM=$(gh issue view $NUM --json body --jq '.body' \
-      | grep -oP '`[^`]*\.(py|tsx?|jsx?|sql|json|ya?ml)`' | sort -u)
+      | grep -oP '`[^`]*\.(py|tsx?|jsx?|sql|json|ya?ml)`' | tr -d '`' | sort -u)
   fi
 
   echo "$FILES_FOR_NUM"
