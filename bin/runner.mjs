@@ -41,8 +41,9 @@ import {
   writeFileSync,
   readdirSync,
   mkdirSync,
+  realpathSync,
 } from "fs";
-import { join, dirname, relative, isAbsolute } from "path";
+import { join, dirname, basename, relative, isAbsolute } from "path";
 import { execSync } from "child_process";
 
 const DEFAULT_MODEL = "claude-sonnet-4-5";
@@ -279,10 +280,25 @@ function resolvePath(cwd, p) {
  * this file): reject when relative(cwd, resolved) starts with ".." or is
  * absolute.
  *
+ * The lexical checks above only inspect the path *string* — they do not
+ * protect against a symlink pre-existing inside cwd (planted by an earlier
+ * tool call, or already present on disk) that lexically resolves inside cwd
+ * but dereferences at the OS level to a location outside it. To close that
+ * gap, the resolved path's *real* (symlink-free) location is also checked
+ * against the *real* cwd before returning. write_file targets frequently
+ * don't exist yet (its mkdirSync call runs after this function returns), so
+ * realpathSync would throw ENOENT if run on the leaf directly — this walks
+ * up to the nearest existing ancestor, resolves *that*, and rejoins the
+ * non-existent remainder. Unlike bin/registry.mjs's normalizeDir() (a
+ * non-security path-normalization helper), there is no fail-open fallback
+ * here: this is a security confinement check, so a resolution failure must
+ * never be treated as "no symlink present".
+ *
  * @param {string} cwd   - Absolute path to the allowed root directory.
  * @param {string} p     - Model-supplied path (must be relative).
  * @returns {string}     - Absolute resolved path (guaranteed inside cwd).
- * @throws {Error}       - If p is absolute or resolves outside cwd.
+ * @throws {Error}       - If p is absolute or resolves outside cwd (lexically
+ *                         or after symlink resolution).
  */
 function resolveConfinedPath(cwd, p) {
   if (isAbsolute(p)) {
@@ -297,6 +313,31 @@ function resolveConfinedPath(cwd, p) {
       `Path escape detected: "${p}" resolves outside the working directory. Use a path relative to the working directory.`,
     );
   }
+
+  // Symlink-resolution check: walk up from `resolved` to the nearest
+  // existing ancestor (this may be `cwd` itself, if none of the
+  // intermediate directories exist yet — the common case for write_file),
+  // realpath that ancestor, then rejoin the not-yet-existing remainder.
+  const realCwd = realpathSync.native(cwd);
+  let existingAncestor = resolved;
+  const remainder = [];
+  while (!existsSync(existingAncestor)) {
+    const parent = dirname(existingAncestor);
+    if (parent === existingAncestor) break; // reached filesystem root — give up walking
+    remainder.unshift(basename(existingAncestor));
+    existingAncestor = parent;
+  }
+  const realAncestor = realpathSync.native(existingAncestor);
+  const realResolved =
+    remainder.length > 0 ? join(realAncestor, ...remainder) : realAncestor;
+
+  const realRel = relative(realCwd, realResolved);
+  if (realRel.startsWith("..") || isAbsolute(realRel)) {
+    throw new Error(
+      `Path escape detected: "${p}" resolves outside the working directory. Use a path relative to the working directory.`,
+    );
+  }
+
   return resolved;
 }
 
