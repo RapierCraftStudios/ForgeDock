@@ -18,7 +18,15 @@
 
 import { describe, it, before, after } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, mkdirSync, writeFileSync, rmSync, readFileSync, existsSync } from "node:fs";
+import {
+  mkdtempSync,
+  mkdirSync,
+  writeFileSync,
+  rmSync,
+  readFileSync,
+  existsSync,
+  symlinkSync,
+} from "node:fs";
 import { join } from "node:path";
 import os from "node:os";
 
@@ -322,6 +330,64 @@ describe("getToolHandlers", () => {
     assert.throws(
       () => handlers.write_file({ path: "../outside.txt", content: "escaped" }),
       /Path escape detected/,
+    );
+  });
+
+  // -------------------------------------------------------------------------
+  // SEC: symlink escape — resolveConfinedPath must resolve symlinks before
+  // the confinement check, not just validate the path string (issue #1228).
+  // A symlink pre-existing inside cwd must not let read_file/write_file
+  // escape working-directory confinement.
+  // -------------------------------------------------------------------------
+
+  it("read_file rejects a symlinked file that resolves outside cwd (SEC: symlink escape)", () => {
+    const symlinkTmp = mkdtempSync(join(os.tmpdir(), "forgedock-symlink-src-"));
+    const outsideSecret = join(symlinkTmp, "secret.txt");
+    writeFileSync(outsideSecret, "outside-cwd-secret");
+
+    const handlers = getToolHandlers(TMP);
+    const linkPath = join(TMP, "evil-link.txt");
+    symlinkSync(outsideSecret, linkPath);
+    try {
+      assert.throws(
+        () => handlers.read_file({ path: "evil-link.txt" }),
+        /Path escape detected/,
+      );
+    } finally {
+      rmSync(linkPath, { force: true });
+      rmSync(symlinkTmp, { recursive: true, force: true });
+    }
+  });
+
+  it("write_file rejects a target inside a symlinked directory that resolves outside cwd (SEC: symlink escape)", () => {
+    const symlinkTmp = mkdtempSync(join(os.tmpdir(), "forgedock-symlink-dst-"));
+
+    const handlers = getToolHandlers(TMP);
+    const linkDir = join(TMP, "evil-link-dir");
+    symlinkSync(symlinkTmp, linkDir);
+    try {
+      assert.throws(
+        () => handlers.write_file({ path: "evil-link-dir/pwned.txt", content: "pwned" }),
+        /Path escape detected/,
+      );
+      // The write must not have happened outside cwd.
+      assert.equal(existsSync(join(symlinkTmp, "pwned.txt")), false);
+    } finally {
+      rmSync(linkDir, { force: true });
+      rmSync(symlinkTmp, { recursive: true, force: true });
+    }
+  });
+
+  it("write_file allows deeply nested new paths with no existing intermediate directories (regression: symlink fix must not over-block)", () => {
+    const handlers = getToolHandlers(TMP);
+    const out = handlers.write_file({
+      path: "new-a/new-b/new-c/deep.txt",
+      content: "deep content",
+    });
+    assert.match(out, /Wrote \d+ bytes/);
+    assert.equal(
+      readFileSync(join(TMP, "new-a", "new-b", "new-c", "deep.txt"), "utf-8"),
+      "deep content",
     );
   });
 
