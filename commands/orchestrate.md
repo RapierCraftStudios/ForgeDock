@@ -324,22 +324,44 @@ For each detected conflict, resolve it in exactly ONE of two ways:
 # Serialization is expressed as a standard "Depends on #X" edge so Step 3A consumes it
 # with no new plumbing (see Step 3A dependency-marker parsing).
 RECONCILED_COUNT=0
+N_ARBITRATED=0
+N_SERIALIZED=0
 for CONFLICT in "${DETECTED_CONFLICTS[@]}"; do
   # CONFLICT = "FIRST SECOND RESOLUTION" where RESOLUTION is "arbitrate" or "serialize"
   set -- $CONFLICT; FIRST=$1; SECOND=$2; RESOLUTION=$3
   if [ "$RESOLUTION" = "serialize" ]; then
-    SECOND_BODY=$(gh issue view $SECOND -R {GH_REPO} --json body --jq '.body')
-    if ! echo "$SECOND_BODY" | grep -qiE "depends on #${FIRST}\b"; then
-      gh issue edit $SECOND -R {GH_REPO} \
-        --body "${SECOND_BODY}
+    # Reverse-direction cycle guard: before adding "#SECOND depends on #FIRST", check
+    # whether #FIRST already declares "Depends on #SECOND". If it does, the requested
+    # edge would close a 2-node cycle (#FIRST -> #SECOND -> #FIRST) that Step 3D.5's
+    # cycle detector would later have to exclude from dispatch entirely (both issues
+    # stuck behind needs-human). Skip the edge and fall back to arbitration-in-place
+    # instead, so both issues still run.
+    FIRST_BODY=$(gh issue view $FIRST -R {GH_REPO} --json body --jq '.body')
+    if echo "$FIRST_BODY" | grep -qiE "depends on #${SECOND}\b"; then
+      echo "Phase 2.5: skipping serialization edge #${SECOND} -> #${FIRST}: reverse edge #${FIRST} -> #${SECOND} already exists (would create a cycle). Falling back to arbitration-in-place."
+      RESOLUTION="arbitrate"
+    else
+      SECOND_BODY=$(gh issue view $SECOND -R {GH_REPO} --json body --jq '.body')
+      if ! echo "$SECOND_BODY" | grep -qiE "depends on #${FIRST}\b"; then
+        gh issue edit $SECOND -R {GH_REPO} \
+          --body "${SECOND_BODY}
 
 Depends on #${FIRST}
 <!-- Serialized by orchestrate Phase 2.5: competing recommendation reconciled via dependency edge. -->"
+      fi
     fi
+  fi
+  # Re-check RESOLUTION (may have been downgraded from "serialize" to "arbitrate" above)
+  # so the breakdown counters and the Step 2.5D per-issue decision recording both reflect
+  # the resolution that was actually applied, not the one originally proposed.
+  if [ "$RESOLUTION" = "serialize" ]; then
+    N_SERIALIZED=$((N_SERIALIZED + 1))
+  else
+    N_ARBITRATED=$((N_ARBITRATED + 1))
   fi
   RECONCILED_COUNT=$((RECONCILED_COUNT + 1))
 done
-echo "Phase 2.5 reconciled ${RECONCILED_COUNT} competing recommendation(s)."
+echo "Phase 2.5 reconciled ${RECONCILED_COUNT} competing recommendation(s) (${N_ARBITRATED} arbitrated, ${N_SERIALIZED} serialized)."
 ```
 
 **MUST NOT**: close, skip, or merge any issue on the basis of a detected conflict. Two issues with competing recommendations are BOTH valid work items — Phase 2.5 makes their plans coherent, it does not eliminate either. (This is the Safety Rule 9 boundary — see the Purpose note above.)
@@ -372,8 +394,8 @@ The `FORGE:SYNTHESIS_BRIEF` annotation is consumed by Step 4A's `{GIST_CONTEXT}`
 
 **Investigations reconciled**: {INVESTIGATION_COUNT}
 **Competing recommendations detected**: {RECONCILED_COUNT}
-  - Arbitrated in place: {N_arbitrated}
-  - Serialized via dependency edge: {N_serialized}
+  - Arbitrated in place: {N_ARBITRATED} (includes any serialization edges downgraded by the reverse-cycle guard)
+  - Serialized via dependency edge: {N_SERIALIZED}
 **Per-issue synthesis briefs emitted**: {N_briefs}
 
 Proceeding to dependency analysis with a deconflicted plan set...
