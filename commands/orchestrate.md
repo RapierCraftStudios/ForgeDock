@@ -534,14 +534,19 @@ Layers 1-4 infer conflict risk from structure — path overlap, directory nestin
 
 ```bash
 # Union of affected files across all issues in the CURRENT batch only (already
-# extracted per-issue in Layer 1) — never the whole repo.
-ALL_AFFECTED_FILES=$(printf '%s\n' "${LAYER1_FILES[@]}" | sort -u)
+# extracted per-issue in Layer 1) — never the whole repo. Built as an array
+# (not a newline-joined scalar) so each path survives as a single pathspec
+# argument below — a plain string here would be word-split and glob-expanded
+# by the shell when handed to `git log --`, silently mangling or dropping any
+# path containing a space or glob metacharacter.
+mapfile -t ALL_AFFECTED_FILES < <(printf '%s\n' "${LAYER1_FILES[@]}" | sort -u)
 
 # Bounded window: last 90 days, capped at 200 commits — whichever is smaller.
 # Each commit's file list is delimited by a marker so co-occurring files can be
-# grouped per-commit in a single pass.
+# grouped per-commit in a single pass. The array is expanded quoted
+# ("${ALL_AFFECTED_FILES[@]}") so every path is passed as one literal argument.
 git log --name-only --since="90 days ago" --max-count=200 \
-  --pretty=format:'---%H---' -- $ALL_AFFECTED_FILES \
+  --pretty=format:'---%H---' -- "${ALL_AFFECTED_FILES[@]}" \
   > /tmp/cochange_log.txt
 
 # Parse into commit → file-set groups, then increment a co-occurrence counter
