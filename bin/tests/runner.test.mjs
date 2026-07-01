@@ -245,6 +245,21 @@ describe("getToolHandlers", () => {
     assert.throws(() => handlers.run_bash({ command: "node -e \"process.exit(3)\"" }), /exit 3/);
   });
 
+  // Regression test for issue #1229 (staging review — PR #1226): the success
+  // path previously returned only stdout (via execSync), silently discarding
+  // stderr written by a command that still exits 0 — even though the tool
+  // schema promises combined stdout/stderr and the error path already
+  // combines both.
+  it("run_bash includes stderr in the result even when the command exits 0", () => {
+    const handlers = getToolHandlers(TMP);
+    const out = handlers.run_bash({
+      command:
+        "node -e \"process.stderr.write('WARN'); process.stdout.write('OK')\"",
+    });
+    assert.match(out, /OK/);
+    assert.match(out, /WARN/);
+  });
+
   it("run_bash scrubs ANTHROPIC_API_KEY from the child env", () => {
     const orig = process.env.ANTHROPIC_API_KEY;
     process.env.ANTHROPIC_API_KEY = "sk-ant-should-not-leak";
