@@ -149,31 +149,35 @@ grep -lE "asyncio\.shield|asyncio\.wait_for|Task\.cancel" {CHANGED_FILES} 2>/dev
 grep -lE "^\w+ = (\{\}|\[\]|set\(\)|Lock\(\)|defaultdict|Counter)" {CHANGED_FILES} 2>/dev/null | grep -qE '\.py$' && DOMAINS="$DOMAINS STATE"
 
 # Check for capacity constants in worker/infra/browser Python files
-for f in $(echo {CHANGED_FILES} | tr ' ' '\n' | grep -E '\.py$' | grep -E 'services/worker/|infra/|browser/'); do
+while IFS= read -r f; do
+    [ -z "$f" ] && continue
     git diff HEAD -- "$f" 2>/dev/null | grep -qE '^\+[A-Za-z_]\w*(MB|SIZE|MAX|LIMIT|THRESHOLD|TIMEOUT)\w*\s*=' && DOMAINS="$DOMAINS CAPACITY" && break
-done
+done < <(echo {CHANGED_FILES} | tr ' ' '\n' | grep -E '\.py$' | grep -E 'services/worker/|infra/|browser/')
 
 # Check for env var usage in changed files
 grep -lE "os\.getenv|process\.env" {CHANGED_FILES} 2>/dev/null && DOMAINS="$DOMAINS DEPLOY"
 
 # Check for new app.* imports added outside try: blocks in Python files
-for f in $(echo {CHANGED_FILES} | tr ' ' '\n' | grep -E '\.py$'); do
+while IFS= read -r f; do
+    [ -z "$f" ] && continue
     NEW_IMPORTS=$(git diff HEAD -- "$f" 2>/dev/null | grep -E '^\+\s*(from app\.|import app\.)' | grep -v '^+++')
     if [ -n "$NEW_IMPORTS" ]; then
         DOMAINS="$DOMAINS IMPORT_RESOLUTION"
         break
     fi
-done
+done < <(echo {CHANGED_FILES} | tr ' ' '\n' | grep -E '\.py$')
 
 # Check for runtime UID changes in Dockerfiles or entrypoint scripts
-for f in $(echo {CHANGED_FILES} | tr ' ' '\n' | grep -iE 'Dockerfile|entrypoint.*\.sh'); do
+while IFS= read -r f; do
+    [ -z "$f" ] && continue
     git diff HEAD -- "$f" 2>/dev/null | grep -E '^\+.*(USER\s+[^0]|su-exec|gosu|setuid)' | grep -v '^+++' | grep -q . && DOMAINS="$DOMAINS INFRA" && break
-done
+done < <(echo {CHANGED_FILES} | tr ' ' '\n' | grep -iE 'Dockerfile|entrypoint.*\.sh')
 
 # Check for gate condition narrowing in router Python files (condition removal = fix may be incomplete across siblings)
-for f in $(echo {CHANGED_FILES} | tr ' ' '\n' | grep -E '\.py$' | grep -E 'router'); do
+while IFS= read -r f; do
+    [ -z "$f" ] && continue
     git diff HEAD -- "$f" 2>/dev/null | grep -E '^-.*\bif\b.*\bor\b' | grep -v '^---' | grep -q . && DOMAINS="$DOMAINS ROUTER_BUG" && break
-done
+done < <(echo {CHANGED_FILES} | tr ' ' '\n' | grep -E '\.py$' | grep -E 'router')
 
 # Check for external tool config files (structural schema validation advisory)
 # {CHANGED_FILES} is space-separated (see array-split note above) — reuse the
@@ -267,10 +271,11 @@ For new/modified endpoints:
 3. Does the endpoint check resource ownership (`user_id`) before returning data?
 
 ```bash
-for f in $(echo {CHANGED_FILES} | tr ' ' '\n' | grep -E 'router|route'); do
+while IFS= read -r f; do
+    [ -z "$f" ] && continue
     grep -nE "CurrentUser|SessionUser|Depends\(get_" "$f" 2>/dev/null
     grep -nE "@router\.(get|post|put|delete)" "$f" 2>/dev/null
-done
+done < <(echo {CHANGED_FILES} | tr ' ' '\n' | grep -E 'router|route')
 ```
 
 ### 2C: Deploy chain (when new env vars are introduced)
@@ -297,11 +302,12 @@ For each `.sql` file:
 5. **Migration number collision**: Check against origin branch
 
 ```bash
-for f in $(echo {CHANGED_FILES} | tr ' ' '\n' | grep '\.sql$'); do
+while IFS= read -r f; do
+    [ -z "$f" ] && continue
     grep -nE "ADD COLUMN.*NOT NULL" "$f" | grep -v "DEFAULT" && echo "DB: NOT NULL without DEFAULT in $f"
     grep -nE "DROP (TABLE|COLUMN|INDEX)" "$f" | grep -v "IF EXISTS" && echo "DB: DROP without IF EXISTS in $f"
     grep -nE "SELECT.*FROM" "$f" | grep -v "LIMIT" | grep -v "WHERE.*created_at" && echo "DB: possibly unbounded query in $f"
-done
+done < <(echo {CHANGED_FILES} | tr ' ' '\n' | grep '\.sql$')
 
 # Migration prefix collision scan (Deploy Gate — HIGH)
 # Runs whenever any SQL file changed. Scans the full infra/migrations/ tree for duplicate
@@ -341,7 +347,8 @@ For each `.tsx`/`.ts` client component:
 7. **Rules of Hooks**: Do function components avoid early returns before hook calls?
 
 ```bash
-for f in $(echo {CHANGED_FILES} | tr ' ' '\n' | grep -E '\.tsx?$' | grep -v 'route\.ts'); do
+while IFS= read -r f; do
+    [ -z "$f" ] && continue
     # Check for useEffect without cleanup (basic heuristic)
     grep -c "useEffect" "$f" 2>/dev/null
     grep -c "return.*cleanup\|return.*\(\) =>" "$f" 2>/dev/null
@@ -381,15 +388,16 @@ for f in $(echo {CHANGED_FILES} | tr ' ' '\n' | grep -E '\.tsx?$' | grep -v 'rou
         }
         in_component && /\buse[A-Z]/ { found_hook=1 }
     ' FILENAME="$f" "$f" 2>/dev/null
-done
+done < <(echo {CHANGED_FILES} | tr ' ' '\n' | grep -E '\.tsx?$' | grep -v 'route\.ts')
 ```
 
 ### 2F: Frontend proxy wiring (client-side fetch calls)
 
 ```bash
-for f in $(echo {CHANGED_FILES} | tr ' ' '\n' | grep -E '\.(tsx?|jsx?)$' | grep -v 'route\.ts$'); do
+while IFS= read -r f; do
+    [ -z "$f" ] && continue
     grep -nE '(fetch|useSWR|apiFetch)\s*[(<]\s*[`"'"'"']/api/v1/' "$f" 2>/dev/null && echo "PROXY: direct /api/v1/ call in $f — must use /api/ proxy"
-done
+done < <(echo {CHANGED_FILES} | tr ' ' '\n' | grep -E '\.(tsx?|jsx?)$' | grep -v 'route\.ts$')
 ```
 
 ### 2G: Cross-service integration (shell scripts with curl/wget)
@@ -424,7 +432,8 @@ The script `verify-host-headers.sh` checks for the `FORGE_INTERNAL_PATTERNS` env
 **Why this matters**: Every DB connection function in a deploy script must use `${POSTGRES_HOST:-localhost}` (or equivalent env var interpolation), not a bare `"localhost"` string literal. A hardcoded `"localhost"` works in local development but fails in any environment where PostgreSQL runs on a separate host. The pattern is reliably grep-detectable. <!-- Added: forge#303 -->
 
 ```bash
-for f in $(echo {CHANGED_FILES} | tr ' ' '\n' | grep -E '\.sh$'); do
+while IFS= read -r f; do
+    [ -z "$f" ] && continue
   # Only check files that contain DB connection tools
   if grep -qE "PGPASSWORD|createdb|psql|pg_dump|pg_restore" "$f" 2>/dev/null; then
     # Look for new/modified lines with hardcoded localhost in variable assignments
@@ -439,7 +448,7 @@ for f in $(echo {CHANGED_FILES} | tr ' ' '\n' | grep -E '\.sh$'); do
       echo "$HARDCODED"
     fi
   fi
-done
+done < <(echo {CHANGED_FILES} | tr ' ' '\n' | grep -E '\.sh$')
 ```
 
 Report any hit as **HIGH** — the DB connection will fail in any environment where PostgreSQL is not on `127.0.0.1:5432`.
@@ -505,7 +514,8 @@ Report each conflict as **HIGH** — a shadowed native command is a silent user-
 **Severity**: MEDIUM (flags for review, not auto-blocking). The review agent's concurrency auditor verifies with full context.
 
 ```bash
-for f in $(echo {CHANGED_FILES} | tr ' ' '\n' | grep -E '\.py$'); do
+while IFS= read -r f; do
+    [ -z "$f" ] && continue
     # asyncio.shield usage — outer await may be reached with pending CancelledError
     grep -nE "asyncio\.shield" "$f" 2>/dev/null && \
         echo "ASYNC: asyncio.shield in $f — verify outer await isn't reachable with pending CancelledError. Prefer loop.create_task() for fire-and-forget."
@@ -520,7 +530,7 @@ for f in $(echo {CHANGED_FILES} | tr ' ' '\n' | grep -E '\.py$'); do
         sed -n "$((LINENO+1)),$((LINENO+5))p" "$f" | grep -q "await" && \
             echo "ASYNC: await in except/finally block at $f:$LINENO — may fail if CancelledError is pending"
     done
-done
+done < <(echo {CHANGED_FILES} | tr ' ' '\n' | grep -E '\.py$')
 ```
 
 
@@ -543,7 +553,8 @@ For each new module-level state variable in the diff:
    ```
 
 ```bash
-for f in $(echo {CHANGED_FILES} | tr ' ' '\n' | grep -E '\.py$'); do
+while IFS= read -r f; do
+    [ -z "$f" ] && continue
     # Find new module-level state variables introduced in the diff
     NEW_VARS=$(git diff HEAD -- "$f" 2>/dev/null | grep -E '^\+[A-Za-z_]\w* = (\{\}|\[\]|set\(\)|Lock\(\)|defaultdict|Counter)' | grep -oE '^[+][A-Za-z_]\w*' | tr -d '+' | sort -u)
     for new_var in $NEW_VARS; do
@@ -560,7 +571,7 @@ for f in $(echo {CHANGED_FILES} | tr ' ' '\n' | grep -E '\.py$'); do
             done
         done
     done
-done
+done < <(echo {CHANGED_FILES} | tr ' ' '\n' | grep -E '\.py$')
 ```
 
 **Severity**: MEDIUM — missing a mutation site is usually a latent bug, not an immediate crash, but it causes incorrect behavior under concurrent load.
@@ -578,11 +589,12 @@ For each changed file in the anti-detection/scraping domains:
 **1. Identify modified string identifier sets** (frozensets, tuples, or lists of string literals used for detection):
 
 ```bash
-for f in $(echo {CHANGED_FILES} | tr ' ' '\n' | grep -E '\.py$' | grep -E 'anti_detection/|consumers/|browser/|shared/detection/'); do
+while IFS= read -r f; do
+    [ -z "$f" ] && continue
     echo "=== String sets in $f ==="
     # Find named constants that are frozenset/tuple/list of strings
     grep -nE "^[A-Z_]+ = (frozenset|tuple|set)\(\[?['\"]|^[A-Z_]+ = \(['\"]|^[A-Z_]+ = \[['\"]" "$f" 2>/dev/null
-done
+done < <(echo {CHANGED_FILES} | tr ' ' '\n' | grep -E '\.py$' | grep -E 'anti_detection/|consumers/|browser/|shared/detection/')
 ```
 
 **2. For each string in a modified set, check if it appears in sibling detection files:**
@@ -590,7 +602,8 @@ done
 ```bash
 SERVICE_DIR=$(echo {CHANGED_FILES} | tr ' ' '\n' | grep -E 'anti_detection/|consumers/|browser/' | head -1 | grep -oE '^services/[^/]+/[^/]+' || echo "services/worker/worker")
 
-for f in $(echo {CHANGED_FILES} | tr ' ' '\n' | grep -E '\.py$' | grep -E 'anti_detection/|consumers/|browser/|shared/detection/'); do
+while IFS= read -r f; do
+    [ -z "$f" ] && continue
     # Extract string values from detection sets in this file
     STRINGS=$(grep -oE "'[a-z_][a-z0-9_-]*'" "$f" 2>/dev/null | tr -d "'" | sort -u)
     for s in $STRINGS; do
@@ -598,13 +611,14 @@ for f in $(echo {CHANGED_FILES} | tr ' ' '\n' | grep -E '\.py$' | grep -E 'anti_
         FOUND=$(grep -rl "\"$s\"\|'$s'" $SERVICE_DIR/ 2>/dev/null | grep -v "^$f$" | grep '\.py$' | head -1)
         [ -z "$FOUND" ] && echo "STR: '$s' in $f appears NOWHERE else in $SERVICE_DIR — possible typo or dead entry"
     done
-done
+done < <(echo {CHANGED_FILES} | tr ' ' '\n' | grep -E '\.py$' | grep -E 'anti_detection/|consumers/|browser/|shared/detection/')
 ```
 
 **3. Check for identifiers mentioned in comments/docstrings of the SAME file that are NOT in the actual set** (catches the `abck` vs `_abck` class of bug):
 
 ```bash
-for f in $(echo {CHANGED_FILES} | tr ' ' '\n' | grep -E '\.py$' | grep -E 'anti_detection/|consumers/|browser/|shared/detection/'); do
+while IFS= read -r f; do
+    [ -z "$f" ] && continue
     echo "=== Comment/code drift in $f ==="
     # Extract string literals from actual sets (remove quotes)
     SET_STRINGS=$(grep -oE "frozenset\(\[([^]]+)\]\)" "$f" 2>/dev/null | grep -oE "'[^']+'" | tr -d "'" | sort -u)
@@ -616,14 +630,15 @@ for f in $(echo {CHANGED_FILES} | tr ' ' '\n' | grep -E '\.py$' | grep -E 'anti_
     for ref in $COMMENT_REFS; do
         echo "$SET_STRINGS" | grep -q "^${ref}$" || echo "STR: '$ref' mentioned in comment in $f but NOT found in any string set — possible omission or typo"
     done
-done
+done < <(echo {CHANGED_FILES} | tr ' ' '\n' | grep -E '\.py$' | grep -E 'anti_detection/|consumers/|browser/|shared/detection/')
 ```
 
 **4. Cross-reference sibling sets in related modules** (the primary inter-file check):
 
 ```bash
 # Find all detection-related Python files in the same service
-for f in $(echo {CHANGED_FILES} | tr ' ' '\n' | grep -E '\.py$' | grep -E 'anti_detection/|consumers/|browser/'); do
+while IFS= read -r f; do
+    [ -z "$f" ] && continue
     SIBLINGS=$(find $(dirname "$f")/../ -name "*.py" -path "*/anti_detection/*" -o -name "*.py" -path "*/consumers/*" -o -name "*.py" -path "*/browser/*" 2>/dev/null | grep -v "^$f$" | head -10)
 
     # Extract detection set names from the changed file
@@ -645,7 +660,7 @@ for f in $(echo {CHANGED_FILES} | tr ' ' '\n' | grep -E '\.py$' | grep -E 'anti_
                 echo "STR: '$s' in $f not found in sibling file $sib — verify if cross-module consistency is required"
         done
     done <<< "$SIBLINGS"
-done
+done < <(echo {CHANGED_FILES} | tr ' ' '\n' | grep -E '\.py$' | grep -E 'anti_detection/|consumers/|browser/')
 ```
 
 **Flag as findings**:
@@ -664,7 +679,8 @@ done
 For each new or modified capacity constant in the diff:
 
 ```bash
-for f in $(echo {CHANGED_FILES} | tr ' ' '\n' | grep -E '\.py$' | grep -E 'services/worker/|infra/|browser/'); do
+while IFS= read -r f; do
+    [ -z "$f" ] && continue
     # Find new capacity constant assignments introduced by this diff
     NEW_CAPS=$(git diff HEAD -- "$f" 2>/dev/null | grep -E '^\+[A-Za-z_]\w*(MB|SIZE|MAX|LIMIT|THRESHOLD|TIMEOUT)\w*\s*=' | grep -oE '^[+][A-Za-z_]\w+' | tr -d '+' | sort -u)
     for cap_var in $NEW_CAPS; do
@@ -682,7 +698,7 @@ for f in $(echo {CHANGED_FILES} | tr ' ' '\n' | grep -E '\.py$' | grep -E 'servi
         git log --all -15 --oneline --grep="memory" 2>/dev/null | head -5
         git log --all -15 --oneline --grep="$(echo $keywords | cut -d' ' -f1)" 2>/dev/null | head -5
     done
-done
+done < <(echo {CHANGED_FILES} | tr ' ' '\n' | grep -E '\.py$' | grep -E 'services/worker/|infra/|browser/')
 ```
 
 **Flag as findings**:
@@ -700,7 +716,8 @@ done
 **Why this matters**: `appleboy/ssh-action` processes every `script:` field through Go's `text/template` engine **client-side, before SSH transmission**. Any `{{` in the script — including in comments, `docker ps --format` strings, and `docker inspect --format` strings — is interpreted as a Go template directive. If the expression does not resolve against the action's data context (which is an empty map for `appleboy/ssh-action`), the step exits with status 1 **before the script reaches the remote shell**. Shell error handlers (`|| fallback`, `2>/dev/null`, `set -e`) are completely bypassed. `continue-on-error: true` masks the failure silently, producing apparent deploy success with no remote shell output.
 
 ```bash
-for f in $(echo {CHANGED_FILES} | tr ' ' '\n' | grep -E '\.github/workflows/.*\.yml$'); do
+while IFS= read -r f; do
+    [ -z "$f" ] && continue
     if grep -q "appleboy/ssh-action" "$f"; then
         TEMPLATE_HITS=$(grep -n "{{" "$f")
         if [ -n "$TEMPLATE_HITS" ]; then
@@ -717,7 +734,7 @@ for f in $(echo {CHANGED_FILES} | tr ' ' '\n' | grep -E '\.github/workflows/.*\.
             echo "  docker ps --format json | jq -r '.Status'"
         fi
     fi
-done
+done < <(echo {CHANGED_FILES} | tr ' ' '\n' | grep -E '\.github/workflows/.*\.yml$')
 ```
 
 Report any hit as **CONFIRMED HIGH** — the step will exit 1 before reaching the remote shell.
@@ -733,7 +750,8 @@ Go template directives in `appleboy/ssh-action` `script:` blocks are preprocesse
 ```bash
 PR_BASE="${PR_BASE:-staging}"
 
-for f in $(echo {CHANGED_FILES} | tr ' ' '\n' | grep -E '\.py$'); do
+while IFS= read -r f; do
+    [ -z "$f" ] && continue
     # Extract new app.* import statements added in the diff
     # Only consider lines added (starting with +), skip diff headers (+++)
     NEW_IMPORTS=$(git diff HEAD -- "$f" 2>/dev/null | grep -E '^\+\s*(from app\.|import app\.)' | grep -v '^+++' | sed 's/^+//')
@@ -767,7 +785,7 @@ for f in $(echo {CHANGED_FILES} | tr ' ' '\n' | grep -E '\.py$'); do
             fi
         fi
     done
-done
+done < <(echo {CHANGED_FILES} | tr ' ' '\n' | grep -E '\.py$')
 ```
 
 **Flag as findings**:
@@ -790,10 +808,11 @@ A builder agent working in a milestone-branch worktree has access to milestone-o
 # Step 1: Identify the service directory from the changed Dockerfile/entrypoint path
 # e.g. services/worker/Dockerfile → service root = services/worker/
 SERVICE_DIR=""
-for f in $(echo {CHANGED_FILES} | tr ' ' '\n' | grep -iE 'Dockerfile|entrypoint.*\.sh'); do
+while IFS= read -r f; do
+    [ -z "$f" ] && continue
     SERVICE_DIR=$(dirname "$f")
     break
-done
+done < <(echo {CHANGED_FILES} | tr ' ' '\n' | grep -iE 'Dockerfile|entrypoint.*\.sh')
 
 if [ -n "$SERVICE_DIR" ]; then
     # Step 2: Find volume mount points for this service in any docker-compose*.yml
@@ -836,7 +855,8 @@ fi
 ```bash
 PR_BASE="${PR_BASE:-staging}"
 
-for f in $(echo {CHANGED_FILES} | tr ' ' '\n' | grep -E '\.py$' | grep -E 'router'); do
+while IFS= read -r f; do
+    [ -z "$f" ] && continue
     # Extract removed condition lines from the diff (lines starting with -)
     REMOVED_CONDITIONS=$(git diff HEAD -- "$f" 2>/dev/null | grep -E '^-.*\bif\b' | grep -v '^---' | sed 's/^-//' | sed 's/^\s*//' | head -5)
 
@@ -859,7 +879,7 @@ for f in $(echo {CHANGED_FILES} | tr ' ' '\n' | grep -E '\.py$' | grep -E 'route
             fi
         done
     fi
-done
+done < <(echo {CHANGED_FILES} | tr ' ' '\n' | grep -E '\.py$' | grep -E 'router')
 ```
 
 **Flag as findings**:

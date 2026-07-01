@@ -1541,13 +1541,14 @@ If no infra context is configured above, derive the deployment model from the ch
 
    **Scan ALL `{{` occurrences in every `script:` block of every `appleboy/ssh-action` step in changed files:**
    ```bash
-   for f in $(gh pr diff [PR_NUMBER] --name-only | grep -E '\.github/workflows/.*\.yml$'); do
+   while IFS= read -r f; do
+       [ -z "$f" ] && continue
        if grep -q "appleboy/ssh-action" "$f"; then
            echo "=== appleboy/ssh-action found in $f ==="
            # Show all {{ occurrences with line numbers
            grep -n "{{" "$f"
        fi
-   done
+   done < <(gh pr diff [PR_NUMBER] --name-only | grep -E '\.github/workflows/.*\.yml$')
    ```
 
    **For every `{{` found, classify and flag:**

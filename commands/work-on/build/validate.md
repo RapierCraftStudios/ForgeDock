@@ -172,10 +172,14 @@ When changed files touch database engine configuration, flag for manual connecti
 ```bash
 cd {WORKTREE_PATH}
 DB_CONFIG_FILES=""
-for f in $(echo {CHANGED_FILES} | tr ' ' '\n' | grep -E '\.py$'); do
+# Process substitution (< <(...)), NOT a piped `| while read`, so DB_CONFIG_FILES
+# set inside the loop body survives past the loop (a piped while-read would run
+# in a subshell and silently discard the accumulator).
+while IFS= read -r f; do
+    [ -z "$f" ] && continue
     grep -qE "create_async_engine|AsyncSession|connect_args|pool_size|prepared_statement|engine_from_config|sessionmaker" "$f" 2>/dev/null && \
         DB_CONFIG_FILES="${DB_CONFIG_FILES}${f}"$'\n'
-done
+done < <(echo {CHANGED_FILES} | tr ' ' '\n' | grep -E '\.py$')
 
 if [ -n "$DB_CONFIG_FILES" ]; then
     echo "DB CONFIG CHANGE DETECTED in:"

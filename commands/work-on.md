@@ -1368,10 +1368,11 @@ Skip if no changed Python files contain DB engine/session/pool patterns.
 
 ```bash
 cd {WORKTREE_PATH}
-for f in $(echo {CHANGED_FILES} | tr ' ' '\n' | grep -E '\.py$'); do
+while IFS= read -r f; do
+    [ -z "$f" ] && continue
     grep -qE "create_async_engine|AsyncSession|connect_args|pool_size|prepared_statement|engine_from_config|sessionmaker" "$f" 2>/dev/null && \
         echo "DB CONFIG CHANGE DETECTED in: $f"
-done
+done < <(echo {CHANGED_FILES} | tr ' ' '\n' | grep -E '\.py$')
 ```
 
 Advisory only — does not block build. Check for lambda/callable in connect_args (the exact bug class from PR #14391).
