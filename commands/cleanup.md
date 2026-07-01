@@ -182,6 +182,8 @@ Both gaps disappear when merged-PR head-refs (regardless of base branch or merge
 
 **Why also check `headRefOid`**: branch names are freely reusable in git. A name-only match cannot distinguish "this branch's current tip is the commit that merged" from "a branch with this name merged at some point in the past and has since been reused for new, unmerged work" (e.g. a second issue happens to slugify to the same `fix/*`/`feat/*` name). Comparing the branch's live remote tip SHA against the merged PR's `headRefOid` closes that gap — deletion only proceeds when the (name, SHA) pair matches a merged PR exactly, regardless of base branch or merge strategy.
 
+**Why `--force-with-lease` on the delete**: the `CURRENT_SHA` snapshot above is read from the local `origin/$branch` ref as of the `git fetch --prune` at the top of this phase. For large batches this loop can run for a while (one network call per branch), so a new commit can land on the remote branch between the fetch and that branch's turn in the loop — a TOCTOU window. A plain `git push origin --delete "$branch"` is unconditional: it deletes whatever the remote ref currently points to, even if that's no longer `$CURRENT_SHA`. Using `--force-with-lease=refs/heads/$branch:$CURRENT_SHA` makes the deletion a server-verified compare-and-swap — the remote rejects the update if `refs/heads/$branch` has moved since the snapshot, instead of silently deleting new work.
+
 ```bash
 cd {REPO_PATH}
 git fetch --prune origin
@@ -200,12 +202,22 @@ MERGED_HEADS=$(gh pr list {GH_FLAG} --state merged --limit 1000 --json headRefNa
 
 DELETE_COUNT=0
 SKIP_COUNT=0
+RACE_SKIP_COUNT=0
 for branch in $REMOTE_BRANCHES; do
   CURRENT_SHA=$(git rev-parse "origin/$branch" 2>/dev/null)
   if printf '%s\n' "$MERGED_HEADS" | grep -qxF "$(printf '%s\t%s' "$branch" "$CURRENT_SHA")"; then
     # Name AND tip SHA match a merged PR's head-ref — safe to delete.
-    if git push origin --delete "$branch" 2>&1; then
+    # Use --force-with-lease as a server-side compare-and-swap: the remote re-verifies
+    # refs/heads/$branch is still at $CURRENT_SHA at push time, closing the TOCTOU gap
+    # between this snapshot and the actual delete (see note above).
+    if git push origin --force-with-lease="refs/heads/$branch:$CURRENT_SHA" ":refs/heads/$branch" 2>&1; then
       DELETE_COUNT=$((DELETE_COUNT + 1))
+    else
+      # Lease rejected — the branch's remote tip moved since the snapshot (a new push
+      # landed mid-loop). Do NOT retry/force past this: skip and let the next cleanup
+      # run re-evaluate it against fresh state.
+      RACE_SKIP_COUNT=$((RACE_SKIP_COUNT + 1))
+      echo "RACE: origin/$branch tip changed since snapshot ($CURRENT_SHA) — lease rejected, not deleting. Will re-evaluate on next /cleanup run."
     fi
   elif printf '%s\n' "$MERGED_HEADS" | cut -f1 | grep -qxF "$branch"; then
     # Name matches a merged PR's head-ref, but the branch's current tip does not match
@@ -215,7 +227,7 @@ for branch in $REMOTE_BRANCHES; do
     echo "SKIP: origin/$branch name matches a merged PR head-ref but current tip ($CURRENT_SHA) does not match the merged commit — branch name likely reused for new work. Not deleting."
   fi
 done
-echo "Deleted $DELETE_COUNT merged remote branches, skipped $SKIP_COUNT name-matched/SHA-mismatched branches (source of truth: gh pr list --state merged, verified against headRefOid)"
+echo "Deleted $DELETE_COUNT merged remote branches, skipped $SKIP_COUNT name-matched/SHA-mismatched branches, skipped $RACE_SKIP_COUNT raced branches (tip changed between snapshot and delete) (source of truth: gh pr list --state merged, verified against headRefOid, deletion gated by --force-with-lease)"
 ```
 
 **Note**: This can take a while for large batches (1 network call per deleted branch, plus one batched `gh pr list` call). Run in background if > 20 branches.
