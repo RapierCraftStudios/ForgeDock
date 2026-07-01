@@ -309,7 +309,7 @@ done
 
 **Cluster rule**: Two investigations are in the same cluster when they share a target subsystem (overlapping affected-file directories OR the same domain tag from Step 3B applied to their recommendations). Clustering is by **conceptual surface**, deliberately coarser than Step 3C's file-level analysis — the goal is to surface plan-level contradictions the file layer cannot see.
 
-**Available prior signal** <!-- Added: forge#1196 -->: Step 3C Layer 5 (historical co-change coupling, computed later in Phase 3) is a strong empirical prior for this clustering step — two investigations whose affected files have historically co-changed are good candidates for the same subsystem cluster. Layer 5 itself still executes in Phase 3, after this step runs; this is a forward reference for readers extending this clustering rule, not a functional dependency or phase-reordering.
+**Forward reference — related future signal** <!-- Added: forge#1196 -->: This clustering step (Step 2.5B) runs before Phase 3, so no Layer 5 data exists yet at this point — do not treat it as an input here. For readers extending this clustering rule in the future: Step 3C Layer 5 (historical co-change coupling, computed later in Phase 3) is a related signal worth reusing — two investigations whose affected files have historically co-changed would be good candidates for the same subsystem cluster. This is purely a forward reference, not a functional dependency or phase-reordering.
 
 ### Step 2.5C: Detect and resolve competing recommendations
 
