@@ -212,6 +212,9 @@ for branch in $REMOTE_BRANCHES; do
     # between this snapshot and the actual delete (see note above).
     if git push origin --force-with-lease="refs/heads/$branch:$CURRENT_SHA" ":refs/heads/$branch" 2>&1; then
       DELETE_COUNT=$((DELETE_COUNT + 1))
+      # Log the pre-deletion SHA so it's visible in run output/logs for recovery —
+      # see "Recovery: restoring an accidentally pruned branch" below.
+      echo "Deleted origin/$branch (was $CURRENT_SHA) — restorable via: git push origin $CURRENT_SHA:refs/heads/$branch"
     else
       # Lease rejected — the branch's remote tip moved since the snapshot (a new push
       # landed mid-loop). Do NOT retry/force past this: skip and let the next cleanup
@@ -233,6 +236,20 @@ echo "Deleted $DELETE_COUNT merged remote branches, skipped $SKIP_COUNT name-mat
 **Note**: This can take a while for large batches (1 network call per deleted branch, plus one batched `gh pr list` call). Run in background if > 20 branches.
 
 **One-time backfill for existing stale branches**: repos that adopted this fix after already accumulating stale `feat/*`/`fix/*` branches (e.g. from milestones that shipped long ago) should run `/cleanup branches` once manually — the PR-state query above will catch the full backlog in a single pass since it isn't scoped to "this batch" or "this session," it queries all merged PRs on the repo.
+
+**Recovery: restoring an accidentally pruned branch**
+
+Phase 3C only ever deletes a branch whose (name, SHA) pair matched a merged PR's `headRefOid`, so the commit is never lost — it's still reachable from the PR's merge commit, and the branch's pre-deletion tip SHA is echoed in the run log above (`Deleted origin/$branch (was $CURRENT_SHA) ...`). If a branch is pruned in error (or needs to be recreated for any reason), restore it with:
+
+```bash
+# Using the SHA logged at deletion time (or from `gh pr view {PR_NUMBER} --json headRefOid`
+# if the run log is no longer available):
+git push origin <sha>:refs/heads/<branch>
+```
+
+Alternatively, GitHub itself offers a one-click **"Restore branch"** button on the merged PR's page (shown on the "<branch> was deleted" banner) for a limited window after deletion — typically available for as long as the underlying ref data hasn't been garbage-collected, often a few weeks. This is the fastest option when working from the GitHub UI rather than a local clone.
+
+Both options only apply to branches deleted by this phase (or by GitHub's own merge/delete UI) — a SHA is not captured for branches removed by other means (e.g. manual `git push origin --delete` run outside of `/cleanup`), so recovery there depends on `git reflog` on a clone that still has the ref, or GitHub's audit log.
 
 ---
 
