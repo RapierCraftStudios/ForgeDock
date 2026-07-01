@@ -1447,7 +1447,7 @@ Stage all changes and commit:
 ```bash
 cd {WORKTREE_PATH}
 git add -u
-git commit -m "fix({SCOPE}): {description} (#{NUMBER})"
+git commit -s -m "fix({SCOPE}): {description} (#{NUMBER})"
 ```
 
 Conventional prefix: `fix`/`feat`/`refactor`/`docs`. Reference `#{NUMBER}` in message.

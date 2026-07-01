@@ -382,7 +382,7 @@ Then:
 --- Next steps ---
   1. Review generated scripts in .forgedock/scripts/
   2. Run each script manually to verify output
-  3. If correct: git add .forgedock/scripts/ && git commit -m "feat(scripts): adaptive scripts from /optimize"
+  3. If correct: git add .forgedock/scripts/ && git commit -s -m "feat(scripts): adaptive scripts from /optimize"
   4. If not: edit scripts directly or update forge.yaml → learned: and re-run /optimize
 ```
 

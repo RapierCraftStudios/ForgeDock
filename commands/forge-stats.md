@@ -129,7 +129,7 @@ for cmd in commands/*.md; do
 done
 
 git add .baselines
-git commit -m "stats: update command baselines — $(date +%Y-%m-%d)"
+git commit -s -m "stats: update command baselines — $(date +%Y-%m-%d)"
 ```
 
 ---

@@ -243,7 +243,7 @@ After the gate passes, commit all staged changes in a single commit. This includ
 ```bash
 cd {WORKTREE_PATH}
 git add -u
-git commit -m "fix({SCOPE}): {description} (#NUMBER)"
+git commit -s -m "fix({SCOPE}): {description} (#NUMBER)"
 ```
 
 Where `{SCOPE}` is the command or module scope from the contract (e.g. `work-on`, `quality-gate`), and `{description}` summarises the implementation. Use the commit convention from the contract:
