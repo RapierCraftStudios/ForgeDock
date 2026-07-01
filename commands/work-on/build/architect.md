@@ -448,10 +448,36 @@ For each non-obvious interaction or potential failure mode:
 - Suggest a mitigation or check
 
 Focus on:
-- Files that have changed recently (check `git log --oneline -10 -- {FILE}`)
+- Churn / hot-spot files (see below) — high historical change frequency correlates with defect density
 - Paths that are called in both sync and async contexts
 - Any place where the change touches a serialization boundary (JSON in/out, DB read/write)
 - Unused or dormant code that the change might activate
+
+### Churn (Hot-Spot) Signal
+
+Recency alone (did the file appear in the last N commits?) is a weak, binary proxy. Compute a bounded per-file **churn tier** instead — how often each affected file has actually changed over a fixed window — and fold it into the risk table below.
+
+For each file in `{AFFECTED_FILES}` (never repo-wide — this must stay O(affected files) to fit the Phase A0–A5 time budget):
+
+```bash
+CHURN_WINDOW="90 days ago"   # named constant — must match the same window used in review-pr.md Phase 3A
+
+for FILE in {AFFECTED_FILES}; do
+  COMMITS=$(git log --oneline --since="$CHURN_WINDOW" -- "$FILE" | wc -l)
+  if [ "$COMMITS" -ge 15 ]; then TIER="HOT"
+  elif [ "$COMMITS" -ge 5 ]; then TIER="MEDIUM"
+  else TIER="LOW"
+  fi
+  echo "$FILE: $TIER ($COMMITS commits in last 90 days)"
+done
+```
+
+**Tiers** (fixed thresholds — keep identical to `review-pr.md` Phase 3A so both phases agree on what "hot" means):
+- **HOT**: 15+ commits in the window
+- **MEDIUM**: 5–14 commits in the window
+- **LOW**: 0–4 commits in the window
+
+Any file classified **HOT** MUST get an explicit row in the Risk Assessment table below (e.g. "High historical churn — {N} commits in last 90 days — changes here have a higher defect-density prior"), rated at least MEDIUM severity, with a mitigation such as "extra reviewer scrutiny" or "prefer smaller, isolated diffs to this file." MEDIUM-tier files may be noted inline without a dedicated row. LOW-tier files need no mention.
 
 ---
 
