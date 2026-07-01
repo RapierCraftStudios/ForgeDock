@@ -1873,7 +1873,7 @@ done
 | Contracts posted | {N} |
 | Contract→code divergences | {N} (agents that updated contract mid-build) |
 | Review findings created | {N_total} |
-| Findings after synthesis | {N} (review findings after dedup/arbitration) |
+| Findings queued after cascade control | {N_queued}/{N_total} ({N_deferred} deferred — see Step 4C) |
 | Competing recommendations reconciled (Phase 2.5) | {RECONCILED_COUNT} (investigation plans arbitrated in place + serialized) |
 | Findings validated | {N} |
 | False positives | {N} ({%}) |
@@ -1882,7 +1882,7 @@ done
 **Domain breakdown**: {N} scraping, {N} frontend, {N} billing, ...
 **Routing**: {N} fast-lane, {N} feature-lane
 
-> `Competing recommendations reconciled` is populated by Phase 2.5 (`RECONCILED_COUNT`). It is `0` when the batch had 0–1 investigations (synthesis is a no-op). <!-- Added: forge#1192 -->
+> `Findings queued after cascade control` reports Step 4C's defer/execute triage split (`QUEUED_FINDINGS` vs `DEFERRED_FINDINGS`) — it is NOT a dedup/arbitration computation; no such step exists for review findings. `Competing recommendations reconciled` is populated by Phase 2.5 (`RECONCILED_COUNT`), which reconciles investigation plans, not review findings. It is `0` when the batch had 0–1 investigations (synthesis is a no-op). <!-- Added: forge#1192, forge#1193 -->
 
 **Systematic issues** (flag if detected):
 - False positive rate > 30% → review agents may need tuning
