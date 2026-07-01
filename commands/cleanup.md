@@ -180,6 +180,8 @@ Delete remote `fix/` and `feat/` branches whose PR has merged — using **GitHub
 
 Both gaps disappear when merged-PR head-refs (regardless of base branch or merge strategy) are used directly as the deletion set:
 
+**Why also check `headRefOid`**: branch names are freely reusable in git. A name-only match cannot distinguish "this branch's current tip is the commit that merged" from "a branch with this name merged at some point in the past and has since been reused for new, unmerged work" (e.g. a second issue happens to slugify to the same `fix/*`/`feat/*` name). Comparing the branch's live remote tip SHA against the merged PR's `headRefOid` closes that gap — deletion only proceeds when the (name, SHA) pair matches a merged PR exactly, regardless of base branch or merge strategy.
+
 ```bash
 cd {REPO_PATH}
 git fetch --prune origin
@@ -187,22 +189,33 @@ git fetch --prune origin
 # All remote fix/* and feat/* branches currently on origin
 REMOTE_BRANCHES=$(git branch -r | grep -E "origin/(fix|feat)/" | sed 's|origin/||' | tr -d ' ')
 
-# Head-ref names of every merged PR, regardless of base branch (staging, milestone/*, main)
-# or merge strategy (merge-commit vs. squash) — this is GitHub's own merge bookkeeping,
-# not local ref topology, so it's immune to both gaps above.
+# Head-ref name + head-ref SHA of every merged PR, regardless of base branch (staging,
+# milestone/*, main) or merge strategy (merge-commit vs. squash) — this is GitHub's own
+# merge bookkeeping, not local ref topology, so it's immune to both gaps above.
+# headRefOid is captured alongside headRefName so deletion can be gated on the branch's
+# CURRENT tip matching the commit that actually merged, not just a name match.
 # --limit is set high to avoid silent truncation; repos with more historical merged PRs
 # than this should re-run `/cleanup branches` incrementally to catch the remainder.
-MERGED_HEADS=$(gh pr list {GH_FLAG} --state merged --limit 1000 --json headRefName --jq '.[].headRefName')
+MERGED_HEADS=$(gh pr list {GH_FLAG} --state merged --limit 1000 --json headRefName,headRefOid --jq '.[] | "\(.headRefName)\t\(.headRefOid)"')
 
 DELETE_COUNT=0
+SKIP_COUNT=0
 for branch in $REMOTE_BRANCHES; do
-  if printf '%s\n' "$MERGED_HEADS" | grep -qxF "$branch"; then
+  CURRENT_SHA=$(git rev-parse "origin/$branch" 2>/dev/null)
+  if printf '%s\n' "$MERGED_HEADS" | grep -qxF "$(printf '%s\t%s' "$branch" "$CURRENT_SHA")"; then
+    # Name AND tip SHA match a merged PR's head-ref — safe to delete.
     if git push origin --delete "$branch" 2>&1; then
       DELETE_COUNT=$((DELETE_COUNT + 1))
     fi
+  elif printf '%s\n' "$MERGED_HEADS" | cut -f1 | grep -qxF "$branch"; then
+    # Name matches a merged PR's head-ref, but the branch's current tip does not match
+    # any merged commit recorded under that name — likely a reused branch name holding
+    # new, unmerged work. Skip deletion rather than risk destroying live commits.
+    SKIP_COUNT=$((SKIP_COUNT + 1))
+    echo "SKIP: origin/$branch name matches a merged PR head-ref but current tip ($CURRENT_SHA) does not match the merged commit — branch name likely reused for new work. Not deleting."
   fi
 done
-echo "Deleted $DELETE_COUNT merged remote branches (source of truth: gh pr list --state merged)"
+echo "Deleted $DELETE_COUNT merged remote branches, skipped $SKIP_COUNT name-matched/SHA-mismatched branches (source of truth: gh pr list --state merged, verified against headRefOid)"
 ```
 
 **Note**: This can take a while for large batches (1 network call per deleted branch, plus one batched `gh pr list` call). Run in background if > 20 branches.
