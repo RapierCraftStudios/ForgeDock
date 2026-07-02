@@ -95,7 +95,7 @@ Proposed (deterministic):
 2. `transition-label.sh` — label state machine with validation
 3. `validate-pr-target.sh` — hard-fail if PR targets wrong branch
 4. `setup-worktree.sh` — deterministic worktree creation
-5. `post-annotation.sh` — FORGE annotation posting with format validation
+5. `forge-annotation.sh` — FORGE annotation read/write/validate engine: `write` renders a well-formed `<!-- FORGE:MARKER -->` comment body from field arguments (INVESTIGATOR, CONTRACT, BUILDER, CHECKPOINT templates), `read` fetches the latest matching annotation from a GitHub issue via `gh api`, `validate` rejects a body missing its required completion terminator (e.g. `FORGE:INVESTIGATOR` without `INVESTIGATION:COMPLETE`) with a non-zero exit. Ships as a net-new engine (#1267); migrating `commands/*.md` call sites to use it is tracked separately (#1247).
 
 **Deploy-gate testing scripts** (milestone: Deterministic Deploy-Gate Testing — #863):
 
