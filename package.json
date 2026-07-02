@@ -49,7 +49,7 @@
     "node": ">=18"
   },
   "optionalDependencies": {
-    "@anthropic-ai/sdk": ">=0.30.0"
+    "@anthropic-ai/sdk": ">=0.30.0 <1"
   },
   "peerDependencies": {
     "@anthropic-ai/claude-code": ">=2.0.0"
