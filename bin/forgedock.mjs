@@ -58,15 +58,15 @@ const SCRIPTS_DIR = join(FORGE_HOME, "scripts");
 const SCRIPTS_TARGET_DIR = join(HOME, ".claude", "scripts");
 
 /**
- * Allowlist of pipeline-agent scripts that get installed to ~/.claude/scripts/.
- * Only these files are symlinked (or copied on Windows) during install/update.
+ * Allowlist of pipeline-agent scripts that `uninstall` cleans up from
+ * ~/.claude/scripts/. The journey-based install no longer writes these
+ * itself — this set only identifies leftovers from legacy installs so
+ * `uninstall` can find and remove them.
  *
  * Internal tooling (gen-logo.mjs, verify-*.sh) lives in scripts/ but is NOT
- * installed — those scripts are invoked directly via $FORGE_HOME/scripts/ by
+ * covered here — those scripts are invoked directly via $FORGE_HOME/scripts/ by
  * review-pr.md and quality-gate.md and should not pollute the user's Claude
  * scripts namespace.
- *
- * When adding a new pipeline-agent script, add its filename here.
  */
 const PIPELINE_SCRIPTS = new Set([
   "classify-lane.sh",
@@ -366,9 +366,11 @@ function escapeRegExp(str) {
 // ---------------------------------------------------------------------------
 
 /**
- * The sentinel comment line written by install() immediately before the
- * `export FORGE_HOME=` line. This is the reliable anchor for removal —
- * it is never present in organic shell profiles.
+ * The sentinel comment line legacy installs wrote immediately before the
+ * `export FORGE_HOME=` line. The journey-based install no longer writes this
+ * block — this constant is used by `uninstall` cleanup for legacy installs
+ * that still have it in a shell profile. It is the reliable anchor for
+ * removal — never present in organic shell profiles.
  */
 const FORGE_HOME_COMMENT = "# ForgeDock — autonomous development pipeline";
 
@@ -874,17 +876,22 @@ async function update() {
  * Run installation health checks and report pass/fail for each.
  *
  * Checks (in order):
- *   1. Command symlinks — TARGET_DIR entries point to correct COMMANDS_DIR files
- *   2. gh CLI installed and authenticated
- *   3. git configured (user.name + user.email)
- *   4. forge.yaml exists and has required keys
- *   5. SessionStart hook registered in ~/.claude/settings.json
- *   6. CLAUDE.md has the ForgeDock behavioral block (cwd)
- *   7. Required workflow labels exist on the GitHub repo (needs forge.yaml + gh auth)
- *   8. FORGE_HOME environment variable is set
- *   9. Playwright MCP registered in ~/.claude/mcp_servers.json (advisory warn — required for /qa-sweep)
+ *   1.  Command symlinks — TARGET_DIR entries point to correct COMMANDS_DIR files
+ *   2.  gh CLI installed and authenticated
+ *   3.  git configured (user.name + user.email)
+ *   4.  forge.yaml exists and has required keys
+ *   5.  SessionStart hook registered in ~/.claude/settings.json
+ *   6.  CLAUDE.md legacy managed block (cwd) — informational only; the
+ *       journey install never injects one, session context comes from the
+ *       SessionStart hook
+ *   7.  Required workflow labels exist on the GitHub repo (needs forge.yaml + gh auth)
+ *   8.  FORGE_HOME environment variable — informational only; not required
+ *       by the journey install
+ *   9.  Playwright MCP registered in ~/.claude/mcp_servers.json (advisory warn — required for /qa-sweep)
+ *   10. yq installed (hard dependency for forge.yaml parsing)
+ *   11. Claude Code installed and version compatible (advisory warn if not on PATH)
  *
- * Exits with code 0 if all checks pass, code 1 if any fail.
+ * Returns 0 if all checks pass (warnings allowed), 1 if any hard check fails.
  */
 async function doctor() {
   console.log("");
@@ -1149,13 +1156,18 @@ async function doctor() {
     }
   }
 
-  // ── Check 6: CLAUDE.md has ForgeDock block (cwd) ──────────────────────────
+  // ── Check 6: CLAUDE.md legacy managed block (cwd, informational) ──────────
+  // The journey-based install never injects a CLAUDE.md block — session
+  // context comes from the SessionStart hook (see Check 5). A block's absence
+  // is therefore normal and PASSes. Its presence means a legacy block from an
+  // older install is still around; that's informational, not a failure —
+  // `npx forgedock uninstall` removes it.
   {
     const claudeMdPath = join(process.cwd(), "CLAUDE.md");
     if (!existsSync(claudeMdPath)) {
-      warn(
-        "CLAUDE.md behavioral block",
-        `No CLAUDE.md found in ${process.cwd()}. Run: npx forgedock install  (from your project directory)`,
+      pass(
+        "CLAUDE.md legacy block",
+        "no CLAUDE.md found — session context comes from the SessionStart hook",
       );
     } else {
       try {
@@ -1164,15 +1176,18 @@ async function doctor() {
           content.includes(CLAUDE_BLOCK_BEGIN) &&
           content.includes(CLAUDE_BLOCK_END)
         ) {
-          pass("CLAUDE.md behavioral block", `found in ${claudeMdPath}`);
+          warn(
+            "CLAUDE.md legacy block",
+            `legacy ForgeDock block found in ${claudeMdPath} — uninstall removes it; the SessionStart hook has replaced it`,
+          );
         } else {
-          fail(
-            "CLAUDE.md behavioral block",
-            `Run: npx forgedock install  (from ${process.cwd()}) to inject the ForgeDock pipeline rules block`,
+          pass(
+            "CLAUDE.md legacy block",
+            "no legacy ForgeDock block — session context comes from the SessionStart hook",
           );
         }
       } catch (err) {
-        fail("CLAUDE.md behavioral block", `Cannot read CLAUDE.md: ${err.message}`);
+        fail("CLAUDE.md legacy block", `Cannot read CLAUDE.md: ${err.message}`);
       }
     }
   }
@@ -1239,7 +1254,7 @@ async function doctor() {
           } else {
             fail(
               "GitHub workflow labels",
-              `Run: npx forgedock labels setup  (missing: ${missingLabels.join(", ")})`,
+              `Create the missing labels manually, e.g.: gh label create "<name>" --color <hex> --description "<desc>" -R ${forgeOwner}/${forgeRepo}  (see bin/labels.json for definitions; missing: ${missingLabels.join(", ")})`,
             );
           }
         }
@@ -1247,15 +1262,19 @@ async function doctor() {
     }
   }
 
-  // ── Check 8: FORGE_HOME environment variable ───────────────────────────────
+  // ── Check 8: FORGE_HOME environment variable (informational) ──────────────
+  // The journey-based install never exports FORGE_HOME — it isn't required
+  // for the pipeline to run. It only affects orchestrate's legacy
+  // classify-lane script fallback (tracked as a follow-up), so a missing
+  // value is a warning, not a failure.
   {
     const envForgeHome = process.env.FORGE_HOME;
     if (envForgeHome) {
       pass("FORGE_HOME env var", `set to "${envForgeHome}"`);
     } else {
-      fail(
+      warn(
         "FORGE_HOME env var",
-        `Add to your shell profile: export FORGE_HOME="${FORGE_HOME}"  then restart your shell (or run: source ~/.bashrc)`,
+        "not exported — only affects orchestrate's legacy classify-lane script fallback (tracked as a follow-up). Not required for normal use.",
       );
     }
   }
@@ -1457,6 +1476,7 @@ function help() {
     ["--fast", "Skip animation/motion"],
     ["--manual", "Plain text prompts instead of the review screen (init)"],
     ["--verbose", "Show detection sources for every field (init)"],
+    ["--minimal", "Generate a minimal forge.yaml with required sections only (init)"],
   ];
 
   process.stdout.write(

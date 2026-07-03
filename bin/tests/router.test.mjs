@@ -156,4 +156,33 @@ describe("router", () => {
     assert.match(res.stdout + res.stderr, /already exists/i);
     assert.equal(readFileSync(join(cwd, "forge.yaml"), "utf-8"), preContent);
   });
+
+  it("golden path: journey install (--fast, non-TTY) with a pre-existing CLAUDE.md (no managed block) leaves doctor exiting 0", () => {
+    const home = mkdtempSync(join(os.tmpdir(), "fd-doctor-home-"));
+    const cwd = mkdtempSync(join(os.tmpdir(), "fd-doctor-cwd-"));
+
+    // Deterministic git identity, independent of the host machine's own
+    // global git config — Check 3 (git configured) must pass reliably.
+    writeFileSync(
+      join(home, ".gitconfig"),
+      "[user]\n\tname = Test User\n\temail = test@example.com\n",
+      "utf-8",
+    );
+
+    // Pre-existing CLAUDE.md with no ForgeDock managed block. The journey
+    // install must not require one, and doctor must not treat its absence
+    // as a failure — session context comes from the SessionStart hook.
+    writeFileSync(
+      join(cwd, "CLAUDE.md"),
+      "# Project notes\n\nSome existing content.\n",
+      "utf-8",
+    );
+
+    const installRes = runCli(["install", "--fast"], { cwd, home });
+    assert.equal(installRes.status, 0, installRes.stdout + installRes.stderr);
+    assert.ok(existsSync(join(cwd, "forge.yaml")));
+
+    const doctorRes = runCli(["doctor"], { cwd, home });
+    assert.equal(doctorRes.status, 0, doctorRes.stdout + doctorRes.stderr);
+  });
 });
