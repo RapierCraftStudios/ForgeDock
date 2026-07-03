@@ -101,7 +101,8 @@ export const PHASES = [
     entryCondition: (s) => s.committed.includes("review"),
     async detectOutcome(state, io) {
       const out = await io.gh(["issue", "view", String(state.issue), "--json", "state,labels"]);
-      const j = JSON.parse(out || "{}");
+      let j;
+      try { j = JSON.parse(out || "{}"); } catch { return { status: "failed", detail: "malformed gh response" }; }
       const labels = (j.labels || []).map((l) => l.name || l);
       if (j.state === "CLOSED" || labels.includes("workflow:merged"))
         return { status: "committed", terminalReason: "merged", outputs: {} };
@@ -120,7 +121,8 @@ async function prStatusFor(state, io) {
   const n = await openPrFor(state, io);
   if (!n) return null;
   const out = await io.gh(["pr", "view", String(n), "--json", "number,state,labels,mergedAt"]);
-  const j = JSON.parse(out || "{}");
+  let j;
+  try { j = JSON.parse(out || "{}"); } catch { return null; }
   const labels = (j.labels || []).map((l) => l.name || l);
   return { number: j.number, merged: !!j.mergedAt || j.state === "MERGED",
            needsHuman: labels.includes("needs-human") };

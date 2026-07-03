@@ -40,4 +40,110 @@ describe("pickPhase", () => {
     assert.equal(outcome.status, "committed");
     assert.equal(outcome.outputs.branch, "fix/x-42");
   });
+
+  it("close.detectOutcome does not throw on malformed gh response and reports failed", async () => {
+    const close = PHASES.find(p => p.id === "close");
+    const io = {
+      gh: async () => "not json {{{",
+      git: async () => "0",
+    };
+    const outcome = await close.detectOutcome({ ...base }, io);
+    assert.equal(outcome.status, "failed");
+  });
+
+  describe("investigate.detectOutcome", () => {
+    const investigate = PHASES.find(p => p.id === "investigate");
+    const ioWith = (blob) => ({ gh: async () => blob, git: async () => "0" });
+
+    it("INVALID marker -> committed, terminalReason invalid", async () => {
+      const outcome = await investigate.detectOutcome(base, ioWith("INVESTIGATION:INVALID"));
+      assert.equal(outcome.status, "committed");
+      assert.equal(outcome.terminalReason, "invalid");
+    });
+
+    it("DECOMPOSE:YES -> committed, terminalReason decomposed", async () => {
+      const outcome = await investigate.detectOutcome(base, ioWith("DECOMPOSE:YES"));
+      assert.equal(outcome.status, "committed");
+      assert.equal(outcome.terminalReason, "decomposed");
+    });
+
+    it("INVESTIGATION:COMPLETE only -> committed, no terminalReason", async () => {
+      const outcome = await investigate.detectOutcome(base, ioWith("INVESTIGATION:COMPLETE"));
+      assert.equal(outcome.status, "committed");
+      assert.equal(outcome.terminalReason, undefined);
+    });
+
+    it("no markers -> failed", async () => {
+      const outcome = await investigate.detectOutcome(base, ioWith("nothing relevant here"));
+      assert.equal(outcome.status, "failed");
+    });
+  });
+
+  describe("review.detectOutcome", () => {
+    const review = PHASES.find(p => p.id === "review");
+    const reviewState = { ...base, branch: "fix/x-42" };
+
+    function ioFor({ prList, prView }) {
+      return {
+        gh: async (args) => {
+          const cmd = args.join(" ");
+          if (cmd.startsWith("pr list")) return prList;
+          if (cmd.startsWith("pr view")) return prView;
+          throw new Error(`unexpected gh call: ${cmd}`);
+        },
+        git: async () => "0",
+      };
+    }
+
+    it("no PR -> failed", async () => {
+      const io = ioFor({ prList: "[]", prView: "" });
+      const outcome = await review.detectOutcome(reviewState, io);
+      assert.equal(outcome.status, "failed");
+    });
+
+    it("PR merged -> committed with outputs.pr", async () => {
+      const io = ioFor({
+        prList: JSON.stringify([{ number: 7 }]),
+        prView: JSON.stringify({ number: 7, state: "MERGED", mergedAt: "t", labels: [] }),
+      });
+      const outcome = await review.detectOutcome(reviewState, io);
+      assert.equal(outcome.status, "committed");
+      assert.equal(outcome.outputs.pr, 7);
+    });
+
+    it("PR open with needs-human label -> blocked", async () => {
+      const io = ioFor({
+        prList: JSON.stringify([{ number: 7 }]),
+        prView: JSON.stringify({ number: 7, state: "OPEN", mergedAt: null, labels: [{ name: "needs-human" }] }),
+      });
+      const outcome = await review.detectOutcome(reviewState, io);
+      assert.equal(outcome.status, "blocked");
+      assert.equal(outcome.outputs.pr, 7);
+    });
+  });
+
+  describe("close.detectOutcome", () => {
+    const close = PHASES.find(p => p.id === "close");
+    const ioWith = (blob) => ({ gh: async () => blob, git: async () => "0" });
+
+    it("issue CLOSED -> committed, terminalReason merged", async () => {
+      const io = ioWith(JSON.stringify({ state: "CLOSED", labels: [] }));
+      const outcome = await close.detectOutcome(base, io);
+      assert.equal(outcome.status, "committed");
+      assert.equal(outcome.terminalReason, "merged");
+    });
+
+    it("workflow:merged label -> committed, terminalReason merged", async () => {
+      const io = ioWith(JSON.stringify({ state: "OPEN", labels: [{ name: "workflow:merged" }] }));
+      const outcome = await close.detectOutcome(base, io);
+      assert.equal(outcome.status, "committed");
+      assert.equal(outcome.terminalReason, "merged");
+    });
+
+    it("open + no label -> failed", async () => {
+      const io = ioWith(JSON.stringify({ state: "OPEN", labels: [] }));
+      const outcome = await close.detectOutcome(base, io);
+      assert.equal(outcome.status, "failed");
+    });
+  });
 });
