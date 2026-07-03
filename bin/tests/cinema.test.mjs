@@ -172,4 +172,37 @@ describe("fixCard", () => {
     assert.match(card, /╭[─ ]*.*╮/s);
     assert.match(card, /run: gh auth login/);
   });
+
+  it("truecolor colors the whole border, not just the leading char", () => {
+    const card = fixCard(["run: gh auth login"], "truecolor");
+    const matches = card.match(/38;2;255;107;53/g) || [];
+    assert.ok(matches.length >= 6, `expected >=6 ember escapes, got ${matches.length}`);
+  });
+
+  it("mode 'none' emits no escapes at all", () => {
+    const card = fixCard(["run: gh auth login"], "none");
+    assert.doesNotMatch(card, /\x1b/);
+  });
+});
+
+describe("mode gate on accent helpers (review findings)", () => {
+  it("revealRows with motion under mode 'none' emits no 38;2 escapes but keeps cursor-up motion", async () => {
+    const w = fakeWriter();
+    await revealRows(
+      [{ label: "git", run: async () => ({ ok: true, detail: "2.45" }) }],
+      { mode: "none", motion: true, writer: w, interval: 1, minDisplayMs: 1 },
+    );
+    assert.doesNotMatch(w.text, /38;2/);
+    assert.match(w.text, /\x1b\[1A/);
+  });
+
+  it("revealRows in mode '256' with a badge emits 38;5 and never 38;2", async () => {
+    const w = fakeWriter();
+    await revealRows(
+      [{ label: "owner/repo", run: async () => ({ ok: true, detail: "Rapier/ForgeDock", badge: "high" }) }],
+      { mode: "256", motion: false, writer: w },
+    );
+    assert.match(w.text, /38;5;/);
+    assert.doesNotMatch(w.text, /38;2/);
+  });
 });

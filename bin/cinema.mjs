@@ -175,15 +175,16 @@ export function sleep(ms) {
 // Animation primitives (Task 2)
 // ---------------------------------------------------------------------------
 
-import { box, stripAnsi } from "./tui.mjs";
+import { box } from "./tui.mjs";
 
 const BRAILLE = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
 
 /** Ember-tinted status glyph for a result row. */
 function statusGlyph(ok, mode) {
-  if (mode === "none") return ok ? "✔" : "✖";
   const rgb = ok ? [255, 179, 71] : [224, 112, 80]; // amber / ember-red
-  return `\x1b[38;2;${rgb[0]};${rgb[1]};${rgb[2]}m${ok ? "✔" : "✖"}\x1b[0m`;
+  const glyph = ok ? "✔" : "✖";
+  if (mode === "none") return glyph;
+  return `${fg(rgb, mode)}${glyph}\x1b[0m`;
 }
 
 /** Dim wrapper honoring the mode gate. */
@@ -196,16 +197,17 @@ function badgeText(badge, mode) {
   const label = badge === "medium" ? "med" : badge;
   if (mode === "none") return `[${label}]`;
   const rgb = badge === "high" ? [125, 219, 132] : badge === "medium" ? [232, 192, 96] : [224, 112, 80];
-  return `\x1b[38;2;${rgb[0]};${rgb[1]};${rgb[2]}m[${label}]\x1b[0m`;
+  return `${fg(rgb, mode)}[${label}]\x1b[0m`;
 }
 
 /** Ember-bordered fix card (wraps tui.box; border color applied when able). */
 export function fixCard(lines, mode) {
   const boxed = box(lines.map((l) => ` ${l} `), { title: "fix" });
   if (mode === "none") return boxed;
+  const ember = fg([255, 107, 53], mode);
   return boxed
     .split("\n")
-    .map((l) => l.replace(/^([╭╰│]|\s*[╭╰│])/u, (m) => `\x1b[38;2;255;107;53m${m}\x1b[0m`))
+    .map((l) => l.replace(/[╭╮╰╯─│]/gu, (m) => `${ember}${m}\x1b[0m`))
     .join("\n");
 }
 
@@ -232,10 +234,12 @@ export async function revealRows(
       res = await row.run();
     } else {
       let frame = 0;
-      writer.write(`  \x1b[38;2;255;107;53m${BRAILLE[0]}\x1b[0m ${row.label}\n`);
+      const spinnerColor = fg([255, 107, 53], mode);
+      const reset = mode === "none" ? "" : "\x1b[0m";
+      writer.write(`  ${spinnerColor}${BRAILLE[0]}${reset} ${row.label}\n`);
       const timer = setInterval(() => {
         frame = (frame + 1) % BRAILLE.length;
-        writer.write(`\x1b[1A\x1b[2K  \x1b[38;2;255;107;53m${BRAILLE[frame]}\x1b[0m ${row.label}\n`);
+        writer.write(`\x1b[1A\x1b[2K  ${spinnerColor}${BRAILLE[frame]}${reset} ${row.label}\n`);
       }, interval);
       const started = Date.now();
       try {
