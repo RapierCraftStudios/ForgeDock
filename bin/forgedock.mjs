@@ -9,6 +9,7 @@ import os from "os";
 import {
   makeCtx,
   runJourney,
+  forge,
   read,
   review,
   celebrate,
@@ -220,7 +221,15 @@ async function update() {
         console.log(`  Already up to date.`);
       } else {
         console.log(`  ${GREEN}Updated to latest.${RESET}`);
-        await runJourney(ctx());
+        // Reinstall = relink commands + re-register the hook. Never the full
+        // journey: update must not reach read/review, which could overwrite a
+        // curated forge.yaml (and re-runs AI enrichment on every update).
+        const c = ctx();
+        await forge(c);
+        if (!existsSync(join(c.cwd, "forge.yaml"))) {
+          const dim = (s) => (c.mode === "none" ? s : `\x1b[2m${s}\x1b[22m`);
+          c.stdout.write("  " + dim("Configure this repo: npx forgedock init") + "\n");
+        }
       }
     } catch (err) {
       console.log(
@@ -313,4 +322,6 @@ switch (command) {
     help();
     exitCode = 1;
 }
-process.exit(exitCode);
+// Natural exit: set the code and let the event loop drain so stdout is never
+// truncated (spinner timers are unref'd; SIGINT listeners are removed).
+process.exitCode = exitCode;

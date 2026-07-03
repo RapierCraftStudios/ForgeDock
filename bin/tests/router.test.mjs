@@ -5,7 +5,7 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { mkdtempSync, writeFileSync, readFileSync, existsSync, mkdirSync } from "node:fs";
+import { mkdtempSync, writeFileSync, readFileSync, existsSync, mkdirSync, cpSync } from "node:fs";
 import { join, dirname } from "node:path";
 import os from "node:os";
 import { fileURLToPath } from "node:url";
@@ -97,5 +97,29 @@ describe("router", () => {
 
     const manifest = JSON.parse(readFileSync(manifestPath, "utf-8"));
     assert.deepEqual(manifest.files, {}, "manifest should be cleared of removed entries");
+  });
+
+  it("update in a forgeHome without .git prints the npm-update hint and exits 0", () => {
+    // FORGE_HOME is derived from the CLI file's location — to exercise the
+    // "installed via npm" branch (no .git), copy bin/ into a temp forgeHome
+    // and spawn the copy. update() checks for .git before touching anything
+    // else, so commands/ is not needed.
+    const forgeHome = mkdtempSync(join(os.tmpdir(), "fd-npm-"));
+    cpSync(join(dirname(CLI)), join(forgeHome, "bin"), {
+      recursive: true,
+      filter: (src) => !src.includes("tests"),
+    });
+    const home = mkdtempSync(join(os.tmpdir(), "fd-npm-home-"));
+    const res = spawnSync(process.execPath, [join(forgeHome, "bin", "forgedock.mjs"), "update"], {
+      cwd: mkdtempSync(join(os.tmpdir(), "fd-npm-cwd-")),
+      env: { ...process.env, HOME: home, USERPROFILE: home, NO_COLOR: "1" },
+      encoding: "utf-8",
+      timeout: 30000,
+    });
+    assert.equal(res.status, 0);
+    assert.match(res.stdout, /npm update -g forgedock/);
+    // Guard: update must never enter the config journey.
+    assert.doesNotMatch(res.stdout, /Reading your repository/);
+    assert.doesNotMatch(res.stdout, /forge\.yaml configuration/);
   });
 });
