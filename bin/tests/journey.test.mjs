@@ -7,7 +7,7 @@ import assert from "node:assert/strict";
 import { mkdtempSync, readFileSync, writeFileSync, existsSync, mkdirSync } from "node:fs";
 import { join } from "node:path";
 import os from "node:os";
-import { writeForgeYaml, backupExisting, detectDescription, makeCtx, preflight, forge, read, review, celebrate, runJourney } from "../journey.mjs";
+import { writeForgeYaml, backupExisting, detectDescription, makeCtx, preflight, forge, read, review, celebrate, runJourney, manualLowConfidenceKeys } from "../journey.mjs";
 
 const VALUES = {
   owner: "RapierCraftStudios",
@@ -95,6 +95,79 @@ describe("detectDescription", () => {
     assert.deepEqual(detectDescription(dir), { value: "", source: "" });
     writeFileSync(join(dir, "CLAUDE.md"), "# T\n\nProject brain.\n", "utf-8");
     assert.deepEqual(detectDescription(dir), { value: "Project brain.", source: "CLAUDE.md" });
+  });
+});
+
+describe("manualLowConfidenceKeys", () => {
+  /** A draft where only `owner` is low-confidence; everything else high/medium. */
+  function makeDraft() {
+    return {
+      project: {
+        owner: { value: "your-github-org", confidence: "low", source: "default placeholder", why: "" },
+        repo: { value: "ForgeDock", confidence: "high", source: "git remote", why: "" },
+        name: { value: "Forge Dock", confidence: "medium", source: "derived from repo slug", why: "" },
+      },
+      paths: {
+        root: { value: "/repo", confidence: "high", source: "process.cwd()", why: "" },
+        worktreeBase: { value: "/repo/.claude/worktrees", confidence: "high", source: "derived from root", why: "" },
+      },
+      branches: {
+        default: { value: "main", confidence: "high", source: "git symbolic-ref", why: "" },
+        staging: { value: "staging", confidence: "high", source: "git branch -r", why: "" },
+      },
+      meta: { remoteDetected: true },
+    };
+  }
+
+  /** Values accepted unchanged from the draft, description left blank. */
+  function baseValues(draft) {
+    return {
+      owner: draft.project.owner.value,
+      repo: draft.project.repo.value,
+      name: draft.project.name.value,
+      description: "",
+      root: draft.paths.root.value,
+      worktreeBase: draft.paths.worktreeBase.value,
+      defaultBranch: draft.branches.default.value,
+      stagingBranch: draft.branches.staging.value,
+    };
+  }
+
+  it("low owner + unchanged value → ['owner']", () => {
+    const draft = makeDraft();
+    // Give description a value so this test isolates owner-only behavior
+    // (description's own low-confidence rule is covered separately below).
+    const values = { ...baseValues(draft), description: "A hand-typed description" };
+    const res = manualLowConfidenceKeys(draft, { value: "", source: "" }, values);
+    assert.deepEqual(res, ["owner"]);
+  });
+
+  it("edited value → []", () => {
+    const draft = makeDraft();
+    const values = { ...baseValues(draft), owner: "edited-owner", description: "A hand-typed description" };
+    const res = manualLowConfidenceKeys(draft, { value: "", source: "" }, values);
+    assert.deepEqual(res, []);
+  });
+
+  it("description: detection empty + user left it empty → flagged low", () => {
+    const draft = makeDraft();
+    const values = { ...baseValues(draft), owner: "edited-owner" }; // isolate to description
+    const res = manualLowConfidenceKeys(draft, { value: "", source: "" }, values);
+    assert.ok(res.includes("description"), "description should be flagged when detection and user both left it blank");
+  });
+
+  it("description: user typed a value over an empty detection → not flagged", () => {
+    const draft = makeDraft();
+    const values = { ...baseValues(draft), owner: "edited-owner", description: "A hand-typed description" };
+    const res = manualLowConfidenceKeys(draft, { value: "", source: "" }, values);
+    assert.ok(!res.includes("description"));
+  });
+
+  it("description: detected from README and accepted → not flagged", () => {
+    const draft = makeDraft();
+    const values = { ...baseValues(draft), owner: "edited-owner", description: "Detected description" };
+    const res = manualLowConfidenceKeys(draft, { value: "Detected description", source: "README.md" }, values);
+    assert.ok(!res.includes("description"));
   });
 });
 
@@ -290,6 +363,11 @@ describe("forge (Act II)", () => {
     assert.equal(res1.copied, res1.total);
     assert.equal(res1.installed, 0);
     assert.ok(existsSync(join(home, ".claude", "forgedock", "copied-commands.json")));
+    // Honest receipt: when everything was copied, the headline says
+    // "installed" (not "linked") and the parenthetical accounts for copied.
+    assert.match(first.w.text, /installed/);
+    assert.match(first.w.text, new RegExp(`copied ${res1.copied}\\b`));
+    assert.doesNotMatch(first.w.text, /commands linked/);
 
     const second = stubCtx({ home, linkStrategy: "copy" });
     second.ctx.forgeHome = forgeHome;

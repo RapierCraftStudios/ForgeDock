@@ -99,16 +99,19 @@ describe("router", () => {
     assert.deepEqual(manifest.files, {}, "manifest should be cleared of removed entries");
   });
 
-  it("update in a forgeHome without .git prints the npm-update hint and exits 0", () => {
+  it("update in a forgeHome without .git prints the npm-update hint, relinks via forge, and exits 0", () => {
     // FORGE_HOME is derived from the CLI file's location — to exercise the
     // "installed via npm" branch (no .git), copy bin/ into a temp forgeHome
     // and spawn the copy. update() checks for .git before touching anything
-    // else, so commands/ is not needed.
+    // else. forge() now runs as the repair path even here, so give it a
+    // commands/ directory to link.
     const forgeHome = mkdtempSync(join(os.tmpdir(), "fd-npm-"));
     cpSync(join(dirname(CLI)), join(forgeHome, "bin"), {
       recursive: true,
       filter: (src) => !src.includes("tests"),
     });
+    mkdirSync(join(forgeHome, "commands"), { recursive: true });
+    writeFileSync(join(forgeHome, "commands", "one.md"), "# /one\n\nTest command\n", "utf-8");
     const home = mkdtempSync(join(os.tmpdir(), "fd-npm-home-"));
     const res = spawnSync(process.execPath, [join(forgeHome, "bin", "forgedock.mjs"), "update"], {
       cwd: mkdtempSync(join(os.tmpdir(), "fd-npm-cwd-")),
@@ -118,8 +121,30 @@ describe("router", () => {
     });
     assert.equal(res.status, 0);
     assert.match(res.stdout, /npm update -g forgedock/);
+    // forge() now runs as a repair path — commands get (re)linked/copied.
+    assert.match(res.stdout, /slash command/i);
+    assert.ok(existsSync(join(home, ".claude", "commands", "one.md")));
     // Guard: update must never enter the config journey.
     assert.doesNotMatch(res.stdout, /Reading your repository/);
     assert.doesNotMatch(res.stdout, /forge\.yaml configuration/);
+  });
+
+  it("init --manual non-TTY with existing forge.yaml aborts (exit 1, file untouched)", () => {
+    const home = mkdtempSync(join(os.tmpdir(), "fd-manual-abort-home-"));
+    const cwd = mkdtempSync(join(os.tmpdir(), "fd-manual-abort-cwd-"));
+    const preContent = "precious: config\n";
+    writeFileSync(join(cwd, "forge.yaml"), preContent, "utf-8");
+
+    const res = spawnSync(process.execPath, [CLI, "init", "--manual"], {
+      cwd,
+      input: "",
+      env: { ...process.env, HOME: home, USERPROFILE: home, NO_COLOR: "1" },
+      encoding: "utf-8",
+      timeout: 30000,
+    });
+
+    assert.equal(res.status, 1);
+    assert.match(res.stdout + res.stderr, /already exists/i);
+    assert.equal(readFileSync(join(cwd, "forge.yaml"), "utf-8"), preContent);
   });
 });

@@ -16,6 +16,7 @@ import {
   findMarkdownFiles,
   writeForgeYaml,
   backupExisting,
+  manualLowConfidenceKeys,
 } from "./journey.mjs";
 import { removeSessionStartHook } from "./settings-hook.mjs";
 import { resolveState, setOptOut } from "./registry.mjs";
@@ -69,12 +70,20 @@ function statusScreen(c) {
   } else if (!configured) {
     c.stdout.write(`\n  Generate config: npx forgedock init\n`);
   } else {
-    c.stdout.write(`\n  Reconfigure: npx forgedock init · Full journey: npx forgedock install\n`);
+    c.stdout.write(`\n  Reconfigure: npx forgedock init · Refresh commands + hook: npx forgedock update\n`);
   }
   c.stdout.write("\n");
 }
 
 async function initFlow(c) {
+  const outputPath = join(c.cwd, "forge.yaml");
+  if (existsSync(outputPath) && process.stdin.isTTY !== true) {
+    const dim = (s) => (c.mode === "none" ? s : `\x1b[2m${s}\x1b[22m`);
+    c.stdout.write("\n  forge.yaml already exists — non-interactive run, aborting to protect it.\n");
+    c.stdout.write("  " + dim("Run interactively (or delete forge.yaml) to regenerate.") + "\n");
+    return 1;
+  }
+
   if (flags.includes("--manual")) {
     // Manual escape hatch: plain prompts, detection values as defaults.
     const { draft, description } = await read(c);
@@ -88,10 +97,10 @@ async function initFlow(c) {
       defaultBranch: await input("Default branch", draft.branches.default.value),
       stagingBranch: await input("Staging branch", draft.branches.staging.value),
     };
-    const outputPath = join(c.cwd, "forge.yaml");
     const backup = backupExisting(outputPath);
     if (backup) c.stdout.write(`  Backed up: forge.yaml → ${backup.backupName}\n`);
-    const { todoCount } = writeForgeYaml(v, [], outputPath);
+    const lowKeys = manualLowConfidenceKeys(draft, description, v);
+    const { todoCount } = writeForgeYaml(v, lowKeys, outputPath);
     celebrate(c, { written: true, todoCount });
     return 0;
   }
@@ -186,6 +195,20 @@ async function uninstall() {
   console.log("");
 }
 
+// Reinstall = relink commands + re-register the hook. Never the full
+// journey: update must not reach read/review, which could overwrite a
+// curated forge.yaml (and re-runs AI enrichment on every update). Also
+// idempotent, so it's the repair path for a configured repo whose
+// symlinks or hook registration got out of sync.
+async function relinkAndHint() {
+  const c = ctx();
+  await forge(c);
+  if (!existsSync(join(c.cwd, "forge.yaml"))) {
+    const dim = (s) => (c.mode === "none" ? s : `\x1b[2m${s}\x1b[22m`);
+    c.stdout.write("  " + dim("Configure this repo: npx forgedock init") + "\n");
+  }
+}
+
 async function update() {
   console.log("");
   console.log(`${BOLD}ForgeDock${RESET} — Checking for updates`);
@@ -221,16 +244,8 @@ async function update() {
         console.log(`  Already up to date.`);
       } else {
         console.log(`  ${GREEN}Updated to latest.${RESET}`);
-        // Reinstall = relink commands + re-register the hook. Never the full
-        // journey: update must not reach read/review, which could overwrite a
-        // curated forge.yaml (and re-runs AI enrichment on every update).
-        const c = ctx();
-        await forge(c);
-        if (!existsSync(join(c.cwd, "forge.yaml"))) {
-          const dim = (s) => (c.mode === "none" ? s : `\x1b[2m${s}\x1b[22m`);
-          c.stdout.write("  " + dim("Configure this repo: npx forgedock init") + "\n");
-        }
       }
+      await relinkAndHint();
     } catch (err) {
       console.log(
         `  ${YELLOW}Cannot fast-forward — local changes exist. Skipping.${RESET}`,
@@ -240,6 +255,7 @@ async function update() {
     console.log(
       `  Installed via npm. Run ${CYAN}npm update -g forgedock${RESET} to update.`,
     );
+    await relinkAndHint();
   }
   console.log("");
 }

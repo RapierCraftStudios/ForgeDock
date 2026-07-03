@@ -119,6 +119,52 @@ branches:
   return { todoCount };
 }
 
+/** Maps manual-flow value keys to their location in a ConfigDraft. */
+const DRAFT_KEY_PATHS = {
+  owner: ["project", "owner"],
+  repo: ["project", "repo"],
+  name: ["project", "name"],
+  root: ["paths", "root"],
+  worktreeBase: ["paths", "worktreeBase"],
+  defaultBranch: ["branches", "default"],
+  stagingBranch: ["branches", "staging"],
+};
+
+/**
+ * Compute which fields accepted in the `--manual` init flow should be flagged
+ * low-confidence (and so get a `# TODO(forgedock:<field>)` comment).
+ *
+ * A field counts as low-confidence when detection scored it "low" AND the
+ * user accepted the detected value unchanged (didn't type over the default).
+ * `description` is special-cased: it has no draft entry, so it counts as low
+ * when detection found nothing (empty) and the user also left it empty.
+ *
+ * Pure — no I/O, safe to unit test directly.
+ *
+ * @param {import('./init-detect.mjs').ConfigDraft} draft
+ * @param {{ value: string, source: string }} description
+ * @param {{owner:string,repo:string,name:string,description:string,root:string,
+ *          worktreeBase:string,defaultBranch:string,stagingBranch:string}} values
+ *   The values accepted from the manual prompts.
+ * @returns {string[]}
+ */
+export function manualLowConfidenceKeys(draft, description, values) {
+  const keys = [];
+  for (const [key, path] of Object.entries(DRAFT_KEY_PATHS)) {
+    const field = path.reduce(
+      (node, k) => (node && typeof node === "object" ? node[k] : undefined),
+      draft,
+    );
+    if (field && field.confidence === "low" && values[key] === field.value) {
+      keys.push(key);
+    }
+  }
+  if (!description.value && !values.description) {
+    keys.push("description");
+  }
+  return keys;
+}
+
 /**
  * Back up an existing file to <name>.bak (timestamped if .bak exists).
  * @returns {{ backupName: string } | null} null when the file didn't exist.
@@ -498,7 +544,11 @@ export async function forge(ctx) {
   }
 
   const glyph = (ok) => (ctx.mode === "none" ? (ok ? "✔" : "!") : `\x1b[38;2;255;179;71m${ok ? "✔" : "!"}\x1b[0m`);
-  w.write(`  ${glyph(true)} ${files.length} slash commands linked ${dimLine(ctx, `(new ${installed}, updated ${updated}, unchanged ${skipped})`)}\n`);
+  const headlineVerb = copied > 0 ? "installed" : "linked";
+  const headlineDetail = copied > 0
+    ? `(new ${installed}, copied ${copied}, updated ${updated}, unchanged ${skipped})`
+    : `(new ${installed}, updated ${updated}, unchanged ${skipped})`;
+  w.write(`  ${glyph(true)} ${files.length} slash commands ${headlineVerb} ${dimLine(ctx, headlineDetail)}\n`);
   if (copied > 0) {
     w.write(`  ${glyph(false)} ${copied} copied (not linked) ${dimLine(ctx, "— enable Windows Developer Mode for live-updating links")}\n`);
   }
