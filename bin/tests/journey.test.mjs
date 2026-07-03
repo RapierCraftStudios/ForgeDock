@@ -7,7 +7,7 @@ import assert from "node:assert/strict";
 import { mkdtempSync, readFileSync, writeFileSync, existsSync } from "node:fs";
 import { join } from "node:path";
 import os from "node:os";
-import { writeForgeYaml, backupExisting, detectDescription } from "../journey.mjs";
+import { writeForgeYaml, backupExisting, detectDescription, makeCtx, preflight } from "../journey.mjs";
 
 const VALUES = {
   owner: "RapierCraftStudios",
@@ -95,5 +95,85 @@ describe("detectDescription", () => {
     assert.deepEqual(detectDescription(dir), { value: "", source: "" });
     writeFileSync(join(dir, "CLAUDE.md"), "# T\n\nProject brain.\n", "utf-8");
     assert.deepEqual(detectDescription(dir), { value: "Project brain.", source: "CLAUDE.md" });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Task 5: preflight & makeCtx tests
+// ---------------------------------------------------------------------------
+
+/** Writer stub + exec stub factory for act tests. */
+function fakeWriter() {
+  const chunks = [];
+  return { chunks, write(s) { chunks.push(s); return true; }, get text() { return chunks.join(""); }, isTTY: false };
+}
+
+function stubCtx({ execMap = {}, home = os.tmpdir(), cwd = os.tmpdir() } = {}) {
+  const w = fakeWriter();
+  return {
+    ctx: makeCtx({
+      cwd,
+      home,
+      forgeHome: "C:/fake/forgedock",
+      argv: [],
+      env: {},
+      stdout: w,
+      mode: "none",
+      motion: false,
+      startedAt: 0,
+      exec: (cmd, args) => {
+        const key = [cmd, ...(args || [])].join(" ");
+        if (key in execMap) {
+          const v = execMap[key];
+          if (v instanceof Error) throw v;
+          return v;
+        }
+        throw new Error(`ENOENT: ${key}`);
+      },
+    }),
+    w,
+  };
+}
+
+describe("preflight", () => {
+  it("all green when everything is present", async () => {
+    const home = mkdtempSync(join(os.tmpdir(), "fd-home-"));
+    const { mkdirSync } = await import("node:fs");
+    mkdirSync(join(home, ".claude"), { recursive: true });
+    const { ctx, w } = stubCtx({
+      home,
+      execMap: {
+        "git --version": "git version 2.45.0",
+        "gh --version": "gh version 2.52.0",
+        "gh auth status": "Logged in to github.com",
+      },
+    });
+    const res = await preflight(ctx);
+    assert.equal(res.checks.every((c) => c.ok), true);
+    assert.equal(res.ghReady, true);
+    assert.match(w.text, /F O R G E D O C K/);
+  });
+
+  it("missing gh yields a fix card and ghReady=false, but does not throw", async () => {
+    const home = mkdtempSync(join(os.tmpdir(), "fd-home2-"));
+    const { mkdirSync } = await import("node:fs");
+    mkdirSync(join(home, ".claude"), { recursive: true });
+    const { ctx, w } = stubCtx({
+      home,
+      execMap: { "git --version": "git version 2.45.0" },
+    });
+    const res = await preflight(ctx);
+    const gh = res.checks.find((c) => c.name === "GitHub CLI");
+    assert.equal(gh.ok, false);
+    assert.equal(res.ghReady, false);
+    assert.match(w.text, /cli\.github\.com/); // fix card content
+  });
+
+  it("missing ~/.claude flags Claude Code check", async () => {
+    const home = mkdtempSync(join(os.tmpdir(), "fd-home3-"));
+    const { ctx } = stubCtx({ home, execMap: { "git --version": "git version 2.45.0" } });
+    const res = await preflight(ctx);
+    const cc = res.checks.find((c) => c.name === "Claude Code");
+    assert.equal(cc.ok, false);
   });
 });

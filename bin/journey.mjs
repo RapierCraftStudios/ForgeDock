@@ -177,3 +177,124 @@ export function detectDescription(cwd) {
   }
   return { value: "", source: "" };
 }
+
+// ---------------------------------------------------------------------------
+// Journey context (Task 5)
+// ---------------------------------------------------------------------------
+
+import { execFileSync } from "child_process";
+import os from "os";
+import {
+  renderMark, ember, shimmer, revealRows, moltenBar, fixCard,
+  colorMode, motionEnabled, CHROME_STOPS, HERO_MARK, COMPACT_MARK, sleep,
+} from "./cinema.mjs";
+
+/**
+ * Build the shared journey context. Every act takes this as its first arg.
+ * All process-touching values are injectable for tests.
+ */
+export function makeCtx(overrides = {}) {
+  const env = overrides.env ?? process.env;
+  const stdout = overrides.stdout ?? process.stdout;
+  const argv = overrides.argv ?? process.argv.slice(2);
+  return {
+    cwd: process.cwd(),
+    home: env.HOME || env.USERPROFILE || os.homedir(),
+    forgeHome: "",
+    argv,
+    env,
+    stdout,
+    mode: colorMode(env, stdout),
+    motion: motionEnabled(argv, env, stdout),
+    exec: (cmd, args) =>
+      execFileSync(cmd, args, {
+        encoding: "utf-8",
+        stdio: ["pipe", "pipe", "pipe"],
+        timeout: 10000,
+      }).trim(),
+    startedAt: Date.now(),
+    ...overrides,
+  };
+}
+
+// ---------------------------------------------------------------------------
+// Act I — Ignition: hero mark + preflight checks (Task 5)
+// ---------------------------------------------------------------------------
+
+const dimLine = (ctx, s) => (ctx.mode === "none" ? s : `\x1b[2m${s}\x1b[22m`);
+
+/**
+ * Render the hero banner and run preflight checks. Failures render fix cards
+ * and the journey continues — advisory, never fatal.
+ * @returns {Promise<{ checks: Array<{name, ok, detail, fix?}>, ghReady: boolean }>}
+ */
+export async function preflight(ctx) {
+  const { stdout: w } = ctx;
+  w.write("\n");
+  await shimmer(HERO_MARK, CHROME_STOPS, { mode: ctx.mode, motion: ctx.motion, writer: w });
+  w.write("\n  " + ember("F O R G E D O C K", ctx.mode) + "\n");
+  w.write("  " + dimLine(ctx, "──── lighting the forge ────────────────────") + "\n\n");
+
+  const rows = [
+    {
+      label: "Node",
+      run: async () => {
+        const major = Number(process.versions.node.split(".")[0]);
+        return major >= 18
+          ? { ok: true, detail: `v${process.versions.node}` }
+          : { ok: false, detail: `v${process.versions.node} — need ≥18`, fix: ["Upgrade Node: https://nodejs.org/"] };
+      },
+    },
+    {
+      label: "git",
+      run: async () => {
+        try {
+          const v = ctx.exec("git", ["--version"]);
+          return { ok: true, detail: v.replace(/^git version\s*/, "") };
+        } catch {
+          return { ok: false, detail: "not found", fix: ["Install git: https://git-scm.com/downloads"] };
+        }
+      },
+    },
+    {
+      label: "Claude Code",
+      run: async () => {
+        const claudeDir = join(ctx.home, ".claude");
+        return existsSync(claudeDir)
+          ? { ok: true, detail: "~/.claude found" }
+          : { ok: false, detail: "~/.claude not found", fix: ["Install Claude Code: https://claude.com/claude-code"] };
+      },
+    },
+    {
+      label: "GitHub CLI",
+      run: async () => {
+        try {
+          ctx.exec("gh", ["--version"]);
+        } catch {
+          return {
+            ok: false,
+            detail: "not found",
+            fix: ["Install gh: https://cli.github.com/", "Windows: winget install GitHub.cli"],
+          };
+        }
+        try {
+          ctx.exec("gh", ["auth", "status"]);
+          return { ok: true, detail: "authenticated" };
+        } catch {
+          return { ok: false, detail: "not authenticated", fix: ["Run: gh auth login"] };
+        }
+      },
+    },
+  ];
+
+  // Map check names for the return contract (label ≠ name only for clarity).
+  const results = await revealRows(rows, { mode: ctx.mode, motion: ctx.motion, writer: w });
+  const checks = rows.map((r, i) => ({ name: r.label === "git" ? "git" : r.label, ...results[i] }));
+  const named = [
+    { ...checks[0], name: "Node" },
+    { ...checks[1], name: "git" },
+    { ...checks[2], name: "Claude Code" },
+    { ...checks[3], name: "GitHub CLI" },
+  ];
+  return { checks: named, ghReady: named[3].ok };
+}
