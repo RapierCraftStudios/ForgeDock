@@ -208,6 +208,7 @@ export function makeCtx(overrides = {}) {
     mode: colorMode(env, stdout),
     motion: motionEnabled(argv, env, stdout),
     nodeVersion,
+    linkStrategy: "symlink",
     exec: (cmd, args) =>
       execFileSync(cmd, args, {
         encoding: "utf-8",
@@ -298,7 +299,7 @@ export async function preflight(ctx) {
 // Act II — Forging: command symlinks + SessionStart hook (Task 6)
 // ---------------------------------------------------------------------------
 
-import { mkdir, symlink, readlink, lstat, readdir, rename, copyFile, readFile, writeFile } from "fs/promises";
+import { mkdir, symlink, readlink, lstat, readdir, rename, copyFile, readFile, writeFile, unlink } from "fs/promises";
 import { relative, dirname as pathDirname } from "path";
 import { installSessionStartHook } from "./settings-hook.mjs";
 
@@ -337,6 +338,8 @@ async function saveCopiedManifest(manifestPath, manifest) {
   await rename(manifestPath + ".tmp", manifestPath);
 }
 
+const isLinkPermissionError = (err) => err.code === "EPERM" || err.code === "EACCES";
+
 /**
  * Act II: link commands into ~/.claude/commands with a molten progress line,
  * then register the SessionStart hook.
@@ -344,13 +347,15 @@ async function saveCopiedManifest(manifestPath, manifest) {
  * regular files are skipped with a warning; changed links updated atomically.
  * On Windows without Developer Mode (symlink → EPERM/EACCES) each command is
  * copied instead, and recorded in a manifest so re-runs can tell ForgeDock's
- * own copies apart from user-owned files.
+ * own copies apart from user-owned files. ctx.linkStrategy ("symlink" default)
+ * can be set to "copy" to skip all symlink attempts (deterministic tests).
  */
 export async function forge(ctx) {
   const { stdout: w } = ctx;
   const commandsDir = join(ctx.forgeHome, "commands");
   const targetDir = join(ctx.home, ".claude", "commands");
   const manifestPath = join(ctx.home, ".claude", "forgedock", "copied-commands.json");
+  const wantSymlink = ctx.linkStrategy !== "copy";
 
   w.write("\n  " + ember("Forging commands", ctx.mode) + " " + dimLine(ctx, `into ${targetDir}`) + "\n\n");
   await mkdir(targetDir, { recursive: true });
@@ -362,6 +367,13 @@ export async function forge(ctx) {
   let installed = 0, updated = 0, skipped = 0, copied = 0;
   const barWidth = 24;
   let barShown = false;
+
+  const recordCopy = (rel) => {
+    if (!manifest.files[rel]) {
+      manifest.files[rel] = true;
+      manifestChanged = true;
+    }
+  };
 
   for (let i = 0; i < files.length; i++) {
     const file = files[i];
@@ -376,18 +388,49 @@ export async function forge(ctx) {
         if (current === file) {
           skipped++;
         } else {
-          await symlink(file, target + ".tmp");
-          await rename(target + ".tmp", target);
-          updated++;
+          try {
+            await symlink(file, target + ".tmp");
+            await rename(target + ".tmp", target);
+            updated++;
+          } catch (linkErr) {
+            if (!isLinkPermissionError(linkErr)) throw linkErr;
+            // Can't re-link — replace the managed link with a copy.
+            // unlink first: copyFile onto a symlink writes THROUGH the link.
+            await unlink(target);
+            await copyFile(file, target);
+            updated++; // replaces an existing managed entry
+            recordCopy(rel);
+          }
         }
       } else if (manifest.files[rel]) {
         // A regular file we copied on a previous run — ours to manage.
-        const [src, dst] = await Promise.all([readFile(file), readFile(target)]);
-        if (src.equals(dst)) {
-          skipped++;
-        } else {
-          await copyFile(file, target);
-          updated++;
+        // First try upgrading it to a symlink (Developer Mode enabled since).
+        let upgraded = false;
+        if (wantSymlink) {
+          try {
+            await symlink(file, target + ".tmp");
+            try {
+              await rename(target + ".tmp", target); // rename replaces existing files on Windows
+            } catch (renameErr) {
+              await unlink(target + ".tmp").catch(() => {});
+              throw renameErr;
+            }
+            updated++;
+            delete manifest.files[rel];
+            manifestChanged = true;
+            upgraded = true;
+          } catch (linkErr) {
+            if (!isLinkPermissionError(linkErr)) throw linkErr;
+          }
+        }
+        if (!upgraded) {
+          const [src, dst] = await Promise.all([readFile(file), readFile(target)]);
+          if (src.equals(dst)) {
+            skipped++;
+          } else {
+            await copyFile(file, target);
+            updated++;
+          }
         }
       } else {
         if (barShown) { w.write("\x1b[1A\x1b[2K"); barShown = false; }
@@ -396,23 +439,26 @@ export async function forge(ctx) {
       }
     } catch (err) {
       if (err.code !== "ENOENT") throw err;
-      try {
-        await symlink(file, target);
-        installed++;
-        if (manifest.files[rel]) {
-          // Symlinks work now (e.g. Developer Mode enabled) — drop the stale copy record.
-          delete manifest.files[rel];
-          manifestChanged = true;
+      let linked = false;
+      if (wantSymlink) {
+        try {
+          await symlink(file, target);
+          installed++;
+          linked = true;
+          if (manifest.files[rel]) {
+            // Symlinks work now and the old copy is gone — drop the stale record.
+            delete manifest.files[rel];
+            manifestChanged = true;
+          }
+        } catch (linkErr) {
+          if (!isLinkPermissionError(linkErr)) throw linkErr;
         }
-      } catch (linkErr) {
-        if (linkErr.code !== "EPERM" && linkErr.code !== "EACCES") throw linkErr;
+      }
+      if (!linked) {
         // Windows without Developer Mode/admin — fall back to a copy.
         await copyFile(file, target);
         copied++;
-        if (!manifest.files[rel]) {
-          manifest.files[rel] = true;
-          manifestChanged = true;
-        }
+        recordCopy(rel);
       }
     }
 
@@ -424,16 +470,27 @@ export async function forge(ctx) {
   }
   if (barShown) w.write("\x1b[1A\x1b[2K");
 
-  if (manifestChanged) await saveCopiedManifest(manifestPath, manifest);
-
   const hookScript = join(ctx.forgeHome, "bin", "hooks", "session-start.mjs");
   const settingsPath = join(ctx.home, ".claude", "settings.json");
   const { status: hookStatus } = installSessionStartHook(settingsPath, hookScript);
+
+  // Housekeeping — must never abort the receipt or the hook.
+  let manifestSaveFailed = false;
+  if (manifestChanged) {
+    try {
+      await saveCopiedManifest(manifestPath, manifest);
+    } catch {
+      manifestSaveFailed = true;
+    }
+  }
 
   const glyph = (ok) => (ctx.mode === "none" ? (ok ? "✔" : "!") : `\x1b[38;2;255;179;71m${ok ? "✔" : "!"}\x1b[0m`);
   w.write(`  ${glyph(true)} ${files.length} slash commands linked ${dimLine(ctx, `(new ${installed}, updated ${updated}, unchanged ${skipped})`)}\n`);
   if (copied > 0) {
     w.write(`  ${glyph(false)} ${copied} copied (not linked) ${dimLine(ctx, "— enable Windows Developer Mode for live-updating links")}\n`);
+  }
+  if (manifestSaveFailed) {
+    w.write("  " + dimLine(ctx, "manifest not saved — re-runs may warn about copied files") + "\n");
   }
   if (hookStatus === "skipped-malformed") {
     w.write(`  ${glyph(false)} SessionStart hook NOT registered — ${settingsPath} is not valid JSON\n`);

@@ -108,7 +108,7 @@ function fakeWriter() {
   return { chunks, write(s) { chunks.push(s); return true; }, get text() { return chunks.join(""); }, isTTY: false };
 }
 
-function stubCtx({ execMap = {}, home = os.tmpdir(), cwd = os.tmpdir() } = {}) {
+function stubCtx({ execMap = {}, home = os.tmpdir(), cwd = os.tmpdir(), ...overrides } = {}) {
   const w = fakeWriter();
   return {
     ctx: makeCtx({
@@ -130,6 +130,7 @@ function stubCtx({ execMap = {}, home = os.tmpdir(), cwd = os.tmpdir() } = {}) {
         }
         throw new Error(`ENOENT: ${key}`);
       },
+      ...overrides,
     }),
     w,
   };
@@ -268,6 +269,11 @@ describe("forge (Act II)", () => {
     assert.equal(res2.hookStatus, "already");
   });
 
+  it("makeCtx defaults linkStrategy to 'symlink'", () => {
+    const { ctx } = stubCtx({});
+    assert.equal(ctx.linkStrategy, "symlink");
+  });
+
   it("re-run over our copied files is idempotent (manifest recognizes our copies)", async () => {
     const home = mkdtempSync(join(os.tmpdir(), "fd-forge-home3-"));
     const forgeHome = mkdtempSync(join(os.tmpdir(), "fd-forge-src3-"));
@@ -277,19 +283,52 @@ describe("forge (Act II)", () => {
     writeFileSync(join(forgeHome, "commands", "sub", "b.md"), "B", "utf-8");
     writeFileSync(join(forgeHome, "bin", "hooks", "session-start.mjs"), "// hook", "utf-8");
 
-    const first = stubCtx({ home });
+    // linkStrategy "copy" forces the copy-fallback path deterministically,
+    // even on symlink-capable machines (POSIX CI, Developer Mode).
+    const first = stubCtx({ home, linkStrategy: "copy" });
     first.ctx.forgeHome = forgeHome;
-    await forge(first.ctx);
+    const res1 = await forge(first.ctx);
+    assert.equal(res1.copied, res1.total);
+    assert.equal(res1.installed, 0);
+    assert.ok(existsSync(join(home, ".claude", "forgedock", "copied-commands.json")));
 
-    const second = stubCtx({ home });
+    const second = stubCtx({ home, linkStrategy: "copy" });
     second.ctx.forgeHome = forgeHome;
     const res2 = await forge(second.ctx);
 
     assert.equal(res2.installed, 0);
     assert.equal(res2.copied, 0);
-    assert.equal(res2.skipped + res2.updated, res2.total);
+    assert.equal(res2.skipped, res2.total);
     assert.equal(res2.hookStatus, "already");
     assert.doesNotMatch(second.w.text, /WARNING/);
+  });
+
+  it("manifest-tracked file with changed content is updated", async () => {
+    const home = mkdtempSync(join(os.tmpdir(), "fd-forge-home5-"));
+    const forgeHome = mkdtempSync(join(os.tmpdir(), "fd-forge-src5-"));
+    mkdirSyncFs(join(forgeHome, "commands"), { recursive: true });
+    mkdirSyncFs(join(forgeHome, "bin", "hooks"), { recursive: true });
+    writeFileSync(join(forgeHome, "commands", "a.md"), "A", "utf-8");
+    writeFileSync(join(forgeHome, "bin", "hooks", "session-start.mjs"), "// hook", "utf-8");
+
+    // Pre-seed the manifest (it's our copy) and a stale copy at the target.
+    mkdirSyncFs(join(home, ".claude", "forgedock"), { recursive: true });
+    writeFileSync(
+      join(home, ".claude", "forgedock", "copied-commands.json"),
+      JSON.stringify({ version: 1, files: { "a.md": true } }),
+      "utf-8",
+    );
+    const target = join(home, ".claude", "commands", "a.md");
+    mkdirSyncFs(join(home, ".claude", "commands"), { recursive: true });
+    writeFileSync(target, "OLD", "utf-8");
+
+    const { ctx, w } = stubCtx({ home, linkStrategy: "copy" });
+    ctx.forgeHome = forgeHome;
+    const res = await forge(ctx);
+
+    assert.equal(res.updated, 1);
+    assert.equal(readFileSync(target, "utf-8"), "A");
+    assert.doesNotMatch(w.text, /WARNING/);
   });
 
   it("user-owned regular file is never clobbered", async () => {
