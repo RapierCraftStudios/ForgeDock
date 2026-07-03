@@ -832,8 +832,9 @@ Expected: FAIL — `Cannot find module '../engine.mjs'`.
  * injected runner (runCommand-shaped), determining each phase's outcome from
  * GitHub state (phase.detectOutcome). All effects are injected → fully testable.
  */
+import { fileURLToPath } from "node:url";
 import { appendEvent, readLog, deriveState } from "./engine/runlog.mjs";
-import { PHASES, pickPhase, TERMINAL_REASONS } from "./engine/phases.mjs";
+import { pickPhase, TERMINAL_REASONS } from "./engine/phases.mjs";
 import { reconcileState } from "./engine/reconcile.mjs";
 import { makeProjector } from "./engine/projector.mjs";
 
@@ -842,7 +843,7 @@ const DEFAULT_MAX_ATTEMPTS = 3;
 export async function runIssue(opts) {
   const { issue, dir, agentId, lane = "staging", io, runner,
           now = () => Date.now(), maxAttempts = DEFAULT_MAX_ATTEMPTS,
-          commandsDir = new URL("../commands", import.meta.url).pathname } = opts;
+          commandsDir = fileURLToPath(new URL("../commands", import.meta.url)) } = opts;
   const projector = makeProjector(io);
 
   // 1. Load + reconcile (GitHub wins).
