@@ -29,4 +29,28 @@ describe("state codec", () => {
     const body = upsertStateBlock("Just text", idx);
     assert.equal(parseState(body).v, 7);
   });
+
+  it("upsertStateBlock handles $ replacement patterns in JSON values", () => {
+    // Create an index with $ replacement patterns in serialized values
+    const idx1 = { v: 1, run: "r1", issue: 42, lane: "staging",
+      committed: ["investigate"], phase: "build", branch: null,
+      pr: null, terminal: false, terminalReason: "step $1 of $` and $$ done",
+      lease: null };
+    // Create another index also with $ patterns
+    const idx2 = { v: 2, run: "r1", issue: 42, lane: "staging",
+      committed: ["investigate", "build"], phase: "review", branch: "fix/$1-weird",
+      pr: null, terminal: false, terminalReason: "another $& test",
+      lease: null };
+    // Serialize idx1 into a body with surrounding text
+    let body = "Header\n\n" + serializeState(idx1) + "\n\nFooter";
+    // Upsert with idx2 (which also has $ patterns)
+    body = upsertStateBlock(body, idx2);
+    // Should have exactly one block
+    assert.equal((body.match(/FORGE:STATE/g) || []).length, 1);
+    // Parsed result should exactly match idx2 (no corruption)
+    assert.deepEqual(parseState(body), idx2);
+    // Preserved surrounding text
+    assert.match(body, /Header/);
+    assert.match(body, /Footer/);
+  });
 });

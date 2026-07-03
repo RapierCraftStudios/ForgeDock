@@ -291,7 +291,7 @@ export function parseState(issueBody) {
 /** Replace the FORGE:STATE block in place, or append one if absent. */
 export function upsertStateBlock(body, index) {
   const block = serializeState(index);
-  if (BLOCK_RE.test(body || "")) return body.replace(BLOCK_RE, block);
+  if (BLOCK_RE.test(body || "")) return body.replace(BLOCK_RE, () => block);
   return `${body || ""}\n\n${block}`.trimStart();
 }
 ```
