@@ -2,33 +2,38 @@
 
 import { fileURLToPath } from "url";
 import { dirname, join, relative } from "path";
-import { mkdir, symlink, readlink, lstat, readdir, stat } from "fs/promises";
-import {
-  existsSync,
-  appendFileSync,
-  readFileSync,
-  writeFileSync,
-  renameSync,
-} from "fs";
+import { mkdir, lstat, readlink, unlink, readFile, writeFile } from "fs/promises";
+import { existsSync, writeFileSync } from "fs";
 import { execSync } from "child_process";
-import readline from "readline";
+import os from "os";
+import {
+  makeCtx,
+  runJourney,
+  read,
+  review,
+  celebrate,
+  findMarkdownFiles,
+  writeForgeYaml,
+  backupExisting,
+} from "./journey.mjs";
+import { removeSessionStartHook } from "./settings-hook.mjs";
+import { resolveState, setOptOut } from "./registry.mjs";
+import { renderMark, ember } from "./cinema.mjs";
+import { input } from "./tui.mjs";
 
 const __filename = fileURLToPath(import.meta.url);
-const __dirname = dirname(__filename);
-const FORGE_HOME = dirname(__dirname);
+const FORGE_HOME = dirname(dirname(__filename));
 const COMMANDS_DIR = join(FORGE_HOME, "commands");
 
-if (!process.env.HOME) {
-  console.error(
-    "Error: HOME environment variable is not set. Cannot determine install location.",
-  );
-  process.exit(1);
-}
+const HOME = process.env.HOME || process.env.USERPROFILE || os.homedir();
+const TARGET_DIR = join(HOME, ".claude", "commands");
+const MANIFEST_PATH = join(HOME, ".claude", "forgedock", "copied-commands.json");
 
-const TARGET_DIR = join(process.env.HOME, ".claude", "commands");
-
-const args = process.argv.slice(2);
-const command = args[0] || "install";
+const rawArgs = process.argv.slice(2);
+const FLAGS = new Set(["--fast", "--manual", "--verbose"]);
+const flags = rawArgs.filter((a) => FLAGS.has(a));
+const positional = rawArgs.filter((a) => !FLAGS.has(a));
+const command = positional[0] || "install";
 
 const BOLD = "\x1b[1m";
 const GREEN = "\x1b[32m";
@@ -37,133 +42,62 @@ const CYAN = "\x1b[36m";
 const RED = "\x1b[31m";
 const RESET = "\x1b[0m";
 
-/**
- * Prompt the user for a yes/no confirmation.
- * Returns false (safe default) when stdin is not a TTY (e.g. CI or piped input).
- */
-async function confirmOverwrite(question) {
-  if (!process.stdin.isTTY) {
-    console.log(
-      `  ${YELLOW}Non-interactive environment detected — aborting to protect existing config.${RESET}`,
-    );
-    return false;
-  }
-  return new Promise((resolve) => {
-    const rl = readline.createInterface({
-      input: process.stdin,
-      output: process.stdout,
-    });
-    rl.question(question, (answer) => {
-      rl.close();
-      resolve(answer.trim().toLowerCase() === "y" || answer.trim().toLowerCase() === "yes");
-    });
-  });
+function ctx() {
+  const c = makeCtx({ argv: flags });
+  c.forgeHome = FORGE_HOME;
+  c.home = HOME;
+  return c;
 }
 
-async function findMarkdownFiles(dir) {
-  const results = [];
-  const entries = await readdir(dir, { withFileTypes: true });
-  for (const entry of entries) {
-    const full = join(dir, entry.name);
-    if (entry.isDirectory()) {
-      results.push(...(await findMarkdownFiles(full)));
-    } else if (entry.name.endsWith(".md")) {
-      results.push(full);
-    }
+/** Compact status screen for configured/managed directories. */
+function statusScreen(c) {
+  const state = resolveState(c.cwd);
+  const mark = renderMark("compact", c.mode);
+  const dim = (s) => (c.mode === "none" ? s : `\x1b[2m${s}\x1b[22m`);
+  c.stdout.write("\n" + mark[0] + "\n");
+  c.stdout.write(mark[1] + "  " + ember("FORGEDOCK", c.mode) + " " + dim("status") + "\n");
+  c.stdout.write(mark[2] + "\n" + mark[3] + "\n\n");
+  const configured = existsSync(join(c.cwd, "forge.yaml"));
+  c.stdout.write(`  directory   ${state}\n`);
+  c.stdout.write(`  forge.yaml  ${configured ? "present" : "missing"}\n`);
+  c.stdout.write(`  commands    ${existsSync(TARGET_DIR) ? "installed at " + TARGET_DIR : "not installed"}\n`);
+  if (state === "managed-optedout") {
+    c.stdout.write(`\n  ForgeDock is disabled (opted out) here. Re-enable: npx forgedock enable\n`);
+  } else if (state === "unmanaged") {
+    c.stdout.write(`\n  ForgeDock is not active in this directory. Activate: npx forgedock enable\n`);
+  } else if (!configured) {
+    c.stdout.write(`\n  Generate config: npx forgedock init\n`);
+  } else {
+    c.stdout.write(`\n  Reconfigure: npx forgedock init · Full journey: npx forgedock install\n`);
   }
-  return results.sort();
+  c.stdout.write("\n");
 }
 
-async function install() {
-  console.log("");
-  console.log(`${BOLD}ForgeDock${RESET} — Installing pipeline commands`);
-  console.log(`  Source: ${CYAN}${COMMANDS_DIR}/${RESET}`);
-  console.log(`  Target: ${CYAN}${TARGET_DIR}/${RESET}`);
-  console.log("");
-
-  await mkdir(TARGET_DIR, { recursive: true });
-
-  const files = await findMarkdownFiles(COMMANDS_DIR);
-  let installed = 0;
-  let updated = 0;
-  let skipped = 0;
-
-  for (const file of files) {
-    const rel = relative(COMMANDS_DIR, file);
-    const target = join(TARGET_DIR, rel);
-    const targetDir = dirname(target);
-
-    await mkdir(targetDir, { recursive: true });
-
-    try {
-      const stats = await lstat(target);
-
-      if (stats.isSymbolicLink()) {
-        const current = await readlink(target);
-        if (current === file) {
-          skipped++;
-        } else {
-          await symlink(file, target + ".tmp");
-          const { rename } = await import("fs/promises");
-          await rename(target + ".tmp", target);
-          console.log(`  ${YELLOW}Updated${RESET}: ${rel}`);
-          updated++;
-        }
-      } else {
-        console.log(
-          `  ${YELLOW}WARNING${RESET}: ${rel} is a regular file — skipping (remove it manually to let ForgeDock manage it)`,
-        );
-        skipped++;
-      }
-    } catch (err) {
-      if (err.code !== "ENOENT") {
-        console.error(
-          `  ${RED}Error${RESET}: Cannot access ${rel} — ${err.code ?? err.message}`,
-        );
-        throw err;
-      }
-      // Doesn't exist — create symlink
-      await symlink(file, target);
-      console.log(`  ${GREEN}Installed${RESET}: ${rel}`);
-      installed++;
-    }
+async function initFlow(c) {
+  if (flags.includes("--manual")) {
+    // Manual escape hatch: plain prompts, detection values as defaults.
+    const { draft, description } = await read(c);
+    const v = {
+      owner: await input("GitHub owner", draft.project.owner.value),
+      repo: await input("Repository", draft.project.repo.value),
+      name: await input("Project name", draft.project.name.value),
+      description: await input("Description", description.value),
+      root: await input("Repo root", draft.paths.root.value),
+      worktreeBase: await input("Worktree base", draft.paths.worktreeBase.value),
+      defaultBranch: await input("Default branch", draft.branches.default.value),
+      stagingBranch: await input("Staging branch", draft.branches.staging.value),
+    };
+    const outputPath = join(c.cwd, "forge.yaml");
+    const backup = backupExisting(outputPath);
+    if (backup) c.stdout.write(`  Backed up: forge.yaml → ${backup.backupName}\n`);
+    const { todoCount } = writeForgeYaml(v, [], outputPath);
+    celebrate(c, { written: true, todoCount });
+    return 0;
   }
-
-  console.log("");
-  console.log(
-    `Done. ${GREEN}Installed: ${installed}${RESET}, Updated: ${updated}, Skipped: ${skipped}`,
-  );
-  console.log("");
-
-  // Set FORGE_HOME in shell profiles
-  let profileUpdated = false;
-  for (const profile of [
-    join(process.env.HOME, ".bashrc"),
-    join(process.env.HOME, ".zshrc"),
-  ]) {
-    if (existsSync(profile)) {
-      const content = readFileSync(profile, "utf-8");
-      if (!content.includes("FORGE_HOME")) {
-        appendFileSync(
-          profile,
-          `\n# ForgeDock — autonomous development pipeline\nexport FORGE_HOME="${FORGE_HOME}"\n`,
-        );
-        console.log(`  Added FORGE_HOME to ${profile}`);
-        profileUpdated = true;
-      }
-    }
-  }
-
-  console.log(
-    `${GREEN}ForgeDock commands are now available as slash commands in any Claude Code session.${RESET}`,
-  );
-  console.log("");
-
-  // Auto-generate forge.yaml if missing — no second command needed
-  const forgeYamlPath = join(process.cwd(), "forge.yaml");
-  if (!existsSync(forgeYamlPath)) {
-    await init(true);
-  }
+  const { draft, description } = await read(c);
+  const reviewed = await review(c, draft, description);
+  celebrate(c, reviewed);
+  return reviewed.aborted ? 1 : 0;
 }
 
 async function uninstall() {
@@ -183,7 +117,6 @@ async function uninstall() {
       if (stats.isSymbolicLink()) {
         const current = await readlink(target);
         if (current === file) {
-          const { unlink } = await import("fs/promises");
           await unlink(target);
           console.log(`  ${RED}Removed${RESET}: ${rel}`);
           removed++;
@@ -200,8 +133,55 @@ async function uninstall() {
     }
   }
 
+  // Remove copy-installed commands (Windows without Developer Mode, or a
+  // symlink→copy fallback from a previous run) tracked in the ownership
+  // manifest. These are regular files, not symlinks, so the loop above
+  // never touches them — the manifest is the only record of ForgeDock's
+  // ownership over them.
+  let manifest = null;
+  try {
+    manifest = JSON.parse(await readFile(MANIFEST_PATH, "utf-8"));
+  } catch {
+    manifest = null;
+  }
+  if (manifest && manifest.files && typeof manifest.files === "object") {
+    const manifestRels = Object.keys(manifest.files);
+    for (const rel of manifestRels) {
+      const target = join(TARGET_DIR, rel);
+      try {
+        const stats = await lstat(target);
+        if (stats.isFile() && !stats.isSymbolicLink()) {
+          await unlink(target);
+          console.log(`  ${RED}Removed${RESET}: ${rel} ${YELLOW}(copied)${RESET}`);
+          removed++;
+        }
+      } catch (err) {
+        if (err.code !== "ENOENT") {
+          console.error(
+            `  ${RED}Error${RESET}: Cannot access ${rel} — ${err.code ?? err.message}`,
+          );
+          throw err;
+        }
+        // Already gone — nothing to do
+      }
+    }
+    if (manifestRels.length > 0) {
+      manifest.files = {};
+      try {
+        await mkdir(dirname(MANIFEST_PATH), { recursive: true });
+        await writeFile(MANIFEST_PATH, JSON.stringify(manifest, null, 2) + "\n", "utf-8");
+      } catch {
+        // Best-effort — a failed manifest write is non-fatal
+      }
+    }
+  }
+
   console.log("");
   console.log(`Done. Removed: ${removed} commands.`);
+  console.log("");
+
+  const { status } = removeSessionStartHook(join(HOME, ".claude", "settings.json"));
+  if (status === "removed") console.log("  Removed: SessionStart hook");
   console.log("");
 }
 
@@ -240,7 +220,7 @@ async function update() {
         console.log(`  Already up to date.`);
       } else {
         console.log(`  ${GREEN}Updated to latest.${RESET}`);
-        await install();
+        await runJourney(ctx());
       }
     } catch (err) {
       console.log(
@@ -253,370 +233,6 @@ async function update() {
     );
   }
   console.log("");
-}
-
-async function init(fromInstall = false) {
-  console.log("");
-  console.log(`${BOLD}ForgeDock${RESET} — Generating forge.yaml`);
-  console.log("");
-
-  const cwd = process.cwd();
-  const worktreeBase = join(cwd, ".claude", "worktrees");
-  const outputPath = join(cwd, "forge.yaml");
-
-  // --- Detect git remote URL and parse owner/repo ---
-  let owner = "your-github-org";
-  let repo = "your-repo-name";
-  let remoteDetected = false;
-
-  try {
-    const remoteUrl = execSync("git remote get-url origin", {
-      cwd,
-      encoding: "utf-8",
-      stdio: ["pipe", "pipe", "pipe"],
-    }).trim();
-
-    // SSH: git@github.com:owner/repo.git
-    const sshMatch = remoteUrl.match(/^git@[^:]+:([^/]+)\/(.+?)(?:\.git)?$/);
-    // HTTPS: https://github.com/owner/repo.git
-    const httpsMatch = remoteUrl.match(
-      /^https?:\/\/[^/]+\/([^/]+)\/(.+?)(?:\.git)?$/,
-    );
-
-    if (sshMatch) {
-      owner = sshMatch[1];
-      repo = sshMatch[2];
-      remoteDetected = true;
-    } else if (httpsMatch) {
-      owner = httpsMatch[1];
-      repo = httpsMatch[2];
-      remoteDetected = true;
-    } else {
-      console.log(
-        `  ${YELLOW}Warning${RESET}: Could not parse git remote URL — using placeholder values`,
-      );
-    }
-  } catch {
-    console.log(
-      `  ${YELLOW}Warning${RESET}: No git remote found — using placeholder values`,
-    );
-  }
-
-  if (remoteDetected) {
-    console.log(`  Detected repo:   ${CYAN}${owner}/${repo}${RESET}`);
-  }
-
-  // --- Detect default branch ---
-  let defaultBranch = "main";
-  try {
-    const headRef = execSync("git symbolic-ref refs/remotes/origin/HEAD", {
-      cwd,
-      encoding: "utf-8",
-      stdio: ["pipe", "pipe", "pipe"],
-    }).trim();
-    // refs/remotes/origin/main → main
-    defaultBranch = headRef.replace(/^refs\/remotes\/origin\//, "");
-    console.log(`  Default branch:  ${CYAN}${defaultBranch}${RESET}`);
-  } catch {
-    // Fallback: try git rev-parse
-    try {
-      defaultBranch = execSync("git rev-parse --abbrev-ref HEAD", {
-        cwd,
-        encoding: "utf-8",
-        stdio: ["pipe", "pipe", "pipe"],
-      }).trim();
-      if (defaultBranch === "HEAD") defaultBranch = "main";
-      console.log(
-        `  Default branch:  ${CYAN}${defaultBranch}${RESET} (from current branch)`,
-      );
-    } catch {
-      console.log(
-        `  ${YELLOW}Warning${RESET}: Could not detect default branch — defaulting to "main"`,
-      );
-    }
-  }
-
-  // --- Detect staging branch ---
-  let stagingBranch = "staging";
-  try {
-    const remoteBranches = execSync("git branch -r", {
-      cwd,
-      encoding: "utf-8",
-      stdio: ["pipe", "pipe", "pipe"],
-    });
-    if (remoteBranches.includes("origin/staging")) {
-      stagingBranch = "staging";
-      console.log(`  Staging branch:  ${CYAN}staging${RESET} (detected)`);
-    } else {
-      stagingBranch = defaultBranch;
-      console.log(
-        `  Staging branch:  ${CYAN}${defaultBranch}${RESET} (no staging branch found — using default)`,
-      );
-    }
-  } catch {
-    console.log(
-      `  ${YELLOW}Warning${RESET}: Could not read remote branches — defaulting staging to "${defaultBranch}"`,
-    );
-    stagingBranch = defaultBranch;
-  }
-
-  // --- Auto-detect project description from README.md ---
-  let description = "";
-  try {
-    const readmePath = join(cwd, "README.md");
-    if (existsSync(readmePath)) {
-      const readmeContent = readFileSync(readmePath, "utf-8").slice(0, 2048);
-      // Skip the first heading line (# Title), grab the first non-empty paragraph
-      const lines = readmeContent.split("\n");
-      let inFirstParagraph = false;
-      const paragraphLines = [];
-      for (const line of lines) {
-        // Skip heading lines at the top
-        if (!inFirstParagraph && line.match(/^#/)) continue;
-        // Skip blank lines before paragraph starts
-        if (!inFirstParagraph && line.trim() === "") continue;
-        // Skip lines that are just badges, HTML, code fences, horizontal rules, or tables
-        if (!inFirstParagraph && line.match(/^[!<\[`|]/)) continue;
-        if (!inFirstParagraph && line.match(/^---/)) continue;
-        // Start collecting
-        if (!inFirstParagraph) {
-          inFirstParagraph = true;
-        }
-        // Stop at blank line (end of paragraph)
-        if (line.trim() === "") break;
-        paragraphLines.push(line.trim());
-      }
-      if (paragraphLines.length > 0) {
-        // Flatten to single line, strip markdown links/bold/inline code
-        description = paragraphLines
-          .join(" ")
-          .replace(/\[([^\]]+)\]\([^)]+\)/g, "$1")
-          .replace(/\*\*([^*]+)\*\*/g, "$1")
-          .replace(/`([^`]+)`/g, "$1")
-          .slice(0, 200)
-          .trim();
-      }
-    }
-  } catch {
-    // Best-effort only — silently fall back to empty description
-  }
-
-  if (description) {
-    console.log(
-      `  Description:     ${CYAN}${description.slice(0, 60)}${description.length > 60 ? "…" : ""}${RESET} (from README.md)`,
-    );
-  }
-
-  // --- Auto-detect project description from CLAUDE.md (fallback) ---
-  if (!description) {
-    try {
-      const claudePath = join(cwd, "CLAUDE.md");
-      if (existsSync(claudePath)) {
-        const claudeContent = readFileSync(claudePath, "utf-8").slice(0, 2048);
-        const lines = claudeContent.split("\n");
-        let inFirstParagraph = false;
-        const paragraphLines = [];
-        for (const line of lines) {
-          // Skip heading lines at the top
-          if (!inFirstParagraph && line.match(/^#/)) continue;
-          // Skip blank lines before paragraph starts
-          if (!inFirstParagraph && line.trim() === "") continue;
-          // Skip lines that are just badges, HTML comments, code fences, horizontal rules, or tables
-          if (!inFirstParagraph && line.match(/^[!<\[`|]/)) continue;
-          if (!inFirstParagraph && line.match(/^---/)) continue;
-          // Start collecting
-          if (!inFirstParagraph) {
-            inFirstParagraph = true;
-          }
-          // Stop at blank line (end of paragraph)
-          if (line.trim() === "") break;
-          paragraphLines.push(line.trim());
-        }
-        if (paragraphLines.length > 0) {
-          // Flatten to single line, strip markdown links/bold/inline code
-          description = paragraphLines
-            .join(" ")
-            .replace(/\[([^\]]+)\]\([^)]+\)/g, "$1")
-            .replace(/\*\*([^*]+)\*\*/g, "$1")
-            .replace(/`([^`]+)`/g, "$1")
-            .slice(0, 200)
-            .trim();
-        }
-      }
-    } catch {
-      // Best-effort only — silently fall back to empty description
-    }
-
-    if (description) {
-      console.log(
-        `  Description:     ${CYAN}${description.slice(0, 60)}${description.length > 60 ? "…" : ""}${RESET} (from CLAUDE.md)`,
-      );
-    }
-  }
-
-  // --- Handle existing forge.yaml ---
-  if (existsSync(outputPath)) {
-    if (!fromInstall) {
-      console.log(
-        `  ${YELLOW}Warning:${RESET} forge.yaml already exists at ${outputPath}`,
-      );
-      console.log(
-        `  Continuing will back up your existing config and replace it with a freshly generated one.`,
-      );
-      console.log(``);
-      const confirmed = await confirmOverwrite(`  Overwrite? [y/N] `);
-      if (!confirmed) {
-        console.log(``);
-        console.log(
-          `  ${YELLOW}Aborted.${RESET} Your forge.yaml was not modified.`,
-        );
-        console.log(``);
-        return;
-      }
-      console.log(``);
-    }
-    const baseBak = join(cwd, "forge.yaml.bak");
-    const backupPath = existsSync(baseBak)
-      ? join(
-          cwd,
-          `forge.yaml.bak.${new Date().toISOString().replace(/[:.]/g, "-")}`,
-        )
-      : baseBak;
-    const backupName = backupPath.split("/").pop();
-    renameSync(outputPath, backupPath);
-    console.log(`  ${YELLOW}Backed up${RESET}: forge.yaml → ${backupName}`);
-  }
-
-  // --- Generate forge.yaml content ---
-  const projectName = repo
-    .split(/[-_]/)
-    .map((w) => w.charAt(0).toUpperCase() + w.slice(1))
-    .join(" ");
-
-  const content = `# forge.yaml — ForgeDock Configuration
-#
-# Auto-generated by: npx forgedock init
-# Edit this file with your project details.
-#
-# Required sections: project, paths, branches
-# Optional sections: repos, project_board, services, review, verification
-#
-# See docs/CONFIG.md for full reference.
-
-# =============================================================================
-# PROJECT (REQUIRED)
-# =============================================================================
-
-project:
-  name: "${projectName}"
-  owner: "${owner}"
-  repo: "${repo}"
-  description: "${description.replace(/\\/g, '\\\\').replace(/"/g, '\\"')}"
-
-# =============================================================================
-# PATHS (REQUIRED)
-# =============================================================================
-
-paths:
-  root: "${cwd.replace(/\\/g, '\\\\').replace(/"/g, '\\"')}"
-  worktree_base: "${worktreeBase.replace(/\\/g, '\\\\').replace(/"/g, '\\"')}"
-
-# =============================================================================
-# BRANCHES (REQUIRED)
-# =============================================================================
-
-branches:
-  default: "${defaultBranch}"
-  staging: "${stagingBranch}"
-  feature_pattern: "milestone/{slug}"
-
-# =============================================================================
-# REPOS (OPTIONAL)
-# Multi-repo configuration. Remove the # to enable.
-# =============================================================================
-
-# repos:
-#   default:
-#     repo: "${owner}/${repo}"
-#     staging_branch: "${stagingBranch}"
-#   satellites:
-#     - prefix: "mcp"
-#       repo: "${owner}/your-satellite-repo"
-#       staging_branch: "main"
-#       local_path: "${join(cwd, "..", "your-satellite-repo")}"
-
-# =============================================================================
-# PROJECT BOARD (OPTIONAL)
-# GitHub Projects v2 integration.
-# To find IDs: gh project list --owner ${owner}
-# =============================================================================
-
-# project_board:
-#   owner: "${owner}"
-#   project_number: 1
-#   project_id: "PVT_kwHOxxxxxxxxxxxxxxxx"
-#   field_ids:
-#     status: "PVTSSF_xxxxxxxxxxxxxxxxxxxxxxxx"
-#     lane: "PVTSSF_xxxxxxxxxxxxxxxxxxxxxxxx"
-#     component: "PVTSSF_xxxxxxxxxxxxxxxxxxxxxxxx"
-#     priority: "PVTSSF_xxxxxxxxxxxxxxxxxxxxxxxx"
-#     workflow: "PVTSSF_xxxxxxxxxxxxxxxxxxxxxxxx"
-
-# =============================================================================
-# REVIEW (OPTIONAL)
-# Context injected into review agent prompts.
-# =============================================================================
-
-# review:
-#   tech_stack: "Node.js, TypeScript, PostgreSQL"
-#   context: |
-#     Describe your repo structure and any unusual conventions here.
-
-# =============================================================================
-# VERIFICATION (OPTIONAL)
-# Health-check patterns for quality gate and validate commands.
-# =============================================================================
-
-# verification:
-#   health_endpoint: "https://api.${repo}.io/health"
-#   health_patterns:
-#     - '"status": "ok"'
-`;
-
-  writeFileSync(outputPath, content, "utf-8");
-
-  console.log(`  ${GREEN}Created${RESET}: forge.yaml`);
-  console.log("");
-
-  if (fromInstall) {
-    // Called automatically from install() — only print what still needs attention
-    if (!remoteDetected) {
-      console.log(`${YELLOW}Action required:${RESET}`);
-      console.log(
-        `  Edit ${CYAN}forge.yaml${RESET} — fill in ${CYAN}project.owner${RESET} and ${CYAN}project.repo${RESET} (git remote not detected)`,
-      );
-      console.log("");
-    }
-  } else {
-    // Called explicitly via `npx forgedock init` — print full next steps
-    console.log(`${BOLD}Next steps:${RESET}`);
-    if (!remoteDetected) {
-      console.log(
-        `  1. Edit ${CYAN}forge.yaml${RESET} — fill in ${CYAN}project.owner${RESET} and ${CYAN}project.repo${RESET}`,
-      );
-    } else {
-      console.log(
-        `  1. Review ${CYAN}forge.yaml${RESET} — all required fields were auto-detected`,
-      );
-    }
-    console.log(
-      `  2. Add ${CYAN}forge.yaml${RESET} to ${CYAN}.gitignore${RESET} if it contains sensitive paths`,
-    );
-    console.log(
-      `  3. Run ${CYAN}/forgedock-init${RESET} inside Claude Code for guided AI-powered setup`,
-    );
-    console.log("");
-  }
 }
 
 function help() {
@@ -633,20 +249,53 @@ function help() {
   console.log(
     `  ${CYAN}npx forgedock init${RESET}       Generate forge.yaml config for your project`,
   );
+  console.log(`  ${CYAN}npx forgedock enable${RESET}     Activate ForgeDock in this directory`);
+  console.log(`  ${CYAN}npx forgedock disable${RESET}    Opt out of ForgeDock in this directory`);
+  console.log(`  ${CYAN}npx forgedock status${RESET}     Show ForgeDock state for this directory`);
   console.log(`  ${CYAN}npx forgedock uninstall${RESET}  Remove commands`);
   console.log(
     `  ${CYAN}npx forgedock update${RESET}     Pull latest & reinstall`,
   );
   console.log(`  ${CYAN}npx forgedock help${RESET}       Show this help`);
   console.log("");
+  console.log("Flags:");
+  console.log(`  ${CYAN}--fast${RESET}       Skip animation/motion`);
+  console.log(`  ${CYAN}--manual${RESET}     Plain text prompts instead of the review screen (init)`);
+  console.log(`  ${CYAN}--verbose${RESET}    Show detection sources for every field (init)`);
+  console.log("");
 }
 
+let exitCode = 0;
 switch (command) {
-  case "install":
-    await install();
+  case "install": {
+    const c = ctx();
+    if (existsSync(join(c.cwd, "forge.yaml")) && resolveState(c.cwd) === "managed-active") {
+      statusScreen(c);
+    } else {
+      exitCode = await runJourney(c);
+    }
     break;
+  }
   case "init":
-    await init();
+    exitCode = await initFlow(ctx());
+    break;
+  case "enable": {
+    const c = ctx();
+    await setOptOut(c.cwd, false);
+    if (!existsSync(join(c.cwd, "forge.yaml")) && !existsSync(join(c.cwd, ".forgedock"))) {
+      writeFileSync(join(c.cwd, ".forgedock"), "", "utf-8");
+    }
+    c.stdout.write("\n  ForgeDock enabled in this directory.\n\n");
+    break;
+  }
+  case "disable": {
+    const c = ctx();
+    await setOptOut(c.cwd, true);
+    c.stdout.write("\n  ForgeDock disabled in this directory. Re-enable: npx forgedock enable\n\n");
+    break;
+  }
+  case "status":
+    statusScreen(ctx());
     break;
   case "uninstall":
     await uninstall();
@@ -662,5 +311,6 @@ switch (command) {
   default:
     console.log(`${RED}Unknown command: ${command}${RESET}`);
     help();
-    process.exit(1);
+    exitCode = 1;
 }
+process.exit(exitCode);
