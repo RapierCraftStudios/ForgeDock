@@ -55,4 +55,15 @@ describe("runlog", () => {
     assert.deepEqual(s.committed, []);
     assert.equal(s.phase, null);
   });
+
+  it("readLog throws on corrupted non-final line (mid-file data loss)", () => {
+    appendEvent(dir, 42, { event: "RUN_START", issue: 42 });
+    appendFileSync(join(dir, "42.jsonl"), "not json\n"); // corrupted line in the middle
+    appendFileSync(join(dir, "42.jsonl"), '{"seq":3,"event":"PHASE_COMMIT","phase":"investigate","outputs":{}}\n');
+    assert.throws(
+      () => readLog(dir, 42),
+      /corrupt run-log line/,
+      "should throw on mid-file corruption"
+    );
+  });
 });

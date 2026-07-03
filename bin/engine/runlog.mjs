@@ -3,7 +3,7 @@
  * One JSON event per line at {dir}/{issue}.jsonl. seq is assigned monotonically.
  */
 import { readFileSync, appendFileSync, existsSync, mkdirSync } from "node:fs";
-import { join, dirname } from "node:path";
+import { join } from "node:path";
 
 function logPath(dir, issue) { return join(dir, `${issue}.jsonl`); }
 
@@ -19,10 +19,23 @@ export function appendEvent(dir, issue, event) {
 export function readLog(dir, issue) {
   const path = logPath(dir, issue);
   if (!existsSync(path)) return [];
+  const lines = readFileSync(path, "utf-8").split("\n");
+  // Drop trailing empty lines to find the last non-empty line.
+  while (lines.length > 0 && !lines[lines.length - 1].trim()) lines.pop();
+
   const out = [];
-  for (const line of readFileSync(path, "utf-8").split("\n")) {
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i];
     if (!line.trim()) continue;
-    try { out.push(JSON.parse(line)); } catch { /* partial final line: ignore */ }
+    try {
+      out.push(JSON.parse(line));
+    } catch (err) {
+      // Only tolerate parse failure on the final non-empty line (crash mid-write).
+      if (i === lines.length - 1) {
+        break; // Ignore truncated final line.
+      }
+      throw new Error(`corrupt run-log line ${i + 1} in ${path}`);
+    }
   }
   return out;
 }
