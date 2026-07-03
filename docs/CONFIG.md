@@ -14,7 +14,7 @@ echo "forge.yaml" >> .gitignore  # if your credentials path is sensitive
 
 ## CLI Flags
 
-These flags apply to `npx forgedock` (the full install journey) and `npx forgedock init` (config-only regeneration):
+`--verbose` and `--fast` apply to both `npx forgedock` (the full install journey) and `npx forgedock init` (config-only regeneration); `--manual` applies to `init` only:
 
 | Flag | Behavior |
 |------|----------|
@@ -26,8 +26,9 @@ These flags apply to `npx forgedock` (the full install journey) and `npx forgedo
 
 | Variable | Behavior |
 |----------|----------|
-| `FORGE_NO_MOTION=1` | Same effect as `--fast` — disables animation frames. |
-| `NO_COLOR=1` (or a non-TTY output stream) | Disables ANSI color output. Motion is unaffected. |
+| `FORGE_NO_MOTION=1` | Same effect as `--fast` — disables animation frames. Color is unaffected. |
+| `NO_COLOR=1` | Disables ANSI color output only. Motion is unaffected (monochrome choreography). |
+| Non-TTY / piped output (or `CI=1`) | Plain sequential log: no color **and** no animation. |
 
 The default (no flags) is the annotated review screen: detection runs, AI enrichment fills in what it can (when an API key is available), and you review the result on a single screen — Enter accepts everything, low-confidence fields are flagged with a `# TODO(forgedock:<field>)` comment if left unedited.
 
@@ -625,12 +626,12 @@ The hook entry is registered idempotently: re-installing (`npx forgedock update`
 
 ### Opting Out
 
-Per-directory, independent of the global hook registration:
+Per-directory, independent of the global hook registration. Each command acts on the current working directory — run it inside the project directory:
 
 ```bash
-npx forgedock disable [dir]  # this directory goes silent (managed-optedout)
-npx forgedock enable [dir]   # re-activate it
-npx forgedock status [dir]   # show the resolved state
+npx forgedock disable  # the current directory goes silent (managed-optedout)
+npx forgedock enable   # re-activate the current directory
+npx forgedock status   # show the current directory's resolved state
 ```
 
 See [Per-Directory State Registry](#per-directory-state-registry) below for how opt-out state is tracked.
@@ -697,22 +698,22 @@ If you downgrade to a build older than PR #467 **and** your project is accessed 
 - The one-time "Enable ForgeDock here?" nudge may reappear once.
 - No data is lost. No crash. Fail-open behaviour holds throughout.
 
-**Recovery**: after downgrading, re-apply your opt-out with the older build:
+**Recovery**: after downgrading, re-apply your opt-out with the older build (run inside the project directory):
 
 ```bash
-npx forgedock disable [dir]
+npx forgedock disable
 ```
 
 This re-writes the entry under the key form the older build expects.
 
 ### Managing Opt-Out State
 
-Use the `forgedock enable` and `forgedock disable` commands to add or remove a directory from the opt-out set:
+Use the `forgedock enable` and `forgedock disable` commands to add or remove a directory from the opt-out set. Each command always acts on the current working directory — run it inside the project directory:
 
 ```bash
-npx forgedock enable [dir]   # Remove directory from opt-out set (default: cwd)
-npx forgedock disable [dir]  # Add directory to opt-out set (default: cwd)
-npx forgedock status [dir]   # Show resolved state for a directory
+npx forgedock enable   # Remove the current directory from the opt-out set
+npx forgedock disable  # Add the current directory to the opt-out set
+npx forgedock status   # Show the current directory's resolved state
 ```
 
 ---
