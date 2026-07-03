@@ -16,7 +16,7 @@ import { join, basename } from "path";
 // forge.yaml generation (Task 4)
 // ---------------------------------------------------------------------------
 
-const esc = (s) => String(s).replace(/\\/g, "\\\\").replace(/"/g, '\\"');
+const esc = (s) => String(s).replace(/\\/g, "\\\\").replace(/"/g, '\\"').replace(/\r/g, "\\r").replace(/\n/g, "\\n");
 
 /** Append the TODO flag for a low-confidence field. */
 function todo(key, low) {

@@ -51,6 +51,13 @@ describe("writeForgeYaml", () => {
     assert.match(yaml, /staging: "staging"\s+# TODO\(forgedock:stagingBranch\)/);
     assert.equal(res.todoCount, 2);
   });
+  it("escapes newlines so values stay on one line", () => {
+    const out = join(dir, "forge.yaml");
+    writeForgeYaml({ ...VALUES, description: "line one\nline two" }, ["description"], out);
+    const yaml = readFileSync(out, "utf-8");
+    assert.match(yaml, /description: "line one\\nline two"\s+# TODO\(forgedock:description\)/);
+    assert.doesNotMatch(yaml, /line two"\s*$/m);
+  });
 });
 
 describe("backupExisting", () => {
