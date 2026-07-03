@@ -2,6 +2,8 @@
 description: Decompose subcommand — break a complex issue into ordered sub-issues, post FORGE:DECOMPOSED, stop
 argument-hint: [issue number] [--repo GH_REPO] [--gh-flag GH_FLAG]
 ---
+<!-- SPDX-FileCopyrightText: Copyright (c) RapierCraft Studios -->
+<!-- SPDX-License-Identifier: AGPL-3.0-or-later -->
 
 # work-on/decompose — Decomposition Subcommand
 

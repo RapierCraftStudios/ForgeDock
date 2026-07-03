@@ -291,7 +291,7 @@ export function parseState(issueBody) {
 /** Replace the FORGE:STATE block in place, or append one if absent. */
 export function upsertStateBlock(body, index) {
   const block = serializeState(index);
-  if (BLOCK_RE.test(body || "")) return body.replace(BLOCK_RE, block);
+  if (BLOCK_RE.test(body || "")) return body.replace(BLOCK_RE, () => block);
   return `${body || ""}\n\n${block}`.trimStart();
 }
 ```
@@ -832,8 +832,9 @@ Expected: FAIL — `Cannot find module '../engine.mjs'`.
  * injected runner (runCommand-shaped), determining each phase's outcome from
  * GitHub state (phase.detectOutcome). All effects are injected → fully testable.
  */
+import { fileURLToPath } from "node:url";
 import { appendEvent, readLog, deriveState } from "./engine/runlog.mjs";
-import { PHASES, pickPhase, TERMINAL_REASONS } from "./engine/phases.mjs";
+import { pickPhase, TERMINAL_REASONS } from "./engine/phases.mjs";
 import { reconcileState } from "./engine/reconcile.mjs";
 import { makeProjector } from "./engine/projector.mjs";
 
@@ -842,7 +843,7 @@ const DEFAULT_MAX_ATTEMPTS = 3;
 export async function runIssue(opts) {
   const { issue, dir, agentId, lane = "staging", io, runner,
           now = () => Date.now(), maxAttempts = DEFAULT_MAX_ATTEMPTS,
-          commandsDir = new URL("../commands", import.meta.url).pathname } = opts;
+          commandsDir = fileURLToPath(new URL("../commands", import.meta.url)) } = opts;
   const projector = makeProjector(io);
 
   // 1. Load + reconcile (GitHub wins).
@@ -1012,12 +1013,12 @@ describe("crash injection", () => {
 });
 ```
 
-> Note: the engine's `runPhaseWithRetry` swallows a thrown runner as a `PHASE_FAILED` and retries within the same run. To simulate a true process death (no in-run retry), the crash test throws and lets the **outer** `try/catch` abandon the run, then starts a fresh `runIssue` — mirroring a killed process that is re-launched. If the default `maxAttempts` masks the crash, pass `maxAttempts: 1` in the crash runs.
+> **CORRECTION (supersedes the code block above).** Injecting the crash from the `runner` does NOT work: `runPhaseWithRetry` catches a thrown runner as a retryable `PHASE_FAILED` (so the run completes in one launch — a false positive), and `maxAttempts: 1` makes a single failure escalate straight to `needs-human` (breaking the run), not resume. A true process death must be injected where `runIssue` does NOT internally catch it: (1) the `projector.writeState` FORGE:STATE mirror (engine.mjs:53), which fires *after* the local `PHASE_COMMIT` is appended — resume must continue from the run-log; and (2) `phase.detectOutcome` (engine.mjs:81), which fires *after* a phase's side effect but *before* its commit — the phase must re-run idempotently. The committed `bin/tests/engine-crash.test.mjs` injects at both points (via a fake `io.gh`/`io.git` that throws once), relaunches `runIssue` like a supervisor, and asserts `launches >= 2` so the crash provably fired.
 
 - [ ] **Step 2: Run the test to verify it fails (if it does), then reconcile**
 
 Run: `node --test bin/tests/engine-crash.test.mjs`
-Expected initially: may FAIL if in-run retry masks the simulated crash. If so, add `maxAttempts: 1` to the `runIssue` calls inside the `for` loop and re-run. Expected after: PASS.
+Expected: 9/9 PASS — 8 mirror-crash points (initial state write + 6 phase commits + terminate) plus 1 mid-phase build crash, each asserting `launches >= 2` so resume is provably exercised (see the CORRECTION note below for why the crash is injected at the mirror/detectOutcome, not the runner).
 
 - [ ] **Step 3: Commit**
 
@@ -1032,12 +1033,14 @@ git commit -s -m "test(engine): crash-injection proves per-phase resume + idempo
 
 **Files:**
 - Create: `bin/engine-cli.mjs`
-- Modify: `bin/forgedock.mjs` (add a `run` subcommand case in the command switch near the existing `install/init/...` dispatch)
+- Modify: `bin/forgedock.mjs` (add a `run-issue` subcommand case in the command switch near the existing `install/init/...` dispatch)
 - Test: `bin/tests/engine-cli.test.mjs`
 
 **Interfaces:**
 - Consumes: `runIssue` (Task 6).
 - Produces: `makeIo() => {gh, git}` (real `gh`/`git` via `execFile`), `scanStalls(issues, dir, io, now) => number[]` (issues whose lease expired on a non-terminal state), and `runFromCli(argv)`.
+
+Note: the subcommand is named `run-issue`, not `run`, to avoid colliding with the pre-existing `forgedock run <command>` spec-runner from #1151.
 
 - [ ] **Step 1: Write the failing test for `scanStalls` (pure, no network)**
 
@@ -1073,7 +1076,7 @@ Expected: FAIL — module not found.
 ```js
 // bin/engine-cli.mjs
 /**
- * Headless entry point: `forgedock run <issue>` drives one issue through the
+ * Headless entry point: `forgedock run-issue <issue>` drives one issue through the
  * durable engine; scanStalls finds dead-lease issues for the orchestrator to resume.
  */
 import { execFile } from "node:child_process";
@@ -1112,7 +1115,7 @@ export async function scanStalls(issues, io, now) {
 
 export async function runFromCli(argv) {
   const issue = parseInt(argv[0], 10);
-  if (!Number.isInteger(issue)) throw new Error("usage: forgedock run <issue-number>");
+  if (!Number.isInteger(issue)) throw new Error("usage: forgedock run-issue <issue-number>");
   const lane = flag(argv, "--lane") || "staging";
   const io = makeIo();
   const agentId = `cli_${process.pid}`;
@@ -1129,12 +1132,14 @@ function flag(argv, name) { const i = argv.indexOf(name); return i >= 0 ? argv[i
 Add a `case` to the existing command switch (the block that dispatches `install`/`init`/`update`/`help`). Locate it and insert:
 
 ```js
-    case "run": {
+    case "run-issue": {
       const { runFromCli } = await import("./engine-cli.mjs");
       await runFromCli(process.argv.slice(3));
       break;
     }
 ```
+
+Note: named `run-issue`, not `run`, to avoid colliding with the pre-existing `forgedock run <command>` spec-runner from #1151.
 
 - [ ] **Step 5: Run test to verify it passes**
 
@@ -1150,7 +1155,7 @@ Expected: PASS — all engine suites plus the pre-existing runner/tui/etc. suite
 
 ```bash
 git add bin/engine-cli.mjs bin/tests/engine-cli.test.mjs bin/forgedock.mjs
-git commit -s -m "feat(engine): forgedock run headless entry + lease-based stall scan"
+git commit -s -m "feat(engine): forgedock run-issue headless entry + lease-based stall scan"
 ```
 
 ---

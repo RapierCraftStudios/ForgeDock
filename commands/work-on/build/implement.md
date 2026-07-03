@@ -2,6 +2,8 @@
 description: Implementation agent — writes code, makes commits, posts builder comment
 argument-hint: [issue number] [--repo GH_REPO] [--gh-flag GH_FLAG] [--worktree PATH] [--branch BRANCH]
 ---
+<!-- SPDX-FileCopyrightText: Copyright (c) RapierCraft Studios -->
+<!-- SPDX-License-Identifier: AGPL-3.0-or-later -->
 
 # work-on/build/implement — Implementation Subcommand
 
@@ -241,9 +243,11 @@ gh issue comment {NUMBER} {GH_FLAG} --body "<!-- FORGE:BUILDER -->
 {Checklist of each criterion from the contract, marked ✅ or ❌}
 
 ### Testing Checklist
-- [ ] {Test scenario 1}
-- [ ] {Test scenario 2}
-- [ ] {Test scenario 3}
+- [ ] {Test scenario 1} [type:api]
+- [ ] {Test scenario 2} [type:unit]
+- [ ] {Test scenario 3} [type:e2e]
+
+> **Test-type annotation** (optional): Append `[type:api]`, `[type:unit]`, `[type:e2e]`, or `[type:manual]` to each checklist item. The test gate reads this annotation directly and skips regex inference. Omit it to rely on regex classification fallback.
 
 <!-- FORGE:BUILDER:COMPLETE -->"
 ```

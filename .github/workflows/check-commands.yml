@@ -1,0 +1,29 @@
+name: Check Command Conflicts
+
+on:
+  pull_request:
+    paths:
+      - 'commands/**'
+      - 'scripts/check-native-conflicts.sh'
+  push:
+    branches:
+      - staging
+      - main
+    paths:
+      - 'commands/**'
+      - 'scripts/check-native-conflicts.sh'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.sha }}
+  cancel-in-progress: true
+
+jobs:
+  check-native-conflicts:
+    name: Native command conflict check
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Check native command conflicts
+        run: bash scripts/check-native-conflicts.sh commands/

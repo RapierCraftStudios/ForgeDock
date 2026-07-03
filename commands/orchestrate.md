@@ -2,6 +2,8 @@
 description: Orchestrate parallel work on multiple issues or an entire milestone — spawns sub-agents that each run the full /work-on pipeline
 argument-hint: [milestone <slug> | #1 #2 #3 | next <N> | fast-lane | priority:P0]
 ---
+<!-- SPDX-FileCopyrightText: Copyright (c) RapierCraft Studios -->
+<!-- SPDX-License-Identifier: AGPL-3.0-or-later -->
 
 # /orchestrate — Multi-Issue Parallel Orchestrator
 
@@ -11,9 +13,9 @@ argument-hint: [milestone <slug> | #1 #2 #3 | next <N> | fast-lane | priority:P0
 
 1. **Every agent MUST invoke `/work-on` via the Skill tool.** You do NOT write implementation prompts. You copy the Phase 4A template verbatim and fill in the `{VARIABLES}`. Nothing else. No custom prompts. No "just read and edit" shortcuts. The Skill tool invocation is what triggers labels, investigation comments, structured review, and trajectory tracking. Without it, the agent's work has no paper trail and is worthless.
 
-2. **You are a dispatcher, not a builder.** You resolve issues, plan waves, spawn agents, and report results. You NEVER read code, edit files, or implement fixes yourself.
+2. **You are a dispatcher, not a builder.** You resolve issues, build the dependency DAG, spawn agents, and report results. You NEVER read code, edit files, or implement fixes yourself.
 
-3. **After each wave, verify agents used `/work-on`.** Check that completed issues have `workflow:*` labels and structured comments. If an agent bypassed the pipeline, report it as a failure.
+3. **After each agent completes, verify it used `/work-on`.** Check that completed issues have `workflow:*` labels and structured comments. If an agent bypassed the pipeline, report it as a failure.
 
 ---
 
@@ -129,7 +131,7 @@ If a `workflow:decomposed` issue is found, automatically expand it to its open s
 **What the orchestrator SHOULD do:**
 - If two issues look related, add a note in the agent prompt: "Note: #{OTHER} has similar symptoms — investigate whether this is the same root cause or a different code path"
 - Let both agents run independently — if one finds it's truly a duplicate, `/work-on`'s investigation phase will close it as invalid with evidence
-- Flag potential overlap in the wave plan for the user's awareness, but NEVER act on it
+- Flag potential overlap in the DAG plan for the user's awareness, but NEVER act on it
 
 **Why**: Surface-level similarity hides critical differences. #3842 (api_key.id lazy load) and #4039 (user.id lazy load) had identical error messages but targeted completely different ORM objects. Closing #4039 as a "duplicate" would have left a customer-impacting P0 bug unfixed.
 
@@ -253,6 +255,154 @@ Proceeding to dependency analysis with the expanded issue set...
 
 ---
 
+## Phase 2.5: Investigation Synthesis
+
+<!-- Added: forge#1192 -->
+
+**Purpose**: Reconcile *competing recommendations* across investigation outputs BEFORE they fan out to implementation agents. Phase 3's conflict detection (Step 3C) deconflicts issues at the **file** layer only — it prevents git merge conflicts. It performs **zero semantic deconfliction**: two issues can touch entirely different files while proposing **contradictory approaches to the same problem**, and the file-overlap detector passes both straight to parallel dispatch. This phase closes that gap by clustering investigations semantically (by target subsystem, not by file) and arbitrating incompatible plans into a single decision — or serializing them so the second agent inherits the first's decision.
+
+**This phase operates ONLY on FORGE annotations and issue bodies. It NEVER reads code, and it NEVER closes, skips, or merges issues.** Reconciling plans/annotations is distinct from adjudicating *duplicate validity* (Safety Rule 9, the #3842/#4039 scar): the anti-dedup rule forbids the orchestrator from deciding two issues are the same bug and closing one — that call belongs to `/work-on` investigation agents examining actual code. Plan reconciliation touches neither code nor issue state; it only writes a synthesis brief annotation and adds `Depends on #X` serialization edges. It therefore does not violate Hard Rule 2 (dispatcher, not builder) or Safety Rule 9.
+
+**No-op guard**: This entire phase is skipped when the batch contains **0 or 1 investigations** — there is nothing to reconcile against. Proceed directly to Phase 3.
+
+### Step 2.5A: No-op guard
+
+```bash
+# Count investigations that completed in Wave 0 (Phase 2), regardless of whether each
+# emitted a Knowledge Gist. Use the full completed-investigation set (the same
+# {investigation_numbers} that Steps 2C.5, 2.5B and 2.5C iterate) — NOT the
+# INVESTIGATION_GISTS map, which only holds gist-producing investigations and would
+# undercount when a genuine investigation reached a recommendation without a gist.
+# If < 2, skip synthesis entirely.
+INVESTIGATION_NUMS=( {investigation_numbers} )
+INVESTIGATION_COUNT=${#INVESTIGATION_NUMS[@]}
+if [ "$INVESTIGATION_COUNT" -lt 2 ]; then
+  echo "Phase 2.5 skipped: ${INVESTIGATION_COUNT} investigation(s) in batch — nothing to reconcile. Proceeding to Phase 3."
+  SYNTHESIS_RAN=false
+  RECONCILED_COUNT=0
+  # Skip to Phase 3.
+else
+  SYNTHESIS_RAN=true
+fi
+```
+
+If `SYNTHESIS_RAN` is false, do NOT execute Steps 2.5B–2.5D — proceed directly to Phase 3. Step 4A's `{GIST_CONTEXT}` generation will fall back to the existing raw-gist behavior (no synthesis brief exists).
+
+### Step 2.5B: Cluster investigations by target subsystem
+
+For each investigation that completed in Wave 0, read its `FORGE:INVESTIGATOR` comment (and the newly spawned implementation issue bodies from Step 2D) and extract its **Recommendation** and **Affected Files / target subsystem** — NOT to compare files for merge conflicts, but to group investigations that operate on the **same conceptual surface** (e.g. "auth session lifecycle", "credit metering", "orchestrate DAG construction").
+
+```bash
+# For each investigation, pull its recommendation + affected-files block (annotations only — no code reads)
+declare -A INV_RECOMMENDATION
+declare -A INV_SUBSYSTEM
+for INV_NUM in {investigation_numbers}; do
+  INV_BODY=$(gh api repos/{GH_REPO}/issues/${INV_NUM}/comments \
+    --jq '.[] | select(.body | contains("FORGE:INVESTIGATOR")) | .body' 2>/dev/null | head -1)
+  # Extract the Recommendation section (annotation prose only)
+  INV_RECOMMENDATION[$INV_NUM]=$(echo "$INV_BODY" | awk '/^### Recommendation/{p=1;next}/^### /{p=0}p')
+  # Derive a coarse subsystem tag from Affected Files directories + title keywords
+  INV_SUBSYSTEM[$INV_NUM]=$(echo "$INV_BODY" \
+    | grep -oP '`[^`]+/[^`]+`' | xargs -r -n1 dirname 2>/dev/null | sort | uniq -c | sort -rn | head -1)
+done
+```
+
+**Cluster rule**: Two investigations are in the same cluster when they share a target subsystem (overlapping affected-file directories OR the same domain tag from Step 3B applied to their recommendations). Clustering is by **conceptual surface**, deliberately coarser than Step 3C's file-level analysis — the goal is to surface plan-level contradictions the file layer cannot see.
+
+**Forward reference — related future signal** <!-- Added: forge#1196 -->: This clustering step (Step 2.5B) runs before Phase 3, so no Layer 5 data exists yet at this point — do not treat it as an input here. For readers extending this clustering rule in the future: Step 3C Layer 5 (historical co-change coupling, computed later in Phase 3) is a related signal worth reusing — two investigations whose affected files have historically co-changed would be good candidates for the same subsystem cluster. This is purely a forward reference, not a functional dependency or phase-reordering.
+
+### Step 2.5C: Detect and resolve competing recommendations
+
+Within each cluster (2+ investigations on the same subsystem), compare the **Recommendation** sections for incompatibility — e.g. one recommends adding a cache layer while another recommends removing caching from the same path; one proposes a new abstraction another proposes to delete. This is a semantic comparison of *proposed approaches*, read purely from the annotation prose.
+
+For each detected conflict, resolve it in exactly ONE of two ways:
+
+1. **Arbitration decision** — When the two recommendations are directly incompatible and one is clearly correct given the combined evidence, record a single deconflicted decision for BOTH issues. State which approach wins and why. This decision is written into each affected issue's `FORGE:SYNTHESIS_BRIEF` (Step 2.5D) — it does NOT close either issue; both still run, but against a reconciled plan.
+2. **Serialization edge** — When the approaches are interdependent (the second issue's correct approach depends on what the first decides) or arbitration cannot pick a winner from annotations alone, add a `Depends on #{FIRST}` marker to the SECOND issue's body so the two serialize. The second agent then inherits the first's merged result during its own investigation/context phase.
+
+```bash
+# Serialization is expressed as a standard "Depends on #X" edge so Step 3A consumes it
+# with no new plumbing (see Step 3A dependency-marker parsing).
+RECONCILED_COUNT=0
+N_ARBITRATED=0
+N_SERIALIZED=0
+for CONFLICT in "${DETECTED_CONFLICTS[@]}"; do
+  # CONFLICT = "FIRST SECOND RESOLUTION" where RESOLUTION is "arbitrate" or "serialize"
+  set -- $CONFLICT; FIRST=$1; SECOND=$2; RESOLUTION=$3
+  if [ "$RESOLUTION" = "serialize" ]; then
+    # Reverse-direction cycle guard: before adding "#SECOND depends on #FIRST", check
+    # whether #FIRST already declares "Depends on #SECOND". If it does, the requested
+    # edge would close a 2-node cycle (#FIRST -> #SECOND -> #FIRST) that Step 3D.5's
+    # cycle detector would later have to exclude from dispatch entirely (both issues
+    # stuck behind needs-human). Skip the edge and fall back to arbitration-in-place
+    # instead, so both issues still run.
+    FIRST_BODY=$(gh issue view $FIRST -R {GH_REPO} --json body --jq '.body')
+    if echo "$FIRST_BODY" | grep -qiE "depends on #${SECOND}\b"; then
+      echo "Phase 2.5: skipping serialization edge #${FIRST} -> #${SECOND}: reverse edge #${SECOND} -> #${FIRST} already exists (would create a cycle). Falling back to arbitration-in-place."
+      RESOLUTION="arbitrate"
+    else
+      SECOND_BODY=$(gh issue view $SECOND -R {GH_REPO} --json body --jq '.body')
+      if ! echo "$SECOND_BODY" | grep -qiE "depends on #${FIRST}\b"; then
+        gh issue edit $SECOND -R {GH_REPO} \
+          --body "${SECOND_BODY}
+
+Depends on #${FIRST}
+<!-- Serialized by orchestrate Phase 2.5: competing recommendation reconciled via dependency edge. -->"
+      fi
+    fi
+  fi
+  # Re-check RESOLUTION (may have been downgraded from "serialize" to "arbitrate" above)
+  # so the breakdown counters and the Step 2.5D per-issue decision recording both reflect
+  # the resolution that was actually applied, not the one originally proposed.
+  if [ "$RESOLUTION" = "serialize" ]; then
+    N_SERIALIZED=$((N_SERIALIZED + 1))
+  else
+    N_ARBITRATED=$((N_ARBITRATED + 1))
+  fi
+  RECONCILED_COUNT=$((RECONCILED_COUNT + 1))
+done
+echo "Phase 2.5 reconciled ${RECONCILED_COUNT} competing recommendation(s) (${N_ARBITRATED} arbitrated, ${N_SERIALIZED} serialized)."
+```
+
+**MUST NOT**: close, skip, or merge any issue on the basis of a detected conflict. Two issues with competing recommendations are BOTH valid work items — Phase 2.5 makes their plans coherent, it does not eliminate either. (This is the Safety Rule 9 boundary — see the Purpose note above.)
+
+### Step 2.5D: Emit one deconflicted brief per issue
+
+For each implementation issue about to be dispatched, write a single `FORGE:SYNTHESIS_BRIEF` annotation containing ONLY the reconciled context relevant to *that* issue — the arbitration decisions affecting it and pointers to the specific sibling investigation Gists it actually needs. This replaces injecting the entire aggregated milestone-index gist (which forces each agent to independently re-arbitrate the same contradictions, wasting tokens and producing nondeterministic cross-PR incoherence).
+
+```bash
+for ISSUE_NUM in {implementation_issue_numbers}; do
+  # Assemble the per-issue brief: arbitration decisions touching this issue's subsystem +
+  # only the relevant sibling gist URLs (not the full milestone-index dump)
+  BRIEF_BODY="Reconciled context for this issue (see orchestrate Phase 2.5):
+${PER_ISSUE_DECISIONS[$ISSUE_NUM]}"
+  gh issue comment $ISSUE_NUM -R {GH_REPO} --body "<!-- FORGE:SYNTHESIS_BRIEF -->
+## Synthesis Brief
+
+${BRIEF_BODY}
+
+<!-- FORGE:SYNTHESIS_BRIEF:COMPLETE -->"
+done
+```
+
+The `FORGE:SYNTHESIS_BRIEF` annotation is consumed by Step 4A's `{GIST_CONTEXT}` generation (which prefers it over the raw milestone-index gist when present) and its reconciled count (`RECONCILED_COUNT`) feeds the Step 6B `Competing recommendations reconciled (Phase 2.5)` metric.
+
+**Report**: Post a brief Phase 2.5 summary to the user before proceeding to Phase 3:
+
+```
+## Phase 2.5: Investigation Synthesis
+
+**Investigations reconciled**: {INVESTIGATION_COUNT}
+**Competing recommendations detected**: {RECONCILED_COUNT}
+  - Arbitrated in place: {N_ARBITRATED} (includes any serialization edges downgraded by the reverse-cycle guard)
+  - Serialized via dependency edge: {N_SERIALIZED}
+**Per-issue synthesis briefs emitted**: {N_briefs}
+
+Proceeding to dependency analysis with a deconflicted plan set...
+```
+
+---
+
 ## Phase 3: Dependency Analysis & Execution Plan
 
 ### Step 3A: Analyze explicit dependencies
@@ -272,7 +422,7 @@ done
 
 ### Step 3B: Domain estimation
 
-For each issue, estimate which domains it touches based on title, body, and labels. This improves wave planning — issues in the same domain likely touch the same files and should be sequential.
+For each issue, estimate which domains it touches based on title, body, and labels. This improves DAG construction — issues in the same domain likely touch the same files and should be serialized (one becomes a predecessor of the other).
 
 ```bash
 for NUM in {issue_numbers}; do
@@ -289,11 +439,11 @@ for NUM in {issue_numbers}; do
 done
 ```
 
-**Use domain info for wave planning:**
-- Issues in the SAME domain (especially WORKER, BILLING, DATABASE) are more likely to touch the same files → prefer sequential within a wave or adjacent waves
+**Use domain info for DAG edge construction:**
+- Issues in the SAME domain (especially WORKER, BILLING, DATABASE) are more likely to touch the same files → add predecessor edges to serialize them
 - Issues in DIFFERENT domains are more likely independent → safe to parallelize
 - BILLING + AUTH issues should be prioritized early (security-critical)
-- **DATABASE issues are ALWAYS serialized — hard rule, no exceptions.** Multiple agents writing migrations simultaneously will produce duplicate migration numbers (e.g., two `0067_*.sql` files), which breaks the migration runner. Every DATABASE issue must be in its own wave. If 3 DATABASE issues are in a batch: Wave 1 runs issue A, Wave 2 runs issue B, Wave 3 runs issue C.
+- **DATABASE issues are ALWAYS serialized — hard rule, no exceptions.** Multiple agents writing migrations simultaneously will produce duplicate migration numbers (e.g., two `0067_*.sql` files), which breaks the migration runner. DATABASE issues form a linear predecessor chain in the DAG. If 3 DATABASE issues are in a batch: A has no predecessors, B has {A} as predecessor, C has {B} as predecessor.
 
 **Store domain tags per issue** for use in the plan presentation (Step 3E).
 
@@ -303,27 +453,36 @@ Domain estimation (above) catches broad category overlap but misses cases where 
 
 #### Layer 1: Explicit file-overlap extraction
 
-**For issues that already have an INVESTIGATOR comment** (from Wave 0 or a prior session), extract their Affected Files list:
+**For issues that already have an INVESTIGATOR comment** (from Wave 0 or a prior session), extract their Affected Files list. **For issues WITHOUT an investigation comment**, fall back to parsing the issue body for file paths. Both code paths accumulate into a single `LAYER1_FILES` array (declared once, before the loop) — this is the batch-wide file set that Layer 5's co-change query (below) reuses, per the "file list already extracted in Layer 1" reference in Layer 2 and Layer 5:
 
 ```bash
+LAYER1_FILES=()
 for NUM in {issue_numbers}; do
   echo "=== #$NUM ==="
-  gh api repos/{GH_REPO}/issues/${NUM}/comments \
+  FILES_FOR_NUM=$(gh api repos/{GH_REPO}/issues/${NUM}/comments \
     --jq '.[] | select(.body | contains("FORGE:INVESTIGATOR")) | .body' 2>/dev/null \
-    | grep -oP '`[^`]*\.(py|tsx?|jsx?|sql|json|ya?ml)`' | sort -u
+    | grep -oP '`[^`]*\.(py|tsx?|jsx?|sql|json|ya?ml)`' | tr -d '`' | sort -u)
+
+  # Fall back to parsing the issue body directly when no INVESTIGATOR comment exists yet.
+  if [ -z "$FILES_FOR_NUM" ]; then
+    FILES_FOR_NUM=$(gh issue view $NUM --json body --jq '.body' \
+      | grep -oP '`[^`]*\.(py|tsx?|jsx?|sql|json|ya?ml)`' | tr -d '`' | sort -u)
+  fi
+
+  echo "$FILES_FOR_NUM"
+
+  # Accumulate into the batch-wide array — read line-by-line so each extracted path
+  # becomes one array element (paths here don't contain spaces, but this stays robust).
+  while IFS= read -r f; do
+    [ -n "$f" ] && LAYER1_FILES+=("$f")
+  done <<< "$FILES_FOR_NUM"
 done
 ```
 
-**For issues WITHOUT an investigation comment**, fall back to parsing the issue body for file paths:
-
-```bash
-gh issue view $NUM --json body --jq '.body' | grep -oP '`[^`]*\.(py|tsx?|jsx?|sql|json|ya?ml)`' | sort -u
-```
-
 **Cross-reference all extracted file lists:**
-- If two issues share ANY affected file → they MUST be in separate waves (sequential)
+- If two issues share ANY affected file → one MUST be a predecessor of the other (serialized)
 - The issue with lower issue number goes first (stable ordering), unless an explicit `Depends on #` says otherwise
-- Add a conflict note to the wave plan: "#{A} and #{B} both modify `{file}` — serialized"
+- Add a conflict note to the DAG plan: "#{A} and #{B} both modify `{file}` — #{A} is predecessor of #{B}"
 
 #### Layer 2: Directory-proximity detection
 
@@ -393,46 +552,215 @@ When file extraction yields **fewer than 2 file paths** for an issue (common for
 
 **Rules:**
 - If an issue has 0-1 extracted file paths AND shares a domain tag (from Step 3B) with another issue → serialize them
-- If an issue has 0 extracted file paths AND no domain tag could be determined → serialize it with the immediately preceding wave (safest default)
+- If an issue has 0 extracted file paths AND no domain tag could be determined → add it as a predecessor of the next same-domain issue, or if no domain match exists, serialize it after the most recently added issue (safest default)
 - Add a note to the plan: "#{N} — low file-extraction confidence, serialized conservatively"
 
-**Rationale**: The cost of a false-negative (two agents conflict → one fails with merge error, wasting the full agent run) far exceeds the cost of a false-positive (an issue waits one extra wave before starting). Always err toward serialization when uncertain.
+**Rationale**: The cost of a false-negative (two agents conflict → one fails with merge error, wasting the full agent run) far exceeds the cost of a false-positive (an issue waits for one predecessor before starting). Always err toward serialization when uncertain.
+
+#### Layer 5: Historical co-change coupling <!-- Added: forge#1196 --> <!-- Empty-set guard: forge#1206 -->
+
+Layers 1-4 infer conflict risk from structure — path overlap, directory nesting, hard-coded high-fan-in lists. They miss the case where two files with no directory or naming relationship have historically changed together in the same commits (e.g. `models/user.py` and `services/billing/charge.py`), and they over-serialize the inverse case where files merely sit near each other but have never actually co-changed. Git commit history answers both questions directly and empirically. This layer reads **commit metadata only** — the list of files touched per commit — never file contents, so it does not violate Hard Rule 2 ("dispatcher, not a builder... never read code"). This is the same category of operation already established as compliant in `commands/work-on/investigate.md` and `commands/work-on/build/context.md`, which mine `git log` for issue cross-referencing.
+
+**Bounded query** — restrict both the time window and the file set so this stays a small, deterministic, single-shot lookup (never a full-repo co-change matrix). An empty `ALL_AFFECTED_FILES` set MUST short-circuit before the query runs — passing an empty array to `git log --` does not mean "match nothing", it means "no pathspec restriction", which would silently widen the query to the entire repo:
+
+```bash
+# Union of affected files across all issues in the CURRENT batch only (already
+# extracted per-issue in Layer 1) — never the whole repo. Built as an array
+# (not a newline-joined scalar) so each path survives as a single pathspec
+# argument below — a plain string here would be word-split and glob-expanded
+# by the shell when handed to `git log --`, silently mangling or dropping any
+# path containing a space or glob metacharacter.
+mapfile -t ALL_AFFECTED_FILES < <(printf '%s\n' "${LAYER1_FILES[@]}" | sort -u)
+
+# Guard: an empty array expands to nothing after `--`, which git interprets as
+# "no pathspec restriction" (i.e. the whole repo) rather than "match nothing".
+# Skip the query entirely in that case instead of letting it silently widen to
+# a full-repo scan — this can happen when upstream file-extraction (Layer 1)
+# yields zero paths for every issue in the batch.
+if [ "${#ALL_AFFECTED_FILES[@]}" -eq 0 ]; then
+  echo "Layer 5: no affected files extracted by Layer 1 for this batch — skipping co-change query, falling back to Layers 1-4."
+else
+  # Bounded window: last 90 days, capped at 200 commits — whichever is smaller.
+  # Each commit's file list is delimited by a marker so co-occurring files can be
+  # grouped per-commit in a single pass. The array is expanded quoted
+  # ("${ALL_AFFECTED_FILES[@]}") so every path is passed as one literal argument.
+  git log --name-only --since="90 days ago" --max-count=200 \
+    --pretty=format:'---%H---' -- "${ALL_AFFECTED_FILES[@]}" \
+    > /tmp/cochange_log.txt
+
+  # Parse into commit → file-set groups, then increment a co-occurrence counter
+  # for every unordered pair of files that appear in the SAME commit's file list.
+  # (Illustrative — an agent executing this reads /tmp/cochange_log.txt and tallies
+  # pairs; no separate script is shipped, matching the pseudo-code style of Layers 1-4.)
+fi
+```
+
+**Scoring rule**: A file pair is **co-change coupled** when it appears together in **3 or more** of the commits captured by the bounded query above. A pair with **zero** co-occurrences across the entire window is **verified independent**.
+
+**Apply the signal:**
+- **High co-change pair spans two different issues in the batch** → add a serialization edge between them (same directed-edge convention as Layers 1-4: lower issue number is predecessor), OR, if the pair also carries competing investigation recommendations, flag it for Phase 2.5 arbitration instead of a blind serialization edge (see cross-reference in Step 2.5B below).
+- **Verified-independent pair** → MAY be used to downgrade an existing Layer 2 "broad directory + different domain" or Layer 4 "conservative fallback" serialization to parallel. This downgrade is **never** applied to Layer 1 (same-file hard conflict, which is ground truth from the current batch, not historical inference) or to Layer 3 high-fan-in-file edges (a file can be structurally high-risk even with a thin history window, e.g. a newly added `main.py`).
+- If `ALL_AFFECTED_FILES` is empty, the guard above skips the query and Layer 5 contributes nothing for the entire batch. If the bounded query runs but returns no commits (e.g. brand-new files, or window/pair-set too small to have history) → Layer 5 contributes nothing; fall back silently to Layers 1-4's existing verdict for that pair.
+
+**Rationale**: Empirical co-change is a strictly stronger signal than directory proximity or naming convention — it is the actual observed outcome the other layers are trying to approximate. Bounding the window and pair-set keeps the query cheap and deterministic while still catching the cross-directory conflicts Layers 1-4 structurally cannot see.
 
 #### Combining all layers
 
-Build the final conflict graph by merging signals from all four layers:
+Build the final conflict graph by merging signals from all five layers:
 
 | Signal | Strength | Action |
 |--------|----------|--------|
 | Layer 1: Same file | **Hard conflict** | Always serialize |
 | Layer 2: Same small directory | **Probable conflict** | Serialize |
 | Layer 2: Same broad directory + same domain | **Probable conflict** | Serialize |
-| Layer 2: Same broad directory + different domain | **Possible conflict** | Parallelize (accept risk) |
+| Layer 2: Same broad directory + different domain | **Possible conflict** | Parallelize (accept risk) — unless Layer 5 shows high co-change, then serialize |
 | Layer 3: High-fan-in file touched | **Probable conflict** | Serialize with same-service issues |
 | Layer 3: Shared model/init pattern | **Probable conflict** | Serialize |
 | Layer 4: Low confidence + same domain | **Conservative** | Serialize |
-| Layer 4: Low confidence + no domain | **Conservative** | Serialize with prior wave |
+| Layer 4: Low confidence + no domain | **Conservative** | Add predecessor edge to most recent issue — unless Layer 5 shows verified independence, then parallelize |
+| Layer 5: High co-change (3+ shared commits, cross-issue file pair) | **Probable conflict** | Serialize (or route to Phase 2.5 arbitration if a competing-recommendation conflict is also present) |
+| Layer 5: Verified independent (zero shared commits) | **Downgrade signal** | Permits downgrading a Layer 2 "broad directory + different domain" or Layer 4 verdict to parallel — never overrides Layer 1 or Layer 3 |
 
-**This supplements, not replaces, the domain keyword estimation.** Domain tags still help with broad sequencing decisions. Multi-layer conflict detection catches the specific cases keywords miss (e.g., two issues that both modify files in `services/api/app/models/` where one is labeled WORKER and the other BILLING — Layer 2 catches this even though Layer 1 shows no direct file overlap).
+**This supplements, not replaces, the domain keyword estimation.** Domain tags still help with broad sequencing decisions. Multi-layer conflict detection catches the specific cases keywords miss (e.g., two issues that both modify files in `services/api/app/models/` where one is labeled WORKER and the other BILLING — Layer 2 catches this even though Layer 1 shows no direct file overlap; or two issues touching files in unrelated directories that Layer 5 shows have co-changed in 4 of the last 12 commits touching either file).
 
-### Step 3D: Build the execution plan
+### Step 3D: Build the dependency DAG
 
-Organize issues into **waves** (groups that can run in parallel):
+Build a **directed acyclic graph (DAG)** of per-issue dependencies. Each issue gets a `predecessors` set — the specific issues that must reach a terminal state before this issue can dispatch. This replaces the previous wave-grouping model where all issues in a wave had to complete before any issue in the next wave could start.
 
-**Wave rules:**
-- Investigation issues already ran in Wave 0 (Phase 2) — they are NOT included in these waves
-- Issues with NO dependencies and NO file overlap → same wave (parallel)
-- Issues that depend on other issues in the set → later wave (after dependency completes)
-- **No artificial agent limit per wave** — spawn as many parallel agents as there are independent issues. The only constraint is file overlap and explicit dependencies.
-- Issues that touch the **same files** must be in separate waves (sequential) to avoid merge conflicts
-- If unsure about conflicts, err on the side of parallel — each agent works in its own worktree
+**DAG construction rules:**
+- Investigation issues already ran in Phase 2 — they are NOT included in this DAG
+- Each issue starts with an empty predecessor set
+- **Explicit dependencies**: If issue B says "Depends on #A" or "Blocked by #A", add A to B's predecessors
+- **File-conflict edges**: If two issues share affected files (from Step 3C Layer 1), add a directed edge: lower issue number → higher issue number (unless explicit deps say otherwise). The later issue has the earlier issue in its predecessors.
+- **Domain serialization edges**: DATABASE issues form a linear chain (each has the previous DATABASE issue as its predecessor). Same-small-directory issues (Layer 2) and high-fan-in file issues (Layer 3) get directed edges as per Step 3C rules.
+- **Conservative fallback edges**: Low-confidence issues (Layer 4) get edges to same-domain issues as per Step 3C rules.
+- **Co-change coupling edges** <!-- Added: forge#1196 -->: High co-change file pairs (Layer 5, 3+ shared commits in the bounded window) that span two different issues get a directed edge using the same lower-issue-number-is-predecessor convention as Layer 1. Verified-independent pairs (Layer 5, zero shared commits) may instead REMOVE an edge that Layer 2 or Layer 4 would otherwise have added for that pair — Layer 1 and Layer 3 edges are never removed by a Layer 5 downgrade.
+- **No artificial concurrency limit** — all issues with empty predecessor sets dispatch simultaneously. The only constraints are file overlap, explicit dependencies, and co-change coupling.
 
-**Example plan:**
+**Terminology:**
+- **Ready issues**: Issues whose predecessor set is empty (all predecessors have reached terminal state or were never added)
+- **Blocked issues**: Issues with one or more unresolved predecessors
+- **Critical path**: The longest chain of dependent issues in the DAG — determines minimum wall-clock time
+
+**Example DAG:**
 ```
-Wave 0 (already done): #2644 (investigation) → spawned #2645, #2646, #2647
-Wave 1 (parallel): #2633 (orphaned queues), #2636 (invalidation sub), #2645 (new finding), #2646 (new finding)
-Wave 2 (after deps): #2634 (enable daemon — after #2633 fixes memory leak), #2647 (depends on #2645)
+Phase 2 (already done): #2644 (investigation) → spawned #2645, #2646, #2647
+
+Dependency graph:
+  #2633 (orphaned queues)     → predecessors: {}          ← READY
+  #2636 (invalidation sub)    → predecessors: {}          ← READY
+  #2645 (new finding)         → predecessors: {}          ← READY
+  #2646 (new finding)         → predecessors: {}          ← READY
+  #2634 (enable daemon)       → predecessors: {#2633}     ← blocked until #2633 completes
+  #2647 (depends on #2645)    → predecessors: {#2645}     ← blocked until #2645 completes
+
+Critical path: #2633 → #2634 (2 steps) or #2645 → #2647 (2 steps)
+Initial dispatch: #2633, #2636, #2645, #2646 (all ready — launched simultaneously)
 ```
+
+**Key advantage over waves**: When #2633 completes, #2634 dispatches immediately — it does not wait for #2636, #2645, or #2646 to finish. Similarly, when #2645 completes, #2647 dispatches immediately regardless of other issues' status.
+
+### Step 3D.5: Cycle Detection (MANDATORY) <!-- Added: forge#1085 -->
+
+**Run immediately after Step 3D's DAG edge construction, before presenting the plan (Step 3E).** This step validates that the predecessor graph is acyclic. Without it, mutual `Depends on` declarations (e.g., A depends on B AND B depends on A) cause both issues to remain permanently blocked in Step 4B's dispatch loop — no error, no timeout, indefinite deadlock.
+
+**Algorithm**: Kahn's topological sort. Runs in O(V+E) — negligible overhead for typical batch sizes.
+
+```bash
+# --- Step 3D.5: Cycle Detection ---
+# Inputs:
+#   ISSUES[]         — array of all issue numbers in the DAG
+#   PREDECESSORS[N]  — space-separated list of predecessor issue numbers for issue N
+
+# Step 1: Compute in-degree for each issue
+declare -A IN_DEGREE
+for NUM in "${ISSUES[@]}"; do
+  IN_DEGREE[$NUM]=0
+done
+for NUM in "${ISSUES[@]}"; do
+  for PRED in ${PREDECESSORS[$NUM]:-}; do
+    IN_DEGREE[$NUM]=$(( ${IN_DEGREE[$NUM]:-0} + 1 ))
+  done
+done
+
+# Step 2: Seed the queue with zero-in-degree issues (no predecessors)
+KAHN_QUEUE=()
+for NUM in "${ISSUES[@]}"; do
+  [ "${IN_DEGREE[$NUM]}" -eq 0 ] && KAHN_QUEUE+=("$NUM")
+done
+
+# Step 3: Process queue — reduce successor in-degrees, enqueue newly freed issues
+PROCESSED_COUNT=0
+PROCESSED_ORDER=()
+while [ "${#KAHN_QUEUE[@]}" -gt 0 ]; do
+  # Dequeue
+  CURRENT="${KAHN_QUEUE[0]}"
+  KAHN_QUEUE=("${KAHN_QUEUE[@]:1}")
+  PROCESSED_ORDER+=("$CURRENT")
+  PROCESSED_COUNT=$(( PROCESSED_COUNT + 1 ))
+
+  # Reduce in-degree of all issues that depend on CURRENT (i.e., CURRENT is in their PREDECESSORS)
+  for SUCCESSOR in "${ISSUES[@]}"; do
+    for PRED in ${PREDECESSORS[$SUCCESSOR]:-}; do
+      if [ "$PRED" = "$CURRENT" ]; then
+        IN_DEGREE[$SUCCESSOR]=$(( ${IN_DEGREE[$SUCCESSOR]} - 1 ))
+        [ "${IN_DEGREE[$SUCCESSOR]}" -eq 0 ] && KAHN_QUEUE+=("$SUCCESSOR")
+      fi
+    done
+  done
+done
+
+# Step 4: Any issue not processed has in-degree > 0 — part of a cycle
+CYCLE_ISSUES=()
+EXCLUDED_CYCLE=()
+for NUM in "${ISSUES[@]}"; do
+  FOUND=false
+  for P in "${PROCESSED_ORDER[@]}"; do [ "$P" = "$NUM" ] && FOUND=true && break; done
+  [ "$FOUND" = "false" ] && CYCLE_ISSUES+=("$NUM")
+done
+
+# Step 5: Handle cycles
+if [ "${#CYCLE_ISSUES[@]}" -gt 0 ]; then
+  echo "CYCLE DETECTED in dependency graph — the following issues form a circular dependency:"
+  for C in "${CYCLE_ISSUES[@]}"; do
+    echo "  #${C}: predecessors=[${PREDECESSORS[$C]}]"
+    # Label each cyclic issue needs-human
+    gh issue edit "$C" -R {GH_REPO} --add-label "needs-human" 2>/dev/null || true
+    gh issue comment "$C" -R {GH_REPO} --body "**Cycle detected by /orchestrate**: This issue is part of a circular dependency chain involving issues: ${CYCLE_ISSUES[*]/#/#}. The orchestrator cannot dispatch it automatically. Please fix the \`Depends on\` declarations so that no cycle exists, then re-run /orchestrate." 2>/dev/null || true
+    # Remove from DAG — store in EXCLUDED_CYCLE for Step 3E reporting
+    EXCLUDED_CYCLE+=("$C")
+    # Remove from ISSUES array for all downstream processing
+    # Use exact-match filter loop — pattern substitution (${array[@]/pattern}) leaves blank
+    # slots and corrupts partial matches (e.g., removing 100 changes 1000 to 0).
+    NEW_ISSUES=()
+    for I in "${ISSUES[@]}"; do
+      [ "$I" != "$C" ] && NEW_ISSUES+=("$I")
+    done
+    ISSUES=("${NEW_ISSUES[@]}")
+  done
+  echo ""
+  echo "These issues have been labeled needs-human and excluded from the DAG."
+  echo "Fix their dependency declarations and re-run /orchestrate."
+else
+  echo "DAG cycle check: PASS — no cycles detected. Proceeding with ${#PROCESSED_ORDER[@]} issues."
+fi
+
+# Guard: if all issues were cyclic, ISSUES[] is now empty — abort before presenting an empty plan
+if [ "${#ISSUES[@]}" -eq 0 ]; then
+  echo ""
+  echo "ERROR: All issues in this batch form circular dependencies and have been excluded."
+  echo "Every issue has been labeled needs-human."
+  echo "Fix the Depends on / Blocked by declarations so no cycle exists, then re-run /orchestrate."
+  exit 1
+fi
+# --- End Step 3D.5 ---
+```
+
+**After this step**:
+- `ISSUES[]` contains only acyclic issues — safe to dispatch
+- `EXCLUDED_CYCLE[]` contains cyclic issue numbers — reported in Step 3E, never dispatched
+- If `EXCLUDED_CYCLE` is non-empty, report it clearly in the Step 3E plan before asking for user confirmation
+- If `ISSUES[]` is empty after cycle exclusion (all issues were cyclic), the guard above aborts with `exit 1` — Step 3E is never reached with an empty plan <!-- Added: forge#1110 -->
 
 ### Step 3E: Present the plan to the user
 
@@ -441,103 +769,129 @@ Wave 2 (after deps): #2634 (enable daemon — after #2633 fixes memory leak), #2
 
 **Scope**: {milestone name / "N issues" / "fast-lane"}
 **Total issues**: {count} ({investigation_count} investigations + {implementation_count} implementations)
-**Estimated waves**: {wave_count} (Wave 0 = investigations, then implementation waves)
+**Execution model**: Dependency-graph streaming (issues dispatch as predecessors complete)
 
 {IF investigations exist:}
-### Wave 0 — Investigations (run first, may spawn new issues)
+### Investigations (run first, may spawn new issues)
 | # | Title | Expected Output |
 |---|-------|----------------|
-| #{INV1} | {title} | New issues → folded into subsequent waves |
+| #{INV1} | {title} | New issues → folded into dependency graph |
 
-### Implementation Waves (after investigations complete)
+### Implementation (after investigations complete)
 {END IF}
 
 ### Domain Distribution
 | Domain | Issues | Notes |
 |--------|--------|-------|
 | FRONTEND | {N} | {Independent pages / Shared components} |
-| BILLING | {N} | {Critical — prioritize in Wave 1} |
-| DATABASE | {N} | {Sequential — migration order matters} |
-| AUTH | {N} | {Critical — Wave 1} |
+| BILLING | {N} | {Critical — dispatches immediately} |
+| DATABASE | {N} | {Serialized chain — migration order matters} |
+| AUTH | {N} | {Critical — dispatches immediately} |
 | WORKER | {N} | {High overlap risk within worker service} |
 | AI | {N} | {Independent} |
 | INFRA | {N} | {Independent} |
 
 (Omit rows with 0 issues. Add project-specific domain rows from forge.yaml → review.domains.)
 
-### Implementation Waves
+### Dependency Graph
 
-| Wave | Issues | Strategy |
-|------|--------|----------|
-| 1 | #{A}, #{B}, #{C} | Parallel (no deps, different domains) |
-| 2 | #{D} (after #{A}), #{E} | Parallel (D waits for A) |
-| 3 | #{F} (after #{D}) | Sequential |
+| Issue | Predecessors | Domain | Status |
+|-------|-------------|--------|--------|
+| #{A} | — | FRONTEND | Ready (dispatches immediately) |
+| #{B} | — | BILLING | Ready (dispatches immediately) |
+| #{C} | — | WORKER | Ready (dispatches immediately) |
+| #{D} | #{A} | FRONTEND | Blocked (waits for #{A} only) |
+| #{E} | — | DATABASE | Ready (dispatches immediately) |
+| #{F} | #{E} | DATABASE | Blocked (serialized — waits for #{E}) |
 
-**Note**: Wave 0 investigations may create additional issues that will be automatically added to the implementation waves. The final wave plan will be confirmed after investigations complete.
+**Critical path**: #{E} → #{F} (2 steps, determines minimum wall-clock time)
+**Initial dispatch**: #{A}, #{B}, #{C}, #{E} (all predecessors resolved)
+**Streaming**: #{D} dispatches as soon as #{A} completes — does NOT wait for #{B}, #{C}, or #{E}
+
+**Note**: Investigations may create additional issues that will be automatically added to the dependency graph. The final graph will be confirmed after investigations complete.
 
 **Excluded** (already in progress / ineligible):
 - #{X} — {reason}
+
+{IF EXCLUDED_CYCLE is non-empty:}
+### ⚠ Circular Dependencies Detected — Manual Fix Required
+
+The following issues form a circular dependency chain and **cannot be dispatched** until the cycle is resolved:
+
+| Issue | Depends On | Problem |
+|-------|------------|---------|
+{rows: each EXCLUDED_CYCLE issue, its predecessor list, "mutual dependency — forms cycle with #{other}"}
+
+**Action required**: Edit each issue's body to remove or correct the `Depends on` / `Blocked by` declarations so no cycle exists. Each issue has been labeled `needs-human`. After fixing, re-run `/orchestrate` to dispatch them.
+{END IF}
 
 Proceed? (yes / adjust / pick specific issues)
 ```
 
 **Wait for user confirmation before spawning agents.** This is the checkpoint — once agents launch, they run autonomously.
 
-**After confirmation**: If Wave 0 exists, execute Phase 2B-E first. Then re-present the expanded plan (with newly spawned issues slotted into waves) for a quick confirmation before launching implementation waves.
+**After confirmation**: If investigations exist, execute Phase 2B-E first. Then re-present the expanded plan (with newly spawned issues added to the dependency graph) for a quick confirmation before launching implementation.
 
 ---
 
-## Phase 4: Execute Waves
+## Engine mode (headless)
 
-### Step 4A-pre: Capture staging baseline (MANDATORY before each wave)
-
-**WHY THIS EXISTS**: Milestone-code-onto-staging contamination incidents (see issue #150) produce unexpected growth on the staging branch that is otherwise invisible until after a deploy. Capturing a line-count baseline before each wave and re-checking after allows early detection of any contamination by agents in that wave.
-
-**When to run**: Before launching EVERY wave in batches that target `staging` (fast-lane or milestone→staging). Skip only for pure milestone-branch batches where `{PR_BASE}` is `milestone/*` and staging is not involved.
+When running headless/CI, dispatch each issue via the durable execution engine instead of spawning prose agents:
 
 ```bash
-# Capture staging baseline before launching the wave
-git fetch origin
-if [ "$DEFAULT_BRANCH" = "$STAGING_BRANCH" ]; then
-  # Single-branch repo — staging and default are the same; diff is always zero
-  STAGING_LINES_BEFORE=0
-  echo "Staging baseline before Wave {N}: skipped — single-branch repo (staging == default)"
-else
-  STAGING_LINES_BEFORE=$(git diff --stat origin/$DEFAULT_BRANCH...origin/$STAGING_BRANCH 2>/dev/null \
-    | tail -1 \
-    | grep -oP '\d+ insertion' \
-    | grep -oP '\d+' \
-    || echo "0")
-  echo "Staging baseline before Wave {N}: ${STAGING_LINES_BEFORE} lines ahead of $DEFAULT_BRANCH"
-fi
+forgedock run-issue <issue> --lane <staging|milestone/slug>
 ```
 
-Store `STAGING_LINES_BEFORE` per wave. After the wave completes (after Step 4C), run the integrity check:
+The engine drives every phase transition deterministically, mirrors state to the `FORGE:STATE` block on the issue, and holds a lease. To recover stalls, scan in-flight issues' `FORGE:STATE`; any issue with an expired lease and a non-terminal state is re-dispatched with the same `forgedock run-issue <issue>` command — it resumes from the last committed phase (idempotent). This replaces the label-heuristic "already in progress" check and the resume-with-nagging loop.
+
+---
+
+## Phase 4: Streaming DAG Execution
+
+### Step 4A-pre: Staging baseline tracking (MANDATORY — continuous)
+
+**WHY THIS EXISTS**: Milestone-code-onto-staging contamination incidents (see issue #150) produce unexpected growth on the staging branch that is otherwise invisible until after a deploy. In the streaming DAG model, there are no discrete wave boundaries — instead, track a running baseline and check after each agent completion.
+
+**When to run**: Capture the initial baseline before the first dispatch. Then re-check after every agent that merges a PR targeting `staging`. Skip for pure milestone-branch batches where all issues target `milestone/*`.
 
 ```bash
-# Check staging integrity after wave completes (run after Step 4C)
+# Capture initial staging baseline before first dispatch
 git fetch origin
 if [ "$DEFAULT_BRANCH" = "$STAGING_BRANCH" ]; then
-  STAGING_LINES_AFTER=0
-  STAGING_GROWTH=0
-  echo "Staging integrity check: skipped — single-branch repo (staging == default)"
+  STAGING_LINES_BASELINE=0
+  echo "Staging baseline: skipped — single-branch repo (staging == default)"
 else
-  STAGING_LINES_AFTER=$(git diff --stat origin/$DEFAULT_BRANCH...origin/$STAGING_BRANCH 2>/dev/null \
+  STAGING_LINES_BASELINE=$(git diff --stat origin/$DEFAULT_BRANCH...origin/$STAGING_BRANCH 2>/dev/null \
     | tail -1 \
     | grep -oP '\d+ insertion' \
     | grep -oP '\d+' \
     || echo "0")
-  STAGING_GROWTH=$((STAGING_LINES_AFTER - STAGING_LINES_BEFORE))
-  echo "Staging after Wave {N}: ${STAGING_LINES_AFTER} lines (+${STAGING_GROWTH} vs baseline)"
+  echo "Staging baseline: ${STAGING_LINES_BASELINE} lines ahead of $DEFAULT_BRANCH"
+fi
 
-  # Alert if growth exceeds expected delta
-  # Expected: only the lines from PRs merged in this wave
-  # Alert threshold: growth > 500 lines more than the sum of changed lines from wave PRs
-  # (Use 0 as threshold if no PRs merged — any growth is unexpected)
-  EXPECTED_DELTA={SUM_OF_PR_LINE_COUNTS_THIS_WAVE}  # set from PR diffs collected in 4B
-  UNEXPECTED_GROWTH=$((STAGING_GROWTH - EXPECTED_DELTA))
+# Track cumulative expected growth from merged PRs
+CUMULATIVE_EXPECTED_DELTA=0
+```
+
+**Per-agent-completion integrity check** (run in Step 4B after each agent merges a PR targeting staging):
+
+```bash
+# After agent completes and its PR merges to staging:
+git fetch origin
+if [ "$DEFAULT_BRANCH" != "$STAGING_BRANCH" ]; then
+  STAGING_LINES_NOW=$(git diff --stat origin/$DEFAULT_BRANCH...origin/$STAGING_BRANCH 2>/dev/null \
+    | tail -1 \
+    | grep -oP '\d+ insertion' \
+    | grep -oP '\d+' \
+    || echo "0")
+  STAGING_TOTAL_GROWTH=$((STAGING_LINES_NOW - STAGING_LINES_BASELINE))
+
+  # Add this PR's line count to cumulative expected delta
+  CUMULATIVE_EXPECTED_DELTA=$((CUMULATIVE_EXPECTED_DELTA + {THIS_PR_LINE_COUNT}))
+
+  UNEXPECTED_GROWTH=$((STAGING_TOTAL_GROWTH - CUMULATIVE_EXPECTED_DELTA))
   if [ "$UNEXPECTED_GROWTH" -gt 500 ]; then
-    echo "ALERT: Staging grew by ${STAGING_GROWTH} lines (+${UNEXPECTED_GROWTH} beyond expected ${EXPECTED_DELTA})."
+    echo "ALERT: Staging grew by ${STAGING_TOTAL_GROWTH} lines (+${UNEXPECTED_GROWTH} beyond expected ${CUMULATIVE_EXPECTED_DELTA})."
     echo "This may indicate milestone-code contamination via agent merge commits."
     echo "Review: git log --oneline --merges origin/$DEFAULT_BRANCH..origin/$STAGING_BRANCH"
     echo "Do NOT merge $STAGING_BRANCH → $DEFAULT_BRANCH until the unexpected growth is investigated."
@@ -546,15 +900,120 @@ else
 fi
 ```
 
-If `UNEXPECTED_GROWTH > 500`, report the alert clearly before launching the next wave. The user confirms whether to continue.
+If `UNEXPECTED_GROWTH > 500`, report the alert clearly before dispatching any more agents. The user confirms whether to continue.
 
 ---
 
-### Step 4A: Launch a wave
+### Step 4A.pre.0: Pre-create milestone branches for ready issues (MANDATORY before classify-lane) <!-- Added: forge#901 -->
+
+**WHY THIS EXISTS**: Feature-lane milestone branches were created lazily — by whichever feature-lane agent reached its build phase first. When multiple agents are dispatched simultaneously, they each run the lane check at roughly the same time. Every agent that runs before the branch is first pushed observes "branch absent" and is misrouted (hard-fail / `needs-human`, or fallback to staging in older code paths). The result is a single milestone's PRs scattered across the milestone branch and staging — a branch-routing nondeterminism that recurs under parallelism.
+
+The fix is deterministic: create every milestone branch the ready issues will target **once, up front, before any agent runs `classify-lane.sh`**. After this step, every agent's lane check sees the branch and routes consistently.
+
+**When to run**: Before the classify-lane loop in Step 4A.pre, for every dispatch group (initial ready set + each subsequent batch of newly unblocked issues). The step is a no-op for pure fast-lane issues (no issue in the group has a milestone).
+
+**Requires bash 4+**: This snippet uses an associative array (`declare -A SEEN_MILESTONE_SLUG`) to de-dupe milestone slugs, so it must run under bash 4 or newer. Under a non-bash POSIX shell (`sh`/dash), `declare -A` fails and the de-dupe silently no-ops. This degrades gracefully — branch creation stays correct because the `git ls-remote --exit-code` exists-check below still skips any milestone branch that already exists; the only effect is redundant, idempotent `ls-remote`/`push` attempts for milestones referenced by more than one issue. Run this command's blocks under bash 4+. <!-- Added: forge#901 -->
+
+```bash
+# Pre-create the origin milestone branch for every distinct milestone referenced by ready issues.
+# Slugification MUST byte-match scripts/classify-lane.sh — otherwise a branch is created that
+# the classifier will not select. Keep these two slug pipelines identical.
+git fetch origin
+
+# Collect distinct milestone titles among the ready issues
+declare -A SEEN_MILESTONE_SLUG
+for NUM in {ready_issue_numbers}; do
+  MILESTONE_TITLE=$(gh issue view "$NUM" -R {GH_REPO} --json milestone --jq '.milestone.title // empty' 2>/dev/null || echo "")
+  [ -z "$MILESTONE_TITLE" ] && continue  # fast-lane issue — no milestone branch needed
+
+  # Slugify — IDENTICAL to classify-lane.sh: lowercase → spaces-to-hyphens →
+  # strip non-[a-z0-9-] → collapse hyphens → strip leading/trailing hyphens.
+  SLUG=$(echo "$MILESTONE_TITLE" \
+    | tr '[:upper:]' '[:lower:]' \
+    | tr ' ' '-' \
+    | tr -cd 'a-z0-9-' \
+    | sed 's/--*/-/g' \
+    | sed 's/^-//;s/-$//')
+
+  # Empty-slug guard (matches classify-lane.sh): a title with no ASCII letters/digits/hyphens
+  # would produce "milestone/", an invalid ref. Skip and let classify-lane surface the error.
+  if [ -z "$SLUG" ]; then
+    echo "WARN: milestone title '$MILESTONE_TITLE' (issue #$NUM) produced an empty slug — skipping pre-creation; classify-lane will hard-fail." >&2
+    continue
+  fi
+
+  # De-dupe: only attempt creation once per milestone
+  [ -n "${SEEN_MILESTONE_SLUG[$SLUG]:-}" ] && continue
+  SEEN_MILESTONE_SLUG[$SLUG]=1
+
+  LANE="milestone/$SLUG"
+  if git ls-remote --exit-code origin "$LANE" >/dev/null 2>&1; then
+    echo "Milestone branch '$LANE' already exists on origin — no action."
+    continue
+  fi
+
+  # Create-if-absent from the default branch (matches /milestone create).
+  # $DEFAULT_BRANCH is resolved from forge.yaml at the top of this command.
+  echo "Pre-creating milestone branch '$LANE' from origin/$DEFAULT_BRANCH …"
+  if git push origin "origin/$DEFAULT_BRANCH:refs/heads/$LANE" 2>/dev/null; then
+    echo "Created milestone branch '$LANE'."
+  elif git ls-remote --exit-code origin "$LANE" >/dev/null 2>&1; then
+    # A concurrent orchestrator (or an agent) created it first — harmless. Never force-push.
+    echo "Milestone branch '$LANE' was created concurrently — proceeding with the existing branch."
+  else
+    echo "ERROR: failed to pre-create milestone branch '$LANE' from origin/$DEFAULT_BRANCH." >&2
+    echo "       classify-lane.sh will hard-fail for issues in this milestone until the branch exists." >&2
+  fi
+done
+```
+
+This step is the deterministic counterpart to fix #2 (atomic create-if-absent in the classifier): by guaranteeing the branch exists before the lane checks run, no agent can observe a missing branch. `classify-lane.sh`'s hard-fail is intentionally preserved as the phantom-slug gate for any path that bypasses this step.
+
+### Step 4A.pre: Classify lane for each issue (MANDATORY before dispatching agents)
+
+Before building agent prompts, run `classify-lane.sh` for every issue in the current dispatch group to compute `{LANE}` and `{PR_BASE}` deterministically. The script output is authoritative — the LLM MUST NOT override or reason around it.
+
+```bash
+# Requires classify-lane.sh to be available at ~/.claude/scripts/classify-lane.sh
+# (installed by `npx forgedock` — see bin/forgedock.mjs linkScripts step)
+# Fallback: bash "$FORGE_HOME/scripts/classify-lane.sh" if ~/.claude/scripts/ is unavailable
+
+declare -A ISSUE_LANE
+declare -A ISSUE_PR_BASE
+
+# Batch-level accumulators for review-finding cascade control (Step 4C) and
+# Completion Sweep (Step 4F). Declared here so they persist across ALL agent
+# completions — Step 4C runs per-agent and must NOT re-initialize these.
+DEFERRED_FINDINGS=()
+QUEUED_FINDINGS=()
+declare -A DEFERRED_REASONS
+declare -A AGENT_ISSUE_MAP
+
+for NUM in {ready_issue_numbers}; do
+  PR_BASE=$(bash ~/.claude/scripts/classify-lane.sh "$NUM" -R {GH_REPO}) || {
+    echo "ERROR: classify-lane.sh failed for #$NUM — adding needs-human label and skipping" >&2
+    gh issue edit "$NUM" -R {GH_REPO} --add-label "needs-human" 2>/dev/null || true
+    continue
+  }
+  # Derive LANE label from PR_BASE
+  if [ "$PR_BASE" = "staging" ]; then
+    LANE="fast-lane"
+  else
+    LANE="feature-lane"
+  fi
+  ISSUE_LANE[$NUM]="$LANE"
+  ISSUE_PR_BASE[$NUM]="$PR_BASE"
+  echo "#$NUM → lane=$LANE, PR_BASE=$PR_BASE"
+done
+```
+
+Use `${ISSUE_LANE[$NUM]}` and `${ISSUE_PR_BASE[$NUM]}` to populate `{LANE}` and `{PR_BASE}` in the agent template below. Never substitute prose guesses for these values — the script output is the only valid source. <!-- Added: forge#677 -->
+
+### Step 4A: Dispatch ready issues
 
 **REMINDER: You MUST use the template below verbatim. Only fill in `{VARIABLES}`. Do NOT rewrite the agent prompt. Do NOT write custom implementation instructions. The agent MUST invoke `/work-on` via the Skill tool — this is the HARD RULE from the top of this file.**
 
-For each issue in the current wave, spawn an Agent sub-agent that runs the full `/work-on` pipeline.
+For each **ready** issue (all predecessors resolved or no predecessors), spawn an Agent sub-agent that runs the full `/work-on` pipeline. On the initial dispatch, this is every issue with an empty predecessor set. On subsequent dispatches (triggered by agent completions in Step 4B), this is every newly-unblocked issue.
 
 **One agent per issue.** Do NOT group multiple issues into a single agent. `/work-on` handles branching, labels, and PRs per-issue.
 
@@ -613,38 +1072,83 @@ If the label is NOT terminal (e.g., `workflow:investigating`, `workflow:ready-to
 )
 ```
 
-**`{GIST_CONTEXT}` generation**: For each issue in the wave, check if it was spawned by an investigation that has a Knowledge Gist (from Step 2C.5). If so, include the Gist URL(s) in the agent prompt:
+**`{GIST_CONTEXT}` generation**: For each issue being dispatched, build the context block. **Prefer the deconflicted `FORGE:SYNTHESIS_BRIEF` (from Phase 2.5) when one exists** — it is a per-issue, already-reconciled brief that carries only the arbitration decisions and sibling investigation Gists relevant to *this* issue. Injecting it instead of the full aggregated milestone-index gist means the agent does not re-arbitrate the same contradictions (less token spend, less nondeterminism). Only when Phase 2.5 did not run (0/1 investigations — no brief exists) does this fall back to the raw parent-investigation + milestone-index gist behavior. <!-- Added: forge#1192 -->
 
 ```bash
 # Build GIST_CONTEXT for an issue
 GIST_CONTEXT=""
-PARENT_INV=$(gh issue view {NUMBER} -R {GH_REPO} --json body --jq '.body' \
-  | grep -oP '(?i)parent[: ]*#\K\d+|spawned from[: ]*#\K\d+' | head -1)
 
-if [ -n "$PARENT_INV" ] && [ -n "${INVESTIGATION_GISTS[$PARENT_INV]:-}" ]; then
+# Preferred path: a deconflicted per-issue synthesis brief from Phase 2.5.
+SYNTHESIS_BRIEF=$(gh api repos/{GH_REPO}/issues/{NUMBER}/comments \
+  --jq '[.[] | select(.body | contains("<!-- FORGE:SYNTHESIS_BRIEF -->"))] | last | .body // ""' 2>/dev/null)
+
+if [ -n "$SYNTHESIS_BRIEF" ]; then
+  # Phase 2.5 ran and reconciled competing recommendations for this issue.
+  # Inject the deconflicted brief INSTEAD of the raw milestone-index gist dump.
   GIST_CONTEXT="
+**RECONCILED CONTEXT (orchestrate Phase 2.5 synthesis brief)**: Competing investigation recommendations affecting this issue have already been reconciled. Use this deconflicted brief as your primary cross-investigation context — do NOT independently re-arbitrate the underlying investigations.
+${SYNTHESIS_BRIEF}"
+else
+  # Fallback: Phase 2.5 did not run (0/1 investigations). Use the raw gist behavior.
+  PARENT_INV=$(gh issue view {NUMBER} -R {GH_REPO} --json body --jq '.body' \
+    | grep -oP '(?i)parent[: ]*#\K\d+|spawned from[: ]*#\K\d+' | head -1)
+
+  if [ -n "$PARENT_INV" ] && [ -n "${INVESTIGATION_GISTS[$PARENT_INV]:-}" ]; then
+    GIST_CONTEXT="
 **CONTEXT FROM PRIOR INVESTIGATION**: Investigation #${PARENT_INV} produced Knowledge Gist(s) with findings relevant to this issue:
 $(echo "${INVESTIGATION_GISTS[$PARENT_INV]}" | while IFS= read -r url; do echo "- ${url}"; done)
 Fetch the Gist content during the context-gathering phase for implementation guidance."
-fi
+  fi
 
-# Include milestone index URL if available (from Step 2C.5)
-if [ -n "$MILESTONE_INDEX_URL" ]; then
-  GIST_CONTEXT="${GIST_CONTEXT}
+  # Include milestone index URL if available (from Step 2C.5)
+  if [ -n "$MILESTONE_INDEX_URL" ]; then
+    GIST_CONTEXT="${GIST_CONTEXT}
 
 **MILESTONE KNOWLEDGE INDEX**: All investigation findings for this milestone are aggregated in a single index Gist:
 - ${MILESTONE_INDEX_URL}
 The context-gathering phase can fetch this index to discover all investigation Gists for the milestone."
+  fi
 fi
 ```
 
-If `GIST_CONTEXT` is empty (no parent investigation or milestone index found), the variable resolves to a blank line in the template — no impact on the agent prompt. <!-- Updated: forge#341 -->
+If `GIST_CONTEXT` is empty (no synthesis brief, no parent investigation, and no milestone index found), the variable resolves to a blank line in the template — no impact on the agent prompt. <!-- Updated: forge#341, forge#1192 -->
 
-**Launch all agents in the current wave simultaneously** by putting multiple Agent tool calls in a single message. Use `run_in_background=true` so they execute in parallel.
+**Capture agent IDs after the batch spawn (MANDATORY)**: Each `Agent(...)` call returns an agent ID. Store each returned ID in `AGENT_ISSUE_MAP` keyed by issue number. This map is the only way to resume a stalled agent by ID in Steps 4B and 4B.5:
 
-### Step 4B: Monitor wave completion
+```
+# After the single-message batch spawn, capture each returned ID:
+AGENT_ISSUE_MAP[{NUMBER}] = <agent_id returned by Agent()>
+```
+
+`AGENT_ISSUE_MAP` starts empty and accumulates entries as agents are spawned. For parallel dispatch (all Agent() calls in one message), capture the returned IDs from the batch response — one entry per issue — before entering Step 4B's monitoring loop. Without this capture, `resume=` calls in Steps 4B and 4B.5 will have no agent ID to reference and the resume will fail. <!-- Added: forge#1083 -->
+
+**Launch all ready agents simultaneously** by putting multiple Agent tool calls in a single message. Use `run_in_background=true` so they execute in parallel.
+
+### Step 4B: Monitor completions and dispatch newly ready issues
 
 You will be automatically notified when each background agent completes. **Do NOT use `sleep` loops to poll for completion.** Instead, wait for the automatic notification. When you receive a notification that an agent completed, immediately process it.
+
+**Core streaming dispatch loop**: After processing each agent completion, check the DAG for newly unblocked issues. If any issue now has all predecessors in a terminal state, dispatch it immediately (run Steps 4A.pre.0, 4A.pre, and 4A for the newly ready issues). This is the key difference from the wave model — issues dispatch as soon as their specific predecessors complete, not after an entire group finishes.
+
+```bash
+# After each agent completion, check for newly ready issues:
+for BLOCKED_NUM in {all_blocked_issue_numbers}; do
+  ALL_PREDS_DONE=true
+  for PRED in {predecessors_of_BLOCKED_NUM}; do
+    PRED_STATE=$(gh issue view $PRED -R {GH_REPO} --json labels,state --jq '{state: .state, workflow: [.labels[].name | select(startswith("workflow:"))]}')
+    # Terminal states: workflow:merged, workflow:invalid, needs-human, or state=CLOSED
+    if ! echo "$PRED_STATE" | grep -qE 'workflow:merged|workflow:invalid|needs-human|CLOSED'; then
+      ALL_PREDS_DONE=false
+      break
+    fi
+  done
+  if [ "$ALL_PREDS_DONE" = "true" ]; then
+    echo "#{BLOCKED_NUM} is now READY — all predecessors resolved. Dispatching."
+    # Add to dispatch batch for this completion cycle
+  fi
+done
+# Run Steps 4A.pre.0 → 4A.pre → 4A for newly ready issues (batch them in a single message)
+```
 
 **CRITICAL — Stall detection and recovery**: Background agents sometimes stop mid-pipeline (`stop_reason=end_turn`) after completing a sub-phase (e.g., investigation completes but build never starts). This causes the agent to "complete" from the Agent tool's perspective even though the `/work-on` pipeline is only partially done. When you receive a completion notification:
 
@@ -658,7 +1162,7 @@ You will be automatically notified when each background agent completes. **Do NO
 2. **If the issue is NOT in a terminal state** (`workflow:merged`, `workflow:invalid`, or `needs-human`), the agent stalled mid-pipeline. **Resume it immediately**:
    ```
    Agent(
-     resume="{AGENT_ID}",
+     resume=AGENT_ISSUE_MAP[{NUMBER}],
      description="Resume #{NUMBER} pipeline",
      run_in_background=true,
      prompt="The previous /work-on invocation stopped before completing the full pipeline. The issue is currently at {CURRENT_WORKFLOW_STATE}. Continue — invoke Skill(skill='work-on', args='{NUMBER}') to resume the routing loop from the current state. /work-on will re-read GitHub state and pick up where it left off."
@@ -666,11 +1170,15 @@ You will be automatically notified when each background agent completes. **Do NO
    ```
    **Resume ALL stalled agents in a single message** (parallel resume). Do not wait between resumes.
 
-3. **Track resume cycles per agent.** If an agent has been resumed 3+ times and still hasn't reached a terminal state, report it as a failure — do not resume again.
+3. **Track resume cycles per agent.** If an agent has been resumed 2+ times and still hasn't reached a terminal state, report it as a failure — do not resume again.
 
 4. **Record completed results**: Success (PR merged), Invalid (issue closed), Blocked (needs human), or Error
 
-5. **Verify pipeline compliance** — for each truly completed issue, check that the agent used `/work-on`:
+5. **Check for newly unblocked issues** — run the DAG readiness check above. If any issues are now ready, dispatch them immediately (Steps 4A.pre.0 → 4A.pre → 4A). Batch all newly ready issues into a single dispatch message.
+
+6. **Handle predecessor failures** — if a completed agent's issue FAILED (needs-human, invalid, or error), check for dependent issues in the DAG. Mark all transitive dependents as "skipped — dependency #{X} failed" and report them. Do NOT dispatch them.
+
+7. **Verify pipeline compliance** — for each truly completed issue, check that the agent used `/work-on`:
    ```bash
    LABELS=$(gh issue view $NUM -R {GH_REPO} --json labels --jq '[.labels[].name | select(startswith("workflow:"))] | length')
    COMMENTS=$(gh api repos/{GH_REPO}/issues/${NUM}/comments --jq '[.[] | select(.body | test("FORGE:INVESTIGATOR|FORGE:BUILDER"))] | length')
@@ -680,33 +1188,123 @@ You will be automatically notified when each background agent completes. **Do NO
    ```
    If an agent bypassed the pipeline, report it as a **failure** regardless of whether a PR exists.
 
-6. **Post a brief status update** to the user after each agent reaches terminal state:
+8. **Post a brief status update** to the user after each agent reaches terminal state:
    ```
    ✓ #{NUMBER} — {title} → PR #{PR} merged to {target}
    ✗ #{NUMBER} — {title} → {reason for failure}
    ⚠ #{NUMBER} — {title} → PIPELINE BYPASS (no /work-on — PR invalid)
-   ⏳ Wave 1: 2/3 complete (1 resumed after stall)...
+   ⏳ Progress: {completed}/{total} complete, {active} active, {blocked} blocked
+   → Dispatched #{NEWLY_READY} (predecessor #{PRED} completed)
    ```
+
+9. **Run staging integrity check** (from Step 4A-pre) if the completed agent merged a PR targeting staging.
+
+**Termination condition**: All issues in the DAG are in a terminal state (merged, invalid, needs-human, or skipped due to dependency failure). When this condition is met, check whether deferred review-spawned findings exist (accumulated in `DEFERRED_FINDINGS` during Step 4C). If deferred findings exist → proceed to Step 4F (Completion Sweep). If no deferred findings → proceed to Phase 5.
 
 **Anti-pattern — DO NOT DO THIS:**
 - `sleep 60/120/180/300` loops to check status — you will be notified automatically
 - Spawning separate "progress check" agents — they waste tokens and add noise
 - Reading agent JSONL output files to check progress — use GitHub labels as the source of truth
 - Polling the same status check repeatedly on a timer
+- Waiting for a "batch" of completions before checking for newly ready issues — check after EVERY completion
 
-### Step 4C: Collect review-finding issues from completed wave
+### Step 4B.5: Time-Based Stall Detection
 
-When ALL agents in the current wave have completed, check if any `/work-on` runs spawned review-finding issues during their review phase. These are new work items that should be folded into the remaining waves.
+**Purpose**: Catches agents that have stopped responding WITHOUT exiting (e.g., rate-limited, context-frozen, or silently hung). The reactive check in Step 4B only fires on agent completion — this check catches agents that never complete at all.
+
+**When to run** (NOT a sleep loop — two trigger points only):
+1. On every background agent completion event (run BEFORE the terminal-state check in Step 4B)
+2. Before posting any "waiting for agents..." status update to the user
+
+**Do NOT poll on a timer. Do NOT use sleep. Run at these two trigger points only.**
+
+**Read stall timeout from config**:
+```bash
+STALL_TIMEOUT=$(yq '.pipeline.stall_timeout_minutes // 15' forge.yaml 2>/dev/null || echo 15)
+```
+
+**For each non-terminal agent in the current batch**:
+```bash
+for NUM in {active_issue_numbers}; do
+  # Skip issues already in terminal state
+  TERMINAL=$(gh issue view $NUM -R {GH_REPO} --json labels \
+    --jq '[.labels[].name | select(. == "workflow:merged" or . == "workflow:invalid" or . == "needs-human")] | length')
+  [ "$TERMINAL" -gt 0 ] && continue
+
+  # Get last activity timestamp — prefer last comment (catches FORGE:HEARTBEAT updates)
+  LAST_ACTIVITY=$(gh api repos/{GH_REPO}/issues/${NUM}/comments \
+    --jq '.[-1].updated_at // empty' 2>/dev/null)
+  # Fall back to issue updated_at if no comments
+  if [ -z "$LAST_ACTIVITY" ]; then
+    LAST_ACTIVITY=$(gh issue view $NUM -R {GH_REPO} --json updatedAt --jq '.updatedAt')
+  fi
+
+  # Compute elapsed minutes (GNU date — adjust for macOS: date -j -f "%Y-%m-%dT%H:%M:%SZ")
+  LAST_EPOCH=$(date -d "$LAST_ACTIVITY" +%s 2>/dev/null \
+    || date -j -f "%Y-%m-%dT%H:%M:%SZ" "$LAST_ACTIVITY" +%s 2>/dev/null)
+  NOW_EPOCH=$(date +%s)
+  ELAPSED_MIN=$(( (NOW_EPOCH - LAST_EPOCH) / 60 ))
+
+  if [ "$ELAPSED_MIN" -gt "$STALL_TIMEOUT" ]; then
+    # Count prior stall events on this issue
+    STALL_COUNT=$(gh api repos/{GH_REPO}/issues/${NUM}/comments \
+      --jq '[.[] | select(.body | contains("FORGE:STALL_DETECTED"))] | length')
+
+    CURRENT_STATE=$(gh issue view $NUM -R {GH_REPO} --json labels \
+      --jq '[.labels[].name | select(startswith("workflow:"))] | .[0] // "unknown"')
+
+    if [ "$STALL_COUNT" -lt 2 ]; then
+      # Auto-resume: post stall annotation and re-invoke /work-on
+      RESUME_ATTEMPT=$(( STALL_COUNT + 1 ))
+      gh issue comment $NUM -R {GH_REPO} --body "<!-- FORGE:STALL_DETECTED -->
+## Stall Detected
+
+**Issue**: #${NUM}
+**Elapsed since last activity**: ${ELAPSED_MIN} min (threshold: ${STALL_TIMEOUT} min)
+**Current workflow state**: ${CURRENT_STATE}
+**Auto-resume attempt**: ${RESUME_ATTEMPT} of 2
+**Timestamp**: $(date -u +%Y-%m-%dT%H:%M:%SZ)"
+
+      # Resume the agent — collect all resumes and launch in a single message (see Step 4B rule)
+      # STALL_RESUME_LIST is accumulated and launched in parallel after the loop
+      STALL_RESUME_LIST="$STALL_RESUME_LIST $NUM"
+    else
+      # 2+ prior stalls — auto-resume exhausted, escalate to needs-human
+      gh issue edit $NUM -R {GH_REPO} --add-label "needs-human"
+      gh issue comment $NUM -R {GH_REPO} --body "<!-- FORGE:STALL_DETECTED -->
+## Stall Escalated — Needs Human Intervention
+
+Issue #${NUM} has been auto-resumed ${STALL_COUNT} times without reaching a terminal state. Auto-resume limit (2) exhausted. Manual intervention required.
+
+**Last workflow state**: ${CURRENT_STATE}
+**Total elapsed since last activity**: ${ELAPSED_MIN} min
+**Timestamp**: $(date -u +%Y-%m-%dT%H:%M:%SZ)"
+      echo "STALL ESCALATED: #{NUM} → needs-human (${STALL_COUNT} prior resumes)"
+    fi
+  fi
+done
+
+# Launch all stall resumes in parallel (single message — same rule as Step 4B)
+# For each NUM in $STALL_RESUME_LIST, call Agent(resume=AGENT_ISSUE_MAP[NUM], run_in_background=true, ...)
+```
+
+**Resume all stalled agents in a single message** (parallel). Use the same `Agent(resume=...)` pattern as Step 4B — do not wait between individual resumes.
+
+**Track stall resume cycles separately** from completion-event resumes (Step 4B). If the same issue accumulates ≥ 2 `FORGE:STALL_DETECTED` comments AND still hasn't reached terminal state, do not resume again — the `needs-human` label is already set.
+
+### Step 4C: Collect review-finding issues from completed agents
+
+After each agent reaches a terminal state, check if its `/work-on` run spawned review-finding issues during the review phase. These are new work items that should be added to the dependency DAG and dispatched when ready.
 
 ```bash
 # Method 1: Read TRAJECTORY comments from completed issues for "Finding issues" row
-for NUM in {completed_issue_numbers_this_wave}; do
+for NUM in {completed_issue_number}; do
   gh api repos/{GH_REPO}/issues/${NUM}/comments \
     --jq '.[] | select(.body | contains("FORGE:TRAJECTORY")) | .body' 2>/dev/null \
     | grep -oP 'Finding issues\s*\|\s*#?\K\d+[^|]*' | grep -oP '\d+' | sort -u
 done
 
-# Method 2 (fallback): Check for recently created review-finding issues that reference PRs from this wave
+# Method 2 (fallback): Check for recently created review-finding issues that reference PRs from this batch
 gh issue list -R {GH_REPO} --state open --label "review-finding" --limit 20 \
   --json number,title,body,createdAt \
   --jq "[.[] | select(.createdAt > \"$(date -u -d '2 hours ago' +%Y-%m-%dT%H:%M:%SZ)\")]"
@@ -714,7 +1312,7 @@ gh issue list -R {GH_REPO} --state open --label "review-finding" --limit 20 \
 
 **If review-finding issues were spawned:**
 
-**Cascade control (MANDATORY — run before folding findings into waves):**
+**Cascade control (MANDATORY — run before folding findings into the DAG):**
 
 For each spawned finding, determine whether it should be **executed** or **deferred**:
 
@@ -722,17 +1320,17 @@ For each spawned finding, determine whether it should be **executed** or **defer
 1. **Generation ≥ 2** (always defer, even for P1/P2): Finding was spawned by an issue that was itself a review-finding. Check the source issue's labels for `review-finding` — if the source has that label, the new finding is generation 2. Always defer. Rationale: gen-2+ cascade is theoretically unbounded — cap it here.
 2. **Priority override** (P1 or P2 → always execute): If the finding is labeled P1 or P2, skip all remaining heuristics and execute. Rationale: high-priority findings must never be suppressed by keyword matching.
 3. **Comment/typo heuristic** (P3 and below only): Finding title contains the word "comment" or "typo" (case-insensitive). These are 1-line cosmetic fixes that do not block other work.
-4. **P3 + same-file overlap**: Finding is labeled `P3` AND the file it targets overlaps with ANY file already in the current or remaining batch waves. Rationale: same-file P3 findings serialize the entire remaining batch — one finding per original issue doubles wall-clock time with no proportional value.
+4. **P3 + same-file overlap**: Finding is labeled `P3` AND the file it targets overlaps with ANY file already in the current batch (active or queued in the DAG). Rationale: same-file P3 findings add predecessor edges that serialize agents — one finding per original issue increases wall-clock time with no proportional value.
 
-**Defer** (do NOT add to wave queue) if rules 1, 3, or 4 match.
+**Defer** (do NOT add to the DAG) if rules 1, 3, or 4 match.
 
-**Execute** (add to wave queue) if:
+**Execute** (add to the DAG) if:
 - Rule 2 matches (P1 or P2)
 - None of the defer rules matched (generation 1, P3 with no file overlap, not a keyword match)
 
 **Before running the loop, build the batch file list (MANDATORY for Heuristic 3):**
 
-Collect all file paths from every issue in the current batch — both completed waves and remaining queued waves. This produces `ALL_BATCH_FILES`, a newline-separated list of file paths used by Heuristic 3 to test same-file overlap.
+Collect all file paths from every issue in the current batch — both completed and remaining queued issues in the DAG. This produces `ALL_BATCH_FILES`, a newline-separated list of file paths used by Heuristic 3 to test same-file overlap.
 
 ```bash
 # Build ALL_BATCH_FILES: collect file paths from ALL batch issues (completed + queued)
@@ -755,6 +1353,8 @@ ALL_BATCH_FILES=$(echo "$ALL_BATCH_FILES" | sort -u | grep -v '^$')
 
 ```bash
 # For each finding, check its priority label and generation
+# NOTE: DEFERRED_FINDINGS, QUEUED_FINDINGS, and DEFERRED_REASONS are declared at
+# batch scope in Step 4A.pre — do NOT re-initialize them here (Step 4C runs per-agent).
 for FINDING_NUM in {spawned_finding_numbers}; do
   FINDING_DATA=$(gh issue view $FINDING_NUM -R {GH_REPO} --json labels,title,body \
     --jq '{labels: [.labels[].name], title: .title, body: .body}')
@@ -788,6 +1388,7 @@ for FINDING_NUM in {spawned_finding_numbers}; do
 
   if [ "$DEFER" = "true" ]; then
     DEFERRED_FINDINGS+=($FINDING_NUM)
+    DEFERRED_REASONS[$FINDING_NUM]="$DEFER_REASON"
     echo "Deferred #${FINDING_NUM}: $DEFER_REASON"
   else
     QUEUED_FINDINGS+=($FINDING_NUM)
@@ -797,28 +1398,83 @@ done
 
 **For queued (non-deferred) findings:**
 
-1. **Add them to the remaining wave plan.** They are implementation issues — same as issues spawned by investigations in Phase 2.
+1. **Add them to the dependency DAG.** They are implementation issues — same as issues spawned by investigations in Phase 2. Compute their predecessor sets using the same conflict detection (Step 3C Layers 1-4) against all remaining blocked/active issues.
 2. **Respect source branch context.** Review-finding issues have `**Code branch**: \`{branch}\`` in their body — the `/work-on` agent will read this and branch from the right origin. No special handling needed from the orchestrator.
 3. **Report to user:**
    ```
-   Wave {N} review spawned {count} new finding issues: #{A}, #{B}
-   Queued for execution: #{A}, #{B}
+   Agent #{COMPLETED} spawned {count} new finding issues: #{A}, #{B}
+   Added to DAG: #{A} (predecessors: {}), #{B} (predecessors: {#{X}})
    Deferred (cascade control): #{C} (P3 same-file), #{D} (comment heuristic)
-   Adding queued findings to Wave {N+1} (or new wave if no remaining waves).
    ```
-4. **Re-run file-overlap detection** (Step 3C) on the expanded issue set — finding issues may conflict with planned issues that touch the same files.
+4. **Re-run file-overlap detection** (Step 3C) on the expanded issue set — finding issues may conflict with active or queued issues that touch the same files. Ready findings dispatch immediately via the standard Step 4B dispatch loop.
 
 **For deferred findings:**
 
-They remain open in GitHub — they will be picked up by future `/orchestrate` or `/work-on` runs. Log them in the final batch summary under "deferred" so they are visible. Do NOT close or label them — leave them for the next pipeline pass.
+Track them in `DEFERRED_FINDINGS` for re-evaluation in Step 4F (Completion Sweep) after the DAG drains. Do NOT close or label them yet — the sweep will determine their final disposition.
 
-**If no review-finding issues were spawned:** Continue to next wave normally.
+**If no review-finding issues were spawned:** Continue monitoring for the next agent completion.
 
-### Step 4D: Milestone integration build gate (MANDATORY between waves)
+### Step 4C.5: Milestone lane-consistency check (periodic) <!-- Added: forge#901 -->
 
-**WHY THIS EXISTS**: Session Intelligence milestone shipped 116 PRs across multiple waves with zero integration testing. Each PR built in isolation — type errors from cross-PR interactions (wrong prop types, missing components, incompatible interfaces) were invisible until the milestone→staging merge broke the build with 4 distinct errors. This gate catches those failures early.
+**WHY THIS EXISTS**: A milestone's feature-lane PRs must all target the same milestone branch. If a branch-routing race ever scatters them — some on the milestone branch, some on staging — the milestone branch becomes incomplete relative to staging, and the split is otherwise invisible until the milestone tries to ship. Step 4A.pre.0 prevents the split deterministically; this check detects any residual split so it surfaces immediately instead of at ship time.
 
-**When to run**: After each wave completes, IF the batch targets a milestone branch AND any `.tsx`/`.ts` files were changed by agents in the completed wave.
+**When to run**: After every 3rd agent completion (or after all agents complete, whichever comes first), for any batch where at least one issue has a milestone. Skip for pure fast-lane batches. This check is **non-blocking** — it alerts; it does not auto-resolve or stop the pipeline.
+
+```bash
+# For each distinct milestone in the batch, assert all of its feature-lane PRs share one base.
+for NUM in {all_batch_issue_numbers}; do
+  MILESTONE_TITLE=$(gh issue view "$NUM" -R {GH_REPO} --json milestone --jq '.milestone.title // empty' 2>/dev/null || echo "")
+  [ -z "$MILESTONE_TITLE" ] && continue
+
+  SLUG=$(echo "$MILESTONE_TITLE" \
+    | tr '[:upper:]' '[:lower:]' \
+    | tr ' ' '-' \
+    | tr -cd 'a-z0-9-' \
+    | sed 's/--*/-/g' \
+    | sed 's/^-//;s/-$//')
+  [ -z "$SLUG" ] && continue
+  EXPECTED_BASE="milestone/$SLUG"
+
+  # Collect the base branch of every PR that closes an issue in this milestone.
+  # Iterate the milestone's issues and read each one's linked PR base.
+  # Exclude CLOSED-unmerged PRs: a closed-but-not-merged PR is a superseded/abandoned
+  # routing attempt and does NOT reflect the live lane. Keep only OPEN (in-flight) and
+  # MERGED (landed) PRs. `gh pr list --state` cannot combine open+merged, so query all
+  # and drop CLOSED in jq.
+  BASES=$(gh pr list -R {GH_REPO} --state all --search "milestone:\"$MILESTONE_TITLE\"" \
+    --json baseRefName,state --jq '.[] | select(.state != "CLOSED") | .baseRefName' 2>/dev/null | sort -u)
+  # Fallback: if PR search by milestone is unavailable, derive from the issues' linked PRs.
+  if [ -z "$BASES" ]; then
+    BASES=$(for IN in {all_batch_issue_numbers}; do
+      IM=$(gh issue view "$IN" -R {GH_REPO} --json milestone --jq '.milestone.title // empty' 2>/dev/null)
+      [ "$IM" = "$MILESTONE_TITLE" ] || continue
+      gh pr list -R {GH_REPO} --state all --search "$IN in:body" \
+        --json baseRefName,state --jq '.[] | select(.state != "CLOSED") | .baseRefName' 2>/dev/null
+    done | sort -u)
+  fi
+
+  STRAY_BASES=$(echo "$BASES" | grep -v "^${EXPECTED_BASE}\$" | grep -v '^$' || true)
+  if [ -n "$STRAY_BASES" ]; then
+    echo "ALERT: milestone '$MILESTONE_TITLE' has feature-lane PRs split across multiple base branches." >&2
+    echo "       Expected base: $EXPECTED_BASE" >&2
+    echo "       Found bases:" >&2
+    echo "$BASES" | sed 's/^/         - /' >&2
+    echo "       This indicates a branch-routing split — reconcile the stray PRs onto $EXPECTED_BASE" >&2
+    echo "       (rebase/cherry-pick the stray branch onto the milestone branch) before the milestone ships." >&2
+    # Do NOT auto-stop or auto-resolve — surface the alert and let the user decide.
+  else
+    echo "Lane-consistency OK: all '$MILESTONE_TITLE' PRs target $EXPECTED_BASE."
+  fi
+done
+```
+
+Report any `ALERT` lines prominently before dispatching more agents. Reconciliation of an existing split is a manual/`/milestone`-assisted step — this check only ensures the split is never silent.
+
+### Step 4D: Milestone integration build gate (MANDATORY — periodic for milestone batches)
+
+**WHY THIS EXISTS**: Session Intelligence milestone shipped 116 PRs across multiple dispatches with zero integration testing. Each PR built in isolation — type errors from cross-PR interactions (wrong prop types, missing components, incompatible interfaces) were invisible until the milestone→staging merge broke the build with 4 distinct errors. This gate catches those failures early.
+
+**When to run**: After every 3rd milestone-targeted agent completion (or when all milestone issues are complete), IF the batch targets a milestone branch AND any `.tsx`/`.ts` files were changed by agents in the completed set. Running after every single agent would be too frequent — batch the check to reduce overhead while still catching integration errors before they accumulate.
 
 All tool commands are read from `forge.yaml → verification.commands`; each step logs `SKIPPED — not configured` when the corresponding key is absent rather than silently passing.
 
@@ -833,7 +1489,7 @@ MILESTONE_BRANCH="milestone/{milestone_slug}"
 TS_CHANGED=$(git diff origin/{DEFAULT_BRANCH}...origin/${MILESTONE_BRANCH} --name-only | grep -E '\.(tsx?|jsx?)$' | head -1)
 
 if [ -n "$TS_CHANGED" ]; then
-    echo "=== Integration Build Gate (TypeScript): Wave {N} ==="
+    echo "=== Integration Build Gate (TypeScript): batch checkpoint ==="
     cd {REPO_PATH}
     git fetch origin ${MILESTONE_BRANCH}
     git checkout origin/${MILESTONE_BRANCH} --detach 2>/dev/null
@@ -857,18 +1513,18 @@ if [ -n "$TS_CHANGED" ]; then
     git checkout - 2>/dev/null
 
     if [ "$TSC_EXIT" -ne 0 ]; then
-        echo "BLOCKING: TypeScript errors on ${MILESTONE_BRANCH} after Wave {N}."
-        echo "Fix type errors before starting next wave."
+        echo "BLOCKING: TypeScript errors on ${MILESTONE_BRANCH} after batch checkpoint."
+        echo "Fix type errors before dispatching more milestone agents."
     elif [ "${BUILD_EXIT:-0}" -ne 0 ]; then
-        echo "BLOCKING: build failed on ${MILESTONE_BRANCH} after Wave {N}."
-        echo "Build/prerender errors — fix before starting next wave."
+        echo "BLOCKING: build failed on ${MILESTONE_BRANCH} after batch checkpoint."
+        echo "Build/prerender errors — fix before dispatching more milestone agents."
     fi
 fi
 
 # Python format check
 PY_CHANGED=$(git diff origin/{DEFAULT_BRANCH}...origin/${MILESTONE_BRANCH} --name-only | grep -E '\.py$' | head -1)
 if [ -n "$PY_CHANGED" ]; then
-    echo "=== Integration Build Gate (Python): Wave {N} ==="
+    echo "=== Integration Build Gate (Python): batch checkpoint ==="
     cd {REPO_PATH}
     git checkout origin/${MILESTONE_BRANCH} --detach 2>/dev/null
 
@@ -883,31 +1539,237 @@ if [ -n "$PY_CHANGED" ]; then
     git checkout - 2>/dev/null
 
     if [ "$FORMAT_EXIT" -ne 0 ]; then
-        echo "WARNING: Python formatting issues on ${MILESTONE_BRANCH} after Wave {N}."
+        echo "WARNING: Python formatting issues on ${MILESTONE_BRANCH} after batch checkpoint."
         echo "Not blocking but should be fixed before milestone→staging."
     fi
 fi
 ```
 
-**If the gate fails**: Report the errors to the user. Do NOT proceed to the next wave. The accumulated milestone branch has integration errors that will only get worse with more PRs on top. Build failures are BLOCKING — SSG/prerender crashes are invisible to typecheck alone — configure `typescript.build` in `verification.commands` to catch them.
+**If the gate fails**: Report the errors to the user. Do NOT dispatch any more milestone-targeted agents until the integration errors are resolved. The accumulated milestone branch has integration errors that will only get worse with more PRs on top. Build failures are BLOCKING — SSG/prerender crashes are invisible to typecheck alone — configure `typescript.build` in `verification.commands` to catch them. Non-milestone (fast-lane) agents may continue dispatching normally.
 
-### Step 4E: Advance to next wave
-
-When wave results are processed, the integration gate passes (or is not applicable), and any new finding issues are folded in:
-
-1. Check if any failures in the current wave block the next wave (dependency failures)
-2. If a dependency failed, skip dependent issues in the next wave and report them as "skipped — dependency #{X} failed"
-3. Launch the next wave (same process as Step 4A)
-
-### Step 4F: Handle individual agent failures
+### Step 4E: Handle individual agent failures
 
 If an agent reports failure or error:
 - **Merge conflict**: Report to user, mark issue as needing human attention
 - **Invalid issue**: Already handled by the agent (closed with comment) — just report it
 - **Build/test failure**: Report the error, suggest manual intervention
 - **Agent timeout**: Report which issue timed out, suggest re-running with `/work-on #{N}`
+- **Dependency cascade**: Mark all transitive dependents in the DAG as "skipped — dependency #{X} failed"
 
 **Do NOT retry failed agents automatically.** Report the failure and let the user decide.
+
+### Step 4F: Completion Sweep (deferred review-spawned findings) <!-- Added: forge#1105 -->
+
+**When to run**: After all DAG issues reach terminal state AND `DEFERRED_FINDINGS` is non-empty. Skip if no findings were deferred during this batch.
+
+**WHY THIS EXISTS**: Deferred findings accumulate during the batch because of file-overlap and cascade-control heuristics (Step 4C). But once the DAG drains, the conditions that caused deferral often no longer apply — completed issues no longer occupy files, so same-file overlap vanishes. Without this sweep, deferred findings silently pile up across runs and never get resolved.
+
+**Step 4F.1: Classify deferred findings into permanent vs re-evaluable**
+
+```bash
+PERMANENT_DEFERRED=()
+SWEEP_CANDIDATES=()
+
+for FINDING_NUM in "${DEFERRED_FINDINGS[@]}"; do
+  DEFER_REASON="${DEFERRED_REASONS[$FINDING_NUM]}"
+
+  # Generation >= 2 deferrals are PERMANENT — unbounded cascade prevention
+  if echo "$DEFER_REASON" | grep -qi "generation"; then
+    PERMANENT_DEFERRED+=($FINDING_NUM)
+  else
+    # All other deferrals (comment/typo, P3 same-file) are re-evaluable
+    SWEEP_CANDIDATES+=($FINDING_NUM)
+  fi
+done
+
+echo "Completion sweep: ${#SWEEP_CANDIDATES[@]} re-evaluable, ${#PERMANENT_DEFERRED[@]} permanent"
+```
+
+**Step 4F.2: Re-evaluate sweep candidates**
+
+Re-run the Step 4C heuristics against the now-empty DAG. Since all original batch issues are in terminal state, the `ALL_BATCH_FILES` list for file-overlap detection is empty — P3 same-file deferrals will now pass.
+
+```bash
+SWEEP_EXECUTE=()
+SWEEP_STILL_DEFERRED=()
+
+for FINDING_NUM in "${SWEEP_CANDIDATES[@]}"; do
+  FINDING_DATA=$(gh issue view $FINDING_NUM -R {GH_REPO} --json labels,title,body,state \
+    --jq '{labels: [.labels[].name], title: .title, body: .body, state: .state}')
+
+  # Skip if already closed (resolved by another process)
+  STATE=$(echo "$FINDING_DATA" | jq -r '.state')
+  [ "$STATE" = "CLOSED" ] && continue
+
+  PRIORITY=$(echo "$FINDING_DATA" | jq -r '.labels[] | select(startswith("priority:P")) | ltrimstr("priority:")' | head -1)
+  TITLE=$(echo "$FINDING_DATA" | jq -r '.title')
+
+  # Re-apply heuristics against the drained DAG (no active batch files)
+  # Comment/typo heuristic still applies — these are cosmetic regardless of DAG state
+  if echo "$TITLE" | grep -qi "comment\|typo"; then
+    SWEEP_STILL_DEFERRED+=($FINDING_NUM)
+    echo "Sweep: #${FINDING_NUM} still deferred (comment/typo — cosmetic)"
+  else
+    # P3 same-file overlap no longer applies (DAG is drained, no active files)
+    # All other findings are safe to execute
+    SWEEP_EXECUTE+=($FINDING_NUM)
+    echo "Sweep: #${FINDING_NUM} cleared for execution (file overlap resolved)"
+  fi
+done
+```
+
+**Step 4F.3: Dispatch cleared findings**
+
+For each finding in `SWEEP_EXECUTE`, add it to a fresh sweep DAG and dispatch using the same Steps 4A.pre.0, 4A.pre, and 4A logic. Run file-overlap detection between the swept findings themselves (they may conflict with each other).
+
+**MANDATORY**: Use the full Step 4A agent template verbatim for each swept finding. Do NOT use a bare `prompt="Run /work-on N"` — that bypasses the label-state loop contract, source branch detection, and all pipeline enforcement rules. Swept findings are always `review-finding` issues that require source branch detection to route correctly.
+
+**Step 4F.3.pre: Classify lane for each sweep finding (MANDATORY before dispatching)**
+
+Run `classify-lane.sh` per finding — same pattern as Step 4A.pre:
+
+```bash
+declare -A SWEEP_LANE
+declare -A SWEEP_PR_BASE
+
+for FINDING_NUM in "${SWEEP_EXECUTE[@]}"; do
+  SWEEP_BASE=$(bash ~/.claude/scripts/classify-lane.sh "$FINDING_NUM" -R {GH_REPO}) || {
+    echo "ERROR: classify-lane.sh failed for #$FINDING_NUM — adding needs-human and skipping" >&2
+    gh issue edit "$FINDING_NUM" -R {GH_REPO} --add-label "needs-human" 2>/dev/null || true
+    continue
+  }
+  if [ "$SWEEP_BASE" = "staging" ]; then
+    SWEEP_LANE[$FINDING_NUM]="fast-lane"
+  else
+    SWEEP_LANE[$FINDING_NUM]="feature-lane"
+  fi
+  SWEEP_PR_BASE[$FINDING_NUM]="$SWEEP_BASE"
+  echo "#$FINDING_NUM → lane=${SWEEP_LANE[$FINDING_NUM]}, PR_BASE=$SWEEP_BASE"
+done
+```
+
+**Step 4F.3.dispatch: Dispatch with full Step 4A template**
+
+```bash
+if [ ${#SWEEP_EXECUTE[@]} -gt 0 ]; then
+  echo "Completion sweep: dispatching ${#SWEEP_EXECUTE[@]} cleared findings"
+
+  # Build sweep DAG — same conflict detection as Step 3C Layers 1-4
+  # but only among the swept findings (no original batch issues remain active)
+  # Dispatch ready findings, monitor completions using the same Step 4B loop
+  # This is a SINGLE pass — findings spawned during the sweep are NOT swept again
+  # (they follow the standard Step 4C triage: queued or deferred for next run)
+
+  # NOTE: Step 4A.pre.0 (milestone branch pre-creation) is intentionally skipped here.
+  # Swept findings are always review-finding issues that target an already-existing branch
+  # (staging or a milestone branch). The branch was created when the original batch ran —
+  # it always exists by the time the sweep runs.
+
+  for FINDING_NUM in "${SWEEP_EXECUTE[@]}"; do
+    # Skip any finding whose classify-lane call failed (needs-human already set above)
+    [ -z "${SWEEP_PR_BASE[$FINDING_NUM]:-}" ] && continue
+
+    FINDING_TITLE=$(gh issue view "$FINDING_NUM" -R {GH_REPO} --json title --jq '.title' 2>/dev/null || echo "")
+
+    # Build GIST_CONTEXT for sweep finding — same as Step 4A's *fallback* (raw-gist) path.
+    # The Phase 2.5 FORGE:SYNTHESIS_BRIEF preference is intentionally NOT applied here:
+    # sweep findings are freshly-created review-finding issues that never received a
+    # synthesis brief (Phase 2.5 runs only over the original batch's investigations), so
+    # there is nothing to prefer. Keep this block in sync with 4A's fallback branch only.
+    GIST_CONTEXT=""
+    PARENT_INV=$(gh issue view "$FINDING_NUM" -R {GH_REPO} --json body --jq '.body' \
+      | grep -oP '(?i)parent[: ]*#\K\d+|spawned from[: ]*#\K\d+' | head -1)
+
+    if [ -n "$PARENT_INV" ] && [ -n "${INVESTIGATION_GISTS[$PARENT_INV]:-}" ]; then
+      GIST_CONTEXT="
+**CONTEXT FROM PRIOR INVESTIGATION**: Investigation #${PARENT_INV} produced Knowledge Gist(s) with findings relevant to this issue:
+$(echo "${INVESTIGATION_GISTS[$PARENT_INV]}" | while IFS= read -r url; do echo "- ${url}"; done)
+Fetch the Gist content during the context-gathering phase for implementation guidance."
+    fi
+
+    if [ -n "$MILESTONE_INDEX_URL" ]; then
+      GIST_CONTEXT="${GIST_CONTEXT}
+
+**MILESTONE KNOWLEDGE INDEX**: All investigation findings for this milestone are aggregated in a single index Gist:
+- ${MILESTONE_INDEX_URL}
+The context-gathering phase can fetch this index to discover all investigation Gists for the milestone."
+    fi
+
+    # Use the full Step 4A template verbatim — copied here so sweep agents receive
+    # the complete pipeline contract. Keep in sync with Step 4A when the template changes.
+    Agent(
+      subagent_type="general-purpose",
+      model="sonnet",
+      description="Work on {PROJECT_PREFIX}#${FINDING_NUM}",
+      run_in_background=true,
+      prompt="You are working on GitHub issue #${FINDING_NUM} for the {PROJECT_NAME} project.
+
+**Project**: {PROJECT_NAME}
+**Repository**: {GH_REPO}
+**Repo path**: {REPO_PATH}
+
+**YOUR MISSION**: Invoke \`/work-on\` via the Skill tool and let it run to completion. \`/work-on\` is a self-contained routing loop that handles the ENTIRE pipeline: investigate → build (context → architect → implement → validate) → review (push → PR → /review-pr --auto-merge) → close (project board → trajectory log → worktree cleanup). Do NOT intervene, compensate, or manually close issues — \`/work-on\` handles everything including issue closure and label updates in its close phase.
+
+**CRITICAL — DO NOT STOP EARLY**: /work-on runs as a multi-phase routing loop. Each phase (investigate, build, review, close) returns an intermediate result — these are NOT completion signals. You are NOT done until the issue reaches a terminal state: \`workflow:merged\`, \`workflow:invalid\`, or \`needs-human\`. If /work-on returns after only one phase (e.g., investigation), you MUST invoke it again immediately — it will re-read GitHub state and continue to the next phase. Keep invoking /work-on until it reaches a terminal state. Never output 'done' or stop after an intermediate result.
+
+**HOW REVIEW FINDINGS WORK**: /review-pr may create GitHub issues (with \`review-finding\` label) for findings it discovers. These are NOT blockers — they are separate work items that will go through their own /work-on pipeline later. The original PR should ALWAYS merge after review. The only exception is build errors (code doesn't compile) — those must be fixed before merging.
+
+**IMPORTANT RULES**:
+- **MANDATORY**: You MUST use the Skill tool to invoke 'work-on' with args '${FINDING_NUM}'. Do NOT implement manually — /work-on handles the full pipeline including label state machine (workflow:investigating → workflow:building → workflow:in-review → workflow:merged), investigation reports, PR creation, and cleanup.
+  - For default repo issues: \`Skill(skill='work-on', args='${FINDING_NUM}')\`
+  - For satellite repo issues: \`Skill(skill='work-on', args='{SATELLITE_PREFIX}:${FINDING_NUM}')\` (prefix from forge.yaml → repos.satellites)
+- NEVER bypass /work-on with manual git/gh commands — the label updates and structured comments are critical for tracking
+- NEVER target \`main\` for PRs targeting the default repo. Use \`{STAGING_BRANCH}\` for fast-lane issues, or \`milestone/{slug}\` for milestone issues.
+- Satellite repos (MCP, n8n) have no staging branch — fast-lane PRs go to \`main\` for those.
+- If the issue is INVALID after investigation, close it with a comment explaining why
+- If you hit merge conflicts or blockers, post a comment on the issue and STOP — do not force anything
+- Do not interact with the user — you are running autonomously in the background
+- **NEVER ask the user questions** — you are a background agent. If review finds issues, auto-fix simple ones and proceed. For complex findings, merge anyway and create follow-up issues.
+
+**LABEL-STATE LOOP CONTRACT — enforce after EVERY Skill return**:
+After EVERY \`Skill(skill='work-on', ...)\` call returns, immediately check the issue's current workflow label:
+\`\`\`bash
+gh issue view ${FINDING_NUM} -R {GH_REPO} --json labels --jq '[.labels[].name | select(startswith(\"workflow:\"))]'
+\`\`\`
+**Terminal labels** (only these allow you to stop): \`workflow:merged\`, \`workflow:invalid\`
+**Terminal condition also**: \`needs-human\` label present OR issue state is \`closed\`
+If the label is NOT terminal (e.g., \`workflow:investigating\`, \`workflow:ready-to-build\`, \`workflow:building\`, \`workflow:in-review\`), invoke \`Skill(skill='work-on', args='${FINDING_NUM}')\` again immediately. The \`/work-on\` skill will re-read GitHub state and advance to the next phase. Do NOT output a summary, do NOT pause, do NOT ask for confirmation — just invoke it again.
+
+**CRITICAL — SOURCE BRANCH DETECTION**:
+- If the issue has the \`review-finding\` label, read the issue body for \`**Code branch**: \\\`{branch}\\\`\`
+- If found, that is the SOURCE_BRANCH — the code ONLY exists on that branch (e.g., \`staging\`), NOT on \`origin/main\`
+- Investigation MUST use \`git show origin/{SOURCE_BRANCH}:{filepath}\` to verify the code exists
+- Worktree MUST branch from \`origin/{SOURCE_BRANCH}\`, NOT \`origin/main\`
+- PR target is \`{SOURCE_BRANCH}\` (the fix goes back to where the code lives)
+
+**LANE**: ${SWEEP_LANE[$FINDING_NUM]} (PR target: ${SWEEP_PR_BASE[$FINDING_NUM]})
+**Issue title**: ${FINDING_TITLE}
+${GIST_CONTEXT}
+"
+    )
+  done
+
+  # Monitor sweep agents using the same Step 4B completion loop
+  # IMPORTANT: Findings spawned by sweep agents are NOT re-swept —
+  # they follow standard Step 4C triage to prevent recursive cascades
+fi
+```
+
+**Step 4F.4: Report sweep results**
+
+```
+Completion Sweep Results:
+  Dispatched: #{A}, #{B} (file overlap cleared after DAG drain)
+  Still deferred (cosmetic): #{C} (comment/typo)
+  Permanently deferred (gen2): #{D} (generation >= 2 cascade cap)
+```
+
+**After sweep agents complete** (or if no findings were dispatched): proceed to Phase 5.
+
+**Anti-patterns — DO NOT DO THIS:**
+- Re-sweeping findings spawned during the sweep itself — this creates unbounded recursion. Sweep is a single pass.
+- Overriding generation >= 2 deferrals — the cascade cap is absolute.
+- Skipping the sweep because "there are only a few" deferred findings — even one deferred finding represents unresolved work.
 
 ---
 
@@ -927,7 +1789,7 @@ This will:
 - Fix stale workflow labels on any issues the agents left behind
 - Close orphaned open issues whose PRs were merged (common when merging to `staging`)
 - Remove worktrees created by agents in this batch
-- Delete local/remote branches for merged PRs
+- Delete local/remote `fix/*` and `feat/*` branches whose PR has merged — detection uses merged-PR state (`gh pr list --state merged`) as the source of truth, so it covers feature-lane branches merged into a milestone branch as well as squash-merged branches, not just branches merged directly to staging
 - Report milestones that hit 0 open issues — these are ready for `/milestone ship` (staging review + merge). Do NOT close them; closure happens after code reaches staging.
 - Sync Project board state
 
@@ -952,7 +1814,7 @@ Include the cleanup summary in the final report (Phase 6). If cleanup found prob
 
 ## Phase 6: Consolidated Report
 
-After ALL waves AND cleanup complete, present a final summary.
+After ALL issues reach terminal state AND cleanup completes, present a final summary.
 
 ### Step 6A: Collect trajectory data
 
@@ -965,6 +1827,22 @@ done
 
 Aggregate into the batch-level analytics for Step 6B.
 
+**Also collect the machine-readable summary cards** (`<!-- FORGE:CARD {json} -->`, embedded in
+each issue's `FORGE:TRAJECTORY` comment by `/work-on` close phase). These power the per-issue and
+batch cards in Step 6C:
+
+```bash
+CARDS=""
+for NUM in {all_completed_issue_numbers}; do
+  CARD=$(gh api repos/{GH_REPO}/issues/${NUM}/comments \
+    --jq '.[] | select(.body | contains("FORGE:CARD")) | .body' 2>/dev/null \
+    | sed -n 's/.*<!-- FORGE:CARD \(.*\) -->.*/\1/p' | head -1)
+  [ -n "$CARD" ] && CARDS="${CARDS}${CARD}"$'\n'
+done
+# CARDS is now a newline-delimited list of per-issue JSON objects (skip any issue whose
+# card is absent — pre-card runs or non-merged terminal states degrade gracefully).
+```
+
 ### Step 6B: Present consolidated report
 
 ```
@@ -973,7 +1851,7 @@ Aggregate into the batch-level analytics for Step 6B.
 **Scope**: {milestone / issue list}
 **Duration**: {approximate time}
 
-### Wave 0: Investigations
+### Investigations (Phase 2)
 {IF investigations ran:}
 | # | Investigation | Issues Created | Result |
 |---|-------------|---------------|--------|
@@ -993,17 +1871,31 @@ Aggregate into the batch-level analytics for Step 6B.
 
 ### Review-Spawned Issues
 
-{IF review findings were created during any wave:}
+{IF review findings were created during any agent run:}
 | # | Finding | Source Issue | Source PR | Status |
 |---|---------|-------------|-----------|--------|
-| #{F1} | {title} | #{A} | PR #{PR} | ✓ Merged (wave {N}) / ⏳ Open (deferred) |
+| #{F1} | {title} | #{A} | PR #{PR} | ✓ Merged (in-batch) / ✓ Swept (completion sweep) / ⏳ Deferred (cosmetic) / ⛔ Deferred (gen2 cascade cap) |
 
 {ELSE: "No review findings created during this batch."}
 
+### Completion Sweep <!-- Added: forge#1105 -->
+- **Re-evaluated**: {N} deferred findings re-checked after DAG drain
+- **Dispatched**: {N} findings cleared and executed (file overlap resolved)
+- **Still deferred (cosmetic)**: {N} comment/typo findings (low-value, safe to leave)
+- **Permanently deferred (gen2)**: {N} generation >= 2 findings (cascade cap — requires manual `/work-on`)
+
+{IF permanently deferred > 0:}
+**Action required**: The following findings were permanently deferred due to the generation >= 2 cascade cap. They will NOT be picked up automatically — run `/work-on #{N}` manually or include them in the next `/orchestrate` batch:
+{list of permanently deferred issue numbers and titles}
+
+{IF cosmetic deferred > 0:}
+**Low-priority leftovers**: The following cosmetic findings remain open. They will be picked up by future runs or can be batched with `/orchestrate #{N1} #{N2}`:
+{list of cosmetic deferred issue numbers and titles}
+
 ### Summary
 - **Investigations**: {N} completed, spawned {M} new issues
-- **Review findings**: {N} spawned, {M} resolved in-batch, {K} deferred
-- **Succeeded**: {N} issues resolved (implementation)
+- **Review findings**: {N} spawned, {M} resolved in-batch, {K} swept, {J} deferred (cosmetic), {L} deferred (gen2)
+- **Succeeded**: {N} issues resolved (implementation + sweep)
 - **Failed**: {N} issues need attention
 - **Skipped**: {N} issues (dependency failures)
 
@@ -1020,7 +1912,7 @@ Aggregate into the batch-level analytics for Step 6B.
 |-------|-------|-------|--------|-------|---------|--------------|
 {per-agent rows from audit}
 
-**Wave efficiency**: {avg_idle_pct}% idle time
+**Batch efficiency**: {avg_idle_pct}% idle time
 **Total resume cycles**: {sum_resumes} across {agent_count} agents
 **Clean agents** (no stalls): {clean_count}/{agent_count}
 
@@ -1033,7 +1925,8 @@ Aggregate into the batch-level analytics for Step 6B.
 | Contracts posted | {N} |
 | Contract→code divergences | {N} (agents that updated contract mid-build) |
 | Review findings created | {N_total} |
-| Findings after synthesis | {N} (deduplicated/arbitrated) |
+| Findings queued after cascade control | {N_queued}/{N_total} ({N_deferred} deferred — see Step 4C) |
+| Competing recommendations reconciled (Phase 2.5) | {RECONCILED_COUNT} (investigation plans arbitrated in place + serialized) |
 | Findings validated | {N} |
 | False positives | {N} ({%}) |
 | Anomalies flagged | {N} |
@@ -1041,10 +1934,12 @@ Aggregate into the batch-level analytics for Step 6B.
 **Domain breakdown**: {N} scraping, {N} frontend, {N} billing, ...
 **Routing**: {N} fast-lane, {N} feature-lane
 
+> `Findings queued after cascade control` reports Step 4C's defer/execute triage split (`QUEUED_FINDINGS` vs `DEFERRED_FINDINGS`) — it is NOT a dedup/arbitration computation; no such step exists for review findings. `Competing recommendations reconciled` is populated by Phase 2.5 (`RECONCILED_COUNT`), which reconciles investigation plans, not review findings. It is `0` when the batch had 0–1 investigations (synthesis is a no-op). <!-- Added: forge#1192, forge#1193 -->
+
 **Systematic issues** (flag if detected):
 - False positive rate > 30% → review agents may need tuning
 - Invalidation rate < 10% or > 35% → investigation calibration off
-- Same-domain merge conflicts in 2+ waves → domain sequencing too aggressive
+- Same-domain merge conflicts between concurrent agents → domain serialization edges too loose
 - Contract divergences > 20% → investigation quality may need improvement
 - **Idle% > 50%** → agents stalling at phase boundaries; check work-on routing loop
 - **Avg resumes > 1** → orchestrator having to compensate for agent stops
@@ -1054,6 +1949,56 @@ Aggregate into the batch-level analytics for Step 6B.
 {If some failed: "Issues #{X}, #{Y} need manual attention. Re-run with `/work-on #{X}` after resolving blockers."}
 {If fast-lane: "All fixes merged to staging. Merge staging → main via GitHub web UI when ready to deploy."}
 ```
+
+### Step 6C: Pipeline Summary Cards (the shareable moment)
+
+Render one compact summary card per completed issue (from the `CARDS` JSON collected in Step 6A),
+then a single batch-level summary card. These are the shareable artifacts a developer screenshots
+after an orchestration run. Print all cards to stdout.
+
+**Per-issue card** — emit one for each JSON object in `CARDS`. Use the same box-drawing style and
+51-column inner width as `work-on/close.md` Phase C4.5b. Read fields directly from the JSON
+(`issue`, `title`, `pipeline`, `commits`, `additions`, `deletions`, `pr`, `pr_target`, `review`,
+`elapsed_seconds`). Truncate long titles with `…`; render `null` numeric fields as `—`. The
+`pipeline`/`status` field already encodes skipped phases (decomposed/invalid/blocked), so reflect
+it verbatim. Skip issues with no card (graceful — pre-card or non-merged runs).
+
+**Batch summary card** — aggregate across all collected cards:
+
+```
+╔═══════════════════════════════════════════════════╗
+║  ForgeDock Orchestration Complete                 ║
+╠═══════════════════════════════════════════════════╣
+║                                                   ║
+║  Scope:    {milestone / issue list}               ║
+║  Issues:   {N} merged · {M} blocked · {K} invalid ║
+║  Commits:  {SUM_COMMITS} ({SUM_ADD} additions, {SUM_DEL} deletions) ║
+║  PRs:      {N} merged                             ║
+║  Findings: {N} spawned · {M} resolved             ║
+║  Time:     {BATCH_ELAPSED}                        ║
+║                                                   ║
+╚═══════════════════════════════════════════════════╝
+```
+
+Aggregate with `jq` over the collected cards (every sum degrades gracefully — `null`/missing
+fields are treated as 0; never fabricate):
+
+```bash
+echo "$CARDS" | grep -v '^$' | jq -s '{
+  merged:   (map(select(.status=="merged"))   | length),
+  blocked:  (map(select(.status=="blocked"))  | length),
+  invalid:  (map(select(.status=="invalid"))  | length),
+  commits:  (map(.commits   // 0) | add),
+  adds:     (map(.additions // 0) | add),
+  dels:     (map(.deletions // 0) | add),
+  prs:      (map(select(.pr != null)) | length),
+  elapsed:  (map(.elapsed_seconds // 0) | add)
+}'
+```
+
+The batch card's `Findings:` line is filled from the review-finding counts already computed in
+the Summary section above. `BATCH_ELAPSED` is the wall-clock duration of the orchestration run
+(Step 6B `Duration`), not the sum of per-issue elapsed times.
 
 ---
 
@@ -1065,10 +2010,10 @@ Aggregate into the batch-level analytics for Step 6B.
 4. **Always confirm with user before launching** — Step 3E is the mandatory checkpoint
 5. **No retries** — if an agent fails, report it and move on
 6. **Respect existing work** — skip issues already being worked on (`workflow:building`, `workflow:in-review`)
-7. **Dependency failures cascade** — if A fails and B depends on A, B is skipped (not attempted)
+7. **Dependency failures cascade** — if A fails and B depends on A, all transitive dependents of A are skipped (not attempted)
 8. **Always run post-batch cleanup** — Phase 5 is mandatory. Never skip `/cleanup all` after orchestration.
-9. **NEVER close/skip issues as duplicates** — only `/work-on` investigation agents can make that call after examining the actual code. The orchestrator delegates, it does not adjudicate.
-10. **Post-wave verification** — after each wave, check that every completed issue has `workflow:*` labels and structured comments. If an agent bypassed `/work-on`, report it as a pipeline failure.
+9. **NEVER close/skip issues as duplicates** — only `/work-on` investigation agents can make that call after examining the actual code. The orchestrator delegates, it does not adjudicate. **This is distinct from Phase 2.5 plan reconciliation**: reconciling *competing recommendations* across investigation annotations (arbitrating incompatible plans, adding `Depends on #X` serialization edges) operates only on FORGE annotations and issue bodies — it never reads code and never closes/skips/merges an issue. Both issues in a reconciled conflict still run. Adjudicating *duplicate validity* (deciding two issues are the same bug and closing one) remains forbidden. <!-- Added: forge#1192 -->
+10. **Per-completion verification** — after each agent completes, check that it has `workflow:*` labels and structured comments. If an agent bypassed `/work-on`, report it as a pipeline failure.
 
 ---
 
@@ -1076,31 +2021,38 @@ Aggregate into the batch-level analytics for Step 6B.
 
 ### "orchestrate milestone api-expansion"
 → Fetches all open issues in "API Expansion v1" milestone
-→ Analyzes deps (#1526 → #1527 → #1528 → #1529, #1530 independent)
-→ Plans 3 waves, confirms with user, executes
+→ Builds DAG: #1526 → #1527 → #1528 → #1529 (chain), #1530 (no predecessors)
+→ Confirms with user, dispatches #1526 + #1530 immediately
+→ When #1526 completes, dispatches #1527 immediately (doesn't wait for #1530)
+→ Streaming continues until all issues reach terminal state
 
 ### "orchestrate #1533 #1250"
 → Fetches those 2 issues, no deps between them
-→ Single wave, both parallel, confirms, executes
+→ DAG: both have empty predecessor sets
+→ Confirms, dispatches both simultaneously
 
 ### "orchestrate next 5"
-→ Gets top 5 priority issues, checks deps
-→ Plans waves, confirms, executes
+→ Gets top 5 priority issues, builds DAG
+→ Confirms, dispatches all ready issues immediately
+→ Dependent issues dispatch as predecessors complete
 
 ### "orchestrate P0"
 → Gets all P0 issues, runs them all (presumably urgent)
-→ Single wave if possible, confirms, executes
+→ DAG: likely all independent — dispatches simultaneously
+→ Confirms, executes
 
 ### "orchestrate fast-lane"
 → Gets all unmilestoned bugs/fixes
-→ Groups by independence, runs in waves
+→ Builds DAG from file-conflict and domain-serialization edges
+→ Dispatches all ready issues, streams dependent issues as predecessors complete
 
 ### "orchestrate milestone user-auth-v2"
 → Fetches all open issues in "User Auth v2" milestone
 → Detects #42 is an investigation issue (title: "Investigate: session expiry race condition under high concurrency")
-→ Wave 0: Runs `/work-on 42` — investigation creates 3 new issues (#55-#57)
+→ Phase 2: Runs `/work-on 42` — investigation creates 3 new issues (#55-#57)
 → Re-fetches milestone issues, now includes #55-#57
-→ Wave 1: #38 (P0 token refresh bug), #41 (session store migration), #55, #56 (all independent)
-→ Wave 2: #39 (enable refresh rotation — after #38 fixes token bug), #57 (depends on #55)
-→ Wave 3: remaining issues
-→ Final report shows investigation spawned issues and their results
+→ Builds DAG: #38, #41, #55, #56 have no predecessors (ready); #39 depends on #38; #57 depends on #55
+→ Dispatches #38, #41, #55, #56 simultaneously
+→ When #38 completes, #39 dispatches immediately (doesn't wait for #41, #55, or #56)
+→ When #55 completes, #57 dispatches immediately (doesn't wait for others)
+→ Final report shows investigation spawned issues and streaming execution results

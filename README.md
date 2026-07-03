@@ -49,14 +49,13 @@ $ /work-on #42          "POST /api/payments returns 500 for free-tier users"
 <p><em><code>/work-on #42</code> — issue to reviewed PR, with the full reasoning chain written back to GitHub.</em></p>
 </div>
 
-### Try it in 60 seconds
+### Try it in 30 seconds — on a throwaway repo, nothing to lose
 
 ```bash
-npx forgedock
+npx forgedock demo     # spins up a risk-free demo repo and shows you the pipeline end to end
 ```
 
-One command: it checks your environment, installs the slash commands, reads
-your repo, and writes a reviewed `forge.yaml` — you press Enter once.
+Ready to use it for real? **`npx forgedock`** walks you through one continuous setup: it checks your environment, installs the slash commands, reads your repo, and hands you a single annotated `forge.yaml` to review — you press Enter once.
 
 > ⭐ **If ForgeDock saves you time, [star the repo](https://github.com/RapierCraftStudios/ForgeDock/stargazers)** — it's the whole marketing budget.
 
@@ -177,7 +176,7 @@ Issue → Investigate → Context → Architect → Build → Quality Gate → R
 **Requirements:** [Claude Code](https://docs.anthropic.com/en/docs/claude-code) · [GitHub CLI](https://cli.github.com/) (authenticated) · Node.js ≥ 18.
 
 ```bash
-npx forgedock
+npx forgedock          # checks your environment, installs the commands, detects your repo, and hands you a reviewed forge.yaml
 ```
 
 One command does everything: it checks your environment, installs the slash commands into Claude Code, detects your repo (owner, branches, paths), and hands you a single annotated `forge.yaml` to review — press Enter to accept. Run `npx forgedock init` any time afterward to re-generate the config only.

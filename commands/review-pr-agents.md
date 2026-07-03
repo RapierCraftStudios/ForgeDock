@@ -1,3 +1,6 @@
+<!-- SPDX-FileCopyrightText: Copyright (c) RapierCraft Studios -->
+<!-- SPDX-License-Identifier: AGPL-3.0-or-later -->
+
 # Agent Catalog for `/review-pr`
 
 This file is the Agent Catalog referenced by the `/review-pr` orchestrator. It is read via the `Read` tool during Phase 3C (agent dispatch). It contains:
@@ -27,6 +30,11 @@ fi
 gh pr diff [PR_NUMBER] --name-only
 gh pr diff [PR_NUMBER]
 ```
+
+**Hot-spot prior**:
+[CHURN_CONTEXT]
+
+If a file you are reviewing is listed above as a hot-spot, apply deeper scrutiny to it — high historical churn correlates with defect density. Prefer tracing that file's full code paths (Evidence-Based Review Protocol §2) over a quick pattern scan, and weight ambiguous findings in hot-spot files toward LIKELY rather than POSSIBLE.
 
 ### 2. Dynamic Exploration
 - From each changed file, follow imports and function calls
@@ -139,6 +147,7 @@ Append this block at the very end of your comment (after the `---` footer line, 
 | API Design | `API` |
 | Database & Migration | `DB` |
 | Infrastructure | `INFRA` |
+| Config Schema | `CFG` |
 
 ### Example
 
@@ -197,9 +206,10 @@ For each changed file, check:
 
    FastAPI's default validation error response exposes internal field names, types, and constraints. Attackers can enumerate the complete request schema by sending malformed payloads.
    ```bash
-   for f in $MODEL_FILES; do
+   while IFS= read -r f; do
+       [ -z "$f" ] && continue
        grep -rn "RequestValidationError\|validation_exception_handler\|@app.exception_handler" services/api/app/main.py services/api/app/ 2>/dev/null | head -5
-   done
+   done <<< "$MODEL_FILES"
    # If no custom handler found AND the PR adds new Pydantic models or FastAPI endpoints:
    #   LIKELY MEDIUM — FastAPI default exposes internal field names/types/constraints to any caller
    #   Safe pattern: catch RequestValidationError and return only {"detail": "Invalid request"} or a sanitized message
@@ -212,12 +222,13 @@ For each changed file, check:
 
    Unauthenticated health endpoints are expected to be public — the Auth agent's auth-dependency check does not apply. The relevant question is whether they reveal more than `{"status": "ok"}`.
    ```bash
-   for f in $HEALTH_FILES; do
+   while IFS= read -r f; do
+       [ -z "$f" ] && continue
        # Find unauthenticated endpoints (no Depends() in signature) and check return content
        grep -A25 "@router\.\(get\|head\)\|async def health\|async def ping\|async def live\|async def ready\|async def status" "$f" | \
            grep -iE "version|host|port|redis|postgres|db_url|tesseract|pillow|PIL\.__version__|software|engine|server" && \
            echo "SEC: health endpoint in $f returns operational details. Reveals software versions (enables CVE targeting) or connectivity state (enables DoS confirmation). Safe pattern: return only {\"status\": \"ok\"} or {\"status\": \"degraded\"} — no version strings, no host/port, no connectivity details."
-   done
+   done <<< "$HEALTH_FILES"
    ```
    **Confidence**: `LIKELY` — version strings may be intentionally scoped to internal-only endpoints; verify auth status of the endpoint.
    **Severity**: MEDIUM for software version strings (direct CVE targeting input); LOW for DB/Redis connectivity state (useful for DoS confirmation, not exploit).
@@ -227,10 +238,11 @@ For each changed file, check:
 
    Git SHAs and deployment topology exposed via response headers enable targeted CVE research and attack planning.
    ```bash
-   for f in $MIDDLEWARE_FILES; do
+   while IFS= read -r f; do
+       [ -z "$f" ] && continue
        grep -nE "X-App-Version|X-Deployment-Color|X-.*-SHA|X-.*-Build|X-.*-Commit|Server:|X-Powered-By" "$f" 2>/dev/null && \
            echo "SEC: response header in $f leaks infrastructure details. Git SHA enables targeted CVE diffing against public commits. Deployment color reveals blue/green topology. Safe pattern: omit these headers or gate them behind an internal-only middleware."
-   done
+   done <<< "$MIDDLEWARE_FILES"
    ```
    **Confidence**: `LIKELY` — header may be intentional for internal observability tooling behind an auth gate; verify it applies to all responses.
    **Severity**: LOW — information disclosure accelerates other attacks but is not directly exploitable without an additional vulnerability.
@@ -255,11 +267,12 @@ CONFIG_FILES=$(gh pr diff [PR_NUMBER] --name-only | grep -E "(traefik/|infra/ngi
 
 **A. Port bind address audit** (when `docker-compose*.yml` is in diff — trigger: `$INFRA_FILES` non-empty)
 ```bash
-for f in $INFRA_FILES; do
+while IFS= read -r f; do
+    [ -z "$f" ] && continue
     # Flag non-web ports bound to 0.0.0.0 (no explicit host binding = binds to 0.0.0.0 by default)
     grep -nE "^\s+- \"[0-9]+:[0-9]+\"" "$f" | grep -v "127\.0\.0\.1\|::1" | grep -vE "\"(80|443):" && \
         echo "SEC: port published on 0.0.0.0 in $f — verify UFW/firewall is the ONLY protection. Docker daemon restart can reset iptables and expose the port directly."
-done
+done <<< "$INFRA_FILES"
 ```
 **Confidence**: `LIKELY` — a firewall rule may exist that provides protection; flag for verification rather than hard-block.
 **Severity**: HIGH for database/internal service ports (5432, 6432, 6379); MEDIUM for other non-web ports.
@@ -267,10 +280,11 @@ done
 
 **B. Missing USER directive** (when any `Dockerfile` is in diff — trigger: `$DOCKERFILE_FILES` non-empty)
 ```bash
-for f in $DOCKERFILE_FILES; do
+while IFS= read -r f; do
+    [ -z "$f" ] && continue
     grep -q "^USER " "$f" || \
         echo "SEC: CONFIRMED — no USER directive in $f. Container runs as UID 0. For services that process user-supplied URLs or untrusted input (worker, Playwright), running as root significantly lowers the bar for container escape."
-done
+done <<< "$DOCKERFILE_FILES"
 ```
 **Confidence**: `CONFIRMED` — absence of USER directive is an objective, verifiable fact.
 **Severity**: HIGH for services processing untrusted input; MEDIUM for internal-only services.
@@ -278,10 +292,11 @@ done
 
 **C. Response header information disclosure** (when Python middleware/main.py adds response headers — trigger: `$HEADER_FILES` non-empty)
 ```bash
-for f in $HEADER_FILES; do
+while IFS= read -r f; do
+    [ -z "$f" ] && continue
     grep -nE "X-App-Version|X-Deployment-Color|Server:|X-Powered-By|X-.*-SHA|X-.*-Build" "$f" 2>/dev/null && \
         echo "SEC: response header in $f leaks infrastructure details. Git SHA enables targeted CVE diffing against public commits. Deployment color reveals blue/green topology to attackers."
-done
+done <<< "$HEADER_FILES"
 ```
 **Confidence**: `CONFIRMED` — header name reveals infra details by definition.
 **Severity**: MEDIUM — information disclosure accelerates other attacks but is not directly exploitable.
@@ -289,11 +304,12 @@ done
 
 **D. CI security scan gating** (when `.github/workflows/*.yml` is in diff — trigger: `$WORKFLOW_FILES` non-empty)
 ```bash
-for f in $WORKFLOW_FILES; do
+while IFS= read -r f; do
+    [ -z "$f" ] && continue
     # Find security scanner steps with continue-on-error: true
     grep -B5 "continue-on-error: true" "$f" | grep -iE "trivy|snyk|security|cve|scan|grype|dockle" && \
         echo "SEC: security scanner in $f has continue-on-error: true — CVEs will be logged but will NEVER block a deploy. Remove continue-on-error or add a severity threshold."
-done
+done <<< "$WORKFLOW_FILES"
 ```
 **Confidence**: `CONFIRMED` — `continue-on-error: true` on a security scanner step is objectively a non-blocking scan.
 **Severity**: HIGH — security scanner provides zero protection when it cannot block.
@@ -301,10 +317,11 @@ done
 
 **E. In-memory rate limiter** (when TypeScript files are in diff — trigger: `$TS_FILES` non-empty)
 ```bash
-for f in $TS_FILES; do
+while IFS= read -r f; do
+    [ -z "$f" ] && continue
     grep -nE "new Map\(\)|=\s*\{\}|= new Map" "$f" 2>/dev/null | grep -iE "rate|limit|attempt|count|throttle|window" && \
         echo "SEC: in-memory rate limiter detected in $f — resets on every container restart, not shared across blue/green replicas. Use Redis (via Upstash, ioredis, or the existing Redis client) for distributed rate limiting."
-done
+done <<< "$TS_FILES"
 ```
 **Confidence**: `LIKELY` — in-memory store may be intentional for non-critical paths; flag for verification.
 **Severity**: MEDIUM — bypass requires restarting the container or hitting a different replica; not trivially exploitable but provides no protection in blue/green deploys.
@@ -312,10 +329,11 @@ done
 
 **F. Cookie security flags** (when TypeScript files are in diff — trigger: `$TS_FILES` non-empty)
 ```bash
-for f in $TS_FILES; do
+while IFS= read -r f; do
+    [ -z "$f" ] && continue
     grep -nE "httpOnly:\s*false|secure:\s*false|sameSite.*['\"]none['\"]" "$f" 2>/dev/null && \
         echo "SEC: cookie in $f has weakened security flag. httpOnly: false exposes cookie to JS (XSS risk). secure: false allows transmission over HTTP. sameSite: none without Secure enables CSRF."
-done
+done <<< "$TS_FILES"
 ```
 **Confidence**: `CONFIRMED` — explicit `false`/`none` values are objective findings.
 **Severity**: HIGH for `httpOnly: false` (direct XSS vector for session cookies); MEDIUM for `secure: false` or `sameSite: none`.
@@ -323,11 +341,12 @@ done
 
 **G. Fallback credential scan in config files** (when config files are in diff — trigger: `$CONFIG_FILES` non-empty)
 ```bash
-for f in $CONFIG_FILES; do
+while IFS= read -r f; do
+    [ -z "$f" ] && continue
     # Shell-style fallback: ${VAR:-default} — flag non-trivial fallback values that may be credentials
     grep -nE "\$\{[A-Z_]+:-[^}]{4,}\}" "$f" | grep -ivE "(localhost|127\.0\.0\.1|0\.0\.0\.0|true|false|^[0-9]+$|/tmp|/var|/etc)" && \
         echo "SEC: potential credential fallback in $f — verify fallback value is safe if env var is absent"
-done
+done <<< "$CONFIG_FILES"
 ```
 For each hit: read the fallback value.
 - Contains `$apr1$`, `$2b$`, `$bcrypt$`, `$argon2`, or hash-like long alphanumeric with `$` separators: **CONFIRMED HIGH** — htpasswd/bcrypt placeholder; active if env var is absent.
@@ -341,15 +360,17 @@ For each hit: read the fallback value.
 
 **H. Runtime UID × volume ownership** (when any Dockerfile is in diff AND diff contains `USER`, `su-exec`, `gosu`, or `setuid` — trigger: `$DOCKERFILE_FILES` non-empty AND UID change detected)
 ```bash
-UID_CHANGE=$(for f in $DOCKERFILE_FILES; do
+UID_CHANGE=$(while IFS= read -r f; do
+    [ -z "$f" ] && continue
     gh pr diff [PR_NUMBER] -- "$f" 2>/dev/null | grep -E '^\+.*(USER\s+[^0]|su-exec|gosu|setuid)' | grep -v '^+++' && break
-done)
+done <<< "$DOCKERFILE_FILES")
 if [ -n "$UID_CHANGE" ]; then
     echo "UID change detected — cross-referencing named volume mounts..."
     COMPOSE_FILES=$(find . -maxdepth 2 -name "docker-compose*.yml" 2>/dev/null | sort)
-    for cf in $COMPOSE_FILES; do
+    while IFS= read -r cf; do
+        [ -z "$cf" ] && continue
         grep -A2 "volumes:" "$cf" | grep -E "^\s+\w.*:" | grep -v "^--$" && echo "  ^ in $cf"
-    done
+    done <<< "$COMPOSE_FILES"
 fi
 ```
 For each named volume found: determine its container mount point. Named volumes are created as **root-owned** by Docker at first use — a privilege drop (root → UID N) without a `chown` before the drop will silently break any service path that calls `mkdir`, `write_bytes`, `open(... 'w')`, or `os.makedirs` under that mount point.
@@ -1171,9 +1192,10 @@ If no API context is configured above, derive conventions from the changed files
     BASE=$(gh pr view [PR_NUMBER] --json baseRefName --jq '.baseRefName')
 
     # Find PRs merged to this base in the last 48 hours
+    CUTOFF="$(date -u -d '48 hours ago' +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || date -u -v-48H +%Y-%m-%dT%H:%M:%SZ)"
     RECENT_MERGED=$(gh pr list --base "$BASE" --state merged --limit 20 \
       --json number,title,mergedAt,files \
-      --jq --arg cutoff "$(date -u -d '48 hours ago' +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || date -u -v-48H +%Y-%m-%dT%H:%M:%SZ)" \
+      2>/dev/null | jq --arg cutoff "$CUTOFF" \
       '.[] | select(.mergedAt > $cutoff) | {number, title, schema_files: [.files[].path | select(test("schemas?/|scrape\\.py|models\\.py"))]}' \
       2>/dev/null | head -40)
 
@@ -1409,17 +1431,19 @@ If no infra context is configured above, derive the deployment model from the ch
    OLD_VALUES=$(gh pr diff [PR_NUMBER] | grep "^\-" | grep -oP '"status"\s*:\s*"\K[^"]+' | sort -u)
 
    # Search all non-application consumer locations for those old values
-   for val in $OLD_VALUES; do
+   while IFS= read -r val; do
+       [ -z "$val" ] && continue
        echo "=== Searching for old response value: $val ==="
        grep -rn "$val" scripts/ infra/ .github/ traefik/ 2>/dev/null | grep -v "^Binary"
        grep -rn "$val" docker-compose*.yml 2>/dev/null
-   done
+   done <<< "$OLD_VALUES"
 
    # Also search for endpoint path references in consumer locations
    HEALTH_PATHS=$(gh pr diff [PR_NUMBER] | grep "^\+" | grep -oP '@\w+\.(?:get|post)\("\K[^"]+(?:health|status|ping|ready|live|readiness|liveness)[^"]*')
-   for path in $HEALTH_PATHS; do
+   while IFS= read -r path; do
+       [ -z "$path" ] && continue
        grep -rn "$path" scripts/ infra/ .github/ traefik/ docker-compose*.yml 2>/dev/null | grep -v "^Binary"
-   done
+   done <<< "$HEALTH_PATHS"
    ```
 
    **For each hit, classify:**
@@ -1517,13 +1541,14 @@ If no infra context is configured above, derive the deployment model from the ch
 
    **Scan ALL `{{` occurrences in every `script:` block of every `appleboy/ssh-action` step in changed files:**
    ```bash
-   for f in $(gh pr diff [PR_NUMBER] --name-only | grep -E '\.github/workflows/.*\.yml$'); do
+   while IFS= read -r f; do
+       [ -z "$f" ] && continue
        if grep -q "appleboy/ssh-action" "$f"; then
            echo "=== appleboy/ssh-action found in $f ==="
            # Show all {{ occurrences with line numbers
            grep -n "{{" "$f"
        fi
-   done
+   done < <(gh pr diff [PR_NUMBER] --name-only | grep -E '\.github/workflows/.*\.yml$')
    ```
 
    **For every `{{` found, classify and flag:**
@@ -1544,10 +1569,11 @@ If no infra context is configured above, derive the deployment model from the ch
    **Scan changed config files for credential fallbacks:**
    ```bash
    CONFIG_FILES=$(gh pr diff [PR_NUMBER] --name-only | grep -E "(traefik/|infra/nginx/|infra/|\.github/workflows/).*(\.ya?ml|\.toml|\.json|\.conf|\.ini)$" | head -20)
-   for f in $CONFIG_FILES; do
+   while IFS= read -r f; do
+       [ -z "$f" ] && continue
        # Shell-style fallback: ${VAR:-default} — filter out safe non-credential defaults
        grep -nE "\$\{[A-Z_]+:-[^}]{4,}\}" "$f" | grep -ivE "(localhost|127\.0\.0\.1|0\.0\.0\.0|true|false|^[0-9]+$|/tmp|/var|/etc)" | head -20
-   done
+   done <<< "$CONFIG_FILES"
    ```
 
    **For each hit, classify the fallback value:**
@@ -1583,9 +1609,10 @@ If no infra context is configured above, derive the deployment model from the ch
    **Scan for host-side database tool invocations:**
    ```bash
    DEPLOY_FILES=$(gh pr diff [PR_NUMBER] --name-only | grep -E "(\.github/workflows/.*\.yml$|scripts/deploy.*\.sh$|docker-entrypoint.*\.sh$)")
-   for f in $DEPLOY_FILES; do
+   while IFS= read -r f; do
+       [ -z "$f" ] && continue
        grep -n "\bpsql\b\|\bcreatedb\b\|\bpg_dump\b\|\bpg_restore\b" "$f" | grep -v "docker exec" | head -20
-   done
+   done <<< "$DEPLOY_FILES"
    ```
 
    **For each match, classify:**
@@ -1600,6 +1627,54 @@ If no infra context is configured above, derive the deployment model from the ch
    - `pg_dump -h localhost -U $USER $DB` → `docker exec [DB_CONTAINER] pg_dump -U $USER $DB`
 
    Host-side port bindings to Docker containers are unreliable in SSH deploy contexts. Deploy scripts that invoke database tools directly cannot depend on `localhost:5432` being reachable; the same operation via `docker exec` bypasses the host network entirely and always succeeds when the container is running. <!-- Added: forge#322 -->
+
+15. **External tool config schema validation** (when any config file consumed by an external tool is in the diff — trigger: files under `traefik/`, `infra/nginx/`, `k8s/`, `terraform/`, `*.conf`, `*.toml`, or any `docker-compose*.yml` with non-trivial changes to service definitions):
+
+   **Principle: Logical correctness ≠ structural correctness.** A config can have the right values in the wrong nesting and be silently rejected by the external tool — producing zero error logs in some tools (e.g. Traefik v3 ignores unrecognized nesting silently). The INFRA agent must verify both dimensions:
+   - **Logical correctness** (covered by existing checks): Are the values coherent? Do names match across files? Is the wiring consistent with the deploy pipeline?
+   - **Structural correctness** (this check): Does the YAML/TOML/HCL structure match what the tool's actual schema expects? Are directives nested at the correct depth? Do required parent keys exist?
+
+   **For each external tool config file in the diff**:
+
+   1. **Identify the tool and version**: Read the `image:` tag in `docker-compose*.yml` for the tool (e.g., `traefik:v3.1`, `nginx:1.25`). If the tool version cannot be determined from the diff, note it as unknown.
+
+   2. **Reason about the schema**: Ask — "Does this change's structure match what `{tool} {version}` actually expects?" Key questions:
+      - Is this directive/key nested under the correct parent section?
+      - Does this version of the tool use a different config syntax than a prior version? (Version migrations often change required nesting — e.g., Traefik v2 → v3 moved many config keys to different parent sections)
+      - Are any required sibling keys missing from the changed section?
+      - Does the tool expect this value at file scope, or under a named block?
+
+   3. **Cross-reference against sibling config files**: If the project uses dynamic config loading (e.g., `traefik/dynamic/`), verify that a key defined in the static config is not also required in the dynamic config (or vice versa) for the feature to activate.
+
+   4. **Flag structural mismatches**: If any key or nesting does not match the tool's expected schema for the declared version, flag as **CONFIRMED HIGH**. Structural config mismatches are silently rejected at runtime — no startup crash, no error log, the feature simply does not activate.
+
+   ```bash
+   # Identify tool config files in the diff
+   CONFIG_TOOL_FILES=$(gh pr diff [PR_NUMBER] --name-only | grep -E \
+     "(traefik/|infra/nginx/|k8s/|terraform/|.*\.conf$|.*\.toml$)" | head -20)
+   COMPOSE_INFRA_FILES=$(gh pr diff [PR_NUMBER] --name-only | grep -E "docker-compose.*\.yml$")
+
+   # For each config file: read the full file (not just the diff) to understand the structure
+   while IFS= read -r f; do
+       [ -z "$f" ] && continue
+       echo "=== Reading full config structure: $f ==="
+       cat "$f"
+   done <<< "$CONFIG_TOOL_FILES"
+
+   # Identify tool version from docker-compose (for version-aware schema reasoning)
+   while IFS= read -r f; do
+       [ -z "$f" ] && continue
+       grep -E "image:\s*(traefik|nginx|haproxy|envoy|caddy|terraform):" "$f" 2>/dev/null && echo "  ^ in $f"
+   done <<< "$COMPOSE_INFRA_FILES"
+   ```
+
+   **Severity classification**:
+   - Config key present but under wrong parent section: **CONFIRMED HIGH** — key is silently ignored; feature does not activate
+   - Required sibling key missing from changed section: **CONFIRMED HIGH** — partial config is silently incomplete
+   - Version mismatch (config uses v2 syntax on v3 tool): **CONFIRMED HIGH** — v3 silently ignores v2 keys in most tools
+   - Structural ambiguity (key could plausibly be correct but version cannot be determined): **LIKELY MEDIUM** — flag for human verification with schema reference
+
+   **Do NOT rely solely on logical correctness checks when structural correctness has not been verified.** A config that names services correctly, uses coherent values, and matches the deploy script's expectations can still be silently rejected if the nesting does not match the tool's schema. Both dimensions must be verified independently. <!-- Added: forge#1104 -->
 
 ## Post Findings
 ```bash
@@ -1675,5 +1750,6 @@ EOF
 | appleboy/ssh-action Go template safety | Item 12 | COVERED | #226 |
 | Insecure config file defaults | Item 13 | COVERED | #301 |
 | Host-side database tool invocations | Item 14 | COVERED | #322 |
+| External tool config schema validation (structural correctness) | Item 15 | COVERED | #1104 |
 | Docker image tag pinning (mutable tags) | — | GAP | |
 | Network policy / inter-container isolation | — | GAP | |

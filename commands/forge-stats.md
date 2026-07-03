@@ -2,6 +2,8 @@
 description: Track command sizes, detect bloat, compare against baselines and thresholds
 argument-hint: [diff | baseline | full]
 ---
+<!-- SPDX-FileCopyrightText: Copyright (c) RapierCraft Studios -->
+<!-- SPDX-License-Identifier: AGPL-3.0-or-later -->
 
 # /forge-stats — Prompt Bloat Tracker
 
@@ -127,7 +129,7 @@ for cmd in commands/*.md; do
 done
 
 git add .baselines
-git commit -m "stats: update command baselines — $(date +%Y-%m-%d)"
+git commit -s -m "stats: update command baselines — $(date +%Y-%m-%d)"
 ```
 
 ---

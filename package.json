@@ -1,7 +1,7 @@
 {
   "name": "forgedock",
   "version": "1.1.0",
-  "description": "GitHub as a knowledge graph for AI agents. Autonomous dev pipeline for Claude Code.",
+  "description": "Autonomous dev pipeline for Claude Code. GitHub as institutional memory \u2014 every issue, PR, and annotation survives context resets and makes the next agent smarter.",
   "bin": {
     "forgedock": "bin/forgedock.mjs"
   },
@@ -27,7 +27,7 @@
     "type": "git",
     "url": "git+https://github.com/RapierCraftStudios/ForgeDock.git"
   },
-  "homepage": "https://github.com/RapierCraftStudios/ForgeDock",
+  "homepage": "https://forgedock.dev",
   "bugs": {
     "url": "https://github.com/RapierCraftStudios/ForgeDock/issues"
   },
@@ -36,6 +36,7 @@
     "!bin/tests/",
     "commands/",
     "docs/",
+    "examples/",
     "scripts/",
     "templates/",
     "LICENSE",
@@ -46,5 +47,16 @@
   },
   "engines": {
     "node": ">=18"
+  },
+  "optionalDependencies": {
+    "@anthropic-ai/sdk": ">=0.30.0 <1"
+  },
+  "peerDependencies": {
+    "@anthropic-ai/claude-code": ">=2.0.0"
+  },
+  "peerDependenciesMeta": {
+    "@anthropic-ai/claude-code": {
+      "optional": true
+    }
   }
 }

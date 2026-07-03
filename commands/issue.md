@@ -2,6 +2,8 @@
 description: Create a well-structured GitHub issue that the pipeline can consume reliably
 argument-hint: [description of the problem or feature]
 ---
+<!-- SPDX-FileCopyrightText: Copyright (c) RapierCraft Studios -->
+<!-- SPDX-License-Identifier: AGPL-3.0-or-later -->
 
 # /issue — Deterministic Issue Creator
 
@@ -203,9 +205,11 @@ Files that need changes (ordered by dependency — change these in this order):
 
 ## Acceptance Criteria
 
-- [ ] {Specific, testable criterion}
+- [ ] {Specific, testable criterion} [type:api]
 - [ ] {Specific, testable criterion}
 - [ ] {No regressions in {related_feature}}
+
+> **Test-type annotation** (optional): Append `[type:api]`, `[type:unit]`, `[type:e2e]`, or `[type:manual]` to each criterion. The test gate reads this annotation directly and skips regex inference. Omit it to rely on regex classification fallback.
 
 ## Dependencies
 
@@ -279,8 +283,10 @@ Files that need changes (ordered by dependency):
 
 ## Acceptance Criteria
 
+- [ ] {Specific, testable criterion} [type:api]
 - [ ] {Specific, testable criterion}
-- [ ] {Specific, testable criterion}
+
+> **Test-type annotation** (optional): Append `[type:api]`, `[type:unit]`, `[type:e2e]`, or `[type:manual]` to each criterion. The test gate reads this annotation directly and skips regex inference. Omit it to rely on regex classification fallback.
 
 ## Context
 
@@ -305,7 +311,7 @@ Files that need changes (ordered by dependency):
 - Title MUST use conventional commit prefix: `fix:`, `feat:`, `refactor:`, `investigate:`, `docs:`
 - `## Problem` is MANDATORY — every issue must state what's wrong or what's needed
 - `## Affected Files` is MANDATORY — list actual file paths the investigator should read first
-- `## Acceptance Criteria` is MANDATORY — at least one testable `- [ ]` criterion
+- `## Acceptance Criteria` is MANDATORY — at least one testable `- [ ]` criterion; each item MAY carry an optional `[type:api|unit|e2e|manual]` annotation for deterministic test-gate classification (omit to fall back to regex inference)
 - Domain-specific sections (Evidence Trail, Pattern Metadata, Validation Checklist, etc.) SHOULD be preserved — they add pipeline value. Add mandatory sections around them, not instead of them.
 - `## Prior Investigation` is OPTIONAL — include only when parent/sibling investigation Gist URLs are available. Each Gist URL must be wrapped in a `<!-- FORGE:PRIOR_GIST: {url} -->` annotation for machine-readable parsing by downstream agents. <!-- Added: forge#339 -->
 

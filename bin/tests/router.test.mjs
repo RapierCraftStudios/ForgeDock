@@ -22,14 +22,23 @@ function runCli(args, { cwd, home } = {}) {
 }
 
 describe("router", () => {
-  it("help lists only real commands — no demo, no integrate", () => {
+  it("help lists the union of journey + engine commands — no phantom commands", () => {
     const res = runCli(["help"], { home: mkdtempSync(join(os.tmpdir(), "fd-h-")) });
     assert.equal(res.status, 0);
+    // Journey/onboarding surface
     assert.match(res.stdout, /install/);
     assert.match(res.stdout, /enable/);
     assert.match(res.stdout, /disable/);
     assert.match(res.stdout, /status/);
-    assert.doesNotMatch(res.stdout, /demo/);
+    // Engine surface (real commands merged from staging)
+    assert.match(res.stdout, /demo/);
+    assert.match(res.stdout, /run-issue/);
+    assert.match(res.stdout, /doctor/);
+    // Journey flags
+    assert.match(res.stdout, /--fast/);
+    assert.match(res.stdout, /--manual/);
+    assert.match(res.stdout, /--verbose/);
+    // Never-shipped command must not reappear
     assert.doesNotMatch(res.stdout, /integrate/);
   });
 

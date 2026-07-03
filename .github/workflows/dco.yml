@@ -1,0 +1,23 @@
+name: DCO Check
+
+on:
+  pull_request_target:
+    types: [opened, synchronize, reopened]
+
+jobs:
+  dco:
+    name: DCO Sign-Off Verification
+    runs-on: ubuntu-latest
+    permissions:
+      pull-requests: read
+      statuses: write
+
+    steps:
+      - name: Check DCO sign-off
+        uses: KineticCafe/actions-dco@1da04282bbf757dab7d92a5c8535dbfb8113da5c # v3.1.0
+        with:
+          config: |
+            # Allow these bots to skip the DCO requirement — they cannot sign off
+            [bot]
+            policy = "allowlist"
+            allow = ["github-actions[bot]", "dependabot[bot]", "dependabot-preview[bot]", "rapiercraft-forge[bot]"]

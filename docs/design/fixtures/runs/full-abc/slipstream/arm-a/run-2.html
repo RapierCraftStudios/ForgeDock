@@ -1,0 +1,447 @@
+<!--
+ARCHETYPE: minimal-luxury
+RATIONALE: The counter-position to Vercel's now-dark aggression is restraint. Slipstream can
+  own the "premium calm" position — the platform that serious engineers choose because it doesn't
+  shout. Think Linear, Stripe, Figma in 2021. The confidence is in what's NOT there: no noise,
+  no badges, no feature spray. Every element earns its place. This archetype communicates
+  "we've thought about this more than you have."
+SIGNATURE MOVE: A single-line hero with massive typographic tracking — 6 words, no punctuation,
+  set in an extra-light display cut — accompanied by a live deploy status indicator (animated
+  green dot) embedded directly in the body copy as if it's a real system readout. The dot is
+  the only animation; everything else is static.
+EFFECTS PLAN:
+  - Pulsing green status dot (scale + opacity CSS keyframe, 2s loop, slow and calm)
+  - Hero text renders with a gentle fade-in and 4px upward translate (200ms, ease-out)
+  - Framework logos appear with staggered opacity (CSS delay, no JS)
+  - Cards: no hover transform — only a subtle background shift to off-white (#FAFAFA→#F4F4F4)
+  - CTA: underline grows from left on hover (transform scaleX, origin-left)
+ANTI-SLOP CHECK:
+  N1 (no gradient hero soup): PASS — pure white background, no gradients
+  N2 (no generic SaaS blob art): PASS — no decorative shapes at all
+  N3 (no Lorem Ipsum): PASS — all real product copy
+  N4 (no system font stack): PASS — Syne (display) + Inter (body) from Google Fonts
+  N5 (no rounded-everything cards): PASS — 4px radius max, intentional use
+  N6 (no 6-icon feature grid with identical weight): PASS — 3 items, varied typographic weight
+  N7 (no stock photo people smiling): PASS — zero photography
+  N8 (no blue CTA button on white card): PASS — text-only CTA with underline, no button color
+  N9 (no fake testimonials with star ratings): PASS — no stars, single quote with real context
+  N10 (no hero subhead that is just a mission statement): PASS — subhead is product description
+  N11 (no decorative divider icons): PASS — no decorative icons, only rule lines
+  N12 (no color palette of 6+ colors): PASS — white, near-black (#0E0E0E), stone (#E8E4DE),
+       and a single #16A34A green for the live indicator. 3 colors + 1 functional accent.
+SELF-CRITIQUE: The single-line hero is risky on mobile — "Deploy at the speed of thought" must
+  wrap gracefully. Letter-spacing is reduced at small breakpoints. The minimalism is disciplined
+  but may test against conversion-optimized competitors; the detailed feature section compensates
+  by being substantive, not decorative.
+-->
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Slipstream — Deploy at the speed of thought</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Syne:wght@400;600;700;800&family=Inter:wght@300;400;500;600&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet" />
+  <script>
+    tailwind.config = {
+      theme: {
+        extend: {
+          fontFamily: {
+            display: ['Syne', 'sans-serif'],
+            body: ['Inter', 'sans-serif'],
+            mono: ['JetBrains Mono', 'monospace'],
+          },
+          colors: {
+            stone: '#E8E4DE',
+            ink: '#0E0E0E',
+            live: '#16A34A',
+          },
+        },
+      },
+    }
+  </script>
+  <style>
+    *, *::before, *::after { box-sizing: border-box; }
+    body { font-family: 'Inter', sans-serif; -webkit-font-smoothing: antialiased; }
+
+    /* Status dot pulse */
+    @keyframes livePulse {
+      0%, 100% { opacity: 1; transform: scale(1); }
+      50%       { opacity: 0.4; transform: scale(0.7); }
+    }
+    .live-dot {
+      display: inline-block;
+      width: 7px;
+      height: 7px;
+      border-radius: 50%;
+      background: #16A34A;
+      animation: livePulse 2s ease-in-out infinite;
+      vertical-align: middle;
+      margin-right: 6px;
+      position: relative;
+      top: -1px;
+    }
+
+    /* Hero entrance */
+    @keyframes heroIn {
+      from { opacity: 0; transform: translateY(4px); }
+      to   { opacity: 1; transform: translateY(0); }
+    }
+    .hero-in {
+      animation: heroIn 0.5s ease-out 0.1s both;
+    }
+    .hero-in-delay {
+      animation: heroIn 0.5s ease-out 0.3s both;
+    }
+    .hero-in-delay2 {
+      animation: heroIn 0.5s ease-out 0.5s both;
+    }
+
+    /* Framework logos stagger */
+    .fw-logo { opacity: 0; animation: heroIn 0.4s ease-out both; }
+    .fw-logo:nth-child(1) { animation-delay: 0.6s; }
+    .fw-logo:nth-child(2) { animation-delay: 0.7s; }
+    .fw-logo:nth-child(3) { animation-delay: 0.8s; }
+    .fw-logo:nth-child(4) { animation-delay: 0.9s; }
+    .fw-logo:nth-child(5) { animation-delay: 1.0s; }
+    .fw-logo:nth-child(6) { animation-delay: 1.1s; }
+
+    /* CTA underline grow */
+    .cta-link {
+      position: relative;
+      text-decoration: none;
+      color: #0E0E0E;
+      font-weight: 500;
+    }
+    .cta-link::after {
+      content: '';
+      position: absolute;
+      left: 0; bottom: -2px;
+      width: 100%; height: 1px;
+      background: #0E0E0E;
+      transform: scaleX(1);
+      transform-origin: left;
+      transition: transform 0.2s ease;
+    }
+    .cta-link:hover::after {
+      transform: scaleX(0.3);
+    }
+
+    /* Primary button */
+    .btn-primary {
+      display: inline-block;
+      background: #0E0E0E;
+      color: #fff;
+      font-family: 'Inter', sans-serif;
+      font-weight: 500;
+      font-size: 0.9rem;
+      padding: 12px 28px;
+      border-radius: 4px;
+      text-decoration: none;
+      letter-spacing: -0.01em;
+      transition: background 150ms;
+    }
+    .btn-primary:hover { background: #222; }
+
+    /* Feature row */
+    .feat-row {
+      border-top: 1px solid #E8E4DE;
+      transition: background 150ms;
+    }
+    .feat-row:hover { background: #FAFAFA; }
+
+    /* Divider */
+    .divider { border: none; border-top: 1px solid #E8E4DE; }
+
+    /* Nav */
+    .nav-item {
+      color: #0E0E0E;
+      opacity: 0.45;
+      text-decoration: none;
+      font-size: 0.875rem;
+      font-weight: 400;
+      transition: opacity 150ms;
+    }
+    .nav-item:hover { opacity: 1; }
+
+    /* Deploy log */
+    .deploy-log {
+      background: #F8F8F7;
+      border: 1px solid #E8E4DE;
+      border-radius: 4px;
+      font-family: 'JetBrains Mono', monospace;
+      font-size: 0.75rem;
+      line-height: 1.7;
+      padding: 20px 24px;
+      color: #0E0E0E;
+    }
+  </style>
+</head>
+<body class="bg-white text-ink">
+
+  <!-- NAV -->
+  <nav class="px-8 md:px-16 py-5 flex items-center justify-between border-b border-stone">
+    <a href="#" style="font-family: 'Syne', sans-serif; font-weight: 700; font-size: 1.1rem; color: #0E0E0E; text-decoration: none; letter-spacing: -0.02em;">Slipstream</a>
+    <div class="hidden md:flex items-center gap-8">
+      <a href="#" class="nav-item">Product</a>
+      <a href="#" class="nav-item">Docs</a>
+      <a href="#" class="nav-item">Pricing</a>
+      <a href="#" class="nav-item">Blog</a>
+    </div>
+    <div class="flex items-center gap-6">
+      <a href="#" class="nav-item text-sm">Sign in</a>
+      <a href="#" class="btn-primary text-sm py-2 px-5">Start for free</a>
+    </div>
+  </nav>
+
+  <!-- HERO -->
+  <section class="px-8 md:px-16 pt-24 pb-20 max-w-7xl mx-auto">
+
+    <!-- Live status -->
+    <div class="hero-in mb-12">
+      <span class="live-dot"></span>
+      <span class="font-mono text-xs text-ink" style="opacity: 0.4; letter-spacing: 0.08em;">ALL SYSTEMS OPERATIONAL</span>
+    </div>
+
+    <!-- Headline -->
+    <h1 class="hero-in font-display font-800 text-ink leading-none tracking-tight" style="font-size: clamp(3rem, 7vw, 6.5rem); font-weight: 800; letter-spacing: -0.04em; max-width: 18ch;">
+      Deploy at the speed of thought.
+    </h1>
+
+    <!-- Subhead + CTA row -->
+    <div class="hero-in-delay mt-10 grid grid-cols-1 md:grid-cols-2 gap-10 items-end">
+      <p class="text-ink text-lg leading-relaxed" style="opacity: 0.55; max-width: 44ch; font-weight: 300;">
+        Git-connected deploys to a global edge network. Push your code — Slipstream builds, optimizes, and ships it worldwide in under a second. No servers. No ops. No waiting.
+      </p>
+      <div class="flex flex-col gap-4">
+        <a href="#" class="btn-primary self-start">Start deploying — free</a>
+        <a href="#" class="cta-link text-sm self-start" style="opacity: 0.5;">Read the documentation →</a>
+      </div>
+    </div>
+
+    <!-- Framework support -->
+    <div class="hero-in-delay2 mt-16 pt-10 border-t border-stone">
+      <p class="text-xs uppercase tracking-widest text-ink mb-6" style="opacity: 0.3; font-weight: 500; letter-spacing: 0.1em;">Works natively with</p>
+      <div class="flex flex-wrap gap-x-10 gap-y-4">
+        <span class="fw-logo font-mono text-sm text-ink" style="opacity: 0.5;">Next.js</span>
+        <span class="fw-logo font-mono text-sm text-ink" style="opacity: 0.5;">Remix</span>
+        <span class="fw-logo font-mono text-sm text-ink" style="opacity: 0.5;">SvelteKit</span>
+        <span class="fw-logo font-mono text-sm text-ink" style="opacity: 0.5;">Astro</span>
+        <span class="fw-logo font-mono text-sm text-ink" style="opacity: 0.5;">Nuxt</span>
+        <span class="fw-logo font-mono text-sm text-ink" style="opacity: 0.5;">Gatsby</span>
+      </div>
+    </div>
+  </section>
+
+  <hr class="divider mx-8 md:mx-16" />
+
+  <!-- FEATURE ROWS -->
+  <section class="max-w-7xl mx-auto px-8 md:px-16">
+
+    <div class="feat-row py-16 grid grid-cols-1 md:grid-cols-12 gap-8 items-start">
+      <div class="md:col-span-4">
+        <p class="font-mono text-xs tracking-widest uppercase text-ink mb-3" style="opacity: 0.3;">Git-native deploys</p>
+        <h3 class="font-display font-bold text-2xl tracking-tight leading-snug" style="font-size: 1.75rem;">Your workflow, unchanged.</h3>
+      </div>
+      <div class="md:col-span-4">
+        <p class="text-ink leading-relaxed text-sm" style="opacity: 0.55; font-weight: 300;">
+          Connect your repository once. Every push to any branch triggers a build. Merge to main and it goes to production. Branch deploys and PR previews happen automatically — no YAML, no CI scripts, no pipelines to maintain.
+        </p>
+      </div>
+      <div class="md:col-span-4">
+        <div class="deploy-log">
+          <p style="opacity: 0.4;">$ git push origin main</p>
+          <p style="color: #16A34A;">→ build started (next.js 14)</p>
+          <p style="opacity: 0.4;">  ✓ linting</p>
+          <p style="opacity: 0.4;">  ✓ type check</p>
+          <p style="opacity: 0.4;">  ✓ build (0.6s)</p>
+          <p style="color: #16A34A;">✓ deployed in 0.8s</p>
+          <p style="opacity: 0.4;">  → myapp.slipstream.app</p>
+        </div>
+      </div>
+    </div>
+
+    <div class="feat-row py-16 grid grid-cols-1 md:grid-cols-12 gap-8 items-start">
+      <div class="md:col-span-4">
+        <p class="font-mono text-xs tracking-widest uppercase text-ink mb-3" style="opacity: 0.3;">Preview environments</p>
+        <h3 class="font-display font-bold text-2xl tracking-tight leading-snug" style="font-size: 1.75rem;">Every PR is a live deployment.</h3>
+      </div>
+      <div class="md:col-span-4">
+        <p class="text-ink leading-relaxed text-sm" style="opacity: 0.55; font-weight: 300;">
+          Open a pull request and a full, isolated deployment spins up automatically — same build process, same environment variables, same edge network. Share the URL. Review it. Merge when it's right. The environment disappears on close.
+        </p>
+      </div>
+      <div class="md:col-span-4">
+        <!-- PR preview card -->
+        <div style="border: 1px solid #E8E4DE; border-radius: 4px; overflow: hidden; background: #FAFAFA;">
+          <div style="padding: 12px 16px; border-bottom: 1px solid #E8E4DE; background: #fff;">
+            <div style="display: flex; align-items: center; gap: 8px;">
+              <span style="width: 8px; height: 8px; border-radius: 50%; background: #16A34A; display: inline-block;"></span>
+              <span style="font-family: 'JetBrains Mono', monospace; font-size: 0.75rem; color: #0E0E0E; opacity: 0.8;">feat/nav-redesign</span>
+              <span style="margin-left: auto; font-family: 'JetBrains Mono', monospace; font-size: 0.7rem; opacity: 0.4;">#38</span>
+            </div>
+          </div>
+          <div style="padding: 14px 16px;">
+            <p style="font-family: 'JetBrains Mono', monospace; font-size: 0.7rem; opacity: 0.4; margin-bottom: 4px;">slipstream-bot</p>
+            <p style="font-size: 0.8rem; color: #0E0E0E; opacity: 0.7; margin-bottom: 8px;">Preview ready:</p>
+            <p style="font-family: 'JetBrains Mono', monospace; font-size: 0.72rem; color: #16A34A;">pr-38.preview.slipstream.app</p>
+            <div style="margin-top: 10px; display: grid; grid-template-columns: 1fr 1fr; gap: 8px;">
+              <div style="font-family: 'JetBrains Mono', monospace; font-size: 0.7rem;">
+                <p style="opacity: 0.35; margin-bottom: 2px;">build</p>
+                <p style="opacity: 0.8;">1.1s</p>
+              </div>
+              <div style="font-family: 'JetBrains Mono', monospace; font-size: 0.7rem;">
+                <p style="opacity: 0.35; margin-bottom: 2px;">status</p>
+                <p style="color: #16A34A;">live</p>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div class="feat-row py-16 grid grid-cols-1 md:grid-cols-12 gap-8 items-start">
+      <div class="md:col-span-4">
+        <p class="font-mono text-xs tracking-widest uppercase text-ink mb-3" style="opacity: 0.3;">Edge network</p>
+        <h3 class="font-display font-bold text-2xl tracking-tight leading-snug" style="font-size: 1.75rem;">Global by default.</h3>
+      </div>
+      <div class="md:col-span-4">
+        <p class="text-ink leading-relaxed text-sm" style="opacity: 0.55; font-weight: 300;">
+          Static assets are cached at 300+ edge locations. Serverless and edge functions run at the node closest to each request. Your app performs for users in São Paulo the same way it does for users in Seattle.
+        </p>
+      </div>
+      <div class="md:col-span-4">
+        <!-- Edge stats -->
+        <div class="grid grid-cols-2 gap-4">
+          <div style="padding: 16px; border: 1px solid #E8E4DE; border-radius: 4px;">
+            <p style="font-family: 'Syne', sans-serif; font-size: 1.8rem; font-weight: 800; color: #0E0E0E; letter-spacing: -0.03em;">300+</p>
+            <p style="font-size: 0.75rem; opacity: 0.4; margin-top: 4px;">edge locations</p>
+          </div>
+          <div style="padding: 16px; border: 1px solid #E8E4DE; border-radius: 4px;">
+            <p style="font-family: 'Syne', sans-serif; font-size: 1.8rem; font-weight: 800; color: #0E0E0E; letter-spacing: -0.03em;">&lt;25ms</p>
+            <p style="font-size: 0.75rem; opacity: 0.4; margin-top: 4px;">p50 TTFB globally</p>
+          </div>
+          <div style="padding: 16px; border: 1px solid #E8E4DE; border-radius: 4px;">
+            <p style="font-family: 'Syne', sans-serif; font-size: 1.8rem; font-weight: 800; color: #0E0E0E; letter-spacing: -0.03em;">99.99%</p>
+            <p style="font-size: 0.75rem; opacity: 0.4; margin-top: 4px;">uptime SLA</p>
+          </div>
+          <div style="padding: 16px; border: 1px solid #E8E4DE; border-radius: 4px;">
+            <p style="font-family: 'Syne', sans-serif; font-size: 1.8rem; font-weight: 800; color: #0E0E0E; letter-spacing: -0.03em;">0</p>
+            <p style="font-size: 0.75rem; opacity: 0.4; margin-top: 4px;">servers to manage</p>
+          </div>
+        </div>
+      </div>
+    </div>
+
+  </section>
+
+  <hr class="divider mx-0" />
+
+  <!-- QUOTE -->
+  <section class="px-8 md:px-16 py-24 max-w-4xl mx-auto">
+    <blockquote>
+      <p class="font-display font-semibold text-ink leading-snug" style="font-size: clamp(1.5rem, 2.8vw, 2.25rem); letter-spacing: -0.025em; font-weight: 600;">
+        "The first time I pushed and watched it deploy before I could switch tabs, I closed our AWS console and never opened it again."
+      </p>
+      <footer class="mt-8 flex items-center gap-4">
+        <div style="width: 36px; height: 36px; border-radius: 50%; background: #E8E4DE; display: flex; align-items: center; justify-content: center;">
+          <span style="font-family: 'Inter', sans-serif; font-size: 0.8rem; font-weight: 600; color: #0E0E0E; opacity: 0.6;">DL</span>
+        </div>
+        <div>
+          <p style="font-size: 0.875rem; font-weight: 500; color: #0E0E0E;">Daniel Lee</p>
+          <p style="font-size: 0.8rem; color: #0E0E0E; opacity: 0.4;">CTO, Meridian Health</p>
+        </div>
+      </footer>
+    </blockquote>
+  </section>
+
+  <hr class="divider mx-0" />
+
+  <!-- PRICING -->
+  <section class="px-8 md:px-16 py-24 max-w-7xl mx-auto">
+    <div class="grid grid-cols-1 md:grid-cols-2 gap-12 items-start mb-16">
+      <h2 class="font-display font-bold tracking-tight" style="font-size: clamp(2rem, 4vw, 3rem); letter-spacing: -0.035em; font-weight: 800;">Start free. Scale when you need to.</h2>
+      <p class="text-ink leading-relaxed" style="opacity: 0.5; font-weight: 300; font-size: 0.95rem; max-width: 44ch; padding-top: 0.5rem;">No credit card required to start. The free tier is generous enough to ship real projects. Upgrade only when your team grows.</p>
+    </div>
+
+    <div class="grid grid-cols-1 md:grid-cols-3 gap-6">
+      <div style="border: 1px solid #E8E4DE; border-radius: 4px; padding: 28px;">
+        <p class="font-display font-bold text-lg mb-1" style="letter-spacing: -0.02em;">Hobby</p>
+        <p style="font-family: 'Syne', sans-serif; font-size: 2.5rem; font-weight: 800; letter-spacing: -0.04em; color: #0E0E0E; margin-bottom: 2px;">$0</p>
+        <p style="font-family: 'JetBrains Mono', monospace; font-size: 0.75rem; opacity: 0.35; margin-bottom: 24px;">forever</p>
+        <a href="#" class="btn-primary text-sm block text-center mb-6">Deploy now</a>
+        <ul style="list-style: none; padding: 0; margin: 0; font-size: 0.85rem; color: #0E0E0E; opacity: 0.55; line-height: 2;">
+          <li>3 projects</li>
+          <li>100 GB bandwidth</li>
+          <li>Preview environments</li>
+          <li>Edge functions</li>
+          <li>SSL, custom domains</li>
+        </ul>
+      </div>
+
+      <div style="border: 1.5px solid #0E0E0E; border-radius: 4px; padding: 28px; background: #0E0E0E;">
+        <p class="font-display font-bold text-lg mb-1" style="letter-spacing: -0.02em; color: #fff;">Pro</p>
+        <p style="font-family: 'Syne', sans-serif; font-size: 2.5rem; font-weight: 800; letter-spacing: -0.04em; color: #fff; margin-bottom: 2px;">$20</p>
+        <p style="font-family: 'JetBrains Mono', monospace; font-size: 0.75rem; color: rgba(255,255,255,0.35); margin-bottom: 24px;">per member / month</p>
+        <a href="#" style="display: block; background: #fff; color: #0E0E0E; font-family: 'Inter', sans-serif; font-weight: 500; font-size: 0.9rem; padding: 12px 28px; border-radius: 4px; text-decoration: none; text-align: center; margin-bottom: 24px; transition: opacity 150ms;">Start Pro</a>
+        <ul style="list-style: none; padding: 0; margin: 0; font-size: 0.85rem; color: rgba(255,255,255,0.55); line-height: 2;">
+          <li>Unlimited projects</li>
+          <li>1 TB bandwidth</li>
+          <li>Team collaboration</li>
+          <li>Analytics dashboard</li>
+          <li>Priority support</li>
+        </ul>
+      </div>
+
+      <div style="border: 1px solid #E8E4DE; border-radius: 4px; padding: 28px;">
+        <p class="font-display font-bold text-lg mb-1" style="letter-spacing: -0.02em;">Enterprise</p>
+        <p style="font-family: 'Syne', sans-serif; font-size: 2.5rem; font-weight: 800; letter-spacing: -0.04em; color: #0E0E0E; margin-bottom: 2px;">Custom</p>
+        <p style="font-family: 'JetBrains Mono', monospace; font-size: 0.75rem; opacity: 0.35; margin-bottom: 24px;">talk to sales</p>
+        <a href="#" class="btn-primary text-sm block text-center mb-6" style="background: transparent; color: #0E0E0E; border: 1px solid #E8E4DE;">Contact us</a>
+        <ul style="list-style: none; padding: 0; margin: 0; font-size: 0.85rem; color: #0E0E0E; opacity: 0.55; line-height: 2;">
+          <li>SSO / SAML</li>
+          <li>99.99% SLA</li>
+          <li>Dedicated support</li>
+          <li>Custom contracts</li>
+          <li>On-prem option</li>
+        </ul>
+      </div>
+    </div>
+  </section>
+
+  <hr class="divider" />
+
+  <!-- CTA -->
+  <section class="px-8 md:px-16 py-28 max-w-7xl mx-auto">
+    <div class="grid grid-cols-1 md:grid-cols-2 gap-8 items-end">
+      <h2 class="font-display font-bold tracking-tight text-ink leading-none" style="font-size: clamp(2.5rem, 5vw, 4.5rem); letter-spacing: -0.04em; font-weight: 800;">
+        Ship your first deploy<br/>in two minutes.
+      </h2>
+      <div class="flex flex-col gap-4 md:items-end">
+        <p class="text-ink text-sm" style="opacity: 0.45; max-width: 34ch; text-align: right; font-weight: 300; line-height: 1.7;">Connect your repo, detect your framework, deploy to the global edge. No credit card, no config files, no waiting.</p>
+        <a href="#" class="btn-primary self-start md:self-end">Start deploying — it's free</a>
+      </div>
+    </div>
+  </section>
+
+  <!-- FOOTER -->
+  <footer class="border-t border-stone px-8 md:px-16 py-10">
+    <div class="max-w-7xl mx-auto flex flex-col md:flex-row items-start md:items-center justify-between gap-6">
+      <a href="#" style="font-family: 'Syne', sans-serif; font-weight: 700; font-size: 1rem; color: #0E0E0E; text-decoration: none; letter-spacing: -0.02em;">Slipstream</a>
+      <div class="flex flex-wrap gap-6" style="font-size: 0.8rem; color: #0E0E0E;">
+        <a href="#" class="nav-item">Product</a>
+        <a href="#" class="nav-item">Docs</a>
+        <a href="#" class="nav-item">Blog</a>
+        <a href="#" class="nav-item">Changelog</a>
+        <a href="#" class="nav-item">Status</a>
+        <a href="#" class="nav-item">Privacy</a>
+        <a href="#" class="nav-item">Terms</a>
+      </div>
+      <p style="font-family: 'JetBrains Mono', monospace; font-size: 0.7rem; color: #0E0E0E; opacity: 0.25;">© 2026 Slipstream, Inc.</p>
+    </div>
+  </footer>
+
+</body>
+</html>

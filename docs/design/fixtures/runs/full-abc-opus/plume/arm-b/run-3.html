@@ -1,0 +1,353 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Plume | Project management for builders</title>
+<link href="https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;500&display=swap" rel="stylesheet">
+<style>
+  *, *::before, *::after { margin: 0; padding: 0; box-sizing: border-box; }
+  html { font-size: 16px; }
+  body { font-family: 'DM Sans', sans-serif; background: #0b1120; color: #e2e8f0; -webkit-font-smoothing: antialiased; overflow-x: hidden; }
+  code, .mono { font-family: 'IBM Plex Mono', monospace; }
+
+  /* Gradient overlay at top */
+  body::before { content: ''; position: fixed; top: 0; left: 0; right: 0; height: 600px; background: radial-gradient(ellipse 80% 50% at 50% -20%, rgba(56,189,248,0.12) 0%, transparent 100%); pointer-events: none; z-index: 0; }
+
+  /* Nav */
+  .nav { position: fixed; top: 0; left: 0; right: 0; z-index: 100; padding: 0 48px; height: 60px; display: flex; align-items: center; justify-content: space-between; background: rgba(11,17,32,0.75); backdrop-filter: blur(16px); border-bottom: 1px solid rgba(255,255,255,0.05); }
+  .nav-brand { font-size: 1.125rem; font-weight: 700; color: #f8fafc; letter-spacing: -0.02em; display: flex; align-items: center; gap: 8px; }
+  .nav-brand .mark { width: 24px; height: 24px; background: linear-gradient(135deg, #38bdf8, #818cf8); border-radius: 6px; }
+  .nav-right { display: flex; gap: 28px; align-items: center; }
+  .nav-right a { color: #94a3b8; font-size: 0.875rem; text-decoration: none; font-weight: 500; }
+  .nav-right a:hover { color: #e2e8f0; }
+  .nav-signup { background: linear-gradient(135deg, #38bdf8, #818cf8); color: #0b1120; padding: 8px 20px; border-radius: 8px; font-weight: 600; font-size: 0.875rem; text-decoration: none; }
+
+  /* Hero — full-width centered, large type */
+  .hero { position: relative; z-index: 1; padding: 200px 48px 100px; text-align: center; max-width: 880px; margin: 0 auto; }
+  .hero h1 { font-size: 4.5rem; font-weight: 700; line-height: 1.05; letter-spacing: -0.045em; margin-bottom: 28px; }
+  .hero h1 .gradient { background: linear-gradient(135deg, #38bdf8 0%, #818cf8 50%, #c084fc 100%); -webkit-background-clip: text; -webkit-text-fill-color: transparent; }
+  .hero .subtitle { font-size: 1.25rem; color: #94a3b8; line-height: 1.7; max-width: 540px; margin: 0 auto 48px; }
+  .hero-cta { display: inline-flex; gap: 16px; align-items: center; }
+  .btn-gradient { background: linear-gradient(135deg, #38bdf8, #818cf8); color: #0b1120; padding: 14px 36px; border-radius: 10px; font-weight: 600; font-size: 0.9375rem; text-decoration: none; transition: opacity 0.15s; }
+  .btn-gradient:hover { opacity: 0.9; }
+  .btn-outline { color: #94a3b8; padding: 14px 28px; border-radius: 10px; font-size: 0.9375rem; text-decoration: none; border: 1px solid rgba(255,255,255,0.1); font-weight: 500; transition: border-color 0.15s, color 0.15s; }
+  .btn-outline:hover { border-color: rgba(255,255,255,0.25); color: #e2e8f0; }
+
+  /* Bento grid */
+  .bento { position: relative; z-index: 1; max-width: 1100px; margin: 0 auto; padding: 40px 48px 120px; display: grid; grid-template-columns: repeat(12, 1fr); grid-template-rows: auto; gap: 16px; }
+  .bento-card { background: rgba(255,255,255,0.03); border: 1px solid rgba(255,255,255,0.06); border-radius: 16px; padding: 32px; overflow: hidden; }
+  .bento-card:hover { border-color: rgba(255,255,255,0.1); }
+
+  .b1 { grid-column: span 7; }
+  .b2 { grid-column: span 5; }
+  .b3 { grid-column: span 4; }
+  .b4 { grid-column: span 4; }
+  .b5 { grid-column: span 4; }
+  .b6 { grid-column: span 12; }
+
+  .bento-card h3 { font-size: 1.125rem; font-weight: 600; margin-bottom: 8px; letter-spacing: -0.01em; }
+  .bento-card p { font-size: 0.875rem; color: #64748b; line-height: 1.65; }
+  .bento-card .label { font-size: 0.6875rem; font-weight: 600; text-transform: uppercase; letter-spacing: 0.08em; color: #38bdf8; margin-bottom: 14px; }
+
+  /* b1: Issue list mockup */
+  .issue-table { margin-top: 20px; }
+  .issue-tr { display: grid; grid-template-columns: 24px 56px 1fr 72px 64px; gap: 10px; align-items: center; padding: 9px 0; border-bottom: 1px solid rgba(255,255,255,0.04); font-size: 0.8125rem; }
+  .issue-status { width: 16px; height: 16px; border-radius: 50%; border: 2px solid; }
+  .status-todo { border-color: #475569; }
+  .status-progress { border-color: #f59e0b; background: rgba(245,158,11,0.2); }
+  .status-done { border-color: #22c55e; background: #22c55e; }
+  .issue-key { color: #475569; font-family: 'IBM Plex Mono', monospace; font-size: 0.75rem; }
+  .issue-name { color: #cbd5e1; }
+  .issue-tag { font-size: 0.6875rem; padding: 2px 8px; border-radius: 4px; }
+  .tag-blue { background: rgba(56,189,248,0.12); color: #38bdf8; }
+  .tag-orange { background: rgba(251,146,60,0.12); color: #fb923c; }
+  .tag-purple { background: rgba(192,132,252,0.12); color: #c084fc; }
+  .issue-prio { font-size: 0.75rem; color: #475569; }
+
+  /* b2: Keyboard shortcuts */
+  .kbd-grid { margin-top: 20px; display: flex; flex-direction: column; gap: 10px; }
+  .kbd-row { display: flex; align-items: center; gap: 14px; }
+  .kbd { display: inline-flex; align-items: center; justify-content: center; min-width: 32px; height: 28px; padding: 0 8px; background: rgba(255,255,255,0.06); border: 1px solid rgba(255,255,255,0.1); border-radius: 5px; font-family: 'IBM Plex Mono', monospace; font-size: 0.75rem; color: #94a3b8; }
+  .kbd-desc { font-size: 0.8125rem; color: #64748b; }
+
+  /* b3, b4, b5 stat cards */
+  .stat-number { font-size: 2.75rem; font-weight: 700; letter-spacing: -0.03em; margin: 16px 0 8px; background: linear-gradient(135deg, #38bdf8, #818cf8); -webkit-background-clip: text; -webkit-text-fill-color: transparent; }
+  .stat-desc { font-size: 0.875rem; color: #64748b; }
+
+  /* b6: Full-width workflow */
+  .workflow-steps { margin-top: 24px; display: flex; align-items: center; gap: 0; }
+  .wf-step { flex: 1; text-align: center; padding: 20px 16px; background: rgba(255,255,255,0.02); border: 1px solid rgba(255,255,255,0.05); border-radius: 10px; }
+  .wf-step .wf-icon { font-size: 1.5rem; margin-bottom: 8px; }
+  .wf-step .wf-label { font-size: 0.8125rem; font-weight: 600; color: #cbd5e1; }
+  .wf-step .wf-sub { font-size: 0.75rem; color: #475569; margin-top: 4px; }
+  .wf-arrow { color: #334155; font-size: 1.25rem; padding: 0 8px; flex-shrink: 0; }
+
+  /* Testimonial section */
+  .testimonials { position: relative; z-index: 1; max-width: 1100px; margin: 0 auto; padding: 0 48px 120px; }
+  .test-header { text-align: center; margin-bottom: 56px; }
+  .test-header h2 { font-size: 2.25rem; font-weight: 700; letter-spacing: -0.03em; }
+  .test-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 20px; }
+  .test-card { background: rgba(255,255,255,0.03); border: 1px solid rgba(255,255,255,0.06); border-radius: 14px; padding: 32px; }
+  .test-card blockquote { font-size: 0.9375rem; color: #94a3b8; line-height: 1.7; margin-bottom: 20px; font-style: normal; }
+  .test-card .author { display: flex; align-items: center; gap: 12px; }
+  .test-card .avatar { width: 36px; height: 36px; border-radius: 50%; background: linear-gradient(135deg, #1e293b, #334155); }
+  .test-card .author-info { font-size: 0.8125rem; }
+  .test-card .author-name { color: #e2e8f0; font-weight: 600; }
+  .test-card .author-role { color: #475569; }
+
+  /* Pricing strip */
+  .pricing { position: relative; z-index: 1; max-width: 900px; margin: 0 auto; padding: 0 48px 140px; }
+  .pricing-header { text-align: center; margin-bottom: 48px; }
+  .pricing-header h2 { font-size: 2.25rem; font-weight: 700; letter-spacing: -0.03em; margin-bottom: 12px; }
+  .pricing-header p { color: #64748b; font-size: 1.0625rem; }
+  .pricing-cards { display: grid; grid-template-columns: 1fr 1fr; gap: 20px; }
+  .price-card { background: rgba(255,255,255,0.03); border: 1px solid rgba(255,255,255,0.06); border-radius: 16px; padding: 40px; }
+  .price-card.featured { border-color: rgba(56,189,248,0.3); background: rgba(56,189,248,0.04); }
+  .price-card .tier { font-size: 0.8125rem; font-weight: 600; text-transform: uppercase; letter-spacing: 0.06em; color: #64748b; margin-bottom: 12px; }
+  .price-card.featured .tier { color: #38bdf8; }
+  .price-card .price { font-size: 2.5rem; font-weight: 700; letter-spacing: -0.03em; margin-bottom: 8px; }
+  .price-card .price-sub { font-size: 0.875rem; color: #475569; margin-bottom: 24px; }
+  .price-features { list-style: none; display: flex; flex-direction: column; gap: 10px; margin-bottom: 32px; }
+  .price-features li { font-size: 0.875rem; color: #94a3b8; display: flex; align-items: center; gap: 10px; }
+  .price-features li::before { content: "+"; font-family: 'IBM Plex Mono', monospace; color: #38bdf8; font-weight: 600; }
+  .price-card .btn-gradient { display: block; text-align: center; }
+  .btn-muted { display: block; text-align: center; background: rgba(255,255,255,0.06); color: #94a3b8; padding: 14px 36px; border-radius: 10px; font-weight: 600; font-size: 0.9375rem; text-decoration: none; }
+  .btn-muted:hover { background: rgba(255,255,255,0.1); }
+
+  /* Footer */
+  footer { position: relative; z-index: 1; max-width: 1100px; margin: 0 auto; padding: 40px 48px; border-top: 1px solid rgba(255,255,255,0.06); display: flex; justify-content: space-between; align-items: center; }
+  footer .foot-brand { font-size: 0.875rem; color: #334155; }
+  footer nav { display: flex; gap: 24px; }
+  footer nav a { font-size: 0.8125rem; color: #475569; text-decoration: none; }
+  footer nav a:hover { color: #94a3b8; }
+</style>
+</head>
+<body>
+
+<div class="nav">
+  <div class="nav-brand">
+    <div class="mark"></div>
+    Plume
+  </div>
+  <div class="nav-right">
+    <a href="#">Features</a>
+    <a href="#">Pricing</a>
+    <a href="#">Docs</a>
+    <a href="#">Blog</a>
+    <a href="#" class="nav-signup">Get started</a>
+  </div>
+</div>
+
+<section class="hero">
+  <h1>Where teams <span class="gradient">plan and ship</span> software</h1>
+  <p class="subtitle">Issues, cycles, projects, and roadmaps in one fast interface. Built for engineers who value their time.</p>
+  <div class="hero-cta">
+    <a href="#" class="btn-gradient">Start for free</a>
+    <a href="#" class="btn-outline">Watch demo</a>
+  </div>
+</section>
+
+<section class="bento">
+  <!-- B1: Issue list -->
+  <div class="bento-card b1">
+    <div class="label">Issues</div>
+    <h3>Everything in one view</h3>
+    <p>Filter, sort, group, and act on issues without leaving the list. Every column, every action -- one keystroke away.</p>
+    <div class="issue-table">
+      <div class="issue-tr">
+        <div class="issue-status status-progress"></div>
+        <div class="issue-key">PLM-341</div>
+        <div class="issue-name">Implement OAuth2 PKCE flow for mobile clients</div>
+        <div><span class="issue-tag tag-blue">Feature</span></div>
+        <div class="issue-prio">Urgent</div>
+      </div>
+      <div class="issue-tr">
+        <div class="issue-status status-progress"></div>
+        <div class="issue-key">PLM-338</div>
+        <div class="issue-name">Connection pool exhaustion under load spike</div>
+        <div><span class="issue-tag tag-orange">Bug</span></div>
+        <div class="issue-prio">High</div>
+      </div>
+      <div class="issue-tr">
+        <div class="issue-status status-todo"></div>
+        <div class="issue-key">PLM-335</div>
+        <div class="issue-name">Add OpenTelemetry traces to payment service</div>
+        <div><span class="issue-tag tag-purple">Infra</span></div>
+        <div class="issue-prio">Medium</div>
+      </div>
+      <div class="issue-tr">
+        <div class="issue-status status-done"></div>
+        <div class="issue-key">PLM-330</div>
+        <div class="issue-name">Migrate user search to Typesense</div>
+        <div><span class="issue-tag tag-blue">Feature</span></div>
+        <div class="issue-prio">Medium</div>
+      </div>
+      <div class="issue-tr">
+        <div class="issue-status status-done"></div>
+        <div class="issue-key">PLM-327</div>
+        <div class="issue-name">Fix timezone handling in scheduled reports</div>
+        <div><span class="issue-tag tag-orange">Bug</span></div>
+        <div class="issue-prio">Low</div>
+      </div>
+    </div>
+  </div>
+
+  <!-- B2: Keyboard -->
+  <div class="bento-card b2">
+    <div class="label">Keyboard-first</div>
+    <h3>Never touch the mouse</h3>
+    <p>Full shortcut coverage for every action in the app.</p>
+    <div class="kbd-grid">
+      <div class="kbd-row"><span class="kbd">C</span><span class="kbd-desc">New issue</span></div>
+      <div class="kbd-row"><span class="kbd">J</span> / <span class="kbd">K</span><span class="kbd-desc">Move up / down</span></div>
+      <div class="kbd-row"><span class="kbd">Enter</span><span class="kbd-desc">Open issue</span></div>
+      <div class="kbd-row"><span class="kbd">S</span><span class="kbd-desc">Set status</span></div>
+      <div class="kbd-row"><span class="kbd">L</span><span class="kbd-desc">Add label</span></div>
+      <div class="kbd-row"><span class="kbd">/</span><span class="kbd-desc">Search</span></div>
+      <div class="kbd-row"><span class="kbd">Cmd</span> + <span class="kbd">K</span><span class="kbd-desc">Command palette</span></div>
+    </div>
+  </div>
+
+  <!-- B3, B4, B5: Stats -->
+  <div class="bento-card b3">
+    <div class="label">Speed</div>
+    <div class="stat-number">50ms</div>
+    <div class="stat-desc">p95 render time for any view in the app. No loading spinners, ever.</div>
+  </div>
+  <div class="bento-card b4">
+    <div class="label">Cycles</div>
+    <div class="stat-number">2wk</div>
+    <div class="stat-desc">Default cadence. Time-box your sprints. Auto-rollover keeps things moving.</div>
+  </div>
+  <div class="bento-card b5">
+    <div class="label">Integrations</div>
+    <div class="stat-number">30+</div>
+    <div class="stat-desc">GitHub, GitLab, Slack, Figma, Sentry, Vercel, and the tools you already use.</div>
+  </div>
+
+  <!-- B6: Workflow -->
+  <div class="bento-card b6">
+    <div class="label">Workflow</div>
+    <h3>From idea to production, in one place</h3>
+    <p>Plume tracks the full lifecycle. No context switching between planning tools and dev tools.</p>
+    <div class="workflow-steps">
+      <div class="wf-step">
+        <div class="wf-icon">&#x1f4dd;</div>
+        <div class="wf-label">Backlog</div>
+        <div class="wf-sub">Capture and triage</div>
+      </div>
+      <div class="wf-arrow">&rarr;</div>
+      <div class="wf-step">
+        <div class="wf-icon">&#x1f3af;</div>
+        <div class="wf-label">Cycle</div>
+        <div class="wf-sub">Plan the sprint</div>
+      </div>
+      <div class="wf-arrow">&rarr;</div>
+      <div class="wf-step">
+        <div class="wf-icon">&#x1f6e0;</div>
+        <div class="wf-label">In Progress</div>
+        <div class="wf-sub">Build with context</div>
+      </div>
+      <div class="wf-arrow">&rarr;</div>
+      <div class="wf-step">
+        <div class="wf-icon">&#x1f50d;</div>
+        <div class="wf-label">Review</div>
+        <div class="wf-sub">PR linked automatically</div>
+      </div>
+      <div class="wf-arrow">&rarr;</div>
+      <div class="wf-step">
+        <div class="wf-icon">&#x1f680;</div>
+        <div class="wf-label">Shipped</div>
+        <div class="wf-sub">Deploy and close</div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<section class="testimonials">
+  <div class="test-header">
+    <h2>Loved by teams who ship</h2>
+  </div>
+  <div class="test-grid">
+    <div class="test-card">
+      <blockquote>"We evaluated every tracker on the market. Plume is the only one that doesn't slow us down. The keyboard UX alone saved us."</blockquote>
+      <div class="author">
+        <div class="avatar"></div>
+        <div class="author-info">
+          <div class="author-name">Kai Hernandez</div>
+          <div class="author-role">CTO, Stackline</div>
+        </div>
+      </div>
+    </div>
+    <div class="test-card">
+      <blockquote>"Cycles + auto-linked PRs mean I never have to ask 'what's the status?' in standup. Everything is visible by default."</blockquote>
+      <div class="author">
+        <div class="avatar"></div>
+        <div class="author-info">
+          <div class="author-name">Priya Mehta</div>
+          <div class="author-role">Engineering Manager, Relay</div>
+        </div>
+      </div>
+    </div>
+    <div class="test-card">
+      <blockquote>"I used to spend 20 min grooming the board before every sprint. With Plume it takes 5. The defaults are just right."</blockquote>
+      <div class="author">
+        <div class="avatar"></div>
+        <div class="author-info">
+          <div class="author-name">David Park</div>
+          <div class="author-role">Senior Engineer, Canopy</div>
+        </div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<section class="pricing">
+  <div class="pricing-header">
+    <h2>Simple, honest pricing</h2>
+    <p>Start free. Scale when you need to.</p>
+  </div>
+  <div class="pricing-cards">
+    <div class="price-card">
+      <div class="tier">Free</div>
+      <div class="price">$0</div>
+      <div class="price-sub">Up to 10 members, forever</div>
+      <ul class="price-features">
+        <li>Unlimited issues and projects</li>
+        <li>Cycles and roadmap views</li>
+        <li>GitHub and GitLab integrations</li>
+        <li>Command palette and full keyboard nav</li>
+      </ul>
+      <a href="#" class="btn-muted">Get started</a>
+    </div>
+    <div class="price-card featured">
+      <div class="tier">Pro</div>
+      <div class="price">$8<span style="font-size:1rem;font-weight:400;color:#64748b"> / user / month</span></div>
+      <div class="price-sub">For growing teams that need more</div>
+      <ul class="price-features">
+        <li>Everything in Free</li>
+        <li>Unlimited members</li>
+        <li>Advanced analytics and insights</li>
+        <li>SAML SSO and SCIM provisioning</li>
+        <li>Priority support</li>
+      </ul>
+      <a href="#" class="btn-gradient">Start free trial</a>
+    </div>
+  </div>
+</section>
+
+<footer>
+  <div class="foot-brand">&copy; 2026 Plume</div>
+  <nav>
+    <a href="#">Privacy</a>
+    <a href="#">Terms</a>
+    <a href="#">Security</a>
+    <a href="#">Status</a>
+    <a href="#">Twitter</a>
+    <a href="#">GitHub</a>
+  </nav>
+</footer>
+
+</body>
+</html>

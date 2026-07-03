@@ -2,6 +2,8 @@
 description: Investigate a GitHub issue — validate it's real, determine root cause, post findings
 argument-hint: [issue number] [--repo {owner}/{repo}] [--gh-flag "-R {owner}/{repo}"]
 ---
+<!-- SPDX-FileCopyrightText: Copyright (c) RapierCraft Studios -->
+<!-- SPDX-License-Identifier: AGPL-3.0-or-later -->
 
 # /work-on:investigate — Issue Investigation Subcommand
 
@@ -70,13 +72,30 @@ If the issue specifies a **Code branch** (`**Code branch**: \`{branch}\``), chec
 1. **Check the right branch** — read from the branch specified in the issue body (`**Code branch**: \`{branch}\``) if present
 2. **Read domain files** — start with the key files for the affected domain
 3. **Verify claims** — does the code actually have the problem described?
-4. **Git blame** — trace when/why the relevant code was written
+4. **Git blame** — trace when/why the relevant code was written. Run bounded, local commands (no network round-trip):
+   ```bash
+   # Introducing commit for each affected file (first commit that added it)
+   git log --reverse --format='%h %an %ad %s' --date=short -- {affected_file} | head -1
+   # Last-touch commit (most recent change)
+   git log -1 --format='%h %an %ad %s' --date=short -- {affected_file}
+   # Line-level blame for a specific suspect hunk, if the issue names one
+   git blame -L {start},{end} -- {affected_file}
+   ```
+   Record the introducing commit and last-touch commit for each primary affected file — this feeds the mandatory **History findings** field in Phase 1C.
 5. **Domain context discovery** (narrow scope only, 1–5 files):
    ```bash
    git log --oneline --all -30 -- {affected_files} | grep -oP '#\d+' | sort -u
    gh issue list -R {GH_REPO} --state closed --limit 8 --search "{function_name}"
    ```
    Keep only file/function-level overlap. Max 5 related issues. Everything is a hint to verify, not a fact.
+
+   **Pickaxe pass (prior fix / regression detection)** — bounded to one pass, capped at 5 hits: search for prior additions/removals of the suspected symbol or literal string named in the issue (a function name, error string, or config key), independent of whether that fix was ever linked to a filed issue:
+   ```bash
+   git log -S"{suspected_symbol_or_string}" --oneline -- {affected_files} | head -5
+   # Use -G instead of -S when the target is a regex pattern rather than a literal string
+   git log -G"{pattern}" --oneline -- {affected_files} | head -5
+   ```
+   Any hit here is a candidate prior fix or reintroduced defect — read the commit body (`git show {hash}`) to confirm before citing it. Feed confirmed hits into the History findings field and let them inform the verdict (e.g. a defect being reintroduced raises severity).
 6. **Determine root cause** — what's actually broken or missing?
 7. **Identify affected files** — full list of files that need changes
 8. **Fix-approach validation** — if the issue proposes a fix, don't adopt it as spec. Trace through the target system's middleware, auth, routing, config. Cross-domain: if fix in domain A interacts with domain B, read domain B's files too.
@@ -110,6 +129,12 @@ gh issue comment {NUMBER} {GH_FLAG} --body "<!-- FORGE:INVESTIGATOR -->
 
 ### Evidence
 {specific findings — function names, line numbers, behavior observed}
+
+### History Findings
+**Introducing commit**: {hash — author — date — subject, per primary affected file}
+**Last touched**: {hash — author — date — subject}
+**Pickaxe hits (prior fixes / regressions)**: {commit(s) found via \`git log -S\`/\`-G\`, or 'None found' — max 5}
+{This field is MANDATORY — populate from the git blame + pickaxe commands in step 4/5. If a file is newly created (no history), write 'New file — no history.'}
 
 ### Recommendation
 {what to build/fix, concrete and actionable}
@@ -352,8 +377,13 @@ ${INDEX_ENTRY}"
     fi
 
     # Update the Gist
-    echo "$UPDATED_INDEX" | gh gist edit "$INDEX_GIST_ID" -f "$INDEX_FILENAME" - 2>/dev/null
-    if [ $? -eq 0 ]; then
+    # gh gist edit does not support stdin via '-'; use a temp file instead
+    TMPFILE=$(mktemp --suffix=.md)
+    echo "$UPDATED_INDEX" > "$TMPFILE"
+    gh gist edit "$INDEX_GIST_ID" -f "$INDEX_FILENAME" "$TMPFILE" 2>/dev/null
+    EDIT_EXIT=$?
+    rm -f "$TMPFILE"
+    if [ $EDIT_EXIT -eq 0 ]; then
       INDEX_URL="$EXISTING_INDEX_URL"
       echo "Milestone index Gist updated: ${INDEX_URL}"
     else
@@ -400,6 +430,16 @@ fi
 ```bash
 gh issue edit {NUMBER} {GH_FLAG} --add-label "workflow:ready-to-build" --remove-label "workflow:investigating"
 ```
+
+Write machine-readable phase checkpoint (MUST execute immediately after label update, before returning):
+```bash
+CHECKPOINT_TIMESTAMP=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+gh issue comment {NUMBER} {GH_FLAG} --body "<!-- FORGE:CHECKPOINT -->
+\`\`\`json
+{\"phase\": \"INVESTIGATION\", \"status\": \"COMPLETE\", \"next_phase\": \"BUILD\", \"timestamp\": \"${CHECKPOINT_TIMESTAMP}\"}
+\`\`\`"
+```
+
 Return verdict to caller (work-on routing loop proceeds to build).
 
 **CONFIRMED or PARTIAL with decompose: YES**:
@@ -407,6 +447,16 @@ Return verdict to caller (work-on routing loop proceeds to build).
 gh issue edit {NUMBER} {GH_FLAG} --remove-label "workflow:investigating"
 ```
 Do NOT add `workflow:ready-to-build` — the routing loop will invoke `work-on:decompose` based on the `decompose: YES` return value.
+
+Write machine-readable phase checkpoint (MUST execute immediately after label update, before returning):
+```bash
+CHECKPOINT_TIMESTAMP=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+gh issue comment {NUMBER} {GH_FLAG} --body "<!-- FORGE:CHECKPOINT -->
+\`\`\`json
+{\"phase\": \"INVESTIGATION\", \"status\": \"COMPLETE\", \"next_phase\": \"DECOMPOSE\", \"timestamp\": \"${CHECKPOINT_TIMESTAMP}\"}
+\`\`\`"
+```
+
 Return verdict to caller (work-on routing loop proceeds to decompose).
 
 **INVALID**:
@@ -414,7 +464,7 @@ Return verdict to caller (work-on routing loop proceeds to decompose).
 gh issue edit {NUMBER} {GH_FLAG} --add-label "workflow:invalid" --remove-label "workflow:investigating"
 gh issue close {NUMBER} {GH_FLAG} --comment "Closing as invalid: {reason from investigation}"
 ```
-Return INVALID to caller (work-on stops).
+Return INVALID to caller (work-on stops). No checkpoint written — INVALID is terminal.
 
 ---
 

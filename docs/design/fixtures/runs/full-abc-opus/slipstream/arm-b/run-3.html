@@ -1,0 +1,496 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Slipstream</title>
+<link href="https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;600;700&family=Fira+Code:wght@400;500&display=swap" rel="stylesheet">
+<style>
+  *, *::before, *::after { margin: 0; padding: 0; box-sizing: border-box; }
+
+  :root {
+    --ink: #0f172a;
+    --ink-light: #334155;
+    --ink-muted: #64748b;
+    --bg: #ffffff;
+    --bg-alt: #f8fafc;
+    --border: #e2e8f0;
+    --blue: #2563eb;
+    --blue-bg: #eff6ff;
+    --green: #16a34a;
+  }
+
+  body {
+    font-family: 'DM Sans', -apple-system, sans-serif;
+    background: var(--bg);
+    color: var(--ink);
+    -webkit-font-smoothing: antialiased;
+    line-height: 1.6;
+  }
+
+  /* ===== NAV ===== */
+  .nav-wrap {
+    position: fixed; top: 0; left: 0; right: 0; z-index: 100;
+    background: rgba(255,255,255,0.9);
+    backdrop-filter: blur(16px);
+    border-bottom: 1px solid var(--border);
+  }
+  .nav-inner {
+    max-width: 1200px; margin: 0 auto;
+    padding: 0 40px; height: 60px;
+    display: flex; align-items: center; justify-content: space-between;
+  }
+  .nav-brand {
+    font-size: 19px; font-weight: 700; letter-spacing: -0.5px;
+    color: var(--ink);
+  }
+  .nav-items { display: flex; gap: 32px; align-items: center; }
+  .nav-items a {
+    font-size: 14px; color: var(--ink-muted); text-decoration: none;
+    font-weight: 500;
+  }
+  .nav-items a:hover { color: var(--ink); }
+  .btn-blue {
+    display: inline-block; padding: 9px 22px;
+    background: var(--blue); color: white;
+    font-size: 14px; font-weight: 600;
+    border-radius: 6px; text-decoration: none;
+    transition: background 0.15s;
+  }
+  .btn-blue:hover { background: #1d4ed8; }
+
+  /* ===== HERO: typographic, no images ===== */
+  .hero {
+    max-width: 1200px; margin: 0 auto;
+    padding: 160px 40px 100px;
+  }
+  .hero-top-line {
+    font-family: 'Fira Code', monospace;
+    font-size: 14px; color: var(--blue);
+    margin-bottom: 24px;
+    font-weight: 500;
+  }
+  .hero h1 {
+    font-size: 64px; font-weight: 700;
+    line-height: 1.08; letter-spacing: -2.5px;
+    max-width: 720px;
+    margin-bottom: 32px;
+  }
+  .hero-desc {
+    font-size: 19px; color: var(--ink-light);
+    max-width: 540px; line-height: 1.7;
+    margin-bottom: 48px;
+  }
+  .hero-cta { display: flex; gap: 16px; align-items: center; margin-bottom: 80px; }
+  .btn-outline {
+    display: inline-block; padding: 11px 28px;
+    border: 1.5px solid var(--border); border-radius: 6px;
+    font-size: 14px; font-weight: 600; color: var(--ink);
+    text-decoration: none; transition: border-color 0.15s;
+  }
+  .btn-outline:hover { border-color: var(--ink-muted); }
+  .btn-blue-lg {
+    display: inline-block; padding: 13px 32px;
+    background: var(--blue); color: white;
+    font-size: 15px; font-weight: 600;
+    border-radius: 6px; text-decoration: none;
+  }
+  .btn-blue-lg:hover { background: #1d4ed8; }
+
+  /* Horizontal pipeline diagram */
+  .pipeline {
+    display: flex; align-items: center;
+    gap: 0;
+    max-width: 900px;
+  }
+  .pipeline-step {
+    flex: 1;
+    padding: 24px;
+    background: var(--bg-alt);
+    border: 1px solid var(--border);
+    text-align: center;
+  }
+  .pipeline-step:first-child { border-radius: 10px 0 0 10px; }
+  .pipeline-step:last-child { border-radius: 0 10px 10px 0; }
+  .pipeline-step + .pipeline-step { border-left: none; }
+  .pipeline-step .step-label {
+    font-family: 'Fira Code', monospace;
+    font-size: 11px; font-weight: 500;
+    color: var(--ink-muted);
+    text-transform: uppercase;
+    letter-spacing: 1px;
+    margin-bottom: 8px;
+  }
+  .pipeline-step .step-value {
+    font-size: 15px; font-weight: 600;
+  }
+  .pipeline-arrow {
+    font-size: 18px; color: var(--ink-muted);
+    padding: 0 2px;
+    flex-shrink: 0;
+  }
+
+  /* ===== DIVIDER ===== */
+  .divider {
+    max-width: 1200px; margin: 0 auto;
+    padding: 0 40px;
+  }
+  .divider hr {
+    border: none; border-top: 1px solid var(--border);
+  }
+
+  /* ===== FEATURES: alternating rows ===== */
+  .feature-section {
+    max-width: 1200px; margin: 0 auto;
+    padding: 100px 40px;
+  }
+  .feature-row {
+    display: grid; grid-template-columns: 1fr 1fr;
+    gap: 80px; align-items: center;
+    margin-bottom: 100px;
+  }
+  .feature-row:last-child { margin-bottom: 0; }
+  .feature-row.reverse .feature-content { order: 2; }
+  .feature-row.reverse .feature-visual { order: 1; }
+
+  .feature-tag {
+    display: inline-block;
+    font-family: 'Fira Code', monospace;
+    font-size: 12px; font-weight: 500;
+    color: var(--blue);
+    background: var(--blue-bg);
+    padding: 4px 12px; border-radius: 4px;
+    margin-bottom: 16px;
+  }
+  .feature-content h2 {
+    font-size: 32px; font-weight: 700;
+    letter-spacing: -1px; margin-bottom: 16px;
+    line-height: 1.2;
+  }
+  .feature-content p {
+    font-size: 16px; color: var(--ink-light);
+    line-height: 1.75;
+  }
+
+  .feature-visual {
+    background: var(--ink);
+    border-radius: 10px;
+    padding: 32px;
+    font-family: 'Fira Code', monospace;
+    font-size: 13px; line-height: 1.9;
+    color: #cbd5e1;
+    overflow-x: auto;
+  }
+  .feature-visual .kw { color: #c084fc; }
+  .feature-visual .str { color: #4ade80; }
+  .feature-visual .cmt { color: #475569; }
+  .feature-visual .fn { color: #60a5fa; }
+  .feature-visual .num { color: #fb923c; }
+  .feature-visual .op { color: #94a3b8; }
+
+  /* ===== GRID STATS ===== */
+  .stats-section {
+    background: var(--ink);
+    padding: 80px 40px;
+  }
+  .stats-inner {
+    max-width: 1200px; margin: 0 auto;
+    display: grid; grid-template-columns: repeat(4, 1fr);
+    gap: 40px;
+    text-align: center;
+  }
+  .stat-item .stat-num {
+    font-size: 44px; font-weight: 700;
+    color: white; letter-spacing: -1.5px;
+  }
+  .stat-item .stat-desc {
+    font-size: 14px; color: #94a3b8; margin-top: 4px;
+  }
+
+  /* ===== FRAMEWORK STRIP ===== */
+  .fw-section {
+    max-width: 1200px; margin: 0 auto;
+    padding: 100px 40px;
+    text-align: center;
+  }
+  .fw-section h2 {
+    font-size: 32px; font-weight: 700; letter-spacing: -1px;
+    margin-bottom: 12px;
+  }
+  .fw-section > p {
+    color: var(--ink-muted); font-size: 16px;
+    margin-bottom: 48px;
+  }
+  .fw-strip {
+    display: flex; justify-content: center; gap: 12px; flex-wrap: wrap;
+  }
+  .fw-pill {
+    padding: 10px 24px;
+    border: 1px solid var(--border);
+    border-radius: 100px;
+    font-size: 14px; font-weight: 600;
+    color: var(--ink-light);
+    background: var(--bg);
+  }
+
+  /* ===== TEAM ===== */
+  .team-section {
+    max-width: 1200px; margin: 0 auto;
+    padding: 0 40px 100px;
+  }
+  .team-section h2 {
+    font-size: 32px; font-weight: 700; letter-spacing: -1px;
+    margin-bottom: 48px;
+  }
+  .team-grid {
+    display: grid; grid-template-columns: repeat(3, 1fr);
+    gap: 24px;
+  }
+  .team-card {
+    padding: 36px 32px;
+    background: var(--bg-alt);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+  }
+  .team-card h3 {
+    font-size: 17px; font-weight: 600; margin-bottom: 10px;
+  }
+  .team-card p {
+    font-size: 14px; color: var(--ink-muted); line-height: 1.7;
+  }
+
+  /* ===== FINAL CTA ===== */
+  .final-cta {
+    max-width: 1200px; margin: 0 auto;
+    padding: 0 40px 120px;
+  }
+  .final-cta-inner {
+    border: 1px solid var(--border);
+    border-radius: 16px;
+    padding: 80px;
+    text-align: center;
+    background: var(--bg-alt);
+  }
+  .final-cta-inner h2 {
+    font-size: 40px; font-weight: 700; letter-spacing: -1.5px;
+    margin-bottom: 16px;
+  }
+  .final-cta-inner p {
+    color: var(--ink-muted); font-size: 17px;
+    margin-bottom: 36px;
+  }
+  .cta-input-row {
+    display: flex; gap: 12px; justify-content: center;
+    max-width: 480px; margin: 0 auto;
+  }
+  .cta-input-row input {
+    flex: 1; padding: 13px 16px;
+    border: 1px solid var(--border); border-radius: 6px;
+    font-size: 14px; font-family: 'Fira Code', monospace;
+    color: var(--ink-muted);
+    background: var(--bg);
+    outline: none;
+  }
+  .cta-input-row input:focus { border-color: var(--blue); }
+
+  /* ===== FOOTER ===== */
+  footer {
+    border-top: 1px solid var(--border);
+    max-width: 1200px; margin: 0 auto;
+    padding: 40px;
+    display: flex; justify-content: space-between;
+  }
+  footer span { font-size: 13px; color: var(--ink-muted); }
+  .f-links { display: flex; gap: 24px; }
+  .f-links a { font-size: 13px; color: var(--ink-muted); text-decoration: none; }
+  .f-links a:hover { color: var(--ink); }
+</style>
+</head>
+<body>
+
+<div class="nav-wrap">
+  <div class="nav-inner">
+    <div class="nav-brand">slipstream</div>
+    <div class="nav-items">
+      <a href="#">Features</a>
+      <a href="#">Enterprise</a>
+      <a href="#">Docs</a>
+      <a href="#">Changelog</a>
+      <a href="#">Pricing</a>
+      <a href="#" class="btn-blue">Start for free</a>
+    </div>
+  </div>
+</div>
+
+<section class="hero">
+  <div class="hero-top-line">$ git push origin main</div>
+  <h1>Your code runs everywhere in under ten seconds</h1>
+  <p class="hero-desc">Slipstream is a deployment platform. Connect a repository. Push code. It builds, deploys to a global edge network, and gives you a URL. No servers. No containers. No configuration files.</p>
+  <div class="hero-cta">
+    <a href="#" class="btn-blue-lg">Deploy now</a>
+    <a href="#" class="btn-outline">Read documentation</a>
+  </div>
+
+  <div class="pipeline">
+    <div class="pipeline-step">
+      <div class="step-label">Push</div>
+      <div class="step-value">git push</div>
+    </div>
+    <div class="pipeline-step">
+      <div class="step-label">Build</div>
+      <div class="step-value">~8 seconds</div>
+    </div>
+    <div class="pipeline-step">
+      <div class="step-label">Deploy</div>
+      <div class="step-value">94 edge nodes</div>
+    </div>
+    <div class="pipeline-step">
+      <div class="step-label">Live</div>
+      <div class="step-value">your-app.slipstream.app</div>
+    </div>
+  </div>
+</section>
+
+<div class="divider"><hr></div>
+
+<section class="feature-section">
+
+  <div class="feature-row">
+    <div class="feature-content">
+      <div class="feature-tag">preview deployments</div>
+      <h2>Every pull request is a live environment</h2>
+      <p>When a developer opens a PR, Slipstream builds it and assigns a unique URL. Designers review the running app. PMs click through flows. Engineers debug in production conditions. The diff is context; the preview is the review.</p>
+    </div>
+    <div class="feature-visual">
+      <div><span class="cmt"># PR #247: redesign checkout flow</span></div>
+      <div>&nbsp;</div>
+      <div><span class="kw">Status:</span> Ready</div>
+      <div><span class="kw">Branch:</span> feat/checkout-v2</div>
+      <div><span class="kw">URL:</span>    <span class="str">https://pr-247.slipstream.app</span></div>
+      <div>&nbsp;</div>
+      <div><span class="cmt"># 3 comments, 2 approvals</span></div>
+      <div><span class="cmt"># Merged &rarr; production deploy triggered</span></div>
+    </div>
+  </div>
+
+  <div class="feature-row reverse">
+    <div class="feature-content">
+      <div class="feature-tag">serverless functions</div>
+      <h2>Backend logic without the backend</h2>
+      <p>Write API endpoints as files. They deploy alongside your frontend to the same edge network. Automatic scaling. No cold starts. No instance types. No load balancers. You write the function; Slipstream handles the rest.</p>
+    </div>
+    <div class="feature-visual">
+      <div><span class="cmt">// api/users/[id].ts</span></div>
+      <div><span class="kw">import</span> { db } <span class="kw">from</span> <span class="str">'@/lib/db'</span></div>
+      <div>&nbsp;</div>
+      <div><span class="kw">export async function</span> <span class="fn">GET</span>(req) {</div>
+      <div>&nbsp;&nbsp;<span class="kw">const</span> user = <span class="kw">await</span> db.user</div>
+      <div>&nbsp;&nbsp;&nbsp;&nbsp;.<span class="fn">findUnique</span>({ id: req.params.id })</div>
+      <div>&nbsp;</div>
+      <div>&nbsp;&nbsp;<span class="kw">return</span> Response.<span class="fn">json</span>(user)</div>
+      <div>}</div>
+    </div>
+  </div>
+
+  <div class="feature-row">
+    <div class="feature-content">
+      <div class="feature-tag">edge network</div>
+      <h2>94 locations. One deploy command.</h2>
+      <p>Your static assets are cached on every continent. Your server-rendered pages execute at the edge closest to each user. DNS, SSL, and CDN configuration are automatic. You never choose a region or manage a certificate.</p>
+    </div>
+    <div class="feature-visual">
+      <div><span class="cmt"># Global latency (TTFB, p95)</span></div>
+      <div>&nbsp;</div>
+      <div>North America &nbsp;&nbsp; <span class="num">18ms</span></div>
+      <div>Europe &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; <span class="num">22ms</span></div>
+      <div>Asia Pacific &nbsp;&nbsp;&nbsp; <span class="num">31ms</span></div>
+      <div>South America &nbsp;&nbsp; <span class="num">38ms</span></div>
+      <div>Africa &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; <span class="num">44ms</span></div>
+      <div>Oceania &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; <span class="num">29ms</span></div>
+    </div>
+  </div>
+
+</section>
+
+<section class="stats-section">
+  <div class="stats-inner">
+    <div class="stat-item">
+      <div class="stat-num">94</div>
+      <div class="stat-desc">Edge locations worldwide</div>
+    </div>
+    <div class="stat-item">
+      <div class="stat-num">12M+</div>
+      <div class="stat-desc">Deploys per month</div>
+    </div>
+    <div class="stat-item">
+      <div class="stat-num">99.99%</div>
+      <div class="stat-desc">Uptime guarantee</div>
+    </div>
+    <div class="stat-item">
+      <div class="stat-num">0</div>
+      <div class="stat-desc">Servers to manage</div>
+    </div>
+  </div>
+</section>
+
+<section class="fw-section">
+  <h2>First-class framework support</h2>
+  <p>Zero-config deploys for the frameworks that define modern web development.</p>
+  <div class="fw-strip">
+    <div class="fw-pill">Next.js</div>
+    <div class="fw-pill">Remix</div>
+    <div class="fw-pill">Astro</div>
+    <div class="fw-pill">SvelteKit</div>
+    <div class="fw-pill">Nuxt</div>
+    <div class="fw-pill">Vite</div>
+    <div class="fw-pill">Gatsby</div>
+    <div class="fw-pill">Angular</div>
+    <div class="fw-pill">Eleventy</div>
+    <div class="fw-pill">Hugo</div>
+  </div>
+</section>
+
+<div class="divider"><hr></div>
+
+<section class="team-section">
+  <h2>Built for teams that ship</h2>
+  <div class="team-grid">
+    <div class="team-card">
+      <h3>Deploy notifications</h3>
+      <p>Slack, email, and webhook notifications on every deploy. Your team knows what shipped and when, without checking dashboards.</p>
+    </div>
+    <div class="team-card">
+      <h3>Deploy comments</h3>
+      <p>Leave feedback directly on preview deployments. Pin a comment to a specific page and URL. Context stays with the deploy, not in a separate thread.</p>
+    </div>
+    <div class="team-card">
+      <h3>Branch protection</h3>
+      <p>Require successful preview builds before merge. Set approval gates per environment. Production deploys only from your main branch.</p>
+    </div>
+  </div>
+</section>
+
+<section class="final-cta">
+  <div class="final-cta-inner">
+    <h2>Ship your next project on Slipstream</h2>
+    <p>Free for personal projects. Deploy in under sixty seconds.</p>
+    <div class="cta-input-row">
+      <input type="text" value="https://github.com/you/your-repo" readonly>
+      <a href="#" class="btn-blue-lg">Deploy</a>
+    </div>
+  </div>
+</section>
+
+<footer>
+  <span>&copy; 2026 Slipstream</span>
+  <div class="f-links">
+    <a href="#">Privacy</a>
+    <a href="#">Terms</a>
+    <a href="#">Status</a>
+    <a href="#">Security</a>
+    <a href="#">Careers</a>
+  </div>
+</footer>
+
+</body>
+</html>

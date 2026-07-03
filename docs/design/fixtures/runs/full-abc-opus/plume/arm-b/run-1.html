@@ -1,0 +1,315 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Plume — Issue tracking for teams who ship</title>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+<style>
+  *, *::before, *::after { margin: 0; padding: 0; box-sizing: border-box; }
+  html { font-size: 16px; scroll-behavior: smooth; }
+  body { font-family: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif; background: #09090b; color: #fafafa; line-height: 1.6; -webkit-font-smoothing: antialiased; }
+
+  /* Nav */
+  nav { position: fixed; top: 0; left: 0; right: 0; z-index: 100; padding: 0 48px; height: 64px; display: flex; align-items: center; justify-content: space-between; background: rgba(9,9,11,0.8); backdrop-filter: blur(12px); border-bottom: 1px solid rgba(255,255,255,0.06); }
+  .nav-logo { font-size: 1.125rem; font-weight: 700; letter-spacing: -0.02em; color: #fff; }
+  .nav-links { display: flex; gap: 32px; align-items: center; }
+  .nav-links a { color: #a1a1aa; font-size: 0.875rem; text-decoration: none; transition: color 0.15s; }
+  .nav-links a:hover { color: #fff; }
+  .nav-cta { background: #fff; color: #09090b; padding: 8px 20px; border-radius: 8px; font-size: 0.875rem; font-weight: 600; text-decoration: none; transition: opacity 0.15s; }
+  .nav-cta:hover { opacity: 0.88; }
+
+  /* Hero */
+  .hero { padding: 180px 48px 120px; max-width: 900px; margin: 0 auto; text-align: center; }
+  .hero-badge { display: inline-block; font-size: 0.75rem; font-weight: 500; color: #a78bfa; border: 1px solid rgba(167,139,250,0.3); padding: 4px 14px; border-radius: 999px; margin-bottom: 28px; letter-spacing: 0.02em; }
+  .hero h1 { font-size: 4rem; font-weight: 700; line-height: 1.08; letter-spacing: -0.04em; margin-bottom: 24px; }
+  .hero h1 span { background: linear-gradient(135deg, #a78bfa 0%, #818cf8 100%); -webkit-background-clip: text; -webkit-text-fill-color: transparent; }
+  .hero p { font-size: 1.25rem; color: #a1a1aa; max-width: 560px; margin: 0 auto 40px; line-height: 1.7; }
+  .hero-actions { display: flex; gap: 16px; justify-content: center; }
+  .btn-primary { background: #fff; color: #09090b; padding: 14px 32px; border-radius: 10px; font-size: 0.9375rem; font-weight: 600; text-decoration: none; transition: transform 0.15s, box-shadow 0.15s; }
+  .btn-primary:hover { transform: translateY(-1px); box-shadow: 0 8px 30px rgba(255,255,255,0.1); }
+  .btn-secondary { background: transparent; color: #d4d4d8; padding: 14px 32px; border-radius: 10px; font-size: 0.9375rem; font-weight: 500; text-decoration: none; border: 1px solid rgba(255,255,255,0.12); transition: border-color 0.15s; }
+  .btn-secondary:hover { border-color: rgba(255,255,255,0.3); }
+
+  /* Interface mockup */
+  .mockup-section { padding: 0 48px 120px; max-width: 1100px; margin: 0 auto; }
+  .mockup { background: #111113; border: 1px solid rgba(255,255,255,0.08); border-radius: 16px; overflow: hidden; box-shadow: 0 40px 80px rgba(0,0,0,0.5); }
+  .mockup-bar { height: 44px; background: #18181b; border-bottom: 1px solid rgba(255,255,255,0.06); display: flex; align-items: center; padding: 0 16px; gap: 8px; }
+  .mockup-dot { width: 12px; height: 12px; border-radius: 50%; background: #27272a; }
+  .mockup-body { display: grid; grid-template-columns: 220px 1fr; min-height: 420px; }
+  .mockup-sidebar { background: #0f0f11; border-right: 1px solid rgba(255,255,255,0.06); padding: 20px 0; }
+  .sidebar-item { padding: 8px 20px; font-size: 0.8125rem; color: #71717a; display: flex; align-items: center; gap: 10px; cursor: default; }
+  .sidebar-item.active { color: #e4e4e7; background: rgba(255,255,255,0.04); }
+  .sidebar-icon { width: 16px; height: 16px; border-radius: 3px; background: #27272a; flex-shrink: 0; }
+  .sidebar-item.active .sidebar-icon { background: #a78bfa; }
+  .sidebar-label { font-size: 0.6875rem; font-weight: 600; text-transform: uppercase; letter-spacing: 0.08em; color: #3f3f46; padding: 20px 20px 8px; }
+  .mockup-content { padding: 20px 24px; }
+  .content-header { display: flex; align-items: center; justify-content: space-between; margin-bottom: 20px; }
+  .content-title { font-size: 0.9375rem; font-weight: 600; color: #e4e4e7; }
+  .content-filter { font-size: 0.75rem; color: #52525b; background: #18181b; padding: 5px 12px; border-radius: 6px; border: 1px solid rgba(255,255,255,0.06); }
+  .issue-row { display: grid; grid-template-columns: 20px 60px 1fr 80px 80px 32px; align-items: center; gap: 12px; padding: 10px 0; border-bottom: 1px solid rgba(255,255,255,0.04); font-size: 0.8125rem; }
+  .issue-check { width: 16px; height: 16px; border: 1.5px solid #3f3f46; border-radius: 4px; }
+  .issue-id { color: #52525b; font-family: 'SF Mono', 'Fira Code', monospace; font-size: 0.75rem; }
+  .issue-title { color: #d4d4d8; }
+  .issue-label { font-size: 0.6875rem; padding: 2px 8px; border-radius: 4px; font-weight: 500; }
+  .label-bug { background: rgba(239,68,68,0.15); color: #f87171; }
+  .label-feat { background: rgba(59,130,246,0.15); color: #60a5fa; }
+  .label-perf { background: rgba(168,85,247,0.15); color: #c084fc; }
+  .issue-priority { display: flex; gap: 2px; }
+  .priority-bar { width: 3px; height: 12px; border-radius: 1px; background: #27272a; }
+  .priority-bar.on { background: #f59e0b; }
+  .issue-avatar { width: 24px; height: 24px; border-radius: 50%; background: #27272a; }
+
+  /* Features */
+  .features { padding: 120px 48px; max-width: 1100px; margin: 0 auto; }
+  .features-header { text-align: center; margin-bottom: 72px; }
+  .features-header h2 { font-size: 2.5rem; font-weight: 700; letter-spacing: -0.03em; margin-bottom: 16px; }
+  .features-header p { color: #71717a; font-size: 1.125rem; max-width: 480px; margin: 0 auto; }
+  .features-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 24px; }
+  .feature-card { background: #111113; border: 1px solid rgba(255,255,255,0.06); border-radius: 14px; padding: 36px 32px; transition: border-color 0.2s; }
+  .feature-card:hover { border-color: rgba(255,255,255,0.12); }
+  .feature-icon { width: 40px; height: 40px; border-radius: 10px; background: rgba(167,139,250,0.1); display: flex; align-items: center; justify-content: center; margin-bottom: 20px; font-size: 1.125rem; }
+  .feature-card h3 { font-size: 1.0625rem; font-weight: 600; margin-bottom: 10px; letter-spacing: -0.01em; }
+  .feature-card p { font-size: 0.875rem; color: #71717a; line-height: 1.65; }
+
+  /* Keyboard section */
+  .keyboard-section { padding: 120px 48px; max-width: 1100px; margin: 0 auto; display: grid; grid-template-columns: 1fr 1fr; gap: 80px; align-items: center; }
+  .keyboard-text h2 { font-size: 2.5rem; font-weight: 700; letter-spacing: -0.03em; margin-bottom: 20px; }
+  .keyboard-text p { color: #71717a; font-size: 1.0625rem; line-height: 1.7; margin-bottom: 28px; }
+  .shortcut-list { display: flex; flex-direction: column; gap: 12px; }
+  .shortcut { display: flex; align-items: center; gap: 16px; }
+  .shortcut kbd { background: #18181b; border: 1px solid rgba(255,255,255,0.1); border-radius: 6px; padding: 4px 10px; font-family: 'SF Mono', 'Fira Code', monospace; font-size: 0.8125rem; color: #a1a1aa; min-width: 40px; text-align: center; }
+  .shortcut span { font-size: 0.875rem; color: #71717a; }
+  .keyboard-visual { background: #111113; border: 1px solid rgba(255,255,255,0.06); border-radius: 14px; padding: 36px; }
+  .cmd-palette { background: #18181b; border: 1px solid rgba(255,255,255,0.08); border-radius: 10px; overflow: hidden; }
+  .cmd-input { padding: 14px 18px; font-size: 0.875rem; color: #71717a; border-bottom: 1px solid rgba(255,255,255,0.06); display: flex; align-items: center; gap: 10px; }
+  .cmd-input-icon { color: #52525b; }
+  .cmd-result { padding: 8px; }
+  .cmd-item { padding: 10px 14px; border-radius: 6px; font-size: 0.8125rem; color: #a1a1aa; display: flex; align-items: center; gap: 12px; cursor: default; }
+  .cmd-item.selected { background: rgba(167,139,250,0.1); color: #e4e4e7; }
+  .cmd-item-key { font-size: 0.6875rem; color: #52525b; margin-left: auto; font-family: 'SF Mono', monospace; }
+
+  /* Social proof */
+  .social { padding: 120px 48px; text-align: center; max-width: 800px; margin: 0 auto; border-top: 1px solid rgba(255,255,255,0.06); }
+  .social p { font-size: 1.5rem; font-weight: 500; line-height: 1.6; letter-spacing: -0.02em; color: #d4d4d8; margin-bottom: 24px; }
+  .social cite { font-style: normal; font-size: 0.875rem; color: #52525b; }
+  .social cite strong { color: #71717a; }
+  .logos { display: flex; justify-content: center; gap: 48px; margin-top: 64px; opacity: 0.3; }
+  .logo-placeholder { width: 100px; height: 28px; background: #fff; border-radius: 4px; }
+
+  /* CTA */
+  .cta-section { padding: 140px 48px; text-align: center; }
+  .cta-section h2 { font-size: 3rem; font-weight: 700; letter-spacing: -0.04em; margin-bottom: 16px; }
+  .cta-section p { color: #71717a; font-size: 1.125rem; margin-bottom: 40px; }
+
+  /* Footer */
+  footer { padding: 48px; border-top: 1px solid rgba(255,255,255,0.06); display: flex; justify-content: space-between; align-items: center; max-width: 1200px; margin: 0 auto; }
+  .footer-left { font-size: 0.8125rem; color: #3f3f46; }
+  .footer-links { display: flex; gap: 24px; }
+  .footer-links a { font-size: 0.8125rem; color: #52525b; text-decoration: none; }
+  .footer-links a:hover { color: #a1a1aa; }
+</style>
+</head>
+<body>
+
+<nav>
+  <div class="nav-logo">Plume</div>
+  <div class="nav-links">
+    <a href="#features">Features</a>
+    <a href="#workflow">Workflow</a>
+    <a href="#pricing">Pricing</a>
+    <a href="#docs">Docs</a>
+    <a href="#" class="nav-cta">Get started</a>
+  </div>
+</nav>
+
+<section class="hero">
+  <div class="hero-badge">Now in public beta</div>
+  <h1>Plan, track, and <span>ship software</span></h1>
+  <p>Plume is issue tracking rebuilt for teams who care about velocity. Keyboard-driven, zero ceremony, ruthlessly fast.</p>
+  <div class="hero-actions">
+    <a href="#" class="btn-primary">Get started free</a>
+    <a href="#" class="btn-secondary">See it in action</a>
+  </div>
+</section>
+
+<section class="mockup-section">
+  <div class="mockup">
+    <div class="mockup-bar">
+      <div class="mockup-dot"></div>
+      <div class="mockup-dot"></div>
+      <div class="mockup-dot"></div>
+    </div>
+    <div class="mockup-body">
+      <div class="mockup-sidebar">
+        <div class="sidebar-label">Workspace</div>
+        <div class="sidebar-item active"><div class="sidebar-icon"></div> My Issues</div>
+        <div class="sidebar-item"><div class="sidebar-icon"></div> All Issues</div>
+        <div class="sidebar-item"><div class="sidebar-icon"></div> Active Cycle</div>
+        <div class="sidebar-item"><div class="sidebar-icon"></div> Roadmap</div>
+        <div class="sidebar-label">Projects</div>
+        <div class="sidebar-item"><div class="sidebar-icon"></div> Auth v2</div>
+        <div class="sidebar-item"><div class="sidebar-icon"></div> Billing rewrite</div>
+        <div class="sidebar-item"><div class="sidebar-icon"></div> API platform</div>
+      </div>
+      <div class="mockup-content">
+        <div class="content-header">
+          <div class="content-title">My Issues</div>
+          <div class="content-filter">Filter: Active</div>
+        </div>
+        <div class="issue-row">
+          <div class="issue-check"></div>
+          <div class="issue-id">PLM-142</div>
+          <div class="issue-title">Add rate limiting to public API endpoints</div>
+          <div><span class="issue-label label-feat">Feature</span></div>
+          <div class="issue-priority"><div class="priority-bar on"></div><div class="priority-bar on"></div><div class="priority-bar on"></div><div class="priority-bar"></div></div>
+          <div class="issue-avatar"></div>
+        </div>
+        <div class="issue-row">
+          <div class="issue-check"></div>
+          <div class="issue-id">PLM-139</div>
+          <div class="issue-title">WebSocket reconnection drops events in Firefox</div>
+          <div><span class="issue-label label-bug">Bug</span></div>
+          <div class="issue-priority"><div class="priority-bar on"></div><div class="priority-bar on"></div><div class="priority-bar on"></div><div class="priority-bar on"></div></div>
+          <div class="issue-avatar"></div>
+        </div>
+        <div class="issue-row">
+          <div class="issue-check"></div>
+          <div class="issue-id">PLM-137</div>
+          <div class="issue-title">Optimize query planner for filtered list views</div>
+          <div><span class="issue-label label-perf">Perf</span></div>
+          <div class="issue-priority"><div class="priority-bar on"></div><div class="priority-bar on"></div><div class="priority-bar"></div><div class="priority-bar"></div></div>
+          <div class="issue-avatar"></div>
+        </div>
+        <div class="issue-row">
+          <div class="issue-check"></div>
+          <div class="issue-id">PLM-134</div>
+          <div class="issue-title">Implement SCIM provisioning for enterprise SSO</div>
+          <div><span class="issue-label label-feat">Feature</span></div>
+          <div class="issue-priority"><div class="priority-bar on"></div><div class="priority-bar on"></div><div class="priority-bar"></div><div class="priority-bar"></div></div>
+          <div class="issue-avatar"></div>
+        </div>
+        <div class="issue-row">
+          <div class="issue-check"></div>
+          <div class="issue-id">PLM-131</div>
+          <div class="issue-title">Branch auto-linking misses hyphenated repo names</div>
+          <div><span class="issue-label label-bug">Bug</span></div>
+          <div class="issue-priority"><div class="priority-bar on"></div><div class="priority-bar"></div><div class="priority-bar"></div><div class="priority-bar"></div></div>
+          <div class="issue-avatar"></div>
+        </div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<section class="features" id="features">
+  <div class="features-header">
+    <h2>Everything you need. Nothing you don't.</h2>
+    <p>Built for the way engineering teams actually work, not the way PMs draw process diagrams.</p>
+  </div>
+  <div class="features-grid">
+    <div class="feature-card">
+      <div class="feature-icon">&#9889;</div>
+      <h3>Sub-50ms interactions</h3>
+      <p>Every view loads instantly. Optimistic updates mean the UI never waits for your backend. You feel the difference in the first ten seconds.</p>
+    </div>
+    <div class="feature-card">
+      <div class="feature-icon">&#8635;</div>
+      <h3>Cycles and projects</h3>
+      <p>Time-box work into cycles for cadence. Group related issues into projects for longer arcs. See both on a single roadmap view.</p>
+    </div>
+    <div class="feature-card">
+      <div class="feature-icon">&#128279;</div>
+      <h3>Git-native integrations</h3>
+      <p>Issues move when your code moves. Branch creation, PR linking, and deployment tracking happen automatically from GitHub or GitLab.</p>
+    </div>
+    <div class="feature-card">
+      <div class="feature-icon">&#9000;</div>
+      <h3>Keyboard-first</h3>
+      <p>Navigate, triage, assign, and close without leaving the home row. A command palette and full shortcut coverage mean your hands never touch the mouse.</p>
+    </div>
+    <div class="feature-card">
+      <div class="feature-icon">&#128200;</div>
+      <h3>Progress and insights</h3>
+      <p>Cycle burndowns, project completion rates, and scope-change tracking. Clear visibility for leads, no status meetings required.</p>
+    </div>
+    <div class="feature-card">
+      <div class="feature-icon">&#128274;</div>
+      <h3>Teams and permissions</h3>
+      <p>Organize by squad with fine-grained visibility controls. Each team owns their triage, backlog, and active cycle independently.</p>
+    </div>
+  </div>
+</section>
+
+<section class="keyboard-section" id="workflow">
+  <div class="keyboard-text">
+    <h2>Your hands stay on the keyboard</h2>
+    <p>Plume is built for flow state. The command palette gives you instant access to every action, and single-key shortcuts handle the rest.</p>
+    <div class="shortcut-list">
+      <div class="shortcut"><kbd>C</kbd> <span>Create a new issue</span></div>
+      <div class="shortcut"><kbd>S</kbd> <span>Set status</span></div>
+      <div class="shortcut"><kbd>P</kbd> <span>Set priority</span></div>
+      <div class="shortcut"><kbd>A</kbd> <span>Assign to teammate</span></div>
+      <div class="shortcut"><kbd>/</kbd> <span>Search everything</span></div>
+      <div class="shortcut"><kbd>&#8984;K</kbd> <span>Command palette</span></div>
+    </div>
+  </div>
+  <div class="keyboard-visual">
+    <div class="cmd-palette">
+      <div class="cmd-input">
+        <span class="cmd-input-icon">&#x2318;K</span>
+        <span>assign to...</span>
+      </div>
+      <div class="cmd-result">
+        <div class="cmd-item selected">
+          <span>&#9679;</span> Sarah Chen
+          <span class="cmd-item-key">Engineering</span>
+        </div>
+        <div class="cmd-item">
+          <span>&#9679;</span> Marcus Rivera
+          <span class="cmd-item-key">Engineering</span>
+        </div>
+        <div class="cmd-item">
+          <span>&#9679;</span> Jun Tanaka
+          <span class="cmd-item-key">Design</span>
+        </div>
+        <div class="cmd-item">
+          <span>&#9679;</span> Aisha Patel
+          <span class="cmd-item-key">Product</span>
+        </div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<section class="social">
+  <p>"We moved from Jira to Plume in a week. Three months later, not a single engineer has asked to go back. It's the fastest tool we've ever used."</p>
+  <cite><strong>Elena Marchetti</strong>, Engineering Lead at Vantage</cite>
+  <div class="logos">
+    <div class="logo-placeholder"></div>
+    <div class="logo-placeholder"></div>
+    <div class="logo-placeholder"></div>
+    <div class="logo-placeholder"></div>
+    <div class="logo-placeholder"></div>
+  </div>
+</section>
+
+<section class="cta-section">
+  <h2>Start shipping with less friction</h2>
+  <p>Free for teams up to 10. No credit card required.</p>
+  <a href="#" class="btn-primary">Get started</a>
+</section>
+
+<footer>
+  <div class="footer-left">&copy; 2026 Plume Inc.</div>
+  <div class="footer-links">
+    <a href="#">Privacy</a>
+    <a href="#">Terms</a>
+    <a href="#">Status</a>
+    <a href="#">Twitter</a>
+    <a href="#">GitHub</a>
+  </div>
+</footer>
+
+</body>
+</html>

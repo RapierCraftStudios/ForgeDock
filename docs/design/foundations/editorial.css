@@ -1,0 +1,300 @@
+/*
+ * editorial.css — Foundation for the editorial-typographic archetype
+ *
+ * Archetype ID: editorial-typographic
+ * Craft profile (reference-corpus.md):
+ *   radius system: generous — 16px card / 12px input / 8px button
+ *   button style:  serif-label text button or outlined; subtle warm shadow
+ *   divider style: gradient fade to transparent at edges
+ *   icon treatment: tinted squares or rectangles at low opacity
+ *
+ * Override --color-accent (and related tokens) via a :root block in the
+ * generated page to brand this foundation without touching the file.
+ *
+ * Issue: #1048 — custom CSS component library per archetype
+ */
+
+/* --- 1. Design Tokens --- */
+:root {
+  /* Accent — override per brand */
+  --color-accent:          #b5651d;          /* warm amber/sienna default */
+  --color-accent-subtle:   rgba(181, 101, 29, 0.10);
+  --color-accent-hover:    rgba(181, 101, 29, 0.18);
+
+  /* Surface palette */
+  --color-bg:              #faf8f5;          /* warm off-white — cream base */
+  --color-bg-raised:       #f5f0e8;
+  --color-bg-sunken:       #f0e8dc;
+  --color-fg:              #1a1410;
+  --color-fg-muted:        #6b5e52;
+  --color-fg-faint:        #a0907e;
+  --color-border:          rgba(90, 70, 50, 0.14);
+  --color-border-strong:   rgba(90, 70, 50, 0.28);
+
+  /* Code surface */
+  --code-bg:               rgba(90, 70, 50, 0.07);
+
+  /* Radius system — at least 3 distinct values (N13 compliance) */
+  --radius-sm:             4px;             /* inline / badge-tight */
+  --radius-btn:            8px;             /* button — smaller than card */
+  --radius-input:          12px;            /* input — between btn and card */
+  --radius-card:           16px;            /* card — most generous */
+  --radius-pill:           9999px;          /* pill badge */
+
+  /* Shadow tokens — warm, soft, low-spread */
+  --shadow-card:           0 1px 3px rgba(90, 60, 30, 0.06),
+                           0 0 0 1px rgba(90, 60, 30, 0.08);
+  --shadow-card-hover:     0 6px 20px rgba(90, 60, 30, 0.10),
+                           0 0 0 1px rgba(90, 60, 30, 0.10);
+  --shadow-btn:            0 1px 4px rgba(90, 60, 30, 0.18),
+                           0 0 0 1px rgba(90, 60, 30, 0.12);
+  --shadow-btn-hover:      0 4px 12px rgba(90, 60, 30, 0.22),
+                           0 0 0 1px rgba(90, 60, 30, 0.16);
+  --shadow-elevated:       0 8px 32px rgba(90, 60, 30, 0.12);
+
+  /* Transition — deliberate, not hurried */
+  --transition-fast:       150ms cubic-bezier(0.4, 0, 0.2, 1);
+  --transition-base:       240ms cubic-bezier(0.4, 0, 0.2, 1);
+  --transition-slow:       380ms cubic-bezier(0.4, 0, 0.2, 1);
+
+  /* Spacing scale */
+  --space-1:4px; --space-2:8px; --space-3:12px; --space-4:16px;
+  --space-6:24px; --space-8:32px; --space-12:48px; --space-16:64px; --space-24:96px;
+
+  /* Icon sizing — contextual, not uniform (N16 compliance) */
+  --icon-feature: 24px;
+  --icon-nav:     18px;
+  --icon-inline:  16px;
+}
+
+/* --- 2. Element Overrides (N18 compliance) --- */
+
+/* Custom selection — branded warm tint */
+::selection {
+  background: var(--color-accent-subtle);
+  color:      var(--color-fg);
+}
+
+/* Custom focus ring — warm accent, not browser default (N18, N15 compliance) */
+:focus-visible {
+  outline:        2px solid var(--color-accent);
+  outline-offset: 3px;
+}
+
+/* Custom scrollbar — thin, theme-matched */
+::-webkit-scrollbar       { width: 6px; height: 6px; }
+::-webkit-scrollbar-track { background: var(--color-bg-raised); }
+::-webkit-scrollbar-thumb {
+  background:    var(--color-border-strong);
+  border-radius: var(--radius-pill);
+}
+::-webkit-scrollbar-thumb:hover { background: var(--color-accent); }
+
+/* Code blocks — warm, inline-friendly */
+code, kbd {
+  background:    var(--code-bg);
+  border-radius: var(--radius-sm);
+  padding:       2px 6px;
+  font-size:     0.875em;
+  font-family:   ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+
+/* Links — animated underline, not browser default (N17 compliance) */
+a:not([class]) {
+  color:                    var(--color-accent);
+  text-decoration:          underline;
+  text-decoration-color:    transparent;
+  text-underline-offset:    3px;
+  text-decoration-thickness: 1px;
+  transition:               text-decoration-color var(--transition-fast);
+}
+a:not([class]):hover {
+  text-decoration-color: var(--color-accent);
+}
+
+/* --- 3. Component Classes --- */
+
+/* --- Button --- */
+
+.btn {
+  display:          inline-flex;
+  align-items:      center;
+  gap:              var(--space-2);
+  padding:          10px 20px;
+  border-radius:    var(--radius-btn);
+  font-size:        0.9375rem;
+  font-weight:      500;
+  line-height:      1;
+  letter-spacing:   0.01em;
+  cursor:           pointer;
+  white-space:      nowrap;
+  transition:       box-shadow var(--transition-fast),
+                    transform var(--transition-fast),
+                    background-color var(--transition-fast);
+  /* Depth signal: shadow lift — satisfies N14 */
+  background-color: var(--color-accent);
+  color:            #fff;
+  box-shadow:       var(--shadow-btn);
+  border:           none;
+}
+
+.btn:hover {
+  box-shadow:       var(--shadow-btn-hover);
+  transform:        translateY(-1px);
+  background-color: color-mix(in srgb, var(--color-accent) 90%, #000);
+}
+
+.btn:active {
+  transform:  translateY(0px);
+  box-shadow: 0 1px 2px rgba(90, 60, 30, 0.14);
+}
+
+.btn:focus-visible {
+  outline:        2px solid var(--color-accent);
+  outline-offset: 3px;                     /* custom focus ring — N18 compliance */
+}
+
+/* Ghost / outlined variant */
+.btn-ghost {
+  background-color: transparent;
+  color:            var(--color-accent);
+  box-shadow:       none;
+  border:           1px solid var(--color-border-strong);
+}
+
+.btn-ghost:hover {
+  background-color: var(--color-accent-hover);
+  box-shadow:       none;
+  transform:        translateY(-1px);
+}
+
+.btn-ghost:active {
+  transform:        translateY(0px);
+  background-color: var(--color-accent-subtle);
+}
+
+/* --- Card --- */
+
+.card {
+  background:    var(--color-bg-raised);
+  border-radius: var(--radius-card);       /* 16px — generous, editorial */
+  box-shadow:    var(--shadow-card);
+  padding:       var(--space-6);
+  transition:    box-shadow var(--transition-base),
+                 transform  var(--transition-base);
+}
+
+.card:hover {
+  box-shadow: var(--shadow-card-hover);
+  transform:  translateY(-2px);
+}
+
+/* --- Badge --- */
+
+.badge {
+  display:          inline-flex;
+  align-items:      center;
+  gap:              var(--space-1);
+  padding:          3px 10px;
+  border-radius:    var(--radius-pill);    /* pill — categorically different */
+  font-size:        0.75rem;
+  font-weight:      500;
+  letter-spacing:   0.03em;
+  text-transform:   uppercase;
+  background-color: var(--color-accent-subtle);
+  color:            var(--color-accent);
+  border:           1px solid rgba(181, 101, 29, 0.20);
+}
+
+/* --- Input --- */
+
+.input {
+  display:          block;
+  width:            100%;
+  padding:          10px 14px;
+  border-radius:    var(--radius-input);   /* 12px — distinct from card and btn */
+  font-size:        0.9375rem;
+  background-color: var(--color-bg);
+  color:            var(--color-fg);
+  border:           1px solid var(--color-border-strong);
+  transition:       border-color var(--transition-fast),
+                    box-shadow   var(--transition-fast);
+  /* Removes browser default appearance */
+  -webkit-appearance: none;
+  appearance:       none;
+}
+
+.input::placeholder { color: var(--color-fg-faint); }
+
+.input:focus {
+  outline:      none;
+  border-color: var(--color-accent);
+  box-shadow:   0 0 0 3px var(--color-accent-subtle); /* custom focus ring — N18 */
+}
+
+/* --- 4. Utility Classes --- */
+
+/* Scroll-triggered reveal (honors prefers-reduced-motion) */
+.reveal {
+  opacity:    0;
+  transform:  translateY(20px);
+  transition: opacity var(--transition-slow), transform var(--transition-slow);
+}
+
+.reveal.visible {
+  opacity:   1;
+  transform: translateY(0);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .reveal,
+  .reveal.visible {
+    opacity:    1;
+    transform:  none;
+    transition: none;
+  }
+}
+
+/* Gradient text */
+.gradient-text {
+  background-image:    linear-gradient(135deg, var(--color-accent) 0%, var(--color-fg-muted) 100%);
+  -webkit-background-clip: text;
+  background-clip:     text;
+  -webkit-text-fill-color: transparent;
+  color:               transparent;
+}
+
+/* Glass — warm-tinted */
+.glass {
+  background:  rgba(250, 248, 245, 0.75);
+  backdrop-filter:         blur(12px);
+  -webkit-backdrop-filter: blur(12px);
+  border:      1px solid var(--color-border);
+}
+
+/* Divider — gradient fade to transparent at edges (craft profile) */
+.divider {
+  height:     1px;
+  border:     none;
+  background: linear-gradient(
+    to right,
+    transparent,
+    var(--color-border-strong) 20%,
+    var(--color-border-strong) 80%,
+    transparent
+  );
+  margin: var(--space-12) 0;
+}
+
+/* Icon container — tinted square */
+.icon-container {
+  display:          inline-flex;
+  align-items:      center;
+  justify-content:  center;
+  width:            var(--icon-feature);
+  height:           var(--icon-feature);
+  border-radius:    var(--radius-sm);
+  background-color: var(--color-accent-subtle);
+  color:            var(--color-accent);
+  flex-shrink:      0;
+}

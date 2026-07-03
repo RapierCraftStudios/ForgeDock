@@ -1,7 +1,7 @@
 # Durable Execution Engine — Design Spec
 
 **Date:** 2026-07-03
-**Status:** Approved design, ready for implementation planning
+**Status:** Implemented (headless engine core) on branch feat/durable-execution-engine — see docs/superpowers/plans/2026-07-03-durable-execution-engine.md
 **Tracking:** #1256 (keystone), epic #1320 (five foundations of autonomy)
 **Scope of this spec:** the durable engine **core** only — phase state machine, run-log, resume, and orchestrator integration for **headless / orchestrated** runs. Verification, learning, economics, and provenance (#1315–#1319) are separate specs that build on this substrate.
 
@@ -156,7 +156,7 @@ Each phase returns a typed result; the engine acts on the **type** (replacing pr
 
 ## 8. Concurrency & orchestrator integration
 
-**Lease.** `FORGE:STATE.lease = {by: agentId, until: ts}` is written on `RUN_START`, renewed on each `PHASE_COMMIT`, released on `RUN_TERMINAL`. On start, if a live lease held by another agent exists, the caller defers. Because GitHub wins on divergence, the lease is authoritative — two agents cannot both work one issue. This replaces the orchestrator's fuzzy "already in progress" label heuristic with a race-safe primitive.
+**Lease.** `FORGE:STATE.lease = {by: agentId, until: ts}` is written on `RUN_START`, renewed on each `PHASE_COMMIT`, released on `RUN_TERMINAL`. On start, if a live lease held by another agent exists, the caller defers. This is best-effort mutual exclusion (checked on start; not an atomic CAS) — GitHub issue-edit has no compare-and-swap, so a concurrent start can still race between the lease read and the next write. It replaces the orchestrator's fuzzy "already in progress" label heuristic with a much tighter, race-*reducing* primitive.
 
 **`/orchestrate` becomes a thin driver:**
 - Decomposes into the wave/DAG (unchanged), then calls `engine.run(issue)` per issue.

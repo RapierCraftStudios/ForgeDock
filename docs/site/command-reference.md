@@ -16,6 +16,8 @@ npx forgedock
 
 After installation, every command is available as `/command-name` in any Claude Code session.
 
+**New here?** You don't need to learn all of these at once. Start with the [Command Learning Path](./command-learning-path.md) — it tiers every command by when you need it, beginning with the three you'll use on Day 1.
+
 ---
 
 ## Core Pipeline Commands
@@ -417,6 +419,7 @@ These are invoked automatically by `/work-on` but can also be run standalone.
 
 ## Next Steps
 
+- [Command Learning Path](./command-learning-path.md) — which commands to learn first, tiered by when you need them
 - [Getting Started with ForgeDock in 5 Minutes](./getting-started.md) — install and run your first pipeline
 - [How ForgeDock's Knowledge Graph Works](./how-it-works.md) — understand how commands share context
 - [ForgeDock vs. Manual Claude Code Workflows](./vs-manual-workflows.md) — why structured commands beat ad-hoc prompting

@@ -36,12 +36,13 @@ TARGET=${TARGET_BRANCH:-main}
 
 # Step 1: Find all PR numbers in the bundle (same logic as review-pr-staging Phase 0A)
 BUNDLE_PRS=$(git log origin/$TARGET..origin/$SOURCE --oneline \
-  | grep -oP '#\d+' \
+  | grep -oE '#[0-9]+' \
   | sort -u \
   | tr -d '#')
 
 MERGE_PRS=$(git log origin/$TARGET..origin/$SOURCE --merges --oneline \
-  | grep -oP '(?<=pull request #)\d+' \
+  | grep -oE 'pull request #[0-9]+' \
+  | grep -oE '[0-9]+' \
   | sort -u)
 
 ALL_PR_NUMBERS=$(echo "$BUNDLE_PRS $MERGE_PRS" | tr ' ' '\n' | sort -u | grep -E '^[0-9]+$')
@@ -127,7 +128,7 @@ git log --oneline origin/$TARGET..origin/$SOURCE --format="%h %s" | head -50
 
 ```bash
 # Extract PR numbers from merge commits
-PR_NUMBERS=$(git log origin/$TARGET..origin/$SOURCE --merges --format="%s" | grep -oP '#\d+' | sort -u)
+PR_NUMBERS=$(git log origin/$TARGET..origin/$SOURCE --merges --format="%s" | grep -oE '#[0-9]+' | sort -u)
 
 # Get PR details
 for PR in $PR_NUMBERS; do
@@ -142,7 +143,7 @@ done
 # Extract issue references from PR bodies
 for PR in $PR_NUMBERS; do
   NUM=${PR#\#}
-  CLOSES=$(gh pr view $NUM --json body --jq '.body' 2>/dev/null | grep -oP 'Closes #\K\d+')
+  CLOSES=$(gh pr view $NUM --json body --jq '.body' 2>/dev/null | grep -oE 'Closes #[0-9]+' | grep -oE '[0-9]+')
   for ISSUE in $CLOSES; do
     gh issue view $ISSUE --json number,title,labels --jq '"\(.number) | \(.title) | \([.labels[].name] | join(","))"' 2>/dev/null
   done
@@ -188,10 +189,14 @@ if [ -n "$MIGRATIONS" ]; then
   echo "⚠️ DATABASE MIGRATIONS INCLUDED:"
   echo "$MIGRATIONS"
   # Show migration content for review
-  for m in $MIGRATIONS; do
+  # $MIGRATIONS is one path per line (`git diff --name-only`) — herestring,
+  # not a piped `| while read`, for consistency with the newline-safe pattern
+  # used elsewhere in this sweep.
+  while IFS= read -r m; do
+    [ -z "$m" ] && continue
     echo "--- $m ---"
     git show origin/$SOURCE:$m 2>/dev/null | head -30
-  done
+  done <<< "$MIGRATIONS"
 fi
 ```
 
@@ -225,7 +230,7 @@ if [ -n "$NEW_ENV" ]; then
   # Cross-check with SOPS chain (only when deploy.secrets_backend == "sops")
   # If your project uses a different backend, skip this block and verify manually.
   if [ "{DEPLOY_SECRETS_BACKEND}" = "sops" ]; then
-    for var in $(echo "$NEW_ENV" | grep -oP '^\+\K[A-Z_]+'); do
+    for var in $(echo "$NEW_ENV" | grep -oE '^\+[A-Z_]+' | sed 's/^\+//'); do
       if ! grep -q "$var" scripts/decrypt-secrets.sh 2>/dev/null; then
         echo "  ❌ $var NOT in decrypt-secrets.sh ENV_MAPPING"
       fi

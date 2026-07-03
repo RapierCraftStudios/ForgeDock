@@ -17,6 +17,27 @@ This tutorial gets you from zero to your first autonomous pipeline run in under 
 - [Claude Code](https://docs.anthropic.com/en/docs/claude-code) installed and authenticated
 - Git and GitHub CLI (`gh`) installed and authenticated (`gh auth login`)
 - Node.js 18 or higher
+- [`yq`](https://github.com/mikefarah/yq) — YAML parser used by all pipeline commands to read `forge.yaml`
+
+**Install `yq`:**
+
+```bash
+# macOS
+brew install yq
+
+# Ubuntu / Debian
+sudo apt-get install yq
+# or: sudo snap install yq
+
+# Windows
+winget install mikefarah.yq
+# or: choco install yq
+
+# Any platform (via Go)
+go install github.com/mikefarah/yq/v4@latest
+```
+
+> **Note:** Without `yq`, pipeline commands that read `forge.yaml` (including `/work-on`, `/scope`, `/orchestrate`, and most others) will fall back to defaults or skip config-driven steps silently.
 
 ---
 
@@ -33,20 +54,36 @@ This symlinks all 25+ ForgeDock command specs into `~/.claude/commands/` — mak
 **Verify the install:**
 
 ```bash
-ls ~/.claude/commands/ | grep -E "work-on|review-pr|quality-gate"
+npx forgedock doctor
 ```
 
-You should see `work-on.md`, `review-pr.md`, and `quality-gate.md`.
+`doctor` runs an installation health check across six categories — command symlinks, `forge.yaml`, required tools (`gh`, `yq`, Claude Code), GitHub workflow labels, and Playwright MCP — and prints a pass/fail/warn line with a fix hint for each:
+
+```
+ForgeDock Doctor — Installation Health Check
+
+  ✔  Command symlinks  25 symlinks valid
+  ✔  gh CLI  installed and authenticated
+  ✔  yq  yq (https://github.com/mikefarah/yq/) version v4.x
+  ✔  Claude Code  v2.x (compatible, >= v2.0.0)
+  ⚠  Playwright MCP  Not registered — needed for /qa-sweep
+
+  All checks passed. ForgeDock installation is healthy.
+```
+
+It exits `0` when everything passes and `1` if any check fails, so you can also use it in CI.
+
+> Prefer a quick spot-check? `ls ~/.claude/commands/ | grep -E "work-on|review-pr|quality-gate"` should list `work-on.md`, `review-pr.md`, and `quality-gate.md`.
 
 ---
 
 ## Step 2: Your Config Is Already There
 
-`npx forgedock` in Step 1 already detected your repo and walked you through a reviewed `forge.yaml` — there's no separate config step to run. If you need to redo detection later (moved the repo, renamed a branch), just re-run:
+`npx forgedock` in Step 1 ran the full install journey — including repo detection and a reviewed `forge.yaml` — so there's no separate config step to run. If you need to redo detection later (moved the repo, renamed a branch), or want a leaner config with just the required sections, re-run:
 
 ```bash
 cd /path/to/your/project
-npx forgedock init
+npx forgedock init --minimal
 ```
 
 **Optional: enrich the config.** Once `forge.yaml` exists, open Claude Code in your project directory and run `/forgedock-init` to fill in the optional sections that plain detection can't infer:
@@ -71,9 +108,16 @@ paths:
   worktree_base: "/path/to/my-app/.claude/worktrees"
 
 branches:
+  default: "main"
   staging: "staging"
-  default: "staging"
+  feature_pattern: "milestone/{slug}"
 ```
+
+That's the whole config. Run `npx forgedock doctor` to confirm it's valid.
+
+> **The three required sections are `project`, `paths`, and `branches`** — `npx forgedock init --minimal` auto-detects `paths` for you (so worktrees land in the right place) and you rarely need to touch it. Everything else (project board, review context, verification commands, multi-repo routing) is optional and falls back to sensible defaults. Browse [`forge.yaml.example`](https://github.com/RapierCraftStudios/ForgeDock/blob/main/forge.yaml.example) and [`docs/CONFIG.md`](https://github.com/RapierCraftStudios/ForgeDock/blob/main/docs/CONFIG.md) when you're ready to customize.
+
+**Prefer guided, AI-powered setup?** Open Claude Code in your project directory and run `/forgedock-init` instead — it scans your repo and fills in the optional sections (repo owner/name, worktree path, branch strategy, project board) for you.
 
 ---
 
@@ -144,13 +188,18 @@ For a deep dive into how this works, read [How ForgeDock's Knowledge Graph Works
 
 ## Next Steps
 
+- [Command Learning Path](./command-learning-path.md) — which commands to learn next, tiered by when you need them
 - [How ForgeDock's Knowledge Graph Works](./how-it-works.md) — understand the architecture
+- [What Are Those FORGE Comments?](./annotations-explained.md) — a 2-minute explainer for the annotations on your issues
 - [ForgeDock vs. Manual Claude Code Workflows](./vs-manual-workflows.md) — why this beats ad-hoc prompting
 - [Complete Command Reference](./command-reference.md) — all 25 commands with examples
+- [Troubleshooting & Recovery Guide](./troubleshooting.md) — diagnose and recover from common pipeline failures
 
 ---
 
 ## Troubleshooting
+
+The quick fixes below cover the most common first-run issues. For the full list of failure modes — quality gate failures, worktree conflicts, stale labels, rate limits, and more — see the [Troubleshooting & Recovery Guide](./troubleshooting.md).
 
 **`/work-on` not found in Claude Code**
 

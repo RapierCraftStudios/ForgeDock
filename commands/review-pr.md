@@ -3,6 +3,8 @@ description: Context-aware PR review — analyzes what the PR touches, spawns do
 argument-hint: [PR number, URL, "open", or "staging" for feature→main review]
 allowed-tools: Task, Bash, Read, Grep, Glob, WebFetch, Skill
 ---
+<!-- SPDX-FileCopyrightText: Copyright (c) RapierCraft Studios -->
+<!-- SPDX-License-Identifier: AGPL-3.0-or-later -->
 
 # PR Review — Orchestrator
 
@@ -124,6 +126,9 @@ while [ "$MERGE_HEALTH" = "UNKNOWN" ] && [ "$MERGE_RETRY" -lt 3 ]; do
 done
 # MERGE_HEALTH: MERGEABLE | CONFLICTING | UNKNOWN (still async after retries)
 # MERGE_HEALTH_STATE: CLEAN | DIRTY | BLOCKED | UNSTABLE | UNKNOWN
+
+# Resolve repo name early — used in Phases 5, 6, 8B, 9A (clean-review skip path bypasses Phase 6A) <!-- Added: forge#820 -->
+REPO=$(gh repo view --json nameWithOwner --jq '.nameWithOwner')
 ```
 
 ### 1B: Classify
@@ -619,6 +624,36 @@ echo "$DIFF" | grep -cE "subprocess|os\.system|eval\(|exec\(|pickle|yaml\.load[^
 echo "$FILES" | grep -cE "^sdk/|openapi.*\.json$|openapi-versions/" && echo "  SDK_OPENAPI" || true
 ```
 
+**Churn (hot-spot) signal**: The signals above are all derived from the current diff content — none of them measure historical change frequency, which is one of the strongest empirical predictors of defect density. Compute a bounded per-file churn tier for the PR's changed files only (never repo-wide) and carry it forward as `CHURN_CONTEXT` for Phase 3C:
+
+```bash
+CHURN_WINDOW="90 days ago"   # named constant — must match the same window used in architect.md Phase A5
+CHURN_CONTEXT=""
+# Herestring (not a piped `| while read`) — a pipe would run the loop body in a
+# subshell in bash, silently discarding CHURN_CONTEXT once the loop exits. $FILES
+# is one path per line (gh pr diff --name-only), so `read -r` per line is safe
+# even when a path contains embedded spaces.
+while IFS= read -r FILE; do
+  [ -z "$FILE" ] && continue
+  COMMITS=$(git log --oneline --since="$CHURN_WINDOW" -- "$FILE" 2>/dev/null | wc -l)
+  if [ "$COMMITS" -ge 15 ]; then
+    # Real newline appended via $'\n' (ANSI-C quoting), not a literal backslash-n.
+    # A literal "\n" would only be interpreted by `echo -e` — it survives
+    # unprocessed into Phase 3C's raw template substitution ([CHURN_CONTEXT] ->
+    # $CHURN_CONTEXT), which does not reprocess escapes, so with 2+ HOT files
+    # multi-hotspot PRs would render squished in the agent prompt. A real
+    # newline here makes the variable correct for every consumer.
+    CHURN_CONTEXT="${CHURN_CONTEXT}${FILE} (${COMMITS} commits in last 90 days — HOT)"$'\n'
+  fi
+done <<< "$FILES"
+if [ -z "$CHURN_CONTEXT" ]; then
+  CHURN_CONTEXT="No hot-spot files detected (all changed files under 15 commits in the last 90 days)."
+fi
+echo "$CHURN_CONTEXT"
+```
+
+Tiers (fixed thresholds, identical to `architect.md` Phase A5): **HOT** = 15+ commits / 90 days, **MEDIUM** = 5–14, **LOW** = 0–4. Only HOT-tier files are listed in `CHURN_CONTEXT` — this keeps the agent prompt signal short and high-value rather than dumping a churn count for every file. This does not change agent selection (3B) — it is a scrutiny prior surfaced to whichever agents are already selected, substituted as `[CHURN_CONTEXT]` in Phase 3C.
+
 ### 3B: Select Agents
 
 | Risk Signal | Required Agents |
@@ -682,8 +717,9 @@ This file contains the Evidence-Based Review Protocol, Structured Findings Proto
 2. Substitute: `[PR_NUMBER]`, `[REVIEW_SHA]`, `[REVIEW_SHA_SHORT]`, `[TITLE]`, relevant files list
 3. Substitute: `[PROJECT_NAME]` → `$PROJECT_NAME`, `[PROJECT_CONTEXT]` → `$PROJECT_CONTEXT`, `[TECH_STACK]` → `$TECH_STACK`
 4. Substitute per-agent domain context: `[DOMAIN_CONTEXT]` → the agent's matching key from `forge.yaml → review.domains` (e.g., `$DOMAIN_CONTEXT_AUTH` for the auth agent, `$DOMAIN_CONTEXT_BILLING` for the billing agent)
-5. If Phase 2.5 found broken assumptions, append them to the agent's prompt as "Pre-found integration issues to verify"
-6. Launch via `Task` tool with the resolved model (default `"sonnet"`, fallback `"opus"` if rate-limited)
+5. Substitute the shared hot-spot prior: `[CHURN_CONTEXT]` → `$CHURN_CONTEXT` (computed once in Phase 3A, same value for every agent — this is a PR-level fact, not a per-domain config value, so it is NOT read from `forge.yaml`)
+6. If Phase 2.5 found broken assumptions, append them to the agent's prompt as "Pre-found integration issues to verify"
+7. Launch via `Task` tool with the resolved model (default `"sonnet"`, fallback `"opus"` if rate-limited)
 
 **CRITICAL**: Launch ALL selected agents in a SINGLE message using multiple Task tool calls. Each agent posts findings directly to the PR via `gh pr comment`.
 
@@ -731,7 +767,6 @@ If synthesis needed, launch a `general-purpose` Task (model: resolved per policy
 ### 6A: Extract Findings
 
 ```bash
-REPO=$(gh repo view --json nameWithOwner --jq '.nameWithOwner')
 HAS_SYNTHESIS=$(gh api "repos/${REPO}/issues/${PR_NUMBER}/comments" --jq '.[].body' | grep -c 'REVIEW-FINDINGS-SYNTHESIZED-START' || echo 0)
 
 if [ "$HAS_SYNTHESIS" -gt 0 ]; then
@@ -786,8 +821,8 @@ fi
 
 if [ -n "$MILESTONE_BRANCH" ]; then
     BRANCH_SLUG=$(echo "$MILESTONE_BRANCH" | sed 's|^milestone/||')
-    MILESTONE_NUMBER=$(gh api repos/${REPO}/milestones --jq --arg slug "$BRANCH_SLUG" '.[] | select((.title | ascii_downcase | gsub("[^a-z0-9]+"; "-")) == $slug) | .number' 2>/dev/null | head -1)
-    [ -z "$MILESTONE_NUMBER" ] && MILESTONE_NUMBER=$(gh api repos/${REPO}/milestones --jq --arg slug "$BRANCH_SLUG" '.[] | select((.title | ascii_downcase | gsub("[^a-z0-9]+"; "-")) | test($slug)) | .number' 2>/dev/null | head -1)
+    MILESTONE_NUMBER=$(gh api repos/${REPO}/milestones 2>/dev/null | jq --arg slug "$BRANCH_SLUG" '.[] | select((.title | ascii_downcase | gsub("[^a-z0-9]+"; "-")) == $slug) | .number' 2>/dev/null | head -1)
+    [ -z "$MILESTONE_NUMBER" ] && MILESTONE_NUMBER=$(gh api repos/${REPO}/milestones 2>/dev/null | jq --arg slug "$BRANCH_SLUG" '.[] | select((.title | ascii_downcase | gsub("[^a-z0-9]+"; "-")) | test($slug)) | .number' 2>/dev/null | head -1)
     [ -n "$MILESTONE_NUMBER" ] && MILESTONE_FLAG="--milestone $(gh api repos/${REPO}/milestones/${MILESTONE_NUMBER} --jq '.title')"
 fi
 ```
@@ -1060,11 +1095,88 @@ fi
 
 **Important**: Phase 8 ONLY merges the PR. It does NOT close the issue, update labels, or clean up worktrees. When invoked via `/work-on`, those responsibilities belong to `work-on/close.md` — which runs after the router detects state 4 (MERGE_COMPLETE: PR merged + issue open). Doing them here would cause the router to hit TERMINAL_MERGED (state 1) and skip the close phase entirely.
 
+### 8B: Post-Merge Review Finding Demilestoning (Milestone PRs Only)
+
+**Skip if**: `IS_MILESTONE_TO_STAGING` is false or `MERGE_STATE != "MERGED"`. Runs only when a milestone→staging PR was just successfully merged.
+
+**Purpose**: Review-finding issues created during a milestone PR review (Phase 6C) inherit the milestone. Once the milestone PR merges, those findings should flow through the fast lane independently — not remain stranded on a closed milestone. This step clears their milestone assignment automatically.
+
+```bash
+if [ "${IS_MILESTONE_TO_STAGING:-false}" = "true" ] && [ "${MERGE_STATE:-}" = "MERGED" ]; then
+    echo "Phase 8B: Clearing milestone from open review-finding issues referencing PR #${PR_NUMBER}..."
+
+    # Find open review-finding issues whose body references this PR number
+    # The title template in Phase 6C always includes: "review finding — PR #${PR_NUMBER}"
+    FINDINGS_TO_DEMILESTONE=$(gh issue list -R "${REPO}" \
+        --state open \
+        --label "review-finding" \
+        --limit 200 \
+        --json number,title,milestone \
+        --jq ".[] | select(.milestone != null) | select(.title | test(\"PR #${PR_NUMBER}\")) | .number" \
+        2>/dev/null || echo "")
+
+    if [ -z "$FINDINGS_TO_DEMILESTONE" ]; then
+        echo "Phase 8B: No open review-finding issues with milestones found referencing PR #${PR_NUMBER}."
+    else
+        MOVED_COUNT=0
+        echo "$FINDINGS_TO_DEMILESTONE" | while IFS= read -r FINDING_NUM; do
+            [ -z "$FINDING_NUM" ] && continue
+            FINDING_TITLE=$(gh issue view "$FINDING_NUM" -R "${REPO}" --json title --jq '.title' 2>/dev/null || echo "#${FINDING_NUM}")
+            gh issue edit "$FINDING_NUM" -R "${REPO}" --milestone "" 2>/dev/null && \
+                echo "  Moved to fast lane: #${FINDING_NUM} — ${FINDING_TITLE}" || \
+                echo "  WARNING: Failed to clear milestone for #${FINDING_NUM}"
+            MOVED_COUNT=$((MOVED_COUNT + 1))
+        done
+        echo "Phase 8B: Review finding demilestoning complete."
+    fi
+fi
+```
+
+<!-- Added: forge#815 -->
+
 ---
 
 ## Phase 9: Integrity Check & Summary (LAST)
 
 **Run AFTER Phase 6 (issues created), Phase 7 (verdict posted), Phase 8 (merge if applicable).**
+
+### 9A: Post-Merge Review Finding Demilestoning Fallback (Milestone PRs Only)
+
+**Skip if**: `IS_MILESTONE_TO_STAGING` is false. Runs when `AUTO_MERGE=false` but the PR was merged manually — Phase 8B did not run in this case, so Phase 9 handles cleanup.
+
+**Detection**: Check if the PR is now MERGED. If so and `IS_MILESTONE_TO_STAGING=true`, run the same demilestoning logic as Phase 8B.
+
+```bash
+if [ "${IS_MILESTONE_TO_STAGING:-false}" = "true" ]; then
+    PR_MERGE_STATE=$(gh pr view $ARGUMENTS --json state --jq '.state' 2>/dev/null || echo "")
+    if [ "$PR_MERGE_STATE" = "MERGED" ]; then
+        echo "Phase 9A: Checking for open review-finding issues to demilestone (fallback — manual merge path)..."
+
+        FINDINGS_TO_DEMILESTONE=$(gh issue list -R "${REPO}" \
+            --state open \
+            --label "review-finding" \
+            --limit 200 \
+            --json number,title,milestone \
+            --jq ".[] | select(.milestone != null) | select(.title | test(\"PR #${PR_NUMBER}\")) | .number" \
+            2>/dev/null || echo "")
+
+        if [ -z "$FINDINGS_TO_DEMILESTONE" ]; then
+            echo "Phase 9A: No open review-finding issues with milestones found referencing PR #${PR_NUMBER} (already cleared or none created)."
+        else
+            echo "$FINDINGS_TO_DEMILESTONE" | while IFS= read -r FINDING_NUM; do
+                [ -z "$FINDING_NUM" ] && continue
+                FINDING_TITLE=$(gh issue view "$FINDING_NUM" -R "${REPO}" --json title --jq '.title' 2>/dev/null || echo "#${FINDING_NUM}")
+                gh issue edit "$FINDING_NUM" -R "${REPO}" --milestone "" 2>/dev/null && \
+                    echo "  Moved to fast lane: #${FINDING_NUM} — ${FINDING_TITLE}" || \
+                    echo "  WARNING: Failed to clear milestone for #${FINDING_NUM}"
+            done
+            echo "Phase 9A: Fallback demilestoning complete."
+        fi
+    fi
+fi
+```
+
+<!-- Added: forge#815 -->
 
 ```bash
 CURRENT_SHA=$(gh pr view $ARGUMENTS --json headRefOid --jq '.headRefOid')
@@ -1118,4 +1230,5 @@ Review complete for PR #X. Verdict: [VERDICT].
 - Integration checks: [pass/N broken paths found]
 - Issues created: [M]
 {IF AUTO_MERGE: "PR merged and issue closed." / "Merge FAILED — see issue."}
+{IF IS_MILESTONE_TO_STAGING: "Review findings demilestoned: [N] issues moved to fast lane." / ""}
 ```

@@ -1,0 +1,295 @@
+/*
+ * minimal-luxury.css — Foundation for the minimal-luxury archetype
+ *
+ * Archetype ID: minimal-luxury
+ * Craft profile (reference-corpus.md):
+ *   radius system: mixed — 20px card / 12px input / 8px button
+ *   button style:  ghost or borderless; minimal fill; no visible shadow
+ *   divider style: spacing only — no visible line between sections
+ *   icon treatment: none or near-invisible; no colored backgrounds
+ *
+ * Override --color-accent (and related tokens) via a :root block in the
+ * generated page to brand this foundation without touching the file.
+ *
+ * Issue: #1048 — custom CSS component library per archetype
+ */
+
+/* ==========================================================================
+   1. Design Tokens — CSS Custom Properties
+   ========================================================================== */
+
+:root {
+  /* Accent — override per brand */
+  --color-accent:          #1a1a1a;          /* near-black default — silent luxury */
+  --color-accent-subtle:   rgba(26, 26, 26, 0.06);
+  --color-accent-hover:    rgba(26, 26, 26, 0.10);
+
+  /* Surface palette — near-white / pure */
+  --color-bg:              #ffffff;
+  --color-bg-raised:       #f9f9f9;
+  --color-bg-sunken:       #f3f3f3;
+  --color-fg:              #111111;
+  --color-fg-muted:        #555555;
+  --color-fg-faint:        #aaaaaa;
+  --color-border:          rgba(0, 0, 0, 0.08);
+  --color-border-strong:   rgba(0, 0, 0, 0.14);
+
+  /* Code surface */
+  --code-bg:               rgba(0, 0, 0, 0.04);
+
+  /* Radius system — mixed, at least 3 distinct values (N13 compliance) */
+  --radius-sm:             4px;             /* micro elements */
+  --radius-btn:            8px;             /* button */
+  --radius-input:          12px;            /* input */
+  --radius-card:           20px;            /* card — most generous */
+  --radius-pill:           9999px;          /* pill badge */
+
+  /* Shadow tokens — near-zero, luxury restraint */
+  --shadow-card:           0 1px 2px rgba(0, 0, 0, 0.04),
+                           0 0 0 1px rgba(0, 0, 0, 0.06);
+  --shadow-card-hover:     0 4px 16px rgba(0, 0, 0, 0.06),
+                           0 0 0 1px rgba(0, 0, 0, 0.08);
+  --shadow-btn:            none;            /* no visible shadow — craft profile */
+  --shadow-elevated:       0 8px 40px rgba(0, 0, 0, 0.08);
+
+  /* Transition — measured, unhurried */
+  --transition-fast:       180ms cubic-bezier(0.4, 0, 0.2, 1);
+  --transition-base:       280ms cubic-bezier(0.4, 0, 0.2, 1);
+  --transition-slow:       420ms cubic-bezier(0.4, 0, 0.2, 1);
+
+  /* Spacing scale — generous air */
+  --space-1:4px; --space-2:8px; --space-3:12px; --space-4:16px;
+  --space-6:24px; --space-8:32px; --space-12:48px; --space-16:64px; --space-24:96px;
+
+  /* Icon sizing — contextual (craft profile: near-invisible, no backgrounds) */
+  --icon-feature: 20px;
+  --icon-nav:     16px;
+  --icon-inline:  14px;
+}
+
+/* ==========================================================================
+   2. Element Overrides — Professional baseline defaults (N18 compliance)
+   ========================================================================== */
+
+/* Custom selection — subtle black tint */
+::selection {
+  background: var(--color-accent-subtle);
+  color:      var(--color-fg);
+}
+
+/* Custom focus ring — restrained, thin (N18, N15 compliance) */
+:focus-visible {
+  outline:        1.5px solid var(--color-fg);
+  outline-offset: 3px;
+}
+
+/* Custom scrollbar — ultra-thin, near-invisible */
+::-webkit-scrollbar       { width: 4px; height: 4px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb {
+  background:    rgba(0, 0, 0, 0.18);
+  border-radius: var(--radius-pill);
+}
+::-webkit-scrollbar-thumb:hover { background: rgba(0, 0, 0, 0.32); }
+
+/* Code blocks — clean, minimal */
+code, kbd {
+  background:    var(--code-bg);
+  border-radius: var(--radius-sm);
+  padding:       2px 6px;
+  font-size:     0.875em;
+  font-family:   ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+
+/* Links — custom underline (N17 compliance) */
+a:not([class]) {
+  color:                    var(--color-fg);
+  text-decoration:          underline;
+  text-decoration-color:    rgba(0, 0, 0, 0.25);
+  text-underline-offset:    3px;
+  text-decoration-thickness: 1px;
+  transition:               text-decoration-color var(--transition-fast);
+}
+a:not([class]):hover {
+  text-decoration-color: var(--color-fg);
+}
+
+/* ==========================================================================
+   3. Component Classes — Buttons, Cards, Badges, Inputs
+   ========================================================================== */
+
+/* --- Button (N14, N15, N20 compliance) ----------------------------------- */
+
+.btn {
+  display:          inline-flex;
+  align-items:      center;
+  gap:              var(--space-2);
+  padding:          10px 22px;
+  border-radius:    var(--radius-btn);     /* 8px */
+  font-size:        0.9375rem;
+  font-weight:      400;
+  line-height:      1;
+  letter-spacing:   0.04em;
+  cursor:           pointer;
+  white-space:      nowrap;
+  transition:       background-color var(--transition-fast),
+                    color            var(--transition-fast),
+                    transform        var(--transition-fast);
+  /* Minimal fill — craft profile: ghost or borderless, minimal fill */
+  background-color: var(--color-fg);
+  color:            var(--color-bg);
+  border:           none;
+  box-shadow:       none;                  /* no shadow — craft profile */
+}
+
+.btn:hover {
+  background-color: rgba(17, 17, 17, 0.80);
+  transform:        translateY(-1px);      /* lift on hover — N20 compliance */
+}
+
+.btn:active {
+  transform:        translateY(0px);       /* press-down — N20 compliance */
+  background-color: rgba(17, 17, 17, 0.90);
+}
+
+.btn:focus-visible {
+  outline:        1.5px solid var(--color-fg);
+  outline-offset: 3px;                     /* custom focus ring — N18 compliance */
+}
+
+/* Ghost / borderless variant */
+.btn-ghost {
+  background-color: transparent;
+  color:            var(--color-fg);
+  border:           none;
+  box-shadow:       none;
+}
+
+.btn-ghost:hover {
+  background-color: var(--color-accent-hover);
+  transform:        translateY(-1px);
+}
+
+.btn-ghost:active {
+  transform:        translateY(0px);
+  background-color: var(--color-accent-subtle);
+}
+
+/* --- Card (N13 — distinct radius from button) ----------------------------- */
+
+.card {
+  background:    var(--color-bg-raised);
+  border-radius: var(--radius-card);       /* 20px — most generous in system */
+  box-shadow:    var(--shadow-card);
+  padding:       var(--space-8);
+  transition:    box-shadow var(--transition-base),
+                 transform  var(--transition-base);
+}
+
+.card:hover {
+  box-shadow: var(--shadow-card-hover);
+  transform:  translateY(-2px);
+}
+
+/* --- Badge (N13 — distinct radius from card and button) ------------------- */
+
+.badge {
+  display:          inline-flex;
+  align-items:      center;
+  gap:              var(--space-1);
+  padding:          3px 10px;
+  border-radius:    var(--radius-pill);    /* pill — categorical difference */
+  font-size:        0.75rem;
+  font-weight:      400;
+  letter-spacing:   0.06em;
+  text-transform:   uppercase;
+  background-color: var(--color-bg-sunken);
+  color:            var(--color-fg-muted);
+  border:           none;
+}
+
+/* --- Input (N13, N15, N18 compliance) ------------------------------------ */
+
+.input {
+  display:          block;
+  width:            100%;
+  padding:          10px 16px;
+  border-radius:    var(--radius-input);   /* 12px — distinct from card and btn */
+  font-size:        0.9375rem;
+  font-weight:      400;
+  background-color: var(--color-bg);
+  color:            var(--color-fg);
+  border:           1px solid var(--color-border);
+  transition:       border-color var(--transition-fast);
+  -webkit-appearance: none;
+  appearance:       none;
+}
+
+.input::placeholder { color: var(--color-fg-faint); }
+
+.input:focus {
+  outline:      none;
+  border-color: var(--color-fg);
+  box-shadow:   0 0 0 2px var(--color-accent-subtle); /* custom focus ring — N18 */
+}
+
+/* ==========================================================================
+   4. Utility Classes — Animations, Reveals, Layout Helpers
+   ========================================================================== */
+
+/* Scroll-triggered reveal (honors prefers-reduced-motion) */
+.reveal {
+  opacity:    0;
+  transform:  translateY(24px);
+  transition: opacity var(--transition-slow), transform var(--transition-slow);
+}
+
+.reveal.visible {
+  opacity:   1;
+  transform: translateY(0);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .reveal,
+  .reveal.visible {
+    opacity:    1;
+    transform:  none;
+    transition: none;
+  }
+}
+
+/* Gradient text — luxury monochrome */
+.gradient-text {
+  background-image:    linear-gradient(135deg, var(--color-fg) 0%, var(--color-fg-muted) 100%);
+  -webkit-background-clip: text;
+  background-clip:     text;
+  -webkit-text-fill-color: transparent;
+  color:               transparent;
+}
+
+/* Glass — clean, near-invisible */
+.glass {
+  background:  rgba(255, 255, 255, 0.85);
+  backdrop-filter:         blur(16px);
+  -webkit-backdrop-filter: blur(16px);
+  border:      1px solid var(--color-border);
+}
+
+/* Divider — spacing only, no visible line (craft profile) */
+.divider {
+  height:     var(--space-12);  /* spacing creates the visual break — no line */
+  border:     none;
+  background: none;
+  display:    block;
+}
+
+/* Icon container — near-invisible, no background (craft profile) */
+.icon-container {
+  display:          inline-flex;
+  align-items:      center;
+  justify-content:  center;
+  width:            var(--icon-feature);
+  height:           var(--icon-feature);
+  color:            var(--color-fg-faint); /* near-invisible */
+  flex-shrink:      0;
+}

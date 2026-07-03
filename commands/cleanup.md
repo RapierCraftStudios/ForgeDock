@@ -2,6 +2,8 @@
 description: Sweep closed issues for stale labels, missing workflow state, and Project board gaps — plus prune worktrees, branches, and milestones
 argument-hint: [labels | branches | milestones | board | orphans | all]
 ---
+<!-- SPDX-FileCopyrightText: Copyright (c) RapierCraft Studios -->
+<!-- SPDX-License-Identifier: AGPL-3.0-or-later -->
 
 # /cleanup — Full Hygiene Sweep
 
@@ -45,7 +47,7 @@ All `{GH_REPO}`, `{GH_FLAG}`, `{REPO_PATH}`, `{STAGING_BRANCH}`, `{PROJECT_BOARD
 | `labels` or empty | Fix stale/missing workflow labels on closed issues |
 | `orphans` | Close open issues whose PRs are already merged |
 | `branches` | Prune worktrees and remote branches for merged PRs |
-| `milestones` | Close milestones with 0 open issues |
+| `milestones` | Report milestones with 0 open issues (advisory — never closes) |
 | `board` | Sync closed issues to Project board with correct terminal state |
 | `all` | All of the above, in order |
 
@@ -170,58 +172,109 @@ echo "Removed: $WORKTREE_PATH ($BRANCH_NAME)"
 
 ### 3C: Prune merged remote branches
 
-Delete remote `fix/` and `feat/` branches that are fully merged into `{STAGING_BRANCH}`:
+Delete remote `fix/` and `feat/` branches whose PR has merged — using **GitHub PR state as the source of truth**, not local git ancestry.
+
+**Why not `git branch -r --merged {STAGING_BRANCH}`**: an ancestry check only catches branches whose tip commit is reachable from `{STAGING_BRANCH}`. This misses two common cases:
+- **Feature-lane branches merged into a milestone branch.** Per `work-on.md` Phase 3E, milestone issues branch from and PR into `origin/milestone/{slug}`, not `{STAGING_BRANCH}`. Once such a branch's own PR merges into the milestone branch, it's fully absorbed and safe to delete — but it won't show up as "merged into staging" until the milestone itself ships (which may be days later, or never, if abandoned). This is the dominant cause of `feat/*` branches accumulating for a milestone/feature cluster.
+- **Squash merges.** If a branch was merged via squash (manual UI merge, or org/branch-protection settings that force squash-only), the resulting commit is a brand-new SHA that is never an ancestor of the original branch — so ancestry-based detection never matches it, even though the PR is clearly `MERGED` on GitHub.
+
+Both gaps disappear when merged-PR head-refs (regardless of base branch or merge strategy) are used directly as the deletion set:
+
+**Why also check `headRefOid`**: branch names are freely reusable in git. A name-only match cannot distinguish "this branch's current tip is the commit that merged" from "a branch with this name merged at some point in the past and has since been reused for new, unmerged work" (e.g. a second issue happens to slugify to the same `fix/*`/`feat/*` name). Comparing the branch's live remote tip SHA against the merged PR's `headRefOid` closes that gap — deletion only proceeds when the (name, SHA) pair matches a merged PR exactly, regardless of base branch or merge strategy.
+
+**Why `--force-with-lease` on the delete**: the `CURRENT_SHA` snapshot above is read from the local `origin/$branch` ref as of the `git fetch --prune` at the top of this phase. For large batches this loop can run for a while (one network call per branch), so a new commit can land on the remote branch between the fetch and that branch's turn in the loop — a TOCTOU window. A plain `git push origin --delete "$branch"` is unconditional: it deletes whatever the remote ref currently points to, even if that's no longer `$CURRENT_SHA`. Using `--force-with-lease=refs/heads/$branch:$CURRENT_SHA` makes the deletion a server-verified compare-and-swap — the remote rejects the update if `refs/heads/$branch` has moved since the snapshot, instead of silently deleting new work.
 
 ```bash
 cd {REPO_PATH}
 git fetch --prune origin
 
-# Count first
-MERGED_COUNT=$(git branch -r --merged origin/{STAGING_BRANCH} | grep -E "origin/(fix|feat)/" | wc -l)
-echo "Found $MERGED_COUNT merged remote branches to delete"
+# All remote fix/* and feat/* branches currently on origin
+REMOTE_BRANCHES=$(git branch -r | grep -E "origin/(fix|feat)/" | sed 's|origin/||' | tr -d ' ')
 
-# Delete them
-if [ "$MERGED_COUNT" -gt 0 ]; then
-  git branch -r --merged origin/{STAGING_BRANCH} | grep -E "origin/(fix|feat)/" | sed 's|origin/||' | xargs -I{} git push origin --delete {} 2>&1
-fi
+# Head-ref name + head-ref SHA of every merged PR, regardless of base branch (staging,
+# milestone/*, main) or merge strategy (merge-commit vs. squash) — this is GitHub's own
+# merge bookkeeping, not local ref topology, so it's immune to both gaps above.
+# headRefOid is captured alongside headRefName so deletion can be gated on the branch's
+# CURRENT tip matching the commit that actually merged, not just a name match.
+# --limit is set high to avoid silent truncation; repos with more historical merged PRs
+# than this should re-run `/cleanup branches` incrementally to catch the remainder.
+MERGED_HEADS=$(gh pr list {GH_FLAG} --state merged --limit 1000 --json headRefName,headRefOid --jq '.[] | "\(.headRefName)\t\(.headRefOid)"')
+
+DELETE_COUNT=0
+SKIP_COUNT=0
+RACE_SKIP_COUNT=0
+for branch in $REMOTE_BRANCHES; do
+  CURRENT_SHA=$(git rev-parse "origin/$branch" 2>/dev/null)
+  if printf '%s\n' "$MERGED_HEADS" | grep -qxF "$(printf '%s\t%s' "$branch" "$CURRENT_SHA")"; then
+    # Name AND tip SHA match a merged PR's head-ref — safe to delete.
+    # Use --force-with-lease as a server-side compare-and-swap: the remote re-verifies
+    # refs/heads/$branch is still at $CURRENT_SHA at push time, closing the TOCTOU gap
+    # between this snapshot and the actual delete (see note above).
+    if git push origin --force-with-lease="refs/heads/$branch:$CURRENT_SHA" ":refs/heads/$branch" 2>&1; then
+      DELETE_COUNT=$((DELETE_COUNT + 1))
+      # Log the pre-deletion SHA so it's visible in run output/logs for recovery —
+      # see "Recovery: restoring an accidentally pruned branch" below.
+      echo "Deleted origin/$branch (was $CURRENT_SHA) — restorable via: git push origin $CURRENT_SHA:refs/heads/$branch"
+    else
+      # Lease rejected — the branch's remote tip moved since the snapshot (a new push
+      # landed mid-loop). Do NOT retry/force past this: skip and let the next cleanup
+      # run re-evaluate it against fresh state.
+      RACE_SKIP_COUNT=$((RACE_SKIP_COUNT + 1))
+      echo "RACE: origin/$branch tip changed since snapshot ($CURRENT_SHA) — lease rejected, not deleting. Will re-evaluate on next /cleanup run."
+    fi
+  elif printf '%s\n' "$MERGED_HEADS" | cut -f1 | grep -qxF "$branch"; then
+    # Name matches a merged PR's head-ref, but the branch's current tip does not match
+    # any merged commit recorded under that name — likely a reused branch name holding
+    # new, unmerged work. Skip deletion rather than risk destroying live commits.
+    SKIP_COUNT=$((SKIP_COUNT + 1))
+    echo "SKIP: origin/$branch name matches a merged PR head-ref but current tip ($CURRENT_SHA) does not match the merged commit — branch name likely reused for new work. Not deleting."
+  fi
+done
+echo "Deleted $DELETE_COUNT merged remote branches, skipped $SKIP_COUNT name-matched/SHA-mismatched branches, skipped $RACE_SKIP_COUNT raced branches (tip changed between snapshot and delete) (source of truth: gh pr list --state merged, verified against headRefOid, deletion gated by --force-with-lease)"
 ```
 
-**Note**: This can take a while for large batches (1 network call per branch). Run in background if > 20 branches.
+**Note**: This can take a while for large batches (1 network call per deleted branch, plus one batched `gh pr list` call). Run in background if > 20 branches.
+
+**One-time backfill for existing stale branches**: repos that adopted this fix after already accumulating stale `feat/*`/`fix/*` branches (e.g. from milestones that shipped long ago) should run `/cleanup branches` once manually — the PR-state query above will catch the full backlog in a single pass since it isn't scoped to "this batch" or "this session," it queries all merged PRs on the repo.
+
+**Recovery: restoring an accidentally pruned branch**
+
+Phase 3C only ever deletes a branch whose (name, SHA) pair matched a merged PR's `headRefOid`, so the exact deleted commit is always recoverable: its SHA is echoed in the run log above (`Deleted origin/$branch (was $CURRENT_SHA) ...`), and the commit object survives in the remote's object store until garbage collection (for merge-commit merges it also remains reachable from the PR's merge commit; for squash merges the original tip becomes a dangling commit — not reachable by ancestry, but still restorable by SHA for as long as it hasn't been GC'd). If a branch is pruned in error (or needs to be recreated for any reason), restore it with:
+
+```bash
+# Using the SHA logged at deletion time (or from `gh pr view {PR_NUMBER} --json headRefOid`
+# if the run log is no longer available):
+git push origin <sha>:refs/heads/<branch>
+```
+
+Alternatively, GitHub itself offers a one-click **"Restore branch"** button on the merged PR's page (shown on the "<branch> was deleted" banner) for a limited window after deletion — typically available for as long as the underlying ref data hasn't been garbage-collected, often a few weeks. This is the fastest option when working from the GitHub UI rather than a local clone.
+
+Both options only apply to branches deleted by this phase (or by GitHub's own merge/delete UI) — a SHA is not captured for branches removed by other means (e.g. manual `git push origin --delete` run outside of `/cleanup`), so recovery there depends on `git reflog` on a clone that still has the ref, or GitHub's audit log.
 
 ---
 
-## Phase 4: Milestone Hygiene
+## Phase 4: Milestone Hygiene (Advisory Only)
 
-### 4A: Find completed milestones
+**NEVER close milestones in this phase.** Milestones are only closed by `/milestone ship` (human-gated) or `/milestone close` (explicit abandonment). Incorrect closure destroys milestone state that cannot be trivially recovered. <!-- fix: forge#1160 -->
+
+### 4A: Find milestones with 0 open issues
 
 ```bash
 # List open milestones with 0 remaining issues
 gh api repos/:owner/:repo/milestones --jq '.[] | select(.state == "open" and .open_issues == 0) | "\(.number) | \(.title) | open:\(.open_issues) closed:\(.closed_issues)"'
 ```
 
-### 4B: Close completed milestones (shipping-verified only)
+### 4B: Report findings (DO NOT close)
 
-For each milestone with 0 open issues, verify the milestone branch has been merged to staging or main before closing:
+For each milestone with 0 open issues, report it as a candidate for shipping or closing — but take no action:
 
 ```bash
-# Derive slug from milestone title (lowercase, spaces→hyphens, strip non-alphanumeric except hyphens)
-SLUG=$(echo "$MILESTONE_TITLE" | tr '[:upper:]' '[:lower:]' | tr ' ' '-' | tr -cd 'a-z0-9-')
-
-# Check if milestone branch was merged to staging or main
-SHIPPED_STAGING=$(gh pr list --base staging --head "milestone/$SLUG" --state merged --json number --jq '.[0].number' 2>/dev/null)
-SHIPPED_MAIN=$(gh pr list --base main --head "milestone/$SLUG" --state merged --json number --jq '.[0].number' 2>/dev/null)
-
-if [ -n "$SHIPPED_STAGING" ] || [ -n "$SHIPPED_MAIN" ]; then
-  # Safe to close — code has been shipped to staging or main
-  gh api repos/:owner/:repo/milestones/$MILESTONE_NUMBER -X PATCH -f state=closed
-  echo "CLOSED milestone: $MILESTONE_TITLE (shipped via PR #${SHIPPED_STAGING:-$SHIPPED_MAIN})"
-else
-  # DO NOT close — code is only on the milestone branch, not yet shipped
-  echo "SKIPPED: $MILESTONE_TITLE — issues done but milestone branch not merged to staging or main"
-fi
+echo "ADVISORY: $MILESTONE_TITLE — 0 open issues, $CLOSED_ISSUES closed"
+echo "  → To ship: /milestone ship $SLUG"
+echo "  → To abandon: /milestone close $SLUG"
 ```
 
-**Exception**: Don't close milestones that are intentionally kept open for future work (check if the milestone description says "ongoing" or "rolling"). If unsure, **SKIP it** — milestones are only closed by `/milestone ship` after code reaches staging. Incorrect closure destroys milestone state that cannot be trivially recovered.
+Do NOT call `gh api ... -X PATCH -f state=closed` on any milestone. This phase is informational only.
 
 ---
 
@@ -279,15 +332,10 @@ fi
 | Local branches deleted | {N} |
 | Remote branches deleted | {N} |
 
-### Milestones Closed
-| Milestone | Issues (closed) | Shipped via |
-|-----------|-----------------|-------------|
-| {title} | {N} | PR #{M} → staging/main |
-
-### Milestones Skipped (unshipped)
-| Milestone | Issues (closed) | Reason |
-|-----------|-----------------|--------|
-| {title} | {N} | No merged PR from milestone/{slug} → staging or main |
+### Milestones Ready to Ship (advisory — no action taken)
+| Milestone | Issues (closed) | Recommended Action |
+|-----------|-----------------|-------------------|
+| {title} | {N} | `/milestone ship {slug}` or `/milestone close {slug}` |
 
 ### Board Synced
 | Action | Count |
