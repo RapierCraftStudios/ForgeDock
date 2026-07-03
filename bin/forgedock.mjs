@@ -2684,6 +2684,7 @@ function help() {
     ["npx forgedock uninstall", "Remove commands"],
     ["npx forgedock update", "Pull latest & reinstall"],
     ["npx forgedock run <cmd> [args]", "Run a command headlessly via the Anthropic API"],
+    ["npx forgedock run-issue <issue>", "Drive one issue through the durable engine"],
     ["npx forgedock demo", "Set up a risk-free demo repo and print next steps"],
     ["npx forgedock enable [dir]", "Mark directory as ForgeDock-managed"],
     ["npx forgedock disable [dir]", "Opt directory out of ForgeDock"],
@@ -2819,6 +2820,11 @@ switch (command) {
   case "run":
     await run();
     break;
+  case "run-issue": {
+    const { runFromCli } = await import("./engine-cli.mjs");
+    await runFromCli(process.argv.slice(3));
+    break;
+  }
   case "demo":
     await demo();
     break;

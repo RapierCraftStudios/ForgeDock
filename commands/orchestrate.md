@@ -834,6 +834,18 @@ Proceed? (yes / adjust / pick specific issues)
 
 ---
 
+## Engine mode (headless)
+
+When running headless/CI, dispatch each issue via the durable execution engine instead of spawning prose agents:
+
+```bash
+forgedock run-issue <issue> --lane <staging|milestone/slug>
+```
+
+The engine drives every phase transition deterministically, mirrors state to the `FORGE:STATE` block on the issue, and holds a lease. To recover stalls, scan in-flight issues' `FORGE:STATE`; any issue with an expired lease and a non-terminal state is re-dispatched with the same `forgedock run-issue <issue>` command — it resumes from the last committed phase (idempotent). This replaces the label-heuristic "already in progress" check and the resume-with-nagging loop.
+
+---
+
 ## Phase 4: Streaming DAG Execution
 
 ### Step 4A-pre: Staging baseline tracking (MANDATORY — continuous)
