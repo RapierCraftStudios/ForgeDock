@@ -214,7 +214,7 @@ describe("preflight", () => {
 // ---------------------------------------------------------------------------
 
 import { forge } from "../journey.mjs";
-import { lstatSync, mkdirSync as mkdirSyncFs } from "node:fs";
+import { lstatSync, mkdirSync as mkdirSyncFs, symlinkSync } from "node:fs";
 
 /**
  * A command is installed if the target is a symlink (Developer Mode / admin /
@@ -329,6 +329,43 @@ describe("forge (Act II)", () => {
     assert.equal(res.updated, 1);
     assert.equal(readFileSync(target, "utf-8"), "A");
     assert.doesNotMatch(w.text, /WARNING/);
+  });
+
+  it("linkStrategy copy replaces a stale symlink with a copy", async (t) => {
+    const home = mkdtempSync(join(os.tmpdir(), "fd-forge-home6-"));
+    const forgeHome = mkdtempSync(join(os.tmpdir(), "fd-forge-src6-"));
+    mkdirSyncFs(join(forgeHome, "commands"), { recursive: true });
+    mkdirSyncFs(join(forgeHome, "bin", "hooks"), { recursive: true });
+    writeFileSync(join(forgeHome, "commands", "a.md"), "A", "utf-8");
+    writeFileSync(join(forgeHome, "bin", "hooks", "session-start.mjs"), "// hook", "utf-8");
+
+    // Stale symlink at the target pointing at a different file. Only possible
+    // where symlinks can be created — skip otherwise (no Developer Mode).
+    const other = join(forgeHome, "other.md");
+    writeFileSync(other, "OTHER", "utf-8");
+    const target = join(home, ".claude", "commands", "a.md");
+    mkdirSyncFs(join(home, ".claude", "commands"), { recursive: true });
+    try {
+      symlinkSync(other, target);
+    } catch (err) {
+      if (err.code === "EPERM" || err.code === "EACCES") {
+        t.skip("symlink creation unavailable (Windows without Developer Mode)");
+        return;
+      }
+      throw err;
+    }
+
+    const { ctx } = stubCtx({ home, linkStrategy: "copy" });
+    ctx.forgeHome = forgeHome;
+    const res = await forge(ctx);
+
+    assert.equal(res.updated, 1);
+    assert.ok(!lstatSync(target).isSymbolicLink()); // now a regular file, not a link
+    assert.equal(readFileSync(target, "utf-8"), "A");
+    const manifest = JSON.parse(
+      readFileSync(join(home, ".claude", "forgedock", "copied-commands.json"), "utf-8"),
+    );
+    assert.equal(manifest.files["a.md"], true);
   });
 
   it("user-owned regular file is never clobbered", async () => {

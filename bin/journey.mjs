@@ -388,13 +388,24 @@ export async function forge(ctx) {
         if (current === file) {
           skipped++;
         } else {
-          try {
-            await symlink(file, target + ".tmp");
-            await rename(target + ".tmp", target);
-            updated++;
-          } catch (linkErr) {
-            if (!isLinkPermissionError(linkErr)) throw linkErr;
-            // Can't re-link — replace the managed link with a copy.
+          let relinked = false;
+          if (wantSymlink) {
+            try {
+              await symlink(file, target + ".tmp");
+              try {
+                await rename(target + ".tmp", target);
+              } catch (renameErr) {
+                await unlink(target + ".tmp").catch(() => {});
+                throw renameErr;
+              }
+              updated++;
+              relinked = true;
+            } catch (linkErr) {
+              if (!isLinkPermissionError(linkErr)) throw linkErr;
+            }
+          }
+          if (!relinked) {
+            // Can't (or shouldn't) re-link — replace the managed link with a copy.
             // unlink first: copyFile onto a symlink writes THROUGH the link.
             await unlink(target);
             await copyFile(file, target);
