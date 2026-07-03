@@ -1013,12 +1013,12 @@ describe("crash injection", () => {
 });
 ```
 
-> Note: the engine's `runPhaseWithRetry` swallows a thrown runner as a `PHASE_FAILED` and retries within the same run. To simulate a true process death (no in-run retry), the crash test throws and lets the **outer** `try/catch` abandon the run, then starts a fresh `runIssue` — mirroring a killed process that is re-launched. If the default `maxAttempts` masks the crash, pass `maxAttempts: 1` in the crash runs.
+> **CORRECTION (supersedes the code block above).** Injecting the crash from the `runner` does NOT work: `runPhaseWithRetry` catches a thrown runner as a retryable `PHASE_FAILED` (so the run completes in one launch — a false positive), and `maxAttempts: 1` makes a single failure escalate straight to `needs-human` (breaking the run), not resume. A true process death must be injected where `runIssue` does NOT internally catch it: (1) the `projector.writeState` FORGE:STATE mirror (engine.mjs:53), which fires *after* the local `PHASE_COMMIT` is appended — resume must continue from the run-log; and (2) `phase.detectOutcome` (engine.mjs:81), which fires *after* a phase's side effect but *before* its commit — the phase must re-run idempotently. The committed `bin/tests/engine-crash.test.mjs` injects at both points (via a fake `io.gh`/`io.git` that throws once), relaunches `runIssue` like a supervisor, and asserts `launches >= 2` so the crash provably fired.
 
 - [ ] **Step 2: Run the test to verify it fails (if it does), then reconcile**
 
 Run: `node --test bin/tests/engine-crash.test.mjs`
-Expected initially: may FAIL if in-run retry masks the simulated crash. If so, add `maxAttempts: 1` to the `runIssue` calls inside the `for` loop and re-run. Expected after: PASS.
+Expected: 9/9 PASS — 8 mirror-crash points (initial state write + 6 phase commits + terminate) plus 1 mid-phase build crash, each asserting `launches >= 2` so resume is provably exercised (see the CORRECTION note below for why the crash is injected at the mirror/detectOutcome, not the runner).
 
 - [ ] **Step 3: Commit**
 
