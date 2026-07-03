@@ -834,7 +834,7 @@ const REVIEW_FIELDS = [
  */
 export async function annotatedReviewScreen(
   draft,
-  { hasExistingConfig = false, existingContent = "", showSources = false } = {},
+  { hasExistingConfig = false, existingContent = "", showSources = false, extraFields = {} } = {},
 ) {
   // Helper — pull a field from the draft by path, or return a low-confidence placeholder.
   function getField(draftPath) {
@@ -859,7 +859,10 @@ export async function annotatedReviewScreen(
   const whys = {};
 
   for (const fd of REVIEW_FIELDS) {
-    const field = getField(fd.draftPath);
+    const field =
+      fd.draftPath === null && extraFields[fd.key]
+        ? extraFields[fd.key]
+        : getField(fd.draftPath);
     values[fd.key] = field.value;
     confidences[fd.key] = field.confidence;
     sources[fd.key] = field.source;
@@ -984,7 +987,7 @@ export async function annotatedReviewScreen(
     }
 
     process.stdout.write(
-      `  ${dim("Press")} ${bold("Enter")} ${dim("to accept all values, or enter a field number to edit it.")}\n\n`,
+      `  ${dim("Press")} ${bold("Enter")} ${dim("to forge, or a number to edit a field")}\n\n`,
     );
   }
 
