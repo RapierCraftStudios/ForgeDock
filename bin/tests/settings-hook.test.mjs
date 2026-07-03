@@ -4,7 +4,7 @@
  */
 import { describe, it, beforeEach } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, readFileSync, writeFileSync, existsSync } from "node:fs";
+import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import os from "node:os";
 import { installSessionStartHook, removeSessionStartHook } from "../settings-hook.mjs";
@@ -81,5 +81,38 @@ describe("removeSessionStartHook", () => {
     assert.equal(removeSessionStartHook(settingsPath).status, "absent");
     writeFileSync(settingsPath, JSON.stringify({ hooks: {} }), "utf-8");
     assert.equal(removeSessionStartHook(settingsPath).status, "absent");
+  });
+});
+
+describe("installSessionStartHook — malformed hooks shapes", () => {
+  it("hooks as array → skipped-malformed, file untouched", () => {
+    writeFileSync(settingsPath, JSON.stringify({ hooks: [] }), "utf-8");
+    const before = readFileSync(settingsPath, "utf-8");
+    const res = installSessionStartHook(settingsPath, HOOK_SCRIPT);
+    assert.equal(res.status, "skipped-malformed");
+    assert.equal(readFileSync(settingsPath, "utf-8"), before);
+  });
+
+  it("hooks as string → skipped-malformed, file untouched", () => {
+    writeFileSync(settingsPath, JSON.stringify({ hooks: "custom" }), "utf-8");
+    const before = readFileSync(settingsPath, "utf-8");
+    const res = installSessionStartHook(settingsPath, HOOK_SCRIPT);
+    assert.equal(res.status, "skipped-malformed");
+    assert.equal(readFileSync(settingsPath, "utf-8"), before);
+  });
+
+  it("SessionStart as non-array → skipped-malformed, file untouched", () => {
+    writeFileSync(settingsPath, JSON.stringify({ hooks: { SessionStart: "oops" } }), "utf-8");
+    const before = readFileSync(settingsPath, "utf-8");
+    const res = installSessionStartHook(settingsPath, HOOK_SCRIPT);
+    assert.equal(res.status, "skipped-malformed");
+    assert.equal(readFileSync(settingsPath, "utf-8"), before);
+  });
+});
+
+describe("removeSessionStartHook — malformed hooks shapes", () => {
+  it("remove with non-array SessionStart → skipped-malformed", () => {
+    writeFileSync(settingsPath, JSON.stringify({ hooks: { SessionStart: 42 } }), "utf-8");
+    assert.equal(removeSessionStartHook(settingsPath).status, "skipped-malformed");
   });
 });

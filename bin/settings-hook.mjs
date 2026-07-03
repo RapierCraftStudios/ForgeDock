@@ -48,7 +48,20 @@ export function installSessionStartHook(settingsPath, hookScriptPath) {
   if (read === null) return { status: "skipped-malformed" };
   const { settings } = read;
 
-  settings.hooks = settings.hooks && typeof settings.hooks === "object" ? settings.hooks : {};
+  // Validate hooks shape: must be a plain object (not array, string, etc.)
+  if (settings.hooks !== undefined && settings.hooks !== null) {
+    if (Array.isArray(settings.hooks) || typeof settings.hooks !== "object") {
+      return { status: "skipped-malformed" };
+    }
+    // Validate SessionStart if present: must be an array
+    if (settings.hooks.SessionStart !== undefined && !Array.isArray(settings.hooks.SessionStart)) {
+      return { status: "skipped-malformed" };
+    }
+  } else {
+    // hooks missing or null → initialize to fresh object
+    settings.hooks = {};
+  }
+
   const list = Array.isArray(settings.hooks.SessionStart) ? settings.hooks.SessionStart : [];
   if (list.some(isOurs)) return { status: "already" };
 
@@ -74,6 +87,11 @@ export function removeSessionStartHook(settingsPath) {
   if (read === null) return { status: "skipped-malformed" };
   const { settings, fresh } = read;
   if (fresh) return { status: "absent" };
+
+  // Validate SessionStart shape if present: must be an array
+  if (settings.hooks && settings.hooks.SessionStart !== undefined && !Array.isArray(settings.hooks.SessionStart)) {
+    return { status: "skipped-malformed" };
+  }
 
   const list = settings.hooks && Array.isArray(settings.hooks.SessionStart)
     ? settings.hooks.SessionStart
