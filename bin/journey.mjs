@@ -198,6 +198,7 @@ export function makeCtx(overrides = {}) {
   const stdout = overrides.stdout ?? process.stdout;
   const argv = overrides.argv ?? process.argv.slice(2);
   const nodeVersion = overrides.nodeVersion ?? process.versions.node;
+  const enrichFn = overrides.enrichFn ?? enrich;
   return {
     cwd: process.cwd(),
     home: env.HOME || env.USERPROFILE || os.homedir(),
@@ -209,6 +210,7 @@ export function makeCtx(overrides = {}) {
     motion: motionEnabled(argv, env, stdout),
     nodeVersion,
     linkStrategy: "symlink",
+    enrichFn,
     exec: (cmd, args) =>
       execFileSync(cmd, args, {
         encoding: "utf-8",
@@ -532,7 +534,7 @@ export async function read(ctx) {
   const { stdout: w } = ctx;
   w.write("\n  " + ember("Reading your repository", ctx.mode) + "\n\n");
 
-  const draft = await detectConfig(ctx.cwd);
+  let draft = await detectConfig(ctx.cwd);
   const description = detectDescription(ctx.cwd);
 
   const rows = [
@@ -552,7 +554,8 @@ export async function read(ctx) {
   if (ctx.env.ANTHROPIC_API_KEY) {
     try {
       w.write("  " + dimLine(ctx, "✦ enriching with AI…") + "\n");
-      await enrich(draft);
+      const enriched = await ctx.enrichFn(draft);
+      if (enriched && typeof enriched === "object") draft = enriched;
     } catch {
       w.write("  " + dimLine(ctx, "✦ AI enrichment unavailable — continuing with detection only") + "\n");
     }

@@ -7,7 +7,7 @@ import assert from "node:assert/strict";
 import { mkdtempSync, readFileSync, writeFileSync, existsSync, mkdirSync } from "node:fs";
 import { join } from "node:path";
 import os from "node:os";
-import { writeForgeYaml, backupExisting, detectDescription, makeCtx, preflight } from "../journey.mjs";
+import { writeForgeYaml, backupExisting, detectDescription, makeCtx, preflight, forge, read, review, celebrate, runJourney } from "../journey.mjs";
 
 const VALUES = {
   owner: "RapierCraftStudios",
@@ -213,7 +213,6 @@ describe("preflight", () => {
 // Task 6: forge & findMarkdownFiles tests
 // ---------------------------------------------------------------------------
 
-import { forge } from "../journey.mjs";
 import { lstatSync, mkdirSync as mkdirSyncFs, symlinkSync } from "node:fs";
 
 /**
@@ -395,8 +394,6 @@ describe("forge (Act II)", () => {
 // Task 8: read, review, celebrate, & runJourney tests
 // ---------------------------------------------------------------------------
 
-import { read, review, celebrate } from "../journey.mjs";
-
 describe("read (Act III)", () => {
   it("returns a draft + description without a git repo (placeholders, low confidence)", async () => {
     const cwd = mkdtempSync(join(os.tmpdir(), "fd-read-"));
@@ -406,6 +403,54 @@ describe("read (Act III)", () => {
     assert.equal(res.draft.project.owner.value, "your-github-org");
     assert.equal(res.description.value, "A test project.");
     assert.match(w.text, /\[low\]/); // badge rendered for placeholder
+  });
+
+  it("enrichFn is called when ANTHROPIC_API_KEY is set and returns enriched draft", async () => {
+    const cwd = mkdtempSync(join(os.tmpdir(), "fd-read-enrich-"));
+    const original = await read(stubCtx({ cwd }).ctx);
+    const { ctx, w } = stubCtx({
+      cwd,
+      env: { ANTHROPIC_API_KEY: "test-key" },
+      enrichFn: (draft) => {
+        // Return a structuredClone with the name enriched
+        const enriched = structuredClone(draft);
+        enriched.project.name.value = "ENRICHED";
+        return enriched;
+      },
+    });
+    const res = await read(ctx);
+    assert.equal(res.draft.project.name.value, "ENRICHED");
+    assert.match(w.text, /enriching with AI/);
+  });
+
+  it("enrichFn throws: draft stays original, error message written", async () => {
+    const cwd = mkdtempSync(join(os.tmpdir(), "fd-read-enrich-fail-"));
+    const { ctx, w } = stubCtx({
+      cwd,
+      env: { ANTHROPIC_API_KEY: "test-key" },
+      enrichFn: () => {
+        throw new Error("API failed");
+      },
+    });
+    const res = await read(ctx);
+    assert.equal(res.draft.project.owner.value, "your-github-org"); // unchanged
+    assert.match(w.text, /unavailable/);
+  });
+
+  it("no ANTHROPIC_API_KEY: enrichFn is never called", async () => {
+    const cwd = mkdtempSync(join(os.tmpdir(), "fd-read-no-key-"));
+    let enrichFnCalled = false;
+    const { ctx, w } = stubCtx({
+      cwd,
+      env: {},
+      enrichFn: () => {
+        enrichFnCalled = true;
+        return null;
+      },
+    });
+    const res = await read(ctx);
+    assert.equal(enrichFnCalled, false);
+    assert.match(w.text, /no ANTHROPIC_API_KEY/);
   });
 });
 
@@ -443,5 +488,102 @@ describe("celebrate (Act V)", () => {
     assert.match(w.text, /34s|3[0-9]s/);
     assert.match(w.text, /work-on next/);
     assert.match(w.text, /2/); // TODO count surfaces in the receipt
+  });
+
+  it("when hookStatus is skipped-malformed, mentions hook skipped", () => {
+    const { ctx, w } = stubCtx({});
+    celebrate(ctx, { written: true, todoCount: 0, total: 5, hookStatus: "skipped-malformed" });
+    assert.match(w.text, /hook skipped|NOT active/);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Task 8: runJourney contract tests
+// ---------------------------------------------------------------------------
+
+describe("runJourney", () => {
+  it("fresh cwd: resolves exit code 0 and forge.yaml exists", async () => {
+    const cwd = mkdtempSync(join(os.tmpdir(), "fd-journey-"));
+    const forgeHome = mkdtempSync(join(os.tmpdir(), "fd-forge-journey-"));
+    mkdirSyncFs(join(forgeHome, "commands"), { recursive: true });
+    mkdirSyncFs(join(forgeHome, "bin", "hooks"), { recursive: true });
+    writeFileSync(join(forgeHome, "commands", "one.md"), "# /one\n\nTest command\n", "utf-8");
+    writeFileSync(join(forgeHome, "bin", "hooks", "session-start.mjs"), "// stub\n", "utf-8");
+
+    const initialListenerCount = process.listenerCount("SIGINT");
+    const ctx = makeCtx({
+      cwd,
+      forgeHome,
+      home: mkdtempSync(join(os.tmpdir(), "fd-home-journey-")),
+      env: {},
+      stdout: fakeWriter(),
+      mode: "none",
+      motion: false,
+      linkStrategy: "copy",
+    });
+    const exitCode = await runJourney(ctx);
+    const finalListenerCount = process.listenerCount("SIGINT");
+
+    assert.equal(exitCode, 0);
+    assert.ok(existsSync(join(cwd, "forge.yaml")));
+    assert.equal(initialListenerCount, finalListenerCount);
+  });
+
+  it("pre-existing forge.yaml: resolves exit code 1, file byte-identical", async () => {
+    const cwd = mkdtempSync(join(os.tmpdir(), "fd-journey2-"));
+    const forgeHome = mkdtempSync(join(os.tmpdir(), "fd-forge-journey2-"));
+    mkdirSyncFs(join(forgeHome, "commands"), { recursive: true });
+    mkdirSyncFs(join(forgeHome, "bin", "hooks"), { recursive: true });
+    writeFileSync(join(forgeHome, "commands", "one.md"), "# /one\n\nTest command\n", "utf-8");
+    writeFileSync(join(forgeHome, "bin", "hooks", "session-start.mjs"), "// stub\n", "utf-8");
+
+    const preContent = "precious: config\n";
+    writeFileSync(join(cwd, "forge.yaml"), preContent, "utf-8");
+
+    const ctx = makeCtx({
+      cwd,
+      forgeHome,
+      home: mkdtempSync(join(os.tmpdir(), "fd-home-journey2-")),
+      env: {},
+      stdout: fakeWriter(),
+      mode: "none",
+      motion: false,
+      linkStrategy: "copy",
+    });
+    const exitCode = await runJourney(ctx);
+    const postContent = readFileSync(join(cwd, "forge.yaml"), "utf-8");
+
+    assert.equal(exitCode, 1);
+    assert.equal(postContent, preContent);
+  });
+
+  it("SIGINT listener is cleaned up after journey (or error)", async () => {
+    const cwd = mkdtempSync(join(os.tmpdir(), "fd-journey3-"));
+    const forgeHome = mkdtempSync(join(os.tmpdir(), "fd-forge-journey3-"));
+    mkdirSyncFs(join(forgeHome, "commands"), { recursive: true });
+    mkdirSyncFs(join(forgeHome, "bin", "hooks"), { recursive: true });
+    writeFileSync(join(forgeHome, "commands", "one.md"), "# /one\n\nTest\n", "utf-8");
+    writeFileSync(join(forgeHome, "bin", "hooks", "session-start.mjs"), "// stub\n", "utf-8");
+
+    const initialCount = process.listenerCount("SIGINT");
+    const ctx = makeCtx({
+      cwd,
+      forgeHome,
+      home: mkdtempSync(join(os.tmpdir(), "fd-home-journey3-")),
+      env: {},
+      stdout: fakeWriter(),
+      mode: "none",
+      motion: false,
+      linkStrategy: "copy",
+    });
+
+    try {
+      await runJourney(ctx);
+    } catch {
+      // Tolerate any errors; we care about listener cleanup.
+    }
+
+    const finalCount = process.listenerCount("SIGINT");
+    assert.equal(initialCount, finalCount);
   });
 });
