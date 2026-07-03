@@ -1,7 +1,7 @@
 # Durable Execution Engine — Design Spec
 
 **Date:** 2026-07-03
-**Status:** Approved design, ready for implementation planning
+**Status:** Implemented (headless engine core) on branch feat/durable-execution-engine — see docs/superpowers/plans/2026-07-03-durable-execution-engine.md
 **Tracking:** #1256 (keystone), epic #1320 (five foundations of autonomy)
 **Scope of this spec:** the durable engine **core** only — phase state machine, run-log, resume, and orchestrator integration for **headless / orchestrated** runs. Verification, learning, economics, and provenance (#1315–#1319) are separate specs that build on this substrate.
 
