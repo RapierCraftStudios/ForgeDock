@@ -783,7 +783,7 @@ If 0 findings:
 ```
 QUALITY GATE: PASS — no issues detected.
 
-<!-- FORGE:PHASE_COMPLETE — Quality gate is an intermediate check. See work-on.md Universal Phase Dispatcher for next phase. Not terminal — calling agent must continue. -->
+**YOU MUST NOW continue to sub-phase 3H (Format and verify) in work-on.md — this PASS is intermediate, NOT terminal. Do NOT stop.**
 ```
 
 If findings exist:
@@ -791,5 +791,5 @@ If findings exist:
 QUALITY GATE FINDINGS: N issues detected.
 {findings list}
 
-<!-- FORGE:PHASE_COMPLETE — Quality gate is an intermediate check. See work-on.md Universal Phase Dispatcher for next phase. Not terminal — calling agent must continue. -->
+**YOU MUST NOW fix each HIGH and MEDIUM finding, then re-run the quality gate — this result is intermediate, NOT terminal. Do NOT stop.**
 ```

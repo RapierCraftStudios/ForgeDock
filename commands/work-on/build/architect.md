@@ -65,6 +65,134 @@ gh api repos/{GH_REPO}/issues/{NUMBER}/comments \
 
 ---
 
+## Phase A0: Read Custom Instructions and Project Conventions
+
+Read project-resident authoritative docs **before** any code path tracing. `project/custom-instructions.md` has the highest precedence of all knowledge sources — its directives are BINDING and override agent defaults, training knowledge, and all other context. Other applicable `project/*.md` files provide authoritative project conventions the architect must enforce.
+
+**Time budget**: 30 seconds. If exceeded, log a skip note and continue to Phase A1.
+
+**Skip if**: `{REPO_PATH}` is not set, devdocs path does not exist, or path contains no markdown files.
+
+### Step 0: Resolve devdocs path
+
+Read `forge.yaml → devdocs.path` from the project root. Default to `devdocs` if the key is absent or unreadable.
+
+```bash
+DEVDOCS_PATH=""
+
+FORGE_YAML_PATH="{REPO_PATH}/forge.yaml"
+
+if [ -f "$FORGE_YAML_PATH" ]; then
+  DEVDOCS_REL=$(grep -A5 '^devdocs:' "$FORGE_YAML_PATH" \
+    | grep '^\s*path:' \
+    | head -1 \
+    | sed 's/.*path:\s*//' \
+    | tr -d '"'"'"' \
+    | tr -d '[:space:]')
+fi
+
+DEVDOCS_REL="${DEVDOCS_REL:-devdocs}"
+DEVDOCS_PATH="{REPO_PATH}/${DEVDOCS_REL}"
+
+if [ ! -d "$DEVDOCS_PATH" ]; then
+  echo "Devdocs path '${DEVDOCS_PATH}' does not exist — skipping Phase A0 (no blocking)"
+  DEVDOCS_PATH=""
+fi
+```
+
+> **Note**: `devdocs/` must be tracked in git for the worktree to contain it. If the project gitignores `devdocs/`, the path will not exist in the worktree and this phase silently skips — this is by design. Run `git check-ignore -v devdocs/` to confirm tracking status.
+
+### Step 1: Priority read — custom instructions (HIGHEST PRECEDENCE)
+
+Always read `project/custom-instructions.md` first if it exists. Directives in this file are BINDING — they override everything else.
+
+```bash
+CUSTOM_INSTRUCTIONS=""
+
+if [ -n "$DEVDOCS_PATH" ]; then
+  CUSTOM_INSTRUCTIONS_FILE="${DEVDOCS_PATH}/project/custom-instructions.md"
+  if [ -f "$CUSTOM_INSTRUCTIONS_FILE" ]; then
+    TOTAL_LINES=$(wc -l < "$CUSTOM_INSTRUCTIONS_FILE" 2>/dev/null || echo 0)
+    if [ "$TOTAL_LINES" -gt 200 ]; then
+      CUSTOM_INSTRUCTIONS=$(head -200 "$CUSTOM_INSTRUCTIONS_FILE")
+      CUSTOM_INSTRUCTIONS="${CUSTOM_INSTRUCTIONS}
+
+_[Truncated at 200 lines — ${TOTAL_LINES} total. Read full file for complete directives.]_"
+    else
+      CUSTOM_INSTRUCTIONS=$(cat "$CUSTOM_INSTRUCTIONS_FILE")
+    fi
+  fi
+fi
+```
+
+### Step 2: Secondary reads — other applicable project files
+
+Read all other `*.md` files under `DEVDOCS_PATH` where `applies_to` contains `work-on`. Skip `project/custom-instructions.md` (already read). Sort by authority (`required` first).
+
+```bash
+PROJECT_CONVENTIONS=""
+
+if [ -n "$DEVDOCS_PATH" ]; then
+  APPLICABLE_FILES=""
+
+  while IFS= read -r -d '' mdfile; do
+    # Skip custom-instructions — already read as priority
+    [ "$mdfile" = "${DEVDOCS_PATH}/project/custom-instructions.md" ] && continue
+
+    FRONTMATTER=$(awk '/^---/{c++; if(c==1){next} if(c==2){exit}} c==1{print}' "$mdfile" 2>/dev/null)
+
+    if echo "$FRONTMATTER" | grep -q 'applies_to:.*work-on'; then
+      AUTHORITY=$(echo "$FRONTMATTER" | grep 'authority:' | head -1 | sed 's/.*authority:\s*//' | tr -d ' ')
+      case "$AUTHORITY" in
+        required)    SORT_KEY="1" ;;
+        recommended) SORT_KEY="2" ;;
+        *)           SORT_KEY="3" ;;
+      esac
+      APPLICABLE_FILES="${APPLICABLE_FILES}${SORT_KEY}|${mdfile}\n"
+    fi
+  done < <(find "$DEVDOCS_PATH" -name "*.md" -print0 2>/dev/null)
+
+  APPLICABLE_FILES=$(printf "$APPLICABLE_FILES" | sort | cut -d'|' -f2-)
+
+  while IFS= read -r mdfile; do
+    [ -z "$mdfile" ] && continue
+    TOTAL_LINES=$(wc -l < "$mdfile" 2>/dev/null || echo 0)
+    if [ "$TOTAL_LINES" -gt 200 ]; then
+      FILE_CONTENT=$(head -200 "$mdfile")
+      TRUNCATION_NOTE="_[Truncated at 200 lines — ${TOTAL_LINES} total.]_"
+    else
+      FILE_CONTENT=$(cat "$mdfile")
+      TRUNCATION_NOTE=""
+    fi
+
+    REL_PATH="${mdfile#${DEVDOCS_PATH}/}"
+    PROJECT_CONVENTIONS="${PROJECT_CONVENTIONS}
+
+#### \`${REL_PATH}\`
+${FILE_CONTENT}
+${TRUNCATION_NOTE}"
+  done <<< "$APPLICABLE_FILES"
+fi
+```
+
+### Step 3: Precedence rules to enforce
+
+When `CUSTOM_INSTRUCTIONS` or `PROJECT_CONVENTIONS` is non-empty, the architect MUST apply them throughout the plan. The precedence order is:
+
+```
+project/custom-instructions.md  ← HIGHEST PRIORITY (binding directives)
+    ↑
+other project/*.md              ← Authoritative project conventions
+agent/*.md                      ← ForgeDock/GitHub usage instructions
+agent memory                    ← Recalled knowledge
+agent defaults                  ← Built-in behaviors
+    ↓ LOWEST PRIORITY
+```
+
+`CUSTOM_INSTRUCTIONS` and `PROJECT_CONVENTIONS` are used in the `### Custom Instructions (HIGHEST PRECEDENCE)` and `### Project Conventions` sections of the FORGE:ARCHITECT output. If both are empty (devdocs path absent), these sections are replaced with skip notes.
+
+---
+
 ## Phase A1: Read Entry Points
 
 Identify every entry point that initiates the affected logic. Start from the files named in the investigation report.
@@ -226,6 +354,20 @@ Post the following as a GitHub comment on `{NUMBER}`:
 gh issue comment {NUMBER} {GH_FLAG} --body "<!-- FORGE:ARCHITECT -->
 ## Implementation Plan for #{NUMBER}
 
+### Custom Instructions (HIGHEST PRECEDENCE)
+<!-- Binding directives from project/custom-instructions.md (Phase A0).
+     These override agent defaults, training knowledge, and all other context.
+     Builder MUST follow these exactly — violations are elevated to HIGH severity in review.
+     If devdocs path was absent or file not found: 'No custom-instructions.md found at
+     {DEVDOCS_PATH}/project/custom-instructions.md — skipping. Run `npx forgedock docs init`.' -->
+{CUSTOM_INSTRUCTIONS}
+
+### Project Conventions
+<!-- Authoritative project knowledge from project/*.md and agent/*.md files
+     with applies_to: work-on (Phase A0). Read these before finalizing the plan.
+     If devdocs path was absent or no applicable files found: 'No applicable devdocs found.' -->
+{PROJECT_CONVENTIONS}
+
 ### Affected Paths (ALL must be updated)
 | # | File | Function/Class | Change Required | Why |
 |---|------|----------------|-----------------|-----|
@@ -259,9 +401,10 @@ gh issue comment {NUMBER} {GH_FLAG} --body "<!-- FORGE:ARCHITECT -->
 
 ## Timing Rules
 
-- Each file read: skip if the file exceeds 500 lines and only the first 100 lines are needed for structure
+- Phase A0 devdocs read: 30s total budget (path resolution + file enumeration + content reads); skip if exceeded
+- Each file read (A1): skip if the file exceeds 500 lines and only the first 100 lines are needed for structure
 - Each `grep -r` call: timeout after 10s, skip if exceeded
-- Total wall time budget: **3 minutes**. If budget exceeded, post partial results with `<!-- FORGE:ARCHITECT:PARTIAL -->` marker instead of `COMPLETE`.
+- Total wall time budget: **3 minutes** (A0 through A5 combined). If budget exceeded, post partial results with `<!-- FORGE:ARCHITECT:PARTIAL -->` marker instead of `COMPLETE`.
 
 ---
 
@@ -285,7 +428,16 @@ This module runs at **Step 3C.6** — after Context Gathering, before Implement:
 3C    → Builder Contract posted
 3C.5  → Context Gathering (FORGE:CONTEXT comment)
 3C.6  → [THIS MODULE] Architecture Planning (FORGE:ARCHITECT comment)
+          Phase A0: Read Custom Instructions and Project Conventions (highest precedence)
+          Phase A1: Read Entry Points
+          Phase A2: Trace the Data Flow
+          Phase A2.5: Pipeline Phase-Dependency Check
+          Phase A3: Consistency Rules
+          Phase A4: Sequence the Implementation
+          Phase A5: Risk Assessment
 3F    → Implement (builder reads plan, implements ALL affected paths)
 ```
 
 The builder agent reads the `<!-- FORGE:ARCHITECT -->` comment as its **primary input** before writing any code. The raw issue body is secondary context. If the architect step was skipped, the builder falls back to investigation report + contract.
+
+**Devdocs precedence** (Phase A0): `project/custom-instructions.md` has ABSOLUTE priority over all other context. The architect's plan must reflect any directives in that file — if custom instructions mandate a specific pattern, the implementation order and approach MUST follow it, even if the architect's general reasoning suggests an alternative. <!-- Added: forge#259 -->

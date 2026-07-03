@@ -19,19 +19,29 @@ Read `forge.yaml` at the project root to resolve all project-specific variables 
 
 ```bash
 # Parse forge.yaml for project context
-GH_REPO=$(yq '.project.owner + "/" + .project.repo' forge.yaml)
+CONFIG_FILE="${FORGE_CONFIG:-forge.yaml}"
+GH_REPO=$(yq '.project.owner + "/" + .project.repo' "$CONFIG_FILE")
 GH_FLAG="-R $GH_REPO"
-REPO_PATH=$(yq '.paths.root' forge.yaml)
-PROJECT_NAME=$(yq '.project.name' forge.yaml)
-STAGING_BRANCH=$(yq '.branches.staging' forge.yaml)
-PROJECT_BOARD_OWNER=$(yq '.project_board.owner // .project.owner' forge.yaml)
-PROJECT_NUMBER=$(yq '.project_board.project_number // "1"' forge.yaml)
-PROJECT_ID=$(yq '.project_board.project_id' forge.yaml)
+REPO_PATH=$(yq '.paths.root' "$CONFIG_FILE")
+PROJECT_NAME=$(yq '.project.name' "$CONFIG_FILE")
+STAGING_BRANCH=$(yq '.branches.staging' "$CONFIG_FILE")
+DEFAULT_BRANCH=$(yq '.branches.default' "$CONFIG_FILE")
+PROJECT_BOARD_OWNER=$(yq '.project_board.owner // .project.owner' "$CONFIG_FILE")
+PROJECT_NUMBER=$(yq '.project_board.project_number // empty' "$CONFIG_FILE" 2>/dev/null || echo "")
+PROJECT_ID=$(yq '.project_board.project_id // empty' "$CONFIG_FILE" 2>/dev/null || echo "")
+# Project board field and option IDs — empty string when project_board section is absent
+STATUS_FIELD_ID=$(yq '.project_board.field_ids.status // ""' "$CONFIG_FILE" 2>/dev/null || echo "")
+LANE_FIELD_ID=$(yq '.project_board.field_ids.lane // ""' "$CONFIG_FILE" 2>/dev/null || echo "")
+COMPONENT_FIELD_ID=$(yq '.project_board.field_ids.component // ""' "$CONFIG_FILE" 2>/dev/null || echo "")
+PRIORITY_FIELD_ID=$(yq '.project_board.field_ids.priority // ""' "$CONFIG_FILE" 2>/dev/null || echo "")
+STATUS_TODO_OPTION_ID=$(yq '.project_board.option_ids.status.todo // ""' "$CONFIG_FILE" 2>/dev/null || echo "")
+LANE_FEATURE_OPTION_ID=$(yq '.project_board.option_ids.lane.feature // ""' "$CONFIG_FILE" 2>/dev/null || echo "")
+PRIORITY_OPTION_ID=""  # Resolved per-issue from the issue's priority label — see Step 6B
 # Build satellite repo map from repos.satellites list
 # Each satellite: { prefix, repo, staging_branch }
 ```
 
-All `{GH_REPO}`, `{GH_FLAG}`, `{REPO_PATH}`, `{PROJECT_NAME}`, `{STAGING_BRANCH}`, `{PROJECT_BOARD_OWNER}`, `{PROJECT_NUMBER}`, and `{PROJECT_ID}` references below are populated from `forge.yaml`.
+All `{GH_REPO}`, `{GH_FLAG}`, `{REPO_PATH}`, `{PROJECT_NAME}`, `{STAGING_BRANCH}`, `{DEFAULT_BRANCH}`, `{PROJECT_BOARD_OWNER}`, `{PROJECT_NUMBER}`, `{PROJECT_ID}`, `{STATUS_FIELD_ID}`, `{LANE_FIELD_ID}`, `{COMPONENT_FIELD_ID}`, `{PRIORITY_FIELD_ID}`, `{STATUS_TODO_OPTION_ID}`, and `{LANE_FEATURE_OPTION_ID}` references below are populated from `forge.yaml`.
 
 ---
 
@@ -100,40 +110,45 @@ Capture the milestone number from the response.
 
 ```bash
 cd {REPO_PATH}
-git fetch origin main
-git branch milestone/{slug} origin/main
+git fetch origin $DEFAULT_BRANCH
+git branch milestone/{slug} origin/$DEFAULT_BRANCH
 git push origin milestone/{slug}
 ```
 
 ### Step 4: Scope decomposition
 
-Use a Task sub-agent to analyze the milestone scope and propose issues:
+**Investigation-gated decomposition** — do NOT skip code reads. The single-pass shallow-planning approach (one agent, whole milestone, no per-issue code reads) produces under-specified issues that ship incomplete. This step mandates per-proposed-issue investigation before any issue body is written. See `work-on/decompose.md` Phase D0 for the reference pattern that enforces this gate. <!-- Added: forge#293 -->
 
-> You are planning the scope for milestone "{TITLE}" on the {PROJECT_NAME} platform.
->
-> **Milestone description**: {DESCRIPTION}
->
-> **Your job**: Break this milestone into concrete, implementable GitHub issues. Each issue should be:
-> - Independently shippable (produces a working PR on its own)
-> - Specific enough for the `/work-on` pipeline to pick up and implement
-> - Ordered by dependencies (if B needs A's API, A comes first)
->
-> **Project ecosystem context** (from `forge.yaml`):
-> - **Primary repo** (`{GH_REPO}`): The main project codebase at `{REPO_PATH}`
-> - **Tech stack**: {review.tech_stack from forge.yaml, or read CLAUDE.md for project context}
-> - **Satellite repos**: Read from `forge.yaml → repos.satellites` (each has a prefix and repo)
->
-> Check the existing codebase at `{REPO_PATH}` to understand current architecture before proposing changes.
->
-> **Output format**: Numbered list of proposed issues, each with:
-> - **Title**: Actionable, specific
-> - **Repo**: Which repo this issue belongs to (default or satellite prefix from forge.yaml)
-> - **Type**: `feature`, `bug`, `refactor`, `infra`
-> - **Priority**: P1-P3
-> - **Size**: S (1-2 files), M (3-5 files), L (6+ files)
-> - **Dependencies**: Which other issues must be done first (by number)
-> - **Scope**: Key files/modules affected
-> - **Acceptance criteria**: 2-3 testable requirements
+**4A: First pass — enumerate proposed issues (no code reads yet)**
+
+Analyze the milestone description and produce a preliminary list of proposed issues. At this stage, only the title, type, and rough dependency order are needed. Do NOT write issue bodies yet.
+
+**4B: Per-issue investigation (MANDATORY before writing any issue body)**
+
+For each proposed issue in the preliminary list, MUST read the actual code before writing the issue body:
+
+1. **Identify affected files**: Read the files the issue will touch. Start with the files named in the milestone description, then expand to callers and related modules.
+2. **Enumerate all call sites**: For coverage/refactor tasks, grep for every occurrence of the pattern being changed. Do NOT estimate — enumerate. Example: `grep -rn 'poetry run\|npx ' commands/ --include='*.md' | wc -l` to count call sites before writing a "make X config-driven" issue.
+3. **Write exhaustive acceptance criteria**: For coverage/refactor tasks, acceptance criteria MUST be falsifiable. A `grep`/absence assertion qualifies (e.g., `` `grep -rn 'hardcoded_value' commands/` returns no matches ``). The number of criteria must match the scope — there is no cap. Two criteria for a 14-call-site refactor is not acceptable.
+4. **Identify override/companion files**: If a file needs a change, its companion files (config overrides, prod variants, sibling modules) almost certainly do too. List all of them.
+
+**4C: Output format — per-issue, after code read**
+
+For each proposed issue, after completing the per-issue investigation in Step 4B:
+
+- **Title**: Actionable, specific (conventional commit prefix: `fix:`, `feat:`, `refactor:`)
+- **Repo**: Which repo this issue belongs to (default or satellite prefix from forge.yaml)
+- **Type**: `feature`, `bug`, `refactor`, `infra`
+- **Priority**: P1-P3
+- **Size**: S (1-2 files), M (3-5 files), L (6+ files)
+- **Dependencies**: Which other issues must be done first (by number)
+- **Affected files**: Full list of files enumerated during the Step 4B code read (not estimated)
+- **Acceptance criteria**: Exhaustive and falsifiable. For coverage/refactor tasks: one criterion per affected call site or pattern, written as a grep/absence assertion. No cap on criteria count — the list must be complete enough that a reviewer can verify coverage without reading the implementation.
+
+**Project ecosystem context** (from `forge.yaml`):
+- **Primary repo** (`{GH_REPO}`): The main project codebase at `{REPO_PATH}`
+- **Tech stack**: {review.tech_stack from forge.yaml, or read CLAUDE.md for project context}
+- **Satellite repos**: Read from `forge.yaml → repos.satellites` (each has a prefix and repo)
 
 ### Step 5: Review with user
 
@@ -143,10 +158,14 @@ Present the proposed issues to the user. Ask:
 
 ### Step 6: Create issues and assign to milestone
 
+**Issue body standard**: Use the **Pipeline Issue Template** from `issue.md` Phase 3D as the body structure for every issue created here. Do NOT use a bespoke inline template — the Pipeline Issue Template is the single canonical standard for all automated issue creation across the pipeline. The body content (Problem, Root Cause, Affected Files, Acceptance Criteria, Context, Dependencies) comes from the per-issue investigation in Step 4B. <!-- Added: forge#293 -->
+
 For each approved issue, create it in the **correct repo** based on the scope analysis:
 
 ```bash
 # For default repo issues:
+# Body content derives from the Step 4B per-issue investigation.
+# Structure MUST match the Pipeline Issue Template in issue.md Phase 3D.
 gh issue create {GH_FLAG} \
   --title "{fix|feat|refactor}: {issue_title}" \
   --label "{type},{priority}" \
@@ -154,20 +173,21 @@ gh issue create {GH_FLAG} \
   --body "$(cat <<'BODY_EOF'
 ## Problem
 
-{1-3 sentences: what needs to be built or fixed for this milestone. What's missing or broken.}
+{1-3 sentences: what needs to be built or fixed for this milestone. Specific — derived from Step 4B code read, not milestone description alone.}
 
 ## Root Cause (if known)
 
-{Why this needs to change — architecture gap, missing feature, technical debt. If a new feature: "New capability required for {MILESTONE_TITLE}."}
+{Why this needs to change — architecture gap, missing feature, technical debt. Reference specific file:line where possible. If a new feature: "New capability required for {MILESTONE_TITLE}."}
 
 ## Affected Files
 
-Files that need changes:
+Files that need changes (full list from Step 4B code read — ordered by dependency):
 1. `{filepath}` — {what needs to change}
 2. `{filepath}` — {what needs to change}
 
 ## Acceptance Criteria
 
+{Exhaustive and falsifiable. For coverage/refactor tasks: one criterion per affected call site or pattern, written as a grep/absence assertion. No cap — list must be complete.}
 - [ ] {Specific, testable criterion}
 - [ ] {Specific, testable criterion}
 - [ ] No regression in {related feature}
@@ -185,6 +205,7 @@ BODY_EOF
 
 # For satellite repo issues (MCP, n8n) — create in the satellite repo:
 # Note: GitHub milestones are per-repo, so satellite issues reference the milestone by name only
+# Body structure MUST match the Pipeline Issue Template in issue.md Phase 3D.
 gh issue create -R {SATELLITE_REPO} \
   --title "{fix|feat|refactor}: {issue_title}" \
   --label "{type},{priority}" \
@@ -195,16 +216,17 @@ gh issue create -R {SATELLITE_REPO} \
 
 ## Root Cause (if known)
 
-{Why this needs to change. If a new feature: "New capability required for {MILESTONE_TITLE}."}
+{Why this needs to change. Reference specific file:line where possible. If a new feature: "New capability required for {MILESTONE_TITLE}."}
 
 ## Affected Files
 
-Files that need changes:
+Files that need changes (full list from Step 4B code read):
 1. `{filepath}` — {what needs to change}
 2. `{filepath}` — {what needs to change}
 
 ## Acceptance Criteria
 
+{Exhaustive and falsifiable. No cap — coverage/refactor tasks require one criterion per affected call site.}
 - [ ] {Specific, testable criterion}
 - [ ] {Specific, testable criterion}
 
@@ -222,19 +244,47 @@ BODY_EOF
 
 ### Step 6B: Add issues to Project board
 
-For each created issue, add it to the GitHub Project board with initial fields. Reference `forge.yaml → project_board` for field IDs, or `docs/CONFIG.md` → "Project Board" for lookup commands.
+**Skip if `project_board` is not configured** — check resolved vars before proceeding:
 
 ```bash
-for ISSUE_NUM in {created_issue_numbers}; do
-  ISSUE_URL="https://github.com/{GH_REPO}/issues/${ISSUE_NUM}"
-  ITEM_ID=$(gh project item-add {PROJECT_NUMBER} --owner {PROJECT_BOARD_OWNER} --url "$ISSUE_URL" --format json --jq '.id' 2>/dev/null)
-  if [ -n "$ITEM_ID" ]; then
-    gh project item-edit --project-id {PROJECT_ID} --id "$ITEM_ID" --field-id {PROJECT_BOARD_STATUS_FIELD_ID} --single-select-option-id {PROJECT_BOARD_STATUS_TODO_ID} 2>/dev/null || true  # Status=Todo
-    gh project item-edit --project-id {PROJECT_ID} --id "$ITEM_ID" --field-id {PROJECT_BOARD_LANE_FIELD_ID} --single-select-option-id {PROJECT_BOARD_LANE_FEATURE_ID} 2>/dev/null || true  # Lane=Feature
-    gh project item-edit --project-id {PROJECT_ID} --id "$ITEM_ID" --field-id {PROJECT_BOARD_COMPONENT_FIELD_ID} --single-select-option-id {COMPONENT_OPTION_ID} 2>/dev/null || true  # Component (from forge.yaml → project_board.fields)
-    gh project item-edit --project-id {PROJECT_ID} --id "$ITEM_ID" --field-id {PROJECT_BOARD_PRIORITY_FIELD_ID} --single-select-option-id {PRIORITY_OPTION_ID} 2>/dev/null || true  # Priority (from label)
-  fi
-done
+if [ -z "$PROJECT_BOARD_OWNER" ] || [ -z "$PROJECT_ID" ] || [ -z "$PROJECT_NUMBER" ]; then
+  echo "INFO: project_board not configured in forge.yaml — skipping board sync for created issues"
+else
+  # Resolve component option ID for this repo from forge.yaml → project_board.components
+  COMPONENT_OPTION_ID=$(yq '.project_board.components[] | select(.repo == "'"$GH_REPO"'") | .option_id' "$CONFIG_FILE" 2>/dev/null || echo "")
+
+  for ISSUE_NUM in {created_issue_numbers}; do
+    ISSUE_URL="https://github.com/$GH_REPO/issues/${ISSUE_NUM}"
+    ITEM_ID=$(gh project item-add "$PROJECT_NUMBER" --owner "$PROJECT_BOARD_OWNER" --url "$ISSUE_URL" --format json --jq '.id' 2>/dev/null)
+    if [ -n "$ITEM_ID" ]; then
+      # Resolve priority option ID from the issue's priority label
+      ISSUE_PRIORITY=$(gh issue view "$ISSUE_NUM" "$GH_FLAG" --json labels \
+        --jq '[.labels[].name | select(startswith("priority:"))] | .[0] | ltrimstr("priority:") | ascii_downcase' 2>/dev/null || echo "")
+      # Validate ISSUE_PRIORITY matches expected pattern before use as yq key path <!-- Added: forge#300 -->
+      PRIORITY_OPTION_ID=""
+      if [[ "$ISSUE_PRIORITY" =~ ^p[0-3]$ ]]; then
+        PRIORITY_OPTION_ID=$(yq '.project_board.option_ids.priority.'"$ISSUE_PRIORITY"' // ""' "$CONFIG_FILE" 2>/dev/null || echo "")
+      fi
+
+      if [ -n "$STATUS_FIELD_ID" ] && [ -n "$STATUS_TODO_OPTION_ID" ]; then
+        gh project item-edit --project-id "$PROJECT_ID" --id "$ITEM_ID" \
+          --field-id "$STATUS_FIELD_ID" --single-select-option-id "$STATUS_TODO_OPTION_ID" 2>/dev/null || true  # Status=Todo
+      fi
+      if [ -n "$LANE_FIELD_ID" ] && [ -n "$LANE_FEATURE_OPTION_ID" ]; then
+        gh project item-edit --project-id "$PROJECT_ID" --id "$ITEM_ID" \
+          --field-id "$LANE_FIELD_ID" --single-select-option-id "$LANE_FEATURE_OPTION_ID" 2>/dev/null || true  # Lane=Feature
+      fi
+      if [ -n "$COMPONENT_FIELD_ID" ] && [ -n "$COMPONENT_OPTION_ID" ]; then
+        gh project item-edit --project-id "$PROJECT_ID" --id "$ITEM_ID" \
+          --field-id "$COMPONENT_FIELD_ID" --single-select-option-id "$COMPONENT_OPTION_ID" 2>/dev/null || true  # Component (from forge.yaml → project_board.components)
+      fi
+      if [ -n "$PRIORITY_FIELD_ID" ] && [ -n "$PRIORITY_OPTION_ID" ]; then
+        gh project item-edit --project-id "$PROJECT_ID" --id "$ITEM_ID" \
+          --field-id "$PRIORITY_FIELD_ID" --single-select-option-id "$PRIORITY_OPTION_ID" 2>/dev/null || true  # Priority (from issue label)
+      fi
+    fi
+  done
+fi
 ```
 
 ### Step 7: Report
@@ -568,7 +618,7 @@ Syncs the milestone branch with the latest default branch to pick up fast-lane f
 
 ```bash
 cd {REPO_PATH}
-DEFAULT_BRANCH=$(yq '.branches.default' forge.yaml)
+DEFAULT_BRANCH=$(yq '.branches.default' "$CONFIG_FILE")
 git fetch origin $DEFAULT_BRANCH milestone/{slug}
 git checkout milestone/{slug}
 git merge origin/$DEFAULT_BRANCH --no-edit

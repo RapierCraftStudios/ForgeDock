@@ -88,31 +88,50 @@ Needs human review before proceeding to commit.
 
 ## Phase V2: Format and Verify
 
-Run after quality gate passes. Format checks are per-language:
+Run after quality gate passes. All tool commands are read from `forge.yaml → verification.commands`; each step logs `SKIPPED — not configured` when the corresponding key is absent rather than silently passing:
 
 **Python**:
 ```bash
 cd {WORKTREE_PATH}
-black {PYTHON_FILES}
-isort {PYTHON_FILES}
+
+PYTHON_FORMAT=$(yq '.verification.commands.python.format // ""' forge.yaml 2>/dev/null || echo '')
+if [ -n "$PYTHON_FORMAT" ]; then
+    eval "$PYTHON_FORMAT" 2>&1
+else
+    echo "SKIPPED — python.format not configured in verification.commands"
+fi
+
+# Compile check always runs for Python files (no config needed — catches syntax errors)
 python -m py_compile {PYTHON_FILES}
 ```
 Failures in `py_compile` are BLOCKING — fix before continuing.
 
-**TypeScript (tsc)**:
+**TypeScript**:
 ```bash
 cd {WORKTREE_PATH}
-prettier --write {TS_FILES}
-tsc --noEmit
-```
-`tsc --noEmit` failures are BLOCKING — fix type errors before continuing.
 
-**TypeScript (satellite repos — MCP, n8n)**:
-```bash
-cd {WORKTREE_PATH}
-npm run build
-prettier --write {TS_FILES}
+TS_FORMAT=$(yq '.verification.commands.typescript.format // ""' forge.yaml 2>/dev/null || echo '')
+TS_TYPECHECK=$(yq '.verification.commands.typescript.typecheck // ""' forge.yaml 2>/dev/null || echo '')
+TS_BUILD=$(yq '.verification.commands.typescript.build // ""' forge.yaml 2>/dev/null || echo '')
+
+if [ -n "$TS_FORMAT" ]; then
+    eval "$TS_FORMAT" 2>&1
+else
+    echo "SKIPPED — typescript.format not configured in verification.commands"
+fi
+
+if [ -n "$TS_TYPECHECK" ]; then
+    eval "$TS_TYPECHECK" 2>&1
+    TS_EXIT=$?
+elif [ -n "$TS_BUILD" ]; then
+    eval "$TS_BUILD" 2>&1 | tail -30
+    TS_EXIT=$?
+else
+    echo "SKIPPED — typescript.typecheck and typescript.build not configured in verification.commands"
+    TS_EXIT=0
+fi
 ```
+Typecheck or build failures are BLOCKING — fix type errors before continuing.
 
 **Shell scripts**: Verify service interactions — read target middleware files, document what was verified in V4 summary.
 

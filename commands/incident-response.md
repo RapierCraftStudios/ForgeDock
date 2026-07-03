@@ -9,6 +9,7 @@ argument-hint: [issue number | "active" | "postmortem {issue}"]
 
 **Config variables used by this command** (set in `forge.yaml`):
 - `{REPO_PATH}` ← `paths.root` — project repository root
+- `{DEPLOY_WORKFLOW}` ← `deploy.workflow` (optional) — GitHub Actions workflow filename for hotfix deploys (e.g., `hotfix-deploy.yml`). When absent or empty, workflow-trigger and workflow-monitor steps are omitted.
 
 You are the pipeline's incident response coordinator. When production goes down or a critical bug surfaces, this command orchestrates the response: validates the hotfix before deploy, reconstructs the incident timeline, and produces a post-incident analysis.
 
@@ -39,7 +40,7 @@ You are the pipeline's incident response coordinator. When production goes down 
 gh issue view {NUMBER} --json number,title,body,labels,state,comments,assignees,createdAt
 
 # If "active" — find most recent open P0
-gh issue list --state open --label "P0" --limit 5 --json number,title,createdAt,labels \
+gh issue list --state open --label "priority:P0" --limit 5 --json number,title,createdAt,labels \
   --jq 'sort_by(.createdAt) | reverse | .[0]'
 ```
 
@@ -55,8 +56,9 @@ Parse the issue to understand:
 gh pr list --state merged --base main --json number,title,mergedAt \
   --jq '[.[] | select(.mergedAt > (now - 86400 | todate))] | .[] | "\(.number) | \(.title) | \(.mergedAt)"'
 
-# Check recent hotfix deploys
-gh run list --workflow=hotfix-deploy.yml --limit 5 --json databaseId,status,conclusion,createdAt,displayTitle
+# Check recent hotfix deploys (requires deploy.workflow set in forge.yaml)
+# Skip this check if deploy.workflow is not configured.
+gh run list --workflow={deploy.workflow} --limit 5 --json databaseId,status,conclusion,createdAt,displayTitle
 ```
 
 #### Step 1C: Post incident acknowledgment
@@ -119,9 +121,10 @@ Your job:
    - Does it remove functionality other code depends on?
    - Are there syntax errors?
    - Does it change DB schema without a migration?
-4. Run compile checks:
-   - Python: python -m py_compile on changed .py files
-   - TypeScript: npx tsc --noEmit (if web/ files changed)
+4. Run compile checks (read forge.yaml → verification.commands for tool commands):
+   - Python: always run python -m py_compile on changed .py files (no config needed)
+   - Python format/lint: run verification.commands.python.format and .lint if configured; log "SKIPPED — not configured in verification.commands" if absent
+   - TypeScript: run verification.commands.typescript.typecheck if configured; log "SKIPPED — not configured in verification.commands" if absent
 5. Check if the fix is scoped tightly (minimal changes for the incident)
 
 Output:
@@ -143,10 +146,11 @@ gh issue comment {NUMBER} --body "$(cat <<'EOF'
 **Confidence**: {level}
 
 {If safe}:
-**Ready for deploy.** Run:
+**Ready for deploy.** Run (requires `deploy.workflow` set in `forge.yaml`):
 ```
-gh workflow run hotfix-deploy.yml --ref {FIX_BRANCH} -f services={affected_services} -f reason="P0: {TITLE}"
+gh workflow run {deploy.workflow} --ref {FIX_BRANCH} -f {deploy.workflow_inputs.services}={affected_services} -f {deploy.workflow_inputs.reason}="P0: {TITLE}"
 ```
+*(If `deploy.workflow` is not configured, merge the fix branch via the GitHub web UI or your CI/CD provider.)*
 
 {If not safe}:
 **Concerns found:**
@@ -164,8 +168,9 @@ EOF
 #### Step 3A: Watch the deploy workflow
 
 ```bash
-# Find the most recent hotfix-deploy run
-RUN_ID=$(gh run list --workflow=hotfix-deploy.yml --limit 1 --json databaseId --jq '.[0].databaseId')
+# Find the most recent deploy run (requires deploy.workflow set in forge.yaml)
+# Skip if deploy.workflow is not configured.
+RUN_ID=$(gh run list --workflow={deploy.workflow} --limit 1 --json databaseId --jq '.[0].databaseId')
 
 # Check status
 gh run view $RUN_ID --json status,conclusion,jobs

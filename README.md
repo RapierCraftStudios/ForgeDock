@@ -4,13 +4,15 @@
 
 <h1>ForgeDock</h1>
 
-<p><strong>GitHub as a knowledge graph for AI agents.</strong></p>
+<p><strong>Turn a GitHub issue into a merged, reviewed PR — autonomously.</strong></p>
 
-<p>An autonomous development pipeline for Claude Code that uses GitHub issues, PRs, commits, and blame as structured memory — so every agent knows what happened before it, why the code looks the way it does, and what to do next.</p>
+<p>An autonomous development pipeline for Claude Code. Point it at an issue and it investigates, plans, builds, quality-gates, reviews with domain-specialist agents, and opens the PR — reasoning written back to GitHub at every step. Point it at a whole <strong>milestone</strong> and it runs the issues <strong>in parallel</strong>. Intent in, production-ready PRs out, in minutes.</p>
 
 <a href="LICENSE"><img src="https://img.shields.io/badge/License-AGPL--3.0-blue.svg" alt="License: AGPL-3.0" /></a>
 <a href="https://github.com/RapierCraftStudios/ForgeDock/stargazers"><img src="https://img.shields.io/github/stars/RapierCraftStudios/ForgeDock?style=social" alt="GitHub Stars" /></a>
 <a href="https://docs.anthropic.com/en/docs/claude-code"><img src="https://img.shields.io/badge/Built%20for-Claude%20Code-blueviolet" alt="Claude Code" /></a>
+<a href="https://www.npmjs.com/package/forgedock"><img src="https://img.shields.io/npm/v/forgedock?color=cb3837&logo=npm" alt="npm" /></a>
+<a href="https://www.npmjs.com/package/forgedock"><img src="https://img.shields.io/npm/dm/forgedock?color=cb3837&logo=npm&label=downloads" alt="npm downloads per month" /></a>
 <a href="https://github.com/RapierCraftStudios/ForgeDock/pulls"><img src="https://img.shields.io/badge/PRs-welcome-brightgreen.svg" alt="PRs Welcome" /></a>
 <a href="https://github.com/sponsors/RapierCraftStudios"><img src="https://img.shields.io/badge/Sponsor-❤-ea4aaa.svg" alt="Sponsor" /></a>
 
@@ -18,157 +20,131 @@
 
 <br />
 
+<div align="center">
+
+<img src="docs/demo.gif" alt="ForgeDock orchestrating multiple GitHub issues in parallel — agents investigate, build, review, and flip workflow labels through to merged" width="900" />
+
+<p><em><strong>One <code>/orchestrate</code> runs a whole milestone.</strong> Agents pick up issues in parallel, drive each through investigate → build → review, and flip the GitHub labels to <code>merged</code> — live.</em></p>
+
+</div>
+
+<br />
+
+**A single issue, up close:**
+
+```console
+$ /work-on #42          "POST /api/payments returns 500 for free-tier users"
+
+  ✓ investigate    root cause → commit e8f21a3 (PR #38); free-tier users have no billing profile
+  ✓ context        surfaced 2 past bugs in this module + a known audit-log pitfall
+  ✓ architect      2-file plan: nil-guard in validator, free-tier check in the router
+  ✓ build          branch fix/payment-validation-free-tier-42 · 2 files
+  ✓ review         4 domain agents · 0 findings
+  ✓ merged         7m 12s  →  staging
+
+  every step is written back to GitHub. the next agent reads it. nothing is forgotten.
 ```
-You:        /work-on #42
-ForgeDock:  Investigates → Architects → Builds → Quality gates → Reviews → Opens PR
-You:        *click merge*
+
+<div align="center">
+<p><em><code>/work-on #42</code> — issue to reviewed PR, with the full reasoning chain written back to GitHub.</em></p>
+</div>
+
+### Try it in 30 seconds — on a throwaway repo, nothing to lose
+
+```bash
+npx forgedock demo     # spins up a risk-free demo repo and shows you the pipeline end to end
+```
+
+Ready to use it for real? **`npx forgedock`** installs it into Claude Code in about 10 seconds (full setup below).
+
+> ⭐ **If ForgeDock saves you time, [star the repo](https://github.com/RapierCraftStudios/ForgeDock/stargazers)** — it's the whole marketing budget.
+
+---
+
+**Your AI coding agent forgets everything after every session.** It re-explores the codebase from scratch, re-makes mistakes that were already fixed, and has no idea why the code it's touching looks the way it does. ForgeDock fixes that by making **GitHub itself the memory** — every pipeline stage writes structured findings that every later agent reads.
+
+## Without ForgeDock vs. With ForgeDock
+
+| Without ForgeDock | With ForgeDock |
+|---|---|
+| Agent starts every session blind — no context from prior work | Agent reads structured investigation, root cause, and history straight from GitHub |
+| The same bugs get reintroduced across PRs | Review agents surface known pitfalls from past PRs *before* you commit |
+| Investigation is repeated after every compaction | GitHub is the memory — a new session resumes exactly where the last left off |
+| You write the issue, plan the fix, open the PR, and review it | `/work-on #42` → investigated, built, reviewed, merged |
+| Review depends on whoever has capacity | 9 domain-specialist agents (security, billing, DB, concurrency…) review every PR |
+| One task at a time, serialized by your attention | `/orchestrate` runs a whole milestone — many issues in parallel, each its own full pipeline |
+
+---
+
+## The idea in one paragraph
+
+AI agents have **no lookback**. They don't know a function was shaped by a bug fix in #347, that an approach was tried and reverted in PR #891, or that three other files need the same change. Context window isn't the bottleneck — **memory is.** But GitHub already stores everything an agent needs: commits, PRs, issues, blame, cross-references. It's a knowledge graph; agents just don't use it as one. ForgeDock makes every stage write **machine-readable annotations** to issues and PRs, and every downstream agent read them. The `gh` CLI becomes the query interface to institutional memory. The result: agents that follow structured data, not vibes.
+
+```
+┌──────────────────────────────────────────────────────────────┐
+│                   GITHUB (Knowledge Graph)                   │
+│                                                              │
+│  Issues:  FORGE:INVESTIGATOR → FORGE:CONTRACT → FORGE:ARCHITECT│
+│  PRs:     FORGE:BUILDER → FORGE:REVIEW → FORGE:TRAJECTORY     │
+│  Links:   git blame → commit → PR → issue → related issues   │
+│                                                              │
+│  Every agent reads this. Every agent writes to it.           │
+│  Nothing is lost between conversations.                      │
+└──────────────────────────────────────────────────────────────┘
 ```
 
 ---
 
-## The Problem
+## See it working
 
-AI coding agents have **no lookback.** They don't know why the code they're touching was written. They can't tell that a function was shaped by a bug fix in issue #347, that a similar approach was tried and reverted in PR #891, or that three other files use the same pattern and need the same fix. They start every task blind — even within a single session.
+**A cross-issue fix that used memory.** Issue #42 fixed a billing nil-check on `/payments`. The same bug exists on `/invoices` and `/subscriptions`, so the pipeline spawns #43. Its context phase reads #42's structured data — *"nil-check already fixed in `payment_validator.py` (#42); apply the same pattern"* — and doesn't re-investigate. It reads the knowledge graph and applies the known fix. Start to merge: 7 minutes.
 
-Context window isn't the bottleneck. **Memory is.** When an agent compacts or a conversation ends, everything it learned is gone. The next agent starts from scratch. The investigation gets repeated. The same mistakes get made. There's no institutional knowledge.
+**Review agents catching a cross-boundary bug.** On a staging→main deploy PR, the Billing Integrity agent found an `/invoices` query still referencing a column that a recent migration had renamed. That finding became a new issue, entered the same pipeline, and was fixed before it reached production.
 
-## The Insight
-
-GitHub already stores everything an agent needs to know — commits, PRs, issues, blame, cross-references. It's a knowledge graph. But AI agents don't use it that way.
-
-ForgeDock changes that. Every pipeline stage writes **structured, machine-readable annotations** to GitHub issues and PRs. Every downstream agent reads what came before. The `gh` CLI becomes the query interface to institutional memory.
-
-```
-┌─────────────────────────────────────────────────────────────────────┐
-│                     GITHUB (Knowledge Graph)                        │
-│                                                                     │
-│  Issues:  FORGE:INVESTIGATOR → FORGE:CONTRACT → FORGE:ARCHITECT     │
-│  PRs:     FORGE:BUILDER → FORGE:REVIEW → FORGE:TRAJECTORY           │
-│  Links:   git blame → commit → PR → issue → related issues          │
-│                                                                     │
-│  Every agent reads this. Every agent writes to it.                  │
-│  Nothing is lost between conversations.                             │
-└─────────────────────────────────────────────────────────────────────┘
-```
-
-When the builder agent starts, it doesn't explore the codebase from scratch. It reads the investigation comment that already traced the root cause, identified affected files, and referenced the commit that introduced the bug. When the architect agent plans the implementation, it reads historical findings from related PRs so it doesn't repeat known mistakes. When a review agent flags a finding, that finding becomes a new issue that enters the same pipeline — investigated, built, reviewed, and merged.
-
-The result: agents that are **deterministic**, not guessing. They follow structured data, not vibes.
+**The pipeline catching its own false positive.** A review agent flagged "no input size cap on the key path." Investigation traced the full call chain, found the cap *already exists* downstream, and closed it `workflow:invalid` with an explanation of why the reviewer missed it. Self-correcting, with a full audit trail — no wasted work.
 
 ---
 
-## See It Working
+## Orchestrate an entire milestone
 
-Here's what a real pipeline run looks like. A user reports that an API endpoint is returning 500 errors — the pipeline takes it from there.
+`/work-on` ships one issue. **`/orchestrate` ships a milestone.** It decomposes the milestone into dependency-ordered waves and runs a full `/work-on` pipeline on each issue **in parallel** — investigating, building, reviewing, and merging many at once, while GitHub labels track every agent's state live. Overlapping files are detected and serialized; independent work runs concurrently.
 
-### Example 1: Bug fix with full context chain
+<div align="center">
+<img src="assets/orchestration.svg" alt="One milestone fanned out into parallel work-on pipelines, each issue advancing through investigating, building, in-review, and merged" width="920" />
+</div>
 
-A user opens issue #42: *"POST /api/payments returns 500 for free-tier users."*
-
+```bash
+/orchestrate milestone/checkout-v2     # decompose → parallel waves → merged PRs
 ```
-FORGE:INVESTIGATOR  →  Traced bug to commit e8f21a3 (PR #38). The payment validation
-                        gate assumed all users have a billing profile — free-tier users don't.
-                        Quantified impact: 12 affected users, 94 failed requests in the last 24h.
-
-FORGE:CONTRACT      →  2-file fix: add nil-check in payment validator,
-                        add free-tier guard in the API router
-
-FORGE:CONTEXT       →  Surfaced 2 historical bugs in the same module:
-                        #29 (missing nil-check on subscription lookup) and
-                        #34 (billing profile race condition on signup).
-                        Known pitfall: don't skip the audit log write on early returns.
-
-FORGE:ARCHITECT     →  Ordered implementation plan with exact file/function/line table
-
-FORGE:BUILDER       →  Branch fix/payment-validation-free-tier-42, 2 files changed
-
-FORGE:REVIEW        →  4 review agents, 0 findings, auto-merged to staging
-```
-
-The context phase knew about the audit log pitfall from issue #34 — a completely different bug, months earlier, in the same module. That's institutional memory.
-
-### Example 2: Cross-issue knowledge graph
-
-The fix for #42 only covered the `/payments` endpoint. But the same nil-check bug exists in `/invoices` and `/subscriptions`. The pipeline spawns issue #43.
-
-The context phase reads the structured data from #42 and says: *"Billing profile nil-check was already fixed in payment_validator.py (#42) — same pattern must be applied consistently."* It doesn't re-investigate. It reads the knowledge graph and applies the known fix to the remaining endpoints. 7 minutes, start to merge.
-
-### Example 3: Review agents catch bugs across service boundaries
-
-A staging-to-main deploy PR gets reviewed by four specialized agents:
-
-- **Concurrency agent** — verified idempotency keys through PostgreSQL advisory locks
-- **Security agent** — flagged a `force_https` default change with broad blast radius
-- **API agent** — verified route registration consistency across all endpoints
-- **Billing Integrity agent** — found that the `/invoices` query still referenced an old column name that was renamed in a recent migration
-
-That billing finding becomes a new issue — enters the same pipeline, gets investigated, built, reviewed, and merged. Bug caught before it hits production.
-
-### Example 4: The pipeline catches its own false positives
-
-A review agent flags "no input size cap on the system key path." The investigation phase traces the full call chain and finds the cap *already exists* in a downstream quality gate module. Closed as `workflow:invalid` with an explanation of why the review agent missed it (it only inspected the text-building logic, not the downstream gate). The trajectory recorded: *"Investigation revealed fix already present."*
-
-The pipeline self-corrects. No wasted work. Full audit trail.
 
 ---
 
-## How It Works
+## How it works
 
-### The Pipeline
+Each stage reads the structured output of the stages before it and writes its own findings back:
 
 ```
-Issue → Investigate → Architect → Build → Quality Gate → Review → Merge
-                ↓           ↓         ↓          ↓            ↓
-          writes to    reads from  reads from  reads from   writes to
-           GitHub       GitHub      GitHub      GitHub       GitHub
+Issue → Investigate → Context → Architect → Build → Quality Gate → Review → Merge
+              └──────────── each stage reads & writes GitHub ────────────┘
 ```
-
-Each stage reads the structured output of previous stages and writes its own findings back:
 
 | Stage | Reads | Writes |
 | --- | --- | --- |
 | **Investigate** | Issue body, `git blame`, related issues/PRs | `FORGE:INVESTIGATOR` — verdict, root cause, affected files, severity |
 | **Context** | Historical findings from related PRs, known pitfalls | `FORGE:CONTEXT` — institutional memory for this module |
-| **Architect** | Investigation + context findings | `FORGE:ARCHITECT` — ordered implementation plan, code paths, risks |
-| **Build** | Investigation + context + architect plan | `FORGE:BUILDER` — branch, commits, files changed, checklist |
-| **Quality Gate** | Builder output, 14+ domain-specific checks | `FORGE:QUALITY_GATE` — findings by domain (security, auth, DB, etc.) |
-| **Review** | PR diff, builder contract, quality gate results | `FORGE:REVIEW` — per-agent findings with evidence and confidence |
-| **Close** | All of the above | `FORGE:TRAJECTORY` — full audit trail of the entire run |
+| **Architect** | Investigation + context | `FORGE:ARCHITECT` — ordered plan, code paths, risks |
+| **Build** | Everything above | `FORGE:BUILDER` — branch, commits, files changed |
+| **Quality Gate** | Builder output, domain-specific checks | `FORGE:QUALITY_GATE` — findings by domain |
+| **Review** | PR diff, contract, gate results | `FORGE:REVIEW` — per-agent findings with evidence + confidence |
+| **Close** | All of the above | `FORGE:TRAJECTORY` — full audit trail of the run |
 
-### GitHub as Database
+**GitHub as the database.** Every annotation is wrapped in an HTML comment (`<!-- FORGE:INVESTIGATOR -->`) that makes it machine-parseable. When an agent starts — even in a brand-new conversation after compaction — it queries the issue via `gh` and reconstructs full context from these tags. Workflow labels (`workflow:investigating`, `workflow:in-review`, `workflow:merged`…) track state, and the pipeline resumes from whatever state GitHub reports. The annotation format is an open standard — see the [FORGE Annotation Protocol](docs/FORGE-PROTOCOL.md).
 
-Every annotation is wrapped in an HTML comment tag (`<!-- FORGE:INVESTIGATOR -->`, `<!-- FORGE:CONTRACT -->`, etc.) that makes it machine-parseable. When an agent starts — even in a brand new conversation after compaction — it queries the issue via `gh` and reconstructs full context from these tags. Nothing depends on conversation history.
+**Domain-specialist review.** Every PR is reviewed by agents with deep, narrow expertise — Billing Integrity, Auth & Access Control, Database, Security, Concurrency, Frontend, API, Performance, Infrastructure. Each posts findings with a confidence level (`CONFIRMED` traced the full path · `LIKELY` pattern match · `POSSIBLE` needs verification). Findings above a severity threshold become new issues that enter the same pipeline.
 
-Labels track workflow state (`workflow:investigating`, `workflow:building`, `workflow:in-review`, `workflow:merged`, `workflow:invalid`). The pipeline resumes from whatever state GitHub says it's in.
+**It improves itself.** Review findings from real PRs feed back in: `/pipeline-health` correlates findings with prompt changes and failures, and recurring patterns become new quality-gate checks. In production use on our own codebase, this loop took the review false-positive rate from ~44% down to under 10%. `/autopilot` goes further — pulling production signals (errors, CI failures, stale issues, analytics), filing issues from them, and optionally running `/work-on` on the top ones.
 
-### Review Agents
-
-PRs are reviewed by domain-specific agents, each with deep expertise:
-
-| Agent | Focus |
-| --- | --- |
-| Billing Integrity | Payment flows, credit debit paths, column renames |
-| Auth & Access Control | Endpoint auth dependencies, resource ownership |
-| Database | Migrations, unbounded queries, NOT NULL without DEFAULT |
-| Security | SQL injection, SSRF, XSS, hardcoded secrets |
-| Concurrency | Idempotency, advisory locks, race conditions |
-| Frontend | useEffect cleanup, error states, hook dependencies |
-| API | Route registration, proxy paths, response contracts |
-| Performance | N+1 queries, unbounded loops, missing indexes |
-| Infrastructure | Dockerfile changes, volume permissions, CI/CD |
-
-Each agent posts structured findings with confidence levels — `CONFIRMED` (traced full code path), `LIKELY` (pattern match), or `POSSIBLE` (needs verification). Findings above a severity threshold become new GitHub issues that enter the same pipeline.
-
-### The Self-Improvement Loop
-
-Review findings from real PRs feed back into the pipeline:
-
-1. Review agents flag patterns (e.g., "async code keeps missing cleanup")
-2. `/pipeline-health` correlates findings with prompt changes and build failures
-3. The quality gate evolves — new domain checks get added from recurring patterns
-4. False positive rate dropped from 44% to under 10% through this loop
-
-`/autopilot` takes this further: it pulls production signals (errors, CI failures, stale issues, analytics), creates issues from findings, and optionally runs `/work-on` on the top issues. Each cycle's fixes compound into the next.
+> Numbers above come from dogfooding ForgeDock on our own production codebase. A public, reproducible benchmark is in progress — track it in the [issues](https://github.com/RapierCraftStudios/ForgeDock/issues).
 
 ---
 
@@ -177,92 +153,106 @@ Review findings from real PRs feed back into the pipeline:
 | Command | What it does |
 | --- | --- |
 | **`/work-on`** | Full issue lifecycle: investigate → build → quality gate → review → merge |
+| `/orchestrate` | Parallel execution — decomposes a milestone into waves, runs `/work-on` on each |
 | `/issue` | Creates pipeline-ready GitHub issues |
-| `/orchestrate` | Parallel execution: decomposes milestones into waves, runs `/work-on` on each |
-| `/review-pr` | Context-aware PR review with 9 specialized agents |
+| `/review-pr` | Context-aware PR review with 9 specialist agents |
 | `/quality-gate` | Pre-commit checks across 14+ domains |
 | `/milestone` | Create, manage, and ship milestones |
-| `/deploy-info` | Staging vs main diff with risk assessment |
-| `/review-pr-staging` | Comprehensive staging-to-main review gate |
+| `/deploy-info` | Staging vs. main diff with risk assessment |
 | `/rollback` | Automated revert PR for production incidents |
 | `/incident-response` | P0 coordination: hotfix, timeline, postmortem |
-| `/pipeline-health` | Self-analysis: measures performance, proposes improvements |
+| `/pipeline-health` | Self-analysis — measures performance, proposes improvements |
 | `/autopilot` | Autonomous improvement cycle: recon → triage → fix |
-| `/security-audit` | 4-phase security posture audit |
+| `/security-audit` | Multi-phase security posture audit |
 | `/cleanup` | Sweeps stale issues, branches, worktrees |
 | `/analytics` | Pull metrics from GSC, Clarity, Umami, Stripe, and more |
-| `/qa-sweep` | Full platform QA via browser automation |
 
----
-
-## Vision
-
-ForgeDock today uses GitHub as its knowledge graph. It works — 20,000+ issues processed, real production codebases shipping autonomously. But GitHub wasn't designed for this. Issue comments are append-only text blobs. Labels are flat strings. Cross-references are implicit links, not queryable edges. Every annotation costs tokens to parse because it's wrapped in markdown meant for humans, not machines.
-
-The end state is a **purpose-built knowledge graph** — a structured, token-efficient store designed from the ground up for AI agents to read and write. Not a GitHub overlay. Not a vector database bolted on the side. A first-class system where:
-
-**In-house knowledge layer.** Replace GitHub comments with a native graph store where relationships are edges, not hyperlinks. An agent asking "what bugs has this module had in the last 30 days?" should be a graph query returning structured data — not parsing 50 issue comment bodies hoping to find `<!-- FORGE:INVESTIGATOR -->` tags. Annotations become nodes with typed relationships (caused-by, fixed-in, blocks, related-to) instead of flat text.
-
-**Token-efficient by design.** Today, an agent reads a 3,000-character investigation comment to extract 5 fields. A purpose-built store returns those 5 fields directly — 50 tokens instead of 800. At pipeline scale (investigation + context + architect + builder + review), this compresses the context budget dramatically. Agents get more lookback within the same window.
-
-**Self-improving feedback loops, closed tighter.** Right now, the improvement loop runs through `/pipeline-health` — a command a human invokes. In the end state, the pipeline continuously measures its own accuracy (false positive rates, investigation-to-build time, review-finding recurrence), identifies degrading patterns, and adjusts its own prompts, quality gate checks, and review focus areas without human intervention. Not "suggest improvements" — actually ship them, validate them, and roll back if metrics regress.
-
-**Fully autonomous development cycles.** Today, `/autopilot` runs recon and creates issues, but a human gates every fix. The vision is a pipeline that can run continuously — detecting production issues, creating issues, investigating, building, reviewing, deploying to staging, validating, and promoting to production — with human oversight moving from "approve every action" to "set policy and review outcomes." The human becomes the architect, not the operator.
-
-**Provider-agnostic agent runtime.** ForgeDock currently runs on Claude Code. The pipeline logic — the state machine, the annotation protocol, the review agent catalog — is model-agnostic. The goal is an agent runtime that can orchestrate any LLM (Claude, GPT, Gemini, open-source models) as specialized workers, choosing the right model for each task based on capability, cost, and latency.
-
-The path from here to there is incremental. Each piece — the knowledge store, the tighter feedback loop, the autonomous deploy gate — can ship independently and compound with the others.
+[Full command reference →](docs/site/command-reference.md)
 
 ---
 
 ## Install
 
-**Step 1: Install commands**
+**Requirements:** [Claude Code](https://docs.anthropic.com/en/docs/claude-code) and [GitHub CLI](https://cli.github.com/).
 
 ```bash
-npx forgedock
+npx forgedock          # 1. install the commands into Claude Code (~10s)
+npx forgedock init     # 2. auto-detect your repo/owner/branches → writes forge.yaml
 ```
 
-This symlinks all pipeline commands into your Claude Code environment (`~/.claude/commands/`).
+`init` writes `forge.yaml` (so ForgeDock works with *your* repo, not a hardcoded one) and injects a short usage block into your project's `CLAUDE.md` so every Claude Code session knows ForgeDock drives development here. Then just open Claude Code and run `/work-on <issue>`.
 
-**Step 2: Generate config**
+<details>
+<summary><strong>Other install options & commands</strong></summary>
+
+**Claude Code plugin marketplace** (Claude Code v2.1.143+):
+
+```
+/plugin marketplace add RapierCraftStudios/ForgeDock
+/plugin install forgedock@forgedock
+```
+
+Commands then appear as `/forgedock:work-on`, etc. You still run `npx forgedock init` to generate `forge.yaml`.
+
+**Maintenance:**
 
 ```bash
-npx forgedock init         # Auto-detects your repo, owner, and branches
+npx forgedock update      # pull latest commands
+npx forgedock integrate   # regenerate the CLAUDE.md usage block
+npx forgedock uninstall   # remove all commands
+npx forgedock help        # show everything
 ```
 
-Creates `forge.yaml` in your project root — the config file that makes ForgeDock work with your repo instead of a hardcoded one. Edit it to fill in your project details.
+> Running `npx forgedock` from *inside* this repo uses the local working tree. From your own project, use `npx forgedock@latest` to pin the published release.
 
-**Step 3: AI-powered setup (optional)**
-
-```
-/forgedock-init            # Inside Claude Code — guided full config walkthrough
-```
-
-Requires [Claude Code](https://docs.anthropic.com/en/docs/claude-code) and [GitHub CLI](https://cli.github.com/).
-
-**Other commands:**
-
-```bash
-npx forgedock update      # Pull latest commands
-npx forgedock uninstall   # Remove all commands
-npx forgedock help        # Show all commands
-```
+</details>
 
 ---
 
-## Contributing
+## Where it's going
 
-PRs welcome. Every change goes through a PR, tested against 3+ scenarios, using conventional commits (`fix(command):`, `feat(command):`, `refactor(command):`).
-
-## License
-
-[AGPL-3.0](LICENSE) — free to use, modify, and distribute. If you modify ForgeDock and offer it as a service (including over a network), you must open-source your modifications under the same license.
+ForgeDock uses GitHub as its knowledge graph today, and it works. But GitHub wasn't built for this — comments are text blobs, labels are flat strings, and every annotation costs tokens to parse. The roadmap is a **durable execution engine** with a purpose-built, token-efficient knowledge store where relationships are queryable edges, an **outcome-based verification gate** that makes correctness machine-checkable, **per-codebase learning** that compounds over time, and a **provider-agnostic runtime** that can route each task to the right model. Each piece ships independently — follow [the five-foundations epic](https://github.com/RapierCraftStudios/ForgeDock/issues) to see it land.
 
 ---
+
+## Show your support
+
+Using ForgeDock in your pipeline? Add the badge — each one is a backlink and a signal to other developers:
+
+```markdown
+[![Built with ForgeDock](https://raw.githubusercontent.com/RapierCraftStudios/ForgeDock/main/assets/built-with-forgedock.svg)](https://github.com/RapierCraftStudios/ForgeDock)
+```
+
+[![Built with ForgeDock](assets/built-with-forgedock.svg)](https://github.com/RapierCraftStudios/ForgeDock)
+
+---
+
+## Star History
 
 <div align="center">
 
-<p>Built by <a href="https://github.com/RapierCraftStudios">RapierCraft Studios</a></p>
+<a href="https://star-history.com/#RapierCraftStudios/ForgeDock&Date">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="https://api.star-history.com/svg?repos=RapierCraftStudios/ForgeDock&type=Date&theme=dark" />
+    <img alt="Star History Chart" src="https://api.star-history.com/svg?repos=RapierCraftStudios/ForgeDock&type=Date" width="600" />
+  </picture>
+</a>
 
+</div>
+
+---
+
+## Docs & community
+
+- [Getting Started in 5 Minutes](docs/site/getting-started.md)
+- [How the Knowledge Graph Works](docs/site/how-it-works.md)
+- [FORGE Annotation Protocol](docs/FORGE-PROTOCOL.md) — the open standard for AI context passing
+- [ForgeDock vs. Manual Claude Code Workflows](docs/site/vs-manual-workflows.md)
+- [Complete Command Reference](docs/site/command-reference.md)
+
+**Contributing:** PRs welcome — every change goes through a PR, tested against 3+ scenarios, using conventional commits (`fix(command):`, `feat(command):`). **License:** [AGPL-3.0](LICENSE) — free to use, modify, and distribute; network use of modifications must be open-sourced under the same license.
+
+<div align="center">
+<br />
+<p>Built and dogfooded in production by <a href="https://github.com/RapierCraftStudios">RapierCraft Studios</a>.</p>
 </div>

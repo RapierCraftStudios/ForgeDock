@@ -40,6 +40,8 @@ gh api repos/{GH_REPO}/issues/{NUMBER}/comments \
 - If FORGE:INVESTIGATOR comment is absent → EXIT with `DECOMPOSE_RESULT: status: BLOCKED`, blocker: "No investigation report found — run investigate first"
 - If investigation report has no Decomposition Assessment section, OR the assessment does not list any sub-issues → EXIT with `DECOMPOSE_RESULT: status: BLOCKED`, blocker: "Investigation report has no decomposition plan — re-run investigate with explicit decomposition scope"
 
+> **Shared Scoping Convention**: This investigation gate (blocks without a `FORGE:INVESTIGATOR` comment) is the **reference pattern** for investigation-gated issue creation across the pipeline. `milestone.md` Step 4 and `orchestrate.md` MUST apply the same principle: read code and identify all affected call sites BEFORE writing any issue body. Sub-issue bodies created in Phase D3 MUST use the Pipeline Issue Template defined in `issue.md` Phase 3D — that template is the single canonical standard for all automated issue creation. <!-- Added: forge#293 -->
+
 Extract from investigation report:
 - Decomposition Assessment section: list of proposed sub-issues with titles and dependencies
 - Milestone (from issue metadata)

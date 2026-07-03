@@ -741,31 +741,58 @@ if iteration == max_iterations AND not PASS:
     Add needs-human label → STOP
 ```
 
-<!-- FORGE:PHASE_COMPLETE — Quality gate done. See Universal Phase Dispatcher: next sub-phase is 3H. Not terminal — continue immediately. -->
+# MUST CONTINUE to sub-phase 3H (Format and verify) — quality gate PASS is intermediate, NOT terminal. <!-- Added: forge#220 -->
 
-**After quality gate completes (PASS or fixes applied): proceed to the next sub-phase per the Universal Phase Dispatcher. Quality gate is an intermediate check — "PASS" means the code is clean, NOT that the build is done.**
+**After quality gate completes (PASS or fixes applied): proceed immediately to sub-phase 3H below. Quality gate is an intermediate check — "PASS" means the code is clean, NOT that the build is done. Do NOT stop.**
+
+**After PASS: Do NOT re-read GitHub state, issue body, labels, or any file. Do NOT run any gh commands. Do NOT check PR status. Proceed directly to Phase 3H (Format and verify) below.** <!-- Added: forge#93 -->
 
 ### 3H: Format and verify
+
+All tool commands are read from `forge.yaml → verification.commands`. When a key is absent, the step logs `SKIPPED — not configured in verification.commands` and continues rather than silently passing.
 
 **Python**:
 ```bash
 cd {WORKTREE_PATH}
-black {PYTHON_FILES} && isort {PYTHON_FILES} && python -m py_compile {PYTHON_FILES}
+
+PYTHON_FORMAT=$(yq '.verification.commands.python.format // ""' forge.yaml 2>/dev/null || echo '')
+if [ -n "$PYTHON_FORMAT" ]; then
+    eval "$PYTHON_FORMAT" 2>&1
+else
+    echo "SKIPPED — python.format not configured in verification.commands"
+fi
+
+# Compile check always runs (no config needed — catches syntax errors)
+python -m py_compile {PYTHON_FILES}
 ```
 `py_compile` failures are BLOCKING.
 
-**TypeScript (primary repo — has tsconfig.json)**:
+**TypeScript**:
 ```bash
 cd {WORKTREE_PATH}
-prettier --write {TS_FILES} && tsc --noEmit
-```
-`tsc --noEmit` failures are BLOCKING.
 
-**TypeScript (satellite repos)**:
-```bash
-cd {WORKTREE_PATH}
-npm run build && prettier --write {TS_FILES}
+TS_FORMAT=$(yq '.verification.commands.typescript.format // ""' forge.yaml 2>/dev/null || echo '')
+TS_TYPECHECK=$(yq '.verification.commands.typescript.typecheck // ""' forge.yaml 2>/dev/null || echo '')
+TS_BUILD=$(yq '.verification.commands.typescript.build // ""' forge.yaml 2>/dev/null || echo '')
+
+if [ -n "$TS_FORMAT" ]; then
+    eval "$TS_FORMAT" 2>&1
+else
+    echo "SKIPPED — typescript.format not configured in verification.commands"
+fi
+
+if [ -n "$TS_TYPECHECK" ]; then
+    eval "$TS_TYPECHECK" 2>&1
+    TS_EXIT=$?
+elif [ -n "$TS_BUILD" ]; then
+    eval "$TS_BUILD" 2>&1 | tail -30
+    TS_EXIT=$?
+else
+    echo "SKIPPED — typescript.typecheck and typescript.build not configured in verification.commands"
+    TS_EXIT=0
+fi
 ```
+Typecheck or build failures are BLOCKING.
 
 ### 3I: Frontend proxy wiring check (MANDATORY)
 
@@ -791,27 +818,44 @@ Advisory only — does not block build. Check for lambda/callable in connect_arg
 
 Skip if no new env vars introduced.
 
+**Config variables used by this phase** (set in `forge.yaml`):
+- `{deploy.secrets_backend}` — secrets delivery method (`sops`, `aws-sm`, `vault`, `ci-env`, `none`). When absent or not `sops`, SOPS-specific checks below are skipped with an explicit log message.
+- `{verification.services[name].container}` — container name for post-deploy verification. Resolved by matching the service name; falls back to `{service}` (bare name) when not configured.
+
 For each new env var, verify present in ALL required locations:
 
 | Location | Required for |
 |----------|-------------|
 | `.env.example` | All new vars |
-| `infra/secrets/prod.enc.yaml` (SOPS) | Production secrets |
-| `infra/decrypt-secrets.sh` ENV_MAPPING | All vars in deploy chain |
-| `app/env_validation.py` | API service vars |
-| `docker-compose.prod.yml` | Vars needing explicit injection |
+| Secrets backend (see `deploy.secrets_backend`) | Secret vars — skip if backend is `none` or unset |
+| `app/env_validation.py` | API service vars (if project has one) |
+| `docker-compose.prod.yml` | Vars needing explicit injection (if project uses Docker Compose) |
 
-Deploy chain: SOPS → `decrypt-secrets.sh` (ENV_MAPPING) → `.env.secrets` → `merge-env-secrets.sh` → `.env.production` → docker-compose `env_file`.
+**Secrets backend check** *(trigger: `deploy.secrets_backend == "sops"`)*:
 
-**Operator-set var classification** *(trigger: new env var is NOT present in `infra/secrets/prod.enc.yaml`)*: <!-- Added: forge#380 -->
+If the project uses SOPS, verify the new var is present in all SOPS chain locations:
+- `infra/secrets/prod.enc.yaml` — SOPS-encrypted secret store
+- `infra/decrypt-secrets.sh` ENV_MAPPING — maps SOPS key to env var name
+- Deploy chain: SOPS → `decrypt-secrets.sh` (ENV_MAPPING) → `.env.secrets` → `merge-env-secrets.sh` → `.env.production` → docker-compose `env_file`
 
-Some env vars are operator-set (non-secret, not sourced from SOPS) — they must be manually added to `.env.production` on the production server. The SOPS deploy chain does not carry them. When a new env var has no entry in `prod.enc.yaml`, classify it as operator-set and add a **HARD BLOCKER** item to the Testing Checklist:
+If `deploy.secrets_backend` is absent or not `sops`, skip these checks and log:
+> `SKIP: SOPS chain check — deploy.secrets_backend is not "sops". Configure deploy.secrets_backend in forge.yaml to enable.`
+
+**Operator-set var classification** *(trigger: new env var is NOT in the configured secrets backend)*: <!-- Added: forge#380 -->
+
+Some env vars are operator-set (non-secret, not sourced from the secrets backend) — they must be manually added to the runtime environment on the production server. When a new env var has no entry in the secrets backend, classify it as operator-set and add a **HARD BLOCKER** item to the Testing Checklist.
+
+Resolve the container name for the verification command:
+1. Look up the service in `forge.yaml → verification.services[]` by name — use the `container` field if present.
+2. If no matching entry, fall back to the bare service name: `{service}` (no suffix).
 
 ```
-- [ ] HARD BLOCKER: Add {VAR_NAME} to .env.production on the production server.
-      This var is operator-set (not in SOPS) — it does NOT flow through the automated
-      deploy chain. It must be added manually before or after deploy.
-      Verify with: docker exec {service}-blue env | grep {VAR_NAME}
+- [ ] HARD BLOCKER: Add {VAR_NAME} to the runtime environment on the production server.
+      This var is operator-set — it does NOT flow through the automated secrets chain.
+      It must be added manually before or after deploy.
+      Verify with: docker exec {CONTAINER_NAME} env | grep {VAR_NAME}
+      (CONTAINER_NAME resolved from verification.services[{service}].container in forge.yaml,
+       or bare service name if not configured)
 ```
 
 **`env_file` re-read warning** *(trigger: any new env var added to `.env.production` path)*:
@@ -822,11 +866,13 @@ Add this warning to the Testing Checklist whenever a new env var is introduced (
 
 **Post-deploy in-container verification** *(trigger: any new env var)*:
 
-Add the following to the Testing Checklist so the deployer can confirm delivery after deploy:
+Add the following to the Testing Checklist so the deployer can confirm delivery after deploy.
+
+Resolve `{CONTAINER_NAME}` from `forge.yaml → verification.services[{service}].container`; use `{service}` (bare) if the field is absent.
 
 ```bash
 # Verify env var reached the running container (run post-deploy)
-docker exec {service}-blue env | grep {VAR_NAME}
+docker exec {CONTAINER_NAME} env | grep {VAR_NAME}
 # Expected: {VAR_NAME}={value}
 # If blank: container was not recreated — run: docker compose up --no-deps --force-recreate {service}
 ```
@@ -955,8 +1001,23 @@ PR #${PR_NUMBER} created targeting \`{PR_BASE}\`. Invoking /review-pr with --aut
 ```
 
 ### 5C: Invoke /review-pr with --auto-merge
+
+**Context budget check** (run before invoking review-pr): <!-- Added: forge#93 -->
+
+Large-context sessions that accumulated significant build history cause review-pr to hit the token limit mid-review. Check the accumulated context before delegating:
+
+- If the build changed **≥10 files** OR this agent has made **≥20 Skill invocations** since it started: invoke `work-on/review` as a fresh sub-agent (via `Skill(skill="work-on/review", args="...")`) rather than calling review-pr directly. The sub-agent starts with a clean context window.
+- Otherwise (small build, few skill calls): invoke review-pr directly as below.
+- **Fallback**: if `work-on/review` is not available (partial install), invoke review-pr directly regardless of file count and add a note that context may be large.
+
+**Direct invocation** (small builds — <10 changed files AND <20 Skill invocations):
 ```
 Skill(skill="review-pr", args="{PR_NUMBER} --auto-merge --issue {NUMBER} --base {PR_BASE} --gh-flag {GH_FLAG}")
+```
+
+**Sub-agent invocation** (large builds — ≥10 changed files OR ≥20 Skill invocations):
+```
+Skill(skill="work-on/review", args="{NUMBER} --repo {GH_REPO} --gh-flag {GH_FLAG} --worktree {WORKTREE_PATH} --branch {BRANCH} --base {PR_BASE}")
 ```
 
 Review-pr handles: full domain-agent review → post findings as separate issues → merge PR. It does NOT close the issue or clean up the worktree — those run in Phase 6.
@@ -973,6 +1034,10 @@ gh issue view {NUMBER} {GH_FLAG} --json state --jq '.state'
 - PR NOT MERGED → `gh pr merge {PR_NUMBER} {GH_FLAG} --merge --auto`. If fails → post comment, add `needs-human`, STOP.
 
 <!-- FORGE:PHASE_COMPLETE — Review done, PR merged. See Universal Phase Dispatcher: next phase is Phase 6 (Close & Cleanup). Not terminal — continue immediately. -->
+
+**After /review-pr returns and the PR is confirmed merged: immediately proceed to Phase 6 (Close & Cleanup). Do NOT stop here. `REVIEW_RESULT: status: COMPLETE` is an intermediate result — the pipeline is NOT done. Invoke Phase 6 now to close the issue, update labels, post the trajectory log, and clean up the worktree.**
+
+**Do NOT output any text describing this transition. Do NOT write phrases like "returning to work-on", "proceeding to close", "now invoking Phase 6", or any narrative summary of what comes next. Do NOT emit end_turn. Execute Phase 6 code immediately.** <!-- Added: forge#93 -->
 
 ---
 
@@ -1098,4 +1163,4 @@ gh issue comment {NUMBER} {GH_FLAG} --body "<!-- FORGE:TRAJECTORY -->
 - PR creation fails: check if branch pushed, if PR already exists
 - Merge conflicts: report to user, do NOT auto-resolve
 - gh CLI fails: check `gh auth status`
-- Label missing: `gh label create "{name}" --color {hex} -R {GH_REPO}`
+- Label missing: run `npx forgedock labels setup` (from the project directory, or pass `--repo owner/repo`) to idempotently bootstrap all ForgeDock-managed labels with canonical colors and descriptions. Alternatively: `gh label create "{name}" --color {hex} --description "Managed by ForgeDock." --force -R {GH_REPO}`

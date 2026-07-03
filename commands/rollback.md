@@ -9,6 +9,7 @@ argument-hint: [PR number to revert, or "last" for most recent deploy]
 
 **Config variables used by this command** (set in `forge.yaml`):
 - `{REPO_PATH}` ← `paths.root` — project repository root
+- `{DEPLOY_WORKFLOW}` ← `deploy.workflow` (optional) — GitHub Actions workflow filename for fast-track deploys (e.g., `hotfix-deploy.yml`). When absent or empty, the workflow-trigger suggestion is omitted.
 
 You are the pipeline's emergency rollback system. When a shipped feature or fix causes production issues, this command creates a revert PR and fast-tracks it through the pipeline.
 
@@ -112,12 +113,29 @@ If conflicts cannot be auto-resolved, report to user and STOP.
 
 ### Step 2C: Verify the revert compiles
 
-```bash
-# Python files
-poetry -C services/api run python -m py_compile {reverted_python_files} 2>&1
+Read `forge.yaml → verification.commands` for project-specific tool commands:
 
-# TypeScript files (if any)
-cd web && npx tsc --noEmit 2>&1 | head -20
+```bash
+# Python compile check (always runs — no config needed)
+for f in {reverted_python_files}; do
+    python3 -m py_compile "$f" 2>&1
+done
+
+# Python format check (config-driven)
+PYTHON_FORMAT=$(yq '.verification.commands.python.format // ""' forge.yaml 2>/dev/null || echo '')
+if [ -n "$PYTHON_FORMAT" ]; then
+    eval "$PYTHON_FORMAT" 2>&1 | head -20
+else
+    echo "SKIPPED — python.format not configured in verification.commands"
+fi
+
+# TypeScript typecheck (config-driven)
+TS_TYPECHECK=$(yq '.verification.commands.typescript.typecheck // ""' forge.yaml 2>/dev/null || echo '')
+if [ -n "$TS_TYPECHECK" ]; then
+    eval "$TS_TYPECHECK" 2>&1 | head -20
+else
+    echo "SKIPPED — typescript.typecheck not configured in verification.commands"
+fi
 ```
 
 ---
@@ -160,10 +178,11 @@ PR_EOF
 ```bash
 gh pr merge {REVERT_PR} --merge
 ```
-- Then trigger hotfix deploy:
+- Then trigger hotfix deploy (requires `deploy.workflow` set in `forge.yaml`):
 ```bash
 echo "Revert merged to main. CI/CD will deploy automatically."
-echo "For faster deploy, trigger hotfix: gh workflow run hotfix-deploy.yml --ref main -f services={affected} -f reason=\"Rollback PR #{PR_NUMBER}\""
+echo "For faster deploy, trigger deploy workflow: gh workflow run {deploy.workflow} --ref main -f {deploy.workflow_inputs.services}={affected} -f {deploy.workflow_inputs.reason}=\"Rollback PR #{PR_NUMBER}\""
+# If deploy.workflow is not configured in forge.yaml, CI/CD will deploy automatically on the next push to main.
 ```
 
 **If not urgent**:
@@ -192,7 +211,7 @@ fi
 
 ```bash
 gh issue create --title "fix: {original_title} (reverted — needs new approach)" \
-  --label "bug,P1" \
+  --label "bug,priority:P1" \
   --body "$(cat <<'BODY_EOF'
 ## Problem
 

@@ -89,15 +89,19 @@ Mission: Validate whether the issue is real. Assume description is wrong until p
 
 **Domain file hints** (start search here):
 
-| Domain | Key files |
-|--------|-----------|
-| BILLING | `routers/billing.py`, `core/pricing.py`, `services/credit_service.py` |
-| SCRAPING | `unified_consumer.py`, `queues.py`, `domain_playbooks.json` |
+Configure domain-to-file mappings for your project in `forge.yaml → review.key_paths`. The table below shows the standard layout — override any entry that doesn't match your codebase:
+
+| Domain | Default key files (override via forge.yaml) |
+|--------|---------------------------------------------|
+| BILLING | `routers/billing.py`, `core/pricing.py`, `services/payment_service.py` |
+| WORKER | `worker/main.py`, `worker/queues.py`, `worker/tasks.py` |
 | AUTH | `core/auth.py`, `routers/auth.py`, `dependencies.py` |
 | DATABASE | `infra/migrations/`, `models/`, `db/` |
 | FRONTEND | `web/src/app/`, `web/src/components/`, `web/src/lib/` |
-| CORTEX | `cortex_client.py`, `routers/cortex.py` |
+| AI | `services/ai_client.py`, `routers/ai.py` |
 | INFRA | `.github/workflows/`, `docker-compose.yml`, `infra/traefik/` |
+
+If `forge.yaml → review.key_paths` is present, use those mappings instead of the defaults above.
 
 **Steps**: Check right branch → read domain files → verify claims → git blame → determine root cause → identify affected files → validate proposed fixes against full system stack.
 
@@ -210,7 +214,24 @@ Fix HIGH/MEDIUM findings. Max 2 iterations. Skip for 1-file config/docs edits.
 All client-side fetch/useSWR/apiFetch must use `/api/...` proxy routes, NEVER `/api/v1/...` directly.
 
 ### 3I: Deployment completeness check (MANDATORY)
-New env vars must be in: `.env.example` + SOPS `prod.enc.yaml` + `decrypt-secrets.sh` ENV_MAPPING + `env_validation.py` (if API).
+Skip if no new env vars introduced.
+
+For each new env var, verify present in ALL required locations:
+
+| Location | Required for |
+|----------|-------------|
+| `.env.example` | All new vars |
+| Secrets backend (see `deploy.secrets_backend`) | Secret vars — skip if backend is `none` or unset |
+| `app/env_validation.py` | API service vars (if project has one) |
+
+**Secrets backend check** *(trigger: `deploy.secrets_backend == "sops"`)*:
+
+If the project uses SOPS, verify the new var is present in all SOPS chain locations:
+- `infra/secrets/prod.enc.yaml` — SOPS-encrypted secret store
+- `infra/decrypt-secrets.sh` ENV_MAPPING — maps SOPS key to env var name
+
+If `deploy.secrets_backend` is absent or not `sops`, skip these checks and log:
+> `SKIP: SOPS chain check — deploy.secrets_backend is not "sops". Configure deploy.secrets_backend in forge.yaml to enable.`
 
 ### 3J: Commit
 Conventional prefix (fix/feat/refactor/docs). Reference #{NUMBER} in the commit message.

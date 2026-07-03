@@ -108,6 +108,22 @@ REVIEW_SHA=$(gh pr view $ARGUMENTS --json headRefOid --jq '.headRefOid')
 REVIEW_SHA_SHORT=$(echo "$REVIEW_SHA" | cut -c1-7)
 gh pr diff $ARGUMENTS --name-only
 gh pr diff $ARGUMENTS
+
+# Mergeability check — GitHub computes this asynchronously; retry up to 3× on UNKNOWN
+# <!-- Added: forge#194 -->
+MERGE_HEALTH_RESULT=$(gh pr view $ARGUMENTS --json mergeable,mergeStateStatus --jq '"\\(.mergeable)|\\(.mergeStateStatus)"')
+MERGE_HEALTH=${MERGE_HEALTH_RESULT%%|*}
+MERGE_HEALTH_STATE=${MERGE_HEALTH_RESULT##*|}
+MERGE_RETRY=0
+while [ "$MERGE_HEALTH" = "UNKNOWN" ] && [ "$MERGE_RETRY" -lt 3 ]; do
+    MERGE_RETRY=$((MERGE_RETRY + 1))
+    sleep 5
+    MERGE_HEALTH_RESULT=$(gh pr view $ARGUMENTS --json mergeable,mergeStateStatus --jq '"\\(.mergeable)|\\(.mergeStateStatus)"')
+    MERGE_HEALTH=${MERGE_HEALTH_RESULT%%|*}
+    MERGE_HEALTH_STATE=${MERGE_HEALTH_RESULT##*|}
+done
+# MERGE_HEALTH: MERGEABLE | CONFLICTING | UNKNOWN (still async after retries)
+# MERGE_HEALTH_STATE: CLEAN | DIRTY | BLOCKED | UNSTABLE | UNKNOWN
 ```
 
 ### 1B: Classify
@@ -140,27 +156,78 @@ Record: services touched, domains detected, PR scope (1-2 sentences), change cat
 ## Phase 2: Automated Checks (Run ALL in Parallel)
 
 ### 2A: Python Linting (if Python changed)
-```bash
-cd services/api && poetry run black --check app/
-cd services/api && poetry run isort --check app/
-cd services/worker && poetry run black --check worker/
-cd services/worker && poetry run isort --check worker/
-python3 -m py_compile <each-changed-python-file>
-```
-**IMPORTANT**: Always `cd` into service dir and `poetry run black`. Never `pipx run black`.
 
-### 2B: TypeScript/JS (if web/ changed)
+Read `forge.yaml → verification.commands.python` for project-specific tool commands:
+
 ```bash
-cd web && npx prettier --check "src/**/*.{ts,tsx}"
-cd web && npx tsc --noEmit
-cd web && npx next lint
+# Read toolchain commands from forge.yaml
+PYTHON_FORMAT=$(yq '.verification.commands.python.format // ""' forge.yaml 2>/dev/null || echo '')
+PYTHON_LINT=$(yq '.verification.commands.python.lint // ""' forge.yaml 2>/dev/null || echo '')
+PYTHON_TYPECHECK=$(yq '.verification.commands.python.typecheck // ""' forge.yaml 2>/dev/null || echo '')
+
+# Run format check
+if [ -n "$PYTHON_FORMAT" ]; then
+    eval "$PYTHON_FORMAT" 2>&1 | head -30
+else
+    echo "SKIPPED — python.format not configured in verification.commands"
+fi
+
+# Run lint
+if [ -n "$PYTHON_LINT" ]; then
+    eval "$PYTHON_LINT" 2>&1 | head -30
+else
+    echo "SKIPPED — python.lint not configured in verification.commands"
+fi
+
+# Run typecheck
+if [ -n "$PYTHON_TYPECHECK" ]; then
+    eval "$PYTHON_TYPECHECK" 2>&1 | head -50
+else
+    echo "SKIPPED — python.typecheck not configured in verification.commands"
+fi
+
+# Always run compile check on changed Python files (fast, language-universal)
+gh pr diff $ARGUMENTS --name-only | grep '\.py$' | while IFS= read -r f; do
+    python3 -m py_compile "$f" 2>&1
+done
+```
+
+### 2B: TypeScript/JS (if TypeScript/JS changed)
+
+Read `forge.yaml → verification.commands.typescript` for project-specific tool commands:
+
+```bash
+TS_FORMAT=$(yq '.verification.commands.typescript.format // ""' forge.yaml 2>/dev/null || echo '')
+TS_LINT=$(yq '.verification.commands.typescript.lint // ""' forge.yaml 2>/dev/null || echo '')
+TS_TYPECHECK=$(yq '.verification.commands.typescript.typecheck // ""' forge.yaml 2>/dev/null || echo '')
+
+# Run format check
+if [ -n "$TS_FORMAT" ]; then
+    eval "$TS_FORMAT" 2>&1 | head -30
+else
+    echo "SKIPPED — typescript.format not configured in verification.commands"
+fi
+
+# Run lint
+if [ -n "$TS_LINT" ]; then
+    eval "$TS_LINT" 2>&1 | head -30
+else
+    echo "SKIPPED — typescript.lint not configured in verification.commands"
+fi
+
+# Run typecheck
+if [ -n "$TS_TYPECHECK" ]; then
+    eval "$TS_TYPECHECK" 2>&1 | head -50
+    TS_TYPECHECK_EXIT=$?
+else
+    echo "SKIPPED — typescript.typecheck not configured in verification.commands"
+    TS_TYPECHECK_EXIT=0
+fi
 ```
 
 ### 2C: Static Type Checking (if Python changed)
-```bash
-cd services/api && poetry run mypy app/ --ignore-missing-imports --no-error-summary 2>&1 | head -50
-cd services/api && poetry run ruff check app/ --select=E,W,F,B,S --ignore=E501 2>&1 | head -30
-```
+
+Covered by `PYTHON_TYPECHECK` command in 2A above. If `verification.commands.python.typecheck` is unset, this step is explicitly skipped with a log line — it does not silently pass.
 
 ### 2D: Environment Variable Audit
 ```bash
@@ -176,7 +243,7 @@ gh pr diff $ARGUMENTS | grep -oE "['\"][A-Za-z0-9+/=]{40,}['\"]" | head -10
 
 ### 2F: SQL Migration Validation (if *.sql changed)
 ```bash
-for sql_file in $(gh pr diff $ARGUMENTS --name-only | grep "\.sql$"); do
+gh pr diff $ARGUMENTS --name-only | grep "\.sql$" | while IFS= read -r sql_file; do
     grep -E "FOR UPDATE" "$sql_file" | grep -qE "(SUM|COUNT|AVG|MIN|MAX)\s*\(" && echo "ERROR: FOR UPDATE with aggregate"
     grep -qE "DROP (TABLE|COLUMN|INDEX)" "$sql_file" && ! grep -qE "IF EXISTS" "$sql_file" && echo "WARNING: DROP without IF EXISTS"
     grep -qE "ALTER TABLE.*ADD COLUMN.*NOT NULL" "$sql_file" && ! grep -qE "DEFAULT" "$sql_file" && echo "WARNING: NOT NULL without DEFAULT"
@@ -190,8 +257,27 @@ git diff origin/main...HEAD -- "**/package.json" | grep -E "^\+" | grep -v "^\+\
 ```
 
 ### 2H: Tests
+
+Read `forge.yaml → verification.commands.{lang}.test` for the project's test command:
+
 ```bash
-cd services/api && poetry run pytest tests/ -x -q --tb=short 2>&1 | tail -30
+# Check each configured language for a test command
+for lang in python typescript go rust; do
+    TEST_CMD=$(yq ".verification.commands.${lang}.test // \"\"" forge.yaml 2>/dev/null || echo '')
+    if [ -n "$TEST_CMD" ]; then
+        echo "=== Running tests (${lang}): ${TEST_CMD} ==="
+        eval "$TEST_CMD" 2>&1 | tail -30
+        TEST_EXIT=$?
+        [ "$TEST_EXIT" -ne 0 ] && echo "BLOCKING: ${lang} tests failed (exit $TEST_EXIT)"
+    fi
+done
+
+# If no test commands were configured, log explicitly
+PYTHON_TEST=$(yq '.verification.commands.python.test // ""' forge.yaml 2>/dev/null || echo '')
+TS_TEST=$(yq '.verification.commands.typescript.test // ""' forge.yaml 2>/dev/null || echo '')
+if [ -z "$PYTHON_TEST" ] && [ -z "$TS_TEST" ]; then
+    echo "SKIPPED — no test commands configured in verification.commands"
+fi
 ```
 **BLOCKING if tests fail.**
 
@@ -201,36 +287,67 @@ cd services/api && poetry run pytest tests/ -x -q --tb=short 2>&1 | tail -30
 CHANGED_FILES=$(gh pr diff $ARGUMENTS --name-only)
 HAS_TS=$(echo "$CHANGED_FILES" | grep -E '\.(tsx?|jsx?)$' | head -1)
 HAS_PY=$(echo "$CHANGED_FILES" | grep -E '\.py$' | head -1)
-IS_STAGING_TO_MAIN=$([[ "$HEAD" == "staging" && "$BASE" == "main" ]] && echo "true" || echo "false")
-IS_MILESTONE_TO_STAGING=$([[ "$HEAD" =~ ^milestone/ && "$BASE" == "staging" ]] && echo "true" || echo "false")
-REQUIRES_FULL_BUILD=$([[ "$IS_STAGING_TO_MAIN" == "true" || "$IS_MILESTONE_TO_STAGING" == "true" ]] && echo "true" || echo "false")
+# Use POSIX-portable if/else (avoid bash-only [[ ]])
+IS_STAGING_TO_MAIN="false"
+if [ "$HEAD" = "staging" ] && [ "$BASE" = "main" ]; then IS_STAGING_TO_MAIN="true"; fi
+IS_MILESTONE_TO_STAGING="false"
+case "$HEAD" in milestone/*) if [ "$BASE" = "staging" ]; then IS_MILESTONE_TO_STAGING="true"; fi ;; esac
+REQUIRES_FULL_BUILD="false"
+if [ "$IS_STAGING_TO_MAIN" = "true" ] || [ "$IS_MILESTONE_TO_STAGING" = "true" ]; then REQUIRES_FULL_BUILD="true"; fi
 ```
 
 **TypeScript files changed:**
+
+Read `forge.yaml → verification.commands.typescript.typecheck` and `.build`:
+
 ```bash
 gh pr checkout $ARGUMENTS --detach 2>/dev/null
-cd web && npx tsc --noEmit 2>&1
-TSC_EXIT=$?
-if [ "$REQUIRES_FULL_BUILD" = "true" ] || [ "$TSC_EXIT" -eq 0 ]; then
-    npx next build 2>&1 | tail -30
-    BUILD_EXIT=$?
+
+TS_TYPECHECK=$(yq '.verification.commands.typescript.typecheck // ""' forge.yaml 2>/dev/null || echo '')
+TS_BUILD=$(yq '.verification.commands.typescript.build // ""' forge.yaml 2>/dev/null || echo '')
+
+if [ -n "$TS_TYPECHECK" ]; then
+    eval "$TS_TYPECHECK" 2>&1
+    TSC_EXIT=$?
+else
+    echo "SKIPPED — typescript.typecheck not configured in verification.commands"
+    TSC_EXIT=0
 fi
-cd .. && git checkout - 2>/dev/null
+
+if [ -n "$TS_BUILD" ] && { [ "$REQUIRES_FULL_BUILD" = "true" ] || [ "$TSC_EXIT" -eq 0 ]; }; then
+    eval "$TS_BUILD" 2>&1 | tail -30
+    BUILD_EXIT=$?
+elif [ -z "$TS_BUILD" ]; then
+    echo "SKIPPED — typescript.build not configured in verification.commands"
+fi
+
+git checkout - 2>/dev/null
 ```
 
 If `TSC_EXIT != 0`: **CONFIRMED blocking** — type errors.
-If `BUILD_EXIT != 0`: **CONFIRMED blocking** — SSG prerender failure.
+If `BUILD_EXIT != 0`: **CONFIRMED blocking** — build/prerender failure.
 
-**CRITICAL**: `tsc --noEmit` alone is NOT sufficient for staging→main or milestone→staging. PR #2565 passed tsc but failed next build. PR #11637 (Session Intelligence milestone) was APPROVED without any build check because milestone→staging was excluded — 4 build errors shipped to staging.
+**CRITICAL**: typecheck alone is NOT sufficient for staging→main or milestone→staging — configure `typescript.build` in `verification.commands` to catch SSG/prerender failures that typecheck misses.
 
 **Python files changed:**
+
+Read `forge.yaml → verification.commands.python.format` and `.build`:
+
 ```bash
 gh pr checkout $ARGUMENTS --detach 2>/dev/null
-for f in $(echo "$CHANGED_FILES" | grep '\.py$'); do python3 -m py_compile "$f" 2>&1; done
+
+# Compile-check all changed Python files (language-universal — no config needed)
+echo "$CHANGED_FILES" | grep '\.py$' | while IFS= read -r f; do python3 -m py_compile "$f" 2>&1; done
+
 if [ "$REQUIRES_FULL_BUILD" = "true" ]; then
-    cd services/api && poetry run black --check app/ 2>&1
-    cd ../.. && cd services/worker && poetry run black --check worker/ 2>&1
+    PYTHON_FORMAT=$(yq '.verification.commands.python.format // ""' forge.yaml 2>/dev/null || echo '')
+    if [ -n "$PYTHON_FORMAT" ]; then
+        eval "$PYTHON_FORMAT" 2>&1
+    else
+        echo "SKIPPED — python.format not configured in verification.commands (full-build format check skipped)"
+    fi
 fi
+
 git checkout - 2>/dev/null
 ```
 
@@ -242,9 +359,9 @@ Check whether the PR's actual changes match what the builder committed to in its
 
 ```bash
 # Find the contract comment on the linked issue
-ISSUE_NUM=$(gh pr view $ARGUMENTS --json body --jq '.body' | grep -oP 'Closes #\K\d+|#\K\d+' | head -1)
+ISSUE_NUM=$(gh pr view $ARGUMENTS --json body --jq '.body | gsub("(?s).*?(?:Closes #|#)(?<n>[0-9]+).*"; "\(.n)") // empty' 2>/dev/null | head -1)
 if [ -n "$ISSUE_NUM" ]; then
-    CONTRACT_FILES=$(gh api repos/${REPO}/issues/${ISSUE_NUM}/comments --jq '[.[] | select(.body | contains("FORGE:CONTRACT"))] | .[0].body' 2>/dev/null | grep -oP '`[^`]+\.(py|tsx?|sql|sh|yml|yaml|json)`' | tr -d '`' | sort -u)
+    CONTRACT_FILES=$(gh api repos/${REPO}/issues/${ISSUE_NUM}/comments --jq '[.[] | select(.body | contains("FORGE:CONTRACT"))] | .[0].body' 2>/dev/null | grep -E '`[^`]+\.(py|tsx?|sql|sh|yml|yaml|json)`' | grep -oE '`[^`]+\.(py|tsx?|sql|sh|yml|yaml|json)`' | tr -d '`' | sort -u)
     PR_FILES=$(gh pr diff $ARGUMENTS --name-only | sort -u)
 
     # Files in PR but NOT in contract
@@ -273,17 +390,28 @@ For each changed file, identify its **activation path** — how does execution r
 
 ### Step 2.5A: Identify File Types and Their Registration Points
 
-Map each changed file to its activation requirements:
+Map each changed file to its activation requirements.
+
+**Layout path resolution** — Before applying the table below, read your project's layout from `forge.yaml → review.layout` and substitute the values into the pattern column. Defaults (used when the key is absent) match the AlterLab monorepo layout:
+
+| `forge.yaml` key | Default | Used in table as |
+|-----------------|---------|-----------------|
+| `review.layout.pages` | `web/src/app` | `{PAGES_ROOT}` |
+| `review.layout.api_routers` | `services/api/app/routers` | `{API_ROUTERS}` |
+| `review.layout.api_main` | `services/api/app/main.py` | `{API_MAIN}` |
+| `review.layout.api_middleware` | `services/api/app/middleware` | `{API_MIDDLEWARE}` |
+| `review.layout.migrations` | `infra/migrations` | `{MIGRATIONS}` |
+| `review.layout.worker` | `services/worker` | `{WORKER}` |
 
 | Changed File Pattern | Assumption | Verification Target |
 |---------------------|------------|---------------------|
-| `web/src/app/api/**/*.ts` (Route Handler) | Requests reach this handler | Check `web/next.config.js` rewrites don't shadow it; check `infra/nginx/nginx.conf` routes path to Next.js |
-| `services/api/app/routers/*.py` (API Router) | Router is registered in app | Check `services/api/app/main.py` includes this router |
-| `services/api/app/middleware/*.py` | Middleware is in the stack | Check `services/api/app/main.py` middleware registration order |
-| `infra/migrations/*.sql` | Migration runs on current schema | Check previous migration's end state matches assumptions |
+| `{PAGES_ROOT}/api/**/*.ts` (Route Handler) | Requests reach this handler | Check `web/next.config.js` rewrites don't shadow it; check `infra/nginx/nginx.conf` routes path to Next.js |
+| `{API_ROUTERS}/*.py` (API Router) | Router is registered in app | Check `{API_MAIN}` includes this router |
+| `{API_MIDDLEWARE}/*.py` | Middleware is in the stack | Check `{API_MAIN}` middleware registration order |
+| `{MIGRATIONS}/*.sql` | Migration runs on current schema | Check previous migration's end state matches assumptions |
 | `shared/**/*.py` | Imported by consumer services | Verify import paths exist in api/worker; check Docker volume mounts |
-| `services/worker/worker/*.py` (Consumer) | Queue consumer is registered | Check consumer registration in worker startup |
-| Any file using `os.getenv("NEW_VAR")` | Env var is set at runtime | Check `docker-compose.yml`, `.env.example`, `services/api/app/core/env_validation.py` |
+| `{WORKER}/**/*.py` (Consumer) | Queue consumer is registered | Check consumer registration in worker startup |
+| Any file using `os.getenv("NEW_VAR")` | Env var is set at runtime | Check `docker-compose.yml`, `.env.example`, `{API_MAIN}` env validation module |
 | `scripts/decrypt-secrets.sh` (ENV_MAPPING) | Secret reaches running container | Trace full chain: SOPS key → ENV_MAPPING → deploy workflow SCP target → merge script path → `docker-compose.prod.yml` env_file. See Step 2.5B SOPS deploy chain check. |
 | `.secrets/prod.enc.yaml` | SOPS key maps to ENV_MAPPING | Verify key path in YAML matches the tuple in `decrypt-secrets.sh` ENV_MAPPING |
 | `.github/workflows/deploy-production.yml` | Deploy paths are consistent | Verify SCP target + merge script `PROJECT` var resolve to same dir as `docker-compose.prod.yml` env_file |
@@ -301,55 +429,73 @@ Map each changed file to its activation requirements:
 
 For each changed file, execute the relevant checks using the standalone verification scripts in `$FORGE_HOME/scripts/`. These scripts can also be run independently outside the review context (e.g., from `/quality-gate` or `/work-on` builder steps).
 
+**Platform note**: The verify-*.sh scripts require bash and standard POSIX tools. On Windows without bash (Git Bash / WSL / MSYS2), these checks are skipped with an explicit message — the review continues without them.
+
 ```bash
 CHANGED_FILES=$(gh pr diff $ARGUMENTS --name-only)
 REPO_ROOT="."  # Assumes cwd is the repo root
 
-# Write changed files and diff to temp files for script consumption
-CHANGED_FILES_TMP=$(mktemp)
-DIFF_TMP=$(mktemp)
-echo "$CHANGED_FILES" > "$CHANGED_FILES_TMP"
-gh pr diff $ARGUMENTS > "$DIFF_TMP"
-
-# --- Script-based checks (reusable, testable, deterministic) ---
-# Each script exits 0 (pass), 1 (blocking findings), or 2 (warnings only).
-# Output is structured: "BLOCKING: ...", "WARNING: ...", "OK: ..." per line.
-
-# 1. Route/router/middleware/shared-module/component registration
-echo "=== Running: verify-route-registration.sh ==="
-$FORGE_HOME/scripts/verify-route-registration.sh "$CHANGED_FILES_TMP" "$REPO_ROOT" || true
-
-# 2. Environment variable wiring (checks .env.example, docker-compose, env_validation, SOPS mapping)
-echo "=== Running: verify-env-vars.sh ==="
-$FORGE_HOME/scripts/verify-env-vars.sh "$DIFF_TMP" "$REPO_ROOT" || true
-
-# 3. Host headers in shell scripts + client-side proxy bypass check
-# Read project-specific internal service patterns from forge.yaml (if present)
-FORGE_INTERNAL_PATTERNS=""
-if [ -f "$REPO_ROOT/forge.yaml" ]; then
-    FORGE_INTERNAL_PATTERNS=$(grep -A 999 'internal_service_patterns:' "$REPO_ROOT/forge.yaml" \
-        | grep -E '^\s*-\s+' \
-        | sed 's/^\s*-\s*//' \
-        | tr -d '"'"'" \
-        | paste -sd '|' -)
+# --- Platform / bash capability guard ---
+# The verify-*.sh scripts require bash. Detect availability before invoking.
+# On Windows without Git Bash/WSL, skip gracefully rather than crash.
+BASH_AVAILABLE=false
+if command -v bash >/dev/null 2>&1 && bash -c 'echo ok' >/dev/null 2>&1; then
+    BASH_AVAILABLE=true
 fi
-export FORGE_INTERNAL_PATTERNS
-echo "=== Running: verify-host-headers.sh ==="
-$FORGE_HOME/scripts/verify-host-headers.sh "$CHANGED_FILES_TMP" "$REPO_ROOT" || true
 
-# 4. SOPS deploy chain (ENV_MAPPING consistency, deploy path drift, hotfix sync)
-echo "=== Running: verify-sops-chain.sh ==="
-$FORGE_HOME/scripts/verify-sops-chain.sh "$DIFF_TMP" "$CHANGED_FILES_TMP" "$REPO_ROOT" || true
+if [ "$BASH_AVAILABLE" = "true" ]; then
+    # Write changed files and diff to temp files for script consumption.
+    # Use PID-based names instead of mktemp for cross-platform compatibility.
+    CHANGED_FILES_TMP="/tmp/forge-review-changed-$$.tmp"
+    DIFF_TMP="/tmp/forge-review-diff-$$.tmp"
+    echo "$CHANGED_FILES" > "$CHANGED_FILES_TMP"
+    gh pr diff $ARGUMENTS > "$DIFF_TMP"
 
-# Cleanup temp files
-rm -f "$CHANGED_FILES_TMP" "$DIFF_TMP"
+    # --- Script-based checks (reusable, testable, deterministic) ---
+    # Each script exits 0 (pass), 1 (blocking findings), or 2 (warnings only).
+    # Output is structured: "BLOCKING: ...", "WARNING: ...", "OK: ..." per line.
+
+    # 1. Route/router/middleware/shared-module/component registration
+    echo "=== Running: verify-route-registration.sh ==="
+    bash "$FORGE_HOME/scripts/verify-route-registration.sh" "$CHANGED_FILES_TMP" "$REPO_ROOT" || true
+
+    # 2. Environment variable wiring (checks .env.example, docker-compose, env_validation, SOPS mapping)
+    echo "=== Running: verify-env-vars.sh ==="
+    bash "$FORGE_HOME/scripts/verify-env-vars.sh" "$DIFF_TMP" "$REPO_ROOT" || true
+
+    # 3. Host headers in shell scripts + client-side proxy bypass check
+    # Read project-specific internal service patterns from forge.yaml (if present)
+    FORGE_INTERNAL_PATTERNS=""
+    if [ -f "$REPO_ROOT/forge.yaml" ]; then
+        FORGE_INTERNAL_PATTERNS=$(grep -A 999 'internal_service_patterns:' "$REPO_ROOT/forge.yaml" \
+            | grep -E '^\s*-\s+' \
+            | sed 's/^\s*-\s*//' \
+            | tr -d '"'"'" \
+            | awk 'NR>1{printf "|"}{printf $0}END{print ""}')
+    fi
+    export FORGE_INTERNAL_PATTERNS
+    echo "=== Running: verify-host-headers.sh ==="
+    bash "$FORGE_HOME/scripts/verify-host-headers.sh" "$CHANGED_FILES_TMP" "$REPO_ROOT" || true
+
+    # 4. SOPS deploy chain (ENV_MAPPING consistency, deploy path drift, hotfix sync)
+    echo "=== Running: verify-sops-chain.sh ==="
+    bash "$FORGE_HOME/scripts/verify-sops-chain.sh" "$DIFF_TMP" "$CHANGED_FILES_TMP" "$REPO_ROOT" || true
+
+    # Cleanup temp files
+    rm -f "$CHANGED_FILES_TMP" "$DIFF_TMP"
+else
+    echo "=== Phase 2.5B: verify-*.sh skipped — bash not available on this platform ==="
+    echo "    The verify-*.sh scripts require bash (POSIX shell)."
+    echo "    Install Git Bash (Windows) or WSL to enable these checks."
+    echo "    The review continues — integration assumptions should be verified manually."
+fi
 
 # --- Inline checks (not yet extracted to scripts) ---
 
 # Python scoping hazard check — local imports that shadow module-level names
 # A local `import X` makes X a local variable for the ENTIRE function scope.
 # Any reference to X ABOVE the local import will crash with UnboundLocalError.
-for f in $(echo "$CHANGED_FILES" | grep -E '\.py$'); do
+echo "$CHANGED_FILES" | grep -E '\.py$' | while IFS= read -r f; do
     echo "=== Python Scoping Check: $f ==="
     # Find function-scoped imports (indented import statements)
     grep -nE "^\s+import [a-z]" "$f" 2>/dev/null | while read line; do
@@ -363,7 +509,7 @@ for f in $(echo "$CHANGED_FILES" | grep -E '\.py$'); do
 done
 
 # Config file assumption check (baked into Docker image vs volume-mounted)
-for f in $(echo "$CHANGED_FILES" | grep -E "config/.*\.(json|yaml|yml)$"); do
+echo "$CHANGED_FILES" | grep -E "config/.*\.(json|yaml|yml)$" | while IFS= read -r f; do
     echo "=== Config File: $f ==="
     grep -n "$(dirname $f)" docker-compose.yml 2>/dev/null || echo "WARNING: Config dir may not be mounted — changes may require --build"
     grep -n "$(dirname $f)" services/*/Dockerfile 2>/dev/null || true
@@ -380,7 +526,9 @@ done
 # diff. Pre-existing drift is the most dangerous kind — it lurks until
 # staging→main and then blocks the deploy.
 WORKFLOW_FILES=$(echo "$CHANGED_FILES" | grep -E "^\.github/workflows/.*\.yml$" || true)
-IS_STAGING_PR=$([[ "$HEAD" == "staging" && "$BASE" == "main" ]] && echo "true" || echo "false")
+# Use POSIX-portable conditional (avoid bash-only [[ ]])
+IS_STAGING_PR="false"
+if [ "$HEAD" = "staging" ] && [ "$BASE" = "main" ]; then IS_STAGING_PR="true"; fi
 
 if [ -n "$WORKFLOW_FILES" ] || [ "$IS_STAGING_PR" = "true" ]; then
     echo "=== Sibling Workflow Drift Check (MANDATORY for staging→main) ==="
@@ -399,9 +547,14 @@ if [ -n "$WORKFLOW_FILES" ] || [ "$IS_STAGING_PR" = "true" ]; then
 
             echo "--- Comparing '$JOB' job between ci.yml and deploy-production.yml ---"
 
-            # Extract env vars from ALL steps in the job (not just pytest)
-            CI_ENVS=$(sed -n "/^  ${JOB}:/,/^  [a-z]/p" "$CI_WF" 2>/dev/null | grep -E "PYTHONPATH|DATABASE_URL|REDIS_URL|TESTING" | sed 's/^ *//' | sort)
-            DEPLOY_ENVS=$(sed -n "/^  ${JOB}:/,/^  [a-z]/p" "$DEPLOY_WF" 2>/dev/null | grep -E "PYTHONPATH|DATABASE_URL|REDIS_URL|TESTING" | sed 's/^ *//' | sort)
+            # Extract env vars from ALL steps in the job (not just pytest).
+            # Flag-based awk avoids the range-collapse bug: /pat1/,/pat2/ collapses
+            # to a single line when the header (e.g. "  test-api:") matches both
+            # patterns simultaneously. The flag form sets p=1 on the header line,
+            # prints body lines while p=1, and clears p when the next sibling job
+            # header (same indentation, lowercase start) is seen. <!-- Added: forge#310 -->
+            CI_ENVS=$(awk -v pat="^  ${JOB}:" 'BEGIN{p=0} $0~pat{p=1; print; next} p && /^  [a-z]/{p=0} p{print}' "$CI_WF" 2>/dev/null | grep -E "PYTHONPATH|DATABASE_URL|REDIS_URL|TESTING" | sed 's/^ *//' | sort)
+            DEPLOY_ENVS=$(awk -v pat="^  ${JOB}:" 'BEGIN{p=0} $0~pat{p=1; print; next} p && /^  [a-z]/{p=0} p{print}' "$DEPLOY_WF" 2>/dev/null | grep -E "PYTHONPATH|DATABASE_URL|REDIS_URL|TESTING" | sed 's/^ *//' | sort)
 
             # Check for PYTHONPATH specifically — the exact var that caused the #11356 failure
             CI_PYPATH=$(echo "$CI_ENVS" | grep "PYTHONPATH" || echo "(not set)")
@@ -414,16 +567,16 @@ if [ -n "$WORKFLOW_FILES" ] || [ "$IS_STAGING_PR" = "true" ]; then
             fi
 
             # Check for dependency installation steps that exist in one but not the other
-            CI_INSTALLS=$(sed -n "/^  ${JOB}:/,/^  [a-z]/p" "$CI_WF" 2>/dev/null | grep -c "poetry install\|pip install\|npm install" || echo 0)
-            DEPLOY_INSTALLS=$(sed -n "/^  ${JOB}:/,/^  [a-z]/p" "$DEPLOY_WF" 2>/dev/null | grep -c "poetry install\|pip install\|npm install" || echo 0)
+            CI_INSTALLS=$(awk -v pat="^  ${JOB}:" 'BEGIN{p=0} $0~pat{p=1; print; next} p && /^  [a-z]/{p=0} p{print}' "$CI_WF" 2>/dev/null | grep -c "poetry install\|pip install\|npm install" || echo 0)
+            DEPLOY_INSTALLS=$(awk -v pat="^  ${JOB}:" 'BEGIN{p=0} $0~pat{p=1; print; next} p && /^  [a-z]/{p=0} p{print}' "$DEPLOY_WF" 2>/dev/null | grep -c "poetry install\|pip install\|npm install" || echo 0)
             if [ "$CI_INSTALLS" != "$DEPLOY_INSTALLS" ]; then
                 echo "  WARNING: Different number of dependency install steps in '$JOB' — ci.yml has $CI_INSTALLS, deploy has $DEPLOY_INSTALLS"
                 echo "  ACTION: Read both files and verify all dependencies needed by tests are installed in both workflows."
             fi
 
             # Check step names — if CI has a step that deploy doesn't, flag it
-            CI_STEPS=$(sed -n "/^  ${JOB}:/,/^  [a-z]/p" "$CI_WF" 2>/dev/null | grep "- name:" | sed 's/.*- name: //' | sort)
-            DEPLOY_STEPS=$(sed -n "/^  ${JOB}:/,/^  [a-z]/p" "$DEPLOY_WF" 2>/dev/null | grep "- name:" | sed 's/.*- name: //' | sort)
+            CI_STEPS=$(awk -v pat="^  ${JOB}:" 'BEGIN{p=0} $0~pat{p=1; print; next} p && /^  [a-z]/{p=0} p{print}' "$CI_WF" 2>/dev/null | grep "- name:" | sed 's/.*- name: //' | sort)
+            DEPLOY_STEPS=$(awk -v pat="^  ${JOB}:" 'BEGIN{p=0} $0~pat{p=1; print; next} p && /^  [a-z]/{p=0} p{print}' "$DEPLOY_WF" 2>/dev/null | grep "- name:" | sed 's/.*- name: //' | sort)
             MISSING_IN_DEPLOY=$(comm -23 <(echo "$CI_STEPS") <(echo "$DEPLOY_STEPS") 2>/dev/null || true)
             if [ -n "$MISSING_IN_DEPLOY" ]; then
                 echo "  WARNING: Steps in ci.yml '$JOB' missing from deploy-production.yml:"
@@ -508,7 +661,7 @@ Read the file: $FORGE_HOME/commands/review-pr-agents.md
 **>>> LOAD CONFIG: Read forge.yaml for project context:**
 ```bash
 # Read review config from forge.yaml (if present in project root)
-FORGE_YAML="${REPO_ROOT}/forge.yaml"
+FORGE_YAML="${FORGE_CONFIG:-$(git rev-parse --show-toplevel 2>/dev/null)/forge.yaml}"
 PROJECT_NAME=$(yq '.project.name' "$FORGE_YAML" 2>/dev/null || echo "this project")
 PROJECT_CONTEXT=$(yq '.review.context' "$FORGE_YAML" 2>/dev/null || echo "")
 TECH_STACK=$(yq '.review.tech_stack' "$FORGE_YAML" 2>/dev/null || echo "")
@@ -552,7 +705,10 @@ gh api repos/{owner}/{repo}/issues/$ARGUMENTS/comments --jq '.[-10:] | .[].body[
 **Skip if**: Only 1 agent OR total findings ≤ 3.
 
 ```bash
-ALL_FINDINGS=$(gh api "repos/${REPO}/issues/${PR_NUMBER}/comments" --jq '.[].body' | grep -oP '(?<=<!-- FINDING:).*?(?= -->)')
+# Extract structured finding IDs from FINDING HTML comments.
+# Uses jq's scan() (POSIX-portable, no grep -oP required).
+ALL_FINDINGS=$(gh api "repos/${REPO}/issues/${PR_NUMBER}/comments" \
+    --jq '[.[].body | scan("<!-- FINDING:([^>]+) -->") | .[0]] | join("\n")')
 AGENT_COUNT=$(gh api "repos/${REPO}/issues/${PR_NUMBER}/comments" --jq '[.[] | select(.body | test("REVIEW-FINDINGS-START"))] | length')
 FINDING_COUNT=$(echo "$ALL_FINDINGS" | grep -c '.' || echo 0)
 ```
@@ -579,9 +735,13 @@ REPO=$(gh repo view --json nameWithOwner --jq '.nameWithOwner')
 HAS_SYNTHESIS=$(gh api "repos/${REPO}/issues/${PR_NUMBER}/comments" --jq '.[].body' | grep -c 'REVIEW-FINDINGS-SYNTHESIZED-START' || echo 0)
 
 if [ "$HAS_SYNTHESIS" -gt 0 ]; then
-    FINDINGS=$(gh api "repos/${REPO}/issues/${PR_NUMBER}/comments" --jq '.[] | select(.body | test("REVIEW-FINDINGS-SYNTHESIZED-START")) | .body' | grep -oP '(?<=<!-- FINDING:).*?(?= -->)')
+    # Extract finding IDs from synthesized block using jq scan() — no grep -oP needed
+    FINDINGS=$(gh api "repos/${REPO}/issues/${PR_NUMBER}/comments" \
+        --jq '[.[] | select(.body | test("REVIEW-FINDINGS-SYNTHESIZED-START")) | .body | scan("<!-- FINDING:([^>]+) -->") | .[0]] | join("\n")')
 else
-    FINDINGS=$(gh api "repos/${REPO}/issues/${PR_NUMBER}/comments" --jq '.[].body' | grep -oP '(?<=<!-- FINDING:).*?(?= -->)')
+    # Extract finding IDs from all agent comments using jq scan() — portable, no grep -oP
+    FINDINGS=$(gh api "repos/${REPO}/issues/${PR_NUMBER}/comments" \
+        --jq '[.[].body | scan("<!-- FINDING:([^>]+) -->") | .[0]] | join("\n")')
 fi
 ```
 
@@ -600,10 +760,12 @@ If still 0: review is clean — skip to Phase 7.
 ### 6C: Create Issues
 
 ```bash
-gh label create "review-finding" --color "D93F0B" --force 2>/dev/null
-gh label create "needs-validation" --color "FBCA04" --force 2>/dev/null
-gh label create "validated" --color "0E8A16" --force 2>/dev/null
-gh label create "false-positive" --color "CCCCCC" --force 2>/dev/null
+# Colors match the canonical ForgeDock label manifest (bin/labels.json).
+# Run `npx forgedock labels setup` to bootstrap all managed labels at once.
+gh label create "review-finding" --color "D93F0B" --description "Defect or improvement found during automated PR review. Managed by ForgeDock." --force -R {GH_REPO} 2>/dev/null
+gh label create "needs-validation" --color "FBCA04" --description "Review finding awaiting human validation. Managed by ForgeDock." --force -R {GH_REPO} 2>/dev/null
+gh label create "validated" --color "0E8A16" --description "Review finding confirmed as a real issue. Managed by ForgeDock." --force -R {GH_REPO} 2>/dev/null
+gh label create "false-positive" --color "CCCCCC" --description "Review finding dismissed as a false positive. Managed by ForgeDock." --force -R {GH_REPO} 2>/dev/null
 ```
 
 **Milestone detection:**
@@ -677,7 +839,7 @@ else
     ' 2>/dev/null | head -1)
     if [ -n "$REGRESSION" ]; then
         echo "REGRESSION: Previously fixed in #${REGRESSION} — elevating priority"
-        # Create with regression warning and P1 priority
+        # Create with regression warning and priority:P1 label
     fi
 fi
 ```
@@ -685,7 +847,7 @@ fi
 **Rules:**
 - Open `review-finding` issue at same file within ±5 lines → **skip** (do not create duplicate)
 - Open `review-finding` issue at same file with similar title (3+ shared keywords) → **skip** (likely same finding despite line drift)
-- Closed `review-finding` at same file within ±5 lines → create with regression warning, elevate to P1
+- Closed `review-finding` at same file within ±5 lines → create with regression warning, elevate to `priority:P1`
 
 **For each finding** (that passes dedup), create issue:
 ```bash
@@ -741,7 +903,7 @@ ISSUE_EOF
 )" --json number --jq '.number')
 ```
 
-Labels: `review-finding` + `needs-validation` + priority (`P1` CONFIRMED, `P2` LIKELY, `P3` POSSIBLE).
+Labels: `review-finding` + `needs-validation` + priority (`priority:P1` CONFIRMED, `priority:P2` LIKELY, `priority:P3` POSSIBLE).
 
 **Add to project board:**
 ```bash
@@ -752,7 +914,7 @@ for FINDING_NUM in {numbers}; do
   # PROJECT_ID = forge.yaml → project_board.project_id
   # STATUS_FIELD_ID = forge.yaml → project_board.field_ids.status
   # LANE_FIELD_ID = forge.yaml → project_board.field_ids.lane
-  # REVIEW_FINDING_OPTION_ID = forge.yaml → project_board.option_ids.status.in_review
+  # REVIEW_FINDING_OPTION_ID = forge.yaml → project_board.option_ids.workflow.in_review
   ITEM_ID=$(gh project item-add ${PROJECT_NUMBER} --owner ${OWNER} --url "https://github.com/${GH_REPO}/issues/${FINDING_NUM}" --format json --jq '.id' 2>/dev/null)
   [ -n "$ITEM_ID" ] && {
     [ -n "$STATUS_FIELD_ID" ] && gh project item-edit --project-id ${PROJECT_ID} --id "$ITEM_ID" --field-id ${STATUS_FIELD_ID} --single-select-option-id ${REVIEW_FINDING_OPTION_ID} 2>/dev/null || true
@@ -836,16 +998,31 @@ Verdict determined by standard blocking criteria.
 1. Phase 2 automated checks failed (build error, type error, test failure)
 2. Agent finding is CONFIRMED at HIGH or CRITICAL severity
 3. **[Milestone PRs only]** Phase 7A Purpose Regression Gate flagged `HAS_PURPOSE_REGRESSION=true` for this finding — regardless of whether it causes a runtime error
+4. `MERGE_HEALTH == "CONFLICTING"` OR `MERGE_HEALTH_STATE` in {`DIRTY`, `BLOCKED`} — PR cannot be merged cleanly into its base branch <!-- Added: forge#194 -->
+   - Verdict: CHANGES REQUESTED. Message: "Merge conflict with `{base}`. Rebase `{head}` onto `origin/{base}`, resolve the conflicting files, then re-run /review-pr."
+   - If `MERGE_HEALTH == "UNKNOWN"` after retries: emit a WARNING in the verdict body (do NOT treat as a block — GitHub may still be computing it).
 
 ```bash
+# Determine if mergeability is a blocker (MERGE_HEALTH/MERGE_HEALTH_STATE set in Phase 1A; BASE/HEAD set in Phase 0 Mode 3)
+HAS_MERGE_CONFLICT=false
+MERGE_CONFLICT_MSG=""
+if [ "$MERGE_HEALTH" = "CONFLICTING" ] || [ "$MERGE_HEALTH_STATE" = "DIRTY" ] || [ "$MERGE_HEALTH_STATE" = "BLOCKED" ]; then
+    HAS_MERGE_CONFLICT=true
+    MERGE_CONFLICT_MSG="Merge conflict with \`${BASE}\`. Rebase \`${HEAD}\` onto \`origin/${BASE}\`, resolve the conflicting files, then re-run /review-pr."
+fi
+
 # Stale review:
 gh pr review $ARGUMENTS --comment --body "Review of commit $REVIEW_SHA_SHORT is stale — PR HEAD changed. Re-run /review-pr."
 
 # Clean (no blocking issues):
-gh pr review $ARGUMENTS --comment --body "APPROVED: commit $REVIEW_SHA_SHORT after context-aware review ([N] agents: [names]). [M] findings created as issues. Safe to merge."
+gh pr review $ARGUMENTS --comment --body "APPROVED: commit $REVIEW_SHA_SHORT after context-aware review ([N] agents: [names]). [M] findings created as issues. Safe to merge.
+$([ "$MERGE_HEALTH" = "UNKNOWN" ] && echo "
+⚠ Mergeability: GitHub is still computing merge state (UNKNOWN after retries). Verify manually before merging.")"
 
-# Blocking issues (including purpose regressions):
+# Blocking issues (including merge conflicts and purpose regressions):
 gh pr review $ARGUMENTS --comment --body "CHANGES REQUESTED: commit $REVIEW_SHA_SHORT — [N] blocking issues found. See GitHub issues.
+$([ "$HAS_MERGE_CONFLICT" = "true" ] && echo "
+🔴 Merge Conflict: ${MERGE_CONFLICT_MSG}")
 $([ "$HAS_PURPOSE_REGRESSION" = "true" ] && echo "
 ⚠ Purpose Regression: [N] finding(s) contradict the milestone's stated goal and are automatically blocking regardless of runtime impact. See: ${PURPOSE_REGRESSION_FINDINGS[@]}")"
 ```
@@ -857,15 +1034,28 @@ $([ "$HAS_PURPOSE_REGRESSION" = "true" ] && echo "
 **Skip if** `AUTO_MERGE=false`.
 
 ```bash
-# Checkpoint comment on issue
-gh issue comment {MERGE_ISSUE} {MERGE_GH_FLAG} --body "Review complete for PR #{PR_NUMBER}. Verdict: {VERDICT}. Proceeding to merge."
+# Pre-merge mergeability guard — re-fetch fresh state before attempting merge <!-- Added: forge#194 -->
+# A PR that was MERGEABLE at Phase 1A may have become CONFLICTING if the base branch
+# received commits while the review was running. Re-check before every auto-merge.
+PRE_MERGE_RESULT=$(gh pr view {PR_NUMBER} {MERGE_GH_FLAG} --json mergeable,mergeStateStatus --jq '"\\(.mergeable)|\\(.mergeStateStatus)"')
+PRE_MERGE_HEALTH=${PRE_MERGE_RESULT%%|*}
+PRE_MERGE_HEALTH_STATE=${PRE_MERGE_RESULT##*|}
 
-# Merge
-gh pr merge {PR_NUMBER} {MERGE_GH_FLAG} --merge
+if [ "$PRE_MERGE_HEALTH" = "CONFLICTING" ] || [ "$PRE_MERGE_HEALTH_STATE" = "DIRTY" ] || [ "$PRE_MERGE_HEALTH_STATE" = "BLOCKED" ]; then
+    gh issue comment {MERGE_ISSUE} {MERGE_GH_FLAG} --body "⛔ Auto-merge aborted for PR #{PR_NUMBER}: PR is not mergeable (\`mergeable=${PRE_MERGE_HEALTH}\`, \`mergeStateStatus=${PRE_MERGE_HEALTH_STATE}\`). Rebase the branch onto \`{MERGE_BASE}\` and resolve conflicts, then re-run /review-pr."
+    gh issue edit {MERGE_ISSUE} {MERGE_GH_FLAG} --add-label "needs-human" 2>/dev/null || true
+    # STOP — do not attempt gh pr merge on a CONFLICTING/DIRTY PR
+else
+    # Checkpoint comment on issue
+    gh issue comment {MERGE_ISSUE} {MERGE_GH_FLAG} --body "Review complete for PR #{PR_NUMBER}. Verdict: {VERDICT}. Proceeding to merge."
 
-# Verify
-MERGE_STATE=$(gh pr view {PR_NUMBER} {MERGE_GH_FLAG} --json state --jq '.state')
-[ "$MERGE_STATE" != "MERGED" ] && gh issue comment {MERGE_ISSUE} {MERGE_GH_FLAG} --body "PR #{PR_NUMBER} merge failed. State: $MERGE_STATE."
+    # Merge
+    gh pr merge {PR_NUMBER} {MERGE_GH_FLAG} --merge
+
+    # Verify
+    MERGE_STATE=$(gh pr view {PR_NUMBER} {MERGE_GH_FLAG} --json state --jq '.state')
+    [ "$MERGE_STATE" != "MERGED" ] && gh issue comment {MERGE_ISSUE} {MERGE_GH_FLAG} --body "PR #{PR_NUMBER} merge failed. State: $MERGE_STATE."
+fi
 ```
 
 **Important**: Phase 8 ONLY merges the PR. It does NOT close the issue, update labels, or clean up worktrees. When invoked via `/work-on`, those responsibilities belong to `work-on/close.md` — which runs after the router detects state 4 (MERGE_COMPLETE: PR merged + issue open). Doing them here would cause the router to hit TERMINAL_MERGED (state 1) and skip the close phase entirely.
@@ -878,7 +1068,8 @@ MERGE_STATE=$(gh pr view {PR_NUMBER} {MERGE_GH_FLAG} --json state --jq '.state')
 
 ```bash
 CURRENT_SHA=$(gh pr view $ARGUMENTS --json headRefOid --jq '.headRefOid')
-REVIEW_IS_STALE=$([[ "$CURRENT_SHA" != "$REVIEW_SHA" ]] && echo "true" || echo "false")
+REVIEW_IS_STALE="false"
+if [ "$CURRENT_SHA" != "$REVIEW_SHA" ]; then REVIEW_IS_STALE="true"; fi
 ```
 
 ```bash

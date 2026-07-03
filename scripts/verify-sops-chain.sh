@@ -24,6 +24,24 @@ DIFF_INPUT="${1:--}"
 CHANGED_FILES_INPUT="${2:--}"
 REPO_ROOT="${3:-.}"
 
+# --- Secrets backend guard ---
+# This script only applies when the project uses SOPS as its secrets backend.
+# Read the configured backend from the FORGE_SECRETS_BACKEND env var (set by the
+# calling pipeline) or fall back to parsing forge.yaml in the repo root.
+#
+# If the backend is not "sops" (or is unset), exit 0 with a skip message.
+# This is a clean no-op — not a false-pass — so callers can distinguish
+# "SOPS configured and passed" from "SOPS not in use on this project".
+_SECRETS_BACKEND="${FORGE_SECRETS_BACKEND:-}"
+if [ -z "$_SECRETS_BACKEND" ] && [ -f "$REPO_ROOT/forge.yaml" ]; then
+    _SECRETS_BACKEND=$(grep -E '^\s*secrets_backend:' "$REPO_ROOT/forge.yaml" \
+        | head -1 | sed 's/.*secrets_backend:[[:space:]]*//' | tr -d '"' | tr -d "'" | xargs)
+fi
+if [ "$_SECRETS_BACKEND" != "sops" ]; then
+    echo "SKIP: verify-sops-chain — secrets_backend is '${_SECRETS_BACKEND:-none}' (not sops). Configure deploy.secrets_backend: sops in forge.yaml to enable SOPS chain verification."
+    exit 0
+fi
+
 if [ "$DIFF_INPUT" = "-" ]; then
     DIFF_CONTENT=$(cat)
 else
@@ -62,7 +80,9 @@ if [ -n "$NEW_MAPPINGS" ]; then
 
     # For each new mapping, verify the SOPS path structure exists
     # (We can't decrypt SOPS to verify values, but we can check the mapping format is valid)
-    echo "$NEW_MAPPINGS" | while IFS= read -r mapping; do
+    # Use process substitution instead of a pipe so WARNINGS increments persist in the parent shell.
+    # (echo ... | while read creates a subshell — counter changes are lost on subshell exit.)
+    while IFS= read -r mapping; do
         VAR_NAME=$(echo "$mapping" | grep -oE '^"[A-Z_]+"' | tr -d '"')
         SOPS_SECTION=$(echo "$mapping" | grep -oE '\("([a-z_]+)"' | head -1 | tr -d '("')
         SOPS_KEY=$(echo "$mapping" | grep -oE ', "([a-z_]+)"\)' | tr -d ', ")')
@@ -73,7 +93,7 @@ if [ -n "$NEW_MAPPINGS" ]; then
             echo "WARNING: Malformed ENV_MAPPING entry: $mapping"
             WARNINGS=$((WARNINGS + 1))
         fi
-    done
+    done < <(echo "$NEW_MAPPINGS")
 else
     echo "OK: No new ENV_MAPPING entries in diff"
 fi

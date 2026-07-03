@@ -12,6 +12,21 @@ echo "forge.yaml" >> .gitignore  # if your credentials path is sensitive
 
 ---
 
+## CLI Flags for `init`
+
+`npx forgedock init` accepts two optional flags that change how configuration is generated:
+
+| Flag | Behavior |
+|------|----------|
+| `--manual` | Skips AI autopilot enrichment entirely. Presents the annotated review screen with detection baseline values only (no AI-enriched suggestions). Detection still runs to provide defaults — you review and edit the raw inferred values on the same single-screen interface. |
+| `--verbose` | Surfaces each field's detection source and confidence rationale during the init flow. Helpful for understanding where ForgeDock inferred values from (e.g. `git remote`, `package.json`, `gh api`). |
+
+The two flags can be combined: `npx forgedock init --manual --verbose` shows the annotated review screen with detection baseline values and field provenance at each entry.
+
+The default (`npx forgedock init` with no flags) remains the zero-question autopilot: AI enrichment fills in everything it can, and you review the result on a single annotated screen.
+
+---
+
 ## Schema Overview
 
 | Section | Required | Purpose |
@@ -23,6 +38,7 @@ echo "forge.yaml" >> .gitignore  # if your credentials path is sensitive
 | [`project_board`](#project_board-optional) | No | GitHub Projects v2 integration |
 | [`services`](#services-optional) | No | External service URLs and IDs |
 | [`review`](#review-optional) | No | Context injected into review agents |
+| [`devdocs`](#devdocs-optional) | No | Devdocs knowledge tree path |
 | [`verification`](#verification-optional) | No | Health-check patterns |
 | [`billing`](#billing-optional) | No | Enable financial integrity audit phase |
 
@@ -305,6 +321,39 @@ review:
 
 ---
 
+## `devdocs` (OPTIONAL)
+
+Path configuration for the devdocs knowledge tree. Pipeline agents (work-on, review-pr, etc.) read these files as **authoritative project knowledge** before acting.
+
+Run `npx forgedock docs init` to scaffold the tree from ForgeDock's seed templates into the configured path.
+
+```yaml
+devdocs:
+  path: "devdocs"
+```
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| `path` | string (relative path) | No | Path to the devdocs tree, relative to project root. Default: `devdocs`. |
+
+**Commands that use this section**: `docs init`, `work-on/build/context` (Phase C-1), `work-on/build/architect` (Phase A0)
+
+### Migration from `review.context`
+
+If you previously stored project context in `forge.yaml → review.context`, move that content into the appropriate devdocs file after running `npx forgedock docs init`:
+
+| `review.context` content | Target devdocs file |
+|--------------------------|---------------------|
+| Architecture decisions | `devdocs/project/architecture.md` |
+| Tech stack details | `devdocs/project/stack.md` |
+| Coding conventions | `devdocs/project/conventions.md` |
+| Project terminology | `devdocs/project/glossary.md` |
+| ForgeDock usage notes | `devdocs/agent/using-forgedock.md` |
+
+Agents read devdocs files as binding source-of-truth, so they receive richer context than the single `review.context` string.
+
+---
+
 ## `verification` (OPTIONAL)
 
 Service health-check patterns for the quality gate and validate commands.
@@ -382,6 +431,66 @@ billing:
 
 ---
 
+## Label Bootstrap
+
+ForgeDock manages a canonical set of GitHub labels for use across all pipeline commands. Labels cover workflow state, priority, review findings, audit findings, and category classification.
+
+### Bootstrap command
+
+```bash
+# Create/update all ForgeDock-managed labels on the repo defined in forge.yaml:
+npx forgedock labels setup
+
+# Or target a specific repo explicitly:
+npx forgedock labels setup --repo owner/repo
+```
+
+Running this command is idempotent — it creates labels that don't exist and updates the color/description of labels that do. Safe to re-run at any time.
+
+**When to run it**: Once after `npx forgedock install`, or whenever a pipeline command fails with "label not found". The command bootstraps every label the pipeline relies on.
+
+### Canonical label set
+
+The full manifest lives in [`bin/labels.json`](../bin/labels.json) in the ForgeDock package. Each label has a fixed hex color and a description attributing it to ForgeDock.
+
+| Family | Labels |
+|--------|--------|
+| Priority | `priority:P0` `priority:P1` `priority:P2` `priority:P3` |
+| Workflow | `workflow:investigating` `workflow:ready-to-build` `workflow:building` `workflow:in-review` `workflow:merged` `workflow:decomposed` `workflow:invalid` |
+| Pipeline | `needs-human` `review-finding` `needs-validation` `validated` `false-positive` `staging-review` `audit-finding` `orchestration-metrics` `health-report` |
+| Category | `bug` `enhancement` `feature` `refactor` `dead-code` `improvement` `documentation` `qa` `security` `performance` |
+
+### Colors
+
+Colors are grouped by semantic meaning:
+- **Critical/error** (`#B60205`): `priority:P0`, `security`
+- **High/warning-red** (`#D93F0B`): `priority:P1`, `review-finding`, `audit-finding`
+- **Medium/yellow** (`#FBCA04`): `priority:P2`, `needs-validation`
+- **Low/green** (`#C2E0C6`, `#0E8A16`): `priority:P3`, `workflow:merged`, `validated`
+- **Blue pipeline** (`#1D76DB`, `#0075CA`, `#0052CC`): active workflow states
+- **Neutral** (`#CCCCCC`, `#E4E669`): terminal/dismissal states
+
+---
+
+## `marketing` (OPTIONAL)
+
+Controls opt-in growth features such as 'Powered by ForgeDock' footers on PR descriptions created by the pipeline.
+
+> **Note**: `pr_footer` injection requires future pipeline support in `/work-on`. Setting `pr_footer: true` today has no effect — it is a configuration interface that will be activated when the feature ships. When implemented, the pipeline will append a one-line footer to every PR body it creates.
+
+```yaml
+marketing:
+  pr_footer: false
+```
+
+| Field | Type | Required | Default | Description |
+|-------|------|----------|---------|-------------|
+| `pr_footer` | boolean | No | `false` | When `true`, the pipeline appends a 'Powered by ForgeDock' footer link to every PR description it creates. Opt-in only — non-intrusive one-line footer, not a banner. Requires pipeline support (not yet implemented). |
+
+**Commands that use this section**: `work-on` (Phase 4 PR creation — when `pr_footer: true`)
+
+---
+
 ## Config Reading Conventions
 
 ForgeDock commands use two accepted patterns for reading `forge.yaml`:
@@ -390,6 +499,218 @@ ForgeDock commands use two accepted patterns for reading `forge.yaml`:
 - **Python `yaml.safe_load` (complex extraction)**: Commands that need to extract many fields from optional nested sections in a single pass (e.g., `analytics`, `geo-audit`, `qa-sweep`) use a Python heredoc. This avoids chaining many `yq` calls and allows structured error messaging when optional sections are absent.
 
 Do **not** mix the two patterns for the same block of variables (e.g., `yq` with Python fallback). If a command needs more than 5 fields from a deeply nested optional section, use Python. Otherwise, use `yq`.
+
+---
+
+## ConfigDraft Contract
+
+`ConfigDraft` is the shared data structure emitted by `bin/init-detect.mjs` and consumed by the AI enrichment backends (`init-enrich`) and the annotated review renderer (`review-render`). It mirrors the required sections of `forge.yaml` at a per-field granularity, adding provenance and confidence metadata.
+
+### Field shape
+
+Every leaf value in a `ConfigDraft` is a **ConfigField** object:
+
+```ts
+{
+  value:      string,            // The detected or inferred value
+  confidence: "high" | "medium" | "low",  // How certain the detection was
+  source:     string,            // Human-readable label for where the value came from
+  why:        string,            // Plain-language explanation of why this value was chosen
+}
+```
+
+**Confidence levels:**
+
+| Level | Meaning |
+|-------|---------|
+| `"high"` | Verified from a concrete, unambiguous source (e.g., parsed from the git remote URL) |
+| `"medium"` | Inferred from available signals; likely correct but not guaranteed (e.g., current branch name, name derived from repo slug) |
+| `"low"` | Guessed default — no supporting evidence was found (e.g., no git remote, not a git repo) |
+
+### ConfigDraft shape
+
+```js
+{
+  project: {
+    owner: ConfigField,   // GitHub org or username
+    repo:  ConfigField,   // Repository name (without owner prefix)
+    name:  ConfigField,   // Human-readable project name
+  },
+  paths: {
+    root:         ConfigField,  // Absolute path to the project root
+    worktreeBase: ConfigField,  // Absolute path to the git worktree base dir
+  },
+  branches: {
+    default: ConfigField,  // Default branch (e.g. "main")
+    staging: ConfigField,  // Staging branch for fast-lane PRs
+  },
+  meta: {
+    remoteDetected: boolean,  // true iff a parseable git remote URL was found
+  },
+}
+```
+
+### Example output (high-confidence repo)
+
+```js
+{
+  project: {
+    owner: { value: "acme-org",    confidence: "high",   source: "git remote origin (SSH)",   why: "Parsed from SSH remote URL: git@github.com:acme-org/acme-platform.git" },
+    repo:  { value: "acme-platform", confidence: "high",   source: "git remote origin (SSH)",   why: "Parsed from SSH remote URL: git@github.com:acme-org/acme-platform.git" },
+    name:  { value: "Acme Platform", confidence: "medium", source: "derived from repo slug",     why: "Title-cased version of repo name 'acme-platform' (split on hyphens/underscores)" },
+  },
+  paths: {
+    root:         { value: "/home/user/acme",                      confidence: "high", source: "process.cwd()", why: "Absolute path passed to detectConfig — the project root" },
+    worktreeBase: { value: "/home/user/acme/.claude/worktrees",    confidence: "high", source: "derived from root", why: "Convention: {root}/.claude/worktrees" },
+  },
+  branches: {
+    default: { value: "main",    confidence: "high",   source: "git symbolic-ref refs/remotes/origin/HEAD", why: "Remote HEAD points to main" },
+    staging: { value: "staging", confidence: "high",   source: "git branch -r",                             why: "Found 'origin/staging' in the remote branch listing" },
+  },
+  meta: { remoteDetected: true },
+}
+```
+
+### Producing a ConfigDraft
+
+```js
+import { detectConfig } from "./bin/init-detect.mjs";
+
+const draft = await detectConfig(process.cwd());
+// draft.project.owner.value  → "acme-org"
+// draft.project.owner.confidence  → "high"
+```
+
+`detectConfig(cwd)` is the sole public API. It never throws — every error path produces a `low`-confidence default.
+
+### Consuming a ConfigDraft
+
+Downstream consumers read `field.value` for the raw value and `field.confidence` to decide how to handle it:
+
+- **`init-enrich`** (AI enrichment): passes `low`- and `medium`-confidence fields to the AI backend to raise their confidence; leaves `high`-confidence fields untouched.
+- **`review-render`** (TUI review screen): shows each field with its source and why; highlights `low`-confidence fields with a `# TODO(forgedock:<field>)` annotation in the generated YAML.
+
+---
+
+## CLAUDE.md Integration
+
+ForgeDock can inject a managed usage block into your project's `CLAUDE.md` so every Claude Code session opened in the repo automatically knows that ForgeDock drives development here and which commands to use.
+
+### How It Works
+
+Running `npx forgedock init` or `npx forgedock integrate` writes a marker-bounded block into `CLAUDE.md`:
+
+```
+<!-- BEGIN FORGEDOCK -->
+## ForgeDock — Autonomous Development Pipeline
+...command index and conventions...
+<!-- END FORGEDOCK -->
+```
+
+The block is **idempotent** — re-running replaces only the managed section and leaves all other `CLAUDE.md` content untouched. If `CLAUDE.md` does not exist, it is created.
+
+If `AGENTS.md` already exists in the project root, the same block is mirrored into it.
+
+### Commands
+
+| Command | Action |
+|---------|--------|
+| `npx forgedock init` | Generates `forge.yaml` **and** injects the CLAUDE.md block |
+| `npx forgedock integrate` | Injects/refreshes the block without modifying `forge.yaml` |
+
+### Opting Out
+
+To prevent ForgeDock from managing the block, remove the `<!-- BEGIN FORGEDOCK -->` / `<!-- END FORGEDOCK -->` markers from `CLAUDE.md`. Without the markers, subsequent runs will append a new block rather than replacing one — so if you want to opt out permanently, delete or omit the markers **and** do not run `integrate` again.
+
+Alternatively, keep the markers but edit the content between them freely — ForgeDock will replace that section on the next run, so any manual edits inside the markers will be overwritten.
+
+### Re-generating
+
+The command index inside the block is auto-generated from the `description:` frontmatter in each `commands/*.md` file. To refresh it after a ForgeDock update:
+
+```bash
+npx forgedock integrate
+```
+
+---
+
+## Per-Directory State Registry
+
+ForgeDock tracks per-directory opt-out state in a central registry file on the local machine.
+
+### Registry File Location
+
+```
+~/.claude/forgedock/registry.json
+```
+
+The directory (`~/.claude/forgedock/`) is created automatically on first use with mode `0700`. The file is never committed to version control — it is per-user, per-machine state.
+
+### Registry Schema
+
+```json
+{
+  "version": 1,
+  "optedOut": {
+    "/absolute/path/to/project": { "at": "2026-06-09T12:00:00.000Z" }
+  },
+  "nudgeSeen": {
+    "/absolute/path/to/project": { "at": "2026-06-09T12:00:00.000Z" }
+  }
+}
+```
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `version` | number | Schema version — currently `1` |
+| `optedOut` | object | Map of absolute directory paths to opt-out metadata |
+| `optedOut[path].at` | string | ISO-8601 timestamp of when the opt-out was recorded |
+| `nudgeSeen` | object | Map of absolute directory paths where the one-time "Enable ForgeDock here?" nudge has already been shown |
+| `nudgeSeen[path].at` | string | ISO-8601 timestamp of when the nudge was shown for this directory |
+
+### State Resolution
+
+The `registry` module resolves one of three states for any directory:
+
+| State | Meaning |
+|-------|---------|
+| `managed-active` | Directory contains `forge.yaml` or `.forgedock` and is **not** opted out — ForgeDock is active here |
+| `managed-optedout` | Directory has a managed marker but the user has explicitly opted out — ForgeDock stays silent |
+| `unmanaged` | No `forge.yaml` or `.forgedock` marker found — ForgeDock has no presence here |
+
+**Opt-out wins over managed**: if a directory contains `forge.yaml` but its path is listed in `optedOut`, the state is `managed-optedout`.
+
+### Failure Behaviour
+
+A missing or corrupt `registry.json` is treated as an empty opt-out set. The registry always fails open — it never throws and never blocks a Claude Code session.
+
+### Downgrade Behaviour
+
+Registry keys are the **real path** of a directory (resolved via `realpathSync`) rather than the raw `resolve()` path. This has been the case since v1.0.x (PR #467, which fixed symlinked-directory key mismatches).
+
+If you downgrade to a build older than PR #467 **and** your project is accessed via a symlinked directory path, the older build looks up registry entries using the pre-symlink `resolve()`-only key form. It will not find entries written by the newer build's real-path keys. The practical effect is benign:
+
+- Opt-outs set on the newer build briefly stop applying for one session.
+- The one-time "Enable ForgeDock here?" nudge may reappear once.
+- No data is lost. No crash. Fail-open behaviour holds throughout.
+
+**Recovery**: after downgrading, re-apply your opt-out with the older build:
+
+```bash
+npx forgedock disable [dir]
+```
+
+This re-writes the entry under the key form the older build expects.
+
+### Managing Opt-Out State
+
+Use the `forgedock enable` and `forgedock disable` commands to add or remove a directory from the opt-out set:
+
+```bash
+npx forgedock enable [dir]   # Remove directory from opt-out set (default: cwd)
+npx forgedock disable [dir]  # Add directory to opt-out set (default: cwd)
+npx forgedock status [dir]   # Show resolved state for a directory
+```
 
 ---
 

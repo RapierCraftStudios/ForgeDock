@@ -19,9 +19,10 @@ Before any phase runs, build the ecosystem registry from `forge.yaml → repos.s
 # Read satellite repos from forge.yaml
 # Each entry provides: prefix, repo, staging_branch, local_path
 # (Optional: package, publish_workflow — read from each satellite's package.json / workflow files)
+CONFIG_FILE="${FORGE_CONFIG:-forge.yaml}"
 
 # Gate: if repos section is absent or has no satellites, stop here
-if [ -z "$(yq '.repos.satellites // empty' forge.yaml 2>/dev/null)" ]; then
+if [ -z "$(yq '.repos.satellites // empty' "$CONFIG_FILE" 2>/dev/null)" ]; then
   echo "No satellite repos configured in forge.yaml → repos.satellites."
   echo "Add entries to forge.yaml to use /sync-ecosystem:"
   echo ""
@@ -52,10 +53,10 @@ fi
 #       node_sdk: "sdk/node"
 #   Then {REPO_PATH}/sdk/python and {REPO_PATH}/sdk/node are the per-SDK roots.
 
-PROJECT_NAME=$(yq '.project.name' forge.yaml)
-PROJECT_BOARD_OWNER=$(yq '.project_board.owner // .project.owner' forge.yaml)
-PROJECT_BOARD_NUMBER=$(yq '.project_board.project_number // empty' forge.yaml)
-PROJECT_BOARD_ID=$(yq '.project_board.project_id // empty' forge.yaml)
+PROJECT_NAME=$(yq '.project.name' "$CONFIG_FILE")
+PROJECT_BOARD_OWNER=$(yq '.project_board.owner // .project.owner' "$CONFIG_FILE")
+PROJECT_BOARD_NUMBER=$(yq '.project_board.project_number // empty' "$CONFIG_FILE")
+PROJECT_BOARD_ID=$(yq '.project_board.project_id // empty' "$CONFIG_FILE")
 ```
 
 ---
@@ -216,7 +217,7 @@ Create issues in the affected repos:
 # For satellite repos (separate GitHub repos):
 gh issue create -R {TARGET_REPO} \
   --title "feat(sync): {description of what API change needs to be reflected}" \
-  --label "feature,P2" \
+  --label "feature,priority:P2" \
   --body "$(cat <<'BODY_EOF'
 ## Problem
 
@@ -253,7 +254,7 @@ BODY_EOF
 # For monorepo issues (SDKs, packages inside a single repo):
 gh issue create \
   --title "feat(sync): {description of what API change needs to be reflected}" \
-  --label "feature,P2" \
+  --label "feature,priority:P2" \
   --body "$(cat <<'BODY_EOF'
 ## Problem
 

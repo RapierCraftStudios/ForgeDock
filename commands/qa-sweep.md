@@ -170,8 +170,19 @@ fi
 **Dynamic discovery from filesystem** (NOT hardcoded):
 
 ```bash
-cd $PROJECT_ROOT/web/src/app
-find . -name "page.tsx" -o -name "page.js" | sort
+# Read pages root from forge.yaml review.layout.pages, fall back to web/src/app
+PAGES_ROOT=$(yq '.review.layout.pages // "web/src/app"' $PROJECT_ROOT/forge.yaml 2>/dev/null || echo "web/src/app")
+
+cd $PROJECT_ROOT/$PAGES_ROOT
+PAGES=$(find . -name "page.tsx" -o -name "page.js" | sort)
+
+# Loud failure when zero pages found — prevents silent no-op qa-sweep runs
+if [ -z "$PAGES" ]; then
+  echo "ERROR: Zero pages discovered under $PAGES_ROOT. If your project uses a different layout, set review.layout.pages in forge.yaml (e.g., 'apps/web/src/app' or 'src/pages')."
+  exit 1
+fi
+
+echo "$PAGES"
 ```
 
 Convert paths to routes: `./dashboard/billing/page.tsx` → `/dashboard/billing`
@@ -180,7 +191,7 @@ Convert paths to routes: `./dashboard/billing/page.tsx` → `/dashboard/billing`
 
 **Resolve dynamic routes** (`[param]`) by fetching real IDs from API. Test invalid IDs too.
 
-**For `diff` mode**: `git diff --name-only origin/main...origin/staging -- web/src/` → map to affected pages.
+**For `diff` mode**: `git diff --name-only origin/main...origin/staging -- $PAGES_ROOT/` → map to affected pages.
 
 **Present test plan to user** (page count by category, journey count, estimated waves). Wait for confirmation.
 

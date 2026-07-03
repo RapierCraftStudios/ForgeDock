@@ -28,7 +28,7 @@ The user's input (`$ARGUMENTS`) can be:
 |-----------|---------|
 | Free-text description | "the billing page crashes when credits hit zero" |
 | URL to error/log | "https://sentry.io/..." or a pasted stack trace |
-| Reference to code | "the scraper queue leaks memory in unified_consumer.py" |
+| Reference to code | "the background worker leaks memory in task_processor.py" |
 | Feature request | "add a dark mode toggle to the dashboard settings page" |
 | Multi-repo prefix | "mcp: add list_schemas tool" or "n8n: fix credential refresh" |
 | Audit/investigation | "investigate why deploy times doubled this week" |
@@ -38,10 +38,11 @@ The user's input (`$ARGUMENTS`) can be:
 Read `forge.yaml` to build the routing table dynamically:
 
 ```bash
-GH_REPO=$(yq '.project.owner + "/" + .project.repo' forge.yaml)
+CONFIG_FILE="${FORGE_CONFIG:-forge.yaml}"
+GH_REPO=$(yq '.project.owner + "/" + .project.repo' "$CONFIG_FILE")
 GH_FLAG="-R $GH_REPO"
-REPO_PATH=$(yq '.paths.root' forge.yaml)
-STAGING_BRANCH=$(yq '.branches.staging' forge.yaml)
+REPO_PATH=$(yq '.paths.root' "$CONFIG_FILE")
+STAGING_BRANCH=$(yq '.branches.staging' "$CONFIG_FILE")
 # Satellite repos from forge.yaml → repos.satellites (each has: prefix, repo, staging_branch)
 ```
 
@@ -160,8 +161,8 @@ Format: `{prefix}: {concise description}`
 Rules:
 - **Max 80 characters**
 - Use conventional commit prefixes: `fix:`, `feat:`, `refactor:`, `investigate:`, `docs:`
-- Be specific — "fix: billing page crash" is bad, "fix: credit_service division by zero when user credits reach 0" is good
-- Include the component/domain if it helps: `fix(scraper): queue leak in unified_consumer heartbeat loop`
+- Be specific — "fix: billing page crash" is bad, "fix: payment_processor.charge() raises ZeroDivisionError when amount == 0" is good
+- Include the component/domain if it helps: `fix(worker): queue leak in task_processor heartbeat loop`
 - Never use vague words: "improve", "update", "change", "handle" without specifics
 
 ### 3B: Compose the body
@@ -256,6 +257,8 @@ Files/areas to examine:
 ```
 
 ### 3D: Pipeline Issue Template (machine-callable reference)
+
+> **Canonical Standard**: This template is the single source of truth for all automated issue creation in the ForgeDock pipeline. `milestone.md`, `orchestrate.md`, and `work-on/decompose.md` MUST use this template structure when creating issues programmatically. A shared convention is only useful if all create-paths enforce it — divergent inline templates in each command file cause acceptance-criteria drift and coverage gaps. See `work-on/decompose.md` Phase D0 for the investigation-gate pattern that enforces this standard at decomposition time. <!-- Added: forge#293 -->
 
 When pipeline agents create issues programmatically (not via user input), use this canonical template. All automated `gh issue create` calls across Forge commands MUST include these mandatory sections. Domain-specific sections are additive — preserve them, but wrap them with this structure.
 
@@ -424,8 +427,8 @@ fi
 
 ```bash
 # Add to project board if forge.yaml → project_board is configured
-PROJECT_NUMBER=$(yq '.project_board.project_number // ""' forge.yaml)
-PROJECT_BOARD_OWNER=$(yq '.project_board.owner // .project.owner' forge.yaml)
+PROJECT_NUMBER=$(yq '.project_board.project_number // ""' "$CONFIG_FILE")
+PROJECT_BOARD_OWNER=$(yq '.project_board.owner // .project.owner' "$CONFIG_FILE")
 if [ -n "$PROJECT_NUMBER" ] && [ "$PROJECT_NUMBER" != "null" ]; then
   gh project item-add "$PROJECT_NUMBER" --owner "$PROJECT_BOARD_OWNER" --url "${ISSUE_URL}" 2>/dev/null || true
 fi
@@ -487,10 +490,10 @@ Create all {N} issues? (yes / adjust #N / cancel)
 | Bad Issue | Why It Fails | Good Version |
 |-----------|-------------|-------------|
 | "Fix docker mount" | Which compose file? Which mount? | "fix: `.gemini` volume mount in docker-compose.prod.yml missing rw flag" |
-| "Update billing" | What about billing? What's broken? | "fix: credit_service.deduct() raises DivisionByZero when user.credits == 0" |
-| "Investigate performance" | Investigate what? Where? | "investigate: API p95 latency doubled since last deploy — trace hot paths in scraping routers" |
+| "Update billing" | What about billing? What's broken? | "fix: payment_processor.charge() raises ZeroDivisionError when amount == 0" |
+| "Investigate performance" | Investigate what? Where? | "investigate: API p95 latency doubled since last deploy — trace hot paths in job processing routers" |
 | No affected files listed | Investigator guesses wrong files | List every file with what needs to change |
-| "Handle edge case" | Which edge case? In what function? | "fix: unified_consumer.process_job() silently drops jobs when queue.length > MAX_BATCH" |
+| "Handle edge case" | Which edge case? In what function? | "fix: task_processor.process_job() silently drops jobs when queue.length > MAX_BATCH" |
 | Missing override files | Fix is incomplete, deploy fails | Include docker-compose.prod.yml, .env.example, etc. |
 | P0 for a typo fix | Wastes priority signaling | Use P3 for cosmetic issues |
 

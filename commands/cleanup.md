@@ -19,16 +19,22 @@ Read `forge.yaml` at the project root to resolve all project-specific variables 
 
 ```bash
 # Parse forge.yaml for project context
-GH_REPO=$(yq '.project.owner + "/" + .project.repo' forge.yaml)
+CONFIG_FILE="${FORGE_CONFIG:-forge.yaml}"
+GH_REPO=$(yq '.project.owner + "/" + .project.repo' "$CONFIG_FILE")
 GH_FLAG="-R $GH_REPO"
-REPO_PATH=$(yq '.paths.root' forge.yaml)
-STAGING_BRANCH=$(yq '.branches.staging' forge.yaml)
-PROJECT_BOARD_OWNER=$(yq '.project_board.owner // .project.owner' forge.yaml)
-PROJECT_NUMBER=$(yq '.project_board.project_number // "1"' forge.yaml)
-PROJECT_ID=$(yq '.project_board.project_id' forge.yaml)
+REPO_PATH=$(yq '.paths.root' "$CONFIG_FILE")
+STAGING_BRANCH=$(yq '.branches.staging' "$CONFIG_FILE")
+PROJECT_BOARD_OWNER=$(yq '.project_board.owner // .project.owner' "$CONFIG_FILE")
+PROJECT_NUMBER=$(yq '.project_board.project_number // empty' "$CONFIG_FILE" 2>/dev/null || echo "")
+PROJECT_ID=$(yq '.project_board.project_id // empty' "$CONFIG_FILE" 2>/dev/null || echo "")
+# Project board field and option IDs — empty string when project_board section is absent
+STATUS_FIELD_ID=$(yq '.project_board.field_ids.status // ""' "$CONFIG_FILE" 2>/dev/null || echo "")
+WORKFLOW_FIELD_ID=$(yq '.project_board.field_ids.workflow // ""' "$CONFIG_FILE" 2>/dev/null || echo "")
+STATUS_DONE_OPTION_ID=$(yq '.project_board.option_ids.status.done // ""' "$CONFIG_FILE" 2>/dev/null || echo "")
+WORKFLOW_MERGED_OPTION_ID=$(yq '.project_board.option_ids.workflow.merged // ""' "$CONFIG_FILE" 2>/dev/null || echo "")
 ```
 
-All `{GH_REPO}`, `{GH_FLAG}`, `{REPO_PATH}`, `{STAGING_BRANCH}`, `{PROJECT_BOARD_OWNER}`, `{PROJECT_NUMBER}`, and `{PROJECT_ID}` references below are populated from `forge.yaml`.
+All `{GH_REPO}`, `{GH_FLAG}`, `{REPO_PATH}`, `{STAGING_BRANCH}`, `{PROJECT_BOARD_OWNER}`, `{PROJECT_NUMBER}`, `{PROJECT_ID}`, `{STATUS_FIELD_ID}`, `{WORKFLOW_FIELD_ID}`, `{STATUS_DONE_OPTION_ID}`, and `{WORKFLOW_MERGED_OPTION_ID}` references below are populated from `forge.yaml`.
 
 ---
 
@@ -221,19 +227,29 @@ fi
 
 ## Phase 5: Sync Project Board (if `board` or `all`)
 
-For closed issues that are on the Project board but have stale fields:
+**Skip if `project_board` is not configured** — check resolved vars before proceeding:
 
 ```bash
-gh project item-list {PROJECT_NUMBER} --owner {PROJECT_BOARD_OWNER} --format json --limit 200
-```
+if [ -z "$PROJECT_BOARD_OWNER" ] || [ -z "$PROJECT_ID" ] || [ -z "$PROJECT_NUMBER" ]; then
+  echo "INFO: project_board not configured in forge.yaml — skipping board sync"
+else
+  # Board sync: mark closed issues as Done/Merged on the project board
 
-For each item where `content.state == "CLOSED"` but `status != "Done"` or `workflow` is not a terminal state:
+  # List all board items
+  ITEMS=$(gh project item-list "$PROJECT_NUMBER" --owner "$PROJECT_BOARD_OWNER" --format json --limit 200)
 
-```bash
-gh project item-edit --project-id {PROJECT_ID} --id "$ITEM_ID" \
-  --field-id {PROJECT_BOARD_STATUS_FIELD_ID} --single-select-option-id {PROJECT_BOARD_STATUS_DONE_ID} 2>/dev/null || true  # Status=Done
-gh project item-edit --project-id {PROJECT_ID} --id "$ITEM_ID" \
-  --field-id {PROJECT_BOARD_WORKFLOW_FIELD_ID} --single-select-option-id {PROJECT_BOARD_WORKFLOW_MERGED_ID} 2>/dev/null || true  # Workflow=Merged
+  # For each item where content.state == "CLOSED" but status != "Done" or workflow is not terminal:
+  echo "$ITEMS" | jq -r '.items[] | select(.content.state == "CLOSED") | .id' | while read -r ITEM_ID; do
+    if [ -n "$STATUS_FIELD_ID" ] && [ -n "$STATUS_DONE_OPTION_ID" ]; then
+      gh project item-edit --project-id "$PROJECT_ID" --id "$ITEM_ID" \
+        --field-id "$STATUS_FIELD_ID" --single-select-option-id "$STATUS_DONE_OPTION_ID" 2>/dev/null || true  # Status=Done
+    fi
+    if [ -n "$WORKFLOW_FIELD_ID" ] && [ -n "$WORKFLOW_MERGED_OPTION_ID" ]; then
+      gh project item-edit --project-id "$PROJECT_ID" --id "$ITEM_ID" \
+        --field-id "$WORKFLOW_FIELD_ID" --single-select-option-id "$WORKFLOW_MERGED_OPTION_ID" 2>/dev/null || true  # Workflow=Merged
+    fi
+  done
+fi
 ```
 
 ---

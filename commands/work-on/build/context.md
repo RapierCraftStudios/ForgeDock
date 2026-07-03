@@ -33,6 +33,117 @@ Parse from `$ARGUMENTS`:
 
 ---
 
+## Phase C-1: Authoritative Devdocs
+
+Read project-resident authoritative docs **before** any institutional-memory queries. Devdocs contain binding project knowledge (conventions, architecture, custom instructions) that must inform the builder's mental model from the start.
+
+**Time budget**: 30 seconds. If exceeded, log a skip note and continue to Phase C0.
+
+**Skip if**: `{REPO_PATH}` is not set, devdocs path does not exist, or path contains no markdown files.
+
+### Step 0: Resolve devdocs path
+
+Read `forge.yaml → devdocs.path` from the project root. Default to `devdocs` if the key is absent or unreadable.
+
+```bash
+DEVDOCS_PATH=""
+
+# Read forge.yaml directly from repo root (REPO_PATH points to the project root — no directory walk)
+FORGE_YAML_PATH="{REPO_PATH}/forge.yaml"
+
+if [ -f "$FORGE_YAML_PATH" ]; then
+  # Extract devdocs.path key (simple grep — value is on the same or next line under "devdocs:")
+  DEVDOCS_REL=$(grep -A5 '^devdocs:' "$FORGE_YAML_PATH" \
+    | grep '^\s*path:' \
+    | head -1 \
+    | sed 's/.*path:\s*//' \
+    | tr -d '"'"'"' \
+    | tr -d '[:space:]')
+fi
+
+# Default to "devdocs" if not found
+DEVDOCS_REL="${DEVDOCS_REL:-devdocs}"
+DEVDOCS_PATH="{REPO_PATH}/${DEVDOCS_REL}"
+
+if [ ! -d "$DEVDOCS_PATH" ]; then
+  echo "Devdocs path '${DEVDOCS_PATH}' does not exist — skipping Phase C-1 (no blocking)"
+  DEVDOCS_PATH=""
+fi
+```
+
+> **Note**: `devdocs/` must be tracked in git for the worktree to contain it. If the project gitignores `devdocs/`, the path will not exist in the worktree and this phase silently skips — this is by design. Run `git check-ignore -v devdocs/` to confirm tracking status.
+
+### Step 1: Enumerate and filter applicable files
+
+Find all `.md` files under `DEVDOCS_PATH`, parse YAML frontmatter, keep those with `work-on` in `applies_to`. Sort by authority (`required` first, then `recommended`, then `reference`).
+
+```bash
+DEVDOCS_APPLICABLE=""  # list of paths that apply
+
+if [ -n "$DEVDOCS_PATH" ]; then
+  # Find all markdown files recursively
+  while IFS= read -r -d '' mdfile; do
+    # Extract frontmatter block (between first two --- markers)
+    FRONTMATTER=$(awk '/^---/{c++; if(c==1){next} if(c==2){exit}} c==1{print}' "$mdfile" 2>/dev/null)
+
+    # Check if applies_to contains work-on
+    if echo "$FRONTMATTER" | grep -q 'applies_to:.*work-on'; then
+      AUTHORITY=$(echo "$FRONTMATTER" | grep 'authority:' | head -1 | sed 's/.*authority:\s*//' | tr -d ' ')
+      # Prepend sort key: 1=required, 2=recommended, 3=reference, 4=other
+      case "$AUTHORITY" in
+        required)    SORT_KEY="1" ;;
+        recommended) SORT_KEY="2" ;;
+        reference)   SORT_KEY="3" ;;
+        *)           SORT_KEY="4" ;;
+      esac
+      DEVDOCS_APPLICABLE="${DEVDOCS_APPLICABLE}${SORT_KEY}|${mdfile}\n"
+    fi
+  done < <(find "$DEVDOCS_PATH" -name "*.md" -print0 2>/dev/null)
+
+  # Sort by authority key and extract paths
+  DEVDOCS_APPLICABLE=$(printf "$DEVDOCS_APPLICABLE" | sort | cut -d'|' -f2-)
+fi
+
+if [ -z "$DEVDOCS_APPLICABLE" ]; then
+  echo "No devdocs files with 'applies_to: work-on' found — skipping Phase C-1 content read"
+fi
+```
+
+### Step 2: Read content of applicable files
+
+For each applicable file: read its content (max 200 lines; truncate with note if longer). Accumulate for output.
+
+```bash
+DEVDOCS_CONTENT=""
+
+while IFS= read -r mdfile; do
+  [ -z "$mdfile" ] && continue
+  TOTAL_LINES=$(wc -l < "$mdfile" 2>/dev/null || echo 0)
+  if [ "$TOTAL_LINES" -gt 200 ]; then
+    FILE_CONTENT=$(head -200 "$mdfile")
+    TRUNCATION_NOTE="_[Truncated at 200 lines — ${TOTAL_LINES} total. Read full file for complete context.]_"
+  else
+    FILE_CONTENT=$(cat "$mdfile")
+    TRUNCATION_NOTE=""
+  fi
+
+  # Relative path for display
+  REL_PATH="${mdfile#${DEVDOCS_PATH}/}"
+
+  DEVDOCS_CONTENT="${DEVDOCS_CONTENT}
+
+#### \`${REL_PATH}\`
+${FILE_CONTENT}
+${TRUNCATION_NOTE}"
+done <<< "$DEVDOCS_APPLICABLE"
+```
+
+### Step 3: Store for output
+
+`DEVDOCS_CONTENT` is used in the `### Authoritative Devdocs` section of the FORGE:CONTEXT comment output. If empty (path absent or no applicable files), the section is replaced with a skip note.
+
+---
+
 ## Phase C0: Prior Investigation Findings (from Gists)
 
 Scan the issue body for `<!-- FORGE:PRIOR_GIST: {url} -->` annotations embedded by the decompose or orchestrate phases (GIST-02). Also check for `<!-- FORGE:MILESTONE_INDEX: {url} -->` annotations — these reference a milestone-level index Gist (GIST-04) that aggregates all investigation Gist URLs for a milestone into a single reference. Both annotation types reference Knowledge Gists created during upstream investigation (GIST-01) and contain structured findings — verdict, root cause, recommendation, affected files — that the builder needs before writing code.
@@ -278,6 +389,14 @@ Post the following as a GitHub comment on `{NUMBER}`:
 gh issue comment {NUMBER} -R {GH_REPO} --body "<!-- FORGE:CONTEXT -->
 ## Implementation Context for #{NUMBER}
 
+### Authoritative Devdocs
+<!-- Project-resident authoritative knowledge read from devdocs/ (Phase C-1).
+     These files have the highest precedence — they override agent defaults and memory.
+     custom-instructions.md directives are BINDING and MUST be followed exactly.
+     If devdocs path was absent or no files matched applies_to: work-on — write:
+     'No devdocs found at {DEVDOCS_PATH} — skipping. Run `npx forgedock docs init` to scaffold.' -->
+{DEVDOCS_CONTENT}
+
 ### Prior Investigation Findings
 <!-- Summarized Knowledge Gist content from upstream investigations (Phase C0).
      If no FORGE:PRIOR_GIST annotations were found in the issue body: omit this section entirely.
@@ -317,11 +436,12 @@ gh issue comment {NUMBER} -R {GH_REPO} --body "<!-- FORGE:CONTEXT -->
 
 ## Timing Rules
 
+- Phase C-1 devdocs read: 30s total budget (file enumeration + content reads combined); skip if exceeded
 - Phase C0 `gh gist view` calls: timeout after 15s each, 30s total budget for all Gist fetches
 - Each `gh issue list` call: timeout after 20s, skip if exceeded
 - Each `gh pr list` call: timeout after 20s, skip if exceeded
 - Each `grep -r` call: timeout after 10s, skip if exceeded
-- Total wall time budget: **2 minutes** (C0 through C4 combined). If budget exceeded, post partial results with `<!-- FORGE:CONTEXT:PARTIAL -->` marker instead of `COMPLETE`.
+- Total wall time budget: **2 minutes** (C-1 through C4 combined). If budget exceeded, post partial results with `<!-- FORGE:CONTEXT:PARTIAL -->` marker instead of `COMPLETE`.
 
 ---
 
@@ -339,11 +459,19 @@ Skip this entire step (post nothing, return empty briefing) if:
 This module runs at **Step 3C.5** — after Builder Contract is posted, before Implement:
 
 ```
-3C  → Builder Contract posted
+3C   → Builder Contract posted
 3C.5 → [THIS MODULE] Context gathering (max 2 min)
-3F  → Implement (builder now has context briefing)
+         Phase C-1: Authoritative Devdocs (project-resident knowledge — highest precedence)
+         Phase C0:  Prior Investigation Findings (from Gists)
+         Phase C1:  Past Review Findings on These Files
+         Phase C2:  Past Bugs in the Same Module
+         Phase C3:  Related Code Paths
+         Phase C4:  Successful Similar Implementations
+3F   → Implement (builder now has context briefing)
 ```
 
 The builder agent reads the `<!-- FORGE:CONTEXT -->` comment before writing any code. If the context step was skipped, the builder proceeds with investigation report + contract only.
+
+**Devdocs precedence** (Phase C-1): Content from `project/custom-instructions.md` has the HIGHEST precedence of all context sources. Directives there override agent defaults, training knowledge, and all other devdocs. Other `project/*.md` and `agent/*.md` files with `applies_to: work-on` provide authoritative project conventions and ForgeDock usage guidance. <!-- Added: forge#259 -->
 
 When prior investigation Gists are available (Phase C0), the `### Prior Investigation Findings` section gives the builder cross-issue context — root causes, recommendations, and affected files from upstream investigations — without requiring manual Gist lookups. When a milestone-level index Gist exists (GIST-04), Phase C0 can resolve the index to discover all investigation Gists for the milestone from a single URL — providing full milestone-wide context automatically. <!-- Updated: forge#341 -->

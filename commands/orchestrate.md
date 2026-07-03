@@ -1,6 +1,6 @@
 ---
 description: Orchestrate parallel work on multiple issues or an entire milestone — spawns sub-agents that each run the full /work-on pipeline
-argument-hint: [milestone <slug> | #1 #2 #3 | next <N> | fast-lane | P0]
+argument-hint: [milestone <slug> | #1 #2 #3 | next <N> | fast-lane | priority:P0]
 ---
 
 # /orchestrate — Multi-Issue Parallel Orchestrator
@@ -31,16 +31,18 @@ Read `forge.yaml` at the project root to resolve all project-specific variables 
 
 ```bash
 # Parse forge.yaml for project context
-GH_REPO=$(yq '.project.owner + "/" + .project.repo' forge.yaml)
+CONFIG_FILE="${FORGE_CONFIG:-forge.yaml}"
+GH_REPO=$(yq '.project.owner + "/" + .project.repo' "$CONFIG_FILE")
 GH_FLAG="-R $GH_REPO"
-REPO_PATH=$(yq '.paths.root' forge.yaml)
-PROJECT_NAME=$(yq '.project.name' forge.yaml)
-STAGING_BRANCH=$(yq '.branches.staging' forge.yaml)
+REPO_PATH=$(yq '.paths.root' "$CONFIG_FILE")
+PROJECT_NAME=$(yq '.project.name' "$CONFIG_FILE")
+STAGING_BRANCH=$(yq '.branches.staging' "$CONFIG_FILE")
+DEFAULT_BRANCH=$(yq '.branches.default' "$CONFIG_FILE")
 # Build satellite repo map from repos.satellites list
 # Each satellite: { prefix, repo, staging_branch }
 ```
 
-All `{GH_REPO}`, `{GH_FLAG}`, `{REPO_PATH}`, `{PROJECT_NAME}`, and `{STAGING_BRANCH}` references below are populated from `forge.yaml`.
+All `{GH_REPO}`, `{GH_FLAG}`, `{REPO_PATH}`, `{PROJECT_NAME}`, `{STAGING_BRANCH}`, and `{DEFAULT_BRANCH}` references below are populated from `forge.yaml`.
 
 ---
 
@@ -69,10 +71,10 @@ Parse `$ARGUMENTS` to determine which issues to work on:
 |-------|------------|
 | `milestone <slug>` | All open issues assigned to that GitHub milestone (default repo) |
 | `#1 #2 #3` or `1 2 3` | Specific issue numbers, optionally repo-prefixed (e.g., `#123 mcp:5 n8n:12`) |
-| `next <N>` | Top N priority open issues (P0 first, then P1, etc.) |
+| `next <N>` | Top N priority open issues (priority:P0 first, then priority:P1, etc.) |
 | `next <N> all-repos` | Top N across ALL ecosystem repos |
 | `fast-lane` or `fast` | All open fast-lane issues (no milestone, bugs/fixes) |
-| `P0` or `P1` | All open issues with that priority label |
+| `priority:P0` or `priority:P1` | All open issues with that priority label |
 | `mcp:fast` or `n8n:next 3` | Repo-scoped queries |
 | `<slug>` (no keyword) | Try milestone first, then fall back to label search |
 
@@ -229,6 +231,8 @@ Add the newly created issues to the issue set. Re-check each one:
 - Tag them as `IMPLEMENTATION` (investigations don't spawn more investigations)
 - They inherit the milestone from their parent investigation if applicable
 
+**Issue body standard**: Any new issues created by investigation agents MUST use the **Pipeline Issue Template** from `issue.md` Phase 3D as their body structure. Investigation agents that produce issues as output should be prompted to use that template — not ad-hoc body formats — so every spawned issue enters the pipeline with the correct structure (Problem, Root Cause, Affected Files, Acceptance Criteria). Verify spawned issues have all mandatory sections before adding them to the batch; if sections are missing, the `/issue` body-validation step (Phase 4C.5) will repair them. <!-- Added: forge#293 -->
+
 **Updated issue set** = original `IMPLEMENTATION` issues + newly spawned issues from investigations.
 
 ### Step 2E: Report Wave 0 results to user
@@ -274,18 +278,19 @@ For each issue, estimate which domains it touches based on title, body, and labe
 for NUM in {issue_numbers}; do
   ISSUE=$(gh issue view $NUM --json title,body,labels --jq '{title: .title, labels: [.labels[].name], body: (.body[:300])}')
   echo "=== #$NUM ==="
-  echo "$ISSUE" | grep -qiE "credit|billing|pricing|stripe|tier.*cost|charge|refund" && echo "  BILLING" || true
+  echo "$ISSUE" | grep -qiE "credit|billing|pricing|stripe|charge|refund" && echo "  BILLING" || true
   echo "$ISSUE" | grep -qiE "auth|session|jwt|login|permission|oauth" && echo "  AUTH" || true
-  echo "$ISSUE" | grep -qiE "scrape|tier|proxy|playwright|playbook|worker|unified_consumer|penetrat" && echo "  SCRAPING" || true
+  echo "$ISSUE" | grep -qiE "worker|queue|job|task|background|consumer" && echo "  WORKER" || true
   echo "$ISSUE" | grep -qiE "migration|\.sql|database|postgres|alembic" && echo "  DATABASE" || true
   echo "$ISSUE" | grep -qiE "component|page|layout|dashboard|ui|ux|frontend|web/src" && echo "  FRONTEND" || true
   echo "$ISSUE" | grep -qiE "docker|deploy|traefik|nginx|ci|cd|infra|github.action" && echo "  INFRA" || true
-  echo "$ISSUE" | grep -qiE "cortex|llm|extract|schema|format" && echo "  CORTEX" || true
+  echo "$ISSUE" | grep -qiE "llm|extract|schema|format|embedding|model" && echo "  AI" || true
+  # For project-specific domains, configure keywords in forge.yaml → review.domains and extend above
 done
 ```
 
 **Use domain info for wave planning:**
-- Issues in the SAME domain (especially SCRAPING, BILLING, DATABASE) are more likely to touch the same files → prefer sequential within a wave or adjacent waves
+- Issues in the SAME domain (especially WORKER, BILLING, DATABASE) are more likely to touch the same files → prefer sequential within a wave or adjacent waves
 - Issues in DIFFERENT domains are more likely independent → safe to parallelize
 - BILLING + AUTH issues should be prioritized early (security-critical)
 - **DATABASE issues are ALWAYS serialized — hard rule, no exceptions.** Multiple agents writing migrations simultaneously will produce duplicate migration numbers (e.g., two `0067_*.sql` files), which breaks the migration runner. Every DATABASE issue must be in its own wave. If 3 DATABASE issues are in a batch: Wave 1 runs issue A, Wave 2 runs issue B, Wave 3 runs issue C.
@@ -362,11 +367,17 @@ When two issues modify different files that **import from the same utility/init 
 
 **Apply inferences:**
 ```
-# High-fan-in files — if ANY issue touches these, serialize it with all same-service issues:
+# High-fan-in files — if ANY issue touches these, serialize it with all same-service issues.
+# Read layout paths from forge.yaml review.layout; fall back to sensible generic defaults.
+# Example (pseudo-code — adapt to your forge.yaml parsing method):
+#   API_MAIN    = forge_yaml.review.layout.api_main    ?? "services/api/app/main.py"
+#   WORKER_MAIN = forge_yaml.review.layout.worker_main ?? "services/worker/worker/main.py"
+#   PAGES_ROOT  = forge_yaml.review.layout.pages       ?? "web/src/app"
+
 HIGH_FAN_IN = [
-  "services/api/app/main.py",
-  "services/worker/worker/unified_consumer.py",
-  "web/src/app/layout.tsx",
+  API_MAIN,                          # e.g. "services/api/app/main.py" — router/middleware registration
+  WORKER_MAIN,                       # e.g. "services/worker/worker/main.py" — worker entrypoint (set forge.yaml review.layout.worker_main)
+  PAGES_ROOT + "/layout.tsx",        # e.g. "web/src/app/layout.tsx" — root layout for all pages
   "docker-compose.yml",
   "docker-compose.prod.yml",
   ".env.example"
@@ -402,7 +413,7 @@ Build the final conflict graph by merging signals from all four layers:
 | Layer 4: Low confidence + same domain | **Conservative** | Serialize |
 | Layer 4: Low confidence + no domain | **Conservative** | Serialize with prior wave |
 
-**This supplements, not replaces, the domain keyword estimation.** Domain tags still help with broad sequencing decisions. Multi-layer conflict detection catches the specific cases keywords miss (e.g., two issues that both modify files in `services/api/app/models/` where one is labeled SCRAPING and the other BILLING — Layer 2 catches this even though Layer 1 shows no direct file overlap).
+**This supplements, not replaces, the domain keyword estimation.** Domain tags still help with broad sequencing decisions. Multi-layer conflict detection catches the specific cases keywords miss (e.g., two issues that both modify files in `services/api/app/models/` where one is labeled WORKER and the other BILLING — Layer 2 catches this even though Layer 1 shows no direct file overlap).
 
 ### Step 3D: Build the execution plan
 
@@ -444,15 +455,15 @@ Wave 2 (after deps): #2634 (enable daemon — after #2633 fixes memory leak), #2
 ### Domain Distribution
 | Domain | Issues | Notes |
 |--------|--------|-------|
-| SCRAPING | {N} | {High overlap risk / Independent targets} |
 | FRONTEND | {N} | {Independent pages / Shared components} |
 | BILLING | {N} | {Critical — prioritize in Wave 1} |
 | DATABASE | {N} | {Sequential — migration order matters} |
 | AUTH | {N} | {Critical — Wave 1} |
+| WORKER | {N} | {High overlap risk within worker service} |
+| AI | {N} | {Independent} |
 | INFRA | {N} | {Independent} |
-| CORTEX | {N} | {Independent} |
 
-(Omit rows with 0 issues.)
+(Omit rows with 0 issues. Add project-specific domain rows from forge.yaml → review.domains.)
 
 ### Implementation Waves
 
@@ -487,12 +498,18 @@ Proceed? (yes / adjust / pick specific issues)
 ```bash
 # Capture staging baseline before launching the wave
 git fetch origin
-STAGING_LINES_BEFORE=$(git diff --stat origin/main...origin/staging 2>/dev/null \
-  | tail -1 \
-  | grep -oP '\d+ insertion' \
-  | grep -oP '\d+' \
-  || echo "0")
-echo "Staging baseline before Wave {N}: ${STAGING_LINES_BEFORE} lines ahead of main"
+if [ "$DEFAULT_BRANCH" = "$STAGING_BRANCH" ]; then
+  # Single-branch repo — staging and default are the same; diff is always zero
+  STAGING_LINES_BEFORE=0
+  echo "Staging baseline before Wave {N}: skipped — single-branch repo (staging == default)"
+else
+  STAGING_LINES_BEFORE=$(git diff --stat origin/$DEFAULT_BRANCH...origin/$STAGING_BRANCH 2>/dev/null \
+    | tail -1 \
+    | grep -oP '\d+ insertion' \
+    | grep -oP '\d+' \
+    || echo "0")
+  echo "Staging baseline before Wave {N}: ${STAGING_LINES_BEFORE} lines ahead of $DEFAULT_BRANCH"
+fi
 ```
 
 Store `STAGING_LINES_BEFORE` per wave. After the wave completes (after Step 4C), run the integrity check:
@@ -500,27 +517,32 @@ Store `STAGING_LINES_BEFORE` per wave. After the wave completes (after Step 4C),
 ```bash
 # Check staging integrity after wave completes (run after Step 4C)
 git fetch origin
-STAGING_LINES_AFTER=$(git diff --stat origin/main...origin/staging 2>/dev/null \
-  | tail -1 \
-  | grep -oP '\d+ insertion' \
-  | grep -oP '\d+' \
-  || echo "0")
-STAGING_GROWTH=$((STAGING_LINES_AFTER - STAGING_LINES_BEFORE))
+if [ "$DEFAULT_BRANCH" = "$STAGING_BRANCH" ]; then
+  STAGING_LINES_AFTER=0
+  STAGING_GROWTH=0
+  echo "Staging integrity check: skipped — single-branch repo (staging == default)"
+else
+  STAGING_LINES_AFTER=$(git diff --stat origin/$DEFAULT_BRANCH...origin/$STAGING_BRANCH 2>/dev/null \
+    | tail -1 \
+    | grep -oP '\d+ insertion' \
+    | grep -oP '\d+' \
+    || echo "0")
+  STAGING_GROWTH=$((STAGING_LINES_AFTER - STAGING_LINES_BEFORE))
+  echo "Staging after Wave {N}: ${STAGING_LINES_AFTER} lines (+${STAGING_GROWTH} vs baseline)"
 
-echo "Staging after Wave {N}: ${STAGING_LINES_AFTER} lines (+${STAGING_GROWTH} vs baseline)"
-
-# Alert if growth exceeds expected delta
-# Expected: only the lines from PRs merged in this wave
-# Alert threshold: growth > 500 lines more than the sum of changed lines from wave PRs
-# (Use 0 as threshold if no PRs merged — any growth is unexpected)
-EXPECTED_DELTA={SUM_OF_PR_LINE_COUNTS_THIS_WAVE}  # set from PR diffs collected in 4B
-UNEXPECTED_GROWTH=$((STAGING_GROWTH - EXPECTED_DELTA))
-if [ "$UNEXPECTED_GROWTH" -gt 500 ]; then
-  echo "ALERT: Staging grew by ${STAGING_GROWTH} lines (+${UNEXPECTED_GROWTH} beyond expected ${EXPECTED_DELTA})."
-  echo "This may indicate milestone-code contamination via agent merge commits."
-  echo "Review: git log --oneline --merges origin/main..origin/staging"
-  echo "Do NOT merge staging → main until the unexpected growth is investigated."
-  # Do NOT auto-stop — alert the user and let them decide
+  # Alert if growth exceeds expected delta
+  # Expected: only the lines from PRs merged in this wave
+  # Alert threshold: growth > 500 lines more than the sum of changed lines from wave PRs
+  # (Use 0 as threshold if no PRs merged — any growth is unexpected)
+  EXPECTED_DELTA={SUM_OF_PR_LINE_COUNTS_THIS_WAVE}  # set from PR diffs collected in 4B
+  UNEXPECTED_GROWTH=$((STAGING_GROWTH - EXPECTED_DELTA))
+  if [ "$UNEXPECTED_GROWTH" -gt 500 ]; then
+    echo "ALERT: Staging grew by ${STAGING_GROWTH} lines (+${UNEXPECTED_GROWTH} beyond expected ${EXPECTED_DELTA})."
+    echo "This may indicate milestone-code contamination via agent merge commits."
+    echo "Review: git log --oneline --merges origin/$DEFAULT_BRANCH..origin/$STAGING_BRANCH"
+    echo "Do NOT merge $STAGING_BRANCH → $DEFAULT_BRANCH until the unexpected growth is investigated."
+    # Do NOT auto-stop — alert the user and let them decide
+  fi
 fi
 ```
 
@@ -737,7 +759,7 @@ for FINDING_NUM in {spawned_finding_numbers}; do
   FINDING_DATA=$(gh issue view $FINDING_NUM -R {GH_REPO} --json labels,title,body \
     --jq '{labels: [.labels[].name], title: .title, body: .body}')
 
-  PRIORITY=$(echo "$FINDING_DATA" | jq -r '.labels[] | select(startswith("P")) | .' | head -1)
+  PRIORITY=$(echo "$FINDING_DATA" | jq -r '.labels[] | select(startswith("priority:P")) | ltrimstr("priority:")' | head -1)
   TITLE=$(echo "$FINDING_DATA" | jq -r '.title')
 
   # Heuristic 1: Generation check — source issue has review-finding label (always defer, even for P1/P2)
@@ -798,7 +820,14 @@ They remain open in GitHub — they will be picked up by future `/orchestrate` o
 
 **When to run**: After each wave completes, IF the batch targets a milestone branch AND any `.tsx`/`.ts` files were changed by agents in the completed wave.
 
+All tool commands are read from `forge.yaml → verification.commands`; each step logs `SKIPPED — not configured` when the corresponding key is absent rather than silently passing.
+
 ```bash
+# Read toolchain commands from forge.yaml
+TS_TYPECHECK=$(yq '.verification.commands.typescript.typecheck // ""' forge.yaml 2>/dev/null || echo '')
+TS_BUILD=$(yq '.verification.commands.typescript.build // ""' forge.yaml 2>/dev/null || echo '')
+PYTHON_FORMAT=$(yq '.verification.commands.python.format // ""' forge.yaml 2>/dev/null || echo '')
+
 # Check if this is a milestone batch with TypeScript changes
 MILESTONE_BRANCH="milestone/{milestone_slug}"
 TS_CHANGED=$(git diff origin/{DEFAULT_BRANCH}...origin/${MILESTONE_BRANCH} --name-only | grep -E '\.(tsx?|jsx?)$' | head -1)
@@ -808,20 +837,31 @@ if [ -n "$TS_CHANGED" ]; then
     cd {REPO_PATH}
     git fetch origin ${MILESTONE_BRANCH}
     git checkout origin/${MILESTONE_BRANCH} --detach 2>/dev/null
-    cd web && npx tsc --noEmit 2>&1 | head -30
-    TSC_EXIT=$?
-    if [ "$TSC_EXIT" -eq 0 ]; then
-        npx next build 2>&1 | tail -30
-        BUILD_EXIT=$?
+
+    if [ -n "$TS_TYPECHECK" ]; then
+        eval "$TS_TYPECHECK" 2>&1 | head -30
+        TSC_EXIT=$?
+    else
+        echo "SKIPPED — typescript.typecheck not configured in verification.commands"
+        TSC_EXIT=0
     fi
-    cd .. && git checkout - 2>/dev/null
+
+    if [ "$TSC_EXIT" -eq 0 ] && [ -n "$TS_BUILD" ]; then
+        eval "$TS_BUILD" 2>&1 | tail -30
+        BUILD_EXIT=$?
+    elif [ -z "$TS_BUILD" ]; then
+        echo "SKIPPED — typescript.build not configured in verification.commands"
+        BUILD_EXIT=0
+    fi
+
+    git checkout - 2>/dev/null
 
     if [ "$TSC_EXIT" -ne 0 ]; then
         echo "BLOCKING: TypeScript errors on ${MILESTONE_BRANCH} after Wave {N}."
         echo "Fix type errors before starting next wave."
     elif [ "${BUILD_EXIT:-0}" -ne 0 ]; then
-        echo "BLOCKING: next build failed on ${MILESTONE_BRANCH} after Wave {N}."
-        echo "SSG prerender or build errors — fix before starting next wave."
+        echo "BLOCKING: build failed on ${MILESTONE_BRANCH} after Wave {N}."
+        echo "Build/prerender errors — fix before starting next wave."
     fi
 fi
 
@@ -831,20 +871,25 @@ if [ -n "$PY_CHANGED" ]; then
     echo "=== Integration Build Gate (Python): Wave {N} ==="
     cd {REPO_PATH}
     git checkout origin/${MILESTONE_BRANCH} --detach 2>/dev/null
-    cd services/api && poetry run black --check app/ 2>&1 | tail -10
-    BLACK_EXIT=$?
-    poetry run isort --check app/ 2>&1 | tail -10
-    ISORT_EXIT=$?
-    cd ../.. && git checkout - 2>/dev/null
 
-    if [ "$BLACK_EXIT" -ne 0 ] || [ "$ISORT_EXIT" -ne 0 ]; then
+    if [ -n "$PYTHON_FORMAT" ]; then
+        eval "$PYTHON_FORMAT" 2>&1 | tail -10
+        FORMAT_EXIT=$?
+    else
+        echo "SKIPPED — python.format not configured in verification.commands"
+        FORMAT_EXIT=0
+    fi
+
+    git checkout - 2>/dev/null
+
+    if [ "$FORMAT_EXIT" -ne 0 ]; then
         echo "WARNING: Python formatting issues on ${MILESTONE_BRANCH} after Wave {N}."
         echo "Not blocking but should be fixed before milestone→staging."
     fi
 fi
 ```
 
-**If the gate fails**: Report the errors to the user. Do NOT proceed to the next wave. The accumulated milestone branch has integration errors that will only get worse with more PRs on top. `next build` failures are BLOCKING (not just `tsc`) — SSG prerender crashes are invisible to type checking.
+**If the gate fails**: Report the errors to the user. Do NOT proceed to the next wave. The accumulated milestone branch has integration errors that will only get worse with more PRs on top. Build failures are BLOCKING — SSG/prerender crashes are invisible to typecheck alone — configure `typescript.build` in `verification.commands` to catch them.
 
 ### Step 4E: Advance to next wave
 
@@ -1050,12 +1095,12 @@ Aggregate into the batch-level analytics for Step 6B.
 → Gets all unmilestoned bugs/fixes
 → Groups by independence, runs in waves
 
-### "orchestrate milestone cortex-recursive-loop"
-→ Fetches all open issues in "Cortex Recursive Loop" milestone
-→ Detects #2644 is an investigation issue (title: "Investigate: Complete the autonomous recursive loop...")
-→ Wave 0: Runs `/work-on 2644` — investigation creates 5 new issues (#2650-#2654)
-→ Re-fetches milestone issues, now includes #2650-#2654
-→ Wave 1: #2633 (P0 orphaned queues), #2636 (invalidation), #2650, #2651 (all independent)
-→ Wave 2: #2634 (enable daemon, after #2633), #2652 (depends on #2650)
+### "orchestrate milestone user-auth-v2"
+→ Fetches all open issues in "User Auth v2" milestone
+→ Detects #42 is an investigation issue (title: "Investigate: session expiry race condition under high concurrency")
+→ Wave 0: Runs `/work-on 42` — investigation creates 3 new issues (#55-#57)
+→ Re-fetches milestone issues, now includes #55-#57
+→ Wave 1: #38 (P0 token refresh bug), #41 (session store migration), #55, #56 (all independent)
+→ Wave 2: #39 (enable refresh rotation — after #38 fixes token bug), #57 (depends on #55)
 → Wave 3: remaining issues
 → Final report shows investigation spawned issues and their results

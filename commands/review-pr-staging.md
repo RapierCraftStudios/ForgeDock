@@ -14,12 +14,28 @@ Performs comprehensive review of `staging` before merging to `main`. Handles lar
 
 ---
 
+## Config Resolution
+
+Read `forge.yaml` to resolve branch names before running any commands:
+
+```bash
+CONFIG_FILE="${FORGE_CONFIG:-forge.yaml}"
+GH_REPO=$(yq '.project.owner + "/" + .project.repo' "$CONFIG_FILE")
+GH_FLAG="-R $GH_REPO"
+DEFAULT_BRANCH=$(yq '.branches.default' "$CONFIG_FILE")
+STAGING_BRANCH=$(yq '.branches.staging' "$CONFIG_FILE")
+```
+
+All `$DEFAULT_BRANCH` and `$STAGING_BRANCH` references below are populated from `forge.yaml`.
+
+---
+
 ## Evidence-Based Review Protocol (ALL Agents)
 
 ### Diff-First Approach
 ```bash
-git fetch origin main staging
-git diff origin/main...origin/staging
+git fetch origin $DEFAULT_BRANCH $STAGING_BRANCH
+git diff origin/$DEFAULT_BRANCH...origin/$STAGING_BRANCH
 ```
 
 ### Dynamic Exploration
@@ -29,9 +45,9 @@ From each changed file, follow imports and function calls. Trace data flows acro
 
 | Confidence | Criteria | Action |
 |------------|----------|--------|
-| CONFIRMED | Traced full code path, found specific proof | Report as P1 |
-| LIKELY | Pattern suggests issue, mitigations might exist | Report as P2 |
-| POSSIBLE | Suspicious but couldn't trace fully | Report as P3 |
+| CONFIRMED | Traced full code path, found specific proof | Report as priority:P1 |
+| LIKELY | Pattern suggests issue, mitigations might exist | Report as priority:P2 |
+| POSSIBLE | Suspicious but couldn't trace fully | Report as priority:P3 |
 | UNFOUNDED | Found correct handling | Do NOT report |
 
 ### Severity Decision Tree
@@ -77,17 +93,17 @@ Include ALL findings (CONFIRMED, LIKELY, POSSIBLE). One line per finding, sequen
 **Why this matters**: Review findings are filed before the originating PR merges to staging. Without this gate, a staging→main bundle can include commits with known unfixed bugs — the review system caught the issue, but the deploy path ignored it. This gate closes the gap between issue discovery and deploy execution. <!-- Added: forge#303 -->
 
 ```bash
-git fetch origin main staging
+git fetch origin $DEFAULT_BRANCH $STAGING_BRANCH
 
 # Step 1: Find all PR numbers in the staging→main bundle
 # These are the PRs whose commits are included in staging but not yet in main
-BUNDLE_PRS=$(git log origin/main..origin/staging --oneline \
+BUNDLE_PRS=$(git log origin/$DEFAULT_BRANCH..origin/$STAGING_BRANCH --oneline \
   | grep -oP '#\d+' \
   | sort -u \
   | tr -d '#')
 
 # Also extract PR numbers from merge commit subjects (most reliable)
-MERGE_PRS=$(git log origin/main..origin/staging --merges --oneline \
+MERGE_PRS=$(git log origin/$DEFAULT_BRANCH..origin/$STAGING_BRANCH --merges --oneline \
   | grep -oP '(?<=pull request #)\d+' \
   | sort -u)
 
@@ -178,10 +194,10 @@ If the gate exits with `RESULT: BLOCK DEPLOY` → **STOP**. Do NOT proceed to Ph
 ## Phase 0B: Scope Analysis
 
 ```bash
-git fetch origin main staging
-git diff origin/main...origin/staging --stat | tail -20
-git diff origin/main...origin/staging --numstat | awk '{add+=$1; del+=$2} END {print "Added:", add, "Deleted:", del, "Total:", add+del}'
-git diff origin/main...origin/staging --name-only | sort | uniq
+git fetch origin $DEFAULT_BRANCH $STAGING_BRANCH
+git diff origin/$DEFAULT_BRANCH...origin/$STAGING_BRANCH --stat | tail -20
+git diff origin/$DEFAULT_BRANCH...origin/$STAGING_BRANCH --numstat | awk '{add+=$1; del+=$2} END {print "Added:", add, "Deleted:", del, "Total:", add+del}'
+git diff origin/$DEFAULT_BRANCH...origin/$STAGING_BRANCH --name-only | sort | uniq
 ```
 
 Categorize by service (API, Worker, Web, Shared, Infra). Identify high-risk files (billing, credits, pricing, auth, security, migration, scraper).
@@ -193,26 +209,70 @@ Create review chunks by priority: Billing/Pricing (CRITICAL) → Security/Auth (
 ## Phase 1: Automated Checks
 
 ### 1A: Python Linting
+
+Read `forge.yaml → verification.commands.python` for project-specific tool commands:
+
 ```bash
-cd services/api && poetry run black --check app/ && poetry run isort --check app/
-cd services/worker && poetry run black --check worker/ && poetry run isort --check worker/
+PYTHON_FORMAT=$(yq '.verification.commands.python.format // ""' forge.yaml 2>/dev/null || echo '')
+PYTHON_LINT=$(yq '.verification.commands.python.lint // ""' forge.yaml 2>/dev/null || echo '')
+
+if [ -n "$PYTHON_FORMAT" ]; then
+    eval "$PYTHON_FORMAT" 2>&1 | head -30
+else
+    echo "SKIPPED — python.format not configured in verification.commands"
+fi
+
+if [ -n "$PYTHON_LINT" ]; then
+    eval "$PYTHON_LINT" 2>&1 | head -30
+else
+    echo "SKIPPED — python.lint not configured in verification.commands"
+fi
 ```
 
 ### 1B: TypeScript Type-Check + Build (MANDATORY)
+
+Read `forge.yaml → verification.commands.typescript` for project-specific tool commands:
+
 ```bash
-cd web && npx tsc --noEmit 2>&1
-cd web && npx next build 2>&1 | tail -50
+TS_TYPECHECK=$(yq '.verification.commands.typescript.typecheck // ""' forge.yaml 2>/dev/null || echo '')
+TS_BUILD=$(yq '.verification.commands.typescript.build // ""' forge.yaml 2>/dev/null || echo '')
+
+if [ -n "$TS_TYPECHECK" ]; then
+    eval "$TS_TYPECHECK" 2>&1
+    TS_EXIT=$?
+    [ "$TS_EXIT" -ne 0 ] && echo "BLOCKING: typecheck failed — deploy WILL fail"
+else
+    echo "SKIPPED — typescript.typecheck not configured in verification.commands"
+    TS_EXIT=0
+fi
+
+if [ -n "$TS_BUILD" ]; then
+    eval "$TS_BUILD" 2>&1 | tail -50
+    BUILD_EXIT=$?
+    [ "$BUILD_EXIT" -ne 0 ] && echo "BLOCKING: build failed — deploy WILL fail"
+else
+    echo "SKIPPED — typescript.build not configured in verification.commands"
+fi
 ```
-`next build` failure is BLOCKING — deploy WILL fail. `tsc` alone misses SSG prerender failures.
+Build failure is BLOCKING — deploy WILL fail. Typecheck alone misses SSG/prerender failures — configure `typescript.build` in `verification.commands`.
 
 ### 1C: Python Tests
+
+Read `forge.yaml → verification.commands.python.test`:
+
 ```bash
-cd services/api && poetry run pytest tests/ -x -q --tb=short 2>&1 | tail -50
+PYTHON_TEST=$(yq '.verification.commands.python.test // ""' forge.yaml 2>/dev/null || echo '')
+
+if [ -n "$PYTHON_TEST" ]; then
+    eval "$PYTHON_TEST" 2>&1 | tail -50
+else
+    echo "SKIPPED — python.test not configured in verification.commands"
+fi
 ```
 
 ### 1D: Secrets Scan
 ```bash
-git diff origin/main...origin/staging | grep -iE "(api[_-]?key|secret|password|token|credential)" | grep -vE "(#|//|\.example|placeholder)" | head -20
+git diff origin/$DEFAULT_BRANCH...origin/$STAGING_BRANCH | grep -iE "(api[_-]?key|secret|password|token|credential)" | grep -vE "(#|//|\.example|placeholder)" | head -20
 ```
 
 ### 1E: CI Status Gate (BLOCKING)
@@ -290,9 +350,11 @@ Keep ALL findings (CONFIRMED/LIKELY/POSSIBLE). Deduplicate by file:line (keep hi
 
 ### 7C: Ensure Labels
 ```bash
-gh label create "review-finding" --color "D93F0B" --force 2>/dev/null
-gh label create "needs-validation" --color "FBCA04" --force 2>/dev/null
-gh label create "staging-review" --color "1D76DB" --force 2>/dev/null
+# Colors match the canonical ForgeDock label manifest (bin/labels.json).
+# Run `npx forgedock labels setup` to bootstrap all managed labels at once.
+gh label create "review-finding" --color "D93F0B" --description "Defect or improvement found during automated PR review. Managed by ForgeDock." --force -R {GH_REPO} 2>/dev/null
+gh label create "needs-validation" --color "FBCA04" --description "Review finding awaiting human validation. Managed by ForgeDock." --force -R {GH_REPO} 2>/dev/null
+gh label create "staging-review" --color "1D76DB" --description "Finding from a staging branch review before deploy to main. Managed by ForgeDock." --force -R {GH_REPO} 2>/dev/null
 ```
 
 ### 7D: Milestone Detection
@@ -302,7 +364,51 @@ Only assign milestone if reviewing a milestone/* branch. Plain staging reviews g
 Check for open review-finding issues at same file:line → skip. Closed issues at same location → potential regression (elevate priority).
 
 ### 7F: Create Issues
-Sequential creation. Title: `Staging Review: {summary} (staging → main)`. Labels: review-finding, needs-validation, staging-review, P1/P2/P3. Body includes: source branch context (`staging`), code context, evidence, validation checklist.
+Sequential creation. Title: `Staging Review: {summary} (staging → main)`. Labels: review-finding, needs-validation, staging-review, priority:P1/priority:P2/priority:P3. Body includes: source branch context (`staging`), code context, evidence, validation checklist.
+
+**For each finding** (that passes dedup), create issue:
+```bash
+ISSUE_NUM=$(gh issue create \
+  -R {GH_REPO} \
+  --title "chore: [summary] (staging review — PR #${PR_NUMBER})" \
+  --label "review-finding,needs-validation,staging-review,{priority}" \
+  --body "$(cat <<'ISSUE_EOF'
+## Problem
+
+[One sentence: what bug or issue was found. Where it occurs (`file:line`) and what it causes.]
+
+**Source**: PR #[PR_NUMBER] — [TITLE]
+**Confidence**: [CONFIRMED/LIKELY/POSSIBLE]
+**Severity**: [CRITICAL/HIGH/MEDIUM/LOW]
+**Review comment**: [permalink to agent comment]
+
+## Affected Files
+
+Files that need changes:
+1. `[file:line]` — [what needs to change to fix this finding]
+
+## Source Branch Context
+
+**Code branch**: `staging`
+**Worktree base**: `origin/staging`
+
+> When fixing: `git worktree add ../fix-{slug} -b fix/{slug} origin/staging`
+
+## Code Context
+[10 lines around finding]
+
+## Evidence
+[From agent comment]
+
+## Acceptance Criteria
+
+- [ ] Finding validated: VALIDATED / FALSE_POSITIVE / INCONCLUSIVE
+- [ ] If VALIDATED: fix implemented and tested on correct branch
+ISSUE_EOF
+)" --json number --jq '.number')
+```
+
+Labels: `review-finding` + `needs-validation` + `staging-review` + priority (`priority:P1` CONFIRMED, `priority:P2` LIKELY, `priority:P3` POSSIBLE).
 
 **No pre-filtering**: Every finding becomes an issue. Validation agents sort out false positives downstream.
 
