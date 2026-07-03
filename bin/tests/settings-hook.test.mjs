@@ -115,4 +115,11 @@ describe("removeSessionStartHook — malformed hooks shapes", () => {
     writeFileSync(settingsPath, JSON.stringify({ hooks: { SessionStart: 42 } }), "utf-8");
     assert.equal(removeSessionStartHook(settingsPath).status, "skipped-malformed");
   });
+
+  it("hooks as array or primitive → skipped-malformed", () => {
+    for (const hooks of [[], "custom", 42, true]) {
+      writeFileSync(settingsPath, JSON.stringify({ hooks }), "utf-8");
+      assert.equal(removeSessionStartHook(settingsPath).status, "skipped-malformed");
+    }
+  });
 });

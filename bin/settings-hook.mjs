@@ -88,6 +88,13 @@ export function removeSessionStartHook(settingsPath) {
   const { settings, fresh } = read;
   if (fresh) return { status: "absent" };
 
+  // Validate hooks shape: must be a plain object (not array, string, etc.)
+  if (settings.hooks !== undefined && settings.hooks !== null) {
+    if (Array.isArray(settings.hooks) || typeof settings.hooks !== "object") {
+      return { status: "skipped-malformed" };
+    }
+  }
+
   // Validate SessionStart shape if present: must be an array
   if (settings.hooks && settings.hooks.SessionStart !== undefined && !Array.isArray(settings.hooks.SessionStart)) {
     return { status: "skipped-malformed" };
