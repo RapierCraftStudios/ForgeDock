@@ -512,3 +512,157 @@ export async function forge(ctx) {
 
   return { installed, updated, skipped, copied, total: files.length, hookStatus };
 }
+
+// ---------------------------------------------------------------------------
+// Act III — Reading your repository (Task 8)
+// ---------------------------------------------------------------------------
+
+import { detectConfig } from "./init-detect.mjs";
+import { enrich } from "./init-enrich-api.mjs";
+import { annotatedReviewScreen, box } from "./tui.mjs";
+
+const badgeOf = (field) => field.confidence;
+
+/**
+ * Act III: detect the repo, show each field as a reveal row with its
+ * confidence badge, optionally AI-enrich. Detection runs first (it is fast);
+ * rows are display pacing, not fake latency.
+ */
+export async function read(ctx) {
+  const { stdout: w } = ctx;
+  w.write("\n  " + ember("Reading your repository", ctx.mode) + "\n\n");
+
+  const draft = await detectConfig(ctx.cwd);
+  const description = detectDescription(ctx.cwd);
+
+  const rows = [
+    { label: "owner/repo", run: async () => ({ ok: true, detail: `${draft.project.owner.value}/${draft.project.repo.value}`, badge: badgeOf(draft.project.owner) }) },
+    { label: "default branch", run: async () => ({ ok: true, detail: draft.branches.default.value, badge: badgeOf(draft.branches.default) }) },
+    { label: "staging branch", run: async () => ({ ok: true, detail: draft.branches.staging.value, badge: badgeOf(draft.branches.staging) }) },
+    { label: "project name", run: async () => ({ ok: true, detail: draft.project.name.value, badge: badgeOf(draft.project.name) }) },
+    {
+      label: "description",
+      run: async () => description.value
+        ? { ok: true, detail: `"${description.value.slice(0, 40)}${description.value.length > 40 ? "…" : ""}"`, badge: "medium" }
+        : { ok: true, detail: "none found", badge: "low" },
+    },
+  ];
+  await revealRows(rows, { mode: ctx.mode, motion: ctx.motion, writer: w });
+
+  if (ctx.env.ANTHROPIC_API_KEY) {
+    try {
+      w.write("  " + dimLine(ctx, "✦ enriching with AI…") + "\n");
+      await enrich(draft);
+    } catch {
+      w.write("  " + dimLine(ctx, "✦ AI enrichment unavailable — continuing with detection only") + "\n");
+    }
+  } else {
+    w.write("  " + dimLine(ctx, "✦ no ANTHROPIC_API_KEY — skipping AI enrichment") + "\n");
+  }
+
+  return { draft, description };
+}
+
+// ---------------------------------------------------------------------------
+// Act IV — The Review (Task 8)
+// ---------------------------------------------------------------------------
+
+/**
+ * Act IV: the single interaction. Non-TTY + existing config aborts to protect
+ * the file; non-TTY + fresh config writes detection values with TODO flags
+ * (annotatedReviewScreen's non-TTY path returns them directly).
+ */
+export async function review(ctx, draft, description) {
+  const { stdout: w } = ctx;
+  const outputPath = join(ctx.cwd, "forge.yaml");
+  const hasExisting = existsSync(outputPath);
+
+  if (hasExisting && process.stdin.isTTY !== true) {
+    w.write("\n  forge.yaml already exists — non-interactive run, aborting to protect it.\n");
+    w.write("  " + dimLine(ctx, "Run interactively (or delete forge.yaml) to regenerate.") + "\n");
+    return { written: false, todoCount: 0, backupName: null, aborted: true };
+  }
+
+  const extraFields = description.value
+    ? { description: { value: description.value, confidence: "medium", source: description.source, why: `First paragraph of ${description.source}` } }
+    : {};
+
+  const accepted = await annotatedReviewScreen(draft, {
+    hasExistingConfig: hasExisting,
+    showSources: ctx.argv.includes("--verbose"),
+    extraFields,
+  });
+
+  const backup = backupExisting(outputPath);
+  if (backup) w.write(`  Backed up: forge.yaml → ${backup.backupName}\n`);
+
+  const { todoCount } = writeForgeYaml(accepted, accepted.lowConfidenceKeys, outputPath);
+  return { written: true, todoCount, backupName: backup ? backup.backupName : null, aborted: false };
+}
+
+// ---------------------------------------------------------------------------
+// Act V — Forged (Task 8)
+// ---------------------------------------------------------------------------
+
+/**
+ * Act V: quench flash on the compact mark, receipt with real elapsed time,
+ * next-steps box.
+ */
+export function celebrate(ctx, summary) {
+  const { stdout: w } = ctx;
+  const elapsed = Math.round((Date.now() - ctx.startedAt) / 1000);
+  const mark = renderMark("compact", ctx.mode);
+
+  w.write("\n");
+  w.write(mark[0] + "\n");
+  w.write(mark[1] + "   " + ember("Forged.", ctx.mode) + " " + dimLine(ctx, `install → config in ${elapsed}s`) + "\n");
+  w.write(mark[2] + "\n");
+  w.write(mark[3] + "\n\n");
+
+  const glyph = ctx.mode === "none" ? "✔" : "\x1b[38;2;255;179;71m✔\x1b[0m";
+  if (summary.written) {
+    const todoNote = summary.todoCount > 0 ? `${summary.todoCount} field${summary.todoCount === 1 ? "" : "s"} flagged # TODO` : "all fields detected";
+    w.write(`  ${glyph} forge.yaml written          ${dimLine(ctx, todoNote)}\n`);
+  }
+  if (summary.total !== undefined) {
+    const hookNote = summary.hookStatus === "skipped-malformed" ? "hook NOT active — see fix above" : "Claude Code knows this repo";
+    w.write(`  ${glyph} ${summary.total} commands · hook ${summary.hookStatus === "skipped-malformed" ? "skipped" : "active"}   ${dimLine(ctx, hookNote)}\n`);
+  }
+  w.write("\n");
+  w.write(
+    box(
+      [
+        `  1. open claude in this repo`,
+        `  2. run /work-on next — watch an issue become a merged PR`,
+      ],
+      { title: "what's next" },
+    ),
+  );
+  w.write("  " + dimLine(ctx, "docs: github.com/RapierCraftStudios/ForgeDock · ⭐ a star is the whole marketing budget") + "\n\n");
+}
+
+// ---------------------------------------------------------------------------
+// The full journey (Task 8)
+// ---------------------------------------------------------------------------
+
+/**
+ * Acts I→V. Returns the process exit code.
+ * SIGINT: restore cursor, summarize partial state, exit 130.
+ */
+export async function runJourney(ctx) {
+  const onSigint = () => {
+    ctx.stdout.write("\x1b[0m\x1b[?25h\n  Interrupted. Partial state: commands may be installed; config not written.\n  Finish anytime with: npx forgedock init\n");
+    process.exit(130);
+  };
+  process.on("SIGINT", onSigint);
+  try {
+    await preflight(ctx);
+    const forged = await forge(ctx);
+    const { draft, description } = await read(ctx);
+    const reviewed = await review(ctx, draft, description);
+    celebrate(ctx, { ...reviewed, total: forged.total, hookStatus: forged.hookStatus });
+    return reviewed.aborted ? 1 : 0;
+  } finally {
+    process.removeListener("SIGINT", onSigint);
+  }
+}

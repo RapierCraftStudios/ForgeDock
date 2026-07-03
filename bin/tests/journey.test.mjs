@@ -390,3 +390,58 @@ describe("forge (Act II)", () => {
     assert.match(w.text, /WARNING/);
   });
 });
+
+// ---------------------------------------------------------------------------
+// Task 8: read, review, celebrate, & runJourney tests
+// ---------------------------------------------------------------------------
+
+import { read, review, celebrate } from "../journey.mjs";
+
+describe("read (Act III)", () => {
+  it("returns a draft + description without a git repo (placeholders, low confidence)", async () => {
+    const cwd = mkdtempSync(join(os.tmpdir(), "fd-read-"));
+    writeFileSync(join(cwd, "README.md"), "# X\n\nA test project.\n", "utf-8");
+    const { ctx, w } = stubCtx({ cwd });
+    const res = await read(ctx);
+    assert.equal(res.draft.project.owner.value, "your-github-org");
+    assert.equal(res.description.value, "A test project.");
+    assert.match(w.text, /\[low\]/); // badge rendered for placeholder
+  });
+});
+
+describe("review (Act IV)", () => {
+  it("non-TTY + no existing config: writes forge.yaml with TODO flags for low fields", async () => {
+    const cwd = mkdtempSync(join(os.tmpdir(), "fd-review-"));
+    const { ctx } = stubCtx({ cwd });
+    const res0 = await read(ctx);
+    const res = await review(ctx, res0.draft, res0.description);
+    assert.equal(res.written, true);
+    assert.equal(res.aborted, false);
+    const yaml = readFileSync(join(cwd, "forge.yaml"), "utf-8");
+    assert.match(yaml, /# TODO\(forgedock:owner\)/);
+    assert.ok(res.todoCount >= 1);
+  });
+
+  it("non-TTY + existing config: aborts and leaves the file untouched", async () => {
+    const cwd = mkdtempSync(join(os.tmpdir(), "fd-review2-"));
+    writeFileSync(join(cwd, "forge.yaml"), "precious: true\n", "utf-8");
+    const { ctx } = stubCtx({ cwd });
+    const res0 = await read(ctx);
+    const res = await review(ctx, res0.draft, res0.description);
+    assert.equal(res.aborted, true);
+    assert.equal(res.written, false);
+    assert.equal(readFileSync(join(cwd, "forge.yaml"), "utf-8"), "precious: true\n");
+  });
+});
+
+describe("celebrate (Act V)", () => {
+  it("prints elapsed time, receipt, and next steps", () => {
+    const { ctx, w } = stubCtx({});
+    ctx.startedAt = Date.now() - 34000;
+    celebrate(ctx, { written: true, todoCount: 2, total: 24, hookStatus: "installed" });
+    assert.match(w.text, /Forged\./);
+    assert.match(w.text, /34s|3[0-9]s/);
+    assert.match(w.text, /work-on next/);
+    assert.match(w.text, /2/); // TODO count surfaces in the receipt
+  });
+});
