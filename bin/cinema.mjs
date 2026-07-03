@@ -170,3 +170,147 @@ export function ember(text, mode) {
 export function sleep(ms) {
   return new Promise((r) => setTimeout(r, ms));
 }
+
+// ---------------------------------------------------------------------------
+// Animation primitives (Task 2)
+// ---------------------------------------------------------------------------
+
+import { box, stripAnsi } from "./tui.mjs";
+
+const BRAILLE = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
+
+/** Ember-tinted status glyph for a result row. */
+function statusGlyph(ok, mode) {
+  if (mode === "none") return ok ? "✔" : "✖";
+  const rgb = ok ? [255, 179, 71] : [224, 112, 80]; // amber / ember-red
+  return `\x1b[38;2;${rgb[0]};${rgb[1]};${rgb[2]}m${ok ? "✔" : "✖"}\x1b[0m`;
+}
+
+/** Dim wrapper honoring the mode gate. */
+function dimText(s, mode) {
+  return mode === "none" ? s : `\x1b[2m${s}\x1b[22m`;
+}
+
+/** Badge like [high] / [med] / [low], colorized per confidence. */
+function badgeText(badge, mode) {
+  const label = badge === "medium" ? "med" : badge;
+  if (mode === "none") return `[${label}]`;
+  const rgb = badge === "high" ? [125, 219, 132] : badge === "medium" ? [232, 192, 96] : [224, 112, 80];
+  return `\x1b[38;2;${rgb[0]};${rgb[1]};${rgb[2]}m[${label}]\x1b[0m`;
+}
+
+/** Ember-bordered fix card (wraps tui.box; border color applied when able). */
+export function fixCard(lines, mode) {
+  const boxed = box(lines.map((l) => ` ${l} `), { title: "fix" });
+  if (mode === "none") return boxed;
+  return boxed
+    .split("\n")
+    .map((l) => l.replace(/^([╭╰│]|\s*[╭╰│])/u, (m) => `\x1b[38;2;255;107;53m${m}\x1b[0m`))
+    .join("\n");
+}
+
+function formatRow(label, res, mode) {
+  const parts = [`  ${statusGlyph(res.ok, mode)} ${label.padEnd(16)}`];
+  if (res.detail) parts.push(dimText(String(res.detail), mode));
+  if (res.badge) parts.push(badgeText(res.badge, mode));
+  return parts.join("  ");
+}
+
+/**
+ * Reveal rows one at a time: spinner while `run()` is in flight, settling to
+ * a ✔/✖ line (+ optional fix card). Without motion: run, print final line.
+ * Every row's `run` executes regardless of motion — this is display-only.
+ */
+export async function revealRows(
+  rows,
+  { mode, motion, writer = process.stdout, interval = 80, minDisplayMs = 120 } = {},
+) {
+  const results = [];
+  for (const row of rows) {
+    let res;
+    if (!motion) {
+      res = await row.run();
+    } else {
+      let frame = 0;
+      writer.write(`  \x1b[38;2;255;107;53m${BRAILLE[0]}\x1b[0m ${row.label}\n`);
+      const timer = setInterval(() => {
+        frame = (frame + 1) % BRAILLE.length;
+        writer.write(`\x1b[1A\x1b[2K  \x1b[38;2;255;107;53m${BRAILLE[frame]}\x1b[0m ${row.label}\n`);
+      }, interval);
+      const started = Date.now();
+      try {
+        res = await row.run();
+        const elapsed = Date.now() - started;
+        if (elapsed < minDisplayMs) await sleep(minDisplayMs - elapsed);
+      } finally {
+        clearInterval(timer);
+      }
+      writer.write("\x1b[1A\x1b[2K");
+    }
+    writer.write(formatRow(row.label, res, mode) + "\n");
+    if (!res.ok && res.fix && res.fix.length > 0) {
+      writer.write(fixCard(res.fix, mode) + "\n");
+    }
+    results.push(res);
+  }
+  return results;
+}
+
+/**
+ * One-pass highlight sweep over gradient block art, settling to the static
+ * gradientBlock render. In-place redraw via cursor-up; never alt-screen.
+ */
+export async function shimmer(
+  lines,
+  stops,
+  { mode, motion, writer = process.stdout, frames = 14, interval = 55 } = {},
+) {
+  const settled = gradientBlock(lines, stops, mode);
+  if (!motion || mode === "none") {
+    writer.write(settled.join("\n") + "\n");
+    return;
+  }
+  const width = Math.max(...lines.map((l) => l.length));
+  for (let f = 0; f <= frames; f++) {
+    const band = (f / frames) * (width + 16) - 8;
+    const frameLines = lines.map((line, row) => {
+      const chars = [...line];
+      let out = "";
+      for (let i = 0; i < chars.length; i++) {
+        if (chars[i] === " ") {
+          out += " ";
+          continue;
+        }
+        const t = Math.min(i / Math.max(chars.length - 1, 1) + row * 0.06, 1);
+        let rgb = sampleGradient(stops, t);
+        const dist = Math.abs(i - band + row * 1.5);
+        if (dist < 6) {
+          const boost = 1 - dist / 6;
+          rgb = rgb.map((v) => Math.round(v + (255 - v) * boost));
+        }
+        out += `\x1b[38;2;${rgb[0]};${rgb[1]};${rgb[2]}m${chars[i]}`;
+      }
+      return out + "\x1b[0m";
+    });
+    if (f > 0) writer.write(`\x1b[${lines.length}A`);
+    writer.write(frameLines.join("\n") + "\n");
+    await sleep(interval);
+  }
+  writer.write(`\x1b[${lines.length}A`);
+  writer.write(settled.join("\n") + "\n");
+}
+
+/**
+ * One static frame of the molten progress bar: solid fill with a ▓▒ leading
+ * edge and dim ░ remainder. Caller redraws with cursor-up for animation.
+ */
+export function moltenBar(current, total, { width = 24, mode } = {}) {
+  const ratio = total === 0 ? 1 : Math.min(current / total, 1);
+  const filled = Math.round(ratio * width);
+  const solidLen = Math.max(filled - 2, 0);
+  const edge = "▓▒".slice(0, filled - solidLen);
+  const body = "█".repeat(solidLen) + edge;
+  const rest = "░".repeat(Math.max(width - filled, 0));
+  if (mode === "none") return `[${body}${rest}]`;
+  return gradientLine(body, EMBER_STOPS, mode) + dimText(rest, mode);
+}

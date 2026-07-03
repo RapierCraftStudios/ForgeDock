@@ -98,3 +98,78 @@ describe("the mark", () => {
     assert.match(ember("X", "truecolor"), /38;2/);
   });
 });
+
+// Task 2 tests
+import { shimmer, revealRows, moltenBar, fixCard } from "../cinema.mjs";
+
+/** Minimal writable stub capturing everything written. */
+function fakeWriter() {
+  const chunks = [];
+  return {
+    chunks,
+    write(s) { chunks.push(s); return true; },
+    get text() { return chunks.join(""); },
+  };
+}
+
+describe("shimmer", () => {
+  it("without motion writes the settled block once, no cursor movement", async () => {
+    const w = fakeWriter();
+    await shimmer(["ABC", "DEF"], CHROME_STOPS, { mode: "none", motion: false, writer: w });
+    assert.equal(w.text, "ABC\nDEF\n");
+    assert.doesNotMatch(w.text, /\x1b\[\d+A/);
+  });
+  it("with motion ends settled and uses cursor-up (no alt screen)", async () => {
+    const w = fakeWriter();
+    await shimmer(["AB"], EMBER_STOPS, { mode: "truecolor", motion: true, writer: w, frames: 2, interval: 1 });
+    assert.match(w.text, /\x1b\[1A/);          // in-place redraw
+    assert.doesNotMatch(w.text, /\x1b\[\?1049/); // never alt-screen
+  });
+});
+
+describe("revealRows", () => {
+  it("without motion prints one final line per row and returns results", async () => {
+    const w = fakeWriter();
+    const results = await revealRows(
+      [
+        { label: "git", run: async () => ({ ok: true, detail: "2.45" }) },
+        { label: "gh", run: async () => ({ ok: false, detail: "not found", fix: ["winget install GitHub.cli"] }) },
+      ],
+      { mode: "none", motion: false, writer: w },
+    );
+    assert.equal(results.length, 2);
+    assert.match(w.text, /✔ git\s+2\.45/);
+    assert.match(w.text, /✖ gh\s+not found/);
+    assert.match(w.text, /winget install GitHub\.cli/); // fix card rendered
+  });
+  it("renders confidence badges when provided", async () => {
+    const w = fakeWriter();
+    await revealRows(
+      [{ label: "owner/repo", run: async () => ({ ok: true, detail: "Rapier/ForgeDock", badge: "high" }) }],
+      { mode: "none", motion: false, writer: w },
+    );
+    assert.match(w.text, /\[high\]/);
+  });
+});
+
+describe("moltenBar", () => {
+  it("none mode renders bracketed plain bar", () => {
+    const bar = moltenBar(3, 6, { width: 6, mode: "none" });
+    assert.equal(bar, "[█▓▒░░░]");
+  });
+  it("full bar has no empty cells", () => {
+    const bar = moltenBar(6, 6, { width: 6, mode: "none" });
+    assert.doesNotMatch(bar, /░/);
+  });
+  it("truecolor mode emits gradient codes", () => {
+    assert.match(moltenBar(3, 6, { width: 6, mode: "truecolor" }), /38;2/);
+  });
+});
+
+describe("fixCard", () => {
+  it("boxes the fix lines", () => {
+    const card = fixCard(["run: gh auth login"], "none");
+    assert.match(card, /╭[─ ]*.*╮/s);
+    assert.match(card, /run: gh auth login/);
+  });
+});
