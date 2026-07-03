@@ -40,22 +40,23 @@ You should see `work-on.md`, `review-pr.md`, and `quality-gate.md`.
 
 ---
 
-## Step 2: Configure Your Repository
+## Step 2: Your Config Is Already There
 
-In your project root, initialize a `forge.yaml` config file:
+`npx forgedock` in Step 1 already detected your repo and walked you through a reviewed `forge.yaml` — there's no separate config step to run. If you need to redo detection later (moved the repo, renamed a branch), just re-run:
 
 ```bash
 cd /path/to/your/project
-# Open Claude Code in this directory, then run:
-/forgedock-init
+npx forgedock init
 ```
 
-The `/forgedock-init` command scans your repo and generates a `forge.yaml` with:
+**Optional: enrich the config.** Once `forge.yaml` exists, open Claude Code in your project directory and run `/forgedock-init` to fill in the optional sections that plain detection can't infer:
 
-- Your GitHub repo owner and name
-- Worktree base path
-- Branch strategy (staging vs. feature lanes)
-- Project board connection (optional)
+- Project board connection (GitHub Projects v2)
+- Satellite repo routing (multi-repo setups)
+- Review context (tech stack, known pitfalls)
+- Service URLs for health checks
+
+`/forgedock-init` completes an existing `forge.yaml` — it won't create one from scratch.
 
 **Minimal `forge.yaml` example:**
 
@@ -157,7 +158,7 @@ The symlink wasn't created. Re-run `npx forgedock` and check `ls ~/.claude/comma
 
 **`forge.yaml` not found**
 
-Run `/forgedock-init` in your project directory inside Claude Code, or copy `forge.yaml.example` from the ForgeDock repo and edit it.
+Run `npx forgedock init` in your project directory to generate it, or copy `forge.yaml.example` from the ForgeDock repo and edit it. Once it exists, `/forgedock-init` inside Claude Code can fill in the optional sections.
 
 **`gh` auth errors**
 

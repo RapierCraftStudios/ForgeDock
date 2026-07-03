@@ -49,13 +49,14 @@ $ /work-on #42          "POST /api/payments returns 500 for free-tier users"
 <p><em><code>/work-on #42</code> — issue to reviewed PR, with the full reasoning chain written back to GitHub.</em></p>
 </div>
 
-### Try it in 30 seconds — on a throwaway repo, nothing to lose
+### Try it in 60 seconds
 
 ```bash
-npx forgedock demo     # spins up a risk-free demo repo and shows you the pipeline end to end
+npx forgedock
 ```
 
-Ready to use it for real? **`npx forgedock`** installs it into Claude Code in about 10 seconds (full setup below).
+One command: it checks your environment, installs the slash commands, reads
+your repo, and writes a reviewed `forge.yaml` — you press Enter once.
 
 > ⭐ **If ForgeDock saves you time, [star the repo](https://github.com/RapierCraftStudios/ForgeDock/stargazers)** — it's the whole marketing budget.
 
@@ -173,14 +174,19 @@ Issue → Investigate → Context → Architect → Build → Quality Gate → R
 
 ## Install
 
-**Requirements:** [Claude Code](https://docs.anthropic.com/en/docs/claude-code) and [GitHub CLI](https://cli.github.com/).
+**Requirements:** [Claude Code](https://docs.anthropic.com/en/docs/claude-code) · [GitHub CLI](https://cli.github.com/) (authenticated) · Node.js ≥ 18.
 
 ```bash
-npx forgedock          # 1. install the commands into Claude Code (~10s)
-npx forgedock init     # 2. auto-detect your repo/owner/branches → writes forge.yaml
+npx forgedock
 ```
 
-`init` writes `forge.yaml` (so ForgeDock works with *your* repo, not a hardcoded one) and injects a short usage block into your project's `CLAUDE.md` so every Claude Code session knows ForgeDock drives development here. Then just open Claude Code and run `/work-on <issue>`.
+One command does everything: it checks your environment, installs the slash commands into Claude Code, detects your repo (owner, branches, paths), and hands you a single annotated `forge.yaml` to review — press Enter to accept. Run `npx forgedock init` any time afterward to re-generate the config only.
+
+Installing also registers a SessionStart hook, so every Claude Code session
+in a forge-managed directory starts already knowing ForgeDock runs it.
+Per-directory control: `npx forgedock enable` / `disable` / `status`.
+
+Then just open Claude Code and run `/work-on <issue>`.
 
 <details>
 <summary><strong>Other install options & commands</strong></summary>
@@ -197,9 +203,11 @@ Commands then appear as `/forgedock:work-on`, etc. You still run `npx forgedock 
 **Maintenance:**
 
 ```bash
-npx forgedock update      # pull latest commands
-npx forgedock integrate   # regenerate the CLAUDE.md usage block
-npx forgedock uninstall   # remove all commands
+npx forgedock update      # relink commands + refresh the SessionStart hook
+npx forgedock enable      # turn ForgeDock on for this directory
+npx forgedock disable     # turn ForgeDock off for this directory
+npx forgedock status      # show ForgeDock's state for this directory
+npx forgedock uninstall   # remove commands, the hook, and tracked copies
 npx forgedock help        # show everything
 ```
 

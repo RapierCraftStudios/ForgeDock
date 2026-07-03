@@ -12,18 +12,24 @@ echo "forge.yaml" >> .gitignore  # if your credentials path is sensitive
 
 ---
 
-## CLI Flags for `init`
+## CLI Flags
 
-`npx forgedock init` accepts two optional flags that change how configuration is generated:
+These flags apply to `npx forgedock` (the full install journey) and `npx forgedock init` (config-only regeneration):
 
 | Flag | Behavior |
 |------|----------|
-| `--manual` | Skips AI autopilot enrichment entirely. Presents the annotated review screen with detection baseline values only (no AI-enriched suggestions). Detection still runs to provide defaults — you review and edit the raw inferred values on the same single-screen interface. |
-| `--verbose` | Surfaces each field's detection source and confidence rationale during the init flow. Helpful for understanding where ForgeDock inferred values from (e.g. `git remote`, `package.json`, `gh api`). |
+| `--manual` | `npx forgedock init` only. Skips the annotated review screen and asks plain, one-field-at-a-time prompts instead, pre-filled with the detected values as defaults. |
+| `--verbose` | Shows each field's detection source and confidence rationale on the review screen (e.g. `git remote`, `package.json`, `gh api`), instead of only flagging low-confidence fields. |
+| `--fast` | Skips the animation/motion frames and jumps straight to the static screens. |
 
-The two flags can be combined: `npx forgedock init --manual --verbose` shows the annotated review screen with detection baseline values and field provenance at each entry.
+**Environment variables:**
 
-The default (`npx forgedock init` with no flags) remains the zero-question autopilot: AI enrichment fills in everything it can, and you review the result on a single annotated screen.
+| Variable | Behavior |
+|----------|----------|
+| `FORGE_NO_MOTION=1` | Same effect as `--fast` — disables animation frames. |
+| `NO_COLOR=1` (or a non-TTY output stream) | Disables ANSI color output. Motion is unaffected. |
+
+The default (no flags) is the annotated review screen: detection runs, AI enrichment fills in what it can (when an API key is available), and you review the result on a single screen — Enter accepts everything, low-confidence fields are flagged with a `# TODO(forgedock:<field>)` comment if left unedited.
 
 ---
 
@@ -592,45 +598,42 @@ Downstream consumers read `field.value` for the raw value and `field.confidence`
 
 ---
 
-## CLAUDE.md Integration
+## SessionStart Hook Integration
 
-ForgeDock can inject a managed usage block into your project's `CLAUDE.md` so every Claude Code session opened in the repo automatically knows that ForgeDock drives development here and which commands to use.
+ForgeDock does **not** write anything into your project's `CLAUDE.md` or `AGENTS.md`. Instead, `npx forgedock` registers a `SessionStart` hook in `~/.claude/settings.json` — a small script that runs at the start of every Claude Code session and prints ForgeDock's context straight to that session, without touching any file in your repo.
 
 ### How It Works
 
-Running `npx forgedock init` or `npx forgedock integrate` writes a marker-bounded block into `CLAUDE.md`:
+The hook resolves the current directory's state and reacts accordingly:
 
-```
-<!-- BEGIN FORGEDOCK -->
-## ForgeDock — Autonomous Development Pipeline
-...command index and conventions...
-<!-- END FORGEDOCK -->
-```
+| State | Behavior |
+|-------|----------|
+| `managed-active` (`forge.yaml` present, not opted out) | Prints a summary of `forge.yaml` (project, repo, branches) plus the available pipeline commands |
+| `managed-active`, no `forge.yaml` yet | Suggests running `npx forgedock init` |
+| `managed-optedout` | Completely silent — no output |
+| `unmanaged` | Prints a one-time, suppressible nudge to run `npx forgedock enable` |
 
-The block is **idempotent** — re-running replaces only the managed section and leaves all other `CLAUDE.md` content untouched. If `CLAUDE.md` does not exist, it is created.
-
-If `AGENTS.md` already exists in the project root, the same block is mirrored into it.
+The hook entry is registered idempotently: re-installing (`npx forgedock update`) will not duplicate it, and unrelated hooks or settings in `~/.claude/settings.json` are left untouched. If `settings.json` is malformed, the installer skips writing rather than risk corrupting it.
 
 ### Commands
 
 | Command | Action |
 |---------|--------|
-| `npx forgedock init` | Generates `forge.yaml` **and** injects the CLAUDE.md block |
-| `npx forgedock integrate` | Injects/refreshes the block without modifying `forge.yaml` |
+| `npx forgedock` / `npx forgedock install` | Registers the SessionStart hook (along with installing commands and writing `forge.yaml`) |
+| `npx forgedock update` | Re-registers the hook (relink only — does not touch `forge.yaml`) |
+| `npx forgedock uninstall` | Removes the hook entry from `settings.json` |
 
 ### Opting Out
 
-To prevent ForgeDock from managing the block, remove the `<!-- BEGIN FORGEDOCK -->` / `<!-- END FORGEDOCK -->` markers from `CLAUDE.md`. Without the markers, subsequent runs will append a new block rather than replacing one — so if you want to opt out permanently, delete or omit the markers **and** do not run `integrate` again.
-
-Alternatively, keep the markers but edit the content between them freely — ForgeDock will replace that section on the next run, so any manual edits inside the markers will be overwritten.
-
-### Re-generating
-
-The command index inside the block is auto-generated from the `description:` frontmatter in each `commands/*.md` file. To refresh it after a ForgeDock update:
+Per-directory, independent of the global hook registration:
 
 ```bash
-npx forgedock integrate
+npx forgedock disable [dir]  # this directory goes silent (managed-optedout)
+npx forgedock enable [dir]   # re-activate it
+npx forgedock status [dir]   # show the resolved state
 ```
+
+See [Per-Directory State Registry](#per-directory-state-registry) below for how opt-out state is tracked.
 
 ---
 
