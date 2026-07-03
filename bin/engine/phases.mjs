@@ -12,10 +12,19 @@ async function issueMarkers(issue, io) {
   const out = await io.gh(["api", `repos/{owner}/{repo}/issues/${issue}/comments`, "--jq", ".[].body"]);
   return out || "";
 }
-/** Count commits on branch ahead of the lane base. */
+/**
+ * Count commits on branch ahead of the lane base. On the first build the
+ * branch does not exist yet, so real git rejects the ref range — swallow
+ * that (and any other git failure) as "0 ahead" rather than letting it
+ * propagate and crash runIssue (C1).
+ */
 async function commitsAhead(state, io) {
-  const n = await io.git(["rev-list", "--count", `origin/${state.lane}..${state.branch}`]);
-  return parseInt(String(n).trim(), 10) || 0;
+  try {
+    const n = await io.git(["rev-list", "--count", `origin/${state.lane}..${state.branch}`]);
+    return parseInt(String(n).trim(), 10) || 0;
+  } catch {
+    return 0;
+  }
 }
 function has(blob, marker) { return blob.includes(marker); }
 

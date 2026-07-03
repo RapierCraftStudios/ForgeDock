@@ -2,7 +2,7 @@
  * Append-only per-issue run-log (the crash-safe local hot path).
  * One JSON event per line at {dir}/{issue}.jsonl. seq is assigned monotonically.
  */
-import { readFileSync, appendFileSync, existsSync, mkdirSync } from "node:fs";
+import { readFileSync, appendFileSync, writeFileSync, existsSync, mkdirSync } from "node:fs";
 import { join } from "node:path";
 
 function logPath(dir, issue) { return join(dir, `${issue}.jsonl`); }
@@ -13,6 +13,18 @@ export function appendEvent(dir, issue, event) {
   const path = logPath(dir, issue);
   const seq = readLog(dir, issue).length + 1;
   appendFileSync(path, JSON.stringify({ seq, ...event }) + "\n");
+}
+
+/**
+ * Overwrite the local run-log with a fresh set of events (fresh seq each).
+ * Used to reconstruct the local log from a remote FORGE:STATE index on
+ * hydrate (C2), so the local log and the GitHub-wins state stay consistent.
+ */
+export function rewriteLog(dir, issue, events) {
+  mkdirSync(dir, { recursive: true });
+  const path = logPath(dir, issue);
+  const lines = events.map((e, i) => JSON.stringify({ seq: i + 1, ...e }));
+  writeFileSync(path, lines.length ? lines.join("\n") + "\n" : "");
 }
 
 /** Read all complete events; a truncated final line (crash mid-write) is ignored. */

@@ -36,11 +36,16 @@ function makeWorld() {
   const w = { markers: "", pr: null, prMerged: false, issueState: "OPEN", labels: [],
               commitsAhead: 0, body: "Issue.", editCalls: 0, gitCalls: 0,
               crashAtEdit: Infinity, crashAtGit: Infinity, reviewRuns: 0,
-              prCreateCount: 0, buildRuns: 0, crashAtPrView: Infinity, prViewCalls: 0 };
+              prCreateCount: 0, buildRuns: 0, crashAtPrView: Infinity, prViewCalls: 0,
+              commentCalls: 0, crashAtComments: Infinity };
   const io = {
     gh: async (args) => {
       const a = args.join(" ");
-      if (a.includes("/comments")) return w.markers;
+      if (a.includes("/comments")) {
+        w.commentCalls++;
+        if (w.commentCalls === w.crashAtComments) { w.crashAtComments = Infinity; throw new Error("CRASH mid-phase (comments)"); }
+        return w.markers;
+      }
       if (a.startsWith("issue view") && a.includes("body")) return JSON.stringify({ body: w.body });
       if (a.startsWith("issue view")) return JSON.stringify({ state: w.issueState, labels: w.labels });
       if (a.startsWith("issue edit")) {
@@ -145,10 +150,16 @@ describe("crash injection: resume from the durable run-log", () => {
 
   it("re-runs a phase idempotently when killed mid-phase (build), no duplicate commit", async () => {
     const { w, io, runner } = makeWorld();
-    // build makes two git (commitsAhead) calls: reconcile pre-run (call #1 -> 0 ahead,
-    // not satisfied) then detectOutcome post-run (call #2 -> 2 ahead). Killing on git
-    // call #2 dies AFTER build's side effect (marker + commits) but BEFORE its commit.
-    w.crashAtGit = 2;
+    // Post-C1, commitsAhead() (bin/engine/phases.mjs) swallows a git rejection and
+    // returns 0 rather than throwing — a deliberate hardening (first-build has no
+    // ref yet) that also means an injected git-call crash no longer escapes
+    // detectOutcome; it now resolves as a same-run retry instead of a process
+    // death. So the mid-phase kill is injected on the gh "comments" call inside
+    // build.detectOutcome instead: comments calls #1-3 are investigate/context/
+    // architect's detectOutcome; call #4 is build's detectOutcome, which fires
+    // AFTER the runner's side effect (marker + commits) but BEFORE build's commit
+    // — the same crash point as before, on a channel the engine does not guard.
+    w.crashAtComments = 4;
     const { res, launches } = await runToCompletion({ dir, io, runner });
     assert.ok(launches >= 2, `mid-phase crash must fire and require resume (launches=${launches})`);
     assert.equal(res.terminalReason, "merged");
