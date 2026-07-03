@@ -197,6 +197,7 @@ export function makeCtx(overrides = {}) {
   const env = overrides.env ?? process.env;
   const stdout = overrides.stdout ?? process.stdout;
   const argv = overrides.argv ?? process.argv.slice(2);
+  const nodeVersion = overrides.nodeVersion ?? process.versions.node;
   return {
     cwd: process.cwd(),
     home: env.HOME || env.USERPROFILE || os.homedir(),
@@ -206,6 +207,7 @@ export function makeCtx(overrides = {}) {
     stdout,
     mode: colorMode(env, stdout),
     motion: motionEnabled(argv, env, stdout),
+    nodeVersion,
     exec: (cmd, args) =>
       execFileSync(cmd, args, {
         encoding: "utf-8",
@@ -239,10 +241,10 @@ export async function preflight(ctx) {
     {
       label: "Node",
       run: async () => {
-        const major = Number(process.versions.node.split(".")[0]);
+        const major = Number(ctx.nodeVersion.split(".")[0]);
         return major >= 18
-          ? { ok: true, detail: `v${process.versions.node}` }
-          : { ok: false, detail: `v${process.versions.node} — need ≥18`, fix: ["Upgrade Node: https://nodejs.org/"] };
+          ? { ok: true, detail: `v${ctx.nodeVersion}` }
+          : { ok: false, detail: `v${ctx.nodeVersion} — need ≥18`, fix: ["Upgrade Node: https://nodejs.org/"] };
       },
     },
     {
@@ -287,14 +289,7 @@ export async function preflight(ctx) {
     },
   ];
 
-  // Map check names for the return contract (label ≠ name only for clarity).
   const results = await revealRows(rows, { mode: ctx.mode, motion: ctx.motion, writer: w });
-  const checks = rows.map((r, i) => ({ name: r.label === "git" ? "git" : r.label, ...results[i] }));
-  const named = [
-    { ...checks[0], name: "Node" },
-    { ...checks[1], name: "git" },
-    { ...checks[2], name: "Claude Code" },
-    { ...checks[3], name: "GitHub CLI" },
-  ];
+  const named = rows.map((r, i) => ({ name: r.label, ...results[i] }));
   return { checks: named, ghReady: named[3].ok };
 }

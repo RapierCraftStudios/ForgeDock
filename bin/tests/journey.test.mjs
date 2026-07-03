@@ -4,7 +4,7 @@
  */
 import { describe, it, beforeEach } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, readFileSync, writeFileSync, existsSync } from "node:fs";
+import { mkdtempSync, readFileSync, writeFileSync, existsSync, mkdirSync } from "node:fs";
 import { join } from "node:path";
 import os from "node:os";
 import { writeForgeYaml, backupExisting, detectDescription, makeCtx, preflight } from "../journey.mjs";
@@ -175,5 +175,35 @@ describe("preflight", () => {
     const res = await preflight(ctx);
     const cc = res.checks.find((c) => c.name === "Claude Code");
     assert.equal(cc.ok, false);
+  });
+
+  it("gh installed but unauthenticated → auth fix card, ghReady=false", async () => {
+    const home = mkdtempSync(join(os.tmpdir(), "fd-home4-"));
+    mkdirSync(join(home, ".claude"), { recursive: true });
+    const { ctx, w } = stubCtx({
+      home,
+      execMap: {
+        "git --version": "git version 2.45.0",
+        "gh --version": "gh version 2.52.0",
+        // no "gh auth status" key → stub exec throws for it
+      },
+    });
+    const res = await preflight(ctx);
+    const gh = res.checks.find((c) => c.name === "GitHub CLI");
+    assert.equal(gh.ok, false);
+    assert.equal(res.ghReady, false);
+    assert.match(w.text, /gh auth login/);
+    assert.doesNotMatch(w.text, /cli\.github\.com/); // installed → no install card
+  });
+
+  it("old Node version → failed check with upgrade fix card", async () => {
+    const home = mkdtempSync(join(os.tmpdir(), "fd-home5-"));
+    mkdirSync(join(home, ".claude"), { recursive: true });
+    const { ctx, w } = stubCtx({ home, execMap: { "git --version": "git version 2.45.0" } });
+    ctx.nodeVersion = "16.20.0";
+    const res = await preflight(ctx);
+    const node = res.checks.find((c) => c.name === "Node");
+    assert.equal(node.ok, false);
+    assert.match(w.text, /nodejs\.org/);
   });
 });
