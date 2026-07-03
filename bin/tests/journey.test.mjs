@@ -207,3 +207,110 @@ describe("preflight", () => {
     assert.match(w.text, /nodejs\.org/);
   });
 });
+
+// ---------------------------------------------------------------------------
+// Task 6: forge & findMarkdownFiles tests
+// ---------------------------------------------------------------------------
+
+import { forge } from "../journey.mjs";
+import { lstatSync, mkdirSync as mkdirSyncFs } from "node:fs";
+
+/**
+ * A command is installed if the target is a symlink (Developer Mode / admin /
+ * POSIX) OR a regular-file copy whose content equals the source (Windows
+ * copy-fallback). Both count as success.
+ */
+function assertInstalled(target, sourceContent) {
+  const st = lstatSync(target); // throws if missing
+  if (st.isSymbolicLink()) return;
+  assert.equal(readFileSync(target, "utf-8"), sourceContent);
+}
+
+describe("forge (Act II)", () => {
+  it("installs commands (symlink or copy-fallback), registers hook, reports counts", async () => {
+    const home = mkdtempSync(join(os.tmpdir(), "fd-forge-home-"));
+    const forgeHome = mkdtempSync(join(os.tmpdir(), "fd-forge-src-"));
+    mkdirSyncFs(join(forgeHome, "commands", "sub"), { recursive: true });
+    mkdirSyncFs(join(forgeHome, "bin", "hooks"), { recursive: true });
+    writeFileSync(join(forgeHome, "commands", "a.md"), "A", "utf-8");
+    writeFileSync(join(forgeHome, "commands", "sub", "b.md"), "B", "utf-8");
+    writeFileSync(join(forgeHome, "bin", "hooks", "session-start.mjs"), "// hook", "utf-8");
+
+    const { ctx, w } = stubCtx({ home });
+    ctx.forgeHome = forgeHome;
+    const res = await forge(ctx);
+
+    assert.equal(res.total, 2);
+    assert.equal(res.installed + res.copied, res.total);
+    assert.equal(res.hookStatus, "installed");
+    assertInstalled(join(home, ".claude", "commands", "a.md"), "A");
+    assertInstalled(join(home, ".claude", "commands", "sub", "b.md"), "B");
+    const settings = JSON.parse(readFileSync(join(home, ".claude", "settings.json"), "utf-8"));
+    assert.match(JSON.stringify(settings.hooks.SessionStart), /session-start\.mjs/);
+    assert.match(w.text, /2.*commands|commands.*2/i);
+  });
+
+  it("second run is idempotent: skips links, hook already", async () => {
+    const home = mkdtempSync(join(os.tmpdir(), "fd-forge-home2-"));
+    const forgeHome = mkdtempSync(join(os.tmpdir(), "fd-forge-src2-"));
+    mkdirSyncFs(join(forgeHome, "commands"), { recursive: true });
+    mkdirSyncFs(join(forgeHome, "bin", "hooks"), { recursive: true });
+    writeFileSync(join(forgeHome, "commands", "a.md"), "A", "utf-8");
+    writeFileSync(join(forgeHome, "bin", "hooks", "session-start.mjs"), "// hook", "utf-8");
+
+    const { ctx } = stubCtx({ home });
+    ctx.forgeHome = forgeHome;
+    await forge(ctx);
+    const res2 = await forge(makeCtx({ home, forgeHome, stdout: { write: () => true }, mode: "none", motion: false }));
+    assert.equal(res2.installed, 0);
+    assert.equal(res2.copied, 0);
+    assert.equal(res2.skipped, 1);
+    assert.equal(res2.hookStatus, "already");
+  });
+
+  it("re-run over our copied files is idempotent (manifest recognizes our copies)", async () => {
+    const home = mkdtempSync(join(os.tmpdir(), "fd-forge-home3-"));
+    const forgeHome = mkdtempSync(join(os.tmpdir(), "fd-forge-src3-"));
+    mkdirSyncFs(join(forgeHome, "commands", "sub"), { recursive: true });
+    mkdirSyncFs(join(forgeHome, "bin", "hooks"), { recursive: true });
+    writeFileSync(join(forgeHome, "commands", "a.md"), "A", "utf-8");
+    writeFileSync(join(forgeHome, "commands", "sub", "b.md"), "B", "utf-8");
+    writeFileSync(join(forgeHome, "bin", "hooks", "session-start.mjs"), "// hook", "utf-8");
+
+    const first = stubCtx({ home });
+    first.ctx.forgeHome = forgeHome;
+    await forge(first.ctx);
+
+    const second = stubCtx({ home });
+    second.ctx.forgeHome = forgeHome;
+    const res2 = await forge(second.ctx);
+
+    assert.equal(res2.installed, 0);
+    assert.equal(res2.copied, 0);
+    assert.equal(res2.skipped + res2.updated, res2.total);
+    assert.equal(res2.hookStatus, "already");
+    assert.doesNotMatch(second.w.text, /WARNING/);
+  });
+
+  it("user-owned regular file is never clobbered", async () => {
+    const home = mkdtempSync(join(os.tmpdir(), "fd-forge-home4-"));
+    const forgeHome = mkdtempSync(join(os.tmpdir(), "fd-forge-src4-"));
+    mkdirSyncFs(join(forgeHome, "commands"), { recursive: true });
+    mkdirSyncFs(join(forgeHome, "bin", "hooks"), { recursive: true });
+    writeFileSync(join(forgeHome, "commands", "a.md"), "A", "utf-8");
+    writeFileSync(join(forgeHome, "bin", "hooks", "session-start.mjs"), "// hook", "utf-8");
+
+    // Pre-create the target as a user-owned regular file — no manifest entry.
+    const target = join(home, ".claude", "commands", "a.md");
+    mkdirSyncFs(join(home, ".claude", "commands"), { recursive: true });
+    writeFileSync(target, "USER OWNED", "utf-8");
+
+    const { ctx, w } = stubCtx({ home });
+    ctx.forgeHome = forgeHome;
+    const res = await forge(ctx);
+
+    assert.equal(readFileSync(target, "utf-8"), "USER OWNED");
+    assert.equal(res.skipped, 1);
+    assert.match(w.text, /WARNING/);
+  });
+});

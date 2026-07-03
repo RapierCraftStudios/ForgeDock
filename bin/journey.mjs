@@ -293,3 +293,154 @@ export async function preflight(ctx) {
   const named = rows.map((r, i) => ({ name: r.label, ...results[i] }));
   return { checks: named, ghReady: named[3].ok };
 }
+
+// ---------------------------------------------------------------------------
+// Act II — Forging: command symlinks + SessionStart hook (Task 6)
+// ---------------------------------------------------------------------------
+
+import { mkdir, symlink, readlink, lstat, readdir, rename, copyFile, readFile, writeFile } from "fs/promises";
+import { relative, dirname as pathDirname } from "path";
+import { installSessionStartHook } from "./settings-hook.mjs";
+
+/** Recursively find .md files, sorted (moved from forgedock.mjs). */
+export async function findMarkdownFiles(dir) {
+  const results = [];
+  const entries = await readdir(dir, { withFileTypes: true });
+  for (const entry of entries) {
+    const full = join(dir, entry.name);
+    if (entry.isDirectory()) {
+      results.push(...(await findMarkdownFiles(full)));
+    } else if (entry.name.endsWith(".md")) {
+      results.push(full);
+    }
+  }
+  return results.sort();
+}
+
+/** Load the copied-commands ownership manifest (missing/corrupt → empty). */
+async function loadCopiedManifest(manifestPath) {
+  try {
+    const parsed = JSON.parse(await readFile(manifestPath, "utf-8"));
+    if (parsed && typeof parsed === "object" && parsed.files && typeof parsed.files === "object") {
+      return { version: 1, files: parsed.files };
+    }
+  } catch {
+    // missing or corrupt → start fresh
+  }
+  return { version: 1, files: {} };
+}
+
+/** Save the manifest atomically (mkdir recursive + .tmp+rename). */
+async function saveCopiedManifest(manifestPath, manifest) {
+  await mkdir(pathDirname(manifestPath), { recursive: true });
+  await writeFile(manifestPath + ".tmp", JSON.stringify(manifest, null, 2) + "\n", "utf-8");
+  await rename(manifestPath + ".tmp", manifestPath);
+}
+
+/**
+ * Act II: link commands into ~/.claude/commands with a molten progress line,
+ * then register the SessionStart hook.
+ * Symlink semantics preserved verbatim from the original install():
+ * regular files are skipped with a warning; changed links updated atomically.
+ * On Windows without Developer Mode (symlink → EPERM/EACCES) each command is
+ * copied instead, and recorded in a manifest so re-runs can tell ForgeDock's
+ * own copies apart from user-owned files.
+ */
+export async function forge(ctx) {
+  const { stdout: w } = ctx;
+  const commandsDir = join(ctx.forgeHome, "commands");
+  const targetDir = join(ctx.home, ".claude", "commands");
+  const manifestPath = join(ctx.home, ".claude", "forgedock", "copied-commands.json");
+
+  w.write("\n  " + ember("Forging commands", ctx.mode) + " " + dimLine(ctx, `into ${targetDir}`) + "\n\n");
+  await mkdir(targetDir, { recursive: true });
+
+  const manifest = await loadCopiedManifest(manifestPath);
+  let manifestChanged = false;
+
+  const files = await findMarkdownFiles(commandsDir);
+  let installed = 0, updated = 0, skipped = 0, copied = 0;
+  const barWidth = 24;
+  let barShown = false;
+
+  for (let i = 0; i < files.length; i++) {
+    const file = files[i];
+    const rel = relative(commandsDir, file);
+    const target = join(targetDir, rel);
+    await mkdir(pathDirname(target), { recursive: true });
+
+    try {
+      const stats = await lstat(target);
+      if (stats.isSymbolicLink()) {
+        const current = await readlink(target);
+        if (current === file) {
+          skipped++;
+        } else {
+          await symlink(file, target + ".tmp");
+          await rename(target + ".tmp", target);
+          updated++;
+        }
+      } else if (manifest.files[rel]) {
+        // A regular file we copied on a previous run — ours to manage.
+        const [src, dst] = await Promise.all([readFile(file), readFile(target)]);
+        if (src.equals(dst)) {
+          skipped++;
+        } else {
+          await copyFile(file, target);
+          updated++;
+        }
+      } else {
+        if (barShown) { w.write("\x1b[1A\x1b[2K"); barShown = false; }
+        w.write(`  WARNING: ${rel} is a regular file — skipping (remove it manually to let ForgeDock manage it)\n`);
+        skipped++;
+      }
+    } catch (err) {
+      if (err.code !== "ENOENT") throw err;
+      try {
+        await symlink(file, target);
+        installed++;
+        if (manifest.files[rel]) {
+          // Symlinks work now (e.g. Developer Mode enabled) — drop the stale copy record.
+          delete manifest.files[rel];
+          manifestChanged = true;
+        }
+      } catch (linkErr) {
+        if (linkErr.code !== "EPERM" && linkErr.code !== "EACCES") throw linkErr;
+        // Windows without Developer Mode/admin — fall back to a copy.
+        await copyFile(file, target);
+        copied++;
+        if (!manifest.files[rel]) {
+          manifest.files[rel] = true;
+          manifestChanged = true;
+        }
+      }
+    }
+
+    if (ctx.motion) {
+      if (barShown) w.write("\x1b[1A\x1b[2K");
+      w.write(`  ${moltenBar(i + 1, files.length, { width: barWidth, mode: ctx.mode })}  ${i + 1}/${files.length}  ${dimLine(ctx, "/" + rel.replace(/\.md$/, ""))}\n`);
+      barShown = true;
+    }
+  }
+  if (barShown) w.write("\x1b[1A\x1b[2K");
+
+  if (manifestChanged) await saveCopiedManifest(manifestPath, manifest);
+
+  const hookScript = join(ctx.forgeHome, "bin", "hooks", "session-start.mjs");
+  const settingsPath = join(ctx.home, ".claude", "settings.json");
+  const { status: hookStatus } = installSessionStartHook(settingsPath, hookScript);
+
+  const glyph = (ok) => (ctx.mode === "none" ? (ok ? "✔" : "!") : `\x1b[38;2;255;179;71m${ok ? "✔" : "!"}\x1b[0m`);
+  w.write(`  ${glyph(true)} ${files.length} slash commands linked ${dimLine(ctx, `(new ${installed}, updated ${updated}, unchanged ${skipped})`)}\n`);
+  if (copied > 0) {
+    w.write(`  ${glyph(false)} ${copied} copied (not linked) ${dimLine(ctx, "— enable Windows Developer Mode for live-updating links")}\n`);
+  }
+  if (hookStatus === "skipped-malformed") {
+    w.write(`  ${glyph(false)} SessionStart hook NOT registered — ${settingsPath} is not valid JSON\n`);
+    w.write(fixCard([`Fix the JSON in ${settingsPath}, then re-run: npx forgedock install`], ctx.mode) + "\n");
+  } else {
+    w.write(`  ${glyph(true)} SessionStart hook ${hookStatus === "already" ? "active" : "registered"} ${dimLine(ctx, settingsPath)}\n`);
+  }
+
+  return { installed, updated, skipped, copied, total: files.length, hookStatus };
+}
