@@ -1033,12 +1033,14 @@ git commit -s -m "test(engine): crash-injection proves per-phase resume + idempo
 
 **Files:**
 - Create: `bin/engine-cli.mjs`
-- Modify: `bin/forgedock.mjs` (add a `run` subcommand case in the command switch near the existing `install/init/...` dispatch)
+- Modify: `bin/forgedock.mjs` (add a `run-issue` subcommand case in the command switch near the existing `install/init/...` dispatch)
 - Test: `bin/tests/engine-cli.test.mjs`
 
 **Interfaces:**
 - Consumes: `runIssue` (Task 6).
 - Produces: `makeIo() => {gh, git}` (real `gh`/`git` via `execFile`), `scanStalls(issues, dir, io, now) => number[]` (issues whose lease expired on a non-terminal state), and `runFromCli(argv)`.
+
+Note: the subcommand is named `run-issue`, not `run`, to avoid colliding with the pre-existing `forgedock run <command>` spec-runner from #1151.
 
 - [ ] **Step 1: Write the failing test for `scanStalls` (pure, no network)**
 
@@ -1074,7 +1076,7 @@ Expected: FAIL — module not found.
 ```js
 // bin/engine-cli.mjs
 /**
- * Headless entry point: `forgedock run <issue>` drives one issue through the
+ * Headless entry point: `forgedock run-issue <issue>` drives one issue through the
  * durable engine; scanStalls finds dead-lease issues for the orchestrator to resume.
  */
 import { execFile } from "node:child_process";
@@ -1113,7 +1115,7 @@ export async function scanStalls(issues, io, now) {
 
 export async function runFromCli(argv) {
   const issue = parseInt(argv[0], 10);
-  if (!Number.isInteger(issue)) throw new Error("usage: forgedock run <issue-number>");
+  if (!Number.isInteger(issue)) throw new Error("usage: forgedock run-issue <issue-number>");
   const lane = flag(argv, "--lane") || "staging";
   const io = makeIo();
   const agentId = `cli_${process.pid}`;
@@ -1130,12 +1132,14 @@ function flag(argv, name) { const i = argv.indexOf(name); return i >= 0 ? argv[i
 Add a `case` to the existing command switch (the block that dispatches `install`/`init`/`update`/`help`). Locate it and insert:
 
 ```js
-    case "run": {
+    case "run-issue": {
       const { runFromCli } = await import("./engine-cli.mjs");
       await runFromCli(process.argv.slice(3));
       break;
     }
 ```
+
+Note: named `run-issue`, not `run`, to avoid colliding with the pre-existing `forgedock run <command>` spec-runner from #1151.
 
 - [ ] **Step 5: Run test to verify it passes**
 
@@ -1151,7 +1155,7 @@ Expected: PASS — all engine suites plus the pre-existing runner/tui/etc. suite
 
 ```bash
 git add bin/engine-cli.mjs bin/tests/engine-cli.test.mjs bin/forgedock.mjs
-git commit -s -m "feat(engine): forgedock run headless entry + lease-based stall scan"
+git commit -s -m "feat(engine): forgedock run-issue headless entry + lease-based stall scan"
 ```
 
 ---
