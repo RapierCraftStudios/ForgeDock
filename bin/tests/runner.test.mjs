@@ -276,6 +276,26 @@ describe("getToolHandlers", () => {
     }
   });
 
+  // Coverage note for issue #1243 (staging review — PR #1242):
+  // The /proc/$PPID/environ attack class cannot be fully tested here because
+  // /proc/<pid>/environ reflects the environment at execve() time — it does not
+  // update when process.env is modified at runtime. Setting ANTHROPIC_API_KEY
+  // inside the test body (process.env.X = "...") does not inject it into
+  // /proc/self/environ; it only affects the in-memory libc environ. Therefore
+  // a correct test would require ANTHROPIC_API_KEY to be set in the shell
+  // BEFORE launching 'node --test', which cannot be guaranteed in a unit test.
+  //
+  // The effective mitigation at the JavaScript layer is the child-env scrub in
+  // run_bash (childEnv = {...process.env}; delete childEnv.ANTHROPIC_API_KEY),
+  // which prevents the child process from inheriting the key in its OWN env.
+  // The /proc/$PPID/environ vector is a known Linux-level limitation that
+  // requires OS-level isolation (seccomp, prctl) to close fully.
+  // See: issue #1370 for tracking this limitation.
+  //
+  // What IS tested: the child-env scrub prevents process.env.ANTHROPIC_API_KEY
+  // from being inherited by run_bash child processes (see test above).
+  // What is NOT testable in-process: /proc/$PPID/environ reads of the node PID.
+
   it("handlers validate required input", () => {
     const handlers = getToolHandlers(TMP);
     assert.throws(() => handlers.read_file({}), /requires a 'path'/);

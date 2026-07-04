@@ -730,6 +730,19 @@ export async function runCommand(opts = {}) {
   }
 
   const client = new Anthropic({ apiKey });
+  // NOTE on /proc/$PPID/environ (Linux): deleting from process.env calls
+  // unsetenv() at the C level, which does NOT update the kernel's
+  // /proc/<pid>/environ snapshot (that is fixed at execve() time). A
+  // run_bash payload can still read /proc/$PPID/environ and recover the
+  // key if it was set in the shell environment before the node process
+  // started. The only effective JavaScript-layer mitigation is the
+  // child-env scrub in run_bash: `childEnv = {...process.env}; delete
+  // childEnv.ANTHROPIC_API_KEY` — this prevents the child from inheriting
+  // the key in its own process.env, which is sufficient for
+  // `process.env.ANTHROPIC_API_KEY` access. The /proc/$PPID/environ vector
+  // is a known Linux limitation at the OS level; closing it would require
+  // a native module (e.g. prctl PR_SET_DUMPABLE) or process isolation.
+  // See: issue #1370 for tracking this known limitation.
   const handlers = getToolHandlers(cwd);
   const messages = [{ role: "user", content: userMessage }];
 
