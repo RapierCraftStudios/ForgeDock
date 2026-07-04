@@ -572,13 +572,17 @@ Layers 1-4 infer conflict risk from structure — path overlap, directory nestin
 # argument below — a plain string here would be word-split and glob-expanded
 # by the shell when handed to `git log --`, silently mangling or dropping any
 # path containing a space or glob metacharacter.
-mapfile -t ALL_AFFECTED_FILES < <(printf '%s\n' "${LAYER1_FILES[@]}" | sort -u)
+mapfile -t ALL_AFFECTED_FILES < <(printf '%s\n' "${LAYER1_FILES[@]}" | sort -u | grep -v '^$')
 
 # Guard: an empty array expands to nothing after `--`, which git interprets as
 # "no pathspec restriction" (i.e. the whole repo) rather than "match nothing".
 # Skip the query entirely in that case instead of letting it silently widen to
 # a full-repo scan — this can happen when upstream file-extraction (Layer 1)
 # yields zero paths for every issue in the batch.
+# NOTE: `grep -v '^$'` above is required — without it, `printf '%s\n'` on an
+# empty array emits one blank line (printf runs its format string once even
+# with zero variadic args), which `mapfile` captures as a 1-element array of
+# [""], making this guard evaluate to false and causing `git log -- ""` to run.
 if [ "${#ALL_AFFECTED_FILES[@]}" -eq 0 ]; then
   echo "Layer 5: no affected files extracted by Layer 1 for this batch — skipping co-change query, falling back to Layers 1-4."
 else
