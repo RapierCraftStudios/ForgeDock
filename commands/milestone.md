@@ -505,16 +505,27 @@ fi
 
 ### Step 3: Create shipping PR
 
+**Idempotency guard**: Before creating a new PR, check whether an open PR already exists for this milestone branch. If one exists, reuse it (update its body with fresh diff stats) — do NOT create a second PR. This ensures that re-running `/milestone ship {slug}` after blocking review findings continues on the same PR rather than spawning a new one.
+
 ```bash
 # Get the full diff summary (computed after Step 2.5 rebase, so it reflects the final state)
 DIFF_STATS=$(git diff origin/{STAGING_BRANCH}...origin/milestone/{slug} --stat)
 COMMIT_LOG=$(git log origin/{STAGING_BRANCH}..origin/milestone/{slug} --oneline)
 
-gh pr create {GH_FLAG} \
-  --base {STAGING_BRANCH} \
+# Check for an existing open PR from this milestone branch — use --state open to avoid matching merged/closed PRs
+EXISTING_SHIP_PR=$(gh pr list {GH_FLAG} \
   --head milestone/{slug} \
-  --title "Ship: {MILESTONE_TITLE}" \
-  --body "$(cat <<'PR_EOF'
+  --base {STAGING_BRANCH} \
+  --state open \
+  --json number \
+  --jq '.[0].number' 2>/dev/null || echo "")
+
+if [ -n "$EXISTING_SHIP_PR" ]; then
+  # Reuse the existing PR — update its body with fresh diff stats and commit log
+  SHIP_PR_NUMBER=$EXISTING_SHIP_PR
+  echo "Reusing existing open ship PR #${SHIP_PR_NUMBER} (milestone/{slug} → {STAGING_BRANCH}). Updating PR body with current diff stats."
+  gh pr edit "$SHIP_PR_NUMBER" {GH_FLAG} \
+    --body "$(cat <<'PR_EOF'
 ## Milestone: {MILESTONE_TITLE}
 
 {MILESTONE_DESCRIPTION}
@@ -535,6 +546,41 @@ gh pr create {GH_FLAG} \
 {COMMIT_LOG}
 PR_EOF
 )"
+else
+  # No existing open PR — create one
+  gh pr create {GH_FLAG} \
+    --base {STAGING_BRANCH} \
+    --head milestone/{slug} \
+    --title "Ship: {MILESTONE_TITLE}" \
+    --body "$(cat <<'PR_EOF'
+## Milestone: {MILESTONE_TITLE}
+
+{MILESTONE_DESCRIPTION}
+
+## Issues Included
+{list of all closed issues in this milestone with PR references}
+
+## Hunk-Loss Audit
+{If Step 2.5 rebase ran: "✓ Rebase completed — {AT_RISK_COUNT} at-risk staging-branch hunks absorbed into milestone branch before this PR was created. All staging content is preserved."}
+{If Step 2.5 found no at-risk hunks: "✓ Clean — no at-risk staging-branch hunks detected. Safe to merge."}
+
+> ⚠ **IMPORTANT: Merge this PR using a MERGE COMMIT, not squash.** Squash-merging a milestone PR can silently drop staging-only hunks in files the milestone touches. Use the "Create a merge commit" option in the GitHub UI, or `gh pr merge {PR_NUMBER} --merge`.
+
+## Diff Summary
+{DIFF_STATS}
+
+## Commits
+{COMMIT_LOG}
+PR_EOF
+)"
+  SHIP_PR_NUMBER=$(gh pr list {GH_FLAG} \
+    --head milestone/{slug} \
+    --base {STAGING_BRANCH} \
+    --state open \
+    --json number \
+    --jq '.[0].number')
+  echo "Created new ship PR #${SHIP_PR_NUMBER}."
+fi
 ```
 
 ### Step 4: Run staging review
@@ -576,6 +622,8 @@ Shipping attempt for "{MILESTONE_TITLE}" was rejected (PR #{PR_NUMBER} closed wi
 Milestone stays open. Issues remain assigned. Branch milestone/{slug} preserved.
 Run /milestone ship {slug} again when the milestone is ready for another shipping attempt.
 ```
+
+Note: when re-running `/milestone ship {slug}` after fixing blocking findings, Step 3 will detect the existing open PR (if the reviewer left it open) and reuse it — no new PR will be created. If the PR was closed as part of the rejection, Step 3 will create a fresh PR as usual. Either way, the idempotency guard in Step 3 ensures exactly one open ship PR exists at any time.
 
 **If the PR merged successfully**, run the following:
 

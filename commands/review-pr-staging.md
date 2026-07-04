@@ -40,6 +40,18 @@ All `$DEFAULT_BRANCH`, `$STAGING_BRANCH`, `$GATE_POSTURE`, and `$OVERRIDE_PHRASE
 
 ---
 
+## Re-entry / Idempotent Re-review
+
+This command supports being invoked on a PR that was already reviewed in a prior pass (e.g., fixes were pushed after a `FORGE:GATE_FAILURE` or `CHANGES_REQUESTED` verdict). The re-entry behaviour is identical to a first-pass review:
+
+- **Phase 0A runs unconditionally** — it re-checks whether blocking review-finding issues against the PR are still open. Fixes pushed after the first review may have resolved them; Phase 0A must verify this against the current diff before the review proceeds.
+- **All subsequent phases review the updated diff** — the review runs on whatever the PR head branch currently points to, not a cached prior diff.
+- No phases are skipped on re-entry. The full review pipeline runs.
+
+This means agents invoking `/review-pr-staging` on a re-run of `/milestone ship {slug}` (after blocking findings were fixed and pushed) should pass the same PR number — the command will re-run Phase 0A and all review phases on the updated branch, producing a fresh verdict.
+
+---
+
 ## Evidence-Based Review Protocol (ALL Agents) <!-- allowlist:check-protocol-restatements -->
 
 ### Diff-First Approach
