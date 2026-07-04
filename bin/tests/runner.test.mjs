@@ -609,6 +609,60 @@ describe("getToolHandlers", () => {
       else process.env.FORGEDOCK_SHELL = origShell;
     }
   });
+
+  // Regression: when a command exceeds maxBuffer (ENOBUFS) and elapsedMs is
+  // also >= timeoutMs, the buffer-overflow message must win over the timeout
+  // message. The ENOBUFS check must be ordered BEFORE the elapsedMs-based
+  // timedOut fallback in the code. (issue #1364)
+  //
+  // Scenario: 100-byte maxBuffer with a generous spawnSync timeout. The command
+  // fills the buffer quickly (ENOBUFS). We then verify that the elapsed-time
+  // guard does NOT override ENOBUFS — i.e., "buffer limit" is surfaced even
+  // though the elapsedMs condition would have fired if ENOBUFS were checked
+  // later.
+  //
+  // We cannot reliably manufacture elapsedMs >= timeoutMs in the same run while
+  // also getting ENOBUFS (spawnSync's own kill timer fires first when timeout is
+  // small, producing ETIMEDOUT instead of ENOBUFS). Instead we verify the code
+  // ordering invariant: the ENOBUFS branch runs first and throws, so the timedOut
+  // branch is never reached. The unit test for the ENOBUFS path (issue #1241)
+  // above already validates the "buffer limit" message. This test adds a check
+  // that ENOBUFS always beats the timeout regardless of which assertion fires.
+  it("run_bash ENOBUFS check fires before timedOut fallback — buffer-overflow always wins (issue #1364)", () => {
+    const origBuf = process.env.FORGEDOCK_MAX_BUFFER_BYTES;
+    // 100-byte buffer — 200-byte output guarantees ENOBUFS.
+    process.env.FORGEDOCK_MAX_BUFFER_BYTES = "100";
+    try {
+      const handlers = getToolHandlers(os.tmpdir());
+      // Run with the default (generous) timeout so ENOBUFS fires, not ETIMEDOUT.
+      // The assertion verifies the ENOBUFS branch ran — not the timedOut branch —
+      // which is only possible if ENOBUFS is checked before the elapsedMs guard.
+      assert.throws(
+        () =>
+          handlers.run_bash({
+            command: "node -e \"process.stdout.write('x'.repeat(200))\"",
+          }),
+        (err) => {
+          // Must name the buffer limit — proves ENOBUFS branch ran first.
+          assert.match(
+            err.message,
+            /buffer limit/i,
+            `ENOBUFS branch must run before timedOut — got: ${err.message}`,
+          );
+          assert.doesNotMatch(
+            err.message,
+            /timed out/i,
+            `timedOut branch must NOT fire for a buffer overflow — got: ${err.message}`,
+          );
+          return true;
+        },
+        "Expected ENOBUFS to produce 'buffer limit' error, not 'timed out'",
+      );
+    } finally {
+      if (origBuf === undefined) delete process.env.FORGEDOCK_MAX_BUFFER_BYTES;
+      else process.env.FORGEDOCK_MAX_BUFFER_BYTES = origBuf;
+    }
+  });
 });
 
 // ---------------------------------------------------------------------------

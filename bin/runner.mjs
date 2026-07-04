@@ -582,6 +582,29 @@ export function getToolHandlers(cwd) {
       });
       const stdout = result.stdout ? String(result.stdout) : "";
       const stderr = result.stderr ? String(result.stderr) : "";
+      // Check ENOBUFS BEFORE the timedOut fallback. When a command both exceeds
+      // maxBuffer AND runs past timeoutMs, both result.error.code === "ENOBUFS"
+      // and elapsedMs >= timeoutMs are simultaneously true. The elapsedMs
+      // fallback (check 2 below) is a heuristic catch-all that must not
+      // override a specific, authoritative error code. ENOBUFS is always the
+      // correct diagnosis when present — surface it first. (issue #1364)
+      if (result.error?.code === "ENOBUFS") {
+        // The process ran but produced more output than maxBuffer allows.
+        // spawnSync populates result.stdout/stderr up to the limit before
+        // setting result.error — surface what was captured so the agent has
+        // actionable context rather than a misleading "failed to start" error.
+        const partial = (stdout + stderr).trim();
+        const bufDisplay =
+          maxBuffer < 1024
+            ? `${maxBuffer} bytes`
+            : maxBuffer < 1024 * 1024
+              ? `${Math.round(maxBuffer / 1024)}KB`
+              : `${Math.round(maxBuffer / (1024 * 1024))}MB`;
+        throw new Error(
+          `Command output exceeded ${bufDisplay} buffer limit (output truncated).` +
+            (partial ? `\nPartial output:\n${partial}` : ""),
+        );
+      }
       // Detect timeout. Two reliable indicators:
       //   1. result.error.code === "ETIMEDOUT" — Node sets this on the error
       //      object specifically when spawnSync's own `timeout` option fires
@@ -602,6 +625,8 @@ export function getToolHandlers(cwd) {
       //
       // Gate all of this on `result.status === null` so a legitimately-
       // completed process near the timeout boundary is never misreported.
+      // ENOBUFS is excluded above — it is checked first so a command that both
+      // overflows the buffer AND exceeds the timeout gets the correct message.
       const elapsedMs = Date.now() - startMs;
       const timedOut =
         result.status === null &&
@@ -612,23 +637,6 @@ export function getToolHandlers(cwd) {
         throw new Error(
           `Command timed out after ${timeoutSecs}s and was killed. ` +
             `Set FORGEDOCK_BASH_TIMEOUT (ms) to adjust.` +
-            (partial ? `\nPartial output:\n${partial}` : ""),
-        );
-      }
-      if (result.error?.code === "ENOBUFS") {
-        // The process ran but produced more output than maxBuffer allows.
-        // spawnSync populates result.stdout/stderr up to the limit before
-        // setting result.error — surface what was captured so the agent has
-        // actionable context rather than a misleading "failed to start" error.
-        const partial = (stdout + stderr).trim();
-        const bufDisplay =
-          maxBuffer < 1024
-            ? `${maxBuffer} bytes`
-            : maxBuffer < 1024 * 1024
-              ? `${Math.round(maxBuffer / 1024)}KB`
-              : `${Math.round(maxBuffer / (1024 * 1024))}MB`;
-        throw new Error(
-          `Command output exceeded ${bufDisplay} buffer limit (output truncated).` +
             (partial ? `\nPartial output:\n${partial}` : ""),
         );
       }
