@@ -69,6 +69,46 @@ Orchestrator for the full issue lifecycle: investigate → decompose (if needed)
 
 **Adding a new phase**: Insert it into the phase sequence table above and the sub-phase sequence if it belongs to Phase 3. No per-boundary transition code is needed — the universal continuation rule handles all transitions.
 
+### Marker Gate (router-side enforcement) <!-- forge#1419 -->
+
+<!-- FORGE:MARKER_GATE — Single source of truth for phase→marker mapping. Mirrors bin/engine/phases.mjs detectOutcome. Keep in sync. -->
+
+Before advancing past any phase boundary, verify that the phase's structured marker comment was actually posted. This catches the silent-skip regression described in #1418, where a `Skill()` invocation completes without writing its FORGE annotation.
+
+**Phase→Marker table** (mirrors `bin/engine/phases.mjs` `detectOutcome`):
+
+| Phase | Required marker | Notes |
+|-------|----------------|-------|
+| Phase 1: Investigation | `<!-- INVESTIGATION:COMPLETE -->` | Must appear inside the `FORGE:INVESTIGATOR` comment |
+| Phase 3C.5: Context | `<!-- FORGE:CONTEXT -->` | Non-critical — missing marker is a visible skip, not a hard fail |
+| Phase 3C.6: Architect | `<!-- FORGE:ARCHITECT -->` | Required for STANDARD and COMPLEX tasks |
+| Phase 3: Build | `<!-- FORGE:BUILDER:COMPLETE -->` | Bare `FORGE:BUILDER` without `:COMPLETE` = interrupted build; do NOT advance |
+| Phase 5: Review | PR merged or `workflow:merged` label set | |
+
+**Enforcement procedure** — run at each phase exit before posting the `FORGE:CHECKPOINT` comment:
+
+```bash
+# Replace MARKER_TOKEN with the required marker for the phase just completed
+MARKER_FOUND=$(gh api repos/{GH_REPO}/issues/{NUMBER}/comments \
+  --jq '[.[] | select(.body | contains("MARKER_TOKEN"))] | length')
+
+if [ "${MARKER_FOUND:-0}" -eq 0 ]; then
+  echo "MARKER GATE FAIL: MARKER_TOKEN not found after phase exit."
+  echo "Attempting one retry — re-invoking the phase subcommand."
+  # Re-invoke the phase subcommand once (via Skill or inline prose)
+  # If the marker is still absent after the retry:
+  gh issue comment {NUMBER} {GH_FLAG} --body "<!-- FORGE:STALL -->
+**Marker gate failed**: \`MARKER_TOKEN\` was not posted after phase completion and one retry.
+**Action required**: Manual review needed. Adding \`needs-human\` label."
+  gh issue edit {NUMBER} {GH_FLAG} --add-label "needs-human" \
+    --remove-label "workflow:investigating,workflow:building,workflow:in-review" 2>/dev/null || true
+  # STOP — do not advance to next phase
+  exit 1
+fi
+```
+
+**Coordination with #1250**: When the deterministic `SubagentStop`/`PreToolUse` hook from #1250 lands, this prose marker-gate can defer to it. Until then, this is the enforcement mechanism. Do not remove this gate when #1250 merges — verify the hook provides equivalent coverage first.
+
 ---
 
 ## Spawn-Decision Policy
@@ -731,6 +771,20 @@ gh issue comment {NUMBER} {GH_FLAG} --body "<!-- FORGE:CHECKPOINT -->
 \`\`\`json
 {\"phase\": \"INVESTIGATION\", \"status\": \"COMPLETE\", \"next_phase\": \"BUILD\", \"timestamp\": \"${CHECKPOINT_TIMESTAMP}\"}
 \`\`\`"
+```
+**Marker gate — Phase 1 exit** (see Marker Gate table in Universal Phase Dispatcher): <!-- forge#1419 -->
+```bash
+INV_MARKER=$(gh api repos/{GH_REPO}/issues/{NUMBER}/comments \
+  --jq '[.[] | select(.body | contains("INVESTIGATION:COMPLETE"))] | length')
+if [ "${INV_MARKER:-0}" -eq 0 ]; then
+  echo "MARKER GATE FAIL: INVESTIGATION:COMPLETE not found. Re-invoking investigate subcommand."
+  # Re-invoke Skill(skill="work-on/investigate", ...) once — if still absent after retry:
+  gh issue comment {NUMBER} {GH_FLAG} --body "<!-- FORGE:STALL -->
+**Marker gate failed**: \`INVESTIGATION:COMPLETE\` was not posted after Phase 1 completion and one retry. Manual review required."
+  gh issue edit {NUMBER} {GH_FLAG} --add-label "needs-human" \
+    --remove-label "workflow:investigating" 2>/dev/null || true
+  exit 1
+fi
 ```
 <!-- FORGE:PHASE_COMPLETE — Investigation routed to build. See Universal Phase Dispatcher: next phase is Phase 3. Not terminal — continue immediately. -->
 → Continue to Phase 3.
@@ -1575,6 +1629,10 @@ gh issue comment {NUMBER} {GH_FLAG} --body "<!-- FORGE:BUILDER -->
 
 > **Test-type annotation** (optional): Append `[type:api]`, `[type:unit]`, `[type:e2e]`, or `[type:manual]` to each checklist item. The test gate reads this annotation directly and skips regex inference. Omit it to rely on regex classification fallback.
 
+### Session Usage (best-effort)
+{If Claude Code session telemetry is available (e.g. via OTEL_LOG_TOOL_DETAILS or per-agent usage reporting), record token/cost signals here. If unavailable, omit this section rather than fabricating numbers.}
+<!-- Example when available: input_tokens: 12450 | output_tokens: 3210 | cache_read_input_tokens: 8900 | cache_creation_input_tokens: 3500 -->
+
 <!-- FORGE:BUILDER:COMPLETE -->"
 ```
 
@@ -1585,6 +1643,21 @@ gh issue comment {NUMBER} {GH_FLAG} --body "<!-- FORGE:CHECKPOINT -->
 \`\`\`json
 {\"phase\": \"BUILD\", \"status\": \"COMPLETE\", \"next_phase\": \"REVIEW\", \"timestamp\": \"${CHECKPOINT_TIMESTAMP}\"}
 \`\`\`"
+```
+
+**Marker gate — Phase 3 exit** (see Marker Gate table in Universal Phase Dispatcher): <!-- forge#1419 -->
+```bash
+BUILD_MARKER=$(gh api repos/{GH_REPO}/issues/{NUMBER}/comments \
+  --jq '[.[] | select(.body | contains("FORGE:BUILDER:COMPLETE"))] | length')
+if [ "${BUILD_MARKER:-0}" -eq 0 ]; then
+  echo "MARKER GATE FAIL: FORGE:BUILDER:COMPLETE not found. Re-invoking build subcommand."
+  # Re-invoke Skill(skill="work-on/build", ...) once — if still absent after retry:
+  gh issue comment {NUMBER} {GH_FLAG} --body "<!-- FORGE:STALL -->
+**Marker gate failed**: \`FORGE:BUILDER:COMPLETE\` was not posted after Phase 3 completion and one retry. Manual review required."
+  gh issue edit {NUMBER} {GH_FLAG} --add-label "needs-human" \
+    --remove-label "workflow:building" 2>/dev/null || true
+  exit 1
+fi
 ```
 
 ---
@@ -2040,6 +2113,35 @@ AGENTS_RUN=$(echo "$REVIEW_SUMMARY" | grep -oE '[0-9]+ agents' | grep -oE '[0-9]
 AGENTS_RUN="${AGENTS_RUN:-0}"
 ```
 
+**Extract per-stage cost signals** (best-effort — omit block rather than fabricate):
+```bash
+# Read token/usage data from FORGE:BUILDER "Session Usage" section (written by Phase 3M if available).
+# Field names match the Anthropic SDK and bin/runner.mjs usage schema (#1295).
+BUILDER_COMMENT=$(gh api repos/{GH_REPO}/issues/{NUMBER}/comments \
+  --jq '.[] | select(.body | contains("FORGE:BUILDER")) | .body' 2>/dev/null | head -1)
+
+# Extract individual token fields (grep returns "" if not present — treated as unavailable).
+BUILD_INPUT_TOKENS=$(echo "$BUILDER_COMMENT" | grep -oP '(?<=input_tokens: )\d+' | head -1 || echo "")
+BUILD_OUTPUT_TOKENS=$(echo "$BUILDER_COMMENT" | grep -oP '(?<=output_tokens: )\d+' | head -1 || echo "")
+BUILD_CACHE_READ=$(echo "$BUILDER_COMMENT" | grep -oP '(?<=cache_read_input_tokens: )\d+' | head -1 || echo "")
+BUILD_CACHE_CREATION=$(echo "$BUILDER_COMMENT" | grep -oP '(?<=cache_creation_input_tokens: )\d+' | head -1 || echo "")
+
+# Build the cost JSON block — null when the signal is unavailable.
+if [ -n "$BUILD_INPUT_TOKENS" ]; then
+  COST_BLOCK="\"cost\": {
+    \"source\": \"claude_code_session\",
+    \"build\": {
+      \"input_tokens\": ${BUILD_INPUT_TOKENS},
+      \"output_tokens\": ${BUILD_OUTPUT_TOKENS:-0},
+      \"cache_read_input_tokens\": ${BUILD_CACHE_READ:-0},
+      \"cache_creation_input_tokens\": ${BUILD_CACHE_CREATION:-0}
+    }
+  }"
+else
+  COST_BLOCK="\"cost\": null"
+fi
+```
+
 **Post GDR to PR** (not to issue — PR comment survives as permanent artifact on the merged diff):
 ```bash
 if [ "$GDR_EXISTS" != "true" ] && [ -n "{PR_NUMBER}" ]; then
@@ -2052,7 +2154,7 @@ if [ "$GDR_EXISTS" != "true" ] && [ -n "{PR_NUMBER}" ]; then
 
 \`\`\`json
 {
-  \"schema_version\": \"1\",
+  \"schema_version\": \"2\",
   \"issue\": ${NUMBER},
   \"pr\": ${PR_NUMBER},
   \"repo\": \"{GH_REPO}\",
@@ -2083,7 +2185,8 @@ if [ "$GDR_EXISTS" != "true" ] && [ -n "{PR_NUMBER}" ]; then
   \"merge\": {
     \"merged_at\": \"${GDR_TIMESTAMP}\",
     \"justification\": \"Investigation confirmed ({VERDICT}/{CONFIDENCE}), quality gate passed, review ${REVIEW_VERDICT:-approved}\"
-  }
+  },
+  ${COST_BLOCK}
 }
 \`\`\`
 
