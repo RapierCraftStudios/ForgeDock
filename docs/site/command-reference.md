@@ -318,6 +318,56 @@ Audits agent outputs from an orchestration run — timeline analysis, stall dete
 
 ---
 
+### `/pipeline-status`
+
+**Pipeline-wide situational awareness.**
+
+Groups open issues by workflow state, shows active PRs with age, flags stale items, and reports milestone progress. Fully read-only.
+
+With the durable engine, also shows **engine lease state** for issues with a `FORGE:STATE` block — distinguishing `LEASED (agent, Nm left)` from `STALLED (lease expired Nm ago)`. Issues without engine state fall back to `updatedAt`-based staleness.
+
+```bash
+/pipeline-status                  # Full dashboard
+/pipeline-status --stale-days 3   # Custom stale threshold
+/pipeline-status --repo org/repo  # Specific repo
+```
+
+---
+
+### `/pipeline-resume`
+
+**Context recovery after compaction.**
+
+Finds the most recently active issue, reconstructs FORGE annotations, and re-enters the pipeline at the correct phase via `/work-on`.
+
+```bash
+/pipeline-resume                  # Auto-detect most recent issue
+/pipeline-resume 610              # Resume specific issue
+/pipeline-resume --all-stalled    # Fleet recovery: scan + re-dispatch all stalled issues
+/pipeline-resume --all-stalled --dry-run  # List stalled issues without dispatching
+```
+
+The `--all-stalled` mode delegates to `npx forgedock resume-stalled`, which uses the engine's `scanStalls()` for ground-truth expired-lease detection rather than timestamp heuristics.
+
+---
+
+### `npx forgedock resume-stalled`
+
+**Fleet stall recovery (CLI).**
+
+Enumerates all open issues with non-terminal workflow labels, reads each issue's `FORGE:STATE` block via the engine projector, identifies those with an expired lease, and re-dispatches them through the `run-issue` path. Idempotent — a healthy lease is never stolen.
+
+```bash
+npx forgedock resume-stalled              # Scan + re-dispatch stalled issues
+npx forgedock resume-stalled --dry-run    # List stalled issues only (no dispatch)
+npx forgedock resume-stalled --lane main  # Re-dispatch to a specific lane
+npx forgedock resume-stalled --repo org/repo  # Target a specific repo
+```
+
+Recovery flow: `/pipeline-status` (observe) -> `resume-stalled --dry-run` (diagnose) -> `resume-stalled` (recover).
+
+---
+
 ## Operations & Deploy
 
 ---
