@@ -11,8 +11,21 @@ allowed-tools: Task, Bash, Read, Grep, Glob, WebFetch, Skill
 **Input**: $ARGUMENTS
 
 **NEVER use plan mode (EnterPlanMode)** during review — it breaks execution context.
+**NEVER use the Agent tool** — review-pr dispatches domain agents via `Task` tool only. `Agent` spawns opaque subprocesses that bypass the allowed-tools constraint and cannot post structured findings to the PR. Always use `Task(...)` for review agent launch (Phase 3C).
 
 **Agent model policy**: Default `model: "sonnet"`. If Sonnet is rate-limited, fall back to `model: "opus"`. User can override with `--model <name>`. Pass the resolved model in every `Task` tool call.
+
+<!-- FORGE:SPEC_LOADED — review-pr.md loaded and active. Agent is bound by this spec. -->
+
+## HARD RULES — READ BEFORE ANYTHING ELSE
+
+1. **Use `Task(...)` for ALL domain agent launches.** Never substitute `Agent(...)`. Task agents run in a constrained context, post findings to the PR via `gh pr comment`, and their output is structured. Agent spawns opaque subprocesses outside allowed-tools.
+
+2. **Post the FORGE:REVIEW verdict regardless of finding severity.** A review that completes but posts no `<!-- FORGE:REVIEW -->` comment is invisible to the pipeline. Even a PASS verdict must be posted.
+
+3. **Review findings are NOT merge blockers** (unless build errors). File review findings as GitHub issues with `review-finding` label. The PR merges after review. Only compilation failures block merge.
+
+4. **Route correctly at Phase 0.** If the input is "staging" or the PR targets `main`, invoke `Skill("review-pr-staging", ...)` — do NOT run the standard PR review pipeline against a staging→main PR.
 
 ## Architecture — How This Command Works
 
@@ -48,6 +61,15 @@ Example: "3126 --auto-merge --issue 3124 --base staging --gh-flag -R $GH_REPO --
 Extract: `PR_NUMBER`, `AUTO_MERGE=true`, `MERGE_ISSUE`, `MERGE_BASE`, `MERGE_GH_FLAG`, `MERGE_WORKTREE` (optional — the absolute path to the git worktree to clean up after merge)
 
 If `--auto-merge` is NOT present, `AUTO_MERGE=false` — Phase 8 (Auto-Merge) will be skipped.
+
+### Thoroughness Flag
+
+If `$ARGUMENTS` contains `--thorough`, set `THOROUGH=true`. This restores full union-dispatch (all matched domain agents run) for release-critical PRs. Default is `THOROUGH=false` — risk-scaled dispatch (2-3 agents).
+
+```bash
+THOROUGH=false
+echo "$ARGUMENTS" | grep -q "\-\-thorough" && THOROUGH=true
+```
 
 ---
 
@@ -671,35 +693,215 @@ echo "$CHURN_CONTEXT"
 
 Tiers (fixed thresholds, identical to `architect.md` Phase A5): **HOT** = 15+ commits / 90 days, **MEDIUM** = 5–14, **LOW** = 0–4. Only HOT-tier files are listed in `CHURN_CONTEXT` — this keeps the agent prompt signal short and high-value rather than dumping a churn count for every file. This does not change agent selection (3B) — it is a scrutiny prior surfaced to whichever agents are already selected, substituted as `[CHURN_CONTEXT]` in Phase 3C.
 
-### 3B: Select Agents
+### 3B: Select Agents — Risk-Scaled Dispatch
 
-| Risk Signal | Required Agents |
-|-------------|----------------|
-| UNTRUSTED_INPUT_PROCESSING | Security (deep) + relevant domain |
-| SHELL_SCRIPT | Security (deep) + Infrastructure |
-| FINANCIAL | Security + Billing + Concurrency |
-| AUTH_SENSITIVE | Security + Auth Conventions |
-| DATABASE_MUTATION | Security + Database |
-| DB_CONFIG | Security + Database + Infrastructure |
-| INFRASTRUCTURE | Security + Infrastructure |
-| DATABASE_CONTAINER | Security + Infrastructure (escalate to HIGH risk — stateful container restart) |
-| CODE_EXECUTION | Security (deep) |
-| SDK_OPENAPI | Security + API Design & Consistency (runs cross-PR schema check #10) |
-| None | Security + all matching domain agents |
+**Default: 2-3 agents.** General Security always runs. Select the top 1-2 domain agents by relevance score, then apply escalation triggers to add more only when signals warrant it. Use `--thorough` to restore full union dispatch for release-critical PRs.
 
-**General Security agent ALWAYS runs.** Domain agents selected by classification, not PR size. If BILLING detected, always also spawn Concurrency agent. If SHARED touched, spawn agents for all importing services.
+#### Step 1: Score Each Domain by Signal Strength
 
-**Domain-overlap dispatch (MANDATORY for multi-signal PRs):**
+Assign a relevance score to each domain based on signals detected in Phase 3A. Higher score = higher priority for inclusion.
 
-1. **Union semantics**: If multiple risk signals are detected, spawn the UNION of all agents from ALL matched rows. A PR triggering both `AUTH_SENSITIVE` and `FINANCIAL` spawns Security + Auth + Billing + Concurrency — not just one row's agents.
+```bash
+# Relevance scoring — accumulate points per domain from Phase 3A signals
+SCORE_AUTH=0
+SCORE_BILLING=0
+SCORE_CONCURRENCY=0
+SCORE_DATABASE=0
+SCORE_INFRA=0
+SCORE_SECURITY=0
+SCORE_SCRAPING=0
+SCORE_FRONTEND=0
+SCORE_API=0
 
-2. **Critical domain override**: If 2+ of these critical domains are detected in the same PR, spawn agents for ALL affected domains regardless of file count or line changes:
-   - AUTH + BILLING → Security (deep) + Auth + Billing + Concurrency
-   - AUTH + DATABASE_MUTATION → Security (deep) + Auth + Database
-   - FINANCIAL + CONCURRENCY → Security (deep) + Billing + Concurrency + Database
-   - AUTH + CODE_EXECUTION → Security (deep) + Auth
+# AUTH domain signals
+echo "$DIFF" | grep -qE "SessionUser|CurrentUser|jwt|oauth|login|logout|password|NEXTAUTH_SECRET|JWT_SECRET" && SCORE_AUTH=$((SCORE_AUTH + 3))
+echo "$DIFF" | grep -qE "get_current_user|Depends\(get_|x.forwarded.for|forwarded_for|rate.limit.*ip|ip.*rate.limit" && SCORE_AUTH=$((SCORE_AUTH + 2))
+echo "$DIFF" | grep -qE "algorithm.*HS256|algorithm.*RS256|admin.proxy" && SCORE_AUTH=$((SCORE_AUTH + 2))
 
-3. **Why this exists**: A 2-file PR touching both `services/api/app/core/auth.py` and `services/api/app/routers/billing.py` is MORE dangerous than a 20-file refactor in one domain. Small cross-domain PRs create interaction bugs that single-domain reviewers cannot catch. Never reduce agent count based on file count when multiple critical domains are involved.
+# BILLING domain signals
+echo "$DIFF" | grep -qE "credit|balance|debit|charge|refund|stripe|subscription" && SCORE_BILLING=$((SCORE_BILLING + 3))
+echo "$DIFF" | grep -qE "pricing|tier_cost|reconcil" && SCORE_BILLING=$((SCORE_BILLING + 2))
+
+# CONCURRENCY domain signals
+echo "$DIFF" | grep -qE "FOR UPDATE|atomic|transaction|pipeline|MULTI|distributed_lock|acquire_lock" && SCORE_CONCURRENCY=$((SCORE_CONCURRENCY + 3))
+echo "$DIFF" | grep -qE "reserved_by|promo.*claim|voucher.*redeem" && SCORE_CONCURRENCY=$((SCORE_CONCURRENCY + 2))
+
+# DATABASE domain signals
+echo "$FILES" | grep -qE "migration|\.sql$" && SCORE_DATABASE=$((SCORE_DATABASE + 3))
+echo "$DIFF" | grep -qE "DROP|ALTER|DELETE FROM" && SCORE_DATABASE=$((SCORE_DATABASE + 2))
+echo "$DIFF" | grep -qE "create_async_engine|AsyncSession|pool_size|prepared_statement|sessionmaker" && SCORE_DATABASE=$((SCORE_DATABASE + 2))
+
+# INFRASTRUCTURE domain signals
+echo "$DIFF" | grep -qE "docker-compose.*postgres|docker-compose.*redis|postgres.*command:|redis.*command:" && SCORE_INFRA=$((SCORE_INFRA + 3))
+echo "$DIFF" | grep -qE "docker|deploy|traefik|nginx" && SCORE_INFRA=$((SCORE_INFRA + 1))
+echo "$FILES" | grep -qE "^\.github/workflows/" && SCORE_INFRA=$((SCORE_INFRA + 2))
+echo "$FILES" | grep -qE "Dockerfile|docker-compose" && SCORE_INFRA=$((SCORE_INFRA + 2))
+
+# SECURITY domain signals (always baseline)
+SCORE_SECURITY=1
+echo "$DIFF" | grep -qE "subprocess|exec|eval|system\(|popen" && SCORE_SECURITY=$((SCORE_SECURITY + 3))
+echo "$DIFF" | grep -qE "os\.system|eval\(|exec\(|pickle|yaml\.load[^_]" && SCORE_SECURITY=$((SCORE_SECURITY + 3))
+echo "$DIFF" | grep -qE "\.sh$|bash|shell|cron" && SCORE_SECURITY=$((SCORE_SECURITY + 2))
+
+# SCRAPING domain signals
+echo "$DIFF" | grep -qE "scrape|tier.*escalat|proxy|anti_bot|stealth|playwright|playbook" && SCORE_SCRAPING=$((SCORE_SCRAPING + 3))
+
+# FRONTEND domain signals
+echo "$FILES" | grep -qE "^web/src/" && SCORE_FRONTEND=$((SCORE_FRONTEND + 1))
+echo "$FILES" | grep -qcE "^web/src/app/|^web/src/components/" | grep -qv "^0$" && SCORE_FRONTEND=$((SCORE_FRONTEND + 2))
+
+# API domain signals
+echo "$FILES" | grep -qE "router|routes" && SCORE_API=$((SCORE_API + 2))
+echo "$FILES" | grep -qE "^sdk/|openapi.*\.json$|openapi-versions/" && SCORE_API=$((SCORE_API + 3))
+
+echo "=== DOMAIN SCORES ==="
+echo "AUTH=$SCORE_AUTH BILLING=$SCORE_BILLING CONCURRENCY=$SCORE_CONCURRENCY DATABASE=$SCORE_DATABASE INFRA=$SCORE_INFRA SECURITY=$SCORE_SECURITY SCRAPING=$SCORE_SCRAPING FRONTEND=$SCORE_FRONTEND API=$SCORE_API"
+```
+
+#### Step 2: Read Architect CONTRACT for Risk Flags (if PR is from /work-on)
+
+```bash
+CONTRACT_RISK_FLAGS=""
+ISSUE_NUM=$(gh pr view $ARGUMENTS --json body --jq '.body | gsub("(?s).*?(?:Closes #|#)(?<n>[0-9]+).*"; "\(.n)") // empty' 2>/dev/null | head -1)
+if [ -n "$ISSUE_NUM" ]; then
+    CONTRACT_BODY=$(gh api repos/${REPO}/issues/${ISSUE_NUM}/comments \
+        --jq '[.[] | select(.body | contains("FORGE:CONTRACT"))] | .[0].body' 2>/dev/null || echo "")
+    # Extract risk level from CONTRACT — look for "HIGH" or "CRITICAL" risk markers
+    if echo "$CONTRACT_BODY" | grep -qiE "\*\*Risk\*\*.*HIGH|\*\*Risk\*\*.*CRITICAL|Risk.*:\s*(HIGH|CRITICAL)"; then
+        CONTRACT_RISK_FLAGS="HIGH_RISK"
+    fi
+    # Extract cross-domain touches flagged in CONTRACT
+    echo "$CONTRACT_BODY" | grep -qiE "auth|session|jwt" && CONTRACT_RISK_FLAGS="${CONTRACT_RISK_FLAGS} CONTRACT_AUTH"
+    echo "$CONTRACT_BODY" | grep -qiE "billing|credit|payment" && CONTRACT_RISK_FLAGS="${CONTRACT_RISK_FLAGS} CONTRACT_BILLING"
+    echo "$CONTRACT_BODY" | grep -qiE "migration|schema|database" && CONTRACT_RISK_FLAGS="${CONTRACT_RISK_FLAGS} CONTRACT_DATABASE"
+fi
+echo "=== CONTRACT FLAGS: ${CONTRACT_RISK_FLAGS:-none} ==="
+```
+
+#### Step 3: Compute CHURN_ESCALATION
+
+Check whether churn hot-spots exist (computed in Phase 3A `$CHURN_CONTEXT`):
+
+```bash
+CHURN_ESCALATION=false
+echo "$CHURN_CONTEXT" | grep -q "HOT" && CHURN_ESCALATION=true
+echo "=== CHURN_ESCALATION: $CHURN_ESCALATION ==="
+```
+
+#### Step 4: Build Selected Agent Roster
+
+**If `THOROUGH=true`** (user passed `--thorough`, or `IS_MILESTONE_TO_STAGING=true`): run full union dispatch — all agents matching any signal. Skip to "Full union dispatch" below.
+
+**Default (THOROUGH=false):**
+
+Start with the baseline roster: `SELECTED_AGENTS="Security"` (General Security always runs).
+
+Pick the top 1-2 domain agents by score:
+
+```bash
+# Build sorted list: "score:domain"
+DOMAIN_SCORES="$SCORE_AUTH:AUTH $SCORE_BILLING:BILLING $SCORE_CONCURRENCY:CONCURRENCY $SCORE_DATABASE:DATABASE $SCORE_INFRA:INFRA $SCORE_SCRAPING:SCRAPING $SCORE_FRONTEND:FRONTEND $SCORE_API:API"
+
+# Sort descending by score, pick top 2 with score > 0
+TOP_DOMAINS=$(echo "$DOMAIN_SCORES" | tr ' ' '\n' | sort -t: -k1 -rn | head -2 | awk -F: '$1 > 0 {print $2}' | tr '\n' ' ')
+for DOMAIN in $TOP_DOMAINS; do
+    SELECTED_AGENTS="$SELECTED_AGENTS $DOMAIN"
+done
+echo "=== BASELINE ROSTER (top domains): $SELECTED_AGENTS ==="
+```
+
+**Apply escalation triggers** — each adds agents if not already included:
+
+| Trigger | Condition | Added Agents |
+|---------|-----------|--------------|
+| Critical auth path | `SCORE_AUTH >= 3` | Auth (if not already selected) |
+| Critical billing path | `SCORE_BILLING >= 3` | Billing + Concurrency |
+| Migration/schema change | `SCORE_DATABASE >= 3` | Database |
+| Stateful container change | `SCORE_INFRA >= 3` AND `DATABASE_CONTAINER` signal | Infrastructure |
+| Code execution risk | `SCORE_SECURITY >= 4` (deep scan signals) | Security runs in deep mode (already selected) |
+| Churn hot-spot | `CHURN_ESCALATION=true` AND top-scoring domain | Top domain gets added if not already in roster |
+| CONTRACT high-risk | `CONTRACT_RISK_FLAGS` contains `HIGH_RISK` | All CONTRACT-flagged domain agents |
+| First-pass finding severity | Phase 3 re-entry after a CONFIRMED/HIGH finding posted to PR | Add all agents for the domain of the finding |
+| Cross-critical domains | `SCORE_AUTH >= 2` AND `SCORE_BILLING >= 2` | Auth + Billing + Concurrency |
+| Cross-critical domains | `SCORE_AUTH >= 2` AND `SCORE_DATABASE >= 3` | Auth + Database |
+| Cross-critical domains | `SCORE_BILLING >= 2` AND `SCORE_CONCURRENCY >= 2` | Billing + Concurrency + Database |
+
+```bash
+# Apply escalation triggers
+add_agent() {
+    local AGENT="$1"
+    echo "$SELECTED_AGENTS" | grep -qw "$AGENT" || SELECTED_AGENTS="$SELECTED_AGENTS $AGENT"
+}
+
+[ "$SCORE_AUTH" -ge 3 ] && add_agent "Auth"
+[ "$SCORE_BILLING" -ge 3 ] && { add_agent "Billing"; add_agent "Concurrency"; }
+[ "$SCORE_DATABASE" -ge 3 ] && add_agent "Database"
+[ "$SCORE_INFRA" -ge 3 ] && echo "$DIFF" | grep -qE "docker-compose.*postgres|docker-compose.*redis|postgres.*command:|redis.*command:" && add_agent "Infrastructure"
+[ "$CHURN_ESCALATION" = "true" ] && {
+    # Add the top-scoring domain for deeper churn scrutiny if not already selected
+    TOP_CHURN_DOMAIN=$(echo "$DOMAIN_SCORES" | tr ' ' '\n' | sort -t: -k1 -rn | head -1 | awk -F: '{print $2}')
+    [ -n "$TOP_CHURN_DOMAIN" ] && add_agent "$TOP_CHURN_DOMAIN"
+}
+echo "$CONTRACT_RISK_FLAGS" | grep -q "HIGH_RISK" && {
+    echo "$CONTRACT_RISK_FLAGS" | grep -q "CONTRACT_AUTH" && add_agent "Auth"
+    echo "$CONTRACT_RISK_FLAGS" | grep -q "CONTRACT_BILLING" && { add_agent "Billing"; add_agent "Concurrency"; }
+    echo "$CONTRACT_RISK_FLAGS" | grep -q "CONTRACT_DATABASE" && add_agent "Database"
+}
+# Cross-critical domain escalation
+{ [ "$SCORE_AUTH" -ge 2 ] && [ "$SCORE_BILLING" -ge 2 ]; } && { add_agent "Auth"; add_agent "Billing"; add_agent "Concurrency"; }
+{ [ "$SCORE_AUTH" -ge 2 ] && [ "$SCORE_DATABASE" -ge 3 ]; } && { add_agent "Auth"; add_agent "Database"; }
+{ [ "$SCORE_BILLING" -ge 2 ] && [ "$SCORE_CONCURRENCY" -ge 2 ]; } && { add_agent "Billing"; add_agent "Concurrency"; add_agent "Database"; }
+# SDK/OpenAPI always adds API agent
+echo "$FILES" | grep -qE "^sdk/|openapi.*\.json$|openapi-versions/" && add_agent "API"
+
+echo "=== FINAL ROSTER (after escalation): $SELECTED_AGENTS ==="
+AGENT_COUNT=$(echo "$SELECTED_AGENTS" | wc -w)
+echo "=== AGENT COUNT: $AGENT_COUNT ==="
+```
+
+**Full union dispatch (THOROUGH=true or IS_MILESTONE_TO_STAGING=true):**
+
+```bash
+if [ "$THOROUGH" = "true" ] || [ "$IS_MILESTONE_TO_STAGING" = "true" ]; then
+    SELECTED_AGENTS="Security"
+    [ "$SCORE_AUTH" -gt 0 ] && SELECTED_AGENTS="$SELECTED_AGENTS Auth"
+    [ "$SCORE_BILLING" -gt 0 ] && SELECTED_AGENTS="$SELECTED_AGENTS Billing Concurrency"
+    [ "$SCORE_DATABASE" -gt 0 ] && SELECTED_AGENTS="$SELECTED_AGENTS Database"
+    [ "$SCORE_INFRA" -gt 0 ] && SELECTED_AGENTS="$SELECTED_AGENTS Infrastructure"
+    [ "$SCORE_SCRAPING" -gt 0 ] && SELECTED_AGENTS="$SELECTED_AGENTS Scraping"
+    [ "$SCORE_FRONTEND" -gt 0 ] && SELECTED_AGENTS="$SELECTED_AGENTS Frontend"
+    [ "$SCORE_API" -gt 0 ] && SELECTED_AGENTS="$SELECTED_AGENTS API"
+    # Deduplicate
+    SELECTED_AGENTS=$(echo "$SELECTED_AGENTS" | tr ' ' '\n' | sort -u | tr '\n' ' ')
+    echo "=== THOROUGH mode: FULL UNION DISPATCH — $SELECTED_AGENTS ==="
+fi
+```
+
+**Why cross-critical domain pairs always escalate**: A 2-file PR touching both `services/api/app/core/auth.py` and `services/api/app/routers/billing.py` creates interaction bugs that single-domain reviewers cannot catch. Never rely on a single agent for multi-domain risk.
+
+**General Security agent ALWAYS runs.** If BILLING is selected, Concurrency is always added. If SHARED module is touched, add agents for all importing services.
+
+#### Domain-to-File Mapping (for diff slicing in Phase 3C)
+
+Each agent receives only its domain-relevant diff slice rather than the full changeset. Compute per-domain file filters:
+
+```bash
+# Domain file patterns — used in Phase 3C to scope each agent's input
+DOMAIN_FILES_AUTH=$(echo "$FILES" | grep -iE "auth|session|login|logout|jwt|oauth|token|user|permission|middleware" || echo "")
+DOMAIN_FILES_BILLING=$(echo "$FILES" | grep -iE "billing|credit|payment|charge|refund|subscription|pricing|tier" || echo "")
+DOMAIN_FILES_CONCURRENCY=$(echo "$FILES" | grep -iE "lock|queue|atomic|transaction|worker|job|task|celery|redis" || echo "")
+DOMAIN_FILES_DATABASE=$(echo "$FILES" | grep -iE "migration|\.sql$|model|schema|db|database|alembic" || echo "")
+DOMAIN_FILES_INFRA=$(echo "$FILES" | grep -iE "docker|nginx|traefik|\.github|Makefile|deploy|infra" || echo "")
+DOMAIN_FILES_SCRAPING=$(echo "$FILES" | grep -iE "scrape|crawler|proxy|stealth|playwright|browser|anti.bot" || echo "")
+DOMAIN_FILES_FRONTEND=$(echo "$FILES" | grep -iE "^web/|\.tsx?$|\.jsx?$|component|page|layout|style|css" || echo "")
+DOMAIN_FILES_API=$(echo "$FILES" | grep -iE "router|route|endpoint|openapi|sdk|api" || echo "")
+
+# Fallback: if a domain has no specific files matched, give it the full file list
+# (happens for Security — which reviews everything — and for edge cases)
+[ -z "$DOMAIN_FILES_AUTH" ] && DOMAIN_FILES_AUTH="$FILES"
+[ -z "$DOMAIN_FILES_BILLING" ] && DOMAIN_FILES_BILLING="$FILES"
+[ -z "$DOMAIN_FILES_DATABASE" ] && DOMAIN_FILES_DATABASE="$FILES"
+```
 
 ### 3C: Load Agent Templates & Launch
 
@@ -729,16 +931,37 @@ DOMAIN_CONTEXT_API=$(yq '.review.domains.api' "$FORGE_YAML" 2>/dev/null || echo 
 
 If `forge.yaml` is absent or a field is empty/null, agents fall back to generic checks (no project-specific context injected — agents still function correctly, just without project conventions).
 
-This file contains the Evidence-Based Review Protocol, Structured Findings Protocol, and all 9 agent prompt templates. For each selected agent:
+This file contains the Evidence-Based Review Protocol, Structured Findings Protocol, and all 9 agent prompt templates. For each agent in `$SELECTED_AGENTS` (computed in Phase 3B):
 1. Extract its template from the catalog
 2. Substitute: `[PR_NUMBER]`, `[REVIEW_SHA]`, `[REVIEW_SHA_SHORT]`, `[TITLE]`, relevant files list
 3. Substitute: `[PROJECT_NAME]` → `$PROJECT_NAME`, `[PROJECT_CONTEXT]` → `$PROJECT_CONTEXT`, `[TECH_STACK]` → `$TECH_STACK`
 4. Substitute per-agent domain context: `[DOMAIN_CONTEXT]` → the agent's matching key from `forge.yaml → review.domains` (e.g., `$DOMAIN_CONTEXT_AUTH` for the auth agent, `$DOMAIN_CONTEXT_BILLING` for the billing agent)
 5. Substitute the shared hot-spot prior: `[CHURN_CONTEXT]` → `$CHURN_CONTEXT` (computed once in Phase 3A, same value for every agent — this is a PR-level fact, not a per-domain config value, so it is NOT read from `forge.yaml`)
-6. If Phase 2.5 found broken assumptions, append them to the agent's prompt as "Pre-found integration issues to verify"
-7. Launch via `Task` tool with the resolved model (default `"sonnet"`, fallback `"opus"` if rate-limited)
+6. **Scope the diff to the agent's domain** (see "Domain diff slicing" below)
+7. If Phase 2.5 found broken assumptions, append them to the agent's prompt as "Pre-found integration issues to verify"
+8. Launch via `Task` tool with the resolved model (default `"sonnet"`, fallback `"opus"` if rate-limited)
 
 **CRITICAL**: Launch ALL selected agents in a SINGLE message using multiple Task tool calls. Each agent posts findings directly to the PR via `gh pr comment`.
+
+#### Domain Diff Slicing
+
+Each agent's prompt receives `[FILE_LIST]` scoped to its domain-relevant files (computed in Phase 3B as `DOMAIN_FILES_*`). This reduces per-agent token cost — each agent reads only the diff slice relevant to its domain, not the full changeset.
+
+- **Security agent**: receives the full file list and full diff (it must see everything)
+- **Domain agents**: receive `DOMAIN_FILES_<DOMAIN>` as `[FILE_LIST]`; if a domain's file list is empty (fallback), pass the full list
+
+When substituting `[FILE_LIST]` in each agent's template:
+- Auth agent → `$DOMAIN_FILES_AUTH`
+- Billing agent → `$DOMAIN_FILES_BILLING`
+- Concurrency agent → `$DOMAIN_FILES_CONCURRENCY`
+- Database agent → `$DOMAIN_FILES_DATABASE`
+- Infrastructure agent → `$DOMAIN_FILES_INFRA`
+- Scraping agent → `$DOMAIN_FILES_SCRAPING`
+- Frontend agent → `$DOMAIN_FILES_FRONTEND`
+- API agent → `$DOMAIN_FILES_API`
+- Security agent → `$FILES` (full list)
+
+**Note**: Domain agents still run `gh pr diff $PR_NUMBER` inside their execution context. The scoped `[FILE_LIST]` tells each agent which files are most relevant to its domain — it is a focused starting point, not a hard restriction. Agents should follow code paths beyond their slice if those paths are needed to complete a trace.
 
 ---
 
@@ -1211,7 +1434,7 @@ gh pr comment $ARGUMENTS --body "$(cat <<'EOF'
 ## Verdict: [APPROVE / CHANGES REQUESTED / NEEDS RE-REVIEW]
 
 ## Context-Aware Review
-**Domains**: [list] | **Agents**: [N] ([names])
+**Domains**: [list] | **Agents**: [N] ([names]) | **Dispatch mode**: [risk-scaled (default) / thorough (--thorough flag) / full-union (milestone PR)]
 
 ## Integration Checks (Phase 2.5)
 **Code registration**: [pass / N broken activation paths found]
@@ -1243,9 +1466,10 @@ Notify user:
 ```
 Review complete for PR #X. Verdict: [VERDICT].
 - Domains: [list]
-- Agents: [N] ([names])
+- Agents: [N] ([names]) — [dispatch mode: risk-scaled / thorough / full-union]
 - Integration checks: [pass/N broken paths found]
 - Issues created: [M]
 {IF AUTO_MERGE: "PR merged and issue closed." / "Merge FAILED — see issue."}
 {IF IS_MILESTONE_TO_STAGING: "Review findings demilestoned: [N] issues moved to fast lane." / ""}
+{Tip if risk-scaled: "Run with --thorough to enable full union dispatch for release-critical reviews."}
 ```
