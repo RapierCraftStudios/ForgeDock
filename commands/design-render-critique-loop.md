@@ -82,7 +82,7 @@ real reference*. They must never be the same judge. This is also distinct from t
 
 ## `FORGE:CRITIQUE` annotation
 
-Registered in [FORGE-PROTOCOL](../docs/FORGE-PROTOCOL.md). One per iteration, so the improvement trajectory is an
+Registered in [`docs/spec/forge-protocol-v1.md`](../docs/spec/forge-protocol-v1.md). One per iteration, so the improvement trajectory is an
 auditable artifact:
 
 ```markdown

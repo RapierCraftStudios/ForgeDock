@@ -150,7 +150,7 @@ Issue → Investigate → Context → Architect → Build → Quality Gate → R
 | **Review** | PR diff, contract, gate results | `FORGE:REVIEW_STARTED` on the issue; per-agent findings as structured `FINDING` blocks on the PR |
 | **Close** | All of the above | `FORGE:TRAJECTORY` — the full audit trail of the run |
 
-**GitHub as the database.** Every annotation is wrapped in an HTML comment (`<!-- FORGE:INVESTIGATOR -->`) that makes it machine-parseable. When an agent starts — even in a brand-new conversation after compaction — it queries the issue via `gh` and reconstructs full context from these tags. Workflow labels (`workflow:investigating`, `workflow:in-review`, `workflow:merged`…) track state, and the pipeline resumes from whatever state GitHub reports. The annotation format is an open standard — see the [FORGE Annotation Protocol](docs/FORGE-PROTOCOL.md).
+**GitHub as the database.** Every annotation is wrapped in an HTML comment (`<!-- FORGE:INVESTIGATOR -->`) that makes it machine-parseable. When an agent starts — even in a brand-new conversation after compaction — it queries the issue via `gh` and reconstructs full context from these tags. Workflow labels (`workflow:investigating`, `workflow:in-review`, `workflow:merged`…) track state, and the pipeline resumes from whatever state GitHub reports. The annotation format is an open standard — see the [FORGE Annotation Protocol](docs/spec/forge-protocol-v1.md).
 
 **Durable by design.** Headless runs are backed by a real execution engine, not prompt-hope: every phase transition is appended to an event-sourced, crash-safe run log, mirrored to the issue as a compact `FORGE:STATE` index, and guarded by leases so two agents can never own the same issue. Kill the process mid-run and restart it — the engine reconciles local state against GitHub (GitHub wins), adopts branches and PRs that already exist instead of re-running the LLM, and escalates to `needs-human` after bounded retries instead of looping. Phase selection is a pure rule-based state machine: **the engine, not the model, decides what happens next.** The headless core shipped in [PR #1326](https://github.com/RapierCraftStudios/ForgeDock/pull/1326); wiring the interactive path onto the same engine is in progress ([#1323](https://github.com/RapierCraftStudios/ForgeDock/issues/1323)–[#1325](https://github.com/RapierCraftStudios/ForgeDock/issues/1325)).
 
@@ -323,7 +323,7 @@ Using ForgeDock in your pipeline? Add the badge — each one is a backlink and a
 - [Getting Started in 5 Minutes](docs/site/getting-started.md)
 - [How the Knowledge Graph Works](docs/site/how-it-works.md)
 - [What Are Those FORGE Comments?](docs/site/annotations-explained.md) — 2-minute explainer for annotations you meet in the wild
-- [FORGE Annotation Protocol](docs/FORGE-PROTOCOL.md) — the open standard for AI context passing ([formal v1.0 spec](docs/spec/forge-protocol-v1.md))
+- [FORGE Annotation Protocol](docs/spec/forge-protocol-v1.md) — the open standard for AI context passing
 - [ForgeDock vs. Manual Claude Code Workflows](docs/site/vs-manual-workflows.md)
 - [ForgeDock vs. DeepWiki, AGENTS.md, and Cursor Memories](docs/comparison.md)
 - [Command Learning Path](docs/site/command-learning-path.md) — which commands to learn first

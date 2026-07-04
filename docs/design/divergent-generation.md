@@ -76,7 +76,7 @@ directions are retained in the `FORGE:DESIGN_CANDIDATES` annotation (below) so t
 
 ## The `FORGE:DESIGN_CANDIDATES` annotation
 
-Registered in [FORGE-PROTOCOL](../FORGE-PROTOCOL.md). Posted at the divergent-generation step, between the rationale
+Registered in [`docs/spec/forge-protocol-v1.md`](../spec/forge-protocol-v1.md). Posted at the divergent-generation step, between the rationale
 and the spec. It records the committed archetype, the N directions, and the judge's selection + scores — so the
 variance decision is a first-class, machine-queryable artifact, not a hidden roll.
 
