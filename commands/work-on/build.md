@@ -10,12 +10,28 @@ argument-hint: [issue number] [--repo GH_REPO] [--gh-flag GH_FLAG] [--base PR_BA
 **Input**: $ARGUMENTS
 
 **Invoked by**: `work-on.md` Phase 3 — entered when the issue carries label `workflow:ready-to-build` or `workflow:building` (see Universal Phase Dispatcher in work-on.md).
-**Output**: Create worktree, post contract, sequence build subcommands, return result to work-on.md.
+**Output**: Create worktree, post contract, run build phases, return result to work-on.md.
 
 **Agent model policy**: Default `model: "sonnet"`. If Sonnet is rate-limited, fall back to `model: "opus"`.
 **NEVER use plan mode (EnterPlanMode).**
 
-**CRITICAL: You MUST execute ALL phases B0–B6 in order. After each Skill() call returns, you MUST continue to the next phase. Phases B3 (context) and B4 (architect) are skipped ONLY when COMPLEXITY_BAND: TRIVIAL (read from FORGE:FAST_PATH comment in Phase B0). For STANDARD and COMPLEX tasks they are NOT optional — skipping them degrades build quality.**
+**CRITICAL: You MUST execute ALL phases B0–B6 in order. Phases B3 (context) and B4 (architect) are skipped ONLY when COMPLEXITY_BAND: TRIVIAL (read from FORGE:FAST_PATH comment in Phase B0). For STANDARD and COMPLEX tasks they are NOT optional — skipping them degrades build quality.**
+
+### Canonical Build Path (STANDARD/fast-lane) <!-- Added: forge#1276 -->
+
+**Default execution model: inline.** For STANDARD and fast-lane issues, phases B3 (context gathering) and B4 (architecture planning) run **inline in the current context window** — not as separate `Skill()` sub-agent spawns. B5 (implement) and B6 (validate) also run inline.
+
+`Skill()` invocations for context/architect sub-phases are only permitted when the Spawn-Decision Table (work-on.md `##Spawn-Decision Policy`) explicitly applies — specifically Row (c) (parent context near overflow: ≥20 Skill invocations or ≥10 files already changed before the build sub-phase). For most issues, the Skill() forms shown in B3 and B4 below are **reference documentation** describing the sub-phase contract, not mandatory sub-agent invocations.
+
+**Build topology summary**:
+
+| Path | When | Phases |
+|------|------|--------|
+| **STANDARD/fast-lane (default)** | All issues not matching exceptions below | B0 → B1 → B2 → B2.5 → [B3] → [B4] → B5 → B6 — all inline |
+| **Spawn exception (Row c)** | ≥20 Skill invocations OR ≥10 files changed before build | Spawn B3/B4 as fresh sub-agents via `Skill()` |
+| **TRIVIAL fast-path** | COMPLEXITY_BAND: TRIVIAL | Skip B3 and B4 entirely |
+
+This resolves the three-topology conflict: `work-on.md` Phase 3 (inline 3A–3M), `work-on/build.md` (this file), and `work-on-monolithic.md` ([BENCHMARK]) all describe the **same canonical inline path**. `work-on/build.md` adds worktree lifecycle management (B1) and the FORGE:CONTRACT handoff (B2) that the monolithic variant omits for brevity. The `Skill()` forms in B3/B4 below document the sub-phase contract and serve as the exception path only. <!-- Added: forge#1276 -->
 
 ---
 
@@ -194,44 +210,46 @@ If `FUNCTION_NAMES` is non-empty, it will be passed via `--functions` to the con
 
 ## Phase B3: Context Gathering (MANDATORY for STANDARD/COMPLEX — skip for TRIVIAL)
 
-**Skip if COMPLEXITY_BAND: TRIVIAL** (read from FORGE:FAST_PATH in Phase B0) — do not invoke the context subcommand. Proceed directly to Phase B4.
+**Skip if COMPLEXITY_BAND: TRIVIAL** (read from FORGE:FAST_PATH in Phase B0) — skip this phase entirely. Proceed directly to Phase B4.
 
-**For STANDARD and COMPLEX tasks**: Always invoke. Do NOT skip without a TRIVIAL COMPLEXITY_BAND.
+**For STANDARD and COMPLEX tasks**: Always run. Do NOT skip without a TRIVIAL COMPLEXITY_BAND.
 
-Invoke the context subcommand to surface historical review findings and bug patterns:
+**Execution model**: Run **inline** (see Canonical Build Path above). Read the `commands/work-on/build/context.md` spec and execute its steps directly in this context window. Only spawn a Skill() sub-agent when the Spawn-Decision Table Row (c) applies (≥20 prior Skill invocations or ≥10 files already changed). <!-- Added: forge#1276 -->
 
+Surface historical review findings and bug patterns for the affected files. The full step-by-step logic is defined in `commands/work-on/build/context.md`. Key steps: search closed issues with `review-finding` label on the affected files; check git log for past bug patterns; synthesize a `FORGE:CONTEXT` annotation and post it as a GitHub comment.
+
+**Spawn exception** (only when Row (c) applies):
 ```
 Skill("work-on:build:context", args="{NUMBER} --repo {GH_REPO} --gh-flag {GH_FLAG} --repo-path {WORKTREE_PATH} {AFFECTED_FILES} --functions {FUNCTION_NAMES}")
 ```
+If `FUNCTION_NAMES` is empty, omit `--functions`. The Skill() form above is the exception path — not the default. <!-- Added: forge#1276 -->
 
-If `FUNCTION_NAMES` is empty, omit the `--functions` flag entirely:
-
-```
-Skill("work-on:build:context", args="{NUMBER} --repo {GH_REPO} --gh-flag {GH_FLAG} --repo-path {WORKTREE_PATH} {AFFECTED_FILES}")
-```
-
-**After subcommand returns**:
-- Returns structured context briefing (or indicates no relevant history) → continue to B4
-- If subcommand times out or errors → log warning, continue to B4 with empty context (non-blocking)
+**After context gathering**:
+- Structured context briefing produced (or no relevant history found) → continue to B4
+- Context gathering timed out or errored → log warning, continue to B4 with empty context (non-blocking)
 # MUST CONTINUE to Phase B4 — context result is intermediate, NOT terminal.
 
 ---
 
 ## Phase B4: Architecture Planning (MANDATORY for STANDARD/COMPLEX — skip for TRIVIAL)
 
-**Skip if COMPLEXITY_BAND: TRIVIAL** (read from FORGE:FAST_PATH in Phase B0) — do not invoke the architect subcommand. Proceed directly to Phase B5.
+**Skip if COMPLEXITY_BAND: TRIVIAL** (read from FORGE:FAST_PATH in Phase B0) — skip this phase entirely. Proceed directly to Phase B5.
 
-**For STANDARD and COMPLEX tasks**: Always invoke. Even a 1-file STANDARD fix benefits from cross-path consistency checks. Do NOT skip without a TRIVIAL COMPLEXITY_BAND.
+**For STANDARD and COMPLEX tasks**: Always run. Even a 1-file STANDARD fix benefits from cross-path consistency checks. Do NOT skip without a TRIVIAL COMPLEXITY_BAND.
 
-Invoke the architect subcommand to trace all affected code paths and produce an ordered implementation plan:
+**Execution model**: Run **inline** (see Canonical Build Path above). Read the `commands/work-on/build/architect.md` spec and execute its steps directly in this context window. Only spawn a Skill() sub-agent when the Spawn-Decision Table Row (c) applies. <!-- Added: forge#1276 -->
 
+Trace all affected code paths and produce an ordered implementation plan. The full step-by-step logic is defined in `commands/work-on/build/architect.md`. Key steps: map all callers and importers of changed functions; check consistency rules across paths; post a `FORGE:ARCHITECT` annotation with the ordered plan and a risk table.
+
+**Spawn exception** (only when Row (c) applies):
 ```
 Skill("work-on:build:architect", args="{NUMBER} --repo {GH_REPO} --gh-flag {GH_FLAG} --repo-path {WORKTREE_PATH} --files {AFFECTED_FILES}")
 ```
+The Skill() form above is the exception path — not the default. <!-- Added: forge#1276 -->
 
-**After subcommand returns**:
+**After architecture planning**:
 - Returns ordered implementation plan → continue to B5
-- If subcommand returns BLOCKED → post comment, add `needs-human`, return `BUILD_RESULT: status: BLOCKED`
+- BLOCKED (conflicting constraints that cannot be resolved inline) → post comment, add `needs-human`, return `BUILD_RESULT: status: BLOCKED`
 # MUST CONTINUE to Phase B5 — architect result is intermediate, NOT terminal.
 
 ---

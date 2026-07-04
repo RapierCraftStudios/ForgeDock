@@ -886,6 +886,8 @@ esac
 
 <!-- FORGE:PHASE_COMPLETE — Entering Phase 3 (Build). See Universal Phase Dispatcher: sub-phases 3A–3M execute in sequence. No sub-phase completion is terminal. -->
 
+**Canonical path**: Sub-phases 3A–3M run **inline** in the current context window for STANDARD and fast-lane issues. This is the single authoritative build topology. `work-on/build.md` and `work-on-monolithic.md` ([BENCHMARK]) describe the same inline model with different levels of detail; they are not separate competing paths. `Skill()` sub-agent spawns for build sub-phases are only permitted under the Spawn-Decision Table Row (c) exception (≥20 Skill invocations or ≥10 files changed before the build). <!-- Added: forge#1276 -->
+
 **Skip if**: `<!-- FORGE:BUILDER:COMPLETE -->` is present in a BUILDER comment. <!-- Added: forge#1305 — require completion marker, not mere presence of BUILDER annotation -->
 
 **Partial build detection**: If `<!-- FORGE:BUILDER -->` exists BUT `<!-- FORGE:BUILDER:COMPLETE -->` is ABSENT → the build was interrupted after implement.md Phase I6 (comment posted) but before validate.md Phase V5 (commit). Delete the partial comment and restart Phase 3 from the top: <!-- Added: forge#1305 -->
