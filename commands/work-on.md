@@ -724,6 +724,21 @@ case "$TIER" in
 esac
 ```
 
+**Marker gate — Phase 1 exit** (see Marker Gate table in Universal Phase Dispatcher): <!-- forge#1419 -->
+```bash
+INV_MARKER=$(gh api repos/{GH_REPO}/issues/{NUMBER}/comments \
+  --jq '[.[] | select(.body | contains("INVESTIGATION:COMPLETE"))] | length')
+if [ "${INV_MARKER:-0}" -eq 0 ]; then
+  echo "MARKER GATE FAIL: INVESTIGATION:COMPLETE not found. Re-invoking investigate subcommand."
+  # Re-invoke Skill(skill="work-on/investigate", ...) once — if still absent after retry:
+  gh issue comment {NUMBER} {GH_FLAG} --body "<!-- FORGE:STALL -->
+**Marker gate failed**: \`INVESTIGATION:COMPLETE\` was not posted after Phase 1 completion and one retry. Manual review required."
+  gh issue edit {NUMBER} {GH_FLAG} --add-label "needs-human" \
+    --remove-label "workflow:investigating" 2>/dev/null || true
+  exit 1
+fi
+```
+
 Write machine-readable phase checkpoint (MUST execute immediately after label transition, before continuing):
 ```bash
 CHECKPOINT_TIMESTAMP=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
@@ -1588,6 +1603,21 @@ gh issue comment {NUMBER} {GH_FLAG} --body "<!-- FORGE:CHECKPOINT -->
 \`\`\`json
 {\"phase\": \"BUILD\", \"status\": \"COMPLETE\", \"next_phase\": \"REVIEW\", \"timestamp\": \"${CHECKPOINT_TIMESTAMP}\"}
 \`\`\`"
+```
+
+**Marker gate — Phase 3 exit** (see Marker Gate table in Universal Phase Dispatcher): <!-- forge#1419 -->
+```bash
+BUILD_MARKER=$(gh api repos/{GH_REPO}/issues/{NUMBER}/comments \
+  --jq '[.[] | select(.body | contains("FORGE:BUILDER:COMPLETE"))] | length')
+if [ "${BUILD_MARKER:-0}" -eq 0 ]; then
+  echo "MARKER GATE FAIL: FORGE:BUILDER:COMPLETE not found. Re-invoking build subcommand."
+  # Re-invoke Skill(skill="work-on/build", ...) once — if still absent after retry:
+  gh issue comment {NUMBER} {GH_FLAG} --body "<!-- FORGE:STALL -->
+**Marker gate failed**: \`FORGE:BUILDER:COMPLETE\` was not posted after Phase 3 completion and one retry. Manual review required."
+  gh issue edit {NUMBER} {GH_FLAG} --add-label "needs-human" \
+    --remove-label "workflow:building" 2>/dev/null || true
+  exit 1
+fi
 ```
 
 ---
