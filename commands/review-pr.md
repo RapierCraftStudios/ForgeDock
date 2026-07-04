@@ -1093,7 +1093,7 @@ else
 fi
 ```
 
-**Important**: Phase 8 ONLY merges the PR. It does NOT close the issue, update labels, or clean up worktrees. When invoked via `/work-on`, those responsibilities belong to `work-on/close.md` — which runs after the router detects state 4 (MERGE_COMPLETE: PR merged + issue open). Doing them here would cause the router to hit TERMINAL_MERGED (state 1) and skip the close phase entirely.
+**Important**: Phase 8 ONLY merges the PR. It does NOT close the issue, update labels, or clean up worktrees. When invoked via `/work-on`, those responsibilities belong to `work-on/close.md` (work-on.md Phase 6 — triggered when PR is merged and issue is still open). Doing them here would cause the issue to be closed with `workflow:merged` before Phase 6 runs, skipping the close phase entirely.
 
 ### 8B: Post-Merge Review Finding Demilestoning (Milestone PRs Only)
 

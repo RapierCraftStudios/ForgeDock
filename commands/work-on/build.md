@@ -9,8 +9,8 @@ argument-hint: [issue number] [--repo GH_REPO] [--gh-flag GH_FLAG] [--base PR_BA
 
 **Input**: $ARGUMENTS
 
-**Invoked by**: `work-on.md` state 8 (READY_TO_BUILD).
-**Output**: Create worktree, post contract, sequence build subcommands, return result to router.
+**Invoked by**: `work-on.md` Phase 3 — entered when the issue carries label `workflow:ready-to-build` or `workflow:building` (see Universal Phase Dispatcher in work-on.md).
+**Output**: Create worktree, post contract, sequence build subcommands, return result to work-on.md.
 
 **Agent model policy**: Default `model: "sonnet"`. If Sonnet is rate-limited, fall back to `model: "opus"`.
 **NEVER use plan mode (EnterPlanMode).**
@@ -275,13 +275,14 @@ BUILD_RESULT:
 
 ## Integration Point in work-on.md
 
-This module runs at **state 8 (READY_TO_BUILD)** in the routing loop:
+This module runs during **Phase 3** of the work-on.md pipeline (label: `workflow:ready-to-build` or `workflow:building`). The full sequence is defined by the Universal Phase Dispatcher in work-on.md:
 
 ```
-state 8 → [THIS MODULE] worktree + contract + context + architect + implement + validate
-        → BUILD_RESULT: COMPLETE
-states 7, 6 → work-on:review (push + PR + /review-pr --auto-merge)
-states 5, 4 → work-on:close (trajectory + parent tracker + summary)
+Phase 3 (Build)   → [THIS MODULE] worktree + contract + context + architect + implement + validate
+                  → posts FORGE:BUILDER comment, writes FORGE:CHECKPOINT next_phase=REVIEW
+Phase 4 (PR)      → work-on:review — push branch, create PR, set workflow:in-review
+Phase 5 (Review)  → work-on:review — invoke /review-pr --auto-merge
+Phase 6 (Close)   → work-on:close — trajectory + parent tracker + summary + worktree cleanup
 ```
 
-The router re-reads GitHub state after this module returns COMPLETE — it will then detect state 6 (IN_REVIEW) or 7 (BUILD_NO_PR) and invoke `work-on:review`.
+After this module posts `FORGE:BUILDER` and returns, work-on.md's Universal continuation rule re-reads the issue labels. Since the label is not yet terminal (`workflow:merged` / `workflow:invalid` / `needs-human`), it proceeds immediately to Phase 4 (PR Creation) and then Phase 5 (Auto-Review).
