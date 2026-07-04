@@ -1793,7 +1793,7 @@ async function watch() {
   // ── Cleanup on exit ────────────────────────────────────────────────────────
   let intervalHandle;
   function cleanup() {
-    if (intervalHandle) clearInterval(intervalHandle);
+    if (intervalHandle) clearTimeout(intervalHandle);
     if (USE_ANSI_WATCH) {
       process.stdout.write("\x1b[?25h"); // show cursor
     }
@@ -1903,10 +1903,15 @@ async function watch() {
     }
   }
 
-  // Initial render, then start interval
-  await render();
-  intervalHandle = setInterval(render, POLL_INTERVAL_MS);
-  intervalHandle.unref(); // don't keep process alive if loop drains
+  // Self-scheduling render loop — each render awaits completion before
+  // scheduling the next, preventing overlapping cycles when GitHub API
+  // latency exceeds the poll interval (forge#1428).
+  async function scheduleRender() {
+    await render();
+    intervalHandle = setTimeout(scheduleRender, POLL_INTERVAL_MS);
+    intervalHandle.unref(); // don't keep process alive if loop drains
+  }
+  await scheduleRender();
 }
 
 // The journey-routed commands render their own branded marks (hero/compact);
