@@ -1299,6 +1299,11 @@ if iteration == max_iterations AND not PASS:
 
 All tool commands are read from `forge.yaml → verification.commands`. When a key is absent, the step logs `SKIPPED — not configured in verification.commands` and continues rather than silently passing.
 
+**Track skipped checks** — initialize before any check runs:
+```bash
+VERIFICATION_SKIPPED_CHECKS=""
+```
+
 **Python**:
 ```bash
 cd {WORKTREE_PATH}
@@ -1308,6 +1313,7 @@ if [ -n "$PYTHON_FORMAT" ]; then
     eval "$PYTHON_FORMAT" 2>&1
 else
     echo "SKIPPED — python.format not configured in verification.commands"
+    VERIFICATION_SKIPPED_CHECKS="${VERIFICATION_SKIPPED_CHECKS:+$VERIFICATION_SKIPPED_CHECKS, }python.format"
 fi
 
 # Compile check always runs (no config needed — catches syntax errors)
@@ -1327,6 +1333,7 @@ if [ -n "$TS_FORMAT" ]; then
     eval "$TS_FORMAT" 2>&1
 else
     echo "SKIPPED — typescript.format not configured in verification.commands"
+    VERIFICATION_SKIPPED_CHECKS="${VERIFICATION_SKIPPED_CHECKS:+$VERIFICATION_SKIPPED_CHECKS, }typescript.format"
 fi
 
 if [ -n "$TS_TYPECHECK" ]; then
@@ -1337,6 +1344,7 @@ elif [ -n "$TS_BUILD" ]; then
     TS_EXIT=$?
 else
     echo "SKIPPED — typescript.typecheck and typescript.build not configured in verification.commands"
+    VERIFICATION_SKIPPED_CHECKS="${VERIFICATION_SKIPPED_CHECKS:+$VERIFICATION_SKIPPED_CHECKS, }typescript.typecheck/build"
     TS_EXIT=0
 fi
 ```
@@ -1478,12 +1486,20 @@ Check off completed items, mark phases complete, add PR references.
 
 ### 3M: Post implementation comment
 ```bash
+# Compute verification status from VERIFICATION_SKIPPED_CHECKS (set in Phase 3H)
+if [ -z "$VERIFICATION_SKIPPED_CHECKS" ]; then
+  VERIFICATION_STATUS="✅ All configured verification commands passed"
+else
+  VERIFICATION_STATUS="⚠ Verification NOT run: ${VERIFICATION_SKIPPED_CHECKS} — verification.commands not configured for these checks"
+fi
+
 gh issue comment {NUMBER} {GH_FLAG} --body "<!-- FORGE:BUILDER -->
 ## Implementation Complete
 
 **Branch**: \`{BRANCH}\`
 **Commits**: {COMMIT_SHA(S)}
 **Files changed**: {COUNT}
+**Verification Status**: ${VERIFICATION_STATUS}
 
 ### Approach
 {what was built, key decisions}
@@ -1897,6 +1913,13 @@ This check is **audit-only** — it annotates the trajectory for visibility. It 
 Post `<!-- FORGE:TRAJECTORY -->` comment with phase-by-phase results table:
 
 ```bash
+# Compute verification row from VERIFICATION_SKIPPED_CHECKS (set in Phase 3H)
+if [ -z "$VERIFICATION_SKIPPED_CHECKS" ]; then
+  VERIFICATION_ROW="✅ Ran"
+else
+  VERIFICATION_ROW="⚠ Skipped — verification.commands not configured for: ${VERIFICATION_SKIPPED_CHECKS}"
+fi
+
 gh issue comment {NUMBER} {GH_FLAG} --body "<!-- FORGE:TRAJECTORY -->
 ## Pipeline Trajectory — #{NUMBER}
 
@@ -1907,6 +1930,7 @@ gh issue comment {NUMBER} {GH_FLAG} --body "<!-- FORGE:TRAJECTORY -->
 | Phase 2: Decomposition | ⏭ Skipped | {reason} |
 | Phase 3: Build | ✅ Complete | Branch: \`{BRANCH}\` |
 | Phase 3G: Quality Gate | ✅ Gate passed | {iterations} iterations |
+| Phase 3H: Verification | ${VERIFICATION_ROW} | |
 | Phase 4–5: Review + PR | {REVIEW_ROW} | PR #{PR_NUMBER} → \`{PR_BASE}\` |
 | Phase 6: Close | ✅ Complete | Issue closed |
 
