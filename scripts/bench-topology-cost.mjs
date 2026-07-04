@@ -196,6 +196,13 @@ export function validate(data) {
     if (!Array.isArray(run.issues) || run.issues.length === 0) {
       throw new Error(`runs[${i}] (topology: ${run.topology}) must have a non-empty "issues" array`);
     }
+    if (run.issues.length !== CORPUS_ISSUES.length) {
+      process.stderr.write(
+        `WARNING: runs[${i}] (topology: ${run.topology}) has ${run.issues.length} issue(s) ` +
+          `but the standard corpus is ${CORPUS_ISSUES.length} issues. ` +
+          `Partial runs produce non-comparable deltas.\n`,
+      );
+    }
     for (let j = 0; j < run.issues.length; j++) {
       const iss = run.issues[j];
       if (typeof iss.number !== "number") {
