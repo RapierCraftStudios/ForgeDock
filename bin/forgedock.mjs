@@ -1586,6 +1586,7 @@ function help() {
     ["npx forgedock status [dir]", "Show ForgeDock state for a directory"],
     ["npx forgedock run <cmd> [args]", "Run a command headlessly via the Anthropic API"],
     ["npx forgedock run-issue <issue>", "Drive one issue through the durable engine"],
+    ["npx forgedock resume-stalled [--dry-run]", "Fleet stall recovery — re-dispatch expired-lease issues"],
     ["npx forgedock demo", "Set up a risk-free demo repo and print next steps"],
     ["npx forgedock labels [setup] [--repo owner/repo]", "Bootstrap ForgeDock-managed labels on a GitHub repo (idempotent)"],
     ["npx forgedock doctor", "Check installation health"],
@@ -1716,10 +1717,10 @@ async function demo() {
 // The journey-routed commands render their own branded marks (hero/compact);
 // splash() would double-brand them. Engine-surface commands, help, and
 // unknown-command output keep the logo.
-const SPLASH_COMMANDS = new Set(["run", "run-issue", "demo", "doctor", "help", "--help", "-h"]);
+const SPLASH_COMMANDS = new Set(["run", "run-issue", "resume-stalled", "demo", "doctor", "help", "--help", "-h"]);
 const KNOWN_COMMANDS = new Set([
   "install", "init", "enable", "disable", "status", "uninstall", "update",
-  "run", "run-issue", "demo", "doctor", "help", "--help", "-h",
+  "run", "run-issue", "resume-stalled", "demo", "doctor", "help", "--help", "-h",
 ]);
 if (SPLASH_COMMANDS.has(command) || !KNOWN_COMMANDS.has(command)) splash();
 
@@ -1772,6 +1773,11 @@ switch (command) {
   case "run-issue": {
     const { runFromCli } = await import("./engine-cli.mjs");
     await runFromCli(restArgs);
+    break;
+  }
+  case "resume-stalled": {
+    const { resumeStalledFromCli } = await import("./engine-cli.mjs");
+    await resumeStalledFromCli(restArgs);
     break;
   }
   case "demo":

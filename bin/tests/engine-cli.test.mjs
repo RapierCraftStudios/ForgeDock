@@ -1,6 +1,6 @@
-import { describe, it } from "node:test";
+import { describe, it, mock } from "node:test";
 import assert from "node:assert/strict";
-import { scanStalls } from "../engine-cli.mjs";
+import { scanStalls, resumeStalledFromCli } from "../engine-cli.mjs";
 
 describe("scanStalls", () => {
   it("flags issues whose lease expired and state is non-terminal", () => {
@@ -13,6 +13,24 @@ describe("scanStalls", () => {
     const io = { readState: async (i) => states[i] };
     return scanStalls([42, 43, 44], io, now).then((stalled) => {
       assert.deepEqual(stalled, [42]);
+    });
+  });
+
+  it("returns empty when all leases are active", () => {
+    const now = 1_000;
+    const states = {
+      10: { terminal: false, lease: { by: "a1", until: 5_000 } },
+    };
+    const io = { readState: async (i) => states[i] };
+    return scanStalls([10], io, now).then((stalled) => {
+      assert.deepEqual(stalled, []);
+    });
+  });
+
+  it("skips issues with null state (no FORGE:STATE block)", () => {
+    const io = { readState: async () => null };
+    return scanStalls([99], io, 10_000).then((stalled) => {
+      assert.deepEqual(stalled, []);
     });
   });
 });

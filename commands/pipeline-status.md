@@ -184,6 +184,78 @@ echo ""
 
 ---
 
+## Phase 3B: Engine Lease State (FORGE:STATE)
+
+For issues managed by the durable engine, read the `FORGE:STATE` block from each issue body and display lease status. This gives ground-truth stall detection beyond `updatedAt` heuristics. Gracefully degrades — issues without a `FORGE:STATE` block are skipped (they use the Phase 3 timestamp-based detection above).
+
+```bash
+echo "=== Engine Lease State ==="
+echo ""
+
+# Collect all open issues with non-terminal workflow labels
+ENGINE_CANDIDATES=$(gh issue list $GH_FLAG \
+    --state open \
+    --limit 100 \
+    --label "workflow:investigating,workflow:ready-to-build,workflow:building,workflow:in-review" \
+    --json number,title,body \
+    2>/dev/null || echo "[]")
+
+# gh --label uses AND filtering, so query each label separately and merge
+ENGINE_CANDIDATES=$(
+    for LABEL in "workflow:investigating" "workflow:ready-to-build" "workflow:building" "workflow:in-review"; do
+        gh issue list $GH_FLAG \
+            --state open \
+            --label "$LABEL" \
+            --limit 100 \
+            --json number,title,body 2>/dev/null || echo "[]"
+    done | jq -s 'flatten | unique_by(.number)'
+)
+
+NOW_MS=$(date +%s)000
+ENGINE_OUTPUT=""
+
+for ROW in $(echo "$ENGINE_CANDIDATES" | jq -c '.[]'); do
+    NUM=$(echo "$ROW" | jq -r '.number')
+    TITLE=$(echo "$ROW" | jq -r '.title[:55]')
+    BODY=$(echo "$ROW" | jq -r '.body // ""')
+
+    # Extract FORGE:STATE JSON block from issue body
+    STATE_JSON=$(echo "$BODY" | sed -n '/<!-- FORGE:STATE -->/,/<!-- \/FORGE:STATE -->/p' \
+        | grep -v '<!-- ' | tr -d '\n' 2>/dev/null || echo "")
+
+    if [ -z "$STATE_JSON" ]; then
+        continue  # No engine state — skip, Phase 3 covers this issue via updatedAt
+    fi
+
+    TERMINAL=$(echo "$STATE_JSON" | jq -r '.terminal // false' 2>/dev/null || echo "false")
+    if [ "$TERMINAL" = "true" ]; then
+        continue  # Terminal — not interesting for stall detection
+    fi
+
+    LEASE_UNTIL=$(echo "$STATE_JSON" | jq -r '.lease.until // 0' 2>/dev/null || echo "0")
+    LEASE_BY=$(echo "$STATE_JSON" | jq -r '.lease.by // "unknown"' 2>/dev/null || echo "unknown")
+    PHASE=$(echo "$STATE_JSON" | jq -r '.phase // "unknown"' 2>/dev/null || echo "unknown")
+
+    if [ "$LEASE_UNTIL" -gt "$NOW_MS" ] 2>/dev/null; then
+        REMAINING=$(( (LEASE_UNTIL - NOW_MS) / 60000 ))
+        ENGINE_OUTPUT="${ENGINE_OUTPUT}  #${NUM} ${TITLE} [${PHASE}] LEASED (${LEASE_BY}, ${REMAINING}m left)\n"
+    else
+        EXPIRED_AGO=$(( (NOW_MS - LEASE_UNTIL) / 60000 ))
+        ENGINE_OUTPUT="${ENGINE_OUTPUT}  #${NUM} ${TITLE} [${PHASE}] STALLED (lease expired ${EXPIRED_AGO}m ago)\n"
+    fi
+done
+
+if [ -z "$ENGINE_OUTPUT" ]; then
+    echo "  No engine-managed issues in flight (or none with FORGE:STATE blocks)."
+else
+    echo -e "$ENGINE_OUTPUT"
+fi
+
+echo ""
+```
+
+---
+
 ## Phase 4: Milestone Progress
 
 Show open milestones with open/closed issue counts and percentage complete.
