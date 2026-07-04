@@ -1736,9 +1736,39 @@ Skill(skill="review-pr", args="{PR_NUMBER} --auto-merge --issue {NUMBER} --base 
 ```
 
 **Sub-agent invocation** (large builds — ≥10 changed files OR ≥20 Skill invocations):
+
+Before spawning, build a distilled hot-copy of the key annotations the review sub-agent would otherwise re-fetch from GitHub. This reduces gh round-trips in the child without replacing the durable FORGE annotation record. <!-- Added: forge#1277 -->
+
+```bash
+# Hot-copy: extract CONTRACT and ARCHITECT annotation bodies for inline injection
+HOT_CONTRACT=$(gh api repos/{GH_REPO}/issues/{NUMBER}/comments \
+  --jq '[.[] | select(.body | contains("<!-- FORGE:CONTRACT -->"))] | last | .body // ""' 2>/dev/null \
+  | head -60)  # Scope: first 60 lines — captures Proposed Approach + Deliverables table
+
+HOT_ARCHITECT=$(gh api repos/{GH_REPO}/issues/{NUMBER}/comments \
+  --jq '[.[] | select(.body | contains("<!-- FORGE:ARCHITECT -->"))] | last | .body // ""' 2>/dev/null \
+  | head -40)  # Scope: first 40 lines — captures Affected Paths + Implementation Order
+
+# Build inline context block (omit sections where annotation was not found)
+HOT_COPY_BLOCK=""
+if [ -n "$HOT_CONTRACT" ]; then
+  HOT_COPY_BLOCK="${HOT_COPY_BLOCK}
+**HOT COPY — FORGE:CONTRACT** (do not re-fetch; durable record is on the issue):
+${HOT_CONTRACT}"
+fi
+if [ -n "$HOT_ARCHITECT" ]; then
+  HOT_COPY_BLOCK="${HOT_COPY_BLOCK}
+
+**HOT COPY — FORGE:ARCHITECT** (do not re-fetch; durable record is on the issue):
+${HOT_ARCHITECT}"
+fi
 ```
-Skill(skill="work-on/review", args="{NUMBER} --repo {GH_REPO} --gh-flag {GH_FLAG} --worktree {WORKTREE_PATH} --branch {BRANCH} --base {PR_BASE}")
+
 ```
+Skill(skill="work-on/review", args="{NUMBER} --repo {GH_REPO} --gh-flag {GH_FLAG} --worktree {WORKTREE_PATH} --branch {BRANCH} --base {PR_BASE}", context="{HOT_COPY_BLOCK}")
+```
+
+The `{HOT_COPY_BLOCK}` is an optimization that avoids the child re-discovering context already held by the parent. The FORGE annotations on GitHub remain the durable, compaction-safe record. If the hot-copy block is empty (annotations not yet posted), the sub-agent falls back to reading them from GitHub as before.
 
 Review-pr handles: full domain-agent review → post findings as separate issues → merge PR. It does NOT close the issue or clean up the worktree — those run in Phase 6.
 

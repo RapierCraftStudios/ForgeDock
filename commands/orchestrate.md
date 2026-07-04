@@ -1256,6 +1256,31 @@ fi
 
 If `GIST_CONTEXT` is empty (no synthesis brief, no parent investigation, and no milestone index found), the variable resolves to a blank line in the template — no impact on the agent prompt. <!-- Updated: forge#341, forge#1192 -->
 
+**Hot-copy CONTRACT context** (extends `{GIST_CONTEXT}` for milestone-lane issues where the parent issue already carries a `FORGE:CONTRACT` annotation): <!-- Added: forge#1277 -->
+
+When a DAG node issue was spawned from a decomposition (parent issue has `workflow:decomposed` label and the child issue body references `**Parent**: #NNN`), the parent issue may already have a `FORGE:CONTRACT` annotation that was posted before decomposition. Inject a scoped excerpt into the child's prompt so the child does not re-fetch it.
+
+```bash
+# Hot-copy: inject parent CONTRACT annotation excerpt into GIST_CONTEXT (milestone lane only)
+PARENT_NUM=$(gh issue view {NUMBER} -R {GH_REPO} --json body --jq '.body' \
+  | grep -oP '(?i)\*\*Parent\*\*[: ]*#\K\d+' | head -1)
+
+if [ -n "$PARENT_NUM" ]; then
+  PARENT_CONTRACT=$(gh api repos/{GH_REPO}/issues/${PARENT_NUM}/comments \
+    --jq '[.[] | select(.body | contains("<!-- FORGE:CONTRACT -->"))] | last | .body // ""' 2>/dev/null \
+    | head -40)  # Scope: first 40 lines — Proposed Approach + Deliverables table only
+
+  if [ -n "$PARENT_CONTRACT" ]; then
+    GIST_CONTEXT="${GIST_CONTEXT}
+
+**HOT COPY — PARENT FORGE:CONTRACT** (from parent issue #${PARENT_NUM}; do not re-fetch — durable record is on that issue):
+${PARENT_CONTRACT}"
+  fi
+fi
+```
+
+If the issue has no parent reference, or the parent has no `FORGE:CONTRACT` annotation, this block produces no output and `GIST_CONTEXT` is unchanged. The hot-copy is an optimization — the durable annotation on the parent issue remains the authoritative record for compaction recovery.
+
 **Capture agent IDs after the batch spawn (MANDATORY)**: Each `Agent(...)` call returns an agent ID. Store each returned ID in `AGENT_ISSUE_MAP` keyed by issue number. This map is the only way to resume a stalled agent by ID in Steps 4B and 4B.5:
 
 ```
