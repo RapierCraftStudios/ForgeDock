@@ -6,7 +6,10 @@ Status of reserved and blocked brand handles across platforms.
 
 | Domain | Status |
 |--------|--------|
-| `forgedock.dev` | **Owned** — canonical marketing and App URL |
+| `forgedock.dev` | **Unverified** — live content (2026-07-04) is a third-party product unrelated to ForgeDock; registrar verification pending. Do not use as a public-facing link until resolved. |
+| `forgedock.io` | **Parked** — Porkbun parked page, HTTP-only (HTTPS does not connect). Not controlled by RapierCraft Studios. Do not use as a public-facing link. |
+
+> **Rule**: No public ForgeDock surface (npm homepage, repo description, plugin manifests, docs) may point at a domain until its live content is verified as controlled by RapierCraft Studios.
 
 ## npm
 
@@ -45,7 +48,8 @@ Social handle registration is an operational task. Reserve handles before public
 
 | Platform | Action |
 |----------|--------|
-| Domain | Done |
+| Domain (forgedock.dev) | Unverified — registrar check pending; do not use as live surface |
+| Domain (forgedock.io) | Parked — not controlled by RapierCraft Studios; do not use as live surface |
 | npm | Done |
 | GitHub org slug | Blocked — use variant for App slug |
 | Social handles | Reserve before L1 public launch |
