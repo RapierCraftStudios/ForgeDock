@@ -19,6 +19,8 @@ You are the pipeline's deploy awareness layer. Before the user merges staging �
 
 **NEVER use plan mode (EnterPlanMode)** — it breaks execution context.
 
+<!-- FORGE:SPEC_LOADED — deploy-info.md loaded and active. Agent is bound by this spec. -->
+
 ---
 
 ## Phase 0: Review-Finding Readiness Check

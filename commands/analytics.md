@@ -14,6 +14,8 @@ You are the analytics orchestrator. Pull data from ALL available analytics platf
 
 **Agent model policy**: Default `model: "sonnet"`. If Sonnet is rate-limited, fall back to `model: "opus"`. User can override with `--model <name>`. Pass the resolved model in every `Agent` tool call. Each agent prompt includes specific queries, exact API endpoints, and the credentials file path so the model can execute without guessing.
 
+<!-- FORGE:SPEC_LOADED — analytics.md loaded and active. Agent is bound by this spec. -->
+
 ---
 
 ## Config Preamble (REQUIRED — run before anything else)

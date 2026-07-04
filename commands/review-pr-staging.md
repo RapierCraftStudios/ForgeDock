@@ -13,6 +13,10 @@ allowed-tools: Task, Bash, Read, Grep, Glob, WebFetch
 Performs comprehensive review of `staging` before merging to `main`. Handles large diffs (1,000-10,000+ lines), diverse changes, deep analysis, and business impact assessment.
 
 **Agent model policy**: Default `model: "sonnet"`. If Sonnet is rate-limited, fall back to `model: "opus"`. User can override with `--model <name>`.
+**NEVER use plan mode (EnterPlanMode).**
+**NEVER use the Agent tool** — this spec uses `Task` for domain agent dispatch. The Agent tool bypasses the allowed-tools constraint declared in this spec's frontmatter and produces opaque output that cannot be structured into the review verdict.
+
+<!-- FORGE:SPEC_LOADED — review-pr-staging.md loaded and active. Agent is bound by this spec. -->
 
 ---
 
@@ -190,10 +194,24 @@ To override (ship known issues with documented reason), post a comment starting 
   fi
 else
   echo "✅ Open review-finding gate: PASSED — no open findings for PRs in this bundle."
+  # Post FORGE:GATE_PASS for symmetric observability — bypass is indistinguishable from clean pass without this
+  if [ -n "$PR_NUMBER" ]; then
+    gh pr comment "$PR_NUMBER" -R {GH_REPO} --body "<!-- FORGE:GATE_PASS -->
+## Deploy Gate: PASSED
+
+**Gate**: open-review-finding check
+**Result**: PASS — no open \`review-finding\` issues exist for PRs in this bundle.
+**Bundle PRs**: ${ALL_PR_NUMBERS}
+**Timestamp**: $(date -u +%Y-%m-%dT%H:%M:%SZ)
+
+<!-- FORGE:GATE_PASS:TYPE=open-review-finding -->" 2>/dev/null || true
+  fi
 fi
 ```
 
 If the gate exits with `RESULT: BLOCK DEPLOY` → **STOP**. Do NOT proceed to Phase 0B or any downstream phases. A `<!-- FORGE:GATE_FAILURE -->` structured comment is automatically posted on the staging→main PR (if `$PR_NUMBER` is set) for pipeline-health tracking. Report the blocking finding list.
+
+If the gate exits with `RESULT: PASS` → a `<!-- FORGE:GATE_PASS -->` structured comment is posted on the staging→main PR so that `/pipeline-health` can distinguish a clean gate from a silently skipped one. A PR with no gate comment at all indicates a gate bypass — not a clean pass.
 
 ---
 
@@ -387,6 +405,18 @@ case "$TEST_GATE_VERDICT" in
   PASS)
     echo "✅ Test gate: PASS — all test clusters passed. Deploy may proceed."
     TEST_GATE_REASON="PASS — all automated test clusters passed"
+    # Post FORGE:GATE_PASS for symmetric observability
+    if [ -n "$PR_NUMBER" ]; then
+      gh pr comment "$PR_NUMBER" ${GH_FLAG} --body "<!-- FORGE:GATE_PASS -->
+## Deploy Gate: PASSED
+
+**Gate**: test-gate (runtime acceptance criteria)
+**Result**: PASS — all test clusters passed. Deploy may proceed.
+**Bundle PRs**: ${ALL_PR_NUMBERS}
+**Timestamp**: $(date -u +%Y-%m-%dT%H:%M:%SZ)
+
+<!-- FORGE:GATE_PASS:TYPE=test-gate|BUNDLE=$(echo $ALL_PR_NUMBERS | tr '\n' ' ' | xargs) -->" 2>/dev/null || true
+    fi
     ;;
 
   BLOCK)
