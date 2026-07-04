@@ -62,8 +62,10 @@ Key value props:
 
 These are systemic problems being actively addressed:
 
-### Agent Compliance (#639)
+### Agent Compliance (#639, #1383)
 Agents hallucinate branch names and routing targets despite explicit spec instructions. The LLM "reasons" its way around deterministic rules. **Root cause**: prose instructions are suggestions, not constraints. **Fix**: Scripts layer (#651) — extract deterministic operations into executable scripts.
+
+**Concrete incident (#1383)**: Agent invoked with `/review-pr 1378` on a staging-to-main PR completely ignored the command spec — used the `Agent` tool (not in `allowed-tools`), skipped Phase 0 routing to `review-pr-staging`, and never executed deploy gates or test gates. **Mitigations applied**: HARD RULES preambles, `FORGE:SPEC_LOADED` markers, and `NEVER use Agent tool` warnings added to all CRITICAL/HIGH command specs (#1389). Spec compliance rules added to `templates/devdocs/agent/using-forgedock.md` for distribution (#1383). **Long-term fix**: PreToolUse hooks (#1250) for deterministic enforcement.
 
 ### Token Bloat (#619)
 All 27 command specs (~848KB) load into context at session start via symlinks. Most sessions use 1-2 commands but pay the token cost for all of them. **Fix**: Stub + invoke pattern — install thin stubs, load full specs on demand.
