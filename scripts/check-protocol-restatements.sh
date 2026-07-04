@@ -91,14 +91,15 @@ PATTERN_NAMES=(
 
 # Each regex matches one or more heading levels for the given protocol section.
 # Anchored (^) so prose references mid-sentence are not false positives.
-# The trailing [[:space:]]* allows trailing whitespace; we stop before the
-# allowlist comment token so lines with it are excluded in a second pass.
+# Trailing content after the key phrase is permitted (e.g. parentheticals like
+# "(ALL Agents Follow)") — the anchored key phrase is the restatement signal.
+# The allowlist comment token exclusion is handled in a separate grep -v pass.
 PATTERN_REGEXES=(
-  "^#{1,2} FORGE Annotation Protocol[[:space:]]*$"
+  "^#{1,2} FORGE Annotation Protocol"
   "^#{2,3} Annotation Types[[:space:]]*$"
-  "^#{1,2} Workflow State Machine[[:space:]]*$"
-  "^#{1,2} Label State Machine[[:space:]]*$"
-  "^#{1,2} Evidence-Based Review Protocol[[:space:]]*$"
+  "^#{1,2} Workflow State Machine"
+  "^#{1,2} Label State Machine"
+  "^#{1,2} Evidence-Based Review Protocol"
 )
 
 NORMATIVE_SOURCES=(

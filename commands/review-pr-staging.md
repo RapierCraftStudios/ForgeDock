@@ -36,7 +36,7 @@ All `$DEFAULT_BRANCH`, `$STAGING_BRANCH`, `$GATE_POSTURE`, and `$OVERRIDE_PHRASE
 
 ---
 
-## Evidence-Based Review Protocol (ALL Agents)
+## Evidence-Based Review Protocol (ALL Agents) <!-- allowlist:check-protocol-restatements -->
 
 ### Diff-First Approach
 ```bash
