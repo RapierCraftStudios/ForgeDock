@@ -625,3 +625,18 @@ If `TEST_GATE_VERDICT` is `BLOCK` and Phase 8 was reached (advisory posture or o
 > **Test Gate: BLOCK (override/advisory)** — Runtime failures were detected but deploy is proceeding. Reason: `${TEST_GATE_REASON}`. Filed `test-failure` issues track the failures.
 
 **CRITICAL**: This review NEVER merges staging → main. User makes deploy decision via GitHub web UI.
+
+---
+
+## Gate Marker Contract
+
+Every completed staging review MUST leave one of the following structured markers on the PR:
+
+| Marker | Meaning |
+|--------|---------|
+| `<!-- FORGE:GATE_PASS -->` | Gate ran and passed — deploy may proceed |
+| `<!-- FORGE:GATE_FAILURE -->` | Gate ran and blocked — do NOT deploy |
+
+**Absence of both markers = bypass detected.** The `.github/workflows/gate-marker-check.yml` workflow enforces this: it scans the PR timeline after review completes and fails CI if no gate marker is present within 30 minutes of the PR being opened/updated. A missing marker is treated as a deploy blocker — not a pass.
+
+This symmetry closes the silent-bypass gap identified in forge#1387: previously, gate PASS posted nothing, making a clean pass indistinguishable from a skipped spec.
