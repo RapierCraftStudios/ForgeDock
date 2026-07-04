@@ -39,10 +39,10 @@ This quality gate uses **domain detection** to adapt to your project's actual te
 | FRONTEND | `.tsx`/`.ts` files in client component paths |
 | PROXY | Client components using `fetch`/`useSWR`/`apiFetch` |
 | SHELL | `.sh` files or scripts using `curl`/`wget` |
-| STRING_SETS | Python files in anti-detection or browser automation paths |
+| STRING_SETS | *(scraping pack — opt-in)* Python files in anti-detection or browser automation paths. Enable via `forge.yaml → quality_gate.optional_domains: [STRING_SETS]` |
 | CONCURRENCY | Python files using `asyncio.shield`, `asyncio.wait_for`, or `Task.cancel` |
 | STATE | Python files with new module-level mutable variable assignments |
-| CAPACITY | Worker/infra Python files with new size/limit/threshold constants |
+| CAPACITY | *(scraping pack — opt-in)* Worker/infra Python files with new size/limit/threshold constants. Enable via `forge.yaml → quality_gate.optional_domains: [CAPACITY]` |
 | WORKFLOW | `.yml` files in `.github/workflows/` |
 | IMPORT_RESOLUTION | Python files with new `from app.*` imports added outside `try:` blocks |
 | INFRA | Dockerfiles or entrypoints with runtime UID changes |
@@ -92,10 +92,10 @@ Before running checks, classify the changed files into domains. This avoids runn
 | `*.tsx`, `*.ts` in `web/src/` (excluding `route.ts`) | FRONTEND |
 | `*.tsx`, `*.ts` client components with fetch/useSWR | PROXY |
 | `*.sh` files or scripts with `curl`/`wget` | SHELL |
-| `*.py` in `anti_detection/`, `consumers/`, `browser/`, or `shared/detection/` | STRING_SETS |
+| `*.py` in `anti_detection/`, `consumers/`, `browser/`, or `shared/detection/` | STRING_SETS *(scraping pack — opt-in, see 2J)* |
 | `*.py` containing `asyncio.shield`, `asyncio.wait_for`, or `Task.cancel` | CONCURRENCY |
 | `*.py` files with new module-level `dict`, `set`, `Counter`, `Lock`, or `defaultdict` assignments | STATE |
-| `*.py` in `services/worker/`, `infra/`, or `browser/` with new assignments to variables containing `MB`, `SIZE`, `MAX`, `LIMIT`, `THRESHOLD`, or `TIMEOUT` | CAPACITY |
+| `*.py` in `services/worker/`, `infra/`, or `browser/` with new assignments to variables containing `MB`, `SIZE`, `MAX`, `LIMIT`, `THRESHOLD`, or `TIMEOUT` | CAPACITY *(scraping pack — opt-in, see 2K)* |
 | `*.yml` in `.github/workflows/` | WORKFLOW |
 | `*.py` with new `from app.` import statements added outside `try:` blocks | IMPORT_RESOLUTION |
 | `Dockerfile*` or `entrypoint*.sh` with added/changed `USER`, `su-exec`, `gosu`, or `setuid` | INFRA |
@@ -131,7 +131,12 @@ for f in "${CHANGED_FILES_ARR[@]}"; do
     esac
     case "$f" in
         *anti_detection/*|*consumers/*|*browser/*|*shared/detection/*)
-            echo "$f" | grep -qE '\.py$' && DOMAINS="$DOMAINS STRING_SETS"
+            # STRING_SETS is a scraping-pack domain — opt-in via forge.yaml → quality_gate.optional_domains
+            # <!-- Updated: forge#1349 — not enabled by default; scraping-product-specific -->
+            if echo "$f" | grep -qE '\.py$'; then
+                _OPT_DOMAINS=$(grep -A5 'optional_domains:' "{WORKTREE_PATH}/forge.yaml" 2>/dev/null | grep -oE 'STRING_SETS' | head -1 || true)
+                [ -n "$_OPT_DOMAINS" ] && DOMAINS="$DOMAINS STRING_SETS"
+            fi
             ;;
     esac
     case "$f" in
@@ -149,10 +154,15 @@ grep -lE "asyncio\.shield|asyncio\.wait_for|Task\.cancel" {CHANGED_FILES} 2>/dev
 grep -lE "^\w+ = (\{\}|\[\]|set\(\)|Lock\(\)|defaultdict|Counter)" {CHANGED_FILES} 2>/dev/null | grep -qE '\.py$' && DOMAINS="$DOMAINS STATE"
 
 # Check for capacity constants in worker/infra/browser Python files
-while IFS= read -r f; do
-    [ -z "$f" ] && continue
-    git diff HEAD -- "$f" 2>/dev/null | grep -qE '^\+[A-Za-z_]\w*(MB|SIZE|MAX|LIMIT|THRESHOLD|TIMEOUT)\w*\s*=' && DOMAINS="$DOMAINS CAPACITY" && break
-done < <(echo {CHANGED_FILES} | tr ' ' '\n' | grep -E '\.py$' | grep -E 'services/worker/|infra/|browser/')
+# CAPACITY is a scraping-pack domain — opt-in via forge.yaml → quality_gate.optional_domains
+# <!-- Updated: forge#1349 — not enabled by default; scraping-product-specific -->
+_OPT_CAPACITY=$(grep -A5 'optional_domains:' "{WORKTREE_PATH}/forge.yaml" 2>/dev/null | grep -oE 'CAPACITY' | head -1 || true)
+if [ -n "$_OPT_CAPACITY" ]; then
+    while IFS= read -r f; do
+        [ -z "$f" ] && continue
+        git diff HEAD -- "$f" 2>/dev/null | grep -qE '^\+[A-Za-z_]\w*(MB|SIZE|MAX|LIMIT|THRESHOLD|TIMEOUT)\w*\s*=' && DOMAINS="$DOMAINS CAPACITY" && break
+    done < <(echo {CHANGED_FILES} | tr ' ' '\n' | grep -E '\.py$' | grep -E 'services/worker/|infra/|browser/')
+fi
 
 # Check for env var usage in changed files
 grep -lE "os\.getenv|process\.env" {CHANGED_FILES} 2>/dev/null && DOMAINS="$DOMAINS DEPLOY"
@@ -266,14 +276,26 @@ done
 ### 2B: Auth conventions (Python routers, TypeScript route handlers)
 
 For new/modified endpoints:
-1. Which auth dependency is used — `SessionUser` or `CurrentUser`?
-2. Does the route path match? Dashboard routes (`/api/dashboard/*`) must use `SessionUser`. Public API routes (`/api/v1/*`) must use `CurrentUser`.
-3. Does the endpoint check resource ownership (`user_id`) before returning data?
+1. Which auth dependency is used? Read `forge.yaml → review.domains.auth` for the configured dependency name(s). If absent, skip the naming check and fall back to generic resource-ownership verification only.
+2. Does the endpoint check resource ownership (`user_id` or equivalent) before returning data?
+
+Route-path-to-dependency convention (e.g. "dashboard routes must use X, public routes must use Y") is project-specific. Configure it in `forge.yaml → review.domains.auth` if your project uses one. Do not enforce a hard-coded convention universally. <!-- Updated: forge#1349 — removed AlterLab-specific SessionUser/CurrentUser rule -->
 
 ```bash
+# Read configured auth dependency names from forge.yaml (if present)
+AUTH_DEPS=""
+if [ -f "{WORKTREE_PATH}/forge.yaml" ]; then
+    AUTH_DEPS=$(grep -A5 'domains:' "{WORKTREE_PATH}/forge.yaml" 2>/dev/null \
+        | grep -A3 'auth:' | grep -oE '[A-Za-z_]+User|[A-Za-z_]+Auth|get_[a-z_]+' | sort -u | tr '\n' '|' | sed 's/|$//')
+fi
+
 while IFS= read -r f; do
     [ -z "$f" ] && continue
-    grep -nE "CurrentUser|SessionUser|Depends\(get_" "$f" 2>/dev/null
+    if [ -n "$AUTH_DEPS" ]; then
+        grep -nE "($AUTH_DEPS)|Depends\(get_" "$f" 2>/dev/null
+    else
+        grep -nE "Depends\(get_" "$f" 2>/dev/null
+    fi
     grep -nE "@router\.(get|post|put|delete)" "$f" 2>/dev/null
 done < <(echo {CHANGED_FILES} | tr ' ' '\n' | grep -E 'router|route')
 ```
@@ -286,8 +308,13 @@ if [ -n "$NEW_ENVS" ]; then
     for var in $NEW_ENVS; do
         # Check if it exists in .env.example
         grep -q "$var" .env.example 2>/dev/null || echo "DEPLOY: $var not in .env.example"
-        # Check if it's in decrypt-secrets.sh ENV_MAPPING
-        grep -q "$var" scripts/decrypt-secrets.sh 2>/dev/null || echo "DEPLOY: $var not in decrypt-secrets.sh ENV_MAPPING"
+        # Check decrypt-secrets.sh ENV_MAPPING only when the SOPS mapping script exists.
+        # Emitting a finding for a file that doesn't exist in the repo produces false BLOCKINGs
+        # on non-SOPS repos. Use verify-sops-chain.sh for the full SOPS chain check instead.
+        # <!-- Updated: forge#1349 — gate on file presence -->
+        if [ -f "{WORKTREE_PATH}/scripts/decrypt-secrets.sh" ]; then
+            grep -q "$var" "{WORKTREE_PATH}/scripts/decrypt-secrets.sh" 2>/dev/null || echo "DEPLOY: $var not in decrypt-secrets.sh ENV_MAPPING"
+        fi
     done
 fi
 ```
@@ -310,27 +337,23 @@ while IFS= read -r f; do
 done < <(echo {CHANGED_FILES} | tr ' ' '\n' | grep '\.sql$')
 
 # Migration prefix collision scan (Deploy Gate — HIGH)
-# Runs whenever any SQL file changed. Scans the full infra/migrations/ tree for duplicate
-# numeric prefixes not in GRANDFATHERED_DUPLICATES. Duplicates not in the allowlist WILL
-# hard-fail deploy-production.yml's validate-migration-order.sh gate.
+# Runs whenever any SQL file changed. Scans the configured migrations directory for
+# duplicate numeric prefixes. Duplicate prefixes can cause ordering conflicts during deploy.
+# <!-- Updated: forge#1349 — removed stale validate-migration-order.sh reference (script does not exist) -->
 MIGRATIONS_DIR="{WORKTREE_PATH}/infra/migrations"
+# Support configured migration directory from forge.yaml (if set)
+if [ -f "{WORKTREE_PATH}/forge.yaml" ]; then
+    _CONFIGURED_MIGRATIONS=$(grep -E '^\s*migrations_dir:' "{WORKTREE_PATH}/forge.yaml" 2>/dev/null \
+        | head -1 | sed 's/.*migrations_dir:[[:space:]]*//' | tr -d '"' | tr -d "'" | xargs)
+    [ -n "$_CONFIGURED_MIGRATIONS" ] && MIGRATIONS_DIR="{WORKTREE_PATH}/${_CONFIGURED_MIGRATIONS}"
+fi
 if [ -d "$MIGRATIONS_DIR" ]; then
-    # Extract grandfathered prefixes from validate-migration-order.sh if it exists
-    GRANDFATHER_SCRIPT="{WORKTREE_PATH}/scripts/validate-migration-order.sh"
-    GRANDFATHERED=""
-    if [ -f "$GRANDFATHER_SCRIPT" ]; then
-        GRANDFATHERED=$(grep -oE '[0-9]{4}' "$GRANDFATHER_SCRIPT" | sort -u | tr '\n' ' ')
-    fi
     # Find duplicate numeric prefixes across all migration files
     DUPLICATE_PREFIXES=$(ls "$MIGRATIONS_DIR"/*.sql 2>/dev/null \
         | sed 's|.*/\([0-9]*\)_.*|\1|' \
         | sort | uniq -d)
     for prefix in $DUPLICATE_PREFIXES; do
-        if echo "$GRANDFATHERED" | grep -qw "$prefix"; then
-            echo "DB: migration prefix $prefix is duplicated but grandfathered (INFO)"
-        else
-            echo "DB-COLLISION | HIGH | infra/migrations/ | Duplicate migration prefix $prefix is NOT grandfathered — will hard-fail deploy-production.yml validate-migration-order.sh gate. Classify as CRITICAL BLOCKER."
-        fi
+        echo "DB-COLLISION | HIGH | $MIGRATIONS_DIR | Duplicate migration prefix $prefix — ordering conflict will occur during deploy. Classify as CRITICAL BLOCKER."
     done
 fi
 ```
@@ -393,10 +416,29 @@ done < <(echo {CHANGED_FILES} | tr ' ' '\n' | grep -E '\.tsx?$' | grep -v 'route
 
 ### 2F: Frontend proxy wiring (client-side fetch calls)
 
+The direct-backend path prefix to flag is read from `forge.yaml → review.layout.direct_api_prefix`.
+If absent, defaults to `/api/v1/` (backward compatible). This prevents false findings on projects
+that use a different API path scheme. <!-- Updated: forge#1349 — gate on forge.yaml, not hardcoded AlterLab prefix -->
+
 ```bash
+# Read configured direct API prefix from forge.yaml, fall back to /api/v1/
+DIRECT_API_PREFIX="/api/v1/"
+if [ -f "{WORKTREE_PATH}/forge.yaml" ]; then
+    _CONFIGURED_PREFIX=$(grep -E '^\s*direct_api_prefix:' "{WORKTREE_PATH}/forge.yaml" 2>/dev/null \
+        | head -1 | sed 's/.*direct_api_prefix:[[:space:]]*//' | tr -d '"' | tr -d "'" | xargs)
+    # Also check under review.layout section
+    if [ -z "$_CONFIGURED_PREFIX" ]; then
+        _CONFIGURED_PREFIX=$(grep -A 10 'layout:' "{WORKTREE_PATH}/forge.yaml" 2>/dev/null \
+            | grep -E '^\s*direct_api_prefix:' \
+            | head -1 | sed 's/.*direct_api_prefix:[[:space:]]*//' | tr -d '"' | tr -d "'" | xargs)
+    fi
+    [ -n "$_CONFIGURED_PREFIX" ] && DIRECT_API_PREFIX="$_CONFIGURED_PREFIX"
+fi
+ESCAPED_PREFIX=$(printf '%s' "$DIRECT_API_PREFIX" | sed 's|/|\\/|g')
+
 while IFS= read -r f; do
     [ -z "$f" ] && continue
-    grep -nE '(fetch|useSWR|apiFetch)\s*[(<]\s*[`"'"'"']/api/v1/' "$f" 2>/dev/null && echo "PROXY: direct /api/v1/ call in $f — must use /api/ proxy"
+    grep -nE "(fetch|useSWR|apiFetch)\\s*[(<]\\s*[\`\"']${ESCAPED_PREFIX}" "$f" 2>/dev/null && echo "PROXY: direct ${DIRECT_API_PREFIX} call in $f — must use /api/ proxy (configure review.layout.direct_api_prefix in forge.yaml to change the flagged prefix)"
 done < <(echo {CHANGED_FILES} | tr ' ' '\n' | grep -E '\.(tsx?|jsx?)$' | grep -v 'route\.ts$')
 ```
 
@@ -578,9 +620,11 @@ done < <(echo {CHANGED_FILES} | tr ' ' '\n' | grep -E '\.py$')
 
 ---
 
-### 2J: String literal consistency (anti-detection/scraping code)
+### 2J: String literal consistency (anti-detection/scraping code) *(Scraping Pack — opt-in)*
 
-**Triggered when**: changed files include Python files in `anti_detection/`, `consumers/`, `browser/`, or `shared/detection/` directories.
+> **This domain is opt-in and disabled by default.** It is specific to scraping/anti-detection products and produces false findings on general repos. Enable it by adding `STRING_SETS` to `forge.yaml → quality_gate.optional_domains`. <!-- Added: forge#1349 -->
+
+**Triggered when**: changed files include Python files in `anti_detection/`, `consumers/`, `browser/`, or `shared/detection/` directories AND `STRING_SETS` is in `forge.yaml → quality_gate.optional_domains`.
 
 **Why this matters**: Detection keyword sets (e.g., `CHALLENGE_KEYWORDS`, `COMMON_COOKIES`) across related modules share a domain truth — if Akamai adds a new cookie marker, it must appear in ALL related sets. A typo or omission in one set silently breaks detection for that service path. This check catches both inter-file inconsistencies and intra-file comment/code drift.
 
@@ -670,9 +714,11 @@ done < <(echo {CHANGED_FILES} | tr ' ' '\n' | grep -E '\.py$' | grep -E 'anti_de
 
 ---
 
-### 2K: Capacity constant validation (worker/infra code)
+### 2K: Capacity constant validation (worker/infra code) *(Scraping Pack — opt-in)*
 
-**Triggered when**: changed Python files in `services/worker/`, `infra/`, or `browser/` introduce new assignments to variables whose names contain `MB`, `SIZE`, `MAX`, `LIMIT`, `THRESHOLD`, or `TIMEOUT`.
+> **This domain is opt-in and disabled by default.** It is specific to scraping/browser-pool products and produces false findings on general repos. Enable it by adding `CAPACITY` to `forge.yaml → quality_gate.optional_domains`. <!-- Added: forge#1349 -->
+
+**Triggered when**: changed Python files in `services/worker/`, `infra/`, or `browser/` introduce new assignments to variables whose names contain `MB`, `SIZE`, `MAX`, `LIMIT`, `THRESHOLD`, or `TIMEOUT` AND `CAPACITY` is in `forge.yaml → quality_gate.optional_domains`.
 
 **Why this matters**: Hardcoded capacity constants (e.g., `_BROWSER_ESTIMATED_MB = 200`) are design-time guesses that drift from production reality. When used in guard conditions (e.g., "5 × 200 MB = 1000 MB peak"), a wrong constant directly limits system throughput and may never be caught until a slot fails to spawn. A constant is correctly-typed and correctly-used but factually wrong — logic checks pass, the bug ships.
 
