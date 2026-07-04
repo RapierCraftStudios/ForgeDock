@@ -1,13 +1,13 @@
 <!-- SPDX-FileCopyrightText: Copyright (c) RapierCraft Studios -->
 <!-- SPDX-License-Identifier: AGPL-3.0-or-later -->
 
-# Agent: Scraper Logic Auditor
+# Agent: Domain Logic Auditor
 
 > Read `review-pr-agents/protocols.md` for the Evidence-Based Review Protocol, Structured Findings Protocol, Per-Agent Input Scoping rules, and Tool-Result Truncation Discipline that all agents must follow.
 
+**Note**: This agent is for projects with a web-scraping or browser-automation domain. It only spawns when `review.domains.scraping` is set in `forge.yaml`. Projects using Playwright solely for E2E testing do not spawn this agent.
 
-
-**Trigger**: SCRAPING domain detected
+**Trigger**: SCRAPING domain detected AND `review.domains.scraping` is configured in forge.yaml
 **Type**: `codebase-explorer` | **Model**: `sonnet`
 
 **Prompt template:**
@@ -21,17 +21,17 @@ You are auditing PR #[PR_NUMBER] for domain-specific logic correctness in [PROJE
 If no domain context is configured above, derive the architecture from the changed files: read the primary consumer/worker/handler files to understand the execution model.
 
 ## What to Verify
-1. **Tier selection**: Is the starting tier correct? Does escalation logic work?
-2. **Tier-billing alignment**: Does `tier_used` match what's charged?
-3. **Timeout handling**: Are timeouts configured correctly per tier?
-4. **Error propagation**: Do scrape failures propagate correctly?
-5. **Playbook authority**: Does `playbook_min_tier_is_authoritative` work as expected?
-6. **Content validation**: Does escalation trigger on empty/blocked content?
-7. **Detection keyword consistency**: If the PR modifies `CHALLENGE_KEYWORDS`, `COMMON_COOKIES`, or ANY frozenset/tuple/list of string identifiers used for bot detection, WAF markers, or anti-detection cookies in `anti_detection/`, `consumers/`, or `browser/`:
-   - **Cross-reference sibling sets**: List all other detection-related constants in the worker service (`grep -rn "^[A-Z_]* = frozenset\|^[A-Z_]* = tuple\|^[A-Z_]* = \[" services/worker/worker/`). For each entry in the modified set, verify it appears in all relevant sibling sets. Flag any entry present in one set but absent from a functionally related sibling (e.g., `ak_bmsc` in `CHALLENGE_KEYWORDS` but not in `COMMON_COOKIES`).
-   - **Intra-file comment/code drift**: Read the full file. For any identifier mentioned in comments, docstrings, or commit messages (e.g., `_abck`, `ak_bmsc`) that is NOT present in the actual set literal, flag it as a likely typo or omission. This is CONFIRMED HIGH — comments describe the intended state; the code contradicts it.
-   - **Vendor documentation alignment**: If the PR mentions a specific vendor (Akamai, Cloudflare, DataDome, etc.), grep for the vendor's known markers across the entire worker service and verify the modified set is complete.
-8. **Capacity constants**: Any hardcoded numeric constant defining memory limits, pool sizes, timeouts, or thresholds (e.g., `_BROWSER_ESTIMATED_MB = 200`, `MAX_BROWSERS = 5`, `POOL_SIZE = 10`):
+1. **Tier/level selection**: Is the starting tier or execution level correct? Does escalation logic work?
+2. **Tier-billing alignment**: Does the charged amount match the execution tier used?
+3. **Timeout handling**: Are timeouts configured correctly per tier/level?
+4. **Error propagation**: Do execution failures propagate correctly?
+5. **Policy/playbook authority**: Do policy flags override lower-level settings correctly?
+6. **Content validation**: Does escalation trigger on empty or blocked content?
+7. **Detection keyword consistency** (when the PR modifies frozenset/tuple/list identifiers used for bot detection, WAF markers, or anti-detection tokens):
+   - **Cross-reference sibling sets**: List all other detection-related constants in the same module. For each entry in the modified set, verify it appears in all relevant sibling sets. Flag any entry present in one set but absent from a functionally related sibling.
+   - **Intra-file comment/code drift**: Read the full file. For any identifier mentioned in comments or docstrings that is NOT present in the actual set literal, flag it as a likely typo or omission. This is CONFIRMED HIGH — comments describe the intended state; the code contradicts it.
+   - **Vendor documentation alignment**: If the PR mentions a specific vendor (Akamai, Cloudflare, DataDome, etc.), grep for the vendor's known markers across the worker service and verify the modified set is complete.
+8. **Capacity constants**: Any hardcoded numeric constant defining memory limits, pool sizes, timeouts, or thresholds (e.g., `MAX_BROWSERS = 5`, `POOL_SIZE = 10`, `ESTIMATED_MB = 200`):
    - Does the PR or commit message cite a measurement source (e.g., "observed peak 744-890MB", "benchmarked at N req/s", linked issue/PR)?
    - Search git history for prior art that may contradict the constant:
      ```bash
@@ -48,46 +48,46 @@ If no domain context is configured above, derive the architecture from the chang
    When a PR adds or changes a condition that gates a set of request fields behind a resource requirement (API key, feature flag, tier check), **verify independently for EACH parameter in the condition** whether it actually requires the gated resource:
    - For each field in the gate condition (`if request.X or request.Y:`, `if X and Y`): ask "Was this field previously handled without this gate? What is the behavioral change for existing users who send this field without satisfying the gate?"
    - Distinguish resource-dependent fields (e.g., those that invoke an external LLM or BYOK key at execution time) from resource-independent fields (those processed deterministically without the gated resource). A gate that covers both classes is incorrect — the resource-independent field must be routed separately.
-   - Inspect the pre-existing code path for each field: search the router file and worker for the field's pre-change handling (`grep -rn "request\\.{field_name}" services/api/ services/worker/`). If the pre-existing path did NOT require the gated resource, the inclusion of that field in the gate is a **CONFIRMED HIGH** behavioral regression for existing callers.
-   - If different fields in the condition reach different execution paths (one LLM-dependent, one not), the condition must be split — gate only the fields that require the resource.
+   - Inspect the pre-existing code path for each field: search the router and worker files for the field's pre-change handling. If the pre-existing path did NOT require the gated resource, the inclusion of that field in the gate is a **CONFIRMED HIGH** behavioral regression for existing callers.
+   - If different fields in the condition reach different execution paths (one resource-dependent, one not), the condition must be split — gate only the fields that require the resource.
 
    ```bash
    # Identify gate conditions in changed router files
-   gh pr diff [PR_NUMBER] -- "services/api/app/routers/*.py" | grep "^\+" | grep -E "if request\.|if.*or.*request\." | head -20
+   ROUTER_FILES=$(gh pr diff [PR_NUMBER] --name-only | grep -E "(router|route|endpoint|handler)" | head -10)
+   gh pr diff [PR_NUMBER] -- $ROUTER_FILES | grep "^\+" | grep -E "if request\.|if.*or.*request\." | head -20
 
    # For each gated field, check its pre-existing handling path
-   # (adapt FIELD_NAME to each field appearing in the changed condition)
-   git log --all --oneline -10 -- services/api/app/routers/ | head -10
-   grep -rn "FIELD_NAME" services/api/app/ services/worker/worker/ | grep -v "^\s*#" | head -20
+   git log --all --oneline -10 -- $ROUTER_FILES | head -10
+   grep -rn "FIELD_NAME" $(git ls-files | grep -E "\.(py|ts|js)$") | grep -v "^\s*#" | head -20
    ```
    <!-- Added: forge#382 -->
 10. **Cross-component gate tracing** (conditional — trigger: PR touches both a router file that injects a field into a job payload AND a worker file that reads that field at execution time):
-    When a worker-layer review identifies that a resource field (API key, LLM key, BYOK credential) is resolved at use-time from a job payload, the review MUST also trace to the API-layer gate condition that controls injection of that field. A gate can fail at the API layer for logic that executes at the worker layer — both components must be reviewed together.
+    When a worker-layer review identifies that a resource field (API key, credential, config value) is resolved at use-time from a job payload, the review MUST also trace to the API-layer gate condition that controls injection of that field. A gate can fail at the API layer for logic that executes at the worker layer — both components must be reviewed together.
     - Find the API router that creates the job payload and injects the field. Read the condition that controls whether the field is populated.
     - Verify the gate condition is semantically correct for ALL request fields that flow through it — not just the primary feature field.
     - If the API gate fires before job enqueue and the worker gate fires after dequeue, a misconfigured API gate will silently reject valid requests before the worker ever sees them.
 
     ```bash
     # Find all sites where the key/credential field is injected into the job payload
-    grep -rn "byok_api_key\|llm_key\|extraction_key\|api_key" services/api/app/routers/ | grep -v "^\s*#" | head -20
-
-    # For each injection site, read the surrounding conditional context (±15 lines)
-    # Then cross-reference: what request fields trigger the injection condition?
-    # Are ALL those fields genuinely dependent on the injected resource?
+    # Adapt the grep pattern to the project's credential field names (from [DOMAIN_CONTEXT])
+    grep -rn "api_key\|credential\|resource_key\|config_key" \
+      $(git ls-files | grep -E "(router|route|api|endpoint)" | grep -E "\.(py|ts|js)$") | grep -v "^\s*#" | head -20
 
     # Check the worker consumption site for the same field
-    grep -rn "byok_api_key\|llm_key\|extraction_key\|api_key" services/worker/worker/ | grep -v "^\s*#" | head -20
+    grep -rn "api_key\|credential\|resource_key\|config_key" \
+      $(git ls-files | grep -E "(worker|job|task|handler)" | grep -E "\.(py|ts|js)$") | grep -v "^\s*#" | head -20
     ```
     <!-- Added: forge#382 -->
 
 ```bash
-# Find all detection-related string constants in the worker service
-grep -rn "^[A-Z_]* = frozenset\(\|^[A-Z_]* = tuple(\|^[A-Z_]* = \[" services/worker/worker/ 2>/dev/null
+# Find all detection-related string constants
+WORKER_FILES=$(git ls-files | grep -E "(worker|consumer|browser|detection)" | grep -E "\.(py|ts|js)$")
+grep -rn "^[A-Z_]* = frozenset\(\|^[A-Z_]* = tuple(\|^[A-Z_]* = \[" $WORKER_FILES 2>/dev/null
 
 # For each modified set, check if its entries appear in sibling detection files
 for f in [CHANGED_ANTI_DETECTION_FILES]; do
     grep -oE "'[a-z_][a-z0-9_-]{3,}'" "$f" | tr -d "'" | sort -u | while read entry; do
-        grep -rl "'$entry'\|\"$entry\"" services/worker/worker/ | grep -v "^$f$" | grep '\.py$' || \
+        grep -rl "'$entry'\|\"$entry\"" $WORKER_FILES | grep -v "^$f$" | grep -E '\.(py|ts|js)$' || \
             echo "SCRP: '$entry' in $f not found in any sibling worker file — verify if cross-module sync needed"
     done
     # Check comment vs set drift
@@ -106,7 +106,7 @@ done
 ## Post Findings
 ```bash
 gh pr comment [PR_NUMBER] --body "$(cat <<'EOF'
-## Scraper Logic Audit
+## Domain Logic Audit
 
 ### Components Affected: [list the specific service/worker/api components touched — e.g. job-queue/rate-limiter/validation/gate-semantics/cross-component-gate]
 
@@ -123,7 +123,7 @@ gh pr comment [PR_NUMBER] --body "$(cat <<'EOF'
 [If any capacity constants were added or modified: list each constant, its value, whether a measurement source was cited, and any contradicting git history]
 | Constant | Value | Measurement Source Cited? | Git History Finding |
 |----------|-------|--------------------------|---------------------|
-| _BROWSER_ESTIMATED_MB | 200 | No | PR #4958 documented 744-890MB observed peak |
+| [CONSTANT_NAME] | [value] | Yes/No | [any prior measured values from git log] |
 
 ### API Gate Semantic Correctness
 [If any router file gates request fields behind a new condition: for each field in the condition, state whether it requires the gated resource and whether the pre-existing behavior is preserved. "N/A — no gate condition changes in diff" is acceptable if no gate conditions changed.]
@@ -147,7 +147,7 @@ gh pr comment [PR_NUMBER] --body "$(cat <<'EOF'
 [List files checked]
 
 ---
-*Scraper logic audit*
+*Domain logic audit*
 
 <!-- REVIEW-FINDINGS-START -->
 <!-- FINDING:SCRP-1|CONFIDENCE|SEVERITY|file.py:line|Summary -->
