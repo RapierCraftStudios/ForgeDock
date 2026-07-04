@@ -1,6 +1,7 @@
 ---
 description: Stack-aware CI gap detection — audits a project's GitHub Actions workflows against its declared tech stack and files issues for missing config validation checks
 argument-hint: [--repo <prefix>] [--dry-run]
+install: extras
 ---
 <!-- SPDX-FileCopyrightText: Copyright (c) RapierCraft Studios -->
 <!-- SPDX-License-Identifier: AGPL-3.0-or-later -->

@@ -1030,7 +1030,7 @@ fi
 
 **Triggered when**: BILLING domain is set (changed files are under `billing/`, `credits/`, `subscription`, `ledger`, or `payment` paths).
 
-**Why this matters**: Billing code has three reliably grep-detectable defect classes that account for ~27% of review findings in the AlterLab health window: (1) `org_id` not propagated to debit/refund ledger write paths (silent data ownership loss — charges appear with wrong tenant); (2) `asyncio.sleep` / blocking sleep called inside an advisory-lock or open-transaction scope (holds DB connection/lock for the full sleep duration, causing connection exhaustion and deadlocks under load); (3) stdlib `logging.*()` calls passed structlog-style keyword arguments (`event=`, named context keys) that are not valid stdlib kwargs — crashes at runtime with `TypeError: unexpected keyword argument`. <!-- Added: forge#1329 -->
+**Why this matters**: Billing code has three reliably grep-detectable defect classes that account for ~27% of review findings in the AlterLab health window: (1) `org_id` not propagated to debit/refund ledger write paths (silent data ownership loss — charges appear with wrong tenant); (2) `asyncio.sleep` / blocking sleep called inside an advisory-lock or open-transaction scope (holds DB connection/lock for the full sleep duration, causing connection exhaustion and deadlocks under load); (3) stdlib `logging.*()` calls passed structlog-style keyword arguments (`event=`, named context keys) that are not valid stdlib kwargs — crashes at runtime with `TypeError: unexpected keyword argument`. <!-- Added: forge#1329 --> <!-- allowlist: AlterLab -->
 
 **2Q-1: org_id propagation in ledger write functions**
 
@@ -1045,7 +1045,7 @@ while IFS= read -r f; do
         # Read the full function signature (up to 3 lines to cover multi-line sigs)
         sig=$(sed -n "${lineno},$((lineno+2))p" "$f" 2>/dev/null)
         echo "$sig" | grep -qE '\borg_id\b' || \
-            echo "BILLING-1 | MEDIUM | $f:$lineno | Ledger write function '$(echo "$rest" | grep -oE 'def \w+' | head -1)' signature does not include org_id parameter — verify org_id is propagated to all debit/refund paths (AlterLab#25348 pattern)"
+            echo "BILLING-1 | MEDIUM | $f:$lineno | Ledger write function '$(echo "$rest" | grep -oE 'def \w+' | head -1)' signature does not include org_id parameter — verify org_id is propagated to all debit/refund paths (AlterLab#25348 pattern)" <!-- allowlist: AlterLab -->
     done
 done < <(echo {CHANGED_FILES} | tr ' ' '\n' | grep -E '\.py$')
 ```
@@ -1056,14 +1056,14 @@ done < <(echo {CHANGED_FILES} | tr ' ' '\n' | grep -E '\.py$')
 # Grep billing Python files for asyncio.sleep / time.sleep called inside an advisory-lock
 # or open-transaction context (within 20 lines after lock acquisition or BEGIN/session open).
 # Holding a lock or DB connection across a sleep starves the connection pool and causes
-# deadlocks under concurrent load (AlterLab#25725 pattern).
+# deadlocks under concurrent load (AlterLab#25725 pattern). <!-- allowlist: AlterLab -->
 while IFS= read -r f; do
     [ -z "$f" ] && continue
     grep -nE "\basyncio\.sleep\b|\btime\.sleep\b" "$f" 2>/dev/null | while IFS=: read -r lineno rest; do
         start=$((lineno > 20 ? lineno - 20 : 1))
         window=$(sed -n "${start},$((lineno-1))p" "$f" 2>/dev/null)
         echo "$window" | grep -qE 'advisory_lock|BEGIN\b|async with.*session|async with.*conn|async with.*transaction|with.*engine\b' && \
-            echo "BILLING-2 | HIGH | $f:$lineno | asyncio.sleep/time.sleep inside advisory-lock or open-transaction scope — holds DB connection/lock for full sleep duration, causing connection exhaustion and deadlocks under load (AlterLab#25725 pattern). Move sleep outside lock/transaction scope."
+            echo "BILLING-2 | HIGH | $f:$lineno | asyncio.sleep/time.sleep inside advisory-lock or open-transaction scope — holds DB connection/lock for full sleep duration, causing connection exhaustion and deadlocks under load (AlterLab#25725 pattern). Move sleep outside lock/transaction scope." <!-- allowlist: AlterLab -->
     done
 done < <(echo {CHANGED_FILES} | tr ' ' '\n' | grep -E '\.py$')
 ```
@@ -1075,7 +1075,7 @@ done < <(echo {CHANGED_FILES} | tr ' ' '\n' | grep -E '\.py$')
 # that are NOT valid stdlib logging kwargs (exc_info, stack_info, stacklevel, extra).
 # Structlog-style kwargs (event=, extra_=, named context keys) are NOT accepted by stdlib
 # Logger methods and crash at runtime with TypeError: unexpected keyword argument.
-# (AlterLab#25715, #25837, #25819 pattern)
+# (AlterLab#25715, #25837, #25819 pattern) <!-- allowlist: AlterLab -->
 while IFS= read -r f; do
     [ -z "$f" ] && continue
     # Match logging.info/warning/error/debug/critical and logger.info/etc. calls with
@@ -1084,7 +1084,7 @@ while IFS= read -r f; do
     grep -nE "\b(logging|logger)\.(info|warning|error|debug|critical|exception)\s*\(.*\b\w+\s*=" "$f" 2>/dev/null | \
         grep -vE "\b(exc_info|stack_info|stacklevel|extra)\s*=" | \
         grep -v "^\s*#" && \
-        echo "BILLING-3 | HIGH | $f | stdlib logging call with non-stdlib keyword argument detected — stdlib Logger.info/warning/error/etc. only accept exc_info, stack_info, stacklevel, extra as kwargs. Structlog-style kwargs (event=, named context keys) cause TypeError at runtime (AlterLab#25715 pattern). Use structlog.get_logger() instead of logging if structlog kwargs are needed."
+        echo "BILLING-3 | HIGH | $f | stdlib logging call with non-stdlib keyword argument detected — stdlib Logger.info/warning/error/etc. only accept exc_info, stack_info, stacklevel, extra as kwargs. Structlog-style kwargs (event=, named context keys) cause TypeError at runtime (AlterLab#25715 pattern). Use structlog.get_logger() instead of logging if structlog kwargs are needed." <!-- allowlist: AlterLab -->
 done < <(echo {CHANGED_FILES} | tr ' ' '\n' | grep -E '\.py$')
 ```
 

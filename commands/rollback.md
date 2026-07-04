@@ -1,6 +1,7 @@
 ---
 description: Create a revert PR to roll back a shipped feature or fix that caused a production incident
 argument-hint: [PR number to revert, or "last" for most recent deploy]
+install: extras
 ---
 <!-- SPDX-FileCopyrightText: Copyright (c) RapierCraft Studios -->
 <!-- SPDX-License-Identifier: AGPL-3.0-or-later -->

@@ -1,6 +1,7 @@
 ---
 description: Read-only playback of a completed pipeline run — shows FORGE annotations phase by phase with timestamps
 argument-hint: <issue-number>
+install: extras
 ---
 
 # /replay — Pipeline Run Playback

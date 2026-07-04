@@ -1,6 +1,7 @@
 ---
 description: Plain-English breakdown of what happened on a GitHub issue — translates FORGE pipeline annotations into a human-readable narrative for teammates and PMs
 argument-hint: <issue number or PR#N> [--repo prefix]
+install: extras
 ---
 
 # /explain — FORGE Annotation Translator

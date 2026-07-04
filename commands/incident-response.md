@@ -1,6 +1,7 @@
 ---
 description: Coordinate P0 incident response — hotfix validation, timeline reconstruction, and post-incident analysis
 argument-hint: [issue number | "active" | "postmortem {issue}"]
+install: extras
 ---
 <!-- SPDX-FileCopyrightText: Copyright (c) RapierCraft Studios -->
 <!-- SPDX-License-Identifier: AGPL-3.0-or-later -->

@@ -1,6 +1,7 @@
 ---
 description: On-demand Claude Code compatibility and feature parity report — compares installed version against the breakpoints registry and lists affected ForgeDock features
 argument-hint: [--refresh]
+install: extras
 ---
 
 # /compat-audit — Claude Code Compatibility Report

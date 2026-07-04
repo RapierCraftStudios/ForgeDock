@@ -2,6 +2,7 @@
 description: Deterministic deploy-gate — verify a staging→main bundle's acceptance criteria against running code before deploy
 argument-hint: [--prs "<N1 N2 ...>"] [--base <branch>]
 allowed-tools: Task, Bash, Read, Grep, Glob
+install: extras
 ---
 <!-- SPDX-FileCopyrightText: Copyright (c) RapierCraft Studios -->
 <!-- SPDX-License-Identifier: AGPL-3.0-or-later -->

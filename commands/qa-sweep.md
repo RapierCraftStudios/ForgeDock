@@ -1,6 +1,7 @@
 ---
 description: Full platform QA sweep — auto-discovers every page, tests every UI element via browser automation, creates GitHub issues for all findings
 argument-hint: [all | dashboard | marketing | page <route> | journey | visual | functional | a11y]
+install: extras
 ---
 <!-- SPDX-FileCopyrightText: Copyright (c) RapierCraft Studios -->
 <!-- SPDX-License-Identifier: AGPL-3.0-or-later -->

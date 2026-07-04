@@ -1,6 +1,7 @@
 ---
 description: Autonomous platform improvement cycle — recon, triage, fix, report. Runs recon+triage by default; pass --fix to also pick up and fix top issues. Human gates all deploys.
 argument-hint: [--fix | --recon-only | --fix --limit 5 | --dry-run | --fix --yes]
+install: extras
 ---
 
 # /autopilot — Recursive Platform Improvement Cycle
