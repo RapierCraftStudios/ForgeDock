@@ -91,6 +91,14 @@ Append `-{NUMBER}` to ensure uniqueness: e.g. `fix/work-on-build-landing-file-85
 
 - Review-finding issue → parse `**Code branch**: \`{branch}\`` from issue body; branch from `origin/{branch}`
   - **Milestone review-finding hybrid lane** (ONLY when Code branch matches `milestone/*`): This is a high-risk lane. The worktree will carry the full milestone history. The PR target is `staging` (or the base specified). **DANGER: Agents MUST NOT use `git merge` to resolve any conflicts in this lane.** Merge-based conflict resolution will pull the entire milestone commit tree onto staging, contaminating it with unapproved code. Use `git rebase` or `git cherry-pick` only. If conflicts cannot be resolved without a merge, post a comment on the issue, add `needs-human`, and STOP.
+  - **Missing ref fallback**: After parsing, verify the Code branch still exists on remote. If not, fall back to the lane default (`staging` for fast lane, `milestone/{slug}` for feature lane) and note the fallback:
+    ```bash
+    SOURCE_BRANCH="{CODE_BRANCH_FROM_ISSUE_BODY}"
+    if ! git ls-remote --exit-code origin "$SOURCE_BRANCH" >/dev/null 2>&1; then
+      echo "WARNING: Code branch '$SOURCE_BRANCH' not found on remote — falling back to lane default '$PR_BASE'"
+      SOURCE_BRANCH="$PR_BASE"
+    fi
+    ```
 - Feature lane (has milestone) → branch from `origin/{PR_BASE}`
 - Fast lane (no milestone) → branch from `origin/staging`
 

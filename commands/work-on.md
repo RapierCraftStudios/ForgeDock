@@ -1191,6 +1191,14 @@ esac
 **Determine source branch**:
 - Review-finding → parse `**Code branch**: \`{branch}\`` from issue body; branch from `origin/{branch}`
   - **Milestone review-finding hybrid lane** (Code branch matches `milestone/*`): High-risk lane. NEVER use `git merge` to resolve conflicts — use `git rebase` or `git cherry-pick` only. If conflicts can't be resolved without merge, post comment, add `needs-human`, STOP.
+  - **Missing ref fallback**: After parsing, verify the Code branch still exists on remote. If not (e.g., the source PR's head branch was deleted post-merge before a corrected stamp took effect), fall back to `PR_BASE` (the lane default) and note the fallback:
+    ```bash
+    SOURCE_BRANCH="{CODE_BRANCH_FROM_ISSUE_BODY}"
+    if ! git ls-remote --exit-code origin "$SOURCE_BRANCH" >/dev/null 2>&1; then
+      echo "WARNING: Code branch '$SOURCE_BRANCH' not found on remote — falling back to PR_BASE '$PR_BASE'"
+      SOURCE_BRANCH="$PR_BASE"
+    fi
+    ```
 - Feature lane (has milestone) → branch from `origin/{PR_BASE}` (PR_BASE now set above)
 - Fast lane (no milestone) → branch from `origin/{PR_BASE}` (PR_BASE = `{STAGING_BRANCH}`)
 

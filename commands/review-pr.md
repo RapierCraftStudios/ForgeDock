@@ -915,10 +915,10 @@ Files that need changes:
 
 ## Source Branch Context
 
-**Code branch**: `[HEAD_BRANCH]`
-**Worktree base**: `origin/[HEAD_BRANCH]`
+**Code branch**: `[BASE_BRANCH]`
+**Worktree base**: `origin/[BASE_BRANCH]`
 
-> When fixing: `git worktree add ../fix-{slug} -b fix/{slug} origin/[HEAD_BRANCH]`
+> When fixing: `git worktree add ../fix-{slug} -b fix/{slug} origin/[BASE_BRANCH]`
 
 ## Code Context
 [10 lines around finding]
