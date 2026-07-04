@@ -41,7 +41,7 @@ Examples:
 - This repo is not an app service; it is the Forge pipeline itself.
 - `commands/review-pr-agents.md` is a catalog read by other workflows, not a primary user entrypoint.
 - The Codex layer should wrap the existing command system, not fork it into a separate copy.
-- Repo-local Codex skills may override repo defaults from shared command specs when Forge-specific behavior differs from AlterLab-centric upstream assumptions.
+- Repo-local Codex skills may override repo defaults from shared command specs when Forge-specific behavior differs from project-specific upstream assumptions.
 
 ## First References
 

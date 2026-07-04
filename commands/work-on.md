@@ -835,7 +835,17 @@ esac
 
 <!-- FORGE:PHASE_COMPLETE — Entering Phase 3 (Build). See Universal Phase Dispatcher: sub-phases 3A–3M execute in sequence. No sub-phase completion is terminal. -->
 
-**Skip if**: `<!-- FORGE:BUILDER -->` exists.
+**Skip if**: `<!-- FORGE:BUILDER:COMPLETE -->` is present in a BUILDER comment. <!-- Added: forge#1305 — require completion marker, not mere presence of BUILDER annotation -->
+
+**Partial build detection**: If `<!-- FORGE:BUILDER -->` exists BUT `<!-- FORGE:BUILDER:COMPLETE -->` is ABSENT → the build was interrupted after implement.md Phase I6 (comment posted) but before validate.md Phase V5 (commit). Delete the partial comment and restart Phase 3 from the top: <!-- Added: forge#1305 -->
+```bash
+PARTIAL_ID=$(gh api repos/{GH_REPO}/issues/{NUMBER}/comments \
+  --jq '[.[] | select(.body | contains("FORGE:BUILDER") and (contains("FORGE:BUILDER:COMPLETE") | not))] | last | .id // ""')
+if [ -n "$PARTIAL_ID" ]; then
+  gh api repos/{GH_REPO}/issues/comments/$PARTIAL_ID -X DELETE
+  echo "Deleted partial FORGE:BUILDER comment (no FORGE:BUILDER:COMPLETE) — restarting build"
+fi
+```
 
 **CRITICAL: You MUST execute ALL sub-phases 3A–3M in order. Sub-phases 3C.5 (context) and 3C.6 (architect) are skipped ONLY for TRIVIAL tasks and Investigation tasks — see Phase 3B for classification. For STANDARD and COMPLEX tasks they post mandatory `FORGE:CONTEXT` and `FORGE:ARCHITECT` comments that Phase 3F reads as its primary input. Skipping them without a TRIVIAL/Investigation classification degrades build quality and causes review findings. After each sub-phase, continue to the next — no sub-phase is terminal.**
 
@@ -857,9 +867,9 @@ gh issue view {NUMBER} {GH_FLAG} --json number,title,body,labels,state,milestone
 gh api repos/{GH_REPO}/issues/{NUMBER}/comments \
   --jq '.[] | select(.body | contains("FORGE:INVESTIGATOR")) | .body'
 
-# Check if build already completed
+# Check if build already completed (require FORGE:BUILDER:COMPLETE — not just FORGE:BUILDER)
 gh api repos/{GH_REPO}/issues/{NUMBER}/comments \
-  --jq '.[] | select(.body | contains("FORGE:BUILDER")) | .body'
+  --jq '.[] | select(.body | contains("FORGE:BUILDER:COMPLETE")) | .body'
 
 # Check for existing COMPLEXITY_BAND from a prior run (resume path)
 EXISTING_FAST_PATH=$(gh api repos/{GH_REPO}/issues/{NUMBER}/comments \
@@ -1181,6 +1191,14 @@ esac
 **Determine source branch**:
 - Review-finding → parse `**Code branch**: \`{branch}\`` from issue body; branch from `origin/{branch}`
   - **Milestone review-finding hybrid lane** (Code branch matches `milestone/*`): High-risk lane. NEVER use `git merge` to resolve conflicts — use `git rebase` or `git cherry-pick` only. If conflicts can't be resolved without merge, post comment, add `needs-human`, STOP.
+  - **Missing ref fallback**: After parsing, verify the Code branch still exists on remote. If not (e.g., the source PR's head branch was deleted post-merge before a corrected stamp took effect), fall back to `PR_BASE` (the lane default) and note the fallback:
+    ```bash
+    SOURCE_BRANCH="{CODE_BRANCH_FROM_ISSUE_BODY}"
+    if ! git ls-remote --exit-code origin "$SOURCE_BRANCH" >/dev/null 2>&1; then
+      echo "WARNING: Code branch '$SOURCE_BRANCH' not found on remote — falling back to PR_BASE '$PR_BASE'"
+      SOURCE_BRANCH="$PR_BASE"
+    fi
+    ```
 - Feature lane (has milestone) → branch from `origin/{PR_BASE}` (PR_BASE now set above)
 - Fast lane (no milestone) → branch from `origin/{PR_BASE}` (PR_BASE = `{STAGING_BRANCH}`)
 
@@ -1289,6 +1307,11 @@ if iteration == max_iterations AND not PASS:
 
 All tool commands are read from `forge.yaml → verification.commands`. When a key is absent, the step logs `SKIPPED — not configured in verification.commands` and continues rather than silently passing.
 
+**Track skipped checks** — initialize before any check runs:
+```bash
+VERIFICATION_SKIPPED_CHECKS=""
+```
+
 **Python**:
 ```bash
 cd {WORKTREE_PATH}
@@ -1298,6 +1321,7 @@ if [ -n "$PYTHON_FORMAT" ]; then
     eval "$PYTHON_FORMAT" 2>&1
 else
     echo "SKIPPED — python.format not configured in verification.commands"
+    VERIFICATION_SKIPPED_CHECKS="${VERIFICATION_SKIPPED_CHECKS:+$VERIFICATION_SKIPPED_CHECKS, }python.format"
 fi
 
 # Compile check always runs (no config needed — catches syntax errors)
@@ -1317,6 +1341,7 @@ if [ -n "$TS_FORMAT" ]; then
     eval "$TS_FORMAT" 2>&1
 else
     echo "SKIPPED — typescript.format not configured in verification.commands"
+    VERIFICATION_SKIPPED_CHECKS="${VERIFICATION_SKIPPED_CHECKS:+$VERIFICATION_SKIPPED_CHECKS, }typescript.format"
 fi
 
 if [ -n "$TS_TYPECHECK" ]; then
@@ -1327,6 +1352,7 @@ elif [ -n "$TS_BUILD" ]; then
     TS_EXIT=$?
 else
     echo "SKIPPED — typescript.typecheck and typescript.build not configured in verification.commands"
+    VERIFICATION_SKIPPED_CHECKS="${VERIFICATION_SKIPPED_CHECKS:+$VERIFICATION_SKIPPED_CHECKS, }typescript.typecheck/build"
     TS_EXIT=0
 fi
 ```
@@ -1468,12 +1494,20 @@ Check off completed items, mark phases complete, add PR references.
 
 ### 3M: Post implementation comment
 ```bash
+# Compute verification status from VERIFICATION_SKIPPED_CHECKS (set in Phase 3H)
+if [ -z "$VERIFICATION_SKIPPED_CHECKS" ]; then
+  VERIFICATION_STATUS="✅ All configured verification commands passed"
+else
+  VERIFICATION_STATUS="⚠ Verification NOT run: ${VERIFICATION_SKIPPED_CHECKS} — verification.commands not configured for these checks"
+fi
+
 gh issue comment {NUMBER} {GH_FLAG} --body "<!-- FORGE:BUILDER -->
 ## Implementation Complete
 
 **Branch**: \`{BRANCH}\`
 **Commits**: {COMMIT_SHA(S)}
 **Files changed**: {COUNT}
+**Verification Status**: ${VERIFICATION_STATUS}
 
 ### Approach
 {what was built, key decisions}
@@ -1887,6 +1921,13 @@ This check is **audit-only** — it annotates the trajectory for visibility. It 
 Post `<!-- FORGE:TRAJECTORY -->` comment with phase-by-phase results table:
 
 ```bash
+# Compute verification row from VERIFICATION_SKIPPED_CHECKS (set in Phase 3H)
+if [ -z "$VERIFICATION_SKIPPED_CHECKS" ]; then
+  VERIFICATION_ROW="✅ Ran"
+else
+  VERIFICATION_ROW="⚠ Skipped — verification.commands not configured for: ${VERIFICATION_SKIPPED_CHECKS}"
+fi
+
 gh issue comment {NUMBER} {GH_FLAG} --body "<!-- FORGE:TRAJECTORY -->
 ## Pipeline Trajectory — #{NUMBER}
 
@@ -1897,6 +1938,7 @@ gh issue comment {NUMBER} {GH_FLAG} --body "<!-- FORGE:TRAJECTORY -->
 | Phase 2: Decomposition | ⏭ Skipped | {reason} |
 | Phase 3: Build | ✅ Complete | Branch: \`{BRANCH}\` |
 | Phase 3G: Quality Gate | ✅ Gate passed | {iterations} iterations |
+| Phase 3H: Verification | ${VERIFICATION_ROW} | |
 | Phase 4–5: Review + PR | {REVIEW_ROW} | PR #{PR_NUMBER} → \`{PR_BASE}\` |
 | Phase 6: Close | ✅ Complete | Issue closed |
 

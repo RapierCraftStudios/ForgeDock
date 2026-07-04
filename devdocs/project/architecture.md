@@ -94,8 +94,8 @@ Proposed (deterministic):
 1. `classify-lane.sh` — milestone → feature lane, no milestone → staging. No interpretation.
 2. `transition-label.sh` — label state machine with validation
 3. `validate-pr-target.sh` — hard-fail if PR targets wrong branch
-4. `setup-worktree.sh` — deterministic worktree creation
-5. `post-annotation.sh` — FORGE annotation posting with format validation
+4. `worktree-lifecycle.sh` — deterministic worktree create/reuse/cleanup (`ensure`/`cleanup` subcommands; built — #1268). Call-site migration of `work-on.md` Phase 3E/6E to invoke it is a tracked fast-follow (#1247), not yet wired in.
+5. `post-annotation.sh` — FORGE annotation posting with format validation (planned)
 
 **Deploy-gate testing scripts** (milestone: Deterministic Deploy-Gate Testing — #863):
 

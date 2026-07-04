@@ -147,7 +147,7 @@ echo "=== DOMAINS ==="
 echo "$DIFF" | grep -cE "SessionUser|CurrentUser|get_current_user|jwt|oauth|login|logout|Depends\(get_|x.forwarded.for|x_forwarded_for|forwarded_for|rate.limit.*ip|ip.*rate.limit|algorithm.*HS256|algorithm.*RS256|NEXTAUTH_SECRET|JWT_SECRET|admin.proxy" && echo "AUTH" || true
 echo "$DIFF" | grep -cE "credit|balance|debit|reconcil|tier_cost|pricing|charge|refund|stripe|subscription" && echo "BILLING" || true
 echo "$DIFF" | grep -cE "scrape|tier.*escalat|proxy|anti_bot|stealth|playwright|playbook" && echo "SCRAPING" || true
-echo "$DIFF" | grep -cE "FOR UPDATE|atomic|transaction|pipeline|MULTI|distributed_lock|acquire_lock|reserved_by|promo.*claim|voucher.*redeem|is_byop|byop_discount" && echo "CONCURRENCY" || true
+echo "$DIFF" | grep -cE "FOR UPDATE|atomic|transaction|pipeline|MULTI|distributed_lock|acquire_lock|reserved_by|promo.*claim|voucher.*redeem" && echo "CONCURRENCY" || true
 echo "$FILES" | grep -cE "migration|\.sql$" && echo "DATABASE" || true
 echo "$DIFF" | grep -cE "create_async_engine|AsyncSession|connect_args|pool_size|prepared_statement|engine_from_config|sessionmaker" && echo "DB_CONFIG" || true
 echo "$FILES" | grep -cE "router|routes" && echo "API_DESIGN" || true
@@ -397,7 +397,7 @@ For each changed file, identify its **activation path** — how does execution r
 
 Map each changed file to its activation requirements.
 
-**Layout path resolution** — Before applying the table below, read your project's layout from `forge.yaml → review.layout` and substitute the values into the pattern column. Defaults (used when the key is absent) match the AlterLab monorepo layout:
+**Layout path resolution** — Before applying the table below, read your project's layout from `forge.yaml → review.layout` and substitute the values into the pattern column. Defaults (used when the key is absent) are the ForgeDock install defaults:
 
 | `forge.yaml` key | Default | Used in table as |
 |-----------------|---------|-----------------|
@@ -461,6 +461,23 @@ if [ "$BASH_AVAILABLE" = "true" ]; then
     # Output is structured: "BLOCKING: ...", "WARNING: ...", "OK: ..." per line.
 
     # 1. Route/router/middleware/shared-module/component registration
+    # Export forge.yaml layout overrides so verify-route-registration.sh uses project-configured
+    # paths instead of project defaults. The script supports these env vars (lines 36-44 of
+    # verify-route-registration.sh) but requires the caller to set them. <!-- Added: forge#1349 -->
+    if [ -f "$REPO_ROOT/forge.yaml" ]; then
+        _PAGES_ROOT=$(grep -A10 'layout:' "$REPO_ROOT/forge.yaml" 2>/dev/null \
+            | grep -E '^\s*pages:' | head -1 | sed 's/.*pages:[[:space:]]*//' | tr -d '"' | tr -d "'" | xargs)
+        _API_ROUTERS=$(grep -A10 'layout:' "$REPO_ROOT/forge.yaml" 2>/dev/null \
+            | grep -E '^\s*api_routers_dir:' | head -1 | sed 's/.*api_routers_dir:[[:space:]]*//' | tr -d '"' | tr -d "'" | xargs)
+        _API_MAIN=$(grep -A10 'layout:' "$REPO_ROOT/forge.yaml" 2>/dev/null \
+            | grep -E '^\s*api_main:' | head -1 | sed 's/.*api_main:[[:space:]]*//' | tr -d '"' | tr -d "'" | xargs)
+        _API_MIDDLEWARE=$(grep -A10 'layout:' "$REPO_ROOT/forge.yaml" 2>/dev/null \
+            | grep -E '^\s*api_middleware_dir:' | head -1 | sed 's/.*api_middleware_dir:[[:space:]]*//' | tr -d '"' | tr -d "'" | xargs)
+        [ -n "$_PAGES_ROOT" ] && export FORGE_PAGES_ROOT="$_PAGES_ROOT"
+        [ -n "$_API_ROUTERS" ] && export FORGE_API_ROUTERS_DIR="$_API_ROUTERS"
+        [ -n "$_API_MAIN" ] && export FORGE_API_MAIN="$_API_MAIN"
+        [ -n "$_API_MIDDLEWARE" ] && export FORGE_API_MIDDLEWARE_DIR="$_API_MIDDLEWARE"
+    fi
     echo "=== Running: verify-route-registration.sh ==="
     bash "$FORGE_HOME/scripts/verify-route-registration.sh" "$CHANGED_FILES_TMP" "$REPO_ROOT" || true
 
@@ -612,7 +629,7 @@ Format: `INTEG-N|CONFIRMED|HIGH|file:line|Changed code may be unreachable: {reas
 DIFF=$(gh pr diff $ARGUMENTS)
 FILES=$(gh pr diff $ARGUMENTS --name-only)
 echo "=== RISK SIGNALS ==="
-echo "$DIFF" | grep -cE "subprocess|exec|eval|system\(|popen|heredoc|EMEMO_EOF|LLM_|llm_" && echo "  UNTRUSTED_INPUT_PROCESSING" || true
+echo "$DIFF" | grep -cE "subprocess|exec|eval|system\(|popen|heredoc" && echo "  UNTRUSTED_INPUT_PROCESSING" || true
 echo "$DIFF" | grep -cE "\.sh$|bash|shell|cron" && echo "  SHELL_SCRIPT" || true
 echo "$DIFF" | grep -cE "credit|balance|debit|charge|refund|stripe" && echo "  FINANCIAL" || true
 echo "$DIFF" | grep -cE "SessionUser|CurrentUser|jwt|oauth|password|token|secret|x.forwarded.for|x_forwarded_for|forwarded_for|rate.limit.*ip|ip.*rate.limit|algorithm.*HS256|algorithm.*RS256|NEXTAUTH_SECRET|JWT_SECRET|admin.proxy" && echo "  AUTH_SENSITIVE" || true
@@ -1093,7 +1110,7 @@ else
 fi
 ```
 
-**Important**: Phase 8 ONLY merges the PR. It does NOT close the issue, update labels, or clean up worktrees. When invoked via `/work-on`, those responsibilities belong to `work-on/close.md` — which runs after the router detects state 4 (MERGE_COMPLETE: PR merged + issue open). Doing them here would cause the router to hit TERMINAL_MERGED (state 1) and skip the close phase entirely.
+**Important**: Phase 8 ONLY merges the PR. It does NOT close the issue, update labels, or clean up worktrees. When invoked via `/work-on`, those responsibilities belong to `work-on/close.md` (work-on.md Phase 6 — triggered when PR is merged and issue is still open). Doing them here would cause the issue to be closed with `workflow:merged` before Phase 6 runs, skipping the close phase entirely.
 
 ### 8B: Post-Merge Review Finding Demilestoning (Milestone PRs Only)
 

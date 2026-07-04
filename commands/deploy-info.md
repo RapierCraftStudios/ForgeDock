@@ -156,7 +156,7 @@ done
 # Full file diff summary
 git diff --stat origin/$TARGET..origin/$SOURCE
 
-# Read layout paths from forge.yaml, fall back to AlterLab defaults
+# Read layout paths from forge.yaml, fall back to forge.yaml defaults
 LAYOUT_API=$(yq '.review.layout.api // "services/api"' forge.yaml 2>/dev/null || echo "services/api")
 LAYOUT_WORKER=$(yq '.review.layout.worker // "services/worker"' forge.yaml 2>/dev/null || echo "services/worker")
 LAYOUT_PAGES=$(yq '.review.layout.pages // "web/src/app"' forge.yaml 2>/dev/null || echo "web/src/app")
@@ -231,8 +231,10 @@ if [ -n "$NEW_ENV" ]; then
   # If your project uses a different backend, skip this block and verify manually.
   if [ "{DEPLOY_SECRETS_BACKEND}" = "sops" ]; then
     for var in $(echo "$NEW_ENV" | grep -oE '^\+[A-Z_]+' | sed 's/^\+//'); do
-      if ! grep -q "$var" scripts/decrypt-secrets.sh 2>/dev/null; then
-        echo "  ❌ $var NOT in decrypt-secrets.sh ENV_MAPPING"
+      if [ -f "{REPO_PATH}/scripts/decrypt-secrets.sh" ]; then
+        grep -q "$var" "{REPO_PATH}/scripts/decrypt-secrets.sh" 2>/dev/null || echo "  ❌ $var NOT in decrypt-secrets.sh ENV_MAPPING"
+      else
+        echo "  ℹ️  scripts/decrypt-secrets.sh not found — skipping ENV_MAPPING cross-check for $var. Verify manually in your SOPS chain."
       fi
     done
   else

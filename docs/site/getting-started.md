@@ -71,24 +71,31 @@ ForgeDock Doctor — Installation Health Check
   All checks passed. ForgeDock installation is healthy.
 ```
 
-It exits `0` when everything passes and `1` if any check fails, so you can also use it in CI. The `forge.yaml` and GitHub-label checks will fully pass once you finish Step 2 below — re-run `doctor` any time your setup feels off.
+It exits `0` when everything passes and `1` if any check fails, so you can also use it in CI.
 
 > Prefer a quick spot-check? `ls ~/.claude/commands/ | grep -E "work-on|review-pr|quality-gate"` should list `work-on.md`, `review-pr.md`, and `quality-gate.md`.
 
 ---
 
-## Step 2: Configure Your Repository
+## Step 2: Your Config Is Already There
 
-ForgeDock reads a single `forge.yaml` in your project root. **Start minimal** — only the `project`, `paths`, and `branches` sections are required. Everything else is optional and falls back to sensible defaults; add sections as you need them.
-
-The fastest way to get a working config is the `--minimal` flag, which scans your repo and writes just the required sections with detected values:
+`npx forgedock` in Step 1 ran the full install journey — including repo detection and a reviewed `forge.yaml` — so there's no separate config step to run. If you need to redo detection later (moved the repo, renamed a branch), or want a leaner config with just the required sections, re-run:
 
 ```bash
 cd /path/to/your/project
 npx forgedock init --minimal
 ```
 
-This produces a short, readable `forge.yaml` like the one below — this is essentially ForgeDock's own real-world config:
+**Optional: enrich the config.** Once `forge.yaml` exists, open Claude Code in your project directory and run `/forgedock-init` to fill in the optional sections that plain detection can't infer:
+
+- Project board connection (GitHub Projects v2)
+- Satellite repo routing (multi-repo setups)
+- Review context (tech stack, known pitfalls)
+- Service URLs for health checks
+
+`/forgedock-init` completes an existing `forge.yaml` — it won't create one from scratch.
+
+**Minimal `forge.yaml` example:**
 
 ```yaml
 project:
@@ -110,7 +117,7 @@ That's the whole config. Run `npx forgedock doctor` to confirm it's valid.
 
 > **The three required sections are `project`, `paths`, and `branches`** — `npx forgedock init --minimal` auto-detects `paths` for you (so worktrees land in the right place) and you rarely need to touch it. Everything else (project board, review context, verification commands, multi-repo routing) is optional and falls back to sensible defaults. Browse [`forge.yaml.example`](https://github.com/RapierCraftStudios/ForgeDock/blob/main/forge.yaml.example) and [`docs/CONFIG.md`](https://github.com/RapierCraftStudios/ForgeDock/blob/main/docs/CONFIG.md) when you're ready to customize.
 
-**Prefer guided, AI-powered setup?** Open Claude Code in your project directory and run `/forgedock-init` instead — it scans your repo and fills in the optional sections (repo owner/name, worktree path, branch strategy, project board) for you. Plain `npx forgedock init` (no flag) generates the full annotated template with every optional section commented out.
+**Prefer guided, AI-powered setup?** Open Claude Code in your project directory and run `/forgedock-init` instead — it scans your repo and fills in the optional sections (repo owner/name, worktree path, branch strategy, project board) for you.
 
 ---
 
@@ -200,7 +207,7 @@ The symlink wasn't created. Re-run `npx forgedock` and check `ls ~/.claude/comma
 
 **`forge.yaml` not found**
 
-Run `/forgedock-init` in your project directory inside Claude Code, or copy `forge.yaml.example` from the ForgeDock repo and edit it.
+Run `npx forgedock init` in your project directory to generate it, or copy `forge.yaml.example` from the ForgeDock repo and edit it. Once it exists, `/forgedock-init` inside Claude Code can fill in the optional sections.
 
 **`gh` auth errors**
 

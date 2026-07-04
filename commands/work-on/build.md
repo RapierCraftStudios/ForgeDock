@@ -9,8 +9,8 @@ argument-hint: [issue number] [--repo GH_REPO] [--gh-flag GH_FLAG] [--base PR_BA
 
 **Input**: $ARGUMENTS
 
-**Invoked by**: `work-on.md` state 8 (READY_TO_BUILD).
-**Output**: Create worktree, post contract, sequence build subcommands, return result to router.
+**Invoked by**: `work-on.md` Phase 3 — entered when the issue carries label `workflow:ready-to-build` or `workflow:building` (see Universal Phase Dispatcher in work-on.md).
+**Output**: Create worktree, post contract, sequence build subcommands, return result to work-on.md.
 
 **Agent model policy**: Default `model: "sonnet"`. If Sonnet is rate-limited, fall back to `model: "opus"`.
 **NEVER use plan mode (EnterPlanMode).**
@@ -46,7 +46,16 @@ gh api repos/{GH_REPO}/issues/{NUMBER}/comments \
 ```
 
 **Resume check**:
-- If `<!-- FORGE:BUILDER -->` comment exists → build already complete. Return `BUILD_RESULT: status: ALREADY_DONE` to router.
+- If `<!-- FORGE:BUILDER:COMPLETE -->` is present in a BUILDER comment → build already complete. Return `BUILD_RESULT: status: ALREADY_DONE` to router.
+- If `<!-- FORGE:BUILDER -->` exists BUT `<!-- FORGE:BUILDER:COMPLETE -->` is ABSENT → build was interrupted after the comment was posted but before the commit (validate.md V5). Delete the partial comment and restart from Phase B2 (contract): <!-- Added: forge#1305 -->
+  ```bash
+  PARTIAL_ID=$(gh api repos/{GH_REPO}/issues/{NUMBER}/comments \
+    --jq '[.[] | select(.body | contains("FORGE:BUILDER") and (contains("FORGE:BUILDER:COMPLETE") | not))] | last | .id // ""')
+  if [ -n "$PARTIAL_ID" ]; then
+    gh api repos/{GH_REPO}/issues/comments/$PARTIAL_ID -X DELETE
+    echo "Deleted partial FORGE:BUILDER comment (no FORGE:BUILDER:COMPLETE) — restarting build from Phase B2"
+  fi
+  ```
 - If no `<!-- FORGE:INVESTIGATOR -->` comment with `<!-- INVESTIGATION:COMPLETE -->` → EXIT with `BUILD_RESULT: status: BLOCKED`, blocker: "Investigation not complete — run investigate first".
 
 Extract from investigation report:
@@ -82,6 +91,14 @@ Append `-{NUMBER}` to ensure uniqueness: e.g. `fix/work-on-build-landing-file-85
 
 - Review-finding issue → parse `**Code branch**: \`{branch}\`` from issue body; branch from `origin/{branch}`
   - **Milestone review-finding hybrid lane** (ONLY when Code branch matches `milestone/*`): This is a high-risk lane. The worktree will carry the full milestone history. The PR target is `staging` (or the base specified). **DANGER: Agents MUST NOT use `git merge` to resolve any conflicts in this lane.** Merge-based conflict resolution will pull the entire milestone commit tree onto staging, contaminating it with unapproved code. Use `git rebase` or `git cherry-pick` only. If conflicts cannot be resolved without a merge, post a comment on the issue, add `needs-human`, and STOP.
+  - **Missing ref fallback**: After parsing, verify the Code branch still exists on remote. If not, fall back to the lane default (`staging` for fast lane, `milestone/{slug}` for feature lane) and note the fallback:
+    ```bash
+    SOURCE_BRANCH="{CODE_BRANCH_FROM_ISSUE_BODY}"
+    if ! git ls-remote --exit-code origin "$SOURCE_BRANCH" >/dev/null 2>&1; then
+      echo "WARNING: Code branch '$SOURCE_BRANCH' not found on remote — falling back to lane default '$PR_BASE'"
+      SOURCE_BRANCH="$PR_BASE"
+    fi
+    ```
 - Feature lane (has milestone) → branch from `origin/{PR_BASE}`
 - Fast lane (no milestone) → branch from `origin/staging`
 
@@ -275,13 +292,14 @@ BUILD_RESULT:
 
 ## Integration Point in work-on.md
 
-This module runs at **state 8 (READY_TO_BUILD)** in the routing loop:
+This module runs during **Phase 3** of the work-on.md pipeline (label: `workflow:ready-to-build` or `workflow:building`). The full sequence is defined by the Universal Phase Dispatcher in work-on.md:
 
 ```
-state 8 → [THIS MODULE] worktree + contract + context + architect + implement + validate
-        → BUILD_RESULT: COMPLETE
-states 7, 6 → work-on:review (push + PR + /review-pr --auto-merge)
-states 5, 4 → work-on:close (trajectory + parent tracker + summary)
+Phase 3 (Build)   → [THIS MODULE] worktree + contract + context + architect + implement + validate
+                  → posts FORGE:BUILDER comment, writes FORGE:CHECKPOINT next_phase=REVIEW
+Phase 4 (PR)      → work-on:review — push branch, create PR, set workflow:in-review
+Phase 5 (Review)  → work-on:review — invoke /review-pr --auto-merge
+Phase 6 (Close)   → work-on:close — trajectory + parent tracker + summary + worktree cleanup
 ```
 
-The router re-reads GitHub state after this module returns COMPLETE — it will then detect state 6 (IN_REVIEW) or 7 (BUILD_NO_PR) and invoke `work-on:review`.
+After this module posts `FORGE:BUILDER` and returns, work-on.md's Universal continuation rule re-reads the issue labels. Since the label is not yet terminal (`workflow:merged` / `workflow:invalid` / `needs-human`), it proceeds immediately to Phase 4 (PR Creation) and then Phase 5 (Auto-Review).

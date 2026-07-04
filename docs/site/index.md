@@ -37,7 +37,7 @@ No more coordinating between agent sessions. No more lost context. No more start
 
 - [GitHub Repository](https://github.com/RapierCraftStudios/ForgeDock)
 - [npm Package](https://www.npmjs.com/package/forgedock)
-- [Configuration Reference](../CONFIG.md)
+- [Configuration Reference](https://github.com/RapierCraftStudios/ForgeDock/blob/main/docs/CONFIG.md)
 - [Report an Issue](https://github.com/RapierCraftStudios/ForgeDock/issues/new)
 
 ---

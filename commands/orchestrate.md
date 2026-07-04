@@ -519,9 +519,11 @@ When two issues modify different files that **import from the same utility/init 
 | Pattern | Inference | Action |
 |---------|-----------|--------|
 | Issue A modifies `routers/billing.py`, Issue B modifies `routers/auth.py` | Both likely import from `routers/__init__.py` or `dependencies.py` | Flag as possible conflict if same service |
-| Issue A modifies `models/user.py`, Issue B modifies `models/subscription.py` | Both likely modify `models/__init__.py` (SQLAlchemy model registry) | Flag as probable conflict → serialize |
+| Issue A modifies `models/user.py`, Issue B modifies `models/subscription.py` *(Python/SQLAlchemy example)* | Both likely modify `models/__init__.py` (model registry) | Flag as probable conflict → serialize |
+| Issue A modifies `routes/users.js`, Issue B modifies `routes/billing.js` *(Node.js example)* | Both likely import from `routes/index.js` barrel | Flag as possible conflict if same service |
+| Issue A modifies `internal/user/handler.go`, Issue B modifies `internal/billing/handler.go` *(Go example)* | Both likely register in `internal/router/router.go` | Flag as possible conflict if same service |
 | Issue A modifies `web/src/components/X.tsx`, Issue B modifies `web/src/components/Y.tsx` | May share `index.ts` barrel export | Flag only if same parent directory |
-| Issue A modifies `services/api/app/main.py` | `main.py` is a high-fan-in file (router registration, middleware) | Serialize with ANY other API issue |
+| Issue A modifies the app entrypoint (e.g. `main.py`, `main.go`, `server.js`, `app.ts`) | Entrypoint is a high-fan-in file (router registration, middleware) — set the path via `forge.yaml → review.layout.api_main` | Serialize with ANY other same-service issue |
 | Issue A modifies `docker-compose.yml` or `docker-compose.prod.yml` | Global config — any concurrent modification conflicts | Serialize with ALL other issues that touch infra |
 
 **Apply inferences:**
@@ -529,14 +531,14 @@ When two issues modify different files that **import from the same utility/init 
 # High-fan-in files — if ANY issue touches these, serialize it with all same-service issues.
 # Read layout paths from forge.yaml review.layout; fall back to sensible generic defaults.
 # Example (pseudo-code — adapt to your forge.yaml parsing method):
-#   API_MAIN    = forge_yaml.review.layout.api_main    ?? "services/api/app/main.py"
-#   WORKER_MAIN = forge_yaml.review.layout.worker_main ?? "services/worker/worker/main.py"
-#   PAGES_ROOT  = forge_yaml.review.layout.pages       ?? "web/src/app"
+#   API_MAIN    = forge_yaml.review.layout.api_main    ?? "src/main.py"   # set in forge.yaml; no stack-specific default
+#   WORKER_MAIN = forge_yaml.review.layout.worker_main ?? "src/worker.py" # set in forge.yaml; no stack-specific default
+#   PAGES_ROOT  = forge_yaml.review.layout.pages       ?? "web/src/app"   # Next.js default; override in forge.yaml for other frameworks
 
 HIGH_FAN_IN = [
-  API_MAIN,                          # e.g. "services/api/app/main.py" — router/middleware registration
-  WORKER_MAIN,                       # e.g. "services/worker/worker/main.py" — worker entrypoint (set forge.yaml review.layout.worker_main)
-  PAGES_ROOT + "/layout.tsx",        # e.g. "web/src/app/layout.tsx" — root layout for all pages
+  API_MAIN,                          # app entrypoint — router/middleware registration (set forge.yaml review.layout.api_main)
+  WORKER_MAIN,                       # worker entrypoint (set forge.yaml review.layout.worker_main)
+  PAGES_ROOT + "/layout.tsx",        # root layout for all pages (Next.js; adapt for your framework)
   "docker-compose.yml",
   "docker-compose.prod.yml",
   ".env.example"
@@ -570,13 +572,17 @@ Layers 1-4 infer conflict risk from structure — path overlap, directory nestin
 # argument below — a plain string here would be word-split and glob-expanded
 # by the shell when handed to `git log --`, silently mangling or dropping any
 # path containing a space or glob metacharacter.
-mapfile -t ALL_AFFECTED_FILES < <(printf '%s\n' "${LAYER1_FILES[@]}" | sort -u)
+mapfile -t ALL_AFFECTED_FILES < <(printf '%s\n' "${LAYER1_FILES[@]}" | sort -u | grep -v '^$')
 
 # Guard: an empty array expands to nothing after `--`, which git interprets as
 # "no pathspec restriction" (i.e. the whole repo) rather than "match nothing".
 # Skip the query entirely in that case instead of letting it silently widen to
 # a full-repo scan — this can happen when upstream file-extraction (Layer 1)
 # yields zero paths for every issue in the batch.
+# NOTE: `grep -v '^$'` above is required — without it, `printf '%s\n'` on an
+# empty array emits one blank line (printf runs its format string once even
+# with zero variadic args), which `mapfile` captures as a 1-element array of
+# [""], making this guard evaluate to false and causing `git log -- ""` to run.
 if [ "${#ALL_AFFECTED_FILES[@]}" -eq 0 ]; then
   echo "Layer 5: no affected files extracted by Layer 1 for this batch — skipping co-change query, falling back to Layers 1-4."
 else
@@ -831,6 +837,18 @@ Proceed? (yes / adjust / pick specific issues)
 **Wait for user confirmation before spawning agents.** This is the checkpoint — once agents launch, they run autonomously.
 
 **After confirmation**: If investigations exist, execute Phase 2B-E first. Then re-present the expanded plan (with newly spawned issues added to the dependency graph) for a quick confirmation before launching implementation.
+
+---
+
+## Engine mode (headless)
+
+When running headless/CI, dispatch each issue via the durable execution engine instead of spawning prose agents:
+
+```bash
+forgedock run-issue <issue> --lane <staging|milestone/slug>
+```
+
+The engine drives every phase transition deterministically, mirrors state to the `FORGE:STATE` block on the issue, and holds a lease. To recover stalls, scan in-flight issues' `FORGE:STATE`; any issue with an expired lease and a non-terminal state is re-dispatched with the same `forgedock run-issue <issue>` command — it resumes from the last committed phase (idempotent). This replaces the label-heuristic "already in progress" check and the resume-with-nagging loop.
 
 ---
 

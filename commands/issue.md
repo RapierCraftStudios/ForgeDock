@@ -495,7 +495,7 @@ Create all {N} issues? (yes / adjust #N / cancel)
 
 | Bad Issue | Why It Fails | Good Version |
 |-----------|-------------|-------------|
-| "Fix docker mount" | Which compose file? Which mount? | "fix: `.gemini` volume mount in docker-compose.prod.yml missing rw flag" |
+| "Fix docker mount" | Which compose file? Which mount? | "fix: `logs` volume in docker-compose.yml missing `rw` flag — container writes fail at runtime" |
 | "Update billing" | What about billing? What's broken? | "fix: payment_processor.charge() raises ZeroDivisionError when amount == 0" |
 | "Investigate performance" | Investigate what? Where? | "investigate: API p95 latency doubled since last deploy — trace hot paths in job processing routers" |
 | No affected files listed | Investigator guesses wrong files | List every file with what needs to change |

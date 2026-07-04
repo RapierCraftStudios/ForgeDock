@@ -29,3 +29,7 @@ marketing/
 
 # Node
 node_modules/
+.superpowers/
+
+# Scratch diff dumps (root-level only — e.g. _bin_diff.txt, _cmd_diff.txt)
+/_*_diff.txt

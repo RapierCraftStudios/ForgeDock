@@ -5,7 +5,7 @@ description: Run a Forge-aware pre-commit quality gate from Codex.
 
 # Forge Repo Adapter: quality-gate
 
-Use `commands/quality-gate.md` as the source for gate semantics and PASS/FAIL behavior, but replace AlterLab app-specific domain checks with Forge repo checks when the changed files belong to this repository.
+Use `commands/quality-gate.md` as the source for gate semantics and PASS/FAIL behavior, but replace app-specific domain checks with Forge repo checks when the changed files belong to this repository.
 
 ## Forge Domain Classification
 

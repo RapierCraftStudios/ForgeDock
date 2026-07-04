@@ -179,7 +179,7 @@ ISSUE_STATE=$(gh issue view {NUMBER} {GH_FLAG} --json state --jq '.state')
 
 **If `REMAINING_AFTER > 0`** (multi-phase: uncompleted phases remain):
 ```bash
-# Post phase-complete marker — router state 10 (MULTI_PHASE) will re-detect this issue
+# Post phase-complete marker — work-on.md's Universal continuation rule will re-read labels and continue to the next phase
 gh issue comment {NUMBER} {GH_FLAG} --body "<!-- FORGE:PHASE:COMPLETE -->
 Phase complete. PR #{PR_NUMBER} merged to \`{PR_BASE}\`. ${REMAINING_AFTER} phase item(s) remain — leaving issue open for next pipeline iteration."
 
@@ -577,7 +577,7 @@ CLOSE_RESULT:
   parent_closed: {true|false}
 ```
 
-Where `PHASE_COMPLETE` means the current phase was closed but uncompleted phases remain — the issue is left OPEN for the router to re-evaluate on the next pipeline iteration (state 10, MULTI_PHASE).
+Where `PHASE_COMPLETE` means the current phase was closed but uncompleted phases remain — the issue is left OPEN for work-on.md to re-evaluate on the next invocation (via Universal continuation rule: re-read labels, check terminal state, continue to next phase).
 
 ---
 
