@@ -1,0 +1,12 @@
+{
+  "description": "INVESTIGATOR with PARTIAL verdict (valid enum value, not same as partial sentinel)",
+  "input": "<!-- FORGE:INVESTIGATOR -->\n**Verdict**: PARTIAL\n**Confidence**: MEDIUM\n**Severity**: LOW\n**Task Type**: Investigation\n**Decomposition Assessment**: NO — needs more data.\n<!-- INVESTIGATION:COMPLETE -->",
+  "expect": {
+    "type": "INVESTIGATOR",
+    "valid": true,
+    "sentinelState": "complete",
+    "fieldChecks": {
+      "Verdict": "PARTIAL"
+    }
+  }
+}

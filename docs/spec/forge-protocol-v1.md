@@ -1053,7 +1053,36 @@ Annotations do not carry an explicit version field. Conforming consumers
 
 ---
 
-## 12. Acknowledgements
+## 12. Reference Implementation
+
+The canonical reference implementation of this specification is published as a
+separate, MIT-licensed npm package:
+
+**`@forgedock/protocol`** — available at `packages/protocol/` in the ForgeDock
+repository.
+
+It provides:
+
+- `parse(commentBody)` — extracts all annotations from a comment body string
+- `validate(annotation)` — checks conformance per §3–4; returns `{ valid, errors, warnings }`
+- `emit(type, fields)` — produces well-formed annotation strings
+- `emitPartial(type)` — produces the partial sentinel for a type (§3.3)
+
+A conformance suite in `packages/protocol/fixtures/` covers all 13 reserved
+types with valid and invalid examples. The CLI runner can be invoked against any
+fixtures directory:
+
+```bash
+npx @forgedock/protocol fixtures/
+```
+
+**Library version and spec version move together**: a library at version `1.x`
+implements spec version 1.0. Breaking spec changes (§11, major revisions)
+require a library major version bump.
+
+---
+
+## 13. Acknowledgements
 
 The FORGE Annotation Protocol was first developed and proven in a production
 autonomous-development pipeline, where it coordinated investigator, builder,

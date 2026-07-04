@@ -1,0 +1,9 @@
+{
+  "description": "KNOWLEDGE_GIST — empty inline value (invalid per §3.4)",
+  "input": "<!-- FORGE:KNOWLEDGE_GIST:  -->",
+  "expect": {
+    "type": "KNOWLEDGE_GIST",
+    "valid": false,
+    "inlineValue": ""
+  }
+}
