@@ -245,6 +245,7 @@ Run ONLY the checks whose domain was identified in Step 1.5. Skip checks for dom
 - **2O (Residual pattern check)**: Run if `ROUTER_BUG` in DOMAINS
 - **2P (External tool config schema)**: Run if `CONFIG_SCHEMA` in DOMAINS
 - **2Q (Billing)**: Run if `BILLING` in DOMAINS
+- **2R (Registry checks)**: ALWAYS run — executes all promoted checks from `scripts/check-registry/manifest.json` <!-- Added: forge#1331 -->
 
 ### 2A: Security (ALL files)
 
@@ -1093,6 +1094,75 @@ done < <(echo {CHANGED_FILES} | tr ' ' '\n' | grep -E '\.py$')
 - stdlib `logging.*()` with non-stdlib kwargs: **HIGH** — guaranteed `TypeError` crash at runtime when the log call is reached.
 
 **Note**: 2Q-3 (stdlib logging check) fires on ALL changed Python files regardless of path — stdlib logger misuse is not specific to billing paths and is a universal crash class. 2Q-1 and 2Q-2 fire only on billing-domain files.
+
+### 2R: Registry checks (ALWAYS — promoted patterns from recurring review findings)
+
+<!-- Added: forge#1331 -->
+
+**Purpose**: Run all checks that have been promoted from recurring review findings into the registry. These are deterministic scripts that catch in milliseconds what previously required a full review cycle to detect. Each check was generated once by an LLM after the same defect class appeared 3+ times — thereafter it runs forever at zero LLM cost.
+
+**Registry location**: `scripts/check-registry/manifest.json` (relative to repo root)
+
+```bash
+REGISTRY_FILE="{WORKTREE_PATH}/scripts/check-registry/manifest.json"
+REGISTRY_FINDINGS=""
+
+if [ ! -f "$REGISTRY_FILE" ]; then
+    echo "2R: No check registry found at $REGISTRY_FILE — skipping registry checks."
+else
+    # Parse manifest and run each registered check
+    CHECK_COUNT=$(jq '.checks | length' "$REGISTRY_FILE" 2>/dev/null || echo 0)
+
+    if [ "$CHECK_COUNT" -eq 0 ]; then
+        echo "2R: Registry is empty — no promoted checks to run."
+    else
+        echo "2R: Running $CHECK_COUNT registered check(s)..."
+        CHECK_INDEX=0
+        while [ "$CHECK_INDEX" -lt "$CHECK_COUNT" ]; do
+            SCRIPT=$(jq -r ".checks[$CHECK_INDEX].script" "$REGISTRY_FILE" 2>/dev/null)
+            SLUG=$(jq -r ".checks[$CHECK_INDEX].slug" "$REGISTRY_FILE" 2>/dev/null)
+            SEVERITY=$(jq -r ".checks[$CHECK_INDEX].severity" "$REGISTRY_FILE" 2>/dev/null)
+
+            if [ -z "$SCRIPT" ] || [ "$SCRIPT" = "null" ]; then
+                CHECK_INDEX=$((CHECK_INDEX + 1))
+                continue
+            fi
+
+            SCRIPT_PATH="{WORKTREE_PATH}/$SCRIPT"
+
+            if [ ! -x "$SCRIPT_PATH" ]; then
+                echo "2R: WARN — registry check $SLUG script not found or not executable at $SCRIPT_PATH"
+                CHECK_INDEX=$((CHECK_INDEX + 1))
+                continue
+            fi
+
+            # Run the check; pass changed files list and worktree path
+            CHECK_OUTPUT=$("$SCRIPT_PATH" "{CHANGED_FILES}" "{WORKTREE_PATH}" 2>/dev/null)
+            CHECK_EXIT=$?
+
+            if [ "$CHECK_EXIT" -eq 1 ]; then
+                # Check fired — append to findings
+                while IFS= read -r line; do
+                    [ -z "$line" ] && continue
+                    REGISTRY_FINDINGS="${REGISTRY_FINDINGS}
+${line}"
+                done <<< "$CHECK_OUTPUT"
+                echo "2R: FAIL — $SLUG matched ($SEVERITY)"
+            elif [ "$CHECK_EXIT" -eq 0 ] || [ "$CHECK_EXIT" -eq 2 ]; then
+                echo "2R: PASS — $SLUG"
+            else
+                echo "2R: WARN — $SLUG exited with unexpected code $CHECK_EXIT"
+            fi
+
+            CHECK_INDEX=$((CHECK_INDEX + 1))
+        done
+    fi
+fi
+```
+
+If any registry check produces findings, include them in the Step 3 findings list under the check's slug (e.g. `REGISTRY-migration-number-collision | HIGH | ...`). HIGH-severity registry findings are blocking; MEDIUM are advisory.
+
+---
 
 ## Step 3: Compile findings
 
