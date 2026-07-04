@@ -37,7 +37,6 @@
 //   - Call-site wiring in commands/*.md is tracked separately in #1247.
 
 import { readFileSync, existsSync } from 'node:fs';
-import { createRequire } from 'node:module';
 import { resolve, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
