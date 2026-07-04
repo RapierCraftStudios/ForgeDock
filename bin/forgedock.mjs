@@ -31,6 +31,7 @@ import {
   removeSessionStartHook,
   removeSubagentStopHook,
   removePreToolUseHook,
+  removeSubagentStopEnforceHook,
 } from "./settings-hook.mjs";
 import {
   resolveState,
@@ -807,14 +808,23 @@ async function uninstall() {
     );
   }
 
-  // Remove enforcement hooks (#1250): PreToolUse and SubagentStop.
-  const preToolUseRemove = removePreToolUseHook(settingsJsonPath);
-  if (preToolUseRemove.status === "removed") {
-    console.log(`  ${GREEN}✔${RESET}  Removed PreToolUse hook from ${CYAN}~/.claude/settings.json${RESET}`);
+  // Remove enforcement hooks (#1250): PreToolUse, SubagentStop interactive
+  // engine adapter, and SubagentStop annotation verifier.
+  const { status: preToolUseRemoveResult } = removePreToolUseHook(settingsJsonPath);
+  if (preToolUseRemoveResult === "removed") {
+    console.log(`  ${GREEN}✔${RESET}  Removed PreToolUse enforcement hook from ${CYAN}~/.claude/settings.json${RESET}`);
+  } else if (preToolUseRemoveResult !== "absent") {
+    console.log(`  ${YELLOW}⚠${RESET}  Could not remove PreToolUse hook — check ${CYAN}~/.claude/settings.json${RESET} manually.`);
   }
-  const subagentStopRemove = removeSubagentStopHook(settingsJsonPath);
-  if (subagentStopRemove.status === "removed") {
+  const { status: subagentStopRemoveResult } = removeSubagentStopHook(settingsJsonPath);
+  if (subagentStopRemoveResult === "removed") {
     console.log(`  ${GREEN}✔${RESET}  Removed SubagentStop hook from ${CYAN}~/.claude/settings.json${RESET}`);
+  }
+  const { status: subagentStopEnforceRemoveResult } = removeSubagentStopEnforceHook(settingsJsonPath);
+  if (subagentStopEnforceRemoveResult === "removed") {
+    console.log(`  ${GREEN}✔${RESET}  Removed SubagentStop enforcement hook from ${CYAN}~/.claude/settings.json${RESET}`);
+  } else if (subagentStopEnforceRemoveResult !== "absent") {
+    console.log(`  ${YELLOW}⚠${RESET}  Could not remove SubagentStop enforcement hook — check ${CYAN}~/.claude/settings.json${RESET} manually.`);
   }
   console.log("");
 
