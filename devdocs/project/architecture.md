@@ -137,6 +137,63 @@ The primary value is **reliability**, not cost: scripts eliminate LLM inference 
 
 Full methodology and data: `docs/articles/per-repo-adaptive-scripts-token-savings.md`
 
+## Topology Benchmark <!-- Added: forge#1279 -->
+
+Measures the end-to-end token cost per issue to validate the agent topology refactor (#1254) claim: inlining sequential build phases eliminates 6-8 fresh-context establishments per standard run, reducing token cost without degrading quality gates.
+
+### Methodology
+
+**Corpus**: 5 seeded issues in `examples/forgedock-demo/` — fixed, reproducible, covers the full issue type range (bug, feature, refactor, performance, docs).
+
+| Issue | Type | Title |
+|-------|------|-------|
+| #1 | Bug / security | DELETE is missing an auth check |
+| #2 | Feature / security | Safe filtering for GET /notes |
+| #3 | Refactor | Extract the router module |
+| #4 | Performance | O(1) findById |
+| #5 | Docs | Add an API reference |
+
+**Measurement unit**: tokens per issue per `/work-on` run — input_tokens + output_tokens (billed), cache_read_tokens, cache_write_tokens (context establishment proxy).
+
+**Primary signal**: `cache_write_tokens` — each spawned subagent establishes fresh context, writing its full prompt into the cache. Inlining phases reduces the number of fresh-context establishments, lowering `cache_write_tokens`.
+
+**Topologies compared**:
+- `spawned` — baseline: sequential build phases each spawned as separate subagents (pre-#1254)
+- `inline-sequential` — refactored: sequential phases run inline within the orchestrator session (post-#1254)
+
+**Tooling**: `scripts/bench-topology-cost.mjs` — zero-dependency ESM aggregator. Input: structured JSON of per-issue token measurements. Output: per-topology summary, delta, quality gate confirmation.
+
+### Running the Benchmark
+
+```bash
+# After collecting measurements from a /work-on session on examples/forgedock-demo/:
+node scripts/bench-topology-cost.mjs runs.json
+
+# Help / input schema:
+node scripts/bench-topology-cost.mjs --help
+```
+
+Input schema: see `scripts/bench-topology-cost.mjs` file header (search: "Input schema").
+
+When `bin/runner.mjs` emits structured token usage (#1295), measurements can be auto-populated from session logs. Until then, capture from Claude Code session summaries.
+
+### Quality Gate Confirmation
+
+For each topology run, all 5 demo issues must pass quality gate (`quality_gate_passed: true`). The benchmark verdict is INVALID if any quality gate regressed in the post-refactor topology.
+
+### Results
+
+> **Status**: Awaiting post-refactor data. Dependencies #1276-#1278 must complete before post-refactor measurements can be captured.
+
+| Metric | Spawned (baseline) | Inline-sequential (refactored) | Delta | Change |
+|--------|-------------------|-------------------------------|-------|--------|
+| Total tokens (5 issues) | TBD | TBD | TBD | TBD |
+| Avg tokens / issue | TBD | TBD | TBD | TBD |
+| Cache write tokens | TBD | TBD | TBD | TBD |
+| Quality gates passed | TBD | TBD | — | — |
+
+*Update this table when measurements are available. Run `node scripts/bench-topology-cost.mjs runs.json` to generate the delta automatically.*
+
 ### Script Precedence
 
 When resolving which script to run for a given operation, agents apply the following hierarchy (highest to lowest authority):
