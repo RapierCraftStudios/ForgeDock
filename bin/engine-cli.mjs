@@ -41,8 +41,9 @@ export async function scanStalls(issues, io, now) {
 
 export async function runFromCli(argv) {
   const issue = parseInt(argv[0], 10);
-  if (!Number.isInteger(issue)) throw new Error("usage: forgedock run-issue <issue-number>");
-  const lane = flag(argv, "--lane") || "staging";
+  if (!Number.isInteger(issue)) throw new Error("usage: forgedock run-issue <issue-number> --lane <lane>");
+  const lane = flag(argv, "--lane");
+  if (!lane) throw new Error("--lane is required: e.g. --lane main or --lane staging. No default to prevent accidental production targeting.");
   const io = makeIo();
   const agentId = `cli_${process.pid}`;
   const res = await runIssue({ issue, dir: runDir(), agentId, lane, io,
@@ -60,14 +61,15 @@ export async function runFromCli(argv) {
  *
  * Flags:
  *   --dry-run   Print the stalled list and exit 0 without dispatching anything.
- *   --lane      Lane to pass to run-issue (default: "staging").
+ *   --lane      Lane to pass to run-issue (required — no default to prevent accidental production targeting).
  *   --repo      GitHub repo (owner/repo). Defaults to the repo inferred by gh.
  *
  * Exit codes: 0 on success or dry-run. Non-zero on dispatch error.
  */
 export async function resumeStalledFromCli(argv) {
   const dryRun = argv.includes("--dry-run");
-  const lane   = flag(argv, "--lane") || "staging";
+  const lane   = flag(argv, "--lane");
+  if (!lane) throw new Error("--lane is required for resume-stalled: e.g. --lane main or --lane staging.");
   const repo   = flag(argv, "--repo");
 
   const io = makeIo();
