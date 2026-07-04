@@ -81,6 +81,30 @@ Do NOT push this branch. Human review required to identify the source of the mer
 fi
 ```
 
+## Phase R1: Non-Empty Commit Guard (MANDATORY — run before push) <!-- Added: forge#1305 -->
+
+Before pushing, verify the branch has at least one commit ahead of the PR base. This is the last-line defense against the phantom-commit hazard: a session that resumed from a partial FORGE:BUILDER comment (without `:COMPLETE`) would have skipped the commit step and could otherwise push an empty branch.
+
+```bash
+cd {WORKTREE_PATH}
+# Count commits on this branch that are not reachable from origin/{PR_BASE}
+COMMIT_COUNT=$(git rev-list --count HEAD ^origin/{PR_BASE} 2>/dev/null || echo "0")
+if [ "$COMMIT_COUNT" -eq 0 ]; then
+  gh issue comment {NUMBER} {GH_FLAG} --body "## Push Blocked — No Commits Ahead of Base
+
+Branch \`{BRANCH}\` has 0 commits ahead of \`origin/{PR_BASE}\`. Pushing this branch would create an empty PR.
+
+**Likely cause**: Build was interrupted after the FORGE:BUILDER comment was posted (implement.md Phase I6) but before the commit was created (validate.md Phase V5). The branch was pushed with no implementation on it.
+
+**Resolution**: Delete this branch, re-run \`/work-on {NUMBER}\` to restart the build phase. The partial FORGE:BUILDER comment (lacking \`FORGE:BUILDER:COMPLETE\`) will be detected and deleted, and the build will restart cleanly.
+
+<!-- FORGE:PUSH_BLOCKED_EMPTY_BRANCH -->"
+  gh issue edit {NUMBER} {GH_FLAG} --add-label "needs-human"
+  exit 1
+fi
+echo "Commit count ahead of origin/{PR_BASE}: $COMMIT_COUNT — OK to push"
+```
+
 ## Phase R1: Push Branch
 
 ```bash

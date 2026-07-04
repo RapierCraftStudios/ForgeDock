@@ -835,7 +835,17 @@ esac
 
 <!-- FORGE:PHASE_COMPLETE — Entering Phase 3 (Build). See Universal Phase Dispatcher: sub-phases 3A–3M execute in sequence. No sub-phase completion is terminal. -->
 
-**Skip if**: `<!-- FORGE:BUILDER -->` exists.
+**Skip if**: `<!-- FORGE:BUILDER:COMPLETE -->` is present in a BUILDER comment. <!-- Added: forge#1305 — require completion marker, not mere presence of BUILDER annotation -->
+
+**Partial build detection**: If `<!-- FORGE:BUILDER -->` exists BUT `<!-- FORGE:BUILDER:COMPLETE -->` is ABSENT → the build was interrupted after implement.md Phase I6 (comment posted) but before validate.md Phase V5 (commit). Delete the partial comment and restart Phase 3 from the top: <!-- Added: forge#1305 -->
+```bash
+PARTIAL_ID=$(gh api repos/{GH_REPO}/issues/{NUMBER}/comments \
+  --jq '[.[] | select(.body | contains("FORGE:BUILDER") and (contains("FORGE:BUILDER:COMPLETE") | not))] | last | .id // ""')
+if [ -n "$PARTIAL_ID" ]; then
+  gh api repos/{GH_REPO}/issues/comments/$PARTIAL_ID -X DELETE
+  echo "Deleted partial FORGE:BUILDER comment (no FORGE:BUILDER:COMPLETE) — restarting build"
+fi
+```
 
 **CRITICAL: You MUST execute ALL sub-phases 3A–3M in order. Sub-phases 3C.5 (context) and 3C.6 (architect) are skipped ONLY for TRIVIAL tasks and Investigation tasks — see Phase 3B for classification. For STANDARD and COMPLEX tasks they post mandatory `FORGE:CONTEXT` and `FORGE:ARCHITECT` comments that Phase 3F reads as its primary input. Skipping them without a TRIVIAL/Investigation classification degrades build quality and causes review findings. After each sub-phase, continue to the next — no sub-phase is terminal.**
 
@@ -857,9 +867,9 @@ gh issue view {NUMBER} {GH_FLAG} --json number,title,body,labels,state,milestone
 gh api repos/{GH_REPO}/issues/{NUMBER}/comments \
   --jq '.[] | select(.body | contains("FORGE:INVESTIGATOR")) | .body'
 
-# Check if build already completed
+# Check if build already completed (require FORGE:BUILDER:COMPLETE — not just FORGE:BUILDER)
 gh api repos/{GH_REPO}/issues/{NUMBER}/comments \
-  --jq '.[] | select(.body | contains("FORGE:BUILDER")) | .body'
+  --jq '.[] | select(.body | contains("FORGE:BUILDER:COMPLETE")) | .body'
 
 # Check for existing COMPLEXITY_BAND from a prior run (resume path)
 EXISTING_FAST_PATH=$(gh api repos/{GH_REPO}/issues/{NUMBER}/comments \
