@@ -634,6 +634,30 @@ Audits agent outputs from an orchestration run — timeline analysis, stall dete
 
 ---
 
+---
+
+### `npx forgedock report`
+
+**Pipeline impact receipts for your repo.**
+
+Reads `forge.yaml` for `project.owner/repo` and queries GitHub to produce a 30-day (default) summary of pipeline-driven activity: issues closed, share with FORGE annotations, median and p90 open→close time, merged PR count and issue-link rate, defects caught by review, and machine-filed intent share.
+
+```bash
+npx forgedock report               # Terminal summary (default 30 days)
+npx forgedock report --days 7      # Last 7 days
+npx forgedock report --md          # Paste-ready Markdown block (standups, reports)
+npx forgedock report --json        # Raw JSON for scripting
+npx forgedock report --md --quiet  # Markdown without the fleet pointer footer
+```
+
+Requires an authenticated `gh` CLI and a `forge.yaml` with `project.owner` and `project.repo` set. Degrades gracefully: unauthenticated `gh` and missing `forge.yaml` produce actionable error messages. A repo with no ForgeDock history shows a "run /work-on on your first issue" pointer instead of an empty table.
+
+Counts sourced from `gh issue list` / `gh pr list` at the 500-item limit are labeled approximate (`~`), consistent with the honesty convention used in the README.
+
+*This is the local, single-repo seed of the [fleet dashboard](https://forgedock.com/fleet) — the same numbers, one repo, free.*
+
+---
+
 ## Next Steps
 
 - [Command Learning Path](./command-learning-path.md) — which commands to learn first, tiered by when you need them
