@@ -338,6 +338,31 @@ function resolveConfinedPath(cwd, p) {
     );
   }
 
+  // Residual TOCTOU assumption: we return the lexical `resolved` path rather
+  // than `realResolved` so that callers (readFileSync / writeFileSync) work
+  // correctly with not-yet-existing paths (where realResolved === resolved
+  // anyway, since there is nothing to dereference).  The check above verified
+  // confinement on the realpath of the nearest *existing* ancestor, but a
+  // concurrent actor that mutates the filesystem between this check and the
+  // caller's open() call could in theory introduce a symlink that evades the
+  // guard — a classic time-of-check / time-of-use (TOCTOU) window.
+  //
+  // This is acceptable under the current threat model because:
+  //   1. Tool calls are executed in a strictly sequential, synchronous
+  //      `for...of` loop (see the runLive tool-use loop).  There is no async
+  //      gap and no concurrent tool execution within the runner itself.
+  //   2. A prompt-injected model therefore cannot create this race — it would
+  //      need to schedule two tool calls simultaneously, which the loop
+  //      prevents.
+  //   3. Only an independent, external OS process running concurrently could
+  //      exploit the window, which is outside the stated single-shot
+  //      prompt-injection threat model.
+  //
+  // If the runner is ever refactored to execute tool calls concurrently or
+  // asynchronously, this assumption MUST be revisited.  Mitigations to
+  // consider at that point include: operating on `realResolved` directly
+  // (eliminating the lexical/realpath split), or opening the file with an
+  // O_NOFOLLOW-equivalent flag so the kernel rejects a symlink at open time.
   return resolved;
 }
 
