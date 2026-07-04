@@ -281,12 +281,66 @@ gh workflow run {deploy.workflow} --ref main -f {deploy.workflow_inputs.services
 
 ---
 
+## Phase 4B: Deploy Train State <!-- Added: forge#1332 -->
+
+**Purpose**: Report the current state of the rolling staging→main deploy candidate (the "merge train"). One deploy PR should stay open per deploy cycle — this phase shows whether a candidate exists, what is holding it, and what is queued behind it.
+
+```bash
+git fetch origin {STAGING_BRANCH} {DEFAULT_BRANCH} 2>/dev/null
+
+# Step 1: Find the current open staging→main deploy PR (the "train")
+TRAIN_PR=$(gh pr list {GH_FLAG} \
+  --head "{STAGING_BRANCH}" \
+  --base "{DEFAULT_BRANCH}" \
+  --state open \
+  --json number,title,headRefOid,createdAt,reviewRequests \
+  --jq '.[0] // empty' 2>/dev/null)
+
+TRAIN_PR_NUMBER=$(echo "$TRAIN_PR" | jq -r '.number // empty')
+TRAIN_PR_SHA=$(echo "$TRAIN_PR" | jq -r '.headRefOid // empty' | cut -c1-7)
+TRAIN_PR_CREATED=$(echo "$TRAIN_PR" | jq -r '.createdAt // empty')
+
+if [ -z "$TRAIN_PR_NUMBER" ]; then
+  TRAIN_STATUS="NO_TRAIN — no open staging→main PR. Run /review-pr-staging to open one."
+else
+  # Step 2: Check whether the train is held (has blocking findings)
+  HELD_BY=$(gh issue list {GH_FLAG} \
+    --label "review-finding" \
+    --state open \
+    --search "PR #${TRAIN_PR_NUMBER}" \
+    --limit 20 \
+    --json number,title \
+    --jq '[.[] | "#\(.number): \(.title)"] | join("\n")' 2>/dev/null || true)
+
+  if [ -n "$HELD_BY" ]; then
+    TRAIN_STATUS="HELD"
+  else
+    TRAIN_STATUS="CLEAR — ready to merge"
+  fi
+
+  # Step 3: Count commits queued (commits in staging not yet in main)
+  QUEUED_COMMITS=$(git rev-list --count origin/{DEFAULT_BRANCH}..origin/{STAGING_BRANCH} 2>/dev/null || echo "?")
+fi
+```
+
+Train state is included in the Phase 5 output summary.
+
+---
+
 ## Phase 5: Output Summary
 
 ```
 ## Deploy Summary: {SOURCE} → {TARGET}
 
 **Commits**: {N} | **PRs**: {N} | **Issues closed**: {N} | **Files changed**: {N}
+
+### Deploy Train State
+**Train PR**: #{TRAIN_PR_NUMBER} (SHA: {TRAIN_PR_SHA}, opened: {TRAIN_PR_CREATED})
+**Status**: {TRAIN_STATUS}
+{If HELD: "**Held by**: {count} open finding(s) — fix and push to unblock:\n{HELD_BY}"}
+{If CLEAR: "**Ready to merge**: no open findings on the train PR"}
+{If NO_TRAIN: "No open staging→main PR — run /review-pr-staging to open one"}
+**Queued commits**: {QUEUED_COMMITS} (commits in staging not yet in main)
 
 ### Services Affected
 | Service | Files Changed | Rebuild Required |
