@@ -332,6 +332,19 @@ For fixable failures: checkout staging, apply fix, verify locally, commit as `fi
 
 Launch agent (model: sonnet) to analyze all commits since last deploy. Categorize as: NEW FEATURE, ENHANCEMENT, BUG FIX, REFACTOR, SECURITY, PERFORMANCE, INFRASTRUCTURE, DEPENDENCY. Separate user-facing vs internal. Document breaking changes and required pre-deploy actions.
 
+**MANDATORY — post findings as PR comment**: After completing analysis, the agent MUST post its full report directly to the PR:
+```bash
+gh pr comment ${PR_NUMBER} -R ${GH_REPO} --body "<!-- FORGE:REVIEW-AGENT:material-change -->
+## Material Change Analysis
+
+[full analysis report here]
+
+<!-- REVIEW-FINDINGS-START -->
+<!-- FINDING:... -->
+<!-- REVIEW-FINDINGS-END -->"
+```
+Include the structured `<!-- REVIEW-FINDINGS-START -->` block even if there are no findings (empty block). This ensures auditability even if the orchestrator crashes mid-review. <!-- Added: forge#1400 -->
+
 ---
 
 ## Phase 3: Bug Hunter Review (Per-Service)
@@ -346,11 +359,37 @@ Launch Bug Hunter agents for each service with changes:
 
 Each reads the service diff, hunts for bugs, traces context across imports, posts findings with structured block.
 
+**MANDATORY — each Bug Hunter agent MUST post its findings directly to the PR immediately upon completion** (do not wait for the orchestrator to batch-post):
+```bash
+gh pr comment ${PR_NUMBER} -R ${GH_REPO} --body "<!-- FORGE:REVIEW-AGENT:bug-hunter-{service} -->
+## Bug Hunter Review — {service}
+
+[full findings here]
+
+<!-- REVIEW-FINDINGS-START -->
+<!-- FINDING:BUG-N|CONFIDENCE|SEVERITY|file:line|summary -->
+<!-- REVIEW-FINDINGS-END -->"
+```
+Where `{service}` is `api`, `worker`, or `web`. Post one comment per service agent. <!-- Added: forge#1400 -->
+
 ---
 
 ## Phase 4: Code Quality Review
 
 Agent hunts for: dead code, duplicate logic, complexity (>50 line functions), naming issues, missing abstractions, logging quality, magic numbers. Prefix: QA.
+
+**MANDATORY — post findings as PR comment**: After completing analysis, the agent MUST post its full report directly to the PR:
+```bash
+gh pr comment ${PR_NUMBER} -R ${GH_REPO} --body "<!-- FORGE:REVIEW-AGENT:code-quality -->
+## Code Quality Review
+
+[full analysis here]
+
+<!-- REVIEW-FINDINGS-START -->
+<!-- FINDING:QA-N|CONFIDENCE|SEVERITY|file:line|summary -->
+<!-- REVIEW-FINDINGS-END -->"
+```
+<!-- Added: forge#1400 -->
 
 ---
 
@@ -358,11 +397,37 @@ Agent hunts for: dead code, duplicate logic, complexity (>50 line functions), na
 
 Read agent catalog from `.claude/commands/review-pr-agents.md`. Launch domain-specific agents based on which domains have changes. Substitute PR diff commands with staging diff commands. Agents: General Security (always), Auth, Billing, Concurrency, Scraper, API Design, Database, Infrastructure.
 
+**MANDATORY — each domain agent MUST post its findings directly to the PR immediately upon completion** (not batched by the orchestrator):
+```bash
+gh pr comment ${PR_NUMBER} -R ${GH_REPO} --body "<!-- FORGE:REVIEW-AGENT:{domain} -->
+## {Domain} Review
+
+[full analysis here]
+
+<!-- REVIEW-FINDINGS-START -->
+<!-- FINDING:{PREFIX}-N|CONFIDENCE|SEVERITY|file:line|summary -->
+<!-- REVIEW-FINDINGS-END -->"
+```
+Where `{domain}` is `security`, `auth`, `billing`, `concurrency`, `scraper`, `api-design`, `database`, or `infrastructure`. Post one comment per domain agent. This ensures findings are posted even if the orchestrator crashes mid-review. <!-- Added: forge#1400 -->
+
 ---
 
 ## Phase 6: Regression Risk Assessment
 
 Agent maps dependencies, assesses integration points (service boundaries, env vars, Docker changes, workflow sibling drift between ci.yml and deploy-production.yml), evaluates rollback difficulty (easy/hard/destructive/state-dependent), checks test coverage. Posts risk matrix with rollback plan. Prefix: REG.
+
+**MANDATORY — post findings as PR comment**: After completing analysis, the agent MUST post its full report directly to the PR:
+```bash
+gh pr comment ${PR_NUMBER} -R ${GH_REPO} --body "<!-- FORGE:REVIEW-AGENT:regression-risk -->
+## Regression Risk Assessment
+
+[full risk matrix and rollback plan here]
+
+<!-- REVIEW-FINDINGS-START -->
+<!-- FINDING:REG-N|CONFIDENCE|SEVERITY|file:line|summary -->
+<!-- REVIEW-FINDINGS-END -->"
+```
+<!-- Added: forge#1400 -->
 
 **Workflow sibling drift (MANDATORY)**: Deep-diff ci.yml and deploy-production.yml shared jobs. Compare PYTHONPATH, dependency install steps, step names. Pre-existing drift is invisible until deploy fails.
 
