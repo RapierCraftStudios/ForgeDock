@@ -982,15 +982,53 @@ DOMAIN_CONTEXT_API=$(yq '.review.domains.api' "$FORGE_YAML" 2>/dev/null || echo 
 
 If `forge.yaml` is absent or a field is empty/null, agents fall back to generic checks (no project-specific context injected — agents still function correctly, just without project conventions).
 
+**Code Index Slice (inject per agent — replaces full-repo search space with domain-scoped facts):**
+
+Before launching agents, query the code index to build a domain-scoped file list and symbol map for each agent's diff domain. This replaces full-repo search with deterministic pre-computed data:
+
+```bash
+REPO_PATH=$(yq '.paths.root' "$FORGE_YAML" 2>/dev/null || git rev-parse --show-toplevel 2>/dev/null || pwd)
+CODE_INDEX_SCRIPT="${REPO_PATH}/scripts/code-index.sh"
+
+# Ensure index is current (cache-hit on unchanged HEAD — instant if already built)
+if [[ -x "$CODE_INDEX_SCRIPT" ]]; then
+  bash "$CODE_INDEX_SCRIPT" --repo-path "$REPO_PATH" 2>/dev/null || true
+fi
+
+# Build domain-scoped index slices for each selected agent's domain
+# Replace {DOMAIN} with the agent's domain label (auth, billing, database, api, frontend, etc.)
+build_index_slice() {
+  local domain="$1"
+  if [[ -x "$CODE_INDEX_SCRIPT" ]]; then
+    local files
+    files=$(bash "$CODE_INDEX_SCRIPT" query --domain "$domain" --repo-path "$REPO_PATH" 2>/dev/null | awk -F'\t' '{print $1}' | head -30 | tr '\n' ' ')
+    echo "Domain files (${domain}): ${files:-none}"
+  else
+    echo "Code index not available — agent will use grep exploration"
+  fi
+}
+
+# Compute slices for selected agents (only the domains that are actually running)
+INDEX_SLICE_AUTH=$(build_index_slice "auth")
+INDEX_SLICE_BILLING=$(build_index_slice "billing")
+INDEX_SLICE_DATABASE=$(build_index_slice "database")
+INDEX_SLICE_API=$(build_index_slice "api")
+INDEX_SLICE_FRONTEND=$(build_index_slice "frontend")
+INDEX_SLICE_INFRA=$(build_index_slice "infrastructure")
+```
+
+**Absence is not an error**: If `scripts/code-index.sh` is absent, `INDEX_SLICE_*` variables will contain the fallback message and agents proceed with their standard grep-based exploration.
+
 This file contains the Evidence-Based Review Protocol, Structured Findings Protocol, and all 9 agent prompt templates. For each agent in `$SELECTED_AGENTS` (computed in Phase 3B):
 1. Extract its template from the catalog
 2. Substitute: `[PR_NUMBER]`, `[REVIEW_SHA]`, `[REVIEW_SHA_SHORT]`, `[TITLE]`, relevant files list
 3. Substitute: `[PROJECT_NAME]` → `$PROJECT_NAME`, `[PROJECT_CONTEXT]` → `$PROJECT_CONTEXT`, `[TECH_STACK]` → `$TECH_STACK`
 4. Substitute per-agent domain context: `[DOMAIN_CONTEXT]` → the agent's matching key from `forge.yaml → review.domains` (e.g., `$DOMAIN_CONTEXT_AUTH` for the auth agent, `$DOMAIN_CONTEXT_BILLING` for the billing agent)
 5. Substitute the shared hot-spot prior: `[CHURN_CONTEXT]` → `$CHURN_CONTEXT` (computed once in Phase 3A, same value for every agent — this is a PR-level fact, not a per-domain config value, so it is NOT read from `forge.yaml`)
-6. **Scope the diff to the agent's domain** (see "Domain diff slicing" below)
-7. If Phase 2.5 found broken assumptions, append them to the agent's prompt as "Pre-found integration issues to verify"
-8. Launch via `Task` tool with the resolved model (default `"sonnet"`, fallback `"opus"` if rate-limited)
+6. Substitute code index slice: `[INDEX_SLICE]` → the matching `$INDEX_SLICE_{DOMAIN}` variable for this agent (e.g., `$INDEX_SLICE_AUTH` for the auth agent). Agents MUST query index data first; fall back to grep only when index slice is empty or unavailable.
+7. **Scope the diff to the agent's domain** (see "Domain diff slicing" below)
+8. If Phase 2.5 found broken assumptions, append them to the agent's prompt as "Pre-found integration issues to verify"
+9. Launch via `Task` tool with the resolved model (default `"sonnet"`, fallback `"opus"` if rate-limited)
 
 **CRITICAL**: Launch ALL selected agents in a SINGLE message using multiple Task tool calls. Each agent posts findings directly to the PR via `gh pr comment`.
 

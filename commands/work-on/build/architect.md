@@ -316,6 +316,28 @@ agent defaults                  ← Built-in behaviors
 
 Identify every entry point that initiates the affected logic. Start from the files named in the investigation report.
 
+### A1.0: Code Index Query (run FIRST — deterministic, one tool call)
+
+If `scripts/code-index.sh` exists under `{REPO_PATH}`, query the pre-built index before any grep. The index provides caller lists and import graphs without re-scanning the repo:
+
+```bash
+# Ensure index is current (cache-hit on unchanged HEAD — instant if already built)
+bash {REPO_PATH}/scripts/code-index.sh --repo-path {REPO_PATH} 2>/dev/null || true
+
+# Get callers of the primary function under change
+bash {REPO_PATH}/scripts/code-index.sh query --callers {PRIMARY_FUNCTION} --repo-path {REPO_PATH} 2>/dev/null || true
+
+# Get all files that import the affected module
+bash {REPO_PATH}/scripts/code-index.sh query --importers {AFFECTED_FILE} --repo-path {REPO_PATH} 2>/dev/null || true
+
+# Get all files in the same domain as affected files (for sibling path detection)
+bash {REPO_PATH}/scripts/code-index.sh query --domain {DOMAIN} --repo-path {REPO_PATH} 2>/dev/null || true
+```
+
+Use index results to populate the caller list and sibling candidates below. If the index returns results, **skip the grep fallback** — do not re-scan what the index already answered. If the index is absent or returns nothing, fall back to grep.
+
+### A1.1: Grep fallback (only when index absent or returned no results)
+
 For each affected file, read it and identify:
 1. The primary function/method being changed
 2. All callers of that function (grep for usages)

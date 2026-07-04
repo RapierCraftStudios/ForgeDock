@@ -67,10 +67,33 @@ The target repo is `{GH_REPO}` (resolved from `forge.yaml → project`). The wor
 
 If the issue specifies a **Code branch** (`**Code branch**: \`{branch}\``), check out that branch — the affected files may not be on the default branch.
 
+### Code Index Query (run BEFORE any grep exploration)
+
+If `scripts/code-index.sh` exists under `{REPO_PATH}`, query the pre-built symbol/import index first. This yields deterministic answers in one tool call and avoids redundant grep exploration across agents.
+
+```bash
+# Step 0A: Ensure index is current (cache-hit on unchanged HEAD — zero cost if already built)
+bash {REPO_PATH}/scripts/code-index.sh --repo-path {REPO_PATH} 2>/dev/null || true
+
+# Step 0B: Look up the symbol or file named in the issue (replace {SYMBOL} with the relevant name)
+bash {REPO_PATH}/scripts/code-index.sh query --symbol {SYMBOL} --repo-path {REPO_PATH} 2>/dev/null || true
+
+# Step 0C: Find all callers of that symbol
+bash {REPO_PATH}/scripts/code-index.sh query --callers {SYMBOL} --repo-path {REPO_PATH} 2>/dev/null || true
+
+# Step 0D: Find all importers of an affected file
+bash {REPO_PATH}/scripts/code-index.sh query --importers {AFFECTED_FILE} --repo-path {REPO_PATH} 2>/dev/null || true
+
+# Step 0E: Get all files in the affected domain (from issue labels/body)
+bash {REPO_PATH}/scripts/code-index.sh query --domain {DOMAIN_LABEL} --repo-path {REPO_PATH} 2>/dev/null || true
+```
+
+**Fallback**: If `scripts/code-index.sh` is absent or returns no results, proceed with standard grep exploration below. The index is an acceleration layer — its absence never blocks investigation.
+
 ### Investigation steps
 
 1. **Check the right branch** — read from the branch specified in the issue body (`**Code branch**: \`{branch}\``) if present
-2. **Read domain files** — start with the key files for the affected domain
+2. **Read domain files** — start with the key files for the affected domain (use index query results from Step 0E as the file list; fall back to directory inspection if index is absent)
 3. **Verify claims** — does the code actually have the problem described?
 4. **Git blame** — trace when/why the relevant code was written. Run bounded, local commands (no network round-trip):
    ```bash
