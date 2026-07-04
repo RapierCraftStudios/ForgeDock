@@ -617,6 +617,41 @@ branches:
 #   captured_by: "work-on/667"           # command + issue number that wrote it
 
 # =============================================================================
+# INDEX (OPTIONAL)
+# Per-commit code index configuration for scripts/code-index.sh.
+# When configured, agents query a deterministic symbol index and import graph
+# instead of re-scanning the repo from scratch on every investigation, architect,
+# and review run. Index is cached by HEAD SHA — zero cost on unchanged HEAD.
+#
+# Commands that use the index: work-on:investigate, work-on/build/architect,
+#                              review-pr (domain agent context injection)
+# =============================================================================
+
+# index:
+#   # Languages to extract symbols from. Passed to ctags --languages= flag.
+#   # Omit to let ctags auto-detect. Example: Python, JavaScript, TypeScript, Go, Rust
+#   # languages: "Python,JavaScript,TypeScript,Go"
+#
+#   # Glob patterns to exclude from indexing (relative to repo root).
+#   # Added to the find/ctags exclude list alongside built-in defaults
+#   # (.git, node_modules, __pycache__, .forge).
+#   # exclude:
+#   #   - "vendor/**"
+#   #   - "dist/**"
+#   #   - "**/*.min.js"
+#
+#   # Directory where the index cache is stored, relative to the project root.
+#   # Default: ".forge/index" — gitignored by default (add .forge/ to .gitignore).
+#   # Set to an absolute path to share the cache across multiple worktrees.
+#   # cache_dir: ".forge/index"
+#
+#   # When true, the index is rebuilt automatically at the start of each
+#   # investigation/architect/review run (cache-hit on unchanged HEAD = instant).
+#   # When false, agents skip index queries and use grep exploration.
+#   # Default: true
+#   # enabled: true
+
+# =============================================================================
 # MARKETING (OPTIONAL)
 # Controls opt-in growth features such as 'Powered by ForgeDock' footers on
 # PR descriptions created by the pipeline.
