@@ -730,16 +730,19 @@ export async function runCommand(opts = {}) {
   }
 
   const client = new Anthropic({ apiKey });
-  // The SDK has captured the key into the client instance. Remove it from
-  // process.env immediately so that a prompt-injection payload cannot
-  // exfiltrate it by reading the parent process's environment via
-  // /proc/$PPID/environ (Linux). The child-env scrub in run_bash
-  // (childEnv = {...process.env}; delete childEnv.ANTHROPIC_API_KEY) only
-  // removes the key from the *child* env — it does not affect the parent
-  // process environment table, which /proc/$PPID/environ exposes to any
-  // same-UID process. Deleting from process.env here closes that bypass.
-  // gh/git auth tokens (GH_TOKEN/GITHUB_TOKEN) are intentionally left intact.
-  delete process.env.ANTHROPIC_API_KEY; // SEC: close /proc/$PPID/environ bypass
+  // NOTE on /proc/$PPID/environ (Linux): deleting from process.env calls
+  // unsetenv() at the C level, which does NOT update the kernel's
+  // /proc/<pid>/environ snapshot (that is fixed at execve() time). A
+  // run_bash payload can still read /proc/$PPID/environ and recover the
+  // key if it was set in the shell environment before the node process
+  // started. The only effective JavaScript-layer mitigation is the
+  // child-env scrub in run_bash: `childEnv = {...process.env}; delete
+  // childEnv.ANTHROPIC_API_KEY` — this prevents the child from inheriting
+  // the key in its own process.env, which is sufficient for
+  // `process.env.ANTHROPIC_API_KEY` access. The /proc/$PPID/environ vector
+  // is a known Linux limitation at the OS level; closing it would require
+  // a native module (e.g. prctl PR_SET_DUMPABLE) or process isolation.
+  // See: issue #1370 for tracking this known limitation.
   const handlers = getToolHandlers(cwd);
   const messages = [{ role: "user", content: userMessage }];
 
