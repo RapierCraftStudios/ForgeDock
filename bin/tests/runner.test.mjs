@@ -276,6 +276,39 @@ describe("getToolHandlers", () => {
     }
   });
 
+  // Regression test for issue #1243 (staging review — PR #1242): the child-env
+  // scrub in run_bash (delete childEnv.ANTHROPIC_API_KEY) only removes the key
+  // from the child process environment — it does not prevent a run_bash command
+  // from reading the *parent* process environment via /proc/$PPID/environ on
+  // Linux (same UID, /proc is readable). Fix: delete process.env.ANTHROPIC_API_KEY
+  // in runCommand immediately after constructing the Anthropic client, so the
+  // key is absent from the parent process env before any tool call is possible.
+  it("run_bash cannot read ANTHROPIC_API_KEY via /proc/$PPID/environ (SEC: parent proc env bypass — Linux only)", () => {
+    // /proc/$PPID/environ is a Linux-only procfs interface.
+    // Skip on Windows and macOS where /proc is absent.
+    if (process.platform !== "linux") return;
+
+    const orig = process.env.ANTHROPIC_API_KEY;
+    process.env.ANTHROPIC_API_KEY = "sk-ant-ppid-should-not-leak";
+    try {
+      const handlers = getToolHandlers(TMP);
+      // Read the *parent* process's environment via /proc/<ppid>/environ.
+      // process.ppid is the PID of the current process's parent — the same
+      // PID that $PPID expands to inside a bash child. We use Node.js
+      // process.ppid directly for portability across shells and sh/bash.
+      // The environ file is NUL-delimited; replace NUL with newlines for grep.
+      const ppid = process.ppid;
+      const out = handlers.run_bash({
+        command: `node -e "const fs=require('fs'); try { const env=fs.readFileSync('/proc/${ppid}/environ','utf-8'); process.stdout.write(env.split('\\\\0').find(e=>e.startsWith('ANTHROPIC_API_KEY=')) || 'ABSENT'); } catch(e) { process.stdout.write('ABSENT'); }"`,
+      });
+      assert.match(out, /ABSENT/);
+      assert.doesNotMatch(out, /ppid-should-not-leak/);
+    } finally {
+      if (orig === undefined) delete process.env.ANTHROPIC_API_KEY;
+      else process.env.ANTHROPIC_API_KEY = orig;
+    }
+  });
+
   it("handlers validate required input", () => {
     const handlers = getToolHandlers(TMP);
     assert.throws(() => handlers.read_file({}), /requires a 'path'/);

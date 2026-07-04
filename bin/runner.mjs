@@ -730,6 +730,16 @@ export async function runCommand(opts = {}) {
   }
 
   const client = new Anthropic({ apiKey });
+  // The SDK has captured the key into the client instance. Remove it from
+  // process.env immediately so that a prompt-injection payload cannot
+  // exfiltrate it by reading the parent process's environment via
+  // /proc/$PPID/environ (Linux). The child-env scrub in run_bash
+  // (childEnv = {...process.env}; delete childEnv.ANTHROPIC_API_KEY) only
+  // removes the key from the *child* env — it does not affect the parent
+  // process environment table, which /proc/$PPID/environ exposes to any
+  // same-UID process. Deleting from process.env here closes that bypass.
+  // gh/git auth tokens (GH_TOKEN/GITHUB_TOKEN) are intentionally left intact.
+  delete process.env.ANTHROPIC_API_KEY; // SEC: close /proc/$PPID/environ bypass
   const handlers = getToolHandlers(cwd);
   const messages = [{ role: "user", content: userMessage }];
 
