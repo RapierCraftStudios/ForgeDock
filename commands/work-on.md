@@ -1559,6 +1559,7 @@ gh issue comment {NUMBER} {GH_FLAG} --body "<!-- FORGE:BUILDER -->
 **Commits**: {COMMIT_SHA(S)}
 **Files changed**: {COUNT}
 **Verification Status**: ${VERIFICATION_STATUS}
+**Cost (build phase)**: ${PHASE_COST_USD:-unavailable} (best-effort — session telemetry; omit if unavailable)
 
 ### Approach
 {what was built, key decisions}
@@ -2070,6 +2071,40 @@ AGENTS_RUN=$(echo "$REVIEW_SUMMARY" | grep -oE '[0-9]+ agents' | grep -oE '[0-9]
 AGENTS_RUN="${AGENTS_RUN:-0}"
 ```
 
+**Capture best-effort cost signal** from session telemetry before posting GDR. This is best-effort — if the signal is unavailable, the cost block is omitted rather than blocking the pipeline or fabricating a number. Field names align with `bin/runner.mjs` usage accounting from #1295 so downstream tooling shares one schema:
+```bash
+# Best-effort: read per-stage usage from FORGE:BUILDER/FORGE:CONTEXT/FORGE:ARCHITECT phase annotations
+# Source: session telemetry when available (e.g. OTEL_LOG_TOOL_DETAILS, Claude Code usage reporting).
+# If unavailable, set COST_BLOCK to null — the field is omitted from the GDR rather than fabricated.
+COST_INVESTIGATION=$(gh api repos/{GH_REPO}/issues/{NUMBER}/comments \
+  --jq '[.[] | select(.body | contains("FORGE:INVESTIGATOR")) | .body] | last // ""' 2>/dev/null \
+  | grep -oP '(?<=cost_usd: )\S+' | head -1 || echo "")
+COST_BUILD=$(gh api repos/{GH_REPO}/issues/{NUMBER}/comments \
+  --jq '[.[] | select(.body | contains("FORGE:BUILDER")) | .body] | last // ""' 2>/dev/null \
+  | grep -oP '(?<=cost_usd: )\S+' | head -1 || echo "")
+COST_REVIEW=$(gh api repos/{GH_REPO}/issues/{PR_NUMBER}/comments \
+  --jq '[.[] | select(.body | contains("FORGE:REVIEWER")) | .body] | last // ""' 2>/dev/null \
+  | grep -oP '(?<=cost_usd: )\S+' | head -1 || echo "")
+
+# Build cost block JSON only if at least one stage value is present; otherwise null
+if [ -n "$COST_INVESTIGATION" ] || [ -n "$COST_BUILD" ] || [ -n "$COST_REVIEW" ]; then
+  COST_INV_JSON="${COST_INVESTIGATION:-null}"
+  COST_BUILD_JSON="${COST_BUILD:-null}"
+  COST_REVIEW_JSON="${COST_REVIEW:-null}"
+  COST_BLOCK="\"cost\": {
+    \"stages\": {
+      \"investigation\": $COST_INV_JSON,
+      \"build\": $COST_BUILD_JSON,
+      \"review\": $COST_REVIEW_JSON
+    },
+    \"total_usd\": null,
+    \"source\": \"session-telemetry\"
+  },"
+else
+  COST_BLOCK=""
+fi
+```
+
 **Post GDR to PR** (not to issue — PR comment survives as permanent artifact on the merged diff):
 ```bash
 if [ "$GDR_EXISTS" != "true" ] && [ -n "{PR_NUMBER}" ]; then
@@ -2096,6 +2131,7 @@ if [ "$GDR_EXISTS" != "true" ] && [ -n "{PR_NUMBER}" ]; then
     \"confidence\": \"{CONFIDENCE}\",
     \"task_type\": \"{TASK_TYPE}\"
   },
+  ${COST_BLOCK}
   \"context\": {
     \"historical_edges_referenced\": ${REVIEW_FINDING_COUNT},
     \"forge_annotations_read\": [\"FORGE:INVESTIGATOR\", \"FORGE:CONTRACT\", \"FORGE:CONTEXT\", \"FORGE:ARCHITECT\", \"FORGE:BUILDER\"]
