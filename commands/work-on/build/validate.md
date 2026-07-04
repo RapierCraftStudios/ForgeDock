@@ -305,9 +305,13 @@ BUILDER_COMMENT_ID=$(gh api repos/{GH_REPO}/issues/{NUMBER}/comments \
   --jq '[.[] | select(.body | contains("FORGE:BUILDER") and (contains("FORGE:BUILDER:COMPLETE") | not))] | last | .id // ""')
 
 if [ -n "$BUILDER_COMMENT_ID" ]; then
-  # Fetch current body and append the completion marker
+  # Fetch current body and append the completion marker plus best-effort cost signal
   CURRENT_BODY=$(gh api repos/{GH_REPO}/issues/comments/$BUILDER_COMMENT_ID --jq '.body')
-  UPDATED_BODY="${CURRENT_BODY}
+  # Best-effort cost append: only include if session telemetry provides a value; never block
+  PHASE_COST_LINE=""
+  [ -n "${PHASE_COST_USD:-}" ] && PHASE_COST_LINE="
+cost_usd: ${PHASE_COST_USD}"
+  UPDATED_BODY="${CURRENT_BODY}${PHASE_COST_LINE}
 
 <!-- FORGE:BUILDER:COMPLETE -->"
   gh api repos/{GH_REPO}/issues/comments/$BUILDER_COMMENT_ID \
