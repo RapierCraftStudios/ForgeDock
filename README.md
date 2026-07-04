@@ -251,6 +251,15 @@ Commands then appear as `/forgedock:work-on`, etc. You still run `npx forgedock 
 
 **Headless / CI:** the pipeline also runs outside Claude Code. `npx forgedock run work-on <issue> --dry-run` previews the assembled prompt and tool plan; with an `ANTHROPIC_API_KEY`, `npx forgedock run` drives the same command specs through a hardened tool-use loop, and `npx forgedock run-issue <issue>` executes them on the durable engine (event-sourced run log, leases, crash-safe resume).
 
+**Install modes:**
+
+```bash
+npx forgedock install           # project-scoped: <cwd>/.claude/commands/ (default)
+npx forgedock install --global  # global: ~/.claude/commands/ (opt-in)
+```
+
+`uninstall`, `update`, and `doctor` auto-detect which mode is installed — no need to re-specify `--global` after a global install. To explicitly target global: `npx forgedock doctor --global`.
+
 **Maintenance:**
 
 ```bash
@@ -258,9 +267,9 @@ npx forgedock update      # relink commands + refresh the SessionStart hook
 npx forgedock enable      # turn ForgeDock on for this directory
 npx forgedock disable     # turn ForgeDock off for this directory
 npx forgedock status      # show ForgeDock's state for this directory
-npx forgedock doctor      # installation health check with fix hints
+npx forgedock doctor      # installation health check with fix hints (auto-detects mode)
 npx forgedock report      # 30-day pipeline impact receipts (--md for Markdown, --json for scripting)
-npx forgedock uninstall   # remove commands, the hook, and tracked copies
+npx forgedock uninstall   # remove commands, the hook, and tracked copies (auto-detects mode)
 npx forgedock help        # show everything
 ```
 
