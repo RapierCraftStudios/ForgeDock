@@ -35,7 +35,8 @@ This is the **orchestrator**. It routes to the right review mode, runs automated
 
 | File | What | How to invoke |
 |------|------|---------------|
-| `$FORGE_HOME/commands/review-pr-agents.md` | Agent prompt templates (9 agents + protocols) | `Read` tool during Phase 3C |
+| `$FORGE_HOME/commands/review-pr-agents/protocols.md` | Shared review protocols (Evidence-Based + Structured Findings) | `Read` tool during Phase 3C (always) |
+| `$FORGE_HOME/commands/review-pr-agents/<persona>.md` | Per-persona agent prompt templates (9 files) | `Read` tool during Phase 3C (selected agents only) |
 | `$FORGE_HOME/commands/review-pr-staging.md` | Full staging→main review pipeline | `Skill("review-pr-staging", ...)` during Phase 0 |
 
 `$FORGE_HOME` defaults to `~/.claude` (the directory where `npx forgedock` symlinks commands). Override by setting `FORGE_HOME` in your environment.
@@ -756,10 +757,14 @@ Tiers (fixed thresholds, identical to `architect.md` Phase A5): **HOT** = 15+ co
 
 ### 3C: Load Agent Templates & Launch
 
-**>>> INVOCATION: Read the agent catalog file:**
+**>>> INVOCATION: Read shared protocols + selected persona files:**
 ```
-Read the file: $FORGE_HOME/commands/review-pr-agents.md
+Read: $FORGE_HOME/commands/review-pr-agents/protocols.md
+Read: $FORGE_HOME/commands/review-pr-agents/<persona>.md   (one per selected agent from Phase 3B)
 ```
+
+Persona file names: `security.md` (always), `auth.md`, `billing.md`, `concurrency.md`, `scraper.md`, `frontend.md`, `api.md`, `database.md`, `infra.md`.
+See `review-pr-agents.md` for the full routing table mapping domains → persona files.
 
 (`$FORGE_HOME` defaults to `~/.claude`)
 
@@ -782,8 +787,8 @@ DOMAIN_CONTEXT_API=$(yq '.review.domains.api' "$FORGE_YAML" 2>/dev/null || echo 
 
 If `forge.yaml` is absent or a field is empty/null, agents fall back to generic checks (no project-specific context injected — agents still function correctly, just without project conventions).
 
-This file contains the Evidence-Based Review Protocol, Structured Findings Protocol, and all 9 agent prompt templates. For each selected agent:
-1. Extract its template from the catalog
+The `protocols.md` file contains the Evidence-Based Review Protocol and Structured Findings Protocol. Each persona file contains that agent's full prompt template. For each selected agent:
+1. Extract its template from the persona file
 2. Substitute: `[PR_NUMBER]`, `[REVIEW_SHA]`, `[REVIEW_SHA_SHORT]`, `[TITLE]`, relevant files list
 3. Substitute: `[PROJECT_NAME]` → `$PROJECT_NAME`, `[PROJECT_CONTEXT]` → `$PROJECT_CONTEXT`, `[TECH_STACK]` → `$TECH_STACK`
 4. Substitute per-agent domain context: `[DOMAIN_CONTEXT]` → the agent's matching key from `forge.yaml → review.domains` (e.g., `$DOMAIN_CONTEXT_AUTH` for the auth agent, `$DOMAIN_CONTEXT_BILLING` for the billing agent)
