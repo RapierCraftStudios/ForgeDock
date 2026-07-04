@@ -1,23 +1,25 @@
 #!/usr/bin/env node
 /**
- * scripts/eval-gate-scorecard.mjs — Pipeline eval-gate scorecard aggregator (#1285)
+ * scripts/eval-scorecard-aggregator.mjs — Per-run results → scorecard aggregator (#1285)
  *
  * Deterministic, zero-network aggregator for the ForgeDock headless eval harness.
  * Reads an array of per-run results (one per corpus issue) produced by
- * bin/batch-runner.mjs and emits a scorecard JSON: one-shot success rate,
- * mean/median wall-clock, human-intervention count, and (nullable) cost.
+ * bin/batch-runner.mjs and emits a scorecard JSON in the format consumed by
+ * scripts/eval-gate-scorecard.mjs (the CI regression gate, issue #1286).
  *
  * It does NOT call any model, network, or live SDK — it only aggregates the
  * structured output that bin/batch-runner.mjs produces.
- * See docs/spec/eval-run-result.md for the JSON schema.
+ * See docs/spec/eval-run-result.md for the full JSON schema.
  *
  * Usage:
- *   node scripts/eval-gate-scorecard.mjs <runs.json>   # read file, print scorecard JSON
- *   node scripts/eval-gate-scorecard.mjs -             # read runs JSON from stdin
- *   cat runs.json | node scripts/eval-gate-scorecard.mjs
+ *   node scripts/eval-scorecard-aggregator.mjs <runs.json>   # read file, print scorecard JSON
+ *   node scripts/eval-scorecard-aggregator.mjs -             # read runs JSON from stdin
+ *   cat runs.json | node scripts/eval-scorecard-aggregator.mjs
  *
  * Input format: a JSON object with a "runs" array of per-run result objects,
- * plus optional metadata fields (corpus_version, spec_version, model).
+ * plus optional metadata fields (corpus_version, run_id, run_mode, spec_sha).
+ *
+ * Output format: scorecard JSON compatible with scripts/eval-gate-scorecard.mjs.
  *
  * Methodology rule (enforced): fewer than MIN_RUNS valid, scoreable runs is a
  * HARD ERROR — the script exits non-zero rather than emit a misleading rate.
@@ -117,77 +119,73 @@ export function mean(values) {
   return values.reduce((a, b) => a + b, 0) / values.length;
 }
 
-/** Round to 3 decimal places (avoids floating-point noise in output). */
-function round(x) {
+/** Round to 2 decimal places (matches eval-gate-scorecard.mjs success_rate_pct rounding). */
+function round2(x) {
+  return x === null ? null : Math.round(x * 100) / 100;
+}
+
+/** Round to 3 decimal places for wall-clock stats. */
+function round3(x) {
   return x === null ? null : Math.round(x * 1000) / 1000;
 }
 
 /**
- * Aggregate validated run-result objects into a scorecard.
+ * Aggregate validated run-result objects into a scorecard compatible with
+ * scripts/eval-gate-scorecard.mjs (#1286).
  *
  * Does NOT re-validate — call validateRuns() first.
  *
  * @param {object[]} runs
- * @param {{corpus_version?: string|null, spec_version?: string|null, model?: string|null}} [meta]
- * @returns {object} Scorecard object (matches docs/spec/eval-run-result.md).
+ * @param {object} [meta]
+ * @param {string|null} [meta.run_id]          - Unique run identifier.
+ * @param {string|null} [meta.corpus_version]  - Corpus version label.
+ * @param {"full"|"subset"} [meta.run_mode]    - "full" or "subset".
+ * @param {string|null} [meta.spec_sha]        - git SHA of commands/ at run time.
+ * @returns {object} Scorecard compatible with eval-gate-scorecard.mjs.
  */
 export function aggregate(runs, meta = {}) {
-  const nRuns = runs.length;
-  const nSuccess = runs.filter((r) => r.status === "success").length;
-  const nFailure = runs.filter((r) => r.status === "failure").length;
-  const nIncomplete = runs.filter(
-    (r) => r.status === "incomplete" || r.status === "error",
-  ).length;
+  const issuesRun = runs.length;
+  const successfulRuns = runs.filter((r) => r.status === "success").length;
+  const failedRuns = runs.filter((r) => r.status === "failure").length;
 
-  const oneShotSuccessRate = round(nSuccess / nRuns);
+  // success_rate_pct: computed from ALL runs (including error/incomplete),
+  // matching the harness intent: incomplete runs count against the rate.
+  const successRatePct = issuesRun > 0 ? round2((successfulRuns / issuesRun) * 100) : 0;
 
-  // Wall-clock stats — include ALL runs (errors and incompletes still have a
-  // measured wall-clock duration and skewing them out would hide hangs).
+  // Wall-clock stats — include ALL runs.
   const wallClockValues = runs.map((r) => r.wallClockMs).sort((a, b) => a - b);
-  const wallClockMean = mean(wallClockValues);
-  const wallClockMedian = median(wallClockValues);
+  const meanWallClockMs = round3(mean(wallClockValues));
+  const medianWallClockMs = round3(median(wallClockValues));
 
-  // Intervention stats — sum across all runs.
-  const totalInterventions = runs.reduce((sum, r) => sum + r.interventionCount, 0);
+  // Intervention stats.
+  const totalInterventionCount = runs.reduce((sum, r) => sum + r.interventionCount, 0);
 
-  // Cost: null if any run has cost === null or cost is absent; sum otherwise.
-  let totalCost = null;
+  // Cost: null if any run has cost === null or missing; sum otherwise.
   const costValues = runs.map((r) => (r.cost !== undefined ? r.cost : null));
-  if (costValues.every((c) => c !== null)) {
-    totalCost = round(costValues.reduce((a, b) => a + b, 0));
+  const totalCost = costValues.every((c) => c !== null)
+    ? round3(costValues.reduce((a, b) => a + b, 0))
+    : null;
+
+  const runMode = meta.run_mode ?? "full";
+  if (runMode !== "full" && runMode !== "subset") {
+    throw new Error(`run_mode must be "full" or "subset" (got ${JSON.stringify(runMode)})`);
   }
 
-  // Model / spec_version: use first non-null value seen across runs (batch
-  // driver should stamp each run; metadata header takes precedence).
-  const resolvedModel =
-    meta.model ??
-    runs.map((r) => r.model ?? null).find((m) => m !== null) ??
-    null;
-  const resolvedSpecVersion =
-    meta.spec_version ??
-    runs.map((r) => r.specVersion ?? null).find((v) => v !== null) ??
-    null;
-
   return {
-    corpus_version: meta.corpus_version ?? null,
-    spec_version: resolvedSpecVersion,
-    model: resolvedModel,
-    n_runs: nRuns,
-    n_success: nSuccess,
-    n_failure: nFailure,
-    n_incomplete: nIncomplete,
-    one_shot_success_rate: oneShotSuccessRate,
-    wall_clock_ms: {
-      mean: round(wallClockMean),
-      median: round(wallClockMedian),
-      min: wallClockValues.length > 0 ? wallClockValues[0] : null,
-      max: wallClockValues.length > 0 ? wallClockValues[wallClockValues.length - 1] : null,
-    },
-    intervention: {
-      total: totalInterventions,
-      mean_per_run: round(totalInterventions / nRuns),
-    },
+    schema_version: "1",
+    run_id: meta.run_id ?? null,
+    generated_at: new Date().toISOString(),
+    corpus_size: meta.corpus_size ?? issuesRun,
+    issues_run: issuesRun,
+    successful_runs: successfulRuns,
+    failed_runs: failedRuns,
+    success_rate_pct: successRatePct,
+    mean_wall_clock_ms: meanWallClockMs,
+    median_wall_clock_ms: medianWallClockMs,
+    total_intervention_count: totalInterventionCount,
     cost: totalCost,
+    run_mode: runMode,
+    spec_sha: meta.spec_sha ?? null,
   };
 }
 
@@ -226,7 +224,7 @@ async function main() {
     process.exit(1);
   }
 
-  const { runs, corpus_version, spec_version, model } = data;
+  const { runs, run_id, corpus_version, run_mode, spec_sha } = data;
 
   try {
     validateRuns(runs);
@@ -235,7 +233,14 @@ async function main() {
     process.exit(1);
   }
 
-  const scorecard = aggregate(runs, { corpus_version, spec_version, model });
+  let scorecard;
+  try {
+    scorecard = aggregate(runs, { run_id, corpus_version, run_mode, spec_sha });
+  } catch (e) {
+    process.stderr.write(`ERROR: ${e.message}\n`);
+    process.exit(1);
+  }
+
   process.stdout.write(JSON.stringify(scorecard, null, 2) + "\n");
 }
 

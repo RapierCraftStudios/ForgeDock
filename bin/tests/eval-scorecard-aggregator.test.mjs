@@ -1,11 +1,14 @@
 /**
- * bin/tests/eval-gate-scorecard.test.mjs
+ * bin/tests/eval-scorecard-aggregator.test.mjs
  *
- * Unit tests for scripts/eval-gate-scorecard.mjs — the pipeline eval-gate
+ * Unit tests for scripts/eval-scorecard-aggregator.mjs — the pipeline eval-harness
  * scorecard aggregator (issue #1285).
  *
+ * Verifies that the aggregator correctly converts per-run result arrays into
+ * scorecard JSON compatible with scripts/eval-gate-scorecard.mjs (#1286).
+ *
  * All tests are pure-function; no network, no live SDK calls, no fs writes.
- * Run with: node --test bin/tests/eval-gate-scorecard.test.mjs
+ * Run with: node --test bin/tests/eval-scorecard-aggregator.test.mjs
  */
 
 import { describe, it } from "node:test";
@@ -18,7 +21,7 @@ import {
   median,
   mean,
   aggregate,
-} from "../../scripts/eval-gate-scorecard.mjs";
+} from "../../scripts/eval-scorecard-aggregator.mjs";
 
 // ---------------------------------------------------------------------------
 // Fixtures
@@ -211,36 +214,53 @@ describe("mean", () => {
 });
 
 // ---------------------------------------------------------------------------
-// aggregate
+// aggregate — output schema compatibility with eval-gate-scorecard.mjs
 // ---------------------------------------------------------------------------
 
 describe("aggregate", () => {
-  it("reports correct counts for a mixed-status corpus", () => {
+  it("emits schema_version: '1' (required by eval-gate-scorecard.mjs)", () => {
+    const sc = aggregate(makeRuns(5));
+    assert.equal(sc.schema_version, "1");
+  });
+
+  it("emits issues_run matching the run array length", () => {
+    const runs = makeRuns(7);
+    const sc = aggregate(runs);
+    assert.equal(sc.issues_run, 7);
+  });
+
+  it("emits successful_runs and failed_runs correctly", () => {
     const runs = [
       ...makeRuns(3, { status: "success" }),
       makeRun({ issue: 2001, status: "failure" }),
       makeRun({ issue: 2002, status: "failure" }),
-      makeRun({ issue: 2003, status: "incomplete" }),
-      makeRun({ issue: 2004, status: "error" }),
     ];
     const sc = aggregate(runs);
-    assert.equal(sc.n_runs, 7);
-    assert.equal(sc.n_success, 3);
-    assert.equal(sc.n_failure, 2);
-    assert.equal(sc.n_incomplete, 2); // incomplete + error
+    assert.equal(sc.successful_runs, 3);
+    assert.equal(sc.failed_runs, 2);
   });
 
-  it("computes one_shot_success_rate correctly", () => {
-    // 4 success out of 5 → 0.8
+  it("computes success_rate_pct correctly (rounded to 2dp)", () => {
+    // 4 success out of 5 → 80%
     const runs = [
       ...makeRuns(4, { status: "success" }),
       makeRun({ issue: 2001, status: "failure" }),
     ];
     const sc = aggregate(runs);
-    assert.equal(sc.one_shot_success_rate, 0.8);
+    assert.equal(sc.success_rate_pct, 80);
   });
 
-  it("computes wall_clock_ms mean and median", () => {
+  it("success_rate_pct matches successful_runs / issues_run * 100 (gate consistency)", () => {
+    const runs = makeRuns(7, { status: "success" });
+    runs.push(makeRun({ issue: 8000, status: "failure" }));
+    runs.push(makeRun({ issue: 8001, status: "failure" }));
+    // 7/9 ≈ 77.78%
+    const sc = aggregate(runs);
+    const computed = Math.round((sc.successful_runs / sc.issues_run) * 100 * 100) / 100;
+    assert.ok(Math.abs(sc.success_rate_pct - computed) < 0.01, `rate mismatch: ${sc.success_rate_pct} vs computed ${computed}`);
+  });
+
+  it("emits mean_wall_clock_ms and median_wall_clock_ms", () => {
     const runs = [
       makeRun({ wallClockMs: 10000 }),
       makeRun({ issue: 1001, wallClockMs: 20000 }),
@@ -249,19 +269,16 @@ describe("aggregate", () => {
       makeRun({ issue: 1004, wallClockMs: 50000 }),
     ];
     const sc = aggregate(runs);
-    assert.equal(sc.wall_clock_ms.mean, 30000);
-    assert.equal(sc.wall_clock_ms.median, 30000);
-    assert.equal(sc.wall_clock_ms.min, 10000);
-    assert.equal(sc.wall_clock_ms.max, 50000);
+    assert.equal(sc.mean_wall_clock_ms, 30000);
+    assert.equal(sc.median_wall_clock_ms, 30000);
   });
 
-  it("computes intervention totals and mean_per_run", () => {
+  it("emits total_intervention_count summed across all runs", () => {
     const runs = makeRuns(5);
     runs[0].interventionCount = 2;
     runs[1].interventionCount = 1;
     const sc = aggregate(runs);
-    assert.equal(sc.intervention.total, 3);
-    assert.equal(sc.intervention.mean_per_run, 0.6);
+    assert.equal(sc.total_intervention_count, 3);
   });
 
   it("sets cost to null when any run has cost null", () => {
@@ -273,7 +290,7 @@ describe("aggregate", () => {
   it("sets cost to the sum when all runs have a real cost", () => {
     const runs = makeRuns(5, { cost: 0.01 });
     const sc = aggregate(runs);
-    // 5 * 0.01 = 0.05 (rounded to 3dp)
+    // 5 * 0.01 = 0.05
     assert.equal(sc.cost, 0.05);
   });
 
@@ -284,61 +301,70 @@ describe("aggregate", () => {
     assert.equal(sc.cost, null);
   });
 
-  it("passes through corpus_version and spec_version from meta", () => {
-    const runs = makeRuns(5);
-    const sc = aggregate(runs, {
-      corpus_version: "v2",
-      spec_version: "1.0.99",
-      model: "claude-opus-4",
-    });
-    assert.equal(sc.corpus_version, "v2");
-    assert.equal(sc.spec_version, "1.0.99");
-    assert.equal(sc.model, "claude-opus-4");
+  it("defaults run_mode to 'full'", () => {
+    const sc = aggregate(makeRuns(5));
+    assert.equal(sc.run_mode, "full");
   });
 
-  it("picks model from runs when meta.model is absent", () => {
-    const runs = makeRuns(5, { model: "claude-test-model" });
-    const sc = aggregate(runs);
-    assert.equal(sc.model, "claude-test-model");
+  it("accepts run_mode 'subset'", () => {
+    const sc = aggregate(makeRuns(5), { run_mode: "subset" });
+    assert.equal(sc.run_mode, "subset");
   });
 
-  it("a deliberately degraded corpus (all failures) scores 0 success rate", () => {
+  it("throws when run_mode is invalid", () => {
+    assert.throws(() => aggregate(makeRuns(5), { run_mode: "turbo" }), /run_mode must be/);
+  });
+
+  it("passes through run_id and spec_sha from meta", () => {
+    const sc = aggregate(makeRuns(5), { run_id: "run-001", spec_sha: "abc123" });
+    assert.equal(sc.run_id, "run-001");
+    assert.equal(sc.spec_sha, "abc123");
+  });
+
+  it("emits generated_at as an ISO-8601 timestamp", () => {
+    const sc = aggregate(makeRuns(5));
+    assert.match(sc.generated_at, /^\d{4}-\d{2}-\d{2}T/);
+  });
+
+  it("a deliberately degraded corpus (all failures) scores success_rate_pct: 0", () => {
     const runs = makeRuns(MIN_RUNS, { status: "failure" });
     const sc = aggregate(runs);
-    assert.equal(sc.one_shot_success_rate, 0);
-    assert.equal(sc.n_success, 0);
-    assert.equal(sc.n_failure, MIN_RUNS);
+    assert.equal(sc.success_rate_pct, 0);
+    assert.equal(sc.successful_runs, 0);
+    assert.equal(sc.failed_runs, MIN_RUNS);
   });
 
-  it("a perfect corpus scores a success rate of 1", () => {
+  it("a perfect corpus scores success_rate_pct: 100", () => {
     const runs = makeRuns(MIN_RUNS, { status: "success" });
     const sc = aggregate(runs);
-    assert.equal(sc.one_shot_success_rate, 1);
+    assert.equal(sc.success_rate_pct, 100);
   });
 
-  it("scorecard keys match documented schema shape", () => {
-    const sc = aggregate(makeRuns(5));
-    const expectedKeys = [
-      "corpus_version",
-      "spec_version",
-      "model",
-      "n_runs",
-      "n_success",
-      "n_failure",
-      "n_incomplete",
-      "one_shot_success_rate",
-      "wall_clock_ms",
-      "intervention",
-      "cost",
+  it("incomplete and error runs count against success_rate_pct", () => {
+    // 3 success, 1 incomplete, 1 error → 3/5 = 60%
+    const runs = [
+      ...makeRuns(3, { status: "success" }),
+      makeRun({ issue: 2001, status: "incomplete" }),
+      makeRun({ issue: 2002, status: "error" }),
     ];
-    for (const key of expectedKeys) {
-      assert.ok(Object.prototype.hasOwnProperty.call(sc, key), `missing key: ${key}`);
+    const sc = aggregate(runs);
+    assert.equal(sc.success_rate_pct, 60);
+  });
+
+  it("scorecard keys satisfy the eval-gate-scorecard.mjs REQUIRED_FIELDS", () => {
+    // eval-gate-scorecard.mjs requires: schema_version, issues_run, successful_runs,
+    // failed_runs, success_rate_pct, run_mode
+    const sc = aggregate(makeRuns(5));
+    const required = [
+      "schema_version",
+      "issues_run",
+      "successful_runs",
+      "failed_runs",
+      "success_rate_pct",
+      "run_mode",
+    ];
+    for (const key of required) {
+      assert.ok(Object.prototype.hasOwnProperty.call(sc, key), `missing gate-required key: ${key}`);
     }
-    const wallKeys = ["mean", "median", "min", "max"];
-    for (const k of wallKeys) {
-      assert.ok(Object.prototype.hasOwnProperty.call(sc.wall_clock_ms, k), `missing wall_clock_ms.${k}`);
-    }
-    assert.ok(Object.prototype.hasOwnProperty.call(sc.intervention, "total"));
-    assert.ok(Object.prototype.hasOwnProperty.call(sc.intervention, "mean_per_run"));
   });
 });
