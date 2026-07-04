@@ -166,6 +166,37 @@ _trend() {
 }
 ```
 
+### 1D: Run deterministic pipeline-state doctor
+
+Before any LLM analysis, run the deterministic stall-detection script. This costs zero tokens and produces machine-readable findings that Phase 2 and Phase 3 consume directly.
+
+```bash
+# Resolve script path (supports repo-local overrides via FORGE_HOME/scripts/)
+DOCTOR_SCRIPT="${FORGE_HOME}/scripts/doctor-pipeline-state.sh"
+if [ ! -x "$DOCTOR_SCRIPT" ]; then
+  DOCTOR_SCRIPT=$(command -v doctor-pipeline-state.sh 2>/dev/null || true)
+fi
+
+if [ -n "$DOCTOR_SCRIPT" ] && [ -x "$DOCTOR_SCRIPT" ]; then
+  DOCTOR_OUTPUT=$("$DOCTOR_SCRIPT" --repo "$GH_REPO" --json 2>/dev/null || true)
+  DOCTOR_FINDINGS=$(echo "$DOCTOR_OUTPUT" | jq '.findings // []' 2>/dev/null || echo "[]")
+  DOCTOR_SUMMARY=$(echo "$DOCTOR_OUTPUT" | jq '.summary // {}' 2>/dev/null || echo "{}")
+  DOCTOR_CRITICAL=$(echo "$DOCTOR_SUMMARY" | jq '.critical // 0')
+  DOCTOR_WARNING=$(echo "$DOCTOR_SUMMARY"  | jq '.warning  // 0')
+  echo "Pipeline-state doctor: $DOCTOR_CRITICAL critical, $DOCTOR_WARNING warning"
+else
+  echo "WARNING: doctor-pipeline-state.sh not found — skipping deterministic stall check"
+  DOCTOR_FINDINGS="[]"
+  DOCTOR_SUMMARY="{}"
+  DOCTOR_CRITICAL=0
+  DOCTOR_WARNING=0
+fi
+```
+
+**If `DOCTOR_CRITICAL > 0`**: Surface these in the Phase 3 analysis and in the Phase 5 report as P0 items. They are invariant violations, not estimates.
+
+**`DOCTOR_FINDINGS`** is a JSON array. Each finding has: `type`, `severity`, `issue`, `label`, `hours_stuck`, `last_annotation`, `resume_command`, `detail`. Use these fields verbatim in the health report — do not paraphrase.
+
 ---
 
 ## Phase 2: Collect Pipeline Metrics
