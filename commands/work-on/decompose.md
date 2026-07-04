@@ -108,6 +108,21 @@ For each sub-issue, prepare:
 
 For each sub-issue (in dependency order):
 
+**Before creating each sub-issue, run the deterministic dedup check:** <!-- Added: forge#1335 -->
+
+```bash
+SUB_TITLE="{fix|feat|refactor}: {SUB_ISSUE_TITLE}"
+DEDUP_RESULT=$(scripts/issue-dedup.sh "$SUB_TITLE" {GH_FLAG} 2>/dev/null)
+DEDUP_EXIT=$?
+if [ "$DEDUP_EXIT" -eq 1 ]; then
+  echo "DEDUP: Sub-issue near-duplicate detected — $DEDUP_RESULT"
+  echo "Skipping creation. Comment on the existing issue instead."
+  # Do NOT call gh issue create for this sub-issue
+fi
+```
+
+Only call `gh issue create` when the dedup script exits 0 (no match):
+
 ```bash
 gh issue create {GH_FLAG} \
   --title "{fix|feat|refactor}: {SUB_ISSUE_TITLE}" \
