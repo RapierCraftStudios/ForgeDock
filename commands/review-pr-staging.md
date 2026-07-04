@@ -18,6 +18,17 @@ Performs comprehensive review of `staging` before merging to `main`. Handles lar
 
 <!-- FORGE:SPEC_LOADED — review-pr-staging.md loaded and active. Agent is bound by this spec. -->
 
+## Forbidden Tools Self-Check
+
+**Before executing any phase**, verify you are NOT using any of these tools:
+
+| Tool | Status | Reason |
+|------|--------|--------|
+| `Agent` | **FORBIDDEN** | Bypasses allowed-tools constraint; produces opaque output that cannot be structured into the review verdict |
+| `EnterPlanMode` | **FORBIDDEN** | Breaks execution context; phases must be executed, not planned |
+
+If you find yourself about to call `Agent(...)`, stop and use `Task(...)` instead.
+
 ---
 
 ## Config Resolution
