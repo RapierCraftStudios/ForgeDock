@@ -58,6 +58,21 @@ describe("writeForgeYaml", () => {
     assert.match(yaml, /description: "line one\\nline two"\s+# TODO\(forgedock:description\)/);
     assert.doesNotMatch(yaml, /line two"\s*$/m);
   });
+  it("uses atomic tmp+rename: no partial .tmp left on write failure (ref: #1396)", () => {
+    // Simulate a write failure by pointing outputPath at a directory (writeFileSync
+    // throws EISDIR — a cheap stand-in for ENOSPC without needing a real disk-full condition).
+    const out = join(dir, "forge.yaml");
+    mkdirSync(out); // make outputPath a directory so writeFileSync to .tmp fails
+    assert.throws(() => writeForgeYaml(VALUES, [], out), /EISDIR|EEXIST|EPERM/);
+    // The .tmp must not survive the failure
+    assert.ok(!existsSync(out + ".tmp"), ".tmp file must be cleaned up on write failure");
+  });
+  it("leaves no stale .tmp after a successful write", () => {
+    const out = join(dir, "forge.yaml");
+    writeForgeYaml(VALUES, [], out);
+    assert.ok(existsSync(out), "forge.yaml must exist after write");
+    assert.ok(!existsSync(out + ".tmp"), ".tmp must be gone after successful write");
+  });
 });
 
 describe("backupExisting", () => {
