@@ -156,7 +156,7 @@ done
 # Full file diff summary
 git diff --stat origin/$TARGET..origin/$SOURCE
 
-# Read layout paths from forge.yaml, fall back to AlterLab defaults
+# Read layout paths from forge.yaml, fall back to forge.yaml defaults
 LAYOUT_API=$(yq '.review.layout.api // "services/api"' forge.yaml 2>/dev/null || echo "services/api")
 LAYOUT_WORKER=$(yq '.review.layout.worker // "services/worker"' forge.yaml 2>/dev/null || echo "services/worker")
 LAYOUT_PAGES=$(yq '.review.layout.pages // "web/src/app"' forge.yaml 2>/dev/null || echo "web/src/app")
