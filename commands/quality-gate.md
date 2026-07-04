@@ -279,7 +279,7 @@ For new/modified endpoints:
 1. Which auth dependency is used? Read `forge.yaml → review.domains.auth` for the configured dependency name(s). If absent, skip the naming check and fall back to generic resource-ownership verification only.
 2. Does the endpoint check resource ownership (`user_id` or equivalent) before returning data?
 
-Route-path-to-dependency convention (e.g. "dashboard routes must use X, public routes must use Y") is project-specific. Configure it in `forge.yaml → review.domains.auth` if your project uses one. Do not enforce a hard-coded convention universally. <!-- Updated: forge#1349 — removed AlterLab-specific SessionUser/CurrentUser rule -->
+Route-path-to-dependency convention (e.g. "dashboard routes must use X, public routes must use Y") is project-specific. Configure it in `forge.yaml → review.domains.auth` if your project uses one. Do not enforce a hard-coded convention universally. <!-- Updated: forge#1349 — removed hardcoded SessionUser/CurrentUser rule -->
 
 ```bash
 # Read configured auth dependency names from forge.yaml (if present)
@@ -418,7 +418,7 @@ done < <(echo {CHANGED_FILES} | tr ' ' '\n' | grep -E '\.tsx?$' | grep -v 'route
 
 The direct-backend path prefix to flag is read from `forge.yaml → review.layout.direct_api_prefix`.
 If absent, defaults to `/api/v1/` (backward compatible). This prevents false findings on projects
-that use a different API path scheme. <!-- Updated: forge#1349 — gate on forge.yaml, not hardcoded AlterLab prefix -->
+that use a different API path scheme. <!-- Updated: forge#1349 — gate on forge.yaml, not hardcoded prefix -->
 
 ```bash
 # Read configured direct API prefix from forge.yaml, fall back to /api/v1/
