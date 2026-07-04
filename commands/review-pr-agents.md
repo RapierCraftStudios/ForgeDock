@@ -10,6 +10,8 @@ This file is the Agent Catalog referenced by the `/review-pr` orchestrator. It i
 
 Do not modify this file without also updating `review-pr.md`. To update either protocol, edit `docs/spec/review-protocol.md` and sync the copy below.
 
+**NEVER use the Agent tool.** The orchestrator dispatches review agents via `Task` only. `Agent` spawns opaque subprocesses that bypass the `allowed-tools` constraint, cannot post structured findings to the PR, and are not tracked by the review pipeline. Every agent template in this catalog is intended to be passed as the `prompt` argument to a `Task(...)` call.
+
 <!-- FORGE:PROTOCOL_SOURCE — canonical definition lives in docs/spec/review-protocol.md -->
 
 ---
