@@ -1,6 +1,6 @@
 ---
 description: Autonomous platform improvement cycle — recon, triage, fix, report. Runs recon+triage by default; pass --fix to also pick up and fix top issues. Human gates all deploys.
-argument-hint: [--fix | --recon-only | --fix --limit 5 | --dry-run]
+argument-hint: [--fix | --recon-only | --fix --limit 5 | --dry-run | --fix --yes]
 ---
 
 # /autopilot — Recursive Platform Improvement Cycle
@@ -43,6 +43,7 @@ You are an autonomous improvement engine for this project. Your job is to **find
 | `--fix --limit N` | Fix at most N issues (default: 3) |
 | `--recon-only` | Phase 1 only (data collection, no issue creation) |
 | `--dry-run` | Run everything but don't create issues or PRs — just report what would happen |
+| `--fix --yes` | Auto-approve low-risk fixes (P3, single-file, non-sensitive domain); P0/P1, multi-file, and sensitive-domain fixes still require confirmation |
 
 Parse `$ARGUMENTS` and set these variables:
 ```
@@ -50,6 +51,7 @@ MODE = "full" | "recon-only" | "fix"    # derived from flags
 DO_FIX = true if --fix present
 FIX_LIMIT = N from --limit N, default 3
 DRY_RUN = true if --dry-run present
+AUTO_YES = true if --yes present
 ```
 
 ---
@@ -361,22 +363,47 @@ gh issue list --state open --label "bug" --limit 50 --json number,title,labels,c
 
 **MANDATORY CHECKPOINT — do NOT proceed without user confirmation.**
 
+**Exception**: when `AUTO_YES = true`, classify each fix target by risk tier before prompting. Low-risk fixes are auto-approved; high-risk fixes still require confirmation.
+
+**Risk classification** (evaluate per-issue at this step):
+
+```
+LOW_RISK = all of the following are true:
+  - Priority is P2 or P3 (not P0 or P1)
+  - Affects only a single file (from issue body or recon finding)
+  - No sensitive-domain labels: auth, billing, database, security, payments, gdpr
+
+HIGH_RISK = any of the following:
+  - Priority P0 or P1
+  - Multi-file change (2+ files)
+  - Has a sensitive-domain label (auth, billing, database, security, payments, gdpr)
+  - Issue has `needs-human` label
+```
+
+When `AUTO_YES = true`:
+- **LOW_RISK issues**: auto-approve, log `[AUTO-APPROVED: low-risk]`, proceed to 4B.5/4C without waiting.
+- **HIGH_RISK issues**: present the checkpoint below and wait for user response. If user skips, remove from fix targets and continue with remaining low-risk issues.
+
+When `AUTO_YES = false` (default): present the full checkpoint for ALL fix targets and wait.
+
 ```markdown
 ## Autopilot Fix Plan
 
 I'll run `/work-on` for these {N} issues:
 
-| # | Title | Priority | Estimated Scope |
-|---|-------|----------|-----------------|
-| {number} | {title} | {priority} | {small/medium/large} |
+| # | Title | Priority | Estimated Scope | Risk Tier |
+|---|-------|----------|-----------------|-----------|
+| {number} | {title} | {priority} | {small/medium/large} | LOW / HIGH |
 
 Each issue goes through: investigate → validate → build → review → merge to staging.
 Nothing merges to `main` — you deploy when ready.
 
+{If AUTO_YES and any HIGH_RISK: "Note: {N_low} low-risk issues were auto-approved. The {N_high} high-risk issue(s) above require your confirmation."}
+
 **Proceed?** (yes / adjust / skip)
 ```
 
-Wait for user response. If they adjust, re-select. If they skip, end the cycle.
+Wait for user response on high-risk issues. If they adjust, re-select. If they skip all, end the cycle.
 
 ### 4B.5: Spec-Edit Impact Analysis (MANDATORY before any spec-touching fix) <!-- Added: forge#870 -->
 
@@ -502,7 +529,7 @@ When ready to deploy, merge `staging` → `main` via GitHub.
 7. **If a fix fails, move on** — don't retry. Log it and let the next cycle or human handle it.
 8. **DRY_RUN means NO side effects** — no issues created, no PRs, no label changes. Report only.
 9. **P0 overrides everything** — if P0 exists, skip normal recon and fix P0 immediately.
-10. **Always gate fixes on user approval** — Phase 4B checkpoint is non-negotiable.
+10. **Always gate high-risk fixes on user approval** — Phase 4B checkpoint is non-negotiable for P0/P1, multi-file, or sensitive-domain changes. `--yes` only auto-approves LOW_RISK tier (P2/P3, single-file, non-sensitive).
 
 ---
 
@@ -530,5 +557,5 @@ The platform gets better every cycle. Issues that aren't picked up age and rise 
 - **Runtime**: Recon-only ~3-5 min. Full cycle with fixes ~15-45 min depending on issue count.
 - **Token budget**: Recon is cheap (mostly MCP + API calls). Fixes are expensive (full /work-on per issue).
 - **Idempotent**: Safe to run multiple times — dedup prevents duplicate issues, /work-on resumes from checkpoints.
-- **Pairs with /loop**: Run `/loop 4h /autopilot` for continuous improvement, or `/loop 4h /autopilot --fix --limit 2` for autonomous fixing with a human checkpoint every cycle.
+- **Pairs with /loop**: Run `/loop 4h /autopilot` for continuous improvement, `/loop 4h /autopilot --fix --limit 2` for autonomous fixing with a human checkpoint every cycle, or `/loop 4h /autopilot --fix --yes` for fully unattended low-risk fixes (high-risk issues still surface for approval).
 - **Event-driven complement**: `/autopilot` is a periodic cycle. When a specific production signal fires (metric regression, incident, GEO gap), use `/signal-planner` instead — it converts the signal into a dependency-ordered issue DAG, executes via `/orchestrate`, and verifies the originating signal is resolved after the work merges. Use `/autopilot` for scheduled health sweeps; use `/signal-planner` for targeted signal-driven response.
