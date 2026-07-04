@@ -676,20 +676,36 @@ export function renderDryRun(ctx) {
 
 /**
  * Render the pipeline summary card emitted on completion.
- * @param {{command: string, args: string[], iterations: number, stopReason: string}} ctx
+ * @param {{command: string, args: string[], iterations: number, stopReason: string, usage?: object|null}} ctx
  * @returns {string}
  */
 export function renderSummaryCard(ctx) {
-  const { command, args, iterations, stopReason } = ctx;
+  const { command, args, iterations, stopReason, usage = null } = ctx;
   const argStr = Array.isArray(args) ? args.join(" ") : String(args ?? "");
-  return [
+  const lines = [
     ``,
     `┌─ ForgeDock pipeline summary ────────────────────────────`,
     `│ command:    /${command} ${argStr}`.trimEnd(),
     `│ iterations: ${iterations}`,
     `│ stop:       ${stopReason}`,
+  ];
+  if (usage) {
+    lines.push(
+      `│ tokens:     ${usage.input_tokens} in / ${usage.output_tokens} out`,
+      `│ cache:      ${usage.cache_read_input_tokens} read / ${usage.cache_creation_input_tokens} write`,
+    );
+  } else {
+    lines.push(`│ tokens:     N/A`);
+  }
+  lines.push(
     `└─────────────────────────────────────────────────────────`,
-  ].join("\n");
+  );
+  if (usage) {
+    lines.push(
+      `FORGE:USAGE_JSON:${JSON.stringify(usage)}`,
+    );
+  }
+  return lines.join("\n");
 }
 
 // ---------------------------------------------------------------------------
@@ -771,6 +787,15 @@ export async function runCommand(opts = {}) {
   const handlers = getToolHandlers(cwd);
   const messages = [{ role: "user", content: userMessage }];
 
+  // Accumulate token usage across all messages.create() calls in this run.
+  // Field names match the Anthropic SDK's response.usage object exactly.
+  const usage = {
+    input_tokens: 0,
+    output_tokens: 0,
+    cache_creation_input_tokens: 0,
+    cache_read_input_tokens: 0,
+  };
+
   let iterations = 0;
   while (iterations < maxIterations) {
     iterations++;
@@ -782,6 +807,14 @@ export async function runCommand(opts = {}) {
       tools: TOOL_DEFINITIONS,
       messages,
     });
+
+    // Accumulate usage — guard each field for null/undefined (SDK omits
+    // cache fields when prompt caching is not active).
+    const ru = response.usage ?? {};
+    usage.input_tokens += ru.input_tokens ?? 0;
+    usage.output_tokens += ru.output_tokens ?? 0;
+    usage.cache_creation_input_tokens += ru.cache_creation_input_tokens ?? 0;
+    usage.cache_read_input_tokens += ru.cache_read_input_tokens ?? 0;
 
     messages.push({ role: "assistant", content: response.content });
 
@@ -802,6 +835,7 @@ export async function runCommand(opts = {}) {
           args,
           iterations,
           stopReason: response.stop_reason,
+          usage,
         }),
       );
       return {
@@ -809,6 +843,7 @@ export async function runCommand(opts = {}) {
         command: spec.name,
         iterations,
         stopReason: response.stop_reason,
+        usage,
       };
     }
 
@@ -841,7 +876,8 @@ export async function runCommand(opts = {}) {
       args,
       iterations,
       stopReason: "max_iterations",
+      usage,
     }),
   );
-  return { status: "max-iterations", command: spec.name, iterations };
+  return { status: "max-iterations", command: spec.name, iterations, usage };
 }
