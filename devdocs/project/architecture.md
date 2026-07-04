@@ -121,21 +121,21 @@ These scripts sit in the universal tier (bundled with the npm package, run local
 - Replace repeated per-session re-discovery with cached operational knowledge
 - User can opt-in to committing them to the repo
 
-**Measured token savings** (from #673 — based on 5 representative ForgeDock sessions):
+**Measured token savings** (from #673 — based on 5 representative ForgeDock sessions, estimates adjusted ~30% upward for the claude-sonnet-5 tokenizer):
 
 | Operation | Baseline (rediscovery) | With adaptive scripts | Saving |
 |-----------|------------------------|----------------------|--------|
-| forge.yaml full read | ~1,050 tokens | ~100 tokens (learned: section only) | ~950 |
-| Branch name determination | ~350 tokens (gh + LLM inference) | ~170 tokens (branch-targets.sh) | ~180 |
-| Commit style detection | ~200 tokens (git log + LLM) | ~100 tokens (format-commit.sh) | ~100 |
-| Test command discovery | ~400 tokens (package.json + grep) | ~80 tokens (run-tests.sh) | ~320 |
-| Test location + label discovery | ~550 tokens | ~0 discovery¹ | ~550 |
-| **Session total** | **~2,550 tokens** | **~450 tokens** | **~2,100 tokens** |
+| forge.yaml full read | ~1,365 tokens | ~130 tokens (learned: section only) | ~1,235 |
+| Branch name determination | ~455 tokens (gh + LLM inference) | ~220 tokens (branch-targets.sh) | ~235 |
+| Commit style detection | ~260 tokens (git log + LLM) | ~130 tokens (format-commit.sh) | ~130 |
+| Test command discovery | ~520 tokens (package.json + grep) | ~105 tokens (run-tests.sh) | ~415 |
+| Test location + label discovery | ~715 tokens | ~0 discovery¹ | ~715 |
+| **Session total** | **~3,315 tokens** | **~585 tokens** | **~2,730 tokens** |
 
-¹ The prose-discovery calls for test locations and label schemes are eliminated (replaced by `find-tests.sh` and `label-map.sh`). Script execution costs (~80–100 tokens each) are already included in the ~450 session total above — they are not additive.
+¹ The prose-discovery calls for test locations and label schemes are eliminated (replaced by `find-tests.sh` and `label-map.sh`). Script execution costs (~105–130 tokens each) are already included in the ~585 session total above — they are not additive.
 
-Savings range: 1,200 tokens (simple fast-lane issues) to 3,500 tokens (complex multi-file builds).
-At claude-sonnet-4-5 pricing ($3.00/M tokens): ~$0.0063/session saved, ~$1.89/month per repo at 300 sessions/month.
+Savings range: 1,560 tokens (simple fast-lane issues) to 4,550 tokens (complex multi-file builds).
+At claude-sonnet-5 pricing ($3.00/M tokens standard; $2.00/M intro through 2026-08-31): ~$0.0082/session saved at standard pricing, ~$2.46/month per repo at 300 sessions/month. Token estimates use a 1 token ≈ 4 characters heuristic adjusted ~30% for the claude-sonnet-5 tokenizer (±20% error margin).
 
 The primary value is **reliability**, not cost: scripts eliminate LLM inference from deterministic operations. An agent running `branch-targets.sh` cannot hallucinate the branch name (see #639 — hallucinated `milestone/project-agnostic` caused 6-day pipeline misrouting).
 

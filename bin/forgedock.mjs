@@ -1617,7 +1617,7 @@ function help() {
  *
  * Flags:
  *   --dry-run               Preview the assembled prompt + tool plan; no API call.
- *   --model <id>            Override the model (default: claude-sonnet-4-5 or $FORGEDOCK_MODEL).
+ *   --model <id>            Override the model (default: claude-sonnet-5 or $FORGEDOCK_MODEL).
  *   --max-iterations <n>    Bound the tool-use loop (default: 50).
  *
  * The live loop requires ANTHROPIC_API_KEY and the optional @anthropic-ai/sdk

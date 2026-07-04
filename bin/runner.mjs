@@ -46,9 +46,9 @@ import {
 import { join, dirname, basename, relative, isAbsolute } from "path";
 import { execSync, spawnSync } from "child_process";
 
-const DEFAULT_MODEL = "claude-sonnet-4-5";
+const DEFAULT_MODEL = "claude-sonnet-5";
 const DEFAULT_MAX_ITERATIONS = 50;
-const DEFAULT_MAX_TOKENS = 8192;
+const DEFAULT_MAX_TOKENS = 16384;
 // Default wall-clock limit for a single run_bash command. Chosen to be
 // generous enough for CI steps (git clones, test suites) while bounding
 // the worst-case hang to 5 minutes. Override via FORGEDOCK_BASH_TIMEOUT (ms).

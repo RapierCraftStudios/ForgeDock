@@ -788,11 +788,11 @@ describe("renderDryRun / renderSummaryCard", () => {
       spec,
       systemPrompt: "x".repeat(42),
       userMessage: "Execute: /work-on 1151",
-      model: "claude-sonnet-4-5",
+      model: "claude-sonnet-5",
       maxIterations: 50,
     });
     assert.match(out, /\/work-on/);
-    assert.match(out, /claude-sonnet-4-5/);
+    assert.match(out, /claude-sonnet-5/);
     assert.match(out, /read_file, write_file, run_bash/);
     assert.match(out, /42 chars/);
     assert.match(out, /dry-run/);
