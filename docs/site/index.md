@@ -30,6 +30,7 @@ No more coordinating between agent sessions. No more lost context. No more start
 | [ForgeDock vs. Manual Workflows](./vs-manual-workflows.md) | Why structured pipelines beat ad-hoc Claude Code sessions |
 | [FORGE Annotation Protocol](./forge-annotation-protocol.md) | Technical spec — annotation types, completion markers, querying |
 | [Command Reference](./command-reference.md) | All 25+ commands with usage, options, and examples |
+| [For Companies](./for-companies.md) | AGPL vs. commercial license, fleet layer, design-partner program, procurement facts |
 
 ---
 

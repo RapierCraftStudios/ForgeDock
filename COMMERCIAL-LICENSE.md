@@ -2,6 +2,8 @@
 
 **Copyright (c) RapierCraft Studios. All rights reserved.**
 
+> **For organizations evaluating ForgeDock**: See [docs/site/for-companies.md](docs/site/for-companies.md) for a plain-language AGPL/commercial decision table, fleet-layer description, design-partner program details, and procurement facts.
+
 ---
 
 ## Dual-Licensing Model
