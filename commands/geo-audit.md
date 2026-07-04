@@ -12,6 +12,8 @@ You are the GEO (Generative Engine Optimization) auditor. Pull AI referral data 
 
 **NEVER use plan mode (EnterPlanMode)** — it breaks execution context.
 
+<!-- FORGE:SPEC_LOADED — geo-audit.md loaded and active. Agent is bound by this spec. -->
+
 ---
 
 ## Phase 0: Load Config

@@ -13,7 +13,12 @@ Milestones are the top-level planning unit. They group related issues into a shi
 
 **Hierarchy**: Milestone → Issues → Sub-issues (optional decomposition)
 
-**You have access to ALL tools** — Task tool, Skill tool, sub-agents, everything.
+**NEVER use plan mode (EnterPlanMode).**
+**NEVER use the Agent tool for issue work** — milestone dispatches issue work via `Skill(skill="work-on", ...)` only. The Agent tool bypasses the Skill pipeline's label state machine, FORGE annotations, and structured review. The Agent tool may be used only for coordination tasks within milestone planning itself (e.g., parallel issue list queries) — never for /work-on sub-dispatch.
+
+<!-- FORGE:SPEC_LOADED — milestone.md loaded and active. Agent is bound by this spec. -->
+
+**You have access to Task, Skill, and Bash tools** for milestone coordination.
 
 ## Config Resolution
 

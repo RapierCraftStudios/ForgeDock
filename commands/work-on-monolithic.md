@@ -14,6 +14,9 @@ Orchestrator for the full issue lifecycle: investigate → build → review → 
 
 **Agent model policy**: Default `model: "sonnet"`. Fallback: `model: "opus"` if Sonnet is rate-limited.
 **NEVER use plan mode (EnterPlanMode).**
+**NEVER use the Agent tool** — this spec executes all phases inline as a single monolithic prompt. The Agent tool would spawn a subprocess outside this context, breaking the single-prompt contract and losing all accumulated pipeline state.
+
+<!-- FORGE:SPEC_LOADED — work-on-monolithic.md loaded and active. Agent is bound by this spec. -->
 
 ### Compaction Resilience
 

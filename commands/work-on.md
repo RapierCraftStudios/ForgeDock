@@ -13,6 +13,19 @@ Orchestrator for the full issue lifecycle: investigate → decompose (if needed)
 
 **Agent model policy**: Default `model: "sonnet"`. Fallback: `model: "opus"` if Sonnet is rate-limited.
 **NEVER use plan mode (EnterPlanMode).**
+**NEVER use the Agent tool** — this spec uses `Skill(...)` for sub-phase dispatch. The Agent tool spawns opaque subprocesses that bypass phase protocols, skip FORGE annotations, and cannot be constrained by allowed-tools. Always use `Skill(skill="...", args="...")` for sub-phase invocations.
+
+<!-- FORGE:SPEC_LOADED — work-on.md loaded and active. Agent is bound by this spec. -->
+
+## HARD RULES — READ BEFORE ANYTHING ELSE
+
+1. **Every sub-phase MUST be invoked via `Skill(...)`.** You do NOT implement inline. You invoke `Skill(skill="work-on/investigate", ...)`, `Skill(skill="work-on/build", ...)`, etc. The Skill tool invocation is what triggers label updates, FORGE annotations, and structured output. Without it, the phase has no paper trail.
+
+2. **Write to GitHub after EVERY phase.** Every FORGE annotation (HEARTBEAT, INVESTIGATOR, CONTRACT, BUILDER, etc.) must be posted before the next phase starts. A phase that completes without a GitHub write is effectively invisible to the stall detector and future sessions.
+
+3. **Follow the Universal Phase Dispatcher.** The phase sequence table is the SINGLE source of truth for transitions. Do NOT skip phases, do NOT reorder phases, do NOT treat intermediate completions as terminal. Only the terminal states listed in the Dispatcher allow stopping.
+
+4. **PRs NEVER target `main`.** Target `staging` (fast lane) or `milestone/{slug}` (feature lane). A PR to main is a pipeline violation regardless of what the issue description says.
 
 ### Compaction Resilience
 

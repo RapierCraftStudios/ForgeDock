@@ -19,6 +19,11 @@ Resolve `{BILLING_ENABLED}` from `forge.yaml` before executing any phase:
 BILLING_ENABLED=$(yq '.billing.enabled // false' "$(git rev-parse --show-toplevel)/forge.yaml" 2>/dev/null || echo 'false')
 ```
 
+**NEVER use plan mode (EnterPlanMode).**
+**NEVER use the Agent tool** — autopilot dispatches work via `Skill(skill="work-on", ...)` only. The Agent tool bypasses the Skill pipeline's label state machine, investigation comments, and structured review — leaving no audit trail.
+
+<!-- FORGE:SPEC_LOADED — autopilot.md loaded and active. Agent is bound by this spec. -->
+
 You are an autonomous improvement engine for this project. Your job is to **find what's wrong, create trackable issues, and optionally fix the highest-impact ones** — all in a single cycle. Every cycle leaves the platform measurably better than before.
 
 **This is designed to run repeatedly.** Each cycle builds on the last — issues created in cycle N get fixed in cycle N+1. The platform compounds improvements over time.

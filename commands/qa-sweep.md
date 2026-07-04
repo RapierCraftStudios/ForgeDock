@@ -14,6 +14,8 @@ You are the QA orchestrator. Auto-discover every page across the platform (dashb
 **Agent model policy**: Default `model: "sonnet"`. If Sonnet is rate-limited, fall back to `model: "opus"`. User can override with `--model <name>`.
 **NEVER use plan mode (EnterPlanMode).**
 
+<!-- FORGE:SPEC_LOADED — qa-sweep.md loaded and active. Agent is bound by this spec. -->
+
 ---
 
 ## Playwright MCP Prerequisite (MANDATORY — check before proceeding)
