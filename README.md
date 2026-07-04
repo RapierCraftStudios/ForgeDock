@@ -179,24 +179,40 @@ Every mechanism above exists because autonomous agents fail in predictable ways.
 
 ## Commands
 
+**The core loop:**
+
 | Command | What it does |
 | --- | --- |
 | **`/work-on`** | Full issue lifecycle: investigate → build → quality gate → review → merge |
-| `/orchestrate` | Parallel execution — decomposes a milestone into conflict-aware waves, runs `/work-on` on each |
+| `/orchestrate` | A whole milestone in parallel — conflict-aware waves, one pipeline per issue |
 | `/issue` | Creates pipeline-ready GitHub issues |
-| `/review-pr` | Context-aware PR review with 9 specialist agents |
-| `/quality-gate` | Pre-commit checks across 14+ domains |
 | `/milestone` | Create, manage, and ship milestones |
+| `/review-pr` | Context-aware PR review with domain-specialist agents |
+| `/quality-gate` | Pre-commit checks, gated by the domains your change actually touches |
+| `/test-gate` | Acceptance verification against running code before anything deploys |
+
+**Observe & recover** — the durable-state story, as commands:
+
+| Command | What it does |
+| --- | --- |
+| `/pipeline-status` | Fleet view of every in-flight issue, straight from workflow labels |
+| `/pipeline-resume` | Resume an interrupted run from whatever state GitHub reports |
+| `/diagnose` | Trace why a run failed, from its annotations |
+| `/explain` | Translate the FORGE annotations on any issue into plain language |
+| `/replay` | Replay a past run's full audit trail |
+| `/changelog` | Release notes assembled from merged PRs and trajectory receipts |
+
+**Ops:**
+
+| Command | What it does |
+| --- | --- |
 | `/deploy-info` | Staging vs. main diff with risk assessment |
 | `/rollback` | Automated revert PR for production incidents |
-| `/incident-response` | P0 coordination: hotfix, timeline, postmortem |
-| `/pipeline-health` | Self-analysis — measures performance, proposes improvements |
-| `/autopilot` | Autonomous improvement cycle: recon → triage → fix |
+| `/autopilot` | Production signals → triaged issues → fixes |
 | `/security-audit` | Multi-phase security posture audit |
 | `/cleanup` | Sweeps stale issues, branches, worktrees |
-| `/analytics` | Pull metrics from GSC, Clarity, Umami, Stripe, and more |
 
-[Full command reference →](docs/site/command-reference.md)
+More ship today (web-property analytics, browser QA sweeps, self-benchmarking) — see the [full command reference](docs/site/command-reference.md). A leaner, tiered install that keeps the core loop front and center is planned in [#1257](https://github.com/RapierCraftStudios/ForgeDock/issues/1257).
 
 ---
 
