@@ -1019,6 +1019,108 @@ INDEX_SLICE_INFRA=$(build_index_slice "infrastructure")
 
 **Absence is not an error**: If `scripts/code-index.sh` is absent, `INDEX_SLICE_*` variables will contain the fallback message and agents proceed with their standard grep-based exploration.
 
+**>>> COMPUTE: Per-domain diff slices (input-scoping — do this BEFORE launching agents):**
+
+Each domain agent receives only the diff slice relevant to its domain, not the full PR changeset. This caps per-child input cost on large PRs. Compute slices once here; substitute `[DOMAIN_DIFF_SLICE]` per agent below.
+
+```bash
+# Full diff fetched once — agents do NOT re-fetch it
+FULL_DIFF=$(gh pr diff $ARGUMENTS)
+FULL_FILES=$(gh pr diff $ARGUMENTS --name-only)
+
+# --- Security agent: always receives the full diff (cross-cutting domain) ---
+DIFF_SLICE_SECURITY="$FULL_DIFF"
+
+# --- Auth agent: auth, session, jwt, oauth, middleware, permission files ---
+DIFF_SLICE_AUTH=$(echo "$FULL_DIFF" | awk '
+  /^diff --git/ { in_block=0 }
+  /^diff --git.*\/(auth|session|jwt|oauth|permission|middleware|login|token)/ { in_block=1 }
+  in_block { print }
+')
+[ -z "$DIFF_SLICE_AUTH" ] && DIFF_SLICE_AUTH="$FULL_DIFF"
+
+# --- Billing agent: billing, payment, credit, pricing, stripe, subscription files ---
+DIFF_SLICE_BILLING=$(echo "$FULL_DIFF" | awk '
+  /^diff --git/ { in_block=0 }
+  /^diff --git.*\/(billing|payment|credit|pricing|stripe|subscription|invoice|charge|refund)/ { in_block=1 }
+  in_block { print }
+')
+[ -z "$DIFF_SLICE_BILLING" ] && DIFF_SLICE_BILLING="$FULL_DIFF"
+
+# --- Concurrency agent: transaction, lock, queue, async, worker, race-condition files ---
+DIFF_SLICE_CONCURRENCY=$(echo "$FULL_DIFF" | awk '
+  /^diff --git/ { in_block=0 }
+  /^diff --git.*\/(worker|queue|task|async|lock|transaction|pipeline|job)/ { in_block=1 }
+  in_block { print }
+')
+[ -z "$DIFF_SLICE_CONCURRENCY" ] && DIFF_SLICE_CONCURRENCY="$FULL_DIFF"
+
+# --- Database agent: migration, model, schema, ORM, SQL files ---
+DIFF_SLICE_DATABASE=$(echo "$FULL_DIFF" | awk '
+  /^diff --git/ { in_block=0 }
+  /^diff --git.*\/(migration|model|schema|\.sql$|orm|database|db)/ { in_block=1 }
+  in_block { print }
+')
+[ -z "$DIFF_SLICE_DATABASE" ] && DIFF_SLICE_DATABASE="$FULL_DIFF"
+
+# --- Frontend agent: web/src, components, pages, styles, tsx/jsx files ---
+DIFF_SLICE_FRONTEND=$(echo "$FULL_DIFF" | awk '
+  /^diff --git/ { in_block=0 }
+  /^diff --git.*(web\/src|components|pages|styles|\.tsx|\.jsx|\.css|\.scss)/ { in_block=1 }
+  in_block { print }
+')
+[ -z "$DIFF_SLICE_FRONTEND" ] && DIFF_SLICE_FRONTEND="$FULL_DIFF"
+
+# --- API Design agent: router, endpoint, openapi, schema, serializer files ---
+DIFF_SLICE_API=$(echo "$FULL_DIFF" | awk '
+  /^diff --git/ { in_block=0 }
+  /^diff --git.*\/(router|route|endpoint|openapi|serializer|schema|api)/ { in_block=1 }
+  in_block { print }
+')
+[ -z "$DIFF_SLICE_API" ] && DIFF_SLICE_API="$FULL_DIFF"
+
+# --- Infrastructure agent: docker, nginx, ci, deploy, infra, workflow files ---
+DIFF_SLICE_INFRA=$(echo "$FULL_DIFF" | awk '
+  /^diff --git/ { in_block=0 }
+  /^diff --git.*\/(docker|nginx|infra|\.github|deploy|ci|traefik|k8s|helm)/ { in_block=1 }
+  in_block { print }
+')
+[ -z "$DIFF_SLICE_INFRA" ] && DIFF_SLICE_INFRA="$FULL_DIFF"
+
+# --- Scraper agent: scrape, proxy, playwright, stealth, browser files ---
+DIFF_SLICE_SCRAPER=$(echo "$FULL_DIFF" | awk '
+  /^diff --git/ { in_block=0 }
+  /^diff --git.*\/(scrape|scraper|proxy|playwright|stealth|browser|crawl)/ { in_block=1 }
+  in_block { print }
+')
+[ -z "$DIFF_SLICE_SCRAPER" ] && DIFF_SLICE_SCRAPER="$FULL_DIFF"
+```
+
+**Tool-result truncation discipline**: All `gh pr diff` and file-read outputs piped to agents MUST be capped at ~100K characters. This mirrors the runner's built-in 100K-char tool-result cap (`bin/runner.mjs`). Any diff slice exceeding 100K chars must be truncated before substitution — agents that receive oversized context perform worse, not better.
+
+```bash
+# Truncate any slice exceeding 100K chars before passing to agent
+truncate_slice() {
+  local slice="$1"
+  local limit=102400
+  if [ "${#slice}" -gt "$limit" ]; then
+    echo "${slice:0:$limit}"
+    echo "... [TRUNCATED — diff exceeded 100K chars; focus on the files listed above]"
+  else
+    echo "$slice"
+  fi
+}
+DIFF_SLICE_SECURITY=$(truncate_slice "$DIFF_SLICE_SECURITY")
+DIFF_SLICE_AUTH=$(truncate_slice "$DIFF_SLICE_AUTH")
+DIFF_SLICE_BILLING=$(truncate_slice "$DIFF_SLICE_BILLING")
+DIFF_SLICE_CONCURRENCY=$(truncate_slice "$DIFF_SLICE_CONCURRENCY")
+DIFF_SLICE_DATABASE=$(truncate_slice "$DIFF_SLICE_DATABASE")
+DIFF_SLICE_FRONTEND=$(truncate_slice "$DIFF_SLICE_FRONTEND")
+DIFF_SLICE_API=$(truncate_slice "$DIFF_SLICE_API")
+DIFF_SLICE_INFRA=$(truncate_slice "$DIFF_SLICE_INFRA")
+DIFF_SLICE_SCRAPER=$(truncate_slice "$DIFF_SLICE_SCRAPER")
+```
+
 This file contains the Evidence-Based Review Protocol, Structured Findings Protocol, and all 9 agent prompt templates. For each agent in `$SELECTED_AGENTS` (computed in Phase 3B):
 1. Extract its template from the catalog
 2. Substitute: `[PR_NUMBER]`, `[REVIEW_SHA]`, `[REVIEW_SHA_SHORT]`, `[TITLE]`, relevant files list
@@ -1026,7 +1128,7 @@ This file contains the Evidence-Based Review Protocol, Structured Findings Proto
 4. Substitute per-agent domain context: `[DOMAIN_CONTEXT]` → the agent's matching key from `forge.yaml → review.domains` (e.g., `$DOMAIN_CONTEXT_AUTH` for the auth agent, `$DOMAIN_CONTEXT_BILLING` for the billing agent)
 5. Substitute the shared hot-spot prior: `[CHURN_CONTEXT]` → `$CHURN_CONTEXT` (computed once in Phase 3A, same value for every agent — this is a PR-level fact, not a per-domain config value, so it is NOT read from `forge.yaml`)
 6. Substitute code index slice: `[INDEX_SLICE]` → the matching `$INDEX_SLICE_{DOMAIN}` variable for this agent (e.g., `$INDEX_SLICE_AUTH` for the auth agent). Agents MUST query index data first; fall back to grep only when index slice is empty or unavailable.
-7. **Scope the diff to the agent's domain** (see "Domain diff slicing" below)
+7. Substitute per-agent diff slice: `[DOMAIN_DIFF_SLICE]` → the matching `$DIFF_SLICE_*` variable (e.g., `$DIFF_SLICE_AUTH` for the auth agent, `$DIFF_SLICE_SECURITY` for the security agent). This replaces any `gh pr diff [PR_NUMBER]` call inside the agent template — the agent works from the pre-computed slice, not the full changeset.
 8. If Phase 2.5 found broken assumptions, append them to the agent's prompt as "Pre-found integration issues to verify"
 9. Launch via `Task` tool with the resolved model (default `"sonnet"`, fallback `"opus"` if rate-limited)
 

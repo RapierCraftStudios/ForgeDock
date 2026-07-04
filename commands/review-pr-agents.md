@@ -16,11 +16,34 @@ Do not modify this file without also updating `review-pr.md`. To update either p
 
 ---
 
+## Per-Agent Input Scoping
+
+**Each domain agent receives only the diff slice relevant to its domain**, not the full PR changeset. The orchestrator (Phase 3C of `review-pr.md`) pre-computes these slices and substitutes `[DOMAIN_DIFF_SLICE]` in each agent's prompt before dispatch.
+
+**Rationale**: Passing the full changeset to every agent inflates per-child input cost on large PRs. A billing agent reviewing auth code produces noise, not signal. Scoped inputs reduce cost and improve focus.
+
+**Fallback rule**: If a domain's file pattern matches nothing in the PR (slice is empty), the orchestrator falls back to the full diff — ensuring no agent is launched with an empty context. This preserves review coverage on PRs where domain boundaries are blurry.
+
+**Security agent exception**: The General Security agent ALWAYS receives the full diff — security vulnerabilities are cross-cutting and cannot be safely scoped to a file-path filter.
+
+## Tool-Result Truncation Discipline
+
+All tool results consumed by agents — including diff slices, file reads, and command outputs — are capped at **~100K characters**. This mirrors the runner's built-in 100K-char tool-result cap (`bin/runner.mjs`).
+
+**Agents must NOT re-fetch `gh pr diff` in full** — use the pre-supplied `[DOMAIN_DIFF_SLICE]` instead. If an agent needs to read a specific file in full (e.g., to trace an import), cap the read at the relevant section using `head -N` or `sed -n 'X,Yp'`. Never pipe unbounded command output into context without a `| head -N` guard.
+
+Rationale: agents receiving oversized context perform worse, not better — attention dilutes across irrelevant content, and token limits risk truncating the structured findings block that the triage phase depends on.
+
+---
+
 ## Evidence-Based Review Protocol (ALL Agents Follow)
 
 Every agent MUST follow this protocol:
 
 ### 1. Start From the PR Diff
+
+**Input scoping**: You have been given a pre-computed diff slice containing only the files relevant to your domain (`[DOMAIN_DIFF_SLICE]`). Do NOT re-fetch `gh pr diff [PR_NUMBER]` in full — use the slice provided. This is capped at ~100K chars, mirroring the runner's tool-result limit.
+
 ```bash
 # Verify review is still current before reading diff
 CURRENT_SHA=$(gh pr view [PR_NUMBER] --json headRefOid --jq '.headRefOid')
@@ -30,9 +53,14 @@ if [ "$CURRENT_SHA" != "[REVIEW_SHA]" ]; then
     echo "Current HEAD: $(echo $CURRENT_SHA | cut -c1-7)"
 fi
 
+# List files in your domain slice
 gh pr diff [PR_NUMBER] --name-only
-gh pr diff [PR_NUMBER]
+
+# Use the pre-computed domain diff slice supplied by the orchestrator:
+# [DOMAIN_DIFF_SLICE]
 ```
+
+**Tool-result truncation**: When reading individual files or running commands for deeper investigation, always cap output: `cat file.py | head -200`, `grep ... | head -50`. Never pipe unbounded output into context.
 
 **Hot-spot prior**:
 [CHURN_CONTEXT]
@@ -181,9 +209,12 @@ You are performing a security and code quality scan on PR #[PR_NUMBER] for [PROJ
 Scan ALL changed code for security vulnerabilities and code quality issues. This is the baseline review that runs on every PR.
 
 ## Step 1: Read the Diff
+
+The security agent receives the full PR diff (security vulnerabilities are cross-cutting — no file-path scoping is applied). The diff is pre-supplied as `[DOMAIN_DIFF_SLICE]` and is capped at ~100K chars. Do NOT re-fetch the full diff — use what was provided.
+
 ```bash
 gh pr diff [PR_NUMBER] --name-only
-gh pr diff [PR_NUMBER]
+# Use the pre-supplied diff: [DOMAIN_DIFF_SLICE]
 ```
 
 ## Step 2: Security Scan
