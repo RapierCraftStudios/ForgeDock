@@ -337,7 +337,21 @@ git diff origin/main...HEAD -- "**/package.json" | grep -E "^\+" | grep -v "^\+\
 
 ### 2H: Tests
 
-Read `forge.yaml → verification.commands.{lang}.test` for the project's test command:
+Read `forge.yaml → verification.commands.{lang}.test` for the project's test command.
+
+**Before running tests**: check the quarantine manifest for known pre-broken and flaky tests:
+
+```bash
+# Load quarantine manifest if present — used below to suppress known-bad tests from blocking.
+QUARANTINE_MANIFEST=".forgedock/quarantine.jsonl"
+QUARANTINED_TESTS=""
+if [ -f "$QUARANTINE_MANIFEST" ]; then
+    QUARANTINED_TESTS=$(grep -oP '"test":"[^"]*"' "$QUARANTINE_MANIFEST" 2>/dev/null | sed 's/"test":"//;s/"//' | sort -u)
+    QUARANTINE_COUNT=$(echo "$QUARANTINED_TESTS" | grep -c . || echo 0)
+    echo "Quarantine manifest: ${QUARANTINE_COUNT} known-bad test(s) — these will not block the review if they fail."
+    echo "$QUARANTINED_TESTS" | sed 's/^/  - /'
+fi
+```
 
 ```bash
 # Check each configured language for a test command
@@ -347,7 +361,29 @@ for lang in python typescript go rust; do
         echo "=== Running tests (${lang}): ${TEST_CMD} ==="
         eval "$TEST_CMD" 2>&1 | tail -30
         TEST_EXIT=$?
-        [ "$TEST_EXIT" -ne 0 ] && echo "BLOCKING: ${lang} tests failed (exit $TEST_EXIT)"
+        if [ "$TEST_EXIT" -ne 0 ]; then
+            # Attempt to cross-reference with quarantine manifest.
+            # If ALL failing test names appear in $QUARANTINED_TESTS, suppress the block.
+            # Without per-test granularity from the test runner, fall back to treating
+            # any failure as blocking unless the classifier script is available.
+            CLASSIFIER="${FORGEDOCK_SCRIPTS:-scripts}/flaky-quarantine.sh"
+            [ -f "$CLASSIFIER" ] || CLASSIFIER="scripts/flaky-quarantine.sh"
+            if [ -f "$CLASSIFIER" ]; then
+                CL_RESULT=$(bash "$CLASSIFIER" \
+                    --test "$TEST_CMD" \
+                    --base "$(git rev-parse --abbrev-ref origin/HEAD 2>/dev/null | sed 's|origin/||' || echo main)" \
+                    --retries 3 2>&1)
+                echo "$CL_RESULT"
+                CL=$(echo "$CL_RESULT" | grep '^CLASSIFICATION:' | awk '{print $2}')
+                if [ "$CL" = "PRE_BROKEN" ] || [ "$CL" = "FLAKY" ]; then
+                    echo "ADVISORY (not blocking): ${lang} tests classified ${CL} — quarantined, does not block this review"
+                else
+                    echo "BLOCKING: ${lang} tests failed (exit $TEST_EXIT) — classified REAL"
+                fi
+            else
+                echo "BLOCKING: ${lang} tests failed (exit $TEST_EXIT)"
+            fi
+        fi
     fi
 done
 
@@ -358,7 +394,7 @@ if [ -z "$PYTHON_TEST" ] && [ -z "$TS_TEST" ]; then
     echo "SKIPPED — no test commands configured in verification.commands"
 fi
 ```
-**BLOCKING if tests fail.**
+**BLOCKING only for REAL test failures** (deterministically caused by this PR). Pre-broken and flaky failures are surfaced as advisories and do not block approval.
 
 ### 2I: Build Verification (MANDATORY for staging→main AND milestone→staging)
 

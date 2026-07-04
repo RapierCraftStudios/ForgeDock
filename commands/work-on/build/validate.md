@@ -54,10 +54,22 @@ while iteration < max_iterations:
         GATE_PASSED = true
         break
     else:
-        Fix each HIGH and MEDIUM finding in the code at {WORKTREE_PATH}
-        (Do NOT commit yet — fixes are staged for the next gate run)
+        # Separate quarantined test findings from real blocker findings.
+        # quality-gate Step 2R classifies each failing test as PRE_BROKEN, FLAKY, or REAL.
+        # TEST-QUARANTINE findings (LOW) are advisory — do not fix, do not count as gate failures.
+        # TEST-REAL findings (HIGH) and all other HIGH/MEDIUM findings must be fixed.
+        quarantine_findings = findings where severity == LOW and code starts with "TEST-QUARANTINE"
+        blocker_findings    = findings where code != "TEST-QUARANTINE"
 
-if iteration == max_iterations AND result != PASS:
+        if blocker_findings is empty:
+            # All remaining findings are quarantined tests — gate passes from the builder's perspective.
+            GATE_PASSED = true
+            break
+        else:
+            Fix each HIGH and MEDIUM finding in blocker_findings at {WORKTREE_PATH}
+            (Do NOT commit yet — fixes are staged for the next gate run)
+
+if iteration == max_iterations AND result != PASS AND blocker_findings not empty:
     GATE_PASSED = false
     → post comment (see V1-FAIL below)
     → add label needs-human
@@ -73,6 +85,7 @@ Skill("quality-gate", args="{CHANGED_FILES} --worktree {WORKTREE_PATH}")
 - Re-run after EVERY fix pass — never trust that fixes resolved findings without verification
 - Each iteration re-scans ALL changed files — fixes can introduce new issues
 - Only HIGH and MEDIUM findings must be fixed; LOW findings are advisory only
+- `TEST-QUARANTINE | LOW` findings (pre-broken or flaky tests classified by Step 2R) do **not** require fixing and do **not** count toward gate failure — include them in the V5 commit comment for reviewer visibility
 
 **V1-FAIL comment** (post when gate never passes):
 ```bash

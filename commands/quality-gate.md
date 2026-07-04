@@ -246,6 +246,7 @@ Run ONLY the checks whose domain was identified in Step 1.5. Skip checks for dom
 - **2P (External tool config schema)**: Run if `CONFIG_SCHEMA` in DOMAINS
 - **2Q (Billing)**: Run if `BILLING` in DOMAINS
 - **2R (Registry checks)**: ALWAYS run — executes all promoted checks from `scripts/check-registry/manifest.json` <!-- Added: forge#1331 -->
+- **2S (Test failure classification)**: Run if any Step 2 check invoked a test suite and it failed — classifies the failure as PRE_BROKEN, FLAKY, or REAL using `scripts/flaky-quarantine.sh` <!-- Added: forge#1336 -->
 
 ### 2A: Security (ALL files)
 
@@ -1161,6 +1162,81 @@ fi
 ```
 
 If any registry check produces findings, include them in the Step 3 findings list under the check's slug (e.g. `REGISTRY-migration-number-collision | HIGH | ...`). HIGH-severity registry findings are blocking; MEDIUM are advisory.
+
+---
+
+## Step 2S: Test failure classification (run when tests fail in Step 2)
+
+<!-- Added: forge#1336 -->
+
+**Triggered when**: any domain check in Step 2 invokes a test suite command and that command exits non-zero.
+
+**Why this matters**: Builders and reviewers waste cycles on test failures that pre-exist the PR or are intermittently caused by fixture-state races. A test that fails on both the PR branch and the base branch is *pre-broken* and must not block an unrelated PR. A test that fails then passes on retry is *flaky* and should be quarantined, not "fixed" by the builder.
+
+### Classification protocol
+
+For each failing test ID (or test command) surfaced in Step 2:
+
+```bash
+# PR_BASE is the target branch (e.g. "staging", "main", or "milestone/slug")
+# FAILING_TEST is the individual test identifier or re-runnable command
+# GH_REPO is owner/repo from forge.yaml (used to file the quarantine issue)
+# PR_ISSUE_NUMBER is the issue this quality gate was invoked from (optional)
+
+CLASSIFIER="${FORGEDOCK_SCRIPTS:-scripts}/flaky-quarantine.sh"
+[ -f "$CLASSIFIER" ] || CLASSIFIER="{WORKTREE_PATH}/scripts/flaky-quarantine.sh"
+
+if [ -f "$CLASSIFIER" ]; then
+    RESULT=$(bash "$CLASSIFIER" \
+        --test   "{FAILING_TEST}" \
+        --base   "{PR_BASE}" \
+        --worktree "{WORKTREE_PATH}" \
+        --repo   "{GH_REPO}" \
+        --issue  "{PR_ISSUE_NUMBER}" \
+        --retries 3 \
+        2>&1)
+    echo "$RESULT"
+    CLASSIFICATION=$(echo "$RESULT" | grep '^CLASSIFICATION:' | awk '{print $2}')
+else
+    # Script not present — fall back to treating all test failures as real.
+    CLASSIFICATION="REAL"
+    echo "NOTE: scripts/flaky-quarantine.sh not found — treating test failure as REAL (no classification)"
+fi
+```
+
+### Classification outcomes
+
+| Classification | Meaning | Gate behaviour |
+|---|---|---|
+| `PRE_BROKEN` | Fails on base branch — broken before this PR | **Does not block the gate.** Log as advisory. Quarantine manifest entry written; issue filed once. |
+| `FLAKY` | Intermittent — fails then passes on retry | **Does not block the gate.** Log as advisory. Quarantine manifest entry written; issue filed once. |
+| `REAL` | Deterministic on PR, passes on base | **Blocks the gate** — treated as a regression caused by this PR. |
+
+### Gate behaviour
+
+```
+if CLASSIFICATION == "PRE_BROKEN" or CLASSIFICATION == "FLAKY":
+    # Test does not block the gate — record in findings as advisory only.
+    # Emit a LOW finding so the builder and reviewer see it in the report.
+    emit: "TEST-QUARANTINE | LOW | {FAILING_TEST} | classified {CLASSIFICATION} — quarantine entry recorded; does not block this PR"
+    # Do NOT re-run the test or count it as a gate failure.
+
+elif CLASSIFICATION == "REAL":
+    # Test failure is caused by this PR — block the gate as before.
+    emit: "TEST-REAL | HIGH | {FAILING_TEST} | deterministic failure on PR branch; passes on base — this PR introduced the regression"
+```
+
+### Quarantine manifest
+
+The manifest lives at `.forgedock/quarantine.jsonl` in the project root (or at the path set in `FORGEDOCK_QUARANTINE_MANIFEST`). Each line is a JSON object:
+
+```json
+{"test":"<id>","classification":"PRE_BROKEN|FLAKY","base":"<branch>","pr_branch":"<branch>","issue":"<num>","repo":"<owner/repo>","first_seen":"<ISO-8601>","runs_pr":3,"failures_pr":3,"runs_base":1,"failures_base":1}
+```
+
+The manifest is append-only. Duplicate entries (same test already quarantined) are skipped. A corresponding GitHub issue is filed automatically when the script has `--repo` and `gh` is authenticated.
+
+**Reviewers**: when the manifest exists, read it during Phase 2 of `review-pr.md` to avoid re-filing known-quarantined tests as new findings.
 
 ---
 
