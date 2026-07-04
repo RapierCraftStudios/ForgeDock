@@ -192,14 +192,6 @@ For issues managed by the durable engine, read the `FORGE:STATE` block from each
 echo "=== Engine Lease State ==="
 echo ""
 
-# Collect all open issues with non-terminal workflow labels
-ENGINE_CANDIDATES=$(gh issue list $GH_FLAG \
-    --state open \
-    --limit 100 \
-    --label "workflow:investigating,workflow:ready-to-build,workflow:building,workflow:in-review" \
-    --json number,title,body \
-    2>/dev/null || echo "[]")
-
 # gh --label uses AND filtering, so query each label separately and merge
 ENGINE_CANDIDATES=$(
     for LABEL in "workflow:investigating" "workflow:ready-to-build" "workflow:building" "workflow:in-review"; do
@@ -214,7 +206,7 @@ ENGINE_CANDIDATES=$(
 NOW_MS=$(date +%s)000
 ENGINE_OUTPUT=""
 
-for ROW in $(echo "$ENGINE_CANDIDATES" | jq -c '.[]'); do
+while IFS= read -r ROW; do
     NUM=$(echo "$ROW" | jq -r '.number')
     TITLE=$(echo "$ROW" | jq -r '.title[:55]')
     BODY=$(echo "$ROW" | jq -r '.body // ""')
@@ -243,7 +235,7 @@ for ROW in $(echo "$ENGINE_CANDIDATES" | jq -c '.[]'); do
         EXPIRED_AGO=$(( (NOW_MS - LEASE_UNTIL) / 60000 ))
         ENGINE_OUTPUT="${ENGINE_OUTPUT}  #${NUM} ${TITLE} [${PHASE}] STALLED (lease expired ${EXPIRED_AGO}m ago)\n"
     fi
-done
+done <<< "$(echo "$ENGINE_CANDIDATES" | jq -c '.[]')"
 
 if [ -z "$ENGINE_OUTPUT" ]; then
     echo "  No engine-managed issues in flight (or none with FORGE:STATE blocks)."
