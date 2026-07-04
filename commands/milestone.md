@@ -503,9 +503,13 @@ ISSUE_EOF
 fi
 ```
 
-### Step 3: Create or update shipping PR
+### Step 3: Create or update shipping PR (merge-train mechanics)
 
-**Update-in-place policy**: Before creating a new PR, check whether an open shipping PR already exists for this milestone. If one does, push the updated milestone branch and re-request review on the existing PR — do NOT close and recreate. Closing-and-recreating is pure churn: it burns a new PR number, loses review history, and contributes to a low staging→main pass rate. The correct flow is: fix → push → re-request review on the same PR. <!-- Added: forge#1327 -->
+<!-- Added: forge#1327 (update-in-place), extended: forge#1332 (merge-train) -->
+
+**Merge-train policy**: One staging→main PR stays open per deploy cycle. When a milestone ships to staging, it joins the deploy train as a candidate. The train PR is updated in place when fixes are pushed — it is NEVER closed and recreated. Dead-PR chains are eliminated: fix → push → re-request review on the same PR.
+
+**Update-in-place policy**: Before creating a new PR, check whether an open shipping PR already exists for this milestone. If one does, push the updated milestone branch and re-request review on the existing PR — do NOT close and recreate. Closing-and-recreating is pure churn: it burns a new PR number, loses review history, and contributes to a low staging→main pass rate. The correct flow is: fix → push → re-request review on the same PR.
 
 ```bash
 # Check for an existing open shipping PR for this milestone
@@ -521,6 +525,7 @@ if [ -n "$EXISTING_PR" ]; then
   DIFF_STATS=$(git diff origin/{STAGING_BRANCH}...origin/milestone/{slug} --stat)
   COMMIT_LOG=$(git log origin/{STAGING_BRANCH}..origin/milestone/{slug} --oneline)
   gh pr edit "$PR_NUMBER" {GH_FLAG} --body "$(cat <<'PR_EOF'
+<!-- FORGE:TRAIN_CANDIDATE milestone={slug} -->
 ## Milestone: {MILESTONE_TITLE}
 
 {MILESTONE_DESCRIPTION}
@@ -555,6 +560,7 @@ else
     --head milestone/{slug} \
     --title "Ship: {MILESTONE_TITLE}" \
     --body "$(cat <<'PR_EOF'
+<!-- FORGE:TRAIN_CANDIDATE milestone={slug} -->
 ## Milestone: {MILESTONE_TITLE}
 
 {MILESTONE_DESCRIPTION}

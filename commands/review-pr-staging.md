@@ -72,7 +72,44 @@ The **Evidence-Based Review Protocol** and **Structured Findings Protocol** are 
 
 **This phase is MANDATORY and must execute before Phase 0A. No phase may be skipped.**
 
-**Idempotent re-review**: This spec is safe to invoke multiple times on the same PR. Each invocation posts a new `FORGE:REVIEW_ROUTE` marker with the current SHA — re-review passes are distinguished by SHA, not by PR number. When a milestone ship PR receives blocking findings and the fixes are pushed to the head branch, re-invoke this spec on the same PR number. Do NOT close the PR and create a new one. <!-- Added: forge#1328 -->
+**Idempotent re-review (merge-train aware)**: <!-- Added: forge#1328, extended: forge#1332 --> This spec is safe to invoke multiple times on the same PR. Each invocation posts a new `FORGE:REVIEW_ROUTE` marker with the current SHA — re-review passes are distinguished by SHA, not by PR number. When a staging→main deploy PR receives blocking findings and the fixes are pushed to the head branch, re-invoke this spec on the same PR number. Do NOT close the PR and create a new one.
+
+**Prior-finding awareness on re-entry**: On each re-invocation, load findings from prior review passes on the same PR before running any new checks. Previously-resolved findings (issues that are now closed or marked `false-positive`) are excluded from the current verdict to avoid re-surfacing already-fixed issues. Previously-unresolved findings (open issues from a prior pass) are carried forward as context so agents know what was previously flagged:
+
+```bash
+# Load prior FORGE:REVIEW_ROUTE comments to detect re-entry
+PRIOR_ROUTES=$(gh api repos/${GH_REPO}/issues/${PR_NUMBER}/comments \
+  --jq '[.[] | select(.body | test("FORGE:REVIEW_ROUTE")) | .body] | length' 2>/dev/null || echo 0)
+
+IS_REENTRY=0
+if [ "$PRIOR_ROUTES" -gt 0 ]; then
+  IS_REENTRY=1
+  echo "Re-entry detected: $PRIOR_ROUTES prior review pass(es) on PR #${PR_NUMBER}"
+
+  # Load findings from prior passes that are still open
+  PRIOR_OPEN_FINDINGS=$(gh issue list ${GH_FLAG} \
+    --label "review-finding" \
+    --state open \
+    --search "PR #${PR_NUMBER}" \
+    --limit 50 \
+    --json number,title,labels \
+    --jq '.[] | "  - #\(.number): \(.title)"' 2>/dev/null || true)
+
+  # Load findings that were resolved (closed) since the last pass
+  PRIOR_RESOLVED_FINDINGS=$(gh issue list ${GH_FLAG} \
+    --label "review-finding" \
+    --state closed \
+    --search "PR #${PR_NUMBER}" \
+    --limit 50 \
+    --json number,title \
+    --jq '.[] | "  - #\(.number): \(.title)"' 2>/dev/null || true)
+
+  echo "Prior open findings (carry forward): $(echo "$PRIOR_OPEN_FINDINGS" | grep -c '.' || echo 0)"
+  echo "Prior resolved findings (exclude from verdict): $(echo "$PRIOR_RESOLVED_FINDINGS" | grep -c '.' || echo 0)"
+fi
+```
+
+Agents receive `$IS_REENTRY`, `$PRIOR_OPEN_FINDINGS`, and `$PRIOR_RESOLVED_FINDINGS` as context. They MUST NOT re-file issues that already exist in `$PRIOR_OPEN_FINDINGS` (dedup gate in Phase 7 covers this). Resolved findings do NOT contribute to the BLOCK verdict for the current pass.
 
 Resolve the staging→main PR number and post a routing marker immediately. This creates an audit trail — if a staging→main PR has no `FORGE:REVIEW_ROUTE` comment after this command was invoked, the review was bypassed or never started.
 

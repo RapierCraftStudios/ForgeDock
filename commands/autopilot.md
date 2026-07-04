@@ -516,6 +516,44 @@ FIX_RESULTS.push({
 When ready to deploy, merge `staging` → `main` via GitHub.
 ```
 
+### 4E: Deploy Train Check <!-- Added: forge#1332 -->
+
+After fixes are merged to staging, check the deploy train state. The deploy train is the single rolling staging→main PR — one per deploy cycle. Do NOT open a new staging→main PR if one is already open.
+
+```bash
+# Check for an open staging→main deploy PR (the current train)
+TRAIN_PR=$(gh pr list {GH_FLAG} \
+  --head "{STAGING_BRANCH}" \
+  --base "{DEFAULT_BRANCH}" \
+  --state open \
+  --json number,url \
+  --jq '.[0] // empty' 2>/dev/null)
+
+TRAIN_PR_NUMBER=$(echo "$TRAIN_PR" | jq -r '.number // empty')
+
+if [ -n "$TRAIN_PR_NUMBER" ]; then
+  # Train exists — check if it is held by open findings
+  HELD_BY_COUNT=$(gh issue list {GH_FLAG} \
+    --label "review-finding" \
+    --state open \
+    --search "PR #${TRAIN_PR_NUMBER}" \
+    --json number --jq '. | length' 2>/dev/null || echo 0)
+
+  if [ "$HELD_BY_COUNT" -gt 0 ]; then
+    echo "Deploy train PR #${TRAIN_PR_NUMBER} is HELD by ${HELD_BY_COUNT} open finding(s)."
+    echo "The fixes merged in this autopilot cycle may resolve some of them."
+    echo "Re-run /review-pr-staging ${TRAIN_PR_NUMBER} to re-evaluate the train gate."
+  else
+    echo "Deploy train PR #${TRAIN_PR_NUMBER} is CLEAR — no open findings. Ready to merge when you authorize."
+  fi
+else
+  echo "No open staging→main PR found. The merged fixes are queued in staging."
+  echo "Run /review-pr-staging to open a new train PR when ready."
+fi
+```
+
+**Deploy policy**: Autopilot NEVER merges staging→main. It merges issue fixes TO staging only. The train PR is a human-gated merge — the user decides when to ship.
+
 ---
 
 ## Safety Rules
