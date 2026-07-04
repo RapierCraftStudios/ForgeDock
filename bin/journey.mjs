@@ -359,7 +359,11 @@ export async function preflight(ctx) {
 
 import { mkdir, symlink, readlink, lstat, readdir, rename, copyFile, readFile, writeFile, unlink } from "fs/promises";
 import { relative, dirname as pathDirname } from "path";
-import { installSessionStartHook } from "./settings-hook.mjs";
+import {
+  installSessionStartHook,
+  installSubagentStopHook,
+  installPreToolUseHook,
+} from "./settings-hook.mjs";
 
 /**
  * Parse the `install:` tier from a command spec's YAML frontmatter block.
@@ -609,6 +613,15 @@ export async function forge(ctx) {
   const hookScript = join(ctx.forgeHome, "bin", "hooks", "session-start.mjs");
   const settingsPath = join(ctx.home, ".claude", "settings.json");
   const { status: hookStatus } = installSessionStartHook(settingsPath, hookScript);
+
+  // Install enforcement hooks (#1250): PreToolUse (branch/label validation)
+  // and SubagentStop (annotation-posting verification + interactive engine).
+  // These are idempotent and version-gated — always installed (fail-open if
+  // settings.json is malformed, same contract as SessionStart hook).
+  const preToolUseScript = join(ctx.forgeHome, "bin", "hooks", "pre-tool-use.mjs");
+  const subagentStopScript = join(ctx.forgeHome, "bin", "hooks", "interactive-engine.mjs");
+  installPreToolUseHook(settingsPath, preToolUseScript);
+  installSubagentStopHook(settingsPath, subagentStopScript);
 
   // Housekeeping — must never abort the receipt or the hook.
   let manifestSaveFailed = false;

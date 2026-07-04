@@ -1,3 +1,6 @@
+---
+install: internal
+---
 <!-- SPDX-FileCopyrightText: Copyright (c) RapierCraft Studios -->
 <!-- SPDX-License-Identifier: AGPL-3.0-or-later -->
 
@@ -28,7 +31,7 @@ Rationale: agents receiving oversized context perform worse, not better — atte
 
 ---
 
-## Evidence-Based Review Protocol (ALL Agents Follow)
+## Evidence-Based Review Protocol (ALL Agents Follow) <!-- allowlist:check-protocol-restatements -->
 
 Every agent MUST follow this protocol:
 
