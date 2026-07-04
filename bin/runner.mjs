@@ -621,9 +621,14 @@ export function getToolHandlers(cwd) {
         // setting result.error — surface what was captured so the agent has
         // actionable context rather than a misleading "failed to start" error.
         const partial = (stdout + stderr).trim();
-        const bufMB = Math.round(maxBuffer / (1024 * 1024));
+        const bufDisplay =
+          maxBuffer < 1024
+            ? `${maxBuffer} bytes`
+            : maxBuffer < 1024 * 1024
+              ? `${Math.round(maxBuffer / 1024)}KB`
+              : `${Math.round(maxBuffer / (1024 * 1024))}MB`;
         throw new Error(
-          `Command output exceeded ${bufMB}MB buffer limit (output truncated).` +
+          `Command output exceeded ${bufDisplay} buffer limit (output truncated).` +
             (partial ? `\nPartial output:\n${partial}` : ""),
         );
       }
