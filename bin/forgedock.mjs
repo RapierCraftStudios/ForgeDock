@@ -22,6 +22,7 @@ import {
   review,
   celebrate,
   findMarkdownFiles,
+  parseInstallTier,
   writeForgeYaml,
   backupExisting,
   manualLowConfidenceKeys,
@@ -941,27 +942,11 @@ async function doctor() {
     const brokenLinks = [];
 
     try {
-      // Collect all .md files from COMMANDS_DIR recursively
-      const collectMd = async (dir) => {
-        const results = [];
-        let entries;
-        try {
-          entries = await readdir(dir, { withFileTypes: true });
-        } catch {
-          return results;
-        }
-        for (const entry of entries) {
-          const full = join(dir, entry.name);
-          if (entry.isDirectory()) {
-            results.push(...(await collectMd(full)));
-          } else if (entry.name.endsWith(".md")) {
-            results.push(full);
-          }
-        }
-        return results;
-      };
-
-      const sourceFiles = await collectMd(COMMANDS_DIR);
+      // Collect installable .md files from COMMANDS_DIR using the same tier filter
+      // applied by forge() / findMarkdownFiles() — doctor() must validate the filtered
+      // install surface, not the raw directory walk, or it would report false failures
+      // for 'internal' specs that were deliberately excluded from the install.
+      const sourceFiles = await findMarkdownFiles(COMMANDS_DIR);
 
       for (const src of sourceFiles) {
         const rel = relative(COMMANDS_DIR, src);

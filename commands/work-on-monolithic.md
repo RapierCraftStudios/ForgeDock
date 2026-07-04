@@ -1,6 +1,7 @@
 ---
 description: "[BENCHMARK] Monolithic work-on — single-prompt pipeline with no Skill sub-phase boundaries"
 argument-hint: [issue number]
+install: internal
 ---
 <!-- SPDX-FileCopyrightText: Copyright (c) RapierCraft Studios -->
 <!-- SPDX-License-Identifier: AGPL-3.0-or-later -->

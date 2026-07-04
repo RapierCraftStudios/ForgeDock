@@ -1,6 +1,7 @@
 ---
 description: Render a design from its FORGE:DESIGN_SPEC, critique the rendered pixels against the perceptual negatives, and iterate until it passes or the budget is spent — the missing reward signal.
 argument-hint: [<issue-number>|<spec-path>] [--max-iters <n>] [--viewports desktop,mobile]
+install: internal
 ---
 <!-- SPDX-FileCopyrightText: Copyright (c) RapierCraft Studios -->
 <!-- SPDX-License-Identifier: AGPL-3.0-or-later -->

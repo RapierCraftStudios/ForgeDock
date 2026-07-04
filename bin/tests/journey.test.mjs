@@ -7,7 +7,7 @@ import assert from "node:assert/strict";
 import { mkdtempSync, readFileSync, writeFileSync, existsSync, mkdirSync } from "node:fs";
 import { join } from "node:path";
 import os from "node:os";
-import { writeForgeYaml, backupExisting, detectDescription, makeCtx, preflight, forge, read, review, celebrate, runJourney, manualLowConfidenceKeys } from "../journey.mjs";
+import { writeForgeYaml, backupExisting, detectDescription, makeCtx, preflight, forge, read, review, celebrate, runJourney, manualLowConfidenceKeys, parseInstallTier, findMarkdownFiles } from "../journey.mjs";
 
 const VALUES = {
   owner: "RapierCraftStudios",
@@ -663,5 +663,164 @@ describe("runJourney", () => {
 
     const finalCount = process.listenerCount("SIGINT");
     assert.equal(initialCount, finalCount);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// parseInstallTier — install filter (issue #1346)
+// ---------------------------------------------------------------------------
+
+describe("parseInstallTier", () => {
+  let dir;
+  beforeEach(() => {
+    dir = mkdtempSync(join(os.tmpdir(), "fd-tier-"));
+  });
+
+  it("returns 'core' when install key is absent", () => {
+    const f = join(dir, "core-no-key.md");
+    writeFileSync(f, `---\ndescription: a command\n---\n# Body\n`, "utf-8");
+    assert.equal(parseInstallTier(f), "core");
+  });
+
+  it("returns 'core' when install: core is explicit", () => {
+    const f = join(dir, "core-explicit.md");
+    writeFileSync(f, `---\ndescription: a command\ninstall: core\n---\n# Body\n`, "utf-8");
+    assert.equal(parseInstallTier(f), "core");
+  });
+
+  it("returns 'internal' when install: internal", () => {
+    const f = join(dir, "internal.md");
+    writeFileSync(f, `---\ndescription: benchmark rig\ninstall: internal\n---\n# Body\n`, "utf-8");
+    assert.equal(parseInstallTier(f), "internal");
+  });
+
+  it("returns 'extras' when install: extras", () => {
+    const f = join(dir, "extras.md");
+    writeFileSync(f, `---\ndescription: opt-in extra\ninstall: extras\n---\n# Body\n`, "utf-8");
+    assert.equal(parseInstallTier(f), "extras");
+  });
+
+  it("returns 'core' for unrecognised install value (fail-open)", () => {
+    const f = join(dir, "unknown.md");
+    writeFileSync(f, `---\ndescription: a command\ninstall: unknown-tier\n---\n# Body\n`, "utf-8");
+    assert.equal(parseInstallTier(f), "core");
+  });
+
+  it("returns 'core' when file has no frontmatter delimiters (fail-open)", () => {
+    const f = join(dir, "no-frontmatter.md");
+    writeFileSync(f, `# Just a heading\nNo frontmatter here.\n`, "utf-8");
+    assert.equal(parseInstallTier(f), "core");
+  });
+
+  it("returns 'core' when file does not exist (fail-open)", () => {
+    assert.equal(parseInstallTier(join(dir, "nonexistent.md")), "core");
+  });
+
+  it("strips BOM before parsing frontmatter (ref: review-finding #657)", () => {
+    const f = join(dir, "bom.md");
+    // Write UTF-8 BOM followed by frontmatter with install: internal
+    const bom = "\uFEFF";
+    writeFileSync(f, `${bom}---\ninstall: internal\n---\n# Body\n`, "utf-8");
+    assert.equal(parseInstallTier(f), "internal");
+  });
+
+  it("handles quoted install values", () => {
+    const f = join(dir, "quoted.md");
+    writeFileSync(f, `---\ndescription: a command\ninstall: "internal"\n---\n# Body\n`, "utf-8");
+    assert.equal(parseInstallTier(f), "internal");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// findMarkdownFiles — install filter integration (issue #1346)
+// ---------------------------------------------------------------------------
+
+describe("findMarkdownFiles — install tier filter", () => {
+  let dir;
+  beforeEach(() => {
+    dir = mkdtempSync(join(os.tmpdir(), "fd-find-"));
+  });
+
+  it("includes files with no install key (core by default)", async () => {
+    const f = join(dir, "no-key.md");
+    writeFileSync(f, `---\ndescription: a command\n---\n# Body\n`, "utf-8");
+    const found = await findMarkdownFiles(dir);
+    assert.deepEqual(found, [f]);
+  });
+
+  it("includes files with install: core", async () => {
+    const f = join(dir, "core.md");
+    writeFileSync(f, `---\ninstall: core\n---\n# Body\n`, "utf-8");
+    const found = await findMarkdownFiles(dir);
+    assert.deepEqual(found, [f]);
+  });
+
+  it("excludes files with install: internal", async () => {
+    const f = join(dir, "internal.md");
+    writeFileSync(f, `---\ninstall: internal\n---\n# Body\n`, "utf-8");
+    const found = await findMarkdownFiles(dir);
+    assert.deepEqual(found, []);
+  });
+
+  it("excludes files with install: extras", async () => {
+    const f = join(dir, "extras.md");
+    writeFileSync(f, `---\ninstall: extras\n---\n# Body\n`, "utf-8");
+    const found = await findMarkdownFiles(dir);
+    assert.deepEqual(found, []);
+  });
+
+  it("returns only core files when the directory contains a mix", async () => {
+    writeFileSync(join(dir, "a-core.md"), `---\ninstall: core\n---\n`, "utf-8");
+    writeFileSync(join(dir, "b-internal.md"), `---\ninstall: internal\n---\n`, "utf-8");
+    writeFileSync(join(dir, "c-no-key.md"), `---\ndescription: x\n---\n`, "utf-8");
+    writeFileSync(join(dir, "d-extras.md"), `---\ninstall: extras\n---\n`, "utf-8");
+    const found = await findMarkdownFiles(dir);
+    assert.deepEqual(found, [
+      join(dir, "a-core.md"),
+      join(dir, "c-no-key.md"),
+    ]);
+  });
+
+  it("filters recursively inside subdirectories", async () => {
+    const sub = join(dir, "sub");
+    mkdirSync(sub, { recursive: true });
+    const core = join(sub, "core-sub.md");
+    const internal = join(sub, "internal-sub.md");
+    writeFileSync(core, `---\ninstall: core\n---\n`, "utf-8");
+    writeFileSync(internal, `---\ninstall: internal\n---\n`, "utf-8");
+    const found = await findMarkdownFiles(dir);
+    assert.deepEqual(found, [core]);
+  });
+
+  it("verifies the 5 known internal specs are excluded from the real commands/ dir", async () => {
+    // Resolve commands/ relative to the repo root (two levels up from tests/).
+    const { fileURLToPath } = await import("node:url");
+    const { dirname } = await import("node:path");
+    const testsDir = dirname(fileURLToPath(import.meta.url));
+    const commandsDir = join(testsDir, "..", "..", "commands");
+
+    // Skip if we're not running from the repo (e.g. an isolated install).
+    if (!existsSync(commandsDir)) return;
+
+    const found = await findMarkdownFiles(commandsDir);
+    const foundNames = found.map((f) => f.replace(/.*commands[\\/]/, "").replace(/\\/g, "/"));
+
+    for (const internal of [
+      "work-on-monolithic.md",
+      "design-bench.md",
+      "forge-stats.md",
+      "design.md",
+      "design-render-critique-loop.md",
+    ]) {
+      assert.ok(
+        !foundNames.includes(internal),
+        `Expected ${internal} to be excluded from findMarkdownFiles() output (install: internal)`,
+      );
+    }
+
+    // Core commands must still be present
+    assert.ok(foundNames.includes("work-on.md"), "work-on.md must be included");
+    assert.ok(foundNames.includes("review-pr.md"), "review-pr.md must be included");
+    assert.ok(foundNames.includes("quality-gate.md"), "quality-gate.md must be included");
   });
 });

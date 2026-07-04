@@ -351,7 +351,65 @@ import { mkdir, symlink, readlink, lstat, readdir, rename, copyFile, readFile, w
 import { relative, dirname as pathDirname } from "path";
 import { installSessionStartHook } from "./settings-hook.mjs";
 
-/** Recursively find .md files, sorted (moved from forgedock.mjs). */
+/**
+ * Parse the `install:` tier from a command spec's YAML frontmatter block.
+ *
+ * Reads the first 512 bytes of the file synchronously (large enough to reach
+ * any realistic frontmatter block without loading the full spec into memory).
+ * Strips a leading UTF-8 BOM if present — BOM-prefixed files would cause the
+ * frontmatter regex to miss the leading `---` delimiter.
+ *
+ * Tier values:
+ *   'core'     — install for all users (default when key is absent or on any error)
+ *   'extras'   — opt-in, not yet installed by default (reserved for #1257)
+ *   'internal' — ForgeDock development only; never installed to user machines
+ *
+ * Fail-open: any read error, malformed frontmatter, or unrecognised value falls
+ * back to `'core'` so the command is installed rather than silently excluded.
+ *
+ * @param {string} filePath - Absolute path to the .md command spec.
+ * @returns {'core' | 'extras' | 'internal'}
+ */
+export function parseInstallTier(filePath) {
+  try {
+    // Read the file as UTF-8. readFileSync is already imported from "fs" at the
+    // top of this module — no require() needed in this ESM file. For large specs
+    // only the first 512 bytes are relevant (frontmatter fits comfortably within
+    // that budget), but readFileSync is simpler and safe for the file sizes here.
+    let content = readFileSync(filePath, "utf-8");
+    // Strip BOM — a BOM-prefixed file would shift the leading `---` off the
+    // start of the string and cause the frontmatter regex to miss it entirely.
+    // (Ref: review-finding #657 — parseFrontmatter silently falls back on BOM files)
+    content = content.replace(/^\uFEFF/, "");
+
+    // Match YAML frontmatter block: must start at position 0.
+    const match = content.match(/^---\r?\n([\s\S]*?)\r?\n---/);
+    if (!match) return "core";
+
+    const raw = match[1];
+    for (const line of raw.split(/\r?\n/)) {
+      const colonIdx = line.indexOf(":");
+      if (colonIdx === -1) continue;
+      const key = line.slice(0, colonIdx).trim();
+      if (key !== "install") continue;
+      const val = line.slice(colonIdx + 1).trim().replace(/^["']|["']$/g, "");
+      if (val === "internal" || val === "extras" || val === "core") return val;
+      return "core"; // unrecognised value → default
+    }
+    return "core"; // key absent
+  } catch {
+    return "core"; // any read/parse error → fail-open
+  }
+}
+
+/** Recursively find installable .md files, sorted (moved from forgedock.mjs).
+ *
+ * Files with `install: internal` in their YAML frontmatter are excluded — they
+ * are ForgeDock-development-only specs that must never reach user machines.
+ * Files with `install: core` (or no `install:` key) are included. Files with
+ * `install: extras` are excluded from the default install surface (reserved for
+ * the opt-in extras mechanism tracked in #1257).
+ */
 export async function findMarkdownFiles(dir) {
   const results = [];
   const entries = await readdir(dir, { withFileTypes: true });
@@ -360,7 +418,11 @@ export async function findMarkdownFiles(dir) {
     if (entry.isDirectory()) {
       results.push(...(await findMarkdownFiles(full)));
     } else if (entry.name.endsWith(".md")) {
-      results.push(full);
+      const tier = parseInstallTier(full);
+      if (tier === "core") {
+        results.push(full);
+      }
+      // 'internal' and 'extras' are excluded from the default install surface
     }
   }
   return results.sort();
