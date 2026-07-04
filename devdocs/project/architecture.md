@@ -294,6 +294,43 @@ Pre-dispatch gate: if `gh api rate_limit` remaining < `FORGE_RATE_LIMIT_FLOOR` (
 
 ---
 
+## Five Foundations of True Autonomy (Epic #1320)
+
+ForgeDock has a world-class execution layer (investigate → build → review → merge) but requires five foundational capabilities for true autonomous operation. Every recurring pain point — stalls, context-death, misleading idle metrics, forced merges with follow-up issues — is a symptom of one of these missing layers.
+
+### The Five Foundations
+
+| # | Foundation | What it provides | Key issues | Design spec |
+|---|-----------|-----------------|------------|-------------|
+| 1 | **Durable execution** | Control plane owns state/checkpoint/resume; LLM is a pure function at a node | #1256, #1250, #1262, #1266 | `docs/superpowers/specs/2026-07-03-durable-execution-engine-design.md` |
+| 2 | **Machine-checkable verification** | Outcome-based merge gate + eval harness | #1315, #1285, #1286, #1287, #1284, #1259, #1306 | — |
+| 3 | **Per-codebase learning memory** | Retrieval brain over trajectories/PRs/incidents | #1316 | — |
+| 4 | **Economic self-governance** | Risk×cost go/no-go + budget-aware scheduler | #1317, #1249, #1255, #1295, #1296, #1297, #1313, #1314 | `docs/superpowers/specs/2026-07-04-economic-self-governance-design.md` |
+| 5 | **Signed replayable provenance** | Trust artifact for autonomous merges | #1318, #1291, #1292, #1293, #1294 | `docs/superpowers/specs/2026-07-04-provenance-trail-design.md` |
+
+Plus the expansion bet: **Closed-loop autonomy** — production signal → planned DAG → verified resolution (#1319; builds on #1251 + analytics/incident sensors).
+
+### Sequencing
+
+Foundations 1 and 2 are load-bearing; 3–5 compound on top.
+
+**The one bet**: Go all-in on the durable engine (#1256) + eval harness (#1285) as a single initiative. The engine gives you something deterministic to score; the harness tells you whether changes help. That flywheel is the foundation, and the current stall/context-death bug classes (#1305, #1307, #1308) are deleted for free by the engine.
+
+### Durable Moat
+
+Recorded strategy says "moat = workflows, not compute." Workflows are copyable prose. The durable moat is layers 3 + 5: a system that has been learning a customer's codebase for months and can *prove* its changes are safe is not copyable. Verification and learning are the product; the prompts are not.
+
+### Acceptance Criteria
+
+- [ ] Durable engine (#1256) implemented and load-bearing for downstream layers
+- [ ] Eval harness (#1285, #1286, #1287, #1284) operational with outcome-based merge gate (#1315)
+- [ ] Per-codebase learning memory (#1316) implemented
+- [ ] Economic self-governance (#1317) operational with risk×cost go/no-go
+- [ ] Signed replayable provenance (#1318) implemented using FORGE protocol (#1291–1294)
+- [ ] Closed-loop autonomy (#1319) functional
+
+---
+
 ## Milestone: Deterministic Pipeline v2
 
 Active milestone tracking all work toward one-shot reliable task completion.
