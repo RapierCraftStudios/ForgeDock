@@ -12,10 +12,10 @@ import { fileURLToPath } from "node:url";
 
 const CLI = join(dirname(fileURLToPath(import.meta.url)), "..", "forgedock.mjs");
 
-function runCli(args, { cwd, home } = {}) {
+function runCli(args, { cwd, home, extraEnv } = {}) {
   return spawnSync(process.execPath, [CLI, ...args], {
     cwd: cwd ?? mkdtempSync(join(os.tmpdir(), "fd-cli-cwd-")),
-    env: { ...process.env, HOME: home, USERPROFILE: home, NO_COLOR: "1" },
+    env: { ...process.env, HOME: home, USERPROFILE: home, NO_COLOR: "1", ...extraEnv },
     encoding: "utf-8",
     timeout: 30000,
   });
@@ -178,11 +178,21 @@ describe("router", () => {
       "utf-8",
     );
 
-    const installRes = runCli(["install", "--fast"], { cwd, home });
+    // Stub external tools (gh, yq) so doctor passes in isolated environments
+    // (CI, sandboxed test HOMEs) where these aren't installed/authenticated.
+    const stubBin = mkdtempSync(join(os.tmpdir(), "fd-stub-bin-"));
+    // gh: must handle "gh --version" and "gh auth status" with exit 0
+    writeFileSync(join(stubBin, "gh"), "#!/bin/sh\necho 'gh version 2.60.0'\n", { mode: 0o755 });
+    // yq: must handle "yq --version" with exit 0
+    writeFileSync(join(stubBin, "yq"), "#!/bin/sh\necho 'yq (https://github.com/mikefarah/yq/) version v4.44.0'\n", { mode: 0o755 });
+
+    const stubEnv = { PATH: `${stubBin}:${process.env.PATH}` };
+
+    const installRes = runCli(["install", "--fast"], { cwd, home, extraEnv: stubEnv });
     assert.equal(installRes.status, 0, installRes.stdout + installRes.stderr);
     assert.ok(existsSync(join(cwd, "forge.yaml")));
 
-    const doctorRes = runCli(["doctor"], { cwd, home });
+    const doctorRes = runCli(["doctor"], { cwd, home, extraEnv: stubEnv });
     assert.equal(doctorRes.status, 0, doctorRes.stdout + doctorRes.stderr);
   });
 });
