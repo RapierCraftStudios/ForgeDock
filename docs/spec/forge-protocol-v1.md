@@ -1090,6 +1090,19 @@ and reviewer agents across tens of thousands of issues. This specification
 generalizes that wire format into a tool-neutral, openly licensed standard so
 that any agent pipeline can adopt and interoperate with it.
 
+### Conformance note — Codex adapter (second implementation)
+
+The Codex-native adapter (`.agents/skills/*/SKILL.md` in the ForgeDock
+repository) constitutes a second independent implementation of this protocol.
+It reads the same `commands/*.md` workflow specs and produces/consumes FORGE
+annotations through a different runtime (different tool calls, different
+worktree paths, different repo-resolution conventions) than the Claude Code
+path. Both implementations have been validated against
+`scripts/conformance-check.mjs`, the repository's automated conformance suite
+for this specification. This provides concrete evidence of vendor neutrality —
+the wire format is not incidentally compatible with one runtime; it functions
+as designed across distinct agent frameworks.
+
 ---
 
 *FORGE Annotation Protocol v1.0 — released under
