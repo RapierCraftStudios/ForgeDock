@@ -282,7 +282,7 @@ Two things are for sale:
 Month one built the execution layer. The open roadmap — tracked in the [five-foundations epic (#1320)](https://github.com/RapierCraftStudios/ForgeDock/issues/1320) — is about earning trust while unattended:
 
 1. **Durability** — engine-owned state instead of prose-owned state. Headless core shipped ([PR #1326](https://github.com/RapierCraftStudios/ForgeDock/pull/1326)); interactive wiring in progress.
-2. **Verification** — an outcome-based acceptance gate and a graded eval corpus, so "done" is machine-checkable before anything claims success.
+2. **Verification** — an outcome-based acceptance gate and a graded eval corpus, so "done" is machine-checkable before anything claims success. Per-release pipeline scorecards are published in [`docs/eval/`](docs/eval/README.md); model upgrades follow the [model-release playbook](docs/articles/model-release-playbook.md).
 3. **Learning** — per-codebase memory that compounds across runs.
 4. **Economics** — per-run cost accounting and risk×cost dispatch decisions.
 5. **Provenance** — signed, replayable records of every autonomous change.
@@ -329,6 +329,8 @@ Using ForgeDock in your pipeline? Add the badge — each one is a backlink and a
 - [Command Learning Path](docs/site/command-learning-path.md) — which commands to learn first
 - [Complete Command Reference](docs/site/command-reference.md)
 - [Troubleshooting & Recovery](docs/site/troubleshooting.md)
+- [Pipeline Eval Scorecards](docs/eval/README.md) — per-release published results for every model/Claude Code upgrade
+- [Model-Release Upgrade Playbook](docs/articles/model-release-playbook.md) — how to validate a new model before adopting it
 
 **Contributing:** PRs welcome — every change goes through a PR, tested against 3+ scenarios, using conventional commits (`fix(command):`, `feat(command):`). **License:** [AGPL-3.0](LICENSE) — free to use, modify, and distribute; network use of modifications must be open-sourced under the same license. Commercial licenses are available for proprietary use — see [COMMERCIAL-LICENSE.md](COMMERCIAL-LICENSE.md).
 
