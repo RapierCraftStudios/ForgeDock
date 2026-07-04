@@ -40,6 +40,7 @@ ForgeDock uses a strict two-repo model:
 | Hosted script API (faster, validated, versioned) | Platform | Commercial premium |
 | Token efficiency analytics | Platform | Commercial value-add |
 | Website / marketing | Platform | Commercial |
+| FORGE protocol validation library (`packages/protocol/`) | ForgeDock (this repo, `packages/` subdir) | MIT/Apache-2.0 — separately licensed/published, usable by any producer/consumer of FORGE annotations without AGPL obligation. Built in #1291. |
 
 ## Platform Roadmap
 
@@ -95,7 +96,8 @@ Proposed (deterministic):
 2. `transition-label.sh` — label state machine with validation
 3. `validate-pr-target.sh` — hard-fail if PR targets wrong branch
 4. `worktree-lifecycle.sh` — deterministic worktree create/reuse/cleanup (`ensure`/`cleanup` subcommands; built — #1268). Call-site migration of `work-on.md` Phase 3E/6E to invoke it is a tracked fast-follow (#1247), not yet wired in.
-5. `post-annotation.sh` — FORGE annotation posting with format validation (planned)
+5. `forge-annotation.sh` — FORGE annotation read/write/validate engine (Bash; built in #1267, not yet merged to staging) — single source of truth for annotation schema, sentinel checks, and required-field validation across all 5 marker types (INVESTIGATOR, CONTEXT, ARCHITECT, BUILDER, DECOMPOSED). Call-site migration tracked in #1247.
+6. `validate-annotation-node.mjs` — thin Node.js adapter that validates annotation bodies against the MIT/Apache protocol library (`packages/protocol/`, built in #1291); built in #1292. Complements `forge-annotation.sh`: Bash handles format/sentinel rules (AGPL), Node handles spec-conformance against the library (MIT). Degrades gracefully when the library is not yet installed.
 
 **Deploy-gate testing scripts** (milestone: Deterministic Deploy-Gate Testing — #863):
 
@@ -136,6 +138,63 @@ At claude-sonnet-4-5 pricing ($3.00/M tokens): ~$0.0063/session saved, ~$1.89/mo
 The primary value is **reliability**, not cost: scripts eliminate LLM inference from deterministic operations. An agent running `branch-targets.sh` cannot hallucinate the branch name (see #639 — hallucinated `milestone/project-agnostic` caused 6-day pipeline misrouting).
 
 Full methodology and data: `docs/articles/per-repo-adaptive-scripts-token-savings.md`
+
+## Topology Benchmark <!-- Added: forge#1279 -->
+
+Measures the end-to-end token cost per issue to validate the agent topology refactor (#1254) claim: inlining sequential build phases eliminates 6-8 fresh-context establishments per standard run, reducing token cost without degrading quality gates.
+
+### Methodology
+
+**Corpus**: 5 seeded issues in `examples/forgedock-demo/` — fixed, reproducible, covers the full issue type range (bug, feature, refactor, performance, docs).
+
+| Issue | Type | Title |
+|-------|------|-------|
+| #1 | Bug / security | DELETE is missing an auth check |
+| #2 | Feature / security | Safe filtering for GET /notes |
+| #3 | Refactor | Extract the router module |
+| #4 | Performance | O(1) findById |
+| #5 | Docs | Add an API reference |
+
+**Measurement unit**: tokens per issue per `/work-on` run — input_tokens + output_tokens (billed), cache_read_tokens, cache_write_tokens (context establishment proxy).
+
+**Primary signal**: `cache_write_tokens` — each spawned subagent establishes fresh context, writing its full prompt into the cache. Inlining phases reduces the number of fresh-context establishments, lowering `cache_write_tokens`.
+
+**Topologies compared**:
+- `spawned` — baseline: sequential build phases each spawned as separate subagents (pre-#1254)
+- `inline-sequential` — refactored: sequential phases run inline within the orchestrator session (post-#1254)
+
+**Tooling**: `scripts/bench-topology-cost.mjs` — zero-dependency ESM aggregator. Input: structured JSON of per-issue token measurements. Output: per-topology summary, delta, quality gate confirmation.
+
+### Running the Benchmark
+
+```bash
+# After collecting measurements from a /work-on session on examples/forgedock-demo/:
+node scripts/bench-topology-cost.mjs runs.json
+
+# Help / input schema:
+node scripts/bench-topology-cost.mjs --help
+```
+
+Input schema: see `scripts/bench-topology-cost.mjs` file header (search: "Input schema").
+
+When `bin/runner.mjs` emits structured token usage (#1295), measurements can be auto-populated from session logs. Until then, capture from Claude Code session summaries.
+
+### Quality Gate Confirmation
+
+For each topology run, all 5 demo issues must pass quality gate (`quality_gate_passed: true`). The benchmark verdict is INVALID if any quality gate regressed in the post-refactor topology.
+
+### Results
+
+> **Status**: Awaiting post-refactor data. Dependencies #1276-#1278 must complete before post-refactor measurements can be captured.
+
+| Metric | Spawned (baseline) | Inline-sequential (refactored) | Delta | Change |
+|--------|-------------------|-------------------------------|-------|--------|
+| Total tokens (5 issues) | TBD | TBD | TBD | TBD |
+| Avg tokens / issue | TBD | TBD | TBD | TBD |
+| Cache write tokens | TBD | TBD | TBD | TBD |
+| Quality gates passed | TBD | TBD | — | — |
+
+*Update this table when measurements are available. Run `node scripts/bench-topology-cost.mjs runs.json` to generate the delta automatically.*
 
 ### Script Precedence
 

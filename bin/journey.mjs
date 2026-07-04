@@ -9,7 +9,7 @@
  *   init-detect.mjs, init-enrich-api.mjs, tui.annotatedReviewScreen, registry.mjs
  */
 
-import { existsSync, readFileSync, writeFileSync, renameSync } from "fs";
+import { existsSync, readFileSync, writeFileSync, renameSync, unlinkSync } from "fs";
 import { join, basename } from "path";
 
 // ---------------------------------------------------------------------------
@@ -114,7 +114,17 @@ branches:
 #   health_patterns:
 #     - '"status": "ok"'
 `;
-  writeFileSync(outputPath, content, "utf-8");
+  // Atomic write: write to a temp file first, then rename into place.
+  // If the write fails (e.g. ENOSPC), the original file is untouched and
+  // any partial .tmp is cleaned up — no corrupt or missing forge.yaml.
+  const tmpPath = outputPath + ".tmp";
+  try {
+    writeFileSync(tmpPath, content, "utf-8");
+    renameSync(tmpPath, outputPath);
+  } catch (err) {
+    try { unlinkSync(tmpPath); } catch { /* best-effort cleanup */ }
+    throw err;
+  }
   const todoCount = (content.match(/# TODO\(forgedock:/g) || []).length;
   return { todoCount };
 }

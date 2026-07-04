@@ -14,7 +14,7 @@ These assets are live and can be referenced in any outreach:
 | npm package | https://www.npmjs.com/package/forgedock | ✅ Live |
 | Plugin marketplace listing | https://github.com/dev-gom/claude-code-marketplace | ✅ Submitted (#541) |
 | Demo GIF | `docs/demo.tape` (generated asset) | ✅ Ready (#542) |
-| FORGE Annotation Protocol spec | `docs/FORGE-PROTOCOL.md` | ✅ Published (#553) |
+| FORGE Annotation Protocol spec | `docs/spec/forge-protocol-v1.md` | ✅ Published (#553) |
 | dev.to article | `docs/articles/devto-how-i-built-an-ai-agent-that-never-forgets.md` | ✅ Draft ready (#549) |
 | Awesome list submissions | `docs/distribution-submissions.md` | ✅ Documented (#552) |
 
@@ -192,6 +192,6 @@ After each initial outreach action:
 ## Related Assets
 
 - `docs/distribution-submissions.md` — canonical description + awesome list submissions
-- `docs/FORGE-PROTOCOL.md` — FORGE Annotation Protocol spec (shareable with Anthropic as ecosystem contribution)
+- `docs/spec/forge-protocol-v1.md` — FORGE Annotation Protocol spec (shareable with Anthropic as ecosystem contribution)
 - `docs/articles/devto-how-i-built-an-ai-agent-that-never-forgets.md` — long-form story for blog pitch
 - `docs/youtube-demo-script.md` — demo video script (reference for pitch)

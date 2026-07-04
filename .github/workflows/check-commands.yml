@@ -4,14 +4,20 @@ on:
   pull_request:
     paths:
       - 'commands/**'
+      - 'docs/FORGE-PROTOCOL.md'
+      - 'docs/WORKFLOW.md'
       - 'scripts/check-native-conflicts.sh'
+      - 'scripts/check-protocol-restatements.sh'
   push:
     branches:
       - staging
       - main
     paths:
       - 'commands/**'
+      - 'docs/FORGE-PROTOCOL.md'
+      - 'docs/WORKFLOW.md'
       - 'scripts/check-native-conflicts.sh'
+      - 'scripts/check-protocol-restatements.sh'
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.sha }}
@@ -27,6 +33,16 @@ jobs:
 
       - name: Check native command conflicts
         run: bash scripts/check-native-conflicts.sh commands/
+
+  check-protocol-restatements:
+    name: Protocol restatement check
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Check for FORGE protocol restatements in commands/
+        run: bash scripts/check-protocol-restatements.sh commands/ docs/
 
   banned-token-lint:
     name: Banned token lint
