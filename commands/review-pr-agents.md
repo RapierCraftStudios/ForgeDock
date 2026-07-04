@@ -353,7 +353,7 @@ For each hit: read the fallback value.
 - Is `admin`, `password`, `changeme`, `secret`, `test`, or similar weak string: **CONFIRMED HIGH** — default credential.
 - Is empty string (`${VAR:-}` or `${VAR:-""}`): **CONFIRMED HIGH** if field controls authentication.
 
-**Required cross-checks when a credential fallback is found**: (1) Is the env var required in `app/env_validation.py`? (2) Is it in `scripts/decrypt-secrets.sh` ENV_MAPPING? (3) Is it marked required in `.env.example`? If ANY missing: the insecure fallback may be active in some environments.
+**Required cross-checks when a credential fallback is found**: (1) Is the env var required in `app/env_validation.py`? (2) Is it in `scripts/decrypt-secrets.sh` ENV_MAPPING (if configured in your SOPS deploy chain — skip if absent)? (3) Is it marked required in `.env.example`? If ANY missing: the insecure fallback may be active in some environments.
 **Confidence**: `CONFIRMED` — fallback value is objectively verifiable.
 **Severity**: HIGH — insecure fallback credential is equivalent to a hardcoded credential for any environment missing the env var.
 **Evidence**: Config files commonly use `${VAR:-placeholder}` patterns during development, where the placeholder is a sample credential or hash. If the env var is absent in any environment (staging, non-production, first deploy before secrets are injected), the placeholder becomes the active credential. Also covered by INFRA agent item 13 (deployment context + ENV_MAPPING cross-check); this item extends coverage to PRs not classified as INFRA domain.
@@ -801,14 +801,14 @@ CRITICAL: This is a billing system. Double-spend = revenue loss.
    ```
    If `WHERE reserved_by IS NULL` appears in a SELECT that is followed by a separate UPDATE (not in the same atomic statement), this is a CONFIRMED HIGH finding — two concurrent sessions can both pass the read check before either writes.
 
-8. **Cross-service flag staleness**: When a discount or pricing flag (`is_byop`, `has_active_subscription`, `byop_discount`) is set by the API layer at job submission and read by the Worker layer at billing time, verify the flag is re-validated at debit time — not trusted from the queued job payload.
+8. **Cross-service flag staleness**: When a discount or pricing flag (e.g. `has_active_subscription`, a `discount_type` field) is set by the API layer at job submission and read by the Worker layer at billing time, verify the flag is re-validated at debit time — not trusted from the queued job payload.
 
    Search for discount flags passed through Redis/job payloads:
    ```bash
-   grep -rn "is_byop\|byop_discount\|discount.*flag\|flag.*discount" services/api/app/ services/worker/worker/ | head -20
+   grep -rn "discount.*flag\|flag.*discount\|subscription.*flag\|plan_type\|discount_type" services/api/ services/worker/ | head -20
    # If the flag flows through a job payload and is not re-validated at billing: CONFIRMED HIGH
    ```
-   A race window exists when a flag is checked at submission but consumed at billing: the underlying condition (e.g., proxy existence, subscription status) may have changed between the two operations. The fix must re-validate the flag atomically at the point of debit, not rely on a stale value from the job payload.
+   A race window exists when a flag is checked at submission but consumed at billing: the underlying condition (e.g., subscription status, entitlement) may have changed between the two operations. The fix must re-validate the flag atomically at the point of debit, not rely on a stale value from the job payload.
 
 ## Safe Patterns in This Codebase
 ```bash
@@ -1317,8 +1317,8 @@ You are auditing PR #[PR_NUMBER] for database changes in [PROJECT_NAME].
    a. List ALL `*.sql` files in `infra/migrations/` on the PR's target branch (use `git ls-tree` or `ls`)
    b. Extract the 4-digit numeric prefix from each filename (the leading digits before the first `_`)
    c. Identify any prefix that appears more than once
-   d. Cross-reference against the `GRANDFATHERED_DUPLICATES` list in `scripts/validate-migration-order.sh` — these are known-safe legacy duplicates
-   e. **DEPLOY GATE — CRITICAL**: If ANY non-grandfathered duplicate prefix exists → flag as **CRITICAL BLOCKER** and reject the PR. **Do NOT apply migration runner reasoning here.** The deploy gate (`deploy-production.yml`) runs `validate-migration-order.sh` with no `continue-on-error` — it hard-fails on any non-grandfathered duplicate regardless of whether the migration runner executes files correctly. The runner may handle duplicate filenames fine; the deploy script does not. A PR that passes this reasoning trap ("unique filenames, so the runner is safe") will still halt production deploy and waste a 30-minute CI compute cycle. The only safe classification is CRITICAL BLOCKER.
+   d. Identify if the project maintains a grandfathered-duplicates allowlist (e.g., a config file or comment block listing known-safe legacy duplicate prefixes). If one exists, cross-reference against it. <!-- Updated: forge#1349 — removed stale validate-migration-order.sh reference (script does not exist in ForgeDock) -->
+   e. **DEPLOY GATE — CRITICAL**: If ANY non-allowlisted duplicate prefix exists → flag as **CRITICAL BLOCKER** and reject the PR. **Do NOT apply migration runner reasoning here.** Deploy gates that enforce migration ordering hard-fail on any non-allowed duplicate regardless of whether the migration runner executes files correctly. The runner may handle duplicate filenames fine; the deploy script does not. A PR that passes this reasoning trap ("unique filenames, so the runner is safe") will still halt production deploy. The only safe classification is CRITICAL BLOCKER.
    f. Additionally: if the PR adds new migration files, verify their prefixes don't collide with existing files in the directory
 9. **FK and CHECK constraints**: New tables should have appropriate foreign keys and CHECK constraints. Missing FK allows orphaned rows; missing CHECK allows invalid enum values.
 10. **asyncpg gotchas**:
@@ -1588,7 +1588,7 @@ If no infra context is configured above, derive the deployment model from the ch
 
    **Cross-check when a credential fallback is found:**
    1. Is the corresponding env var required (not optional) in `app/env_validation.py` (or equivalent startup validation)?
-   2. Is the env var in `scripts/decrypt-secrets.sh` ENV_MAPPING (delivered from SOPS to `.env.production`)?
+   2. Is the env var in `scripts/decrypt-secrets.sh` ENV_MAPPING (if configured in your SOPS deploy chain — skip if absent; delivered from SOPS to `.env.production`)?
    3. Is the env var documented with a "REQUIRED" note in `.env.example`?
 
    If ANY of these three are missing: the env var may legitimately be absent in some environments, making the insecure fallback active. Flag as **CONFIRMED HIGH** with all three cross-check results.

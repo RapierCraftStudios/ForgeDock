@@ -5,7 +5,7 @@
 #   changed_files_file: path to a file listing changed files (one per line)
 #   repo_root: path to the repository root
 #
-# Layout path overrides (env vars — override defaults for non-AlterLab layouts):
+# Layout path overrides (env vars — override defaults for project-specific layouts):
 #   FORGE_PAGES_ROOT          Root of Next.js App Router pages dir (default: web/src/app)
 #   FORGE_API_ROUTERS_DIR     Dir containing FastAPI router .py files (default: services/api/app/routers)
 #   FORGE_API_MAIN            Path to API app entrypoint, relative to repo root (default: services/api/app/main.py)
@@ -35,7 +35,7 @@ else
     FILES=$(cat "$CHANGED_FILES")
 fi
 
-# Layout path configuration — read from env vars, fall back to AlterLab defaults
+# Layout path configuration — read from env vars, fall back to project defaults
 FORGE_PAGES_ROOT="${FORGE_PAGES_ROOT:-web/src/app}"
 FORGE_API_ROUTERS_DIR="${FORGE_API_ROUTERS_DIR:-services/api/app/routers}"
 FORGE_API_MAIN="${FORGE_API_MAIN:-services/api/app/main.py}"

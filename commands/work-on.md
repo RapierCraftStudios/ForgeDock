@@ -13,6 +13,19 @@ Orchestrator for the full issue lifecycle: investigate → decompose (if needed)
 
 **Agent model policy**: Default `model: "sonnet"`. Fallback: `model: "opus"` if Sonnet is rate-limited.
 **NEVER use plan mode (EnterPlanMode).**
+**NEVER use the Agent tool** — this spec uses `Skill(...)` for sub-phase dispatch. The Agent tool spawns opaque subprocesses that bypass phase protocols, skip FORGE annotations, and cannot be constrained by allowed-tools. Always use `Skill(skill="...", args="...")` for sub-phase invocations.
+
+<!-- FORGE:SPEC_LOADED — work-on.md loaded and active. Agent is bound by this spec. -->
+
+## HARD RULES — READ BEFORE ANYTHING ELSE
+
+1. **Every sub-phase MUST be invoked via `Skill(...)`.** You do NOT implement inline. You invoke `Skill(skill="work-on/investigate", ...)`, `Skill(skill="work-on/build", ...)`, etc. The Skill tool invocation is what triggers label updates, FORGE annotations, and structured output. Without it, the phase has no paper trail.
+
+2. **Write to GitHub after EVERY phase.** Every FORGE annotation (HEARTBEAT, INVESTIGATOR, CONTRACT, BUILDER, etc.) must be posted before the next phase starts. A phase that completes without a GitHub write is effectively invisible to the stall detector and future sessions.
+
+3. **Follow the Universal Phase Dispatcher.** The phase sequence table is the SINGLE source of truth for transitions. Do NOT skip phases, do NOT reorder phases, do NOT treat intermediate completions as terminal. Only the terminal states listed in the Dispatcher allow stopping.
+
+4. **PRs NEVER target `main`.** Target `staging` (fast lane) or `milestone/{slug}` (feature lane). A PR to main is a pipeline violation regardless of what the issue description says.
 
 ### Compaction Resilience
 
@@ -55,6 +68,44 @@ Orchestrator for the full issue lifecycle: investigate → decompose (if needed)
 **If the current state is NOT terminal: proceed to the next phase in the sequence immediately. Do NOT stop. Do NOT emit a summary. Do NOT treat any intermediate phase completion as a terminal signal.** Every phase completion — investigation done, quality gate passed, PR merged, review complete — is an intermediate result. Only the terminal states listed above allow stopping.
 
 **Adding a new phase**: Insert it into the phase sequence table above and the sub-phase sequence if it belongs to Phase 3. No per-boundary transition code is needed — the universal continuation rule handles all transitions.
+
+---
+
+## Spawn-Decision Policy
+
+<!-- FORGE:SPAWN_POLICY — Canonical spawn-decision table. Sibling specs (orchestrate.md, review-pr.md) link to this section. Sub-issues #1276–#1279 reference this table. -->
+
+**Default: run inline.** Every skill, phase, and sub-agent runs inline in the current context unless one of the three criteria below explicitly applies. A sub-agent buys exactly two things — parallelism and context isolation. If neither is needed, forking is waste.
+
+### Spawn-Decision Table
+
+| Row | Criterion | Fork? | Example |
+|-----|-----------|-------|---------|
+| a | **Parallel fan-out** — two or more independent work units can execute concurrently and the total wall time saving justifies the fork overhead | YES — spawn one sub-agent per work unit | `/orchestrate` dispatching multiple `/work-on` agents; `review-pr` spawning domain-specific reviewers in parallel |
+| b | **Fresh-context isolation** — the work unit is a structured review or audit whose value depends on seeing the artefact without the builder's accumulated context bias, AND the review result is load-bearing for the merge decision | YES — spawn a dedicated sub-agent | Phase 5C review-fork when build context is large (see Row c for the quantitative threshold) |
+| c | **Parent context near overflow** — the parent agent has made ≥20 Skill invocations OR the build changed ≥10 files, meaning delegating review inline risks a mid-review token overflow | YES — spawn a fresh sub-agent for review | Phase 5C: `Skill(skill="work-on/review", …)` instead of direct `review-pr` invocation |
+
+**If none of the three rows match: run inline.** Do not fork for convenience, narrative clarity, or to avoid reading a large file. Context cost of a fork (spawning, context reconstruction, result aggregation) is paid every time, even when parallelism or isolation adds no value.
+
+### Depth Budget
+
+**Available depth**: 5 levels (since Claude Code v2.1.172).
+
+**Target depth for a standard run**: ≤ 3.
+
+| Depth | Agent | Notes |
+|-------|-------|-------|
+| 1 | `/orchestrate` | Top-level dispatcher — never implements directly |
+| 2 | `/work-on` | Issue pipeline — runs build phases inline |
+| 3 | Parallel reviewers (Row a/b/c fork) | Domain review agents spawned by Phase 5C |
+
+**Build phases (3A–3M) run inline at depth 2** — they are sequential sub-phases of `/work-on`, not independent agents. Forking the build into a sub-agent (depth 3) is a violation of Row a/b/c unless the build itself fans out independently scoped work units.
+
+**Depth 4–5 are reserved** for exceptional cases (e.g. an orchestrate agent that itself spawns an orchestrate agent for a sub-milestone). Agents that reach depth 4 MUST log a justification comment on the relevant issue.
+
+### Phase 5C Cross-Reference
+
+The existing Phase 5C context-budget check (≥10 changed files OR ≥20 Skill invocations → spawn `work-on/review` sub-agent) is an instance of **Row (c)** above. The quantitative thresholds are not changed — only their framing: they are now a specific application of the spawn-decision table, not a standalone ad-hoc rule.
 
 ---
 
@@ -193,7 +244,7 @@ gh api repos/{GH_REPO}/issues/{NUMBER}/comments --jq '.[] | {id: .id, author: .u
 
 **Check**: state (closed → STOP), terminal labels (`workflow:merged`/`workflow:invalid` → STOP), existing agent comments (`FORGE:INVESTIGATOR`, `FORGE:DECOMPOSED`, `FORGE:CONTRACT`, `FORGE:BUILDER`, `FORGE:TRAJECTORY`, `FORGE:DECISION_RECORD`), parent tracker status, sub-issue status.
 
-**Determine resume point**: No comments → Phase 1. Investigation exists + ready-to-build → Phase 3. Builder + no PR → Phase 4. Builder + PR open → Phase 5. PR merged + issue open → Phase 6.
+**Determine resume point**: No comments → Phase 1. Investigation exists + ready-to-build → Phase 3. Builder:COMPLETE + no PR → Phase 4. Builder without :COMPLETE (partial/interrupted build) + no PR → Phase 3 (partial-build cleanup). Builder + PR open → Phase 5. PR merged + issue open → Phase 6.
 
 ### 0B.5: Read Phase Checkpoint (MANDATORY — executes before any phase-skip decision)
 
@@ -835,7 +886,17 @@ esac
 
 <!-- FORGE:PHASE_COMPLETE — Entering Phase 3 (Build). See Universal Phase Dispatcher: sub-phases 3A–3M execute in sequence. No sub-phase completion is terminal. -->
 
-**Skip if**: `<!-- FORGE:BUILDER -->` exists.
+**Skip if**: `<!-- FORGE:BUILDER:COMPLETE -->` is present in a BUILDER comment. <!-- Added: forge#1305 — require completion marker, not mere presence of BUILDER annotation -->
+
+**Partial build detection**: If `<!-- FORGE:BUILDER -->` exists BUT `<!-- FORGE:BUILDER:COMPLETE -->` is ABSENT → the build was interrupted after implement.md Phase I6 (comment posted) but before validate.md Phase V5 (commit). Delete the partial comment and restart Phase 3 from the top: <!-- Added: forge#1305 -->
+```bash
+PARTIAL_ID=$(gh api repos/{GH_REPO}/issues/{NUMBER}/comments \
+  --jq '[.[] | select(.body | contains("FORGE:BUILDER") and (contains("FORGE:BUILDER:COMPLETE") | not))] | last | .id // ""')
+if [ -n "$PARTIAL_ID" ]; then
+  gh api repos/{GH_REPO}/issues/comments/$PARTIAL_ID -X DELETE
+  echo "Deleted partial FORGE:BUILDER comment (no FORGE:BUILDER:COMPLETE) — restarting build"
+fi
+```
 
 **CRITICAL: You MUST execute ALL sub-phases 3A–3M in order. Sub-phases 3C.5 (context) and 3C.6 (architect) are skipped ONLY for TRIVIAL tasks and Investigation tasks — see Phase 3B for classification. For STANDARD and COMPLEX tasks they post mandatory `FORGE:CONTEXT` and `FORGE:ARCHITECT` comments that Phase 3F reads as its primary input. Skipping them without a TRIVIAL/Investigation classification degrades build quality and causes review findings. After each sub-phase, continue to the next — no sub-phase is terminal.**
 
@@ -857,9 +918,9 @@ gh issue view {NUMBER} {GH_FLAG} --json number,title,body,labels,state,milestone
 gh api repos/{GH_REPO}/issues/{NUMBER}/comments \
   --jq '.[] | select(.body | contains("FORGE:INVESTIGATOR")) | .body'
 
-# Check if build already completed
+# Check if build already completed (require FORGE:BUILDER:COMPLETE — not just FORGE:BUILDER)
 gh api repos/{GH_REPO}/issues/{NUMBER}/comments \
-  --jq '.[] | select(.body | contains("FORGE:BUILDER")) | .body'
+  --jq '.[] | select(.body | contains("FORGE:BUILDER:COMPLETE")) | .body'
 
 # Check for existing COMPLEXITY_BAND from a prior run (resume path)
 EXISTING_FAST_PATH=$(gh api repos/{GH_REPO}/issues/{NUMBER}/comments \
@@ -1181,6 +1242,14 @@ esac
 **Determine source branch**:
 - Review-finding → parse `**Code branch**: \`{branch}\`` from issue body; branch from `origin/{branch}`
   - **Milestone review-finding hybrid lane** (Code branch matches `milestone/*`): High-risk lane. NEVER use `git merge` to resolve conflicts — use `git rebase` or `git cherry-pick` only. If conflicts can't be resolved without merge, post comment, add `needs-human`, STOP.
+  - **Missing ref fallback**: After parsing, verify the Code branch still exists on remote. If not (e.g., the source PR's head branch was deleted post-merge before a corrected stamp took effect), fall back to `PR_BASE` (the lane default) and note the fallback:
+    ```bash
+    SOURCE_BRANCH="{CODE_BRANCH_FROM_ISSUE_BODY}"
+    if ! git ls-remote --exit-code origin "$SOURCE_BRANCH" >/dev/null 2>&1; then
+      echo "WARNING: Code branch '$SOURCE_BRANCH' not found on remote — falling back to PR_BASE '$PR_BASE'"
+      SOURCE_BRANCH="$PR_BASE"
+    fi
+    ```
 - Feature lane (has milestone) → branch from `origin/{PR_BASE}` (PR_BASE now set above)
 - Fast lane (no milestone) → branch from `origin/{PR_BASE}` (PR_BASE = `{STAGING_BRANCH}`)
 
@@ -1289,6 +1358,11 @@ if iteration == max_iterations AND not PASS:
 
 All tool commands are read from `forge.yaml → verification.commands`. When a key is absent, the step logs `SKIPPED — not configured in verification.commands` and continues rather than silently passing.
 
+**Track skipped checks** — initialize before any check runs:
+```bash
+VERIFICATION_SKIPPED_CHECKS=""
+```
+
 **Python**:
 ```bash
 cd {WORKTREE_PATH}
@@ -1298,6 +1372,7 @@ if [ -n "$PYTHON_FORMAT" ]; then
     eval "$PYTHON_FORMAT" 2>&1
 else
     echo "SKIPPED — python.format not configured in verification.commands"
+    VERIFICATION_SKIPPED_CHECKS="${VERIFICATION_SKIPPED_CHECKS:+$VERIFICATION_SKIPPED_CHECKS, }python.format"
 fi
 
 # Compile check always runs (no config needed — catches syntax errors)
@@ -1317,6 +1392,7 @@ if [ -n "$TS_FORMAT" ]; then
     eval "$TS_FORMAT" 2>&1
 else
     echo "SKIPPED — typescript.format not configured in verification.commands"
+    VERIFICATION_SKIPPED_CHECKS="${VERIFICATION_SKIPPED_CHECKS:+$VERIFICATION_SKIPPED_CHECKS, }typescript.format"
 fi
 
 if [ -n "$TS_TYPECHECK" ]; then
@@ -1327,6 +1403,7 @@ elif [ -n "$TS_BUILD" ]; then
     TS_EXIT=$?
 else
     echo "SKIPPED — typescript.typecheck and typescript.build not configured in verification.commands"
+    VERIFICATION_SKIPPED_CHECKS="${VERIFICATION_SKIPPED_CHECKS:+$VERIFICATION_SKIPPED_CHECKS, }typescript.typecheck/build"
     TS_EXIT=0
 fi
 ```
@@ -1468,12 +1545,20 @@ Check off completed items, mark phases complete, add PR references.
 
 ### 3M: Post implementation comment
 ```bash
+# Compute verification status from VERIFICATION_SKIPPED_CHECKS (set in Phase 3H)
+if [ -z "$VERIFICATION_SKIPPED_CHECKS" ]; then
+  VERIFICATION_STATUS="✅ All configured verification commands passed"
+else
+  VERIFICATION_STATUS="⚠ Verification NOT run: ${VERIFICATION_SKIPPED_CHECKS} — verification.commands not configured for these checks"
+fi
+
 gh issue comment {NUMBER} {GH_FLAG} --body "<!-- FORGE:BUILDER -->
 ## Implementation Complete
 
 **Branch**: \`{BRANCH}\`
 **Commits**: {COMMIT_SHA(S)}
 **Files changed**: {COUNT}
+**Verification Status**: ${VERIFICATION_STATUS}
 
 ### Approach
 {what was built, key decisions}
@@ -1639,7 +1724,7 @@ PR #${PR_NUMBER} created targeting \`{PR_BASE}\`. Invoking /review-pr with --aut
 
 **Context budget check** (run before invoking review-pr): <!-- Added: forge#93 -->
 
-Large-context sessions that accumulated significant build history cause review-pr to hit the token limit mid-review. Check the accumulated context before delegating:
+Large-context sessions that accumulated significant build history cause review-pr to hit the token limit mid-review. This check is an instance of **Spawn-Decision Policy Row (c)** (parent context near overflow) — see the [Spawn-Decision Table](#spawn-decision-table) for the general policy. Check the accumulated context before delegating:
 
 - If the build changed **≥10 files** OR this agent has made **≥20 Skill invocations** since it started: invoke `work-on/review` as a fresh sub-agent (via `Skill(skill="work-on/review", args="...")`) rather than calling review-pr directly. The sub-agent starts with a clean context window.
 - Otherwise (small build, few skill calls): invoke review-pr directly as below.
@@ -1887,6 +1972,13 @@ This check is **audit-only** — it annotates the trajectory for visibility. It 
 Post `<!-- FORGE:TRAJECTORY -->` comment with phase-by-phase results table:
 
 ```bash
+# Compute verification row from VERIFICATION_SKIPPED_CHECKS (set in Phase 3H)
+if [ -z "$VERIFICATION_SKIPPED_CHECKS" ]; then
+  VERIFICATION_ROW="✅ Ran"
+else
+  VERIFICATION_ROW="⚠ Skipped — verification.commands not configured for: ${VERIFICATION_SKIPPED_CHECKS}"
+fi
+
 gh issue comment {NUMBER} {GH_FLAG} --body "<!-- FORGE:TRAJECTORY -->
 ## Pipeline Trajectory — #{NUMBER}
 
@@ -1897,6 +1989,7 @@ gh issue comment {NUMBER} {GH_FLAG} --body "<!-- FORGE:TRAJECTORY -->
 | Phase 2: Decomposition | ⏭ Skipped | {reason} |
 | Phase 3: Build | ✅ Complete | Branch: \`{BRANCH}\` |
 | Phase 3G: Quality Gate | ✅ Gate passed | {iterations} iterations |
+| Phase 3H: Verification | ${VERIFICATION_ROW} | |
 | Phase 4–5: Review + PR | {REVIEW_ROW} | PR #{PR_NUMBER} → \`{PR_BASE}\` |
 | Phase 6: Close | ✅ Complete | Issue closed |
 

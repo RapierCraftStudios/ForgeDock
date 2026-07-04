@@ -1,6 +1,7 @@
 ---
 description: Route a design GitHub issue through the UI Taste Harness — investigate → architect → implement → critique loop → user-feedback loop → close — accumulating FORGE:DESIGN_* annotations and driving the design:* label state machine to design:shipped.
 argument-hint: <issue-number> | <brief-name>
+install: internal
 ---
 <!-- SPDX-FileCopyrightText: Copyright (c) RapierCraft Studios -->
 <!-- SPDX-License-Identifier: AGPL-3.0-or-later -->

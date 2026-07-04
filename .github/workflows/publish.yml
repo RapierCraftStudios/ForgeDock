@@ -108,10 +108,22 @@ jobs:
         if: always() && env.SKIP_PUBLISH != 'true'
         run: mv package.json.orig package.json
 
+      - name: Sync plugin.json version
+        if: env.SKIP_PUBLISH != 'true'
+        run: |
+          node -e "
+            const fs = require('fs');
+            const version = require('./package.json').version;
+            const plugin = JSON.parse(fs.readFileSync('.claude-plugin/plugin.json', 'utf8'));
+            plugin.version = version;
+            fs.writeFileSync('.claude-plugin/plugin.json', JSON.stringify(plugin, null, 2) + '\n');
+            console.log('Synced .claude-plugin/plugin.json to version ' + version);
+          "
+
       - name: Push version bump
         if: env.SKIP_PUBLISH != 'true'
         run: |
-          git add package.json
+          git add package.json .claude-plugin/plugin.json
           git commit -m "chore: bump version to ${{ env.VERSION }} [skip ci]"
           git push
 

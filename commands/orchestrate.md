@@ -24,6 +24,9 @@ You are the top-level orchestrator. Your job is to take a batch of issues, plan 
 **You have access to ALL tools** — Agent tool (critical), Task tool, Skill tool, Bash, everything. Use the Agent tool aggressively to parallelize work.
 
 **Agent model policy**: Default `model: "sonnet"`. If Sonnet is rate-limited, fall back to `model: "opus"`. User can override with `--model <name>`.
+**NEVER use plan mode (EnterPlanMode).**
+
+<!-- FORGE:SPEC_LOADED — orchestrate.md loaded and active. Agent is bound by HARD RULES above. -->
 
 ---
 
@@ -519,9 +522,11 @@ When two issues modify different files that **import from the same utility/init 
 | Pattern | Inference | Action |
 |---------|-----------|--------|
 | Issue A modifies `routers/billing.py`, Issue B modifies `routers/auth.py` | Both likely import from `routers/__init__.py` or `dependencies.py` | Flag as possible conflict if same service |
-| Issue A modifies `models/user.py`, Issue B modifies `models/subscription.py` | Both likely modify `models/__init__.py` (SQLAlchemy model registry) | Flag as probable conflict → serialize |
+| Issue A modifies `models/user.py`, Issue B modifies `models/subscription.py` *(Python/SQLAlchemy example)* | Both likely modify `models/__init__.py` (model registry) | Flag as probable conflict → serialize |
+| Issue A modifies `routes/users.js`, Issue B modifies `routes/billing.js` *(Node.js example)* | Both likely import from `routes/index.js` barrel | Flag as possible conflict if same service |
+| Issue A modifies `internal/user/handler.go`, Issue B modifies `internal/billing/handler.go` *(Go example)* | Both likely register in `internal/router/router.go` | Flag as possible conflict if same service |
 | Issue A modifies `web/src/components/X.tsx`, Issue B modifies `web/src/components/Y.tsx` | May share `index.ts` barrel export | Flag only if same parent directory |
-| Issue A modifies `services/api/app/main.py` | `main.py` is a high-fan-in file (router registration, middleware) | Serialize with ANY other API issue |
+| Issue A modifies the app entrypoint (e.g. `main.py`, `main.go`, `server.js`, `app.ts`) | Entrypoint is a high-fan-in file (router registration, middleware) — set the path via `forge.yaml → review.layout.api_main` | Serialize with ANY other same-service issue |
 | Issue A modifies `docker-compose.yml` or `docker-compose.prod.yml` | Global config — any concurrent modification conflicts | Serialize with ALL other issues that touch infra |
 
 **Apply inferences:**
@@ -529,14 +534,14 @@ When two issues modify different files that **import from the same utility/init 
 # High-fan-in files — if ANY issue touches these, serialize it with all same-service issues.
 # Read layout paths from forge.yaml review.layout; fall back to sensible generic defaults.
 # Example (pseudo-code — adapt to your forge.yaml parsing method):
-#   API_MAIN    = forge_yaml.review.layout.api_main    ?? "services/api/app/main.py"
-#   WORKER_MAIN = forge_yaml.review.layout.worker_main ?? "services/worker/worker/main.py"
-#   PAGES_ROOT  = forge_yaml.review.layout.pages       ?? "web/src/app"
+#   API_MAIN    = forge_yaml.review.layout.api_main    ?? "src/main.py"   # set in forge.yaml; no stack-specific default
+#   WORKER_MAIN = forge_yaml.review.layout.worker_main ?? "src/worker.py" # set in forge.yaml; no stack-specific default
+#   PAGES_ROOT  = forge_yaml.review.layout.pages       ?? "web/src/app"   # Next.js default; override in forge.yaml for other frameworks
 
 HIGH_FAN_IN = [
-  API_MAIN,                          # e.g. "services/api/app/main.py" — router/middleware registration
-  WORKER_MAIN,                       # e.g. "services/worker/worker/main.py" — worker entrypoint (set forge.yaml review.layout.worker_main)
-  PAGES_ROOT + "/layout.tsx",        # e.g. "web/src/app/layout.tsx" — root layout for all pages
+  API_MAIN,                          # app entrypoint — router/middleware registration (set forge.yaml review.layout.api_main)
+  WORKER_MAIN,                       # worker entrypoint (set forge.yaml review.layout.worker_main)
+  PAGES_ROOT + "/layout.tsx",        # root layout for all pages (Next.js; adapt for your framework)
   "docker-compose.yml",
   "docker-compose.prod.yml",
   ".env.example"
@@ -570,13 +575,17 @@ Layers 1-4 infer conflict risk from structure — path overlap, directory nestin
 # argument below — a plain string here would be word-split and glob-expanded
 # by the shell when handed to `git log --`, silently mangling or dropping any
 # path containing a space or glob metacharacter.
-mapfile -t ALL_AFFECTED_FILES < <(printf '%s\n' "${LAYER1_FILES[@]}" | sort -u)
+mapfile -t ALL_AFFECTED_FILES < <(printf '%s\n' "${LAYER1_FILES[@]}" | sort -u | grep -v '^$')
 
 # Guard: an empty array expands to nothing after `--`, which git interprets as
 # "no pathspec restriction" (i.e. the whole repo) rather than "match nothing".
 # Skip the query entirely in that case instead of letting it silently widen to
 # a full-repo scan — this can happen when upstream file-extraction (Layer 1)
 # yields zero paths for every issue in the batch.
+# NOTE: `grep -v '^$'` above is required — without it, `printf '%s\n'` on an
+# empty array emits one blank line (printf runs its format string once even
+# with zero variadic args), which `mapfile` captures as a 1-element array of
+# [""], making this guard evaluate to false and causing `git log -- ""` to run.
 if [ "${#ALL_AFFECTED_FILES[@]}" -eq 0 ]; then
   echo "Layer 5: no affected files extracted by Layer 1 for this batch — skipping co-change query, falling back to Layers 1-4."
 else
@@ -831,6 +840,101 @@ Proceed? (yes / adjust / pick specific issues)
 **Wait for user confirmation before spawning agents.** This is the checkpoint — once agents launch, they run autonomously.
 
 **After confirmation**: If investigations exist, execute Phase 2B-E first. Then re-present the expanded plan (with newly spawned issues added to the dependency graph) for a quick confirmation before launching implementation.
+
+---
+
+## Engine mode (headless)
+
+When running headless/CI, dispatch each issue via the durable execution engine instead of spawning prose agents:
+
+```bash
+forgedock run-issue <issue> --lane <staging|milestone/slug>
+```
+
+The engine drives every phase transition deterministically, mirrors state to the `FORGE:STATE` block on the issue, and holds a lease. To recover stalls, scan in-flight issues' `FORGE:STATE`; any issue with an expired lease and a non-terminal state is re-dispatched with the same `forgedock run-issue <issue>` command — it resumes from the last committed phase (idempotent). This replaces the label-heuristic "already in progress" check and the resume-with-nagging loop.
+
+---
+
+## Background Dispatch Mode <!-- Added: forge#1251 -->
+
+This section governs how the orchestrator dispatches DAG-ready issues as background agents and how it handles wake/compaction recovery. Read it before every Phase 4 dispatch decision.
+
+### Feature gate
+
+Background dispatch (via `run_in_background=true` on each `Agent()` call) is the primary dispatch path. It is enabled when **both** of the following conditions hold:
+
+1. **Version**: Claude Code >= v2.1.186 (the release that introduced background subagents with proper `agent_completed` completion notifications and the Notification hook). Below this version, background agents may not surface completion events correctly.
+2. **Env var**: `CLAUDE_CODE_DISABLE_BACKGROUND_TASKS` is **not** set (or is empty).
+
+Check both at the start of Phase 4, before the first dispatch:
+
+```bash
+# Feature gate check — run once before Phase 4 dispatch begins
+BACKGROUND_DISPATCH_ENABLED=true
+
+if [ -n "${CLAUDE_CODE_DISABLE_BACKGROUND_TASKS:-}" ]; then
+  echo "Background dispatch disabled: CLAUDE_CODE_DISABLE_BACKGROUND_TASKS is set."
+  BACKGROUND_DISPATCH_ENABLED=false
+fi
+
+# Version check: if the Claude Code version can be read, compare it.
+# If the version cannot be determined, default to ENABLED (optimistic).
+CC_VERSION=$(claude --version 2>/dev/null | grep -oP '\d+\.\d+\.\d+' | head -1 || echo "")
+if [ -n "$CC_VERSION" ]; then
+  # Compare major.minor.patch numerically
+  IFS='.' read -r CC_MAJOR CC_MINOR CC_PATCH <<< "$CC_VERSION"
+  if [ "$CC_MAJOR" -lt 2 ] || \
+     { [ "$CC_MAJOR" -eq 2 ] && [ "$CC_MINOR" -lt 1 ]; } || \
+     { [ "$CC_MAJOR" -eq 2 ] && [ "$CC_MINOR" -eq 1 ] && [ "$CC_PATCH" -lt 186 ]; }; then
+    echo "Background dispatch disabled: Claude Code ${CC_VERSION} < v2.1.186."
+    BACKGROUND_DISPATCH_ENABLED=false
+  fi
+fi
+```
+
+**When `BACKGROUND_DISPATCH_ENABLED=false`**: fall back to the current streaming dispatch behavior — `run_in_background=true` is still set on each `Agent()` call (existing behavior, already correct), but treat completions as synchronous and do not rely on `agent_completed` notifications. Poll issue labels for terminal state instead.
+
+**When `BACKGROUND_DISPATCH_ENABLED=true`**: use `run_in_background=true` (already in the Step 4A Agent() template) and react to `agent_completed` notifications as documented in Step 4B. Do NOT poll.
+
+### Orchestrator state reconstruction on wake / after compaction
+
+The orchestrator context window must stay small regardless of how many issues have been dispatched. Achieving this requires that all dispatch state is stored on GitHub — not in the orchestrator's context.
+
+**Contract**: After any compaction event or orchestrator wake (session resumed after idle/restart), do NOT rely on in-context variables. Instead, reconstruct the DAG dispatch state from GitHub before checking for newly ready issues:
+
+```bash
+# Reconstruct dispatch state from GitHub after compaction / wake
+# Run this block at the top of every resumed Phase 4 loop iteration.
+
+# 1. Re-fetch all issue labels to rebuild terminal-state knowledge
+for NUM in {all_issue_numbers_in_batch}; do
+  ISSUE_STATE=$(gh issue view "$NUM" -R {GH_REPO} --json state,labels \
+    --jq '{state: .state, workflow: [.labels[].name | select(startswith("workflow:"))]}' \
+    2>/dev/null || echo '{}')
+  # Classify: terminal if workflow:merged, workflow:invalid, needs-human, or CLOSED
+  if echo "$ISSUE_STATE" | grep -qE 'workflow:merged|workflow:invalid|needs-human|CLOSED'; then
+    TERMINAL_ISSUES+=("$NUM")
+  else
+    ACTIVE_ISSUES+=("$NUM")
+  fi
+done
+
+# 2. Re-derive the ready set: any non-terminal issue whose predecessors are all terminal
+for NUM in "${ACTIVE_ISSUES[@]}"; do
+  ALL_PREDS_DONE=true
+  for PRED in {predecessors_of_NUM}; do
+    if ! printf '%s\n' "${TERMINAL_ISSUES[@]}" | grep -qx "$PRED"; then
+      ALL_PREDS_DONE=false
+      break
+    fi
+  done
+  $ALL_PREDS_DONE && READY_ISSUES+=("$NUM")
+done
+
+# 3. Dispatch the reconstructed ready set via standard Step 4A.pre.0 → 4A.pre → 4A flow
+```
+
+**Why this keeps context small**: Each `Agent()` call returns an agent ID stored only in `AGENT_ISSUE_MAP`, which is rebuilt per Step 4A.pre dispatch batch. After compaction, the map is gone — but the DAG state is fully on GitHub. The reconstruction above re-derives the ready set from labels alone, so the orchestrator context never needs to hold cumulative dispatch history.
 
 ---
 
@@ -1115,6 +1219,8 @@ AGENT_ISSUE_MAP[{NUMBER}] = <agent_id returned by Agent()>
 ### Step 4B: Monitor completions and dispatch newly ready issues
 
 You will be automatically notified when each background agent completes. **Do NOT use `sleep` loops to poll for completion.** Instead, wait for the automatic notification. When you receive a notification that an agent completed, immediately process it.
+
+**Successor dispatch latency is measured from `agent_completed`, not from orchestrator polling.** The moment you receive an `agent_completed` notification for issue N, that is t=0 for dispatching N's successors. Any successor whose predecessors are all now terminal MUST be dispatched in the same response that processes the notification — not after a poll cycle, not after a sleep. This is the design property that makes streaming DAG execution faster than wave-based execution. <!-- Added: forge#1251 -->
 
 **Core streaming dispatch loop**: After processing each agent completion, check the DAG for newly unblocked issues. If any issue now has all predecessors in a terminal state, dispatch it immediately (run Steps 4A.pre.0, 4A.pre, and 4A for the newly ready issues). This is the key difference from the wave model — issues dispatch as soon as their specific predecessors complete, not after an entire group finishes.
 

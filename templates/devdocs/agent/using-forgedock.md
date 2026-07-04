@@ -228,6 +228,20 @@ When `forge.yaml → repos.satellites` is configured, issue numbers can be prefi
 
 ---
 
+## Spec Compliance Rules
+
+Command specs declare constraints that agents MUST follow. These rules are not enforced at the tool-call level — compliance depends entirely on the agent reading and obeying the spec. Violations are invisible to the pipeline and can silently skip critical safety gates.
+
+1. **Respect `allowed-tools` frontmatter.** When a command spec declares `allowed-tools:` in its YAML frontmatter, NEVER use a tool not in that list. In particular, NEVER use the `Agent` tool when it is not listed — use `Task` or `Skill` instead. The `Agent` tool spawns opaque subprocesses that bypass `allowed-tools` constraints and cannot post structured output.
+
+2. **Execute Phase 0 routing before any other phase.** Commands with Phase 0 routing conditions (e.g., `review-pr.md` routing staging PRs to `review-pr-staging`) MUST evaluate the routing check before proceeding. Skipping routing can bypass entire sub-pipelines including deploy gates, test gates, and structured finding creation.
+
+3. **Look for `FORGE:SPEC_LOADED` markers.** Critical command specs include a `<!-- FORGE:SPEC_LOADED -->` HTML comment near the top. If you are executing a command and do not see this marker in your context, the spec was not loaded — stop and re-read the command file before proceeding.
+
+<!-- Added: forge#1383 — agent spec-compliance enforcement -->
+
+---
+
 ## Idempotency Rules
 
 - Re-invoking `/work-on` on a completed issue is safe — it reads the terminal label and stops

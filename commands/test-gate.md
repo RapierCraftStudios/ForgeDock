@@ -13,6 +13,10 @@ allowed-tools: Task, Bash, Read, Grep, Glob
 Verifies a staging→main bundle's acceptance criteria against running code before deploy. Called by `/review-pr-staging` (Phase 6.5) with the bundle PRs, or run standalone when `--prs` is absent (computes the bundle itself). Returns a machine-readable BLOCK / PASS / SKIP verdict for the caller to consume.
 
 **Agent model policy**: Default `model: "sonnet"`. If Sonnet is rate-limited, fall back to `model: "opus"`.
+**NEVER use plan mode (EnterPlanMode).**
+**NEVER use the Agent tool** — test-gate dispatches test clusters via `Task` only. The Agent tool bypasses the allowed-tools constraint and produces output that cannot be structured into the machine-readable BLOCK / PASS / SKIP verdict.
+
+<!-- FORGE:SPEC_LOADED — test-gate.md loaded and active. Agent is bound by this spec. -->
 
 **Posture**: Blocking-with-override at the staging→main boundary (mirrors the Phase 0A open-finding gate in `/review-pr-staging`). Posture is config-driven via `verification.test_gate`.
 

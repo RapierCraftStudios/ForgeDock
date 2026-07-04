@@ -338,6 +338,31 @@ function resolveConfinedPath(cwd, p) {
     );
   }
 
+  // Residual TOCTOU assumption: we return the lexical `resolved` path rather
+  // than `realResolved` so that callers (readFileSync / writeFileSync) work
+  // correctly with not-yet-existing paths (where realResolved === resolved
+  // anyway, since there is nothing to dereference).  The check above verified
+  // confinement on the realpath of the nearest *existing* ancestor, but a
+  // concurrent actor that mutates the filesystem between this check and the
+  // caller's open() call could in theory introduce a symlink that evades the
+  // guard — a classic time-of-check / time-of-use (TOCTOU) window.
+  //
+  // This is acceptable under the current threat model because:
+  //   1. Tool calls are executed in a strictly sequential, synchronous
+  //      `for...of` loop (see the runLive tool-use loop).  There is no async
+  //      gap and no concurrent tool execution within the runner itself.
+  //   2. A prompt-injected model therefore cannot create this race — it would
+  //      need to schedule two tool calls simultaneously, which the loop
+  //      prevents.
+  //   3. Only an independent, external OS process running concurrently could
+  //      exploit the window, which is outside the stated single-shot
+  //      prompt-injection threat model.
+  //
+  // If the runner is ever refactored to execute tool calls concurrently or
+  // asynchronously, this assumption MUST be revisited.  Mitigations to
+  // consider at that point include: operating on `realResolved` directly
+  // (eliminating the lexical/realpath split), or opening the file with an
+  // O_NOFOLLOW-equivalent flag so the kernel rejects a symlink at open time.
   return resolved;
 }
 
@@ -539,31 +564,73 @@ export function getToolHandlers(cwd) {
       // available. `shell: shell || true` preserves execSync's implicit
       // "always run via a shell" behavior for compound commands (&&, pipes,
       // heredocs) when resolveBashShell() returns undefined.
+      // maxBuffer defaults to 50 MB. FORGEDOCK_MAX_BUFFER_BYTES overrides it so
+      // tests can trigger ENOBUFS with a small value without generating 50 MB of
+      // output.  Non-positive or non-finite values fall back to the default.
+      const rawMaxBuffer = parseInt(process.env.FORGEDOCK_MAX_BUFFER_BYTES, 10);
+      const maxBuffer =
+        Number.isFinite(rawMaxBuffer) && rawMaxBuffer > 0
+          ? rawMaxBuffer
+          : 50 * 1024 * 1024;
       const result = spawnSync(command, {
         cwd,
         encoding: "utf-8",
-        maxBuffer: 50 * 1024 * 1024,
+        maxBuffer,
         timeout: timeoutMs,
         env: childEnv,
         shell: shell || true,
       });
       const stdout = result.stdout ? String(result.stdout) : "";
       const stderr = result.stderr ? String(result.stderr) : "";
-      // Detect timeout: result.error.code === "ETIMEDOUT" and/or
-      // result.signal === "SIGTERM" are the primary indicators (set by
-      // Node.js when the timeout fires and the process is killed), but on
-      // Windows signal reporting may not be reliable. Fall back to elapsed
-      // wall time — if we spent at least as long as the timeout, the timer
-      // must have fired, since a voluntarily-exiting process would have
-      // returned before then. Gate all of this on `result.status === null`
-      // so a legitimately-completed process near the timeout boundary is
-      // never misreported as timed out.
+      // Check ENOBUFS BEFORE the timedOut fallback. When a command both exceeds
+      // maxBuffer AND runs past timeoutMs, both result.error.code === "ENOBUFS"
+      // and elapsedMs >= timeoutMs are simultaneously true. The elapsedMs
+      // fallback (check 2 below) is a heuristic catch-all that must not
+      // override a specific, authoritative error code. ENOBUFS is always the
+      // correct diagnosis when present — surface it first. (issue #1364)
+      if (result.error?.code === "ENOBUFS") {
+        // The process ran but produced more output than maxBuffer allows.
+        // spawnSync populates result.stdout/stderr up to the limit before
+        // setting result.error — surface what was captured so the agent has
+        // actionable context rather than a misleading "failed to start" error.
+        const partial = (stdout + stderr).trim();
+        const bufDisplay =
+          maxBuffer < 1024
+            ? `${maxBuffer} bytes`
+            : maxBuffer < 1024 * 1024
+              ? `${Math.round(maxBuffer / 1024)}KB`
+              : `${Math.round(maxBuffer / (1024 * 1024))}MB`;
+        throw new Error(
+          `Command output exceeded ${bufDisplay} buffer limit (output truncated).` +
+            (partial ? `\nPartial output:\n${partial}` : ""),
+        );
+      }
+      // Detect timeout. Two reliable indicators:
+      //   1. result.error.code === "ETIMEDOUT" — Node sets this on the error
+      //      object specifically when spawnSync's own `timeout` option fires
+      //      and it kills the child. This is the authoritative Node-initiated
+      //      kill signal.
+      //   2. elapsedMs >= timeoutMs — elapsed-wall-time fallback for platforms
+      //      (primarily Windows) where the ETIMEDOUT error code is unreliable.
+      //      If we spent at least as long as the timeout, the timer must have
+      //      fired, since a voluntarily-exiting process would have returned
+      //      before then.
+      //
+      // NOTE: `result.signal === "SIGTERM"` is intentionally NOT included.
+      // spawnSync sets result.signal for ANY signal that terminated the child —
+      // including SIGTERM from external sources (supervisors, orchestrators,
+      // `timeout(1)` wrappers, or the child self-signaling) that are entirely
+      // unrelated to this runner's timeout. Including it caused any externally-
+      // sent SIGTERM to be misreported as a ForgeDock timeout (issue #1240).
+      //
+      // Gate all of this on `result.status === null` so a legitimately-
+      // completed process near the timeout boundary is never misreported.
+      // ENOBUFS is excluded above — it is checked first so a command that both
+      // overflows the buffer AND exceeds the timeout gets the correct message.
       const elapsedMs = Date.now() - startMs;
       const timedOut =
         result.status === null &&
-        (result.error?.code === "ETIMEDOUT" ||
-          result.signal === "SIGTERM" ||
-          elapsedMs >= timeoutMs);
+        (result.error?.code === "ETIMEDOUT" || elapsedMs >= timeoutMs);
       if (timedOut) {
         const timeoutSecs = Math.round(timeoutMs / 1000);
         const partial = (stdout + stderr).trim();
@@ -622,20 +689,36 @@ export function renderDryRun(ctx) {
 
 /**
  * Render the pipeline summary card emitted on completion.
- * @param {{command: string, args: string[], iterations: number, stopReason: string}} ctx
+ * @param {{command: string, args: string[], iterations: number, stopReason: string, usage?: object|null}} ctx
  * @returns {string}
  */
 export function renderSummaryCard(ctx) {
-  const { command, args, iterations, stopReason } = ctx;
+  const { command, args, iterations, stopReason, usage = null } = ctx;
   const argStr = Array.isArray(args) ? args.join(" ") : String(args ?? "");
-  return [
+  const lines = [
     ``,
     `┌─ ForgeDock pipeline summary ────────────────────────────`,
     `│ command:    /${command} ${argStr}`.trimEnd(),
     `│ iterations: ${iterations}`,
     `│ stop:       ${stopReason}`,
+  ];
+  if (usage) {
+    lines.push(
+      `│ tokens:     ${usage.input_tokens} in / ${usage.output_tokens} out`,
+      `│ cache:      ${usage.cache_read_input_tokens} read / ${usage.cache_creation_input_tokens} write`,
+    );
+  } else {
+    lines.push(`│ tokens:     N/A`);
+  }
+  lines.push(
     `└─────────────────────────────────────────────────────────`,
-  ].join("\n");
+  );
+  if (usage) {
+    lines.push(
+      `FORGE:USAGE_JSON:${JSON.stringify(usage)}`,
+    );
+  }
+  return lines.join("\n");
 }
 
 // ---------------------------------------------------------------------------
@@ -701,8 +784,30 @@ export async function runCommand(opts = {}) {
   }
 
   const client = new Anthropic({ apiKey });
+  // NOTE on /proc/$PPID/environ (Linux): deleting from process.env calls
+  // unsetenv() at the C level, which does NOT update the kernel's
+  // /proc/<pid>/environ snapshot (that is fixed at execve() time). A
+  // run_bash payload can still read /proc/$PPID/environ and recover the
+  // key if it was set in the shell environment before the node process
+  // started. The only effective JavaScript-layer mitigation is the
+  // child-env scrub in run_bash: `childEnv = {...process.env}; delete
+  // childEnv.ANTHROPIC_API_KEY` — this prevents the child from inheriting
+  // the key in its own process.env, which is sufficient for
+  // `process.env.ANTHROPIC_API_KEY` access. The /proc/$PPID/environ vector
+  // is a known Linux limitation at the OS level; closing it would require
+  // a native module (e.g. prctl PR_SET_DUMPABLE) or process isolation.
+  // See: issue #1370 for tracking this known limitation.
   const handlers = getToolHandlers(cwd);
   const messages = [{ role: "user", content: userMessage }];
+
+  // Accumulate token usage across all messages.create() calls in this run.
+  // Field names match the Anthropic SDK's response.usage object exactly.
+  const usage = {
+    input_tokens: 0,
+    output_tokens: 0,
+    cache_creation_input_tokens: 0,
+    cache_read_input_tokens: 0,
+  };
 
   let iterations = 0;
   while (iterations < maxIterations) {
@@ -715,6 +820,14 @@ export async function runCommand(opts = {}) {
       tools: TOOL_DEFINITIONS,
       messages,
     });
+
+    // Accumulate usage — guard each field for null/undefined (SDK omits
+    // cache fields when prompt caching is not active).
+    const ru = response.usage ?? {};
+    usage.input_tokens += ru.input_tokens ?? 0;
+    usage.output_tokens += ru.output_tokens ?? 0;
+    usage.cache_creation_input_tokens += ru.cache_creation_input_tokens ?? 0;
+    usage.cache_read_input_tokens += ru.cache_read_input_tokens ?? 0;
 
     messages.push({ role: "assistant", content: response.content });
 
@@ -735,6 +848,7 @@ export async function runCommand(opts = {}) {
           args,
           iterations,
           stopReason: response.stop_reason,
+          usage,
         }),
       );
       return {
@@ -742,6 +856,7 @@ export async function runCommand(opts = {}) {
         command: spec.name,
         iterations,
         stopReason: response.stop_reason,
+        usage,
       };
     }
 
@@ -774,7 +889,8 @@ export async function runCommand(opts = {}) {
       args,
       iterations,
       stopReason: "max_iterations",
+      usage,
     }),
   );
-  return { status: "max-iterations", command: spec.name, iterations };
+  return { status: "max-iterations", command: spec.name, iterations, usage };
 }

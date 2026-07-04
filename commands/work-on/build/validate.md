@@ -90,7 +90,12 @@ Needs human review before proceeding to commit.
 
 ## Phase V2: Format and Verify
 
-Run after quality gate passes. All tool commands are read from `forge.yaml → verification.commands`; each step logs `SKIPPED — not configured` when the corresponding key is absent rather than silently passing:
+Run after quality gate passes. All tool commands are read from `forge.yaml → verification.commands`; each step logs `SKIPPED — not configured` when the corresponding key is absent rather than silently passing.
+
+**Track skipped checks** — initialize before any check runs:
+```bash
+SKIPPED_CHECKS=""
+```
 
 **Python**:
 ```bash
@@ -101,6 +106,7 @@ if [ -n "$PYTHON_FORMAT" ]; then
     eval "$PYTHON_FORMAT" 2>&1
 else
     echo "SKIPPED — python.format not configured in verification.commands"
+    SKIPPED_CHECKS="${SKIPPED_CHECKS:+$SKIPPED_CHECKS, }python.format"
 fi
 
 # Compile check always runs for Python files (no config needed — catches syntax errors)
@@ -120,6 +126,7 @@ if [ -n "$TS_FORMAT" ]; then
     eval "$TS_FORMAT" 2>&1
 else
     echo "SKIPPED — typescript.format not configured in verification.commands"
+    SKIPPED_CHECKS="${SKIPPED_CHECKS:+$SKIPPED_CHECKS, }typescript.format"
 fi
 
 if [ -n "$TS_TYPECHECK" ]; then
@@ -130,6 +137,7 @@ elif [ -n "$TS_BUILD" ]; then
     TS_EXIT=$?
 else
     echo "SKIPPED — typescript.typecheck and typescript.build not configured in verification.commands"
+    SKIPPED_CHECKS="${SKIPPED_CHECKS:+$SKIPPED_CHECKS, }typescript.typecheck/build"
     TS_EXIT=0
 fi
 ```
@@ -287,6 +295,32 @@ If `origin/{PR_BASE}` does not exist yet (new branch), skip this check — no co
 git ls-remote --exit-code origin {PR_BASE} >/dev/null 2>&1 || echo "PR_BASE not on origin — skipping ancestry audit"
 ```
 
+### V5 Post-Commit: Mark Build Complete (MANDATORY)
+
+After the ancestry audit passes (or is skipped), append `<!-- FORGE:BUILDER:COMPLETE -->` to the existing FORGE:BUILDER comment. This is the **only** place this marker is written — it signals that a real commit exists on the branch and the build is safe to resume-skip. <!-- Added: forge#1305 -->
+
+```bash
+# Find the FORGE:BUILDER comment posted by implement.md Phase I6
+BUILDER_COMMENT_ID=$(gh api repos/{GH_REPO}/issues/{NUMBER}/comments \
+  --jq '[.[] | select(.body | contains("FORGE:BUILDER") and (contains("FORGE:BUILDER:COMPLETE") | not))] | last | .id // ""')
+
+if [ -n "$BUILDER_COMMENT_ID" ]; then
+  # Fetch current body and append the completion marker
+  CURRENT_BODY=$(gh api repos/{GH_REPO}/issues/comments/$BUILDER_COMMENT_ID --jq '.body')
+  UPDATED_BODY="${CURRENT_BODY}
+
+<!-- FORGE:BUILDER:COMPLETE -->"
+  gh api repos/{GH_REPO}/issues/comments/$BUILDER_COMMENT_ID \
+    -X PATCH \
+    --field body="$UPDATED_BODY"
+  echo "FORGE:BUILDER:COMPLETE appended to comment $BUILDER_COMMENT_ID"
+else
+  echo "WARNING: FORGE:BUILDER comment not found or already marked complete — skipping BUILDER:COMPLETE append"
+fi
+```
+
+**Why here and not in implement.md**: The commit (`git commit`) runs in this phase (V5). Appending `:COMPLETE` after the commit ensures that a session crash between implement.md I6 (comment posted) and this step (commit) leaves a partial BUILDER comment without `:COMPLETE`. The next resume will detect the partial comment, delete it, and restart the build. See `implement.md § Phase I1 resume check`.
+
 ---
 
 ## Output
@@ -302,6 +336,9 @@ VALIDATE_RESULT:
   deploy_completeness_fixes: [{VAR_NAME: location_added}, ...]
   commits_added: [{SHA}, ...]  # from V5 if any
   blocker: {description if gate_passed=false}
+  verification_skipped: []  # empty when all configured checks ran; list of skipped check names otherwise
+                            # e.g. ["python.format", "typescript.typecheck/build"]
+                            # populated from SKIPPED_CHECKS in Phase V2
 ```
 
 ---

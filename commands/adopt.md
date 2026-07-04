@@ -14,6 +14,8 @@ Run `/adopt` once after `npx forgedock init` + `/forgedock-init` to make a legac
 **Agent model policy**: Default `model: "sonnet"`. Fallback: `model: "opus"` if Sonnet is rate-limited.
 **NEVER use plan mode (EnterPlanMode).**
 
+<!-- FORGE:SPEC_LOADED — adopt.md loaded and active. Agent is bound by this spec. -->
+
 ---
 
 ## Argument Parsing
