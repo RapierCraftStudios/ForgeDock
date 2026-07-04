@@ -1,0 +1,404 @@
+#!/usr/bin/env node
+/**
+ * bin/hooks/interactive-engine.mjs — ForgeDock SubagentStop hook.
+ *
+ * Interactive engine adapter (issue #1323): bridges the interactive
+ * /work-on path to the durable engine core so that interactive Claude Code
+ * sessions write the same run-log + FORGE:STATE as headless runner sessions
+ * and are resumable across compaction/context-window resets.
+ *
+ * === How it works ===
+ *
+ * Claude Code calls this hook when a subagent (Skill invocation) completes.
+ * The hook receives a JSON payload on stdin:
+ *
+ *   {
+ *     "hook_event_name": "SubagentStop",
+ *     "session_id": "...",
+ *     "transcript_path": "...",   // path to the agent's JSONL transcript
+ *     "stop_hook_active": false
+ *   }
+ *
+ * The hook:
+ *   1. Reads the transcript to identify which /work-on sub-phase just ran
+ *      (by scanning the last Skill invocation and the FORGE annotations
+ *      written to GitHub).
+ *   2. Determines the issue number from the FORGE:STATE block on the issue
+ *      body (GitHub is the authoritative store).
+ *   3. Appends the appropriate PHASE_COMMIT event to the local run-log.
+ *   4. Writes the updated FORGE:STATE back to the GitHub issue body.
+ *
+ * If no /work-on phase is detected (the subagent was something else), the
+ * hook exits 0 silently — fail-open.
+ *
+ * === Phase detection ===
+ *
+ * The hook looks for FORGE annotation markers in the transcript's tool
+ * results (gh issue comment / gh api calls):
+ *
+ *   INVESTIGATION:COMPLETE  → phase "investigate" committed
+ *   FORGE:CONTEXT           → phase "context" committed
+ *   FORGE:ARCHITECT         → phase "architect" committed
+ *   FORGE:BUILDER:COMPLETE  → phase "build" committed
+ *   FORGE:REVIEWER          → phase "review" committed
+ *   workflow:merged label   → phase "close" committed (terminal)
+ *
+ * === Fail-open contract ===
+ *
+ * Any uncaught error exits 0 (never blocks a Claude Code session). Errors
+ * are written to stderr only — they appear in Claude Code's diagnostic
+ * output but do not affect the user's workflow.
+ *
+ * === Wiring ===
+ *
+ * Installed into ~/.claude/settings.json under hooks.SubagentStop by
+ * `forgedock install` (via bin/settings-hook.mjs).
+ * Removed by `forgedock uninstall`.
+ */
+
+import { fileURLToPath, pathToFileURL } from "url";
+import { dirname, join, resolve } from "path";
+import { existsSync, readFileSync } from "fs";
+import { execSync } from "child_process";
+
+// ---------------------------------------------------------------------------
+// Bootstrap
+// ---------------------------------------------------------------------------
+
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = dirname(__filename);
+/** Absolute path to the ForgeDock installation root (parent of bin/). */
+const FORGE_HOME = resolve(__dirname, "..", "..");
+
+// ---------------------------------------------------------------------------
+// Phase marker table
+// Maps FORGE annotation markers (found in transcript tool results) to phase IDs.
+// ---------------------------------------------------------------------------
+
+/** @type {Array<{marker: string, phase: string, terminal?: boolean, terminalReason?: string}>} */
+const PHASE_MARKERS = [
+  { marker: "INVESTIGATION:COMPLETE",  phase: "investigate" },
+  { marker: "INVESTIGATION:INVALID",   phase: "investigate", terminal: true, terminalReason: "invalid" },
+  { marker: "DECOMPOSE:YES",           phase: "investigate", terminal: true, terminalReason: "decomposed" },
+  { marker: "FORGE:CONTEXT",           phase: "context" },
+  { marker: "FORGE:ARCHITECT",         phase: "architect" },
+  { marker: "FORGE:BUILDER:COMPLETE",  phase: "build" },
+  // review phase: PR merged is detected from gh label/state
+  { marker: "FORGE:REVIEWER:MERGED",   phase: "review" },
+  // close phase: issue closed with workflow:merged
+  { marker: "workflow:merged",         phase: "close", terminal: true, terminalReason: "merged" },
+];
+
+// ---------------------------------------------------------------------------
+// Main — fail-open wrapper
+// ---------------------------------------------------------------------------
+
+try {
+  await main();
+} catch (err) {
+  process.stderr.write(`[ForgeDock:interactive-engine] ERROR: ${err.message}\n`);
+}
+process.exit(0);
+
+async function main() {
+  // Read the hook payload from stdin.
+  const raw = await readStdin();
+  if (!raw.trim()) return;
+
+  let payload;
+  try {
+    payload = JSON.parse(raw);
+  } catch {
+    return; // not a JSON hook payload — ignore
+  }
+
+  if (payload.hook_event_name !== "SubagentStop") return;
+
+  const transcriptPath = payload.transcript_path;
+  if (!transcriptPath || !existsSync(transcriptPath)) return;
+
+  // Parse the transcript to find the skill invocation and annotations.
+  const transcript = parseTranscript(transcriptPath);
+  if (!transcript) return;
+
+  const { issueNumber, phaseId, terminalReason, outputs } = detectPhase(transcript);
+  if (!issueNumber || !phaseId) return; // not a /work-on sub-phase
+
+  // Resolve the run-log directory.
+  const runLogDir = resolveRunLogDir();
+  if (!runLogDir) return;
+
+  // Import engine modules dynamically (fail-open if missing).
+  let appendEvent, deriveState, readLog, rewriteLog, makeProjector, reconcileState, freshState;
+  try {
+    ({ appendEvent, deriveState, readLog, rewriteLog } = await import(
+      pathToFileURL(join(FORGE_HOME, "bin", "engine", "runlog.mjs")).href
+    ));
+    ({ makeProjector } = await import(
+      pathToFileURL(join(FORGE_HOME, "bin", "engine", "projector.mjs")).href
+    ));
+    ({ reconcileState } = await import(
+      pathToFileURL(join(FORGE_HOME, "bin", "engine", "reconcile.mjs")).href
+    ));
+  } catch (importErr) {
+    process.stderr.write(`[ForgeDock:interactive-engine] engine modules unavailable: ${importErr.message}\n`);
+    return;
+  }
+
+  // Build a minimal io adapter using the gh CLI.
+  const io = makeCliIo();
+
+  // Load or reconcile state.
+  const projector = makeProjector(io);
+  const local = readLog(runLogDir, issueNumber).length
+    ? deriveState(readLog(runLogDir, issueNumber))
+    : null;
+  const remote = await projector.readState(issueNumber);
+  let { state } = reconcileState(local, remote);
+
+  if (!state) {
+    // Fresh run — bootstrap.
+    const lane = detectLane(transcript) || "staging";
+    state = {
+      v: 0,
+      run: `r_${issueNumber}_${lane}_interactive`,
+      issue: issueNumber,
+      lane,
+      committed: [],
+      phase: null,
+      branch: null,
+      pr: null,
+      terminal: false,
+      terminalReason: null,
+      lease: null,
+    };
+    appendEvent(runLogDir, issueNumber, {
+      event: "RUN_START",
+      issue: issueNumber,
+      run: state.run,
+      lane,
+      source: "interactive",
+    });
+  }
+
+  // Skip if phase already committed (idempotent).
+  if (state.committed.includes(phaseId)) return;
+
+  // Append the PHASE_COMMIT event.
+  appendEvent(runLogDir, issueNumber, {
+    event: "PHASE_COMMIT",
+    phase: phaseId,
+    outputs: outputs || {},
+    source: "interactive",
+  });
+  state = deriveState(readLog(runLogDir, issueNumber));
+
+  if (terminalReason) {
+    appendEvent(runLogDir, issueNumber, {
+      event: "RUN_TERMINAL",
+      reason: terminalReason,
+      source: "interactive",
+    });
+    state = deriveState(readLog(runLogDir, issueNumber));
+    state = { ...state, terminal: true, terminalReason, lease: null };
+  }
+
+  // Mirror to GitHub FORGE:STATE.
+  try {
+    await projector.writeState(issueNumber, state);
+  } catch (writeErr) {
+    process.stderr.write(`[ForgeDock:interactive-engine] FORGE:STATE write failed: ${writeErr.message}\n`);
+    // Non-fatal: run-log is the crash-safe local record; GitHub mirror is best-effort.
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Transcript parsing
+// ---------------------------------------------------------------------------
+
+/**
+ * Read and parse a JSONL transcript file.
+ * Returns an array of transcript entries, or null on error.
+ */
+function parseTranscript(transcriptPath) {
+  try {
+    const raw = readFileSync(transcriptPath, "utf-8");
+    const lines = raw.split("\n").filter((l) => l.trim());
+    return lines.map((l) => {
+      try { return JSON.parse(l); } catch { return null; }
+    }).filter(Boolean);
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Detect which /work-on phase completed and the issue number from transcript entries.
+ *
+ * Strategy:
+ *   - Scan tool_use entries for Skill invocations to find the skill name (→ phase)
+ *   - Scan tool_result entries for gh CLI output containing FORGE annotation markers
+ *   - Extract issue number from Skill args or from the skill name context
+ *
+ * @param {object[]} entries
+ * @returns {{ issueNumber: number|null, phaseId: string|null, terminalReason: string|null, outputs: object }}
+ */
+function detectPhase(entries) {
+  let skillName = null;
+  let issueNumber = null;
+  const foundMarkers = new Set();
+  const outputs = {};
+
+  for (const entry of entries) {
+    // Tool use blocks — find Skill invocations.
+    if (entry.type === "tool_use" && entry.name === "Skill") {
+      const input = entry.input || {};
+      if (input.skill) skillName = input.skill;
+      // Extract issue number from args (e.g. "1323" or "#1323").
+      if (input.args) {
+        const m = String(input.args).match(/\b(\d{3,6})\b/);
+        if (m) issueNumber = parseInt(m[1], 10);
+      }
+    }
+
+    // Tool result blocks — scan for FORGE markers in gh output.
+    if (entry.type === "tool_result") {
+      const content = Array.isArray(entry.content)
+        ? entry.content.map((c) => (typeof c === "string" ? c : c?.text || "")).join("\n")
+        : String(entry.content || "");
+      for (const { marker } of PHASE_MARKERS) {
+        if (content.includes(marker)) foundMarkers.add(marker);
+      }
+      // Extract PR number if present.
+      const prM = content.match(/"number"\s*:\s*(\d+)/);
+      if (prM) outputs.pr = parseInt(prM[1], 10);
+      // Extract branch from git push output.
+      const branchM = content.match(/(?:refs\/heads\/|branch[:\s]+)([\w\-./]+)/i);
+      if (branchM) outputs.branch = branchM[1];
+    }
+
+    // Also scan assistant message text blocks for FORGE markers.
+    if (entry.role === "assistant" && Array.isArray(entry.content)) {
+      for (const block of entry.content) {
+        const text = block.text || block.content || "";
+        for (const { marker } of PHASE_MARKERS) {
+          if (text.includes(marker)) foundMarkers.add(marker);
+        }
+      }
+    }
+  }
+
+  // Match markers to phase, most-specific first (terminal markers take priority).
+  let phaseId = null;
+  let terminalReason = null;
+
+  for (const { marker, phase, terminal, terminalReason: tr } of PHASE_MARKERS) {
+    if (foundMarkers.has(marker)) {
+      phaseId = phase;
+      if (terminal) terminalReason = tr || null;
+      // Keep first match unless a more specific (terminal) marker overrides.
+      if (terminal) break;
+    }
+  }
+
+  // Fallback: derive phase from skill name if no markers found.
+  if (!phaseId && skillName) {
+    phaseId = phaseFromSkill(skillName);
+  }
+
+  return { issueNumber, phaseId, terminalReason, outputs };
+}
+
+/**
+ * Map a Skill name to a phase ID.
+ * @param {string} skill
+ * @returns {string|null}
+ */
+function phaseFromSkill(skill) {
+  const map = {
+    "work-on/investigate": "investigate",
+    "work-on/build/context": "context",
+    "work-on/build/architect": "architect",
+    "work-on/build": "build",
+    "work-on/review": "review",
+    "work-on/close": "close",
+  };
+  return map[skill] || null;
+}
+
+/**
+ * Detect the pipeline lane from transcript tool results.
+ * Looks for branch names or milestone labels that imply feature vs staging lane.
+ */
+function detectLane(entries) {
+  for (const entry of entries) {
+    if (entry.type !== "tool_result") continue;
+    const content = Array.isArray(entry.content)
+      ? entry.content.map((c) => (typeof c === "string" ? c : c?.text || "")).join("\n")
+      : String(entry.content || "");
+    if (/milestone\//.test(content)) return "feature";
+    if (/staging/.test(content)) return "staging";
+  }
+  return null;
+}
+
+// ---------------------------------------------------------------------------
+// Run-log directory resolution
+// ---------------------------------------------------------------------------
+
+/**
+ * Resolve the directory where run-log JSONL files are stored.
+ * Uses .forgedock/run-logs/ in the current working directory,
+ * or FORGE_RUN_LOG_DIR env override for testing.
+ */
+function resolveRunLogDir() {
+  if (process.env.FORGE_RUN_LOG_DIR) return process.env.FORGE_RUN_LOG_DIR;
+  const cwd = process.cwd();
+  // Prefer .forgedock/ if it exists (managed project).
+  const managed = join(cwd, ".forgedock", "run-logs");
+  // Fall back to a temp-like XDG path.
+  return managed;
+}
+
+// ---------------------------------------------------------------------------
+// CLI io adapter
+// ---------------------------------------------------------------------------
+
+/**
+ * Build an io object that delegates gh/git calls to the CLI.
+ * Used by makeProjector to read/write FORGE:STATE on GitHub.
+ */
+function makeCliIo() {
+  function runCli(cmd, args) {
+    try {
+      return execSync([cmd, ...args].join(" "), {
+        encoding: "utf-8",
+        stdio: ["pipe", "pipe", "pipe"],
+        timeout: 15000,
+      });
+    } catch (e) {
+      throw new Error(`${cmd} ${args.join(" ")}: ${e.stderr || e.message}`);
+    }
+  }
+
+  return {
+    gh: async (args) => runCli("gh", args),
+    git: async (args) => runCli("git", args),
+  };
+}
+
+// ---------------------------------------------------------------------------
+// stdin reader
+// ---------------------------------------------------------------------------
+
+async function readStdin() {
+  return new Promise((resolve) => {
+    let buf = "";
+    process.stdin.setEncoding("utf-8");
+    process.stdin.on("data", (chunk) => { buf += chunk; });
+    process.stdin.on("end", () => resolve(buf));
+    process.stdin.on("error", () => resolve(""));
+    // Timeout: if stdin has no data after 2s, resolve empty.
+    setTimeout(() => resolve(buf), 2000);
+  });
+}

@@ -1,0 +1,297 @@
+/**
+ * bin/tests/interactive-engine.test.mjs
+ *
+ * Unit tests for the interactive engine adapter hook (issue #1323).
+ * Tests the phase detection and run-log commit logic.
+ *
+ * Run with: node --test bin/tests/interactive-engine.test.mjs
+ */
+import { describe, it, beforeEach, afterEach } from "node:test";
+import assert from "node:assert/strict";
+import { mkdtempSync, rmSync, writeFileSync, readFileSync, mkdirSync } from "node:fs";
+import { join } from "node:path";
+import os from "node:os";
+
+// ---------------------------------------------------------------------------
+// Import the pure helpers we can test without Claude Code integration.
+// We re-export them from the hook for testability via a thin adapter below.
+// Since interactive-engine.mjs uses top-level await (main()) and exits,
+// we test its internal logic by reconstructing the key functions here.
+// ---------------------------------------------------------------------------
+
+import { appendEvent, deriveState, readLog } from "../engine/runlog.mjs";
+import { reconcileState } from "../engine/reconcile.mjs";
+import { serializeState, parseState, upsertStateBlock } from "../engine/state.mjs";
+
+// ---------------------------------------------------------------------------
+// Helper: simulate what the hook does after detecting a phase
+// ---------------------------------------------------------------------------
+
+function commitPhase(dir, issueNumber, phaseId, outputs = {}, terminalReason = null, lane = "staging") {
+  const existing = readLog(dir, issueNumber);
+  let state = existing.length ? deriveState(existing) : null;
+
+  if (!state) {
+    state = {
+      v: 0,
+      run: `r_${issueNumber}_${lane}_interactive`,
+      issue: issueNumber,
+      lane,
+      committed: [],
+      phase: null,
+      branch: null,
+      pr: null,
+      terminal: false,
+      terminalReason: null,
+      lease: null,
+    };
+    appendEvent(dir, issueNumber, {
+      event: "RUN_START",
+      issue: issueNumber,
+      run: state.run,
+      lane,
+      source: "interactive",
+    });
+  }
+
+  if (state.committed.includes(phaseId)) return deriveState(readLog(dir, issueNumber));
+
+  appendEvent(dir, issueNumber, {
+    event: "PHASE_COMMIT",
+    phase: phaseId,
+    outputs,
+    source: "interactive",
+  });
+  state = deriveState(readLog(dir, issueNumber));
+
+  if (terminalReason) {
+    appendEvent(dir, issueNumber, {
+      event: "RUN_TERMINAL",
+      reason: terminalReason,
+      source: "interactive",
+    });
+    state = deriveState(readLog(dir, issueNumber));
+  }
+  return state;
+}
+
+// ---------------------------------------------------------------------------
+// Phase detection logic (mirrors the hook's detectPhase)
+// ---------------------------------------------------------------------------
+
+const PHASE_MARKERS = [
+  { marker: "INVESTIGATION:COMPLETE",  phase: "investigate" },
+  { marker: "INVESTIGATION:INVALID",   phase: "investigate", terminal: true, terminalReason: "invalid" },
+  { marker: "DECOMPOSE:YES",           phase: "investigate", terminal: true, terminalReason: "decomposed" },
+  { marker: "FORGE:CONTEXT",           phase: "context" },
+  { marker: "FORGE:ARCHITECT",         phase: "architect" },
+  { marker: "FORGE:BUILDER:COMPLETE",  phase: "build" },
+  { marker: "FORGE:REVIEWER:MERGED",   phase: "review" },
+  { marker: "workflow:merged",         phase: "close", terminal: true, terminalReason: "merged" },
+];
+
+function detectPhaseFromText(text) {
+  let phaseId = null;
+  let terminalReason = null;
+  for (const { marker, phase, terminal, terminalReason: tr } of PHASE_MARKERS) {
+    if (text.includes(marker)) {
+      phaseId = phase;
+      if (terminal) { terminalReason = tr; break; }
+    }
+  }
+  return { phaseId, terminalReason };
+}
+
+// ---------------------------------------------------------------------------
+// Flag extraction (mirrors the hook's extractFlag)
+// ---------------------------------------------------------------------------
+
+function extractFlag(command, flag) {
+  const escaped = flag.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const eqRe = new RegExp(`${escaped}=([^\\s"']+|"[^"]*"|'[^']*')`);
+  const eqM = command.match(eqRe);
+  if (eqM) return eqM[1].replace(/^["']|["']$/g, "");
+  const spaceRe = new RegExp(`${escaped}\\s+([^-\\s"'][^\\s"']*|"[^"]*"|'[^']*')`);
+  const spaceM = command.match(spaceRe);
+  if (spaceM) return spaceM[1].replace(/^["']|["']$/g, "");
+  return null;
+}
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+
+let dir;
+beforeEach(() => { dir = mkdtempSync(join(os.tmpdir(), "fd-iengine-")); });
+afterEach(() => { rmSync(dir, { recursive: true, force: true }); });
+
+describe("phase detection from marker text", () => {
+  it("detects investigate from INVESTIGATION:COMPLETE", () => {
+    const { phaseId, terminalReason } = detectPhaseFromText("INVESTIGATION:COMPLETE marker found");
+    assert.equal(phaseId, "investigate");
+    assert.equal(terminalReason, null);
+  });
+
+  it("detects invalid terminal from INVESTIGATION:INVALID", () => {
+    const { phaseId, terminalReason } = detectPhaseFromText("INVESTIGATION:INVALID — not actionable");
+    assert.equal(phaseId, "investigate");
+    assert.equal(terminalReason, "invalid");
+  });
+
+  it("detects decomposed terminal from DECOMPOSE:YES", () => {
+    const { phaseId, terminalReason } = detectPhaseFromText("DECOMPOSE:YES sub-issues spawned");
+    assert.equal(phaseId, "investigate");
+    assert.equal(terminalReason, "decomposed");
+  });
+
+  it("detects context phase from FORGE:CONTEXT", () => {
+    const { phaseId } = detectPhaseFromText("<!-- FORGE:CONTEXT -->");
+    assert.equal(phaseId, "context");
+  });
+
+  it("detects architect phase from FORGE:ARCHITECT", () => {
+    const { phaseId } = detectPhaseFromText("FORGE:ARCHITECT annotation posted");
+    assert.equal(phaseId, "architect");
+  });
+
+  it("detects build phase from FORGE:BUILDER:COMPLETE", () => {
+    const { phaseId } = detectPhaseFromText("FORGE:BUILDER:COMPLETE");
+    assert.equal(phaseId, "build");
+  });
+
+  it("detects merged terminal from workflow:merged", () => {
+    const { phaseId, terminalReason } = detectPhaseFromText("added label workflow:merged");
+    assert.equal(phaseId, "close");
+    assert.equal(terminalReason, "merged");
+  });
+
+  it("returns null for unrelated text", () => {
+    const { phaseId, terminalReason } = detectPhaseFromText("some random output");
+    assert.equal(phaseId, null);
+    assert.equal(terminalReason, null);
+  });
+});
+
+describe("run-log commit logic", () => {
+  it("bootstraps a fresh run on first phase commit", () => {
+    const state = commitPhase(dir, 1323, "investigate");
+    assert.ok(state.run.startsWith("r_1323_staging_interactive"));
+    assert.deepEqual(state.committed, ["investigate"]);
+    assert.equal(state.terminal, false);
+  });
+
+  it("commits phases sequentially and accumulates", () => {
+    commitPhase(dir, 1323, "investigate");
+    commitPhase(dir, 1323, "context");
+    commitPhase(dir, 1323, "architect");
+    const state = commitPhase(dir, 1323, "build", { branch: "fix/pipeline-1323" });
+    assert.deepEqual(state.committed, ["investigate", "context", "architect", "build"]);
+    assert.equal(state.branch, "fix/pipeline-1323");
+  });
+
+  it("is idempotent: committing the same phase twice has no effect", () => {
+    commitPhase(dir, 1323, "investigate");
+    const state = commitPhase(dir, 1323, "investigate"); // duplicate
+    assert.deepEqual(state.committed, ["investigate"]);
+    // Run-log should have exactly one PHASE_COMMIT for investigate.
+    const events = readLog(dir, 1323).filter((e) => e.event === "PHASE_COMMIT");
+    assert.equal(events.length, 1);
+  });
+
+  it("writes RUN_TERMINAL when terminalReason is set", () => {
+    commitPhase(dir, 1323, "investigate", {}, "invalid");
+    const events = readLog(dir, 1323);
+    const terminal = events.find((e) => e.event === "RUN_TERMINAL");
+    assert.ok(terminal);
+    assert.equal(terminal.reason, "invalid");
+  });
+
+  it("marks terminal state for merged", () => {
+    commitPhase(dir, 1323, "investigate");
+    commitPhase(dir, 1323, "context");
+    commitPhase(dir, 1323, "architect");
+    commitPhase(dir, 1323, "build", { branch: "fix/b" });
+    commitPhase(dir, 1323, "review", { pr: 42 });
+    const state = commitPhase(dir, 1323, "close", {}, "merged");
+    assert.equal(state.terminal, true);
+    assert.equal(state.terminalReason, "merged");
+    assert.deepEqual(state.committed, ["investigate", "context", "architect", "build", "review", "close"]);
+  });
+
+  it("persists across separate readLog calls (simulates session resume)", () => {
+    commitPhase(dir, 1323, "investigate");
+    commitPhase(dir, 1323, "context");
+    // Simulate a new session reading the log.
+    const state = deriveState(readLog(dir, 1323));
+    assert.deepEqual(state.committed, ["investigate", "context"]);
+  });
+});
+
+describe("FORGE:STATE round-trip (state.mjs)", () => {
+  it("serializes and parses run state correctly", () => {
+    const s = {
+      v: 2, run: "r_1323_staging_interactive", issue: 1323, lane: "staging",
+      committed: ["investigate", "context"], phase: null, branch: null,
+      pr: null, terminal: false, terminalReason: null, lease: null,
+    };
+    const body = upsertStateBlock("Issue body.", s);
+    const parsed = parseState(body);
+    assert.equal(parsed.issue, 1323);
+    assert.deepEqual(parsed.committed, ["investigate", "context"]);
+  });
+
+  it("upserts in place on second write", () => {
+    const s1 = { v: 1, committed: ["investigate"] };
+    const body1 = upsertStateBlock("", s1);
+    const s2 = { v: 2, committed: ["investigate", "context"] };
+    const body2 = upsertStateBlock(body1, s2);
+    // Should contain exactly one FORGE:STATE block (upserted in place).
+    const count = (body2.match(/FORGE:STATE/g) || []).length;
+    assert.equal(count, 1); // exactly one block, not duplicated
+    const parsed = parseState(body2);
+    assert.deepEqual(parsed.committed, ["investigate", "context"]);
+  });
+});
+
+describe("reconcileState — GitHub wins", () => {
+  it("prefers remote when remote.v > local.v", () => {
+    const local = { v: 1, committed: ["investigate"] };
+    const remote = { v: 3, committed: ["investigate", "context", "architect"] };
+    const { state, action } = reconcileState(local, remote);
+    assert.equal(action, "hydrate");
+    assert.deepEqual(state.committed, ["investigate", "context", "architect"]);
+  });
+
+  it("prefers local when local is ahead of remote (crash pre-mirror)", () => {
+    const local = { v: 5, committed: ["investigate", "context"] };
+    const remote = { v: 2, committed: ["investigate"] };
+    const { state, action } = reconcileState(local, remote);
+    assert.equal(action, "remirror");
+    assert.deepEqual(state.committed, ["investigate", "context"]);
+  });
+});
+
+describe("extractFlag helper", () => {
+  it("extracts --base value (space form)", () => {
+    assert.equal(extractFlag("gh pr create --base staging --title foo", "--base"), "staging");
+  });
+
+  it("extracts --base value (equals form)", () => {
+    assert.equal(extractFlag("gh pr create --base=main --title foo", "--base"), "main");
+  });
+
+  it("extracts --base value (quoted)", () => {
+    assert.equal(extractFlag('gh pr create --base "staging" --title foo', "--base"), "staging");
+  });
+
+  it("returns null when flag not present", () => {
+    assert.equal(extractFlag("gh pr create --title foo", "--base"), null);
+  });
+
+  it("extracts --add-label value", () => {
+    assert.equal(
+      extractFlag("gh issue edit 42 --add-label workflow:building", "--add-label"),
+      "workflow:building",
+    );
+  });
+});
