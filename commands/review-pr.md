@@ -64,6 +64,46 @@ If `--auto-merge` is NOT present, `AUTO_MERGE=false` — Phase 8 (Auto-Merge) wi
 
 ---
 
+## Phase -1: Route Assertion
+
+**This phase is MANDATORY and must execute BEFORE Phase 0. No phase may be skipped.**
+
+Resolve the PR number and post a routing marker immediately. This creates an audit trail — if a PR has no `FORGE:REVIEW_ROUTE` comment after a review command was run, the review was bypassed or never started.
+
+```bash
+# Determine REVIEW_MODE from $ARGUMENTS before any routing decision
+REVIEW_MODE_RAW="$ARGUMENTS"
+if echo "$ARGUMENTS" | grep -qE '^(staging|feature|staging:feature)$'; then
+  REVIEW_MODE="staging-keyword"
+  ROUTE_PR_NUMBER="(resolved by staging sub-command)"
+elif echo "$ARGUMENTS" | grep -qE '^(open|all)$'; then
+  REVIEW_MODE="multi-pr"
+  ROUTE_PR_NUMBER="(list mode)"
+else
+  # Single PR number or URL — resolve HEAD/BASE now
+  PR_ROUTE_INFO=$(gh pr view $ARGUMENTS --json number,baseRefName,headRefName --jq '{number:.number,base:.baseRefName,head:.headRefName}')
+  ROUTE_PR_NUMBER=$(echo "$PR_ROUTE_INFO" | jq -r '.number')
+  ROUTE_HEAD=$(echo "$PR_ROUTE_INFO" | jq -r '.head')
+  ROUTE_BASE=$(echo "$PR_ROUTE_INFO" | jq -r '.base')
+  if [ "$ROUTE_HEAD" = "staging" ] && [ "$ROUTE_BASE" = "main" ] || [ "$ROUTE_HEAD" = "feature" ] && [ "$ROUTE_BASE" = "main" ]; then
+    REVIEW_MODE="staging-auto"
+  else
+    REVIEW_MODE="single-pr"
+  fi
+fi
+
+REVIEW_SHA_ROUTE=$(gh pr view ${ROUTE_PR_NUMBER:-$ARGUMENTS} --json headRefOid --jq '.headRefOid' 2>/dev/null | cut -c1-7 || echo "n/a")
+
+# Post the routing assertion marker to the PR (skip for list/keyword modes where no PR# is known yet)
+if [ "$REVIEW_MODE" != "staging-keyword" ] && [ "$REVIEW_MODE" != "multi-pr" ]; then
+  gh pr comment "$ROUTE_PR_NUMBER" --body "<!-- FORGE:REVIEW_ROUTE mode=${REVIEW_MODE} spec=review-pr.md sha=${REVIEW_SHA_ROUTE} -->"
+fi
+```
+
+**Invariant**: After this phase, `REVIEW_MODE` and (where applicable) `ROUTE_PR_NUMBER` are set. Any sub-invocation of `Skill("review-pr-staging", ...)` should immediately post its own `FORGE:REVIEW_ROUTE` marker scoped to the PR it resolves.
+
+---
+
 ## Phase 0: Route to Review Mode
 
 Check input to determine which mode:

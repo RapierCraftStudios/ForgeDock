@@ -96,6 +96,40 @@ Include ALL findings (CONFIRMED, LIKELY, POSSIBLE). One line per finding, sequen
 
 ---
 
+## Phase -1: Route Assertion
+
+**This phase is MANDATORY and must execute before Phase 0A. No phase may be skipped.**
+
+Resolve the staging→main PR number and post a routing marker immediately. This creates an audit trail — if a staging→main PR has no `FORGE:REVIEW_ROUTE` comment after this command was invoked, the review was bypassed or never started.
+
+```bash
+# Resolve PR_NUMBER from $ARGUMENTS
+# $ARGUMENTS may be: a PR number, "staging", "feature", or "staging:feature"
+if echo "$ARGUMENTS" | grep -qE '^[0-9]+$'; then
+  PR_NUMBER="$ARGUMENTS"
+else
+  # Find the open staging→main PR
+  PR_NUMBER=$(gh pr list ${GH_FLAG} \
+    --head "$STAGING_BRANCH" \
+    --base "$DEFAULT_BRANCH" \
+    --state open \
+    --json number \
+    --jq '.[0].number' 2>/dev/null || echo "")
+fi
+
+REVIEW_SHA_STAGING=$(gh pr view "$PR_NUMBER" ${GH_FLAG} --json headRefOid --jq '.headRefOid' 2>/dev/null | cut -c1-7 || echo "n/a")
+
+if [ -n "$PR_NUMBER" ]; then
+  gh pr comment "$PR_NUMBER" ${GH_FLAG} --body "<!-- FORGE:REVIEW_ROUTE mode=staging-deploy spec=review-pr-staging.md sha=${REVIEW_SHA_STAGING} -->"
+else
+  echo "WARNING: Could not resolve staging→main PR number. FORGE:REVIEW_ROUTE marker not posted."
+fi
+```
+
+`$PR_NUMBER` is now set for all downstream phases that conditionally post gate comments to the PR.
+
+---
+
 ## Phase 0A: Open Review-Finding Gate (BLOCKING — runs before scope analysis)
 
 **Purpose**: Prevent deploying commits that have known, unfixed review findings. The review system catches bugs before merging; this gate ensures the merge path acts on that information.
