@@ -519,9 +519,11 @@ When two issues modify different files that **import from the same utility/init 
 | Pattern | Inference | Action |
 |---------|-----------|--------|
 | Issue A modifies `routers/billing.py`, Issue B modifies `routers/auth.py` | Both likely import from `routers/__init__.py` or `dependencies.py` | Flag as possible conflict if same service |
-| Issue A modifies `models/user.py`, Issue B modifies `models/subscription.py` | Both likely modify `models/__init__.py` (SQLAlchemy model registry) | Flag as probable conflict → serialize |
+| Issue A modifies `models/user.py`, Issue B modifies `models/subscription.py` *(Python/SQLAlchemy example)* | Both likely modify `models/__init__.py` (model registry) | Flag as probable conflict → serialize |
+| Issue A modifies `routes/users.js`, Issue B modifies `routes/billing.js` *(Node.js example)* | Both likely import from `routes/index.js` barrel | Flag as possible conflict if same service |
+| Issue A modifies `internal/user/handler.go`, Issue B modifies `internal/billing/handler.go` *(Go example)* | Both likely register in `internal/router/router.go` | Flag as possible conflict if same service |
 | Issue A modifies `web/src/components/X.tsx`, Issue B modifies `web/src/components/Y.tsx` | May share `index.ts` barrel export | Flag only if same parent directory |
-| Issue A modifies `services/api/app/main.py` | `main.py` is a high-fan-in file (router registration, middleware) | Serialize with ANY other API issue |
+| Issue A modifies the app entrypoint (e.g. `main.py`, `main.go`, `server.js`, `app.ts`) | Entrypoint is a high-fan-in file (router registration, middleware) — set the path via `forge.yaml → review.layout.api_main` | Serialize with ANY other same-service issue |
 | Issue A modifies `docker-compose.yml` or `docker-compose.prod.yml` | Global config — any concurrent modification conflicts | Serialize with ALL other issues that touch infra |
 
 **Apply inferences:**
@@ -529,14 +531,14 @@ When two issues modify different files that **import from the same utility/init 
 # High-fan-in files — if ANY issue touches these, serialize it with all same-service issues.
 # Read layout paths from forge.yaml review.layout; fall back to sensible generic defaults.
 # Example (pseudo-code — adapt to your forge.yaml parsing method):
-#   API_MAIN    = forge_yaml.review.layout.api_main    ?? "services/api/app/main.py"
-#   WORKER_MAIN = forge_yaml.review.layout.worker_main ?? "services/worker/worker/main.py"
-#   PAGES_ROOT  = forge_yaml.review.layout.pages       ?? "web/src/app"
+#   API_MAIN    = forge_yaml.review.layout.api_main    ?? "src/main.py"   # set in forge.yaml; no stack-specific default
+#   WORKER_MAIN = forge_yaml.review.layout.worker_main ?? "src/worker.py" # set in forge.yaml; no stack-specific default
+#   PAGES_ROOT  = forge_yaml.review.layout.pages       ?? "web/src/app"   # Next.js default; override in forge.yaml for other frameworks
 
 HIGH_FAN_IN = [
-  API_MAIN,                          # e.g. "services/api/app/main.py" — router/middleware registration
-  WORKER_MAIN,                       # e.g. "services/worker/worker/main.py" — worker entrypoint (set forge.yaml review.layout.worker_main)
-  PAGES_ROOT + "/layout.tsx",        # e.g. "web/src/app/layout.tsx" — root layout for all pages
+  API_MAIN,                          # app entrypoint — router/middleware registration (set forge.yaml review.layout.api_main)
+  WORKER_MAIN,                       # worker entrypoint (set forge.yaml review.layout.worker_main)
+  PAGES_ROOT + "/layout.tsx",        # root layout for all pages (Next.js; adapt for your framework)
   "docker-compose.yml",
   "docker-compose.prod.yml",
   ".env.example"

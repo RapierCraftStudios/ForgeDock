@@ -10,7 +10,7 @@ argument-hint: [--fix | --recon-only | --fix --limit 5 | --dry-run]
 **Config variables used by this command** (set in `forge.yaml`):
 - `{CREDENTIALS_FILE}` ← `paths.credentials.file` (optional) — path to credentials YAML for analytics APIs
 - `{SERVER_SSH}` ← `services.server_ssh` (optional) — SSH target for production server health checks (e.g., `ubuntu@1.2.3.4`)
-- `{EMEMO_PATH}` ← `services.ememo_path` (optional) — path on production server to open eMemo files
+- `{OPS_INBOX_PATH}` ← `services.ops_inbox_path` (optional) — path on production server to a directory of open work-item files (e.g. `/srv/ops/inbox`)
 - `{BILLING_ENABLED}` ← `billing.enabled` (optional, default `false`) — set to `true` to enable Stripe data collection in the Analytics Snapshot agent
 
 Resolve `{BILLING_ENABLED}` from `forge.yaml` before executing any phase:
@@ -112,7 +112,7 @@ Spawn these as **background agents** (all `run_in_background=true`, all `model="
 **Agent: Production Health**
 ```
 Check production system health:
-1. SSH to check for open eMemos: if {SERVER_SSH} is configured, run: ssh {SERVER_SSH} "ls {EMEMO_PATH}/*-open-* 2>/dev/null" — skip this step if SERVER_SSH or EMEMO_PATH is not set in forge.yaml
+1. SSH to check for open ops-inbox items: if {SERVER_SSH} is configured, run: ssh {SERVER_SSH} "ls {OPS_INBOX_PATH}/*-open-* 2>/dev/null" — skip this step if SERVER_SSH or OPS_INBOX_PATH is not set in forge.yaml
 2. If any exist, cat each one and summarize
 3. Check container health via MCP: get_production_status, run_production_health_check
 4. Check recent error logs: get_production_logs for api and worker (last 100 lines), grep for ERROR/CRITICAL
@@ -197,7 +197,7 @@ For each finding from RECON_DATA, assign:
 
 | Signal | Priority | Type |
 |--------|----------|------|
-| Production eMemo (open) | P1 | bug |
+| Open ops-inbox item | P1 | bug |
 | Container unhealthy | P0 | bug |
 | Error spike (>5x normal) | P1 | bug |
 | Tier degradation (>20% drop) | P2 | bug |
@@ -286,7 +286,7 @@ Print a structured report:
 
 ### Production Health
 - Containers: {all healthy / N unhealthy}
-- Open eMemos: {count}
+- Open ops-inbox items: {count}
 - Error patterns: {summary or "none"}
 
 ### Scraping Performance

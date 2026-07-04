@@ -801,14 +801,14 @@ CRITICAL: This is a billing system. Double-spend = revenue loss.
    ```
    If `WHERE reserved_by IS NULL` appears in a SELECT that is followed by a separate UPDATE (not in the same atomic statement), this is a CONFIRMED HIGH finding — two concurrent sessions can both pass the read check before either writes.
 
-8. **Cross-service flag staleness**: When a discount or pricing flag (`is_byop`, `has_active_subscription`, `byop_discount`) is set by the API layer at job submission and read by the Worker layer at billing time, verify the flag is re-validated at debit time — not trusted from the queued job payload.
+8. **Cross-service flag staleness**: When a discount or pricing flag (e.g. `has_active_subscription`, a `discount_type` field) is set by the API layer at job submission and read by the Worker layer at billing time, verify the flag is re-validated at debit time — not trusted from the queued job payload.
 
    Search for discount flags passed through Redis/job payloads:
    ```bash
-   grep -rn "is_byop\|byop_discount\|discount.*flag\|flag.*discount" services/api/app/ services/worker/worker/ | head -20
+   grep -rn "discount.*flag\|flag.*discount\|subscription.*flag\|plan_type\|discount_type" {API_PATH}/ {WORKER_PATH}/ | head -20
    # If the flag flows through a job payload and is not re-validated at billing: CONFIRMED HIGH
    ```
-   A race window exists when a flag is checked at submission but consumed at billing: the underlying condition (e.g., proxy existence, subscription status) may have changed between the two operations. The fix must re-validate the flag atomically at the point of debit, not rely on a stale value from the job payload.
+   A race window exists when a flag is checked at submission but consumed at billing: the underlying condition (e.g., subscription status, entitlement) may have changed between the two operations. The fix must re-validate the flag atomically at the point of debit, not rely on a stale value from the job payload.
 
 ## Safe Patterns in This Codebase
 ```bash
