@@ -264,8 +264,125 @@ Skill("work-on:build:validate", args="{NUMBER} --repo {GH_REPO} --gh-flag {GH_FL
 Where `{CHANGED_FILES}` is the space-separated list of files changed by the implement subcommand (read from `IMPLEMENT_RESULT` or from the `<!-- FORGE:BUILDER -->` comment).
 
 **After subcommand returns**:
-- `VALIDATE_RESULT: gate_passed: true` → write checkpoint, then return `BUILD_RESULT: status: COMPLETE`
+- `VALIDATE_RESULT: gate_passed: true` → continue to Phase B6.5 (acceptance gate)
 - `VALIDATE_RESULT: gate_passed: false` → subcommand has already posted comment and added `needs-human` label; return `BUILD_RESULT: status: BLOCKED`
+
+---
+
+## Phase B6.5: Acceptance Gate (MANDATORY — cannot be silently skipped) <!-- Added: forge#1315 -->
+
+**Goal**: Execute the machine-checkable acceptance spec emitted by investigate Phase 1C and block merge if any check fails. This is a hard gate — not advisory.
+
+**Read acceptance spec from FORGE:INVESTIGATOR comment**:
+
+```bash
+ACCEPTANCE_CHECKS=$(gh api repos/{GH_REPO}/issues/{NUMBER}/comments \
+  --jq '.[] | select(.body | contains("FORGE:INVESTIGATOR")) | .body' \
+  | grep "^ACCEPTANCE_CHECK:" )
+```
+
+**If `ACCEPTANCE_CHECKS` is empty** (investigation predates this feature or comment was deleted): post a warning comment and **block** — do not silently pass:
+
+```bash
+gh issue comment {NUMBER} {GH_FLAG} --body "<!-- FORGE:ACCEPTANCE_GATE -->
+## Acceptance Gate — No Spec Found
+
+No \`ACCEPTANCE_CHECK:\` lines found in the FORGE:INVESTIGATOR comment. This may mean:
+- The investigation was run before acceptance spec emission was added (re-run investigate to generate the spec), or
+- The investigator comment was deleted.
+
+**Gate result: BLOCKED** — re-run \`/work-on:investigate {NUMBER}\` to regenerate the acceptance spec, then retry the build.
+
+<!-- FORGE:ACCEPTANCE_GATE:BLOCKED -->"
+gh issue edit {NUMBER} {GH_FLAG} --add-label "needs-human"
+```
+Return `BUILD_RESULT: status: BLOCKED`, blocker: "No acceptance spec — re-run investigate to emit ACCEPTANCE_CHECK lines".
+
+**If all checks are `type=skipped`**: post a pass comment noting human review is required, then continue to the checkpoint (non-blocking — skip was deliberate):
+
+```bash
+gh issue comment {NUMBER} {GH_FLAG} --body "<!-- FORGE:ACCEPTANCE_GATE -->
+## Acceptance Gate — Skipped (No Machine-Checkable Criteria)
+
+The acceptance spec contains only a skip sentinel (\`type=skipped\`). No automated checks were run. Human review is required before merge.
+
+<!-- FORGE:ACCEPTANCE_GATE:PASSED -->"
+```
+
+**Otherwise — execute each check**:
+
+```bash
+GATE_PASS=true
+FAILED_CHECKS=""
+
+while IFS= read -r check_line; do
+  ID=$(echo "$check_line"    | sed -n 's/.*id=\([^ ]*\).*/\1/p')
+  TYPE=$(echo "$check_line"  | sed -n 's/.*type=\([^ ]*\).*/\1/p')
+  TARGET=$(echo "$check_line"| sed -n 's/.*target=\([^ ]*\).*/\1/p')
+  MATCHER=$(echo "$check_line"| sed -n 's/.*matcher=\([^ ]*\).*/\1/p')
+  DESC=$(echo "$check_line"  | sed -n 's/.*description=\(.*\)/\1/p')
+
+  [ "$TYPE" = "skipped" ] && continue
+
+  RESULT="PASS"
+  DETAIL=""
+
+  case "$TYPE" in
+    exists)
+      [ -e "$TARGET" ] || { RESULT="FAIL"; DETAIL="path not found: $TARGET"; }
+      ;;
+    contains)
+      grep -qE "$MATCHER" "$TARGET" 2>/dev/null || { RESULT="FAIL"; DETAIL="'$MATCHER' not found in $TARGET"; }
+      ;;
+    command|behavior)
+      if [ "$MATCHER" = "exit_0" ]; then
+        eval "$TARGET" >/dev/null 2>&1 || { RESULT="FAIL"; DETAIL="command exited non-zero: $TARGET"; }
+      else
+        OUTPUT=$(eval "$TARGET" 2>&1)
+        echo "$OUTPUT" | grep -qE "$MATCHER" || { RESULT="FAIL"; DETAIL="output did not match '$MATCHER'. Got: $(echo "$OUTPUT" | head -3)"; }
+      fi
+      ;;
+    *)
+      RESULT="FAIL"; DETAIL="unknown check type: $TYPE"
+      ;;
+  esac
+
+  if [ "$RESULT" = "FAIL" ]; then
+    GATE_PASS=false
+    FAILED_CHECKS="${FAILED_CHECKS}\n- **$ID** ($DESC): $DETAIL"
+  fi
+done <<< "$ACCEPTANCE_CHECKS"
+```
+
+**Post gate result comment**:
+
+```bash
+if [ "$GATE_PASS" = "true" ]; then
+  gh issue comment {NUMBER} {GH_FLAG} --body "<!-- FORGE:ACCEPTANCE_GATE -->
+## Acceptance Gate — PASSED
+
+All machine-checkable acceptance criteria verified against real behavior.
+
+<!-- FORGE:ACCEPTANCE_GATE:PASSED -->"
+else
+  gh issue comment {NUMBER} {GH_FLAG} --body "<!-- FORGE:ACCEPTANCE_GATE -->
+## Acceptance Gate — FAILED
+
+The following acceptance checks did not pass:
+
+$(echo -e "$FAILED_CHECKS")
+
+Merge is blocked. Fix the failing criteria and re-run the validate phase.
+
+<!-- FORGE:ACCEPTANCE_GATE:FAILED -->"
+  gh issue edit {NUMBER} {GH_FLAG} --add-label "needs-human"
+  # Return BLOCKED — merge gate failed
+fi
+```
+
+If `GATE_PASS = false`: return `BUILD_RESULT: status: BLOCKED`, blocker: "Acceptance gate failed — see FORGE:ACCEPTANCE_GATE comment".
+
+If `GATE_PASS = true`: continue to write the phase checkpoint below.
 
 **When gate_passed is true — write machine-readable phase checkpoint before returning (MANDATORY)**:
 ```bash
@@ -297,8 +414,8 @@ BUILD_RESULT:
 This module runs during **Phase 3** of the work-on.md pipeline (label: `workflow:ready-to-build` or `workflow:building`). The full sequence is defined by the Universal Phase Dispatcher in work-on.md:
 
 ```
-Phase 3 (Build)   → [THIS MODULE] worktree + contract + context + architect + implement + validate
-                  → posts FORGE:BUILDER comment, writes FORGE:CHECKPOINT next_phase=REVIEW
+Phase 3 (Build)   → [THIS MODULE] worktree + contract + context + architect + implement + validate + acceptance-gate
+                  → posts FORGE:BUILDER comment + FORGE:ACCEPTANCE_GATE comment, writes FORGE:CHECKPOINT next_phase=REVIEW
 Phase 4 (PR)      → work-on:review — push branch, create PR, set workflow:in-review
 Phase 5 (Review)  → work-on:review — invoke /review-pr --auto-merge
 Phase 6 (Close)   → work-on:close — trajectory + parent tracker + summary + worktree cleanup
