@@ -37,7 +37,7 @@ For each agent selected in Phase 3B, read **only** the files relevant to that ag
 | Auth Conventions Auditor | AUTH domain | `review-pr-agents/auth.md` |
 | Billing Integrity Auditor | BILLING domain | `review-pr-agents/billing.md` |
 | Concurrency & Race Condition Auditor | CONCURRENCY or BILLING domain | `review-pr-agents/concurrency.md` |
-| Scraper Logic Auditor | SCRAPING domain | `review-pr-agents/scraper.md` |
+| Domain Logic Auditor | SCRAPING domain (requires `review.domains.scraping` in forge.yaml) | `review-pr-agents/scraper.md` |
 | Frontend Quality Auditor | WEB service touched | `review-pr-agents/frontend.md` |
 | API Design & Consistency Auditor | New/modified routers or SDK/OpenAPI files | `review-pr-agents/api.md` |
 | Database & Migration Auditor | DATABASE domain | `review-pr-agents/database.md` |
@@ -51,12 +51,11 @@ For each agent selected in Phase 3B, read **only** the files relevant to that ag
 | Auth Conventions | `AUTH` |
 | Billing Integrity | `BILL` |
 | Concurrency | `CONC` |
-| Scraper Logic | `SCRP` |
+| Domain Logic | `SCRP` |
 | Frontend Quality | `FE` |
 | API Design | `API` |
 | Database & Migration | `DB` |
 | Infrastructure | `INFRA` |
-| Config Schema | `CFG` |
 
 ## Loading Instructions for Phase 3C
 

@@ -56,7 +56,7 @@ For each changed file, check:
    ```bash
    while IFS= read -r f; do
        [ -z "$f" ] && continue
-       grep -rn "RequestValidationError\|validation_exception_handler\|@app.exception_handler" services/api/app/main.py services/api/app/ 2>/dev/null | head -5
+       grep -rn "RequestValidationError\|validation_exception_handler\|@app.exception_handler" $(git ls-files | grep -E "(main|app)\.(py|ts|js)$" | head -5) 2>/dev/null | head -5
    done <<< "$MODEL_FILES"
    # If no custom handler found AND the PR adds new Pydantic models or FastAPI endpoints:
    #   LIKELY MEDIUM — FastAPI default exposes internal field names/types/constraints to any caller

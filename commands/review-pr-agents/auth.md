@@ -42,9 +42,9 @@ grep -rn "@router\.(get\|post\|put\|delete)\|app\.(get\|post\|put\|delete)" [CHA
    # If found without a strip/validate step: CONFIRMED HIGH — complete rate limit bypass
    # Safe pattern: headers.delete("x-forwarded-for") or rightmost-IP-only extraction
 
-   # Check if FastAPI backend trusts X-Forwarded-For for rate limit keying
+   # Check if the backend trusts X-Forwarded-For for rate limit keying
    grep -rn "X-Forwarded-For\|x_forwarded_for\|forwarded_for\|client_ip\|real_ip" \
-     services/api/app/ | head -10
+     $(git ls-files | grep -E "\.(py|ts|js)$" | head -20) | head -10
    # If found without trusted-proxy-range validation: CONFIRMED HIGH
    # The backend must only trust X-Forwarded-For when the immediate caller is in a known trusted proxy range
    ```
@@ -54,11 +54,11 @@ grep -rn "@router\.(get\|post\|put\|delete)\|app\.(get\|post\|put\|delete)" [CHA
 7. JWT secret/algorithm separation: when the diff touches JWT signing, verification, or token generation, verify that different token classes (user session, admin-proxy, API key) use distinct signing secrets or asymmetric algorithms — not a shared secret differentiated only by claims
 
    ```bash
-   # Check signing configuration across token classes
-   grep -nE "SECRET|algorithm|HS256|RS256|verify|decode" \
-     services/api/app/security/auth.py web/src/lib/auth.ts | head -20
+   # Check signing configuration across token classes — adapt paths to the project's auth files
+   AUTH_FILES=$(git ls-files | grep -iE "auth|security|jwt|token" | grep -E "\.(py|ts|js)$" | head -10)
+   grep -nE "SECRET|algorithm|HS256|RS256|verify|decode" $AUTH_FILES | head -20
    # Flag if: multiple token classes reference the same secret variable AND the only differentiator is a claim (e.g., aud, role)
-   # Safe pattern: admin tokens use a separate ADMIN_JWT_SECRET or RS256 (asymmetric)
+   # Safe pattern: privileged tokens use a separate secret or RS256 (asymmetric)
    # so that a user-level token CANNOT be escalated to admin by claim manipulation
    ```
 
@@ -72,10 +72,10 @@ grep -rn "@router\.(get\|post\|put\|delete)\|app\.(get\|post\|put\|delete)" [CHA
 1. Read the diff: `gh pr diff [PR_NUMBER]`
 2. For each endpoint, verify auth dependency matches route type
 3. Check ownership queries for multi-tenancy
-4. Search for patterns: `grep -rn "Depends(get_current" services/api/app/routers/`
-5. Compare against existing router patterns for consistency
-6. If diff touches `web/src/middleware.ts`, Next.js route handlers, or FastAPI rate-limit middleware: run header forwarding check (item 6 grep commands above)
-7. If diff touches `services/api/app/security/auth.py`, `web/src/lib/auth.ts`, or any JWT signing/verification code: run JWT secret separation check (item 7 grep commands above)
+4. Search for auth dependency patterns: `grep -rn "get_current\|require_auth\|authenticated_user\|current_user" $(git ls-files | grep -E "router|route|endpoint" | head -20)`
+5. Compare against existing route patterns for consistency
+6. If diff touches middleware, route handlers, or rate-limit code: run header forwarding check (item 6 grep commands above)
+7. If diff touches auth/JWT/token files: run JWT secret separation check (item 7 grep commands above)
 
 ## Post Findings
 ```bash
@@ -85,10 +85,10 @@ gh pr comment [PR_NUMBER] --body "$(cat <<'EOF'
 ### Endpoints Reviewed
 | Endpoint | Method | Auth Dep Used | Expected Auth Dep | Correct? | Ownership Check |
 |----------|--------|--------------|-------------------|----------|-----------------|
-| /path | POST | CurrentUser | SessionUser | NO — VIOLATION | Yes/No/N/A |
+| /path | POST | [auth_dep] | [expected_dep] | Yes/No | Yes/No/N/A |
 
 ### Convention Violations
-[List any violations of the SessionUser/CurrentUser convention with file:line]
+[List any violations of the project's auth convention (from [DOMAIN_CONTEXT]) with file:line]
 
 ### Multi-Tenancy Check
 [For each resource access, show the ownership check or flag missing]
@@ -121,7 +121,7 @@ EOF
 | Defect Category | Check Item(s) | Status | Ref |
 |----------------|---------------|--------|-----|
 | Missing auth dependency on endpoint | Item 1 | COVERED | |
-| Wrong auth dependency (SessionUser vs CurrentUser) | Item 2 | COVERED | |
+| Wrong auth dependency (convention from [DOMAIN_CONTEXT]) | Item 2 | COVERED | |
 | Multi-tenancy / IDOR | Item 3 | COVERED | |
 | Missing rate limiting on public endpoints | Item 4 | COVERED | |
 | IDOR via error code differentiation | Item 5 | COVERED | |

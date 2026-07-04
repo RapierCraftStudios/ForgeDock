@@ -23,18 +23,18 @@ CRITICAL: Any billing bug = revenue loss or user overcharging.
 If no billing context is configured above, derive the billing flow from the changed files: trace credit check → debit → execution → reconciliation paths.
 
 ## What to Verify
-1. **Trace the full flow**: credit check → pre-debit → execution → reconciliation
-2. **tier_used accuracy**: Where is `tier_used` set? Is it the final tier or intermediate?
+1. **Trace the full flow**: charge check → pre-debit → execution → reconciliation
+2. **Charge calculation accuracy**: Where is the charge amount set? Is it the final value or intermediate?
 3. **No double-charging**: Verify pre-debit and reconciliation don't overlap
-4. **Failure handling**: What happens to credits when a scrape fails?
+4. **Failure handling**: What happens to charges when an operation fails?
 5. **Idempotency**: Can a retry cause double-debit?
-6. **Free scrape paths**: Is there any code path that bypasses billing entirely?
+6. **Bypass paths**: Is there any code path that bypasses billing entirely?
 7. **Gate regression check**: If the PR contains or preserves a feature gate that restricts endpoint access (e.g., `if "feature_name" not in features`, tier checks, balance thresholds blocking a route), verify the gate existed in the base branch BEFORE the commits being reviewed. Run `git show origin/{base}:{file} | grep -n "gate_pattern"` to check. If the gate was introduced by the same commit chain being fixed — not an independent historical addition — flag it as a potential rogue gate with HIGH severity: the correct fix is to fully revert the gate block, not to patch around it. A rogue gate silently restricts access for all users below a tier or balance threshold without any intentional review of that restriction. This finding is **informational — not a merge blocker**, but must appear in the Findings table so it can be tracked as a follow-up. <!-- Added: forge#278 -->
 
 ## MANDATORY Before Reporting
-- Search `grep -rn "reconcil" services/worker/` before claiming "no reconciliation"
-- Trace `tier_used` variable before claiming "wrong tier charged"
-- Read the job completion handler in queues.py before claiming "credits not refunded"
+- Search for reconciliation logic before claiming "no reconciliation": `grep -rn "reconcil" $(git ls-files | grep -E "\.(py|js|ts)$")`
+- Trace the charge amount variable before claiming "wrong amount charged"
+- Read the job completion handler (from [DOMAIN_CONTEXT] or `grep -rn "job_complete\|on_complete\|after_execute" $(git ls-files)`) before claiming "charges not refunded"
 
 ## Post Findings
 ```bash

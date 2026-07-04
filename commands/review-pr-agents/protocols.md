@@ -78,7 +78,7 @@ If a file you are reviewing is listed above as a hot-spot, apply deeper scrutiny
 **MANDATORY**: Before classifying any finding as CONFIRMED, you MUST document one of the following forms of reproduction evidence in your report. A pattern match alone is not sufficient.
 
 **Acceptable reproduction evidence (one of)**:
-- **(a) Full code path trace**: List the execution chain from PR-changed code to the failure point. Minimum: 3 steps with specific file + line for each. Example: `services/api/app/routers/billing.py:142 → credits.py:check_balance():87 → returns None → caller at billing.py:148 raises AttributeError`. The chain must terminate at the actual failure — not at "and then it could fail."
+- **(a) Full code path trace**: List the execution chain from PR-changed code to the failure point. Minimum: 3 steps with specific file + line for each. Example: `src/api/routers/billing.py:142 → credits.py:check_balance():87 → returns None → caller at billing.py:148 raises AttributeError`. The chain must terminate at the actual failure — not at "and then it could fail."
 - **(b) Specific input demonstration**: Provide concrete input values that trigger the failure. Example: `POST /api/v1/scrape with {"url": "http://internal:6432/"}` → `requests.get()` hits internal DB port → SSRF confirmed. The values must be specific (not "if an attacker provides a malicious URL") and must map to actual code in the PR diff.
 
 **Downgrade rule**: If you cannot produce either (a) or (b) after a reasonable trace attempt, you MUST classify the finding as **POSSIBLE** — not CONFIRMED or LIKELY. Do NOT use CONFIRMED when the finding is based on:
@@ -170,13 +170,11 @@ Append this block at the very end of your comment (after the `---` footer line, 
 | API Design | `API` |
 | Database & Migration | `DB` |
 | Infrastructure | `INFRA` |
-| Config Schema | `CFG` |
-
 ### Example
 
 `<!-- REVIEW-FINDINGS-START -->`
-`<!-- FINDING:SEC-1|CONFIRMED|HIGH|services/api/app/routers/scrape.py:45|SQL injection via unsanitized user input in query parameter -->`
-`<!-- FINDING:SEC-2|LIKELY|MEDIUM|services/worker/worker/queues.py:312|Potential SSRF through user-controlled proxy URL -->`
+`<!-- FINDING:SEC-1|CONFIRMED|HIGH|src/api/routers/upload.py:45|SQL injection via unsanitized user input in query parameter -->`
+`<!-- FINDING:SEC-2|LIKELY|MEDIUM|src/worker/jobs/process.py:312|Potential SSRF through user-controlled proxy URL -->`
 `<!-- REVIEW-FINDINGS-END -->`
 
 ---

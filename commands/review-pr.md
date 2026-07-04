@@ -211,16 +211,18 @@ FILES=$(gh pr diff $ARGUMENTS --name-only)
 DIFF=$(gh pr diff $ARGUMENTS)
 
 echo "=== SERVICES ==="
-echo "$FILES" | grep -c "^services/api/" && echo "API" || true
-echo "$FILES" | grep -c "^services/worker/" && echo "WORKER" || true
-echo "$FILES" | grep -c "^web/" && echo "WEB" || true
-echo "$FILES" | grep -c "^shared/" && echo "SHARED" || true
-echo "$FILES" | grep -cE "^(docker|infra/|\.github|Makefile|traefik)" && echo "INFRA" || true
+# Service detection is path-agnostic — matches project-specific and generic structures
+echo "$FILES" | grep -cE "(^services/api/|/api/|/backend/)" && echo "API" || true
+echo "$FILES" | grep -cE "(^services/worker/|/worker/|/jobs/|/tasks/)" && echo "WORKER" || true
+echo "$FILES" | grep -cE "(^web/|/frontend/|/app/|\.tsx?$|\.jsx?$)" && echo "WEB" || true
+echo "$FILES" | grep -cE "(^shared/|/shared/|/common/|/lib/)" && echo "SHARED" || true
+echo "$FILES" | grep -cE "^(docker|infra/|\.github|Makefile|traefik|k8s/|terraform/)" && echo "INFRA" || true
 
 echo "=== DOMAINS ==="
-echo "$DIFF" | grep -cE "SessionUser|CurrentUser|get_current_user|jwt|oauth|login|logout|Depends\(get_|x.forwarded.for|x_forwarded_for|forwarded_for|rate.limit.*ip|ip.*rate.limit|algorithm.*HS256|algorithm.*RS256|NEXTAUTH_SECRET|JWT_SECRET|admin.proxy" && echo "AUTH" || true
-echo "$DIFF" | grep -cE "credit|balance|debit|reconcil|tier_cost|pricing|charge|refund|stripe|subscription" && echo "BILLING" || true
-echo "$DIFF" | grep -cE "scrape|tier.*escalat|proxy|anti_bot|stealth|playwright|playbook" && echo "SCRAPING" || true
+echo "$DIFF" | grep -cE "get_current_user|jwt|oauth|login|logout|require_auth|authenticated_user|x.forwarded.for|x_forwarded_for|forwarded_for|rate.limit.*ip|ip.*rate.limit|algorithm.*HS256|algorithm.*RS256|NEXTAUTH_SECRET|JWT_SECRET" && echo "AUTH" || true
+echo "$DIFF" | grep -cE "credit|balance|debit|reconcil|pricing|charge|refund|stripe|subscription|payment" && echo "BILLING" || true
+# SCRAPING: only match browser-automation/scraping keywords, NOT bare "playwright" (avoids E2E test repos)
+echo "$DIFF" | grep -cE "scrape|tier.*escalat|anti_bot|stealth|playwright.*scrape|scrape.*playwright|playbook_min_tier|browser.*pool|proxy.*scrape|web.*scrape" && echo "SCRAPING" || true
 echo "$DIFF" | grep -cE "FOR UPDATE|atomic|transaction|pipeline|MULTI|distributed_lock|acquire_lock|reserved_by|promo.*claim|voucher.*redeem" && echo "CONCURRENCY" || true
 echo "$FILES" | grep -cE "migration|\.sql$" && echo "DATABASE" || true
 echo "$DIFF" | grep -cE "create_async_engine|AsyncSession|connect_args|pool_size|prepared_statement|engine_from_config|sessionmaker" && echo "DB_CONFIG" || true
@@ -706,7 +708,7 @@ echo "=== RISK SIGNALS ==="
 echo "$DIFF" | grep -cE "subprocess|exec|eval|system\(|popen|heredoc" && echo "  UNTRUSTED_INPUT_PROCESSING" || true
 echo "$DIFF" | grep -cE "\.sh$|bash|shell|cron" && echo "  SHELL_SCRIPT" || true
 echo "$DIFF" | grep -cE "credit|balance|debit|charge|refund|stripe" && echo "  FINANCIAL" || true
-echo "$DIFF" | grep -cE "SessionUser|CurrentUser|jwt|oauth|password|token|secret|x.forwarded.for|x_forwarded_for|forwarded_for|rate.limit.*ip|ip.*rate.limit|algorithm.*HS256|algorithm.*RS256|NEXTAUTH_SECRET|JWT_SECRET|admin.proxy" && echo "  AUTH_SENSITIVE" || true
+echo "$DIFF" | grep -cE "jwt|oauth|password|token|secret|x.forwarded.for|x_forwarded_for|forwarded_for|rate.limit.*ip|ip.*rate.limit|algorithm.*HS256|algorithm.*RS256|NEXTAUTH_SECRET|JWT_SECRET|get_current_user|require_auth" && echo "  AUTH_SENSITIVE" || true
 echo "$DIFF" | grep -cE "\.sql$|migration|DROP|ALTER|DELETE FROM" && echo "  DATABASE_MUTATION" || true
 echo "$DIFF" | grep -cE "docker|deploy|traefik|nginx|\.yml.*service" && echo "  INFRASTRUCTURE" || true
 echo "$DIFF" | grep -cE "docker-compose.*postgres|docker-compose.*redis|postgres.*command:|redis.*command:|image:.*postgres|image:.*redis" && echo "  DATABASE_CONTAINER" || true
@@ -766,7 +768,7 @@ SCORE_FRONTEND=0
 SCORE_API=0
 
 # AUTH domain signals
-echo "$DIFF" | grep -qE "SessionUser|CurrentUser|jwt|oauth|login|logout|password|NEXTAUTH_SECRET|JWT_SECRET" && SCORE_AUTH=$((SCORE_AUTH + 3))
+echo "$DIFF" | grep -qE "jwt|oauth|login|logout|password|NEXTAUTH_SECRET|JWT_SECRET|auth_token|access_token|refresh_token" && SCORE_AUTH=$((SCORE_AUTH + 3))
 echo "$DIFF" | grep -qE "get_current_user|Depends\(get_|x.forwarded.for|forwarded_for|rate.limit.*ip|ip.*rate.limit" && SCORE_AUTH=$((SCORE_AUTH + 2))
 echo "$DIFF" | grep -qE "algorithm.*HS256|algorithm.*RS256|admin.proxy" && SCORE_AUTH=$((SCORE_AUTH + 2))
 
@@ -795,8 +797,8 @@ echo "$DIFF" | grep -qE "subprocess|exec|eval|system\(|popen" && SCORE_SECURITY=
 echo "$DIFF" | grep -qE "os\.system|eval\(|exec\(|pickle|yaml\.load[^_]" && SCORE_SECURITY=$((SCORE_SECURITY + 3))
 echo "$DIFF" | grep -qE "\.sh$|bash|shell|cron" && SCORE_SECURITY=$((SCORE_SECURITY + 2))
 
-# SCRAPING domain signals
-echo "$DIFF" | grep -qE "scrape|tier.*escalat|proxy|anti_bot|stealth|playwright|playbook" && SCORE_SCRAPING=$((SCORE_SCRAPING + 3))
+# SCRAPING domain signals — only match browser-automation/scraping context, NOT bare "playwright"
+echo "$DIFF" | grep -qE "scrape|tier.*escalat|anti_bot|stealth|playwright.*scrape|scrape.*playwright|playbook_min_tier|browser.*pool|web.*scrape" && SCORE_SCRAPING=$((SCORE_SCRAPING + 3))
 
 # FRONTEND domain signals
 echo "$FILES" | grep -qE "^web/src/" && SCORE_FRONTEND=$((SCORE_FRONTEND + 1))
@@ -874,6 +876,7 @@ echo "=== BASELINE ROSTER (top domains): $SELECTED_AGENTS ==="
 | Churn hot-spot | `CHURN_ESCALATION=true` AND top-scoring domain | Top domain gets added if not already in roster |
 | CONTRACT high-risk | `CONTRACT_RISK_FLAGS` contains `HIGH_RISK` | All CONTRACT-flagged domain agents |
 | First-pass finding severity | Phase 3 re-entry after a CONFIRMED/HIGH finding posted to PR | Add all agents for the domain of the finding |
+| Scraping domain | `SCORE_SCRAPING >= 3` AND `review.domains.scraping` is set in forge.yaml | Scraping (optional domain pack — never in default catalog) |
 | Cross-critical domains | `SCORE_AUTH >= 2` AND `SCORE_BILLING >= 2` | Auth + Billing + Concurrency |
 | Cross-critical domains | `SCORE_AUTH >= 2` AND `SCORE_DATABASE >= 3` | Auth + Database |
 | Cross-critical domains | `SCORE_BILLING >= 2` AND `SCORE_CONCURRENCY >= 2` | Billing + Concurrency + Database |
@@ -889,6 +892,8 @@ add_agent() {
 [ "$SCORE_BILLING" -ge 3 ] && { add_agent "Billing"; add_agent "Concurrency"; }
 [ "$SCORE_DATABASE" -ge 3 ] && add_agent "Database"
 [ "$SCORE_INFRA" -ge 3 ] && echo "$DIFF" | grep -qE "docker-compose.*postgres|docker-compose.*redis|postgres.*command:|redis.*command:" && add_agent "Infrastructure"
+# Scraping agent is opt-in: only spawns when review.domains.scraping is configured in forge.yaml
+[ "$SCORE_SCRAPING" -ge 3 ] && [ -n "$DOMAIN_CONTEXT_SCRAPING" ] && add_agent "Scraping"
 [ "$CHURN_ESCALATION" = "true" ] && {
     # Add the top-scoring domain for deeper churn scrutiny if not already selected
     TOP_CHURN_DOMAIN=$(echo "$DOMAIN_SCORES" | tr ' ' '\n' | sort -t: -k1 -rn | head -1 | awk -F: '{print $2}')
@@ -920,7 +925,9 @@ if [ "$THOROUGH" = "true" ] || [ "$IS_MILESTONE_TO_STAGING" = "true" ]; then
     [ "$SCORE_BILLING" -gt 0 ] && SELECTED_AGENTS="$SELECTED_AGENTS Billing Concurrency"
     [ "$SCORE_DATABASE" -gt 0 ] && SELECTED_AGENTS="$SELECTED_AGENTS Database"
     [ "$SCORE_INFRA" -gt 0 ] && SELECTED_AGENTS="$SELECTED_AGENTS Infrastructure"
-    [ "$SCORE_SCRAPING" -gt 0 ] && SELECTED_AGENTS="$SELECTED_AGENTS Scraping"
+    # Scraping agent only added in thorough mode when review.domains.scraping is configured
+    SCRAPING_ENABLED=$(yq '.review.domains.scraping' "$FORGE_YAML" 2>/dev/null || echo "")
+    [ "$SCORE_SCRAPING" -gt 0 ] && [ -n "$SCRAPING_ENABLED" ] && SELECTED_AGENTS="$SELECTED_AGENTS Scraping"
     [ "$SCORE_FRONTEND" -gt 0 ] && SELECTED_AGENTS="$SELECTED_AGENTS Frontend"
     [ "$SCORE_API" -gt 0 ] && SELECTED_AGENTS="$SELECTED_AGENTS API"
     # Deduplicate
@@ -944,7 +951,7 @@ DOMAIN_FILES_BILLING=$(echo "$FILES" | grep -iE "billing|credit|payment|charge|r
 DOMAIN_FILES_CONCURRENCY=$(echo "$FILES" | grep -iE "lock|queue|atomic|transaction|worker|job|task|celery|redis" || echo "")
 DOMAIN_FILES_DATABASE=$(echo "$FILES" | grep -iE "migration|\.sql$|model|schema|db|database|alembic" || echo "")
 DOMAIN_FILES_INFRA=$(echo "$FILES" | grep -iE "docker|nginx|traefik|\.github|Makefile|deploy|infra" || echo "")
-DOMAIN_FILES_SCRAPING=$(echo "$FILES" | grep -iE "scrape|crawler|proxy|stealth|playwright|browser|anti.bot" || echo "")
+DOMAIN_FILES_SCRAPING=$(echo "$FILES" | grep -iE "scrape|crawler|stealth|browser.*pool|headless|anti.bot|detection.*keyword|captcha" || echo "")
 DOMAIN_FILES_FRONTEND=$(echo "$FILES" | grep -iE "^web/|\.tsx?$|\.jsx?$|component|page|layout|style|css" || echo "")
 DOMAIN_FILES_API=$(echo "$FILES" | grep -iE "router|route|endpoint|openapi|sdk|api" || echo "")
 
@@ -974,15 +981,17 @@ See `review-pr-agents.md` for the full routing table mapping domains → persona
 FORGE_YAML="${FORGE_CONFIG:-$(git rev-parse --show-toplevel 2>/dev/null)/forge.yaml}"
 PROJECT_NAME=$(yq '.project.name' "$FORGE_YAML" 2>/dev/null || echo "this project")
 PROJECT_CONTEXT=$(yq '.review.context' "$FORGE_YAML" 2>/dev/null || echo "")
-TECH_STACK=$(yq '.review.tech_stack' "$FORGE_YAML" 2>/dev/null || echo "")
 # Domain-specific context (keyed by agent name)
 DOMAIN_CONTEXT_AUTH=$(yq '.review.domains.auth' "$FORGE_YAML" 2>/dev/null || echo "")
 DOMAIN_CONTEXT_BILLING=$(yq '.review.domains.billing' "$FORGE_YAML" 2>/dev/null || echo "")
+DOMAIN_CONTEXT_CONCURRENCY=$(yq '.review.domains.concurrency' "$FORGE_YAML" 2>/dev/null || echo "")
 DOMAIN_CONTEXT_INFRA=$(yq '.review.domains.infra' "$FORGE_YAML" 2>/dev/null || echo "")
 DOMAIN_CONTEXT_DATABASE=$(yq '.review.domains.database' "$FORGE_YAML" 2>/dev/null || echo "")
 DOMAIN_CONTEXT_FRONTEND=$(yq '.review.domains.frontend' "$FORGE_YAML" 2>/dev/null || echo "")
 DOMAIN_CONTEXT_SECURITY=$(yq '.review.domains.security' "$FORGE_YAML" 2>/dev/null || echo "")
 DOMAIN_CONTEXT_API=$(yq '.review.domains.api' "$FORGE_YAML" 2>/dev/null || echo "")
+# Scraping domain context also gates spawning: agent only runs when this key is set
+DOMAIN_CONTEXT_SCRAPING=$(yq '.review.domains.scraping' "$FORGE_YAML" 2>/dev/null || echo "")
 ```
 
 If `forge.yaml` is absent or a field is empty/null, agents fall back to generic checks (no project-specific context injected — agents still function correctly, just without project conventions).
@@ -1129,8 +1138,8 @@ DIFF_SLICE_SCRAPER=$(truncate_slice "$DIFF_SLICE_SCRAPER")
 The `protocols.md` file contains the Evidence-Based Review Protocol, Structured Findings Protocol, Per-Agent Input Scoping rules, and Tool-Result Truncation Discipline. Each persona file contains that agent's full prompt template. For each agent in `$SELECTED_AGENTS` (computed in Phase 3B):
 1. Extract its template from the persona file (`review-pr-agents/<persona>.md`)
 2. Substitute: `[PR_NUMBER]`, `[REVIEW_SHA]`, `[REVIEW_SHA_SHORT]`, `[TITLE]`, relevant files list
-3. Substitute: `[PROJECT_NAME]` → `$PROJECT_NAME`, `[PROJECT_CONTEXT]` → `$PROJECT_CONTEXT`, `[TECH_STACK]` → `$TECH_STACK`
-4. Substitute per-agent domain context: `[DOMAIN_CONTEXT]` → the agent's matching key from `forge.yaml → review.domains` (e.g., `$DOMAIN_CONTEXT_AUTH` for the auth agent, `$DOMAIN_CONTEXT_BILLING` for the billing agent)
+3. Substitute: `[PROJECT_NAME]` → `$PROJECT_NAME`, `[PROJECT_CONTEXT]` → `$PROJECT_CONTEXT`
+4. Substitute per-agent domain context: `[DOMAIN_CONTEXT]` → the agent's matching key from `forge.yaml → review.domains` (e.g., `$DOMAIN_CONTEXT_AUTH` for the auth agent, `$DOMAIN_CONTEXT_BILLING` for the billing agent, `$DOMAIN_CONTEXT_CONCURRENCY` for the concurrency agent, `$DOMAIN_CONTEXT_SCRAPING` for the scraping agent)
 5. Substitute the shared hot-spot prior: `[CHURN_CONTEXT]` → `$CHURN_CONTEXT` (computed once in Phase 3A, same value for every agent — this is a PR-level fact, not a per-domain config value, so it is NOT read from `forge.yaml`)
 6. Substitute code index slice: `[INDEX_SLICE]` → the matching `$INDEX_SLICE_{DOMAIN}` variable for this agent (e.g., `$INDEX_SLICE_AUTH` for the auth agent). Agents MUST query index data first; fall back to grep only when index slice is empty or unavailable.
 7. Substitute per-agent diff slice: `[DOMAIN_DIFF_SLICE]` → the matching `$DIFF_SLICE_*` variable (e.g., `$DIFF_SLICE_AUTH` for the auth agent, `$DIFF_SLICE_SECURITY` for the security agent). This replaces any `gh pr diff [PR_NUMBER]` call inside the agent template — the agent works from the pre-computed slice, not the full changeset.

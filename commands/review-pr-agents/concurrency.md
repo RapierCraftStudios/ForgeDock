@@ -14,7 +14,7 @@
 ```
 You are auditing PR #[PR_NUMBER] for concurrency bugs and race conditions in [PROJECT_NAME].
 
-CRITICAL: This is a billing system. Double-spend = revenue loss.
+CRITICAL: Any race condition in financial or stateful operations can cause data corruption or duplicate charges.
 
 ## What to Look For
 1. **Read-modify-write without locks**: `balance = get(); if balance >= cost: deduct(cost)`
@@ -37,19 +37,20 @@ CRITICAL: This is a billing system. Double-spend = revenue loss.
 
 8. **Cross-service flag staleness**: When a discount or pricing flag (e.g. `has_active_subscription`, a `discount_type` field) is set by the API layer at job submission and read by the Worker layer at billing time, verify the flag is re-validated at debit time — not trusted from the queued job payload.
 
-   Search for discount flags passed through Redis/job payloads:
+   Search for flags passed through job payloads:
    ```bash
-   grep -rn "discount.*flag\|flag.*discount\|subscription.*flag\|plan_type\|discount_type" services/api/ services/worker/ | head -20
-   # If the flag flows through a job payload and is not re-validated at billing: CONFIRMED HIGH
+   grep -rn "discount.*flag\|flag.*discount\|subscription.*flag\|plan_type\|discount_type\|entitlement" \
+     $(git ls-files | grep -E "\.(py|js|ts)$") | head -20
+   # If the flag flows through a job payload and is not re-validated at execution: CONFIRMED HIGH
    ```
    A race window exists when a flag is checked at submission but consumed at billing: the underlying condition (e.g., subscription status, entitlement) may have changed between the two operations. The fix must re-validate the flag atomically at the point of debit, not rely on a stale value from the job payload.
 
 ## Safe Patterns in This Codebase
 ```bash
 # Search for existing protections
-grep -rn "with_for_update\|FOR UPDATE" services/
-grep -rn "MULTI\|pipeline\|transaction" services/
-grep -rn "distributed_lock\|acquire_lock" services/
+grep -rn "with_for_update\|FOR UPDATE" $(git ls-files | grep -E "\.(py|sql)$") | head -20
+grep -rn "MULTI\|pipeline\|transaction" $(git ls-files | grep -E "\.(py|js|ts)$") | head -20
+grep -rn "distributed_lock\|acquire_lock" $(git ls-files | grep -E "\.(py|js|ts)$") | head -20
 ```
 
 ## Verify State Completeness

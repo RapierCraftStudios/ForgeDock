@@ -66,19 +66,19 @@ If no API context is configured above, derive conventions from the changed files
 
 ## Cross-Reference
 ```bash
+# Discover router entrypoints (adapt to project structure)
+API_SRC=$(git ls-files | grep -E "(router|route|endpoint|app)" | grep -E "\.(py|ts|js)$" | head -20)
 # See how existing routers are structured
-grep -rn "APIRouter\|include_router" services/api/app/
-# Check existing patterns
-ls services/api/app/routers/
+grep -rn "APIRouter\|include_router\|app\.include\|express\.Router\|createRouter" $API_SRC 2>/dev/null | head -20
 # Find external response consumers (unguarded dict/attribute access after HTTP calls)
-grep -rn "\.get\|\.post\|\.put\|\.delete\|httpx\|requests\." services/api/app/ | grep -v "test_\|#"
+grep -rn "\.get\|\.post\|\.put\|\.delete\|httpx\|requests\.\|axios\." $API_SRC 2>/dev/null | grep -v "test_\|#" | head -20
 # Find code/snippet generators
-grep -rn "def generate_\|def build_snippet\|def get_code_\|def.*example\b" services/api/app/ services/worker/
+grep -rn "def generate_\|def build_snippet\|def get_code_\|def.*example\b" $(git ls-files | grep -E "\.(py|ts|js)$") 2>/dev/null | head -20
 # Find all locations that reference a modified model class
-grep -rn "{ModelClassName}" services/api/app/ services/worker/ web/src/
+grep -rn "{ModelClassName}" $(git ls-files | grep -E "\.(py|ts|js)$") 2>/dev/null | head -20
 # SDK method lists (for cross-PR check #10)
 grep -rn "_valid_methods\|Literal\[" sdk/ 2>/dev/null | head -20
-grep -rn "Literal\[" services/api/app/schemas/ 2>/dev/null | head -20
+grep -rn "Literal\[" $(git ls-files | grep -E "schema" | grep -E "\.(py|ts)$") 2>/dev/null | head -20
 ```
 
 ## Post Findings

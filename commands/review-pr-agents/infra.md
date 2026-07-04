@@ -85,14 +85,14 @@ If no infra context is configured above, derive the deployment model from the ch
 
    A response contract change that updates only the endpoint while leaving downstream consumers on the old format is equivalent to a breaking API change deployed without a migration path — the breakage surfaces at the worst possible time: during a production deploy. <!-- Added: forge#321 -->
 
-7. **Secret delivery chain** (when `decrypt-secrets.sh`, `.secrets/prod.enc.yaml`, or deploy workflows change):
-   Trace the FULL path a secret takes from SOPS to a running container. Read these files and verify consistency:
-   - `.secrets/prod.enc.yaml` — the SOPS key name under its section (e.g., `oauth.discord_client_id`)
-   - `scripts/decrypt-secrets.sh` — the ENV_MAPPING tuple must match the SOPS path (e.g., `("oauth", "discord_client_id")`)
-   - `.github/workflows/deploy-production.yml` — the SCP `target:` path and the merge step's `PROJECT=` variable
-   - `.github/workflows/hotfix-deploy.yml` — same paths, must be consistent with main deploy
-   - `docker-compose.prod.yml` — `env_file:` must point to the same `.env.production` the merge step writes to
-   **Critical check**: If the workflow appends `/app` to `PRODUCTION_PROJECT_PATH`, and that secret already includes `/app`, secrets will silently go to a wrong directory. Verify the SCP target resolves to the SAME file that `docker-compose.prod.yml` env_file reads.
+7. **Secret delivery chain** (when secrets scripts, encrypted secret files, or deploy workflows change):
+   Trace the FULL path a secret takes from its source (SOPS, Vault, CI secrets, etc.) to the running container. Read the relevant files from `[DOMAIN_CONTEXT]` (or discover them via `git ls-files | grep -iE "secret|decrypt|\.env"`) and verify consistency:
+   - The secrets source file (SOPS yaml, Vault path, etc.) — the key name and section
+   - The decrypt/extract script — the mapping must match the key path in the source
+   - The deploy workflow (from `forge.yaml → deploy.workflow` if configured) — SCP target paths and env var injection
+   - Companion deploy workflows (hotfix, staging, etc.) — must be consistent with main deploy
+   - The docker-compose env_file — must point to the same `.env` file the deploy step writes
+   **Critical check**: If the deploy workflow appends a path suffix and the secret source already includes that suffix, secrets will silently go to the wrong location. Verify the target path resolves to the SAME file that docker-compose `env_file:` reads.
    **Do NOT just verify naming consistency** — verify the filesystem paths are correct end-to-end.
 7b. **Shell metacharacter safety in .env writers** (when `decrypt-secrets.sh` or any script that writes values to `.env` or shell-sourceable config files is touched):
    Secret values can contain any character — passwords, API keys, and OAuth tokens frequently contain `;`, `!`, `|`, `&`, `(`, `)`, `{`, `}`, backticks, and other bash metacharacters. If a script that generates `.env` files uses an **allowlist-based quoting approach** (checking for a specific subset of special characters before deciding whether to quote), it will silently write unquoted values for any character not in the list. When the deploy pipeline sources that file, bash interprets the metacharacter as a command separator, causing exit 127 or command-not-found errors.
@@ -123,17 +123,17 @@ If no infra context is configured above, derive the deployment model from the ch
    An allowlist-based quoting approach in a secret-decryption script will silently fail for any metacharacter not in the list. Secret values (passwords, API keys, OAuth tokens) can contain any character — allowlists are guaranteed to be incomplete. The only safe approach is always-quote. <!-- Added: forge#286 -->
 8. **Cross-domain service interactions** (when shell scripts curl/wget internal services):
    For every `curl` or `wget` command in changed shell scripts that targets an internal service (API, worker, Redis, Postgres), trace the HTTP request through the target application's middleware stack:
-   - Read `services/api/app/main.py` — check `TrustedHostMiddleware` allowed_hosts list. Does the curl's `Host` header value match an allowed entry? (Default `Host` is the URL hostname — a bare container IP like `172.18.0.x` is NOT `localhost`.)
+   - Find the application entrypoint: `grep -rn "TrustedHostMiddleware\|allowed_hosts\|trusted_host" $(git ls-files | grep -E "\.(py|ts|js)$") | head -10` — check the `allowed_hosts` list. Does the curl's `Host` header value match an allowed entry? (Default `Host` is the URL hostname — a bare container IP like `172.18.0.x` is NOT `localhost`.)
    - Check auth requirements — does the target endpoint require API keys or session tokens?
    - Check the URL path — does the endpoint actually exist at that path?
    - **If the curl would be rejected** (wrong Host header, missing auth, wrong path): flag as CONFIRMED finding. A health check or monitoring script that gets 400/401/404 instead of 200 produces false alerts.
    **Do NOT assume a curl will succeed just because the URL is syntactically valid** — read the target service's code to verify.
 9. **Sibling workflow drift** (ALWAYS check for staging→main PRs; also check when ANY `.github/workflows/*.yml` file changes):
-   Multiple workflows contain jobs with the same logical purpose (e.g., `test-api` exists in both `ci.yml` and `deploy-production.yml`).
-   **For staging→main PRs, ALWAYS read both `ci.yml` and `deploy-production.yml` and compare shared jobs — even if neither file changed.** Pre-existing drift is the most dangerous kind: a PR can be approved with green CI while `deploy-production.yml` is missing env vars or install steps that `ci.yml` has, causing failures only at deploy time — not during testing.
-   - Read both files. For each shared job (test-api, test-web): compare PYTHONPATH values on every step, dependency install steps (count + content), step names present in one but not the other
+   Multiple workflows contain jobs with the same logical purpose (e.g., `test-api` exists in both `ci.yml` and a deploy workflow).
+   **For staging→main PRs, ALWAYS read the CI workflow and the deploy workflow and compare shared jobs — even if neither file changed.** Pre-existing drift is the most dangerous kind: a PR can be approved with green CI while the deploy workflow is missing env vars or install steps that CI has, causing failures only at deploy time — not during testing.
+   - Read both files. For each shared job: compare env var values, dependency install steps (count + content), and step names present in one but not the other
    - **Any env var, path, install step, or command present in one but missing from the sibling is CONFIRMED BLOCKING drift** — CI passes but deploy fails
-   - Common siblings: `ci.yml` ↔ `deploy-production.yml` (share `test-api`, `test-web` jobs), `deploy-production.yml` ↔ `hotfix-deploy.yml` (share build/deploy logic)
+   - Identify sibling workflows via: `ls .github/workflows/` — find all workflows sharing job names with the changed file
    **This is the #1 cause of "CI passed but deploy failed" incidents.** Do not skip this check.
 10. **Deploy scope awareness** (ALWAYS run — checks whether ALL changed services will actually be deployed):
    This project may have multiple deploy pipelines. Check which pipelines cover which services:
@@ -327,15 +327,14 @@ gh pr comment [PR_NUMBER] --body "$(cat <<'EOF'
 - [ ] [Any env vars, secrets, DNS changes needed before deploy]
 
 ### Secret Delivery Chain
-[If decrypt-secrets.sh, SOPS, or deploy workflows changed — otherwise write "N/A"]
+[If secret scripts, encrypted secret files, or deploy workflows changed — otherwise write "N/A"]
 | Step | File | Value | Consistent? |
 |------|------|-------|-------------|
-| SOPS key | `.secrets/prod.enc.yaml` | [section.key_name] | — |
-| ENV_MAPPING | `scripts/decrypt-secrets.sh` | [("section", "key_name")] | Yes/No |
-| SCP target | `deploy-production.yml` | [resolved path] | Yes/No |
-| Merge PROJECT | `deploy-production.yml` | [resolved path] | Yes/No |
-| env_file | `docker-compose.prod.yml` | [.env.production] | Yes/No |
-| Hotfix SCP | `hotfix-deploy.yml` | [resolved path] | Yes/No |
+| Secret source | [secrets file path] | [key/section name] | — |
+| Extraction mapping | [decrypt script] | [extracted key name] | Yes/No |
+| Deploy target | [deploy workflow] | [resolved path] | Yes/No |
+| Companion deploy | [hotfix/staging workflow] | [resolved path] | Yes/No |
+| env_file | [docker-compose file] | [env file path] | Yes/No |
 
 ### Rollout Recommendation
 **Strategy**: [Full deploy / Canary / Low-traffic window]
