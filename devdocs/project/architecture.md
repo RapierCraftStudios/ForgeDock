@@ -197,6 +197,42 @@ esac
 
 **Logging tier in FORGE annotations**: When a script resolution runs, log the tier used (`adaptive`, `universal`, or `prose`) in the corresponding FORGE annotation comment. This gives the pipeline trace full observability into which script tier handled each operation.
 
+## Concurrency Model (Engine, #1324)
+
+**Decision recorded**: 2026-07-04
+
+The durable execution engine (#1256) uses an **in-process worker pool + worktree-per-issue** model for concurrent issue dispatch.
+
+### Chosen model: in-process worker pool
+
+Each concurrent issue runs inside the **same engine process** but is isolated on disk by its own git worktree (created/cleaned up via `scripts/worktree-lifecycle.sh`). A single control plane owns the DAG ready-set, dispatch loop, lease renewal, and rate-limit backpressure.
+
+### Why not process-per-issue
+
+| Concern | Process-per-issue | In-process pool |
+|---------|------------------|-----------------|
+| Filesystem isolation | Separate clone per issue | Worktree per issue (`worktree-lifecycle.sh` — already shipped, #1268) |
+| Rate-limit backpressure | Requires IPC to share API quota | Single gate in the dispatch loop |
+| DAG coordination | Cross-process signalling | In-memory ready-set |
+| Recovery / lease renewal | Separate watchdog per process | One lease manager |
+
+### Concurrency cap
+
+`forge.yaml → orchestration.max_concurrent` (optional, default uncapped). When set, the dispatch loop holds at most N in-flight workers; newly ready issues queue until a slot opens. Prevents rate-limit storms from large batches.
+
+### Rate-limit backpressure
+
+Pre-dispatch gate: if `gh api rate_limit` remaining < `FORGE_RATE_LIMIT_FLOOR` (default 200, overridable via `forge.yaml → orchestration.rate_limit_floor`), the dispatch loop pauses until the quota resets. Already-running workers continue unaffected.
+
+### Related issues
+
+- #1256 — durable engine umbrella (foundation)
+- #1268 — `worktree-lifecycle.sh` (MERGED — isolation primitive)
+- #1317 — economic self-governance (related backpressure at scheduler layer)
+- #1247 — work-on.md call-site migration to worktree-lifecycle.sh (fast-follow)
+
+---
+
 ## Milestone: Deterministic Pipeline v2
 
 Active milestone tracking all work toward one-shot reliable task completion.
