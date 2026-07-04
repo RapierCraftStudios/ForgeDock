@@ -1,312 +1,344 @@
 /**
  * bin/tests/eval-gate-scorecard.test.mjs
  *
- * Unit tests for scripts/eval-gate-scorecard.mjs — the pipeline eval regression
- * gate aggregator (#1286).
+ * Unit tests for scripts/eval-gate-scorecard.mjs — the pipeline eval-gate
+ * scorecard aggregator (issue #1285).
  *
- * Covers (all without network or file I/O side effects):
- *   - validate: accepts valid scorecards, rejects missing fields, bad ranges,
- *     bad run_mode, computed rate mismatch, n < MIN_RUNS
- *   - compare: pass when drop <= threshold, fail when drop > threshold,
- *     skip rate assertion for small-n subset runs, handle improvements (negative drop)
- *
+ * All tests are pure-function; no network, no live SDK calls, no fs writes.
  * Run with: node --test bin/tests/eval-gate-scorecard.test.mjs
  */
 
-import { test, describe } from "node:test";
+import { describe, it } from "node:test";
 import assert from "node:assert/strict";
+
 import {
-  validate,
-  compare,
   MIN_RUNS,
-  MIN_RUNS_FOR_RATE_ASSERTION,
-  REGRESSION_THRESHOLD_PP,
+  VALID_STATUSES,
+  validateRuns,
+  median,
+  mean,
+  aggregate,
 } from "../../scripts/eval-gate-scorecard.mjs";
 
 // ---------------------------------------------------------------------------
 // Fixtures
 // ---------------------------------------------------------------------------
 
-function validScorecard(overrides = {}) {
+/** Build a minimal valid run result. */
+function makeRun(overrides = {}) {
   return {
-    schema_version: "1",
-    run_id: "test-run-001",
-    generated_at: "2026-07-04T00:00:00.000Z",
-    corpus_size: 20,
-    issues_run: 20,
-    successful_runs: 16,
-    failed_runs: 4,
-    success_rate_pct: 80,
-    mean_wall_clock_ms: 45000,
-    median_wall_clock_ms: 42000,
-    total_intervention_count: 2,
+    issue: 1001,
+    status: "success",
+    wallClockMs: 30000,
+    interventionCount: 0,
     cost: null,
-    run_mode: "full",
-    spec_sha: "abc123",
     ...overrides,
   };
 }
 
-function subsetScorecard(overrides = {}) {
-  return validScorecard({
-    corpus_size: 5,
-    issues_run: 5,
-    successful_runs: 4,
-    failed_runs: 1,
-    success_rate_pct: 80,
-    run_mode: "subset",
-    ...overrides,
-  });
+/**
+ * Build a minimal valid runs array of `n` success runs with distinct issue numbers.
+ * All have cost: null by default.
+ */
+function makeRuns(n, overrides = {}) {
+  return Array.from({ length: n }, (_, i) =>
+    makeRun({ issue: 1000 + i, ...overrides }),
+  );
 }
 
 // ---------------------------------------------------------------------------
-// validate() — acceptance cases
+// Constants
 // ---------------------------------------------------------------------------
 
-describe("validate: accepts valid scorecards", () => {
-  test("full corpus scorecard", () => {
-    assert.doesNotThrow(() => validate(validScorecard(), "fresh"));
+describe("constants", () => {
+  it("MIN_RUNS is a positive integer", () => {
+    assert.ok(typeof MIN_RUNS === "number" && Number.isInteger(MIN_RUNS) && MIN_RUNS > 0);
   });
 
-  test("subset scorecard", () => {
-    assert.doesNotThrow(() => validate(subsetScorecard(), "fresh"));
-  });
-
-  test("100% success rate", () => {
-    const sc = validScorecard({ successful_runs: 20, failed_runs: 0, success_rate_pct: 100 });
-    assert.doesNotThrow(() => validate(sc, "fresh"));
-  });
-
-  test("0% success rate", () => {
-    const sc = validScorecard({ successful_runs: 0, failed_runs: 20, success_rate_pct: 0 });
-    assert.doesNotThrow(() => validate(sc, "fresh"));
-  });
-
-  test("nullable optional fields (cost, spec_sha)", () => {
-    const sc = validScorecard({ cost: null, spec_sha: null });
-    assert.doesNotThrow(() => validate(sc, "fresh"));
+  it("VALID_STATUSES contains the four documented values", () => {
+    assert.ok(VALID_STATUSES.has("success"));
+    assert.ok(VALID_STATUSES.has("failure"));
+    assert.ok(VALID_STATUSES.has("incomplete"));
+    assert.ok(VALID_STATUSES.has("error"));
+    assert.equal(VALID_STATUSES.size, 4);
   });
 });
 
 // ---------------------------------------------------------------------------
-// validate() — rejection cases
+// validateRuns
 // ---------------------------------------------------------------------------
 
-describe("validate: rejects invalid scorecards", () => {
-  test("null input", () => {
-    assert.throws(() => validate(null, "fresh"), /must be a JSON object/);
+describe("validateRuns", () => {
+  it("accepts a valid array of MIN_RUNS success runs", () => {
+    assert.doesNotThrow(() => validateRuns(makeRuns(MIN_RUNS)));
   });
 
-  test("array input", () => {
-    assert.throws(() => validate([], "fresh"), /must be a JSON object/);
+  it("throws when runs is not an array", () => {
+    assert.throws(() => validateRuns(null), /"runs" must be a JSON array/);
+    assert.throws(() => validateRuns({ issues: [] }), /"runs" must be a JSON array/);
   });
 
-  test("missing schema_version", () => {
-    const sc = validScorecard();
-    delete sc.schema_version;
-    assert.throws(() => validate(sc, "fresh"), /missing required field.*schema_version/);
+  it("throws when runs is an empty array", () => {
+    assert.throws(() => validateRuns([]), /"runs" array is empty/);
   });
 
-  test("missing issues_run", () => {
-    const sc = validScorecard();
-    delete sc.issues_run;
-    assert.throws(() => validate(sc, "fresh"), /missing required field.*issues_run/);
+  it("throws when a run is missing the issue field", () => {
+    const runs = makeRuns(MIN_RUNS);
+    delete runs[0].issue;
+    assert.throws(() => validateRuns(runs), /"issue" must be an integer/);
   });
 
-  test("missing success_rate_pct", () => {
-    const sc = validScorecard();
-    delete sc.success_rate_pct;
-    assert.throws(() => validate(sc, "fresh"), /missing required field.*success_rate_pct/);
+  it("throws when issue is not an integer", () => {
+    const runs = makeRuns(MIN_RUNS);
+    runs[0].issue = "not-a-number";
+    assert.throws(() => validateRuns(runs), /"issue" must be an integer/);
   });
 
-  test("missing run_mode", () => {
-    const sc = validScorecard();
-    delete sc.run_mode;
-    assert.throws(() => validate(sc, "fresh"), /missing required field.*run_mode/);
+  it("throws when status is not a valid value", () => {
+    const runs = makeRuns(MIN_RUNS);
+    runs[0].status = "unknown";
+    assert.throws(() => validateRuns(runs), /"status" must be one of/);
   });
 
-  test("issues_run below MIN_RUNS", () => {
-    const sc = validScorecard({
-      issues_run: MIN_RUNS - 1,
-      successful_runs: MIN_RUNS - 1,
-      failed_runs: 0,
-      success_rate_pct: 100,
+  it("throws when wallClockMs is negative", () => {
+    const runs = makeRuns(MIN_RUNS);
+    runs[0].wallClockMs = -1;
+    assert.throws(() => validateRuns(runs), /"wallClockMs" must be a non-negative/);
+  });
+
+  it("throws when wallClockMs is not a number", () => {
+    const runs = makeRuns(MIN_RUNS);
+    runs[0].wallClockMs = "fast";
+    assert.throws(() => validateRuns(runs), /"wallClockMs" must be a non-negative/);
+  });
+
+  it("throws when interventionCount is not an integer", () => {
+    const runs = makeRuns(MIN_RUNS);
+    runs[0].interventionCount = 1.5;
+    assert.throws(() => validateRuns(runs), /"interventionCount" must be a non-negative integer/);
+  });
+
+  it("throws when interventionCount is negative", () => {
+    const runs = makeRuns(MIN_RUNS);
+    runs[0].interventionCount = -1;
+    assert.throws(() => validateRuns(runs), /"interventionCount" must be a non-negative integer/);
+  });
+
+  it("throws when cost is a negative number", () => {
+    const runs = makeRuns(MIN_RUNS);
+    runs[0].cost = -0.01;
+    assert.throws(() => validateRuns(runs), /"cost" must be a non-negative finite number or null/);
+  });
+
+  it("accepts cost as null", () => {
+    const runs = makeRuns(MIN_RUNS, { cost: null });
+    assert.doesNotThrow(() => validateRuns(runs));
+  });
+
+  it("accepts cost as a positive number", () => {
+    const runs = makeRuns(MIN_RUNS, { cost: 0.005 });
+    assert.doesNotThrow(() => validateRuns(runs));
+  });
+
+  it("accepts runs where cost field is absent (treated as null)", () => {
+    const runs = makeRuns(MIN_RUNS).map((r) => {
+      const copy = { ...r };
+      delete copy.cost;
+      return copy;
     });
-    assert.throws(() => validate(sc, "fresh"), /below minimum/);
+    assert.doesNotThrow(() => validateRuns(runs));
   });
 
-  test("issues_run = MIN_RUNS passes", () => {
-    const sc = validScorecard({
-      issues_run: MIN_RUNS,
-      successful_runs: MIN_RUNS,
-      failed_runs: 0,
-      success_rate_pct: 100,
+  it("enforces MIN_RUNS on scoreable (success/failure) runs", () => {
+    // All error/incomplete — scoreable count is 0.
+    const runs = makeRuns(MIN_RUNS + 2, { status: "error" });
+    assert.throws(() => validateRuns(runs), new RegExp(`minimum is ${MIN_RUNS}`));
+  });
+
+  it("passes when scoreable count is exactly MIN_RUNS even if extra error runs exist", () => {
+    const scoreable = makeRuns(MIN_RUNS, { status: "success" });
+    const extras = makeRuns(3, { status: "error" }).map((r, i) => ({
+      ...r,
+      issue: 9000 + i,
+    }));
+    assert.doesNotThrow(() => validateRuns([...scoreable, ...extras]));
+  });
+
+  it("passes when there are MIN_RUNS failure runs (failure is scoreable)", () => {
+    const runs = makeRuns(MIN_RUNS, { status: "failure" });
+    assert.doesNotThrow(() => validateRuns(runs));
+  });
+});
+
+// ---------------------------------------------------------------------------
+// median
+// ---------------------------------------------------------------------------
+
+describe("median", () => {
+  it("returns null for an empty array", () => {
+    assert.equal(median([]), null);
+  });
+
+  it("returns the single value for a length-1 array", () => {
+    assert.equal(median([42]), 42);
+  });
+
+  it("returns the middle element for an odd-length array", () => {
+    assert.equal(median([1, 3, 5]), 3);
+  });
+
+  it("returns the average of the two middle elements for an even-length array", () => {
+    assert.equal(median([1, 2, 3, 4]), 2.5);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// mean
+// ---------------------------------------------------------------------------
+
+describe("mean", () => {
+  it("returns null for an empty array", () => {
+    assert.equal(mean([]), null);
+  });
+
+  it("computes the arithmetic mean", () => {
+    assert.equal(mean([2, 4, 6]), 4);
+  });
+
+  it("handles a single element", () => {
+    assert.equal(mean([7]), 7);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// aggregate
+// ---------------------------------------------------------------------------
+
+describe("aggregate", () => {
+  it("reports correct counts for a mixed-status corpus", () => {
+    const runs = [
+      ...makeRuns(3, { status: "success" }),
+      makeRun({ issue: 2001, status: "failure" }),
+      makeRun({ issue: 2002, status: "failure" }),
+      makeRun({ issue: 2003, status: "incomplete" }),
+      makeRun({ issue: 2004, status: "error" }),
+    ];
+    const sc = aggregate(runs);
+    assert.equal(sc.n_runs, 7);
+    assert.equal(sc.n_success, 3);
+    assert.equal(sc.n_failure, 2);
+    assert.equal(sc.n_incomplete, 2); // incomplete + error
+  });
+
+  it("computes one_shot_success_rate correctly", () => {
+    // 4 success out of 5 → 0.8
+    const runs = [
+      ...makeRuns(4, { status: "success" }),
+      makeRun({ issue: 2001, status: "failure" }),
+    ];
+    const sc = aggregate(runs);
+    assert.equal(sc.one_shot_success_rate, 0.8);
+  });
+
+  it("computes wall_clock_ms mean and median", () => {
+    const runs = [
+      makeRun({ wallClockMs: 10000 }),
+      makeRun({ issue: 1001, wallClockMs: 20000 }),
+      makeRun({ issue: 1002, wallClockMs: 30000 }),
+      makeRun({ issue: 1003, wallClockMs: 40000 }),
+      makeRun({ issue: 1004, wallClockMs: 50000 }),
+    ];
+    const sc = aggregate(runs);
+    assert.equal(sc.wall_clock_ms.mean, 30000);
+    assert.equal(sc.wall_clock_ms.median, 30000);
+    assert.equal(sc.wall_clock_ms.min, 10000);
+    assert.equal(sc.wall_clock_ms.max, 50000);
+  });
+
+  it("computes intervention totals and mean_per_run", () => {
+    const runs = makeRuns(5);
+    runs[0].interventionCount = 2;
+    runs[1].interventionCount = 1;
+    const sc = aggregate(runs);
+    assert.equal(sc.intervention.total, 3);
+    assert.equal(sc.intervention.mean_per_run, 0.6);
+  });
+
+  it("sets cost to null when any run has cost null", () => {
+    const runs = makeRuns(5, { cost: null });
+    const sc = aggregate(runs);
+    assert.equal(sc.cost, null);
+  });
+
+  it("sets cost to the sum when all runs have a real cost", () => {
+    const runs = makeRuns(5, { cost: 0.01 });
+    const sc = aggregate(runs);
+    // 5 * 0.01 = 0.05 (rounded to 3dp)
+    assert.equal(sc.cost, 0.05);
+  });
+
+  it("sets cost to null if cost field is absent on any run", () => {
+    const runs = makeRuns(5, { cost: 0.01 });
+    delete runs[2].cost;
+    const sc = aggregate(runs);
+    assert.equal(sc.cost, null);
+  });
+
+  it("passes through corpus_version and spec_version from meta", () => {
+    const runs = makeRuns(5);
+    const sc = aggregate(runs, {
+      corpus_version: "v2",
+      spec_version: "1.0.99",
+      model: "claude-opus-4",
     });
-    assert.doesNotThrow(() => validate(sc, "fresh"));
+    assert.equal(sc.corpus_version, "v2");
+    assert.equal(sc.spec_version, "1.0.99");
+    assert.equal(sc.model, "claude-opus-4");
   });
 
-  test("success_rate_pct out of range (>100)", () => {
-    const sc = validScorecard({ success_rate_pct: 101 });
-    assert.throws(() => validate(sc, "fresh"), /out of range/);
+  it("picks model from runs when meta.model is absent", () => {
+    const runs = makeRuns(5, { model: "claude-test-model" });
+    const sc = aggregate(runs);
+    assert.equal(sc.model, "claude-test-model");
   });
 
-  test("success_rate_pct out of range (<0)", () => {
-    const sc = validScorecard({ success_rate_pct: -1 });
-    assert.throws(() => validate(sc, "fresh"), /out of range/);
+  it("a deliberately degraded corpus (all failures) scores 0 success rate", () => {
+    const runs = makeRuns(MIN_RUNS, { status: "failure" });
+    const sc = aggregate(runs);
+    assert.equal(sc.one_shot_success_rate, 0);
+    assert.equal(sc.n_success, 0);
+    assert.equal(sc.n_failure, MIN_RUNS);
   });
 
-  test("success_rate_pct does not match computed value", () => {
-    // 15/20 = 75%, not 80%
-    const sc = validScorecard({ successful_runs: 15, success_rate_pct: 80 });
-    assert.throws(() => validate(sc, "fresh"), /does not match computed/);
+  it("a perfect corpus scores a success rate of 1", () => {
+    const runs = makeRuns(MIN_RUNS, { status: "success" });
+    const sc = aggregate(runs);
+    assert.equal(sc.one_shot_success_rate, 1);
   });
 
-  test("invalid run_mode", () => {
-    const sc = validScorecard({ run_mode: "turbo" });
-    assert.throws(() => validate(sc, "fresh"), /run_mode must be/);
-  });
-
-  test("label is included in error messages", () => {
-    const sc = validScorecard({ run_mode: "bad" });
-    assert.throws(() => validate(sc, "baseline"), /baseline scorecard/);
-  });
-});
-
-// ---------------------------------------------------------------------------
-// compare() — pass cases
-// ---------------------------------------------------------------------------
-
-describe("compare: pass cases", () => {
-  const baseline = validScorecard({ success_rate_pct: 80, successful_runs: 16, issues_run: 20 });
-
-  test("no regression (same rate)", () => {
-    const fresh = validScorecard({ success_rate_pct: 80, successful_runs: 16, issues_run: 20 });
-    const result = compare(fresh, baseline);
-    assert.equal(result.pass, true);
-    assert.equal(result.drop_pp, 0);
-  });
-
-  test("improvement (rate went up)", () => {
-    const fresh = validScorecard({ success_rate_pct: 85, successful_runs: 17, issues_run: 20 });
-    const result = compare(fresh, baseline);
-    assert.equal(result.pass, true);
-    assert.ok(result.drop_pp < 0, "drop_pp should be negative for an improvement");
-  });
-
-  test("drop exactly at threshold passes (not strictly greater)", () => {
-    // 80 - 75 = 5 pp = threshold → PASS
-    const fresh = validScorecard({ success_rate_pct: 75, successful_runs: 15, issues_run: 20 });
-    const result = compare(fresh, baseline);
-    assert.equal(result.pass, true);
-    assert.equal(result.drop_pp, REGRESSION_THRESHOLD_PP);
-  });
-
-  test("drop below threshold passes", () => {
-    const fresh = validScorecard({ success_rate_pct: 76, successful_runs: 15.2, issues_run: 20 });
-    // Adjust to valid: 15/20 = 75, already tested; use 76 → need 15.2 which is invalid
-    // Use a larger corpus to get a fractional pp drop under threshold
-    const bl = validScorecard({ success_rate_pct: 80, successful_runs: 80, issues_run: 100 });
-    const fr = validScorecard({ success_rate_pct: 76, successful_runs: 76, issues_run: 100 });
-    const res = compare(fr, bl);
-    assert.equal(res.pass, true);
-    assert.equal(res.drop_pp, 4);
-  });
-});
-
-// ---------------------------------------------------------------------------
-// compare() — fail cases
-// ---------------------------------------------------------------------------
-
-describe("compare: fail cases (regression detected)", () => {
-  const baseline = validScorecard({ success_rate_pct: 80, successful_runs: 16, issues_run: 20 });
-
-  test("drop above threshold fails", () => {
-    // 80 - 74 = 6 pp > 5 pp threshold → FAIL
-    const fresh = validScorecard({ success_rate_pct: 70, successful_runs: 14, issues_run: 20 });
-    const result = compare(fresh, baseline);
-    assert.equal(result.pass, false);
-    assert.ok(result.drop_pp > REGRESSION_THRESHOLD_PP);
-  });
-
-  test("catastrophic drop (0% success)", () => {
-    const fresh = validScorecard({ success_rate_pct: 0, successful_runs: 0, issues_run: 20 });
-    const result = compare(fresh, baseline);
-    assert.equal(result.pass, false);
-    assert.equal(result.drop_pp, 80);
-  });
-
-  test("failure message mentions threshold and actionable hint", () => {
-    const fresh = validScorecard({ success_rate_pct: 0, successful_runs: 0, issues_run: 20 });
-    const result = compare(fresh, baseline);
-    assert.match(result.reason, /REGRESSION/);
-    assert.match(result.reason, /eval-gate-runbook/);
-  });
-});
-
-// ---------------------------------------------------------------------------
-// compare() — subset / small-n carve-out
-// ---------------------------------------------------------------------------
-
-describe("compare: subset run rate assertion skipped for n < MIN_RUNS_FOR_RATE_ASSERTION", () => {
-  const baseline = subsetScorecard({ success_rate_pct: 80, successful_runs: 4, issues_run: 5 });
-
-  test("large drop on small-n subset is NOT a failure", () => {
-    // n=5 < MIN_RUNS_FOR_RATE_ASSERTION → rate assertion skipped → pass
-    const fresh = subsetScorecard({ success_rate_pct: 40, successful_runs: 2, issues_run: 5 });
-    const result = compare(fresh, baseline);
-    assert.equal(result.pass, true);
-    assert.equal(result.rate_assertion_skipped, true);
-  });
-
-  test("skipped assertion message explains the reason", () => {
-    const fresh = subsetScorecard({ success_rate_pct: 40, successful_runs: 2, issues_run: 5 });
-    const result = compare(fresh, baseline);
-    assert.match(result.reason, /Subset run/);
-    assert.match(result.reason, /rate assertion skipped/);
-  });
-
-  test("large corpus (n >= MIN_RUNS_FOR_RATE_ASSERTION) does apply threshold", () => {
-    const bl = validScorecard({ success_rate_pct: 80, successful_runs: 16, issues_run: 20 });
-    const fr = validScorecard({ success_rate_pct: 60, successful_runs: 12, issues_run: 20 });
-    const result = compare(fr, bl);
-    assert.equal(result.pass, false);
-    assert.equal(result.rate_assertion_skipped, false);
-  });
-
-  test("boundary: n = MIN_RUNS_FOR_RATE_ASSERTION - 1 skips assertion", () => {
-    const n = MIN_RUNS_FOR_RATE_ASSERTION - 1;
-    const bl = validScorecard({ success_rate_pct: 100, successful_runs: n, issues_run: n });
-    const fr = validScorecard({ success_rate_pct: 0, successful_runs: 0, issues_run: n });
-    const result = compare(fr, bl);
-    assert.equal(result.rate_assertion_skipped, true);
-    assert.equal(result.pass, true);
-  });
-
-  test("boundary: n = MIN_RUNS_FOR_RATE_ASSERTION applies assertion", () => {
-    const n = MIN_RUNS_FOR_RATE_ASSERTION;
-    const bl = validScorecard({ success_rate_pct: 100, successful_runs: n, issues_run: n });
-    const fr = validScorecard({ success_rate_pct: 0, successful_runs: 0, issues_run: n });
-    const result = compare(fr, bl);
-    assert.equal(result.rate_assertion_skipped, false);
-    assert.equal(result.pass, false);
-  });
-});
-
-// ---------------------------------------------------------------------------
-// Constants sanity checks
-// ---------------------------------------------------------------------------
-
-describe("exported constants are sane", () => {
-  test("MIN_RUNS is at least 3", () => {
-    assert.ok(MIN_RUNS >= 3);
-  });
-
-  test("MIN_RUNS_FOR_RATE_ASSERTION is greater than MIN_RUNS", () => {
-    assert.ok(MIN_RUNS_FOR_RATE_ASSERTION > MIN_RUNS);
-  });
-
-  test("REGRESSION_THRESHOLD_PP is between 1 and 20 inclusive", () => {
-    assert.ok(REGRESSION_THRESHOLD_PP >= 1);
-    assert.ok(REGRESSION_THRESHOLD_PP <= 20);
+  it("scorecard keys match documented schema shape", () => {
+    const sc = aggregate(makeRuns(5));
+    const expectedKeys = [
+      "corpus_version",
+      "spec_version",
+      "model",
+      "n_runs",
+      "n_success",
+      "n_failure",
+      "n_incomplete",
+      "one_shot_success_rate",
+      "wall_clock_ms",
+      "intervention",
+      "cost",
+    ];
+    for (const key of expectedKeys) {
+      assert.ok(Object.prototype.hasOwnProperty.call(sc, key), `missing key: ${key}`);
+    }
+    const wallKeys = ["mean", "median", "min", "max"];
+    for (const k of wallKeys) {
+      assert.ok(Object.prototype.hasOwnProperty.call(sc.wall_clock_ms, k), `missing wall_clock_ms.${k}`);
+    }
+    assert.ok(Object.prototype.hasOwnProperty.call(sc.intervention, "total"));
+    assert.ok(Object.prototype.hasOwnProperty.call(sc.intervention, "mean_per_run"));
   });
 });
