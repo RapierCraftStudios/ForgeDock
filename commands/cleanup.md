@@ -44,7 +44,7 @@ All `{GH_REPO}`, `{GH_FLAG}`, `{REPO_PATH}`, `{STAGING_BRANCH}`, `{PROJECT_BOARD
 
 | Input | Action |
 |-------|--------|
-| `labels` or empty | Fix stale/missing workflow labels on closed issues |
+| `labels` or empty | Fix stale/missing workflow labels on closed issues; detect OPEN issues stuck in intermediate states (Phase 1D) |
 | `orphans` | Close open issues whose PRs are already merged |
 | `branches` | Prune worktrees and remote branches for merged PRs |
 | `milestones` | Report milestones with 0 open issues (advisory — never closes) |
@@ -104,6 +104,46 @@ gh issue list {GH_FLAG} --state closed --limit 200 --json number,title,labels \
 ```
 
 These were closed outside the pipeline. Report count but don't fix (not necessarily wrong).
+
+### 1D: Detect stale OPEN issues in intermediate workflow states
+
+Open issues stuck in `workflow:building`, `workflow:in-review`, or `workflow:investigating` beyond a configurable threshold indicate a stalled agent. These are invisible to Phase 1A–1C (which only query closed issues).
+
+```bash
+# Configurable threshold — override by setting STALE_THRESHOLD_HOURS before invoking /cleanup
+STALE_THRESHOLD_HOURS=${STALE_THRESHOLD_HOURS:-48}
+
+# Compute cutoff datetime — GNU date (Linux) with BSD date (macOS) fallback
+CUTOFF=$(date -d "${STALE_THRESHOLD_HOURS} hours ago" +%Y-%m-%dT%H:%M:%SZ 2>/dev/null \
+  || date -v-${STALE_THRESHOLD_HOURS}H +%Y-%m-%dT%H:%M:%SZ 2>/dev/null \
+  || echo "")
+
+echo "=== Stale-Open Intermediate Issues (threshold: ${STALE_THRESHOLD_HOURS}h) ==="
+
+STALE_OPEN_COUNT=0
+
+for LABEL in "workflow:building" "workflow:in-review" "workflow:investigating"; do
+  ISSUES=$(gh issue list {GH_FLAG} \
+    --state open \
+    --label "$LABEL" \
+    --limit 100 \
+    --json number,title,updatedAt,labels \
+    --jq --arg threshold "$CUTOFF" --arg label "$LABEL" \
+    '[.[] | select($threshold == "" or .updatedAt < $threshold)] |
+     .[] | "#\(.number) — \(.title[:60]) [label: \($label)] [last update: \(.updatedAt[:10])] → resume: /work-on \(.number)"' \
+    2>/dev/null || echo "")
+
+  if [ -n "$ISSUES" ]; then
+    echo "$ISSUES"
+    COUNT=$(echo "$ISSUES" | grep -c '^#' 2>/dev/null || echo 0)
+    STALE_OPEN_COUNT=$((STALE_OPEN_COUNT + COUNT))
+  fi
+done
+
+echo "Total stale-open intermediate issues: $STALE_OPEN_COUNT"
+```
+
+These are **report-only** — no automatic action is taken. Use `/work-on <n>` (idempotent) to resume a stalled issue. Priority issues (P1/P2) should be actioned first.
 
 ---
 
@@ -319,6 +359,13 @@ fi
 | workflow:building → workflow:merged | {N} |
 | workflow:investigating → cleaned | {N} |
 | needs-validation removed | {N} |
+
+### Stale-Open Intermediate Issues (Phase 1D)
+| Issue | Label | Last Update | Action |
+|-------|-------|-------------|--------|
+| #{N} | workflow:X | YYYY-MM-DD | `/work-on {N}` to resume |
+
+*Total stale-open: {N} (threshold: {STALE_THRESHOLD_HOURS}h)*
 
 ### Orphaned Issues Closed
 | Issue | Merged PR | Action |
