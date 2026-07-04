@@ -1380,11 +1380,38 @@ Files that need changes:
 - [ ] Trace code path to verify issue
 - [ ] Check existing mitigations
 - [ ] Reproduce or construct proof-of-concept
+[BATCHABLE_ANNOTATION]
 ISSUE_EOF
 )" --json number --jq '.number')
 ```
 
 Labels: `review-finding` + `needs-validation` + priority (`priority:P1` CONFIRMED, `priority:P2` LIKELY, `priority:P3` POSSIBLE).
+
+**P3 batchable annotation** — <!-- Added: forge#1333 --> When priority resolves to `priority:P3` (POSSIBLE confidence), check whether the finding qualifies for batching. If the affected file does NOT touch a security or billing path, substitute `[BATCHABLE_ANNOTATION]` with the `<!-- FORGE:BATCHABLE -->` marker. This signals the orchestrator's Phase 1 batching rule that this finding can be grouped with other P3s in the same domain:
+
+```bash
+# Determine batchable eligibility for this finding
+FINDING_PRIORITY="{priority}"  # priority:P1 / priority:P2 / priority:P3
+BATCHABLE_ANNOTATION=""
+
+if [ "$FINDING_PRIORITY" = "priority:P3" ]; then
+  # Check for security/billing exclusions
+  IS_SECURITY_PATH=0
+  IS_BILLING_PATH=0
+  # Test affected file path
+  echo "$FINDING_FILE" | grep -qiE 'security|billing|payment|stripe|charge|invoice' && IS_SECURITY_PATH=1
+  echo "$FINDING_TITLE" | grep -qiE 'security|billing|payment|stripe|charge|invoice' && IS_BILLING_PATH=1
+
+  if [ "$IS_SECURITY_PATH" -eq 0 ] && [ "$IS_BILLING_PATH" -eq 0 ]; then
+    BATCHABLE_ANNOTATION="<!-- FORGE:BATCHABLE -->"
+    echo "INFO: P3 finding eligible for batching — appending FORGE:BATCHABLE annotation"
+  else
+    BATCHABLE_ANNOTATION=""
+    echo "INFO: P3 finding touches security/billing path — NOT batchable, keeping individual pipeline"
+  fi
+fi
+# When priority is P1 or P2: BATCHABLE_ANNOTATION stays empty (never batched)
+```
 
 **Add to project board:**
 ```bash

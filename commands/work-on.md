@@ -276,6 +276,35 @@ fi
 
 **Classify lane**: Milestone → feature lane (`milestone/{slug}`). No milestone → fast lane (`staging`).
 
+**Batch issue detection**: <!-- Added: forge#1333 --> If the issue body contains `<!-- FORGE:BATCH_MEMBERS -->`, this is a P3 batch issue. Set `IS_BATCH=true` and extract the member issue list:
+
+```bash
+IS_BATCH=0
+BATCH_MEMBERS=()
+
+BATCH_MEMBERS_BLOCK=$(gh issue view {NUMBER} {GH_FLAG} --json body --jq '.body' \
+  | sed -n '/<!-- FORGE:BATCH_MEMBERS -->/,/<!-- \/FORGE:BATCH_MEMBERS -->/p' 2>/dev/null || true)
+
+if [ -n "$BATCH_MEMBERS_BLOCK" ]; then
+  IS_BATCH=1
+  # Extract member issue numbers (- [ ] #NNN: title lines)
+  BATCH_MEMBERS=($(echo "$BATCH_MEMBERS_BLOCK" | grep -oP '(?<=- \[ \] #)\d+' || true))
+  echo "Batch issue detected — member issues: ${BATCH_MEMBERS[*]}"
+fi
+```
+
+**Batch issue pipeline rules** (when `IS_BATCH=true`):
+- Build phases execute exactly as normal (the batch issue body IS the spec for what to fix)
+- After successful merge, auto-close all member issues with a cross-reference:
+  ```bash
+  for MEMBER in "${BATCH_MEMBERS[@]}"; do
+    gh issue close "$MEMBER" {GH_FLAG} \
+      --comment "Resolved as part of batch PR #{PR_NUMBER} (#{ISSUE_NUMBER}). See batch issue for details."
+    gh issue edit "$MEMBER" {GH_FLAG} --add-label "workflow:merged" 2>/dev/null || true
+  done
+  ```
+- Member issues are closed in Phase 6 (after PR merge) — NOT before
+
 **Source branch for review-findings**: Parse `**Code branch**: \`{branch}\`` from body. Branch from there, not main.
 
 **Script resolution** — Use the following `resolve_script()` function whenever calling a pipeline script. It enforces the 4-level precedence hierarchy (see `devdocs/project/architecture.md → Script Precedence`):
