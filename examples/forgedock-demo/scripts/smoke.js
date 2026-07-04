@@ -48,8 +48,25 @@ async function main() {
   const unauth = await request(port, 'POST', '/notes', { json: { title: 'nope' } });
   assert.strictEqual(unauth.status, 401, 'POST without token returns 401');
 
+  const count = await request(port, 'GET', '/notes/count');
+  assert.strictEqual(typeof count.body.count, 'number', 'GET /notes/count returns a number');
+
+  const tags = await request(port, 'GET', '/notes/tags');
+  assert.ok(Array.isArray(tags.body.tags), 'GET /notes/tags returns an array');
+
+  const page = await request(port, 'GET', '/notes?limit=1');
+  assert.ok(page.body.notes.length <= 1, 'GET /notes?limit=1 returns at most one note');
+
+  const noteId = created.body.note.id;
+  const patched = await request(port, 'PATCH', `/notes/${noteId}`, {
+    token: 'demo-token',
+    json: { title: 'smoke (patched)' },
+  });
+  assert.strictEqual(patched.status, 200, 'PATCH with token returns 200');
+  assert.strictEqual(patched.body.note.title, 'smoke (patched)', 'PATCH updates the title');
+
   // eslint-disable-next-line no-console
-  console.log('SMOKE OK — health, list, create(auth), create(unauth) all pass');
+  console.log('SMOKE OK — health, list, create(auth), create(unauth), count, tags, pagination, patch all pass');
   server.close();
 }
 
