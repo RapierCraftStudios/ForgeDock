@@ -84,6 +84,41 @@ trust_level = "trusted"
 
 The installer does not modify global trust settings automatically.
 
+## Conformance Verification
+
+The Codex adapter produces and consumes the same FORGE annotation wire format as the Claude Code path. `scripts/conformance-check.mjs` validates annotation output from any producer (Claude Code, Codex, Cursor, or fixtures) against the FORGE Annotation Protocol v1.0 (`docs/spec/forge-protocol-v1.md`).
+
+### Running the check
+
+Pipe real or fixture-captured Codex-adapter-produced FORGE comments into the script:
+
+```bash
+# Validate a fixture file containing FORGE annotation blocks
+node scripts/conformance-check.mjs docs/spec/fixtures/codex-adapter-annotations.md
+
+# Validate live annotations from a merged PR (replace 1234 with the PR number)
+gh api repos/RapierCraftStudios/ForgeDock/issues/1234/comments \
+  --jq '[.[].body]' \
+  | node scripts/conformance-check.mjs -
+
+# Validate all comments on recent merged PRs (last 10)
+gh pr list -R RapierCraftStudios/ForgeDock --state merged --limit 10 --json number \
+  --jq '.[].number' | while read pr; do
+    gh api "repos/RapierCraftStudios/ForgeDock/issues/$pr/comments" \
+      --jq '[.[].body]'
+done | node scripts/conformance-check.mjs -
+```
+
+Exit code 0 = all annotations conform. Exit code 1 = violations found (see output for details). Unrecognized annotation types are tolerated per spec §7.2 (WARN, not FAIL).
+
+### Re-running when the adapter changes
+
+Run the conformance check any time `.agents/skills/` adapter files are modified or after a new release of the spec. Conformance gaps found must be documented as follow-up GitHub issues (findings become issues per repo convention), not silently patched inline.
+
+### Verified implementation claim
+
+The Codex adapter path (`.agents/skills/*/SKILL.md` + `commands/*.md`) is a proven second implementation of the FORGE Annotation Protocol. Both the Claude Code path and the Codex adapter path produce annotations that pass `scripts/conformance-check.mjs`. See `docs/spec/forge-protocol-v1.md` Section 11 for the vendor-neutrality acknowledgement.
+
 ## Usage Notes
 
 - Use the installed `forge` skill as the overview/router entrypoint.
