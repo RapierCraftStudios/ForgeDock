@@ -183,9 +183,11 @@ ISSUE_STATE=$(gh issue view {NUMBER} {GH_FLAG} --json state --jq '.state')
 gh issue comment {NUMBER} {GH_FLAG} --body "<!-- FORGE:PHASE:COMPLETE -->
 Phase complete. PR #{PR_NUMBER} merged to \`{PR_BASE}\`. ${REMAINING_AFTER} phase item(s) remain — leaving issue open for next pipeline iteration."
 
-# Update labels to reflect phase complete (not yet fully merged)
+# Update labels to reflect phase complete — remove current-phase labels and set next-phase label
+# so the router has a signal for which phase comes next (fixes: issue #1381)
 gh issue edit {NUMBER} {GH_FLAG} \
-  --remove-label "workflow:in-review,workflow:building,workflow:investigating" 2>/dev/null || true
+  --remove-label "workflow:in-review,workflow:building,workflow:investigating" \
+  --add-label "workflow:investigating" 2>/dev/null || true
 
 # EXIT — do not close, do not post trajectory, do not run C3–C6
 # Return CLOSE_RESULT: status: PHASE_COMPLETE to caller
