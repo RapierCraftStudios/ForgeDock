@@ -58,10 +58,63 @@ const COMMANDS_DIR = join(FORGE_HOME, "commands");
 // os.homedir() as the always-available fallback (no hard exit — see #744).
 const HOME = process.env.HOME || process.env.USERPROFILE || homedir();
 
-const TARGET_DIR = join(HOME, ".claude", "commands");
-const MANIFEST_PATH = join(HOME, ".claude", "forgedock", "copied-commands.json");
+// ---------------------------------------------------------------------------
+// Install-mode path resolution
+// ---------------------------------------------------------------------------
+// Default (no --global): project-scoped — write to <cwd>/.claude/
+// --global: global install — write to ~/.claude/ (legacy default behavior)
+//
+// uninstall/update/doctor auto-detect mode by checking both locations;
+// --global explicitly targets global even when project-local is also present.
+
+const GLOBAL_CLAUDE_DIR = join(HOME, ".claude");
+
+/**
+ * Resolve the install-mode target directories for the current invocation.
+ *
+ * @param {boolean} [global] - Override auto-detection with explicit mode.
+ *   true = global (~/.claude), false = project-scoped (<cwd>/.claude).
+ *   When omitted, resolves from GLOBAL_FLAG constant.
+ * @returns {{ targetDir: string, scriptsTargetDir: string, manifestPath: string, isGlobal: boolean }}
+ */
+function resolveInstallPaths(global) {
+  const useGlobal = global !== undefined ? global : GLOBAL_FLAG;
+  const claudeBase = useGlobal ? GLOBAL_CLAUDE_DIR : join(process.cwd(), ".claude");
+  return {
+    targetDir: join(claudeBase, "commands"),
+    scriptsTargetDir: join(claudeBase, "scripts"),
+    manifestPath: join(claudeBase, "forgedock", "copied-commands.json"),
+    isGlobal: useGlobal,
+  };
+}
+
+/**
+ * Auto-detect which install mode is present for the current working directory.
+ *
+ * Detection order (first match wins):
+ *   1. If --global flag is set: always use global paths.
+ *   2. If <cwd>/.claude/commands/ exists: project-scoped.
+ *   3. If ~/.claude/commands/ exists (global install): global.
+ *   4. Default to project-scoped (new install).
+ *
+ * Used by uninstall/update/doctor so they operate against whichever mode
+ * is actually installed without requiring the user to re-specify the flag.
+ */
+function detectInstallPaths() {
+  if (GLOBAL_FLAG) return resolveInstallPaths(true);
+  const projectClaude = join(process.cwd(), ".claude", "commands");
+  if (existsSync(projectClaude)) return resolveInstallPaths(false);
+  const globalClaude = join(GLOBAL_CLAUDE_DIR, "commands");
+  if (existsSync(globalClaude)) return resolveInstallPaths(true);
+  // No existing install detected — default to project-scoped (new install default)
+  return resolveInstallPaths(false);
+}
+
+// Module-level path constants resolved from GLOBAL_FLAG for install/init/journey.
+// uninstall/update/doctor use detectInstallPaths() at runtime to auto-detect.
+const { targetDir: TARGET_DIR, scriptsTargetDir: SCRIPTS_TARGET_DIR, manifestPath: MANIFEST_PATH } = resolveInstallPaths();
+
 const SCRIPTS_DIR = join(FORGE_HOME, "scripts");
-const SCRIPTS_TARGET_DIR = join(HOME, ".claude", "scripts");
 
 /**
  * Allowlist of pipeline-agent scripts that `uninstall` cleans up from
@@ -86,10 +139,13 @@ const PIPELINE_SCRIPTS = new Set([
 const rawArgs = process.argv.slice(2);
 const FLAGS = new Set(["--fast", "--manual", "--verbose", "--minimal"]);
 const flags = rawArgs.filter((a) => FLAGS.has(a));
-const positional = rawArgs.filter((a) => !FLAGS.has(a));
+// --global is parsed separately: it scopes install/uninstall/update/doctor to
+// ~/.claude (global) rather than <cwd>/.claude (project-scoped default).
+const GLOBAL_FLAG = rawArgs.includes("--global");
+const positional = rawArgs.filter((a) => !FLAGS.has(a) && a !== "--global");
 const command = positional[0] || "install";
-const cmdIdx = rawArgs.findIndex((a) => !FLAGS.has(a));
-const restArgs = cmdIdx === -1 ? [] : rawArgs.slice(cmdIdx + 1);
+const cmdIdx = rawArgs.findIndex((a) => !FLAGS.has(a) && a !== "--global");
+const restArgs = cmdIdx === -1 ? [] : rawArgs.slice(cmdIdx + 1).filter((a) => a !== "--global");
 
 // ---------------------------------------------------------------------------
 // SessionStart hook — settings.json helpers
@@ -506,7 +562,8 @@ function statusScreen(c) {
   const configured = existsSync(join(c.cwd, "forge.yaml"));
   c.stdout.write(`  directory   ${state}\n`);
   c.stdout.write(`  forge.yaml  ${configured ? "present" : "missing"}\n`);
-  c.stdout.write(`  commands    ${existsSync(TARGET_DIR) ? "installed at " + TARGET_DIR : "not installed"}\n`);
+  const { targetDir: statusTargetDir } = detectInstallPaths();
+  c.stdout.write(`  commands    ${existsSync(statusTargetDir) ? "installed at " + statusTargetDir : "not installed"}\n`);
   if (state === "managed-optedout") {
     c.stdout.write(`\n  ForgeDock is disabled (opted out) here. Re-enable: npx forgedock enable\n`);
   } else if (state === "unmanaged") {
@@ -581,6 +638,13 @@ async function uninstall() {
   console.log(`${BOLD}ForgeDock${RESET} — Removing pipeline commands`);
   console.log("");
 
+  // Auto-detect install mode (project-scoped vs global) so uninstall operates
+  // against the correct target without requiring --global to be re-specified.
+  const { targetDir, scriptsTargetDir, manifestPath, isGlobal } = detectInstallPaths();
+  const modeLabel = isGlobal ? "global (~/.claude)" : `project-scoped (${process.cwd()}/.claude)`;
+  console.log(`  Mode: ${modeLabel}`);
+  console.log("");
+
   const files = await findMarkdownFiles(COMMANDS_DIR);
   let removed = 0;
 
@@ -591,7 +655,7 @@ async function uninstall() {
   // installs that predate the manifest.
   let manifest = null;
   try {
-    manifest = JSON.parse(await readFile(MANIFEST_PATH, "utf-8"));
+    manifest = JSON.parse(await readFile(manifestPath, "utf-8"));
   } catch {
     manifest = null;
   }
@@ -602,7 +666,7 @@ async function uninstall() {
 
   for (const file of files) {
     const rel = relative(COMMANDS_DIR, file);
-    const target = join(TARGET_DIR, rel);
+    const target = join(targetDir, rel);
 
     try {
       const stats = await lstat(target);
@@ -640,7 +704,7 @@ async function uninstall() {
   // them — the manifest is the only record of ForgeDock's ownership over them.
   const manifestRels = Object.keys(manifestFiles);
   for (const rel of manifestRels) {
-    const target = join(TARGET_DIR, rel);
+    const target = join(targetDir, rel);
     try {
       const stats = await lstat(target);
       if (stats.isFile() && !stats.isSymbolicLink()) {
@@ -661,8 +725,8 @@ async function uninstall() {
   if (manifest && manifestRels.length > 0) {
     manifest.files = {};
     try {
-      await mkdir(dirname(MANIFEST_PATH), { recursive: true });
-      await writeFile(MANIFEST_PATH, JSON.stringify(manifest, null, 2) + "\n", "utf-8");
+      await mkdir(dirname(manifestPath), { recursive: true });
+      await writeFile(manifestPath, JSON.stringify(manifest, null, 2) + "\n", "utf-8");
     } catch {
       // Best-effort — a failed manifest write is non-fatal
     }
@@ -672,13 +736,13 @@ async function uninstall() {
   console.log(`Done. Removed: ${removed} commands.`);
   console.log("");
 
-  // Remove scripts installed by ForgeDock from ~/.claude/scripts/
+  // Remove scripts installed by ForgeDock from the detected scripts target dir
   const scriptFiles = await findScriptFiles(SCRIPTS_DIR);
   let scriptsRemoved = 0;
 
   for (const file of scriptFiles) {
     const rel = relative(SCRIPTS_DIR, file);
-    const target = join(SCRIPTS_TARGET_DIR, rel);
+    const target = join(scriptsTargetDir, rel);
 
     try {
       const stats = await lstat(target);
@@ -831,6 +895,11 @@ async function update() {
   console.log("");
   console.log(`${BOLD}ForgeDock${RESET} — Checking for updates`);
   console.log("");
+
+  // Auto-detect install mode so update re-links to the correct target.
+  const { isGlobal: updateIsGlobal } = detectInstallPaths();
+  const updateModeLabel = updateIsGlobal ? "global (~/.claude)" : `project-scoped (${process.cwd()}/.claude)`;
+  console.log(`  Mode: ${updateModeLabel}`);
 
   // Check if installed via npm (no .git directory) or via git clone
   const gitDir = join(FORGE_HOME, ".git");
@@ -1033,6 +1102,12 @@ async function labelsSetup(repo) {
 async function doctor() {
   console.log("");
   console.log(`${BOLD}ForgeDock Doctor${RESET} — Installation Health Check`);
+  console.log("");
+
+  // Auto-detect install mode (project-scoped vs global).
+  const { targetDir: TARGET_DIR, isGlobal: doctorIsGlobal } = detectInstallPaths();
+  const modeLabel = doctorIsGlobal ? "global (~/.claude)" : `project-scoped (${process.cwd()}/.claude)`;
+  console.log(`  Mode: ${modeLabel}`);
   console.log("");
 
   let failures = 0;
@@ -1578,7 +1653,8 @@ function help() {
   const commands = [
     ["Command", "Description"],
     ["npx forgedock", "Guided setup: install commands + configure repo (default)"],
-    ["npx forgedock install", "Install commands"],
+    ["npx forgedock install", "Install commands to <cwd>/.claude/ (project-scoped, default)"],
+    ["npx forgedock install --global", "Install commands to ~/.claude/ (global install, opt-in)"],
     ["npx forgedock init", "Generate forge.yaml config for your project"],
     ["npx forgedock init --minimal", "Generate a minimal forge.yaml (required sections only)"],
     ["npx forgedock enable [dir]", "Activate ForgeDock in a directory"],
@@ -1590,13 +1666,14 @@ function help() {
     ["npx forgedock demo", "Set up a risk-free demo repo and print next steps"],
     ["npx forgedock labels [setup] [--repo owner/repo]", "Bootstrap ForgeDock-managed labels on a GitHub repo (idempotent)"],
     ["npx forgedock watch [--repo owner/repo]", "Live per-agent orchestration view (Ctrl+C to exit)"],
-    ["npx forgedock doctor", "Check installation health"],
-    ["npx forgedock update", "Pull latest & reinstall"],
-    ["npx forgedock uninstall", "Remove commands"],
+    ["npx forgedock doctor", "Check installation health (auto-detects project or global)"],
+    ["npx forgedock update", "Pull latest & reinstall (auto-detects project or global)"],
+    ["npx forgedock uninstall", "Remove commands (auto-detects project or global)"],
     ["npx forgedock help", "Show this help"],
   ];
   const flagRows = [
     ["Flag", "Description"],
+    ["--global", "Target ~/.claude/ instead of <cwd>/.claude/ for install/uninstall/update/doctor"],
     ["--fast", "Skip animation/motion"],
     ["--manual", "Plain text prompts instead of the review screen (init)"],
     ["--verbose", "Show detection sources for every field (init)"],
