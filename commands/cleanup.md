@@ -49,6 +49,7 @@ All `{GH_REPO}`, `{GH_FLAG}`, `{REPO_PATH}`, `{STAGING_BRANCH}`, `{PROJECT_BOARD
 | `branches` | Prune worktrees and remote branches for merged PRs |
 | `milestones` | Report milestones with 0 open issues (advisory — never closes) |
 | `board` | Sync closed issues to Project board with correct terminal state |
+| `batch-p3` | Sweep: fold stale unbatched P3 review findings into domain-grouped batch issues |
 | `all` | All of the above, in order |
 
 ---
@@ -318,6 +319,111 @@ Do NOT call `gh api ... -X PATCH -f state=closed` on any milestone. This phase i
 
 ---
 
+## Phase 4B: P3 Batch Sweep (if `batch-p3` or `all`)
+
+<!-- Added: forge#1333 -->
+
+**Purpose**: Fold stale unbatched P3 review findings into domain-grouped batch issues. Reduces pipeline overhead from individual per-finding full-pipeline runs.
+
+**Skip if**: Input is not `batch-p3` and not `all`.
+
+### Step 4B.1: Fetch open batchable P3 findings
+
+```bash
+# Find all open P3 review findings that carry the FORGE:BATCHABLE annotation
+# and are not already members of a batch (no "batch" label)
+UNBATCHED_P3=$(gh issue list {GH_FLAG} \
+  --state open \
+  --label "review-finding,priority:P3" \
+  --limit 500 \
+  --json number,title,body,labels,createdAt \
+  --jq '.[] | select(.body | test("<!-- FORGE:BATCHABLE -->"))
+         | select(([.labels[].name] | any(. == "batch")) | not)
+         | select(([.labels[].name] | any(. == "security" or . == "billing")) | not)
+         | select((.title | test("security|billing|payment|stripe"; "i")) | not)')
+
+echo "Unbatched batchable P3 findings: $(echo "$UNBATCHED_P3" | jq -s 'length')"
+```
+
+### Step 4B.2: Group by domain
+
+For each finding, extract the domain from the first affected file path under `## Affected Files`:
+
+```bash
+# Domain = top-level directory of the first affected file
+# e.g., "services/api/auth/login.py" → "services/api/auth"
+#        "commands/review-pr.md"     → "commands"
+# Exclude findings where the domain contains "billing" or "security"
+
+# Group findings by domain, track oldest creation timestamp per group
+declare -A DOMAIN_ISSUES
+declare -A DOMAIN_OLDEST
+
+echo "$UNBATCHED_P3" | jq -c '.[]' | while read -r issue; do
+  NUM=$(echo "$issue" | jq -r '.number')
+  CREATED=$(echo "$issue" | jq -r '.createdAt')
+  BODY=$(echo "$issue" | jq -r '.body')
+
+  # Extract first affected file path from body
+  FIRST_FILE=$(echo "$BODY" | sed -n '/^## Affected Files/,/^## /p' | grep -oP '`[^`]+`' | head -1 | tr -d '`')
+  if [ -z "$FIRST_FILE" ]; then
+    FIRST_FILE=$(echo "$BODY" | grep -oP '(?<=\`)[^`]+\.(?:py|ts|tsx|js|go|rs|java|sh|md)(?=\`)' | head -1 || echo "unknown")
+  fi
+  DOMAIN=$(echo "$FIRST_FILE" | cut -d/ -f1,2,3 | sed 's|/[^/]*$||')
+  [ -z "$DOMAIN" ] && DOMAIN="general"
+
+  echo "${NUM}:${DOMAIN}:${CREATED}"
+done
+```
+
+### Step 4B.3: Apply batching threshold
+
+For each domain group:
+- **Trigger**: 5+ unbatched batchable P3 findings in the domain, **OR** the oldest finding in the domain is > 72 hours old
+- **No trigger**: fewer than 5 findings AND none older than 72 hours → skip (no batch created)
+
+```bash
+NOW_EPOCH=$(date +%s)
+HOURS_72=$((72 * 3600))
+
+# For each domain group that meets the threshold, create a batch issue
+# (max 10 members per batch — if more, create multiple batches of ≤ 10 each)
+
+# Exclude domains with "security" or "billing" in the domain path
+echo "$DOMAIN_ISSUES" | while IFS=: read -r domain issue_list; do
+  echo "$domain" | grep -qiE 'security|billing' && continue
+
+  COUNT=$(echo "$issue_list" | tr ',' '\n' | wc -l)
+  OLDEST_EPOCH=$(echo "$DOMAIN_OLDEST[$domain]" | date -d "$..." +%s 2>/dev/null || echo "$NOW_EPOCH")
+  AGE_SECS=$((NOW_EPOCH - OLDEST_EPOCH))
+
+  if [ "$COUNT" -ge 5 ] || [ "$AGE_SECS" -ge "$HOURS_72" ]; then
+    echo "Batching $COUNT P3 findings in domain: ${domain}"
+    # Create batch issues (in chunks of ≤ 10)
+    # See orchestrate.md Phase 1 for the batch creation template
+  fi
+done
+```
+
+**Batch creation** uses the same template as `orchestrate.md Phase 1 → P3 Review-Finding Batching`. After creating the batch issue, add the `batch` label to each member issue to prevent re-batching on the next sweep.
+
+### Step 4B.4: Report
+
+```
+## P3 Batch Sweep
+
+| Domain | Unbatched P3s | Threshold Met | Action |
+|--------|--------------|---------------|--------|
+| {domain} | {N} | ≥5 issues | Created batch #{NUM} ({M} members) |
+| {domain} | {N} | Oldest > 72h | Created batch #{NUM} ({M} members) |
+| {domain} | {N} | Below threshold | No action |
+
+Total batch issues created: {N}
+Total P3 findings batched: {N}
+```
+
+---
+
 ## Phase 5: Sync Project Board (if `board` or `all`)
 
 **Skip if `project_board` is not configured** — check resolved vars before proceeding:
@@ -392,4 +498,10 @@ fi
 
 ### Still Missing Workflow Label
 {N} closed issues have no workflow label (closed outside pipeline — no action needed)
+
+### P3 Batch Sweep Results
+| Domain | Unbatched P3s | Action |
+|--------|--------------|--------|
+| {domain} | {N} | Created batch #{NUM} with {M} members |
+| {domain} | {N} | Below threshold — no action (< 5 findings, none > 72h) |
 ```

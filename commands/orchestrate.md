@@ -121,6 +121,83 @@ Remove issues that should NOT be worked on:
 
 If a `workflow:decomposed` issue is found, automatically expand it to its open sub-issues instead.
 
+### P3 Review-Finding Batching (deterministic grouping rule)
+
+<!-- Added: forge#1333 -->
+
+Before finalizing the issue set, apply the P3 batching rule to reduce full-pipeline overhead on low-severity review findings.
+
+**Trigger conditions** (BOTH must be true to batch):
+1. The issue has labels `review-finding` + `priority:P3`
+2. The issue has `<!-- FORGE:BATCHABLE -->` in its body
+
+**Safety exclusions — NEVER batch** (override all trigger conditions):
+- Issue body contains the word "security" or "billing" anywhere in the title or `## Problem` section
+- Issue has a `security` label
+- Issue has a `billing` label
+
+**Grouping algorithm:**
+```bash
+# Fetch all open batchable P3 issues
+BATCHABLE_P3=$(gh issue list {GH_FLAG} \
+  --state open \
+  --label "review-finding,priority:P3" \
+  --limit 500 \
+  --json number,title,body,labels \
+  --jq '.[] | select(.body | test("<!-- FORGE:BATCHABLE -->"))
+         | select((.title | test("security|billing"; "i")) | not)
+         | select(.body | test("## Problem[\\s\\S]{0,500}(security|billing)"; "i") | not)
+         | select(([.labels[].name] | any(. == "security" or . == "billing")) | not)')
+
+# Group by domain (file-cluster derived from the affected file path in each issue body)
+# Domain is the top-level directory of the first affected file listed under "## Affected Files"
+# e.g., "services/api/auth/login.py" → domain "services/api/auth"
+#        "web/src/app/billing/"     → EXCLUDED (billing path)
+#        "commands/review-pr.md"    → domain "commands"
+```
+
+**Batch creation rule**: When 5+ batchable P3 issues share the same domain, OR when the oldest batchable P3 in a domain exceeds 72 hours, create a single batch issue grouping those issues:
+
+```bash
+BATCH_ISSUE_NUM=$(gh issue create {GH_FLAG} \
+  --title "fix(batch): P3 review findings — {DOMAIN} domain (batch #{BATCH_N})" \
+  --label "review-finding,priority:P3,batch" \
+  --body "$(cat <<'BATCH_EOF'
+## Problem
+
+Batch of P3 review findings in the **{DOMAIN}** domain, grouped to reduce per-finding pipeline overhead.
+
+## Member Findings
+
+<!-- FORGE:BATCH_MEMBERS -->
+{for each member issue: "- [ ] #{NUM}: {TITLE}"}
+<!-- /FORGE:BATCH_MEMBERS -->
+
+## Acceptance Criteria
+
+- [ ] All member findings addressed or closed as false-positive
+- [ ] Member issues auto-closed with reference to this batch PR on merge
+- [ ] No security or billing paths touched (validated before batching)
+
+## Context
+
+**Batch policy**: 5+ open P3 findings in the same domain, or oldest > 72h.
+**Member issues**: #{N1}, #{N2}, #{N3}, ...
+
+<!-- FORGE:BATCHABLE -->
+BATCH_EOF
+)")
+```
+
+**Replace member issues with the batch issue** in the resolved issue set. Member issues are NOT individually dispatched to `/work-on` — the batch issue is the single pipeline unit.
+
+**Important limits**:
+- Max 10 members per batch issue — if more than 10 batchable P3s exist in a domain, create multiple batch issues of ≤ 10 each
+- P1 and P2 issues are NEVER batched — they keep the standard one-issue-one-PR path
+- Batch issues themselves are never nested inside other batch issues
+
+If fewer than 5 batchable P3 findings exist in any domain AND none exceed 72h, skip batch creation entirely — individual P3s run through the standard pipeline.
+
 ### CRITICAL: No duplicate detection at orchestrator level
 
 **The orchestrator NEVER closes, merges, or deduplicates issues.** Even if two issues look like duplicates (similar titles, same error message, same symptoms), they may target different code paths, different ORM objects, or different failure modes. Only a `/work-on` investigation agent — after reading the actual code — can determine whether an issue is truly a duplicate.
