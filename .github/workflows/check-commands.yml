@@ -6,8 +6,10 @@ on:
       - 'commands/**'
       - 'docs/FORGE-PROTOCOL.md'
       - 'docs/WORKFLOW.md'
+      - 'docs/site/command-reference.md'
       - 'scripts/check-native-conflicts.sh'
       - 'scripts/check-protocol-restatements.sh'
+      - 'scripts/check-command-docs-drift.sh'
   push:
     branches:
       - staging
@@ -16,8 +18,10 @@ on:
       - 'commands/**'
       - 'docs/FORGE-PROTOCOL.md'
       - 'docs/WORKFLOW.md'
+      - 'docs/site/command-reference.md'
       - 'scripts/check-native-conflicts.sh'
       - 'scripts/check-protocol-restatements.sh'
+      - 'scripts/check-command-docs-drift.sh'
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.sha }}
@@ -43,6 +47,16 @@ jobs:
 
       - name: Check for FORGE protocol restatements in commands/
         run: bash scripts/check-protocol-restatements.sh commands/ docs/
+
+  command-docs-drift:
+    name: Command / docs drift check
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Check that every installable spec is documented and every reference section has a spec
+        run: bash scripts/check-command-docs-drift.sh commands/ docs/site/command-reference.md
 
   banned-token-lint:
     name: Banned token lint
