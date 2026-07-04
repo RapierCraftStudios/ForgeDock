@@ -1190,7 +1190,7 @@ Agent(
 - If the issue is INVALID after investigation, close it with a comment explaining why
 - If you hit merge conflicts or blockers, post a comment on the issue and STOP — do not force anything
 - Do not interact with the user — you are running autonomously in the background
-- **NEVER ask the user questions** — you are a background agent. If review finds issues, auto-fix simple ones and proceed. For complex findings, merge anyway and create follow-up issues.
+- **NEVER ask the user questions** — you are a background agent. If review finds issues, auto-fix simple ones and proceed. For complex findings on **low-risk domains**, merge anyway and create follow-up issues. For complex findings on **high-risk domains** (AUTH, BILLING, DATABASE, or any domain tagged as security-critical in Step 3B), add the `needs-human` label and stop — do NOT merge. High-risk `needs-human` halts are surfaced as `⚠ Blocked` in the Phase 5 completion report.
 
 **LABEL-STATE LOOP CONTRACT — enforce after EVERY Skill return**:
 After EVERY `Skill(skill='work-on', ...)` call returns, immediately check the issue's current workflow label:
@@ -1869,7 +1869,7 @@ The context-gathering phase can fetch this index to discover all investigation G
 - If the issue is INVALID after investigation, close it with a comment explaining why
 - If you hit merge conflicts or blockers, post a comment on the issue and STOP — do not force anything
 - Do not interact with the user — you are running autonomously in the background
-- **NEVER ask the user questions** — you are a background agent. If review finds issues, auto-fix simple ones and proceed. For complex findings, merge anyway and create follow-up issues.
+- **NEVER ask the user questions** — you are a background agent. If review finds issues, auto-fix simple ones and proceed. For complex findings on **low-risk domains**, merge anyway and create follow-up issues. For complex findings on **high-risk domains** (AUTH, BILLING, DATABASE, or any domain tagged as security-critical in Step 3B), add the `needs-human` label and stop — do NOT merge. High-risk `needs-human` halts are surfaced as `⚠ Blocked` in the Phase 5 completion report.
 
 **LABEL-STATE LOOP CONTRACT — enforce after EVERY Skill return**:
 After EVERY \`Skill(skill='work-on', ...)\` call returns, immediately check the issue's current workflow label:
