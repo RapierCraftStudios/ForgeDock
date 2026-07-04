@@ -1,6 +1,6 @@
-import { describe, it } from "node:test";
+import { describe, it, mock } from "node:test";
 import assert from "node:assert/strict";
-import { scanStalls } from "../engine-cli.mjs";
+import { scanStalls, resumeStalledFromCli } from "../engine-cli.mjs";
 
 describe("scanStalls", () => {
   it("flags issues whose lease expired and state is non-terminal", () => {

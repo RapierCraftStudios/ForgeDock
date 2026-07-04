@@ -39,6 +39,25 @@ If `forge.yaml` is missing: stop and tell the user to run `npx forgedock init` t
 
 Check `$ARGUMENTS`:
 
+- **`--all-stalled`** (fleet recovery mode): shell out to `npx forgedock resume-stalled` to scan all in-flight issues for expired leases and re-dispatch them. This delegates to the durable engine's `scanStalls` for ground-truth stall detection. Add `--dry-run` if only a report is needed. Then STOP — fleet recovery is complete.
+
+```bash
+# Fleet recovery mode — delegate to the engine's resume-stalled CLI
+if echo "$ARGUMENTS" | grep -q -- "--all-stalled"; then
+    DRY_RUN_FLAG=""
+    if echo "$ARGUMENTS" | grep -q -- "--dry-run"; then
+        DRY_RUN_FLAG="--dry-run"
+    fi
+    echo "Fleet stall recovery: scanning all in-flight issues for expired leases…"
+    npx forgedock resume-stalled $DRY_RUN_FLAG
+    echo ""
+    echo "Fleet recovery complete. To resume a single issue: /pipeline-resume <issue-number>"
+    # STOP — fleet recovery does not fall through to single-issue resume.
+fi
+```
+
+If `--all-stalled` was not specified, continue with single-issue resume:
+
 - **Explicit issue number** (e.g., `610`, `#610`): strip `#`, set `TARGET_NUMBER={number}`, skip to Phase 2.
 - **Empty**: proceed with auto-detection below.
 
