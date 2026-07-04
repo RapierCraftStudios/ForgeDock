@@ -504,6 +504,91 @@ describe("getToolHandlers", () => {
       else process.env.FORGEDOCK_BASH_TIMEOUT = orig;
     }
   });
+
+  // Regression: maxBuffer overflow must surface a buffer-truncation message
+  // and the partial captured output — NOT "Command failed to start" (issue
+  // #1241). Before the fix, spawnSync's ENOBUFS error was caught by the
+  // generic `if (result.error)` guard, which discarded stdout/stderr and
+  // reported a misleading spawn-failure message.
+  it("run_bash reports buffer overflow with truncation message, not spawn failure (issue #1241)", () => {
+    const origBuf = process.env.FORGEDOCK_MAX_BUFFER_BYTES;
+    // Set a 100-byte maxBuffer so any command producing >100 bytes triggers
+    // ENOBUFS without generating large output in the test suite.
+    process.env.FORGEDOCK_MAX_BUFFER_BYTES = "100";
+    try {
+      const handlers = getToolHandlers(os.tmpdir());
+      // Produce 200 bytes of output — guaranteed to exceed the 100-byte limit.
+      assert.throws(
+        () =>
+          handlers.run_bash({
+            command: "node -e \"process.stdout.write('x'.repeat(200))\"",
+          }),
+        (err) => {
+          // Must name the buffer limit, not the spawn mechanism.
+          assert.match(
+            err.message,
+            /buffer limit/i,
+            `Expected 'buffer limit' in error message — got: ${err.message}`,
+          );
+          assert.doesNotMatch(
+            err.message,
+            /failed to start/i,
+            `Must NOT say 'failed to start' for a buffer overflow — got: ${err.message}`,
+          );
+          // Partial output must be surfaced (spawnSync captures bytes up to
+          // the limit before setting result.error).
+          assert.match(
+            err.message,
+            /[xX]+/,
+            `Expected partial stdout in error message — got: ${err.message}`,
+          );
+          return true;
+        },
+        "Expected run_bash to throw on maxBuffer overflow",
+      );
+    } finally {
+      if (origBuf === undefined) delete process.env.FORGEDOCK_MAX_BUFFER_BYTES;
+      else process.env.FORGEDOCK_MAX_BUFFER_BYTES = origBuf;
+    }
+  });
+
+  // Verify that genuine spawn failures (ENOENT — shell binary not found) still
+  // produce the original "failed to start" error message and are not
+  // mistakenly treated as buffer overflows.
+  //
+  // NOTE: run_bash uses `shell: shell || true`, so bash always interprets
+  // commands — a nonexistent command name produces exit 127 (not ENOENT).
+  // To trigger a real spawnSync ENOENT we must point FORGEDOCK_SHELL at a
+  // path that does not exist; spawnSync then cannot exec the shell itself.
+  it("run_bash still reports spawn failure (ENOENT) as 'failed to start' (issue #1241)", () => {
+    const origShell = process.env.FORGEDOCK_SHELL;
+    // Point to a shell binary that definitely does not exist so spawnSync
+    // itself fails with ENOENT rather than the child returning exit 127.
+    process.env.FORGEDOCK_SHELL = "/nonexistent/shell/forgedock_test";
+    try {
+      const handlers = getToolHandlers(os.tmpdir());
+      assert.throws(
+        () => handlers.run_bash({ command: "echo hi" }),
+        (err) => {
+          assert.match(
+            err.message,
+            /failed to start/i,
+            `Expected 'failed to start' for ENOENT — got: ${err.message}`,
+          );
+          assert.doesNotMatch(
+            err.message,
+            /buffer limit/i,
+            `ENOENT must NOT be reported as a buffer overflow — got: ${err.message}`,
+          );
+          return true;
+        },
+        "Expected run_bash to throw on ENOENT (nonexistent shell)",
+      );
+    } finally {
+      if (origShell === undefined) delete process.env.FORGEDOCK_SHELL;
+      else process.env.FORGEDOCK_SHELL = origShell;
+    }
+  });
 });
 
 // ---------------------------------------------------------------------------
