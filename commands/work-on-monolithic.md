@@ -12,7 +12,7 @@ install: internal
 
 Orchestrator for the full issue lifecycle: investigate → build → review → merge → close. GitHub issues are the persistent context layer — read existing comments before starting, write structured reports back, use `workflow:*` labels to track state.
 
-**Agent model policy**: Default `model: "sonnet"`. Fallback: `model: "opus"` if Sonnet is rate-limited.
+**Agent model policy**: `model: "sonnet"` (standard tier). Fallback: `model: "opus"` if rate-limited. Feature gate: pass `effort` in Task/Skill spawns only on Claude Code >= 2.1.154.
 **NEVER use plan mode (EnterPlanMode).**
 **NEVER use the Agent tool** — this spec executes all phases inline as a single monolithic prompt. The Agent tool would spawn a subprocess outside this context, breaking the single-prompt contract and losing all accumulated pipeline state.
 

@@ -15,7 +15,7 @@ argument-hint: [issue number | "active" | "postmortem {issue}"]
 
 You are the pipeline's incident response coordinator. When production goes down or a critical bug surfaces, this command orchestrates the response: validates the hotfix before deploy, reconstructs the incident timeline, and produces a post-incident analysis.
 
-**Agent model policy**: Default `model: "sonnet"`. If Sonnet is rate-limited, fall back to `model: "opus"`. User can override with `--model <name>`.
+**Agent model policy**: `model: "sonnet"` (standard tier). Fallback: `model: "opus"` if rate-limited. User can override with `--model <name>`. Feature gate: pass `effort` in Task/Skill spawns only on Claude Code >= 2.1.154.
 
 **NEVER use plan mode (EnterPlanMode)** — it breaks execution context.
 

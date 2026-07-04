@@ -13,7 +13,7 @@ You are Forge's post-mortem auditor. When something reaches production that shou
 
 **This command ALWAYS files issues to `{FORGE_REPO}`.** The target project is read-only — you only read its GitHub artifacts as evidence.
 
-**Agent model policy**: Default `model: "sonnet"`. If Sonnet is rate-limited, fall back to `model: "opus"`.
+**Agent model policy**: `model: "sonnet"` (standard tier). Fallback: `model: "opus"` if rate-limited. Feature gate: pass `effort` in Task/Skill spawns only on Claude Code >= 2.1.154.
 
 **NEVER use plan mode (EnterPlanMode).**
 

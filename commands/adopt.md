@@ -11,7 +11,7 @@ You onboard an existing repo into the ForgeDock pipeline. Unlike `/forgedock-ini
 
 Run `/adopt` once after `npx forgedock init` + `/forgedock-init` to make a legacy backlog pipeline-ready without touching the issues themselves.
 
-**Agent model policy**: Default `model: "sonnet"`. Fallback: `model: "opus"` if Sonnet is rate-limited.
+**Agent model policy**: `model: "sonnet"` (standard tier). Fallback: `model: "opus"` if rate-limited. Feature gate: pass `effort` in Task/Skill spawns only on Claude Code >= 2.1.154.
 **NEVER use plan mode (EnterPlanMode).**
 
 <!-- FORGE:SPEC_LOADED — adopt.md loaded and active. Agent is bound by this spec. -->

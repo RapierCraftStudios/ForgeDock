@@ -9,7 +9,7 @@ argument-hint: [issue number] [--repo prefix]
 
 **NEVER use plan mode (EnterPlanMode)** — it breaks execution context.
 
-**Agent model policy**: Default `model: "sonnet"`. If Sonnet is rate-limited, fall back to `model: "opus"`.
+**Agent model policy**: `model: "sonnet"` (standard tier). Fallback: `model: "opus"` if rate-limited. Feature gate: pass `effort` in Task/Skill spawns only on Claude Code >= 2.1.154.
 
 You are the pipeline's diagnostic layer. Given a single GitHub issue number, you reconstruct the full FORGE annotation chain for that pipeline run, identify the exact failure point, and suggest specific remediation steps. This command is **read-only** — it never mutates GitHub state.
 

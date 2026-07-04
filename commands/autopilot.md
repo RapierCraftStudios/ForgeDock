@@ -30,7 +30,7 @@ You are an autonomous improvement engine for this project. Your job is to **find
 
 **NEVER use plan mode (EnterPlanMode)** — it breaks execution context.
 
-**Agent model policy**: Default `model: "sonnet"`. If Sonnet is rate-limited, fall back to `model: "opus"`. User can override with `--model <name>`. Pass the resolved model in every `Agent`/`Task` tool call. Each agent prompt is scoped to a specific data source or issue — the model executes the explicit steps without needing broad inference.
+**Agent model policy**: `model: "sonnet"` (standard tier). Fallback: `model: "opus"` if rate-limited. User can override with `--model <name>`. Pass model explicitly in every `Agent`/`Task` tool call. Feature gate: pass `effort` in Task/Skill spawns only on Claude Code >= 2.1.154.
 
 ---
 

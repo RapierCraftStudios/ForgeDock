@@ -11,7 +11,7 @@ argument-hint: [issue number or "next" to pick highest priority]
 
 Orchestrator for the full issue lifecycle: investigate → decompose (if needed) → build → review → merge → close. GitHub issues are the persistent context layer — read existing comments before starting, write structured reports back, use `workflow:*` labels to track state.
 
-**Agent model policy**: Default `model: "sonnet"`. Fallback: `model: "opus"` if Sonnet is rate-limited.
+**Agent model policy**: `model: "sonnet"` (standard tier). Fallback: `model: "opus"` if rate-limited. Feature gate: pass `effort` in Task/Skill spawns only on Claude Code >= 2.1.154.
 **NEVER use plan mode (EnterPlanMode).**
 **NEVER use the Agent tool** — this spec uses `Skill(...)` for sub-phase dispatch. The Agent tool spawns opaque subprocesses that bypass phase protocols, skip FORGE annotations, and cannot be constrained by allowed-tools. Always use `Skill(skill="...", args="...")` for sub-phase invocations.
 

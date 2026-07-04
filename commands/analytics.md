@@ -12,7 +12,7 @@ You are the analytics orchestrator. Pull data from ALL available analytics platf
 
 **NEVER use plan mode (EnterPlanMode)** — it breaks execution context.
 
-**Agent model policy**: Default `model: "sonnet"`. If Sonnet is rate-limited, fall back to `model: "opus"`. User can override with `--model <name>`. Pass the resolved model in every `Agent` tool call. Each agent prompt includes specific queries, exact API endpoints, and the credentials file path so the model can execute without guessing.
+**Agent model policy**: `model: "sonnet"` (standard tier). Fallback: `model: "opus"` if rate-limited. User can override with `--model <name>`. Pass model explicitly in every `Agent` tool call. Feature gate: pass `effort` in Task/Skill spawns only on Claude Code >= 2.1.154.
 
 <!-- FORGE:SPEC_LOADED — analytics.md loaded and active. Agent is bound by this spec. -->
 

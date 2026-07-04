@@ -23,7 +23,7 @@ You are the top-level orchestrator. Your job is to take a batch of issues, plan 
 
 **You have access to ALL tools** — Agent tool (critical), Task tool, Skill tool, Bash, everything. Use the Agent tool aggressively to parallelize work.
 
-**Agent model policy**: Default `model: "sonnet"`. If Sonnet is rate-limited, fall back to `model: "opus"`. User can override with `--model <name>`.
+**Agent model policy**: `model: "haiku"`, `effort: low` (mechanical — dispatch bookkeeping, lane routing, classification). Fallback: `model: "sonnet"` if rate-limited. User can override with `--model <name>`. Feature gate: pass `effort` in Task/Skill spawns only on Claude Code >= 2.1.154.
 **NEVER use plan mode (EnterPlanMode).**
 
 <!-- FORGE:SPEC_LOADED — orchestrate.md loaded and active. Agent is bound by HARD RULES above. -->
