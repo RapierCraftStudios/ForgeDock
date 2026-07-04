@@ -28,7 +28,14 @@ import {
   manualLowConfidenceKeys,
 } from "./journey.mjs";
 import { removeSessionStartHook } from "./settings-hook.mjs";
-import { resolveState, setOptOut, clearNudgeSeen } from "./registry.mjs";
+import {
+  resolveState,
+  setOptOut,
+  clearNudgeSeen,
+  detectClaudeVersion,
+  loadBreakpoints,
+  hasFeature,
+} from "./registry.mjs";
 import { renderMark, ember } from "./cinema.mjs";
 import {
   renderLogo,
@@ -549,6 +556,10 @@ function ctx() {
   c.forgeHome = FORGE_HOME;
   c.home = HOME;
   c.includeExtras = flags.includes("--extras");
+  // Detect installed Claude Code version for version-gated install paths (#1252).
+  // Fail-open: null means version is unknown; callers must handle gracefully.
+  c.claudeVersion = detectClaudeVersion();
+  c.breakpoints = loadBreakpoints(FORGE_HOME);
   return c;
 }
 
@@ -2007,6 +2018,24 @@ let exitCode = 0;
 switch (command) {
   case "install": {
     const c = ctx();
+    // Version-gated install path (#1252): detect Claude Code version and advise
+    // on features available or missing. Fail-open — null version skips checks.
+    if (c.claudeVersion) {
+      // Gate: effort levels require v2.1.154+
+      if (!hasFeature(c.breakpoints, "effort_levels", c.claudeVersion)) {
+        process.stderr.write(
+          `  ${YELLOW}note${RESET}  Claude Code v${c.claudeVersion} detected — effort-level frontmatter requires v2.1.154+. ` +
+          `Some orchestration features will use fallback mode.\n`
+        );
+      }
+      // Gate: tool permission rules require v2.1.178+
+      if (!hasFeature(c.breakpoints, "tool_param_value_permission_rules", c.claudeVersion)) {
+        process.stderr.write(
+          `  ${YELLOW}note${RESET}  Claude Code v${c.claudeVersion} detected — Tool(param:value) permission rules require v2.1.178+. ` +
+          `Hook-based enforcement (#1250) will not be installed.\n`
+        );
+      }
+    }
     if (existsSync(join(c.cwd, "forge.yaml")) && resolveState(c.cwd) === "managed-active") {
       statusScreen(c);
     } else {
