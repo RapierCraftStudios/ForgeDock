@@ -526,3 +526,4 @@ The platform gets better every cycle. Issues that aren't picked up age and rise 
 - **Token budget**: Recon is cheap (mostly MCP + API calls). Fixes are expensive (full /work-on per issue).
 - **Idempotent**: Safe to run multiple times — dedup prevents duplicate issues, /work-on resumes from checkpoints.
 - **Pairs with /loop**: Run `/loop 4h /autopilot` for continuous improvement, or `/loop 4h /autopilot --fix --limit 2` for autonomous fixing with a human checkpoint every cycle.
+- **Event-driven complement**: `/autopilot` is a periodic cycle. When a specific production signal fires (metric regression, incident, GEO gap), use `/signal-planner` instead — it converts the signal into a dependency-ordered issue DAG, executes via `/orchestrate`, and verifies the originating signal is resolved after the work merges. Use `/autopilot` for scheduled health sweeps; use `/signal-planner` for targeted signal-driven response.
