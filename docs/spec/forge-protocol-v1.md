@@ -453,6 +453,15 @@ artifact so a sub-issue builder can fetch upstream context directly.
 
 These markers carry no Markdown body; their presence is the signal.
 
+**Phase boundary markers** (appear in pipeline command specs):
+
+| Marker | Meaning |
+|--------|---------|
+| `<!-- FORGE:DISPATCHER — {desc} -->` | Marks the Universal Phase Dispatcher — the single source of truth for phase transitions and routing logic |
+| `<!-- FORGE:PHASE_COMPLETE — {desc} -->` | Inter-phase boundary; documents that a phase completed and names the next phase so agents do not treat an intermediate result as terminal |
+
+**Issue-comment control markers** (posted to issue comments):
+
 | Marker | Meaning |
 |--------|---------|
 | `<!-- FORGE:REVIEW_STARTED -->` | The review phase has been invoked for this issue |
@@ -463,6 +472,255 @@ These markers carry no Markdown body; their presence is the signal.
 
 Error markers signal that automated processing stopped and human attention is
 needed.
+
+---
+
+### 4.4 Design pipeline annotations
+
+These annotations drive the UI Taste Harness — the design-generation pipeline
+that produces a landing page from a design-blind product brief. They carry
+design intent across the investigate → architect → generate → critique → close
+stages, exactly as the lifecycle annotations carry code context across
+investigate → build → review.
+
+#### `FORGE:DESIGN_CONTEXT`
+
+- **Written by**: the `/design` design-investigate stage
+- **Read by**: design-architect stage (grounds the rationale), close phase (audit trail)
+- **Completion sentinel**: `<!-- FORGE:DESIGN_CONTEXT:COMPLETE -->`
+
+The design analog of `FORGE:CONTEXT`: the parsed brief (message / audience /
+single objection), the grammar pulled from the reference corpus, and the recent
+signature moves / archetypes / palettes from design-memory that this design must
+diverge from. Opens the `FORGE:DESIGN_*` chain.
+
+```
+<!-- FORGE:DESIGN_CONTEXT -->
+## Design Context — {product}
+
+**Message:** {one thing the page must say}
+**Audience / objection:** {who} — must overcome: {objection}
+**Corpus grammar:** {relevant traits / archetype priors}
+**Diverge from (memory):** {recent signature moves / archetypes / palettes to avoid}
+<!-- FORGE:DESIGN_CONTEXT:COMPLETE -->
+```
+
+#### `FORGE:DESIGN_RATIONALE`
+
+- **Written by**: the design-architect agent
+- **Read by**: the generate agent (the spec it produces), the render → vision-critique loop, and reviewers
+- **Emitted**: before `FORGE:DESIGN_SPEC`
+
+The designer's diary — the reasoning-before-generation step. Captures a
+seven-element chain of thought (intent/feeling, audience/objection,
+communication hierarchy, direction + rejected alternatives, signature move,
+what's being tried this time, non-goals). MUST carry at least one explicitly
+rejected alternative, a named signature move, and a `→ Produces DESIGN_SPEC`
+link.
+
+```
+<!-- FORGE:DESIGN_RATIONALE -->
+## Design Rationale — {product}
+
+**Intent / feeling:** {one message} · {one feeling}
+**Audience / objection:** {who} — must overcome: {objection}
+**Communication hierarchy:** 1) {…} 2) {…} 3) {…}
+**Direction:** {archetype} — because {reasoning}
+  - Considered & rejected: {alt A} (because {…}); {alt B} (because {…})
+**Signature move:** {the one non-obvious idea}
+**Trying this time:** {technique/learning} (from memory: avoiding {prior move})
+**Non-goals:** {what this won't do}
+
+→ Produces DESIGN_SPEC: {link}
+```
+
+#### `FORGE:DESIGN_CANDIDATES`
+
+- **Written by**: the generate agent (divergent-generation step)
+- **Read by**: the taste-judge (selects the winner), close phase (audit trail), design-memory (to diverge from past winners)
+- **Emitted**: after `FORGE:DESIGN_RATIONALE`, before `FORGE:DESIGN_SPEC`
+
+The variance lever's audit record: the one committed archetype (never blended),
+the N distinct directions generated within it, and the independent taste-judge's
+scores and selection. The selection judge is distinct from the critique loop —
+anti-Goodhart.
+
+```
+<!-- FORGE:DESIGN_CANDIDATES -->
+## Design Candidates — {product}
+
+**Archetype (committed):** {one of the corpus ids}
+**Directions:**
+1. {concept} — signature: {move} — {distinguishing grammar/tokens}
+2. {concept} — signature: {move} — {…}
+**Judge scores:** 1) {score} 2) {score} …
+**Selected:** #{n} — because {reason}
+
+→ Winner produces DESIGN_SPEC: {link}
+```
+
+#### `FORGE:DESIGN_SPEC`
+
+- **Written by**: the design-architect agent
+- **Read by**: the generate agent (constrains output), the deterministic anti-slop linter, the render → vision-critique loop, and the close phase agent
+
+A structured, machine-checkable representation of one page's design language.
+Produced by `FORGE:DESIGN_RATIONALE` — not authored from nowhere. The flow is
+rationale → spec → page. Full field-by-field schema lives in
+`docs/design/design-spec-schema.md`.
+
+````
+<!-- FORGE:DESIGN_SPEC -->
+## Design Spec — {product}
+
+```jsonc
+{
+  "meta":          { "product": "…", "archetype": "…", "corpus_version": "…", "rationale_ref": "…" },
+  "typography":    { "display_family": "…", "body_family": "…", "scale_ratio": …, "weights": […] },
+  "color":         { "mode": "…", "background": "#…", "foreground": "#…", "accent": "#…",
+                     "rules": ["no-default-tailwind-palette", "contrast>=4.5"] },
+  "spacing":       { "base_unit_px": …, "scale": […] },
+  "radius":        { "scale": […] },
+  "shadow":        { "tokens": […] },
+  "motion":        { "vocabulary": […], "reduced_motion": "required" },
+  "layout_grammar":{ "sections": [ { "id": "…", "purpose": "…", "density": "…" } ], "rhythm": "…" },
+  "effects_plan":  { "per_section": [ … ], "budget": { … }, "never": [ … ] },
+  "negatives":     [ … ],
+  "acceptance":    { "perf_budget": { … }, "a11y": { … }, "divergence_ref": "…" }
+}
+```
+
+→ Produced by FORGE:DESIGN_RATIONALE: {link}
+````
+
+#### `FORGE:CRITIQUE`
+
+- **Written by**: the vision-critique loop (one annotation per iteration)
+- **Read by**: the iterate step (consumes its findings), close phase (improvement trajectory audit)
+- **Completion sentinel**: `<!-- FORGE:CRITIQUE:COMPLETE -->`
+
+One annotation per render → critique iteration — the page's improvement
+trajectory as an auditable trail. Records the deterministic lint floor result,
+the desktop+mobile render, the perceptual findings, and the verdict. The critic
+is strictly independent from the benchmark judge — anti-Goodhart.
+
+```
+<!-- FORGE:CRITIQUE -->
+## Critique — {product} · iteration {i}/{max}
+
+**Lint floor:** {PASS | fixed N hard findings}
+**Render:** desktop + mobile captured
+**Perceptual findings:**
+- N{n}: {what was observed in the render} → {correction}
+**Verdict:** {PASS | ITERATE | BUDGET-EXHAUSTED}
+<!-- FORGE:CRITIQUE:COMPLETE -->
+```
+
+#### `FORGE:USER_FEEDBACK`
+
+- **Written by**: the `/design` user-feedback stage
+- **Read by**: the surgical re-generation step, close phase (audit trail)
+- **Completion sentinel**: `<!-- FORGE:USER_FEEDBACK:COMPLETE -->`
+- **Not produced** in automated (benchmark) runs
+
+The structured record of one user-feedback round. There MAY be multiple
+`FORGE:USER_FEEDBACK` annotations on a single issue if the user iterates.
+`FORGE:USER_FEEDBACK` MAY modify a section's visual execution but MUST NOT
+change the committed `meta.archetype` or the signature move from
+`FORGE:DESIGN_RATIONALE` — those choices are locked once the spec is committed.
+
+```
+<!-- FORGE:USER_FEEDBACK -->
+## User Feedback — {product} · round {n}
+
+**Section target:** {section ID from layout_grammar.sections, or "all" for page-wide feedback}
+**Feedback type:** {asset | emotion | direction | freeform}
+**Asset URL:** {URL or "none"}
+**Modification:** {structured description of what to change}
+**Emotion target:** {trust | speed | power | craft | play | unchanged}
+**Satisfied:** {yes | no — "no" loops back after re-generation}
+**Freeform notes:** {verbatim user input not captured in the structured fields}
+<!-- FORGE:USER_FEEDBACK:COMPLETE -->
+```
+
+#### `FORGE:BENCH_SCORECARD`
+
+- **Written by**: the `/design-bench` benchmark rig
+- **Read by**: harness developers (fitness signal), milestone tracker, pipeline-health
+- **Completion sentinel**: `<!-- FORGE:BENCH_SCORECARD:COMPLETE -->`
+
+The result of one ABC benchmark run. Arm A is the harness output, arm B is a
+raw one-shot model, arm C is the real reference page (gold standard). The
+annotation carries win-rates, the A-vs-B harness delta, rubric distributions
+(mean + stdev) across n≥3 runs, mean slop counts, and a judge-calibration check
+(C must beat A and B — otherwise the judge is miscalibrated).
+
+````
+<!-- FORGE:BENCH_SCORECARD -->
+## ABC Benchmark Scorecard
+
+**Corpus version**: {ver} · **Generation model (A & B)**: {model} · **Judge model**: {independent judge}
+**Products**: {n_products} · **Runs/product**: {n}
+
+| Arm | Win-rate vs C | A-vs-B | Mean slop |
+|-----|---------------|--------|-----------|
+| A   | {wr}          | {a_vs_b} | {slop_A} |
+| B   | {wr}          | —        | {slop_B} |
+
+**Judge calibration**: {ok | MISCALIBRATED — N runs where C lost (suspect)}
+
+```json
+{scorecard.json from bench-scorecard.mjs}
+```
+
+<!-- FORGE:BENCH_SCORECARD:COMPLETE -->
+````
+
+#### `FORGE:DESIGN_SHIPPED`
+
+- **Written by**: the `/design` design-close stage
+- **Read by**: design-memory (persists the realized outcome), milestone tracker, pipeline-health
+- **Completion sentinel**: `<!-- FORGE:DESIGN_SHIPPED:COMPLETE -->`
+- **Terminal annotation** for the design pipeline (analogous to `workflow:merged` for code)
+
+Closes the design pipeline. Posted only when the design passes the full
+definition of done — critique-rubric threshold, perf budget, a11y check, and
+the divergence check. Records the final realized outcome written to design-memory
+so the next design can diverge from it.
+
+```
+<!-- FORGE:DESIGN_SHIPPED -->
+## Design Shipped — {product}
+
+**Archetype:** {committed id} · **Signature move:** {the hook}
+**Gates:** rubric {pass} · perf {pass} · a11y {pass} · divergence {distinct from prior}
+**Critique iterations:** {n}
+**Written to memory:** {palette/type/effects/learnings summary}
+<!-- FORGE:DESIGN_SHIPPED:COMPLETE -->
+```
+
+---
+
+### 4.5 Audit annotations
+
+These annotations are posted to issue or PR comments by audit commands
+(`/audit`, `/audit-agents`, `/security-audit`) after running structured code
+audits.
+
+#### `FORGE:AUDIT`
+
+- **Written by**: audit command agents (`/audit`, `/audit-agents`)
+- **Location**: issue or PR comment
+
+Posted after running a structured code or agent audit. Body content varies by
+audit type.
+
+#### `FORGE:SECURITY_AUDIT`
+
+- **Written by**: the `/security-audit` command
+- **Location**: issue comment
+
+Posted after completing a 4-phase security posture audit.
 
 ---
 
@@ -739,7 +997,48 @@ which tool or model produced it — interoperates with this consumer unchanged.
 
 ---
 
-## 10. Versioning
+## 10. Adopting FORGE in Your Own Pipeline
+
+FORGE is an open format. Any tool that can read and write platform comments can
+participate — no dependency on a specific framework, model, or vendor.
+
+**Minimum viable adoption**:
+
+1. Pick the annotation types relevant to your pipeline (`FORGE:INVESTIGATOR` +
+   `FORGE:BUILDER` is a good starting point).
+2. Write your agent prompts to post annotated comments after each phase.
+3. Write downstream agent prompts to read those comments before starting.
+
+**Implementation checklist**:
+
+1. **Read existing annotations** before starting work on an issue:
+
+   ```bash
+   gh api repos/{OWNER}/{REPO}/issues/{NUMBER}/comments \
+     --jq '.[] | select(.body | contains("FORGE:")) | {id: .id, body: .body}'
+   ```
+
+2. **Write annotations** using the schemas in Section 4 after completing each phase.
+
+3. **Check for existing annotations** before writing (idempotency):
+
+   ```bash
+   EXISTING=$(gh api repos/{OWNER}/{REPO}/issues/{NUMBER}/comments \
+     --jq '.[] | select(
+       .body | (contains("FORGE:INVESTIGATOR") and contains("INVESTIGATION:COMPLETE"))
+     ) | .id')
+   if [ -n "$EXISTING" ]; then echo "Already investigated — skip"; fi
+   ```
+
+4. **Respect label state** — check `workflow:*` labels (Section 6) to determine
+   the current phase and whether the work item is in a terminal state.
+
+5. **Use text-contains filtering** as the primary query interface. All FORGE
+   implementations can assume `gh api` or equivalent is available.
+
+---
+
+## 11. Versioning
 
 This document specifies **version 1.0**.
 
@@ -754,7 +1053,7 @@ Annotations do not carry an explicit version field. Conforming consumers
 
 ---
 
-## 11. Acknowledgements
+## 12. Acknowledgements
 
 The FORGE Annotation Protocol was first developed and proven in a production
 autonomous-development pipeline, where it coordinated investigator, builder,
