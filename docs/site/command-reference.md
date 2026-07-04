@@ -8,10 +8,14 @@ keywords: ["claude code slash commands", "claude code extensions", "claude code 
 
 ForgeDock installs slash commands into Claude Code. Each command is a detailed prompt spec that guides an AI agent through a specific phase of the development pipeline.
 
-Install all commands with:
+Commands ship in two tiers:
+
+- **Core** (default install) — the 8 commands that cover the full pipeline: `work-on`, `issue`, `review-pr`, `quality-gate`, `orchestrate`, `forgedock-init`, `forge-stats`, and their sub-phases.
+- **Extras** (opt-in) — analytics, audit, ops, and project-specific commands. Install with `--extras`.
 
 ```bash
-npx forgedock
+npx forgedock              # Core tier only (default)
+npx forgedock --extras     # Core + extras tier
 ```
 
 After installation, every command is available as `/command-name` in any Claude Code session.
@@ -113,7 +117,7 @@ Catches the defects a reviewer would flag — before the commit is made.
 
 ---
 
-### `/test-gate`
+#### `/test-gate`
 
 **Acceptance verification gate.**
 
@@ -146,7 +150,7 @@ Each sub-agent gets its own git worktree and GitHub issue thread. No interferenc
 
 ---
 
-### `/milestone`
+#### `/milestone`
 
 **Milestone manager.**
 
@@ -167,7 +171,7 @@ These commands implement the durable-state story: situational awareness, failure
 
 ---
 
-### `/pipeline-status`
+#### `/pipeline-status`
 
 **Pipeline-wide situational awareness.**
 
@@ -183,7 +187,7 @@ With the durable engine, also shows **engine lease state** for issues with a `FO
 
 ---
 
-### `/pipeline-resume`
+#### `/pipeline-resume`
 
 **Context recovery after compaction.**
 
@@ -200,7 +204,7 @@ The `--all-stalled` mode delegates to `npx forgedock resume-stalled`, which uses
 
 ---
 
-### `/diagnose`
+#### `/diagnose`
 
 **Pipeline failure tracer.**
 
@@ -213,7 +217,7 @@ Traces a failed or stalled pipeline run — identifies which FORGE annotation is
 
 ---
 
-### `/explain`
+#### `/explain`
 
 **FORGE annotation translator.**
 
@@ -226,7 +230,7 @@ Produces a plain-English narrative of everything that happened on a GitHub issue
 
 ---
 
-### `/replay`
+#### `/replay`
 
 **Read-only audit trail playback.**
 
@@ -239,7 +243,7 @@ Steps through a completed pipeline run phase by phase, showing each FORGE annota
 
 ---
 
-### `/changelog`
+#### `/changelog`
 
 **Release notes generator.**
 
@@ -259,7 +263,7 @@ Commands for production operations, incident response, and keeping the repo heal
 
 ---
 
-### `/deploy-info`
+#### `/deploy-info`
 
 **Pre-deploy diff.**
 
@@ -274,7 +278,7 @@ Shows what will deploy next — diff between staging and main with issue/PR summ
 
 ---
 
-### `/rollback`
+#### `/rollback`
 
 **Revert PR creator.**
 
@@ -287,7 +291,7 @@ Creates a revert PR to roll back a shipped feature or fix that caused a producti
 
 ---
 
-### `/incident-response`
+#### `/incident-response`
 
 **P0 incident coordinator.**
 
@@ -301,7 +305,7 @@ Coordinates P0 incident response — hotfix validation, timeline reconstruction,
 
 ---
 
-### `/security-audit`
+#### `/security-audit`
 
 **Periodic security posture audit.**
 
@@ -315,7 +319,7 @@ Runs a 4-phase security checklist against repo files (not just diffs). Creates G
 
 ---
 
-### `/autopilot`
+#### `/autopilot`
 
 **Self-improvement cycle.**
 
@@ -331,7 +335,7 @@ Runs recon, triage, and optionally fixes top-priority issues automatically.
 
 ---
 
-### `/signal-planner`
+#### `/signal-planner`
 
 **Closed-loop production signal to verified resolution.**
 
@@ -349,7 +353,7 @@ Converts a production, analytics, or incident signal into a dependency-ordered i
 
 ---
 
-### `/cleanup`
+#### `/cleanup`
 
 **Repository hygiene sweep.**
 
@@ -366,7 +370,7 @@ Cleans up stale labels, missing workflow state, project board gaps, dangling wor
 
 ---
 
-### `/pipeline-health`
+#### `/pipeline-health`
 
 **Pipeline performance analyzer.**
 
@@ -383,7 +387,7 @@ Measures pipeline performance, correlates with prompt changes, and proposes impr
 
 ---
 
-### `/validate`
+#### `/validate`
 
 **Pre-build issue validation.**
 
@@ -398,7 +402,7 @@ Returns: CONFIRMED, PARTIAL, or INVALID with evidence.
 
 ---
 
-### `/audit`
+#### `/audit`
 
 **Production issue tracer.**
 
@@ -412,7 +416,7 @@ Traces a production failure end-to-end through GitHub artifacts (commits, PRs, i
 
 ---
 
-### `/scope`
+#### `/scope`
 
 **Pre-flight complexity estimator.**
 
@@ -425,7 +429,7 @@ Estimates issue complexity before running `/work-on` — surfaces affected files
 
 ---
 
-### `/diagnose`
+#### `/diagnose`
 
 See [Observe & Recover > `/diagnose`](#diagnose) above.
 
@@ -447,9 +451,25 @@ AI-powered `forge.yaml` generator — scans codebase, queries GitHub, and fills 
 /forgedock-init --section review  # Regenerate one section
 ```
 
+
 ---
 
-### `/adopt`
+### `/forge-stats`
+
+**Command size and bloat tracker.**
+
+Tracks the size of every ForgeDock command file over time. Detects bloat by comparing current sizes against the git-tracked baseline and per-command thresholds. Also reports raw cost-per-issue from `FORGE:DECISION_RECORD` annotations.
+
+```bash
+/forge-stats                      # Compare against baseline
+/forge-stats baseline             # Update baseline to current
+/forge-stats full                 # Full size breakdown
+/forge-stats cost                 # Raw cost-per-issue report
+```
+
+---
+
+#### `/adopt`
 
 **Repo bootstrap & backlog triage.**
 
@@ -464,7 +484,7 @@ Onboards an existing repo into the ForgeDock pipeline — scans open issues, cla
 
 ---
 
-### `/sync-ecosystem`
+#### `/sync-ecosystem`
 
 **Cross-repo sync.**
 
@@ -484,7 +504,7 @@ Detects API changes, syncs satellite repos, and publishes releases.
 
 ---
 
-### `/optimize`
+#### `/optimize`
 
 **Adaptive script generator.**
 
@@ -497,7 +517,7 @@ Analyzes the repo and generates per-repo adaptive scripts from learned patterns,
 
 ---
 
-### `/ci-audit`
+#### `/ci-audit`
 
 **Stack-aware CI gap detection.**
 
@@ -510,7 +530,7 @@ Audits the project's GitHub Actions workflows against its declared tech stack an
 
 ---
 
-### `/compat-audit`
+#### `/compat-audit`
 
 **Claude Code compatibility report.**
 
@@ -538,18 +558,19 @@ These are invoked automatically by `/work-on` but can also be run standalone.
 | `/work-on/review` | Phase 5 | Review only |
 | `/work-on/close` | Phase 6 | Close & cleanup only |
 | `/work-on/decompose` | Phase 2 | Decompose into sub-issues |
-| `/review-pr-staging` | Staging | Review staging branch before deploy |
 | `/review-pr-agents` | PR review | Agent catalog read by `/review-pr` during dispatch (not user-invokable directly) |
 
 ---
 
 ## Extras / Project-Specific
 
-The following commands ship with ForgeDock but target **web-property and analytics workflows**. They are useful for teams running a public web property with analytics platforms (GSC, GA4, Umami, Cloudflare, Stripe, Clarity) wired up in `forge.yaml`. If your project is not a web property or does not have those integrations configured, these commands will have nothing to act on.
+These commands are in the **extras tier** — not installed by default. Install them with `npx forgedock --extras`.
+
+The following extras target **web-property and analytics workflows** specifically. They are useful for teams running a public web property with analytics platforms (GSC, GA4, Umami, Cloudflare, Stripe, Clarity) wired up in `forge.yaml`. If your project is not a web property or does not have those integrations configured, these commands will have nothing to act on.
 
 ---
 
-### `/analytics`
+#### `/analytics`
 
 **Production analytics audit.**
 
@@ -565,7 +586,7 @@ Trigger phrases: "check analytics", "look at prod analytics", "what's happening 
 
 ---
 
-### `/qa-sweep`
+#### `/qa-sweep`
 
 **Full platform QA sweep.**
 
@@ -583,7 +604,7 @@ Auto-discovers pages and tests UI elements via browser automation (requires Play
 
 ---
 
-### `/geo-audit`
+#### `/geo-audit`
 
 **GEO (Generative Engine Optimization) audit.**
 
@@ -597,7 +618,7 @@ Checks AI referral traffic and page compliance for AI search engines. Creates im
 
 ---
 
-### `/audit-agents`
+#### `/audit-agents`
 
 **Agent output analyzer.**
 
