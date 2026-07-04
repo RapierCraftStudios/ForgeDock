@@ -2161,6 +2161,7 @@ gh issue create -R $FORGE_REPO \
 | Transcript health score (Phase 2N/2Q) | ?/100 $(_trend $TRANSCRIPT_HEALTH_SCORE $PRIOR_TRANSCRIPT_SCORE) | > 70 | ✅/⚠️/❌/ℹ️ |
 | — Session flow flag | [✅ Healthy / ⚠️ flag / ℹ️ unavailable] | — | ℹ️ |
 | — Aggregated session metrics (Phase 2Q) | [✅ Available / ℹ️ unavailable] | — | ℹ️ |
+| Avg cost per issue (FORGE:DECISION_RECORD) | $? / ℹ️ unavailable | — | ℹ️ |
 
 ## Trajectory Analytics
 
