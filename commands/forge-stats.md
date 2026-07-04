@@ -1,6 +1,7 @@
 ---
 description: Track command sizes, detect bloat, compare against baselines and thresholds
 argument-hint: [diff | baseline | full]
+install: internal
 ---
 <!-- SPDX-FileCopyrightText: Copyright (c) RapierCraft Studios -->
 <!-- SPDX-License-Identifier: AGPL-3.0-or-later -->
