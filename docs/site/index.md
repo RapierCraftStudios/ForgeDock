@@ -12,6 +12,12 @@ No more coordinating between agent sessions. No more lost context. No more start
 
 ---
 
+## The core idea
+
+**[GitHub Is Already Your Agents' Memory](./github-is-the-memory.md)** — Why agents re-derive everything from scratch every session, why sidecar stores duplicate what GitHub already records, and how FORGE annotations make the existing citation graph machine-readable. This is the canonical explanation of why ForgeDock works the way it does.
+
+---
+
 ## Get Started
 
 **New to ForgeDock?** Start here:
@@ -25,6 +31,7 @@ No more coordinating between agent sessions. No more lost context. No more start
 
 | Page | What You'll Learn |
 |------|-------------------|
+| [GitHub Is Already Your Agents' Memory](./github-is-the-memory.md) | The memory problem, FORGE annotations, the knowledge graph argument, and the open protocol |
 | [Getting Started](./getting-started.md) | Install ForgeDock, configure forge.yaml, run `/work-on` on your first issue |
 | [How It Works](./how-it-works.md) | FORGE annotations, the pipeline relay, compaction resilience, workflow labels |
 | [ForgeDock vs. Manual Workflows](./vs-manual-workflows.md) | Why structured pipelines beat ad-hoc Claude Code sessions |
