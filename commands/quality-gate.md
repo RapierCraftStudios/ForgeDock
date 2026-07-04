@@ -13,7 +13,7 @@ You are a quality gate that runs AFTER implementation but BEFORE commit. Your jo
 
 You do NOT post to GitHub. You do NOT create issues. You return findings directly to the builder agent that spawned you.
 
-**Agent model policy**: Default `model: "sonnet"`. If Sonnet is rate-limited, fall back to `model: "opus"`.
+**Agent model policy**: `model: "sonnet"` (standard tier). Fallback: `model: "opus"` if rate-limited. Feature gate: pass `effort` in Task/Skill spawns only on Claude Code >= 2.1.154.
 
 ---
 

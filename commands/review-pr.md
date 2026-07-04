@@ -13,7 +13,7 @@ allowed-tools: Task, Bash, Read, Grep, Glob, WebFetch, Skill
 **NEVER use plan mode (EnterPlanMode)** during review — it breaks execution context.
 **NEVER use the Agent tool** — review-pr dispatches domain agents via `Task` tool only. `Agent` spawns opaque subprocesses that bypass the allowed-tools constraint and cannot post structured findings to the PR. Always use `Task(...)` for review agent launch (Phase 3C).
 
-**Agent model policy**: Default `model: "sonnet"`. If Sonnet is rate-limited, fall back to `model: "opus"`. User can override with `--model <name>`. Pass the resolved model in every `Task` tool call.
+**Agent model policy**: `model: "sonnet"` (standard tier); the General Security & Quality reviewer spawned as always-runs Task uses `effort: xhigh` (deep tier). Fallback: `model: "opus"` if rate-limited. User can override with `--model <name>`. Pass model and effort explicitly in every `Task` tool call. Feature gate: pass `effort` only on Claude Code >= 2.1.154.
 
 <!-- FORGE:SPEC_LOADED — review-pr.md loaded and active. Agent is bound by this spec. -->
 

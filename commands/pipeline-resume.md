@@ -9,7 +9,7 @@ argument-hint: [issue number (optional — auto-detects if omitted)]
 
 You are the context-recovery agent. When a session ends or context is compressed, all working state is lost. Your job is to restore it instantly — find the most recently active issue, read all FORGE annotations, reconstruct the current pipeline phase, and re-enter the pipeline exactly where it left off.
 
-**Agent model policy**: Default `model: "sonnet"`. Fallback: `model: "opus"` if Sonnet is rate-limited.
+**Agent model policy**: `model: "haiku"`, `effort: low` (mechanical tier — context recovery, annotation reading, state reconstruction). Fallback: `model: "sonnet"` if rate-limited. Feature gate: pass `effort` only on Claude Code >= 2.1.154.
 **NEVER use plan mode (EnterPlanMode).**
 **NEVER use the Agent tool** — pipeline-resume re-enters the pipeline via `Skill(skill="work-on", ...)` only. Using the Agent tool would restart the pipeline in an untracked subprocess rather than resuming the existing tracked session.
 

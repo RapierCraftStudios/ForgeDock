@@ -58,6 +58,22 @@ Key value props:
 - **Deterministic** — scripts layer enforces exact outputs where prose instructions fail
 - **Traceable** — every decision, finding, and change is tracked via FORGE annotations on GitHub
 
+## Agent Model / Effort Tier Map (#1249)
+
+Every pipeline stage carries an explicit `model` and `effort` in its **Agent model policy** line. Stages are classified into three tiers:
+
+| Tier | Model | Effort | Stages |
+|------|-------|--------|--------|
+| **mechanical** | `haiku` | `low` | Label transitions, FORGE annotation posting, issue classification, `/orchestrate` dispatch bookkeeping, `/work-on/close`, `/changelog`, `/pipeline-resume` |
+| **standard** | `sonnet` | _(default)_ | Context gathering, implement, validate, most review personas, `/work-on`, `/issue`, `/work-on/investigate`, `/work-on/build`, `/work-on/review`, `/review-pr`, `/qa-sweep`, `/adopt`, `/deploy-info`, `/diagnose`, `/explain`, `/scope`, `/validate`, `/replay`, `/rollback`, `/incident-response`, `/compat-audit`, `/ci-audit`, `/analytics`, `/optimize`, `/forgedock-init`, `/pipeline-health`, `/review-pr-staging`, `/audit`, `/autopilot` |
+| **deep** | `sonnet` (fallback: `opus`) | `xhigh` | `/work-on/build/architect`, the always-runs General Security & Quality reviewer in `/review-pr`, `/security-audit` |
+
+**Fallback rule** (all tiers): if the designated model is rate-limited, fall back to `opus`.
+
+**Feature gate**: `effort` frontmatter is only emitted when Claude Code >= 2.1.154. Commands that spawn subagents pass `model` and `effort` explicitly in every `Task`/`Skill` call rather than relying on the prose policy line.
+
+**Cost rationale**: Haiku 4.5 is ~$1/$5 per MTok vs Sonnet 5 at ~$3/$15 — assigning mechanical stages to Haiku yields an estimated 40–60% cost reduction on a full `/work-on` run (18–20 agent invocations) with no quality loss on deterministic operations; explicit `xhigh` on architect/security review improves quality where it matters most.
+
 ## Known Pipeline Weaknesses (Active Issues)
 
 These are systemic problems being actively addressed:
