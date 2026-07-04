@@ -287,6 +287,32 @@ If `origin/{PR_BASE}` does not exist yet (new branch), skip this check — no co
 git ls-remote --exit-code origin {PR_BASE} >/dev/null 2>&1 || echo "PR_BASE not on origin — skipping ancestry audit"
 ```
 
+### V5 Post-Commit: Mark Build Complete (MANDATORY)
+
+After the ancestry audit passes (or is skipped), append `<!-- FORGE:BUILDER:COMPLETE -->` to the existing FORGE:BUILDER comment. This is the **only** place this marker is written — it signals that a real commit exists on the branch and the build is safe to resume-skip. <!-- Added: forge#1305 -->
+
+```bash
+# Find the FORGE:BUILDER comment posted by implement.md Phase I6
+BUILDER_COMMENT_ID=$(gh api repos/{GH_REPO}/issues/{NUMBER}/comments \
+  --jq '[.[] | select(.body | contains("FORGE:BUILDER") and (contains("FORGE:BUILDER:COMPLETE") | not))] | last | .id // ""')
+
+if [ -n "$BUILDER_COMMENT_ID" ]; then
+  # Fetch current body and append the completion marker
+  CURRENT_BODY=$(gh api repos/{GH_REPO}/issues/comments/$BUILDER_COMMENT_ID --jq '.body')
+  UPDATED_BODY="${CURRENT_BODY}
+
+<!-- FORGE:BUILDER:COMPLETE -->"
+  gh api repos/{GH_REPO}/issues/comments/$BUILDER_COMMENT_ID \
+    -X PATCH \
+    --field body="$UPDATED_BODY"
+  echo "FORGE:BUILDER:COMPLETE appended to comment $BUILDER_COMMENT_ID"
+else
+  echo "WARNING: FORGE:BUILDER comment not found or already marked complete — skipping BUILDER:COMPLETE append"
+fi
+```
+
+**Why here and not in implement.md**: The commit (`git commit`) runs in this phase (V5). Appending `:COMPLETE` after the commit ensures that a session crash between implement.md I6 (comment posted) and this step (commit) leaves a partial BUILDER comment without `:COMPLETE`. The next resume will detect the partial comment, delete it, and restart the build. See `implement.md § Phase I1 resume check`.
+
 ---
 
 ## Output

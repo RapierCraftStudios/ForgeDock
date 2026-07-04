@@ -46,7 +46,16 @@ gh api repos/{GH_REPO}/issues/{NUMBER}/comments \
 ```
 
 **Resume check**:
-- If `<!-- FORGE:BUILDER -->` comment exists → build already complete. Return `BUILD_RESULT: status: ALREADY_DONE` to router.
+- If `<!-- FORGE:BUILDER:COMPLETE -->` is present in a BUILDER comment → build already complete. Return `BUILD_RESULT: status: ALREADY_DONE` to router.
+- If `<!-- FORGE:BUILDER -->` exists BUT `<!-- FORGE:BUILDER:COMPLETE -->` is ABSENT → build was interrupted after the comment was posted but before the commit (validate.md V5). Delete the partial comment and restart from Phase B2 (contract): <!-- Added: forge#1305 -->
+  ```bash
+  PARTIAL_ID=$(gh api repos/{GH_REPO}/issues/{NUMBER}/comments \
+    --jq '[.[] | select(.body | contains("FORGE:BUILDER") and (contains("FORGE:BUILDER:COMPLETE") | not))] | last | .id // ""')
+  if [ -n "$PARTIAL_ID" ]; then
+    gh api repos/{GH_REPO}/issues/comments/$PARTIAL_ID -X DELETE
+    echo "Deleted partial FORGE:BUILDER comment (no FORGE:BUILDER:COMPLETE) — restarting build from Phase B2"
+  fi
+  ```
 - If no `<!-- FORGE:INVESTIGATOR -->` comment with `<!-- INVESTIGATION:COMPLETE -->` → EXIT with `BUILD_RESULT: status: BLOCKED`, blocker: "Investigation not complete — run investigate first".
 
 Extract from investigation report:
