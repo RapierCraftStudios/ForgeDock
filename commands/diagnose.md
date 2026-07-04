@@ -1,6 +1,7 @@
 ---
 description: Trace a failed or stalled pipeline run — identify which FORGE annotation is missing or malformed, diagnose the failure point, and suggest specific remediation steps
 argument-hint: [issue number] [--repo prefix]
+install: extras
 ---
 
 # /diagnose — Pipeline Failure Tracer

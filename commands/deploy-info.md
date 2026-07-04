@@ -1,6 +1,7 @@
 ---
 description: Show what will deploy next — diff staging vs main with issue/PR summary, risk assessment, and deploy checklist
 argument-hint: [staging | milestone/{slug} | compare {branch}]
+install: extras
 ---
 
 # /deploy-info — Pre-Deploy Summary

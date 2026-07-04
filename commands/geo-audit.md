@@ -1,5 +1,6 @@
 ---
 description: "Run a GEO audit — check AI referral traffic, page compliance, and auto-create improvement issues"
+install: extras
 ---
 <!-- SPDX-FileCopyrightText: Copyright (c) RapierCraft Studios -->
 <!-- SPDX-License-Identifier: AGPL-3.0-or-later -->

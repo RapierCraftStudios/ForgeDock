@@ -1,6 +1,7 @@
 ---
 description: Sweep closed issues for stale labels, missing workflow state, and Project board gaps — plus prune worktrees, branches, and milestones
 argument-hint: [labels | branches | milestones | board | orphans | all]
+install: extras
 ---
 <!-- SPDX-FileCopyrightText: Copyright (c) RapierCraft Studios -->
 <!-- SPDX-License-Identifier: AGPL-3.0-or-later -->

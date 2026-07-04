@@ -1,6 +1,7 @@
 ---
 description: Pipeline-wide situational awareness — groups open issues by workflow state, shows active PRs, flags stale items, and reports milestone progress
 argument-hint: [--repo <owner/repo> | --stale-days <N>]
+install: extras
 ---
 
 # /pipeline-status — Pipeline Status

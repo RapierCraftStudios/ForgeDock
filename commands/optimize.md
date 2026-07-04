@@ -1,6 +1,7 @@
 ---
 description: Analyze this repo and generate per-repo adaptive scripts from learned patterns, git history, and existing configuration
 argument-hint: [--dry-run | --force | --no-registry]
+install: extras
 ---
 
 # /optimize — Per-Repo Adaptive Script Generation

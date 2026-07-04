@@ -1,6 +1,7 @@
 ---
 description: Estimate issue complexity before running /work-on — affected files, blast radius, risk flags, and decomposition recommendation
 argument-hint: <issue number> [--repo {owner}/{repo}]
+install: extras
 ---
 
 # /scope — Pre-Flight Complexity Estimator

@@ -371,7 +371,7 @@ import { installSessionStartHook } from "./settings-hook.mjs";
  *
  * Tier values:
  *   'core'     — install for all users (default when key is absent or on any error)
- *   'extras'   — opt-in, not yet installed by default (reserved for #1257)
+ *   'extras'   — opt-in, not installed by default; use `npx forgedock install --extras` (#1257)
  *   'internal' — ForgeDock development only; never installed to user machines
  *
  * Fail-open: any read error, malformed frontmatter, or unrecognised value falls
@@ -417,22 +417,27 @@ export function parseInstallTier(filePath) {
  * Files with `install: internal` in their YAML frontmatter are excluded — they
  * are ForgeDock-development-only specs that must never reach user machines.
  * Files with `install: core` (or no `install:` key) are included. Files with
- * `install: extras` are excluded from the default install surface (reserved for
- * the opt-in extras mechanism tracked in #1257).
+ * `install: extras` are excluded from the default install surface; they are
+ * available via `npx forgedock install --extras` (implemented in #1257).
+ *
+ * @param {string} dir - Directory to search recursively.
+ * @param {{ includeExtras?: boolean }} [opts] - Options.
+ *   includeExtras: when true, also include `install: extras` specs (opt-in tier).
  */
-export async function findMarkdownFiles(dir) {
+export async function findMarkdownFiles(dir, opts = {}) {
+  const { includeExtras = false } = opts;
   const results = [];
   const entries = await readdir(dir, { withFileTypes: true });
   for (const entry of entries) {
     const full = join(dir, entry.name);
     if (entry.isDirectory()) {
-      results.push(...(await findMarkdownFiles(full)));
+      results.push(...(await findMarkdownFiles(full, opts)));
     } else if (entry.name.endsWith(".md")) {
       const tier = parseInstallTier(full);
-      if (tier === "core") {
+      if (tier === "core" || (includeExtras && tier === "extras")) {
         results.push(full);
       }
-      // 'internal' and 'extras' are excluded from the default install surface
+      // 'internal' is always excluded from the install surface
     }
   }
   return results.sort();
@@ -483,7 +488,7 @@ export async function forge(ctx) {
   const manifest = await loadCopiedManifest(manifestPath);
   let manifestChanged = false;
 
-  const files = await findMarkdownFiles(commandsDir);
+  const files = await findMarkdownFiles(commandsDir, { includeExtras: !!ctx.includeExtras });
   let installed = 0, updated = 0, skipped = 0, copied = 0;
   const barWidth = 24;
   let barShown = false;

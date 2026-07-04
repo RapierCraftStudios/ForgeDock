@@ -84,7 +84,7 @@ const PIPELINE_SCRIPTS = new Set([
 // --minimal is init-only. Subcommands with their own flag parsing (run,
 // run-issue, demo) receive restArgs — everything after the command token.
 const rawArgs = process.argv.slice(2);
-const FLAGS = new Set(["--fast", "--manual", "--verbose", "--minimal"]);
+const FLAGS = new Set(["--fast", "--manual", "--verbose", "--minimal", "--extras"]);
 const flags = rawArgs.filter((a) => FLAGS.has(a));
 const positional = rawArgs.filter((a) => !FLAGS.has(a));
 const command = positional[0] || "install";
@@ -492,6 +492,7 @@ function ctx() {
   const c = makeCtx({ argv: flags });
   c.forgeHome = FORGE_HOME;
   c.home = HOME;
+  c.includeExtras = flags.includes("--extras");
   return c;
 }
 

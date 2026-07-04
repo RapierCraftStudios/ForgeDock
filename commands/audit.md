@@ -1,6 +1,7 @@
 ---
 description: Trace a production issue or pipeline failure end-to-end through GitHub artifacts, then file a detailed improvement issue to the Forge repo
 argument-hint: <description of what went wrong> [--issue N] [--pr N] [--repo prefix]
+install: extras
 ---
 <!-- SPDX-FileCopyrightText: Copyright (c) RapierCraft Studios -->
 <!-- SPDX-License-Identifier: AGPL-3.0-or-later -->
