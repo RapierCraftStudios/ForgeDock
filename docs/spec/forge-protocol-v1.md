@@ -997,7 +997,100 @@ which tool or model produced it — interoperates with this consumer unchanged.
 
 ---
 
-## 10. Adopting FORGE in Your Own Pipeline
+## 10. Nested-Command Decomposition Pattern
+
+Large command specs that grow past ~50 KB become expensive to load in full on
+every invocation, even when a given run only exercises a fraction of the spec's
+surface. The **nested-command decomposition pattern** addresses this by splitting
+a large spec into a top-level file and one or more supporting sub-files in a
+subdirectory of the same name.
+
+### 10.1 When to decompose
+
+Decompose a command spec into a `commands/<name>/` directory when **any two** of
+the following are true:
+
+- The spec file exceeds **~30 KB** (token budget becomes significant).
+- The spec has **two or more separable sub-phases** that are only reached along
+  specific execution paths (e.g., a build phase that is skipped for trivial
+  tasks).
+- The spec delegates to **distinct named skill scopes** (e.g.,
+  `work-on:build:context`, `work-on:build:architect`) that have their own
+  input/output contracts.
+- The spec is invoked by other commands that benefit from loading only a subset
+  of its logic (e.g., `orchestrate` spawns `work-on` but only needs its outer
+  routing logic, not every inline sub-phase).
+
+Do **not** decompose for organizational preference alone. Every subdirectory
+adds a graph node and must be maintained when the parent spec changes. If a spec
+is small and its phases are always executed together, keep it as a single file.
+
+### 10.2 Naming convention
+
+```
+commands/
+  work-on.md              ← top-level entry point (dispatcher + universal rules)
+  work-on/                ← sub-specs, same name as the top-level file
+    build.md              ← sub-command (invocable as work-on:build)
+    build/                ← sub-sub-specs for build
+      context.md
+      architect.md
+      implement.md
+      validate.md
+    investigate.md
+    review.md
+    close.md
+    decompose.md
+```
+
+Rules:
+- The subdirectory name **MUST** match the stem of the top-level spec file
+  (e.g., `work-on.md` → `work-on/`).
+- Sub-files are named after the sub-phase they implement (lowercase,
+  hyphenated). They are invocable as `<parent>:<sub-file-stem>` via the Skill
+  tool (e.g., `Skill(skill="work-on:build:context", ...)`).
+- Sub-files that go to depth 3 (e.g., `work-on/build/context.md`) follow the
+  same pattern recursively: their subdirectory is `work-on/build/context/` if
+  further decomposition is ever needed.
+
+### 10.3 Automatic pick-up by the installer and graph
+
+No manual registration is required. Two mechanisms pick up sub-files
+automatically:
+
+**Installer (`bin/forgedock.mjs`)**: The `findMarkdownFiles()` helper performs a
+recursive directory walk over `commands/` (skipping `node_modules` and
+dot-directories). Every `.md` file discovered — at any depth — is symlinked into
+`~/.claude/commands/` at the same relative path. A file at
+`commands/work-on/build/context.md` is installed as
+`~/.claude/commands/work-on/build/context.md`, making it reachable by Claude
+Code's Skill resolver as `work-on:build:context`.
+
+**Spec graph builder (`scripts/build-spec-graph.mjs`)**: The `walk()` function
+in the builder performs the same recursive directory walk over `commands/`,
+discovering all spec files regardless of nesting depth. Each discovered file
+becomes a graph node. The `load-set` query uses `CONTAINS` edges (written when a
+parent spec references a sub-spec via `Skill()`) to resolve the minimal spec set
+for a given entry command.
+
+### 10.4 Token-saving effect
+
+Because the installer symlinks sub-specs at their actual nested paths, Claude
+Code's selective spec loading (Phase 0 of `/work-on`) can load each sub-spec
+only when execution reaches that sub-phase — skipped sub-phases contribute zero
+tokens to the session context. The spec knowledge graph's `load-set` query
+computes the minimal reachable set from the entry command, excluding sub-specs
+that are never reached by that command's execution graph.
+
+The measured token savings from decomposing `/work-on` and applying
+`load-set`-driven selective loading are documented in
+`docs/articles/command-decomposition-token-savings.md`. The same methodology
+can be applied to any command spec that meets the decomposition criteria in
+Section 10.1.
+
+---
+
+## 11. Adopting FORGE in Your Own Pipeline <!-- renumbered from §10 -->
 
 FORGE is an open format. Any tool that can read and write platform comments can
 participate — no dependency on a specific framework, model, or vendor.
@@ -1038,7 +1131,7 @@ participate — no dependency on a specific framework, model, or vendor.
 
 ---
 
-## 11. Versioning
+## 12. Versioning
 
 This document specifies **version 1.0**.
 
@@ -1053,7 +1146,7 @@ Annotations do not carry an explicit version field. Conforming consumers
 
 ---
 
-## 12. Reference Implementation
+## 13. Reference Implementation
 
 The canonical reference implementation of this specification is published as a
 separate, MIT-licensed npm package:
@@ -1082,7 +1175,7 @@ require a library major version bump.
 
 ---
 
-## 13. Acknowledgements
+## 14. Acknowledgements
 
 The FORGE Annotation Protocol was first developed and proven in a production
 autonomous-development pipeline, where it coordinated investigator, builder,
