@@ -190,6 +190,19 @@ bash {REPO_PATH}/scripts/code-index.sh query --domain {DOMAIN_LABEL} --repo-path
 
 The comment MUST include `<!-- INVESTIGATION:COMPLETE -->` at the very end, AFTER all required sections are present. This marker signals the investigation finished successfully.
 
+Before posting, resolve the attribution annotation link from `forge.yaml`:
+
+```bash
+ATTRIBUTION_ANNOTATION_LINK=$(grep -A5 "^attribution:" forge.yaml 2>/dev/null | grep "annotation_link:" | awk '{print $2}' | tr -d '"' || echo "false")
+ANNOTATION_LINK_FOOTER=""
+if [ "$ATTRIBUTION_ANNOTATION_LINK" = "true" ]; then
+  ANNOTATION_LINK_FOOTER="
+
+---
+*Pipeline powered by [ForgeDock](https://github.com/RapierCraftStudios/ForgeDock)*"
+fi
+```
+
 ```bash
 gh issue comment {NUMBER} {GH_FLAG} --body "<!-- FORGE:INVESTIGATOR -->
 ## Investigation Report
@@ -245,7 +258,7 @@ ACCEPTANCE_CHECK: id={ac-2} type={exists|contains|command|behavior} target={file
 - `behavior` — assert a runtime/observable behavior via shell command (`target` = shell command, `matcher` = expected output string or regex)
 
 **Skipping**: if the issue has no verifiable acceptance criteria and none can be derived from the recommendation, emit a single sentinel: `ACCEPTANCE_CHECK: id=ac-skip type=skipped target=none matcher=none description=No machine-checkable criteria available — human review required`
-
+${ANNOTATION_LINK_FOOTER}
 <!-- INVESTIGATION:COMPLETE -->"
 ```
 

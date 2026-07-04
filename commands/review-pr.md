@@ -1524,20 +1524,29 @@ if [ "$MERGE_HEALTH" = "CONFLICTING" ] || [ "$MERGE_HEALTH_STATE" = "DIRTY" ] ||
     MERGE_CONFLICT_MSG="Merge conflict with \`${BASE}\`. Rebase \`${HEAD}\` onto \`origin/${BASE}\`, resolve the conflicting files, then re-run /review-pr."
 fi
 
+# Resolve attribution footer (forge.yaml → attribution.pr_footer)
+ATTRIBUTION_PR_FOOTER=$(grep -A5 "^attribution:" forge.yaml 2>/dev/null | grep "pr_footer:" | awk '{print $2}' | tr -d '"' || echo "false")
+ATTRIBUTION_FOOTER_LINE=""
+if [ "$ATTRIBUTION_PR_FOOTER" = "true" ]; then
+  ATTRIBUTION_FOOTER_LINE="
+---
+> Orchestrated with [ForgeDock](https://github.com/RapierCraftStudios/ForgeDock) — state, scheduling, review, and memory on GitHub."
+fi
+
 # Stale review:
 gh pr review $ARGUMENTS --comment --body "Review of commit $REVIEW_SHA_SHORT is stale — PR HEAD changed. Re-run /review-pr."
 
 # Clean (no blocking issues):
 gh pr review $ARGUMENTS --comment --body "APPROVED: commit $REVIEW_SHA_SHORT after context-aware review ([N] agents: [names]). [M] findings created as issues. Safe to merge.
 $([ "$MERGE_HEALTH" = "UNKNOWN" ] && echo "
-⚠ Mergeability: GitHub is still computing merge state (UNKNOWN after retries). Verify manually before merging.")"
+⚠ Mergeability: GitHub is still computing merge state (UNKNOWN after retries). Verify manually before merging.")${ATTRIBUTION_FOOTER_LINE}"
 
 # Blocking issues (including merge conflicts and purpose regressions):
 gh pr review $ARGUMENTS --comment --body "CHANGES REQUESTED: commit $REVIEW_SHA_SHORT — [N] blocking issues found. See GitHub issues.
 $([ "$HAS_MERGE_CONFLICT" = "true" ] && echo "
 🔴 Merge Conflict: ${MERGE_CONFLICT_MSG}")
 $([ "$HAS_PURPOSE_REGRESSION" = "true" ] && echo "
-⚠ Purpose Regression: [N] finding(s) contradict the milestone's stated goal and are automatically blocking regardless of runtime impact. See: ${PURPOSE_REGRESSION_FINDINGS[@]}")"
+⚠ Purpose Regression: [N] finding(s) contradict the milestone's stated goal and are automatically blocking regardless of runtime impact. See: ${PURPOSE_REGRESSION_FINDINGS[@]}")${ATTRIBUTION_FOOTER_LINE}"
 ```
 
 ---
