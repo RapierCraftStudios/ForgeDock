@@ -353,7 +353,7 @@ For each hit: read the fallback value.
 - Is `admin`, `password`, `changeme`, `secret`, `test`, or similar weak string: **CONFIRMED HIGH** — default credential.
 - Is empty string (`${VAR:-}` or `${VAR:-""}`): **CONFIRMED HIGH** if field controls authentication.
 
-**Required cross-checks when a credential fallback is found**: (1) Is the env var required in `app/env_validation.py`? (2) Is it in `scripts/decrypt-secrets.sh` ENV_MAPPING? (3) Is it marked required in `.env.example`? If ANY missing: the insecure fallback may be active in some environments.
+**Required cross-checks when a credential fallback is found**: (1) Is the env var required in `app/env_validation.py`? (2) Is it in `scripts/decrypt-secrets.sh` ENV_MAPPING (if configured in your SOPS deploy chain — skip if absent)? (3) Is it marked required in `.env.example`? If ANY missing: the insecure fallback may be active in some environments.
 **Confidence**: `CONFIRMED` — fallback value is objectively verifiable.
 **Severity**: HIGH — insecure fallback credential is equivalent to a hardcoded credential for any environment missing the env var.
 **Evidence**: Config files commonly use `${VAR:-placeholder}` patterns during development, where the placeholder is a sample credential or hash. If the env var is absent in any environment (staging, non-production, first deploy before secrets are injected), the placeholder becomes the active credential. Also covered by INFRA agent item 13 (deployment context + ENV_MAPPING cross-check); this item extends coverage to PRs not classified as INFRA domain.
@@ -1588,7 +1588,7 @@ If no infra context is configured above, derive the deployment model from the ch
 
    **Cross-check when a credential fallback is found:**
    1. Is the corresponding env var required (not optional) in `app/env_validation.py` (or equivalent startup validation)?
-   2. Is the env var in `scripts/decrypt-secrets.sh` ENV_MAPPING (delivered from SOPS to `.env.production`)?
+   2. Is the env var in `scripts/decrypt-secrets.sh` ENV_MAPPING (if configured in your SOPS deploy chain — skip if absent; delivered from SOPS to `.env.production`)?
    3. Is the env var documented with a "REQUIRED" note in `.env.example`?
 
    If ANY of these three are missing: the env var may legitimately be absent in some environments, making the insecure fallback active. Flag as **CONFIRMED HIGH** with all three cross-check results.
