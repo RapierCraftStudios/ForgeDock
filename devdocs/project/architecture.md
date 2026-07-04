@@ -40,6 +40,7 @@ ForgeDock uses a strict two-repo model:
 | Hosted script API (faster, validated, versioned) | Platform | Commercial premium |
 | Token efficiency analytics | Platform | Commercial value-add |
 | Website / marketing | Platform | Commercial |
+| FORGE protocol validation library (`packages/protocol/`) | ForgeDock (this repo, `packages/` subdir) | MIT/Apache-2.0 — separately licensed/published, usable by any producer/consumer of FORGE annotations without AGPL obligation. Built in #1291. |
 
 ## Platform Roadmap
 
@@ -95,7 +96,8 @@ Proposed (deterministic):
 2. `transition-label.sh` — label state machine with validation
 3. `validate-pr-target.sh` — hard-fail if PR targets wrong branch
 4. `worktree-lifecycle.sh` — deterministic worktree create/reuse/cleanup (`ensure`/`cleanup` subcommands; built — #1268). Call-site migration of `work-on.md` Phase 3E/6E to invoke it is a tracked fast-follow (#1247), not yet wired in.
-5. `post-annotation.sh` — FORGE annotation posting with format validation (planned)
+5. `forge-annotation.sh` — FORGE annotation read/write/validate engine (Bash; built in #1267, not yet merged to staging) — single source of truth for annotation schema, sentinel checks, and required-field validation across all 5 marker types (INVESTIGATOR, CONTEXT, ARCHITECT, BUILDER, DECOMPOSED). Call-site migration tracked in #1247.
+6. `validate-annotation-node.mjs` — thin Node.js adapter that validates annotation bodies against the MIT/Apache protocol library (`packages/protocol/`, built in #1291); built in #1292. Complements `forge-annotation.sh`: Bash handles format/sentinel rules (AGPL), Node handles spec-conformance against the library (MIT). Degrades gracefully when the library is not yet installed.
 
 **Deploy-gate testing scripts** (milestone: Deterministic Deploy-Gate Testing — #863):
 
