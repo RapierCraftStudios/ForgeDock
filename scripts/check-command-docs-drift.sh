@@ -21,7 +21,10 @@
 
 set -euo pipefail
 
+# Normalise COMMANDS_DIR: strip trailing slash so path arithmetic is consistent
+# regardless of whether the caller passes "commands" or "commands/".
 COMMANDS_DIR="${1:-commands}"
+COMMANDS_DIR="${COMMANDS_DIR%/}"
 REFERENCE="${2:-docs/site/command-reference.md}"
 
 # ---------------------------------------------------------------------------
