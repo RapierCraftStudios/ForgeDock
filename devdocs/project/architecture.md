@@ -40,7 +40,7 @@ ForgeDock uses a strict two-repo model:
 | Hosted script API (faster, validated, versioned) | Platform | Commercial premium |
 | Token efficiency analytics | Platform | Commercial value-add |
 | Website / marketing | Platform | Commercial |
-| FORGE protocol validation library (`packages/protocol/`) | ForgeDock (this repo, `packages/` subdir) | MIT/Apache-2.0 — separately licensed/published, usable by any producer/consumer of FORGE annotations without AGPL obligation. Built in #1291. |
+| FORGE annotation parse/validate/emit library (`packages/protocol/`) | ForgeDock (this repo, `packages/` subdir) | MIT-licensed — published as `@forgedock/protocol` on npm; separately versioned and publishable; usable by any producer/consumer of FORGE annotations without AGPL obligation. Implements all 13 reserved types from the spec (parse/validate/emit + conformance suite). Built in #1291. |
 
 ## Platform Roadmap
 

@@ -1,0 +1,16 @@
+{
+  "description": "INVESTIGATOR — complete annotation with all required fields",
+  "input": "<!-- FORGE:INVESTIGATOR -->\n## Investigation Report\n\n**Verdict**: CONFIRMED\n**Confidence**: HIGH\n**Severity**: MEDIUM\n**Task Type**: Bug Fix\n**Decomposition Assessment**: NO — single-file fix.\n\n### What Was Claimed\nNull pointer on checkout.\n\n### Root Cause\n`payments/validator.py:142`\n\n<!-- INVESTIGATION:COMPLETE -->",
+  "expect": {
+    "type": "INVESTIGATOR",
+    "valid": true,
+    "sentinelState": "complete",
+    "inlineValue": null,
+    "fieldChecks": {
+      "Verdict": "CONFIRMED",
+      "Confidence": "HIGH",
+      "Severity": "MEDIUM",
+      "Task Type": "Bug Fix"
+    }
+  }
+}

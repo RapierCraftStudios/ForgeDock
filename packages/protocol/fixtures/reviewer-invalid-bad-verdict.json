@@ -1,0 +1,11 @@
+{
+  "description": "REVIEWER — invalid Verdict value",
+  "input": "<!-- FORGE:REVIEWER -->\n## Review — LOGIC\n\n**Verdict**: REJECTED",
+  "expect": {
+    "type": "REVIEWER",
+    "valid": false,
+    "fieldChecks": {
+      "Verdict": "REJECTED"
+    }
+  }
+}

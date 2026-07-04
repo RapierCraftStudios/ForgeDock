@@ -1,0 +1,9 @@
+{
+  "description": "PUSH_FAILED — control marker signals branch push failed after retry",
+  "input": "<!-- FORGE:PUSH_FAILED -->",
+  "expect": {
+    "type": "PUSH_FAILED",
+    "valid": true,
+    "sentinelState": "complete"
+  }
+}

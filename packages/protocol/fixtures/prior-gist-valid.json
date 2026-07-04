@@ -1,0 +1,9 @@
+{
+  "description": "PRIOR_GIST — valid inline-value annotation embedded in sub-issue body",
+  "input": "<!-- FORGE:PRIOR_GIST: https://gist.github.com/example/parent-investigation -->",
+  "expect": {
+    "type": "PRIOR_GIST",
+    "valid": true,
+    "inlineValue": "https://gist.github.com/example/parent-investigation"
+  }
+}

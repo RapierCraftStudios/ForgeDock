@@ -1,0 +1,9 @@
+{
+  "description": "DECOMPOSED — missing completion sentinel",
+  "input": "<!-- FORGE:DECOMPOSED -->\n## Decomposition Complete\n\n### Sub-Issues Created\n- #42: Fix null profile",
+  "expect": {
+    "type": "DECOMPOSED",
+    "valid": false,
+    "sentinelState": "interrupted"
+  }
+}

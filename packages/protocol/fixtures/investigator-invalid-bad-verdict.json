@@ -1,0 +1,12 @@
+{
+  "description": "INVESTIGATOR — invalid Verdict enum value",
+  "input": "<!-- FORGE:INVESTIGATOR -->\n**Verdict**: MAYBE\n**Confidence**: HIGH\n**Severity**: LOW\n**Task Type**: Feature\n**Decomposition Assessment**: NO — simple.\n<!-- INVESTIGATION:COMPLETE -->",
+  "expect": {
+    "type": "INVESTIGATOR",
+    "valid": false,
+    "sentinelState": "complete",
+    "fieldChecks": {
+      "Verdict": "MAYBE"
+    }
+  }
+}
