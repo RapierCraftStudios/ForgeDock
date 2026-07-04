@@ -255,6 +255,7 @@ npx forgedock update      # relink commands + refresh the SessionStart hook
 npx forgedock enable      # turn ForgeDock on for this directory
 npx forgedock disable     # turn ForgeDock off for this directory
 npx forgedock status      # show ForgeDock's state for this directory
+npx forgedock report      # 30-day pipeline impact receipts (--md for Markdown, --json for scripting)
 npx forgedock doctor      # installation health check with fix hints
 npx forgedock uninstall   # remove commands, the hook, and tracked copies
 npx forgedock help        # show everything

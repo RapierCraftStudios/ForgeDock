@@ -1588,6 +1588,7 @@ function help() {
     ["npx forgedock run-issue <issue>", "Drive one issue through the durable engine"],
     ["npx forgedock demo", "Set up a risk-free demo repo and print next steps"],
     ["npx forgedock labels [setup] [--repo owner/repo]", "Bootstrap ForgeDock-managed labels on a GitHub repo (idempotent)"],
+    ["npx forgedock report [--days N] [--md] [--json]", "30-day pipeline impact receipts for your repo"],
     ["npx forgedock doctor", "Check installation health"],
     ["npx forgedock update", "Pull latest & reinstall"],
     ["npx forgedock uninstall", "Remove commands"],
@@ -1716,10 +1717,10 @@ async function demo() {
 // The journey-routed commands render their own branded marks (hero/compact);
 // splash() would double-brand them. Engine-surface commands, help, and
 // unknown-command output keep the logo.
-const SPLASH_COMMANDS = new Set(["run", "run-issue", "demo", "doctor", "help", "--help", "-h"]);
+const SPLASH_COMMANDS = new Set(["run", "run-issue", "demo", "doctor", "report", "help", "--help", "-h"]);
 const KNOWN_COMMANDS = new Set([
   "install", "init", "enable", "disable", "status", "uninstall", "update",
-  "run", "run-issue", "demo", "doctor", "help", "--help", "-h",
+  "run", "run-issue", "demo", "doctor", "report", "labels", "help", "--help", "-h",
 ]);
 if (SPLASH_COMMANDS.has(command) || !KNOWN_COMMANDS.has(command)) splash();
 
@@ -1800,6 +1801,15 @@ switch (command) {
       );
       exitCode = 1;
     }
+    break;
+  }
+  case "report": {
+    const { runReport } = await import("./report.mjs");
+    exitCode = await runReport(restArgs, {
+      cwd: process.cwd(),
+      stdout: process.stdout,
+      stderr: process.stderr,
+    });
     break;
   }
   case "help":

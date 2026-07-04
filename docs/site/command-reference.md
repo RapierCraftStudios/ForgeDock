@@ -250,6 +250,31 @@ Cleans up stale labels, missing workflow state, project board gaps, dangling wor
 
 ---
 
+### `npx forgedock report`
+
+**30-day pipeline impact receipts for your repo.**
+
+Reads `forge.yaml` for `project.owner/repo` and queries GitHub to surface pipeline metrics for the last 30 days (configurable). Useful for standups, sprint reviews, and justifying the workflow to stakeholders.
+
+```bash
+npx forgedock report              # Default: 30-day terminal summary
+npx forgedock report --days 7     # Last 7 days
+npx forgedock report --md         # Paste-ready Markdown (GitHub comments, standups)
+npx forgedock report --json       # Machine-readable JSON for scripting
+npx forgedock report --md --quiet # Markdown without the fleet-layer pointer
+```
+
+**Metrics reported:**
+- Issues closed in the window, and how many carry `FORGE:TRAJECTORY` and `FORGE:INVESTIGATOR` annotations
+- Median and p90 open→close time
+- Merged PRs and share referencing an issue (`Closes/Fixes/Resolves #N`)
+- Issues carrying `review-finding` (caught before aging) and `workflow:invalid` (self-discarded)
+- Share of issues filed by bot/app authors vs. humans (~approximate, labeled with `~`)
+
+**Degrades gracefully**: unauthenticated `gh` and missing `forge.yaml` both produce actionable error messages and exit non-zero.
+
+---
+
 ### `/analytics`
 
 **Production analytics audit.**
