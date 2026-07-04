@@ -14,7 +14,10 @@ const PORT = process.env.PORT || 3000;
 const TABLE = [
   ['GET', /^\/notes$/, routes.listNotes],
   ['POST', /^\/notes$/, routes.createNote],
+  ['GET', /^\/notes\/count$/, routes.countNotes],
+  ['GET', /^\/notes\/tags$/, routes.listTags],
   ['GET', /^\/notes\/(?<id>\d+)$/, routes.getNote],
+  ['PATCH', /^\/notes\/(?<id>\d+)$/, routes.updateNote],
   ['DELETE', /^\/notes\/(?<id>\d+)$/, routes.deleteNote],
 ];
 
@@ -58,7 +61,7 @@ const server = http.createServer(async (req, res) => {
 
   const [, pattern, handler] = match;
   const groups = url.pathname.match(pattern).groups || {};
-  const body = req.method === 'POST' ? await readBody(req) : {};
+  const body = req.method === 'POST' || req.method === 'PATCH' ? await readBody(req) : {};
 
   try {
     const result = handler(req, res, { ...groups, query, body });
