@@ -586,6 +586,16 @@ Use the `/review-pr` skill to review the shipping PR. This is a comprehensive re
 Skill(skill="review-pr", args="{PR_NUMBER}")
 ```
 
+**If the review returns blocking findings (FINDINGS, not PASSED)**:
+- Do NOT close the PR.
+- Do NOT restart from Step 1.
+- Fix the blockers on `milestone/{slug}`, push the commits, then re-invoke review on the same PR:
+  ```
+  Skill(skill="review-pr", args="{PR_NUMBER}")
+  ```
+- Step 3 will detect the open PR on the next `/milestone ship {slug}` call and update it in place — the same PR number is preserved, review history is retained, and the reviewer is re-notified.
+- This eliminates the close-and-recreate churn that inflates the failed-PR count and lowers the staging→main pass rate. <!-- Added: forge#1328 -->
+
 ### Step 5: Report — PR is ready for user to merge
 
 ```

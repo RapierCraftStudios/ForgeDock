@@ -72,6 +72,8 @@ The **Evidence-Based Review Protocol** and **Structured Findings Protocol** are 
 
 **This phase is MANDATORY and must execute before Phase 0A. No phase may be skipped.**
 
+**Idempotent re-review**: This spec is safe to invoke multiple times on the same PR. Each invocation posts a new `FORGE:REVIEW_ROUTE` marker with the current SHA — re-review passes are distinguished by SHA, not by PR number. When a milestone ship PR receives blocking findings and the fixes are pushed to the head branch, re-invoke this spec on the same PR number. Do NOT close the PR and create a new one. <!-- Added: forge#1328 -->
+
 Resolve the staging→main PR number and post a routing marker immediately. This creates an audit trail — if a staging→main PR has no `FORGE:REVIEW_ROUTE` comment after this command was invoked, the review was bypassed or never started.
 
 ```bash
