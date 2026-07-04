@@ -456,6 +456,54 @@ describe("getToolHandlers", () => {
       else process.env.FORGEDOCK_BASH_TIMEOUT = orig;
     }
   });
+
+  // Regression: SIGTERM from external source must NOT be misclassified as
+  // a ForgeDock timeout (issue #1240). Before the fix, the timedOut condition
+  // included `result.signal === "SIGTERM"` which fired for any SIGTERM — not
+  // only those sent by Node's own spawnSync timeout mechanism. A child killed
+  // by an external SIGTERM well below the configured timeoutMs was
+  // incorrectly reported as "Command timed out after Ns".
+  it("run_bash does NOT classify an external SIGTERM as a timeout (issue #1240)", () => {
+    const orig = process.env.FORGEDOCK_BASH_TIMEOUT;
+    // Set a generous 10-second timeout — the command will finish in <1s via
+    // an external SIGTERM, so elapsedMs will be well below timeoutMs.
+    process.env.FORGEDOCK_BASH_TIMEOUT = "10000";
+    try {
+      const handlers = getToolHandlers(os.tmpdir());
+      // The command sends SIGTERM to its own process group immediately.
+      // On POSIX this terminates the child via signal (status=null,
+      // signal="SIGTERM") well within the 10s timeout window.
+      // On Windows, `kill` is not available — skip this test gracefully.
+      let threw = false;
+      let thrownErr = null;
+      try {
+        // `kill $$` sends SIGTERM to the shell's own PID immediately.
+        handlers.run_bash({ command: "kill $$" });
+      } catch (err) {
+        threw = true;
+        thrownErr = err;
+      }
+      if (threw && thrownErr) {
+        // The command may throw because it exited non-zero or was signaled,
+        // but it MUST NOT be reported as a timeout.
+        assert.doesNotMatch(
+          thrownErr.message,
+          /timed out/i,
+          `A child killed by external SIGTERM must not be reported as a timeout — got: ${thrownErr.message}`,
+        );
+        assert.doesNotMatch(
+          thrownErr.message,
+          /FORGEDOCK_BASH_TIMEOUT/,
+          `Timeout error message must not appear for an external-SIGTERM kill — got: ${thrownErr.message}`,
+        );
+      }
+      // If the command didn't throw (e.g. on Windows where `kill $$` may be
+      // interpreted differently), the test passes vacuously — no misreport.
+    } finally {
+      if (orig === undefined) delete process.env.FORGEDOCK_BASH_TIMEOUT;
+      else process.env.FORGEDOCK_BASH_TIMEOUT = orig;
+    }
+  });
 });
 
 // ---------------------------------------------------------------------------

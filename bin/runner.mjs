@@ -549,21 +549,30 @@ export function getToolHandlers(cwd) {
       });
       const stdout = result.stdout ? String(result.stdout) : "";
       const stderr = result.stderr ? String(result.stderr) : "";
-      // Detect timeout: result.error.code === "ETIMEDOUT" and/or
-      // result.signal === "SIGTERM" are the primary indicators (set by
-      // Node.js when the timeout fires and the process is killed), but on
-      // Windows signal reporting may not be reliable. Fall back to elapsed
-      // wall time — if we spent at least as long as the timeout, the timer
-      // must have fired, since a voluntarily-exiting process would have
-      // returned before then. Gate all of this on `result.status === null`
-      // so a legitimately-completed process near the timeout boundary is
-      // never misreported as timed out.
+      // Detect timeout. Two reliable indicators:
+      //   1. result.error.code === "ETIMEDOUT" — Node sets this on the error
+      //      object specifically when spawnSync's own `timeout` option fires
+      //      and it kills the child. This is the authoritative Node-initiated
+      //      kill signal.
+      //   2. elapsedMs >= timeoutMs — elapsed-wall-time fallback for platforms
+      //      (primarily Windows) where the ETIMEDOUT error code is unreliable.
+      //      If we spent at least as long as the timeout, the timer must have
+      //      fired, since a voluntarily-exiting process would have returned
+      //      before then.
+      //
+      // NOTE: `result.signal === "SIGTERM"` is intentionally NOT included.
+      // spawnSync sets result.signal for ANY signal that terminated the child —
+      // including SIGTERM from external sources (supervisors, orchestrators,
+      // `timeout(1)` wrappers, or the child self-signaling) that are entirely
+      // unrelated to this runner's timeout. Including it caused any externally-
+      // sent SIGTERM to be misreported as a ForgeDock timeout (issue #1240).
+      //
+      // Gate all of this on `result.status === null` so a legitimately-
+      // completed process near the timeout boundary is never misreported.
       const elapsedMs = Date.now() - startMs;
       const timedOut =
         result.status === null &&
-        (result.error?.code === "ETIMEDOUT" ||
-          result.signal === "SIGTERM" ||
-          elapsedMs >= timeoutMs);
+        (result.error?.code === "ETIMEDOUT" || elapsedMs >= timeoutMs);
       if (timedOut) {
         const timeoutSecs = Math.round(timeoutMs / 1000);
         const partial = (stdout + stderr).trim();
