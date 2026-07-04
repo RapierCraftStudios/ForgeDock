@@ -539,10 +539,18 @@ export function getToolHandlers(cwd) {
       // available. `shell: shell || true` preserves execSync's implicit
       // "always run via a shell" behavior for compound commands (&&, pipes,
       // heredocs) when resolveBashShell() returns undefined.
+      // maxBuffer defaults to 50 MB. FORGEDOCK_MAX_BUFFER_BYTES overrides it so
+      // tests can trigger ENOBUFS with a small value without generating 50 MB of
+      // output.  Non-positive or non-finite values fall back to the default.
+      const rawMaxBuffer = parseInt(process.env.FORGEDOCK_MAX_BUFFER_BYTES, 10);
+      const maxBuffer =
+        Number.isFinite(rawMaxBuffer) && rawMaxBuffer > 0
+          ? rawMaxBuffer
+          : 50 * 1024 * 1024;
       const result = spawnSync(command, {
         cwd,
         encoding: "utf-8",
-        maxBuffer: 50 * 1024 * 1024,
+        maxBuffer,
         timeout: timeoutMs,
         env: childEnv,
         shell: shell || true,
@@ -579,6 +587,18 @@ export function getToolHandlers(cwd) {
         throw new Error(
           `Command timed out after ${timeoutSecs}s and was killed. ` +
             `Set FORGEDOCK_BASH_TIMEOUT (ms) to adjust.` +
+            (partial ? `\nPartial output:\n${partial}` : ""),
+        );
+      }
+      if (result.error?.code === "ENOBUFS") {
+        // The process ran but produced more output than maxBuffer allows.
+        // spawnSync populates result.stdout/stderr up to the limit before
+        // setting result.error — surface what was captured so the agent has
+        // actionable context rather than a misleading "failed to start" error.
+        const partial = (stdout + stderr).trim();
+        const bufMB = Math.round(maxBuffer / (1024 * 1024));
+        throw new Error(
+          `Command output exceeded ${bufMB}MB buffer limit (output truncated).` +
             (partial ? `\nPartial output:\n${partial}` : ""),
         );
       }
