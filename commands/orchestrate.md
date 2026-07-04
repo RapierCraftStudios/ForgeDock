@@ -852,6 +852,89 @@ The engine drives every phase transition deterministically, mirrors state to the
 
 ---
 
+## Background Dispatch Mode <!-- Added: forge#1251 -->
+
+This section governs how the orchestrator dispatches DAG-ready issues as background agents and how it handles wake/compaction recovery. Read it before every Phase 4 dispatch decision.
+
+### Feature gate
+
+Background dispatch (via `run_in_background=true` on each `Agent()` call) is the primary dispatch path. It is enabled when **both** of the following conditions hold:
+
+1. **Version**: Claude Code >= v2.1.186 (the release that introduced background subagents with proper `agent_completed` completion notifications and the Notification hook). Below this version, background agents may not surface completion events correctly.
+2. **Env var**: `CLAUDE_CODE_DISABLE_BACKGROUND_TASKS` is **not** set (or is empty).
+
+Check both at the start of Phase 4, before the first dispatch:
+
+```bash
+# Feature gate check — run once before Phase 4 dispatch begins
+BACKGROUND_DISPATCH_ENABLED=true
+
+if [ -n "${CLAUDE_CODE_DISABLE_BACKGROUND_TASKS:-}" ]; then
+  echo "Background dispatch disabled: CLAUDE_CODE_DISABLE_BACKGROUND_TASKS is set."
+  BACKGROUND_DISPATCH_ENABLED=false
+fi
+
+# Version check: if the Claude Code version can be read, compare it.
+# If the version cannot be determined, default to ENABLED (optimistic).
+CC_VERSION=$(claude --version 2>/dev/null | grep -oP '\d+\.\d+\.\d+' | head -1 || echo "")
+if [ -n "$CC_VERSION" ]; then
+  # Compare major.minor.patch numerically
+  IFS='.' read -r CC_MAJOR CC_MINOR CC_PATCH <<< "$CC_VERSION"
+  if [ "$CC_MAJOR" -lt 2 ] || \
+     { [ "$CC_MAJOR" -eq 2 ] && [ "$CC_MINOR" -lt 1 ]; } || \
+     { [ "$CC_MAJOR" -eq 2 ] && [ "$CC_MINOR" -eq 1 ] && [ "$CC_PATCH" -lt 186 ]; }; then
+    echo "Background dispatch disabled: Claude Code ${CC_VERSION} < v2.1.186."
+    BACKGROUND_DISPATCH_ENABLED=false
+  fi
+fi
+```
+
+**When `BACKGROUND_DISPATCH_ENABLED=false`**: fall back to the current streaming dispatch behavior — `run_in_background=true` is still set on each `Agent()` call (existing behavior, already correct), but treat completions as synchronous and do not rely on `agent_completed` notifications. Poll issue labels for terminal state instead.
+
+**When `BACKGROUND_DISPATCH_ENABLED=true`**: use `run_in_background=true` (already in the Step 4A Agent() template) and react to `agent_completed` notifications as documented in Step 4B. Do NOT poll.
+
+### Orchestrator state reconstruction on wake / after compaction
+
+The orchestrator context window must stay small regardless of how many issues have been dispatched. Achieving this requires that all dispatch state is stored on GitHub — not in the orchestrator's context.
+
+**Contract**: After any compaction event or orchestrator wake (session resumed after idle/restart), do NOT rely on in-context variables. Instead, reconstruct the DAG dispatch state from GitHub before checking for newly ready issues:
+
+```bash
+# Reconstruct dispatch state from GitHub after compaction / wake
+# Run this block at the top of every resumed Phase 4 loop iteration.
+
+# 1. Re-fetch all issue labels to rebuild terminal-state knowledge
+for NUM in {all_issue_numbers_in_batch}; do
+  ISSUE_STATE=$(gh issue view "$NUM" -R {GH_REPO} --json state,labels \
+    --jq '{state: .state, workflow: [.labels[].name | select(startswith("workflow:"))]}' \
+    2>/dev/null || echo '{}')
+  # Classify: terminal if workflow:merged, workflow:invalid, needs-human, or CLOSED
+  if echo "$ISSUE_STATE" | grep -qE 'workflow:merged|workflow:invalid|needs-human|CLOSED'; then
+    TERMINAL_ISSUES+=("$NUM")
+  else
+    ACTIVE_ISSUES+=("$NUM")
+  fi
+done
+
+# 2. Re-derive the ready set: any non-terminal issue whose predecessors are all terminal
+for NUM in "${ACTIVE_ISSUES[@]}"; do
+  ALL_PREDS_DONE=true
+  for PRED in {predecessors_of_NUM}; do
+    if ! printf '%s\n' "${TERMINAL_ISSUES[@]}" | grep -qx "$PRED"; then
+      ALL_PREDS_DONE=false
+      break
+    fi
+  done
+  $ALL_PREDS_DONE && READY_ISSUES+=("$NUM")
+done
+
+# 3. Dispatch the reconstructed ready set via standard Step 4A.pre.0 → 4A.pre → 4A flow
+```
+
+**Why this keeps context small**: Each `Agent()` call returns an agent ID stored only in `AGENT_ISSUE_MAP`, which is rebuilt per Step 4A.pre dispatch batch. After compaction, the map is gone — but the DAG state is fully on GitHub. The reconstruction above re-derives the ready set from labels alone, so the orchestrator context never needs to hold cumulative dispatch history.
+
+---
+
 ## Phase 4: Streaming DAG Execution
 
 ### Step 4A-pre: Staging baseline tracking (MANDATORY — continuous)
@@ -1133,6 +1216,8 @@ AGENT_ISSUE_MAP[{NUMBER}] = <agent_id returned by Agent()>
 ### Step 4B: Monitor completions and dispatch newly ready issues
 
 You will be automatically notified when each background agent completes. **Do NOT use `sleep` loops to poll for completion.** Instead, wait for the automatic notification. When you receive a notification that an agent completed, immediately process it.
+
+**Successor dispatch latency is measured from `agent_completed`, not from orchestrator polling.** The moment you receive an `agent_completed` notification for issue N, that is t=0 for dispatching N's successors. Any successor whose predecessors are all now terminal MUST be dispatched in the same response that processes the notification — not after a poll cycle, not after a sleep. This is the design property that makes streaming DAG execution faster than wave-based execution. <!-- Added: forge#1251 -->
 
 **Core streaming dispatch loop**: After processing each agent completion, check the DAG for newly unblocked issues. If any issue now has all predecessors in a terminal state, dispatch it immediately (run Steps 4A.pre.0, 4A.pre, and 4A for the newly ready issues). This is the key difference from the wave model — issues dispatch as soon as their specific predecessors complete, not after an entire group finishes.
 
