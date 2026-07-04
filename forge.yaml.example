@@ -304,7 +304,7 @@ branches:
 #   # These drive /qa-sweep page discovery, /deploy-info file categorization,
 #   # /orchestrate high-fan-in detection, /review-pr route-registration checks,
 #   # and the verify-route-registration.sh script. All values are relative to
-#   # the repository root. Defaults match the AlterLab monorepo layout — set
+#   # the repository root. Defaults match the example monorepo layout — set
 #   # these if your project uses a different directory structure.
 #   #
 #   # layout:

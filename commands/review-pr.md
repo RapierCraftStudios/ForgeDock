@@ -462,7 +462,7 @@ if [ "$BASH_AVAILABLE" = "true" ]; then
 
     # 1. Route/router/middleware/shared-module/component registration
     # Export forge.yaml layout overrides so verify-route-registration.sh uses project-configured
-    # paths instead of AlterLab defaults. The script supports these env vars (lines 36-44 of
+    # paths instead of project defaults. The script supports these env vars (lines 36-44 of
     # verify-route-registration.sh) but requires the caller to set them. <!-- Added: forge#1349 -->
     if [ -f "$REPO_ROOT/forge.yaml" ]; then
         _PAGES_ROOT=$(grep -A10 'layout:' "$REPO_ROOT/forge.yaml" 2>/dev/null \

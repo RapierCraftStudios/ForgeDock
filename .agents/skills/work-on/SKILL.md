@@ -13,23 +13,22 @@ Inside the Forge repo, resolve issue targets like this unless the user explicitl
 
 | Input | Repo |
 |---|---|
-| `123`, `#123`, `next`, empty | `RapierCraftStudios/forge` |
-| `forge:123` | `RapierCraftStudios/forge` |
-| `alterlab:123` | `RapierCraft/AlterLab` |
-| `mcp:5` | `RapierCraft/alterlab-mcp-server` |
-| `n8n:12` | `RapierCraft/n8n-nodes-alterlab` |
+| `123`, `#123`, `next`, empty | `RapierCraftStudios/forgedock` |
+| `forge:123` | `RapierCraftStudios/forgedock` |
+
+Satellite prefixes (e.g. `mcp:5`, `sdk:12`) are project-specific and defined in `forge.yaml → repos.satellites`. See `commands/work-on.md` Phase 0B for multi-repo routing.
 
 For Forge repo issues, set:
-- `GH_REPO=RapierCraftStudios/forge`
-- `GH_FLAG=--repo RapierCraftStudios/forge`
-- `REPO_PATH=/home/mrdubey/projects/forge`
+- `GH_REPO=RapierCraftStudios/forgedock`
+- `GH_FLAG=--repo RapierCraftStudios/forgedock`
+- `REPO_PATH=/home/mrdubey/projects/forgedock`
 - `STAGING_BRANCH=staging`
 - `DEFAULT_BRANCH=main`
 
 ## Codex Runtime Overrides
 
 - Treat any `.claude/worktrees/...` example path in the shared command spec as `.codex/worktrees/...` for Codex execution in this repo.
-- Create and reuse worktrees under `/home/mrdubey/projects/forge/.codex/worktrees`.
+- Create and reuse worktrees under `/home/mrdubey/projects/forgedock/.codex/worktrees`.
 - Prefer `gh api repos/{GH_REPO}/issues/{NUMBER}/comments` for comment reads instead of `gh issue view --comments`.
 - Treat GitHub Project-board sync as best-effort only for Forge issues. Do not block the pipeline if Forge-specific board/component mappings are absent.
 - Create missing `workflow:*` labels on demand if the Forge repo does not already have them.

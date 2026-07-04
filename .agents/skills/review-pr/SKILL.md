@@ -5,12 +5,12 @@ description: Review Forge pull requests from Codex with Forge-aware heuristics a
 
 # Forge Repo Adapter: review-pr
 
-Use `commands/review-pr.md` as the lifecycle source for review phases, GitHub outputs, and merge semantics, but override the AlterLab-specific repo assumptions when the PR belongs to `RapierCraftStudios/forge`.
+Use `commands/review-pr.md` as the lifecycle source for review phases, GitHub outputs, and merge semantics, but override the project-specific repo assumptions when the PR belongs to `RapierCraftStudios/forgedock`.
 
 ## Forge Repo Review Override
 
 For Forge repo PRs:
-- Do not require AlterLab service paths like `services/api`, `services/worker`, or `web/`.
+- Do not require project-specific service paths like `services/api`, `services/worker`, or `web/`.
 - Do not depend on `commands/review-pr-agents.md` as an authoritative domain catalog; it remains reference-only for the shared command system.
 - Do not route Forge PRs into `review-pr-staging` solely because the base/head pair matches staging patterns. Continue in a Forge-aware full review flow in this adapter.
 
