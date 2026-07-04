@@ -461,6 +461,23 @@ if [ "$BASH_AVAILABLE" = "true" ]; then
     # Output is structured: "BLOCKING: ...", "WARNING: ...", "OK: ..." per line.
 
     # 1. Route/router/middleware/shared-module/component registration
+    # Export forge.yaml layout overrides so verify-route-registration.sh uses project-configured
+    # paths instead of AlterLab defaults. The script supports these env vars (lines 36-44 of
+    # verify-route-registration.sh) but requires the caller to set them. <!-- Added: forge#1349 -->
+    if [ -f "$REPO_ROOT/forge.yaml" ]; then
+        _PAGES_ROOT=$(grep -A10 'layout:' "$REPO_ROOT/forge.yaml" 2>/dev/null \
+            | grep -E '^\s*pages:' | head -1 | sed 's/.*pages:[[:space:]]*//' | tr -d '"' | tr -d "'" | xargs)
+        _API_ROUTERS=$(grep -A10 'layout:' "$REPO_ROOT/forge.yaml" 2>/dev/null \
+            | grep -E '^\s*api_routers_dir:' | head -1 | sed 's/.*api_routers_dir:[[:space:]]*//' | tr -d '"' | tr -d "'" | xargs)
+        _API_MAIN=$(grep -A10 'layout:' "$REPO_ROOT/forge.yaml" 2>/dev/null \
+            | grep -E '^\s*api_main:' | head -1 | sed 's/.*api_main:[[:space:]]*//' | tr -d '"' | tr -d "'" | xargs)
+        _API_MIDDLEWARE=$(grep -A10 'layout:' "$REPO_ROOT/forge.yaml" 2>/dev/null \
+            | grep -E '^\s*api_middleware_dir:' | head -1 | sed 's/.*api_middleware_dir:[[:space:]]*//' | tr -d '"' | tr -d "'" | xargs)
+        [ -n "$_PAGES_ROOT" ] && export FORGE_PAGES_ROOT="$_PAGES_ROOT"
+        [ -n "$_API_ROUTERS" ] && export FORGE_API_ROUTERS_DIR="$_API_ROUTERS"
+        [ -n "$_API_MAIN" ] && export FORGE_API_MAIN="$_API_MAIN"
+        [ -n "$_API_MIDDLEWARE" ] && export FORGE_API_MIDDLEWARE_DIR="$_API_MIDDLEWARE"
+    fi
     echo "=== Running: verify-route-registration.sh ==="
     bash "$FORGE_HOME/scripts/verify-route-registration.sh" "$CHANGED_FILES_TMP" "$REPO_ROOT" || true
 
