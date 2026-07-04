@@ -18,6 +18,17 @@ Verifies a staging→main bundle's acceptance criteria against running code befo
 
 <!-- FORGE:SPEC_LOADED — test-gate.md loaded and active. Agent is bound by this spec. -->
 
+## Forbidden Tools Self-Check
+
+**Before executing any phase**, verify you are NOT using any of these tools:
+
+| Tool | Status | Reason |
+|------|--------|--------|
+| `Agent` | **FORBIDDEN** | Bypasses allowed-tools constraint; produces unstructured output that cannot be parsed into the machine-readable BLOCK / PASS / SKIP verdict |
+| `EnterPlanMode` | **FORBIDDEN** | Breaks execution context; gate phases must execute, not be planned |
+
+If you find yourself about to call `Agent(...)`, stop and use `Task(...)` instead.
+
 **Posture**: Blocking-with-override at the staging→main boundary (mirrors the Phase 0A open-finding gate in `/review-pr-staging`). Posture is config-driven via `verification.test_gate`.
 
 ---

@@ -27,6 +27,17 @@ allowed-tools: Task, Bash, Read, Grep, Glob, WebFetch, Skill
 
 4. **Route correctly at Phase 0.** If the input is "staging" or the PR targets `main`, invoke `Skill("review-pr-staging", ...)` — do NOT run the standard PR review pipeline against a staging→main PR.
 
+## Forbidden Tools Self-Check
+
+**Before executing any phase**, verify you are NOT using any of these tools:
+
+| Tool | Status | Reason |
+|------|--------|--------|
+| `Agent` | **FORBIDDEN** | Spawns opaque subprocesses outside allowed-tools; bypasses spec workflow; cannot post structured findings |
+| `EnterPlanMode` | **FORBIDDEN** | Breaks execution context; must run phases, not plan them |
+
+If you find yourself about to call `Agent(...)`, stop and use `Task(...)` instead. If you find yourself about to use `EnterPlanMode`, stop and execute the next phase directly.
+
 ## Architecture — How This Command Works
 
 This is the **orchestrator**. It routes to the right review mode, runs automated checks, spawns domain-specific agents, triages findings, and posts the verdict.
