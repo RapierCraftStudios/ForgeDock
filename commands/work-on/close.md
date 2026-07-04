@@ -15,6 +15,8 @@ argument-hint: [issue number] [--repo GH_REPO] [--gh-flag GH_FLAG] [--pr PR_NUMB
 **Agent model policy**: `model: "haiku"`, `effort: low` (mechanical tier — label transitions, annotation posting, board updates). Fallback: `model: "sonnet"` if rate-limited. Feature gate: pass `effort` only on Claude Code >= 2.1.154.
 **NEVER use plan mode (EnterPlanMode).**
 
+<!-- FORGE:SPEC_LOADED — work-on/close.md loaded and active. Agent is bound by this spec. -->
+
 ---
 
 ## Inputs

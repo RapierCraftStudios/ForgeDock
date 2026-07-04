@@ -15,6 +15,8 @@ argument-hint: [issue number] [--repo GH_REPO] [--gh-flag GH_FLAG] [--worktree P
 **Agent model policy**: `model: "sonnet"` (standard tier). Fallback: `model: "opus"` if rate-limited. Feature gate: pass `effort` in Task/Skill spawns only on Claude Code >= 2.1.154.
 **NEVER use plan mode (EnterPlanMode).**
 
+<!-- FORGE:SPEC_LOADED — work-on/build/validate.md loaded and active. Agent is bound by this spec. -->
+
 ---
 
 ## Inputs
