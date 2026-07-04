@@ -1364,6 +1364,41 @@ async function doctor() {
     }
   }
 
+  // ── Check 5b: 2026 feature-gated install capabilities ─────────────────────
+  {
+    const detectedVer = detectClaudeVersion();
+    const breakpoints = loadBreakpoints(FORGE_HOME);
+    if (detectedVer === null) {
+      warn(
+        "Version-gated features",
+        "claude CLI not detected — cannot assess 2026 feature availability. Install or add claude to PATH.",
+      );
+    } else {
+      const vStr = Array.isArray(detectedVer) ? detectedVer.join(".") : String(detectedVer);
+      const featureChecks = [
+        ["effort levels", "effort_levels", "2.1.154"],
+        ["SubagentStop context injection", "stop_subagent_stop_additional_context", "2.1.163"],
+        ["Tool(param:value) permission rules", "tool_param_value_permission_rules", "2.1.178"],
+        ["skills/commands merge", "skills_commands_merge", "2.1.196"],
+        ["Sonnet 5 default + 1M context", "sonnet_5_default_1m_context", "2.1.197"],
+      ];
+      const unavailable = featureChecks
+        .filter(([, key]) => !hasFeature(breakpoints, key, vStr))
+        .map(([label, , minVer]) => `${label} (requires v${minVer}+)`);
+      if (unavailable.length === 0) {
+        pass(
+          "Version-gated features",
+          `v${vStr} — all 2026 features available`,
+        );
+      } else {
+        warn(
+          "Version-gated features",
+          `v${vStr} — unavailable: ${unavailable.join(", ")}. Update Claude Code to unlock.`,
+        );
+      }
+    }
+  }
+
   // ── Check 6: CLAUDE.md legacy managed block (cwd, informational) ──────────
   // The journey-based install never injects a CLAUDE.md block — session
   // context comes from the SessionStart hook (see Check 5). A block's absence
