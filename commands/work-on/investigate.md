@@ -146,6 +146,22 @@ gh issue comment {NUMBER} {GH_FLAG} --body "<!-- FORGE:INVESTIGATOR -->
 **{YES|NO}** — {reason}
 {if YES: proposed sub-issues with titles and dependencies}
 
+### Acceptance Spec
+{For each item in the issue's ## Acceptance Criteria section, emit one machine-checkable check line using the format below. If the issue has no Acceptance Criteria section, derive checks from the Recommendation above. Each check MUST be specific, observable, and testable — not vague prose. Checks are consumed by build/validate Phase B6.5 as the merge gate.}
+
+```
+ACCEPTANCE_CHECK: id={ac-1} type={exists|contains|command|behavior} target={file_path|command|url} matcher={string|exit_0|regex} description={one-line human description}
+ACCEPTANCE_CHECK: id={ac-2} type={exists|contains|command|behavior} target={file_path|command|url} matcher={string|exit_0|regex} description={one-line human description}
+```
+
+**Check types**:
+- `exists` — assert a file or directory exists (`target` = path, `matcher` = ignored)
+- `contains` — assert a file contains a string or regex (`target` = file path, `matcher` = string/regex)
+- `command` — run a shell command and assert exit 0 (`target` = shell command, `matcher` = `exit_0`)
+- `behavior` — assert a runtime/observable behavior via shell command (`target` = shell command, `matcher` = expected output string or regex)
+
+**Skipping**: if the issue has no verifiable acceptance criteria and none can be derived from the recommendation, emit a single sentinel: `ACCEPTANCE_CHECK: id=ac-skip type=skipped target=none matcher=none description=No machine-checkable criteria available — human review required`
+
 <!-- INVESTIGATION:COMPLETE -->"
 ```
 
