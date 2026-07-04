@@ -770,22 +770,11 @@ Annotations record *what happened*; labels record *where a unit of work is* so a
 consumer can determine the current stage without reading every comment. The
 protocol reserves the `workflow:` label namespace:
 
-| Label | Meaning |
-|-------|---------|
-| `workflow:investigating` | Investigation in progress |
-| `workflow:ready-to-build` | Investigation complete, build not started |
-| `workflow:building` | Build in progress |
-| `workflow:in-review` | Pull request open, review active |
-| `workflow:merged` | Pull request merged, work item closed |
-| `workflow:invalid` | Closed as invalid |
-| `workflow:decomposed` | Split into sub-issues |
-| `needs-human` | Blocked; human intervention required |
-
-**Terminal labels** (processing stops when any is set): `workflow:merged`,
-`workflow:invalid`, `workflow:decomposed`, `needs-human`.
-
-Labels and annotations are complementary: labels give a fast state lookup,
-annotations give the full context behind that state.
+> **Canonical reference**: [`docs/spec/label-state-machine.md`](label-state-machine.md)
+>
+> The full state table, transition diagram, terminal labels, and label-exclusivity
+> pattern are defined there. Labels and annotations are complementary: labels give
+> a fast state lookup, annotations give the full context behind that state.
 
 ---
 
