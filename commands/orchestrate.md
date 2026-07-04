@@ -644,7 +644,7 @@ Build a **directed acyclic graph (DAG)** of per-issue dependencies. Each issue g
 - **Domain serialization edges**: DATABASE issues form a linear chain (each has the previous DATABASE issue as its predecessor). Same-small-directory issues (Layer 2) and high-fan-in file issues (Layer 3) get directed edges as per Step 3C rules.
 - **Conservative fallback edges**: Low-confidence issues (Layer 4) get edges to same-domain issues as per Step 3C rules.
 - **Co-change coupling edges** <!-- Added: forge#1196 -->: High co-change file pairs (Layer 5, 3+ shared commits in the bounded window) that span two different issues get a directed edge using the same lower-issue-number-is-predecessor convention as Layer 1. Verified-independent pairs (Layer 5, zero shared commits) may instead REMOVE an edge that Layer 2 or Layer 4 would otherwise have added for that pair — Layer 1 and Layer 3 edges are never removed by a Layer 5 downgrade.
-- **No artificial concurrency limit** — all issues with empty predecessor sets dispatch simultaneously. The only constraints are file overlap, explicit dependencies, and co-change coupling.
+- **No artificial concurrency limit by default** — all issues with empty predecessor sets dispatch simultaneously. The only constraints are file overlap, explicit dependencies, and co-change coupling. When `forge.yaml → orchestration.max_concurrent` is set, the dispatch loop queues excess ready issues and releases them as running workers complete (see Engine mode § Concurrency model).
 
 **Terminology:**
 - **Ready issues**: Issues whose predecessor set is empty (all predecessors have reached terminal state or were never added)
@@ -852,6 +852,57 @@ forgedock run-issue <issue> --lane <staging|milestone/slug>
 ```
 
 The engine drives every phase transition deterministically, mirrors state to the `FORGE:STATE` block on the issue, and holds a lease. To recover stalls, scan in-flight issues' `FORGE:STATE`; any issue with an expired lease and a non-terminal state is re-dispatched with the same `forgedock run-issue <issue>` command — it resumes from the last committed phase (idempotent). This replaces the label-heuristic "already in progress" check and the resume-with-nagging loop.
+
+### Concurrency model: in-process worker pool + worktree-per-issue
+
+**Decision** (recorded 2026-07-04, issue #1324): The durable engine uses an **in-process worker pool** model — a single control plane dispatches and monitors all concurrent issues, each isolated in its own git worktree.
+
+**Rationale over process-per-issue:**
+- Worktree isolation primitive already ships: `scripts/worktree-lifecycle.sh` (`ensure`/`cleanup` subcommands, merged #1268) provides deterministic filesystem isolation without forking a separate OS process per issue.
+- A single control plane can enforce **shared rate-limit backpressure** across all in-flight issues; per-process models require IPC to share API quota state.
+- Co-ordination primitives (DAG ready-set, completion callbacks, lease renewal) live in one place with no cross-process synchronisation overhead.
+- Aligns with the engine-first inversion (#1256): the engine owns correctness; the spec owns routing.
+
+**Filesystem isolation**: Before dispatching each issue, the engine calls:
+```bash
+scripts/worktree-lifecycle.sh ensure <issue-number> <lane>
+# → creates or reuses .forgedock/worktrees/issue-<number>/
+```
+On completion or failure:
+```bash
+scripts/worktree-lifecycle.sh cleanup <issue-number>
+```
+
+**Concurrency cap** (`forge.yaml → orchestration.max_concurrent`):
+- Default: uncapped — all DAG-ready issues dispatch simultaneously (preserves current behaviour).
+- When `max_concurrent: N` is set, the dispatch loop holds at most N in-flight workers. Newly ready issues queue and start as running workers complete.
+- Prevents wave-triggered rate-limit storms on large batches (e.g., 40-issue milestone dispatches).
+
+**Rate-limit backpressure** (pre-dispatch gate):
+
+Before dispatching each new worker, the engine runs:
+```bash
+REMAINING=$(gh api rate_limit --jq '.resources.core.remaining')
+RESET_AT=$(gh api rate_limit --jq '.resources.core.reset')
+RATE_LIMIT_FLOOR=${FORGE_RATE_LIMIT_FLOOR:-200}
+
+if [ "$REMAINING" -lt "$RATE_LIMIT_FLOOR" ]; then
+  echo "GitHub API headroom below floor ($REMAINING < $RATE_LIMIT_FLOOR). Pausing dispatch until reset at $RESET_AT."
+  # Pause dispatch loop — already-running workers continue unaffected
+  sleep_until "$RESET_AT"
+fi
+```
+
+- `FORGE_RATE_LIMIT_FLOOR` defaults to 200 remaining requests. Override in `forge.yaml → orchestration.rate_limit_floor`.
+- Already-in-flight workers are **never interrupted** by the backpressure gate — only new dispatches pause.
+- The gate is re-checked after each worker completion, not on a timer, so dispatch resumes immediately once the floor is cleared.
+
+**Configuration reference** (`forge.yaml`):
+```yaml
+orchestration:
+  max_concurrent: 8          # optional; default: uncapped
+  rate_limit_floor: 200      # optional; default: 200
+```
 
 ---
 
@@ -2100,7 +2151,7 @@ the Summary section above. `BATCH_ELAPSED` is the wall-clock duration of the orc
 
 1. **Every agent MUST invoke `/work-on` via the Skill tool.** No custom prompts. No manual implementation. Copy the Phase 4A template, fill in variables, done. (See HARD RULES at top of file.)
 2. **NEVER merge anything to `main`** — agents merge to `staging` or `milestone/{slug}` only
-3. **No artificial concurrency limit** — spawn as many agents as there are independent issues. Only file overlap and dependencies require sequencing.
+3. **No artificial concurrency limit by default** — spawn as many agents as there are independent issues. Only file overlap and dependencies require sequencing. Set `forge.yaml → orchestration.max_concurrent` to cap in-flight workers and prevent rate-limit storms on large batches (see Engine mode § Concurrency model).
 4. **Always confirm with user before launching** — Step 3E is the mandatory checkpoint
 5. **No retries** — if an agent fails, report it and move on
 6. **Respect existing work** — skip issues already being worked on (`workflow:building`, `workflow:in-review`)
