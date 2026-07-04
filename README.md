@@ -320,6 +320,7 @@ Using ForgeDock in your pipeline? Add the badge — each one is a backlink and a
 
 ## Docs & community
 
+- [GitHub Is Already Your Agents' Memory](docs/site/github-is-the-memory.md) — the canonical argument: why GitHub is the right place for agent memory, how FORGE annotations make it machine-readable, and how to adopt the protocol without ForgeDock
 - [Getting Started in 5 Minutes](docs/site/getting-started.md)
 - [How the Knowledge Graph Works](docs/site/how-it-works.md)
 - [What Are Those FORGE Comments?](docs/site/annotations-explained.md) — 2-minute explainer for annotations you meet in the wild
