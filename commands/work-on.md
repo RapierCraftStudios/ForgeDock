@@ -71,6 +71,44 @@ Orchestrator for the full issue lifecycle: investigate → decompose (if needed)
 
 ---
 
+## Spawn-Decision Policy
+
+<!-- FORGE:SPAWN_POLICY — Canonical spawn-decision table. Sibling specs (orchestrate.md, review-pr.md) link to this section. Sub-issues #1276–#1279 reference this table. -->
+
+**Default: run inline.** Every skill, phase, and sub-agent runs inline in the current context unless one of the three criteria below explicitly applies. A sub-agent buys exactly two things — parallelism and context isolation. If neither is needed, forking is waste.
+
+### Spawn-Decision Table
+
+| Row | Criterion | Fork? | Example |
+|-----|-----------|-------|---------|
+| a | **Parallel fan-out** — two or more independent work units can execute concurrently and the total wall time saving justifies the fork overhead | YES — spawn one sub-agent per work unit | `/orchestrate` dispatching multiple `/work-on` agents; `review-pr` spawning domain-specific reviewers in parallel |
+| b | **Fresh-context isolation** — the work unit is a structured review or audit whose value depends on seeing the artefact without the builder's accumulated context bias, AND the review result is load-bearing for the merge decision | YES — spawn a dedicated sub-agent | Phase 5C review-fork when build context is large (see Row c for the quantitative threshold) |
+| c | **Parent context near overflow** — the parent agent has made ≥20 Skill invocations OR the build changed ≥10 files, meaning delegating review inline risks a mid-review token overflow | YES — spawn a fresh sub-agent for review | Phase 5C: `Skill(skill="work-on/review", …)` instead of direct `review-pr` invocation |
+
+**If none of the three rows match: run inline.** Do not fork for convenience, narrative clarity, or to avoid reading a large file. Context cost of a fork (spawning, context reconstruction, result aggregation) is paid every time, even when parallelism or isolation adds no value.
+
+### Depth Budget
+
+**Available depth**: 5 levels (since Claude Code v2.1.172).
+
+**Target depth for a standard run**: ≤ 3.
+
+| Depth | Agent | Notes |
+|-------|-------|-------|
+| 1 | `/orchestrate` | Top-level dispatcher — never implements directly |
+| 2 | `/work-on` | Issue pipeline — runs build phases inline |
+| 3 | Parallel reviewers (Row a/b/c fork) | Domain review agents spawned by Phase 5C |
+
+**Build phases (3A–3M) run inline at depth 2** — they are sequential sub-phases of `/work-on`, not independent agents. Forking the build into a sub-agent (depth 3) is a violation of Row a/b/c unless the build itself fans out independently scoped work units.
+
+**Depth 4–5 are reserved** for exceptional cases (e.g. an orchestrate agent that itself spawns an orchestrate agent for a sub-milestone). Agents that reach depth 4 MUST log a justification comment on the relevant issue.
+
+### Phase 5C Cross-Reference
+
+The existing Phase 5C context-budget check (≥10 changed files OR ≥20 Skill invocations → spawn `work-on/review` sub-agent) is an instance of **Row (c)** above. The quantitative thresholds are not changed — only their framing: they are now a specific application of the spawn-decision table, not a standalone ad-hoc rule.
+
+---
+
 ## Pipeline Rules
 
 - **NEVER merge to main.** PRs target `staging` (fast lane) or `milestone/{slug}` (feature lane).
@@ -1686,7 +1724,7 @@ PR #${PR_NUMBER} created targeting \`{PR_BASE}\`. Invoking /review-pr with --aut
 
 **Context budget check** (run before invoking review-pr): <!-- Added: forge#93 -->
 
-Large-context sessions that accumulated significant build history cause review-pr to hit the token limit mid-review. Check the accumulated context before delegating:
+Large-context sessions that accumulated significant build history cause review-pr to hit the token limit mid-review. This check is an instance of **Spawn-Decision Policy Row (c)** (parent context near overflow) — see the [Spawn-Decision Table](#spawn-decision-table) for the general policy. Check the accumulated context before delegating:
 
 - If the build changed **≥10 files** OR this agent has made **≥20 Skill invocations** since it started: invoke `work-on/review` as a fresh sub-agent (via `Skill(skill="work-on/review", args="...")`) rather than calling review-pr directly. The sub-agent starts with a clean context window.
 - Otherwise (small build, few skill calls): invoke review-pr directly as below.
