@@ -1101,10 +1101,10 @@ DIFF_SLICE_INFRA=$(echo "$FULL_DIFF" | awk '
 ')
 [ -z "$DIFF_SLICE_INFRA" ] && DIFF_SLICE_INFRA="$FULL_DIFF"
 
-# --- Scraper agent: scrape, proxy, playwright, stealth, browser files ---
+# --- Domain Logic agent: scraping/browser-automation files (does not match bare playwright/E2E test files) ---
 DIFF_SLICE_SCRAPER=$(echo "$FULL_DIFF" | awk '
   /^diff --git/ { in_block=0 }
-  /^diff --git.*\/(scrape|scraper|proxy|playwright|stealth|browser|crawl)/ { in_block=1 }
+  /^diff --git.*\/(scrape|scraper|stealth|browser_pool|headless|anti_bot|captcha|crawl)/ { in_block=1 }
   in_block { print }
 ')
 [ -z "$DIFF_SLICE_SCRAPER" ] && DIFF_SLICE_SCRAPER="$FULL_DIFF"
