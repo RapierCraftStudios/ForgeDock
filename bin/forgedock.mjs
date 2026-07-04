@@ -546,7 +546,7 @@ async function initFlow(c) {
       stagingBranch: draft.branches.staging.value,
     });
     atomicWriteFile(outputPath, content);
-    celebrate(c, { written: true, todoCount: 0 });
+    celebrate(c, { written: true, todoCount: 0, isMinimal: true });
     return 0;
   }
 

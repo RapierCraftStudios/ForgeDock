@@ -564,7 +564,8 @@ describe("celebrate (Act V)", () => {
     celebrate(ctx, { written: true, todoCount: 2, total: 24, hookStatus: "installed" });
     assert.match(w.text, /Forged\./);
     assert.match(w.text, /34s|3[0-9]s/);
-    assert.match(w.text, /work-on next/);
+    assert.match(w.text, /npx forgedock doctor/);
+    assert.match(w.text, /\/issue/);
     assert.match(w.text, /2/); // TODO count surfaces in the receipt
   });
 

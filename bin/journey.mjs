@@ -744,11 +744,16 @@ export function celebrate(ctx, summary) {
     w.write(`  ${glyph} ${summary.total} commands · hook ${summary.hookStatus === "skipped-malformed" ? "skipped" : "active"}   ${dimLine(ctx, hookNote)}\n`);
   }
   w.write("\n");
+  if (summary.isMinimal) {
+    w.write("  " + dimLine(ctx, "see docs/CONFIG.md for optional sections") + "\n");
+  }
   w.write(
     box(
       [
-        `  1. open claude in this repo`,
-        `  2. run /work-on next — watch an issue become a merged PR`,
+        `  1. run npx forgedock labels setup — bootstrap GitHub labels`,
+        `  2. run npx forgedock doctor     — verify the install is green`,
+        `  3. open claude in this repo`,
+        `  4. run /issue <title> then /work-on <number>`,
       ],
       { title: "what's next" },
     ),
