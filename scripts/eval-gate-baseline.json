@@ -1,0 +1,17 @@
+{
+  "schema_version": "1",
+  "run_id": "seed-placeholder",
+  "generated_at": "2026-07-04T00:00:00.000Z",
+  "corpus_size": 5,
+  "issues_run": 5,
+  "successful_runs": 4,
+  "failed_runs": 1,
+  "success_rate_pct": 80,
+  "mean_wall_clock_ms": null,
+  "median_wall_clock_ms": null,
+  "total_intervention_count": 1,
+  "cost": null,
+  "run_mode": "subset",
+  "spec_sha": null,
+  "_note": "Placeholder baseline — replace with a real harness run once #1285 is complete. Tracked in: https://github.com/RapierCraftStudios/ForgeDock/issues/1285"
+}
