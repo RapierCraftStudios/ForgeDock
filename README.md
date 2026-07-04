@@ -323,7 +323,7 @@ Using ForgeDock in your pipeline? Add the badge — each one is a backlink and a
 - [Getting Started in 5 Minutes](docs/site/getting-started.md)
 - [How the Knowledge Graph Works](docs/site/how-it-works.md)
 - [What Are Those FORGE Comments?](docs/site/annotations-explained.md) — 2-minute explainer for annotations you meet in the wild
-- [FORGE Annotation Protocol](docs/spec/forge-protocol-v1.md) — the open standard for AI context passing
+- [FORGE Annotation Protocol](docs/spec/forge-protocol-v1.md) — the open standard for AI context passing (CC-BY-4.0)
 - [ForgeDock vs. Manual Claude Code Workflows](docs/site/vs-manual-workflows.md)
 - [ForgeDock vs. DeepWiki, AGENTS.md, and Cursor Memories](docs/comparison.md)
 - [Command Learning Path](docs/site/command-learning-path.md) — which commands to learn first

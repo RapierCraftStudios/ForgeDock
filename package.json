@@ -36,6 +36,7 @@
     "!bin/tests/",
     "commands/",
     "docs/",
+    "!docs/site/.vitepress/",
     "examples/",
     "scripts/",
     "templates/",

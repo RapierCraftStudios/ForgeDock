@@ -11,8 +11,21 @@ allowed-tools: Task, Bash, Read, Grep, Glob, WebFetch, Skill
 **Input**: $ARGUMENTS
 
 **NEVER use plan mode (EnterPlanMode)** during review — it breaks execution context.
+**NEVER use the Agent tool** — review-pr dispatches domain agents via `Task` tool only. `Agent` spawns opaque subprocesses that bypass the allowed-tools constraint and cannot post structured findings to the PR. Always use `Task(...)` for review agent launch (Phase 3C).
 
 **Agent model policy**: Default `model: "sonnet"`. If Sonnet is rate-limited, fall back to `model: "opus"`. User can override with `--model <name>`. Pass the resolved model in every `Task` tool call.
+
+<!-- FORGE:SPEC_LOADED — review-pr.md loaded and active. Agent is bound by this spec. -->
+
+## HARD RULES — READ BEFORE ANYTHING ELSE
+
+1. **Use `Task(...)` for ALL domain agent launches.** Never substitute `Agent(...)`. Task agents run in a constrained context, post findings to the PR via `gh pr comment`, and their output is structured. Agent spawns opaque subprocesses outside allowed-tools.
+
+2. **Post the FORGE:REVIEW verdict regardless of finding severity.** A review that completes but posts no `<!-- FORGE:REVIEW -->` comment is invisible to the pipeline. Even a PASS verdict must be posted.
+
+3. **Review findings are NOT merge blockers** (unless build errors). File review findings as GitHub issues with `review-finding` label. The PR merges after review. Only compilation failures block merge.
+
+4. **Route correctly at Phase 0.** If the input is "staging" or the PR targets `main`, invoke `Skill("review-pr-staging", ...)` — do NOT run the standard PR review pipeline against a staging→main PR.
 
 ## Architecture — How This Command Works
 
@@ -932,10 +945,10 @@ Files that need changes:
 
 ## Source Branch Context
 
-**Code branch**: `[BASE_BRANCH]`
-**Worktree base**: `origin/[BASE_BRANCH]`
+**Code branch**: `[HEAD_BRANCH]`
+**Worktree base**: `origin/[HEAD_BRANCH]`
 
-> When fixing: `git worktree add ../fix-{slug} -b fix/{slug} origin/[BASE_BRANCH]`
+> When fixing: `git worktree add ../fix-{slug} -b fix/{slug} origin/[HEAD_BRANCH]`
 
 ## Code Context
 [10 lines around finding]

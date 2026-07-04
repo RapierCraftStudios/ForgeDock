@@ -19,6 +19,8 @@ You are the pipeline's deploy awareness layer. Before the user merges staging �
 
 **NEVER use plan mode (EnterPlanMode)** — it breaks execution context.
 
+<!-- FORGE:SPEC_LOADED — deploy-info.md loaded and active. Agent is bound by this spec. -->
+
 ---
 
 ## Phase 0: Review-Finding Readiness Check
@@ -231,8 +233,8 @@ if [ -n "$NEW_ENV" ]; then
   # If your project uses a different backend, skip this block and verify manually.
   if [ "{DEPLOY_SECRETS_BACKEND}" = "sops" ]; then
     for var in $(echo "$NEW_ENV" | grep -oE '^\+[A-Z_]+' | sed 's/^\+//'); do
-      if [ -f "{WORKTREE_PATH}/scripts/decrypt-secrets.sh" ]; then
-        grep -q "$var" "{WORKTREE_PATH}/scripts/decrypt-secrets.sh" 2>/dev/null || echo "  ❌ $var NOT in decrypt-secrets.sh ENV_MAPPING"
+      if [ -f "{REPO_PATH}/scripts/decrypt-secrets.sh" ]; then
+        grep -q "$var" "{REPO_PATH}/scripts/decrypt-secrets.sh" 2>/dev/null || echo "  ❌ $var NOT in decrypt-secrets.sh ENV_MAPPING"
       else
         echo "  ℹ️  scripts/decrypt-secrets.sh not found — skipping ENV_MAPPING cross-check for $var. Verify manually in your SOPS chain."
       fi

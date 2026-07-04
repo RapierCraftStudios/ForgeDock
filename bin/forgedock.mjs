@@ -1588,6 +1588,7 @@ function help() {
     ["npx forgedock run-issue <issue>", "Drive one issue through the durable engine"],
     ["npx forgedock demo", "Set up a risk-free demo repo and print next steps"],
     ["npx forgedock labels [setup] [--repo owner/repo]", "Bootstrap ForgeDock-managed labels on a GitHub repo (idempotent)"],
+    ["npx forgedock watch [--repo owner/repo]", "Live per-agent orchestration view (Ctrl+C to exit)"],
     ["npx forgedock doctor", "Check installation health"],
     ["npx forgedock update", "Pull latest & reinstall"],
     ["npx forgedock uninstall", "Remove commands"],
@@ -1713,13 +1714,207 @@ async function demo() {
   }
 }
 
+/**
+ * `forgedock watch` — live per-agent orchestration view
+ *
+ * Polls GitHub every 5 seconds for in-flight issues (those with workflow:*
+ * labels) and renders a per-agent table with issue#, title, phase, elapsed
+ * time, and staleness status.  All data is sourced from FORGE:HEARTBEAT
+ * comments written by the pipeline at each phase boundary.
+ *
+ * Stalled agents (no HEARTBEAT update within pipeline.stall_timeout_minutes)
+ * are highlighted in yellow.
+ *
+ * Run:  npx forgedock watch [--repo owner/repo]
+ * Exit: Ctrl+C
+ */
+async function watch() {
+  const POLL_INTERVAL_MS = 5000;
+  const USE_ANSI_WATCH = process.stdout.isTTY === true && !process.env.NO_COLOR && process.env.TERM !== "dumb";
+
+  // ── Resolve repo ──────────────────────────────────────────────────────────
+  const watchRepo = resolveLabelsRepo(restArgs);
+  if (!watchRepo) {
+    process.stderr.write(
+      `${RED}No repository found.${RESET}\n` +
+      `  Run from a directory with ${cyan("forge.yaml")}, or pass ${cyan("--repo owner/repo")}.\n`,
+    );
+    process.exitCode = 1;
+    return;
+  }
+
+  // ── Validate gh CLI auth ───────────────────────────────────────────────────
+  try {
+    execSync("gh auth status", { stdio: ["ignore", "pipe", "ignore"] });
+  } catch {
+    process.stderr.write(
+      `${RED}gh CLI is not authenticated.${RESET}\n` +
+      `  Fix: run ${cyan("gh auth login")} then retry.\n`,
+    );
+    process.exitCode = 1;
+    return;
+  }
+
+  // ── Resolve stall timeout ─────────────────────────────────────────────────
+  let stallMinutes = 15;
+  const forgeYamlPath = join(process.cwd(), "forge.yaml");
+  if (existsSync(forgeYamlPath)) {
+    try {
+      const raw = readFileSync(forgeYamlPath, "utf-8");
+      const m = raw.match(/^\s*stall_timeout_minutes:\s*(\d+)/m);
+      if (m) stallMinutes = parseInt(m[1], 10);
+    } catch { /* ignore */ }
+  }
+
+  // ── Helpers ────────────────────────────────────────────────────────────────
+  function extractPhase(heartbeatBody) {
+    const m = heartbeatBody.match(/\*\*Phase\*\*:\s*(.+)/);
+    return m ? m[1].trim() : "unknown";
+  }
+
+  function extractTimestamp(heartbeatBody) {
+    const m = heartbeatBody.match(/\*\*Timestamp\*\*:\s*(\S+)/);
+    return m ? m[1].trim() : null;
+  }
+
+  function elapsedMin(isoTimestamp) {
+    if (!isoTimestamp) return null;
+    const ms = Date.now() - new Date(isoTimestamp).getTime();
+    return Math.floor(ms / 60000);
+  }
+
+  function elapsedStr(minutes) {
+    if (minutes === null) return "—";
+    if (minutes < 60) return `${minutes}m`;
+    return `${Math.floor(minutes / 60)}h ${minutes % 60}m`;
+  }
+
+  // ── Cleanup on exit ────────────────────────────────────────────────────────
+  let intervalHandle;
+  function cleanup() {
+    if (intervalHandle) clearInterval(intervalHandle);
+    if (USE_ANSI_WATCH) {
+      process.stdout.write("\x1b[?25h"); // show cursor
+    }
+    process.exit(0);
+  }
+  process.on("SIGINT", cleanup);
+  process.on("SIGTERM", cleanup);
+
+  if (USE_ANSI_WATCH) {
+    process.stdout.write("\x1b[?25l"); // hide cursor
+  }
+
+  // ── Render loop ────────────────────────────────────────────────────────────
+  const WORKFLOW_LABELS = [
+    "workflow:investigating",
+    "workflow:ready-to-build",
+    "workflow:building",
+    "workflow:in-review",
+    "needs-human",
+  ];
+
+  async function render() {
+    const rows = [["#", "Title", "Phase", "Elapsed", "Status"]];
+    let anyIssues = false;
+
+    for (const label of WORKFLOW_LABELS) {
+      let issueJson;
+      try {
+        // Use execFileSync with argument array to avoid shell injection via watchRepo
+        issueJson = execFileSync(
+          "gh",
+          ["issue", "list", "-R", watchRepo, "--state", "open",
+           "--label", label, "--limit", "30", "--json", "number,title"],
+          { encoding: "utf-8", stdio: ["ignore", "pipe", "pipe"] },
+        );
+      } catch {
+        continue;
+      }
+
+      let issues;
+      try { issues = JSON.parse(issueJson); } catch { continue; }
+
+      for (const issue of issues) {
+        anyIssues = true;
+        let phase = label.replace("workflow:", "");
+        let elapsed = null;
+
+        // Fetch latest FORGE:HEARTBEAT comment for phase + timestamp
+        try {
+          const commentsJson = execFileSync(
+            "gh",
+            ["api", `repos/${watchRepo}/issues/${issue.number}/comments`,
+             "--jq", "[.[] | select(.body | contains(\"FORGE:HEARTBEAT\"))] | last | .body // \"\""],
+            { encoding: "utf-8", stdio: ["ignore", "pipe", "pipe"] },
+          ).trim();
+          if (commentsJson && commentsJson !== '""' && commentsJson !== "") {
+            const body = commentsJson.replace(/^"|"$/g, "").replace(/\\n/g, "\n");
+            phase = extractPhase(body) || phase;
+            const ts = extractTimestamp(body);
+            elapsed = elapsedMin(ts);
+          }
+        } catch { /* use label-derived phase */ }
+
+        const isStalled = elapsed !== null && elapsed >= stallMinutes;
+        const isBlocked = label === "needs-human";
+        const status = isBlocked ? "BLOCKED" : isStalled ? "STALLED" : "running";
+
+        const titleTrunc = issue.title.length > 38 ? issue.title.slice(0, 35) + "..." : issue.title;
+        const phaseShort = phase.length > 30 ? phase.slice(0, 27) + "..." : phase;
+
+        const statusColored = USE_ANSI_WATCH
+          ? (isBlocked ? `\x1b[31m${status}\x1b[0m` : isStalled ? `\x1b[33m${status}\x1b[0m` : `\x1b[32m${status}\x1b[0m`)
+          : status;
+
+        const titleColored = USE_ANSI_WATCH && (isStalled || isBlocked)
+          ? `\x1b[33m${titleTrunc}\x1b[0m`
+          : titleTrunc;
+
+        rows.push([
+          `#${issue.number}`,
+          titleColored,
+          phaseShort,
+          elapsedStr(elapsed),
+          statusColored,
+        ]);
+      }
+    }
+
+    const now = new Date().toISOString().replace("T", " ").slice(0, 19) + " UTC";
+
+    if (USE_ANSI_WATCH) {
+      process.stdout.write("\x1b[2J\x1b[H"); // clear screen + home
+    } else {
+      process.stdout.write(`\n${"─".repeat(60)}\n`);
+    }
+
+    process.stdout.write(`${BOLD}ForgeDock Watch${RESET} — ${dim(watchRepo)}  ${dim(now)}\n\n`);
+
+    if (!anyIssues || rows.length === 1) {
+      process.stdout.write(`  ${dim("No in-flight issues. All quiet.")}\n`);
+    } else {
+      process.stdout.write(table(rows, { header: true }));
+    }
+
+    if (USE_ANSI_WATCH) {
+      process.stdout.write(`\n${dim("Refreshing every 5s — Ctrl+C to exit")}\n`);
+    }
+  }
+
+  // Initial render, then start interval
+  await render();
+  intervalHandle = setInterval(render, POLL_INTERVAL_MS);
+  intervalHandle.unref(); // don't keep process alive if loop drains
+}
+
 // The journey-routed commands render their own branded marks (hero/compact);
 // splash() would double-brand them. Engine-surface commands, help, and
 // unknown-command output keep the logo.
-const SPLASH_COMMANDS = new Set(["run", "run-issue", "demo", "doctor", "help", "--help", "-h"]);
+const SPLASH_COMMANDS = new Set(["run", "run-issue", "demo", "doctor", "watch", "help", "--help", "-h"]);
 const KNOWN_COMMANDS = new Set([
   "install", "init", "enable", "disable", "status", "uninstall", "update",
-  "run", "run-issue", "demo", "doctor", "help", "--help", "-h",
+  "run", "run-issue", "demo", "doctor", "watch", "labels", "help", "--help", "-h",
 ]);
 if (SPLASH_COMMANDS.has(command) || !KNOWN_COMMANDS.has(command)) splash();
 
@@ -1771,7 +1966,12 @@ switch (command) {
     break;
   case "run-issue": {
     const { runFromCli } = await import("./engine-cli.mjs");
-    await runFromCli(restArgs);
+    try {
+      await runFromCli(restArgs);
+    } catch (err) {
+      process.stderr.write(`${RED}${err.message}${RESET}\n`);
+      process.exit(1);
+    }
     break;
   }
   case "demo":
@@ -1779,6 +1979,9 @@ switch (command) {
     break;
   case "doctor":
     exitCode = await doctor();
+    break;
+  case "watch":
+    await watch();
     break;
   case "labels": {
     const subcommand = positional[1];

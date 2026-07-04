@@ -27,6 +27,8 @@ Parse from $ARGUMENTS:
 - `--gh-flag {GH_FLAG}` — gh CLI repo flag (e.g. `-R {owner}/{repo}`)
 - `--base {PR_BASE}` — PR target branch (e.g. `milestone/modular-pipeline-architecture` or `staging`)
 
+**Phase notation**: This file uses **B0–B6** for its own phases. The calling orchestrator (`work-on.md`) uses **3A–3M** for its sub-phases. Mapping: work-on.md Phase 3A = B0 (load state), Phase 3B = complexity classification (posts `FORGE:FAST_PATH` before invoking build), Phase 3C onward maps to B1+ in this file. When cross-references mention "Phase 3B", they refer to work-on.md's Phase 3B, not a phase in this file. <!-- Added: forge#1380 -->
+
 ---
 
 ## Phase B0: Load State from GitHub (MANDATORY)
@@ -64,7 +66,7 @@ Extract from investigation report:
 - Recommendation
 - Task type (Bug Fix / Feature / Refactor / Maintenance / UI/UX / Full-Stack)
 
-**Read COMPLEXITY_BAND** (from FORGE:FAST_PATH comment posted by Phase 3B):
+**Read COMPLEXITY_BAND** (from `FORGE:FAST_PATH` comment posted by Phase 3B of `work-on.md` — the complexity classification step that runs before invoking this file): <!-- Fixed: forge#1380 -->
 ```bash
 COMPLEXITY_BAND=$(gh api repos/{GH_REPO}/issues/{NUMBER}/comments \
   --jq '.[] | select(.body | contains("FORGE:FAST_PATH")) | .body' 2>/dev/null \

@@ -21,6 +21,16 @@ export async function runIssue(opts) {
   const local = readLog(dir, issue).length ? deriveState(readLog(dir, issue)) : null;
   const remote = await projector.readState(issue);
   let { state, action } = reconcileState(local, remote);
+
+  // I3 (best-effort): GitHub issue-edit is not an atomic CAS, so this is a
+  // courtesy check, not a hard mutual-exclusion guarantee — a concurrent
+  // start can still race between this read and the next lease write.
+  // MUST come before any projector.writeState() — remirror/hydrate branches
+  // must not overwrite GitHub state when another agent holds a valid lease.
+  if (remote?.lease && remote.lease.until > now() && remote.lease.by !== agentId) {
+    return { terminalReason: "deferred", detail: `issue ${issue} leased by ${remote.lease.by}` };
+  }
+
   if (!state) {
     state = freshState(issue, lane);
     appendEvent(dir, issue, { event: "RUN_START", issue, run: state.run, lane });
@@ -36,13 +46,6 @@ export async function runIssue(opts) {
     rewriteLog(dir, issue, eventsFromIndex(state));
     state = deriveState(readLog(dir, issue));
     await projector.writeState(issue, state);
-  }
-
-  // I3 (best-effort): GitHub issue-edit is not an atomic CAS, so this is a
-  // courtesy check, not a hard mutual-exclusion guarantee — a concurrent
-  // start can still race between this read and the next lease write.
-  if (remote?.lease && remote.lease.until > now() && remote.lease.by !== agentId) {
-    return { terminalReason: "deferred", detail: `issue ${issue} leased by ${remote.lease.by}` };
   }
 
   // 2. Drive phases until terminal.

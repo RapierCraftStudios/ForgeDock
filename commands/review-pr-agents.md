@@ -805,7 +805,7 @@ CRITICAL: This is a billing system. Double-spend = revenue loss.
 
    Search for discount flags passed through Redis/job payloads:
    ```bash
-   grep -rn "discount.*flag\|flag.*discount\|subscription.*flag\|plan_type\|discount_type" {API_PATH}/ {WORKER_PATH}/ | head -20
+   grep -rn "discount.*flag\|flag.*discount\|subscription.*flag\|plan_type\|discount_type" services/api/ services/worker/ | head -20
    # If the flag flows through a job payload and is not re-validated at billing: CONFIRMED HIGH
    ```
    A race window exists when a flag is checked at submission but consumed at billing: the underlying condition (e.g., subscription status, entitlement) may have changed between the two operations. The fix must re-validate the flag atomically at the point of debit, not rely on a stale value from the job payload.

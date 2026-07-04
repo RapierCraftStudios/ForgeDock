@@ -1,17 +1,15 @@
-# FORGE Annotation Protocol
+# FORGE Annotation Protocol — Deprecated
 
-> **This document has moved.**
+> **This document is no longer the authoritative reference.**
 >
-> The normative specification for the FORGE Annotation Protocol is now maintained at:
->
+> The formal, published specification is:
 > **[`docs/spec/forge-protocol-v1.md`](spec/forge-protocol-v1.md)**
 >
-> That document is the single source of truth for all FORGE annotation types,
-> syntax rules, the label state machine, conformance requirements, the extension
-> mechanism, and the versioning policy.
-
----
-
-*This file is kept as a redirect stub so that existing links and references
-continue to resolve. See `docs/spec/forge-protocol-v1.md` for the full
-specification.*
+> The spec in `docs/spec/forge-protocol-v1.md` is the complete, current document.
+> It supersedes this file entirely. Please update any bookmarks or links.
+>
+> **License note**: The authoritative spec is licensed under
+> [CC-BY-4.0](https://creativecommons.org/licenses/by/4.0/) — freely shareable
+> and usable in any product with attribution. This older draft was mistakenly
+> marked AGPL-3.0; the protocol description itself has always been intended for
+> open, license-compatible adoption.

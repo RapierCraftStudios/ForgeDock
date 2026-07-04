@@ -99,6 +99,77 @@ describe("runIssue", () => {
     assert.deepEqual(s.committed, ["investigate", "context", "architect", "build", "review", "close"]);
   });
 
+  it("I3: defers before writing GitHub state when another agent holds a valid lease (remirror path)", async () => {
+    // Regression test for: writeState() called before lease check in remirror/hydrate branches.
+    // A concurrent agent holds a valid lease — we must NOT write GitHub state before deferring.
+    const { w, io } = fakeWorld();
+    const writeStateCalls = [];
+    const origGh = io.gh;
+    io.gh = async (args) => {
+      if (args[0] === "issue" && args[1] === "edit") writeStateCalls.push([...args]);
+      return origGh(args);
+    };
+
+    // Set up a remote state with a valid lease held by agent "other-agent".
+    // Local v < remote v → reconcile will return action="hydrate".
+    // (For action="remirror": local v > remote v; test the remirror path by leaving local log
+    // ahead — but fakeWorld starts fresh so we test "hydrate" here as primary regression.)
+    const { serializeState } = await import("../engine/state.mjs");
+    const remoteIndex = {
+      v: 3, run: "r_42_staging", issue: 42, lane: "staging",
+      committed: ["investigate", "context"], phase: "architect",
+      branch: null, pr: null, terminal: false, terminalReason: null,
+      lease: { by: "other-agent", until: Date.now() + 60000 },
+    };
+    w.body = serializeState(remoteIndex);
+
+    const runner = async () => { throw new Error("runner must not be called when leased"); };
+    const res = await runIssue({ issue: 42, dir, agentId: "a1", lane: "staging",
+      io, runner, now: () => Date.now(), maxAttempts: 1 });
+
+    assert.equal(res.terminalReason, "deferred");
+    assert.ok(res.detail.includes("other-agent"));
+    // The critical invariant: no issue edit (writeState) should have been called before deferring.
+    const editCalls = writeStateCalls.filter(a => a.includes("issue") && a.includes("edit"));
+    assert.equal(editCalls.length, 0, "writeState must not be called before the lease guard fires");
+  });
+
+  it("I3: defers before writing GitHub state when another agent holds a valid lease (remirror path — local v > remote v)", async () => {
+    // Same invariant as above but exercises the remirror code path (local ahead of remote).
+    const { w, io } = fakeWorld();
+    const writeStateCalls = [];
+    const origGh = io.gh;
+    io.gh = async (args) => {
+      if (args[0] === "issue" && args[1] === "edit") writeStateCalls.push([...args]);
+      return origGh(args);
+    };
+
+    const { serializeState } = await import("../engine/state.mjs");
+    // Remote has a valid lease but lower v — reconcile picks local (remirror action).
+    const remoteIndex = {
+      v: 1, run: "r_42_staging", issue: 42, lane: "staging",
+      committed: ["investigate"], phase: "context",
+      branch: null, pr: null, terminal: false, terminalReason: null,
+      lease: { by: "other-agent", until: Date.now() + 60000 },
+    };
+    w.body = serializeState(remoteIndex);
+
+    // Build a local run-log at v=2 (ahead of remote) to trigger remirror.
+    const { appendEvent } = await import("../engine/runlog.mjs");
+    appendEvent(dir, 42, { event: "RUN_START", issue: 42, run: "r_42_staging", lane: "staging" });
+    appendEvent(dir, 42, { event: "PHASE_COMMIT", phase: "investigate", outputs: {} });
+    appendEvent(dir, 42, { event: "PHASE_COMMIT", phase: "context", outputs: {} });
+
+    const runner = async () => { throw new Error("runner must not be called when leased"); };
+    const res = await runIssue({ issue: 42, dir, agentId: "a1", lane: "staging",
+      io, runner, now: () => Date.now(), maxAttempts: 1 });
+
+    assert.equal(res.terminalReason, "deferred");
+    assert.ok(res.detail.includes("other-agent"));
+    const editCalls = writeStateCalls.filter(a => a.includes("issue") && a.includes("edit"));
+    assert.equal(editCalls.length, 0, "writeState must not be called before the lease guard fires");
+  });
+
   it("C2: hydrate reconstructs the local run-log from a populated remote FORGE:STATE, without re-running committed phases", async () => {
     const { w, io } = fakeWorld();
     const runCounts = {};

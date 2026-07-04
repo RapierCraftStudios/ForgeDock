@@ -755,6 +755,52 @@ describe("renderDryRun / renderSummaryCard", () => {
     assert.match(out, /iterations: 7/);
     assert.match(out, /end_turn/);
   });
+
+  it("renderSummaryCard renders token usage when provided", () => {
+    const usage = {
+      input_tokens: 1200,
+      output_tokens: 340,
+      cache_creation_input_tokens: 500,
+      cache_read_input_tokens: 800,
+    };
+    const out = renderSummaryCard({
+      command: "work-on",
+      args: ["42"],
+      iterations: 3,
+      stopReason: "end_turn",
+      usage,
+    });
+    assert.match(out, /1200 in \/ 340 out/);
+    assert.match(out, /800 read \/ 500 write/);
+    assert.match(out, /FORGE:USAGE_JSON:/);
+    // Verify JSON line is parseable and matches the usage object
+    const jsonLine = out.split("\n").find((l) => l.startsWith("FORGE:USAGE_JSON:"));
+    const parsed = JSON.parse(jsonLine.slice("FORGE:USAGE_JSON:".length));
+    assert.deepStrictEqual(parsed, usage);
+  });
+
+  it("renderSummaryCard renders N/A when usage is null (dry-run)", () => {
+    const out = renderSummaryCard({
+      command: "work-on",
+      args: ["42"],
+      iterations: 0,
+      stopReason: "dry-run",
+      usage: null,
+    });
+    assert.match(out, /tokens:.*N\/A/);
+    assert.ok(!out.includes("FORGE:USAGE_JSON:"), "should not emit JSON line when usage is null");
+  });
+
+  it("renderSummaryCard defaults usage to null when omitted", () => {
+    const out = renderSummaryCard({
+      command: "work-on",
+      args: [],
+      iterations: 1,
+      stopReason: "end_turn",
+    });
+    assert.match(out, /tokens:.*N\/A/);
+    assert.ok(!out.includes("FORGE:USAGE_JSON:"));
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -804,5 +850,18 @@ describe("runCommand", () => {
       }),
       (err) => err.code === "UNKNOWN_COMMAND",
     );
+  });
+
+  it("dry-run result has no usage field", async () => {
+    const result = await runCommand({
+      commandsDir: COMMANDS_DIR,
+      commandName: "work-on",
+      args: ["1151"],
+      cwd: TMP,
+      dryRun: true,
+      logger: { log() {} },
+    });
+    assert.equal(result.status, "dry-run");
+    assert.equal(result.usage, undefined, "dry-run should not include usage");
   });
 });

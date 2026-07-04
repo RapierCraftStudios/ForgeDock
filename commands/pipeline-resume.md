@@ -11,6 +11,9 @@ You are the context-recovery agent. When a session ends or context is compressed
 
 **Agent model policy**: Default `model: "sonnet"`. Fallback: `model: "opus"` if Sonnet is rate-limited.
 **NEVER use plan mode (EnterPlanMode).**
+**NEVER use the Agent tool** — pipeline-resume re-enters the pipeline via `Skill(skill="work-on", ...)` only. Using the Agent tool would restart the pipeline in an untracked subprocess rather than resuming the existing tracked session.
+
+<!-- FORGE:SPEC_LOADED — pipeline-resume.md loaded and active. Agent is bound by this spec. -->
 
 ---
 
