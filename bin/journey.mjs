@@ -363,6 +363,7 @@ import {
   installSessionStartHook,
   installSubagentStopHook,
   installPreToolUseHook,
+  installSubagentStopEnforceHook,
 } from "./settings-hook.mjs";
 
 /**
@@ -614,14 +615,16 @@ export async function forge(ctx) {
   const settingsPath = join(ctx.home, ".claude", "settings.json");
   const { status: hookStatus } = installSessionStartHook(settingsPath, hookScript);
 
-  // Install enforcement hooks (#1250): PreToolUse (branch/label validation)
-  // and SubagentStop (annotation-posting verification + interactive engine).
-  // These are idempotent and version-gated — always installed (fail-open if
+  // Install enforcement hooks (#1250): PreToolUse (branch/label validation),
+  // SubagentStop interactive engine adapter, and SubagentStop annotation
+  // verifier. All are idempotent and always installed (fail-open if
   // settings.json is malformed, same contract as SessionStart hook).
   const preToolUseScript = join(ctx.forgeHome, "bin", "hooks", "pre-tool-use.mjs");
   const subagentStopScript = join(ctx.forgeHome, "bin", "hooks", "interactive-engine.mjs");
-  installPreToolUseHook(settingsPath, preToolUseScript);
+  const subagentStopEnforceScript = join(ctx.forgeHome, "bin", "hooks", "subagent-stop-enforce.mjs");
+  const { status: preToolUseStatus } = installPreToolUseHook(settingsPath, preToolUseScript);
   installSubagentStopHook(settingsPath, subagentStopScript);
+  const { status: subagentStopEnforceStatus } = installSubagentStopEnforceHook(settingsPath, subagentStopEnforceScript);
 
   // Housekeeping — must never abort the receipt or the hook.
   let manifestSaveFailed = false;
@@ -652,7 +655,17 @@ export async function forge(ctx) {
     w.write(`  ${glyph(true)} SessionStart hook ${hookStatus === "already" ? "active" : "registered"} ${dimLine(ctx, settingsPath)}\n`);
   }
 
-  return { installed, updated, skipped, copied, total: files.length, hookStatus };
+  // Report enforcement hook status.
+  if (preToolUseStatus !== null) {
+    w.write(`  ${glyph(true)} PreToolUse enforcement hook ${preToolUseStatus === "already" ? "active" : "registered"} ${dimLine(ctx, "(branch/label enforcement)")}\n`);
+  } else {
+    w.write("  " + dimLine(ctx, "PreToolUse hook skipped — requires Claude Code v2.1.163+") + "\n");
+  }
+  if (subagentStopEnforceStatus !== null) {
+    w.write(`  ${glyph(true)} SubagentStop enforcement hook ${subagentStopEnforceStatus === "already" ? "active" : "registered"} ${dimLine(ctx, "(annotation verification)")}\n`);
+  }
+
+  return { installed, updated, skipped, copied, total: files.length, hookStatus, preToolUseStatus, subagentStopEnforceStatus };
 }
 
 // ---------------------------------------------------------------------------
