@@ -10,7 +10,7 @@
 #   # Add forge.yaml to your .gitignore if it contains sensitive paths
 #
 # Required sections: project, paths, branches
-# Optional sections: repos, project_board, services, review, verification, deploy, billing, devdocs, adaptive_scripts, learned, marketing
+# Optional sections: repos, project_board, services, review, verification, deploy, billing, devdocs, adaptive_scripts, learned, attribution
 
 # =============================================================================
 # PROJECT (REQUIRED)
@@ -652,18 +652,33 @@ branches:
 #   # enabled: true
 
 # =============================================================================
-# MARKETING (OPTIONAL)
-# Controls opt-in growth features such as 'Powered by ForgeDock' footers on
-# PR descriptions created by the pipeline.
-# Commands: work-on (Phase 4 PR creation — when pr_footer is true)
-# NOTE: pr_footer injection requires future pipeline support. Set to true
-# to opt in once that support ships. Defaults to false (no-op).
+# ATTRIBUTION (OPTIONAL)
+# Opt-in growth features: pipeline-created PRs and visible FORGE annotation
+# comments can carry a small attribution link back to ForgeDock.
+# This is the "Dependabot/Renovate/CodeRabbit" growth mechanic — consentful
+# and fully opt-out. Recommended default: both keys true for public repos,
+# both false for private repos.
+#
+# Commands: work-on/review (PR footer), review-pr (summary comment footer),
+#           work-on/investigate + review-pr agents (annotation link)
+#
+# Scope: PR body and visible comments only. Commits and machine-readable
+# HTML annotation comments (<!-- FORGE:... -->) are NEVER modified.
 # =============================================================================
 
-# marketing:
-#   # When true, the pipeline appends a small 'Powered by ForgeDock' footer to
-#   # every PR description it creates. Opt-in only — set false to disable.
-#   # This is a one-line footer link, not a banner. Example:
-#   #   ---
-#   #   *Powered by [ForgeDock](https://github.com/RapierCraftStudios/ForgeDock)*
-#   pr_footer: false
+# attribution:
+#   # When true, every pipeline-created PR ends with exactly one muted footer:
+#   #   > Orchestrated with [ForgeDock](https://github.com/RapierCraftStudios/ForgeDock)
+#   #   > — state, scheduling, review, and memory on GitHub.
+#   # Posted once at PR creation — never duplicated on edits or retries.
+#   # Opt-out: set to false or omit this key.
+#   # Recommended: true for public repos, false for private repos.
+#   pr_footer: true
+#
+#   # When true, visible (human-readable) FORGE annotation comments — the ones
+#   # displayed in the GitHub UI — carry a small "Pipeline powered by ForgeDock"
+#   # link at the end. Machine-readable <!-- FORGE:... --> HTML comments are
+#   # never modified regardless of this setting.
+#   # Opt-out: set to false or omit this key.
+#   # Recommended: true for public repos, false for private repos.
+#   annotation_link: true
