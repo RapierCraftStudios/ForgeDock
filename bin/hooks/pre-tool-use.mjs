@@ -1,4 +1,7 @@
 #!/usr/bin/env node
+import { createRequire } from "module";
+const _require = createRequire(import.meta.url);
+
 /**
  * bin/hooks/pre-tool-use.mjs — ForgeDock PreToolUse hook.
  *
@@ -160,6 +163,10 @@ function checkPrTarget(command) {
  * Check whether a gh issue edit --add-label command represents a valid
  * label state-machine transition.
  *
+ * Reads the current workflow labels from GitHub via `gh issue view` and
+ * validates that the new label is a legal successor in the state machine.
+ * Falls back to allow (exit 0) on any gh CLI error so the hook is fail-open.
+ *
  * @param {string} command
  * @returns {string|null} Error message to show, or null if allowed.
  */
@@ -172,19 +179,81 @@ function checkLabelTransition(command) {
   if (!newLabel) return null;
   if (!newLabel.startsWith(WORKFLOW_LABEL_PREFIX)) return null; // non-workflow label, skip
 
-  // Extract current labels from the command context if possible.
-  // We can't easily read GitHub state here without an async gh call, so we
-  // validate the new label is a known workflow label and enforce only the
-  // most critical blocked transition: adding a terminal label after another
-  // terminal label.
-  const isTerminal = isTerminalLabel(newLabel);
-  if (!isTerminal) return null; // only block terminal label mis-application
+  // The new label must be a known workflow label.
+  if (!Object.prototype.hasOwnProperty.call(LABEL_TRANSITIONS, newLabel) &&
+      !Object.values(LABEL_TRANSITIONS).some((arr) => arr.includes(newLabel))) {
+    return null; // unknown workflow label — don't block
+  }
 
-  // Check if the command itself tries to add a terminal label alongside
-  // contradictory context (e.g. workflow:merged on a workflow:invalid issue).
-  // This is a lightweight check: full transition validation requires reading
-  // current state from GitHub, which is deferred to the SubagentStop hook.
-  return null; // allow — full transition enforcement is in the SubagentStop hook
+  // Extract the issue number from the command.
+  // Supports: `gh issue edit 123`, `gh issue edit #123`, `-R repo` or positional
+  const issueNumM = command.match(/gh\s+issue\s+edit\s+(?:#?(\d+)|(\d+))/);
+  if (!issueNumM) return null; // can't determine issue — fail-open
+  const issueNum = issueNumM[1] || issueNumM[2];
+
+  // Extract repo (-R flag) if present.
+  const repoFlag = extractFlag(command, "-R") || extractFlag(command, "--repo");
+
+  // Read current labels from GitHub synchronously.
+  let currentWorkflowLabel = null;
+  try {
+    const { execFileSync: exec } = _require("child_process");
+    const args = ["issue", "view", issueNum, "--json", "labels"];
+    if (repoFlag) { args.push("-R", repoFlag); }
+    const out = exec("gh", args, {
+      encoding: "utf-8",
+      stdio: ["pipe", "pipe", "pipe"],
+      timeout: 8000,
+    });
+    const parsed = JSON.parse(out);
+    const labels = Array.isArray(parsed.labels)
+      ? parsed.labels.map((l) => (typeof l === "string" ? l : l.name))
+      : [];
+    // Find the current workflow label (the most specific one, last wins).
+    for (const lbl of labels) {
+      if (lbl.startsWith(WORKFLOW_LABEL_PREFIX)) {
+        currentWorkflowLabel = lbl;
+      }
+    }
+  } catch {
+    return null; // gh CLI error — fail-open
+  }
+
+  if (!currentWorkflowLabel) {
+    // No current workflow label — allow any workflow label to be added.
+    return null;
+  }
+
+  // Terminal labels cannot be transitioned away from.
+  if (isTerminalLabel(currentWorkflowLabel)) {
+    return [
+      `[ForgeDock] BLOCKED: Label transition violation.`,
+      ``,
+      `Issue is in terminal state "${currentWorkflowLabel}" — no further transitions allowed.`,
+      `Attempted to add: "${newLabel}"`,
+      ``,
+      `Terminal states (${Object.keys(LABEL_TRANSITIONS).filter((k) => LABEL_TRANSITIONS[k].length === 0).join(", ")}) are final.`,
+    ].join("\n");
+  }
+
+  // Validate the transition against the state machine.
+  const allowed = LABEL_TRANSITIONS[currentWorkflowLabel] || null;
+  if (allowed === null) {
+    return null; // current state not in map — unknown, fail-open
+  }
+  if (!allowed.includes(newLabel)) {
+    return [
+      `[ForgeDock] BLOCKED: Invalid label transition.`,
+      ``,
+      `Current workflow state: "${currentWorkflowLabel}"`,
+      `Attempted transition: → "${newLabel}"`,
+      `Allowed next states  : ${allowed.length > 0 ? allowed.map((s) => `"${s}"`).join(", ") : "(none — terminal)"}`,
+      ``,
+      `Fix: check the pipeline phase and apply the correct next workflow label.`,
+    ].join("\n");
+  }
+
+  return null; // valid transition — allow
 }
 
 // ---------------------------------------------------------------------------

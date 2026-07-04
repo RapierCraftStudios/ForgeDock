@@ -121,7 +121,39 @@ async function main() {
   const transcript = parseTranscript(transcriptPath);
   if (!transcript) return;
 
-  const { issueNumber, phaseId, terminalReason, outputs } = detectPhase(transcript);
+  const { issueNumber, phaseId, terminalReason, outputs, skillInvoked, annotationMissing } = detectPhase(transcript);
+
+  // --- Annotation enforcement (#1250) ---
+  // If a /work-on skill was invoked but the expected FORGE annotation is
+  // missing, block the subagent from completing silently and inject
+  // corrective context so the agent knows what to do.
+  if (skillInvoked && annotationMissing && phaseId) {
+    const PHASE_ANNOTATION_MAP = {
+      investigate: "INVESTIGATION:COMPLETE (or INVESTIGATION:INVALID / DECOMPOSE:YES)",
+      context:     "FORGE:CONTEXT",
+      architect:   "FORGE:ARCHITECT",
+      build:       "FORGE:BUILDER:COMPLETE",
+      review:      "FORGE:REVIEWER:MERGED",
+      close:       "workflow:merged label",
+    };
+    const expected = PHASE_ANNOTATION_MAP[phaseId] || `the ${phaseId} phase annotation`;
+    // Output additionalContext JSON (v2.1.163+ SubagentStop format).
+    // Claude Code reads this and injects it as context for the agent.
+    const feedback = {
+      decision: "block",
+      reason: `[ForgeDock] Phase "${phaseId}" completed without posting its FORGE annotation.`,
+      additionalContext: [
+        `The ${phaseId} phase must post annotation: ${expected}`,
+        `Post this annotation now via gh issue comment, then re-complete this phase.`,
+        `This is a pipeline enforcement check — annotation-free completions are not tracked`,
+        `and cannot be resumed across compaction events.`,
+      ].join("\n"),
+    };
+    process.stdout.write(JSON.stringify(feedback) + "\n");
+    process.exit(2);
+    return;
+  }
+
   if (!issueNumber || !phaseId) return; // not a /work-on sub-phase
 
   // Resolve the run-log directory.
@@ -241,19 +273,20 @@ function parseTranscript(transcriptPath) {
  *   - Extract issue number from Skill args or from the skill name context
  *
  * @param {object[]} entries
- * @returns {{ issueNumber: number|null, phaseId: string|null, terminalReason: string|null, outputs: object }}
+ * @returns {{ issueNumber: number|null, phaseId: string|null, terminalReason: string|null, outputs: object, skillInvoked: boolean, annotationMissing: boolean }}
  */
 function detectPhase(entries) {
   let skillName = null;
   let issueNumber = null;
   const foundMarkers = new Set();
   const outputs = {};
+  let skillInvoked = false;
 
   for (const entry of entries) {
     // Tool use blocks — find Skill invocations.
     if (entry.type === "tool_use" && entry.name === "Skill") {
       const input = entry.input || {};
-      if (input.skill) skillName = input.skill;
+      if (input.skill) { skillName = input.skill; skillInvoked = true; }
       // Extract issue number from args (e.g. "1323" or "#1323").
       if (input.args) {
         const m = String(input.args).match(/\b(\d{3,6})\b/);
@@ -302,11 +335,17 @@ function detectPhase(entries) {
   }
 
   // Fallback: derive phase from skill name if no markers found.
-  if (!phaseId && skillName) {
-    phaseId = phaseFromSkill(skillName);
+  // annotationMissing is true when a skill was invoked but no FORGE markers
+  // were found in the transcript — the agent ran but didn't post its annotation.
+  const markersFound = foundMarkers.size > 0;
+  const phaseFromSkillFallback = !phaseId && skillName ? phaseFromSkill(skillName) : null;
+  if (!phaseId && phaseFromSkillFallback) {
+    phaseId = phaseFromSkillFallback;
   }
 
-  return { issueNumber, phaseId, terminalReason, outputs };
+  const annotationMissing = skillInvoked && !markersFound;
+
+  return { issueNumber, phaseId, terminalReason, outputs, skillInvoked, annotationMissing };
 }
 
 /**

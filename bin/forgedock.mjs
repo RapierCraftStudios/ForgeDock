@@ -27,7 +27,11 @@ import {
   backupExisting,
   manualLowConfidenceKeys,
 } from "./journey.mjs";
-import { removeSessionStartHook } from "./settings-hook.mjs";
+import {
+  removeSessionStartHook,
+  removeSubagentStopHook,
+  removePreToolUseHook,
+} from "./settings-hook.mjs";
 import {
   resolveState,
   setOptOut,
@@ -787,9 +791,8 @@ async function uninstall() {
 
   // Remove the SessionStart hook from ~/.claude/settings.json via the
   // hardened settings-hook module (never writes through malformed JSON).
-  const { status: hookRemoveResult } = removeSessionStartHook(
-    join(HOME, ".claude", "settings.json"),
-  );
+  const settingsJsonPath = join(HOME, ".claude", "settings.json");
+  const { status: hookRemoveResult } = removeSessionStartHook(settingsJsonPath);
   if (hookRemoveResult === "removed") {
     console.log(
       `  ${GREEN}✔${RESET}  Removed SessionStart hook from ${CYAN}~/.claude/settings.json${RESET}`,
@@ -802,6 +805,16 @@ async function uninstall() {
     console.log(
       `  ${YELLOW}⚠${RESET}  Could not update ~/.claude/settings.json — remove the hook manually.`,
     );
+  }
+
+  // Remove enforcement hooks (#1250): PreToolUse and SubagentStop.
+  const preToolUseRemove = removePreToolUseHook(settingsJsonPath);
+  if (preToolUseRemove.status === "removed") {
+    console.log(`  ${GREEN}✔${RESET}  Removed PreToolUse hook from ${CYAN}~/.claude/settings.json${RESET}`);
+  }
+  const subagentStopRemove = removeSubagentStopHook(settingsJsonPath);
+  if (subagentStopRemove.status === "removed") {
+    console.log(`  ${GREEN}✔${RESET}  Removed SubagentStop hook from ${CYAN}~/.claude/settings.json${RESET}`);
   }
   console.log("");
 
@@ -2033,6 +2046,14 @@ switch (command) {
         process.stderr.write(
           `  ${YELLOW}note${RESET}  Claude Code v${c.claudeVersion} detected — Tool(param:value) permission rules require v2.1.178+. ` +
           `Hook-based enforcement (#1250) will not be installed.\n`
+        );
+      } else {
+        // v2.1.178+ supports permission rules — suggest opt-in rules for pipeline safety.
+        process.stderr.write(
+          `  ${CYAN}tip${RESET}   Claude Code v${c.claudeVersion} supports permission rules. ` +
+          `Consider adding to ~/.claude/settings.json:\n` +
+          `         { "permissions": { "deny": ["Bash(git push origin main*)"] } }\n` +
+          `         This prevents accidental direct pushes to main.\n`
         );
       }
     }
