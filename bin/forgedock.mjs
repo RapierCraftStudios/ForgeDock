@@ -1667,6 +1667,7 @@ function help() {
     ["npx forgedock demo", "Set up a risk-free demo repo and print next steps"],
     ["npx forgedock labels [setup] [--repo owner/repo]", "Bootstrap ForgeDock-managed labels on a GitHub repo (idempotent)"],
     ["npx forgedock watch [--repo owner/repo]", "Live per-agent orchestration view (Ctrl+C to exit)"],
+    ["npx forgedock report [--days 30] [--md] [--json]", "30-day pipeline impact receipts for your repo"],
     ["npx forgedock doctor", "Check installation health (auto-detects project or global)"],
     ["npx forgedock update", "Pull latest & reinstall (auto-detects project or global)"],
     ["npx forgedock uninstall", "Remove commands (auto-detects project or global)"],
@@ -2069,6 +2070,11 @@ switch (command) {
   case "doctor":
     exitCode = await doctor();
     break;
+  case "report": {
+    const { runReport } = await import("./report.mjs");
+    await runReport(restArgs);
+    break;
+  }
   case "watch":
     await watch();
     break;
