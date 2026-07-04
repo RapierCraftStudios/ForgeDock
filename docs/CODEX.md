@@ -8,7 +8,7 @@ Shared source:
 - `commands/**/*.md` remains the workflow spec for both runtimes
 
 Claude wrapper:
-- `install.sh` symlinks command files into `~/.claude/commands`
+- `install.sh` symlinks command files into the current project directory by default; pass `--global` to install into `~/.claude/commands/` for all projects
 
 Codex wrapper:
 - `install-codex.sh` generates namespaced skills in `~/.codex/skills`

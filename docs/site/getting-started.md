@@ -43,13 +43,15 @@ go install github.com/mikefarah/yq/v4@latest
 
 ## Step 1: Install ForgeDock
 
-Run the installer with `npx`:
+Run the installer with `npx` from your project directory:
 
 ```bash
 npx forgedock
 ```
 
-This symlinks all 25+ ForgeDock command specs into `~/.claude/commands/` — making them available as slash commands in every Claude Code session.
+This installs all 25+ ForgeDock command specs into the current project (project-scoped by default) — making them available as slash commands in Claude Code sessions for this repo.
+
+> **Want commands available across all projects on this machine?** Use `npx forgedock --global` to install into `~/.claude/commands/` instead. Project-scoped is the default for new installs; use `--global` as an explicit opt-in.
 
 **Verify the install:**
 

@@ -221,8 +221,11 @@ More ship today (web-property analytics, browser QA sweeps, self-benchmarking) �
 **Requirements:** [Claude Code](https://docs.anthropic.com/en/docs/claude-code) · [GitHub CLI](https://cli.github.com/) (authenticated) · Node.js ≥ 18.
 
 ```bash
-npx forgedock          # checks your environment, installs the commands, detects your repo, and hands you a reviewed forge.yaml
+npx forgedock          # project-scoped install: checks your environment, installs commands for this repo, detects your repo, and hands you a reviewed forge.yaml
+npx forgedock --global # global install: installs into ~/.claude/commands/ — available in every Claude Code session on this machine
 ```
+
+**Project-scoped is the default.** `npx forgedock` installs commands scoped to the current project directory. Use `--global` only when you want the commands available across all your projects on this machine.
 
 One command does everything: it checks your environment, installs the slash commands into Claude Code, detects your repo (owner, branches, paths), and hands you a single annotated `forge.yaml` to review — press Enter to accept. Run `npx forgedock init` any time afterward to re-generate the config only.
 
@@ -261,6 +264,35 @@ npx forgedock help        # show everything
 ```
 
 > Running `npx forgedock` from *inside* this repo uses the local working tree. From your own project, use `npx forgedock@latest` to pin the published release.
+
+</details>
+
+<details>
+<summary><strong>Migrating from a global install</strong></summary>
+
+If you installed ForgeDock before project-scoped became the default, your commands live in `~/.claude/commands/`. You have two paths forward:
+
+**Keep the global install** — add `--global` going forward and nothing changes:
+
+```bash
+npx forgedock --global   # install / update globally as before
+```
+
+**Switch to project-scoped** (recommended for multi-repo setups):
+
+```bash
+# 1. Check your current install mode
+npx forgedock status
+
+# 2. Remove the global install
+npx forgedock uninstall --global
+
+# 3. Install project-scoped in each repo you use ForgeDock in
+cd /path/to/your/project
+npx forgedock
+```
+
+Run `npx forgedock doctor` after switching to confirm everything is healthy.
 
 </details>
 

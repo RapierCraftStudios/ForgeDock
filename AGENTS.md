@@ -3,7 +3,7 @@
 Forge is a workflow-spec repository. The shared source of truth lives in `commands/`.
 
 Claude Code support remains intact:
-- `install.sh` installs slash-command symlinks into `~/.claude/commands`
+- `install.sh` installs slash-command symlinks into the current project directory by default; pass `--global` to install into `~/.claude/commands/` for all projects
 - `CLAUDE.md` remains the Claude-oriented project reference
 
 Codex support is additive:
