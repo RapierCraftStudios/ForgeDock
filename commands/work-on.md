@@ -753,18 +753,28 @@ case "$TIER" in
 esac
 ```
 
-**Marker gate — Phase 1 exit** (see Marker Gate table in Universal Phase Dispatcher): <!-- forge#1419 -->
+**Marker gate — Phase 1 exit** (see Marker Gate table in Universal Phase Dispatcher): <!-- forge#1419, forge#1418 -->
 ```bash
 INV_MARKER=$(gh api repos/{GH_REPO}/issues/{NUMBER}/comments \
   --jq '[.[] | select(.body | contains("INVESTIGATION:COMPLETE"))] | length')
 if [ "${INV_MARKER:-0}" -eq 0 ]; then
-  echo "MARKER GATE FAIL: INVESTIGATION:COMPLETE not found. Re-invoking investigate subcommand."
-  # Re-invoke Skill(skill="work-on/investigate", ...) once — if still absent after retry:
-  gh issue comment {NUMBER} {GH_FLAG} --body "<!-- FORGE:STALL -->
-**Marker gate failed**: \`INVESTIGATION:COMPLETE\` was not posted after Phase 1 completion and one retry. Manual review required."
-  gh issue edit {NUMBER} {GH_FLAG} --add-label "needs-human" \
-    --remove-label "workflow:investigating" 2>/dev/null || true
-  exit 1
+  echo "MARKER GATE FAIL: INVESTIGATION:COMPLETE absent — re-invoking work-on/investigate once"
+  Skill(skill="work-on/investigate", args="{NUMBER} --repo {GH_REPO} --gh-flag {GH_FLAG}")
+  INV_MARKER=$(gh api repos/{GH_REPO}/issues/{NUMBER}/comments \
+    --jq '[.[] | select(.body | contains("INVESTIGATION:COMPLETE"))] | length')
+  if [ "${INV_MARKER:-0}" -eq 0 ]; then
+    gh issue comment {NUMBER} {GH_FLAG} --body "<!-- FORGE:GATE_FAILURE -->
+## Marker Gate Failure — Phase 1 (Investigation)
+
+**Expected marker**: \`INVESTIGATION:COMPLETE\` inside a \`FORGE:INVESTIGATOR\` comment
+**Status**: Absent after subcommand re-invocation. Human review required.
+
+The router re-invoked \`work-on/investigate\` once but the marker was still not posted.
+Inspect the subcommand output above for errors. <!-- forge#1418 -->"
+    gh issue edit {NUMBER} {GH_FLAG} --add-label "needs-human" \
+      --remove-label "workflow:investigating" 2>/dev/null || true
+    exit 1
+  fi
 fi
 ```
 
@@ -1634,18 +1644,28 @@ gh issue comment {NUMBER} {GH_FLAG} --body "<!-- FORGE:CHECKPOINT -->
 \`\`\`"
 ```
 
-**Marker gate — Phase 3 exit** (see Marker Gate table in Universal Phase Dispatcher): <!-- forge#1419 -->
+**Marker gate — Phase 3 exit** (see Marker Gate table in Universal Phase Dispatcher): <!-- forge#1419, forge#1418 -->
 ```bash
 BUILD_MARKER=$(gh api repos/{GH_REPO}/issues/{NUMBER}/comments \
   --jq '[.[] | select(.body | contains("FORGE:BUILDER:COMPLETE"))] | length')
 if [ "${BUILD_MARKER:-0}" -eq 0 ]; then
-  echo "MARKER GATE FAIL: FORGE:BUILDER:COMPLETE not found. Re-invoking build subcommand."
-  # Re-invoke Skill(skill="work-on/build", ...) once — if still absent after retry:
-  gh issue comment {NUMBER} {GH_FLAG} --body "<!-- FORGE:STALL -->
-**Marker gate failed**: \`FORGE:BUILDER:COMPLETE\` was not posted after Phase 3 completion and one retry. Manual review required."
-  gh issue edit {NUMBER} {GH_FLAG} --add-label "needs-human" \
-    --remove-label "workflow:building" 2>/dev/null || true
-  exit 1
+  echo "MARKER GATE FAIL: FORGE:BUILDER:COMPLETE absent — re-invoking work-on/build once"
+  Skill(skill="work-on/build", args="{NUMBER} --repo {GH_REPO} --gh-flag {GH_FLAG} --worktree {WORKTREE_PATH} --branch {BRANCH} --base {PR_BASE}")
+  BUILD_MARKER=$(gh api repos/{GH_REPO}/issues/{NUMBER}/comments \
+    --jq '[.[] | select(.body | contains("FORGE:BUILDER:COMPLETE"))] | length')
+  if [ "${BUILD_MARKER:-0}" -eq 0 ]; then
+    gh issue comment {NUMBER} {GH_FLAG} --body "<!-- FORGE:GATE_FAILURE -->
+## Marker Gate Failure — Phase 3 (Build)
+
+**Expected marker**: \`FORGE:BUILDER:COMPLETE\` inside a \`FORGE:BUILDER\` comment
+**Status**: Absent after subcommand re-invocation. Human review required.
+
+The router re-invoked \`work-on/build\` once but the marker was still not posted.
+Inspect the subcommand output above for errors. <!-- forge#1418 -->"
+    gh issue edit {NUMBER} {GH_FLAG} --add-label "needs-human" \
+      --remove-label "workflow:building" 2>/dev/null || true
+    exit 1
+  fi
 fi
 ```
 
