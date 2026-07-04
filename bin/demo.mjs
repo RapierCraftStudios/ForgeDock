@@ -61,6 +61,9 @@ export const DEFAULT_DEMO_DIRNAME = "forgedock-demo";
  *   --repo <slug> | --repo=<slug> Override the demo repo (owner/name).
  *   --open                        Launch Claude Code in the demo dir when found.
  *   --no-open                     Explicitly disable launching (the default).
+ *   --run                         Run the seeded issue through /work-on automatically
+ *                                 (requires ANTHROPIC_API_KEY; falls back to print-only
+ *                                 instructions when the key is absent).
  *   --help | -h                   Show usage.
  *
  * The first non-flag argument is treated as the target directory (positional
@@ -68,8 +71,8 @@ export const DEFAULT_DEMO_DIRNAME = "forgedock-demo";
  *
  * @param {string[]} args
  * @returns {{positional: string|undefined, dir: string|undefined,
- *            repo: string|undefined, open: boolean, help: boolean,
- *            error: string|null}}
+ *            repo: string|undefined, open: boolean, run: boolean,
+ *            help: boolean, error: string|null}}
  */
 export function parseDemoArgs(args = []) {
   const out = {
@@ -77,6 +80,7 @@ export function parseDemoArgs(args = []) {
     dir: undefined,
     repo: undefined,
     open: false,
+    run: false,
     help: false,
     error: null,
   };
@@ -88,6 +92,8 @@ export function parseDemoArgs(args = []) {
       out.open = true;
     } else if (a === "--no-open") {
       out.open = false;
+    } else if (a === "--run") {
+      out.run = true;
     } else if (a === "--dir") {
       out.dir = args[++i];
       if (out.dir === undefined) out.error = "--dir requires a path argument";
@@ -145,7 +151,7 @@ function isEmptyDir(dir, fsx) {
 
 export function demoUsage() {
   return [
-    "Usage: forgedock demo [dir] [--dir <path>] [--repo <owner/name>] [--open]",
+    "Usage: forgedock demo [dir] [--dir <path>] [--repo <owner/name>] [--open] [--run]",
     "",
     "Stand up a runnable ForgeDock demo at a predictable location (default",
     "~/forgedock-demo) and print the exact next steps. No configuration needed.",
@@ -155,6 +161,9 @@ export function demoUsage() {
     "  --repo <slug>    Demo repo to clone (default: RapierCraftStudios/forgedock-demo).",
     "  --open           Launch Claude Code in the demo directory if available.",
     "  --no-open        Do not launch Claude Code (default).",
+    "  --run            Automatically run the seeded issue through /work-on to a",
+    "                   merged PR (requires ANTHROPIC_API_KEY; falls back to",
+    "                   print-only instructions when the key is absent).",
     "  -h, --help       Show this help.",
   ].join("\n");
 }
@@ -186,10 +195,10 @@ export function demoForgeYaml(repoSlug) {
 
 /**
  * Render the success / next-steps card.
- * @param {{target: string, source: string, claudeAvailable: boolean}} ctx
+ * @param {{target: string, source: string, claudeAvailable: boolean, apiKeyAvailable?: boolean}} ctx
  * @returns {string}
  */
-export function renderNextSteps({ target, source, claudeAvailable }) {
+export function renderNextSteps({ target, source, claudeAvailable, apiKeyAvailable = false }) {
   const sourceNote = {
     cloned: "Cloned the live demo repo.",
     pulled: "Demo already present — pulled the latest.",
@@ -214,6 +223,15 @@ export function renderNextSteps({ target, source, claudeAvailable }) {
       ? "  claude            # open Claude Code here (or re-run with --open)"
       : "  # then open Claude Code in this directory",
   ];
+
+  if (!apiKeyAvailable) {
+    lines.push(
+      "",
+      "Tip: set ANTHROPIC_API_KEY and re-run with --run to execute the pipeline",
+      "automatically and watch a PR merge without opening Claude Code.",
+    );
+  }
+
   return lines.join("\n");
 }
 
@@ -261,11 +279,12 @@ const defaultLogger = {
  * Stand up the demo.
  *
  * @param {object} opts
- * @param {string}  opts.forgeHome            - Package root (for bundled scaffold).
+ * @param {string}  opts.forgeHome            - Package root (for bundled scaffold and commands/).
  * @param {string[]} [opts.args]              - CLI args after `demo`.
  * @param {string}  [opts.home]               - Home dir (default os.homedir()).
  * @param {string}  [opts.cwd]                - Working dir (default process.cwd()).
  * @param {string}  [opts.demoRepo]           - Override demo repo slug.
+ * @param {string}  [opts.apiKey]             - Anthropic API key (default ANTHROPIC_API_KEY env).
  * @param {Function} [opts.exec]              - (cmd, args, {cwd}) => {status,...}.
  * @param {object}  [opts.fsx]                - Filesystem facade.
  * @param {Function} [opts.commandExists]     - (bin) => boolean.
@@ -279,6 +298,7 @@ export async function runDemo(opts = {}) {
     args = [],
     home = homedir(),
     cwd = process.cwd(),
+    apiKey = process.env.ANTHROPIC_API_KEY,
     exec = defaultExec,
     fsx = defaultFsx,
     commandExists = defaultCommandExists,
@@ -371,7 +391,72 @@ export async function runDemo(opts = {}) {
   }
 
   const claudeAvailable = commandExists("claude");
-  logger.log(renderNextSteps({ target, source, claudeAvailable }));
+  const apiKeyAvailable = Boolean(apiKey);
+
+  // --run: drive the seeded issue through /work-on automatically.
+  // Requires ANTHROPIC_API_KEY; falls back to print-only instructions gracefully.
+  if (parsed.run) {
+    if (!apiKeyAvailable) {
+      logger.log(
+        "\nANTHROPIC_API_KEY is not set — cannot run the pipeline automatically.\n" +
+        "Export your key and re-run with --run, or open Claude Code manually:\n",
+      );
+      logger.log(renderNextSteps({ target, source, claudeAvailable, apiKeyAvailable: false }));
+      return { status: "ok", target, source };
+    }
+
+    const commandsDir = forgeHome ? join(forgeHome, "commands") : null;
+    if (!commandsDir || !fsx.existsSync(commandsDir)) {
+      logger.error(
+        "Could not locate the ForgeDock commands/ directory. " +
+        "Falling back to manual instructions.",
+      );
+      logger.log(renderNextSteps({ target, source, claudeAvailable, apiKeyAvailable }));
+      return { status: "ok", target, source };
+    }
+
+    logger.log(
+      "\nRunning /work-on 1 in the demo repo — watch the full pipeline execute…\n",
+    );
+
+    let runCommand;
+    try {
+      ({ runCommand } = await import("./runner.mjs"));
+    } catch {
+      logger.error(
+        "Could not load bin/runner.mjs. Falling back to manual instructions.",
+      );
+      logger.log(renderNextSteps({ target, source, claudeAvailable, apiKeyAvailable }));
+      return { status: "ok", target, source };
+    }
+
+    try {
+      const result = await runCommand({
+        commandsDir,
+        commandName: "work-on",
+        args: ["1"],
+        cwd: target,
+        apiKey,
+        logger: { log: logger.log, error: logger.error },
+      });
+      logger.log(`\nDemo pipeline finished with status: ${result.status}`);
+      return { status: result.status === "ok" ? "ok" : result.status, target, source };
+    } catch (err) {
+      if (err.code === "NO_SDK") {
+        logger.error(
+          "\n@anthropic-ai/sdk is not installed. Install it with:\n" +
+          "  npm install @anthropic-ai/sdk\n" +
+          "Then re-run with --run, or open Claude Code manually:\n",
+        );
+      } else {
+        logger.error(`\nPipeline error: ${err.message}\nFalling back to manual instructions.\n`);
+      }
+      logger.log(renderNextSteps({ target, source, claudeAvailable, apiKeyAvailable }));
+      return { status: "ok", target, source };
+    }
+  }
+
+  logger.log(renderNextSteps({ target, source, claudeAvailable, apiKeyAvailable }));
 
   if (parsed.open) {
     if (claudeAvailable) {
