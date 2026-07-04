@@ -5,6 +5,9 @@
 
 This file contains the shared protocols that ALL review agents must follow.
 It is read alongside individual persona files during Phase 3C agent dispatch.
+Canonical source: `docs/spec/review-protocol.md` — sync changes there first.
+
+---
 
 ---
 
@@ -150,3 +153,6 @@ Append this block at the very end of your comment (after the `---` footer line, 
 `<!-- FINDING:SEC-1|CONFIRMED|HIGH|services/api/app/routers/scrape.py:45|SQL injection via unsanitized user input in query parameter -->`
 `<!-- FINDING:SEC-2|LIKELY|MEDIUM|services/worker/worker/queues.py:312|Potential SSRF through user-controlled proxy URL -->`
 `<!-- REVIEW-FINDINGS-END -->`
+
+---
+

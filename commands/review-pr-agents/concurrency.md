@@ -1,12 +1,14 @@
-<!-- SPDX-FileCopyrightText: Copyright (c) RapierCraft Studios -->
+<!-- SPDX-FileCopyrightText: Copyright (c) RapierCraftStudios -->
 <!-- SPDX-License-Identifier: AGPL-3.0-or-later -->
 
 # Agent: Concurrency & Race Condition Auditor
 
+> Read `review-pr-agents/protocols.md` for the Evidence-Based Review Protocol and Structured Findings Protocol that all agents must follow.
+
+
+
 **Trigger**: CONCURRENCY domain detected OR BILLING domain detected
 **Type**: `general-purpose` | **Model**: `sonnet`
-
-> Read `review-pr-agents/protocols.md` for the Evidence-Based Review Protocol and Structured Findings Protocol that all agents must follow.
 
 **Prompt template:**
 ```
@@ -136,3 +138,4 @@ EOF
 | Connection pool exhaustion under concurrency | — | GAP | |
 
 ---
+

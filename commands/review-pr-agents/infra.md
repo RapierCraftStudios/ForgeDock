@@ -1,12 +1,14 @@
-<!-- SPDX-FileCopyrightText: Copyright (c) RapierCraft Studios -->
+<!-- SPDX-FileCopyrightText: Copyright (c) RapierCraftStudios -->
 <!-- SPDX-License-Identifier: AGPL-3.0-or-later -->
 
 # Agent: Infrastructure & Deploy Safety Auditor
 
+> Read `review-pr-agents/protocols.md` for the Evidence-Based Review Protocol and Structured Findings Protocol that all agents must follow.
+
+
+
 **Trigger**: INFRA service touched
 **Type**: `general-purpose` | **Model**: `sonnet`
-
-> Read `review-pr-agents/protocols.md` for the Evidence-Based Review Protocol and Structured Findings Protocol that all agents must follow.
 
 **Prompt template:**
 ```

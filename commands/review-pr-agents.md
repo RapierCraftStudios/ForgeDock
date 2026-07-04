@@ -3,11 +3,19 @@
 
 # Agent Catalog Router for `/review-pr`
 
-This file is the router index referenced by the `/review-pr` orchestrator during Phase 3C (agent dispatch).
+This file is the routing index referenced by the `/review-pr` orchestrator during Phase 3C (agent dispatch).
 Per-persona prompt templates have been split into individual files under `commands/review-pr-agents/`
-to avoid loading the full catalog on every invocation.
+to avoid loading the full catalog on every invocation. Protocols live in `docs/spec/review-protocol.md`
+(canonical source) and are reproduced in `commands/review-pr-agents/protocols.md`.
 
 Do not modify this file without also updating `review-pr.md`.
+
+**NEVER use the Agent tool.** The orchestrator dispatches review agents via `Task` only. `Agent` spawns
+opaque subprocesses that bypass the `allowed-tools` constraint, cannot post structured findings to the PR,
+and are not tracked by the review pipeline. Every agent template is intended to be passed as the `prompt`
+argument to a `Task(...)` call.
+
+<!-- FORGE:PROTOCOL_SOURCE — canonical definition lives in docs/spec/review-protocol.md -->
 
 ---
 
@@ -59,7 +67,7 @@ Read: $FORGE_HOME/commands/review-pr-agents/<persona>.md   (one per selected age
 ```
 
 Each persona file contains:
-- The agent's trigger condition
+- The agent's trigger condition and type
 - Its full prompt template with all check items
 - Its coverage matrix
 

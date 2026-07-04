@@ -1,11 +1,11 @@
-<!-- SPDX-FileCopyrightText: Copyright (c) RapierCraft Studios -->
+<!-- SPDX-FileCopyrightText: Copyright (c) RapierCraftStudios -->
 <!-- SPDX-License-Identifier: AGPL-3.0-or-later -->
 
 # Agent: General Security & Quality Scan (ALWAYS RUNS)
 
-**Type**: `security-exploit-auditor` | **Model**: `sonnet`
-
 > Read `review-pr-agents/protocols.md` for the Evidence-Based Review Protocol and Structured Findings Protocol that all agents must follow.
+
+
 
 **Type**: `security-exploit-auditor` | **Model**: `sonnet`
 
@@ -397,3 +397,4 @@ EOF
 | Timing side-channels in auth | — | GAP | |
 
 ---
+

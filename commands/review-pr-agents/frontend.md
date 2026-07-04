@@ -1,12 +1,14 @@
-<!-- SPDX-FileCopyrightText: Copyright (c) RapierCraft Studios -->
+<!-- SPDX-FileCopyrightText: Copyright (c) RapierCraftStudios -->
 <!-- SPDX-License-Identifier: AGPL-3.0-or-later -->
 
 # Agent: Frontend Quality Auditor
 
+> Read `review-pr-agents/protocols.md` for the Evidence-Based Review Protocol and Structured Findings Protocol that all agents must follow.
+
+
+
 **Trigger**: WEB service touched
 **Type**: `codebase-explorer` | **Model**: `sonnet`
-
-> Read `review-pr-agents/protocols.md` for the Evidence-Based Review Protocol and Structured Findings Protocol that all agents must follow.
 
 **Prompt template:**
 ```
@@ -81,3 +83,4 @@ EOF
 | Next.js App Router caching pitfalls | — | GAP | |
 
 ---
+

@@ -1,12 +1,14 @@
-<!-- SPDX-FileCopyrightText: Copyright (c) RapierCraft Studios -->
+<!-- SPDX-FileCopyrightText: Copyright (c) RapierCraftStudios -->
 <!-- SPDX-License-Identifier: AGPL-3.0-or-later -->
 
 # Agent: Billing Integrity Auditor
 
+> Read `review-pr-agents/protocols.md` for the Evidence-Based Review Protocol and Structured Findings Protocol that all agents must follow.
+
+
+
 **Trigger**: BILLING domain detected
 **Type**: `codebase-explorer` | **Model**: `sonnet`
-
-> Read `review-pr-agents/protocols.md` for the Evidence-Based Review Protocol and Structured Findings Protocol that all agents must follow.
 
 **Prompt template:**
 ```
@@ -93,3 +95,4 @@ EOF
 | Promo/voucher redemption integrity | — | GAP | |
 
 ---
+

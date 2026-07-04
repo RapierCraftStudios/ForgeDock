@@ -1,12 +1,14 @@
-<!-- SPDX-FileCopyrightText: Copyright (c) RapierCraft Studios -->
+<!-- SPDX-FileCopyrightText: Copyright (c) RapierCraftStudios -->
 <!-- SPDX-License-Identifier: AGPL-3.0-or-later -->
 
 # Agent: Scraper Logic Auditor
 
+> Read `review-pr-agents/protocols.md` for the Evidence-Based Review Protocol and Structured Findings Protocol that all agents must follow.
+
+
+
 **Trigger**: SCRAPING domain detected
 **Type**: `codebase-explorer` | **Model**: `sonnet`
-
-> Read `review-pr-agents/protocols.md` for the Evidence-Based Review Protocol and Structured Findings Protocol that all agents must follow.
 
 **Prompt template:**
 ```
@@ -177,3 +179,4 @@ EOF
 | Domain playbook override conflicts | — | GAP | |
 
 ---
+
