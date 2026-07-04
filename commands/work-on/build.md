@@ -33,6 +33,8 @@ argument-hint: [issue number] [--repo GH_REPO] [--gh-flag GH_FLAG] [--base PR_BA
 
 This resolves the three-topology conflict: `work-on.md` Phase 3 (inline 3A–3M), `work-on/build.md` (this file), and `work-on-monolithic.md` ([BENCHMARK]) all describe the **same canonical inline path**. `work-on/build.md` adds worktree lifecycle management (B1) and the FORGE:CONTRACT handoff (B2) that the monolithic variant omits for brevity. The `Skill()` forms in B3/B4 below document the sub-phase contract and serve as the exception path only. <!-- Added: forge#1276 -->
 
+<!-- FORGE:SPEC_LOADED — work-on/build.md loaded and active. Agent is bound by this spec. -->
+
 ---
 
 ## Inputs

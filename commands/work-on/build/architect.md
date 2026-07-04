@@ -14,6 +14,8 @@ argument-hint: [issue number] [--repo GH_REPO] [--gh-flag GH_FLAG] [--files AFFE
 **Agent model policy**: `model: "sonnet"`, `effort: xhigh` (deep tier — full code-path tracing, multi-file architecture planning). Fallback: `model: "opus"` if rate-limited. Feature gate: pass `effort` only on Claude Code >= 2.1.154.
 **NEVER use plan mode (EnterPlanMode).**
 
+<!-- FORGE:SPEC_LOADED — work-on/build/architect.md loaded and active. Agent is bound by this spec. -->
+
 ---
 
 ## COMPLEXITY_BAND Guard (check BEFORE all phases)

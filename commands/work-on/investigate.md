@@ -14,6 +14,8 @@ Standalone investigation phase for the work-on pipeline. Validates whether an is
 **Agent model policy**: `model: "sonnet"` (standard tier). Fallback: `model: "opus"` if rate-limited. Feature gate: pass `effort` in Task/Skill spawns only on Claude Code >= 2.1.154.
 **NEVER use plan mode (EnterPlanMode).**
 
+<!-- FORGE:SPEC_LOADED — work-on/investigate.md loaded and active. Agent is bound by this spec. -->
+
 ---
 
 ## Inputs
