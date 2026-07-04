@@ -5,11 +5,12 @@
 
 This file is the Agent Catalog referenced by the `/review-pr` orchestrator. It is read via the `Read` tool during Phase 3C (agent dispatch). It contains:
 
-1. The **Evidence-Based Review Protocol** — all spawned agents must follow this
-2. The **Structured Findings Protocol** — all spawned agents must include a machine-readable block in their PR comment
-3. All **9 agent templates** — copy the relevant template verbatim when constructing agent prompts
+1. The **Evidence-Based Review Protocol** and **Structured Findings Protocol** — defined in `docs/spec/review-protocol.md` (single normative source). The full text is reproduced below so agents loading this catalog get both protocols and the agent templates in one read.
+2. All **9 agent templates** — copy the relevant template verbatim when constructing agent prompts
 
-Do not modify this file without also updating `review-pr.md`.
+Do not modify this file without also updating `review-pr.md`. To update either protocol, edit `docs/spec/review-protocol.md` and sync the copy below.
+
+<!-- FORGE:PROTOCOL_SOURCE — canonical definition lives in docs/spec/review-protocol.md -->
 
 ---
 
@@ -100,7 +101,7 @@ A redundant import, an unused variable, or a duplicated constant may be harmless
 
 **Before dismissing redundant imports as harmless:** In Python, a local `import X` inside a function makes `X` a local variable for the ENTIRE function scope. Any use of `X` before that import line will raise `UnboundLocalError`. Check whether any code (existing or new) references `X` before the local import. This is a CONFIRMED CRITICAL if found — it crashes at runtime.
 
-### 6. Report Format
+### 7. Report Format
 
 Every finding must include:
 - **File:Line** — Exact location

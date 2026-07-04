@@ -40,59 +40,20 @@ All `$DEFAULT_BRANCH`, `$STAGING_BRANCH`, `$GATE_POSTURE`, and `$OVERRIDE_PHRASE
 
 ---
 
-## Evidence-Based Review Protocol (ALL Agents) <!-- allowlist:check-protocol-restatements -->
+## Review Protocol Reference
 
-### Diff-First Approach
-```bash
-git fetch origin $DEFAULT_BRANCH $STAGING_BRANCH
-git diff origin/$DEFAULT_BRANCH...origin/$STAGING_BRANCH
-```
+<!-- FORGE:PROTOCOL_SOURCE — canonical definition lives in docs/spec/review-protocol.md -->
 
-### Dynamic Exploration
-From each changed file, follow imports and function calls. Trace data flows across service boundaries (API → Redis → Worker).
+The **Evidence-Based Review Protocol** and **Structured Findings Protocol** are defined in `docs/spec/review-protocol.md`. All agents spawned by this spec MUST follow both protocols as specified there. The full protocol text is embedded in `commands/review-pr-agents.md` for agent use.
 
-### Validation Before Reporting
-
-| Confidence | Criteria | Action |
-|------------|----------|--------|
-| CONFIRMED | Traced full code path, found specific proof | Report as priority:P1 |
-| LIKELY | Pattern suggests issue, mitigations might exist | Report as priority:P2 |
-| POSSIBLE | Suspicious but couldn't trace fully | Report as priority:P3 |
-| UNFOUNDED | Found correct handling | Do NOT report |
-
-### Severity Decision Tree
-1. Runtime error → HIGH/CRITICAL
-2. Wrong data silently → HIGH
-3. Degraded performance → MEDIUM
-4. Genuinely cosmetic after tracing all consumers → LOW
-
-### Interaction Analysis
-NEVER dismiss as "pre-existing" without checking whether NEW code interacts with it to create a bug. List every new line referencing the pre-existing construct; if any would fail at runtime → CONFIRMED finding.
-
-### False Positive Prevention
-- Variable scope: Read FULL function, count indentation, check if/else structure
-- Type mismatches: Trace variable to source, check naming
-- Missing functions: `grep -rn "functionName" .` — check re-exports/aliases
-- Unreachable code: Check all callers, dynamic dispatch, tests
-- Redundant imports: In Python, local `import X` makes X local for entire function scope — check for UnboundLocalError
-
-### Report Format
-Every finding: File:Line, code snippet, evidence, confidence, files checked.
-
----
-
-## Structured Findings Protocol
-
-Append at end of every agent comment:
-```
-<!-- REVIEW-FINDINGS-START -->
-<!-- FINDING:PREFIX-N|CONFIDENCE|SEVERITY|file.py:line|One-line summary -->
-<!-- REVIEW-FINDINGS-END -->
-```
-
-Include ALL findings (CONFIRMED, LIKELY, POSSIBLE). One line per finding, sequential numbering.
-
-**Prefixes**: SEC, AUTH, BILL, CONC, SCRP, FE, API, DB, INFRA, BUG, QA, REG
+**Key protocol rules (summary — see `docs/spec/review-protocol.md` for the normative definition)**:
+- Start from the diff. Follow imports. Trace data flows across service boundaries.
+- Confidence levels: CONFIRMED (full code-path proof, P1) → LIKELY (pattern + caveat, P2) → POSSIBLE (advisory, P3) → UNFOUNDED (do not report)
+- REPRODUCTION GATE: CONFIRMED requires a full code-path trace or concrete input demonstration
+- Severity: runtime error → HIGH/CRITICAL; wrong data silently → HIGH; degraded perf → MEDIUM; cosmetic → LOW
+- INTERACTION ANALYSIS: never dismiss as "pre-existing" without checking NEW code interactions
+- FALSE POSITIVE PREVENTION: trace scope, types, callers before reporting
+- Structured findings block MANDATORY at end of every agent comment
 
 ---
 
