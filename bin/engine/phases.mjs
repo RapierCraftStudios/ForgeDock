@@ -50,6 +50,11 @@ export const PHASES = [
     id: "context",
     command: "work-on/build/context",
     entryCondition: (s) => s.committed.includes("investigate"),
+    async reconcile(state, io) {
+      // Idempotent resume: FORGE:CONTEXT already present → skip the LLM re-run.
+      const m = await issueMarkers(state.issue, io);
+      return has(m, "FORGE:CONTEXT") ? { satisfied: true } : { satisfied: false };
+    },
     async detectOutcome(state, io) {
       const m = await issueMarkers(state.issue, io);
       // Context is non-critical: a missing marker is a VISIBLE skip, not a hard fail (spec §7).
@@ -61,6 +66,11 @@ export const PHASES = [
     id: "architect",
     command: "work-on/build/architect",
     entryCondition: (s) => s.committed.includes("context"),
+    async reconcile(state, io) {
+      // Idempotent resume: FORGE:ARCHITECT already present → skip the LLM re-run.
+      const m = await issueMarkers(state.issue, io);
+      return has(m, "FORGE:ARCHITECT") ? { satisfied: true } : { satisfied: false };
+    },
     async detectOutcome(state, io) {
       const m = await issueMarkers(state.issue, io);
       return has(m, "FORGE:ARCHITECT")
@@ -108,6 +118,16 @@ export const PHASES = [
     id: "close",
     command: "work-on/close",
     entryCondition: (s) => s.committed.includes("review"),
+    async reconcile(state, io) {
+      // Idempotent resume: issue already closed or workflow:merged label set → skip the LLM re-run.
+      const out = await io.gh(["issue", "view", String(state.issue), "--json", "state,labels"]);
+      let j;
+      try { j = JSON.parse(out || "{}"); } catch { return { satisfied: false }; }
+      const labels = (j.labels || []).map((l) => l.name || l);
+      return (j.state === "CLOSED" || labels.includes("workflow:merged"))
+        ? { satisfied: true }
+        : { satisfied: false };
+    },
     async detectOutcome(state, io) {
       const out = await io.gh(["issue", "view", String(state.issue), "--json", "state,labels"]);
       let j;
