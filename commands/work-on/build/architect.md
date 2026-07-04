@@ -53,6 +53,7 @@ Parse from $ARGUMENTS:
 Also read from the calling context (in-memory, passed by parent agent):
 - `{INVESTIGATION_REPORT}` — full text of FORGE:INVESTIGATOR comment
 - `{CONTEXT_BRIEFING}` — full text of FORGE:CONTEXT comment (empty string if context step was skipped)
+- `{MEMORY_PRIORS}` — structured prior run blocks emitted by investigate Phase 0.5 (empty string if no priors found or investigate predates memory). When non-empty, treat each `[MEMORY PRIOR]` block as a high-confidence prior: if any prior's affected files overlap with the current plan's affected files, explicitly note the prior's root cause and key lesson in the FORGE:ARCHITECT comment's **Prior Run Priors** section (add this section after **Context Briefing** when priors exist). <!-- Added: forge#1316 -->
 
 If any of these are not passed directly, read them from GitHub (fallback/recovery path):
 

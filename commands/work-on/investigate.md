@@ -27,6 +27,65 @@ If called from `work-on`, these are passed through. If invoked standalone, `--re
 
 ---
 
+## Phase 0.5: Memory Retrieval — Prior Run Priors <!-- Added: forge#1316 -->
+
+**Goal**: Before investigating, retrieve the top-k relevant prior pipeline runs from the per-repo memory index. Inject confirmed priors into the investigation context so the pipeline compounds intelligence across runs.
+
+**This phase is non-blocking** — if the memory index is absent or retrieval fails, log the reason and proceed to Phase 1A. Never stall the pipeline for memory.
+
+### Step 1: Locate memory index Gist
+
+The memory index is a GitHub Gist tagged `<!-- FORGE:MEMORY_INDEX: {GH_REPO} -->`. Find it:
+
+```bash
+MEMORY_INDEX_URL=$(gh gist list --limit 100 \
+  --jq '.[] | select(.description | contains("FORGE:MEMORY_INDEX: {GH_REPO}")) | .url' 2>/dev/null | head -1)
+
+MEMORY_INDEX_ID=$(gh gist list --limit 100 \
+  --jq '.[] | select(.description | contains("FORGE:MEMORY_INDEX: {GH_REPO}")) | .id' 2>/dev/null | head -1)
+```
+
+If no memory index found: log `[MEMORY] No memory index for {GH_REPO} — starting fresh` and skip to Phase 1A.
+
+### Step 2: Retrieve relevant priors (top-k similarity)
+
+Read the memory index content:
+
+```bash
+MEMORY_CONTENT=$(gh gist view "$MEMORY_INDEX_ID" 2>/dev/null)
+```
+
+The memory index is a newline-delimited list of prior run entries, each formatted as:
+
+```
+MEMORY_ENTRY: issue={N} title="{TITLE}" domain="{DOMAIN_TAGS}" root_cause="{ROOT_CAUSE_SUMMARY}" outcome="{merged|invalid|blocked}" files="{AFFECTED_FILES}" lesson="{KEY_LESSON_ONE_LINE}" timestamp={ISO}
+```
+
+**Retrieve top-3 relevant priors** by matching against the current issue title and body:
+
+1. Extract keywords from the current issue title: lowercase, remove stop words, keep noun/verb tokens
+2. Score each memory entry: +2 for a file path overlap, +1 per keyword match in title/root_cause/lesson
+3. Return the top-3 highest-scoring entries (minimum score ≥ 1 to filter noise)
+
+If no entries score ≥ 1: log `[MEMORY] No relevant priors found` and skip to Phase 1A.
+
+### Step 3: Inject priors into investigation context
+
+For each retrieved prior, emit a structured block that Phase 1B can reference:
+
+```
+[MEMORY PRIOR #{RANK}]
+Issue: #{issue} — {title}
+Root cause: {root_cause}
+Outcome: {outcome}
+Key lesson: {lesson}
+Affected files: {files}
+```
+
+Print these blocks to stdout before Phase 1A begins. During Phase 1B (step 3 — blame analysis and step 5 — pickaxe pass), **explicitly check whether the current issue's suspected symbol or file appears in any prior root cause or affected files**. If a match is found, cite it in the FORGE:INVESTIGATOR comment's History Findings field as a `[MEMORY PRIOR]` hit.
+
+---
+
 ## Phase 1A: Load Issue & Check Resume State
 
 ```bash
