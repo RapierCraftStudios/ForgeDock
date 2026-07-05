@@ -109,7 +109,7 @@ gh pr list -R RapierCraftStudios/ForgeDock --state merged --limit 10 --json numb
 done | node scripts/conformance-check.mjs -
 ```
 
-Exit code 0 = all annotations conform. Exit code 1 = violations found (see output for details). Unrecognized annotation types are tolerated per spec §7.2 (WARN, not FAIL).
+Exit code 0 = all annotations conform. Exit code 1 = violations found (see output for details). Unrecognized annotation types are tolerated per spec §7.2 (WARN, not FAIL). An annotation explicitly marked `:PARTIAL` is also reported as a WARN, not a failure — only a fully missing/interrupted completion sentinel fails the exit code. (The reference `validate()` in `@forgedock/protocol` still reports `valid: false` for PARTIAL annotations per §3.2 — that strict signal is for library consumers deciding whether data is safe to treat as complete, not for this CLI's pass/fail gate.)
 
 ### Re-running when the adapter changes
 
