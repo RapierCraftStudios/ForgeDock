@@ -276,6 +276,7 @@ Run ONLY the checks whose domain was identified in Step 1.5. Skip checks for dom
 - **2S (Test failure classification)**: Run if Step 2T (or any future Step 2 check) invoked a test suite and it failed — classifies the failure as PRE_BROKEN, FLAKY, or REAL using `scripts/flaky-quarantine.sh` <!-- Added: forge#1336 -->
 - **2U (Test-subject import linkage)**: ALWAYS run — for each changed test-named file, asserts it statically imports (or otherwise references) its resolved subject module; stack-agnostic <!-- Added: forge#1606 -->
 - **2V (Entrypoint boot/load smoke)**: Run if `ENTRYPOINT` in DOMAINS — runs a syntax check plus a load smoke for declared CLI entrypoints <!-- Added: forge#1606 -->
+- **2W (Static injection scanner)**: ALWAYS run — invokes the `forge.yaml`-declared static security scanner (e.g. semgrep) scoped to changed files, blocking on findings at or above a configured severity; SKIPPED (non-blocking) when unconfigured — stack-agnostic <!-- Added: forge#1607 -->
 
 ### 2A: Security (ALL files)
 
@@ -308,6 +309,22 @@ for f in "${CHANGED_FILES_ARR[@]}"; do
             # Pattern: explicitly weakened cookie security flags expose sessions to XSS, plaintext interception, or CSRF
             grep -nE "httpOnly:\s*false|secure:\s*false|sameSite.*['\"]none['\"]" "$f" 2>/dev/null && \
                 echo "SEC: cookie security flag weakened in $f — httpOnly: false exposes cookie to JS (XSS); secure: false allows HTTP transmission; sameSite: none without Secure enables CSRF."
+            ;;
+    esac
+    # SEC-EXEC: shell-string exec/spawn calls with interpolated or concatenated arguments
+    # <!-- Added: forge#1607 -->
+    # Anchored to the literal substrings "exec(" / "execSync(" / "spawn(" — these do NOT
+    # appear inside "execFileSync(" or "spawnSync(" (an extra 4-8 chars precede the "("
+    # in those safe variants), so no additional exclusion is needed. Only flags a shell
+    # string built from a template literal containing ${...} interpolation, or a quoted
+    # string concatenated with +. A constant string/template literal with no interpolation
+    # or concatenation is NOT flagged (e.g. execSync("gh auth status") is safe).
+    case "$f" in
+        *.js|*.mjs|*.ts|*.tsx)
+            grep -nE '\b(exec|execSync|spawn)\(\s*`[^`]*\$\{' "$f" 2>/dev/null && \
+                echo "SEC-EXEC | HIGH | $f | Shell-string exec/spawn call with template-literal interpolation — use execFileSync/spawnSync with an args array instead (shell injection risk)"
+            grep -nE "\b(exec|execSync|spawn)\(\s*[\"'][^\"']*[\"']\s*\+" "$f" 2>/dev/null && \
+                echo "SEC-EXEC | HIGH | $f | Shell-string exec/spawn call with string concatenation — use execFileSync/spawnSync with an args array instead (shell injection risk)"
             ;;
     esac
 done
@@ -1479,6 +1496,62 @@ done
 
 ---
 
+### 2W: Static injection scanner (ALWAYS)
+
+<!-- Added: forge#1607 -->
+
+**Why this matters**: The SEC-EXEC grep in Step 2A (above) is a fast, zero-dependency, deterministic check — but it only catches the shell-string-interpolation class of injection (the #1586 pattern). Broader injection/taint classes (SSRF via unvalidated redirects, incomplete sanitizer regexes, dataflow-tracked SQL/command injection) need a real static-analysis engine, not a grep heuristic. CodeQL already runs as a required check on PRs targeting the repository's default branch — but that is a repo-level GitHub setting, not something this gate can invoke synchronously per-build (it requires a full-repo database build). This step gives every project a **configurable, stack-agnostic** hook to run its own fast scanner (semgrep is the common choice) scoped to just the changed files, at build time, before the code ever reaches a PR.
+
+This check is entirely `forge.yaml`-driven — ForgeDock does not hardcode semgrep, CodeQL, or any other tool. A project with no `verification.security_scan.command` configured sees a `SKIPPED` line and is never blocked by this step.
+
+```bash
+cd {WORKTREE_PATH}
+
+SCAN_CMD=$(yq '.verification.security_scan.command // ""' forge.yaml 2>/dev/null || echo '')
+
+if [ -z "$SCAN_CMD" ]; then
+    echo "SKIPPED — verification.security_scan.command not configured in forge.yaml (no scanner declared)"
+else
+    # Default pattern anchors on the (severity|level) JSON key name, not a bare severity
+    # word — matching a bare "ERROR"/"HIGH" against raw scanner JSON produces false
+    # positives (e.g. semgrep's own JSON always contains a top-level "errors":[] key,
+    # which a naive `grep -i "ERROR"` matches even with zero findings). Verified against
+    # a real semgrep run: this pattern blocks on an actual `"severity": "ERROR"` finding
+    # and stays silent on clean output. Works for semgrep's `severity` field and
+    # SARIF/CodeQL's `level` field alike.
+    SEVERITY_PATTERN=$(yq '.verification.security_scan.blocking_severity_pattern // "(severity|level)[^a-zA-Z0-9]{0,6}(CRITICAL|HIGH|ERROR)"' forge.yaml 2>/dev/null || echo '(severity|level)[^a-zA-Z0-9]{0,6}(CRITICAL|HIGH|ERROR)')
+
+    # Scope the scan to changed files where the configured command supports positional file
+    # arguments (e.g. `semgrep --config=auto`). Projects whose command already scopes itself
+    # (e.g. a wrapper script) can ignore the appended file list — extra positional args after
+    # a scanner's own flags are typically treated as additional targets, which is safe either way.
+    IFS=' ' read -ra CHANGED_FILES_ARR <<< "{CHANGED_FILES}"
+    SCAN_OUTPUT=$(eval "$SCAN_CMD" "${CHANGED_FILES_ARR[@]}" 2>&1)
+    SCAN_EXIT=$?
+
+    if [ "$SCAN_EXIT" -gt 1 ]; then
+        # Most scanners (semgrep, CodeQL CLI) exit 1 when findings exist and >1 on a real
+        # execution error (bad config, binary crash, missing dependency). Don't let a tool
+        # crash masquerade as "no findings" — surface it explicitly.
+        echo "SECURITY-SCAN-ERROR | HIGH | scanner command exited $SCAN_EXIT (execution error, not a findings exit) — command: $SCAN_CMD"
+        echo "$SCAN_OUTPUT"
+    elif echo "$SCAN_OUTPUT" | grep -qEi "$SEVERITY_PATTERN"; then
+        echo "SECURITY-SCAN | HIGH | scanner reported finding(s) at or above configured severity ($SEVERITY_PATTERN):"
+        echo "$SCAN_OUTPUT"
+    else
+        echo "2W: static injection scanner — no blocking findings ($SCAN_CMD)"
+    fi
+fi
+```
+
+**Flag as findings**:
+- Scanner output matches the configured `blocking_severity_pattern` (default `(severity|level)[^a-zA-Z0-9]{0,6}(CRITICAL|HIGH|ERROR)` — anchored on the JSON key name so it can't false-positive on unrelated JSON structure, e.g. semgrep's own always-present `"errors":[]` key; matches semgrep's `severity` field and SARIF/CodeQL's `level` field): **HIGH** — treat as a real injection/security finding, same weight as SEC-EXEC.
+- Scanner command exits with a code greater than 1 (execution failure, not a findings-exit): **HIGH** — do not silently treat a crashed scanner as "clean"; the builder must fix the configured command or escalate.
+
+**Regression guard**: When `verification.security_scan.command` is absent, this step logs `SKIPPED` and never blocks — existing ForgeDock installs with no scanner declared see no behavior change.
+
+---
+
 ## Step 3: Compile findings
 
 Format findings as a structured list:
@@ -1501,6 +1574,8 @@ OR:
 8. ROUTER-1 | HIGH | routers/handler.py | Residual unfixed gate condition pattern found in sibling router file routers/other_handler.py:N — fix may be incomplete across all callers
 9. TEST-THEATER | MEDIUM | tests/foo.test.mjs | Locally redefines 'bar', which src/foo.mjs also exports — test may be exercising its own copy instead of the real implementation
 10. ENTRYPOINT-2 | HIGH | bin/cli.mjs | Load smoke failed (exit 1) via 'node bin/cli.mjs --help' — entrypoint crashes on boot/import
+11. SEC-EXEC | HIGH | bin/report.mjs:57 | Shell-string exec/spawn call with template-literal interpolation — use execFileSync/spawnSync with an args array instead (shell injection risk)
+12. SECURITY-SCAN | HIGH | scanner reported finding(s) at or above configured severity (semgrep "severity":"ERROR") — see semgrep/CodeQL output for file:line detail
 ```
 
 **Severity classification:**

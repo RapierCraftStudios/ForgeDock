@@ -284,6 +284,63 @@ fi
 
 Docs/config-only changes (a diff containing no `.mjs`/`.js` files) never reach either block above — `JS_FILES`/`SMOKE_TARGETS` are empty and both log `SKIPPED`, matching the module's own Skip Conditions for pure docs/config edits.
 
+**Static injection scan** (direct, blocking backstop mirroring the test-suite/JS-syntax pattern above):
+
+<!-- Added: forge#1607 -->
+
+This is a direct, blocking backstop — unlike `quality-gate.md` Step 2A/2W, it does not iterate a fix-loop; it simply blocks, exactly like the `py_compile`/`node --check` checks above. This step is BLOCKING, not advisory: any SEC-EXEC match or configured-scanner finding must be fixed (or escalated) before this phase can pass.
+
+```bash
+cd {WORKTREE_PATH}
+
+# 1. SEC-EXEC: shell-string exec/spawn calls with interpolated or concatenated arguments.
+#    Identical pattern to quality-gate.md Step 2A — kept byte-for-byte in sync so the two
+#    files never diverge on what counts as a finding.
+IFS=' ' read -ra CHANGED_FILES_ARR <<< "{CHANGED_FILES}"
+for f in "${CHANGED_FILES_ARR[@]}"; do
+    case "$f" in
+        *.js|*.mjs|*.ts|*.tsx)
+            grep -nE '\b(exec|execSync|spawn)\(\s*`[^`]*\$\{' "$f" 2>/dev/null && \
+                { echo "SEC-EXEC FAILED: $f (template-literal interpolation in exec/spawn call)"; SEC_EXEC_FINDINGS="${SEC_EXEC_FINDINGS:+$SEC_EXEC_FINDINGS, }$f"; }
+            grep -nE "\b(exec|execSync|spawn)\(\s*[\"'][^\"']*[\"']\s*\+" "$f" 2>/dev/null && \
+                { echo "SEC-EXEC FAILED: $f (string concatenation in exec/spawn call)"; SEC_EXEC_FINDINGS="${SEC_EXEC_FINDINGS:+$SEC_EXEC_FINDINGS, }$f"; }
+            ;;
+    esac
+done
+
+# 2. Configured static scanner (semgrep, CodeQL CLI, or any project-declared command) —
+#    forge.yaml-driven, stack-agnostic. Identical yq keys to quality-gate.md Step 2W.
+SCAN_CMD=$(yq '.verification.security_scan.command // ""' forge.yaml 2>/dev/null || echo '')
+if [ -z "$SCAN_CMD" ]; then
+    echo "SKIPPED — verification.security_scan.command not configured in forge.yaml"
+else
+    # Anchored on the (severity|level) JSON key name, not a bare severity word — see
+    # quality-gate.md Step 2W for why (a bare "ERROR" match false-positives on semgrep's
+    # own always-present "errors":[] key even with zero findings). Kept identical to
+    # quality-gate.md's default so the two files never diverge on what blocks.
+    SEVERITY_PATTERN=$(yq '.verification.security_scan.blocking_severity_pattern // "(severity|level)[^a-zA-Z0-9]{0,6}(CRITICAL|HIGH|ERROR)"' forge.yaml 2>/dev/null || echo '(severity|level)[^a-zA-Z0-9]{0,6}(CRITICAL|HIGH|ERROR)')
+    SCAN_OUTPUT=$(eval "$SCAN_CMD" "${CHANGED_FILES_ARR[@]}" 2>&1)
+    SCAN_EXIT=$?
+    if [ "$SCAN_EXIT" -gt 1 ]; then
+        echo "SECURITY SCAN ERROR (exit $SCAN_EXIT, execution failure not a findings-exit): $SCAN_CMD"
+        echo "$SCAN_OUTPUT"
+        SECURITY_SCAN_FINDINGS="${SECURITY_SCAN_FINDINGS:+$SECURITY_SCAN_FINDINGS, }scanner-error"
+    elif echo "$SCAN_OUTPUT" | grep -qEi "$SEVERITY_PATTERN"; then
+        echo "SECURITY SCAN FAILED (blocking finding at or above $SEVERITY_PATTERN):"
+        echo "$SCAN_OUTPUT"
+        SECURITY_SCAN_FINDINGS="${SECURITY_SCAN_FINDINGS:+$SECURITY_SCAN_FINDINGS, }scanner-findings"
+    else
+        echo "Static injection scanner: no blocking findings ($SCAN_CMD)"
+    fi
+fi
+```
+
+**SEC-EXEC and configured-scanner findings are BLOCKING**:
+- If the failure is caused by the change just made in this build: fix it in `{WORKTREE_PATH}` (rewrite `exec`/`execSync`/`spawn` to `execFileSync`/`spawnSync` with an args array, or resolve the scanner's reported finding) and re-run this step before continuing.
+- If it cannot be resolved in-place: escalate exactly like the test-suite/entrypoint-smoke failures above — post a `## Static Injection Scan Failed` comment naming `$SEC_EXEC_FINDINGS`/`$SECURITY_SCAN_FINDINGS` and the failing file(s)/command, add `needs-human`, set `GATE_PASSED: false`, and STOP.
+
+Projects with no `.js`/`.mjs`/`.ts`/`.tsx` changed files and no `verification.security_scan.command` configured see both sub-checks log clean/`SKIPPED` output — no behavior change for existing installs.
+
 **Shell scripts**: Verify service interactions — read target middleware files, document what was verified in V4 summary.
 
 **Markdown / config files**: No format step required.
@@ -495,6 +552,13 @@ VALIDATE_RESULT:
                             # .mjs/.js file's load smoke exited 0; list of file paths that
                             # failed otherwise — populated from ENTRYPOINT_FAILURES in Phase
                             # V2. Non-empty means gate_passed: false. <!-- Added: forge#1606 -->
+  security_scan_findings: []  # empty when the SEC-EXEC grep found nothing AND the configured
+                            # verification.security_scan.command (if any) reported no findings
+                            # at/above blocking_severity_pattern; populated with "SEC_EXEC" and/or
+                            # "SECURITY_SCAN" entries otherwise — from SEC_EXEC_FINDINGS /
+                            # SECURITY_SCAN_FINDINGS in Phase V2. Non-empty means gate_passed: false.
+                            # Empty (not absent) when no scanner is configured — that is a SKIPPED
+                            # state, not a finding. <!-- Added: forge#1607 -->
 ```
 
 ---
