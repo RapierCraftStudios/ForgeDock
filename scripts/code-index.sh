@@ -171,11 +171,29 @@ if command -v ctags >/dev/null 2>&1; then
     -f - "$REPO_PATH" 2>/dev/null \
   | grep -v '^!' \
   | while IFS= read -r line; do
-      # Parse JSON output from universal-ctags
-      name=$(echo "$line" | grep -oP '"name"\s*:\s*"\K[^"]+' 2>/dev/null || true)
-      path=$(echo "$line" | grep -oP '"path"\s*:\s*"\K[^"]+' 2>/dev/null || true)
-      line_num=$(echo "$line" | grep -oP '"line"\s*:\s*\K\d+' 2>/dev/null || echo "0")
-      kind=$(echo "$line" | grep -oP '"kind"\s*:\s*"\K[^"]+' 2>/dev/null || echo "unknown")
+      # Parse JSON output from universal-ctags. Portable (non-PCRE) extraction —
+      # grep -oP is not supported by Git Bash's grep build on Windows, so use a
+      # bash regex instead of a lookbehind.
+      if [[ "$line" =~ \"name\"[[:space:]]*:[[:space:]]*\"([^\"]+)\" ]]; then
+        name="${BASH_REMATCH[1]}"
+      else
+        name=""
+      fi
+      if [[ "$line" =~ \"path\"[[:space:]]*:[[:space:]]*\"([^\"]+)\" ]]; then
+        path="${BASH_REMATCH[1]}"
+      else
+        path=""
+      fi
+      if [[ "$line" =~ \"line\"[[:space:]]*:[[:space:]]*([0-9]+) ]]; then
+        line_num="${BASH_REMATCH[1]}"
+      else
+        line_num="0"
+      fi
+      if [[ "$line" =~ \"kind\"[[:space:]]*:[[:space:]]*\"([^\"]+)\" ]]; then
+        kind="${BASH_REMATCH[1]}"
+      else
+        kind="unknown"
+      fi
       if [[ -n "$name" && -n "$path" ]]; then
         echo -e "${name}\t${path}\t${line_num}\t${kind}"
       fi
@@ -190,11 +208,17 @@ if [[ ! -s "$SYMBOLS_FILE" ]] || ! command -v ctags >/dev/null 2>&1; then
   find "$REPO_PATH" -name "*.py" -not -path "*/.git/*" -not -path "*/node_modules/*" \
     -not -path "*/__pycache__/*" 2>/dev/null | while read -r f; do
     grep -n "^def \|^    def \|^class " "$f" 2>/dev/null | while IFS=: read -r lnum content; do
-      name=$(echo "$content" | grep -oP '(?<=def |class )\w+' | head -1)
+      # Portable (non-PCRE) extraction — grep -oP is not supported by Git Bash's
+      # grep build on Windows, so use a bash regex instead of a lookbehind.
+      if [[ "$content" =~ (def|class)[[:space:]]+([A-Za-z_][A-Za-z0-9_]*) ]]; then
+        name="${BASH_REMATCH[2]}"
+      else
+        name=""
+      fi
       kind=$(echo "$content" | grep -q "^def \|    def " && echo "function" || echo "class")
       rel_path="${f#$REPO_PATH/}"
       [[ -n "$name" ]] && echo -e "${name}\t${rel_path}\t${lnum}\t${kind}"
-    done
+    done || true
   done >> "$SYMBOLS_FILE" 2>/dev/null || true
 
   # JavaScript/TypeScript: functions and classes
@@ -202,10 +226,18 @@ if [[ ! -s "$SYMBOLS_FILE" ]] || ! command -v ctags >/dev/null 2>&1; then
     -not -path "*/.git/*" -not -path "*/node_modules/*" 2>/dev/null | while read -r f; do
     grep -n "^export function \|^function \|^export class \|^class \|^const .* = \(function\|async function\|() =>\)" \
       "$f" 2>/dev/null | while IFS=: read -r lnum content; do
-      name=$(echo "$content" | grep -oP '(?<=function |class )\w+|(?<=const )\w+(?=\s*=)' | head -1)
+      # Portable (non-PCRE) extraction — grep -oP is not supported by Git Bash's
+      # grep build on Windows, so use a bash regex instead of lookbehind/lookahead.
+      if [[ "$content" =~ (function|class)[[:space:]]+([A-Za-z_][A-Za-z0-9_]*) ]]; then
+        name="${BASH_REMATCH[2]}"
+      elif [[ "$content" =~ const[[:space:]]+([A-Za-z_][A-Za-z0-9_]*)[[:space:]]*= ]]; then
+        name="${BASH_REMATCH[1]}"
+      else
+        name=""
+      fi
       rel_path="${f#$REPO_PATH/}"
       [[ -n "$name" ]] && echo -e "${name}\t${rel_path}\t${lnum}\tfunction"
-    done
+    done || true
   done >> "$SYMBOLS_FILE" 2>/dev/null || true
 fi
 
@@ -222,10 +254,20 @@ find "$REPO_PATH" -name "*.py" -not -path "*/.git/*" -not -path "*/__pycache__/*
   2>/dev/null | while read -r f; do
   rel_path="${f#$REPO_PATH/}"
   grep -n "^import \|^from " "$f" 2>/dev/null | while IFS=: read -r lnum content; do
-    module=$(echo "$content" | grep -oP '(?<=^from )\S+|(?<=^import )\S+' | head -1)
-    symbol=$(echo "$content" | grep -oP '(?<=import )[\w, ]+$' | head -1 || echo "")
+    # Portable (non-PCRE) extraction — grep -oP is not supported by Git Bash's
+    # grep build on Windows, so use a bash regex instead of lookbehind.
+    if [[ "$content" =~ ^from[[:space:]]+([^[:space:]]+)[[:space:]]+import[[:space:]]+(.+)$ ]]; then
+      module="${BASH_REMATCH[1]}"
+      symbol="${BASH_REMATCH[2]}"
+    elif [[ "$content" =~ ^import[[:space:]]+([^[:space:]]+) ]]; then
+      module="${BASH_REMATCH[1]}"
+      symbol=""
+    else
+      module=""
+      symbol=""
+    fi
     [[ -n "$module" ]] && echo -e "${rel_path}\t${module}\t${symbol}"
-  done
+  done || true
 done >> "$IMPORTS_FILE" 2>/dev/null || true
 
 # JavaScript/TypeScript imports
@@ -233,18 +275,32 @@ find "$REPO_PATH" \( -name "*.js" -o -name "*.ts" -o -name "*.tsx" -o -name "*.j
   -not -path "*/.git/*" -not -path "*/node_modules/*" 2>/dev/null | while read -r f; do
   rel_path="${f#$REPO_PATH/}"
   grep -n "^import \|^} from \|require(" "$f" 2>/dev/null | while IFS=: read -r lnum content; do
-    module=$(echo "$content" | grep -oP "(?<=from ['\"])[^'\"]+|(?<=require\(['\"])[^'\"]+")
+    # Portable (non-PCRE) extraction — grep -oP is not supported by Git Bash's
+    # grep build on Windows, so use a bash regex instead of lookbehind/lookahead.
+    if [[ "$content" =~ from[[:space:]]*[\'\"]([^\'\"]+)[\'\"] ]]; then
+      module="${BASH_REMATCH[1]}"
+    elif [[ "$content" =~ require\([[:space:]]*[\'\"]([^\'\"]+)[\'\"] ]]; then
+      module="${BASH_REMATCH[1]}"
+    else
+      module=""
+    fi
     [[ -n "$module" ]] && echo -e "${rel_path}\t${module}\t"
-  done
+  done || true
 done >> "$IMPORTS_FILE" 2>/dev/null || true
 
 # Go imports
 find "$REPO_PATH" -name "*.go" -not -path "*/.git/*" 2>/dev/null | while read -r f; do
   rel_path="${f#$REPO_PATH/}"
   grep -n '"[^"]*"' "$f" 2>/dev/null | grep -v "//\|fmt.Print\|errors.New" | while IFS=: read -r lnum content; do
-    module=$(echo "$content" | grep -oP '"\K[^"]+(?=")')
+    # Portable (non-PCRE) extraction — grep -oP is not supported by Git Bash's
+    # grep build on Windows, so use a bash regex instead of lookbehind/lookahead.
+    if [[ "$content" =~ \"([^\"]+)\" ]]; then
+      module="${BASH_REMATCH[1]}"
+    else
+      module=""
+    fi
     [[ -n "$module" ]] && echo -e "${rel_path}\t${module}\t"
-  done
+  done || true
 done >> "$IMPORTS_FILE" 2>/dev/null || true
 
 # ---------------------------------------------------------------------------
@@ -271,7 +327,11 @@ if [[ -s "$SYMBOLS_FILE" ]]; then
         if [[ "$rel_caller" == "$sym_file" ]]; then continue; fi
         caller_line=$(grep -n "\b${sym_name}(" "$caller_file" 2>/dev/null | head -1 | cut -d: -f1 || echo "0")
         echo -e "${sym_name}\t${rel_caller}\t${caller_line}"
-      done
+      done || true
+      # ^ `xargs grep -l` returning 1 (zero callers found for this symbol) propagates
+      # through `pipefail` into this `while` compound statement, which is subject to
+      # `set -e` — guard it here so one symbol with no callers doesn't abort the
+      # remaining symbols in the outer loop.
   done >> "$CALLERS_FILE" 2>/dev/null || true
 fi
 
@@ -337,6 +397,20 @@ IMPORT_COUNT=$(wc -l < "$IMPORTS_FILE" 2>/dev/null || echo 0)
 CALLER_COUNT=$(wc -l < "$CALLERS_FILE" 2>/dev/null || echo 0)
 FILE_COUNT=$(wc -l < "$DOMAIN_FILE" 2>/dev/null || echo 0)
 
+# Sanity check: if source files that should have produced symbols/imports were
+# found, but extraction came back empty, a loop was truncated somewhere above
+# (or a tool like grep -oP is unavailable/incompatible on this platform) — flag
+# it instead of letting "Index built successfully" silently paper over data loss.
+SRC_FILE_COUNT=$(find "$REPO_PATH" \( -name "*.py" -o -name "*.js" -o -name "*.ts" \
+  -o -name "*.tsx" -o -name "*.jsx" -o -name "*.go" \) -not -path "*/.git/*" \
+  -not -path "*/node_modules/*" -not -path "*/__pycache__/*" 2>/dev/null | wc -l | tr -d ' ')
+INDEX_TRUNCATED=0
+if [[ "$SRC_FILE_COUNT" -gt 0 && "$SYMBOL_COUNT" -eq 0 ]]; then
+  INDEX_TRUNCATED=1
+  echo "WARN: 0 symbols extracted despite ${SRC_FILE_COUNT} matching source file(s) found." >&2
+  echo "WARN: Extraction may have been truncated by a shell/grep failure, or ctags/grep tooling is unavailable/incompatible on this platform." >&2
+fi
+
 cat > "${CACHE_DIR}/index.json" << INDEX_EOF
 {
   "schema_version": "1",
@@ -348,7 +422,8 @@ cat > "${CACHE_DIR}/index.json" << INDEX_EOF
     "symbols": ${SYMBOL_COUNT},
     "imports": ${IMPORT_COUNT},
     "callers": ${CALLER_COUNT},
-    "files": ${FILE_COUNT}
+    "files": ${FILE_COUNT},
+    "truncated": $([[ "$INDEX_TRUNCATED" -eq 1 ]] && echo "true" || echo "false")
   },
   "files": {
     "symbols": "${CACHE_DIR}/symbols.tsv",
@@ -365,7 +440,11 @@ cat > "${CACHE_DIR}/index.json" << INDEX_EOF
 }
 INDEX_EOF
 
-echo "INFO: Index built successfully"
+if [[ "$INDEX_TRUNCATED" -eq 1 ]]; then
+  echo "WARN: Index build completed but looks truncated — see WARN lines above."
+else
+  echo "INFO: Index built successfully"
+fi
 echo "INFO:   Symbols:  ${SYMBOL_COUNT}"
 echo "INFO:   Imports:  ${IMPORT_COUNT}"
 echo "INFO:   Callers:  ${CALLER_COUNT}"
