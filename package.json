@@ -38,6 +38,7 @@
     "docs/",
     "!docs/site/.vitepress/",
     "examples/",
+    "packages/protocol/src/",
     "scripts/",
     "templates/",
     "LICENSE",

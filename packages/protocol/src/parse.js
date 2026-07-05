@@ -34,6 +34,11 @@ const SENTINEL_SUFFIXES = new Set(['COMPLETE', 'PARTIAL']);
 // Matches bold-key lines: **Key**: value  (used for field extraction)
 const BOLD_FIELD_RE = /^\*\*([^*]+)\*\*\s*:\s*(.+)$/;
 
+// Generic (unknown-type) sentinel patterns, anchored to a whole line — see
+// resolveSentinelState() below for why anchoring matters. (forge#1594)
+const GENERIC_COMPLETE_RE = /^\s*<!--\s*[A-Z_:]+:COMPLETE\s*-->\s*$/m;
+const GENERIC_PARTIAL_RE = /^\s*<!--\s*[A-Z_:]+:PARTIAL\s*-->\s*$/m;
+
 /**
  * Determine sentinel state for an annotation body given its type definition.
  *
@@ -43,9 +48,13 @@ const BOLD_FIELD_RE = /^\*\*([^*]+)\*\*\s*:\s*(.+)$/;
  */
 function resolveSentinelState(body, typeDef) {
   if (!typeDef) {
-    // Unknown type — look for generic sentinel patterns
-    if (/<!--\s*[A-Z_:]+:COMPLETE\s*-->/.test(body)) return SentinelState.COMPLETE;
-    if (/<!--\s*[A-Z_:]+:PARTIAL\s*-->/.test(body)) return SentinelState.PARTIAL;
+    // Unknown type — look for generic sentinel patterns. Anchored to require the
+    // sentinel to occupy its own (trimmed) line — the same structural test as
+    // OPENING_TAG_RE above. A field value that merely *mentions* sentinel-shaped
+    // text (e.g. **Commits**: ... <!-- FORGE:BUILDER:COMPLETE -->) must not be
+    // able to spoof completion; only a sentinel on its own line is real. (forge#1594)
+    if (GENERIC_COMPLETE_RE.test(body)) return SentinelState.COMPLETE;
+    if (GENERIC_PARTIAL_RE.test(body)) return SentinelState.PARTIAL;
     return SentinelState.INTERRUPTED;
   }
 
@@ -60,14 +69,24 @@ function resolveSentinelState(body, typeDef) {
     return SentinelState.COMPLETE;
   }
 
+  // Anchored to a whole line (with the `m` flag so `^`/`$` match at every line
+  // boundary within body, not just start/end of the whole string) — a real
+  // sentinel always occupies its own line (see emit.js, which always emits it
+  // that way). This is the sentinel-detection mirror of the OPENING_TAG_RE
+  // anchor above: an unanchored substring test previously let a field value
+  // that merely *contains* the sentinel text (e.g. a **Commits** message quoting
+  // it) spoof completion for an annotation that was never actually completed.
+  // (forge#1594 — inverse of the #1524 opening-tag anchor gap)
   const completionPattern = new RegExp(
-    `<!--\\s*${escapeRegExp(typeDef.completionSentinel)}\\s*-->`,
+    `^\\s*<!--\\s*${escapeRegExp(typeDef.completionSentinel)}\\s*-->\\s*$`,
+    'm',
   );
   if (completionPattern.test(body)) return SentinelState.COMPLETE;
 
   if (typeDef.partialSentinel) {
     const partialPattern = new RegExp(
-      `<!--\\s*${escapeRegExp(typeDef.partialSentinel)}\\s*-->`,
+      `^\\s*<!--\\s*${escapeRegExp(typeDef.partialSentinel)}\\s*-->\\s*$`,
+      'm',
     );
     if (partialPattern.test(body)) return SentinelState.PARTIAL;
   }

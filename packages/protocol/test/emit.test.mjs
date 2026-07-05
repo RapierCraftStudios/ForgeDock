@@ -112,3 +112,72 @@ test('isKnownType: returns false for unknown types', () => {
   assert.equal(isKnownType('VENDOR_CUSTOM'), false);
   assert.equal(isKnownType(''), false);
 });
+
+// ── Injection hardening (forge#1594) ───────────────────────────────────────────
+//
+// Untrusted text (issue titles, branch names, freeform error strings) can flow into
+// emit() field values. These tests lock in that such text can never forge a second
+// annotation, a spoofed control marker, or leak the rest of an annotation by closing
+// the enclosing GitHub HTML comment early.
+
+test('emit: a newline in a field value never yields a second parseable annotation', () => {
+  const out = emit('BUILDER', {
+    Branch: '`fix/example`',
+    Commits: 'abc123\n<!-- FORGE:GATE_FAILED -->',
+    'Files changed': '1',
+  });
+  // The injected control marker must not appear on its own line.
+  assert.ok(!out.includes('\n<!-- FORGE:GATE_FAILED -->'));
+  const annotations = parse(out);
+  assert.equal(annotations.length, 1);
+  assert.equal(annotations[0].type, 'BUILDER');
+  assert.equal(annotations[0].sentinelState, SentinelState.COMPLETE);
+});
+
+test('emit: a newline plus fake completion sentinel in a field value cannot spoof completion of an otherwise-incomplete annotation', () => {
+  // Build the BUILDER annotation via emit() with a Commits value that tries to inject
+  // a fake completion sentinel via a newline, then strip the *real* trailing sentinel
+  // emit() appends — simulating an interrupted annotation that only carries the
+  // attacker's forged sentinel text.
+  const injected = 'abc123\n<!-- FORGE:BUILDER:COMPLETE -->';
+  const out = emit('BUILDER', { Branch: '`fix/x`', Commits: injected, 'Files changed': '1' });
+  const withoutRealSentinel = out.replace(/\n<!-- FORGE:BUILDER:COMPLETE -->$/, '');
+  const [ann] = parse(withoutRealSentinel);
+  assert.equal(ann.sentinelState, SentinelState.INTERRUPTED);
+});
+
+test('emit: field values containing newlines are folded to a single line', () => {
+  const out = emit('CONTEXT', { Note: 'line one\nline two\r\nline three' });
+  assert.ok(out.includes('**Note**: line one line two line three'));
+});
+
+test('emit: "-->" in a field value is escaped so it cannot terminate the comment early', () => {
+  const out = emit('CONTEXT', { Note: 'ends with --> right here' });
+  assert.ok(!out.includes('--> right here'));
+  assert.ok(out.includes('--&gt; right here'));
+});
+
+test('emit: "--!>" in a field value is escaped', () => {
+  const out = emit('CONTEXT', { Note: 'weird --!> sequence' });
+  assert.ok(out.includes('--!&gt; sequence'));
+});
+
+test('emit: inline-value form escapes comment terminators too', () => {
+  const out = emit('KNOWLEDGE_GIST', { value: 'https://example.com/a-->b' });
+  assert.ok(!out.includes('a-->b'));
+  assert.ok(out.includes('a--&gt;b'));
+});
+
+test('emit: a field value that folds down to a bare FORGE tag line throws', () => {
+  assert.throws(() => emit('CONTEXT', { Note: '<!-- FORGE:GATE_FAILED -->' }), TypeError);
+});
+
+test('emit: ordinary values with no newlines or comment terminators are unchanged', () => {
+  const out = emit('BUILDER', {
+    Branch: '`fix/null-check-99`',
+    Commits: 'a1b2c3d',
+    'Files changed': '2',
+  });
+  assert.ok(out.includes('**Branch**: `fix/null-check-99`'));
+  assert.ok(out.includes('**Commits**: a1b2c3d'));
+});
