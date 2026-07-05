@@ -2034,11 +2034,14 @@ async function watch() {
 
   // Self-scheduling render loop — each render awaits completion before
   // scheduling the next, preventing overlapping cycles when GitHub API
-  // latency exceeds the poll interval (forge#1428).
+  // latency exceeds the poll interval (forge#1428). The scheduled timeout is
+  // the ONLY handle keeping the event loop alive for this command — it must
+  // stay ref'd, or Node exits after the first render despite printing
+  // "Refreshing every Ns — Ctrl+C to exit" (forge#1593). The only intended
+  // exit path is SIGINT/SIGTERM → cleanup(), which restores the cursor.
   async function scheduleRender() {
     await render();
     intervalHandle = setTimeout(scheduleRender, POLL_INTERVAL_MS);
-    intervalHandle.unref(); // don't keep process alive if loop drains
   }
   await scheduleRender();
 }

@@ -25,6 +25,55 @@ export function makeIo() {
 export function runDir() { return join(homedir(), ".forge", "runs"); }
 
 /**
+ * Resolves the repo `gh` would target by default (i.e. resolved from the cwd
+ * git remote), via `gh repo view`. Used to validate an explicit `--repo` flag
+ * against the ambient context — see `assertRepoMatchesCwd`.
+ * @param {{gh: Function}} io
+ * @returns {Promise<string|null>} "owner/repo", or null if it can't be determined
+ */
+async function resolveDefaultRepo(io) {
+  try {
+    const out = await io.gh(["repo", "view", "--json", "nameWithOwner", "--jq", ".nameWithOwner"]);
+    const repo = String(out).trim();
+    return repo || null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Guards against cross-repo state confusion (forge#1593): `--repo` used to be
+ * threaded into the `gh issue list` enumeration call but never into the
+ * projector's state reads/writes or into re-dispatch, so a mismatched
+ * `--repo` silently read/wrote FORGE:STATE in the cwd-resolved repo instead
+ * of the requested one. Fully threading `--repo` through every `io.gh`/
+ * `io.git` call site the engine makes during a run (phases.mjs, reconcile.mjs,
+ * projector.mjs) would be a much larger, riskier change. Instead, this fails
+ * closed: if `--repo` is given and doesn't match the repo `gh` would use by
+ * default, refuse to run at all rather than silently mixing repos.
+ * @param {{gh: Function}} io
+ * @param {string|null} repo
+ * @returns {Promise<void>}
+ */
+async function assertRepoMatchesCwd(io, repo) {
+  if (!repo) return;
+  const defaultRepo = await resolveDefaultRepo(io);
+  if (defaultRepo === null) {
+    throw new Error(
+      `--repo ${repo} was given, but the current repo could not be determined (\`gh repo view\` failed) to ` +
+      `verify it matches. Refusing to run cross-repo without verification.`
+    );
+  }
+  if (defaultRepo !== repo) {
+    throw new Error(
+      `--repo ${repo} does not match the current repo (${defaultRepo}). Cross-repo dispatch is not supported — ` +
+      `state reads/writes (issue view/edit) are cwd-scoped and would silently target ${defaultRepo} instead of ` +
+      `${repo}. Run this command with cwd set to a checkout of ${repo}, or omit --repo to operate on ${defaultRepo}.`
+    );
+  }
+}
+
+/**
  * @param {number[]} issues
  * @param {{readState:(i:number)=>Promise<{terminal:boolean,lease:?{until:number}}|null>}} io
  * @param {number} now
@@ -39,14 +88,23 @@ export async function scanStalls(issues, io, now) {
   return stalled;
 }
 
-export async function runFromCli(argv) {
+/**
+ * @param {string[]} argv
+ * @param {{io?: {gh: Function}, runIssue?: Function}} [deps]
+ *   Injectable for tests — defaults to real `gh`/`git` (makeIo()) and the real
+ *   `runIssue` engine driver.
+ */
+export async function runFromCli(argv, deps = {}) {
   const issue = parseInt(argv[0], 10);
   if (!Number.isInteger(issue)) throw new Error("usage: forgedock run-issue <issue-number> --lane <lane>");
   const lane = flag(argv, "--lane");
   if (!lane) throw new Error("--lane is required: e.g. --lane main or --lane staging. No default to prevent accidental production targeting.");
-  const io = makeIo();
+  const repo = flag(argv, "--repo");
+  const io = deps.io ?? makeIo();
+  await assertRepoMatchesCwd(io, repo);
+  const runIssueFn = deps.runIssue ?? runIssue;
   const agentId = `cli_${process.pid}`;
-  const res = await runIssue({ issue, dir: runDir(), agentId, lane, io,
+  const res = await runIssueFn({ issue, dir: runDir(), agentId, lane, io,
     runner: (await import("./runner.mjs")).runCommand, now: () => Date.now() });
   console.log(`issue #${issue} → ${res.terminalReason}`);
   return res;
@@ -62,7 +120,10 @@ export async function runFromCli(argv) {
  * Flags:
  *   --dry-run   Print the stalled list and exit 0 without dispatching anything.
  *   --lane      Lane to pass to run-issue (required — no default to prevent accidental production targeting).
- *   --repo      GitHub repo (owner/repo). Defaults to the repo inferred by gh.
+ *   --repo      GitHub repo (owner/repo). Must match the repo `gh` resolves by default
+ *               (the cwd git remote) — cross-repo dispatch is refused (forge#1593),
+ *               since state reads/writes are cwd-scoped and would otherwise silently
+ *               target the wrong repo. Omit --repo to operate on the cwd-resolved repo.
  *
  * Per-issue dispatch failures are caught and isolated — one issue's engine error
  * (e.g. NO_API_KEY/NO_SDK or any other uncaught phase error from runIssue) does
@@ -81,6 +142,7 @@ export async function resumeStalledFromCli(argv, deps = {}) {
   const repo   = flag(argv, "--repo");
 
   const io = deps.io ?? makeIo();
+  await assertRepoMatchesCwd(io, repo);
   const dispatch = deps.dispatch ?? runFromCli;
   const projector = makeProjector(io);
   const now = Date.now();
