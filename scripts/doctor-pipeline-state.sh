@@ -197,7 +197,11 @@ SKIPPED_JSON="[]"
 bounded_reason() {
   local raw="${1:-}"
   local first_line
-  first_line=$(printf '%s\n' "$raw" | head -n1)
+  # `|| true` guards against SIGPIPE (exit 141) under `set -euo pipefail`:
+  # head closes the pipe after the first line, so printf may be killed while
+  # still writing on large multi-line input. This keeps the helper self-safe
+  # regardless of whether the caller wraps it in a command substitution.
+  first_line=$(printf '%s\n' "$raw" | head -n1 || true)
   if [ "${#first_line}" -gt 300 ]; then
     printf '%s...[truncated]' "${first_line:0:300}"
   else
