@@ -35,6 +35,8 @@ If called from `work-on`, these are passed through. If invoked standalone, `--re
 
 **This phase is non-blocking** — if the memory index is absent or retrieval fails, log the reason and proceed to Phase 1A. Never stall the pipeline for memory.
 
+**Note on Gist visibility (forge#1587)**: The memory-index Gist is created **secret** (see `close.md` Phase C5.2 — no `--public` flag). `gh gist list` and `gh gist view` operate against the authenticated user's own Gists by description/id regardless of public/secret status, so the retrieval steps below work unchanged against a secret Gist. No code change is needed here — this note exists only so a future edit doesn't reintroduce a "must be public to be readable" assumption.
+
 ### Step 1: Locate memory index Gist
 
 The memory index is a GitHub Gist tagged `<!-- FORGE:MEMORY_INDEX: {GH_REPO} -->`. Find it:
