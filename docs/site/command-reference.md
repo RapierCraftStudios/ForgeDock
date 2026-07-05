@@ -10,7 +10,7 @@ ForgeDock installs slash commands into Claude Code. Each command is a detailed p
 
 Commands ship in two tiers:
 
-- **Core** (default install) — the 8 commands that cover the full pipeline: `work-on`, `issue`, `review-pr`, `quality-gate`, `orchestrate`, `forgedock-init`, `forge-stats`, and their sub-phases.
+- **Core** (default install) — the commands that cover the full pipeline: `work-on`, `issue`, `review-pr`, `quality-gate`, `orchestrate`, `forgedock-init`, and their sub-phases.
 - **Extras** (opt-in) — analytics, audit, ops, and project-specific commands. Install with `--extras`.
 
 ```bash
@@ -451,21 +451,6 @@ AI-powered `forge.yaml` generator — scans codebase, queries GitHub, and fills 
 /forgedock-init --section review  # Regenerate one section
 ```
 
-
----
-
-### `/forge-stats`
-
-**Command size and bloat tracker.**
-
-Tracks the size of every ForgeDock command file over time. Detects bloat by comparing current sizes against the git-tracked baseline and per-command thresholds. Also reports raw cost-per-issue from `FORGE:DECISION_RECORD` annotations.
-
-```bash
-/forge-stats                      # Compare against baseline
-/forge-stats baseline             # Update baseline to current
-/forge-stats full                 # Full size breakdown
-/forge-stats cost                 # Raw cost-per-issue report
-```
 
 ---
 
