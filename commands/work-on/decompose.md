@@ -112,12 +112,15 @@ For each sub-issue (in dependency order):
 
 ```bash
 SUB_TITLE="{fix|feat|refactor}: {SUB_ISSUE_TITLE}"
-DEDUP_RESULT=$(scripts/issue-dedup.sh "$SUB_TITLE" {GH_FLAG} 2>/dev/null)
+DEDUP_RESULT=$(scripts/issue-dedup.sh "$SUB_TITLE" {GH_FLAG} 2>&1)
 DEDUP_EXIT=$?
 if [ "$DEDUP_EXIT" -eq 1 ]; then
   echo "DEDUP: Sub-issue near-duplicate detected — $DEDUP_RESULT"
   echo "Skipping creation. Comment on the existing issue instead."
   # Do NOT call gh issue create for this sub-issue
+elif [ "$DEDUP_EXIT" -eq 2 ]; then
+  echo "DEDUP: Usage error — $DEDUP_RESULT"
+  # Do NOT call gh issue create for this sub-issue — fix the invocation and retry
 fi
 ```
 

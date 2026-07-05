@@ -1316,12 +1316,15 @@ Run the deterministic dedup script first, then fall through to the line-range ch
 # Step 0: Deterministic title dedup — catches near-duplicates before line-range check
 # See scripts/issue-dedup.sh for the token-overlap algorithm. <!-- Added: forge#1335 -->
 FINDING_TITLE_DEDUP="fix: brief description of finding (review finding — PR #${PR_NUMBER})"
-DEDUP_RESULT=$(scripts/issue-dedup.sh "$FINDING_TITLE_DEDUP" "$GH_FLAG" 2>/dev/null)
+DEDUP_RESULT=$(scripts/issue-dedup.sh "$FINDING_TITLE_DEDUP" "$GH_FLAG" 2>&1)
 DEDUP_EXIT=$?
 if [ "$DEDUP_EXIT" -eq 1 ]; then
   echo "DEDUP: Skipping — $DEDUP_RESULT"
   # Skip this finding — do NOT create a duplicate issue
   # Add a comment on the existing issue referencing this recurrence in PR #${PR_NUMBER}
+elif [ "$DEDUP_EXIT" -eq 2 ]; then
+  echo "DEDUP: Usage error — $DEDUP_RESULT"
+  # Skip this finding — do NOT fall through to gh issue create on a usage error
 fi
 ```
 

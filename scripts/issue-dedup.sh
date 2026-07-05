@@ -28,15 +28,26 @@
 #
 # Integration pattern (for command specs that call gh issue create):
 #
-#   DEDUP_RESULT=$(scripts/issue-dedup.sh "$PROPOSED_TITLE" "$GH_FLAG")
+#   DEDUP_RESULT=$(scripts/issue-dedup.sh "$PROPOSED_TITLE" "$GH_FLAG" 2>&1)
 #   DEDUP_EXIT=$?
 #   if [ $DEDUP_EXIT -eq 1 ]; then
 #     echo "Near-duplicate detected: $DEDUP_RESULT"
 #     echo "Comment on the existing issue instead of creating a new one."
 #     echo "Use --force to override and create anyway."
 #     exit 1
+#   elif [ $DEDUP_EXIT -eq 2 ]; then
+#     echo "Dedup check usage error: $DEDUP_RESULT"
+#     echo "Do NOT proceed to issue creation — fix the invocation and retry."
+#     exit 2
 #   fi
 #   gh issue create ...   # only runs when exit 0
+#
+#   Callers MUST explicitly branch on exit 2 (usage error) as a hard stop, not
+#   just exit 1 (duplicate found). Silently falling through on any non-1 exit
+#   code — including redirecting stderr to /dev/null — means a malformed
+#   invocation (bad flag, missing argument) is indistinguishable from "no
+#   duplicate found" and proceeds to create a possibly-duplicate issue with
+#   zero operator-visible signal.
 #
 # Notes:
 #   - Closed issues are NOT matched (a regression should be filed fresh with a
