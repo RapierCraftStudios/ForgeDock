@@ -63,6 +63,10 @@ while [[ $# -gt 0 ]]; do
   case "$1" in
     -R)
       shift
+      if [[ $# -eq 0 ]]; then
+        echo "Missing value for -R" >&2
+        exit 2
+      fi
       GH_FLAG="-R $1"
       shift
       ;;
