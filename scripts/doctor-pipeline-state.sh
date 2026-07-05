@@ -226,10 +226,16 @@ add_skip() {
 # ---------------------------------------------------------------------------
 # I1: Issues stuck in workflow:investigating
 # ---------------------------------------------------------------------------
-INVESTIGATING=$(gh issue list $GH_FLAG \
+# Distinguish a confirmed-empty list from a gh API failure (rate limit, network
+# blip, auth issue) — an API failure must NOT be treated as "no issues found".
+if ! INVESTIGATING=$(gh issue list $GH_FLAG \
   --state open --label "workflow:investigating" \
   --limit 100 \
-  --json number,title,updatedAt,labels 2>/dev/null || echo "[]")
+  --json number,title,updatedAt,labels 2>"$GH_STDERR_TMP"); then
+  echo "WARNING: gh issue list failed for workflow:investigating — I1 check inconclusive, skipping (not treated as empty): $(cat "$GH_STDERR_TMP")" >&2
+  add_skip "I1" "all" "gh issue list failed: $(bounded_reason "$(cat "$GH_STDERR_TMP")")"
+  INVESTIGATING="[]"
+fi
 
 while IFS= read -r row; do
   num=$(echo "$row" | jq -r '.number')
@@ -252,10 +258,15 @@ done < <(echo "$INVESTIGATING" | jq -c '.[]')
 # ---------------------------------------------------------------------------
 # I2: Issues stuck in workflow:building
 # ---------------------------------------------------------------------------
-BUILDING=$(gh issue list $GH_FLAG \
+# Distinguish a confirmed-empty list from a gh API failure — see I1 above.
+if ! BUILDING=$(gh issue list $GH_FLAG \
   --state open --label "workflow:building" \
   --limit 100 \
-  --json number,title,updatedAt,labels 2>/dev/null || echo "[]")
+  --json number,title,updatedAt,labels 2>"$GH_STDERR_TMP"); then
+  echo "WARNING: gh issue list failed for workflow:building — I2 check inconclusive, skipping (not treated as empty): $(cat "$GH_STDERR_TMP")" >&2
+  add_skip "I2" "all" "gh issue list failed: $(bounded_reason "$(cat "$GH_STDERR_TMP")")"
+  BUILDING="[]"
+fi
 
 while IFS= read -r row; do
   num=$(echo "$row" | jq -r '.number')
@@ -278,10 +289,15 @@ done < <(echo "$BUILDING" | jq -c '.[]')
 # ---------------------------------------------------------------------------
 # I3: Issues stuck in workflow:in-review
 # ---------------------------------------------------------------------------
-IN_REVIEW=$(gh issue list $GH_FLAG \
+# Distinguish a confirmed-empty list from a gh API failure — see I1 above.
+if ! IN_REVIEW=$(gh issue list $GH_FLAG \
   --state open --label "workflow:in-review" \
   --limit 100 \
-  --json number,title,updatedAt,labels 2>/dev/null || echo "[]")
+  --json number,title,updatedAt,labels 2>"$GH_STDERR_TMP"); then
+  echo "WARNING: gh issue list failed for workflow:in-review — I3 check inconclusive, skipping (not treated as empty): $(cat "$GH_STDERR_TMP")" >&2
+  add_skip "I3" "all" "gh issue list failed: $(bounded_reason "$(cat "$GH_STDERR_TMP")")"
+  IN_REVIEW="[]"
+fi
 
 while IFS= read -r row; do
   num=$(echo "$row" | jq -r '.number')
@@ -355,10 +371,15 @@ done < <(echo "$IN_REVIEW" | jq -c '.[]')
 # ---------------------------------------------------------------------------
 # I6: PRs open without FORGE annotations
 # ---------------------------------------------------------------------------
-OPEN_PRS=$(gh pr list $GH_FLAG \
+# Distinguish a confirmed-empty list from a gh API failure — see I1 above.
+if ! OPEN_PRS=$(gh pr list $GH_FLAG \
   --state open \
   --limit 50 \
-  --json number,title,body,createdAt 2>/dev/null || echo "[]")
+  --json number,title,body,createdAt 2>"$GH_STDERR_TMP"); then
+  echo "WARNING: gh pr list failed for open PRs — I6 check inconclusive, skipping (not treated as empty): $(cat "$GH_STDERR_TMP")" >&2
+  add_skip "I6" "all" "gh pr list failed: $(bounded_reason "$(cat "$GH_STDERR_TMP")")"
+  OPEN_PRS="[]"
+fi
 
 while IFS= read -r row; do
   pr_num=$(echo "$row" | jq -r '.number')
@@ -422,6 +443,12 @@ if [ "$CHECKS_SKIPPED" -gt 0 ]; then
 fi
 
 if [ "$TOTAL" -eq 0 ]; then
+  if [ "$CHECKS_SKIPPED" -gt 0 ]; then
+    echo "  No stalls detected in checks that ran, but $CHECKS_SKIPPED check(s) were skipped"
+    echo "  due to gh API failures — pipeline health is INCONCLUSIVE, not confirmed healthy."
+    echo ""
+    exit 0
+  fi
   echo "  No stalls detected. Pipeline is healthy."
   echo ""
   exit 0
