@@ -322,13 +322,21 @@ function tokenizeCommand(command) {
 
 /**
  * Extract the value of a CLI flag from a command string.
- * Handles both `--flag value` and `--flag=value` forms.
+ * Handles `--flag value`, `--flag=value`, and — for single-dash, single-letter
+ * short flags only (e.g. `-B`, `-R`) — the attached form `-Bvalue`.
  *
  * Tokenizes the command first (see `tokenizeCommand`) and matches the flag
  * against actual argv tokens — NOT against substrings anywhere in the raw
  * command string. This prevents flag-shaped text inside a quoted argument
  * value (e.g. `--title "Fix -B main thread bug"`) from being misread as a
  * real flag (issue #1519).
+ *
+ * The attached form is valid getopt-style syntax that real CLIs (including
+ * `gh`) accept for single-dash short flags — e.g. `gh pr create -Bmain` is
+ * equivalent to `gh pr create -B main`. Without this branch, a forbidden PR
+ * base written as `-Bmain` would produce no match and bypass the hard block
+ * (issue #1550). The attached-form check is scoped to 2-character single-dash
+ * flags so long flags (`--base`) are never affected.
  *
  * @param {string} command
  * @param {string} flag  e.g. "--base" or "-B"
@@ -337,11 +345,12 @@ function tokenizeCommand(command) {
 function extractFlag(command, flag) {
   const tokens = tokenizeCommand(command);
   const eqPrefix = `${flag}=`;
+  const isShortFlag = flag.length === 2 && flag[0] === "-" && flag[1] !== "-";
 
   for (let i = 0; i < tokens.length; i++) {
     const token = tokens[i];
 
-    // --flag=value form
+    // --flag=value form (also covers the equals form of a short flag, e.g. -B=value)
     if (token.startsWith(eqPrefix)) {
       return token.slice(eqPrefix.length);
     }
@@ -349,6 +358,11 @@ function extractFlag(command, flag) {
     // --flag value form (value is the next token)
     if (token === flag) {
       return i + 1 < tokens.length ? tokens[i + 1] : null;
+    }
+
+    // -Bvalue attached form (single-dash short flags only, e.g. -Bmain)
+    if (isShortFlag && token.startsWith(flag) && token.length > flag.length) {
+      return token.slice(flag.length);
     }
   }
 
