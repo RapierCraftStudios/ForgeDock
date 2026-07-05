@@ -37,13 +37,28 @@ function makeWorld() {
               commitsAhead: 0, body: "Issue.", editCalls: 0, gitCalls: 0,
               crashAtEdit: Infinity, crashAtGit: Infinity, reviewRuns: 0,
               prCreateCount: 0, buildRuns: 0, crashAtPrView: Infinity, prViewCalls: 0,
-              commentCalls: 0, crashAtComments: Infinity };
+              commentCalls: 0, crashAtComments: Infinity,
+              postBuildCommentCalls: 0, crashAtPostBuildComments: Infinity };
   const io = {
     gh: async (args) => {
       const a = args.join(" ");
       if (a.includes("/comments")) {
         w.commentCalls++;
         if (w.commentCalls === w.crashAtComments) { w.crashAtComments = Infinity; throw new Error("CRASH mid-phase (comments)"); }
+        // Scoped channel: only counts /comments calls that occur after build's
+        // runner has already executed its side effect (w.buildRuns > 0). The
+        // FIRST such call is guaranteed to be build's own detectOutcome — no
+        // other phase's reconcile/detectOutcome runs between build's runner
+        // returning and build's detectOutcome firing (engine.mjs's straight-line
+        // await chain in runPhaseWithRetry). Robust to earlier phases (investigate/
+        // context/architect) adding or removing their own /comments calls.
+        if (w.buildRuns > 0) {
+          w.postBuildCommentCalls++;
+          if (w.postBuildCommentCalls === w.crashAtPostBuildComments) {
+            w.crashAtPostBuildComments = Infinity;
+            throw new Error("CRASH mid-phase (post-build comments)");
+          }
+        }
         return w.markers;
       }
       if (a.startsWith("issue view") && a.includes("body")) return JSON.stringify({ body: w.body });
@@ -155,11 +170,20 @@ describe("crash injection: resume from the durable run-log", () => {
     // ref yet) that also means an injected git-call crash no longer escapes
     // detectOutcome; it now resolves as a same-run retry instead of a process
     // death. So the mid-phase kill is injected on the gh "comments" call inside
-    // build.detectOutcome instead: comments calls #1-3 are investigate/context/
-    // architect's detectOutcome; call #4 is build's detectOutcome, which fires
-    // AFTER the runner's side effect (marker + commits) but BEFORE build's commit
-    // — the same crash point as before, on a channel the engine does not guard.
-    w.crashAtComments = 4;
+    // build.detectOutcome instead.
+    //
+    // An earlier version of this test injected on an absolute /comments call
+    // count (crashAtComments = 4), assuming call #4 was always build's
+    // detectOutcome. That assumption drifted whenever an earlier phase
+    // (investigate/context/architect) gained or lost its own reconcile/
+    // detectOutcome /comments call, silently un-exercising this resume path
+    // (the crash landed inside a try/caught `reconcile` instead and never
+    // fired). crashAtPostBuildComments is scoped structurally instead: it only
+    // counts /comments calls made after w.buildRuns > 0, so the first one is
+    // guaranteed to be build's own detectOutcome regardless of how many
+    // /comments calls earlier phases make — the same crash point as before,
+    // on a channel the engine does not guard, but immune to call-count drift.
+    w.crashAtPostBuildComments = 1;
     const { res, launches } = await runToCompletion({ dir, io, runner });
     assert.ok(launches >= 2, `mid-phase crash must fire and require resume (launches=${launches})`);
     assert.equal(res.terminalReason, "merged");
