@@ -154,19 +154,27 @@ if [ -n "$DOCTOR_SCRIPT" ] && [ -x "$DOCTOR_SCRIPT" ]; then
   DOCTOR_SUMMARY=$(echo "$DOCTOR_OUTPUT" | jq '.summary // {}' 2>/dev/null || echo "{}")
   DOCTOR_CRITICAL=$(echo "$DOCTOR_SUMMARY" | jq '.critical // 0')
   DOCTOR_WARNING=$(echo "$DOCTOR_SUMMARY"  | jq '.warning  // 0')
-  echo "Pipeline-state doctor: $DOCTOR_CRITICAL critical, $DOCTOR_WARNING warning"
+  DOCTOR_CHECKS_SKIPPED=$(echo "$DOCTOR_SUMMARY" | jq '.checks_skipped // 0')
+  DOCTOR_DEGRADED=$(echo "$DOCTOR_SUMMARY" | jq '.degraded // []')
+  echo "Pipeline-state doctor: $DOCTOR_CRITICAL critical, $DOCTOR_WARNING warning, $DOCTOR_CHECKS_SKIPPED check(s) skipped"
 else
   echo "WARNING: doctor-pipeline-state.sh not found — skipping deterministic stall check"
   DOCTOR_FINDINGS="[]"
   DOCTOR_SUMMARY="{}"
   DOCTOR_CRITICAL=0
   DOCTOR_WARNING=0
+  DOCTOR_CHECKS_SKIPPED=0
+  DOCTOR_DEGRADED="[]"
 fi
 ```
 
 **If `DOCTOR_CRITICAL > 0`**: Surface these in the Phase 3 analysis and in the Phase 5 report as P0 items. They are invariant violations, not estimates.
 
 **`DOCTOR_FINDINGS`** is a JSON array. Each finding has: `type`, `severity`, `issue`, `label`, `hours_stuck`, `last_annotation`, `resume_command`, `detail`. Use these fields verbatim in the health report — do not paraphrase.
+
+**If `DOCTOR_CHECKS_SKIPPED > 0`**: One or more invariant checks (I4/I5) fail-open on a real `gh` API failure rather than being confirmed-missing — this is intentional, but a check that stays skipped across consecutive runs means the underlying `gh` failure is persistent, not a transient blip. Surface this as a degraded-health signal in the Phase 3 analysis and the Phase 5 report (e.g. "I4/I5 invariants silently disabled — investigate underlying `gh` failure"), distinct from the `DOCTOR_CRITICAL` P0 items above since a skip is a coverage gap, not a confirmed violation.
+
+**`DOCTOR_DEGRADED`** is a JSON array. Each entry has: `check`, `issue`, `reason`. Use these fields verbatim when listing which checks were skipped and why — do not paraphrase.
 
 ---
 
