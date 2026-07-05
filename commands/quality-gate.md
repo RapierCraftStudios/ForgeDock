@@ -1177,6 +1177,13 @@ cd {WORKTREE_PATH}
 
 TEST_LANGS=$(yq '.verification.commands // {} | keys | .[]' forge.yaml 2>/dev/null || echo '')
 
+# Accumulate ALL failing test commands (newline-separated) — do NOT overwrite a
+# scalar per iteration. If multiple languages' suites fail in one gate run, every
+# failure must reach Step 2S for classification; clobbering earlier failures with
+# later ones would let a REAL regression escape classification when a subsequent
+# language's failure happens to be PRE_BROKEN/FLAKY.
+FAILING_TESTS=""
+
 if [ -z "$TEST_LANGS" ]; then
     echo "2T: SKIPPED — verification.commands not configured in forge.yaml (no test key to run)"
 else
@@ -1194,16 +1201,12 @@ else
         TEST_EXIT=$?
 
         if [ "$TEST_EXIT" -ne 0 ]; then
-            echo "2T: FAIL — ${LANG}.test exited $TEST_EXIT — handing off to Step 2S for classification"
-            # FAILING_TEST is set to the full re-runnable command, not a parsed individual
+            echo "2T: FAIL — ${LANG}.test exited $TEST_EXIT — queued for Step 2S classification"
+            # Each entry is the full re-runnable command, not a parsed individual
             # test ID — flaky-quarantine.sh re-runs whatever it is given verbatim, and a
-            # single re-runnable command is the only representation that stays stack-agnostic
+            # re-runnable command is the only representation that stays stack-agnostic
             # across pytest/go test/cargo test/node --test/etc.
-            FAILING_TEST="$TEST_CMD"
-            # → Immediately run the Step 2S classification protocol below using this
-            #   FAILING_TEST, with PR_BASE/GH_REPO/PR_ISSUE_NUMBER already in scope for
-            #   this gate invocation. Step 2S decides TEST-REAL (blocking) vs
-            #   TEST-QUARANTINE (non-blocking) — 2T never blocks the gate directly.
+            FAILING_TESTS="${FAILING_TESTS}${TEST_CMD}"$'\n'
         else
             echo "2T: PASS — ${LANG}.test"
         fi
@@ -1211,7 +1214,21 @@ else
 fi
 ```
 
-If any `${LANG}.test` invocation above exited non-zero, proceed to **Step 2S** immediately using `FAILING_TEST="$TEST_CMD"` for that language. Step 2S's classification protocol determines whether the failure blocks the gate (`TEST-REAL | HIGH`) or is recorded as a non-blocking quarantine advisory (`TEST-QUARANTINE | LOW`) — 2T itself makes no blocking decision, it only detects and hands off.
+If `$FAILING_TESTS` is non-empty, run the **Step 2S** classification protocol once per accumulated entry — every failing test command gets classified, not just the last one:
+
+```bash
+if [ -n "$FAILING_TESTS" ]; then
+    while IFS= read -r FAILING_TEST; do
+        [ -z "$FAILING_TEST" ] && continue
+        echo "2T→2S: classifying failing test command: $FAILING_TEST"
+        # → Run the Step 2S classification protocol below with this FAILING_TEST,
+        #   using PR_BASE/GH_REPO/PR_ISSUE_NUMBER already in scope for this gate
+        #   invocation. Emit one TEST-REAL or TEST-QUARANTINE finding per entry.
+    done <<< "$FAILING_TESTS"
+fi
+```
+
+Step 2S's classification protocol determines, per failing command, whether the failure blocks the gate (`TEST-REAL | HIGH`) or is recorded as a non-blocking quarantine advisory (`TEST-QUARANTINE | LOW`) — 2T itself makes no blocking decision, it only detects and hands off.
 
 ---
 
