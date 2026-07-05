@@ -1,0 +1,9 @@
+{
+  "description": "PRIOR_GIST — inline value exactly \"COMPLETE\" must still parse as a real annotation, not be dropped as a sentinel marker (forge#1526)",
+  "input": "<!-- FORGE:PRIOR_GIST: COMPLETE -->",
+  "expect": {
+    "type": "PRIOR_GIST",
+    "valid": true,
+    "inlineValue": "COMPLETE"
+  }
+}
