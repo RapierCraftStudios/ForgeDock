@@ -435,6 +435,22 @@ cmd_read() {
     exit 1
   fi
 
+  # `gh api --paginate` writes one JSON array PER PAGE to stdout, concatenated
+  # (not merged into a single top-level array). Issues with >100 comments span
+  # multiple pages. Feeding that multi-document stream directly into a jq filter
+  # written for one document makes jq re-run the filter once per page — the
+  # default/latest mode below would print one "latest per page" body per page
+  # instead of a single global latest, and --all mode would emit N separate
+  # JSON arrays concatenated instead of one valid array. Aggregate all pages
+  # into a single array first so behavior is correct regardless of page count;
+  # this is a no-op for the common single-page case.
+  local aggregated_json
+  if ! aggregated_json="$(jq -s 'add' <<<"$comments_json" 2>&1)"; then
+    echo "ERROR: failed to aggregate paginated comments: $aggregated_json" >&2
+    exit 1
+  fi
+  comments_json="$aggregated_json"
+
   if [ "$all_flag" -eq 1 ]; then
     jq --arg needle "$needle" '[.[] | select(.body | contains($needle)) | .body]' <<<"$comments_json"
   else
