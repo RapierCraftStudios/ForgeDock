@@ -161,6 +161,48 @@ describe("pre-tool-use hook — subprocess", () => {
     assert.equal(exitCode, 0);
   });
 
+  // -------------------------------------------------------------------------
+  // Regression tests for issue #1519 — extractFlag() must not misread
+  // flag-shaped text embedded inside a quoted --title/--body value as a
+  // real --base/-B flag. These run against the actual hook file via
+  // runHook() (subprocess), not the duplicated pure-logic copy above.
+  // -------------------------------------------------------------------------
+
+  it("exits 0 when -B-shaped text appears inside a quoted --title value (#1519)", () => {
+    const { exitCode } = runHook({
+      hook_event_name: "PreToolUse",
+      tool_name: "Bash",
+      tool_input: {
+        command: 'gh pr create --title "Fix -B main thread bug" --body "desc"',
+      },
+    });
+    assert.equal(exitCode, 0);
+  });
+
+  it("exits 0 when --base-shaped text appears inside a quoted --body value (#1519)", () => {
+    const { exitCode } = runHook({
+      hook_event_name: "PreToolUse",
+      tool_name: "Bash",
+      tool_input: {
+        command:
+          'gh pr create --title "fix" --body "Discusses --base main config handling"',
+      },
+    });
+    assert.equal(exitCode, 0);
+  });
+
+  it("still exits 2 for a real -B main flag alongside quoted args (#1519)", () => {
+    const { exitCode, stdout } = runHook({
+      hook_event_name: "PreToolUse",
+      tool_name: "Bash",
+      tool_input: {
+        command: 'gh pr create -B main --title "Fix -B thing"',
+      },
+    });
+    assert.equal(exitCode, 2);
+    assert.match(stdout, /BLOCKED/);
+  });
+
   it("exits 0 for non-PreToolUse events (wrong event type)", () => {
     const { exitCode } = runHook({
       hook_event_name: "SessionStart",
