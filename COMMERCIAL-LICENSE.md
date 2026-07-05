@@ -47,7 +47,7 @@ A commercial license grants you the right to:
 
 Contact **RapierCraft Studios** to discuss licensing terms:
 
-- **Email**: [licensing@rapiercraftstudios.com](mailto:licensing@rapiercraftstudios.com)
+- **Email**: [support@rapiercraftstudios.com](mailto:support@rapiercraftstudios.com)
 - **GitHub**: [https://github.com/RapierCraftStudios](https://github.com/RapierCraftStudios)
 - **Sponsors / early access**: [https://github.com/sponsors/RapierCraftStudios](https://github.com/sponsors/RapierCraftStudios)
 

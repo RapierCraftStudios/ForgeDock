@@ -4,7 +4,7 @@
   "description": "ForgeDock — Autonomous AI development pipeline commands for Claude Code. Investigate, architect, build, review, and merge with structured GitHub-backed memory.",
   "owner": {
     "name": "RapierCraft Studios",
-    "email": "team@rapiercraftstudios.com"
+    "email": "support@rapiercraftstudios.com"
   },
   "plugins": [
     {

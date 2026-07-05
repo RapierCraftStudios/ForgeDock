@@ -58,7 +58,7 @@ We are onboarding a small group of organizations as design partners for the flee
 
 Design partnership is appropriate for organizations that are already running ForgeDock in production (or want to start) and have a concrete need for org-level visibility or governance over autonomous merges.
 
-**To apply**: [Open a design-partner intake request](https://github.com/RapierCraftStudios/ForgeDock/issues/new?template=design-partner.yml) on GitHub, or email [licensing@rapiercraftstudios.com](mailto:licensing@rapiercraftstudios.com) directly.
+**To apply**: [Open a design-partner intake request](https://github.com/RapierCraftStudios/ForgeDock/issues/new?template=design-partner.yml) on GitHub, or email [support@rapiercraftstudios.com](mailto:support@rapiercraftstudios.com) directly.
 
 ---
 
@@ -90,6 +90,6 @@ See [`GOVERNANCE.md`](../../GOVERNANCE.md) for the project's decision-making pro
 
 Commercial licensing, design-partner applications, and enterprise inquiries:
 
-- **Email**: [licensing@rapiercraftstudios.com](mailto:licensing@rapiercraftstudios.com)
+- **Email**: [support@rapiercraftstudios.com](mailto:support@rapiercraftstudios.com)
 - **Design-partner intake form**: [Open an intake request on GitHub](https://github.com/RapierCraftStudios/ForgeDock/issues/new?template=design-partner.yml)
 - **Sponsors / early access**: [github.com/sponsors/RapierCraftStudios](https://github.com/sponsors/RapierCraftStudios)
