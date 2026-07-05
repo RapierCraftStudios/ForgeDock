@@ -417,11 +417,12 @@ echo "ForgeDock Pipeline State Doctor"
 echo "Repo: $GH_REPO | Stuck threshold: ${STUCK_HOURS}h"
 echo "────────────────────────────────────────────────────────────"
 
+if [ "$CHECKS_SKIPPED" -gt 0 ]; then
+  echo "  NOTE: $CHECKS_SKIPPED check(s) skipped due to gh API failures (see --json 'degraded' for detail)."
+fi
+
 if [ "$TOTAL" -eq 0 ]; then
   echo "  No stalls detected. Pipeline is healthy."
-  if [ "$CHECKS_SKIPPED" -gt 0 ]; then
-    echo "  NOTE: $CHECKS_SKIPPED check(s) skipped due to gh API failures (see --json 'degraded' for detail)."
-  fi
   echo ""
   exit 0
 fi
