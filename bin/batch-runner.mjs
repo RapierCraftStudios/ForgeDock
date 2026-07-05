@@ -155,7 +155,7 @@ export function makeRunResult(issue, status, opts = {}) {
  *
  * @param {string} outputPath   - Absolute or relative path to write.
  * @param {object[]} results    - Array of per-run result objects.
- * @param {object} [meta]       - Top-level metadata (corpus_version, spec_version, model).
+ * @param {object} [meta]       - Top-level metadata (corpus_version, spec_version, model, corpus_size).
  * @returns {void}
  */
 export function writeResults(outputPath, results, meta = {}) {
@@ -163,6 +163,7 @@ export function writeResults(outputPath, results, meta = {}) {
   mkdirSync(dirname(resolved), { recursive: true });
   const payload = {
     corpus_version: meta.corpus_version ?? null,
+    corpus_size: meta.corpus_size ?? null,
     spec_version: meta.spec_version ?? null,
     model: meta.model ?? null,
     generated_at: new Date().toISOString(),
@@ -319,6 +320,7 @@ async function main() {
 
   const meta = {
     corpus_version: corpus.corpus_version,
+    corpus_size: corpus.issues.length,
     spec_version: specVersion,
     model: results.find((r) => r.model)?.model ?? null,
   };
