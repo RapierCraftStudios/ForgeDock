@@ -137,13 +137,17 @@ Run the deterministic dedup script first (authoritative check), then fall back t
 
 ```bash
 # Authoritative deterministic check — uses token overlap algorithm (see scripts/issue-dedup.sh)
-DEDUP_RESULT=$(scripts/issue-dedup.sh "{PROPOSED_TITLE}" {GH_FLAG} 2>/dev/null)
+DEDUP_RESULT=$(scripts/issue-dedup.sh "{PROPOSED_TITLE}" {GH_FLAG} 2>&1)
 DEDUP_EXIT=$?
 
 if [ "$DEDUP_EXIT" -eq 1 ]; then
   echo "Near-duplicate detected: $DEDUP_RESULT"
   echo "Existing issue found — do NOT create a new one."
   # STOP here and report to user (see handling rules below)
+elif [ "$DEDUP_EXIT" -eq 2 ]; then
+  echo "Dedup check usage error: $DEDUP_RESULT"
+  echo "Do NOT proceed to issue creation — fix the invocation and retry."
+  # STOP here — do not fall through to gh issue create
 fi
 ```
 
