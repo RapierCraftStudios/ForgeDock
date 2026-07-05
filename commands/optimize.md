@@ -1,6 +1,7 @@
 ---
 description: Analyze this repo and generate per-repo adaptive scripts from learned patterns, git history, and existing configuration
 argument-hint: [--dry-run | --force | --no-registry]
+install: extras
 ---
 
 # /optimize — Per-Repo Adaptive Script Generation
@@ -9,7 +10,7 @@ argument-hint: [--dry-run | --force | --no-registry]
 
 Proactively analyze the current repository and generate `.forgedock/scripts/` entries from `forge.yaml → learned:`, git commit history, and pipeline annotations — without waiting for a correction event. This is the proactive half of the learning loop; reactive capture happens in `/work-on` Phase 1D.
 
-**Agent model policy**: Default `model: "sonnet"`. Fallback: `model: "opus"` if Sonnet is rate-limited.
+**Agent model policy**: `model: "sonnet"` (standard tier). Fallback: `model: "opus"` if rate-limited. Feature gate: pass `effort` in Task/Skill spawns only on Claude Code >= 2.1.154.
 **NEVER use plan mode (EnterPlanMode).**
 
 ---

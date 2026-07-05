@@ -2,6 +2,7 @@
 description: Deterministic deploy-gate — verify a staging→main bundle's acceptance criteria against running code before deploy
 argument-hint: [--prs "<N1 N2 ...>"] [--base <branch>]
 allowed-tools: Task, Bash, Read, Grep, Glob
+install: extras
 ---
 <!-- SPDX-FileCopyrightText: Copyright (c) RapierCraft Studios -->
 <!-- SPDX-License-Identifier: AGPL-3.0-or-later -->
@@ -12,7 +13,22 @@ allowed-tools: Task, Bash, Read, Grep, Glob
 
 Verifies a staging→main bundle's acceptance criteria against running code before deploy. Called by `/review-pr-staging` (Phase 6.5) with the bundle PRs, or run standalone when `--prs` is absent (computes the bundle itself). Returns a machine-readable BLOCK / PASS / SKIP verdict for the caller to consume.
 
-**Agent model policy**: Default `model: "sonnet"`. If Sonnet is rate-limited, fall back to `model: "opus"`.
+**Agent model policy**: `model: "sonnet"` (standard tier). Fallback: `model: "opus"` if rate-limited. Feature gate: pass `effort` in Task/Skill spawns only on Claude Code >= 2.1.154.
+**NEVER use plan mode (EnterPlanMode).**
+**NEVER use the Agent tool** — test-gate dispatches test clusters via `Task` only. The Agent tool bypasses the allowed-tools constraint and produces output that cannot be structured into the machine-readable BLOCK / PASS / SKIP verdict.
+
+<!-- FORGE:SPEC_LOADED — test-gate.md loaded and active. Agent is bound by this spec. -->
+
+## Forbidden Tools Self-Check
+
+**Before executing any phase**, verify you are NOT using any of these tools:
+
+| Tool | Status | Reason |
+|------|--------|--------|
+| `Agent` | **FORBIDDEN** | Bypasses allowed-tools constraint; produces unstructured output that cannot be parsed into the machine-readable BLOCK / PASS / SKIP verdict |
+| `EnterPlanMode` | **FORBIDDEN** | Breaks execution context; gate phases must execute, not be planned |
+
+If you find yourself about to call `Agent(...)`, stop and use `Task(...)` instead.
 
 **Posture**: Blocking-with-override at the staging→main boundary (mirrors the Phase 0A open-finding gate in `/review-pr-staging`). Posture is config-driven via `verification.test_gate`.
 

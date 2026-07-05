@@ -1,0 +1,14 @@
+{
+  "description": "FORGE-tag-shaped substring embedded in a field value must not split/corrupt the annotation (forge#1524)",
+  "input": "<!-- FORGE:BUILDER -->\n**Branch**: `fix/example`\n**Commits**: abc123 fixes docs mentioning <!-- FORGE:CONTRACT --> example text\n**Files changed**: 1\n<!-- FORGE:BUILDER:COMPLETE -->",
+  "expect": {
+    "type": "BUILDER",
+    "valid": true,
+    "sentinelState": "complete",
+    "fieldChecks": {
+      "Branch": "`fix/example`",
+      "Commits": "abc123 fixes docs mentioning <!-- FORGE:CONTRACT --> example text",
+      "Files changed": "1"
+    }
+  }
+}

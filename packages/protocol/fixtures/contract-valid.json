@@ -1,0 +1,11 @@
+{
+  "description": "CONTRACT — complete annotation with required Task type field",
+  "input": "<!-- FORGE:CONTRACT -->\n## Builder Contract\n\n**Task type**: Bug Fix\n\n### Proposed Approach\nGuard null at the lookup site.\n\n### Deliverables\n| File | Change | Why |\n|------|--------|-----|\n| payments/validator.py | Add null guard | Prevent NPE |",
+  "expect": {
+    "type": "CONTRACT",
+    "valid": true,
+    "fieldChecks": {
+      "Task type": "Bug Fix"
+    }
+  }
+}

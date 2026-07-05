@@ -1,6 +1,7 @@
 ---
 description: Independently verify if a reported issue is actually a problem before making code changes.
 argument-hint: [issue description or #number]
+install: extras
 ---
 <!-- SPDX-FileCopyrightText: Copyright (c) RapierCraft Studios -->
 <!-- SPDX-License-Identifier: AGPL-3.0-or-later -->
@@ -11,7 +12,7 @@ argument-hint: [issue description or #number]
 
 Verify whether a reported issue is real before anyone writes code. This command exists for reports that come from outside the pipeline — user complaints, DevOps alerts, monitoring triggers, gut feelings. It is the checkpoint before creating a GitHub issue.
 
-**Agent model policy**: Default `model: "sonnet"`. If Sonnet is rate-limited, fall back to `model: "opus"`.
+**Agent model policy**: `model: "sonnet"` (standard tier). Fallback: `model: "opus"` if rate-limited. Feature gate: pass `effort` in Task/Skill spawns only on Claude Code >= 2.1.154.
 
 **Output**: A verdict (CONFIRMED / NOT A PROBLEM / NEEDS MORE DATA) with evidence.
 

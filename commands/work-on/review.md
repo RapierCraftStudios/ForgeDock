@@ -12,8 +12,10 @@ argument-hint: [issue number] [--repo GH_REPO] [--gh-flag GH_FLAG] [--worktree P
 **Invoked by**: `work-on.md` Phase 4–5, after `build/validate.md` returns `GATE_PASSED: true`.
 **Output**: Push branch, create PR, invoke /review-pr --auto-merge, return result to caller.
 
-**Agent model policy**: Default `model: "sonnet"`. If Sonnet is rate-limited, fall back to `model: "opus"`.
+**Agent model policy**: `model: "sonnet"` (standard tier). Fallback: `model: "opus"` if rate-limited. Feature gate: pass `effort` in Task/Skill spawns only on Claude Code >= 2.1.154.
 **NEVER use plan mode (EnterPlanMode).**
+
+<!-- FORGE:SPEC_LOADED — work-on/review.md loaded and active. Agent is bound by this spec. -->
 
 ---
 
@@ -146,7 +148,21 @@ Derive from issue title:
 - `docs(...):`  → `Docs: {description}`
 - fallback: use issue title as-is
 
-### R2B: Create PR
+### R2B: Resolve attribution footer (optional)
+
+Before creating the PR, check `forge.yaml → attribution.pr_footer`:
+
+```bash
+ATTRIBUTION_PR_FOOTER=$(grep -A5 "^attribution:" forge.yaml 2>/dev/null | grep "pr_footer:" | awk '{print $2}' | tr -d '"' || echo "false")
+```
+
+If `ATTRIBUTION_PR_FOOTER` is `true`, append the following footer to the PR body (once — never duplicate on retries):
+
+```
+> Orchestrated with [ForgeDock](https://github.com/RapierCraftStudios/ForgeDock) — state, scheduling, review, and memory on GitHub.
+```
+
+### R2C: Create PR
 
 ```bash
 gh pr create {GH_FLAG} \
@@ -170,10 +186,14 @@ gh pr create {GH_FLAG} \
 Closes #{NUMBER}
 
 **Implementation branch**: \`{BRANCH}\`
-**Base**: \`{PR_BASE}\`"
+**Base**: \`{PR_BASE}\`
+{IF_ATTRIBUTION_PR_FOOTER_TRUE:
+> Orchestrated with [ForgeDock](https://github.com/RapierCraftStudios/ForgeDock) — state, scheduling, review, and memory on GitHub.}"
 ```
 
 **Note**: `Closes #{NUMBER}` documents intent but does NOT auto-close for non-default-branch PRs. The close subcommand handles explicit closure after merge.
+
+**Attribution guard**: The footer line is appended once at PR creation. If the PR already exists (resume path), do NOT append the footer again — check the existing PR body first.
 
 If PR creation fails because a PR already exists for this branch:
 ```bash
@@ -181,7 +201,7 @@ gh pr list {GH_FLAG} --head {BRANCH} --json number,url --jq '.[0]'
 ```
 Use the existing PR number and continue.
 
-### R2C: Update labels
+### R2D: Update labels
 
 ```bash
 gh issue edit {NUMBER} {GH_FLAG} \

@@ -1,0 +1,9 @@
+{
+  "description": "TRAJECTORY — valid pipeline audit trail annotation",
+  "input": "<!-- FORGE:TRAJECTORY -->\n## Pipeline Trajectory — #128\n\n| Phase | Result | Notes |\n|-------|--------|-------|\n| Investigation | CONFIRMED (HIGH) | Task type: Bug Fix |\n| Build | done | Branch: `fix/null-billing-profile-128` |\n| Review + Merge | merged | PR #131 |\n| Close | done | Issue closed |\n\n**Decisions**: Guard at the lookup site.\n**Anomalies**: None\n**Completed**: 2026-01-15T09:30:00Z",
+  "expect": {
+    "type": "TRAJECTORY",
+    "valid": true,
+    "sentinelState": "complete"
+  }
+}

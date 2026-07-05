@@ -1,0 +1,9 @@
+{
+  "description": "KNOWLEDGE_GIST — inline value exactly \"PARTIAL\" must still parse as a real annotation, not be dropped as a sentinel marker (forge#1526)",
+  "input": "<!-- FORGE:KNOWLEDGE_GIST: PARTIAL -->",
+  "expect": {
+    "type": "KNOWLEDGE_GIST",
+    "valid": true,
+    "inlineValue": "PARTIAL"
+  }
+}

@@ -11,8 +11,21 @@ argument-hint: [issue number or "next" to pick highest priority]
 
 Orchestrator for the full issue lifecycle: investigate → decompose (if needed) → build → review → merge → close. GitHub issues are the persistent context layer — read existing comments before starting, write structured reports back, use `workflow:*` labels to track state.
 
-**Agent model policy**: Default `model: "sonnet"`. Fallback: `model: "opus"` if Sonnet is rate-limited.
+**Agent model policy**: `model: "sonnet"` (standard tier). Fallback: `model: "opus"` if rate-limited. Feature gate: pass `effort` in Task/Skill spawns only on Claude Code >= 2.1.154.
 **NEVER use plan mode (EnterPlanMode).**
+**NEVER use the Agent tool** — this spec uses `Skill(...)` for sub-phase dispatch. The Agent tool spawns opaque subprocesses that bypass phase protocols, skip FORGE annotations, and cannot be constrained by allowed-tools. Always use `Skill(skill="...", args="...")` for sub-phase invocations.
+
+<!-- FORGE:SPEC_LOADED — work-on.md loaded and active. Agent is bound by this spec. -->
+
+## HARD RULES — READ BEFORE ANYTHING ELSE
+
+1. **Every sub-phase MUST be invoked via `Skill(...)`.** You do NOT implement inline. You invoke `Skill(skill="work-on/investigate", ...)`, `Skill(skill="work-on/build", ...)`, etc. The Skill tool invocation is what triggers label updates, FORGE annotations, and structured output. Without it, the phase has no paper trail.
+
+2. **Write to GitHub after EVERY phase.** Every FORGE annotation (HEARTBEAT, INVESTIGATOR, CONTRACT, BUILDER, etc.) must be posted before the next phase starts. A phase that completes without a GitHub write is effectively invisible to the stall detector and future sessions.
+
+3. **Follow the Universal Phase Dispatcher.** The phase sequence table is the SINGLE source of truth for transitions. Do NOT skip phases, do NOT reorder phases, do NOT treat intermediate completions as terminal. Only the terminal states listed in the Dispatcher allow stopping.
+
+4. **PRs NEVER target `main`.** Target `staging` (fast lane) or `milestone/{slug}` (feature lane). A PR to main is a pipeline violation regardless of what the issue description says.
 
 ### Compaction Resilience
 
@@ -55,6 +68,44 @@ Orchestrator for the full issue lifecycle: investigate → decompose (if needed)
 **If the current state is NOT terminal: proceed to the next phase in the sequence immediately. Do NOT stop. Do NOT emit a summary. Do NOT treat any intermediate phase completion as a terminal signal.** Every phase completion — investigation done, quality gate passed, PR merged, review complete — is an intermediate result. Only the terminal states listed above allow stopping.
 
 **Adding a new phase**: Insert it into the phase sequence table above and the sub-phase sequence if it belongs to Phase 3. No per-boundary transition code is needed — the universal continuation rule handles all transitions.
+
+---
+
+## Spawn-Decision Policy
+
+<!-- FORGE:SPAWN_POLICY — Canonical spawn-decision table. Sibling specs (orchestrate.md, review-pr.md) link to this section. Sub-issues #1276–#1279 reference this table. -->
+
+**Default: run inline.** Every skill, phase, and sub-agent runs inline in the current context unless one of the three criteria below explicitly applies. A sub-agent buys exactly two things — parallelism and context isolation. If neither is needed, forking is waste.
+
+### Spawn-Decision Table
+
+| Row | Criterion | Fork? | Example |
+|-----|-----------|-------|---------|
+| a | **Parallel fan-out** — two or more independent work units can execute concurrently and the total wall time saving justifies the fork overhead | YES — spawn one sub-agent per work unit | `/orchestrate` dispatching multiple `/work-on` agents; `review-pr` spawning domain-specific reviewers in parallel |
+| b | **Fresh-context isolation** — the work unit is a structured review or audit whose value depends on seeing the artefact without the builder's accumulated context bias, AND the review result is load-bearing for the merge decision | YES — spawn a dedicated sub-agent | Phase 5C review-fork when build context is large (see Row c for the quantitative threshold) |
+| c | **Parent context near overflow** — the parent agent has made ≥20 Skill invocations OR the build changed ≥10 files, meaning delegating review inline risks a mid-review token overflow | YES — spawn a fresh sub-agent for review | Phase 5C: `Skill(skill="work-on/review", …)` instead of direct `review-pr` invocation |
+
+**If none of the three rows match: run inline.** Do not fork for convenience, narrative clarity, or to avoid reading a large file. Context cost of a fork (spawning, context reconstruction, result aggregation) is paid every time, even when parallelism or isolation adds no value.
+
+### Depth Budget
+
+**Available depth**: 5 levels (since Claude Code v2.1.172).
+
+**Target depth for a standard run**: ≤ 3.
+
+| Depth | Agent | Notes |
+|-------|-------|-------|
+| 1 | `/orchestrate` | Top-level dispatcher — never implements directly |
+| 2 | `/work-on` | Issue pipeline — runs build phases inline |
+| 3 | Parallel reviewers (Row a/b/c fork) | Domain review agents spawned by Phase 5C |
+
+**Build phases (3A–3M) run inline at depth 2** — they are sequential sub-phases of `/work-on`, not independent agents. Forking the build into a sub-agent (depth 3) is a violation of Row a/b/c unless the build itself fans out independently scoped work units.
+
+**Depth 4–5 are reserved** for exceptional cases (e.g. an orchestrate agent that itself spawns an orchestrate agent for a sub-milestone). Agents that reach depth 4 MUST log a justification comment on the relevant issue.
+
+### Phase 5C Cross-Reference
+
+The existing Phase 5C context-budget check (≥10 changed files OR ≥20 Skill invocations → spawn `work-on/review` sub-agent) is an instance of **Row (c)** above. The quantitative thresholds are not changed — only their framing: they are now a specific application of the spawn-decision table, not a standalone ad-hoc rule.
 
 ---
 
@@ -193,7 +244,7 @@ gh api repos/{GH_REPO}/issues/{NUMBER}/comments --jq '.[] | {id: .id, author: .u
 
 **Check**: state (closed → STOP), terminal labels (`workflow:merged`/`workflow:invalid` → STOP), existing agent comments (`FORGE:INVESTIGATOR`, `FORGE:DECOMPOSED`, `FORGE:CONTRACT`, `FORGE:BUILDER`, `FORGE:TRAJECTORY`, `FORGE:DECISION_RECORD`), parent tracker status, sub-issue status.
 
-**Determine resume point**: No comments → Phase 1. Investigation exists + ready-to-build → Phase 3. Builder + no PR → Phase 4. Builder + PR open → Phase 5. PR merged + issue open → Phase 6.
+**Determine resume point**: No comments → Phase 1. Investigation exists + ready-to-build → Phase 3. Builder:COMPLETE + no PR → Phase 4. Builder without :COMPLETE (partial/interrupted build) + no PR → Phase 3 (partial-build cleanup). Builder + PR open → Phase 5. PR merged + issue open → Phase 6.
 
 ### 0B.5: Read Phase Checkpoint (MANDATORY — executes before any phase-skip decision)
 
@@ -224,6 +275,35 @@ fi
 **If no checkpoint exists**: fall back to prose resume heuristics in Phase 0B above — treat as fresh start at Phase 1.
 
 **Classify lane**: Milestone → feature lane (`milestone/{slug}`). No milestone → fast lane (`staging`).
+
+**Batch issue detection**: <!-- Added: forge#1333 --> If the issue body contains `<!-- FORGE:BATCH_MEMBERS -->`, this is a P3 batch issue. Set `IS_BATCH=true` and extract the member issue list:
+
+```bash
+IS_BATCH=0
+BATCH_MEMBERS=()
+
+BATCH_MEMBERS_BLOCK=$(gh issue view {NUMBER} {GH_FLAG} --json body --jq '.body' \
+  | sed -n '/<!-- FORGE:BATCH_MEMBERS -->/,/<!-- \/FORGE:BATCH_MEMBERS -->/p' 2>/dev/null || true)
+
+if [ -n "$BATCH_MEMBERS_BLOCK" ]; then
+  IS_BATCH=1
+  # Extract member issue numbers (- [ ] #NNN: title lines)
+  BATCH_MEMBERS=($(echo "$BATCH_MEMBERS_BLOCK" | grep -oP '(?<=- \[ \] #)\d+' || true))
+  echo "Batch issue detected — member issues: ${BATCH_MEMBERS[*]}"
+fi
+```
+
+**Batch issue pipeline rules** (when `IS_BATCH=true`):
+- Build phases execute exactly as normal (the batch issue body IS the spec for what to fix)
+- After successful merge, auto-close all member issues with a cross-reference:
+  ```bash
+  for MEMBER in "${BATCH_MEMBERS[@]}"; do
+    gh issue close "$MEMBER" {GH_FLAG} \
+      --comment "Resolved as part of batch PR #{PR_NUMBER} (#{ISSUE_NUMBER}). See batch issue for details."
+    gh issue edit "$MEMBER" {GH_FLAG} --add-label "workflow:merged" 2>/dev/null || true
+  done
+  ```
+- Member issues are closed in Phase 6 (after PR merge) — NOT before
 
 **Source branch for review-findings**: Parse `**Code branch**: \`{branch}\`` from body. Branch from there, not main.
 
@@ -673,6 +753,31 @@ case "$TIER" in
 esac
 ```
 
+**Marker gate — Phase 1 exit** (see Marker Gate table in Universal Phase Dispatcher): <!-- forge#1419, forge#1418 -->
+```bash
+INV_MARKER=$(gh api repos/{GH_REPO}/issues/{NUMBER}/comments \
+  --jq '[.[] | select(.body | contains("INVESTIGATION:COMPLETE"))] | length')
+if [ "${INV_MARKER:-0}" -eq 0 ]; then
+  echo "MARKER GATE FAIL: INVESTIGATION:COMPLETE absent — re-invoking work-on/investigate once"
+  Skill(skill="work-on/investigate", args="{NUMBER} --repo {GH_REPO} --gh-flag {GH_FLAG}")
+  INV_MARKER=$(gh api repos/{GH_REPO}/issues/{NUMBER}/comments \
+    --jq '[.[] | select(.body | contains("INVESTIGATION:COMPLETE"))] | length')
+  if [ "${INV_MARKER:-0}" -eq 0 ]; then
+    gh issue comment {NUMBER} {GH_FLAG} --body "<!-- FORGE:GATE_FAILURE -->
+## Marker Gate Failure — Phase 1 (Investigation)
+
+**Expected marker**: \`INVESTIGATION:COMPLETE\` inside a \`FORGE:INVESTIGATOR\` comment
+**Status**: Absent after subcommand re-invocation. Human review required.
+
+The router re-invoked \`work-on/investigate\` once but the marker was still not posted.
+Inspect the subcommand output above for errors. <!-- forge#1418 -->"
+    gh issue edit {NUMBER} {GH_FLAG} --add-label "needs-human" \
+      --remove-label "workflow:investigating" 2>/dev/null || true
+    exit 1
+  fi
+fi
+```
+
 Write machine-readable phase checkpoint (MUST execute immediately after label transition, before continuing):
 ```bash
 CHECKPOINT_TIMESTAMP=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
@@ -834,6 +939,8 @@ esac
 ## Phase 3: Build
 
 <!-- FORGE:PHASE_COMPLETE — Entering Phase 3 (Build). See Universal Phase Dispatcher: sub-phases 3A–3M execute in sequence. No sub-phase completion is terminal. -->
+
+**Canonical path**: Sub-phases 3A–3M run **inline** in the current context window for STANDARD and fast-lane issues. This is the single authoritative build topology. `work-on/build.md` and `work-on-monolithic.md` ([BENCHMARK]) describe the same inline model with different levels of detail; they are not separate competing paths. `Skill()` sub-agent spawns for build sub-phases are only permitted under the Spawn-Decision Table Row (c) exception (≥20 Skill invocations or ≥10 files changed before the build). <!-- Added: forge#1276 -->
 
 **Skip if**: `<!-- FORGE:BUILDER:COMPLETE -->` is present in a BUILDER comment. <!-- Added: forge#1305 — require completion marker, not mere presence of BUILDER annotation -->
 
@@ -1508,6 +1615,7 @@ gh issue comment {NUMBER} {GH_FLAG} --body "<!-- FORGE:BUILDER -->
 **Commits**: {COMMIT_SHA(S)}
 **Files changed**: {COUNT}
 **Verification Status**: ${VERIFICATION_STATUS}
+**Cost (build phase)**: ${PHASE_COST_USD:-unavailable} (best-effort — session telemetry; omit if unavailable)
 
 ### Approach
 {what was built, key decisions}
@@ -1534,6 +1642,31 @@ gh issue comment {NUMBER} {GH_FLAG} --body "<!-- FORGE:CHECKPOINT -->
 \`\`\`json
 {\"phase\": \"BUILD\", \"status\": \"COMPLETE\", \"next_phase\": \"REVIEW\", \"timestamp\": \"${CHECKPOINT_TIMESTAMP}\"}
 \`\`\`"
+```
+
+**Marker gate — Phase 3 exit** (see Marker Gate table in Universal Phase Dispatcher): <!-- forge#1419, forge#1418 -->
+```bash
+BUILD_MARKER=$(gh api repos/{GH_REPO}/issues/{NUMBER}/comments \
+  --jq '[.[] | select(.body | contains("FORGE:BUILDER:COMPLETE"))] | length')
+if [ "${BUILD_MARKER:-0}" -eq 0 ]; then
+  echo "MARKER GATE FAIL: FORGE:BUILDER:COMPLETE absent — re-invoking work-on/build once"
+  Skill(skill="work-on/build", args="{NUMBER} --repo {GH_REPO} --gh-flag {GH_FLAG} --worktree {WORKTREE_PATH} --branch {BRANCH} --base {PR_BASE}")
+  BUILD_MARKER=$(gh api repos/{GH_REPO}/issues/{NUMBER}/comments \
+    --jq '[.[] | select(.body | contains("FORGE:BUILDER:COMPLETE"))] | length')
+  if [ "${BUILD_MARKER:-0}" -eq 0 ]; then
+    gh issue comment {NUMBER} {GH_FLAG} --body "<!-- FORGE:GATE_FAILURE -->
+## Marker Gate Failure — Phase 3 (Build)
+
+**Expected marker**: \`FORGE:BUILDER:COMPLETE\` inside a \`FORGE:BUILDER\` comment
+**Status**: Absent after subcommand re-invocation. Human review required.
+
+The router re-invoked \`work-on/build\` once but the marker was still not posted.
+Inspect the subcommand output above for errors. <!-- forge#1418 -->"
+    gh issue edit {NUMBER} {GH_FLAG} --add-label "needs-human" \
+      --remove-label "workflow:building" 2>/dev/null || true
+    exit 1
+  fi
+fi
 ```
 
 ---
@@ -1673,7 +1806,7 @@ PR #${PR_NUMBER} created targeting \`{PR_BASE}\`. Invoking /review-pr with --aut
 
 **Context budget check** (run before invoking review-pr): <!-- Added: forge#93 -->
 
-Large-context sessions that accumulated significant build history cause review-pr to hit the token limit mid-review. Check the accumulated context before delegating:
+Large-context sessions that accumulated significant build history cause review-pr to hit the token limit mid-review. This check is an instance of **Spawn-Decision Policy Row (c)** (parent context near overflow) — see the [Spawn-Decision Table](#spawn-decision-table) for the general policy. Check the accumulated context before delegating:
 
 - If the build changed **≥10 files** OR this agent has made **≥20 Skill invocations** since it started: invoke `work-on/review` as a fresh sub-agent (via `Skill(skill="work-on/review", args="...")`) rather than calling review-pr directly. The sub-agent starts with a clean context window.
 - Otherwise (small build, few skill calls): invoke review-pr directly as below.
@@ -1685,9 +1818,39 @@ Skill(skill="review-pr", args="{PR_NUMBER} --auto-merge --issue {NUMBER} --base 
 ```
 
 **Sub-agent invocation** (large builds — ≥10 changed files OR ≥20 Skill invocations):
+
+Before spawning, build a distilled hot-copy of the key annotations the review sub-agent would otherwise re-fetch from GitHub. This reduces gh round-trips in the child without replacing the durable FORGE annotation record. <!-- Added: forge#1277 -->
+
+```bash
+# Hot-copy: extract CONTRACT and ARCHITECT annotation bodies for inline injection
+HOT_CONTRACT=$(gh api repos/{GH_REPO}/issues/{NUMBER}/comments \
+  --jq '[.[] | select(.body | contains("<!-- FORGE:CONTRACT -->"))] | last | .body // ""' 2>/dev/null \
+  | head -60)  # Scope: first 60 lines — captures Proposed Approach + Deliverables table
+
+HOT_ARCHITECT=$(gh api repos/{GH_REPO}/issues/{NUMBER}/comments \
+  --jq '[.[] | select(.body | contains("<!-- FORGE:ARCHITECT -->"))] | last | .body // ""' 2>/dev/null \
+  | head -40)  # Scope: first 40 lines — captures Affected Paths + Implementation Order
+
+# Build inline context block (omit sections where annotation was not found)
+HOT_COPY_BLOCK=""
+if [ -n "$HOT_CONTRACT" ]; then
+  HOT_COPY_BLOCK="${HOT_COPY_BLOCK}
+**HOT COPY — FORGE:CONTRACT** (do not re-fetch; durable record is on the issue):
+${HOT_CONTRACT}"
+fi
+if [ -n "$HOT_ARCHITECT" ]; then
+  HOT_COPY_BLOCK="${HOT_COPY_BLOCK}
+
+**HOT COPY — FORGE:ARCHITECT** (do not re-fetch; durable record is on the issue):
+${HOT_ARCHITECT}"
+fi
 ```
-Skill(skill="work-on/review", args="{NUMBER} --repo {GH_REPO} --gh-flag {GH_FLAG} --worktree {WORKTREE_PATH} --branch {BRANCH} --base {PR_BASE}")
+
 ```
+Skill(skill="work-on/review", args="{NUMBER} --repo {GH_REPO} --gh-flag {GH_FLAG} --worktree {WORKTREE_PATH} --branch {BRANCH} --base {PR_BASE}", context="{HOT_COPY_BLOCK}")
+```
+
+The `{HOT_COPY_BLOCK}` is an optimization that avoids the child re-discovering context already held by the parent. The FORGE annotations on GitHub remain the durable, compaction-safe record. If the hot-copy block is empty (annotations not yet posted), the sub-agent falls back to reading them from GitHub as before.
 
 Review-pr handles: full domain-agent review → post findings as separate issues → merge PR. It does NOT close the issue or clean up the worktree — those run in Phase 6.
 
@@ -1989,6 +2152,40 @@ AGENTS_RUN=$(echo "$REVIEW_SUMMARY" | grep -oE '[0-9]+ agents' | grep -oE '[0-9]
 AGENTS_RUN="${AGENTS_RUN:-0}"
 ```
 
+**Capture best-effort cost signal** from session telemetry before posting GDR. This is best-effort — if the signal is unavailable, the cost block is omitted rather than blocking the pipeline or fabricating a number. Field names align with `bin/runner.mjs` usage accounting from #1295 so downstream tooling shares one schema:
+```bash
+# Best-effort: read per-stage usage from FORGE:BUILDER/FORGE:CONTEXT/FORGE:ARCHITECT phase annotations
+# Source: session telemetry when available (e.g. OTEL_LOG_TOOL_DETAILS, Claude Code usage reporting).
+# If unavailable, set COST_BLOCK to null — the field is omitted from the GDR rather than fabricated.
+COST_INVESTIGATION=$(gh api repos/{GH_REPO}/issues/{NUMBER}/comments \
+  --jq '[.[] | select(.body | contains("FORGE:INVESTIGATOR")) | .body] | last // ""' 2>/dev/null \
+  | grep -oP '(?<=cost_usd: )\S+' | head -1 || echo "")
+COST_BUILD=$(gh api repos/{GH_REPO}/issues/{NUMBER}/comments \
+  --jq '[.[] | select(.body | contains("FORGE:BUILDER")) | .body] | last // ""' 2>/dev/null \
+  | grep -oP '(?<=cost_usd: )\S+' | head -1 || echo "")
+COST_REVIEW=$(gh api repos/{GH_REPO}/issues/{PR_NUMBER}/comments \
+  --jq '[.[] | select(.body | contains("FORGE:REVIEWER")) | .body] | last // ""' 2>/dev/null \
+  | grep -oP '(?<=cost_usd: )\S+' | head -1 || echo "")
+
+# Build cost block JSON only if at least one stage value is present; otherwise null
+if [ -n "$COST_INVESTIGATION" ] || [ -n "$COST_BUILD" ] || [ -n "$COST_REVIEW" ]; then
+  COST_INV_JSON="${COST_INVESTIGATION:-null}"
+  COST_BUILD_JSON="${COST_BUILD:-null}"
+  COST_REVIEW_JSON="${COST_REVIEW:-null}"
+  COST_BLOCK="\"cost\": {
+    \"stages\": {
+      \"investigation\": $COST_INV_JSON,
+      \"build\": $COST_BUILD_JSON,
+      \"review\": $COST_REVIEW_JSON
+    },
+    \"total_usd\": null,
+    \"source\": \"session-telemetry\"
+  },"
+else
+  COST_BLOCK=""
+fi
+```
+
 **Post GDR to PR** (not to issue — PR comment survives as permanent artifact on the merged diff):
 ```bash
 if [ "$GDR_EXISTS" != "true" ] && [ -n "{PR_NUMBER}" ]; then
@@ -2015,6 +2212,7 @@ if [ "$GDR_EXISTS" != "true" ] && [ -n "{PR_NUMBER}" ]; then
     \"confidence\": \"{CONFIDENCE}\",
     \"task_type\": \"{TASK_TYPE}\"
   },
+  ${COST_BLOCK}
   \"context\": {
     \"historical_edges_referenced\": ${REVIEW_FINDING_COUNT},
     \"forge_annotations_read\": [\"FORGE:INVESTIGATOR\", \"FORGE:CONTRACT\", \"FORGE:CONTEXT\", \"FORGE:ARCHITECT\", \"FORGE:BUILDER\"]

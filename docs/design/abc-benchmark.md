@@ -8,7 +8,7 @@
 > Companion to [design-spec-schema](design-spec-schema.md) (#881), [reference-corpus](reference-corpus.md) (#880),
 > and the [`/design-bench`](../../commands/design-bench.md) command spec.
 > Results are carried as a `FORGE:BENCH_SCORECARD` annotation — registered in
-> [`../FORGE-PROTOCOL.md`](../FORGE-PROTOCOL.md).
+> [`../spec/forge-protocol-v1.md`](../spec/forge-protocol-v1.md).
 
 ## Why this exists first
 

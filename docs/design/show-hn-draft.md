@@ -2,6 +2,17 @@
 
 <!-- Updated by #1092: messaging angles research (2026-06-25) -->
 <!-- Updated by #1099: context-rot pain framing (2026-06-27) -->
+<!-- GATE: #1264 — DO NOT POST until benchmark scorecard is available.
+     Every quantitative efficiency claim must trace to a reproducible benchmark run.
+     Required before posting:
+       1. Land cost accounting (#1255) and topology fix (#1254)
+       2. Run benchmark suite (#1259) and publish scorecard:
+            - cost per issue by difficulty class
+            - one-shot success rate
+            - before/after the optimization wave
+       3. Rewrite the maker comment to lead with the measured table
+          (keep context-rot framing, replace estimates with actuals)
+     See: #1264 -->
 <!-- Research: "LLM Wiki" vocabulary = 17M views / 5K stars (Karpathy gist, April 2026).
      "Context rot" is now mainstream community vocabulary (MindStudio, Augment Code, Stack Overflow, 2025-2026).
      Lead with context rot pain; use LLM Wiki vocabulary as the HN title hook. Full research: docs/design/messaging-angles-research.md -->
@@ -68,7 +79,7 @@ Some technical details:
 
 Known limitations:
 - Claude Code only (no Cursor/Codex/Aider support yet)
-- Token-heavy on first run before adaptive scripts cache project patterns
+- Token-heavy on first run before adaptive scripts cache project patterns <!-- BENCHMARK_NEEDED: replace with measured cost figure from scorecard (#1264) -->
 - The pipeline is opinionated — it enforces a specific workflow that may not fit every team
 
 I'm a solo developer building this to solve my own problems. Happy to answer questions about the architecture, the FORGE annotation protocol, or the prompt engineering behind the command specs.
@@ -84,3 +95,17 @@ I'm a solo developer building this to solve my own problems. Happy to answer que
 - **If compared to Devin**: "Devin is a cloud service; ForgeDock runs locally with your own API key. Different trade-offs — Devin is turnkey, ForgeDock gives you full control and traceability."
 - **If compared to DeepWiki**: "DeepWiki generates a documentation snapshot of your repo. ForgeDock writes structured annotations during each pipeline run — context stays current with your actual work, not a snapshot."
 - **If asked about scale**: Be honest about current adoption. Don't inflate numbers.
+
+---
+
+## Pre-Post Benchmark Gate (#1264)
+
+**Do not submit to HN until all items are checked.**
+
+- [ ] Cost accounting landed (#1255)
+- [ ] Topology fix landed (#1254)
+- [ ] Benchmark suite run (#1259) and scorecard published
+- [ ] Scorecard includes: cost per issue by difficulty class, one-shot success rate, before/after optimization wave
+- [ ] Every quantitative claim in the maker comment above traces to a row in the scorecard
+- [ ] `<!-- BENCHMARK_NEEDED -->` comments in the draft have been replaced with measured figures
+- [ ] Reproducible method documented: demo repo + runner script so readers can re-run the benchmark

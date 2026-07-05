@@ -1,6 +1,7 @@
 ---
 description: Periodic security posture audit — runs a scripted 4-phase checklist against repo files (not diffs), creates GitHub issues for confirmed findings
 argument-hint: [--repo <prefix>] [--phase 1|2|3|4|all] [--dry-run]
+install: extras
 ---
 <!-- SPDX-FileCopyrightText: Copyright (c) RapierCraft Studios -->
 <!-- SPDX-License-Identifier: AGPL-3.0-or-later -->
@@ -18,7 +19,7 @@ This command is designed to be run:
 
 This is NOT a PR review — it does not approve or block. It creates issues for each gap found.
 
-**Agent model policy**: Default `model: "sonnet"`. If Sonnet is rate-limited, fall back to `model: "opus"`.
+**Agent model policy**: `model: "sonnet"`, `effort: xhigh` (deep tier — comprehensive security analysis). Fallback: `model: "opus"` if rate-limited. Feature gate: pass `effort` only on Claude Code >= 2.1.154.
 **NEVER use plan mode (EnterPlanMode).**
 
 ---

@@ -22,6 +22,10 @@ live there — this command is the executable workflow over that methodology.
 **No application runtime.** ForgeDock is a set of command specs. This command is a step-by-step procedure an
 agent executes; the only executable helper is the deterministic aggregator `scripts/bench-scorecard.mjs`.
 
+**NEVER use plan mode (EnterPlanMode).**
+
+<!-- FORGE:SPEC_LOADED — design-bench.md loaded and active. Agent is bound by this spec. -->
+
 ---
 
 ## The three arms (one variable)
@@ -128,7 +132,7 @@ The aggregator (see `scripts/bench-scorecard.mjs`):
   generated arm is a judge defect, not a harness win — treat those runs as suspect.
 
 Post the result as a `FORGE:BENCH_SCORECARD` annotation (registered in
-[`docs/FORGE-PROTOCOL.md`](../docs/FORGE-PROTOCOL.md)) on the tracking issue:
+[`docs/spec/forge-protocol-v1.md`](../docs/spec/forge-protocol-v1.md)) on the tracking issue:
 
 ```bash
 gh issue comment <ISSUE> --body "<!-- FORGE:BENCH_SCORECARD -->

@@ -1,0 +1,9 @@
+{
+  "description": "INVESTIGATOR — missing completion sentinel (interrupted)",
+  "input": "<!-- FORGE:INVESTIGATOR -->\n## Investigation Report\n\n**Verdict**: CONFIRMED\n**Confidence**: HIGH\n**Severity**: MEDIUM\n**Task Type**: Bug Fix\n\n**Decomposition Assessment**: NO — single file.",
+  "expect": {
+    "type": "INVESTIGATOR",
+    "valid": false,
+    "sentinelState": "interrupted"
+  }
+}

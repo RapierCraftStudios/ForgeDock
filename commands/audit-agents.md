@@ -1,6 +1,7 @@
 ---
 description: Audit agent outputs from an orchestration run — timeline analysis, stall detection, active vs idle time breakdown
 argument-hint: [session-id | latest | <agent-id>]
+install: extras
 ---
 <!-- SPDX-FileCopyrightText: Copyright (c) RapierCraft Studios -->
 <!-- SPDX-License-Identifier: AGPL-3.0-or-later -->
@@ -48,20 +49,49 @@ fi
 
 ### Step 1A: Find the session
 
-Agent outputs live in `/tmp/claude-1000/` as symlinks to JSONL files in `~/.claude/projects/*/subagents/`.
+Agent outputs live in `~/.claude/projects/{munged-project-path}/subagents/agent-{agentId}.jsonl`.
+The project path munging rule: both `/` and `.` are replaced with `-`
+(e.g. `/home/user/projects/myproject` → `-home-user-projects-myproject`).
 
-```bash
-# List recent sessions
-ls -lt /tmp/claude-1000/ 2>/dev/null | head -10
+```python
+import os, sys
+from pathlib import Path
 
-# For each session dir, list agent output files
-for DIR in /tmp/claude-1000/*/; do
-  TASKS_DIR="${DIR}*/tasks/"
-  AGENT_COUNT=$(find $TASKS_DIR -name "a*.output" -type l 2>/dev/null | wc -l)
-  if [ "$AGENT_COUNT" -gt 0 ]; then
-    echo "$(stat -c %Y "$DIR" 2>/dev/null) $DIR ($AGENT_COUNT agents)"
-  fi
-done | sort -rn | head -5
+def _session_project_dir(project_path):
+    """Convert a Claude Code project path to its ~/.claude/projects/ directory name.
+    Rule: both '/' and '.' are replaced with '-'.
+    Matches pipeline-health.md _session_project_dir() exactly.
+    """
+    import re
+    return re.sub(r'[/.]', '-', project_path)
+
+CLAUDE_PROJECTS_DIR = Path.home() / ".claude" / "projects"
+
+# Discover all subagent JSONL files under ~/.claude/projects/
+# Each subagent file: ~/.claude/projects/{project}/{sessionId}/subagents/agent-{agentId}.jsonl
+subagent_files = []
+if CLAUDE_PROJECTS_DIR.exists():
+    for jsonl_path in sorted(CLAUDE_PROJECTS_DIR.rglob("subagents/agent-*.jsonl"),
+                             key=lambda p: p.stat().st_mtime, reverse=True):
+        # Only process files with actual content (> 10 lines / non-empty)
+        try:
+            size = jsonl_path.stat().st_size
+            if size < 200:  # 200 bytes ≈ fewer than 10 minimal JSONL lines
+                continue
+            # Count lines portably without wc -l
+            with open(jsonl_path, 'rb') as fh:
+                line_count = sum(1 for _ in fh)
+            if line_count > 10:
+                subagent_files.append(jsonl_path)
+        except OSError:
+            continue
+
+if not subagent_files:
+    print("SKIPPED — transcripts unreadable on this platform")
+    print("  ~/.claude/projects/ not found or contains no subagent JSONL files.")
+    sys.exit(0)
+
+print(f"Found {len(subagent_files)} subagent JSONL file(s) under {CLAUDE_PROJECTS_DIR}")
 ```
 
 **Input resolution:**
@@ -72,20 +102,47 @@ done | sort -rn | head -5
 
 ### Step 1B: Collect agent JSONL files
 
-```bash
-SESSION_DIR="/tmp/claude-1000/{PROJECT_PATH}/{SESSION_ID}"
-TASKS_DIR="${SESSION_DIR}/tasks"
+```python
+import os
+from pathlib import Path
 
-# Agent files are symlinks starting with 'a' pointing to .jsonl files
-for LINK in ${TASKS_DIR}/a*.output; do
-  AGENT_ID=$(basename "$LINK" .output)
-  TARGET=$(readlink -f "$LINK")
-  LINES=$(wc -l < "$TARGET" 2>/dev/null || echo 0)
-  echo "$AGENT_ID $LINES $TARGET"
-done
+# Filter subagent_files by $ARGUMENTS (session UUID, agent ID, project fragment, or "latest")
+ARGUMENT = "$ARGUMENTS".strip()
+
+if not ARGUMENT or ARGUMENT.lower() == "latest":
+    # Use the most recent session — take the most recently modified subagent directory
+    # Group by parent session dir (grandparent of the subagent file)
+    by_session = {}
+    for p in subagent_files:
+        session_dir = p.parent.parent  # .../projects/{project}/{sessionId}/
+        mtime = session_dir.stat().st_mtime if session_dir.exists() else 0
+        if session_dir not in by_session or mtime > by_session[session_dir][0]:
+            by_session[session_dir] = (mtime, [])
+        by_session[session_dir][1].append(p)
+    if by_session:
+        latest_session_dir = max(by_session, key=lambda d: by_session[d][0])
+        agent_files = by_session[latest_session_dir][1]
+    else:
+        agent_files = []
+else:
+    # Filter by session UUID, agent ID, or project path fragment
+    agent_files = [
+        p for p in subagent_files
+        if ARGUMENT in str(p)
+    ]
+
+if not agent_files:
+    print(f"SKIPPED — no matching agent JSONL files found for argument: {ARGUMENT!r}")
+    import sys; sys.exit(0)
+
+print(f"Processing {len(agent_files)} agent file(s)")
+for p in agent_files:
+    agent_id = p.stem.replace("agent-", "", 1)
+    print(f"  {agent_id}  {p}")
 ```
 
 Only process files with `> 10` lines (smaller files are helper/polling agents, not work-on agents).
+Line count is computed in Python from the actual JSONL bytes — not from a symlink stub.
 
 ---
 
@@ -189,17 +246,43 @@ def parse_agent(filepath, agent_id):
     max_replays = max(ts_counts.values()) if ts_counts else 1
     resume_cycles = max_replays - 1  # first occurrence is original, rest are replays
 
-    # Build phase timeline from unique skill invocations
+    # Build phase timeline from unique skill invocations.
+    # Stall detection: a gap is a TRUE STALL only when it is >120s AND contains zero
+    # tool_use events (i.e. ends in end_turn with no tool calls in the window).
+    # Gaps that contain any tool_use block (Bash, Edit, Read, Grep, …) are ACTIVE work —
+    # the agent was building; only Skill() calls were sparse.
+    #
+    # To detect tool activity between consecutive Skill() calls we collect all
+    # tool_use timestamps from the raw lines and check whether any fall in the gap.
+    all_tool_use_ts = []
+    for raw_line in lines:
+        raw = json.loads(raw_line)
+        raw_msg = raw.get('message', {})
+        raw_content = raw_msg.get('content', [])
+        raw_ts_str = raw.get('timestamp', '')
+        if raw_ts_str and isinstance(raw_content, list):
+            for c in raw_content:
+                if c.get('type') == 'tool_use':
+                    try:
+                        all_tool_use_ts.append(
+                            datetime.fromisoformat(raw_ts_str.replace('Z', '+00:00'))
+                        )
+                    except ValueError:
+                        pass
+
     phases = []
     prev_ts = first_ts
     for si in skill_invocations:
         gap_sec = (si['ts'] - prev_ts).total_seconds()
+        # Any tool_use event inside the gap window means the agent was active
+        has_tool_use_in_gap = any(prev_ts < t <= si['ts'] for t in all_tool_use_ts)
+        is_stall = gap_sec > 120 and not has_tool_use_in_gap
         phases.append({
             'ts': si['ts'],
             'skill': si['skill'],
             'args': si['args'],
             'gap_from_prev_sec': gap_sec,
-            'is_stall': gap_sec > 120  # > 2 min = stall
+            'is_stall': is_stall,  # True only when >2 min AND zero tool calls in gap
         })
         prev_ts = si['ts']
 
@@ -433,6 +516,6 @@ This enables tracking whether orchestrator/prompt changes actually improved thro
 ## Notes
 
 - **File format**: Agent outputs are JSONL (one JSON object per line). Each line has `type` (user/assistant), `timestamp`, `message` (with `content` array and optional `stop_reason`).
-- **Symlinks**: Files in `/tmp/claude-1000/*/tasks/a*.output` are symlinks to `~/.claude/projects/*/subagents/agent-*.jsonl`.
+- **Subagent files**: Located at `~/.claude/projects/{munged-project-path}/{sessionId}/subagents/agent-{agentId}.jsonl`. The munging rule: both `/` and `.` in the project path are replaced with `-` (e.g. `/home/user/projects/myapp` → `-home-user-projects-myapp`). There are no platform-specific temp paths or symlinks involved.
 - **Size filtering**: Only analyze files > 10 lines. Small files are helper/polling agents spawned by the orchestrator for status checks.
 - **Resume detection**: When an agent is resumed, the full conversation is replayed. Duplicate `(timestamp, skill_name)` pairs indicate replay cycles. `max(duplicates) - 1 = resume_cycles`.

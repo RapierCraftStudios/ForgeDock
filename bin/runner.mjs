@@ -46,9 +46,9 @@ import {
 import { join, dirname, basename, relative, isAbsolute } from "path";
 import { execSync, spawnSync } from "child_process";
 
-const DEFAULT_MODEL = "claude-sonnet-4-5";
+const DEFAULT_MODEL = "claude-sonnet-5";
 const DEFAULT_MAX_ITERATIONS = 50;
-const DEFAULT_MAX_TOKENS = 8192;
+const DEFAULT_MAX_TOKENS = 16384;
 // Default wall-clock limit for a single run_bash command. Chosen to be
 // generous enough for CI steps (git clones, test suites) while bounding
 // the worst-case hang to 5 minutes. Override via FORGEDOCK_BASH_TIMEOUT (ms).
@@ -582,6 +582,29 @@ export function getToolHandlers(cwd) {
       });
       const stdout = result.stdout ? String(result.stdout) : "";
       const stderr = result.stderr ? String(result.stderr) : "";
+      // Check ENOBUFS BEFORE the timedOut fallback. When a command both exceeds
+      // maxBuffer AND runs past timeoutMs, both result.error.code === "ENOBUFS"
+      // and elapsedMs >= timeoutMs are simultaneously true. The elapsedMs
+      // fallback (check 2 below) is a heuristic catch-all that must not
+      // override a specific, authoritative error code. ENOBUFS is always the
+      // correct diagnosis when present — surface it first. (issue #1364)
+      if (result.error?.code === "ENOBUFS") {
+        // The process ran but produced more output than maxBuffer allows.
+        // spawnSync populates result.stdout/stderr up to the limit before
+        // setting result.error — surface what was captured so the agent has
+        // actionable context rather than a misleading "failed to start" error.
+        const partial = (stdout + stderr).trim();
+        const bufDisplay =
+          maxBuffer < 1024
+            ? `${maxBuffer} bytes`
+            : maxBuffer < 1024 * 1024
+              ? `${Math.round(maxBuffer / 1024)}KB`
+              : `${Math.round(maxBuffer / (1024 * 1024))}MB`;
+        throw new Error(
+          `Command output exceeded ${bufDisplay} buffer limit (output truncated).` +
+            (partial ? `\nPartial output:\n${partial}` : ""),
+        );
+      }
       // Detect timeout. Two reliable indicators:
       //   1. result.error.code === "ETIMEDOUT" — Node sets this on the error
       //      object specifically when spawnSync's own `timeout` option fires
@@ -602,6 +625,8 @@ export function getToolHandlers(cwd) {
       //
       // Gate all of this on `result.status === null` so a legitimately-
       // completed process near the timeout boundary is never misreported.
+      // ENOBUFS is excluded above — it is checked first so a command that both
+      // overflows the buffer AND exceeds the timeout gets the correct message.
       const elapsedMs = Date.now() - startMs;
       const timedOut =
         result.status === null &&
@@ -612,18 +637,6 @@ export function getToolHandlers(cwd) {
         throw new Error(
           `Command timed out after ${timeoutSecs}s and was killed. ` +
             `Set FORGEDOCK_BASH_TIMEOUT (ms) to adjust.` +
-            (partial ? `\nPartial output:\n${partial}` : ""),
-        );
-      }
-      if (result.error?.code === "ENOBUFS") {
-        // The process ran but produced more output than maxBuffer allows.
-        // spawnSync populates result.stdout/stderr up to the limit before
-        // setting result.error — surface what was captured so the agent has
-        // actionable context rather than a misleading "failed to start" error.
-        const partial = (stdout + stderr).trim();
-        const bufMB = Math.round(maxBuffer / (1024 * 1024));
-        throw new Error(
-          `Command output exceeded ${bufMB}MB buffer limit (output truncated).` +
             (partial ? `\nPartial output:\n${partial}` : ""),
         );
       }
@@ -676,20 +689,36 @@ export function renderDryRun(ctx) {
 
 /**
  * Render the pipeline summary card emitted on completion.
- * @param {{command: string, args: string[], iterations: number, stopReason: string}} ctx
+ * @param {{command: string, args: string[], iterations: number, stopReason: string, usage?: object|null}} ctx
  * @returns {string}
  */
 export function renderSummaryCard(ctx) {
-  const { command, args, iterations, stopReason } = ctx;
+  const { command, args, iterations, stopReason, usage = null } = ctx;
   const argStr = Array.isArray(args) ? args.join(" ") : String(args ?? "");
-  return [
+  const lines = [
     ``,
     `┌─ ForgeDock pipeline summary ────────────────────────────`,
     `│ command:    /${command} ${argStr}`.trimEnd(),
     `│ iterations: ${iterations}`,
     `│ stop:       ${stopReason}`,
+  ];
+  if (usage) {
+    lines.push(
+      `│ tokens:     ${usage.input_tokens} in / ${usage.output_tokens} out`,
+      `│ cache:      ${usage.cache_read_input_tokens} read / ${usage.cache_creation_input_tokens} write`,
+    );
+  } else {
+    lines.push(`│ tokens:     N/A`);
+  }
+  lines.push(
     `└─────────────────────────────────────────────────────────`,
-  ].join("\n");
+  );
+  if (usage) {
+    lines.push(
+      `FORGE:USAGE_JSON:${JSON.stringify(usage)}`,
+    );
+  }
+  return lines.join("\n");
 }
 
 // ---------------------------------------------------------------------------
@@ -771,6 +800,15 @@ export async function runCommand(opts = {}) {
   const handlers = getToolHandlers(cwd);
   const messages = [{ role: "user", content: userMessage }];
 
+  // Accumulate token usage across all messages.create() calls in this run.
+  // Field names match the Anthropic SDK's response.usage object exactly.
+  const usage = {
+    input_tokens: 0,
+    output_tokens: 0,
+    cache_creation_input_tokens: 0,
+    cache_read_input_tokens: 0,
+  };
+
   let iterations = 0;
   while (iterations < maxIterations) {
     iterations++;
@@ -782,6 +820,14 @@ export async function runCommand(opts = {}) {
       tools: TOOL_DEFINITIONS,
       messages,
     });
+
+    // Accumulate usage — guard each field for null/undefined (SDK omits
+    // cache fields when prompt caching is not active).
+    const ru = response.usage ?? {};
+    usage.input_tokens += ru.input_tokens ?? 0;
+    usage.output_tokens += ru.output_tokens ?? 0;
+    usage.cache_creation_input_tokens += ru.cache_creation_input_tokens ?? 0;
+    usage.cache_read_input_tokens += ru.cache_read_input_tokens ?? 0;
 
     messages.push({ role: "assistant", content: response.content });
 
@@ -802,6 +848,7 @@ export async function runCommand(opts = {}) {
           args,
           iterations,
           stopReason: response.stop_reason,
+          usage,
         }),
       );
       return {
@@ -809,6 +856,7 @@ export async function runCommand(opts = {}) {
         command: spec.name,
         iterations,
         stopReason: response.stop_reason,
+        usage,
       };
     }
 
@@ -841,7 +889,8 @@ export async function runCommand(opts = {}) {
       args,
       iterations,
       stopReason: "max_iterations",
+      usage,
     }),
   );
-  return { status: "max-iterations", command: spec.name, iterations };
+  return { status: "max-iterations", command: spec.name, iterations, usage };
 }

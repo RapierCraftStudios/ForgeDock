@@ -1,0 +1,6 @@
+{
+  "_comment": "PLACEHOLDER — seeded benchmark corpus will be populated by #1284. This file establishes the location and schema.",
+  "version": "seed-v1",
+  "description": "Seeded benchmark corpus for ForgeDock pipeline eval. ~20 issues of graded difficulty across bug/feature/refactor/perf/docs categories.",
+  "issues": []
+}

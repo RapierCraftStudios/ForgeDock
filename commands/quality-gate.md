@@ -13,7 +13,10 @@ You are a quality gate that runs AFTER implementation but BEFORE commit. Your jo
 
 You do NOT post to GitHub. You do NOT create issues. You return findings directly to the builder agent that spawned you.
 
-**Agent model policy**: Default `model: "sonnet"`. If Sonnet is rate-limited, fall back to `model: "opus"`.
+**Agent model policy**: `model: "sonnet"` (standard tier). Fallback: `model: "opus"` if rate-limited. Feature gate: pass `effort` in Task/Skill spawns only on Claude Code >= 2.1.154.
+**NEVER use plan mode (EnterPlanMode).**
+
+<!-- FORGE:SPEC_LOADED — quality-gate.md loaded and active. Agent is bound by this spec. -->
 
 ---
 
@@ -49,6 +52,7 @@ This quality gate uses **domain detection** to adapt to your project's actual te
 | ROUTER_BUG | Router Python files where gate conditions are narrowed |
 | FORGE_GRAPH | `commands/*.md` specs or `scripts/*` files change (ForgeDock self-consistency) |
 | CONFIG_SCHEMA | Config files for external tools (`traefik/`, `infra/nginx/`, `k8s/`, `terraform/`, `*.conf`, `*.toml` in infra paths, or `docker-compose*.yml` with service definition changes) |
+| BILLING | Files under `billing/`, `credits/`, `subscription`, `ledger`, or `payment` paths |
 
 **Stack-agnostic coverage**: The example domains above reflect common patterns caught in production; they are not requirements. A Go or Ruby project benefits from SECURITY checks. A Node.js project benefits from FRONTEND, PROXY, and DEPLOY checks. Any project benefits from DATABASE and WORKFLOW checks when those file types are present. The stack-specific examples (Python routers, SOPS secrets chain, FastAPI layouts, appleboy SSH deploys) are illustrative — the domain detection system applies the applicable subset to any codebase.
 
@@ -88,7 +92,8 @@ Before running checks, classify the changed files into domains. This avoids runn
 | `*.py` in `routers/` or `route.ts` handlers | AUTH |
 | `*.py`, `*.ts`, `*.tsx`, `*.sh` (any code file) | SECURITY (always) |
 | Files containing `os.getenv` or `process.env` | DEPLOY |
-| `*.sql` or files in `migrations/` | DATABASE |
+| `*.sql`, files in `migrations/`, or `*migrations/*.py` (Alembic) | DATABASE |
+| Files under `billing/`, `credits/`, `subscription`, `ledger`, or `payment` paths | BILLING |
 | `*.tsx`, `*.ts` in `web/src/` (excluding `route.ts`) | FRONTEND |
 | `*.tsx`, `*.ts` client components with fetch/useSWR | PROXY |
 | `*.sh` files or scripts with `curl`/`wget` | SHELL |
@@ -116,7 +121,10 @@ DOMAINS=""
 IFS=' ' read -ra CHANGED_FILES_ARR <<< "{CHANGED_FILES}"
 for f in "${CHANGED_FILES_ARR[@]}"; do
     case "$f" in
-        *.sql|*migrations/*) DOMAINS="$DOMAINS DATABASE" ;;
+        *.sql|*migrations/*|*migrations/*.py) DOMAINS="$DOMAINS DATABASE" ;;
+    esac
+    case "$f" in
+        *billing/*|*credits/*|*subscription*|*ledger*|*payment*) DOMAINS="$DOMAINS BILLING" ;;
     esac
     case "$f" in
         *router*|*route.ts) DOMAINS="$DOMAINS AUTH" ;;
@@ -236,6 +244,9 @@ Run ONLY the checks whose domain was identified in Step 1.5. Skip checks for dom
 - **2N (Runtime UID × filesystem write)**: Run if `INFRA` in DOMAINS
 - **2O (Residual pattern check)**: Run if `ROUTER_BUG` in DOMAINS
 - **2P (External tool config schema)**: Run if `CONFIG_SCHEMA` in DOMAINS
+- **2Q (Billing)**: Run if `BILLING` in DOMAINS
+- **2R (Registry checks)**: ALWAYS run — executes all promoted checks from `scripts/check-registry/manifest.json` <!-- Added: forge#1331 -->
+- **2S (Test failure classification)**: Run if any Step 2 check invoked a test suite and it failed — classifies the failure as PRE_BROKEN, FLAKY, or REAL using `scripts/flaky-quarantine.sh` <!-- Added: forge#1336 -->
 
 ### 2A: Security (ALL files)
 
@@ -319,14 +330,15 @@ if [ -n "$NEW_ENVS" ]; then
 fi
 ```
 
-### 2D: Database quality (SQL migration files)
+### 2D: Database quality (SQL migration files and Alembic Python migrations)
 
-For each `.sql` file:
+For each `.sql` file or Alembic migration `.py` file:
 1. **NOT NULL without DEFAULT**: `ALTER TABLE ... ADD COLUMN ... NOT NULL` without `DEFAULT` locks table and fails on existing rows
 2. **DROP without IF EXISTS**: Fails on fresh databases
 3. **Missing indexes**: New columns used in WHERE/JOIN without indexes
 4. **Unbounded queries**: SELECT without LIMIT or time-bound WHERE clause
 5. **Migration number collision**: Check against origin branch
+6. **IF NOT EXISTS guard**: `CREATE TABLE`/`CREATE INDEX` without `IF NOT EXISTS` guard fails on re-run
 
 ```bash
 while IFS= read -r f; do
@@ -334,12 +346,25 @@ while IFS= read -r f; do
     grep -nE "ADD COLUMN.*NOT NULL" "$f" | grep -v "DEFAULT" && echo "DB: NOT NULL without DEFAULT in $f"
     grep -nE "DROP (TABLE|COLUMN|INDEX)" "$f" | grep -v "IF EXISTS" && echo "DB: DROP without IF EXISTS in $f"
     grep -nE "SELECT.*FROM" "$f" | grep -v "LIMIT" | grep -v "WHERE.*created_at" && echo "DB: possibly unbounded query in $f"
-done < <(echo {CHANGED_FILES} | tr ' ' '\n' | grep '\.sql$')
+    # IF NOT EXISTS guard check — CREATE TABLE/INDEX without guard fails on replay or repeated apply
+    grep -nE "^\s*(CREATE TABLE|CREATE INDEX|CREATE UNIQUE INDEX)\b" "$f" | grep -iv "IF NOT EXISTS" && \
+        echo "DB-GUARD | MEDIUM | $f | CREATE TABLE/INDEX without IF NOT EXISTS guard — statement will fail on re-run or fresh database replay. Add IF NOT EXISTS."
+done < <(echo {CHANGED_FILES} | tr ' ' '\n' | grep -E '\.sql$')
+
+# Also run structural checks on Alembic Python migration files
+while IFS= read -r f; do
+    [ -z "$f" ] && continue
+    # Check for op.create_table / op.create_index without if_not_exists or checkfirst guard
+    grep -nE "\bop\.create_table\b|\bop\.create_index\b" "$f" | grep -iv "if_not_exists\|checkfirst" && \
+        echo "DB-GUARD | MEDIUM | $f | op.create_table/op.create_index without if_not_exists/checkfirst guard — will fail on replay. Add if_not_exists=True or checkfirst=True."
+done < <(echo {CHANGED_FILES} | tr ' ' '\n' | grep -E 'migrations/.*\.py$')
 
 # Migration prefix collision scan (Deploy Gate — HIGH)
-# Runs whenever any SQL file changed. Scans the configured migrations directory for
-# duplicate numeric prefixes. Duplicate prefixes can cause ordering conflicts during deploy.
+# Runs whenever any SQL or Alembic Python migration file changed. Scans the configured
+# migrations directory for duplicate numeric prefixes (both .sql and .py files).
+# Duplicate prefixes can cause ordering conflicts during deploy.
 # <!-- Updated: forge#1349 — removed stale validate-migration-order.sh reference (script does not exist) -->
+# <!-- Updated: forge#1329 — extended collision scan to cover .py Alembic migration files -->
 MIGRATIONS_DIR="{WORKTREE_PATH}/infra/migrations"
 # Support configured migration directory from forge.yaml (if set)
 if [ -f "{WORKTREE_PATH}/forge.yaml" ]; then
@@ -348,8 +373,8 @@ if [ -f "{WORKTREE_PATH}/forge.yaml" ]; then
     [ -n "$_CONFIGURED_MIGRATIONS" ] && MIGRATIONS_DIR="{WORKTREE_PATH}/${_CONFIGURED_MIGRATIONS}"
 fi
 if [ -d "$MIGRATIONS_DIR" ]; then
-    # Find duplicate numeric prefixes across all migration files
-    DUPLICATE_PREFIXES=$(ls "$MIGRATIONS_DIR"/*.sql 2>/dev/null \
+    # Find duplicate numeric prefixes across all migration files (.sql and .py)
+    DUPLICATE_PREFIXES=$( { ls "$MIGRATIONS_DIR"/*.sql 2>/dev/null; ls "$MIGRATIONS_DIR"/*.py 2>/dev/null; } \
         | sed 's|.*/\([0-9]*\)_.*|\1|' \
         | sort | uniq -d)
     for prefix in $DUPLICATE_PREFIXES; do
@@ -1001,6 +1026,219 @@ fi
 **This check is advisory (MEDIUM), not blocking (HIGH)**. The quality gate cannot substitute for CI-level validators (`traefik validate`, `nginx -t`, `terraform validate`). Its role is to detect when those validators are absent from CI and surface that gap to the builder. Actual structural validation belongs in GitHub Actions.
 
 **Separation of concerns**: ForgeDock reasons about architecture, logic, and security; CI runs deterministic tool validators with zero token cost. The quality gate enforces that the CI layer is complete — it does not replace it.
+
+### 2Q: Billing domain checks (billing/credits/subscription/ledger/payment code)
+
+**Triggered when**: BILLING domain is set (changed files are under `billing/`, `credits/`, `subscription`, `ledger`, or `payment` paths).
+
+**Why this matters**: Billing code has three reliably grep-detectable defect classes that account for ~27% of review findings in the AlterLab health window: (1) `org_id` not propagated to debit/refund ledger write paths (silent data ownership loss — charges appear with wrong tenant); (2) `asyncio.sleep` / blocking sleep called inside an advisory-lock or open-transaction scope (holds DB connection/lock for the full sleep duration, causing connection exhaustion and deadlocks under load); (3) stdlib `logging.*()` calls passed structlog-style keyword arguments (`event=`, named context keys) that are not valid stdlib kwargs — crashes at runtime with `TypeError: unexpected keyword argument`. <!-- Added: forge#1329 --> <!-- allowlist: AlterLab -->
+
+**2Q-1: org_id propagation in ledger write functions**
+
+```bash
+# Grep billing Python files for ledger write function definitions missing an org_id parameter.
+# Heuristic: functions named debit/refund/charge/credit/apply_credit/record_usage whose
+# signature (def line) does not contain org_id are flagged as MEDIUM — reviewer verifies
+# with full context whether org_id is pulled from a passed object instead.
+while IFS= read -r f; do
+    [ -z "$f" ] && continue
+    grep -nE "^\s*def (debit|refund|charge|credit|apply_credit|record_usage|create_invoice|issue_credit)\b" "$f" 2>/dev/null | while IFS=: read -r lineno rest; do
+        # Read the full function signature (up to 3 lines to cover multi-line sigs)
+        sig=$(sed -n "${lineno},$((lineno+2))p" "$f" 2>/dev/null)
+        echo "$sig" | grep -qE '\borg_id\b' || \
+            echo "BILLING-1 | MEDIUM | $f:$lineno | Ledger write function '$(echo "$rest" | grep -oE 'def \w+' | head -1)' signature does not include org_id parameter — verify org_id is propagated to all debit/refund paths (AlterLab#25348 pattern)" <!-- allowlist: AlterLab -->
+    done
+done < <(echo {CHANGED_FILES} | tr ' ' '\n' | grep -E '\.py$')
+```
+
+**2Q-2: Blocking sleep inside advisory-lock or open-transaction scope**
+
+```bash
+# Grep billing Python files for asyncio.sleep / time.sleep called inside an advisory-lock
+# or open-transaction context (within 20 lines after lock acquisition or BEGIN/session open).
+# Holding a lock or DB connection across a sleep starves the connection pool and causes
+# deadlocks under concurrent load (AlterLab#25725 pattern). <!-- allowlist: AlterLab -->
+while IFS= read -r f; do
+    [ -z "$f" ] && continue
+    grep -nE "\basyncio\.sleep\b|\btime\.sleep\b" "$f" 2>/dev/null | while IFS=: read -r lineno rest; do
+        start=$((lineno > 20 ? lineno - 20 : 1))
+        window=$(sed -n "${start},$((lineno-1))p" "$f" 2>/dev/null)
+        echo "$window" | grep -qE 'advisory_lock|BEGIN\b|async with.*session|async with.*conn|async with.*transaction|with.*engine\b' && \
+            echo "BILLING-2 | HIGH | $f:$lineno | asyncio.sleep/time.sleep inside advisory-lock or open-transaction scope — holds DB connection/lock for full sleep duration, causing connection exhaustion and deadlocks under load (AlterLab#25725 pattern). Move sleep outside lock/transaction scope." <!-- allowlist: AlterLab -->
+    done
+done < <(echo {CHANGED_FILES} | tr ' ' '\n' | grep -E '\.py$')
+```
+
+**2Q-3: stdlib logging calls with structlog-style kwargs**
+
+```bash
+# Grep changed Python files for logging.*()/logger.*() calls that pass keyword arguments
+# that are NOT valid stdlib logging kwargs (exc_info, stack_info, stacklevel, extra).
+# Structlog-style kwargs (event=, extra_=, named context keys) are NOT accepted by stdlib
+# Logger methods and crash at runtime with TypeError: unexpected keyword argument.
+# (AlterLab#25715, #25837, #25819 pattern) <!-- allowlist: AlterLab -->
+while IFS= read -r f; do
+    [ -z "$f" ] && continue
+    # Match logging.info/warning/error/debug/critical and logger.info/etc. calls with
+    # non-stdlib kwargs. Valid stdlib kwargs: exc_info, stack_info, stacklevel, extra.
+    # Flag any named kwarg that is NOT one of those four.
+    grep -nE "\b(logging|logger)\.(info|warning|error|debug|critical|exception)\s*\(.*\b\w+\s*=" "$f" 2>/dev/null | \
+        grep -vE "\b(exc_info|stack_info|stacklevel|extra)\s*=" | \
+        grep -v "^\s*#" && \
+        echo "BILLING-3 | HIGH | $f | stdlib logging call with non-stdlib keyword argument detected — stdlib Logger.info/warning/error/etc. only accept exc_info, stack_info, stacklevel, extra as kwargs. Structlog-style kwargs (event=, named context keys) cause TypeError at runtime (AlterLab#25715 pattern). Use structlog.get_logger() instead of logging if structlog kwargs are needed." <!-- allowlist: AlterLab -->
+done < <(echo {CHANGED_FILES} | tr ' ' '\n' | grep -E '\.py$')
+```
+
+**Flag as findings**:
+- Ledger write function missing `org_id` parameter: **MEDIUM** — heuristic; reviewer verifies whether org_id is obtained from a passed object. Silent data ownership loss if omitted.
+- `asyncio.sleep`/`time.sleep` inside advisory-lock or transaction scope: **HIGH** — guaranteed connection/lock starvation under concurrent load.
+- stdlib `logging.*()` with non-stdlib kwargs: **HIGH** — guaranteed `TypeError` crash at runtime when the log call is reached.
+
+**Note**: 2Q-3 (stdlib logging check) fires on ALL changed Python files regardless of path — stdlib logger misuse is not specific to billing paths and is a universal crash class. 2Q-1 and 2Q-2 fire only on billing-domain files.
+
+### 2R: Registry checks (ALWAYS — promoted patterns from recurring review findings)
+
+<!-- Added: forge#1331 -->
+
+**Purpose**: Run all checks that have been promoted from recurring review findings into the registry. These are deterministic scripts that catch in milliseconds what previously required a full review cycle to detect. Each check was generated once by an LLM after the same defect class appeared 3+ times — thereafter it runs forever at zero LLM cost.
+
+**Registry location**: `scripts/check-registry/manifest.json` (relative to repo root)
+
+```bash
+REGISTRY_FILE="{WORKTREE_PATH}/scripts/check-registry/manifest.json"
+REGISTRY_FINDINGS=""
+
+if [ ! -f "$REGISTRY_FILE" ]; then
+    echo "2R: No check registry found at $REGISTRY_FILE — skipping registry checks."
+else
+    # Parse manifest and run each registered check
+    CHECK_COUNT=$(jq '.checks | length' "$REGISTRY_FILE" 2>/dev/null || echo 0)
+
+    if [ "$CHECK_COUNT" -eq 0 ]; then
+        echo "2R: Registry is empty — no promoted checks to run."
+    else
+        echo "2R: Running $CHECK_COUNT registered check(s)..."
+        CHECK_INDEX=0
+        while [ "$CHECK_INDEX" -lt "$CHECK_COUNT" ]; do
+            SCRIPT=$(jq -r ".checks[$CHECK_INDEX].script" "$REGISTRY_FILE" 2>/dev/null)
+            SLUG=$(jq -r ".checks[$CHECK_INDEX].slug" "$REGISTRY_FILE" 2>/dev/null)
+            SEVERITY=$(jq -r ".checks[$CHECK_INDEX].severity" "$REGISTRY_FILE" 2>/dev/null)
+
+            if [ -z "$SCRIPT" ] || [ "$SCRIPT" = "null" ]; then
+                CHECK_INDEX=$((CHECK_INDEX + 1))
+                continue
+            fi
+
+            SCRIPT_PATH="{WORKTREE_PATH}/$SCRIPT"
+
+            if [ ! -x "$SCRIPT_PATH" ]; then
+                echo "2R: WARN — registry check $SLUG script not found or not executable at $SCRIPT_PATH"
+                CHECK_INDEX=$((CHECK_INDEX + 1))
+                continue
+            fi
+
+            # Run the check; pass changed files list and worktree path
+            CHECK_OUTPUT=$("$SCRIPT_PATH" "{CHANGED_FILES}" "{WORKTREE_PATH}" 2>/dev/null)
+            CHECK_EXIT=$?
+
+            if [ "$CHECK_EXIT" -eq 1 ]; then
+                # Check fired — append to findings
+                while IFS= read -r line; do
+                    [ -z "$line" ] && continue
+                    REGISTRY_FINDINGS="${REGISTRY_FINDINGS}
+${line}"
+                done <<< "$CHECK_OUTPUT"
+                echo "2R: FAIL — $SLUG matched ($SEVERITY)"
+            elif [ "$CHECK_EXIT" -eq 0 ] || [ "$CHECK_EXIT" -eq 2 ]; then
+                echo "2R: PASS — $SLUG"
+            else
+                echo "2R: WARN — $SLUG exited with unexpected code $CHECK_EXIT"
+            fi
+
+            CHECK_INDEX=$((CHECK_INDEX + 1))
+        done
+    fi
+fi
+```
+
+If any registry check produces findings, include them in the Step 3 findings list under the check's slug (e.g. `REGISTRY-migration-number-collision | HIGH | ...`). HIGH-severity registry findings are blocking; MEDIUM are advisory.
+
+---
+
+## Step 2S: Test failure classification (run when tests fail in Step 2)
+
+<!-- Added: forge#1336 -->
+
+**Triggered when**: any domain check in Step 2 invokes a test suite command and that command exits non-zero.
+
+**Why this matters**: Builders and reviewers waste cycles on test failures that pre-exist the PR or are intermittently caused by fixture-state races. A test that fails on both the PR branch and the base branch is *pre-broken* and must not block an unrelated PR. A test that fails then passes on retry is *flaky* and should be quarantined, not "fixed" by the builder.
+
+### Classification protocol
+
+For each failing test ID (or test command) surfaced in Step 2:
+
+```bash
+# PR_BASE is the target branch (e.g. "staging", "main", or "milestone/slug")
+# FAILING_TEST is the individual test identifier or re-runnable command
+# GH_REPO is owner/repo from forge.yaml (used to file the quarantine issue)
+# PR_ISSUE_NUMBER is the issue this quality gate was invoked from (optional)
+
+CLASSIFIER="${FORGEDOCK_SCRIPTS:-scripts}/flaky-quarantine.sh"
+[ -f "$CLASSIFIER" ] || CLASSIFIER="{WORKTREE_PATH}/scripts/flaky-quarantine.sh"
+
+if [ -f "$CLASSIFIER" ]; then
+    RESULT=$(bash "$CLASSIFIER" \
+        --test   "{FAILING_TEST}" \
+        --base   "{PR_BASE}" \
+        --worktree "{WORKTREE_PATH}" \
+        --repo   "{GH_REPO}" \
+        --issue  "{PR_ISSUE_NUMBER}" \
+        --retries 3 \
+        2>&1)
+    echo "$RESULT"
+    CLASSIFICATION=$(echo "$RESULT" | grep '^CLASSIFICATION:' | awk '{print $2}')
+else
+    # Script not present — fall back to treating all test failures as real.
+    CLASSIFICATION="REAL"
+    echo "NOTE: scripts/flaky-quarantine.sh not found — treating test failure as REAL (no classification)"
+fi
+```
+
+### Classification outcomes
+
+| Classification | Meaning | Gate behaviour |
+|---|---|---|
+| `PRE_BROKEN` | Fails on base branch — broken before this PR | **Does not block the gate.** Log as advisory. Quarantine manifest entry written; issue filed once. |
+| `FLAKY` | Intermittent — fails then passes on retry | **Does not block the gate.** Log as advisory. Quarantine manifest entry written; issue filed once. |
+| `REAL` | Deterministic on PR, passes on base | **Blocks the gate** — treated as a regression caused by this PR. |
+
+### Gate behaviour
+
+```
+if CLASSIFICATION == "PRE_BROKEN" or CLASSIFICATION == "FLAKY":
+    # Test does not block the gate — record in findings as advisory only.
+    # Emit a LOW finding so the builder and reviewer see it in the report.
+    emit: "TEST-QUARANTINE | LOW | {FAILING_TEST} | classified {CLASSIFICATION} — quarantine entry recorded; does not block this PR"
+    # Do NOT re-run the test or count it as a gate failure.
+
+elif CLASSIFICATION == "REAL":
+    # Test failure is caused by this PR — block the gate as before.
+    emit: "TEST-REAL | HIGH | {FAILING_TEST} | deterministic failure on PR branch; passes on base — this PR introduced the regression"
+```
+
+### Quarantine manifest
+
+The manifest lives at `.forgedock/quarantine.jsonl` in the project root (or at the path set in `FORGEDOCK_QUARANTINE_MANIFEST`). Each line is a JSON object:
+
+```json
+{"test":"<id>","classification":"PRE_BROKEN|FLAKY","base":"<branch>","pr_branch":"<branch>","issue":"<num>","repo":"<owner/repo>","first_seen":"<ISO-8601>","runs_pr":3,"failures_pr":3,"runs_base":1,"failures_base":1}
+```
+
+The manifest is append-only. Duplicate entries (same test already quarantined) are skipped. A corresponding GitHub issue is filed automatically when the script has `--repo` and `gh` is authenticated.
+
+**Reviewers**: when the manifest exists, read it during Phase 2 of `review-pr.md` to avoid re-filing known-quarantined tests as new findings.
+
+---
 
 ## Step 3: Compile findings
 

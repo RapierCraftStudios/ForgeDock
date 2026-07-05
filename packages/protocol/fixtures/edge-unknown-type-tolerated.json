@@ -1,0 +1,8 @@
+{
+  "description": "Unknown type — must be tolerated (§7.2.4), not fail",
+  "input": "<!-- FORGE:ACME_SECURITY_SCAN -->\nCustom annotation content.\n<!-- ACME_SECURITY_SCAN:COMPLETE -->",
+  "expect": {
+    "type": "ACME_SECURITY_SCAN",
+    "valid": true
+  }
+}

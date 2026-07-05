@@ -1,0 +1,9 @@
+{
+  "description": "ARCHITECT — partial annotation (interrupted mid-write, uses partial sentinel)",
+  "input": "<!-- FORGE:ARCHITECT -->\n## Implementation Plan for #42\n\n### Affected Paths (ALL must be updated)\nPartial list only.\n\n<!-- FORGE:ARCHITECT:PARTIAL -->",
+  "expect": {
+    "type": "ARCHITECT",
+    "valid": false,
+    "sentinelState": "partial"
+  }
+}

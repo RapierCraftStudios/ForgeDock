@@ -1,0 +1,11 @@
+{
+  "description": "REVIEWER — valid review annotation with APPROVED verdict",
+  "input": "<!-- FORGE:REVIEWER -->\n## Review — SECURITY\n\n**Verdict**: APPROVED\n\n### Findings\nNo security issues found.",
+  "expect": {
+    "type": "REVIEWER",
+    "valid": true,
+    "fieldChecks": {
+      "Verdict": "APPROVED"
+    }
+  }
+}

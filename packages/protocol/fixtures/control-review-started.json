@@ -1,0 +1,9 @@
+{
+  "description": "REVIEW_STARTED — control marker, presence is the signal",
+  "input": "<!-- FORGE:REVIEW_STARTED -->",
+  "expect": {
+    "type": "REVIEW_STARTED",
+    "valid": true,
+    "sentinelState": "complete"
+  }
+}

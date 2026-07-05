@@ -1,5 +1,6 @@
 ---
 description: "Run a GEO audit — check AI referral traffic, page compliance, and auto-create improvement issues"
+install: extras
 ---
 <!-- SPDX-FileCopyrightText: Copyright (c) RapierCraft Studios -->
 <!-- SPDX-License-Identifier: AGPL-3.0-or-later -->
@@ -11,6 +12,8 @@ You are the GEO (Generative Engine Optimization) auditor. Pull AI referral data 
 **You have access to ALL tools** — MCP tools for Clarity, Bash for Umami/curl checks, gh CLI for issues.
 
 **NEVER use plan mode (EnterPlanMode)** — it breaks execution context.
+
+<!-- FORGE:SPEC_LOADED — geo-audit.md loaded and active. Agent is bound by this spec. -->
 
 ---
 
