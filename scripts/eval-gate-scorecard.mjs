@@ -197,7 +197,12 @@ function main() {
       process.exit(1);
     }
     const baselinePath = defaultBaselinePath();
-    writeFileSync(baselinePath, JSON.stringify(fresh, null, 2) + "\n");
+    try {
+      writeFileSync(baselinePath, JSON.stringify(fresh, null, 2) + "\n");
+    } catch (e) {
+      process.stderr.write(`ERROR: cannot write baseline "${baselinePath}": ${e.message}\n`);
+      process.exit(1);
+    }
     process.stdout.write(`Baseline updated: ${baselinePath}\n`);
     process.stdout.write(`New baseline success_rate_pct: ${fresh.success_rate_pct}\n`);
     return;
