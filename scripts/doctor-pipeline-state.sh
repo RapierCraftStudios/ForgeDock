@@ -187,6 +187,24 @@ add_finding() {
 # ---------------------------------------------------------------------------
 SKIPPED_JSON="[]"
 
+# bounded_reason: cap raw external-tool stderr before it enters the published
+# JSON contract. `gh` does not normally print secrets to stderr, but verbose/
+# debug tracing (e.g. GH_DEBUG) can emit multi-line output including request
+# headers. Keep only the first line, capped at 300 chars, so the published
+# degraded[].reason field can never carry unbounded/verbose diagnostic text.
+# The full untruncated text still goes to the local `>&2` warning above each
+# add_skip call — this only bounds the copy that gets published.
+bounded_reason() {
+  local raw="${1:-}"
+  local first_line
+  first_line=$(printf '%s\n' "$raw" | head -n1)
+  if [ "${#first_line}" -gt 300 ]; then
+    printf '%s...[truncated]' "${first_line:0:300}"
+  else
+    printf '%s' "$first_line"
+  fi
+}
+
 add_skip() {
   local check="$1"
   local issue_num="$2"
@@ -291,7 +309,7 @@ while IFS= read -r row; do
     --json comments \
     --jq '[.comments[].body | contains("FORGE:BUILDER")] | any' 2>"$GH_STDERR_TMP"); then
     echo "WARNING: gh issue view failed for #$num — I4 check inconclusive, skipping (not treated as missing): $(cat "$GH_STDERR_TMP")" >&2
-    add_skip "I4" "$num" "gh issue view failed: $(cat "$GH_STDERR_TMP")"
+    add_skip "I4" "$num" "gh issue view failed: $(bounded_reason "$(cat "$GH_STDERR_TMP")")"
     continue
   fi
   if [ "$has_builder" = "false" ]; then
@@ -317,7 +335,7 @@ while IFS= read -r row; do
     --json number \
     --jq '. | length' 2>"$GH_STDERR_TMP"); then
     echo "WARNING: gh pr list failed for #$num — I5 check inconclusive, skipping (not treated as missing): $(cat "$GH_STDERR_TMP")" >&2
-    add_skip "I5" "$num" "gh pr list failed: $(cat "$GH_STDERR_TMP")"
+    add_skip "I5" "$num" "gh pr list failed: $(bounded_reason "$(cat "$GH_STDERR_TMP")")"
     continue
   fi
   if [ "$pr_count" -eq 0 ]; then
