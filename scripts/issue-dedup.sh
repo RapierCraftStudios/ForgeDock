@@ -3,10 +3,15 @@
 #
 # Usage:
 #   issue-dedup.sh <title> [-R <owner/repo>] [--force]
+#   issue-dedup.sh <title> ["-R <owner/repo>"] [--force]   (single pre-joined token also accepted)
 #
-#   <title>         : Proposed issue title (required, must be quoted if it contains spaces)
-#   -R <owner/repo> : GitHub repository (optional, defaults to FORGE_REPO or current repo)
-#   --force         : Skip dedup check and always allow creation (explicit override)
+#   <title>           : Proposed issue title (required, must be quoted if it contains spaces)
+#   -R <owner/repo>   : GitHub repository, as two argv tokens (optional, defaults to
+#                       FORGE_REPO or current repo)
+#   "-R <owner/repo>" : GitHub repository, as ONE pre-joined token (e.g. when a caller
+#                       passes an already-composed $GH_FLAG variable quoted as "$GH_FLAG").
+#                       Both forms are accepted.
+#   --force           : Skip dedup check and always allow creation (explicit override)
 #
 # Exit codes:
 #   0 — No near-duplicate found. Creation is safe. Stdout is empty.
@@ -29,6 +34,10 @@
 # Integration pattern (for command specs that call gh issue create):
 #
 #   DEDUP_RESULT=$(scripts/issue-dedup.sh "$PROPOSED_TITLE" "$GH_FLAG" 2>&1)
+#   # ^ $GH_FLAG is typically already composed as "-R owner/repo" and quoted here,
+#   #   producing ONE argv token — the parser accepts this joined form directly
+#   #   (see the -R\ * case arm below). An unset/empty $GH_FLAG quotes to an empty
+#   #   token, which the parser also treats as "no repo flag" rather than a title.
 #   DEDUP_EXIT=$?
 #   if [ $DEDUP_EXIT -eq 1 ]; then
 #     echo "Near-duplicate detected: $DEDUP_RESULT"
@@ -72,6 +81,11 @@ FORCE=0
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
+    "")
+      # Empty-string token — e.g. a caller quoting an unset/empty $GH_FLAG
+      # ("$GH_FLAG" -> ""). Treat as "no repo flag supplied", not as a title.
+      shift
+      ;;
     -R)
       shift
       if [[ $# -eq 0 ]]; then
@@ -79,6 +93,14 @@ while [[ $# -gt 0 ]]; do
         exit 2
       fi
       GH_FLAG="-R $1"
+      shift
+      ;;
+    -R\ *)
+      # Single pre-joined token, e.g. "-R owner/repo" — produced when a caller
+      # quotes an already-composed $GH_FLAG variable ("$GH_FLAG") instead of
+      # passing -R and the repo as two separate argv tokens. Both call shapes
+      # are valid integration patterns used across commands/*.md callers.
+      GH_FLAG="$1"
       shift
       ;;
     --force)
