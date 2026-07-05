@@ -321,6 +321,19 @@ describe("aggregate", () => {
     assert.equal(sc.spec_sha, "abc123");
   });
 
+  it("defaults corpus_size to issues_run when meta.corpus_size is absent", () => {
+    const sc = aggregate(makeRuns(5));
+    assert.equal(sc.corpus_size, sc.issues_run);
+    assert.equal(sc.corpus_size, 5);
+  });
+
+  it("passes through an explicit corpus_size distinct from issues_run (subset aggregation)", () => {
+    const sc = aggregate(makeRuns(5), { corpus_size: 20, run_mode: "subset" });
+    assert.equal(sc.corpus_size, 20);
+    assert.equal(sc.issues_run, 5);
+    assert.notEqual(sc.corpus_size, sc.issues_run);
+  });
+
   it("emits generated_at as an ISO-8601 timestamp", () => {
     const sc = aggregate(makeRuns(5));
     assert.match(sc.generated_at, /^\d{4}-\d{2}-\d{2}T/);

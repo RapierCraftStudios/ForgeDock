@@ -141,6 +141,7 @@ function round3(x) {
  * @param {string|null} [meta.corpus_version]  - Corpus version label.
  * @param {"full"|"subset"} [meta.run_mode]    - "full" or "subset".
  * @param {string|null} [meta.spec_sha]        - git SHA of commands/ at run time.
+ * @param {number|null} [meta.corpus_size]     - Size of the source corpus (defaults to issues_run).
  * @returns {object} Scorecard compatible with eval-gate-scorecard.mjs.
  */
 export function aggregate(runs, meta = {}) {
@@ -224,7 +225,7 @@ async function main() {
     process.exit(1);
   }
 
-  const { runs, run_id, corpus_version, run_mode, spec_sha } = data;
+  const { runs, run_id, corpus_version, run_mode, spec_sha, corpus_size } = data;
 
   try {
     validateRuns(runs);
@@ -235,7 +236,7 @@ async function main() {
 
   let scorecard;
   try {
-    scorecard = aggregate(runs, { run_id, corpus_version, run_mode, spec_sha });
+    scorecard = aggregate(runs, { run_id, corpus_version, run_mode, spec_sha, corpus_size });
   } catch (e) {
     process.stderr.write(`ERROR: ${e.message}\n`);
     process.exit(1);

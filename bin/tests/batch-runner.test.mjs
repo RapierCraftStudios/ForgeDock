@@ -240,4 +240,18 @@ describe("writeResults", () => {
     assert.equal(data.runs.length, 1);
     assert.equal(data.runs[0].issue, 9999);
   });
+
+  it("includes corpus_size when provided in meta", () => {
+    const outputPath = join(TMP, "corpus-size.json");
+    writeResults(outputPath, [makeRunResult(1001, "success")], { corpus_size: 20 });
+    const data = JSON.parse(readFileSync(outputPath, "utf-8"));
+    assert.equal(data.corpus_size, 20);
+  });
+
+  it("defaults corpus_size to null when absent from meta", () => {
+    const outputPath = join(TMP, "corpus-size-absent.json");
+    writeResults(outputPath, [], {});
+    const data = JSON.parse(readFileSync(outputPath, "utf-8"));
+    assert.equal(data.corpus_size, null);
+  });
 });
