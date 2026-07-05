@@ -18,7 +18,15 @@
 # Output (JSON mode):
 #   { "findings": [ { "type", "severity", "issue", "label", "hours_stuck",
 #                     "last_annotation", "resume_command", "detail" } ],
-#     "summary": { "total", "critical", "warning" } }
+#     "summary": { "total", "critical", "warning",
+#                   "checks_skipped", "degraded": [ { "check", "issue", "reason" } ] } }
+#
+# "checks_skipped"/"degraded" surface I4/I5 checks that fail-open on a real
+# `gh` API failure (rate limit, network blip, auth issue) rather than being
+# treated as confirmed-missing (see #1531). A skip is NOT a finding — it does
+# not affect "total"/"critical"/"warning" or the exit code — but a
+# persistently non-zero "checks_skipped" across runs means those invariants
+# are silently disabled and warrants investigating the underlying `gh` failure.
 #
 # Exit codes:
 #   0 = no findings (pipeline healthy)
@@ -168,6 +176,32 @@ add_finding() {
 }
 
 # ---------------------------------------------------------------------------
+# Skipped-checks accumulator
+#
+# I4/I5 fail open on a real `gh` API failure (rate limit, network blip, auth
+# issue) rather than treating it as confirmed-missing — this is intentional
+# (see #1531: skip > false-CRITICAL). The skip previously logged only to
+# stderr, which is invisible to /pipeline-health (it consumes --json stdout,
+# not stderr). add_skip() records the same skip event into a JSON-tracked
+# array so persistent degradation surfaces in the machine-readable contract.
+# ---------------------------------------------------------------------------
+SKIPPED_JSON="[]"
+
+add_skip() {
+  local check="$1"
+  local issue_num="$2"
+  local reason="$3"
+
+  local entry
+  entry=$(jq -n \
+    --arg check "$check" \
+    --arg issue "$issue_num" \
+    --arg reason "$reason" \
+    '{check:$check,issue:$issue,reason:$reason}')
+  SKIPPED_JSON=$(echo "$SKIPPED_JSON" | jq ". + [$entry]")
+}
+
+# ---------------------------------------------------------------------------
 # I1: Issues stuck in workflow:investigating
 # ---------------------------------------------------------------------------
 INVESTIGATING=$(gh issue list $GH_FLAG \
@@ -257,6 +291,7 @@ while IFS= read -r row; do
     --json comments \
     --jq '[.comments[].body | contains("FORGE:BUILDER")] | any' 2>"$GH_STDERR_TMP"); then
     echo "WARNING: gh issue view failed for #$num — I4 check inconclusive, skipping (not treated as missing): $(cat "$GH_STDERR_TMP")" >&2
+    add_skip "I4" "$num" "gh issue view failed: $(cat "$GH_STDERR_TMP")"
     continue
   fi
   if [ "$has_builder" = "false" ]; then
@@ -282,6 +317,7 @@ while IFS= read -r row; do
     --json number \
     --jq '. | length' 2>"$GH_STDERR_TMP"); then
     echo "WARNING: gh pr list failed for #$num — I5 check inconclusive, skipping (not treated as missing): $(cat "$GH_STDERR_TMP")" >&2
+    add_skip "I5" "$num" "gh pr list failed: $(cat "$GH_STDERR_TMP")"
     continue
   fi
   if [ "$pr_count" -eq 0 ]; then
@@ -328,15 +364,19 @@ done < <(echo "$OPEN_PRS" | jq -c '.[]')
 TOTAL=$(echo "$FINDINGS_JSON" | jq 'length')
 CRITICAL=$(echo "$FINDINGS_JSON" | jq '[.[] | select(.severity == "critical")] | length')
 WARNING=$(echo "$FINDINGS_JSON" | jq '[.[] | select(.severity == "warning")] | length')
+CHECKS_SKIPPED=$(echo "$SKIPPED_JSON" | jq 'length')
 
 SUMMARY_JSON=$(jq -n \
   --argjson total "$TOTAL" \
   --argjson critical "$CRITICAL" \
   --argjson warning "$WARNING" \
+  --argjson checks_skipped "$CHECKS_SKIPPED" \
+  --argjson degraded "$SKIPPED_JSON" \
   --arg repo "$GH_REPO" \
   --arg stuck_hours "$STUCK_HOURS" \
   '{repo:$repo,stuck_hours_threshold:($stuck_hours|tonumber),
-    total:$total,critical:$critical,warning:$warning}')
+    total:$total,critical:$critical,warning:$warning,
+    checks_skipped:$checks_skipped,degraded:$degraded}')
 
 # ---------------------------------------------------------------------------
 # Output
@@ -357,6 +397,9 @@ echo "────────────────────────�
 
 if [ "$TOTAL" -eq 0 ]; then
   echo "  No stalls detected. Pipeline is healthy."
+  if [ "$CHECKS_SKIPPED" -gt 0 ]; then
+    echo "  NOTE: $CHECKS_SKIPPED check(s) skipped due to gh API failures (see --json 'degraded' for detail)."
+  fi
   echo ""
   exit 0
 fi
