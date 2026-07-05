@@ -667,6 +667,12 @@ export async function forge(ctx) {
   } else {
     w.write("  " + dimLine(ctx, "PreToolUse hook skipped — requires Claude Code v2.1.163+") + "\n");
   }
+  // "skipped-malformed" and "absent" are intentionally silent here:
+  // - skipped-malformed: installSessionStartHook() above reads the same
+  //   settingsPath and already prints the malformed-JSON fix-card, so a
+  //   second message would just repeat the same signal.
+  // - absent: the expected steady state (nothing to remove) — this
+  //   function only reports state *changes*, not no-ops.
   if (subagentStopEnforceStatus === "removed") {
     w.write(`  ${glyph(true)} SubagentStop enforcement hook removed ${dimLine(ctx, "(non-functional — see forge#1527)")}\n`);
   }
