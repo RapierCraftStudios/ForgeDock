@@ -59,7 +59,7 @@
 import { fileURLToPath, pathToFileURL } from "url";
 import { dirname, join, resolve } from "path";
 import { existsSync, readFileSync } from "fs";
-import { execSync } from "child_process";
+import { execFileSync } from "child_process";
 
 // ---------------------------------------------------------------------------
 // Bootstrap
@@ -410,7 +410,7 @@ function resolveRunLogDir() {
 function makeCliIo() {
   function runCli(cmd, args) {
     try {
-      return execSync([cmd, ...args].join(" "), {
+      return execFileSync(cmd, args, {
         encoding: "utf-8",
         stdio: ["pipe", "pipe", "pipe"],
         timeout: 15000,
