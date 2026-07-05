@@ -101,6 +101,15 @@ fi
 GH_FLAG="-R $GH_REPO"
 
 # ---------------------------------------------------------------------------
+# Shared stderr sink for checks that must not merge stderr into a compared
+# value (see I4/I5 below). Redirecting to this file (instead of `2>&1`) keeps
+# a captured variable limited to stdout on success, while still preserving
+# the diagnostic stderr text for the WARNING message on actual failure.
+# ---------------------------------------------------------------------------
+GH_STDERR_TMP=$(mktemp)
+trap 'rm -f "$GH_STDERR_TMP"' EXIT
+
+# ---------------------------------------------------------------------------
 # Utility: ISO timestamp to hours-ago
 # ---------------------------------------------------------------------------
 hours_since() {
@@ -246,8 +255,8 @@ while IFS= read -r row; do
   # network blip, auth issue) — an API failure must NOT be treated as confirmed-missing.
   if ! has_builder=$(gh issue view "$num" $GH_FLAG \
     --json comments \
-    --jq '[.comments[].body | contains("FORGE:BUILDER")] | any' 2>&1); then
-    echo "WARNING: gh issue view failed for #$num — I4 check inconclusive, skipping (not treated as missing): $has_builder" >&2
+    --jq '[.comments[].body | contains("FORGE:BUILDER")] | any' 2>"$GH_STDERR_TMP"); then
+    echo "WARNING: gh issue view failed for #$num — I4 check inconclusive, skipping (not treated as missing): $(cat "$GH_STDERR_TMP")" >&2
     continue
   fi
   if [ "$has_builder" = "false" ]; then
@@ -271,8 +280,8 @@ while IFS= read -r row; do
     --state open \
     --search "closes #$num" \
     --json number \
-    --jq '. | length' 2>&1); then
-    echo "WARNING: gh pr list failed for #$num — I5 check inconclusive, skipping (not treated as missing): $pr_count" >&2
+    --jq '. | length' 2>"$GH_STDERR_TMP"); then
+    echo "WARNING: gh pr list failed for #$num — I5 check inconclusive, skipping (not treated as missing): $(cat "$GH_STDERR_TMP")" >&2
     continue
   fi
   if [ "$pr_count" -eq 0 ]; then
