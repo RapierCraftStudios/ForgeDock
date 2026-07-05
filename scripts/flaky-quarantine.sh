@@ -167,8 +167,15 @@ if [ "$CLASSIFICATION" = "PRE_BROKEN" ] || [ "$CLASSIFICATION" = "FLAKY" ]; then
   mkdir -p "$MANIFEST_DIR"
 
   TIMESTAMP=$(iso_now)
-  # Escape double-quotes in TEST_CMD for JSON safety
-  TEST_JSON=$(echo "$TEST_CMD" | sed 's/\\/\\\\/g; s/"/\\"/g')
+  # Escape TEST_CMD for JSON safety. A hand-rolled sed replacement only covers
+  # backslash and double-quote — a test command containing a literal newline
+  # or other control character would produce invalid JSON/JSONL. `jq -Rs '.'`
+  # slurps the raw input as one string and emits a fully JSON-escaped literal
+  # (including \n, \t, etc.); strip the surrounding quotes since TEST_JSON is
+  # embedded inside an already-quoted field below.
+  TEST_JSON_QUOTED=$(printf '%s' "$TEST_CMD" | jq -Rs '.')
+  TEST_JSON="${TEST_JSON_QUOTED#\"}"
+  TEST_JSON="${TEST_JSON%\"}"
 
   ENTRY="{\"test\":\"${TEST_JSON}\",\"classification\":\"${CLASSIFICATION}\",\"base\":\"${BASE_BRANCH}\",\"pr_branch\":\"${PR_BRANCH}\",\"issue\":\"${ISSUE_NUM}\",\"repo\":\"${REPO}\",\"first_seen\":\"${TIMESTAMP}\",\"runs_pr\":${RUNS_PR},\"failures_pr\":${FAILURES_PR},\"runs_base\":${RUNS_BASE},\"failures_base\":${FAILURES_BASE}}"
 

@@ -144,7 +144,11 @@ normalize_tokens() {
 }
 
 PROPOSED_TOKENS=$(normalize_tokens "$PROPOSED_TITLE")
-PROPOSED_TOKEN_COUNT=$(echo "$PROPOSED_TOKENS" | grep -c . 2>/dev/null || echo 0)
+# grep -c always prints a numeric count (including "0") even when it matches
+# nothing — it just exits 1 in that case. `|| echo 0` would append a SECOND
+# "0" line on top of grep's own "0" output, corrupting the numeric comparison
+# below. `|| true` only suppresses the non-zero exit under `set -e`.
+PROPOSED_TOKEN_COUNT=$(echo "$PROPOSED_TOKENS" | grep -c . || true)
 
 if [[ "$PROPOSED_TOKEN_COUNT" -lt 1 ]]; then
   # Title has no meaningful tokens — skip dedup (cannot match)
@@ -181,13 +185,14 @@ while IFS=$'\t' read -r CAND_NUMBER CAND_TITLE; do
   [[ -z "$CAND_NUMBER" ]] && continue
 
   CAND_TOKENS=$(normalize_tokens "$CAND_TITLE")
-  CAND_TOKEN_COUNT=$(echo "$CAND_TOKENS" | grep -c . 2>/dev/null || echo 0)
+  # Same double-fallback hazard as PROPOSED_TOKEN_COUNT above — see comment there.
+  CAND_TOKEN_COUNT=$(echo "$CAND_TOKENS" | grep -c . || true)
 
   # Shared token count: intersection of proposed and candidate token sets
   SHARED_COUNT=$(comm -12 \
     <(echo "$PROPOSED_TOKENS") \
     <(echo "$CAND_TOKENS") \
-    | grep -c . 2>/dev/null || echo 0)
+    | grep -c . || true)
 
   # Shorter token set size (for percentage threshold)
   if [[ "$PROPOSED_TOKEN_COUNT" -le "$CAND_TOKEN_COUNT" ]]; then
