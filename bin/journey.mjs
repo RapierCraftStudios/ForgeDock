@@ -363,7 +363,7 @@ import {
   installSessionStartHook,
   installSubagentStopHook,
   installPreToolUseHook,
-  installSubagentStopEnforceHook,
+  removeSubagentStopEnforceHook,
 } from "./settings-hook.mjs";
 
 /**
@@ -615,16 +615,22 @@ export async function forge(ctx) {
   const settingsPath = join(ctx.home, ".claude", "settings.json");
   const { status: hookStatus } = installSessionStartHook(settingsPath, hookScript);
 
-  // Install enforcement hooks (#1250): PreToolUse (branch/label validation),
-  // SubagentStop interactive engine adapter, and SubagentStop annotation
-  // verifier. All are idempotent and always installed (fail-open if
-  // settings.json is malformed, same contract as SessionStart hook).
+  // Install enforcement hooks (#1250): PreToolUse (branch/label validation)
+  // and SubagentStop interactive engine adapter. Both are idempotent and
+  // always installed (fail-open if settings.json is malformed, same
+  // contract as SessionStart hook).
   const preToolUseScript = join(ctx.forgeHome, "bin", "hooks", "pre-tool-use.mjs");
   const subagentStopScript = join(ctx.forgeHome, "bin", "hooks", "interactive-engine.mjs");
-  const subagentStopEnforceScript = join(ctx.forgeHome, "bin", "hooks", "subagent-stop-enforce.mjs");
   const { status: preToolUseStatus } = installPreToolUseHook(settingsPath, preToolUseScript);
   installSubagentStopHook(settingsPath, subagentStopScript);
-  const { status: subagentStopEnforceStatus } = installSubagentStopEnforceHook(settingsPath, subagentStopEnforceScript);
+
+  // SubagentStop annotation-verifier hook (#1250) is NOT installed: its
+  // trigger condition (a `FORGE:PHASE_START` marker in the transcript) is
+  // never emitted anywhere in the pipeline, so it always exits 0 with zero
+  // enforcement effect while still spawning a process + reading the
+  // transcript on every SubagentStop (forge#1527). Actively clean up any
+  // prior installation instead of installing it.
+  const { status: subagentStopEnforceStatus } = removeSubagentStopEnforceHook(settingsPath);
 
   // Housekeeping — must never abort the receipt or the hook.
   let manifestSaveFailed = false;
@@ -661,8 +667,8 @@ export async function forge(ctx) {
   } else {
     w.write("  " + dimLine(ctx, "PreToolUse hook skipped — requires Claude Code v2.1.163+") + "\n");
   }
-  if (subagentStopEnforceStatus !== null) {
-    w.write(`  ${glyph(true)} SubagentStop enforcement hook ${subagentStopEnforceStatus === "already" ? "active" : "registered"} ${dimLine(ctx, "(annotation verification)")}\n`);
+  if (subagentStopEnforceStatus === "removed") {
+    w.write(`  ${glyph(true)} SubagentStop enforcement hook removed ${dimLine(ctx, "(non-functional — see forge#1527)")}\n`);
   }
 
   return { installed, updated, skipped, copied, total: files.length, hookStatus, preToolUseStatus, subagentStopEnforceStatus };

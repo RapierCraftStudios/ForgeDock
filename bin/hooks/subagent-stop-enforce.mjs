@@ -47,9 +47,20 @@
  *
  * === Wiring ===
  *
- * Installed into ~/.claude/settings.json under hooks.SubagentStop by
- * `forgedock install` (version-gated: requires Claude Code v2.1.163+).
- * Removed by `forgedock uninstall`.
+ * NOT currently installed (forge#1527): `detectPhase()`'s trigger condition
+ * (a literal `FORGE:PHASE_START` marker in the transcript) is never emitted
+ * anywhere in the pipeline — no command/skill writes that string into a
+ * Claude Code transcript, so this hook always fell through to "not a
+ * pipeline phase subagent" and exited 0 with zero enforcement effect. As of
+ * forge#1527, `forgedock install`/`update` no longer installs this hook and
+ * actively removes any prior installation via `removeSubagentStopEnforceHook`.
+ *
+ * This file and its install/remove primitives (`installSubagentStopEnforceHook`
+ * / `removeSubagentStopEnforceHook` in bin/settings-hook.mjs) are kept intact
+ * for a future fix that wires a real transcript-visible trigger (e.g. the
+ * skill-header text each work-on subcommand already renders into the
+ * transcript) and corrects the `context` → `FORGE:CONTRACT` mapping bug in
+ * `PHASE_ANNOTATIONS` below (should require `FORGE:CONTEXT` instead).
  * Identified by the string "subagent-stop-enforce.mjs" in SUBAGENT_ENFORCE_MARKER.
  */
 
