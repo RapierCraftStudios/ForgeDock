@@ -22,7 +22,7 @@
  *   --quiet     Suppress the optional ForgeDock fleet pointer in --md output
  */
 
-import { execSync } from "child_process";
+import { execSync, execFileSync } from "child_process";
 import { readFileSync, existsSync } from "fs";
 import { resolve, dirname, join } from "path";
 import { fileURLToPath } from "url";
@@ -50,15 +50,34 @@ const cyan = (s) => `${CYAN}${s}${RESET}`;
 // ---------------------------------------------------------------------------
 
 /**
- * Run a gh command and return parsed JSON, or null on failure.
+ * Run a `gh` command via execFileSync (no shell — argv array only) and
+ * return parsed JSON, or null on failure.
+ *
+ * MUST receive an argv array, never a shell string — forge.yaml-derived
+ * values (owner/repo) flow into these arguments and must never be
+ * interpolated into a shell command string. See #1586.
+ *
+ * Exported (in addition to the default CLI entry point `runReport`) so
+ * tests can exercise the real no-shell execution path directly.
  */
-function ghJson(cmd) {
+export function ghJson(args) {
   try {
-    const out = execSync(cmd, { encoding: "utf-8", stdio: ["pipe", "pipe", "pipe"] });
+    const out = execFileSync("gh", args, { encoding: "utf-8", stdio: ["pipe", "pipe", "pipe"] });
     return JSON.parse(out.trim());
   } catch {
     return null;
   }
+}
+
+/**
+ * Validate that a forge.yaml-derived owner/repo value is safe to use as a
+ * `gh -R owner/repo` argument. GitHub usernames/orgs and repo names are
+ * restricted to alphanumerics, hyphens, underscores, and dots.
+ *
+ * Exported for the same testability reason as `ghJson` above.
+ */
+export function isValidGhIdentifier(value) {
+  return typeof value === "string" && /^[\w.-]+$/.test(value);
 }
 
 /**
@@ -158,12 +177,12 @@ function isGhAuthenticated() {
 async function computeStats({ owner, repo, days }) {
   const since = new Date(Date.now() - days * 24 * 60 * 60 * 1000).toISOString();
   const ghRepo = `${owner}/${repo}`;
-  const repoFlag = `-R ${ghRepo}`;
 
   // ---- Closed issues in window ----
-  const closedIssues = ghJson(
-    `gh issue list ${repoFlag} --state closed --limit 500 --json number,title,body,labels,createdAt,closedAt,author`
-  ) ?? [];
+  const closedIssues = ghJson([
+    "issue", "list", "-R", ghRepo, "--state", "closed", "--limit", "500",
+    "--json", "number,title,body,labels,createdAt,closedAt,author",
+  ]) ?? [];
 
   const windowIssues = closedIssues.filter((i) => i.closedAt && i.closedAt >= since);
 
@@ -199,9 +218,10 @@ async function computeStats({ owner, repo, days }) {
   ).length;
 
   // ---- Merged PRs in window ----
-  const mergedPRs = ghJson(
-    `gh pr list ${repoFlag} --state merged --limit 500 --json number,title,body,mergedAt`
-  ) ?? [];
+  const mergedPRs = ghJson([
+    "pr", "list", "-R", ghRepo, "--state", "merged", "--limit", "500",
+    "--json", "number,title,body,mergedAt",
+  ]) ?? [];
 
   const windowPRs = mergedPRs.filter((p) => p.mergedAt && p.mergedAt >= since);
 
@@ -368,8 +388,19 @@ export async function runReport(args) {
     process.exit(1);
   }
 
+  // Validate owner/repo before they ever reach a subprocess call — a hostile
+  // forge.yaml (e.g. `owner: "x; echo pwned"`) must be rejected here, not
+  // passed through. See #1586.
+  if (!isValidGhIdentifier(owner) || !isValidGhIdentifier(repo)) {
+    process.stderr.write(
+      `\n  ${RED}Error: forge.yaml project.owner/project.repo contains invalid characters.${RESET}\n` +
+      `  Fix: owner and repo must match ${cyan("/^[\\w.-]+$/")} (letters, digits, ., _, -).\n\n`
+    );
+    process.exit(1);
+  }
+
   // Check for ForgeDock history
-  const testCheck = ghJson(`gh issue list -R ${owner}/${repo} --limit 1 --state closed --json number`) ?? [];
+  const testCheck = ghJson(["issue", "list", "-R", `${owner}/${repo}`, "--limit", "1", "--state", "closed", "--json", "number"]) ?? [];
   if (!testCheck.length) {
     process.stdout.write(
       `\n  ${YELLOW}No closed issues found in ${owner}/${repo}.${RESET}\n` +

