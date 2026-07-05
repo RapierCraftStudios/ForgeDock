@@ -46,32 +46,39 @@ jobs:
     steps:
       - name: Resolve PR number
         id: pr
-        run: |
-          if [ "${{ github.event_name }}" = "pull_request" ]; then
-            echo "number=${{ github.event.pull_request.number }}" >> "$GITHUB_OUTPUT"
-            echo "base=${{ github.event.pull_request.base.ref }}" >> "$GITHUB_OUTPUT"
-            echo "head=${{ github.event.pull_request.head.ref }}" >> "$GITHUB_OUTPUT"
-            echo "created_at=${{ github.event.pull_request.created_at }}" >> "$GITHUB_OUTPUT"
-          else
-            # issue_comment event — fetch PR details via API
-            PR_DATA=$(gh pr view "${{ github.event.issue.number }}" \
-              --repo "${{ github.repository }}" \
-              --json number,baseRefName,headRefName,createdAt \
-              --jq '{number:.number,base:.baseRefName,head:.headRefName,created_at:.createdAt}')
-            echo "number=$(echo $PR_DATA | jq -r '.number')" >> "$GITHUB_OUTPUT"
-            echo "base=$(echo $PR_DATA | jq -r '.base')" >> "$GITHUB_OUTPUT"
-            echo "head=$(echo $PR_DATA | jq -r '.head')" >> "$GITHUB_OUTPUT"
-            echo "created_at=$(echo $PR_DATA | jq -r '.created_at')" >> "$GITHUB_OUTPUT"
-          fi
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          EVENT_NAME: ${{ github.event_name }}
+          PR_NUMBER_CTX: ${{ github.event.pull_request.number }}
+          PR_BASE_CTX: ${{ github.event.pull_request.base.ref }}
+          PR_HEAD_CTX: ${{ github.event.pull_request.head.ref }}
+          PR_CREATED_CTX: ${{ github.event.pull_request.created_at }}
+          ISSUE_NUMBER_CTX: ${{ github.event.issue.number }}
+          REPO_CTX: ${{ github.repository }}
+        run: |
+          if [ "$EVENT_NAME" = "pull_request" ]; then
+            echo "number=$PR_NUMBER_CTX" >> "$GITHUB_OUTPUT"
+            echo "base=$PR_BASE_CTX" >> "$GITHUB_OUTPUT"
+            echo "head=$PR_HEAD_CTX" >> "$GITHUB_OUTPUT"
+            echo "created_at=$PR_CREATED_CTX" >> "$GITHUB_OUTPUT"
+          else
+            # issue_comment event — fetch PR details via API
+            PR_DATA=$(gh pr view "$ISSUE_NUMBER_CTX" \
+              --repo "$REPO_CTX" \
+              --json number,baseRefName,headRefName,createdAt \
+              --jq '{number:.number,base:.baseRefName,head:.headRefName,created_at:.createdAt}')
+            echo "number=$(echo "$PR_DATA" | jq -r '.number')" >> "$GITHUB_OUTPUT"
+            echo "base=$(echo "$PR_DATA" | jq -r '.base')" >> "$GITHUB_OUTPUT"
+            echo "head=$(echo "$PR_DATA" | jq -r '.head')" >> "$GITHUB_OUTPUT"
+            echo "created_at=$(echo "$PR_DATA" | jq -r '.created_at')" >> "$GITHUB_OUTPUT"
+          fi
 
       - name: Skip non-deploy PRs
         id: scope
+        env:
+          BASE: ${{ steps.pr.outputs.base }}
+          HEAD: ${{ steps.pr.outputs.head }}
         run: |
-          BASE="${{ steps.pr.outputs.base }}"
-          HEAD="${{ steps.pr.outputs.head }}"
-
           # Gate only applies to staging→main or feature→main deploy PRs
           if [ "$BASE" != "main" ]; then
             echo "skip=true" >> "$GITHUB_OUTPUT"
@@ -87,10 +94,11 @@ jobs:
       - name: Scan PR comments for gate markers
         id: scan
         if: steps.scope.outputs.skip == 'false'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR_NUMBER: ${{ steps.pr.outputs.number }}
+          REPO: ${{ github.repository }}
         run: |
-          PR_NUMBER="${{ steps.pr.outputs.number }}"
-          REPO="${{ github.repository }}"
-
           # Fetch all PR comments (including review comments and issue comments)
           COMMENTS=$(gh pr view "$PR_NUMBER" \
             --repo "$REPO" \
@@ -123,16 +131,15 @@ jobs:
             echo "marker_found=none" >> "$GITHUB_OUTPUT"
             echo "No FORGE gate marker found on PR #$PR_NUMBER."
           fi
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Check 30-minute window
         id: window
         if: |
           steps.scope.outputs.skip == 'false' &&
           steps.scan.outputs.marker_found == 'none'
+        env:
+          PR_CREATED: ${{ steps.pr.outputs.created_at }}
         run: |
-          PR_CREATED="${{ steps.pr.outputs.created_at }}"
           NOW=$(date -u +%s)
           PR_EPOCH=$(date -u -d "$PR_CREATED" +%s 2>/dev/null || date -u -j -f "%Y-%m-%dT%H:%M:%SZ" "$PR_CREATED" +%s 2>/dev/null || echo 0)
           ELAPSED=$(( NOW - PR_EPOCH ))
@@ -153,12 +160,13 @@ jobs:
 
       - name: Evaluate gate result
         if: steps.scope.outputs.skip == 'false'
+        env:
+          MARKER: ${{ steps.scan.outputs.marker_found }}
+          STALE: ${{ steps.window.outputs.stale }}
+          PR_NUMBER: ${{ steps.pr.outputs.number }}
+          SPEC_LOADED: ${{ steps.scan.outputs.spec_loaded }}
+          REMAINING: ${{ steps.window.outputs.remaining_seconds }}
         run: |
-          MARKER="${{ steps.scan.outputs.marker_found }}"
-          STALE="${{ steps.window.outputs.stale }}"
-          PR_NUMBER="${{ steps.pr.outputs.number }}"
-          SPEC_LOADED="${{ steps.scan.outputs.spec_loaded }}"
-
           if [ "$MARKER" = "pass" ]; then
             echo "✅ FORGE:GATE_PASS found — deploy gates ran and passed. PR #$PR_NUMBER is cleared for merge."
             exit 0
@@ -191,7 +199,6 @@ jobs:
             echo "Resolution: Run /review-pr $PR_NUMBER (or /review-pr staging) to complete the review."
             exit 1
           else
-            REMAINING="${{ steps.window.outputs.remaining_seconds }}"
             echo "⏳ No gate marker yet — within 30-minute window (${REMAINING}s remaining)."
             echo ""
             echo "The /review-pr-staging spec posts gate markers during Phase 0A (open-review-finding gate)"
