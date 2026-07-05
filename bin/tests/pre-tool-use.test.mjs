@@ -203,6 +203,97 @@ describe("pre-tool-use hook — subprocess", () => {
     assert.match(stdout, /BLOCKED/);
   });
 
+  // -------------------------------------------------------------------------
+  // Regression tests for issue #1550 — extractFlag() must also recognize the
+  // attached short-flag form (-Bvalue, no separating space), which `gh`
+  // itself accepts as equivalent to `-B value`. Without this, a forbidden
+  // PR base written as -Bmain bypassed the hard block entirely.
+  // -------------------------------------------------------------------------
+
+  it("exits 2 and prints BLOCKED for attached short-flag form -Bmain (#1550)", () => {
+    const { exitCode, stdout } = runHook({
+      hook_event_name: "PreToolUse",
+      tool_name: "Bash",
+      tool_input: { command: "gh pr create -Bmain --title foo" },
+    });
+    assert.equal(exitCode, 2);
+    assert.match(stdout, /BLOCKED/);
+  });
+
+  it("exits 2 for attached short-flag form -Bmaster (#1550)", () => {
+    const { exitCode, stdout } = runHook({
+      hook_event_name: "PreToolUse",
+      tool_name: "Bash",
+      tool_input: { command: "gh pr create -Bmaster --title foo" },
+    });
+    assert.equal(exitCode, 2);
+    assert.match(stdout, /BLOCKED/);
+  });
+
+  it("exits 0 for attached short-flag form targeting an allowed base -Bstaging (#1550)", () => {
+    const { exitCode } = runHook({
+      hook_event_name: "PreToolUse",
+      tool_name: "Bash",
+      tool_input: { command: "gh pr create -Bstaging --title foo" },
+    });
+    assert.equal(exitCode, 0);
+  });
+
+  // -------------------------------------------------------------------------
+  // Regression tests for the quoted-decoy bypass (#1519 bug class, under-block
+  // direction). A quoted --title/--body value that starts with the flag text
+  // must NOT be treated as the flag — otherwise extraction short-circuits on
+  // the decoy and misses a real forbidden `-B main` later in the command.
+  // These run against the real hook via runHook() (subprocess).
+  // -------------------------------------------------------------------------
+
+  it("still exits 2 when a quoted --title decoy starts with -B but a real -B main follows (attached-form decoy)", () => {
+    const { exitCode, stdout } = runHook({
+      hook_event_name: "PreToolUse",
+      tool_name: "Bash",
+      tool_input: {
+        command: 'gh pr create --title "-Bstaging is fine" -B main',
+      },
+    });
+    assert.equal(exitCode, 2);
+    assert.match(stdout, /BLOCKED/);
+  });
+
+  it("still exits 2 when a quoted --title decoy starts with -B= but a real -B main follows (equals-form decoy)", () => {
+    const { exitCode, stdout } = runHook({
+      hook_event_name: "PreToolUse",
+      tool_name: "Bash",
+      tool_input: {
+        command: 'gh pr create --title "-B=staging is fine" -B main',
+      },
+    });
+    assert.equal(exitCode, 2);
+    assert.match(stdout, /BLOCKED/);
+  });
+
+  it("still exits 2 when a quoted --body decoy precedes a real -Bmain attached flag", () => {
+    const { exitCode, stdout } = runHook({
+      hook_event_name: "PreToolUse",
+      tool_name: "Bash",
+      tool_input: {
+        command: 'gh pr create --body "-Bstaging safe" -Bmain',
+      },
+    });
+    assert.equal(exitCode, 2);
+    assert.match(stdout, /BLOCKED/);
+  });
+
+  it("exits 0 when a quoted --body decoy starts with -Bmain but the real base is staging (no false over-block)", () => {
+    const { exitCode } = runHook({
+      hook_event_name: "PreToolUse",
+      tool_name: "Bash",
+      tool_input: {
+        command: 'gh pr create --body "-Bmain in the title text" -B staging',
+      },
+    });
+    assert.equal(exitCode, 0);
+  });
+
   it("exits 0 for non-PreToolUse events (wrong event type)", () => {
     const { exitCode } = runHook({
       hook_event_name: "SessionStart",
