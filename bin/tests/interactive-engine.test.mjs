@@ -14,23 +14,33 @@ import os from "node:os";
 
 // ---------------------------------------------------------------------------
 // Import the pure helpers we can test without Claude Code integration.
-// We re-export them from the hook for testability via a thin adapter below.
-// Since interactive-engine.mjs uses top-level await (main()) and exits,
-// we test its internal logic by reconstructing the key functions here.
+// Since interactive-engine.mjs uses top-level await (main()) and exits when
+// run directly, its top-level main()/process.exit(0) is guarded behind a
+// direct-execution check so the module can be safely imported for testing.
 //
-// parseTranscript/detectPhase/detectLane are now `export`ed from the hook
-// (issue #1580), and the hook's top-level main()/process.exit(0) is guarded
-// behind a direct-execution check, so those three are imported and driven
-// directly below against realistic nested Claude Code JSONL fixtures rather
-// than reconstructed. The PHASE_MARKERS/detectPhaseFromText/phaseFromSkill
-// re-implementations further down remain for focused marker-matching and
-// skill-name-normalization unit tests that don't need a transcript at all.
+// parseTranscript/detectPhase/detectLane are `export`ed from the hook
+// (issue #1580) and driven directly below against realistic nested Claude
+// Code JSONL fixtures. detectPhaseFromText and phaseFromSkill are also
+// `export`ed from the hook (phaseFromSkill since #1525; detectPhaseFromText
+// added in #1592) and imported directly below — no local reimplementations
+// remain for any interactive-engine.mjs function.
+//
+// The extractFlag reimplementation further down is a separate, pre-existing
+// case: it mirrors a private (non-exported) helper in a *different* hook,
+// bin/hooks/pre-tool-use.mjs, not a subject of this file. Left as-is per
+// #1592's investigation — recommended as a narrow follow-up on pre-tool-use.mjs.
 // ---------------------------------------------------------------------------
 
 import { appendEvent, deriveState, readLog } from "../engine/runlog.mjs";
 import { reconcileState } from "../engine/reconcile.mjs";
 import { serializeState, parseState, upsertStateBlock } from "../engine/state.mjs";
-import { parseTranscript, detectPhase, detectLane } from "../hooks/interactive-engine.mjs";
+import {
+  parseTranscript,
+  detectPhase,
+  detectLane,
+  detectPhaseFromText,
+  phaseFromSkill,
+} from "../hooks/interactive-engine.mjs";
 
 // ---------------------------------------------------------------------------
 // Helper: simulate what the hook does after detecting a phase
@@ -85,51 +95,10 @@ function commitPhase(dir, issueNumber, phaseId, outputs = {}, terminalReason = n
 }
 
 // ---------------------------------------------------------------------------
-// Phase detection logic (mirrors the hook's detectPhase)
-// ---------------------------------------------------------------------------
-
-const PHASE_MARKERS = [
-  { marker: "INVESTIGATION:COMPLETE",  phase: "investigate" },
-  { marker: "INVESTIGATION:INVALID",   phase: "investigate", terminal: true, terminalReason: "invalid" },
-  { marker: "DECOMPOSE:YES",           phase: "investigate", terminal: true, terminalReason: "decomposed" },
-  { marker: "FORGE:CONTEXT",           phase: "context" },
-  { marker: "FORGE:ARCHITECT",         phase: "architect" },
-  { marker: "FORGE:BUILDER:COMPLETE",  phase: "build" },
-  { marker: "FORGE:REVIEWER:MERGED",   phase: "review" },
-  { marker: "workflow:merged",         phase: "close", terminal: true, terminalReason: "merged" },
-];
-
-function detectPhaseFromText(text) {
-  let phaseId = null;
-  let terminalReason = null;
-  for (const { marker, phase, terminal, terminalReason: tr } of PHASE_MARKERS) {
-    if (text.includes(marker)) {
-      phaseId = phase;
-      if (terminal) { terminalReason = tr; break; }
-    }
-  }
-  return { phaseId, terminalReason };
-}
-
-// ---------------------------------------------------------------------------
-// Skill-name-to-phase fallback (mirrors the hook's phaseFromSkill)
-// ---------------------------------------------------------------------------
-
-function phaseFromSkill(skill) {
-  const normalized = String(skill || "").replace(/\//g, ":");
-  const map = {
-    "work-on:investigate": "investigate",
-    "work-on:build:context": "context",
-    "work-on:build:architect": "architect",
-    "work-on:build": "build",
-    "work-on:review": "review",
-    "work-on:close": "close",
-  };
-  return map[normalized] || null;
-}
-
-// ---------------------------------------------------------------------------
 // Flag extraction (mirrors the hook's extractFlag)
+//
+// extractFlag belongs to a different hook, bin/hooks/pre-tool-use.mjs, which
+// does not export it either — out of scope for #1592 (see header note above).
 // ---------------------------------------------------------------------------
 
 function extractFlag(command, flag) {
@@ -285,7 +254,7 @@ describe("detectLane — real nested Claude Code transcript schema (#1580)", () 
   });
 });
 
-describe("phase detection from marker text", () => {
+describe("detectPhaseFromText — real module import (#1592)", () => {
   it("detects investigate from INVESTIGATION:COMPLETE", () => {
     const { phaseId, terminalReason } = detectPhaseFromText("INVESTIGATION:COMPLETE marker found");
     assert.equal(phaseId, "investigate");
@@ -431,7 +400,7 @@ describe("reconcileState — GitHub wins", () => {
   });
 });
 
-describe("phaseFromSkill mapping (issue #1525)", () => {
+describe("phaseFromSkill mapping — real module import (issue #1525, #1592)", () => {
   it("resolves colon-separated skill names to their phase", () => {
     assert.equal(phaseFromSkill("work-on:investigate"), "investigate");
     assert.equal(phaseFromSkill("work-on:build:context"), "context");

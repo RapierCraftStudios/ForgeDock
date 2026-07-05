@@ -5,11 +5,10 @@
  * All tests use fixture data — no live network calls.
  *
  * Covers:
- *   - median() and p90() math across edge cases
- *   - Empty-history path (no closed issues → pointer message)
- *   - Approximate-count labeling when result limit is hit
- *   - Machine-filed percentage computation
- *   - Pipeline-driven (annotated) percentage computation
+ *   - median()/p90()/fmtMinutes() math across edge cases (real module
+ *     import — see #1592)
+ *   - Window filtering, percentage, and approximate-count computation via
+ *     the real computeWindowStats() (real module import — see #1592)
  *   - Shell-injection resistance of ghJson()/isValidGhIdentifier() (real
  *     module import — see #1586)
  *
@@ -25,37 +24,9 @@ import { execFileSync } from "node:child_process";
 import { existsSync, rmSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
-import { isValidGhIdentifier } from "../report.mjs";
+import { isValidGhIdentifier, median, p90, fmtMinutes, computeWindowStats } from "../report.mjs";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
-
-// ---------------------------------------------------------------------------
-// Import the pure helpers directly by re-implementing the inline exports.
-// report.mjs does not export these as named exports to keep the CLI surface
-// minimal, so we duplicate the functions here for isolated unit testing —
-// the source of truth is report.mjs.
-// ---------------------------------------------------------------------------
-
-function median(sorted) {
-  if (!sorted.length) return null;
-  const mid = Math.floor(sorted.length / 2);
-  return sorted.length % 2 !== 0
-    ? sorted[mid]
-    : (sorted[mid - 1] + sorted[mid]) / 2;
-}
-
-function p90(sorted) {
-  if (!sorted.length) return null;
-  const idx = Math.ceil(sorted.length * 0.9) - 1;
-  return sorted[Math.max(0, idx)];
-}
-
-function fmtMinutes(mins) {
-  if (mins === null || mins === undefined) return "n/a";
-  if (mins < 60) return `${Math.round(mins)}m`;
-  if (mins < 1440) return `${Math.round(mins / 60)}h`;
-  return `${Math.round(mins / 1440)}d`;
-}
 
 // ---------------------------------------------------------------------------
 // Fixture helpers
@@ -164,11 +135,15 @@ describe("fmtMinutes", () => {
 });
 
 // ---------------------------------------------------------------------------
-// Tests: stat computation against fixture issues
+// Tests: computeWindowStats() against fixture issues (real module import)
+//
+// These drive the ACTUAL exported computeWindowStats() from report.mjs, not
+// a reimplementation of its filter/count logic — a regression in the real
+// window-filtering, percentage, or approx-flag computation fails these
+// tests. See #1592.
 // ---------------------------------------------------------------------------
 
-describe("stat computation from fixture issues", () => {
-  // Build a fixture set of 10 closed issues
+describe("computeWindowStats — fixture issues", () => {
   const since = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000).toISOString();
 
   const fixtureIssues = [
@@ -185,90 +160,69 @@ describe("stat computation from fixture issues", () => {
     makeClosedIssue(1000, 75),
   ];
 
-  // Filter to window (all are within 30 days in this fixture)
-  const windowIssues = fixtureIssues.filter((i) => i.closedAt >= since);
+  const stats = computeWindowStats({
+    closedIssues: fixtureIssues,
+    mergedPRs: [],
+    since,
+    ghRepo: "test/repo",
+    days: 30,
+  });
 
   it("counts all 10 issues as closed in window", () => {
-    assert.equal(windowIssues.length, 10);
+    assert.equal(stats.issues.closed, 10);
   });
 
   it("counts annotated issues correctly (5 with FORGE: in body)", () => {
-    const annotated = windowIssues.filter(
-      (i) => i.body && (i.body.includes("FORGE:INVESTIGATOR") || i.body.includes("FORGE:TRAJECTORY"))
-    ).length;
-    assert.equal(annotated, 5);
+    assert.equal(stats.issues.annotated, 5);
+    assert.equal(stats.issues.annotatedPct, 50);
   });
 
   it("counts machine-filed issues correctly (2 bots)", () => {
-    const machineFiled = windowIssues.filter((i) => {
-      const t = (i.author?.type || "").toLowerCase();
-      return t === "bot" || (i.author?.login || "").endsWith("[bot]");
-    }).length;
-    assert.equal(machineFiled, 2);
+    assert.equal(stats.issues.machineFiled, 2);
+    assert.equal(stats.issues.machineFiledPct, 20);
   });
 
   it("counts review-finding issues correctly (1)", () => {
-    const reviewFindings = windowIssues.filter((i) =>
-      (i.labels || []).some((l) => l.name === "review-finding")
-    ).length;
-    assert.equal(reviewFindings, 1);
+    assert.equal(stats.issues.reviewFindings, 1);
   });
 
   it("counts workflow:invalid issues correctly (1)", () => {
-    const invalid = windowIssues.filter((i) =>
-      (i.labels || []).some((l) => l.name === "workflow:invalid")
-    ).length;
-    assert.equal(invalid, 1);
+    assert.equal(stats.issues.invalid, 1);
   });
 
-  it("computes time-to-close durations correctly", () => {
-    const ttc = windowIssues
-      .filter((i) => i.createdAt && i.closedAt)
-      .map((i) => (new Date(i.closedAt) - new Date(i.createdAt)) / 60000)
-      .filter((m) => m >= 0)
-      .sort((a, b) => a - b);
-    // All fixture durations in minutes: 5, 10, 30, 45, 60, 75, 90, 120, 150, 200 (sorted)
-    assert.equal(ttc.length, 10);
-    assert.ok(median(ttc) > 0, "median TTC should be positive");
-    assert.ok(p90(ttc) >= median(ttc), "p90 should be >= median");
-  });
-});
-
-// ---------------------------------------------------------------------------
-// Tests: approximate-count labeling
-// ---------------------------------------------------------------------------
-
-describe("approximate count labeling", () => {
-  it("labels counts as approximate when result limit (500) is hit", () => {
-    // Simulate the approx flag logic: closedIssues.length >= 500
-    const approxIssue = 500 >= 500; // true
-    assert.equal(approxIssue, true);
-    const prefix = approxIssue ? "~" : "";
-    assert.equal(prefix, "~");
+  it("computes median/p90 time-to-close from real durations", () => {
+    // Fixture durations in minutes: 5, 10, 30, 45, 60, 75, 90, 120, 150, 200 (sorted)
+    assert.equal(stats.issues.medianTtc, 67.5);
+    assert.equal(stats.issues.p90Ttc, 150);
   });
 
-  it("does not label as approximate when under limit", () => {
-    const approxIssue = 42 >= 500; // false
-    const prefix = approxIssue ? "~" : "";
-    assert.equal(prefix, "");
-  });
-});
-
-// ---------------------------------------------------------------------------
-// Tests: empty history path
-// ---------------------------------------------------------------------------
-
-describe("empty history path", () => {
-  it("detects empty repo (no closed issues) from fixture empty array", () => {
-    const closedIssues = [];
-    const testCheck = closedIssues;
-    // Mirrors the condition in runReport: !testCheck.length → show pointer
-    assert.equal(!testCheck.length, true);
+  it("does not flag the issue count as approximate under the 500 result limit", () => {
+    assert.equal(stats.issues.approx, false);
   });
 
-  it("does not trigger empty path when issues exist", () => {
-    const closedIssues = [{ number: 1 }];
-    assert.equal(!closedIssues.length, false);
+  it("flags the issue count as approximate when the fixture hits the 500 result limit", () => {
+    const bigFixture = new Array(500).fill(null).map((_, i) => makeClosedIssue(i + 1, 10));
+    const bigStats = computeWindowStats({
+      closedIssues: bigFixture,
+      mergedPRs: [],
+      since,
+      ghRepo: "test/repo",
+      days: 30,
+    });
+    assert.equal(bigStats.issues.approx, true);
+  });
+
+  it("returns a zeroed, non-approximate result for an empty closed-issues fixture", () => {
+    const emptyStats = computeWindowStats({
+      closedIssues: [],
+      mergedPRs: [],
+      since,
+      ghRepo: "test/repo",
+      days: 30,
+    });
+    assert.equal(emptyStats.issues.closed, 0);
+    assert.equal(emptyStats.issues.approx, false);
+    assert.equal(emptyStats.issues.medianTtc, null);
   });
 });
 
