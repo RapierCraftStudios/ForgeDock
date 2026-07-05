@@ -350,19 +350,26 @@ function detectPhase(entries) {
 
 /**
  * Map a Skill name to a phase ID.
+ *
+ * Real Skill() invocations use colon-separated names (e.g. "work-on:build:context",
+ * matching the registered skill catalog and commands/work-on/build.md's exception-path
+ * invocations). Some spec prose still uses slash-separated names (e.g. "work-on/build"),
+ * so the input is normalized to colons before lookup — this keeps the fallback working
+ * regardless of which convention a given caller followed (issue #1525).
  * @param {string} skill
  * @returns {string|null}
  */
 function phaseFromSkill(skill) {
+  const normalized = String(skill || "").replace(/\//g, ":");
   const map = {
-    "work-on/investigate": "investigate",
-    "work-on/build/context": "context",
-    "work-on/build/architect": "architect",
-    "work-on/build": "build",
-    "work-on/review": "review",
-    "work-on/close": "close",
+    "work-on:investigate": "investigate",
+    "work-on:build:context": "context",
+    "work-on:build:architect": "architect",
+    "work-on:build": "build",
+    "work-on:review": "review",
+    "work-on:close": "close",
   };
-  return map[skill] || null;
+  return map[normalized] || null;
 }
 
 /**

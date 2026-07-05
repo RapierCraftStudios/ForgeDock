@@ -103,6 +103,23 @@ function detectPhaseFromText(text) {
 }
 
 // ---------------------------------------------------------------------------
+// Skill-name-to-phase fallback (mirrors the hook's phaseFromSkill)
+// ---------------------------------------------------------------------------
+
+function phaseFromSkill(skill) {
+  const normalized = String(skill || "").replace(/\//g, ":");
+  const map = {
+    "work-on:investigate": "investigate",
+    "work-on:build:context": "context",
+    "work-on:build:architect": "architect",
+    "work-on:build": "build",
+    "work-on:review": "review",
+    "work-on:close": "close",
+  };
+  return map[normalized] || null;
+}
+
+// ---------------------------------------------------------------------------
 // Flag extraction (mirrors the hook's extractFlag)
 // ---------------------------------------------------------------------------
 
@@ -268,6 +285,36 @@ describe("reconcileState — GitHub wins", () => {
     const { state, action } = reconcileState(local, remote);
     assert.equal(action, "remirror");
     assert.deepEqual(state.committed, ["investigate", "context"]);
+  });
+});
+
+describe("phaseFromSkill mapping (issue #1525)", () => {
+  it("resolves colon-separated skill names to their phase", () => {
+    assert.equal(phaseFromSkill("work-on:investigate"), "investigate");
+    assert.equal(phaseFromSkill("work-on:build:context"), "context");
+    assert.equal(phaseFromSkill("work-on:build:architect"), "architect");
+    assert.equal(phaseFromSkill("work-on:build"), "build");
+    assert.equal(phaseFromSkill("work-on:review"), "review");
+    assert.equal(phaseFromSkill("work-on:close"), "close");
+  });
+
+  it("normalizes legacy slash-separated skill names before lookup", () => {
+    assert.equal(phaseFromSkill("work-on/investigate"), "investigate");
+    assert.equal(phaseFromSkill("work-on/build/context"), "context");
+    assert.equal(phaseFromSkill("work-on/build/architect"), "architect");
+    assert.equal(phaseFromSkill("work-on/build"), "build");
+    assert.equal(phaseFromSkill("work-on/review"), "review");
+    assert.equal(phaseFromSkill("work-on/close"), "close");
+  });
+
+  it("returns null for unknown skill names", () => {
+    assert.equal(phaseFromSkill("quality-gate"), null);
+    assert.equal(phaseFromSkill("review-pr"), null);
+  });
+
+  it("returns null for empty or missing input", () => {
+    assert.equal(phaseFromSkill(""), null);
+    assert.equal(phaseFromSkill(undefined), null);
   });
 });
 
