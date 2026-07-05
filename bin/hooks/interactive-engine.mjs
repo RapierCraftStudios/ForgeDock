@@ -93,12 +93,22 @@ const PHASE_MARKERS = [
 // Main — fail-open wrapper
 // ---------------------------------------------------------------------------
 
-try {
-  await main();
-} catch (err) {
-  process.stderr.write(`[ForgeDock:interactive-engine] ERROR: ${err.message}\n`);
+// Only auto-run when this file is executed directly as the Claude Code
+// SubagentStop hook — not when it's `import`ed (e.g. by tests, to reuse
+// parseTranscript/detectPhase/detectLane). Without this guard, importing the
+// module for testing would trigger main()'s real gh/git side effects and
+// kill the test process via process.exit(0) (issue #1580).
+const isDirectExecution =
+  !!process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href;
+
+if (isDirectExecution) {
+  try {
+    await main();
+  } catch (err) {
+    process.stderr.write(`[ForgeDock:interactive-engine] ERROR: ${err.message}\n`);
+  }
+  process.exit(0);
 }
-process.exit(0);
 
 async function main() {
   // Read the hook payload from stdin.
@@ -252,7 +262,7 @@ async function main() {
  * Read and parse a JSONL transcript file.
  * Returns an array of transcript entries, or null on error.
  */
-function parseTranscript(transcriptPath) {
+export function parseTranscript(transcriptPath) {
   try {
     const raw = readFileSync(transcriptPath, "utf-8");
     const lines = raw.split("\n").filter((l) => l.trim());
@@ -275,7 +285,7 @@ function parseTranscript(transcriptPath) {
  * @param {object[]} entries
  * @returns {{ issueNumber: number|null, phaseId: string|null, terminalReason: string|null, outputs: object, skillInvoked: boolean, annotationMissing: boolean }}
  */
-function detectPhase(entries) {
+export function detectPhase(entries) {
   let skillName = null;
   let issueNumber = null;
   const foundMarkers = new Set();
@@ -283,39 +293,54 @@ function detectPhase(entries) {
   let skillInvoked = false;
 
   for (const entry of entries) {
-    // Tool use blocks — find Skill invocations.
-    if (entry.type === "tool_use" && entry.name === "Skill") {
-      const input = entry.input || {};
-      if (input.skill) { skillName = input.skill; skillInvoked = true; }
-      // Extract issue number from args (e.g. "1323" or "#1323").
-      if (input.args) {
-        const m = String(input.args).match(/\b(\d{3,6})\b/);
-        if (m) issueNumber = parseInt(m[1], 10);
-      }
-    }
+    // Real Claude Code transcript entries nest role/content under
+    // `entry.message` (e.g. {"type":"assistant","message":{"role":"assistant",
+    // "content":[{"type":"tool_use",...}]}}) — the block-level types
+    // (tool_use/tool_result/text) live inside message.content[], never at
+    // the entry's own top level. Fall back to a flat/legacy shape
+    // (entry.role/entry.content directly) if entry.message is absent, so
+    // any pre-normalized or synthetic transcript still works (issue #1580).
+    const message = entry && typeof entry === "object" && entry.message ? entry.message : entry;
+    const role = message?.role;
+    const contentBlocks = Array.isArray(message?.content) ? message.content : [];
 
-    // Tool result blocks — scan for FORGE markers in gh output.
-    if (entry.type === "tool_result") {
-      const content = Array.isArray(entry.content)
-        ? entry.content.map((c) => (typeof c === "string" ? c : c?.text || "")).join("\n")
-        : String(entry.content || "");
-      for (const { marker } of PHASE_MARKERS) {
-        if (content.includes(marker)) foundMarkers.add(marker);
-      }
-      // Extract PR number if present.
-      const prM = content.match(/"number"\s*:\s*(\d+)/);
-      if (prM) outputs.pr = parseInt(prM[1], 10);
-      // Extract branch from git push output.
-      const branchM = content.match(/(?:refs\/heads\/|branch[:\s]+)([\w\-./]+)/i);
-      if (branchM) outputs.branch = branchM[1];
-    }
+    for (const block of contentBlocks) {
+      if (!block || typeof block !== "object") continue;
 
-    // Also scan assistant message text blocks for FORGE markers.
-    if (entry.role === "assistant" && Array.isArray(entry.content)) {
-      for (const block of entry.content) {
-        const text = block.text || block.content || "";
+      // Tool use blocks — find Skill invocations.
+      if (block.type === "tool_use" && block.name === "Skill") {
+        const input = block.input || {};
+        if (input.skill) { skillName = input.skill; skillInvoked = true; }
+        // Extract issue number from args (e.g. "1323" or "#1323").
+        if (input.args) {
+          const m = String(input.args).match(/\b(\d{3,6})\b/);
+          if (m) issueNumber = parseInt(m[1], 10);
+        }
+      }
+
+      // Tool result blocks — scan for FORGE markers in gh output.
+      if (block.type === "tool_result") {
+        const content = Array.isArray(block.content)
+          ? block.content.map((c) => (typeof c === "string" ? c : c?.text || "")).join("\n")
+          : String(block.content || "");
         for (const { marker } of PHASE_MARKERS) {
-          if (text.includes(marker)) foundMarkers.add(marker);
+          if (content.includes(marker)) foundMarkers.add(marker);
+        }
+        // Extract PR number if present.
+        const prM = content.match(/"number"\s*:\s*(\d+)/);
+        if (prM) outputs.pr = parseInt(prM[1], 10);
+        // Extract branch from git push output.
+        const branchM = content.match(/(?:refs\/heads\/|branch[:\s]+)([\w\-./]+)/i);
+        if (branchM) outputs.branch = branchM[1];
+      }
+
+      // Also scan assistant message text blocks for FORGE markers.
+      if (role === "assistant") {
+        const text = block.text || block.content || "";
+        if (typeof text === "string") {
+          for (const { marker } of PHASE_MARKERS) {
+            if (text.includes(marker)) foundMarkers.add(marker);
+          }
         }
       }
     }
@@ -359,7 +384,7 @@ function detectPhase(entries) {
  * @param {string} skill
  * @returns {string|null}
  */
-function phaseFromSkill(skill) {
+export function phaseFromSkill(skill) {
   const normalized = String(skill || "").replace(/\//g, ":");
   const map = {
     "work-on:investigate": "investigate",
@@ -376,14 +401,22 @@ function phaseFromSkill(skill) {
  * Detect the pipeline lane from transcript tool results.
  * Looks for branch names or milestone labels that imply feature vs staging lane.
  */
-function detectLane(entries) {
+export function detectLane(entries) {
   for (const entry of entries) {
-    if (entry.type !== "tool_result") continue;
-    const content = Array.isArray(entry.content)
-      ? entry.content.map((c) => (typeof c === "string" ? c : c?.text || "")).join("\n")
-      : String(entry.content || "");
-    if (/milestone\//.test(content)) return "feature";
-    if (/staging/.test(content)) return "staging";
+    // Same nested-schema normalization as detectPhase() — tool_result blocks
+    // live under entry.message.content[], not at entry's own top level
+    // (sibling of the #1580 bug: this function had the identical mistake).
+    const message = entry && typeof entry === "object" && entry.message ? entry.message : entry;
+    const contentBlocks = Array.isArray(message?.content) ? message.content : [];
+
+    for (const block of contentBlocks) {
+      if (!block || typeof block !== "object" || block.type !== "tool_result") continue;
+      const content = Array.isArray(block.content)
+        ? block.content.map((c) => (typeof c === "string" ? c : c?.text || "")).join("\n")
+        : String(block.content || "");
+      if (/milestone\//.test(content)) return "feature";
+      if (/staging/.test(content)) return "staging";
+    }
   }
   return null;
 }

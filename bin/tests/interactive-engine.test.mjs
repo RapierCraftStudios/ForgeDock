@@ -17,11 +17,20 @@ import os from "node:os";
 // We re-export them from the hook for testability via a thin adapter below.
 // Since interactive-engine.mjs uses top-level await (main()) and exits,
 // we test its internal logic by reconstructing the key functions here.
+//
+// parseTranscript/detectPhase/detectLane are now `export`ed from the hook
+// (issue #1580), and the hook's top-level main()/process.exit(0) is guarded
+// behind a direct-execution check, so those three are imported and driven
+// directly below against realistic nested Claude Code JSONL fixtures rather
+// than reconstructed. The PHASE_MARKERS/detectPhaseFromText/phaseFromSkill
+// re-implementations further down remain for focused marker-matching and
+// skill-name-normalization unit tests that don't need a transcript at all.
 // ---------------------------------------------------------------------------
 
 import { appendEvent, deriveState, readLog } from "../engine/runlog.mjs";
 import { reconcileState } from "../engine/reconcile.mjs";
 import { serializeState, parseState, upsertStateBlock } from "../engine/state.mjs";
+import { parseTranscript, detectPhase, detectLane } from "../hooks/interactive-engine.mjs";
 
 // ---------------------------------------------------------------------------
 // Helper: simulate what the hook does after detecting a phase
@@ -141,6 +150,140 @@ function extractFlag(command, flag) {
 let dir;
 beforeEach(() => { dir = mkdtempSync(join(os.tmpdir(), "fd-iengine-")); });
 afterEach(() => { rmSync(dir, { recursive: true, force: true }); });
+
+// ---------------------------------------------------------------------------
+// Real nested Claude Code transcript fixtures — drives the ACTUAL exported
+// parseTranscript/detectPhase/detectLane from the hook, not a
+// re-implementation (issue #1580). Real transcript lines nest role/content
+// under `message`, e.g.:
+//   {"type":"assistant","message":{"role":"assistant","content":[
+//     {"type":"tool_use","name":"Skill","input":{...}}]}}
+//   {"type":"user","message":{"role":"user","content":[
+//     {"type":"tool_result","content":[{"type":"text","text":"..."}]}]}}
+// ---------------------------------------------------------------------------
+
+function writeTranscript(dirPath, lines) {
+  const path = join(dirPath, "transcript.jsonl");
+  writeFileSync(path, lines.map((l) => JSON.stringify(l)).join("\n") + "\n", "utf-8");
+  return path;
+}
+
+function assistantToolUse(name, input) {
+  return { type: "assistant", message: { role: "assistant", content: [{ type: "tool_use", name, input }] } };
+}
+
+function userToolResult(text) {
+  return {
+    type: "user",
+    message: { role: "user", content: [{ type: "tool_result", content: [{ type: "text", text }] }] },
+  };
+}
+
+function assistantText(text) {
+  return { type: "assistant", message: { role: "assistant", content: [{ type: "text", text }] } };
+}
+
+describe("detectPhase — real nested Claude Code transcript schema (#1580)", () => {
+  it("detects a Skill invocation and issue number from a nested tool_use block", () => {
+    const path = writeTranscript(dir, [
+      assistantToolUse("Skill", { skill: "work-on:investigate", args: "1580" }),
+      userToolResult("<!-- INVESTIGATION:COMPLETE -->"),
+    ]);
+    const transcript = parseTranscript(path);
+    assert.ok(transcript, "parseTranscript should successfully parse the fixture");
+    const { skillInvoked, issueNumber, phaseId, annotationMissing } = detectPhase(transcript);
+    assert.equal(skillInvoked, true);
+    assert.equal(issueNumber, 1580);
+    assert.equal(phaseId, "investigate");
+    assert.equal(annotationMissing, false);
+  });
+
+  it("extracts FORGE marker from a nested tool_result block, not top-level entry.type", () => {
+    const path = writeTranscript(dir, [
+      assistantToolUse("Skill", { skill: "work-on:build:context", args: "1580" }),
+      userToolResult("<!-- FORGE:CONTEXT -->\nsome gh output\n<!-- FORGE:CONTEXT:COMPLETE -->"),
+    ]);
+    const transcript = parseTranscript(path);
+    const { phaseId, skillInvoked, annotationMissing } = detectPhase(transcript);
+    assert.equal(phaseId, "context");
+    assert.equal(skillInvoked, true);
+    assert.equal(annotationMissing, false);
+  });
+
+  it("extracts FORGE marker from a nested assistant text block", () => {
+    const path = writeTranscript(dir, [
+      assistantToolUse("Skill", { skill: "work-on:build:architect", args: "1580" }),
+      assistantText("Posting the plan now.\n<!-- FORGE:ARCHITECT -->\n...\n<!-- FORGE:ARCHITECT:COMPLETE -->"),
+    ]);
+    const transcript = parseTranscript(path);
+    const { phaseId, annotationMissing } = detectPhase(transcript);
+    assert.equal(phaseId, "architect");
+    assert.equal(annotationMissing, false);
+  });
+
+  it("flags annotationMissing when a Skill runs but no FORGE marker is found", () => {
+    const path = writeTranscript(dir, [
+      assistantToolUse("Skill", { skill: "work-on:build:context", args: "1580" }),
+      userToolResult("no markers here, just noise"),
+    ]);
+    const transcript = parseTranscript(path);
+    const { skillInvoked, annotationMissing, phaseId } = detectPhase(transcript);
+    assert.equal(skillInvoked, true);
+    assert.equal(annotationMissing, true);
+    // Falls back to phaseFromSkill("work-on:build:context") = "context".
+    assert.equal(phaseId, "context");
+  });
+
+  it("extracts PR number and branch from a nested tool_result block", () => {
+    const path = writeTranscript(dir, [
+      assistantToolUse("Skill", { skill: "work-on:review", args: "1580" }),
+      userToolResult('branch refs/heads/fix/thing-1580 pushed\n{"number": 42, "state": "OPEN"}\nFORGE:REVIEWER:MERGED'),
+    ]);
+    const transcript = parseTranscript(path);
+    const { phaseId, outputs } = detectPhase(transcript);
+    assert.equal(phaseId, "review");
+    assert.equal(outputs.pr, 42);
+    assert.match(outputs.branch, /fix\/thing-1580/);
+  });
+
+  it("returns no phase/issue for an unrelated transcript (no Skill, no markers)", () => {
+    const path = writeTranscript(dir, [
+      assistantText("just chatting, nothing relevant"),
+      userToolResult("plain command output"),
+    ]);
+    const transcript = parseTranscript(path);
+    const { skillInvoked, issueNumber, phaseId } = detectPhase(transcript);
+    assert.equal(skillInvoked, false);
+    assert.equal(issueNumber, null);
+    assert.equal(phaseId, null);
+  });
+});
+
+describe("detectLane — real nested Claude Code transcript schema (#1580)", () => {
+  it("detects the feature lane from a nested tool_result mentioning milestone/", () => {
+    const path = writeTranscript(dir, [
+      userToolResult("Creating worktree on milestone/durable-onboarding-engine"),
+    ]);
+    const transcript = parseTranscript(path);
+    assert.equal(detectLane(transcript), "feature");
+  });
+
+  it("detects the staging lane from a nested tool_result mentioning staging", () => {
+    const path = writeTranscript(dir, [
+      userToolResult("git worktree add ... origin/staging"),
+    ]);
+    const transcript = parseTranscript(path);
+    assert.equal(detectLane(transcript), "staging");
+  });
+
+  it("returns null when no lane signal is present", () => {
+    const path = writeTranscript(dir, [
+      userToolResult("no lane info here"),
+    ]);
+    const transcript = parseTranscript(path);
+    assert.equal(detectLane(transcript), null);
+  });
+});
 
 describe("phase detection from marker text", () => {
   it("detects investigate from INVESTIGATION:COMPLETE", () => {
