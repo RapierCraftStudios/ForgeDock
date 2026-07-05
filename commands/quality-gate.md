@@ -246,7 +246,8 @@ Run ONLY the checks whose domain was identified in Step 1.5. Skip checks for dom
 - **2P (External tool config schema)**: Run if `CONFIG_SCHEMA` in DOMAINS
 - **2Q (Billing)**: Run if `BILLING` in DOMAINS
 - **2R (Registry checks)**: ALWAYS run — executes all promoted checks from `scripts/check-registry/manifest.json` <!-- Added: forge#1331 -->
-- **2S (Test failure classification)**: Run if any Step 2 check invoked a test suite and it failed — classifies the failure as PRE_BROKEN, FLAKY, or REAL using `scripts/flaky-quarantine.sh` <!-- Added: forge#1336 -->
+- **2T (Test suite execution)**: ALWAYS run — runs each configured `verification.commands.<lang>.test` command; stack-agnostic <!-- Added: forge#1605 -->
+- **2S (Test failure classification)**: Run if Step 2T (or any future Step 2 check) invoked a test suite and it failed — classifies the failure as PRE_BROKEN, FLAKY, or REAL using `scripts/flaky-quarantine.sh` <!-- Added: forge#1336 -->
 
 ### 2A: Security (ALL files)
 
@@ -1165,11 +1166,60 @@ If any registry check produces findings, include them in the Step 3 findings lis
 
 ---
 
+### 2T: Test suite execution (ALWAYS — runs the target repo's declared test suite)
+
+<!-- Added: forge#1605 -->
+
+**Purpose**: This is the check that makes Step 2S reachable. Every domain check above (2A-2R) inspects source text — none of them actually runs the project's test suite, so the classification protocol in Step 2S has never had a real failure to classify. This check is stack-agnostic and driven entirely by `forge.yaml → verification.commands` — it does not assume Python, Node, or any specific toolchain.
+
+```bash
+cd {WORKTREE_PATH}
+
+TEST_LANGS=$(yq '.verification.commands // {} | keys | .[]' forge.yaml 2>/dev/null || echo '')
+
+if [ -z "$TEST_LANGS" ]; then
+    echo "2T: SKIPPED — verification.commands not configured in forge.yaml (no test key to run)"
+else
+    while IFS= read -r LANG; do
+        [ -z "$LANG" ] && continue
+        TEST_CMD=$(yq ".verification.commands.${LANG}.test // \"\"" forge.yaml 2>/dev/null || echo '')
+
+        if [ -z "$TEST_CMD" ]; then
+            echo "2T: SKIPPED — ${LANG}.test not configured in verification.commands"
+            continue
+        fi
+
+        echo "2T: Running ${LANG}.test: $TEST_CMD"
+        (cd {WORKTREE_PATH} && eval "$TEST_CMD") 2>&1
+        TEST_EXIT=$?
+
+        if [ "$TEST_EXIT" -ne 0 ]; then
+            echo "2T: FAIL — ${LANG}.test exited $TEST_EXIT — handing off to Step 2S for classification"
+            # FAILING_TEST is set to the full re-runnable command, not a parsed individual
+            # test ID — flaky-quarantine.sh re-runs whatever it is given verbatim, and a
+            # single re-runnable command is the only representation that stays stack-agnostic
+            # across pytest/go test/cargo test/node --test/etc.
+            FAILING_TEST="$TEST_CMD"
+            # → Immediately run the Step 2S classification protocol below using this
+            #   FAILING_TEST, with PR_BASE/GH_REPO/PR_ISSUE_NUMBER already in scope for
+            #   this gate invocation. Step 2S decides TEST-REAL (blocking) vs
+            #   TEST-QUARANTINE (non-blocking) — 2T never blocks the gate directly.
+        else
+            echo "2T: PASS — ${LANG}.test"
+        fi
+    done <<< "$TEST_LANGS"
+fi
+```
+
+If any `${LANG}.test` invocation above exited non-zero, proceed to **Step 2S** immediately using `FAILING_TEST="$TEST_CMD"` for that language. Step 2S's classification protocol determines whether the failure blocks the gate (`TEST-REAL | HIGH`) or is recorded as a non-blocking quarantine advisory (`TEST-QUARANTINE | LOW`) — 2T itself makes no blocking decision, it only detects and hands off.
+
+---
+
 ## Step 2S: Test failure classification (run when tests fail in Step 2)
 
 <!-- Added: forge#1336 -->
 
-**Triggered when**: any domain check in Step 2 invokes a test suite command and that command exits non-zero.
+**Triggered when**: Step 2T (above) runs a test suite command and that command exits non-zero. Step 2T is currently the only Step 2 check that invokes a test suite — this section stays written generically ("any domain check") in case a future domain check gains its own test-running capability.
 
 **Why this matters**: Builders and reviewers waste cycles on test failures that pre-exist the PR or are intermittently caused by fixture-state races. A test that fails on both the PR branch and the base branch is *pre-broken* and must not block an unrelated PR. A test that fails then passes on retry is *flaky* and should be quarantined, not "fixed" by the builder.
 

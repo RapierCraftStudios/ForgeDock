@@ -158,6 +158,46 @@ fi
 ```
 Typecheck or build failures are BLOCKING — fix type errors before continuing.
 
+**Test suite** (stack-agnostic — runs every configured `verification.commands.<lang>.test`):
+
+<!-- Added: forge#1605 -->
+
+This is a direct, blocking backstop — unlike `quality-gate.md` Step 2T/2S, it does not classify a failure as pre-existing/flaky vs. real; it simply blocks, exactly like the `py_compile`/typecheck checks above. Runs whenever this phase runs (the module-level Skip Conditions above already exclude 1-file config/docs-only changes).
+
+```bash
+cd {WORKTREE_PATH}
+
+TEST_LANGS=$(yq '.verification.commands // {} | keys | .[]' forge.yaml 2>/dev/null || echo '')
+
+if [ -z "$TEST_LANGS" ]; then
+    echo "SKIPPED — verification.commands not configured in forge.yaml (no test key to run)"
+else
+    while IFS= read -r LANG; do
+        [ -z "$LANG" ] && continue
+        TEST_CMD=$(yq ".verification.commands.${LANG}.test // \"\"" forge.yaml 2>/dev/null || echo '')
+
+        if [ -z "$TEST_CMD" ]; then
+            echo "SKIPPED — ${LANG}.test not configured in verification.commands"
+            SKIPPED_CHECKS="${SKIPPED_CHECKS:+$SKIPPED_CHECKS, }${LANG}.test"
+            continue
+        fi
+
+        echo "Running ${LANG}.test: $TEST_CMD"
+        (cd {WORKTREE_PATH} && eval "$TEST_CMD") 2>&1
+        TEST_EXIT=$?
+
+        if [ "$TEST_EXIT" -ne 0 ]; then
+            echo "TEST SUITE FAILED (${LANG}): exit $TEST_EXIT"
+            TEST_FAILURES="${TEST_FAILURES:+$TEST_FAILURES, }${LANG}"
+        fi
+    done <<< "$TEST_LANGS"
+fi
+```
+
+**Test failures are BLOCKING**:
+- If the failure is caused by the change just made in this build (a broken test in a changed module): fix it in `{WORKTREE_PATH}` and re-run this step before continuing.
+- If the failure cannot be resolved in-place (e.g. it appears unrelated to this change): do NOT silently pass. Escalate exactly like V1-FAIL — post a `## Test Suite Failed` comment naming `$TEST_FAILURES` and the failing command(s), add `needs-human`, set `GATE_PASSED: false`, and STOP.
+
 **Shell scripts**: Verify service interactions — read target middleware files, document what was verified in V4 summary.
 
 **Markdown / config files**: No format step required.
@@ -356,8 +396,12 @@ VALIDATE_RESULT:
   commits_added: [{SHA}, ...]  # from V5 if any
   blocker: {description if gate_passed=false}
   verification_skipped: []  # empty when all configured checks ran; list of skipped check names otherwise
-                            # e.g. ["python.format", "typescript.typecheck/build"]
+                            # e.g. ["python.format", "typescript.typecheck/build", "rust.test"]
                             # populated from SKIPPED_CHECKS in Phase V2
+  test_failures: []         # empty when all configured verification.commands.*.test runs passed;
+                            # list of language keys whose test command exited non-zero otherwise
+                            # (e.g. ["python", "go"]) — populated from TEST_FAILURES in Phase V2.
+                            # Any non-empty value here means gate_passed: false and blocker is set.
 ```
 
 ---
