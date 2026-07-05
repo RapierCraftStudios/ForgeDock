@@ -1,6 +1,6 @@
 import { describe, it, mock } from "node:test";
 import assert from "node:assert/strict";
-import { scanStalls, resumeStalledFromCli } from "../engine-cli.mjs";
+import { scanStalls, resumeStalledFromCli, runFromCli } from "../engine-cli.mjs";
 import { serializeState } from "../engine/state.mjs";
 
 /** Builds a fake io.gh that serves `issue list` (only for `label`) and `issue view` (state) calls. */
@@ -175,5 +175,102 @@ describe("resumeStalledFromCli", () => {
 
     assert.deepEqual(result, { stalled: [], dispatched: [], failed: [] });
     assert.equal(dispatch.mock.callCount(), 0);
+  });
+
+  // forge#1593: --repo must be validated against the cwd-resolved repo before
+  // any state I/O — otherwise it silently reads/writes FORGE:STATE in the
+  // wrong repo (only the `issue list` enumeration ever honored --repo).
+  describe("--repo targeting guard", () => {
+    /** Fake gh that answers `repo view` with `currentRepo` and everything else with empty results. */
+    function makeRepoAwareIo(currentRepo) {
+      const calls = [];
+      return {
+        calls,
+        gh: async (args) => {
+          calls.push(args);
+          if (args[0] === "repo" && args[1] === "view") return `${currentRepo}\n`;
+          if (args[0] === "issue" && args[1] === "list") return JSON.stringify([]);
+          throw new Error(`unexpected gh call: ${args.join(" ")}`);
+        },
+      };
+    }
+
+    it("throws before any issue enumeration when --repo mismatches the cwd-resolved repo", async () => {
+      const io = makeRepoAwareIo("acme/other-repo");
+      const dispatch = mock.fn(async () => ({ terminalReason: "workflow:merged" }));
+
+      await assert.rejects(
+        resumeStalledFromCli(["--lane", "staging", "--repo", "acme/target-repo"], { io, dispatch }),
+        /does not match the current repo/,
+      );
+
+      // Only the `repo view` verification call happened — no enumeration, no dispatch.
+      assert.deepEqual(io.calls.map((c) => c.slice(0, 2)), [["repo", "view"]]);
+      assert.equal(dispatch.mock.callCount(), 0);
+    });
+
+    it("proceeds normally when --repo matches the cwd-resolved repo", async () => {
+      const io = makeRepoAwareIo("acme/target-repo");
+      const dispatch = mock.fn(async () => ({ terminalReason: "workflow:merged" }));
+
+      const result = await resumeStalledFromCli(
+        ["--lane", "staging", "--repo", "acme/target-repo"],
+        { io, dispatch },
+      );
+
+      assert.deepEqual(result, { stalled: [], dispatched: [], failed: [] });
+    });
+
+    it("does not call `gh repo view` at all when --repo is omitted", async () => {
+      const io = makeRepoAwareIo("acme/target-repo");
+      const dispatch = mock.fn(async () => ({ terminalReason: "workflow:merged" }));
+
+      await resumeStalledFromCli(["--lane", "staging"], { io, dispatch });
+
+      assert.ok(!io.calls.some((c) => c[0] === "repo" && c[1] === "view"));
+    });
+  });
+});
+
+describe("runFromCli --repo targeting guard", () => {
+  /** Fake gh that answers `repo view` with `currentRepo`. */
+  function makeRepoAwareIo(currentRepo) {
+    return {
+      gh: async (args) => {
+        if (args[0] === "repo" && args[1] === "view") return `${currentRepo}\n`;
+        throw new Error(`unexpected gh call: ${args.join(" ")}`);
+      },
+    };
+  }
+
+  it("throws before invoking runIssue when --repo mismatches the cwd-resolved repo", async () => {
+    const io = makeRepoAwareIo("acme/other-repo");
+    const runIssue = mock.fn(async () => ({ terminalReason: "workflow:merged" }));
+
+    await assert.rejects(
+      runFromCli(["42", "--lane", "staging", "--repo", "acme/target-repo"], { io, runIssue }),
+      /does not match the current repo/,
+    );
+    assert.equal(runIssue.mock.callCount(), 0);
+  });
+
+  it("invokes runIssue when --repo matches the cwd-resolved repo", async () => {
+    const io = makeRepoAwareIo("acme/target-repo");
+    const runIssue = mock.fn(async () => ({ terminalReason: "workflow:merged" }));
+
+    const res = await runFromCli(["42", "--lane", "staging", "--repo", "acme/target-repo"], { io, runIssue });
+
+    assert.equal(runIssue.mock.callCount(), 1);
+    assert.equal(res.terminalReason, "workflow:merged");
+  });
+
+  it("skips the repo-view check entirely when --repo is omitted", async () => {
+    const io = { gh: async () => { throw new Error("should not be called"); } };
+    const runIssue = mock.fn(async () => ({ terminalReason: "workflow:merged" }));
+
+    const res = await runFromCli(["42", "--lane", "staging"], { io, runIssue });
+
+    assert.equal(runIssue.mock.callCount(), 1);
+    assert.equal(res.terminalReason, "workflow:merged");
   });
 });
