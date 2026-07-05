@@ -64,15 +64,24 @@ export async function runFromCli(argv) {
  *   --lane      Lane to pass to run-issue (required — no default to prevent accidental production targeting).
  *   --repo      GitHub repo (owner/repo). Defaults to the repo inferred by gh.
  *
- * Exit codes: 0 on success or dry-run. Non-zero on dispatch error.
+ * Per-issue dispatch failures are caught and isolated — one issue's engine error
+ * (e.g. NO_API_KEY/NO_SDK or any other uncaught phase error from runIssue) does
+ * not abort dispatch of the remaining stalled issues in the batch. Failures are
+ * recorded in the returned `failed` array; the caller decides how to surface them.
+ *
+ * @param {string[]} argv
+ * @param {{io?: {gh: Function}, dispatch?: (argv: string[]) => Promise<any>}} [deps]
+ *   Injectable for tests — defaults to real `gh`/`git` (makeIo()) and the real
+ *   `runFromCli` dispatcher.
  */
-export async function resumeStalledFromCli(argv) {
+export async function resumeStalledFromCli(argv, deps = {}) {
   const dryRun = argv.includes("--dry-run");
   const lane   = flag(argv, "--lane");
   if (!lane) throw new Error("--lane is required for resume-stalled: e.g. --lane main or --lane staging.");
   const repo   = flag(argv, "--repo");
 
-  const io = makeIo();
+  const io = deps.io ?? makeIo();
+  const dispatch = deps.dispatch ?? runFromCli;
   const projector = makeProjector(io);
   const now = Date.now();
 
@@ -106,7 +115,7 @@ export async function resumeStalledFromCli(argv) {
 
   if (issueSet.size === 0) {
     console.log("resume-stalled: no in-flight issues found.");
-    return { stalled: [], dispatched: [] };
+    return { stalled: [], dispatched: [], failed: [] };
   }
 
   const candidates = [...issueSet];
@@ -114,24 +123,37 @@ export async function resumeStalledFromCli(argv) {
 
   if (stalled.length === 0) {
     console.log("resume-stalled: all in-flight issues have active leases — nothing stalled.");
-    return { stalled: [], dispatched: [] };
+    return { stalled: [], dispatched: [], failed: [] };
   }
 
   console.log(`resume-stalled: ${stalled.length} stalled issue(s) found: ${stalled.map((n) => `#${n}`).join(", ")}`);
 
   if (dryRun) {
     console.log("resume-stalled: --dry-run — not dispatching.");
-    return { stalled, dispatched: [] };
+    return { stalled, dispatched: [], failed: [] };
   }
 
   const dispatched = [];
+  const failed = [];
   for (const issue of stalled) {
     console.log(`resume-stalled: dispatching #${issue} …`);
-    await runFromCli([String(issue), "--lane", lane, ...(repo ? ["--repo", repo] : [])]);
-    dispatched.push(issue);
+    try {
+      await dispatch([String(issue), "--lane", lane, ...(repo ? ["--repo", repo] : [])]);
+      dispatched.push(issue);
+    } catch (err) {
+      console.error(`resume-stalled: #${issue} failed: ${err.message}`);
+      failed.push({ issue, error: err.message });
+    }
   }
 
-  return { stalled, dispatched };
+  if (failed.length > 0) {
+    console.log(
+      `resume-stalled: ${dispatched.length} dispatched, ${failed.length} failed: ` +
+        `${failed.map((f) => `#${f.issue}`).join(", ")}`,
+    );
+  }
+
+  return { stalled, dispatched, failed };
 }
 
 function flag(argv, name) { const i = argv.indexOf(name); return i >= 0 ? argv[i + 1] : null; }
