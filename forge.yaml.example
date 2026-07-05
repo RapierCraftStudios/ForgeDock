@@ -442,6 +442,30 @@ branches:
 #   #     test: "cargo test"
 #   #     build: "cargo build"
 #
+#   # Declared CLI entrypoints and their boot/load-smoke commands.
+#   # Used by: quality-gate (ENTRYPOINT domain, Step 2V), work-on/build/validate
+#   #          (Phase V2 boot/load smoke — direct blocking backstop)
+#   #
+#   # For Node/JS projects, `package.json → bin` targets are auto-detected as
+#   # entrypoints with no config needed here — a `node <file> --help` smoke runs
+#   # by default. Declare `entrypoints` explicitly when: (a) your stack has no
+#   # equivalent auto-detected manifest (Python, Go, Rust, ...), or (b) the
+#   # default `--help` invocation is not the right smoke command for a given file.
+#   #
+#   # Each entry lists the entrypoint file path(s) (relative to project root) and
+#   # the shell command that should exit 0 when the entrypoint boots/loads cleanly.
+#   # A non-zero exit blocks the gate — this is the JS/stack-agnostic analogue of
+#   # `py_compile` plus an actual load smoke (catches import-time crashes that a
+#   # syntax check alone would miss).
+#   #
+#   # entrypoints:
+#   #   - files: ["bin/forgedock.mjs"]
+#   #     command: "node bin/forgedock.mjs --help"
+#   #   - files: ["app/main.py"]
+#   #     command: "python -m app.main --help"
+#   #   - files: ["cmd/server/main.go"]
+#   #     command: "go run ./cmd/server --help"
+#
 #   # Integration test suites run by /test-gate against the provisioned cluster.
 #   # Each entry specifies a logical cluster (matched to test_services), the shell
 #   # command to execute, and the working directory (relative to project root).

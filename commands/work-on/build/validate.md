@@ -198,6 +198,92 @@ fi
 - If the failure is caused by the change just made in this build (a broken test in a changed module): fix it in `{WORKTREE_PATH}` and re-run this step before continuing.
 - If the failure cannot be resolved in-place (e.g. it appears unrelated to this change): do NOT silently pass. Escalate exactly like V1-FAIL — post a `## Test Suite Failed` comment naming `$TEST_FAILURES` and the failing command(s), add `needs-human`, set `GATE_PASSED: false`, and STOP.
 
+**JS/Node syntax + entrypoint boot smoke** (JS analogue of `py_compile` above — universal, direct blocking backstop mirroring the test-suite pairing with `quality-gate.md` Step 2T/2S above):
+
+<!-- Added: forge#1606 -->
+
+```bash
+cd {WORKTREE_PATH}
+
+JS_FILES=$(echo {CHANGED_FILES} | tr ' ' '\n' | grep -E '\.(mjs|js)$')
+
+if [ -z "$JS_FILES" ]; then
+    echo "SKIPPED — no .mjs/.js files changed (no runtime surface for this check)"
+else
+    while IFS= read -r f; do
+        [ -z "$f" ] && continue
+        node --check "$f" 2>&1
+        if [ $? -ne 0 ]; then
+            echo "NODE --CHECK FAILED: $f"
+            JS_SYNTAX_FAILURES="${JS_SYNTAX_FAILURES:+$JS_SYNTAX_FAILURES, }$f"
+        fi
+    done <<< "$JS_FILES"
+fi
+```
+`node --check` failures are BLOCKING — fix the syntax error before continuing (same treatment as a `py_compile` failure above).
+
+Entrypoint **load smoke** runs additionally when a changed `.mjs`/`.js` file is a declared CLI entrypoint (`package.json → bin` target, auto-detected; or `forge.yaml → verification.entrypoints[].files`), OR this build's own `FORGE:CONTRACT` comment declares `**Task type**: Refactor` (a refactor of any changed file, not just entrypoints, is exactly the class of change that produced the #1500/#1578 import-time crash this check targets):
+
+```bash
+cd {WORKTREE_PATH}
+
+# Resolve declared entrypoints: package.json bin targets + forge.yaml verification.entrypoints
+BIN_TARGETS=""
+if [ -f package.json ]; then
+    BIN_TARGETS=$(node -e '
+        try {
+            const pkg = require(process.argv[1]);
+            const bin = pkg.bin;
+            if (!bin) process.exit(0);
+            const vals = typeof bin === "string" ? [bin] : Object.values(bin);
+            console.log(vals.join("\n"));
+        } catch (e) {}
+    ' "$(pwd)/package.json" 2>/dev/null || true)
+fi
+FORGE_ENTRYPOINTS=$(yq '.verification.entrypoints[].files[]' forge.yaml 2>/dev/null | grep -v '^null$' || true)
+ALL_ENTRYPOINTS=$(printf '%s\n%s\n' "$BIN_TARGETS" "$FORGE_ENTRYPOINTS" | grep -v '^[[:space:]]*$' | sort -u)
+
+# Refactor signal — this build's own FORGE:CONTRACT comment (already posted by build.md
+# Phase B2 before this validate phase ever runs) declares the task type.
+IS_REFACTOR=$(gh api repos/{GH_REPO}/issues/{NUMBER}/comments --jq '.[] | select(.body | contains("FORGE:CONTRACT")) | .body' 2>/dev/null | grep -iE '\*\*Task type\*\*:[[:space:]]*Refactor' || true)
+
+SMOKE_TARGETS=""
+IFS=' ' read -ra CHANGED_FILES_ARR <<< "{CHANGED_FILES}"
+for f in "${CHANGED_FILES_ARR[@]}"; do
+    case "$f" in
+        *.mjs|*.js)
+            if echo "$ALL_ENTRYPOINTS" | grep -qxF "$f" || [ -n "$IS_REFACTOR" ]; then
+                SMOKE_TARGETS="${SMOKE_TARGETS}${f}"$'\n'
+            fi
+            ;;
+    esac
+done
+
+if [ -z "$SMOKE_TARGETS" ]; then
+    echo "SKIPPED — no declared entrypoint or refactor-flagged .mjs/.js files in this change (no boot smoke required)"
+else
+    while IFS= read -r f; do
+        [ -z "$f" ] && continue
+        SMOKE_CMD=$(yq ".verification.entrypoints[] | select(.files[] == \"$f\") | .command" forge.yaml 2>/dev/null | grep -v '^null$' | head -1)
+        [ -z "$SMOKE_CMD" ] && SMOKE_CMD="node $f --help"
+        echo "Running load smoke for $f: $SMOKE_CMD"
+        SMOKE_OUTPUT=$(eval "$SMOKE_CMD" 2>&1)
+        SMOKE_EXIT=$?
+        if [ "$SMOKE_EXIT" -ne 0 ]; then
+            echo "ENTRYPOINT SMOKE FAILED ($SMOKE_EXIT): $f"
+            echo "$SMOKE_OUTPUT"
+            ENTRYPOINT_FAILURES="${ENTRYPOINT_FAILURES:+$ENTRYPOINT_FAILURES, }$f"
+        fi
+    done <<< "$SMOKE_TARGETS"
+fi
+```
+
+**Entrypoint smoke failures are BLOCKING**:
+- If the failure is caused by the change just made in this build: fix it in `{WORKTREE_PATH}` and re-run this step before continuing.
+- If it cannot be resolved in-place: escalate exactly like the test-suite failure above — post a `## Entrypoint Smoke Failed` comment naming `$ENTRYPOINT_FAILURES` and the failing command(s), add `needs-human`, set `GATE_PASSED: false`, and STOP.
+
+Docs/config-only changes (a diff containing no `.mjs`/`.js` files) never reach either block above — `JS_FILES`/`SMOKE_TARGETS` are empty and both log `SKIPPED`, matching the module's own Skip Conditions for pure docs/config edits.
+
 **Shell scripts**: Verify service interactions — read target middleware files, document what was verified in V4 summary.
 
 **Markdown / config files**: No format step required.
@@ -402,6 +488,13 @@ VALIDATE_RESULT:
                             # list of language keys whose test command exited non-zero otherwise
                             # (e.g. ["python", "go"]) — populated from TEST_FAILURES in Phase V2.
                             # Any non-empty value here means gate_passed: false and blocker is set.
+  js_syntax_failures: []    # empty when node --check passed for every changed .mjs/.js file;
+                            # list of file paths that failed otherwise — populated from
+                            # JS_SYNTAX_FAILURES in Phase V2. Non-empty means gate_passed: false.
+  entrypoint_smoke_failures: []  # empty when every declared-entrypoint/refactor-flagged
+                            # .mjs/.js file's load smoke exited 0; list of file paths that
+                            # failed otherwise — populated from ENTRYPOINT_FAILURES in Phase
+                            # V2. Non-empty means gate_passed: false. <!-- Added: forge#1606 -->
 ```
 
 ---

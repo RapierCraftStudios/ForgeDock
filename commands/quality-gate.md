@@ -53,6 +53,7 @@ This quality gate uses **domain detection** to adapt to your project's actual te
 | FORGE_GRAPH | `commands/*.md` specs or `scripts/*` files change (ForgeDock self-consistency) |
 | CONFIG_SCHEMA | Config files for external tools (`traefik/`, `infra/nginx/`, `k8s/`, `terraform/`, `*.conf`, `*.toml` in infra paths, or `docker-compose*.yml` with service definition changes) |
 | BILLING | Files under `billing/`, `credits/`, `subscription`, `ledger`, or `payment` paths |
+| ENTRYPOINT | Files matching a declared CLI entrypoint — `package.json → bin` targets (auto-detected), or paths listed in `forge.yaml → verification.entrypoints[].files` <!-- Added: forge#1606 --> |
 
 **Stack-agnostic coverage**: The example domains above reflect common patterns caught in production; they are not requirements. A Go or Ruby project benefits from SECURITY checks. A Node.js project benefits from FRONTEND, PROXY, and DEPLOY checks. Any project benefits from DATABASE and WORKFLOW checks when those file types are present. The stack-specific examples (Python routers, SOPS secrets chain, FastAPI layouts, appleboy SSH deploys) are illustrative — the domain detection system applies the applicable subset to any codebase.
 
@@ -107,6 +108,7 @@ Before running checks, classify the changed files into domains. This avoids runn
 | `*.py` in `routers/` where the diff removes a line containing an or-gate condition (lines starting with `-` containing `if.*or`) | ROUTER_BUG |
 | `commands/*.md` or `scripts/*` files (ForgeDock repo only — dogfoods its own spec graph) | FORGE_GRAPH |
 | Files under `traefik/`, `infra/nginx/`, `k8s/`, `terraform/`, or files matching `*.conf`, `*.toml` in infra paths, or `docker-compose*.yml` with service definition changes | CONFIG_SCHEMA |
+| Files matching a `package.json → bin` target, or paths listed in `forge.yaml → verification.entrypoints[].files` | ENTRYPOINT *(see 2V)* <!-- Added: forge#1606 --> |
 
 **Apply the classification:**
 
@@ -212,6 +214,30 @@ for f in "${CHANGED_FILES_ARR[@]}"; do
     esac
 done
 
+# Check for declared CLI entrypoint files — package.json bin targets (auto-detected
+# for Node/JS projects) plus forge.yaml verification.entrypoints (stack-agnostic
+# fallback for non-Node projects). Silent/zero-cost when neither is configured.
+# <!-- Added: forge#1606 -->
+_BIN_TARGETS=""
+if [ -f "{WORKTREE_PATH}/package.json" ]; then
+    _BIN_TARGETS=$(node -e '
+        try {
+            const pkg = require(process.argv[1]);
+            const bin = pkg.bin;
+            if (!bin) process.exit(0);
+            const vals = typeof bin === "string" ? [bin] : Object.values(bin);
+            console.log(vals.join("\n"));
+        } catch (e) {}
+    ' "{WORKTREE_PATH}/package.json" 2>/dev/null || true)
+fi
+_FORGE_ENTRYPOINTS=$(yq '.verification.entrypoints[].files[]' "{WORKTREE_PATH}/forge.yaml" 2>/dev/null | grep -v '^null$' || true)
+_ALL_ENTRYPOINTS=$(printf '%s\n%s\n' "$_BIN_TARGETS" "$_FORGE_ENTRYPOINTS" | grep -v '^[[:space:]]*$' | sort -u)
+if [ -n "$_ALL_ENTRYPOINTS" ]; then
+    for f in "${CHANGED_FILES_ARR[@]}"; do
+        echo "$_ALL_ENTRYPOINTS" | grep -qxF "$f" && DOMAINS="$DOMAINS ENTRYPOINT" && break
+    done
+fi
+
 # SECURITY is always included for any code file
 DOMAINS="SECURITY $DOMAINS"
 
@@ -248,6 +274,8 @@ Run ONLY the checks whose domain was identified in Step 1.5. Skip checks for dom
 - **2R (Registry checks)**: ALWAYS run — executes all promoted checks from `scripts/check-registry/manifest.json` <!-- Added: forge#1331 -->
 - **2T (Test suite execution)**: ALWAYS run — runs each configured `verification.commands.<lang>.test` command; stack-agnostic <!-- Added: forge#1605 -->
 - **2S (Test failure classification)**: Run if Step 2T (or any future Step 2 check) invoked a test suite and it failed — classifies the failure as PRE_BROKEN, FLAKY, or REAL using `scripts/flaky-quarantine.sh` <!-- Added: forge#1336 -->
+- **2U (Test-subject import linkage)**: ALWAYS run — for each changed test-named file, asserts it statically imports (or otherwise references) its resolved subject module; stack-agnostic <!-- Added: forge#1606 -->
+- **2V (Entrypoint boot/load smoke)**: Run if `ENTRYPOINT` in DOMAINS — runs a syntax check plus a load smoke for declared CLI entrypoints <!-- Added: forge#1606 -->
 
 ### 2A: Security (ALL files)
 
@@ -1307,6 +1335,150 @@ The manifest is append-only. Duplicate entries (same test already quarantined) a
 
 ---
 
+### 2U: Test-subject import linkage (ALWAYS — catches test theater)
+
+<!-- Added: forge#1606 -->
+
+**Why this matters**: Step 2T/2S run the declared test suite and classify failures, but neither inspects whether a test's *source* actually exercises the module it claims to test. A test can pass cleanly while asserting tautologies against a locally-reimplemented copy of the subject's logic — the suite is green, but nothing about the real implementation was verified. This class of bug is not caught by running the suite; it requires reading the test file itself. The check below is intentionally a stack-agnostic grep heuristic (consistent with 2J/2M/2O elsewhere in this file), not a full AST import resolver.
+
+This check fires whenever a changed file matches a common test-naming convention (`*.test.*`, `*_test.*`, `test_*.*`) — it does not depend on any domain flag.
+
+```bash
+cd {WORKTREE_PATH}
+
+while IFS= read -r f; do
+    [ -z "$f" ] && continue
+    BASENAME=$(basename "$f")
+    EXT="${BASENAME##*.}"
+
+    # Strip common test-naming markers to recover the candidate subject basename.
+    # No marker matched → SUBJECT_BASE stays identical to BASENAME → not a test file, skip.
+    SUBJECT_BASE=$(echo "$BASENAME" \
+        | sed -E "s/\.test\.${EXT}\$//; s/_test\.${EXT}\$//; s/^test_//; s/\.${EXT}\$//")
+    [ "$SUBJECT_BASE" = "$BASENAME" ] && continue
+
+    # Resolve the subject file: same basename, anywhere in the tree, excluding test dirs
+    # and the test file itself. If more than one candidate exists, or none exist, this
+    # check cannot confidently identify a subject — skip rather than guess wrong (avoids
+    # false positives, per the acceptance criterion on legitimate fixture imports).
+    SUBJECT_FILE=$(git ls-files 2>/dev/null \
+        | grep -E "(^|/)${SUBJECT_BASE}\.[A-Za-z0-9]+\$" \
+        | grep -vE '(^|/)(tests?|__tests__)/' \
+        | grep -vF "$f")
+    SUBJECT_COUNT=$(echo "$SUBJECT_FILE" | grep -cv '^$')
+    [ "$SUBJECT_COUNT" -ne 1 ] && continue
+    SUBJECT_FILE=$(echo "$SUBJECT_FILE" | head -1)
+
+    # Coarse signal: does the test reference the subject basename on ANY
+    # import/require/from/use line at all? Not anchored to line-start — multi-line
+    # import statements put the `from "...";` clause on a continuation line prefixed
+    # by `}` (e.g. `} from "../foo.mjs";`), which a start-anchored pattern would miss.
+    HAS_IMPORT=$(grep -nE '(import|require\(|from |use )' "$f" 2>/dev/null | grep -F "$SUBJECT_BASE")
+    if [ -z "$HAS_IMPORT" ]; then
+        echo "TEST-THEATER | MEDIUM | $f | No static import/require of resolved subject module $SUBJECT_FILE found on any import line — verify this test exercises the real implementation, not a local reimplementation"
+        continue
+    fi
+
+    # Fine-grained signal: the test PARTIALLY imports the subject but locally redefines
+    # a name that is ALSO a top-level definition in the subject file — exported OR not.
+    # Using ALL definitions (not just exports) matters: a function can be reimplemented
+    # in a test specifically BECAUSE it isn't exported yet — that's still theater; the
+    # correct fix is to export it and import it, not to keep a local copy. Scoped
+    # strictly to the resolved subject's own definitions (not any name anywhere in the
+    # repo) — a locally-defined helper that happens to share a name with an unrelated
+    # file's private helper is NOT a finding. A short denylist of universal ESM/CJS
+    # boilerplate identifiers (__dirname, __filename) is excluded — those collide
+    # between nearly any two Node modules and carry no signal.
+    BOILERPLATE_NAMES="__dirname|__filename|__proto__"
+    SUBJECT_DEFS=$(grep -E '^(export )?(async )?function [A-Za-z_$][A-Za-z0-9_$]*|^(export )?const [A-Za-z_$][A-Za-z0-9_$]*[[:space:]]*=|^def [A-Za-z_][A-Za-z0-9_]*' \
+        "$SUBJECT_FILE" 2>/dev/null \
+        | sed -E 's/^(export )?(async )?function[[:space:]]+([A-Za-z_$][A-Za-z0-9_$]*).*/\3/; s/^(export )?const[[:space:]]+([A-Za-z_$][A-Za-z0-9_$]*)[[:space:]]*=.*/\2/; s/^def[[:space:]]+([A-Za-z_][A-Za-z0-9_]*).*/\1/' \
+        | grep -vE "^(${BOILERPLATE_NAMES})\$" | sort -u)
+    LOCAL_DEFS=$(grep -E '^(export )?(async )?function [A-Za-z_$][A-Za-z0-9_$]*|^(export )?const [A-Za-z_$][A-Za-z0-9_$]*[[:space:]]*=|^def [A-Za-z_][A-Za-z0-9_]*' \
+        "$f" 2>/dev/null \
+        | sed -E 's/^(export )?(async )?function[[:space:]]+([A-Za-z_$][A-Za-z0-9_$]*).*/\3/; s/^(export )?const[[:space:]]+([A-Za-z_$][A-Za-z0-9_$]*)[[:space:]]*=.*/\2/; s/^def[[:space:]]+([A-Za-z_][A-Za-z0-9_]*).*/\1/' \
+        | grep -vE "^(${BOILERPLATE_NAMES})\$" | sort -u)
+
+    while IFS= read -r name; do
+        [ -z "$name" ] && continue
+        echo "$LOCAL_DEFS" | grep -qxF "$name" && \
+            echo "TEST-THEATER | MEDIUM | $f | Locally redefines '$name', which is also a top-level definition in $SUBJECT_FILE — the test may be exercising its own copy instead of the real implementation. Import '$name' from $SUBJECT_FILE instead of redefining it (export it first if it isn't already)."
+    done <<< "$SUBJECT_DEFS"
+done < <(echo {CHANGED_FILES} | tr ' ' '\n')
+```
+
+**Flag as findings**:
+- No static import of the resolved subject anywhere in the test file: **MEDIUM** — the test may not exercise the real implementation at all.
+- Test locally redefines a name that its own resolved subject file also defines (exported or not): **MEDIUM** — the test likely exercises a local copy instead of the real implementation, even though the file imports something else from the same subject.
+
+**Regression guard** (false-positive prevention):
+- Skips entirely when no test-naming convention matches the changed file's basename (not a test file)
+- Skips entirely when zero or multiple candidate subject files are found (ambiguous — never guesses)
+- The "locally redefines" signal is scoped to the *resolved subject's own* top-level definitions only — a helper that shares a name with a private function in some unrelated file is not flagged
+- A small denylist (`__dirname`, `__filename`, `__proto__`) excludes universal ESM/CJS boilerplate that would otherwise collide between almost any two Node modules
+
+---
+
+### 2V: Entrypoint boot/load smoke (declared CLI entrypoints)
+
+<!-- Added: forge#1606 -->
+
+**Triggered when**: `ENTRYPOINT` domain is set (a changed file matches a declared CLI entrypoint — see Step 1.5).
+
+**Why this matters**: `py_compile` (Python) is the only "does this file load" check anywhere in the pipeline — there is no equivalent for `.mjs`/`.js` or any other stack. An entrypoint can have a syntax error, or crash at import time (e.g. a temporal-dead-zone reference, a top-level throw, a broken dynamic import) with no gate that would catch it before the change ships. `node --check` catches syntax errors; only actually loading/invoking the entrypoint catches import-time crashes.
+
+```bash
+cd {WORKTREE_PATH}
+
+IFS=' ' read -ra CHANGED_FILES_ARR <<< "{CHANGED_FILES}"
+
+for f in "${CHANGED_FILES_ARR[@]}"; do
+    case "$f" in
+        *.mjs|*.js)
+            node --check "$f" 2>&1
+            if [ $? -ne 0 ]; then
+                echo "ENTRYPOINT-1 | HIGH | $f | node --check failed — syntax error in declared entrypoint"
+            fi
+            ;;
+    esac
+done
+
+# Load smoke: actually invoke the declared entrypoint's start command. Prefers a
+# per-entrypoint command declared in forge.yaml; falls back to `node <file> --help`
+# for JS/Node bins with no declared command.
+for f in "${CHANGED_FILES_ARR[@]}"; do
+    echo "$_ALL_ENTRYPOINTS" | grep -qxF "$f" || continue
+
+    SMOKE_CMD=$(yq ".verification.entrypoints[] | select(.files[] == \"$f\") | .command" forge.yaml 2>/dev/null | grep -v '^null$' | head -1)
+    if [ -z "$SMOKE_CMD" ]; then
+        case "$f" in
+            *.mjs|*.js) SMOKE_CMD="node $f --help" ;;
+        esac
+    fi
+
+    if [ -z "$SMOKE_CMD" ]; then
+        echo "2V: no smoke command resolvable for $f — declare verification.entrypoints[].command in forge.yaml for this stack"
+        continue
+    fi
+
+    echo "2V: running load smoke for $f: $SMOKE_CMD"
+    SMOKE_OUTPUT=$(eval "$SMOKE_CMD" 2>&1)
+    SMOKE_EXIT=$?
+    if [ "$SMOKE_EXIT" -ne 0 ]; then
+        echo "ENTRYPOINT-2 | HIGH | $f | Load smoke failed (exit $SMOKE_EXIT) via '$SMOKE_CMD' — entrypoint crashes on boot/import:"
+        echo "$SMOKE_OUTPUT"
+    fi
+done
+```
+
+**Flag as findings**:
+- `node --check` (or the declared stack's syntax check) fails: **HIGH** — guaranteed parse failure, will crash on every invocation.
+- Load smoke command exits non-zero: **HIGH** — the entrypoint fails to boot/import even though it parses; this is the class of bug `py_compile`-only coverage misses entirely for non-Python entrypoints.
+
+**Regression guard**: files with no runtime surface (`.md`, `.yml`, docs/config) never match the `ENTRYPOINT` domain trigger and never reach this check — see Step 1.5.
+
+---
+
 ## Step 3: Compile findings
 
 Format findings as a structured list:
@@ -1327,6 +1499,8 @@ OR:
 6. SHELL-1 | HIGH | deploy.sh | Hardcoded 'localhost' in DB connection function — use ${POSTGRES_HOST:-localhost} pattern
 7. INFRA-1 | HIGH | Dockerfile | Filesystem write ops found under named volume mount — add chown before privilege drop in entrypoint
 8. ROUTER-1 | HIGH | routers/handler.py | Residual unfixed gate condition pattern found in sibling router file routers/other_handler.py:N — fix may be incomplete across all callers
+9. TEST-THEATER | MEDIUM | tests/foo.test.mjs | Locally redefines 'bar', which src/foo.mjs also exports — test may be exercising its own copy instead of the real implementation
+10. ENTRYPOINT-2 | HIGH | bin/cli.mjs | Load smoke failed (exit 1) via 'node bin/cli.mjs --help' — entrypoint crashes on boot/import
 ```
 
 **Severity classification:**
