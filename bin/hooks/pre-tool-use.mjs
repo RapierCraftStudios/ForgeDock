@@ -261,37 +261,98 @@ function checkLabelTransition(command) {
 // ---------------------------------------------------------------------------
 
 /**
+ * Split a shell command string into argv-like tokens, honoring single and
+ * double quotes so that quoted argument values (e.g. `--title "..."`) are
+ * never split apart or scanned as separate tokens.
+ *
+ * This is intentionally NOT a full POSIX shell parser — it doesn't handle
+ * escapes, `$()`, backticks, or command chaining. It only needs to be
+ * accurate enough to distinguish "a flag in argument position" from
+ * "flag-shaped text embedded inside a different argument's value", which is
+ * all `extractFlag` needs (issue #1519).
+ *
+ * @param {string} command
+ * @returns {string[]}
+ */
+function tokenizeCommand(command) {
+  const tokens = [];
+  let current = "";
+  let inSingle = false;
+  let inDouble = false;
+
+  for (let i = 0; i < command.length; i++) {
+    const ch = command[i];
+
+    if (inSingle) {
+      if (ch === "'") inSingle = false;
+      else current += ch;
+      continue;
+    }
+
+    if (inDouble) {
+      if (ch === '"') inDouble = false;
+      else current += ch;
+      continue;
+    }
+
+    if (ch === "'") {
+      inSingle = true;
+      continue;
+    }
+
+    if (ch === '"') {
+      inDouble = true;
+      continue;
+    }
+
+    if (/\s/.test(ch)) {
+      if (current.length > 0) {
+        tokens.push(current);
+        current = "";
+      }
+      continue;
+    }
+
+    current += ch;
+  }
+
+  if (current.length > 0) tokens.push(current);
+  return tokens;
+}
+
+/**
  * Extract the value of a CLI flag from a command string.
  * Handles both `--flag value` and `--flag=value` forms.
+ *
+ * Tokenizes the command first (see `tokenizeCommand`) and matches the flag
+ * against actual argv tokens — NOT against substrings anywhere in the raw
+ * command string. This prevents flag-shaped text inside a quoted argument
+ * value (e.g. `--title "Fix -B main thread bug"`) from being misread as a
+ * real flag (issue #1519).
  *
  * @param {string} command
  * @param {string} flag  e.g. "--base" or "-B"
  * @returns {string|null}
  */
 function extractFlag(command, flag) {
-  // --flag=value form
-  const eqRe = new RegExp(`${escapeRegExp(flag)}=([^\\s"']+|"[^"]*"|'[^']*')`);
-  const eqM = command.match(eqRe);
-  if (eqM) return stripQuotes(eqM[1]);
+  const tokens = tokenizeCommand(command);
+  const eqPrefix = `${flag}=`;
 
-  // --flag value form (value is the next non-flag token)
-  const spaceRe = new RegExp(`${escapeRegExp(flag)}\\s+([^-\\s"'][^\\s"']*|"[^"]*"|'[^']*')`);
-  const spaceM = command.match(spaceRe);
-  if (spaceM) return stripQuotes(spaceM[1]);
+  for (let i = 0; i < tokens.length; i++) {
+    const token = tokens[i];
+
+    // --flag=value form
+    if (token.startsWith(eqPrefix)) {
+      return token.slice(eqPrefix.length);
+    }
+
+    // --flag value form (value is the next token)
+    if (token === flag) {
+      return i + 1 < tokens.length ? tokens[i + 1] : null;
+    }
+  }
 
   return null;
-}
-
-function stripQuotes(s) {
-  if (!s) return s;
-  if ((s.startsWith('"') && s.endsWith('"')) || (s.startsWith("'") && s.endsWith("'"))) {
-    return s.slice(1, -1);
-  }
-  return s;
-}
-
-function escapeRegExp(s) {
-  return s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
 function isTerminalLabel(label) {
