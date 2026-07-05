@@ -261,9 +261,21 @@ function checkLabelTransition(command) {
 // ---------------------------------------------------------------------------
 
 /**
+ * @typedef {Object} CommandToken
+ * @property {string} value    The token text, with surrounding quotes removed.
+ * @property {boolean} quoted  True if ANY character of this token originated
+ *                             inside single or double quotes.
+ */
+
+/**
  * Split a shell command string into argv-like tokens, honoring single and
  * double quotes so that quoted argument values (e.g. `--title "..."`) are
  * never split apart or scanned as separate tokens.
+ *
+ * Each token carries a `quoted` flag recording whether any of its characters
+ * came from inside quotes. `extractFlag` uses this to refuse to interpret a
+ * quoted argument value as a flag when doing so would be ambiguous (the
+ * equals and attached forms) — see the note on `extractFlag` (issue #1519).
  *
  * This is intentionally NOT a full POSIX shell parser — it doesn't handle
  * escapes, `$()`, backticks, or command chaining. It only needs to be
@@ -272,11 +284,12 @@ function checkLabelTransition(command) {
  * all `extractFlag` needs (issue #1519).
  *
  * @param {string} command
- * @returns {string[]}
+ * @returns {CommandToken[]}
  */
 function tokenizeCommand(command) {
   const tokens = [];
   let current = "";
+  let quoted = false;
   let inSingle = false;
   let inDouble = false;
 
@@ -297,26 +310,29 @@ function tokenizeCommand(command) {
 
     if (ch === "'") {
       inSingle = true;
+      quoted = true;
       continue;
     }
 
     if (ch === '"') {
       inDouble = true;
+      quoted = true;
       continue;
     }
 
     if (/\s/.test(ch)) {
       if (current.length > 0) {
-        tokens.push(current);
-        current = "";
+        tokens.push({ value: current, quoted });
       }
+      current = "";
+      quoted = false;
       continue;
     }
 
     current += ch;
   }
 
-  if (current.length > 0) tokens.push(current);
+  if (current.length > 0) tokens.push({ value: current, quoted });
   return tokens;
 }
 
@@ -338,6 +354,18 @@ function tokenizeCommand(command) {
  * (issue #1550). The attached-form check is scoped to 2-character single-dash
  * flags so long flags (`--base`) are never affected.
  *
+ * QUOTING RULE: the equals form (`-B=value`) and the attached form (`-Bvalue`)
+ * are honored ONLY on unquoted tokens. Both match a token by prefix, so a
+ * quoted argument value that merely STARTS with the flag text — e.g. an
+ * attacker-controlled `--title "-Bstaging is fine"` or `--title "-B=staging"`
+ * — must not be mistaken for the flag. If it were, extraction would
+ * short-circuit on the decoy and return before reaching a real forbidden
+ * `-B main` later in the command, silently bypassing the block. This is the
+ * issue #1519 bug class (flag-shaped text inside a quoted value) in the
+ * under-blocking direction. The exact form (`token === flag`) stays
+ * quote-insensitive: a fully-quoted `"-B"` in flag position is unambiguously
+ * the flag, and its value is the next token regardless of quoting.
+ *
  * @param {string} command
  * @param {string} flag  e.g. "--base" or "-B"
  * @returns {string|null}
@@ -348,16 +376,22 @@ function extractFlag(command, flag) {
   const isShortFlag = flag.length === 2 && flag[0] === "-" && flag[1] !== "-";
 
   for (let i = 0; i < tokens.length; i++) {
-    const token = tokens[i];
+    const { value: token, quoted } = tokens[i];
+
+    // --flag value form (value is the next token). Quote-insensitive: an exact
+    // token match is unambiguous even when the flag itself was quoted.
+    if (token === flag) {
+      return i + 1 < tokens.length ? tokens[i + 1].value : null;
+    }
+
+    // Prefix-based forms below must not fire on quoted argument values — a
+    // quoted decoy that starts with the flag text would otherwise short-circuit
+    // extraction and hide a real forbidden flag later in the command (#1519).
+    if (quoted) continue;
 
     // --flag=value form (also covers the equals form of a short flag, e.g. -B=value)
     if (token.startsWith(eqPrefix)) {
       return token.slice(eqPrefix.length);
-    }
-
-    // --flag value form (value is the next token)
-    if (token === flag) {
-      return i + 1 < tokens.length ? tokens[i + 1] : null;
     }
 
     // -Bvalue attached form (single-dash short flags only, e.g. -Bmain)
