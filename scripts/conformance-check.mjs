@@ -35,10 +35,20 @@
  *   handling of unknown/unreserved annotation types). Delegating avoids a second,
  *   independently-drifting parser (see #1521 — a prior standalone regex here diverged
  *   from the library and rejected valid `TYPE:COMPLETE` sentinels as new annotations).
+ *
+ *   PARTIAL sentinel exception: `validate()` reports `valid: false` for an annotation
+ *   explicitly marked `:PARTIAL` — that strictness (§3.2 "MUST NOT treat as complete")
+ *   is correct for library consumers deciding whether data is safe to consume, and is
+ *   locked in by packages/protocol/test/validate.test.mjs and fixtures/context-partial.json.
+ *   This CLI's pass/fail gate is a narrower question ("should CI exit non-zero for this
+ *   input?") and, consistent with its pre-#1521 behavior, treats an explicit PARTIAL as
+ *   a WARN, not a failure — the producer was honest about the interruption (§3.3). Only
+ *   a fully missing/interrupted sentinel (no COMPLETE, no PARTIAL) fails the exit code.
  */
 
 import { readFileSync } from "fs";
 import { parse, validate } from "../packages/protocol/src/index.js";
+import { SentinelState } from "../packages/protocol/src/types.js";
 
 // ── Line-number recovery ──────────────────────────────────────────────────────
 //
@@ -119,10 +129,21 @@ for (const [idx, body] of commentBodies.entries()) {
 
     const prefix = `[comment ${idx + 1}, line ${ann.startLine}] FORGE:${ann.type}`;
 
-    if (errors.length === 0 && warnings.length === 0) {
+    // An explicit PARTIAL sentinel is an honest producer signal (§3.3), not a silent
+    // contract violation — demote validate()'s PARTIAL-specific error out of this CLI's
+    // exit-code tally. validate() already emits an equivalent entry in `warnings` for
+    // PARTIAL annotations, so dropping the error here (rather than re-printing it) avoids
+    // duplicate WARN lines for the same condition. Any other error on the same annotation
+    // (missing required field, bad enum value, etc.) is unaffected and still fails.
+    const hardErrors =
+      ann.sentinelState === SentinelState.PARTIAL
+        ? errors.filter((e) => !/is marked PARTIAL/.test(e))
+        : errors;
+
+    if (hardErrors.length === 0 && warnings.length === 0) {
       console.log(`PASS  ${prefix}`);
     } else {
-      for (const v of errors) {
+      for (const v of hardErrors) {
         console.error(`FAIL  ${prefix} — ${v}`);
         totalViolations++;
       }
