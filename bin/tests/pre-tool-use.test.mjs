@@ -11,10 +11,36 @@ import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import { join, resolve, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
+import { mkdtempSync, rmSync, writeFileSync as writeFileSyncTop } from "node:fs";
+import osTop from "node:os";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
 const HOOK_PATH = resolve(__dirname, "..", "hooks", "pre-tool-use.mjs");
+
+/**
+ * Create a fresh temp directory that IS a ForgeDock-managed project (has a
+ * `forge.yaml`), for project-scope-guard tests. Caller must clean up.
+ * @returns {string} absolute path to the managed directory
+ */
+function makeManagedDir() {
+  const dir = mkdtempSync(join(osTop.tmpdir(), "fd-ptu-managed-"));
+  writeFileSyncTop(join(dir, "forge.yaml"), "project:\n  owner: test\n  repo: test\n", "utf-8");
+  return dir;
+}
+
+/**
+ * Shared managed directory used as the DEFAULT cwd for all hook subprocess
+ * tests below (via runHook()'s default). This repo's checked-out worktree
+ * does not itself contain a forge.yaml (it's gitignored), so a synthetic
+ * managed directory is required for the existing pre-#1591 test suite to
+ * keep exercising enforcement by default — only the explicit "unmanaged
+ * directory" test below overrides `cwd` to a directory with no forge.yaml.
+ */
+const DEFAULT_MANAGED_DIR = makeManagedDir();
+process.on("exit", () => {
+  try { rmSync(DEFAULT_MANAGED_DIR, { recursive: true, force: true }); } catch { /* best effort */ }
+});
 
 // ---------------------------------------------------------------------------
 // Re-implement the pure logic from the hook for unit testing without spawning.
@@ -45,15 +71,20 @@ function checkPrTarget(command) {
 
 // ---------------------------------------------------------------------------
 // Helper: run the hook script as a subprocess with a JSON payload on stdin.
-// Returns { exitCode, stdout, stderr }.
+// Returns { exitCode, stdout, stderr }. Accepts an optional `cwd` so tests
+// can exercise the project-scope guard (issue #1591) — defaults to
+// DEFAULT_MANAGED_DIR, a synthetic directory with a forge.yaml so existing
+// tests keep exercising enforcement without depending on this repo's own
+// (gitignored) forge.yaml being present in the checkout.
 // ---------------------------------------------------------------------------
 
-function runHook(payload) {
+function runHook(payload, opts = {}) {
   const result = spawnSync(process.execPath, [HOOK_PATH], {
     input: JSON.stringify(payload),
     encoding: "utf-8",
     timeout: 5000,
     env: { ...process.env, NODE_OPTIONS: "" },
+    cwd: opts.cwd || DEFAULT_MANAGED_DIR,
   });
   return {
     exitCode: result.status ?? -1,
@@ -107,6 +138,13 @@ describe("checkPrTarget — pure logic", () => {
     const msg = checkPrTarget("gh pr create --base MAIN --title foo");
     assert.ok(msg);
   });
+
+  // Issue #1591 — quoted-value equals form must still be recognized.
+  it('handles quoted-value equals form --base="main"', () => {
+    const msg = checkPrTarget('gh pr create --base="main" --title foo');
+    assert.ok(msg);
+    assert.match(msg, /main/);
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -133,23 +171,23 @@ describe("pre-tool-use hook — subprocess", () => {
   });
 
   it("exits 2 and prints BLOCKED for gh pr create --base main", () => {
-    const { exitCode, stdout } = runHook({
+    const { exitCode, stderr } = runHook({
       hook_event_name: "PreToolUse",
       tool_name: "Bash",
       tool_input: { command: "gh pr create --base main --title foo" },
     });
     assert.equal(exitCode, 2);
-    assert.match(stdout, /BLOCKED/);
+    assert.match(stderr, /BLOCKED/);
   });
 
   it("exits 2 for --base=master", () => {
-    const { exitCode, stdout } = runHook({
+    const { exitCode, stderr } = runHook({
       hook_event_name: "PreToolUse",
       tool_name: "Bash",
       tool_input: { command: "gh pr create --base=master --title foo" },
     });
     assert.equal(exitCode, 2);
-    assert.match(stdout, /BLOCKED/);
+    assert.match(stderr, /BLOCKED/);
   });
 
   it("exits 0 for gh pr create --base staging", () => {
@@ -192,7 +230,7 @@ describe("pre-tool-use hook — subprocess", () => {
   });
 
   it("still exits 2 for a real -B main flag alongside quoted args (#1519)", () => {
-    const { exitCode, stdout } = runHook({
+    const { exitCode, stderr } = runHook({
       hook_event_name: "PreToolUse",
       tool_name: "Bash",
       tool_input: {
@@ -200,7 +238,7 @@ describe("pre-tool-use hook — subprocess", () => {
       },
     });
     assert.equal(exitCode, 2);
-    assert.match(stdout, /BLOCKED/);
+    assert.match(stderr, /BLOCKED/);
   });
 
   // -------------------------------------------------------------------------
@@ -211,23 +249,23 @@ describe("pre-tool-use hook — subprocess", () => {
   // -------------------------------------------------------------------------
 
   it("exits 2 and prints BLOCKED for attached short-flag form -Bmain (#1550)", () => {
-    const { exitCode, stdout } = runHook({
+    const { exitCode, stderr } = runHook({
       hook_event_name: "PreToolUse",
       tool_name: "Bash",
       tool_input: { command: "gh pr create -Bmain --title foo" },
     });
     assert.equal(exitCode, 2);
-    assert.match(stdout, /BLOCKED/);
+    assert.match(stderr, /BLOCKED/);
   });
 
   it("exits 2 for attached short-flag form -Bmaster (#1550)", () => {
-    const { exitCode, stdout } = runHook({
+    const { exitCode, stderr } = runHook({
       hook_event_name: "PreToolUse",
       tool_name: "Bash",
       tool_input: { command: "gh pr create -Bmaster --title foo" },
     });
     assert.equal(exitCode, 2);
-    assert.match(stdout, /BLOCKED/);
+    assert.match(stderr, /BLOCKED/);
   });
 
   it("exits 0 for attached short-flag form targeting an allowed base -Bstaging (#1550)", () => {
@@ -248,7 +286,7 @@ describe("pre-tool-use hook — subprocess", () => {
   // -------------------------------------------------------------------------
 
   it("still exits 2 when a quoted --title decoy starts with -B but a real -B main follows (attached-form decoy)", () => {
-    const { exitCode, stdout } = runHook({
+    const { exitCode, stderr } = runHook({
       hook_event_name: "PreToolUse",
       tool_name: "Bash",
       tool_input: {
@@ -256,11 +294,11 @@ describe("pre-tool-use hook — subprocess", () => {
       },
     });
     assert.equal(exitCode, 2);
-    assert.match(stdout, /BLOCKED/);
+    assert.match(stderr, /BLOCKED/);
   });
 
   it("still exits 2 when a quoted --title decoy starts with -B= but a real -B main follows (equals-form decoy)", () => {
-    const { exitCode, stdout } = runHook({
+    const { exitCode, stderr } = runHook({
       hook_event_name: "PreToolUse",
       tool_name: "Bash",
       tool_input: {
@@ -268,11 +306,11 @@ describe("pre-tool-use hook — subprocess", () => {
       },
     });
     assert.equal(exitCode, 2);
-    assert.match(stdout, /BLOCKED/);
+    assert.match(stderr, /BLOCKED/);
   });
 
   it("still exits 2 when a quoted --body decoy precedes a real -Bmain attached flag", () => {
-    const { exitCode, stdout } = runHook({
+    const { exitCode, stderr } = runHook({
       hook_event_name: "PreToolUse",
       tool_name: "Bash",
       tool_input: {
@@ -280,7 +318,7 @@ describe("pre-tool-use hook — subprocess", () => {
       },
     });
     assert.equal(exitCode, 2);
-    assert.match(stdout, /BLOCKED/);
+    assert.match(stderr, /BLOCKED/);
   });
 
   it("exits 0 when a quoted --body decoy starts with -Bmain but the real base is staging (no false over-block)", () => {
@@ -292,6 +330,100 @@ describe("pre-tool-use hook — subprocess", () => {
       },
     });
     assert.equal(exitCode, 0);
+  });
+
+  // -------------------------------------------------------------------------
+  // Regression tests for issue #1591 — the quoted-flag bypass. A single-word
+  // token that was quoted (with no embedded whitespace) is functionally
+  // identical to its unquoted form once the shell hands it to `gh`, so it
+  // must be blocked the same way. Previously, `tokenizeCommand`'s whole-token
+  // `quoted` boolean (true if ANY character was quoted) caused `extractFlag`
+  // to skip these forms entirely.
+  // -------------------------------------------------------------------------
+
+  it('exits 2 for a quoted-value equals form --base="main" (#1591)', () => {
+    const { exitCode, stderr } = runHook({
+      hook_event_name: "PreToolUse",
+      tool_name: "Bash",
+      tool_input: { command: 'gh pr create --base="main" --title foo' },
+    });
+    assert.equal(exitCode, 2);
+    assert.match(stderr, /BLOCKED/);
+    assert.match(stderr, /main/);
+  });
+
+  it('exits 2 for a fully-quoted equals form "--base=main" (#1591)', () => {
+    const { exitCode, stderr } = runHook({
+      hook_event_name: "PreToolUse",
+      tool_name: "Bash",
+      tool_input: { command: 'gh pr create "--base=main" --title foo' },
+    });
+    assert.equal(exitCode, 2);
+    assert.match(stderr, /BLOCKED/);
+    assert.match(stderr, /main/);
+  });
+
+  it('exits 2 for a fully-quoted attached short-flag form "-Bmain" (#1591)', () => {
+    const { exitCode, stderr } = runHook({
+      hook_event_name: "PreToolUse",
+      tool_name: "Bash",
+      tool_input: { command: 'gh pr create "-Bmain" --title foo' },
+    });
+    assert.equal(exitCode, 2);
+    assert.match(stderr, /BLOCKED/);
+    assert.match(stderr, /main/);
+  });
+
+  it('still exits 0 for a fully-quoted attached short-flag form targeting an allowed base "-Bstaging" (#1591, no over-block)', () => {
+    const { exitCode } = runHook({
+      hook_event_name: "PreToolUse",
+      tool_name: "Bash",
+      tool_input: { command: 'gh pr create "-Bstaging" --title foo' },
+    });
+    assert.equal(exitCode, 0);
+  });
+
+  // -------------------------------------------------------------------------
+  // Regression tests for the project-scope guard (issue #1591). The hook
+  // installs into the user's global ~/.claude/settings.json, so it must
+  // no-op entirely outside a ForgeDock-managed directory (one with a
+  // forge.yaml or .forgedock marker) rather than enforcing pipeline rules
+  // in every repo on the machine.
+  // -------------------------------------------------------------------------
+
+  it("exits 0 (no-op) for a forbidden PR base when cwd is NOT a ForgeDock-managed directory (#1591)", () => {
+    const unmanagedDir = mkdtempSync(join(osTop.tmpdir(), "fd-ptu-unmanaged-"));
+    try {
+      const { exitCode } = runHook(
+        {
+          hook_event_name: "PreToolUse",
+          tool_name: "Bash",
+          tool_input: { command: "gh pr create --base main --title foo" },
+        },
+        { cwd: unmanagedDir },
+      );
+      assert.equal(exitCode, 0);
+    } finally {
+      rmSync(unmanagedDir, { recursive: true, force: true });
+    }
+  });
+
+  it("still exits 2 for a forbidden PR base when cwd IS a ForgeDock-managed directory (#1591)", () => {
+    const managedDir = makeManagedDir();
+    try {
+      const { exitCode, stderr } = runHook(
+        {
+          hook_event_name: "PreToolUse",
+          tool_name: "Bash",
+          tool_input: { command: "gh pr create --base main --title foo" },
+        },
+        { cwd: managedDir },
+      );
+      assert.equal(exitCode, 2);
+      assert.match(stderr, /BLOCKED/);
+    } finally {
+      rmSync(managedDir, { recursive: true, force: true });
+    }
   });
 
   it("exits 0 for non-PreToolUse events (wrong event type)", () => {
@@ -337,7 +469,7 @@ import {
   SUBAGENT_STOP_MARKER,
   PRE_TOOL_USE_MARKER,
 } from "../settings-hook.mjs";
-import { mkdtempSync, writeFileSync, readFileSync, rmSync } from "node:fs";
+import { writeFileSync, readFileSync } from "node:fs";
 import os from "node:os";
 
 describe("settings-hook — SubagentStop wiring", () => {
@@ -402,6 +534,20 @@ describe("settings-hook — PreToolUse wiring", () => {
     const parsed = JSON.parse(readFileSync(settingsPath, "utf-8"));
     assert.ok(Array.isArray(parsed.hooks.PreToolUse));
     assert.match(JSON.stringify(parsed.hooks.PreToolUse), /pre-tool-use\.mjs/);
+    after();
+  });
+
+  // Issue #1591 — the installed entry must carry matcher: "Bash" so Claude
+  // Code's harness skips spawning this hook for non-Bash tool calls.
+  it('installs PreToolUse hook with matcher: "Bash" (#1591)', () => {
+    before();
+    installPreToolUseHook(settingsPath, "/fake/pre-tool-use.mjs");
+    const parsed = JSON.parse(readFileSync(settingsPath, "utf-8"));
+    const entry = parsed.hooks.PreToolUse.find((e) =>
+      JSON.stringify(e).includes(PRE_TOOL_USE_MARKER),
+    );
+    assert.ok(entry, "expected to find the installed PreToolUse entry");
+    assert.equal(entry.matcher, "Bash");
     after();
   });
 
