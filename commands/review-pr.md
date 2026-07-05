@@ -23,7 +23,7 @@ allowed-tools: Task, Bash, Read, Grep, Glob, WebFetch, Skill
 
 2. **Post the FORGE:REVIEW verdict regardless of finding severity.** A review that completes but posts no `<!-- FORGE:REVIEW -->` comment is invisible to the pipeline. Even a PASS verdict must be posted.
 
-3. **Review findings are NOT merge blockers** (unless build errors). File review findings as GitHub issues with `review-finding` label. The PR merges after review. Only compilation failures block merge.
+3. **Review findings do NOT block merge UNLESS they meet the Blocking Criteria in §7B** (a CONFIRMED HIGH/CRITICAL finding, a purpose regression, a merge conflict, or a build/type/test failure). File every finding as a GitHub issue with the `review-finding` label regardless of severity. Minor/style findings never block; §7B's blocking conditions always do — including under `--auto-merge`.
 
 4. **Route correctly at Phase 0.** If the input is "staging" or the PR targets `main`, invoke `Skill("review-pr-staging", ...)` — do NOT run the standard PR review pipeline against a staging→main PR.
 
