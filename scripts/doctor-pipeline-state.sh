@@ -114,6 +114,20 @@ hours_since() {
 }
 
 # ---------------------------------------------------------------------------
+# Utility: does a JSON array of label names contain any TERMINAL_LABELS entry?
+# ---------------------------------------------------------------------------
+has_terminal_label() {
+  local labels_json="$1"
+  local label
+  for label in $TERMINAL_LABELS; do
+    if echo "$labels_json" | jq -e --arg l "$label" 'index($l) != null' >/dev/null 2>&1; then
+      return 0
+    fi
+  done
+  return 1
+}
+
+# ---------------------------------------------------------------------------
 # Findings accumulator
 # ---------------------------------------------------------------------------
 FINDINGS_JSON="[]"
@@ -150,10 +164,14 @@ add_finding() {
 INVESTIGATING=$(gh issue list $GH_FLAG \
   --state open --label "workflow:investigating" \
   --limit 100 \
-  --json number,title,updatedAt 2>/dev/null || echo "[]")
+  --json number,title,updatedAt,labels 2>/dev/null || echo "[]")
 
 while IFS= read -r row; do
   num=$(echo "$row" | jq -r '.number')
+  labels=$(echo "$row" | jq -c '[.labels[].name]')
+  if has_terminal_label "$labels"; then
+    continue
+  fi
   updated=$(echo "$row" | jq -r '.updatedAt')
   hours=$(hours_since "$updated")
   if [ "$hours" -ge "$STUCK_HOURS" ]; then
@@ -172,10 +190,14 @@ done < <(echo "$INVESTIGATING" | jq -c '.[]')
 BUILDING=$(gh issue list $GH_FLAG \
   --state open --label "workflow:building" \
   --limit 100 \
-  --json number,title,updatedAt 2>/dev/null || echo "[]")
+  --json number,title,updatedAt,labels 2>/dev/null || echo "[]")
 
 while IFS= read -r row; do
   num=$(echo "$row" | jq -r '.number')
+  labels=$(echo "$row" | jq -c '[.labels[].name]')
+  if has_terminal_label "$labels"; then
+    continue
+  fi
   updated=$(echo "$row" | jq -r '.updatedAt')
   hours=$(hours_since "$updated")
   if [ "$hours" -ge "$STUCK_HOURS" ]; then
@@ -194,10 +216,14 @@ done < <(echo "$BUILDING" | jq -c '.[]')
 IN_REVIEW=$(gh issue list $GH_FLAG \
   --state open --label "workflow:in-review" \
   --limit 100 \
-  --json number,title,updatedAt 2>/dev/null || echo "[]")
+  --json number,title,updatedAt,labels 2>/dev/null || echo "[]")
 
 while IFS= read -r row; do
   num=$(echo "$row" | jq -r '.number')
+  labels=$(echo "$row" | jq -c '[.labels[].name]')
+  if has_terminal_label "$labels"; then
+    continue
+  fi
   updated=$(echo "$row" | jq -r '.updatedAt')
   hours=$(hours_since "$updated")
   if [ "$hours" -ge "$STUCK_HOURS" ]; then
@@ -215,10 +241,15 @@ done < <(echo "$IN_REVIEW" | jq -c '.[]')
 # ---------------------------------------------------------------------------
 while IFS= read -r row; do
   num=$(echo "$row" | jq -r '.number')
-  # Check for FORGE:BUILDER annotation in issue comments
-  has_builder=$(gh issue view "$num" $GH_FLAG \
+  # Check for FORGE:BUILDER annotation in issue comments.
+  # Distinguish a confirmed-absent annotation from a gh API failure (rate limit,
+  # network blip, auth issue) — an API failure must NOT be treated as confirmed-missing.
+  if ! has_builder=$(gh issue view "$num" $GH_FLAG \
     --json comments \
-    --jq '[.comments[].body | contains("FORGE:BUILDER")] | any' 2>/dev/null || echo "false")
+    --jq '[.comments[].body | contains("FORGE:BUILDER")] | any' 2>&1); then
+    echo "WARNING: gh issue view failed for #$num — I4 check inconclusive, skipping (not treated as missing): $has_builder" >&2
+    continue
+  fi
   if [ "$has_builder" = "false" ]; then
     add_finding \
       "missing_annotation" "critical" \
@@ -234,11 +265,16 @@ done < <(echo "$BUILDING" | jq -c '.[]')
 # ---------------------------------------------------------------------------
 while IFS= read -r row; do
   num=$(echo "$row" | jq -r '.number')
-  pr_count=$(gh pr list $GH_FLAG \
+  # Distinguish a confirmed-absent PR from a gh API failure (rate limit, network
+  # blip, auth issue) — an API failure must NOT be treated as confirmed-missing.
+  if ! pr_count=$(gh pr list $GH_FLAG \
     --state open \
     --search "closes #$num" \
     --json number \
-    --jq '. | length' 2>/dev/null || echo 0)
+    --jq '. | length' 2>&1); then
+    echo "WARNING: gh pr list failed for #$num — I5 check inconclusive, skipping (not treated as missing): $pr_count" >&2
+    continue
+  fi
   if [ "$pr_count" -eq 0 ]; then
     add_finding \
       "missing_pr" "critical" \
