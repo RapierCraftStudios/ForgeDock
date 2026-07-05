@@ -20,13 +20,30 @@ name: Deploy Gate Marker Check
 # a `created_at` comparison against the PR's head commit timestamp. This avoids
 # requiring a scheduled workflow with PR number state.
 #
-# Trust model: a gate marker only counts if its author has `admin` or `maintain`
-# permission on the repo (checked via the collaborator-permission API) — an
-# arbitrary commenter (e.g. an external contributor who can comment but cannot
-# push/merge) cannot forge a passing gate by hand-typing the marker text.
-# Residual risk (accepted, out of scope): an account that already has
-# admin/maintain permission could still forge its own marker — that account
-# already has push/merge rights and this check cannot constrain it further.
+# Trust model: a gate marker only counts if its author's GitHub login appears in
+# the `FORGE_TRUSTED_MARKER_AUTHORS` repository variable (Settings → Actions →
+# Variables → New repository variable), a comma-separated allowlist of logins
+# that legitimately run /review-pr-staging. An arbitrary commenter (e.g. an
+# external contributor who can comment but is not in the allowlist) cannot
+# forge a passing gate by hand-typing the marker text.
+#
+# IMPORTANT — operator setup required: if `FORGE_TRUSTED_MARKER_AUTHORS` is
+# unset or empty, NO marker is trusted and every staging→main PR will be
+# treated as a gate bypass after the 30-minute window. Set this variable to
+# the GitHub login(s) that run /review-pr-staging before relying on this gate.
+#
+# Why a repo variable and not a live permission-API lookup: GET
+# /repos/{owner}/{repo}/collaborators/{username}/permission requires push/admin
+# access from the calling token, which the default GITHUB_TOKEN does not have
+# under this workflow's minimal `permissions:` block — and there is no
+# `administration` scope available in the `permissions:` key to grant it. A
+# lookup-based design would fail closed on every author, permanently blocking
+# all staging→main deploys. Reading `vars.*` requires no extra token scope, so
+# the allowlist is the reliable mechanism.
+#
+# Residual risk (accepted, out of scope): an account already in the allowlist
+# could still forge its own marker — that account already has push/merge
+# rights and this check cannot constrain it further.
 
 on:
   pull_request:
@@ -106,6 +123,7 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           PR_NUMBER: ${{ steps.pr.outputs.number }}
           REPO: ${{ github.repository }}
+          TRUSTED_AUTHORS_RAW: ${{ vars.FORGE_TRUSTED_MARKER_AUTHORS }}
         run: |
           # Fetch PR comments and review comments as {login, body} JSON — author
           # identity MUST travel with the body so a marker can be attributed to
@@ -126,24 +144,21 @@ jobs:
             } || true
           )
 
-          # Cache collaborator-permission lookups per login for this run so a
-          # PR with many comments from the same author doesn't re-query the API.
-          declare -A PERM_CACHE
+          # Normalize the comma-separated allowlist (repo variable) into one
+          # trimmed login per line. No GitHub API call and no extra token scope
+          # is needed — `vars.*` is resolved by the Actions runtime itself.
+          TRUSTED_LIST=$(echo "$TRUSTED_AUTHORS_RAW" | tr ',' '\n' | sed 's/^[[:space:]]*//; s/[[:space:]]*$//' | grep -v '^$' || true)
+
+          if [ -z "$TRUSTED_LIST" ]; then
+            echo "WARNING: FORGE_TRUSTED_MARKER_AUTHORS repo variable is unset or empty — no marker author can be trusted, every PR will be treated as a gate bypass. Configure this variable (Settings → Actions → Variables) with the login(s) that run /review-pr-staging."
+          fi
 
           is_trusted_author() {
             local login="$1"
-            if [ -z "$login" ]; then
+            if [ -z "$login" ] || [ -z "$TRUSTED_LIST" ]; then
               return 1
             fi
-            if [ -z "${PERM_CACHE[$login]+set}" ]; then
-              local perm
-              perm=$(gh api "repos/$REPO/collaborators/$login/permission" --jq '.permission' 2>/dev/null || echo "")
-              PERM_CACHE["$login"]="$perm"
-            fi
-            case "${PERM_CACHE[$login]}" in
-              admin|maintain) return 0 ;;
-              *) return 1 ;;
-            esac
+            echo "$TRUSTED_LIST" | grep -qxF "$login"
           }
 
           GATE_PASS=0
@@ -161,21 +176,21 @@ jobs:
               if is_trusted_author "$LOGIN"; then
                 GATE_PASS=$((GATE_PASS + 1))
               else
-                echo "Ignoring FORGE:GATE_PASS marker from untrusted author '$LOGIN' (not admin/maintain)."
+                echo "Ignoring FORGE:GATE_PASS marker from untrusted author '$LOGIN' (not in FORGE_TRUSTED_MARKER_AUTHORS)."
               fi
             fi
             if echo "$BODY" | grep -q '<!-- FORGE:GATE_FAILURE'; then
               if is_trusted_author "$LOGIN"; then
                 GATE_FAILURE=$((GATE_FAILURE + 1))
               else
-                echo "Ignoring FORGE:GATE_FAILURE marker from untrusted author '$LOGIN' (not admin/maintain)."
+                echo "Ignoring FORGE:GATE_FAILURE marker from untrusted author '$LOGIN' (not in FORGE_TRUSTED_MARKER_AUTHORS)."
               fi
             fi
             if echo "$BODY" | grep -q '<!-- FORGE:SPEC_LOADED'; then
               if is_trusted_author "$LOGIN"; then
                 SPEC_LOADED=$((SPEC_LOADED + 1))
               else
-                echo "Ignoring FORGE:SPEC_LOADED marker from untrusted author '$LOGIN' (not admin/maintain)."
+                echo "Ignoring FORGE:SPEC_LOADED marker from untrusted author '$LOGIN' (not in FORGE_TRUSTED_MARKER_AUTHORS)."
               fi
             fi
           done <<< "$ALL_ITEMS"
