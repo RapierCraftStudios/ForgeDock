@@ -39,7 +39,7 @@
 import { readFileSync, existsSync } from 'node:fs';
 import { createRequire } from 'node:module';
 import { resolve, dirname } from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 
 const SCRIPT_NAME = 'validate-annotation-node.mjs';
 const __filename = fileURLToPath(import.meta.url);
@@ -102,12 +102,13 @@ async function readBody(fileArg) {
 
 // ---------------------------------------------------------------------------
 // Locate the protocol library
-// Library expected at packages/protocol/ relative to the repo root.
+// Library expected at packages/protocol/src/index.js relative to the repo
+// root (per packages/protocol/package.json main/exports).
 // Repo root is two directories above this script (scripts/ → repo root).
 // ---------------------------------------------------------------------------
 function resolveLibraryPath() {
   const repoRoot = resolve(__dirname, '..');
-  return resolve(repoRoot, 'packages', 'protocol', 'index.js');
+  return resolve(repoRoot, 'packages', 'protocol', 'src', 'index.js');
 }
 
 // ---------------------------------------------------------------------------
@@ -147,7 +148,7 @@ async function main() {
     // Library not yet built (#1291 not merged) — exit 0 with a warning.
     // This is the expected state until #1291 lands; the pipeline must not break.
     process.stdout.write(
-      `WARN: forge-protocol library not found at packages/protocol/index.js\n` +
+      `WARN: forge-protocol library not found at packages/protocol/src/index.js\n` +
       `  Conformance validation skipped — install the library from #1291 to enable spec-conformance checks.\n` +
       `  Annotation posting will proceed without library validation.\n`
     );
@@ -156,34 +157,56 @@ async function main() {
 
   let library;
   try {
-    library = await import(libraryPath);
+    // Dynamic import() requires a file:// URL for absolute paths on Windows
+    // (a bare "C:\..." path is misparsed as a URL with protocol "c:"). Using
+    // pathToFileURL() makes this work identically on Windows and POSIX.
+    library = await import(pathToFileURL(libraryPath));
   } catch (err) {
     // Library file exists but failed to load — log and degrade gracefully.
     process.stdout.write(
-      `WARN: forge-protocol library found at packages/protocol/index.js but failed to load: ${err.message}\n` +
+      `WARN: forge-protocol library found at packages/protocol/src/index.js but failed to load: ${err.message}\n` +
       `  Conformance validation skipped. Check that the library is built correctly.\n`
     );
     process.exit(0);
   }
 
   // ---------------------------------------------------------------------------
-  // Call library.validate() — the library must export a named `validate` function.
-  // Expected API (from #1291 spec):
-  //   validate(annotation) → { valid: boolean, errors: string[] }
-  //   where annotation is { type: MARKER_STRING, body: FULL_COMMENT_BODY }
+  // Parse the body into a structured annotation, then call library.validate().
+  // The library's validate() expects a ParsedAnnotation (the output of parse()),
+  // NOT a raw { type, body } literal — validate() reads annotation.isReserved,
+  // .fields, .sentinelState, etc., all of which only exist after parse() runs.
+  // Passing an unparsed literal makes validate() take its "unknown type, tolerate"
+  // early-return path (§7.2.4) and always report { valid: true }, silently
+  // skipping every real conformance check.
   // ---------------------------------------------------------------------------
-  if (typeof library.validate !== 'function') {
+  if (typeof library.parse !== 'function' || typeof library.validate !== 'function') {
     process.stderr.write(
-      `ERROR: forge-protocol library does not export a 'validate' function.\n` +
-      `  Expected: export function validate(annotation) { return { valid, errors }; }\n` +
+      `ERROR: forge-protocol library does not export the expected 'parse' and 'validate' functions.\n` +
       `  Found exports: ${Object.keys(library).join(', ') || '(none)'}\n`
+    );
+    process.exit(2);
+  }
+
+  let annotation;
+  try {
+    const parsed = library.parse(body);
+    annotation = parsed.find((a) => a.type === marker);
+  } catch (err) {
+    process.stderr.write(`ERROR: library.parse() threw an exception: ${err.message}\n`);
+    process.exit(1);
+  }
+
+  if (!annotation) {
+    process.stderr.write(
+      `ERROR: no '${marker}' annotation found in the provided body — expected an opening tag ` +
+      `like <!-- FORGE:${marker} --> somewhere in the input.\n`
     );
     process.exit(2);
   }
 
   let result;
   try {
-    result = library.validate({ type: marker, body });
+    result = library.validate(annotation);
   } catch (err) {
     process.stderr.write(`ERROR: library.validate() threw an exception: ${err.message}\n`);
     process.exit(1);
