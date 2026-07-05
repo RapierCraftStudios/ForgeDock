@@ -211,14 +211,15 @@ jobs:
 
       - name: Determine run mode
         id: mode
+        env:
+          RUN_MODE_INPUT: ${{ github.event.inputs.run_mode }}
         run: |
-          MODE="${{ github.event.inputs.run_mode }}"
-          echo "run_mode=${MODE:-full}" >> "$GITHUB_OUTPUT"
+          echo "run_mode=${RUN_MODE_INPUT:-full}" >> "$GITHUB_OUTPUT"
 
       - name: Run full eval harness
         id: eval
         run: |
-          MODE="${{ steps.mode.outputs.run_mode }}"
+          MODE="$RUN_MODE"
           echo "Running eval harness in mode: $MODE"
           if [ -f "scripts/eval-harness-runner.mjs" ]; then
             node scripts/eval-harness-runner.mjs --mode "$MODE" --output scorecard.json
