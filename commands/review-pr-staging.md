@@ -435,7 +435,7 @@ gh pr comment ${PR_NUMBER} -R ${GH_REPO} --body "<!-- FORGE:REVIEW-AGENT:code-qu
 
 ## Phase 5: Security & Billing Deep Dive
 
-Read agent catalog from `.claude/commands/review-pr-agents.md`. Launch domain-specific agents based on which domains have changes. Substitute PR diff commands with staging diff commands. Agents: General Security (always), Auth, Billing, Concurrency, Scraper, API Design, Database, Infrastructure.
+Read agent catalog from `.claude/commands/review-pr-agents.md`. Launch domain-specific agents based on which domains have changes. Substitute PR diff commands with staging diff commands. Agents: General Security (always), Auth, Billing, Concurrency, Scraper, API Design, Database, Infrastructure, Spec/CLI (when `commands/**` or `bin/**` are touched — added unconditionally; see forge#1610).
 
 **MANDATORY — each domain agent MUST post its findings directly to the PR immediately upon completion** (not batched by the orchestrator):
 ```bash

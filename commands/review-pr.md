@@ -751,6 +751,7 @@ echo "$DIFF" | grep -cE "docker-compose.*postgres|docker-compose.*redis|postgres
 echo "$DIFF" | grep -cE "create_async_engine|AsyncSession|connect_args|pool_size|prepared_statement|engine_from_config|sessionmaker" && echo "  DB_CONFIG" || true
 echo "$DIFF" | grep -cE "subprocess|os\.system|eval\(|exec\(|pickle|yaml\.load[^_]" && echo "  CODE_EXECUTION" || true
 echo "$FILES" | grep -cE "^sdk/|openapi.*\.json$|openapi-versions/" && echo "  SDK_OPENAPI" || true
+echo "$FILES" | grep -cE "^commands/|^bin/" && echo "  SPEC_CLI" || true
 ```
 
 **Churn (hot-spot) signal**: The signals above are all derived from the current diff content — none of them measure historical change frequency, which is one of the strongest empirical predictors of defect density. Compute a bounded per-file churn tier for the PR's changed files only (never repo-wide) and carry it forward as `CHURN_CONTEXT` for Phase 3C:
@@ -913,6 +914,7 @@ echo "=== BASELINE ROSTER (top domains): $SELECTED_AGENTS ==="
 | CONTRACT high-risk | `CONTRACT_RISK_FLAGS` contains `HIGH_RISK` | All CONTRACT-flagged domain agents |
 | First-pass finding severity | Phase 3 re-entry after a CONFIRMED/HIGH finding posted to PR | Add all agents for the domain of the finding |
 | Scraping domain | `SCORE_SCRAPING >= 3` AND `review.domains.scraping` is set in forge.yaml | Scraping (optional domain pack — never in default catalog) |
+| Spec-as-code / CLI surface | `SPEC_CLI` signal (any `commands/**` or `bin/**` file in the diff) | SpecCLI — added unconditionally, bypassing the top-2 score cutoff (spec-as-code has no automated test gate; a routing miss here is unrecoverable downstream) |
 | Cross-critical domains | `SCORE_AUTH >= 2` AND `SCORE_BILLING >= 2` | Auth + Billing + Concurrency |
 | Cross-critical domains | `SCORE_AUTH >= 2` AND `SCORE_DATABASE >= 3` | Auth + Database |
 | Cross-critical domains | `SCORE_BILLING >= 2` AND `SCORE_CONCURRENCY >= 2` | Billing + Concurrency + Database |
@@ -946,6 +948,8 @@ echo "$CONTRACT_RISK_FLAGS" | grep -q "HIGH_RISK" && {
 { [ "$SCORE_BILLING" -ge 2 ] && [ "$SCORE_CONCURRENCY" -ge 2 ]; } && { add_agent "Billing"; add_agent "Concurrency"; add_agent "Database"; }
 # SDK/OpenAPI always adds API agent
 echo "$FILES" | grep -qE "^sdk/|openapi.*\.json$|openapi-versions/" && add_agent "API"
+# Spec-as-code / CLI surface always adds the Spec/CLI agent (unconditional — bypasses top-2 cutoff)
+echo "$FILES" | grep -qE "^commands/|^bin/" && add_agent "SpecCLI"
 
 echo "=== FINAL ROSTER (after escalation): $SELECTED_AGENTS ==="
 AGENT_COUNT=$(echo "$SELECTED_AGENTS" | wc -w)
@@ -966,6 +970,7 @@ if [ "$THOROUGH" = "true" ] || [ "$IS_MILESTONE_TO_STAGING" = "true" ]; then
     [ "$SCORE_SCRAPING" -gt 0 ] && [ -n "$SCRAPING_ENABLED" ] && SELECTED_AGENTS="$SELECTED_AGENTS Scraping"
     [ "$SCORE_FRONTEND" -gt 0 ] && SELECTED_AGENTS="$SELECTED_AGENTS Frontend"
     [ "$SCORE_API" -gt 0 ] && SELECTED_AGENTS="$SELECTED_AGENTS API"
+    echo "$FILES" | grep -qE "^commands/|^bin/" && SELECTED_AGENTS="$SELECTED_AGENTS SpecCLI"
     # Deduplicate
     SELECTED_AGENTS=$(echo "$SELECTED_AGENTS" | tr ' ' '\n' | sort -u | tr '\n' ' ')
     echo "=== THOROUGH mode: FULL UNION DISPATCH — $SELECTED_AGENTS ==="
@@ -990,6 +995,7 @@ DOMAIN_FILES_INFRA=$(echo "$FILES" | grep -iE "docker|nginx|traefik|\.github|Mak
 DOMAIN_FILES_SCRAPING=$(echo "$FILES" | grep -iE "scrape|crawler|stealth|browser.*pool|headless|anti.bot|detection.*keyword|captcha" || echo "")
 DOMAIN_FILES_FRONTEND=$(echo "$FILES" | grep -iE "^web/|\.tsx?$|\.jsx?$|component|page|layout|style|css" || echo "")
 DOMAIN_FILES_API=$(echo "$FILES" | grep -iE "router|route|endpoint|openapi|sdk|api" || echo "")
+DOMAIN_FILES_SPEC=$(echo "$FILES" | grep -E "^commands/|^bin/" || echo "")
 
 # Fallback: if a domain has no specific files matched, give it the full file list
 # (happens for Security — which reviews everything — and for edge cases)
@@ -1006,7 +1012,7 @@ Read: $FORGE_HOME/commands/review-pr-agents/protocols.md
 Read: $FORGE_HOME/commands/review-pr-agents/<persona>.md   (one per selected agent from Phase 3B)
 ```
 
-Persona file names: `security.md` (always), `auth.md`, `billing.md`, `concurrency.md`, `scraper.md`, `frontend.md`, `api.md`, `database.md`, `infra.md`.
+Persona file names: `security.md` (always), `auth.md`, `billing.md`, `concurrency.md`, `scraper.md`, `frontend.md`, `api.md`, `database.md`, `infra.md`, `spec-cli.md`.
 See `review-pr-agents.md` for the full routing table mapping domains → persona files.
 
 (`$FORGE_HOME` defaults to `~/.claude`)
@@ -1026,6 +1032,7 @@ DOMAIN_CONTEXT_DATABASE=$(yq '.review.domains.database' "$FORGE_YAML" 2>/dev/nul
 DOMAIN_CONTEXT_FRONTEND=$(yq '.review.domains.frontend' "$FORGE_YAML" 2>/dev/null || echo "")
 DOMAIN_CONTEXT_SECURITY=$(yq '.review.domains.security' "$FORGE_YAML" 2>/dev/null || echo "")
 DOMAIN_CONTEXT_API=$(yq '.review.domains.api' "$FORGE_YAML" 2>/dev/null || echo "")
+DOMAIN_CONTEXT_SPEC=$(yq '.review.domains.spec_cli' "$FORGE_YAML" 2>/dev/null || echo "")
 # Scraping domain context also gates spawning: agent only runs when this key is set
 DOMAIN_CONTEXT_SCRAPING=$(yq '.review.domains.scraping' "$FORGE_YAML" 2>/dev/null || echo "")
 ```
@@ -1144,6 +1151,14 @@ DIFF_SLICE_SCRAPER=$(echo "$FULL_DIFF" | awk '
   in_block { print }
 ')
 [ -z "$DIFF_SLICE_SCRAPER" ] && DIFF_SLICE_SCRAPER="$FULL_DIFF"
+
+# --- Spec/CLI agent: command specs and Node CLI files (a/ and b/ prefixes in diff headers) ---
+DIFF_SLICE_SPEC=$(echo "$FULL_DIFF" | awk '
+  /^diff --git/ { in_block=0 }
+  /^diff --git a\/(commands|bin)\// { in_block=1 }
+  in_block { print }
+')
+[ -z "$DIFF_SLICE_SPEC" ] && DIFF_SLICE_SPEC="$FULL_DIFF"
 ```
 
 **Tool-result truncation discipline**: All `gh pr diff` and file-read outputs piped to agents MUST be capped at ~100K characters. This mirrors the runner's built-in 100K-char tool-result cap (`bin/runner.mjs`). Any diff slice exceeding 100K chars must be truncated before substitution — agents that receive oversized context perform worse, not better.
@@ -1169,13 +1184,14 @@ DIFF_SLICE_FRONTEND=$(truncate_slice "$DIFF_SLICE_FRONTEND")
 DIFF_SLICE_API=$(truncate_slice "$DIFF_SLICE_API")
 DIFF_SLICE_INFRA=$(truncate_slice "$DIFF_SLICE_INFRA")
 DIFF_SLICE_SCRAPER=$(truncate_slice "$DIFF_SLICE_SCRAPER")
+DIFF_SLICE_SPEC=$(truncate_slice "$DIFF_SLICE_SPEC")
 ```
 
 The `protocols.md` file contains the Evidence-Based Review Protocol, Structured Findings Protocol, Per-Agent Input Scoping rules, and Tool-Result Truncation Discipline. Each persona file contains that agent's full prompt template. For each agent in `$SELECTED_AGENTS` (computed in Phase 3B):
 1. Extract its template from the persona file (`review-pr-agents/<persona>.md`)
 2. Substitute: `[PR_NUMBER]`, `[REVIEW_SHA]`, `[REVIEW_SHA_SHORT]`, `[TITLE]`, relevant files list
 3. Substitute: `[PROJECT_NAME]` → `$PROJECT_NAME`, `[PROJECT_CONTEXT]` → `$PROJECT_CONTEXT`
-4. Substitute per-agent domain context: `[DOMAIN_CONTEXT]` → the agent's matching key from `forge.yaml → review.domains` (e.g., `$DOMAIN_CONTEXT_AUTH` for the auth agent, `$DOMAIN_CONTEXT_BILLING` for the billing agent, `$DOMAIN_CONTEXT_CONCURRENCY` for the concurrency agent, `$DOMAIN_CONTEXT_SCRAPING` for the scraping agent)
+4. Substitute per-agent domain context: `[DOMAIN_CONTEXT]` → the agent's matching key from `forge.yaml → review.domains` (e.g., `$DOMAIN_CONTEXT_AUTH` for the auth agent, `$DOMAIN_CONTEXT_BILLING` for the billing agent, `$DOMAIN_CONTEXT_CONCURRENCY` for the concurrency agent, `$DOMAIN_CONTEXT_SCRAPING` for the scraping agent, `$DOMAIN_CONTEXT_SPEC` for the spec/CLI agent)
 5. Substitute the shared hot-spot prior: `[CHURN_CONTEXT]` → `$CHURN_CONTEXT` (computed once in Phase 3A, same value for every agent — this is a PR-level fact, not a per-domain config value, so it is NOT read from `forge.yaml`)
 6. Substitute code index slice: `[INDEX_SLICE]` → the matching `$INDEX_SLICE_{DOMAIN}` variable for this agent (e.g., `$INDEX_SLICE_AUTH` for the auth agent). Agents MUST query index data first; fall back to grep only when index slice is empty or unavailable.
 7. Substitute per-agent diff slice: `[DOMAIN_DIFF_SLICE]` → the matching `$DIFF_SLICE_*` variable (e.g., `$DIFF_SLICE_AUTH` for the auth agent, `$DIFF_SLICE_SECURITY` for the security agent). This replaces any `gh pr diff [PR_NUMBER]` call inside the agent template — the agent works from the pre-computed slice, not the full changeset.
@@ -1200,6 +1216,7 @@ When substituting `[FILE_LIST]` in each agent's template:
 - Scraping agent → `$DOMAIN_FILES_SCRAPING`
 - Frontend agent → `$DOMAIN_FILES_FRONTEND`
 - API agent → `$DOMAIN_FILES_API`
+- Spec/CLI agent → `$DOMAIN_FILES_SPEC`
 - Security agent → `$FILES` (full list)
 
 **Note**: Domain agents still run `gh pr diff $PR_NUMBER` inside their execution context. The scoped `[FILE_LIST]` tells each agent which files are most relevant to its domain — it is a focused starting point, not a hard restriction. Agents should follow code paths beyond their slice if those paths are needed to complete a trace.

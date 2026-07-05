@@ -42,6 +42,7 @@ For each agent selected in Phase 3B, read **only** the files relevant to that ag
 | API Design & Consistency Auditor | New/modified routers or SDK/OpenAPI files | `review-pr-agents/api.md` |
 | Database & Migration Auditor | DATABASE domain | `review-pr-agents/database.md` |
 | Infrastructure & Deploy Safety Auditor | INFRA service touched | `review-pr-agents/infra.md` |
+| Spec/CLI Auditor | SPEC_CLI domain (`commands/**` or `bin/**` touched) | `review-pr-agents/spec-cli.md` |
 
 ## Domain Prefixes (for Structured Findings)
 
@@ -56,6 +57,7 @@ For each agent selected in Phase 3B, read **only** the files relevant to that ag
 | API Design | `API` |
 | Database & Migration | `DB` |
 | Infrastructure | `INFRA` |
+| Spec/CLI | `SPEC` |
 
 ## Loading Instructions for Phase 3C
 
