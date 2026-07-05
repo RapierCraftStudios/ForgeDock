@@ -533,8 +533,16 @@ fi
 GitHub does not support flipping a Gist's visibility from public to secret in place. If you find an existing `FORGE:MEMORY_INDEX: {GH_REPO}` Gist that is **public** (check with `gh api gists/${MEMORY_INDEX_ID} --jq '.public'`), replace it:
 
 ```bash
-# 1. Save the existing content so no learnings are lost
+# The gist ID here is the same one found by the FORGE:MEMORY_INDEX search above.
+OLD_PUBLIC_GIST_ID="$MEMORY_INDEX_ID"
+
+# 1. Save the existing content so no learnings are lost — and verify the save
+#    succeeded BEFORE deleting anything.
 gh gist view "$OLD_PUBLIC_GIST_ID" > /tmp/memory_index_migrate.md
+if [ ! -s /tmp/memory_index_migrate.md ]; then
+  echo "ABORT: failed to save gist content — not deleting the public gist." >&2
+  exit 1
+fi
 
 # 2. Delete the public gist (removes the world-readable copy)
 gh gist delete "$OLD_PUBLIC_GIST_ID" --yes
