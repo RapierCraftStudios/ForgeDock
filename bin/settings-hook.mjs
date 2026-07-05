@@ -204,6 +204,12 @@ export function removeSubagentStopHook(settingsPath) {
 
 /**
  * Merge ForgeDock's PreToolUse hook into settings.json.
+ *
+ * The installed entry carries `matcher: "Bash"` so Claude Code's harness
+ * only invokes this hook for Bash tool calls — without it, Node spawns for
+ * every tool call (Read/Edit/Grep/Glob/...) just to exit 0 immediately
+ * (issue #1591).
+ *
  * @param {string} settingsPath       - Absolute path to ~/.claude/settings.json
  * @param {string} hookScriptPath     - Absolute path to bin/hooks/pre-tool-use.mjs
  * @returns {{ status: 'installed'|'already'|'skipped-malformed' }}
@@ -228,6 +234,7 @@ export function installPreToolUseHook(settingsPath, hookScriptPath) {
   if (list.some(isOursPreToolUse)) return { status: "already" };
 
   list.push({
+    matcher: "Bash",
     hooks: [{ type: "command", command: `node "${hookScriptPath}"` }],
   });
   settings.hooks.PreToolUse = list;

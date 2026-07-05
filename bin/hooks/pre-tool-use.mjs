@@ -1,6 +1,12 @@
 #!/usr/bin/env node
 import { createRequire } from "module";
+import { existsSync } from "fs";
+import { dirname, join, resolve as resolvePath } from "path";
+import { fileURLToPath, pathToFileURL } from "url";
 const _require = createRequire(import.meta.url);
+
+/** Absolute path to the ForgeDock installation root (parent of bin/). */
+const FORGE_HOME = resolvePath(dirname(fileURLToPath(import.meta.url)), "..", "..");
 
 /**
  * bin/hooks/pre-tool-use.mjs — ForgeDock PreToolUse hook.
@@ -12,7 +18,7 @@ const _require = createRequire(import.meta.url);
  *
  * Claude Code sends a JSON payload to stdin and reads the exit code:
  *   exit 0  — allow the tool call
- *   exit 2  — block the tool call (error message on stdout is shown to agent)
+ *   exit 2  — block the tool call (error message on stderr is shown to agent)
  *
  * Input payload (stdin JSON):
  *   {
@@ -34,6 +40,13 @@ const _require = createRequire(import.meta.url);
  *    against the workflow label state machine.
  *    Blocks invalid transitions (e.g. jumping from investigating to merged).
  *
+ * Both rules only apply inside a ForgeDock-managed directory (a directory
+ * with a `forge.yaml` or `.forgedock` marker) — see `isForgeDockManagedCwd()`
+ * (issue #1591). The hook installs into the user's global
+ * `~/.claude/settings.json`, so without this guard every Bash call in every
+ * repo on the machine would be subject to these ForgeDock-specific rules,
+ * including unrelated repos where `main` is a legitimate PR target.
+ *
  * === Fail-open contract ===
  *
  * Any uncaught error or parse failure exits 0 (allow) — this hook must
@@ -42,7 +55,9 @@ const _require = createRequire(import.meta.url);
  * === Wiring ===
  *
  * Installed into ~/.claude/settings.json under hooks.PreToolUse by
- * `forgedock install` (via bin/settings-hook.mjs).
+ * `forgedock install` (via bin/settings-hook.mjs). The install entry carries
+ * `matcher: "Bash"` so Claude Code's harness only spawns this script for
+ * Bash tool calls, not every tool call.
  * Removed by `forgedock uninstall`.
  */
 
@@ -101,12 +116,17 @@ async function main() {
   // Only intercept Bash tool calls.
   if (toolName !== "Bash") { process.exit(0); return; }
 
+  // Only enforce inside a ForgeDock-managed project — this hook installs
+  // globally (~/.claude/settings.json), so without this guard both rules
+  // below would fire in every unrelated repo on the machine (issue #1591).
+  if (!(await isForgeDockManagedCwd())) { process.exit(0); return; }
+
   const command = String(toolInput.command || "");
 
   // --- Rule 1: PR branch target validation ---
   const prViolation = checkPrTarget(command);
   if (prViolation) {
-    process.stdout.write(prViolation);
+    process.stderr.write(prViolation);
     process.exit(2);
     return;
   }
@@ -114,12 +134,51 @@ async function main() {
   // --- Rule 2: Label transition validation ---
   const labelViolation = checkLabelTransition(command);
   if (labelViolation) {
-    process.stdout.write(labelViolation);
+    process.stderr.write(labelViolation);
     process.exit(2);
     return;
   }
 
   process.exit(0);
+}
+
+// ---------------------------------------------------------------------------
+// Project-scope guard (issue #1591)
+// ---------------------------------------------------------------------------
+
+/**
+ * Determine whether the current working directory is a ForgeDock-managed
+ * project — i.e. whether pipeline enforcement rules should apply here at
+ * all. This hook installs into the user's global `~/.claude/settings.json`,
+ * so it fires for every Bash call in every repo unless explicitly scoped.
+ *
+ * Reuses `bin/registry.mjs::resolveState`, the same primitive
+ * `bin/hooks/session-start.mjs` already uses to decide whether to inject
+ * ForgeDock context — a directory is managed iff it has a `forge.yaml` or
+ * `.forgedock` marker (and hasn't been explicitly opted out).
+ *
+ * Fail-open: if `registry.mjs` cannot be dynamically imported (broken
+ * install, missing file), falls back to a direct `forge.yaml`/`.forgedock`
+ * existence check on cwd. If even that throws, returns false (no
+ * enforcement) rather than letting an error propagate — consistent with
+ * this hook's overall fail-open contract.
+ *
+ * @returns {Promise<boolean>}
+ */
+async function isForgeDockManagedCwd() {
+  const cwd = process.cwd();
+  try {
+    const { resolveState } = await import(
+      pathToFileURL(join(FORGE_HOME, "bin", "registry.mjs")).href
+    );
+    return resolveState(cwd) === "managed-active";
+  } catch {
+    try {
+      return existsSync(join(cwd, "forge.yaml")) || existsSync(join(cwd, ".forgedock"));
+    } catch {
+      return false;
+    }
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -273,9 +332,10 @@ function checkLabelTransition(command) {
  * never split apart or scanned as separate tokens.
  *
  * Each token carries a `quoted` flag recording whether any of its characters
- * came from inside quotes. `extractFlag` uses this to refuse to interpret a
- * quoted argument value as a flag when doing so would be ambiguous (the
- * equals and attached forms) — see the note on `extractFlag` (issue #1519).
+ * came from inside quotes. This flag is retained for diagnostics, but
+ * `extractFlag` does NOT use it to decide whether a token can be a flag —
+ * see the note on `extractFlag` (issue #1591) for why "was any character
+ * quoted" is the wrong discriminator.
  *
  * This is intentionally NOT a full POSIX shell parser — it doesn't handle
  * escapes, `$()`, backticks, or command chaining. It only needs to be
@@ -354,17 +414,28 @@ function tokenizeCommand(command) {
  * (issue #1550). The attached-form check is scoped to 2-character single-dash
  * flags so long flags (`--base`) are never affected.
  *
- * QUOTING RULE: the equals form (`-B=value`) and the attached form (`-Bvalue`)
- * are honored ONLY on unquoted tokens. Both match a token by prefix, so a
- * quoted argument value that merely STARTS with the flag text — e.g. an
- * attacker-controlled `--title "-Bstaging is fine"` or `--title "-B=staging"`
- * — must not be mistaken for the flag. If it were, extraction would
- * short-circuit on the decoy and return before reaching a real forbidden
- * `-B main` later in the command, silently bypassing the block. This is the
- * issue #1519 bug class (flag-shaped text inside a quoted value) in the
- * under-blocking direction. The exact form (`token === flag`) stays
- * quote-insensitive: a fully-quoted `"-B"` in flag position is unambiguously
- * the flag, and its value is the next token regardless of quoting.
+ * DECOY RULE: the equals form (`-B=value`/`--base=value`) and the attached
+ * form (`-Bvalue`) are skipped on any token that contains EMBEDDED
+ * WHITESPACE — not on any token that was merely quoted.
+ *
+ * A shell token can only contain whitespace if quoting was used to glue
+ * multiple words into a single argument (e.g. `--title "-Bstaging is
+ * fine"` — the value is a whole sentence, not a flag). That is the actual
+ * signature of the issue #1519 decoy: flag-shaped text embedded inside an
+ * unrelated multi-word `--title`/`--body` value. Skipping on embedded
+ * whitespace preserves that protection.
+ *
+ * A single-word token being quoted, on the other hand, changes nothing about
+ * the resulting argv entry — `"-Bmain"`, `'-Bmain'`, and `-Bmain` are all
+ * identical once the shell hands the argument to `gh`, as are `--base="main"`
+ * and `--base=main`. Treating "was quoted at all" as reason enough to skip
+ * (the previous behaviour) let these single-word quoted forms sail through
+ * untouched — a real, commonly-written bypass (issue #1591), not a decoy.
+ * So quoting alone must never exempt a token from these checks; only
+ * embedded whitespace does. The exact form (`token === flag`) stays
+ * quote-insensitive as before: a fully-quoted `"-B"` in flag position is
+ * unambiguously the flag, and its value is the next token regardless of
+ * quoting.
  *
  * @param {string} command
  * @param {string} flag  e.g. "--base" or "-B"
@@ -376,7 +447,7 @@ function extractFlag(command, flag) {
   const isShortFlag = flag.length === 2 && flag[0] === "-" && flag[1] !== "-";
 
   for (let i = 0; i < tokens.length; i++) {
-    const { value: token, quoted } = tokens[i];
+    const { value: token } = tokens[i];
 
     // --flag value form (value is the next token). Quote-insensitive: an exact
     // token match is unambiguous even when the flag itself was quoted.
@@ -384,10 +455,13 @@ function extractFlag(command, flag) {
       return i + 1 < tokens.length ? tokens[i + 1].value : null;
     }
 
-    // Prefix-based forms below must not fire on quoted argument values — a
-    // quoted decoy that starts with the flag text would otherwise short-circuit
-    // extraction and hide a real forbidden flag later in the command (#1519).
-    if (quoted) continue;
+    // Prefix-based forms below must not fire on a token that required
+    // quoting to glue multiple words into one argument — that shape is the
+    // real #1519 decoy signature (e.g. a --title value that happens to
+    // start with flag-looking text). A token can only contain whitespace if
+    // it came from inside quotes, so embedded whitespace — not quoting
+    // itself — is the correct discriminator (issue #1591).
+    if (/\s/.test(token)) continue;
 
     // --flag=value form (also covers the equals form of a short flag, e.g. -B=value)
     if (token.startsWith(eqPrefix)) {
