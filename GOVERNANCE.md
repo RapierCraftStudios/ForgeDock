@@ -112,4 +112,4 @@ The dual-license model does not affect the openness of the AGPL core. The commer
 
 ---
 
-*This document describes design intent and architectural decisions. It is not a legal contract. For licensing questions, contact [licensing@rapiercraft.studio](mailto:licensing@rapiercraft.studio).*
+*This document describes design intent and architectural decisions. It is not a legal contract. For licensing questions, contact [licensing@rapiercraftstudios.com](mailto:licensing@rapiercraftstudios.com).*

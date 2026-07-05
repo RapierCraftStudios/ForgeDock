@@ -314,7 +314,7 @@ The core is AGPL-3.0 and stays that way: engineers run the full pipeline on thei
 
 Two things are for sale:
 
-- **A [commercial license](COMMERCIAL-LICENSE.md)** — for organizations that need ForgeDock inside proprietary workflows or products without AGPL copyleft obligations. Contact [licensing@rapiercraft.studio](mailto:licensing@rapiercraft.studio).
+- **A [commercial license](COMMERCIAL-LICENSE.md)** — for organizations that need ForgeDock inside proprietary workflows or products without AGPL copyleft obligations. Contact [licensing@rapiercraftstudios.com](mailto:licensing@rapiercraftstudios.com).
 - **The fleet layer** *(in development)* — org-wide observability over every pipeline run: the receipts on this page, live, across all your repos, plus policy controls and audit-grade provenance for autonomous merges. We're onboarding a small group of design partners — see [ForgeDock for Companies](docs/site/for-companies.md) for details and intake.
 
 ---
