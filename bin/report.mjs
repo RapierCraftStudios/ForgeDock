@@ -126,8 +126,11 @@ function readForgeYaml(cwd) {
 
 /**
  * Compute median of a sorted numeric array.
+ *
+ * Exported (in addition to `p90`/`fmtMinutes` below) so tests can exercise
+ * the real math directly instead of reimplementing it. See #1592.
  */
-function median(sorted) {
+export function median(sorted) {
   if (!sorted.length) return null;
   const mid = Math.floor(sorted.length / 2);
   return sorted.length % 2 !== 0
@@ -138,7 +141,7 @@ function median(sorted) {
 /**
  * Compute p90 of a sorted numeric array.
  */
-function p90(sorted) {
+export function p90(sorted) {
   if (!sorted.length) return null;
   const idx = Math.ceil(sorted.length * 0.9) - 1;
   return sorted[Math.max(0, idx)];
@@ -147,7 +150,7 @@ function p90(sorted) {
 /**
  * Format minutes as a human-readable duration.
  */
-function fmtMinutes(mins) {
+export function fmtMinutes(mins) {
   if (mins === null || mins === undefined) return "n/a";
   if (mins < 60) return `${Math.round(mins)}m`;
   if (mins < 1440) return `${Math.round(mins / 60)}h`;
@@ -171,19 +174,19 @@ function isGhAuthenticated() {
 // ---------------------------------------------------------------------------
 
 /**
- * Fetch and compute all stats for the given repo and window.
- * Returns a structured result object. Throws on hard failures.
+ * Pure computation of window-scoped issue/PR statistics from already-fetched
+ * GitHub API data. Contains no I/O — extracted from `computeStats()` so it
+ * can be unit-tested directly against fixture data instead of being
+ * reimplemented inline in the test file. See #1592.
+ *
+ * @param {object} args
+ * @param {object[]} args.closedIssues - Raw `gh issue list --state closed` JSON.
+ * @param {object[]} args.mergedPRs - Raw `gh pr list --state merged` JSON.
+ * @param {string} args.since - ISO timestamp; window lower bound.
+ * @param {string} args.ghRepo - `owner/repo` string, echoed back in the result.
+ * @param {number} args.days - Look-back window in days, echoed back in the result.
  */
-async function computeStats({ owner, repo, days }) {
-  const since = new Date(Date.now() - days * 24 * 60 * 60 * 1000).toISOString();
-  const ghRepo = `${owner}/${repo}`;
-
-  // ---- Closed issues in window ----
-  const closedIssues = ghJson([
-    "issue", "list", "-R", ghRepo, "--state", "closed", "--limit", "500",
-    "--json", "number,title,body,labels,createdAt,closedAt,author",
-  ]) ?? [];
-
+export function computeWindowStats({ closedIssues, mergedPRs, since, ghRepo, days }) {
   const windowIssues = closedIssues.filter((i) => i.closedAt && i.closedAt >= since);
 
   // Annotated issues (contain FORGE:INVESTIGATOR or FORGE:TRAJECTORY)
@@ -216,12 +219,6 @@ async function computeStats({ owner, repo, days }) {
   const reviewFindingCount = windowIssues.filter((i) =>
     (i.labels || []).some((l) => l.name === "review-finding")
   ).length;
-
-  // ---- Merged PRs in window ----
-  const mergedPRs = ghJson([
-    "pr", "list", "-R", ghRepo, "--state", "merged", "--limit", "500",
-    "--json", "number,title,body,mergedAt",
-  ]) ?? [];
 
   const windowPRs = mergedPRs.filter((p) => p.mergedAt && p.mergedAt >= since);
 
@@ -263,6 +260,27 @@ async function computeStats({ owner, repo, days }) {
         : 0,
     },
   };
+}
+
+/**
+ * Fetch and compute all stats for the given repo and window.
+ * Returns a structured result object. Throws on hard failures.
+ */
+async function computeStats({ owner, repo, days }) {
+  const since = new Date(Date.now() - days * 24 * 60 * 60 * 1000).toISOString();
+  const ghRepo = `${owner}/${repo}`;
+
+  const closedIssues = ghJson([
+    "issue", "list", "-R", ghRepo, "--state", "closed", "--limit", "500",
+    "--json", "number,title,body,labels,createdAt,closedAt,author",
+  ]) ?? [];
+
+  const mergedPRs = ghJson([
+    "pr", "list", "-R", ghRepo, "--state", "merged", "--limit", "500",
+    "--json", "number,title,body,mergedAt",
+  ]) ?? [];
+
+  return computeWindowStats({ closedIssues, mergedPRs, since, ghRepo, days });
 }
 
 // ---------------------------------------------------------------------------
