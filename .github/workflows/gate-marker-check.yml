@@ -19,6 +19,14 @@ name: Deploy Gate Marker Check
 # Note: The 30-minute window is enforced by the `gate-marker-stale` job using
 # a `created_at` comparison against the PR's head commit timestamp. This avoids
 # requiring a scheduled workflow with PR number state.
+#
+# Trust model: a gate marker only counts if its author has `admin` or `maintain`
+# permission on the repo (checked via the collaborator-permission API) — an
+# arbitrary commenter (e.g. an external contributor who can comment but cannot
+# push/merge) cannot forge a passing gate by hand-typing the marker text.
+# Residual risk (accepted, out of scope): an account that already has
+# admin/maintain permission could still forge its own marker — that account
+# already has push/merge rights and this check cannot constrain it further.
 
 on:
   pull_request:
@@ -99,23 +107,78 @@ jobs:
           PR_NUMBER: ${{ steps.pr.outputs.number }}
           REPO: ${{ github.repository }}
         run: |
-          # Fetch all PR comments (including review comments and issue comments)
-          COMMENTS=$(gh pr view "$PR_NUMBER" \
+          # Fetch PR comments and review comments as {login, body} JSON — author
+          # identity MUST travel with the body so a marker can be attributed to
+          # its actual author before it is trusted (see "Trust model" note above).
+          COMMENTS_JSON=$(gh pr view "$PR_NUMBER" \
             --repo "$REPO" \
             --json comments \
-            --jq '.comments[].body' 2>/dev/null || echo "")
+            --jq '.comments' 2>/dev/null || echo "[]")
 
-          # Also check PR review comments
-          REVIEW_COMMENTS=$(gh api "repos/$REPO/pulls/$PR_NUMBER/reviews" \
-            --jq '.[].body' 2>/dev/null || echo "")
+          REVIEWS_JSON=$(gh api "repos/$REPO/pulls/$PR_NUMBER/reviews" 2>/dev/null || echo "[]")
 
-          ALL_COMMENTS="$COMMENTS
-          $REVIEW_COMMENTS"
+          # Use the real `jq` binary (not gh's --jq) with -c so every item is
+          # guaranteed to be exactly one line, regardless of body content.
+          ALL_ITEMS=$(
+            {
+              echo "$COMMENTS_JSON" | jq -c '.[] | {login: (.author.login // ""), body: (.body // "")}' 2>/dev/null
+              echo "$REVIEWS_JSON"  | jq -c '.[] | {login: (.user.login // ""), body: (.body // "")}' 2>/dev/null
+            } || true
+          )
 
-          # Look for FORGE gate markers
-          GATE_PASS=$(echo "$ALL_COMMENTS" | grep -c '<!-- FORGE:GATE_PASS' || true)
-          GATE_FAILURE=$(echo "$ALL_COMMENTS" | grep -c '<!-- FORGE:GATE_FAILURE' || true)
-          SPEC_LOADED=$(echo "$ALL_COMMENTS" | grep -c '<!-- FORGE:SPEC_LOADED' || true)
+          # Cache collaborator-permission lookups per login for this run so a
+          # PR with many comments from the same author doesn't re-query the API.
+          declare -A PERM_CACHE
+
+          is_trusted_author() {
+            local login="$1"
+            if [ -z "$login" ]; then
+              return 1
+            fi
+            if [ -z "${PERM_CACHE[$login]+set}" ]; then
+              local perm
+              perm=$(gh api "repos/$REPO/collaborators/$login/permission" --jq '.permission' 2>/dev/null || echo "")
+              PERM_CACHE["$login"]="$perm"
+            fi
+            case "${PERM_CACHE[$login]}" in
+              admin|maintain) return 0 ;;
+              *) return 1 ;;
+            esac
+          }
+
+          GATE_PASS=0
+          GATE_FAILURE=0
+          SPEC_LOADED=0
+
+          while IFS= read -r ITEM; do
+            if [ -z "$ITEM" ]; then
+              continue
+            fi
+            LOGIN=$(echo "$ITEM" | jq -r '.login' 2>/dev/null || echo "")
+            BODY=$(echo "$ITEM" | jq -r '.body' 2>/dev/null || echo "")
+
+            if echo "$BODY" | grep -q '<!-- FORGE:GATE_PASS'; then
+              if is_trusted_author "$LOGIN"; then
+                GATE_PASS=$((GATE_PASS + 1))
+              else
+                echo "Ignoring FORGE:GATE_PASS marker from untrusted author '$LOGIN' (not admin/maintain)."
+              fi
+            fi
+            if echo "$BODY" | grep -q '<!-- FORGE:GATE_FAILURE'; then
+              if is_trusted_author "$LOGIN"; then
+                GATE_FAILURE=$((GATE_FAILURE + 1))
+              else
+                echo "Ignoring FORGE:GATE_FAILURE marker from untrusted author '$LOGIN' (not admin/maintain)."
+              fi
+            fi
+            if echo "$BODY" | grep -q '<!-- FORGE:SPEC_LOADED'; then
+              if is_trusted_author "$LOGIN"; then
+                SPEC_LOADED=$((SPEC_LOADED + 1))
+              else
+                echo "Ignoring FORGE:SPEC_LOADED marker from untrusted author '$LOGIN' (not admin/maintain)."
+              fi
+            fi
+          done <<< "$ALL_ITEMS"
 
           echo "gate_pass=$GATE_PASS" >> "$GITHUB_OUTPUT"
           echo "gate_failure=$GATE_FAILURE" >> "$GITHUB_OUTPUT"
@@ -123,13 +186,13 @@ jobs:
 
           if [ "$GATE_PASS" -gt 0 ]; then
             echo "marker_found=pass" >> "$GITHUB_OUTPUT"
-            echo "Found FORGE:GATE_PASS marker — gate ran and passed."
+            echo "Found trusted FORGE:GATE_PASS marker — gate ran and passed."
           elif [ "$GATE_FAILURE" -gt 0 ]; then
             echo "marker_found=failure" >> "$GITHUB_OUTPUT"
-            echo "Found FORGE:GATE_FAILURE marker — gate ran and BLOCKED deploy."
+            echo "Found trusted FORGE:GATE_FAILURE marker — gate ran and BLOCKED deploy."
           else
             echo "marker_found=none" >> "$GITHUB_OUTPUT"
-            echo "No FORGE gate marker found on PR #$PR_NUMBER."
+            echo "No trusted FORGE gate marker found on PR #$PR_NUMBER."
           fi
 
       - name: Check 30-minute window
