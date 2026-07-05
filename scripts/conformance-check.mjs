@@ -26,154 +26,40 @@
  *   1 = one or more conformance violations found
  *   2 = input parse error
  *
- * Conformance rules implemented (per forge-protocol-v1.md):
- *   - §3.1  Opening tag format: <!-- FORGE:{TYPE} -->
- *   - §3.2  Completion sentinel present for known annotation types
- *   - §3.3  Partial sentinel noted (warning, not error — producer may have been interrupted)
- *   - §4.1  FORGE:INVESTIGATOR required fields: Verdict, Confidence, Severity, Task Type, Decomposition Assessment
- *   - §4.1  FORGE:INVESTIGATOR Verdict values: CONFIRMED | PARTIAL | INVALID
- *   - §4.1  FORGE:INVESTIGATOR Confidence values: HIGH | MEDIUM | LOW
- *   - §4.1  FORGE:INVESTIGATOR Severity values: CRITICAL | HIGH | MEDIUM | LOW
- *   - §4.2  FORGE:CONTRACT required fields: Problem, Acceptance Criteria
- *   - §4.3  FORGE:CONTEXT required fields: Historical Context
- *   - §4.4  FORGE:ARCHITECT required fields: Approach
- *   - §4.5  FORGE:BUILDER required fields: Branch, Commits, Files changed
- *   - §4.5  FORGE:BUILDER completion sentinel: <!-- FORGE:BUILDER:COMPLETE -->
- *   - §7.2  Unknown annotation types are tolerated (not errors)
- *   - §3.2  Interrupted annotations (no completion, no partial sentinel) are flagged
+ * Conformance rules:
+ *   This script does NOT reimplement the FORGE Annotation Protocol parsing/validation
+ *   rules itself. It delegates entirely to the spec reference implementation,
+ *   `@forgedock/protocol` (packages/protocol/src/{parse,validate,types}.js), which
+ *   implements §3.1 (opening tag format), §3.2 (completion sentinels), §3.3 (partial
+ *   sentinels), §4.x (per-type required fields and enum values), and §7.2 (tolerant
+ *   handling of unknown/unreserved annotation types). Delegating avoids a second,
+ *   independently-drifting parser (see #1521 — a prior standalone regex here diverged
+ *   from the library and rejected valid `TYPE:COMPLETE` sentinels as new annotations).
  */
 
 import { readFileSync } from "fs";
+import { parse, validate } from "../packages/protocol/src/index.js";
 
-// ── Spec-defined annotation types and their validation rules ──────────────────
-
-const KNOWN_TYPES = new Set([
-  "INVESTIGATOR", "CONTRACT", "CONTEXT", "ARCHITECT", "BUILDER",
-  "REVIEWER", "TRAJECTORY", "DECISION_RECORD", "CHECKPOINT",
-  "PHASE:COMPLETE", "GATE_FAILED", "ANCESTRY_FAILED", "AUDIT-AGENTS",
-  "STALL_DETECTED", "CARD",
-]);
-
-/**
- * Per-type validation: returns an array of violation strings (empty = conforming).
- * Completion sentinel is checked separately.
- */
-const TYPE_VALIDATORS = {
-  INVESTIGATOR(body) {
-    const errs = [];
-    if (!/\*\*Verdict\*\*:\s*(CONFIRMED|PARTIAL|INVALID)/i.test(body))
-      errs.push("Missing or invalid Verdict (expected CONFIRMED | PARTIAL | INVALID)");
-    if (!/\*\*Confidence\*\*:\s*(HIGH|MEDIUM|LOW)/i.test(body))
-      errs.push("Missing or invalid Confidence (expected HIGH | MEDIUM | LOW)");
-    if (!/\*\*Severity\*\*:\s*(CRITICAL|HIGH|MEDIUM|LOW)/i.test(body))
-      errs.push("Missing or invalid Severity (expected CRITICAL | HIGH | MEDIUM | LOW)");
-    if (!/\*\*Task Type\*\*:/i.test(body))
-      errs.push("Missing Task Type field");
-    if (!/decomposition assessment/i.test(body))
-      errs.push("Missing Decomposition Assessment");
-    return errs;
-  },
-  CONTRACT(body) {
-    const errs = [];
-    if (!/problem|what needs to (be done|change)/i.test(body))
-      errs.push("Missing Problem/scope description");
-    if (!/acceptance criteria/i.test(body))
-      errs.push("Missing Acceptance Criteria");
-    return errs;
-  },
-  CONTEXT(body) {
-    const errs = [];
-    if (!/historical context|prior findings|knowledge graph/i.test(body))
-      errs.push("Missing Historical Context section");
-    return errs;
-  },
-  ARCHITECT(body) {
-    const errs = [];
-    if (!/approach|implementation plan|design/i.test(body))
-      errs.push("Missing Approach/design section");
-    return errs;
-  },
-  BUILDER(body) {
-    const errs = [];
-    if (!/\*\*Branch\*\*:/i.test(body))
-      errs.push("Missing Branch field");
-    if (!/\*\*Commits?\*\*:/i.test(body))
-      errs.push("Missing Commits field");
-    if (!/\*\*Files changed\*\*:/i.test(body))
-      errs.push("Missing Files changed field");
-    return errs;
-  },
-};
-
-// Per-type completion sentinels (§3.2 — domain-specific sentinels where specified)
-const COMPLETION_SENTINELS = {
-  INVESTIGATOR: /<!--\s*INVESTIGATION:COMPLETE\s*-->/,
-  BUILDER: /<!--\s*FORGE:BUILDER:COMPLETE\s*-->/,
-  // For all other known types: generic pattern <!-- {TYPE}:COMPLETE -->
-};
-
-function completionSentinelFor(type) {
-  if (COMPLETION_SENTINELS[type]) return COMPLETION_SENTINELS[type];
-  return new RegExp(`<!--\\s*${type.replace(":", "\\:")}:COMPLETE\\s*-->`);
-}
-
-// ── Annotation extraction ─────────────────────────────────────────────────────
-
-/**
- * Extract all FORGE annotations from a comment body string.
- * Returns [{type, body, startLine}]
- */
-function extractAnnotations(commentBody) {
+// ── Line-number recovery ──────────────────────────────────────────────────────
+//
+// parse() returns ParsedAnnotation objects ({ type, raw, body, ... }) without a
+// line number — it only needs character-level text, not position, for its own
+// purposes. This script's console output has always reported a 1-indexed line
+// number per annotation, so we recover it here by matching each annotation's
+// opening-tag line against the original comment body, scanning forward from the
+// end of the previous match. Annotations are contiguous in the source (parse()
+// assigns every line from an opening tag onward to that annotation until the
+// next true opening tag), so a single forward-scanning pass is sufficient.
+function withStartLines(commentBody, annotations) {
   const lines = commentBody.split("\n");
-  const annotations = [];
-  let current = null;
-
-  for (let i = 0; i < lines.length; i++) {
-    const line = lines[i];
-    const openMatch = line.match(/^<!--\s*FORGE:([A-Z][A-Z0-9_:]*)\s*-->/);
-    if (openMatch) {
-      if (current) annotations.push(current);
-      current = { type: openMatch[1], body: line + "\n", startLine: i + 1 };
-    } else if (current) {
-      current.body += line + "\n";
-    }
-  }
-  if (current) annotations.push(current);
-  return annotations;
-}
-
-// ── Conformance check ─────────────────────────────────────────────────────────
-
-function checkAnnotation(ann) {
-  const { type, body } = ann;
-  const results = { type, startLine: ann.startLine, violations: [], warnings: [] };
-
-  // §7.2 — unknown types are tolerated
-  if (!KNOWN_TYPES.has(type)) {
-    results.warnings.push(`Unknown annotation type '${type}' — tolerated per §7.2`);
-    return results;
-  }
-
-  // §3.2 — completion sentinel check
-  const sentinel = completionSentinelFor(type);
-  const hasCompletion = sentinel.test(body);
-  const hasPartial = new RegExp(`<!--\\s*${type.replace(":", "\\:")}:PARTIAL\\s*-->`).test(body);
-
-  if (!hasCompletion) {
-    if (hasPartial) {
-      results.warnings.push(`Partial sentinel present — producer was interrupted (§3.3)`);
-    } else {
-      results.violations.push(`Missing completion sentinel (expected per §3.2)`);
-    }
-  }
-
-  // Per-type field validation
-  const validator = TYPE_VALIDATORS[type];
-  if (validator) {
-    results.violations.push(...validator(body));
-  }
-
-  return results;
+  let searchFrom = 0;
+  return annotations.map((ann) => {
+    const openingLine = ann.raw.split("\n")[0];
+    let idx = lines.indexOf(openingLine, searchFrom);
+    if (idx === -1) idx = searchFrom;
+    searchFrom = idx + 1;
+    return { ...ann, startLine: idx + 1 };
+  });
 }
 
 // ── Input parsing ─────────────────────────────────────────────────────────────
@@ -222,23 +108,25 @@ let totalViolations = 0;
 let totalWarnings = 0;
 
 for (const [idx, body] of commentBodies.entries()) {
-  const annotations = extractAnnotations(body);
-  if (!annotations.length) continue;
+  const parsed = parse(body);
+  if (!parsed.length) continue;
+
+  const annotations = withStartLines(body, parsed);
 
   for (const ann of annotations) {
     totalAnnotations++;
-    const result = checkAnnotation(ann);
+    const { errors, warnings } = validate(ann);
 
-    const prefix = `[comment ${idx + 1}, line ${result.startLine}] FORGE:${result.type}`;
+    const prefix = `[comment ${idx + 1}, line ${ann.startLine}] FORGE:${ann.type}`;
 
-    if (result.violations.length === 0 && result.warnings.length === 0) {
+    if (errors.length === 0 && warnings.length === 0) {
       console.log(`PASS  ${prefix}`);
     } else {
-      for (const v of result.violations) {
+      for (const v of errors) {
         console.error(`FAIL  ${prefix} — ${v}`);
         totalViolations++;
       }
-      for (const w of result.warnings) {
+      for (const w of warnings) {
         console.warn(`WARN  ${prefix} — ${w}`);
         totalWarnings++;
       }
