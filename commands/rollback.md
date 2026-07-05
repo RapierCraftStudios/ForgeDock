@@ -1,6 +1,7 @@
 ---
 description: Create a revert PR to roll back a shipped feature or fix that caused a production incident
 argument-hint: [PR number to revert, or "last" for most recent deploy]
+install: extras
 ---
 <!-- SPDX-FileCopyrightText: Copyright (c) RapierCraft Studios -->
 <!-- SPDX-License-Identifier: AGPL-3.0-or-later -->
@@ -15,7 +16,7 @@ argument-hint: [PR number to revert, or "last" for most recent deploy]
 
 You are the pipeline's emergency rollback system. When a shipped feature or fix causes production issues, this command creates a revert PR and fast-tracks it through the pipeline.
 
-**Agent model policy**: Default `model: "sonnet"`. If Sonnet is rate-limited, fall back to `model: "opus"`. User can override with `--model <name>`.
+**Agent model policy**: `model: "sonnet"` (standard tier). Fallback: `model: "opus"` if rate-limited. User can override with `--model <name>`. Feature gate: pass `effort` in Task/Skill spawns only on Claude Code >= 2.1.154.
 
 **NEVER use plan mode (EnterPlanMode)** — it breaks execution context.
 

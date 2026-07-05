@@ -334,7 +334,7 @@ review:
 
 Path configuration for the devdocs knowledge tree. Pipeline agents (work-on, review-pr, etc.) read these files as **authoritative project knowledge** before acting.
 
-Run `npx forgedock docs init` to scaffold the tree from ForgeDock's seed templates into the configured path.
+Create the devdocs tree by copying the seed templates from `devdocs/templates/` (in this repo) into your configured path, or scaffold it manually by creating `devdocs/project/architecture.md`, `devdocs/agent/using-forgedock.md`, and an optional `devdocs/index.yaml`.
 
 ```yaml
 devdocs:
@@ -345,9 +345,9 @@ devdocs:
 | Field | Type | Required | Description |
 |-------|------|----------|-------------|
 | `path` | string (relative path) | No | Path to the devdocs tree, relative to project root. Default: `devdocs`. |
-| `index_path` | string (relative or absolute path) | No | Path to the selective loading index file. Default: `{path}/index.yaml`. When the index file exists at this path, agents read it first (~400 tokens) and load only docs whose domain matches the current issue's labels. When absent, agents fall back to loading all docs with `applies_to: work-on` (backward compatible). Scaffold the index with `npx forgedock docs init`. |
+| `index_path` | string (relative or absolute path) | No | Path to the selective loading index file. Default: `{path}/index.yaml`. When the index file exists at this path, agents read it first (~400 tokens) and load only docs whose domain matches the current issue's labels. When absent, agents fall back to loading all docs with `applies_to: work-on` (backward compatible). Create the index manually or copy the seed template from `devdocs/templates/`. |
 
-**Commands that use this section**: `docs init`, `work-on/build/context` (Phase C-1), `work-on/build/architect` (Phase A0)
+**Commands that use this section**: `work-on/build/context` (Phase C-1), `work-on/build/architect` (Phase A0)
 
 ### Selective Loading (index.yaml)
 
@@ -366,14 +366,11 @@ When `devdocs/index.yaml` exists, agents use **domain-filtered selective loading
 
 **Backward compatibility**: If `index.yaml` is absent, behavior is unchanged — all docs with `applies_to: work-on` are loaded. No migration required for existing devdocs trees.
 
-Scaffold the index with:
-```bash
-npx forgedock docs init
-```
+Scaffold the index manually by creating `devdocs/index.yaml` (or copy the seed template from `devdocs/templates/` in the ForgeDock repo).
 
 ### Migration from `review.context`
 
-If you previously stored project context in `forge.yaml → review.context`, move that content into the appropriate devdocs file after running `npx forgedock docs init`:
+If you previously stored project context in `forge.yaml → review.context`, move that content into the appropriate devdocs file:
 
 | `review.context` content | Target devdocs file |
 |--------------------------|---------------------|

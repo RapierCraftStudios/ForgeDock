@@ -9,7 +9,7 @@
 > `motion.video_placeholder` fields + `motion` rubric dimension (#1043); `product_mock` field + `product_mock`
 > rubric dimension (#1045); `scroll_narrative` object + `scroll_narrative` rubric dimension (#1046).
 >
-> Registered as a FORGE annotation type in [`../FORGE-PROTOCOL.md`](../FORGE-PROTOCOL.md).
+> Registered as a FORGE annotation type in [`../spec/forge-protocol-v1.md`](../spec/forge-protocol-v1.md).
 
 ## Purpose
 

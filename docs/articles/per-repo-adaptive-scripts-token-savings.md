@@ -33,7 +33,7 @@ We measured this cost across five representative completed issues.
 
 We analyzed five pipeline sessions from the ForgeDock dogfooding repository (issues #674, #669, #671, #679, #676). For each session, we identified every tool call that was a "rediscovery call" — a call whose purpose was to learn something about the project that was already true in the previous session.
 
-Token counts were estimated at 1 token per 4 characters (conservative; actual tokenization may differ by model and content type). We counted command invocation + output, not context window overhead.
+Token counts were estimated at 1 token per 4 characters (conservative; actual tokenization may differ by model and content type), then adjusted upward ~30% to reflect the claude-sonnet-5 tokenizer, which produces approximately 30% more tokens than claude-sonnet-4.x for the same text. We counted command invocation + output, not context window overhead.
 
 ---
 
@@ -41,13 +41,13 @@ Token counts were estimated at 1 token per 4 characters (conservative; actual to
 
 | Operation | Mechanism (baseline) | Token estimate |
 |-----------|---------------------|----------------|
-| forge.yaml full read | Read 111-line, 4,228-byte file | ~1,050 |
-| Branch name determination | `gh issue view` + LLM milestone-to-slug inference | ~350 |
-| Commit style detection | `git log --oneline -5` + LLM pattern inference | ~200 |
-| Test command discovery | Read package.json/pyproject.toml + grep test scripts | ~400 |
-| Test location discovery | `ls tests/`, `ls __tests__/`, parse package.json | ~250 |
-| Label scheme discovery | `gh label list` or inferred from pipeline comments | ~300 |
-| **Total per session** | | **~2,550 tokens** |
+| forge.yaml full read | Read 111-line, 4,228-byte file | ~1,365 |
+| Branch name determination | `gh issue view` + LLM milestone-to-slug inference | ~455 |
+| Commit style detection | `git log --oneline -5` + LLM pattern inference | ~260 |
+| Test command discovery | Read package.json/pyproject.toml + grep test scripts | ~520 |
+| Test location discovery | `ls tests/`, `ls __tests__/`, parse package.json | ~325 |
+| Label scheme discovery | `gh label list` or inferred from pipeline comments | ~390 |
+| **Total per session** | | **~3,315 tokens** |
 
 These numbers are per-session. On a repository with active development (10-30 issues/month), this rediscovery tax runs 25,500–76,500 tokens/month on patterns that have not changed.
 
@@ -68,39 +68,41 @@ After `/optimize` generates `.forgedock/scripts/` entries from `forge.yaml → l
 
 | Script | Size | Execution cost |
 |--------|------|----------------|
-| `branch-targets.sh` | 23 lines, ~470 bytes | ~170 tokens |
-| `run-tests.sh` | 10 lines, ~200 bytes | ~80 tokens |
-| `format-commit.sh` | 15 lines, ~300 bytes | ~100 tokens |
-| `forge.yaml` learned section (4 targeted yq reads) | subset of 4,228-byte file | ~100 tokens |
-| **Total per session** | | **~450 tokens** |
+| `branch-targets.sh` | 23 lines, ~470 bytes | ~220 tokens |
+| `run-tests.sh` | 10 lines, ~200 bytes | ~105 tokens |
+| `format-commit.sh` | 15 lines, ~300 bytes | ~130 tokens |
+| `forge.yaml` learned section (4 targeted yq reads) | subset of 4,228-byte file | ~130 tokens |
+| **Total per session** | | **~585 tokens** |
 
-The key insight: a script call costs roughly the script size (to read) plus the output size (to receive). A 23-line branch-targets.sh costs ~118 tokens to read and produces 1 line of output. The equivalent LLM-based rediscovery costs ~350 tokens and occasionally hallucinates.
+The key insight: a script call costs roughly the script size (to read) plus the output size (to receive). A 23-line branch-targets.sh costs ~153 tokens to read and produces 1 line of output. The equivalent LLM-based rediscovery costs ~455 tokens and occasionally hallucinates.
 
 ---
 
 ## Savings Calculation
 
 ```
-savings_per_session = 2,550 - 450 = 2,100 tokens
+savings_per_session = 3,315 - 585 = 2,730 tokens
 
 range:
-  low  = 1,200 tokens  (simple fast-lane issues, no test discovery needed)
-  high = 3,500 tokens  (complex multi-file issues with full pattern rediscovery)
+  low  = 1,560 tokens  (simple fast-lane issues, no test discovery needed)
+  high = 4,550 tokens  (complex multi-file issues with full pattern rediscovery)
 ```
 
-At claude-sonnet-4-5 pricing ($3.00 per million input tokens):
+At claude-sonnet-5 pricing ($3.00 per million input tokens standard; $2.00/M intro through 2026-08-31):
 
 ```
-2,100 tokens/session × $3.00 / 1,000,000 = $0.0063/session
+2,730 tokens/session × $3.00 / 1,000,000 = $0.0082/session (standard)
+2,730 tokens/session × $2.00 / 1,000,000 = $0.0055/session (intro rate)
 ```
 
 At observed ForgeDock dogfooding pace (5–15 issues/day, averaging ~10):
 
 ```
-300 sessions/month × $0.0063 = $1.89/month per repo
+300 sessions/month × $0.0082 = $2.46/month per repo (standard rate)
+300 sessions/month × $0.0055 = $1.65/month per repo (intro rate through 2026-08-31)
 ```
 
-For teams running ForgeDock at production scale across multiple repositories, these savings compound. A team with 5 active repos at 300 sessions/month each saves ~$9.45/month from adaptive scripts alone. The cost of running `/optimize` once per repo to generate the scripts: effectively zero (a single session that generates ~5 scripts).
+For teams running ForgeDock at production scale across multiple repositories, these savings compound. A team with 5 active repos at 300 sessions/month each saves ~$12.30/month from adaptive scripts alone at standard pricing. The cost of running `/optimize` once per repo to generate the scripts: effectively zero (a single session that generates ~5 scripts).
 
 **Payback period: 1 session.**
 
@@ -125,10 +127,10 @@ Per-repo scripts replace approximately 25–40% of devdocs content for projects 
 **Combined savings per session** (adaptive scripts + devdocs selective loading):
 
 ```
-Rediscovery elimination (adaptive scripts): ~2,100 tokens
-Devdocs selective loading (#675):           ~1,000 tokens
+Rediscovery elimination (adaptive scripts): ~2,730 tokens
+Devdocs selective loading (#675):           ~1,300 tokens
 ────────────────────────────────────────────────────────
-Total combined:                             ~3,100 tokens/session
+Total combined:                             ~4,030 tokens/session
 ```
 
 ---
@@ -159,7 +161,7 @@ The estimates in this article carry these caveats:
 
 3. **LLM hallucination cost not counted**: Our baseline counts only the token cost of rediscovery, not the token cost of correcting a hallucinated branch name or wrong test command. Including rework, the actual cost of rediscovery-induced errors is higher.
 
-4. **Model pricing changes**: The $3.00/M figure is current as of June 2026. Pricing trends downward over time; the absolute dollar savings will decrease, but the proportional savings (rediscovery as a fraction of session cost) remain constant.
+4. **Model pricing changes**: The $3.00/M standard figure is current as of July 2026 for claude-sonnet-5. An introductory rate of $2.00/M input is available through 2026-08-31. Pricing trends downward over time; the absolute dollar savings will decrease, but the proportional savings (rediscovery as a fraction of session cost) remain constant.
 
 ---
 

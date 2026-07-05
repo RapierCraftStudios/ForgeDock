@@ -27,8 +27,20 @@ import {
   backupExisting,
   manualLowConfidenceKeys,
 } from "./journey.mjs";
-import { removeSessionStartHook } from "./settings-hook.mjs";
-import { resolveState, setOptOut, clearNudgeSeen } from "./registry.mjs";
+import {
+  removeSessionStartHook,
+  removeSubagentStopHook,
+  removePreToolUseHook,
+  removeSubagentStopEnforceHook,
+} from "./settings-hook.mjs";
+import {
+  resolveState,
+  setOptOut,
+  clearNudgeSeen,
+  detectClaudeVersion,
+  loadBreakpoints,
+  hasFeature,
+} from "./registry.mjs";
 import { renderMark, ember } from "./cinema.mjs";
 import {
   renderLogo,
@@ -58,10 +70,54 @@ const COMMANDS_DIR = join(FORGE_HOME, "commands");
 // os.homedir() as the always-available fallback (no hard exit — see #744).
 const HOME = process.env.HOME || process.env.USERPROFILE || homedir();
 
-const TARGET_DIR = join(HOME, ".claude", "commands");
-const MANIFEST_PATH = join(HOME, ".claude", "forgedock", "copied-commands.json");
+// ---------------------------------------------------------------------------
+// Install-mode path resolution
+// ---------------------------------------------------------------------------
+// ForgeDock installs commands globally, to ~/.claude/. That is the only
+// location the installer (bin/journey.mjs: forge()) ever writes to — it
+// resolves its target from ctx.home (HOME/USERPROFILE/os.homedir()), never
+// from process.cwd(). A prior refactor (#1288/#1500) added a project-scoped-
+// by-default detection layer here without updating the installer to match,
+// producing a split-brain where status/doctor/uninstall could report a
+// "project-scoped" location that install() never actually wrote to (see
+// #1589). This was backed out: detection now always agrees with what the
+// installer does.
+//
+// --global is still accepted as a CLI flag for backward compatibility with
+// existing invocations, but it is now a no-op — global is the only supported
+// install location.
+
+const GLOBAL_CLAUDE_DIR = join(HOME, ".claude");
+
+/**
+ * Resolve the install target directories for the current invocation.
+ * Always resolves to the global (~/.claude) location — see the block
+ * comment above for why project-scoped resolution was removed.
+ *
+ * @returns {{ targetDir: string, scriptsTargetDir: string, manifestPath: string, isGlobal: boolean }}
+ */
+function resolveInstallPaths() {
+  return {
+    targetDir: join(GLOBAL_CLAUDE_DIR, "commands"),
+    scriptsTargetDir: join(GLOBAL_CLAUDE_DIR, "scripts"),
+    manifestPath: join(GLOBAL_CLAUDE_DIR, "forgedock", "copied-commands.json"),
+    isGlobal: true,
+  };
+}
+
+/**
+ * Resolve install paths for uninstall/update/doctor/status. Kept as a
+ * distinct entry point (rather than calling resolveInstallPaths() directly)
+ * since these commands conceptually "detect" an existing install; today
+ * that always resolves to the same global location as resolveInstallPaths().
+ *
+ * @returns {{ targetDir: string, scriptsTargetDir: string, manifestPath: string, isGlobal: boolean }}
+ */
+function detectInstallPaths() {
+  return resolveInstallPaths();
+}
+
 const SCRIPTS_DIR = join(FORGE_HOME, "scripts");
-const SCRIPTS_TARGET_DIR = join(HOME, ".claude", "scripts");
 
 /**
  * Allowlist of pipeline-agent scripts that `uninstall` cleans up from
@@ -84,12 +140,15 @@ const PIPELINE_SCRIPTS = new Set([
 // --minimal is init-only. Subcommands with their own flag parsing (run,
 // run-issue, demo) receive restArgs — everything after the command token.
 const rawArgs = process.argv.slice(2);
-const FLAGS = new Set(["--fast", "--manual", "--verbose", "--minimal"]);
+const FLAGS = new Set(["--fast", "--manual", "--verbose", "--minimal", "--extras"]);
 const flags = rawArgs.filter((a) => FLAGS.has(a));
-const positional = rawArgs.filter((a) => !FLAGS.has(a));
+// --global is stripped from positionals/restArgs for backward compatibility
+// with existing invocations, but is otherwise a no-op — see the install-mode
+// path resolution block above (global is now the only install location).
+const positional = rawArgs.filter((a) => !FLAGS.has(a) && a !== "--global");
 const command = positional[0] || "install";
-const cmdIdx = rawArgs.findIndex((a) => !FLAGS.has(a));
-const restArgs = cmdIdx === -1 ? [] : rawArgs.slice(cmdIdx + 1);
+const cmdIdx = rawArgs.findIndex((a) => !FLAGS.has(a) && a !== "--global");
+const restArgs = cmdIdx === -1 ? [] : rawArgs.slice(cmdIdx + 1).filter((a) => a !== "--global");
 
 // ---------------------------------------------------------------------------
 // SessionStart hook — settings.json helpers
@@ -492,6 +551,11 @@ function ctx() {
   const c = makeCtx({ argv: flags });
   c.forgeHome = FORGE_HOME;
   c.home = HOME;
+  c.includeExtras = flags.includes("--extras");
+  // Detect installed Claude Code version for version-gated install paths (#1252).
+  // Fail-open: null means version is unknown; callers must handle gracefully.
+  c.claudeVersion = detectClaudeVersion();
+  c.breakpoints = loadBreakpoints(FORGE_HOME);
   return c;
 }
 
@@ -506,7 +570,8 @@ function statusScreen(c) {
   const configured = existsSync(join(c.cwd, "forge.yaml"));
   c.stdout.write(`  directory   ${state}\n`);
   c.stdout.write(`  forge.yaml  ${configured ? "present" : "missing"}\n`);
-  c.stdout.write(`  commands    ${existsSync(TARGET_DIR) ? "installed at " + TARGET_DIR : "not installed"}\n`);
+  const { targetDir: statusTargetDir } = detectInstallPaths();
+  c.stdout.write(`  commands    ${existsSync(statusTargetDir) ? "installed at " + statusTargetDir : "not installed"}\n`);
   if (state === "managed-optedout") {
     c.stdout.write(`\n  ForgeDock is disabled (opted out) here. Re-enable: npx forgedock enable\n`);
   } else if (state === "unmanaged") {
@@ -546,7 +611,7 @@ async function initFlow(c) {
       stagingBranch: draft.branches.staging.value,
     });
     atomicWriteFile(outputPath, content);
-    celebrate(c, { written: true, todoCount: 0 });
+    celebrate(c, { written: true, todoCount: 0, isMinimal: true });
     return 0;
   }
 
@@ -581,6 +646,10 @@ async function uninstall() {
   console.log(`${BOLD}ForgeDock${RESET} — Removing pipeline commands`);
   console.log("");
 
+  const { targetDir, scriptsTargetDir, manifestPath } = detectInstallPaths();
+  console.log(`  Mode: global (~/.claude)`);
+  console.log("");
+
   const files = await findMarkdownFiles(COMMANDS_DIR);
   let removed = 0;
 
@@ -591,7 +660,7 @@ async function uninstall() {
   // installs that predate the manifest.
   let manifest = null;
   try {
-    manifest = JSON.parse(await readFile(MANIFEST_PATH, "utf-8"));
+    manifest = JSON.parse(await readFile(manifestPath, "utf-8"));
   } catch {
     manifest = null;
   }
@@ -602,7 +671,7 @@ async function uninstall() {
 
   for (const file of files) {
     const rel = relative(COMMANDS_DIR, file);
-    const target = join(TARGET_DIR, rel);
+    const target = join(targetDir, rel);
 
     try {
       const stats = await lstat(target);
@@ -640,7 +709,7 @@ async function uninstall() {
   // them — the manifest is the only record of ForgeDock's ownership over them.
   const manifestRels = Object.keys(manifestFiles);
   for (const rel of manifestRels) {
-    const target = join(TARGET_DIR, rel);
+    const target = join(targetDir, rel);
     try {
       const stats = await lstat(target);
       if (stats.isFile() && !stats.isSymbolicLink()) {
@@ -661,8 +730,8 @@ async function uninstall() {
   if (manifest && manifestRels.length > 0) {
     manifest.files = {};
     try {
-      await mkdir(dirname(MANIFEST_PATH), { recursive: true });
-      await writeFile(MANIFEST_PATH, JSON.stringify(manifest, null, 2) + "\n", "utf-8");
+      await mkdir(dirname(manifestPath), { recursive: true });
+      await writeFile(manifestPath, JSON.stringify(manifest, null, 2) + "\n", "utf-8");
     } catch {
       // Best-effort — a failed manifest write is non-fatal
     }
@@ -672,13 +741,13 @@ async function uninstall() {
   console.log(`Done. Removed: ${removed} commands.`);
   console.log("");
 
-  // Remove scripts installed by ForgeDock from ~/.claude/scripts/
+  // Remove scripts installed by ForgeDock from the detected scripts target dir
   const scriptFiles = await findScriptFiles(SCRIPTS_DIR);
   let scriptsRemoved = 0;
 
   for (const file of scriptFiles) {
     const rel = relative(SCRIPTS_DIR, file);
-    const target = join(SCRIPTS_TARGET_DIR, rel);
+    const target = join(scriptsTargetDir, rel);
 
     try {
       const stats = await lstat(target);
@@ -711,9 +780,8 @@ async function uninstall() {
 
   // Remove the SessionStart hook from ~/.claude/settings.json via the
   // hardened settings-hook module (never writes through malformed JSON).
-  const { status: hookRemoveResult } = removeSessionStartHook(
-    join(HOME, ".claude", "settings.json"),
-  );
+  const settingsJsonPath = join(HOME, ".claude", "settings.json");
+  const { status: hookRemoveResult } = removeSessionStartHook(settingsJsonPath);
   if (hookRemoveResult === "removed") {
     console.log(
       `  ${GREEN}✔${RESET}  Removed SessionStart hook from ${CYAN}~/.claude/settings.json${RESET}`,
@@ -726,6 +794,25 @@ async function uninstall() {
     console.log(
       `  ${YELLOW}⚠${RESET}  Could not update ~/.claude/settings.json — remove the hook manually.`,
     );
+  }
+
+  // Remove enforcement hooks (#1250): PreToolUse, SubagentStop interactive
+  // engine adapter, and SubagentStop annotation verifier.
+  const { status: preToolUseRemoveResult } = removePreToolUseHook(settingsJsonPath);
+  if (preToolUseRemoveResult === "removed") {
+    console.log(`  ${GREEN}✔${RESET}  Removed PreToolUse enforcement hook from ${CYAN}~/.claude/settings.json${RESET}`);
+  } else if (preToolUseRemoveResult !== "absent") {
+    console.log(`  ${YELLOW}⚠${RESET}  Could not remove PreToolUse hook — check ${CYAN}~/.claude/settings.json${RESET} manually.`);
+  }
+  const { status: subagentStopRemoveResult } = removeSubagentStopHook(settingsJsonPath);
+  if (subagentStopRemoveResult === "removed") {
+    console.log(`  ${GREEN}✔${RESET}  Removed SubagentStop hook from ${CYAN}~/.claude/settings.json${RESET}`);
+  }
+  const { status: subagentStopEnforceRemoveResult } = removeSubagentStopEnforceHook(settingsJsonPath);
+  if (subagentStopEnforceRemoveResult === "removed") {
+    console.log(`  ${GREEN}✔${RESET}  Removed SubagentStop enforcement hook from ${CYAN}~/.claude/settings.json${RESET}`);
+  } else if (subagentStopEnforceRemoveResult !== "absent") {
+    console.log(`  ${YELLOW}⚠${RESET}  Could not remove SubagentStop enforcement hook — check ${CYAN}~/.claude/settings.json${RESET} manually.`);
   }
   console.log("");
 
@@ -831,6 +918,8 @@ async function update() {
   console.log("");
   console.log(`${BOLD}ForgeDock${RESET} — Checking for updates`);
   console.log("");
+
+  console.log(`  Mode: global (~/.claude)`);
 
   // Check if installed via npm (no .git directory) or via git clone
   const gitDir = join(FORGE_HOME, ".git");
@@ -1033,6 +1122,10 @@ async function labelsSetup(repo) {
 async function doctor() {
   console.log("");
   console.log(`${BOLD}ForgeDock Doctor${RESET} — Installation Health Check`);
+  console.log("");
+
+  const { targetDir: TARGET_DIR } = detectInstallPaths();
+  console.log(`  Mode: global (~/.claude)`);
   console.log("");
 
   let failures = 0;
@@ -1274,6 +1367,41 @@ async function doctor() {
       }
     } catch (err) {
       fail("SessionStart hook", `Cannot read ~/.claude/settings.json: ${err.message}. Run: npx forgedock install`);
+    }
+  }
+
+  // ── Check 5b: 2026 feature-gated install capabilities ─────────────────────
+  {
+    const detectedVer = detectClaudeVersion();
+    const breakpoints = loadBreakpoints(FORGE_HOME);
+    if (detectedVer === null) {
+      warn(
+        "Version-gated features",
+        "claude CLI not detected — cannot assess 2026 feature availability. Install or add claude to PATH.",
+      );
+    } else {
+      const vStr = Array.isArray(detectedVer) ? detectedVer.join(".") : String(detectedVer);
+      const featureChecks = [
+        ["effort levels", "effort_levels", "2.1.154"],
+        ["SubagentStop context injection", "stop_subagent_stop_additional_context", "2.1.163"],
+        ["Tool(param:value) permission rules", "tool_param_value_permission_rules", "2.1.178"],
+        ["skills/commands merge", "skills_commands_merge", "2.1.196"],
+        ["Sonnet 5 default + 1M context", "sonnet_5_default_1m_context", "2.1.197"],
+      ];
+      const unavailable = featureChecks
+        .filter(([, key]) => !hasFeature(breakpoints, key, vStr))
+        .map(([label, , minVer]) => `${label} (requires v${minVer}+)`);
+      if (unavailable.length === 0) {
+        pass(
+          "Version-gated features",
+          `v${vStr} — all 2026 features available`,
+        );
+      } else {
+        warn(
+          "Version-gated features",
+          `v${vStr} — unavailable: ${unavailable.join(", ")}. Update Claude Code to unlock.`,
+        );
+      }
     }
   }
 
@@ -1578,7 +1706,7 @@ function help() {
   const commands = [
     ["Command", "Description"],
     ["npx forgedock", "Guided setup: install commands + configure repo (default)"],
-    ["npx forgedock install", "Install commands"],
+    ["npx forgedock install", "Install commands to ~/.claude/"],
     ["npx forgedock init", "Generate forge.yaml config for your project"],
     ["npx forgedock init --minimal", "Generate a minimal forge.yaml (required sections only)"],
     ["npx forgedock enable [dir]", "Activate ForgeDock in a directory"],
@@ -1586,8 +1714,11 @@ function help() {
     ["npx forgedock status [dir]", "Show ForgeDock state for a directory"],
     ["npx forgedock run <cmd> [args]", "Run a command headlessly via the Anthropic API"],
     ["npx forgedock run-issue <issue>", "Drive one issue through the durable engine"],
+    ["npx forgedock resume-stalled [--dry-run]", "Fleet stall recovery — re-dispatch expired-lease issues"],
     ["npx forgedock demo", "Set up a risk-free demo repo and print next steps"],
     ["npx forgedock labels [setup] [--repo owner/repo]", "Bootstrap ForgeDock-managed labels on a GitHub repo (idempotent)"],
+    ["npx forgedock watch [--repo owner/repo]", "Live per-agent orchestration view (Ctrl+C to exit)"],
+    ["npx forgedock report [--days 30] [--md] [--json]", "30-day pipeline impact receipts for your repo"],
     ["npx forgedock doctor", "Check installation health"],
     ["npx forgedock update", "Pull latest & reinstall"],
     ["npx forgedock uninstall", "Remove commands"],
@@ -1615,7 +1746,7 @@ function help() {
  *
  * Flags:
  *   --dry-run               Preview the assembled prompt + tool plan; no API call.
- *   --model <id>            Override the model (default: claude-sonnet-4-5 or $FORGEDOCK_MODEL).
+ *   --model <id>            Override the model (default: claude-sonnet-5 or $FORGEDOCK_MODEL).
  *   --max-iterations <n>    Bound the tool-use loop (default: 50).
  *
  * The live loop requires ANTHROPIC_API_KEY and the optional @anthropic-ai/sdk
@@ -1713,13 +1844,212 @@ async function demo() {
   }
 }
 
+/**
+ * `forgedock watch` — live per-agent orchestration view
+ *
+ * Polls GitHub every 5 seconds for in-flight issues (those with workflow:*
+ * labels) and renders a per-agent table with issue#, title, phase, elapsed
+ * time, and staleness status.  All data is sourced from FORGE:HEARTBEAT
+ * comments written by the pipeline at each phase boundary.
+ *
+ * Stalled agents (no HEARTBEAT update within pipeline.stall_timeout_minutes)
+ * are highlighted in yellow.
+ *
+ * Run:  npx forgedock watch [--repo owner/repo]
+ * Exit: Ctrl+C
+ */
+async function watch() {
+  const POLL_INTERVAL_MS = 5000;
+  const USE_ANSI_WATCH = process.stdout.isTTY === true && !process.env.NO_COLOR && process.env.TERM !== "dumb";
+
+  // ── Resolve repo ──────────────────────────────────────────────────────────
+  const watchRepo = resolveLabelsRepo(restArgs);
+  if (!watchRepo) {
+    process.stderr.write(
+      `${RED}No repository found.${RESET}\n` +
+      `  Run from a directory with ${cyan("forge.yaml")}, or pass ${cyan("--repo owner/repo")}.\n`,
+    );
+    process.exitCode = 1;
+    return;
+  }
+
+  // ── Validate gh CLI auth ───────────────────────────────────────────────────
+  try {
+    execSync("gh auth status", { stdio: ["ignore", "pipe", "ignore"] });
+  } catch {
+    process.stderr.write(
+      `${RED}gh CLI is not authenticated.${RESET}\n` +
+      `  Fix: run ${cyan("gh auth login")} then retry.\n`,
+    );
+    process.exitCode = 1;
+    return;
+  }
+
+  // ── Resolve stall timeout ─────────────────────────────────────────────────
+  let stallMinutes = 15;
+  const forgeYamlPath = join(process.cwd(), "forge.yaml");
+  if (existsSync(forgeYamlPath)) {
+    try {
+      const raw = readFileSync(forgeYamlPath, "utf-8");
+      const m = raw.match(/^\s*stall_timeout_minutes:\s*(\d+)/m);
+      if (m) stallMinutes = parseInt(m[1], 10);
+    } catch { /* ignore */ }
+  }
+
+  // ── Helpers ────────────────────────────────────────────────────────────────
+  function extractPhase(heartbeatBody) {
+    const m = heartbeatBody.match(/\*\*Phase\*\*:\s*(.+)/);
+    return m ? m[1].trim() : "unknown";
+  }
+
+  function extractTimestamp(heartbeatBody) {
+    const m = heartbeatBody.match(/\*\*Timestamp\*\*:\s*(\S+)/);
+    return m ? m[1].trim() : null;
+  }
+
+  function elapsedMin(isoTimestamp) {
+    if (!isoTimestamp) return null;
+    const ms = Date.now() - new Date(isoTimestamp).getTime();
+    return Math.floor(ms / 60000);
+  }
+
+  function elapsedStr(minutes) {
+    if (minutes === null) return "—";
+    if (minutes < 60) return `${minutes}m`;
+    return `${Math.floor(minutes / 60)}h ${minutes % 60}m`;
+  }
+
+  // ── Cleanup on exit ────────────────────────────────────────────────────────
+  let intervalHandle;
+  function cleanup() {
+    if (intervalHandle) clearTimeout(intervalHandle);
+    if (USE_ANSI_WATCH) {
+      process.stdout.write("\x1b[?25h"); // show cursor
+    }
+    process.exit(0);
+  }
+  process.on("SIGINT", cleanup);
+  process.on("SIGTERM", cleanup);
+
+  if (USE_ANSI_WATCH) {
+    process.stdout.write("\x1b[?25l"); // hide cursor
+  }
+
+  // ── Render loop ────────────────────────────────────────────────────────────
+  const WORKFLOW_LABELS = [
+    "workflow:investigating",
+    "workflow:ready-to-build",
+    "workflow:building",
+    "workflow:in-review",
+    "needs-human",
+  ];
+
+  async function render() {
+    const rows = [["#", "Title", "Phase", "Elapsed", "Status"]];
+    let anyIssues = false;
+
+    for (const label of WORKFLOW_LABELS) {
+      let issueJson;
+      try {
+        // Use execFileSync with argument array to avoid shell injection via watchRepo
+        issueJson = execFileSync(
+          "gh",
+          ["issue", "list", "-R", watchRepo, "--state", "open",
+           "--label", label, "--limit", "30", "--json", "number,title"],
+          { encoding: "utf-8", stdio: ["ignore", "pipe", "pipe"] },
+        );
+      } catch {
+        continue;
+      }
+
+      let issues;
+      try { issues = JSON.parse(issueJson); } catch { continue; }
+
+      for (const issue of issues) {
+        anyIssues = true;
+        let phase = label.replace("workflow:", "");
+        let elapsed = null;
+
+        // Fetch latest FORGE:HEARTBEAT comment for phase + timestamp
+        try {
+          const commentsJson = execFileSync(
+            "gh",
+            ["api", `repos/${watchRepo}/issues/${issue.number}/comments`,
+             "--jq", "[.[] | select(.body | contains(\"FORGE:HEARTBEAT\"))] | last | .body // \"\""],
+            { encoding: "utf-8", stdio: ["ignore", "pipe", "pipe"] },
+          ).trim();
+          if (commentsJson && commentsJson !== '""' && commentsJson !== "") {
+            const body = commentsJson.replace(/^"|"$/g, "").replace(/\\n/g, "\n");
+            phase = extractPhase(body) || phase;
+            const ts = extractTimestamp(body);
+            elapsed = elapsedMin(ts);
+          }
+        } catch { /* use label-derived phase */ }
+
+        const isStalled = elapsed !== null && elapsed >= stallMinutes;
+        const isBlocked = label === "needs-human";
+        const status = isBlocked ? "BLOCKED" : isStalled ? "STALLED" : "running";
+
+        const titleTrunc = issue.title.length > 38 ? issue.title.slice(0, 35) + "..." : issue.title;
+        const phaseShort = phase.length > 30 ? phase.slice(0, 27) + "..." : phase;
+
+        const statusColored = USE_ANSI_WATCH
+          ? (isBlocked ? `\x1b[31m${status}\x1b[0m` : isStalled ? `\x1b[33m${status}\x1b[0m` : `\x1b[32m${status}\x1b[0m`)
+          : status;
+
+        const titleColored = USE_ANSI_WATCH && (isStalled || isBlocked)
+          ? `\x1b[33m${titleTrunc}\x1b[0m`
+          : titleTrunc;
+
+        rows.push([
+          `#${issue.number}`,
+          titleColored,
+          phaseShort,
+          elapsedStr(elapsed),
+          statusColored,
+        ]);
+      }
+    }
+
+    const now = new Date().toISOString().replace("T", " ").slice(0, 19) + " UTC";
+
+    if (USE_ANSI_WATCH) {
+      process.stdout.write("\x1b[2J\x1b[H"); // clear screen + home
+    } else {
+      process.stdout.write(`\n${"─".repeat(60)}\n`);
+    }
+
+    process.stdout.write(`${BOLD}ForgeDock Watch${RESET} — ${dim(watchRepo)}  ${dim(now)}\n\n`);
+
+    if (!anyIssues || rows.length === 1) {
+      process.stdout.write(`  ${dim("No in-flight issues. All quiet.")}\n`);
+    } else {
+      process.stdout.write(table(rows, { header: true }));
+    }
+
+    if (USE_ANSI_WATCH) {
+      process.stdout.write(`\n${dim("Refreshing every 5s — Ctrl+C to exit")}\n`);
+    }
+  }
+
+  // Self-scheduling render loop — each render awaits completion before
+  // scheduling the next, preventing overlapping cycles when GitHub API
+  // latency exceeds the poll interval (forge#1428).
+  async function scheduleRender() {
+    await render();
+    intervalHandle = setTimeout(scheduleRender, POLL_INTERVAL_MS);
+    intervalHandle.unref(); // don't keep process alive if loop drains
+  }
+  await scheduleRender();
+}
+
 // The journey-routed commands render their own branded marks (hero/compact);
 // splash() would double-brand them. Engine-surface commands, help, and
 // unknown-command output keep the logo.
-const SPLASH_COMMANDS = new Set(["run", "run-issue", "demo", "doctor", "help", "--help", "-h"]);
+const SPLASH_COMMANDS = new Set(["run", "run-issue", "resume-stalled", "demo", "doctor", "watch", "help", "--help", "-h"]);
 const KNOWN_COMMANDS = new Set([
   "install", "init", "enable", "disable", "status", "uninstall", "update",
-  "run", "run-issue", "demo", "doctor", "help", "--help", "-h",
+  "run", "run-issue", "resume-stalled", "demo", "doctor", "watch", "labels", "help", "--help", "-h",
 ]);
 if (SPLASH_COMMANDS.has(command) || !KNOWN_COMMANDS.has(command)) splash();
 
@@ -1727,6 +2057,32 @@ let exitCode = 0;
 switch (command) {
   case "install": {
     const c = ctx();
+    // Version-gated install path (#1252): detect Claude Code version and advise
+    // on features available or missing. Fail-open — null version skips checks.
+    if (c.claudeVersion) {
+      // Gate: effort levels require v2.1.154+
+      if (!hasFeature(c.breakpoints, "effort_levels", c.claudeVersion)) {
+        process.stderr.write(
+          `  ${YELLOW}note${RESET}  Claude Code v${c.claudeVersion} detected — effort-level frontmatter requires v2.1.154+. ` +
+          `Some orchestration features will use fallback mode.\n`
+        );
+      }
+      // Gate: tool permission rules require v2.1.178+
+      if (!hasFeature(c.breakpoints, "tool_param_value_permission_rules", c.claudeVersion)) {
+        process.stderr.write(
+          `  ${YELLOW}note${RESET}  Claude Code v${c.claudeVersion} detected — Tool(param:value) permission rules require v2.1.178+. ` +
+          `Hook-based enforcement (#1250) will not be installed.\n`
+        );
+      } else {
+        // v2.1.178+ supports permission rules — suggest opt-in rules for pipeline safety.
+        process.stderr.write(
+          `  ${CYAN}tip${RESET}   Claude Code v${c.claudeVersion} supports permission rules. ` +
+          `Consider adding to ~/.claude/settings.json:\n` +
+          `         { "permissions": { "deny": ["Bash(git push origin main*)"] } }\n` +
+          `         This prevents accidental direct pushes to main.\n`
+        );
+      }
+    }
     if (existsSync(join(c.cwd, "forge.yaml")) && resolveState(c.cwd) === "managed-active") {
       statusScreen(c);
     } else {
@@ -1771,7 +2127,23 @@ switch (command) {
     break;
   case "run-issue": {
     const { runFromCli } = await import("./engine-cli.mjs");
-    await runFromCli(restArgs);
+    try {
+      await runFromCli(restArgs);
+    } catch (err) {
+      process.stderr.write(`${RED}${err.message}${RESET}\n`);
+      exitCode = 1;
+    }
+    break;
+  }
+  case "resume-stalled": {
+    const { resumeStalledFromCli } = await import("./engine-cli.mjs");
+    try {
+      const result = await resumeStalledFromCli(restArgs);
+      if (result && result.failed && result.failed.length > 0) exitCode = 1;
+    } catch (err) {
+      process.stderr.write(`${RED}${err.message}${RESET}\n`);
+      exitCode = 1;
+    }
     break;
   }
   case "demo":
@@ -1779,6 +2151,14 @@ switch (command) {
     break;
   case "doctor":
     exitCode = await doctor();
+    break;
+  case "report": {
+    const { runReport } = await import("./report.mjs");
+    await runReport(restArgs);
+    break;
+  }
+  case "watch":
+    await watch();
     break;
   case "labels": {
     const subcommand = positional[1];

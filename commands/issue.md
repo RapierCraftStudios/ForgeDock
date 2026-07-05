@@ -11,7 +11,7 @@ argument-hint: [description of the problem or feature]
 
 You create GitHub issues with the exact structure the `/work-on` pipeline expects. Every issue you create must give the investigation agent enough context to find the right files on the first pass — no vague descriptions, no missing domains, no ambiguous scope.
 
-**Agent model policy**: Default `model: "sonnet"`. Fallback: `model: "opus"` if Sonnet is rate-limited.
+**Agent model policy**: `model: "sonnet"` (standard tier). Fallback: `model: "opus"` if rate-limited. Feature gate: pass `effort` in Task/Skill spawns only on Claude Code >= 2.1.154.
 **NEVER use plan mode (EnterPlanMode).**
 
 ---
@@ -133,8 +133,28 @@ List every file that the fix/feature will need to touch. Be thorough:
 
 ### 2D: Check for duplicates
 
+Run the deterministic dedup script first (authoritative check), then fall back to an LLM pass if the script produces no result:
+
 ```bash
-# Search for existing issues with similar scope
+# Authoritative deterministic check — uses token overlap algorithm (see scripts/issue-dedup.sh)
+DEDUP_RESULT=$(scripts/issue-dedup.sh "{PROPOSED_TITLE}" {GH_FLAG} 2>&1)
+DEDUP_EXIT=$?
+
+if [ "$DEDUP_EXIT" -eq 1 ]; then
+  echo "Near-duplicate detected: $DEDUP_RESULT"
+  echo "Existing issue found — do NOT create a new one."
+  # STOP here and report to user (see handling rules below)
+elif [ "$DEDUP_EXIT" -eq 2 ]; then
+  echo "Dedup check usage error: $DEDUP_RESULT"
+  echo "Do NOT proceed to issue creation — fix the invocation and retry."
+  # STOP here — do not fall through to gh issue create
+fi
+```
+
+If the script exits 0 (no match found), also run an LLM-side search as a fallback:
+
+```bash
+# LLM fallback — broader semantic search for issues the token algorithm may miss
 gh issue list {GH_FLAG} --state open --limit 20 --search "{key_terms}" --json number,title,labels --jq '.[] | "#\(.number) [\(.labels | map(.name) | join(","))] \(.title)"'
 
 # Also check recently closed issues (might be a regression)
@@ -144,6 +164,7 @@ gh issue list {GH_FLAG} --state closed --limit 10 --search "{key_terms}" --json 
 If a duplicate exists:
 - **Open duplicate found**: Tell the user. Do NOT create the issue. Show the existing issue number.
 - **Closed duplicate found (regression)**: Create the issue but reference the prior issue in the body: "Regression of #{N}."
+- **User wants to override**: Pass `--force` to the dedup script — this is an explicit human override path. Agents MUST NOT pass `--force` without user authorization. <!-- Added: forge#1335 -->
 
 ### 2E: Check for milestone context
 

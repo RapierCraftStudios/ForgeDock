@@ -10,11 +10,13 @@
 // >>> It exists only inside examples/forgedock-demo so the review agents have
 // >>> something to catch. Do not copy this pattern into real code.
 
-let notes = [
-  { id: 1, owner: 'alice', title: 'Buy milk', body: 'Whole milk, 2 liters', secret: false },
-  { id: 2, owner: 'alice', title: 'Launch plan', body: 'Ship the demo repo', secret: true },
-  { id: 3, owner: 'bob', title: 'Gym', body: 'Leg day', secret: false },
+const SEED = [
+  { id: 1, owner: 'alice', title: 'Buy milk', body: 'Whole milk, 2 liters', secret: false, tags: ['errand'], archived: false, createdAt: '2024-01-01T00:00:00.000Z' },
+  { id: 2, owner: 'alice', title: 'Launch plan', body: 'Ship the demo repo', secret: true, tags: ['work'], archived: false, createdAt: '2024-01-02T00:00:00.000Z' },
+  { id: 3, owner: 'bob', title: 'Gym', body: 'Leg day', secret: false, tags: ['fitness', 'errand'], archived: false, createdAt: '2024-01-03T00:00:00.000Z' },
 ];
+
+let notes = SEED.map((n) => ({ ...n }));
 
 let nextId = 4;
 
@@ -43,7 +45,13 @@ function query(whereClause) {
 }
 
 function insert(note) {
-  const record = { id: nextId++, secret: false, ...note };
+  const record = { id: nextId++, secret: false, tags: [], archived: false, createdAt: new Date().toISOString() };
+  // Only override a default when the caller actually supplied the key — a
+  // spread of an object containing an explicit `undefined` would otherwise
+  // silently clobber the default (e.g. `tags: undefined`).
+  for (const [key, value] of Object.entries(note)) {
+    if (value !== undefined) record[key] = value;
+  }
   notes.push(record);
   return record;
 }
@@ -55,12 +63,29 @@ function remove(id) {
 }
 
 function reset() {
-  notes = [
-    { id: 1, owner: 'alice', title: 'Buy milk', body: 'Whole milk, 2 liters', secret: false },
-    { id: 2, owner: 'alice', title: 'Launch plan', body: 'Ship the demo repo', secret: true },
-    { id: 3, owner: 'bob', title: 'Gym', body: 'Leg day', secret: false },
-  ];
+  notes = SEED.map((n) => ({ ...n }));
   nextId = 4;
 }
 
-module.exports = { all, findById, query, insert, remove, reset };
+// Returns a NEW array sorted by `id` ascending — does not mutate `arr`.
+//
+// >>> DEMO NOTE: bubble sort is an INTENTIONAL, isolated inefficiency (O(n^2))
+// >>> kept here so the review/perf pipeline has a real hot path to optimize.
+// >>> `notes` is already maintained in insertion (id) order, so callers that
+// >>> only need "sorted by id" rarely need this at all — see the perf issue
+// >>> that targets its one caller in routes/notes.js.
+function bubbleSortById(arr) {
+  const copy = arr.slice();
+  for (let i = 0; i < copy.length; i++) {
+    for (let j = 0; j < copy.length - i - 1; j++) {
+      if (copy[j].id > copy[j + 1].id) {
+        const tmp = copy[j];
+        copy[j] = copy[j + 1];
+        copy[j + 1] = tmp;
+      }
+    }
+  }
+  return copy;
+}
+
+module.exports = { all, findById, query, insert, remove, reset, bubbleSortById };

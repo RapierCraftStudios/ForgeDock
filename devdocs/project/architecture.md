@@ -40,6 +40,7 @@ ForgeDock uses a strict two-repo model:
 | Hosted script API (faster, validated, versioned) | Platform | Commercial premium |
 | Token efficiency analytics | Platform | Commercial value-add |
 | Website / marketing | Platform | Commercial |
+| FORGE annotation parse/validate/emit library (`packages/protocol/`) | ForgeDock (this repo, `packages/` subdir) | MIT-licensed — published as `@forgedock/protocol` on npm; separately versioned and publishable; usable by any producer/consumer of FORGE annotations without AGPL obligation. Implements all 13 reserved types from the spec (parse/validate/emit + conformance suite). Built in #1291. |
 
 ## Platform Roadmap
 
@@ -57,12 +58,30 @@ Key value props:
 - **Deterministic** — scripts layer enforces exact outputs where prose instructions fail
 - **Traceable** — every decision, finding, and change is tracked via FORGE annotations on GitHub
 
+## Agent Model / Effort Tier Map (#1249)
+
+Every pipeline stage carries an explicit `model` and `effort` in its **Agent model policy** line. Stages are classified into three tiers:
+
+| Tier | Model | Effort | Stages |
+|------|-------|--------|--------|
+| **mechanical** | `haiku` | `low` | Label transitions, FORGE annotation posting, issue classification, `/orchestrate` dispatch bookkeeping, `/work-on/close`, `/changelog`, `/pipeline-resume` |
+| **standard** | `sonnet` | _(default)_ | Context gathering, implement, validate, most review personas, `/work-on`, `/issue`, `/work-on/investigate`, `/work-on/build`, `/work-on/review`, `/review-pr`, `/qa-sweep`, `/adopt`, `/deploy-info`, `/diagnose`, `/explain`, `/scope`, `/validate`, `/replay`, `/rollback`, `/incident-response`, `/compat-audit`, `/ci-audit`, `/analytics`, `/optimize`, `/forgedock-init`, `/pipeline-health`, `/review-pr-staging`, `/audit`, `/autopilot` |
+| **deep** | `sonnet` (fallback: `opus`) | `xhigh` | `/work-on/build/architect`, the always-runs General Security & Quality reviewer in `/review-pr`, `/security-audit` |
+
+**Fallback rule** (all tiers): if the designated model is rate-limited, fall back to `opus`.
+
+**Feature gate**: `effort` frontmatter is only emitted when Claude Code >= 2.1.154. Commands that spawn subagents pass `model` and `effort` explicitly in every `Task`/`Skill` call rather than relying on the prose policy line.
+
+**Cost rationale**: Haiku 4.5 is ~$1/$5 per MTok vs Sonnet 5 at ~$3/$15 — assigning mechanical stages to Haiku yields an estimated 40–60% cost reduction on a full `/work-on` run (18–20 agent invocations) with no quality loss on deterministic operations; explicit `xhigh` on architect/security review improves quality where it matters most.
+
 ## Known Pipeline Weaknesses (Active Issues)
 
 These are systemic problems being actively addressed:
 
-### Agent Compliance (#639)
+### Agent Compliance (#639, #1383)
 Agents hallucinate branch names and routing targets despite explicit spec instructions. The LLM "reasons" its way around deterministic rules. **Root cause**: prose instructions are suggestions, not constraints. **Fix**: Scripts layer (#651) — extract deterministic operations into executable scripts.
+
+**Concrete incident (#1383)**: Agent invoked with `/review-pr 1378` on a staging-to-main PR completely ignored the command spec — used the `Agent` tool (not in `allowed-tools`), skipped Phase 0 routing to `review-pr-staging`, and never executed deploy gates or test gates. **Mitigations applied**: HARD RULES preambles, `FORGE:SPEC_LOADED` markers, and `NEVER use Agent tool` warnings added to all CRITICAL/HIGH command specs (#1389). Spec compliance rules added to `templates/devdocs/agent/using-forgedock.md` for distribution (#1383). **Long-term fix**: PreToolUse hooks (#1250) for deterministic enforcement.
 
 ### Token Bloat (#619)
 All 27 command specs (~848KB) load into context at session start via symlinks. Most sessions use 1-2 commands but pay the token cost for all of them. **Fix**: Stub + invoke pattern — install thin stubs, load full specs on demand.
@@ -95,7 +114,8 @@ Proposed (deterministic):
 2. `transition-label.sh` — label state machine with validation
 3. `validate-pr-target.sh` — hard-fail if PR targets wrong branch
 4. `worktree-lifecycle.sh` — deterministic worktree create/reuse/cleanup (`ensure`/`cleanup` subcommands; built — #1268). Call-site migration of `work-on.md` Phase 3E/6E to invoke it is a tracked fast-follow (#1247), not yet wired in.
-5. `post-annotation.sh` — FORGE annotation posting with format validation (planned)
+5. `forge-annotation.sh` — FORGE annotation read/write/validate engine (Bash; built in #1267) — single source of truth for annotation schema, sentinel checks, and required-field validation across all 5 marker types (INVESTIGATOR, CONTEXT, ARCHITECT, BUILDER, DECOMPOSED). Subcommands: `write` renders a well-formed `<!-- FORGE:MARKER -->` comment body from field arguments, `read` fetches the latest matching annotation via `gh api`, `validate` rejects a body missing its required completion terminator (e.g. `FORGE:INVESTIGATOR` without `INVESTIGATION:COMPLETE`) with a non-zero exit. Call-site migration tracked in #1247.
+6. `validate-annotation-node.mjs` — thin Node.js adapter that validates annotation bodies against the MIT/Apache protocol library (`packages/protocol/`, built in #1291); built in #1292. Complements `forge-annotation.sh`: Bash handles format/sentinel rules (AGPL), Node handles spec-conformance against the library (MIT). Degrades gracefully when the library is not yet installed.
 
 **Deploy-gate testing scripts** (milestone: Deterministic Deploy-Gate Testing — #863):
 
@@ -117,25 +137,82 @@ These scripts sit in the universal tier (bundled with the npm package, run local
 - Replace repeated per-session re-discovery with cached operational knowledge
 - User can opt-in to committing them to the repo
 
-**Measured token savings** (from #673 — based on 5 representative ForgeDock sessions):
+**Measured token savings** (from #673 — based on 5 representative ForgeDock sessions, estimates adjusted ~30% upward for the claude-sonnet-5 tokenizer):
 
 | Operation | Baseline (rediscovery) | With adaptive scripts | Saving |
 |-----------|------------------------|----------------------|--------|
-| forge.yaml full read | ~1,050 tokens | ~100 tokens (learned: section only) | ~950 |
-| Branch name determination | ~350 tokens (gh + LLM inference) | ~170 tokens (branch-targets.sh) | ~180 |
-| Commit style detection | ~200 tokens (git log + LLM) | ~100 tokens (format-commit.sh) | ~100 |
-| Test command discovery | ~400 tokens (package.json + grep) | ~80 tokens (run-tests.sh) | ~320 |
-| Test location + label discovery | ~550 tokens | ~0 discovery¹ | ~550 |
-| **Session total** | **~2,550 tokens** | **~450 tokens** | **~2,100 tokens** |
+| forge.yaml full read | ~1,365 tokens | ~130 tokens (learned: section only) | ~1,235 |
+| Branch name determination | ~455 tokens (gh + LLM inference) | ~220 tokens (branch-targets.sh) | ~235 |
+| Commit style detection | ~260 tokens (git log + LLM) | ~130 tokens (format-commit.sh) | ~130 |
+| Test command discovery | ~520 tokens (package.json + grep) | ~105 tokens (run-tests.sh) | ~415 |
+| Test location + label discovery | ~715 tokens | ~0 discovery¹ | ~715 |
+| **Session total** | **~3,315 tokens** | **~585 tokens** | **~2,730 tokens** |
 
-¹ The prose-discovery calls for test locations and label schemes are eliminated (replaced by `find-tests.sh` and `label-map.sh`). Script execution costs (~80–100 tokens each) are already included in the ~450 session total above — they are not additive.
+¹ The prose-discovery calls for test locations and label schemes are eliminated (replaced by `find-tests.sh` and `label-map.sh`). Script execution costs (~105–130 tokens each) are already included in the ~585 session total above — they are not additive.
 
-Savings range: 1,200 tokens (simple fast-lane issues) to 3,500 tokens (complex multi-file builds).
-At claude-sonnet-4-5 pricing ($3.00/M tokens): ~$0.0063/session saved, ~$1.89/month per repo at 300 sessions/month.
+Savings range: 1,560 tokens (simple fast-lane issues) to 4,550 tokens (complex multi-file builds).
+At claude-sonnet-5 pricing ($3.00/M tokens standard; $2.00/M intro through 2026-08-31): ~$0.0082/session saved at standard pricing, ~$2.46/month per repo at 300 sessions/month. Token estimates use a 1 token ≈ 4 characters heuristic adjusted ~30% for the claude-sonnet-5 tokenizer (±20% error margin).
 
 The primary value is **reliability**, not cost: scripts eliminate LLM inference from deterministic operations. An agent running `branch-targets.sh` cannot hallucinate the branch name (see #639 — hallucinated `milestone/project-agnostic` caused 6-day pipeline misrouting).
 
 Full methodology and data: `docs/articles/per-repo-adaptive-scripts-token-savings.md`
+
+## Topology Benchmark <!-- Added: forge#1279 -->
+
+Measures the end-to-end token cost per issue to validate the agent topology refactor (#1254) claim: inlining sequential build phases eliminates 6-8 fresh-context establishments per standard run, reducing token cost without degrading quality gates.
+
+### Methodology
+
+**Corpus**: 5 seeded issues in `examples/forgedock-demo/` — fixed, reproducible, covers the full issue type range (bug, feature, refactor, performance, docs).
+
+| Issue | Type | Title |
+|-------|------|-------|
+| #1 | Bug / security | DELETE is missing an auth check |
+| #2 | Feature / security | Safe filtering for GET /notes |
+| #3 | Refactor | Extract the router module |
+| #4 | Performance | O(1) findById |
+| #5 | Docs | Add an API reference |
+
+**Measurement unit**: tokens per issue per `/work-on` run — input_tokens + output_tokens (billed), cache_read_tokens, cache_write_tokens (context establishment proxy).
+
+**Primary signal**: `cache_write_tokens` — each spawned subagent establishes fresh context, writing its full prompt into the cache. Inlining phases reduces the number of fresh-context establishments, lowering `cache_write_tokens`.
+
+**Topologies compared**:
+- `spawned` — baseline: sequential build phases each spawned as separate subagents (pre-#1254)
+- `inline-sequential` — refactored: sequential phases run inline within the orchestrator session (post-#1254)
+
+**Tooling**: `scripts/bench-topology-cost.mjs` — zero-dependency ESM aggregator. Input: structured JSON of per-issue token measurements. Output: per-topology summary, delta, quality gate confirmation.
+
+### Running the Benchmark
+
+```bash
+# After collecting measurements from a /work-on session on examples/forgedock-demo/:
+node scripts/bench-topology-cost.mjs runs.json
+
+# Help / input schema:
+node scripts/bench-topology-cost.mjs --help
+```
+
+Input schema: see `scripts/bench-topology-cost.mjs` file header (search: "Input schema").
+
+When `bin/runner.mjs` emits structured token usage (#1295), measurements can be auto-populated from session logs. Until then, capture from Claude Code session summaries.
+
+### Quality Gate Confirmation
+
+For each topology run, all 5 demo issues must pass quality gate (`quality_gate_passed: true`). The benchmark verdict is INVALID if any quality gate regressed in the post-refactor topology.
+
+### Results
+
+> **Status**: Awaiting post-refactor data. Dependencies #1276-#1278 must complete before post-refactor measurements can be captured.
+
+| Metric | Spawned (baseline) | Inline-sequential (refactored) | Delta | Change |
+|--------|-------------------|-------------------------------|-------|--------|
+| Total tokens (5 issues) | TBD | TBD | TBD | TBD |
+| Avg tokens / issue | TBD | TBD | TBD | TBD |
+| Cache write tokens | TBD | TBD | TBD | TBD |
+| Quality gates passed | TBD | TBD | — | — |
+
+*Update this table when measurements are available. Run `node scripts/bench-topology-cost.mjs runs.json` to generate the delta automatically.*
 
 ### Script Precedence
 
@@ -196,6 +273,79 @@ esac
 ```
 
 **Logging tier in FORGE annotations**: When a script resolution runs, log the tier used (`adaptive`, `universal`, or `prose`) in the corresponding FORGE annotation comment. This gives the pipeline trace full observability into which script tier handled each operation.
+
+## Concurrency Model (Engine, #1324)
+
+**Decision recorded**: 2026-07-04
+
+The durable execution engine (#1256) uses an **in-process worker pool + worktree-per-issue** model for concurrent issue dispatch.
+
+### Chosen model: in-process worker pool
+
+Each concurrent issue runs inside the **same engine process** but is isolated on disk by its own git worktree (created/cleaned up via `scripts/worktree-lifecycle.sh`). A single control plane owns the DAG ready-set, dispatch loop, lease renewal, and rate-limit backpressure.
+
+### Why not process-per-issue
+
+| Concern | Process-per-issue | In-process pool |
+|---------|------------------|-----------------|
+| Filesystem isolation | Separate clone per issue | Worktree per issue (`worktree-lifecycle.sh` — already shipped, #1268) |
+| Rate-limit backpressure | Requires IPC to share API quota | Single gate in the dispatch loop |
+| DAG coordination | Cross-process signalling | In-memory ready-set |
+| Recovery / lease renewal | Separate watchdog per process | One lease manager |
+
+### Concurrency cap
+
+`forge.yaml → orchestration.max_concurrent` (optional, default uncapped). When set, the dispatch loop holds at most N in-flight workers; newly ready issues queue until a slot opens. Prevents rate-limit storms from large batches.
+
+### Rate-limit backpressure
+
+Pre-dispatch gate: if `gh api rate_limit` remaining < `FORGE_RATE_LIMIT_FLOOR` (default 200, overridable via `forge.yaml → orchestration.rate_limit_floor`), the dispatch loop pauses until the quota resets. Already-running workers continue unaffected.
+
+### Related issues
+
+- #1256 — durable engine umbrella (foundation)
+- #1268 — `worktree-lifecycle.sh` (MERGED — isolation primitive)
+- #1317 — economic self-governance (related backpressure at scheduler layer)
+- #1247 — work-on.md call-site migration to worktree-lifecycle.sh (fast-follow)
+
+---
+
+## Five Foundations of True Autonomy (Epic #1320)
+
+ForgeDock has a world-class execution layer (investigate → build → review → merge) but requires five foundational capabilities for true autonomous operation. Every recurring pain point — stalls, context-death, misleading idle metrics, forced merges with follow-up issues — is a symptom of one of these missing layers.
+
+### The Five Foundations
+
+| # | Foundation | What it provides | Key issues | Design spec |
+|---|-----------|-----------------|------------|-------------|
+| 1 | **Durable execution** | Control plane owns state/checkpoint/resume; LLM is a pure function at a node | #1256, #1250, #1262, #1266 | `docs/superpowers/specs/2026-07-03-durable-execution-engine-design.md` |
+| 2 | **Machine-checkable verification** | Outcome-based merge gate + eval harness | #1315, #1285, #1286, #1287, #1284, #1259, #1306 | — |
+| 3 | **Per-codebase learning memory** | Retrieval brain over trajectories/PRs/incidents | #1316 | — |
+| 4 | **Economic self-governance** | Risk×cost go/no-go + budget-aware scheduler | #1317, #1249, #1255, #1295, #1296, #1297, #1313, #1314 | `docs/superpowers/specs/2026-07-04-economic-self-governance-design.md` |
+| 5 | **Signed replayable provenance** | Trust artifact for autonomous merges | #1318, #1291, #1292, #1293, #1294 | `docs/superpowers/specs/2026-07-04-provenance-trail-design.md` |
+
+Plus the expansion bet: **Closed-loop autonomy** — production signal → planned DAG → verified resolution (#1319; builds on #1251 + analytics/incident sensors).
+
+### Sequencing
+
+Foundations 1 and 2 are load-bearing; 3–5 compound on top.
+
+**The one bet**: Go all-in on the durable engine (#1256) + eval harness (#1285) as a single initiative. The engine gives you something deterministic to score; the harness tells you whether changes help. That flywheel is the foundation, and the current stall/context-death bug classes (#1305, #1307, #1308) are deleted for free by the engine.
+
+### Durable Moat
+
+Recorded strategy says "moat = workflows, not compute." Workflows are copyable prose. The durable moat is layers 3 + 5: a system that has been learning a customer's codebase for months and can *prove* its changes are safe is not copyable. Verification and learning are the product; the prompts are not.
+
+### Acceptance Criteria
+
+- [ ] Durable engine (#1256) implemented and load-bearing for downstream layers
+- [ ] Eval harness (#1285, #1286, #1287, #1284) operational with outcome-based merge gate (#1315)
+- [ ] Per-codebase learning memory (#1316) implemented
+- [ ] Economic self-governance (#1317) operational with risk×cost go/no-go
+- [ ] Signed replayable provenance (#1318) implemented using FORGE protocol (#1291–1294)
+- [ ] Closed-loop autonomy (#1319) functional
+
+---
 
 ## Milestone: Deterministic Pipeline v2
 

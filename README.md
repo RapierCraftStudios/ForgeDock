@@ -150,7 +150,7 @@ Issue → Investigate → Context → Architect → Build → Quality Gate → R
 | **Review** | PR diff, contract, gate results | `FORGE:REVIEW_STARTED` on the issue; per-agent findings as structured `FINDING` blocks on the PR |
 | **Close** | All of the above | `FORGE:TRAJECTORY` — the full audit trail of the run |
 
-**GitHub as the database.** Every annotation is wrapped in an HTML comment (`<!-- FORGE:INVESTIGATOR -->`) that makes it machine-parseable. When an agent starts — even in a brand-new conversation after compaction — it queries the issue via `gh` and reconstructs full context from these tags. Workflow labels (`workflow:investigating`, `workflow:in-review`, `workflow:merged`…) track state, and the pipeline resumes from whatever state GitHub reports. The annotation format is an open standard — see the [FORGE Annotation Protocol](docs/FORGE-PROTOCOL.md).
+**GitHub as the database.** Every annotation is wrapped in an HTML comment (`<!-- FORGE:INVESTIGATOR -->`) that makes it machine-parseable. When an agent starts — even in a brand-new conversation after compaction — it queries the issue via `gh` and reconstructs full context from these tags. Workflow labels (`workflow:investigating`, `workflow:in-review`, `workflow:merged`…) track state, and the pipeline resumes from whatever state GitHub reports. The annotation format is an open standard — see the [FORGE Annotation Protocol](docs/spec/forge-protocol-v1.md).
 
 **Durable by design.** Headless runs are backed by a real execution engine, not prompt-hope: every phase transition is appended to an event-sourced, crash-safe run log, mirrored to the issue as a compact `FORGE:STATE` index, and guarded by leases so two agents can never own the same issue. Kill the process mid-run and restart it — the engine reconciles local state against GitHub (GitHub wins), adopts branches and PRs that already exist instead of re-running the LLM, and escalates to `needs-human` after bounded retries instead of looping. Phase selection is a pure rule-based state machine: **the engine, not the model, decides what happens next.** The headless core shipped in [PR #1326](https://github.com/RapierCraftStudios/ForgeDock/pull/1326); wiring the interactive path onto the same engine is in progress ([#1323](https://github.com/RapierCraftStudios/ForgeDock/issues/1323)–[#1325](https://github.com/RapierCraftStudios/ForgeDock/issues/1325)).
 
@@ -221,8 +221,11 @@ More ship today (web-property analytics, browser QA sweeps, self-benchmarking) �
 **Requirements:** [Claude Code](https://docs.anthropic.com/en/docs/claude-code) · [GitHub CLI](https://cli.github.com/) (authenticated) · Node.js ≥ 18.
 
 ```bash
-npx forgedock          # checks your environment, installs the commands, detects your repo, and hands you a reviewed forge.yaml
+npx forgedock          # project-scoped install: checks your environment, installs commands for this repo, detects your repo, and hands you a reviewed forge.yaml
+npx forgedock --global # global install: installs into ~/.claude/commands/ — available in every Claude Code session on this machine
 ```
+
+**Project-scoped is the default.** `npx forgedock` installs commands scoped to the current project directory. Use `--global` only when you want the commands available across all your projects on this machine.
 
 One command does everything: it checks your environment, installs the slash commands into Claude Code, detects your repo (owner, branches, paths), and hands you a single annotated `forge.yaml` to review — press Enter to accept. Run `npx forgedock init` any time afterward to re-generate the config only.
 
@@ -248,6 +251,15 @@ Commands then appear as `/forgedock:work-on`, etc. You still run `npx forgedock 
 
 **Headless / CI:** the pipeline also runs outside Claude Code. `npx forgedock run work-on <issue> --dry-run` previews the assembled prompt and tool plan; with an `ANTHROPIC_API_KEY`, `npx forgedock run` drives the same command specs through a hardened tool-use loop, and `npx forgedock run-issue <issue>` executes them on the durable engine (event-sourced run log, leases, crash-safe resume).
 
+**Install modes:**
+
+```bash
+npx forgedock install           # project-scoped: <cwd>/.claude/commands/ (default)
+npx forgedock install --global  # global: ~/.claude/commands/ (opt-in)
+```
+
+`uninstall`, `update`, and `doctor` auto-detect which mode is installed — no need to re-specify `--global` after a global install. To explicitly target global: `npx forgedock doctor --global`.
+
 **Maintenance:**
 
 ```bash
@@ -255,12 +267,42 @@ npx forgedock update      # relink commands + refresh the SessionStart hook
 npx forgedock enable      # turn ForgeDock on for this directory
 npx forgedock disable     # turn ForgeDock off for this directory
 npx forgedock status      # show ForgeDock's state for this directory
-npx forgedock doctor      # installation health check with fix hints
-npx forgedock uninstall   # remove commands, the hook, and tracked copies
+npx forgedock doctor      # installation health check with fix hints (auto-detects mode)
+npx forgedock report      # 30-day pipeline impact receipts (--md for Markdown, --json for scripting)
+npx forgedock uninstall   # remove commands, the hook, and tracked copies (auto-detects mode)
 npx forgedock help        # show everything
 ```
 
 > Running `npx forgedock` from *inside* this repo uses the local working tree. From your own project, use `npx forgedock@latest` to pin the published release.
+
+</details>
+
+<details>
+<summary><strong>Migrating from a global install</strong></summary>
+
+If you installed ForgeDock before project-scoped became the default, your commands live in `~/.claude/commands/`. You have two paths forward:
+
+**Keep the global install** — add `--global` going forward and nothing changes:
+
+```bash
+npx forgedock --global   # install / update globally as before
+```
+
+**Switch to project-scoped** (recommended for multi-repo setups):
+
+```bash
+# 1. Check your current install mode
+npx forgedock status
+
+# 2. Remove the global install
+npx forgedock uninstall --global
+
+# 3. Install project-scoped in each repo you use ForgeDock in
+cd /path/to/your/project
+npx forgedock
+```
+
+Run `npx forgedock doctor` after switching to confirm everything is healthy.
 
 </details>
 
@@ -272,8 +314,8 @@ The core is AGPL-3.0 and stays that way: engineers run the full pipeline on thei
 
 Two things are for sale:
 
-- **A [commercial license](COMMERCIAL-LICENSE.md)** — for organizations that need ForgeDock inside proprietary workflows or products without AGPL copyleft obligations. Contact [licensing@rapiercraft.studio](mailto:licensing@rapiercraft.studio).
-- **The fleet layer** *(in development)* — org-wide observability over every pipeline run: the receipts on this page, live, across all your repos, plus policy controls and audit-grade provenance for autonomous merges. We're onboarding a small group of design partners — [open a Discussion](https://github.com/RapierCraftStudios/ForgeDock/discussions) or email the address above to get in early.
+- **A [commercial license](COMMERCIAL-LICENSE.md)** — for organizations that need ForgeDock inside proprietary workflows or products without AGPL copyleft obligations. Contact [support@rapiercraftstudios.com](mailto:support@rapiercraftstudios.com).
+- **The fleet layer** *(in development)* — org-wide observability over every pipeline run: the receipts on this page, live, across all your repos, plus policy controls and audit-grade provenance for autonomous merges. We're onboarding a small group of design partners — see [ForgeDock for Companies](docs/site/for-companies.md) for details and intake.
 
 ---
 
@@ -282,7 +324,7 @@ Two things are for sale:
 Month one built the execution layer. The open roadmap — tracked in the [five-foundations epic (#1320)](https://github.com/RapierCraftStudios/ForgeDock/issues/1320) — is about earning trust while unattended:
 
 1. **Durability** — engine-owned state instead of prose-owned state. Headless core shipped ([PR #1326](https://github.com/RapierCraftStudios/ForgeDock/pull/1326)); interactive wiring in progress.
-2. **Verification** — an outcome-based acceptance gate and a graded eval corpus, so "done" is machine-checkable before anything claims success.
+2. **Verification** — an outcome-based acceptance gate and a graded eval corpus, so "done" is machine-checkable before anything claims success. Per-release pipeline scorecards are published in [`docs/eval/`](docs/eval/README.md); model upgrades follow the [model-release playbook](docs/articles/model-release-playbook.md).
 3. **Learning** — per-codebase memory that compounds across runs.
 4. **Economics** — per-run cost accounting and risk×cost dispatch decisions.
 5. **Provenance** — signed, replayable records of every autonomous change.
@@ -320,15 +362,18 @@ Using ForgeDock in your pipeline? Add the badge — each one is a backlink and a
 
 ## Docs & community
 
+- [GitHub Is Already Your Agents' Memory](docs/site/github-is-the-memory.md) — the canonical argument: why GitHub is the right place for agent memory, how FORGE annotations make it machine-readable, and how to adopt the protocol without ForgeDock
 - [Getting Started in 5 Minutes](docs/site/getting-started.md)
 - [How the Knowledge Graph Works](docs/site/how-it-works.md)
 - [What Are Those FORGE Comments?](docs/site/annotations-explained.md) — 2-minute explainer for annotations you meet in the wild
-- [FORGE Annotation Protocol](docs/FORGE-PROTOCOL.md) — the open standard for AI context passing ([formal v1.0 spec](docs/spec/forge-protocol-v1.md))
+- [FORGE Annotation Protocol](docs/spec/forge-protocol-v1.md) — the open standard for AI context passing (CC-BY-4.0)
 - [ForgeDock vs. Manual Claude Code Workflows](docs/site/vs-manual-workflows.md)
 - [ForgeDock vs. DeepWiki, AGENTS.md, and Cursor Memories](docs/comparison.md)
 - [Command Learning Path](docs/site/command-learning-path.md) — which commands to learn first
 - [Complete Command Reference](docs/site/command-reference.md)
 - [Troubleshooting & Recovery](docs/site/troubleshooting.md)
+- [Pipeline Eval Scorecards](docs/eval/README.md) — per-release published results for every model/Claude Code upgrade
+- [Model-Release Upgrade Playbook](docs/articles/model-release-playbook.md) — how to validate a new model before adopting it
 
 **Contributing:** PRs welcome — every change goes through a PR, tested against 3+ scenarios, using conventional commits (`fix(command):`, `feat(command):`). **License:** [AGPL-3.0](LICENSE) — free to use, modify, and distribute; network use of modifications must be open-sourced under the same license. Commercial licenses are available for proprietary use — see [COMMERCIAL-LICENSE.md](COMMERCIAL-LICENSE.md).
 

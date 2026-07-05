@@ -30,6 +30,30 @@ describe("state codec", () => {
     assert.equal(parseState(body).v, 7);
   });
 
+  it("round-trips state containing --> in string values (HTML comment injection guard)", () => {
+    // A terminalReason or branch containing "-->" must not close the HTML comment early.
+    const poison = { ...idx, terminalReason: "step --> done --> ok", branch: "fix/-->-42" };
+    const body = "prefix\n\n" + serializeState(poison);
+    // The raw serialized form must NOT contain the literal "-->" sequence inside the payload
+    const rawPayload = body.match(/<!-- FORGE:STATE\n([\s\S]*?)\n-->/)?.[1] ?? "";
+    assert.ok(!rawPayload.includes("-->"), "payload must not contain raw --> (would close HTML comment early)");
+    // But round-tripping through parseState must restore the original values
+    const got = parseState(body);
+    assert.deepEqual(got, poison);
+  });
+
+  it("round-trips state containing --!> in string values (HTML comment injection guard)", () => {
+    // "--!>" is an alternate HTML comment terminator that JSON.stringify does not
+    // escape; it must not appear raw in the payload (CodeQL js/bad-tag-filter).
+    const poison = { ...idx, terminalReason: "abort --!> now", branch: "fix/--!>-42" };
+    const body = "prefix\n\n" + serializeState(poison);
+    const rawPayload = body.match(/<!-- FORGE:STATE\n([\s\S]*?)\n-->/)?.[1] ?? "";
+    assert.ok(!rawPayload.includes("--!>"), "payload must not contain raw --!> (HTML comment terminator)");
+    assert.ok(!rawPayload.includes("-->"), "payload must not contain raw --> either");
+    const got = parseState(body);
+    assert.deepEqual(got, poison);
+  });
+
   it("upsertStateBlock handles $ replacement patterns in JSON values", () => {
     // Create an index with $ replacement patterns in serialized values
     const idx1 = { v: 1, run: "r1", issue: 42, lane: "staging",

@@ -1,0 +1,9 @@
+{
+  "description": "ANCESTRY_FAILED — control marker signals branch ancestry check failure",
+  "input": "<!-- FORGE:ANCESTRY_FAILED -->",
+  "expect": {
+    "type": "ANCESTRY_FAILED",
+    "valid": true,
+    "sentinelState": "complete"
+  }
+}

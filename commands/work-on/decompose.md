@@ -12,7 +12,7 @@ argument-hint: [issue number] [--repo GH_REPO] [--gh-flag GH_FLAG]
 **Invoked by**: `work-on.md` routing loop, when `INVESTIGATE_RESULT.decompose = YES`.
 **Output**: Create sub-issues, update parent tracker, post `<!-- FORGE:DECOMPOSED -->` comment, set labels. STOP — each sub-issue runs its own /work-on.
 
-**Agent model policy**: Default `model: "sonnet"`. If Sonnet is rate-limited, fall back to `model: "opus"`.
+**Agent model policy**: `model: "sonnet"` (standard tier). Fallback: `model: "opus"` if rate-limited. Feature gate: pass `effort` in Task/Skill spawns only on Claude Code >= 2.1.154.
 **NEVER use plan mode (EnterPlanMode).**
 
 ---
@@ -107,6 +107,24 @@ For each sub-issue, prepare:
 ## Phase D3: Create Sub-Issues
 
 For each sub-issue (in dependency order):
+
+**Before creating each sub-issue, run the deterministic dedup check:** <!-- Added: forge#1335 -->
+
+```bash
+SUB_TITLE="{fix|feat|refactor}: {SUB_ISSUE_TITLE}"
+DEDUP_RESULT=$(scripts/issue-dedup.sh "$SUB_TITLE" {GH_FLAG} 2>&1)
+DEDUP_EXIT=$?
+if [ "$DEDUP_EXIT" -eq 1 ]; then
+  echo "DEDUP: Sub-issue near-duplicate detected — $DEDUP_RESULT"
+  echo "Skipping creation. Comment on the existing issue instead."
+  # Do NOT call gh issue create for this sub-issue
+elif [ "$DEDUP_EXIT" -eq 2 ]; then
+  echo "DEDUP: Usage error — $DEDUP_RESULT"
+  # Do NOT call gh issue create for this sub-issue — fix the invocation and retry
+fi
+```
+
+Only call `gh issue create` when the dedup script exits 0 (no match):
 
 ```bash
 gh issue create {GH_FLAG} \

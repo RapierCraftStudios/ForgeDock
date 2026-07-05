@@ -1,0 +1,211 @@
+name: Deploy Gate Marker Check
+
+# Verifies that staging→main PRs have a FORGE:GATE_PASS or FORGE:GATE_FAILURE
+# marker comment before merge is allowed. Closes the bypass-detection gap
+# identified in forge#1387: without this check, a spec bypass (agent never ran
+# review-pr-staging) is indistinguishable from a clean gate pass because both
+# previously left no comment.
+#
+# Trigger: pull_request targeting main (staging→main deploy PRs only).
+# Non-staging→main PRs are skipped immediately (the gate only applies to deploy PRs).
+#
+# Gate logic:
+#   1. On PR open / sync / reopen: schedule a 30-minute pending window.
+#      If no gate marker is found within 30 minutes, post a warning comment and
+#      fail the check.
+#   2. On subsequent syncs and label/comment events: re-evaluate immediately.
+#      If a marker is found, the check passes. If still absent, fail.
+#
+# Note: The 30-minute window is enforced by the `gate-marker-stale` job using
+# a `created_at` comparison against the PR's head commit timestamp. This avoids
+# requiring a scheduled workflow with PR number state.
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, labeled, unlabeled]
+    branches:
+      - main
+  issue_comment:
+    types: [created]
+
+permissions:
+  pull-requests: read
+  contents: read
+  statuses: write
+
+jobs:
+  gate-marker-check:
+    name: Check for FORGE gate markers
+    runs-on: ubuntu-latest
+
+    # Only run on PRs targeting main — skip all other PR events
+    if: |
+      github.event_name == 'pull_request' ||
+      (github.event_name == 'issue_comment' && github.event.issue.pull_request != null)
+
+    steps:
+      - name: Resolve PR number
+        id: pr
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          EVENT_NAME: ${{ github.event_name }}
+          PR_NUMBER_CTX: ${{ github.event.pull_request.number }}
+          PR_BASE_CTX: ${{ github.event.pull_request.base.ref }}
+          PR_HEAD_CTX: ${{ github.event.pull_request.head.ref }}
+          PR_CREATED_CTX: ${{ github.event.pull_request.created_at }}
+          ISSUE_NUMBER_CTX: ${{ github.event.issue.number }}
+          REPO_CTX: ${{ github.repository }}
+        run: |
+          if [ "$EVENT_NAME" = "pull_request" ]; then
+            echo "number=$PR_NUMBER_CTX" >> "$GITHUB_OUTPUT"
+            echo "base=$PR_BASE_CTX" >> "$GITHUB_OUTPUT"
+            echo "head=$PR_HEAD_CTX" >> "$GITHUB_OUTPUT"
+            echo "created_at=$PR_CREATED_CTX" >> "$GITHUB_OUTPUT"
+          else
+            # issue_comment event — fetch PR details via API
+            PR_DATA=$(gh pr view "$ISSUE_NUMBER_CTX" \
+              --repo "$REPO_CTX" \
+              --json number,baseRefName,headRefName,createdAt \
+              --jq '{number:.number,base:.baseRefName,head:.headRefName,created_at:.createdAt}')
+            echo "number=$(echo "$PR_DATA" | jq -r '.number')" >> "$GITHUB_OUTPUT"
+            echo "base=$(echo "$PR_DATA" | jq -r '.base')" >> "$GITHUB_OUTPUT"
+            echo "head=$(echo "$PR_DATA" | jq -r '.head')" >> "$GITHUB_OUTPUT"
+            echo "created_at=$(echo "$PR_DATA" | jq -r '.created_at')" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Skip non-deploy PRs
+        id: scope
+        env:
+          BASE: ${{ steps.pr.outputs.base }}
+          HEAD: ${{ steps.pr.outputs.head }}
+        run: |
+          # Gate only applies to staging→main or feature→main deploy PRs
+          if [ "$BASE" != "main" ]; then
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+            echo "PR base is '$BASE' (not main) — gate-marker-check does not apply."
+          elif [ "$HEAD" != "staging" ] && [ "$HEAD" != "feature" ]; then
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+            echo "PR head is '$HEAD' (not staging/feature) — gate-marker-check does not apply."
+          else
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+            echo "Deploy PR detected: $HEAD → $BASE. Running gate-marker-check."
+          fi
+
+      - name: Scan PR comments for gate markers
+        id: scan
+        if: steps.scope.outputs.skip == 'false'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR_NUMBER: ${{ steps.pr.outputs.number }}
+          REPO: ${{ github.repository }}
+        run: |
+          # Fetch all PR comments (including review comments and issue comments)
+          COMMENTS=$(gh pr view "$PR_NUMBER" \
+            --repo "$REPO" \
+            --json comments \
+            --jq '.comments[].body' 2>/dev/null || echo "")
+
+          # Also check PR review comments
+          REVIEW_COMMENTS=$(gh api "repos/$REPO/pulls/$PR_NUMBER/reviews" \
+            --jq '.[].body' 2>/dev/null || echo "")
+
+          ALL_COMMENTS="$COMMENTS
+          $REVIEW_COMMENTS"
+
+          # Look for FORGE gate markers
+          GATE_PASS=$(echo "$ALL_COMMENTS" | grep -c '<!-- FORGE:GATE_PASS' || true)
+          GATE_FAILURE=$(echo "$ALL_COMMENTS" | grep -c '<!-- FORGE:GATE_FAILURE' || true)
+          SPEC_LOADED=$(echo "$ALL_COMMENTS" | grep -c '<!-- FORGE:SPEC_LOADED' || true)
+
+          echo "gate_pass=$GATE_PASS" >> "$GITHUB_OUTPUT"
+          echo "gate_failure=$GATE_FAILURE" >> "$GITHUB_OUTPUT"
+          echo "spec_loaded=$SPEC_LOADED" >> "$GITHUB_OUTPUT"
+
+          if [ "$GATE_PASS" -gt 0 ]; then
+            echo "marker_found=pass" >> "$GITHUB_OUTPUT"
+            echo "Found FORGE:GATE_PASS marker — gate ran and passed."
+          elif [ "$GATE_FAILURE" -gt 0 ]; then
+            echo "marker_found=failure" >> "$GITHUB_OUTPUT"
+            echo "Found FORGE:GATE_FAILURE marker — gate ran and BLOCKED deploy."
+          else
+            echo "marker_found=none" >> "$GITHUB_OUTPUT"
+            echo "No FORGE gate marker found on PR #$PR_NUMBER."
+          fi
+
+      - name: Check 30-minute window
+        id: window
+        if: |
+          steps.scope.outputs.skip == 'false' &&
+          steps.scan.outputs.marker_found == 'none'
+        env:
+          PR_CREATED: ${{ steps.pr.outputs.created_at }}
+        run: |
+          NOW=$(date -u +%s)
+          PR_EPOCH=$(date -u -d "$PR_CREATED" +%s 2>/dev/null || date -u -j -f "%Y-%m-%dT%H:%M:%SZ" "$PR_CREATED" +%s 2>/dev/null || echo 0)
+          ELAPSED=$(( NOW - PR_EPOCH ))
+          WINDOW=1800  # 30 minutes in seconds
+
+          echo "PR created: $PR_CREATED (epoch: $PR_EPOCH)"
+          echo "Now: $NOW, Elapsed: ${ELAPSED}s, Window: ${WINDOW}s"
+
+          if [ "$ELAPSED" -gt "$WINDOW" ]; then
+            echo "stale=true" >> "$GITHUB_OUTPUT"
+            echo "PR is older than 30 minutes with no gate marker — treating as bypass."
+          else
+            REMAINING=$(( WINDOW - ELAPSED ))
+            echo "stale=false" >> "$GITHUB_OUTPUT"
+            echo "remaining_seconds=$REMAINING" >> "$GITHUB_OUTPUT"
+            echo "PR is within the 30-minute window (${ELAPSED}s elapsed, ${REMAINING}s remaining). Gate may still be running."
+          fi
+
+      - name: Evaluate gate result
+        if: steps.scope.outputs.skip == 'false'
+        env:
+          MARKER: ${{ steps.scan.outputs.marker_found }}
+          STALE: ${{ steps.window.outputs.stale }}
+          PR_NUMBER: ${{ steps.pr.outputs.number }}
+          SPEC_LOADED: ${{ steps.scan.outputs.spec_loaded }}
+          REMAINING: ${{ steps.window.outputs.remaining_seconds }}
+        run: |
+          if [ "$MARKER" = "pass" ]; then
+            echo "✅ FORGE:GATE_PASS found — deploy gates ran and passed. PR #$PR_NUMBER is cleared for merge."
+            exit 0
+          fi
+
+          if [ "$MARKER" = "failure" ]; then
+            echo "⛔ FORGE:GATE_FAILURE found — deploy gate BLOCKED this PR."
+            echo ""
+            echo "The /review-pr-staging command ran and a deploy gate blocked this PR."
+            echo "Fix the blocking issue, then re-run the staging review."
+            exit 1
+          fi
+
+          # No marker found
+          if [ "$STALE" = "true" ]; then
+            echo "⛔ GATE BYPASS DETECTED — No FORGE gate marker found on PR #$PR_NUMBER after 30 minutes."
+            echo ""
+            echo "A staging→main deploy PR MUST have a FORGE:GATE_PASS or FORGE:GATE_FAILURE comment"
+            echo "posted by /review-pr-staging before merge is permitted."
+            echo ""
+            echo "Possible causes:"
+            echo "  1. The /review-pr-staging command was never run for this PR."
+            echo "  2. The agent improvised instead of following the spec (spec bypass)."
+            echo "  3. The review ran but was interrupted before Phase 0A completed."
+            echo ""
+            if [ "${SPEC_LOADED:-0}" = "0" ]; then
+              echo "  ⚠️  FORGE:SPEC_LOADED marker is also absent — strong evidence the spec was never loaded."
+            fi
+            echo ""
+            echo "Resolution: Run /review-pr $PR_NUMBER (or /review-pr staging) to complete the review."
+            exit 1
+          else
+            echo "⏳ No gate marker yet — within 30-minute window (${REMAINING}s remaining)."
+            echo ""
+            echo "The /review-pr-staging spec posts gate markers during Phase 0A (open-review-finding gate)"
+            echo "and Phase 6.5 (runtime test gate). If the review is still in progress, this check"
+            echo "will pass once a marker is posted."
+            echo ""
+            echo "If the review has already completed with no marker, re-run it."
+            # Exit 0 during the window — don't block while review may be in progress
+            exit 0
+          fi

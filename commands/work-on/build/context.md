@@ -11,6 +11,8 @@ argument-hint: [issue number] [affected_files...] [--functions function_names...
 **Time budget**: Max 2 minutes of queries. Skip any query that times out.
 **Output**: Post `<!-- FORGE:CONTEXT -->` comment on the issue, then return structured briefing to caller.
 
+<!-- FORGE:SPEC_LOADED — work-on/build/context.md loaded and active. Agent is bound by this spec. -->
+
 ---
 
 ## COMPLEXITY_BAND Guard (check BEFORE all phases)

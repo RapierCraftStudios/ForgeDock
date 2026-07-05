@@ -395,3 +395,31 @@ task-relevant spec set instead of letting the agent load blindly.
 
 Shipping the wiring is deferred because no hook-infrastructure layer exists in
 the repo yet; this section is the spec that a later issue implements against.
+
+## Nested-Command Decomposition and the Graph
+
+The spec graph's `walk()` function (in `build-spec-graph.mjs`) and the
+`load-set` query together enable the nested-command decomposition pattern. A
+brief summary is given here; the full naming convention, decomposition criteria,
+and token-saving effect are documented in
+**`docs/spec/forge-protocol-v1.md` § 10 (Nested-Command Decomposition
+Pattern)**.
+
+**How nested specs become graph nodes**: `walk()` recursively discovers every
+`commands/**/*.md` file at any depth. Each file is registered as a `cmd:` node
+whose id follows the Skill() colon-delimited form (`cmd:work-on:build:context`
+for `commands/work-on/build/context.md`). `CONTAINS` edges are inferred when a
+parent spec references a child via `Skill(skill="<name>", ...)`.
+
+**How `load-set` exploits decomposition**: `load-set <command>` seeds at the
+command's node and walks `CONTAINS` and `REQUIRES` edges forward. A decomposed
+command like `work-on` returns only the 11 files its execution graph actually
+reaches — not the full ~44-spec corpus. Sub-specs that belong to `work-on/build/`
+but are only invoked under specific conditions (e.g., `context.md` is skipped for
+TRIVIAL tasks) can be added or removed from the reachable set by updating the
+`CONTAINS` edges in the parent spec, without changing the query logic.
+
+**Token-saving measurement**: See
+`docs/articles/command-decomposition-token-savings.md` for before/after token
+counts for `/review-pr` and `/orchestrate` following their spec decompositions
+in #1271 and #1272.

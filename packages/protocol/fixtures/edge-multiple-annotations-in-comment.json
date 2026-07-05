@@ -1,0 +1,12 @@
+{
+  "description": "Multiple annotations in one comment — BUILDER followed by TRAJECTORY",
+  "input": "<!-- FORGE:BUILDER -->\n**Branch**: `fix/example-42`\n**Commits**: abc1234\n**Files changed**: 1\n<!-- FORGE:BUILDER:COMPLETE -->\n<!-- FORGE:TRAJECTORY -->\n## Pipeline Trajectory — #42\n\n**Completed**: 2026-01-15T09:30:00Z",
+  "expect": {
+    "type": "BUILDER",
+    "valid": true,
+    "sentinelState": "complete",
+    "fieldChecks": {
+      "Branch": "`fix/example-42`"
+    }
+  }
+}

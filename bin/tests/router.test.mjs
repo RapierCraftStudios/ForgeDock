@@ -195,4 +195,86 @@ describe("router", () => {
     const doctorRes = runCli(["doctor"], { cwd, home, extraEnv: stubEnv });
     assert.equal(doctorRes.status, 0, doctorRes.stdout + doctorRes.stderr);
   });
+
+  it("install/status/doctor agree on location when cwd has its own unrelated .claude/commands/ (#1589)", () => {
+    // Regression for the install split-brain: journey's forge() always
+    // writes to home/.claude/commands (global) — it never respects cwd.
+    // detectInstallPaths() must therefore always report that same global
+    // location, even when cwd happens to already have its own, unrelated
+    // .claude/commands/ directory (e.g. a repo with its own Claude commands,
+    // ForgeDock's own repo included). Before the fix, detectInstallPaths()
+    // treated cwd's .claude/commands/ existence as evidence of a
+    // "project-scoped ForgeDock install" and pointed status/doctor/uninstall
+    // at the wrong directory.
+    const home = mkdtempSync(join(os.tmpdir(), "fd-split-home-"));
+    const cwd = mkdtempSync(join(os.tmpdir(), "fd-split-cwd-"));
+
+    writeFileSync(
+      join(home, ".gitconfig"),
+      "[user]\n\tname = Test User\n\temail = test@example.com\n",
+      "utf-8",
+    );
+
+    // Pre-existing, unrelated .claude/commands/ in cwd — NOT created by
+    // ForgeDock. This is exactly the false-positive trigger from the issue.
+    const cwdClaudeCommands = join(cwd, ".claude", "commands");
+    mkdirSync(cwdClaudeCommands, { recursive: true });
+    const unrelatedFile = "not-a-forgedock-command.md";
+    writeFileSync(join(cwdClaudeCommands, unrelatedFile), "# user's own command\n", "utf-8");
+
+    const stubBin = mkdtempSync(join(os.tmpdir(), "fd-split-stub-bin-"));
+    writeFileSync(join(stubBin, "gh"), "#!/bin/sh\necho 'gh version 2.60.0'\n", { mode: 0o755 });
+    writeFileSync(join(stubBin, "yq"), "#!/bin/sh\necho 'yq (https://github.com/mikefarah/yq/) version v4.44.0'\n", { mode: 0o755 });
+    const stubEnv = { PATH: `${stubBin}:${process.env.PATH}` };
+
+    const installRes = runCli(["install", "--fast"], { cwd, home, extraEnv: stubEnv });
+    assert.equal(installRes.status, 0, installRes.stdout + installRes.stderr);
+
+    const homeCommandsDir = join(home, ".claude", "commands");
+    assert.ok(existsSync(homeCommandsDir), "install must write to the global home directory");
+    assert.ok(
+      existsSync(join(homeCommandsDir, "work-on.md")),
+      "install must land known command files in the global home directory",
+    );
+
+    // cwd's own unrelated .claude/commands/ must be left completely alone.
+    assert.ok(
+      existsSync(join(cwdClaudeCommands, unrelatedFile)),
+      "install must not touch cwd's pre-existing, unrelated .claude/commands/",
+    );
+    assert.ok(
+      !existsSync(join(cwdClaudeCommands, "work-on.md")),
+      "install must not land ForgeDock commands in cwd's .claude/commands/",
+    );
+
+    const statusRes = runCli(["status"], { cwd, home, extraEnv: stubEnv });
+    assert.equal(statusRes.status, 0, statusRes.stdout + statusRes.stderr);
+    assert.match(statusRes.stdout, /installed at/i);
+    assert.doesNotMatch(
+      statusRes.stdout,
+      /not installed/i,
+      "status must find the real (global) install, not conclude nothing is installed",
+    );
+
+    const doctorRes = runCli(["doctor"], { cwd, home, extraEnv: stubEnv });
+    assert.equal(doctorRes.status, 0, doctorRes.stdout + doctorRes.stderr);
+    assert.doesNotMatch(
+      doctorRes.stdout,
+      /project-scoped/i,
+      "doctor must not report a project-scoped mode — install never writes there",
+    );
+
+    const uninstallRes = runCli(["uninstall"], { cwd, home, extraEnv: stubEnv });
+    assert.equal(uninstallRes.status, 0, uninstallRes.stdout + uninstallRes.stderr);
+    // uninstall must clear out what install actually created (the global dir)...
+    assert.ok(
+      !existsSync(join(homeCommandsDir, "work-on.md")),
+      "uninstall must remove the command files install created in the global directory",
+    );
+    // ...and must still leave cwd's unrelated file untouched.
+    assert.ok(
+      existsSync(join(cwdClaudeCommands, unrelatedFile)),
+      "uninstall must not touch cwd's pre-existing, unrelated .claude/commands/",
+    );
+  });
 });

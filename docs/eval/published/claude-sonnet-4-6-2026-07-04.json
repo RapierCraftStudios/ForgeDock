@@ -1,0 +1,33 @@
+{
+  "_comment": "PLACEHOLDER — harness (#1285) and CI gate (#1286) are not yet operational. This file establishes the schema and location convention. Replace with a real run when the harness is ready.",
+  "run_id": "claude-sonnet-4-6-2026-07-04",
+  "model": "claude-sonnet-4-6",
+  "claude_code_version": "pending",
+  "corpus_version": "seed-v1",
+  "run_date": "2026-07-04",
+  "n_issues": null,
+  "n_completed": null,
+  "one_shot_success_rate": null,
+  "human_intervention_count": {
+    "mean": null,
+    "median": null,
+    "p90": null
+  },
+  "wall_clock_seconds": {
+    "mean": null,
+    "median": null,
+    "p90": null
+  },
+  "cost_per_issue_usd": {
+    "mean": null,
+    "median": null,
+    "p90": null
+  },
+  "issues": [],
+  "vs_baseline": {
+    "baseline_run_id": null,
+    "one_shot_success_rate_delta": null,
+    "human_intervention_delta": null,
+    "regressions": []
+  }
+}

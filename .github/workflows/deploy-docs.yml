@@ -2,18 +2,24 @@ name: Deploy Documentation Site
 
 on:
   push:
-    branches: [main, staging]
+    # Deploy only on main — GitHub Pages has a single production endpoint.
+    # Staging pushes must not overwrite the live site with WIP content.
+    # Use workflow_dispatch below to manually validate docs from a staging build.
+    branches: [main]
     paths:
       - 'docs/site/**'
       - 'package.json'
 
-  # Allow manual trigger from GitHub Actions UI
+  # Allow manual trigger from GitHub Actions UI (use this for staging validation)
   workflow_dispatch:
 
 # Allow one concurrent deploy; cancel in-flight runs on new push
 concurrency:
   group: pages
   cancel-in-progress: true
+
+permissions:
+  contents: read
 
 jobs:
   build:
@@ -27,9 +33,10 @@ jobs:
         uses: actions/setup-node@v4
         with:
           node-version: '20'
+          cache: 'npm'
 
       - name: Install dependencies
-        run: npm install
+        run: npm ci
 
       - name: Build documentation site
         run: npm run docs:build
