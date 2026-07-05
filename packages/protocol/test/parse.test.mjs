@@ -187,3 +187,32 @@ test('parse: non-inline-value sentinel folding is unchanged for COMPLETE/PARTIAL
   assert.equal(partialAnnotations[0].type, 'CONTEXT');
   assert.equal(partialAnnotations[0].sentinelState, SentinelState.PARTIAL);
 });
+
+test('parse: sentinel text embedded inside a field value does NOT spoof completion (forge#1594)', () => {
+  // A **Commits** field that merely mentions the literal completion sentinel text
+  // (e.g. quoting it in a changelog note) must not flip sentinelState to complete —
+  // only a sentinel occupying its own whole line is a real sentinel. This is the
+  // sentinel-detection mirror of the #1524 opening-tag anchor fix.
+  const body =
+    `<!-- FORGE:BUILDER -->\n**Branch**: \`fix/example\`\n` +
+    `**Commits**: see note about <!-- FORGE:BUILDER:COMPLETE --> in the changelog\n` +
+    `**Files changed**: 1`;
+  const [ann] = parse(body);
+  assert.equal(ann.type, 'BUILDER');
+  assert.equal(ann.sentinelState, SentinelState.INTERRUPTED);
+});
+
+test('parse: a real completion sentinel on its own line still completes normally (forge#1594 non-regression)', () => {
+  const body =
+    `<!-- FORGE:BUILDER -->\n**Branch**: \`fix/example\`\n**Commits**: abc123\n` +
+    `**Files changed**: 1\n<!-- FORGE:BUILDER:COMPLETE -->`;
+  const [ann] = parse(body);
+  assert.equal(ann.sentinelState, SentinelState.COMPLETE);
+});
+
+test('parse: unknown-type generic sentinel detection is also line-anchored (forge#1594)', () => {
+  const body = `<!-- FORGE:CUSTOM_VENDOR_TYPE -->\nNote: some text mentions <!-- X:COMPLETE --> mid-sentence.`;
+  const [ann] = parse(body);
+  assert.equal(ann.isReserved, false);
+  assert.equal(ann.sentinelState, SentinelState.INTERRUPTED);
+});

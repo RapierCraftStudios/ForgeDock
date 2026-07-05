@@ -98,7 +98,11 @@ let raw;
 
 try {
   if (args.length === 0 || args[0] === "-") {
-    raw = readFileSync("/dev/stdin", "utf8");
+    // Read stdin via fd 0 rather than the "/dev/stdin" path — the latter does not
+    // exist on Windows (ENOENT), breaking the piped-stdin mode documented above
+    // despite it being an advertised, supported input mode. Reading fd 0 directly
+    // is the portable idiom and works identically on POSIX. (forge#1594)
+    raw = readFileSync(0, "utf8");
   } else {
     raw = readFileSync(args[0], "utf8");
   }
