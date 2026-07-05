@@ -2150,7 +2150,7 @@ switch (command) {
       await runFromCli(restArgs);
     } catch (err) {
       process.stderr.write(`${RED}${err.message}${RESET}\n`);
-      process.exit(1);
+      exitCode = 1;
     }
     break;
   }

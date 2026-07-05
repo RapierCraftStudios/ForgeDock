@@ -141,8 +141,9 @@ export async function resumeStalledFromCli(argv, deps = {}) {
       await dispatch([String(issue), "--lane", lane, ...(repo ? ["--repo", repo] : [])]);
       dispatched.push(issue);
     } catch (err) {
-      console.error(`resume-stalled: #${issue} failed: ${err.message}`);
-      failed.push({ issue, error: err.message });
+      const message = err?.message ?? String(err);
+      console.error(`resume-stalled: #${issue} failed: ${message}`);
+      failed.push({ issue, error: message });
     }
   }
 
