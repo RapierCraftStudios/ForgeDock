@@ -2156,7 +2156,13 @@ switch (command) {
   }
   case "resume-stalled": {
     const { resumeStalledFromCli } = await import("./engine-cli.mjs");
-    await resumeStalledFromCli(restArgs);
+    try {
+      const result = await resumeStalledFromCli(restArgs);
+      if (result && result.failed && result.failed.length > 0) exitCode = 1;
+    } catch (err) {
+      process.stderr.write(`${RED}${err.message}${RESET}\n`);
+      exitCode = 1;
+    }
     break;
   }
   case "demo":
