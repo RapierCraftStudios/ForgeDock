@@ -54,6 +54,9 @@ concurrency:
   group: eval-gate-${{ github.ref }}
   cancel-in-progress: true
 
+permissions:
+  contents: read
+
 jobs:
   # ---------------------------------------------------------------------------
   # Job 1 (PR / push only): classify the diff to skip non-substantive changes.
