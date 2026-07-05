@@ -19,7 +19,13 @@
 import { RESERVED_TYPES, RESERVED_TYPE_NAMES, SentinelState } from './types.js';
 
 // Matches: <!-- FORGE:TYPE --> or <!-- FORGE:TYPE: value -->
-const OPENING_TAG_RE = /<!--\s*FORGE:([A-Z_]+)(?::\s*(.*?))?\s*-->/;
+// Anchored to require the tag to be the ENTIRE (trimmed) line — a FORGE-tag-shaped
+// substring embedded inside other line content (e.g. a **Commits**: field value that
+// happens to mention a FORGE tag) is never a structural annotation opener. Every real
+// FORGE tag emission (opening tags and sentinel markers alike) occupies its own line;
+// this anchor makes "is the whole line" the structural test instead of a bare substring
+// search, which previously let field-value text split/corrupt annotations. (forge#1524)
+const OPENING_TAG_RE = /^\s*<!--\s*FORGE:([A-Z_]+)(?::\s*(.*?))?\s*-->\s*$/;
 
 // Sentinel suffixes that appear as inline-values in tags that look like opening tags
 // but are actually completion/partial markers, e.g. <!-- FORGE:CONTEXT:COMPLETE -->

@@ -99,3 +99,37 @@ test('parse: BUILDER annotation body ends at next FORGE: tag', () => {
   const [builder] = parse(body);
   assert.ok(!builder.body.includes('Trajectory content'));
 });
+
+test('parse: FORGE-tag-shaped substring embedded in a field value does not split/corrupt the annotation (forge#1524)', () => {
+  const body = [
+    `<!-- FORGE:BUILDER -->`,
+    `**Branch**: \`fix/example\``,
+    `**Commits**: abc123 fixes docs mentioning <!-- FORGE:CONTRACT --> example text`,
+    `**Files changed**: 1`,
+    `<!-- FORGE:BUILDER:COMPLETE -->`,
+  ].join('\n');
+  const annotations = parse(body);
+  assert.equal(annotations.length, 1);
+  const [builder] = annotations;
+  assert.equal(builder.type, 'BUILDER');
+  assert.equal(builder.sentinelState, SentinelState.COMPLETE);
+  assert.equal(builder.fields['Commits'], 'abc123 fixes docs mentioning <!-- FORGE:CONTRACT --> example text');
+  assert.equal(builder.fields['Files changed'], '1');
+});
+
+test('parse: FORGE-tag-shaped substring embedded mid-line inside a body loop line does not open a new annotation (forge#1524)', () => {
+  const body = [
+    `<!-- FORGE:INVESTIGATOR -->`,
+    `**Verdict**: CONFIRMED`,
+    `**Confidence**: HIGH`,
+    `**Severity**: HIGH`,
+    `**Task Type**: Bug Fix`,
+    `### Evidence`,
+    `See docs referencing <!-- FORGE:CONTEXT --> for prior art.`,
+    `<!-- INVESTIGATION:COMPLETE -->`,
+  ].join('\n');
+  const annotations = parse(body);
+  assert.equal(annotations.length, 1);
+  assert.equal(annotations[0].type, 'INVESTIGATOR');
+  assert.equal(annotations[0].sentinelState, SentinelState.COMPLETE);
+});
