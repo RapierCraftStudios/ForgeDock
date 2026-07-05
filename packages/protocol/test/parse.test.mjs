@@ -133,3 +133,57 @@ test('parse: FORGE-tag-shaped substring embedded mid-line inside a body loop lin
   assert.equal(annotations[0].type, 'INVESTIGATOR');
   assert.equal(annotations[0].sentinelState, SentinelState.COMPLETE);
 });
+
+// forge#1526: inline-value types (KNOWLEDGE_GIST, MILESTONE_INDEX, PRIOR_GIST) whose value
+// is exactly "COMPLETE" or "PARTIAL" collide in shape with sentinel/closing markers
+// (<!-- FORGE:CONTEXT:COMPLETE -->). These must still parse as real annotations.
+
+test('parse: PRIOR_GIST with inline value "COMPLETE" as the first line is not dropped as a sentinel (forge#1526)', () => {
+  const body = `<!-- FORGE:PRIOR_GIST: COMPLETE -->`;
+  const annotations = parse(body);
+  assert.equal(annotations.length, 1);
+  assert.equal(annotations[0].type, 'PRIOR_GIST');
+  assert.equal(annotations[0].inlineValue, 'COMPLETE');
+});
+
+test('parse: KNOWLEDGE_GIST with inline value "PARTIAL" as the first line is not dropped as a sentinel (forge#1526)', () => {
+  const body = `<!-- FORGE:KNOWLEDGE_GIST: PARTIAL -->`;
+  const annotations = parse(body);
+  assert.equal(annotations.length, 1);
+  assert.equal(annotations[0].type, 'KNOWLEDGE_GIST');
+  assert.equal(annotations[0].inlineValue, 'PARTIAL');
+});
+
+test('parse: MILESTONE_INDEX with inline value "COMPLETE" following another annotation starts its own annotation, not folded into the preceding body (forge#1526)', () => {
+  const body = [
+    `<!-- FORGE:BUILDER -->`,
+    `**Branch**: \`fix/example\``,
+    `**Commits**: abc123`,
+    `**Files changed**: 1`,
+    `<!-- FORGE:BUILDER:COMPLETE -->`,
+    `<!-- FORGE:MILESTONE_INDEX: COMPLETE -->`,
+  ].join('\n');
+  const annotations = parse(body);
+  assert.equal(annotations.length, 2);
+  assert.equal(annotations[0].type, 'BUILDER');
+  assert.ok(!annotations[0].body.includes('MILESTONE_INDEX'));
+  assert.equal(annotations[1].type, 'MILESTONE_INDEX');
+  assert.equal(annotations[1].inlineValue, 'COMPLETE');
+});
+
+test('parse: non-inline-value sentinel folding is unchanged for COMPLETE/PARTIAL (forge#1526 non-regression)', () => {
+  // CONTEXT does not declare inlineValue: true — its FORGE:CONTEXT:COMPLETE /
+  // FORGE:CONTEXT:PARTIAL sentinels must still fold into the CONTEXT annotation's body,
+  // not start a new annotation.
+  const completeBody = `<!-- FORGE:CONTEXT -->\nSome context.\n<!-- FORGE:CONTEXT:COMPLETE -->`;
+  const completeAnnotations = parse(completeBody);
+  assert.equal(completeAnnotations.length, 1);
+  assert.equal(completeAnnotations[0].type, 'CONTEXT');
+  assert.equal(completeAnnotations[0].sentinelState, SentinelState.COMPLETE);
+
+  const partialBody = `<!-- FORGE:CONTEXT -->\nSome context.\n<!-- FORGE:CONTEXT:PARTIAL -->`;
+  const partialAnnotations = parse(partialBody);
+  assert.equal(partialAnnotations.length, 1);
+  assert.equal(partialAnnotations[0].type, 'CONTEXT');
+  assert.equal(partialAnnotations[0].sentinelState, SentinelState.PARTIAL);
+});

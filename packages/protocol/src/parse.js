@@ -126,6 +126,7 @@ export function parse(commentBody) {
 
     const type = tagMatch[1];
     const rawInlineValue = tagMatch[2] !== undefined ? tagMatch[2].trim() : null;
+    const typeDefForTag = RESERVED_TYPES[type];
 
     // Sentinel lines like <!-- FORGE:CONTEXT:COMPLETE --> match the opening tag regex
     // because the regex captures "CONTEXT" as type and "COMPLETE" as inlineValue.
@@ -133,13 +134,24 @@ export function parse(commentBody) {
     // the preceding annotation's body. The inner body-accumulation loop handles
     // this by including such lines rather than breaking on them. However, if a
     // sentinel line appears at the very beginning (before any annotation), skip it.
-    if (rawInlineValue !== null && SENTINEL_SUFFIXES.has(rawInlineValue)) {
+    //
+    // Exception: types that declare inlineValue: true (KNOWLEDGE_GIST, MILESTONE_INDEX,
+    // PRIOR_GIST) use COMPLETE/PARTIAL as legitimate inline values, not sentinel markers
+    // — e.g. <!-- FORGE:PRIOR_GIST: COMPLETE --> is a real annotation whose value is the
+    // string "COMPLETE". Only guess "sentinel" for types that don't use inline-value form
+    // (typeDefForTag?.inlineValue is false/undefined for all of those, including unknown
+    // types where typeDefForTag itself is undefined). (forge#1526)
+    if (
+      rawInlineValue !== null &&
+      SENTINEL_SUFFIXES.has(rawInlineValue) &&
+      !typeDefForTag?.inlineValue
+    ) {
       i++;
       continue;
     }
 
     const inlineValue = rawInlineValue;
-    const typeDef = RESERVED_TYPES[type];
+    const typeDef = typeDefForTag;
     const isControl = typeDef?.controlMarker === true;
     const isReserved = RESERVED_TYPE_NAMES.has(type);
 
@@ -151,9 +163,19 @@ export function parse(commentBody) {
     while (j < lines.length) {
       const bodyLineMatch = lines[j].match(OPENING_TAG_RE);
       if (bodyLineMatch) {
+        const bodyLineType = bodyLineMatch[1];
         const bodyLineInlineValue = bodyLineMatch[2] !== undefined ? bodyLineMatch[2].trim() : null;
-        // Sentinel-like tags (COMPLETE/PARTIAL inline value) → include in body, don't break
-        if (bodyLineInlineValue !== null && SENTINEL_SUFFIXES.has(bodyLineInlineValue)) {
+        const bodyLineTypeDef = RESERVED_TYPES[bodyLineType];
+        // Sentinel-like tags (COMPLETE/PARTIAL inline value) → include in body, don't break.
+        // Exception: if bodyLineType is an inline-value type (KNOWLEDGE_GIST, MILESTONE_INDEX,
+        // PRIOR_GIST), COMPLETE/PARTIAL is a genuine inline value for a NEW annotation, not a
+        // sentinel — fall through to "True opening tag" below so it starts its own annotation
+        // instead of being folded into the preceding one's body. (forge#1526)
+        if (
+          bodyLineInlineValue !== null &&
+          SENTINEL_SUFFIXES.has(bodyLineInlineValue) &&
+          !bodyLineTypeDef?.inlineValue
+        ) {
           bodyLines.push(lines[j]);
           j++;
           continue;
