@@ -75,13 +75,17 @@ jobs:
 
       - name: Classify commands/ diff
         id: classify
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          PUSH_BEFORE_SHA: ${{ github.event.before }}
         run: |
           # Determine the base ref to diff against.
-          if [ "${{ github.event_name }}" = "pull_request" ]; then
-            BASE_SHA="${{ github.event.pull_request.base.sha }}"
+          if [ "$EVENT_NAME" = "pull_request" ]; then
+            BASE_SHA="$PR_BASE_SHA"
           else
             # push: diff against the previous commit on the branch
-            BASE_SHA="${{ github.event.before }}"
+            BASE_SHA="$PUSH_BEFORE_SHA"
           fi
 
           echo "Diffing commands/ from $BASE_SHA to HEAD"
