@@ -10,7 +10,7 @@ Read this file at the start of every `/orchestrate` invocation.
 
 ## HARD RULES — READ BEFORE ANYTHING ELSE
 
-1. **Every agent MUST invoke `/work-on` via the Skill tool.** You do NOT write implementation prompts. You copy the Phase 4A template verbatim and fill in the `{VARIABLES}`. Nothing else. No custom prompts. No "just read and edit" shortcuts. The Skill tool invocation is what triggers labels, investigation comments, structured review, and trajectory tracking. Without it, the agent's work has no paper trail and is worthless.
+1. **Every agent MUST invoke `/work-on` via the Skill tool.** You do NOT write implementation prompts. You copy the Phase 4A template verbatim and fill in the `{VARIABLES}`. Nothing else. No custom prompts. No "just read and edit" shortcuts. The Skill tool invocation is what triggers labels, investigation comments, structured review, and trajectory tracking. Without it, the agent's work has no paper trail and is worthless. This rule governs *builder* dispatches only — the independent-verification reviewer spawned by Phase 4 Step 4B.7 uses its own fixed template from that step (also fill-in-variables-only) and is a verification check, not a builder dispatch; spawning it is not a violation of this rule. <!-- Added: forge#1613 -->
 
 2. **You are a dispatcher, not a builder.** You resolve issues, build the dependency DAG, spawn agents, and report results. You NEVER read code, edit files, or implement fixes yourself.
 

@@ -149,6 +149,13 @@ QUEUED_FINDINGS=()
 declare -A DEFERRED_REASONS
 declare -A AGENT_ISSUE_MAP
 
+# Batch-level accumulators for independent verification (Step 4B.7). Same
+# lifecycle rule: declared once here, appended per-agent-completion, never
+# re-initialized inside the completion loop. They feed the Phase 6 report's
+# "Independent verification" row. <!-- Added: forge#1613 -->
+INDEP_VERIFY_PASSED=()
+INDEP_VERIFY_FAILED=()
+
 for NUM in {ready_issue_numbers}; do
   PR_BASE=$(bash ~/.claude/scripts/classify-lane.sh "$NUM" -R {GH_REPO}) || {
     echo "ERROR: classify-lane.sh failed for #$NUM — adding needs-human label and skipping" >&2
@@ -317,6 +324,8 @@ You will be automatically notified when each background agent completes. **Do NO
 
 **Core streaming dispatch loop**: After processing each agent completion, check the DAG for newly unblocked issues. If any issue now has all predecessors in a terminal state, dispatch it immediately (run Steps 4A.pre.0, 4A.pre, and 4A for the newly ready issues). This is the key difference from the wave model — issues dispatch as soon as their specific predecessors complete, not after an entire group finishes.
 
+**Before running this loop for a just-merged issue's successors, run Step 4B.7 (batch-level independent verification) for that issue.** A predecessor whose verification FAILED (it carries a `FORGE:INDEP_VERIFY_FAIL` comment) counts as a FAILED predecessor per item 6 below — its dependents are skipped, NOT dispatched, even though the `needs-human` label it carries would otherwise match the terminal-state grep. <!-- Added: forge#1613 -->
+
 ```bash
 # After each agent completion, check for newly ready issues:
 for BLOCKED_NUM in {all_blocked_issue_numbers}; do
@@ -361,9 +370,11 @@ done
 
 4. **Record completed results**: Success (PR merged), Invalid (issue closed), Blocked (needs human), or Error
 
-5. **Check for newly unblocked issues** — run the DAG readiness check above. If any issues are now ready, dispatch them immediately (Steps 4A.pre.0 → 4A.pre → 4A). Batch all newly ready issues into a single dispatch message.
+4.5. **Run independent verification** (Step 4B.7) — if the completed issue reached `workflow:merged`, run Step 4B.7 BEFORE the readiness check in item 5. The step is a fast no-op unless the issue's Step 3B domain tags intersect the security-critical set. A verification FAIL converts this issue into a FAILED predecessor for item 6 purposes — its successors are blocked. <!-- Added: forge#1613 -->
 
-6. **Handle predecessor failures** — if a completed agent's issue FAILED (needs-human, invalid, or error), check for dependent issues in the DAG. Mark all transitive dependents as "skipped — dependency #{X} failed" and report them. Do NOT dispatch them.
+5. **Check for newly unblocked issues** — run the DAG readiness check above (after item 4.5's verification gate for the just-completed issue). If any issues are now ready, dispatch them immediately (Steps 4A.pre.0 → 4A.pre → 4A). Batch all newly ready issues into a single dispatch message.
+
+6. **Handle predecessor failures** — if a completed agent's issue FAILED (needs-human, invalid, error, or failed independent verification per Step 4B.7 — `FORGE:INDEP_VERIFY_FAIL`), check for dependent issues in the DAG. Mark all transitive dependents as "skipped — dependency #{X} failed" and report them. Do NOT dispatch them.
 
 7. **Verify pipeline compliance** — for each truly completed issue, check that the agent used `/work-on`:
    ```bash
@@ -478,6 +489,133 @@ done
 **Resume all stalled agents in a single message** (parallel). Use the same `Agent(resume=...)` pattern as Step 4B — do not wait between individual resumes.
 
 **Track stall resume cycles separately** from completion-event resumes (Step 4B). If the same issue accumulates ≥ 2 `FORGE:STALL_DETECTED` comments AND still hasn't reached terminal state, do not resume again — the `needs-human` label is already set.
+
+### Step 4B.7: Batch-level independent verification (MANDATORY before successor dispatch — security-critical domains) <!-- Added: forge#1613 -->
+
+**WHY THIS EXISTS**: Every agent in a batch runs the same `/work-on → /review-pr` pipeline, so a defect class that pipeline misses once is missed identically by all N parallel agents — parallelism scales defect-introduction throughput while review depth per PR stays flat. The per-issue review also reads the builder's own framing (contract, investigation, architect comments), which biases it toward confirming the builder's interpretation of the acceptance criteria instead of re-deriving them. This step adds the one check the per-issue pipeline structurally cannot provide: a reviewer with NO access to the builder's framing, who must independently confirm each acceptance criterion against the merged diff — and whose failure verdict blocks successor dispatch.
+
+**When to run**: On every agent-completion event where the completed issue has just reached `workflow:merged` — AFTER recording the result (Step 4B item 4) and BEFORE the DAG readiness check that dispatches the issue's successors (Step 4B items 4.5/5). Run at most once per issue.
+
+**This spawn does NOT violate Hard Rule 1** (`config.md`): Hard Rule 1 restricts *builder* dispatches to the Phase 4A `/work-on` template. This step spawns a *reviewer* using its own fixed template below — a verification check, not implementation work. Fill in `{VARIABLES}` only; do not rewrite the reviewer prompt.
+
+**Gate — all three checks, in order** (any skip → continue directly to the readiness check; the step is a no-op for the common case and adds zero latency to non-security-critical issues):
+
+```bash
+# 1. Config toggle — default ON when the section is absent from forge.yaml
+IV_ENABLED=$(yq '.orchestrate.independent_verification.enabled // true' forge.yaml 2>/dev/null || echo true)
+if [ "$IV_ENABLED" = "false" ]; then
+  echo "Step 4B.7 skipped for #${NUM} — disabled in forge.yaml (orchestrate.independent_verification.enabled)"
+fi
+
+# 2. Domain gate — the issue's Step 3B domain tags must intersect the configured
+#    security-critical set. Reuse the tags stored per issue in Step 3B — do NOT re-derive.
+#    Default set when unconfigured: AUTH, BILLING, DATABASE.
+IV_DOMAINS=$(yq '.orchestrate.independent_verification.domains[]' forge.yaml 2>/dev/null \
+  | tr '[:lower:]' '[:upper:]')
+[ -z "$IV_DOMAINS" ] && IV_DOMAINS=$(printf 'AUTH\nBILLING\nDATABASE')
+# {ISSUE_DOMAIN_TAGS} = this issue's Step 3B tags (e.g. "AUTH FRONTEND")
+GATED_IN=false
+for TAG in {ISSUE_DOMAIN_TAGS}; do
+  if echo "$IV_DOMAINS" | grep -qxF "$TAG"; then GATED_IN=true; break; fi
+done
+if [ "$GATED_IN" = "false" ]; then
+  echo "Step 4B.7 skipped for #${NUM} — domain tags not security-critical"
+fi
+
+# 3. Idempotency — never verify the same issue twice (resume/re-entry safe)
+ALREADY=$(gh api repos/{GH_REPO}/issues/${NUM}/comments \
+  --jq '[.[] | select(.body | test("FORGE:INDEP_VERIFY_(PASS|FAIL)"))] | length' 2>/dev/null || echo 0)
+if [ "${ALREADY:-0}" -gt 0 ]; then
+  echo "Step 4B.7 skipped for #${NUM} — already verified"
+fi
+```
+
+**Collect the reviewer's ONLY inputs** — issue title, Acceptance Criteria section, merged diff. Nothing else. Do NOT pass the issue's Problem/Root Cause/Recommendation prose, and do NOT pass any `FORGE:*` comment — denying the builder's framing is the mechanism that makes this check independent:
+
+```bash
+ISSUE_TITLE=$(gh issue view "$NUM" -R {GH_REPO} --json title --jq '.title')
+
+# Extract ONLY the Acceptance Criteria section from the issue body
+ACCEPTANCE=$(gh issue view "$NUM" -R {GH_REPO} --json body --jq '.body' \
+  | awk '/^## Acceptance Criteria/{p=1; next} /^## /{p=0} p')
+if [ -z "$ACCEPTANCE" ]; then
+  # No criteria to verify against — treat as FAIL (never silently pass), see verdict handling
+  echo "WARNING: #${NUM} has no '## Acceptance Criteria' section — verification cannot pass"
+fi
+
+# The merged PR for this issue (most recently merged PR referencing it)
+PR_NUM=$(gh pr list -R {GH_REPO} --state merged --search "${NUM} in:body" \
+  --json number,mergedAt --jq 'sort_by(.mergedAt) | last | .number' 2>/dev/null)
+PR_DIFF=$(gh pr diff "$PR_NUM" -R {GH_REPO} 2>/dev/null)
+if [ -z "$PR_NUM" ] || [ -z "$PR_DIFF" ]; then
+  # Cannot locate the merged diff — treat as FAIL (never silently pass), see verdict handling
+  echo "WARNING: #${NUM} — merged PR or diff not resolvable; verification cannot pass"
+fi
+```
+
+**Spawn the independent reviewer** (foreground — the verdict gates dispatch, so do NOT run it in the background):
+
+```
+Agent(
+  subagent_type="general-purpose",
+  model="sonnet",
+  description="Independent verification #{NUM}",
+  run_in_background=false,
+  prompt="You are an independent acceptance-criteria verifier. You have NO other context about this change, and that is intentional. Do NOT fetch the issue, its comments, the PR description, or any FORGE:* comment — judge ONLY from the materials below. Do not assume the change is correct because it merged.
+
+**Issue title**: {ISSUE_TITLE}
+
+**Acceptance criteria**:
+{ACCEPTANCE}
+
+**Merged diff** (unified format):
+{PR_DIFF}
+
+For EACH acceptance criterion, decide whether the diff satisfies it. Be adversarial: a criterion the diff does not clearly and verifiably implement is FAIL. A criterion that cannot be evaluated from the diff alone (requires a live run, external state, or a human process step) is UNVERIFIABLE — not FAIL, not PASS.
+
+Output EXACTLY this format and nothing else:
+
+VERDICT: {PASS or FAIL — FAIL if ANY criterion is FAIL; PASS otherwise}
+CRITERIA:
+- [PASS|FAIL|UNVERIFIABLE] {criterion text} — {one-line reason}
+"
+)
+```
+
+**Verdict handling** — every gated-in issue gets exactly ONE marker comment; there is no silent-pass path:
+
+- **`VERDICT: PASS`** (no criterion FAIL): post the pass marker and continue to the readiness check.
+
+  ```bash
+  gh issue comment "$NUM" -R {GH_REPO} --body "<!-- FORGE:INDEP_VERIFY_PASS -->
+  ## Independent Verification — PASS
+
+  PR #${PR_NUM} independently verified against this issue's acceptance criteria. The reviewer had no access to builder context (contract/investigation/architect comments).
+
+  {per-criterion lines from the reviewer output}"
+  INDEP_VERIFY_PASSED+=("$NUM")
+  ```
+
+- **`VERDICT: FAIL`** (any criterion FAIL): post the fail marker, add `needs-human`, and treat this issue as a FAILED predecessor (Step 4B item 6) — its transitive dependents are marked "skipped — dependency #{NUM} failed independent verification" and are NOT dispatched.
+
+  ```bash
+  gh issue comment "$NUM" -R {GH_REPO} --body "<!-- FORGE:INDEP_VERIFY_FAIL -->
+  ## Independent Verification — FAIL
+
+  PR #${PR_NUM} is already merged, but independent verification found unmet acceptance criteria. Successor dispatch for this issue is BLOCKED pending human review.
+
+  {per-criterion lines from the reviewer output — failing criteria first}
+
+  **Next step**: a human decides whether to revert, fix forward, or accept. Remove \`needs-human\` after resolving."
+  gh issue edit "$NUM" -R {GH_REPO} --add-label "needs-human"
+  INDEP_VERIFY_FAILED+=("$NUM")
+  ```
+
+  The merged PR is NOT auto-reverted — reverting is a human decision. Blocking *successor dispatch* is the orchestrator's own lever, and it is applied unconditionally on FAIL.
+
+- **Degenerate inputs or malformed output** — missing Acceptance Criteria section, unresolvable merged PR/diff, reviewer output with no parseable `VERDICT:` line, or reviewer agent error: treat as **FAIL**. Post the `FORGE:INDEP_VERIFY_FAIL` marker with the degenerate condition named (and the raw reviewer output when there is one), add `needs-human`, and block successors exactly as above. The step must never silently pass.
+
+**State variables**: `INDEP_VERIFY_PASSED` / `INDEP_VERIFY_FAILED` are declared at batch scope in Step 4A.pre alongside `DEFERRED_FINDINGS` — do NOT re-initialize them here (this step runs per-agent-completion). Phase 6 (Step 6A) also re-derives the counts from the `FORGE:INDEP_VERIFY_*` comment markers, so the report survives orchestrator compaction.
 
 ### Step 4C: Collect review-finding issues from completed agents
 

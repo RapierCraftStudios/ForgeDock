@@ -10,7 +10,7 @@
 #   # Add forge.yaml to your .gitignore if it contains sensitive paths
 #
 # Required sections: project, paths, branches
-# Optional sections: repos, project_board, services, review, verification, deploy, billing, devdocs, adaptive_scripts, learned, attribution
+# Optional sections: repos, project_board, services, review, verification, deploy, billing, devdocs, adaptive_scripts, learned, attribution, orchestrate
 
 # =============================================================================
 # PROJECT (REQUIRED)
@@ -696,3 +696,31 @@ branches:
 #   # Opt-out: set to false or omit this key.
 #   # Recommended: true for public repos, false for private repos.
 #   annotation_link: true
+
+# =============================================================================
+# ORCHESTRATE (OPTIONAL)
+# Batch-execution behavior for /orchestrate.
+# Commands: orchestrate (Phase 4 — Step 4B.7 independent verification,
+#           Phase 6 — verification results in the consolidated report)
+# =============================================================================
+
+# orchestrate:
+#   # Batch-level independent verification (Step 4B.7).
+#   # After an issue in a security-critical domain reaches workflow:merged and
+#   # BEFORE its successors are dispatched, /orchestrate spawns an independent
+#   # reviewer that re-derives the issue's acceptance criteria against the
+#   # merged diff — WITHOUT access to the builder's contract/investigation
+#   # framing. A failed verification blocks successor dispatch and escalates
+#   # to needs-human.
+#   independent_verification:
+#     # Enable or disable the verification step.
+#     # Default when this section is absent: true (default-on).
+#     enabled: true
+#
+#     # Domains that trigger verification, matched against the issue's
+#     # Step 3B domain tags (case-insensitive).
+#     # Default when omitted: [auth, billing, database]
+#     domains:
+#       - auth
+#       - billing
+#       - database
