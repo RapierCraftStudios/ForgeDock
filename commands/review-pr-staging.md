@@ -276,6 +276,172 @@ Create review chunks by priority: Billing/Pricing (CRITICAL) → Security/Auth (
 
 ---
 
+## Phase 0B.5: Decomposition / Large-Rewrite Parity Check <!-- Added: forge#1612 -->
+
+**Purpose**: Detect when a file is deleted or rewritten and its content reappears across sibling new files. When a decomposition or large rewrite is detected, verify that every normative rule (MUST/NEVER/HARD RULE/gate/threshold) from the old file survives in a non-contradictory form in the new file set. Prevents the class of defect where additive diff review misses dropped or contradicted rules (e.g., #1588 — HARD RULE 3 auto-merge contradiction introduced in a 26-file decomposition).
+
+**Trigger detection (run in Phase 0B scope context — `$DEFAULT_BRANCH` and `$STAGING_BRANCH` already set)**:
+
+```bash
+# Step 1: Find all deleted files in this staging diff
+DELETED_FILES=$(git diff origin/$DEFAULT_BRANCH...origin/$STAGING_BRANCH \
+  --diff-filter=D --name-only 2>/dev/null)
+
+# Step 2: Find all added files in this staging diff
+ADDED_FILES=$(git diff origin/$DEFAULT_BRANCH...origin/$STAGING_BRANCH \
+  --diff-filter=A --name-only 2>/dev/null)
+
+DECOMP_DETECTED=false
+DECOMP_PAIRS=""   # accumulates "OLD_FILE -> NEW_FILE1,NEW_FILE2" lines
+
+if [ -z "$DELETED_FILES" ]; then
+  echo "No deleted files detected — parity check skipped."
+else
+  for DELETED_FILE in $DELETED_FILES; do
+    # Get the old file's line count before deletion
+    OLD_LINES=$(git show origin/$DEFAULT_BRANCH:"$DELETED_FILE" 2>/dev/null | wc -l)
+    [ "$OLD_LINES" -eq 0 ] && continue
+
+    # Heuristic: if ANY added file shares a basename prefix or directory with
+    # the deleted file, compute content overlap.
+    # Overlap = lines from the old file that appear verbatim in the new file set.
+    # If overlap / old_lines > 0.50 → decomposition detected.
+    OLD_DIRNAME=$(dirname "$DELETED_FILE")
+    OLD_BASENAME=$(basename "$DELETED_FILE" | sed 's/\.[^.]*$//')
+
+    SIBLING_ADDED=""
+    for ADDED_FILE in $ADDED_FILES; do
+      ADDED_DIR=$(dirname "$ADDED_FILE")
+      ADDED_BASE=$(basename "$ADDED_FILE" | sed 's/\.[^.]*$//')
+      # Match: same directory, or added file's dir is a subdirectory of deleted dir,
+      # or basename prefix match (e.g. review-pr.md → review-pr-agents.md)
+      if [ "$ADDED_DIR" = "$OLD_DIRNAME" ] || \
+         echo "$ADDED_DIR" | grep -q "^${OLD_DIRNAME}/" || \
+         echo "$ADDED_BASE" | grep -q "^${OLD_BASENAME}"; then
+        SIBLING_ADDED="$SIBLING_ADDED $ADDED_FILE"
+      fi
+    done
+
+    [ -z "$SIBLING_ADDED" ] && continue
+
+    # Count lines from old file that appear in any sibling added file
+    OLD_CONTENT=$(git show origin/$DEFAULT_BRANCH:"$DELETED_FILE" 2>/dev/null)
+    MATCHED_LINES=0
+    while IFS= read -r OLD_LINE; do
+      [ -z "$OLD_LINE" ] && continue
+      for SIBLING in $SIBLING_ADDED; do
+        SIBLING_CONTENT=$(git show origin/$STAGING_BRANCH:"$SIBLING" 2>/dev/null)
+        if echo "$SIBLING_CONTENT" | grep -qF "$OLD_LINE" 2>/dev/null; then
+          MATCHED_LINES=$((MATCHED_LINES + 1))
+          break
+        fi
+      done
+    done <<< "$OLD_CONTENT"
+
+    OVERLAP_PCT=0
+    if [ "$OLD_LINES" -gt 0 ]; then
+      OVERLAP_PCT=$(( (MATCHED_LINES * 100) / OLD_LINES ))
+    fi
+
+    if [ "$OVERLAP_PCT" -ge 50 ]; then
+      DECOMP_DETECTED=true
+      DECOMP_PAIRS="${DECOMP_PAIRS}${DELETED_FILE} -> $(echo $SIBLING_ADDED | tr ' ' ',')\n"
+      echo "DECOMPOSITION DETECTED: $DELETED_FILE (${OVERLAP_PCT}% content overlap with sibling added files)"
+    fi
+  done
+fi
+```
+
+**If `DECOMP_DETECTED=false`**: Log `"No decomposition detected — parity check skipped."` and continue to Phase 1.
+
+**If `DECOMP_DETECTED=true`**: For each detected deletion-and-reappearance pair, run the parity check:
+
+```bash
+# Step 3: For each decomposed file pair, extract normative rules and verify parity
+while IFS= read -r PAIR_LINE; do
+  [ -z "$PAIR_LINE" ] && continue
+  OLD_FILE=$(echo "$PAIR_LINE" | cut -d' ' -f1)
+  NEW_FILES=$(echo "$PAIR_LINE" | awk '{print $NF}' | tr ',' ' ')
+
+  echo ""
+  echo "=== PARITY CHECK: $OLD_FILE ==="
+  echo "New file set: $NEW_FILES"
+  echo ""
+
+  # Extract all normative-rule lines from the old file
+  OLD_RULES=$(git show origin/$DEFAULT_BRANCH:"$OLD_FILE" 2>/dev/null \
+    | grep -nE 'MUST|NEVER|HARD RULE|HARD_RULE|gate:|threshold:' \
+    | grep -v '^[[:space:]]*#' \
+    | grep -v '^[[:space:]]*//')
+
+  if [ -z "$OLD_RULES" ]; then
+    echo "No normative rules (MUST/NEVER/HARD RULE/gate/threshold) found in $OLD_FILE — parity check skipped for this file."
+    continue
+  fi
+
+  echo "Normative rules extracted from $OLD_FILE:"
+  echo "$OLD_RULES"
+  echo ""
+
+  # For each old rule, check if it survives in the new file set
+  # Output: Rule | Surviving Location | Status (PRESENT/MISSING/CONTRADICTED)
+  echo "| Old Rule (line:text) | Surviving Location | Status |"
+  echo "|---|---|---|"
+
+  while IFS= read -r RULE_LINE; do
+    [ -z "$RULE_LINE" ] && continue
+    RULE_TEXT=$(echo "$RULE_LINE" | sed 's/^[0-9]*://' | sed 's/^[[:space:]]*//')
+    RULE_KEYWORDS=$(echo "$RULE_TEXT" | grep -oE '[A-Z][A-Z ]+' | head -1 | xargs)
+
+    SURVIVING_LOCATION="—"
+    STATUS="MISSING"
+
+    for NEW_FILE in $NEW_FILES; do
+      # Check for verbatim or near-verbatim presence
+      if git show origin/$STAGING_BRANCH:"$NEW_FILE" 2>/dev/null \
+          | grep -qF "$RULE_KEYWORDS" 2>/dev/null; then
+        SURVIVING_LOCATION="$NEW_FILE"
+        STATUS="PRESENT"
+
+        # Contradiction check: look for semantic negation near the same keyword
+        # (e.g., "NEVER" replaced by "only ... failures block" nearby)
+        CONTEXT_IN_NEW=$(git show origin/$STAGING_BRANCH:"$NEW_FILE" 2>/dev/null \
+          | grep -A2 -B2 -F "$RULE_KEYWORDS" 2>/dev/null)
+        CONTEXT_IN_OLD=$(git show origin/$DEFAULT_BRANCH:"$OLD_FILE" 2>/dev/null \
+          | grep -A2 -B2 -F "$RULE_KEYWORDS" 2>/dev/null)
+        # Flag for agent review when context changed significantly
+        OLD_CTX_HASH=$(echo "$CONTEXT_IN_OLD" | md5sum | cut -c1-8)
+        NEW_CTX_HASH=$(echo "$CONTEXT_IN_NEW" | md5sum | cut -c1-8)
+        if [ "$OLD_CTX_HASH" != "$NEW_CTX_HASH" ]; then
+          STATUS="PRESENT (context changed — verify for contradiction)"
+          SURVIVING_LOCATION="$NEW_FILE (context diff detected)"
+        fi
+        break
+      fi
+    done
+
+    echo "| \`$RULE_TEXT\` | $SURVIVING_LOCATION | **$STATUS** |"
+  done <<< "$OLD_RULES"
+
+done < <(printf "%b" "$DECOMP_PAIRS")
+```
+
+**Agent instruction — verify the parity table above**:
+
+After running the shell block above, you (the review agent) MUST:
+
+1. **Review each MISSING row**: A rule marked MISSING was present in the old file and absent from the entire new file set. For each MISSING row, verify by reading the new files directly (they are in the staging diff). If it is genuinely absent, this is a **CONFIRMED finding** (HIGH severity if the rule was a HARD RULE or NEVER; MEDIUM if MUST or threshold).
+
+2. **Review each "context changed" row**: Read the old context and new context. If the new context reverses or contradicts the old rule (e.g., old: "auto-merge only after approval" → new: "only compilation failures block merge"), this is a **CONTRADICTED** rule — emit as a **CONFIRMED finding** (HIGH severity).
+
+3. **Emit CONFIRMED finding for each MISSING or CONTRADICTED rule** using the standard staging finding template (Phase 7F). Title format: `Staging Review: rule dropped in decomposition — "{RULE_KEYWORD}" absent from {OLD_FILE} successors (staging → main)`.
+
+4. **If all rules are PRESENT with no context changes**: Log `"Parity check PASSED — all normative rules from {OLD_FILE} verified in new file set."` and continue.
+
+**Fixture validation** (required self-test — run mentally when the old file contains both "auto-merge only after approval" and the new files contain "only compilation failures block merge" with no approval requirement): This pair MUST be classified as CONTRADICTED and emitted as a CONFIRMED HIGH finding. This is the exact scenario from #1588.
+
+---
+
 ## Phase 1: Automated Checks
 
 ### 1A: Python Linting
