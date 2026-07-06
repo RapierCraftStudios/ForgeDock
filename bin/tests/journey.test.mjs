@@ -538,6 +538,79 @@ describe("forge (Act II)", () => {
     assert.ok(!JSON.stringify(subagentStop).includes("subagent-stop-enforce.mjs"));
     assert.match(w.text, /SubagentStop enforcement hook removed/);
   });
+
+  it("prunes orphaned ForgeDock symlink after command rename (forge#1701)", async (t) => {
+    const home = mkdtempSync(join(os.tmpdir(), "fd-forge-home9-"));
+    const forgeHome = mkdtempSync(join(os.tmpdir(), "fd-forge-src9-"));
+    mkdirSyncFs(join(forgeHome, "commands"), { recursive: true });
+    mkdirSyncFs(join(forgeHome, "bin", "hooks"), { recursive: true });
+    // Current state: only pipeline-resume.md exists (resume.md was renamed away)
+    writeFileSync(join(forgeHome, "commands", "pipeline-resume.md"), "PIPELINE-RESUME", "utf-8");
+    writeFileSync(join(forgeHome, "bin", "hooks", "session-start.mjs"), "// hook", "utf-8");
+
+    // Pre-seed the target dir with an orphaned symlink that points to the
+    // now-deleted resume.md in commandsDir.
+    const commandsDir = join(forgeHome, "commands");
+    const targetCommands = join(home, ".claude", "commands");
+    mkdirSyncFs(targetCommands, { recursive: true });
+    const orphanTarget = join(commandsDir, "resume.md"); // this file no longer exists
+    const orphanLink = join(targetCommands, "resume.md");
+    try {
+      symlinkSync(orphanTarget, orphanLink);
+    } catch (err) {
+      if (err.code === "EPERM" || err.code === "EACCES") {
+        t.skip("symlink creation unavailable (Windows without Developer Mode)");
+        return;
+      }
+      throw err;
+    }
+    assert.ok(existsSync(orphanLink) || true, "orphan link created (lstat follows the broken link)");
+
+    const { ctx, w } = stubCtx({ home });
+    ctx.forgeHome = forgeHome;
+    const res = await forge(ctx);
+
+    // Orphan should be gone
+    assert.ok(!existsSync(orphanLink), "orphaned symlink was removed");
+    // pipeline-resume.md should be installed
+    assert.ok(existsSync(join(targetCommands, "pipeline-resume.md")), "renamed command installed");
+    // pruned count reported
+    assert.equal(res.pruned, 1);
+    assert.match(w.text, /orphaned symlink/);
+  });
+
+  it("does not remove user-owned symlinks pointing outside commandsDir", async (t) => {
+    const home = mkdtempSync(join(os.tmpdir(), "fd-forge-home10-"));
+    const forgeHome = mkdtempSync(join(os.tmpdir(), "fd-forge-src10-"));
+    mkdirSyncFs(join(forgeHome, "commands"), { recursive: true });
+    mkdirSyncFs(join(forgeHome, "bin", "hooks"), { recursive: true });
+    writeFileSync(join(forgeHome, "commands", "a.md"), "A", "utf-8");
+    writeFileSync(join(forgeHome, "bin", "hooks", "session-start.mjs"), "// hook", "utf-8");
+
+    // A user-owned symlink pointing somewhere outside commandsDir
+    const targetCommands = join(home, ".claude", "commands");
+    mkdirSyncFs(targetCommands, { recursive: true });
+    const userFile = join(home, "user-custom.md");
+    writeFileSync(userFile, "USER CUSTOM", "utf-8");
+    const userLink = join(targetCommands, "user-custom.md");
+    try {
+      symlinkSync(userFile, userLink);
+    } catch (err) {
+      if (err.code === "EPERM" || err.code === "EACCES") {
+        t.skip("symlink creation unavailable (Windows without Developer Mode)");
+        return;
+      }
+      throw err;
+    }
+
+    const { ctx } = stubCtx({ home });
+    ctx.forgeHome = forgeHome;
+    const res = await forge(ctx);
+
+    // User-owned symlink must survive untouched
+    assert.ok(existsSync(userLink), "user-owned symlink preserved");
+    assert.equal(res.pruned, 0);
+  });
 });
 
 // ---------------------------------------------------------------------------

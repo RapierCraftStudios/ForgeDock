@@ -471,6 +471,68 @@ async function saveCopiedManifest(manifestPath, manifest) {
 const isLinkPermissionError = (err) => err.code === "EPERM" || err.code === "EACCES";
 
 /**
+ * Recursively walk targetDir and remove any symlink whose target begins with
+ * commandsDir (i.e. a ForgeDock-managed link) but whose target file no longer
+ * exists on disk. These are "orphaned" symlinks left behind when a command is
+ * renamed or deleted.
+ *
+ * Safety invariant: only symlinks whose readlink() result starts with
+ * commandsDir + "/" are touched. User-owned symlinks and third-party links are
+ * never removed.
+ *
+ * @param {string} targetDir   - ~/.claude/commands (installed commands root)
+ * @param {string} commandsDir - FORGE_HOME/commands (source commands root)
+ * @returns {Promise<number>} Number of orphaned symlinks removed.
+ */
+async function pruneOrphanedSymlinks(targetDir, commandsDir) {
+  const prefix = commandsDir + "/";
+  let pruned = 0;
+
+  async function walk(dir) {
+    let entries;
+    try {
+      entries = await readdir(dir, { withFileTypes: true });
+    } catch (err) {
+      if (err.code === "ENOENT") return; // targetDir doesn't exist yet — nothing to prune
+      throw err;
+    }
+    for (const entry of entries) {
+      const full = join(dir, entry.name);
+      if (entry.isDirectory()) {
+        await walk(full);
+      } else if (entry.isSymbolicLink()) {
+        let target;
+        try {
+          target = await readlink(full);
+        } catch {
+          continue; // can't read link — skip
+        }
+        // Only manage links that point into our commandsDir
+        if (!target.startsWith(prefix)) continue;
+        // Check whether the target file still exists
+        try {
+          await lstat(target);
+          // target exists — not orphaned
+        } catch (err) {
+          if (err.code !== "ENOENT") continue; // unexpected error — skip to be safe
+          // target is gone → orphaned symlink
+          try {
+            await unlink(full);
+            pruned++;
+          } catch (unlinkErr) {
+            if (unlinkErr.code !== "ENOENT") throw unlinkErr;
+            // already gone — race condition, that's fine
+          }
+        }
+      }
+    }
+  }
+
+  await walk(targetDir);
+  return pruned;
+}
+
+/**
  * Act II: link commands into ~/.claude/commands with a molten progress line,
  * then register the SessionStart hook.
  * Symlink semantics preserved verbatim from the original install():
@@ -611,6 +673,10 @@ export async function forge(ctx) {
   }
   if (barShown) w.write("\x1b[1A\x1b[2K");
 
+  // Prune orphaned symlinks: links that point into commandsDir but whose
+  // target file no longer exists (e.g. after a command is renamed or deleted).
+  const pruned = await pruneOrphanedSymlinks(targetDir, commandsDir);
+
   const hookScript = join(ctx.forgeHome, "bin", "hooks", "session-start.mjs");
   const settingsPath = join(ctx.home, ".claude", "settings.json");
   const { status: hookStatus } = installSessionStartHook(settingsPath, hookScript);
@@ -648,6 +714,9 @@ export async function forge(ctx) {
     ? `(new ${installed}, copied ${copied}, updated ${updated}, unchanged ${skipped})`
     : `(new ${installed}, updated ${updated}, unchanged ${skipped})`;
   w.write(`  ${glyph(true)} ${files.length} slash commands ${headlineVerb} ${dimLine(ctx, headlineDetail)}\n`);
+  if (pruned > 0) {
+    w.write(`  ${glyph(true)} ${pruned} orphaned symlink${pruned === 1 ? "" : "s"} removed ${dimLine(ctx, "(commands deleted or renamed since last install)")}\n`);
+  }
   if (copied > 0) {
     w.write(`  ${glyph(false)} ${copied} copied (not linked) ${dimLine(ctx, "— enable Windows Developer Mode for live-updating links")}\n`);
   }
@@ -677,7 +746,7 @@ export async function forge(ctx) {
     w.write(`  ${glyph(true)} SubagentStop enforcement hook removed ${dimLine(ctx, "(non-functional — see forge#1527)")}\n`);
   }
 
-  return { installed, updated, skipped, copied, total: files.length, hookStatus, preToolUseStatus, subagentStopEnforceStatus };
+  return { installed, updated, skipped, copied, pruned, total: files.length, hookStatus, preToolUseStatus, subagentStopEnforceStatus };
 }
 
 // ---------------------------------------------------------------------------
