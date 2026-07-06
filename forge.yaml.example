@@ -466,6 +466,38 @@ branches:
 #   #   - files: ["cmd/server/main.go"]
 #   #     command: "go run ./cmd/server --help"
 #
+#   # Static injection scanner invoked at build time — a per-PR/per-commit scan that
+#   # runs before the code ever reaches review, catching injection-class findings
+#   # (SQL/command/SSRF/taint) that the SEC-EXEC grep alone cannot (SEC-EXEC only
+#   # catches shell-string exec/spawn interpolation; it is not a semantic analyzer).
+#   # Used by: quality-gate (Step 2W), work-on/build/validate (Phase V2 — direct
+#   # blocking backstop, no fix-loop).
+#   #
+#   # ForgeDock does not hardcode a scanner — declare whatever your project already
+#   # uses. `command` is a shell string; the changed-file list is appended as
+#   # positional arguments (most scanners, e.g. semgrep, treat trailing paths as
+#   # scan targets). When this key is absent, both gate steps log SKIPPED and never
+#   # block — adopting this check is entirely opt-in.
+#   #
+#   # `blocking_severity_pattern` is a case-insensitive regex matched against the
+#   # scanner's stdout/stderr; any match blocks the gate. Defaults to
+#   # "(severity|level)[^a-zA-Z0-9]{0,6}(CRITICAL|HIGH|ERROR)" — anchored on the JSON
+#   # key name (`severity` for semgrep, `level` for SARIF/CodeQL), not a bare severity
+#   # word. A naive bare-word pattern (e.g. just "ERROR") over-matches scanner JSON that
+#   # always contains an unrelated key like semgrep's empty "errors":[] field. Note the
+#   # anchored default can still match a scanner DIAGNOSTIC (a non-empty errors[] entry
+#   # carrying "level":"error") — that fails safe (blocks) but is not a code finding;
+#   # override this pattern for your scanner's exact output shape if that matters.
+#   #
+#   # security_scan:
+#   #   # Python/multi-language project using semgrep with the default ruleset
+#   #   command: "semgrep --config=auto --json --quiet"
+#   #   blocking_severity_pattern: "(severity|level)[^a-zA-Z0-9]{0,6}(CRITICAL|HIGH|ERROR)"
+#   #
+#   #   # Alternative: a project-specific semgrep config with custom severity naming
+#   #   # command: "semgrep --config=.semgrep.yml --json --quiet"
+#   #   # blocking_severity_pattern: "\"severity\"[^a-zA-Z0-9]{0,6}(ERROR|WARNING)"
+#
 #   # Integration test suites run by /test-gate against the provisioned cluster.
 #   # Each entry specifies a logical cluster (matched to test_services), the shell
 #   # command to execute, and the working directory (relative to project root).

@@ -1,0 +1,68 @@
+name: "CodeQL"
+
+# Advanced-setup CodeQL analysis, triggered on pull_request (any base branch — including
+# `staging`) and push to staging/main, plus a weekly schedule.
+#
+# forge#1607: CodeQL previously ran only as the repo's "default setup" (a GitHub
+# repo-settings toggle, not a workflow file). Default setup is architecturally
+# restricted to the repository's default branch (`main`) — it never analyzed PRs
+# targeting `staging`, so injection-class findings (e.g. forge#1576, a CodeQL
+# js/bad-tag-filter alert) were only ever caught at the staging->main deploy PR,
+# after the defect had already lived on staging. Default setup and an advanced
+# (workflow-file) setup are mutually exclusive — GitHub disables workflow-based
+# runs while default setup is active — so this workflow requires the repo's
+# default setup to be switched to "not-configured" (via the code-scanning API)
+# for these runs to actually execute and upload results.
+#
+# Language/build-mode selection mirrors the prior default-setup configuration
+# (javascript-typescript + actions, both build-mode: none) so scan coverage does
+# not regress.
+
+on:
+  pull_request:
+  push:
+    branches:
+      - staging
+      - main
+  schedule:
+    - cron: "30 3 * * 1"
+
+concurrency:
+  # Include event_name so a scheduled run and a push-to-main run (both resolve
+  # github.ref to refs/heads/main) do not share a group and cancel each other.
+  group: ${{ github.workflow }}-${{ github.event_name }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+  security-events: write
+  actions: read
+
+jobs:
+  analyze:
+    name: Analyze (${{ matrix.language }})
+    runs-on: ubuntu-latest
+
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - language: javascript-typescript
+            build-mode: none
+          - language: actions
+            build-mode: none
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Initialize CodeQL
+        uses: github/codeql-action/init@v3
+        with:
+          languages: ${{ matrix.language }}
+          build-mode: ${{ matrix.build-mode }}
+
+      - name: Perform CodeQL Analysis
+        uses: github/codeql-action/analyze@v3
+        with:
+          category: "/language:${{ matrix.language }}"
