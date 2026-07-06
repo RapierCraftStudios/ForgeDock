@@ -89,6 +89,32 @@ const PHASE_MARKERS = [
   { marker: "workflow:merged",         phase: "close", terminal: true, terminalReason: "merged" },
 ];
 
+/**
+ * Match a single string of text against the PHASE_MARKERS table and return
+ * the phase (and terminal reason) implied by the first marker found, in
+ * table order — a terminal marker stops the scan. This is the same
+ * marker-matching rule `detectPhase()` applies per-block below, factored
+ * out as a standalone export so it can be tested directly against a bare
+ * string without needing a full transcript-entries array. Purely additive:
+ * `detectPhase()`'s existing multi-entry accumulation algorithm is
+ * untouched and does not call this function. See #1592.
+ *
+ * @param {string} text
+ * @returns {{ phaseId: string|null, terminalReason: string|null }}
+ */
+export function detectPhaseFromText(text) {
+  const str = typeof text === "string" ? text : "";
+  let phaseId = null;
+  let terminalReason = null;
+  for (const { marker, phase, terminal, terminalReason: tr } of PHASE_MARKERS) {
+    if (str.includes(marker)) {
+      phaseId = phase;
+      if (terminal) { terminalReason = tr; break; }
+    }
+  }
+  return { phaseId, terminalReason };
+}
+
 // ---------------------------------------------------------------------------
 // Main — fail-open wrapper
 // ---------------------------------------------------------------------------

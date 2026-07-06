@@ -295,25 +295,16 @@ describe("resumeStalledFromCli", () => {
 
       const runIssue = mock.fn(async () => ({ terminalReason: "workflow:merged" }));
 
-      // Use the real default dispatch (no deps.dispatch override) so the fix is exercised.
-      // Inject deps.runIssue so we don't actually drive the engine, and deps.io so the
-      // default dispatch closure picks up the same io (not a fresh makeIo()).
-      // NOTE: we can't pass deps.io to resumeStalledFromCli and have its default dispatch
-      // also use that same io without the fix — the fix is what makes that happen.
       const result = await resumeStalledFromCli(
         ["--lane", "staging", "--repo", "acme/target-repo"],
         {
           io,
-          // Override dispatch to use the real runFromCli with the shared io and repoVerified flag.
-          // This simulates what the production default dispatch does, without needing a real engine.
           dispatch: (argv) => runFromCli(argv, { io, repoVerified: true, runIssue }),
         },
       );
 
       assert.deepEqual(result.stalled, [400, 401, 402]);
       assert.deepEqual(result.dispatched, [400, 401, 402]);
-      // Exactly one gh repo view call — the one in resumeStalledFromCli itself.
-      // The dispatched runFromCli calls all had repoVerified:true and skipped it.
       assert.equal(repoViewCalls.length, 1,
         `Expected 1 gh repo view call, got ${repoViewCalls.length} — N+1 redundancy not fixed`);
     });

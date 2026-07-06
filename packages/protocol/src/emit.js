@@ -13,6 +13,61 @@
 
 import { RESERVED_TYPES, RESERVED_TYPE_NAMES } from './types.js';
 
+// A folded field/inline value that is itself (whole, trimmed) shaped like a FORGE
+// opening tag or a generic sentinel line has no legitimate reason to look that way —
+// parse()'s line-anchored matching (see parse.js OPENING_TAG_RE / resolveSentinelState)
+// treats any line matching this shape as live protocol structure. Untrusted text
+// (issue titles, branch names, freeform error/output strings) flowing into emit()
+// must never be able to forge one. (forge#1594)
+const FORGE_TAG_LINE_RE =
+  /^\s*<!--\s*(?:FORGE:[A-Z_]+(?::.*)?|[A-Z_][A-Z_:]*:(?:COMPLETE|PARTIAL))\s*-->\s*$/;
+
+// Newline variants that would let a value spill onto its own line(s).
+const NEWLINE_RE = /\r\n|\r|\n/g;
+
+/**
+ * Sanitize a value before it is serialized into a `**Key**: value` field line or
+ * an inline-value tag. Two independent protections:
+ *
+ *   1. Newlines are folded to a single space so a multi-line value can never
+ *      produce a new line of its own — every real FORGE tag (opening tag,
+ *      sentinel, control marker) occupies a whole line, so folding denies an
+ *      injected value the only shape parse() treats as structural.
+ *   2. HTML comment delimiters (`<!--`, `-->`, and `--!>`) are escaped so a
+ *      value can never open a new unterminated HTML comment or prematurely close
+ *      the enclosing `<!-- ... -->` comment — GitHub's renderer treats a literal
+ *      `<!--` as the start of a new (nested-looking) comment, visually swallowing
+ *      subsequent lines including the completion sentinel, and treats a literal
+ *      `-->` as ending the enclosing comment early, leaking the remainder as
+ *      visible rendered text. Both directions of the delimiter pair must be
+ *      escaped. (forge#1594, forge#1638)
+ *
+ * As defense in depth, if a value still folds down to a line that is itself a
+ * bare FORGE tag/sentinel shape, emit() rejects it outright rather than silently
+ * emitting something a parser could mistake for real protocol structure.
+ *
+ * @param {*} rawValue
+ * @returns {string}
+ */
+function sanitizeFieldValue(rawValue) {
+  const folded = String(rawValue).replace(NEWLINE_RE, ' ');
+  if (FORGE_TAG_LINE_RE.test(folded.trim())) {
+    throw new TypeError(
+      `emit(): field value resolves to a bare FORGE tag/sentinel line, which is not permitted: ${JSON.stringify(rawValue)}`,
+    );
+  }
+  // Escape the HTML comment opener ("<!--") so a value cannot start a new
+  // unterminated HTML comment in GitHub's renderer, which would visually swallow
+  // subsequent lines — the same rendering-leak the closer escaping below prevents
+  // from the opposite direction. (forge#1638)
+  const withOpenerEscaped = folded.replace(/<!--/g, '&lt;!--');
+  // Escape both HTML comment-close forms ("-->" and "--!>") — only replacing the
+  // literal character sequence (not just documenting the risk) prevents the
+  // enclosing comment from terminating early. (forge#1594; noted but never fixed
+  // for the FORGE:STATE codec in bin/engine/state.mjs — see issue investigation)
+  return withOpenerEscaped.replace(/--(!)?>/g, (_, bang) => `--${bang || ''}&gt;`);
+}
+
 /**
  * Emit a well-formed FORGE annotation string.
  *
@@ -32,7 +87,7 @@ export function emit(type, fields = {}) {
   // Inline-value form (§3.4)
   if (typeDef?.inlineValue) {
     const value = fields.value ?? '';
-    return `<!-- FORGE:${upperType}: ${value} -->`;
+    return `<!-- FORGE:${upperType}: ${sanitizeFieldValue(value)} -->`;
   }
 
   // Control marker form (§4.3) — just the tag, no body
@@ -44,10 +99,13 @@ export function emit(type, fields = {}) {
   const lines = [`<!-- FORGE:${upperType} -->`];
 
   // Emit each field as a **Key**: value line
+  // Both key and val are sanitized — a partial-sanitization hole where only the
+  // value was sanitized was identified in forge#1637. Keys can carry the same
+  // newline / comment-terminator injection vectors as values.
   const fieldEntries = Object.entries(fields);
   if (fieldEntries.length > 0) {
     for (const [key, val] of fieldEntries) {
-      lines.push(`**${key}**: ${val}`);
+      lines.push(`**${sanitizeFieldValue(key)}**: ${sanitizeFieldValue(val)}`);
     }
   }
 

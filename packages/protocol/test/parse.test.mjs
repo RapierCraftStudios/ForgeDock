@@ -5,6 +5,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { parse } from '../src/parse.js';
+import { emit } from '../src/emit.js';
 import { SentinelState } from '../src/types.js';
 
 test('parse: empty string returns empty array', () => {
@@ -186,4 +187,85 @@ test('parse: non-inline-value sentinel folding is unchanged for COMPLETE/PARTIAL
   assert.equal(partialAnnotations.length, 1);
   assert.equal(partialAnnotations[0].type, 'CONTEXT');
   assert.equal(partialAnnotations[0].sentinelState, SentinelState.PARTIAL);
+});
+
+test('parse: sentinel text embedded inside a field value does NOT spoof completion (forge#1594)', () => {
+  // A **Commits** field that merely mentions the literal completion sentinel text
+  // (e.g. quoting it in a changelog note) must not flip sentinelState to complete —
+  // only a sentinel occupying its own whole line is a real sentinel. This is the
+  // sentinel-detection mirror of the #1524 opening-tag anchor fix.
+  const body =
+    `<!-- FORGE:BUILDER -->\n**Branch**: \`fix/example\`\n` +
+    `**Commits**: see note about <!-- FORGE:BUILDER:COMPLETE --> in the changelog\n` +
+    `**Files changed**: 1`;
+  const [ann] = parse(body);
+  assert.equal(ann.type, 'BUILDER');
+  assert.equal(ann.sentinelState, SentinelState.INTERRUPTED);
+});
+
+test('parse: a real completion sentinel on its own line still completes normally (forge#1594 non-regression)', () => {
+  const body =
+    `<!-- FORGE:BUILDER -->\n**Branch**: \`fix/example\`\n**Commits**: abc123\n` +
+    `**Files changed**: 1\n<!-- FORGE:BUILDER:COMPLETE -->`;
+  const [ann] = parse(body);
+  assert.equal(ann.sentinelState, SentinelState.COMPLETE);
+});
+
+test('parse: unknown-type generic sentinel detection is also line-anchored (forge#1594)', () => {
+  const body = `<!-- FORGE:CUSTOM_VENDOR_TYPE -->\nNote: some text mentions <!-- X:COMPLETE --> mid-sentence.`;
+  const [ann] = parse(body);
+  assert.equal(ann.isReserved, false);
+  assert.equal(ann.sentinelState, SentinelState.INTERRUPTED);
+});
+
+// ── Round-trip unescape (forge#1662) ──────────────────────────────────────────
+//
+// emit() escapes HTML comment delimiters in field keys, field values, and inline
+// values to protect GitHub's renderer. parse() must reverse these escapes so that
+// parse(emit(...)) is lossless. These tests cover all three escape sequences:
+//   1. `-->` / `--!>` — comment closer forms (forge#1594)
+//   2. `<!--`          — comment opener form (forge#1638)
+// and verify the unescape is applied to both field values and inline values.
+
+test('parse(emit(...)): field value containing "-->" round-trips losslessly (forge#1662)', () => {
+  const original = 'ends with --> right here';
+  const [ann] = parse(emit('CONTEXT', { Note: original }));
+  assert.equal(ann.fields['Note'], original);
+});
+
+test('parse(emit(...)): field value containing "--!>" round-trips losslessly (forge#1662)', () => {
+  const original = 'weird --!> sequence';
+  const [ann] = parse(emit('CONTEXT', { Note: original }));
+  assert.equal(ann.fields['Note'], original);
+});
+
+test('parse(emit(...)): field value containing "<!--" round-trips losslessly (forge#1662)', () => {
+  const original = 'starts with <!-- right here';
+  const [ann] = parse(emit('CONTEXT', { Note: original }));
+  assert.equal(ann.fields['Note'], original);
+});
+
+test('parse(emit(...)): field key containing "-->" round-trips losslessly (forge#1662)', () => {
+  const keyName = 'Key-->Name';
+  const [ann] = parse(emit('CONTEXT', { [keyName]: 'safe-value' }));
+  assert.ok(keyName in ann.fields, `Expected key "${keyName}" in fields, got: ${JSON.stringify(Object.keys(ann.fields))}`);
+  assert.equal(ann.fields[keyName], 'safe-value');
+});
+
+test('parse(emit(...)): inline value containing "-->" round-trips losslessly (forge#1662)', () => {
+  const original = 'https://example.com/a-->b';
+  const [ann] = parse(emit('KNOWLEDGE_GIST', { value: original }));
+  assert.equal(ann.inlineValue, original);
+});
+
+test('parse(emit(...)): inline value containing "<!--" round-trips losslessly (forge#1662)', () => {
+  const original = 'https://example.com/a<!--b';
+  const [ann] = parse(emit('KNOWLEDGE_GIST', { value: original }));
+  assert.equal(ann.inlineValue, original);
+});
+
+test('parse(emit(...)): field value with multiple escape sequences round-trips losslessly (forge#1662)', () => {
+  const original = 'from <!-- start --> to --!> end';
+  const [ann] = parse(emit('CONTEXT', { Note: original }));
+  assert.equal(ann.fields['Note'], original);
 });

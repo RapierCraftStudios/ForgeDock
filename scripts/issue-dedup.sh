@@ -3,10 +3,18 @@
 #
 # Usage:
 #   issue-dedup.sh <title> [-R <owner/repo>] [--force]
+#   issue-dedup.sh <title> ["-R <owner/repo>"] [--force]   (single pre-joined token also accepted)
 #
-#   <title>         : Proposed issue title (required, must be quoted if it contains spaces)
-#   -R <owner/repo> : GitHub repository (optional, defaults to FORGE_REPO or current repo)
-#   --force         : Skip dedup check and always allow creation (explicit override)
+#   <title>           : Proposed issue title (required, must be quoted if it contains spaces)
+#   -R <owner/repo>   : GitHub repository, as two argv tokens (optional, defaults to
+#                       FORGE_REPO or current repo)
+#   "-R <owner/repo>" : GitHub repository, as ONE pre-joined token (e.g. when a caller
+#                       passes an already-composed $GH_FLAG variable quoted as "$GH_FLAG").
+#                       Both forms are accepted. A title that happens to start with "-R "
+#                       but lacks the "/" separator (e.g. "-R login is broken") is
+#                       correctly detected by the parser and treated as a title, not a
+#                       repo flag. See the -R\ * case arm guard in the arg-parsing loop.
+#   --force           : Skip dedup check and always allow creation (explicit override)
 #
 # Exit codes:
 #   0 — No near-duplicate found. Creation is safe. Stdout is empty.
@@ -29,6 +37,10 @@
 # Integration pattern (for command specs that call gh issue create):
 #
 #   DEDUP_RESULT=$(scripts/issue-dedup.sh "$PROPOSED_TITLE" "$GH_FLAG" 2>&1)
+#   # ^ $GH_FLAG is typically already composed as "-R owner/repo" and quoted here,
+#   #   producing ONE argv token — the parser accepts this joined form directly
+#   #   (see the -R\ * case arm below). An unset/empty $GH_FLAG quotes to an empty
+#   #   token, which the parser also treats as "no repo flag" rather than a title.
 #   DEDUP_EXIT=$?
 #   if [ $DEDUP_EXIT -eq 1 ]; then
 #     echo "Near-duplicate detected: $DEDUP_RESULT"
@@ -72,6 +84,11 @@ FORCE=0
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
+    "")
+      # Empty-string token — e.g. a caller quoting an unset/empty $GH_FLAG
+      # ("$GH_FLAG" -> ""). Treat as "no repo flag supplied", not as a title.
+      shift
+      ;;
     -R)
       shift
       if [[ $# -eq 0 ]]; then
@@ -80,6 +97,25 @@ while [[ $# -gt 0 ]]; do
       fi
       GH_FLAG="-R $1"
       shift
+      ;;
+    -R\ *)
+      # Single pre-joined token, e.g. "-R owner/repo" — produced when a caller
+      # quotes an already-composed $GH_FLAG variable ("$GH_FLAG") instead of
+      # passing -R and the repo as two separate argv tokens. Both call shapes
+      # are valid integration patterns used across commands/*.md callers.
+      #
+      # Guard: a valid repo token always contains '/' (owner/repo format).
+      # If the value after "-R " has no '/', the token is a positional title
+      # that happens to start with "-R " (e.g. "-R login is broken") — treat
+      # it as the title instead. This prevents argv-flag-title-collision (#1625).
+      _rval="${1#-R }"
+      if [[ "$_rval" == */* ]]; then
+        GH_FLAG="$1"
+        shift
+      else
+        PROPOSED_TITLE="$1"
+        shift
+      fi
       ;;
     --force)
       FORCE=1
@@ -122,7 +158,11 @@ normalize_tokens() {
 }
 
 PROPOSED_TOKENS=$(normalize_tokens "$PROPOSED_TITLE")
-PROPOSED_TOKEN_COUNT=$(echo "$PROPOSED_TOKENS" | grep -c . 2>/dev/null || echo 0)
+# grep -c always prints a numeric count (including "0") even when it matches
+# nothing — it just exits 1 in that case. `|| echo 0` would append a SECOND
+# "0" line on top of grep's own "0" output, corrupting the numeric comparison
+# below. `|| true` only suppresses the non-zero exit under `set -e`.
+PROPOSED_TOKEN_COUNT=$(echo "$PROPOSED_TOKENS" | grep -c . || true)
 
 if [[ "$PROPOSED_TOKEN_COUNT" -lt 1 ]]; then
   # Title has no meaningful tokens — skip dedup (cannot match)
@@ -159,13 +199,14 @@ while IFS=$'\t' read -r CAND_NUMBER CAND_TITLE; do
   [[ -z "$CAND_NUMBER" ]] && continue
 
   CAND_TOKENS=$(normalize_tokens "$CAND_TITLE")
-  CAND_TOKEN_COUNT=$(echo "$CAND_TOKENS" | grep -c . 2>/dev/null || echo 0)
+  # Same double-fallback hazard as PROPOSED_TOKEN_COUNT above — see comment there.
+  CAND_TOKEN_COUNT=$(echo "$CAND_TOKENS" | grep -c . || true)
 
   # Shared token count: intersection of proposed and candidate token sets
   SHARED_COUNT=$(comm -12 \
     <(echo "$PROPOSED_TOKENS") \
     <(echo "$CAND_TOKENS") \
-    | grep -c . 2>/dev/null || echo 0)
+    | grep -c . || true)
 
   # Shorter token set size (for percentage threshold)
   if [[ "$PROPOSED_TOKEN_COUNT" -le "$CAND_TOKEN_COUNT" ]]; then

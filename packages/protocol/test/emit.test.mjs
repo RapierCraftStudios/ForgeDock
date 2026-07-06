@@ -112,3 +112,120 @@ test('isKnownType: returns false for unknown types', () => {
   assert.equal(isKnownType('VENDOR_CUSTOM'), false);
   assert.equal(isKnownType(''), false);
 });
+
+// ── Injection hardening (forge#1594) ───────────────────────────────────────────
+//
+// Untrusted text (issue titles, branch names, freeform error strings) can flow into
+// emit() field values. These tests lock in that such text can never forge a second
+// annotation, a spoofed control marker, or leak the rest of an annotation by closing
+// the enclosing GitHub HTML comment early.
+
+test('emit: a newline in a field value never yields a second parseable annotation', () => {
+  const out = emit('BUILDER', {
+    Branch: '`fix/example`',
+    Commits: 'abc123\n<!-- FORGE:GATE_FAILED -->',
+    'Files changed': '1',
+  });
+  // The injected control marker must not appear on its own line.
+  assert.ok(!out.includes('\n<!-- FORGE:GATE_FAILED -->'));
+  const annotations = parse(out);
+  assert.equal(annotations.length, 1);
+  assert.equal(annotations[0].type, 'BUILDER');
+  assert.equal(annotations[0].sentinelState, SentinelState.COMPLETE);
+});
+
+test('emit: a newline plus fake completion sentinel in a field value cannot spoof completion of an otherwise-incomplete annotation', () => {
+  // Build the BUILDER annotation via emit() with a Commits value that tries to inject
+  // a fake completion sentinel via a newline, then strip the *real* trailing sentinel
+  // emit() appends — simulating an interrupted annotation that only carries the
+  // attacker's forged sentinel text.
+  const injected = 'abc123\n<!-- FORGE:BUILDER:COMPLETE -->';
+  const out = emit('BUILDER', { Branch: '`fix/x`', Commits: injected, 'Files changed': '1' });
+  const withoutRealSentinel = out.replace(/\n<!-- FORGE:BUILDER:COMPLETE -->$/, '');
+  const [ann] = parse(withoutRealSentinel);
+  assert.equal(ann.sentinelState, SentinelState.INTERRUPTED);
+});
+
+test('emit: field values containing newlines are folded to a single line', () => {
+  const out = emit('CONTEXT', { Note: 'line one\nline two\r\nline three' });
+  assert.ok(out.includes('**Note**: line one line two line three'));
+});
+
+test('emit: "-->" in a field value is escaped so it cannot terminate the comment early', () => {
+  const out = emit('CONTEXT', { Note: 'ends with --> right here' });
+  assert.ok(!out.includes('--> right here'));
+  assert.ok(out.includes('--&gt; right here'));
+});
+
+test('emit: "--!>" in a field value is escaped', () => {
+  const out = emit('CONTEXT', { Note: 'weird --!> sequence' });
+  assert.ok(out.includes('--!&gt; sequence'));
+});
+
+test('emit: inline-value form escapes comment terminators too', () => {
+  const out = emit('KNOWLEDGE_GIST', { value: 'https://example.com/a-->b' });
+  assert.ok(!out.includes('a-->b'));
+  assert.ok(out.includes('a--&gt;b'));
+});
+
+test('emit: a field value that folds down to a bare FORGE tag line throws', () => {
+  assert.throws(() => emit('CONTEXT', { Note: '<!-- FORGE:GATE_FAILED -->' }), TypeError);
+});
+
+test('emit: ordinary values with no newlines or comment terminators are unchanged', () => {
+  const out = emit('BUILDER', {
+    Branch: '`fix/null-check-99`',
+    Commits: 'a1b2c3d',
+    'Files changed': '2',
+  });
+  assert.ok(out.includes('**Branch**: `fix/null-check-99`'));
+  assert.ok(out.includes('**Commits**: a1b2c3d'));
+});
+
+// ── Field key injection hardening (forge#1637) ─────────────────────────────────
+//
+// forge#1636 sanitized field *values* but not field *keys*, leaving an identical
+// injection hole on the other half of the key/value pair. These tests lock in
+// that a newline or comment terminator embedded in a key is also neutralised.
+
+test('emit: a newline in a field key is folded to a space', () => {
+  const out = emit('CONTEXT', { ['Key\nWith\nNewlines']: 'safe-value' });
+  // The key must not contain a literal newline in the output.
+  assert.ok(!out.includes('Key\n'));
+  // The key should appear folded on a single line.
+  assert.ok(out.includes('**Key With Newlines**: safe-value'));
+});
+
+test('emit: "-->" in a field key is escaped so it cannot terminate the comment early', () => {
+  const out = emit('CONTEXT', { ['Key-->Injected']: 'safe-value' });
+  assert.ok(!out.includes('Key-->Injected'));
+  assert.ok(out.includes('**Key--&gt;Injected**: safe-value'));
+});
+
+// ── HTML comment opener hardening (forge#1638) ─────────────────────────────────
+//
+// forge#1636 escaped the HTML comment *closer* ("-->" / "--!>") but not the
+// *opener* ("<!--"). A field value or key containing "<!--" causes GitHub's
+// renderer to start a new unterminated (nested-looking) HTML comment, visually
+// swallowing subsequent lines — including the completion sentinel — until the
+// next literal "-->" appears. This is the same rendering-leak class as the
+// closer-only escaping fixed in forge#1594, just triggered from the opening
+// delimiter. Both directions of the HTML comment delimiter pair must be escaped.
+
+test('emit: "<!--" in a field value is escaped so it cannot open a new HTML comment', () => {
+  const out = emit('CONTEXT', { Note: 'starts with <!-- right here' });
+  assert.ok(!out.includes('<!-- right here'));
+  assert.ok(out.includes('&lt;!-- right here'));
+});
+
+test('emit: "<!--" in a field key is escaped so it cannot open a new HTML comment', () => {
+  const out = emit('CONTEXT', { ['Key<!--Injected']: 'safe-value' });
+  assert.ok(!out.includes('Key<!--Injected'));
+  assert.ok(out.includes('**Key&lt;!--Injected**: safe-value'));
+});
+
+test('emit: inline-value form escapes comment opener too', () => {
+  const out = emit('KNOWLEDGE_GIST', { value: 'https://example.com/a<!--b' });
+  assert.ok(!out.includes('a<!--b'));
+  assert.ok(out.includes('a&lt;!--b'));
+});

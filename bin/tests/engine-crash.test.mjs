@@ -50,7 +50,10 @@ function makeWorld() {
       const a = args.join(" ");
       if (a.includes("/comments")) {
         w.commentCalls++;
-        if (w.commentCalls === w.crashAtComments) { w.crashAtComments = Infinity; throw new Error("CRASH mid-phase (comments)"); }
+        // Scoped channel: count and optionally crash BEFORE the legacy channel
+        // so postBuildCommentCalls is always accurate even if both channels are
+        // ever co-armed. (Currently mutual-exclusive — no scenario arms both —
+        // but hoisting the counter makes the invariant hold programmatically.)
         if (w.buildRuns > 0) {
           w.postBuildCommentCalls++;
           if (w.postBuildCommentCalls === w.crashAtPostBuildComments) {
@@ -58,6 +61,7 @@ function makeWorld() {
             throw new Error("CRASH mid-phase (comments, post-build)");
           }
         }
+        if (w.commentCalls === w.crashAtComments) { w.crashAtComments = Infinity; throw new Error("CRASH mid-phase (comments)"); }
         return w.markers;
       }
       if (a.startsWith("issue view") && a.includes("body")) return JSON.stringify({ body: w.body });
@@ -90,8 +94,8 @@ function makeWorld() {
   const runner = async ({ commandName }) => {
     switch (commandName) {
       case "work-on/investigate": w.markers += " INVESTIGATION:COMPLETE"; break;
-      case "work-on/build/context": w.markers += " FORGE:CONTEXT"; break;
-      case "work-on/build/architect": w.markers += " FORGE:ARCHITECT"; break;
+      case "work-on/build/context": w.markers += " FORGE:CONTEXT FORGE:CONTEXT:COMPLETE"; break;
+      case "work-on/build/architect": w.markers += " FORGE:ARCHITECT FORGE:ARCHITECT:COMPLETE"; break;
       case "work-on/build": w.markers += " FORGE:BUILDER:COMPLETE"; w.commitsAhead = 2; w.buildRuns++; break;
       // Idempotent review runner: adopts an existing PR instead of creating a
       // second one on resume, so a duplicate-create would be observable via

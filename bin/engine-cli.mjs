@@ -42,14 +42,15 @@ async function resolveDefaultRepo(io) {
 }
 
 /**
- * Guards against cross-repo state confusion: `--repo` used to be threaded into
- * the `gh issue list` enumeration call but never into the projector's state
- * reads/writes or into re-dispatch, so a mismatched `--repo` silently read/wrote
- * FORGE:STATE in the cwd-resolved repo instead of the requested one. Fully
- * threading `--repo` through every call site the engine makes during a run would
- * be a much larger, riskier change. Instead, this fails closed: if `--repo` is
- * given and doesn't match the repo `gh` would use by default, refuse to run at
- * all rather than silently mixing repos.
+ * Guards against cross-repo state confusion (forge#1593): `--repo` used to be
+ * threaded into the `gh issue list` enumeration call but never into the
+ * projector's state reads/writes or into re-dispatch, so a mismatched
+ * `--repo` silently read/wrote FORGE:STATE in the cwd-resolved repo instead
+ * of the requested one. Fully threading `--repo` through every `io.gh`/
+ * `io.git` call site the engine makes during a run (phases.mjs, reconcile.mjs,
+ * projector.mjs) would be a much larger, riskier change. Instead, this fails
+ * closed: if `--repo` is given and doesn't match the repo `gh` would use by
+ * default, refuse to run at all rather than silently mixing repos.
  * @param {{gh: Function}} io
  * @param {string|null} repo
  * @returns {Promise<void>}
@@ -123,9 +124,9 @@ export async function runFromCli(argv, deps = {}) {
  *   --dry-run   Print the stalled list and exit 0 without dispatching anything.
  *   --lane      Lane to pass to run-issue (required — no default to prevent accidental production targeting).
  *   --repo      GitHub repo (owner/repo). Must match the repo `gh` resolves by default
- *               (the cwd git remote) — cross-repo dispatch is refused, since state
- *               reads/writes are cwd-scoped and would otherwise silently target the
- *               wrong repo. Omit --repo to operate on the cwd-resolved repo.
+ *               (the cwd git remote) — cross-repo dispatch is refused (forge#1593),
+ *               since state reads/writes are cwd-scoped and would otherwise silently
+ *               target the wrong repo. Omit --repo to operate on the cwd-resolved repo.
  *
  * Per-issue dispatch failures are caught and isolated — one issue's engine error
  * (e.g. NO_API_KEY/NO_SDK or any other uncaught phase error from runIssue) does

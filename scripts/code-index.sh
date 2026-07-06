@@ -222,7 +222,7 @@ if [[ ! -s "$SYMBOLS_FILE" ]] || ! command -v ctags >/dev/null 2>&1; then
   done >> "$SYMBOLS_FILE" 2>/dev/null || true
 
   # JavaScript/TypeScript: functions and classes
-  find "$REPO_PATH" -name "*.js" -o -name "*.ts" -o -name "*.tsx" -o -name "*.jsx" \
+  find "$REPO_PATH" \( -name "*.js" -o -name "*.ts" -o -name "*.tsx" -o -name "*.jsx" \) \
     -not -path "*/.git/*" -not -path "*/node_modules/*" 2>/dev/null | while read -r f; do
     grep -n "^export function \|^function \|^export class \|^class \|^const .* = \(function\|async function\|() =>\)" \
       "$f" 2>/dev/null | while IFS=: read -r lnum content; do
