@@ -234,6 +234,175 @@ Record: services touched, domains detected, PR scope (1-2 sentences), change cat
 
 ---
 
+## Phase 1C.5: Decomposition / Large-Rewrite Parity Check <!-- Added: forge#1612 -->
+
+**Purpose**: Detect when a PR deletes or rewrites a file and its content reappears across sibling new files. When a decomposition or large rewrite is detected, verify that every normative rule (MUST/NEVER/HARD RULE/gate/threshold) from the old file survives in a non-contradictory form in the new file set. Prevents the class of defect where additive diff review misses dropped or contradicted rules (e.g., #1588 — HARD RULE 3 auto-merge contradiction introduced in a 26-file decomposition).
+
+**Trigger detection (run in Phase 1 context — `$PR_NUMBER`, `$FILES`, and `$BASE` are already set from Phase 1A)**:
+
+```bash
+# Resolve base branch for old-file lookup
+BASE=$(gh pr view $PR_NUMBER --json baseRefName --jq '.baseRefName' 2>/dev/null)
+HEAD=$(gh pr view $PR_NUMBER --json headRefName --jq '.headRefName' 2>/dev/null)
+
+# Step 1: Detect deleted files and renamed/decomposed files using --find-renames
+DELETED_FILES=$(gh pr diff $PR_NUMBER --name-only 2>/dev/null \
+  | xargs -I{} sh -c 'gh pr view '"$PR_NUMBER"' --json files --jq ".files[] | select(.filename == \"{}\" and .status == \"removed\") | .filename"' 2>/dev/null \
+  || git diff origin/$BASE...origin/$HEAD --diff-filter=D --name-only 2>/dev/null)
+
+# Also check git rename detection (covers splits with --find-renames similarity >= 50%)
+RENAME_PAIRS=$(git diff origin/$BASE...origin/$HEAD --find-renames=50 --diff-filter=R --name-status 2>/dev/null \
+  | awk '/^R/ {print $2, "->", $3}')
+
+ADDED_FILES=$(git diff origin/$BASE...origin/$HEAD --diff-filter=A --name-only 2>/dev/null)
+
+DECOMP_DETECTED=false
+DECOMP_PAIRS=""
+
+if [ -n "$RENAME_PAIRS" ]; then
+  echo "Rename/decomposition detected via --find-renames:"
+  echo "$RENAME_PAIRS"
+  DECOMP_DETECTED=true
+  # Extract old files from rename pairs for rule extraction below
+  while IFS= read -r RENAME_LINE; do
+    OLD_F=$(echo "$RENAME_LINE" | awk '{print $1}')
+    NEW_F=$(echo "$RENAME_LINE" | awk '{print $3}')
+    DECOMP_PAIRS="${DECOMP_PAIRS}${OLD_F} -> ${NEW_F}\n"
+  done <<< "$RENAME_PAIRS"
+fi
+
+if [ -n "$DELETED_FILES" ]; then
+  for DELETED_FILE in $DELETED_FILES; do
+    OLD_LINES=$(git show origin/$BASE:"$DELETED_FILE" 2>/dev/null | wc -l)
+    [ "$OLD_LINES" -eq 0 ] && continue
+
+    OLD_DIRNAME=$(dirname "$DELETED_FILE")
+    OLD_BASENAME=$(basename "$DELETED_FILE" | sed 's/\.[^.]*$//')
+
+    SIBLING_ADDED=""
+    for ADDED_FILE in $ADDED_FILES; do
+      ADDED_DIR=$(dirname "$ADDED_FILE")
+      ADDED_BASE=$(basename "$ADDED_FILE" | sed 's/\.[^.]*$//')
+      if [ "$ADDED_DIR" = "$OLD_DIRNAME" ] || \
+         echo "$ADDED_DIR" | grep -q "^${OLD_DIRNAME}/" || \
+         echo "$ADDED_BASE" | grep -q "^${OLD_BASENAME}"; then
+        SIBLING_ADDED="$SIBLING_ADDED $ADDED_FILE"
+      fi
+    done
+
+    [ -z "$SIBLING_ADDED" ] && continue
+
+    # Compute content overlap using the PR diff (lines removed from old, reappearing in new)
+    OLD_CONTENT=$(git show origin/$BASE:"$DELETED_FILE" 2>/dev/null)
+    MATCHED_LINES=0
+    while IFS= read -r OLD_LINE; do
+      [ -z "$OLD_LINE" ] && continue
+      for SIBLING in $SIBLING_ADDED; do
+        SIBLING_CONTENT=$(git show origin/$HEAD:"$SIBLING" 2>/dev/null)
+        if echo "$SIBLING_CONTENT" | grep -qF "$OLD_LINE" 2>/dev/null; then
+          MATCHED_LINES=$((MATCHED_LINES + 1))
+          break
+        fi
+      done
+    done <<< "$OLD_CONTENT"
+
+    OVERLAP_PCT=0
+    if [ "$OLD_LINES" -gt 0 ]; then
+      OVERLAP_PCT=$(( (MATCHED_LINES * 100) / OLD_LINES ))
+    fi
+
+    if [ "$OVERLAP_PCT" -ge 50 ]; then
+      DECOMP_DETECTED=true
+      DECOMP_PAIRS="${DECOMP_PAIRS}${DELETED_FILE} -> $(echo $SIBLING_ADDED | tr ' ' ',')\n"
+      echo "DECOMPOSITION DETECTED: $DELETED_FILE (${OVERLAP_PCT}% content overlap with sibling added files)"
+    fi
+  done
+fi
+
+if [ "$DECOMP_DETECTED" = "false" ]; then
+  echo "No decomposition detected — parity check skipped."
+fi
+```
+
+**If no decomposition detected**: Log `"No decomposition detected — parity check skipped."` and continue to Phase 2.
+
+**If decomposition detected**: For each decomposed file pair, extract normative rules and verify parity:
+
+```bash
+while IFS= read -r PAIR_LINE; do
+  [ -z "$PAIR_LINE" ] && continue
+  OLD_FILE=$(echo "$PAIR_LINE" | cut -d' ' -f1)
+  NEW_FILES=$(echo "$PAIR_LINE" | awk '{print $NF}' | tr ',' ' ')
+
+  echo ""
+  echo "=== PARITY CHECK: $OLD_FILE ==="
+  echo "New file set: $NEW_FILES"
+  echo ""
+
+  OLD_RULES=$(git show origin/$BASE:"$OLD_FILE" 2>/dev/null \
+    | grep -nE 'MUST|NEVER|HARD RULE|HARD_RULE|gate:|threshold:' \
+    | grep -v '^[[:space:]]*#' \
+    | grep -v '^[[:space:]]*//')
+
+  if [ -z "$OLD_RULES" ]; then
+    echo "No normative rules found in $OLD_FILE — parity check skipped for this file."
+    continue
+  fi
+
+  echo "Normative rules extracted from $OLD_FILE:"
+  echo "$OLD_RULES"
+  echo ""
+
+  echo "| Old Rule (line:text) | Surviving Location | Status |"
+  echo "|---|---|---|"
+
+  while IFS= read -r RULE_LINE; do
+    [ -z "$RULE_LINE" ] && continue
+    RULE_TEXT=$(echo "$RULE_LINE" | sed 's/^[0-9]*://' | sed 's/^[[:space:]]*//')
+    RULE_KEYWORDS=$(echo "$RULE_TEXT" | grep -oE '[A-Z][A-Z ]+' | head -1 | xargs)
+
+    SURVIVING_LOCATION="—"
+    STATUS="MISSING"
+
+    for NEW_FILE in $NEW_FILES; do
+      NEW_FILE_CONTENT=$(git show origin/$HEAD:"$NEW_FILE" 2>/dev/null)
+      if echo "$NEW_FILE_CONTENT" | grep -qF "$RULE_KEYWORDS" 2>/dev/null; then
+        SURVIVING_LOCATION="$NEW_FILE"
+        STATUS="PRESENT"
+
+        CONTEXT_IN_NEW=$(echo "$NEW_FILE_CONTENT" | grep -A2 -B2 -F "$RULE_KEYWORDS" 2>/dev/null)
+        CONTEXT_IN_OLD=$(git show origin/$BASE:"$OLD_FILE" 2>/dev/null \
+          | grep -A2 -B2 -F "$RULE_KEYWORDS" 2>/dev/null)
+        OLD_CTX_HASH=$(echo "$CONTEXT_IN_OLD" | md5sum | cut -c1-8)
+        NEW_CTX_HASH=$(echo "$CONTEXT_IN_NEW" | md5sum | cut -c1-8)
+        if [ "$OLD_CTX_HASH" != "$NEW_CTX_HASH" ]; then
+          STATUS="PRESENT (context changed — verify for contradiction)"
+          SURVIVING_LOCATION="$NEW_FILE (context diff detected)"
+        fi
+        break
+      fi
+    done
+
+    echo "| \`$RULE_TEXT\` | $SURVIVING_LOCATION | **$STATUS** |"
+  done <<< "$OLD_RULES"
+
+done < <(printf "%b" "$DECOMP_PAIRS")
+```
+
+**Agent instruction — verify the parity table above**:
+
+After running the shell block above, you (the review agent) MUST:
+
+1. **Review each MISSING row**: A rule marked MISSING was present in the old file and absent from the entire new file set. For each MISSING row, verify by reading the new files in the diff. If genuinely absent, this is a **CONFIRMED finding** (HIGH severity if the rule was a HARD RULE or NEVER; MEDIUM if MUST or threshold). Use the standard finding template (Phase 6C / Phase 7B).
+
+2. **Review each "context changed" row**: Read the old context and new context. If the new context reverses or contradicts the old rule (e.g., old: "auto-merge only after approval" → new: "only compilation failures block merge"), this is a **CONTRADICTED** rule — emit as a **CONFIRMED finding** (HIGH severity). Title format: `fix(commands): rule contradicted in decomposition — "{RULE_KEYWORD}" semantics reversed in {OLD_FILE} successors (review finding — PR #{PR_NUMBER})`.
+
+3. **If all rules PRESENT with no context changes**: Log `"Parity check PASSED — all normative rules from {OLD_FILE} verified in new file set."` and continue.
+
+**Fixture validation** (required self-test — when the old file contains "auto-merge only after approval" and the new files contain "only compilation failures block merge" with no approval requirement): This pair MUST be classified as CONTRADICTED and emitted as a CONFIRMED HIGH finding. This is the exact scenario from #1588.
+
+---
+
 ## Phase 2: Automated Checks (Run ALL in Parallel)
 
 ### 2A: Python Linting (if Python changed)
