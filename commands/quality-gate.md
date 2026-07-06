@@ -1546,11 +1546,23 @@ else
         # Don't let a tool crash masquerade as "no findings" — surface it explicitly.
         echo "SECURITY-SCAN-ERROR | HIGH | scanner command exited $SCAN_EXIT (execution error, not a findings exit) — command: $SCAN_CMD"
         echo "$SCAN_OUTPUT"
-    elif echo "$SCAN_OUTPUT" | grep -qEi "$SEVERITY_PATTERN"; then
-        echo "SECURITY-SCAN | HIGH | scanner reported finding(s) at or above configured severity ($SEVERITY_PATTERN):"
-        echo "$SCAN_OUTPUT"
     else
-        echo "2W: static injection scanner — no blocking findings ($SCAN_CMD)"
+        # Capture grep's exit code separately — grep -E exits 0 (match), 1 (no match),
+        # or 2 (invalid regex). An elif-only check treats exit 2 identically to exit 1,
+        # silently passing the gate when blocking_severity_pattern is a malformed regex.
+        # Checking $? immediately after the pipe preserves the grep exit (last command).
+        echo "$SCAN_OUTPUT" | grep -qEi "$SEVERITY_PATTERN"
+        GREP_EXIT=$?
+        if [ "$GREP_EXIT" -eq 2 ]; then
+            # grep regex compile error — the operator-supplied pattern is invalid ERE.
+            # Fail closed: an unchecked gate is worse than a noisy false-positive block.
+            echo "SECURITY-SCAN-CONFIG-ERROR | HIGH | blocking_severity_pattern is not a valid ERE regex — scanner gate cannot run. Fix forge.yaml → verification.security_scan.blocking_severity_pattern. Pattern: $SEVERITY_PATTERN"
+        elif [ "$GREP_EXIT" -eq 0 ]; then
+            echo "SECURITY-SCAN | HIGH | scanner reported finding(s) at or above configured severity ($SEVERITY_PATTERN):"
+            echo "$SCAN_OUTPUT"
+        else
+            echo "2W: static injection scanner — no blocking findings ($SCAN_CMD)"
+        fi
     fi
 fi
 ```
@@ -1558,6 +1570,7 @@ fi
 **Flag as findings**:
 - Scanner output matches the configured `blocking_severity_pattern` (default `(severity|level)[^a-zA-Z0-9]{0,6}(CRITICAL|HIGH|ERROR)` — anchored on the JSON key name so it does not over-match on an empty `"errors":[]` key; matches semgrep's `severity` field and SARIF/CodeQL's `level` field): **HIGH** — treat as a real injection/security finding, same weight as SEC-EXEC. Override the pattern for your scanner's exact output shape if a non-empty diagnostic array causes spurious blocks.
 - Scanner command exits with a code greater than 1 (execution failure, not a findings-exit): **HIGH** — do not silently treat a crashed scanner as "clean"; the builder must fix the configured command or escalate.
+- `blocking_severity_pattern` is not a valid ERE regex (`grep -E` exits 2): **HIGH** — the gate cannot evaluate findings. Fix the pattern in `forge.yaml → verification.security_scan.blocking_severity_pattern` before proceeding. An invalid pattern silently disables injection blocking if not caught. <!-- Added: forge#1671 -->
 
 **Regression guard**: When `verification.security_scan.command` is absent, this step logs `SKIPPED` and never blocks — existing ForgeDock installs with no scanner declared see no behavior change.
 

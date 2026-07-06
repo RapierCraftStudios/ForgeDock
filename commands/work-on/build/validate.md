@@ -329,12 +329,24 @@ else
         echo "SECURITY SCAN ERROR (exit $SCAN_EXIT, execution failure not a findings-exit): $SCAN_CMD"
         echo "$SCAN_OUTPUT"
         SECURITY_SCAN_FINDINGS="${SECURITY_SCAN_FINDINGS:+$SECURITY_SCAN_FINDINGS, }scanner-error"
-    elif echo "$SCAN_OUTPUT" | grep -qEi "$SEVERITY_PATTERN"; then
-        echo "SECURITY SCAN FAILED (blocking finding at or above $SEVERITY_PATTERN):"
-        echo "$SCAN_OUTPUT"
-        SECURITY_SCAN_FINDINGS="${SECURITY_SCAN_FINDINGS:+$SECURITY_SCAN_FINDINGS, }scanner-findings"
     else
-        echo "Static injection scanner: no blocking findings ($SCAN_CMD)"
+        # Capture grep's exit code separately — grep -E exits 0 (match), 1 (no match),
+        # or 2 (invalid regex). An elif-only check treats exit 2 identically to exit 1,
+        # silently passing the gate when blocking_severity_pattern is a malformed regex.
+        echo "$SCAN_OUTPUT" | grep -qEi "$SEVERITY_PATTERN"
+        GREP_EXIT=$?
+        if [ "$GREP_EXIT" -eq 2 ]; then
+            # grep regex compile error — invalid ERE in blocking_severity_pattern.
+            # Fail closed: an unchecked gate is worse than a noisy false-positive block.
+            echo "SECURITY SCAN CONFIG ERROR (blocking_severity_pattern is not a valid ERE regex — gate cannot run): $SEVERITY_PATTERN"
+            SECURITY_SCAN_FINDINGS="${SECURITY_SCAN_FINDINGS:+$SECURITY_SCAN_FINDINGS, }scanner-config-error"
+        elif [ "$GREP_EXIT" -eq 0 ]; then
+            echo "SECURITY SCAN FAILED (blocking finding at or above $SEVERITY_PATTERN):"
+            echo "$SCAN_OUTPUT"
+            SECURITY_SCAN_FINDINGS="${SECURITY_SCAN_FINDINGS:+$SECURITY_SCAN_FINDINGS, }scanner-findings"
+        else
+            echo "Static injection scanner: no blocking findings ($SCAN_CMD)"
+        fi
     fi
 fi
 ```
@@ -342,6 +354,7 @@ fi
 **SEC-EXEC and configured-scanner findings are BLOCKING**:
 - If the failure is caused by the change just made in this build: fix it in `{WORKTREE_PATH}` (rewrite `exec`/`execSync`/`spawn` to `execFileSync`/`spawnSync` with an args array, or resolve the scanner's reported finding) and re-run this step before continuing.
 - If it cannot be resolved in-place: escalate exactly like the test-suite/entrypoint-smoke failures above — post a `## Static Injection Scan Failed` comment naming `$SEC_EXEC_FINDINGS`/`$SECURITY_SCAN_FINDINGS` and the failing file(s)/command, add `needs-human`, set `GATE_PASSED: false`, and STOP.
+- `scanner-config-error` in `$SECURITY_SCAN_FINDINGS` means `blocking_severity_pattern` is not a valid ERE regex (`grep -E` exits 2) — fix the pattern in `forge.yaml → verification.security_scan.blocking_severity_pattern` before proceeding; an invalid pattern silently disables injection blocking if not caught. <!-- Added: forge#1671 -->
 
 Projects with no `.js`/`.mjs`/`.ts`/`.tsx` changed files and no `verification.security_scan.command` configured see both sub-checks log clean/`SKIPPED` output — no behavior change for existing installs.
 
