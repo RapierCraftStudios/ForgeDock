@@ -278,6 +278,40 @@ Shows what will deploy next — diff between staging and main with issue/PR summ
 
 ---
 
+### `/deploy-pr`
+
+**PR ship orchestrator.**
+
+Ships a branch to its deploy target — detects or creates the PR, runs CI fixing via `/fix-ci`, runs the review gate via `/review-pr`, merges after both pass, and returns a structured result. Designed to be invoked by `/autopilot` as part of the autonomous deploy loop.
+
+```bash
+/deploy-pr staging                           # Ship staging → main
+/deploy-pr milestone/my-feature              # Ship milestone → staging
+/deploy-pr feat/my-branch --target staging   # Ship any branch → staging
+/deploy-pr staging --dry-run                 # Simulate without merging
+/deploy-pr staging --issue 1234              # Reference parent issue in PR body
+```
+
+**Branch routing**: `staging` → `main` (Deploy), `milestone/*` → `staging` (Ship), other → `staging` (Merge). Never force-merges. Returns `{ pr, source, target, status, ci_fixes, review_findings }`.
+
+---
+
+### `/fix-ci`
+
+**Automated CI failure resolution loop.**
+
+Diagnoses CI failures on a PR, applies targeted fixes, pushes new commits, and loops until green or max attempts reached. Invoked automatically by `/deploy-pr` as the CI gate step; can also be run directly.
+
+```bash
+/fix-ci 123                       # Fix CI on PR #123
+/fix-ci 123 --max-attempts 5      # Allow up to 5 fix iterations
+/fix-ci 123 --repo owner/repo     # Explicit repo
+```
+
+Returns `{ pr, status, attempts, fixes_applied }`.
+
+---
+
 #### `/rollback`
 
 **Revert PR creator.**
@@ -366,6 +400,21 @@ Cleans up stale labels, missing workflow state, project board gaps, dangling wor
 /cleanup board                    # Fix project board gaps
 /cleanup orphans                  # Remove dangling worktrees
 /cleanup all                      # Everything
+```
+
+---
+
+### `/recover-orphans`
+
+**Pipeline orphan recovery.**
+
+Scans for issues stuck in intermediate workflow states (building, investigating, in-review) where the agent died mid-pipeline. Diagnoses each orphan's actual GitHub state and applies the appropriate recovery action — re-entering the pipeline via `/work-on` or `/review-pr`.
+
+```bash
+/recover-orphans                  # Scan and recover all orphans
+/recover-orphans --dry-run        # Show orphans without recovering
+/recover-orphans --since 24       # Only orphans stalled > 24 hours
+/recover-orphans --issue 42       # Recover a specific issue
 ```
 
 ---
