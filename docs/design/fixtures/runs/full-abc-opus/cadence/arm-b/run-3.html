@@ -1,0 +1,428 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Cadence — Email sending, solved</title>
+<link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;500&display=swap" rel="stylesheet">
+<style>
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+body { font-family: 'Space Grotesk', sans-serif; color: #0c0c0c; background: #fff; -webkit-font-smoothing: antialiased; }
+.wrap { max-width: 1200px; margin: 0 auto; padding: 0 48px; }
+
+/* ---- NAV ---- */
+.topbar { padding: 16px 0; }
+.topbar .wrap { display: flex; align-items: center; justify-content: space-between; }
+.brand { font-weight: 700; font-size: 21px; letter-spacing: -0.5px; }
+.brand em { font-style: normal; color: #e55a2b; }
+.topbar nav { display: flex; gap: 32px; align-items: center; }
+.topbar nav a { font-size: 14px; color: #555; text-decoration: none; font-weight: 500; }
+.topbar nav a:hover { color: #000; }
+.pill-btn { background: #e55a2b; color: #fff; padding: 8px 22px; border-radius: 100px; font-weight: 600; font-size: 14px; text-decoration: none; }
+.pill-btn:hover { background: #d14e22; }
+
+/* ---- HERO: split diagonal ---- */
+.hero { padding: 80px 0 0; overflow: hidden; }
+.hero-inner { display: grid; grid-template-columns: 5fr 6fr; gap: 0; min-height: 520px; }
+.hero-text { padding: 60px 48px 60px 0; display: flex; flex-direction: column; justify-content: center; }
+.hero-text .overline { font-size: 12px; font-weight: 700; text-transform: uppercase; letter-spacing: 2px; color: #e55a2b; margin-bottom: 16px; }
+.hero-text h1 { font-size: 50px; font-weight: 700; line-height: 1.1; letter-spacing: -2px; margin-bottom: 20px; }
+.hero-text h1 .highlight { background: linear-gradient(120deg, #e55a2b 0%, #f59e0b 100%); -webkit-background-clip: text; -webkit-text-fill-color: transparent; }
+.hero-text p { font-size: 17px; color: #555; line-height: 1.7; margin-bottom: 32px; max-width: 440px; }
+.hero-btns { display: flex; gap: 12px; }
+.btn-orange { background: #e55a2b; color: #fff; padding: 14px 32px; border-radius: 10px; font-weight: 600; font-size: 15px; text-decoration: none; }
+.btn-orange:hover { background: #d14e22; }
+.btn-outline { border: 2px solid #ddd; color: #333; padding: 12px 32px; border-radius: 10px; font-weight: 600; font-size: 15px; text-decoration: none; }
+.btn-outline:hover { border-color: #999; }
+
+/* Hero right: stacked terminal */
+.hero-code { background: #1e1e2e; border-radius: 16px 0 0 16px; padding: 40px 40px 40px 48px; display: flex; flex-direction: column; justify-content: center; position: relative; }
+.hero-code::after { content: ''; position: absolute; right: -200px; top: 0; bottom: 0; width: 200px; background: #1e1e2e; }
+.terminal-label { font-family: 'IBM Plex Mono', monospace; font-size: 11px; color: #666; text-transform: uppercase; letter-spacing: 1px; margin-bottom: 12px; }
+.terminal-block { background: #13131f; border-radius: 8px; padding: 20px; margin-bottom: 16px; font-family: 'IBM Plex Mono', monospace; font-size: 13px; line-height: 1.8; color: #cdd6f4; overflow-x: auto; }
+.terminal-block:last-child { margin-bottom: 0; }
+.t-kw { color: #cba6f7; }
+.t-str { color: #a6e3a1; }
+.t-fn { color: #89b4fa; }
+.t-cm { color: #585b70; }
+.t-op { color: #f38ba8; }
+.t-num { color: #fab387; }
+.t-var { color: #cdd6f4; }
+
+/* ---- LOGOS / SOCIAL PROOF ---- */
+.proof { padding: 56px 0; border-bottom: 1px solid #eee; }
+.proof .wrap { text-align: center; }
+.proof p { font-size: 13px; color: #aaa; text-transform: uppercase; letter-spacing: 1.5px; font-weight: 600; margin-bottom: 28px; }
+.logo-row { display: flex; justify-content: center; gap: 56px; align-items: center; opacity: 0.35; }
+.logo-row span { font-size: 22px; font-weight: 700; letter-spacing: -0.5px; }
+
+/* ---- SPLIT FEATURES (alternating) ---- */
+.split { padding: 100px 0; }
+.split:nth-child(even) { background: #faf9f7; }
+.split-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 80px; align-items: center; }
+.split-grid.reverse { direction: rtl; }
+.split-grid.reverse > * { direction: ltr; }
+.split-text .tag { display: inline-block; font-size: 11px; font-weight: 700; text-transform: uppercase; letter-spacing: 1.5px; padding: 4px 12px; border-radius: 4px; margin-bottom: 16px; }
+.tag-orange { background: #fff3ec; color: #e55a2b; }
+.tag-green { background: #ecfdf5; color: #059669; }
+.tag-blue { background: #eff6ff; color: #2563eb; }
+.tag-purple { background: #f5f3ff; color: #7c3aed; }
+.split-text h2 { font-size: 34px; font-weight: 700; letter-spacing: -1px; margin-bottom: 14px; line-height: 1.2; }
+.split-text p { font-size: 16px; color: #555; line-height: 1.7; margin-bottom: 16px; }
+.split-text ul { list-style: none; margin-top: 8px; }
+.split-text ul li { font-size: 15px; color: #444; padding: 6px 0 6px 22px; position: relative; }
+.split-text ul li::before { content: ''; position: absolute; left: 0; top: 14px; width: 8px; height: 8px; border-radius: 2px; background: #e55a2b; }
+
+/* Visual panels */
+.visual-panel { border-radius: 12px; overflow: hidden; }
+.api-response { background: #1e1e2e; border-radius: 12px; padding: 28px; font-family: 'IBM Plex Mono', monospace; font-size: 13px; line-height: 1.8; color: #cdd6f4; }
+.dashboard-mock { background: #fff; border: 1px solid #e5e5e5; border-radius: 12px; padding: 0; overflow: hidden; }
+.dash-header { background: #fafafa; border-bottom: 1px solid #eee; padding: 16px 24px; display: flex; align-items: center; gap: 12px; }
+.dash-dot { width: 10px; height: 10px; border-radius: 50%; background: #ddd; }
+.dash-title { font-size: 13px; font-weight: 600; color: #888; }
+.dash-body { padding: 24px; }
+.stat-row { display: grid; grid-template-columns: repeat(4, 1fr); gap: 16px; margin-bottom: 20px; }
+.stat-box { background: #faf9f7; border-radius: 8px; padding: 16px; }
+.stat-box .val { font-size: 24px; font-weight: 700; }
+.stat-box .lbl { font-size: 12px; color: #999; margin-top: 2px; }
+.bar-chart { display: flex; gap: 6px; align-items: flex-end; height: 80px; }
+.bar-chart .bar { flex: 1; border-radius: 3px 3px 0 0; }
+.b-1 { height: 45%; background: #e55a2b; }
+.b-2 { height: 62%; background: #e55a2b; }
+.b-3 { height: 78%; background: #e55a2b; }
+.b-4 { height: 55%; background: #e55a2b; }
+.b-5 { height: 90%; background: #e55a2b; }
+.b-6 { height: 72%; background: #e55a2b; }
+.b-7 { height: 85%; background: #e55a2b; }
+.b-8 { height: 60%; background: #f59e0b; }
+
+.template-mock { background: #fff; border: 1px solid #e5e5e5; border-radius: 12px; overflow: hidden; }
+.tmpl-toolbar { display: flex; gap: 8px; padding: 12px 16px; border-bottom: 1px solid #eee; background: #fafafa; }
+.tmpl-btn { padding: 5px 14px; font-size: 12px; border-radius: 6px; border: 1px solid #ddd; background: #fff; color: #555; font-weight: 500; }
+.tmpl-btn.active { background: #e55a2b; color: #fff; border-color: #e55a2b; }
+.tmpl-body { padding: 24px; font-size: 14px; color: #333; }
+.tmpl-body .subject-line { font-weight: 600; margin-bottom: 16px; padding-bottom: 12px; border-bottom: 1px solid #eee; }
+.tmpl-body .body-text { color: #666; line-height: 1.8; }
+.tmpl-body .var { background: #fff3ec; color: #e55a2b; padding: 1px 6px; border-radius: 3px; font-family: 'IBM Plex Mono', monospace; font-size: 12px; }
+.tmpl-footer { padding: 12px 16px; border-top: 1px solid #eee; font-size: 12px; color: #aaa; }
+
+/* ---- NUMBERS STRIP ---- */
+.numbers { padding: 80px 0; background: #1e1e2e; color: #fff; }
+.numbers .wrap { display: grid; grid-template-columns: repeat(4, 1fr); gap: 40px; text-align: center; }
+.n-item .n-val { font-size: 40px; font-weight: 700; letter-spacing: -1px; }
+.n-item .n-val span { color: #e55a2b; }
+.n-item .n-label { font-size: 14px; color: #888; margin-top: 4px; }
+
+/* ---- CTA ---- */
+.bottom-cta { padding: 120px 0; text-align: center; background: #faf9f7; }
+.bottom-cta h2 { font-size: 44px; font-weight: 700; letter-spacing: -1.5px; margin-bottom: 16px; }
+.bottom-cta p { font-size: 17px; color: #666; max-width: 500px; margin: 0 auto 40px; line-height: 1.6; }
+.cta-input-row { display: flex; justify-content: center; gap: 8px; max-width: 440px; margin: 0 auto; }
+.cta-input { flex: 1; padding: 14px 20px; border: 2px solid #ddd; border-radius: 10px; font-size: 15px; font-family: 'Space Grotesk', sans-serif; outline: none; }
+.cta-input:focus { border-color: #e55a2b; }
+.cta-input::placeholder { color: #bbb; }
+.cta-go { background: #e55a2b; color: #fff; border: none; padding: 14px 28px; border-radius: 10px; font-weight: 700; font-size: 15px; cursor: pointer; font-family: 'Space Grotesk', sans-serif; }
+.cta-go:hover { background: #d14e22; }
+.cta-fine { font-size: 13px; color: #999; margin-top: 14px; }
+
+/* ---- FOOTER ---- */
+footer { padding: 40px 0; border-top: 1px solid #eee; }
+footer .wrap { display: grid; grid-template-columns: 2fr 1fr 1fr 1fr; gap: 40px; }
+.foot-brand { font-weight: 700; font-size: 18px; margin-bottom: 8px; }
+.foot-brand em { font-style: normal; color: #e55a2b; }
+.foot-desc { font-size: 13px; color: #999; line-height: 1.6; }
+.foot-col h4 { font-size: 13px; font-weight: 700; text-transform: uppercase; letter-spacing: 1px; color: #888; margin-bottom: 12px; }
+.foot-col a { display: block; font-size: 14px; color: #555; text-decoration: none; padding: 4px 0; }
+.foot-col a:hover { color: #000; }
+</style>
+</head>
+<body>
+
+<div class="topbar">
+  <div class="wrap">
+    <div class="brand">cadenc<em>e</em></div>
+    <nav>
+      <a href="#">Docs</a>
+      <a href="#">Pricing</a>
+      <a href="#">Templates</a>
+      <a href="#">Blog</a>
+      <a href="#">Login</a>
+      <a href="#" class="pill-btn">Start for free</a>
+    </nav>
+  </div>
+</div>
+
+<!-- HERO -->
+<section class="hero">
+  <div class="wrap">
+    <div class="hero-inner">
+      <div class="hero-text">
+        <div class="overline">Email API for developers</div>
+        <h1>Stop wrestling with email.<br><span class="highlight">Start sending it.</span></h1>
+        <p>Cadence gives you a REST API to send transactional and marketing email, a template editor for your content team, and deliverability infrastructure that keeps you out of the spam folder.</p>
+        <div class="hero-btns">
+          <a href="#" class="btn-orange">Get your API key</a>
+          <a href="#" class="btn-outline">See the docs</a>
+        </div>
+      </div>
+      <div class="hero-code">
+        <div class="terminal-label">Send your first email</div>
+        <div class="terminal-block">
+<span class="t-cm">// Install: npm install @cadence/node</span>
+<br><br><span class="t-kw">import</span> { <span class="t-fn">Cadence</span> } <span class="t-kw">from</span> <span class="t-str">'@cadence/node'</span>;
+<br><span class="t-kw">const</span> <span class="t-var">cadence</span> <span class="t-op">=</span> <span class="t-kw">new</span> <span class="t-fn">Cadence</span>(process.env.<span class="t-var">CADENCE_API_KEY</span>);
+<br><br><span class="t-kw">const</span> { <span class="t-var">id</span> } <span class="t-op">=</span> <span class="t-kw">await</span> cadence.<span class="t-fn">send</span>({
+<br>&nbsp;&nbsp;<span class="t-var">from</span>: <span class="t-str">'team@yourapp.com'</span>,
+<br>&nbsp;&nbsp;<span class="t-var">to</span>: <span class="t-str">'jamie@example.com'</span>,
+<br>&nbsp;&nbsp;<span class="t-var">subject</span>: <span class="t-str">'Your order has shipped'</span>,
+<br>&nbsp;&nbsp;<span class="t-var">template</span>: <span class="t-str">'order-shipped'</span>,
+<br>&nbsp;&nbsp;<span class="t-var">data</span>: {
+<br>&nbsp;&nbsp;&nbsp;&nbsp;<span class="t-var">name</span>: <span class="t-str">'Jamie'</span>,
+<br>&nbsp;&nbsp;&nbsp;&nbsp;<span class="t-var">tracking</span>: <span class="t-str">'1Z999AA10...'</span>
+<br>&nbsp;&nbsp;}
+<br>});
+        </div>
+        <div class="terminal-label">Response</div>
+        <div class="terminal-block">
+{
+<br>&nbsp;&nbsp;<span class="t-str">"id"</span>: <span class="t-str">"msg_8fK2xLm9..."</span>,
+<br>&nbsp;&nbsp;<span class="t-str">"status"</span>: <span class="t-str">"queued"</span>,
+<br>&nbsp;&nbsp;<span class="t-str">"estimated_delivery"</span>: <span class="t-str">"&lt;1s"</span>
+<br>}
+        </div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- Social proof -->
+<section class="proof">
+  <div class="wrap">
+    <p>Trusted by engineering teams at</p>
+    <div class="logo-row">
+      <span>Vercel</span>
+      <span>Linear</span>
+      <span>Notion</span>
+      <span>Supabase</span>
+      <span>Planetscale</span>
+    </div>
+  </div>
+</section>
+
+<!-- Feature 1: Deliverability -->
+<section class="split">
+  <div class="wrap">
+    <div class="split-grid">
+      <div class="split-text">
+        <div class="tag tag-green">Deliverability</div>
+        <h2>Your email lands in the inbox. We make sure of it.</h2>
+        <p>Deliverability is the hardest part of email and the most invisible. Cadence manages domain authentication, IP reputation, bounce processing, and suppression lists automatically.</p>
+        <ul>
+          <li>SPF, DKIM, and DMARC configured with one DNS change</li>
+          <li>Dedicated IP pools with automated warm-up</li>
+          <li>Real-time bounce and complaint suppression</li>
+          <li>Blocklist monitoring and proactive alerts</li>
+          <li>ISP postmaster integration for Gmail, Outlook, Yahoo</li>
+        </ul>
+      </div>
+      <div class="api-response">
+<span class="t-cm">// GET /v1/domains/yourapp.com/health</span>
+<br><br>{
+<br>&nbsp;&nbsp;<span class="t-str">"domain"</span>: <span class="t-str">"yourapp.com"</span>,
+<br>&nbsp;&nbsp;<span class="t-str">"authentication"</span>: {
+<br>&nbsp;&nbsp;&nbsp;&nbsp;<span class="t-str">"spf"</span>: <span class="t-str">"pass"</span>,
+<br>&nbsp;&nbsp;&nbsp;&nbsp;<span class="t-str">"dkim"</span>: <span class="t-str">"pass"</span>,
+<br>&nbsp;&nbsp;&nbsp;&nbsp;<span class="t-str">"dmarc"</span>: <span class="t-str">"pass"</span>
+<br>&nbsp;&nbsp;},
+<br>&nbsp;&nbsp;<span class="t-str">"reputation"</span>: <span class="t-num">97</span>,
+<br>&nbsp;&nbsp;<span class="t-str">"bounce_rate_30d"</span>: <span class="t-num">0.002</span>,
+<br>&nbsp;&nbsp;<span class="t-str">"complaint_rate_30d"</span>: <span class="t-num">0.0001</span>,
+<br>&nbsp;&nbsp;<span class="t-str">"blocklists"</span>: []
+<br>}
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- Feature 2: Templates -->
+<section class="split" style="background:#faf9f7;">
+  <div class="wrap">
+    <div class="split-grid reverse">
+      <div class="split-text">
+        <div class="tag tag-orange">Templates</div>
+        <h2>Engineers build templates. Content teams own them.</h2>
+        <p>Create email templates from React-style components or use the visual editor. Either way, your marketing and product people can edit subject lines, body copy, and scheduling without opening a code editor.</p>
+        <ul>
+          <li>Build from composable components (headers, CTAs, product cards)</li>
+          <li>Visual drag-and-drop editor for non-engineers</li>
+          <li>Variables, conditionals, and loops in templates</li>
+          <li>Version history with instant rollback</li>
+          <li>Preview with real recipient data before sending</li>
+        </ul>
+      </div>
+      <div class="template-mock">
+        <div class="tmpl-toolbar">
+          <div class="tmpl-btn active">Visual</div>
+          <div class="tmpl-btn">HTML</div>
+          <div class="tmpl-btn">Preview</div>
+          <div class="tmpl-btn">Data</div>
+        </div>
+        <div class="tmpl-body">
+          <div class="subject-line">Subject: Your order <span class="var">{{order_id}}</span> has shipped</div>
+          <div class="body-text">
+            Hi <span class="var">{{name}}</span>,<br><br>
+            Great news! Your order <span class="var">{{order_id}}</span> is on its way. You can track your package using the link below.<br><br>
+            <span style="display:inline-block; background:#e55a2b; color:#fff; padding:8px 20px; border-radius:6px; font-size:13px; font-weight:600;">Track my order</span><br><br>
+            Estimated delivery: <span class="var">{{delivery_date}}</span>
+          </div>
+        </div>
+        <div class="tmpl-footer">Template: order-shipped &middot; v3 &middot; Last edited by Maria L. &middot; 1 day ago</div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- Feature 3: Analytics -->
+<section class="split">
+  <div class="wrap">
+    <div class="split-grid">
+      <div class="split-text">
+        <div class="tag tag-blue">Analytics</div>
+        <h2>See what happens after you hit send</h2>
+        <p>Track deliveries, opens, clicks, bounces, and unsubscribes in real time. Drill down per message, per template, or per domain. Export everything to your data warehouse.</p>
+        <ul>
+          <li>Per-message event timeline (queued, sent, delivered, opened, clicked)</li>
+          <li>Aggregate dashboards by template, tag, or time range</li>
+          <li>Webhooks for every event, delivered in under 500ms</li>
+          <li>S3 export for long-term storage and analysis</li>
+        </ul>
+      </div>
+      <div class="dashboard-mock">
+        <div class="dash-header">
+          <div class="dash-dot"></div>
+          <div class="dash-dot"></div>
+          <div class="dash-dot"></div>
+          <div class="dash-title">Analytics &mdash; Last 7 days</div>
+        </div>
+        <div class="dash-body">
+          <div class="stat-row">
+            <div class="stat-box"><div class="val">142,391</div><div class="lbl">Delivered</div></div>
+            <div class="stat-box"><div class="val">68.2%</div><div class="lbl">Open rate</div></div>
+            <div class="stat-box"><div class="val">12.4%</div><div class="lbl">Click rate</div></div>
+            <div class="stat-box"><div class="val">0.3%</div><div class="lbl">Bounce rate</div></div>
+          </div>
+          <div class="bar-chart">
+            <div class="bar b-1"></div>
+            <div class="bar b-2"></div>
+            <div class="bar b-3"></div>
+            <div class="bar b-4"></div>
+            <div class="bar b-5"></div>
+            <div class="bar b-6"></div>
+            <div class="bar b-7"></div>
+            <div class="bar b-8"></div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- Feature 4: Testing -->
+<section class="split" style="background:#faf9f7;">
+  <div class="wrap">
+    <div class="split-grid reverse">
+      <div class="split-text">
+        <div class="tag tag-purple">Testing</div>
+        <h2>Test every email before it reaches a real inbox</h2>
+        <p>Cadence's test mode captures outgoing email in a virtual inbox. Your integration tests can assert on email content, and your team can preview rendered templates with live data.</p>
+        <ul>
+          <li>Sandbox mode: all emails captured, none delivered</li>
+          <li>API to query captured emails in test suites</li>
+          <li>Visual preview with real template data</li>
+          <li>Separate test and production API keys</li>
+        </ul>
+      </div>
+      <div class="api-response">
+<span class="t-cm">// Test mode: emails are captured, not sent</span>
+<br><span class="t-kw">const</span> cadence <span class="t-op">=</span> <span class="t-kw">new</span> <span class="t-fn">Cadence</span>(<span class="t-str">'cd_test_...'</span>);
+<br><br><span class="t-kw">await</span> cadence.<span class="t-fn">send</span>({
+<br>&nbsp;&nbsp;<span class="t-var">to</span>: <span class="t-str">'test@example.com'</span>,
+<br>&nbsp;&nbsp;<span class="t-var">template</span>: <span class="t-str">'welcome'</span>,
+<br>&nbsp;&nbsp;<span class="t-var">data</span>: { <span class="t-var">name</span>: <span class="t-str">'Test User'</span> }
+<br>});
+<br><br><span class="t-cm">// Assert in your test suite</span>
+<br><span class="t-kw">const</span> inbox <span class="t-op">=</span> <span class="t-kw">await</span> cadence.<span class="t-fn">testInbox</span>(<span class="t-str">'test@example.com'</span>);
+<br>expect(inbox[<span class="t-num">0</span>].subject).<span class="t-fn">toContain</span>(<span class="t-str">'Welcome'</span>);
+<br>expect(inbox[<span class="t-num">0</span>].html).<span class="t-fn">toContain</span>(<span class="t-str">'Test User'</span>);
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- Numbers -->
+<section class="numbers">
+  <div class="wrap">
+    <div class="n-item">
+      <div class="n-val">2.1<span>B</span></div>
+      <div class="n-label">Emails delivered per month</div>
+    </div>
+    <div class="n-item">
+      <div class="n-val">99.98<span>%</span></div>
+      <div class="n-label">API uptime (90-day rolling)</div>
+    </div>
+    <div class="n-item">
+      <div class="n-val">&lt;250<span>ms</span></div>
+      <div class="n-label">p95 API response time</div>
+    </div>
+    <div class="n-item">
+      <div class="n-val">7</div>
+      <div class="n-label">Official SDK languages</div>
+    </div>
+  </div>
+</section>
+
+<!-- CTA -->
+<section class="bottom-cta">
+  <div class="wrap">
+    <h2>Ready to send?</h2>
+    <p>Create a free account and get your API key. 10,000 emails per month on the free tier. No credit card, no sales call.</p>
+    <div class="cta-input-row">
+      <input type="email" class="cta-input" placeholder="you@company.com">
+      <button class="cta-go">Get API key</button>
+    </div>
+    <div class="cta-fine">Free plan includes full API access, template editor, analytics, and test mode.</div>
+  </div>
+</section>
+
+<footer>
+  <div class="wrap">
+    <div>
+      <div class="foot-brand">cadenc<em>e</em></div>
+      <div class="foot-desc">Email infrastructure for developers<br>and the teams they work with.</div>
+    </div>
+    <div class="foot-col">
+      <h4>Product</h4>
+      <a href="#">API Reference</a>
+      <a href="#">SDKs</a>
+      <a href="#">Templates</a>
+      <a href="#">Pricing</a>
+    </div>
+    <div class="foot-col">
+      <h4>Resources</h4>
+      <a href="#">Documentation</a>
+      <a href="#">Changelog</a>
+      <a href="#">Status Page</a>
+      <a href="#">Blog</a>
+    </div>
+    <div class="foot-col">
+      <h4>Company</h4>
+      <a href="#">About</a>
+      <a href="#">Security</a>
+      <a href="#">Privacy</a>
+      <a href="#">Terms</a>
+    </div>
+  </div>
+</footer>
+
+</body>
+</html>

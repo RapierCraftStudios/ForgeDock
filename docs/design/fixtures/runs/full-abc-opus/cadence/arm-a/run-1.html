@@ -1,0 +1,1068 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Cadence — Email API for teams that ship</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=DM+Serif+Display&family=Instrument+Sans:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+<style>
+  *, *::before, *::after { margin: 0; padding: 0; box-sizing: border-box; }
+
+  :root {
+    --cream: #F6F1EB;
+    --ink: #1A1714;
+    --warm-gray: #8C857B;
+    --accent: #C45D3E;
+    --accent-light: #F0DDD6;
+    --border: #D9D3CB;
+    --code-bg: #1A1714;
+    --code-fg: #E8E2DA;
+  }
+
+  html { font-size: 16px; scroll-behavior: smooth; }
+
+  body {
+    font-family: 'Instrument Sans', sans-serif;
+    background: var(--cream);
+    color: var(--ink);
+    line-height: 1.55;
+    -webkit-font-smoothing: antialiased;
+  }
+
+  /* NAV */
+  nav {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 24px 48px;
+    border-bottom: 1px solid var(--border);
+    position: sticky;
+    top: 0;
+    background: var(--cream);
+    z-index: 100;
+  }
+
+  .nav-logo {
+    font-family: 'DM Serif Display', serif;
+    font-size: 1.5rem;
+    color: var(--ink);
+    text-decoration: none;
+    letter-spacing: -0.02em;
+  }
+
+  .nav-links {
+    display: flex;
+    gap: 32px;
+    align-items: center;
+    list-style: none;
+  }
+
+  .nav-links a {
+    text-decoration: none;
+    color: var(--warm-gray);
+    font-size: 0.9rem;
+    font-weight: 500;
+    transition: color 0.2s;
+  }
+
+  .nav-links a:hover { color: var(--ink); }
+
+  .btn-primary {
+    display: inline-block;
+    background: var(--accent);
+    color: #fff;
+    padding: 10px 24px;
+    border-radius: 4px;
+    text-decoration: none;
+    font-weight: 600;
+    font-size: 0.9rem;
+    transition: background 0.2s;
+    border: none;
+    cursor: pointer;
+  }
+
+  .btn-primary:hover { background: #A8492F; }
+
+  .btn-secondary {
+    display: inline-block;
+    background: transparent;
+    color: var(--ink);
+    padding: 10px 24px;
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    text-decoration: none;
+    font-weight: 600;
+    font-size: 0.9rem;
+    transition: all 0.2s;
+    cursor: pointer;
+  }
+
+  .btn-secondary:hover { border-color: var(--ink); }
+
+  /* HERO — editorial split */
+  .hero {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    min-height: 85vh;
+    border-bottom: 1px solid var(--border);
+  }
+
+  .hero-left {
+    padding: 80px 64px 80px 48px;
+    display: flex;
+    flex-direction: column;
+    justify-content: center;
+  }
+
+  .hero-label {
+    font-size: 0.75rem;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.12em;
+    color: var(--accent);
+    margin-bottom: 24px;
+  }
+
+  .hero-headline {
+    font-family: 'DM Serif Display', serif;
+    font-size: 4rem;
+    line-height: 1.05;
+    letter-spacing: -0.03em;
+    margin-bottom: 28px;
+    max-width: 520px;
+  }
+
+  .hero-sub {
+    font-size: 1.15rem;
+    color: var(--warm-gray);
+    max-width: 420px;
+    margin-bottom: 40px;
+    line-height: 1.65;
+  }
+
+  .hero-actions {
+    display: flex;
+    gap: 16px;
+    align-items: center;
+  }
+
+  .hero-meta {
+    margin-top: 48px;
+    display: flex;
+    gap: 48px;
+  }
+
+  .hero-meta dt {
+    font-size: 0.7rem;
+    text-transform: uppercase;
+    letter-spacing: 0.1em;
+    color: var(--warm-gray);
+    margin-bottom: 4px;
+  }
+
+  .hero-meta dd {
+    font-family: 'DM Serif Display', serif;
+    font-size: 1.6rem;
+    letter-spacing: -0.02em;
+  }
+
+  /* HERO RIGHT — live API log */
+  .hero-right {
+    background: var(--code-bg);
+    padding: 48px 40px;
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+    position: relative;
+  }
+
+  .api-log-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    margin-bottom: 24px;
+    padding-bottom: 16px;
+    border-bottom: 1px solid #2E2A25;
+  }
+
+  .api-log-title {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 0.75rem;
+    color: #7A7368;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+  }
+
+  .api-log-dot {
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    background: #4CAF50;
+    box-shadow: 0 0 6px rgba(76, 175, 80, 0.5);
+  }
+
+  .api-entry {
+    margin-bottom: 20px;
+    padding: 16px;
+    border-radius: 3px;
+    background: rgba(255,255,255,0.03);
+    border-left: 2px solid transparent;
+  }
+
+  .api-entry.post { border-left-color: var(--accent); }
+  .api-entry.get { border-left-color: #4CAF50; }
+  .api-entry.response { border-left-color: #7A7368; }
+
+  .api-entry-method {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 0.7rem;
+    font-weight: 500;
+    letter-spacing: 0.04em;
+  }
+
+  .api-entry-method.post { color: var(--accent); }
+  .api-entry-method.get { color: #4CAF50; }
+
+  .api-entry-path {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 0.8rem;
+    color: var(--code-fg);
+    margin-left: 8px;
+  }
+
+  .api-entry-time {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 0.65rem;
+    color: #5A5449;
+    float: right;
+  }
+
+  .api-entry-body {
+    margin-top: 10px;
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 0.72rem;
+    color: #9E9789;
+    line-height: 1.7;
+    white-space: pre;
+  }
+
+  .api-entry-status {
+    display: inline-block;
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 0.65rem;
+    padding: 2px 8px;
+    border-radius: 2px;
+    margin-top: 8px;
+  }
+
+  .api-entry-status.ok {
+    background: rgba(76,175,80,0.15);
+    color: #4CAF50;
+  }
+
+  /* EDITORIAL SECTION */
+  .section-editorial {
+    display: grid;
+    grid-template-columns: 300px 1fr;
+    gap: 0;
+    border-bottom: 1px solid var(--border);
+  }
+
+  .section-editorial .section-label-col {
+    padding: 80px 48px;
+    border-right: 1px solid var(--border);
+  }
+
+  .section-label {
+    font-family: 'DM Serif Display', serif;
+    font-size: 0.85rem;
+    color: var(--warm-gray);
+    position: sticky;
+    top: 120px;
+    writing-mode: horizontal-tb;
+  }
+
+  .section-label-num {
+    display: block;
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 0.65rem;
+    color: var(--accent);
+    margin-bottom: 8px;
+    letter-spacing: 0.06em;
+  }
+
+  .section-content {
+    padding: 80px 64px;
+  }
+
+  .section-headline {
+    font-family: 'DM Serif Display', serif;
+    font-size: 2.8rem;
+    line-height: 1.1;
+    letter-spacing: -0.02em;
+    margin-bottom: 24px;
+    max-width: 600px;
+  }
+
+  .section-body {
+    font-size: 1.05rem;
+    color: var(--warm-gray);
+    max-width: 540px;
+    line-height: 1.7;
+    margin-bottom: 40px;
+  }
+
+  /* CODE BLOCK */
+  .code-block {
+    background: var(--code-bg);
+    border-radius: 6px;
+    overflow: hidden;
+    margin-bottom: 32px;
+    max-width: 640px;
+  }
+
+  .code-block-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 12px 20px;
+    background: rgba(255,255,255,0.04);
+    border-bottom: 1px solid #2E2A25;
+  }
+
+  .code-block-lang {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 0.65rem;
+    color: #7A7368;
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+  }
+
+  .code-block-dots {
+    display: flex;
+    gap: 6px;
+  }
+
+  .code-block-dots span {
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    background: #3A352F;
+  }
+
+  .code-block pre {
+    padding: 24px 20px;
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 0.78rem;
+    line-height: 1.75;
+    color: var(--code-fg);
+    overflow-x: auto;
+  }
+
+  .code-block pre .kw { color: var(--accent); }
+  .code-block pre .str { color: #C9A96E; }
+  .code-block pre .cm { color: #5A5449; }
+  .code-block pre .fn { color: #7DAECC; }
+  .code-block pre .num { color: #C45D3E; }
+
+  /* FEATURE GRID — asymmetric */
+  .features-grid {
+    display: grid;
+    grid-template-columns: 1.2fr 0.8fr;
+    gap: 1px;
+    background: var(--border);
+    border-bottom: 1px solid var(--border);
+  }
+
+  .feature-cell {
+    background: var(--cream);
+    padding: 56px 48px;
+  }
+
+  .feature-cell.tall {
+    grid-row: span 2;
+  }
+
+  .feature-cell-num {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 0.65rem;
+    color: var(--accent);
+    margin-bottom: 16px;
+    letter-spacing: 0.06em;
+  }
+
+  .feature-cell h3 {
+    font-family: 'DM Serif Display', serif;
+    font-size: 1.5rem;
+    margin-bottom: 12px;
+    letter-spacing: -0.01em;
+  }
+
+  .feature-cell p {
+    color: var(--warm-gray);
+    font-size: 0.92rem;
+    line-height: 1.65;
+    max-width: 400px;
+  }
+
+  .feature-cell ul {
+    list-style: none;
+    margin-top: 16px;
+  }
+
+  .feature-cell ul li {
+    padding: 8px 0;
+    border-bottom: 1px solid var(--border);
+    font-size: 0.88rem;
+    color: var(--warm-gray);
+  }
+
+  .feature-cell ul li:last-child { border-bottom: none; }
+
+  .feature-cell ul li strong {
+    color: var(--ink);
+    font-weight: 600;
+  }
+
+  /* DELIVERABILITY SECTION */
+  .deliverability {
+    padding: 100px 48px;
+    border-bottom: 1px solid var(--border);
+  }
+
+  .deliverability-inner {
+    max-width: 1200px;
+    margin: 0 auto;
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 80px;
+    align-items: start;
+  }
+
+  .deliverability-left .section-headline {
+    max-width: 480px;
+  }
+
+  .deliverability-stats {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 24px;
+    margin-top: 40px;
+  }
+
+  .stat-card {
+    padding: 24px;
+    border: 1px solid var(--border);
+    border-radius: 3px;
+  }
+
+  .stat-card-value {
+    font-family: 'DM Serif Display', serif;
+    font-size: 2.2rem;
+    letter-spacing: -0.02em;
+    margin-bottom: 6px;
+  }
+
+  .stat-card-label {
+    font-size: 0.78rem;
+    color: var(--warm-gray);
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+  }
+
+  .deliverability-right {
+    padding-top: 24px;
+  }
+
+  .deliverability-item {
+    padding: 24px 0;
+    border-bottom: 1px solid var(--border);
+  }
+
+  .deliverability-item:first-child { border-top: 1px solid var(--border); }
+
+  .deliverability-item h4 {
+    font-family: 'DM Serif Display', serif;
+    font-size: 1.15rem;
+    margin-bottom: 8px;
+  }
+
+  .deliverability-item p {
+    font-size: 0.88rem;
+    color: var(--warm-gray);
+    line-height: 1.6;
+  }
+
+  /* TEMPLATE SECTION */
+  .templates-section {
+    display: grid;
+    grid-template-columns: 300px 1fr;
+    border-bottom: 1px solid var(--border);
+  }
+
+  .templates-sidebar {
+    padding: 80px 48px;
+    border-right: 1px solid var(--border);
+    background: var(--accent-light);
+  }
+
+  .templates-main {
+    padding: 80px 64px;
+  }
+
+  .template-code-pair {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 32px;
+    margin-top: 32px;
+  }
+
+  .template-preview {
+    border: 1px solid var(--border);
+    border-radius: 3px;
+    padding: 32px;
+    background: #fff;
+  }
+
+  .template-preview-header {
+    font-size: 0.7rem;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    color: var(--warm-gray);
+    margin-bottom: 20px;
+    padding-bottom: 12px;
+    border-bottom: 1px solid var(--border);
+  }
+
+  .template-preview h4 {
+    font-family: 'DM Serif Display', serif;
+    font-size: 1.3rem;
+    margin-bottom: 12px;
+  }
+
+  .template-preview p {
+    font-size: 0.85rem;
+    color: var(--warm-gray);
+    line-height: 1.6;
+    margin-bottom: 16px;
+  }
+
+  .template-preview .fake-btn {
+    display: inline-block;
+    background: var(--accent);
+    color: #fff;
+    padding: 8px 20px;
+    border-radius: 3px;
+    font-size: 0.8rem;
+    font-weight: 600;
+  }
+
+  /* ANALYTICS */
+  .analytics-section {
+    padding: 100px 48px;
+    border-bottom: 1px solid var(--border);
+  }
+
+  .analytics-inner {
+    max-width: 1200px;
+    margin: 0 auto;
+  }
+
+  .analytics-grid {
+    display: grid;
+    grid-template-columns: repeat(4, 1fr);
+    gap: 1px;
+    background: var(--border);
+    border: 1px solid var(--border);
+    border-radius: 3px;
+    overflow: hidden;
+    margin-top: 48px;
+  }
+
+  .analytics-cell {
+    background: var(--cream);
+    padding: 40px 32px;
+  }
+
+  .analytics-cell-label {
+    font-size: 0.7rem;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    color: var(--warm-gray);
+    margin-bottom: 12px;
+  }
+
+  .analytics-cell-value {
+    font-family: 'DM Serif Display', serif;
+    font-size: 2rem;
+    margin-bottom: 6px;
+    letter-spacing: -0.02em;
+  }
+
+  .analytics-cell-change {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 0.7rem;
+    color: #4CAF50;
+  }
+
+  .analytics-bar-chart {
+    display: flex;
+    align-items: flex-end;
+    gap: 4px;
+    height: 60px;
+    margin-top: 16px;
+  }
+
+  .analytics-bar {
+    flex: 1;
+    background: var(--border);
+    border-radius: 1px;
+    min-width: 4px;
+  }
+
+  .analytics-bar.active { background: var(--accent); }
+
+  /* CTA */
+  .cta-section {
+    padding: 120px 48px;
+    text-align: left;
+    max-width: 1200px;
+    margin: 0 auto;
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 80px;
+    align-items: center;
+  }
+
+  .cta-headline {
+    font-family: 'DM Serif Display', serif;
+    font-size: 3.5rem;
+    line-height: 1.08;
+    letter-spacing: -0.03em;
+  }
+
+  .cta-right {
+    padding: 48px;
+    border: 1px solid var(--border);
+    border-radius: 3px;
+  }
+
+  .cta-right p {
+    color: var(--warm-gray);
+    margin-bottom: 24px;
+    line-height: 1.6;
+  }
+
+  .cta-install {
+    background: var(--code-bg);
+    padding: 16px 20px;
+    border-radius: 3px;
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 0.8rem;
+    color: var(--code-fg);
+    margin-bottom: 24px;
+  }
+
+  .cta-install .prompt { color: var(--accent); }
+
+  /* FOOTER */
+  footer {
+    padding: 48px;
+    border-top: 1px solid var(--border);
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+  }
+
+  footer .nav-logo { font-size: 1.2rem; }
+
+  .footer-links {
+    display: flex;
+    gap: 24px;
+    list-style: none;
+  }
+
+  .footer-links a {
+    text-decoration: none;
+    color: var(--warm-gray);
+    font-size: 0.82rem;
+  }
+
+  /* RESPONSIVE */
+  @media (max-width: 1024px) {
+    .hero { grid-template-columns: 1fr; }
+    .hero-right { min-height: 500px; }
+    .hero-headline { font-size: 3rem; }
+    .section-editorial { grid-template-columns: 1fr; }
+    .section-editorial .section-label-col { padding: 40px 48px 0; border-right: none; border-bottom: none; }
+    .section-label { position: static; }
+    .features-grid { grid-template-columns: 1fr; }
+    .feature-cell.tall { grid-row: span 1; }
+    .deliverability-inner { grid-template-columns: 1fr; gap: 48px; }
+    .templates-section { grid-template-columns: 1fr; }
+    .templates-sidebar { border-right: none; border-bottom: 1px solid var(--border); }
+    .template-code-pair { grid-template-columns: 1fr; }
+    .analytics-grid { grid-template-columns: 1fr 1fr; }
+    .cta-section { grid-template-columns: 1fr; gap: 48px; }
+    .cta-headline { font-size: 2.5rem; }
+  }
+
+  @media (max-width: 640px) {
+    nav { padding: 16px 24px; }
+    .nav-links { display: none; }
+    .hero-left { padding: 48px 24px; }
+    .hero-headline { font-size: 2.2rem; }
+    .hero-meta { flex-direction: column; gap: 16px; }
+    .hero-right { padding: 24px; }
+    .section-content { padding: 48px 24px; }
+    .feature-cell { padding: 32px 24px; }
+    .deliverability { padding: 48px 24px; }
+    .deliverability-stats { grid-template-columns: 1fr; }
+    .templates-sidebar { padding: 48px 24px; }
+    .templates-main { padding: 48px 24px; }
+    .analytics-section { padding: 48px 24px; }
+    .analytics-grid { grid-template-columns: 1fr; }
+    .cta-section { padding: 64px 24px; }
+    footer { flex-direction: column; gap: 16px; padding: 32px 24px; }
+  }
+</style>
+</head>
+<body>
+
+<nav>
+  <a href="#" class="nav-logo">Cadence</a>
+  <ul class="nav-links">
+    <li><a href="#api">API</a></li>
+    <li><a href="#deliverability">Deliverability</a></li>
+    <li><a href="#templates">Templates</a></li>
+    <li><a href="#analytics">Analytics</a></li>
+    <li><a href="#" class="btn-primary">Get API Key</a></li>
+  </ul>
+</nav>
+
+<!-- HERO: editorial split with live API log -->
+<section class="hero">
+  <div class="hero-left">
+    <div class="hero-label">Email API for developers</div>
+    <h1 class="hero-headline">Send email from&nbsp;code. Let your team write&nbsp;it.</h1>
+    <p class="hero-sub">A REST API and SDKs for transactional and marketing email. Domain authentication, deliverability monitoring, and a template editor your content team can actually use.</p>
+    <div class="hero-actions">
+      <a href="#" class="btn-primary">Get Started Free</a>
+      <a href="#" class="btn-secondary">Read the Docs</a>
+    </div>
+    <dl class="hero-meta">
+      <div>
+        <dt>Avg. delivery</dt>
+        <dd>1.2s</dd>
+      </div>
+      <div>
+        <dt>Inbox rate</dt>
+        <dd>99.1%</dd>
+      </div>
+      <div>
+        <dt>Uptime</dt>
+        <dd>99.97%</dd>
+      </div>
+    </dl>
+  </div>
+
+  <div class="hero-right">
+    <div class="api-log-header">
+      <span class="api-log-title">Live API Log</span>
+      <span class="api-log-dot"></span>
+    </div>
+
+    <div class="api-entry post">
+      <span class="api-entry-time">12ms ago</span>
+      <span class="api-entry-method post">POST</span>
+      <span class="api-entry-path">/v1/emails/send</span>
+      <div class="api-entry-body">{
+  "from": "team@yourapp.com",
+  "to": "jane@customer.io",
+  "template": "welcome-series-1",
+  "data": { "first_name": "Jane", "plan": "Pro" }
+}</div>
+      <span class="api-entry-status ok">202 Accepted</span>
+    </div>
+
+    <div class="api-entry get">
+      <span class="api-entry-time">340ms ago</span>
+      <span class="api-entry-method get">GET</span>
+      <span class="api-entry-path">/v1/emails/msg_8xK2p/status</span>
+      <div class="api-entry-body">{
+  "status": "delivered",
+  "delivered_at": "2024-11-14T09:41:02Z",
+  "open_count": 1,
+  "click_count": 0
+}</div>
+    </div>
+
+    <div class="api-entry post">
+      <span class="api-entry-time">1.4s ago</span>
+      <span class="api-entry-method post">POST</span>
+      <span class="api-entry-path">/v1/emails/batch</span>
+      <div class="api-entry-body">{
+  "template": "invoice-receipt",
+  "recipients": 847,
+  "scheduled_for": "2024-11-14T14:00:00Z"
+}</div>
+      <span class="api-entry-status ok">202 Accepted &middot; 847 queued</span>
+    </div>
+
+    <div class="api-entry get">
+      <span class="api-entry-time">3.1s ago</span>
+      <span class="api-entry-method get">GET</span>
+      <span class="api-entry-path">/v1/domains/yourapp.com/health</span>
+      <div class="api-entry-body">{
+  "spf": "pass", "dkim": "pass", "dmarc": "pass",
+  "reputation": 97, "bounce_rate": "0.3%"
+}</div>
+    </div>
+  </div>
+</section>
+
+<!-- SECTION 01: The API -->
+<section class="section-editorial" id="api">
+  <div class="section-label-col">
+    <div class="section-label">
+      <span class="section-label-num">01</span>
+      The API
+    </div>
+  </div>
+  <div class="section-content">
+    <h2 class="section-headline">Three lines to send. One endpoint to learn.</h2>
+    <p class="section-body">The core API is one POST to <code>/v1/emails/send</code>. Pass a recipient, a template ID (or inline HTML), and your data. Cadence handles DKIM signing, retry logic, bounce processing, and delivery tracking. SDKs for Node, Python, Go, Ruby, and PHP.</p>
+
+    <div class="code-block">
+      <div class="code-block-header">
+        <span class="code-block-lang">Node.js</span>
+        <div class="code-block-dots"><span></span><span></span><span></span></div>
+      </div>
+      <pre><span class="kw">import</span> { Cadence } <span class="kw">from</span> <span class="str">'@cadence/node'</span>;
+
+<span class="kw">const</span> cadence = <span class="kw">new</span> <span class="fn">Cadence</span>(<span class="str">'cd_live_9x8f...'</span>);
+
+<span class="kw">await</span> cadence.<span class="fn">send</span>({
+  <span class="str">from</span>:     <span class="str">'notifications@yourapp.com'</span>,
+  <span class="str">to</span>:       <span class="str">'jane@customer.io'</span>,
+  <span class="str">template</span>: <span class="str">'welcome-series-1'</span>,
+  <span class="str">data</span>:     { <span class="str">first_name</span>: <span class="str">'Jane'</span>, <span class="str">plan</span>: <span class="str">'Pro'</span> },
+});
+<span class="cm">// => { id: 'msg_8xK2p', status: 'queued' }</span></pre>
+    </div>
+
+    <div class="code-block">
+      <div class="code-block-header">
+        <span class="code-block-lang">Python</span>
+        <div class="code-block-dots"><span></span><span></span><span></span></div>
+      </div>
+      <pre><span class="kw">from</span> cadence <span class="kw">import</span> Cadence
+
+client = <span class="fn">Cadence</span>(api_key=<span class="str">"cd_live_9x8f..."</span>)
+
+response = client.<span class="fn">send</span>(
+    from_email=<span class="str">"billing@yourapp.com"</span>,
+    to=<span class="str">"jane@customer.io"</span>,
+    template=<span class="str">"invoice-receipt"</span>,
+    data={<span class="str">"amount"</span>: <span class="str">"$49.00"</span>, <span class="str">"invoice_id"</span>: <span class="str">"INV-1042"</span>},
+)
+<span class="cm"># response.id => "msg_r3Wp1"</span></pre>
+    </div>
+  </div>
+</section>
+
+<!-- FEATURES GRID -->
+<section class="features-grid">
+  <div class="feature-cell tall">
+    <div class="feature-cell-num">02</div>
+    <h3>Built for production</h3>
+    <p>Cadence runs on dedicated IPs with automatic warm-up, handles suppression lists, processes bounces and complaints in real time, and provides domain health monitoring. This is infrastructure, not a weekend project.</p>
+    <ul>
+      <li><strong>Automatic IP warm-up</strong> &mdash; graduated volume increase over 14 days</li>
+      <li><strong>Suppression management</strong> &mdash; global + account-level suppression lists</li>
+      <li><strong>Bounce classification</strong> &mdash; hard/soft bounce detection with auto-suppression</li>
+      <li><strong>Complaint loops</strong> &mdash; ISP feedback loop integration (AOL, Yahoo, Outlook)</li>
+      <li><strong>Webhook events</strong> &mdash; delivery, open, click, bounce, complaint, unsubscribe</li>
+      <li><strong>Rate limiting</strong> &mdash; per-domain throttling to protect sender reputation</li>
+    </ul>
+  </div>
+
+  <div class="feature-cell">
+    <div class="feature-cell-num">03</div>
+    <h3>Domain authentication</h3>
+    <p>One API call generates your SPF, DKIM, and DMARC records. Cadence continuously monitors DNS propagation and alerts you if records drift or expire. BIMI support included.</p>
+  </div>
+
+  <div class="feature-cell">
+    <div class="feature-cell-num">04</div>
+    <h3>Test and preview</h3>
+    <p>Send to a sandbox domain that captures every email without delivering. Render previews for any template with test data. Inspect headers, MIME structure, and link rewriting before going live.</p>
+  </div>
+</section>
+
+<!-- DELIVERABILITY -->
+<section class="deliverability" id="deliverability">
+  <div class="deliverability-inner">
+    <div class="deliverability-left">
+      <h2 class="section-headline">Deliverability you can measure, not just hope for.</h2>
+      <p class="section-body">Cadence monitors inbox placement across Gmail, Outlook, Yahoo, and Apple Mail. When something changes, you see it in the dashboard and in your webhook stream before it becomes a problem.</p>
+      <div class="deliverability-stats">
+        <div class="stat-card">
+          <div class="stat-card-value">99.1%</div>
+          <div class="stat-card-label">Inbox placement</div>
+        </div>
+        <div class="stat-card">
+          <div class="stat-card-value">0.12%</div>
+          <div class="stat-card-label">Bounce rate</div>
+        </div>
+        <div class="stat-card">
+          <div class="stat-card-value">1.2s</div>
+          <div class="stat-card-label">Avg. delivery</div>
+        </div>
+        <div class="stat-card">
+          <div class="stat-card-value">42</div>
+          <div class="stat-card-label">ISP feedback loops</div>
+        </div>
+      </div>
+    </div>
+
+    <div class="deliverability-right">
+      <div class="deliverability-item">
+        <h4>Inbox placement testing</h4>
+        <p>Seed-list tests across 30+ mailbox providers. See exactly where your email lands: inbox, promotions, spam, or missing. Run tests on-demand or on a schedule.</p>
+      </div>
+      <div class="deliverability-item">
+        <h4>Reputation monitoring</h4>
+        <p>Track sender score, domain reputation, and IP reputation in one place. Cadence pulls data from Google Postmaster Tools, Microsoft SNDS, and proprietary signals.</p>
+      </div>
+      <div class="deliverability-item">
+        <h4>Content scanning</h4>
+        <p>Before you send, Cadence checks your HTML against known spam triggers: link shorteners, excessive images, missing unsubscribe headers, and authentication gaps.</p>
+      </div>
+      <div class="deliverability-item">
+        <h4>Dedicated IPs</h4>
+        <p>Starter plans use Cadence's shared pool (maintained at 95+ reputation). Scaling plans get dedicated IPs with automated warm-up and per-IP analytics.</p>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- TEMPLATES -->
+<section class="templates-section" id="templates">
+  <div class="templates-sidebar">
+    <div class="section-label">
+      <span class="section-label-num">05</span>
+      Templates
+    </div>
+    <h2 style="font-family:'DM Serif Display',serif; font-size:1.8rem; margin-top:24px; line-height:1.15; letter-spacing:-0.02em;">Write templates in code. Edit them in a visual tool.</h2>
+    <p style="color:var(--warm-gray); margin-top:16px; font-size:0.92rem; line-height:1.6;">Engineers define email templates as React-like components. Content owners edit text, images, and variables in a visual editor without touching the codebase. Version-controlled, preview-able, and deployable via API or dashboard.</p>
+  </div>
+
+  <div class="templates-main">
+    <div class="template-code-pair">
+      <div class="code-block" style="margin:0;">
+        <div class="code-block-header">
+          <span class="code-block-lang">Template JSX</span>
+          <div class="code-block-dots"><span></span><span></span><span></span></div>
+        </div>
+        <pre><span class="kw">import</span> { Email, Section, Button }
+  <span class="kw">from</span> <span class="str">'@cadence/components'</span>;
+
+<span class="kw">export default</span> <span class="kw">function</span> <span class="fn">WelcomeEmail</span>({ first_name, plan }) {
+  <span class="kw">return</span> (
+    &lt;<span class="fn">Email</span> subject={<span class="str">`Welcome, ${first_name}`</span>}&gt;
+      &lt;<span class="fn">Section</span> padding=<span class="str">"32"</span>&gt;
+        &lt;h1&gt;You're on {plan}&lt;/h1&gt;
+        &lt;p&gt;Hi {first_name}, your account
+           is ready.&lt;/p&gt;
+        &lt;<span class="fn">Button</span> href=<span class="str">"/dashboard"</span>&gt;
+          Open Dashboard
+        &lt;/<span class="fn">Button</span>&gt;
+      &lt;/<span class="fn">Section</span>&gt;
+    &lt;/<span class="fn">Email</span>&gt;
+  );
+}</pre>
+      </div>
+
+      <div class="template-preview">
+        <div class="template-preview-header">Preview: welcome-series-1</div>
+        <h4>You're on Pro</h4>
+        <p>Hi Jane, your account is ready. Explore the dashboard to configure your sending domain and create your first template.</p>
+        <span class="fake-btn">Open Dashboard</span>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ANALYTICS -->
+<section class="analytics-section" id="analytics">
+  <div class="analytics-inner">
+    <h2 class="section-headline">Every email, measured.</h2>
+    <p class="section-body">Real-time analytics on sends, deliveries, opens, clicks, bounces, and unsubscribes. Filter by template, domain, tag, or recipient. Export via API or webhooks.</p>
+
+    <div class="analytics-grid">
+      <div class="analytics-cell">
+        <div class="analytics-cell-label">Sent (24h)</div>
+        <div class="analytics-cell-value">142,847</div>
+        <div class="analytics-cell-change">+12.3% vs. yesterday</div>
+        <div class="analytics-bar-chart">
+          <div class="analytics-bar" style="height:30%"></div>
+          <div class="analytics-bar" style="height:45%"></div>
+          <div class="analytics-bar" style="height:55%"></div>
+          <div class="analytics-bar" style="height:40%"></div>
+          <div class="analytics-bar" style="height:65%"></div>
+          <div class="analytics-bar" style="height:70%"></div>
+          <div class="analytics-bar" style="height:50%"></div>
+          <div class="analytics-bar" style="height:80%"></div>
+          <div class="analytics-bar active" style="height:90%"></div>
+          <div class="analytics-bar active" style="height:100%"></div>
+        </div>
+      </div>
+      <div class="analytics-cell">
+        <div class="analytics-cell-label">Delivered</div>
+        <div class="analytics-cell-value">99.1%</div>
+        <div class="analytics-cell-change">Stable</div>
+      </div>
+      <div class="analytics-cell">
+        <div class="analytics-cell-label">Open rate</div>
+        <div class="analytics-cell-value">34.2%</div>
+        <div class="analytics-cell-change">+2.1pp vs. last week</div>
+      </div>
+      <div class="analytics-cell">
+        <div class="analytics-cell-label">Click rate</div>
+        <div class="analytics-cell-value">8.7%</div>
+        <div class="analytics-cell-change">+0.9pp vs. last week</div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- CTA -->
+<section class="cta-section">
+  <div>
+    <h2 class="cta-headline">Start sending in five&nbsp;minutes.</h2>
+  </div>
+  <div class="cta-right">
+    <p>Sign up for a free account, verify your domain, and send your first email. No credit card required. Free tier includes 10,000 emails per month.</p>
+    <div class="cta-install">
+      <span class="prompt">$</span> npm install @cadence/node
+    </div>
+    <a href="#" class="btn-primary" style="width:100%;text-align:center;display:block;">Get Your API Key</a>
+  </div>
+</section>
+
+<footer>
+  <a href="#" class="nav-logo">Cadence</a>
+  <ul class="footer-links">
+    <li><a href="#">Documentation</a></li>
+    <li><a href="#">API Reference</a></li>
+    <li><a href="#">Status</a></li>
+    <li><a href="#">Pricing</a></li>
+    <li><a href="#">GitHub</a></li>
+  </ul>
+</footer>
+
+</body>
+</html>

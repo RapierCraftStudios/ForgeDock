@@ -1,0 +1,446 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Slipstream - The deployment platform for the modern web</title>
+<link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;500&display=swap" rel="stylesheet">
+<style>
+  *, *::before, *::after { margin: 0; padding: 0; box-sizing: border-box; }
+
+  body {
+    font-family: 'Space Grotesk', sans-serif;
+    background: #fafaf9;
+    color: #1c1917;
+    -webkit-font-smoothing: antialiased;
+  }
+
+  /* ---- NAV ---- */
+  header {
+    display: flex; align-items: center; justify-content: space-between;
+    padding: 20px 64px;
+    position: fixed; top: 0; left: 0; right: 0; z-index: 50;
+    background: rgba(250,250,249,0.92);
+    backdrop-filter: blur(12px);
+  }
+  .logo { font-size: 20px; font-weight: 700; letter-spacing: -0.5px; }
+  .nav-center { display: flex; gap: 36px; }
+  .nav-center a {
+    font-size: 14px; font-weight: 500; color: #78716c;
+    text-decoration: none; transition: color 0.15s;
+  }
+  .nav-center a:hover { color: #1c1917; }
+  .nav-right { display: flex; gap: 12px; align-items: center; }
+  .nav-right a { font-size: 14px; font-weight: 500; color: #78716c; text-decoration: none; }
+  .btn-dark {
+    display: inline-block; padding: 10px 24px;
+    background: #1c1917; color: #fafaf9;
+    font-size: 14px; font-weight: 600;
+    border-radius: 6px; text-decoration: none;
+    border: none; cursor: pointer;
+    transition: background 0.15s;
+  }
+  .btn-dark:hover { background: #292524; }
+
+  /* ---- HERO: split layout ---- */
+  .hero {
+    display: grid; grid-template-columns: 1fr 1fr;
+    min-height: 100vh;
+    max-width: 1440px; margin: 0 auto;
+    padding: 0 64px;
+    align-items: center;
+    gap: 80px;
+  }
+  .hero-text { padding-top: 64px; }
+  .hero-text h1 {
+    font-size: 56px; font-weight: 700;
+    line-height: 1.1; letter-spacing: -2px;
+    margin-bottom: 24px;
+  }
+  .hero-text h1 em {
+    font-style: normal;
+    color: #0369a1;
+  }
+  .hero-text p {
+    font-size: 18px; line-height: 1.7;
+    color: #57534e; max-width: 460px;
+    margin-bottom: 40px;
+  }
+  .hero-actions { display: flex; gap: 16px; align-items: center; }
+  .hero-actions .link-arrow {
+    font-size: 15px; font-weight: 500; color: #1c1917;
+    text-decoration: none;
+  }
+  .hero-actions .link-arrow:hover { text-decoration: underline; }
+
+  .hero-visual {
+    padding-top: 64px;
+  }
+  .code-window {
+    background: #1c1917;
+    border-radius: 12px;
+    overflow: hidden;
+    box-shadow: 0 24px 80px rgba(0,0,0,0.15);
+  }
+  .code-titlebar {
+    padding: 16px 20px;
+    display: flex; align-items: center; gap: 8px;
+    border-bottom: 1px solid #292524;
+  }
+  .code-dot { width: 10px; height: 10px; border-radius: 50%; }
+  .code-dot:nth-child(1) { background: #ef4444; }
+  .code-dot:nth-child(2) { background: #eab308; }
+  .code-dot:nth-child(3) { background: #22c55e; }
+  .code-titlebar span {
+    margin-left: 12px; font-size: 12px;
+    color: #78716c; font-family: 'IBM Plex Mono', monospace;
+  }
+  .code-body {
+    padding: 28px 24px;
+    font-family: 'IBM Plex Mono', monospace;
+    font-size: 13px; line-height: 2;
+    color: #d6d3d1;
+  }
+  .code-body .comment { color: #78716c; }
+  .code-body .keyword { color: #c084fc; }
+  .code-body .string { color: #34d399; }
+  .code-body .fn { color: #60a5fa; }
+  .code-body .tag { color: #f472b6; }
+
+  .deploy-status {
+    margin-top: 16px;
+    background: #1c1917;
+    border-radius: 12px;
+    padding: 20px 24px;
+    font-family: 'IBM Plex Mono', monospace;
+    font-size: 13px;
+    display: flex; flex-direction: column; gap: 6px;
+    box-shadow: 0 8px 40px rgba(0,0,0,0.1);
+  }
+  .deploy-row { display: flex; align-items: center; gap: 10px; }
+  .dot-green { width: 8px; height: 8px; border-radius: 50%; background: #22c55e; }
+  .dot-blue { width: 8px; height: 8px; border-radius: 50%; background: #3b82f6; }
+  .deploy-row span { color: #a8a29e; }
+  .deploy-row strong { color: #fafaf9; font-weight: 500; }
+  .deploy-row a { color: #38bdf8; text-decoration: none; }
+
+  /* ---- METRICS BAR ---- */
+  .metrics-bar {
+    border-top: 1px solid #e7e5e4;
+    border-bottom: 1px solid #e7e5e4;
+    padding: 64px;
+    display: flex; justify-content: center; gap: 120px;
+  }
+  .metric { text-align: center; }
+  .metric .number {
+    font-size: 48px; font-weight: 700; letter-spacing: -2px;
+    color: #1c1917;
+  }
+  .metric .label {
+    font-size: 14px; color: #78716c; margin-top: 4px;
+  }
+
+  /* ---- FEATURES (horizontal cards) ---- */
+  .features-section {
+    max-width: 1200px; margin: 0 auto;
+    padding: 120px 64px;
+  }
+  .features-section > h2 {
+    font-size: 36px; font-weight: 700; letter-spacing: -1px;
+    margin-bottom: 64px;
+  }
+  .feature-row {
+    display: grid; grid-template-columns: 1fr 1fr;
+    gap: 48px;
+    margin-bottom: 48px;
+  }
+  .feature-block {
+    padding: 48px;
+    background: #f5f5f4;
+    border-radius: 12px;
+    border: 1px solid #e7e5e4;
+  }
+  .feature-label {
+    font-size: 11px; font-weight: 600;
+    text-transform: uppercase; letter-spacing: 1.5px;
+    color: #0369a1; margin-bottom: 16px;
+  }
+  .feature-block h3 {
+    font-size: 22px; font-weight: 600; margin-bottom: 12px;
+  }
+  .feature-block p {
+    font-size: 15px; color: #57534e; line-height: 1.7;
+  }
+  .feature-wide {
+    grid-column: 1 / -1;
+  }
+  .feature-code {
+    background: #1c1917;
+    color: #d6d3d1;
+    font-family: 'IBM Plex Mono', monospace;
+    font-size: 13px;
+    padding: 20px 24px;
+    border-radius: 8px;
+    margin-top: 20px;
+    line-height: 1.8;
+    overflow-x: auto;
+  }
+  .feature-code .dim { color: #57534e; }
+
+  /* ---- FRAMEWORKS ---- */
+  .frameworks-section {
+    max-width: 1200px; margin: 0 auto;
+    padding: 0 64px 120px;
+  }
+  .frameworks-section h2 {
+    font-size: 36px; font-weight: 700; letter-spacing: -1px;
+    margin-bottom: 16px;
+  }
+  .frameworks-section > p {
+    color: #57534e; font-size: 17px; margin-bottom: 48px;
+  }
+  .fw-grid {
+    display: grid; grid-template-columns: repeat(4, 1fr);
+    gap: 16px;
+  }
+  .fw-card {
+    padding: 32px 28px;
+    background: #f5f5f4;
+    border: 1px solid #e7e5e4;
+    border-radius: 10px;
+    text-align: center;
+  }
+  .fw-card .fw-name {
+    font-size: 16px; font-weight: 600;
+    margin-bottom: 4px;
+  }
+  .fw-card .fw-note {
+    font-size: 13px; color: #78716c;
+  }
+
+  /* ---- BOTTOM CTA ---- */
+  .bottom-cta {
+    max-width: 1200px; margin: 0 auto;
+    padding: 0 64px 120px;
+    text-align: center;
+  }
+  .bottom-cta-box {
+    background: #1c1917;
+    border-radius: 16px;
+    padding: 80px 64px;
+    color: #fafaf9;
+  }
+  .bottom-cta-box h2 {
+    font-size: 42px; font-weight: 700; letter-spacing: -1.5px;
+    margin-bottom: 16px;
+  }
+  .bottom-cta-box p {
+    color: #a8a29e; font-size: 18px;
+    margin-bottom: 40px;
+  }
+  .btn-light {
+    display: inline-block; padding: 14px 32px;
+    background: #fafaf9; color: #1c1917;
+    font-size: 15px; font-weight: 600;
+    border-radius: 8px; text-decoration: none;
+    transition: opacity 0.15s;
+  }
+  .btn-light:hover { opacity: 0.9; }
+
+  /* ---- FOOTER ---- */
+  footer {
+    border-top: 1px solid #e7e5e4;
+    padding: 40px 64px;
+    display: flex; justify-content: space-between;
+    max-width: 1440px; margin: 0 auto;
+  }
+  footer span { font-size: 13px; color: #a8a29e; }
+  .footer-links { display: flex; gap: 24px; }
+  .footer-links a { font-size: 13px; color: #78716c; text-decoration: none; }
+  .footer-links a:hover { color: #1c1917; }
+</style>
+</head>
+<body>
+
+<header>
+  <div class="logo">slipstream</div>
+  <nav class="nav-center">
+    <a href="#">Product</a>
+    <a href="#">Solutions</a>
+    <a href="#">Docs</a>
+    <a href="#">Pricing</a>
+    <a href="#">Blog</a>
+  </nav>
+  <div class="nav-right">
+    <a href="#">Log in</a>
+    <a href="#" class="btn-dark">Start for free</a>
+  </div>
+</header>
+
+<section class="hero">
+  <div class="hero-text">
+    <h1>Deploy to the edge <em>on every push</em></h1>
+    <p>Slipstream connects to your Git repository and turns every commit into a global deployment. Preview environments for every PR. Serverless functions for your backend. No infrastructure to manage.</p>
+    <div class="hero-actions">
+      <a href="#" class="btn-dark">Deploy now</a>
+      <a href="#" class="link-arrow">View documentation &rarr;</a>
+    </div>
+  </div>
+  <div class="hero-visual">
+    <div class="code-window">
+      <div class="code-titlebar">
+        <div class="code-dot"></div>
+        <div class="code-dot"></div>
+        <div class="code-dot"></div>
+        <span>app/page.tsx</span>
+      </div>
+      <div class="code-body">
+        <div><span class="keyword">export default</span> <span class="keyword">function</span> <span class="fn">Home</span>() {</div>
+        <div>&nbsp;&nbsp;<span class="keyword">return</span> (</div>
+        <div>&nbsp;&nbsp;&nbsp;&nbsp;<span class="tag">&lt;main&gt;</span></div>
+        <div>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span class="tag">&lt;h1&gt;</span>Shipped with Slipstream<span class="tag">&lt;/h1&gt;</span></div>
+        <div>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span class="tag">&lt;p&gt;</span>Globally distributed in 8 seconds.<span class="tag">&lt;/p&gt;</span></div>
+        <div>&nbsp;&nbsp;&nbsp;&nbsp;<span class="tag">&lt;/main&gt;</span></div>
+        <div>&nbsp;&nbsp;)</div>
+        <div>}</div>
+      </div>
+    </div>
+    <div class="deploy-status">
+      <div class="deploy-row">
+        <div class="dot-green"></div>
+        <strong>Production</strong>
+        <span>&middot; 4s ago &middot;</span>
+        <a href="#">your-app.slipstream.app</a>
+      </div>
+      <div class="deploy-row">
+        <div class="dot-blue"></div>
+        <strong>Preview</strong>
+        <span>&middot; feat/nav-redesign &middot;</span>
+        <a href="#">feat-nav-redesign.slipstream.app</a>
+      </div>
+    </div>
+  </div>
+</section>
+
+<section class="metrics-bar">
+  <div class="metric">
+    <div class="number">94</div>
+    <div class="label">Edge locations</div>
+  </div>
+  <div class="metric">
+    <div class="number">&lt;50ms</div>
+    <div class="label">Global TTFB</div>
+  </div>
+  <div class="metric">
+    <div class="number">8s</div>
+    <div class="label">Average build time</div>
+  </div>
+  <div class="metric">
+    <div class="number">99.99%</div>
+    <div class="label">Uptime SLA</div>
+  </div>
+</section>
+
+<section class="features-section">
+  <h2>What the platform does</h2>
+  <div class="feature-row">
+    <div class="feature-block">
+      <div class="feature-label">Previews</div>
+      <h3>Every PR is a running environment</h3>
+      <p>When a developer opens a pull request, Slipstream builds and deploys it to a unique URL. Reviewers see the change running, not just as code. Comments and approvals happen alongside the live preview.</p>
+    </div>
+    <div class="feature-block">
+      <div class="feature-label">Edge Network</div>
+      <h3>Fast everywhere, not just near your servers</h3>
+      <p>Static assets are cached at 94 edge locations. Dynamic routes execute at the edge closest to the user. No regions to choose, no replicas to configure. Your app is fast by default.</p>
+    </div>
+  </div>
+  <div class="feature-row">
+    <div class="feature-block feature-wide">
+      <div class="feature-label">Serverless Functions</div>
+      <h3>Backend logic, zero server management</h3>
+      <p>Write API routes and server-side logic as functions. They deploy with your frontend, scale automatically, and run in the same edge network. You never provision a server or choose an instance type.</p>
+      <div class="feature-code">
+        <div><span class="dim">// api/hello.ts</span></div>
+        <div>export default function handler(req, res) {</div>
+        <div>&nbsp;&nbsp;const user = await db.users.find(req.query.id)</div>
+        <div>&nbsp;&nbsp;return res.json({ name: user.name, plan: user.plan })</div>
+        <div>}</div>
+        <div><span class="dim">// Deployed to the edge. Scales to zero. No servers.</span></div>
+      </div>
+    </div>
+  </div>
+  <div class="feature-row">
+    <div class="feature-block">
+      <div class="feature-label">Git Integration</div>
+      <h3>Your repository is the source of truth</h3>
+      <p>Connect GitHub, GitLab, or Bitbucket. Every push to any branch triggers a build. Merge to main and it's in production. Rollback is a revert commit. The workflow is Git, nothing else.</p>
+    </div>
+    <div class="feature-block">
+      <div class="feature-label">Collaboration</div>
+      <h3>Ship together, not just side by side</h3>
+      <p>Deploy notifications in Slack. Comments on preview deployments. Branch-level permissions and approval gates. Your whole team sees what shipped, who shipped it, and when.</p>
+    </div>
+  </div>
+</section>
+
+<section class="frameworks-section">
+  <h2>The home for modern frameworks</h2>
+  <p>Zero-configuration support for the frameworks that power the web.</p>
+  <div class="fw-grid">
+    <div class="fw-card">
+      <div class="fw-name">Next.js</div>
+      <div class="fw-note">Full support incl. App Router</div>
+    </div>
+    <div class="fw-card">
+      <div class="fw-name">Remix</div>
+      <div class="fw-note">Edge & Node runtimes</div>
+    </div>
+    <div class="fw-card">
+      <div class="fw-name">Astro</div>
+      <div class="fw-note">Static & SSR modes</div>
+    </div>
+    <div class="fw-card">
+      <div class="fw-name">SvelteKit</div>
+      <div class="fw-note">Adapter included</div>
+    </div>
+    <div class="fw-card">
+      <div class="fw-name">Nuxt</div>
+      <div class="fw-note">SSR on the edge</div>
+    </div>
+    <div class="fw-card">
+      <div class="fw-name">Vite</div>
+      <div class="fw-note">Any SPA framework</div>
+    </div>
+    <div class="fw-card">
+      <div class="fw-name">Gatsby</div>
+      <div class="fw-note">Incremental builds</div>
+    </div>
+    <div class="fw-card">
+      <div class="fw-name">Eleventy</div>
+      <div class="fw-note">Static site gen</div>
+    </div>
+  </div>
+</section>
+
+<section class="bottom-cta">
+  <div class="bottom-cta-box">
+    <h2>Stop configuring infrastructure.<br>Start shipping product.</h2>
+    <p>Free for hobby projects. No credit card required to start.</p>
+    <a href="#" class="btn-light">Deploy now</a>
+  </div>
+</section>
+
+<footer>
+  <span>&copy; 2026 Slipstream, Inc.</span>
+  <div class="footer-links">
+    <a href="#">Privacy</a>
+    <a href="#">Terms</a>
+    <a href="#">Status</a>
+    <a href="#">Security</a>
+    <a href="#">GitHub</a>
+  </div>
+</footer>
+
+</body>
+</html>

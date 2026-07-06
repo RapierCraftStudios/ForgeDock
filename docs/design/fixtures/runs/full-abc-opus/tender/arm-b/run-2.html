@@ -1,0 +1,291 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Tender - The payments API for modern businesses</title>
+<link href="https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;600;700&family=Fira+Code:wght@400;500&display=swap" rel="stylesheet">
+<style>
+  *, *::before, *::after { margin: 0; padding: 0; box-sizing: border-box; }
+  body { font-family: 'DM Sans', sans-serif; background: #09090b; color: #fafafa; -webkit-font-smoothing: antialiased; }
+
+  /* NAV */
+  header { position: sticky; top: 0; z-index: 100; background: rgba(9,9,11,0.85); backdrop-filter: blur(16px); border-bottom: 1px solid #27272a; }
+  header .inner { max-width: 1240px; margin: 0 auto; padding: 0 40px; display: flex; align-items: center; justify-content: space-between; height: 64px; }
+  .logo { font-weight: 700; font-size: 21px; color: #fafafa; letter-spacing: -0.5px; }
+  .logo em { font-style: normal; color: #22c55e; }
+  .nav-links { display: flex; gap: 28px; align-items: center; }
+  .nav-links a { color: #a1a1aa; font-size: 14px; text-decoration: none; font-weight: 500; transition: color 0.15s; }
+  .nav-links a:hover { color: #fafafa; }
+  .btn-green { background: #22c55e; color: #09090b; font-weight: 600; font-size: 14px; padding: 9px 20px; border-radius: 6px; text-decoration: none; display: inline-block; transition: background 0.15s; }
+  .btn-green:hover { background: #16a34a; }
+  .btn-ghost { color: #fafafa; border: 1px solid #3f3f46; padding: 9px 20px; border-radius: 6px; font-size: 14px; font-weight: 600; text-decoration: none; display: inline-block; transition: border-color 0.15s; }
+  .btn-ghost:hover { border-color: #22c55e; }
+
+  /* HERO - two column */
+  .hero { max-width: 1240px; margin: 0 auto; padding: 100px 40px 80px; display: grid; grid-template-columns: 1fr 1fr; gap: 60px; align-items: center; }
+  .hero-text h1 { font-size: 52px; font-weight: 700; line-height: 1.1; letter-spacing: -1.5px; margin-bottom: 20px; }
+  .hero-text h1 .accent { color: #22c55e; }
+  .hero-text p { font-size: 18px; color: #a1a1aa; line-height: 1.65; margin-bottom: 32px; max-width: 480px; }
+  .hero-cta { display: flex; gap: 14px; }
+  .hero-code { background: #18181b; border: 1px solid #27272a; border-radius: 12px; overflow: hidden; }
+  .hero-code-tabs { display: flex; background: #0f0f12; border-bottom: 1px solid #27272a; }
+  .hero-code-tabs button { background: none; border: none; color: #71717a; padding: 10px 20px; font-family: 'Fira Code', monospace; font-size: 12px; cursor: pointer; border-bottom: 2px solid transparent; }
+  .hero-code-tabs button.active { color: #22c55e; border-bottom-color: #22c55e; }
+  .hero-code pre { padding: 24px; font-family: 'Fira Code', monospace; font-size: 13px; line-height: 1.75; color: #d4d4d8; overflow-x: auto; }
+  .hero-code .kw { color: #c084fc; }
+  .hero-code .fn { color: #60a5fa; }
+  .hero-code .st { color: #4ade80; }
+  .hero-code .cm { color: #52525b; }
+  .hero-code .nb { color: #fbbf24; }
+
+  /* LOGOS */
+  .logos { border-top: 1px solid #27272a; border-bottom: 1px solid #27272a; padding: 40px 0; }
+  .logos .inner { max-width: 1240px; margin: 0 auto; padding: 0 40px; text-align: center; }
+  .logos p { font-size: 13px; color: #52525b; text-transform: uppercase; letter-spacing: 2px; font-weight: 600; margin-bottom: 28px; }
+  .logo-row { display: flex; justify-content: center; gap: 56px; align-items: center; flex-wrap: wrap; }
+  .logo-row span { font-size: 18px; font-weight: 700; color: #3f3f46; letter-spacing: -0.3px; }
+
+  /* FEATURES - horizontal cards */
+  .features { max-width: 1240px; margin: 0 auto; padding: 100px 40px; }
+  .features .section-header { text-align: center; margin-bottom: 64px; }
+  .features .section-header h2 { font-size: 40px; font-weight: 700; letter-spacing: -1px; margin-bottom: 12px; }
+  .features .section-header p { color: #a1a1aa; font-size: 17px; max-width: 520px; margin: 0 auto; }
+  .feature-rows { display: flex; flex-direction: column; gap: 24px; }
+  .feature-row { display: grid; grid-template-columns: 1fr 1fr; border: 1px solid #27272a; border-radius: 14px; overflow: hidden; background: #18181b; transition: border-color 0.2s; }
+  .feature-row:hover { border-color: #3f3f46; }
+  .feature-row-text { padding: 48px; display: flex; flex-direction: column; justify-content: center; }
+  .feature-row-text .tag { display: inline-block; font-size: 11px; font-weight: 700; text-transform: uppercase; letter-spacing: 1.5px; color: #22c55e; margin-bottom: 14px; }
+  .feature-row-text h3 { font-size: 28px; font-weight: 700; letter-spacing: -0.5px; margin-bottom: 12px; }
+  .feature-row-text p { color: #a1a1aa; font-size: 15px; line-height: 1.65; }
+  .feature-row-visual { background: #0f0f12; padding: 48px; display: flex; align-items: center; justify-content: center; }
+  .feature-row:nth-child(even) .feature-row-text { order: 2; }
+  .feature-row:nth-child(even) .feature-row-visual { order: 1; }
+
+  /* mini metric cards inside visuals */
+  .metric-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; width: 100%; }
+  .metric-card { background: #18181b; border: 1px solid #27272a; border-radius: 10px; padding: 20px; }
+  .metric-card .value { font-size: 28px; font-weight: 700; color: #22c55e; margin-bottom: 4px; }
+  .metric-card .label { font-size: 12px; color: #71717a; }
+
+  /* method pills */
+  .method-pills { display: flex; flex-wrap: wrap; gap: 10px; }
+  .method-pill { background: #27272a; color: #d4d4d8; font-size: 13px; font-weight: 500; padding: 8px 16px; border-radius: 8px; }
+
+  /* terminal block */
+  .terminal { width: 100%; background: #09090b; border: 1px solid #27272a; border-radius: 10px; padding: 20px; font-family: 'Fira Code', monospace; font-size: 12px; color: #a1a1aa; line-height: 1.8; }
+  .terminal .prompt { color: #22c55e; }
+  .terminal .output { color: #71717a; }
+
+  /* THREE COL BOTTOM */
+  .three-col { max-width: 1240px; margin: 0 auto; padding: 0 40px 100px; display: grid; grid-template-columns: repeat(3, 1fr); gap: 24px; }
+  .col-card { background: #18181b; border: 1px solid #27272a; border-radius: 14px; padding: 36px; transition: border-color 0.2s; }
+  .col-card:hover { border-color: #3f3f46; }
+  .col-card .icon-circle { width: 48px; height: 48px; border-radius: 50%; background: rgba(34,197,94,0.1); display: flex; align-items: center; justify-content: center; font-size: 20px; margin-bottom: 20px; }
+  .col-card h3 { font-size: 18px; font-weight: 700; margin-bottom: 10px; }
+  .col-card p { font-size: 14px; color: #a1a1aa; line-height: 1.6; }
+
+  /* CTA */
+  .final-cta { padding: 100px 40px; text-align: center; position: relative; overflow: hidden; }
+  .final-cta::before { content: ''; position: absolute; top: 50%; left: 50%; width: 600px; height: 600px; background: radial-gradient(circle, rgba(34,197,94,0.08), transparent 70%); transform: translate(-50%, -50%); pointer-events: none; }
+  .final-cta h2 { font-size: 44px; font-weight: 700; letter-spacing: -1px; margin-bottom: 16px; position: relative; }
+  .final-cta p { font-size: 17px; color: #a1a1aa; margin-bottom: 36px; max-width: 460px; margin-left: auto; margin-right: auto; position: relative; }
+  .final-cta .cta-btns { display: flex; gap: 14px; justify-content: center; position: relative; }
+
+  /* FOOTER */
+  footer { border-top: 1px solid #27272a; padding: 40px 0; }
+  footer .inner { max-width: 1240px; margin: 0 auto; padding: 0 40px; display: flex; justify-content: space-between; align-items: center; }
+  footer p { font-size: 13px; color: #52525b; }
+  footer .flinks { display: flex; gap: 24px; }
+  footer .flinks a { color: #52525b; font-size: 13px; text-decoration: none; }
+  footer .flinks a:hover { color: #a1a1aa; }
+</style>
+</head>
+<body>
+
+<header>
+  <div class="inner">
+    <div class="logo"><em>t</em>ender</div>
+    <div class="nav-links">
+      <a href="#">Products</a>
+      <a href="#">Documentation</a>
+      <a href="#">Pricing</a>
+      <a href="#">Changelog</a>
+      <a href="#" class="btn-ghost">Log in</a>
+      <a href="#" class="btn-green">Get API keys</a>
+    </div>
+  </div>
+</header>
+
+<section class="hero">
+  <div class="hero-text">
+    <h1>The payments API built for <span class="accent">serious scale</span></h1>
+    <p>Tender unifies payments, billing, and payouts into a single integration. Accept 60+ payment methods across 135 currencies while we handle fraud, compliance, and settlement.</p>
+    <div class="hero-cta">
+      <a href="#" class="btn-green">Start integrating</a>
+      <a href="#" class="btn-ghost">Read the docs</a>
+    </div>
+  </div>
+  <div class="hero-code">
+    <div class="hero-code-tabs">
+      <button class="active">Node.js</button>
+      <button>Python</button>
+      <button>cURL</button>
+    </div>
+    <pre><span class="cm">// Create a subscription in seconds</span>
+<span class="kw">import</span> Tender <span class="kw">from</span> <span class="st">'@tender/node'</span>;
+
+<span class="kw">const</span> tender = <span class="kw">new</span> <span class="fn">Tender</span>(<span class="st">'sk_live_...'</span>);
+
+<span class="kw">const</span> sub = <span class="kw">await</span> tender.<span class="fn">subscriptions</span>.<span class="fn">create</span>({
+  <span class="fn">customer</span>: <span class="st">'cus_9Xr3kL'</span>,
+  <span class="fn">items</span>: [{
+    <span class="fn">price</span>: <span class="st">'price_pro_monthly'</span>,
+    <span class="fn">quantity</span>: <span class="nb">1</span>
+  }],
+  <span class="fn">trial_days</span>: <span class="nb">14</span>,
+});
+<span class="cm">// sub.status === 'trialing'</span></pre>
+  </div>
+</section>
+
+<section class="logos">
+  <div class="inner">
+    <p>Trusted by teams building the future</p>
+    <div class="logo-row">
+      <span>Vercel</span>
+      <span>Linear</span>
+      <span>Figma</span>
+      <span>Notion</span>
+      <span>Retool</span>
+      <span>Supabase</span>
+    </div>
+  </div>
+</section>
+
+<section class="features">
+  <div class="section-header">
+    <h2>Built for every side of payments</h2>
+    <p>From first charge to global expansion, Tender grows with your business.</p>
+  </div>
+
+  <div class="feature-rows">
+    <div class="feature-row">
+      <div class="feature-row-text">
+        <span class="tag">Payments</span>
+        <h3>Accept any payment, anywhere</h3>
+        <p>Cards, digital wallets, bank debits, BNPL, and dozens of region-specific methods. One API call, automatic routing, optimized acceptance rates across all of them.</p>
+      </div>
+      <div class="feature-row-visual">
+        <div class="method-pills">
+          <span class="method-pill">Visa</span>
+          <span class="method-pill">Mastercard</span>
+          <span class="method-pill">Apple Pay</span>
+          <span class="method-pill">Google Pay</span>
+          <span class="method-pill">iDEAL</span>
+          <span class="method-pill">SEPA</span>
+          <span class="method-pill">Boleto</span>
+          <span class="method-pill">PIX</span>
+          <span class="method-pill">Alipay</span>
+          <span class="method-pill">UPI</span>
+          <span class="method-pill">Klarna</span>
+          <span class="method-pill">ACH</span>
+          <span class="method-pill">BECS</span>
+          <span class="method-pill">Bancontact</span>
+        </div>
+      </div>
+    </div>
+
+    <div class="feature-row">
+      <div class="feature-row-text">
+        <span class="tag">Billing</span>
+        <h3>Subscription and usage billing that just works</h3>
+        <p>Flat-rate, per-seat, usage-based, or hybrid. Tender calculates proration, generates invoices, handles dunning, and manages upgrades and downgrades automatically.</p>
+      </div>
+      <div class="feature-row-visual">
+        <div class="terminal">
+          <div><span class="prompt">$</span> tender billing invoices list --customer cus_9Xr3kL</div>
+          <div class="output">
+INV_ID&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;STATUS&nbsp;&nbsp;&nbsp;AMOUNT&nbsp;&nbsp;&nbsp;DUE
+inv_8Kx2m1&nbsp;&nbsp;&nbsp;paid&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;$299.00&nbsp;&nbsp;2026-06-01
+inv_7Rp4n3&nbsp;&nbsp;&nbsp;paid&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;$299.00&nbsp;&nbsp;2026-05-01
+inv_6Wt9q7&nbsp;&nbsp;&nbsp;paid&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;$149.50&nbsp;&nbsp;2026-04-01
+          </div>
+          <div style="margin-top:8px"><span class="prompt">$</span> tender billing subscription update sub_3Mx --prorate</div>
+          <div class="output">Subscription updated. Credit of $12.41 applied.</div>
+        </div>
+      </div>
+    </div>
+
+    <div class="feature-row">
+      <div class="feature-row-text">
+        <span class="tag">Payouts</span>
+        <h3>Move money to anyone, globally</h3>
+        <p>Route payouts to marketplace sellers, gig workers, or SaaS partners in 47 countries. Automate splits, manage tax reporting, and settle in local currency.</p>
+      </div>
+      <div class="feature-row-visual">
+        <div class="metric-grid">
+          <div class="metric-card">
+            <div class="value">$12.4M</div>
+            <div class="label">Paid out this month</div>
+          </div>
+          <div class="metric-card">
+            <div class="value">2,847</div>
+            <div class="label">Active recipients</div>
+          </div>
+          <div class="metric-card">
+            <div class="value">47</div>
+            <div class="label">Countries</div>
+          </div>
+          <div class="metric-card">
+            <div class="value">T+1</div>
+            <div class="label">Avg settlement</div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<div class="three-col">
+  <div class="col-card">
+    <div class="icon-circle">&#128274;</div>
+    <h3>Compliance handled</h3>
+    <p>PCI DSS Level 1, SOC 2 Type II, PSD2/SCA. We hold money transmission licenses in every jurisdiction we operate. You stay focused on your product.</p>
+  </div>
+  <div class="col-card">
+    <div class="icon-circle">&#129302;</div>
+    <h3>Fraud &amp; risk engine</h3>
+    <p>Every transaction is scored in real time. Custom rules, block lists, velocity checks, and 3DS challenges give you control without friction for good customers.</p>
+  </div>
+  <div class="col-card">
+    <div class="icon-circle">&#128200;</div>
+    <h3>Revenue dashboard</h3>
+    <p>Finance teams get real-time views of revenue, MRR, churn, disputes, and payouts. Export anything, set alerts, and close the books faster.</p>
+  </div>
+</div>
+
+<section class="final-cta">
+  <h2>Ship payments, not paperwork</h2>
+  <p>Get your test API keys instantly. Go live when you're ready, with no contracts required up to $1M in volume.</p>
+  <div class="cta-btns">
+    <a href="#" class="btn-green">Get API keys</a>
+    <a href="#" class="btn-ghost">Explore documentation</a>
+  </div>
+</section>
+
+<footer>
+  <div class="inner">
+    <p>&copy; 2026 Tender Technologies, Inc.</p>
+    <div class="flinks">
+      <a href="#">Privacy</a>
+      <a href="#">Terms</a>
+      <a href="#">Security</a>
+      <a href="#">Status</a>
+      <a href="#">Blog</a>
+    </div>
+  </div>
+</footer>
+
+</body>
+</html>

@@ -1,0 +1,674 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Tender — Payments API for Internet Businesses</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <link href="https://fonts.googleapis.com/css2?family=DM+Sans:wght@300;400;500;600;700&family=DM+Mono:wght@400;500&display=swap" rel="stylesheet" />
+  <style>
+    body { font-family: 'DM Sans', sans-serif; background: #fafaf8; color: #111; }
+    .mono { font-family: 'DM Mono', monospace; }
+
+    .hero-bg {
+      background:
+        radial-gradient(circle at 15% 50%, rgba(234, 88, 12, 0.06) 0%, transparent 50%),
+        radial-gradient(circle at 85% 20%, rgba(234, 88, 12, 0.04) 0%, transparent 45%),
+        #fafaf8;
+    }
+
+    .section-alt { background: #111; color: #f5f5f0; }
+
+    .orange { color: #ea580c; }
+    .orange-bg { background: #ea580c; }
+    .orange-light { background: #fff4ee; }
+
+    .tab-active {
+      background: #111;
+      color: #fafaf8;
+    }
+    .tab-inactive {
+      background: transparent;
+      color: #666;
+    }
+
+    .stripe-border {
+      border: 1.5px solid #e5e5e0;
+    }
+
+    .code-window {
+      background: #0d0d0d;
+      border: 1.5px solid #2a2a2a;
+      border-radius: 12px;
+      overflow: hidden;
+    }
+
+    .metric-card {
+      background: white;
+      border: 1.5px solid #e5e5e0;
+      border-radius: 12px;
+    }
+
+    .feature-row:not(:last-child) {
+      border-bottom: 1.5px solid #e5e5e0;
+    }
+
+    .cta-section {
+      background: linear-gradient(135deg, #111 0%, #1c1c1c 100%);
+    }
+
+    .logo-mark {
+      width: 32px;
+      height: 32px;
+      background: #ea580c;
+      border-radius: 8px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+    }
+
+    .tag {
+      display: inline-block;
+      background: #fff4ee;
+      color: #ea580c;
+      border: 1px solid rgba(234,88,12,0.2);
+      border-radius: 100px;
+      font-size: 11px;
+      font-weight: 500;
+      padding: 3px 10px;
+      font-family: 'DM Mono', monospace;
+      letter-spacing: 0.02em;
+    }
+
+    .btn-primary {
+      background: #ea580c;
+      color: white;
+      font-weight: 600;
+      border-radius: 8px;
+      padding: 12px 24px;
+      display: inline-block;
+      transition: background 0.15s, transform 0.1s, box-shadow 0.15s;
+      font-size: 14px;
+    }
+    .btn-primary:hover {
+      background: #c2410c;
+      box-shadow: 0 8px 24px rgba(234,88,12,0.25);
+    }
+
+    .btn-outline {
+      border: 1.5px solid #d1d1cc;
+      color: #333;
+      font-weight: 500;
+      border-radius: 8px;
+      padding: 12px 24px;
+      display: inline-block;
+      transition: border-color 0.15s, color 0.15s;
+      font-size: 14px;
+    }
+    .btn-outline:hover {
+      border-color: #999;
+      color: #111;
+    }
+
+    .number-label {
+      font-size: 11px;
+      font-weight: 600;
+      text-transform: uppercase;
+      letter-spacing: 0.1em;
+      color: #999;
+    }
+  </style>
+</head>
+<body>
+
+  <!-- Nav -->
+  <nav class="sticky top-0 z-50 bg-white/90 backdrop-blur border-b border-gray-100">
+    <div class="max-w-6xl mx-auto px-6 h-16 flex items-center justify-between">
+      <div class="flex items-center gap-8">
+        <a href="#" class="flex items-center gap-2.5">
+          <div class="logo-mark">
+            <svg class="w-4 h-4 text-white" fill="currentColor" viewBox="0 0 24 24"><path d="M12 2L2 7l10 5 10-5-10-5zM2 17l10 5 10-5M2 12l10 5 10-5"/></svg>
+          </div>
+          <span class="font-semibold text-lg text-gray-900">Tender</span>
+        </a>
+        <div class="hidden md:flex gap-7 text-sm text-gray-500">
+          <a href="#" class="hover:text-gray-900 transition-colors">Products</a>
+          <a href="#" class="hover:text-gray-900 transition-colors">Developers</a>
+          <a href="#" class="hover:text-gray-900 transition-colors">Pricing</a>
+          <a href="#" class="hover:text-gray-900 transition-colors">Enterprise</a>
+          <a href="#" class="hover:text-gray-900 transition-colors">Blog</a>
+        </div>
+      </div>
+      <div class="flex items-center gap-3">
+        <a href="#" class="text-sm text-gray-500 hover:text-gray-900 font-medium">Sign in</a>
+        <a href="#" class="btn-primary text-sm">Start integrating</a>
+      </div>
+    </div>
+  </nav>
+
+  <!-- Hero -->
+  <section class="hero-bg pt-24 pb-20">
+    <div class="max-w-6xl mx-auto px-6">
+      <div class="max-w-3xl">
+        <div class="flex items-center gap-3 mb-7">
+          <span class="tag">New: Instant Payouts in 47 countries</span>
+          <span class="text-xs text-gray-400">→ Read the announcement</span>
+        </div>
+
+        <h1 class="text-6xl font-bold leading-tight tracking-tight text-gray-900 mb-6">
+          The payments API for<br />
+          companies that move<br />
+          <span class="orange">serious money.</span>
+        </h1>
+
+        <p class="text-xl text-gray-500 leading-relaxed mb-10 max-w-2xl font-normal">
+          Accept cards and local payment methods globally. Run subscription billing with proration and invoicing. Pay out to sellers in any currency. Fraud screening and compliance come standard.
+        </p>
+
+        <div class="flex flex-wrap items-center gap-4 mb-16">
+          <a href="#" class="btn-primary">Start integrating</a>
+          <a href="#" class="btn-outline">View the docs →</a>
+          <span class="text-sm text-gray-400 mono">npm install @tender/sdk</span>
+        </div>
+
+        <!-- Inline stats -->
+        <div class="flex flex-wrap gap-10">
+          <div>
+            <p class="text-3xl font-bold text-gray-900">$94B+</p>
+            <p class="number-label mt-1">Processed annually</p>
+          </div>
+          <div class="w-px bg-gray-200 self-stretch"></div>
+          <div>
+            <p class="text-3xl font-bold text-gray-900">135+</p>
+            <p class="number-label mt-1">Currencies</p>
+          </div>
+          <div class="w-px bg-gray-200 self-stretch"></div>
+          <div>
+            <p class="text-3xl font-bold text-gray-900">80+</p>
+            <p class="number-label mt-1">Payment methods</p>
+          </div>
+          <div class="w-px bg-gray-200 self-stretch"></div>
+          <div>
+            <p class="text-3xl font-bold text-gray-900">99.99%</p>
+            <p class="number-label mt-1">Uptime SLA</p>
+          </div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- Trusted by -->
+  <section class="border-t border-b border-gray-100 py-10 bg-white">
+    <div class="max-w-6xl mx-auto px-6 flex flex-col md:flex-row items-center gap-8">
+      <p class="number-label shrink-0">Trusted by</p>
+      <div class="flex flex-wrap items-center gap-10">
+        <span class="font-semibold text-gray-300 text-lg">Lineage</span>
+        <span class="font-semibold text-gray-300 text-lg">Circlemore</span>
+        <span class="font-semibold text-gray-300 text-lg">VaultPay</span>
+        <span class="font-semibold text-gray-300 text-lg">Meridian</span>
+        <span class="font-semibold text-gray-300 text-lg">Corusant</span>
+        <span class="font-semibold text-gray-300 text-lg">Axial</span>
+        <span class="font-semibold text-gray-300 text-lg">Fundflow</span>
+      </div>
+    </div>
+  </section>
+
+  <!-- Code section -->
+  <section class="py-24 bg-white">
+    <div class="max-w-6xl mx-auto px-6">
+      <div class="grid lg:grid-cols-2 gap-16 items-start">
+        <div class="pt-4">
+          <span class="tag">Developer-first</span>
+          <h2 class="text-4xl font-bold text-gray-900 mt-4 mb-5">Built for the engineer who's done it wrong before.</h2>
+          <p class="text-gray-500 text-lg leading-relaxed mb-8">Predictable REST. Consistent error shapes. Typed SDKs. Webhook signatures. Idempotency keys. A test mode that actually simulates real failures. We sweat the API design so your integration stays clean as you scale.</p>
+
+          <ul class="space-y-3">
+            <li class="flex gap-3 text-sm text-gray-600">
+              <span class="orange font-bold mt-0.5">→</span>
+              <div><strong class="text-gray-900">Versioned API</strong> — breaking changes announced 6+ months early, migration guides included</div>
+            </li>
+            <li class="flex gap-3 text-sm text-gray-600">
+              <span class="orange font-bold mt-0.5">→</span>
+              <div><strong class="text-gray-900">SDKs in 8 languages</strong> — Node, Python, Go, Ruby, Java, .NET, PHP, with TypeScript types</div>
+            </li>
+            <li class="flex gap-3 text-sm text-gray-600">
+              <span class="orange font-bold mt-0.5">→</span>
+              <div><strong class="text-gray-900">OpenAPI spec</strong> — generate your own client, import into Postman or Insomnia</div>
+            </li>
+            <li class="flex gap-3 text-sm text-gray-600">
+              <span class="orange font-bold mt-0.5">→</span>
+              <div><strong class="text-gray-900">Webhook replay</strong> — replay any event from the dashboard or CLI for debugging</div>
+            </li>
+            <li class="flex gap-3 text-sm text-gray-600">
+              <span class="orange font-bold mt-0.5">→</span>
+              <div><strong class="text-gray-900">Test mode parity</strong> — every production feature works in test, with realistic latency simulation</div>
+            </li>
+          </ul>
+
+          <div class="flex gap-3 mt-8">
+            <a href="#" class="btn-primary">View the docs</a>
+            <a href="#" class="btn-outline">API Reference</a>
+          </div>
+        </div>
+
+        <!-- Code window -->
+        <div>
+          <!-- Tab bar -->
+          <div class="flex gap-1 mb-3">
+            <button class="mono text-xs px-4 py-2 rounded-md tab-active">Accept payment</button>
+            <button class="mono text-xs px-4 py-2 rounded-md tab-inactive">Create subscription</button>
+            <button class="mono text-xs px-4 py-2 rounded-md tab-inactive">Pay out</button>
+          </div>
+
+          <div class="code-window">
+            <!-- Window chrome -->
+            <div class="flex items-center gap-2 px-4 py-3 border-b border-gray-800">
+              <div class="w-3 h-3 rounded-full bg-red-500/60"></div>
+              <div class="w-3 h-3 rounded-full bg-yellow-500/60"></div>
+              <div class="w-3 h-3 rounded-full bg-green-500/60"></div>
+              <span class="mono text-xs text-gray-600 ml-2">checkout.js</span>
+            </div>
+            <div class="p-6 mono text-sm leading-7 overflow-x-auto">
+              <div class="text-gray-500">// 1. Initialize client</div>
+              <div class="text-blue-400">import <span class="text-white">Tender</span> from <span class="text-orange-300">'@tender/sdk'</span>;</div>
+              <div class="mt-1 text-purple-400">const <span class="text-white">t</span> = <span class="text-blue-300">new</span> <span class="text-yellow-300">Tender</span>(<span class="text-white">process</span>.env.<span class="text-orange-300">TENDER_KEY</span>);</div>
+              <div class="mt-4 text-gray-500">// 2. Create payment intent in your backend</div>
+              <div class="text-purple-400">const <span class="text-white">intent</span> = <span class="text-blue-400">await</span> t.payments.<span class="text-yellow-300">create</span>({</div>
+              <div class="pl-5 text-orange-300">amount: <span class="text-white">9900</span>,</div>
+              <div class="pl-5 text-orange-300">currency: <span class="text-green-300">'gbp'</span>,</div>
+              <div class="pl-5 text-orange-300">payment_method_types: <span class="text-white">[</span></div>
+              <div class="pl-10 text-green-300">'card'<span class="text-white">,</span> <span class="text-green-300">'bacs_debit'</span></div>
+              <div class="pl-5 text-white">],</div>
+              <div class="pl-5 text-orange-300">idempotency_key: <span class="text-green-300">'ord_7Mx93a'</span></div>
+              <div class="text-white">});</div>
+              <div class="mt-4 text-gray-500">// 3. Pass client_secret to frontend</div>
+              <div class="text-blue-400">return <span class="text-white">res</span>.<span class="text-yellow-300">json</span>({ client_secret: intent.client_secret });</div>
+              <div class="mt-4 text-gray-600">// → Tender handles 3DS2, fraud, and settlement</div>
+            </div>
+            <!-- Response -->
+            <div class="border-t border-gray-800 px-5 py-3 flex items-center justify-between">
+              <div class="flex items-center gap-2">
+                <div class="w-2 h-2 bg-green-400 rounded-full"></div>
+                <span class="mono text-xs text-green-400">200 OK · 89ms</span>
+              </div>
+              <div class="flex gap-4 mono text-xs text-gray-600">
+                <span>fraud: 3/100</span>
+                <span>GBP</span>
+                <span>3DS2: exempted</span>
+              </div>
+            </div>
+          </div>
+
+          <!-- Additional snippet: subscription -->
+          <div class="code-window mt-4">
+            <div class="flex items-center gap-2 px-4 py-3 border-b border-gray-800">
+              <div class="w-3 h-3 rounded-full bg-red-500/60"></div>
+              <div class="w-3 h-3 rounded-full bg-yellow-500/60"></div>
+              <div class="w-3 h-3 rounded-full bg-green-500/60"></div>
+              <span class="mono text-xs text-gray-600 ml-2">billing.py</span>
+            </div>
+            <div class="p-6 mono text-sm leading-7 overflow-x-auto">
+              <div class="text-blue-400">sub = client.subscriptions.<span class="text-yellow-300">create</span>(</div>
+              <div class="pl-5 text-orange-300">customer=<span class="text-green-300">"cus_Kp3ma2"</span><span class="text-white">,</span></div>
+              <div class="pl-5 text-orange-300">items=[{<span class="text-green-300">"price"</span>: <span class="text-green-300">"price_pro_monthly"</span><span class="text-white">,</span> <span class="text-green-300">"quantity"</span>: <span class="text-white">12</span>}]<span class="text-white">,</span></div>
+              <div class="pl-5 text-orange-300">proration_behavior=<span class="text-green-300">"create_prorations"</span><span class="text-white">,</span></div>
+              <div class="pl-5 text-orange-300">trial_period_days=<span class="text-white">14</span></div>
+              <div class="text-white">)</div>
+              <div class="mt-2 text-gray-600"># Invoices auto-generated · smart retries · webhooks fired</div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- Features table-style section -->
+  <section class="py-24 bg-gray-50 border-t border-gray-100">
+    <div class="max-w-6xl mx-auto px-6">
+      <div class="mb-14">
+        <span class="tag">Capabilities</span>
+        <h2 class="text-4xl font-bold text-gray-900 mt-4 mb-3">Everything the money stack needs.</h2>
+        <p class="text-gray-500 max-w-xl">One platform, one contract, one invoice. Tender replaces a patchwork of acquirers, fraud tools, billing engines, and payout networks.</p>
+      </div>
+
+      <div class="stripe-border rounded-2xl bg-white overflow-hidden">
+        <!-- Row 1 -->
+        <div class="feature-row p-8 grid md:grid-cols-3 gap-8">
+          <div class="md:col-span-1">
+            <div class="flex items-center gap-3 mb-2">
+              <div class="w-8 h-8 rounded-lg orange-light flex items-center justify-center">
+                <svg class="w-4 h-4 orange" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M3 10h18M7 15h1m4 0h1m-7 4h12a3 3 0 003-3V8a3 3 0 00-3-3H6a3 3 0 00-3 3v8a3 3 0 003 3z"/></svg>
+              </div>
+              <h3 class="font-semibold text-gray-900">Global Acceptance</h3>
+            </div>
+          </div>
+          <div class="md:col-span-2 text-sm text-gray-500 leading-relaxed">
+            Accept cards (Visa, Mastercard, Amex, UnionPay), digital wallets (Apple Pay, Google Pay), and 80+ local methods including SEPA Direct Debit, ACH, PIX, UPI, Boleto, and iDEAL. Intelligent routing across multiple acquirers maximizes authorization rates by market. Dynamic currency conversion lets customers pay in their local currency while you settle in yours.
+            <div class="flex flex-wrap gap-2 mt-3">
+              <span class="mono text-xs px-2 py-1 bg-orange-50 text-orange-600 rounded">135 currencies</span>
+              <span class="mono text-xs px-2 py-1 bg-orange-50 text-orange-600 rounded">47 countries</span>
+              <span class="mono text-xs px-2 py-1 bg-orange-50 text-orange-600 rounded">smart routing</span>
+              <span class="mono text-xs px-2 py-1 bg-orange-50 text-orange-600 rounded">DCC</span>
+            </div>
+          </div>
+        </div>
+
+        <!-- Row 2 -->
+        <div class="feature-row p-8 grid md:grid-cols-3 gap-8">
+          <div class="md:col-span-1">
+            <div class="flex items-center gap-3 mb-2">
+              <div class="w-8 h-8 rounded-lg orange-light flex items-center justify-center">
+                <svg class="w-4 h-4 orange" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"/></svg>
+              </div>
+              <h3 class="font-semibold text-gray-900">Subscription Billing</h3>
+            </div>
+          </div>
+          <div class="md:col-span-2 text-sm text-gray-500 leading-relaxed">
+            Model any pricing structure: flat-rate, per-seat, usage-based, or tiered. Proration is automatic on upgrades and downgrades. Trial periods, coupons, and discounts work out of the box. Dunning retries follow customizable schedules. PDF invoices are generated, hosted, and emailed on your behalf. Integrates with revenue recognition workflows for ASC 606 compliance.
+            <div class="flex flex-wrap gap-2 mt-3">
+              <span class="mono text-xs px-2 py-1 bg-orange-50 text-orange-600 rounded">metered</span>
+              <span class="mono text-xs px-2 py-1 bg-orange-50 text-orange-600 rounded">seat-based</span>
+              <span class="mono text-xs px-2 py-1 bg-orange-50 text-orange-600 rounded">proration</span>
+              <span class="mono text-xs px-2 py-1 bg-orange-50 text-orange-600 rounded">smart retries</span>
+              <span class="mono text-xs px-2 py-1 bg-orange-50 text-orange-600 rounded">invoices</span>
+            </div>
+          </div>
+        </div>
+
+        <!-- Row 3 -->
+        <div class="feature-row p-8 grid md:grid-cols-3 gap-8">
+          <div class="md:col-span-1">
+            <div class="flex items-center gap-3 mb-2">
+              <div class="w-8 h-8 rounded-lg orange-light flex items-center justify-center">
+                <svg class="w-4 h-4 orange" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 4.354a4 4 0 110 5.292M15 21H3v-1a6 6 0 0112 0v1zm0 0h6v-1a6 6 0 00-9-5.197M13 7a4 4 0 11-8 0 4 4 0 018 0z"/></svg>
+              </div>
+              <h3 class="font-semibold text-gray-900">Marketplace Payouts</h3>
+            </div>
+          </div>
+          <div class="md:col-span-2 text-sm text-gray-500 leading-relaxed">
+            Split payments between your platform and connected accounts at charge time. Hold funds in escrow with configurable release conditions. Onboard sellers and contractors through a KYC API — no manual process required. Pay out in 47 countries in local currency on instant, daily, weekly, or custom schedules. Batch payouts for platforms handling thousands of recipients.
+            <div class="flex flex-wrap gap-2 mt-3">
+              <span class="mono text-xs px-2 py-1 bg-orange-50 text-orange-600 rounded">split payments</span>
+              <span class="mono text-xs px-2 py-1 bg-orange-50 text-orange-600 rounded">KYC API</span>
+              <span class="mono text-xs px-2 py-1 bg-orange-50 text-orange-600 rounded">escrow</span>
+              <span class="mono text-xs px-2 py-1 bg-orange-50 text-orange-600 rounded">instant payouts</span>
+            </div>
+          </div>
+        </div>
+
+        <!-- Row 4 -->
+        <div class="feature-row p-8 grid md:grid-cols-3 gap-8">
+          <div class="md:col-span-1">
+            <div class="flex items-center gap-3 mb-2">
+              <div class="w-8 h-8 rounded-lg orange-light flex items-center justify-center">
+                <svg class="w-4 h-4 orange" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12l2 2 4-4m5.618-4.016A11.955 11.955 0 0112 2.944a11.955 11.955 0 01-8.618 3.04A12.02 12.02 0 003 9c0 5.591 3.824 10.29 9 11.622 5.176-1.332 9-6.03 9-11.622 0-1.042-.133-2.052-.382-3.016z"/></svg>
+              </div>
+              <h3 class="font-semibold text-gray-900">Fraud & Risk</h3>
+            </div>
+          </div>
+          <div class="md:col-span-2 text-sm text-gray-500 leading-relaxed">
+            Every transaction is scored by an ML model trained on billions of data points across the Tender network. Risk signals include device fingerprint, velocity, behavioral patterns, IP geolocation, and historical merchant data. 3DS2 is applied adaptively — triggered only when risk warrants it, so you don't friction away legitimate customers. Custom rules and block lists can be configured via dashboard or API.
+            <div class="flex flex-wrap gap-2 mt-3">
+              <span class="mono text-xs px-2 py-1 bg-orange-50 text-orange-600 rounded">ML scoring</span>
+              <span class="mono text-xs px-2 py-1 bg-orange-50 text-orange-600 rounded">3DS2 adaptive</span>
+              <span class="mono text-xs px-2 py-1 bg-orange-50 text-orange-600 rounded">sub-100ms</span>
+              <span class="mono text-xs px-2 py-1 bg-orange-50 text-orange-600 rounded">custom rules</span>
+            </div>
+          </div>
+        </div>
+
+        <!-- Row 5 -->
+        <div class="p-8 grid md:grid-cols-3 gap-8">
+          <div class="md:col-span-1">
+            <div class="flex items-center gap-3 mb-2">
+              <div class="w-8 h-8 rounded-lg orange-light flex items-center justify-center">
+                <svg class="w-4 h-4 orange" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 19v-6a2 2 0 00-2-2H5a2 2 0 00-2 2v6a2 2 0 002 2h2a2 2 0 002-2zm0 0V9a2 2 0 012-2h2a2 2 0 012 2v10m-6 0a2 2 0 002 2h2a2 2 0 002-2m0 0V5a2 2 0 012-2h2a2 2 0 012 2v14a2 2 0 01-2 2h-2a2 2 0 01-2-2z"/></svg>
+              </div>
+              <h3 class="font-semibold text-gray-900">Finance Dashboard</h3>
+            </div>
+          </div>
+          <div class="md:col-span-2 text-sm text-gray-500 leading-relaxed">
+            A dashboard built for finance and operations teams, not just engineers. Track MRR, ARR, churn, outstanding invoices, dispute status, and payout schedules in real time. Segment revenue by plan, cohort, or geography. Automated dispute response workflows and evidence submission. Tax liability breakdowns by jurisdiction. Export to CSV, QuickBooks, NetSuite, or Xero. Role-based access keeps API keys away from non-technical team members.
+            <div class="flex flex-wrap gap-2 mt-3">
+              <span class="mono text-xs px-2 py-1 bg-orange-50 text-orange-600 rounded">MRR / ARR</span>
+              <span class="mono text-xs px-2 py-1 bg-orange-50 text-orange-600 rounded">disputes</span>
+              <span class="mono text-xs px-2 py-1 bg-orange-50 text-orange-600 rounded">tax reports</span>
+              <span class="mono text-xs px-2 py-1 bg-orange-50 text-orange-600 rounded">QuickBooks sync</span>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- Dark compliance section -->
+  <section class="section-alt py-24">
+    <div class="max-w-6xl mx-auto px-6">
+      <div class="grid lg:grid-cols-2 gap-20 items-center">
+        <div>
+          <span class="inline-block text-xs font-semibold text-orange-400 mono uppercase tracking-widest mb-5">Security & compliance</span>
+          <h2 class="text-4xl font-bold text-white mb-6">We carry the regulatory weight.</h2>
+          <p class="text-gray-400 text-lg leading-relaxed mb-10">PCI, GDPR, SOC 2, AML, KYC. These aren't boxes Tender checks — they're core architecture. When you build on Tender, cardholder data never touches your servers, and you inherit our compliance posture automatically.</p>
+
+          <div class="grid grid-cols-2 gap-4">
+            <div class="bg-white/5 border border-white/10 rounded-xl p-5">
+              <div class="text-orange-400 mono text-2xl font-bold mb-1">PCI L1</div>
+              <div class="text-white text-sm font-medium mb-1">Level 1 Certified</div>
+              <div class="text-gray-500 text-xs">Highest tier. Data never stored on your infrastructure.</div>
+            </div>
+            <div class="bg-white/5 border border-white/10 rounded-xl p-5">
+              <div class="text-orange-400 mono text-2xl font-bold mb-1">SOC 2</div>
+              <div class="text-white text-sm font-medium mb-1">Type II Audited</div>
+              <div class="text-gray-500 text-xs">Annual audit. Report available under NDA.</div>
+            </div>
+            <div class="bg-white/5 border border-white/10 rounded-xl p-5">
+              <div class="text-orange-400 mono text-2xl font-bold mb-1">ISO</div>
+              <div class="text-white text-sm font-medium mb-1">27001 Certified</div>
+              <div class="text-gray-500 text-xs">Data processor agreements for GDPR compliance.</div>
+            </div>
+            <div class="bg-white/5 border border-white/10 rounded-xl p-5">
+              <div class="text-orange-400 mono text-2xl font-bold mb-1">AML</div>
+              <div class="text-white text-sm font-medium mb-1">Compliant</div>
+              <div class="text-gray-500 text-xs">Licensed money transmitter in all operating jurisdictions.</div>
+            </div>
+          </div>
+        </div>
+
+        <div class="space-y-4">
+          <!-- Trust points -->
+          <div class="bg-white/5 border border-white/8 rounded-2xl p-6">
+            <h3 class="font-semibold text-white mb-2">Cardholder data isolation</h3>
+            <p class="text-gray-400 text-sm leading-relaxed">Tender.js captures card details directly in our hosted fields. PAN, CVV, and expiry never traverse your servers. Your PCI scope stays minimal.</p>
+          </div>
+          <div class="bg-white/5 border border-white/8 rounded-2xl p-6">
+            <h3 class="font-semibold text-white mb-2">Global licensing</h3>
+            <p class="text-gray-400 text-sm leading-relaxed">Tender holds money transmitter licenses, payment institution licenses in the EU, and acquiring licenses across our operating footprint. You don't need your own.</p>
+          </div>
+          <div class="bg-white/5 border border-white/8 rounded-2xl p-6">
+            <h3 class="font-semibold text-white mb-2">Tax handling</h3>
+            <p class="text-gray-400 text-sm leading-relaxed">US sales tax calculation and remittance, EU VAT management, and localized invoices. Tax liability reports available by jurisdiction, synced to your ERP.</p>
+          </div>
+          <div class="bg-white/5 border border-white/8 rounded-2xl p-6">
+            <h3 class="font-semibold text-white mb-2">99.99% SLA, globally</h3>
+            <p class="text-gray-400 text-sm leading-relaxed">Multi-region redundancy with automatic failover. Degraded-mode operation if a downstream acquirer fails. Status page updated in real time, with historical incident log.</p>
+          </div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- Testimonials - light -->
+  <section class="py-24 bg-white border-t border-gray-100">
+    <div class="max-w-6xl mx-auto px-6">
+      <div class="mb-14 text-center">
+        <h2 class="text-4xl font-bold text-gray-900 mb-3">What engineering and finance teams say.</h2>
+        <p class="text-gray-500 max-w-lg mx-auto">From first integration to $100M+ in volume — Tender scales with you.</p>
+      </div>
+
+      <div class="grid md:grid-cols-3 gap-6">
+        <div class="stripe-border rounded-2xl p-6">
+          <p class="text-gray-700 text-sm leading-relaxed mb-5">"We consolidated four payment vendors into Tender in a single sprint. The API is the most consistent I've used — everything just works the way you'd expect it to."</p>
+          <div class="border-t border-gray-100 pt-4 flex items-center gap-3">
+            <div class="w-9 h-9 rounded-full orange-bg flex items-center justify-center text-white text-xs font-bold">AK</div>
+            <div>
+              <p class="text-sm font-semibold text-gray-900">Arjun Kapoor</p>
+              <p class="text-xs text-gray-400">CTO · Lineage Finance</p>
+            </div>
+          </div>
+        </div>
+
+        <div class="stripe-border rounded-2xl p-6">
+          <p class="text-gray-700 text-sm leading-relaxed mb-5">"Our finance team used to spend half a day pulling numbers from different systems. Now everything — revenue, disputes, payouts — is one dashboard. It's been quietly transformative."</p>
+          <div class="border-t border-gray-100 pt-4 flex items-center gap-3">
+            <div class="w-9 h-9 rounded-full bg-gray-900 flex items-center justify-center text-white text-xs font-bold">SM</div>
+            <div>
+              <p class="text-sm font-semibold text-gray-900">Sarah Mitchell</p>
+              <p class="text-xs text-gray-400">VP Finance · Circlemore</p>
+            </div>
+          </div>
+        </div>
+
+        <div class="stripe-border rounded-2xl p-6">
+          <p class="text-gray-700 text-sm leading-relaxed mb-5">"Tender's marketplace payout API is the only reason we could launch contractor payments in 14 countries inside 8 weeks. KYC, FX, everything — handled out of the box."</p>
+          <div class="border-t border-gray-100 pt-4 flex items-center gap-3">
+            <div class="w-9 h-9 rounded-full bg-indigo-600 flex items-center justify-center text-white text-xs font-bold">LR</div>
+            <div>
+              <p class="text-sm font-semibold text-gray-900">Luis Reyes</p>
+              <p class="text-xs text-gray-400">Engineering Lead · Meridian</p>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- Pricing -->
+  <section class="py-24 bg-gray-50 border-t border-gray-100">
+    <div class="max-w-5xl mx-auto px-6">
+      <div class="text-center mb-14">
+        <span class="tag">Pricing</span>
+        <h2 class="text-4xl font-bold text-gray-900 mt-4 mb-3">No surprises. No minimums.</h2>
+        <p class="text-gray-500">Usage-based pricing from day one. Volume discounts and interchange-plus available as you scale.</p>
+      </div>
+
+      <div class="grid md:grid-cols-2 gap-6">
+        <div class="bg-white stripe-border rounded-2xl p-8">
+          <p class="number-label mb-3">Standard</p>
+          <div class="flex items-end gap-2 mb-2">
+            <span class="text-5xl font-bold text-gray-900">2.5%</span>
+            <span class="text-xl text-gray-400 mb-1">+ 30¢</span>
+          </div>
+          <p class="text-sm text-gray-400 mb-6">per successful card transaction</p>
+          <ul class="space-y-2.5 text-sm text-gray-600 mb-8">
+            <li class="flex gap-2.5"><span class="orange font-bold">✓</span> All payment methods included</li>
+            <li class="flex gap-2.5"><span class="orange font-bold">✓</span> Subscription billing and invoicing</li>
+            <li class="flex gap-2.5"><span class="orange font-bold">✓</span> Fraud detection and 3DS2</li>
+            <li class="flex gap-2.5"><span class="orange font-bold">✓</span> Finance dashboard for your whole team</li>
+            <li class="flex gap-2.5"><span class="orange font-bold">✓</span> Email and developer forum support</li>
+          </ul>
+          <a href="#" class="btn-outline block text-center">Get started free</a>
+        </div>
+
+        <div class="bg-gray-900 rounded-2xl p-8 relative overflow-hidden">
+          <div class="absolute top-0 right-0 text-xs font-semibold orange-bg text-white px-4 py-2 rounded-bl-xl">Enterprise</div>
+          <p class="number-label text-gray-500 mb-3">Volume pricing</p>
+          <div class="mb-2">
+            <span class="text-4xl font-bold text-white">Custom rates</span>
+          </div>
+          <p class="text-sm text-gray-500 mb-6">For $1M+ monthly volume</p>
+          <ul class="space-y-2.5 text-sm text-gray-400 mb-8">
+            <li class="flex gap-2.5"><span class="text-orange-400 font-bold">✓</span> Interchange-plus pricing</li>
+            <li class="flex gap-2.5"><span class="text-orange-400 font-bold">✓</span> Dedicated support engineer</li>
+            <li class="flex gap-2.5"><span class="text-orange-400 font-bold">✓</span> Custom SLAs and uptime guarantees</li>
+            <li class="flex gap-2.5"><span class="text-orange-400 font-bold">✓</span> On-premise data residency options</li>
+            <li class="flex gap-2.5"><span class="text-orange-400 font-bold">✓</span> Custom MSA and DPA</li>
+          </ul>
+          <a href="#" class="btn-primary block text-center">Talk to sales</a>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- CTA -->
+  <section class="cta-section py-32">
+    <div class="max-w-4xl mx-auto px-6 text-center">
+      <h2 class="text-5xl font-bold text-white mb-6 tracking-tight">Start moving money today.</h2>
+      <p class="text-gray-400 text-xl mb-10 font-light">API keys in 30 seconds. Full test environment. Production in days, not months.</p>
+      <div class="flex flex-wrap justify-center gap-4">
+        <a href="#" class="btn-primary text-base px-10 py-5">Start integrating</a>
+        <a href="#" class="inline-block border border-gray-700 hover:border-gray-500 text-gray-300 hover:text-white font-medium px-10 py-5 rounded-xl text-base transition-all">View the docs →</a>
+      </div>
+      <div class="mt-10 flex flex-wrap justify-center gap-6 mono text-xs text-gray-600">
+        <span>npm install @tender/sdk</span>
+        <span>·</span>
+        <span>pip install tender</span>
+        <span>·</span>
+        <span>go get tender.dev/sdk</span>
+        <span>·</span>
+        <span>gem install tender</span>
+      </div>
+    </div>
+  </section>
+
+  <!-- Footer -->
+  <footer class="bg-gray-900 border-t border-white/5 py-14">
+    <div class="max-w-6xl mx-auto px-6">
+      <div class="grid md:grid-cols-5 gap-10 mb-10">
+        <div class="md:col-span-2">
+          <div class="flex items-center gap-2.5 mb-4">
+            <div class="logo-mark">
+              <svg class="w-4 h-4 text-white" fill="currentColor" viewBox="0 0 24 24"><path d="M12 2L2 7l10 5 10-5-10-5z"/></svg>
+            </div>
+            <span class="font-semibold text-white text-lg">Tender</span>
+          </div>
+          <p class="text-sm text-gray-500 max-w-xs leading-relaxed">Payments infrastructure for internet businesses. Global, reliable, developer-first.</p>
+          <div class="flex gap-2 mt-4">
+            <a href="#" class="mono text-xs px-3 py-1.5 border border-gray-800 text-gray-500 hover:text-gray-300 rounded transition-colors">Status</a>
+            <a href="#" class="mono text-xs px-3 py-1.5 border border-gray-800 text-gray-500 hover:text-gray-300 rounded transition-colors">GitHub</a>
+          </div>
+        </div>
+        <div>
+          <p class="number-label mb-4">Product</p>
+          <ul class="space-y-2.5 text-sm text-gray-400">
+            <li><a href="#" class="hover:text-white transition-colors">Payments</a></li>
+            <li><a href="#" class="hover:text-white transition-colors">Billing</a></li>
+            <li><a href="#" class="hover:text-white transition-colors">Payouts</a></li>
+            <li><a href="#" class="hover:text-white transition-colors">Fraud</a></li>
+            <li><a href="#" class="hover:text-white transition-colors">Dashboard</a></li>
+          </ul>
+        </div>
+        <div>
+          <p class="number-label mb-4">Developers</p>
+          <ul class="space-y-2.5 text-sm text-gray-400">
+            <li><a href="#" class="hover:text-white transition-colors">Documentation</a></li>
+            <li><a href="#" class="hover:text-white transition-colors">API Reference</a></li>
+            <li><a href="#" class="hover:text-white transition-colors">SDKs</a></li>
+            <li><a href="#" class="hover:text-white transition-colors">Changelog</a></li>
+            <li><a href="#" class="hover:text-white transition-colors">Support</a></li>
+          </ul>
+        </div>
+        <div>
+          <p class="number-label mb-4">Company</p>
+          <ul class="space-y-2.5 text-sm text-gray-400">
+            <li><a href="#" class="hover:text-white transition-colors">About</a></li>
+            <li><a href="#" class="hover:text-white transition-colors">Blog</a></li>
+            <li><a href="#" class="hover:text-white transition-colors">Careers</a></li>
+            <li><a href="#" class="hover:text-white transition-colors">Security</a></li>
+            <li><a href="#" class="hover:text-white transition-colors">Contact</a></li>
+          </ul>
+        </div>
+      </div>
+      <div class="border-t border-white/5 pt-6 flex flex-col md:flex-row justify-between gap-3 text-xs text-gray-600 mono">
+        <span>© 2025 Tender Payments Inc. All rights reserved.</span>
+        <div class="flex gap-6">
+          <a href="#" class="hover:text-gray-400">Privacy</a>
+          <a href="#" class="hover:text-gray-400">Terms</a>
+          <a href="#" class="hover:text-gray-400">PCI</a>
+          <a href="#" class="hover:text-gray-400">Cookies</a>
+        </div>
+      </div>
+    </div>
+  </footer>
+
+</body>
+</html>
