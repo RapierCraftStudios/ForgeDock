@@ -1,0 +1,8 @@
+{
+  "description": "CONTRACT — missing required Task type field",
+  "input": "<!-- FORGE:CONTRACT -->\n## Builder Contract\n\n### Proposed Approach\nGuard null at the lookup site.",
+  "expect": {
+    "type": "CONTRACT",
+    "valid": false
+  }
+}

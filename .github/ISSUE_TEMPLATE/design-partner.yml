@@ -1,0 +1,83 @@
+name: Design-Partner Application
+description: Apply for the ForgeDock fleet-layer design-partner program (org-level observability and policy controls, currently in development).
+labels: ["marketing", "needs-human"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for your interest in the ForgeDock design-partner program. This form routes to the RapierCraft Studios team — **it is not processed by the automated pipeline**. We will respond within a few business days.
+
+        For context on what the fleet layer is and what design partnership includes, see [ForgeDock for Companies](https://github.com/RapierCraftStudios/ForgeDock/blob/main/docs/site/for-companies.md).
+
+  - type: input
+    id: org_name
+    attributes:
+      label: Organization name (optional)
+      description: The name of your company or team. You can leave this blank if you prefer to discuss privately over email.
+      placeholder: "Acme Corp (or leave blank)"
+    validations:
+      required: false
+
+  - type: dropdown
+    id: repo_count
+    attributes:
+      label: How many repositories would you run ForgeDock across?
+      options:
+        - "1–5 repos"
+        - "6–20 repos"
+        - "21–100 repos"
+        - "More than 100 repos"
+        - "Not sure yet"
+    validations:
+      required: true
+
+  - type: textarea
+    id: current_workflow
+    attributes:
+      label: Current agent workflow
+      description: |
+        How are you using AI coding agents today? (e.g., ad-hoc Claude Code sessions, a custom pipeline, something else entirely)
+        If you're already running ForgeDock, describe roughly how many issues/week go through the pipeline.
+      placeholder: "We run Claude Code ad-hoc on individual tasks. We'd like to give the pipeline structured memory and see what's happening across all our repos..."
+    validations:
+      required: true
+
+  - type: textarea
+    id: fleet_needs
+    attributes:
+      label: What do you want from the fleet layer?
+      description: |
+        What's the concrete problem you're trying to solve? Common answers: "We want to see which autonomous merges need human review before they land", "We need an audit trail for compliance", "We want policy controls so the pipeline can't merge to production branches without approval."
+      placeholder: "We need an audit trail of every autonomous change for our security review process..."
+    validations:
+      required: true
+
+  - type: dropdown
+    id: timeline
+    attributes:
+      label: Timeline
+      description: When are you looking to deploy fleet-layer capabilities?
+      options:
+        - "Actively evaluating now"
+        - "Within 3 months"
+        - "Within 6 months"
+        - "Exploring / no firm timeline"
+    validations:
+      required: true
+
+  - type: input
+    id: contact_email
+    attributes:
+      label: Contact email
+      description: Where should we reply? If you'd prefer to keep this private, leave blank and we'll respond on this issue.
+      placeholder: "you@example.com (optional)"
+    validations:
+      required: false
+
+  - type: markdown
+    attributes:
+      value: |
+        ---
+        **Note**: This issue will be labeled `needs-human` and will not be automatically processed by the ForgeDock pipeline. A human at RapierCraft Studios will review it and follow up directly.
+
+        Questions? Email [support@rapiercraftstudios.com](mailto:support@rapiercraftstudios.com).

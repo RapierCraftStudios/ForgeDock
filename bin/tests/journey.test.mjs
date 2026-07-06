@@ -58,6 +58,21 @@ describe("writeForgeYaml", () => {
     assert.match(yaml, /description: "line one\\nline two"\s+# TODO\(forgedock:description\)/);
     assert.doesNotMatch(yaml, /line two"\s*$/m);
   });
+  it("uses atomic tmp+rename: no partial .tmp left on write failure (ref: #1396)", () => {
+    // Simulate a write failure by pointing outputPath at a directory (writeFileSync
+    // throws EISDIR — a cheap stand-in for ENOSPC without needing a real disk-full condition).
+    const out = join(dir, "forge.yaml");
+    mkdirSync(out); // make outputPath a directory so writeFileSync to .tmp fails
+    assert.throws(() => writeForgeYaml(VALUES, [], out), /EISDIR|EEXIST|EPERM/);
+    // The .tmp must not survive the failure
+    assert.ok(!existsSync(out + ".tmp"), ".tmp file must be cleaned up on write failure");
+  });
+  it("leaves no stale .tmp after a successful write", () => {
+    const out = join(dir, "forge.yaml");
+    writeForgeYaml(VALUES, [], out);
+    assert.ok(existsSync(out), "forge.yaml must exist after write");
+    assert.ok(!existsSync(out + ".tmp"), ".tmp must be gone after successful write");
+  });
 });
 
 describe("backupExisting", () => {
@@ -466,6 +481,63 @@ describe("forge (Act II)", () => {
     assert.equal(res.skipped, 1);
     assert.match(w.text, /WARNING/);
   });
+
+  // forge#1527: the SubagentStop annotation-enforcement hook's trigger
+  // (`FORGE:PHASE_START` in the transcript) is never emitted anywhere in the
+  // pipeline, so it was dead code that always exited 0 with zero enforcement
+  // effect. `forge()` must no longer install it, and must clean up any prior
+  // installation.
+  it("does not install the SubagentStop annotation-enforcement hook", async () => {
+    const home = mkdtempSync(join(os.tmpdir(), "fd-forge-home7-"));
+    const forgeHome = mkdtempSync(join(os.tmpdir(), "fd-forge-src7-"));
+    mkdirSyncFs(join(forgeHome, "commands"), { recursive: true });
+    mkdirSyncFs(join(forgeHome, "bin", "hooks"), { recursive: true });
+    writeFileSync(join(forgeHome, "commands", "a.md"), "A", "utf-8");
+    writeFileSync(join(forgeHome, "bin", "hooks", "session-start.mjs"), "// hook", "utf-8");
+
+    const { ctx } = stubCtx({ home });
+    ctx.forgeHome = forgeHome;
+    const res = await forge(ctx);
+
+    assert.notEqual(res.subagentStopEnforceStatus, "installed");
+    const settings = JSON.parse(readFileSync(join(home, ".claude", "settings.json"), "utf-8"));
+    const subagentStop = settings.hooks?.SubagentStop ?? [];
+    assert.ok(!JSON.stringify(subagentStop).includes("subagent-stop-enforce.mjs"));
+  });
+
+  it("removes a previously installed SubagentStop annotation-enforcement hook", async () => {
+    const home = mkdtempSync(join(os.tmpdir(), "fd-forge-home8-"));
+    const forgeHome = mkdtempSync(join(os.tmpdir(), "fd-forge-src8-"));
+    mkdirSyncFs(join(forgeHome, "commands"), { recursive: true });
+    mkdirSyncFs(join(forgeHome, "bin", "hooks"), { recursive: true });
+    writeFileSync(join(forgeHome, "commands", "a.md"), "A", "utf-8");
+    writeFileSync(join(forgeHome, "bin", "hooks", "session-start.mjs"), "// hook", "utf-8");
+
+    // Pre-seed settings.json as if a prior install had registered the
+    // now-removed hook.
+    mkdirSyncFs(join(home, ".claude"), { recursive: true });
+    writeFileSync(
+      join(home, ".claude", "settings.json"),
+      JSON.stringify({
+        hooks: {
+          SubagentStop: [
+            { hooks: [{ type: "command", command: 'node "/fake/bin/hooks/subagent-stop-enforce.mjs"' }] },
+          ],
+        },
+      }),
+      "utf-8",
+    );
+
+    const { ctx, w } = stubCtx({ home });
+    ctx.forgeHome = forgeHome;
+    const res = await forge(ctx);
+
+    assert.equal(res.subagentStopEnforceStatus, "removed");
+    const settings = JSON.parse(readFileSync(join(home, ".claude", "settings.json"), "utf-8"));
+    const subagentStop = settings.hooks?.SubagentStop ?? [];
+    assert.ok(!JSON.stringify(subagentStop).includes("subagent-stop-enforce.mjs"));
+    assert.match(w.text, /SubagentStop enforcement hook removed/);
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -564,7 +636,8 @@ describe("celebrate (Act V)", () => {
     celebrate(ctx, { written: true, todoCount: 2, total: 24, hookStatus: "installed" });
     assert.match(w.text, /Forged\./);
     assert.match(w.text, /34s|3[0-9]s/);
-    assert.match(w.text, /work-on next/);
+    assert.match(w.text, /npx forgedock doctor/);
+    assert.match(w.text, /\/issue/);
     assert.match(w.text, /2/); // TODO count surfaces in the receipt
   });
 

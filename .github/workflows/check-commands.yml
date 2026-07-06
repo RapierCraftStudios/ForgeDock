@@ -4,18 +4,31 @@ on:
   pull_request:
     paths:
       - 'commands/**'
+      - 'docs/FORGE-PROTOCOL.md'
+      - 'docs/WORKFLOW.md'
+      - 'docs/site/command-reference.md'
       - 'scripts/check-native-conflicts.sh'
+      - 'scripts/check-protocol-restatements.sh'
+      - 'scripts/check-command-docs-drift.sh'
   push:
     branches:
       - staging
       - main
     paths:
       - 'commands/**'
+      - 'docs/FORGE-PROTOCOL.md'
+      - 'docs/WORKFLOW.md'
+      - 'docs/site/command-reference.md'
       - 'scripts/check-native-conflicts.sh'
+      - 'scripts/check-protocol-restatements.sh'
+      - 'scripts/check-command-docs-drift.sh'
 
 concurrency:
-  group: ${{ github.workflow }}-${{ github.sha }}
+  group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
+
+permissions:
+  contents: read
 
 jobs:
   check-native-conflicts:
@@ -27,6 +40,26 @@ jobs:
 
       - name: Check native command conflicts
         run: bash scripts/check-native-conflicts.sh commands/
+
+  check-protocol-restatements:
+    name: Protocol restatement check
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Check for FORGE protocol restatements in commands/
+        run: bash scripts/check-protocol-restatements.sh commands/ docs/
+
+  command-docs-drift:
+    name: Command / docs drift check
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Check that every installable spec is documented and every reference section has a spec
+        run: bash scripts/check-command-docs-drift.sh commands/ docs/site/command-reference.md
 
   banned-token-lint:
     name: Banned token lint

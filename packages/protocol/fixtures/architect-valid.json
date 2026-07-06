@@ -1,0 +1,9 @@
+{
+  "description": "ARCHITECT — complete implementation plan",
+  "input": "<!-- FORGE:ARCHITECT -->\n## Implementation Plan for #42\n\n### Affected Paths (ALL must be updated)\n| # | File | Function/Class | Change Required | Why |\n|---|------|----------------|-----------------|-----|\n| 1 | payments/validator.py | validate() | Add null guard | Prevent NPE |\n\n### Implementation Order\n1. Null guard in validate() — must be first\n\n<!-- FORGE:ARCHITECT:COMPLETE -->",
+  "expect": {
+    "type": "ARCHITECT",
+    "valid": true,
+    "sentinelState": "complete"
+  }
+}

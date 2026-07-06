@@ -609,6 +609,60 @@ describe("getToolHandlers", () => {
       else process.env.FORGEDOCK_SHELL = origShell;
     }
   });
+
+  // Regression: when a command exceeds maxBuffer (ENOBUFS) and elapsedMs is
+  // also >= timeoutMs, the buffer-overflow message must win over the timeout
+  // message. The ENOBUFS check must be ordered BEFORE the elapsedMs-based
+  // timedOut fallback in the code. (issue #1364)
+  //
+  // Scenario: 100-byte maxBuffer with a generous spawnSync timeout. The command
+  // fills the buffer quickly (ENOBUFS). We then verify that the elapsed-time
+  // guard does NOT override ENOBUFS — i.e., "buffer limit" is surfaced even
+  // though the elapsedMs condition would have fired if ENOBUFS were checked
+  // later.
+  //
+  // We cannot reliably manufacture elapsedMs >= timeoutMs in the same run while
+  // also getting ENOBUFS (spawnSync's own kill timer fires first when timeout is
+  // small, producing ETIMEDOUT instead of ENOBUFS). Instead we verify the code
+  // ordering invariant: the ENOBUFS branch runs first and throws, so the timedOut
+  // branch is never reached. The unit test for the ENOBUFS path (issue #1241)
+  // above already validates the "buffer limit" message. This test adds a check
+  // that ENOBUFS always beats the timeout regardless of which assertion fires.
+  it("run_bash ENOBUFS check fires before timedOut fallback — buffer-overflow always wins (issue #1364)", () => {
+    const origBuf = process.env.FORGEDOCK_MAX_BUFFER_BYTES;
+    // 100-byte buffer — 200-byte output guarantees ENOBUFS.
+    process.env.FORGEDOCK_MAX_BUFFER_BYTES = "100";
+    try {
+      const handlers = getToolHandlers(os.tmpdir());
+      // Run with the default (generous) timeout so ENOBUFS fires, not ETIMEDOUT.
+      // The assertion verifies the ENOBUFS branch ran — not the timedOut branch —
+      // which is only possible if ENOBUFS is checked before the elapsedMs guard.
+      assert.throws(
+        () =>
+          handlers.run_bash({
+            command: "node -e \"process.stdout.write('x'.repeat(200))\"",
+          }),
+        (err) => {
+          // Must name the buffer limit — proves ENOBUFS branch ran first.
+          assert.match(
+            err.message,
+            /buffer limit/i,
+            `ENOBUFS branch must run before timedOut — got: ${err.message}`,
+          );
+          assert.doesNotMatch(
+            err.message,
+            /timed out/i,
+            `timedOut branch must NOT fire for a buffer overflow — got: ${err.message}`,
+          );
+          return true;
+        },
+        "Expected ENOBUFS to produce 'buffer limit' error, not 'timed out'",
+      );
+    } finally {
+      if (origBuf === undefined) delete process.env.FORGEDOCK_MAX_BUFFER_BYTES;
+      else process.env.FORGEDOCK_MAX_BUFFER_BYTES = origBuf;
+    }
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -734,11 +788,11 @@ describe("renderDryRun / renderSummaryCard", () => {
       spec,
       systemPrompt: "x".repeat(42),
       userMessage: "Execute: /work-on 1151",
-      model: "claude-sonnet-4-5",
+      model: "claude-sonnet-5",
       maxIterations: 50,
     });
     assert.match(out, /\/work-on/);
-    assert.match(out, /claude-sonnet-4-5/);
+    assert.match(out, /claude-sonnet-5/);
     assert.match(out, /read_file, write_file, run_bash/);
     assert.match(out, /42 chars/);
     assert.match(out, /dry-run/);
@@ -754,6 +808,52 @@ describe("renderDryRun / renderSummaryCard", () => {
     assert.match(out, /\/work-on 1151/);
     assert.match(out, /iterations: 7/);
     assert.match(out, /end_turn/);
+  });
+
+  it("renderSummaryCard renders token usage when provided", () => {
+    const usage = {
+      input_tokens: 1200,
+      output_tokens: 340,
+      cache_creation_input_tokens: 500,
+      cache_read_input_tokens: 800,
+    };
+    const out = renderSummaryCard({
+      command: "work-on",
+      args: ["42"],
+      iterations: 3,
+      stopReason: "end_turn",
+      usage,
+    });
+    assert.match(out, /1200 in \/ 340 out/);
+    assert.match(out, /800 read \/ 500 write/);
+    assert.match(out, /FORGE:USAGE_JSON:/);
+    // Verify JSON line is parseable and matches the usage object
+    const jsonLine = out.split("\n").find((l) => l.startsWith("FORGE:USAGE_JSON:"));
+    const parsed = JSON.parse(jsonLine.slice("FORGE:USAGE_JSON:".length));
+    assert.deepStrictEqual(parsed, usage);
+  });
+
+  it("renderSummaryCard renders N/A when usage is null (dry-run)", () => {
+    const out = renderSummaryCard({
+      command: "work-on",
+      args: ["42"],
+      iterations: 0,
+      stopReason: "dry-run",
+      usage: null,
+    });
+    assert.match(out, /tokens:.*N\/A/);
+    assert.ok(!out.includes("FORGE:USAGE_JSON:"), "should not emit JSON line when usage is null");
+  });
+
+  it("renderSummaryCard defaults usage to null when omitted", () => {
+    const out = renderSummaryCard({
+      command: "work-on",
+      args: [],
+      iterations: 1,
+      stopReason: "end_turn",
+    });
+    assert.match(out, /tokens:.*N\/A/);
+    assert.ok(!out.includes("FORGE:USAGE_JSON:"));
   });
 });
 
@@ -804,5 +904,18 @@ describe("runCommand", () => {
       }),
       (err) => err.code === "UNKNOWN_COMMAND",
     );
+  });
+
+  it("dry-run result has no usage field", async () => {
+    const result = await runCommand({
+      commandsDir: COMMANDS_DIR,
+      commandName: "work-on",
+      args: ["1151"],
+      cwd: TMP,
+      dryRun: true,
+      logger: { log() {} },
+    });
+    assert.equal(result.status, "dry-run");
+    assert.equal(result.usage, undefined, "dry-run should not include usage");
   });
 });

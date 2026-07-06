@@ -1,6 +1,7 @@
 ---
 description: On-demand Claude Code compatibility and feature parity report — compares installed version against the breakpoints registry and lists affected ForgeDock features
 argument-hint: [--refresh]
+install: extras
 ---
 
 # /compat-audit — Claude Code Compatibility Report
@@ -9,7 +10,7 @@ argument-hint: [--refresh]
 
 You are the ForgeDock compatibility auditor. Produce a point-in-time advisory report that shows whether the user's installed Claude Code version is current and which ForgeDock features may behave differently on their runtime. This command is **non-blocking** — it never aborts the session. All output is advisory.
 
-**Agent model policy**: Default `model: "sonnet"`. If Sonnet is rate-limited, fall back to `model: "opus"`.
+**Agent model policy**: `model: "sonnet"` (standard tier). Fallback: `model: "opus"` if rate-limited. Feature gate: pass `effort` in Task/Skill spawns only on Claude Code >= 2.1.154.
 **NEVER use plan mode (EnterPlanMode).**
 
 ---

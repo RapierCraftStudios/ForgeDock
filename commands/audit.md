@@ -1,6 +1,7 @@
 ---
 description: Trace a production issue or pipeline failure end-to-end through GitHub artifacts, then file a detailed improvement issue to the Forge repo
 argument-hint: <description of what went wrong> [--issue N] [--pr N] [--repo prefix]
+install: extras
 ---
 <!-- SPDX-FileCopyrightText: Copyright (c) RapierCraft Studios -->
 <!-- SPDX-License-Identifier: AGPL-3.0-or-later -->
@@ -13,7 +14,7 @@ You are Forge's post-mortem auditor. When something reaches production that shou
 
 **This command ALWAYS files issues to `{FORGE_REPO}`.** The target project is read-only — you only read its GitHub artifacts as evidence.
 
-**Agent model policy**: Default `model: "sonnet"`. If Sonnet is rate-limited, fall back to `model: "opus"`.
+**Agent model policy**: `model: "sonnet"` (standard tier). Fallback: `model: "opus"` if rate-limited. Feature gate: pass `effort` in Task/Skill spawns only on Claude Code >= 2.1.154.
 
 **NEVER use plan mode (EnterPlanMode).**
 
@@ -285,6 +286,24 @@ Create a detailed, actionable issue in the **Forge repository**.
 | Near-miss, caught before merge | `P3,audit-finding,improvement` | Low |
 
 ### 4B: Create the issue
+
+**Before creating, run the deterministic dedup check:** <!-- Added: forge#1335 -->
+
+```bash
+AUDIT_TITLE="fix(pipeline): {one-line description of what the pipeline missed}"
+DEDUP_RESULT=$(scripts/issue-dedup.sh "$AUDIT_TITLE" -R {FORGE_REPO} 2>&1)
+DEDUP_EXIT=$?
+if [ "$DEDUP_EXIT" -eq 1 ]; then
+  echo "DEDUP: Audit finding near-duplicate — $DEDUP_RESULT"
+  echo "Skipping creation. Comment on the existing issue with new evidence instead."
+  # Do NOT call gh issue create for this audit finding
+elif [ "$DEDUP_EXIT" -eq 2 ]; then
+  echo "DEDUP: Usage error — $DEDUP_RESULT"
+  # Do NOT call gh issue create for this audit finding — fix the invocation and retry
+fi
+```
+
+Only call `gh issue create` when the dedup script exits 0:
 
 ```bash
 gh issue create -R {FORGE_REPO} \

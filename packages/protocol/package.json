@@ -1,0 +1,45 @@
+{
+  "name": "@forgedock/protocol",
+  "version": "1.0.0",
+  "description": "Parse, validate, and emit FORGE annotation protocol v1.0 annotations. MIT-licensed reference implementation.",
+  "type": "module",
+  "main": "./src/index.js",
+  "exports": {
+    ".": "./src/index.js"
+  },
+  "bin": {
+    "forge-protocol-conformance": "./src/cli.js"
+  },
+  "scripts": {
+    "test": "node --test \"test/**/*.test.mjs\"",
+    "conformance": "node src/cli.js fixtures/"
+  },
+  "keywords": [
+    "forge-protocol",
+    "forge-annotation",
+    "annotation",
+    "forgedock",
+    "ai-agents",
+    "validation",
+    "parser"
+  ],
+  "author": "RapierCraft Studios",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/RapierCraftStudios/ForgeDock.git",
+    "directory": "packages/protocol"
+  },
+  "homepage": "https://github.com/RapierCraftStudios/ForgeDock/tree/main/packages/protocol",
+  "bugs": {
+    "url": "https://github.com/RapierCraftStudios/ForgeDock/issues"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "files": [
+    "src/",
+    "fixtures/",
+    "LICENSE"
+  ]
+}

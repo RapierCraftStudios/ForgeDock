@@ -1,0 +1,6 @@
+{
+  "_comment": "ForgeDock check-registry manifest — promoted checks from recurring review findings.",
+  "_version": "1",
+  "_docs": "See scripts/check-registry/README.md for the full specification.",
+  "checks": []
+}

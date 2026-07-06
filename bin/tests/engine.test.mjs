@@ -208,4 +208,103 @@ describe("runIssue", () => {
     assert.deepEqual(s.committed, ["investigate", "context", "architect", "build", "review", "close"]);
     assert.equal(s.issue, 42);
   });
+
+  it("R1: context.reconcile short-circuits when FORGE:CONTEXT already present (no LLM re-run)", async () => {
+    // Crash-injection: simulate a resume where context already completed (FORGE:CONTEXT present)
+    // but only investigate is in the committed list. context.reconcile should fire and skip the LLM.
+    const { w, io } = fakeWorld();
+    w.markers = " INVESTIGATION:COMPLETE FORGE:CONTEXT";
+    const runCounts = {};
+
+    // Pre-populate local log with investigate committed (crash happened after context LLM ran
+    // and posted its marker, but before PHASE_COMMIT was written).
+    const { appendEvent } = await import("../engine/runlog.mjs");
+    appendEvent(dir, 42, { event: "RUN_START", issue: 42, run: "r_42_staging", lane: "staging" });
+    appendEvent(dir, 42, { event: "PHASE_COMMIT", phase: "investigate", outputs: {} });
+
+    const script = {
+      "work-on/build/architect": () => { w.markers += " FORGE:ARCHITECT"; },
+      "work-on/build": () => { w.markers += " FORGE:BUILDER:COMPLETE"; w.commitsAhead = 2; },
+      "work-on/review": () => { w.pr = 7; w.prMerged = true; },
+      "work-on/close": () => { w.issueState = "CLOSED"; },
+    };
+    const runner = async ({ commandName }) => {
+      runCounts[commandName] = (runCounts[commandName] || 0) + 1;
+      script[commandName]?.();
+      return { status: "complete" };
+    };
+
+    const res = await runIssue({ issue: 42, dir, agentId: "a1", lane: "staging",
+      io, runner, now: () => 1000, maxAttempts: 3 });
+
+    assert.equal(res.terminalReason, "merged");
+    assert.equal(runCounts["work-on/build/context"] || 0, 0, "context must not re-run when FORGE:CONTEXT present");
+    const s = deriveState(readLog(dir, 42));
+    assert.ok(s.committed.includes("context"), "context must be in committed after reconcile");
+  });
+
+  it("R2: architect.reconcile short-circuits when FORGE:ARCHITECT already present (no LLM re-run)", async () => {
+    // Crash-injection: resume where architect already completed (FORGE:ARCHITECT present)
+    // but only investigate+context are committed. architect.reconcile should fire and skip LLM.
+    const { w, io } = fakeWorld();
+    w.markers = " INVESTIGATION:COMPLETE FORGE:CONTEXT FORGE:ARCHITECT";
+    const runCounts = {};
+
+    const { appendEvent } = await import("../engine/runlog.mjs");
+    appendEvent(dir, 42, { event: "RUN_START", issue: 42, run: "r_42_staging", lane: "staging" });
+    appendEvent(dir, 42, { event: "PHASE_COMMIT", phase: "investigate", outputs: {} });
+    appendEvent(dir, 42, { event: "PHASE_COMMIT", phase: "context", outputs: {} });
+
+    const script = {
+      "work-on/build": () => { w.markers += " FORGE:BUILDER:COMPLETE"; w.commitsAhead = 2; },
+      "work-on/review": () => { w.pr = 7; w.prMerged = true; },
+      "work-on/close": () => { w.issueState = "CLOSED"; },
+    };
+    const runner = async ({ commandName }) => {
+      runCounts[commandName] = (runCounts[commandName] || 0) + 1;
+      script[commandName]?.();
+      return { status: "complete" };
+    };
+
+    const res = await runIssue({ issue: 42, dir, agentId: "a1", lane: "staging",
+      io, runner, now: () => 1000, maxAttempts: 3 });
+
+    assert.equal(res.terminalReason, "merged");
+    assert.equal(runCounts["work-on/build/architect"] || 0, 0, "architect must not re-run when FORGE:ARCHITECT present");
+    const s = deriveState(readLog(dir, 42));
+    assert.ok(s.committed.includes("architect"), "architect must be in committed after reconcile");
+  });
+
+  it("R3: close.reconcile short-circuits when issue already closed (no LLM re-run)", async () => {
+    // Crash-injection: resume where close already ran (issue CLOSED) but only
+    // investigate+context+architect+build+review are committed. close.reconcile should fire.
+    const { w, io } = fakeWorld();
+    w.markers = " INVESTIGATION:COMPLETE FORGE:CONTEXT FORGE:ARCHITECT FORGE:BUILDER:COMPLETE";
+    w.commitsAhead = 2;
+    w.pr = 7;
+    w.prMerged = true;
+    w.issueState = "CLOSED";
+    const runCounts = {};
+
+    const { appendEvent } = await import("../engine/runlog.mjs");
+    appendEvent(dir, 42, { event: "RUN_START", issue: 42, run: "r_42_staging", lane: "staging" });
+    appendEvent(dir, 42, { event: "PHASE_COMMIT", phase: "investigate", outputs: {} });
+    appendEvent(dir, 42, { event: "PHASE_COMMIT", phase: "context", outputs: {} });
+    appendEvent(dir, 42, { event: "PHASE_COMMIT", phase: "architect", outputs: {} });
+    appendEvent(dir, 42, { event: "PHASE_COMMIT", phase: "build", outputs: { branch: "fix/pipeline-42" } });
+    appendEvent(dir, 42, { event: "PHASE_COMMIT", phase: "review", outputs: { pr: 7 } });
+
+    const runner = async ({ commandName }) => {
+      runCounts[commandName] = (runCounts[commandName] || 0) + 1;
+      return { status: "complete" };
+    };
+
+    const res = await runIssue({ issue: 42, dir, agentId: "a1", lane: "staging",
+      io, runner, now: () => 1000, maxAttempts: 3 });
+
+    assert.equal(res.terminalReason, "merged");
+    assert.equal(runCounts["work-on/close"] || 0, 0, "close must not re-run when issue already CLOSED");
+    const s = deriveState(readLog(dir, 42));
+    assert.ok(s.committed.includes("close"), "close must be in committed after reconcile");
+  });
 });

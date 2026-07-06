@@ -1,0 +1,9 @@
+{
+  "description": "BUILDER — missing FORGE:BUILDER:COMPLETE sentinel",
+  "input": "<!-- FORGE:BUILDER -->\n## Implementation Complete\n\n**Branch**: `fix/null-billing-profile-128`\n**Commits**: a1b2c3d\n**Files changed**: 2",
+  "expect": {
+    "type": "BUILDER",
+    "valid": false,
+    "sentinelState": "interrupted"
+  }
+}

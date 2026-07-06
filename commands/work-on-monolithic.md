@@ -12,8 +12,13 @@ install: internal
 
 Orchestrator for the full issue lifecycle: investigate → build → review → merge → close. GitHub issues are the persistent context layer — read existing comments before starting, write structured reports back, use `workflow:*` labels to track state.
 
-**Agent model policy**: Default `model: "sonnet"`. Fallback: `model: "opus"` if Sonnet is rate-limited.
+**Agent model policy**: `model: "sonnet"` (standard tier). Fallback: `model: "opus"` if rate-limited. Feature gate: pass `effort` in Task/Skill spawns only on Claude Code >= 2.1.154.
 **NEVER use plan mode (EnterPlanMode).**
+
+> **Relationship to `/work-on` (canonical path)**: This file is a `[BENCHMARK]` reference variant. It documents the same inline-execution model that `/work-on` Phase 3 and `work-on/build.md` use as their **default** for STANDARD/fast-lane issues — all build sub-phases (context → architect → implement → validate) run inline in the current context window with no `Skill()` sub-agent spawns. The difference is that this file omits the worktree lifecycle, `FORGE:CONTRACT` posting, and the Spawn-Decision exception path for large builds. Use `/work-on` for production runs; use this file for baseline benchmarking or when comparing single-prompt token cost against the modular path. See `work-on/build.md` (Canonical Build Path section) for the reconciled build topology. <!-- Added: forge#1276 -->
+**NEVER use the Agent tool** — this spec executes all phases inline as a single monolithic prompt. The Agent tool would spawn a subprocess outside this context, breaking the single-prompt contract and losing all accumulated pipeline state.
+
+<!-- FORGE:SPEC_LOADED — work-on-monolithic.md loaded and active. Agent is bound by this spec. -->
 
 ### Compaction Resilience
 
@@ -65,7 +70,7 @@ gh api repos/{GH_REPO}/issues/{NUMBER}/comments --jq '.[] | {id: .id, author: .u
 
 **Check**: state (closed → STOP), terminal labels (`workflow:merged`/`workflow:invalid` → STOP), existing agent comments (`FORGE:INVESTIGATOR`, `FORGE:CONTRACT`, `FORGE:BUILDER`, `FORGE:TRAJECTORY`), parent tracker status.
 
-**Determine resume point**: No comments → Phase 1. Investigation exists + ready-to-build → Phase 3. Builder + no PR → Phase 4. Builder + PR open → Phase 5. PR merged + issue open → close issue.
+**Determine resume point**: No comments → Phase 1. Investigation exists + ready-to-build → Phase 3. Builder:COMPLETE + no PR → Phase 4. Builder without :COMPLETE (partial/interrupted build) + no PR → Phase 3 (partial-build cleanup). Builder + PR open → Phase 5. PR merged + issue open → close issue.
 
 **Classify lane**: Milestone → feature lane (`milestone/{slug}`). No milestone → fast lane (`staging`).
 

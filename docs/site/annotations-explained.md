@@ -50,6 +50,30 @@ Affected: bin/forgedock.mjs
 
 Read them whenever you want visibility into what your agents are doing. That's the whole point: the work is transparent and auditable, right there in GitHub.
 
+## Attribution Footers (Opt-In)
+
+ForgeDock can optionally append a small attribution line to pipeline-created PRs and visible annotation comments. This is the same mechanic used by Dependabot, Renovate, and CodeRabbit to grow through public repos — consentful and single-key opt-out.
+
+**`attribution.pr_footer: true`** — every pipeline-created PR ends with one muted footer:
+
+```
+> Orchestrated with ForgeDock — state, scheduling, review, and memory on GitHub.
+```
+
+**`attribution.annotation_link: true`** — visible (human-readable) annotation comments in the GitHub UI carry a small "Pipeline powered by ForgeDock" link at the end. Machine-readable `<!-- FORGE:... -->` HTML comments are never modified, regardless of this setting.
+
+Both keys default to disabled. The recommended configuration for public repos is to enable both; for private repos, leave both off.
+
+To configure, add an `attribution:` section to your `forge.yaml`:
+
+```yaml
+attribution:
+  pr_footer: true        # append footer to pipeline-created PRs
+  annotation_link: true  # append link to visible annotation comments
+```
+
+To opt out entirely, set both to `false` or omit the section. No commit messages, git trailers, or machine-readable annotations are ever modified — this applies to PR bodies and visible comments only.
+
 ## Want the Technical Details?
 
 If you're building your own agent pipeline or contributing to ForgeDock, the full machine-readable format — every annotation type, completion markers, and parsing rules — is documented in the [FORGE Annotation Protocol](./forge-annotation-protocol.md).

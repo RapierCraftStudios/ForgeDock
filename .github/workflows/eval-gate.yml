@@ -1,0 +1,261 @@
+name: Pipeline Eval Gate
+
+# Wires the eval harness (#1285) into CI so that substantive commands/ changes
+# trigger an automated subset regression run, and a full corpus run is available
+# on demand or on model release. (#1286)
+#
+# Trigger rules:
+#   pull_request / push:  subset run, path-gated to substantive commands/ changes
+#   workflow_dispatch:    full corpus run (on demand / model release)
+#
+# Substantive change definition (eval-classify-diff.sh):
+#   A diff is non-substantive (skips the eval run) when EVERY changed line in
+#   commands/ is one of: blank, comment (<!-- ... -->), markdown heading (#),
+#   or a line that only changes whitespace. Prose edits to instructions are
+#   substantive and trigger the eval.
+#
+# Baseline storage decision (documented here for auditability):
+#   The "last known-good" scorecard is stored as a committed JSON file at
+#   scripts/eval-gate-baseline.json. Rationale:
+#   - Committed JSON is auditable: every baseline update appears in git blame/log.
+#   - No external storage (GH cache, release asset) is needed, keeping the gate
+#     dependency-free and reproducible from a cold clone.
+#   - The baseline file is updated manually (or by a post-merge bot step) after a
+#     deliberate improvement is confirmed. This is a conscious human gate: you
+#     must explicitly bump the baseline, the pipeline does not auto-ratchet.
+#   - See docs/design/eval-gate-runbook.md §Baseline for the update procedure.
+#
+# Regression threshold: 5 percentage points (defined in eval-gate-scorecard.mjs).
+# Rate assertion is skipped for subset runs with n < 8 to avoid false positives
+# from natural variance on small corpora (see scorecard script for full rationale).
+
+on:
+  pull_request:
+    paths:
+      - 'commands/**'
+  push:
+    branches:
+      - staging
+      - main
+    paths:
+      - 'commands/**'
+  workflow_dispatch:
+    inputs:
+      run_mode:
+        description: 'Run mode: subset (fast) or full (complete corpus)'
+        required: false
+        default: 'full'
+        type: choice
+        options:
+          - full
+          - subset
+
+concurrency:
+  group: eval-gate-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  # ---------------------------------------------------------------------------
+  # Job 1 (PR / push only): classify the diff to skip non-substantive changes.
+  # ---------------------------------------------------------------------------
+  classify-diff:
+    name: Classify commands/ diff
+    runs-on: ubuntu-latest
+    if: github.event_name != 'workflow_dispatch'
+    outputs:
+      substantive: ${{ steps.classify.outputs.substantive }}
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Classify commands/ diff
+        id: classify
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          PUSH_BEFORE_SHA: ${{ github.event.before }}
+        run: |
+          # Determine the base ref to diff against.
+          if [ "$EVENT_NAME" = "pull_request" ]; then
+            BASE_SHA="$PR_BASE_SHA"
+          else
+            # push: diff against the previous commit on the branch
+            BASE_SHA="$PUSH_BEFORE_SHA"
+          fi
+
+          echo "Diffing commands/ from $BASE_SHA to HEAD"
+
+          # Get all changed lines in commands/**  (added/removed, not context lines).
+          DIFF_LINES=$(git diff "$BASE_SHA" HEAD -- 'commands/**' 2>/dev/null | grep '^[+-]' | grep -v '^[+-][+-][+-]' || true)
+
+          if [ -z "$DIFF_LINES" ]; then
+            echo "No commands/ lines changed — skipping eval run"
+            echo "substantive=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          # Strip lines that are:
+          #   - blank (or only whitespace)
+          #   - HTML comments  <!-- ... -->
+          #   - Markdown headings  # ...
+          #   - Lines that only differ in leading/trailing whitespace
+          # If anything substantive remains, the diff is substantive.
+          SUBSTANTIVE=$(echo "$DIFF_LINES" | \
+            grep -v '^[+-][[:space:]]*$' | \
+            grep -v '^[+-][[:space:]]*<!--' | \
+            grep -v '^[+-][[:space:]]*#' | \
+            grep -v '^[+-]>>' | \
+            cat || true)
+
+          if [ -z "$SUBSTANTIVE" ]; then
+            echo "Only non-substantive changes (comments, headings, blank lines) — skipping eval run"
+            echo "substantive=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "Substantive commands/ changes detected — eval run required"
+            echo "substantive=true" >> "$GITHUB_OUTPUT"
+          fi
+
+  # ---------------------------------------------------------------------------
+  # Job 2: Subset eval run (triggered by substantive PR/push diff).
+  # ---------------------------------------------------------------------------
+  eval-subset:
+    name: Pipeline eval — subset run
+    runs-on: ubuntu-latest
+    needs: [classify-diff]
+    if: |
+      needs.classify-diff.outputs.substantive == 'true'
+    permissions:
+      contents: read
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Use Node.js 24
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24
+
+      - name: Install dependencies
+        run: npm ci --ignore-scripts
+
+      - name: Run subset eval harness
+        id: eval
+        run: |
+          # The eval harness (#1285) writes a scorecard to stdout and exits non-zero
+          # on harness-level failure (not pipeline regression — that's the gate's job).
+          # We capture the scorecard JSON and feed it to the gate aggregator.
+          #
+          # Expected invocation once #1285 ships:
+          #   node scripts/eval-harness-runner.mjs --mode subset --output scorecard.json
+          #
+          # Until #1285 is complete, this step stubs the harness call so CI is
+          # wired end-to-end and the gate logic can be validated independently.
+          # The stub emits a scorecard that matches the committed baseline, so the
+          # gate passes in CI without live API calls.
+          if [ -f "scripts/eval-harness-runner.mjs" ]; then
+            node scripts/eval-harness-runner.mjs --mode subset --output scorecard.json
+          else
+            echo "eval-harness-runner.mjs not yet present (#1285) — emitting stub scorecard for gate wiring validation"
+            # Stub: mirrors the committed baseline so the gate passes.
+            node -e "
+              const baseline = JSON.parse(require('fs').readFileSync('scripts/eval-gate-baseline.json', 'utf8'));
+              const stub = {
+                ...baseline,
+                run_id: 'ci-stub-' + Date.now(),
+                generated_at: new Date().toISOString(),
+                run_mode: 'subset',
+                spec_sha: process.env.GITHUB_SHA || null,
+                _note: 'Stub scorecard: eval-harness-runner.mjs not yet present (#1285). Remove once harness lands.'
+              };
+              require('fs').writeFileSync('scorecard.json', JSON.stringify(stub, null, 2) + '\n');
+              console.log('Stub scorecard written to scorecard.json');
+            "
+          fi
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          GITHUB_SHA: ${{ github.sha }}
+
+      - name: Run eval regression gate
+        run: |
+          node scripts/eval-gate-scorecard.mjs scorecard.json scripts/eval-gate-baseline.json
+
+      - name: Upload scorecard artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: eval-scorecard-subset-${{ github.sha }}
+          path: scorecard.json
+          retention-days: 30
+
+  # ---------------------------------------------------------------------------
+  # Job 3: Full corpus eval run (workflow_dispatch only).
+  # ---------------------------------------------------------------------------
+  eval-full:
+    name: Pipeline eval — full corpus run
+    runs-on: ubuntu-latest
+    if: github.event_name == 'workflow_dispatch'
+    permissions:
+      contents: read
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Use Node.js 24
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24
+
+      - name: Install dependencies
+        run: npm ci --ignore-scripts
+
+      - name: Determine run mode
+        id: mode
+        env:
+          RUN_MODE_INPUT: ${{ github.event.inputs.run_mode }}
+        run: |
+          echo "run_mode=${RUN_MODE_INPUT:-full}" >> "$GITHUB_OUTPUT"
+
+      - name: Run full eval harness
+        id: eval
+        run: |
+          MODE="$RUN_MODE"
+          echo "Running eval harness in mode: $MODE"
+          if [ -f "scripts/eval-harness-runner.mjs" ]; then
+            node scripts/eval-harness-runner.mjs --mode "$MODE" --output scorecard.json
+          else
+            echo "eval-harness-runner.mjs not yet present (#1285) — emitting stub scorecard"
+            node -e "
+              const baseline = JSON.parse(require('fs').readFileSync('scripts/eval-gate-baseline.json', 'utf8'));
+              const stub = {
+                ...baseline,
+                run_id: 'ci-stub-full-' + Date.now(),
+                generated_at: new Date().toISOString(),
+                run_mode: process.env.RUN_MODE || 'full',
+                spec_sha: process.env.GITHUB_SHA || null,
+                _note: 'Stub scorecard: eval-harness-runner.mjs not yet present (#1285). Remove once harness lands.'
+              };
+              require('fs').writeFileSync('scorecard.json', JSON.stringify(stub, null, 2) + '\n');
+              console.log('Stub scorecard written to scorecard.json');
+            "
+          fi
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          GITHUB_SHA: ${{ github.sha }}
+          RUN_MODE: ${{ steps.mode.outputs.run_mode }}
+
+      - name: Run eval regression gate
+        run: |
+          node scripts/eval-gate-scorecard.mjs scorecard.json scripts/eval-gate-baseline.json
+
+      - name: Upload scorecard artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: eval-scorecard-full-${{ github.sha }}
+          path: scorecard.json
+          retention-days: 90

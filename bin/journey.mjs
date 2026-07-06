@@ -9,7 +9,7 @@
  *   init-detect.mjs, init-enrich-api.mjs, tui.annotatedReviewScreen, registry.mjs
  */
 
-import { existsSync, readFileSync, writeFileSync, renameSync } from "fs";
+import { existsSync, readFileSync, writeFileSync, renameSync, unlinkSync } from "fs";
 import { join, basename } from "path";
 
 // ---------------------------------------------------------------------------
@@ -114,7 +114,17 @@ branches:
 #   health_patterns:
 #     - '"status": "ok"'
 `;
-  writeFileSync(outputPath, content, "utf-8");
+  // Atomic write: write to a temp file first, then rename into place.
+  // If the write fails (e.g. ENOSPC), the original file is untouched and
+  // any partial .tmp is cleaned up — no corrupt or missing forge.yaml.
+  const tmpPath = outputPath + ".tmp";
+  try {
+    writeFileSync(tmpPath, content, "utf-8");
+    renameSync(tmpPath, outputPath);
+  } catch (err) {
+    try { unlinkSync(tmpPath); } catch { /* best-effort cleanup */ }
+    throw err;
+  }
   const todoCount = (content.match(/# TODO\(forgedock:/g) || []).length;
   return { todoCount };
 }
@@ -349,7 +359,12 @@ export async function preflight(ctx) {
 
 import { mkdir, symlink, readlink, lstat, readdir, rename, copyFile, readFile, writeFile, unlink } from "fs/promises";
 import { relative, dirname as pathDirname } from "path";
-import { installSessionStartHook } from "./settings-hook.mjs";
+import {
+  installSessionStartHook,
+  installSubagentStopHook,
+  installPreToolUseHook,
+  removeSubagentStopEnforceHook,
+} from "./settings-hook.mjs";
 
 /**
  * Parse the `install:` tier from a command spec's YAML frontmatter block.
@@ -361,7 +376,7 @@ import { installSessionStartHook } from "./settings-hook.mjs";
  *
  * Tier values:
  *   'core'     — install for all users (default when key is absent or on any error)
- *   'extras'   — opt-in, not yet installed by default (reserved for #1257)
+ *   'extras'   — opt-in, not installed by default; use `npx forgedock install --extras` (#1257)
  *   'internal' — ForgeDock development only; never installed to user machines
  *
  * Fail-open: any read error, malformed frontmatter, or unrecognised value falls
@@ -407,22 +422,27 @@ export function parseInstallTier(filePath) {
  * Files with `install: internal` in their YAML frontmatter are excluded — they
  * are ForgeDock-development-only specs that must never reach user machines.
  * Files with `install: core` (or no `install:` key) are included. Files with
- * `install: extras` are excluded from the default install surface (reserved for
- * the opt-in extras mechanism tracked in #1257).
+ * `install: extras` are excluded from the default install surface; they are
+ * available via `npx forgedock install --extras` (implemented in #1257).
+ *
+ * @param {string} dir - Directory to search recursively.
+ * @param {{ includeExtras?: boolean }} [opts] - Options.
+ *   includeExtras: when true, also include `install: extras` specs (opt-in tier).
  */
-export async function findMarkdownFiles(dir) {
+export async function findMarkdownFiles(dir, opts = {}) {
+  const { includeExtras = false } = opts;
   const results = [];
   const entries = await readdir(dir, { withFileTypes: true });
   for (const entry of entries) {
     const full = join(dir, entry.name);
     if (entry.isDirectory()) {
-      results.push(...(await findMarkdownFiles(full)));
+      results.push(...(await findMarkdownFiles(full, opts)));
     } else if (entry.name.endsWith(".md")) {
       const tier = parseInstallTier(full);
-      if (tier === "core") {
+      if (tier === "core" || (includeExtras && tier === "extras")) {
         results.push(full);
       }
-      // 'internal' and 'extras' are excluded from the default install surface
+      // 'internal' is always excluded from the install surface
     }
   }
   return results.sort();
@@ -473,7 +493,7 @@ export async function forge(ctx) {
   const manifest = await loadCopiedManifest(manifestPath);
   let manifestChanged = false;
 
-  const files = await findMarkdownFiles(commandsDir);
+  const files = await findMarkdownFiles(commandsDir, { includeExtras: !!ctx.includeExtras });
   let installed = 0, updated = 0, skipped = 0, copied = 0;
   const barWidth = 24;
   let barShown = false;
@@ -595,6 +615,23 @@ export async function forge(ctx) {
   const settingsPath = join(ctx.home, ".claude", "settings.json");
   const { status: hookStatus } = installSessionStartHook(settingsPath, hookScript);
 
+  // Install enforcement hooks (#1250): PreToolUse (branch/label validation)
+  // and SubagentStop interactive engine adapter. Both are idempotent and
+  // always installed (fail-open if settings.json is malformed, same
+  // contract as SessionStart hook).
+  const preToolUseScript = join(ctx.forgeHome, "bin", "hooks", "pre-tool-use.mjs");
+  const subagentStopScript = join(ctx.forgeHome, "bin", "hooks", "interactive-engine.mjs");
+  const { status: preToolUseStatus } = installPreToolUseHook(settingsPath, preToolUseScript);
+  installSubagentStopHook(settingsPath, subagentStopScript);
+
+  // SubagentStop annotation-verifier hook (#1250) is NOT installed: its
+  // trigger condition (a `FORGE:PHASE_START` marker in the transcript) is
+  // never emitted anywhere in the pipeline, so it always exits 0 with zero
+  // enforcement effect while still spawning a process + reading the
+  // transcript on every SubagentStop (forge#1527). Actively clean up any
+  // prior installation instead of installing it.
+  const { status: subagentStopEnforceStatus } = removeSubagentStopEnforceHook(settingsPath);
+
   // Housekeeping — must never abort the receipt or the hook.
   let manifestSaveFailed = false;
   if (manifestChanged) {
@@ -624,7 +661,23 @@ export async function forge(ctx) {
     w.write(`  ${glyph(true)} SessionStart hook ${hookStatus === "already" ? "active" : "registered"} ${dimLine(ctx, settingsPath)}\n`);
   }
 
-  return { installed, updated, skipped, copied, total: files.length, hookStatus };
+  // Report enforcement hook status.
+  if (preToolUseStatus !== null) {
+    w.write(`  ${glyph(true)} PreToolUse enforcement hook ${preToolUseStatus === "already" ? "active" : "registered"} ${dimLine(ctx, "(branch/label enforcement)")}\n`);
+  } else {
+    w.write("  " + dimLine(ctx, "PreToolUse hook skipped — requires Claude Code v2.1.163+") + "\n");
+  }
+  // "skipped-malformed" and "absent" are intentionally silent here:
+  // - skipped-malformed: installSessionStartHook() above reads the same
+  //   settingsPath and already prints the malformed-JSON fix-card, so a
+  //   second message would just repeat the same signal.
+  // - absent: the expected steady state (nothing to remove) — this
+  //   function only reports state *changes*, not no-ops.
+  if (subagentStopEnforceStatus === "removed") {
+    w.write(`  ${glyph(true)} SubagentStop enforcement hook removed ${dimLine(ctx, "(non-functional — see forge#1527)")}\n`);
+  }
+
+  return { installed, updated, skipped, copied, total: files.length, hookStatus, preToolUseStatus, subagentStopEnforceStatus };
 }
 
 // ---------------------------------------------------------------------------
@@ -744,11 +797,16 @@ export function celebrate(ctx, summary) {
     w.write(`  ${glyph} ${summary.total} commands · hook ${summary.hookStatus === "skipped-malformed" ? "skipped" : "active"}   ${dimLine(ctx, hookNote)}\n`);
   }
   w.write("\n");
+  if (summary.isMinimal) {
+    w.write("  " + dimLine(ctx, "see docs/CONFIG.md for optional sections") + "\n");
+  }
   w.write(
     box(
       [
-        `  1. open claude in this repo`,
-        `  2. run /work-on next — watch an issue become a merged PR`,
+        `  1. run npx forgedock labels setup — bootstrap GitHub labels`,
+        `  2. run npx forgedock doctor     — verify the install is green`,
+        `  3. open claude in this repo`,
+        `  4. run /issue <title> then /work-on <number>`,
       ],
       { title: "what's next" },
     ),

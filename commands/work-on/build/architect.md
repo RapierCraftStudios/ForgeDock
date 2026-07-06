@@ -11,6 +11,11 @@ argument-hint: [issue number] [--repo GH_REPO] [--gh-flag GH_FLAG] [--files AFFE
 **Time budget**: Max 3 minutes. Skip any file read that times out.
 **Output**: Post `<!-- FORGE:ARCHITECT -->` comment on the issue, then return structured plan to caller.
 
+**Agent model policy**: `model: "sonnet"`, `effort: xhigh` (deep tier — full code-path tracing, multi-file architecture planning). Fallback: `model: "opus"` if rate-limited. Feature gate: pass `effort` only on Claude Code >= 2.1.154.
+**NEVER use plan mode (EnterPlanMode).**
+
+<!-- FORGE:SPEC_LOADED — work-on/build/architect.md loaded and active. Agent is bound by this spec. -->
+
 ---
 
 ## COMPLEXITY_BAND Guard (check BEFORE all phases)
@@ -50,6 +55,7 @@ Parse from $ARGUMENTS:
 Also read from the calling context (in-memory, passed by parent agent):
 - `{INVESTIGATION_REPORT}` — full text of FORGE:INVESTIGATOR comment
 - `{CONTEXT_BRIEFING}` — full text of FORGE:CONTEXT comment (empty string if context step was skipped)
+- `{MEMORY_PRIORS}` — structured prior run blocks emitted by investigate Phase 0.5 (empty string if no priors found or investigate predates memory). When non-empty, treat each `[MEMORY PRIOR]` block as a high-confidence prior: if any prior's affected files overlap with the current plan's affected files, explicitly note the prior's root cause and key lesson in the FORGE:ARCHITECT comment's **Prior Run Priors** section (add this section after **Context Briefing** when priors exist). <!-- Added: forge#1316 -->
 
 If any of these are not passed directly, read them from GitHub (fallback/recovery path):
 
@@ -315,6 +321,28 @@ agent defaults                  ← Built-in behaviors
 ## Phase A1: Read Entry Points
 
 Identify every entry point that initiates the affected logic. Start from the files named in the investigation report.
+
+### A1.0: Code Index Query (run FIRST — deterministic, one tool call)
+
+If `scripts/code-index.sh` exists under `{REPO_PATH}`, query the pre-built index before any grep. The index provides caller lists and import graphs without re-scanning the repo:
+
+```bash
+# Ensure index is current (cache-hit on unchanged HEAD — instant if already built)
+bash {REPO_PATH}/scripts/code-index.sh --repo-path {REPO_PATH} 2>/dev/null || true
+
+# Get callers of the primary function under change
+bash {REPO_PATH}/scripts/code-index.sh query --callers {PRIMARY_FUNCTION} --repo-path {REPO_PATH} 2>/dev/null || true
+
+# Get all files that import the affected module
+bash {REPO_PATH}/scripts/code-index.sh query --importers {AFFECTED_FILE} --repo-path {REPO_PATH} 2>/dev/null || true
+
+# Get all files in the same domain as affected files (for sibling path detection)
+bash {REPO_PATH}/scripts/code-index.sh query --domain {DOMAIN} --repo-path {REPO_PATH} 2>/dev/null || true
+```
+
+Use index results to populate the caller list and sibling candidates below. If the index returns results, **skip the grep fallback** — do not re-scan what the index already answered. If the index is absent or returns nothing, fall back to grep.
+
+### A1.1: Grep fallback (only when index absent or returned no results)
 
 For each affected file, read it and identify:
 1. The primary function/method being changed

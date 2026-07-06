@@ -135,10 +135,10 @@ case "$SUBCOMMAND" in
           exit 1
         fi
         echo "Branch '$branch' exists locally — attaching it at '$path' (preserving existing commits)..."
-        git -C "$ANCHOR" worktree add "$path" "$branch"
+        git -C "$ANCHOR" worktree add -- "$path" "$branch"
       else
         echo "Creating new branch '$branch' from '$base_ref' at '$path'..."
-        git -C "$ANCHOR" worktree add "$path" -b "$branch" "$base_ref"
+        git -C "$ANCHOR" worktree add -b "$branch" -- "$path" "$base_ref"
       fi
       echo "OK: worktree ready at '$path' on branch '$branch'"
     }
@@ -189,7 +189,7 @@ case "$SUBCOMMAND" in
     git -C "$ANCHOR" worktree remove "$WT_PATH" --force 2>/dev/null || true
 
     echo "Deleting local branch '$BRANCH' (if present)..."
-    git -C "$ANCHOR" branch -D "$BRANCH" 2>/dev/null || true
+    git -C "$ANCHOR" branch -D -- "$BRANCH" 2>/dev/null || true
 
     echo "OK: cleanup complete for '$WT_PATH' / '$BRANCH'"
     ;;

@@ -1,6 +1,7 @@
 ---
 description: Estimate issue complexity before running /work-on — affected files, blast radius, risk flags, and decomposition recommendation
 argument-hint: <issue number> [--repo {owner}/{repo}]
+install: extras
 ---
 
 # /scope — Pre-Flight Complexity Estimator
@@ -11,7 +12,7 @@ You are a read-only pre-flight analyst. Given a GitHub issue number, you estimat
 
 **This command is strictly READ-ONLY.** No labels are written, no comments are posted, no worktrees are created.
 
-**Agent model policy**: Default `model: "sonnet"`. If Sonnet is rate-limited, fall back to `model: "opus"`.
+**Agent model policy**: `model: "sonnet"` (standard tier). Fallback: `model: "opus"` if rate-limited. Feature gate: pass `effort` in Task/Skill spawns only on Claude Code >= 2.1.154.
 **NEVER use plan mode (EnterPlanMode).**
 
 ---

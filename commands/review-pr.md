@@ -11,8 +11,32 @@ allowed-tools: Task, Bash, Read, Grep, Glob, WebFetch, Skill
 **Input**: $ARGUMENTS
 
 **NEVER use plan mode (EnterPlanMode)** during review — it breaks execution context.
+**NEVER use the Agent tool** — review-pr dispatches domain agents via `Task` tool only. `Agent` spawns opaque subprocesses that bypass the allowed-tools constraint and cannot post structured findings to the PR. Always use `Task(...)` for review agent launch (Phase 3C).
 
-**Agent model policy**: Default `model: "sonnet"`. If Sonnet is rate-limited, fall back to `model: "opus"`. User can override with `--model <name>`. Pass the resolved model in every `Task` tool call.
+**Agent model policy**: `model: "sonnet"` (standard tier); the General Security & Quality reviewer spawned as always-runs Task uses `effort: xhigh` (deep tier). Fallback: `model: "opus"` if rate-limited. User can override with `--model <name>`. Pass model and effort explicitly in every `Task` tool call. Feature gate: pass `effort` only on Claude Code >= 2.1.154.
+
+<!-- FORGE:SPEC_LOADED — review-pr.md loaded and active. Agent is bound by this spec. -->
+
+## HARD RULES — READ BEFORE ANYTHING ELSE
+
+1. **Use `Task(...)` for ALL domain agent launches.** Never substitute `Agent(...)`. Task agents run in a constrained context, post findings to the PR via `gh pr comment`, and their output is structured. Agent spawns opaque subprocesses outside allowed-tools.
+
+2. **Post the FORGE:REVIEW verdict regardless of finding severity.** A review that completes but posts no `<!-- FORGE:REVIEW -->` comment is invisible to the pipeline. Even a PASS verdict must be posted.
+
+3. **Review findings do NOT block merge UNLESS they meet the Blocking Criteria in §7B** (a CONFIRMED HIGH/CRITICAL finding, a purpose regression, a merge conflict, or a build/type/test failure). File every finding as a GitHub issue with the `review-finding` label regardless of severity. Minor/style findings never block; §7B's blocking conditions always do — including under `--auto-merge`.
+
+4. **Route correctly at Phase 0.** If the input is "staging" or the PR targets `main`, invoke `Skill("review-pr-staging", ...)` — do NOT run the standard PR review pipeline against a staging→main PR.
+
+## Forbidden Tools Self-Check
+
+**Before executing any phase**, verify you are NOT using any of these tools:
+
+| Tool | Status | Reason |
+|------|--------|--------|
+| `Agent` | **FORBIDDEN** | Spawns opaque subprocesses outside allowed-tools; bypasses spec workflow; cannot post structured findings |
+| `EnterPlanMode` | **FORBIDDEN** | Breaks execution context; must run phases, not plan them |
+
+If you find yourself about to call `Agent(...)`, stop and use `Task(...)` instead. If you find yourself about to use `EnterPlanMode`, stop and execute the next phase directly.
 
 ## Architecture — How This Command Works
 
@@ -22,7 +46,8 @@ This is the **orchestrator**. It routes to the right review mode, runs automated
 
 | File | What | How to invoke |
 |------|------|---------------|
-| `$FORGE_HOME/commands/review-pr-agents.md` | Agent prompt templates (9 agents + protocols) | `Read` tool during Phase 3C |
+| `$FORGE_HOME/commands/review-pr-agents/protocols.md` | Shared review protocols (Evidence-Based + Structured Findings + Input Scoping) | `Read` tool during Phase 3C (always) |
+| `$FORGE_HOME/commands/review-pr-agents/<persona>.md` | Per-persona agent prompt templates (9 files) | `Read` tool during Phase 3C (selected agents only) |
 | `$FORGE_HOME/commands/review-pr-staging.md` | Full staging→main review pipeline | `Skill("review-pr-staging", ...)` during Phase 0 |
 
 `$FORGE_HOME` defaults to `~/.claude` (the directory where `npx forgedock` symlinks commands). Override by setting `FORGE_HOME` in your environment.
@@ -48,6 +73,55 @@ Example: "3126 --auto-merge --issue 3124 --base staging --gh-flag -R $GH_REPO --
 Extract: `PR_NUMBER`, `AUTO_MERGE=true`, `MERGE_ISSUE`, `MERGE_BASE`, `MERGE_GH_FLAG`, `MERGE_WORKTREE` (optional — the absolute path to the git worktree to clean up after merge)
 
 If `--auto-merge` is NOT present, `AUTO_MERGE=false` — Phase 8 (Auto-Merge) will be skipped.
+
+### Thoroughness Flag
+
+If `$ARGUMENTS` contains `--thorough`, set `THOROUGH=true`. This restores full union-dispatch (all matched domain agents run) for release-critical PRs. Default is `THOROUGH=false` — risk-scaled dispatch (2-3 agents).
+
+```bash
+THOROUGH=false
+echo "$ARGUMENTS" | grep -q "\-\-thorough" && THOROUGH=true
+```
+
+---
+
+## Phase -1: Route Assertion
+
+**This phase is MANDATORY and must execute BEFORE Phase 0. No phase may be skipped.**
+
+Resolve the PR number and post a routing marker immediately. This creates an audit trail — if a PR has no `FORGE:REVIEW_ROUTE` comment after a review command was run, the review was bypassed or never started.
+
+```bash
+# Determine REVIEW_MODE from $ARGUMENTS before any routing decision
+REVIEW_MODE_RAW="$ARGUMENTS"
+if echo "$ARGUMENTS" | grep -qE '^(staging|feature|staging:feature)$'; then
+  REVIEW_MODE="staging-keyword"
+  ROUTE_PR_NUMBER="(resolved by staging sub-command)"
+elif echo "$ARGUMENTS" | grep -qE '^(open|all)$'; then
+  REVIEW_MODE="multi-pr"
+  ROUTE_PR_NUMBER="(list mode)"
+else
+  # Single PR number or URL — resolve HEAD/BASE now
+  PR_ROUTE_INFO=$(gh pr view $ARGUMENTS --json number,baseRefName,headRefName --jq '{number:.number,base:.baseRefName,head:.headRefName}')
+  ROUTE_PR_NUMBER=$(echo "$PR_ROUTE_INFO" | jq -r '.number')
+  ROUTE_HEAD=$(echo "$PR_ROUTE_INFO" | jq -r '.head')
+  ROUTE_BASE=$(echo "$PR_ROUTE_INFO" | jq -r '.base')
+  if [ "$ROUTE_HEAD" = "staging" ] && [ "$ROUTE_BASE" = "main" ] || [ "$ROUTE_HEAD" = "feature" ] && [ "$ROUTE_BASE" = "main" ]; then
+    REVIEW_MODE="staging-auto"
+  else
+    REVIEW_MODE="single-pr"
+  fi
+fi
+
+REVIEW_SHA_ROUTE=$(gh pr view ${ROUTE_PR_NUMBER:-$ARGUMENTS} --json headRefOid --jq '.headRefOid' 2>/dev/null | cut -c1-7 || echo "n/a")
+
+# Post the routing assertion marker to the PR (skip for list/keyword modes where no PR# is known yet)
+if [ "$REVIEW_MODE" != "staging-keyword" ] && [ "$REVIEW_MODE" != "multi-pr" ]; then
+  gh pr comment "$ROUTE_PR_NUMBER" --body "<!-- FORGE:REVIEW_ROUTE mode=${REVIEW_MODE} spec=review-pr.md sha=${REVIEW_SHA_ROUTE} -->"
+fi
+```
+
+**Invariant**: After this phase, `REVIEW_MODE` and (where applicable) `ROUTE_PR_NUMBER` are set. Any sub-invocation of `Skill("review-pr-staging", ...)` should immediately post its own `FORGE:REVIEW_ROUTE` marker scoped to the PR it resolves.
 
 ---
 
@@ -137,16 +211,18 @@ FILES=$(gh pr diff $ARGUMENTS --name-only)
 DIFF=$(gh pr diff $ARGUMENTS)
 
 echo "=== SERVICES ==="
-echo "$FILES" | grep -c "^services/api/" && echo "API" || true
-echo "$FILES" | grep -c "^services/worker/" && echo "WORKER" || true
-echo "$FILES" | grep -c "^web/" && echo "WEB" || true
-echo "$FILES" | grep -c "^shared/" && echo "SHARED" || true
-echo "$FILES" | grep -cE "^(docker|infra/|\.github|Makefile|traefik)" && echo "INFRA" || true
+# Service detection is path-agnostic — matches project-specific and generic structures
+echo "$FILES" | grep -cE "(^services/api/|/api/|/backend/)" && echo "API" || true
+echo "$FILES" | grep -cE "(^services/worker/|/worker/|/jobs/|/tasks/)" && echo "WORKER" || true
+echo "$FILES" | grep -cE "(^web/|/frontend/|/app/|\.tsx?$|\.jsx?$)" && echo "WEB" || true
+echo "$FILES" | grep -cE "(^shared/|/shared/|/common/|/lib/)" && echo "SHARED" || true
+echo "$FILES" | grep -cE "^(docker|infra/|\.github|Makefile|traefik|k8s/|terraform/)" && echo "INFRA" || true
 
 echo "=== DOMAINS ==="
-echo "$DIFF" | grep -cE "SessionUser|CurrentUser|get_current_user|jwt|oauth|login|logout|Depends\(get_|x.forwarded.for|x_forwarded_for|forwarded_for|rate.limit.*ip|ip.*rate.limit|algorithm.*HS256|algorithm.*RS256|NEXTAUTH_SECRET|JWT_SECRET|admin.proxy" && echo "AUTH" || true
-echo "$DIFF" | grep -cE "credit|balance|debit|reconcil|tier_cost|pricing|charge|refund|stripe|subscription" && echo "BILLING" || true
-echo "$DIFF" | grep -cE "scrape|tier.*escalat|proxy|anti_bot|stealth|playwright|playbook" && echo "SCRAPING" || true
+echo "$DIFF" | grep -cE "get_current_user|jwt|oauth|login|logout|require_auth|authenticated_user|x.forwarded.for|x_forwarded_for|forwarded_for|rate.limit.*ip|ip.*rate.limit|algorithm.*HS256|algorithm.*RS256|NEXTAUTH_SECRET|JWT_SECRET" && echo "AUTH" || true
+echo "$DIFF" | grep -cE "credit|balance|debit|reconcil|pricing|charge|refund|stripe|subscription|payment" && echo "BILLING" || true
+# SCRAPING: only match browser-automation/scraping keywords, NOT bare "playwright" (avoids E2E test repos)
+echo "$DIFF" | grep -cE "scrape|tier.*escalat|anti_bot|stealth|playwright.*scrape|scrape.*playwright|playbook_min_tier|browser.*pool|proxy.*scrape|web.*scrape" && echo "SCRAPING" || true
 echo "$DIFF" | grep -cE "FOR UPDATE|atomic|transaction|pipeline|MULTI|distributed_lock|acquire_lock|reserved_by|promo.*claim|voucher.*redeem" && echo "CONCURRENCY" || true
 echo "$FILES" | grep -cE "migration|\.sql$" && echo "DATABASE" || true
 echo "$DIFF" | grep -cE "create_async_engine|AsyncSession|connect_args|pool_size|prepared_statement|engine_from_config|sessionmaker" && echo "DB_CONFIG" || true
@@ -263,7 +339,21 @@ git diff origin/main...HEAD -- "**/package.json" | grep -E "^\+" | grep -v "^\+\
 
 ### 2H: Tests
 
-Read `forge.yaml → verification.commands.{lang}.test` for the project's test command:
+Read `forge.yaml → verification.commands.{lang}.test` for the project's test command.
+
+**Before running tests**: check the quarantine manifest for known pre-broken and flaky tests:
+
+```bash
+# Load quarantine manifest if present — used below to suppress known-bad tests from blocking.
+QUARANTINE_MANIFEST=".forgedock/quarantine.jsonl"
+QUARANTINED_TESTS=""
+if [ -f "$QUARANTINE_MANIFEST" ]; then
+    QUARANTINED_TESTS=$(grep -oP '"test":"[^"]*"' "$QUARANTINE_MANIFEST" 2>/dev/null | sed 's/"test":"//;s/"//' | sort -u)
+    QUARANTINE_COUNT=$(echo "$QUARANTINED_TESTS" | grep -c . || echo 0)
+    echo "Quarantine manifest: ${QUARANTINE_COUNT} known-bad test(s) — these will not block the review if they fail."
+    echo "$QUARANTINED_TESTS" | sed 's/^/  - /'
+fi
+```
 
 ```bash
 # Check each configured language for a test command
@@ -273,7 +363,29 @@ for lang in python typescript go rust; do
         echo "=== Running tests (${lang}): ${TEST_CMD} ==="
         eval "$TEST_CMD" 2>&1 | tail -30
         TEST_EXIT=$?
-        [ "$TEST_EXIT" -ne 0 ] && echo "BLOCKING: ${lang} tests failed (exit $TEST_EXIT)"
+        if [ "$TEST_EXIT" -ne 0 ]; then
+            # Attempt to cross-reference with quarantine manifest.
+            # If ALL failing test names appear in $QUARANTINED_TESTS, suppress the block.
+            # Without per-test granularity from the test runner, fall back to treating
+            # any failure as blocking unless the classifier script is available.
+            CLASSIFIER="${FORGEDOCK_SCRIPTS:-scripts}/flaky-quarantine.sh"
+            [ -f "$CLASSIFIER" ] || CLASSIFIER="scripts/flaky-quarantine.sh"
+            if [ -f "$CLASSIFIER" ]; then
+                CL_RESULT=$(bash "$CLASSIFIER" \
+                    --test "$TEST_CMD" \
+                    --base "$(git rev-parse --abbrev-ref origin/HEAD 2>/dev/null | sed 's|origin/||' || echo main)" \
+                    --retries 3 2>&1)
+                echo "$CL_RESULT"
+                CL=$(echo "$CL_RESULT" | grep '^CLASSIFICATION:' | awk '{print $2}')
+                if [ "$CL" = "PRE_BROKEN" ] || [ "$CL" = "FLAKY" ]; then
+                    echo "ADVISORY (not blocking): ${lang} tests classified ${CL} — quarantined, does not block this review"
+                else
+                    echo "BLOCKING: ${lang} tests failed (exit $TEST_EXIT) — classified REAL"
+                fi
+            else
+                echo "BLOCKING: ${lang} tests failed (exit $TEST_EXIT)"
+            fi
+        fi
     fi
 done
 
@@ -284,7 +396,7 @@ if [ -z "$PYTHON_TEST" ] && [ -z "$TS_TEST" ]; then
     echo "SKIPPED — no test commands configured in verification.commands"
 fi
 ```
-**BLOCKING if tests fail.**
+**BLOCKING only for REAL test failures** (deterministically caused by this PR). Pre-broken and flaky failures are surfaced as advisories and do not block approval.
 
 ### 2I: Build Verification (MANDATORY for staging→main AND milestone→staging)
 
@@ -632,7 +744,7 @@ echo "=== RISK SIGNALS ==="
 echo "$DIFF" | grep -cE "subprocess|exec|eval|system\(|popen|heredoc" && echo "  UNTRUSTED_INPUT_PROCESSING" || true
 echo "$DIFF" | grep -cE "\.sh$|bash|shell|cron" && echo "  SHELL_SCRIPT" || true
 echo "$DIFF" | grep -cE "credit|balance|debit|charge|refund|stripe" && echo "  FINANCIAL" || true
-echo "$DIFF" | grep -cE "SessionUser|CurrentUser|jwt|oauth|password|token|secret|x.forwarded.for|x_forwarded_for|forwarded_for|rate.limit.*ip|ip.*rate.limit|algorithm.*HS256|algorithm.*RS256|NEXTAUTH_SECRET|JWT_SECRET|admin.proxy" && echo "  AUTH_SENSITIVE" || true
+echo "$DIFF" | grep -cE "jwt|oauth|password|token|secret|x.forwarded.for|x_forwarded_for|forwarded_for|rate.limit.*ip|ip.*rate.limit|algorithm.*HS256|algorithm.*RS256|NEXTAUTH_SECRET|JWT_SECRET|get_current_user|require_auth" && echo "  AUTH_SENSITIVE" || true
 echo "$DIFF" | grep -cE "\.sql$|migration|DROP|ALTER|DELETE FROM" && echo "  DATABASE_MUTATION" || true
 echo "$DIFF" | grep -cE "docker|deploy|traefik|nginx|\.yml.*service" && echo "  INFRASTRUCTURE" || true
 echo "$DIFF" | grep -cE "docker-compose.*postgres|docker-compose.*redis|postgres.*command:|redis.*command:|image:.*postgres|image:.*redis" && echo "  DATABASE_CONTAINER" || true
@@ -671,42 +783,231 @@ echo "$CHURN_CONTEXT"
 
 Tiers (fixed thresholds, identical to `architect.md` Phase A5): **HOT** = 15+ commits / 90 days, **MEDIUM** = 5–14, **LOW** = 0–4. Only HOT-tier files are listed in `CHURN_CONTEXT` — this keeps the agent prompt signal short and high-value rather than dumping a churn count for every file. This does not change agent selection (3B) — it is a scrutiny prior surfaced to whichever agents are already selected, substituted as `[CHURN_CONTEXT]` in Phase 3C.
 
-### 3B: Select Agents
+### 3B: Select Agents — Risk-Scaled Dispatch
 
-| Risk Signal | Required Agents |
-|-------------|----------------|
-| UNTRUSTED_INPUT_PROCESSING | Security (deep) + relevant domain |
-| SHELL_SCRIPT | Security (deep) + Infrastructure |
-| FINANCIAL | Security + Billing + Concurrency |
-| AUTH_SENSITIVE | Security + Auth Conventions |
-| DATABASE_MUTATION | Security + Database |
-| DB_CONFIG | Security + Database + Infrastructure |
-| INFRASTRUCTURE | Security + Infrastructure |
-| DATABASE_CONTAINER | Security + Infrastructure (escalate to HIGH risk — stateful container restart) |
-| CODE_EXECUTION | Security (deep) |
-| SDK_OPENAPI | Security + API Design & Consistency (runs cross-PR schema check #10) |
-| None | Security + all matching domain agents |
+**Default: 2-3 agents.** General Security always runs. Select the top 1-2 domain agents by relevance score, then apply escalation triggers to add more only when signals warrant it. Use `--thorough` to restore full union dispatch for release-critical PRs.
 
-**General Security agent ALWAYS runs.** Domain agents selected by classification, not PR size. If BILLING detected, always also spawn Concurrency agent. If SHARED touched, spawn agents for all importing services.
+#### Step 1: Score Each Domain by Signal Strength
 
-**Domain-overlap dispatch (MANDATORY for multi-signal PRs):**
+Assign a relevance score to each domain based on signals detected in Phase 3A. Higher score = higher priority for inclusion.
 
-1. **Union semantics**: If multiple risk signals are detected, spawn the UNION of all agents from ALL matched rows. A PR triggering both `AUTH_SENSITIVE` and `FINANCIAL` spawns Security + Auth + Billing + Concurrency — not just one row's agents.
+```bash
+# Relevance scoring — accumulate points per domain from Phase 3A signals
+SCORE_AUTH=0
+SCORE_BILLING=0
+SCORE_CONCURRENCY=0
+SCORE_DATABASE=0
+SCORE_INFRA=0
+SCORE_SECURITY=0
+SCORE_SCRAPING=0
+SCORE_FRONTEND=0
+SCORE_API=0
 
-2. **Critical domain override**: If 2+ of these critical domains are detected in the same PR, spawn agents for ALL affected domains regardless of file count or line changes:
-   - AUTH + BILLING → Security (deep) + Auth + Billing + Concurrency
-   - AUTH + DATABASE_MUTATION → Security (deep) + Auth + Database
-   - FINANCIAL + CONCURRENCY → Security (deep) + Billing + Concurrency + Database
-   - AUTH + CODE_EXECUTION → Security (deep) + Auth
+# AUTH domain signals
+echo "$DIFF" | grep -qE "jwt|oauth|login|logout|password|NEXTAUTH_SECRET|JWT_SECRET|auth_token|access_token|refresh_token" && SCORE_AUTH=$((SCORE_AUTH + 3))
+echo "$DIFF" | grep -qE "get_current_user|Depends\(get_|x.forwarded.for|forwarded_for|rate.limit.*ip|ip.*rate.limit" && SCORE_AUTH=$((SCORE_AUTH + 2))
+echo "$DIFF" | grep -qE "algorithm.*HS256|algorithm.*RS256|admin.proxy" && SCORE_AUTH=$((SCORE_AUTH + 2))
 
-3. **Why this exists**: A 2-file PR touching both `services/api/app/core/auth.py` and `services/api/app/routers/billing.py` is MORE dangerous than a 20-file refactor in one domain. Small cross-domain PRs create interaction bugs that single-domain reviewers cannot catch. Never reduce agent count based on file count when multiple critical domains are involved.
+# BILLING domain signals
+echo "$DIFF" | grep -qE "credit|balance|debit|charge|refund|stripe|subscription" && SCORE_BILLING=$((SCORE_BILLING + 3))
+echo "$DIFF" | grep -qE "pricing|tier_cost|reconcil" && SCORE_BILLING=$((SCORE_BILLING + 2))
+
+# CONCURRENCY domain signals
+echo "$DIFF" | grep -qE "FOR UPDATE|atomic|transaction|pipeline|MULTI|distributed_lock|acquire_lock" && SCORE_CONCURRENCY=$((SCORE_CONCURRENCY + 3))
+echo "$DIFF" | grep -qE "reserved_by|promo.*claim|voucher.*redeem" && SCORE_CONCURRENCY=$((SCORE_CONCURRENCY + 2))
+
+# DATABASE domain signals
+echo "$FILES" | grep -qE "migration|\.sql$" && SCORE_DATABASE=$((SCORE_DATABASE + 3))
+echo "$DIFF" | grep -qE "DROP|ALTER|DELETE FROM" && SCORE_DATABASE=$((SCORE_DATABASE + 2))
+echo "$DIFF" | grep -qE "create_async_engine|AsyncSession|pool_size|prepared_statement|sessionmaker" && SCORE_DATABASE=$((SCORE_DATABASE + 2))
+
+# INFRASTRUCTURE domain signals
+echo "$DIFF" | grep -qE "docker-compose.*postgres|docker-compose.*redis|postgres.*command:|redis.*command:" && SCORE_INFRA=$((SCORE_INFRA + 3))
+echo "$DIFF" | grep -qE "docker|deploy|traefik|nginx" && SCORE_INFRA=$((SCORE_INFRA + 1))
+echo "$FILES" | grep -qE "^\.github/workflows/" && SCORE_INFRA=$((SCORE_INFRA + 2))
+echo "$FILES" | grep -qE "Dockerfile|docker-compose" && SCORE_INFRA=$((SCORE_INFRA + 2))
+
+# SECURITY domain signals (always baseline)
+SCORE_SECURITY=1
+echo "$DIFF" | grep -qE "subprocess|exec|eval|system\(|popen" && SCORE_SECURITY=$((SCORE_SECURITY + 3))
+echo "$DIFF" | grep -qE "os\.system|eval\(|exec\(|pickle|yaml\.load[^_]" && SCORE_SECURITY=$((SCORE_SECURITY + 3))
+echo "$DIFF" | grep -qE "\.sh$|bash|shell|cron" && SCORE_SECURITY=$((SCORE_SECURITY + 2))
+
+# SCRAPING domain signals — only match browser-automation/scraping context, NOT bare "playwright"
+echo "$DIFF" | grep -qE "scrape|tier.*escalat|anti_bot|stealth|playwright.*scrape|scrape.*playwright|playbook_min_tier|browser.*pool|web.*scrape" && SCORE_SCRAPING=$((SCORE_SCRAPING + 3))
+
+# FRONTEND domain signals
+echo "$FILES" | grep -qE "^web/src/" && SCORE_FRONTEND=$((SCORE_FRONTEND + 1))
+echo "$FILES" | grep -qcE "^web/src/app/|^web/src/components/" | grep -qv "^0$" && SCORE_FRONTEND=$((SCORE_FRONTEND + 2))
+
+# API domain signals
+echo "$FILES" | grep -qE "router|routes" && SCORE_API=$((SCORE_API + 2))
+echo "$FILES" | grep -qE "^sdk/|openapi.*\.json$|openapi-versions/" && SCORE_API=$((SCORE_API + 3))
+
+echo "=== DOMAIN SCORES ==="
+echo "AUTH=$SCORE_AUTH BILLING=$SCORE_BILLING CONCURRENCY=$SCORE_CONCURRENCY DATABASE=$SCORE_DATABASE INFRA=$SCORE_INFRA SECURITY=$SCORE_SECURITY SCRAPING=$SCORE_SCRAPING FRONTEND=$SCORE_FRONTEND API=$SCORE_API"
+```
+
+#### Step 2: Read Architect CONTRACT for Risk Flags (if PR is from /work-on)
+
+```bash
+CONTRACT_RISK_FLAGS=""
+ISSUE_NUM=$(gh pr view $ARGUMENTS --json body --jq '.body | gsub("(?s).*?(?:Closes #|#)(?<n>[0-9]+).*"; "\(.n)") // empty' 2>/dev/null | head -1)
+if [ -n "$ISSUE_NUM" ]; then
+    CONTRACT_BODY=$(gh api repos/${REPO}/issues/${ISSUE_NUM}/comments \
+        --jq '[.[] | select(.body | contains("FORGE:CONTRACT"))] | .[0].body' 2>/dev/null || echo "")
+    # Extract risk level from CONTRACT — look for "HIGH" or "CRITICAL" risk markers
+    if echo "$CONTRACT_BODY" | grep -qiE "\*\*Risk\*\*.*HIGH|\*\*Risk\*\*.*CRITICAL|Risk.*:\s*(HIGH|CRITICAL)"; then
+        CONTRACT_RISK_FLAGS="HIGH_RISK"
+    fi
+    # Extract cross-domain touches flagged in CONTRACT
+    echo "$CONTRACT_BODY" | grep -qiE "auth|session|jwt" && CONTRACT_RISK_FLAGS="${CONTRACT_RISK_FLAGS} CONTRACT_AUTH"
+    echo "$CONTRACT_BODY" | grep -qiE "billing|credit|payment" && CONTRACT_RISK_FLAGS="${CONTRACT_RISK_FLAGS} CONTRACT_BILLING"
+    echo "$CONTRACT_BODY" | grep -qiE "migration|schema|database" && CONTRACT_RISK_FLAGS="${CONTRACT_RISK_FLAGS} CONTRACT_DATABASE"
+fi
+echo "=== CONTRACT FLAGS: ${CONTRACT_RISK_FLAGS:-none} ==="
+```
+
+#### Step 3: Compute CHURN_ESCALATION
+
+Check whether churn hot-spots exist (computed in Phase 3A `$CHURN_CONTEXT`):
+
+```bash
+CHURN_ESCALATION=false
+echo "$CHURN_CONTEXT" | grep -q "HOT" && CHURN_ESCALATION=true
+echo "=== CHURN_ESCALATION: $CHURN_ESCALATION ==="
+```
+
+#### Step 4: Build Selected Agent Roster
+
+**If `THOROUGH=true`** (user passed `--thorough`, or `IS_MILESTONE_TO_STAGING=true`): run full union dispatch — all agents matching any signal. Skip to "Full union dispatch" below.
+
+**Default (THOROUGH=false):**
+
+Start with the baseline roster: `SELECTED_AGENTS="Security"` (General Security always runs).
+
+Pick the top 1-2 domain agents by score:
+
+```bash
+# Build sorted list: "score:domain"
+DOMAIN_SCORES="$SCORE_AUTH:AUTH $SCORE_BILLING:BILLING $SCORE_CONCURRENCY:CONCURRENCY $SCORE_DATABASE:DATABASE $SCORE_INFRA:INFRA $SCORE_SCRAPING:SCRAPING $SCORE_FRONTEND:FRONTEND $SCORE_API:API"
+
+# Sort descending by score, pick top 2 with score > 0
+TOP_DOMAINS=$(echo "$DOMAIN_SCORES" | tr ' ' '\n' | sort -t: -k1 -rn | head -2 | awk -F: '$1 > 0 {print $2}' | tr '\n' ' ')
+for DOMAIN in $TOP_DOMAINS; do
+    SELECTED_AGENTS="$SELECTED_AGENTS $DOMAIN"
+done
+echo "=== BASELINE ROSTER (top domains): $SELECTED_AGENTS ==="
+```
+
+**Apply escalation triggers** — each adds agents if not already included:
+
+| Trigger | Condition | Added Agents |
+|---------|-----------|--------------|
+| Critical auth path | `SCORE_AUTH >= 3` | Auth (if not already selected) |
+| Critical billing path | `SCORE_BILLING >= 3` | Billing + Concurrency |
+| Migration/schema change | `SCORE_DATABASE >= 3` | Database |
+| Stateful container change | `SCORE_INFRA >= 3` AND `DATABASE_CONTAINER` signal | Infrastructure |
+| Code execution risk | `SCORE_SECURITY >= 4` (deep scan signals) | Security runs in deep mode (already selected) |
+| Churn hot-spot | `CHURN_ESCALATION=true` AND top-scoring domain | Top domain gets added if not already in roster |
+| CONTRACT high-risk | `CONTRACT_RISK_FLAGS` contains `HIGH_RISK` | All CONTRACT-flagged domain agents |
+| First-pass finding severity | Phase 3 re-entry after a CONFIRMED/HIGH finding posted to PR | Add all agents for the domain of the finding |
+| Scraping domain | `SCORE_SCRAPING >= 3` AND `review.domains.scraping` is set in forge.yaml | Scraping (optional domain pack — never in default catalog) |
+| Cross-critical domains | `SCORE_AUTH >= 2` AND `SCORE_BILLING >= 2` | Auth + Billing + Concurrency |
+| Cross-critical domains | `SCORE_AUTH >= 2` AND `SCORE_DATABASE >= 3` | Auth + Database |
+| Cross-critical domains | `SCORE_BILLING >= 2` AND `SCORE_CONCURRENCY >= 2` | Billing + Concurrency + Database |
+
+```bash
+# Apply escalation triggers
+add_agent() {
+    local AGENT="$1"
+    echo "$SELECTED_AGENTS" | grep -qw "$AGENT" || SELECTED_AGENTS="$SELECTED_AGENTS $AGENT"
+}
+
+[ "$SCORE_AUTH" -ge 3 ] && add_agent "Auth"
+[ "$SCORE_BILLING" -ge 3 ] && { add_agent "Billing"; add_agent "Concurrency"; }
+[ "$SCORE_DATABASE" -ge 3 ] && add_agent "Database"
+[ "$SCORE_INFRA" -ge 3 ] && echo "$DIFF" | grep -qE "docker-compose.*postgres|docker-compose.*redis|postgres.*command:|redis.*command:" && add_agent "Infrastructure"
+# Scraping agent is opt-in: only spawns when review.domains.scraping is configured in forge.yaml
+[ "$SCORE_SCRAPING" -ge 3 ] && [ -n "$DOMAIN_CONTEXT_SCRAPING" ] && add_agent "Scraping"
+[ "$CHURN_ESCALATION" = "true" ] && {
+    # Add the top-scoring domain for deeper churn scrutiny if not already selected
+    TOP_CHURN_DOMAIN=$(echo "$DOMAIN_SCORES" | tr ' ' '\n' | sort -t: -k1 -rn | head -1 | awk -F: '{print $2}')
+    [ -n "$TOP_CHURN_DOMAIN" ] && add_agent "$TOP_CHURN_DOMAIN"
+}
+echo "$CONTRACT_RISK_FLAGS" | grep -q "HIGH_RISK" && {
+    echo "$CONTRACT_RISK_FLAGS" | grep -q "CONTRACT_AUTH" && add_agent "Auth"
+    echo "$CONTRACT_RISK_FLAGS" | grep -q "CONTRACT_BILLING" && { add_agent "Billing"; add_agent "Concurrency"; }
+    echo "$CONTRACT_RISK_FLAGS" | grep -q "CONTRACT_DATABASE" && add_agent "Database"
+}
+# Cross-critical domain escalation
+{ [ "$SCORE_AUTH" -ge 2 ] && [ "$SCORE_BILLING" -ge 2 ]; } && { add_agent "Auth"; add_agent "Billing"; add_agent "Concurrency"; }
+{ [ "$SCORE_AUTH" -ge 2 ] && [ "$SCORE_DATABASE" -ge 3 ]; } && { add_agent "Auth"; add_agent "Database"; }
+{ [ "$SCORE_BILLING" -ge 2 ] && [ "$SCORE_CONCURRENCY" -ge 2 ]; } && { add_agent "Billing"; add_agent "Concurrency"; add_agent "Database"; }
+# SDK/OpenAPI always adds API agent
+echo "$FILES" | grep -qE "^sdk/|openapi.*\.json$|openapi-versions/" && add_agent "API"
+
+echo "=== FINAL ROSTER (after escalation): $SELECTED_AGENTS ==="
+AGENT_COUNT=$(echo "$SELECTED_AGENTS" | wc -w)
+echo "=== AGENT COUNT: $AGENT_COUNT ==="
+```
+
+**Full union dispatch (THOROUGH=true or IS_MILESTONE_TO_STAGING=true):**
+
+```bash
+if [ "$THOROUGH" = "true" ] || [ "$IS_MILESTONE_TO_STAGING" = "true" ]; then
+    SELECTED_AGENTS="Security"
+    [ "$SCORE_AUTH" -gt 0 ] && SELECTED_AGENTS="$SELECTED_AGENTS Auth"
+    [ "$SCORE_BILLING" -gt 0 ] && SELECTED_AGENTS="$SELECTED_AGENTS Billing Concurrency"
+    [ "$SCORE_DATABASE" -gt 0 ] && SELECTED_AGENTS="$SELECTED_AGENTS Database"
+    [ "$SCORE_INFRA" -gt 0 ] && SELECTED_AGENTS="$SELECTED_AGENTS Infrastructure"
+    # Scraping agent only added in thorough mode when review.domains.scraping is configured
+    SCRAPING_ENABLED=$(yq '.review.domains.scraping' "$FORGE_YAML" 2>/dev/null || echo "")
+    [ "$SCORE_SCRAPING" -gt 0 ] && [ -n "$SCRAPING_ENABLED" ] && SELECTED_AGENTS="$SELECTED_AGENTS Scraping"
+    [ "$SCORE_FRONTEND" -gt 0 ] && SELECTED_AGENTS="$SELECTED_AGENTS Frontend"
+    [ "$SCORE_API" -gt 0 ] && SELECTED_AGENTS="$SELECTED_AGENTS API"
+    # Deduplicate
+    SELECTED_AGENTS=$(echo "$SELECTED_AGENTS" | tr ' ' '\n' | sort -u | tr '\n' ' ')
+    echo "=== THOROUGH mode: FULL UNION DISPATCH — $SELECTED_AGENTS ==="
+fi
+```
+
+**Why cross-critical domain pairs always escalate**: A 2-file PR touching both `services/api/app/core/auth.py` and `services/api/app/routers/billing.py` creates interaction bugs that single-domain reviewers cannot catch. Never rely on a single agent for multi-domain risk.
+
+**General Security agent ALWAYS runs.** If BILLING is selected, Concurrency is always added. If SHARED module is touched, add agents for all importing services.
+
+#### Domain-to-File Mapping (for diff slicing in Phase 3C)
+
+Each agent receives only its domain-relevant diff slice rather than the full changeset. Compute per-domain file filters:
+
+```bash
+# Domain file patterns — used in Phase 3C to scope each agent's input
+DOMAIN_FILES_AUTH=$(echo "$FILES" | grep -iE "auth|session|login|logout|jwt|oauth|token|user|permission|middleware" || echo "")
+DOMAIN_FILES_BILLING=$(echo "$FILES" | grep -iE "billing|credit|payment|charge|refund|subscription|pricing|tier" || echo "")
+DOMAIN_FILES_CONCURRENCY=$(echo "$FILES" | grep -iE "lock|queue|atomic|transaction|worker|job|task|celery|redis" || echo "")
+DOMAIN_FILES_DATABASE=$(echo "$FILES" | grep -iE "migration|\.sql$|model|schema|db|database|alembic" || echo "")
+DOMAIN_FILES_INFRA=$(echo "$FILES" | grep -iE "docker|nginx|traefik|\.github|Makefile|deploy|infra" || echo "")
+DOMAIN_FILES_SCRAPING=$(echo "$FILES" | grep -iE "scrape|crawler|stealth|browser.*pool|headless|anti.bot|detection.*keyword|captcha" || echo "")
+DOMAIN_FILES_FRONTEND=$(echo "$FILES" | grep -iE "^web/|\.tsx?$|\.jsx?$|component|page|layout|style|css" || echo "")
+DOMAIN_FILES_API=$(echo "$FILES" | grep -iE "router|route|endpoint|openapi|sdk|api" || echo "")
+
+# Fallback: if a domain has no specific files matched, give it the full file list
+# (happens for Security — which reviews everything — and for edge cases)
+[ -z "$DOMAIN_FILES_AUTH" ] && DOMAIN_FILES_AUTH="$FILES"
+[ -z "$DOMAIN_FILES_BILLING" ] && DOMAIN_FILES_BILLING="$FILES"
+[ -z "$DOMAIN_FILES_DATABASE" ] && DOMAIN_FILES_DATABASE="$FILES"
+```
 
 ### 3C: Load Agent Templates & Launch
 
-**>>> INVOCATION: Read the agent catalog file:**
+**>>> INVOCATION: Read shared protocols + selected persona files:**
 ```
-Read the file: $FORGE_HOME/commands/review-pr-agents.md
+Read: $FORGE_HOME/commands/review-pr-agents/protocols.md
+Read: $FORGE_HOME/commands/review-pr-agents/<persona>.md   (one per selected agent from Phase 3B)
 ```
+
+Persona file names: `security.md` (always), `auth.md`, `billing.md`, `concurrency.md`, `scraper.md`, `frontend.md`, `api.md`, `database.md`, `infra.md`.
+See `review-pr-agents.md` for the full routing table mapping domains → persona files.
 
 (`$FORGE_HOME` defaults to `~/.claude`)
 
@@ -716,29 +1017,192 @@ Read the file: $FORGE_HOME/commands/review-pr-agents.md
 FORGE_YAML="${FORGE_CONFIG:-$(git rev-parse --show-toplevel 2>/dev/null)/forge.yaml}"
 PROJECT_NAME=$(yq '.project.name' "$FORGE_YAML" 2>/dev/null || echo "this project")
 PROJECT_CONTEXT=$(yq '.review.context' "$FORGE_YAML" 2>/dev/null || echo "")
-TECH_STACK=$(yq '.review.tech_stack' "$FORGE_YAML" 2>/dev/null || echo "")
 # Domain-specific context (keyed by agent name)
 DOMAIN_CONTEXT_AUTH=$(yq '.review.domains.auth' "$FORGE_YAML" 2>/dev/null || echo "")
 DOMAIN_CONTEXT_BILLING=$(yq '.review.domains.billing' "$FORGE_YAML" 2>/dev/null || echo "")
+DOMAIN_CONTEXT_CONCURRENCY=$(yq '.review.domains.concurrency' "$FORGE_YAML" 2>/dev/null || echo "")
 DOMAIN_CONTEXT_INFRA=$(yq '.review.domains.infra' "$FORGE_YAML" 2>/dev/null || echo "")
 DOMAIN_CONTEXT_DATABASE=$(yq '.review.domains.database' "$FORGE_YAML" 2>/dev/null || echo "")
 DOMAIN_CONTEXT_FRONTEND=$(yq '.review.domains.frontend' "$FORGE_YAML" 2>/dev/null || echo "")
 DOMAIN_CONTEXT_SECURITY=$(yq '.review.domains.security' "$FORGE_YAML" 2>/dev/null || echo "")
 DOMAIN_CONTEXT_API=$(yq '.review.domains.api' "$FORGE_YAML" 2>/dev/null || echo "")
+# Scraping domain context also gates spawning: agent only runs when this key is set
+DOMAIN_CONTEXT_SCRAPING=$(yq '.review.domains.scraping' "$FORGE_YAML" 2>/dev/null || echo "")
 ```
 
 If `forge.yaml` is absent or a field is empty/null, agents fall back to generic checks (no project-specific context injected — agents still function correctly, just without project conventions).
 
-This file contains the Evidence-Based Review Protocol, Structured Findings Protocol, and all 9 agent prompt templates. For each selected agent:
-1. Extract its template from the catalog
+**Code Index Slice (inject per agent — replaces full-repo search space with domain-scoped facts):**
+
+Before launching agents, query the code index to build a domain-scoped file list and symbol map for each agent's diff domain. This replaces full-repo search with deterministic pre-computed data:
+
+```bash
+REPO_PATH=$(yq '.paths.root' "$FORGE_YAML" 2>/dev/null || git rev-parse --show-toplevel 2>/dev/null || pwd)
+CODE_INDEX_SCRIPT="${REPO_PATH}/scripts/code-index.sh"
+
+# Ensure index is current (cache-hit on unchanged HEAD — instant if already built)
+if [[ -x "$CODE_INDEX_SCRIPT" ]]; then
+  bash "$CODE_INDEX_SCRIPT" --repo-path "$REPO_PATH" 2>/dev/null || true
+fi
+
+# Build domain-scoped index slices for each selected agent's domain
+# Replace {DOMAIN} with the agent's domain label (auth, billing, database, api, frontend, etc.)
+build_index_slice() {
+  local domain="$1"
+  if [[ -x "$CODE_INDEX_SCRIPT" ]]; then
+    local files
+    files=$(bash "$CODE_INDEX_SCRIPT" query --domain "$domain" --repo-path "$REPO_PATH" 2>/dev/null | awk -F'\t' '{print $1}' | head -30 | tr '\n' ' ')
+    echo "Domain files (${domain}): ${files:-none}"
+  else
+    echo "Code index not available — agent will use grep exploration"
+  fi
+}
+
+# Compute slices for selected agents (only the domains that are actually running)
+INDEX_SLICE_AUTH=$(build_index_slice "auth")
+INDEX_SLICE_BILLING=$(build_index_slice "billing")
+INDEX_SLICE_DATABASE=$(build_index_slice "database")
+INDEX_SLICE_API=$(build_index_slice "api")
+INDEX_SLICE_FRONTEND=$(build_index_slice "frontend")
+INDEX_SLICE_INFRA=$(build_index_slice "infrastructure")
+```
+
+**Absence is not an error**: If `scripts/code-index.sh` is absent, `INDEX_SLICE_*` variables will contain the fallback message and agents proceed with their standard grep-based exploration.
+
+**>>> COMPUTE: Per-domain diff slices (input-scoping — do this BEFORE launching agents):**
+
+Each domain agent receives only the diff slice relevant to its domain, not the full PR changeset. This caps per-child input cost on large PRs. Compute slices once here; substitute `[DOMAIN_DIFF_SLICE]` per agent below.
+
+```bash
+# Full diff fetched once — agents do NOT re-fetch it
+FULL_DIFF=$(gh pr diff $ARGUMENTS)
+FULL_FILES=$(gh pr diff $ARGUMENTS --name-only)
+
+# --- Security agent: always receives the full diff (cross-cutting domain) ---
+DIFF_SLICE_SECURITY="$FULL_DIFF"
+
+# --- Auth agent: auth, session, jwt, oauth, middleware, permission files ---
+DIFF_SLICE_AUTH=$(echo "$FULL_DIFF" | awk '
+  /^diff --git/ { in_block=0 }
+  /^diff --git.*\/(auth|session|jwt|oauth|permission|middleware|login|token)/ { in_block=1 }
+  in_block { print }
+')
+[ -z "$DIFF_SLICE_AUTH" ] && DIFF_SLICE_AUTH="$FULL_DIFF"
+
+# --- Billing agent: billing, payment, credit, pricing, stripe, subscription files ---
+DIFF_SLICE_BILLING=$(echo "$FULL_DIFF" | awk '
+  /^diff --git/ { in_block=0 }
+  /^diff --git.*\/(billing|payment|credit|pricing|stripe|subscription|invoice|charge|refund)/ { in_block=1 }
+  in_block { print }
+')
+[ -z "$DIFF_SLICE_BILLING" ] && DIFF_SLICE_BILLING="$FULL_DIFF"
+
+# --- Concurrency agent: transaction, lock, queue, async, worker, race-condition files ---
+DIFF_SLICE_CONCURRENCY=$(echo "$FULL_DIFF" | awk '
+  /^diff --git/ { in_block=0 }
+  /^diff --git.*\/(worker|queue|task|async|lock|transaction|pipeline|job)/ { in_block=1 }
+  in_block { print }
+')
+[ -z "$DIFF_SLICE_CONCURRENCY" ] && DIFF_SLICE_CONCURRENCY="$FULL_DIFF"
+
+# --- Database agent: migration, model, schema, ORM, SQL files ---
+DIFF_SLICE_DATABASE=$(echo "$FULL_DIFF" | awk '
+  /^diff --git/ { in_block=0 }
+  /^diff --git.*\/(migration|model|schema|\.sql$|orm|database|db)/ { in_block=1 }
+  in_block { print }
+')
+[ -z "$DIFF_SLICE_DATABASE" ] && DIFF_SLICE_DATABASE="$FULL_DIFF"
+
+# --- Frontend agent: web/src, components, pages, styles, tsx/jsx files ---
+DIFF_SLICE_FRONTEND=$(echo "$FULL_DIFF" | awk '
+  /^diff --git/ { in_block=0 }
+  /^diff --git.*(web\/src|components|pages|styles|\.tsx|\.jsx|\.css|\.scss)/ { in_block=1 }
+  in_block { print }
+')
+[ -z "$DIFF_SLICE_FRONTEND" ] && DIFF_SLICE_FRONTEND="$FULL_DIFF"
+
+# --- API Design agent: router, endpoint, openapi, schema, serializer files ---
+DIFF_SLICE_API=$(echo "$FULL_DIFF" | awk '
+  /^diff --git/ { in_block=0 }
+  /^diff --git.*\/(router|route|endpoint|openapi|serializer|schema|api)/ { in_block=1 }
+  in_block { print }
+')
+[ -z "$DIFF_SLICE_API" ] && DIFF_SLICE_API="$FULL_DIFF"
+
+# --- Infrastructure agent: docker, nginx, ci, deploy, infra, workflow files ---
+DIFF_SLICE_INFRA=$(echo "$FULL_DIFF" | awk '
+  /^diff --git/ { in_block=0 }
+  /^diff --git.*\/(docker|nginx|infra|\.github|deploy|ci|traefik|k8s|helm)/ { in_block=1 }
+  in_block { print }
+')
+[ -z "$DIFF_SLICE_INFRA" ] && DIFF_SLICE_INFRA="$FULL_DIFF"
+
+# --- Domain Logic agent: scraping/browser-automation files (does not match bare playwright/E2E test files) ---
+DIFF_SLICE_SCRAPER=$(echo "$FULL_DIFF" | awk '
+  /^diff --git/ { in_block=0 }
+  /^diff --git.*\/(scrape|scraper|stealth|browser_pool|headless|anti_bot|captcha|crawl)/ { in_block=1 }
+  in_block { print }
+')
+[ -z "$DIFF_SLICE_SCRAPER" ] && DIFF_SLICE_SCRAPER="$FULL_DIFF"
+```
+
+**Tool-result truncation discipline**: All `gh pr diff` and file-read outputs piped to agents MUST be capped at ~100K characters. This mirrors the runner's built-in 100K-char tool-result cap (`bin/runner.mjs`). Any diff slice exceeding 100K chars must be truncated before substitution — agents that receive oversized context perform worse, not better.
+
+```bash
+# Truncate any slice exceeding 100K chars before passing to agent
+truncate_slice() {
+  local slice="$1"
+  local limit=102400
+  if [ "${#slice}" -gt "$limit" ]; then
+    echo "${slice:0:$limit}"
+    echo "... [TRUNCATED — diff exceeded 100K chars; focus on the files listed above]"
+  else
+    echo "$slice"
+  fi
+}
+DIFF_SLICE_SECURITY=$(truncate_slice "$DIFF_SLICE_SECURITY")
+DIFF_SLICE_AUTH=$(truncate_slice "$DIFF_SLICE_AUTH")
+DIFF_SLICE_BILLING=$(truncate_slice "$DIFF_SLICE_BILLING")
+DIFF_SLICE_CONCURRENCY=$(truncate_slice "$DIFF_SLICE_CONCURRENCY")
+DIFF_SLICE_DATABASE=$(truncate_slice "$DIFF_SLICE_DATABASE")
+DIFF_SLICE_FRONTEND=$(truncate_slice "$DIFF_SLICE_FRONTEND")
+DIFF_SLICE_API=$(truncate_slice "$DIFF_SLICE_API")
+DIFF_SLICE_INFRA=$(truncate_slice "$DIFF_SLICE_INFRA")
+DIFF_SLICE_SCRAPER=$(truncate_slice "$DIFF_SLICE_SCRAPER")
+```
+
+The `protocols.md` file contains the Evidence-Based Review Protocol, Structured Findings Protocol, Per-Agent Input Scoping rules, and Tool-Result Truncation Discipline. Each persona file contains that agent's full prompt template. For each agent in `$SELECTED_AGENTS` (computed in Phase 3B):
+1. Extract its template from the persona file (`review-pr-agents/<persona>.md`)
 2. Substitute: `[PR_NUMBER]`, `[REVIEW_SHA]`, `[REVIEW_SHA_SHORT]`, `[TITLE]`, relevant files list
-3. Substitute: `[PROJECT_NAME]` → `$PROJECT_NAME`, `[PROJECT_CONTEXT]` → `$PROJECT_CONTEXT`, `[TECH_STACK]` → `$TECH_STACK`
-4. Substitute per-agent domain context: `[DOMAIN_CONTEXT]` → the agent's matching key from `forge.yaml → review.domains` (e.g., `$DOMAIN_CONTEXT_AUTH` for the auth agent, `$DOMAIN_CONTEXT_BILLING` for the billing agent)
+3. Substitute: `[PROJECT_NAME]` → `$PROJECT_NAME`, `[PROJECT_CONTEXT]` → `$PROJECT_CONTEXT`
+4. Substitute per-agent domain context: `[DOMAIN_CONTEXT]` → the agent's matching key from `forge.yaml → review.domains` (e.g., `$DOMAIN_CONTEXT_AUTH` for the auth agent, `$DOMAIN_CONTEXT_BILLING` for the billing agent, `$DOMAIN_CONTEXT_CONCURRENCY` for the concurrency agent, `$DOMAIN_CONTEXT_SCRAPING` for the scraping agent)
 5. Substitute the shared hot-spot prior: `[CHURN_CONTEXT]` → `$CHURN_CONTEXT` (computed once in Phase 3A, same value for every agent — this is a PR-level fact, not a per-domain config value, so it is NOT read from `forge.yaml`)
-6. If Phase 2.5 found broken assumptions, append them to the agent's prompt as "Pre-found integration issues to verify"
-7. Launch via `Task` tool with the resolved model (default `"sonnet"`, fallback `"opus"` if rate-limited)
+6. Substitute code index slice: `[INDEX_SLICE]` → the matching `$INDEX_SLICE_{DOMAIN}` variable for this agent (e.g., `$INDEX_SLICE_AUTH` for the auth agent). Agents MUST query index data first; fall back to grep only when index slice is empty or unavailable.
+7. Substitute per-agent diff slice: `[DOMAIN_DIFF_SLICE]` → the matching `$DIFF_SLICE_*` variable (e.g., `$DIFF_SLICE_AUTH` for the auth agent, `$DIFF_SLICE_SECURITY` for the security agent). This replaces any `gh pr diff [PR_NUMBER]` call inside the agent template — the agent works from the pre-computed slice, not the full changeset.
+8. If Phase 2.5 found broken assumptions, append them to the agent's prompt as "Pre-found integration issues to verify"
+9. Launch via `Task` tool with the resolved model (default `"sonnet"`, fallback `"opus"` if rate-limited)
 
 **CRITICAL**: Launch ALL selected agents in a SINGLE message using multiple Task tool calls. Each agent posts findings directly to the PR via `gh pr comment`.
+
+#### Domain Diff Slicing
+
+Each agent's prompt receives `[FILE_LIST]` scoped to its domain-relevant files (computed in Phase 3B as `DOMAIN_FILES_*`). This reduces per-agent token cost — each agent reads only the diff slice relevant to its domain, not the full changeset.
+
+- **Security agent**: receives the full file list and full diff (it must see everything)
+- **Domain agents**: receive `DOMAIN_FILES_<DOMAIN>` as `[FILE_LIST]`; if a domain's file list is empty (fallback), pass the full list
+
+When substituting `[FILE_LIST]` in each agent's template:
+- Auth agent → `$DOMAIN_FILES_AUTH`
+- Billing agent → `$DOMAIN_FILES_BILLING`
+- Concurrency agent → `$DOMAIN_FILES_CONCURRENCY`
+- Database agent → `$DOMAIN_FILES_DATABASE`
+- Infrastructure agent → `$DOMAIN_FILES_INFRA`
+- Scraping agent → `$DOMAIN_FILES_SCRAPING`
+- Frontend agent → `$DOMAIN_FILES_FRONTEND`
+- API agent → `$DOMAIN_FILES_API`
+- Security agent → `$FILES` (full list)
+
+**Note**: Domain agents still run `gh pr diff $PR_NUMBER` inside their execution context. The scoped `[FILE_LIST]` tells each agent which files are most relevant to its domain — it is a focused starting point, not a hard restriction. Agents should follow code paths beyond their slice if those paths are needed to complete a trace.
 
 ---
 
@@ -846,8 +1310,26 @@ fi
 
 **Dedup against existing issues (MANDATORY before creating):**
 
+Run the deterministic dedup script first, then fall through to the line-range check:
+
 ```bash
-# For each finding, check if an open issue already exists at the same file within ±5 lines
+# Step 0: Deterministic title dedup — catches near-duplicates before line-range check
+# See scripts/issue-dedup.sh for the token-overlap algorithm. <!-- Added: forge#1335 -->
+FINDING_TITLE_DEDUP="fix: brief description of finding (review finding — PR #${PR_NUMBER})"
+DEDUP_RESULT=$(scripts/issue-dedup.sh "$FINDING_TITLE_DEDUP" "$GH_FLAG" 2>&1)
+DEDUP_EXIT=$?
+if [ "$DEDUP_EXIT" -eq 1 ]; then
+  echo "DEDUP: Skipping — $DEDUP_RESULT"
+  # Skip this finding — do NOT create a duplicate issue
+  # Add a comment on the existing issue referencing this recurrence in PR #${PR_NUMBER}
+elif [ "$DEDUP_EXIT" -eq 2 ]; then
+  echo "DEDUP: Usage error — $DEDUP_RESULT"
+  # Skip this finding — do NOT fall through to gh issue create on a usage error
+fi
+```
+
+```bash
+# For each finding (that passes the title dedup above), check line-range overlap
 FINDING_FILE="path/to/file.py"
 FINDING_LINE="123"
 FINDING_TITLE="fix: brief description of finding (review finding — PR #${PR_NUMBER})"
@@ -925,6 +1407,11 @@ ISSUE_NUM=$(gh issue create \
 **Root cause**: [one sentence — why the bug occurs mechanically]
 **Prevention**: [one sentence — what the builder must do to avoid this class of bug]
 
+<!-- FORGE:PATTERN: [pattern-slug] -->
+<!-- This machine-readable tag is used by pipeline-health Phase 4A to count pattern recurrences.
+     When this slug appears on 3+ findings, a check-promotion issue is automatically filed.
+     Keep the slug consistent across all findings for the same defect class. --> <!-- Added: forge#1331 -->
+
 ## Affected Files
 
 Files that need changes:
@@ -951,11 +1438,38 @@ Files that need changes:
 - [ ] Trace code path to verify issue
 - [ ] Check existing mitigations
 - [ ] Reproduce or construct proof-of-concept
+[BATCHABLE_ANNOTATION]
 ISSUE_EOF
 )" --json number --jq '.number')
 ```
 
 Labels: `review-finding` + `needs-validation` + priority (`priority:P1` CONFIRMED, `priority:P2` LIKELY, `priority:P3` POSSIBLE).
+
+**P3 batchable annotation** — <!-- Added: forge#1333 --> When priority resolves to `priority:P3` (POSSIBLE confidence), check whether the finding qualifies for batching. If the affected file does NOT touch a security or billing path, substitute `[BATCHABLE_ANNOTATION]` with the `<!-- FORGE:BATCHABLE -->` marker. This signals the orchestrator's Phase 1 batching rule that this finding can be grouped with other P3s in the same domain:
+
+```bash
+# Determine batchable eligibility for this finding
+FINDING_PRIORITY="{priority}"  # priority:P1 / priority:P2 / priority:P3
+BATCHABLE_ANNOTATION=""
+
+if [ "$FINDING_PRIORITY" = "priority:P3" ]; then
+  # Check for security/billing exclusions
+  IS_SECURITY_PATH=0
+  IS_BILLING_PATH=0
+  # Test affected file path
+  echo "$FINDING_FILE" | grep -qiE 'security|billing|payment|stripe|charge|invoice' && IS_SECURITY_PATH=1
+  echo "$FINDING_TITLE" | grep -qiE 'security|billing|payment|stripe|charge|invoice' && IS_BILLING_PATH=1
+
+  if [ "$IS_SECURITY_PATH" -eq 0 ] && [ "$IS_BILLING_PATH" -eq 0 ]; then
+    BATCHABLE_ANNOTATION="<!-- FORGE:BATCHABLE -->"
+    echo "INFO: P3 finding eligible for batching — appending FORGE:BATCHABLE annotation"
+  else
+    BATCHABLE_ANNOTATION=""
+    echo "INFO: P3 finding touches security/billing path — NOT batchable, keeping individual pipeline"
+  fi
+fi
+# When priority is P1 or P2: BATCHABLE_ANNOTATION stays empty (never batched)
+```
 
 **Add to project board:**
 ```bash
@@ -1063,20 +1577,29 @@ if [ "$MERGE_HEALTH" = "CONFLICTING" ] || [ "$MERGE_HEALTH_STATE" = "DIRTY" ] ||
     MERGE_CONFLICT_MSG="Merge conflict with \`${BASE}\`. Rebase \`${HEAD}\` onto \`origin/${BASE}\`, resolve the conflicting files, then re-run /review-pr."
 fi
 
+# Resolve attribution footer (forge.yaml → attribution.pr_footer)
+ATTRIBUTION_PR_FOOTER=$(grep -A5 "^attribution:" forge.yaml 2>/dev/null | grep "pr_footer:" | awk '{print $2}' | tr -d '"' || echo "false")
+ATTRIBUTION_FOOTER_LINE=""
+if [ "$ATTRIBUTION_PR_FOOTER" = "true" ]; then
+  ATTRIBUTION_FOOTER_LINE="
+---
+> Orchestrated with [ForgeDock](https://github.com/RapierCraftStudios/ForgeDock) — state, scheduling, review, and memory on GitHub."
+fi
+
 # Stale review:
 gh pr review $ARGUMENTS --comment --body "Review of commit $REVIEW_SHA_SHORT is stale — PR HEAD changed. Re-run /review-pr."
 
 # Clean (no blocking issues):
 gh pr review $ARGUMENTS --comment --body "APPROVED: commit $REVIEW_SHA_SHORT after context-aware review ([N] agents: [names]). [M] findings created as issues. Safe to merge.
 $([ "$MERGE_HEALTH" = "UNKNOWN" ] && echo "
-⚠ Mergeability: GitHub is still computing merge state (UNKNOWN after retries). Verify manually before merging.")"
+⚠ Mergeability: GitHub is still computing merge state (UNKNOWN after retries). Verify manually before merging.")${ATTRIBUTION_FOOTER_LINE}"
 
 # Blocking issues (including merge conflicts and purpose regressions):
 gh pr review $ARGUMENTS --comment --body "CHANGES REQUESTED: commit $REVIEW_SHA_SHORT — [N] blocking issues found. See GitHub issues.
 $([ "$HAS_MERGE_CONFLICT" = "true" ] && echo "
 🔴 Merge Conflict: ${MERGE_CONFLICT_MSG}")
 $([ "$HAS_PURPOSE_REGRESSION" = "true" ] && echo "
-⚠ Purpose Regression: [N] finding(s) contradict the milestone's stated goal and are automatically blocking regardless of runtime impact. See: ${PURPOSE_REGRESSION_FINDINGS[@]}")"
+⚠ Purpose Regression: [N] finding(s) contradict the milestone's stated goal and are automatically blocking regardless of runtime impact. See: ${PURPOSE_REGRESSION_FINDINGS[@]}")${ATTRIBUTION_FOOTER_LINE}"
 ```
 
 ---
@@ -1086,6 +1609,20 @@ $([ "$HAS_PURPOSE_REGRESSION" = "true" ] && echo "
 **Skip if** `AUTO_MERGE=false`.
 
 ```bash
+# §7B verdict + purpose-regression guard — check before any merge attempt <!-- Added: forge#1601 -->
+# HARD RULE 3 requires that VERDICT=CHANGES REQUESTED and HAS_PURPOSE_REGRESSION=true
+# always block merge, including under --auto-merge. These vars are set in Phase 7A/7B
+# earlier in the same agent session. An unset/empty VERDICT is safe — it evaluates to
+# "" which does not equal "CHANGES REQUESTED", so fast-lane PRs (no 7A run) are unaffected.
+if [ "$VERDICT" = "CHANGES REQUESTED" ] || [ "$HAS_PURPOSE_REGRESSION" = "true" ]; then
+    BLOCK_REASON=""
+    [ "$VERDICT" = "CHANGES REQUESTED" ] && BLOCK_REASON="review verdict is CHANGES REQUESTED (blocking finding confirmed by Phase 7B)"
+    [ "$HAS_PURPOSE_REGRESSION" = "true" ] && BLOCK_REASON="${BLOCK_REASON:+${BLOCK_REASON}; }purpose regression detected by Phase 7A (\`HAS_PURPOSE_REGRESSION=true\`)"
+    gh issue comment {MERGE_ISSUE} {MERGE_GH_FLAG} --body "⛔ Auto-merge aborted for PR #{PR_NUMBER}: ${BLOCK_REASON}. Manual review required before merging."
+    gh issue edit {MERGE_ISSUE} {MERGE_GH_FLAG} --add-label "needs-human" 2>/dev/null || true
+    # STOP — do not attempt gh pr merge when §7B blocking conditions are active
+else
+
 # Pre-merge mergeability guard — re-fetch fresh state before attempting merge <!-- Added: forge#194 -->
 # A PR that was MERGEABLE at Phase 1A may have become CONFLICTING if the base branch
 # received commits while the review was running. Re-check before every auto-merge.
@@ -1099,7 +1636,7 @@ if [ "$PRE_MERGE_HEALTH" = "CONFLICTING" ] || [ "$PRE_MERGE_HEALTH_STATE" = "DIR
     # STOP — do not attempt gh pr merge on a CONFLICTING/DIRTY PR
 else
     # Checkpoint comment on issue
-    gh issue comment {MERGE_ISSUE} {MERGE_GH_FLAG} --body "Review complete for PR #{PR_NUMBER}. Verdict: {VERDICT}. Proceeding to merge."
+    gh issue comment {MERGE_ISSUE} {MERGE_GH_FLAG} --body "Review complete for PR #{PR_NUMBER}. Verdict: ${VERDICT:-APPROVED}. Proceeding to merge."
 
     # Merge
     gh pr merge {PR_NUMBER} {MERGE_GH_FLAG} --merge
@@ -1107,6 +1644,7 @@ else
     # Verify
     MERGE_STATE=$(gh pr view {PR_NUMBER} {MERGE_GH_FLAG} --json state --jq '.state')
     [ "$MERGE_STATE" != "MERGED" ] && gh issue comment {MERGE_ISSUE} {MERGE_GH_FLAG} --body "PR #{PR_NUMBER} merge failed. State: $MERGE_STATE."
+fi
 fi
 ```
 
@@ -1211,7 +1749,7 @@ gh pr comment $ARGUMENTS --body "$(cat <<'EOF'
 ## Verdict: [APPROVE / CHANGES REQUESTED / NEEDS RE-REVIEW]
 
 ## Context-Aware Review
-**Domains**: [list] | **Agents**: [N] ([names])
+**Domains**: [list] | **Agents**: [N] ([names]) | **Dispatch mode**: [risk-scaled (default) / thorough (--thorough flag) / full-union (milestone PR)]
 
 ## Integration Checks (Phase 2.5)
 **Code registration**: [pass / N broken activation paths found]
@@ -1243,9 +1781,10 @@ Notify user:
 ```
 Review complete for PR #X. Verdict: [VERDICT].
 - Domains: [list]
-- Agents: [N] ([names])
+- Agents: [N] ([names]) — [dispatch mode: risk-scaled / thorough / full-union]
 - Integration checks: [pass/N broken paths found]
 - Issues created: [M]
 {IF AUTO_MERGE: "PR merged and issue closed." / "Merge FAILED — see issue."}
 {IF IS_MILESTONE_TO_STAGING: "Review findings demilestoned: [N] issues moved to fast lane." / ""}
+{Tip if risk-scaled: "Run with --thorough to enable full union dispatch for release-critical reviews."}
 ```
