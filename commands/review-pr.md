@@ -1609,6 +1609,20 @@ $([ "$HAS_PURPOSE_REGRESSION" = "true" ] && echo "
 **Skip if** `AUTO_MERGE=false`.
 
 ```bash
+# §7B verdict + purpose-regression guard — check before any merge attempt <!-- Added: forge#1601 -->
+# HARD RULE 3 requires that VERDICT=CHANGES REQUESTED and HAS_PURPOSE_REGRESSION=true
+# always block merge, including under --auto-merge. These vars are set in Phase 7A/7B
+# earlier in the same agent session. An unset/empty VERDICT is safe — it evaluates to
+# "" which does not equal "CHANGES REQUESTED", so fast-lane PRs (no 7A run) are unaffected.
+if [ "$VERDICT" = "CHANGES REQUESTED" ] || [ "$HAS_PURPOSE_REGRESSION" = "true" ]; then
+    BLOCK_REASON=""
+    [ "$VERDICT" = "CHANGES REQUESTED" ] && BLOCK_REASON="review verdict is CHANGES REQUESTED (blocking finding confirmed by Phase 7B)"
+    [ "$HAS_PURPOSE_REGRESSION" = "true" ] && BLOCK_REASON="${BLOCK_REASON:+${BLOCK_REASON}; }purpose regression detected by Phase 7A (\`HAS_PURPOSE_REGRESSION=true\`)"
+    gh issue comment {MERGE_ISSUE} {MERGE_GH_FLAG} --body "⛔ Auto-merge aborted for PR #{PR_NUMBER}: ${BLOCK_REASON}. Manual review required before merging."
+    gh issue edit {MERGE_ISSUE} {MERGE_GH_FLAG} --add-label "needs-human" 2>/dev/null || true
+    # STOP — do not attempt gh pr merge when §7B blocking conditions are active
+else
+
 # Pre-merge mergeability guard — re-fetch fresh state before attempting merge <!-- Added: forge#194 -->
 # A PR that was MERGEABLE at Phase 1A may have become CONFLICTING if the base branch
 # received commits while the review was running. Re-check before every auto-merge.
@@ -1622,7 +1636,7 @@ if [ "$PRE_MERGE_HEALTH" = "CONFLICTING" ] || [ "$PRE_MERGE_HEALTH_STATE" = "DIR
     # STOP — do not attempt gh pr merge on a CONFLICTING/DIRTY PR
 else
     # Checkpoint comment on issue
-    gh issue comment {MERGE_ISSUE} {MERGE_GH_FLAG} --body "Review complete for PR #{PR_NUMBER}. Verdict: {VERDICT}. Proceeding to merge."
+    gh issue comment {MERGE_ISSUE} {MERGE_GH_FLAG} --body "Review complete for PR #{PR_NUMBER}. Verdict: ${VERDICT:-APPROVED}. Proceeding to merge."
 
     # Merge
     gh pr merge {PR_NUMBER} {MERGE_GH_FLAG} --merge
@@ -1630,6 +1644,7 @@ else
     # Verify
     MERGE_STATE=$(gh pr view {PR_NUMBER} {MERGE_GH_FLAG} --json state --jq '.state')
     [ "$MERGE_STATE" != "MERGED" ] && gh issue comment {MERGE_ISSUE} {MERGE_GH_FLAG} --body "PR #{PR_NUMBER} merge failed. State: $MERGE_STATE."
+fi
 fi
 ```
 
