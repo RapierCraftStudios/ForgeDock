@@ -37,6 +37,23 @@ done
 # card is absent — pre-card runs or non-merged terminal states degrade gracefully).
 ```
 
+**Also collect independent-verification results** (Step 4B.7 markers) for the analytics row in
+Step 6B. Re-derive the counts from the comment markers rather than trusting in-memory state —
+this makes the row compaction-resilient. Issues with neither marker were not gated in
+(non-security-critical domain, feature disabled, or non-merged terminal state): <!-- Added: forge#1613 -->
+
+```bash
+IV_PASS=0; IV_FAIL=0
+for NUM in {all_completed_issue_numbers}; do
+  MARKERS=$(gh api repos/{GH_REPO}/issues/${NUM}/comments \
+    --jq '[.[] | select(.body | test("FORGE:INDEP_VERIFY_(PASS|FAIL)")) | .body] | first // ""' 2>/dev/null)
+  case "$MARKERS" in
+    *FORGE:INDEP_VERIFY_PASS*) IV_PASS=$((IV_PASS + 1)) ;;
+    *FORGE:INDEP_VERIFY_FAIL*) IV_FAIL=$((IV_FAIL + 1)) ;;
+  esac
+done
+```
+
 ### Step 6B: Present consolidated report
 
 ```
@@ -123,12 +140,15 @@ done
 | Competing recommendations reconciled (Phase 2.5) | {RECONCILED_COUNT} (investigation plans arbitrated in place + serialized) |
 | Findings validated | {N} |
 | False positives | {N} ({%}) |
+| Independent verification | {IV_PASS} passed / {IV_FAIL} failed |
 | Anomalies flagged | {N} |
 
 **Domain breakdown**: {N} scraping, {N} frontend, {N} billing, ...
 **Routing**: {N} fast-lane, {N} feature-lane
 
 > `Findings queued after cascade control` reports Step 4C's defer/execute triage split (`QUEUED_FINDINGS` vs `DEFERRED_FINDINGS`) — it is NOT a dedup/arbitration computation; no such step exists for review findings. `Competing recommendations reconciled` is populated by Phase 2.5 (`RECONCILED_COUNT`), which reconciles investigation plans, not review findings. It is `0` when the batch had 0–1 investigations (synthesis is a no-op). <!-- Added: forge#1192, forge#1193 -->
+
+> `Independent verification` reports Step 4B.7's batch-level acceptance-criteria re-check on merged PRs in security-critical domains. `{IV_PASS}` / `{IV_FAIL}` are re-derived in Step 6A from `FORGE:INDEP_VERIFY_PASS` / `FORGE:INDEP_VERIFY_FAIL` comment markers — never estimated. Issues with neither marker were not gated in (non-security-critical domain, feature disabled via `orchestrate.independent_verification.enabled`, or non-merged terminal state). `0 passed / 0 failed` is the expected value for batches with no security-critical issues. Any `{IV_FAIL} > 0` issue carries `needs-human` and had its successors blocked — list those issue numbers under **Systematic issues** below. <!-- Added: forge#1613 -->
 
 **Systematic issues** (flag if detected):
 - False positive rate > 30% → review agents may need tuning
@@ -137,6 +157,7 @@ done
 - Contract divergences > 20% → investigation quality may need improvement
 - **Idle% > 50%** → agents stalling at phase boundaries; check work-on routing loop
 - **Avg resumes > 1** → orchestrator having to compensate for agent stops
+- **Independent verification failures > 0** → merged PRs with unmet acceptance criteria reached staging/milestone; list the failing issue numbers here — each carries `needs-human` and blocked its successors (Step 4B.7)
 
 ### Next Steps
 {If milestone and all issues done: "Milestone ready to ship. Run `/milestone ship {slug}` when ready. The ship command includes a pre-merge hunk-loss audit (Step 2.5) that detects staging-only hunks in milestone-modified files and rebases the milestone branch to absorb them before creating the PR — protecting against squash-merge regressions."}
