@@ -971,7 +971,7 @@ async function update() {
       // Restore original branch after a successful update.
       if (needsCheckout && !isDetached) {
         try {
-          execSync(`git checkout ${branch} --quiet`, { cwd: FORGE_HOME });
+          execFileSync("git", ["checkout", branch, "--quiet"], { cwd: FORGE_HOME });
           console.log(
             `  Restored branch ${CYAN}${branch}${RESET}.`,
           );
