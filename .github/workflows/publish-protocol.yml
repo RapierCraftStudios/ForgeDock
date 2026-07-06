@@ -1,0 +1,64 @@
+name: Publish @forgedock/protocol to npm
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'packages/protocol/**'
+  workflow_dispatch:
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    if: github.ref == 'refs/heads/main'
+    permissions:
+      contents: read
+      id-token: write
+      packages: write
+
+    defaults:
+      run:
+        working-directory: packages/protocol
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Use Node.js 24
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          registry-url: 'https://registry.npmjs.org'
+
+      - name: Run tests
+        run: node --test "test/**/*.test.mjs"
+
+      - name: Run conformance suite
+        run: node src/cli.js fixtures/
+
+      - name: Check if version already published
+        id: version-check
+        run: |
+          PKG_VERSION=$(node -p "require('./package.json').version")
+          PKG_NAME=$(node -p "require('./package.json').name")
+          if npm show "${PKG_NAME}@${PKG_VERSION}" version --silent 2>/dev/null | grep -q "${PKG_VERSION}"; then
+            echo "Version ${PKG_VERSION} already published — skipping"
+            echo "SKIP_PUBLISH=true" >> $GITHUB_ENV
+          else
+            echo "SKIP_PUBLISH=false" >> $GITHUB_ENV
+          fi
+
+      - name: Publish to npm (OIDC trusted publishing)
+        if: env.SKIP_PUBLISH != 'true'
+        run: npm publish --provenance --access public
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+
+      - name: Publish to GitHub Packages
+        if: env.SKIP_PUBLISH != 'true'
+        run: |
+          NPMRC="$RUNNER_TEMP/.npmrc"
+          echo "//npm.pkg.github.com/:_authToken=${GH_TOKEN}" > "$NPMRC"
+          echo "@forgedock:registry=https://npm.pkg.github.com" >> "$NPMRC"
+          npm publish --access public --userconfig "$NPMRC"
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}

@@ -1,0 +1,483 @@
+<!--
+  ARCHETYPE: editorial-typographic
+  SIGNATURE MOVE: A newspaper-style two-column layout where the left column is a full-height sticky "editorial" — a single strong thesis statement set in large serif — while the right column scrolls through product sections like magazine spreads. Type is the art.
+  EFFECTS PLAN:
+    - Left column: sticky with a thin vertical rule, thesis text fills the column edge-to-edge
+    - Section transitions: thin numbered rules (01, 02, 03) used as chapter markers — editorial pacing
+    - Pull quote: oversized serif italic floated outside the grid with a hairline border-left
+    - Issue list: set as a typographic table — monospaced identifiers, ragged-right titles
+    - CTA: inverted type treatment — white on black, letterpress-style, no box-shadow theatrics
+    - Hover on nav links: underline slides from left (scaleX transform on ::after pseudo)
+  NEGATIVES CHECKED:
+    N1 (generic SaaS layout) — PASS: editorial two-column newspaper grid, no hero blob or split with screenshot
+    N2 (cliché copy) — PASS: "Work like you mean it." — short, declarative; no productivity buzzwords
+    N3 (overloaded color) — PASS: warm off-white (#FAFAF7) + black + single accent terracotta (#C4603A), used sparingly
+    N4 (fake screenshots) — PASS: issue table is live-rendered HTML, typographically styled
+    N5 (wall of feature bullets) — PASS: features written as editorial paragraph statements with pull numbers
+    N6 (hero CTA overload) — PASS: one CTA in hero ("Start free"), sign-in is just a link
+    N7 (infinite gradients) — PASS: no gradients; warm background tint only
+    N8 (social proof inflation) — PASS: one specific quote with publication-style attribution
+    N9 (animation overload) — PASS: only nav underline and scroll reveal; nothing looping or ambient
+    N10 (font mixing chaos) — PASS: Playfair Display (editorial serif) + DM Sans (body) — deliberate pairing
+    N11 (mobile ignorance) — PASS: sticky column collapses to stacked on mobile, all breakpoints handled
+    N12 (forgettable close) — PASS: closing chapter has its own editorial thesis ("The tool should disappear.")
+-->
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Plume — Work like you mean it.</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Playfair+Display:ital,wght@0,400;0,500;0,700;1,400;1,500&family=DM+Sans:wght@300;400;500;600&family=DM+Mono:wght@400;500&display=swap" rel="stylesheet" />
+  <script>
+    tailwind.config = {
+      theme: {
+        extend: {
+          fontFamily: {
+            serif: ['Playfair Display', 'Georgia', 'serif'],
+            sans: ['DM Sans', 'system-ui', 'sans-serif'],
+            mono: ['DM Mono', 'Fira Code', 'monospace'],
+          },
+          colors: {
+            terra: '#C4603A',
+            'warm-bg': '#FAFAF7',
+            'warm-rule': '#E8E6E0',
+            ink: '#1A1814',
+          },
+        },
+      },
+    }
+  </script>
+  <style>
+    * { -webkit-font-smoothing: antialiased; }
+    body { background: #FAFAF7; color: #1A1814; }
+
+    /* Nav underline animation */
+    .nav-link {
+      position: relative;
+      text-decoration: none;
+      color: #5A5750;
+      font-size: 13px;
+      font-weight: 400;
+      padding-bottom: 2px;
+    }
+    .nav-link::after {
+      content: '';
+      position: absolute;
+      bottom: 0;
+      left: 0;
+      width: 100%;
+      height: 1px;
+      background: #1A1814;
+      transform: scaleX(0);
+      transform-origin: left;
+      transition: transform 0.25s cubic-bezier(0.16,1,0.3,1);
+    }
+    .nav-link:hover::after { transform: scaleX(1); }
+    .nav-link:hover { color: #1A1814; }
+
+    /* Chapter rule */
+    .chapter-rule {
+      border-top: 1px solid #1A1814;
+      padding-top: 10px;
+    }
+    .chapter-num {
+      font-family: 'DM Mono', monospace;
+      font-size: 10px;
+      letter-spacing: 0.15em;
+      color: #C4603A;
+      display: block;
+      margin-bottom: 4px;
+    }
+
+    /* Pull quote */
+    .pull-quote {
+      border-left: 3px solid #C4603A;
+      padding-left: 20px;
+    }
+
+    /* Issue table row */
+    .issue-editorial {
+      display: grid;
+      grid-template-columns: 80px 1fr 90px 80px;
+      align-items: center;
+      border-bottom: 1px solid #E8E6E0;
+      padding: 10px 0;
+      gap: 8px;
+    }
+    .issue-editorial:hover {
+      background: rgba(196, 96, 58, 0.04);
+    }
+
+    /* CTA button */
+    .btn-editorial {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      padding: 12px 24px;
+      background: #1A1814;
+      color: #FAFAF7;
+      font-family: 'DM Sans', sans-serif;
+      font-weight: 500;
+      font-size: 14px;
+      letter-spacing: 0.01em;
+      border: 1px solid #1A1814;
+      text-decoration: none;
+      transition: background 0.2s, color 0.2s;
+    }
+    .btn-editorial:hover {
+      background: #C4603A;
+      border-color: #C4603A;
+    }
+
+    /* Scroll reveal */
+    .reveal {
+      opacity: 0;
+      transform: translateY(12px);
+      transition: opacity 0.7s cubic-bezier(0.16,1,0.3,1), transform 0.7s cubic-bezier(0.16,1,0.3,1);
+    }
+    .reveal.visible {
+      opacity: 1;
+      transform: translateY(0);
+    }
+    .reveal-d1 { transition-delay: 0.1s; }
+    .reveal-d2 { transition-delay: 0.2s; }
+    .reveal-d3 { transition-delay: 0.3s; }
+
+    /* Status treatment */
+    .status-editorial {
+      font-family: 'DM Mono', monospace;
+      font-size: 10px;
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+    }
+
+    /* Horizontal rule style */
+    hr.editorial { border: none; border-top: 1px solid #E8E6E0; }
+
+    /* Background tint block */
+    .tint-block { background: #F0EDE4; }
+
+    /* Large editorial number */
+    .editorial-stat {
+      font-family: 'Playfair Display', serif;
+      font-weight: 700;
+      font-size: clamp(3rem, 6vw, 5rem);
+      line-height: 1;
+      letter-spacing: -0.02em;
+      color: #1A1814;
+    }
+  </style>
+</head>
+<body class="font-sans bg-warm-bg text-ink">
+
+  <!-- Masthead / Nav -->
+  <header class="border-b border-warm-rule bg-warm-bg/95 backdrop-blur-sm sticky top-0 z-50">
+    <!-- Top strip -->
+    <div class="border-b border-warm-rule px-6 py-1.5 flex items-center justify-between">
+      <span class="font-mono text-xs text-zinc-400 tracking-widest uppercase">Issue tracking for teams who ship</span>
+      <a href="#" class="text-xs font-medium text-terra hover:underline">→ Now in public beta</a>
+    </div>
+    <!-- Main nav -->
+    <div class="max-w-7xl mx-auto px-6 h-14 flex items-center justify-between">
+      <div class="flex items-center gap-8">
+        <a href="#" class="font-serif text-xl font-bold tracking-tight text-ink">Plume</a>
+        <nav class="hidden md:flex items-center gap-6">
+          <a href="#" class="nav-link">Product</a>
+          <a href="#" class="nav-link">Changelog</a>
+          <a href="#" class="nav-link">Pricing</a>
+          <a href="#" class="nav-link">Docs</a>
+        </nav>
+      </div>
+      <div class="flex items-center gap-4">
+        <a href="#" class="nav-link">Sign in</a>
+        <a href="#" class="btn-editorial py-2 px-5 text-sm">Start free</a>
+      </div>
+    </div>
+  </header>
+
+  <!-- Layout container — editorial two-column -->
+  <div class="max-w-7xl mx-auto px-6">
+    <div class="md:flex">
+
+      <!-- LEFT COLUMN — sticky editorial thesis -->
+      <div class="hidden md:block md:w-72 lg:w-80 flex-shrink-0 border-r border-warm-rule">
+        <div class="sticky top-28 py-16 pr-10">
+          <span class="chapter-num">Plume · 2025</span>
+          <h1 class="font-serif text-4xl lg:text-5xl font-bold leading-[1.05] tracking-tight mb-6">
+            Work like<br/>you<br/>mean it.
+          </h1>
+          <hr class="editorial mb-6" />
+          <p class="text-sm text-zinc-600 leading-relaxed mb-8">
+            Issue tracking that respects your attention. Built for software teams who'd rather ship than manage their tools.
+          </p>
+          <a href="#" class="btn-editorial">Get started free</a>
+          <p class="mt-4 text-xs text-zinc-400 leading-relaxed">No credit card · Setup in minutes</p>
+
+          <!-- Pull stat -->
+          <div class="mt-12 pt-8 border-t border-warm-rule">
+            <div class="editorial-stat text-terra">2.8k</div>
+            <p class="text-xs text-zinc-500 mt-1 leading-relaxed font-mono uppercase tracking-wider">Issues closed<br/>today across<br/>Plume teams</p>
+          </div>
+        </div>
+      </div>
+
+      <!-- RIGHT COLUMN — scrollable content -->
+      <div class="md:flex-1 md:pl-12 lg:pl-16">
+
+        <!-- Mobile hero (only visible < md) -->
+        <div class="md:hidden py-12 border-b border-warm-rule mb-12">
+          <h1 class="font-serif text-5xl font-bold leading-[1.05] tracking-tight mb-5">Work like<br/>you mean it.</h1>
+          <p class="text-base text-zinc-600 leading-relaxed mb-6">Issue tracking that respects your attention. Built for software teams who'd rather ship than manage their tools.</p>
+          <a href="#" class="btn-editorial">Get started free</a>
+        </div>
+
+        <!-- Chapter 01 — The interface -->
+        <div class="py-14 border-b border-warm-rule">
+          <div class="chapter-rule reveal mb-8">
+            <span class="chapter-num">01 / Interface</span>
+            <h2 class="font-serif text-2xl md:text-3xl font-medium leading-tight">Every issue, exactly where it belongs.</h2>
+          </div>
+
+          <!-- Issue table -->
+          <div class="reveal reveal-d1 mb-8">
+            <!-- Header -->
+            <div class="issue-editorial" style="border-bottom: 2px solid #1A1814; padding-bottom: 6px;">
+              <span class="font-mono text-xs uppercase tracking-widest text-zinc-400">ID</span>
+              <span class="font-mono text-xs uppercase tracking-widest text-zinc-400">Title</span>
+              <span class="font-mono text-xs uppercase tracking-widest text-zinc-400 hidden sm:block">Status</span>
+              <span class="font-mono text-xs uppercase tracking-widest text-zinc-400">Priority</span>
+            </div>
+
+            <div class="issue-editorial">
+              <span class="font-mono text-xs text-zinc-400">PLM-238</span>
+              <span class="text-sm font-medium">Keyboard shortcut overlay</span>
+              <span class="status-editorial text-terra hidden sm:block">In progress</span>
+              <span class="font-mono text-xs font-medium text-red-600">Urgent</span>
+            </div>
+
+            <div class="issue-editorial">
+              <span class="font-mono text-xs text-zinc-400">PLM-241</span>
+              <span class="text-sm font-medium">Cycle date overflow on narrow viewports</span>
+              <span class="status-editorial text-zinc-500 hidden sm:block">Todo</span>
+              <span class="font-mono text-xs font-medium text-red-600">Urgent</span>
+            </div>
+
+            <div class="issue-editorial">
+              <span class="font-mono text-xs text-zinc-400">PLM-229</span>
+              <span class="text-sm font-medium">Roadmap: group by quarter</span>
+              <span class="status-editorial text-amber-600 hidden sm:block">In review</span>
+              <span class="font-mono text-xs font-medium text-zinc-500">Medium</span>
+            </div>
+
+            <div class="issue-editorial" style="border-bottom:none;">
+              <span class="font-mono text-xs text-zinc-400">PLM-215</span>
+              <span class="text-sm text-zinc-400 line-through">Sub-issue collapse state</span>
+              <span class="status-editorial text-green-600 hidden sm:block">Done</span>
+              <span class="font-mono text-xs font-medium text-zinc-400">Low</span>
+            </div>
+          </div>
+
+          <!-- Keyboard shortcuts bar -->
+          <div class="reveal reveal-d2 flex items-center gap-3 text-xs text-zinc-500 border border-warm-rule p-3 bg-white">
+            <span class="font-mono uppercase tracking-wider text-xs">Shortcuts</span>
+            <span class="mx-2 text-zinc-300">|</span>
+            <kbd class="font-mono bg-warm-bg border border-warm-rule px-2 py-0.5 text-xs">C</kbd>
+            <span>New issue</span>
+            <kbd class="font-mono bg-warm-bg border border-warm-rule px-2 py-0.5 text-xs ml-4">⌘K</kbd>
+            <span>Command</span>
+            <kbd class="font-mono bg-warm-bg border border-warm-rule px-2 py-0.5 text-xs ml-4">?</kbd>
+            <span>All shortcuts</span>
+          </div>
+        </div>
+
+        <!-- Chapter 02 — Cycles -->
+        <div class="py-14 border-b border-warm-rule">
+          <div class="chapter-rule reveal mb-8">
+            <span class="chapter-num">02 / Cycles</span>
+            <h2 class="font-serif text-2xl md:text-3xl font-medium leading-tight">Time-boxed. Automatic. No ceremony.</h2>
+          </div>
+
+          <div class="grid sm:grid-cols-2 gap-8 mb-10">
+            <div class="reveal">
+              <p class="text-sm text-zinc-700 leading-relaxed">
+                A Plume cycle is a fixed time window with a clear scope. Issues carry over automatically. When the cycle closes, you see exactly what shipped — no manual tally.
+              </p>
+            </div>
+            <div class="reveal reveal-d1">
+              <p class="text-sm text-zinc-700 leading-relaxed">
+                Cycle health is visible at a glance: completion rate, velocity trend, scope creep. All the signal you need without building a dashboard.
+              </p>
+            </div>
+          </div>
+
+          <!-- Cycle progress visual -->
+          <div class="reveal tint-block border border-warm-rule p-6">
+            <div class="flex items-center justify-between mb-4">
+              <div>
+                <span class="font-mono text-xs uppercase tracking-widest text-zinc-500">Cycle 12</span>
+                <h3 class="font-serif text-xl font-medium mt-0.5">Q3 Sprint — Week 2</h3>
+              </div>
+              <div class="text-right">
+                <span class="font-serif text-3xl font-bold text-terra">43%</span>
+                <p class="font-mono text-xs text-zinc-500 uppercase tracking-wider">Complete</p>
+              </div>
+            </div>
+            <div class="w-full h-2 bg-zinc-200 rounded-full mb-4">
+              <div class="h-full rounded-full" style="width:43%; background:#C4603A;"></div>
+            </div>
+            <div class="flex items-center gap-6 text-xs font-mono text-zinc-500 uppercase tracking-wider">
+              <span><strong class="text-ink font-bold font-sans">16</strong> closed</span>
+              <span><strong class="text-ink font-bold font-sans">8</strong> in progress</span>
+              <span><strong class="text-ink font-bold font-sans">14</strong> todo</span>
+              <span class="ml-auto"><strong class="text-terra font-bold font-sans">6 days</strong> left</span>
+            </div>
+          </div>
+        </div>
+
+        <!-- Pull quote break -->
+        <div class="py-14 border-b border-warm-rule">
+          <div class="reveal pull-quote max-w-lg">
+            <p class="font-serif text-2xl md:text-3xl italic font-normal leading-snug text-ink mb-4">
+              "We moved from Linear to Plume because it types like a text editor and thinks like a project manager."
+            </p>
+            <p class="font-mono text-xs uppercase tracking-widest text-zinc-500">
+              Denise Moreau — Engineering Director, Vercel
+            </p>
+          </div>
+        </div>
+
+        <!-- Chapter 03 — Roadmap -->
+        <div class="py-14 border-b border-warm-rule">
+          <div class="chapter-rule reveal mb-8">
+            <span class="chapter-num">03 / Roadmap</span>
+            <h2 class="font-serif text-2xl md:text-3xl font-medium leading-tight">The roadmap writes itself.</h2>
+          </div>
+
+          <div class="reveal mb-6">
+            <p class="text-sm text-zinc-700 leading-relaxed max-w-lg">
+              Plume's roadmap view is generated from your project and cycle data — not a separate doc you maintain in Notion. Share a read-only link with stakeholders. It updates as you work.
+            </p>
+          </div>
+
+          <!-- Mini roadmap visual -->
+          <div class="reveal reveal-d1 border border-warm-rule bg-white overflow-x-auto">
+            <div class="min-w-96 p-5">
+              <div class="flex items-center gap-2 mb-4">
+                <span class="font-mono text-xs uppercase tracking-widest text-zinc-400">Projects</span>
+                <span class="mx-2 text-zinc-200">·</span>
+                <span class="font-mono text-xs uppercase tracking-widest text-zinc-400">Q3 2025</span>
+              </div>
+              <div class="space-y-3">
+                <!-- Row -->
+                <div class="flex items-center gap-3">
+                  <span class="w-28 text-xs font-medium truncate flex-shrink-0">Auth refactor</span>
+                  <div class="flex-1 h-6 bg-warm-bg rounded-sm relative border border-warm-rule">
+                    <div class="absolute left-0 top-0 h-full rounded-sm" style="width:80%; background:#C4603A; opacity:0.7;"></div>
+                    <span class="absolute inset-0 flex items-center px-2 text-xs font-mono text-white mix-blend-multiply">80%</span>
+                  </div>
+                </div>
+                <div class="flex items-center gap-3">
+                  <span class="w-28 text-xs font-medium truncate flex-shrink-0">Mobile redesign</span>
+                  <div class="flex-1 h-6 bg-warm-bg rounded-sm relative border border-warm-rule" style="margin-left: 15%;">
+                    <div class="absolute left-0 top-0 h-full rounded-sm" style="width:40%; background:#1A1814; opacity:0.6;"></div>
+                    <span class="absolute inset-0 flex items-center px-2 text-xs font-mono text-white">40%</span>
+                  </div>
+                </div>
+                <div class="flex items-center gap-3">
+                  <span class="w-28 text-xs font-medium truncate flex-shrink-0">API v2</span>
+                  <div class="flex-1 h-6 bg-warm-bg rounded-sm relative border border-warm-rule" style="margin-left: 35%;">
+                    <div class="absolute left-0 top-0 h-full rounded-sm" style="width:20%; background:#1A1814; opacity:0.4;"></div>
+                    <span class="absolute inset-0 flex items-center px-2 text-xs font-mono text-zinc-500">Planning</span>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <!-- Chapter 04 — Integrations -->
+        <div class="py-14 border-b border-warm-rule">
+          <div class="chapter-rule reveal mb-8">
+            <span class="chapter-num">04 / Integrations</span>
+            <h2 class="font-serif text-2xl md:text-3xl font-medium leading-tight">Plume syncs. You don't have to.</h2>
+          </div>
+          <div class="grid grid-cols-2 sm:grid-cols-4 gap-px bg-warm-rule border border-warm-rule reveal">
+            <div class="bg-warm-bg p-5 text-center hover:bg-white transition-colors">
+              <p class="font-serif font-medium text-sm mb-1">GitHub</p>
+              <p class="font-mono text-xs text-zinc-400 uppercase tracking-wide">PRs → Issues</p>
+            </div>
+            <div class="bg-warm-bg p-5 text-center hover:bg-white transition-colors">
+              <p class="font-serif font-medium text-sm mb-1">Slack</p>
+              <p class="font-mono text-xs text-zinc-400 uppercase tracking-wide">Notifications</p>
+            </div>
+            <div class="bg-warm-bg p-5 text-center hover:bg-white transition-colors">
+              <p class="font-serif font-medium text-sm mb-1">Figma</p>
+              <p class="font-mono text-xs text-zinc-400 uppercase tracking-wide">Design links</p>
+            </div>
+            <div class="bg-warm-bg p-5 text-center hover:bg-white transition-colors">
+              <p class="font-serif font-medium text-sm mb-1">API</p>
+              <p class="font-mono text-xs text-zinc-400 uppercase tracking-wide">Build your own</p>
+            </div>
+          </div>
+        </div>
+
+        <!-- Chapter 05 — Close -->
+        <div class="py-20">
+          <div class="chapter-rule reveal mb-8">
+            <span class="chapter-num">05 / On tools</span>
+            <h2 class="font-serif text-3xl md:text-4xl font-medium italic leading-tight mb-6">
+              "The best tool is the one that disappears."
+            </h2>
+          </div>
+          <div class="reveal mb-10">
+            <p class="text-sm text-zinc-600 leading-relaxed max-w-lg">
+              Plume is designed to get out of the way. Your team opens it, does the work, and closes the tab. That's the product. Fast, focused, and finished — so you can ship.
+            </p>
+          </div>
+          <div class="reveal reveal-d1 border-t border-warm-rule pt-8">
+            <a href="#" class="btn-editorial">Start building with Plume</a>
+            <p class="mt-4 text-xs text-zinc-400">Free to start · Teams from $8/seat/mo · Cancel anytime</p>
+          </div>
+        </div>
+
+      </div>
+    </div>
+  </div>
+
+  <!-- Footer -->
+  <footer class="border-t-2 border-warm-rule bg-warm-bg px-6 py-10">
+    <div class="max-w-7xl mx-auto">
+      <div class="flex flex-col md:flex-row items-start md:items-center justify-between gap-6">
+        <div>
+          <span class="font-serif text-lg font-bold text-ink">Plume</span>
+          <p class="font-mono text-xs text-zinc-400 uppercase tracking-widest mt-1">Issue tracking for teams who ship.</p>
+        </div>
+        <div class="flex flex-wrap gap-6 text-xs text-zinc-400">
+          <a href="#" class="nav-link text-xs">Privacy</a>
+          <a href="#" class="nav-link text-xs">Terms</a>
+          <a href="#" class="nav-link text-xs">Security</a>
+          <a href="#" class="nav-link text-xs">Status</a>
+          <a href="#" class="nav-link text-xs">Twitter / X</a>
+          <a href="#" class="nav-link text-xs">GitHub</a>
+        </div>
+      </div>
+      <hr class="editorial mt-8 mb-4" />
+      <p class="font-mono text-xs text-zinc-400">© 2025 Plume, Inc. All rights reserved.</p>
+    </div>
+  </footer>
+
+  <script>
+    const observer = new IntersectionObserver((entries) => {
+      entries.forEach(entry => {
+        if (entry.isIntersecting) entry.target.classList.add('visible');
+      });
+    }, { threshold: 0.08 });
+
+    document.querySelectorAll('.reveal').forEach(el => observer.observe(el));
+  </script>
+</body>
+</html>

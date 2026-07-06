@@ -376,3 +376,142 @@ export async function clearNudgeSeen(dir) {
     delete registry.nudgeSeen[absDir];
   });
 }
+
+// ---------------------------------------------------------------------------
+// Claude Code version detection and breakpoints resolution (issue #1252)
+// ---------------------------------------------------------------------------
+
+// execFileSync is not imported at the top of this module (it only imports fs
+// builtins). Import it lazily here using createRequire — safe in Node ESM.
+import { createRequire } from "module";
+const _require = createRequire(import.meta.url);
+
+/**
+ * Detect the installed Claude Code version by running `claude --version`.
+ *
+ * Returns the version string (e.g. "2.1.197") or null if Claude Code is not
+ * installed or the version cannot be parsed. Never throws — callers can safely
+ * check for null and degrade gracefully.
+ *
+ * @returns {string | null} Semver-style version string or null.
+ */
+export function detectClaudeVersion() {
+  try {
+    const { execFileSync } = _require("child_process");
+    const raw = execFileSync("claude", ["--version"], {
+      encoding: "utf-8",
+      stdio: ["pipe", "pipe", "pipe"],
+      timeout: 5000,
+    }).trim();
+    // Claude Code outputs e.g. "Claude Code 2.1.197" or just "2.1.197"
+    const m = raw.match(/(\d+\.\d+\.\d+)/);
+    return m ? m[1] : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Compare two semver-style version strings (e.g. "2.1.152" vs "2.1.197").
+ *
+ * Returns:
+ *   -1 if a < b
+ *    0 if a === b
+ *    1 if a > b
+ *
+ * Non-numeric components are compared lexicographically. Handles missing
+ * components by treating them as 0.
+ *
+ * @param {string} a
+ * @param {string} b
+ * @returns {-1 | 0 | 1}
+ */
+export function compareVersions(a, b) {
+  const pa = String(a).split(".").map((s) => parseInt(s, 10) || 0);
+  const pb = String(b).split(".").map((s) => parseInt(s, 10) || 0);
+  const len = Math.max(pa.length, pb.length);
+  for (let i = 0; i < len; i++) {
+    const va = pa[i] ?? 0;
+    const vb = pb[i] ?? 0;
+    if (va < vb) return -1;
+    if (va > vb) return 1;
+  }
+  return 0;
+}
+
+/**
+ * Load and parse docs/claude-breakpoints.json relative to FORGE_HOME.
+ *
+ * Returns the parsed breakpoints array or an empty array on any error (file
+ * missing, malformed JSON, etc.). Consumers must pass the FORGE_HOME path.
+ *
+ * @param {string} forgeHome - Absolute path to the ForgeDock repo root.
+ * @returns {Array<object>} Array of breakpoint objects.
+ */
+export function loadBreakpoints(forgeHome) {
+  try {
+    const bpPath = join(forgeHome, "docs", "claude-breakpoints.json");
+    const raw = readFileSync(bpPath, "utf-8");
+    const parsed = JSON.parse(raw);
+    return Array.isArray(parsed.breakpoints) ? parsed.breakpoints : [];
+  } catch {
+    return [];
+  }
+}
+
+/**
+ * Resolve all breakpoints applicable to a given Claude Code version.
+ *
+ * A breakpoint is "applicable" if its version is > the supplied version,
+ * meaning the user is on an older version and will be affected by this
+ * breakpoint. This surfaces the set of features/changes the user is missing.
+ *
+ * If no version is supplied, all breakpoints are returned (useful for
+ * listing the full registry).
+ *
+ * Results are sorted by version ascending.
+ *
+ * @param {Array<object>} breakpoints - Array from loadBreakpoints().
+ * @param {string | null} installedVersion - The user's installed Claude Code version, or null.
+ * @returns {Array<object>} Breakpoints the user is missing or all breakpoints if no version.
+ */
+export function resolveBreakpoints(breakpoints, installedVersion) {
+  if (!installedVersion) return [...breakpoints].sort((a, b) => compareVersions(a.version, b.version));
+  return breakpoints
+    .filter((bp) => compareVersions(bp.version, installedVersion) > 0)
+    .sort((a, b) => compareVersions(a.version, b.version));
+}
+
+/**
+ * Resolve a single breakpoint by feature_key.
+ *
+ * Returns the breakpoint object with the matching `feature_key`, or null
+ * if not found. Useful for conditional logic: "does this install support
+ * effort_levels?" → `resolveBreakpoint(bps, 'effort_levels')`.
+ *
+ * @param {Array<object>} breakpoints - Array from loadBreakpoints().
+ * @param {string} featureKey - The `feature_key` value to look up.
+ * @returns {object | null} The matching breakpoint or null.
+ */
+export function resolveBreakpoint(breakpoints, featureKey) {
+  return breakpoints.find((bp) => bp.feature_key === featureKey) ?? null;
+}
+
+/**
+ * Check whether a detected Claude Code version meets or exceeds the version
+ * required for a given feature_key.
+ *
+ * Returns true if the feature is available, false if not, and null if the
+ * feature_key is unknown or the installed version is not detectable.
+ *
+ * @param {Array<object>} breakpoints - Array from loadBreakpoints().
+ * @param {string} featureKey - Feature to check.
+ * @param {string | null} installedVersion - Detected Claude Code version.
+ * @returns {boolean | null}
+ */
+export function hasFeature(breakpoints, featureKey, installedVersion) {
+  if (!installedVersion) return null;
+  const bp = resolveBreakpoint(breakpoints, featureKey);
+  if (!bp) return null;
+  return compareVersions(installedVersion, bp.version) >= 0;
+}

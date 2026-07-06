@@ -1,6 +1,7 @@
 ---
 description: Detect API changes, sync satellite repos, and publish releases
 argument-hint: [check | auto | status | publish | PR-number]
+install: extras
 ---
 <!-- SPDX-FileCopyrightText: Copyright (c) RapierCraft Studios -->
 <!-- SPDX-License-Identifier: AGPL-3.0-or-later -->
@@ -444,7 +445,7 @@ npm version {minor|patch|major} --no-git-tag-version
 # 3. Commit the version bump
 NEW_VERSION=$(grep '"version"' package.json | grep -oP '\d+\.\d+\.\d+')
 git add package.json package-lock.json
-git commit -m "chore: bump version to ${NEW_VERSION}"
+git commit -s -m "chore: bump version to ${NEW_VERSION}"
 git push origin main
 
 # 4. Create GitHub Release (triggers {PUBLISH_WORKFLOW} automatically)
@@ -495,7 +496,7 @@ cd {SUBPATH} && npm version {minor|patch} --no-git-tag-version && cd -
 
 # Commit and push
 git add {SUBPATH}/pyproject.toml {SUBPATH}/package.json {SUBPATH}/package-lock.json
-git commit -m "chore({COMPONENT}): bump version to {NEW_VERSION}"
+git commit -s -m "chore({COMPONENT}): bump version to {NEW_VERSION}"
 git push origin fix/{COMPONENT}-version-bump
 
 # Create PR to {STAGING_BRANCH}, merge, then trigger publish from main

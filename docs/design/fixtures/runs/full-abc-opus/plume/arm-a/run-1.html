@@ -1,0 +1,1270 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Plume - Issue tracking for teams who ship</title>
+<link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@300;400;500;600;700&family=DM+Serif+Display&display=swap" rel="stylesheet">
+<style>
+  *, *::before, *::after { margin: 0; padding: 0; box-sizing: border-box; }
+
+  :root {
+    --ink: #1a1a1a;
+    --ink-secondary: #5a5a5a;
+    --ink-tertiary: #8a8a8a;
+    --surface: #fafaf8;
+    --surface-raised: #ffffff;
+    --border: #e8e6e1;
+    --border-light: #f0eeea;
+    --accent: #2d5a27;
+    --accent-light: #e8f0e7;
+  }
+
+  html { font-size: 16px; -webkit-font-smoothing: antialiased; }
+
+  body {
+    font-family: 'Plus Jakarta Sans', sans-serif;
+    background: var(--surface);
+    color: var(--ink);
+    line-height: 1.6;
+  }
+
+  /* NAV */
+  nav {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 28px 64px;
+    max-width: 1400px;
+    margin: 0 auto;
+  }
+
+  .logo {
+    font-family: 'DM Serif Display', serif;
+    font-size: 1.5rem;
+    letter-spacing: -0.02em;
+    color: var(--ink);
+  }
+
+  .nav-links {
+    display: flex;
+    gap: 40px;
+    align-items: center;
+    list-style: none;
+  }
+
+  .nav-links a {
+    text-decoration: none;
+    color: var(--ink-secondary);
+    font-size: 0.875rem;
+    font-weight: 500;
+    transition: color 0.2s;
+  }
+
+  .nav-links a:hover { color: var(--ink); }
+
+  .nav-cta {
+    background: var(--ink);
+    color: var(--surface) !important;
+    padding: 10px 24px;
+    border-radius: 6px;
+    font-weight: 600;
+    transition: opacity 0.2s;
+  }
+
+  .nav-cta:hover { opacity: 0.85; }
+
+  /* HERO */
+  .hero {
+    max-width: 1400px;
+    margin: 0 auto;
+    padding: 100px 64px 80px;
+    display: grid;
+    grid-template-columns: 1fr;
+    text-align: left;
+  }
+
+  .hero-label {
+    font-size: 0.75rem;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.12em;
+    color: var(--accent);
+    margin-bottom: 24px;
+  }
+
+  .hero h1 {
+    font-family: 'DM Serif Display', serif;
+    font-size: clamp(3rem, 6vw, 5.5rem);
+    line-height: 1.05;
+    letter-spacing: -0.03em;
+    max-width: 800px;
+    margin-bottom: 32px;
+  }
+
+  .hero-sub {
+    font-size: 1.25rem;
+    color: var(--ink-secondary);
+    max-width: 560px;
+    line-height: 1.7;
+    font-weight: 300;
+    margin-bottom: 48px;
+  }
+
+  .hero-actions {
+    display: flex;
+    gap: 16px;
+    align-items: center;
+  }
+
+  .btn-primary {
+    display: inline-block;
+    background: var(--ink);
+    color: var(--surface);
+    padding: 14px 36px;
+    border-radius: 6px;
+    font-weight: 600;
+    font-size: 0.9375rem;
+    text-decoration: none;
+    transition: opacity 0.2s;
+    font-family: inherit;
+    border: none;
+    cursor: pointer;
+  }
+
+  .btn-primary:hover { opacity: 0.85; }
+
+  .btn-ghost {
+    display: inline-block;
+    color: var(--ink-secondary);
+    padding: 14px 24px;
+    font-weight: 500;
+    font-size: 0.9375rem;
+    text-decoration: none;
+    transition: color 0.2s;
+  }
+
+  .btn-ghost:hover { color: var(--ink); }
+
+  /* PRODUCT SCREENSHOT */
+  .product-hero {
+    max-width: 1400px;
+    margin: 0 auto;
+    padding: 0 64px 120px;
+  }
+
+  .product-frame {
+    background: var(--surface-raised);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    overflow: hidden;
+    box-shadow: 0 24px 80px rgba(0,0,0,0.06), 0 2px 8px rgba(0,0,0,0.03);
+  }
+
+  .product-titlebar {
+    display: flex;
+    align-items: center;
+    padding: 14px 20px;
+    border-bottom: 1px solid var(--border-light);
+    gap: 8px;
+  }
+
+  .dot { width: 10px; height: 10px; border-radius: 50%; }
+  .dot-r { background: #f87171; }
+  .dot-y { background: #fbbf24; }
+  .dot-g { background: #4ade80; }
+
+  .product-ui {
+    display: grid;
+    grid-template-columns: 220px 1fr 280px;
+    min-height: 420px;
+  }
+
+  .sidebar {
+    border-right: 1px solid var(--border-light);
+    padding: 16px 0;
+    font-size: 0.8125rem;
+  }
+
+  .sidebar-section {
+    padding: 0 16px;
+    margin-bottom: 20px;
+  }
+
+  .sidebar-label {
+    font-size: 0.6875rem;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    color: var(--ink-tertiary);
+    margin-bottom: 8px;
+    font-weight: 600;
+  }
+
+  .sidebar-item {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 6px 8px;
+    border-radius: 4px;
+    color: var(--ink-secondary);
+    cursor: pointer;
+    transition: background 0.15s;
+  }
+
+  .sidebar-item:hover { background: var(--border-light); }
+  .sidebar-item.active { background: var(--accent-light); color: var(--accent); font-weight: 600; }
+
+  .sidebar-icon {
+    width: 14px;
+    height: 14px;
+    border-radius: 3px;
+    border: 1.5px solid currentColor;
+    flex-shrink: 0;
+  }
+
+  .sidebar-icon.filled { background: currentColor; }
+
+  .main-panel { padding: 20px 24px; }
+
+  .main-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    margin-bottom: 20px;
+  }
+
+  .main-title {
+    font-size: 1rem;
+    font-weight: 700;
+  }
+
+  .filter-bar {
+    display: flex;
+    gap: 8px;
+  }
+
+  .filter-pill {
+    font-size: 0.6875rem;
+    padding: 4px 10px;
+    border-radius: 4px;
+    background: var(--border-light);
+    color: var(--ink-secondary);
+    font-weight: 500;
+  }
+
+  .issue-list { list-style: none; }
+
+  .issue-row {
+    display: grid;
+    grid-template-columns: 20px 60px 1fr auto auto;
+    align-items: center;
+    gap: 12px;
+    padding: 10px 0;
+    border-bottom: 1px solid var(--border-light);
+    font-size: 0.8125rem;
+  }
+
+  .issue-check {
+    width: 14px;
+    height: 14px;
+    border-radius: 50%;
+    border: 1.5px solid var(--border);
+  }
+
+  .issue-check.done {
+    background: var(--accent);
+    border-color: var(--accent);
+  }
+
+  .issue-id { color: var(--ink-tertiary); font-family: 'Plus Jakarta Sans', monospace; font-size: 0.75rem; }
+
+  .issue-title-text { font-weight: 500; }
+
+  .issue-priority {
+    display: inline-block;
+    width: 16px;
+    height: 16px;
+    border-radius: 3px;
+    font-size: 0.6rem;
+    text-align: center;
+    line-height: 16px;
+    font-weight: 700;
+    color: white;
+  }
+
+  .p-urgent { background: #dc2626; }
+  .p-high { background: #ea580c; }
+  .p-medium { background: #ca8a04; }
+  .p-low { background: #6b7280; }
+
+  .issue-label {
+    font-size: 0.6875rem;
+    padding: 2px 8px;
+    border-radius: 10px;
+    font-weight: 500;
+  }
+
+  .label-bug { background: #fee2e2; color: #991b1b; }
+  .label-feat { background: #dbeafe; color: #1e40af; }
+  .label-perf { background: #fef3c7; color: #92400e; }
+  .label-infra { background: #e0e7ff; color: #3730a3; }
+
+  .detail-panel {
+    border-left: 1px solid var(--border-light);
+    padding: 20px;
+    font-size: 0.8125rem;
+  }
+
+  .detail-title {
+    font-weight: 700;
+    font-size: 0.9375rem;
+    margin-bottom: 16px;
+    line-height: 1.4;
+  }
+
+  .detail-meta { margin-bottom: 20px; }
+
+  .detail-row {
+    display: flex;
+    justify-content: space-between;
+    padding: 6px 0;
+    border-bottom: 1px solid var(--border-light);
+  }
+
+  .detail-key { color: var(--ink-tertiary); }
+  .detail-val { font-weight: 500; }
+
+  .detail-desc {
+    color: var(--ink-secondary);
+    font-size: 0.8125rem;
+    line-height: 1.6;
+    margin-top: 16px;
+  }
+
+  /* PILLARS */
+  .pillars {
+    max-width: 1400px;
+    margin: 0 auto;
+    padding: 0 64px 120px;
+  }
+
+  .pillars-header {
+    margin-bottom: 64px;
+  }
+
+  .pillars-header h2 {
+    font-family: 'DM Serif Display', serif;
+    font-size: clamp(2rem, 3.5vw, 3rem);
+    letter-spacing: -0.02em;
+    margin-bottom: 16px;
+  }
+
+  .pillars-header p {
+    color: var(--ink-secondary);
+    max-width: 520px;
+    font-weight: 300;
+    font-size: 1.1rem;
+  }
+
+  .pillars-grid {
+    display: grid;
+    grid-template-columns: repeat(3, 1fr);
+    gap: 1px;
+    background: var(--border);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    overflow: hidden;
+  }
+
+  .pillar {
+    background: var(--surface-raised);
+    padding: 48px 40px;
+  }
+
+  .pillar-number {
+    font-size: 0.6875rem;
+    text-transform: uppercase;
+    letter-spacing: 0.1em;
+    color: var(--ink-tertiary);
+    margin-bottom: 20px;
+    font-weight: 600;
+  }
+
+  .pillar h3 {
+    font-family: 'DM Serif Display', serif;
+    font-size: 1.5rem;
+    margin-bottom: 16px;
+    letter-spacing: -0.01em;
+  }
+
+  .pillar p {
+    color: var(--ink-secondary);
+    font-size: 0.9375rem;
+    line-height: 1.7;
+    margin-bottom: 20px;
+  }
+
+  .pillar-detail {
+    font-size: 0.8125rem;
+    color: var(--ink-tertiary);
+    line-height: 1.7;
+    border-top: 1px solid var(--border-light);
+    padding-top: 16px;
+  }
+
+  /* KEYBOARD SECTION */
+  .keyboard-section {
+    max-width: 1400px;
+    margin: 0 auto;
+    padding: 0 64px 120px;
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 80px;
+    align-items: start;
+  }
+
+  .keyboard-content h2 {
+    font-family: 'DM Serif Display', serif;
+    font-size: clamp(1.75rem, 3vw, 2.5rem);
+    letter-spacing: -0.02em;
+    margin-bottom: 20px;
+  }
+
+  .keyboard-content > p {
+    color: var(--ink-secondary);
+    font-size: 1.0625rem;
+    line-height: 1.7;
+    font-weight: 300;
+    margin-bottom: 40px;
+    max-width: 480px;
+  }
+
+  .shortcut-group {
+    margin-bottom: 32px;
+  }
+
+  .shortcut-group-title {
+    font-size: 0.6875rem;
+    text-transform: uppercase;
+    letter-spacing: 0.1em;
+    color: var(--ink-tertiary);
+    font-weight: 600;
+    margin-bottom: 12px;
+  }
+
+  .shortcut-row {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 10px 0;
+    border-bottom: 1px solid var(--border-light);
+  }
+
+  .shortcut-label { font-size: 0.875rem; color: var(--ink-secondary); }
+
+  .shortcut-keys {
+    display: flex;
+    gap: 4px;
+  }
+
+  .key {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    min-width: 28px;
+    height: 28px;
+    padding: 0 8px;
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 5px;
+    font-size: 0.75rem;
+    font-weight: 600;
+    color: var(--ink-secondary);
+    box-shadow: 0 1px 2px rgba(0,0,0,0.05);
+    font-family: 'Plus Jakarta Sans', sans-serif;
+  }
+
+  .keyboard-visual {
+    background: var(--surface-raised);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    padding: 40px;
+  }
+
+  .cmd-palette {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    overflow: hidden;
+    box-shadow: 0 12px 40px rgba(0,0,0,0.08);
+  }
+
+  .cmd-input {
+    padding: 16px 20px;
+    border-bottom: 1px solid var(--border-light);
+    display: flex;
+    align-items: center;
+    gap: 10px;
+  }
+
+  .cmd-input-icon {
+    color: var(--ink-tertiary);
+    font-size: 0.875rem;
+  }
+
+  .cmd-input-text {
+    color: var(--ink);
+    font-size: 0.875rem;
+    font-weight: 500;
+  }
+
+  .cmd-results { list-style: none; }
+
+  .cmd-result {
+    padding: 10px 20px;
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    font-size: 0.8125rem;
+    color: var(--ink-secondary);
+    cursor: pointer;
+    transition: background 0.1s;
+  }
+
+  .cmd-result:hover, .cmd-result.active {
+    background: var(--accent-light);
+    color: var(--accent);
+  }
+
+  .cmd-result-icon {
+    width: 20px;
+    text-align: center;
+    font-size: 0.75rem;
+    opacity: 0.6;
+  }
+
+  .cmd-hint {
+    margin-left: auto;
+    font-size: 0.6875rem;
+    color: var(--ink-tertiary);
+  }
+
+  /* WORKFLOW SECTION */
+  .workflow-section {
+    background: var(--ink);
+    color: var(--surface);
+    padding: 120px 64px;
+  }
+
+  .workflow-inner {
+    max-width: 1400px;
+    margin: 0 auto;
+  }
+
+  .workflow-header {
+    margin-bottom: 72px;
+  }
+
+  .workflow-header h2 {
+    font-family: 'DM Serif Display', serif;
+    font-size: clamp(2rem, 3.5vw, 3rem);
+    letter-spacing: -0.02em;
+    margin-bottom: 16px;
+  }
+
+  .workflow-header p {
+    color: rgba(250,250,248,0.6);
+    max-width: 520px;
+    font-weight: 300;
+    font-size: 1.0625rem;
+    line-height: 1.7;
+  }
+
+  .workflow-steps {
+    display: grid;
+    grid-template-columns: repeat(4, 1fr);
+    gap: 0;
+    position: relative;
+  }
+
+  .workflow-step {
+    padding: 40px 32px;
+    border: 1px solid rgba(250,250,248,0.1);
+    border-right: none;
+    position: relative;
+  }
+
+  .workflow-step:last-child { border-right: 1px solid rgba(250,250,248,0.1); }
+
+  .step-number {
+    font-size: 2.5rem;
+    font-family: 'DM Serif Display', serif;
+    color: rgba(250,250,248,0.15);
+    margin-bottom: 20px;
+  }
+
+  .step-title {
+    font-weight: 700;
+    font-size: 1rem;
+    margin-bottom: 12px;
+  }
+
+  .step-desc {
+    color: rgba(250,250,248,0.6);
+    font-size: 0.875rem;
+    line-height: 1.7;
+  }
+
+  .step-detail {
+    margin-top: 20px;
+    font-size: 0.75rem;
+    color: rgba(250,250,248,0.35);
+    line-height: 1.6;
+    border-top: 1px solid rgba(250,250,248,0.08);
+    padding-top: 16px;
+  }
+
+  /* INTEGRATIONS */
+  .integrations {
+    max-width: 1400px;
+    margin: 0 auto;
+    padding: 120px 64px;
+  }
+
+  .integrations-grid {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 80px;
+    align-items: start;
+  }
+
+  .integrations h2 {
+    font-family: 'DM Serif Display', serif;
+    font-size: clamp(1.75rem, 3vw, 2.5rem);
+    letter-spacing: -0.02em;
+    margin-bottom: 20px;
+  }
+
+  .integrations > .integrations-grid > div > p {
+    color: var(--ink-secondary);
+    font-size: 1.0625rem;
+    line-height: 1.7;
+    font-weight: 300;
+    margin-bottom: 40px;
+  }
+
+  .integration-list { list-style: none; }
+
+  .integration-item {
+    display: flex;
+    align-items: flex-start;
+    gap: 20px;
+    padding: 24px 0;
+    border-bottom: 1px solid var(--border-light);
+  }
+
+  .integration-icon {
+    width: 40px;
+    height: 40px;
+    border-radius: 8px;
+    background: var(--border-light);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-weight: 700;
+    font-size: 0.75rem;
+    color: var(--ink-secondary);
+    flex-shrink: 0;
+  }
+
+  .integration-name {
+    font-weight: 600;
+    margin-bottom: 4px;
+  }
+
+  .integration-desc {
+    font-size: 0.8125rem;
+    color: var(--ink-secondary);
+    line-height: 1.5;
+  }
+
+  .integrations-visual {
+    background: var(--surface-raised);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    padding: 32px;
+  }
+
+  .commit-feed { list-style: none; }
+
+  .commit-item {
+    display: flex;
+    align-items: flex-start;
+    gap: 16px;
+    padding: 16px 0;
+    border-bottom: 1px solid var(--border-light);
+  }
+
+  .commit-dot {
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    background: var(--accent);
+    margin-top: 6px;
+    flex-shrink: 0;
+  }
+
+  .commit-msg {
+    font-size: 0.8125rem;
+    font-weight: 500;
+    margin-bottom: 4px;
+    font-family: 'Plus Jakarta Sans', monospace;
+  }
+
+  .commit-meta {
+    font-size: 0.75rem;
+    color: var(--ink-tertiary);
+  }
+
+  .commit-link {
+    margin-top: 4px;
+    font-size: 0.75rem;
+    color: var(--accent);
+    text-decoration: none;
+  }
+
+  /* PRICING TEASER */
+  .pricing-teaser {
+    max-width: 1400px;
+    margin: 0 auto;
+    padding: 0 64px 120px;
+    text-align: left;
+  }
+
+  .pricing-card {
+    background: var(--surface-raised);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    padding: 64px 80px;
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 64px;
+    align-items: center;
+  }
+
+  .pricing-card h2 {
+    font-family: 'DM Serif Display', serif;
+    font-size: clamp(1.75rem, 3vw, 2.5rem);
+    letter-spacing: -0.02em;
+    margin-bottom: 16px;
+  }
+
+  .pricing-card > div > p {
+    color: var(--ink-secondary);
+    font-size: 1rem;
+    line-height: 1.7;
+    margin-bottom: 32px;
+  }
+
+  .pricing-highlights { list-style: none; }
+
+  .pricing-highlights li {
+    padding: 10px 0;
+    border-bottom: 1px solid var(--border-light);
+    font-size: 0.9375rem;
+    display: flex;
+    align-items: center;
+    gap: 12px;
+  }
+
+  .check-icon {
+    color: var(--accent);
+    font-weight: 700;
+  }
+
+  /* FOOTER */
+  footer {
+    border-top: 1px solid var(--border);
+    padding: 48px 64px;
+    max-width: 1400px;
+    margin: 0 auto;
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+  }
+
+  .footer-logo {
+    font-family: 'DM Serif Display', serif;
+    font-size: 1.125rem;
+  }
+
+  .footer-links {
+    display: flex;
+    gap: 32px;
+    list-style: none;
+  }
+
+  .footer-links a {
+    text-decoration: none;
+    color: var(--ink-tertiary);
+    font-size: 0.8125rem;
+    transition: color 0.2s;
+  }
+
+  .footer-links a:hover { color: var(--ink); }
+
+  .footer-copy {
+    font-size: 0.75rem;
+    color: var(--ink-tertiary);
+  }
+
+  /* MOBILE */
+  @media (max-width: 1024px) {
+    .product-ui { grid-template-columns: 200px 1fr; }
+    .detail-panel { display: none; }
+    .pillars-grid { grid-template-columns: 1fr; }
+    .keyboard-section { grid-template-columns: 1fr; }
+    .keyboard-visual { display: none; }
+    .workflow-steps { grid-template-columns: 1fr 1fr; }
+    .integrations-grid { grid-template-columns: 1fr; }
+    .integrations-visual { display: none; }
+    .pricing-card { grid-template-columns: 1fr; }
+  }
+
+  @media (max-width: 640px) {
+    nav { padding: 20px 24px; }
+    .nav-links { gap: 20px; }
+    .nav-links li:not(:last-child) { display: none; }
+    .hero { padding: 60px 24px 48px; }
+    .product-hero { padding: 0 24px 80px; }
+    .product-ui { grid-template-columns: 1fr; }
+    .sidebar { display: none; }
+    .pillars { padding: 0 24px 80px; }
+    .pillar { padding: 32px 24px; }
+    .keyboard-section { padding: 0 24px 80px; gap: 40px; }
+    .workflow-section { padding: 80px 24px; }
+    .workflow-steps { grid-template-columns: 1fr; }
+    .workflow-step { border-right: 1px solid rgba(250,250,248,0.1); }
+    .integrations { padding: 80px 24px; }
+    .pricing-teaser { padding: 0 24px 80px; }
+    .pricing-card { padding: 40px 32px; }
+    footer { padding: 32px 24px; flex-direction: column; gap: 24px; text-align: center; }
+    .footer-links { flex-wrap: wrap; justify-content: center; }
+  }
+</style>
+</head>
+<body>
+
+<!-- NAV -->
+<nav>
+  <div class="logo">Plume</div>
+  <ul class="nav-links">
+    <li><a href="#features">Features</a></li>
+    <li><a href="#workflow">Workflow</a></li>
+    <li><a href="#integrations">Integrations</a></li>
+    <li><a href="#pricing">Pricing</a></li>
+    <li><a href="#" class="nav-cta">Get started</a></li>
+  </ul>
+</nav>
+
+<!-- HERO -->
+<section class="hero">
+  <div class="hero-label">Issue tracking, refined</div>
+  <h1>Plan, build, and ship<br>without the noise</h1>
+  <p class="hero-sub">Plume is project management for software teams who value speed and clarity. Keyboard-first, opinionated by design, built for people who actually ship.</p>
+  <div class="hero-actions">
+    <a href="#" class="btn-primary">Get started free</a>
+    <a href="#" class="btn-ghost">See how it works</a>
+  </div>
+</section>
+
+<!-- PRODUCT SCREENSHOT -->
+<section class="product-hero">
+  <div class="product-frame">
+    <div class="product-titlebar">
+      <div class="dot dot-r"></div>
+      <div class="dot dot-y"></div>
+      <div class="dot dot-g"></div>
+    </div>
+    <div class="product-ui">
+      <!-- Sidebar -->
+      <div class="sidebar">
+        <div class="sidebar-section">
+          <div class="sidebar-label">Workspace</div>
+          <div class="sidebar-item active"><div class="sidebar-icon filled"></div>My Issues</div>
+          <div class="sidebar-item"><div class="sidebar-icon"></div>All Issues</div>
+          <div class="sidebar-item"><div class="sidebar-icon"></div>Activity</div>
+        </div>
+        <div class="sidebar-section">
+          <div class="sidebar-label">Cycles</div>
+          <div class="sidebar-item"><div class="sidebar-icon"></div>Cycle 24 &middot; Active</div>
+          <div class="sidebar-item"><div class="sidebar-icon"></div>Cycle 25 &middot; Next</div>
+        </div>
+        <div class="sidebar-section">
+          <div class="sidebar-label">Projects</div>
+          <div class="sidebar-item"><div class="sidebar-icon"></div>Auth Rewrite</div>
+          <div class="sidebar-item"><div class="sidebar-icon"></div>Mobile App</div>
+          <div class="sidebar-item"><div class="sidebar-icon"></div>API v3</div>
+        </div>
+        <div class="sidebar-section">
+          <div class="sidebar-label">Views</div>
+          <div class="sidebar-item"><div class="sidebar-icon"></div>Roadmap</div>
+          <div class="sidebar-item"><div class="sidebar-icon"></div>Progress</div>
+        </div>
+      </div>
+
+      <!-- Main panel -->
+      <div class="main-panel">
+        <div class="main-header">
+          <div class="main-title">Cycle 24 &mdash; Nov 11&ndash;22</div>
+          <div class="filter-bar">
+            <div class="filter-pill">Status: In Progress</div>
+            <div class="filter-pill">Priority: All</div>
+          </div>
+        </div>
+        <ul class="issue-list">
+          <li class="issue-row">
+            <div class="issue-check done"></div>
+            <span class="issue-id">PLM-142</span>
+            <span class="issue-title-text">Migrate session store to Redis</span>
+            <span class="issue-label label-infra">infra</span>
+            <span class="issue-priority p-high">H</span>
+          </li>
+          <li class="issue-row">
+            <div class="issue-check"></div>
+            <span class="issue-id">PLM-158</span>
+            <span class="issue-title-text">Add bulk-action toolbar to issue list</span>
+            <span class="issue-label label-feat">feature</span>
+            <span class="issue-priority p-medium">M</span>
+          </li>
+          <li class="issue-row">
+            <div class="issue-check"></div>
+            <span class="issue-id">PLM-163</span>
+            <span class="issue-title-text">Fix timezone offset in cycle dates</span>
+            <span class="issue-label label-bug">bug</span>
+            <span class="issue-priority p-urgent">!</span>
+          </li>
+          <li class="issue-row">
+            <div class="issue-check"></div>
+            <span class="issue-id">PLM-167</span>
+            <span class="issue-title-text">Reduce bundle size: tree-shake chart lib</span>
+            <span class="issue-label label-perf">perf</span>
+            <span class="issue-priority p-medium">M</span>
+          </li>
+          <li class="issue-row">
+            <div class="issue-check done"></div>
+            <span class="issue-id">PLM-171</span>
+            <span class="issue-title-text">Implement keyboard navigation in list view</span>
+            <span class="issue-label label-feat">feature</span>
+            <span class="issue-priority p-high">H</span>
+          </li>
+          <li class="issue-row">
+            <div class="issue-check"></div>
+            <span class="issue-id">PLM-174</span>
+            <span class="issue-title-text">OAuth flow for GitHub integration</span>
+            <span class="issue-label label-feat">feature</span>
+            <span class="issue-priority p-high">H</span>
+          </li>
+          <li class="issue-row">
+            <div class="issue-check"></div>
+            <span class="issue-id">PLM-179</span>
+            <span class="issue-title-text">Add cycle velocity chart to progress view</span>
+            <span class="issue-label label-feat">feature</span>
+            <span class="issue-priority p-low">L</span>
+          </li>
+        </ul>
+      </div>
+
+      <!-- Detail panel -->
+      <div class="detail-panel">
+        <div class="detail-title">Fix timezone offset in cycle dates</div>
+        <div class="detail-meta">
+          <div class="detail-row"><span class="detail-key">Status</span><span class="detail-val">In Progress</span></div>
+          <div class="detail-row"><span class="detail-key">Priority</span><span class="detail-val" style="color:#dc2626;">Urgent</span></div>
+          <div class="detail-row"><span class="detail-key">Assignee</span><span class="detail-val">A. Chen</span></div>
+          <div class="detail-row"><span class="detail-key">Cycle</span><span class="detail-val">Cycle 24</span></div>
+          <div class="detail-row"><span class="detail-key">Project</span><span class="detail-val">API v3</span></div>
+          <div class="detail-row"><span class="detail-key">Label</span><span class="detail-val">bug</span></div>
+          <div class="detail-row"><span class="detail-key">Created</span><span class="detail-val">Nov 13</span></div>
+        </div>
+        <p class="detail-desc">Cycle start/end dates display incorrectly for users outside UTC. The stored dates are UTC but rendered without conversion. Affects cycle filtering and progress calculation.</p>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- PILLARS -->
+<section class="pillars" id="features">
+  <div class="pillars-header">
+    <h2>Designed around how<br>teams actually work</h2>
+    <p>Every decision in Plume serves one goal: remove friction between having an idea and shipping it.</p>
+  </div>
+  <div class="pillars-grid">
+    <div class="pillar">
+      <div class="pillar-number">01</div>
+      <h3>Issues that move</h3>
+      <p>Create, triage, and close issues faster than you can context-switch. Status, priority, labels, and assignees update in place. No page reloads, no save buttons, no waiting.</p>
+      <div class="pillar-detail">Custom statuses per team. Bulk operations on any selection. Sub-issues for decomposition. Markdown descriptions with inline code and image paste.</div>
+    </div>
+    <div class="pillar">
+      <div class="pillar-number">02</div>
+      <h3>Cycles keep cadence</h3>
+      <p>Time-boxed sprints that start automatically. Drag issues in, track velocity, review what shipped. Unfinished work rolls forward with a single action. No ceremony.</p>
+      <div class="pillar-detail">Configurable cycle length (1-4 weeks). Burndown and velocity charts. Auto-archive completed cycles. Scope-change tracking to protect commitments.</div>
+    </div>
+    <div class="pillar">
+      <div class="pillar-number">03</div>
+      <h3>Projects span cycles</h3>
+      <p>Long-running initiatives that cross multiple sprints. Set milestones, track progress as a percentage, and see which cycles contribute. Projects give you the big picture without a separate tool.</p>
+      <div class="pillar-detail">Roadmap timeline view. Status updates with rich text. Automatic progress from child issues. Filter the board by project to focus.</div>
+    </div>
+  </div>
+</section>
+
+<!-- KEYBOARD SECTION -->
+<section class="keyboard-section">
+  <div class="keyboard-content">
+    <h2>Your hands stay on<br>the keyboard</h2>
+    <p>Plume is built for people who think in keystrokes. Every action is reachable without touching the mouse. The command palette puts the entire workspace at your fingertips.</p>
+
+    <div class="shortcut-group">
+      <div class="shortcut-group-title">Navigation</div>
+      <div class="shortcut-row">
+        <span class="shortcut-label">Command palette</span>
+        <div class="shortcut-keys"><span class="key">&#8984;</span><span class="key">K</span></div>
+      </div>
+      <div class="shortcut-row">
+        <span class="shortcut-label">Go to My Issues</span>
+        <div class="shortcut-keys"><span class="key">G</span> <span class="key">M</span></div>
+      </div>
+      <div class="shortcut-row">
+        <span class="shortcut-label">Go to Active Cycle</span>
+        <div class="shortcut-keys"><span class="key">G</span> <span class="key">C</span></div>
+      </div>
+      <div class="shortcut-row">
+        <span class="shortcut-label">Search issues</span>
+        <div class="shortcut-keys"><span class="key">/</span></div>
+      </div>
+    </div>
+
+    <div class="shortcut-group">
+      <div class="shortcut-group-title">Issue actions</div>
+      <div class="shortcut-row">
+        <span class="shortcut-label">New issue</span>
+        <div class="shortcut-keys"><span class="key">C</span></div>
+      </div>
+      <div class="shortcut-row">
+        <span class="shortcut-label">Set priority</span>
+        <div class="shortcut-keys"><span class="key">P</span></div>
+      </div>
+      <div class="shortcut-row">
+        <span class="shortcut-label">Change status</span>
+        <div class="shortcut-keys"><span class="key">S</span></div>
+      </div>
+      <div class="shortcut-row">
+        <span class="shortcut-label">Assign to me</span>
+        <div class="shortcut-keys"><span class="key">I</span></div>
+      </div>
+      <div class="shortcut-row">
+        <span class="shortcut-label">Add label</span>
+        <div class="shortcut-keys"><span class="key">L</span></div>
+      </div>
+    </div>
+  </div>
+
+  <div class="keyboard-visual">
+    <div class="cmd-palette">
+      <div class="cmd-input">
+        <span class="cmd-input-icon">&#9906;</span>
+        <span class="cmd-input-text">assign PLM-163...</span>
+      </div>
+      <ul class="cmd-results">
+        <li class="cmd-result active">
+          <span class="cmd-result-icon">&#9679;</span>
+          Assign to Alex Chen
+          <span class="cmd-hint">a.chen</span>
+        </li>
+        <li class="cmd-result">
+          <span class="cmd-result-icon">&#9679;</span>
+          Assign to Maria Santos
+          <span class="cmd-hint">m.santos</span>
+        </li>
+        <li class="cmd-result">
+          <span class="cmd-result-icon">&#9679;</span>
+          Assign to Jordan Park
+          <span class="cmd-hint">j.park</span>
+        </li>
+        <li class="cmd-result">
+          <span class="cmd-result-icon">&#9679;</span>
+          Assign to Sam Lee
+          <span class="cmd-hint">s.lee</span>
+        </li>
+        <li class="cmd-result">
+          <span class="cmd-result-icon">&#9675;</span>
+          Unassign
+          <span class="cmd-hint"></span>
+        </li>
+      </ul>
+    </div>
+    <p style="margin-top: 24px; font-size: 0.75rem; color: var(--ink-tertiary); text-align: center;">Command palette &middot; reachable from anywhere with <span class="key" style="display:inline-flex; vertical-align: middle;">&#8984;</span> <span class="key" style="display:inline-flex; vertical-align: middle;">K</span></p>
+  </div>
+</section>
+
+<!-- WORKFLOW SECTION -->
+<section class="workflow-section" id="workflow">
+  <div class="workflow-inner">
+    <div class="workflow-header">
+      <h2>From idea to shipped<br>in one place</h2>
+      <p>Plume replaces the constellation of tools your team has outgrown. One workspace, one source of truth, no tab-switching.</p>
+    </div>
+
+    <div class="workflow-steps">
+      <div class="workflow-step">
+        <div class="step-number">01</div>
+        <div class="step-title">Capture</div>
+        <div class="step-desc">Create issues in seconds. Keyboard shortcut, command palette, or Slack integration. Every issue gets a unique ID and immediate context.</div>
+        <div class="step-detail">Quick-capture with C. Paste images inline. Templates for bugs, features, and tasks. Issues link to code from the start.</div>
+      </div>
+      <div class="workflow-step">
+        <div class="step-number">02</div>
+        <div class="step-title">Plan</div>
+        <div class="step-desc">Drag issues into cycles. Set priorities. Scope work that fits your team's velocity. Protect the sprint by tracking scope changes in real time.</div>
+        <div class="step-detail">Backlog grooming view. Effort estimates. Dependency flags. Automatic capacity calculation based on team size and historical data.</div>
+      </div>
+      <div class="workflow-step">
+        <div class="step-number">03</div>
+        <div class="step-title">Build</div>
+        <div class="step-desc">Issues move through statuses as code ships. PRs link automatically. Branch names generate from issue IDs. The board updates without anyone touching it.</div>
+        <div class="step-detail">GitHub and GitLab sync. Auto-transition on PR merge. Branch name patterns: plm-163-fix-timezone. Code review status reflected on the issue.</div>
+      </div>
+      <div class="workflow-step">
+        <div class="step-number">04</div>
+        <div class="step-title">Ship</div>
+        <div class="step-desc">Close the cycle, review velocity, archive what shipped. Unfinished work rolls forward. The team knows exactly what landed and what's next.</div>
+        <div class="step-detail">Cycle summary reports. Changelog generation. Slack notifications on cycle close. Historical velocity trend so estimates improve over time.</div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- INTEGRATIONS -->
+<section class="integrations" id="integrations">
+  <div class="integrations-grid">
+    <div>
+      <h2>Connects to your<br>existing stack</h2>
+      <p>Plume integrates with the tools your team already relies on. No data silos, no copy-pasting, no context lost between tools.</p>
+      <ul class="integration-list">
+        <li class="integration-item">
+          <div class="integration-icon">GH</div>
+          <div>
+            <div class="integration-name">GitHub</div>
+            <div class="integration-desc">Sync PRs, branches, and commits. Auto-link issues by branch name. Transition statuses on merge.</div>
+          </div>
+        </li>
+        <li class="integration-item">
+          <div class="integration-icon">GL</div>
+          <div>
+            <div class="integration-name">GitLab</div>
+            <div class="integration-desc">Merge request sync, pipeline status, and branch linking. Full bidirectional sync.</div>
+          </div>
+        </li>
+        <li class="integration-item">
+          <div class="integration-icon">SK</div>
+          <div>
+            <div class="integration-name">Slack</div>
+            <div class="integration-desc">Create issues from messages. Get notified on status changes. Slash commands for quick actions.</div>
+          </div>
+        </li>
+        <li class="integration-item">
+          <div class="integration-icon">FG</div>
+          <div>
+            <div class="integration-name">Figma</div>
+            <div class="integration-desc">Embed design links in issues. Preview thumbnails inline. Keep design and engineering in sync.</div>
+          </div>
+        </li>
+        <li class="integration-item">
+          <div class="integration-icon">SY</div>
+          <div>
+            <div class="integration-name">Sentry</div>
+            <div class="integration-desc">Auto-create issues from errors. Link stack traces. Close Sentry issues when the fix ships.</div>
+          </div>
+        </li>
+      </ul>
+    </div>
+
+    <div class="integrations-visual">
+      <div style="font-size: 0.6875rem; text-transform: uppercase; letter-spacing: 0.08em; color: var(--ink-tertiary); font-weight: 600; margin-bottom: 16px;">Recent Activity &middot; GitHub</div>
+      <ul class="commit-feed">
+        <li class="commit-item">
+          <div class="commit-dot"></div>
+          <div>
+            <div class="commit-msg">fix: convert cycle dates to local tz</div>
+            <div class="commit-meta">a.chen &middot; 2 min ago &middot; PLM-163</div>
+            <a href="#" class="commit-link">View PR #247 &rarr;</a>
+          </div>
+        </li>
+        <li class="commit-item">
+          <div class="commit-dot"></div>
+          <div>
+            <div class="commit-msg">feat: add bulk selection toolbar</div>
+            <div class="commit-meta">m.santos &middot; 18 min ago &middot; PLM-158</div>
+            <a href="#" class="commit-link">View PR #245 &rarr;</a>
+          </div>
+        </li>
+        <li class="commit-item">
+          <div class="commit-dot"></div>
+          <div>
+            <div class="commit-msg">refactor: tree-shake chart dependency</div>
+            <div class="commit-meta">j.park &middot; 1 hr ago &middot; PLM-167</div>
+            <a href="#" class="commit-link">View PR #243 &rarr;</a>
+          </div>
+        </li>
+        <li class="commit-item">
+          <div class="commit-dot"></div>
+          <div>
+            <div class="commit-msg">feat: keyboard nav for issue list</div>
+            <div class="commit-meta">s.lee &middot; 3 hr ago &middot; PLM-171</div>
+            <a href="#" class="commit-link">View PR #241 &rarr;</a>
+          </div>
+        </li>
+      </ul>
+    </div>
+  </div>
+</section>
+
+<!-- PRICING TEASER -->
+<section class="pricing-teaser" id="pricing">
+  <div class="pricing-card">
+    <div>
+      <h2>Start building today</h2>
+      <p>Free for teams up to 5. No credit card, no trial countdown. Upgrade when your team grows and you need advanced features.</p>
+      <a href="#" class="btn-primary">Get started free</a>
+    </div>
+    <ul class="pricing-highlights">
+      <li><span class="check-icon">&#10003;</span> Unlimited issues and projects</li>
+      <li><span class="check-icon">&#10003;</span> Cycles and roadmap views</li>
+      <li><span class="check-icon">&#10003;</span> GitHub and GitLab integration</li>
+      <li><span class="check-icon">&#10003;</span> Keyboard-first interface</li>
+      <li><span class="check-icon">&#10003;</span> Command palette and shortcuts</li>
+      <li><span class="check-icon">&#10003;</span> API access</li>
+      <li><span class="check-icon">&#10003;</span> Priority support from $8/seat/mo</li>
+    </ul>
+  </div>
+</section>
+
+<!-- FOOTER -->
+<footer>
+  <div class="footer-logo">Plume</div>
+  <ul class="footer-links">
+    <li><a href="#">Features</a></li>
+    <li><a href="#">Pricing</a></li>
+    <li><a href="#">Docs</a></li>
+    <li><a href="#">Changelog</a></li>
+    <li><a href="#">Blog</a></li>
+    <li><a href="#">Twitter</a></li>
+  </ul>
+  <div class="footer-copy">&copy; 2026 Plume. All rights reserved.</div>
+</footer>
+
+</body>
+</html>

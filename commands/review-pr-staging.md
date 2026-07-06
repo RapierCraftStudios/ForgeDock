@@ -2,6 +2,7 @@
 description: Staging review mode — comprehensive review of staging branch before deploy to main
 argument-hint: [PR number or "staging"]
 allowed-tools: Task, Bash, Read, Grep, Glob, WebFetch
+install: extras
 ---
 <!-- SPDX-FileCopyrightText: Copyright (c) RapierCraft Studios -->
 <!-- SPDX-License-Identifier: AGPL-3.0-or-later -->
@@ -12,7 +13,22 @@ allowed-tools: Task, Bash, Read, Grep, Glob, WebFetch
 
 Performs comprehensive review of `staging` before merging to `main`. Handles large diffs (1,000-10,000+ lines), diverse changes, deep analysis, and business impact assessment.
 
-**Agent model policy**: Default `model: "sonnet"`. If Sonnet is rate-limited, fall back to `model: "opus"`. User can override with `--model <name>`.
+**Agent model policy**: `model: "sonnet"` (standard tier). Fallback: `model: "opus"` if rate-limited. User can override with `--model <name>`. Feature gate: pass `effort` in Task/Skill spawns only on Claude Code >= 2.1.154.
+**NEVER use plan mode (EnterPlanMode).**
+**NEVER use the Agent tool** — this spec uses `Task` for domain agent dispatch. The Agent tool bypasses the allowed-tools constraint declared in this spec's frontmatter and produces opaque output that cannot be structured into the review verdict.
+
+<!-- FORGE:SPEC_LOADED — review-pr-staging.md loaded and active. Agent is bound by this spec. -->
+
+## Forbidden Tools Self-Check
+
+**Before executing any phase**, verify you are NOT using any of these tools:
+
+| Tool | Status | Reason |
+|------|--------|--------|
+| `Agent` | **FORBIDDEN** | Bypasses allowed-tools constraint; produces opaque output that cannot be structured into the review verdict |
+| `EnterPlanMode` | **FORBIDDEN** | Breaks execution context; phases must be executed, not planned |
+
+If you find yourself about to call `Agent(...)`, stop and use `Task(...)` instead.
 
 ---
 
@@ -36,59 +52,93 @@ All `$DEFAULT_BRANCH`, `$STAGING_BRANCH`, `$GATE_POSTURE`, and `$OVERRIDE_PHRASE
 
 ---
 
-## Evidence-Based Review Protocol (ALL Agents)
+## Review Protocol Reference
 
-### Diff-First Approach
-```bash
-git fetch origin $DEFAULT_BRANCH $STAGING_BRANCH
-git diff origin/$DEFAULT_BRANCH...origin/$STAGING_BRANCH
-```
+<!-- FORGE:PROTOCOL_SOURCE — canonical definition lives in docs/spec/review-protocol.md -->
 
-### Dynamic Exploration
-From each changed file, follow imports and function calls. Trace data flows across service boundaries (API → Redis → Worker).
+The **Evidence-Based Review Protocol** and **Structured Findings Protocol** are defined in `docs/spec/review-protocol.md`. All agents spawned by this spec MUST follow both protocols as specified there. The full protocol text is embedded in `commands/review-pr-agents.md` for agent use.
 
-### Validation Before Reporting
-
-| Confidence | Criteria | Action |
-|------------|----------|--------|
-| CONFIRMED | Traced full code path, found specific proof | Report as priority:P1 |
-| LIKELY | Pattern suggests issue, mitigations might exist | Report as priority:P2 |
-| POSSIBLE | Suspicious but couldn't trace fully | Report as priority:P3 |
-| UNFOUNDED | Found correct handling | Do NOT report |
-
-### Severity Decision Tree
-1. Runtime error → HIGH/CRITICAL
-2. Wrong data silently → HIGH
-3. Degraded performance → MEDIUM
-4. Genuinely cosmetic after tracing all consumers → LOW
-
-### Interaction Analysis
-NEVER dismiss as "pre-existing" without checking whether NEW code interacts with it to create a bug. List every new line referencing the pre-existing construct; if any would fail at runtime → CONFIRMED finding.
-
-### False Positive Prevention
-- Variable scope: Read FULL function, count indentation, check if/else structure
-- Type mismatches: Trace variable to source, check naming
-- Missing functions: `grep -rn "functionName" .` — check re-exports/aliases
-- Unreachable code: Check all callers, dynamic dispatch, tests
-- Redundant imports: In Python, local `import X` makes X local for entire function scope — check for UnboundLocalError
-
-### Report Format
-Every finding: File:Line, code snippet, evidence, confidence, files checked.
+**Key protocol rules (summary — see `docs/spec/review-protocol.md` for the normative definition)**:
+- Start from the diff. Follow imports. Trace data flows across service boundaries.
+- Confidence levels: CONFIRMED (full code-path proof, P1) → LIKELY (pattern + caveat, P2) → POSSIBLE (advisory, P3) → UNFOUNDED (do not report)
+- REPRODUCTION GATE: CONFIRMED requires a full code-path trace or concrete input demonstration
+- Severity: runtime error → HIGH/CRITICAL; wrong data silently → HIGH; degraded perf → MEDIUM; cosmetic → LOW
+- INTERACTION ANALYSIS: never dismiss as "pre-existing" without checking NEW code interactions
+- FALSE POSITIVE PREVENTION: trace scope, types, callers before reporting
+- Structured findings block MANDATORY at end of every agent comment
 
 ---
 
-## Structured Findings Protocol
+## Phase -1: Route Assertion
 
-Append at end of every agent comment:
+**This phase is MANDATORY and must execute before Phase 0A. No phase may be skipped.**
+
+**Idempotent re-review (merge-train aware)**: <!-- Added: forge#1328, extended: forge#1332 --> This spec is safe to invoke multiple times on the same PR. Each invocation posts a new `FORGE:REVIEW_ROUTE` marker with the current SHA — re-review passes are distinguished by SHA, not by PR number. When a staging→main deploy PR receives blocking findings and the fixes are pushed to the head branch, re-invoke this spec on the same PR number. Do NOT close the PR and create a new one.
+
+**Prior-finding awareness on re-entry**: On each re-invocation, load findings from prior review passes on the same PR before running any new checks. Previously-resolved findings (issues that are now closed or marked `false-positive`) are excluded from the current verdict to avoid re-surfacing already-fixed issues. Previously-unresolved findings (open issues from a prior pass) are carried forward as context so agents know what was previously flagged:
+
+```bash
+# Load prior FORGE:REVIEW_ROUTE comments to detect re-entry
+PRIOR_ROUTES=$(gh api repos/${GH_REPO}/issues/${PR_NUMBER}/comments \
+  --jq '[.[] | select(.body | test("FORGE:REVIEW_ROUTE")) | .body] | length' 2>/dev/null || echo 0)
+
+IS_REENTRY=0
+if [ "$PRIOR_ROUTES" -gt 0 ]; then
+  IS_REENTRY=1
+  echo "Re-entry detected: $PRIOR_ROUTES prior review pass(es) on PR #${PR_NUMBER}"
+
+  # Load findings from prior passes that are still open
+  PRIOR_OPEN_FINDINGS=$(gh issue list ${GH_FLAG} \
+    --label "review-finding" \
+    --state open \
+    --search "PR #${PR_NUMBER}" \
+    --limit 50 \
+    --json number,title,labels \
+    --jq '.[] | "  - #\(.number): \(.title)"' 2>/dev/null || true)
+
+  # Load findings that were resolved (closed) since the last pass
+  PRIOR_RESOLVED_FINDINGS=$(gh issue list ${GH_FLAG} \
+    --label "review-finding" \
+    --state closed \
+    --search "PR #${PR_NUMBER}" \
+    --limit 50 \
+    --json number,title \
+    --jq '.[] | "  - #\(.number): \(.title)"' 2>/dev/null || true)
+
+  echo "Prior open findings (carry forward): $(echo "$PRIOR_OPEN_FINDINGS" | grep -c '.' || echo 0)"
+  echo "Prior resolved findings (exclude from verdict): $(echo "$PRIOR_RESOLVED_FINDINGS" | grep -c '.' || echo 0)"
+fi
 ```
-<!-- REVIEW-FINDINGS-START -->
-<!-- FINDING:PREFIX-N|CONFIDENCE|SEVERITY|file.py:line|One-line summary -->
-<!-- REVIEW-FINDINGS-END -->
+
+Agents receive `$IS_REENTRY`, `$PRIOR_OPEN_FINDINGS`, and `$PRIOR_RESOLVED_FINDINGS` as context. They MUST NOT re-file issues that already exist in `$PRIOR_OPEN_FINDINGS` (dedup gate in Phase 7 covers this). Resolved findings do NOT contribute to the BLOCK verdict for the current pass.
+
+Resolve the staging→main PR number and post a routing marker immediately. This creates an audit trail — if a staging→main PR has no `FORGE:REVIEW_ROUTE` comment after this command was invoked, the review was bypassed or never started.
+
+```bash
+# Resolve PR_NUMBER from $ARGUMENTS
+# $ARGUMENTS may be: a PR number, "staging", "feature", or "staging:feature"
+if echo "$ARGUMENTS" | grep -qE '^[0-9]+$'; then
+  PR_NUMBER="$ARGUMENTS"
+else
+  # Find the open staging→main PR
+  PR_NUMBER=$(gh pr list ${GH_FLAG} \
+    --head "$STAGING_BRANCH" \
+    --base "$DEFAULT_BRANCH" \
+    --state open \
+    --json number \
+    --jq '.[0].number' 2>/dev/null || echo "")
+fi
+
+REVIEW_SHA_STAGING=$(gh pr view "$PR_NUMBER" ${GH_FLAG} --json headRefOid --jq '.headRefOid' 2>/dev/null | cut -c1-7 || echo "n/a")
+
+if [ -n "$PR_NUMBER" ]; then
+  gh pr comment "$PR_NUMBER" ${GH_FLAG} --body "<!-- FORGE:REVIEW_ROUTE mode=staging-deploy spec=review-pr-staging.md sha=${REVIEW_SHA_STAGING} -->"
+else
+  echo "WARNING: Could not resolve staging→main PR number. FORGE:REVIEW_ROUTE marker not posted."
+fi
 ```
 
-Include ALL findings (CONFIRMED, LIKELY, POSSIBLE). One line per finding, sequential numbering.
-
-**Prefixes**: SEC, AUTH, BILL, CONC, SCRP, FE, API, DB, INFRA, BUG, QA, REG
+`$PR_NUMBER` is now set for all downstream phases that conditionally post gate comments to the PR.
 
 ---
 
@@ -190,10 +240,24 @@ To override (ship known issues with documented reason), post a comment starting 
   fi
 else
   echo "✅ Open review-finding gate: PASSED — no open findings for PRs in this bundle."
+  # Post FORGE:GATE_PASS for symmetric observability — bypass is indistinguishable from clean pass without this
+  if [ -n "$PR_NUMBER" ]; then
+    gh pr comment "$PR_NUMBER" -R {GH_REPO} --body "<!-- FORGE:GATE_PASS -->
+## Deploy Gate: PASSED
+
+**Gate**: open-review-finding check
+**Result**: PASS — no open \`review-finding\` issues exist for PRs in this bundle.
+**Bundle PRs**: ${ALL_PR_NUMBERS}
+**Timestamp**: $(date -u +%Y-%m-%dT%H:%M:%SZ)
+
+<!-- FORGE:GATE_PASS:TYPE=open-review-finding -->" 2>/dev/null || true
+  fi
 fi
 ```
 
 If the gate exits with `RESULT: BLOCK DEPLOY` → **STOP**. Do NOT proceed to Phase 0B or any downstream phases. A `<!-- FORGE:GATE_FAILURE -->` structured comment is automatically posted on the staging→main PR (if `$PR_NUMBER` is set) for pipeline-health tracking. Report the blocking finding list.
+
+If the gate exits with `RESULT: PASS` → a `<!-- FORGE:GATE_PASS -->` structured comment is posted on the staging→main PR so that `/pipeline-health` can distinguish a clean gate from a silently skipped one. A PR with no gate comment at all indicates a gate bypass — not a clean pass.
 
 ---
 
@@ -308,6 +372,19 @@ For fixable failures: checkout staging, apply fix, verify locally, commit as `fi
 
 Launch agent (model: sonnet) to analyze all commits since last deploy. Categorize as: NEW FEATURE, ENHANCEMENT, BUG FIX, REFACTOR, SECURITY, PERFORMANCE, INFRASTRUCTURE, DEPENDENCY. Separate user-facing vs internal. Document breaking changes and required pre-deploy actions.
 
+**MANDATORY — post findings as PR comment**: After completing analysis, the agent MUST post its full report directly to the PR:
+```bash
+gh pr comment ${PR_NUMBER} -R ${GH_REPO} --body "<!-- FORGE:REVIEW-AGENT:material-change -->
+## Material Change Analysis
+
+[full analysis report here]
+
+<!-- REVIEW-FINDINGS-START -->
+<!-- FINDING:... -->
+<!-- REVIEW-FINDINGS-END -->"
+```
+Include the structured `<!-- REVIEW-FINDINGS-START -->` block even if there are no findings (empty block). This ensures auditability even if the orchestrator crashes mid-review. <!-- Added: forge#1400 -->
+
 ---
 
 ## Phase 3: Bug Hunter Review (Per-Service)
@@ -322,11 +399,37 @@ Launch Bug Hunter agents for each service with changes:
 
 Each reads the service diff, hunts for bugs, traces context across imports, posts findings with structured block.
 
+**MANDATORY — each Bug Hunter agent MUST post its findings directly to the PR immediately upon completion** (do not wait for the orchestrator to batch-post):
+```bash
+gh pr comment ${PR_NUMBER} -R ${GH_REPO} --body "<!-- FORGE:REVIEW-AGENT:bug-hunter-{service} -->
+## Bug Hunter Review — {service}
+
+[full findings here]
+
+<!-- REVIEW-FINDINGS-START -->
+<!-- FINDING:BUG-N|CONFIDENCE|SEVERITY|file:line|summary -->
+<!-- REVIEW-FINDINGS-END -->"
+```
+Where `{service}` is `api`, `worker`, or `web`. Post one comment per service agent. <!-- Added: forge#1400 -->
+
 ---
 
 ## Phase 4: Code Quality Review
 
 Agent hunts for: dead code, duplicate logic, complexity (>50 line functions), naming issues, missing abstractions, logging quality, magic numbers. Prefix: QA.
+
+**MANDATORY — post findings as PR comment**: After completing analysis, the agent MUST post its full report directly to the PR:
+```bash
+gh pr comment ${PR_NUMBER} -R ${GH_REPO} --body "<!-- FORGE:REVIEW-AGENT:code-quality -->
+## Code Quality Review
+
+[full analysis here]
+
+<!-- REVIEW-FINDINGS-START -->
+<!-- FINDING:QA-N|CONFIDENCE|SEVERITY|file:line|summary -->
+<!-- REVIEW-FINDINGS-END -->"
+```
+<!-- Added: forge#1400 -->
 
 ---
 
@@ -334,11 +437,37 @@ Agent hunts for: dead code, duplicate logic, complexity (>50 line functions), na
 
 Read agent catalog from `.claude/commands/review-pr-agents.md`. Launch domain-specific agents based on which domains have changes. Substitute PR diff commands with staging diff commands. Agents: General Security (always), Auth, Billing, Concurrency, Scraper, API Design, Database, Infrastructure.
 
+**MANDATORY — each domain agent MUST post its findings directly to the PR immediately upon completion** (not batched by the orchestrator):
+```bash
+gh pr comment ${PR_NUMBER} -R ${GH_REPO} --body "<!-- FORGE:REVIEW-AGENT:{domain} -->
+## {Domain} Review
+
+[full analysis here]
+
+<!-- REVIEW-FINDINGS-START -->
+<!-- FINDING:{PREFIX}-N|CONFIDENCE|SEVERITY|file:line|summary -->
+<!-- REVIEW-FINDINGS-END -->"
+```
+Where `{domain}` is `security`, `auth`, `billing`, `concurrency`, `scraper`, `api-design`, `database`, or `infrastructure`. Post one comment per domain agent. This ensures findings are posted even if the orchestrator crashes mid-review. <!-- Added: forge#1400 -->
+
 ---
 
 ## Phase 6: Regression Risk Assessment
 
 Agent maps dependencies, assesses integration points (service boundaries, env vars, Docker changes, workflow sibling drift between ci.yml and deploy-production.yml), evaluates rollback difficulty (easy/hard/destructive/state-dependent), checks test coverage. Posts risk matrix with rollback plan. Prefix: REG.
+
+**MANDATORY — post findings as PR comment**: After completing analysis, the agent MUST post its full report directly to the PR:
+```bash
+gh pr comment ${PR_NUMBER} -R ${GH_REPO} --body "<!-- FORGE:REVIEW-AGENT:regression-risk -->
+## Regression Risk Assessment
+
+[full risk matrix and rollback plan here]
+
+<!-- REVIEW-FINDINGS-START -->
+<!-- FINDING:REG-N|CONFIDENCE|SEVERITY|file:line|summary -->
+<!-- REVIEW-FINDINGS-END -->"
+```
+<!-- Added: forge#1400 -->
 
 **Workflow sibling drift (MANDATORY)**: Deep-diff ci.yml and deploy-production.yml shared jobs. Compare PYTHONPATH, dependency install steps, step names. Pre-existing drift is invisible until deploy fails.
 
@@ -387,6 +516,18 @@ case "$TEST_GATE_VERDICT" in
   PASS)
     echo "✅ Test gate: PASS — all test clusters passed. Deploy may proceed."
     TEST_GATE_REASON="PASS — all automated test clusters passed"
+    # Post FORGE:GATE_PASS for symmetric observability
+    if [ -n "$PR_NUMBER" ]; then
+      gh pr comment "$PR_NUMBER" ${GH_FLAG} --body "<!-- FORGE:GATE_PASS -->
+## Deploy Gate: PASSED
+
+**Gate**: test-gate (runtime acceptance criteria)
+**Result**: PASS — all test clusters passed. Deploy may proceed.
+**Bundle PRs**: ${ALL_PR_NUMBERS}
+**Timestamp**: $(date -u +%Y-%m-%dT%H:%M:%SZ)
+
+<!-- FORGE:GATE_PASS:TYPE=test-gate|BUNDLE=$(echo $ALL_PR_NUMBERS | tr '\n' ' ' | xargs) -->" 2>/dev/null || true
+    fi
     ;;
 
   BLOCK)
@@ -587,3 +728,18 @@ If `TEST_GATE_VERDICT` is `BLOCK` and Phase 8 was reached (advisory posture or o
 > **Test Gate: BLOCK (override/advisory)** — Runtime failures were detected but deploy is proceeding. Reason: `${TEST_GATE_REASON}`. Filed `test-failure` issues track the failures.
 
 **CRITICAL**: This review NEVER merges staging → main. User makes deploy decision via GitHub web UI.
+
+---
+
+## Gate Marker Contract
+
+Every completed staging review MUST leave one of the following structured markers on the PR:
+
+| Marker | Meaning |
+|--------|---------|
+| `<!-- FORGE:GATE_PASS -->` | Gate ran and passed — deploy may proceed |
+| `<!-- FORGE:GATE_FAILURE -->` | Gate ran and blocked — do NOT deploy |
+
+**Absence of both markers = bypass detected.** The `.github/workflows/gate-marker-check.yml` workflow enforces this: it scans the PR timeline after review completes and fails CI if no gate marker is present within 30 minutes of the PR being opened/updated. A missing marker is treated as a deploy blocker — not a pass.
+
+This symmetry closes the silent-bypass gap identified in forge#1387: previously, gate PASS posted nothing, making a clean pass indistinguishable from a skipped spec.

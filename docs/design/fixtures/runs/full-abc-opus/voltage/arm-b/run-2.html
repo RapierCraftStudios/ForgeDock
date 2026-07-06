@@ -1,0 +1,396 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Voltage — Run Python on GPUs, Serverlessly</title>
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=DM+Sans:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+<style>
+  *, *::before, *::after { margin: 0; padding: 0; box-sizing: border-box; }
+  body {
+    font-family: 'DM Sans', sans-serif;
+    background: #fafaf8;
+    color: #1a1a1a;
+    line-height: 1.6;
+  }
+
+  /* NAV */
+  nav {
+    position: sticky; top: 0; z-index: 100;
+    background: rgba(250,250,248,0.92);
+    backdrop-filter: blur(10px);
+    border-bottom: 1px solid #e5e5e0;
+    padding: 0 64px;
+    height: 64px; display: flex; align-items: center; justify-content: space-between;
+  }
+  .logo { font-weight: 800; font-size: 22px; letter-spacing: -1px; color: #1a1a1a; }
+  .logo em { font-style: normal; color: #e04000; }
+  nav ul { list-style: none; display: flex; gap: 28px; }
+  nav ul a { color: #666; font-size: 14px; font-weight: 500; text-decoration: none; }
+  nav ul a:hover { color: #1a1a1a; }
+  .nav-actions { display: flex; gap: 12px; align-items: center; }
+  .nav-actions a { text-decoration: none; font-size: 14px; font-weight: 600; }
+  .link-login { color: #666; }
+  .link-signup {
+    background: #1a1a1a; color: #fff; padding: 8px 20px;
+    border-radius: 6px; transition: background 0.2s;
+  }
+  .link-signup:hover { background: #333; }
+
+  /* HERO — full-width, centered, editorial */
+  .hero {
+    max-width: 1440px; margin: 0 auto;
+    padding: 120px 64px 80px;
+    text-align: center;
+  }
+  .hero-kicker {
+    display: inline-block;
+    font-family: 'IBM Plex Mono', monospace;
+    font-size: 13px; font-weight: 500; letter-spacing: 1px;
+    text-transform: uppercase; color: #e04000;
+    margin-bottom: 24px;
+  }
+  .hero h1 {
+    font-size: 68px; font-weight: 800; line-height: 1.05;
+    letter-spacing: -3px; margin-bottom: 24px;
+    max-width: 800px; margin-left: auto; margin-right: auto;
+  }
+  .hero p {
+    font-size: 20px; color: #555; line-height: 1.7;
+    max-width: 600px; margin: 0 auto 40px;
+  }
+  .hero-cta {
+    display: inline-flex; align-items: center; gap: 10px;
+    background: #e04000; color: #fff; padding: 16px 36px;
+    border-radius: 8px; font-weight: 700; font-size: 16px;
+    text-decoration: none; transition: background 0.2s;
+  }
+  .hero-cta:hover { background: #c03800; }
+  .hero-cta svg { width: 18px; height: 18px; }
+  .hero-sub {
+    margin-top: 16px; font-size: 13px; color: #999;
+    font-family: 'IBM Plex Mono', monospace;
+  }
+
+  /* CODE SHOWCASE — two-column below hero */
+  .showcase {
+    max-width: 1200px; margin: 0 auto;
+    padding: 0 64px 100px;
+    display: grid; grid-template-columns: 1fr 1fr; gap: 48px;
+    align-items: start;
+  }
+  .showcase-text { padding-top: 40px; }
+  .showcase-text h2 {
+    font-size: 32px; font-weight: 800; letter-spacing: -1px;
+    margin-bottom: 20px;
+  }
+  .showcase-text p {
+    font-size: 16px; color: #555; line-height: 1.7; margin-bottom: 16px;
+  }
+  .showcase-text ul {
+    list-style: none; margin-top: 20px;
+  }
+  .showcase-text li {
+    font-size: 15px; color: #333; padding: 8px 0;
+    border-bottom: 1px solid #eee;
+    display: flex; align-items: center; gap: 10px;
+  }
+  .showcase-text li .check {
+    color: #e04000; font-weight: 700; font-size: 16px;
+  }
+
+  .code-panel {
+    background: #1a1a1a; border-radius: 12px; overflow: hidden;
+    box-shadow: 0 16px 48px rgba(0,0,0,0.12);
+  }
+  .code-tabs {
+    display: flex; background: #111; border-bottom: 1px solid #2a2a2a;
+  }
+  .code-tab {
+    padding: 10px 20px; font-family: 'IBM Plex Mono', monospace;
+    font-size: 12px; color: #666; cursor: pointer;
+  }
+  .code-tab.active { color: #fafaf8; border-bottom: 2px solid #e04000; }
+  .code-content {
+    padding: 28px; font-family: 'IBM Plex Mono', monospace;
+    font-size: 13.5px; line-height: 1.85; color: #ccc; overflow-x: auto;
+  }
+  .code-content .kw { color: #c792ea; }
+  .code-content .fn { color: #82aaff; }
+  .code-content .str { color: #c3e88d; }
+  .code-content .dec { color: #ffcb6b; }
+  .code-content .cm { color: #666; }
+  .code-content .num { color: #f78c6c; }
+  .code-content .op { color: #89ddff; }
+
+  /* BENTO FEATURES */
+  .bento {
+    max-width: 1200px; margin: 0 auto;
+    padding: 80px 64px 100px;
+    border-top: 1px solid #e5e5e0;
+  }
+  .bento-title {
+    font-size: 14px; font-weight: 600; text-transform: uppercase;
+    letter-spacing: 1px; color: #999; margin-bottom: 48px;
+    font-family: 'IBM Plex Mono', monospace;
+  }
+  .bento-grid {
+    display: grid;
+    grid-template-columns: repeat(3, 1fr);
+    grid-template-rows: auto auto;
+    gap: 16px;
+  }
+  .bento-card {
+    background: #fff; border: 1px solid #e5e5e0;
+    border-radius: 12px; padding: 36px;
+    transition: box-shadow 0.3s;
+  }
+  .bento-card:hover { box-shadow: 0 8px 32px rgba(0,0,0,0.06); }
+  .bento-card.wide { grid-column: span 2; }
+  .bento-card h3 {
+    font-size: 18px; font-weight: 700; margin-bottom: 10px;
+  }
+  .bento-card p {
+    font-size: 14px; color: #666; line-height: 1.7;
+  }
+  .bento-card .mono-label {
+    font-family: 'IBM Plex Mono', monospace;
+    font-size: 12px; color: #e04000; font-weight: 600;
+    text-transform: uppercase; letter-spacing: 0.5px;
+    margin-bottom: 12px;
+  }
+
+  /* PRICING TEASER */
+  .pricing {
+    max-width: 1200px; margin: 0 auto;
+    padding: 80px 64px 100px;
+    border-top: 1px solid #e5e5e0;
+    display: grid; grid-template-columns: 1fr 1fr; gap: 64px;
+    align-items: center;
+  }
+  .pricing h2 {
+    font-size: 36px; font-weight: 800; letter-spacing: -1.5px;
+    margin-bottom: 16px;
+  }
+  .pricing > div:first-child p {
+    font-size: 16px; color: #555; line-height: 1.7;
+  }
+  .price-cards { display: flex; flex-direction: column; gap: 12px; }
+  .price-row {
+    display: flex; justify-content: space-between; align-items: center;
+    background: #fff; border: 1px solid #e5e5e0;
+    border-radius: 8px; padding: 20px 24px;
+  }
+  .price-row .resource {
+    font-weight: 600; font-size: 15px;
+  }
+  .price-row .rate {
+    font-family: 'IBM Plex Mono', monospace;
+    font-size: 14px; color: #e04000; font-weight: 600;
+  }
+  .price-row .unit {
+    font-size: 12px; color: #999; margin-left: 4px;
+  }
+
+  /* FINAL CTA */
+  .final-cta {
+    max-width: 1200px; margin: 0 auto;
+    padding: 100px 64px;
+    text-align: center;
+  }
+  .terminal-block {
+    display: inline-block; background: #1a1a1a;
+    border-radius: 12px; padding: 40px 64px;
+    margin-bottom: 32px;
+  }
+  .terminal-block pre {
+    font-family: 'IBM Plex Mono', monospace;
+    font-size: 18px; color: #ccc; text-align: left;
+  }
+  .terminal-block .prompt { color: #e04000; }
+  .terminal-block .cmd { color: #fff; }
+  .final-cta h2 {
+    font-size: 40px; font-weight: 800; letter-spacing: -1.5px;
+    margin-bottom: 16px;
+  }
+  .final-cta p {
+    font-size: 16px; color: #666; max-width: 440px;
+    margin: 0 auto 28px;
+  }
+
+  /* FOOTER */
+  footer {
+    border-top: 1px solid #e5e5e0;
+    padding: 32px 64px;
+    max-width: 1440px; margin: 0 auto;
+    display: flex; justify-content: space-between;
+  }
+  footer span { font-size: 13px; color: #999; }
+  footer ul { list-style: none; display: flex; gap: 20px; }
+  footer ul a { font-size: 13px; color: #999; text-decoration: none; }
+  footer ul a:hover { color: #333; }
+</style>
+</head>
+<body>
+
+<nav>
+  <div class="logo"><em>V</em>oltage</div>
+  <ul>
+    <li><a href="#features">Platform</a></li>
+    <li><a href="#pricing">Pricing</a></li>
+    <li><a href="#">Docs</a></li>
+    <li><a href="#">Blog</a></li>
+  </ul>
+  <div class="nav-actions">
+    <a href="#" class="link-login">Log in</a>
+    <a href="#" class="link-signup">Sign up</a>
+  </div>
+</nav>
+
+<section class="hero">
+  <span class="hero-kicker">Serverless GPU Compute</span>
+  <h1>Your Python, our GPUs, zero infrastructure</h1>
+  <p>Voltage runs compute-heavy Python in the cloud. Add a decorator, pick your hardware, and deploy. You pay only for the seconds your code is running.</p>
+  <a href="#" class="hero-cta">
+    Run your first function
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M5 12h14M12 5l7 7-7 7"/></svg>
+  </a>
+  <div class="hero-sub">pip install voltage &middot; Free tier available</div>
+</section>
+
+<section class="showcase">
+  <div class="code-panel">
+    <div class="code-tabs">
+      <div class="code-tab active">train.py</div>
+      <div class="code-tab">serve.py</div>
+    </div>
+    <div class="code-content">
+<span class="kw">import</span> voltage<br>
+<span class="kw">from</span> voltage <span class="kw">import</span> Volume<br>
+<br>
+<span class="cm"># Persistent storage for model checkpoints</span><br>
+checkpoints <span class="op">=</span> Volume.persisted(<span class="str">"training-checkpoints"</span>)<br>
+<br>
+<span class="dec">@voltage.function</span>(<br>
+&nbsp;&nbsp;&nbsp;&nbsp;gpu<span class="op">=</span><span class="str">"H100"</span>,<br>
+&nbsp;&nbsp;&nbsp;&nbsp;memory<span class="op">=</span><span class="num">65536</span>,<br>
+&nbsp;&nbsp;&nbsp;&nbsp;volumes<span class="op">=</span>{<span class="str">"/checkpoints"</span>: checkpoints},<br>
+&nbsp;&nbsp;&nbsp;&nbsp;timeout<span class="op">=</span><span class="num">3600</span>,<br>
+)<br>
+<span class="kw">def</span> <span class="fn">train_lora</span>(base_model: str, dataset_path: str):<br>
+&nbsp;&nbsp;&nbsp;&nbsp;<span class="kw">from</span> transformers <span class="kw">import</span> AutoModelForCausalLM<br>
+&nbsp;&nbsp;&nbsp;&nbsp;<span class="kw">from</span> peft <span class="kw">import</span> LoraConfig, get_peft_model<br>
+<br>
+&nbsp;&nbsp;&nbsp;&nbsp;model <span class="op">=</span> AutoModelForCausalLM.from_pretrained(<br>
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;base_model, device_map<span class="op">=</span><span class="str">"auto"</span><br>
+&nbsp;&nbsp;&nbsp;&nbsp;)<br>
+&nbsp;&nbsp;&nbsp;&nbsp;peft_model <span class="op">=</span> get_peft_model(model, LoraConfig(<br>
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;r<span class="op">=</span><span class="num">16</span>, lora_alpha<span class="op">=</span><span class="num">32</span>, target_modules<span class="op">=</span>[<span class="str">"q_proj"</span>, <span class="str">"v_proj"</span>]<br>
+&nbsp;&nbsp;&nbsp;&nbsp;))<br>
+<br>
+&nbsp;&nbsp;&nbsp;&nbsp;<span class="cm"># ... training loop ...</span><br>
+&nbsp;&nbsp;&nbsp;&nbsp;peft_model.save_pretrained(<span class="str">"/checkpoints/lora-adapter"</span>)<br>
+    </div>
+  </div>
+  <div class="showcase-text">
+    <h2>Write ordinary Python. We handle the rest.</h2>
+    <p>No Dockerfiles, no Kubernetes manifests, no Terraform. Voltage detects your imports, builds a container image, provisions the hardware, and runs your function.</p>
+    <p>Persistent volumes let you share data between runs. Secrets are injected at runtime. Logs stream in real time.</p>
+    <ul>
+      <li><span class="check">&check;</span> Dependencies detected from imports</li>
+      <li><span class="check">&check;</span> GPU drivers pre-installed (CUDA 12.x)</li>
+      <li><span class="check">&check;</span> Persistent networked volumes</li>
+      <li><span class="check">&check;</span> Secret management built in</li>
+      <li><span class="check">&check;</span> Structured logging &amp; tracing</li>
+    </ul>
+  </div>
+</section>
+
+<section class="bento" id="features">
+  <div class="bento-title">Platform capabilities</div>
+  <div class="bento-grid">
+    <div class="bento-card wide">
+      <div class="mono-label">Autoscaling</div>
+      <h3>Zero to 10,000 containers in seconds</h3>
+      <p>Voltage scales your function horizontally based on request volume. When traffic drops, containers are reclaimed instantly. You never pay for idle hardware. Min and max concurrency are configurable per function.</p>
+    </div>
+    <div class="bento-card">
+      <div class="mono-label">GPU Fleet</div>
+      <h3>A100, H100, L4, T4</h3>
+      <p>Select GPU type per function. Multi-GPU configurations available for large model training. Spot pricing for fault-tolerant batch workloads.</p>
+    </div>
+    <div class="bento-card">
+      <div class="mono-label">Endpoints</div>
+      <h3>Serve models over HTTPS</h3>
+      <p>Turn any function into an inference API with one flag. Built-in request queuing, batching, and auth. WebSocket streaming for generative models.</p>
+    </div>
+    <div class="bento-card">
+      <div class="mono-label">Scheduling</div>
+      <h3>Cron and event-driven triggers</h3>
+      <p>Schedule recurring jobs or trigger functions from webhooks, queues, or other Voltage functions. Build entire ML pipelines as composable functions.</p>
+    </div>
+    <div class="bento-card wide">
+      <div class="mono-label">Developer Experience</div>
+      <h3>A local-feeling development loop</h3>
+      <p>Run functions locally with voltage run --local, then deploy with voltage deploy. Hot-reload during development. Tail logs, stream metrics, and SSH into running containers for debugging. The CLI is designed to stay out of your way.</p>
+    </div>
+  </div>
+</section>
+
+<section class="pricing" id="pricing">
+  <div>
+    <h2>Pay only for compute seconds</h2>
+    <p>No base fees, no reserved instances, no minimum spend. Idle functions cost exactly zero. Usage is billed per-second with no rounding.</p>
+  </div>
+  <div class="price-cards">
+    <div class="price-row">
+      <span class="resource">CPU (per vCPU)</span>
+      <span><span class="rate">$0.000014</span><span class="unit">/sec</span></span>
+    </div>
+    <div class="price-row">
+      <span class="resource">Memory (per GiB)</span>
+      <span><span class="rate">$0.000003</span><span class="unit">/sec</span></span>
+    </div>
+    <div class="price-row">
+      <span class="resource">T4 GPU</span>
+      <span><span class="rate">$0.000164</span><span class="unit">/sec</span></span>
+    </div>
+    <div class="price-row">
+      <span class="resource">A100 80GB GPU</span>
+      <span><span class="rate">$0.001028</span><span class="unit">/sec</span></span>
+    </div>
+    <div class="price-row">
+      <span class="resource">H100 GPU</span>
+      <span><span class="rate">$0.001389</span><span class="unit">/sec</span></span>
+    </div>
+  </div>
+</section>
+
+<section class="final-cta">
+  <div class="terminal-block">
+    <pre><span class="prompt">$</span> <span class="cmd">pip install voltage</span>
+<span class="prompt">$</span> <span class="cmd">voltage login</span>
+<span class="prompt">$</span> <span class="cmd">voltage deploy train.py</span>
+<span style="color:#4ade80;">&#10003;</span> Deployed train_lora  &rarr;  https://you.voltage.run/train-lora</pre>
+  </div>
+  <h2>Start building in five minutes</h2>
+  <p>Free tier includes 10 GPU-hours/month. No credit card required to get started.</p>
+  <a href="#" class="hero-cta">
+    Get started free
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M5 12h14M12 5l7 7-7 7"/></svg>
+  </a>
+</section>
+
+<footer>
+  <span>&copy; 2026 Voltage, Inc. All rights reserved.</span>
+  <ul>
+    <li><a href="#">Docs</a></li>
+    <li><a href="#">GitHub</a></li>
+    <li><a href="#">Status</a></li>
+    <li><a href="#">Privacy</a></li>
+    <li><a href="#">Terms</a></li>
+  </ul>
+</footer>
+
+</body>
+</html>

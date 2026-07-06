@@ -7,8 +7,8 @@ description: Investigate a Forge GitHub issue from Codex and post a FORGE:INVEST
 
 Use `commands/work-on/investigate.md` as the authoritative investigation workflow, with these Forge repo overrides:
 
-- Default repo context is `RapierCraftStudios/forge`, not `RapierCraft/AlterLab`.
-- Read/write issue comments via `gh api repos/RapierCraftStudios/forge/issues/{NUMBER}/comments`.
+- Default repo context is `RapierCraftStudios/forgedock`.
+- Read/write issue comments via `gh api repos/RapierCraftStudios/forgedock/issues/{NUMBER}/comments`.
 - Use `FORGE:*` markers as the primary resume protocol.
 - Treat missing workflow labels as normal in this repo; create them when needed instead of failing.
 
@@ -26,7 +26,7 @@ Prioritize these files when the issue is in the Forge repo:
 
 ## Investigation Rule
 
-If the shared command’s AlterLab domain table is not relevant, replace it with the Forge repo file set above and continue with the same output contract: post a `<!-- FORGE:INVESTIGATOR -->` comment, update labels best-effort, and return the structured investigate result.
+If the shared command’s domain table references project-specific paths that are not relevant to this repo, replace it with the Forge repo file set above and continue with the same output contract: post a `<!-- FORGE:INVESTIGATOR -->` comment, update labels best-effort, and return the structured investigate result.
 
 ## Continuation Rule
 

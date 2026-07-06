@@ -10,7 +10,7 @@
 #   # Add forge.yaml to your .gitignore if it contains sensitive paths
 #
 # Required sections: project, paths, branches
-# Optional sections: repos, project_board, services, review, verification, deploy, billing, devdocs, adaptive_scripts, learned, marketing
+# Optional sections: repos, project_board, services, review, verification, deploy, billing, devdocs, adaptive_scripts, learned, attribution
 
 # =============================================================================
 # PROJECT (REQUIRED)
@@ -284,11 +284,25 @@ branches:
 #     Deploy: blue/green via Docker Compose on a single VPS behind Traefik.
 #     Database: PostgreSQL with async SQLAlchemy. No ORM migrations — raw SQL.
 #
-#   # Domain-specific review notes (keyed by review-pr-agents domain)
+#   # Domain-specific review notes (keyed by review-pr-agents domain).
+#   # Each key injects free-text context into the matching review agent's [DOMAIN_CONTEXT].
+#   # If a key is absent, the agent falls back to generic checks without project conventions.
+#   #
+#   # Special gating rule: the `scraping` key also GATES the Scraper agent — the agent
+#   # only spawns when this key is present. Projects using Playwright for E2E tests only
+#   # (no web-scraping domain) must NOT set this key.
 #   domains:
-#     billing: "Stripe webhooks; idempotency keys required on all handlers"
-#     auth: "JWT + refresh token rotation; sessions stored in Redis"
-#     database: "Always use docker exec <container> for psql/migrations"
+#     auth: "JWT + refresh token rotation; sessions stored in Redis; all admin endpoints require ADMIN_SECRET"
+#     billing: "Stripe webhooks; idempotency keys required on all handlers; reconciliation in worker/reconcile.py"
+#     concurrency: "Redis for distributed locks; use with_for_update() on all balance reads; job queue is Celery"
+#     database: "Always use docker exec <container> for psql/migrations; Alembic for schema versioning"
+#     infra: "Blue/green deploy via Docker Compose; deploy workflow: .github/workflows/deploy.yml; secrets via SOPS"
+#     frontend: "Next.js 15 App Router; shadcn/ui components; all server actions must validate auth"
+#     security: "Internal services reachable at 10.0.0.x; Redis not firewalled from workers"
+#     api: "FastAPI; all routers registered in app/main.py; Pydantic v2 for validation"
+#     # scraping: "Browser pool in worker/browser/pool.py; tier escalation in worker/consumers/scrape.py"
+#     # ^^^ Uncomment scraping only if this project has a web-scraping domain.
+#     # ^^^ Leaving it commented out prevents the Scraper agent from spawning on Playwright E2E PRs.
 #
 #   # Domain-to-file mapping used by /work-on investigation and /review-pr agents
 #   # to quickly locate relevant files for a given issue domain.
@@ -304,7 +318,7 @@ branches:
 #   # These drive /qa-sweep page discovery, /deploy-info file categorization,
 #   # /orchestrate high-fan-in detection, /review-pr route-registration checks,
 #   # and the verify-route-registration.sh script. All values are relative to
-#   # the repository root. Defaults match the AlterLab monorepo layout — set
+#   # the repository root. Defaults match the example monorepo layout — set
 #   # these if your project uses a different directory structure.
 #   #
 #   # layout:
@@ -617,18 +631,68 @@ branches:
 #   captured_by: "work-on/667"           # command + issue number that wrote it
 
 # =============================================================================
-# MARKETING (OPTIONAL)
-# Controls opt-in growth features such as 'Powered by ForgeDock' footers on
-# PR descriptions created by the pipeline.
-# Commands: work-on (Phase 4 PR creation — when pr_footer is true)
-# NOTE: pr_footer injection requires future pipeline support. Set to true
-# to opt in once that support ships. Defaults to false (no-op).
+# INDEX (OPTIONAL)
+# Per-commit code index configuration for scripts/code-index.sh.
+# When configured, agents query a deterministic symbol index and import graph
+# instead of re-scanning the repo from scratch on every investigation, architect,
+# and review run. Index is cached by HEAD SHA — zero cost on unchanged HEAD.
+#
+# Commands that use the index: work-on:investigate, work-on/build/architect,
+#                              review-pr (domain agent context injection)
 # =============================================================================
 
-# marketing:
-#   # When true, the pipeline appends a small 'Powered by ForgeDock' footer to
-#   # every PR description it creates. Opt-in only — set false to disable.
-#   # This is a one-line footer link, not a banner. Example:
-#   #   ---
-#   #   *Powered by [ForgeDock](https://github.com/RapierCraftStudios/ForgeDock)*
-#   pr_footer: false
+# index:
+#   # Languages to extract symbols from. Passed to ctags --languages= flag.
+#   # Omit to let ctags auto-detect. Example: Python, JavaScript, TypeScript, Go, Rust
+#   # languages: "Python,JavaScript,TypeScript,Go"
+#
+#   # Glob patterns to exclude from indexing (relative to repo root).
+#   # Added to the find/ctags exclude list alongside built-in defaults
+#   # (.git, node_modules, __pycache__, .forge).
+#   # exclude:
+#   #   - "vendor/**"
+#   #   - "dist/**"
+#   #   - "**/*.min.js"
+#
+#   # Directory where the index cache is stored, relative to the project root.
+#   # Default: ".forge/index" — gitignored by default (add .forge/ to .gitignore).
+#   # Set to an absolute path to share the cache across multiple worktrees.
+#   # cache_dir: ".forge/index"
+#
+#   # When true, the index is rebuilt automatically at the start of each
+#   # investigation/architect/review run (cache-hit on unchanged HEAD = instant).
+#   # When false, agents skip index queries and use grep exploration.
+#   # Default: true
+#   # enabled: true
+
+# =============================================================================
+# ATTRIBUTION (OPTIONAL)
+# Opt-in growth features: pipeline-created PRs and visible FORGE annotation
+# comments can carry a small attribution link back to ForgeDock.
+# This is the "Dependabot/Renovate/CodeRabbit" growth mechanic — consentful
+# and fully opt-out. Recommended default: both keys true for public repos,
+# both false for private repos.
+#
+# Commands: work-on/review (PR footer), review-pr (summary comment footer),
+#           work-on/investigate + review-pr agents (annotation link)
+#
+# Scope: PR body and visible comments only. Commits and machine-readable
+# HTML annotation comments (<!-- FORGE:... -->) are NEVER modified.
+# =============================================================================
+
+# attribution:
+#   # When true, every pipeline-created PR ends with exactly one muted footer:
+#   #   > Orchestrated with [ForgeDock](https://github.com/RapierCraftStudios/ForgeDock)
+#   #   > — state, scheduling, review, and memory on GitHub.
+#   # Posted once at PR creation — never duplicated on edits or retries.
+#   # Opt-out: set to false or omit this key.
+#   # Recommended: true for public repos, false for private repos.
+#   pr_footer: true
+#
+#   # When true, visible (human-readable) FORGE annotation comments — the ones
+#   # displayed in the GitHub UI — carry a small "Pipeline powered by ForgeDock"
+#   # link at the end. Machine-readable <!-- FORGE:... --> HTML comments are
+#   # never modified regardless of this setting.
+#   # Opt-out: set to false or omit this key.
+#   # Recommended: true for public repos, false for private repos.
+#   annotation_link: true

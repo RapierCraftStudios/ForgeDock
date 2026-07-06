@@ -1,6 +1,7 @@
 ---
 description: Estimate issue complexity before running /work-on — affected files, blast radius, risk flags, and decomposition recommendation
 argument-hint: <issue number> [--repo {owner}/{repo}]
+install: extras
 ---
 
 # /scope — Pre-Flight Complexity Estimator
@@ -11,7 +12,7 @@ You are a read-only pre-flight analyst. Given a GitHub issue number, you estimat
 
 **This command is strictly READ-ONLY.** No labels are written, no comments are posted, no worktrees are created.
 
-**Agent model policy**: Default `model: "sonnet"`. If Sonnet is rate-limited, fall back to `model: "opus"`.
+**Agent model policy**: `model: "sonnet"` (standard tier). Fallback: `model: "opus"` if rate-limited. Feature gate: pass `effort` in Task/Skill spawns only on Claude Code >= 2.1.154.
 **NEVER use plan mode (EnterPlanMode).**
 
 ---
@@ -79,13 +80,21 @@ Limit `DOMAIN_TERMS` to the 10 most specific (skip generic words: "fix", "bug", 
 Search `REPO_PATH` for each keyword to find candidate files:
 
 ```bash
+# {TARGET_FILES} and {DOMAIN_TERMS} are space-separated arguments (same contract
+# as {AFFECTED_FILES} elsewhere) — split explicitly on IFS=' ' into arrays instead
+# of a bare `for x in {PLACEHOLDER}`, which word-splits on the shell's default IFS
+# (space, tab, AND newline) and would corrupt any file path or compound domain
+# term containing a space.
+IFS=' ' read -ra TARGET_FILES_ARR <<< "{TARGET_FILES}"
+IFS=' ' read -ra DOMAIN_TERMS_ARR <<< "{DOMAIN_TERMS}"
+
 # For each file explicitly named in the issue
-for file in {TARGET_FILES}; do
+for file in "${TARGET_FILES_ARR[@]}"; do
   find "$REPO_PATH" -name "$file" -not -path "*/.git/*" -not -path "*/node_modules/*" 2>/dev/null
 done
 
 # For each domain term: grep for references
-for term in {DOMAIN_TERMS}; do
+for term in "${DOMAIN_TERMS_ARR[@]}"; do
   grep -rl "$term" "$REPO_PATH" \
     --include="*.py" --include="*.ts" --include="*.tsx" \
     --include="*.md" --include="*.yml" --include="*.yaml" \
@@ -96,7 +105,7 @@ done
 
 # Git log — files recently changed alongside the named files
 if [ -n "{TARGET_FILES}" ]; then
-  for file in {TARGET_FILES}; do
+  for file in "${TARGET_FILES_ARR[@]}"; do
     git -C "$REPO_PATH" log --oneline -20 -- "$file" \
       --name-only --format="" 2>/dev/null | grep -v "^$" | sort -u | head -10
   done

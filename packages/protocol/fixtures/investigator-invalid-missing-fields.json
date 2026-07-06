@@ -1,0 +1,9 @@
+{
+  "description": "INVESTIGATOR — missing required fields (Confidence, Severity)",
+  "input": "<!-- FORGE:INVESTIGATOR -->\n**Verdict**: CONFIRMED\n**Task Type**: Bug Fix\n**Decomposition Assessment**: NO — simple.\n<!-- INVESTIGATION:COMPLETE -->",
+  "expect": {
+    "type": "INVESTIGATOR",
+    "valid": false,
+    "sentinelState": "complete"
+  }
+}

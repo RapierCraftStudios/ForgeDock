@@ -1,6 +1,7 @@
 ---
 description: Sweep closed issues for stale labels, missing workflow state, and Project board gaps — plus prune worktrees, branches, and milestones
 argument-hint: [labels | branches | milestones | board | orphans | all]
+install: extras
 ---
 <!-- SPDX-FileCopyrightText: Copyright (c) RapierCraft Studios -->
 <!-- SPDX-License-Identifier: AGPL-3.0-or-later -->
@@ -44,11 +45,12 @@ All `{GH_REPO}`, `{GH_FLAG}`, `{REPO_PATH}`, `{STAGING_BRANCH}`, `{PROJECT_BOARD
 
 | Input | Action |
 |-------|--------|
-| `labels` or empty | Fix stale/missing workflow labels on closed issues |
+| `labels` or empty | Fix stale/missing workflow labels on closed issues; detect OPEN issues stuck in intermediate states (Phase 1D) |
 | `orphans` | Close open issues whose PRs are already merged |
 | `branches` | Prune worktrees and remote branches for merged PRs |
-| `milestones` | Close milestones with 0 open issues |
+| `milestones` | Report milestones with 0 open issues (advisory — never closes) |
 | `board` | Sync closed issues to Project board with correct terminal state |
+| `batch-p3` | Sweep: fold stale unbatched P3 review findings into domain-grouped batch issues |
 | `all` | All of the above, in order |
 
 ---
@@ -104,6 +106,46 @@ gh issue list {GH_FLAG} --state closed --limit 200 --json number,title,labels \
 ```
 
 These were closed outside the pipeline. Report count but don't fix (not necessarily wrong).
+
+### 1D: Detect stale OPEN issues in intermediate workflow states
+
+Open issues stuck in `workflow:building`, `workflow:in-review`, or `workflow:investigating` beyond a configurable threshold indicate a stalled agent. These are invisible to Phase 1A–1C (which only query closed issues).
+
+```bash
+# Configurable threshold — override by setting STALE_THRESHOLD_HOURS before invoking /cleanup
+STALE_THRESHOLD_HOURS=${STALE_THRESHOLD_HOURS:-48}
+
+# Compute cutoff datetime — GNU date (Linux) with BSD date (macOS) fallback
+CUTOFF=$(date -d "${STALE_THRESHOLD_HOURS} hours ago" +%Y-%m-%dT%H:%M:%SZ 2>/dev/null \
+  || date -v-${STALE_THRESHOLD_HOURS}H +%Y-%m-%dT%H:%M:%SZ 2>/dev/null \
+  || echo "")
+
+echo "=== Stale-Open Intermediate Issues (threshold: ${STALE_THRESHOLD_HOURS}h) ==="
+
+STALE_OPEN_COUNT=0
+
+for LABEL in "workflow:building" "workflow:in-review" "workflow:investigating"; do
+  ISSUES=$(gh issue list {GH_FLAG} \
+    --state open \
+    --label "$LABEL" \
+    --limit 100 \
+    --json number,title,updatedAt,labels \
+    --jq --arg threshold "$CUTOFF" --arg label "$LABEL" \
+    '[.[] | select($threshold == "" or .updatedAt < $threshold)] |
+     .[] | "#\(.number) — \(.title[:60]) [label: \($label)] [last update: \(.updatedAt[:10])] → resume: /work-on \(.number)"' \
+    2>/dev/null || echo "")
+
+  if [ -n "$ISSUES" ]; then
+    echo "$ISSUES"
+    COUNT=$(echo "$ISSUES" | grep -c '^#' 2>/dev/null || echo 0)
+    STALE_OPEN_COUNT=$((STALE_OPEN_COUNT + COUNT))
+  fi
+done
+
+echo "Total stale-open intermediate issues: $STALE_OPEN_COUNT"
+```
+
+These are **report-only** — no automatic action is taken. Use `/work-on <n>` (idempotent) to resume a stalled issue. Priority issues (P1/P2) should be actioned first.
 
 ---
 
@@ -172,58 +214,214 @@ echo "Removed: $WORKTREE_PATH ($BRANCH_NAME)"
 
 ### 3C: Prune merged remote branches
 
-Delete remote `fix/` and `feat/` branches that are fully merged into `{STAGING_BRANCH}`:
+Delete remote `fix/` and `feat/` branches whose PR has merged — using **GitHub PR state as the source of truth**, not local git ancestry.
+
+**Why not `git branch -r --merged {STAGING_BRANCH}`**: an ancestry check only catches branches whose tip commit is reachable from `{STAGING_BRANCH}`. This misses two common cases:
+- **Feature-lane branches merged into a milestone branch.** Per `work-on.md` Phase 3E, milestone issues branch from and PR into `origin/milestone/{slug}`, not `{STAGING_BRANCH}`. Once such a branch's own PR merges into the milestone branch, it's fully absorbed and safe to delete — but it won't show up as "merged into staging" until the milestone itself ships (which may be days later, or never, if abandoned). This is the dominant cause of `feat/*` branches accumulating for a milestone/feature cluster.
+- **Squash merges.** If a branch was merged via squash (manual UI merge, or org/branch-protection settings that force squash-only), the resulting commit is a brand-new SHA that is never an ancestor of the original branch — so ancestry-based detection never matches it, even though the PR is clearly `MERGED` on GitHub.
+
+Both gaps disappear when merged-PR head-refs (regardless of base branch or merge strategy) are used directly as the deletion set:
+
+**Why also check `headRefOid`**: branch names are freely reusable in git. A name-only match cannot distinguish "this branch's current tip is the commit that merged" from "a branch with this name merged at some point in the past and has since been reused for new, unmerged work" (e.g. a second issue happens to slugify to the same `fix/*`/`feat/*` name). Comparing the branch's live remote tip SHA against the merged PR's `headRefOid` closes that gap — deletion only proceeds when the (name, SHA) pair matches a merged PR exactly, regardless of base branch or merge strategy.
+
+**Why `--force-with-lease` on the delete**: the `CURRENT_SHA` snapshot above is read from the local `origin/$branch` ref as of the `git fetch --prune` at the top of this phase. For large batches this loop can run for a while (one network call per branch), so a new commit can land on the remote branch between the fetch and that branch's turn in the loop — a TOCTOU window. A plain `git push origin --delete "$branch"` is unconditional: it deletes whatever the remote ref currently points to, even if that's no longer `$CURRENT_SHA`. Using `--force-with-lease=refs/heads/$branch:$CURRENT_SHA` makes the deletion a server-verified compare-and-swap — the remote rejects the update if `refs/heads/$branch` has moved since the snapshot, instead of silently deleting new work.
 
 ```bash
 cd {REPO_PATH}
 git fetch --prune origin
 
-# Count first
-MERGED_COUNT=$(git branch -r --merged origin/{STAGING_BRANCH} | grep -E "origin/(fix|feat)/" | wc -l)
-echo "Found $MERGED_COUNT merged remote branches to delete"
+# All remote fix/* and feat/* branches currently on origin
+REMOTE_BRANCHES=$(git branch -r | grep -E "origin/(fix|feat)/" | sed 's|origin/||' | tr -d ' ')
 
-# Delete them
-if [ "$MERGED_COUNT" -gt 0 ]; then
-  git branch -r --merged origin/{STAGING_BRANCH} | grep -E "origin/(fix|feat)/" | sed 's|origin/||' | xargs -I{} git push origin --delete {} 2>&1
-fi
+# Head-ref name + head-ref SHA of every merged PR, regardless of base branch (staging,
+# milestone/*, main) or merge strategy (merge-commit vs. squash) — this is GitHub's own
+# merge bookkeeping, not local ref topology, so it's immune to both gaps above.
+# headRefOid is captured alongside headRefName so deletion can be gated on the branch's
+# CURRENT tip matching the commit that actually merged, not just a name match.
+# --limit is set high to avoid silent truncation; repos with more historical merged PRs
+# than this should re-run `/cleanup branches` incrementally to catch the remainder.
+MERGED_HEADS=$(gh pr list {GH_FLAG} --state merged --limit 1000 --json headRefName,headRefOid --jq '.[] | "\(.headRefName)\t\(.headRefOid)"')
+
+DELETE_COUNT=0
+SKIP_COUNT=0
+RACE_SKIP_COUNT=0
+for branch in $REMOTE_BRANCHES; do
+  CURRENT_SHA=$(git rev-parse "origin/$branch" 2>/dev/null)
+  if printf '%s\n' "$MERGED_HEADS" | grep -qxF "$(printf '%s\t%s' "$branch" "$CURRENT_SHA")"; then
+    # Name AND tip SHA match a merged PR's head-ref — safe to delete.
+    # Use --force-with-lease as a server-side compare-and-swap: the remote re-verifies
+    # refs/heads/$branch is still at $CURRENT_SHA at push time, closing the TOCTOU gap
+    # between this snapshot and the actual delete (see note above).
+    if git push origin --force-with-lease="refs/heads/$branch:$CURRENT_SHA" ":refs/heads/$branch" 2>&1; then
+      DELETE_COUNT=$((DELETE_COUNT + 1))
+      # Log the pre-deletion SHA so it's visible in run output/logs for recovery —
+      # see "Recovery: restoring an accidentally pruned branch" below.
+      echo "Deleted origin/$branch (was $CURRENT_SHA) — restorable via: git push origin $CURRENT_SHA:refs/heads/$branch"
+    else
+      # Lease rejected — the branch's remote tip moved since the snapshot (a new push
+      # landed mid-loop). Do NOT retry/force past this: skip and let the next cleanup
+      # run re-evaluate it against fresh state.
+      RACE_SKIP_COUNT=$((RACE_SKIP_COUNT + 1))
+      echo "RACE: origin/$branch tip changed since snapshot ($CURRENT_SHA) — lease rejected, not deleting. Will re-evaluate on next /cleanup run."
+    fi
+  elif printf '%s\n' "$MERGED_HEADS" | cut -f1 | grep -qxF "$branch"; then
+    # Name matches a merged PR's head-ref, but the branch's current tip does not match
+    # any merged commit recorded under that name — likely a reused branch name holding
+    # new, unmerged work. Skip deletion rather than risk destroying live commits.
+    SKIP_COUNT=$((SKIP_COUNT + 1))
+    echo "SKIP: origin/$branch name matches a merged PR head-ref but current tip ($CURRENT_SHA) does not match the merged commit — branch name likely reused for new work. Not deleting."
+  fi
+done
+echo "Deleted $DELETE_COUNT merged remote branches, skipped $SKIP_COUNT name-matched/SHA-mismatched branches, skipped $RACE_SKIP_COUNT raced branches (tip changed between snapshot and delete) (source of truth: gh pr list --state merged, verified against headRefOid, deletion gated by --force-with-lease)"
 ```
 
-**Note**: This can take a while for large batches (1 network call per branch). Run in background if > 20 branches.
+**Note**: This can take a while for large batches (1 network call per deleted branch, plus one batched `gh pr list` call). Run in background if > 20 branches.
+
+**One-time backfill for existing stale branches**: repos that adopted this fix after already accumulating stale `feat/*`/`fix/*` branches (e.g. from milestones that shipped long ago) should run `/cleanup branches` once manually — the PR-state query above will catch the full backlog in a single pass since it isn't scoped to "this batch" or "this session," it queries all merged PRs on the repo.
+
+**Recovery: restoring an accidentally pruned branch**
+
+Phase 3C only ever deletes a branch whose (name, SHA) pair matched a merged PR's `headRefOid`, so the exact deleted commit is always recoverable: its SHA is echoed in the run log above (`Deleted origin/$branch (was $CURRENT_SHA) ...`), and the commit object survives in the remote's object store until garbage collection (for merge-commit merges it also remains reachable from the PR's merge commit; for squash merges the original tip becomes a dangling commit — not reachable by ancestry, but still restorable by SHA for as long as it hasn't been GC'd). If a branch is pruned in error (or needs to be recreated for any reason), restore it with:
+
+```bash
+# Using the SHA logged at deletion time (or from `gh pr view {PR_NUMBER} --json headRefOid`
+# if the run log is no longer available):
+git push origin <sha>:refs/heads/<branch>
+```
+
+Alternatively, GitHub itself offers a one-click **"Restore branch"** button on the merged PR's page (shown on the "<branch> was deleted" banner) for a limited window after deletion — typically available for as long as the underlying ref data hasn't been garbage-collected, often a few weeks. This is the fastest option when working from the GitHub UI rather than a local clone.
+
+Both options only apply to branches deleted by this phase (or by GitHub's own merge/delete UI) — a SHA is not captured for branches removed by other means (e.g. manual `git push origin --delete` run outside of `/cleanup`), so recovery there depends on `git reflog` on a clone that still has the ref, or GitHub's audit log.
 
 ---
 
-## Phase 4: Milestone Hygiene
+## Phase 4: Milestone Hygiene (Advisory Only)
 
-### 4A: Find completed milestones
+**NEVER close milestones in this phase.** Milestones are only closed by `/milestone ship` (human-gated) or `/milestone close` (explicit abandonment). Incorrect closure destroys milestone state that cannot be trivially recovered. <!-- fix: forge#1160 -->
+
+### 4A: Find milestones with 0 open issues
 
 ```bash
 # List open milestones with 0 remaining issues
 gh api repos/:owner/:repo/milestones --jq '.[] | select(.state == "open" and .open_issues == 0) | "\(.number) | \(.title) | open:\(.open_issues) closed:\(.closed_issues)"'
 ```
 
-### 4B: Close completed milestones (shipping-verified only)
+### 4B: Report findings (DO NOT close)
 
-For each milestone with 0 open issues, verify the milestone branch has been merged to staging or main before closing:
+For each milestone with 0 open issues, report it as a candidate for shipping or closing — but take no action:
 
 ```bash
-# Derive slug from milestone title (lowercase, spaces→hyphens, strip non-alphanumeric except hyphens)
-SLUG=$(echo "$MILESTONE_TITLE" | tr '[:upper:]' '[:lower:]' | tr ' ' '-' | tr -cd 'a-z0-9-')
-
-# Check if milestone branch was merged to staging or main
-SHIPPED_STAGING=$(gh pr list --base staging --head "milestone/$SLUG" --state merged --json number --jq '.[0].number' 2>/dev/null)
-SHIPPED_MAIN=$(gh pr list --base main --head "milestone/$SLUG" --state merged --json number --jq '.[0].number' 2>/dev/null)
-
-if [ -n "$SHIPPED_STAGING" ] || [ -n "$SHIPPED_MAIN" ]; then
-  # Safe to close — code has been shipped to staging or main
-  gh api repos/:owner/:repo/milestones/$MILESTONE_NUMBER -X PATCH -f state=closed
-  echo "CLOSED milestone: $MILESTONE_TITLE (shipped via PR #${SHIPPED_STAGING:-$SHIPPED_MAIN})"
-else
-  # DO NOT close — code is only on the milestone branch, not yet shipped
-  echo "SKIPPED: $MILESTONE_TITLE — issues done but milestone branch not merged to staging or main"
-fi
+echo "ADVISORY: $MILESTONE_TITLE — 0 open issues, $CLOSED_ISSUES closed"
+echo "  → To ship: /milestone ship $SLUG"
+echo "  → To abandon: /milestone close $SLUG"
 ```
 
-**Exception**: Don't close milestones that are intentionally kept open for future work (check if the milestone description says "ongoing" or "rolling"). If unsure, **SKIP it** — milestones are only closed by `/milestone ship` after code reaches staging. Incorrect closure destroys milestone state that cannot be trivially recovered.
+Do NOT call `gh api ... -X PATCH -f state=closed` on any milestone. This phase is informational only.
+
+---
+
+## Phase 4B: P3 Batch Sweep (if `batch-p3` or `all`)
+
+<!-- Added: forge#1333 -->
+
+**Purpose**: Fold stale unbatched P3 review findings into domain-grouped batch issues. Reduces pipeline overhead from individual per-finding full-pipeline runs.
+
+**Skip if**: Input is not `batch-p3` and not `all`.
+
+### Step 4B.1: Fetch open batchable P3 findings
+
+```bash
+# Find all open P3 review findings that carry the FORGE:BATCHABLE annotation
+# and are not already members of a batch (no "batch" label)
+UNBATCHED_P3=$(gh issue list {GH_FLAG} \
+  --state open \
+  --label "review-finding,priority:P3" \
+  --limit 500 \
+  --json number,title,body,labels,createdAt \
+  --jq '.[] | select(.body | test("<!-- FORGE:BATCHABLE -->"))
+         | select(([.labels[].name] | any(. == "batch")) | not)
+         | select(([.labels[].name] | any(. == "security" or . == "billing")) | not)
+         | select((.title | test("security|billing|payment|stripe"; "i")) | not)')
+
+echo "Unbatched batchable P3 findings: $(echo "$UNBATCHED_P3" | jq -s 'length')"
+```
+
+### Step 4B.2: Group by domain
+
+For each finding, extract the domain from the first affected file path under `## Affected Files`:
+
+```bash
+# Domain = top-level directory of the first affected file
+# e.g., "services/api/auth/login.py" → "services/api/auth"
+#        "commands/review-pr.md"     → "commands"
+# Exclude findings where the domain contains "billing" or "security"
+
+# Group findings by domain, track oldest creation timestamp per group
+declare -A DOMAIN_ISSUES
+declare -A DOMAIN_OLDEST
+
+echo "$UNBATCHED_P3" | jq -c '.[]' | while read -r issue; do
+  NUM=$(echo "$issue" | jq -r '.number')
+  CREATED=$(echo "$issue" | jq -r '.createdAt')
+  BODY=$(echo "$issue" | jq -r '.body')
+
+  # Extract first affected file path from body
+  FIRST_FILE=$(echo "$BODY" | sed -n '/^## Affected Files/,/^## /p' | grep -oP '`[^`]+`' | head -1 | tr -d '`')
+  if [ -z "$FIRST_FILE" ]; then
+    FIRST_FILE=$(echo "$BODY" | grep -oP '(?<=\`)[^`]+\.(?:py|ts|tsx|js|go|rs|java|sh|md)(?=\`)' | head -1 || echo "unknown")
+  fi
+  DOMAIN=$(echo "$FIRST_FILE" | cut -d/ -f1,2,3 | sed 's|/[^/]*$||')
+  [ -z "$DOMAIN" ] && DOMAIN="general"
+
+  echo "${NUM}:${DOMAIN}:${CREATED}"
+done
+```
+
+### Step 4B.3: Apply batching threshold
+
+For each domain group:
+- **Trigger**: 5+ unbatched batchable P3 findings in the domain, **OR** the oldest finding in the domain is > 72 hours old
+- **No trigger**: fewer than 5 findings AND none older than 72 hours → skip (no batch created)
+
+```bash
+NOW_EPOCH=$(date +%s)
+HOURS_72=$((72 * 3600))
+
+# For each domain group that meets the threshold, create a batch issue
+# (max 10 members per batch — if more, create multiple batches of ≤ 10 each)
+
+# Exclude domains with "security" or "billing" in the domain path
+echo "$DOMAIN_ISSUES" | while IFS=: read -r domain issue_list; do
+  echo "$domain" | grep -qiE 'security|billing' && continue
+
+  COUNT=$(echo "$issue_list" | tr ',' '\n' | wc -l)
+  OLDEST_EPOCH=$(echo "$DOMAIN_OLDEST[$domain]" | date -d "$..." +%s 2>/dev/null || echo "$NOW_EPOCH")
+  AGE_SECS=$((NOW_EPOCH - OLDEST_EPOCH))
+
+  if [ "$COUNT" -ge 5 ] || [ "$AGE_SECS" -ge "$HOURS_72" ]; then
+    echo "Batching $COUNT P3 findings in domain: ${domain}"
+    # Create batch issues (in chunks of ≤ 10)
+    # See orchestrate.md Phase 1 for the batch creation template
+  fi
+done
+```
+
+**Batch creation** uses the same template as `orchestrate.md Phase 1 → P3 Review-Finding Batching`. After creating the batch issue, add the `batch` label to each member issue to prevent re-batching on the next sweep.
+
+### Step 4B.4: Report
+
+```
+## P3 Batch Sweep
+
+| Domain | Unbatched P3s | Threshold Met | Action |
+|--------|--------------|---------------|--------|
+| {domain} | {N} | ≥5 issues | Created batch #{NUM} ({M} members) |
+| {domain} | {N} | Oldest > 72h | Created batch #{NUM} ({M} members) |
+| {domain} | {N} | Below threshold | No action |
+
+Total batch issues created: {N}
+Total P3 findings batched: {N}
+```
 
 ---
 
@@ -269,6 +467,13 @@ fi
 | workflow:investigating → cleaned | {N} |
 | needs-validation removed | {N} |
 
+### Stale-Open Intermediate Issues (Phase 1D)
+| Issue | Label | Last Update | Action |
+|-------|-------|-------------|--------|
+| #{N} | workflow:X | YYYY-MM-DD | `/work-on {N}` to resume |
+
+*Total stale-open: {N} (threshold: {STALE_THRESHOLD_HOURS}h)*
+
 ### Orphaned Issues Closed
 | Issue | Merged PR | Action |
 |-------|-----------|--------|
@@ -281,15 +486,10 @@ fi
 | Local branches deleted | {N} |
 | Remote branches deleted | {N} |
 
-### Milestones Closed
-| Milestone | Issues (closed) | Shipped via |
-|-----------|-----------------|-------------|
-| {title} | {N} | PR #{M} → staging/main |
-
-### Milestones Skipped (unshipped)
-| Milestone | Issues (closed) | Reason |
-|-----------|-----------------|--------|
-| {title} | {N} | No merged PR from milestone/{slug} → staging or main |
+### Milestones Ready to Ship (advisory — no action taken)
+| Milestone | Issues (closed) | Recommended Action |
+|-----------|-----------------|-------------------|
+| {title} | {N} | `/milestone ship {slug}` or `/milestone close {slug}` |
 
 ### Board Synced
 | Action | Count |
@@ -299,4 +499,10 @@ fi
 
 ### Still Missing Workflow Label
 {N} closed issues have no workflow label (closed outside pipeline — no action needed)
+
+### P3 Batch Sweep Results
+| Domain | Unbatched P3s | Action |
+|--------|--------------|--------|
+| {domain} | {N} | Created batch #{NUM} with {M} members |
+| {domain} | {N} | Below threshold — no action (< 5 findings, none > 72h) |
 ```

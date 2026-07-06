@@ -1,0 +1,9 @@
+{
+  "description": "GATE_FAILED — control marker signals quality gate retry budget exhausted",
+  "input": "<!-- FORGE:GATE_FAILED -->",
+  "expect": {
+    "type": "GATE_FAILED",
+    "valid": true,
+    "sentinelState": "complete"
+  }
+}

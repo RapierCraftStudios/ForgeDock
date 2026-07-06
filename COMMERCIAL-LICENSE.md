@@ -2,6 +2,8 @@
 
 **Copyright (c) RapierCraft Studios. All rights reserved.**
 
+> **For organizations evaluating ForgeDock**: See [docs/site/for-companies.md](docs/site/for-companies.md) for a plain-language AGPL/commercial decision table, fleet-layer description, design-partner program details, and procurement facts.
+
 ---
 
 ## Dual-Licensing Model
@@ -45,7 +47,7 @@ A commercial license grants you the right to:
 
 Contact **RapierCraft Studios** to discuss licensing terms:
 
-- **Email**: [licensing@rapiercraft.studio](mailto:licensing@rapiercraft.studio)
+- **Email**: [support@rapiercraftstudios.com](mailto:support@rapiercraftstudios.com)
 - **GitHub**: [https://github.com/RapierCraftStudios](https://github.com/RapierCraftStudios)
 - **Sponsors / early access**: [https://github.com/sponsors/RapierCraftStudios](https://github.com/sponsors/RapierCraftStudios)
 

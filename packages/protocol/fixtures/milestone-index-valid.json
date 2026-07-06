@@ -1,0 +1,9 @@
+{
+  "description": "MILESTONE_INDEX — valid inline-value annotation",
+  "input": "<!-- FORGE:MILESTONE_INDEX: https://example.com/milestone-index -->",
+  "expect": {
+    "type": "MILESTONE_INDEX",
+    "valid": true,
+    "inlineValue": "https://example.com/milestone-index"
+  }
+}

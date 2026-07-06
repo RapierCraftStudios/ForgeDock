@@ -12,8 +12,10 @@ argument-hint: [issue number] [--repo GH_REPO] [--gh-flag GH_FLAG] [--worktree P
 **Invoked by**: `work-on.md` Step 3F.5, after `implement.md` has written and staged code (not committed).
 **Output**: Return `GATE_PASSED: true/false` to caller. On failure after max iterations, post comment and set `needs-human`.
 
-**Agent model policy**: Default `model: "sonnet"`. If Sonnet is rate-limited, fall back to `model: "opus"`.
+**Agent model policy**: `model: "sonnet"` (standard tier). Fallback: `model: "opus"` if rate-limited. Feature gate: pass `effort` in Task/Skill spawns only on Claude Code >= 2.1.154.
 **NEVER use plan mode (EnterPlanMode).**
+
+<!-- FORGE:SPEC_LOADED — work-on/build/validate.md loaded and active. Agent is bound by this spec. -->
 
 ---
 
@@ -52,10 +54,22 @@ while iteration < max_iterations:
         GATE_PASSED = true
         break
     else:
-        Fix each HIGH and MEDIUM finding in the code at {WORKTREE_PATH}
-        (Do NOT commit yet — fixes are staged for the next gate run)
+        # Separate quarantined test findings from real blocker findings.
+        # quality-gate Step 2R classifies each failing test as PRE_BROKEN, FLAKY, or REAL.
+        # TEST-QUARANTINE findings (LOW) are advisory — do not fix, do not count as gate failures.
+        # TEST-REAL findings (HIGH) and all other HIGH/MEDIUM findings must be fixed.
+        quarantine_findings = findings where severity == LOW and code starts with "TEST-QUARANTINE"
+        blocker_findings    = findings where code != "TEST-QUARANTINE"
 
-if iteration == max_iterations AND result != PASS:
+        if blocker_findings is empty:
+            # All remaining findings are quarantined tests — gate passes from the builder's perspective.
+            GATE_PASSED = true
+            break
+        else:
+            Fix each HIGH and MEDIUM finding in blocker_findings at {WORKTREE_PATH}
+            (Do NOT commit yet — fixes are staged for the next gate run)
+
+if iteration == max_iterations AND result != PASS AND blocker_findings not empty:
     GATE_PASSED = false
     → post comment (see V1-FAIL below)
     → add label needs-human
@@ -71,6 +85,7 @@ Skill("quality-gate", args="{CHANGED_FILES} --worktree {WORKTREE_PATH}")
 - Re-run after EVERY fix pass — never trust that fixes resolved findings without verification
 - Each iteration re-scans ALL changed files — fixes can introduce new issues
 - Only HIGH and MEDIUM findings must be fixed; LOW findings are advisory only
+- `TEST-QUARANTINE | LOW` findings (pre-broken or flaky tests classified by Step 2R) do **not** require fixing and do **not** count toward gate failure — include them in the V5 commit comment for reviewer visibility
 
 **V1-FAIL comment** (post when gate never passes):
 ```bash
@@ -90,7 +105,12 @@ Needs human review before proceeding to commit.
 
 ## Phase V2: Format and Verify
 
-Run after quality gate passes. All tool commands are read from `forge.yaml → verification.commands`; each step logs `SKIPPED — not configured` when the corresponding key is absent rather than silently passing:
+Run after quality gate passes. All tool commands are read from `forge.yaml → verification.commands`; each step logs `SKIPPED — not configured` when the corresponding key is absent rather than silently passing.
+
+**Track skipped checks** — initialize before any check runs:
+```bash
+SKIPPED_CHECKS=""
+```
 
 **Python**:
 ```bash
@@ -101,6 +121,7 @@ if [ -n "$PYTHON_FORMAT" ]; then
     eval "$PYTHON_FORMAT" 2>&1
 else
     echo "SKIPPED — python.format not configured in verification.commands"
+    SKIPPED_CHECKS="${SKIPPED_CHECKS:+$SKIPPED_CHECKS, }python.format"
 fi
 
 # Compile check always runs for Python files (no config needed — catches syntax errors)
@@ -120,6 +141,7 @@ if [ -n "$TS_FORMAT" ]; then
     eval "$TS_FORMAT" 2>&1
 else
     echo "SKIPPED — typescript.format not configured in verification.commands"
+    SKIPPED_CHECKS="${SKIPPED_CHECKS:+$SKIPPED_CHECKS, }typescript.format"
 fi
 
 if [ -n "$TS_TYPECHECK" ]; then
@@ -130,6 +152,7 @@ elif [ -n "$TS_BUILD" ]; then
     TS_EXIT=$?
 else
     echo "SKIPPED — typescript.typecheck and typescript.build not configured in verification.commands"
+    SKIPPED_CHECKS="${SKIPPED_CHECKS:+$SKIPPED_CHECKS, }typescript.typecheck/build"
     TS_EXIT=0
 fi
 ```
@@ -172,21 +195,30 @@ When changed files touch database engine configuration, flag for manual connecti
 ```bash
 cd {WORKTREE_PATH}
 DB_CONFIG_FILES=""
-for f in $(echo {CHANGED_FILES} | tr ' ' '\n' | grep -E '\.py$'); do
+# Process substitution (< <(...)), NOT a piped `| while read`, so DB_CONFIG_FILES
+# set inside the loop body survives past the loop (a piped while-read would run
+# in a subshell and silently discard the accumulator).
+while IFS= read -r f; do
+    [ -z "$f" ] && continue
     grep -qE "create_async_engine|AsyncSession|connect_args|pool_size|prepared_statement|engine_from_config|sessionmaker" "$f" 2>/dev/null && \
-        DB_CONFIG_FILES="$DB_CONFIG_FILES $f"
-done
+        DB_CONFIG_FILES="${DB_CONFIG_FILES}${f}"$'\n'
+done < <(echo {CHANGED_FILES} | tr ' ' '\n' | grep -E '\.py$')
 
 if [ -n "$DB_CONFIG_FILES" ]; then
-    echo "DB CONFIG CHANGE DETECTED in:$DB_CONFIG_FILES"
+    echo "DB CONFIG CHANGE DETECTED in:"
+    echo "$DB_CONFIG_FILES"
     echo "ACTION: Verify database connectivity after deploy — changes to engine config, connect_args, or session factories can cause silent runtime failures."
     echo "RECOMMENDED: Run a minimal connectivity test (e.g., SELECT 1) through the modified session/engine path."
 
     # Check for lambda/callable in connect_args — the exact bug class from PR #14391
-    for f in $DB_CONFIG_FILES; do
+    # $DB_CONFIG_FILES is one path per line (built above) — herestring, not a
+    # piped `| while read`, so behavior stays consistent with the other fixes
+    # in this sweep even though no accumulator is set inside this particular loop.
+    while IFS= read -r f; do
+        [ -z "$f" ] && continue
         grep -nE "lambda.*:.*['\"]|=lambda" "$f" 2>/dev/null | grep -iE "connect_args|prepared_statement|pool|engine" && \
             echo "WARNING: Lambda/callable in database configuration in $f — verify callback signature matches library's expected calling convention"
-    done
+    done <<< "$DB_CONFIG_FILES"
 fi
 ```
 
@@ -234,7 +266,7 @@ After the gate passes, commit all staged changes in a single commit. This includ
 ```bash
 cd {WORKTREE_PATH}
 git add -u
-git commit -m "fix({SCOPE}): {description} (#NUMBER)"
+git commit -s -m "fix({SCOPE}): {description} (#NUMBER)"
 ```
 
 Where `{SCOPE}` is the command or module scope from the contract (e.g. `work-on`, `quality-gate`), and `{description}` summarises the implementation. Use the commit convention from the contract:
@@ -278,6 +310,36 @@ If `origin/{PR_BASE}` does not exist yet (new branch), skip this check — no co
 git ls-remote --exit-code origin {PR_BASE} >/dev/null 2>&1 || echo "PR_BASE not on origin — skipping ancestry audit"
 ```
 
+### V5 Post-Commit: Mark Build Complete (MANDATORY)
+
+After the ancestry audit passes (or is skipped), append `<!-- FORGE:BUILDER:COMPLETE -->` to the existing FORGE:BUILDER comment. This is the **only** place this marker is written — it signals that a real commit exists on the branch and the build is safe to resume-skip. <!-- Added: forge#1305 -->
+
+```bash
+# Find the FORGE:BUILDER comment posted by implement.md Phase I6
+BUILDER_COMMENT_ID=$(gh api repos/{GH_REPO}/issues/{NUMBER}/comments \
+  --jq '[.[] | select(.body | contains("FORGE:BUILDER") and (contains("FORGE:BUILDER:COMPLETE") | not))] | last | .id // ""')
+
+if [ -n "$BUILDER_COMMENT_ID" ]; then
+  # Fetch current body and append the completion marker plus best-effort cost signal
+  CURRENT_BODY=$(gh api repos/{GH_REPO}/issues/comments/$BUILDER_COMMENT_ID --jq '.body')
+  # Best-effort cost append: only include if session telemetry provides a value; never block
+  PHASE_COST_LINE=""
+  [ -n "${PHASE_COST_USD:-}" ] && PHASE_COST_LINE="
+cost_usd: ${PHASE_COST_USD}"
+  UPDATED_BODY="${CURRENT_BODY}${PHASE_COST_LINE}
+
+<!-- FORGE:BUILDER:COMPLETE -->"
+  gh api repos/{GH_REPO}/issues/comments/$BUILDER_COMMENT_ID \
+    -X PATCH \
+    --field body="$UPDATED_BODY"
+  echo "FORGE:BUILDER:COMPLETE appended to comment $BUILDER_COMMENT_ID"
+else
+  echo "WARNING: FORGE:BUILDER comment not found or already marked complete — skipping BUILDER:COMPLETE append"
+fi
+```
+
+**Why here and not in implement.md**: The commit (`git commit`) runs in this phase (V5). Appending `:COMPLETE` after the commit ensures that a session crash between implement.md I6 (comment posted) and this step (commit) leaves a partial BUILDER comment without `:COMPLETE`. The next resume will detect the partial comment, delete it, and restart the build. See `implement.md § Phase I1 resume check`.
+
 ---
 
 ## Output
@@ -293,6 +355,9 @@ VALIDATE_RESULT:
   deploy_completeness_fixes: [{VAR_NAME: location_added}, ...]
   commits_added: [{SHA}, ...]  # from V5 if any
   blocker: {description if gate_passed=false}
+  verification_skipped: []  # empty when all configured checks ran; list of skipped check names otherwise
+                            # e.g. ["python.format", "typescript.typecheck/build"]
+                            # populated from SKIPPED_CHECKS in Phase V2
 ```
 
 ---
