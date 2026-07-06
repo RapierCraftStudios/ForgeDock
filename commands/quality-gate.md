@@ -560,7 +560,7 @@ Report any hit as **HIGH** — the DB connection will fail in any environment wh
 ```bash
 PORT_FINDINGS=""
 
-# Check .sh files and .md files (spec bash blocks) for grep -P / grep -oP
+# Check .sh files and .md files (spec bash blocks) for grep -P / grep -oP <!-- allowlist: comment describing the anti-pattern -->
 while IFS= read -r f; do
     [ -z "$f" ] && continue
     PCRE_HITS=$(grep -nE 'grep -[o]?P[ "]|grep [^|]*-[o]?P[ "]' "$f" 2>/dev/null | grep -v '<!-- allowlist:' || true)

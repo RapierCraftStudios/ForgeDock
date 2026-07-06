@@ -359,7 +359,7 @@ fi
 Detect new env vars:
 ```bash
 cd {WORKTREE_PATH}
-# Portable (POSIX ERE) — no grep -P / PCRE lookbehind required
+# Portable (POSIX ERE) — no grep -P / PCRE lookbehind required <!-- allowlist: comment describing the anti-pattern -->
 git diff HEAD~1 -- {CHANGED_FILES} \
   | grep -oE 'os\.environ\["[A-Z_]+"[^"]*|os\.getenv\(["\'"'"']?[A-Z_]+' \
   | sed "s/os\.environ\[\"//;s/os\.getenv(['\"]*//" \
