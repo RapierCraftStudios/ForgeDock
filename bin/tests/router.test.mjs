@@ -138,6 +138,114 @@ describe("router", () => {
     assert.doesNotMatch(res.stdout, /forge\.yaml configuration/);
   });
 
+  it("update from a git worktree resolves symlinks to the main repo, not the worktree (#1700)", () => {
+    // Simulate issue #1700: forgedock.mjs runs from inside a git worktree.
+    // A git worktree has a .git FILE (not a directory).  resolveRealForgeHome()
+    // must detect this, resolve to the main repo root, and link commands from
+    // there — not from the ephemeral worktree that will be cleaned up.
+    //
+    // Physical layout:
+    //   remoteRepo/        — bare clone (local remote so git fetch succeeds)
+    //   mainRepo/          — the real, stable installation (has .git DIR)
+    //     commands/stable.md
+    //     bin/             — copy of forgedock CLI for forge()
+    //   worktree/          — ephemeral worktree (has .git FILE)
+    //     .git             — file: "gitdir: mainRepo/.git/worktrees/test-wt"
+    //     commands/ephemeral.md
+    //     bin/forgedock.mjs — script under test
+    //
+    // Test flow:
+    //   resolveRealForgeHome(worktree)
+    //     → detects worktree/.git is a FILE
+    //     → runs git rev-parse --git-common-dir (cwd: worktree) → mainRepo/.git
+    //     → returns mainRepo (dirname of mainRepo/.git)
+    //   update() with FORGE_HOME = mainRepo
+    //     → mainRepo/.git is a DIR → git-clone path
+    //     → on "main" branch → git fetch origin main → succeeds (local bare remote)
+    //     → already up to date → relinkAndHint() → links mainRepo/commands
+
+    const remoteRepo = mkdtempSync(join(os.tmpdir(), "fd-remote-"));
+    const mainRepo = mkdtempSync(join(os.tmpdir(), "fd-main-repo-"));
+    const worktree = mkdtempSync(join(os.tmpdir(), "fd-worktree-"));
+
+    // Bootstrap: bare remote repo, then clone it as mainRepo
+    spawnSync("git", ["init", "--bare", remoteRepo], { stdio: "pipe" });
+    spawnSync("git", ["init", mainRepo], { stdio: "pipe" });
+    spawnSync("git", ["-C", mainRepo, "remote", "add", "origin", remoteRepo], { stdio: "pipe" });
+    spawnSync("git", ["-C", mainRepo, "commit", "--allow-empty", "-m", "init"], { stdio: "pipe" });
+    spawnSync("git", ["-C", mainRepo, "push", "origin", "main"], { stdio: "pipe" });
+
+    // Build the git worktree admin chain so git commands work from worktree
+    mkdirSync(join(mainRepo, ".git", "worktrees", "test-wt"), { recursive: true });
+    writeFileSync(
+      join(mainRepo, ".git", "worktrees", "test-wt", "gitdir"),
+      `${join(worktree, ".git")}\n`,
+      "utf-8",
+    );
+    writeFileSync(join(mainRepo, ".git", "worktrees", "test-wt", "commondir"), "../..\n", "utf-8");
+    writeFileSync(
+      join(mainRepo, ".git", "worktrees", "test-wt", "HEAD"),
+      "ref: refs/heads/fix/test\n",
+      "utf-8",
+    );
+    // worktree/.git is the FILE that marks this directory as a linked worktree
+    writeFileSync(
+      join(worktree, ".git"),
+      `gitdir: ${join(mainRepo, ".git", "worktrees", "test-wt")}\n`,
+      "utf-8",
+    );
+
+    // Install the forgedock CLI into the WORKTREE (the binary the agent would invoke)
+    cpSync(join(dirname(CLI)), join(worktree, "bin"), {
+      recursive: true,
+      filter: (src) => !src.includes("tests"),
+    });
+
+    // Commands in the WORKTREE — must NOT be symlinked (dangling after cleanup)
+    mkdirSync(join(worktree, "commands"), { recursive: true });
+    writeFileSync(join(worktree, "commands", "ephemeral.md"), "# Ephemeral\n", "utf-8");
+
+    // Commands in the MAIN REPO — these are the stable ones that SHOULD be symlinked
+    mkdirSync(join(mainRepo, "commands"), { recursive: true });
+    writeFileSync(join(mainRepo, "commands", "stable.md"), "# Stable\n", "utf-8");
+
+    // Copy bin/ into mainRepo so forge() can find session-start.mjs when relinking
+    cpSync(join(dirname(CLI)), join(mainRepo, "bin"), {
+      recursive: true,
+      filter: (src) => !src.includes("tests"),
+    });
+
+    const home = mkdtempSync(join(os.tmpdir(), "fd-wt-home-"));
+
+    // Run forgedock update from the WORKTREE binary.
+    // Before fix: FORGE_HOME = worktree path → ephemeral.md installed → dangling after cleanup.
+    // After fix:  FORGE_HOME = mainRepo path → stable.md installed → stable forever.
+    const res = spawnSync(
+      process.execPath,
+      [join(worktree, "bin", "forgedock.mjs"), "update"],
+      {
+        cwd: mkdtempSync(join(os.tmpdir(), "fd-wt-cwd-")),
+        env: { ...process.env, HOME: home, USERPROFILE: home, NO_COLOR: "1" },
+        encoding: "utf-8",
+        timeout: 30000,
+      },
+    );
+
+    assert.equal(res.status, 0, `update exited non-zero:\n${res.stderr}`);
+
+    // stable.md from the MAIN REPO must be installed
+    assert.ok(
+      existsSync(join(home, ".claude", "commands", "stable.md")),
+      "stable.md from the main repo must be installed (resolveRealForgeHome resolved correctly)",
+    );
+
+    // ephemeral.md from the WORKTREE must NOT be installed
+    assert.ok(
+      !existsSync(join(home, ".claude", "commands", "ephemeral.md")),
+      "ephemeral.md from the worktree must NOT be installed (would become dangling after cleanup)",
+    );
+  });
+
   it("init --manual non-TTY with existing forge.yaml aborts (exit 1, file untouched)", () => {
     const home = mkdtempSync(join(os.tmpdir(), "fd-manual-abort-home-"));
     const cwd = mkdtempSync(join(os.tmpdir(), "fd-manual-abort-cwd-"));
