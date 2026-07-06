@@ -487,7 +487,7 @@ else
   WORKTREE_REMOVED=0
   WORKTREE_KEPT=0
 
-  git worktree list --porcelain 2>/dev/null | grep "^worktree " | sed 's/^worktree //' | while read -r WT_PATH; do
+  while IFS= read -r WT_PATH; do
     # Skip the main worktree (repo root)
     [ "$WT_PATH" = "$REPO_PATH" ] && continue
     # Only manage worktrees under WORKTREE_BASE
@@ -527,7 +527,7 @@ else
       echo "  UNKNOWN: $WT_PATH (branch: $BRANCH) — no PR found, leaving as-is"
       WORKTREE_KEPT=$((WORKTREE_KEPT + 1))
     fi
-  done
+  done < <(git worktree list --porcelain 2>/dev/null | grep "^worktree " | sed 's/^worktree //')
 
   echo "Worktree cleanup: removed=$WORKTREE_REMOVED kept=$WORKTREE_KEPT"
 fi
