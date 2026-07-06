@@ -392,6 +392,11 @@ while IFS= read -r PAIR_LINE; do
     [ -z "$RULE_LINE" ] && continue
     RULE_TEXT=$(echo "$RULE_LINE" | sed 's/^[0-9]*://' | sed 's/^[[:space:]]*//')
     RULE_KEYWORDS=$(echo "$RULE_TEXT" | grep -oE '[A-Z][A-Z ]+' | head -1 | xargs)
+    # Fallback for lowercase-prefix rules (gate:, threshold:) — uppercase-only regex yields empty
+    [ -z "$RULE_KEYWORDS" ] && RULE_KEYWORDS=$(echo "$RULE_TEXT" | cut -d: -f1 | xargs)
+    [ -z "$RULE_KEYWORDS" ] && RULE_KEYWORDS=$(echo "$RULE_TEXT" | awk '{print $1}')
+    # Skip if still empty after all fallbacks (avoids grep -qF "" false-positive matching every line)
+    [ -z "$RULE_KEYWORDS" ] && { echo "| \`$RULE_TEXT\` | (keyword extraction failed) | **SKIP** |"; continue; }
 
     SURVIVING_LOCATION="—"
     STATUS="MISSING"
