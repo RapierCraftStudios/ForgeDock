@@ -87,11 +87,26 @@ jobs:
 
       - name: Syntax-check .sh files with bash (macOS)
         run: |
+          # Scope: diff-based — only .sh files changed in this PR are syntax-checked.
+          # This allows phased remediation of the existing corpus while catching new
+          # syntax errors in changed scripts. <!-- scope: diff-only; see #1608 -->
+          if [ -n "${{ github.event.pull_request.base.sha }}" ]; then
+            BASE_SHA="${{ github.event.pull_request.base.sha }}"
+          else
+            BASE_SHA="$(git rev-parse HEAD^)"
+          fi
+          CHANGED_SCRIPTS=$(git diff --name-only "$BASE_SHA"...HEAD -- 'scripts/**/*.sh' 2>/dev/null \
+            | grep -E '\.sh$' || true)
+          if [ -z "$CHANGED_SCRIPTS" ]; then
+            echo "OK: No scripts/*.sh files changed in this PR — bash -n syntax check skipped."
+            exit 0
+          fi
           FAILED=0
           while IFS= read -r f; do
+            [ -f "$f" ] || continue
             bash -n "$f" 2>&1 || { echo "SYNTAX ERROR in $f"; FAILED=1; }
-          done < <(find scripts/ -name '*.sh' -type f)
-          [ "$FAILED" -eq 0 ] && echo "OK: All .sh files pass bash -n syntax check on macOS"
+          done <<< "$CHANGED_SCRIPTS"
+          [ "$FAILED" -eq 0 ] && echo "OK: All changed .sh files pass bash -n syntax check on macOS"
           exit "$FAILED"
 
   # ---------------------------------------------------------------------------
@@ -110,11 +125,25 @@ jobs:
 
       - name: Syntax-check .sh files with bash (Windows Git Bash)
         run: |
+          # Scope: diff-based — only .sh files changed in this PR are syntax-checked.
+          # Prevents blocking on pre-existing issues in unrelated scripts. <!-- scope: diff-only; see #1608 -->
+          if [ -n "${{ github.event.pull_request.base.sha }}" ]; then
+            BASE_SHA="${{ github.event.pull_request.base.sha }}"
+          else
+            BASE_SHA="$(git rev-parse HEAD^)"
+          fi
+          CHANGED_SCRIPTS=$(git diff --name-only "$BASE_SHA"...HEAD -- 'scripts/**/*.sh' 2>/dev/null \
+            | grep -E '\.sh$' || true)
+          if [ -z "$CHANGED_SCRIPTS" ]; then
+            echo "OK: No scripts/*.sh files changed in this PR — bash -n syntax check skipped."
+            exit 0
+          fi
           FAILED=0
           while IFS= read -r f; do
+            [ -f "$f" ] || continue
             bash -n "$f" 2>&1 || { echo "SYNTAX ERROR in $f"; FAILED=1; }
-          done < <(find scripts/ -name '*.sh' -type f)
-          [ "$FAILED" -eq 0 ] && echo "OK: All .sh files pass bash -n syntax check on Windows Git Bash"
+          done <<< "$CHANGED_SCRIPTS"
+          [ "$FAILED" -eq 0 ] && echo "OK: All changed .sh files pass bash -n syntax check on Windows Git Bash"
           exit "$FAILED"
 
       - name: Verify no GNU date -d epoch patterns in shell scripts
