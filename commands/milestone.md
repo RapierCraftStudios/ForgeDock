@@ -1,6 +1,7 @@
 ---
 description: Create, manage, and ship milestones — the top-level planning layer for feature development
 argument-hint: [create <name> | status | ship <slug> | sync <slug>]
+install: extras
 ---
 <!-- SPDX-FileCopyrightText: Copyright (c) RapierCraft Studios -->
 <!-- SPDX-License-Identifier: AGPL-3.0-or-later -->
@@ -13,7 +14,12 @@ Milestones are the top-level planning unit. They group related issues into a shi
 
 **Hierarchy**: Milestone → Issues → Sub-issues (optional decomposition)
 
-**You have access to ALL tools** — Task tool, Skill tool, sub-agents, everything.
+**NEVER use plan mode (EnterPlanMode).**
+**NEVER use the Agent tool for issue work** — milestone dispatches issue work via `Skill(skill="work-on", ...)` only. The Agent tool bypasses the Skill pipeline's label state machine, FORGE annotations, and structured review. The Agent tool may be used only for coordination tasks within milestone planning itself (e.g., parallel issue list queries) — never for /work-on sub-dispatch.
+
+<!-- FORGE:SPEC_LOADED — milestone.md loaded and active. Agent is bound by this spec. -->
+
+**You have access to Task, Skill, and Bash tools** for milestone coordination.
 
 ## Config Resolution
 
@@ -498,18 +504,29 @@ ISSUE_EOF
 fi
 ```
 
-### Step 3: Create shipping PR
+### Step 3: Create or update shipping PR (merge-train mechanics)
+
+<!-- Added: forge#1327 (update-in-place), extended: forge#1332 (merge-train) -->
+
+**Merge-train policy**: One staging→main PR stays open per deploy cycle. When a milestone ships to staging, it joins the deploy train as a candidate. The train PR is updated in place when fixes are pushed — it is NEVER closed and recreated. Dead-PR chains are eliminated: fix → push → re-request review on the same PR.
+
+**Update-in-place policy**: Before creating a new PR, check whether an open shipping PR already exists for this milestone. If one does, push the updated milestone branch and re-request review on the existing PR — do NOT close and recreate. Closing-and-recreating is pure churn: it burns a new PR number, loses review history, and contributes to a low staging→main pass rate. The correct flow is: fix → push → re-request review on the same PR.
 
 ```bash
-# Get the full diff summary (computed after Step 2.5 rebase, so it reflects the final state)
-DIFF_STATS=$(git diff origin/{STAGING_BRANCH}...origin/milestone/{slug} --stat)
-COMMIT_LOG=$(git log origin/{STAGING_BRANCH}..origin/milestone/{slug} --oneline)
+# Check for an existing open shipping PR for this milestone
+EXISTING_PR=$(gh pr list {GH_FLAG} --head "milestone/{slug}" --base "{STAGING_BRANCH}" --state open \
+    --json number,url --jq '.[0] | "\(.number)|\(.url)"' 2>/dev/null)
 
-gh pr create {GH_FLAG} \
-  --base {STAGING_BRANCH} \
-  --head milestone/{slug} \
-  --title "Ship: {MILESTONE_TITLE}" \
-  --body "$(cat <<'PR_EOF'
+if [ -n "$EXISTING_PR" ]; then
+  PR_NUMBER=$(echo "$EXISTING_PR" | cut -d'|' -f1)
+  PR_URL=$(echo "$EXISTING_PR" | cut -d'|' -f2)
+  echo "Existing open shipping PR #$PR_NUMBER found — updating in place (not recreating)."
+
+  # Update PR body to reflect latest diff state after fixes were pushed
+  DIFF_STATS=$(git diff origin/{STAGING_BRANCH}...origin/milestone/{slug} --stat)
+  COMMIT_LOG=$(git log origin/{STAGING_BRANCH}..origin/milestone/{slug} --oneline)
+  gh pr edit "$PR_NUMBER" {GH_FLAG} --body "$(cat <<'PR_EOF'
+<!-- FORGE:TRAIN_CANDIDATE milestone={slug} -->
 ## Milestone: {MILESTONE_TITLE}
 
 {MILESTONE_DESCRIPTION}
@@ -529,7 +546,43 @@ gh pr create {GH_FLAG} \
 ## Commits
 {COMMIT_LOG}
 PR_EOF
-)"
+  )"
+
+  # Re-request review so reviewers are notified of the updated push
+  gh pr review "$PR_NUMBER" {GH_FLAG} --request-review 2>/dev/null || true
+  echo "PR #$PR_NUMBER updated and review re-requested."
+else
+  # No open PR exists — create a new one
+  DIFF_STATS=$(git diff origin/{STAGING_BRANCH}...origin/milestone/{slug} --stat)
+  COMMIT_LOG=$(git log origin/{STAGING_BRANCH}..origin/milestone/{slug} --oneline)
+
+  gh pr create {GH_FLAG} \
+    --base {STAGING_BRANCH} \
+    --head milestone/{slug} \
+    --title "Ship: {MILESTONE_TITLE}" \
+    --body "$(cat <<'PR_EOF'
+<!-- FORGE:TRAIN_CANDIDATE milestone={slug} -->
+## Milestone: {MILESTONE_TITLE}
+
+{MILESTONE_DESCRIPTION}
+
+## Issues Included
+{list of all closed issues in this milestone with PR references}
+
+## Hunk-Loss Audit
+{If Step 2.5 rebase ran: "✓ Rebase completed — {AT_RISK_COUNT} at-risk staging-branch hunks absorbed into milestone branch before this PR was created. All staging content is preserved."}
+{If Step 2.5 found no at-risk hunks: "✓ Clean — no at-risk staging-branch hunks detected. Safe to merge."}
+
+> ⚠ **IMPORTANT: Merge this PR using a MERGE COMMIT, not squash.** Squash-merging a milestone PR can silently drop staging-only hunks in files the milestone touches. Use the "Create a merge commit" option in the GitHub UI, or `gh pr merge {PR_NUMBER} --merge`.
+
+## Diff Summary
+{DIFF_STATS}
+
+## Commits
+{COMMIT_LOG}
+PR_EOF
+    )"
+fi
 ```
 
 ### Step 4: Run staging review
@@ -539,6 +592,16 @@ Use the `/review-pr` skill to review the shipping PR. This is a comprehensive re
 ```
 Skill(skill="review-pr", args="{PR_NUMBER}")
 ```
+
+**If the review returns blocking findings (FINDINGS, not PASSED)**:
+- Do NOT close the PR.
+- Do NOT restart from Step 1.
+- Fix the blockers on `milestone/{slug}`, push the commits, then re-invoke review on the same PR:
+  ```
+  Skill(skill="review-pr", args="{PR_NUMBER}")
+  ```
+- Step 3 will detect the open PR on the next `/milestone ship {slug}` call and update it in place — the same PR number is preserved, review history is retained, and the reviewer is re-notified.
+- This eliminates the close-and-recreate churn that inflates the failed-PR count and lowers the staging→main pass rate. <!-- Added: forge#1328 -->
 
 ### Step 5: Report — PR is ready for user to merge
 
@@ -571,6 +634,8 @@ Shipping attempt for "{MILESTONE_TITLE}" was rejected (PR #{PR_NUMBER} closed wi
 Milestone stays open. Issues remain assigned. Branch milestone/{slug} preserved.
 Run /milestone ship {slug} again when the milestone is ready for another shipping attempt.
 ```
+
+**When the staging review returns blockers (FINDINGS, not PASSED)**: do NOT close the PR. Fix the blockers on `milestone/{slug}`, push the fixes, then re-run `/milestone ship {slug}`. Step 3 will detect the open PR and update it in place — the same PR number is preserved, review history is retained, and the reviewer is re-notified. This eliminates the close-and-recreate churn that inflates the failed-PR count and lowers the staging→main pass rate. <!-- Added: forge#1327 -->
 
 **If the PR merged successfully**, run the following:
 

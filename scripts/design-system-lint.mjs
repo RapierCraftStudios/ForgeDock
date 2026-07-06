@@ -731,7 +731,7 @@ function checkSectionSkeleton(spec, html, strict) {
 function checkHeroGradient(spec, html, css, strict) {
   const optedIn = specOptsIn(
     spec,
-    { rule: "no-default-tailwind-palette", negId: "N1" },
+    { rule: "no-hero-gradient", negId: "N1" },
     strict,
   );
   const sev = blockIf(optedIn, strict);

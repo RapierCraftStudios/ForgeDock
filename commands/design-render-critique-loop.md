@@ -1,6 +1,7 @@
 ---
 description: Render a design from its FORGE:DESIGN_SPEC, critique the rendered pixels against the perceptual negatives, and iterate until it passes or the budget is spent — the missing reward signal.
 argument-hint: [<issue-number>|<spec-path>] [--max-iters <n>] [--viewports desktop,mobile]
+install: internal
 ---
 <!-- SPDX-FileCopyrightText: Copyright (c) RapierCraft Studios -->
 <!-- SPDX-License-Identifier: AGPL-3.0-or-later -->
@@ -81,7 +82,7 @@ real reference*. They must never be the same judge. This is also distinct from t
 
 ## `FORGE:CRITIQUE` annotation
 
-Registered in [FORGE-PROTOCOL](../docs/FORGE-PROTOCOL.md). One per iteration, so the improvement trajectory is an
+Registered in [FORGE Annotation Protocol](../docs/spec/forge-protocol-v1.md). One per iteration, so the improvement trajectory is an
 auditable artifact:
 
 ```markdown

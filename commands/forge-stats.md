@@ -1,13 +1,14 @@
 ---
 description: Track command sizes, detect bloat, compare against baselines and thresholds
-argument-hint: [diff | baseline | full]
+argument-hint: [diff | baseline | full | cost]
+install: internal
 ---
 <!-- SPDX-FileCopyrightText: Copyright (c) RapierCraft Studios -->
 <!-- SPDX-License-Identifier: AGPL-3.0-or-later -->
 
 # /forge-stats — Prompt Bloat Tracker
 
-**Input**: $ARGUMENTS (default: `diff`)
+**Input**: $ARGUMENTS (default: `diff`; modes: `diff`, `baseline`, `full`, `cost`)
 
 Tracks the size of every Forge command file over time. Detects bloat by comparing current sizes against the git-tracked baseline and per-command thresholds.
 
@@ -129,7 +130,7 @@ for cmd in commands/*.md; do
 done
 
 git add .baselines
-git commit -m "stats: update command baselines — $(date +%Y-%m-%d)"
+git commit -s -m "stats: update command baselines — $(date +%Y-%m-%d)"
 ```
 
 ---
@@ -193,3 +194,122 @@ If 3+ commands repeat the same instruction block (e.g., "how to create a worktre
 
 ### 4. Remove motivational padding
 Emojis, ALL CAPS warnings, "YOU MUST", "CRITICAL", "NO EXCEPTIONS" — these are noise. Sonnet follows clear instructions, not emphasis. Replace 5 lines of warnings with 1 line of instruction.
+
+---
+
+## Mode: `cost`
+
+Report raw cost-per-issue, cost-per-stage, and cost-per-agent-tier by reading `FORGE:DECISION_RECORD` annotations from merged PRs. **Raw numbers only** — no trend dashboards, no automated regression-flagging, no visualization. Respects the open-core boundary defined in `devdocs/project/architecture.md` (trend analytics are a Platform value-add).
+
+```bash
+cd "$FORGE_HOME"
+
+CONFIG_FILE="${FORGE_CONFIG:-forge.yaml}"
+GH_REPO=$(yq e '.project.owner + "/" + .project.repo' "$CONFIG_FILE")
+
+echo "=== Forge Cost Report — $(date +%Y-%m-%d) ==="
+echo "Repo: $GH_REPO"
+echo ""
+
+# Fetch all merged PRs (last 50) and extract their FORGE:DECISION_RECORD JSON blocks
+RECORDS=$(gh pr list -R "$GH_REPO" --state merged --limit 50 --json number \
+  --jq '.[].number' 2>/dev/null | while read pr; do
+    gh api "repos/$GH_REPO/issues/$pr/comments" \
+      --jq '.[] | select(.body | contains("FORGE:DECISION_RECORD")) | .body' 2>/dev/null
+done)
+
+if [ -z "$RECORDS" ]; then
+  echo "No FORGE:DECISION_RECORD annotations found in the last 50 merged PRs."
+  echo "(Older issues predate the cost block — no data to report.)"
+  exit 0
+fi
+
+# Extract cost blocks via Python (handles missing cost block gracefully)
+echo "$RECORDS" | python3 - <<'PYEOF'
+import sys, re, json
+
+records = []
+for block in sys.stdin.read().split("<!-- FORGE:DECISION_RECORD -->"):
+    m = re.search(r'```json\s*(\{.*?\})\s*```', block, re.DOTALL)
+    if not m:
+        continue
+    try:
+        data = json.loads(m.group(1))
+    except json.JSONDecodeError:
+        continue
+    records.append(data)
+
+if not records:
+    print("No parseable FORGE:DECISION_RECORD JSON found.")
+    sys.exit(0)
+
+print(f"Parsed {len(records)} FORGE:DECISION_RECORD annotation(s).\n")
+
+has_cost = [r for r in records if r.get("cost")]
+no_cost  = [r for r in records if not r.get("cost")]
+
+print(f"  With cost block   : {len(has_cost)}")
+print(f"  Without cost block: {len(no_cost)} (older annotations — no data)")
+print()
+
+if not has_cost:
+    print("No cost data available. Cost blocks are written starting with #1296.")
+    sys.exit(0)
+
+# Per-issue raw cost
+print("--- Cost Per Issue ---")
+print(f"{'Issue':<10} {'PR':<8} {'Total ($)':<12} {'Stages'}")
+print(f"{'-----':<10} {'--':<8} {'---------':<12} {'------'}")
+for r in sorted(has_cost, key=lambda x: x.get("issue", 0)):
+    cost = r.get("cost", {})
+    total = cost.get("total_usd", "n/a")
+    stages = cost.get("stages", {})
+    stage_str = ", ".join(f"{k}: ${v}" for k, v in stages.items()) if stages else "n/a"
+    print(f"  #{r.get('issue','?'):<8} #{r.get('pr','?'):<6} {str(total):<12} {stage_str}")
+
+print()
+
+# Per-stage aggregate
+stage_totals = {}
+for r in has_cost:
+    for stage, val in (r.get("cost", {}).get("stages") or {}).items():
+        try:
+            stage_totals[stage] = stage_totals.get(stage, 0.0) + float(val)
+        except (TypeError, ValueError):
+            pass
+
+if stage_totals:
+    print("--- Cost Per Stage (aggregate) ---")
+    for stage, total in sorted(stage_totals.items()):
+        print(f"  {stage:<20}: ${total:.4f}")
+    print()
+
+# Per-agent-tier aggregate
+tier_totals = {}
+for r in has_cost:
+    for tier, val in (r.get("cost", {}).get("agent_tiers") or {}).items():
+        try:
+            tier_totals[tier] = tier_totals.get(tier, 0.0) + float(val)
+        except (TypeError, ValueError):
+            pass
+
+if tier_totals:
+    print("--- Cost Per Agent Tier (aggregate) ---")
+    for tier, total in sorted(tier_totals.items()):
+        print(f"  {tier:<20}: ${total:.4f}")
+    print()
+
+# Summary
+if has_cost:
+    totals = [float(r["cost"]["total_usd"]) for r in has_cost if r.get("cost", {}).get("total_usd") not in (None, "unavailable")]
+    if totals:
+        print(f"Issues with cost data: {len(totals)}")
+        print(f"  Total cost (window) : ${sum(totals):.4f}")
+        print(f"  Average per issue   : ${sum(totals)/len(totals):.4f}")
+        print(f"  Min / Max           : ${min(totals):.4f} / ${max(totals):.4f}")
+PYEOF
+```
+
+**Scope constraint**: This mode reports raw numbers sourced from `FORGE:DECISION_RECORD` annotations only. No new data source is invented. Trend visualization, regression-flagging, and alerting logic are Platform features — do not add them here. If a cost block is absent (older annotations predating #1296), report "no data" rather than erroring.
+
+<!-- Added: forge#1297 -->

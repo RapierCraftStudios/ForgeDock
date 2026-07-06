@@ -1,0 +1,9 @@
+{
+  "description": "PUSH_BLOCKED — control marker signals branch push blocked by platform policy",
+  "input": "<!-- FORGE:PUSH_BLOCKED -->",
+  "expect": {
+    "type": "PUSH_BLOCKED",
+    "valid": true,
+    "sentinelState": "complete"
+  }
+}

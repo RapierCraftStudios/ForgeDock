@@ -31,7 +31,7 @@ const __dirname = dirname(__filename);
 //
 // Use pathToFileURL to produce a valid file:// URL on Windows (raw C:\ paths are
 // not valid ESM specifiers on Windows — see ERR_UNSUPPORTED_ESM_URL_SCHEME).
-const { stripAnsi, truncateVisible, runSteps, renderLogo } = await import(
+const { stripAnsi, truncateVisible, runSteps, renderLogo, annotatedReviewScreen } = await import(
   pathToFileURL(join(__dirname, "..", "tui.mjs")).href
 );
 
@@ -556,5 +556,54 @@ describe("renderLogo — plain-text fallback in non-TTY/NO_COLOR environment", (
     const result = renderLogo();
     assert.ok(result.includes("ForgeDock"),
       "renderLogo() with no args must still include 'ForgeDock'");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// annotatedReviewScreen extraFields
+// ---------------------------------------------------------------------------
+
+describe("annotatedReviewScreen extraFields", () => {
+  it("non-TTY: description from extraFields is returned; medium conf not flagged low", async () => {
+    // process.stdin.isTTY is false under node --test, so this exercises the non-TTY path.
+    const draft = {
+      project: {
+        owner: { value: "o", confidence: "high", source: "s", why: "w" },
+        repo: { value: "r", confidence: "high", source: "s", why: "w" },
+        name: { value: "n", confidence: "medium", source: "s", why: "w" },
+      },
+      paths: {
+        root: { value: "/p", confidence: "high", source: "s", why: "w" },
+        worktreeBase: { value: "/p/w", confidence: "high", source: "s", why: "w" },
+      },
+      branches: {
+        default: { value: "main", confidence: "high", source: "s", why: "w" },
+        staging: { value: "main", confidence: "medium", source: "s", why: "w" },
+      },
+      meta: { remoteDetected: true },
+    };
+    const res = await annotatedReviewScreen(draft, {
+      extraFields: {
+        description: { value: "From README", confidence: "medium", source: "README.md", why: "First paragraph" },
+      },
+    });
+    assert.equal(res.description, "From README");
+    assert.ok(!res.lowConfidenceKeys.includes("description"));
+  });
+
+  it("non-TTY without extraFields: description stays empty and low", async () => {
+    const draft = {
+      project: { owner: { value: "o", confidence: "high", source: "s", why: "w" },
+                 repo: { value: "r", confidence: "high", source: "s", why: "w" },
+                 name: { value: "n", confidence: "medium", source: "s", why: "w" } },
+      paths: { root: { value: "/p", confidence: "high", source: "s", why: "w" },
+               worktreeBase: { value: "/p/w", confidence: "high", source: "s", why: "w" } },
+      branches: { default: { value: "main", confidence: "high", source: "s", why: "w" },
+                  staging: { value: "main", confidence: "medium", source: "s", why: "w" } },
+      meta: { remoteDetected: true },
+    };
+    const res = await annotatedReviewScreen(draft, {});
+    assert.equal(res.description, "");
+    assert.ok(res.lowConfidenceKeys.includes("description"));
   });
 });

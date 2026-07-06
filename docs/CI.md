@@ -2,6 +2,8 @@
 
 This guide explains how to integrate ForgeDock's `/review-pr` pipeline into GitHub Actions so every PR gets automatic multi-domain AI review without requiring a manual Claude Code session.
 
+<!-- publish trigger: bot-token merges do not fire path-filtered workflows -->
+
 ---
 
 ## What This Does
@@ -18,7 +20,7 @@ The `forgedock-review.yml` workflow template triggers on every pull request (ope
 ## Prerequisites
 
 1. **Anthropic API key** — Claude Code runs against the Anthropic API. Get one at [console.anthropic.com](https://console.anthropic.com).
-2. **ForgeDock installed** — The workflow installs ForgeDock automatically via `npx forgedock install`.
+2. **ForgeDock installed** — The workflow installs ForgeDock automatically via `npx forgedock install --global` (CI uses global install so commands are available system-wide in the runner).
 3. **GitHub Actions enabled** — Standard for all public repos; enabled by default for private repos.
 
 ---
@@ -35,6 +37,20 @@ In your repository: **Settings → Secrets and variables → Actions → New rep
 
 Never commit the API key to your repository. GitHub Actions masks secrets in logs, but only secrets stored via Settings are protected.
 
+### 1a. Set the deploy-gate repository variable
+
+If you use the `gate-marker-check` workflow (which enforces that every staging→main PR was reviewed by `/review-pr-staging` before merge), you must also set a **repository variable** that tells the gate which GitHub logins are authorized to post gate markers.
+
+In your repository: **Settings → Secrets and variables → Actions → Variables → New repository variable**
+
+| Name | Value |
+|------|-------|
+| `FORGE_TRUSTED_MARKER_AUTHORS` | Comma-separated list of GitHub logins authorized to run `/review-pr-staging` (e.g. `your-bot-login,your-personal-login`) |
+
+**Why this is required**: The gate-marker-check workflow verifies that gate markers (`FORGE:GATE_PASS` / `FORGE:GATE_FAILURE`) were posted by a trusted author — not hand-typed by an external contributor. If this variable is unset or empty, the gate rejects every marker and blocks all staging→main PRs. The gate will fail immediately with setup instructions rather than waiting 30 minutes and producing a cryptic timeout error.
+
+**What logins to include**: Add the GitHub login of the bot or user account that runs Claude Code sessions (the account that posts `/review-pr-staging` output). For automated CI setups this is typically the bot account; for manual runs it is your personal GitHub login.
+
 ### 2. Copy the workflow template
 
 Copy `templates/workflows/forgedock-review.yml` from your ForgeDock installation to your repository:
@@ -45,7 +61,7 @@ mkdir -p .github/workflows
 cp "$(npx forgedock which-dir)/templates/workflows/forgedock-review.yml" .github/workflows/forgedock-review.yml
 ```
 
-Or copy it manually — the file is in `~/.claude/commands/../templates/workflows/forgedock-review.yml` after running `npx forgedock install`.
+Or copy it manually — the file is in `~/.claude/commands/../templates/workflows/forgedock-review.yml` after running `npx forgedock install --global`.
 
 ### 3. Commit and push
 

@@ -127,19 +127,9 @@ A new agent session running `/work-on 42` should always know what to do next by 
 
 ## Labels as State Machine
 
-GitHub labels track the workflow state of every issue:
+GitHub labels track the workflow state of every issue. The pipeline reads these labels to determine what to do next. A human can also manually set a label to nudge the pipeline or override its routing.
 
-| Label | Meaning |
-|-------|---------|
-| `workflow:investigating` | Investigator agent is running |
-| `workflow:ready-to-build` | Investigation complete, queued for build |
-| `workflow:building` | Builder agent is running |
-| `workflow:in-review` | PR created, review agents running |
-| `workflow:merged` | PR merged, issue closed |
-| `workflow:invalid` | Issue was not a real problem |
-| `workflow:decomposed` | Split into sub-issues |
-
-The pipeline reads these labels to determine what to do next. A human can also manually set a label to nudge the pipeline or override its routing.
+> **Label reference**: [`docs/spec/label-state-machine.md`](../spec/label-state-machine.md) — full state table, transition rules, and terminal labels.
 
 ---
 

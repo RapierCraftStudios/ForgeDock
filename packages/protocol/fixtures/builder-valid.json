@@ -1,0 +1,14 @@
+{
+  "description": "BUILDER — complete handoff annotation with all required fields",
+  "input": "<!-- FORGE:BUILDER -->\n## Implementation Complete\n\n**Branch**: `fix/null-billing-profile-128`\n**Commits**: a1b2c3d\n**Files changed**: 2\n\n### Changes\n- `payments/validator.py` — guard null profile\n- `tests/test_validator.py` — add regression test\n\n<!-- FORGE:BUILDER:COMPLETE -->",
+  "expect": {
+    "type": "BUILDER",
+    "valid": true,
+    "sentinelState": "complete",
+    "fieldChecks": {
+      "Branch": "`fix/null-billing-profile-128`",
+      "Commits": "a1b2c3d",
+      "Files changed": "2"
+    }
+  }
+}

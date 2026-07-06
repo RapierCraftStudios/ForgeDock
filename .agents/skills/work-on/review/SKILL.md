@@ -7,8 +7,8 @@ description: Push a Forge worktree branch, create a PR, and delegate review thro
 
 Use `commands/work-on/review.md` as the authoritative PR-creation workflow, with these Forge repo overrides:
 
-- Default repo context is `RapierCraftStudios/forge`.
-- After push/PR creation, route review to the repo-local Forge review adapter instead of assuming AlterLab’s review environment.
+- Default repo context is `RapierCraftStudios/forgedock`.
+- After push/PR creation, route review to the repo-local Forge review adapter instead of assuming the project’s external review environment.
 - Preserve `FORGE:REVIEW_STARTED`, `REVIEW_RESULT`, merge verification, and issue-closing behavior from the shared workflow.
 
 ## Review Delegation Override

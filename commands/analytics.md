@@ -1,5 +1,6 @@
 ---
 description: Pull production analytics from GSC, Bing Webmaster, Clarity, Umami, Cloudflare, Stripe, and GA4 — generate insights and create actionable GitHub issues. Trigger when user says things like "check analytics", "look at prod analytics", "make issues from analytics", "what's happening on the site", "audit the site", "check revenue", etc.
+install: extras
 ---
 <!-- SPDX-FileCopyrightText: Copyright (c) RapierCraft Studios -->
 <!-- SPDX-License-Identifier: AGPL-3.0-or-later -->
@@ -12,7 +13,9 @@ You are the analytics orchestrator. Pull data from ALL available analytics platf
 
 **NEVER use plan mode (EnterPlanMode)** — it breaks execution context.
 
-**Agent model policy**: Default `model: "sonnet"`. If Sonnet is rate-limited, fall back to `model: "opus"`. User can override with `--model <name>`. Pass the resolved model in every `Agent` tool call. Each agent prompt includes specific queries, exact API endpoints, and the credentials file path so the model can execute without guessing.
+**Agent model policy**: `model: "sonnet"` (standard tier). Fallback: `model: "opus"` if rate-limited. User can override with `--model <name>`. Pass model explicitly in every `Agent` tool call. Feature gate: pass `effort` in Task/Skill spawns only on Claude Code >= 2.1.154.
+
+<!-- FORGE:SPEC_LOADED — analytics.md loaded and active. Agent is bound by this spec. -->
 
 ---
 
