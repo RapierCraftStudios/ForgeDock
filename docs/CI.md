@@ -37,6 +37,20 @@ In your repository: **Settings → Secrets and variables → Actions → New rep
 
 Never commit the API key to your repository. GitHub Actions masks secrets in logs, but only secrets stored via Settings are protected.
 
+### 1a. Set the deploy-gate repository variable
+
+If you use the `gate-marker-check` workflow (which enforces that every staging→main PR was reviewed by `/review-pr-staging` before merge), you must also set a **repository variable** that tells the gate which GitHub logins are authorized to post gate markers.
+
+In your repository: **Settings → Secrets and variables → Actions → Variables → New repository variable**
+
+| Name | Value |
+|------|-------|
+| `FORGE_TRUSTED_MARKER_AUTHORS` | Comma-separated list of GitHub logins authorized to run `/review-pr-staging` (e.g. `your-bot-login,your-personal-login`) |
+
+**Why this is required**: The gate-marker-check workflow verifies that gate markers (`FORGE:GATE_PASS` / `FORGE:GATE_FAILURE`) were posted by a trusted author — not hand-typed by an external contributor. If this variable is unset or empty, the gate rejects every marker and blocks all staging→main PRs. The gate will fail immediately with setup instructions rather than waiting 30 minutes and producing a cryptic timeout error.
+
+**What logins to include**: Add the GitHub login of the bot or user account that runs Claude Code sessions (the account that posts `/review-pr-staging` output). For automated CI setups this is typically the bot account; for manual runs it is your personal GitHub login.
+
 ### 2. Copy the workflow template
 
 Copy `templates/workflows/forgedock-review.yml` from your ForgeDock installation to your repository:
