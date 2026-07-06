@@ -137,6 +137,35 @@ jobs:
             echo "Deploy PR detected: $HEAD → $BASE. Running gate-marker-check."
           fi
 
+      - name: Check FORGE_TRUSTED_MARKER_AUTHORS configured
+        id: vars_check
+        if: steps.scope.outputs.skip == 'false'
+        env:
+          TRUSTED_AUTHORS_RAW: ${{ vars.FORGE_TRUSTED_MARKER_AUTHORS }}
+        run: |
+          # Fail immediately with actionable guidance when the required repo variable
+          # is unset or empty. Without this check the gate silently accepts no markers,
+          # waits 30 minutes, then fails with a cryptic "gate bypass" error — giving
+          # operators no indication that a one-time variable setup is required.
+          # <!-- Added: forge#1663 -->
+          TRUSTED_LIST=$(echo "$TRUSTED_AUTHORS_RAW" | tr ',' '\n' | sed 's/^[[:space:]]*//; s/[[:space:]]*$//' | grep -v '^$' || true)
+          if [ -z "$TRUSTED_LIST" ]; then
+            echo "⛔ SETUP REQUIRED: FORGE_TRUSTED_MARKER_AUTHORS repository variable is not configured."
+            echo ""
+            echo "This variable is required before the deploy gate can function. Without it, no"
+            echo "gate marker author can be trusted and every staging→main PR will be blocked."
+            echo ""
+            echo "How to fix:"
+            echo "  1. Go to: Settings → Secrets and variables → Actions → Variables → New repository variable"
+            echo "  2. Name:  FORGE_TRUSTED_MARKER_AUTHORS"
+            echo "  3. Value: comma-separated list of GitHub logins that run /review-pr-staging"
+            echo "            Example: rapiercraft-forge[bot],your-login"
+            echo ""
+            echo "After setting the variable, re-run this check (push a commit or re-run the workflow)."
+            exit 1
+          fi
+          echo "FORGE_TRUSTED_MARKER_AUTHORS is set (${#TRUSTED_LIST} chars). Proceeding."
+
       - name: Scan PR comments for gate markers
         id: scan
         if: steps.scope.outputs.skip == 'false'
