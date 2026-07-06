@@ -146,4 +146,60 @@ describe("pickPhase", () => {
       assert.equal(outcome.status, "failed");
     });
   });
+
+  // Regression tests for #1669: reconcile must require :COMPLETE markers, not bare annotation openers.
+  describe("context.reconcile — requires FORGE:CONTEXT:COMPLETE (not bare FORGE:CONTEXT)", () => {
+    const context = PHASES.find(p => p.id === "context");
+    const ioWith = (blob) => ({ gh: async () => blob, git: async () => "0" });
+
+    it("bare FORGE:CONTEXT (partial annotation) -> not satisfied", async () => {
+      const r = await context.reconcile(base, ioWith("<!-- FORGE:CONTEXT -->"));
+      assert.equal(r.satisfied, false);
+    });
+
+    it("FORGE:CONTEXT:COMPLETE present -> satisfied", async () => {
+      const r = await context.reconcile(base, ioWith("<!-- FORGE:CONTEXT -->\n<!-- FORGE:CONTEXT:COMPLETE -->"));
+      assert.equal(r.satisfied, true);
+    });
+
+    it("no marker at all -> not satisfied", async () => {
+      const r = await context.reconcile(base, ioWith("nothing here"));
+      assert.equal(r.satisfied, false);
+    });
+  });
+
+  describe("architect.reconcile — requires FORGE:ARCHITECT:COMPLETE (not bare FORGE:ARCHITECT)", () => {
+    const architect = PHASES.find(p => p.id === "architect");
+    const ioWith = (blob) => ({ gh: async () => blob, git: async () => "0" });
+
+    it("bare FORGE:ARCHITECT (partial annotation) -> not satisfied", async () => {
+      const r = await architect.reconcile(base, ioWith("<!-- FORGE:ARCHITECT -->"));
+      assert.equal(r.satisfied, false);
+    });
+
+    it("FORGE:ARCHITECT:COMPLETE present -> satisfied", async () => {
+      const r = await architect.reconcile(base, ioWith("<!-- FORGE:ARCHITECT -->\n<!-- FORGE:ARCHITECT:COMPLETE -->"));
+      assert.equal(r.satisfied, true);
+    });
+
+    it("no marker at all -> not satisfied", async () => {
+      const r = await architect.reconcile(base, ioWith("nothing here"));
+      assert.equal(r.satisfied, false);
+    });
+  });
+
+  describe("architect.detectOutcome — requires FORGE:ARCHITECT:COMPLETE (not bare FORGE:ARCHITECT)", () => {
+    const architect = PHASES.find(p => p.id === "architect");
+    const ioWith = (blob) => ({ gh: async () => blob, git: async () => "0" });
+
+    it("bare FORGE:ARCHITECT (partial annotation) -> failed", async () => {
+      const outcome = await architect.detectOutcome(base, ioWith("<!-- FORGE:ARCHITECT -->"));
+      assert.equal(outcome.status, "failed");
+    });
+
+    it("FORGE:ARCHITECT:COMPLETE present -> committed", async () => {
+      const outcome = await architect.detectOutcome(base, ioWith("<!-- FORGE:ARCHITECT:COMPLETE -->"));
+      assert.equal(outcome.status, "committed");
+    });
+  });
 });
