@@ -59,21 +59,189 @@ gh pr list -R $REPO --state all --limit 200 --json number,state,mergedAt,created
   --jq "[.[] | select(.createdAt > \"$SINCE\" and .baseRefName == \"staging\" and (.headRefName | startswith(\"milestone/\")))] | {total: length, merged: [.[] | select(.mergedAt != null)] | length, failed: [.[] | select(.state == \"CLOSED\" and .mergedAt == null)] | length}"
 ```
 
-### 2E: Review findings per PR (density metric)
+### 2E: Review findings per PR (defect-per-PR — anti-treadmill metric) <!-- Added: forge#1614 -->
+
+This is the pipeline's headline quality KPI. A ratio near 1.0 means the review stage is a
+self-correction treadmill — it catches defects the builder produced rather than shipping
+clean PRs. Track weekly and daily series to distinguish genuine improvement from confounded
+signals (throughput spikes, detection shifting from synchronous review to retroactive audit).
+
+**Key terminology**:
+- **Synchronous finding**: discovered during PR review before merge (`FORGE:FINDING_SOURCE: review`).
+  Rising synchronous findings = builder is producing more defects (bad). Falling = genuine improvement.
+- **Retroactive audit finding**: discovered by `/audit` after the PR already merged
+  (`FORGE:FINDING_SOURCE: audit`). Rising audit findings with falling synchronous = coverage
+  regression, not quality gain — the gate shifted, not the defect rate.
 
 ```bash
-# PRs merged in window
-MERGED_COUNT=$(gh pr list -R $REPO --state closed --json mergedAt,createdAt \
-  --jq "[.[] | select(.mergedAt != null and .createdAt > \"$SINCE\")] | length")
+# ── Rolling weekly series (last 8 complete weeks + current partial week) ──────────────────
+NOW_EPOCH=$(date -u +%s)
 
-# Review findings created in window
-FINDING_COUNT=$(gh issue list -R $REPO --state all --label "review-finding" --json createdAt \
-  --jq "[.[] | select(.createdAt > \"$SINCE\")] | length")
+echo "=== defect_per_pr: rolling weekly series ==="
+echo "Week             | Merged PRs | Sync Findings | Audit Findings | defect_per_pr | Trend source"
+echo "-----------------|------------|---------------|----------------|---------------|-------------"
 
-echo "Findings per PR: $(echo "scale=2; $FINDING_COUNT / $MERGED_COUNT" | bc 2>/dev/null || echo 'N/A')"
+# Fetch ALL merged PRs and ALL review-findings in one call each (avoid per-week API hammering)
+ALL_PRS=$(gh pr list -R "$REPO" --state closed --limit 500 \
+  --json number,mergedAt --jq '[.[] | select(.mergedAt != null)]')
+ALL_FINDINGS=$(gh issue list -R "$REPO" --state all --label "review-finding" --limit 500 \
+  --json number,createdAt,body \
+  --jq '[.[] | {number, createdAt,
+    source: (if (.body | test("FORGE:FINDING_SOURCE: audit"; "i")) then "audit"
+             elif (.body | test("FORGE:FINDING_SOURCE: review"; "i")) then "review"
+             else "review" end)}]')
+# Note: findings without FORGE:FINDING_SOURCE default to "review" for backward compatibility.
+# Historical findings created before forge#1614 are treated as synchronous (conservative — avoids
+# understating the synchronous series for periods before the annotation was introduced).
+
+PREV_RATIO="N/A"
+TREADMILL_WEEKS=0
+
+for WEEK_OFFSET in 8 7 6 5 4 3 2 1 0; do
+  # Compute week boundaries (Monday–Sunday; week 0 = current partial week)
+  if [ "$WEEK_OFFSET" -eq 0 ]; then
+    # Current partial week: Monday 00:00 UTC to now
+    DAY_OF_WEEK=$(date -u +%u)  # 1=Mon … 7=Sun
+    WEEK_START_EPOCH=$((NOW_EPOCH - (DAY_OF_WEEK - 1) * 86400 - (NOW_EPOCH % 86400) + 0))
+    # Normalize to Monday 00:00 UTC
+    WEEK_START_EPOCH=$(( (NOW_EPOCH / 86400 - DAY_OF_WEEK + 1) * 86400 ))
+    WEEK_END_EPOCH=$NOW_EPOCH
+    DAYS_IN_WEEK=$(( (NOW_EPOCH - WEEK_START_EPOCH) / 86400 + 1 ))
+    WEEK_LABEL="current (partial, ${DAYS_IN_WEEK}d)"
+    IS_PARTIAL=1
+  else
+    DAY_OF_WEEK=$(date -u +%u)
+    WEEK_END_EPOCH=$(( (NOW_EPOCH / 86400 - DAY_OF_WEEK + 1) * 86400 - (WEEK_OFFSET - 1) * 7 * 86400 ))
+    WEEK_START_EPOCH=$(( WEEK_END_EPOCH - 7 * 86400 ))
+    WEEK_LABEL=$(date -u -d "@$WEEK_START_EPOCH" +%Y-%m-%d 2>/dev/null \
+      || python3 -c "import datetime; print(datetime.datetime.utcfromtimestamp($WEEK_START_EPOCH).strftime('%Y-%m-%d'))")
+    DAYS_IN_WEEK=7
+    IS_PARTIAL=0
+  fi
+
+  WEEK_START_ISO=$(date -u -d "@$WEEK_START_EPOCH" +%Y-%m-%dT%H:%M:%SZ 2>/dev/null \
+    || python3 -c "import datetime; print(datetime.datetime.utcfromtimestamp($WEEK_START_EPOCH).strftime('%Y-%m-%dT%H:%M:%SZ'))")
+  WEEK_END_ISO=$(date -u -d "@$WEEK_END_EPOCH" +%Y-%m-%dT%H:%M:%SZ 2>/dev/null \
+    || python3 -c "import datetime; print(datetime.datetime.utcfromtimestamp($WEEK_END_EPOCH).strftime('%Y-%m-%dT%H:%M:%SZ'))")
+
+  W_MERGED=$(echo "$ALL_PRS" | jq "[.[] | select(.mergedAt >= \"$WEEK_START_ISO\" and .mergedAt < \"$WEEK_END_ISO\")] | length")
+  W_SYNC=$(echo "$ALL_FINDINGS" | jq "[.[] | select(.createdAt >= \"$WEEK_START_ISO\" and .createdAt < \"$WEEK_END_ISO\" and .source == \"review\")] | length")
+  W_AUDIT=$(echo "$ALL_FINDINGS" | jq "[.[] | select(.createdAt >= \"$WEEK_START_ISO\" and .createdAt < \"$WEEK_END_ISO\" and .source == \"audit\")] | length")
+  W_TOTAL=$(( W_SYNC + W_AUDIT ))
+
+  # Normalize partial week: extrapolate to full-week equivalent for trend comparison
+  if [ "$IS_PARTIAL" -eq 1 ] && [ "$DAYS_IN_WEEK" -gt 0 ]; then
+    # Partial-week ratio uses raw counts (not extrapolated) — label clearly
+    TREND_SOURCE="raw (${DAYS_IN_WEEK}d elapsed)"
+  else
+    TREND_SOURCE="full week"
+  fi
+
+  if [ "$W_MERGED" -gt 0 ]; then
+    RATIO=$(echo "scale=2; $W_TOTAL / $W_MERGED" | bc 2>/dev/null || echo "N/A")
+    SYNC_RATIO=$(echo "scale=2; $W_SYNC / $W_MERGED" | bc 2>/dev/null || echo "N/A")
+  else
+    RATIO="N/A (0 PRs)"
+    SYNC_RATIO="N/A"
+  fi
+
+  # Treadmill threshold: track consecutive full weeks above 0.8
+  if [ "$IS_PARTIAL" -eq 0 ] && [ "$W_MERGED" -gt 0 ]; then
+    ABOVE_THRESHOLD=$(echo "$RATIO > 0.8" | bc 2>/dev/null || echo 0)
+    if [ "$ABOVE_THRESHOLD" -eq 1 ]; then
+      TREADMILL_WEEKS=$((TREADMILL_WEEKS + 1))
+    else
+      TREADMILL_WEEKS=0
+    fi
+  fi
+
+  printf "%-16s | %-10s | %-13s | %-14s | %-13s | %s\n" \
+    "$WEEK_LABEL" "$W_MERGED" "$W_SYNC" "$W_AUDIT" "$RATIO" "$TREND_SOURCE"
+
+  PREV_RATIO="$RATIO"
+done
+
+# ── Treadmill warning ─────────────────────────────────────────────────────────────────────
+if [ "$TREADMILL_WEEKS" -ge 2 ]; then
+  echo ""
+  echo "⚠ PIPELINE_HEALTH: treadmill warning"
+  echo "  defect_per_pr has exceeded 0.8 for ${TREADMILL_WEEKS} consecutive full weeks."
+  echo "  The review stage is catching defects the builder produces rather than shipping"
+  echo "  clean PRs. Investigate root causes via /pipeline-health Phase 3 (pattern analysis)"
+  echo "  or run /audit to identify escaped defects."
+  echo "  Threshold: defect_per_pr > 0.8 sustained for >= 2 weeks (configurable via"
+  echo "  TREADMILL_THRESHOLD and TREADMILL_MIN_WEEKS env vars or forge.yaml pipeline_health)."
+fi
+
+# ── Coverage regression detection ────────────────────────────────────────────────────────
+# A drop in synchronous findings while audit findings rise = detection shifted, not quality gained
+RECENT_SYNC=$(echo "$ALL_FINDINGS" | jq "[.[] | select(.createdAt > \"$SINCE\" and .source == \"review\")] | length")
+RECENT_AUDIT=$(echo "$ALL_FINDINGS" | jq "[.[] | select(.createdAt > \"$SINCE\" and .source == \"audit\")] | length")
+if [ "$RECENT_AUDIT" -gt "$RECENT_SYNC" ] && [ "$RECENT_AUDIT" -gt 0 ]; then
+  echo ""
+  echo "⚠ PIPELINE_HEALTH: coverage regression signal"
+  echo "  Audit findings (${RECENT_AUDIT}) exceed synchronous review findings (${RECENT_SYNC}) in window."
+  echo "  This pattern means defects are escaping review and being caught post-merge by /audit."
+  echo "  A falling total defect_per_pr in this context is NOT a quality improvement —"
+  echo "  it is a coverage regression. Investigate review agent effectiveness."
+fi
+
+# ── Per-day series (last 14 days) ────────────────────────────────────────────────────────
+echo ""
+echo "=== defect_per_pr: per-day series (last 14 days) ==="
+echo "Date       | Merged PRs | Sync Findings | Audit Findings | defect_per_pr"
+echo "-----------|------------|---------------|----------------|---------------"
+
+for DAY_OFFSET in $(seq 13 -1 0); do
+  DAY_START_EPOCH=$(( (NOW_EPOCH / 86400 - DAY_OFFSET) * 86400 ))
+  DAY_END_EPOCH=$(( DAY_START_EPOCH + 86400 ))
+  DAY_LABEL=$(date -u -d "@$DAY_START_EPOCH" +%Y-%m-%d 2>/dev/null \
+    || python3 -c "import datetime; print(datetime.datetime.utcfromtimestamp($DAY_START_EPOCH).strftime('%Y-%m-%d'))")
+  DAY_START_ISO=$(date -u -d "@$DAY_START_EPOCH" +%Y-%m-%dT%H:%M:%SZ 2>/dev/null \
+    || python3 -c "import datetime; print(datetime.datetime.utcfromtimestamp($DAY_START_EPOCH).strftime('%Y-%m-%dT%H:%M:%SZ'))")
+  DAY_END_ISO=$(date -u -d "@$DAY_END_EPOCH" +%Y-%m-%dT%H:%M:%SZ 2>/dev/null \
+    || python3 -c "import datetime; print(datetime.datetime.utcfromtimestamp($DAY_END_EPOCH).strftime('%Y-%m-%dT%H:%M:%SZ'))")
+
+  D_MERGED=$(echo "$ALL_PRS" | jq "[.[] | select(.mergedAt >= \"$DAY_START_ISO\" and .mergedAt < \"$DAY_END_ISO\")] | length")
+  D_SYNC=$(echo "$ALL_FINDINGS" | jq "[.[] | select(.createdAt >= \"$DAY_START_ISO\" and .createdAt < \"$DAY_END_ISO\" and .source == \"review\")] | length")
+  D_AUDIT=$(echo "$ALL_FINDINGS" | jq "[.[] | select(.createdAt >= \"$DAY_START_ISO\" and .createdAt < \"$DAY_END_ISO\" and .source == \"audit\")] | length")
+  D_TOTAL=$(( D_SYNC + D_AUDIT ))
+
+  if [ "$D_MERGED" -gt 0 ]; then
+    D_RATIO=$(echo "scale=2; $D_TOTAL / $D_MERGED" | bc 2>/dev/null || echo "N/A")
+  else
+    D_RATIO="— (0 PRs)"
+  fi
+  printf "%-10s | %-10s | %-13s | %-14s | %s\n" "$DAY_LABEL" "$D_MERGED" "$D_SYNC" "$D_AUDIT" "$D_RATIO"
+done
+
+# ── Lifetime baseline (for replay / regression check) ────────────────────────────────────
+LIFETIME_MERGED=$(echo "$ALL_PRS" | jq 'length')
+LIFETIME_SYNC=$(echo "$ALL_FINDINGS" | jq '[.[] | select(.source == "review")] | length')
+LIFETIME_AUDIT=$(echo "$ALL_FINDINGS" | jq '[.[] | select(.source == "audit")] | length')
+LIFETIME_TOTAL=$(( LIFETIME_SYNC + LIFETIME_AUDIT ))
+if [ "$LIFETIME_MERGED" -gt 0 ]; then
+  LIFETIME_RATIO=$(echo "scale=2; $LIFETIME_TOTAL / $LIFETIME_MERGED" | bc 2>/dev/null || echo "N/A")
+else
+  LIFETIME_RATIO="N/A"
+fi
+echo ""
+echo "Lifetime defect_per_pr: $LIFETIME_RATIO ($LIFETIME_TOTAL findings / $LIFETIME_MERGED PRs)"
+echo "  Synchronous (review): $LIFETIME_SYNC | Retroactive (audit): $LIFETIME_AUDIT"
 ```
 
-Target: < 0.5 findings per PR (meaning most PRs pass clean).
+**Why this matters**: A single-window ratio (old Phase 2E) cannot distinguish a genuine quality
+improvement from a throughput spike or a shift in detection timing. The weekly rolling series
+with synchronous/retroactive split makes the difference visible. A week where synchronous findings
+drop while audit findings rise is a coverage regression — the treadmill accelerated, not improved.
+The treadmill warning fires when defect_per_pr > 0.8 for 2+ consecutive weeks, signaling the
+pipeline is spending more capacity on self-correction than forward progress.
+
+**Configuration** (optional — set in forge.yaml `pipeline_health` section or as env vars):
+- `TREADMILL_THRESHOLD` (default: `0.8`) — defect_per_pr level that counts as a treadmill week
+- `TREADMILL_MIN_WEEKS` (default: `2`) — consecutive weeks above threshold before warning fires
+
+Target: < 0.5 defect_per_pr (synchronous series) sustained. Lifetime baseline ~0.99 as of 2026-07-05 audit.
 
 ### 2F: Issue lifecycle velocity
 

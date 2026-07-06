@@ -136,6 +136,8 @@ done
 | Contracts posted | {N} |
 | Contract→code divergences | {N} (agents that updated contract mid-build) |
 | Review findings created | {N_total} |
+| Defect/PR (this batch) | {BATCH_DEFECT_PER_PR} ({N_sync} synchronous / {N_audit} retroactive audit) <!-- Added: forge#1614 --> |
+| Defect/PR rolling trend | {ROLLING_TREND} (from /pipeline-health Phase 2E if available; N/A for single-issue runs) <!-- Added: forge#1614 --> |
 | Findings queued after cascade control | {N_queued}/{N_total} ({N_deferred} deferred — see Step 4C) |
 | Competing recommendations reconciled (Phase 2.5) | {RECONCILED_COUNT} (investigation plans arbitrated in place + serialized) |
 | Findings validated | {N} |
@@ -143,10 +145,40 @@ done
 | Independent verification | {IV_PASS} passed / {IV_FAIL} failed |
 | Anomalies flagged | {N} |
 
+**Defect/PR computation** (for the Defect/PR rows above):
+
+```bash
+# Compute batch-scoped defect_per_pr from issues processed in this orchestration run
+BATCH_MERGED_COUNT=${#COMPLETED_ISSUE_NUMBERS[@]}  # PRs merged in this batch
+BATCH_SYNC_FINDINGS=$(gh issue list -R "$GH_REPO" --state all --label "review-finding" \
+  --limit 200 --json number,createdAt,body \
+  --jq "[.[] | select(.createdAt > \"$BATCH_START_ISO\") |
+    select(.body | test(\"FORGE:FINDING_SOURCE: review\"; \"i\"))] | length" 2>/dev/null || echo 0)
+BATCH_AUDIT_FINDINGS=$(gh issue list -R "$GH_REPO" --state all --label "review-finding" \
+  --limit 200 --json number,createdAt,body \
+  --jq "[.[] | select(.createdAt > \"$BATCH_START_ISO\") |
+    select(.body | test(\"FORGE:FINDING_SOURCE: audit\"; \"i\"))] | length" 2>/dev/null || echo 0)
+BATCH_TOTAL_FINDINGS=$(( BATCH_SYNC_FINDINGS + BATCH_AUDIT_FINDINGS ))
+
+if [ "$BATCH_MERGED_COUNT" -gt 0 ]; then
+  BATCH_DEFECT_PER_PR=$(echo "scale=2; $BATCH_TOTAL_FINDINGS / $BATCH_MERGED_COUNT" | bc 2>/dev/null || echo "N/A")
+else
+  BATCH_DEFECT_PER_PR="N/A (0 PRs merged)"
+fi
+
+# Pull rolling trend label from pipeline-health Phase 2E output if available
+# (run /pipeline-health separately for full rolling series; here we just report the batch ratio)
+ROLLING_TREND="see /pipeline-health Phase 2E for rolling 8-week series"
+
+echo "Defect/PR (this batch): $BATCH_DEFECT_PER_PR ($BATCH_SYNC_FINDINGS sync / $BATCH_AUDIT_FINDINGS audit)"
+echo "Treadmill check: $([ "$BATCH_AUDIT_FINDINGS" -gt "$BATCH_SYNC_FINDINGS" ] && echo '⚠ audit > sync (coverage regression signal)' || echo 'OK')"
+```
+
 **Domain breakdown**: {N} scraping, {N} frontend, {N} billing, ...
 **Routing**: {N} fast-lane, {N} feature-lane
 
 > `Findings queued after cascade control` reports Step 4C's defer/execute triage split (`QUEUED_FINDINGS` vs `DEFERRED_FINDINGS`) — it is NOT a dedup/arbitration computation; no such step exists for review findings. `Competing recommendations reconciled` is populated by Phase 2.5 (`RECONCILED_COUNT`), which reconciles investigation plans, not review findings. It is `0` when the batch had 0–1 investigations (synthesis is a no-op). <!-- Added: forge#1192, forge#1193 -->
+> `Defect/PR (this batch)` counts findings created after `$BATCH_START_ISO` (the orchestration run start time). Findings without `FORGE:FINDING_SOURCE` annotation are counted in the total but not in either split series (pre-forge#1614 runs). Compare against /pipeline-health Phase 2E rolling baseline to assess whether this batch improved or degraded the trend. <!-- Added: forge#1614 -->
 
 > `Independent verification` reports Step 4B.7's batch-level acceptance-criteria re-check on merged PRs in security-critical domains. `{IV_PASS}` / `{IV_FAIL}` are re-derived in Step 6A from `FORGE:INDEP_VERIFY_PASS` / `FORGE:INDEP_VERIFY_FAIL` comment markers — never estimated. Issues with neither marker were not gated in (non-security-critical domain, feature disabled via `orchestrate.independent_verification.enabled`, or non-merged terminal state). `0 passed / 0 failed` is the expected value for batches with no security-critical issues. Any `{IV_FAIL} > 0` issue carries `needs-human` and had its successors blocked — list those issue numbers under **Systematic issues** below. <!-- Added: forge#1613 -->
 
