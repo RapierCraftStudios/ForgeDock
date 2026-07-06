@@ -51,9 +51,10 @@ export const PHASES = [
     command: "work-on/build/context",
     entryCondition: (s) => s.committed.includes("investigate"),
     async reconcile(state, io) {
-      // Idempotent resume: FORGE:CONTEXT already present → skip the LLM re-run.
+      // Idempotent resume: FORGE:CONTEXT:COMPLETE present → skip the LLM re-run.
+      // Bare FORGE:CONTEXT matches a partial/interrupted annotation — require :COMPLETE.
       const m = await issueMarkers(state.issue, io);
-      return has(m, "FORGE:CONTEXT") ? { satisfied: true } : { satisfied: false };
+      return has(m, "FORGE:CONTEXT:COMPLETE") ? { satisfied: true } : { satisfied: false };
     },
     async detectOutcome(state, io) {
       const m = await issueMarkers(state.issue, io);
@@ -67,15 +68,16 @@ export const PHASES = [
     command: "work-on/build/architect",
     entryCondition: (s) => s.committed.includes("context"),
     async reconcile(state, io) {
-      // Idempotent resume: FORGE:ARCHITECT already present → skip the LLM re-run.
+      // Idempotent resume: FORGE:ARCHITECT:COMPLETE present → skip the LLM re-run.
+      // Bare FORGE:ARCHITECT matches a partial/interrupted annotation — require :COMPLETE.
       const m = await issueMarkers(state.issue, io);
-      return has(m, "FORGE:ARCHITECT") ? { satisfied: true } : { satisfied: false };
+      return has(m, "FORGE:ARCHITECT:COMPLETE") ? { satisfied: true } : { satisfied: false };
     },
     async detectOutcome(state, io) {
       const m = await issueMarkers(state.issue, io);
-      return has(m, "FORGE:ARCHITECT")
+      return has(m, "FORGE:ARCHITECT:COMPLETE")
         ? { status: "committed", outputs: {} }
-        : { status: "failed", detail: "no FORGE:ARCHITECT" };
+        : { status: "failed", detail: "no FORGE:ARCHITECT:COMPLETE" };
     },
   },
   {

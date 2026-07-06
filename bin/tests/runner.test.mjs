@@ -918,4 +918,18 @@ describe("runCommand", () => {
     assert.equal(result.status, "dry-run");
     assert.equal(result.usage, undefined, "dry-run should not include usage");
   });
+
+  it("dry-run result includes model field", async () => {
+    const result = await runCommand({
+      commandsDir: COMMANDS_DIR,
+      commandName: "work-on",
+      args: ["1151"],
+      cwd: TMP,
+      dryRun: true,
+      model: "claude-test-model",
+      logger: { log() {} },
+    });
+    assert.equal(result.status, "dry-run");
+    assert.equal(result.model, "claude-test-model", "dry-run result must include model field");
+  });
 });

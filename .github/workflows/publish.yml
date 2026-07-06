@@ -99,10 +99,12 @@ jobs:
         if: env.SKIP_PUBLISH != 'true'
         run: |
           NPMRC="$RUNNER_TEMP/.npmrc"
-          echo "//npm.pkg.github.com/:_authToken=${{ secrets.GITHUB_TOKEN }}" > "$NPMRC"
+          echo "//npm.pkg.github.com/:_authToken=${GH_TOKEN}" > "$NPMRC"
           echo "@rapiercraftstudios:registry=https://npm.pkg.github.com" >> "$NPMRC"
           npm pkg set name="@rapiercraftstudios/forgedock"
           npm publish --access public --userconfig "$NPMRC"
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Restore package.json name
         if: always() && env.SKIP_PUBLISH != 'true'

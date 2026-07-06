@@ -759,7 +759,7 @@ export async function runCommand(opts = {}) {
 
   if (dryRun) {
     logger.log(renderDryRun({ spec, systemPrompt, userMessage, model, maxIterations }));
-    return { status: "dry-run", command: spec.name, args, specPath: spec.path };
+    return { status: "dry-run", command: spec.name, args, specPath: spec.path, model };
   }
 
   if (!apiKey) {
@@ -857,6 +857,7 @@ export async function runCommand(opts = {}) {
         iterations,
         stopReason: response.stop_reason,
         usage,
+        model,
       };
     }
 
@@ -892,5 +893,5 @@ export async function runCommand(opts = {}) {
       usage,
     }),
   );
-  return { status: "max-iterations", command: spec.name, iterations, usage };
+  return { status: "max-iterations", command: spec.name, iterations, usage, model };
 }

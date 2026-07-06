@@ -99,6 +99,31 @@ function escapeRegExp(str) {
 }
 
 /**
+ * Reverse the HTML entity escapes applied by emit()'s sanitizeFieldValue().
+ *
+ * emit() escapes three HTML comment delimiter sequences to protect GitHub's
+ * renderer from comment injection:
+ *   1. `<!--`  → `&lt;!--`   (forge#1638)
+ *   2. `--!>`  → `--!&gt;`   (forge#1594)
+ *   3. `-->`   → `--&gt;`    (forge#1594)
+ *
+ * parse() must apply the inverse so that round-tripping through emit → parse
+ * is lossless. Unescape order: `--!&gt;` before `--&gt;` (most-specific first)
+ * to avoid the `!` being left dangling by an overly-greedy `--&gt;` pass.
+ * The `&lt;!--` unescape is independent and can run in any relative order.
+ * (forge#1662)
+ *
+ * @param {string} raw
+ * @returns {string}
+ */
+function unescapeFieldValue(raw) {
+  return raw
+    .replace(/--!&gt;/g, '--!>')
+    .replace(/--&gt;/g, '-->')
+    .replace(/&lt;!--/g, '<!--');
+}
+
+/**
  * Extract **Key**: value fields from an annotation body.
  *
  * @param {string} body
@@ -109,7 +134,7 @@ function extractFields(body) {
   for (const line of body.split('\n')) {
     const m = line.trim().match(BOLD_FIELD_RE);
     if (m) {
-      fields[m[1].trim()] = m[2].trim();
+      fields[unescapeFieldValue(m[1].trim())] = unescapeFieldValue(m[2].trim());
     }
   }
   return fields;
@@ -169,7 +194,7 @@ export function parse(commentBody) {
       continue;
     }
 
-    const inlineValue = rawInlineValue;
+    const inlineValue = rawInlineValue !== null ? unescapeFieldValue(rawInlineValue) : null;
     const typeDef = typeDefForTag;
     const isControl = typeDef?.controlMarker === true;
     const isReserved = RESERVED_TYPE_NAMES.has(type);

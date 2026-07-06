@@ -39,8 +39,8 @@ describe("runIssue", () => {
     // Each phase run advances the world so detectOutcome sees a committed result.
     const script = {
       "work-on/investigate": () => { w.markers += " INVESTIGATION:COMPLETE"; },
-      "work-on/build/context": () => { w.markers += " FORGE:CONTEXT"; },
-      "work-on/build/architect": () => { w.markers += " FORGE:ARCHITECT"; },
+      "work-on/build/context": () => { w.markers += " FORGE:CONTEXT:COMPLETE"; },
+      "work-on/build/architect": () => { w.markers += " FORGE:ARCHITECT:COMPLETE"; },
       "work-on/build": () => { w.markers += " FORGE:BUILDER:COMPLETE"; w.commitsAhead = 2; },
       "work-on/review": () => { w.pr = 7; w.prMerged = true; },
       "work-on/close": () => { w.issueState = "CLOSED"; },
@@ -60,8 +60,8 @@ describe("runIssue", () => {
     const { w, io } = fakeWorld();
     const script = {
       "work-on/investigate": () => { w.markers += " INVESTIGATION:COMPLETE"; },
-      "work-on/build/context": () => { w.markers += " FORGE:CONTEXT"; },
-      "work-on/build/architect": () => { w.markers += " FORGE:ARCHITECT"; },
+      "work-on/build/context": () => { w.markers += " FORGE:CONTEXT:COMPLETE"; },
+      "work-on/build/architect": () => { w.markers += " FORGE:ARCHITECT:COMPLETE"; },
       "work-on/build": () => { w.markers += " FORGE:BUILDER:COMPLETE"; w.commitsAhead = 1; },
       "work-on/review": () => { w.pr = 7; w.prNeedsHuman = true; },
     };
@@ -83,8 +83,8 @@ describe("runIssue", () => {
     };
     const script = {
       "work-on/investigate": () => { w.markers += " INVESTIGATION:COMPLETE"; },
-      "work-on/build/context": () => { w.markers += " FORGE:CONTEXT"; },
-      "work-on/build/architect": () => { w.markers += " FORGE:ARCHITECT"; },
+      "work-on/build/context": () => { w.markers += " FORGE:CONTEXT:COMPLETE"; },
+      "work-on/build/architect": () => { w.markers += " FORGE:ARCHITECT:COMPLETE"; },
       "work-on/build": () => { w.markers += " FORGE:BUILDER:COMPLETE"; w.commitsAhead = 2; },
       "work-on/review": () => { w.pr = 7; w.prMerged = true; },
       "work-on/close": () => { w.issueState = "CLOSED"; },
@@ -183,12 +183,12 @@ describe("runIssue", () => {
     // The remote index says build already committed; mirror that in the world so
     // review's own reconcile/detectOutcome see a consistent picture.
     w.commitsAhead = 2;
-    w.markers = " INVESTIGATION:COMPLETE FORGE:CONTEXT FORGE:ARCHITECT FORGE:BUILDER:COMPLETE";
+    w.markers = " INVESTIGATION:COMPLETE FORGE:CONTEXT:COMPLETE FORGE:ARCHITECT:COMPLETE FORGE:BUILDER:COMPLETE";
 
     const script = {
       "work-on/investigate": () => { w.markers += " INVESTIGATION:COMPLETE"; },
-      "work-on/build/context": () => { w.markers += " FORGE:CONTEXT"; },
-      "work-on/build/architect": () => { w.markers += " FORGE:ARCHITECT"; },
+      "work-on/build/context": () => { w.markers += " FORGE:CONTEXT:COMPLETE"; },
+      "work-on/build/architect": () => { w.markers += " FORGE:ARCHITECT:COMPLETE"; },
       "work-on/build": () => { w.markers += " FORGE:BUILDER:COMPLETE"; w.commitsAhead = 2; },
       "work-on/review": () => { w.pr = 7; w.prMerged = true; },
       "work-on/close": () => { w.issueState = "CLOSED"; },
@@ -213,7 +213,7 @@ describe("runIssue", () => {
     // Crash-injection: simulate a resume where context already completed (FORGE:CONTEXT present)
     // but only investigate is in the committed list. context.reconcile should fire and skip the LLM.
     const { w, io } = fakeWorld();
-    w.markers = " INVESTIGATION:COMPLETE FORGE:CONTEXT";
+    w.markers = " INVESTIGATION:COMPLETE FORGE:CONTEXT:COMPLETE";
     const runCounts = {};
 
     // Pre-populate local log with investigate committed (crash happened after context LLM ran
@@ -223,7 +223,7 @@ describe("runIssue", () => {
     appendEvent(dir, 42, { event: "PHASE_COMMIT", phase: "investigate", outputs: {} });
 
     const script = {
-      "work-on/build/architect": () => { w.markers += " FORGE:ARCHITECT"; },
+      "work-on/build/architect": () => { w.markers += " FORGE:ARCHITECT:COMPLETE"; },
       "work-on/build": () => { w.markers += " FORGE:BUILDER:COMPLETE"; w.commitsAhead = 2; },
       "work-on/review": () => { w.pr = 7; w.prMerged = true; },
       "work-on/close": () => { w.issueState = "CLOSED"; },
@@ -247,7 +247,7 @@ describe("runIssue", () => {
     // Crash-injection: resume where architect already completed (FORGE:ARCHITECT present)
     // but only investigate+context are committed. architect.reconcile should fire and skip LLM.
     const { w, io } = fakeWorld();
-    w.markers = " INVESTIGATION:COMPLETE FORGE:CONTEXT FORGE:ARCHITECT";
+    w.markers = " INVESTIGATION:COMPLETE FORGE:CONTEXT:COMPLETE FORGE:ARCHITECT:COMPLETE";
     const runCounts = {};
 
     const { appendEvent } = await import("../engine/runlog.mjs");
@@ -279,7 +279,7 @@ describe("runIssue", () => {
     // Crash-injection: resume where close already ran (issue CLOSED) but only
     // investigate+context+architect+build+review are committed. close.reconcile should fire.
     const { w, io } = fakeWorld();
-    w.markers = " INVESTIGATION:COMPLETE FORGE:CONTEXT FORGE:ARCHITECT FORGE:BUILDER:COMPLETE";
+    w.markers = " INVESTIGATION:COMPLETE FORGE:CONTEXT:COMPLETE FORGE:ARCHITECT:COMPLETE FORGE:BUILDER:COMPLETE";
     w.commitsAhead = 2;
     w.pr = 7;
     w.prMerged = true;

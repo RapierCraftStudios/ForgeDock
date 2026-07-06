@@ -8,14 +8,16 @@ Per-release pipeline evaluation results for ForgeDock. Every scorecard here was 
 
 | Field | Value |
 |-------|-------|
-| Scorecard | [claude-sonnet-4-6-2026-07-04.json](published/claude-sonnet-4-6-2026-07-04.json) |
-| Model | claude-sonnet-4-6 |
+| Scorecard | [claude-sonnet-5-2026-07-04.json](published/claude-sonnet-5-2026-07-04.json) |
+| Model | claude-sonnet-5 |
 | Corpus | seed-v1 |
 | Run date | 2026-07-04 |
 | One-shot success rate | — (pending harness) |
 | Human-intervention mean | — (pending harness) |
 
 > **Note**: The baseline above is a format placeholder. The harness (#1285) and CI gate (#1286) must be operational before real scorecard values can be populated. When the first real run completes, update this table and remove this note.
+>
+> **Model upgrade**: Default model was updated from `claude-sonnet-4-5` to `claude-sonnet-5` in PR #1441 (issue #1248, committed 2026-07-04). The `--model` flag and `FORGEDOCK_MODEL` env var override the default at runtime.
 
 ---
 
@@ -23,6 +25,7 @@ Per-release pipeline evaluation results for ForgeDock. Every scorecard here was 
 
 | Run ID | Model | Corpus | Date | One-shot success | Human interventions/issue | Scorecard |
 |--------|-------|--------|------|-----------------|--------------------------|-----------|
+| claude-sonnet-5-2026-07-04 | claude-sonnet-5 | seed-v1 | 2026-07-04 | pending | pending | [scorecard](published/claude-sonnet-5-2026-07-04.json) |
 | claude-sonnet-4-6-2026-07-04 | claude-sonnet-4-6 | seed-v1 | 2026-07-04 | pending | pending | [scorecard](published/claude-sonnet-4-6-2026-07-04.json) |
 
 ---
@@ -34,8 +37,8 @@ Every file in `published/` is a JSON object with the following fields:
 ```jsonc
 {
   // Run metadata
-  "run_id": "claude-sonnet-4-6-2026-07-04",       // <model-slug>-<YYYY-MM-DD>
-  "model": "claude-sonnet-4-6",                    // exact model identifier
+  "run_id": "claude-sonnet-5-2026-07-04",          // <model-slug>-<YYYY-MM-DD>
+  "model": "claude-sonnet-5",                       // exact model identifier
   "claude_code_version": "1.x.x",                  // Claude Code version used
   "corpus_version": "seed-v1",                     // corpus tag from docs/eval/corpus/
   "run_date": "2026-07-04",                        // ISO 8601 date

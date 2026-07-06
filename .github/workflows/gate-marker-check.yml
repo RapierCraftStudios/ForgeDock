@@ -27,6 +27,13 @@ name: Deploy Gate Marker Check
 # external contributor who can comment but is not in the allowlist) cannot
 # forge a passing gate by hand-typing the marker text.
 #
+# issue_comment trigger restriction: the job only runs for issue_comment events
+# where the commenter has OWNER, MEMBER, or COLLABORATOR author_association.
+# This prevents untrusted external contributors (association: CONTRIBUTOR,
+# FIRST_TIMER, FIRST_TIME_CONTRIBUTOR, NONE) from triggering the workflow via
+# any comment on any PR, which would waste CI minutes and exercise the
+# statuses:write permission surface unnecessarily. <!-- Added: forge#1661 -->
+#
 # IMPORTANT — operator setup required: if `FORGE_TRUSTED_MARKER_AUTHORS` is
 # unset or empty, NO marker is trusted and every staging→main PR will be
 # treated as a gate bypass after the 30-minute window. Set this variable to
@@ -63,10 +70,16 @@ jobs:
     name: Check for FORGE gate markers
     runs-on: ubuntu-latest
 
-    # Only run on PRs targeting main — skip all other PR events
+    # Only run on PRs targeting main — skip all other PR events.
+    # For issue_comment events, additionally require that the commenter has
+    # OWNER, MEMBER, or COLLABORATOR association to prevent untrusted external
+    # contributors from triggering the workflow (and exercising statuses:write)
+    # via arbitrary comments on any PR. <!-- Added: forge#1661 -->
     if: |
       github.event_name == 'pull_request' ||
-      (github.event_name == 'issue_comment' && github.event.issue.pull_request != null)
+      (github.event_name == 'issue_comment' &&
+       github.event.issue.pull_request != null &&
+       contains(fromJSON('["OWNER","MEMBER","COLLABORATOR"]'), github.event.comment.author_association))
 
     steps:
       - name: Resolve PR number
@@ -81,21 +94,29 @@ jobs:
           ISSUE_NUMBER_CTX: ${{ github.event.issue.number }}
           REPO_CTX: ${{ github.repository }}
         run: |
+          # Sanitize all values written to GITHUB_OUTPUT by stripping newline and
+          # carriage-return characters. Branch refs and timestamps from the PR event
+          # payload are attacker-controlled for PRs from forked repos — a value
+          # containing '\n' would inject arbitrary key=value pairs into GITHUB_OUTPUT,
+          # potentially overriding outputs consumed by downstream steps (e.g. injecting
+          # skip=false to bypass the non-deploy-PR guard). <!-- Added: forge#1660 -->
+          sanitize() { printf '%s' "$1" | tr -d '\n\r'; }
+
           if [ "$EVENT_NAME" = "pull_request" ]; then
-            echo "number=$PR_NUMBER_CTX" >> "$GITHUB_OUTPUT"
-            echo "base=$PR_BASE_CTX" >> "$GITHUB_OUTPUT"
-            echo "head=$PR_HEAD_CTX" >> "$GITHUB_OUTPUT"
-            echo "created_at=$PR_CREATED_CTX" >> "$GITHUB_OUTPUT"
+            echo "number=$(sanitize "$PR_NUMBER_CTX")" >> "$GITHUB_OUTPUT"
+            echo "base=$(sanitize "$PR_BASE_CTX")" >> "$GITHUB_OUTPUT"
+            echo "head=$(sanitize "$PR_HEAD_CTX")" >> "$GITHUB_OUTPUT"
+            echo "created_at=$(sanitize "$PR_CREATED_CTX")" >> "$GITHUB_OUTPUT"
           else
             # issue_comment event — fetch PR details via API
             PR_DATA=$(gh pr view "$ISSUE_NUMBER_CTX" \
               --repo "$REPO_CTX" \
               --json number,baseRefName,headRefName,createdAt \
               --jq '{number:.number,base:.baseRefName,head:.headRefName,created_at:.createdAt}')
-            echo "number=$(echo "$PR_DATA" | jq -r '.number')" >> "$GITHUB_OUTPUT"
-            echo "base=$(echo "$PR_DATA" | jq -r '.base')" >> "$GITHUB_OUTPUT"
-            echo "head=$(echo "$PR_DATA" | jq -r '.head')" >> "$GITHUB_OUTPUT"
-            echo "created_at=$(echo "$PR_DATA" | jq -r '.created_at')" >> "$GITHUB_OUTPUT"
+            echo "number=$(echo "$PR_DATA" | jq -r '.number' | tr -d '\n\r')" >> "$GITHUB_OUTPUT"
+            echo "base=$(echo "$PR_DATA" | jq -r '.base' | tr -d '\n\r')" >> "$GITHUB_OUTPUT"
+            echo "head=$(echo "$PR_DATA" | jq -r '.head' | tr -d '\n\r')" >> "$GITHUB_OUTPUT"
+            echo "created_at=$(echo "$PR_DATA" | jq -r '.created_at' | tr -d '\n\r')" >> "$GITHUB_OUTPUT"
           fi
 
       - name: Skip non-deploy PRs
@@ -115,6 +136,35 @@ jobs:
             echo "skip=false" >> "$GITHUB_OUTPUT"
             echo "Deploy PR detected: $HEAD → $BASE. Running gate-marker-check."
           fi
+
+      - name: Check FORGE_TRUSTED_MARKER_AUTHORS configured
+        id: vars_check
+        if: steps.scope.outputs.skip == 'false'
+        env:
+          TRUSTED_AUTHORS_RAW: ${{ vars.FORGE_TRUSTED_MARKER_AUTHORS }}
+        run: |
+          # Fail immediately with actionable guidance when the required repo variable
+          # is unset or empty. Without this check the gate silently accepts no markers,
+          # waits 30 minutes, then fails with a cryptic "gate bypass" error — giving
+          # operators no indication that a one-time variable setup is required.
+          # <!-- Added: forge#1663 -->
+          TRUSTED_LIST=$(echo "$TRUSTED_AUTHORS_RAW" | tr ',' '\n' | sed 's/^[[:space:]]*//; s/[[:space:]]*$//' | grep -v '^$' || true)
+          if [ -z "$TRUSTED_LIST" ]; then
+            echo "⛔ SETUP REQUIRED: FORGE_TRUSTED_MARKER_AUTHORS repository variable is not configured."
+            echo ""
+            echo "This variable is required before the deploy gate can function. Without it, no"
+            echo "gate marker author can be trusted and every staging→main PR will be blocked."
+            echo ""
+            echo "How to fix:"
+            echo "  1. Go to: Settings → Secrets and variables → Actions → Variables → New repository variable"
+            echo "  2. Name:  FORGE_TRUSTED_MARKER_AUTHORS"
+            echo "  3. Value: comma-separated list of GitHub logins that run /review-pr-staging"
+            echo "            Example: rapiercraft-forge[bot],your-login"
+            echo ""
+            echo "After setting the variable, re-run this check (push a commit or re-run the workflow)."
+            exit 1
+          fi
+          echo "FORGE_TRUSTED_MARKER_AUTHORS is set (${#TRUSTED_LIST} chars). Proceeding."
 
       - name: Scan PR comments for gate markers
         id: scan
@@ -219,7 +269,17 @@ jobs:
           PR_CREATED: ${{ steps.pr.outputs.created_at }}
         run: |
           NOW=$(date -u +%s)
-          PR_EPOCH=$(date -u -d "$PR_CREATED" +%s 2>/dev/null || date -u -j -f "%Y-%m-%dT%H:%M:%SZ" "$PR_CREATED" +%s 2>/dev/null || echo 0)
+          # Validate PR_CREATED is ISO 8601 (YYYY-MM-DDTHH:MM:SSZ) before passing to date -d.
+          # An unvalidated date string could cause date -d to interpret relative or
+          # malformed values, producing an unexpected epoch and corrupting the stale
+          # calculation. If the format guard fails, default to epoch 0 (fail-closed:
+          # ELAPSED becomes very large → stale=true). <!-- Added: forge#1664 -->
+          if echo "$PR_CREATED" | grep -qE '^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$'; then
+            PR_EPOCH=$(date -u -d "$PR_CREATED" +%s 2>/dev/null || date -u -j -f "%Y-%m-%dT%H:%M:%SZ" "$PR_CREATED" +%s 2>/dev/null || echo 0)
+          else
+            echo "WARNING: PR created_at '$PR_CREATED' does not match expected ISO 8601 format (YYYY-MM-DDTHH:MM:SSZ) — defaulting to epoch 0 (treating as stale)."
+            PR_EPOCH=0
+          fi
           ELAPSED=$(( NOW - PR_EPOCH ))
           WINDOW=1800  # 30 minutes in seconds
 

@@ -1,37 +1,33 @@
 ---
-description: Autonomous platform improvement cycle — recon, triage, fix, report. Runs recon+triage by default; pass --fix to also pick up and fix top issues. Human gates all deploys.
-argument-hint: [--fix | --recon-only | --fix --limit 5 | --dry-run | --fix --yes]
+description: Autonomous deploy loop — runs until zero open issues remain. Detects pipeline state and resumes from any position. Fully autonomous after invocation.
+argument-hint: [--dry-run | --recon-only]
 install: extras
 ---
+<!-- SPDX-FileCopyrightText: Copyright (c) RapierCraft Studios -->
+<!-- SPDX-License-Identifier: AGPL-3.0-or-later -->
 
-# /autopilot — Recursive Platform Improvement Cycle
+# /autopilot — Autonomous Deploy Loop
 
-**Input**: $ARGUMENTS (default: recon + triage + report, no fixing)
+**Input**: $ARGUMENTS (default: full autonomous loop until zero open issues remain)
 
 **Config variables used by this command** (set in `forge.yaml`):
 - `{CREDENTIALS_FILE}` ← `paths.credentials.file` (optional) — path to credentials YAML for analytics APIs
-- `{SERVER_SSH}` ← `services.server_ssh` (optional) — SSH target for production server health checks (e.g., `ubuntu@1.2.3.4`)
-- `{OPS_INBOX_PATH}` ← `services.ops_inbox_path` (optional) — path on production server to a directory of open work-item files (e.g. `/srv/ops/inbox`)
-- `{BILLING_ENABLED}` ← `billing.enabled` (optional, default `false`) — set to `true` to enable Stripe data collection in the Analytics Snapshot agent
-
-Resolve `{BILLING_ENABLED}` from `forge.yaml` before executing any phase:
-
-```bash
-BILLING_ENABLED=$(yq '.billing.enabled // false' "$(git rev-parse --show-toplevel)/forge.yaml" 2>/dev/null || echo 'false')
-```
+- `{SERVER_SSH}` ← `services.server_ssh` (optional) — SSH target for production server health checks
+- `{OPS_INBOX_PATH}` ← `services.ops_inbox_path` (optional) — path on production server to ops work-item files
+- `{BILLING_ENABLED}` ← `billing.enabled` (optional, default `false`) — set to `true` to enable Stripe data in Analytics Snapshot
 
 **NEVER use plan mode (EnterPlanMode).**
-**NEVER use the Agent tool** — autopilot dispatches work via `Skill(skill="work-on", ...)` only. The Agent tool bypasses the Skill pipeline's label state machine, investigation comments, and structured review — leaving no audit trail.
+**NEVER use the Agent tool** — autopilot dispatches all work via `Skill(...)` calls only. The Agent tool bypasses the Skill pipeline's label state machine, investigation comments, and structured review — leaving no audit trail.
 
 <!-- FORGE:SPEC_LOADED — autopilot.md loaded and active. Agent is bound by this spec. -->
 
-You are an autonomous improvement engine for this project. Your job is to **find what's wrong, create trackable issues, and optionally fix the highest-impact ones** — all in a single cycle. Every cycle leaves the platform measurably better than before.
+You are a fully autonomous deploy loop for this project. Your job is to **detect the current pipeline state, work through all open issues from highest to lowest priority, and deploy everything — without stopping for user confirmation**. Invoking `/autopilot` is the authorization to run to completion.
 
-**This is designed to run repeatedly.** Each cycle builds on the last — issues created in cycle N get fixed in cycle N+1. The platform compounds improvements over time.
+**This command overrides the standard "never merge to main" rule.** `/autopilot` IS the authorized deploy system. It ships staging→main and milestone→staging→main as part of normal operation.
 
-**NEVER use plan mode (EnterPlanMode)** — it breaks execution context.
+**This command resumes from wherever the pipeline is stuck.** It always reads current GitHub state before taking any action.
 
-**Agent model policy**: `model: "sonnet"` (standard tier). Fallback: `model: "opus"` if rate-limited. User can override with `--model <name>`. Pass model explicitly in every `Agent`/`Task` tool call. Feature gate: pass `effort` in Task/Skill spawns only on Claude Code >= 2.1.154.
+**Agent model policy**: `model: "sonnet"` (standard tier). Fallback: `model: "opus"` if rate-limited. User can override with `--model <name>`.
 
 ---
 
@@ -39,414 +35,613 @@ You are an autonomous improvement engine for this project. Your job is to **find
 
 | Flag | Effect |
 |------|--------|
-| (none) | Phases 1-3 only (recon, triage, report) |
-| `--fix` | Also run Phase 4 (pick top issues, fix via /work-on) |
-| `--fix --limit N` | Fix at most N issues (default: 3) |
-| `--recon-only` | Phase 1 only (data collection, no issue creation) |
-| `--dry-run` | Run everything but don't create issues or PRs — just report what would happen |
-| `--fix --yes` | Auto-approve low-risk fixes (P3, single-file, non-sensitive domain); P0/P1, multi-file, and sensitive-domain fixes still require confirmation |
+| (none) | Full autonomous loop — state detection → recon → fast lane → milestone → report |
+| `--dry-run` | Run all phases but do NOT create issues, merge PRs, or modify state — report only |
+| `--recon-only` | Phase 0 (state detection) and Phase 1 (recon) only — no loop execution |
 
-Parse `$ARGUMENTS` and set these variables:
-```
-MODE = "full" | "recon-only" | "fix"    # derived from flags
-DO_FIX = true if --fix present
-FIX_LIMIT = N from --limit N, default 3
-DRY_RUN = true if --dry-run present
-AUTO_YES = true if --yes present
+Parse `$ARGUMENTS` and set:
+```bash
+DRY_RUN=false
+RECON_ONLY=false
+
+for arg in $ARGUMENTS; do
+  case "$arg" in
+    --dry-run)     DRY_RUN=true ;;
+    --recon-only)  RECON_ONLY=true ;;
+  esac
+done
 ```
 
 ---
 
-## Phase 0: Cycle Context
+## Config Preamble (MANDATORY — run before any phase)
 
-**Goal**: Understand what happened since the last cycle.
-
-### 0A: Timestamp & baseline
+Read all `forge.yaml` config variables before any logic runs:
 
 ```bash
-echo "=== Autopilot Cycle: $(date -u +%Y-%m-%dT%H:%M:%SZ) ==="
+CONFIG_FILE="${FORGE_CONFIG:-forge.yaml}"
+if [ ! -f "$CONFIG_FILE" ]; then
+  echo "ERROR: forge.yaml not found. Run: npx forgedock init"
+  exit 1
+fi
 
-# Portable ISO-8601 date arithmetic using python3 (works on Windows, macOS, Linux).
-# Replaces GNU-only `date -u -d 'N days ago'` which fails on Windows and macOS.
-DATE_3D_AGO=$(python3 -c "from datetime import datetime, timedelta, timezone; print((datetime.now(timezone.utc) - timedelta(days=3)).strftime('%Y-%m-%dT%H:%M:%SZ'))")
-DATE_7D_AGO=$(python3 -c "from datetime import datetime, timedelta, timezone; print((datetime.now(timezone.utc) - timedelta(days=7)).strftime('%Y-%m-%dT%H:%M:%SZ'))")
+GH_REPO=$(yq '.project.owner + "/" + .project.repo' "$CONFIG_FILE" 2>/dev/null)
+GH_FLAG="-R $GH_REPO"
+REPO_PATH=$(yq '.paths.root' "$CONFIG_FILE" 2>/dev/null || git rev-parse --show-toplevel)
+STAGING_BRANCH=$(yq '.branches.staging // "staging"' "$CONFIG_FILE" 2>/dev/null || echo "staging")
+DEFAULT_BRANCH=$(yq '.branches.default // "main"' "$CONFIG_FILE" 2>/dev/null || echo "main")
+
+# Optional config — gracefully absent
+CREDENTIALS_FILE=$(yq '.paths.credentials.file // ""' "$CONFIG_FILE" 2>/dev/null || echo '')
+SERVER_SSH=$(yq '.services.server_ssh // ""' "$CONFIG_FILE" 2>/dev/null || echo '')
+OPS_INBOX_PATH=$(yq '.services.ops_inbox_path // ""' "$CONFIG_FILE" 2>/dev/null || echo '')
+BILLING_ENABLED=$(yq '.billing.enabled // false' "$CONFIG_FILE" 2>/dev/null || echo 'false')
+
+echo "Autopilot: repo=$GH_REPO staging=$STAGING_BRANCH default=$DEFAULT_BRANCH dry_run=$DRY_RUN recon_only=$RECON_ONLY"
+```
+
+---
+
+## Phase 0: State Detection
+
+**Goal**: Read current GitHub state and determine where the pipeline is. Always start here — never assume clean state.
+
+### 0A: Detect open staging→main PR
+
+```bash
+STAGING_TO_MAIN_PR=$(gh pr list $GH_FLAG \
+  --head "$STAGING_BRANCH" \
+  --base "$DEFAULT_BRANCH" \
+  --state open \
+  --json number,title,headRefOid \
+  --jq '.[0] // empty' 2>/dev/null)
+
+if [ -n "$STAGING_TO_MAIN_PR" ]; then
+  STAGING_PR_NUMBER=$(echo "$STAGING_TO_MAIN_PR" | jq -r '.number')
+  echo "STATE: Open staging→main PR #$STAGING_PR_NUMBER detected"
+else
+  STAGING_PR_NUMBER=""
+  echo "STATE: No open staging→main PR"
+fi
+```
+
+### 0B: Detect open milestone→staging PRs
+
+```bash
+MILESTONE_PRS=$(gh pr list $GH_FLAG \
+  --base "$STAGING_BRANCH" \
+  --state open \
+  --json number,title,headRefName \
+  --jq '[.[] | select(.headRefName | startswith("milestone/"))]' 2>/dev/null || echo '[]')
+
+MILESTONE_PR_COUNT=$(echo "$MILESTONE_PRS" | jq 'length' 2>/dev/null || echo '0')
+echo "STATE: $MILESTONE_PR_COUNT open milestone→staging PR(s)"
+```
+
+### 0C: Detect in-flight issues (stuck in intermediate workflow states)
+
+```bash
+INFLIGHT_ISSUES=$(gh issue list $GH_FLAG \
+  --state open \
+  --limit 200 \
+  --json number,title,labels \
+  --jq '[.[] | select(.labels | map(.name) | any(. == "workflow:building" or . == "workflow:in-review"))] | length' \
+  2>/dev/null || echo '0')
+echo "STATE: $INFLIGHT_ISSUES in-flight issue(s) (workflow:building or workflow:in-review)"
+```
+
+### 0D: Detect staging vs main delta
+
+```bash
+git fetch origin "$STAGING_BRANCH" "$DEFAULT_BRANCH" 2>/dev/null || true
+STAGING_AHEAD=$(git rev-list --count "origin/${DEFAULT_BRANCH}..origin/${STAGING_BRANCH}" 2>/dev/null || echo '0')
+echo "STATE: staging is $STAGING_AHEAD commit(s) ahead of $DEFAULT_BRANCH"
+```
+
+### 0E: Count open unmilestoned issues
+
+```bash
+OPEN_FAST_LANE=$(gh issue list $GH_FLAG \
+  --state open \
+  --limit 200 \
+  --json number,title,milestone,labels \
+  --jq '[.[] | select(
+    .milestone == null and
+    (.labels | map(.name) | any(. == "workflow:merged" or . == "workflow:invalid" or . == "workflow:decomposed") | not)
+  )] | length' \
+  2>/dev/null || echo '0')
+echo "STATE: $OPEN_FAST_LANE open unmilestoned issue(s) for fast lane"
+```
+
+### 0F: Summarize detected state
+
+```
+## Current Pipeline State
+
+| Signal | Value |
+|--------|-------|
+| staging→main PR open | ${STAGING_PR_NUMBER:-none} |
+| milestone→staging PRs open | $MILESTONE_PR_COUNT |
+| In-flight issues (stuck) | $INFLIGHT_ISSUES |
+| staging commits ahead of $DEFAULT_BRANCH | $STAGING_AHEAD |
+| Open fast-lane issues | $OPEN_FAST_LANE |
+```
+
+**Resume logic**:
+- If `INFLIGHT_ISSUES > 0` → call `/recover-orphans` first in Phase 1A before running recon
+- If `STAGING_PR_NUMBER` is set → that deploy is in progress; `/deploy-pr` will detect and resume it
+- Otherwise → proceed through phases in order
+
+---
+
+## Phase 1: Recon
+
+**Goal**: Surface signals that need new GitHub issues. Lightweight — CI health, issue backlog, optional analytics pulse.
+
+If `RECON_ONLY=true`, print the recon report and **stop after this phase**.
+
+### 1A: Recover orphaned pipeline state (MANDATORY — run before recon)
+
+Orphaned issues (stuck in workflow:building or workflow:in-review without an active agent) cause loop contamination. Recover them first so the loop sees accurate open issue counts.
+
+```bash
+RECOVER_ORPHANS_AVAILABLE=$(ls ~/.claude/commands/recover-orphans.md 2>/dev/null && echo "true" || echo "false")
+
+if [ "$INFLIGHT_ISSUES" -gt 0 ]; then
+  if [ "$RECOVER_ORPHANS_AVAILABLE" = "true" ] && [ "$DRY_RUN" = "false" ]; then
+    echo "Recovering $INFLIGHT_ISSUES orphaned pipeline issue(s)..."
+    Skill("recover-orphans", args="")
+  elif [ "$DRY_RUN" = "true" ]; then
+    echo "[DRY-RUN] Would invoke: Skill(recover-orphans)"
+  else
+    echo "WARNING: /recover-orphans not installed — cannot auto-recover orphaned issues. Install it first."
+  fi
+else
+  echo "No in-flight issues — skipping orphan recovery"
+fi
+```
+
+### 1B: CI/CD Health
+
+```bash
 DATE_1D_AGO=$(python3 -c "from datetime import datetime, timedelta, timezone; print((datetime.now(timezone.utc) - timedelta(days=1)).strftime('%Y-%m-%dT%H:%M:%SZ'))")
 
-# Recent closed issues (last 3 days) — what was fixed recently?
-gh issue list --state closed --json number,title,labels,closedAt \
-  --jq '[.[] | select(.closedAt > "'"$DATE_3D_AGO"'")] | length' 2>/dev/null || echo "0"
+RECENT_FAILURES=$(gh run list $GH_FLAG --limit 30 --json conclusion,createdAt,workflowName \
+  --jq "[.[] | select(.conclusion == \"failure\" and .createdAt > \"$DATE_1D_AGO\")] | length" \
+  2>/dev/null || echo "0")
 
-# Open issue count by priority
-gh issue list --state open --label "priority:P0" --json number --jq 'length'
-gh issue list --state open --label "priority:P1" --json number --jq 'length'
-gh issue list --state open --label "priority:P2" --json number --jq 'length'
+RECENT_RUNS=$(gh run list $GH_FLAG --limit 30 --json conclusion,createdAt \
+  --jq "[.[] | select(.createdAt > \"$DATE_1D_AGO\")] | length" \
+  2>/dev/null || echo "0")
 
-# Stale issues (open, no workflow label, older than 7 days)
-gh issue list --state open --limit 200 --json number,title,labels,createdAt \
-  --jq '[.[] | select(
-    (.labels | map(.name) | any(startswith("workflow:")) | not) and
-    (.createdAt < "'"$DATE_7D_AGO"'")
-  )] | length'
+echo "CI (24h): $RECENT_FAILURES/$RECENT_RUNS failures"
 
-# Failed CI runs in last 24h
-gh run list --limit 30 --json conclusion,createdAt \
-  --jq '[.[] | select(.conclusion == "failure" and .createdAt > "'"$DATE_1D_AGO"'")] | length'
+# Recurring failures (same workflow failing multiple times)
+RECURRING=$(gh run list $GH_FLAG --limit 30 --json conclusion,workflowName \
+  --jq '[.[] | select(.conclusion == "failure")] | group_by(.workflowName) | .[] | select(length > 1) | "\(length)x \(.[0].workflowName)"' \
+  2>/dev/null || echo '')
+[ -n "$RECURRING" ] && echo "Recurring CI failures: $RECURRING"
 ```
 
-Store these as `BASELINE` metrics for the cycle report.
-
-### 0B: Check for open P0s
+### 1C: Issue Backlog Health
 
 ```bash
-gh issue list --state open --label "priority:P0" --json number,title --jq '.[] | "#\(.number) \(.title)"'
+DATE_14D_AGO=$(python3 -c "from datetime import datetime, timedelta, timezone; print((datetime.now(timezone.utc) - timedelta(days=14)).strftime('%Y-%m-%dT%H:%M:%SZ'))")
+
+# Count by priority
+P0_COUNT=$(gh issue list $GH_FLAG --state open --limit 200 --json labels \
+  --jq '[.[] | select(.labels | map(.name) | any(. == "P0"))] | length' 2>/dev/null || echo "0")
+P1_COUNT=$(gh issue list $GH_FLAG --state open --limit 200 --json labels \
+  --jq '[.[] | select(.labels | map(.name) | any(. == "P1"))] | length' 2>/dev/null || echo "0")
+P2_COUNT=$(gh issue list $GH_FLAG --state open --limit 200 --json labels \
+  --jq '[.[] | select(.labels | map(.name) | any(. == "P2"))] | length' 2>/dev/null || echo "0")
+
+# Stale issues (open >14d, no workflow label, no milestone)
+STALE_COUNT=$(gh issue list $GH_FLAG --state open --limit 200 --json number,labels,createdAt,milestone \
+  --jq "[.[] | select(
+    (.labels | map(.name) | any(startswith(\"workflow:\")) | not) and
+    (.createdAt < \"$DATE_14D_AGO\") and
+    .milestone == null
+  )] | length" 2>/dev/null || echo "0")
+
+echo "Backlog: P0=$P0_COUNT P1=$P1_COUNT P2=$P2_COUNT stale=$STALE_COUNT"
 ```
 
-If any P0 issues exist:
-- **STOP the normal cycle**
-- Print: `P0 issue(s) open — autopilot prioritizing these above all else`
-- Set `FIX_TARGETS` to the P0 issue numbers
-- Skip to Phase 4 (fix mode, regardless of flags)
-
----
-
-## Phase 1: Recon (Parallel Data Collection)
-
-**Goal**: Pull signals from every available source. Launch ALL collectors simultaneously.
-
-### 1A: Launch parallel recon agents
-
-Spawn these as **background agents** (all `run_in_background=true`, all `model="sonnet"`):
-
-**Agent: Production Health**
-```
-Check production system health:
-1. SSH to check for open ops-inbox items: if {SERVER_SSH} is configured, run: ssh {SERVER_SSH} "ls {OPS_INBOX_PATH}/*-open-* 2>/dev/null" — skip this step if SERVER_SSH or OPS_INBOX_PATH is not set in forge.yaml
-2. If any exist, cat each one and summarize
-3. Check container health via MCP: get_production_status, run_production_health_check
-4. Check recent error logs: get_production_logs for api and worker (last 100 lines), grep for ERROR/CRITICAL
-5. Return: memo summaries, unhealthy containers, error patterns with counts
-```
-
-**Agent: Scraping Intelligence**
-```
-Pull scraping performance data:
-1. Read scrape_diagnostics summary from admin API or production logs
-2. Check Redis for tier feedback stats: tier success/fail rates across domains
-3. Look for patterns: domains with >50% failure rate, tiers with degraded performance
-4. Return: top failing domains (count + tier), tier pass rates, any new anti-bot patterns
-```
-
-**Agent: CI/CD Health**
-```
-Check CI pipeline health:
-1. gh run list --limit 30 — count failures by workflow name
-2. For each failed run: gh run view {id} --json jobs — identify which job failed
-3. Check if ecosystem-sync is consistently failing (known issue vs new)
-4. Return: failure rate, recurring failures, new failures
-```
-
-**Agent: Issue Backlog Health**
-```
-Analyze GitHub issue backlog:
-1. gh issue list --state open --limit 200 — full list with labels, milestones, dates
-2. Count by: priority (P0-P3), type (bug/feature/etc), milestone, age
-3. Find stale issues: open > 14 days, no workflow label, no recent comments
-4. Find orphaned issues: workflow:in-review but no open PR
-5. Find blocked issues: depends on another open issue
-6. Return: backlog summary, stale issues list, orphans, blockers
-```
-
-**Agent: Analytics Snapshot** (lightweight — not the full /analytics audit)
-```
-Quick analytics pulse — just the key metrics, not a full audit:
-1. Read credentials from {CREDENTIALS_FILE} (set via paths.credentials.file in forge.yaml)
-2. GSC: mcp__gsc__search_analytics for last 7 days — total clicks, impressions, avg position
-3. Stripe (only if {BILLING_ENABLED} is true): mcp__stripe__retrieve_balance — current balance.
-   Skip this step entirely if {BILLING_ENABLED} is false — do NOT call any Stripe MCP tools.
-4. Return: clicks trend (up/down), revenue (or "N/A — billing.enabled: false" if skipped), notable changes
-```
-
-### 1B: Collect results
-
-Wait for all agents to complete. Aggregate into a `RECON_DATA` object:
-```
-RECON_DATA = {
-  production: { memos, unhealthy_containers, error_patterns },
-  scraping: { failing_domains, tier_rates, new_patterns },
-  ci: { failure_rate, recurring_failures, new_failures },
-  backlog: { summary, stale_issues, orphans, blockers },
-  analytics: { clicks_trend, revenue, notable_changes }
-}
-```
-
-If `MODE == "recon-only"`, print RECON_DATA as a formatted report and **stop here**.
-
----
-
-## Phase 2: Triage & Issue Creation
-
-**Goal**: Convert recon signals into actionable, deduplicated GitHub issues.
-
-### 2A: Deduplication check
-
-Before creating ANY issue, search for existing open issues that cover the same problem:
+### 1D: Analytics Pulse (optional — forge.yaml-gated)
 
 ```bash
-# For each finding, search existing issues
-gh issue list --state open --limit 200 --json number,title,labels \
-  --jq '.[] | "\(.number) \(.title)"'
+# Only run if CREDENTIALS_FILE is configured and the file exists
+if [ -n "$CREDENTIALS_FILE" ] && [ -f "$CREDENTIALS_FILE" ]; then
+  echo "Analytics pulse: credentials at $CREDENTIALS_FILE — checking GSC..."
+  # GSC: last 7 days via mcp__gsc__search_analytics (if MCP available)
+  # If MCP unavailable, log and skip — do not block
+  ANALYTICS_AVAILABLE=true
+else
+  echo "Analytics pulse: SKIPPED — paths.credentials.file not set in forge.yaml or file absent"
+  ANALYTICS_AVAILABLE=false
+fi
+
+# Stripe balance: only if billing.enabled is true AND credentials are present
+if [ "$BILLING_ENABLED" = "true" ] && [ "$ANALYTICS_AVAILABLE" = "true" ]; then
+  echo "Billing analytics: checking Stripe balance..."
+  # mcp__stripe__retrieve_balance — skip gracefully if MCP unavailable
+else
+  echo "Billing analytics: SKIPPED — billing.enabled is false (or credentials absent)"
+fi
 ```
 
-**Rule**: If an existing open issue covers the finding (even partially), DO NOT create a duplicate. Instead, add a comment to the existing issue with the new data point.
+### 1E: Create issues from recon findings
 
-### 2B: Classify and prioritize findings
+For each finding (recurring CI failures, critical stale issue patterns):
 
-For each finding from RECON_DATA, assign:
-
-| Signal | Priority | Type |
-|--------|----------|------|
-| Open ops-inbox item | P1 | bug |
-| Container unhealthy | P0 | bug |
-| Error spike (>5x normal) | P1 | bug |
-| Tier degradation (>20% drop) | P2 | bug |
-| CI consistently failing | P2 | bug |
-| Stale issue (>14 days) | — | (comment, don't create new issue) |
-| Orphaned workflow state | — | (fix via /cleanup, not new issue) |
-| Analytics decline (>20% week-over-week) | P2 | improvement |
-| New anti-bot pattern detected | P2 | feature |
-
-### 2C: Create issues
-
-For each finding that passes dedup check, create a GitHub issue:
-
+**Deduplication check first** — search existing open issues before creating:
 ```bash
-gh issue create \
-  --title "{fix|feat|refactor}: {concise description}" \
-  --label "{priority},{type}" \
-  --body "$(cat <<'ISSUE_EOF'
+EXISTING_ISSUES=$(gh issue list $GH_FLAG --state open --limit 200 --json number,title \
+  --jq '.[] | "\(.number) \(.title)"' 2>/dev/null)
+```
+
+For new findings that have no existing open duplicate:
+```bash
+if [ "$DRY_RUN" = "false" ]; then
+  gh issue create $GH_FLAG \
+    --title "fix: {finding_description}" \
+    --label "P2,bug" \
+    --body "$(cat <<'ISSUE_EOF'
 ## Problem
 
-{Description of the finding with specific data points. What's wrong or what's missing.}
+{Description of the finding with specific data points.}
 
 ## Root Cause (if known)
 
-{What's causing the issue — specific code path, config gap, or behavior. If unknown: "Root cause unknown — investigation needed."}
+{Specific root cause or "Root cause unknown — investigation needed."}
 
 ## Affected Files
 
 Files that need changes:
 1. `{filepath}` — {what needs to change}
-2. `{filepath}` — {what needs to change}
 
 ## Acceptance Criteria
 
 - [ ] {Specific, testable criterion}
-- [ ] No regression in {related feature}
 
 ## Context
 
-Found by \`/autopilot\` cycle on {DATE}.
+Found by \`/autopilot\` cycle on $(date -u +%Y-%m-%dT%H:%M:%SZ).
 
 ## Evidence
 
-{Logs, metrics, error messages — concrete data, not speculation}
-
-## Suggested Approach
-
-{Brief suggestion — the /work-on investigation will validate this}
-
----
-*Created by autopilot recon cycle. Will be validated before any fix is applied.*
+{Concrete data — log lines, failure counts, metrics}
 ISSUE_EOF
 )"
+else
+  echo "[DRY-RUN] Would create issue: fix: {finding_description}"
+fi
 ```
 
-**DRY_RUN check**: If `DRY_RUN == true`, print what would be created but don't actually create issues.
+Store created issue numbers in `RECON_ISSUES` array for spec-edit impact analysis.
 
-### 2D: Quick hygiene (inline, no separate /cleanup invocation)
+If `RECON_ONLY=true`, print recon report and **stop here**:
 
-While we have the backlog data, fix obvious hygiene issues directly:
-
-```bash
-# Close orphaned issues (merged PR but still open)
-for orphan in {ORPHAN_LIST}; do
-  gh issue close $orphan --comment "Auto-closed by autopilot: linked PR was already merged."
-done
-
-# Fix stale labels on closed issues
-for stale in {STALE_LABEL_LIST}; do
-  gh issue edit $stale --add-label "workflow:merged" --remove-label "workflow:in-review,workflow:building" 2>/dev/null || true
-done
 ```
+## Autopilot Recon Report — $(date -u +%Y-%m-%dT%H:%M:%SZ)
 
-Store list of created issues as `CREATED_ISSUES`.
+### Pipeline State
+- staging→main PR: ${STAGING_PR_NUMBER:-none detected}
+- In-flight issues (orphans recovered): $INFLIGHT_ISSUES
+- Open fast-lane issues: $OPEN_FAST_LANE
 
----
-
-## Phase 3: Cycle Report
-
-**Goal**: Present findings and actions taken to the user.
-
-Print a structured report:
-
-```markdown
-## Autopilot Cycle Report — {DATE}
-
-### Production Health
-- Containers: {all healthy / N unhealthy}
-- Open ops-inbox items: {count}
-- Error patterns: {summary or "none"}
-
-### Scraping Performance
-- Tier pass rates: T1 {X}%, T2 {X}%, T3 {X}%, T4 {X}%
-- Top failing domains: {list or "all healthy"}
-- New patterns: {any or "none detected"}
-
-### CI/CD
-- Failure rate (24h): {X}/{Y} runs
-- Recurring failures: {list or "none"}
+### CI/CD (24h)
+- Failure rate: $RECENT_FAILURES/$RECENT_RUNS
+- Recurring: ${RECURRING:-none}
 
 ### Issue Backlog
-- Open: {P0: N, P1: N, P2: N, P3: N}
-- Stale (>14d): {count}
-- Orphaned: {count fixed}
-
-### Analytics Pulse
-- Clicks (7d): {N} ({trend})
-- Revenue: ${N} (or "N/A — billing.enabled: false" if Stripe step was skipped)
+- Open: P0=$P0_COUNT P1=$P1_COUNT P2=$P2_COUNT
+- Stale (>14d, no workflow): $STALE_COUNT
 
 ### Actions Taken
-- Issues created: {count} ({list with numbers})
-- Issues commented: {count}
-- Orphans closed: {count}
-- Stale labels fixed: {count}
-- Spec-edit impact analyses logged: {count} (FORGE:AUTOPILOT_IMPACT — blast radius surfaced before spec fixes)
+- Orphans recovered: $INFLIGHT_ISSUES
+- Issues created from recon: ${#RECON_ISSUES[@]}
 
-### Recommended Next Steps
-{Prioritized list of what the user should look at or deploy}
-```
-
-If `DO_FIX == false`, **stop here**. Print:
-```
-Run `/autopilot --fix` to also pick up and fix the top {FIX_LIMIT} issues.
+Run without --recon-only to execute the full autonomous loop.
 ```
 
 ---
 
-## Phase 4: Fix (Optional, requires --fix flag)
+## Phase 2: Fast Lane Loop
 
-**Goal**: Pick the highest-impact fixable issues and run them through `/work-on`.
+**Goal**: Work through all open unmilestoned issues until zero remain. Loop until the count is 0 or a safety cap is hit.
 
-### 4A: Select fix targets
-
-If `FIX_TARGETS` was set by Phase 0 (P0 issues), use those. Otherwise:
-
-Pick the top `FIX_LIMIT` issues by this priority:
-1. P0 issues (always first)
-2. P1 bugs (production-impacting)
-3. Issues created by THIS cycle (freshest signal)
-4. P2 bugs with `validated` or `needs-validation` label
-5. Oldest P1 issues (prevent aging)
-
-**Exclude** from fix targets:
-- Issues with `needs-human` label
-- Issues in milestones (feature lane — don't autopilot feature work)
-- Issues already in `workflow:building` or `workflow:in-review`
-- Issues with open dependencies
+**Overrides "never merge to main"**: This phase deploys staging→main after each iteration. `/autopilot` is the authorized deploy system.
 
 ```bash
-# Get candidates
-gh issue list --state open --label "bug" --limit 50 --json number,title,labels,createdAt \
-  --jq 'sort_by(.labels | map(select(.name | startswith("priority:P"))) | .[0].name) | .[:{FIX_LIMIT}] | .[] | "#\(.number) \(.title)"'
+FAST_LANE_ITERATIONS=0
+MAX_FAST_LANE_ITERATIONS=20  # safety cap — prevents infinite loop on stuck state
+FAST_LANE_DEPLOYS=0
+FAST_LANE_FINDINGS_BOUNCED=0
+
+echo "=== Fast Lane Loop ==="
+
+while true; do
+  FAST_LANE_ITERATIONS=$((FAST_LANE_ITERATIONS + 1))
+
+  if [ "$FAST_LANE_ITERATIONS" -gt "$MAX_FAST_LANE_ITERATIONS" ]; then
+    echo "Fast lane loop: reached max iterations ($MAX_FAST_LANE_ITERATIONS) — breaking to prevent infinite loop"
+    break
+  fi
+
+  # Re-query open unmilestoned issues — always re-read, never trust a cached count
+  OPEN_UNMILESTONED=$(gh issue list $GH_FLAG \
+    --state open \
+    --limit 200 \
+    --json number,title,milestone,labels \
+    --jq '[.[] | select(
+      .milestone == null and
+      (.labels | map(.name) | any(. == "workflow:merged" or . == "workflow:invalid" or . == "workflow:decomposed") | not)
+    )] | length' \
+    2>/dev/null || echo '0')
+
+  echo "Fast lane iteration $FAST_LANE_ITERATIONS: $OPEN_UNMILESTONED open unmilestoned issue(s)"
+
+  if [ "$OPEN_UNMILESTONED" -eq 0 ]; then
+    echo "Fast lane: zero open unmilestoned issues — loop complete"
+    break
+  fi
+
+  # Step 1: Orchestrate all open fast-lane issues in parallel via /orchestrate
+  echo "=== Fast Lane Iteration $FAST_LANE_ITERATIONS: Orchestrating $OPEN_UNMILESTONED issues ==="
+  if [ "$DRY_RUN" = "false" ]; then
+    Skill("orchestrate", args="fast-lane")
+  else
+    echo "[DRY-RUN] Would invoke: Skill(orchestrate, fast-lane)"
+  fi
+
+  # Step 2: Deploy staging→main if staging has new commits
+  git fetch origin "$STAGING_BRANCH" "$DEFAULT_BRANCH" 2>/dev/null || true
+  STAGING_AHEAD_NOW=$(git rev-list --count "origin/${DEFAULT_BRANCH}..origin/${STAGING_BRANCH}" 2>/dev/null || echo '0')
+
+  if [ "$STAGING_AHEAD_NOW" -gt 0 ]; then
+    echo "staging is $STAGING_AHEAD_NOW commit(s) ahead — deploying via /deploy-pr..."
+    if [ "$DRY_RUN" = "false" ]; then
+      DEPLOY_RESULT=$(Skill("deploy-pr", args="staging"))
+      # Parse structured JSON result from deploy-pr
+      DEPLOY_STATUS=$(echo "$DEPLOY_RESULT" | jq -r '.status // empty' 2>/dev/null || echo '')
+      [ -z "$DEPLOY_STATUS" ] && DEPLOY_STATUS=$(echo "$DEPLOY_RESULT" | grep -oE '"status":"[^"]*"' | grep -oE '"[^"]*"$' | tr -d '"' || echo 'unknown')
+      echo "Deploy status: $DEPLOY_STATUS"
+      [ "$DEPLOY_STATUS" = "merged" ] && FAST_LANE_DEPLOYS=$((FAST_LANE_DEPLOYS + 1))
+    else
+      echo "[DRY-RUN] Would invoke: Skill(deploy-pr, staging)"
+    fi
+  else
+    echo "staging is not ahead of $DEFAULT_BRANCH — no deploy needed this iteration"
+  fi
+
+  # Step 3: Recover any newly orphaned issues before next iteration
+  if [ "$RECOVER_ORPHANS_AVAILABLE" = "true" ] && [ "$DRY_RUN" = "false" ]; then
+    Skill("recover-orphans", args="--since 2")
+  elif [ "$DRY_RUN" = "true" ]; then
+    echo "[DRY-RUN] Would invoke: Skill(recover-orphans, --since 2)"
+  fi
+
+  # Count review findings that bounced to fast lane (unmilestoned review-finding issues)
+  NEW_FINDINGS=$(gh issue list $GH_FLAG \
+    --state open \
+    --limit 200 \
+    --json number,milestone,labels \
+    --jq '[.[] | select(.milestone == null and (.labels | map(.name) | any(. == "review-finding")))] | length' \
+    2>/dev/null || echo '0')
+  [ "$NEW_FINDINGS" -gt 0 ] && FAST_LANE_FINDINGS_BOUNCED=$((FAST_LANE_FINDINGS_BOUNCED + NEW_FINDINGS))
+  echo "End of iteration $FAST_LANE_ITERATIONS — review findings in fast lane: $NEW_FINDINGS"
+done
+
+echo "Fast lane complete: $FAST_LANE_ITERATIONS iteration(s), $FAST_LANE_DEPLOYS deploy(s)"
 ```
 
-### 4B: Present fix plan to user
+---
 
-**MANDATORY CHECKPOINT — do NOT proceed without user confirmation.**
+## Phase 3: Milestone Loop
 
-**Exception**: when `AUTO_YES = true`, classify each fix target by risk tier before prompting. Low-risk fixes are auto-approved; high-risk fixes still require confirmation.
+**Goal**: Ship each milestone with open issues, in order of completion percentage (highest first). Skip milestones at 0%.
 
-**Risk classification** (evaluate per-issue at this step):
-
-```
-LOW_RISK = all of the following are true:
-  - Priority is P2 or P3 (not P0 or P1)
-  - Affects only a single file (from issue body or recon finding)
-  - No sensitive-domain labels: auth, billing, database, security, payments, gdpr
-
-HIGH_RISK = any of the following:
-  - Priority P0 or P1
-  - Multi-file change (2+ files)
-  - Has a sensitive-domain label (auth, billing, database, security, payments, gdpr)
-  - Issue has `needs-human` label
-```
-
-When `AUTO_YES = true`:
-- **LOW_RISK issues**: auto-approve, log `[AUTO-APPROVED: low-risk]`, proceed to 4B.5/4C without waiting.
-- **HIGH_RISK issues**: present the checkpoint below and wait for user response. If user skips, remove from fix targets and continue with remaining low-risk issues.
-
-When `AUTO_YES = false` (default): present the full checkpoint for ALL fix targets and wait.
-
-```markdown
-## Autopilot Fix Plan
-
-I'll run `/work-on` for these {N} issues:
-
-| # | Title | Priority | Estimated Scope | Risk Tier |
-|---|-------|----------|-----------------|-----------|
-| {number} | {title} | {priority} | {small/medium/large} | LOW / HIGH |
-
-Each issue goes through: investigate → validate → build → review → merge to staging.
-Nothing merges to `main` — you deploy when ready.
-
-{If AUTO_YES and any HIGH_RISK: "Note: {N_low} low-risk issues were auto-approved. The {N_high} high-risk issue(s) above require your confirmation."}
-
-**Proceed?** (yes / adjust / skip)
-```
-
-Wait for user response on high-risk issues. If they adjust, re-select. If they skip all, end the cycle.
-
-### 4B.5: Spec-Edit Impact Analysis (MANDATORY before any spec-touching fix) <!-- Added: forge#870 -->
-
-**Goal**: Before autopilot dispatches a fix that edits ForgeDock's own command specs (`commands/*.md`), surface the blast radius of the change so the edit doesn't silently break downstream consumers (every spec that reads a changed FORGE annotation, every command in a changed sub-phase chain, every script/label a touched node feeds).
-
-This step **consumes the read-only query interface** shipped by the Spec Knowledge Graph (`scripts/graph-query.sh`, subcommand `impact`). It does **not** reimplement graph traversal — the blast radius is computed once, in `graph-query.sh`, and autopilot only reads its output.
-
-**When it runs**: for each approved fix target whose affected files (from the issue body's `## Affected Files` section, or the recon finding that created it) include any path matching `commands/*.md`. Non-spec fixes skip this step entirely.
-
-**Graceful degradation**: `graph-query.sh` ships only with the Spec Knowledge Graph. If it is absent (fast-lane repos, or a checkout predating the milestone), **skip with a noted reason — never block the cycle**.
+**Each milestone cycle**: orchestrate all open issues in the milestone → ship milestone branch to staging → deploy staging to main.
 
 ```bash
-GRAPH_QUERY="$(git rev-parse --show-toplevel)/scripts/graph-query.sh"
+MILESTONE_ITERATIONS=0
+MILESTONE_DEPLOYS=0
 
-# For each approved fix target that edits commands/*.md:
-for issue in $SPEC_FIX_TARGETS; do
-  if [ ! -x "$GRAPH_QUERY" ]; then
-    echo "skip impact analysis for #$issue — graph-query.sh not present (Spec Knowledge Graph not installed)"
+echo "=== Milestone Loop ==="
+
+# Get all open milestones with completion percentages
+MILESTONES=$(gh api "repos/$GH_REPO/milestones" \
+  --jq '[.[] | {
+    number: .number,
+    title: .title,
+    slug: (.title | ascii_downcase | gsub("[^a-z0-9]+"; "-") | ltrimstr("-") | rtrimstr("-")),
+    open_issues: .open_issues,
+    closed_issues: .closed_issues,
+    completion_pct: (if (.open_issues + .closed_issues) > 0 then ((.closed_issues * 100) / (.open_issues + .closed_issues) | floor) else 0 end)
+  }] | sort_by(-.completion_pct)' \
+  2>/dev/null || echo '[]')
+
+MILESTONE_COUNT=$(echo "$MILESTONES" | jq 'length' 2>/dev/null || echo '0')
+echo "Found $MILESTONE_COUNT milestone(s)"
+
+echo "$MILESTONES" | jq -r '.[] | "\(.completion_pct)% — \(.title) (\(.open_issues) open, \(.closed_issues) closed)"'
+
+# Process each milestone — sorted by completion% descending, skip 0%
+echo "$MILESTONES" | jq -c '.[]' | while IFS= read -r milestone; do
+  MS_TITLE=$(echo "$milestone" | jq -r '.title')
+  MS_SLUG=$(echo "$milestone" | jq -r '.slug')
+  MS_OPEN=$(echo "$milestone" | jq -r '.open_issues')
+  MS_PCT=$(echo "$milestone" | jq -r '.completion_pct')
+
+  if [ "$MS_PCT" -eq 0 ]; then
+    echo "Skipping milestone '$MS_TITLE' (0% complete — no issues closed yet)"
     continue
   fi
 
-  # Derive the spec node(s) the fix changes. Prefer the FORGE annotation or
-  # command/sub-phase named in the issue's Affected Files / recon finding.
-  # graph-query.sh normalizes all of these forms:
-  #   FORGE:CONTRACT  ==  CONTRACT  ==  ann:FORGE:CONTRACT
-  #   work-on:build:implement  ==  cmd:work-on:build:implement
-  #   classify-lane.sh  ==  script:classify-lane.sh
-  #   workflow:merged  ==  label:workflow:merged
-  for node in $CHANGED_SPEC_NODES; do
-    echo "### Impact of changing $node (fix #$issue)"
-    bash "$GRAPH_QUERY" impact "$node" --human
-  done
+  echo "=== Processing milestone: '$MS_TITLE' ($MS_PCT% complete, $MS_OPEN open) ==="
+
+  # Step 1: Orchestrate open issues in this milestone
+  if [ "$MS_OPEN" -gt 0 ]; then
+    if [ "$DRY_RUN" = "false" ]; then
+      Skill("orchestrate", args="milestone $MS_SLUG")
+    else
+      echo "[DRY-RUN] Would invoke: Skill(orchestrate, milestone $MS_SLUG)"
+    fi
+  else
+    echo "Milestone '$MS_TITLE' has no open issues — checking if branch needs deploy"
+  fi
+
+  # Step 2: Ship milestone branch → staging via /deploy-pr
+  MILESTONE_BRANCH="milestone/$MS_SLUG"
+  MILESTONE_BRANCH_EXISTS=$(git ls-remote --exit-code origin "$MILESTONE_BRANCH" >/dev/null 2>&1 && echo "true" || echo "false")
+
+  if [ "$MILESTONE_BRANCH_EXISTS" = "true" ]; then
+    echo "Shipping $MILESTONE_BRANCH → staging..."
+    if [ "$DRY_RUN" = "false" ]; then
+      MS_RESULT=$(Skill("deploy-pr", args="$MILESTONE_BRANCH"))
+      MS_STATUS=$(echo "$MS_RESULT" | jq -r '.status // empty' 2>/dev/null || echo '')
+      [ -z "$MS_STATUS" ] && MS_STATUS=$(echo "$MS_RESULT" | grep -oE '"status":"[^"]*"' | grep -oE '"[^"]*"$' | tr -d '"' || echo 'unknown')
+      echo "Milestone ship status: $MS_STATUS"
+
+      if [ "$MS_STATUS" = "merged" ]; then
+        MILESTONE_DEPLOYS=$((MILESTONE_DEPLOYS + 1))
+
+        # Step 3: After milestone merges to staging, deploy staging → main
+        git fetch origin "$STAGING_BRANCH" "$DEFAULT_BRANCH" 2>/dev/null || true
+        STAGING_AHEAD_MS=$(git rev-list --count "origin/${DEFAULT_BRANCH}..origin/${STAGING_BRANCH}" 2>/dev/null || echo '0')
+        if [ "$STAGING_AHEAD_MS" -gt 0 ]; then
+          echo "Milestone merged to staging — deploying staging → $DEFAULT_BRANCH..."
+          MAIN_RESULT=$(Skill("deploy-pr", args="staging"))
+          MAIN_STATUS=$(echo "$MAIN_RESULT" | jq -r '.status // empty' 2>/dev/null || echo 'unknown')
+          echo "Main deploy status: $MAIN_STATUS"
+          [ "$MAIN_STATUS" = "merged" ] && FAST_LANE_DEPLOYS=$((FAST_LANE_DEPLOYS + 1))
+        fi
+      fi
+    else
+      echo "[DRY-RUN] Would invoke: Skill(deploy-pr, $MILESTONE_BRANCH)"
+      echo "[DRY-RUN] If merged, would invoke: Skill(deploy-pr, staging)"
+    fi
+  else
+    echo "Milestone branch '$MILESTONE_BRANCH' not found on remote — skipping deploy"
+  fi
+
+  MILESTONE_ITERATIONS=$((MILESTONE_ITERATIONS + 1))
+
+  # Step 4: Review findings from milestones are unmilestoned — they loop back to fast lane automatically
+  MS_FINDINGS=$(gh issue list $GH_FLAG \
+    --state open \
+    --limit 50 \
+    --json number,milestone,labels \
+    --jq '[.[] | select(.milestone == null and (.labels | map(.name) | any(. == "review-finding")))] | length' \
+    2>/dev/null || echo '0')
+  [ "$MS_FINDINGS" -gt 0 ] && echo "NOTE: $MS_FINDINGS review finding(s) now in fast lane — processed next cycle"
 done
+
+echo "Milestone loop complete: $MILESTONE_ITERATIONS milestone(s) processed, $MILESTONE_DEPLOYS milestone ship(s)"
 ```
 
-**Log the result in a FORGE annotation.** Post one `FORGE:AUTOPILOT_IMPACT` comment per spec-touching fix target on its issue, BEFORE invoking `/work-on` in 4C:
+---
+
+## Phase 4: Final Report
+
+Print a summary of everything done in this autopilot run:
 
 ```bash
-gh issue comment $issue --body "<!-- FORGE:AUTOPILOT_IMPACT -->
+CYCLE_END=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+
+# Re-check final open issue count
+FINAL_OPEN=$(gh issue list $GH_FLAG --state open --limit 200 --json number --jq 'length' 2>/dev/null || echo '0')
+FINAL_FAST_LANE=$(gh issue list $GH_FLAG --state open --limit 200 --json number,milestone \
+  --jq '[.[] | select(.milestone == null)] | length' 2>/dev/null || echo '0')
+
+echo ""
+echo "╔═══════════════════════════════════════════════════╗"
+echo "║  Autopilot Complete                               ║"
+echo "╠═══════════════════════════════════════════════════╣"
+echo "║                                                   ║"
+
+cat <<REPORT
+## Autopilot Cycle Report — $CYCLE_END
+
+### Pipeline State at Start
+- staging→main PR: ${STAGING_PR_NUMBER:-none}
+- In-flight issues recovered: $INFLIGHT_ISSUES
+- Open fast-lane issues at start: $OPEN_FAST_LANE
+- Milestones found: ${MILESTONE_COUNT:-0}
+
+### Recon
+- CI failures (24h): $RECENT_FAILURES/$RECENT_RUNS
+- Recurring failures: ${RECURRING:-none}
+- Issues created from recon: ${#RECON_ISSUES[@]:-0}
+
+### Fast Lane
+- Iterations: $FAST_LANE_ITERATIONS
+- Deploys (staging→$DEFAULT_BRANCH): $FAST_LANE_DEPLOYS
+- Review findings bounced to fast lane: $FAST_LANE_FINDINGS_BOUNCED
+
+### Milestone Loop
+- Milestones processed: $MILESTONE_ITERATIONS
+- Milestone ships: $MILESTONE_DEPLOYS
+
+### Final State
+- Open issues: $FINAL_OPEN total ($FINAL_FAST_LANE unmilestoned)
+REPORT
+
+if [ "$FINAL_FAST_LANE" -eq 0 ]; then
+  echo ""
+  echo "Zero open unmilestoned issues remain. Pipeline is clean."
+else
+  echo ""
+  echo "$FINAL_FAST_LANE unmilestoned issue(s) remain. These may require human review (needs-human label) or have open dependencies:"
+  gh issue list $GH_FLAG --state open --limit 20 --json number,title,labels,milestone \
+    --jq '.[] | select(.milestone == null) | "  #\(.number) \(.title) [\(.labels | map(.name) | join(","))]"' \
+    2>/dev/null || true
+fi
+
+echo ""
+echo "╚═══════════════════════════════════════════════════╝"
+```
+
+---
+
+## Spec-Edit Impact Analysis (MANDATORY before any spec-touching recon fix)
+
+<!-- Added: forge#870 -->
+
+Before autopilot dispatches a recon-created fix (via /orchestrate → /work-on) that edits ForgeDock's own command specs (`commands/*.md`), surface the blast radius via `graph-query.sh`. This prevents spec edits from silently breaking downstream consumers.
+
+**When it runs**: for each issue in `RECON_ISSUES` whose affected files include any path matching `commands/*.md`.
+
+```bash
+GRAPH_QUERY="$(git rev-parse --show-toplevel)/scripts/graph-query.sh"
+RECON_ISSUES=${RECON_ISSUES:-()}
+
+for issue in "${RECON_ISSUES[@]}"; do
+  AFFECTED_SPECS=$(gh issue view "$issue" $GH_FLAG --json body --jq '.body' \
+    | grep -oE '`commands/[^`]+\.md`' | tr -d '`' | head -5)
+  if [ -z "$AFFECTED_SPECS" ]; then continue; fi
+
+  IMPACT_OUTPUT=""
+  if [ ! -x "$GRAPH_QUERY" ]; then
+    IMPACT_OUTPUT="(skipped — Spec Knowledge Graph not installed)"
+    echo "skip impact analysis for #$issue — graph-query.sh not present"
+  else
+    for spec_file in $AFFECTED_SPECS; do
+      NODE=$(basename "$spec_file" .md)
+      NODE_IMPACT=$(bash "$GRAPH_QUERY" impact "$NODE" --human 2>/dev/null || echo "(no edges for $NODE)")
+      IMPACT_OUTPUT="${IMPACT_OUTPUT}### Impact of $NODE:
+${NODE_IMPACT}
+
+"
+    done
+  fi
+
+  if [ "$DRY_RUN" = "false" ]; then
+    gh issue comment "$issue" $GH_FLAG --body "<!-- FORGE:AUTOPILOT_IMPACT -->
 ## Spec-Edit Impact Analysis
 
-**Changed spec node(s)**: \`$CHANGED_SPEC_NODES\`
+**Changed spec node(s)**: \`$AFFECTED_SPECS\`
 **Query**: \`graph-query.sh impact <node> --human\` (Spec Knowledge Graph, read-only)
 
 ### Blast Radius (downstream consumers of this change)
@@ -454,147 +649,37 @@ gh issue comment $issue --body "<!-- FORGE:AUTOPILOT_IMPACT -->
 $IMPACT_OUTPUT
 \`\`\`
 
-Every command/spec listed above reads the changed annotation or sits in the changed sub-phase chain. The \`/work-on\` build for this fix MUST keep these consumers working — verify the changed field/marker is still produced in the shape they expect.
+Every command/spec listed above reads the changed annotation or sits in the changed sub-phase chain. The \`/work-on\` build for this fix MUST keep these consumers working.
 
 <!-- FORGE:AUTOPILOT_IMPACT:COMPLETE -->"
-```
-
-If `graph-query.sh` was absent, post the same annotation with the blast-radius block set to `(skipped — Spec Knowledge Graph not installed)` so the skip is auditable.
-
-**Worked example** — autopilot picks up a fix that renames a field inside the `FORGE:CONTRACT` annotation. Before dispatching `/work-on`, it runs:
-
-```bash
-$ graph-query.sh impact FORGE:CONTRACT --human
-Impact (blast radius) of changing ann:FORGE:CONTRACT:
-  cmd:milestone
-  cmd:orchestrate
-  cmd:resume
-  cmd:review-pr
-  cmd:work-on
-  cmd:work-on-monolithic
-  cmd:work-on:build
-  cmd:work-on:build:implement
-  cmd:work-on:review
-```
-
-The summary makes the nine downstream consumers explicit before the edit lands, so the contract-field rename is reviewed against every reader — not discovered as a broken consumer later.
-
-**`FORGE:AUTOPILOT_IMPACT`** is a leaf annotation: autopilot is its only writer and no downstream pipeline phase consumes it. It exists to record the blast radius on the issue thread for human and reviewer visibility.
-
-### 4C: Execute fixes
-
-For each approved fix target, invoke `/work-on` via the Skill tool:
-
-```
-Skill(skill: "work-on", args: "{ISSUE_NUMBER}")
-```
-
-Run them **sequentially** (not parallel) — each `/work-on` invocation is heavyweight and benefits from full context. If one fails, continue to the next.
-
-After each `/work-on` completes, record the result:
-```
-FIX_RESULTS.push({
-  issue: NUMBER,
-  outcome: "merged" | "invalid" | "failed" | "needs-human",
-  pr: PR_NUMBER or null,
-  branch: BRANCH_NAME
-})
-```
-
-### 4D: Fix summary
-
-```markdown
-## Fix Results
-
-| Issue | Outcome | PR |
-|-------|---------|-----|
-| #{N} | {outcome} | #{PR} |
-
-**Merged to staging**: {count}
-**Needs attention**: {list}
-**Spec-edit impact analyses**: {count} blast-radius summaries logged (FORGE:AUTOPILOT_IMPACT) before spec fixes
-
-When ready to deploy, merge `staging` → `main` via GitHub.
-```
-
-### 4E: Deploy Train Check <!-- Added: forge#1332 -->
-
-After fixes are merged to staging, check the deploy train state. The deploy train is the single rolling staging→main PR — one per deploy cycle. Do NOT open a new staging→main PR if one is already open.
-
-```bash
-# Check for an open staging→main deploy PR (the current train)
-TRAIN_PR=$(gh pr list {GH_FLAG} \
-  --head "{STAGING_BRANCH}" \
-  --base "{DEFAULT_BRANCH}" \
-  --state open \
-  --json number,url \
-  --jq '.[0] // empty' 2>/dev/null)
-
-TRAIN_PR_NUMBER=$(echo "$TRAIN_PR" | jq -r '.number // empty')
-
-if [ -n "$TRAIN_PR_NUMBER" ]; then
-  # Train exists — check if it is held by open findings
-  HELD_BY_COUNT=$(gh issue list {GH_FLAG} \
-    --label "review-finding" \
-    --state open \
-    --search "PR #${TRAIN_PR_NUMBER}" \
-    --json number --jq '. | length' 2>/dev/null || echo 0)
-
-  if [ "$HELD_BY_COUNT" -gt 0 ]; then
-    echo "Deploy train PR #${TRAIN_PR_NUMBER} is HELD by ${HELD_BY_COUNT} open finding(s)."
-    echo "The fixes merged in this autopilot cycle may resolve some of them."
-    echo "Re-run /review-pr-staging ${TRAIN_PR_NUMBER} to re-evaluate the train gate."
   else
-    echo "Deploy train PR #${TRAIN_PR_NUMBER} is CLEAR — no open findings. Ready to merge when you authorize."
+    echo "[DRY-RUN] Would post FORGE:AUTOPILOT_IMPACT on issue #$issue"
   fi
-else
-  echo "No open staging→main PR found. The merged fixes are queued in staging."
-  echo "Run /review-pr-staging to open a new train PR when ready."
-fi
+done
 ```
 
-**Deploy policy**: Autopilot NEVER merges staging→main. It merges issue fixes TO staging only. The train PR is a human-gated merge — the user decides when to ship.
+**`FORGE:AUTOPILOT_IMPACT`** is a leaf annotation: autopilot is its only writer and no downstream pipeline phase consumes it. It records blast radius on the issue thread for human and reviewer visibility.
 
 ---
 
 ## Safety Rules
 
-1. **NEVER merge to `main`** — all fixes go to `staging`. User deploys manually.
-2. **NEVER skip investigation** — every fix goes through full `/work-on` (investigate → validate → build → review → merge).
-3. **NEVER fix `needs-human` issues** — these require human judgment (legal, external services, etc.).
-4. **NEVER fix milestone issues** — feature work is scoped to milestones, not autopilot.
-5. **NEVER create duplicate issues** — always dedup against existing open issues first.
-6. **NEVER run more than FIX_LIMIT fixes per cycle** — prevent runaway resource consumption.
-7. **If a fix fails, move on** — don't retry. Log it and let the next cycle or human handle it.
-8. **DRY_RUN means NO side effects** — no issues created, no PRs, no label changes. Report only.
-9. **P0 overrides everything** — if P0 exists, skip normal recon and fix P0 immediately.
-10. **Always gate high-risk fixes on user approval** — Phase 4B checkpoint is non-negotiable for P0/P1, multi-file, or sensitive-domain changes. `--yes` only auto-approves LOW_RISK tier (P2/P3, single-file, non-sensitive).
-
----
-
-## Recursion: How Cycles Compound
-
-Each cycle feeds the next:
-```
-Cycle N: CI recon detects recurring lint failures across 3 files → autopilot triage creates issue #X
-Cycle N+1: autopilot picks up #X → /work-on adds pre-commit hook → merged to staging
-Cycle N+2: CI recon shows lint failures resolved — no new issue needed
-```
-
-```
-Cycle N: /analytics finds CTR dropped on /pricing → creates issue #Y
-Cycle N+1: autopilot picks up #Y → /work-on rewrites SERP snippet → merged
-Cycle N+2: /analytics shows CTR recovered → improvement confirmed
-```
-
-The platform gets better every cycle. Issues that aren't picked up age and rise in priority. Issues that keep recurring indicate a deeper structural problem — autopilot will eventually create a "meta" issue about the pattern.
+1. **Overrides "never merge to main"** — `/autopilot` IS the authorized deploy system. staging→main is normal operation.
+2. **Never skip investigation** — all issues go through full `/work-on` pipeline (via /orchestrate) before any fix lands.
+3. **Never process `needs-human` issues** — /orchestrate and /work-on skip these automatically.
+4. **Never create duplicate issues** — always dedup against existing open issues before creating.
+5. **Loop safety cap** — max 20 fast-lane iterations prevents infinite loops on stuck state.
+6. **DRY_RUN means NO side effects** — no issues created, no PRs merged, no labels changed. Report only.
+7. **Graceful sub-skill degradation** — if /recover-orphans is not installed, log a warning and continue.
+8. **State always re-read** — never trust a cached issue count. Re-query GitHub at each loop iteration.
+9. **deploy-pr result is authoritative** — if status is not "merged", do not assume the deploy succeeded. Log and continue the loop.
 
 ---
 
 ## Operational Notes
 
-- **Runtime**: Recon-only ~3-5 min. Full cycle with fixes ~15-45 min depending on issue count.
-- **Token budget**: Recon is cheap (mostly MCP + API calls). Fixes are expensive (full /work-on per issue).
-- **Idempotent**: Safe to run multiple times — dedup prevents duplicate issues, /work-on resumes from checkpoints.
-- **Pairs with /loop**: Run `/loop 4h /autopilot` for continuous improvement, `/loop 4h /autopilot --fix --limit 2` for autonomous fixing with a human checkpoint every cycle, or `/loop 4h /autopilot --fix --yes` for fully unattended low-risk fixes (high-risk issues still surface for approval).
-- **Event-driven complement**: `/autopilot` is a periodic cycle. When a specific production signal fires (metric regression, incident, GEO gap), use `/signal-planner` instead — it converts the signal into a dependency-ordered issue DAG, executes via `/orchestrate`, and verifies the originating signal is resolved after the work merges. Use `/autopilot` for scheduled health sweeps; use `/signal-planner` for targeted signal-driven response.
+- **Runtime**: Recon-only ~2-3 min. Full cycle time depends on open issue count — typically 20-90 min per loop.
+- **Token budget**: Recon is cheap (mostly API calls). Each orchestrate+deploy cycle is expensive (full /work-on per issue via /orchestrate).
+- **Idempotent**: Safe to run multiple times — /work-on resumes from pipeline checkpoints, /deploy-pr detects existing open PRs.
+- **Pairs with /loop**: Run `/loop 4h /autopilot` for continuous improvement cycles.
+- **Event-driven complement**: `/autopilot` is a periodic loop. For targeted signal-driven response (metric regression, incident, GEO gap), use `/signal-planner` instead — it converts a specific signal into a dependency-ordered issue DAG, executes via `/orchestrate`, and verifies the originating signal is resolved after the work merges. Use `/autopilot` for scheduled sweeps; use `/signal-planner` for targeted responses.
