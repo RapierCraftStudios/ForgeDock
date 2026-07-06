@@ -81,21 +81,29 @@ jobs:
           ISSUE_NUMBER_CTX: ${{ github.event.issue.number }}
           REPO_CTX: ${{ github.repository }}
         run: |
+          # Sanitize all values written to GITHUB_OUTPUT by stripping newline and
+          # carriage-return characters. Branch refs and timestamps from the PR event
+          # payload are attacker-controlled for PRs from forked repos — a value
+          # containing '\n' would inject arbitrary key=value pairs into GITHUB_OUTPUT,
+          # potentially overriding outputs consumed by downstream steps (e.g. injecting
+          # skip=false to bypass the non-deploy-PR guard). <!-- Added: forge#1660 -->
+          sanitize() { printf '%s' "$1" | tr -d '\n\r'; }
+
           if [ "$EVENT_NAME" = "pull_request" ]; then
-            echo "number=$PR_NUMBER_CTX" >> "$GITHUB_OUTPUT"
-            echo "base=$PR_BASE_CTX" >> "$GITHUB_OUTPUT"
-            echo "head=$PR_HEAD_CTX" >> "$GITHUB_OUTPUT"
-            echo "created_at=$PR_CREATED_CTX" >> "$GITHUB_OUTPUT"
+            echo "number=$(sanitize "$PR_NUMBER_CTX")" >> "$GITHUB_OUTPUT"
+            echo "base=$(sanitize "$PR_BASE_CTX")" >> "$GITHUB_OUTPUT"
+            echo "head=$(sanitize "$PR_HEAD_CTX")" >> "$GITHUB_OUTPUT"
+            echo "created_at=$(sanitize "$PR_CREATED_CTX")" >> "$GITHUB_OUTPUT"
           else
             # issue_comment event — fetch PR details via API
             PR_DATA=$(gh pr view "$ISSUE_NUMBER_CTX" \
               --repo "$REPO_CTX" \
               --json number,baseRefName,headRefName,createdAt \
               --jq '{number:.number,base:.baseRefName,head:.headRefName,created_at:.createdAt}')
-            echo "number=$(echo "$PR_DATA" | jq -r '.number')" >> "$GITHUB_OUTPUT"
-            echo "base=$(echo "$PR_DATA" | jq -r '.base')" >> "$GITHUB_OUTPUT"
-            echo "head=$(echo "$PR_DATA" | jq -r '.head')" >> "$GITHUB_OUTPUT"
-            echo "created_at=$(echo "$PR_DATA" | jq -r '.created_at')" >> "$GITHUB_OUTPUT"
+            echo "number=$(echo "$PR_DATA" | jq -r '.number' | tr -d '\n\r')" >> "$GITHUB_OUTPUT"
+            echo "base=$(echo "$PR_DATA" | jq -r '.base' | tr -d '\n\r')" >> "$GITHUB_OUTPUT"
+            echo "head=$(echo "$PR_DATA" | jq -r '.head' | tr -d '\n\r')" >> "$GITHUB_OUTPUT"
+            echo "created_at=$(echo "$PR_DATA" | jq -r '.created_at' | tr -d '\n\r')" >> "$GITHUB_OUTPUT"
           fi
 
       - name: Skip non-deploy PRs
