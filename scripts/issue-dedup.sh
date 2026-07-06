@@ -10,7 +10,10 @@
 #                       FORGE_REPO or current repo)
 #   "-R <owner/repo>" : GitHub repository, as ONE pre-joined token (e.g. when a caller
 #                       passes an already-composed $GH_FLAG variable quoted as "$GH_FLAG").
-#                       Both forms are accepted.
+#                       Both forms are accepted. A title that happens to start with "-R "
+#                       but lacks the "/" separator (e.g. "-R login is broken") is
+#                       correctly detected by the parser and treated as a title, not a
+#                       repo flag. See the -R\ * case arm guard in the arg-parsing loop.
 #   --force           : Skip dedup check and always allow creation (explicit override)
 #
 # Exit codes:
@@ -100,8 +103,19 @@ while [[ $# -gt 0 ]]; do
       # quotes an already-composed $GH_FLAG variable ("$GH_FLAG") instead of
       # passing -R and the repo as two separate argv tokens. Both call shapes
       # are valid integration patterns used across commands/*.md callers.
-      GH_FLAG="$1"
-      shift
+      #
+      # Guard: a valid repo token always contains '/' (owner/repo format).
+      # If the value after "-R " has no '/', the token is a positional title
+      # that happens to start with "-R " (e.g. "-R login is broken") — treat
+      # it as the title instead. This prevents argv-flag-title-collision (#1625).
+      _rval="${1#-R }"
+      if [[ "$_rval" == */* ]]; then
+        GH_FLAG="$1"
+        shift
+      else
+        PROPOSED_TITLE="$1"
+        shift
+      fi
       ;;
     --force)
       FORCE=1
