@@ -66,6 +66,26 @@ If a file you are reviewing is listed above as a hot-spot, apply deeper scrutiny
 
 **POSSIBLE findings are informational advisories** — they are logged and tracked but do NOT block merge and do NOT trigger mandatory fix PRs. When in doubt, POSSIBLE is the correct classification. <!-- Added: forge#371 -->
 
+### 3.6 ADVERSARIAL TRACE — New Side-Effect Surfaces (MANDATORY) <!-- Added: forge#1611 -->
+
+Every new **exec/spawn/network/publish/`gh`-write** surface introduced by the diff is a mandatory adversarial target. "New surface" means any of:
+- A new shell exec, subprocess spawn, or command invocation (e.g., `subprocess.run`, `execSync`, `sh`, `bash`, `eval`)
+- A new outbound network call (e.g., `requests.get`, `fetch`, `axios`, `curl`, `urllib`)
+- A new publish or emit operation (e.g., writing to a queue, posting a webhook, emitting an event)
+- A new `gh` write operation (e.g., `gh issue edit`, `gh pr merge`, `gh issue close`, `gh issue comment`)
+
+**For each new surface, you MUST document one of**:
+- **Reachable**: trace the attacker-controlled input path from the diff entry point to the new surface (minimum 3 steps with file:line). Classify as CONFIRMED.
+- **Provably unreachable**: cite the specific gate, constant, or structural reason the surface cannot be reached with attacker-controlled input. Classify as UNFOUNDED (do not report).
+- **Untraceable in one pass**: you started the trace but could not reach a definitive conclusion. Classify as **LIKELY** — NOT POSSIBLE. <!-- downgrade to POSSIBLE is prohibited for new side-effect surfaces -->
+
+**Explicit non-evidence**: The following are NOT sufficient to skip this trace or downgrade to UNFOUNDED:
+- Commit message intent ("intentional cleanup", "safe refactor")
+- Green CodeQL or passing CI
+- The surface "looks intentional" or matches a known pattern
+
+This trace is required in addition to the §3.5 Reproduction Gate, not instead of it.
+
 ### 4. SEVERITY CLASSIFICATION — TRACE THE IMPACT
 
 **CRITICAL RULE: Never dismiss a finding as "minor", "cosmetic", or "harmless" without tracing its downstream impact.** If you spot something unusual (redundant code, odd patterns, duplicated values), ask: "Does this cause a runtime error, data corruption, or wrong behavior in any code path that touches it?" Trace forward through every consumer of the construct.
@@ -109,6 +129,9 @@ Every finding must include:
 - **Evidence** — Why this is a bug (show the code path)
 - **Confidence** — CONFIRMED/LIKELY/POSSIBLE
 - **What you checked** — List files you read to verify
+- **What was NOT checked / Residual paths** — List code paths you did not trace. If every enumerated path was exercised, write "All paths covered." This field is MANDATORY and may not be omitted or left empty. <!-- Added: forge#1611 -->
+
+**Coverage vocabulary constraint** <!-- Added: forge#1611 -->: The words **verified**, **correct**, **hardened**, and **safe** may only be applied to a component when every code path through that component was exercised in the review. If fewer paths were checked, you MUST state the fraction instead (e.g., "2 of 6 paths checked"). Using "verified correct" or "hardening verified" on a partial check is a protocol violation — it overclaims coverage and prevents downstream triage from correctly prioritizing residual risk.
 
 ---
 

@@ -700,20 +700,23 @@ Post summary with verdict:
 4. CONFIRMED HIGH blocking (crashes, data loss) → NEEDS FIXES FIRST
 5. All else → APPROVE FOR DEPLOY
 
-Include: Material Changes Summary, Risk Matrix (CI, Build, Bugs, Security, Billing, Quality, Regression, **Test Gate**), Finding Triage Results, Blocking Issues, Deployment Checklist (pre-deploy, deploy, post-deploy verification, rollback triggers), Stats.
+Include: Material Changes Summary, Risk Matrix (CI, Build, Bugs, Security, Billing, Quality, Regression, **Test Gate**, **Coverage**), Finding Triage Results, Blocking Issues, Deployment Checklist (pre-deploy, deploy, post-deploy verification, rollback triggers), Stats.
 
-**Risk Matrix must include a Test Gate row** (use `$TEST_GATE_VERDICT` and `$TEST_GATE_REASON` set in Phase 6.5):
+**Risk Matrix must include a Test Gate row and a Coverage row** (use `$TEST_GATE_VERDICT` and `$TEST_GATE_REASON` set in Phase 6.5):
 
-| Domain | Result | Notes |
-|--------|--------|-------|
-| CI | ... | ... |
-| Build | ... | ... |
-| Bugs | ... | ... |
-| Security | ... | ... |
-| Billing | ... | ... |
-| Quality | ... | ... |
-| Regression | ... | ... |
-| **Test Gate** | `${TEST_GATE_VERDICT:-SKIP}` | `${TEST_GATE_REASON:-Phase 6.5 not run}` |
+| Domain | Result | Notes | Coverage / Not Checked |
+|--------|--------|-------|------------------------|
+| CI | ... | ... | N/A |
+| Build | ... | ... | N/A |
+| Bugs | ... | ... | {paths checked / total paths} |
+| Security | ... | ... | {paths checked / total paths} |
+| Billing | ... | ... | {paths checked / total paths} |
+| Quality | ... | ... | {paths checked / total paths} |
+| Regression | ... | ... | {paths checked / total paths} |
+| **Test Gate** | `${TEST_GATE_VERDICT:-SKIP}` | `${TEST_GATE_REASON:-Phase 6.5 not run}` | N/A |
+| **Coverage** | {FULL \| PARTIAL} | Summary of residual paths | List any domain with undeclared residual paths |
+
+**APPROVE is forbidden when any domain row has undeclared residual paths** (Coverage/Not-Checked cell is blank or contains "unknown"). <!-- Added: forge#1611 --> If an agent's report for a domain does not include a "What was NOT checked / Residual paths" field, that domain's coverage is undeclared — the Coverage row for that domain must show PARTIAL and the overall verdict must be NEEDS FIXES FIRST (agent must re-run with residual paths declared) or a documented override must be present.
 
 If `TEST_GATE_VERDICT` is `SKIP`, surface the gap explicitly in the summary:
 
