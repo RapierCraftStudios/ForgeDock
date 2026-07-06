@@ -1,6 +1,7 @@
 ---
 description: Autonomous deploy loop — runs until zero open issues remain. Detects pipeline state and resumes from any position. Fully autonomous after invocation.
 argument-hint: [--dry-run | --recon-only]
+install: extras
 ---
 <!-- SPDX-FileCopyrightText: Copyright (c) RapierCraft Studios -->
 <!-- SPDX-License-Identifier: AGPL-3.0-or-later -->
