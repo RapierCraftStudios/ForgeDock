@@ -1580,6 +1580,16 @@ ISSUE_NUM=$(gh issue create \
 <!-- This machine-readable tag is used by pipeline-health Phase 4A to count pattern recurrences.
      When this slug appears on 3+ findings, a check-promotion issue is automatically filed.
      Keep the slug consistent across all findings for the same defect class. --> <!-- Added: forge#1331 -->
+<!-- FORGE:FINDING_SOURCE: review -->
+<!-- This machine-readable tag classifies the finding's discovery context:
+     review  = found synchronously during PR review (merge-time); indicates a defect the
+               builder produced that the gate caught before staging.
+     audit   = found retroactively via /audit after the PR already merged; indicates a
+               defect that escaped the review gate.
+     pipeline-health Phase 2E uses this tag to separate the two series. Without it,
+     a drop in total findings driven by fewer retroactive audits looks identical to a
+     genuine quality improvement. Historical findings without this tag default to 'review'
+     for backward compatibility. --> <!-- Added: forge#1614 -->
 
 ## Affected Files
 
