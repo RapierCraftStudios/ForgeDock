@@ -233,12 +233,19 @@ describe("router", () => {
       },
     );
 
-    assert.equal(res.status, 0, `update exited non-zero:\n${res.stderr}`);
+    assert.equal(
+      res.status,
+      0,
+      `update exited non-zero:\nstdout: ${res.stdout}\nstderr: ${res.stderr}`,
+    );
 
     // stable.md from the MAIN REPO must be installed
     assert.ok(
       existsSync(join(home, ".claude", "commands", "stable.md")),
-      "stable.md from the main repo must be installed (resolveRealForgeHome resolved correctly)",
+      `stable.md from the main repo must be installed (resolveRealForgeHome resolved correctly)\n` +
+        `stdout: ${res.stdout}\nstderr: ${res.stderr}\n` +
+        `home/.claude/commands exists: ${existsSync(join(home, ".claude", "commands"))}\n` +
+        `mainRepo: ${mainRepo}\nworktree: ${worktree}`,
     );
 
     // ephemeral.md from the WORKTREE must NOT be installed
