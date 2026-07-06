@@ -89,6 +89,8 @@ If a file you are reviewing is listed above as a hot-spot, apply deeper scrutiny
 - A theoretical exploit path not grounded in specific lines from the diff
 - A heuristic ("this type of code often has X bug") without verification
 
+**Exception — §3.6 side-effect surfaces**: For findings on new exec/spawn/network/publish/`gh`-write surfaces (§3.6), the floor is **LIKELY**, not POSSIBLE. If the trace is untraceable in one pass, classify as LIKELY — the downgrade to POSSIBLE is prohibited for §3.6 surfaces. §3.6 takes precedence over this rule for those findings. <!-- Added: forge#1648 -->
+
 **POSSIBLE findings are informational advisories** — they are logged and tracked but do NOT block merge and do NOT trigger mandatory fix PRs. When in doubt, POSSIBLE is the correct classification. <!-- Added: forge#371 -->
 
 ### 3.6 ADVERSARIAL TRACE — New Side-Effect Surfaces (MANDATORY) <!-- Added: forge#1611 -->
