@@ -319,11 +319,17 @@ for f in "${CHANGED_FILES_ARR[@]}"; do
     # string built from a template literal containing ${...} interpolation, or a quoted
     # string concatenated with +. A constant string/template literal with no interpolation
     # or concatenation is NOT flagged (e.g. execSync("gh auth status") is safe).
+    # Uses PCRE mode (-P flag) with a (?<!\.) negative lookbehind to exclude method-call forms
+    # like regex.exec(`${x}`) (RegExp.prototype.exec — no shell surface) while still
+    # catching free-function calls (exec/execSync/spawn imported from child_process).
+    # The -P flag is intentional — ERE (\b alone) cannot distinguish .exec( from exec(;
+    # PCRE lookbehind is required. <!-- allowlist: grep -P required for (?<!\.) lookbehind — ERE cannot express this -->
+    # <!-- Fixed: forge#1672 -->
     case "$f" in
         *.js|*.mjs|*.ts|*.tsx)
-            grep -nE '\b(exec|execSync|spawn)\(\s*`[^`]*\$\{' "$f" 2>/dev/null && \
+            grep -nP '(?<!\.)\b(exec|execSync|spawn)\(\s*`[^`]*\$\{' "$f" 2>/dev/null && \ <!-- allowlist: grep -P required for (?<!\.) lookbehind — ERE cannot express this -->
                 echo "SEC-EXEC | HIGH | $f | Shell-string exec/spawn call with template-literal interpolation — use execFileSync/spawnSync with an args array instead (shell injection risk)"
-            grep -nE "\b(exec|execSync|spawn)\(\s*[\"'][^\"']*[\"']\s*\+" "$f" 2>/dev/null && \
+            grep -nP "(?<!\.)\b(exec|execSync|spawn)\(\s*[\"'][^\"']*[\"']\s*\+" "$f" 2>/dev/null && \ <!-- allowlist: grep -P required for (?<!\.) lookbehind — ERE cannot express this -->
                 echo "SEC-EXEC | HIGH | $f | Shell-string exec/spawn call with string concatenation — use execFileSync/spawnSync with an args array instead (shell injection risk)"
             ;;
     esac
