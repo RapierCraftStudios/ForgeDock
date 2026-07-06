@@ -207,7 +207,7 @@ for NUM in $ORPHAN_LIST; do
       --state open \
       --search "#$NUM" \
       --limit 20 \
-      --json number,headRefName,reviewDecision,statusCheckRollup \
+      --json number,headRefName,reviewDecision,statusCheckRollup,body \
       2>/dev/null)
     OPEN_PR_NUM=$(echo "$OPEN_PR_JSON" | jq -r ".[] | select(.body | test(\"#${NUM}\")) | .number" 2>/dev/null | head -1)
   else
