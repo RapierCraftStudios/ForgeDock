@@ -1,0 +1,160 @@
+name: Shell Compatibility
+
+# Runs shellcheck on .sh files and validates portability on macOS and Windows.
+# Prevents reintroduction of GNU-only shell constructs (grep -P, date -d epoch,
+# GNU sed extensions) that silently fail on macOS BSD tools or Windows bash.
+#
+# Trigger rules:
+#   pull_request / push: path-gated to .sh files and .github/workflows/
+#
+# Background: grep -oP (PCRE) has been reintroduced 4 times (#786, #811, #1179,
+# #1608). This workflow catches it at CI rather than at code review. <!-- Added: forge#1608 -->
+
+on:
+  pull_request:
+    paths:
+      - 'scripts/**'
+      - '.github/workflows/**'
+  push:
+    branches:
+      - staging
+      - main
+    paths:
+      - 'scripts/**'
+      - '.github/workflows/**'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  # ---------------------------------------------------------------------------
+  # Job 1: shellcheck — static analysis for .sh files on Linux
+  # ---------------------------------------------------------------------------
+  shellcheck:
+    name: shellcheck (.sh files)
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Run shellcheck on all .sh scripts
+        uses: ludeeus/action-shellcheck@2.0.0
+        with:
+          scandir: './scripts'
+          severity: error
+          # SC2086: double-quote to prevent word splitting — ERROR level
+          # SC2031: var was modified in a subshell (WARNINGS subclass) — ERROR level
+          # SC2034: var appears unused — WARNING level (not blocking here)
+          check_together: 'yes'
+        env:
+          SHELLCHECK_OPTS: '-e SC2034'
+
+  # ---------------------------------------------------------------------------
+  # Job 2: portability smoke on macOS — verify .sh files can be parsed by BSD
+  # ---------------------------------------------------------------------------
+  macos-portability:
+    name: macOS portability smoke
+    runs-on: macos-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Verify no grep -P / grep -oP in shell scripts
+        run: |
+          # BSD grep on macOS does not support -P (PCRE).
+          # This step hard-fails if any .sh file uses grep -P or grep -oP in executable code.
+          # Exclusions:
+          # - Lines that are shell comments (first non-whitespace char is #) — these document
+          #   the anti-pattern and are intentionally excluded via grep -v '^\s*#'
+          # - Lines containing '# allowlist:' — explicit per-line exemptions
+          MATCHES=$(grep -rnE "grep\s+-[a-zA-Z]*P[ '\"]|grep\s+-oP[ '\"]|grep\s+-P[ '\"]" scripts/ \
+            --include='*.sh' \
+            | grep -vE ':[0-9]+:\s*#' \
+            | grep -v '# allowlist:' \
+            || true)
+          if [ -n "$MATCHES" ]; then
+            echo "ERROR: Non-portable grep -P / grep -oP found in scripts/:"
+            echo "$MATCHES"
+            echo ""
+            echo "BSD grep (macOS) does not support -P. Use grep -E + sed instead."
+            exit 1
+          fi
+          echo "OK: No grep -P patterns found in scripts/"
+
+      - name: Syntax-check .sh files with bash (macOS)
+        run: |
+          # Scope: diff-based — only .sh files changed in this PR are syntax-checked.
+          # This allows phased remediation of the existing corpus while catching new
+          # syntax errors in changed scripts. <!-- scope: diff-only; see #1608 -->
+          if [ -n "${{ github.event.pull_request.base.sha }}" ]; then
+            BASE_SHA="${{ github.event.pull_request.base.sha }}"
+          else
+            BASE_SHA="$(git rev-parse HEAD^)"
+          fi
+          CHANGED_SCRIPTS=$(git diff --name-only "$BASE_SHA"...HEAD -- 'scripts/**/*.sh' 2>/dev/null \
+            | grep -E '\.sh$' || true)
+          if [ -z "$CHANGED_SCRIPTS" ]; then
+            echo "OK: No scripts/*.sh files changed in this PR — bash -n syntax check skipped."
+            exit 0
+          fi
+          FAILED=0
+          while IFS= read -r f; do
+            [ -f "$f" ] || continue
+            bash -n "$f" 2>&1 || { echo "SYNTAX ERROR in $f"; FAILED=1; }
+          done <<< "$CHANGED_SCRIPTS"
+          [ "$FAILED" -eq 0 ] && echo "OK: All changed .sh files pass bash -n syntax check on macOS"
+          exit "$FAILED"
+
+  # ---------------------------------------------------------------------------
+  # Job 3: portability smoke on Windows (Git Bash)
+  # ---------------------------------------------------------------------------
+  windows-portability:
+    name: Windows portability smoke (Git Bash)
+    runs-on: windows-latest
+
+    defaults:
+      run:
+        shell: bash
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Syntax-check .sh files with bash (Windows Git Bash)
+        run: |
+          # Scope: diff-based — only .sh files changed in this PR are syntax-checked.
+          # Prevents blocking on pre-existing issues in unrelated scripts. <!-- scope: diff-only; see #1608 -->
+          if [ -n "${{ github.event.pull_request.base.sha }}" ]; then
+            BASE_SHA="${{ github.event.pull_request.base.sha }}"
+          else
+            BASE_SHA="$(git rev-parse HEAD^)"
+          fi
+          CHANGED_SCRIPTS=$(git diff --name-only "$BASE_SHA"...HEAD -- 'scripts/**/*.sh' 2>/dev/null \
+            | grep -E '\.sh$' || true)
+          if [ -z "$CHANGED_SCRIPTS" ]; then
+            echo "OK: No scripts/*.sh files changed in this PR — bash -n syntax check skipped."
+            exit 0
+          fi
+          FAILED=0
+          while IFS= read -r f; do
+            [ -f "$f" ] || continue
+            bash -n "$f" 2>&1 || { echo "SYNTAX ERROR in $f"; FAILED=1; }
+          done <<< "$CHANGED_SCRIPTS"
+          [ "$FAILED" -eq 0 ] && echo "OK: All changed .sh files pass bash -n syntax check on Windows Git Bash"
+          exit "$FAILED"
+
+      - name: Verify no GNU date -d epoch patterns in shell scripts
+        run: |
+          # GNU date -d '@epoch' is not portable to macOS or Windows date.
+          # Portable alternative: python3 -c "import datetime; ..."
+          MATCHES=$(grep -rnE "date -d '@[0-9]|date -d \"\$" scripts/ --include='*.sh' | grep -v '# allowlist:' || true)
+          if [ -n "$MATCHES" ]; then
+            echo "WARNING: GNU date -d epoch pattern found (not portable to macOS/Windows):"
+            echo "$MATCHES"
+            echo "Use: python3 -c \"import sys,datetime; print(datetime.datetime.fromtimestamp(int(sys.argv[1])))\" \"\$EPOCH\""
+            # Advisory only — does not block (date -d is less critical than grep -P)
+          fi
+          echo "Windows portability smoke complete."

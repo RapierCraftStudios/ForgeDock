@@ -343,7 +343,9 @@ done < <(echo {CHANGED_FILES} | tr ' ' '\n' | grep -E 'router|route')
 ### 2C: Deploy chain (when new env vars are introduced)
 
 ```bash
-NEW_ENVS=$(grep -rnE "os\.getenv\(|process\.env\." {CHANGED_FILES} 2>/dev/null | grep -oP "(os\.getenv\(['\"]|process\.env\.)(\w+)" | sed 's/os.getenv(["'"'"']//;s/process.env.//' | sort -u)
+NEW_ENVS=$(grep -rnE "os\.getenv\(|process\.env\." {CHANGED_FILES} 2>/dev/null \
+  | grep -oE "os\.getenv\(['\"][A-Za-z_][A-Za-z0-9_]*|process\.env\.[A-Za-z_][A-Za-z0-9_]*" \
+  | sed "s/os\.getenv(['\"]//;s/process\.env\.//" | sort -u)
 if [ -n "$NEW_ENVS" ]; then
     for var in $NEW_ENVS; do
         # Check if it exists in .env.example
@@ -548,6 +550,43 @@ done < <(echo {CHANGED_FILES} | tr ' ' '\n' | grep -E '\.sh$')
 ```
 
 Report any hit as **HIGH** — the DB connection will fail in any environment where PostgreSQL is not on `127.0.0.1:5432`.
+
+### 2G.5.5: Shell portability lint (SHELL or FORGE_GRAPH domain)
+
+**Triggered when**: `SHELL` or `FORGE_GRAPH` is in DOMAINS (i.e., changed files include `.sh` files or `commands/*.md` specs).
+
+**Why this matters**: `grep -P` and `grep -oP` (PCRE) are GNU-only — macOS BSD grep does not support `-P` and returns exit code 1 with no output, causing silent empty-variable failures. This has been a recurring reintroduction vector across #786, #811, #1179. Additional portability red flags: `\K` in grep patterns (PCRE-only), `(?<=…)` lookbehind (PCRE-only), hardcoded `~/` home paths (non-portable across environments), and CRLF line endings in shell files. <!-- Added: forge#1608 -->
+
+```bash
+PORT_FINDINGS=""
+
+# Check .sh files and .md files (spec bash blocks) for grep -P / grep -oP <!-- allowlist: comment describing the anti-pattern -->
+while IFS= read -r f; do
+    [ -z "$f" ] && continue
+    PCRE_HITS=$(grep -nE 'grep -[o]?P[ "]|grep [^|]*-[o]?P[ "]' "$f" 2>/dev/null | grep -v '<!-- allowlist:' || true)
+    if [ -n "$PCRE_HITS" ]; then
+        while IFS= read -r hit; do
+            PORT_FINDINGS="${PORT_FINDINGS}PORT | MEDIUM | $f | ${hit}
+"
+        done <<< "$PCRE_HITS"
+    fi
+    # Check for PCRE-only constructs in grep patterns (lookbehind, \K)
+    PCRE_CONSTRUCT_HITS=$(grep -nE "grep[^|]*'[^']*(\?\<\=|\\\\K)|grep[^|]*\"[^\"]*(\?\<\=|\\\\K)" "$f" 2>/dev/null | grep -v '<!-- allowlist:' || true)
+    if [ -n "$PCRE_CONSTRUCT_HITS" ]; then
+        while IFS= read -r hit; do
+            PORT_FINDINGS="${PORT_FINDINGS}PORT | MEDIUM | $f | PCRE construct (lookbehind or \\K): ${hit}
+"
+        done <<< "$PCRE_CONSTRUCT_HITS"
+    fi
+done < <(echo {CHANGED_FILES} | tr ' ' '\n' | grep -E '\.(sh|md)$')
+
+if [ -n "$PORT_FINDINGS" ]; then
+    echo "$PORT_FINDINGS"
+    echo "PORT-1 | MEDIUM | Replace grep -P/-oP with grep -E/-oE + sed for portable extraction. BSD grep (macOS) does not support PCRE (-P flag)."
+fi
+```
+
+Report hits as **PORT | MEDIUM** — portable replacements exist for all listed patterns (`grep -oE` + `sed` for extraction; ERE covers all common use-cases). If the pattern is in a comment or allowlisted line (contains `<!-- allowlist:`), skip it.
 
 ### 2G.6: Spec graph self-consistency (FORGE_GRAPH domain)
 
@@ -872,7 +911,7 @@ while IFS= read -r f; do
 
         # Derive the module path from the import statement
         # "from app.billing.subscriptions import X" → "app/billing/subscriptions.py"
-        MODULE=$(echo "$import_line" | grep -oP '(?<=from |import )app[\w.]+' | head -1 | tr '.' '/')
+        MODULE=$(echo "$import_line" | grep -oE '(from|import) app[A-Za-z0-9_.]+' | sed 's/^from //;s/^import //' | grep -oE '^app[A-Za-z0-9_.]+' | head -1 | tr '.' '/')
 
         if [ -n "$MODULE" ]; then
             # Check if the module exists in the base branch file tree
@@ -967,7 +1006,7 @@ while IFS= read -r f; do
         # For each removed condition line, search sibling files for the same pattern
         echo "$REMOVED_CONDITIONS" | while IFS= read -r condition; do
             # Extract the key pattern from the condition (e.g., field name or function call)
-            PATTERN=$(echo "$condition" | grep -oP '(?<=if\s)[\w.]+|[\w.]+\(|[\w.]+\s+or' | head -1 | tr -d ' ')
+            PATTERN=$(echo "$condition" | sed -n 's/.*if[[:space:]]\+//p' | grep -oE '^[A-Za-z_.][A-Za-z0-9_.]*(\(|[[:space:]]+or)?' | head -1 | tr -d ' ')
             if [ -n "$PATTERN" ]; then
                 MATCHES=$(grep -rn "$PATTERN" "$ROUTER_DIR" --include="*.py" | grep -v "^${f}:" | grep -v "^\s*#" | head -10)
                 if [ -n "$MATCHES" ]; then
