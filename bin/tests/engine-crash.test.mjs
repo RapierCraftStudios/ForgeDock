@@ -94,8 +94,8 @@ function makeWorld() {
   const runner = async ({ commandName }) => {
     switch (commandName) {
       case "work-on/investigate": w.markers += " INVESTIGATION:COMPLETE"; break;
-      case "work-on/build/context": w.markers += " FORGE:CONTEXT"; break;
-      case "work-on/build/architect": w.markers += " FORGE:ARCHITECT"; break;
+      case "work-on/build/context": w.markers += " FORGE:CONTEXT FORGE:CONTEXT:COMPLETE"; break;
+      case "work-on/build/architect": w.markers += " FORGE:ARCHITECT FORGE:ARCHITECT:COMPLETE"; break;
       case "work-on/build": w.markers += " FORGE:BUILDER:COMPLETE"; w.commitsAhead = 2; w.buildRuns++; break;
       // Idempotent review runner: adopts an existing PR instead of creating a
       // second one on resume, so a duplicate-create would be observable via
