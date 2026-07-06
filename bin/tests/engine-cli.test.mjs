@@ -221,6 +221,34 @@ describe("resumeStalledFromCli", () => {
       assert.deepEqual(result, { stalled: [], dispatched: [], failed: [] });
     });
 
+    it("accepts --repo with different casing than the cwd-resolved repo (case-insensitive)", async () => {
+      // GitHub repo identifiers are case-insensitive — "Acme/Target-Repo" and "acme/target-repo"
+      // refer to the same repo. The guard must not reject case variants.
+      const io = makeRepoAwareIo("acme/target-repo");
+      const dispatch = mock.fn(async () => ({ terminalReason: "workflow:merged" }));
+
+      const result = await resumeStalledFromCli(
+        ["--lane", "staging", "--repo", "Acme/Target-Repo"],
+        { io, dispatch },
+      );
+
+      assert.deepEqual(result, { stalled: [], dispatched: [], failed: [] });
+    });
+
+    it("accepts --repo with incidental trailing whitespace (whitespace-tolerant)", async () => {
+      // User-supplied --repo may have incidental surrounding whitespace from shell quoting
+      // or copy-paste. The guard must not reject values that differ only in whitespace.
+      const io = makeRepoAwareIo("acme/target-repo");
+      const dispatch = mock.fn(async () => ({ terminalReason: "workflow:merged" }));
+
+      const result = await resumeStalledFromCli(
+        ["--lane", "staging", "--repo", "acme/target-repo "],
+        { io, dispatch },
+      );
+
+      assert.deepEqual(result, { stalled: [], dispatched: [], failed: [] });
+    });
+
     it("does not call `gh repo view` at all when --repo is omitted", async () => {
       const io = makeRepoAwareIo("acme/target-repo");
       const dispatch = mock.fn(async () => ({ terminalReason: "workflow:merged" }));
@@ -319,6 +347,17 @@ describe("runFromCli --repo targeting guard", () => {
     const runIssue = mock.fn(async () => ({ terminalReason: "workflow:merged" }));
 
     const res = await runFromCli(["42", "--lane", "staging", "--repo", "acme/target-repo"], { io, runIssue });
+
+    assert.equal(runIssue.mock.callCount(), 1);
+    assert.equal(res.terminalReason, "workflow:merged");
+  });
+
+  it("accepts --repo with different casing than the cwd-resolved repo (case-insensitive)", async () => {
+    // GitHub repo identifiers are case-insensitive — the guard must not reject case variants.
+    const io = makeRepoAwareIo("acme/target-repo");
+    const runIssue = mock.fn(async () => ({ terminalReason: "workflow:merged" }));
+
+    const res = await runFromCli(["42", "--lane", "staging", "--repo", "Acme/Target-Repo"], { io, runIssue });
 
     assert.equal(runIssue.mock.callCount(), 1);
     assert.equal(res.terminalReason, "workflow:merged");
