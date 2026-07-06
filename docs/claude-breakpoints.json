@@ -3,14 +3,40 @@
   "schema": {
     "version": "Claude Code version string where the breakpoint was introduced (e.g. '2.1.157')",
     "type": "Category of change: 'feature' | 'behavior_change' | 'compatibility' | 'deprecation'",
+    "feature_key": "(optional) Machine-readable key for resolve-style lookups, e.g. 'reload_skills', 'effort_levels'",
     "description": "Human-readable description of what changed in Claude Code at this version",
     "forgedock_impact": "How this change affects ForgeDock — what commands, scripts, or behaviors are affected",
     "severity": "Impact level if a user is on this version or older: 'high' | 'medium' | 'low' | 'info'"
   },
   "breakpoints": [
     {
+      "version": "2.1.152",
+      "type": "feature",
+      "feature_key": "session_start_reload_skills",
+      "description": "SessionStart hook gains `reloadSkills` capability; MessageDisplay hook introduced",
+      "forgedock_impact": "The SessionStart hook in settings-hook.mjs can now trigger skill reload on session start. MessageDisplay hook enables display-layer interception — ForgeDock can use this for nudge/banner injection without polluting stdout.",
+      "severity": "medium"
+    },
+    {
+      "version": "2.1.154",
+      "type": "feature",
+      "feature_key": "effort_levels",
+      "description": "Effort levels (low..max) introduced for per-subagent/skill effort frontmatter; Opus 4.8 model available; lean system prompt mode",
+      "forgedock_impact": "ForgeDock commands can now gate effort-level frontmatter by version. orchestrate.md sub-agents can specify effort levels. Installer should gate effort-level injection at v2.1.154+. Lean system prompt reduces context overhead for simple commands.",
+      "severity": "medium"
+    },
+    {
+      "version": "2.1.154",
+      "type": "compatibility",
+      "feature_key": "native_workflows",
+      "description": "Native /workflows dynamic workflows introduced as a built-in Claude Code feature",
+      "forgedock_impact": "Parallel to ForgeDock's orchestrate.md. ForgeDock's approach adds GitHub persistence (FORGE: annotations, label-state machine, compaction resilience) that native /workflows lacks. Both can coexist — ForgeDock is the orchestration layer with state, not a replacement for native workflows.",
+      "severity": "info"
+    },
+    {
       "version": "2.1.157",
       "type": "behavior_change",
+      "feature_key": "worktree_auto_unlock",
       "description": "EnterWorktree now unlocks worktrees automatically when the agent session finishes",
       "forgedock_impact": "ForgeDock no longer needs --force on worktree cleanup commands. The cleanup phase in work-on.md can use standard git worktree remove without the force flag.",
       "severity": "low"
@@ -18,30 +44,74 @@
     {
       "version": "2.1.157",
       "type": "feature",
+      "feature_key": "skills_auto_load",
       "description": "Plugins in .claude/skills are auto-loaded without requiring marketplace installation",
       "forgedock_impact": "Symlink-based install (the original forgedock install method) remains valid but is no longer required for skill discovery. The stub file install pattern introduced in #619 is the preferred approach and works the same way.",
       "severity": "info"
     },
     {
       "version": "2.1.163",
+      "type": "feature",
+      "feature_key": "stop_subagent_stop_additional_context",
+      "description": "Stop and SubagentStop hooks gain `additionalContext` injection — hooks can return structured context to block completion or redirect the agent",
+      "forgedock_impact": "ForgeDock's SubagentStop enforcement hooks (issue #1250) can now inject corrective context when a pipeline stage skips its FORGE annotation. This makes blocking hooks actionable: the agent receives specific remediation guidance rather than a bare rejection.",
+      "severity": "high"
+    },
+    {
+      "version": "2.1.163",
       "type": "compatibility",
+      "feature_key": "managed_version_constraints",
       "description": "requiredMinimumVersion and requiredMaximumVersion managed settings added for enterprise deployments",
       "forgedock_impact": "ForgeDock's own version check (forgedock doctor, #682) is the OSS equivalent of this enterprise feature. No conflict — enterprise users with managed settings may have stricter version constraints than ForgeDock requires.",
       "severity": "info"
     },
     {
+      "version": "2.1.170",
+      "type": "feature",
+      "feature_key": "fable_5",
+      "description": "Fable 5 model support introduced",
+      "forgedock_impact": "ForgeDock commands using model-selection frontmatter may gate on this version for Fable 5 access. Installer version detection should record this for mode-selection logic.",
+      "severity": "info"
+    },
+    {
       "version": "2.1.172",
       "type": "feature",
+      "feature_key": "nested_subagents_5_levels",
       "description": "Sub-agents can spawn sub-agents up to 5 levels deep (increased nesting depth)",
       "forgedock_impact": "ForgeDock's orchestrate.md uses multi-agent orchestration. The 5-level nesting limit is compatible with ForgeDock's orchestration patterns. No changes needed.",
       "severity": "info"
     },
     {
-      "version": "2.1.154",
-      "type": "compatibility",
-      "description": "Native /workflows dynamic workflows introduced as a built-in Claude Code feature",
-      "forgedock_impact": "Parallel to ForgeDock's orchestrate.md. ForgeDock's approach adds GitHub persistence (FORGE: annotations, label-state machine, compaction resilience) that native /workflows lacks. Both can coexist — ForgeDock is the orchestration layer with state, not a replacement for native workflows.",
-      "severity": "info"
+      "version": "2.1.178",
+      "type": "feature",
+      "feature_key": "tool_param_value_permission_rules",
+      "description": "Tool(param:value) permission rules introduced — e.g. `Agent(model:opus)`, `Bash(git push *)` — allow fine-grained tool permission matching on parameter values",
+      "forgedock_impact": "ForgeDock installer can now ship opt-in permission-rule suggestions (e.g. deny `Bash(git push origin main*)`) via `npx forgedock install`. These rules require v2.1.178+. Gate their injection in the installer by detected version. Enforces branch-protection policies deterministically rather than by prose.",
+      "severity": "high"
+    },
+    {
+      "version": "2.1.186",
+      "type": "feature",
+      "feature_key": "background_subagent_permission_surfacing",
+      "description": "Background sub-agent permission requests are surfaced to the user; completion notifications for background sub-agents added (v2.1.186–2.1.191 rollout)",
+      "forgedock_impact": "ForgeDock's orchestrate.md sub-agents dispatched in background mode will now surface permission prompts to the user when they encounter ungranted tools. Completion notifications reduce the need for polling. No ForgeDock spec changes required — behavior improves automatically.",
+      "severity": "medium"
+    },
+    {
+      "version": "2.1.196",
+      "type": "feature",
+      "feature_key": "skills_commands_merge",
+      "description": "Skills and commands merge into a unified namespace; `CLAUDE_CODE_SUBAGENT_MODEL=inherit` env var introduced for sub-agent model inheritance",
+      "forgedock_impact": "ForgeDock install method (symlinks into ~/.claude/commands/) is unaffected. `CLAUDE_CODE_SUBAGENT_MODEL=inherit` allows orchestrate.md sub-agents to inherit the parent model without explicit frontmatter — reduces per-subagent config overhead. Gate this env injection at v2.1.196+.",
+      "severity": "medium"
+    },
+    {
+      "version": "2.1.197",
+      "type": "feature",
+      "feature_key": "sonnet_5_default_1m_context",
+      "description": "Sonnet 5 becomes the default model; native 1M context window supported",
+      "forgedock_impact": "ForgeDock commands benefit from the 1M context window — compaction is less likely to trigger during long pipeline runs. Context budget calculations in orchestrate.md and work-on.md can be relaxed. compat-audit.md should surface this as the new minimum-recommended version for optimal context handling.",
+      "severity": "medium"
     }
   ]
 }

@@ -12,8 +12,10 @@ argument-hint: [issue number] [--repo GH_REPO] [--gh-flag GH_FLAG] [--worktree P
 **Invoked by**: `work-on.md` Step 3F, after worktree is created and context is gathered.
 **Output**: Write code, commit(s), post `<!-- FORGE:BUILDER -->` comment, return result to caller.
 
-**Agent model policy**: Default `model: "sonnet"`. If Sonnet is rate-limited, fall back to `model: "opus"`.
+**Agent model policy**: `model: "sonnet"` (standard tier). Fallback: `model: "opus"` if rate-limited. Feature gate: pass `effort` in Task/Skill spawns only on Claude Code >= 2.1.154.
 **NEVER use plan mode (EnterPlanMode).**
+
+<!-- FORGE:SPEC_LOADED — work-on/build/implement.md loaded and active. Agent is bound by this spec. -->
 
 ---
 
@@ -53,7 +55,17 @@ gh api repos/{GH_REPO}/issues/{NUMBER}/comments \
   --jq '.[] | select(.body | contains("FORGE:CONTEXT")) | .body'
 ```
 
-**Resume check**: If `<!-- FORGE:BUILDER -->` comment already exists, the implementation is done — EXIT and return `IMPLEMENT_RESULT: status: ALREADY_DONE` to caller.
+**Resume check**:
+- If `<!-- FORGE:BUILDER:COMPLETE -->` is present in a BUILDER comment → implementation is done — EXIT and return `IMPLEMENT_RESULT: status: ALREADY_DONE` to caller.
+- If `<!-- FORGE:BUILDER -->` exists BUT `<!-- FORGE:BUILDER:COMPLETE -->` is ABSENT → implementation was interrupted after the comment was posted but before the commit (validate.md V5). Delete the partial comment and restart from Phase I2:
+  ```bash
+  PARTIAL_ID=$(gh api repos/{GH_REPO}/issues/{NUMBER}/comments \
+    --jq '[.[] | select(.body | contains("FORGE:BUILDER") and (contains("FORGE:BUILDER:COMPLETE") | not))] | last | .id // ""')
+  if [ -n "$PARTIAL_ID" ]; then
+    gh api repos/{GH_REPO}/issues/comments/$PARTIAL_ID -X DELETE
+    echo "Deleted partial FORGE:BUILDER comment (no FORGE:BUILDER:COMPLETE) — restarting implementation"
+  fi
+  ```
 
 **Primary guide**: If `<!-- FORGE:ARCHITECT -->` is present, it is the **primary implementation input**. Follow its ordered implementation list exactly — it defines which files change, in what order, and what consistency checks must pass. The investigation report and contract are secondary context.
 
@@ -225,12 +237,7 @@ gh issue edit {NUMBER} {GH_FLAG} --body "{UPDATED_BODY}"
 
 ## Phase I6: Post FORGE:BUILDER Comment
 
-**Before posting, read the attribution config**:
-```bash
-SHOW_ATTRIBUTION=$(yq '.branding.show_attribution // "true"' forge.yaml 2>/dev/null || echo "true")
-[ "$SHOW_ATTRIBUTION" = "false" ] && ATTRIBUTION_LINE="" || ATTRIBUTION_LINE="
-> Pipeline powered by [ForgeDock](https://github.com/RapierCraftStudios/ForgeDock)"
-```
+Post the implementation summary comment. **Do NOT include `<!-- FORGE:BUILDER:COMPLETE -->` here** — that marker is posted by `validate.md` Phase V5 after the commit succeeds. A crash between I6 and V5 would otherwise leave a completion-marked comment with no commit on the branch.
 
 ```bash
 gh issue comment {NUMBER} {GH_FLAG} --body "<!-- FORGE:BUILDER -->
@@ -250,12 +257,14 @@ gh issue comment {NUMBER} {GH_FLAG} --body "<!-- FORGE:BUILDER -->
 {Checklist of each criterion from the contract, marked ✅ or ❌}
 
 ### Testing Checklist
-- [ ] {Test scenario 1}
-- [ ] {Test scenario 2}
-- [ ] {Test scenario 3}
-${ATTRIBUTION_LINE}
-<!-- FORGE:BUILDER:COMPLETE -->"
+- [ ] {Test scenario 1} [type:api]
+- [ ] {Test scenario 2} [type:unit]
+- [ ] {Test scenario 3} [type:e2e]
+
+> **Test-type annotation** (optional): Append `[type:api]`, `[type:unit]`, `[type:e2e]`, or `[type:manual]` to each checklist item. The test gate reads this annotation directly and skips regex inference. Omit it to rely on regex classification fallback."
 ```
+
+**Note**: `<!-- FORGE:BUILDER:COMPLETE -->` is intentionally absent from this comment. It is appended to this comment by `validate.md` Phase V5 after the git commit completes — see `validate.md § Phase V5`. This ordering ensures the completion marker only exists when a real commit is present on the branch.
 
 ---
 

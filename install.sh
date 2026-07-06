@@ -9,6 +9,20 @@ set -euo pipefail
 FORGE_HOME="$(cd "$(dirname "$0")" && pwd)"
 TARGET_DIR="$HOME/.claude/commands"
 
+# Worktree guard — refuse to install when running from a git worktree.
+# In a worktree, .git is a regular file (not a directory); installing from a
+# worktree would repoint all ~/.claude/commands/ symlinks to an ephemeral path
+# that disappears when the worktree is cleaned up, breaking every Forge command.
+# <!-- Added: forge#1037 -->
+if [ -f "$FORGE_HOME/.git" ]; then
+    echo "ERROR: install.sh is running from a git worktree." >&2
+    echo "       FORGE_HOME: $FORGE_HOME" >&2
+    echo "       Installing from a worktree would repoint ~/.claude/commands/ symlinks" >&2
+    echo "       to an ephemeral path that breaks when the worktree is deleted." >&2
+    echo "       Run install.sh from the main repository clone instead." >&2
+    exit 1
+fi
+
 echo "RapierCraft Forge — Installing pipeline commands"
 echo "  Source: $FORGE_HOME/commands/"
 echo "  Target: $TARGET_DIR/"
@@ -33,10 +47,13 @@ while IFS= read -r cmd; do
     mkdir -p "$target_dir"
 
     if [ -L "$target" ]; then
-        # Symlink exists — check if it points to us
-        current=$(readlink -f "$target")
-        expected=$(readlink -f "$cmd")
-        if [ "$current" = "$expected" ]; then
+        # Symlink exists — check if it points to us.
+        # Use plain readlink (not -f) to read the stored link value without
+        # resolving the target. readlink -f fails with exit 1 on broken symlinks,
+        # which crashes the script under set -euo pipefail. Plain readlink reads
+        # the stored path and always succeeds for any symlink. <!-- forge#1037 -->
+        current=$(readlink "$target")
+        if [ "$current" = "$cmd" ]; then
             SKIPPED=$((SKIPPED + 1))
         else
             # Points somewhere else — update it
@@ -59,6 +76,24 @@ done < <(find "$FORGE_HOME/commands" -name "*.md" | sort)
 
 echo ""
 echo "Done. Installed: $INSTALLED, Updated: $UPDATED, Skipped: $SKIPPED"
+
+# Write .symlink-source sentinel so other tools can detect who owns the symlinks
+# and refuse to over-install from a different (possibly ephemeral) source.
+# <!-- Added: forge#1037 -->
+SENTINEL="$TARGET_DIR/.symlink-source"
+INSTALL_TIMESTAMP=$(date -u +"%Y-%m-%d %H:%M:%S")
+cat > "$SENTINEL" <<SENTINEL_EOF
+# Forge command symlinks — DO NOT REPOINT
+# Source: $FORGE_HOME/commands/
+#
+# These symlinks are managed by RapierCraft Forge.
+# Running another tool's install script here will repoint them away from Forge,
+# breaking all forge commands if the new source is an ephemeral worktree.
+#
+# To reinstall: cd $FORGE_HOME && ./install.sh
+# Last installed: $INSTALL_TIMESTAMP
+SENTINEL_EOF
+
 echo ""
 echo "Forge commands are now available as slash commands in any Claude Code session."
 echo "Pipeline docs: $FORGE_HOME/docs/"

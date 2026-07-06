@@ -1,0 +1,9 @@
+{
+  "description": "MILESTONE_INDEX with inline value \"COMPLETE\" appearing after a preceding annotation must start its own annotation, not be folded into the preceding annotation's body (forge#1526)",
+  "input": "<!-- FORGE:BUILDER -->\n**Branch**: `fix/example`\n**Commits**: abc123\n**Files changed**: 1\n<!-- FORGE:BUILDER:COMPLETE -->\n<!-- FORGE:MILESTONE_INDEX: COMPLETE -->",
+  "expect": {
+    "type": "MILESTONE_INDEX",
+    "valid": true,
+    "inlineValue": "COMPLETE"
+  }
+}

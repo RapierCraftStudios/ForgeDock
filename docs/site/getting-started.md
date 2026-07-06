@@ -43,40 +43,59 @@ go install github.com/mikefarah/yq/v4@latest
 
 ## Step 1: Install ForgeDock
 
-Run the installer with `npx`:
+Run the installer with `npx` from your project directory:
 
 ```bash
 npx forgedock
 ```
 
-This symlinks all 25+ ForgeDock command specs into `~/.claude/commands/` — making them available as slash commands in every Claude Code session.
+This installs all 25+ ForgeDock command specs into the current project (project-scoped by default) — making them available as slash commands in Claude Code sessions for this repo.
+
+> **Want commands available across all projects on this machine?** Use `npx forgedock --global` to install into `~/.claude/commands/` instead. Project-scoped is the default for new installs; use `--global` as an explicit opt-in.
 
 **Verify the install:**
 
 ```bash
-ls ~/.claude/commands/ | grep -E "work-on|review-pr|quality-gate"
+npx forgedock doctor
 ```
 
-You should see `work-on.md`, `review-pr.md`, and `quality-gate.md`.
+`doctor` runs an installation health check across six categories — command symlinks, `forge.yaml`, required tools (`gh`, `yq`, Claude Code), GitHub workflow labels, and Playwright MCP — and prints a pass/fail/warn line with a fix hint for each:
+
+```
+ForgeDock Doctor — Installation Health Check
+
+  ✔  Command symlinks  25 symlinks valid
+  ✔  gh CLI  installed and authenticated
+  ✔  yq  yq (https://github.com/mikefarah/yq/) version v4.x
+  ✔  Claude Code  v2.x (compatible, >= v2.0.0)
+  ⚠  Playwright MCP  Not registered — needed for /qa-sweep
+
+  All checks passed. ForgeDock installation is healthy.
+```
+
+It exits `0` when everything passes and `1` if any check fails, so you can also use it in CI.
+
+> Prefer a quick spot-check? `ls .claude/commands/ | grep -E "work-on|review-pr|quality-gate"` should list `work-on.md`, `review-pr.md`, and `quality-gate.md`. (For a `--global` install, use `ls ~/.claude/commands/` instead.)
 
 ---
 
-## Step 2: Configure Your Repository
+## Step 2: Your Config Is Already There
 
-In your project root, initialize a `forge.yaml` config file:
+`npx forgedock` in Step 1 ran the full install journey — including repo detection and a reviewed `forge.yaml` — so there's no separate config step to run. If you need to redo detection later (moved the repo, renamed a branch), or want a leaner config with just the required sections, re-run:
 
 ```bash
 cd /path/to/your/project
-# Open Claude Code in this directory, then run:
-/forgedock-init
+npx forgedock init --minimal
 ```
 
-The `/forgedock-init` command scans your repo and generates a `forge.yaml` with:
+**Optional: enrich the config.** Once `forge.yaml` exists, open Claude Code in your project directory and run `/forgedock-init` to fill in the optional sections that plain detection can't infer:
 
-- Your GitHub repo owner and name
-- Worktree base path
-- Branch strategy (staging vs. feature lanes)
-- Project board connection (optional)
+- Project board connection (GitHub Projects v2)
+- Satellite repo routing (multi-repo setups)
+- Review context (tech stack, known pitfalls)
+- Service URLs for health checks
+
+`/forgedock-init` completes an existing `forge.yaml` — it won't create one from scratch.
 
 **Minimal `forge.yaml` example:**
 
@@ -91,9 +110,16 @@ paths:
   worktree_base: "/path/to/my-app/.claude/worktrees"
 
 branches:
+  default: "main"
   staging: "staging"
-  default: "staging"
+  feature_pattern: "milestone/{slug}"
 ```
+
+That's the whole config. Run `npx forgedock doctor` to confirm it's valid.
+
+> **The three required sections are `project`, `paths`, and `branches`** — `npx forgedock init --minimal` auto-detects `paths` for you (so worktrees land in the right place) and you rarely need to touch it. Everything else (project board, review context, verification commands, multi-repo routing) is optional and falls back to sensible defaults. Browse [`forge.yaml.example`](https://github.com/RapierCraftStudios/ForgeDock/blob/main/forge.yaml.example) and [`docs/CONFIG.md`](https://github.com/RapierCraftStudios/ForgeDock/blob/main/docs/CONFIG.md) when you're ready to customize.
+
+**Prefer guided, AI-powered setup?** Open Claude Code in your project directory and run `/forgedock-init` instead — it scans your repo and fills in the optional sections (repo owner/name, worktree path, branch strategy, project board) for you.
 
 ---
 
@@ -164,21 +190,26 @@ For a deep dive into how this works, read [How ForgeDock's Knowledge Graph Works
 
 ## Next Steps
 
+- [Command Learning Path](./command-learning-path.md) — which commands to learn next, tiered by when you need them
 - [How ForgeDock's Knowledge Graph Works](./how-it-works.md) — understand the architecture
+- [What Are Those FORGE Comments?](./annotations-explained.md) — a 2-minute explainer for the annotations on your issues
 - [ForgeDock vs. Manual Claude Code Workflows](./vs-manual-workflows.md) — why this beats ad-hoc prompting
 - [Complete Command Reference](./command-reference.md) — all 25 commands with examples
+- [Troubleshooting & Recovery Guide](./troubleshooting.md) — diagnose and recover from common pipeline failures
 
 ---
 
 ## Troubleshooting
 
+The quick fixes below cover the most common first-run issues. For the full list of failure modes — quality gate failures, worktree conflicts, stale labels, rate limits, and more — see the [Troubleshooting & Recovery Guide](./troubleshooting.md).
+
 **`/work-on` not found in Claude Code**
 
-The symlink wasn't created. Re-run `npx forgedock` and check `ls ~/.claude/commands/`.
+The symlink wasn't created. Re-run `npx forgedock` and check `ls .claude/commands/` (project-scoped, default) or `ls ~/.claude/commands/` (if you used `--global`).
 
 **`forge.yaml` not found**
 
-Run `/forgedock-init` in your project directory inside Claude Code, or copy `forge.yaml.example` from the ForgeDock repo and edit it.
+Run `npx forgedock init` in your project directory to generate it, or copy `forge.yaml.example` from the ForgeDock repo and edit it. Once it exists, `/forgedock-init` inside Claude Code can fill in the optional sections.
 
 **`gh` auth errors**
 
@@ -187,3 +218,40 @@ Run `gh auth login` and complete the OAuth flow. ForgeDock uses `gh` for all Git
 **Pipeline stops at investigation**
 
 The issue may have been marked `workflow:invalid`. Check the issue comments for the investigation report — it will explain why.
+
+---
+
+## Migrating from a global install
+
+If you installed ForgeDock before project-scoped became the default (prior to v1.0.22), your commands live in `~/.claude/commands/`. You have two options:
+
+**Option A: Keep the global install (no action required)**
+
+Add `--global` to all future `npx forgedock install/update/uninstall/doctor` calls. Your existing setup is unchanged.
+
+```bash
+npx forgedock update --global   # re-link after a version bump
+```
+
+**Option B: Switch to project-scoped (recommended for per-repo version control)**
+
+1. Remove the global install:
+   ```bash
+   npx forgedock uninstall --global
+   ```
+2. In each repo you want ForgeDock in, run a fresh project-scoped install:
+   ```bash
+   cd /path/to/your-repo
+   npx forgedock install
+   ```
+3. Verify:
+   ```bash
+   npx forgedock doctor      # auto-detects project-scoped install
+   ```
+
+**Detect your current mode:**
+
+```bash
+npx forgedock doctor          # prints "Mode: project-scoped" or "Mode: global"
+npx forgedock status          # shows install path
+```

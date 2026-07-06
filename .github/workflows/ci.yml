@@ -1,0 +1,48 @@
+name: CI
+
+# Runs the repo's unit-test suite (`npm test` = `node --test "bin/tests/**/*.test.mjs"`)
+# on every PR and on push to staging.
+#
+# Closes the visibility gap identified in forge#1581: before this workflow,
+# no CI job ran the suite at all, so failing tests (including CLI-breaking
+# regressions) were invisible on PRs and could reach a deploy candidate
+# without ever failing a check.
+#
+# Push to `main` is intentionally excluded here — `publish.yml` already runs
+# `npm test` as a pre-publish gate on every push to `main`. Including `main`
+# here would duplicate the test run and waste CI minutes (forge#1603).
+#
+# This job intentionally has no continue-on-error: a red result here is the
+# desired, correct signal — it is not masked or auto-passed.
+
+on:
+  pull_request:
+  push:
+    branches:
+      - staging
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  unit-tests:
+    name: Unit tests (node --test)
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Use Node.js 22
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Install dependencies
+        run: npm ci --ignore-scripts
+
+      - name: Run unit tests
+        run: npm test

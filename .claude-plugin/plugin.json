@@ -1,9 +1,12 @@
 {
   "name": "forgedock",
   "description": "Autonomous AI development pipeline that uses GitHub as a structured knowledge graph for Claude Code agents. Adds /work-on, /review-pr, /quality-gate, /orchestrate, and 20+ pipeline commands.",
+  "version": "1.1.1",
   "author": {
     "name": "RapierCraft Studios"
   },
   "homepage": "https://github.com/RapierCraftStudios/ForgeDock",
+  "repository": "https://github.com/RapierCraftStudios/ForgeDock",
+  "license": "AGPL-3.0",
   "commands": "./commands"
 }

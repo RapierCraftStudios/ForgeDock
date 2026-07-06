@@ -1,0 +1,293 @@
+/*
+ * technical.css — Foundation for the technical-dense archetype
+ *
+ * Archetype ID: technical-dense
+ * Craft profile (reference-corpus.md):
+ *   radius system: tight — 8px card / 6px input / 4px button
+ *   button style:  sharp, mono-label; no gradient; high-contrast border on ghost
+ *   divider style: hairline 1px solid at 8% opacity
+ *   icon treatment: monochrome, small (16px), uniform
+ *
+ * Override --color-accent (and related tokens) via a :root block in the
+ * generated page to brand this foundation without touching the file.
+ *
+ * Issue: #1048 — custom CSS component library per archetype
+ */
+
+/* --- 1. Design Tokens --- */
+
+:root {
+  /* Accent — override per brand */
+  --color-accent:          #0ea5e9;          /* cool sky blue default */
+  --color-accent-subtle:   rgba(14, 165, 233, 0.10);
+  --color-accent-hover:    rgba(14, 165, 233, 0.16);
+
+  /* Surface palette — dark-first technical */
+  --color-bg:              #0d1117;
+  --color-bg-raised:       #161b22;
+  --color-bg-sunken:       #090d13;
+  --color-fg:              #e6edf3;
+  --color-fg-muted:        #8b949e;
+  --color-fg-faint:        #484f58;
+  --color-border:          rgba(240, 246, 252, 0.08);
+  --color-border-strong:   rgba(240, 246, 252, 0.14);
+
+  /* Code surface */
+  --code-bg:               rgba(240, 246, 252, 0.06);
+
+  /* Radius system — tight, at least 3 distinct values (N13 compliance) */
+  --radius-sm:             2px;             /* tags / micro elements */
+  --radius-btn:            4px;             /* button — tight, sharp */
+  --radius-input:          6px;             /* input — slightly more than button */
+  --radius-card:           8px;             /* card — most generous in this system */
+  --radius-pill:           9999px;          /* pill badge */
+
+  /* Shadow tokens — cool, flat, low-spread */
+  --shadow-card:           0 1px 3px rgba(0, 0, 0, 0.24),
+                           0 0 0 1px rgba(240, 246, 252, 0.08);
+  --shadow-card-hover:     0 4px 16px rgba(0, 0, 0, 0.32),
+                           0 0 0 1px rgba(240, 246, 252, 0.14);
+  --shadow-btn:            none;            /* technical: no shadow on primary */
+  --shadow-elevated:       0 8px 32px rgba(0, 0, 0, 0.40);
+
+  /* Transition — crisp, fast */
+  --transition-fast:       120ms cubic-bezier(0.4, 0, 0.2, 1);
+  --transition-base:       200ms cubic-bezier(0.4, 0, 0.2, 1);
+  --transition-slow:       320ms cubic-bezier(0.4, 0, 0.2, 1);
+
+  /* Spacing scale */
+  --space-1:4px; --space-2:8px; --space-3:12px; --space-4:16px;
+  --space-6:24px; --space-8:32px; --space-12:48px; --space-16:64px; --space-24:96px;
+
+  /* Icon sizing — uniform 16px (craft profile: monochrome, small, uniform) */
+  --icon-feature: 16px;
+  --icon-nav:     16px;
+  --icon-inline:  14px;
+}
+
+/* --- 2. Element Overrides (N18 compliance) --- */
+
+/* Custom selection — cool accent tint */
+::selection {
+  background: var(--color-accent-subtle);
+  color:      var(--color-fg);
+}
+
+/* Custom focus ring — technical accent (N18, N15 compliance) */
+:focus-visible {
+  outline:        2px solid var(--color-accent);
+  outline-offset: 2px;
+}
+
+/* Custom scrollbar — thin, cool-dark theme */
+::-webkit-scrollbar       { width: 5px; height: 5px; }
+::-webkit-scrollbar-track { background: var(--color-bg-sunken); }
+::-webkit-scrollbar-thumb {
+  background:    var(--color-border-strong);
+  border-radius: var(--radius-sm);
+}
+::-webkit-scrollbar-thumb:hover { background: var(--color-fg-muted); }
+
+/* Code blocks — dark, dense */
+code, kbd {
+  background:    var(--code-bg);
+  border-radius: var(--radius-sm);
+  padding:       2px 6px;
+  font-size:     0.875em;
+  font-family:   ui-monospace, SFMono-Regular, Menlo, monospace;
+  color:         var(--color-fg);
+  border:        1px solid var(--color-border);
+}
+
+/* Links — custom underline treatment (N17 compliance) */
+a:not([class]) {
+  color:                    var(--color-accent);
+  text-decoration:          underline;
+  text-decoration-color:    transparent;
+  text-underline-offset:    3px;
+  text-decoration-thickness: 1px;
+  transition:               text-decoration-color var(--transition-fast);
+}
+a:not([class]):hover {
+  text-decoration-color: var(--color-accent);
+}
+
+/* --- 3. Component Classes --- */
+
+/* --- Button --- */
+
+.btn {
+  display:          inline-flex;
+  align-items:      center;
+  gap:              var(--space-2);
+  padding:          8px 16px;
+  border-radius:    var(--radius-btn);     /* 4px — sharp, technical */
+  font-size:        0.875rem;
+  font-weight:      500;
+  font-family:      ui-monospace, SFMono-Regular, Menlo, monospace;
+  line-height:      1;
+  letter-spacing:   0.02em;
+  cursor:           pointer;
+  white-space:      nowrap;
+  transition:       background-color var(--transition-fast),
+                    border-color     var(--transition-fast),
+                    transform        var(--transition-fast);
+  /* Flat fill with high-contrast border — technical depth signal (N14) */
+  background-color: var(--color-accent);
+  color:            #fff;
+  border:           1px solid transparent;
+  box-shadow:       none;
+}
+
+.btn:hover {
+  background-color: color-mix(in srgb, var(--color-accent) 85%, #000);
+  transform:        translateY(-1px);      /* lift on hover — N20 compliance */
+}
+
+.btn:active {
+  transform:        translateY(0px);       /* press-down — N20 compliance */
+  background-color: color-mix(in srgb, var(--color-accent) 75%, #000);
+}
+
+.btn:focus-visible {
+  outline:        2px solid var(--color-accent);
+  outline-offset: 2px;                     /* custom focus ring — N18 compliance */
+}
+
+/* Ghost — high-contrast border (craft profile: "high-contrast border on ghost") */
+.btn-ghost {
+  background-color: transparent;
+  color:            var(--color-fg);
+  border:           1px solid var(--color-border-strong);
+  box-shadow:       none;
+}
+
+.btn-ghost:hover {
+  background-color: var(--color-bg-raised);
+  border-color:     var(--color-fg-muted);
+  transform:        translateY(-1px);
+}
+
+.btn-ghost:active {
+  transform:        translateY(0px);
+  background-color: var(--color-bg-sunken);
+}
+
+/* --- Card --- */
+
+.card {
+  background:    var(--color-bg-raised);
+  border-radius: var(--radius-card);       /* 8px — tight, dense */
+  box-shadow:    var(--shadow-card);
+  padding:       var(--space-4);
+  transition:    box-shadow var(--transition-base),
+                 transform  var(--transition-base);
+}
+
+.card:hover {
+  box-shadow: var(--shadow-card-hover);
+  transform:  translateY(-1px);
+}
+
+/* --- Badge --- */
+
+.badge {
+  display:          inline-flex;
+  align-items:      center;
+  gap:              var(--space-1);
+  padding:          2px 8px;
+  border-radius:    var(--radius-pill);    /* pill — categorical difference */
+  font-size:        0.6875rem;
+  font-weight:      500;
+  font-family:      ui-monospace, SFMono-Regular, Menlo, monospace;
+  letter-spacing:   0.05em;
+  text-transform:   uppercase;
+  background-color: var(--color-accent-subtle);
+  color:            var(--color-accent);
+  border:           1px solid rgba(14, 165, 233, 0.20);
+}
+
+/* --- Input --- */
+
+.input {
+  display:          block;
+  width:            100%;
+  padding:          8px 12px;
+  border-radius:    var(--radius-input);   /* 6px — distinct from card and btn */
+  font-size:        0.875rem;
+  font-family:      ui-monospace, SFMono-Regular, Menlo, monospace;
+  background-color: var(--color-bg-sunken);
+  color:            var(--color-fg);
+  border:           1px solid var(--color-border-strong);
+  transition:       border-color var(--transition-fast),
+                    box-shadow   var(--transition-fast);
+  -webkit-appearance: none;
+  appearance:       none;
+}
+
+.input::placeholder { color: var(--color-fg-faint); }
+
+.input:focus {
+  outline:      none;
+  border-color: var(--color-accent);
+  box-shadow:   0 0 0 3px var(--color-accent-subtle); /* custom focus ring — N18 */
+}
+
+/* --- 4. Utility Classes --- */
+
+/* Scroll-triggered reveal (honors prefers-reduced-motion) */
+.reveal {
+  opacity:    0;
+  transform:  translateY(16px);
+  transition: opacity var(--transition-slow), transform var(--transition-slow);
+}
+
+.reveal.visible {
+  opacity:   1;
+  transform: translateY(0);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .reveal,
+  .reveal.visible {
+    opacity:    1;
+    transform:  none;
+    transition: none;
+  }
+}
+
+/* Gradient text — technical cool-to-accent */
+.gradient-text {
+  background-image:    linear-gradient(135deg, var(--color-accent) 0%, #38bdf8 100%);
+  -webkit-background-clip: text;
+  background-clip:     text;
+  -webkit-text-fill-color: transparent;
+  color:               transparent;
+}
+
+/* Glass — dark, technical tint */
+.glass {
+  background:  rgba(22, 27, 34, 0.80);
+  backdrop-filter:         blur(8px);
+  -webkit-backdrop-filter: blur(8px);
+  border:      1px solid var(--color-border);
+}
+
+/* Divider — hairline 1px solid at 8% opacity (craft profile) */
+.divider {
+  height:     1px;
+  border:     none;
+  background: var(--color-border);        /* 8% opacity border = hairline */
+  margin:     var(--space-8) 0;
+}
+
+/* Icon container — no tinted background (craft profile: monochrome, no container) */
+.icon-container {
+  display:          inline-flex;
+  align-items:      center;
+  justify-content:  center;
+  width:            var(--icon-feature);
+  height:           var(--icon-feature);
+  color:            var(--color-fg-muted);
+  flex-shrink:      0;
+}

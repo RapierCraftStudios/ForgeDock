@@ -1,0 +1,9 @@
+{
+  "description": "DECOMPOSED — complete annotation",
+  "input": "<!-- FORGE:DECOMPOSED -->\n## Decomposition Complete\n\n### Sub-Issues Created\n- #42: Fix null profile\n- #43: Add regression test\n\n### Decomposition Rationale\nTwo independent changes, can be parallelized.\n\n<!-- FORGE:DECOMPOSED:COMPLETE -->",
+  "expect": {
+    "type": "DECOMPOSED",
+    "valid": true,
+    "sentinelState": "complete"
+  }
+}

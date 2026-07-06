@@ -1,0 +1,14 @@
+{
+  "description": "A field value that merely quotes the completion sentinel text must NOT spoof completion when no real sentinel line is present (forge#1594)",
+  "input": "<!-- FORGE:BUILDER -->\n**Branch**: `fix/example`\n**Commits**: see note about <!-- FORGE:BUILDER:COMPLETE --> in the changelog\n**Files changed**: 1",
+  "expect": {
+    "type": "BUILDER",
+    "valid": false,
+    "sentinelState": "interrupted",
+    "fieldChecks": {
+      "Branch": "`fix/example`",
+      "Commits": "see note about <!-- FORGE:BUILDER:COMPLETE --> in the changelog",
+      "Files changed": "1"
+    }
+  }
+}

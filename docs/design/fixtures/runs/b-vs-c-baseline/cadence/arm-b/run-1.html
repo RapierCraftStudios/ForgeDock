@@ -1,0 +1,364 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Cadence — Email API for developers</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script>
+    tailwind.config = {
+      theme: {
+        extend: {
+          fontFamily: {
+            mono: ['JetBrains Mono', 'Fira Code', 'Cascadia Code', 'monospace'],
+            sans: ['Inter', 'system-ui', 'sans-serif'],
+          },
+          colors: {
+            brand: {
+              50:  '#f0fdf4',
+              100: '#dcfce7',
+              400: '#4ade80',
+              500: '#22c55e',
+              600: '#16a34a',
+              700: '#15803d',
+              900: '#14532d',
+            }
+          }
+        }
+      }
+    }
+  </script>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet" />
+  <style>
+    .code-block { background: #0d1117; }
+    .token-keyword { color: #ff7b72; }
+    .token-string  { color: #a5d6ff; }
+    .token-func    { color: #d2a8ff; }
+    .token-prop    { color: #79c0ff; }
+    .token-comment { color: #8b949e; }
+    .token-number  { color: #f2cc60; }
+    .token-plain   { color: #e6edf3; }
+    .gradient-hero {
+      background: radial-gradient(ellipse 80% 60% at 50% -10%, rgba(34,197,94,0.15) 0%, transparent 60%),
+                  #09090b;
+    }
+    .glow-green {
+      box-shadow: 0 0 0 1px rgba(34,197,94,0.3), 0 0 40px rgba(34,197,94,0.08);
+    }
+    .stat-card {
+      background: linear-gradient(135deg, rgba(255,255,255,0.03) 0%, rgba(255,255,255,0.01) 100%);
+    }
+  </style>
+</head>
+<body class="bg-zinc-950 text-zinc-100 font-sans antialiased">
+
+  <!-- Nav -->
+  <nav class="border-b border-zinc-800 bg-zinc-950/80 backdrop-blur-sm sticky top-0 z-50">
+    <div class="max-w-6xl mx-auto px-6 h-14 flex items-center justify-between">
+      <div class="flex items-center gap-8">
+        <span class="font-mono font-semibold text-lg tracking-tight text-white">cadence<span class="text-brand-500">.</span></span>
+        <div class="hidden md:flex items-center gap-6 text-sm text-zinc-400">
+          <a href="#" class="hover:text-zinc-100 transition-colors">Docs</a>
+          <a href="#" class="hover:text-zinc-100 transition-colors">API Reference</a>
+          <a href="#" class="hover:text-zinc-100 transition-colors">Pricing</a>
+          <a href="#" class="hover:text-zinc-100 transition-colors">Blog</a>
+        </div>
+      </div>
+      <div class="flex items-center gap-3">
+        <a href="#" class="text-sm text-zinc-400 hover:text-zinc-100 transition-colors">Log in</a>
+        <a href="#" class="text-sm bg-brand-500 hover:bg-brand-400 text-black font-semibold px-4 py-1.5 rounded-md transition-colors">Get API key</a>
+      </div>
+    </div>
+  </nav>
+
+  <!-- Hero -->
+  <section class="gradient-hero pt-24 pb-20 px-6">
+    <div class="max-w-6xl mx-auto">
+      <div class="inline-flex items-center gap-2 bg-zinc-900 border border-zinc-800 rounded-full px-3 py-1 text-xs text-zinc-400 mb-8">
+        <span class="w-1.5 h-1.5 rounded-full bg-brand-500 inline-block"></span>
+        99.97% deliverability rate across production senders
+      </div>
+
+      <div class="grid lg:grid-cols-2 gap-16 items-center">
+        <div>
+          <h1 class="text-5xl font-extrabold tracking-tight leading-tight mb-6">
+            Email infrastructure<br />
+            that <span class="text-brand-400">actually delivers.</span>
+          </h1>
+          <p class="text-lg text-zinc-400 leading-relaxed mb-8">
+            A REST API and SDKs for sending transactional and marketing email. Cadence handles domain authentication, bounce tracking, and deliverability — so you ship the feature, not the plumbing.
+          </p>
+          <div class="flex flex-wrap gap-3 mb-10">
+            <a href="#" class="bg-brand-500 hover:bg-brand-400 text-black font-semibold px-6 py-3 rounded-lg text-sm transition-colors">Get started free</a>
+            <a href="#" class="bg-zinc-800 hover:bg-zinc-700 text-zinc-100 font-medium px-6 py-3 rounded-lg text-sm transition-colors">Read the docs →</a>
+          </div>
+          <p class="text-xs text-zinc-600">Free tier: 5,000 emails/month. No credit card required.</p>
+        </div>
+
+        <!-- Code panel -->
+        <div class="glow-green rounded-xl overflow-hidden border border-zinc-800">
+          <div class="code-block px-4 py-3 flex items-center gap-2 border-b border-zinc-800">
+            <div class="w-3 h-3 rounded-full bg-zinc-700"></div>
+            <div class="w-3 h-3 rounded-full bg-zinc-700"></div>
+            <div class="w-3 h-3 rounded-full bg-zinc-700"></div>
+            <span class="ml-3 text-xs text-zinc-500 font-mono">send-welcome-email.ts</span>
+          </div>
+          <pre class="code-block px-5 py-5 text-sm font-mono leading-relaxed overflow-x-auto"><code><span class="token-keyword">import</span> <span class="token-plain">{ Cadence } </span><span class="token-keyword">from</span> <span class="token-string">'@cadence/sdk'</span><span class="token-plain">;</span>
+
+<span class="token-keyword">const</span> <span class="token-plain">client = </span><span class="token-keyword">new</span> <span class="token-func">Cadence</span><span class="token-plain">({</span>
+  <span class="token-prop">apiKey</span><span class="token-plain">: process.env.</span><span class="token-prop">CADENCE_API_KEY</span><span class="token-plain">,</span>
+<span class="token-plain">});</span>
+
+<span class="token-keyword">await</span> <span class="token-plain">client.email.</span><span class="token-func">send</span><span class="token-plain">({</span>
+  <span class="token-prop">to</span><span class="token-plain">:       </span><span class="token-string">'maya@example.com'</span><span class="token-plain">,</span>
+  <span class="token-prop">from</span><span class="token-plain">:     </span><span class="token-string">'hello@yourapp.com'</span><span class="token-plain">,</span>
+  <span class="token-prop">template</span><span class="token-plain">: </span><span class="token-string">'welcome-v2'</span><span class="token-plain">,</span>
+  <span class="token-prop">data</span><span class="token-plain">: {</span>
+    <span class="token-prop">name</span><span class="token-plain">:      </span><span class="token-string">'Maya'</span><span class="token-plain">,</span>
+    <span class="token-prop">plan</span><span class="token-plain">:      </span><span class="token-string">'pro'</span><span class="token-plain">,</span>
+    <span class="token-prop">loginUrl</span><span class="token-plain">:  </span><span class="token-string">'https://app.yourapp.com/login'</span><span class="token-plain">,</span>
+  <span class="token-plain">},</span>
+<span class="token-plain">});</span>
+
+<span class="token-comment">// { id: 'msg_01HXYZ...', status: 'queued' }</span></code></pre>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- Stats bar -->
+  <section class="border-y border-zinc-800 py-10 bg-zinc-900/30">
+    <div class="max-w-6xl mx-auto px-6 grid grid-cols-2 md:grid-cols-4 gap-8 text-center">
+      <div>
+        <div class="text-3xl font-bold text-white mb-1">4.2B+</div>
+        <div class="text-sm text-zinc-500">Emails delivered / year</div>
+      </div>
+      <div>
+        <div class="text-3xl font-bold text-white mb-1">99.97%</div>
+        <div class="text-sm text-zinc-500">Deliverability rate</div>
+      </div>
+      <div>
+        <div class="text-3xl font-bold text-white mb-1">&lt;120ms</div>
+        <div class="text-sm text-zinc-500">Median send latency</div>
+      </div>
+      <div>
+        <div class="text-3xl font-bold text-white mb-1">11 SDKs</div>
+        <div class="text-sm text-zinc-500">Node, Python, Go, Ruby…</div>
+      </div>
+    </div>
+  </section>
+
+  <!-- The hard part is handled -->
+  <section class="py-24 px-6">
+    <div class="max-w-6xl mx-auto">
+      <div class="text-center mb-16">
+        <h2 class="text-3xl font-bold mb-4">The invisible work is done for you</h2>
+        <p class="text-zinc-400 max-w-xl mx-auto">Deliverability is a full-time job. We've already done it. Every account gets production-grade email infrastructure from day one.</p>
+      </div>
+      <div class="grid md:grid-cols-3 gap-6">
+
+        <div class="stat-card border border-zinc-800 rounded-xl p-6">
+          <div class="w-10 h-10 bg-brand-500/10 border border-brand-500/20 rounded-lg flex items-center justify-center mb-4">
+            <svg class="w-5 h-5 text-brand-400" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M9 12l2 2 4-4m5.618-4.016A11.955 11.955 0 0112 2.944a11.955 11.955 0 01-8.618 3.04A12.02 12.02 0 003 9c0 5.591 3.824 10.29 9 11.622 5.176-1.332 9-6.03 9-11.622 0-1.042-.133-2.052-.382-3.016z" /></svg>
+          </div>
+          <h3 class="font-semibold text-white mb-2">Domain authentication</h3>
+          <p class="text-sm text-zinc-400 leading-relaxed">SPF, DKIM, and DMARC configured in minutes with guided DNS setup. We verify and monitor your records continuously.</p>
+        </div>
+
+        <div class="stat-card border border-zinc-800 rounded-xl p-6">
+          <div class="w-10 h-10 bg-brand-500/10 border border-brand-500/20 rounded-lg flex items-center justify-center mb-4">
+            <svg class="w-5 h-5 text-brand-400" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M18.364 18.364A9 9 0 005.636 5.636m12.728 12.728A9 9 0 015.636 5.636m12.728 12.728L5.636 5.636" /></svg>
+          </div>
+          <h3 class="font-semibold text-white mb-2">Suppression management</h3>
+          <p class="text-sm text-zinc-400 leading-relaxed">Bounces, unsubscribes, and spam complaints are captured and suppressed automatically. No manual list hygiene.</p>
+        </div>
+
+        <div class="stat-card border border-zinc-800 rounded-xl p-6">
+          <div class="w-10 h-10 bg-brand-500/10 border border-brand-500/20 rounded-lg flex items-center justify-center mb-4">
+            <svg class="w-5 h-5 text-brand-400" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M9 19v-6a2 2 0 00-2-2H5a2 2 0 00-2 2v6a2 2 0 002 2h2a2 2 0 002-2zm0 0V9a2 2 0 012-2h2a2 2 0 012 2v10m-6 0a2 2 0 002 2h2a2 2 0 002-2m0 0V5a2 2 0 012-2h2a2 2 0 012 2v14a2 2 0 01-2 2h-2a2 2 0 01-2-2z" /></svg>
+          </div>
+          <h3 class="font-semibold text-white mb-2">Reputation monitoring</h3>
+          <p class="text-sm text-zinc-400 leading-relaxed">Real-time visibility into your sender reputation, bounce rates, and spam complaint rates — with alerts before they become problems.</p>
+        </div>
+
+        <div class="stat-card border border-zinc-800 rounded-xl p-6">
+          <div class="w-10 h-10 bg-brand-500/10 border border-brand-500/20 rounded-lg flex items-center justify-center mb-4">
+            <svg class="w-5 h-5 text-brand-400" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M15 12a3 3 0 11-6 0 3 3 0 016 0z" /><path stroke-linecap="round" stroke-linejoin="round" d="M2.458 12C3.732 7.943 7.523 5 12 5c4.478 0 8.268 2.943 9.542 7-1.274 4.057-5.064 7-9.542 7-4.477 0-8.268-2.943-9.542-7z" /></svg>
+          </div>
+          <h3 class="font-semibold text-white mb-2">Preview &amp; test mode</h3>
+          <p class="text-sm text-zinc-400 leading-relaxed">Send to your test environment without touching production inboxes. See exactly how an email renders before it ships to users.</p>
+        </div>
+
+        <div class="stat-card border border-zinc-800 rounded-xl p-6">
+          <div class="w-10 h-10 bg-brand-500/10 border border-brand-500/20 rounded-lg flex items-center justify-center mb-4">
+            <svg class="w-5 h-5 text-brand-400" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M7 21a4 4 0 01-4-4V5a2 2 0 012-2h4a2 2 0 012 2v12a4 4 0 01-4 4zm0 0h12a2 2 0 002-2v-4a2 2 0 00-2-2h-2.343M11 7.343l1.657-1.657a2 2 0 012.828 0l2.829 2.829a2 2 0 010 2.828l-8.486 8.486M7 17h.01" /></svg>
+          </div>
+          <h3 class="font-semibold text-white mb-2">React component templates</h3>
+          <p class="text-sm text-zinc-400 leading-relaxed">Write emails as React components. Compile to battle-tested HTML. Version control your templates like the rest of your code.</p>
+        </div>
+
+        <div class="stat-card border border-zinc-800 rounded-xl p-6">
+          <div class="w-10 h-10 bg-brand-500/10 border border-brand-500/20 rounded-lg flex items-center justify-center mb-4">
+            <svg class="w-5 h-5 text-brand-400" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M13 7h8m0 0v8m0-8l-8 8-4-4-6 6" /></svg>
+          </div>
+          <h3 class="font-semibold text-white mb-2">Analytics dashboard</h3>
+          <p class="text-sm text-zinc-400 leading-relaxed">Opens, clicks, deliveries, and bounces per campaign and per message. Exportable via webhook or the Events API.</p>
+        </div>
+
+      </div>
+    </div>
+  </section>
+
+  <!-- For both engineers and content owners -->
+  <section class="py-24 px-6 bg-zinc-900/30 border-y border-zinc-800">
+    <div class="max-w-6xl mx-auto">
+      <div class="text-center mb-16">
+        <h2 class="text-3xl font-bold mb-4">One tool for your whole team</h2>
+        <p class="text-zinc-400 max-w-xl mx-auto">Engineers control the plumbing. Everyone else controls the content. No PRs required to update copy.</p>
+      </div>
+      <div class="grid md:grid-cols-2 gap-8">
+
+        <div class="bg-zinc-900 border border-zinc-800 rounded-xl p-8">
+          <div class="text-xs font-mono text-brand-400 uppercase tracking-widest mb-4">For engineers</div>
+          <h3 class="text-xl font-semibold mb-4">An API that fits your stack</h3>
+          <ul class="space-y-3 text-sm text-zinc-400">
+            <li class="flex gap-3"><span class="text-brand-500 mt-0.5">✓</span> REST API + SDKs for Node, Python, Go, Ruby, PHP, Elixir, and more</li>
+            <li class="flex gap-3"><span class="text-brand-500 mt-0.5">✓</span> Idempotency keys — safe to retry without duplicate sends</li>
+            <li class="flex gap-3"><span class="text-brand-500 mt-0.5">✓</span> Webhook delivery for open/click/bounce events</li>
+            <li class="flex gap-3"><span class="text-brand-500 mt-0.5">✓</span> Scheduled sends via API — no cron job needed</li>
+            <li class="flex gap-3"><span class="text-brand-500 mt-0.5">✓</span> React Email support — templates are code, not config</li>
+            <li class="flex gap-3"><span class="text-brand-500 mt-0.5">✓</span> Staging environment with real send simulation</li>
+          </ul>
+        </div>
+
+        <div class="bg-zinc-900 border border-zinc-800 rounded-xl p-8">
+          <div class="text-xs font-mono text-brand-400 uppercase tracking-widest mb-4">For content &amp; product</div>
+          <h3 class="text-xl font-semibold mb-4">Edit emails without a deploy</h3>
+          <ul class="space-y-3 text-sm text-zinc-400">
+            <li class="flex gap-3"><span class="text-brand-500 mt-0.5">✓</span> Visual template editor — update subject, copy, and layout directly</li>
+            <li class="flex gap-3"><span class="text-brand-500 mt-0.5">✓</span> Preview any template with real data before publishing</li>
+            <li class="flex gap-3"><span class="text-brand-500 mt-0.5">✓</span> Schedule campaigns and one-time sends from the dashboard</li>
+            <li class="flex gap-3"><span class="text-brand-500 mt-0.5">✓</span> Per-template analytics: open rate, click rate, unsubscribes</li>
+            <li class="flex gap-3"><span class="text-brand-500 mt-0.5">✓</span> Role-based access — content editors can't touch API credentials</li>
+            <li class="flex gap-3"><span class="text-brand-500 mt-0.5">✓</span> Version history — revert any template to a previous state</li>
+          </ul>
+        </div>
+
+      </div>
+    </div>
+  </section>
+
+  <!-- API snippet section -->
+  <section class="py-24 px-6">
+    <div class="max-w-6xl mx-auto">
+      <div class="grid lg:grid-cols-2 gap-16 items-start">
+        <div>
+          <h2 class="text-3xl font-bold mb-4">From zero to sending in under five minutes</h2>
+          <p class="text-zinc-400 mb-8 leading-relaxed">Install the SDK, set your API key, call <code class="text-brand-400 bg-zinc-800 px-1.5 py-0.5 rounded text-sm font-mono">email.send()</code>. That's the whole integration for most use cases. No SMTP config, no relay setup, no warm-up spreadsheet.</p>
+          <div class="space-y-4">
+            <div class="flex gap-4 items-start">
+              <div class="w-8 h-8 rounded-full bg-brand-500/20 border border-brand-500/30 text-brand-400 text-sm font-mono font-semibold flex items-center justify-center shrink-0 mt-0.5">1</div>
+              <div>
+                <div class="font-medium text-white mb-1">Install the SDK</div>
+                <div class="text-sm text-zinc-400">npm, pip, go get, gem — whichever fits your stack</div>
+              </div>
+            </div>
+            <div class="flex gap-4 items-start">
+              <div class="w-8 h-8 rounded-full bg-brand-500/20 border border-brand-500/30 text-brand-400 text-sm font-mono font-semibold flex items-center justify-center shrink-0 mt-0.5">2</div>
+              <div>
+                <div class="font-medium text-white mb-1">Add your API key</div>
+                <div class="text-sm text-zinc-400">One environment variable. No SMTP credentials to juggle.</div>
+              </div>
+            </div>
+            <div class="flex gap-4 items-start">
+              <div class="w-8 h-8 rounded-full bg-brand-500/20 border border-brand-500/30 text-brand-400 text-sm font-mono font-semibold flex items-center justify-center shrink-0 mt-0.5">3</div>
+              <div>
+                <div class="font-medium text-white mb-1">Send your first email</div>
+                <div class="text-sm text-zinc-400">Hit the API. Check the dashboard. It's there.</div>
+              </div>
+            </div>
+            <div class="flex gap-4 items-start">
+              <div class="w-8 h-8 rounded-full bg-brand-500/20 border border-brand-500/30 text-brand-400 text-sm font-mono font-semibold flex items-center justify-center shrink-0 mt-0.5">4</div>
+              <div>
+                <div class="font-medium text-white mb-1">Authenticate your domain</div>
+                <div class="text-sm text-zinc-400">Follow the DNS guide to unlock full deliverability and custom from addresses.</div>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <div>
+          <div class="glow-green rounded-xl overflow-hidden border border-zinc-800">
+            <div class="code-block px-4 py-3 flex items-center gap-2 border-b border-zinc-800">
+              <span class="text-xs text-zinc-500 font-mono">Shell</span>
+            </div>
+            <pre class="code-block px-5 py-4 text-sm font-mono leading-relaxed overflow-x-auto"><code><span class="token-comment"># Install</span>
+<span class="token-plain">npm install @cadence/sdk</span>
+
+<span class="token-comment"># Set your key</span>
+<span class="token-plain">export CADENCE_API_KEY=</span><span class="token-string">sk_live_...</span></code></pre>
+          </div>
+
+          <div class="glow-green rounded-xl overflow-hidden border border-zinc-800 mt-4">
+            <div class="code-block px-4 py-3 flex items-center gap-2 border-b border-zinc-800">
+              <span class="text-xs text-zinc-500 font-mono">Python</span>
+            </div>
+            <pre class="code-block px-5 py-4 text-sm font-mono leading-relaxed overflow-x-auto"><code><span class="token-keyword">from</span> <span class="token-plain">cadence </span><span class="token-keyword">import</span> <span class="token-plain">Cadence</span>
+
+<span class="token-plain">client = </span><span class="token-func">Cadence</span><span class="token-plain">(api_key=</span><span class="token-string">"sk_live_..."</span><span class="token-plain">)</span>
+
+<span class="token-plain">client.email.</span><span class="token-func">send</span><span class="token-plain">(</span>
+  <span class="token-prop">to</span><span class="token-plain">=</span><span class="token-string">"user@example.com"</span><span class="token-plain">,</span>
+  <span class="token-prop">from_</span><span class="token-plain">=</span><span class="token-string">"you@yourapp.com"</span><span class="token-plain">,</span>
+  <span class="token-prop">template</span><span class="token-plain">=</span><span class="token-string">"password-reset"</span><span class="token-plain">,</span>
+  <span class="token-prop">data</span><span class="token-plain">={</span><span class="token-string">"reset_url"</span><span class="token-plain">: reset_link}</span>
+<span class="token-plain">)</span></code></pre>
+          </div>
+
+          <div class="glow-green rounded-xl overflow-hidden border border-zinc-800 mt-4">
+            <div class="code-block px-4 py-3 flex items-center gap-2 border-b border-zinc-800">
+              <span class="text-xs text-zinc-500 font-mono">Go</span>
+            </div>
+            <pre class="code-block px-5 py-4 text-sm font-mono leading-relaxed overflow-x-auto"><code><span class="token-plain">client := cadence.</span><span class="token-func">New</span><span class="token-plain">(</span><span class="token-string">"sk_live_..."</span><span class="token-plain">)</span>
+
+<span class="token-plain">_, err := client.Email.</span><span class="token-func">Send</span><span class="token-plain">(ctx, &cadence.SendParams{</span>
+  <span class="token-prop">To</span><span class="token-plain">:       </span><span class="token-string">"user@example.com"</span><span class="token-plain">,</span>
+  <span class="token-prop">From</span><span class="token-plain">:     </span><span class="token-string">"you@yourapp.com"</span><span class="token-plain">,</span>
+  <span class="token-prop">Template</span><span class="token-plain">: </span><span class="token-string">"order-confirmed"</span><span class="token-plain">,</span>
+<span class="token-plain">})</span></code></pre>
+          </div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- CTA -->
+  <section class="py-24 px-6">
+    <div class="max-w-2xl mx-auto text-center">
+      <h2 class="text-4xl font-bold mb-4">Start sending in minutes</h2>
+      <p class="text-zinc-400 mb-8 text-lg">Free tier includes 5,000 emails per month. No credit card required. Full API access from day one.</p>
+      <div class="flex flex-col sm:flex-row gap-4 justify-center">
+        <a href="#" class="bg-brand-500 hover:bg-brand-400 text-black font-bold px-8 py-4 rounded-lg text-base transition-colors">Get your API key →</a>
+        <a href="#" class="bg-zinc-800 hover:bg-zinc-700 text-zinc-100 font-medium px-8 py-4 rounded-lg text-base transition-colors">Read the quickstart</a>
+      </div>
+      <p class="text-xs text-zinc-600 mt-6">Used in production by 3,000+ engineering teams</p>
+    </div>
+  </section>
+
+  <!-- Footer -->
+  <footer class="border-t border-zinc-800 py-10 px-6">
+    <div class="max-w-6xl mx-auto flex flex-col md:flex-row items-center justify-between gap-4">
+      <span class="font-mono font-semibold text-zinc-400">cadence<span class="text-brand-500">.</span></span>
+      <div class="flex gap-6 text-sm text-zinc-600">
+        <a href="#" class="hover:text-zinc-400">Privacy</a>
+        <a href="#" class="hover:text-zinc-400">Terms</a>
+        <a href="#" class="hover:text-zinc-400">Status</a>
+        <a href="#" class="hover:text-zinc-400">Security</a>
+        <a href="#" class="hover:text-zinc-400">Contact</a>
+      </div>
+    </div>
+  </footer>
+
+</body>
+</html>

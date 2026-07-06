@@ -1,7 +1,7 @@
 {
   "name": "forgedock",
-  "version": "1.0.16",
-  "description": "Structured autonomous pipeline commands for Claude Code — investigate, build, review, merge.",
+  "version": "1.1.1",
+  "description": "Autonomous dev pipeline for Claude Code. GitHub as institutional memory — every issue, PR, and annotation survives context resets and makes the next agent smarter.",
   "bin": {
     "forgedock": "bin/forgedock.mjs"
   },
@@ -19,13 +19,7 @@
     "anthropic",
     "agentic-ai",
     "devtools",
-    "automation",
-    "pipeline",
-    "cli",
-    "slash-commands",
-    "github-workflow",
-    "ai-development",
-    "agentic"
+    "automation"
   ],
   "author": "RapierCraft Studios",
   "license": "AGPL-3.0",
@@ -33,7 +27,7 @@
     "type": "git",
     "url": "git+https://github.com/RapierCraftStudios/ForgeDock.git"
   },
-  "homepage": "https://forgedock.dev",
+  "homepage": "https://github.com/RapierCraftStudios/ForgeDock#readme",
   "bugs": {
     "url": "https://github.com/RapierCraftStudios/ForgeDock/issues"
   },
@@ -41,8 +35,10 @@
     "bin/",
     "!bin/tests/",
     "commands/",
-    ".claude-plugin/",
     "docs/",
+    "!docs/site/.vitepress/",
+    "examples/",
+    "packages/protocol/src/",
     "scripts/",
     "templates/",
     "LICENSE",
@@ -54,11 +50,14 @@
     "docs:build": "vitepress build docs/site",
     "docs:preview": "vitepress preview docs/site"
   },
-  "devDependencies": {
-    "vitepress": "^1.6.3"
-  },
   "engines": {
     "node": ">=18"
+  },
+  "optionalDependencies": {
+    "@anthropic-ai/sdk": ">=0.30.0 <1"
+  },
+  "devDependencies": {
+    "vitepress": "^1.6.3"
   },
   "peerDependencies": {
     "@anthropic-ai/claude-code": ">=2.0.0"

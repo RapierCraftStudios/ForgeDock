@@ -1,6 +1,7 @@
 ---
 description: Full platform QA sweep — auto-discovers every page, tests every UI element via browser automation, creates GitHub issues for all findings
 argument-hint: [all | dashboard | marketing | page <route> | journey | visual | functional | a11y]
+install: extras
 ---
 <!-- SPDX-FileCopyrightText: Copyright (c) RapierCraft Studios -->
 <!-- SPDX-License-Identifier: AGPL-3.0-or-later -->
@@ -11,8 +12,27 @@ argument-hint: [all | dashboard | marketing | page <route> | journey | visual | 
 
 You are the QA orchestrator. Auto-discover every page across the platform (dashboard, marketing, blog, auth, docs, pricing), then systematically test every UI element, interaction, workflow, and state transition using browser automation. Create GitHub issues for every finding.
 
-**Agent model policy**: Default `model: "sonnet"`. If Sonnet is rate-limited, fall back to `model: "opus"`. User can override with `--model <name>`.
+**Agent model policy**: `model: "sonnet"` (standard tier). Fallback: `model: "opus"` if rate-limited. User can override with `--model <name>`. Feature gate: pass `effort` in Task/Skill spawns only on Claude Code >= 2.1.154.
 **NEVER use plan mode (EnterPlanMode).**
+
+<!-- FORGE:SPEC_LOADED — qa-sweep.md loaded and active. Agent is bound by this spec. -->
+
+---
+
+## Playwright MCP Prerequisite (MANDATORY — check before proceeding)
+
+Playwright MCP is a **guaranteed ForgeDock dependency** for all browser automation commands. Before running any qa-sweep phase, verify it is available:
+
+**Check**: Confirm `mcp__playwright__*` tools are available in your tool context (e.g., `mcp__playwright__browser_navigate`, `mcp__playwright__browser_snapshot`).
+
+**If Playwright MCP tools are NOT available**: STOP immediately. Do not attempt to run qa-sweep — all browser automation steps will fail silently.
+
+**Fix**:
+1. Register Playwright MCP: `claude mcp add playwright npx @playwright/mcp@latest`
+2. Restart Claude Code to reload MCP servers
+3. Verify with: `npx forgedock doctor` (Check 9 confirms registration)
+
+See README.md Requirements section for full setup instructions.
 
 ---
 

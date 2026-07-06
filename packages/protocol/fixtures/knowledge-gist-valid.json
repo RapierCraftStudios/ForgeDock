@@ -1,0 +1,9 @@
+{
+  "description": "KNOWLEDGE_GIST — valid inline-value annotation",
+  "input": "<!-- FORGE:KNOWLEDGE_GIST: https://gist.github.com/example/abc123 -->",
+  "expect": {
+    "type": "KNOWLEDGE_GIST",
+    "valid": true,
+    "inlineValue": "https://gist.github.com/example/abc123"
+  }
+}

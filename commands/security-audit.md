@@ -1,6 +1,7 @@
 ---
 description: Periodic security posture audit — runs a scripted 4-phase checklist against repo files (not diffs), creates GitHub issues for confirmed findings
 argument-hint: [--repo <prefix>] [--phase 1|2|3|4|all] [--dry-run]
+install: extras
 ---
 <!-- SPDX-FileCopyrightText: Copyright (c) RapierCraft Studios -->
 <!-- SPDX-License-Identifier: AGPL-3.0-or-later -->
@@ -18,7 +19,7 @@ This command is designed to be run:
 
 This is NOT a PR review — it does not approve or block. It creates issues for each gap found.
 
-**Agent model policy**: Default `model: "sonnet"`. If Sonnet is rate-limited, fall back to `model: "opus"`.
+**Agent model policy**: `model: "sonnet"`, `effort: xhigh` (deep tier — comprehensive security analysis). Fallback: `model: "opus"` if rate-limited. Feature gate: pass `effort` only on Claude Code >= 2.1.154.
 **NEVER use plan mode (EnterPlanMode).**
 
 ---
@@ -110,13 +111,14 @@ fi
 **Check**:
 ```bash
 DOCKER_COMPOSE_FILES=$(find "$REPO_PATH" -name "docker-compose*.yml" -not -path "*/.git/*" 2>/dev/null)
-for f in $DOCKER_COMPOSE_FILES; do
+while IFS= read -r f; do
+  [ -z "$f" ] && continue
   HITS=$(grep -n '0\.0\.0\.0:[0-9]' "$f" 2>/dev/null | grep -v '^\s*#' || true)
   if [ -n "$HITS" ]; then
     echo "FINDING [1A] $f:"
     echo "$HITS"
   fi
-done
+done <<< "$DOCKER_COMPOSE_FILES"
 ```
 
 **Confirm**: For each hit, verify the port is NOT a web-facing port (80, 443, 8080, 3000). Ports like 6432 (PgBouncer), 6379 (Redis), 5432 (Postgres), 27017 (MongoDB) bound to `0.0.0.0` are confirmed findings.
@@ -134,12 +136,13 @@ done
 **Check**:
 ```bash
 DOCKERFILES=$(find "$REPO_PATH" -name "Dockerfile*" -not -path "*/.git/*" 2>/dev/null)
-for f in $DOCKERFILES; do
+while IFS= read -r f; do
+  [ -z "$f" ] && continue
   # Skip if USER directive is present (anywhere in the file, case-insensitive)
   if ! grep -iq '^\s*USER\s' "$f" 2>/dev/null; then
     echo "FINDING [1B] $f: no USER directive — container runs as root"
   fi
-done
+done <<< "$DOCKERFILES"
 ```
 
 **Confirm**: Check if the Dockerfile is for a long-running service (not a one-shot build image). If service container with no USER → confirmed finding.
@@ -157,14 +160,15 @@ done
 **Check**:
 ```bash
 DOCKER_COMPOSE_FILES=$(find "$REPO_PATH" -name "docker-compose*.yml" -not -path "*/.git/*" 2>/dev/null)
-for f in $DOCKER_COMPOSE_FILES; do
+while IFS= read -r f; do
+  [ -z "$f" ] && continue
   # Redis without requirepass
   REDIS_NO_AUTH=$(grep -A5 'image:.*redis' "$f" 2>/dev/null | grep -v 'requirepass\|password' | grep -c 'redis' || true)
   # Postgres without POSTGRES_PASSWORD
   PG_NO_AUTH=$(awk '/image:.*postgres/{found=1} found && /POSTGRES_PASSWORD/{found=0} found && /^[[:space:]]*-[[:space:]]*[A-Z]/{print}' "$f" 2>/dev/null | grep -v 'POSTGRES_PASSWORD' | head -3 || true)
 
   [ -n "$PG_NO_AUTH" ] && echo "FINDING [1C] $f: Postgres service may lack POSTGRES_PASSWORD"
-done
+done <<< "$DOCKER_COMPOSE_FILES"
 ```
 
 **Manual review**: Check for `POSTGRES_PASSWORD` and `requirepass` in compose environment sections. Flag any service using a blank/trivial password as a documented value.
@@ -184,7 +188,8 @@ done
 **Check**:
 ```bash
 WORKFLOW_FILES=$(find "$REPO_PATH/.github/workflows" -name "*.yml" 2>/dev/null)
-for f in $WORKFLOW_FILES; do
+while IFS= read -r f; do
+  [ -z "$f" ] && continue
   # Find security scanner steps then check if continue-on-error follows within 5 lines
   awk '
     /trivy|snyk|owasp|dependency.check|gitleaks|semgrep|gosec|bandit/ {
@@ -195,7 +200,7 @@ for f in $WORKFLOW_FILES; do
       print FILENAME ":" NR ": continue-on-error: true near security scanner at line " scanner_line
     }
   ' FILENAME="$f" "$f" 2>/dev/null || true
-done
+done <<< "$WORKFLOW_FILES"
 ```
 
 **Confirm**: Verify the flagged step is indeed a security scanner step (not a notification or deploy step). Confirmed if scanner produces failure exit codes that are being swallowed.
@@ -213,10 +218,11 @@ done
 **Check**:
 ```bash
 CONFIG_FILES=$(find "$REPO_PATH/infra" "$REPO_PATH/services" -name "*.conf" -o -name "*.yml" -o -name "nginx.conf" 2>/dev/null | grep -v '.git')
-for f in $CONFIG_FILES; do
+while IFS= read -r f; do
+  [ -z "$f" ] && continue
   HITS=$(grep -n '^\s*#.*\(deny\|allow\s\|auth_basic\|auth_request\|satisfy all\|limit_req\|access_by_lua\)' "$f" 2>/dev/null || true)
   [ -n "$HITS" ] && echo "FINDING [2B] $f:" && echo "$HITS"
-done
+done <<< "$CONFIG_FILES"
 ```
 
 **Confirm**: Distinguish intentional comments (documentation) from disabled access control rules. Confirmed if the commented line is a functional directive that would restrict access.
@@ -236,10 +242,11 @@ done
 **Check**:
 ```bash
 CSP_FILES=$(grep -rl "Content-Security-Policy\|script-src" "$REPO_PATH" --include="*.js" --include="*.ts" --include="*.json" --include="*.conf" --include="*.yml" 2>/dev/null | grep -v '.git' | grep -v node_modules)
-for f in $CSP_FILES; do
+while IFS= read -r f; do
+  [ -z "$f" ] && continue
   HITS=$(grep -n "script-src.*unsafe-inline\|unsafe-inline.*script-src" "$f" 2>/dev/null || true)
   [ -n "$HITS" ] && echo "FINDING [3A] $f:" && echo "$HITS"
-done
+done <<< "$CSP_FILES"
 ```
 
 **Confirm**: Verify the CSP header applies to the production site (not just dev/storybook). Check if a nonce-based approach is already in use (nonce + unsafe-inline is still a finding but lower severity).
@@ -257,10 +264,11 @@ done
 **Check**:
 ```bash
 HEADER_FILES=$(grep -rl "X-App-Version\|X-Deployment-Color\|X-Git-Sha\|X-Build-Id\|Server:" "$REPO_PATH" --include="*.py" --include="*.ts" --include="*.js" --include="*.conf" 2>/dev/null | grep -v '.git' | grep -v node_modules)
-for f in $HEADER_FILES; do
+while IFS= read -r f; do
+  [ -z "$f" ] && continue
   HITS=$(grep -n '"X-App-Version"\|"X-Deployment-Color"\|"X-Git-Sha"\|"X-Build-Id"\|"Server:' "$f" 2>/dev/null || true)
   [ -n "$HITS" ] && echo "FINDING [3B] $f:" && echo "$HITS"
-done
+done <<< "$HEADER_FILES"
 ```
 
 **Confirm**: Check if the header is set in a response (not just read). If set in outbound responses → confirmed finding. Internal-only APIs (not publicly routed) are `priority:P3`; public APIs are `priority:P2`.
@@ -435,14 +443,15 @@ payment_intent.payment_failed
 **Check**:
 ```bash
 WEBHOOK_FILES=$(grep -rl "stripe\|webhook" "$REPO_PATH/services" --include="*.py" 2>/dev/null | grep -v '.git' | head -10)
-for f in $WEBHOOK_FILES; do
+while IFS= read -r f; do
+  [ -z "$f" ] && continue
   REQUIRED_EVENTS="customer.subscription.deleted invoice.payment_failed charge.refunded charge.dispute.created"
   for event in $REQUIRED_EVENTS; do
     if ! grep -q "\"$event\"\|'$event'" "$f" 2>/dev/null; then
       echo "FINDING [4A] $f: Stripe event '$event' not handled"
     fi
   done
-done
+done <<< "$WEBHOOK_FILES"
 ```
 
 **Confirm**: Verify the event type appears in a handler dispatch (not just a comment). Confirmed if the event would change user entitlements or financial state but has no handler.

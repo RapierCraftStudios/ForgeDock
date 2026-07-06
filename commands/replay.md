@@ -1,6 +1,7 @@
 ---
 description: Read-only playback of a completed pipeline run — shows FORGE annotations phase by phase with timestamps
 argument-hint: <issue-number>
+install: extras
 ---
 
 # /replay — Pipeline Run Playback
@@ -9,7 +10,7 @@ argument-hint: <issue-number>
 
 Replay a completed pipeline run. Fetches all FORGE annotations posted during the pipeline and displays them chronologically — phase headings, timestamps, and key structured fields. Read-only: nothing is written, no labels changed.
 
-**Agent model policy**: Default `model: "sonnet"`. If Sonnet is rate-limited, fall back to `model: "opus"`.
+**Agent model policy**: `model: "sonnet"` (standard tier). Fallback: `model: "opus"` if rate-limited. Feature gate: pass `effort` in Task/Skill spawns only on Claude Code >= 2.1.154.
 
 ---
 

@@ -1,6 +1,7 @@
 ---
 description: Detect API changes, sync satellite repos, and publish releases
-argument-hint: [check | auto | status | publish | trigger | PR-number]
+argument-hint: [check | auto | status | publish | PR-number]
+install: extras
 ---
 <!-- SPDX-FileCopyrightText: Copyright (c) RapierCraft Studios -->
 <!-- SPDX-License-Identifier: AGPL-3.0-or-later -->
@@ -106,7 +107,6 @@ Iterate over all `repos.satellites` entries before proceeding to Phase 1.
 | `status` | Check publication status of ALL ecosystem components (code vs published versions) |
 | `publish` | Bump versions, cut releases, and trigger publishes for all components with unpublished changes |
 | `publish {COMPONENT}` | Publish a specific component by prefix |
-| `trigger` | Detect open `FORGE:CROSS_REPO_TRIGGER` issues in this repo and process them (auto-run `/work-on` or prompt maintainer) |
 | `PR-number` (e.g., `#1500`) | Analyze a specific PR for ecosystem impact |
 
 ---
@@ -445,7 +445,7 @@ npm version {minor|patch|major} --no-git-tag-version
 # 3. Commit the version bump
 NEW_VERSION=$(grep '"version"' package.json | grep -oP '\d+\.\d+\.\d+')
 git add package.json package-lock.json
-git commit -m "chore: bump version to ${NEW_VERSION}"
+git commit -s -m "chore: bump version to ${NEW_VERSION}"
 git push origin main
 
 # 4. Create GitHub Release (triggers {PUBLISH_WORKFLOW} automatically)
@@ -496,7 +496,7 @@ cd {SUBPATH} && npm version {minor|patch} --no-git-tag-version && cd -
 
 # Commit and push
 git add {SUBPATH}/pyproject.toml {SUBPATH}/package.json {SUBPATH}/package-lock.json
-git commit -m "chore({COMPONENT}): bump version to {NEW_VERSION}"
+git commit -s -m "chore({COMPONENT}): bump version to {NEW_VERSION}"
 git push origin fix/{COMPONENT}-version-bump
 
 # Create PR to {STAGING_BRANCH}, merge, then trigger publish from main
@@ -556,234 +556,6 @@ EOF
 npm view {PACKAGE} version          # for npm packages
 pip index versions {PACKAGE} 2>/dev/null || pip install {PACKAGE}== 2>&1 | grep -oP '\d+\.\d+\.\d+'
 ```
-```
-
----
-
-## Trigger Handler: Process Incoming Cross-Repo Dispatch
-
-**Only run when input is `trigger`.**
-
-This phase handles the *inbound* side of cross-repo coordination: it discovers open issues in the current repo that were created by the `cross-repo-trigger.yml` GitHub Actions workflow (installed via `templates/cross-repo-trigger.yml` from #1021), validates them, and either invokes `/work-on` automatically or posts a human-readable prompt for the maintainer.
-
-**Platform boundary note**: This subcommand handles *processing* of already-created trigger issues. *Detection* of new trigger issues without manual polling requires an always-on event listener — that is L2 Platform scope (GitHub App). The AGPL CLI tier implementation is: user or CI runs `/sync-ecosystem trigger` periodically or after receiving a GitHub notification.
-
-### T1: Build satellite registry
-
-Reuse the Config Preamble at the top of this file. The satellite registry (`repos.satellites`) is the authority for `auto_run` values — do NOT read `auto_run` from the trigger issue body.
-
-```bash
-CONFIG_FILE="${FORGE_CONFIG:-forge.yaml}"
-
-if [ -z "$(yq '.repos.satellites // empty' "$CONFIG_FILE" 2>/dev/null)" ]; then
-  echo "No satellite repos configured in forge.yaml → repos.satellites."
-  echo "Cannot determine auto_run policy for trigger issues."
-  echo "Add satellite entries to forge.yaml, then re-run /sync-ecosystem trigger."
-  exit 0
-fi
-```
-
-### T2: Detect open trigger issues
-
-```bash
-# Find open issues in the current repo that contain the FORGE:CROSS_REPO_TRIGGER marker
-TRIGGER_ISSUES=$(gh issue list \
-  --search "FORGE:CROSS_REPO_TRIGGER in:body" \
-  --state open \
-  --limit 50 \
-  --json number,title,body,url)
-
-TRIGGER_COUNT=$(echo "$TRIGGER_ISSUES" | python3 -c "import json,sys; print(len(json.load(sys.stdin)))")
-
-if [ "$TRIGGER_COUNT" -eq 0 ]; then
-  echo "No open FORGE:CROSS_REPO_TRIGGER issues found. Nothing to process."
-  exit 0
-fi
-
-echo "Found $TRIGGER_COUNT open trigger issue(s). Processing..."
-```
-
-### T3: Validate and process each trigger issue
-
-For each open trigger issue, validate the body and dispatch the correct action.
-
-```python
-# Parse trigger issues and process each one
-python3 -c "
-import json, os, subprocess, sys
-
-config_file = os.environ.get('FORGE_CONFIG', 'forge.yaml')
-
-# Read satellite registry from forge.yaml
-try:
-    result = subprocess.run(
-        ['python3', '-c', '''
-import yaml, json, sys
-with open(\"''' + config_file + '''\") as f:
-    cfg = yaml.safe_load(f)
-sats = (cfg.get('repos') or {}).get('satellites') or []
-print(json.dumps([
-    {'repo': s.get('repo',''), 'auto_run': bool(s.get('auto_run', False))}
-    for s in sats if isinstance(s, dict) and s.get('repo')
-]))
-'''],
-        capture_output=True, text=True
-    )
-    satellites = json.loads(result.stdout.strip() or '[]')
-except Exception as e:
-    print(f'ERROR reading forge.yaml satellites: {e}')
-    sys.exit(1)
-
-# Build lookup: upstream repo → auto_run
-satellite_map = {s['repo']: s['auto_run'] for s in satellites}
-
-# Read trigger issues (passed via stdin or environment)
-trigger_issues_raw = os.environ.get('TRIGGER_ISSUES_JSON', '[]')
-try:
-    trigger_issues = json.loads(trigger_issues_raw)
-except json.JSONDecodeError:
-    trigger_issues = []
-
-processed = 0
-skipped = 0
-NL = chr(10)
-
-for issue in trigger_issues:
-    number = issue.get('number')
-    title  = issue.get('title', '')
-    body   = issue.get('body', '') or ''
-    url    = issue.get('url', '')
-
-    # Guard: must contain the marker
-    if 'FORGE:CROSS_REPO_TRIGGER' not in body:
-        print(f'Issue #{number}: missing FORGE:CROSS_REPO_TRIGGER marker — skipping')
-        skipped += 1
-        continue
-
-    # Validate required fields in body
-    upstream_repo  = None
-    pr_number      = None
-    has_files      = False
-
-    for line in body.splitlines():
-        line_s = line.strip()
-        if line_s.startswith('- Upstream repo:'):
-            upstream_repo = line_s.split(':', 1)[-1].strip()
-        elif line_s.startswith('- Merged PR:'):
-            parts = line_s.split('#', 1)
-            if len(parts) > 1:
-                pr_number = parts[1].split()[0].rstrip(')')
-        elif line_s.startswith('- ') and '### Matched Files' in body:
-            # presence of the matched-files list
-            has_files = True
-
-    # Accept any issue that has the marker + upstream repo + PR number
-    if not upstream_repo or not pr_number:
-        comment = (
-            f'<!-- FORGE:TRIGGER_VALIDATION_FAILED -->{NL}'
-            f'## Trigger Validation Failed{NL}{NL}'
-            f'This issue is tagged with \`FORGE:CROSS_REPO_TRIGGER\` but is missing required fields:{NL}'
-            f'- upstream repo: {\"present\" if upstream_repo else \"MISSING\"}{NL}'
-            f'- PR number: {\"present\" if pr_number else \"MISSING\"}{NL}{NL}'
-            f'Expected format is produced by \`templates/cross-repo-trigger.yml\`.{NL}'
-            f'Please verify the issue body or recreate the trigger manually.{NL}'
-        )
-        subprocess.run(['gh', 'issue', 'comment', str(number), '--body', comment], capture_output=True)
-        print(f'Issue #{number}: validation failed (upstream_repo={upstream_repo}, pr={pr_number}) — commented and skipped')
-        skipped += 1
-        continue
-
-    # Look up auto_run from satellite registry
-    auto_run = satellite_map.get(upstream_repo)
-
-    if auto_run is None:
-        # No satellite entry matches this upstream repo
-        comment = (
-            f'<!-- FORGE:TRIGGER_NO_SATELLITE -->{NL}'
-            f'## No Satellite Entry Found{NL}{NL}'
-            f'This trigger issue was created by an upstream merge in \`{upstream_repo}\`,{NL}'
-            f'but \`forge.yaml → repos.satellites\` has no entry with \`repo: {upstream_repo}\`.{NL}{NL}'
-            f'**Options**:{NL}'
-            f'1. Add a satellite entry for \`{upstream_repo}\` to \`forge.yaml\` and re-run \`/sync-ecosystem trigger\`.{NL}'
-            f'2. Close this issue if the trigger was unintended.{NL}'
-        )
-        subprocess.run(['gh', 'issue', 'comment', str(number), '--body', comment], capture_output=True)
-        subprocess.run(['gh', 'issue', 'edit', str(number), '--add-label', 'needs-human'], capture_output=True)
-        print(f'Issue #{number}: no satellite entry for {upstream_repo} — needs-human label added')
-        skipped += 1
-        continue
-
-    if auto_run:
-        # auto_run: true — add label and note that /work-on should be invoked
-        print(f'Issue #{number}: auto_run=true for {upstream_repo} — invoking /work-on #{number}')
-        comment = (
-            f'<!-- FORGE:TRIGGER_AUTO_RUN -->{NL}'
-            f'## Trigger Detected — Auto-Run Enabled{NL}{NL}'
-            f'**Upstream**: \`{upstream_repo}\` PR \`#{pr_number}\`{NL}'
-            f'**Policy**: \`auto_run: true\` in \`forge.yaml → repos.satellites\`{NL}{NL}'
-            f'Invoking \`/work-on {number}\` to begin automated investigation.{NL}'
-        )
-        subprocess.run(['gh', 'issue', 'comment', str(number), '--body', comment], capture_output=True)
-        subprocess.run(['gh', 'issue', 'edit', str(number), '--add-label', 'workflow:investigating'], capture_output=True)
-        # Invoke /work-on — this returns control to the Claude Code session
-        # Skill(skill='work-on', args=str(number))
-        print(f'  -> Skill(skill=\"work-on\", args=\"{number}\")')
-        processed += 1
-    else:
-        # auto_run: false — post human-readable comment prompting maintainer
-        print(f'Issue #{number}: auto_run=false for {upstream_repo} — posting manual instruction')
-        comment = (
-            f'<!-- FORGE:TRIGGER_MANUAL -->{NL}'
-            f'## Trigger Detected — Manual Run Required{NL}{NL}'
-            f'**Upstream**: \`{upstream_repo}\` PR \`#{pr_number}\`{NL}'
-            f'**Policy**: \`auto_run: false\` in \`forge.yaml → repos.satellites\`{NL}{NL}'
-            f'A PR merged in \`{upstream_repo}\` has touched files that match this satellite\'s \`trigger_paths\`.{NL}'
-            f'This may require investigation to check if your contracts, types, or integrations are affected.{NL}{NL}'
-            f'**To process this trigger, run**:{NL}'
-            f'\`\`\`{NL}'
-            f'/work-on {number}{NL}'
-            f'\`\`\`{NL}{NL}'
-            f'Or close this issue if no action is needed.{NL}{NL}'
-            f'> To enable automatic processing, set \`auto_run: true\` for \`{upstream_repo}\` in \`forge.yaml → repos.satellites\`.{NL}'
-            f'> Note: \`auto_run: true\` requires an active Claude Code session with ForgeDock installed in this repo.{NL}'
-        )
-        subprocess.run(['gh', 'issue', 'comment', str(number), '--body', comment], capture_output=True)
-        subprocess.run(['gh', 'issue', 'edit', str(number), '--add-label', 'needs-human'], capture_output=True)
-        processed += 1
-
-print(f'{NL}Trigger processing complete: {processed} processed, {skipped} skipped.')
-" <<< ""
-```
-
-**Usage note**: Call this subcommand with the `TRIGGER_ISSUES_JSON` environment variable set to the JSON output from step T2, or use the shell pipeline pattern below:
-
-```bash
-TRIGGER_ISSUES_JSON=$(gh issue list \
-  --search "FORGE:CROSS_REPO_TRIGGER in:body" \
-  --state open \
-  --limit 50 \
-  --json number,title,body,url) \
-python3 -c "... (same script as T3 above) ..."
-```
-
-### T4: Report trigger processing results
-
-After processing all trigger issues, output a summary:
-
-```
-## Trigger Processing Complete
-
-| Issue | Upstream Repo | PR | auto_run | Action |
-|-------|--------------|-----|----------|--------|
-| #{NUMBER} | {UPSTREAM_REPO} | #{PR_NUMBER} | true | /work-on invoked |
-| #{NUMBER} | {UPSTREAM_REPO} | #{PR_NUMBER} | false | Manual comment posted |
-| #{NUMBER} | {UPSTREAM_REPO} | #{PR_NUMBER} | — | Validation failed — see comment |
-
-{If auto_run issues were found:}
-/work-on has been invoked for {N} issue(s). Each will run through the full investigation → build → review → merge pipeline.
-
-{If manual issues were found:}
-{N} trigger issue(s) are awaiting manual action. Open each issue and run /work-on {NUMBER} when ready.
 ```
 
 ---

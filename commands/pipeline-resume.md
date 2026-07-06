@@ -1,16 +1,20 @@
 ---
 description: Recover full pipeline context after compaction — find the last active issue, reconstruct FORGE annotations, and resume work
 argument-hint: [issue number (optional — auto-detects if omitted)]
+install: extras
 ---
 
-# /resume — Context Recovery After Compaction
+# /pipeline-resume — Context Recovery After Compaction
 
 **Input**: $ARGUMENTS
 
 You are the context-recovery agent. When a session ends or context is compressed, all working state is lost. Your job is to restore it instantly — find the most recently active issue, read all FORGE annotations, reconstruct the current pipeline phase, and re-enter the pipeline exactly where it left off.
 
-**Agent model policy**: Default `model: "sonnet"`. Fallback: `model: "opus"` if Sonnet is rate-limited.
+**Agent model policy**: `model: "haiku"`, `effort: low` (mechanical tier — context recovery, annotation reading, state reconstruction). Fallback: `model: "sonnet"` if rate-limited. Feature gate: pass `effort` only on Claude Code >= 2.1.154.
 **NEVER use plan mode (EnterPlanMode).**
+**NEVER use the Agent tool** — pipeline-resume re-enters the pipeline via `Skill(skill="work-on", ...)` only. Using the Agent tool would restart the pipeline in an untracked subprocess rather than resuming the existing tracked session.
+
+<!-- FORGE:SPEC_LOADED — pipeline-resume.md loaded and active. Agent is bound by this spec. -->
 
 ---
 
@@ -35,6 +39,25 @@ If `forge.yaml` is missing: stop and tell the user to run `npx forgedock init` t
 ### 1A: Parse input
 
 Check `$ARGUMENTS`:
+
+- **`--all-stalled`** (fleet recovery mode): shell out to `npx forgedock resume-stalled` to scan all in-flight issues for expired leases and re-dispatch them. This delegates to the durable engine's `scanStalls` for ground-truth stall detection. Add `--dry-run` if only a report is needed. Then STOP — fleet recovery is complete.
+
+```bash
+# Fleet recovery mode — delegate to the engine's resume-stalled CLI
+if echo "$ARGUMENTS" | grep -q -- "--all-stalled"; then
+    DRY_RUN_FLAG=""
+    if echo "$ARGUMENTS" | grep -q -- "--dry-run"; then
+        DRY_RUN_FLAG="--dry-run"
+    fi
+    echo "Fleet stall recovery: scanning all in-flight issues for expired leases…"
+    npx forgedock resume-stalled $DRY_RUN_FLAG
+    echo ""
+    echo "Fleet recovery complete. To resume a single issue: /pipeline-resume <issue-number>"
+    # STOP — fleet recovery does not fall through to single-issue resume.
+fi
+```
+
+If `--all-stalled` was not specified, continue with single-issue resume:
 
 - **Explicit issue number** (e.g., `610`, `#610`): strip `#`, set `TARGET_NUMBER={number}`, skip to Phase 2.
 - **Empty**: proceed with auto-detection below.
@@ -110,7 +133,7 @@ for NUMBER in $(echo "$RECENT_ISSUES" | jq -r '.number'); do
 done
 ```
 
-If still no candidate: display `No recent active issues found. To resume work on a specific issue, run: /resume {issue-number}` and STOP.
+If still no candidate: display `No recent active issues found. To resume work on a specific issue, run: /pipeline-resume {issue-number}` and STOP.
 
 ---
 
@@ -247,7 +270,7 @@ Invoke `/work-on` to re-enter the pipeline. Work-on reads GitHub state independe
 Skill("work-on", args="{TARGET_NUMBER}")
 ```
 
-**Why delegation works**: `/work-on` Phase 0B already implements "Determine resume point" — it reads issue labels and FORGE annotations to route to the correct phase. `/resume` provides the human-readable context summary, then hands off to `/work-on` for execution.
+**Why delegation works**: `/work-on` Phase 0B already implements "Determine resume point" — it reads issue labels and FORGE annotations to route to the correct phase. `/pipeline-resume` provides the human-readable context summary, then hands off to `/work-on` for execution.
 
 **Do NOT re-implement pipeline logic here.** The context summary above is for the agent's working memory only — the actual phase routing and execution is owned by `/work-on`.
 
@@ -258,7 +281,7 @@ Skill("work-on", args="{TARGET_NUMBER}")
 | Condition | Response |
 |-----------|----------|
 | `forge.yaml` missing | Stop: "Run \`npx forgedock init\` to generate forge.yaml" |
-| No active issues + no FORGE annotations found | Stop: "No recent active issues found. Run \`/resume {number}\` with an explicit issue number, or \`/work-on next\` to start a new issue." |
+| No active issues + no FORGE annotations found | Stop: "No recent active issues found. Run \`/pipeline-resume {number}\` with an explicit issue number, or \`/work-on next\` to start a new issue." |
 | Issue is closed with `workflow:merged` | Stop: "Issue #{number} is already merged. Nothing to resume." |
 | Issue is closed with `workflow:invalid` | Stop: "Issue #{number} was closed as invalid. Nothing to resume." |
 | Issue has `needs-human` label | Stop: "Issue #{number} is blocked (needs-human). Review the blocking comment and resolve it manually before resuming." |

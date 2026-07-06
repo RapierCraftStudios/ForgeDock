@@ -12,8 +12,10 @@ argument-hint: [issue number] [--repo GH_REPO] [--gh-flag GH_FLAG] [--pr PR_NUMB
 **Invoked by**: `work-on.md` Phase 6–7, after `review.md` returns `REVIEW_RESULT: status: COMPLETE`.
 **Output**: Update project board, close issue, update parent tracker, post trajectory log. Return final summary.
 
-**Agent model policy**: Default `model: "sonnet"`. If Sonnet is rate-limited, fall back to `model: "opus"`.
+**Agent model policy**: `model: "haiku"`, `effort: low` (mechanical tier — label transitions, annotation posting, board updates). Fallback: `model: "sonnet"` if rate-limited. Feature gate: pass `effort` only on Claude Code >= 2.1.154.
 **NEVER use plan mode (EnterPlanMode).**
+
+<!-- FORGE:SPEC_LOADED — work-on/close.md loaded and active. Agent is bound by this spec. -->
 
 ---
 
@@ -179,13 +181,15 @@ ISSUE_STATE=$(gh issue view {NUMBER} {GH_FLAG} --json state --jq '.state')
 
 **If `REMAINING_AFTER > 0`** (multi-phase: uncompleted phases remain):
 ```bash
-# Post phase-complete marker — router state 10 (MULTI_PHASE) will re-detect this issue
+# Post phase-complete marker — work-on.md's Universal continuation rule will re-read labels and continue to the next phase
 gh issue comment {NUMBER} {GH_FLAG} --body "<!-- FORGE:PHASE:COMPLETE -->
 Phase complete. PR #{PR_NUMBER} merged to \`{PR_BASE}\`. ${REMAINING_AFTER} phase item(s) remain — leaving issue open for next pipeline iteration."
 
-# Update labels to reflect phase complete (not yet fully merged)
+# Update labels to reflect phase complete — remove current-phase labels and set next-phase label
+# so the router has a signal for which phase comes next (fixes: issue #1381)
 gh issue edit {NUMBER} {GH_FLAG} \
-  --remove-label "workflow:in-review,workflow:building,workflow:investigating" 2>/dev/null || true
+  --remove-label "workflow:in-review,workflow:building,workflow:investigating" \
+  --add-label "workflow:investigating" 2>/dev/null || true
 
 # EXIT — do not close, do not post trajectory, do not run C3–C6
 # Return CLOSE_RESULT: status: PHASE_COMPLETE to caller
@@ -279,218 +283,128 @@ Output to stdout (returned to calling agent):
 
 ---
 
-## Phase C4.5: Shareable Pipeline Summary
+## Phase C4.5: Pipeline Summary Card (MANDATORY)
 
-Generate a comprehensive, stakeholder-readable pipeline run report and post it as a `<!-- FORGE:SUMMARY -->` comment on the issue. Optionally write a local markdown file.
+The shareable artifact. After the close completes, render a box-drawing summary card to
+stdout (terminal screenshot moment) AND compute a machine-readable twin that Phase C5
+embeds in the `FORGE:TRAJECTORY` comment for platform consumption.
 
-**Skip if**: `<!-- FORGE:SUMMARY -->` already exists on the issue (idempotency guard).
+**All stats are real — pulled from `gh`/`git`. Every lookup degrades gracefully: a missing
+value renders as `—` and NEVER aborts the card. Do NOT fabricate stats.**
 
-### Idempotency check
-```bash
-SUMMARY_EXISTS=$(gh api repos/{GH_REPO}/issues/{NUMBER}/comments \
-  --jq '[.[] | select(.body | contains("FORGE:SUMMARY"))] | length > 0' 2>/dev/null || echo "false")
-
-if [ "$SUMMARY_EXISTS" = "true" ]; then
-  echo "INFO: FORGE:SUMMARY already exists on issue #{NUMBER} — skipping Phase C4.5"
-  # → proceed to Phase C5
-fi
-```
-
-### Extract pipeline data from FORGE annotations
-
-All data is reconstructed from comments already posted during the pipeline run:
+### C4.5a: Gather real stats
 
 ```bash
-# Issue metadata
-ISSUE_TITLE=$(gh issue view {NUMBER} {GH_FLAG} --json title --jq '.title' 2>/dev/null || echo "")
-ISSUE_MILESTONE=$(gh issue view {NUMBER} {GH_FLAG} --json milestone --jq '.milestone.title // "none"' 2>/dev/null || echo "none")
+# Commit / diff stats from the merged PR (single API call). Fallbacks to "—" if absent.
+PR_STATS=$(gh pr view {PR_NUMBER} {GH_FLAG} --json commits,additions,deletions,baseRefName,isDraft 2>/dev/null)
+COMMITS=$(echo "$PR_STATS"   | jq -r '(.commits | length) // empty' 2>/dev/null); COMMITS=${COMMITS:-—}
+ADDITIONS=$(echo "$PR_STATS" | jq -r '.additions // empty' 2>/dev/null); ADDITIONS=${ADDITIONS:-—}
+DELETIONS=$(echo "$PR_STATS" | jq -r '.deletions // empty' 2>/dev/null); DELETIONS=${DELETIONS:-—}
+PR_TARGET=$(echo "$PR_STATS" | jq -r '.baseRefName // empty' 2>/dev/null); PR_TARGET=${PR_TARGET:-{PR_BASE}}
+IS_DRAFT=$(echo "$PR_STATS"  | jq -r '.isDraft // false' 2>/dev/null)
 
-# From FORGE:INVESTIGATOR
-INVESTIGATOR_BODY=$(gh api repos/{GH_REPO}/issues/{NUMBER}/comments \
-  --jq '.[] | select(.body | contains("FORGE:INVESTIGATOR")) | .body' 2>/dev/null | head -c 10000)
-VERDICT=$(echo "$INVESTIGATOR_BODY" | grep -oE '\*\*Verdict\*\*: [A-Z]+' | sed 's/\*\*Verdict\*\*: //' | head -1)
-CONFIDENCE=$(echo "$INVESTIGATOR_BODY" | grep -oE '\*\*Confidence\*\*: [A-Z]+' | sed 's/\*\*Confidence\*\*: //' | head -1)
-TASK_TYPE=$(echo "$INVESTIGATOR_BODY" | grep -oE '\*\*Task Type\*\*: [^\n]+' | sed 's/\*\*Task Type\*\*: //' | head -1)
-SEVERITY=$(echo "$INVESTIGATOR_BODY" | grep -oE '\*\*Severity\*\*: [A-Z]+' | sed 's/\*\*Severity\*\*: //' | head -1)
-
-# From FORGE:BUILDER
-BUILDER_BODY=$(gh api repos/{GH_REPO}/issues/{NUMBER}/comments \
-  --jq '.[] | select(.body | contains("FORGE:BUILDER")) | .body' 2>/dev/null | head -c 10000)
-BUILD_BRANCH=$(echo "$BUILDER_BODY" | grep -oE '\*\*Branch\*\*: `[^`]+`' | sed "s/\*\*Branch\*\*: \`//;s/\`//" | head -1)
-BUILD_COMMITS=$(echo "$BUILDER_BODY" | grep -oE '\*\*Commits\*\*: [^\n]+' | sed 's/\*\*Commits\*\*: //' | head -1)
-BUILD_FILES_CHANGED=$(echo "$BUILDER_BODY" | grep -oE '\*\*Files changed\*\*: [0-9]+' | sed 's/\*\*Files changed\*\*: //' | head -1)
-
-# Lane classification (from FORGE:CONTRACT or milestone)
-if [ "$ISSUE_MILESTONE" != "none" ] && [ -n "$ISSUE_MILESTONE" ]; then
-  LANE="Feature lane (milestone: ${ISSUE_MILESTONE})"
+# Review summary — count domain-agent verdicts posted by /review-pr on the PR.
+REVIEW_BODIES=$(gh pr view {PR_NUMBER} {GH_FLAG} --json reviews,comments \
+  --jq '[.reviews[].body // ""] + [.comments[].body // ""] | .[]' 2>/dev/null)
+# NOTE: `grep -c` already prints `0` on no match (and exits non-zero) — do NOT add
+# `|| echo 0`, which would append a second line ("0\n0") and break the arithmetic
+# and `--argjson` below. Swallow the non-zero exit with `|| true`, then default.
+APPROVED=$(echo "$REVIEW_BODIES" | grep -cE 'APPROVED:' 2>/dev/null || true); APPROVED=${APPROVED:-0}
+CHANGES=$(echo  "$REVIEW_BODIES" | grep -cE 'CHANGES REQUESTED:' 2>/dev/null || true); CHANGES=${CHANGES:-0}
+TOTAL_AGENTS=$((APPROVED + CHANGES))
+# Blockers = review-finding issues created by this PR that are still open (best-effort).
+BLOCKERS=$(echo "$REVIEW_BODIES" | grep -ciE 'blocker|merge.?block' 2>/dev/null || true); BLOCKERS=${BLOCKERS:-0}
+if [ "$TOTAL_AGENTS" -gt 0 ]; then
+  REVIEW_SUMMARY="${APPROVED}/${TOTAL_AGENTS} agents passed, ${BLOCKERS} blockers"
 else
-  LANE="Fast lane (staging)"
+  REVIEW_SUMMARY="—"   # review data unavailable (e.g. review skipped)
 fi
 
-# Review findings (from PR review comment — optional, may not exist)
-REVIEW_SUMMARY=""
-if [ -n "{PR_NUMBER}" ]; then
-  REVIEW_SUMMARY=$(gh api repos/{GH_REPO}/issues/{PR_NUMBER}/comments \
-    --jq '[.[] | select(.body | (contains("FORGE:REVIEWER") or test("APPROVED:|CHANGES REQUESTED:"; "i")))] | last | .body // ""' \
-    2>/dev/null || echo "")
-fi
-REVIEW_VERDICT=$(echo "$REVIEW_SUMMARY" | grep -oE 'Verdict: (APPROVED|CHANGES REQUESTED)' | sed 's/Verdict: //' | head -1)
-REVIEW_VERDICT="${REVIEW_VERDICT:-APPROVED}"
-FINDINGS_COUNT=$(echo "$REVIEW_SUMMARY" | grep -oE '[0-9]+ findings' | grep -oE '[0-9]+' | head -1 || echo "0")
-FINDINGS_COUNT="${FINDINGS_COUNT:-0}"
-AGENTS_RUN=$(echo "$REVIEW_SUMMARY" | grep -oE '[0-9]+ agents' | grep -oE '[0-9]+' | head -1 || echo "0")
-AGENTS_RUN="${AGENTS_RUN:-0}"
+# Elapsed wall-clock: first FORGE agent comment → now.
+FIRST_TS=$(gh api repos/{GH_REPO}/issues/{NUMBER}/comments \
+  --jq '[.[] | select(.body | contains("FORGE:")) | .created_at] | sort | .[0] // empty' 2>/dev/null)
+if [ -n "$FIRST_TS" ]; then
+  START_EPOCH=$(date -u -d "$FIRST_TS" +%s 2>/dev/null \
+    || python3 -c "import sys,datetime; ts=sys.argv[1].rstrip('Z'); print(int(datetime.datetime.fromisoformat(ts+'+00:00').timestamp()))" "$FIRST_TS" 2>/dev/null \
+    || echo "")
+  NOW_EPOCH=$(date -u +%s)
+  if [ -n "$START_EPOCH" ]; then
+    ELAPSED_SECS=$((NOW_EPOCH - START_EPOCH))
+    ELAPSED=$(printf '%dm %02ds' $((ELAPSED_SECS / 60)) $((ELAPSED_SECS % 60)))
+  else ELAPSED="—"; ELAPSED_SECS=0; fi
+else ELAPSED="—"; ELAPSED_SECS=0; fi
 
-# Quality gate result (from FORGE:BUILDER or FORGE:TRAJECTORY if already posted)
-QUALITY_GATE_RESULT=$(echo "$BUILDER_BODY" | grep -oiE 'quality gate[: ]+[a-z]+' | head -1 || echo "")
-
-# Decompose routing decision (from FORGE:INVESTIGATOR)
-DECOMPOSE=$(echo "$INVESTIGATOR_BODY" | grep -oE '\*\*(YES|NO)\*\* —[^\n]+' | sed 's/\*\*//g' | head -1)
-
-# Summary timestamp
-SUMMARY_TIMESTAMP=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+# Pipeline line + status — reflect the ACTUAL terminal state.
+#   merged    → investigate → architect → build → review → merge ✓
+#   decomposed→ investigate → decompose ⏹ (sub-issues spawned)
+#   invalid   → investigate → invalid ✗
+#   blocked   → investigate → … → blocked ⚠ (needs-human)
+#   draft PR  → append "(draft)" to the merge segment
+case "{TERMINAL_STATE}" in
+  decomposed) PIPELINE_LINE="investigate → decompose ⏹"; CARD_STATUS="decomposed" ;;
+  invalid)    PIPELINE_LINE="investigate → invalid ✗";   CARD_STATUS="invalid" ;;
+  blocked)    PIPELINE_LINE="investigate → build → blocked ⚠"; CARD_STATUS="blocked" ;;
+  *)          PIPELINE_LINE="investigate → architect → build → review → merge ✓"; CARD_STATUS="merged" ;;
+esac
+[ "$IS_DRAFT" = "true" ] && PIPELINE_LINE="${PIPELINE_LINE} (draft)"
 ```
 
-### Post FORGE:SUMMARY comment
+### C4.5b: Render the card to stdout
+
+Print the card to stdout (the calling agent surfaces it in the terminal). Card inner
+width is **51** columns. Truncate the title with an ellipsis (`…`) if `#{NUMBER} — {TITLE}`
+exceeds the field; pad shorter lines with spaces so the right border `║` stays aligned.
+
+```
+╔═══════════════════════════════════════════════════╗
+║  ForgeDock Pipeline Complete                      ║
+╠═══════════════════════════════════════════════════╣
+║                                                   ║
+║  Issue:    #{NUMBER} — {TITLE}                    ║
+║  Pipeline: {PIPELINE_LINE}                        ║
+║  Commits:  {COMMITS} ({ADDITIONS} additions, {DELETIONS} deletions) ║
+║  PR:       #{PR_NUMBER} (merged to {PR_TARGET})   ║
+║  Review:   {REVIEW_SUMMARY}                       ║
+║  Time:     {ELAPSED}                              ║
+║                                                   ║
+╚═══════════════════════════════════════════════════╝
+```
+
+**Edge-case rendering**:
+- Decomposed: title line stays; `Pipeline:` shows `investigate → decompose ⏹`; `PR:`, `Review:`, `Commits:` render `—`; the header reads `ForgeDock Pipeline — Decomposed`.
+- Invalid: header `ForgeDock Pipeline — Closed (invalid)`; `Pipeline:` shows `investigate → invalid ✗`; downstream stats `—`.
+- Blocked / needs-human: header `ForgeDock Pipeline — Blocked`; `Review:`/`PR:` reflect last known state; remaining stats `—`.
+- Draft PR: `PR:` line appends `(draft)` and the merge segment is not marked `✓`.
+
+### C4.5c: Build the machine-readable twin
+
+Assemble the JSON object below (used verbatim by Phase C5). Numeric stats that were `—`
+become `null` in JSON; never emit `"—"` as a number.
 
 ```bash
-gh issue comment {NUMBER} {GH_FLAG} --body "<!-- FORGE:SUMMARY -->
-## Pipeline Run Summary — #${NUMBER}: ${ISSUE_TITLE}
-
-> Generated at **${SUMMARY_TIMESTAMP}** | [View PR #${PR_NUMBER}](https://github.com/{GH_REPO}/pull/${PR_NUMBER}) | [View Issue](https://github.com/{GH_REPO}/issues/${NUMBER})
-
----
-
-### Pipeline Overview
-
-| Field | Value |
-|-------|-------|
-| **Issue** | #${NUMBER} — ${ISSUE_TITLE} |
-| **Lane** | ${LANE} |
-| **PR** | #${PR_NUMBER} → \`{PR_BASE}\` |
-| **Branch** | \`${BUILD_BRANCH:-{BRANCH}}\` |
-| **Terminal state** | \`workflow:merged\` |
-
----
-
-### Agent Decisions
-
-| Decision Point | Outcome |
-|---------------|---------|
-| **Lane classification** | ${LANE} |
-| **Investigation verdict** | ${VERDICT:-—} (${CONFIDENCE:-—} confidence, severity: ${SEVERITY:-—}) |
-| **Task type** | ${TASK_TYPE:-—} |
-| **Decompose routing** | ${DECOMPOSE:-NO — single-concern change} |
-| **Review verdict** | ${REVIEW_VERDICT} (${AGENTS_RUN} agents, ${FINDINGS_COUNT} finding(s) created) |
-
----
-
-### Build Summary
-
-| Field | Value |
-|-------|-------|
-| **Branch** | \`${BUILD_BRANCH:-{BRANCH}}\` |
-| **Commits** | ${BUILD_COMMITS:-—} |
-| **Files changed** | ${BUILD_FILES_CHANGED:-—} |
-| **Quality gate** | ${QUALITY_GATE_RESULT:-see trajectory} |
-
----
-
-### Review Findings
-
-$(if [ -n "$REVIEW_SUMMARY" ] && [ "$FINDINGS_COUNT" != "0" ]; then
-  echo "${FINDINGS_COUNT} finding(s) created during review by ${AGENTS_RUN} agents. Each finding was filed as a separate issue for traceability."
-else
-  echo "No review findings created (${AGENTS_RUN} agents run, 0 findings)."
-fi)
-
----
-
-### What Was Not Captured
-
-- **Token usage**: Not available — Claude Code does not expose per-session token counts via API during pipeline execution.
-- **Phase durations**: FORGE annotations do not include machine-readable start/end timestamps. Use \`/replay ${NUMBER}\` for chronological annotation display.
-
----
-
-*Generated by ForgeDock \`/work-on\` Phase C4.5. Full pipeline trace: \`FORGE:TRAJECTORY\` comment on this issue. Queryable artifact: \`FORGE:DECISION_RECORD\` on PR #${PR_NUMBER}.*"
+CARD_JSON=$(jq -nc \
+  --argjson issue {NUMBER} \
+  --arg title "{TITLE}" \
+  --arg status "$CARD_STATUS" \
+  --arg pipeline "$PIPELINE_LINE" \
+  --arg pr "{PR_NUMBER}" \
+  --arg target "$PR_TARGET" \
+  --arg commits "$COMMITS" --arg adds "$ADDITIONS" --arg dels "$DELETIONS" \
+  --arg review "$REVIEW_SUMMARY" --argjson blockers "${BLOCKERS:-0}" \
+  --argjson elapsed "${ELAPSED_SECS:-0}" \
+  '{issue:$issue, title:$title, status:$status, pipeline:$pipeline,
+    pr:($pr|tonumber? // null), pr_target:$target,
+    commits:($commits|tonumber? // null),
+    additions:($adds|tonumber? // null),
+    deletions:($dels|tonumber? // null),
+    review:$review, blockers:$blockers, elapsed_seconds:$elapsed}')
 ```
-
-### Optional: Write local report file
-
-**Skip if**: `forge.yaml → reports.save_local` is not set to `true`.
-
-```bash
-# Read forge.yaml using FORGE_CONFIG env override (never hardcode path)
-CONFIG_FILE="${FORGE_CONFIG:-forge.yaml}"
-SAVE_LOCAL=""
-if command -v yq >/dev/null 2>&1 && [ -f "$CONFIG_FILE" ]; then
-  SAVE_LOCAL=$(yq '.reports.save_local // ""' "$CONFIG_FILE" 2>/dev/null || echo "")
-fi
-
-if [ "$SAVE_LOCAL" = "true" ]; then
-  REPORTS_DIR="${REPO_PATH}/.forgedock/reports"
-  mkdir -p "$REPORTS_DIR"
-  REPORT_FILE="${REPORTS_DIR}/${NUMBER}.md"
-
-  cat > "$REPORT_FILE" << REPORT_CONTENT_EOF
-# Pipeline Run Report — Issue #${NUMBER}
-
-**Title**: ${ISSUE_TITLE}
-**Generated**: ${SUMMARY_TIMESTAMP}
-**Lane**: ${LANE}
-**PR**: #${PR_NUMBER} → \`{PR_BASE}\`
-**Branch**: \`${BUILD_BRANCH:-{BRANCH}}\`
-**Terminal state**: \`workflow:merged\`
-
-## Agent Decisions
-
-| Decision | Outcome |
-|----------|---------|
-| Investigation verdict | ${VERDICT:-—} (${CONFIDENCE:-—} confidence) |
-| Severity | ${SEVERITY:-—} |
-| Task type | ${TASK_TYPE:-—} |
-| Decompose routing | ${DECOMPOSE:-NO — single-concern change} |
-| Review verdict | ${REVIEW_VERDICT} |
-
-## Build Summary
-
-- **Commits**: ${BUILD_COMMITS:-—}
-- **Files changed**: ${BUILD_FILES_CHANGED:-—}
-- **Quality gate**: ${QUALITY_GATE_RESULT:-see trajectory}
-
-## Review
-
-- **Agents run**: ${AGENTS_RUN}
-- **Findings created**: ${FINDINGS_COUNT}
-
-## Links
-
-- Issue: https://github.com/{GH_REPO}/issues/${NUMBER}
-- PR: https://github.com/{GH_REPO}/pull/${PR_NUMBER}
-REPORT_CONTENT_EOF
-
-  echo "Local report saved: ${REPORT_FILE}"
-else
-  echo "INFO: reports.save_local not set — skipping local file write"
-  echo "      To enable: add 'reports:\n  save_local: true' to forge.yaml"
-fi
-```
-
-<!-- Added: forge#951 -->
 
 ---
 
 ## Phase C5: Trajectory Log (MANDATORY)
 
 Post the `<!-- FORGE:TRAJECTORY -->` comment as the final pipeline record:
-
-**Before posting, read the attribution config**:
-```bash
-SHOW_ATTRIBUTION=$(yq '.branding.show_attribution // "true"' forge.yaml 2>/dev/null || echo "true")
-[ "$SHOW_ATTRIBUTION" = "false" ] && ATTRIBUTION_LINE="" || ATTRIBUTION_LINE="
-> Pipeline powered by [ForgeDock](https://github.com/RapierCraftStudios/ForgeDock)"
-```
 
 ```bash
 gh issue comment {NUMBER} {GH_FLAG} --body "<!-- FORGE:TRAJECTORY -->
@@ -515,14 +429,145 @@ gh issue comment {NUMBER} {GH_FLAG} --body "<!-- FORGE:TRAJECTORY -->
 **Anomalies**: None
 
 **Pipeline completed**: {TIMESTAMP}
-${ATTRIBUTION_LINE}"
+
+<!-- FORGE:CARD ${CARD_JSON} -->"
 ```
+
+The `<!-- FORGE:CARD {...} -->` block carries the machine-readable summary computed in
+Phase C4.5c. It is wrapped in an HTML comment so it stays hidden in GitHub's rendered view
+(keeping the trajectory comment clean) while remaining greppable in the raw body for platform
+consumption — `/orchestrate` reads it to build per-issue cards. This block is **additive**:
+all existing `FORGE:TRAJECTORY` consumers select via `contains("FORGE:TRAJECTORY")` and parse
+the markdown table, so the embedded JSON does not affect them.
 
 Where:
 - `{PARENT_STATUS}` = `⏭ Skipped` (if no parent) or `✅ Complete` (if parent updated)
 - `{PARENT_NOTES}` = `No parent tracker` or `Checked off in #{PARENT_REF}`
 - `{CLEANUP_STATUS}` = `✅ Removed` (worktree removed + branch deleted) or `⏭ Skipped` (no path provided or path not found)
 - `{TIMESTAMP}` = current date/time in ISO format
+
+---
+
+## Phase C5.2: Memory Index Update <!-- Added: forge#1316 -->
+
+**Goal**: Append this run's learnings to the per-repo memory index so future `investigate` runs can retrieve relevant priors. This is the write side of the compounding intelligence loop.
+
+**This phase is non-blocking** — if Gist creation or update fails, log the reason and continue to Phase C5.5. Never stall close for memory.
+
+**Skip if**: Terminal state is `INVALID` (nothing useful to learn from an invalid issue) OR `<!-- FORGE:TRAJECTORY -->` was already posted AND `<!-- FORGE:MEMORY_INDEXED -->` comment exists on the issue (idempotency guard).
+
+### Step 1: Compose memory entry
+
+Extract key fields from the pipeline:
+
+```bash
+ROOT_CAUSE=$(gh api repos/{GH_REPO}/issues/{NUMBER}/comments \
+  --jq '.[] | select(.body | contains("FORGE:INVESTIGATOR")) | .body' \
+  | sed -n '/### Root Cause/{n;p;q}' | head -1 | cut -c1-120)
+
+AFFECTED_FILES_BRIEF=$(gh api repos/{GH_REPO}/issues/{NUMBER}/comments \
+  --jq '.[] | select(.body | contains("FORGE:INVESTIGATOR")) | .body' \
+  | sed -n '/### Affected Files/{n;p;q}' | head -1 | cut -c1-120)
+
+DOMAIN_TAGS=$(gh issue view {NUMBER} {GH_FLAG} --json labels \
+  --jq '[.labels[].name | select(test("^(auth|billing|database|security|payments|gdpr|perf|ui|api|config)"))] | join(",")' 2>/dev/null || echo "")
+
+MEMORY_TIMESTAMP=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+
+MEMORY_ENTRY="MEMORY_ENTRY: issue={NUMBER} title=\"{TITLE}\" domain=\"${DOMAIN_TAGS}\" root_cause=\"${ROOT_CAUSE}\" outcome=\"${CARD_STATUS}\" files=\"${AFFECTED_FILES_BRIEF}\" lesson=\"${ROOT_CAUSE}\" timestamp=${MEMORY_TIMESTAMP}"
+```
+
+### Step 2: Find or create the memory index Gist
+
+```bash
+MEMORY_INDEX_ID=$(gh gist list --limit 100 \
+  --jq '.[] | select(.description | contains("FORGE:MEMORY_INDEX: {GH_REPO}")) | .id' 2>/dev/null | head -1)
+
+if [ -z "$MEMORY_INDEX_ID" ]; then
+  # First run — create the index Gist
+  TMPFILE=$(mktemp --suffix=.md)
+  cat > "$TMPFILE" <<GIST_EOF
+# ForgeDock Memory Index — {GH_REPO}
+<!-- FORGE:MEMORY_INDEX: {GH_REPO} -->
+Generated by ForgeDock close phase. Each line is a prior pipeline run.
+
+${MEMORY_ENTRY}
+GIST_EOF
+  # Memory gists MUST be secret — never pass --public here (forge#1587).
+  # The entry content below embeds real issue titles, root causes, and file
+  # paths; for a private consumer repo, --public would publish that content
+  # to a world-readable Gist. `gh gist create` is secret by default, so
+  # simply omitting --public is sufficient — the read side (investigate.md
+  # Phase 0.5, via `gh gist view`/`gh gist list`) works unchanged against
+  # secret gists for the authenticated owner.
+  MEMORY_INDEX_URL=$(gh gist create "$TMPFILE" \
+    --desc "FORGE:MEMORY_INDEX: {GH_REPO} — per-codebase learning index" \
+    2>/dev/null | head -1)
+  MEMORY_INDEX_ID=$(echo "$MEMORY_INDEX_URL" | sed 's|.*/||')
+  rm -f "$TMPFILE"
+  echo "[MEMORY] Created memory index Gist: ${MEMORY_INDEX_URL}"
+else
+  # Append to existing index
+  EXISTING_CONTENT=$(gh gist view "$MEMORY_INDEX_ID" 2>/dev/null)
+  UPDATED_CONTENT="${EXISTING_CONTENT}
+${MEMORY_ENTRY}"
+  INDEX_FILENAME=$(gh api gists/${MEMORY_INDEX_ID} --jq '.files | keys[0]' 2>/dev/null)
+  INDEX_FILENAME="${INDEX_FILENAME:-memory_index.md}"
+  TMPFILE=$(mktemp --suffix=.md)
+  echo "$UPDATED_CONTENT" > "$TMPFILE"
+  gh gist edit "$MEMORY_INDEX_ID" -f "$INDEX_FILENAME" "$TMPFILE" 2>/dev/null
+  EDIT_EXIT=$?
+  rm -f "$TMPFILE"
+  MEMORY_INDEX_URL="https://gist.github.com/${MEMORY_INDEX_ID}"
+  if [ $EDIT_EXIT -eq 0 ]; then
+    echo "[MEMORY] Appended to memory index: ${MEMORY_INDEX_URL}"
+  else
+    echo "WARNING: Failed to update memory index — run will not be persisted"
+    MEMORY_INDEX_URL=""
+  fi
+fi
+```
+
+### Migration: replacing an existing public memory-index Gist
+
+GitHub does not support flipping a Gist's visibility from public to secret in place. If you find an existing `FORGE:MEMORY_INDEX: {GH_REPO}` Gist that is **public** (check with `gh api gists/${MEMORY_INDEX_ID} --jq '.public'`), replace it:
+
+```bash
+# The gist ID here is the same one found by the FORGE:MEMORY_INDEX search above.
+OLD_PUBLIC_GIST_ID="$MEMORY_INDEX_ID"
+
+# 1. Save the existing content so no learnings are lost — and verify the save
+#    succeeded BEFORE deleting anything.
+gh gist view "$OLD_PUBLIC_GIST_ID" > /tmp/memory_index_migrate.md
+if [ ! -s /tmp/memory_index_migrate.md ]; then
+  echo "ABORT: failed to save gist content — not deleting the public gist." >&2
+  exit 1
+fi
+
+# 2. Delete the public gist (removes the world-readable copy)
+gh gist delete "$OLD_PUBLIC_GIST_ID" --yes
+
+# 3. Recreate it secret (no --public) with the same description tag so the
+#    next close/investigate run finds it via the FORGE:MEMORY_INDEX search
+gh gist create /tmp/memory_index_migrate.md \
+  --desc "FORGE:MEMORY_INDEX: {GH_REPO} — per-codebase learning index"
+```
+
+This is a one-time manual step per affected repo — Phase C5.2 itself only ever creates the index once (Step 2's `if [ -z "$MEMORY_INDEX_ID" ]` branch) and appends afterward, so a stale public gist is never auto-recreated secret on its own.
+
+### Step 3: Post audit annotation on the issue
+
+```bash
+if [ -n "$MEMORY_INDEX_URL" ]; then
+  gh issue comment {NUMBER} {GH_FLAG} --body "<!-- FORGE:MEMORY_INDEXED -->
+This run has been indexed in the per-repo memory: ${MEMORY_INDEX_URL}
+
+Future \`investigate\` runs on \`{GH_REPO}\` will retrieve this entry as a prior when working on related issues.
+
+<!-- FORGE:MEMORY_INDEXED:COMPLETE -->"
+  echo "[MEMORY] Indexed issue #{NUMBER} into memory at: ${MEMORY_INDEX_URL}"
+fi
+```
 
 ---
 
@@ -659,7 +704,7 @@ CLOSE_RESULT:
   parent_closed: {true|false}
 ```
 
-Where `PHASE_COMPLETE` means the current phase was closed but uncompleted phases remain — the issue is left OPEN for the router to re-evaluate on the next pipeline iteration (state 10, MULTI_PHASE).
+Where `PHASE_COMPLETE` means the current phase was closed but uncompleted phases remain — the issue is left OPEN for work-on.md to re-evaluate on the next invocation (via Universal continuation rule: re-read labels, check terminal state, continue to next phase).
 
 ---
 

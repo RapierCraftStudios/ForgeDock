@@ -10,7 +10,7 @@
 #   # Add forge.yaml to your .gitignore if it contains sensitive paths
 #
 # Required sections: project, paths, branches
-# Optional sections: repos, project_board, services, review, verification, deploy, billing, devdocs, adaptive_scripts, learned, marketing
+# Optional sections: repos, project_board, services, review, verification, deploy, billing, devdocs, adaptive_scripts, learned, attribution
 
 # =============================================================================
 # PROJECT (REQUIRED)
@@ -130,24 +130,6 @@ branches:
 #       # /security-audit against this satellite repo. Mirrors the top-level
 #       # billing.enabled flag but scoped per-satellite.
 #       # billing_enabled: false
-#
-#       # Cross-repo trigger fields (declarative — runtime support via GitHub Actions):
-#
-#       # Fire a cross-repo trigger when a PR merges in THIS (parent) repo touching
-#       # paths listed in trigger_paths. Set false to disable triggering for this satellite.
-#       # trigger_on_merge: true
-#
-#       # Path globs that constrain when the trigger fires. Uses GitHub Actions glob syntax
-#       # (same as `on: push: paths:`). The trigger fires only when at least one changed
-#       # file matches a pattern in this list. Omit to trigger on every merge.
-#       # trigger_paths:
-#       #   - "src/api/**"
-#       #   - "types/**"
-#
-#       # Set true to automatically invoke /work-on on the satellite issue when the trigger
-#       # fires. Requires a running Claude Code session with ForgeDock installed in the
-#       # satellite repo. Advanced opt-in — leave false unless you have a persistent session.
-#       # auto_run: false
 #
 #     # Monorepo satellite: multiple packages in a single repo.
 #     # Use subpaths to name each package root relative to local_path.
@@ -302,11 +284,25 @@ branches:
 #     Deploy: blue/green via Docker Compose on a single VPS behind Traefik.
 #     Database: PostgreSQL with async SQLAlchemy. No ORM migrations — raw SQL.
 #
-#   # Domain-specific review notes (keyed by review-pr-agents domain)
+#   # Domain-specific review notes (keyed by review-pr-agents domain).
+#   # Each key injects free-text context into the matching review agent's [DOMAIN_CONTEXT].
+#   # If a key is absent, the agent falls back to generic checks without project conventions.
+#   #
+#   # Special gating rule: the `scraping` key also GATES the Scraper agent — the agent
+#   # only spawns when this key is present. Projects using Playwright for E2E tests only
+#   # (no web-scraping domain) must NOT set this key.
 #   domains:
-#     billing: "Stripe webhooks; idempotency keys required on all handlers"
-#     auth: "JWT + refresh token rotation; sessions stored in Redis"
-#     database: "Always use docker exec <container> for psql/migrations"
+#     auth: "JWT + refresh token rotation; sessions stored in Redis; all admin endpoints require ADMIN_SECRET"
+#     billing: "Stripe webhooks; idempotency keys required on all handlers; reconciliation in worker/reconcile.py"
+#     concurrency: "Redis for distributed locks; use with_for_update() on all balance reads; job queue is Celery"
+#     database: "Always use docker exec <container> for psql/migrations; Alembic for schema versioning"
+#     infra: "Blue/green deploy via Docker Compose; deploy workflow: .github/workflows/deploy.yml; secrets via SOPS"
+#     frontend: "Next.js 15 App Router; shadcn/ui components; all server actions must validate auth"
+#     security: "Internal services reachable at 10.0.0.x; Redis not firewalled from workers"
+#     api: "FastAPI; all routers registered in app/main.py; Pydantic v2 for validation"
+#     # scraping: "Browser pool in worker/browser/pool.py; tier escalation in worker/consumers/scrape.py"
+#     # ^^^ Uncomment scraping only if this project has a web-scraping domain.
+#     # ^^^ Leaving it commented out prevents the Scraper agent from spawning on Playwright E2E PRs.
 #
 #   # Domain-to-file mapping used by /work-on investigation and /review-pr agents
 #   # to quickly locate relevant files for a given issue domain.
@@ -322,7 +318,7 @@ branches:
 #   # These drive /qa-sweep page discovery, /deploy-info file categorization,
 #   # /orchestrate high-fan-in detection, /review-pr route-registration checks,
 #   # and the verify-route-registration.sh script. All values are relative to
-#   # the repository root. Defaults match the AlterLab monorepo layout — set
+#   # the repository root. Defaults match the example monorepo layout — set
 #   # these if your project uses a different directory structure.
 #   #
 #   # layout:
@@ -445,6 +441,41 @@ branches:
 #   #     typecheck: ""
 #   #     test: "cargo test"
 #   #     build: "cargo build"
+#
+#   # Integration test suites run by /test-gate against the provisioned cluster.
+#   # Each entry specifies a logical cluster (matched to test_services), the shell
+#   # command to execute, and the working directory (relative to project root).
+#   # Used by: test-gate (Phase 3 — Provision + Phase 4 — Fan out)
+#   #
+#   # integration_tests:
+#   #   - cluster: "api"
+#   #     command: "pytest tests/integration/ -q --tb=short"
+#   #     working_dir: "."
+#   #   - cluster: "worker"
+#   #     command: "pytest tests/worker/ -q --tb=short"
+#   #     working_dir: "."
+#
+#   # Maps logical cluster names (from integration_tests[].cluster) to running
+#   # container names. /test-gate uses these to verify the cluster is live before
+#   # executing the test command. Omit entries for clusters that do not use Docker.
+#   # Used by: test-gate (Phase 3 — Provision)
+#   #
+#   # test_services:
+#   #   api: "acme-api-blue"
+#   #   worker: "acme-worker-blue"
+#
+#   # Controls /test-gate posture at the staging-to-main deploy boundary.
+#   # posture:
+#   #   blocking  — a BLOCK verdict prevents the merge (override_phrase bypasses).
+#   #   advisory  — a BLOCK verdict is surfaced in the summary but does not block.
+#   # override_phrase — exact string an operator must include in a PR comment to
+#   #   bypass a blocking BLOCK verdict (mirrors the Phase 0A open-finding gate).
+#   # Defaults: posture: "blocking", override_phrase as shown below.
+#   # Used by: test-gate (Phase 7 — Verdict), review-pr-staging (Phase 6.5)
+#   #
+#   # test_gate:
+#   #   posture: "blocking"
+#   #   override_phrase: "OVERRIDE: shipping with test failures —"
 
 # =============================================================================
 # DEPLOY (OPTIONAL)
@@ -600,111 +631,68 @@ branches:
 #   captured_by: "work-on/667"           # command + issue number that wrote it
 
 # =============================================================================
-# MARKETING (OPTIONAL)
-# Controls opt-in growth features such as 'Powered by ForgeDock' footers on
-# PR descriptions created by the pipeline.
-# Commands: work-on (Phase 4 PR creation — when pr_footer is true)
-# NOTE: pr_footer injection requires future pipeline support. Set to true
-# to opt in once that support ships. Defaults to false (no-op).
+# INDEX (OPTIONAL)
+# Per-commit code index configuration for scripts/code-index.sh.
+# When configured, agents query a deterministic symbol index and import graph
+# instead of re-scanning the repo from scratch on every investigation, architect,
+# and review run. Index is cached by HEAD SHA — zero cost on unchanged HEAD.
+#
+# Commands that use the index: work-on:investigate, work-on/build/architect,
+#                              review-pr (domain agent context injection)
 # =============================================================================
 
-# marketing:
-#   # When true, the pipeline appends a small 'Powered by ForgeDock' footer to
-#   # every PR description it creates. Opt-in only — set false to disable.
-#   # This is a one-line footer link, not a banner. Example:
-#   #   ---
-#   #   *Powered by [ForgeDock](https://github.com/RapierCraftStudios/ForgeDock)*
-#   pr_footer: false
+# index:
+#   # Languages to extract symbols from. Passed to ctags --languages= flag.
+#   # Omit to let ctags auto-detect. Example: Python, JavaScript, TypeScript, Go, Rust
+#   # languages: "Python,JavaScript,TypeScript,Go"
+#
+#   # Glob patterns to exclude from indexing (relative to repo root).
+#   # Added to the find/ctags exclude list alongside built-in defaults
+#   # (.git, node_modules, __pycache__, .forge).
+#   # exclude:
+#   #   - "vendor/**"
+#   #   - "dist/**"
+#   #   - "**/*.min.js"
+#
+#   # Directory where the index cache is stored, relative to the project root.
+#   # Default: ".forge/index" — gitignored by default (add .forge/ to .gitignore).
+#   # Set to an absolute path to share the cache across multiple worktrees.
+#   # cache_dir: ".forge/index"
+#
+#   # When true, the index is rebuilt automatically at the start of each
+#   # investigation/architect/review run (cache-hit on unchanged HEAD = instant).
+#   # When false, agents skip index queries and use grep exploration.
+#   # Default: true
+#   # enabled: true
 
 # =============================================================================
-# UPGRADE_DEPS (OPTIONAL)
-# Controls /upgrade-deps — the autonomous dependency upgrade pipeline.
-# /upgrade-deps detects outdated packages (npm, pip, cargo), creates GitHub
-# issues for eligible upgrades, and optionally runs /work-on on each so every
-# upgrade is investigated, tested, reviewed, and merged — not blindly bumped.
-# Commands: upgrade-deps
+# ATTRIBUTION (OPTIONAL)
+# Opt-in growth features: pipeline-created PRs and visible FORGE annotation
+# comments can carry a small attribution link back to ForgeDock.
+# This is the "Dependabot/Renovate/CodeRabbit" growth mechanic — consentful
+# and fully opt-out. Recommended default: both keys true for public repos,
+# both false for private repos.
+#
+# Commands: work-on/review (PR footer), review-pr (summary comment footer),
+#           work-on/investigate + review-pr agents (annotation link)
+#
+# Scope: PR body and visible comments only. Commits and machine-readable
+# HTML annotation comments (<!-- FORGE:... -->) are NEVER modified.
 # =============================================================================
 
-# upgrade_deps:
-#   # Ecosystems to check for outdated packages.
-#   # Supported: "npm", "pip", "cargo" (cargo requires: cargo install cargo-outdated)
-#   # Default: ["npm"]
-#   ecosystems:
-#     - npm
-#     # - pip
-#     # - cargo
+# attribution:
+#   # When true, every pipeline-created PR ends with exactly one muted footer:
+#   #   > Orchestrated with [ForgeDock](https://github.com/RapierCraftStudios/ForgeDock)
+#   #   > — state, scheduling, review, and memory on GitHub.
+#   # Posted once at PR creation — never duplicated on edits or retries.
+#   # Opt-out: set to false or omit this key.
+#   # Recommended: true for public repos, false for private repos.
+#   pr_footer: true
 #
-#   # Whether to create issues for major version upgrades (default: false).
-#   # Major upgrades carry breaking-change risk — review manually before enabling.
-#   # When false, major upgrades appear in the summary report for human review only.
-#   allow_major: false
-#
-#   # Packages to never auto-upgrade (excluded from issue creation and /work-on).
-#   # Use for intentional version pins or packages with known breaking changes.
-#   exclude:
-#     # - "some-legacy-package"   # pinned at 1.x for compatibility
-#     # - "internal-fork"         # forked version, do not auto-bump
-#
-#   # How many patch packages to group into one batch issue when --batch is used.
-#   # Batching reduces issue noise for low-risk patch bumps.
-#   # Default: 5
-#   issue_batch_size: 5
-
-# =============================================================================
-# COMMUNITY (OPTIONAL)
-# Controls automated contributor onboarding in PR comments.
-# When a first-time contributor opens a PR, /review-pr detects that they have
-# no prior merged PRs and (when enabled) posts a welcome comment with:
-#   - a greeting and project name
-#   - key repo conventions (DCO sign-off, commit style, issue tracking)
-#   - a link to the contributing guide
-#   - an explanation of what the automated review pipeline does
-#
-# Detection: gh pr list --author "$PR_AUTHOR" --state merged --limit 1
-# If the result is empty → first-time contributor → welcome comment is posted.
-#
-# Commands: review-pr (Phase 9 — new contributor welcome)
-# =============================================================================
-
-# community:
-#   # When true (default), /review-pr posts a welcome comment for first-time contributors.
-#   # Set to false to disable the welcome comment entirely.
-#   welcome_new_contributors: true
-#
-#   # Path or URL to the contributing guide linked in the welcome comment.
-#   # Relative paths resolve from the repo root (GitHub renders CONTRIBUTING.md as a link).
-#   # Default: "CONTRIBUTING.md"
-#   contributing_url: "CONTRIBUTING.md"
-#
-#   # Optional: custom conventions block to include in the welcome comment.
-#   # Replaces the default DCO + conventional-commits conventions text.
-#   # Use a YAML literal block scalar (|) to preserve line breaks.
-#   # If omitted, the default conventions text is used.
-#   # conventions: |
-#   #   - Conventional commits: fix(scope):, feat(scope):, refactor(scope):
-#   #   - Sign off commits with git commit -s (DCO required)
-#   #   - Open a GitHub issue before fixing a bug inline
-
-# =============================================================================
-# BRANDING (OPTIONAL)
-# Controls attribution in FORGE annotation comments posted to GitHub issues
-# and PRs by pipeline commands (FORGE:INVESTIGATOR, FORGE:BUILDER,
-# FORGE:CONTRACT, FORGE:TRAJECTORY, FORGE:DECOMPOSED, etc.).
-#
-# When show_attribution is true (the default), each annotation comment ends
-# with a one-line footer:
-#   > Pipeline powered by [ForgeDock](https://github.com/RapierCraftStudios/ForgeDock)
-#
-# This follows the pattern established by Dependabot, Renovate, and other
-# GitHub-integrated tools that include a small attribution in automated
-# comments. It helps new users discover the tooling while remaining
-# unobtrusive. Set to false to suppress the attribution entirely.
-#
-# Commands: work-on (all phases that post FORGE: annotation comments)
-# =============================================================================
-
-# branding:
-#   # When true (default), annotation comments posted by the pipeline include a
-#   # one-line attribution footer linking back to ForgeDock. Set to false to
-#   # suppress the attribution entirely.
-#   show_attribution: true
+#   # When true, visible (human-readable) FORGE annotation comments — the ones
+#   # displayed in the GitHub UI — carry a small "Pipeline powered by ForgeDock"
+#   # link at the end. Machine-readable <!-- FORGE:... --> HTML comments are
+#   # never modified regardless of this setting.
+#   # Opt-out: set to false or omit this key.
+#   # Recommended: true for public repos, false for private repos.
+#   annotation_link: true

@@ -22,7 +22,7 @@ export default defineConfig({
     nav: [
       { text: 'Quick Start', link: '/getting-started' },
       { text: 'Commands', link: '/command-reference' },
-      { text: 'Configuration', link: '/configuration' },
+      { text: 'Annotations', link: '/annotations-explained' },
       {
         text: 'GitHub',
         link: 'https://github.com/RapierCraftStudios/ForgeDock',
@@ -35,15 +35,16 @@ export default defineConfig({
         items: [
           { text: 'Quick Start', link: '/getting-started' },
           { text: 'How It Works', link: '/how-it-works' },
+          { text: 'Troubleshooting', link: '/troubleshooting' },
         ],
       },
       {
         text: 'Reference',
         items: [
           { text: 'Command Reference', link: '/command-reference' },
-          { text: 'Configuration (forge.yaml)', link: '/configuration' },
-          { text: 'Architecture', link: '/architecture' },
+          { text: 'Command Learning Path', link: '/command-learning-path' },
           { text: 'FORGE Annotation Protocol', link: '/forge-annotation-protocol' },
+          { text: 'Annotations Explained', link: '/annotations-explained' },
         ],
       },
       {
