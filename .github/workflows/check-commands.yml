@@ -80,7 +80,7 @@ jobs:
           # - 'EMEMO_EOF' — exact uppercase heredoc token; no false positives expected
           # - 'is_byop'   — exact token; no false positives expected
           # - 'byop_discount' — exact token; no false positives expected
-          MATCHES=$(grep -rniP '\balterlab\b|\bememo\b|EMEMO_EOF|\bis_byop\b|\bbyop_discount\b' commands/ \
+          MATCHES=$(grep -rniE '\balterlab\b|\bememo\b|EMEMO_EOF|\bis_byop\b|\bbyop_discount\b' commands/ \
             --include='*.md' \
             | grep -v '<!-- allowlist:' \
             || true)
@@ -92,3 +92,36 @@ jobs:
             exit 1
           fi
           echo "OK: No banned tokens found in commands/"
+
+  portability-lint:
+    name: Shell portability lint (no grep -P in specs)
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Check commands/ for non-portable grep -P / grep -oP patterns
+        run: |
+          # Fail if any command spec contains grep -P or grep -oP (GNU-only PCRE).
+          # macOS BSD grep does not support -P; these patterns cause silent empty-variable
+          # failures on any non-GNU platform. Use grep -E / grep -oE + sed instead.
+          #
+          # Exclusions:
+          # - Lines containing '<!-- allowlist:' are intentionally exempted.
+          # - This check itself uses only grep -E (portable).
+          #
+          # Pattern rationale: match 'grep' followed by optional flags ending in P,
+          # or 'grep -oP' / 'grep -P' directly. Word boundary via space/quote context.
+          MATCHES=$(grep -rnE "grep\s+-[a-zA-Z]*P[ '\"]|grep\s+-oP[ '\"]|grep\s+-P[ '\"]" commands/ \
+            --include='*.md' \
+            | grep -v '<!-- allowlist:' \
+            || true)
+          if [ -n "$MATCHES" ]; then
+            echo "ERROR: Non-portable grep -P / grep -oP found in commands/:"
+            echo "$MATCHES"
+            echo ""
+            echo "Replace with grep -E / grep -oE + sed for portable extraction."
+            echo "BSD grep (macOS) does not support -P (PCRE). See #786, #811, #1179."
+            exit 1
+          fi
+          echo "OK: No grep -P / grep -oP patterns found in commands/"

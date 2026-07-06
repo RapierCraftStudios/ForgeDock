@@ -359,9 +359,15 @@ fi
 Detect new env vars:
 ```bash
 cd {WORKTREE_PATH}
-git diff HEAD~1 -- {CHANGED_FILES} | grep -oP '(?<=os\.environ\[")[^"]+|(?<=os\.getenv\()["\']?[A-Z_]+' | sort -u
-# Also check TypeScript:
-git diff HEAD~1 -- {CHANGED_FILES} | grep -oP 'process\.env\.\K[A-Z_]+' | sort -u
+# Portable (POSIX ERE) — no grep -P / PCRE lookbehind required
+git diff HEAD~1 -- {CHANGED_FILES} \
+  | grep -oE 'os\.environ\["[A-Z_]+"[^"]*|os\.getenv\(["\'"'"']?[A-Z_]+' \
+  | sed "s/os\.environ\[\"//;s/os\.getenv(['\"]*//" \
+  | grep -oE '^[A-Z_]+' | sort -u
+# Also check TypeScript (portable):
+git diff HEAD~1 -- {CHANGED_FILES} \
+  | grep -oE 'process\.env\.[A-Z_]+' \
+  | sed 's/process\.env\.//' | sort -u
 ```
 
 For each new env var found, verify it is present in ALL required locations:
