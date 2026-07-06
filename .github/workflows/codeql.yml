@@ -28,7 +28,9 @@ on:
     - cron: "30 3 * * 1"
 
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
+  # Include event_name so a scheduled run and a push-to-main run (both resolve
+  # github.ref to refs/heads/main) do not share a group and cancel each other.
+  group: ${{ github.workflow }}-${{ github.event_name }}-${{ github.ref }}
   cancel-in-progress: true
 
 permissions:

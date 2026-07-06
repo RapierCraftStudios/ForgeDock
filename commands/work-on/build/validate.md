@@ -319,7 +319,11 @@ else
     # own always-present "errors":[] key even with zero findings). Kept identical to
     # quality-gate.md's default so the two files never diverge on what blocks.
     SEVERITY_PATTERN=$(yq '.verification.security_scan.blocking_severity_pattern // "(severity|level)[^a-zA-Z0-9]{0,6}(CRITICAL|HIGH|ERROR)"' forge.yaml 2>/dev/null || echo '(severity|level)[^a-zA-Z0-9]{0,6}(CRITICAL|HIGH|ERROR)')
-    SCAN_OUTPUT=$(eval "$SCAN_CMD" "${CHANGED_FILES_ARR[@]}" 2>&1)
+    # SECURITY: array expansion is single-quoted so eval re-parses only the trusted $SCAN_CMD,
+    # never the (attacker-controllable) file paths — see quality-gate.md Step 2W for the full
+    # rationale. `eval "$SCAN_CMD" "${ARR[@]}"` would re-parse a filename like `$(rm -rf x).py`
+    # as shell; the quoted-suffix form keeps each path a literal argv element.
+    SCAN_OUTPUT=$(eval "$SCAN_CMD"' "${CHANGED_FILES_ARR[@]}"' 2>&1)
     SCAN_EXIT=$?
     if [ "$SCAN_EXIT" -gt 1 ]; then
         echo "SECURITY SCAN ERROR (exit $SCAN_EXIT, execution failure not a findings-exit): $SCAN_CMD"
@@ -554,11 +558,12 @@ VALIDATE_RESULT:
                             # V2. Non-empty means gate_passed: false. <!-- Added: forge#1606 -->
   security_scan_findings: []  # empty when the SEC-EXEC grep found nothing AND the configured
                             # verification.security_scan.command (if any) reported no findings
-                            # at/above blocking_severity_pattern; populated with "SEC_EXEC" and/or
-                            # "SECURITY_SCAN" entries otherwise — from SEC_EXEC_FINDINGS /
-                            # SECURITY_SCAN_FINDINGS in Phase V2. Non-empty means gate_passed: false.
-                            # Empty (not absent) when no scanner is configured — that is a SKIPPED
-                            # state, not a finding. <!-- Added: forge#1607 -->
+                            # at/above blocking_severity_pattern. Otherwise the union of two
+                            # accumulators from Phase V2: SEC_EXEC_FINDINGS (offending file
+                            # path(s)) and SECURITY_SCAN_FINDINGS ("scanner-error" on a crash,
+                            # "scanner-findings" on a severity-pattern match). Non-empty means
+                            # gate_passed: false. Empty (not absent) when no scanner is
+                            # configured — that is a SKIPPED state, not a finding. <!-- Added: forge#1607 -->
 ```
 
 ---

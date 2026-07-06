@@ -1500,7 +1500,7 @@ done
 
 <!-- Added: forge#1607 -->
 
-**Why this matters**: The SEC-EXEC grep in Step 2A (above) is a fast, zero-dependency, deterministic check — but it only catches the shell-string-interpolation class of injection (the #1586 pattern). Broader injection/taint classes (SSRF via unvalidated redirects, incomplete sanitizer regexes, dataflow-tracked SQL/command injection) need a real static-analysis engine, not a grep heuristic. CodeQL already runs as a required check on PRs targeting the repository's default branch — but that is a repo-level GitHub setting, not something this gate can invoke synchronously per-build (it requires a full-repo database build). This step gives every project a **configurable, stack-agnostic** hook to run its own fast scanner (semgrep is the common choice) scoped to just the changed files, at build time, before the code ever reaches a PR.
+**Why this matters**: The SEC-EXEC grep in Step 2A (above) is a fast, zero-dependency, deterministic check — but it only catches the shell-string-interpolation class of injection. Broader injection/taint classes (SSRF via unvalidated redirects, incomplete sanitizer regexes, dataflow-tracked SQL/command injection) need a real static-analysis engine, not a grep heuristic. CodeQL already runs as a required check on PRs targeting the repository's default branch — but that is a repo-level GitHub setting, not something this gate can invoke synchronously per-build (it requires a full-repo database build). This step gives every project a **configurable, stack-agnostic** hook to run its own fast scanner (semgrep is the common choice) scoped to just the changed files, at build time, before the code ever reaches a PR.
 
 This check is entirely `forge.yaml`-driven — ForgeDock does not hardcode semgrep, CodeQL, or any other tool. A project with no `verification.security_scan.command` configured sees a `SKIPPED` line and is never blocked by this step.
 
@@ -1513,26 +1513,37 @@ if [ -z "$SCAN_CMD" ]; then
     echo "SKIPPED — verification.security_scan.command not configured in forge.yaml (no scanner declared)"
 else
     # Default pattern anchors on the (severity|level) JSON key name, not a bare severity
-    # word — matching a bare "ERROR"/"HIGH" against raw scanner JSON produces false
-    # positives (e.g. semgrep's own JSON always contains a top-level "errors":[] key,
-    # which a naive `grep -i "ERROR"` matches even with zero findings). Verified against
-    # a real semgrep run: this pattern blocks on an actual `"severity": "ERROR"` finding
-    # and stays silent on clean output. Works for semgrep's `severity` field and
-    # SARIF/CodeQL's `level` field alike.
+    # word — matching a bare "ERROR"/"HIGH" against raw scanner JSON over-matches on
+    # unrelated structure (e.g. a scanner's always-present empty `"errors":[]` key, which a
+    # naive `grep -i "ERROR"` hits even with zero findings). Anchoring on the key name blocks
+    # only actual `"severity": "ERROR"` / `"level": "error"` values. Trade-off to be aware of:
+    # a scanner DIAGNOSTIC entry (e.g. a parse warning in a non-empty `errors[]` array whose
+    # object carries `"level":"error"`) can also match — that fails safe (blocks rather than
+    # passes) and surfaces a real scanner problem, but it is not strictly a code finding.
+    # Override blocking_severity_pattern for your scanner's exact output shape if needed.
     SEVERITY_PATTERN=$(yq '.verification.security_scan.blocking_severity_pattern // "(severity|level)[^a-zA-Z0-9]{0,6}(CRITICAL|HIGH|ERROR)"' forge.yaml 2>/dev/null || echo '(severity|level)[^a-zA-Z0-9]{0,6}(CRITICAL|HIGH|ERROR)')
 
     # Scope the scan to changed files where the configured command supports positional file
     # arguments (e.g. `semgrep --config=auto`). Projects whose command already scopes itself
     # (e.g. a wrapper script) can ignore the appended file list — extra positional args after
     # a scanner's own flags are typically treated as additional targets, which is safe either way.
+    #
+    # SECURITY: the array expansion is kept inside a SINGLE-QUOTED string appended to $SCAN_CMD
+    # so `eval` re-parses ONLY the (trusted) command, NOT the (potentially attacker-controlled)
+    # file paths. `eval "$SCAN_CMD" "${ARR[@]}"` would splice the already-expanded filenames
+    # back into eval's argument string and re-parse them as shell — a filename like
+    # `$(rm -rf x).py` would then execute. `eval "$SCAN_CMD"' "${ARR[@]}"'` expands the array
+    # AFTER eval finishes tokenising, so each path stays one literal argv element.
     IFS=' ' read -ra CHANGED_FILES_ARR <<< "{CHANGED_FILES}"
-    SCAN_OUTPUT=$(eval "$SCAN_CMD" "${CHANGED_FILES_ARR[@]}" 2>&1)
+    SCAN_OUTPUT=$(eval "$SCAN_CMD"' "${CHANGED_FILES_ARR[@]}"' 2>&1)
     SCAN_EXIT=$?
 
     if [ "$SCAN_EXIT" -gt 1 ]; then
-        # Most scanners (semgrep, CodeQL CLI) exit 1 when findings exist and >1 on a real
-        # execution error (bad config, binary crash, missing dependency). Don't let a tool
-        # crash masquerade as "no findings" — surface it explicitly.
+        # Many scanners (e.g. semgrep run with --error) exit 1 when findings exist and >1 on a
+        # real execution error (bad config, binary crash, missing dependency). Exit-code
+        # semantics vary by tool and flags — this branch is a best-effort crash guard, not a
+        # findings signal; the severity-pattern match below is the authoritative findings check.
+        # Don't let a tool crash masquerade as "no findings" — surface it explicitly.
         echo "SECURITY-SCAN-ERROR | HIGH | scanner command exited $SCAN_EXIT (execution error, not a findings exit) — command: $SCAN_CMD"
         echo "$SCAN_OUTPUT"
     elif echo "$SCAN_OUTPUT" | grep -qEi "$SEVERITY_PATTERN"; then
@@ -1545,7 +1556,7 @@ fi
 ```
 
 **Flag as findings**:
-- Scanner output matches the configured `blocking_severity_pattern` (default `(severity|level)[^a-zA-Z0-9]{0,6}(CRITICAL|HIGH|ERROR)` — anchored on the JSON key name so it can't false-positive on unrelated JSON structure, e.g. semgrep's own always-present `"errors":[]` key; matches semgrep's `severity` field and SARIF/CodeQL's `level` field): **HIGH** — treat as a real injection/security finding, same weight as SEC-EXEC.
+- Scanner output matches the configured `blocking_severity_pattern` (default `(severity|level)[^a-zA-Z0-9]{0,6}(CRITICAL|HIGH|ERROR)` — anchored on the JSON key name so it does not over-match on an empty `"errors":[]` key; matches semgrep's `severity` field and SARIF/CodeQL's `level` field): **HIGH** — treat as a real injection/security finding, same weight as SEC-EXEC. Override the pattern for your scanner's exact output shape if a non-empty diagnostic array causes spurious blocks.
 - Scanner command exits with a code greater than 1 (execution failure, not a findings-exit): **HIGH** — do not silently treat a crashed scanner as "clean"; the builder must fix the configured command or escalate.
 
 **Regression guard**: When `verification.security_scan.command` is absent, this step logs `SKIPPED` and never blocks — existing ForgeDock installs with no scanner declared see no behavior change.

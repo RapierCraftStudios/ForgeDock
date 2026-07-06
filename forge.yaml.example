@@ -483,10 +483,11 @@ branches:
 #   # scanner's stdout/stderr; any match blocks the gate. Defaults to
 #   # "(severity|level)[^a-zA-Z0-9]{0,6}(CRITICAL|HIGH|ERROR)" — anchored on the JSON
 #   # key name (`severity` for semgrep, `level` for SARIF/CodeQL), not a bare severity
-#   # word. A naive bare-word pattern (e.g. just "ERROR") false-positives on scanner
-#   # JSON that always contains an unrelated key like semgrep's own "errors":[] field,
-#   # even when there are zero real findings — verified against a live semgrep run.
-#   # Override if your scanner's output uses a different key/value shape.
+#   # word. A naive bare-word pattern (e.g. just "ERROR") over-matches scanner JSON that
+#   # always contains an unrelated key like semgrep's empty "errors":[] field. Note the
+#   # anchored default can still match a scanner DIAGNOSTIC (a non-empty errors[] entry
+#   # carrying "level":"error") — that fails safe (blocks) but is not a code finding;
+#   # override this pattern for your scanner's exact output shape if that matters.
 #   #
 #   # security_scan:
 #   #   # Python/multi-language project using semgrep with the default ruleset
