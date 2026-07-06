@@ -218,7 +218,16 @@ jobs:
         env:
           RUN_MODE_INPUT: ${{ github.event.inputs.run_mode }}
         run: |
-          echo "run_mode=${RUN_MODE_INPUT:-full}" >> "$GITHUB_OUTPUT"
+          # Allowlist validation: choice inputs are not server-enforced via the API.
+          # Default to 'full' if an unrecognized value is supplied.
+          case "${RUN_MODE_INPUT:-full}" in
+            full|subset) RUN_MODE_SAFE="${RUN_MODE_INPUT:-full}" ;;
+            *)
+              echo "WARNING: unrecognized run_mode '${RUN_MODE_INPUT}' — defaulting to 'full'"
+              RUN_MODE_SAFE="full"
+              ;;
+          esac
+          echo "run_mode=${RUN_MODE_SAFE}" >> "$GITHUB_OUTPUT"
 
       - name: Run full eval harness
         id: eval
