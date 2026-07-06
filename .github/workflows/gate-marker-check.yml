@@ -27,6 +27,13 @@ name: Deploy Gate Marker Check
 # external contributor who can comment but is not in the allowlist) cannot
 # forge a passing gate by hand-typing the marker text.
 #
+# issue_comment trigger restriction: the job only runs for issue_comment events
+# where the commenter has OWNER, MEMBER, or COLLABORATOR author_association.
+# This prevents untrusted external contributors (association: CONTRIBUTOR,
+# FIRST_TIMER, FIRST_TIME_CONTRIBUTOR, NONE) from triggering the workflow via
+# any comment on any PR, which would waste CI minutes and exercise the
+# statuses:write permission surface unnecessarily. <!-- Added: forge#1661 -->
+#
 # IMPORTANT — operator setup required: if `FORGE_TRUSTED_MARKER_AUTHORS` is
 # unset or empty, NO marker is trusted and every staging→main PR will be
 # treated as a gate bypass after the 30-minute window. Set this variable to
@@ -63,10 +70,16 @@ jobs:
     name: Check for FORGE gate markers
     runs-on: ubuntu-latest
 
-    # Only run on PRs targeting main — skip all other PR events
+    # Only run on PRs targeting main — skip all other PR events.
+    # For issue_comment events, additionally require that the commenter has
+    # OWNER, MEMBER, or COLLABORATOR association to prevent untrusted external
+    # contributors from triggering the workflow (and exercising statuses:write)
+    # via arbitrary comments on any PR. <!-- Added: forge#1661 -->
     if: |
       github.event_name == 'pull_request' ||
-      (github.event_name == 'issue_comment' && github.event.issue.pull_request != null)
+      (github.event_name == 'issue_comment' &&
+       github.event.issue.pull_request != null &&
+       contains(fromJSON('["OWNER","MEMBER","COLLABORATOR"]'), github.event.comment.author_association))
 
     steps:
       - name: Resolve PR number
