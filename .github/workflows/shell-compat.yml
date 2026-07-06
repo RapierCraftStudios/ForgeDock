@@ -66,9 +66,14 @@ jobs:
       - name: Verify no grep -P / grep -oP in shell scripts
         run: |
           # BSD grep on macOS does not support -P (PCRE).
-          # This step hard-fails if any .sh file uses grep -P or grep -oP.
+          # This step hard-fails if any .sh file uses grep -P or grep -oP in executable code.
+          # Exclusions:
+          # - Lines that are shell comments (first non-whitespace char is #) — these document
+          #   the anti-pattern and are intentionally excluded via grep -v '^\s*#'
+          # - Lines containing '# allowlist:' — explicit per-line exemptions
           MATCHES=$(grep -rnE "grep\s+-[a-zA-Z]*P[ '\"]|grep\s+-oP[ '\"]|grep\s+-P[ '\"]" scripts/ \
             --include='*.sh' \
+            | grep -vE ':[0-9]+:\s*#' \
             | grep -v '# allowlist:' \
             || true)
           if [ -n "$MATCHES" ]; then
