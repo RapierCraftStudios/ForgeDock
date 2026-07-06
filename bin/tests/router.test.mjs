@@ -168,13 +168,28 @@ describe("router", () => {
     const mainRepo = mkdtempSync(join(os.tmpdir(), "fd-main-repo-"));
     const worktree = mkdtempSync(join(os.tmpdir(), "fd-worktree-"));
 
+    // Git identity env vars — required on CI runners that have no global user.email/user.name.
+    // Without these, `git commit --allow-empty` exits non-zero (silent, stdio:pipe), leaving
+    // mainRepo with zero commits. git rev-parse HEAD then fails with "ambiguous argument 'HEAD'",
+    // which update() catches as "Cannot fast-forward — local changes exist" and skips relink.
+    const gitEnv = {
+      ...process.env,
+      GIT_AUTHOR_NAME: "ForgeDock Test",
+      GIT_AUTHOR_EMAIL: "test@forgedock.test",
+      GIT_COMMITTER_NAME: "ForgeDock Test",
+      GIT_COMMITTER_EMAIL: "test@forgedock.test",
+    };
+
     // Bootstrap: bare remote repo, then clone it as mainRepo.
     // Use -b main explicitly so the initial branch is "main" regardless of
     // the system's init.defaultBranch config (CI runners may default to "master").
     spawnSync("git", ["init", "--bare", "-b", "main", remoteRepo], { stdio: "pipe" });
     spawnSync("git", ["init", "-b", "main", mainRepo], { stdio: "pipe" });
     spawnSync("git", ["-C", mainRepo, "remote", "add", "origin", remoteRepo], { stdio: "pipe" });
-    spawnSync("git", ["-C", mainRepo, "commit", "--allow-empty", "-m", "init"], { stdio: "pipe" });
+    spawnSync("git", ["-C", mainRepo, "commit", "--allow-empty", "-m", "init"], {
+      stdio: "pipe",
+      env: gitEnv,
+    });
     spawnSync("git", ["-C", mainRepo, "push", "origin", "main"], { stdio: "pipe" });
 
     // Build the git worktree admin chain so git commands work from worktree
@@ -233,19 +248,12 @@ describe("router", () => {
       },
     );
 
-    assert.equal(
-      res.status,
-      0,
-      `update exited non-zero:\nstdout: ${res.stdout}\nstderr: ${res.stderr}`,
-    );
+    assert.equal(res.status, 0, `update exited non-zero:\n${res.stderr}`);
 
     // stable.md from the MAIN REPO must be installed
     assert.ok(
       existsSync(join(home, ".claude", "commands", "stable.md")),
-      `stable.md from the main repo must be installed (resolveRealForgeHome resolved correctly)\n` +
-        `stdout: ${res.stdout}\nstderr: ${res.stderr}\n` +
-        `home/.claude/commands exists: ${existsSync(join(home, ".claude", "commands"))}\n` +
-        `mainRepo: ${mainRepo}\nworktree: ${worktree}`,
+      "stable.md from the main repo must be installed (resolveRealForgeHome resolved correctly)",
     );
 
     // ephemeral.md from the WORKTREE must NOT be installed
