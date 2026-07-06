@@ -929,9 +929,23 @@ async function update() {
         cwd: FORGE_HOME,
         encoding: "utf-8",
       }).trim();
-      if (branch !== "main") {
-        console.log(`  Not on main branch (${branch}) — skipping`);
-        return;
+
+      // If on a non-main branch, switch to main for the update then restore.
+      // Detached HEAD ("HEAD") is treated as non-restorable — we leave on main
+      // after the update and warn the user.
+      const isDetached = branch === "HEAD";
+      const needsCheckout = branch !== "main";
+      if (needsCheckout) {
+        if (isDetached) {
+          console.log(
+            `  ${YELLOW}Detached HEAD state — switching to main for update.${RESET}`,
+          );
+        } else {
+          console.log(
+            `  On branch ${CYAN}${branch}${RESET} — switching to ${CYAN}main${RESET} for update...`,
+          );
+        }
+        execSync("git checkout main --quiet", { cwd: FORGE_HOME });
       }
 
       const before = execSync("git rev-parse HEAD", {
@@ -953,6 +967,20 @@ async function update() {
         console.log(`  ${GREEN}Updated to latest.${RESET}`);
       }
       await relinkAndHint();
+
+      // Restore original branch after a successful update.
+      if (needsCheckout && !isDetached) {
+        try {
+          execSync(`git checkout ${branch} --quiet`, { cwd: FORGE_HOME });
+          console.log(
+            `  Restored branch ${CYAN}${branch}${RESET}.`,
+          );
+        } catch {
+          console.log(
+            `  ${YELLOW}⚠  Could not restore branch ${branch} — you are now on main.${RESET}`,
+          );
+        }
+      }
     } catch (err) {
       console.log(
         `  ${YELLOW}Cannot fast-forward — local changes exist. Skipping.${RESET}`,
