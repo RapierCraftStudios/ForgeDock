@@ -1,0 +1,813 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Tender — Payments Infrastructure for the Internet</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;600;700&family=Space+Mono:wght@400;700&display=swap" rel="stylesheet">
+<style>
+  *, *::before, *::after { margin: 0; padding: 0; box-sizing: border-box; }
+
+  :root {
+    --bg: #0a0a0c;
+    --surface: #111114;
+    --surface-2: #18181c;
+    --border: #222228;
+    --border-light: #2a2a32;
+    --text: #e8e8ec;
+    --text-muted: #8888a0;
+    --text-dim: #555568;
+    --accent: #00e5a0;
+    --accent-dim: #00e5a020;
+    --mono: 'Space Mono', monospace;
+    --sans: 'Space Grotesk', sans-serif;
+  }
+
+  html { font-size: 16px; background: var(--bg); color: var(--text); }
+  body { font-family: var(--sans); line-height: 1.5; -webkit-font-smoothing: antialiased; }
+
+  /* Layout */
+  .container { max-width: 1280px; margin: 0 auto; padding: 0 24px; }
+  .grid-12 { display: grid; grid-template-columns: repeat(12, 1fr); gap: 1px; }
+
+  /* Nav */
+  nav {
+    position: sticky; top: 0; z-index: 100;
+    background: var(--bg); border-bottom: 1px solid var(--border);
+    padding: 0 24px; height: 52px;
+    display: flex; align-items: center; justify-content: space-between;
+  }
+  nav .logo { font-family: var(--mono); font-weight: 700; font-size: 15px; letter-spacing: -0.5px; }
+  nav .logo span { color: var(--accent); }
+  nav ul { list-style: none; display: flex; gap: 28px; }
+  nav ul li a { color: var(--text-muted); text-decoration: none; font-size: 13px; font-weight: 500; transition: color 0.15s; }
+  nav ul li a:hover { color: var(--text); }
+  nav .nav-cta {
+    font-family: var(--mono); font-size: 12px; font-weight: 700;
+    color: var(--bg); background: var(--accent); border: none;
+    padding: 6px 16px; cursor: pointer; letter-spacing: 0.5px;
+  }
+
+  /* Hero — asymmetric two-column */
+  .hero {
+    display: grid; grid-template-columns: 5fr 7fr;
+    min-height: 85vh; border-bottom: 1px solid var(--border);
+  }
+  .hero-left {
+    padding: 80px 48px 80px 24px;
+    display: flex; flex-direction: column; justify-content: center;
+    border-right: 1px solid var(--border);
+  }
+  .hero-left .tag {
+    font-family: var(--mono); font-size: 11px; color: var(--accent);
+    letter-spacing: 2px; text-transform: uppercase; margin-bottom: 24px;
+  }
+  .hero-left h1 {
+    font-size: clamp(36px, 4vw, 56px); font-weight: 700;
+    line-height: 1.05; letter-spacing: -2px; margin-bottom: 20px;
+  }
+  .hero-left p {
+    font-size: 15px; color: var(--text-muted); max-width: 400px;
+    line-height: 1.7; margin-bottom: 32px;
+  }
+  .hero-actions { display: flex; gap: 12px; align-items: center; }
+  .btn-primary {
+    font-family: var(--mono); font-size: 13px; font-weight: 700;
+    background: var(--accent); color: var(--bg); border: none;
+    padding: 12px 24px; cursor: pointer; letter-spacing: 0.3px;
+    text-decoration: none; display: inline-block;
+  }
+  .btn-secondary {
+    font-family: var(--mono); font-size: 13px; font-weight: 400;
+    color: var(--text-muted); background: none; border: 1px solid var(--border);
+    padding: 11px 24px; cursor: pointer; text-decoration: none;
+  }
+  .btn-secondary:hover { border-color: var(--text-muted); color: var(--text); }
+
+  /* Hero right — Transaction Flow Visualization (Signature Move) */
+  .hero-right {
+    padding: 40px 24px;
+    display: flex; flex-direction: column; justify-content: center;
+    position: relative; overflow: hidden;
+    background: var(--surface);
+  }
+  .tx-flow {
+    display: flex; flex-direction: column; gap: 0;
+    font-family: var(--mono); font-size: 12px;
+  }
+  .tx-row {
+    display: grid; grid-template-columns: 90px 1fr 100px 80px 100px;
+    gap: 0; padding: 10px 16px;
+    border-bottom: 1px solid var(--border);
+    align-items: center;
+    animation: fadeSlideIn 0.6s ease-out both;
+  }
+  .tx-row:nth-child(1) { animation-delay: 0.1s; }
+  .tx-row:nth-child(2) { animation-delay: 0.3s; }
+  .tx-row:nth-child(3) { animation-delay: 0.5s; }
+  .tx-row:nth-child(4) { animation-delay: 0.7s; }
+  .tx-row:nth-child(5) { animation-delay: 0.9s; }
+  .tx-row:nth-child(6) { animation-delay: 1.1s; }
+  .tx-row:nth-child(7) { animation-delay: 1.3s; }
+  .tx-row:nth-child(8) { animation-delay: 1.5s; }
+
+  @keyframes fadeSlideIn {
+    from { opacity: 0; transform: translateY(8px); }
+    to { opacity: 1; transform: translateY(0); }
+  }
+
+  .tx-header {
+    color: var(--text-dim); text-transform: uppercase; letter-spacing: 1px;
+    font-size: 10px; border-bottom: 1px solid var(--border-light);
+    padding-bottom: 12px; margin-bottom: 4px;
+  }
+  .tx-id { color: var(--text-dim); }
+  .tx-desc { color: var(--text); font-family: var(--sans); font-size: 13px; }
+  .tx-amount { color: var(--text); text-align: right; font-weight: 700; }
+  .tx-currency { color: var(--text-dim); text-align: center; }
+  .tx-status { text-align: right; }
+  .tx-status .succeeded { color: var(--accent); }
+  .tx-status .processing { color: #f5a623; }
+  .tx-status .pending { color: var(--text-dim); }
+
+  .tx-flow-meta {
+    margin-top: 16px; padding: 12px 16px;
+    border: 1px solid var(--border); background: var(--bg);
+    display: flex; justify-content: space-between;
+    font-family: var(--mono); font-size: 11px; color: var(--text-dim);
+  }
+  .tx-flow-meta .live-dot {
+    display: inline-block; width: 6px; height: 6px;
+    background: var(--accent); border-radius: 50%; margin-right: 6px;
+    animation: pulse 2s infinite;
+  }
+  @keyframes pulse {
+    0%, 100% { opacity: 1; }
+    50% { opacity: 0.3; }
+  }
+
+  /* Stats bar */
+  .stats-bar {
+    display: grid; grid-template-columns: repeat(4, 1fr);
+    border-bottom: 1px solid var(--border);
+  }
+  .stat-cell {
+    padding: 32px 24px; border-right: 1px solid var(--border);
+    text-align: left;
+  }
+  .stat-cell:last-child { border-right: none; }
+  .stat-cell .number {
+    font-size: 32px; font-weight: 700; letter-spacing: -1.5px;
+    margin-bottom: 4px;
+  }
+  .stat-cell .number span { color: var(--accent); }
+  .stat-cell .label {
+    font-family: var(--mono); font-size: 11px; color: var(--text-dim);
+    text-transform: uppercase; letter-spacing: 1px;
+  }
+
+  /* Code section */
+  .code-section {
+    display: grid; grid-template-columns: 1fr 1fr;
+    border-bottom: 1px solid var(--border);
+  }
+  .code-panel {
+    padding: 48px 32px; border-right: 1px solid var(--border);
+  }
+  .code-panel:last-child { border-right: none; }
+  .code-panel h3 {
+    font-family: var(--mono); font-size: 11px; color: var(--accent);
+    text-transform: uppercase; letter-spacing: 2px; margin-bottom: 24px;
+  }
+  pre {
+    background: var(--bg); border: 1px solid var(--border);
+    padding: 20px; overflow-x: auto; font-family: var(--mono);
+    font-size: 12.5px; line-height: 1.8; color: var(--text-muted);
+  }
+  pre .kw { color: var(--accent); }
+  pre .str { color: #f5a623; }
+  pre .num { color: #e06060; }
+  pre .comment { color: var(--text-dim); }
+
+  .response-panel {
+    padding: 48px 32px;
+    display: flex; flex-direction: column;
+  }
+  .response-panel h3 {
+    font-family: var(--mono); font-size: 11px; color: var(--text-dim);
+    text-transform: uppercase; letter-spacing: 2px; margin-bottom: 24px;
+  }
+
+  /* Features dense grid */
+  .features-dense {
+    padding: 80px 24px; border-bottom: 1px solid var(--border);
+  }
+  .features-dense .section-head {
+    display: grid; grid-template-columns: 1fr 1fr; gap: 48px;
+    margin-bottom: 64px;
+  }
+  .features-dense h2 {
+    font-size: 40px; font-weight: 700; letter-spacing: -2px; line-height: 1.1;
+  }
+  .features-dense .section-head p {
+    color: var(--text-muted); font-size: 15px; line-height: 1.7;
+    padding-top: 8px;
+  }
+  .feature-grid {
+    display: grid; grid-template-columns: repeat(3, 1fr); gap: 1px;
+    background: var(--border);
+  }
+  .feature-cell {
+    background: var(--surface); padding: 32px;
+  }
+  .feature-cell .feat-tag {
+    font-family: var(--mono); font-size: 10px; color: var(--accent);
+    text-transform: uppercase; letter-spacing: 1.5px; margin-bottom: 12px;
+  }
+  .feature-cell h4 {
+    font-size: 17px; font-weight: 600; margin-bottom: 8px; letter-spacing: -0.3px;
+  }
+  .feature-cell p {
+    font-size: 13px; color: var(--text-muted); line-height: 1.6;
+  }
+
+  /* Dashboard mockup section */
+  .dashboard-section {
+    padding: 80px 24px; border-bottom: 1px solid var(--border);
+  }
+  .dashboard-section h2 {
+    font-size: 36px; font-weight: 700; letter-spacing: -1.5px;
+    margin-bottom: 12px;
+  }
+  .dashboard-section > p {
+    color: var(--text-muted); font-size: 15px; margin-bottom: 48px; max-width: 500px;
+  }
+  .dashboard-mock {
+    background: var(--surface); border: 1px solid var(--border);
+    padding: 0; overflow: hidden;
+  }
+  .dash-toolbar {
+    display: flex; align-items: center; justify-content: space-between;
+    padding: 12px 20px; border-bottom: 1px solid var(--border);
+    background: var(--surface-2);
+  }
+  .dash-toolbar .tabs { display: flex; gap: 0; }
+  .dash-toolbar .tab {
+    font-family: var(--mono); font-size: 11px; padding: 6px 16px;
+    color: var(--text-dim); border: 1px solid var(--border);
+    border-right: none; cursor: pointer; background: none;
+  }
+  .dash-toolbar .tab:last-child { border-right: 1px solid var(--border); }
+  .dash-toolbar .tab.active { color: var(--accent); background: var(--bg); }
+  .dash-toolbar .period {
+    font-family: var(--mono); font-size: 11px; color: var(--text-dim);
+  }
+  .dash-body { padding: 24px 20px; }
+  .dash-metrics {
+    display: grid; grid-template-columns: repeat(4, 1fr); gap: 16px;
+    margin-bottom: 24px;
+  }
+  .dash-metric {
+    border: 1px solid var(--border); padding: 16px;
+  }
+  .dash-metric .val { font-size: 24px; font-weight: 700; letter-spacing: -1px; }
+  .dash-metric .lbl { font-family: var(--mono); font-size: 10px; color: var(--text-dim); text-transform: uppercase; letter-spacing: 1px; margin-top: 4px; }
+  .dash-metric .delta { font-family: var(--mono); font-size: 11px; color: var(--accent); margin-top: 4px; }
+  .dash-chart {
+    border: 1px solid var(--border); padding: 20px; height: 200px;
+    display: flex; align-items: flex-end; gap: 4px;
+    position: relative;
+  }
+  .chart-bar {
+    flex: 1; background: var(--accent-dim); border-top: 2px solid var(--accent);
+    min-height: 8px; transition: height 0.3s;
+  }
+  .dash-chart .chart-label {
+    position: absolute; top: 12px; left: 20px;
+    font-family: var(--mono); font-size: 10px; color: var(--text-dim);
+    text-transform: uppercase; letter-spacing: 1px;
+  }
+
+  /* Billing section */
+  .billing-section {
+    display: grid; grid-template-columns: 7fr 5fr;
+    border-bottom: 1px solid var(--border);
+  }
+  .billing-left {
+    padding: 80px 48px 80px 24px; border-right: 1px solid var(--border);
+  }
+  .billing-left .tag {
+    font-family: var(--mono); font-size: 11px; color: var(--accent);
+    text-transform: uppercase; letter-spacing: 2px; margin-bottom: 16px;
+  }
+  .billing-left h2 {
+    font-size: 36px; font-weight: 700; letter-spacing: -1.5px; margin-bottom: 16px;
+    line-height: 1.1;
+  }
+  .billing-left p {
+    color: var(--text-muted); font-size: 14px; line-height: 1.7; margin-bottom: 24px;
+    max-width: 480px;
+  }
+  .billing-features {
+    display: flex; flex-direction: column; gap: 12px;
+  }
+  .billing-feat {
+    display: flex; align-items: baseline; gap: 10px;
+    font-size: 13px;
+  }
+  .billing-feat .check { color: var(--accent); font-family: var(--mono); font-size: 12px; }
+  .billing-feat span { color: var(--text-muted); }
+
+  .billing-right { padding: 40px 24px; display: flex; align-items: center; }
+  .invoice-mock {
+    width: 100%; background: var(--bg); border: 1px solid var(--border);
+    font-family: var(--mono); font-size: 12px;
+  }
+  .invoice-header {
+    padding: 16px; border-bottom: 1px solid var(--border);
+    display: flex; justify-content: space-between;
+    color: var(--text-dim);
+  }
+  .invoice-line {
+    padding: 10px 16px; display: flex; justify-content: space-between;
+    border-bottom: 1px solid var(--border);
+  }
+  .invoice-line .desc { color: var(--text-muted); }
+  .invoice-line .amt { color: var(--text); font-weight: 700; }
+  .invoice-total {
+    padding: 12px 16px; display: flex; justify-content: space-between;
+    background: var(--surface-2);
+  }
+  .invoice-total .desc { color: var(--text); font-weight: 700; }
+  .invoice-total .amt { color: var(--accent); font-weight: 700; font-size: 14px; }
+
+  /* Global coverage */
+  .coverage-section {
+    padding: 80px 24px; border-bottom: 1px solid var(--border);
+  }
+  .coverage-section h2 {
+    font-size: 36px; font-weight: 700; letter-spacing: -1.5px; margin-bottom: 48px;
+  }
+  .coverage-grid {
+    display: grid; grid-template-columns: repeat(6, 1fr); gap: 1px;
+    background: var(--border);
+  }
+  .coverage-cell {
+    background: var(--surface); padding: 20px;
+    text-align: left;
+  }
+  .coverage-cell .region {
+    font-family: var(--mono); font-size: 10px; color: var(--accent);
+    text-transform: uppercase; letter-spacing: 1px; margin-bottom: 8px;
+  }
+  .coverage-cell .methods {
+    font-size: 12px; color: var(--text-muted); line-height: 1.8;
+  }
+
+  /* Footer */
+  footer {
+    padding: 48px 24px; display: grid; grid-template-columns: 2fr 1fr 1fr 1fr;
+    gap: 48px; border-top: 1px solid var(--border);
+  }
+  footer .brand { font-family: var(--mono); font-weight: 700; font-size: 14px; margin-bottom: 12px; }
+  footer .brand span { color: var(--accent); }
+  footer .tagline { font-size: 13px; color: var(--text-dim); }
+  footer h5 {
+    font-family: var(--mono); font-size: 10px; color: var(--text-dim);
+    text-transform: uppercase; letter-spacing: 1.5px; margin-bottom: 16px;
+  }
+  footer ul { list-style: none; }
+  footer ul li { margin-bottom: 8px; }
+  footer ul li a { color: var(--text-muted); text-decoration: none; font-size: 13px; }
+  footer ul li a:hover { color: var(--text); }
+
+  /* Mobile */
+  @media (max-width: 900px) {
+    .hero { grid-template-columns: 1fr; }
+    .hero-left { padding: 48px 24px; border-right: none; border-bottom: 1px solid var(--border); }
+    .hero-right { min-height: 400px; }
+    .stats-bar { grid-template-columns: repeat(2, 1fr); }
+    .code-section { grid-template-columns: 1fr; }
+    .code-panel { border-right: none; border-bottom: 1px solid var(--border); }
+    .feature-grid { grid-template-columns: 1fr; }
+    .billing-section { grid-template-columns: 1fr; }
+    .billing-left { border-right: none; }
+    .coverage-grid { grid-template-columns: repeat(2, 1fr); }
+    .dash-metrics { grid-template-columns: repeat(2, 1fr); }
+    footer { grid-template-columns: 1fr 1fr; }
+    nav ul { display: none; }
+    .tx-row { grid-template-columns: 60px 1fr 80px 60px; }
+    .tx-currency { display: none; }
+  }
+  @media (max-width: 560px) {
+    .stats-bar { grid-template-columns: 1fr; }
+    .coverage-grid { grid-template-columns: 1fr; }
+    .dash-metrics { grid-template-columns: 1fr; }
+    footer { grid-template-columns: 1fr; }
+  }
+</style>
+</head>
+<body>
+
+<nav>
+  <div class="logo"><span>&gt;</span> tender</div>
+  <ul>
+    <li><a href="#">Products</a></li>
+    <li><a href="#">Documentation</a></li>
+    <li><a href="#">Pricing</a></li>
+    <li><a href="#">Changelog</a></li>
+  </ul>
+  <button class="nav-cta">Start integrating</button>
+</nav>
+
+<!-- HERO -->
+<section class="hero">
+  <div class="hero-left">
+    <div class="tag">Payments Infrastructure</div>
+    <h1>Move money at internet scale</h1>
+    <p>One API for payments, payouts, billing, and fraud. Tender handles the financial plumbing so your team ships product, not compliance paperwork.</p>
+    <div class="hero-actions">
+      <a href="#" class="btn-primary">Start integrating</a>
+      <a href="#" class="btn-secondary">View docs</a>
+    </div>
+  </div>
+  <div class="hero-right">
+    <div class="tx-flow">
+      <div class="tx-row tx-header">
+        <span>ID</span><span>Description</span><span style="text-align:right">Amount</span><span style="text-align:center">Ccy</span><span style="text-align:right">Status</span>
+      </div>
+      <div class="tx-row">
+        <span class="tx-id">tx_9f3a</span>
+        <span class="tx-desc">Acme Corp &mdash; Annual Plan</span>
+        <span class="tx-amount">12,000.00</span>
+        <span class="tx-currency">USD</span>
+        <span class="tx-status"><span class="succeeded">succeeded</span></span>
+      </div>
+      <div class="tx-row">
+        <span class="tx-id">tx_8e2b</span>
+        <span class="tx-desc">Shibuya Ramen &mdash; POS Terminal</span>
+        <span class="tx-amount">4,280.00</span>
+        <span class="tx-currency">JPY</span>
+        <span class="tx-status"><span class="succeeded">succeeded</span></span>
+      </div>
+      <div class="tx-row">
+        <span class="tx-id">tx_7d1c</span>
+        <span class="tx-desc">CloudSaaS &mdash; Usage Billing</span>
+        <span class="tx-amount">847.63</span>
+        <span class="tx-currency">EUR</span>
+        <span class="tx-status"><span class="processing">processing</span></span>
+      </div>
+      <div class="tx-row">
+        <span class="tx-id">tx_6c0d</span>
+        <span class="tx-desc">Marketplace Payout &mdash; Seller #4412</span>
+        <span class="tx-amount">2,190.00</span>
+        <span class="tx-currency">GBP</span>
+        <span class="tx-status"><span class="succeeded">succeeded</span></span>
+      </div>
+      <div class="tx-row">
+        <span class="tx-id">tx_5b9e</span>
+        <span class="tx-desc">FinanceApp &mdash; Subscription Renewal</span>
+        <span class="tx-amount">99.00</span>
+        <span class="tx-currency">USD</span>
+        <span class="tx-status"><span class="succeeded">succeeded</span></span>
+      </div>
+      <div class="tx-row">
+        <span class="tx-id">tx_4a8f</span>
+        <span class="tx-desc">Berlin Mobility &mdash; Ride Credits</span>
+        <span class="tx-amount">1,540.00</span>
+        <span class="tx-currency">EUR</span>
+        <span class="tx-status"><span class="pending">pending</span></span>
+      </div>
+      <div class="tx-row">
+        <span class="tx-id">tx_3z7g</span>
+        <span class="tx-desc">EdTech Pro &mdash; Team License</span>
+        <span class="tx-amount">6,400.00</span>
+        <span class="tx-currency">USD</span>
+        <span class="tx-status"><span class="succeeded">succeeded</span></span>
+      </div>
+      <div class="tx-row">
+        <span class="tx-id">tx_2y6h</span>
+        <span class="tx-desc">Lagos Fresh &mdash; Delivery Fee</span>
+        <span class="tx-amount">15,000.00</span>
+        <span class="tx-currency">NGN</span>
+        <span class="tx-status"><span class="succeeded">succeeded</span></span>
+      </div>
+    </div>
+    <div class="tx-flow-meta">
+      <span><span class="live-dot"></span> Live transaction feed</span>
+      <span>8 of 14,291 today</span>
+    </div>
+  </div>
+</section>
+
+<!-- STATS -->
+<section class="stats-bar">
+  <div class="stat-cell">
+    <div class="number">99<span>.</span>997<span>%</span></div>
+    <div class="label">API uptime (trailing 90d)</div>
+  </div>
+  <div class="stat-cell">
+    <div class="number">135<span>+</span></div>
+    <div class="label">Currencies supported</div>
+  </div>
+  <div class="stat-cell">
+    <div class="number">47<span>ms</span></div>
+    <div class="label">Median API latency</div>
+  </div>
+  <div class="stat-cell">
+    <div class="number"><span>$</span>410<span>B</span></div>
+    <div class="label">Processed annually</div>
+  </div>
+</section>
+
+<!-- CODE -->
+<section class="code-section">
+  <div class="code-panel">
+    <h3>Request</h3>
+    <pre><span class="comment">// Create a payment intent</span>
+<span class="kw">const</span> payment = <span class="kw">await</span> tender.payments.create({
+  amount: <span class="num">4999</span>,
+  currency: <span class="str">'usd'</span>,
+  payment_method: <span class="str">'pm_card_visa'</span>,
+  customer: <span class="str">'cus_R4nd0mId'</span>,
+  metadata: {
+    order_id: <span class="str">'ord_2847'</span>,
+    sku: <span class="str">'pro_annual'</span>
+  },
+  fraud_check: <span class="kw">true</span>,
+  idempotency_key: <span class="str">'ik_8f3a9b2c'</span>
+});
+
+<span class="comment">// Returns immediately with status</span>
+console.log(payment.id);
+<span class="comment">// =&gt; "pay_1N4x..."</span></pre>
+  </div>
+  <div class="response-panel">
+    <h3>Response &middot; 200 OK &middot; 43ms</h3>
+    <pre>{
+  <span class="str">"id"</span>: <span class="str">"pay_1N4xQvK9e2"</span>,
+  <span class="str">"object"</span>: <span class="str">"payment"</span>,
+  <span class="str">"amount"</span>: <span class="num">4999</span>,
+  <span class="str">"currency"</span>: <span class="str">"usd"</span>,
+  <span class="str">"status"</span>: <span class="str">"succeeded"</span>,
+  <span class="str">"fraud_score"</span>: <span class="num">0.02</span>,
+  <span class="str">"fraud_decision"</span>: <span class="str">"allow"</span>,
+  <span class="str">"customer"</span>: <span class="str">"cus_R4nd0mId"</span>,
+  <span class="str">"payment_method"</span>: {
+    <span class="str">"type"</span>: <span class="str">"card"</span>,
+    <span class="str">"brand"</span>: <span class="str">"visa"</span>,
+    <span class="str">"last4"</span>: <span class="str">"4242"</span>
+  },
+  <span class="str">"created"</span>: <span class="num">1719052800</span>
+}</pre>
+  </div>
+</section>
+
+<!-- FEATURES -->
+<section class="features-dense">
+  <div class="container">
+    <div class="section-head">
+      <h2>Everything the money path needs</h2>
+      <p>From checkout to reconciliation, Tender covers the full lifecycle. No stitching together point solutions. No compliance surprises.</p>
+    </div>
+  </div>
+  <div class="feature-grid">
+    <div class="feature-cell">
+      <div class="feat-tag">Payments</div>
+      <h4>Accept any payment method</h4>
+      <p>Cards, bank debits, wallets, BNPL, and 50+ local methods. One integration, global reach. Automatic routing picks the cheapest rail.</p>
+    </div>
+    <div class="feature-cell">
+      <div class="feat-tag">Billing</div>
+      <h4>Subscriptions and usage metering</h4>
+      <p>Flat, tiered, per-seat, or metered. Proration calculated automatically. Invoices generated and delivered. Dunning retries on your schedule.</p>
+    </div>
+    <div class="feature-cell">
+      <div class="feat-tag">Payouts</div>
+      <h4>Move money to anyone, anywhere</h4>
+      <p>Send funds to bank accounts in 45+ countries. Split payments for marketplaces. Real-time payout tracking with webhook notifications.</p>
+    </div>
+    <div class="feature-cell">
+      <div class="feat-tag">Fraud</div>
+      <h4>Machine-learned risk scoring</h4>
+      <p>Every transaction scored in real-time using network-wide signals. Custom rules engine for your business logic. 3D Secure triggered adaptively.</p>
+    </div>
+    <div class="feature-cell">
+      <div class="feat-tag">Compliance</div>
+      <h4>Regulation handled for you</h4>
+      <p>PCI DSS Level 1, SOC 2 Type II, PSD2 SCA, local licensing. We hold the certifications so you don't manage auditors.</p>
+    </div>
+    <div class="feature-cell">
+      <div class="feat-tag">Platform</div>
+      <h4>Multi-party money flows</h4>
+      <p>Connected accounts, delayed settlements, platform fees, 1099-K reporting. Build a marketplace without becoming a money transmitter.</p>
+    </div>
+    <div class="feature-cell">
+      <div class="feat-tag">Dashboard</div>
+      <h4>Finance team command center</h4>
+      <p>Real-time revenue, disputes, refunds. Export to your ERP. Role-based access. Search any transaction in milliseconds.</p>
+    </div>
+    <div class="feature-cell">
+      <div class="feat-tag">Webhooks</div>
+      <h4>Event-driven architecture</h4>
+      <p>200+ event types with at-least-once delivery. Automatic retries with exponential backoff. Event replay for recovery.</p>
+    </div>
+    <div class="feature-cell">
+      <div class="feat-tag">SDKs</div>
+      <h4>Libraries for every stack</h4>
+      <p>Official SDKs for Node, Python, Go, Ruby, PHP, Java, .NET. Typed. Tested. Versioned. Generated from our OpenAPI spec.</p>
+    </div>
+  </div>
+</section>
+
+<!-- DASHBOARD -->
+<section class="dashboard-section">
+  <div class="container">
+    <h2>Your finance team will thank you</h2>
+    <p>Real-time visibility into every transaction, payout, and dispute. No more spreadsheet reconciliation.</p>
+    <div class="dashboard-mock">
+      <div class="dash-toolbar">
+        <div class="tabs">
+          <button class="tab active">Overview</button>
+          <button class="tab">Payments</button>
+          <button class="tab">Payouts</button>
+          <button class="tab">Disputes</button>
+        </div>
+        <span class="period">Jun 1 &ndash; Jun 22, 2026</span>
+      </div>
+      <div class="dash-body">
+        <div class="dash-metrics">
+          <div class="dash-metric">
+            <div class="val">$2.41M</div>
+            <div class="lbl">Gross volume</div>
+            <div class="delta">+12.3% vs prev</div>
+          </div>
+          <div class="dash-metric">
+            <div class="val">18,429</div>
+            <div class="lbl">Successful payments</div>
+            <div class="delta">+8.7% vs prev</div>
+          </div>
+          <div class="dash-metric">
+            <div class="val">0.04%</div>
+            <div class="lbl">Dispute rate</div>
+            <div class="delta">-0.01pp vs prev</div>
+          </div>
+          <div class="dash-metric">
+            <div class="val">$184K</div>
+            <div class="lbl">Net payouts</div>
+            <div class="delta">+6.1% vs prev</div>
+          </div>
+        </div>
+        <div class="dash-chart">
+          <span class="chart-label">Daily volume (USD)</span>
+          <div class="chart-bar" style="height:45%"></div>
+          <div class="chart-bar" style="height:52%"></div>
+          <div class="chart-bar" style="height:48%"></div>
+          <div class="chart-bar" style="height:61%"></div>
+          <div class="chart-bar" style="height:55%"></div>
+          <div class="chart-bar" style="height:70%"></div>
+          <div class="chart-bar" style="height:68%"></div>
+          <div class="chart-bar" style="height:58%"></div>
+          <div class="chart-bar" style="height:75%"></div>
+          <div class="chart-bar" style="height:82%"></div>
+          <div class="chart-bar" style="height:78%"></div>
+          <div class="chart-bar" style="height:90%"></div>
+          <div class="chart-bar" style="height:85%"></div>
+          <div class="chart-bar" style="height:72%"></div>
+          <div class="chart-bar" style="height:88%"></div>
+          <div class="chart-bar" style="height:95%"></div>
+          <div class="chart-bar" style="height:91%"></div>
+          <div class="chart-bar" style="height:80%"></div>
+          <div class="chart-bar" style="height:87%"></div>
+          <div class="chart-bar" style="height:92%"></div>
+          <div class="chart-bar" style="height:85%"></div>
+          <div class="chart-bar" style="height:70%"></div>
+        </div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- BILLING -->
+<section class="billing-section">
+  <div class="billing-left">
+    <div class="tag">Billing Engine</div>
+    <h2>Subscriptions that handle the edge cases</h2>
+    <p>Upgrades, downgrades, trials, add-ons, metered overages, annual contracts with monthly invoicing. Tender's billing engine handles the permutations you'd rather not code yourself.</p>
+    <div class="billing-features">
+      <div class="billing-feat"><span class="check">[+]</span> <span>Proration calculated to the second</span></div>
+      <div class="billing-feat"><span class="check">[+]</span> <span>Smart dunning with configurable retry schedules</span></div>
+      <div class="billing-feat"><span class="check">[+]</span> <span>Revenue recognition-ready invoices</span></div>
+      <div class="billing-feat"><span class="check">[+]</span> <span>Usage metering with real-time aggregation</span></div>
+      <div class="billing-feat"><span class="check">[+]</span> <span>Multi-currency with automatic FX at settlement</span></div>
+      <div class="billing-feat"><span class="check">[+]</span> <span>Tax calculation via Tender Tax or third-party</span></div>
+    </div>
+  </div>
+  <div class="billing-right">
+    <div class="invoice-mock">
+      <div class="invoice-header">
+        <span>INV-2026-04418</span>
+        <span>Jun 22, 2026</span>
+      </div>
+      <div class="invoice-line">
+        <span class="desc">Pro Plan (annual)</span>
+        <span class="amt">$4,800.00</span>
+      </div>
+      <div class="invoice-line">
+        <span class="desc">Additional seats x 3</span>
+        <span class="amt">$1,440.00</span>
+      </div>
+      <div class="invoice-line">
+        <span class="desc">API calls overage (12,400 units)</span>
+        <span class="amt">$248.00</span>
+      </div>
+      <div class="invoice-line">
+        <span class="desc">Credit: unused days on Basic</span>
+        <span class="amt" style="color: var(--accent);">-$142.47</span>
+      </div>
+      <div class="invoice-line">
+        <span class="desc">Tax (8.875%)</span>
+        <span class="amt">$563.14</span>
+      </div>
+      <div class="invoice-total">
+        <span class="desc">Total due</span>
+        <span class="amt">$6,908.67</span>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- COVERAGE -->
+<section class="coverage-section">
+  <div class="container">
+    <h2>Global coverage, local methods</h2>
+    <div class="coverage-grid">
+      <div class="coverage-cell">
+        <div class="region">North America</div>
+        <div class="methods">Visa / MC / Amex<br>ACH Direct Debit<br>Apple Pay<br>Google Pay</div>
+      </div>
+      <div class="coverage-cell">
+        <div class="region">Europe</div>
+        <div class="methods">SEPA Direct Debit<br>iDEAL<br>Bancontact<br>Klarna / Sofort</div>
+      </div>
+      <div class="coverage-cell">
+        <div class="region">UK</div>
+        <div class="methods">Visa / MC Debit<br>Open Banking<br>Bacs Direct Debit<br>PayPal</div>
+      </div>
+      <div class="coverage-cell">
+        <div class="region">Asia Pacific</div>
+        <div class="methods">Alipay / WeChat<br>Konbini<br>UPI<br>GrabPay / GCash</div>
+      </div>
+      <div class="coverage-cell">
+        <div class="region">Latin America</div>
+        <div class="methods">PIX<br>Boleto<br>OXXO<br>Mercado Pago</div>
+      </div>
+      <div class="coverage-cell">
+        <div class="region">Africa / MENA</div>
+        <div class="methods">M-Pesa<br>Flutterwave<br>KNET<br>Mada</div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- FOOTER -->
+<footer>
+  <div>
+    <div class="brand"><span>&gt;</span> tender</div>
+    <div class="tagline">Payments infrastructure for the internet economy.</div>
+  </div>
+  <div>
+    <h5>Product</h5>
+    <ul>
+      <li><a href="#">Payments</a></li>
+      <li><a href="#">Billing</a></li>
+      <li><a href="#">Payouts</a></li>
+      <li><a href="#">Fraud</a></li>
+      <li><a href="#">Dashboard</a></li>
+    </ul>
+  </div>
+  <div>
+    <h5>Developers</h5>
+    <ul>
+      <li><a href="#">Documentation</a></li>
+      <li><a href="#">API Reference</a></li>
+      <li><a href="#">SDKs</a></li>
+      <li><a href="#">Changelog</a></li>
+      <li><a href="#">Status</a></li>
+    </ul>
+  </div>
+  <div>
+    <h5>Company</h5>
+    <ul>
+      <li><a href="#">About</a></li>
+      <li><a href="#">Careers</a></li>
+      <li><a href="#">Security</a></li>
+      <li><a href="#">Legal</a></li>
+      <li><a href="#">Contact</a></li>
+    </ul>
+  </div>
+</footer>
+
+</body>
+</html>

@@ -10,10 +10,12 @@ on:
       - 'scripts/**'
       - 'templates/**'
       - 'package.json'
+  workflow_dispatch:  # Manual retrigger for bot-token merges
 
 jobs:
   publish:
     runs-on: ubuntu-latest
+    if: github.ref == 'refs/heads/main'
     permissions:
       contents: write
       id-token: write
@@ -21,6 +23,31 @@ jobs:
 
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0  # Full history needed for git describe --tags (path-guard check)
+
+      - name: Check if publishable files changed (workflow_dispatch only)
+        if: github.event_name == 'workflow_dispatch'
+        run: |
+          # workflow_dispatch has no paths: filter (GitHub limitation).
+          # Mirror the push trigger's path filter manually: skip publish if no
+          # relevant files changed since the last release tag.
+          LAST_TAG=$(git describe --tags --abbrev=0 2>/dev/null || echo "")
+          if [ -z "$LAST_TAG" ]; then
+            echo "No previous tag found — proceeding with publish"
+            echo "SKIP_PUBLISH=false" >> $GITHUB_ENV
+          else
+            CHANGED=$(git diff --name-only "$LAST_TAG"..HEAD -- \
+              commands/ bin/ docs/ scripts/ templates/ package.json 2>/dev/null || echo "")
+            if [ -z "$CHANGED" ]; then
+              echo "No publish-relevant files changed since $LAST_TAG — skipping spurious dispatch"
+              echo "SKIP_PUBLISH=true" >> $GITHUB_ENV
+            else
+              echo "Publish-relevant changes detected since $LAST_TAG:"
+              echo "$CHANGED"
+              echo "SKIP_PUBLISH=false" >> $GITHUB_ENV
+            fi
+          fi
 
       - name: Use Node.js 24
         uses: actions/setup-node@v4
@@ -28,10 +55,14 @@ jobs:
           node-version: 24
           registry-url: 'https://registry.npmjs.org'
 
+      - name: Check native command conflicts
+        run: bash scripts/check-native-conflicts.sh commands/
+
       - name: Run tests
         run: npm test
 
       - name: Bump patch version
+        if: env.SKIP_PUBLISH != 'true'
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
@@ -68,19 +99,33 @@ jobs:
         if: env.SKIP_PUBLISH != 'true'
         run: |
           NPMRC="$RUNNER_TEMP/.npmrc"
-          echo "//npm.pkg.github.com/:_authToken=${{ secrets.GITHUB_TOKEN }}" > "$NPMRC"
+          echo "//npm.pkg.github.com/:_authToken=${GH_TOKEN}" > "$NPMRC"
           echo "@rapiercraftstudios:registry=https://npm.pkg.github.com" >> "$NPMRC"
           npm pkg set name="@rapiercraftstudios/forgedock"
           npm publish --access public --userconfig "$NPMRC"
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Restore package.json name
         if: always() && env.SKIP_PUBLISH != 'true'
         run: mv package.json.orig package.json
 
+      - name: Sync plugin.json version
+        if: env.SKIP_PUBLISH != 'true'
+        run: |
+          node -e "
+            const fs = require('fs');
+            const version = require('./package.json').version;
+            const plugin = JSON.parse(fs.readFileSync('.claude-plugin/plugin.json', 'utf8'));
+            plugin.version = version;
+            fs.writeFileSync('.claude-plugin/plugin.json', JSON.stringify(plugin, null, 2) + '\n');
+            console.log('Synced .claude-plugin/plugin.json to version ' + version);
+          "
+
       - name: Push version bump
         if: env.SKIP_PUBLISH != 'true'
         run: |
-          git add package.json
+          git add package.json .claude-plugin/plugin.json
           git commit -m "chore: bump version to ${{ env.VERSION }} [skip ci]"
           git push
 

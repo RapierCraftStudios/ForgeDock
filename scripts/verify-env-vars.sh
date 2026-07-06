@@ -179,8 +179,24 @@ for var in $VAR_NAMES; do
     fi
 
     if [ -z "$FOUND_IN" ]; then
-        echo "BLOCKING: $var — not found in .env.example, docker-compose.yml, or env_validation.py"
-        BLOCKING=$((BLOCKING + 1))
+        # Determine whether any of the optional surfaces exist in this repo.
+        # If NONE of the known surfaces exist (not even .env.example), the repo
+        # uses a layout we can't validate — emit SKIP instead of a false BLOCKING.
+        # This is the verify-sops-chain.sh pattern: unknown layout → graceful skip,
+        # not a spurious failure. <!-- Added: forge#1349 -->
+        HAS_ANY_SURFACE=0
+        [ -f "$REPO_ROOT/.env.example" ] && HAS_ANY_SURFACE=1
+        [ -f "$REPO_ROOT/docker-compose.yml" ] && HAS_ANY_SURFACE=1
+        [ -f "$REPO_ROOT/docker-compose.prod.yml" ] && HAS_ANY_SURFACE=1
+        [ -f "$REPO_ROOT/services/api/app/core/env_validation.py" ] && HAS_ANY_SURFACE=1
+        [ -f "$REPO_ROOT/scripts/decrypt-secrets.sh" ] && HAS_ANY_SURFACE=1
+
+        if [ "$HAS_ANY_SURFACE" -eq 0 ]; then
+            echo "SKIP: $var — no known env-wiring surfaces found in repo (no .env.example, docker-compose, env_validation.py, or SOPS mapping). Configure verification.env_check_surfaces in forge.yaml or add .env.example to enable this check."
+        else
+            echo "BLOCKING: $var — not found in any detected env-wiring surface (.env.example, docker-compose.yml, env_validation.py, or decrypt-secrets.sh)"
+            BLOCKING=$((BLOCKING + 1))
+        fi
     else
         echo "OK: $var — found in:$FOUND_IN"
     fi

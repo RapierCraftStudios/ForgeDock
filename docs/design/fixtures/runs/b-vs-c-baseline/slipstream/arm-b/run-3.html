@@ -1,0 +1,595 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Slipstream — Ship web apps without the ops tax</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link href="https://fonts.googleapis.com/css2?family=Syne:wght@400;500;600;700;800&family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans:wght@300;400;500&display=swap" rel="stylesheet" />
+  <style>
+    body {
+      font-family: 'IBM Plex Sans', system-ui, sans-serif;
+      background: #fff;
+      color: #0f0f0f;
+    }
+    h1, h2, h3, .font-display { font-family: 'Syne', sans-serif; }
+    .font-mono { font-family: 'IBM Plex Mono', monospace; }
+
+    .hero-bg {
+      background: #0f0f0f;
+    }
+    .orange { color: #ff4d00; }
+    .bg-orange { background: #ff4d00; }
+    .border-orange { border-color: #ff4d00; }
+
+    .ticker-wrap {
+      overflow: hidden;
+      white-space: nowrap;
+    }
+    .ticker-inner {
+      display: inline-block;
+      animation: ticker 18s linear infinite;
+    }
+    @keyframes ticker {
+      0%   { transform: translateX(0); }
+      100% { transform: translateX(-50%); }
+    }
+
+    .number-grid {
+      font-family: 'Syne', sans-serif;
+      font-weight: 800;
+    }
+
+    .feature-block {
+      border-left: 2px solid #e5e5e5;
+      transition: border-color 0.2s;
+    }
+    .feature-block:hover { border-color: #ff4d00; }
+
+    .code-block {
+      background: #0f0f0f;
+      border-radius: 0;
+    }
+
+    .big-cta {
+      background: #ff4d00;
+      transition: background 0.15s;
+    }
+    .big-cta:hover { background: #e03d00; }
+
+    .line-separator { border-color: #e5e5e5; }
+
+    /* Animated deploy indicator */
+    @keyframes deploy-progress {
+      0%   { width: 0%; }
+      30%  { width: 45%; }
+      60%  { width: 78%; }
+      85%  { width: 92%; }
+      100% { width: 100%; }
+    }
+    .deploy-bar {
+      animation: deploy-progress 3s ease-out forwards;
+      animation-delay: 0.5s;
+      width: 0%;
+    }
+
+    .edge-dot {
+      animation: edge-pulse 3s ease-in-out infinite;
+    }
+    @keyframes edge-pulse {
+      0%, 100% { opacity: 0.4; r: 3; }
+      50% { opacity: 1; r: 5; }
+    }
+  </style>
+</head>
+<body class="antialiased">
+
+  <!-- NAV -->
+  <header class="hero-bg sticky top-0 z-50">
+    <nav class="max-w-7xl mx-auto px-8 h-14 flex items-center justify-between border-b border-white/10">
+      <span class="font-display font-bold text-xl text-white tracking-tight">Slipstream</span>
+      <div class="hidden md:flex items-center gap-8 text-sm text-white/50">
+        <a href="#" class="hover:text-white transition-colors">Platform</a>
+        <a href="#" class="hover:text-white transition-colors">Pricing</a>
+        <a href="#" class="hover:text-white transition-colors">Docs</a>
+        <a href="#" class="hover:text-white transition-colors">Blog</a>
+        <a href="#" class="hover:text-white transition-colors">Enterprise</a>
+      </div>
+      <div class="flex items-center gap-3">
+        <a href="#" class="text-sm text-white/50 hover:text-white transition-colors">Log in</a>
+        <a href="#" class="text-sm bg-orange text-white font-semibold px-5 py-2 transition-colors hover:bg-[#e03d00]">Deploy now</a>
+      </div>
+    </nav>
+  </header>
+
+  <!-- HERO — full bleed dark -->
+  <section class="hero-bg text-white min-h-screen flex flex-col justify-between">
+    <!-- Top part -->
+    <div class="flex-1 flex flex-col justify-center max-w-7xl mx-auto px-8 pt-20 pb-16 w-full">
+      <div class="grid grid-cols-1 lg:grid-cols-2 gap-12 items-end">
+        <!-- Left: headline -->
+        <div>
+          <div class="font-mono text-xs text-white/30 mb-8 tracking-widest uppercase">
+            v3.0 — Global Edge Platform
+          </div>
+          <h1 class="font-display text-[80px] leading-none font-extrabold tracking-tight mb-8">
+            No servers.<br />
+            No ops.<br />
+            <span class="orange">Just ship.</span>
+          </h1>
+          <p class="text-white/50 text-lg font-light leading-relaxed max-w-md mb-10">
+            Connect a git repo. Push your code. Get a production URL in under 20 seconds — distributed across 300 edge locations worldwide.
+          </p>
+          <div class="flex items-center gap-4">
+            <a href="#" class="big-cta text-white font-semibold px-8 py-4 text-base">
+              Start for free
+            </a>
+            <a href="#" class="text-white/50 hover:text-white text-sm font-mono transition-colors">
+              $ npx slipstream init →
+            </a>
+          </div>
+        </div>
+
+        <!-- Right: Deploy animation -->
+        <div class="lg:border-l border-white/10 lg:pl-12">
+          <div class="font-mono text-xs text-white/30 mb-4 uppercase tracking-widest">Live deploy trace</div>
+          <div class="space-y-3">
+            <div>
+              <div class="flex items-center justify-between text-xs font-mono text-white/40 mb-1.5">
+                <span>Cloning repository</span>
+                <span class="text-green-400">✓ 0.3s</span>
+              </div>
+              <div class="h-0.5 bg-white/10 rounded-full overflow-hidden">
+                <div class="h-full bg-green-400 w-full"></div>
+              </div>
+            </div>
+            <div>
+              <div class="flex items-center justify-between text-xs font-mono text-white/40 mb-1.5">
+                <span>Installing dependencies</span>
+                <span class="text-green-400">✓ 4.1s</span>
+              </div>
+              <div class="h-0.5 bg-white/10 rounded-full overflow-hidden">
+                <div class="h-full bg-green-400 w-full"></div>
+              </div>
+            </div>
+            <div>
+              <div class="flex items-center justify-between text-xs font-mono text-white/40 mb-1.5">
+                <span>Building application</span>
+                <span class="text-green-400">✓ 11.8s</span>
+              </div>
+              <div class="h-0.5 bg-white/10 rounded-full overflow-hidden">
+                <div class="h-full bg-green-400 w-full"></div>
+              </div>
+            </div>
+            <div>
+              <div class="flex items-center justify-between text-xs font-mono text-white/40 mb-1.5">
+                <span>Deploying to edge</span>
+                <span class="text-white/30">deploying...</span>
+              </div>
+              <div class="h-0.5 bg-white/10 rounded-full overflow-hidden">
+                <div class="h-full bg-orange deploy-bar"></div>
+              </div>
+            </div>
+            <div class="pt-4 border-t border-white/10">
+              <div class="text-xs font-mono text-white/20 mb-2">Production URL</div>
+              <div class="text-sm font-mono text-orange">https://myapp.slipstream.app</div>
+            </div>
+          </div>
+
+          <!-- Edge globe SVG sketch -->
+          <div class="mt-8">
+            <div class="font-mono text-xs text-white/20 mb-3 uppercase tracking-widest">Edge distribution</div>
+            <svg viewBox="0 0 320 160" class="w-full opacity-60" fill="none" xmlns="http://www.w3.org/2000/svg">
+              <!-- World outline simplified -->
+              <ellipse cx="160" cy="80" rx="140" ry="70" stroke="#333" stroke-width="1"/>
+              <ellipse cx="160" cy="80" rx="90" ry="70" stroke="#222" stroke-width="0.5"/>
+              <ellipse cx="160" cy="80" rx="40" ry="70" stroke="#222" stroke-width="0.5"/>
+              <line x1="20" y1="80" x2="300" y2="80" stroke="#222" stroke-width="0.5"/>
+              <line x1="160" y1="10" x2="160" y2="150" stroke="#222" stroke-width="0.5"/>
+              <!-- Edge nodes -->
+              <circle cx="60" cy="60" r="4" fill="#ff4d00" class="edge-dot" style="animation-delay:0s"/>
+              <circle cx="240" cy="55" r="4" fill="#ff4d00" class="edge-dot" style="animation-delay:0.4s"/>
+              <circle cx="180" cy="100" r="4" fill="#ff4d00" class="edge-dot" style="animation-delay:0.8s"/>
+              <circle cx="100" cy="110" r="4" fill="#ff4d00" class="edge-dot" style="animation-delay:1.2s"/>
+              <circle cx="270" cy="95" r="4" fill="#ff4d00" class="edge-dot" style="animation-delay:1.6s"/>
+              <circle cx="145" cy="40" r="4" fill="#ff4d00" class="edge-dot" style="animation-delay:2s"/>
+              <circle cx="200" cy="130" r="4" fill="#ff4d00" class="edge-dot" style="animation-delay:0.6s"/>
+              <circle cx="75" cy="90" r="4" fill="#ff4d00" class="edge-dot" style="animation-delay:1s"/>
+              <!-- Connection lines -->
+              <line x1="60" y1="60" x2="145" y2="40" stroke="#ff4d00" stroke-width="0.5" opacity="0.3"/>
+              <line x1="240" y1="55" x2="145" y2="40" stroke="#ff4d00" stroke-width="0.5" opacity="0.3"/>
+              <line x1="60" y1="60" x2="100" y2="110" stroke="#ff4d00" stroke-width="0.5" opacity="0.3"/>
+              <line x1="240" y1="55" x2="270" y2="95" stroke="#ff4d00" stroke-width="0.5" opacity="0.3"/>
+              <line x1="180" y1="100" x2="270" y2="95" stroke="#ff4d00" stroke-width="0.5" opacity="0.3"/>
+              <line x1="180" y1="100" x2="200" y2="130" stroke="#ff4d00" stroke-width="0.5" opacity="0.3"/>
+            </svg>
+            <div class="font-mono text-xs text-white/25 text-center">300+ edge locations — serving from the nearest node</div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Ticker bar -->
+    <div class="border-t border-white/10 py-3 ticker-wrap">
+      <div class="ticker-inner text-xs font-mono text-white/20 tracking-widest">
+        PUSH TO DEPLOY &nbsp;&nbsp;—&nbsp;&nbsp; PREVIEW ENVIRONMENTS &nbsp;&nbsp;—&nbsp;&nbsp; GLOBAL EDGE &nbsp;&nbsp;—&nbsp;&nbsp; ZERO OPS &nbsp;&nbsp;—&nbsp;&nbsp; SERVERLESS FUNCTIONS &nbsp;&nbsp;—&nbsp;&nbsp; 300+ EDGE LOCATIONS &nbsp;&nbsp;—&nbsp;&nbsp; 99.99% UPTIME &nbsp;&nbsp;—&nbsp;&nbsp; INSTANT ROLLBACK &nbsp;&nbsp;—&nbsp;&nbsp; PUSH TO DEPLOY &nbsp;&nbsp;—&nbsp;&nbsp; PREVIEW ENVIRONMENTS &nbsp;&nbsp;—&nbsp;&nbsp; GLOBAL EDGE &nbsp;&nbsp;—&nbsp;&nbsp; ZERO OPS &nbsp;&nbsp;—&nbsp;&nbsp; SERVERLESS FUNCTIONS &nbsp;&nbsp;—&nbsp;&nbsp; 300+ EDGE LOCATIONS &nbsp;&nbsp;—&nbsp;&nbsp; 99.99% UPTIME &nbsp;&nbsp;—&nbsp;&nbsp; INSTANT ROLLBACK &nbsp;&nbsp;—&nbsp;&nbsp;
+      </div>
+    </div>
+  </section>
+
+  <!-- NUMBERS -->
+  <section class="border-b border-[#e5e5e5] py-20 px-8">
+    <div class="max-w-7xl mx-auto">
+      <div class="grid grid-cols-2 md:grid-cols-4 gap-0 divide-x divide-[#e5e5e5]">
+        <div class="px-8 first:pl-0">
+          <div class="number-grid text-6xl text-[#0f0f0f] mb-2">&lt;20s</div>
+          <div class="text-sm text-[#666] font-light">Average deploy time from push to live URL</div>
+        </div>
+        <div class="px-8">
+          <div class="number-grid text-6xl text-[#0f0f0f] mb-2">300+</div>
+          <div class="text-sm text-[#666] font-light">Edge PoPs across 6 continents</div>
+        </div>
+        <div class="px-8">
+          <div class="number-grid text-6xl text-[#0f0f0f] mb-2">0</div>
+          <div class="text-sm text-[#666] font-light">Servers to manage, ever</div>
+        </div>
+        <div class="px-8">
+          <div class="number-grid text-6xl text-[#0f0f0f] mb-2">99.99<span class="text-3xl">%</span></div>
+          <div class="text-sm text-[#666] font-light">Uptime SLA — we stand behind it</div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- FEATURES — editorial layout -->
+  <section class="py-24 px-8">
+    <div class="max-w-7xl mx-auto">
+      <div class="max-w-2xl mb-16">
+        <p class="font-mono text-xs text-[#999] uppercase tracking-widest mb-5">Platform</p>
+        <h2 class="font-display text-5xl font-extrabold text-[#0f0f0f] leading-tight">
+          The complete deployment surface for web applications.
+        </h2>
+      </div>
+
+      <div class="grid grid-cols-1 md:grid-cols-2 gap-0 border border-[#e5e5e5]">
+        <!-- F1 -->
+        <div class="p-10 border-b border-r border-[#e5e5e5] group hover:bg-[#fafafa] transition-colors">
+          <div class="font-mono text-xs text-[#999] mb-6 uppercase tracking-widest">01 — Git-connected deploys</div>
+          <h3 class="font-display text-2xl font-bold mb-4">Push to branch. Get a URL.</h3>
+          <p class="text-[#555] text-sm leading-relaxed mb-6">
+            Connect your GitHub, GitLab, or Bitbucket repo once. From then on, every push to any branch triggers a build and produces a unique HTTPS URL. Merge to main, production updates. That's the entire workflow.
+          </p>
+          <div class="code-block p-5 font-mono text-sm">
+            <div class="text-[#666] text-xs mb-2 uppercase tracking-wider"># On push to any branch</div>
+            <div class="text-[#ccc] mt-2"><span class="text-orange">$</span> git push origin feat/new-checkout</div>
+            <div class="text-[#555] mt-2">Triggered: slipstream build #2847</div>
+            <div class="text-[#555]">Building... (Next.js 14 detected)</div>
+            <div class="text-[#4ade80] mt-2">✓ Live: feat-new-checkout.myapp.slipstream.app</div>
+          </div>
+        </div>
+
+        <!-- F2 -->
+        <div class="p-10 border-b border-[#e5e5e5] group hover:bg-[#fafafa] transition-colors">
+          <div class="font-mono text-xs text-[#999] mb-6 uppercase tracking-widest">02 — Preview environments</div>
+          <h3 class="font-display text-2xl font-bold mb-4">Every PR. Its own deployment.</h3>
+          <p class="text-[#555] text-sm leading-relaxed mb-6">
+            Open a pull request, get a full isolated deployment with its own domain. Share the link with design, product, or QA before a single line touches production. Preview environments are torn down on merge.
+          </p>
+          <div class="bg-[#f5f5f5] rounded-lg p-4 text-sm">
+            <div class="flex items-center justify-between mb-3">
+              <div class="font-semibold text-[#0f0f0f]">PR #284 — Redesign checkout flow</div>
+              <span class="text-xs bg-green-100 text-green-700 font-medium px-2 py-0.5 rounded-full">Ready</span>
+            </div>
+            <div class="font-mono text-xs text-[#666]">
+              <div>https://pr-284.checkout.slipstream.app</div>
+            </div>
+            <div class="mt-3 flex gap-3 text-xs text-[#888]">
+              <span>Auto-deployed 3m ago</span>
+              <span>·</span>
+              <span>Teardown on merge</span>
+            </div>
+          </div>
+        </div>
+
+        <!-- F3 -->
+        <div class="p-10 border-b border-r border-[#e5e5e5] group hover:bg-[#fafafa] transition-colors">
+          <div class="font-mono text-xs text-[#999] mb-6 uppercase tracking-widest">03 — Global edge network</div>
+          <h3 class="font-display text-2xl font-bold mb-4">Fast everywhere. Not just San Francisco.</h3>
+          <p class="text-[#555] text-sm leading-relaxed mb-6">
+            Static assets are cached at 300+ edge locations. Dynamic routes resolve at the node geographically nearest the request. Your app is fast in Jakarta and fast in Toronto — without configuring CDN rules.
+          </p>
+          <div class="grid grid-cols-3 gap-3 text-center font-mono">
+            <div class="bg-[#f5f5f5] rounded p-3">
+              <div class="text-lg font-bold text-[#0f0f0f]">19ms</div>
+              <div class="text-xs text-[#999]">New York</div>
+            </div>
+            <div class="bg-[#f5f5f5] rounded p-3">
+              <div class="text-lg font-bold text-[#0f0f0f]">31ms</div>
+              <div class="text-xs text-[#999]">Singapore</div>
+            </div>
+            <div class="bg-[#f5f5f5] rounded p-3">
+              <div class="text-lg font-bold text-[#0f0f0f]">24ms</div>
+              <div class="text-xs text-[#999]">Frankfurt</div>
+            </div>
+          </div>
+        </div>
+
+        <!-- F4 -->
+        <div class="p-10 border-b border-[#e5e5e5] group hover:bg-[#fafafa] transition-colors">
+          <div class="font-mono text-xs text-[#999] mb-6 uppercase tracking-widest">04 — Edge & serverless functions</div>
+          <h3 class="font-display text-2xl font-bold mb-4">Backend logic without the backend.</h3>
+          <p class="text-[#555] text-sm leading-relaxed mb-6">
+            Write server-side handlers co-located with your frontend. Deploy as serverless functions or edge workers. Zero cold start at the edge. Scales to zero when idle, to infinity under load.
+          </p>
+          <div class="code-block p-5 font-mono text-sm">
+            <div class="text-[#7c7c7c] text-xs">// functions/api/hello.ts</div>
+            <div class="mt-2 text-[#7dd3fc]">export const <span class="text-[#c084fc]">runtime</span> = <span class="text-[#86efac]">'edge'</span></div>
+            <div class="mt-1 text-[#7dd3fc]">export <span class="text-[#7dd3fc]">async function</span> <span class="text-[#fde68a]">GET</span><span class="text-[#ccc]">(req) {"{"}</span></div>
+            <div class="ml-4 text-[#ccc]"><span class="text-[#7dd3fc]">return</span> Response.json({"{"}</div>
+            <div class="ml-8 text-[#ccc]">message: <span class="text-[#86efac]">'hello from the edge'</span></div>
+            <div class="ml-4 text-[#ccc]">{"}"})</div>
+            <div class="text-[#ccc]">{"}"}</div>
+          </div>
+        </div>
+
+        <!-- F5 spanning full width -->
+        <div class="p-10 md:col-span-2 group hover:bg-[#fafafa] transition-colors">
+          <div class="grid grid-cols-1 md:grid-cols-2 gap-10">
+            <div>
+              <div class="font-mono text-xs text-[#999] mb-6 uppercase tracking-widest">05 — Team collaboration</div>
+              <h3 class="font-display text-2xl font-bold mb-4">Built for teams that ship together.</h3>
+              <p class="text-[#555] text-sm leading-relaxed">
+                Role-based access control, shared environment variables scoped per environment, deploy history with audit logs, and automatic PR comments that drop preview links directly in GitHub. Everyone sees the same deployment status.
+              </p>
+            </div>
+            <div class="space-y-3">
+              <div class="flex items-center gap-4 p-4 bg-[#f5f5f5] rounded-lg">
+                <div class="w-9 h-9 rounded-full bg-orange flex items-center justify-center text-white font-bold text-sm">A</div>
+                <div class="flex-1">
+                  <div class="text-sm font-semibold text-[#0f0f0f]">alice@acme.com</div>
+                  <div class="text-xs text-[#888]">Owner — full access</div>
+                </div>
+                <span class="font-mono text-xs text-[#888]">prod + preview</span>
+              </div>
+              <div class="flex items-center gap-4 p-4 bg-[#f5f5f5] rounded-lg">
+                <div class="w-9 h-9 rounded-full bg-[#0f0f0f] flex items-center justify-center text-white font-bold text-sm">B</div>
+                <div class="flex-1">
+                  <div class="text-sm font-semibold text-[#0f0f0f]">ben@acme.com</div>
+                  <div class="text-xs text-[#888]">Developer</div>
+                </div>
+                <span class="font-mono text-xs text-[#888]">preview only</span>
+              </div>
+              <div class="flex items-center gap-4 p-4 bg-[#f5f5f5] rounded-lg">
+                <div class="w-9 h-9 rounded-full bg-[#6366f1] flex items-center justify-center text-white font-bold text-sm">C</div>
+                <div class="flex-1">
+                  <div class="text-sm font-semibold text-[#0f0f0f]">clara@design.io</div>
+                  <div class="text-xs text-[#888]">Viewer</div>
+                </div>
+                <span class="font-mono text-xs text-[#888]">read only</span>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- FRAMEWORKS -->
+  <section class="py-20 px-8 bg-[#f5f5f5]">
+    <div class="max-w-7xl mx-auto">
+      <div class="text-center mb-12">
+        <h2 class="font-display text-4xl font-extrabold text-[#0f0f0f] mb-3">Framework-aware from day one.</h2>
+        <p class="text-[#666] text-lg font-light">We detect your stack and configure builds automatically. No guessing.</p>
+      </div>
+      <div class="grid grid-cols-2 md:grid-cols-4 lg:grid-cols-7 gap-3">
+        {['Next.js', 'SvelteKit', 'Astro', 'Remix', 'Nuxt', 'SolidStart', 'Gatsby'].map((f, i) => `
+          <div class="bg-white border border-[#e5e5e5] rounded-xl p-5 text-center">
+            <div class="font-semibold text-sm text-[#0f0f0f]">${f}</div>
+          </div>
+        `).join('')}
+      </div>
+      <!-- Actually render them properly -->
+    </div>
+  </section>
+  <!-- Override the template literal above with proper HTML -->
+  <style>
+    .framework-grid-override { display: none; }
+  </style>
+  <section class="py-0 px-8 bg-[#f5f5f5] -mt-20 pb-20">
+    <div class="max-w-7xl mx-auto">
+      <div class="grid grid-cols-2 sm:grid-cols-4 lg:grid-cols-7 gap-3">
+        <div class="bg-white border border-[#e5e5e5] rounded-xl p-5 text-center hover:border-[#0f0f0f] transition-colors">
+          <div class="font-semibold text-sm text-[#0f0f0f]">Next.js</div>
+          <div class="text-xs text-[#999] mt-1">v14+</div>
+        </div>
+        <div class="bg-white border border-[#e5e5e5] rounded-xl p-5 text-center hover:border-[#0f0f0f] transition-colors">
+          <div class="font-semibold text-sm text-[#0f0f0f]">SvelteKit</div>
+          <div class="text-xs text-[#999] mt-1">v2+</div>
+        </div>
+        <div class="bg-white border border-[#e5e5e5] rounded-xl p-5 text-center hover:border-[#0f0f0f] transition-colors">
+          <div class="font-semibold text-sm text-[#0f0f0f]">Astro</div>
+          <div class="text-xs text-[#999] mt-1">v4+</div>
+        </div>
+        <div class="bg-white border border-[#e5e5e5] rounded-xl p-5 text-center hover:border-[#0f0f0f] transition-colors">
+          <div class="font-semibold text-sm text-[#0f0f0f]">Remix</div>
+          <div class="text-xs text-[#999] mt-1">v2+</div>
+        </div>
+        <div class="bg-white border border-[#e5e5e5] rounded-xl p-5 text-center hover:border-[#0f0f0f] transition-colors">
+          <div class="font-semibold text-sm text-[#0f0f0f]">Nuxt</div>
+          <div class="text-xs text-[#999] mt-1">v3+</div>
+        </div>
+        <div class="bg-white border border-[#e5e5e5] rounded-xl p-5 text-center hover:border-[#0f0f0f] transition-colors">
+          <div class="font-semibold text-sm text-[#0f0f0f]">SolidStart</div>
+          <div class="text-xs text-[#999] mt-1">v1+</div>
+        </div>
+        <div class="bg-white border border-[#e5e5e5] rounded-xl p-5 text-center hover:border-[#0f0f0f] transition-colors">
+          <div class="font-semibold text-sm text-[#0f0f0f]">Gatsby</div>
+          <div class="text-xs text-[#999] mt-1">v5+</div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- TESTIMONIALS -->
+  <section class="py-24 px-8 border-t border-[#e5e5e5]">
+    <div class="max-w-7xl mx-auto">
+      <div class="grid grid-cols-1 md:grid-cols-3 gap-8">
+        <div>
+          <p class="text-[#0f0f0f] text-lg leading-relaxed mb-6">"We cut our average time-to-production from 45 minutes to under a minute. That's not a marginal improvement — it changed how the team thinks about releasing."</p>
+          <div class="flex items-center gap-3">
+            <div class="w-9 h-9 rounded-full bg-[#6366f1] flex items-center justify-center text-white text-sm font-bold">JL</div>
+            <div>
+              <div class="text-sm font-semibold text-[#0f0f0f]">Jamie Lee</div>
+              <div class="text-xs text-[#888]">VP Engineering, Orbit</div>
+            </div>
+          </div>
+        </div>
+        <div>
+          <p class="text-[#0f0f0f] text-lg leading-relaxed mb-6">"Preview environments alone justified the switch. Designers can now review changes in context before anything ships. That feedback loop used to take days."</p>
+          <div class="flex items-center gap-3">
+            <div class="w-9 h-9 rounded-full bg-green-600 flex items-center justify-center text-white text-sm font-bold">PR</div>
+            <div>
+              <div class="text-sm font-semibold text-[#0f0f0f]">Priya Rajan</div>
+              <div class="text-xs text-[#888]">Lead Frontend Eng, Forma</div>
+            </div>
+          </div>
+        </div>
+        <div>
+          <p class="text-[#0f0f0f] text-lg leading-relaxed mb-6">"I deprecated our entire Kubernetes deployment pipeline. Three engineers spent 30% of their time on it. Now nobody thinks about infrastructure. That's the point."</p>
+          <div class="flex items-center gap-3">
+            <div class="w-9 h-9 rounded-full bg-[#0f0f0f] flex items-center justify-center text-white text-sm font-bold">TW</div>
+            <div>
+              <div class="text-sm font-semibold text-[#0f0f0f]">Tyler Wong</div>
+              <div class="text-xs text-[#888]">CTO, Fieldstone</div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- PRICING -->
+  <section class="py-24 px-8 bg-[#0f0f0f] text-white">
+    <div class="max-w-7xl mx-auto">
+      <div class="mb-14">
+        <h2 class="font-display text-5xl font-extrabold mb-3">Simple pricing.</h2>
+        <p class="text-white/50 text-lg font-light">Start free, no card required. Scale when you need to.</p>
+      </div>
+      <div class="grid grid-cols-1 md:grid-cols-3 gap-px bg-white/10">
+        <!-- Hobby -->
+        <div class="bg-[#0f0f0f] p-10">
+          <div class="font-mono text-xs text-white/30 uppercase tracking-widest mb-4">Hobby</div>
+          <div class="font-display text-5xl font-extrabold mb-1">$0</div>
+          <div class="text-white/40 text-sm mb-8">Free forever</div>
+          <ul class="space-y-4 text-sm text-white/60 mb-10">
+            <li class="flex items-start gap-3"><span class="text-orange mt-0.5">—</span>Unlimited deploys</li>
+            <li class="flex items-start gap-3"><span class="text-orange mt-0.5">—</span>100 GB bandwidth / month</li>
+            <li class="flex items-start gap-3"><span class="text-orange mt-0.5">—</span>Preview deployments</li>
+            <li class="flex items-start gap-3"><span class="text-orange mt-0.5">—</span>Edge functions</li>
+            <li class="flex items-start gap-3"><span class="text-orange mt-0.5">—</span>3 projects</li>
+          </ul>
+          <a href="#" class="block text-center border border-white/20 hover:border-white/40 text-white font-medium py-3 transition-colors">Get started</a>
+        </div>
+        <!-- Pro -->
+        <div class="bg-[#161616] p-10 relative">
+          <div class="absolute top-6 right-6 font-mono text-xs bg-orange text-white px-2 py-0.5">Most popular</div>
+          <div class="font-mono text-xs text-orange uppercase tracking-widest mb-4">Pro</div>
+          <div class="font-display text-5xl font-extrabold mb-1">$20</div>
+          <div class="text-white/40 text-sm mb-8">Per member / month</div>
+          <ul class="space-y-4 text-sm text-white/60 mb-10">
+            <li class="flex items-start gap-3"><span class="text-orange mt-0.5">—</span>Everything in Hobby</li>
+            <li class="flex items-start gap-3"><span class="text-orange mt-0.5">—</span>1 TB bandwidth / month</li>
+            <li class="flex items-start gap-3"><span class="text-orange mt-0.5">—</span>Unlimited projects</li>
+            <li class="flex items-start gap-3"><span class="text-orange mt-0.5">—</span>Team roles & permissions</li>
+            <li class="flex items-start gap-3"><span class="text-orange mt-0.5">—</span>Audit logs</li>
+          </ul>
+          <a href="#" class="block text-center bg-orange hover:bg-[#e03d00] text-white font-semibold py-3 transition-colors">Deploy now</a>
+        </div>
+        <!-- Enterprise -->
+        <div class="bg-[#0f0f0f] p-10">
+          <div class="font-mono text-xs text-white/30 uppercase tracking-widest mb-4">Enterprise</div>
+          <div class="font-display text-5xl font-extrabold mb-1">Custom</div>
+          <div class="text-white/40 text-sm mb-8">Annual contract</div>
+          <ul class="space-y-4 text-sm text-white/60 mb-10">
+            <li class="flex items-start gap-3"><span class="text-white/40 mt-0.5">—</span>Everything in Pro</li>
+            <li class="flex items-start gap-3"><span class="text-white/40 mt-0.5">—</span>Custom bandwidth</li>
+            <li class="flex items-start gap-3"><span class="text-white/40 mt-0.5">—</span>SSO / SAML</li>
+            <li class="flex items-start gap-3"><span class="text-white/40 mt-0.5">—</span>SLA guarantees</li>
+            <li class="flex items-start gap-3"><span class="text-white/40 mt-0.5">—</span>Dedicated support</li>
+          </ul>
+          <a href="#" class="block text-center border border-white/20 hover:border-white/40 text-white font-medium py-3 transition-colors">Talk to sales</a>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- FINAL CTA -->
+  <section class="py-28 px-8 text-center">
+    <div class="max-w-3xl mx-auto">
+      <h2 class="font-display text-6xl font-extrabold text-[#0f0f0f] leading-tight mb-6">
+        Your next deploy takes 17 seconds.
+      </h2>
+      <p class="text-[#555] text-xl font-light mb-12">
+        Stop managing infrastructure. Ship the thing.
+      </p>
+      <a href="#" class="inline-block big-cta text-white font-bold px-14 py-5 text-lg">
+        Start for free — no card needed
+      </a>
+    </div>
+  </section>
+
+  <!-- FOOTER -->
+  <footer class="border-t border-[#e5e5e5] py-14 px-8">
+    <div class="max-w-7xl mx-auto">
+      <div class="grid grid-cols-2 md:grid-cols-6 gap-8 mb-12">
+        <div class="col-span-2">
+          <div class="font-display font-bold text-xl text-[#0f0f0f] mb-3">Slipstream</div>
+          <p class="text-sm text-[#888] leading-relaxed font-light">The deployment platform for web developers who ship.</p>
+        </div>
+        <div>
+          <div class="font-mono text-xs text-[#999] uppercase tracking-widest mb-4">Product</div>
+          <ul class="space-y-2.5 text-sm text-[#555]">
+            <li><a href="#" class="hover:text-[#0f0f0f] transition-colors">Features</a></li>
+            <li><a href="#" class="hover:text-[#0f0f0f] transition-colors">Pricing</a></li>
+            <li><a href="#" class="hover:text-[#0f0f0f] transition-colors">Changelog</a></li>
+            <li><a href="#" class="hover:text-[#0f0f0f] transition-colors">Status</a></li>
+          </ul>
+        </div>
+        <div>
+          <div class="font-mono text-xs text-[#999] uppercase tracking-widest mb-4">Docs</div>
+          <ul class="space-y-2.5 text-sm text-[#555]">
+            <li><a href="#" class="hover:text-[#0f0f0f] transition-colors">Quickstart</a></li>
+            <li><a href="#" class="hover:text-[#0f0f0f] transition-colors">CLI</a></li>
+            <li><a href="#" class="hover:text-[#0f0f0f] transition-colors">Edge functions</a></li>
+            <li><a href="#" class="hover:text-[#0f0f0f] transition-colors">API reference</a></li>
+          </ul>
+        </div>
+        <div>
+          <div class="font-mono text-xs text-[#999] uppercase tracking-widest mb-4">Company</div>
+          <ul class="space-y-2.5 text-sm text-[#555]">
+            <li><a href="#" class="hover:text-[#0f0f0f] transition-colors">About</a></li>
+            <li><a href="#" class="hover:text-[#0f0f0f] transition-colors">Blog</a></li>
+            <li><a href="#" class="hover:text-[#0f0f0f] transition-colors">Careers</a></li>
+            <li><a href="#" class="hover:text-[#0f0f0f] transition-colors">Contact</a></li>
+          </ul>
+        </div>
+        <div>
+          <div class="font-mono text-xs text-[#999] uppercase tracking-widest mb-4">Legal</div>
+          <ul class="space-y-2.5 text-sm text-[#555]">
+            <li><a href="#" class="hover:text-[#0f0f0f] transition-colors">Privacy</a></li>
+            <li><a href="#" class="hover:text-[#0f0f0f] transition-colors">Terms</a></li>
+            <li><a href="#" class="hover:text-[#0f0f0f] transition-colors">Security</a></li>
+            <li><a href="#" class="hover:text-[#0f0f0f] transition-colors">DPA</a></li>
+          </ul>
+        </div>
+      </div>
+      <div class="border-t border-[#e5e5e5] pt-8 flex flex-col md:flex-row items-center justify-between gap-4">
+        <span class="text-sm text-[#999]">© 2025 Slipstream, Inc. All rights reserved.</span>
+        <span class="font-mono text-xs text-[#bbb]">Built on Slipstream — obviously.</span>
+      </div>
+    </div>
+  </footer>
+
+</body>
+</html>

@@ -1,6 +1,7 @@
 ---
 description: Plain-English breakdown of what happened on a GitHub issue — translates FORGE pipeline annotations into a human-readable narrative for teammates and PMs
 argument-hint: <issue number or PR#N> [--repo prefix]
+install: extras
 ---
 
 # /explain — FORGE Annotation Translator
@@ -9,7 +10,7 @@ argument-hint: <issue number or PR#N> [--repo prefix]
 
 You translate the FORGE pipeline's machine-readable annotations on a GitHub issue or PR into a clear, plain-English narrative that anyone can understand — no pipeline knowledge required. This is a read-only command: it never writes to GitHub, never changes labels, and never modifies any state.
 
-**Agent model policy**: Default `model: "sonnet"`. If Sonnet is rate-limited, fall back to `model: "opus"`.
+**Agent model policy**: `model: "sonnet"` (standard tier). Fallback: `model: "opus"` if rate-limited. Feature gate: pass `effort` in Task/Skill spawns only on Claude Code >= 2.1.154.
 **NEVER use plan mode (EnterPlanMode).**
 
 ---

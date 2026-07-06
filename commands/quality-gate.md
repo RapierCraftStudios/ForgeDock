@@ -13,7 +13,10 @@ You are a quality gate that runs AFTER implementation but BEFORE commit. Your jo
 
 You do NOT post to GitHub. You do NOT create issues. You return findings directly to the builder agent that spawned you.
 
-**Agent model policy**: Default `model: "sonnet"`. If Sonnet is rate-limited, fall back to `model: "opus"`.
+**Agent model policy**: `model: "sonnet"` (standard tier). Fallback: `model: "opus"` if rate-limited. Feature gate: pass `effort` in Task/Skill spawns only on Claude Code >= 2.1.154.
+**NEVER use plan mode (EnterPlanMode).**
+
+<!-- FORGE:SPEC_LOADED — quality-gate.md loaded and active. Agent is bound by this spec. -->
 
 ---
 
@@ -39,14 +42,17 @@ This quality gate uses **domain detection** to adapt to your project's actual te
 | FRONTEND | `.tsx`/`.ts` files in client component paths |
 | PROXY | Client components using `fetch`/`useSWR`/`apiFetch` |
 | SHELL | `.sh` files or scripts using `curl`/`wget` |
-| STRING_SETS | Python files in anti-detection or browser automation paths |
+| STRING_SETS | *(scraping pack — opt-in)* Python files in anti-detection or browser automation paths. Enable via `forge.yaml → quality_gate.optional_domains: [STRING_SETS]` |
 | CONCURRENCY | Python files using `asyncio.shield`, `asyncio.wait_for`, or `Task.cancel` |
 | STATE | Python files with new module-level mutable variable assignments |
-| CAPACITY | Worker/infra Python files with new size/limit/threshold constants |
+| CAPACITY | *(scraping pack — opt-in)* Worker/infra Python files with new size/limit/threshold constants. Enable via `forge.yaml → quality_gate.optional_domains: [CAPACITY]` |
 | WORKFLOW | `.yml` files in `.github/workflows/` |
 | IMPORT_RESOLUTION | Python files with new `from app.*` imports added outside `try:` blocks |
 | INFRA | Dockerfiles or entrypoints with runtime UID changes |
 | ROUTER_BUG | Router Python files where gate conditions are narrowed |
+| FORGE_GRAPH | `commands/*.md` specs or `scripts/*` files change (ForgeDock self-consistency) |
+| CONFIG_SCHEMA | Config files for external tools (`traefik/`, `infra/nginx/`, `k8s/`, `terraform/`, `*.conf`, `*.toml` in infra paths, or `docker-compose*.yml` with service definition changes) |
+| BILLING | Files under `billing/`, `credits/`, `subscription`, `ledger`, or `payment` paths |
 
 **Stack-agnostic coverage**: The example domains above reflect common patterns caught in production; they are not requirements. A Go or Ruby project benefits from SECURITY checks. A Node.js project benefits from FRONTEND, PROXY, and DEPLOY checks. Any project benefits from DATABASE and WORKFLOW checks when those file types are present. The stack-specific examples (Python routers, SOPS secrets chain, FastAPI layouts, appleboy SSH deploys) are illustrative — the domain detection system applies the applicable subset to any codebase.
 
@@ -86,18 +92,21 @@ Before running checks, classify the changed files into domains. This avoids runn
 | `*.py` in `routers/` or `route.ts` handlers | AUTH |
 | `*.py`, `*.ts`, `*.tsx`, `*.sh` (any code file) | SECURITY (always) |
 | Files containing `os.getenv` or `process.env` | DEPLOY |
-| `*.sql` or files in `migrations/` | DATABASE |
+| `*.sql`, files in `migrations/`, or `*migrations/*.py` (Alembic) | DATABASE |
+| Files under `billing/`, `credits/`, `subscription`, `ledger`, or `payment` paths | BILLING |
 | `*.tsx`, `*.ts` in `web/src/` (excluding `route.ts`) | FRONTEND |
 | `*.tsx`, `*.ts` client components with fetch/useSWR | PROXY |
 | `*.sh` files or scripts with `curl`/`wget` | SHELL |
-| `*.py` in `anti_detection/`, `consumers/`, `browser/`, or `shared/detection/` | STRING_SETS |
+| `*.py` in `anti_detection/`, `consumers/`, `browser/`, or `shared/detection/` | STRING_SETS *(scraping pack — opt-in, see 2J)* |
 | `*.py` containing `asyncio.shield`, `asyncio.wait_for`, or `Task.cancel` | CONCURRENCY |
 | `*.py` files with new module-level `dict`, `set`, `Counter`, `Lock`, or `defaultdict` assignments | STATE |
-| `*.py` in `services/worker/`, `infra/`, or `browser/` with new assignments to variables containing `MB`, `SIZE`, `MAX`, `LIMIT`, `THRESHOLD`, or `TIMEOUT` | CAPACITY |
+| `*.py` in `services/worker/`, `infra/`, or `browser/` with new assignments to variables containing `MB`, `SIZE`, `MAX`, `LIMIT`, `THRESHOLD`, or `TIMEOUT` | CAPACITY *(scraping pack — opt-in, see 2K)* |
 | `*.yml` in `.github/workflows/` | WORKFLOW |
 | `*.py` with new `from app.` import statements added outside `try:` blocks | IMPORT_RESOLUTION |
 | `Dockerfile*` or `entrypoint*.sh` with added/changed `USER`, `su-exec`, `gosu`, or `setuid` | INFRA |
 | `*.py` in `routers/` where the diff removes a line containing an or-gate condition (lines starting with `-` containing `if.*or`) | ROUTER_BUG |
+| `commands/*.md` or `scripts/*` files (ForgeDock repo only — dogfoods its own spec graph) | FORGE_GRAPH |
+| Files under `traefik/`, `infra/nginx/`, `k8s/`, `terraform/`, or files matching `*.conf`, `*.toml` in infra paths, or `docker-compose*.yml` with service definition changes | CONFIG_SCHEMA |
 
 **Apply the classification:**
 
@@ -105,9 +114,17 @@ Before running checks, classify the changed files into domains. This avoids runn
 # Initialize domain flags
 DOMAINS=""
 
-for f in {CHANGED_FILES}; do
+# {CHANGED_FILES} is a space-separated argument (same contract as {AFFECTED_FILES}
+# in architect.md) — split explicitly on IFS=' ' into an array instead of relying
+# on a bare `for f in {CHANGED_FILES}`, which word-splits on the shell's default
+# IFS (space, tab, AND newline) and would corrupt any path containing a space.
+IFS=' ' read -ra CHANGED_FILES_ARR <<< "{CHANGED_FILES}"
+for f in "${CHANGED_FILES_ARR[@]}"; do
     case "$f" in
-        *.sql|*migrations/*) DOMAINS="$DOMAINS DATABASE" ;;
+        *.sql|*migrations/*|*migrations/*.py) DOMAINS="$DOMAINS DATABASE" ;;
+    esac
+    case "$f" in
+        *billing/*|*credits/*|*subscription*|*ledger*|*payment*) DOMAINS="$DOMAINS BILLING" ;;
     esac
     case "$f" in
         *router*|*route.ts) DOMAINS="$DOMAINS AUTH" ;;
@@ -122,8 +139,16 @@ for f in {CHANGED_FILES}; do
     esac
     case "$f" in
         *anti_detection/*|*consumers/*|*browser/*|*shared/detection/*)
-            echo "$f" | grep -qE '\.py$' && DOMAINS="$DOMAINS STRING_SETS"
+            # STRING_SETS is a scraping-pack domain — opt-in via forge.yaml → quality_gate.optional_domains
+            # <!-- Updated: forge#1349 — not enabled by default; scraping-product-specific -->
+            if echo "$f" | grep -qE '\.py$'; then
+                _OPT_DOMAINS=$(grep -A5 'optional_domains:' "{WORKTREE_PATH}/forge.yaml" 2>/dev/null | grep -oE 'STRING_SETS' | head -1 || true)
+                [ -n "$_OPT_DOMAINS" ] && DOMAINS="$DOMAINS STRING_SETS"
+            fi
             ;;
+    esac
+    case "$f" in
+        commands/*.md|scripts/*) DOMAINS="$DOMAINS FORGE_GRAPH" ;;
     esac
     case "$f" in
         .github/workflows/*.yml) DOMAINS="$DOMAINS WORKFLOW" ;;
@@ -137,30 +162,54 @@ grep -lE "asyncio\.shield|asyncio\.wait_for|Task\.cancel" {CHANGED_FILES} 2>/dev
 grep -lE "^\w+ = (\{\}|\[\]|set\(\)|Lock\(\)|defaultdict|Counter)" {CHANGED_FILES} 2>/dev/null | grep -qE '\.py$' && DOMAINS="$DOMAINS STATE"
 
 # Check for capacity constants in worker/infra/browser Python files
-for f in $(echo {CHANGED_FILES} | tr ' ' '\n' | grep -E '\.py$' | grep -E 'services/worker/|infra/|browser/'); do
-    git diff HEAD -- "$f" 2>/dev/null | grep -qE '^\+[A-Za-z_]\w*(MB|SIZE|MAX|LIMIT|THRESHOLD|TIMEOUT)\w*\s*=' && DOMAINS="$DOMAINS CAPACITY" && break
-done
+# CAPACITY is a scraping-pack domain — opt-in via forge.yaml → quality_gate.optional_domains
+# <!-- Updated: forge#1349 — not enabled by default; scraping-product-specific -->
+_OPT_CAPACITY=$(grep -A5 'optional_domains:' "{WORKTREE_PATH}/forge.yaml" 2>/dev/null | grep -oE 'CAPACITY' | head -1 || true)
+if [ -n "$_OPT_CAPACITY" ]; then
+    while IFS= read -r f; do
+        [ -z "$f" ] && continue
+        git diff HEAD -- "$f" 2>/dev/null | grep -qE '^\+[A-Za-z_]\w*(MB|SIZE|MAX|LIMIT|THRESHOLD|TIMEOUT)\w*\s*=' && DOMAINS="$DOMAINS CAPACITY" && break
+    done < <(echo {CHANGED_FILES} | tr ' ' '\n' | grep -E '\.py$' | grep -E 'services/worker/|infra/|browser/')
+fi
 
 # Check for env var usage in changed files
 grep -lE "os\.getenv|process\.env" {CHANGED_FILES} 2>/dev/null && DOMAINS="$DOMAINS DEPLOY"
 
 # Check for new app.* imports added outside try: blocks in Python files
-for f in $(echo {CHANGED_FILES} | tr ' ' '\n' | grep -E '\.py$'); do
+while IFS= read -r f; do
+    [ -z "$f" ] && continue
     NEW_IMPORTS=$(git diff HEAD -- "$f" 2>/dev/null | grep -E '^\+\s*(from app\.|import app\.)' | grep -v '^+++')
     if [ -n "$NEW_IMPORTS" ]; then
         DOMAINS="$DOMAINS IMPORT_RESOLUTION"
         break
     fi
-done
+done < <(echo {CHANGED_FILES} | tr ' ' '\n' | grep -E '\.py$')
 
 # Check for runtime UID changes in Dockerfiles or entrypoint scripts
-for f in $(echo {CHANGED_FILES} | tr ' ' '\n' | grep -iE 'Dockerfile|entrypoint.*\.sh'); do
+while IFS= read -r f; do
+    [ -z "$f" ] && continue
     git diff HEAD -- "$f" 2>/dev/null | grep -E '^\+.*(USER\s+[^0]|su-exec|gosu|setuid)' | grep -v '^+++' | grep -q . && DOMAINS="$DOMAINS INFRA" && break
-done
+done < <(echo {CHANGED_FILES} | tr ' ' '\n' | grep -iE 'Dockerfile|entrypoint.*\.sh')
 
 # Check for gate condition narrowing in router Python files (condition removal = fix may be incomplete across siblings)
-for f in $(echo {CHANGED_FILES} | tr ' ' '\n' | grep -E '\.py$' | grep -E 'router'); do
+while IFS= read -r f; do
+    [ -z "$f" ] && continue
     git diff HEAD -- "$f" 2>/dev/null | grep -E '^-.*\bif\b.*\bor\b' | grep -v '^---' | grep -q . && DOMAINS="$DOMAINS ROUTER_BUG" && break
+done < <(echo {CHANGED_FILES} | tr ' ' '\n' | grep -E '\.py$' | grep -E 'router')
+
+# Check for external tool config files (structural schema validation advisory)
+# {CHANGED_FILES} is space-separated (see array-split note above) — reuse the
+# same CHANGED_FILES_ARR built above instead of re-splitting.
+for f in "${CHANGED_FILES_ARR[@]}"; do
+    case "$f" in
+        traefik/*|infra/nginx/*|k8s/*|terraform/*)
+            DOMAINS="$DOMAINS CONFIG_SCHEMA" && break ;;
+        *.conf|*.toml)
+            echo "$f" | grep -qE 'infra/|traefik/|nginx/|k8s/|terraform/' && DOMAINS="$DOMAINS CONFIG_SCHEMA" && break ;;
+        docker-compose*.yml)
+            # Trigger only if service definitions changed (not just env vars or labels)
+            git diff HEAD -- "$f" 2>/dev/null | grep -E '^\+\s+(image:|command:|entrypoint:)' | grep -q . && DOMAINS="$DOMAINS CONFIG_SCHEMA" && break ;;
+    esac
 done
 
 # SECURITY is always included for any code file
@@ -185,7 +234,7 @@ Run ONLY the checks whose domain was identified in Step 1.5. Skip checks for dom
 - **2D (Database)**: Run if `DATABASE` in DOMAINS
 - **2E (Frontend lifecycle)**: Run if `FRONTEND` in DOMAINS
 - **2F (Frontend proxy)**: Run if `PROXY` in DOMAINS
-- **2G (Cross-service integration)**: Run if `SHELL` in DOMAINS
+- **2G (Cross-service integration)**: Run if `SHELL` or `FORGE_GRAPH` in DOMAINS
 - **2H (Asyncio cancellation)**: Run if `CONCURRENCY` in DOMAINS
 - **2I (State completeness)**: Run if `STATE` in DOMAINS
 - **2J (String literal consistency)**: Run if `STRING_SETS` in DOMAINS
@@ -194,6 +243,10 @@ Run ONLY the checks whose domain was identified in Step 1.5. Skip checks for dom
 - **2M (Import resolution)**: Run if `IMPORT_RESOLUTION` in DOMAINS
 - **2N (Runtime UID × filesystem write)**: Run if `INFRA` in DOMAINS
 - **2O (Residual pattern check)**: Run if `ROUTER_BUG` in DOMAINS
+- **2P (External tool config schema)**: Run if `CONFIG_SCHEMA` in DOMAINS
+- **2Q (Billing)**: Run if `BILLING` in DOMAINS
+- **2R (Registry checks)**: ALWAYS run — executes all promoted checks from `scripts/check-registry/manifest.json` <!-- Added: forge#1331 -->
+- **2S (Test failure classification)**: Run if any Step 2 check invoked a test suite and it failed — classifies the failure as PRE_BROKEN, FLAKY, or REAL using `scripts/flaky-quarantine.sh` <!-- Added: forge#1336 -->
 
 ### 2A: Security (ALL files)
 
@@ -207,7 +260,11 @@ For every changed file, check:
 
 ```bash
 # Quick automated checks
-for f in {CHANGED_FILES}; do
+# {CHANGED_FILES} is a space-separated argument — split explicitly on IFS=' '
+# into an array instead of a bare `for f in {CHANGED_FILES}` (see Step 1.5 for
+# the full rationale; this is a separate bash block so the array is rebuilt here).
+IFS=' ' read -ra CHANGED_FILES_ARR <<< "{CHANGED_FILES}"
+for f in "${CHANGED_FILES_ARR[@]}"; do
     # f-string SQL
     grep -nE "f['\"].*SELECT|f['\"].*INSERT|f['\"].*UPDATE|f['\"].*DELETE|f['\"].*WHERE" "$f" 2>/dev/null && echo "SEC: f-string SQL in $f"
     # Hardcoded secrets
@@ -230,15 +287,28 @@ done
 ### 2B: Auth conventions (Python routers, TypeScript route handlers)
 
 For new/modified endpoints:
-1. Which auth dependency is used — `SessionUser` or `CurrentUser`?
-2. Does the route path match? Dashboard routes (`/api/dashboard/*`) must use `SessionUser`. Public API routes (`/api/v1/*`) must use `CurrentUser`.
-3. Does the endpoint check resource ownership (`user_id`) before returning data?
+1. Which auth dependency is used? Read `forge.yaml → review.domains.auth` for the configured dependency name(s). If absent, skip the naming check and fall back to generic resource-ownership verification only.
+2. Does the endpoint check resource ownership (`user_id` or equivalent) before returning data?
+
+Route-path-to-dependency convention (e.g. "dashboard routes must use X, public routes must use Y") is project-specific. Configure it in `forge.yaml → review.domains.auth` if your project uses one. Do not enforce a hard-coded convention universally. <!-- Updated: forge#1349 — removed hardcoded SessionUser/CurrentUser rule -->
 
 ```bash
-for f in $(echo {CHANGED_FILES} | tr ' ' '\n' | grep -E 'router|route'); do
-    grep -nE "CurrentUser|SessionUser|Depends\(get_" "$f" 2>/dev/null
+# Read configured auth dependency names from forge.yaml (if present)
+AUTH_DEPS=""
+if [ -f "{WORKTREE_PATH}/forge.yaml" ]; then
+    AUTH_DEPS=$(grep -A5 'domains:' "{WORKTREE_PATH}/forge.yaml" 2>/dev/null \
+        | grep -A3 'auth:' | grep -oE '[A-Za-z_]+User|[A-Za-z_]+Auth|get_[a-z_]+' | sort -u | tr '\n' '|' | sed 's/|$//')
+fi
+
+while IFS= read -r f; do
+    [ -z "$f" ] && continue
+    if [ -n "$AUTH_DEPS" ]; then
+        grep -nE "($AUTH_DEPS)|Depends\(get_" "$f" 2>/dev/null
+    else
+        grep -nE "Depends\(get_" "$f" 2>/dev/null
+    fi
     grep -nE "@router\.(get|post|put|delete)" "$f" 2>/dev/null
-done
+done < <(echo {CHANGED_FILES} | tr ' ' '\n' | grep -E 'router|route')
 ```
 
 ### 2C: Deploy chain (when new env vars are introduced)
@@ -249,50 +319,66 @@ if [ -n "$NEW_ENVS" ]; then
     for var in $NEW_ENVS; do
         # Check if it exists in .env.example
         grep -q "$var" .env.example 2>/dev/null || echo "DEPLOY: $var not in .env.example"
-        # Check if it's in decrypt-secrets.sh ENV_MAPPING
-        grep -q "$var" scripts/decrypt-secrets.sh 2>/dev/null || echo "DEPLOY: $var not in decrypt-secrets.sh ENV_MAPPING"
+        # Check decrypt-secrets.sh ENV_MAPPING only when the SOPS mapping script exists.
+        # Emitting a finding for a file that doesn't exist in the repo produces false BLOCKINGs
+        # on non-SOPS repos. Use verify-sops-chain.sh for the full SOPS chain check instead.
+        # <!-- Updated: forge#1349 — gate on file presence -->
+        if [ -f "{WORKTREE_PATH}/scripts/decrypt-secrets.sh" ]; then
+            grep -q "$var" "{WORKTREE_PATH}/scripts/decrypt-secrets.sh" 2>/dev/null || echo "DEPLOY: $var not in decrypt-secrets.sh ENV_MAPPING"
+        fi
     done
 fi
 ```
 
-### 2D: Database quality (SQL migration files)
+### 2D: Database quality (SQL migration files and Alembic Python migrations)
 
-For each `.sql` file:
+For each `.sql` file or Alembic migration `.py` file:
 1. **NOT NULL without DEFAULT**: `ALTER TABLE ... ADD COLUMN ... NOT NULL` without `DEFAULT` locks table and fails on existing rows
 2. **DROP without IF EXISTS**: Fails on fresh databases
 3. **Missing indexes**: New columns used in WHERE/JOIN without indexes
 4. **Unbounded queries**: SELECT without LIMIT or time-bound WHERE clause
 5. **Migration number collision**: Check against origin branch
+6. **IF NOT EXISTS guard**: `CREATE TABLE`/`CREATE INDEX` without `IF NOT EXISTS` guard fails on re-run
 
 ```bash
-for f in $(echo {CHANGED_FILES} | tr ' ' '\n' | grep '\.sql$'); do
+while IFS= read -r f; do
+    [ -z "$f" ] && continue
     grep -nE "ADD COLUMN.*NOT NULL" "$f" | grep -v "DEFAULT" && echo "DB: NOT NULL without DEFAULT in $f"
     grep -nE "DROP (TABLE|COLUMN|INDEX)" "$f" | grep -v "IF EXISTS" && echo "DB: DROP without IF EXISTS in $f"
     grep -nE "SELECT.*FROM" "$f" | grep -v "LIMIT" | grep -v "WHERE.*created_at" && echo "DB: possibly unbounded query in $f"
-done
+    # IF NOT EXISTS guard check — CREATE TABLE/INDEX without guard fails on replay or repeated apply
+    grep -nE "^\s*(CREATE TABLE|CREATE INDEX|CREATE UNIQUE INDEX)\b" "$f" | grep -iv "IF NOT EXISTS" && \
+        echo "DB-GUARD | MEDIUM | $f | CREATE TABLE/INDEX without IF NOT EXISTS guard — statement will fail on re-run or fresh database replay. Add IF NOT EXISTS."
+done < <(echo {CHANGED_FILES} | tr ' ' '\n' | grep -E '\.sql$')
+
+# Also run structural checks on Alembic Python migration files
+while IFS= read -r f; do
+    [ -z "$f" ] && continue
+    # Check for op.create_table / op.create_index without if_not_exists or checkfirst guard
+    grep -nE "\bop\.create_table\b|\bop\.create_index\b" "$f" | grep -iv "if_not_exists\|checkfirst" && \
+        echo "DB-GUARD | MEDIUM | $f | op.create_table/op.create_index without if_not_exists/checkfirst guard — will fail on replay. Add if_not_exists=True or checkfirst=True."
+done < <(echo {CHANGED_FILES} | tr ' ' '\n' | grep -E 'migrations/.*\.py$')
 
 # Migration prefix collision scan (Deploy Gate — HIGH)
-# Runs whenever any SQL file changed. Scans the full infra/migrations/ tree for duplicate
-# numeric prefixes not in GRANDFATHERED_DUPLICATES. Duplicates not in the allowlist WILL
-# hard-fail deploy-production.yml's validate-migration-order.sh gate.
+# Runs whenever any SQL or Alembic Python migration file changed. Scans the configured
+# migrations directory for duplicate numeric prefixes (both .sql and .py files).
+# Duplicate prefixes can cause ordering conflicts during deploy.
+# <!-- Updated: forge#1349 — removed stale validate-migration-order.sh reference (script does not exist) -->
+# <!-- Updated: forge#1329 — extended collision scan to cover .py Alembic migration files -->
 MIGRATIONS_DIR="{WORKTREE_PATH}/infra/migrations"
+# Support configured migration directory from forge.yaml (if set)
+if [ -f "{WORKTREE_PATH}/forge.yaml" ]; then
+    _CONFIGURED_MIGRATIONS=$(grep -E '^\s*migrations_dir:' "{WORKTREE_PATH}/forge.yaml" 2>/dev/null \
+        | head -1 | sed 's/.*migrations_dir:[[:space:]]*//' | tr -d '"' | tr -d "'" | xargs)
+    [ -n "$_CONFIGURED_MIGRATIONS" ] && MIGRATIONS_DIR="{WORKTREE_PATH}/${_CONFIGURED_MIGRATIONS}"
+fi
 if [ -d "$MIGRATIONS_DIR" ]; then
-    # Extract grandfathered prefixes from validate-migration-order.sh if it exists
-    GRANDFATHER_SCRIPT="{WORKTREE_PATH}/scripts/validate-migration-order.sh"
-    GRANDFATHERED=""
-    if [ -f "$GRANDFATHER_SCRIPT" ]; then
-        GRANDFATHERED=$(grep -oE '[0-9]{4}' "$GRANDFATHER_SCRIPT" | sort -u | tr '\n' ' ')
-    fi
-    # Find duplicate numeric prefixes across all migration files
-    DUPLICATE_PREFIXES=$(ls "$MIGRATIONS_DIR"/*.sql 2>/dev/null \
+    # Find duplicate numeric prefixes across all migration files (.sql and .py)
+    DUPLICATE_PREFIXES=$( { ls "$MIGRATIONS_DIR"/*.sql 2>/dev/null; ls "$MIGRATIONS_DIR"/*.py 2>/dev/null; } \
         | sed 's|.*/\([0-9]*\)_.*|\1|' \
         | sort | uniq -d)
     for prefix in $DUPLICATE_PREFIXES; do
-        if echo "$GRANDFATHERED" | grep -qw "$prefix"; then
-            echo "DB: migration prefix $prefix is duplicated but grandfathered (INFO)"
-        else
-            echo "DB-COLLISION | HIGH | infra/migrations/ | Duplicate migration prefix $prefix is NOT grandfathered — will hard-fail deploy-production.yml validate-migration-order.sh gate. Classify as CRITICAL BLOCKER."
-        fi
+        echo "DB-COLLISION | HIGH | $MIGRATIONS_DIR | Duplicate migration prefix $prefix — ordering conflict will occur during deploy. Classify as CRITICAL BLOCKER."
     done
 fi
 ```
@@ -309,7 +395,8 @@ For each `.tsx`/`.ts` client component:
 7. **Rules of Hooks**: Do function components avoid early returns before hook calls?
 
 ```bash
-for f in $(echo {CHANGED_FILES} | tr ' ' '\n' | grep -E '\.tsx?$' | grep -v 'route\.ts'); do
+while IFS= read -r f; do
+    [ -z "$f" ] && continue
     # Check for useEffect without cleanup (basic heuristic)
     grep -c "useEffect" "$f" 2>/dev/null
     grep -c "return.*cleanup\|return.*\(\) =>" "$f" 2>/dev/null
@@ -349,15 +436,35 @@ for f in $(echo {CHANGED_FILES} | tr ' ' '\n' | grep -E '\.tsx?$' | grep -v 'rou
         }
         in_component && /\buse[A-Z]/ { found_hook=1 }
     ' FILENAME="$f" "$f" 2>/dev/null
-done
+done < <(echo {CHANGED_FILES} | tr ' ' '\n' | grep -E '\.tsx?$' | grep -v 'route\.ts')
 ```
 
 ### 2F: Frontend proxy wiring (client-side fetch calls)
 
+The direct-backend path prefix to flag is read from `forge.yaml → review.layout.direct_api_prefix`.
+If absent, defaults to `/api/v1/` (backward compatible). This prevents false findings on projects
+that use a different API path scheme. <!-- Updated: forge#1349 — gate on forge.yaml, not hardcoded prefix -->
+
 ```bash
-for f in $(echo {CHANGED_FILES} | tr ' ' '\n' | grep -E '\.(tsx?|jsx?)$' | grep -v 'route\.ts$'); do
-    grep -nE '(fetch|useSWR|apiFetch)\s*[(<]\s*[`"'"'"']/api/v1/' "$f" 2>/dev/null && echo "PROXY: direct /api/v1/ call in $f — must use /api/ proxy"
-done
+# Read configured direct API prefix from forge.yaml, fall back to /api/v1/
+DIRECT_API_PREFIX="/api/v1/"
+if [ -f "{WORKTREE_PATH}/forge.yaml" ]; then
+    _CONFIGURED_PREFIX=$(grep -E '^\s*direct_api_prefix:' "{WORKTREE_PATH}/forge.yaml" 2>/dev/null \
+        | head -1 | sed 's/.*direct_api_prefix:[[:space:]]*//' | tr -d '"' | tr -d "'" | xargs)
+    # Also check under review.layout section
+    if [ -z "$_CONFIGURED_PREFIX" ]; then
+        _CONFIGURED_PREFIX=$(grep -A 10 'layout:' "{WORKTREE_PATH}/forge.yaml" 2>/dev/null \
+            | grep -E '^\s*direct_api_prefix:' \
+            | head -1 | sed 's/.*direct_api_prefix:[[:space:]]*//' | tr -d '"' | tr -d "'" | xargs)
+    fi
+    [ -n "$_CONFIGURED_PREFIX" ] && DIRECT_API_PREFIX="$_CONFIGURED_PREFIX"
+fi
+ESCAPED_PREFIX=$(printf '%s' "$DIRECT_API_PREFIX" | sed 's|/|\\/|g')
+
+while IFS= read -r f; do
+    [ -z "$f" ] && continue
+    grep -nE "(fetch|useSWR|apiFetch)\\s*[(<]\\s*[\`\"']${ESCAPED_PREFIX}" "$f" 2>/dev/null && echo "PROXY: direct ${DIRECT_API_PREFIX} call in $f — must use /api/ proxy (configure review.layout.direct_api_prefix in forge.yaml to change the flagged prefix)"
+done < <(echo {CHANGED_FILES} | tr ' ' '\n' | grep -E '\.(tsx?|jsx?)$' | grep -v 'route\.ts$')
 ```
 
 ### 2G: Cross-service integration (shell scripts with curl/wget)
@@ -392,7 +499,8 @@ The script `verify-host-headers.sh` checks for the `FORGE_INTERNAL_PATTERNS` env
 **Why this matters**: Every DB connection function in a deploy script must use `${POSTGRES_HOST:-localhost}` (or equivalent env var interpolation), not a bare `"localhost"` string literal. A hardcoded `"localhost"` works in local development but fails in any environment where PostgreSQL runs on a separate host. The pattern is reliably grep-detectable. <!-- Added: forge#303 -->
 
 ```bash
-for f in $(echo {CHANGED_FILES} | tr ' ' '\n' | grep -E '\.sh$'); do
+while IFS= read -r f; do
+    [ -z "$f" ] && continue
   # Only check files that contain DB connection tools
   if grep -qE "PGPASSWORD|createdb|psql|pg_dump|pg_restore" "$f" 2>/dev/null; then
     # Look for new/modified lines with hardcoded localhost in variable assignments
@@ -407,10 +515,62 @@ for f in $(echo {CHANGED_FILES} | tr ' ' '\n' | grep -E '\.sh$'); do
       echo "$HARDCODED"
     fi
   fi
-done
+done < <(echo {CHANGED_FILES} | tr ' ' '\n' | grep -E '\.sh$')
 ```
 
 Report any hit as **HIGH** — the DB connection will fail in any environment where PostgreSQL is not on `127.0.0.1:5432`.
+
+### 2G.6: Spec graph self-consistency (FORGE_GRAPH domain)
+
+**Triggered when**: changed files include `commands/*.md` specs or `scripts/*` files (ForgeDock repo only — it dogfoods its own Spec Knowledge Graph). Skips silently in any project without `scripts/validate-spec-graph.sh`.
+
+**Why this matters**: ForgeDock's pipeline behavior is encoded in a ~1.2 MB prose spec corpus where drift is invisible — a `FORGE:*` annotation written but never read, a `Skill(skill="X")` referencing a sub-phase that no longer exists, or a `workflow:*` label set by no command. The Spec Knowledge Graph (`build-spec-graph.mjs`) makes this queryable; `validate-spec-graph.sh` consumes it and partitions findings into HARD (dangling cross-refs, broken label transitions) and SOFT (orphan annotations).
+
+```bash
+# Run only when commands/*.md or scripts/* changed and the validator ships in this repo.
+VALIDATOR="$FORGEDOCK_SCRIPTS/validate-spec-graph.sh"
+[ -f "$VALIDATOR" ] || VALIDATOR="{WORKTREE_PATH}/scripts/validate-spec-graph.sh"
+if [ -f "$VALIDATOR" ]; then
+    # The graph is auto-built from the worktree (gitignored JSON not required).
+    # --soft keeps the gate non-blocking on the documented baseline orphans;
+    # HARD findings are still reported below and surfaced as gate findings.
+    GRAPH_REPORT=$(bash "$VALIDATOR" --root "{WORKTREE_PATH}" --soft 2>&1 || true)
+    echo "$GRAPH_REPORT"
+    # Map any HARD finding to a quality-gate finding (dangling ref / broken transition).
+    echo "$GRAPH_REPORT" | grep -E '^\s*\[HARD\]' | while IFS= read -r hit; do
+        echo "FORGE_GRAPH | HIGH | spec-graph | ${hit#*] }"
+    done
+fi
+```
+
+Report each `[HARD]` line as **HIGH** — a dangling `Skill()` target or a label set by no command is a real pipeline break (an agent will invoke a phase that does not exist, or a state will never be entered/exited). Orphan-annotation `[SOFT]` lines are advisory: surface them in the report for periodic triage but do NOT block the commit. Scaffolding `[INFO]` lines are expected and need no action. To gate on HARD findings (fail the build), drop `--soft`; the default keeps existing baseline orphans from blocking until they are triaged. <!-- Added: forge#869 -->
+
+### 2G.7: Native command conflict check (FORGE_GRAPH domain)
+
+**Triggered when**: changed files include `commands/*.md` files (top-level, not sub-phase subdirectories). Skips silently in any project without `scripts/check-native-conflicts.sh`.
+
+**Why this matters**: ForgeDock commands are installed into `~/.claude/commands/`, the same namespace as native Claude Code built-in slash commands. A top-level command file whose basename matches a native command name (e.g. `resume.md` → `/resume`, `status.md` → `/status`) completely shadows the native command — users lose access to core Claude Code functionality with no error message. This check prevents the bug class from ever reaching `staging` or `npm publish`. <!-- Added: forge#1074 -->
+
+```bash
+# Run only when top-level commands/*.md files changed and the script ships in this repo.
+# Sub-phase files in subdirectories (commands/work-on/*.md) are installed with their
+# relative path preserved and resolve to namespaced commands — they cannot shadow
+# root-level native commands and are not scanned.
+CONFLICT_CHECKER="$FORGEDOCK_SCRIPTS/check-native-conflicts.sh"
+[ -f "$CONFLICT_CHECKER" ] || CONFLICT_CHECKER="{WORKTREE_PATH}/scripts/check-native-conflicts.sh"
+if [ -f "$CONFLICT_CHECKER" ]; then
+    CONFLICT_REPORT=$(bash "$CONFLICT_CHECKER" "{WORKTREE_PATH}/commands" 2>&1) || CONFLICT_EXIT=$?
+    echo "$CONFLICT_REPORT"
+    if [ "${CONFLICT_EXIT:-0}" -ne 0 ]; then
+        # Extract each conflicting file from the report and emit a gate finding.
+        echo "$CONFLICT_REPORT" | grep -E '^\s+commands/' | while IFS= read -r hit; do
+            echo "FORGE_GRAPH | HIGH | native-conflict | ${hit#*  }"
+        done
+    fi
+fi
+```
+
+Report each conflict as **HIGH** — a shadowed native command is a silent user-facing regression (the native command becomes unreachable without warning). The builder must rename the conflicting file before the commit. Blocklist updates are in `scripts/check-native-conflicts.sh` (NATIVE_COMMANDS array).
 
 ### 2H: Asyncio cancellation safety (Python async code)
 
@@ -421,7 +581,8 @@ Report any hit as **HIGH** — the DB connection will fail in any environment wh
 **Severity**: MEDIUM (flags for review, not auto-blocking). The review agent's concurrency auditor verifies with full context.
 
 ```bash
-for f in $(echo {CHANGED_FILES} | tr ' ' '\n' | grep -E '\.py$'); do
+while IFS= read -r f; do
+    [ -z "$f" ] && continue
     # asyncio.shield usage — outer await may be reached with pending CancelledError
     grep -nE "asyncio\.shield" "$f" 2>/dev/null && \
         echo "ASYNC: asyncio.shield in $f — verify outer await isn't reachable with pending CancelledError. Prefer loop.create_task() for fire-and-forget."
@@ -436,7 +597,7 @@ for f in $(echo {CHANGED_FILES} | tr ' ' '\n' | grep -E '\.py$'); do
         sed -n "$((LINENO+1)),$((LINENO+5))p" "$f" | grep -q "await" && \
             echo "ASYNC: await in except/finally block at $f:$LINENO — may fail if CancelledError is pending"
     done
-done
+done < <(echo {CHANGED_FILES} | tr ' ' '\n' | grep -E '\.py$')
 ```
 
 
@@ -459,7 +620,8 @@ For each new module-level state variable in the diff:
    ```
 
 ```bash
-for f in $(echo {CHANGED_FILES} | tr ' ' '\n' | grep -E '\.py$'); do
+while IFS= read -r f; do
+    [ -z "$f" ] && continue
     # Find new module-level state variables introduced in the diff
     NEW_VARS=$(git diff HEAD -- "$f" 2>/dev/null | grep -E '^\+[A-Za-z_]\w* = (\{\}|\[\]|set\(\)|Lock\(\)|defaultdict|Counter)' | grep -oE '^[+][A-Za-z_]\w*' | tr -d '+' | sort -u)
     for new_var in $NEW_VARS; do
@@ -476,16 +638,18 @@ for f in $(echo {CHANGED_FILES} | tr ' ' '\n' | grep -E '\.py$'); do
             done
         done
     done
-done
+done < <(echo {CHANGED_FILES} | tr ' ' '\n' | grep -E '\.py$')
 ```
 
 **Severity**: MEDIUM — missing a mutation site is usually a latent bug, not an immediate crash, but it causes incorrect behavior under concurrent load.
 
 ---
 
-### 2J: String literal consistency (anti-detection/scraping code)
+### 2J: String literal consistency (anti-detection/scraping code) *(Scraping Pack — opt-in)*
 
-**Triggered when**: changed files include Python files in `anti_detection/`, `consumers/`, `browser/`, or `shared/detection/` directories.
+> **This domain is opt-in and disabled by default.** It is specific to scraping/anti-detection products and produces false findings on general repos. Enable it by adding `STRING_SETS` to `forge.yaml → quality_gate.optional_domains`. <!-- Added: forge#1349 -->
+
+**Triggered when**: changed files include Python files in `anti_detection/`, `consumers/`, `browser/`, or `shared/detection/` directories AND `STRING_SETS` is in `forge.yaml → quality_gate.optional_domains`.
 
 **Why this matters**: Detection keyword sets (e.g., `CHALLENGE_KEYWORDS`, `COMMON_COOKIES`) across related modules share a domain truth — if Akamai adds a new cookie marker, it must appear in ALL related sets. A typo or omission in one set silently breaks detection for that service path. This check catches both inter-file inconsistencies and intra-file comment/code drift.
 
@@ -494,11 +658,12 @@ For each changed file in the anti-detection/scraping domains:
 **1. Identify modified string identifier sets** (frozensets, tuples, or lists of string literals used for detection):
 
 ```bash
-for f in $(echo {CHANGED_FILES} | tr ' ' '\n' | grep -E '\.py$' | grep -E 'anti_detection/|consumers/|browser/|shared/detection/'); do
+while IFS= read -r f; do
+    [ -z "$f" ] && continue
     echo "=== String sets in $f ==="
     # Find named constants that are frozenset/tuple/list of strings
     grep -nE "^[A-Z_]+ = (frozenset|tuple|set)\(\[?['\"]|^[A-Z_]+ = \(['\"]|^[A-Z_]+ = \[['\"]" "$f" 2>/dev/null
-done
+done < <(echo {CHANGED_FILES} | tr ' ' '\n' | grep -E '\.py$' | grep -E 'anti_detection/|consumers/|browser/|shared/detection/')
 ```
 
 **2. For each string in a modified set, check if it appears in sibling detection files:**
@@ -506,7 +671,8 @@ done
 ```bash
 SERVICE_DIR=$(echo {CHANGED_FILES} | tr ' ' '\n' | grep -E 'anti_detection/|consumers/|browser/' | head -1 | grep -oE '^services/[^/]+/[^/]+' || echo "services/worker/worker")
 
-for f in $(echo {CHANGED_FILES} | tr ' ' '\n' | grep -E '\.py$' | grep -E 'anti_detection/|consumers/|browser/|shared/detection/'); do
+while IFS= read -r f; do
+    [ -z "$f" ] && continue
     # Extract string values from detection sets in this file
     STRINGS=$(grep -oE "'[a-z_][a-z0-9_-]*'" "$f" 2>/dev/null | tr -d "'" | sort -u)
     for s in $STRINGS; do
@@ -514,13 +680,14 @@ for f in $(echo {CHANGED_FILES} | tr ' ' '\n' | grep -E '\.py$' | grep -E 'anti_
         FOUND=$(grep -rl "\"$s\"\|'$s'" $SERVICE_DIR/ 2>/dev/null | grep -v "^$f$" | grep '\.py$' | head -1)
         [ -z "$FOUND" ] && echo "STR: '$s' in $f appears NOWHERE else in $SERVICE_DIR — possible typo or dead entry"
     done
-done
+done < <(echo {CHANGED_FILES} | tr ' ' '\n' | grep -E '\.py$' | grep -E 'anti_detection/|consumers/|browser/|shared/detection/')
 ```
 
 **3. Check for identifiers mentioned in comments/docstrings of the SAME file that are NOT in the actual set** (catches the `abck` vs `_abck` class of bug):
 
 ```bash
-for f in $(echo {CHANGED_FILES} | tr ' ' '\n' | grep -E '\.py$' | grep -E 'anti_detection/|consumers/|browser/|shared/detection/'); do
+while IFS= read -r f; do
+    [ -z "$f" ] && continue
     echo "=== Comment/code drift in $f ==="
     # Extract string literals from actual sets (remove quotes)
     SET_STRINGS=$(grep -oE "frozenset\(\[([^]]+)\]\)" "$f" 2>/dev/null | grep -oE "'[^']+'" | tr -d "'" | sort -u)
@@ -532,20 +699,25 @@ for f in $(echo {CHANGED_FILES} | tr ' ' '\n' | grep -E '\.py$' | grep -E 'anti_
     for ref in $COMMENT_REFS; do
         echo "$SET_STRINGS" | grep -q "^${ref}$" || echo "STR: '$ref' mentioned in comment in $f but NOT found in any string set — possible omission or typo"
     done
-done
+done < <(echo {CHANGED_FILES} | tr ' ' '\n' | grep -E '\.py$' | grep -E 'anti_detection/|consumers/|browser/|shared/detection/')
 ```
 
 **4. Cross-reference sibling sets in related modules** (the primary inter-file check):
 
 ```bash
 # Find all detection-related Python files in the same service
-for f in $(echo {CHANGED_FILES} | tr ' ' '\n' | grep -E '\.py$' | grep -E 'anti_detection/|consumers/|browser/'); do
+while IFS= read -r f; do
+    [ -z "$f" ] && continue
     SIBLINGS=$(find $(dirname "$f")/../ -name "*.py" -path "*/anti_detection/*" -o -name "*.py" -path "*/consumers/*" -o -name "*.py" -path "*/browser/*" 2>/dev/null | grep -v "^$f$" | head -10)
 
     # Extract detection set names from the changed file
     SET_NAMES=$(grep -oE "^[A-Z_]+ = (frozenset|tuple|set)" "$f" 2>/dev/null | grep -oE "^[A-Z_]+")
 
-    for sib in $SIBLINGS; do
+    # $SIBLINGS is one file path per line (`find`) — herestring (not a piped
+    # `| while read`, which would run the loop body in a subshell and discard
+    # any accumulator set inside it) preserves newline-safety for paths with spaces.
+    while IFS= read -r sib; do
+        [ -z "$sib" ] && continue
         # Extract strings from sibling detection sets
         SIB_STRINGS=$(grep -oE "'[a-z_][a-z0-9_-]*'" "$sib" 2>/dev/null | tr -d "'" | sort -u)
 
@@ -556,8 +728,8 @@ for f in $(echo {CHANGED_FILES} | tr ' ' '\n' | grep -E '\.py$' | grep -E 'anti_
             echo "$SIB_STRINGS" | grep -q "^${s}$" || \
                 echo "STR: '$s' in $f not found in sibling file $sib — verify if cross-module consistency is required"
         done
-    done
-done
+    done <<< "$SIBLINGS"
+done < <(echo {CHANGED_FILES} | tr ' ' '\n' | grep -E '\.py$' | grep -E 'anti_detection/|consumers/|browser/')
 ```
 
 **Flag as findings**:
@@ -567,16 +739,19 @@ done
 
 ---
 
-### 2K: Capacity constant validation (worker/infra code)
+### 2K: Capacity constant validation (worker/infra code) *(Scraping Pack — opt-in)*
 
-**Triggered when**: changed Python files in `services/worker/`, `infra/`, or `browser/` introduce new assignments to variables whose names contain `MB`, `SIZE`, `MAX`, `LIMIT`, `THRESHOLD`, or `TIMEOUT`.
+> **This domain is opt-in and disabled by default.** It is specific to scraping/browser-pool products and produces false findings on general repos. Enable it by adding `CAPACITY` to `forge.yaml → quality_gate.optional_domains`. <!-- Added: forge#1349 -->
+
+**Triggered when**: changed Python files in `services/worker/`, `infra/`, or `browser/` introduce new assignments to variables whose names contain `MB`, `SIZE`, `MAX`, `LIMIT`, `THRESHOLD`, or `TIMEOUT` AND `CAPACITY` is in `forge.yaml → quality_gate.optional_domains`.
 
 **Why this matters**: Hardcoded capacity constants (e.g., `_BROWSER_ESTIMATED_MB = 200`) are design-time guesses that drift from production reality. When used in guard conditions (e.g., "5 × 200 MB = 1000 MB peak"), a wrong constant directly limits system throughput and may never be caught until a slot fails to spawn. A constant is correctly-typed and correctly-used but factually wrong — logic checks pass, the bug ships.
 
 For each new or modified capacity constant in the diff:
 
 ```bash
-for f in $(echo {CHANGED_FILES} | tr ' ' '\n' | grep -E '\.py$' | grep -E 'services/worker/|infra/|browser/'); do
+while IFS= read -r f; do
+    [ -z "$f" ] && continue
     # Find new capacity constant assignments introduced by this diff
     NEW_CAPS=$(git diff HEAD -- "$f" 2>/dev/null | grep -E '^\+[A-Za-z_]\w*(MB|SIZE|MAX|LIMIT|THRESHOLD|TIMEOUT)\w*\s*=' | grep -oE '^[+][A-Za-z_]\w+' | tr -d '+' | sort -u)
     for cap_var in $NEW_CAPS; do
@@ -594,7 +769,7 @@ for f in $(echo {CHANGED_FILES} | tr ' ' '\n' | grep -E '\.py$' | grep -E 'servi
         git log --all -15 --oneline --grep="memory" 2>/dev/null | head -5
         git log --all -15 --oneline --grep="$(echo $keywords | cut -d' ' -f1)" 2>/dev/null | head -5
     done
-done
+done < <(echo {CHANGED_FILES} | tr ' ' '\n' | grep -E '\.py$' | grep -E 'services/worker/|infra/|browser/')
 ```
 
 **Flag as findings**:
@@ -612,7 +787,8 @@ done
 **Why this matters**: `appleboy/ssh-action` processes every `script:` field through Go's `text/template` engine **client-side, before SSH transmission**. Any `{{` in the script — including in comments, `docker ps --format` strings, and `docker inspect --format` strings — is interpreted as a Go template directive. If the expression does not resolve against the action's data context (which is an empty map for `appleboy/ssh-action`), the step exits with status 1 **before the script reaches the remote shell**. Shell error handlers (`|| fallback`, `2>/dev/null`, `set -e`) are completely bypassed. `continue-on-error: true` masks the failure silently, producing apparent deploy success with no remote shell output.
 
 ```bash
-for f in $(echo {CHANGED_FILES} | tr ' ' '\n' | grep -E '\.github/workflows/.*\.yml$'); do
+while IFS= read -r f; do
+    [ -z "$f" ] && continue
     if grep -q "appleboy/ssh-action" "$f"; then
         TEMPLATE_HITS=$(grep -n "{{" "$f")
         if [ -n "$TEMPLATE_HITS" ]; then
@@ -629,7 +805,7 @@ for f in $(echo {CHANGED_FILES} | tr ' ' '\n' | grep -E '\.github/workflows/.*\.
             echo "  docker ps --format json | jq -r '.Status'"
         fi
     fi
-done
+done < <(echo {CHANGED_FILES} | tr ' ' '\n' | grep -E '\.github/workflows/.*\.yml$')
 ```
 
 Report any hit as **CONFIRMED HIGH** — the step will exit 1 before reaching the remote shell.
@@ -645,7 +821,8 @@ Go template directives in `appleboy/ssh-action` `script:` blocks are preprocesse
 ```bash
 PR_BASE="${PR_BASE:-staging}"
 
-for f in $(echo {CHANGED_FILES} | tr ' ' '\n' | grep -E '\.py$'); do
+while IFS= read -r f; do
+    [ -z "$f" ] && continue
     # Extract new app.* import statements added in the diff
     # Only consider lines added (starting with +), skip diff headers (+++)
     NEW_IMPORTS=$(git diff HEAD -- "$f" 2>/dev/null | grep -E '^\+\s*(from app\.|import app\.)' | grep -v '^+++' | sed 's/^+//')
@@ -679,7 +856,7 @@ for f in $(echo {CHANGED_FILES} | tr ' ' '\n' | grep -E '\.py$'); do
             fi
         fi
     done
-done
+done < <(echo {CHANGED_FILES} | tr ' ' '\n' | grep -E '\.py$')
 ```
 
 **Flag as findings**:
@@ -702,20 +879,24 @@ A builder agent working in a milestone-branch worktree has access to milestone-o
 # Step 1: Identify the service directory from the changed Dockerfile/entrypoint path
 # e.g. services/worker/Dockerfile → service root = services/worker/
 SERVICE_DIR=""
-for f in $(echo {CHANGED_FILES} | tr ' ' '\n' | grep -iE 'Dockerfile|entrypoint.*\.sh'); do
+while IFS= read -r f; do
+    [ -z "$f" ] && continue
     SERVICE_DIR=$(dirname "$f")
     break
-done
+done < <(echo {CHANGED_FILES} | tr ' ' '\n' | grep -iE 'Dockerfile|entrypoint.*\.sh')
 
 if [ -n "$SERVICE_DIR" ]; then
     # Step 2: Find volume mount points for this service in any docker-compose*.yml
     COMPOSE_FILES=$(find . -maxdepth 3 -name "docker-compose*.yml" 2>/dev/null | sort)
     VOLUME_MOUNTS=""
-    for cf in $COMPOSE_FILES; do
+    # $COMPOSE_FILES is one path per line (`find`) — herestring, not a piped
+    # `| while read`, so VOLUME_MOUNTS remains visible after the loop exits.
+    while IFS= read -r cf; do
+        [ -z "$cf" ] && continue
         # Extract named volume mount points (lines like: - volume_name:/container/path)
         MOUNTS=$(grep -oE '[a-z_-]+:/[^: ]+' "$cf" 2>/dev/null | grep -v '^#' | cut -d: -f2)
         VOLUME_MOUNTS="$VOLUME_MOUNTS $MOUNTS"
-    done
+    done <<< "$COMPOSE_FILES"
 
     # Step 3: Grep the service directory for filesystem write operations
     WRITE_OPS=$(grep -rn "mkdir\|write_bytes\|open(.*['\"]w\|makedirs\|shutil\.copy\|shutil\.move" \
@@ -745,7 +926,8 @@ fi
 ```bash
 PR_BASE="${PR_BASE:-staging}"
 
-for f in $(echo {CHANGED_FILES} | tr ' ' '\n' | grep -E '\.py$' | grep -E 'router'); do
+while IFS= read -r f; do
+    [ -z "$f" ] && continue
     # Extract removed condition lines from the diff (lines starting with -)
     REMOVED_CONDITIONS=$(git diff HEAD -- "$f" 2>/dev/null | grep -E '^-.*\bif\b' | grep -v '^---' | sed 's/^-//' | sed 's/^\s*//' | head -5)
 
@@ -768,7 +950,7 @@ for f in $(echo {CHANGED_FILES} | tr ' ' '\n' | grep -E '\.py$' | grep -E 'route
             fi
         done
     fi
-done
+done < <(echo {CHANGED_FILES} | tr ' ' '\n' | grep -E '\.py$' | grep -E 'router')
 ```
 
 **Flag as findings**:
@@ -778,6 +960,285 @@ done
 - Only runs on files in a `routers/` path
 - Only triggers when a condition line was actually removed in the diff (not just modified)
 - Reports file:line matches from sibling files only (excludes the fixed file itself)
+
+### 2P: External Tool Config Schema Advisory (external tool config files)
+
+**Triggered when**: CONFIG_SCHEMA domain is set (config files for external tools are in the diff).
+
+**Why this matters**: External tools with strict config schemas (Traefik, nginx, Kubernetes, Terraform, Docker Compose) silently ignore or reject structurally incorrect config — no startup crash, no error log, the feature simply does not activate. The quality gate cannot run `traefik validate` / `nginx -t` / `terraform validate` (those belong in CI), but it can verify that CI validation steps exist for the tool and remind the builder that structural validation is CI's responsibility. <!-- Added: forge#1104 -->
+
+```bash
+# Identify which external tools have config files in the diff
+TOOL_FILES=$(echo {CHANGED_FILES} | tr ' ' '\n' | grep -E \
+    "(traefik/|infra/nginx/|k8s/|terraform/|docker-compose.*\.yml$|.*\.(conf|toml)$)" | head -20)
+
+if [ -n "$TOOL_FILES" ]; then
+    echo "CONFIG_SCHEMA: External tool config files detected in diff:"
+    echo "$TOOL_FILES"
+    echo ""
+
+    # Check whether CI has a validation step for each detected tool
+    WORKFLOW_DIR="{WORKTREE_PATH}/.github/workflows"
+    CI_MISSING=""
+
+    # $TOOL_FILES is one path per line (already newline-split above via `tr`) —
+    # herestring, not a piped `| while read`, so CI_MISSING remains visible
+    # after the loop exits.
+    while IFS= read -r f; do
+        [ -z "$f" ] && continue
+        case "$f" in
+            traefik/*)
+                grep -rlE "traefik.*validate|traefik.*check" "$WORKFLOW_DIR" 2>/dev/null | grep -q . || \
+                    CI_MISSING="$CI_MISSING traefik"
+                ;;
+            infra/nginx/*|*nginx*.conf)
+                grep -rlE "nginx.*-t|nginx.*test|nginx.*configtest" "$WORKFLOW_DIR" 2>/dev/null | grep -q . || \
+                    CI_MISSING="$CI_MISSING nginx"
+                ;;
+            k8s/*|*.yaml)
+                if ! grep -rlE "kubectl.*--dry-run|kubeval|kustomize.*build|helm.*lint" "$WORKFLOW_DIR" 2>/dev/null | grep -q .; then
+                    echo "$f" | grep -qE '^k8s/' && CI_MISSING="$CI_MISSING kubernetes"
+                fi
+                ;;
+            terraform/*)
+                grep -rlE "terraform.*validate|terraform.*plan|tflint" "$WORKFLOW_DIR" 2>/dev/null | grep -q . || \
+                    CI_MISSING="$CI_MISSING terraform"
+                ;;
+        esac
+    done <<< "$TOOL_FILES"
+
+    # Deduplicate
+    CI_MISSING=$(echo "$CI_MISSING" | tr ' ' '\n' | sort -u | grep -v '^$' | tr '\n' ' ')
+
+    if [ -n "$CI_MISSING" ]; then
+        for tool in $CI_MISSING; do
+            echo "CFG-1 | MEDIUM | .github/workflows/ | No CI validation step found for $tool config changes — add structural validation (e.g., 'traefik validate', 'nginx -t', 'terraform validate') to CI so structural errors are caught before merge. The INFRA review agent verifies logical correctness; CI must verify structural correctness."
+        done
+    else
+        echo "CFG: CI validation steps detected for modified tool configs — structural validation covered by CI."
+    fi
+fi
+```
+
+**Flag as findings**:
+- No CI validation step for a tool whose config files changed: **MEDIUM** — structural config errors will not be caught before deploy. The fix is a CI-layer addition (see `/ci-audit` for a comprehensive CI gap audit), not a quality gate fix.
+
+**This check is advisory (MEDIUM), not blocking (HIGH)**. The quality gate cannot substitute for CI-level validators (`traefik validate`, `nginx -t`, `terraform validate`). Its role is to detect when those validators are absent from CI and surface that gap to the builder. Actual structural validation belongs in GitHub Actions.
+
+**Separation of concerns**: ForgeDock reasons about architecture, logic, and security; CI runs deterministic tool validators with zero token cost. The quality gate enforces that the CI layer is complete — it does not replace it.
+
+### 2Q: Billing domain checks (billing/credits/subscription/ledger/payment code)
+
+**Triggered when**: BILLING domain is set (changed files are under `billing/`, `credits/`, `subscription`, `ledger`, or `payment` paths).
+
+**Why this matters**: Billing code has three reliably grep-detectable defect classes that account for ~27% of review findings in the AlterLab health window: (1) `org_id` not propagated to debit/refund ledger write paths (silent data ownership loss — charges appear with wrong tenant); (2) `asyncio.sleep` / blocking sleep called inside an advisory-lock or open-transaction scope (holds DB connection/lock for the full sleep duration, causing connection exhaustion and deadlocks under load); (3) stdlib `logging.*()` calls passed structlog-style keyword arguments (`event=`, named context keys) that are not valid stdlib kwargs — crashes at runtime with `TypeError: unexpected keyword argument`. <!-- Added: forge#1329 --> <!-- allowlist: AlterLab -->
+
+**2Q-1: org_id propagation in ledger write functions**
+
+```bash
+# Grep billing Python files for ledger write function definitions missing an org_id parameter.
+# Heuristic: functions named debit/refund/charge/credit/apply_credit/record_usage whose
+# signature (def line) does not contain org_id are flagged as MEDIUM — reviewer verifies
+# with full context whether org_id is pulled from a passed object instead.
+while IFS= read -r f; do
+    [ -z "$f" ] && continue
+    grep -nE "^\s*def (debit|refund|charge|credit|apply_credit|record_usage|create_invoice|issue_credit)\b" "$f" 2>/dev/null | while IFS=: read -r lineno rest; do
+        # Read the full function signature (up to 3 lines to cover multi-line sigs)
+        sig=$(sed -n "${lineno},$((lineno+2))p" "$f" 2>/dev/null)
+        echo "$sig" | grep -qE '\borg_id\b' || \
+            echo "BILLING-1 | MEDIUM | $f:$lineno | Ledger write function '$(echo "$rest" | grep -oE 'def \w+' | head -1)' signature does not include org_id parameter — verify org_id is propagated to all debit/refund paths (AlterLab#25348 pattern)" <!-- allowlist: AlterLab -->
+    done
+done < <(echo {CHANGED_FILES} | tr ' ' '\n' | grep -E '\.py$')
+```
+
+**2Q-2: Blocking sleep inside advisory-lock or open-transaction scope**
+
+```bash
+# Grep billing Python files for asyncio.sleep / time.sleep called inside an advisory-lock
+# or open-transaction context (within 20 lines after lock acquisition or BEGIN/session open).
+# Holding a lock or DB connection across a sleep starves the connection pool and causes
+# deadlocks under concurrent load (AlterLab#25725 pattern). <!-- allowlist: AlterLab -->
+while IFS= read -r f; do
+    [ -z "$f" ] && continue
+    grep -nE "\basyncio\.sleep\b|\btime\.sleep\b" "$f" 2>/dev/null | while IFS=: read -r lineno rest; do
+        start=$((lineno > 20 ? lineno - 20 : 1))
+        window=$(sed -n "${start},$((lineno-1))p" "$f" 2>/dev/null)
+        echo "$window" | grep -qE 'advisory_lock|BEGIN\b|async with.*session|async with.*conn|async with.*transaction|with.*engine\b' && \
+            echo "BILLING-2 | HIGH | $f:$lineno | asyncio.sleep/time.sleep inside advisory-lock or open-transaction scope — holds DB connection/lock for full sleep duration, causing connection exhaustion and deadlocks under load (AlterLab#25725 pattern). Move sleep outside lock/transaction scope." <!-- allowlist: AlterLab -->
+    done
+done < <(echo {CHANGED_FILES} | tr ' ' '\n' | grep -E '\.py$')
+```
+
+**2Q-3: stdlib logging calls with structlog-style kwargs**
+
+```bash
+# Grep changed Python files for logging.*()/logger.*() calls that pass keyword arguments
+# that are NOT valid stdlib logging kwargs (exc_info, stack_info, stacklevel, extra).
+# Structlog-style kwargs (event=, extra_=, named context keys) are NOT accepted by stdlib
+# Logger methods and crash at runtime with TypeError: unexpected keyword argument.
+# (AlterLab#25715, #25837, #25819 pattern) <!-- allowlist: AlterLab -->
+while IFS= read -r f; do
+    [ -z "$f" ] && continue
+    # Match logging.info/warning/error/debug/critical and logger.info/etc. calls with
+    # non-stdlib kwargs. Valid stdlib kwargs: exc_info, stack_info, stacklevel, extra.
+    # Flag any named kwarg that is NOT one of those four.
+    grep -nE "\b(logging|logger)\.(info|warning|error|debug|critical|exception)\s*\(.*\b\w+\s*=" "$f" 2>/dev/null | \
+        grep -vE "\b(exc_info|stack_info|stacklevel|extra)\s*=" | \
+        grep -v "^\s*#" && \
+        echo "BILLING-3 | HIGH | $f | stdlib logging call with non-stdlib keyword argument detected — stdlib Logger.info/warning/error/etc. only accept exc_info, stack_info, stacklevel, extra as kwargs. Structlog-style kwargs (event=, named context keys) cause TypeError at runtime (AlterLab#25715 pattern). Use structlog.get_logger() instead of logging if structlog kwargs are needed." <!-- allowlist: AlterLab -->
+done < <(echo {CHANGED_FILES} | tr ' ' '\n' | grep -E '\.py$')
+```
+
+**Flag as findings**:
+- Ledger write function missing `org_id` parameter: **MEDIUM** — heuristic; reviewer verifies whether org_id is obtained from a passed object. Silent data ownership loss if omitted.
+- `asyncio.sleep`/`time.sleep` inside advisory-lock or transaction scope: **HIGH** — guaranteed connection/lock starvation under concurrent load.
+- stdlib `logging.*()` with non-stdlib kwargs: **HIGH** — guaranteed `TypeError` crash at runtime when the log call is reached.
+
+**Note**: 2Q-3 (stdlib logging check) fires on ALL changed Python files regardless of path — stdlib logger misuse is not specific to billing paths and is a universal crash class. 2Q-1 and 2Q-2 fire only on billing-domain files.
+
+### 2R: Registry checks (ALWAYS — promoted patterns from recurring review findings)
+
+<!-- Added: forge#1331 -->
+
+**Purpose**: Run all checks that have been promoted from recurring review findings into the registry. These are deterministic scripts that catch in milliseconds what previously required a full review cycle to detect. Each check was generated once by an LLM after the same defect class appeared 3+ times — thereafter it runs forever at zero LLM cost.
+
+**Registry location**: `scripts/check-registry/manifest.json` (relative to repo root)
+
+```bash
+REGISTRY_FILE="{WORKTREE_PATH}/scripts/check-registry/manifest.json"
+REGISTRY_FINDINGS=""
+
+if [ ! -f "$REGISTRY_FILE" ]; then
+    echo "2R: No check registry found at $REGISTRY_FILE — skipping registry checks."
+else
+    # Parse manifest and run each registered check
+    CHECK_COUNT=$(jq '.checks | length' "$REGISTRY_FILE" 2>/dev/null || echo 0)
+
+    if [ "$CHECK_COUNT" -eq 0 ]; then
+        echo "2R: Registry is empty — no promoted checks to run."
+    else
+        echo "2R: Running $CHECK_COUNT registered check(s)..."
+        CHECK_INDEX=0
+        while [ "$CHECK_INDEX" -lt "$CHECK_COUNT" ]; do
+            SCRIPT=$(jq -r ".checks[$CHECK_INDEX].script" "$REGISTRY_FILE" 2>/dev/null)
+            SLUG=$(jq -r ".checks[$CHECK_INDEX].slug" "$REGISTRY_FILE" 2>/dev/null)
+            SEVERITY=$(jq -r ".checks[$CHECK_INDEX].severity" "$REGISTRY_FILE" 2>/dev/null)
+
+            if [ -z "$SCRIPT" ] || [ "$SCRIPT" = "null" ]; then
+                CHECK_INDEX=$((CHECK_INDEX + 1))
+                continue
+            fi
+
+            SCRIPT_PATH="{WORKTREE_PATH}/$SCRIPT"
+
+            if [ ! -x "$SCRIPT_PATH" ]; then
+                echo "2R: WARN — registry check $SLUG script not found or not executable at $SCRIPT_PATH"
+                CHECK_INDEX=$((CHECK_INDEX + 1))
+                continue
+            fi
+
+            # Run the check; pass changed files list and worktree path
+            CHECK_OUTPUT=$("$SCRIPT_PATH" "{CHANGED_FILES}" "{WORKTREE_PATH}" 2>/dev/null)
+            CHECK_EXIT=$?
+
+            if [ "$CHECK_EXIT" -eq 1 ]; then
+                # Check fired — append to findings
+                while IFS= read -r line; do
+                    [ -z "$line" ] && continue
+                    REGISTRY_FINDINGS="${REGISTRY_FINDINGS}
+${line}"
+                done <<< "$CHECK_OUTPUT"
+                echo "2R: FAIL — $SLUG matched ($SEVERITY)"
+            elif [ "$CHECK_EXIT" -eq 0 ] || [ "$CHECK_EXIT" -eq 2 ]; then
+                echo "2R: PASS — $SLUG"
+            else
+                echo "2R: WARN — $SLUG exited with unexpected code $CHECK_EXIT"
+            fi
+
+            CHECK_INDEX=$((CHECK_INDEX + 1))
+        done
+    fi
+fi
+```
+
+If any registry check produces findings, include them in the Step 3 findings list under the check's slug (e.g. `REGISTRY-migration-number-collision | HIGH | ...`). HIGH-severity registry findings are blocking; MEDIUM are advisory.
+
+---
+
+## Step 2S: Test failure classification (run when tests fail in Step 2)
+
+<!-- Added: forge#1336 -->
+
+**Triggered when**: any domain check in Step 2 invokes a test suite command and that command exits non-zero.
+
+**Why this matters**: Builders and reviewers waste cycles on test failures that pre-exist the PR or are intermittently caused by fixture-state races. A test that fails on both the PR branch and the base branch is *pre-broken* and must not block an unrelated PR. A test that fails then passes on retry is *flaky* and should be quarantined, not "fixed" by the builder.
+
+### Classification protocol
+
+For each failing test ID (or test command) surfaced in Step 2:
+
+```bash
+# PR_BASE is the target branch (e.g. "staging", "main", or "milestone/slug")
+# FAILING_TEST is the individual test identifier or re-runnable command
+# GH_REPO is owner/repo from forge.yaml (used to file the quarantine issue)
+# PR_ISSUE_NUMBER is the issue this quality gate was invoked from (optional)
+
+CLASSIFIER="${FORGEDOCK_SCRIPTS:-scripts}/flaky-quarantine.sh"
+[ -f "$CLASSIFIER" ] || CLASSIFIER="{WORKTREE_PATH}/scripts/flaky-quarantine.sh"
+
+if [ -f "$CLASSIFIER" ]; then
+    RESULT=$(bash "$CLASSIFIER" \
+        --test   "{FAILING_TEST}" \
+        --base   "{PR_BASE}" \
+        --worktree "{WORKTREE_PATH}" \
+        --repo   "{GH_REPO}" \
+        --issue  "{PR_ISSUE_NUMBER}" \
+        --retries 3 \
+        2>&1)
+    echo "$RESULT"
+    CLASSIFICATION=$(echo "$RESULT" | grep '^CLASSIFICATION:' | awk '{print $2}')
+else
+    # Script not present — fall back to treating all test failures as real.
+    CLASSIFICATION="REAL"
+    echo "NOTE: scripts/flaky-quarantine.sh not found — treating test failure as REAL (no classification)"
+fi
+```
+
+### Classification outcomes
+
+| Classification | Meaning | Gate behaviour |
+|---|---|---|
+| `PRE_BROKEN` | Fails on base branch — broken before this PR | **Does not block the gate.** Log as advisory. Quarantine manifest entry written; issue filed once. |
+| `FLAKY` | Intermittent — fails then passes on retry | **Does not block the gate.** Log as advisory. Quarantine manifest entry written; issue filed once. |
+| `REAL` | Deterministic on PR, passes on base | **Blocks the gate** — treated as a regression caused by this PR. |
+
+### Gate behaviour
+
+```
+if CLASSIFICATION == "PRE_BROKEN" or CLASSIFICATION == "FLAKY":
+    # Test does not block the gate — record in findings as advisory only.
+    # Emit a LOW finding so the builder and reviewer see it in the report.
+    emit: "TEST-QUARANTINE | LOW | {FAILING_TEST} | classified {CLASSIFICATION} — quarantine entry recorded; does not block this PR"
+    # Do NOT re-run the test or count it as a gate failure.
+
+elif CLASSIFICATION == "REAL":
+    # Test failure is caused by this PR — block the gate as before.
+    emit: "TEST-REAL | HIGH | {FAILING_TEST} | deterministic failure on PR branch; passes on base — this PR introduced the regression"
+```
+
+### Quarantine manifest
+
+The manifest lives at `.forgedock/quarantine.jsonl` in the project root (or at the path set in `FORGEDOCK_QUARANTINE_MANIFEST`). Each line is a JSON object:
+
+```json
+{"test":"<id>","classification":"PRE_BROKEN|FLAKY","base":"<branch>","pr_branch":"<branch>","issue":"<num>","repo":"<owner/repo>","first_seen":"<ISO-8601>","runs_pr":3,"failures_pr":3,"runs_base":1,"failures_base":1}
+```
+
+The manifest is append-only. Duplicate entries (same test already quarantined) are skipped. A corresponding GitHub issue is filed automatically when the script has `--repo` and `gh` is authenticated.
+
+**Reviewers**: when the manifest exists, read it during Phase 2 of `review-pr.md` to avoid re-filing known-quarantined tests as new findings.
+
+---
 
 ## Step 3: Compile findings
 

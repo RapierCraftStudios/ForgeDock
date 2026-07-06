@@ -1,0 +1,94 @@
+name: Check Command Conflicts
+
+on:
+  pull_request:
+    paths:
+      - 'commands/**'
+      - 'docs/FORGE-PROTOCOL.md'
+      - 'docs/WORKFLOW.md'
+      - 'docs/site/command-reference.md'
+      - 'scripts/check-native-conflicts.sh'
+      - 'scripts/check-protocol-restatements.sh'
+      - 'scripts/check-command-docs-drift.sh'
+  push:
+    branches:
+      - staging
+      - main
+    paths:
+      - 'commands/**'
+      - 'docs/FORGE-PROTOCOL.md'
+      - 'docs/WORKFLOW.md'
+      - 'docs/site/command-reference.md'
+      - 'scripts/check-native-conflicts.sh'
+      - 'scripts/check-protocol-restatements.sh'
+      - 'scripts/check-command-docs-drift.sh'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  check-native-conflicts:
+    name: Native command conflict check
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Check native command conflicts
+        run: bash scripts/check-native-conflicts.sh commands/
+
+  check-protocol-restatements:
+    name: Protocol restatement check
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Check for FORGE protocol restatements in commands/
+        run: bash scripts/check-protocol-restatements.sh commands/ docs/
+
+  command-docs-drift:
+    name: Command / docs drift check
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Check that every installable spec is documented and every reference section has a spec
+        run: bash scripts/check-command-docs-drift.sh commands/ docs/site/command-reference.md
+
+  banned-token-lint:
+    name: Banned token lint
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Check for banned product-specific tokens in commands/
+        run: |
+          # Fail if any command spec contains tokens tied to a specific product.
+          # These tokens indicate AlterLab-specific residue that must not re-enter
+          # the generic ForgeDock command corpus.
+          #
+          # Notes on pattern precision:
+          # - 'alterlab'  — matched case-insensitively; no false positives expected
+          # - '\bememo\b' — word-boundary match excludes React's 'useMemo'/'React.memo'
+          # - 'EMEMO_EOF' — exact uppercase heredoc token; no false positives expected
+          # - 'is_byop'   — exact token; no false positives expected
+          # - 'byop_discount' — exact token; no false positives expected
+          MATCHES=$(grep -rniP '\balterlab\b|\bememo\b|EMEMO_EOF|\bis_byop\b|\bbyop_discount\b' commands/ \
+            --include='*.md' \
+            | grep -v '<!-- allowlist:' \
+            || true)
+          if [ -n "$MATCHES" ]; then
+            echo "ERROR: Banned product-specific tokens found in commands/:"
+            echo "$MATCHES"
+            echo ""
+            echo "Remove or replace these tokens before merging."
+            exit 1
+          fi
+          echo "OK: No banned tokens found in commands/"

@@ -1,0 +1,294 @@
+/*
+ * brutalist.css — Foundation for the bold-brutalist archetype
+ *
+ * Archetype ID: bold-brutalist
+ * Craft profile (reference-corpus.md):
+ *   radius system: zero or max (0px or 9999px — never in between)
+ *   button style:  high-contrast; heavy border (2px+); flat fill; no shadow
+ *   divider style: bold solid line (2–3px) or full color-block section break
+ *   icon treatment: bold, oversized (32px+); high contrast; no tinted backgrounds
+ *
+ * Override --color-accent (and related tokens) via a :root block in the
+ * generated page to brand this foundation without touching the file.
+ *
+ * Issue: #1048 — custom CSS component library per archetype
+ */
+
+/* --- 1. Design Tokens --- */
+
+:root {
+  /* Accent — override per brand */
+  --color-accent:          #ff2d00;          /* bold red-orange default */
+  --color-accent-subtle:   rgba(255, 45, 0, 0.08);
+  --color-accent-hover:    rgba(255, 45, 0, 0.14);
+
+  /* Surface palette — stark, high contrast */
+  --color-bg:              #ffffff;
+  --color-bg-raised:       #f5f5f5;
+  --color-bg-sunken:       #ebebeb;
+  --color-fg:              #000000;
+  --color-fg-muted:        #333333;
+  --color-fg-faint:        #777777;
+  --color-border:          #000000;          /* full-black border — brutalist */
+  --color-border-strong:   #000000;
+
+  /* Code surface */
+  --code-bg:               #000000;
+
+  /* Radius system — zero OR pill, nothing in between (N13 compliance by contrast) */
+  --radius-sm:             0px;             /* all boxes: hard edge */
+  --radius-btn:            0px;             /* button — hard edge */
+  --radius-input:          0px;             /* input — hard edge */
+  --radius-card:           0px;             /* card — hard edge */
+  --radius-pill:           9999px;          /* pill badge only — maximum curve */
+
+  /* Shadow tokens — no shadow (craft profile: flat fill, no shadow) */
+  --shadow-card:           none;
+  --shadow-card-hover:     4px 4px 0 var(--color-fg);
+  --shadow-btn:            none;
+  --shadow-elevated:       8px 8px 0 var(--color-fg);
+
+  /* Transition — snap, immediate */
+  --transition-fast:       80ms step-end;
+  --transition-base:       100ms cubic-bezier(0.4, 0, 0.2, 1);
+  --transition-slow:       200ms cubic-bezier(0.4, 0, 0.2, 1);
+
+  /* Spacing scale */
+  --space-1:4px; --space-2:8px; --space-3:12px; --space-4:16px;
+  --space-6:24px; --space-8:32px; --space-12:48px; --space-16:64px; --space-24:96px;
+
+  /* Icon sizing — oversized (32px+), no containers (craft profile) */
+  --icon-feature: 36px;
+  --icon-nav:     24px;
+  --icon-inline:  20px;
+}
+
+/* --- 2. Element Overrides (N18 compliance) --- */
+
+/* Custom selection — bold accent fill */
+::selection {
+  background: var(--color-accent);
+  color:      #ffffff;
+}
+
+/* Custom focus ring — heavy black border (N18, N15 compliance) */
+:focus-visible {
+  outline:        3px solid var(--color-fg);
+  outline-offset: 2px;
+}
+
+/* Custom scrollbar — thick, stark */
+::-webkit-scrollbar       { width: 8px; height: 8px; }
+::-webkit-scrollbar-track { background: var(--color-bg-raised); }
+::-webkit-scrollbar-thumb {
+  background:    var(--color-fg);
+  border-radius: 0;
+}
+::-webkit-scrollbar-thumb:hover { background: var(--color-accent); }
+
+/* Code blocks — inverse, high-contrast */
+code, kbd {
+  background:    var(--code-bg);
+  border-radius: 0;
+  padding:       3px 8px;
+  font-size:     0.875em;
+  font-family:   ui-monospace, SFMono-Regular, Menlo, monospace;
+  color:         #ffffff;
+  border:        2px solid var(--color-fg);
+}
+
+/* Links — bold underline (N17 compliance) */
+a:not([class]) {
+  color:                    var(--color-fg);
+  text-decoration:          underline;
+  text-decoration-color:    var(--color-fg);
+  text-underline-offset:    4px;
+  text-decoration-thickness: 2px;          /* heavy underline — brutalist */
+  transition:               color var(--transition-fast),
+                            text-decoration-color var(--transition-fast);
+}
+a:not([class]):hover {
+  color:                 var(--color-accent);
+  text-decoration-color: var(--color-accent);
+}
+
+/* --- 3. Component Classes --- */
+
+/* --- Button --- */
+
+.btn {
+  display:          inline-flex;
+  align-items:      center;
+  gap:              var(--space-2);
+  padding:          12px 24px;
+  border-radius:    var(--radius-btn);     /* 0px — hard edge */
+  font-size:        0.9375rem;
+  font-weight:      700;
+  line-height:      1;
+  letter-spacing:   0.05em;
+  text-transform:   uppercase;
+  cursor:           pointer;
+  white-space:      nowrap;
+  transition:       background-color var(--transition-fast),
+                    box-shadow       var(--transition-fast),
+                    transform        var(--transition-fast);
+  /* High-contrast flat fill with heavy border — craft profile */
+  background-color: var(--color-fg);
+  color:            var(--color-bg);
+  border:           2px solid var(--color-fg);
+  box-shadow:       none;
+}
+
+.btn:hover {
+  background-color: var(--color-accent);
+  border-color:     var(--color-accent);
+  box-shadow:       4px 4px 0 var(--color-fg);
+  transform:        translate(-2px, -2px);
+}
+
+.btn:active {
+  transform:  translate(0px, 0px);
+  box-shadow: none;
+}
+
+.btn:focus-visible {
+  outline:        3px solid var(--color-fg);
+  outline-offset: 3px;                     /* heavy focus ring — N18 compliance */
+}
+
+/* Ghost — high-contrast outline (craft profile) */
+.btn-ghost {
+  background-color: transparent;
+  color:            var(--color-fg);
+  border:           2px solid var(--color-fg);
+  box-shadow:       none;
+}
+
+.btn-ghost:hover {
+  background-color: var(--color-fg);
+  color:            var(--color-bg);
+  box-shadow:       4px 4px 0 var(--color-accent);
+  transform:        translate(-2px, -2px);
+}
+
+.btn-ghost:active {
+  transform:        translate(0px, 0px);
+  box-shadow:       none;
+}
+
+/* --- Card --- */
+
+.card {
+  background:    var(--color-bg-raised);
+  border-radius: var(--radius-card);       /* 0px — hard edge */
+  border:        2px solid var(--color-fg);
+  box-shadow:    var(--shadow-card);
+  padding:       var(--space-6);
+  transition:    box-shadow var(--transition-base),
+                 transform  var(--transition-base);
+}
+
+.card:hover {
+  box-shadow: var(--shadow-card-hover);
+  transform:  translate(-2px, -2px);
+}
+
+/* --- Badge --- */
+
+.badge {
+  display:          inline-flex;
+  align-items:      center;
+  gap:              var(--space-1);
+  padding:          3px 10px;
+  border-radius:    var(--radius-pill);    /* pill — only rounded element */
+  font-size:        0.6875rem;
+  font-weight:      700;
+  letter-spacing:   0.08em;
+  text-transform:   uppercase;
+  background-color: var(--color-fg);
+  color:            var(--color-bg);
+  border:           none;
+}
+
+/* --- Input --- */
+
+.input {
+  display:          block;
+  width:            100%;
+  padding:          10px 14px;
+  border-radius:    var(--radius-input);   /* 0px — hard edge */
+  font-size:        0.9375rem;
+  font-weight:      500;
+  background-color: var(--color-bg);
+  color:            var(--color-fg);
+  border:           2px solid var(--color-fg);
+  transition:       border-color var(--transition-fast),
+                    box-shadow   var(--transition-fast);
+  -webkit-appearance: none;
+  appearance:       none;
+}
+
+.input::placeholder { color: var(--color-fg-faint); }
+
+.input:focus {
+  outline:      none;
+  border-color: var(--color-accent);
+  box-shadow:   4px 4px 0 var(--color-fg);
+}
+
+/* --- 4. Utility Classes --- */
+
+/* Scroll-triggered reveal (honors prefers-reduced-motion) */
+.reveal {
+  opacity:    0;
+  transform:  translateY(12px);
+  transition: opacity var(--transition-slow), transform var(--transition-slow);
+}
+
+.reveal.visible {
+  opacity:   1;
+  transform: translateY(0);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .reveal,
+  .reveal.visible {
+    opacity:    1;
+    transform:  none;
+    transition: none;
+  }
+}
+
+/* Gradient text — stark, high-contrast */
+.gradient-text {
+  background-image:    linear-gradient(90deg, var(--color-fg) 0%, var(--color-accent) 100%);
+  -webkit-background-clip: text;
+  background-clip:     text;
+  -webkit-text-fill-color: transparent;
+  color:               transparent;
+}
+
+/* Glass — not used in brutalist; falls back to solid with border */
+.glass {
+  background: var(--color-bg-raised);
+  border:     2px solid var(--color-fg);
+}
+
+/* Divider — bold solid 2px (craft profile) */
+.divider {
+  height:     0;
+  border:     none;
+  border-top: 2px solid var(--color-fg);
+  margin:     var(--space-8) 0;
+}
+
+/* Icon container — no background, high contrast (craft profile) */
+.icon-container {
+  display:          inline-flex;
+  align-items:      center;
+  justify-content:  center;
+  width:            var(--icon-feature);   /* oversized: 36px */
+  height:           var(--icon-feature);
+  color:            var(--color-fg);       /* high contrast — no tinted background */
+  flex-shrink:      0;
+}

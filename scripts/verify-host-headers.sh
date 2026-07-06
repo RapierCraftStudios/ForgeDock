@@ -67,9 +67,9 @@ while read -r f; do
         elif echo "$CONTENT" | grep -qE "\-\-header\s+[\"']Host:"; then
             echo "OK: $f:$LINENO — Host header explicitly set (--header)"
         else
-            echo "BLOCKING: $f:$LINENO — curl/wget to internal service without explicit Host header. TrustedHostMiddleware will reject raw IP as Host value."
+            echo "BLOCKING: $f:$LINENO — curl/wget to internal service without explicit Host header. Host-validation middleware will reject a raw IP as the Host value."
             echo "  Line: $CONTENT"
-            echo "  Fix: Add -H 'Host: localhost' (or appropriate allowed host from services/api/app/main.py allowed_hosts)"
+            echo "  Fix: Add -H 'Host: <allowed-hostname>' — check your service's allowed_hosts configuration for the correct value"
             BLOCKING=$((BLOCKING + 1))
         fi
     done < <(echo "$CURL_LINES")
@@ -96,11 +96,11 @@ if [ -n "$FRONTEND_FILES" ]; then
         fi
 
         if [ -n "$DIRECT_CALLS" ]; then
-            echo "BLOCKING: $f — direct /api/v1/ call bypasses Next.js proxy (auth will fail)"
+            echo "BLOCKING: $f — direct /api/v1/ call bypasses frontend proxy (auth middleware will be skipped)"
             while IFS= read -r match; do
                 echo "  $match"
             done < <(echo "$DIRECT_CALLS")
-            echo "  Fix: Use /api/* proxy routes instead of /api/v1/* direct FastAPI calls"
+            echo "  Fix: Use the frontend proxy route (e.g. /api/*) instead of calling the backend API directly"
             BLOCKING=$((BLOCKING + 1))
         else
             echo "OK: $f — no direct backend calls"

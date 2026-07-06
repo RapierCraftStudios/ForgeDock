@@ -1,0 +1,9 @@
+{
+  "description": "CONTEXT — complete annotation with FORGE:CONTEXT:COMPLETE sentinel",
+  "input": "<!-- FORGE:CONTEXT -->\n## Implementation Context for #42\n\n### Known Pitfalls for This Area\nAlways null-check before dereferencing profile.\n\n<!-- FORGE:CONTEXT:COMPLETE -->",
+  "expect": {
+    "type": "CONTEXT",
+    "valid": true,
+    "sentinelState": "complete"
+  }
+}

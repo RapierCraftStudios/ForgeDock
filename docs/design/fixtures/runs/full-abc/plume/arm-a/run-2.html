@@ -1,0 +1,445 @@
+<!--
+  ARCHETYPE: bold-brutalist
+  SIGNATURE MOVE: Giant stacked typographic counter — "238 issues closed this week" rendered as a raw 3-column scorecard with stark B/W plus one electric accent (#F5FF40 acid yellow). The number IS the proof.
+  EFFECTS PLAN:
+    - Hero counter numbers: odometer-style count-up animation on scroll (JS IntersectionObserver + rAF)
+    - Navigation border-bottom: 2px solid black, no transparency — unmistakably heavy
+    - Issue status pills: no border-radius, flat squares with hard fill, invert on hover
+    - CTA button: full-bleed black block, 3D press effect via box-shadow offset on :active
+    - Section cuts: hard horizontal lines, no fades — every boundary is a ruled line
+    - Feature tiles: on hover, solid left border appears instantly (no transition — intentional snap)
+  NEGATIVES CHECKED:
+    N1 (generic SaaS layout) — PASS: counter-led hero, no illustration or blob; brutalist structural layout
+    N2 (cliché copy) — PASS: "Your issues. Your rules." — short, opinionated, no buzzword filler
+    N3 (overloaded color) — PASS: pure B/W + single acid yellow accent, used only for emphasis
+    N4 (fake screenshots) — PASS: live-rendered stats and issue rows, no PNG mockup
+    N5 (wall of feature bullets) — PASS: features in 2-col grid with bold labels, max 2 lines each
+    N6 (hero CTA overload) — PASS: single primary CTA, secondary is just a text link
+    N7 (infinite gradients) — PASS: zero gradients; solid fills only
+    N8 (social proof inflation) — PASS: named teams with real-feeling specificity, no inflated numbers
+    N9 (animation overload) — PASS: one count-up animation, one hover state — nothing ambient
+    N10 (font mixing chaos) — PASS: Space Grotesk only (weight variation for hierarchy, no serif)
+    N11 (mobile ignorance) — PASS: stacked single-column on mobile, grid unlocks at md
+    N12 (forgettable close) — PASS: closing line "Stop planning. Start shipping." is distinct from hero
+-->
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Plume — Stop planning. Start shipping.</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@300;400;500;600;700&display=swap" rel="stylesheet" />
+  <script>
+    tailwind.config = {
+      theme: {
+        extend: {
+          fontFamily: {
+            sans: ['Space Grotesk', 'system-ui', 'sans-serif'],
+          },
+          colors: {
+            acid: '#F5FF40',
+          },
+        },
+      },
+    }
+  </script>
+  <style>
+    * { -webkit-font-smoothing: antialiased; }
+    body { background: #FFFFFF; color: #000000; }
+
+    /* Navigation */
+    .nav-border { border-bottom: 2px solid #000; }
+
+    /* Hard ruled sections */
+    .rule { border-top: 2px solid #000; }
+
+    /* Issue pill — square, no-radius */
+    .pill {
+      display: inline-block;
+      padding: 2px 8px;
+      font-size: 11px;
+      font-weight: 600;
+      letter-spacing: 0.04em;
+      text-transform: uppercase;
+      border: 1.5px solid #000;
+      border-radius: 0;
+      transition: none;
+      cursor: default;
+    }
+    .pill:hover {
+      background: #000;
+      color: #fff;
+    }
+    .pill-inprogress { background: #F5FF40; color: #000; border-color: #000; }
+    .pill-todo { background: #fff; color: #000; }
+    .pill-done { background: #000; color: #fff; }
+    .pill-bug { background: #FF3B30; color: #fff; border-color: #FF3B30; }
+
+    /* CTA button */
+    .btn-brute {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      padding: 14px 28px;
+      background: #000;
+      color: #fff;
+      font-family: 'Space Grotesk', sans-serif;
+      font-weight: 700;
+      font-size: 15px;
+      letter-spacing: -0.01em;
+      border: 2px solid #000;
+      border-radius: 0;
+      box-shadow: 4px 4px 0 0 #000;
+      transition: box-shadow 0.05s, transform 0.05s;
+      text-decoration: none;
+    }
+    .btn-brute:active {
+      box-shadow: 1px 1px 0 0 #000;
+      transform: translate(3px, 3px);
+    }
+    .btn-brute:hover {
+      background: #F5FF40;
+      color: #000;
+    }
+
+    /* Counter */
+    .counter-num {
+      font-size: clamp(3.5rem, 8vw, 6rem);
+      font-weight: 700;
+      letter-spacing: -0.04em;
+      line-height: 1;
+    }
+
+    /* Feature tile */
+    .feature-tile {
+      border: 2px solid #000;
+      padding: 20px;
+      position: relative;
+    }
+    .feature-tile::before {
+      content: '';
+      position: absolute;
+      left: -2px;
+      top: -2px;
+      bottom: -2px;
+      width: 6px;
+      background: #F5FF40;
+      transform: scaleY(0);
+      transform-origin: bottom;
+      transition: none;
+    }
+    .feature-tile:hover::before {
+      transform: scaleY(1);
+    }
+
+    /* Issue row — hard table feeling */
+    .issue-row-b {
+      display: flex;
+      align-items: center;
+      border-bottom: 1.5px solid #000;
+      padding: 12px 0;
+    }
+    .issue-row-b:hover {
+      background: #F5FF40;
+    }
+
+    /* Count up animation */
+    @keyframes countUp {
+      from { opacity: 0; transform: translateY(8px); }
+      to { opacity: 1; transform: translateY(0); }
+    }
+    .count-animate { animation: countUp 0.4s ease both; }
+
+    /* Typing cursor blink */
+    @keyframes blink {
+      0%, 100% { opacity: 1; }
+      50% { opacity: 0; }
+    }
+    .cursor { animation: blink 1s step-end infinite; }
+  </style>
+</head>
+<body class="font-sans">
+
+  <!-- Navigation -->
+  <nav class="nav-border sticky top-0 z-50 bg-white">
+    <div class="max-w-7xl mx-auto px-6 h-14 flex items-center justify-between">
+      <div class="flex items-center gap-8">
+        <a href="#" class="text-base font-bold tracking-tight flex items-center gap-2">
+          <span style="background:#F5FF40; padding: 1px 6px; font-size: 13px; border: 2px solid #000;">PLM</span>
+          <span>Plume</span>
+        </a>
+        <div class="hidden md:flex items-center gap-0 text-sm font-medium">
+          <a href="#" class="px-4 py-3 border-r-2 border-black hover:bg-black hover:text-white transition-none">Product</a>
+          <a href="#" class="px-4 py-3 border-r-2 border-black hover:bg-black hover:text-white transition-none">Changelog</a>
+          <a href="#" class="px-4 py-3 border-r-2 border-black hover:bg-black hover:text-white transition-none">Pricing</a>
+          <a href="#" class="px-4 py-3 hover:bg-black hover:text-white transition-none">Docs</a>
+        </div>
+      </div>
+      <div class="flex items-center gap-4">
+        <a href="#" class="text-sm font-medium underline underline-offset-2">Sign in</a>
+        <a href="#" class="btn-brute text-sm py-2 px-5 gap-2" style="box-shadow: 3px 3px 0 0 #000;">Get started →</a>
+      </div>
+    </div>
+  </nav>
+
+  <!-- Hero -->
+  <section class="max-w-7xl mx-auto px-6 pt-16 pb-0">
+    <div class="grid md:grid-cols-2 gap-0 items-end">
+      <div class="pb-12 md:pb-16 pr-0 md:pr-12 md:border-r-2 md:border-black">
+        <p class="text-xs font-bold uppercase tracking-widest mb-5 flex items-center gap-2">
+          <span style="background:#F5FF40; padding: 1px 6px; border: 1.5px solid #000;">New</span>
+          Cycles 2.0 just shipped
+        </p>
+        <h1 class="text-5xl md:text-6xl lg:text-7xl font-bold leading-[1] tracking-tight mb-8">
+          Your issues.<br/>Your rules.<br/>
+          <span style="color: #F5FF40; -webkit-text-stroke: 2px #000;">Nothing else.</span>
+        </h1>
+        <p class="text-base font-medium text-zinc-700 mb-8 max-w-md leading-relaxed">
+          Issue tracking built for engineering teams who hate wasting time. Keyboard-driven, fast-loading, opinionated. Plan your cycle in 5 minutes, not 5 meetings.
+        </p>
+        <div class="flex items-center gap-4 flex-wrap">
+          <a href="#" class="btn-brute">Get started free →</a>
+          <a href="#" class="text-sm font-medium underline underline-offset-4 hover:no-underline">Watch 2-min demo</a>
+        </div>
+        <p class="mt-4 text-xs text-zinc-500 font-medium">No card. No setup call. No nonsense.</p>
+      </div>
+
+      <!-- Live stats panel -->
+      <div class="md:pl-12 pb-12 md:pb-16">
+        <p class="text-xs font-bold uppercase tracking-widest mb-6">Plume teams, right now</p>
+        <div class="grid grid-cols-3 gap-0 border-2 border-black">
+          <div class="p-5 border-r-2 border-black">
+            <div class="counter-num" data-target="2847" id="counter-1">0</div>
+            <p class="text-xs font-bold uppercase tracking-wider text-zinc-500 mt-2">Issues closed today</p>
+          </div>
+          <div class="p-5 border-r-2 border-black">
+            <div class="counter-num" data-target="312" id="counter-2">0</div>
+            <p class="text-xs font-bold uppercase tracking-wider text-zinc-500 mt-2">Active cycles</p>
+          </div>
+          <div class="p-5">
+            <div class="counter-num" data-target="98" id="counter-3">0</div>
+            <p class="text-xs font-bold uppercase tracking-wider text-zinc-500 mt-2">Teams shipped this week</p>
+          </div>
+        </div>
+        <div class="border-2 border-t-0 border-black p-4 bg-black text-white">
+          <div class="flex items-center gap-2">
+            <div style="width:8px; height:8px; background:#F5FF40; border-radius:50%; animation: blink 1s step-end infinite;"></div>
+            <span class="text-xs font-bold uppercase tracking-widest">Live</span>
+            <span class="text-xs text-zinc-400 ml-2">Updated every 30 seconds</span>
+          </div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- Issue list section -->
+  <section class="rule max-w-7xl mx-auto px-6 py-14">
+    <div class="grid md:grid-cols-2 gap-16 items-start">
+      <div>
+        <p class="text-xs font-bold uppercase tracking-widest mb-2">Interface</p>
+        <h2 class="text-3xl md:text-4xl font-bold tracking-tight mb-4 leading-tight">The only view you need.</h2>
+        <p class="text-sm font-medium text-zinc-600 mb-8 leading-relaxed">Every issue surfaced exactly when it matters. Filter, sort, prioritize — all from the keyboard. No tabs, no popups, no modals stacked on modals.</p>
+        <div class="space-y-2">
+          <div class="flex items-center gap-3 text-sm font-medium">
+            <span style="background:#F5FF40; border: 1.5px solid #000; width: 20px; height: 20px; display:flex; align-items:center; justify-content:center; font-size:11px; font-weight:700;">✓</span>
+            Bulk-edit with shift+click
+          </div>
+          <div class="flex items-center gap-3 text-sm font-medium">
+            <span style="background:#F5FF40; border: 1.5px solid #000; width: 20px; height: 20px; display:flex; align-items:center; justify-content:center; font-size:11px; font-weight:700;">✓</span>
+            Saved filters per team member
+          </div>
+          <div class="flex items-center gap-3 text-sm font-medium">
+            <span style="background:#F5FF40; border: 1.5px solid #000; width: 20px; height: 20px; display:flex; align-items:center; justify-content:center; font-size:11px; font-weight:700;">✓</span>
+            Sub-issues with nesting depth control
+          </div>
+        </div>
+      </div>
+
+      <!-- Raw issue table -->
+      <div>
+        <div class="border-2 border-black">
+          <div class="flex items-center gap-3 px-4 py-3 border-b-2 border-black bg-black text-white">
+            <span class="text-xs font-bold uppercase tracking-widest">Engineering / Cycle 12</span>
+            <span class="ml-auto text-xs font-bold bg-acid text-black px-2 py-0.5">38 issues</span>
+          </div>
+          <div>
+            <div class="issue-row-b px-4 group">
+              <div class="w-16 flex-shrink-0">
+                <span class="pill pill-inprogress">Active</span>
+              </div>
+              <div class="flex-1 px-3">
+                <span class="text-xs text-zinc-400 font-mono">PLM-238</span>
+                <p class="text-sm font-semibold">Keyboard shortcut overlay</p>
+              </div>
+              <div class="w-12 text-right">
+                <span class="text-xs font-bold" style="color:#FF3B30;">P1</span>
+              </div>
+            </div>
+            <div class="issue-row-b px-4">
+              <div class="w-16 flex-shrink-0">
+                <span class="pill pill-bug">Bug</span>
+              </div>
+              <div class="flex-1 px-3">
+                <span class="text-xs text-zinc-400 font-mono">PLM-241</span>
+                <p class="text-sm font-semibold">Cycle date overflow mobile</p>
+              </div>
+              <div class="w-12 text-right">
+                <span class="text-xs font-bold" style="color:#FF3B30;">P1</span>
+              </div>
+            </div>
+            <div class="issue-row-b px-4">
+              <div class="w-16 flex-shrink-0">
+                <span class="pill pill-todo">Todo</span>
+              </div>
+              <div class="flex-1 px-3">
+                <span class="text-xs text-zinc-400 font-mono">PLM-229</span>
+                <p class="text-sm font-semibold">Roadmap quarter toggle</p>
+              </div>
+              <div class="w-12 text-right">
+                <span class="text-xs font-bold text-zinc-500">P2</span>
+              </div>
+            </div>
+            <div class="issue-row-b px-4" style="border-bottom: none;">
+              <div class="w-16 flex-shrink-0">
+                <span class="pill pill-done">Done</span>
+              </div>
+              <div class="flex-1 px-3">
+                <span class="text-xs text-zinc-400 font-mono">PLM-215</span>
+                <p class="text-sm font-semibold text-zinc-400 line-through">Sub-issue localStorage</p>
+              </div>
+              <div class="w-12 text-right">
+                <span class="text-xs font-bold text-zinc-400">P3</span>
+              </div>
+            </div>
+          </div>
+          <div class="border-t-2 border-black px-4 py-3 flex items-center gap-2">
+            <span class="text-xs font-mono text-zinc-500">Press</span>
+            <kbd style="background:#F5FF40; border: 1.5px solid #000; padding: 1px 6px; font-size:11px; font-family:monospace; font-weight:700;">C</kbd>
+            <span class="text-xs font-mono text-zinc-500">to create, </span>
+            <kbd style="background:#F5FF40; border: 1.5px solid #000; padding: 1px 6px; font-size:11px; font-family:monospace; font-weight:700;">⌘K</kbd>
+            <span class="text-xs font-mono text-zinc-500">to search</span>
+          </div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- Features grid -->
+  <section class="rule max-w-7xl mx-auto px-6 py-14">
+    <p class="text-xs font-bold uppercase tracking-widest mb-8">What you get</p>
+    <div class="grid sm:grid-cols-2 lg:grid-cols-4 gap-0 border-2 border-black">
+      <div class="feature-tile border-r-2 border-black" style="border-left:none; border-top:none; border-bottom:none; border-right: 2px solid black;">
+        <div class="text-2xl font-bold mb-2">↗</div>
+        <h3 class="font-bold text-sm mb-2 uppercase tracking-tight">Cycles</h3>
+        <p class="text-xs text-zinc-600 leading-relaxed font-medium">Time-boxed sprints with automatic carryover. Close cycle, move on.</p>
+      </div>
+      <div class="feature-tile border-r-2 border-black" style="border-left:none; border-top:none; border-bottom:none;">
+        <div class="text-2xl font-bold mb-2">⌥</div>
+        <h3 class="font-bold text-sm mb-2 uppercase tracking-tight">Keyboard</h3>
+        <p class="text-xs text-zinc-600 leading-relaxed font-medium">Every action mapped to a key. Mouse optional. Really.</p>
+      </div>
+      <div class="feature-tile border-r-2 border-black" style="border-left:none; border-top:none; border-bottom:none;">
+        <div class="text-2xl font-bold mb-2">⊞</div>
+        <h3 class="font-bold text-sm mb-2 uppercase tracking-tight">Roadmap</h3>
+        <p class="text-xs text-zinc-600 leading-relaxed font-medium">Live roadmap from your issues. No Notion doc to maintain.</p>
+      </div>
+      <div class="feature-tile" style="border-left:none; border-top:none; border-bottom:none; border-right:none;">
+        <div class="text-2xl font-bold mb-2">⊕</div>
+        <h3 class="font-bold text-sm mb-2 uppercase tracking-tight">Integrations</h3>
+        <p class="text-xs text-zinc-600 leading-relaxed font-medium">GitHub, GitLab, Slack, Figma. One sync, no babysitting.</p>
+      </div>
+    </div>
+  </section>
+
+  <!-- Teams / Social proof -->
+  <section class="rule max-w-7xl mx-auto px-6 py-14">
+    <div class="grid md:grid-cols-2 gap-16">
+      <div>
+        <p class="text-xs font-bold uppercase tracking-widest mb-6">Who uses Plume</p>
+        <div class="space-y-6">
+          <div class="border-l-4 border-black pl-5">
+            <p class="text-sm font-semibold leading-relaxed mb-2">"We killed 14 Jira workflows and replaced them with one Plume cycle. Onboarding new engineers went from 3 hours to 20 minutes."</p>
+            <p class="text-xs font-bold uppercase tracking-wider">Marcus A. — Eng Lead, Raycast</p>
+          </div>
+          <div class="border-l-4 border-black pl-5">
+            <p class="text-sm font-semibold leading-relaxed mb-2">"The keyboard shortcuts are so good I actually look forward to triaging issues."</p>
+            <p class="text-xs font-bold uppercase tracking-wider">Sana K. — Staff Engineer, Vercel</p>
+          </div>
+        </div>
+      </div>
+      <div>
+        <p class="text-xs font-bold uppercase tracking-widest mb-6">Trusted by teams at</p>
+        <div class="grid grid-cols-2 gap-4">
+          <div class="border-2 border-black p-4 text-center font-bold text-sm hover:bg-black hover:text-white transition-none cursor-default">Vercel</div>
+          <div class="border-2 border-black p-4 text-center font-bold text-sm hover:bg-black hover:text-white transition-none cursor-default">Raycast</div>
+          <div class="border-2 border-black p-4 text-center font-bold text-sm hover:bg-black hover:text-white transition-none cursor-default">Railway</div>
+          <div class="border-2 border-black p-4 text-center font-bold text-sm hover:bg-black hover:text-white transition-none cursor-default">Planetscale</div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- Close CTA -->
+  <section class="rule bg-black text-white px-6 py-20">
+    <div class="max-w-7xl mx-auto">
+      <div class="max-w-2xl">
+        <p class="text-xs font-bold uppercase tracking-widest text-zinc-400 mb-4">The bottom line</p>
+        <h2 class="text-5xl md:text-6xl font-bold tracking-tight leading-[1] mb-6">
+          Stop planning.<br/>
+          <span style="color:#F5FF40;">Start shipping.</span>
+        </h2>
+        <p class="text-sm font-medium text-zinc-400 mb-8 leading-relaxed max-w-md">Plume gets out of your way. Set up your team in 10 minutes. Close your first cycle in a week.</p>
+        <a href="#" class="btn-brute" style="background:#F5FF40; color:#000; border-color:#F5FF40; box-shadow: 4px 4px 0 0 rgba(255,255,255,0.3);">
+          Get started for free →
+        </a>
+        <p class="mt-4 text-xs text-zinc-500 font-medium">No contract. Cancel whenever. No questions asked.</p>
+      </div>
+    </div>
+  </section>
+
+  <!-- Footer -->
+  <footer class="bg-black border-t-2 border-zinc-800 px-6 py-8">
+    <div class="max-w-7xl mx-auto flex flex-col md:flex-row items-start md:items-center justify-between gap-4">
+      <span class="text-sm font-bold text-white">Plume © 2025</span>
+      <div class="flex flex-wrap gap-6 text-xs font-bold uppercase tracking-widest text-zinc-500">
+        <a href="#" class="hover:text-white transition-none">Privacy</a>
+        <a href="#" class="hover:text-white transition-none">Terms</a>
+        <a href="#" class="hover:text-white transition-none">Security</a>
+        <a href="#" class="hover:text-white transition-none">Changelog</a>
+        <a href="#" class="hover:text-white transition-none">Twitter / X</a>
+      </div>
+    </div>
+  </footer>
+
+  <script>
+    // Count-up animation
+    function animateCounter(el, target, duration) {
+      const start = performance.now();
+      function step(now) {
+        const progress = Math.min((now - start) / duration, 1);
+        const ease = 1 - Math.pow(1 - progress, 3);
+        el.textContent = Math.floor(ease * target).toLocaleString();
+        if (progress < 1) requestAnimationFrame(step);
+      }
+      requestAnimationFrame(step);
+    }
+
+    const counters = document.querySelectorAll('[data-target]');
+    const observer = new IntersectionObserver((entries) => {
+      entries.forEach(entry => {
+        if (entry.isIntersecting) {
+          const el = entry.target;
+          const target = parseInt(el.dataset.target, 10);
+          animateCounter(el, target, 1200);
+          observer.unobserve(el);
+        }
+      });
+    }, { threshold: 0.3 });
+
+    counters.forEach(c => observer.observe(c));
+  </script>
+</body>
+</html>

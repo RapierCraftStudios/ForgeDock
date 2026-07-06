@@ -1,0 +1,9 @@
+{
+  "description": "BUILDER — missing required Branch field",
+  "input": "<!-- FORGE:BUILDER -->\n## Implementation Complete\n\n**Commits**: a1b2c3d\n**Files changed**: 2\n\n<!-- FORGE:BUILDER:COMPLETE -->",
+  "expect": {
+    "type": "BUILDER",
+    "valid": false,
+    "sentinelState": "complete"
+  }
+}

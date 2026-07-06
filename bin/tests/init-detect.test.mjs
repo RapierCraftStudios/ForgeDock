@@ -26,7 +26,7 @@ import { mkdtempSync, rmSync, mkdirSync } from "node:fs";
 import { join } from "node:path";
 import os from "node:os";
 import { execFileSync } from "node:child_process";
-import { detectConfig } from "../init-detect.mjs";
+import { detectConfig, buildMinimalForgeYaml } from "../init-detect.mjs";
 
 // ---------------------------------------------------------------------------
 // Fixture helpers
@@ -425,5 +425,77 @@ describe("detectConfig — project name derivation", async () => {
     addRemote(repoPath, "origin", "https://github.com/org/forge.git");
     const draft = await detectConfig(repoPath);
     assert.equal(draft.project.name.value, "Forge");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// buildMinimalForgeYaml — pure minimal-template builder (#1148)
+// ---------------------------------------------------------------------------
+
+describe("buildMinimalForgeYaml", () => {
+  const base = {
+    projectName: "My App",
+    owner: "my-org",
+    repo: "my-repo",
+    description: "A test project",
+    root: "/home/me/my-repo",
+    worktreeBase: "/home/me/my-repo/.claude/worktrees",
+    defaultBranch: "main",
+    stagingBranch: "staging",
+  };
+
+  it("includes all three required sections so `doctor` passes", () => {
+    const yaml = buildMinimalForgeYaml(base);
+    assert.match(yaml, /^project:/m);
+    assert.match(yaml, /^paths:/m);
+    assert.match(yaml, /^branches:/m);
+  });
+
+  it("embeds the detected values", () => {
+    const yaml = buildMinimalForgeYaml(base);
+    assert.match(yaml, /name: "My App"/);
+    assert.match(yaml, /owner: "my-org"/);
+    assert.match(yaml, /repo: "my-repo"/);
+    assert.match(yaml, /description: "A test project"/);
+    assert.match(yaml, /root: "\/home\/me\/my-repo"/);
+    assert.match(yaml, /worktree_base: "\/home\/me\/my-repo\/\.claude\/worktrees"/);
+    assert.match(yaml, /default: "main"/);
+    assert.match(yaml, /staging: "staging"/);
+    assert.match(yaml, /feature_pattern: "milestone\/\{slug\}"/);
+  });
+
+  it("omits all commented optional sections (stays minimal)", () => {
+    const yaml = buildMinimalForgeYaml(base);
+    assert.doesNotMatch(yaml, /# repos:/);
+    assert.doesNotMatch(yaml, /# project_board:/);
+    assert.doesNotMatch(yaml, /# review:/);
+    assert.doesNotMatch(yaml, /# verification:/);
+    // Far shorter than the full ~200-line template.
+    assert.ok(yaml.split("\n").length < 40, "minimal config should be under 40 lines");
+  });
+
+  it("omits the description line when description is empty", () => {
+    const yaml = buildMinimalForgeYaml({ ...base, description: "" });
+    assert.doesNotMatch(yaml, /description:/);
+  });
+
+  it("escapes backslashes in Windows paths (ref: forge#810)", () => {
+    const yaml = buildMinimalForgeYaml({
+      ...base,
+      root: String.raw`C:\Users\me\my-repo`,
+      worktreeBase: String.raw`C:\Users\me\my-repo\.claude\worktrees`,
+    });
+    // Each backslash in the path is doubled in the emitted YAML scalar.
+    assert.ok(yaml.includes(String.raw`root: "C:\\Users\\me\\my-repo"`));
+    assert.ok(
+      yaml.includes(
+        String.raw`worktree_base: "C:\\Users\\me\\my-repo\\.claude\\worktrees"`,
+      ),
+    );
+  });
+
+  it("escapes embedded double quotes", () => {
+    const yaml = buildMinimalForgeYaml({ ...base, description: 'has "quotes"' });
+    assert.ok(yaml.includes('description: "has \\"quotes\\""'));
   });
 });

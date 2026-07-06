@@ -1,0 +1,9 @@
+{
+  "description": "CONTEXT — partial annotation (time-limited, producer ran out of time)",
+  "input": "<!-- FORGE:CONTEXT -->\n## Implementation Context for #42\n\n### Known Pitfalls for This Area\nAlways null-check before dereferencing profile.\n\n<!-- FORGE:CONTEXT:PARTIAL -->",
+  "expect": {
+    "type": "CONTEXT",
+    "valid": false,
+    "sentinelState": "partial"
+  }
+}

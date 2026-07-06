@@ -1,0 +1,345 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Slipstream - Ship it.</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+<style>
+  *,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
+  :root{
+    --black:#0a0a0a;--white:#f5f5f0;--accent:#ff3d00;--gray:#888;--grayDark:#1a1a1a;--grayMid:#2a2a2a;
+  }
+  html{font-size:16px;scroll-behavior:smooth}
+  body{font-family:'Space Grotesk',sans-serif;background:var(--black);color:var(--white);line-height:1.5;-webkit-font-smoothing:antialiased}
+  a{color:inherit;text-decoration:none}
+
+  /* UTILITY */
+  .container{max-width:1280px;margin:0 auto;padding:0 2rem}
+  .mono{font-family:'JetBrains Mono',monospace}
+  .accent{color:var(--accent)}
+  .uppercase{text-transform:uppercase;letter-spacing:.15em;font-size:.75rem;font-weight:600}
+
+  /* NAV */
+  nav{position:fixed;top:0;left:0;right:0;z-index:100;padding:1.25rem 2rem;display:flex;justify-content:space-between;align-items:center;background:rgba(10,10,10,.92);backdrop-filter:blur(4px);border-bottom:1px solid var(--grayMid)}
+  nav .logo{font-weight:700;font-size:1.25rem;letter-spacing:-.02em}
+  nav .logo span{color:var(--accent)}
+  nav ul{list-style:none;display:flex;gap:2rem;font-size:.85rem;font-weight:500}
+  nav .cta-nav{background:var(--accent);color:var(--black);padding:.5rem 1.25rem;font-weight:700;font-size:.8rem;text-transform:uppercase;letter-spacing:.1em}
+
+  /* HERO — signature move: oversized terminal command */
+  .hero{min-height:100vh;display:flex;flex-direction:column;justify-content:center;padding-top:5rem;position:relative;overflow:hidden}
+  .hero-command{font-family:'JetBrains Mono',monospace;font-size:clamp(2.5rem,8vw,7rem);font-weight:500;line-height:1.1;letter-spacing:-.03em;margin-bottom:2rem}
+  .hero-command .prompt{color:var(--accent)}
+  .hero-command .cmd{color:var(--white)}
+  .hero-sub{font-size:clamp(1rem,2vw,1.35rem);color:var(--gray);max-width:540px;margin-bottom:3rem;line-height:1.6}
+  .hero-cta{display:inline-block;background:var(--accent);color:var(--black);padding:1rem 2.5rem;font-weight:700;font-size:1rem;text-transform:uppercase;letter-spacing:.12em;transition:background .15s}
+  .hero-cta:hover{background:#ff5722}
+  .hero-meta{margin-top:4rem;display:flex;gap:3rem;flex-wrap:wrap}
+  .hero-meta dt{font-size:.7rem;text-transform:uppercase;letter-spacing:.15em;color:var(--gray);margin-bottom:.25rem}
+  .hero-meta dd{font-family:'JetBrains Mono',monospace;font-size:1.5rem;font-weight:500}
+
+  /* DIVIDER */
+  .divider{border:none;border-top:1px solid var(--grayMid);margin:0}
+
+  /* DEPLOY LOG SECTION */
+  .deploy-section{padding:6rem 0}
+  .deploy-section h2{font-size:clamp(1.75rem,4vw,3rem);font-weight:700;letter-spacing:-.03em;margin-bottom:1rem}
+  .deploy-section .lead{color:var(--gray);font-size:1.05rem;max-width:560px;margin-bottom:3rem}
+  .deploy-grid{display:grid;grid-template-columns:1fr 1fr;gap:2rem;align-items:start}
+  .deploy-terminal{background:var(--grayDark);border:1px solid var(--grayMid);padding:1.5rem;font-family:'JetBrains Mono',monospace;font-size:.8rem;line-height:1.8;overflow-x:auto}
+  .deploy-terminal .line-ok{color:#4ade80}
+  .deploy-terminal .line-info{color:var(--gray)}
+  .deploy-terminal .line-accent{color:var(--accent)}
+  .deploy-terminal .header{display:flex;gap:.5rem;margin-bottom:1rem}
+  .deploy-terminal .dot{width:10px;height:10px;border-radius:50%;background:var(--grayMid);border:1px solid #444}
+  .deploy-features{display:flex;flex-direction:column;gap:2rem}
+  .deploy-features .feat{border-left:2px solid var(--accent);padding-left:1.25rem}
+  .deploy-features .feat h3{font-size:1rem;font-weight:600;margin-bottom:.35rem}
+  .deploy-features .feat p{color:var(--gray);font-size:.9rem;line-height:1.5}
+
+  /* FRAMEWORKS STRIP */
+  .frameworks{padding:5rem 0;border-top:1px solid var(--grayMid)}
+  .frameworks h2{font-size:.75rem;text-transform:uppercase;letter-spacing:.2em;color:var(--gray);margin-bottom:2.5rem}
+  .fw-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(140px,1fr));gap:1.5rem}
+  .fw-card{border:1px solid var(--grayMid);padding:1.25rem;text-align:left;font-weight:600;font-size:.95rem;transition:border-color .15s}
+  .fw-card:hover{border-color:var(--accent)}
+  .fw-card span{display:block;font-family:'JetBrains Mono',monospace;font-size:.7rem;color:var(--gray);margin-top:.35rem;font-weight:400}
+
+  /* METRICS BAR */
+  .metrics{padding:5rem 0;border-top:1px solid var(--grayMid)}
+  .metrics-grid{display:grid;grid-template-columns:repeat(4,1fr);gap:2rem}
+  .metric{text-align:left}
+  .metric .val{font-size:clamp(2rem,4vw,3.5rem);font-weight:700;letter-spacing:-.04em;line-height:1}
+  .metric .val .unit{font-size:.5em;color:var(--accent);margin-left:.1em}
+  .metric .label{font-size:.75rem;text-transform:uppercase;letter-spacing:.15em;color:var(--gray);margin-top:.5rem}
+
+  /* WORKFLOW SECTION */
+  .workflow{padding:6rem 0;border-top:1px solid var(--grayMid)}
+  .workflow h2{font-size:clamp(1.75rem,4vw,3rem);font-weight:700;letter-spacing:-.03em;margin-bottom:3rem}
+  .workflow-steps{display:grid;grid-template-columns:repeat(3,1fr);gap:0}
+  .step{padding:2rem;border:1px solid var(--grayMid);position:relative}
+  .step-num{font-family:'JetBrains Mono',monospace;font-size:3rem;font-weight:700;color:var(--accent);line-height:1;margin-bottom:1rem}
+  .step h3{font-size:1.1rem;font-weight:600;margin-bottom:.5rem}
+  .step p{font-size:.85rem;color:var(--gray);line-height:1.6}
+  .step code{font-family:'JetBrains Mono',monospace;font-size:.75rem;display:block;margin-top:.75rem;color:var(--white);background:var(--black);padding:.5rem .75rem;border:1px solid var(--grayMid)}
+
+  /* EDGE SECTION */
+  .edge{padding:6rem 0;border-top:1px solid var(--grayMid)}
+  .edge-layout{display:grid;grid-template-columns:1fr 1fr;gap:4rem;align-items:start}
+  .edge h2{font-size:clamp(1.75rem,4vw,2.5rem);font-weight:700;letter-spacing:-.02em;margin-bottom:1rem}
+  .edge .lead{color:var(--gray);font-size:1rem;line-height:1.6;margin-bottom:2rem}
+  .edge-locations{display:grid;grid-template-columns:repeat(3,1fr);gap:.75rem}
+  .edge-loc{font-family:'JetBrains Mono',monospace;font-size:.75rem;padding:.5rem .75rem;border:1px solid var(--grayMid);color:var(--gray)}
+  .edge-loc .region{color:var(--white);font-weight:500;display:block}
+  .edge-func{border:1px solid var(--grayMid);padding:1.5rem}
+  .edge-func h3{font-size:1rem;font-weight:600;margin-bottom:1rem}
+  .edge-func pre{font-family:'JetBrains Mono',monospace;font-size:.75rem;line-height:1.7;color:var(--gray);overflow-x:auto}
+  .edge-func pre .kw{color:var(--accent)}
+  .edge-func pre .str{color:#4ade80}
+  .edge-func pre .cmt{color:#555}
+
+  /* CTA BANNER */
+  .cta-banner{padding:6rem 0;border-top:1px solid var(--grayMid);text-align:left}
+  .cta-banner h2{font-size:clamp(2rem,5vw,4rem);font-weight:700;letter-spacing:-.04em;margin-bottom:1rem}
+  .cta-banner p{color:var(--gray);font-size:1.1rem;margin-bottom:2.5rem;max-width:480px}
+  .cta-banner .btn{display:inline-block;background:var(--accent);color:var(--black);padding:1.1rem 3rem;font-weight:700;font-size:1rem;text-transform:uppercase;letter-spacing:.12em;transition:background .15s}
+  .cta-banner .btn:hover{background:#ff5722}
+  .cta-banner .free{display:block;margin-top:.75rem;font-size:.8rem;color:var(--gray)}
+
+  /* FOOTER */
+  footer{border-top:1px solid var(--grayMid);padding:2rem 0;display:flex;justify-content:space-between;align-items:center;font-size:.75rem;color:var(--gray)}
+
+  /* RESPONSIVE */
+  @media(max-width:900px){
+    .deploy-grid,.workflow-steps,.edge-layout,.metrics-grid{grid-template-columns:1fr}
+    .edge-locations{grid-template-columns:repeat(2,1fr)}
+    nav ul{display:none}
+    .hero-meta{flex-direction:column;gap:1.5rem}
+  }
+  @media(max-width:600px){
+    .container{padding:0 1.25rem}
+    .edge-locations{grid-template-columns:1fr}
+    .fw-grid{grid-template-columns:repeat(2,1fr)}
+  }
+</style>
+</head>
+<body>
+
+<!-- NAV -->
+<nav>
+  <div class="logo">SLIP<span>STREAM</span></div>
+  <ul>
+    <li><a href="#deploy">Deploy</a></li>
+    <li><a href="#frameworks">Frameworks</a></li>
+    <li><a href="#edge">Edge</a></li>
+    <li><a href="#workflow">How it works</a></li>
+  </ul>
+  <a href="#" class="cta-nav">Deploy now</a>
+</nav>
+
+<!-- HERO: Signature move = oversized terminal command as typography -->
+<section class="hero">
+  <div class="container">
+    <div class="hero-command">
+      <span class="prompt">$</span> <span class="cmd">git push origin main</span>
+    </div>
+    <p class="hero-sub">That's the entire deploy process. Push your code. Slipstream builds it, ships it to 40+ edge locations, and hands you a live URL. No YAML. No containers. No waiting.</p>
+    <a href="#" class="hero-cta">Deploy now — free</a>
+    <dl class="hero-meta">
+      <div>
+        <dt>Build time</dt>
+        <dd>&lt;8s</dd>
+      </div>
+      <div>
+        <dt>Edge locations</dt>
+        <dd>42</dd>
+      </div>
+      <div>
+        <dt>Uptime</dt>
+        <dd>99.99%</dd>
+      </div>
+      <div>
+        <dt>Deploys / day</dt>
+        <dd>1.2M+</dd>
+      </div>
+    </dl>
+  </div>
+</section>
+
+<hr class="divider">
+
+<!-- DEPLOY LOG -->
+<section class="deploy-section" id="deploy">
+  <div class="container">
+    <h2>Every push, deployed.</h2>
+    <p class="lead">Connect your repository. Slipstream detects the framework, installs dependencies, builds, and deploys. Every pull request gets its own preview URL.</p>
+    <div class="deploy-grid">
+      <div class="deploy-terminal">
+        <div class="header"><span class="dot"></span><span class="dot"></span><span class="dot"></span></div>
+        <div class="line-info">$ slipstream deploy</div>
+        <div class="line-info">Detecting framework... <span class="line-ok">Next.js 14.2</span></div>
+        <div class="line-info">Installing dependencies...</div>
+        <div class="line-ok">&#10003; 1,247 modules installed (2.1s)</div>
+        <div class="line-info">Building...</div>
+        <div class="line-ok">&#10003; Build complete (4.8s)</div>
+        <div class="line-info">Deploying to edge network...</div>
+        <div class="line-ok">&#10003; 42 regions propagated (1.2s)</div>
+        <div class="line-info">Assigning URL...</div>
+        <div class="line-accent">&#9654; https://app-git-main.slipstream.app</div>
+        <br>
+        <div class="line-ok">Deploy complete in 8.1s</div>
+      </div>
+      <div class="deploy-features">
+        <div class="feat">
+          <h3>Preview deployments</h3>
+          <p>Every pull request gets a unique, shareable URL. Review changes in production conditions before merging. Comments sync back to your PR.</p>
+        </div>
+        <div class="feat">
+          <h3>Instant rollbacks</h3>
+          <p>Every deploy is immutable. Roll back to any previous deployment with a single click. No rebuild required.</p>
+        </div>
+        <div class="feat">
+          <h3>Zero configuration</h3>
+          <p>Framework detection, build settings, and output routing are handled automatically. Override anything when you need to.</p>
+        </div>
+        <div class="feat">
+          <h3>Branch environments</h3>
+          <p>Every branch gets its own environment with isolated serverless functions, environment variables, and edge config. Test in production parity.</p>
+        </div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<hr class="divider">
+
+<!-- FRAMEWORKS -->
+<section class="frameworks" id="frameworks">
+  <div class="container">
+    <h2>First-class framework support</h2>
+    <div class="fw-grid">
+      <div class="fw-card">Next.js<span>App Router, SSR, ISR</span></div>
+      <div class="fw-card">React<span>SPA, Vite, CRA</span></div>
+      <div class="fw-card">Svelte<span>SvelteKit, Vite</span></div>
+      <div class="fw-card">Astro<span>SSG, SSR, Islands</span></div>
+      <div class="fw-card">Nuxt<span>Vue 3, Nitro</span></div>
+      <div class="fw-card">Remix<span>Full-stack, loaders</span></div>
+      <div class="fw-card">Angular<span>SSR, prerender</span></div>
+      <div class="fw-card">Solid<span>SolidStart</span></div>
+    </div>
+  </div>
+</section>
+
+<!-- METRICS -->
+<section class="metrics">
+  <div class="container">
+    <div class="metrics-grid">
+      <div class="metric">
+        <div class="val">50<span class="unit">ms</span></div>
+        <div class="label">Median TTFB globally</div>
+      </div>
+      <div class="metric">
+        <div class="val">99.99<span class="unit">%</span></div>
+        <div class="label">Uptime SLA</div>
+      </div>
+      <div class="metric">
+        <div class="val">1.2<span class="unit">M</span></div>
+        <div class="label">Deploys per day</div>
+      </div>
+      <div class="metric">
+        <div class="val">42</div>
+        <div class="label">Edge regions</div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- WORKFLOW -->
+<section class="workflow" id="workflow">
+  <div class="container">
+    <h2>Three commands. That's it.</h2>
+    <div class="workflow-steps">
+      <div class="step">
+        <div class="step-num">01</div>
+        <h3>Connect</h3>
+        <p>Link your GitHub, GitLab, or Bitbucket repository. Slipstream reads your framework and configures the build pipeline.</p>
+        <code>$ slipstream link github.com/team/app</code>
+      </div>
+      <div class="step">
+        <div class="step-num">02</div>
+        <h3>Push</h3>
+        <p>Push to any branch. Slipstream builds and deploys automatically. Preview URLs for branches, production URL for main.</p>
+        <code>$ git push origin feature/auth</code>
+      </div>
+      <div class="step">
+        <div class="step-num">03</div>
+        <h3>Ship</h3>
+        <p>Merge your PR. Production updates in seconds. Instant rollback if anything goes wrong. Global CDN invalidation included.</p>
+        <code>$ gh pr merge --squash</code>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- EDGE -->
+<section class="edge" id="edge">
+  <div class="container">
+    <div class="edge-layout">
+      <div>
+        <h2>Edge functions. No cold starts.</h2>
+        <p class="lead">Run server-side logic at the edge. API routes, middleware, authentication, redirects -- all deployed alongside your frontend, executed in the region closest to your user.</p>
+        <div class="edge-locations">
+          <div class="edge-loc"><span class="region">IAD</span>Virginia</div>
+          <div class="edge-loc"><span class="region">SFO</span>San Francisco</div>
+          <div class="edge-loc"><span class="region">LHR</span>London</div>
+          <div class="edge-loc"><span class="region">FRA</span>Frankfurt</div>
+          <div class="edge-loc"><span class="region">NRT</span>Tokyo</div>
+          <div class="edge-loc"><span class="region">SYD</span>Sydney</div>
+          <div class="edge-loc"><span class="region">GRU</span>Sao Paulo</div>
+          <div class="edge-loc"><span class="region">SIN</span>Singapore</div>
+          <div class="edge-loc"><span class="region">BOM</span>Mumbai</div>
+        </div>
+      </div>
+      <div class="edge-func">
+        <h3>api/hello.ts</h3>
+        <pre><span class="kw">export default</span> <span class="kw">function</span> handler(req: Request) {
+  <span class="kw">const</span> city = req.geo?.city ?? <span class="str">'somewhere'</span>;
+
+  <span class="kw">return new</span> Response(
+    JSON.stringify({
+      message: <span class="str">`Hello from ${city}`</span>,
+      region: process.env.SLIPSTREAM_REGION,
+      latency: <span class="str">'&lt;10ms'</span>,
+    }),
+    {
+      headers: { <span class="str">'content-type'</span>: <span class="str">'application/json'</span> },
+    }
+  );
+}</pre>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- CTA -->
+<section class="cta-banner">
+  <div class="container">
+    <h2>Stop configuring.<br>Start shipping.</h2>
+    <p>Free for personal projects. No credit card required. Deploy your first app in under a minute.</p>
+    <a href="#" class="btn">Deploy now</a>
+    <span class="free">Free tier includes 100GB bandwidth, unlimited preview deploys, and edge functions.</span>
+  </div>
+</section>
+
+<!-- FOOTER -->
+<footer>
+  <div class="container" style="display:flex;justify-content:space-between;width:100%">
+    <span>Slipstream 2026</span>
+    <span class="mono" style="font-size:.7rem">Build. Push. Live.</span>
+  </div>
+</footer>
+
+</body>
+</html>

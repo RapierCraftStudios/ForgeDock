@@ -1,6 +1,7 @@
 ---
 description: Auto-generate release notes from merged PRs and FORGE:TRAJECTORY annotations — grouped by conventional commit type
 argument-hint: [v1.0.0..v1.1.0 | since:YYYY-MM-DD | last-N]
+install: extras
 ---
 
 # /changelog — Release Notes Generator
@@ -9,7 +10,7 @@ argument-hint: [v1.0.0..v1.1.0 | since:YYYY-MM-DD | last-N]
 
 Generate a structured markdown changelog from merged PRs and their FORGE:TRAJECTORY annotations. Groups entries by conventional commit type (feat, fix, refactor, docs, chore) and enriches each entry with task type and investigation verdict from the pipeline's annotation layer.
 
-**Agent model policy**: Default `model: "sonnet"`. Fallback: `model: "opus"` if Sonnet is rate-limited.
+**Agent model policy**: `model: "haiku"`, `effort: low` (mechanical tier — annotation reading, changelog generation). Fallback: `model: "sonnet"` if rate-limited. Feature gate: pass `effort` only on Claude Code >= 2.1.154.
 
 **NEVER use plan mode (EnterPlanMode)** — it breaks execution context.
 

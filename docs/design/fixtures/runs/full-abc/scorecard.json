@@ -1,0 +1,144 @@
+{
+  "corpus_version": "seed-v1",
+  "generation_model": "claude-sonnet-4-6",
+  "judge_model": "claude-sonnet-4-6",
+  "n_products": 5,
+  "n_runs_per_product": 3,
+  "win_rate_vs_C": {
+    "A": {
+      "mean": 0.133,
+      "by_product": {
+        "cadence": 0,
+        "tender": 0,
+        "slipstream": 0.667,
+        "voltage": 0,
+        "plume": 0
+      }
+    },
+    "B": {
+      "mean": 0.133,
+      "by_product": {
+        "cadence": 0,
+        "tender": 0,
+        "slipstream": 0.667,
+        "voltage": 0,
+        "plume": 0
+      }
+    }
+  },
+  "a_vs_b_win_rate": 0.633,
+  "rubric": {
+    "A": {
+      "hierarchy": {
+        "mean": 3.667,
+        "stdev": 0.816
+      },
+      "typography": {
+        "mean": 3.933,
+        "stdev": 0.594
+      },
+      "color": {
+        "mean": 3.467,
+        "stdev": 0.834
+      },
+      "whitespace": {
+        "mean": 3.4,
+        "stdev": 0.91
+      },
+      "originality": {
+        "mean": 3.533,
+        "stdev": 0.99
+      },
+      "mobile": {
+        "mean": 2.933,
+        "stdev": 0.594
+      }
+    },
+    "B": {
+      "hierarchy": {
+        "mean": 3.733,
+        "stdev": 0.594
+      },
+      "typography": {
+        "mean": 3.467,
+        "stdev": 0.64
+      },
+      "color": {
+        "mean": 3.267,
+        "stdev": 0.704
+      },
+      "whitespace": {
+        "mean": 3.2,
+        "stdev": 0.561
+      },
+      "originality": {
+        "mean": 2.867,
+        "stdev": 0.64
+      },
+      "mobile": {
+        "mean": 3.4,
+        "stdev": 0.632
+      }
+    },
+    "C": {
+      "hierarchy": {
+        "mean": 5,
+        "stdev": 0
+      },
+      "typography": {
+        "mean": 4.8,
+        "stdev": 0.414
+      },
+      "color": {
+        "mean": 4.8,
+        "stdev": 0.414
+      },
+      "whitespace": {
+        "mean": 4.4,
+        "stdev": 0.507
+      },
+      "originality": {
+        "mean": 4.4,
+        "stdev": 0.507
+      },
+      "mobile": {
+        "mean": 4.2,
+        "stdev": 0.414
+      }
+    }
+  },
+  "slop": {
+    "A": 1.733,
+    "B": 2.733,
+    "C": 0.8
+  },
+  "judge_calibration": {
+    "miscalibrated_runs": [
+      {
+        "product": "slipstream",
+        "run": 1,
+        "comparison": "A_vs_C",
+        "winner": "A"
+      },
+      {
+        "product": "slipstream",
+        "run": 1,
+        "comparison": "B_vs_C",
+        "winner": "B"
+      },
+      {
+        "product": "slipstream",
+        "run": 3,
+        "comparison": "A_vs_C",
+        "winner": "A"
+      },
+      {
+        "product": "slipstream",
+        "run": 3,
+        "comparison": "B_vs_C",
+        "winner": "B"
+      }
+    ],
+    "ok": false
+  }
+}

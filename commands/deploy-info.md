@@ -1,6 +1,7 @@
 ---
 description: Show what will deploy next — diff staging vs main with issue/PR summary, risk assessment, and deploy checklist
 argument-hint: [staging | milestone/{slug} | compare {branch}]
+install: extras
 ---
 
 # /deploy-info — Pre-Deploy Summary
@@ -15,9 +16,11 @@ argument-hint: [staging | milestone/{slug} | compare {branch}]
 
 You are the pipeline's deploy awareness layer. Before the user merges staging → main (triggering CI/CD deployment), this command shows exactly what's going out: which PRs, which issues, what changed, and what risks exist.
 
-**Agent model policy**: Default `model: "sonnet"`. If Sonnet is rate-limited, fall back to `model: "opus"`. User can override with `--model <name>`.
+**Agent model policy**: `model: "sonnet"` (standard tier). Fallback: `model: "opus"` if rate-limited. User can override with `--model <name>`. Feature gate: pass `effort` in Task/Skill spawns only on Claude Code >= 2.1.154.
 
 **NEVER use plan mode (EnterPlanMode)** — it breaks execution context.
+
+<!-- FORGE:SPEC_LOADED — deploy-info.md loaded and active. Agent is bound by this spec. -->
 
 ---
 
@@ -156,7 +159,7 @@ done
 # Full file diff summary
 git diff --stat origin/$TARGET..origin/$SOURCE
 
-# Read layout paths from forge.yaml, fall back to AlterLab defaults
+# Read layout paths from forge.yaml, fall back to forge.yaml defaults
 LAYOUT_API=$(yq '.review.layout.api // "services/api"' forge.yaml 2>/dev/null || echo "services/api")
 LAYOUT_WORKER=$(yq '.review.layout.worker // "services/worker"' forge.yaml 2>/dev/null || echo "services/worker")
 LAYOUT_PAGES=$(yq '.review.layout.pages // "web/src/app"' forge.yaml 2>/dev/null || echo "web/src/app")
@@ -189,10 +192,14 @@ if [ -n "$MIGRATIONS" ]; then
   echo "⚠️ DATABASE MIGRATIONS INCLUDED:"
   echo "$MIGRATIONS"
   # Show migration content for review
-  for m in $MIGRATIONS; do
+  # $MIGRATIONS is one path per line (`git diff --name-only`) — herestring,
+  # not a piped `| while read`, for consistency with the newline-safe pattern
+  # used elsewhere in this sweep.
+  while IFS= read -r m; do
+    [ -z "$m" ] && continue
     echo "--- $m ---"
     git show origin/$SOURCE:$m 2>/dev/null | head -30
-  done
+  done <<< "$MIGRATIONS"
 fi
 ```
 
@@ -227,8 +234,10 @@ if [ -n "$NEW_ENV" ]; then
   # If your project uses a different backend, skip this block and verify manually.
   if [ "{DEPLOY_SECRETS_BACKEND}" = "sops" ]; then
     for var in $(echo "$NEW_ENV" | grep -oE '^\+[A-Z_]+' | sed 's/^\+//'); do
-      if ! grep -q "$var" scripts/decrypt-secrets.sh 2>/dev/null; then
-        echo "  ❌ $var NOT in decrypt-secrets.sh ENV_MAPPING"
+      if [ -f "{REPO_PATH}/scripts/decrypt-secrets.sh" ]; then
+        grep -q "$var" "{REPO_PATH}/scripts/decrypt-secrets.sh" 2>/dev/null || echo "  ❌ $var NOT in decrypt-secrets.sh ENV_MAPPING"
+      else
+        echo "  ℹ️  scripts/decrypt-secrets.sh not found — skipping ENV_MAPPING cross-check for $var. Verify manually in your SOPS chain."
       fi
     done
   else
@@ -272,12 +281,66 @@ gh workflow run {deploy.workflow} --ref main -f {deploy.workflow_inputs.services
 
 ---
 
+## Phase 4B: Deploy Train State <!-- Added: forge#1332 -->
+
+**Purpose**: Report the current state of the rolling staging→main deploy candidate (the "merge train"). One deploy PR should stay open per deploy cycle — this phase shows whether a candidate exists, what is holding it, and what is queued behind it.
+
+```bash
+git fetch origin {STAGING_BRANCH} {DEFAULT_BRANCH} 2>/dev/null
+
+# Step 1: Find the current open staging→main deploy PR (the "train")
+TRAIN_PR=$(gh pr list {GH_FLAG} \
+  --head "{STAGING_BRANCH}" \
+  --base "{DEFAULT_BRANCH}" \
+  --state open \
+  --json number,title,headRefOid,createdAt,reviewRequests \
+  --jq '.[0] // empty' 2>/dev/null)
+
+TRAIN_PR_NUMBER=$(echo "$TRAIN_PR" | jq -r '.number // empty')
+TRAIN_PR_SHA=$(echo "$TRAIN_PR" | jq -r '.headRefOid // empty' | cut -c1-7)
+TRAIN_PR_CREATED=$(echo "$TRAIN_PR" | jq -r '.createdAt // empty')
+
+if [ -z "$TRAIN_PR_NUMBER" ]; then
+  TRAIN_STATUS="NO_TRAIN — no open staging→main PR. Run /review-pr-staging to open one."
+else
+  # Step 2: Check whether the train is held (has blocking findings)
+  HELD_BY=$(gh issue list {GH_FLAG} \
+    --label "review-finding" \
+    --state open \
+    --search "PR #${TRAIN_PR_NUMBER}" \
+    --limit 20 \
+    --json number,title \
+    --jq '[.[] | "#\(.number): \(.title)"] | join("\n")' 2>/dev/null || true)
+
+  if [ -n "$HELD_BY" ]; then
+    TRAIN_STATUS="HELD"
+  else
+    TRAIN_STATUS="CLEAR — ready to merge"
+  fi
+
+  # Step 3: Count commits queued (commits in staging not yet in main)
+  QUEUED_COMMITS=$(git rev-list --count origin/{DEFAULT_BRANCH}..origin/{STAGING_BRANCH} 2>/dev/null || echo "?")
+fi
+```
+
+Train state is included in the Phase 5 output summary.
+
+---
+
 ## Phase 5: Output Summary
 
 ```
 ## Deploy Summary: {SOURCE} → {TARGET}
 
 **Commits**: {N} | **PRs**: {N} | **Issues closed**: {N} | **Files changed**: {N}
+
+### Deploy Train State
+**Train PR**: #{TRAIN_PR_NUMBER} (SHA: {TRAIN_PR_SHA}, opened: {TRAIN_PR_CREATED})
+**Status**: {TRAIN_STATUS}
+{If HELD: "**Held by**: {count} open finding(s) — fix and push to unblock:\n{HELD_BY}"}
+{If CLEAR: "**Ready to merge**: no open findings on the train PR"}
+{If NO_TRAIN: "No open staging→main PR — run /review-pr-staging to open one"}
+**Queued commits**: {QUEUED_COMMITS} (commits in staging not yet in main)
 
 ### Services Affected
 | Service | Files Changed | Rebuild Required |
