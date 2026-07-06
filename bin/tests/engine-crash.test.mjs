@@ -50,7 +50,10 @@ function makeWorld() {
       const a = args.join(" ");
       if (a.includes("/comments")) {
         w.commentCalls++;
-        if (w.commentCalls === w.crashAtComments) { w.crashAtComments = Infinity; throw new Error("CRASH mid-phase (comments)"); }
+        // Scoped channel: count and optionally crash BEFORE the legacy channel
+        // so postBuildCommentCalls is always accurate even if both channels are
+        // ever co-armed. (Currently mutual-exclusive — no scenario arms both —
+        // but hoisting the counter makes the invariant hold programmatically.)
         if (w.buildRuns > 0) {
           w.postBuildCommentCalls++;
           if (w.postBuildCommentCalls === w.crashAtPostBuildComments) {
@@ -58,6 +61,7 @@ function makeWorld() {
             throw new Error("CRASH mid-phase (comments, post-build)");
           }
         }
+        if (w.commentCalls === w.crashAtComments) { w.crashAtComments = Infinity; throw new Error("CRASH mid-phase (comments)"); }
         return w.markers;
       }
       if (a.startsWith("issue view") && a.includes("body")) return JSON.stringify({ body: w.body });
