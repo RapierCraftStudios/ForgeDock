@@ -168,9 +168,11 @@ describe("router", () => {
     const mainRepo = mkdtempSync(join(os.tmpdir(), "fd-main-repo-"));
     const worktree = mkdtempSync(join(os.tmpdir(), "fd-worktree-"));
 
-    // Bootstrap: bare remote repo, then clone it as mainRepo
-    spawnSync("git", ["init", "--bare", remoteRepo], { stdio: "pipe" });
-    spawnSync("git", ["init", mainRepo], { stdio: "pipe" });
+    // Bootstrap: bare remote repo, then clone it as mainRepo.
+    // Use -b main explicitly so the initial branch is "main" regardless of
+    // the system's init.defaultBranch config (CI runners may default to "master").
+    spawnSync("git", ["init", "--bare", "-b", "main", remoteRepo], { stdio: "pipe" });
+    spawnSync("git", ["init", "-b", "main", mainRepo], { stdio: "pipe" });
     spawnSync("git", ["-C", mainRepo, "remote", "add", "origin", remoteRepo], { stdio: "pipe" });
     spawnSync("git", ["-C", mainRepo, "commit", "--allow-empty", "-m", "init"], { stdio: "pipe" });
     spawnSync("git", ["-C", mainRepo, "push", "origin", "main"], { stdio: "pipe" });
