@@ -63,7 +63,7 @@ async function assertRepoMatchesCwd(io, repo) {
       `verify it matches. Refusing to run cross-repo without verification.`
     );
   }
-  if (defaultRepo !== repo) {
+  if (defaultRepo.toLowerCase().trim() !== repo.toLowerCase().trim()) {
     throw new Error(
       `--repo ${repo} does not match the current repo (${defaultRepo}). Cross-repo dispatch is not supported — ` +
       `state reads/writes (issue view/edit) are cwd-scoped and would silently target ${defaultRepo} instead of ` +
