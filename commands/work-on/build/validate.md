@@ -294,15 +294,17 @@ This is a direct, blocking backstop — unlike `quality-gate.md` Step 2A/2W, it 
 cd {WORKTREE_PATH}
 
 # 1. SEC-EXEC: shell-string exec/spawn calls with interpolated or concatenated arguments.
-#    Identical pattern to quality-gate.md Step 2A — kept byte-for-byte in sync so the two
-#    files never diverge on what counts as a finding.
+#    Identical pattern to quality-gate.md Step 2A — kept in sync (uses PCRE mode with
+#    (?<!\.) lookbehind) so the two files never diverge on what counts as a finding.
+#    PCRE mode is intentional — lookbehind required to exclude .exec( method calls.
+#    <!-- allowlist: grep -P required for (?<!\.) lookbehind — ERE cannot express this -->
 IFS=' ' read -ra CHANGED_FILES_ARR <<< "{CHANGED_FILES}"
 for f in "${CHANGED_FILES_ARR[@]}"; do
     case "$f" in
         *.js|*.mjs|*.ts|*.tsx)
-            grep -nE '\b(exec|execSync|spawn)\(\s*`[^`]*\$\{' "$f" 2>/dev/null && \
+            grep -nP '(?<!\.)\b(exec|execSync|spawn)\(\s*`[^`]*\$\{' "$f" 2>/dev/null && \ <!-- allowlist: grep -P required for (?<!\.) lookbehind — ERE cannot express this -->
                 { echo "SEC-EXEC FAILED: $f (template-literal interpolation in exec/spawn call)"; SEC_EXEC_FINDINGS="${SEC_EXEC_FINDINGS:+$SEC_EXEC_FINDINGS, }$f"; }
-            grep -nE "\b(exec|execSync|spawn)\(\s*[\"'][^\"']*[\"']\s*\+" "$f" 2>/dev/null && \
+            grep -nP "(?<!\.)\b(exec|execSync|spawn)\(\s*[\"'][^\"']*[\"']\s*\+" "$f" 2>/dev/null && \ <!-- allowlist: grep -P required for (?<!\.) lookbehind — ERE cannot express this -->
                 { echo "SEC-EXEC FAILED: $f (string concatenation in exec/spawn call)"; SEC_EXEC_FINDINGS="${SEC_EXEC_FINDINGS:+$SEC_EXEC_FINDINGS, }$f"; }
             ;;
     esac
