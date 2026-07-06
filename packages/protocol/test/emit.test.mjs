@@ -201,3 +201,31 @@ test('emit: "-->" in a field key is escaped so it cannot terminate the comment e
   assert.ok(!out.includes('Key-->Injected'));
   assert.ok(out.includes('**Key--&gt;Injected**: safe-value'));
 });
+
+// ── HTML comment opener hardening (forge#1638) ─────────────────────────────────
+//
+// forge#1636 escaped the HTML comment *closer* ("-->" / "--!>") but not the
+// *opener* ("<!--"). A field value or key containing "<!--" causes GitHub's
+// renderer to start a new unterminated (nested-looking) HTML comment, visually
+// swallowing subsequent lines — including the completion sentinel — until the
+// next literal "-->" appears. This is the same rendering-leak class as the
+// closer-only escaping fixed in forge#1594, just triggered from the opening
+// delimiter. Both directions of the HTML comment delimiter pair must be escaped.
+
+test('emit: "<!--" in a field value is escaped so it cannot open a new HTML comment', () => {
+  const out = emit('CONTEXT', { Note: 'starts with <!-- right here' });
+  assert.ok(!out.includes('<!-- right here'));
+  assert.ok(out.includes('&lt;!-- right here'));
+});
+
+test('emit: "<!--" in a field key is escaped so it cannot open a new HTML comment', () => {
+  const out = emit('CONTEXT', { ['Key<!--Injected']: 'safe-value' });
+  assert.ok(!out.includes('Key<!--Injected'));
+  assert.ok(out.includes('**Key&lt;!--Injected**: safe-value'));
+});
+
+test('emit: inline-value form escapes comment opener too', () => {
+  const out = emit('KNOWLEDGE_GIST', { value: 'https://example.com/a<!--b' });
+  assert.ok(!out.includes('a<!--b'));
+  assert.ok(out.includes('a&lt;!--b'));
+});
