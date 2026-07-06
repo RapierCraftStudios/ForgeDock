@@ -7,6 +7,7 @@ import { dirname, join, relative, resolve } from "path";
 import { mkdir, lstat, readlink, readdir, unlink, readFile, writeFile } from "fs/promises";
 import {
   existsSync,
+  lstatSync,
   readFileSync,
   writeFileSync,
   renameSync,
@@ -63,7 +64,64 @@ import { buildMinimalForgeYaml } from "./init-detect.mjs";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
-const FORGE_HOME = dirname(__dirname);
+
+/**
+ * Resolve the real ForgeDock installation root, guarding against the case
+ * where forgedock.mjs is executed from inside a git worktree.
+ *
+ * A git worktree always has a `.git` FILE (not directory) at its root that
+ * points back to the main repository's `.git` directory. When forgedock runs
+ * from a worktree, `dirname(__dirname)` resolves to the ephemeral worktree
+ * path — causing symlinks in `~/.claude/commands/` to point inside the
+ * worktree. After the worktree is cleaned up, those symlinks become dangling
+ * refs and all slash commands fail.
+ *
+ * Detection: if `dir/.git` is a regular file, we are inside a worktree.
+ * Resolution: run `git rev-parse --git-common-dir` (cwd: dir) which returns
+ * the path to the main `.git` directory; its parent is the stable repo root.
+ *
+ * Falls back to `dir` unchanged when:
+ *  - `dir/.git` is a directory (normal git clone — already correct)
+ *  - `dir/.git` does not exist (npm-installed package — already correct)
+ *  - Any error occurs (git not available, unexpected structure, etc.)
+ *
+ * @param {string} dir - Candidate FORGE_HOME (typically dirname(__dirname))
+ * @returns {string} Stable repo root, or `dir` if no worktree is detected
+ */
+function resolveRealForgeHome(dir) {
+  try {
+    const gitEntry = join(dir, ".git");
+    let stat;
+    try {
+      stat = lstatSync(gitEntry);
+    } catch {
+      // ENOENT → npm-installed package with no .git at all — return as-is
+      return dir;
+    }
+    if (!stat.isFile()) {
+      // .git is a directory → normal git clone, already points at the real root
+      return dir;
+    }
+    // .git is a file → we are inside a git worktree.
+    // `git rev-parse --git-common-dir` returns the path to the shared .git dir
+    // of the main worktree.  On some git versions the path is relative to cwd,
+    // so resolve it against `dir` before taking dirname.
+    const commonDir = execSync("git rev-parse --git-common-dir", {
+      cwd: dir,
+      encoding: "utf-8",
+      stdio: ["pipe", "pipe", "pipe"],
+      timeout: 5000,
+    }).trim();
+    // dirname(".git") = "." when commonDir is a bare ".git" string
+    const mainRepoRoot = dirname(resolve(dir, commonDir));
+    return mainRepoRoot;
+  } catch {
+    // Any failure (git not found, exit non-zero, etc.) — fail safe
+    return dir;
+  }
+}
+
+const FORGE_HOME = resolveRealForgeHome(dirname(__dirname));
 const COMMANDS_DIR = join(FORGE_HOME, "commands");
 
 // Resolve home cross-platform: HOME on Unix, USERPROFILE on Windows, with
