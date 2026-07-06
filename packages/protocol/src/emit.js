@@ -92,10 +92,13 @@ export function emit(type, fields = {}) {
   const lines = [`<!-- FORGE:${upperType} -->`];
 
   // Emit each field as a **Key**: value line
+  // Both key and val are sanitized — a partial-sanitization hole where only the
+  // value was sanitized was identified in forge#1637. Keys can carry the same
+  // newline / comment-terminator injection vectors as values.
   const fieldEntries = Object.entries(fields);
   if (fieldEntries.length > 0) {
     for (const [key, val] of fieldEntries) {
-      lines.push(`**${key}**: ${sanitizeFieldValue(val)}`);
+      lines.push(`**${sanitizeFieldValue(key)}**: ${sanitizeFieldValue(val)}`);
     }
   }
 

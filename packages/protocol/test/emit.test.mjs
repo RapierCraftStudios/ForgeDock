@@ -181,3 +181,23 @@ test('emit: ordinary values with no newlines or comment terminators are unchange
   assert.ok(out.includes('**Branch**: `fix/null-check-99`'));
   assert.ok(out.includes('**Commits**: a1b2c3d'));
 });
+
+// ── Field key injection hardening (forge#1637) ─────────────────────────────────
+//
+// forge#1636 sanitized field *values* but not field *keys*, leaving an identical
+// injection hole on the other half of the key/value pair. These tests lock in
+// that a newline or comment terminator embedded in a key is also neutralised.
+
+test('emit: a newline in a field key is folded to a space', () => {
+  const out = emit('CONTEXT', { ['Key\nWith\nNewlines']: 'safe-value' });
+  // The key must not contain a literal newline in the output.
+  assert.ok(!out.includes('Key\n'));
+  // The key should appear folded on a single line.
+  assert.ok(out.includes('**Key With Newlines**: safe-value'));
+});
+
+test('emit: "-->" in a field key is escaped so it cannot terminate the comment early', () => {
+  const out = emit('CONTEXT', { ['Key-->Injected']: 'safe-value' });
+  assert.ok(!out.includes('Key-->Injected'));
+  assert.ok(out.includes('**Key--&gt;Injected**: safe-value'));
+});
