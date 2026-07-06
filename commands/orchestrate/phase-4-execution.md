@@ -553,9 +553,16 @@ if [ -z "$ACCEPTANCE" ]; then
   echo "WARNING: #${NUM} has no '## Acceptance Criteria' section — verification cannot pass"
 fi
 
-# The merged PR for this issue (most recently merged PR referencing it)
-PR_NUM=$(gh pr list -R {GH_REPO} --state merged --search "${NUM} in:body" \
+# The merged PR for this issue — anchor on "Closes #N" (written by all /work-on PRs)
+# to avoid false positives from bare-number matches in changelogs or cross-references.
+# Fall back to bare-number search only when the anchored search returns nothing.
+PR_NUM=$(gh pr list -R {GH_REPO} --state merged --search "\"Closes #${NUM}\" in:body" \
   --json number,mergedAt --jq 'sort_by(.mergedAt) | last | .number' 2>/dev/null)
+if [ -z "$PR_NUM" ]; then
+  # Fallback: bare-number search for PRs that don't follow the "Closes #N" convention
+  PR_NUM=$(gh pr list -R {GH_REPO} --state merged --search "${NUM} in:body" \
+    --json number,mergedAt --jq 'sort_by(.mergedAt) | last | .number' 2>/dev/null)
+fi
 # Cap the diff at ~100K chars — mirrors the tool-result truncation discipline used by
 # review agents. Oversized context degrades reviewer accuracy and risks truncating output.
 PR_DIFF=$(gh pr diff "$PR_NUM" -R {GH_REPO} 2>/dev/null | head -c 100000)
@@ -796,8 +803,15 @@ for NUM in {all_batch_issue_numbers}; do
     BASES=$(for IN in {all_batch_issue_numbers}; do
       IM=$(gh issue view "$IN" -R {GH_REPO} --json milestone --jq '.milestone.title // empty' 2>/dev/null)
       [ "$IM" = "$MILESTONE_TITLE" ] || continue
-      gh pr list -R {GH_REPO} --state all --search "$IN in:body" \
-        --json baseRefName,state --jq '.[] | select(.state != "CLOSED") | .baseRefName' 2>/dev/null
+      # Anchor on "Closes #N" first; fall back to bare-number search when empty.
+      BASES_ANCHORED=$(gh pr list -R {GH_REPO} --state all --search "\"Closes #${IN}\" in:body" \
+        --json baseRefName,state --jq '.[] | select(.state != "CLOSED") | .baseRefName' 2>/dev/null)
+      if [ -n "$BASES_ANCHORED" ]; then
+        echo "$BASES_ANCHORED"
+      else
+        gh pr list -R {GH_REPO} --state all --search "$IN in:body" \
+          --json baseRefName,state --jq '.[] | select(.state != "CLOSED") | .baseRefName' 2>/dev/null
+      fi
     done | sort -u)
   fi
 
