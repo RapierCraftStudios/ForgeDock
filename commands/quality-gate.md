@@ -640,6 +640,46 @@ fi
 
 Report each conflict as **HIGH** — a shadowed native command is a silent user-facing regression (the native command becomes unreachable without warning). The builder must rename the conflicting file before the commit. Blocklist updates are in `scripts/check-native-conflicts.sh` (NATIVE_COMMANDS array).
 
+### 2G.8: Spec-as-code side-effect and marker check (FORGE_GRAPH domain)
+
+**Triggered when**: changed files include `commands/*.md` specs (ForgeDock repo only — applies only when `scripts/check-command-side-effects.sh` and `scripts/check-spec-markers.sh` ship in this repo).
+
+**Why this matters**: Command specs are spec-as-code — they drive autonomous side effects (auto-merge, `gh gist create`, `git push`, label mutations, issue creation). Two defect classes ship silently when there is no diff-aware gate:
+- **Class A (unguarded public gists)**: `gh gist create --public` in a code block publishes private repo titles, root causes, and file paths to the world. Even one unreviewed commit to `staging` can expose customer data. (Ref: forge#1587)
+- **Class B (guard-after-action ordering)**: A DRY_RUN / governor guard placed in prose after a code block that contains a side-effect verb does not actually guard that verb — the side-effect executes on every agent run. (Ref: forge#1609 — signal-planner.md DRY_RUN check at prose L285 did not guard `gh issue create` at code L224)
+- **Unknown FORGE: markers**: A typo like `FORGE:NOTES` causes agents to look for a comment annotation that is never emitted, silently breaking pipeline state detection. (Ref: forge#633)
+
+```bash
+# Run only when commands/*.md or scripts/* changed and both scripts ship in this repo.
+SIDE_EFFECT_CHECKER="$FORGEDOCK_SCRIPTS/check-command-side-effects.sh"
+[ -f "$SIDE_EFFECT_CHECKER" ] || SIDE_EFFECT_CHECKER="{WORKTREE_PATH}/scripts/check-command-side-effects.sh"
+MARKER_CHECKER="$FORGEDOCK_SCRIPTS/check-spec-markers.sh"
+[ -f "$MARKER_CHECKER" ] || MARKER_CHECKER="{WORKTREE_PATH}/scripts/check-spec-markers.sh"
+
+if [ -f "$SIDE_EFFECT_CHECKER" ]; then
+    SE_REPORT=$(bash "$SIDE_EFFECT_CHECKER" "{WORKTREE_PATH}/commands" 2>&1) || SE_EXIT=$?
+    echo "$SE_REPORT"
+    if [ "${SE_EXIT:-0}" -ne 0 ]; then
+        # Extract each HIGH finding and emit as a gate finding.
+        echo "$SE_REPORT" | grep -E '^HIGH ' | while IFS= read -r hit; do
+            echo "FORGE_GRAPH | HIGH | spec-side-effects | ${hit#HIGH | }"
+        done
+    fi
+fi
+
+if [ -f "$MARKER_CHECKER" ]; then
+    MK_REPORT=$(bash "$MARKER_CHECKER" "{WORKTREE_PATH}/commands" "{WORKTREE_PATH}" 2>&1) || MK_EXIT=$?
+    echo "$MK_REPORT"
+    if [ "${MK_EXIT:-0}" -ne 0 ]; then
+        echo "$MK_REPORT" | grep -E '^HIGH ' | while IFS= read -r hit; do
+            echo "FORGE_GRAPH | HIGH | spec-markers | ${hit#HIGH | }"
+        done
+    fi
+fi
+```
+
+Report each Class A finding as **HIGH** — unconditional block. Report each Class B finding as **HIGH** — the side-effect executes without the guard being applied. Report each unknown marker finding as **HIGH** — the pipeline state machine silently breaks. The builder must fix the violation before the commit proceeds. Add `<!-- allowlist:check-command-side-effects -->` or `<!-- allowlist:check-spec-markers -->` on the same line to suppress a specific known-good exception. <!-- Added: forge#1609 -->
+
 ### 2H: Asyncio cancellation safety (Python async code)
 
 **Triggered when**: changed Python files contain `asyncio.shield`, `asyncio.wait_for`, or `Task.cancel`.

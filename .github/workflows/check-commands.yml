@@ -10,6 +10,8 @@ on:
       - 'scripts/check-native-conflicts.sh'
       - 'scripts/check-protocol-restatements.sh'
       - 'scripts/check-command-docs-drift.sh'
+      - 'scripts/check-command-side-effects.sh'
+      - 'scripts/check-spec-markers.sh'
   push:
     branches:
       - staging
@@ -22,6 +24,8 @@ on:
       - 'scripts/check-native-conflicts.sh'
       - 'scripts/check-protocol-restatements.sh'
       - 'scripts/check-command-docs-drift.sh'
+      - 'scripts/check-command-side-effects.sh'
+      - 'scripts/check-spec-markers.sh'
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.sha }}
@@ -149,3 +153,40 @@ jobs:
             exit 1
           fi
           echo "OK: No grep -P / grep -oP patterns found in changed commands/ spec files."
+
+  spec-side-effects:
+    name: Spec-as-code side-effect gate
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Check commands/ for unguarded side-effect verbs
+        run: |
+          # Fail if any command spec introduces:
+          #   Class A: gh gist create/edit --public (always prohibited — gists must be secret)
+          #   Class B: side-effect verb in a section with no DRY_RUN/governor guard (diff-aware)
+          #
+          # <!-- Added: forge#1609 -->
+          if [ -n "${{ github.event.pull_request.base.sha }}" ]; then
+            export GITHUB_BASE_SHA="${{ github.event.pull_request.base.sha }}"
+          fi
+          bash scripts/check-command-side-effects.sh commands/
+
+  spec-markers:
+    name: Spec marker / placeholder check
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Check commands/ for unknown FORGE markers and workflow placeholders
+        run: |
+          # Fail if any command spec contains:
+          #   - A FORGE: annotation marker not in the known registry (catches typos like FORGE:NOTES)
+          #   - An unsubstituted {PLACEHOLDER} token in a .github/workflows/*.yml run block
+          #
+          # <!-- Added: forge#1609 -->
+          bash scripts/check-spec-markers.sh commands/ .
