@@ -269,7 +269,17 @@ jobs:
           PR_CREATED: ${{ steps.pr.outputs.created_at }}
         run: |
           NOW=$(date -u +%s)
-          PR_EPOCH=$(date -u -d "$PR_CREATED" +%s 2>/dev/null || date -u -j -f "%Y-%m-%dT%H:%M:%SZ" "$PR_CREATED" +%s 2>/dev/null || echo 0)
+          # Validate PR_CREATED is ISO 8601 (YYYY-MM-DDTHH:MM:SSZ) before passing to date -d.
+          # An unvalidated date string could cause date -d to interpret relative or
+          # malformed values, producing an unexpected epoch and corrupting the stale
+          # calculation. If the format guard fails, default to epoch 0 (fail-closed:
+          # ELAPSED becomes very large → stale=true). <!-- Added: forge#1664 -->
+          if echo "$PR_CREATED" | grep -qE '^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$'; then
+            PR_EPOCH=$(date -u -d "$PR_CREATED" +%s 2>/dev/null || date -u -j -f "%Y-%m-%dT%H:%M:%SZ" "$PR_CREATED" +%s 2>/dev/null || echo 0)
+          else
+            echo "WARNING: PR created_at '$PR_CREATED' does not match expected ISO 8601 format (YYYY-MM-DDTHH:MM:SSZ) — defaulting to epoch 0 (treating as stale)."
+            PR_EPOCH=0
+          fi
           ELAPSED=$(( NOW - PR_EPOCH ))
           WINDOW=1800  # 30 minutes in seconds
 
