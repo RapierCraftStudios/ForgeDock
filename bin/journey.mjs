@@ -238,12 +238,39 @@ export function detectDescription(cwd) {
 // Journey context (Task 5)
 // ---------------------------------------------------------------------------
 
-import { execFileSync } from "child_process";
+import { execFileSync, spawnSync } from "child_process";
 import os from "os";
 import {
   renderMark, ember, shimmer, revealRows, moltenBar, fixCard,
   colorMode, motionEnabled, CHROME_STOPS, HERO_MARK, COMPACT_MARK, sleep,
 } from "./cinema.mjs";
+
+// ---------------------------------------------------------------------------
+// URL opener (default openFn implementation — injectable for tests)
+// ---------------------------------------------------------------------------
+
+/**
+ * Open a URL in the system default browser. Best-effort: errors are swallowed
+ * so the caller's journey continues even when no browser is available.
+ *
+ * Platform dispatch:
+ *   Linux   → xdg-open
+ *   macOS   → open
+ *   Windows → start (via shell)
+ */
+export function openUrl(url) {
+  try {
+    if (process.platform === "win32") {
+      spawnSync("cmd", ["/c", "start", "", url], { stdio: "ignore", windowsHide: true });
+    } else if (process.platform === "darwin") {
+      spawnSync("open", [url], { detached: true, stdio: "ignore" });
+    } else {
+      spawnSync("xdg-open", [url], { detached: true, stdio: "ignore" });
+    }
+  } catch {
+    // Best-effort — if the browser can't be opened, the journey continues.
+  }
+}
 
 /**
  * Build the shared journey context. Every act takes this as its first arg.
@@ -255,6 +282,7 @@ export function makeCtx(overrides = {}) {
   const argv = overrides.argv ?? process.argv.slice(2);
   const nodeVersion = overrides.nodeVersion ?? process.versions.node;
   const enrichFn = overrides.enrichFn ?? enrich;
+  const openFn = overrides.openFn ?? openUrl;
   return {
     cwd: process.cwd(),
     home: env.HOME || env.USERPROFILE || os.homedir(),
@@ -267,6 +295,7 @@ export function makeCtx(overrides = {}) {
     nodeVersion,
     linkStrategy: "symlink",
     enrichFn,
+    openFn,
     exec: (cmd, args) =>
       execFileSync(cmd, args, {
         encoding: "utf-8",
@@ -755,7 +784,7 @@ export async function forge(ctx) {
 
 import { detectConfig } from "./init-detect.mjs";
 import { enrich } from "./init-enrich-api.mjs";
-import { annotatedReviewScreen, box } from "./tui.mjs";
+import { annotatedReviewScreen, box, confirm } from "./tui.mjs";
 
 const badgeOf = (field) => field.confidence;
 
@@ -872,15 +901,55 @@ export function celebrate(ctx, summary) {
   w.write(
     box(
       [
-        `  1. run npx forgedock labels setup — bootstrap GitHub labels`,
-        `  2. run npx forgedock doctor     — verify the install is green`,
-        `  3. open claude in this repo`,
-        `  4. run /issue <title> then /work-on <number>`,
+        `  1. install GitHub App       — github.com/apps/rapiercraft-forgedock`,
+        `  2. run npx forgedock labels setup — bootstrap GitHub labels`,
+        `  3. run npx forgedock doctor     — verify the install is green`,
+        `  4. open claude in this repo`,
+        `  5. run /issue <title> then /work-on <number>`,
       ],
       { title: "what's next" },
     ),
   );
   w.write("  " + dimLine(ctx, "docs: github.com/RapierCraftStudios/ForgeDock · ⭐ a star is the whole marketing budget") + "\n\n");
+}
+
+// ---------------------------------------------------------------------------
+// Act V.5 — Connect: GitHub App install prompt (Issue #1719)
+// ---------------------------------------------------------------------------
+
+const GITHUB_APP_URL = "https://github.com/apps/rapiercraft-forgedock/installations/new";
+
+/**
+ * Act V.5: prompt the user to install the ForgeDock GitHub App on their
+ * account. Non-blocking — declining or non-interactive mode both continue
+ * the journey without error.
+ *
+ * Uses ctx.openFn (injectable for tests) to open the URL in the default
+ * browser. In non-TTY environments (piped stdin, --fast) confirm() resolves
+ * immediately to false (the defaultValue), so no prompt is shown.
+ *
+ * @returns {Promise<{ opened: boolean }>}
+ */
+export async function connect(ctx) {
+  const { stdout: w } = ctx;
+  w.write("\n  " + ember("Connect to GitHub", ctx.mode) + "\n\n");
+
+  const yes = await confirm(
+    "Install the ForgeDock GitHub App for automatic pipeline triggers?",
+    false,
+  );
+
+  if (yes) {
+    ctx.openFn(GITHUB_APP_URL);
+    w.write(
+      `  \x1b[38;2;255;179;71m✔\x1b[0m Opening ${GITHUB_APP_URL}\n` +
+      `  ${ctx.mode === "none" ? "" : "\x1b[2m"}Install account-wide (all repositories) to enable webhook triggers.\x1b[22m\n`,
+    );
+    return { opened: true };
+  }
+
+  w.write(`  ${ctx.mode === "none" ? "" : "\x1b[2m"}Skipped — install anytime: ${GITHUB_APP_URL}\x1b[22m\n`);
+  return { opened: false };
 }
 
 // ---------------------------------------------------------------------------
@@ -902,7 +971,8 @@ export async function runJourney(ctx) {
     const forged = await forge(ctx);
     const { draft, description } = await read(ctx);
     const reviewed = await review(ctx, draft, description);
-    celebrate(ctx, { ...reviewed, total: forged.total, hookStatus: forged.hookStatus });
+    const connected = await connect(ctx);
+    celebrate(ctx, { ...reviewed, ...connected, total: forged.total, hookStatus: forged.hookStatus });
     return reviewed.aborted ? 1 : 0;
   } finally {
     process.removeListener("SIGINT", onSigint);
