@@ -443,15 +443,19 @@ Proceed? (yes / adjust / pick specific issues)
 
 ---
 
-## Engine mode (headless)
+## Engine mode (default)
 
-When running headless/CI, dispatch each issue via the durable execution engine instead of spawning prose agents:
+Dispatch each issue via the durable execution engine. This is the **default execution mode** for both interactive (`/autopilot`, `/orchestrate`) and headless/CI paths:
 
 ```bash
 forgedock run-issue <issue> --lane <staging|milestone/slug>
 ```
 
-The engine drives every phase transition deterministically, mirrors state to the `FORGE:STATE` block on the issue, and holds a lease. To recover stalls, scan in-flight issues' `FORGE:STATE`; any issue with an expired lease and a non-terminal state is re-dispatched with the same `forgedock run-issue <issue>` command — it resumes from the last committed phase (idempotent). This replaces the label-heuristic "already in progress" check and the resume-with-nagging loop.
+The engine drives every phase transition deterministically, mirrors state to the `FORGE:STATE` block on the issue, and holds a lease. Its **fail-closed review gate** (`phases.mjs → detectOutcome`) means the PR must be confirmed merged before the phase is committed — missing or unparseable review comments are treated as failures, not approvals. To recover stalls, scan in-flight issues' `FORGE:STATE`; any issue with an expired lease and a non-terminal state is re-dispatched with the same `forgedock run-issue <issue>` command — it resumes from the last committed phase (idempotent). This replaces the label-heuristic "already in progress" check and the resume-with-nagging loop.
+
+**Why engine-first**: The engine's phase table enforces gate semantics in code — not via LLM interpretation of markdown specs. This eliminates the class of bug where the LLM assumes a review approved when the FORGE:REVIEW comment is absent or unreadable (issue #1714). Interactive sessions that run `/work-on` via Skill invocations additionally bridge to the engine run-log via the SubagentStop hook (`bin/hooks/interactive-engine.mjs`) — state is durable across compaction and context resets.
+
+**Fallback (no forgedock CLI)**: If `forgedock` is not in PATH, fall back to spawning Agent sub-agents that run `Skill("work-on", ...)` per issue. The SubagentStop hook still bridges these runs to the engine run-log for state persistence.
 
 ### Concurrency model: in-process worker pool + worktree-per-issue
 

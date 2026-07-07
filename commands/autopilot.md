@@ -387,12 +387,47 @@ while true; do
     break
   fi
 
-  # Step 1: Orchestrate all open fast-lane issues in parallel via /orchestrate
-  echo "=== Fast Lane Iteration $FAST_LANE_ITERATIONS: Orchestrating $OPEN_UNMILESTONED issues ==="
+  # Step 1: Drive all open fast-lane issues through the durable engine.
+  # Each issue is dispatched individually via `forgedock run-issue` so the engine's
+  # phase table (fail-closed review gate, deterministic resume, lease-based concurrency)
+  # enforces every transition — not the LLM interpreting work-on.md.
+  # Fallback: if forgedock CLI is unavailable, delegate to /orchestrate (markdown-spec path).
+  echo "=== Fast Lane Iteration $FAST_LANE_ITERATIONS: Dispatching $OPEN_UNMILESTONED issues via engine ==="
+
+  FORGEDOCK_AVAILABLE=$(command -v forgedock >/dev/null 2>&1 && echo "true" || echo "false")
+
   if [ "$DRY_RUN" = "false" ]; then
-    Skill("orchestrate", args="fast-lane")
+    if [ "$FORGEDOCK_AVAILABLE" = "true" ]; then
+      # Engine-first dispatch: enumerate issues and run each through the durable engine.
+      # Issues are dispatched concurrently — the engine holds per-issue leases.
+      FAST_LANE_ISSUE_NUMS=$(gh issue list $GH_FLAG \
+        --state open \
+        --limit 200 \
+        --json number,milestone,labels \
+        --jq '[.[] | select(
+          .milestone == null and
+          (.labels | map(.name) | any(. == "workflow:merged" or . == "workflow:invalid" or . == "workflow:decomposed" or . == "needs-human") | not)
+        )] | .[].number' \
+        2>/dev/null || echo '')
+
+      for ISSUE_NUM in $FAST_LANE_ISSUE_NUMS; do
+        echo "Dispatching #$ISSUE_NUM via forgedock run-issue --lane staging"
+        forgedock run-issue "$ISSUE_NUM" --lane staging &
+      done
+
+      # Wait for all engine workers to complete before proceeding to deploy step.
+      wait
+      echo "Engine dispatch complete for fast-lane iteration $FAST_LANE_ITERATIONS"
+    else
+      echo "WARNING: forgedock CLI not in PATH — falling back to Skill(orchestrate, fast-lane)"
+      Skill("orchestrate", args="fast-lane")
+    fi
   else
-    echo "[DRY-RUN] Would invoke: Skill(orchestrate, fast-lane)"
+    if [ "$FORGEDOCK_AVAILABLE" = "true" ]; then
+      echo "[DRY-RUN] Would dispatch each fast-lane issue via: forgedock run-issue <issue> --lane staging"
+    else
+      echo "[DRY-RUN] Would invoke: Skill(orchestrate, fast-lane)"
+    fi
   fi
 
   # Step 2: Deploy staging→main if staging has new commits
@@ -481,12 +516,43 @@ echo "$MILESTONES" | jq -c '.[]' | while IFS= read -r milestone; do
 
   echo "=== Processing milestone: '$MS_TITLE' ($MS_PCT% complete, $MS_OPEN open) ==="
 
-  # Step 1: Orchestrate open issues in this milestone
+  # Step 1: Drive open issues in this milestone through the durable engine.
+  # Same engine-first dispatch as Phase 2 — fail-closed gates apply to milestone issues too.
+  # Fallback: if forgedock CLI is unavailable, delegate to /orchestrate.
   if [ "$MS_OPEN" -gt 0 ]; then
+    FORGEDOCK_AVAILABLE=$(command -v forgedock >/dev/null 2>&1 && echo "true" || echo "false")
+
     if [ "$DRY_RUN" = "false" ]; then
-      Skill("orchestrate", args="milestone $MS_SLUG")
+      if [ "$FORGEDOCK_AVAILABLE" = "true" ]; then
+        MS_ISSUE_NUMS=$(gh issue list $GH_FLAG \
+          --state open \
+          --limit 200 \
+          --json number,milestone,labels \
+          --jq --arg slug "$MS_SLUG" \
+          '[.[] | select(
+            .milestone != null and
+            (.milestone.title | ascii_downcase | gsub("[^a-z0-9]+"; "-") | ltrimstr("-") | rtrimstr("-")) == $slug and
+            (.labels | map(.name) | any(. == "workflow:merged" or . == "workflow:invalid" or . == "workflow:decomposed" or . == "needs-human") | not)
+          )] | .[].number' \
+          2>/dev/null || echo '')
+
+        for ISSUE_NUM in $MS_ISSUE_NUMS; do
+          echo "Dispatching #$ISSUE_NUM via forgedock run-issue --lane milestone/$MS_SLUG"
+          forgedock run-issue "$ISSUE_NUM" --lane "milestone/$MS_SLUG" &
+        done
+
+        wait
+        echo "Engine dispatch complete for milestone '$MS_TITLE'"
+      else
+        echo "WARNING: forgedock CLI not in PATH — falling back to Skill(orchestrate, milestone $MS_SLUG)"
+        Skill("orchestrate", args="milestone $MS_SLUG")
+      fi
     else
-      echo "[DRY-RUN] Would invoke: Skill(orchestrate, milestone $MS_SLUG)"
+      if [ "$FORGEDOCK_AVAILABLE" = "true" ]; then
+        echo "[DRY-RUN] Would dispatch each milestone issue via: forgedock run-issue <issue> --lane milestone/$MS_SLUG"
+      else
+        echo "[DRY-RUN] Would invoke: Skill(orchestrate, milestone $MS_SLUG)"
+      fi
     fi
   else
     echo "Milestone '$MS_TITLE' has no open issues — checking if branch needs deploy"
