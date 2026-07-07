@@ -159,7 +159,7 @@ jobs:
             echo "  1. Go to: Settings → Secrets and variables → Actions → Variables → New repository variable"
             echo "  2. Name:  FORGE_TRUSTED_MARKER_AUTHORS"
             echo "  3. Value: comma-separated list of GitHub logins that run /review-pr-staging"
-            echo "            Example: rapiercraft-forge[bot],your-login"
+            echo "            Example: rapiercraft-forgedock[bot],your-login"
             echo ""
             echo "After setting the variable, re-run this check (push a commit or re-run the workflow)."
             exit 1
