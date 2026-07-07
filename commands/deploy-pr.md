@@ -392,8 +392,11 @@ while [ "$REVIEW_ITER" -lt "$MAX_REVIEW_ITER" ] && [ "$REVIEW_GATE_PASSED" = "fa
       # This loop's next iteration will re-read the latest PR state.
     fi
   else
-    echo "WARNING: Could not determine review verdict from FORGE:REVIEW comment. Assuming APPROVED."
-    REVIEW_GATE_PASSED=true
+    # Fail-closed: unknown verdict must block merge, not grant it.
+    # If FORGE:REVIEW comment is missing, malformed, or unparseable for any reason
+    # (race condition, context compaction, skill error, comment format mismatch),
+    # treat it as a failed review — REVIEW_GATE_PASSED remains false.
+    echo "ERROR: Could not determine review verdict from FORGE:REVIEW comment. Blocking merge — review verdict is required. (#1714)"
   fi
 done
 
