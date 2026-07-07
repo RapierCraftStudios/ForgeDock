@@ -171,7 +171,31 @@ Use `${ISSUE_LANE[$NUM]}` and `${ISSUE_PR_BASE[$NUM]}` to populate `{LANE}` and 
 
 ### Step 4A: Dispatch ready issues
 
-**REMINDER: You MUST use the template below verbatim. Only fill in `{VARIABLES}`. Do NOT rewrite the agent prompt. Do NOT write custom implementation instructions. The agent MUST invoke `/work-on` via the Skill tool — this is the HARD RULE from the top of this file.**
+**Engine-first dispatch (default)**: When `forgedock` is in PATH, dispatch each ready issue via the durable engine rather than spawning prose Agent sub-agents. The engine's phase table enforces gate semantics in code — its fail-closed review gate and deterministic phase ordering are not subject to LLM interpretation.
+
+```bash
+# Engine-first dispatch: check CLI availability, then dispatch ready issues in parallel
+FORGEDOCK_AVAILABLE=$(command -v forgedock >/dev/null 2>&1 && echo "true" || echo "false")
+
+if [ "$FORGEDOCK_AVAILABLE" = "true" ]; then
+  for NUM in {ready_issue_numbers}; do
+    LANE="${ISSUE_LANE[$NUM]}"
+    PR_BASE="${ISSUE_PR_BASE[$NUM]}"
+    echo "Dispatching #$NUM via forgedock run-issue --lane $PR_BASE"
+    forgedock run-issue "$NUM" --lane "$PR_BASE" &
+  done
+  wait
+  echo "Engine dispatch complete — advancing to Step 4B (completion sweep)"
+else
+  echo "WARNING: forgedock CLI not in PATH — falling back to Agent-spawn path (markdown-spec execution)"
+  # Fall through to Agent-spawn template below. The SubagentStop hook (bin/hooks/interactive-engine.mjs)
+  # bridges these runs to the engine run-log for state persistence even on the fallback path.
+fi
+```
+
+**Agent-spawn path (fallback when forgedock CLI unavailable)**: When `FORGEDOCK_AVAILABLE=false`, spawn Agent sub-agents per issue using the template below. This preserves engine state via the SubagentStop hook even without the CLI.
+
+**REMINDER: You MUST use the template below verbatim when on the Agent-spawn fallback path. Only fill in `{VARIABLES}`. Do NOT rewrite the agent prompt. Do NOT write custom implementation instructions. The agent MUST invoke `/work-on` via the Skill tool — this is the HARD RULE from the top of this file.**
 
 For each **ready** issue (all predecessors resolved or no predecessors), spawn an Agent sub-agent that runs the full `/work-on` pipeline. On the initial dispatch, this is every issue with an empty predecessor set. On subsequent dispatches (triggered by agent completions in Step 4B), this is every newly-unblocked issue.
 
