@@ -44,9 +44,9 @@ ForgeDock uses a strict two-repo model:
 
 ## Platform Roadmap
 
-- **L1**: Read-only observability dashboard — renders the GitHub knowledge graph the CLI produces (runs, timelines, stall detection, throughput, cycle time, cost-per-issue)
-- **L2**: Central public GitHub App + hosted webhook bot (BYO-key) — always-on backend that triggers pipeline runs, multi-tenant credential isolation, individual paid plan
-- **L3**: Hosted dev execution sandboxes — pipeline execution on isolated ephemeral compute
+- **L1** ✓ shipped (milestone #4, closed 2026-07-06): Read-only observability dashboard — renders the GitHub knowledge graph the CLI produces (runs, timelines, stall detection, throughput, cycle time, cost-per-issue)
+- **L2** planned (milestone #5): Central public GitHub App + hosted webhook bot (BYO-key) — always-on backend that triggers pipeline runs, multi-tenant credential isolation, individual paid plan
+- **L3** planned (milestone #6): Hosted dev execution sandboxes — pipeline execution on isolated ephemeral compute
 
 ## Target Market
 
@@ -347,14 +347,14 @@ Recorded strategy says "moat = workflows, not compute." Workflows are copyable p
 
 ---
 
-## Milestone: Deterministic Pipeline v2
+## Milestone: Deterministic Pipeline v2 ✓ shipped (milestone #9, closed 2026-07-06)
 
-Active milestone tracking all work toward one-shot reliable task completion.
+All work toward one-shot reliable task completion — completed and merged.
 
-| # | Issue | Priority | Track |
-|---|-------|----------|-------|
-| #651 | Scripts layer architecture | P0 | Execution determinism |
-| #652 | DevDocs redesign (parent tracker) | P1 | Knowledge determinism |
-| #653 | Per-repo adaptive scripts (investigation) | P1 | Execution determinism |
+| # | Issue | Priority | Track | Status |
+|---|-------|----------|-------|--------|
+| #651 | Scripts layer architecture | P0 | Execution determinism | ✓ done |
+| #652 | DevDocs redesign (parent tracker) | P1 | Knowledge determinism | ✓ done |
+| #653 | Per-repo adaptive scripts (investigation) | P1 | Execution determinism | ✓ done |
 
 **Core promise**: Task in → result out, one shot, no waste. No stalls, no reruns, no shortcuts, no overcomplication.
