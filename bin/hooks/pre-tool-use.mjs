@@ -188,6 +188,10 @@ async function isForgeDockManagedCwd() {
 /**
  * Check whether a gh pr create command targets a forbidden base branch.
  *
+ * Allows staging → main PRs (the deploy path) by detecting --head staging
+ * or falling back to the current git branch. Feature branches targeting
+ * main are still hard-blocked.
+ *
  * @param {string} command
  * @returns {string|null} Error message to show, or null if allowed.
  */
@@ -199,6 +203,12 @@ function checkPrTarget(command) {
   if (!base) return null; // no --base flag — gh will use the default
 
   if (FORBIDDEN_PR_BASES.includes(base.toLowerCase())) {
+    // Allow staging → main (the deploy path, not a pipeline violation).
+    const head = extractFlag(command, "--head") || extractFlag(command, "-H") || currentGitBranch();
+    if (head && /^staging$/.test(head)) {
+      return null; // deploy flow — allowed
+    }
+
     return [
       `[ForgeDock] BLOCKED: PR targets "${base}" — pipeline rule violation.`,
       ``,
@@ -206,6 +216,7 @@ function checkPrTarget(command) {
       `A PR to "${base}" is a hard pipeline violation. Fix the --base flag.`,
       ``,
       `Allowed targets: staging | milestone/<slug>`,
+      `Exception: staging → main (deploy flow) is allowed.`,
     ].join("\n");
   }
 
@@ -313,6 +324,27 @@ function checkLabelTransition(command) {
   }
 
   return null; // valid transition — allow
+}
+
+// ---------------------------------------------------------------------------
+// Git helpers
+// ---------------------------------------------------------------------------
+
+/**
+ * Return the current git branch name, or null on any failure.
+ * Used to detect the staging → main deploy path.
+ */
+function currentGitBranch() {
+  try {
+    const { execFileSync: exec } = _require("child_process");
+    return exec("git", ["rev-parse", "--abbrev-ref", "HEAD"], {
+      encoding: "utf-8",
+      stdio: ["pipe", "pipe", "pipe"],
+      timeout: 5000,
+    }).trim() || null;
+  } catch {
+    return null;
+  }
 }
 
 // ---------------------------------------------------------------------------
