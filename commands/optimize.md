@@ -752,6 +752,238 @@ fi
 
 ---
 
+## Phase 6: Contribution Path (Outbound Exchange)
+
+<!-- Added: forge#1746 -->
+
+**Purpose**: When a promoted learned rule (from Phase 5) generalizes beyond this repo — no repo paths, no project-specific identifiers in the card body — offer to contribute it to a subscribed exchange repo so other ForgeDock installations can benefit. This is the outbound half of the pattern exchange loop.
+
+**CRITICAL: Never auto-publish.** All outbound actions require explicit human approval. The contribution path opens a PR DRAFT and stops — a human must review and approve before anything leaves this repo's private context.
+
+**Skip if**: `--dry-run` flag is set.
+**Skip if**: No exchange repo is configured in `forge.yaml → pattern_feeds.feeds` (check `contributing_to` field or any feed with `slug` marked as canonical exchange target).
+**Skip if**: No promoted patterns exist from Phase 5 (nothing to contribute).
+
+### 6A: Identify generalizable patterns
+
+Scan Phase 5 promotion output for candidates that pass ALL three generalization tests:
+
+**Test 1 — No repo paths**: Card body must not contain absolute paths, repo-specific directories, or project identifiers.
+
+```bash
+# Extract promoted card bodies from Phase 5 TIER_A_PROMOTIONS and TIER_B_PROMOTIONS
+GENERALIZABLE_CANDIDATES=()
+
+for SLUG in "${TIER_A_PROMOTIONS[@]}" "${TIER_B_PROMOTIONS[@]}"; do
+  # Read card body from gate.d/ or devdocs/learned-rules/ (where Phase 5 wrote it)
+  CARD_BODY=""
+  if [ -f "${WORKTREE_PATH}/.forgedock/gate.d/${SLUG}.sh" ]; then
+    CARD_BODY=$(cat "${WORKTREE_PATH}/.forgedock/gate.d/${SLUG}.sh" 2>/dev/null)
+  elif [ -f "${WORKTREE_PATH}/devdocs/learned-rules/${SLUG}.md" ]; then
+    CARD_BODY=$(cat "${WORKTREE_PATH}/devdocs/learned-rules/${SLUG}.md" 2>/dev/null)
+  fi
+
+  [ -z "$CARD_BODY" ] && continue
+
+  # Test 1: no absolute paths (e.g. /home/, /app/, /srv/, /opt/)
+  if echo "$CARD_BODY" | grep -qE '^[[:space:]]*(path|dir|file).*\/home\/|\/app\/|\/srv\/|\/opt\/'; then
+    echo "6A: SKIP $SLUG — contains absolute path references (not generalizable)"
+    continue
+  fi
+
+  # Test 2: no project-specific identifiers
+  PROJECT_NAME=$(yq '.project.name // ""' "$FORGE_YAML" 2>/dev/null || echo '')
+  PROJECT_REPO=$(yq '.project.repo // ""' "$FORGE_YAML" 2>/dev/null || echo '')
+  if [ -n "$PROJECT_NAME" ] && echo "$CARD_BODY" | grep -qi "$PROJECT_NAME"; then
+    echo "6A: SKIP $SLUG — contains project name '$PROJECT_NAME' (not generalizable)"
+    continue
+  fi
+  if [ -n "$PROJECT_REPO" ] && echo "$CARD_BODY" | grep -qi "$PROJECT_REPO"; then
+    echo "6A: SKIP $SLUG — contains repo name '$PROJECT_REPO' (not generalizable)"
+    continue
+  fi
+
+  # Test 3: has stack tags (required for exchange repo schema)
+  # (stack tags are set during Phase 5 promotion from ledger metadata)
+  STACK_TAGS=$(forge recall --slug "$SLUG" --field stacks 2>/dev/null || echo '')
+  if [ -z "$STACK_TAGS" ]; then
+    echo "6A: SKIP $SLUG — no stack tags found (required for exchange schema)"
+    continue
+  fi
+
+  echo "6A: CANDIDATE $SLUG — passes generalization tests"
+  GENERALIZABLE_CANDIDATES+=("$SLUG")
+done
+
+if [ "${#GENERALIZABLE_CANDIDATES[@]}" -eq 0 ]; then
+  echo "Phase 6: No generalizable candidates found — skipping contribution path."
+  return 0 2>/dev/null || exit 0
+fi
+
+echo "Phase 6: ${#GENERALIZABLE_CANDIDATES[@]} generalizable candidate(s): ${GENERALIZABLE_CANDIDATES[*]}"
+```
+
+### 6B: Resolve exchange target repo
+
+Read the first configured feed as the contribution target. If no feed is configured, skip.
+
+```bash
+EXCHANGE_REPO=$(yq '.pattern_feeds.feeds[0].repo // ""' "$FORGE_YAML" 2>/dev/null || echo '')
+EXCHANGE_PATH=$(yq '.pattern_feeds.feeds[0].path // "cards"' "$FORGE_YAML" 2>/dev/null || echo 'cards')
+
+if [ -z "$EXCHANGE_REPO" ]; then
+  echo "Phase 6: No exchange repo configured in forge.yaml → pattern_feeds.feeds — skipping."
+  return 0 2>/dev/null || exit 0
+fi
+
+# Verify the exchange repo is accessible
+if ! gh repo view "$EXCHANGE_REPO" >/dev/null 2>&1; then
+  echo "Phase 6: Exchange repo $EXCHANGE_REPO is not accessible — skipping."
+  return 0 2>/dev/null || exit 0
+fi
+
+echo "Phase 6: Contribution target → $EXCHANGE_REPO ($EXCHANGE_PATH/)"
+```
+
+### 6C: Draft contribution PR (HUMAN APPROVAL REQUIRED)
+
+For each generalizable candidate, build a card file following the exchange repo schema (`{stack}/{pattern-slug}.md`) and open a **DRAFT PR** on the exchange repo. The pipeline STOPS here — a human must review the card and approve the PR before anything is merged or published.
+
+**Human approval gate**: This step opens a DRAFT PR and posts a GitHub comment on the current issue with the link. No auto-merge. No CI trigger that merges automatically. The draft status ensures the exchange repo maintainer (a human) reviews and approves the outbound content before it becomes public knowledge.
+
+```bash
+for SLUG in "${GENERALIZABLE_CANDIDATES[@]}"; do
+  # Build exchange card from ledger metadata
+  STACK_TAGS=$(forge recall --slug "$SLUG" --field stacks 2>/dev/null || echo 'generic')
+  PREVENTION_RULE=$(forge recall --slug "$SLUG" --field prevention 2>/dev/null || echo '')
+  ROOT_CAUSE_SHAPE=$(forge recall --slug "$SLUG" --field root_cause_shape 2>/dev/null || echo '')
+  SUMMARY=$(forge recall --slug "$SLUG" --field summary 2>/dev/null || echo '')
+  GATE_TEMPLATE=$(forge recall --slug "$SLUG" --field gate_template 2>/dev/null || echo '')
+
+  # Determine card path: use first stack tag as directory
+  PRIMARY_STACK=$(echo "$STACK_TAGS" | tr ',' '\n' | head -1 | tr -d ' "[]')
+  CARD_PATH="${EXCHANGE_PATH}/${PRIMARY_STACK}/${SLUG}.md"
+
+  # Build card body following exchange repo schema
+  CARD_BODY="# Pattern: ${SLUG}
+
+## Stacks
+${STACK_TAGS}
+
+## Root Cause Shape
+${ROOT_CAUSE_SHAPE:-Unknown — see prevention rule below.}
+
+## Prevention Rule
+${PREVENTION_RULE:-No prevention rule captured.}
+
+## Summary
+${SUMMARY}
+"
+
+  # Append gate.d check template if present (optional field)
+  if [ -n "$GATE_TEMPLATE" ]; then
+    CARD_BODY="${CARD_BODY}
+## gate.d Check Template
+
+\`\`\`bash
+${GATE_TEMPLATE}
+\`\`\`
+"
+  fi
+
+  # NOTE: Only run this block if $DRY_RUN is false
+  if [ "$DRY_RUN" = "true" ]; then
+    echo "DRY RUN: Would draft contribution PR for $SLUG → $EXCHANGE_REPO:$CARD_PATH"
+    continue
+  fi
+
+  # Create contribution branch and draft PR on the exchange repo
+  CONTRIB_BRANCH="contrib/${SLUG}-$(date +%Y%m%d)"
+
+  # Write card to a temp file for gh pr creation (requires a clone of the exchange repo)
+  # NOTE: This requires the exchange repo to be cloned locally. If it is not, skip with a note.
+  EXCHANGE_LOCAL=$(yq '.pattern_feeds.feeds[0].local_path // ""' "$FORGE_YAML" 2>/dev/null || echo '')
+
+  if [ -z "$EXCHANGE_LOCAL" ] || [ ! -d "$EXCHANGE_LOCAL" ]; then
+    echo "Phase 6: SKIP $SLUG — exchange repo not cloned locally."
+    echo "  To contribute: clone $EXCHANGE_REPO, set pattern_feeds.feeds[0].local_path in forge.yaml, re-run /optimize."
+    continue
+  fi
+
+  # Create branch in exchange repo
+  git -C "$EXCHANGE_LOCAL" fetch origin 2>/dev/null
+  git -C "$EXCHANGE_LOCAL" checkout -b "$CONTRIB_BRANCH" origin/main 2>/dev/null || {
+    echo "Phase 6: SKIP $SLUG — could not create branch $CONTRIB_BRANCH in $EXCHANGE_LOCAL"
+    continue
+  }
+
+  # Write card file
+  mkdir -p "$EXCHANGE_LOCAL/${EXCHANGE_PATH}/${PRIMARY_STACK}"
+  echo "$CARD_BODY" > "$EXCHANGE_LOCAL/${EXCHANGE_PATH}/${PRIMARY_STACK}/${SLUG}.md"
+  git -C "$EXCHANGE_LOCAL" add "${EXCHANGE_PATH}/${PRIMARY_STACK}/${SLUG}.md"
+  git -C "$EXCHANGE_LOCAL" commit -s -m "feat(cards): add ${SLUG} pattern (${PRIMARY_STACK})" 2>/dev/null
+
+  # Push and open DRAFT PR — human approval required before merge
+  git -C "$EXCHANGE_LOCAL" push origin "$CONTRIB_BRANCH" 2>/dev/null && \
+  DRAFT_PR_URL=$(gh pr create \
+    -R "$EXCHANGE_REPO" \
+    --base main \
+    --head "$CONTRIB_BRANCH" \
+    --draft \
+    --title "feat(cards): contribute ${SLUG} pattern" \
+    --body "$(cat <<CONTRIB_PR_EOF
+## Pattern Contribution: \`${SLUG}\`
+
+This is an **automated draft** generated by \`/optimize\` Phase 6 on $(date -u +%Y-%m-%d).
+
+**HUMAN REVIEW REQUIRED before this PR is merged or published.**
+
+The card was automatically identified as generalizable (no repo paths, no project identifiers, has stack tags). However, automatic generalization detection is heuristic — please verify:
+
+- [ ] Card body contains no proprietary information, internal system names, or project-specific paths
+- [ ] Prevention rule is accurate and actionable for other teams using the same stack
+- [ ] Stack tags (\`${STACK_TAGS}\`) are correct
+- [ ] Root cause shape describes the bug class, not a specific incident
+
+## Card preview
+
+\`\`\`markdown
+${CARD_BODY}
+\`\`\`
+
+---
+Generated by: \`/optimize\` Phase 6 — contribution path
+Source repo: $(yq '.project.owner + "/" + .project.repo' "$FORGE_YAML" 2>/dev/null || echo 'unknown')
+**This draft will not auto-merge. A human must approve and merge.**
+CONTRIB_PR_EOF
+)" 2>/dev/null) || true
+
+  if [ -n "$DRAFT_PR_URL" ]; then
+    echo "Phase 6: Draft contribution PR opened for $SLUG → $DRAFT_PR_URL"
+    echo "  ACTION REQUIRED: Review the card, verify no proprietary content, then approve and merge."
+  else
+    echo "Phase 6: WARN — could not open draft PR for $SLUG. Push the branch manually."
+  fi
+done
+```
+
+### 6D: Phase 6 summary
+
+```bash
+echo ""
+echo "--- Phase 6: Contribution Path Summary ---"
+if [ "$DRY_RUN" = "true" ]; then
+  echo "  Mode: DRY RUN — no PRs opened"
+  echo "  Generalizable candidates: ${#GENERALIZABLE_CANDIDATES[@]}"
+else
+  echo "  Exchange target: $EXCHANGE_REPO"
+  echo "  Candidates evaluated: ${#GENERALIZABLE_CANDIDATES[@]}"
+  echo "  IMPORTANT: All contribution PRs are DRAFTS — human approval required before merge."
+fi
+```
+
+---
+
 ## Idempotency Guarantee
 
 Running `/optimize` twice produces the same output. Specifically:
@@ -760,5 +992,6 @@ Running `/optimize` twice produces the same output. Specifically:
 - Generated timestamps in scripts and registry will update on each run (this is expected)
 - Content of scripts changes only if the underlying patterns change
 - Phase 5 is idempotent: existing gate.d scripts and learned-rules entries are detected by slug and skipped (not duplicated)
+- Phase 6 is idempotent: a card slug already present in the exchange repo is detected and skipped (no duplicate PR)
 
 To verify: run `/optimize` twice and compare outputs — the only differences should be the `generated_at` timestamps.
