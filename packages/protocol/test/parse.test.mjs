@@ -295,6 +295,89 @@ test('parse: CARD annotation inlineValue contains sha8 prefix and b64 payload (f
   assert.match(ann.inlineValue, /^v1 sha:[0-9a-f]{8} b64:[A-Za-z0-9_-]+$/);
 });
 
+// ── CLAIM and CLAIM_RELEASED (forge#1736) ─────────────────────────────────
+//
+// CLAIM is a lifecycle annotation with a completion sentinel 'CLAIM:COMPLETE'.
+// CLAIM_RELEASED is a control marker (no body, presence is the signal).
+
+test('parse: CLAIM annotation is recognized as lifecycle type with sentinel (forge#1736)', () => {
+  const body = [
+    '<!-- FORGE:CLAIM -->',
+    '**Holder**: #1736 / run-abc123',
+    '**Files**: commands/orchestrate/phase-3-dependency.md',
+    '**Interfaces**: Step 3C conflict detection API',
+    '**TTL**: terminal state of Holder issue #1736',
+    '<!-- CLAIM:COMPLETE -->',
+  ].join('\n');
+  const annotations = parse(body);
+  assert.equal(annotations.length, 1);
+  const [ann] = annotations;
+  assert.equal(ann.type, 'CLAIM');
+  assert.equal(ann.isReserved, true);
+  assert.equal(ann.isControl, false);
+  assert.equal(ann.inlineValue, null);
+  assert.equal(ann.sentinelState, SentinelState.COMPLETE);
+  assert.equal(ann.fields['Holder'], '#1736 / run-abc123');
+  assert.equal(ann.fields['TTL'], 'terminal state of Holder issue #1736');
+});
+
+test('parse: CLAIM without sentinel → sentinelState interrupted (forge#1736)', () => {
+  const body = [
+    '<!-- FORGE:CLAIM -->',
+    '**Holder**: #1736 / run-abc',
+    '**Files**: commands/orchestrate/phase-3-dependency.md',
+    '**Interfaces**: Step 3C API',
+    '**TTL**: terminal',
+  ].join('\n');
+  const [ann] = parse(body);
+  assert.equal(ann.type, 'CLAIM');
+  assert.equal(ann.sentinelState, SentinelState.INTERRUPTED);
+});
+
+test('parse: CLAIM_RELEASED is a control marker (forge#1736)', () => {
+  const body = '<!-- FORGE:CLAIM_RELEASED -->';
+  const annotations = parse(body);
+  assert.equal(annotations.length, 1);
+  const [ann] = annotations;
+  assert.equal(ann.type, 'CLAIM_RELEASED');
+  assert.equal(ann.isReserved, true);
+  assert.equal(ann.isControl, true);
+  assert.equal(ann.sentinelState, SentinelState.COMPLETE);
+});
+
+test('parse(emit(...)): CLAIM round-trips with sanitized field values (forge#1736)', () => {
+  const emitted = emit('CLAIM', {
+    Holder: '#1736 / run-abc',
+    Files: 'commands/orchestrate/phase-3-dependency.md',
+    Interfaces: 'Step 3C API',
+    TTL: 'terminal state of Holder issue #1736',
+  });
+  // CLAIM has a completionSentinel — emit() appends it
+  const [ann] = parse(emitted);
+  assert.equal(ann.type, 'CLAIM');
+  assert.equal(ann.sentinelState, SentinelState.COMPLETE);
+  assert.equal(ann.fields['Holder'], '#1736 / run-abc');
+  assert.equal(ann.fields['Files'], 'commands/orchestrate/phase-3-dependency.md');
+  assert.equal(ann.fields['Interfaces'], 'Step 3C API');
+  assert.equal(ann.fields['TTL'], 'terminal state of Holder issue #1736');
+});
+
+test('parse: CLAIM_RELEASED following CLAIM in one comment — two annotations (forge#1736)', () => {
+  const body = [
+    '<!-- FORGE:CLAIM -->',
+    '**Holder**: #1736 / run-abc',
+    '**Files**: commands/orchestrate/phase-3-dependency.md',
+    '**Interfaces**: Step 3C API',
+    '**TTL**: terminal',
+    '<!-- CLAIM:COMPLETE -->',
+    '<!-- FORGE:CLAIM_RELEASED -->',
+  ].join('\n');
+  const annotations = parse(body);
+  assert.equal(annotations.length, 2);
+  assert.equal(annotations[0].type, 'CLAIM');
+  assert.equal(annotations[1].type, 'CLAIM_RELEASED');
+});
+
 test('parse: CARD annotation following another annotation starts its own annotation (forge#1727)', () => {
   const body = [
     '<!-- FORGE:BUILDER -->',

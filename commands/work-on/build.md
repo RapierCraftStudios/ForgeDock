@@ -185,6 +185,50 @@ gh issue comment {NUMBER} {GH_FLAG} --body "<!-- FORGE:CONTRACT -->
 
 Contract must be grounded in the investigation report. Every deliverable file must appear in the affected files list from the investigator. Adversarially validate the proposed fix against adjacent system layers before posting.
 
+### B2.1: Post FORGE:CLAIM on coordination issue (conditional — when running under orchestration batch) <!-- Added: forge#1736 -->
+
+**Skip if**: `FORGE_COORD_ISSUE` is not set (agent is not running under an orchestration batch). This step is a no-op outside of `/orchestrate` dispatch — no error, no output.
+
+**When `FORGE_COORD_ISSUE` is set**: Post a `FORGE:CLAIM` annotation on the coordination issue to advertise this agent's active resource reservation to the orchestrator and peer agents. This enables the claims-board Layer-2/4 relaxation sweep (orchestrate Step 4B) to identify issue-pairs with disjoint file sets and downgrade unnecessary serialization edges.
+
+```bash
+if [ -n "${FORGE_COORD_ISSUE:-}" ]; then
+  COORD_NUM=$(echo "$FORGE_COORD_ISSUE" | grep -oE '[0-9]+$')
+  if [ -n "$COORD_NUM" ]; then
+    # Extract file paths from the just-posted FORGE:CONTRACT deliverables table
+    CLAIMED_FILES=$(gh api repos/{GH_REPO}/issues/{NUMBER}/comments \
+      --jq '[.[] | select(.body | contains("FORGE:CONTRACT"))] | last | .body' 2>/dev/null \
+      | awk '/^### Deliverables/{p=1; next} /^### /{p=0} p' \
+      | grep -oP '`[^`]+\.(py|tsx?|jsx?|sql|json|ya?ml|md|mjs|sh)`' \
+      | tr -d '`' | sort -u | tr '\n' '\n' | head -20)
+    CLAIMED_FILES="${CLAIMED_FILES:-"(files listed in FORGE:CONTRACT deliverables table)"}"
+
+    # Extract preserved interfaces from the FORGE:ARCHITECT affected paths table (if present)
+    CLAIMED_INTERFACES=$(gh api repos/{GH_REPO}/issues/{NUMBER}/comments \
+      --jq '[.[] | select(.body | contains("FORGE:ARCHITECT"))] | last | .body' 2>/dev/null \
+      | awk '/^### Affected Paths/{p=1; next} /^### /{p=0} p' \
+      | grep -oP 'Function/Class.*\|.*\|' | head -10 || echo "(see FORGE:ARCHITECT for interface details)")
+    CLAIMED_INTERFACES="${CLAIMED_INTERFACES:-"(see FORGE:ARCHITECT comment for interface details)"}"
+
+    CLAIM_HOLDER="#${NUMBER} / $(date -u +%Y%m%dT%H%M%S)"
+    CLAIM_TTL="terminal state of Holder issue #${NUMBER}"
+
+    gh issue comment "$COORD_NUM" -R {GH_REPO} --body "<!-- FORGE:CLAIM -->
+## Resource Claim
+
+**Holder**: ${CLAIM_HOLDER}
+**Files**: ${CLAIMED_FILES}
+**Interfaces**: ${CLAIMED_INTERFACES}
+**TTL**: ${CLAIM_TTL}
+
+<!-- CLAIM:COMPLETE -->" 2>/dev/null || true
+    echo "FORGE:CLAIM posted on coordination issue #${COORD_NUM} for #${NUMBER}"
+  fi
+fi
+```
+
+**After posting**: Continue to Phase B2.5. The claim is now visible to the orchestrator and peer agents. The orchestrator's claims-board relaxation sweep (orchestrate Step 4B) will read this claim when determining whether serialized peers can be unblocked.
+
 ---
 
 ## Phase B2.5: Extract FUNCTION_NAMES from Contract

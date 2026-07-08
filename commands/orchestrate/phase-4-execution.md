@@ -297,6 +297,30 @@ fi
 
 If `GIST_CONTEXT` is empty (no synthesis brief, no parent investigation, and no milestone index found), the variable resolves to a blank line in the template — no impact on the agent prompt. <!-- Updated: forge#341, forge#1192 -->
 
+**Claims board context injection** <!-- Added: forge#1736 -->: When a coordination issue exists for this batch (`FORGE_COORD_ISSUE` is set), append the claims board URL and the active-claims check instruction to the agent's context. This enables each `/work-on` agent to post its `FORGE:CLAIM` on build start.
+
+```bash
+# Inject coordination issue URL if claims board was created in Step 3D.1
+if [ -n "${FORGE_COORD_ISSUE:-}" ]; then
+  GIST_CONTEXT="${GIST_CONTEXT}
+
+**ORCHESTRATION CLAIMS BOARD**: This agent is running under an orchestration batch.
+Claims board issue URL: ${FORGE_COORD_ISSUE}
+
+On build start (Phase B2 / Phase 3C of /work-on), post a FORGE:CLAIM annotation on the
+coordination issue above. Required fields:
+  Holder: ##{NUMBER} / batch-$(date -u +%Y%m%dT%H%M%S)
+  Files: (list of files from your FORGE:CONTRACT deliverables table, one per line)
+  Interfaces: (public function/type signatures you will modify or that callers must preserve)
+  TTL: terminal state of Holder issue ##{NUMBER}
+
+On reaching terminal state (workflow:merged, workflow:invalid, or needs-human), post
+<!-- FORGE:CLAIM_RELEASED --> on the coordination issue to release your claim.
+
+Set FORGE_COORD_ISSUE=${FORGE_COORD_ISSUE} in your environment so /work-on phases can read it."
+fi
+```
+
 **Hot-copy CONTRACT context** (extends `{GIST_CONTEXT}` for milestone-lane issues where the parent issue already carries a `FORGE:CONTRACT` annotation): <!-- Added: forge#1277 -->
 
 When a DAG node issue was spawned from a decomposition (parent issue has `workflow:decomposed` label and the child issue body references `**Parent**: #NNN`), the parent issue may already have a `FORGE:CONTRACT` annotation that was posted before decomposition. Inject a scoped excerpt into the child's prompt so the child does not re-fetch it.
@@ -383,7 +407,47 @@ done
 
 3. **Track resume cycles per agent.** If an agent has been resumed 2+ times and still hasn't reached a terminal state, report it as a failure — do not resume again.
 
-4. **Record completed results**: Success (PR merged), Invalid (issue closed), Blocked (needs human), or Error
+4. **Post CLAIM_RELEASED on coordination issue** (when `FORGE_COORD_ISSUE` is set): <!-- Added: forge#1736 -->
+   ```bash
+   # After verifying terminal state for issue NUM, release its claim on the coordination issue
+   if [ -n "${FORGE_COORD_ISSUE:-}" ]; then
+     COORD_NUM=$(echo "$FORGE_COORD_ISSUE" | grep -oE '[0-9]+$')
+     if [ -n "$COORD_NUM" ]; then
+       gh issue comment "$COORD_NUM" -R {GH_REPO} --body "<!-- FORGE:CLAIM_RELEASED -->
+**Holder**: #${NUM} — reached terminal state: ${FINAL_WORKFLOW_STATE}
+**Released**: $(date -u +%Y-%m-%dT%H:%M:%SZ)" 2>/dev/null || true
+       echo "CLAIM_RELEASED posted for #${NUM} on coordination issue #${COORD_NUM}"
+     fi
+   fi
+   ```
+
+   **Claims-board relaxation sweep** (run after posting CLAIM_RELEASED): When a claim is released, check all remaining Layer-2/4-serialized issue pairs. If the now-released Holder's claimed files were the *only* conflict reason for a still-blocked issue, and that blocked issue already has an active `FORGE:CLAIM` with a disjoint file set, the blocking edge MAY be relaxed (blocked issue becomes ready). <!-- Added: forge#1736 -->
+
+   ```bash
+   # After CLAIM_RELEASED for issue NUM:
+   # Read all active FORGE:CLAIM annotations from coordination issue
+   if [ -n "${FORGE_COORD_ISSUE:-}" ] && [ -n "${COORD_NUM:-}" ]; then
+     ACTIVE_CLAIMS=$(gh api repos/{GH_REPO}/issues/${COORD_NUM}/comments \
+       --jq '[.[] | select(.body | contains("<!-- FORGE:CLAIM -->")) |
+              select(.body | contains("<!-- FORGE:CLAIM_RELEASED -->") | not)] |
+             map({holder: (.body | capture("\\*\\*Holder\\*\\*: (?P<h>[^\\n]+)").h),
+                  files: (.body | capture("\\*\\*Files\\*\\*: (?P<f>[^\\n]+)").f)})' 2>/dev/null || echo '[]')
+     # For each still-blocked issue in a Layer-2/4 pair: check if its claim's file set
+     # is disjoint from all remaining active claims. If so, mark it ready.
+     # (Layer-1 and Layer-3 edges are never relaxed — this check is Layer-2/4 only.)
+     for BLOCKED_NUM in {layer_2_4_blocked_issues}; do
+       BLOCKED_CLAIM_FILES=$(echo "$ACTIVE_CLAIMS" \
+         | jq -r --arg h "#${BLOCKED_NUM}" '.[] | select(.holder | startswith($h)) | .files' 2>/dev/null || echo "")
+       if [ -n "$BLOCKED_CLAIM_FILES" ]; then
+         # Compare file set with all other active claims — if disjoint, downgrade to ready
+         echo "Claims-board relaxation: checking if #${BLOCKED_NUM} can be unblocked based on disjoint claims"
+         # (Implementer: build a set-intersection check here using sorted file lists)
+       fi
+     done
+   fi
+   ```
+
+5. **Record completed results**: Success (PR merged), Invalid (issue closed), Blocked (needs human), or Error
 
 5. **Check for newly unblocked issues** — run the DAG readiness check above. If any issues are now ready, dispatch them immediately (Steps 4A.pre.0 → 4A.pre → 4A). Batch all newly ready issues into a single dispatch message.
 
