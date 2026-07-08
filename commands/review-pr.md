@@ -116,6 +116,12 @@ fi
 REVIEW_SHA_ROUTE=$(gh pr view ${ROUTE_PR_NUMBER:-$ARGUMENTS} --json headRefOid --jq '.headRefOid' 2>/dev/null | cut -c1-7 || echo "n/a")
 
 # Post the routing assertion marker to the PR (skip for list/keyword modes where no PR# is known yet)
+# CODEC PATH (forge#1727): REVIEW_ROUTE is a custom (non-RESERVED) annotation type; emit() tolerates
+# unknown types. Use the codec CLI to produce the opening tag for any FORGE: annotation.
+# For single-line control markers like REVIEW_ROUTE, the inline heredoc is acceptable as long
+# as field values contain no untrusted content (here: REVIEW_MODE and REVIEW_SHA_ROUTE are
+# pipeline-internal values, not user-supplied text). For annotations with user-supplied fields,
+# route through: forge-annotation.sh write REVIEWER --field Verdict=APPROVED ...
 if [ "$REVIEW_MODE" != "staging-keyword" ] && [ "$REVIEW_MODE" != "multi-pr" ]; then
   gh pr comment "$ROUTE_PR_NUMBER" --body "<!-- FORGE:REVIEW_ROUTE mode=${REVIEW_MODE} spec=review-pr.md sha=${REVIEW_SHA_ROUTE} -->"
 fi

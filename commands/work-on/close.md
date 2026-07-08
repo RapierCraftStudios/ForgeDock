@@ -660,6 +660,15 @@ CARD_JSON=$(jq -nc \
 
 ## Phase C5: Trajectory Log (MANDATORY)
 
+**CODEC PATH (forge#1727)**: Post the `<!-- FORGE:TRAJECTORY -->` comment via the protocol codec — do NOT hand-roll the opening tag. Use `forge-annotation.sh write TRAJECTORY --field ...` or `node packages/protocol/src/cli.js emit TRAJECTORY` to produce the opening tag. The codec handles any field escaping automatically.
+
+```bash
+# Codec produces the opening <!-- FORGE:TRAJECTORY --> tag
+TRAJECTORY_HEADER=$(node packages/protocol/src/cli.js emit TRAJECTORY)
+# $TRAJECTORY_HEADER = "<!-- FORGE:TRAJECTORY -->"
+# Append the Markdown body sections, then post via gh issue comment.
+```
+
 Post the `<!-- FORGE:TRAJECTORY -->` comment as the final pipeline record:
 
 ```bash
@@ -686,15 +695,33 @@ gh issue comment {NUMBER} {GH_FLAG} --body "<!-- FORGE:TRAJECTORY -->
 
 **Pipeline completed**: {TIMESTAMP}
 
-<!-- FORGE:CARD ${CARD_JSON} -->"
+$(node packages/protocol/src/cli.js emit CARD --b64 \
+  --field issue={NUMBER} \
+  --field status={CARD_STATUS} \
+  --field pipeline="${PIPELINE_LINE}" \
+  --field pr={PR_NUMBER} \
+  --field pr_target="${PR_TARGET}" \
+  --field commits="${COMMITS}" \
+  --field additions="${ADDITIONS}" \
+  --field deletions="${DELETIONS}" \
+  --field review="${REVIEW_SUMMARY}" \
+  --field elapsed="${ELAPSED_SECS:-0}")"
 ```
 
-The `<!-- FORGE:CARD {...} -->` block carries the machine-readable summary computed in
-Phase C4.5c. It is wrapped in an HTML comment so it stays hidden in GitHub's rendered view
-(keeping the trajectory comment clean) while remaining greppable in the raw body for platform
-consumption — `/orchestrate` reads it to build per-issue cards. This block is **additive**:
-all existing `FORGE:TRAJECTORY` consumers select via `contains("FORGE:TRAJECTORY")` and parse
-the markdown table, so the embedded JSON does not affect them.
+The `<!-- FORGE:CARD: v1 sha:... b64:... -->` line carries the machine-readable summary computed in
+Phase C4.5c, encoded as Base64url (design decision 2026-07-08: encoding beats escaping — the
+Base64url alphabet cannot contain HTML comment delimiters by construction). It is wrapped in
+the inline-value annotation form `<!-- FORGE:CARD: ... -->` so parse() extracts the encoded
+payload. Platform consumers (e.g., `/orchestrate`) decode via `node packages/protocol/src/cli.js
+parse --type CARD --field status`. This block is **additive**: all existing `FORGE:TRAJECTORY`
+consumers select via `contains("FORGE:TRAJECTORY")` and parse the markdown table, so the
+embedded CARD line does not affect them.
+
+**CODEC PATH (forge#1727)**: The `$(node packages/protocol/src/cli.js emit CARD --b64 ...)` call
+above replaces the previous `<!-- FORGE:CARD ${CARD_JSON} -->` inline-JSON form. The Base64url
+form is safe against all HTML comment injection vectors and includes a sha8 integrity prefix for
+truncation detection. Consumers that parsed the old inline-JSON form must migrate to the codec
+parse path: `echo '...' | node packages/protocol/src/cli.js parse --type CARD --field <key>`.
 
 Where:
 - `{PARENT_STATUS}` = `⏭ Skipped` (if no parent) or `✅ Complete` (if parent updated)

@@ -613,6 +613,15 @@ Use 2-3 keywords from the issue title. If no results, skip this phase — do not
 
 ## Output Format
 
+**CODEC PATH (forge#1727)**: Post the `<!-- FORGE:CONTEXT -->` comment via the protocol codec — do NOT hand-roll the opening tag or completion sentinel. Use `forge-annotation.sh write CONTEXT` or `node packages/protocol/src/cli.js emit CONTEXT` to produce the tag and sentinel (`<!-- FORGE:CONTEXT:COMPLETE -->`). The codec handles completion sentinel emission automatically.
+
+```bash
+# Codec produces the opening tag and completion sentinel
+CONTEXT_BODY=$(node packages/protocol/src/cli.js emit CONTEXT)
+# $CONTEXT_BODY = "<!-- FORGE:CONTEXT -->\n<!-- FORGE:CONTEXT:COMPLETE -->"
+# Insert the Markdown sections between the opening tag line and the sentinel.
+```
+
 Post the following as a GitHub comment on `{NUMBER}`:
 
 ```bash

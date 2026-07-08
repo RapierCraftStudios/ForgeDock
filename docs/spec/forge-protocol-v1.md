@@ -1143,16 +1143,71 @@ separate, MIT-licensed npm package:
 **`@forgedock/protocol`** — available at `packages/protocol/` in the ForgeDock
 repository.
 
-It provides:
+### 13.1 Normative codec path
+
+**`packages/protocol/` is the normative write and read path for all FORGE
+annotations.** Hand-rolled annotation construction (embedding raw
+`<!-- FORGE:TYPE -->` strings in inline heredocs or `--body` blocks) is
+**non-conformant** because it bypasses the codec's escaping and round-trip
+guarantees. Every producer MUST route annotation construction through one of:
+
+1. **`forge-annotation.sh write <TYPE> --field KEY=VALUE ...`** (AGPL-licensed,
+   ships with the npm package at `scripts/forge-annotation.sh`), or
+2. **`node packages/protocol/src/cli.js emit <TYPE> --field KEY=VALUE ...`**
+   (MIT-licensed, part of the `@forgedock/protocol` package)
+
+Both paths delegate to `emit()` from `packages/protocol/src/emit.js`, which
+applies the complete escaping and sanitization policy (§3.5 injection hardening).
+
+### 13.2 JavaScript API
+
+```js
+import { parse, validate, emit, emitPartial } from '@forgedock/protocol';
+```
 
 - `parse(commentBody)` — extracts all annotations from a comment body string
 - `validate(annotation)` — checks conformance per §3–4; returns `{ valid, errors, warnings }`
-- `emit(type, fields)` — produces well-formed annotation strings
+- `emit(type, fields)` — produces a well-formed annotation string; applies all §3.5 escaping
 - `emitPartial(type)` — produces the partial sentinel for a type (§3.3)
 
-A conformance suite in `packages/protocol/fixtures/` covers all 13 reserved
-types with valid and invalid examples. The CLI runner can be invoked against any
-fixtures directory:
+### 13.3 CLI subcommands
+
+The CLI at `packages/protocol/src/cli.js` exposes three modes:
+
+```bash
+# Emit — print a well-formed annotation body to stdout
+node packages/protocol/src/cli.js emit INVESTIGATOR \
+  --field Verdict=CONFIRMED --field Confidence=HIGH \
+  --field Severity=MEDIUM --field "Task Type=Bug Fix" \
+  --field "Decomposition Assessment=NO — single fix."
+
+# Parse — read a comment body from stdin, extract a field value
+echo '<!-- FORGE:INVESTIGATOR -->...' | \
+  node packages/protocol/src/cli.js parse --type INVESTIGATOR --field Verdict
+# → CONFIRMED
+
+# Conformance runner (legacy — no subcommand keyword)
+node packages/protocol/src/cli.js fixtures/
+```
+
+The `emit` subcommand also supports the Base64url machine-surface form for
+`FORGE:CARD` annotations (design decision 2026-07-08: encoding beats escaping):
+
+```bash
+node packages/protocol/src/cli.js emit CARD \
+  --field issue=1370 --field status=merged --b64
+# → <!-- FORGE:CARD: v1 sha:7234c2d8 b64:eyJ... -->
+```
+
+The Base64url alphabet `[A-Za-z0-9_-]` cannot contain `>`, `<`, or `!`, making
+`-->`, `--!>`, and `<!--` structurally unrepresentable in the machine surface.
+
+### 13.4 Conformance suite
+
+A conformance suite in `packages/protocol/fixtures/` covers all reserved types
+with valid and invalid examples, including adversarial payloads that reproduce
+historical escaping vulnerabilities. The suite can be run against any fixtures
+directory:
 
 ```bash
 npx @forgedock/protocol fixtures/

@@ -21,20 +21,29 @@ done
 
 Aggregate into the batch-level analytics for Step 6B.
 
-**Also collect the machine-readable summary cards** (`<!-- FORGE:CARD {json} -->`, embedded in
-each issue's `FORGE:TRAJECTORY` comment by `/work-on` close phase). These power the per-issue and
-batch cards in Step 6C:
+**Also collect the machine-readable summary cards** (embedded in each issue's `FORGE:TRAJECTORY`
+comment by `/work-on` close phase as a `<!-- FORGE:CARD: v1 sha:... b64:... -->` line). These
+power the per-issue and batch cards in Step 6C.
+
+**CODEC PATH (forge#1727)**: Cards are now Base64url-encoded. Use the protocol CLI's `parse`
+subcommand to decode them — do NOT use the old `sed -n 's/.*<!-- FORGE:CARD \(.*\) -->.*/\1/p'`
+regex extraction, which only worked for the deprecated inline-JSON form:
 
 ```bash
 CARDS=""
 for NUM in {all_completed_issue_numbers}; do
-  CARD=$(gh api repos/{GH_REPO}/issues/${NUM}/comments \
-    --jq '.[] | select(.body | contains("FORGE:CARD")) | .body' 2>/dev/null \
-    | sed -n 's/.*<!-- FORGE:CARD \(.*\) -->.*/\1/p' | head -1)
-  [ -n "$CARD" ] && CARDS="${CARDS}${CARD}"$'\n'
+  # Fetch the TRAJECTORY comment body for this issue
+  TRAJ_BODY=$(gh api repos/{GH_REPO}/issues/${NUM}/comments \
+    --jq '[.[] | select(.body | contains("FORGE:CARD:"))] | last | .body // ""' 2>/dev/null || true)
+  if [ -n "$TRAJ_BODY" ]; then
+    # Decode via protocol CLI — handles both Base64url form (forge#1727) and gracefully
+    # exits 1 (skips) for pre-migration inline-JSON entries.
+    CARD=$(echo "$TRAJ_BODY" | node packages/protocol/src/cli.js parse --type CARD 2>/dev/null || true)
+    [ -n "$CARD" ] && CARDS="${CARDS}${CARD}"$'\n'
+  fi
 done
-# CARDS is now a newline-delimited list of per-issue JSON objects (skip any issue whose
-# card is absent — pre-card runs or non-merged terminal states degrade gracefully).
+# CARDS is now a newline-delimited list of per-issue JSON objects decoded from FORGE:CARD payloads.
+# Skip any issue whose card is absent — pre-card runs or non-merged terminal states degrade gracefully.
 ```
 
 ### Step 6B: Present consolidated report
