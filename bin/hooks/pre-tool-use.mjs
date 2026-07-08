@@ -70,9 +70,16 @@ async function getInvariants() {
  *    Currently: branch_must_exist_on_remote — blocks checkouts of branches
  *    that don't exist on origin (catches hallucinated branch names before
  *    they cause a mid-build git failure).
- *    Intercepts `gh issue edit --add-label` and validates the transition
- *    against the workflow label state machine.
- *    Blocks invalid transitions (e.g. jumping from investigating to merged).
+ *
+ * 4. Gist visibility guard (issue #1729)
+ *    Intercepts `gh gist create --public` and hard-blocks it.
+ *    Memory-bearing pipeline gists (FORGE:KNOWLEDGE_GIST, FORGE:MILESTONE_INDEX,
+ *    FORGE:PRIOR_GIST, FORGE:MEMORY_INDEX) MUST be secret — publishing them to
+ *    a world-readable Gist exposes root causes, file paths, and security findings.
+ *    Override: set FORGE_ALLOW_PUBLIC_GIST=1 in the shell environment before
+ *    starting Claude Code (operator-set only — agents cannot bypass this by
+ *    setting env vars via Bash tool calls, as this hook reads process.env which
+ *    is set at process start, not at tool-call time).
  *
  * Both rules only apply inside a ForgeDock-managed directory (a directory
  * with a `forge.yaml` or `.forgedock` marker) — see `isForgeDockManagedCwd()`
@@ -177,6 +184,14 @@ async function main() {
   const preconditionViolation = await checkDeclaredPreconditions(command);
   if (preconditionViolation) {
     process.stderr.write(preconditionViolation);
+    process.exit(2);
+    return;
+  }
+
+  // --- Rule 4: Gist visibility guard ---
+  const gistViolation = checkGistVisibility(command);
+  if (gistViolation) {
+    process.stderr.write(gistViolation);
     process.exit(2);
     return;
   }
@@ -428,6 +443,58 @@ function checkLabelTransition(command) {
   }
 
   return null; // valid transition — allow
+}
+
+// ---------------------------------------------------------------------------
+// Rule 4: Gist visibility guard (issue #1729)
+// ---------------------------------------------------------------------------
+
+/**
+ * Check whether a gh gist create command uses the --public flag.
+ *
+ * Pipeline gists (FORGE:KNOWLEDGE_GIST, FORGE:MILESTONE_INDEX, FORGE:PRIOR_GIST,
+ * FORGE:MEMORY_INDEX) MUST be secret. Passing --public to gh gist create publishes
+ * investigation findings — root causes, file paths, security details — to a
+ * world-readable URL. gh gist create is secret by default; this rule blocks any
+ * explicit --public override so a future spec edit cannot reintroduce a public gist.
+ *
+ * Override: FORGE_ALLOW_PUBLIC_GIST=1 in the operator's shell environment.
+ * This env var must be set BEFORE starting Claude Code — it is read from process.env
+ * at hook startup, not from the tool payload, so agents cannot bypass it by setting
+ * the variable via a Bash tool call in the same session.
+ *
+ * @param {string} command
+ * @returns {string|null} Error message to show, or null if allowed.
+ */
+function checkGistVisibility(command) {
+  // Only check gh gist create commands.
+  if (!/gh\s+gist\s+create/.test(command)) return null;
+
+  // Allow operator override via env var.
+  if (process.env.FORGE_ALLOW_PUBLIC_GIST === "1") return null;
+
+  // Check for --public flag (space form, equals form, and standalone --public).
+  // extractFlag handles --public=value; for the bare boolean flag --public we
+  // additionally check whether "--public" appears as a standalone token.
+  const tokens = tokenizeCommand(command);
+  const hasPublicFlag = tokens.some(({ value }) => value === "--public") ||
+    extractFlag(command, "--public") !== null;
+
+  if (hasPublicFlag) {
+    return [
+      `[ForgeDock] BLOCKED: gh gist create --public is a pipeline violation.`,
+      ``,
+      `Pipeline gists (FORGE:KNOWLEDGE_GIST, FORGE:MILESTONE_INDEX, FORGE:PRIOR_GIST,`,
+      `FORGE:MEMORY_INDEX) MUST be created secret. Passing --public publishes`,
+      `investigation findings — root causes, file paths, security details — to a`,
+      `world-readable URL. Remove the --public flag (gh gist create is secret by default).`,
+      ``,
+      `Exception: set FORGE_ALLOW_PUBLIC_GIST=1 in your shell environment BEFORE`,
+      `starting Claude Code if you intentionally need a public gist.`,
+    ].join("\n");
+  }
+
+  return null;
 }
 
 // ---------------------------------------------------------------------------

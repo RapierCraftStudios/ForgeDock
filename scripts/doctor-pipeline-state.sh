@@ -45,6 +45,8 @@
 #   I5  Issues in workflow:in-review with no open PR
 #   I6  PRs open without a FORGE:CONTRACT or FORGE:BUILDER annotation
 #   I7  Orphaned worktree branches (local branches fix/* with no open PR)
+#   I8  FORGE-referenced gists with public visibility (KNOWLEDGE_GIST, MILESTONE_INDEX,
+#       PRIOR_GIST annotations in recent issue comments)
 #
 # /pipeline-health should consume this script's JSON output rather than
 # re-discovering state from scratch.
@@ -402,6 +404,79 @@ while IFS= read -r row; do
       "PR #$pr_num is open but has no FORGE: annotations in its body. Either it was created outside the pipeline or the annotation was lost. Invariant I6: pipeline PRs must have FORGE:CONTRACT or FORGE:BUILDER. Inspect: gh pr view $pr_num $GH_FLAG"
   fi
 done < <(echo "$OPEN_PRS" | jq -c '.[]')
+
+# ---------------------------------------------------------------------------
+# I8: FORGE-referenced gists with public visibility
+#
+# Scan the last 100 issues (open + closed) for comments containing
+# FORGE:KNOWLEDGE_GIST, FORGE:MILESTONE_INDEX, or FORGE:PRIOR_GIST annotations.
+# Extract the gist ID from each URL and query gh api gists/{id} --jq .public.
+# A "true" result means a pipeline memory gist is world-readable — CRITICAL finding.
+#
+# Fail-open on gh API errors: a network blip or rate-limit must NOT be reported
+# as a confirmed public gist. Uses add_skip (same pattern as I4/I5) so persistent
+# API degradation surfaces in --json degraded[] without inflating CRITICAL count.
+# ---------------------------------------------------------------------------
+RECENT_ISSUES=$(gh issue list $GH_FLAG \
+  --state all \
+  --limit 100 \
+  --json number \
+  --jq '.[].number' 2>"$GH_STDERR_TMP" || true)
+
+I8_FETCH_ERR=$(cat "$GH_STDERR_TMP")
+if [ -z "$RECENT_ISSUES" ] && [ -n "$I8_FETCH_ERR" ]; then
+  echo "WARNING: gh issue list failed for I8 gist-visibility scan — check inconclusive, skipping: $I8_FETCH_ERR" >&2
+  add_skip "I8" "all" "gh issue list failed: $(bounded_reason "$I8_FETCH_ERR")"
+fi
+
+for issue_num in $RECENT_ISSUES; do
+  # Fetch comments and extract FORGE gist annotation URLs
+  if ! ISSUE_COMMENTS=$(gh issue view "$issue_num" $GH_FLAG \
+    --json comments \
+    --jq '[.comments[].body] | join("\n")' 2>"$GH_STDERR_TMP"); then
+    echo "WARNING: gh issue view failed for #$issue_num (I8) — skipping: $(cat "$GH_STDERR_TMP")" >&2
+    add_skip "I8" "$issue_num" "gh issue view failed: $(bounded_reason "$(cat "$GH_STDERR_TMP")")"
+    continue
+  fi
+
+  # Extract gist URLs from all three FORGE annotation types.
+  # The character class [^\s >]+ matches any non-whitespace, non-space, non-> char,
+  # which covers standard usernames, bot accounts (e.g. rapiercraft-forge[bot]),
+  # and gist hashes — all valid in a gist URL before the closing ' -->'.
+  GIST_URLS=$(echo "$ISSUE_COMMENTS" \
+    | grep -oE '<!-- FORGE:(KNOWLEDGE_GIST|PRIOR_GIST): https://gist\.github\.com/[^ >]+ -->' \
+    | grep -oE 'https://gist\.github\.com/[^ >]+' || true)
+  # FORGE:MILESTONE_INDEX may appear in milestone description, not comments, but
+  # some pipelines also post it as a comment — include it in the scan.
+  MILESTONE_GIST_URLS=$(echo "$ISSUE_COMMENTS" \
+    | grep -oE '<!-- FORGE:MILESTONE_INDEX: https://gist\.github\.com/[^ >]+ -->' \
+    | grep -oE 'https://gist\.github\.com/[^ >]+' || true)
+  ALL_GIST_URLS=$(printf '%s\n%s\n' "$GIST_URLS" "$MILESTONE_GIST_URLS" | grep -v '^$' | sort -u || true)
+
+  for gist_url in $ALL_GIST_URLS; do
+    # Extract gist ID: last path component after the username segment
+    gist_id=$(echo "$gist_url" | sed 's|.*/||')
+    if [ -z "$gist_id" ]; then
+      continue
+    fi
+
+    # Query gist visibility — fail-open on API error (rate limit, auth, network)
+    if ! IS_PUBLIC=$(gh api "gists/${gist_id}" --jq '.public' 2>"$GH_STDERR_TMP"); then
+      echo "WARNING: gh api gists/${gist_id} failed (I8) — skipping: $(cat "$GH_STDERR_TMP")" >&2
+      add_skip "I8" "$issue_num" "gh api gists/${gist_id} failed: $(bounded_reason "$(cat "$GH_STDERR_TMP")")"
+      continue
+    fi
+
+    if [ "$IS_PUBLIC" = "true" ]; then
+      add_finding \
+        "public_forge_gist" "critical" \
+        "$issue_num" "gist_visibility" "0" \
+        "FORGE:KNOWLEDGE_GIST/FORGE:MILESTONE_INDEX/FORGE:PRIOR_GIST" \
+        "gh api gists/${gist_id} --jq '.public'" \
+        "Issue #${issue_num} references a public FORGE gist: ${gist_url} — gist ID: ${gist_id}. Pipeline memory gists (FORGE:KNOWLEDGE_GIST, FORGE:MILESTONE_INDEX, FORGE:PRIOR_GIST) MUST be secret. Public gists expose root causes, file paths, and security findings to the open internet. Invariant I8 broken. Migration: gh gist view ${gist_id} > /tmp/gist_migrate.md && gh gist delete ${gist_id} --yes && gh gist create /tmp/gist_migrate.md --desc '<original description>' (no --public). Then update the annotation URL on issue #${issue_num}."
+    fi
+  done
+done
 
 # ---------------------------------------------------------------------------
 # Summary
