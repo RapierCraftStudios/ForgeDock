@@ -531,19 +531,32 @@ Report any hit as **HIGH** — the DB connection will fail in any environment wh
 VALIDATOR="$FORGEDOCK_SCRIPTS/validate-spec-graph.sh"
 [ -f "$VALIDATOR" ] || VALIDATOR="{WORKTREE_PATH}/scripts/validate-spec-graph.sh"
 if [ -f "$VALIDATOR" ]; then
+    # Compute the changed-files list for clone-drift detection (Check 4).
+    # Use git diff against the PR base; fall back to empty string (skips clone-drift)
+    # if git is unavailable or the worktree has no remote ref to compare against.
+    CHANGED_FILES_LIST=$(git -C "{WORKTREE_PATH}" diff --name-only "origin/{PR_BASE}...HEAD" 2>/dev/null || true)
+
     # The graph is auto-built from the worktree (gitignored JSON not required).
     # --soft keeps the gate non-blocking on the documented baseline orphans;
     # HARD findings are still reported below and surfaced as gate findings.
-    GRAPH_REPORT=$(bash "$VALIDATOR" --root "{WORKTREE_PATH}" --soft 2>&1 || true)
+    # --changed-files enables Check 4 (clone-drift) when the file list is non-empty.
+    GRAPH_REPORT=$(bash "$VALIDATOR" --root "{WORKTREE_PATH}" --soft \
+        ${CHANGED_FILES_LIST:+--changed-files "$CHANGED_FILES_LIST"} 2>&1 || true)
     echo "$GRAPH_REPORT"
     # Map any HARD finding to a quality-gate finding (dangling ref / broken transition).
     echo "$GRAPH_REPORT" | grep -E '^\s*\[HARD\]' | while IFS= read -r hit; do
         echo "FORGE_GRAPH | HIGH | spec-graph | ${hit#*] }"
     done
+    # Surface clone-drift SOFT findings as advisory MEDIUM findings (not blocking).
+    echo "$GRAPH_REPORT" | grep -E '^\s*\[SOFT\]\s+clone-drift' | while IFS= read -r hit; do
+        echo "FORGE_GRAPH | MEDIUM | clone-drift | ${hit#*] }"
+    done
 fi
 ```
 
 Report each `[HARD]` line as **HIGH** — a dangling `Skill()` target or a label set by no command is a real pipeline break (an agent will invoke a phase that does not exist, or a state will never be entered/exited). Orphan-annotation `[SOFT]` lines are advisory: surface them in the report for periodic triage but do NOT block the commit. Scaffolding `[INFO]` lines are expected and need no action. To gate on HARD findings (fail the build), drop `--soft`; the default keeps existing baseline orphans from blocking until they are triaged. <!-- Added: forge#869 -->
+
+**Clone-drift check** (Check 4 — SOFT/MEDIUM): When `--changed-files` is supplied, the validator emits `[SOFT] clone-drift` findings for any spec block that was modified in one file but whose identical twin in a sibling spec was not updated. These appear as `FORGE_GRAPH | MEDIUM | clone-drift` gate findings — advisory but not blocking by default. A clone-drift warning means a fix was applied to one spec and may be needed in its sibling. <!-- Added: forge#1728 -->
 
 ### 2G.7: Native command conflict check (FORGE_GRAPH domain)
 

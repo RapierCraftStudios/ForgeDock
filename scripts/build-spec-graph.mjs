@@ -44,6 +44,10 @@
  *   CONTAINS    — command -> sub-phase (directory nesting + Skill(skill="X") invocations)
  *   INVOKES     — command runs a script (references a real scripts/*.sh file)
  *   REQUIRES    — command/spec must read a devdoc (authority: required)
+ *   SHARED_BLOCK — two command/sub-phase files share an identical normalized content block
+ *               (heading-delimited section; hash match after whitespace + heading-number strip).
+ *               Evidence carries { file, section, hash, siblingFile, siblingSection }.
+ *               Used by validate-spec-graph.sh --changed-files for clone-drift detection.
  *
  * Determinism: all node/edge arrays are sorted by a stable composite key and
  * JSON is emitted with sorted object keys, so re-runs produce byte-identical
@@ -63,7 +67,7 @@ import { join, dirname, relative, basename, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import { createHash } from "node:crypto";
 
-const SCHEMA_VERSION = 1;
+const SCHEMA_VERSION = 2;
 
 // ---------------------------------------------------------------------------
 // Argument parsing
@@ -234,6 +238,138 @@ function skillTargetToId(skill) {
 }
 
 // ---------------------------------------------------------------------------
+// Block fingerprinting — shared-block edge detection
+// ---------------------------------------------------------------------------
+
+/**
+ * Minimum normalized line count for a block to be considered a shared-block
+ * candidate. Tiny boilerplate sections (e.g. single-line headings with no
+ * body) produce false positives — require at least this many non-empty lines.
+ */
+const SHARED_BLOCK_MIN_LINES = 10;
+
+/**
+ * Normalize a block of content for fingerprinting.
+ *
+ * Normalization rules (cosmetic divergence must NOT alarm):
+ *   1. Strip leading/trailing whitespace from every line.
+ *   2. Collapse runs of blank lines to a single blank line.
+ *   3. Strip heading-number prefixes from the first line of a section heading
+ *      (e.g. "### 3B: Foo" → "### Foo", "## 0B.1: Bar" → "## Bar").
+ *   4. Lowercase the entire content so spelling-case divergence is invisible.
+ *
+ * Structural divergence (different prose, reordered bullets) IS retained and
+ * WILL produce a different hash, triggering no edge — as intended.
+ */
+function normalizeBlock(lines) {
+  const stripped = lines
+    .map((l) => l.trim())
+    // Strip heading-number prefixes: "### 0B.1: text" → "### text",
+    // "## 3C.5: text" → "## text", "### 1A: text" → "### text".
+    .map((l) => l.replace(/^(#{1,6}\s+)[0-9]+[A-Z]?(?:\.[0-9]+)?(?:\.[0-9]+)?:\s+/, "$1"))
+    .join("\n")
+    // Collapse runs of ≥2 blank lines to a single blank line.
+    .replace(/\n{3,}/g, "\n\n")
+    .toLowerCase()
+    .trim();
+  return stripped;
+}
+
+/**
+ * Split `text` (a command/sub-phase spec file) into heading-delimited blocks.
+ *
+ * Each block starts at a `##` or `###` heading and runs until the next
+ * heading of the same or higher level (or end of file). The heading line is
+ * included in the block so the section title participates in the hash.
+ *
+ * Returns an array of { heading, lines[], normalized, hash } objects.
+ * Blocks below SHARED_BLOCK_MIN_LINES (after normalization) are omitted to
+ * avoid false positives from tiny boilerplate sections.
+ */
+function splitIntoBlocks(text) {
+  const rawLines = text.split("\n");
+  const blocks = [];
+  let currentHeading = null;
+  let currentLines = [];
+
+  const flushBlock = () => {
+    if (!currentHeading) return;
+    const normalized = normalizeBlock(currentLines);
+    const nonEmpty = normalized.split("\n").filter((l) => l.trim().length > 0);
+    if (nonEmpty.length >= SHARED_BLOCK_MIN_LINES) {
+      const hash = createHash("sha256").update(normalized).digest("hex");
+      blocks.push({ heading: currentHeading, lines: currentLines.slice(), normalized, hash });
+    }
+  };
+
+  for (const line of rawLines) {
+    // Match ## or ### headings (but NOT #### and deeper — too granular).
+    if (/^#{2,3}\s/.test(line)) {
+      flushBlock();
+      currentHeading = line.trim();
+      currentLines = [line];
+    } else if (currentHeading) {
+      currentLines.push(line);
+    }
+  }
+  flushBlock();
+  return blocks;
+}
+
+/**
+ * Fingerprint all command files and emit SHARED_BLOCK edges between any two
+ * (file, section) pairs whose normalized block hash matches.
+ *
+ * A SHARED_BLOCK edge is directional: from the lexically-first file to the
+ * lexically-second file (so each pair produces exactly one edge, not two).
+ * The evidence payload carries both files and both section headings so the
+ * validator can name them precisely in its warning.
+ *
+ * This function is called ONLY from build() — NOT from the --hash probe path.
+ * The --hash path exits before build() is called.
+ */
+function fingerprintBlocks(commandFiles, allSpecText, addEdge, nodes) {
+  // Build a map: hash -> [ { file, heading } ]
+  const hashMap = new Map();
+
+  for (let ci = 0; ci < commandFiles.length; ci++) {
+    const rel = commandFiles[ci];
+    const text = allSpecText[ci];
+    const blocks = splitIntoBlocks(text);
+    for (const block of blocks) {
+      const entry = { file: rel, heading: block.heading, hash: block.hash };
+      if (!hashMap.has(block.hash)) hashMap.set(block.hash, []);
+      hashMap.get(block.hash).push(entry);
+    }
+  }
+
+  // For each hash with ≥2 matches, emit SHARED_BLOCK edges between all pairs.
+  for (const [hash, entries] of hashMap) {
+    if (entries.length < 2) continue;
+    // Sort by file path for determinism (lexically earlier file is `from`).
+    const sorted = [...entries].sort((a, b) => (a.file < b.file ? -1 : a.file > b.file ? 1 : 0));
+    for (let i = 0; i < sorted.length; i++) {
+      for (let j = i + 1; j < sorted.length; j++) {
+        const a = sorted[i];
+        const b = sorted[j];
+        const fromId = `cmd:${a.file.replace(/^commands\//, "").replace(/\.md$/, "").split("/").join(":")}`;
+        const toId = `cmd:${b.file.replace(/^commands\//, "").replace(/\.md$/, "").split("/").join(":")}`;
+        // Only emit if both nodes exist in the graph.
+        if (nodes.has(fromId) && nodes.has(toId)) {
+          addEdge(fromId, "SHARED_BLOCK", toId, {
+            file: a.file,
+            section: a.heading,
+            siblingFile: b.file,
+            siblingSection: b.heading,
+            hash: hash.slice(0, 16), // truncated for readability in graph JSON
+          });
+        }
+      }
+    }
+  }
+}
+
+// ---------------------------------------------------------------------------
 // Build the graph
 // ---------------------------------------------------------------------------
 
@@ -393,6 +529,13 @@ function build() {
     }
   }
 
+  // --- SHARED_BLOCK: cross-spec content clone detection --------------------
+  // Fingerprint heading-delimited blocks across all command files. Emit
+  // SHARED_BLOCK edges between any two (file, section) pairs whose normalized
+  // content hash matches. Used by validate-spec-graph.sh --changed-files for
+  // clone-drift detection pre-commit and in CI.
+  fingerprintBlocks(commandFiles, allSpecText, addEdge, nodes);
+
   // --- Finalize: deterministic ordering ------------------------------------
   const nodeArr = [...nodes.values()].sort((a, b) => cmp(a.id, b.id));
   const edgeArr = edges.sort(
@@ -461,6 +604,16 @@ function selfCheck(graph, quiet) {
     ["review-pr READS FORGE:CONTRACT", has("cmd:review-pr", "READS", "ann:FORGE:CONTRACT")],
     ["builtFromHash is a sha256 hex digest", typeof hash === "string" && /^[0-9a-f]{64}$/.test(hash)],
   ];
+
+  // Informational log: how many SHARED_BLOCK edges were found. A count of 0
+  // means the corpus has no identical blocks right now (all specs have diverged),
+  // which is valid — the detection mechanism is still active and will fire when
+  // a future edit creates a shared clone. Not a hard assertion because the
+  // corpus can legitimately have zero shared blocks at any point in time.
+  const sharedBlockCount = graph.graph.edges.filter((e) => e.type === "SHARED_BLOCK").length;
+  if (!quiet) {
+    console.error(`  INFO  shared-block edges in corpus: ${sharedBlockCount} (clone-drift detection active)`);
+  }
 
   let allPass = true;
   for (const [label, ok] of checks) {

@@ -28,6 +28,16 @@
 #        add/remove asymmetry where a label is `--remove-label`-d but never
 #        `--add-label`-ed, which signals a state-machine gap.
 #
+#   4. Clone drift (SOFT — warn; only when --changed-files is supplied)
+#        A SHARED_BLOCK edge connects two spec files that share an identical
+#        normalized content block (heading-delimited section). If one of those
+#        files appears in --changed-files but the other does not, a SOFT warning
+#        is emitted naming the sibling file and section. This surfaces the
+#        #1360/#1426 class of bug: editing a shared block in one spec without
+#        updating its twin. The check is SOFT — it will never block a commit by
+#        default — and is completely skipped when --changed-files is absent
+#        (backward compatible with all existing callers).
+#
 # Exit codes:
 #   0  no HARD inconsistencies (SOFT warnings / INFO may still be printed),
 #      or --soft was passed (warn-only mode)
@@ -35,23 +45,30 @@
 #      or a usage / dependency error
 #
 # Usage:
-#   validate-spec-graph.sh [--soft] [--graph <path>] [--root <dir>] [--quiet] [--json] [-h|--help]
+#   validate-spec-graph.sh [--soft] [--graph <path>] [--root <dir>] [--quiet] [--json]
+#                          [--changed-files <files>] [-h|--help]
 #
 # Flags:
-#   --soft          Warn-only mode: report HARD findings but exit 0 anyway.
-#                   Used when first wiring into CI so the documented baseline
-#                   orphans/refs do not break the build before triage.
-#   --graph <path>  Validate a specific graph JSON (default:
-#                   <repo>/.forgedock/graph/spec-graph.json). If the default is
-#                   absent (it is gitignored), the graph is auto-built on the
-#                   fly via build-spec-graph.mjs — no committed graph required.
-#   --root <dir>    Repo root to scan for Skill() refs and to auto-build from
-#                   (default: parent of this script's dir).
-#   --quiet         Suppress the human-readable report; print only the summary
-#                   line (and set the exit code).
-#   --json          Emit findings as a single JSON object on stdout instead of
-#                   the human-readable report.
-#   -h | --help     Show this help.
+#   --soft              Warn-only mode: report HARD findings but exit 0 anyway.
+#                       Used when first wiring into CI so the documented baseline
+#                       orphans/refs do not break the build before triage.
+#   --graph <path>      Validate a specific graph JSON (default:
+#                       <repo>/.forgedock/graph/spec-graph.json). If the default is
+#                       absent (it is gitignored), the graph is auto-built on the
+#                       fly via build-spec-graph.mjs — no committed graph required.
+#   --root <dir>        Repo root to scan for Skill() refs and to auto-build from
+#                       (default: parent of this script's dir).
+#   --quiet             Suppress the human-readable report; print only the summary
+#                       line (and set the exit code).
+#   --json              Emit findings as a single JSON object on stdout instead of
+#                       the human-readable report.
+#   --changed-files <f> Space- or newline-separated list of repo-relative file paths
+#                       that were modified in the current change (e.g. output of
+#                       \`git diff --name-only origin/staging...HEAD\`). When supplied,
+#                       enables Check 4 (clone-drift): any SHARED_BLOCK twin of a
+#                       changed file that is NOT in this list generates a SOFT warning.
+#                       When absent, Check 4 is silently skipped (backward compatible).
+#   -h | --help         Show this help.
 #
 # This is a UNIVERSAL-tier script (ships with the npm package). It is read-only:
 # it never mutates the repo or the committed graph (it only writes a temp graph
@@ -122,6 +139,7 @@ QUIET=0
 JSON=0
 GRAPH_PATH=""
 ROOT_OVERRIDE=""
+CHANGED_FILES=""
 
 while [ "$#" -gt 0 ]; do
   case "$1" in
@@ -149,6 +167,11 @@ while [ "$#" -gt 0 ]; do
     --root)
       [ "$#" -ge 2 ] || die "--root requires a path"
       ROOT_OVERRIDE="$2"
+      shift 2
+      ;;
+    --changed-files)
+      [ "$#" -ge 2 ] || die "--changed-files requires an argument"
+      CHANGED_FILES="$2"
       shift 2
       ;;
     -*)
@@ -356,12 +379,87 @@ check_transitions() {
 }
 
 # ---------------------------------------------------------------------------
+# Check 4: Clone drift (SHARED_BLOCK edges × changed files)
+# ---------------------------------------------------------------------------
+
+check_clone_drift() {
+  # Skip entirely when --changed-files was not supplied.
+  [ -n "$CHANGED_FILES" ] || return 0
+
+  # Normalize the changed-files list: split on whitespace/newlines/commas,
+  # strip leading ./ prefix so repo-relative paths match graph evidence.file.
+  local changed_norm
+  changed_norm="$(printf '%s\n' "$CHANGED_FILES" \
+    | tr ',' '\n' \
+    | tr ' ' '\n' \
+    | sed 's|^\./||' \
+    | grep -v '^$' \
+    | sort -u)"
+
+  [ -n "$changed_norm" ] || return 0
+
+  # Query all SHARED_BLOCK edges from the graph.
+  # Each edge has evidence.file and evidence.siblingFile.
+  # For every changed file that matches evidence.file OR evidence.siblingFile,
+  # check whether the twin (the other side) is also in the changed list.
+  # Emit a SOFT finding for each un-changed twin.
+  local drift_rows
+  drift_rows="$(jq -r '
+    .graph.edges[]
+    | select(.type == "SHARED_BLOCK")
+    | .evidence as $ev
+    | "\($ev.file)\t\($ev.section)\t\($ev.siblingFile)\t\($ev.siblingSection)\t\($ev.hash)"
+  ' "$GRAPH" 2>/dev/null || true)"
+
+  [ -n "$drift_rows" ] || return 0
+
+  local seen_pairs=""  # deduplicate (fileA|fileB) pairs already warned
+  local file section sibling_file sibling_section hash
+  while IFS=$'\t' read -r file section sibling_file sibling_section hash; do
+    [ -n "$file" ] || continue
+
+    local pair_key
+    if [ "$file" \< "$sibling_file" ]; then
+      pair_key="${file}|${sibling_file}|${section}"
+    else
+      pair_key="${sibling_file}|${file}|${sibling_section}"
+    fi
+    # Skip if this pair+section was already reported (shared block with 3+ files
+    # could produce duplicate warnings for the same pair).
+    case "$seen_pairs" in *"$pair_key"*) continue ;; esac
+
+    local changed_file=""
+    local changed_sibling=""
+    # Check if this file is in the changed list.
+    if printf '%s\n' "$changed_norm" | grep -qxF "$file"; then
+      changed_file="$file"
+    fi
+    if printf '%s\n' "$changed_norm" | grep -qxF "$sibling_file"; then
+      changed_sibling="$sibling_file"
+    fi
+
+    # Emit a warning when exactly one side is changed (not both, not neither).
+    if [ -n "$changed_file" ] && [ -z "$changed_sibling" ]; then
+      add_finding SOFT clone-drift \
+        "$file modified section '${section}' which is a shared clone of '$sibling_file' section '${sibling_section}' (hash prefix: ${hash}) — update the sibling to keep them in sync."
+      seen_pairs="${seen_pairs} ${pair_key}"
+    elif [ -z "$changed_file" ] && [ -n "$changed_sibling" ]; then
+      add_finding SOFT clone-drift \
+        "$sibling_file modified section '${sibling_section}' which is a shared clone of '$file' section '${section}' (hash prefix: ${hash}) — update the sibling to keep them in sync."
+      seen_pairs="${seen_pairs} ${pair_key}"
+    fi
+    # Both changed or neither changed → no warning.
+  done <<< "$drift_rows"
+}
+
+# ---------------------------------------------------------------------------
 # Run checks
 # ---------------------------------------------------------------------------
 
 check_orphans
 check_dangling
 check_transitions
+check_clone_drift
 
 # Sort findings deterministically (severity rank, then class, then message).
 sev_rank() {

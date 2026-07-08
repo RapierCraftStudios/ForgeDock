@@ -10,6 +10,8 @@ on:
       - 'scripts/check-native-conflicts.sh'
       - 'scripts/check-protocol-restatements.sh'
       - 'scripts/check-command-docs-drift.sh'
+      - 'scripts/build-spec-graph.mjs'
+      - 'scripts/validate-spec-graph.sh'
   push:
     branches:
       - staging
@@ -22,6 +24,8 @@ on:
       - 'scripts/check-native-conflicts.sh'
       - 'scripts/check-protocol-restatements.sh'
       - 'scripts/check-command-docs-drift.sh'
+      - 'scripts/build-spec-graph.mjs'
+      - 'scripts/validate-spec-graph.sh'
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
@@ -92,3 +96,48 @@ jobs:
             exit 1
           fi
           echo "OK: No banned tokens found in commands/"
+
+  spec-graph-drift:
+    name: Spec graph clone-drift check
+    runs-on: ubuntu-latest
+    # Runs when commands or the spec-graph scripts themselves change.
+    # Uses --soft so clone-drift SOFT warnings are reported but never block CI.
+    # The job exits 0 on SOFT/INFO findings; only HARD findings exit non-zero
+    # (and --soft suppresses even those). This makes the check purely advisory.
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0  # Full history needed for git diff against base branch
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Run spec-graph validator with clone-drift check
+        run: |
+          # Compute changed files relative to the merge base (PR) or the previous
+          # push commit (push to staging/main). The --changed-files flag enables
+          # Check 4 (clone-drift) in validate-spec-graph.sh.
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            BASE_SHA="${{ github.event.pull_request.base.sha }}"
+            CHANGED=$(git diff --name-only "$BASE_SHA...HEAD" -- 'commands/**' 'scripts/*' 2>/dev/null || true)
+          else
+            # Push event: compare against previous push SHA.
+            PREV_SHA="${{ github.event.before }}"
+            CHANGED=$(git diff --name-only "$PREV_SHA...HEAD" -- 'commands/**' 'scripts/*' 2>/dev/null || true)
+          fi
+
+          echo "Changed files for drift check:"
+          echo "$CHANGED" | head -20
+
+          # Run the validator with --soft (warn only — never block CI).
+          # Pass --changed-files to enable clone-drift detection (Check 4).
+          bash scripts/validate-spec-graph.sh \
+            --root . \
+            --soft \
+            ${CHANGED:+--changed-files "$CHANGED"}
+
+          echo ""
+          echo "spec-graph-drift: complete (--soft mode: HARD findings reported but not blocking)"
