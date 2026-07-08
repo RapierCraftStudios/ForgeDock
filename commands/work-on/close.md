@@ -571,6 +571,54 @@ fi
 
 ---
 
+---
+
+## Phase C5.3: Repo Map Refresh (incremental) <!-- Added: forge#1734 -->
+
+**Skip if**: `scripts/build-repo-map.mjs` does not exist under `{REPO_PATH}` OR no changed files can be determined from the merged PR.
+
+**This phase is non-blocking** — if the map refresh or push fails, log the reason and continue to Phase C5.5. Never stall close for map maintenance.
+
+**Purpose**: After each PR merge, refresh the blob-hash-keyed repo map entries for only the files changed in the merged PR. Unchanged files are skipped by the script's blob-hash check — cost is bounded to actual churn.
+
+### Step 1: Collect changed files from the merged PR
+
+```bash
+CHANGED_FILES=$(gh pr view {PR_NUMBER} {GH_FLAG} --json files \
+  --jq '[.files[].path] | join(",")' 2>/dev/null || echo "")
+
+if [ -z "$CHANGED_FILES" ]; then
+  echo "[repo-map] No changed files found in PR #{PR_NUMBER} — skipping map refresh"
+fi
+```
+
+### Step 2: Run incremental refresh
+
+```bash
+REPO_MAP_SCRIPT="{REPO_PATH}/scripts/build-repo-map.mjs"
+if [ -f "$REPO_MAP_SCRIPT" ] && [ -n "$CHANGED_FILES" ]; then
+  REFRESH_RESULT=$(node "$REPO_MAP_SCRIPT" refresh \
+    --root "{REPO_PATH}" \
+    --files "$CHANGED_FILES" \
+    --quiet 2>&1) || REFRESH_RESULT="error"
+  echo "[repo-map] Refresh result: $REFRESH_RESULT"
+else
+  echo "[repo-map] Skipping repo map refresh (script not found or no changed files)"
+  REFRESH_RESULT=""
+fi
+```
+
+### Step 3: Push updated map to forge-knowledge branch (non-blocking)
+
+```bash
+if [ -f "$REPO_MAP_SCRIPT" ] && [ -n "$REFRESH_RESULT" ] && [ "$REFRESH_RESULT" != "error" ]; then
+  node "$REPO_MAP_SCRIPT" push \
+    --root "{REPO_PATH}" \
+    --quiet 2>/dev/null || true
+  echo "[repo-map] Map pushed to forge-knowledge branch (or skipped if remote unavailable)"
+fi
+```
+
 ## Phase C5.5: Graph Decision Record (MANDATORY when PR exists)
 
 **Skip if**: `{PR_NUMBER}` is empty OR `<!-- FORGE:DECISION_RECORD -->` already posted on the PR.
