@@ -452,30 +452,73 @@ If `GIST_SUMMARIES` is non-empty, it will be included in the `### Prior Investig
 
 ## Phase C1: Past Review Findings on These Files
 
+**Primary path — Forge Ledger** (O(1) local index lookup, zero API calls): <!-- Added: forge#1732 -->
+
+Check for a local knowledge index before making any GitHub API calls. If the index exists, use
+`forge recall` for exact file-path lookups. Fall back to live `gh issue list --search` only when
+the index is absent or returns no results for a given file.
+
+```bash
+# Resolve recall CLI path relative to repository root
+RECALL_PATH="${REPO_PATH:-$(git rev-parse --show-toplevel 2>/dev/null)}/bin/recall.mjs"
+LEDGER_AVAILABLE=0
+
+if [ -f "$RECALL_PATH" ]; then
+  # Quick probe: does the index exist and have cards?
+  PROBE=$(node "$RECALL_PATH" --doctor 2>/dev/null | grep "^Total cards:" | grep -v "^Total cards:    0" || true)
+  [ -n "$PROBE" ] && LEDGER_AVAILABLE=1
+fi
+
+LEDGER_FINDINGS=""
+
+if [ "$LEDGER_AVAILABLE" -eq 1 ]; then
+  echo "[context:C1] Using Forge Ledger for file-path recall (zero API calls)"
+  IFS=' ' read -ra AFFECTED_FILES_ARR <<< "{AFFECTED_FILES}"
+  for file in "${AFFECTED_FILES_ARR[@]}"; do
+    FILE_CARDS=$(node "$RECALL_PATH" --file "$file" --k 5 --json 2>/dev/null || echo "[]")
+    if [ "$FILE_CARDS" != "[]" ] && [ -n "$FILE_CARDS" ]; then
+      LEDGER_FINDINGS="${LEDGER_FINDINGS}
+### Ledger findings for \`${file}\`
+\`\`\`json
+${FILE_CARDS}
+\`\`\`"
+    fi
+  done
+fi
+```
+
+**Extract from ledger results** (when `LEDGER_AVAILABLE=1` and `LEDGER_FINDINGS` is non-empty):
+Parse the JSON card array. For each card: extract `kind`, `rootCause`, `pattern`, `prevention`,
+`paths`, `symbols`, `issue` (citation). Include in the FORGE:CONTEXT output under
+**### Known Pitfalls for This Area** (pattern/stale cards) and **### Historical Findings on These
+Files** (investigation cards). Cards with `status: "stale"` are noted as such but still included
+— they may describe a bug class that has since moved files.
+
+**Fallback path — live GitHub search** (when `LEDGER_AVAILABLE=0` or `LEDGER_FINDINGS` is empty):
+
 Query closed issues with `review-finding` label, searching by filename:
 
 ```bash
-# {AFFECTED_FILES} is a space-separated file path list (see contract note above)
-# — split explicitly on IFS=' ' into an array instead of a bare
-# `for file in {AFFECTED_FILES}`, which word-splits on the shell's default IFS
-# (space, tab, AND newline) and would corrupt any path containing a space.
-IFS=' ' read -ra AFFECTED_FILES_ARR <<< "{AFFECTED_FILES}"
-for file in "${AFFECTED_FILES_ARR[@]}"; do
-  basename=$(basename "$file" .py)
-  gh issue list -R {GH_REPO} \
-    --state closed \
-    --label "review-finding" \
-    --search "$basename" \
-    --limit 10 \
-    --json number,title,body \
-    --jq '.[] | {
-      number,
-      title,
-      pattern:    (.body | capture("\\*\\*Pattern\\*\\*: *(?<p>[^\\n]+)").p    // null),
-      prevention: (.body | capture("\\*\\*Prevention\\*\\*: *(?<v>[^\\n]+)").v // null),
-      root_cause: (.body | capture("\\*\\*Root cause\\*\\*: *(?<rc>[^\\n]+)").rc // (.body | capture("Root Cause[^\\n]*\\n(?<rc>[^\\n]+)").rc // "see body"))
-    }'
-done
+if [ "$LEDGER_AVAILABLE" -eq 0 ] || [ -z "$LEDGER_FINDINGS" ]; then
+  echo "[context:C1] Forge Ledger unavailable or empty — falling back to live gh search"
+  IFS=' ' read -ra AFFECTED_FILES_ARR <<< "{AFFECTED_FILES}"
+  for file in "${AFFECTED_FILES_ARR[@]}"; do
+    basename=$(basename "$file" .py)
+    gh issue list -R {GH_REPO} \
+      --state closed \
+      --label "review-finding" \
+      --search "$basename" \
+      --limit 10 \
+      --json number,title,body \
+      --jq '.[] | {
+        number,
+        title,
+        pattern:    (.body | capture("\\*\\*Pattern\\*\\*: *(?<p>[^\\n]+)").p    // null),
+        prevention: (.body | capture("\\*\\*Prevention\\*\\*: *(?<v>[^\\n]+)").v // null),
+        root_cause: (.body | capture("\\*\\*Root cause\\*\\*: *(?<rc>[^\\n]+)").rc // (.body | capture("Root Cause[^\\n]*\\n(?<rc>[^\\n]+)").rc // "see body"))
+      }'
+  done
+fi
 ```
 
 Keep findings where the filename or function name appears in the title or body. Discard false matches (same word, different module).
