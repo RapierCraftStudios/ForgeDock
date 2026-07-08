@@ -1,0 +1,9 @@
+{
+  "description": "AUTOPILOT_CYCLE — missing required fields cycle_id and timestamp",
+  "input": "<!-- FORGE:AUTOPILOT_CYCLE -->\n## Autopilot Cycle — 20260708-3\n\n**baseline**: {\"open_issues\":5,\"ci_failures\":1,\"pending_findings\":0}\n**phase_markers**: recon\n\n### Phases Completed\n- [x] recon\n\n<!-- FORGE:AUTOPILOT_CYCLE:COMPLETE -->",
+  "expect": {
+    "type": "AUTOPILOT_CYCLE",
+    "valid": false,
+    "sentinelState": "complete"
+  }
+}

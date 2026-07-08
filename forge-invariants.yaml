@@ -1,0 +1,91 @@
+# forge-invariants.yaml — ForgeDock checkable pipeline invariants
+#
+# Each invariant declares:
+#   id          — unique identifier (snake_case)
+#   scope       — when this invariant is evaluated:
+#                   pretooluse  → checked in bin/hooks/pre-tool-use.mjs before tool execution
+#                   runlog      → temporal rule checked over bin/engine/runlog.mjs event stream
+#                   close       → terminal assertion checked in work-on/close.md before trajectory post
+#   proposition — human-readable statement of what must be true (named in violation messages)
+#   enforcement — enforcement point (matches scope)
+#
+# Invariants are evaluated by bin/engine/invariants.mjs.
+# Violations name the proposition — no silent blocks.
+
+invariants:
+
+  # ---------------------------------------------------------------------------
+  # pretooluse — hook preconditions (evaluated before tool execution)
+  # ---------------------------------------------------------------------------
+
+  - id: branch_must_exist_on_remote
+    scope: pretooluse
+    proposition: "checkout target branch must exist on origin before checkout"
+    enforcement: pretooluse
+    description: |
+      Before a `git checkout`, `git worktree add`, or `git switch` that targets a
+      named branch, the branch must exist on the remote. This catches hallucinated
+      branch names before they cause a git error mid-build. Evaluated against
+      `git ls-remote --exit-code origin <branch>`.
+    # The hook uses this declaration to emit a named-violation message. The
+    # actual git ls-remote check runs inside checkDeclaredPreconditions() in
+    # pre-tool-use.mjs. No shell `check` command is embedded here — the
+    # evaluation logic is in the evaluator, not in the YAML.
+
+  # ---------------------------------------------------------------------------
+  # runlog — temporal ordering rules (single-pass over run-log JSONL)
+  # ---------------------------------------------------------------------------
+
+  - id: review_precedes_merge
+    scope: runlog
+    proposition: "PHASE_COMMIT(review) must appear before RUN_TERMINAL(merged)"
+    enforcement: runlog
+    description: |
+      A run that reaches terminal state 'merged' must have a committed review
+      phase. A run-log where RUN_TERMINAL(reason=merged) appears without a
+      prior PHASE_COMMIT(phase=review) indicates the review phase was skipped
+      or bypassed — a pipeline protocol violation.
+
+  - id: gate_event_precedes_review
+    scope: runlog
+    proposition: "PHASE_COMMIT(build) must appear before PHASE_COMMIT(review)"
+    enforcement: runlog
+    description: |
+      The build phase (which includes the quality gate) must be committed before
+      the review phase. A run-log where review is committed without a prior build
+      commit indicates the quality gate was bypassed or the phase sequence was
+      violated. NOTE: the run-log has no explicit 'push' event type; PHASE_COMMIT
+      with phase='build' is the canonical proxy for 'build + gate completed'.
+
+  - id: terminal_state_once
+    scope: runlog
+    proposition: "RUN_TERMINAL must appear at most once in a run-log"
+    enforcement: runlog
+    description: |
+      A valid run-log contains exactly one RUN_TERMINAL event. Multiple
+      RUN_TERMINAL events indicate a log corruption or a double-terminate bug.
+
+  # ---------------------------------------------------------------------------
+  # close — terminal-state assertions (checked before trajectory post)
+  # ---------------------------------------------------------------------------
+
+  - id: issue_closed_at_terminal
+    scope: close
+    proposition: "issue must be in CLOSED state before workflow:merged label is applied"
+    enforcement: close
+    description: |
+      At close time, after workflow:merged label is applied, the GitHub issue
+      must be in CLOSED state. An issue with workflow:merged but state=OPEN is
+      the canonical review→close stall symptom. Evaluated by the close phase
+      via `gh issue view --json state` after the close attempt.
+
+  - id: run_log_terminal_at_close
+    scope: close
+    proposition: "run-log must contain RUN_TERMINAL before close trajectory is posted"
+    enforcement: close
+    description: |
+      The close phase must not post the FORGE:TRAJECTORY annotation if the
+      local run-log does not contain a RUN_TERMINAL event. A missing
+      RUN_TERMINAL at close time indicates the pipeline exited abnormally
+      (crash or skip). Evaluated by invariants.mjs assertCloseInvariants()
+      over the local run-log before the trajectory comment is posted.

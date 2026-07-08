@@ -87,6 +87,8 @@ Extract from contract:
 - Deliverables table (file, change, why)
 - Acceptance criteria
 
+**Danger-Zone Rule Cards (BINDING CONSTRAINTS)**: When the FORGE:CONTEXT comment contains a `### Danger-Zone Rule Cards` section, each card is a **binding must-not-violate constraint** with the same authority as devdocs custom instructions. Before writing any code, read all injected cards and internalize them as explicit prohibitions. If the implementation plan requires touching a file listed in a card, the card's rule overrides the plan — choose an implementation path that satisfies the rule, or post a `needs-human` comment explaining the conflict. Do NOT silently proceed past a rule card that the implementation would violate. The quality gate (check 2G.9) will flag violations as `known-pattern-recurrence` (highest embarrassment class). <!-- Added: forge#1744 -->
+
 ---
 
 ## Phase I2: Route by Task Type

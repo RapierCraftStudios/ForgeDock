@@ -53,6 +53,7 @@ This quality gate uses **domain detection** to adapt to your project's actual te
 | FORGE_GRAPH | `commands/*.md` specs or `scripts/*` files change (ForgeDock self-consistency) |
 | CONFIG_SCHEMA | Config files for external tools (`traefik/`, `infra/nginx/`, `k8s/`, `terraform/`, `*.conf`, `*.toml` in infra paths, or `docker-compose*.yml` with service definition changes) |
 | BILLING | Files under `billing/`, `credits/`, `subscription`, `ledger`, or `payment` paths |
+| WIRE_THROUGH | Any code file where the diff adds new conditional lines (`if`/`elif`/`else`/`guard`/`feature flag`) — triggers wire-through proof check <!-- Added: forge#1731 --> |
 
 **Stack-agnostic coverage**: The example domains above reflect common patterns caught in production; they are not requirements. A Go or Ruby project benefits from SECURITY checks. A Node.js project benefits from FRONTEND, PROXY, and DEPLOY checks. Any project benefits from DATABASE and WORKFLOW checks when those file types are present. The stack-specific examples (Python routers, SOPS secrets chain, FastAPI layouts, appleboy SSH deploys) are illustrative — the domain detection system applies the applicable subset to any codebase.
 
@@ -107,6 +108,7 @@ Before running checks, classify the changed files into domains. This avoids runn
 | `*.py` in `routers/` where the diff removes a line containing an or-gate condition (lines starting with `-` containing `if.*or`) | ROUTER_BUG |
 | `commands/*.md` or `scripts/*` files (ForgeDock repo only — dogfoods its own spec graph) | FORGE_GRAPH |
 | Files under `traefik/`, `infra/nginx/`, `k8s/`, `terraform/`, or files matching `*.conf`, `*.toml` in infra paths, or `docker-compose*.yml` with service definition changes | CONFIG_SCHEMA |
+| Executable code files (`.py`, `.ts`, `.tsx`, `.js`, `.sh`) where the diff adds new `if`/`elif`/`else`/guard/feature-flag conditional lines — NOT `.md` prose spec files | WIRE_THROUGH *(universal — see 2G.8)* <!-- Added: forge#1731 --> |
 
 **Apply the classification:**
 
@@ -212,6 +214,22 @@ for f in "${CHANGED_FILES_ARR[@]}"; do
     esac
 done
 
+# Check for newly added conditional paths in code files — wire-through proof trigger <!-- Added: forge#1731 -->
+# Scoped to NEWLY ADDED lines only (lines starting with '+' in the diff, excluding the '+++' header).
+# Pre-existing conditionals are never flagged — only additions.
+# Applies to executable code files ONLY (.py, .ts, .tsx, .js, .sh) — NOT .md prose spec files,
+# which use 'if'/'else' in natural language and pseudocode that is never executed.
+while IFS= read -r f; do
+    [ -z "$f" ] && continue
+    NEW_CONDITIONALS=$(git diff HEAD -- "$f" 2>/dev/null \
+        | grep -E '^\+' | grep -v '^+++' \
+        | grep -E '^\+\s*(if |elif |else:?\s*$|if\(|elif\()|\bguard\b|\bfeature.?flag\b|FEATURE_FLAG|ENABLE_[A-Z_]+\s*=|DISABLE_[A-Z_]+\s*=')
+    if [ -n "$NEW_CONDITIONALS" ]; then
+        DOMAINS="$DOMAINS WIRE_THROUGH"
+        break
+    fi
+done < <(echo {CHANGED_FILES} | tr ' ' '\n' | grep -E '\.(py|ts|tsx|js|sh)$')
+
 # SECURITY is always included for any code file
 DOMAINS="SECURITY $DOMAINS"
 
@@ -246,7 +264,11 @@ Run ONLY the checks whose domain was identified in Step 1.5. Skip checks for dom
 - **2P (External tool config schema)**: Run if `CONFIG_SCHEMA` in DOMAINS
 - **2Q (Billing)**: Run if `BILLING` in DOMAINS
 - **2R (Registry checks)**: ALWAYS run — executes all promoted checks from `scripts/check-registry/manifest.json` <!-- Added: forge#1331 -->
+- **2R.5 (Adaptive gate.d checks)**: ALWAYS run when `adaptive_scripts.enabled` — executes `.forgedock/scripts/gate.d/*.sh`; each script is repo-specific and was promoted from a recurring finding pattern <!-- Added: forge#1739 -->
+- **2G.8 (Wire-through proof)**: Run if `WIRE_THROUGH` in DOMAINS — demands each newly added conditional path be demonstrably reachable <!-- Added: forge#1731 -->
+- **2G.9 (Danger-zone recurrence)**: Run if `FORGE_GRAPH` in DOMAINS — cross-references injected danger-zone rule cards from FORGE:CONTEXT against the diff; violations tagged `known-pattern-recurrence` (HIGH) <!-- Added: forge#1744 -->
 - **2S (Test failure classification)**: Run if any Step 2 check invoked a test suite and it failed — classifies the failure as PRE_BROKEN, FLAKY, or REAL using `scripts/flaky-quarantine.sh` <!-- Added: forge#1336 -->
+- **2T (Subscribed pattern card rules)**: ALWAYS run when `pattern_feeds.enabled` is true — injects Tier-B (warning-only) learned rules from subscribed exchange cards that have a `gate.d` check template matching any changed file's stack <!-- Added: forge#1746 -->
 
 ### 2A: Security (ALL files)
 
@@ -469,6 +491,30 @@ done < <(echo {CHANGED_FILES} | tr ' ' '\n' | grep -E '\.(tsx?|jsx?)$' | grep -v
 
 ### 2G: Cross-service integration (shell scripts with curl/wget)
 
+<!-- Added: forge#1739 — Tier-B learned-rules injection -->
+
+**Tier-B learned-rules injection (SHELL domain)**: Before running host-header and localhost checks, load any repo-specific prose rules from `devdocs/learned-rules/SHELL.md`. These are Tier-B patterns — non-mechanizable defect descriptions that have recurred ≥3 times and been promoted by `/optimize` for inclusion in this domain scan. Inject the content as additional context for the LLM scan, bounded to ~200 tokens (approximately 30 lines). Skip gracefully if the file is absent.
+
+```bash
+# Tier-B learned-rules injection for SHELL domain
+SHELL_LEARNED_RULES=""
+SHELL_RULES_PATH="{WORKTREE_PATH}/devdocs/learned-rules/SHELL.md"
+if [ -f "$SHELL_RULES_PATH" ]; then
+    # Bound to first 30 lines (~200 tokens) — enough for pattern descriptions
+    SHELL_LEARNED_RULES=$(head -30 "$SHELL_RULES_PATH" 2>/dev/null || true)
+    if [ -n "$SHELL_LEARNED_RULES" ]; then
+        echo "2G: Injecting Tier-B learned rules from devdocs/learned-rules/SHELL.md ($(wc -l < "$SHELL_RULES_PATH" 2>/dev/null || echo '?') total lines, first 30 loaded)"
+        # The learned rules are used as additional LLM scan context below.
+        # Each rule entry is a prose description of a recurrent defect class.
+        # When scanning shell scripts below, treat any pattern matching a
+        # learned-rule description as a MEDIUM finding (advisory, not blocking)
+        # unless the rule explicitly marks it HIGH.
+    fi
+fi
+```
+
+**Apply Tier-B learned rules**: For each changed `*.sh` file, if `SHELL_LEARNED_RULES` is non-empty, perform an additional LLM-assisted scan: read the shell file diff and the injected rules, emit any matching findings as `SHELL-LEARNED-{slug} | {SEVERITY} | {file} | {rule description}`. This scan is bounded — read only the diff lines (not the full file) and the injected rule content. Skip if no rule content was loaded.
+
 For shell scripts that make HTTP requests to internal services:
 1. Read the target service's middleware to verify the Host header will be accepted
 2. Check that auth tokens are included if the endpoint requires them
@@ -571,6 +617,155 @@ fi
 ```
 
 Report each conflict as **HIGH** — a shadowed native command is a silent user-facing regression (the native command becomes unreachable without warning). The builder must rename the conflicting file before the commit. Blocklist updates are in `scripts/check-native-conflicts.sh` (NATIVE_COMMANDS array).
+
+### 2G.8: Wire-through proof for newly added conditional paths
+
+<!-- Added: forge#1731 -->
+
+**Triggered when**: `WIRE_THROUGH` in DOMAINS — the diff adds new conditional lines (`if`/`elif`/`else`/guard/feature-flag) in executable code files (`.py`, `.ts`, `.tsx`, `.js`, `.sh`). Markdown spec files are explicitly excluded — prose docs use `if`/`else` as natural language, not executable conditionals.
+
+**Why this matters**: A recurring defect class ships dead-on-arrival: guards, feature flags, validators, and error branches that are added to the codebase but never actually execute. Examples: #1230 (orchestrate Layer 5 `LAYER1_FILES` never populated — dead code), #1522 (validator pointed at wrong path — permanent no-op), #1244 (guard added to fix Layer 5 itself never fires), #1580 (hook reads wrong transcript schema). Nothing in the quality gate previously asked the one question that kills this class: *prove this new conditional actually runs.*
+
+**Scope boundary — newly added lines ONLY**: This check scans lines beginning with `+` in the diff (excluding `+++` file-header lines). Pre-existing conditionals are **never** flagged. A conditional that existed before this diff is outside scope regardless of whether it has tests.
+
+**Acceptance criteria for each new conditional**:
+
+Each newly added `if`/`elif`/`else` block or guard construct must satisfy AT LEAST ONE of:
+
+1. **Test present in the diff**: The same diff (or any test file in the diff) contains a call that exercises the guarded path — a test function, an invocation with a parameter that triggers the condition, or an assertion on the conditional branch's output.
+2. **Execution trace annotation**: The new conditional line is immediately preceded or followed by a comment `# WIRE:PROVEN — <method>` where `<method>` describes how the path was verified to fire (e.g., `# WIRE:PROVEN — manual: ran with --debug flag, confirmed guard triggered`).
+3. **Trivial re-guard** (auto-exempt): The conditional is a null-check, length-check, or type-check on a value already validated upstream on the same code path AND the new condition's body is a `return`, `continue`, `break`, `pass`, or single-line assignment with no side effects. These are defensive re-guards with no new behavior.
+
+**Check logic**:
+
+```bash
+# WIRE_THROUGH check — runs when WIRE_THROUGH in DOMAINS
+WIRE_THROUGH_FINDINGS=""
+
+while IFS= read -r f; do
+    [ -z "$f" ] && continue
+    # Extract newly added conditional lines from the diff (+ lines, not +++ header)
+    NEW_CONDS=$(git diff HEAD -- "$f" 2>/dev/null \
+        | grep -E '^\+' | grep -v '^+++' \
+        | grep -nE '\bif\b|\belif\b|\belse\b|guard|feature.?flag|FEATURE_FLAG|ENABLE_|DISABLE_')
+
+    [ -z "$NEW_CONDS" ] && continue
+
+    # For each new conditional line, check for acceptance criteria
+    while IFS= read -r cond_line; do
+        [ -z "$cond_line" ] && continue
+        LINENO=$(echo "$cond_line" | cut -d: -f1 | tr -d '+')
+
+        # Criterion 3 auto-exempt: trivial re-guard (null/len/type check with no-side-effect body)
+        COND_TEXT=$(echo "$cond_line" | sed 's/^+//')
+        if echo "$COND_TEXT" | grep -qE '\bis (None|null|undefined)\b|\blen\s*\(|\bisinstance\s*\(|\btypeof\b|\bif not\b|\bif !\b'; then
+            # Check the body is trivial (next line is return/continue/break/pass/simple assign)
+            # Use git diff context to read adjacent lines — simplified: check annotation only
+            NEXT_CONTEXT=$(git diff HEAD -- "$f" 2>/dev/null | grep -A2 "^+${COND_TEXT}" | tail -2)
+            if echo "$NEXT_CONTEXT" | grep -qE '^\+\s*(return|continue|break|pass|[a-zA-Z_]+ = [^(]+$)'; then
+                continue  # Auto-exempt trivial re-guard
+            fi
+        fi
+
+        # Criterion 2: WIRE:PROVEN annotation present in diff near this line
+        if git diff HEAD -- "$f" 2>/dev/null | grep -qE '^\+.*#\s*WIRE:PROVEN'; then
+            continue  # Annotated — accepted
+        fi
+
+        # Criterion 1: test exercising this path present anywhere in the diff
+        # Look for test patterns added in the diff (test_, def test, it(, describe(, assert)
+        DIFF_HAS_TEST=$(git diff HEAD -- 2>/dev/null | grep -E '^\+' | grep -v '^+++' \
+            | grep -E 'def test_|test\(|it\(|describe\(|assert |expect\(' | head -1)
+        if [ -n "$DIFF_HAS_TEST" ]; then
+            continue  # Test present in diff — accepted
+        fi
+
+        # None of the criteria met — emit a finding
+        WIRE_THROUGH_FINDINGS="${WIRE_THROUGH_FINDINGS}
+WIRE_THROUGH | HIGH | $f:${LINENO:-?} | Newly added conditional '$(echo "$COND_TEXT" | xargs | head -c 80)' has no wire-through proof. Add a test that triggers this path, OR annotate with '# WIRE:PROVEN — <method>', OR verify it qualifies as a trivial re-guard (null/len/type check with no-side-effect body)."
+    done <<< "$NEW_CONDS"
+done < <(echo {CHANGED_FILES} | tr ' ' '\n' | grep -E '\.(py|ts|tsx|js|sh)$')
+
+# Emit findings
+if [ -n "$WIRE_THROUGH_FINDINGS" ]; then
+    echo "$WIRE_THROUGH_FINDINGS"
+fi
+```
+
+**Severity**: **HIGH** — a guard that never fires is functionally equivalent to dead code and defeats the purpose of the defensive check. The review agent has consistently flagged this class (see motivation issues above). Blocking at gate eliminates the 1–2 week detection lag.
+
+**Auto-exempt patterns** (builder does not need to prove these):
+- Null/None/undefined checks where body is `return`/`continue`/`break`/`pass`
+- Length checks where body is a single-line assignment or early return
+- Type checks (`isinstance`, `typeof`) where body is a single-line coercion
+
+**Escaping the check legitimately**:
+- Add a test in the same diff that exercises the conditional
+- Add `# WIRE:PROVEN — <method>` immediately before or after the new conditional
+- Ensure the conditional qualifies as a trivial re-guard (see criterion 3 above)
+
+Do NOT suppress the finding by making the check less strict or adding fake no-op tests. The intent is a real proof that the path is reachable. <!-- Added: forge#1731 -->
+
+### 2G.9: Danger-zone recurrence check (FORGE_GRAPH domain) <!-- Added: forge#1744 -->
+
+**Triggered when**: `FORGE_GRAPH` in DOMAINS (changed files include `commands/*.md` specs or `scripts/*` files). Skips silently when the FORGE:CONTEXT comment on the issue contains no `### Danger-Zone Rule Cards` section (i.e., Phase C0.5 injected zero cards — nothing to cross-reference).
+
+**Why this matters**: When Phase C0.5 injects danger-zone rule cards into the builder's context, those cards represent the highest-value risk knowledge for the files being changed. A violation of an injected rule card is the most embarrassing category of pipeline failure — the system knew about the recurring pattern and the builder violated it anyway. Detecting this at the quality gate (pre-merge) rather than at review (post-PR) is the highest-leverage intervention point. Each violation tagged `known-pattern-recurrence` feeds directly into pipeline-health metrics for A/B evaluation (cards-on vs cards-off first-review finding rate).
+
+```bash
+# 2G.9: Danger-zone recurrence check
+# Step 1: Read injected danger-zone cards from FORGE:CONTEXT comment on the issue
+CONTEXT_COMMENT=$(gh api repos/{GH_REPO}/issues/{ISSUE_NUMBER}/comments \
+  --jq '[.[] | select(.body | contains("<!-- FORGE:CONTEXT -->"))] | last | .body // ""' 2>/dev/null \
+  | timeout 10 cat || echo '')
+
+# Extract the Danger-Zone Rule Cards section
+DZ_SECTION=$(echo "$CONTEXT_COMMENT" \
+  | sed -n '/^### Danger-Zone Rule Cards/,/^### /p' \
+  | head -30)
+
+if [ -z "$DZ_SECTION" ] || ! echo "$DZ_SECTION" | grep -q '^- '; then
+  echo "2G.9: no injected danger-zone cards in FORGE:CONTEXT — skipping recurrence check"
+else
+  echo "2G.9: checking diff against injected danger-zone rule cards..."
+
+  # Extract pattern keywords from each card (text after "recurring: " up to " (" or ";")
+  # Card format: {file} — {N} findings/90d — recurring: {pattern} (#{issue}); rule: {prevention}
+  CARD_PATTERNS=$(echo "$DZ_SECTION" \
+    | grep '^- ' \
+    | sed -n 's/.*recurring: \([^;(]*\).*/\1/p' \
+    | sed 's/[[:space:]]*$//' \
+    | grep -v '^$' \
+    | head -10)
+
+  if [ -z "$CARD_PATTERNS" ]; then
+    echo "2G.9: no pattern keywords extracted from cards — skipping"
+  else
+    # Step 2: Read the diff and check for pattern keyword matches
+    DIFF_CONTENT=$(cd {WORKTREE_PATH} && git diff --cached 2>/dev/null || git diff HEAD 2>/dev/null)
+
+    while IFS= read -r pattern; do
+      [ -z "$pattern" ] && continue
+      # Escape pattern for grep (strip regex-unsafe chars, use literal substring match)
+      SAFE_PATTERN=$(echo "$pattern" | head -c 60 | sed 's/[.*+?^${}()|[\]\\]/\\&/g')
+      [ -z "$SAFE_PATTERN" ] && continue
+
+      # Check if the diff introduces lines matching the pattern (added lines only)
+      MATCH=$(echo "$DIFF_CONTENT" | grep -E '^\+' | grep -v '^+++' | grep -i "$SAFE_PATTERN" | head -3)
+      if [ -n "$MATCH" ]; then
+        MATCH_PREVIEW=$(echo "$MATCH" | head -1 | head -c 120)
+        echo "FORGE_GRAPH | HIGH | known-pattern-recurrence | Diff matches injected rule card pattern '${pattern}': ${MATCH_PREVIEW} — this is a known-pattern-recurrence: the pipeline injected this rule card and the implementation violated it anyway. Fix before merging."
+      fi
+    done <<< "$CARD_PATTERNS"
+
+    echo "2G.9: recurrence check complete"
+  fi
+fi
+```
+
+**Severity**: **HIGH** — `known-pattern-recurrence` is the highest embarrassment class. The pipeline had the risk knowledge in context and the implementation violated it regardless. This represents a failure of the context injection mechanism's effectiveness, and every recurrence degrades the A/B signal that measures whether memory injection changes agent behavior. The builder must fix the violation before the gate can pass.
+
+**Note**: This check fires only for FORGE_GRAPH domain changes (ForgeDock spec files). For application code changes, violations of injected rule cards are surfaced by the review agents in Phase 5 — the quality gate cross-reference here is specific to pipeline spec changes where the FORGE:CONTEXT from the issue is the definitive context source. <!-- Added: forge#1744 -->
 
 ### 2H: Asyncio cancellation safety (Python async code)
 
@@ -1162,6 +1357,228 @@ fi
 ```
 
 If any registry check produces findings, include them in the Step 3 findings list under the check's slug (e.g. `REGISTRY-migration-number-collision | HIGH | ...`). HIGH-severity registry findings are blocking; MEDIUM are advisory.
+
+---
+
+## Step 2R.5: Adaptive gate.d checks (when adaptive_scripts.enabled)
+
+<!-- Added: forge#1739 -->
+
+**Purpose**: Run all repo-specific learned checks that have been promoted from recurring review findings into `.forgedock/scripts/gate.d/`. Unlike the static `scripts/check-registry/` (Step 2R), gate.d scripts live in the per-repo adaptive layer and are generated by `/optimize` from validated Ledger patterns. Each script represents a defect class that appeared ≥3 times in this specific codebase — it catches in milliseconds what previously required a full review cycle to detect.
+
+**Triggered when**: `adaptive_scripts.enabled` is `true` in `forge.yaml` (default: true) AND the `gate.d/` subdirectory exists under `adaptive_scripts.directory`.
+
+```bash
+# Read adaptive_scripts config from forge.yaml
+ADAPTIVE_ENABLED=$(yq '.adaptive_scripts.enabled // "true"' "{WORKTREE_PATH}/forge.yaml" 2>/dev/null || echo 'true')
+ADAPTIVE_DIR_REL=$(yq '.adaptive_scripts.directory // ".forgedock/scripts"' "{WORKTREE_PATH}/forge.yaml" 2>/dev/null || echo '.forgedock/scripts')
+ADAPTIVE_DIR="{WORKTREE_PATH}/${ADAPTIVE_DIR_REL}"
+
+# Bounds check: reject adaptive_scripts.directory values that escape the worktree root
+WORKTREE_NORM=$(realpath -m "{WORKTREE_PATH}" 2>/dev/null || echo "{WORKTREE_PATH}")
+ADAPTIVE_DIR_NORM=$(realpath -m "$ADAPTIVE_DIR" 2>/dev/null || echo "$ADAPTIVE_DIR")
+if [[ "$ADAPTIVE_DIR_NORM" != "${WORKTREE_NORM}/"* ]]; then
+    echo "2R.5: WARN — adaptive_scripts.directory resolves outside worktree root ('$ADAPTIVE_DIR_NORM') — skipping gate.d execution"
+    ADAPTIVE_ENABLED="false"
+fi
+
+GATED_FINDINGS=""
+
+if [ "$ADAPTIVE_ENABLED" != "false" ]; then
+    GATE_D_DIR="${ADAPTIVE_DIR}/gate.d"
+
+    if [ ! -d "$GATE_D_DIR" ]; then
+        echo "2R.5: No gate.d directory found at $GATE_D_DIR — skipping adaptive checks."
+    else
+        # Generate unified diff file for scripts to consume
+        DIFF_PATH=$(mktemp /tmp/forge-gate-diff.XXXXXX 2>/dev/null || echo "/tmp/forge-gate-diff.$$")
+        git -C "{WORKTREE_PATH}" diff HEAD -- {CHANGED_FILES} > "$DIFF_PATH" 2>/dev/null || true
+
+        GATE_D_COUNT=$(find "$GATE_D_DIR" -maxdepth 1 -name "*.sh" -type f 2>/dev/null | wc -l | tr -d ' ')
+
+        if [ "$GATE_D_COUNT" -eq 0 ]; then
+            echo "2R.5: gate.d directory exists but is empty — no adaptive checks to run."
+        else
+            echo "2R.5: Running $GATE_D_COUNT adaptive gate.d check(s) from $GATE_D_DIR ..."
+
+            # Run each gate.d script in lexicographic order
+            while IFS= read -r script; do
+                [ -z "$script" ] && continue
+                SLUG=$(basename "$script" .sh)
+
+                if [ ! -x "$script" ]; then
+                    echo "2R.5: WARN — gate.d script $SLUG is not executable — skipping (run: chmod +x $script)"
+                    continue
+                fi
+
+                # Run with per-script 30s timeout; pass diff path and worktree root
+                # timeout exit code 124 = timed out; treat as fail-closed (HIGH finding)
+                GATE_OUTPUT=$(timeout 30 bash "$script" "$DIFF_PATH" "{WORKTREE_PATH}" 2>/dev/null)
+                GATE_EXIT=$?
+
+                if [ "$GATE_EXIT" -eq 124 ]; then
+                    # Timeout — fail closed: block the gate with HIGH finding
+                    TIMEOUT_FINDING="GATD-${SLUG}-timeout | HIGH | (gate.d) | gate.d script '$SLUG' timed out after 30s — failing closed. Investigate and optimize the script or increase timeout via gate.d contract."
+                    GATED_FINDINGS="${GATED_FINDINGS}
+${TIMEOUT_FINDING}"
+                    echo "2R.5: TIMEOUT — $SLUG (30s) — fail-closed HIGH finding added"
+                elif [ "$GATE_EXIT" -eq 1 ]; then
+                    # Script fired — findings on stdout
+                    while IFS= read -r line; do
+                        [ -z "$line" ] && continue
+                        GATED_FINDINGS="${GATED_FINDINGS}
+${line}"
+                    done <<< "$GATE_OUTPUT"
+                    echo "2R.5: FAIL — $SLUG matched"
+                elif [ "$GATE_EXIT" -eq 0 ] || [ "$GATE_EXIT" -eq 2 ]; then
+                    # 0 = pass, 2 = inapplicable (skip silently)
+                    echo "2R.5: PASS — $SLUG"
+                else
+                    echo "2R.5: WARN — $SLUG exited with unexpected code $GATE_EXIT (expected 0, 1, or 2)"
+                fi
+            done < <(find "$GATE_D_DIR" -maxdepth 1 -name "*.sh" -type f | sort)
+
+        fi
+
+        # Clean up temp diff file
+        rm -f "$DIFF_PATH" 2>/dev/null || true
+    fi
+fi
+```
+
+If any gate.d check produces findings, include them in the Step 3 findings list prefixed with `GATD-{slug}` (e.g. `GATD-stderr-contamination | HIGH | scripts/doctor.sh | ...`). HIGH-severity findings are blocking; MEDIUM are advisory; LOW are advisory only.
+
+**gate.d script contract** (for authors of promoted checks):
+- `$1` = absolute path to the unified diff file (`git diff HEAD`)
+- `$2` = absolute path to the worktree root
+- stdout = findings lines, one per line: `SLUG | HIGH|MEDIUM|LOW | FILE | MESSAGE`
+- Exit 0 = no findings / passed; Exit 1 = findings emitted; Exit 2 = inapplicable (diff has no relevant content)
+- 30-second wall-time budget enforced by quality-gate; timeout = fail-closed HIGH finding
+- Do NOT write to disk, do NOT make network requests, do NOT modify any files
+
+---
+
+## Step 2T: Subscribed pattern card rules (when pattern_feeds enabled)
+
+<!-- Added: forge#1746 -->
+
+**Triggered when**: `pattern_feeds.enabled` is `true` in `forge.yaml` AND the local ledger contains at least one card with `origin: <feed-slug>` AND a `gate.d` check template.
+
+**Purpose**: Cards subscribed from exchange repos (see `forge.yaml → pattern_feeds`) may include a `gate.d` check template — a bash snippet that catches the pattern described in the card. When the changed files include a stack that matches the card's `stacks:` field, the check template is seeded as a Tier-B (warning-only) learned rule and injected into this gate run. This gives cross-repo validated patterns gate enforcement without requiring a human to manually promote them first.
+
+**CRITICAL — advisory-only**: Step 2T findings are NEVER blocking (HIGH). They are always MEDIUM (advisory) regardless of the card's stated severity. A finding becomes blocking only after the card is promoted to a local validated finding (via the standard 3-occurrence threshold in `/pipeline-health` Phase 4 + Step 2R). This prevents imported patterns from blocking the builder until the pattern has been validated against the local codebase.
+
+**Fail-safe on malformed templates**: If a `gate.d` check template is absent, empty, syntactically invalid, or exits with an unexpected code, log a warning and continue. Never fail-open silently — log every skip with a reason.
+
+```bash
+# Read pattern_feeds config
+FEEDS_ENABLED=$(yq '.pattern_feeds.enabled // "false"' "{WORKTREE_PATH}/forge.yaml" 2>/dev/null || echo 'false')
+LEDGER_PATH=$(yq '.pattern_feeds.ledger_path // ".forge/ledger"' "{WORKTREE_PATH}/forge.yaml" 2>/dev/null || echo '.forge/ledger')
+LEDGER_DIR="{WORKTREE_PATH}/${LEDGER_PATH}"
+
+SUBSCRIBED_FINDINGS=""
+
+if [ "$FEEDS_ENABLED" != "true" ]; then
+    echo "2T: pattern_feeds.enabled is not true — skipping subscribed card rules."
+else
+    if [ ! -d "$LEDGER_DIR" ]; then
+        echo "2T: Ledger directory not found at $LEDGER_DIR — skipping. Run scripts/build-knowledge-index.mjs to populate."
+    else
+        # Discover subscribed cards: ledger entries with origin != "" (imported from exchange)
+        SUBSCRIBED_CARDS=$(find "$LEDGER_DIR" -name "*.json" -type f 2>/dev/null | xargs grep -l '"origin"' 2>/dev/null | head -50)
+
+        if [ -z "$SUBSCRIBED_CARDS" ]; then
+            echo "2T: No subscribed cards found in ledger — skipping."
+        else
+            CARD_COUNT=$(echo "$SUBSCRIBED_CARDS" | wc -l | tr -d ' ')
+            echo "2T: Found $CARD_COUNT subscribed card(s) — checking for applicable gate.d templates..."
+
+            while IFS= read -r card_file; do
+                [ -z "$card_file" ] && continue
+
+                # Read card metadata
+                CARD_SLUG=$(jq -r '.slug // ""' "$card_file" 2>/dev/null)
+                CARD_ORIGIN=$(jq -r '.origin // ""' "$card_file" 2>/dev/null)
+                CARD_STACKS=$(jq -r '.stacks // [] | .[]' "$card_file" 2>/dev/null | tr '\n' ' ' | xargs)
+                GATE_TEMPLATE=$(jq -r '.gate_template // ""' "$card_file" 2>/dev/null)
+                PREVENTION_RULE=$(jq -r '.prevention // ""' "$card_file" 2>/dev/null)
+
+                [ -z "$CARD_SLUG" ] && continue
+                [ -z "$GATE_TEMPLATE" ] && {
+                    echo "2T: SKIP $CARD_SLUG (origin: $CARD_ORIGIN) — no gate.d template"
+                    continue
+                }
+
+                # Stack filter: check if any changed file's extension matches the card's stacks
+                # Stack detection: node/typescript=.ts/.tsx/.js/.mjs, python=.py,
+                #                  bash/gha=.sh/.yml/.yaml, go=.go, rust=.rs, generic=any
+                STACK_MATCH=false
+                for STACK in $CARD_STACKS; do
+                    case "$STACK" in
+                        node|typescript)
+                            echo "{CHANGED_FILES}" | tr ' ' '\n' | grep -qE '\.(ts|tsx|js|mjs|cjs)$' && STACK_MATCH=true ;;
+                        python)
+                            echo "{CHANGED_FILES}" | tr ' ' '\n' | grep -qE '\.py$' && STACK_MATCH=true ;;
+                        bash)
+                            echo "{CHANGED_FILES}" | tr ' ' '\n' | grep -qE '\.sh$' && STACK_MATCH=true ;;
+                        gha)
+                            echo "{CHANGED_FILES}" | tr ' ' '\n' | grep -qE '\.ya?ml$' && STACK_MATCH=true ;;
+                        go)
+                            echo "{CHANGED_FILES}" | tr ' ' '\n' | grep -qE '\.go$' && STACK_MATCH=true ;;
+                        rust)
+                            echo "{CHANGED_FILES}" | tr ' ' '\n' | grep -qE '\.rs$' && STACK_MATCH=true ;;
+                        generic)
+                            STACK_MATCH=true ;;
+                    esac
+                    [ "$STACK_MATCH" = "true" ] && break
+                done
+
+                if [ "$STACK_MATCH" = "false" ]; then
+                    echo "2T: SKIP $CARD_SLUG — no stack match (card stacks: $CARD_STACKS)"
+                    continue
+                fi
+
+                # Validate template syntax (bash -n = syntax-only check, no execution)
+                TEMPLATE_FILE=$(mktemp /tmp/forge-gate-template-XXXXXX.sh 2>/dev/null || echo "/tmp/forge-gate-template-$$.sh")
+                echo "$GATE_TEMPLATE" > "$TEMPLATE_FILE" 2>/dev/null
+                if ! bash -n "$TEMPLATE_FILE" 2>/dev/null; then
+                    echo "2T: WARN — $CARD_SLUG (origin: $CARD_ORIGIN) has invalid gate.d template syntax — skipping"
+                    rm -f "$TEMPLATE_FILE" 2>/dev/null || true
+                    continue
+                fi
+                chmod +x "$TEMPLATE_FILE" 2>/dev/null
+
+                # Run template with 15s timeout; pass changed files list and worktree path
+                TEMPLATE_OUTPUT=$(timeout 15 bash "$TEMPLATE_FILE" "{CHANGED_FILES}" "{WORKTREE_PATH}" 2>/dev/null)
+                TEMPLATE_EXIT=$?
+                rm -f "$TEMPLATE_FILE" 2>/dev/null || true
+
+                if [ "$TEMPLATE_EXIT" -eq 124 ]; then
+                    echo "2T: WARN — $CARD_SLUG template timed out (15s) — skipping"
+                elif [ "$TEMPLATE_EXIT" -eq 1 ]; then
+                    # Template fired — emit as MEDIUM (advisory) regardless of card severity
+                    while IFS= read -r line; do
+                        [ -z "$line" ] && continue
+                        # Rewrite any HIGH severity from card template to MEDIUM (advisory only)
+                        SAFE_LINE=$(echo "$line" | sed 's/| HIGH |/| MEDIUM |/g')
+                        SUBSCRIBED_FINDINGS="${SUBSCRIBED_FINDINGS}
+SUBSCRIBED-${CARD_SLUG} | MEDIUM | (from exchange:${CARD_ORIGIN}) | ${SAFE_LINE}"
+                    done <<< "$TEMPLATE_OUTPUT"
+                    echo "2T: ADVISORY — $CARD_SLUG matched (origin: $CARD_ORIGIN). Prevention rule: ${PREVENTION_RULE}"
+                    echo "2T: NOTE — This is an imported pattern (Tier-B advisory). It becomes blocking only after local promotion via /pipeline-health Phase 4."
+                elif [ "$TEMPLATE_EXIT" -eq 0 ] || [ "$TEMPLATE_EXIT" -eq 2 ]; then
+                    echo "2T: PASS — $CARD_SLUG (no match)"
+                else
+                    echo "2T: WARN — $CARD_SLUG template exited with unexpected code $TEMPLATE_EXIT — skipping"
+                fi
+
+            done <<< "$SUBSCRIBED_CARDS"
+        fi
+    fi
+fi
+```
+
+If any Step 2T template produces findings, include them in the Step 3 findings list prefixed `SUBSCRIBED-{slug}`. All Step 2T findings are MEDIUM (advisory) — they never block the commit. Include the prevention rule and origin feed in the finding message so the builder can understand the cross-repo context.
 
 ---
 

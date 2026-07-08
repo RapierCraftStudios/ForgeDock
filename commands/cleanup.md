@@ -91,11 +91,58 @@ done
 - If it has `workflow:invalid` already → just remove `workflow:investigating`
 - If closed normally → add `workflow:merged`, remove `workflow:investigating`
 
-**Stale `needs-validation`** — remove from all closed issues:
+**Stale `needs-validation`** — backfill from FORGE:INVESTIGATOR verdict where available; strip-only for issues with no verdict comment: <!-- Added: forge#1730 -->
+
+This is the H1 backfill sweep from the Design Decision (#1730). For each closed finding-issue with `needs-validation`:
+1. Fetch any `FORGE:INVESTIGATOR` comment on the issue
+2. Extract the `**Verdict**: ...` line
+3. `CONFIRMED` → apply `validated` + remove `needs-validation`
+4. `NOT-CONFIRMED` / `INVALID` / `PARTIAL` → apply `false-positive` + remove `needs-validation`
+5. No verdict comment (or unrecognized verdict) → strip `needs-validation` only (no label added — do not guess)
+
+**H4 is forbidden**: Do NOT use file-overlap heuristics (whether a fix-PR touched the cited file) to infer validated/false-positive. H4 has ~10% error rate and poisons the corpus. If there is no FORGE:INVESTIGATOR comment, the issue goes to strip-only.
+
 ```bash
+BACKFILL_VALIDATED=0
+BACKFILL_FALSE_POSITIVE=0
+BACKFILL_STRIP_ONLY=0
+
 for NUM in {needs_validation_numbers}; do
-  gh issue edit $NUM {GH_FLAG} --remove-label "needs-validation" 2>/dev/null || true
+  # Fetch FORGE:INVESTIGATOR comment if any
+  INVESTIGATOR_COMMENT=$(gh api repos/{GH_REPO}/issues/$NUM/comments \
+    --jq '[.[] | select(.body | contains("FORGE:INVESTIGATOR"))] | last | .body // ""' 2>/dev/null || echo "")
+
+  if [ -n "$INVESTIGATOR_COMMENT" ]; then
+    # Extract verdict — matches "**Verdict**: CONFIRMED" etc.
+    VERDICT=$(echo "$INVESTIGATOR_COMMENT" | grep -oE '\*\*Verdict\*\*: [A-Za-z0-9_][A-Za-z0-9_-]*' | sed 's/^\*\*Verdict\*\*: //' | head -1)
+
+    case "$VERDICT" in
+      CONFIRMED)
+        gh issue edit $NUM {GH_FLAG} --add-label "validated" --remove-label "needs-validation" 2>/dev/null || true
+        echo "#$NUM: needs-validation → validated (verdict: CONFIRMED)"
+        BACKFILL_VALIDATED=$((BACKFILL_VALIDATED + 1))
+        ;;
+      NOT-CONFIRMED|INVALID|PARTIAL)
+        gh issue edit $NUM {GH_FLAG} --add-label "false-positive" --remove-label "needs-validation" 2>/dev/null || true
+        echo "#$NUM: needs-validation → false-positive (verdict: $VERDICT)"
+        BACKFILL_FALSE_POSITIVE=$((BACKFILL_FALSE_POSITIVE + 1))
+        ;;
+      *)
+        # Unrecognized or empty verdict — strip-only (no guessing)
+        gh issue edit $NUM {GH_FLAG} --remove-label "needs-validation" 2>/dev/null || true
+        echo "#$NUM: needs-validation stripped (no recognized verdict in INVESTIGATOR comment)"
+        BACKFILL_STRIP_ONLY=$((BACKFILL_STRIP_ONLY + 1))
+        ;;
+    esac
+  else
+    # No INVESTIGATOR comment — strip-only
+    gh issue edit $NUM {GH_FLAG} --remove-label "needs-validation" 2>/dev/null || true
+    echo "#$NUM: needs-validation stripped (no FORGE:INVESTIGATOR comment found)"
+    BACKFILL_STRIP_ONLY=$((BACKFILL_STRIP_ONLY + 1))
+  fi
 done
+
+echo "Backfill complete: validated=$BACKFILL_VALIDATED false-positive=$BACKFILL_FALSE_POSITIVE strip-only=$BACKFILL_STRIP_ONLY"
 ```
 
 ### 1C: Report closed issues with NO workflow label
@@ -465,7 +512,9 @@ fi
 | workflow:in-review → workflow:merged | {N} |
 | workflow:building → workflow:merged | {N} |
 | workflow:investigating → cleaned | {N} |
-| needs-validation removed | {N} |
+| needs-validation → validated (backfill H1) | {N} |
+| needs-validation → false-positive (backfill H1) | {N} |
+| needs-validation stripped (no verdict) | {N} |
 
 ### Stale-Open Intermediate Issues (Phase 1D)
 | Issue | Label | Last Update | Action |

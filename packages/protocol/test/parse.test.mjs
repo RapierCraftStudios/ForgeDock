@@ -269,3 +269,137 @@ test('parse(emit(...)): field value with multiple escape sequences round-trips l
   const [ann] = parse(emit('CONTEXT', { Note: original }));
   assert.equal(ann.fields['Note'], original);
 });
+
+// ── CARD annotation — Base64url machine-surface form (forge#1727) ──────────
+//
+// The FORGE:CARD type uses the colon inline-value syntax (§3.4):
+//   <!-- FORGE:CARD: v1 sha:<sha8hex> b64:<base64url_of_canonical_json> -->
+// parse() extracts the inline value "v1 sha:X b64:Y" as inlineValue.
+// The cli.js decodeCardInlineValue() function handles decoding; these tests
+// verify that parse() correctly identifies CARD as an inline-value annotation.
+
+test('parse: CARD annotation is recognized as inline-value type (forge#1727)', () => {
+  const body = '<!-- FORGE:CARD: v1 sha:7234c2d8 b64:eyJpc3N1ZSI6IjEzNzAiLCJzdGF0dXMiOiJtZXJnZWQiLCJ0eXBlIjoiQ0FSRCJ9 -->';
+  const annotations = parse(body);
+  assert.equal(annotations.length, 1);
+  const [ann] = annotations;
+  assert.equal(ann.type, 'CARD');
+  assert.equal(ann.isReserved, true);
+  assert.ok(ann.inlineValue !== null, 'CARD annotation should have an inlineValue');
+  assert.ok(ann.inlineValue.startsWith('v1 sha:'), `inlineValue should start with "v1 sha:", got: "${ann.inlineValue}"`);
+});
+
+test('parse: CARD annotation inlineValue contains sha8 prefix and b64 payload (forge#1727)', () => {
+  const body = '<!-- FORGE:CARD: v1 sha:7234c2d8 b64:eyJpc3N1ZSI6IjEzNzAiLCJzdGF0dXMiOiJtZXJnZWQiLCJ0eXBlIjoiQ0FSRCJ9 -->';
+  const [ann] = parse(body);
+  assert.match(ann.inlineValue, /^v1 sha:[0-9a-f]{8} b64:[A-Za-z0-9_-]+$/);
+});
+
+// ── CLAIM and CLAIM_RELEASED (forge#1736) ─────────────────────────────────
+//
+// CLAIM is a lifecycle annotation with a completion sentinel 'CLAIM:COMPLETE'.
+// CLAIM_RELEASED is a control marker (no body, presence is the signal).
+
+test('parse: CLAIM annotation is recognized as lifecycle type with sentinel (forge#1736)', () => {
+  const body = [
+    '<!-- FORGE:CLAIM -->',
+    '**Holder**: #1736 / run-abc123',
+    '**Files**: commands/orchestrate/phase-3-dependency.md',
+    '**Interfaces**: Step 3C conflict detection API',
+    '**TTL**: terminal state of Holder issue #1736',
+    '<!-- CLAIM:COMPLETE -->',
+  ].join('\n');
+  const annotations = parse(body);
+  assert.equal(annotations.length, 1);
+  const [ann] = annotations;
+  assert.equal(ann.type, 'CLAIM');
+  assert.equal(ann.isReserved, true);
+  assert.equal(ann.isControl, false);
+  assert.equal(ann.inlineValue, null);
+  assert.equal(ann.sentinelState, SentinelState.COMPLETE);
+  assert.equal(ann.fields['Holder'], '#1736 / run-abc123');
+  assert.equal(ann.fields['TTL'], 'terminal state of Holder issue #1736');
+});
+
+test('parse: CLAIM without sentinel → sentinelState interrupted (forge#1736)', () => {
+  const body = [
+    '<!-- FORGE:CLAIM -->',
+    '**Holder**: #1736 / run-abc',
+    '**Files**: commands/orchestrate/phase-3-dependency.md',
+    '**Interfaces**: Step 3C API',
+    '**TTL**: terminal',
+  ].join('\n');
+  const [ann] = parse(body);
+  assert.equal(ann.type, 'CLAIM');
+  assert.equal(ann.sentinelState, SentinelState.INTERRUPTED);
+});
+
+test('parse: CLAIM_RELEASED is a control marker (forge#1736)', () => {
+  const body = '<!-- FORGE:CLAIM_RELEASED -->';
+  const annotations = parse(body);
+  assert.equal(annotations.length, 1);
+  const [ann] = annotations;
+  assert.equal(ann.type, 'CLAIM_RELEASED');
+  assert.equal(ann.isReserved, true);
+  assert.equal(ann.isControl, true);
+  assert.equal(ann.sentinelState, SentinelState.COMPLETE);
+});
+
+test('parse(emit(...)): CLAIM round-trips with sanitized field values (forge#1736)', () => {
+  const emitted = emit('CLAIM', {
+    Holder: '#1736 / run-abc',
+    Files: 'commands/orchestrate/phase-3-dependency.md',
+    Interfaces: 'Step 3C API',
+    TTL: 'terminal state of Holder issue #1736',
+  });
+  // CLAIM has a completionSentinel — emit() appends it
+  const [ann] = parse(emitted);
+  assert.equal(ann.type, 'CLAIM');
+  assert.equal(ann.sentinelState, SentinelState.COMPLETE);
+  assert.equal(ann.fields['Holder'], '#1736 / run-abc');
+  assert.equal(ann.fields['Files'], 'commands/orchestrate/phase-3-dependency.md');
+  assert.equal(ann.fields['Interfaces'], 'Step 3C API');
+  assert.equal(ann.fields['TTL'], 'terminal state of Holder issue #1736');
+});
+
+test('parse: CLAIM_RELEASED following CLAIM in one comment — two annotations (forge#1736)', () => {
+  const body = [
+    '<!-- FORGE:CLAIM -->',
+    '**Holder**: #1736 / run-abc',
+    '**Files**: commands/orchestrate/phase-3-dependency.md',
+    '**Interfaces**: Step 3C API',
+    '**TTL**: terminal',
+    '<!-- CLAIM:COMPLETE -->',
+    '<!-- FORGE:CLAIM_RELEASED -->',
+  ].join('\n');
+  const annotations = parse(body);
+  assert.equal(annotations.length, 2);
+  assert.equal(annotations[0].type, 'CLAIM');
+  assert.equal(annotations[1].type, 'CLAIM_RELEASED');
+});
+
+test('parse: CARD annotation following another annotation starts its own annotation (forge#1727)', () => {
+  const body = [
+    '<!-- FORGE:BUILDER -->',
+    '**Branch**: `fix/example`',
+    '**Commits**: abc123',
+    '**Files changed**: 1',
+    '<!-- FORGE:BUILDER:COMPLETE -->',
+    '<!-- FORGE:CARD: v1 sha:7234c2d8 b64:eyJpc3N1ZSI6IjEzNzAiLCJzdGF0dXMiOiJtZXJnZWQiLCJ0eXBlIjoiQ0FSRCJ9 -->',
+  ].join('\n');
+  const annotations = parse(body);
+  assert.equal(annotations.length, 2);
+  assert.equal(annotations[0].type, 'BUILDER');
+  assert.equal(annotations[1].type, 'CARD');
+  assert.ok(annotations[1].inlineValue, 'Second annotation should be a CARD with an inlineValue');
+});
+
+test('parse: CARD with inline value "COMPLETE" parses as real annotation (not dropped as sentinel) (forge#1727)', () => {
+  // CARD is an inline-value type — "COMPLETE" is a legitimate inline value, not a sentinel.
+  // This parallels the PRIOR_GIST / KNOWLEDGE_GIST / MILESTONE_INDEX fix from forge#1526.
+  const body = '<!-- FORGE:CARD: COMPLETE -->';
+  const annotations = parse(body);
+  assert.equal(annotations.length, 1);
+  assert.equal(annotations[0].type, 'CARD');
+  assert.equal(annotations[0].inlineValue, 'COMPLETE');
+});

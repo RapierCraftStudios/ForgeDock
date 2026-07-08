@@ -318,6 +318,76 @@ agent defaults                  ← Built-in behaviors
 
 ---
 
+## Phase A1.5: Prior Decision Injection (MANDATORY for STANDARD/COMPLEX — skip for TRIVIAL) <!-- Added: forge#1737 -->
+
+**Purpose**: Surface ADRs from prior pipeline runs whose anchor paths overlap the contract files before any code is written. Architect plans open with binding prior decisions ("prior decision NNN: chose process substitution over pipes because pipe-RHS subshell loss — #1689") so tradeoffs are not silently re-litigated.
+
+**Skip if**: COMPLEXITY_BAND: TRIVIAL OR `devdocs/decisions/` does not exist at `{REPO_PATH}/devdocs/decisions/` OR the directory is empty.
+
+**Token budget**: ≤300 tokens total (max 3 ADRs × ~100 tokens each). Truncate each ADR body to first 20 lines.
+
+```bash
+DECISIONS_DIR="{REPO_PATH}/devdocs/decisions"
+
+if [ -d "$DECISIONS_DIR" ] && [ -n "$(ls -A "$DECISIONS_DIR" 2>/dev/null | grep -v '\.gitkeep')" ]; then
+  echo "Scanning $DECISIONS_DIR for ADRs overlapping contract files..."
+
+  # Build list of contract file basenames for anchor matching
+  IFS=' ' read -ra CONTRACT_FILES_ARR <<< "{AFFECTED_FILES}"
+  MATCHED_ADRS=()
+  ADR_COUNT=0
+
+  for adr_file in "$DECISIONS_DIR"/*.md; do
+    [ -f "$adr_file" ] || continue
+    # Skip needs-review ADRs — anchor is dead, don't inject as constraints
+    if grep -q "^status: needs-review" "$adr_file" 2>/dev/null; then
+      echo "  Skipped (needs-review): $(basename $adr_file)"
+      continue
+    fi
+    # Check if this ADR's anchor path overlaps any contract file
+    ANCHOR=$(grep "^anchor:" "$adr_file" 2>/dev/null | head -1 | sed 's/^anchor:\s*//')
+    if [ -z "$ANCHOR" ]; then continue; fi
+
+    for contract_file in "${CONTRACT_FILES_ARR[@]}"; do
+      if echo "$ANCHOR" | grep -qF "$(basename "$contract_file" | cut -d. -f1)" || \
+         echo "$contract_file" | grep -qF "$ANCHOR"; then
+        MATCHED_ADRS+=("$adr_file")
+        ADR_COUNT=$((ADR_COUNT + 1))
+        break
+      fi
+    done
+
+    [ "$ADR_COUNT" -ge 3 ] && break  # Hard cap: 3 ADRs max
+  done
+
+  if [ "${#MATCHED_ADRS[@]}" -gt 0 ]; then
+    echo ""
+    echo "### Prior Decisions (${#MATCHED_ADRS[@]} ADRs overlapping contract files)"
+    echo "<!-- Each ADR is a prior tradeoff that constrains this implementation. -->"
+    for adr_file in "${MATCHED_ADRS[@]}"; do
+      echo ""
+      echo "#### $(basename "$adr_file")"
+      head -20 "$adr_file"  # ~100 tokens per ADR — stays within 300-token budget
+    done
+    echo ""
+    echo "<!-- FORGE:PRIOR_DECISIONS: ${#MATCHED_ADRS[@]} ADR(s) injected above — treat as constraints, not suggestions -->"
+  else
+    echo "No matching ADRs found for contract files — proceeding without prior decision constraints"
+  fi
+else
+  echo "devdocs/decisions/ absent or empty — skipping prior decision injection"
+fi
+```
+
+**Inject into FORGE:ARCHITECT comment**: If matching ADRs were found, add a `### Prior Decisions (Constraints)` section **before** `### Affected Paths` in the output comment. The builder reads this section before writing any code.
+
+**Skip conditions**:
+- COMPLEXITY_BAND: TRIVIAL — trivial changes have no cross-path consistency risk; ADR injection adds unnecessary context
+- `devdocs/decisions/` absent or empty — no ADRs to inject
+- All candidate ADRs are `status: needs-review` — dead-anchor ADRs are excluded from constraint injection
+
+---
+
 ## Phase A1: Read Entry Points
 
 Identify every entry point that initiates the affected logic. Start from the files named in the investigation report.
@@ -548,6 +618,13 @@ gh issue comment {NUMBER} {GH_FLAG} --body "<!-- FORGE:ARCHITECT -->
      with applies_to: work-on (Phase A0). Read these before finalizing the plan.
      If devdocs path was absent or no applicable files found: 'No applicable devdocs found.' -->
 {PROJECT_CONVENTIONS}
+
+### Prior Decisions (Constraints)
+<!-- Auto-ADRs from prior TRAJECTORY runs whose anchor paths overlap the contract files.
+     Injected by Phase A1.5. Builder MUST respect these tradeoffs — re-litigating requires
+     explicit justification. Absent when devdocs/decisions/ is empty or no overlap found.
+     status: needs-review ADRs are excluded — their anchors are dead. -->
+{PRIOR_DECISIONS}
 
 ### Affected Paths (ALL must be updated)
 | # | File | Function/Class | Change Required | Why |

@@ -23,9 +23,11 @@ allowed-tools: Task, Bash, Read, Grep, Glob, WebFetch, Skill
 
 2. **Post the FORGE:REVIEW verdict regardless of finding severity.** A review that completes but posts no `<!-- FORGE:REVIEW -->` comment is invisible to the pipeline. Even a PASS verdict must be posted.
 
-3. **Review findings do NOT block merge UNLESS they meet the Blocking Criteria in §7B** (a CONFIRMED HIGH/CRITICAL finding, a purpose regression, a merge conflict, or a build/type/test failure). File every finding as a GitHub issue with the `review-finding` label regardless of severity. Minor/style findings never block; §7B's blocking conditions always do — including under `--auto-merge`.
+3. **Review findings do NOT block merge UNLESS they meet the Blocking Criteria in §7B** (a CONFIRMED HIGH/CRITICAL finding, a purpose regression, a merge conflict, or a build/type/test failure) **or the calibration threshold check in §7B.5 sets `CALIBRATION_NEEDS_HUMAN=true`** (HIGH-confidence task type with historical survival < 80%). File every finding as a GitHub issue with the `review-finding` label regardless of severity. Minor/style findings never block; §7B's and §7B.5's blocking conditions always do — including under `--auto-merge`. <!-- forge#1741 -->
 
 4. **Route correctly at Phase 0.** If the input is "staging" or the PR targets `main`, invoke `Skill("review-pr-staging", ...)` — do NOT run the standard PR review pipeline against a staging→main PR.
+
+5. **`spec-evolution` PRs are NEVER auto-merged.** When a PR carries the `spec-evolution` label (created by `/spec-doctor`), Phase -1 MUST set `AUTO_MERGE=false` and add `needs-human` before any other processing. This cannot be overridden by the caller — the eval gate plus human review are the only permitted merge path. See Phase -1 `spec-evolution guard` block. <!-- Added: forge#1742 -->
 
 ## Forbidden Tools Self-Check
 
@@ -115,9 +117,43 @@ fi
 
 REVIEW_SHA_ROUTE=$(gh pr view ${ROUTE_PR_NUMBER:-$ARGUMENTS} --json headRefOid --jq '.headRefOid' 2>/dev/null | cut -c1-7 || echo "n/a")
 
+# spec-evolution guard — MUST run before posting FORGE:REVIEW_ROUTE <!-- Added: forge#1742 -->
+# spec-evolution PRs are produced by /spec-doctor and require eval-gate + human review.
+# Auto-merge is structurally excluded regardless of how review-pr was invoked.
+# This guard activates for single-PR mode only (staging/multi-pr modes don't auto-merge anyway).
+IS_SPEC_EVOLUTION=false
+if [ "$REVIEW_MODE" = "single-pr" ] && [ -n "$ROUTE_PR_NUMBER" ] && [ "$ROUTE_PR_NUMBER" != "(list mode)" ] && [ "$ROUTE_PR_NUMBER" != "(resolved by staging sub-command)" ]; then
+  SPEC_EVOL_CHECK=$(gh pr view "$ROUTE_PR_NUMBER" --json labels \
+    --jq '[.labels[].name] | any(. == "spec-evolution")' 2>/dev/null || echo "false")
+  if [ "$SPEC_EVOL_CHECK" = "true" ]; then
+    IS_SPEC_EVOLUTION=true
+    AUTO_MERGE=false
+    # Add needs-human label to the associated issue (if --issue was passed in $ARGUMENTS)
+    SPEC_EVOL_ISSUE=$(echo "$ARGUMENTS" | grep -oP '(?<=--issue )\d+' || echo "")
+    if [ -n "$SPEC_EVOL_ISSUE" ]; then
+      GH_FLAG_SPEC=$(echo "$ARGUMENTS" | grep -oP '(?<=-R )\S+' | head -1 | sed 's/^/-R /' || echo "")
+      gh issue edit "$SPEC_EVOL_ISSUE" $GH_FLAG_SPEC --add-label "needs-human" 2>/dev/null || true
+    fi
+    echo "SPEC-EVOLUTION GUARD: PR #${ROUTE_PR_NUMBER} carries 'spec-evolution' label."
+    echo "AUTO_MERGE forced to false. Human review + eval gate required before merge."
+    echo "HARD RULE 5: This cannot be overridden by the caller."
+  fi
+fi
+
 # Post the routing assertion marker to the PR (skip for list/keyword modes where no PR# is known yet)
+# CODEC PATH (forge#1727): REVIEW_ROUTE is a custom (non-RESERVED) annotation type; emit() tolerates
+# unknown types. Use the codec CLI to produce the opening tag for any FORGE: annotation.
+# For single-line control markers like REVIEW_ROUTE, the inline heredoc is acceptable as long
+# as field values contain no untrusted content (here: REVIEW_MODE and REVIEW_SHA_ROUTE are
+# pipeline-internal values, not user-supplied text). For annotations with user-supplied fields,
+# route through: forge-annotation.sh write REVIEWER --field Verdict=APPROVED ...
 if [ "$REVIEW_MODE" != "staging-keyword" ] && [ "$REVIEW_MODE" != "multi-pr" ]; then
-  gh pr comment "$ROUTE_PR_NUMBER" --body "<!-- FORGE:REVIEW_ROUTE mode=${REVIEW_MODE} spec=review-pr.md sha=${REVIEW_SHA_ROUTE} -->"
+  if [ "$IS_SPEC_EVOLUTION" = "true" ]; then
+    gh pr comment "$ROUTE_PR_NUMBER" --body "<!-- FORGE:REVIEW_ROUTE mode=spec-evolution-blocked spec=review-pr.md sha=${REVIEW_SHA_ROUTE} -->
+⚠️ **spec-evolution PR**: auto-merge is structurally excluded (HARD RULE 5). Eval gate must pass and a human must review and merge. See \`docs/design/eval-gate-runbook.md\`."
+  else
+    gh pr comment "$ROUTE_PR_NUMBER" --body "<!-- FORGE:REVIEW_ROUTE mode=${REVIEW_MODE} spec=review-pr.md sha=${REVIEW_SHA_ROUTE} -->"
+  fi
 fi
 ```
 
@@ -753,35 +789,71 @@ echo "$DIFF" | grep -cE "subprocess|os\.system|eval\(|exec\(|pickle|yaml\.load[^
 echo "$FILES" | grep -cE "^sdk/|openapi.*\.json$|openapi-versions/" && echo "  SDK_OPENAPI" || true
 ```
 
-**Churn (hot-spot) signal**: The signals above are all derived from the current diff content — none of them measure historical change frequency, which is one of the strongest empirical predictors of defect density. Compute a bounded per-file churn tier for the PR's changed files only (never repo-wide) and carry it forward as `CHURN_CONTEXT` for Phase 3C:
+**Churn (hot-spot) signal**: The signals above are all derived from the current diff content — none of them measure historical change frequency or defect density. Compute both commit-churn tier and finding-density tier for the PR's changed files and carry them forward as `CHURN_CONTEXT` for Phase 3C: <!-- Finding-density signal: forge#1738 -->
 
 ```bash
 CHURN_WINDOW="90 days ago"   # named constant — must match the same window used in architect.md Phase A5
 CHURN_CONTEXT=""
+
+# Load danger-zones index for finding-density signal (non-blocking — absent index is not an error).
+# The index is produced by scripts/danger-zones.mjs and updated on each merge via
+# build-knowledge-index.mjs --with-danger-zones. When absent, only commit-count signal is used.
+DANGER_ZONES_INDEX="${HOME}/.forge/index/danger-zones.json"
+DZ_DATA=""
+if [ -f "$DANGER_ZONES_INDEX" ]; then
+  DZ_DATA=$(cat "$DANGER_ZONES_INDEX" 2>/dev/null || true)
+fi
+
 # Herestring (not a piped `| while read`) — a pipe would run the loop body in a
 # subshell in bash, silently discarding CHURN_CONTEXT once the loop exits. $FILES
 # is one path per line (gh pr diff --name-only), so `read -r` per line is safe
 # even when a path contains embedded spaces.
 while IFS= read -r FILE; do
   [ -z "$FILE" ] && continue
+
+  # Commit-churn signal (unchanged from original)
   COMMITS=$(git log --oneline --since="$CHURN_WINDOW" -- "$FILE" 2>/dev/null | wc -l)
+  COMMIT_TAG=""
   if [ "$COMMITS" -ge 15 ]; then
+    COMMIT_TAG=" — HOT (${COMMITS} commits/90d)"
+  fi
+
+  # Finding-density signal (new — reads from danger-zones index when available)
+  FINDING_TAG=""
+  if [ -n "$DZ_DATA" ]; then
+    FINDING_COUNT=$(echo "$DZ_DATA" | python3 -c "
+import sys, json
+d = json.loads(sys.stdin.read())
+files = d.get('files', {})
+entry = files.get('${FILE}', None)
+if entry:
+    print(entry.get('findingCount90d', 0))
+else:
+    print(0)
+" 2>/dev/null || echo "0")
+    if [ "${FINDING_COUNT:-0}" -ge 3 ]; then
+      FINDING_TAG=" — HOT-FINDINGS (${FINDING_COUNT} findings/90d)"
+    fi
+  fi
+
+  # Append to CHURN_CONTEXT when either signal fires
+  if [ -n "$COMMIT_TAG" ] || [ -n "$FINDING_TAG" ]; then
     # Real newline appended via $'\n' (ANSI-C quoting), not a literal backslash-n.
     # A literal "\n" would only be interpreted by `echo -e` — it survives
     # unprocessed into Phase 3C's raw template substitution ([CHURN_CONTEXT] ->
     # $CHURN_CONTEXT), which does not reprocess escapes, so with 2+ HOT files
     # multi-hotspot PRs would render squished in the agent prompt. A real
     # newline here makes the variable correct for every consumer.
-    CHURN_CONTEXT="${CHURN_CONTEXT}${FILE} (${COMMITS} commits in last 90 days — HOT)"$'\n'
+    CHURN_CONTEXT="${CHURN_CONTEXT}${FILE}${COMMIT_TAG}${FINDING_TAG}"$'\n'
   fi
 done <<< "$FILES"
 if [ -z "$CHURN_CONTEXT" ]; then
-  CHURN_CONTEXT="No hot-spot files detected (all changed files under 15 commits in the last 90 days)."
+  CHURN_CONTEXT="No hot-spot files detected (all changed files under 15 commits and under 3 findings in the last 90 days)."
 fi
 echo "$CHURN_CONTEXT"
 ```
 
-Tiers (fixed thresholds, identical to `architect.md` Phase A5): **HOT** = 15+ commits / 90 days, **MEDIUM** = 5–14, **LOW** = 0–4. Only HOT-tier files are listed in `CHURN_CONTEXT` — this keeps the agent prompt signal short and high-value rather than dumping a churn count for every file. This does not change agent selection (3B) — it is a scrutiny prior surfaced to whichever agents are already selected, substituted as `[CHURN_CONTEXT]` in Phase 3C.
+Tiers (fixed thresholds, identical to `architect.md` Phase A5): **HOT** = 15+ commits / 90 days, **MEDIUM** = 5–14, **LOW** = 0–4. **HOT-FINDINGS** = 3+ confirmed findings in 90 days (from Forge Ledger danger-zones index). Only files where at least one signal fires are listed in `CHURN_CONTEXT` — this keeps the agent prompt signal short and high-value. A file can appear with both tags (e.g., `commands/orchestrate.md — HOT (20 commits/90d) — HOT-FINDINGS (18 findings/90d)`). This does not change agent selection (3B) — it is a scrutiny prior surfaced to whichever agents are already selected, substituted as `[CHURN_CONTEXT]` in Phase 3C. When the danger-zones index is absent (cold start or pre-1738 install), `CHURN_CONTEXT` falls back to commit-count-only behavior (no HOT-FINDINGS tags). <!-- Added: forge#1738 -->
 
 ### 3B: Select Agents — Risk-Scaled Dispatch
 
@@ -951,6 +1023,191 @@ echo "=== FINAL ROSTER (after escalation): $SELECTED_AGENTS ==="
 AGENT_COUNT=$(echo "$SELECTED_AGENTS" | wc -w)
 echo "=== AGENT COUNT: $AGENT_COUNT ==="
 ```
+
+### 3B.5: Provenance-Based Trust Escalation (Conditional)
+
+**Skip if**: `THOROUGH=true` OR `IS_MILESTONE_TO_STAGING=true` — these modes already run full union dispatch; provenance de-escalation must not narrow an already-thorough review. This skip is enforced in code at the Step 4 application block (not merely relied upon via a downstream overwrite). <!-- forge#1804 -->
+
+
+**Purpose**: Adjust the agent roster based on the PR's verifiable track record. Proven `(task-type × module-set)` combinations may drop optional judgment agents; novel combinations escalate to full panel plus `needs-human` on merge. The hard floor (Security agent + all Phase 2 automated checks) runs at every intensity tier, unconditionally.
+
+**HARD FLOOR (non-negotiable)**: Security agent always stays in `SELECTED_AGENTS`. Phase 2 automated checks (linting, typecheck, secrets scan, SQL validation) run regardless of intensity tier. Trust only modulates optional LLM judgment breadth.
+
+#### Step 1: Declare defaults (fail-safe initialization)
+
+```bash
+# Default: SHADOW — no roster change, log the decision only.
+# This ensures that any error path (absent table, parse failure, git error)
+# falls back to the current static behavior — never looser, never tighter.
+INTENSITY_TIER="SHADOW"
+TABLE_CELL_KEY="(unavailable)"
+PROVENANCE_TABLE_LOADED=false
+TRUST_SHADOW_MODE=$(yq '.review.trust_shadow_mode // "true"' "${FORGE_YAML:-forge.yaml}" 2>/dev/null || echo "true")
+```
+
+#### Step 2: Read provenance table from forge-knowledge branch
+
+```bash
+# Single bounded git-show read — no network round-trip if the branch is local.
+# Fail-safe: any non-zero exit or parse error → PROVENANCE_JSON stays empty.
+PROVENANCE_JSON=""
+if git show-ref --quiet "refs/remotes/origin/forge-knowledge" 2>/dev/null || \
+   git show-ref --quiet "refs/heads/forge-knowledge" 2>/dev/null; then
+  PROVENANCE_JSON=$(git show "forge-knowledge:calibration/provenance.json" 2>/dev/null || \
+                    git show "origin/forge-knowledge:calibration/provenance.json" 2>/dev/null || echo "")
+fi
+
+if [ -n "$PROVENANCE_JSON" ] && echo "$PROVENANCE_JSON" | jq -e '.rows' >/dev/null 2>&1; then
+  PROVENANCE_TABLE_LOADED=true
+  echo "=== PROVENANCE TABLE: loaded ($(echo "$PROVENANCE_JSON" | jq '.rows | length') cells) ==="
+else
+  echo "=== PROVENANCE TABLE: absent or invalid — intensity tier defaults to SHADOW (no roster change) ==="
+fi
+```
+
+#### Step 3: Compute module key and look up cell
+
+```bash
+if [ "$PROVENANCE_TABLE_LOADED" = "true" ]; then
+  # Normalize changed files to module key (mirrors normalizeModules() in calibration.mjs):
+  # Take the top-level directory of each file; for two-level prefixes (services/*, apps/*,
+  # packages/*, clients/*, sdk/*) include the second directory segment too.
+  # Sort + deduplicate + join with "|".
+  TWO_LEVEL="services apps packages clients sdk"
+  RAW_PREFIXES=$(echo "$FILES" | while IFS= read -r f; do
+    [ -z "$f" ] && continue
+    top=$(echo "$f" | cut -d/ -f1)
+    second=$(echo "$f" | cut -d/ -f2)
+    two_level_match=false
+    for prefix in $TWO_LEVEL; do
+      [ "$top" = "$prefix" ] && two_level_match=true && break
+    done
+    if [ "$two_level_match" = "true" ] && [ -n "$second" ]; then
+      echo "${top}/${second}"
+    else
+      echo "$top"
+    fi
+  done | sort -u | tr '\n' '|' | sed 's/|$//')
+
+  # Determine task type from FORGE:INVESTIGATOR annotation on the linked issue (if available)
+  ISSUE_NUM_FOR_TRUST=$(gh pr view "$ARGUMENTS" --json body \
+    --jq '.body | gsub("(?s).*?(?:Closes #|#)(?<n>[0-9]+).*"; "\(.n)") // ""' 2>/dev/null | head -1)
+  TASK_TYPE_FOR_TRUST=""
+  if [ -n "$ISSUE_NUM_FOR_TRUST" ]; then
+    TASK_TYPE_FOR_TRUST=$(gh api "repos/${REPO}/issues/${ISSUE_NUM_FOR_TRUST}/comments" \
+      --jq '[.[] | select(.body | contains("FORGE:INVESTIGATOR"))] | last | .body' 2>/dev/null \
+      | grep -oP '(?<=\*\*Task Type\*\*: )[\w /]+' | head -1 | xargs || echo "")
+  fi
+  # Fall back to title-based inference if INVESTIGATOR comment absent
+  if [ -z "$TASK_TYPE_FOR_TRUST" ]; then
+    PR_TITLE=$(gh pr view "$ARGUMENTS" --json title --jq '.title' 2>/dev/null || echo "")
+    case "$PR_TITLE" in
+      fix*|Fix*)   TASK_TYPE_FOR_TRUST="Bug Fix" ;;
+      feat*|Feat*) TASK_TYPE_FOR_TRUST="Feature" ;;
+      refactor*)   TASK_TYPE_FOR_TRUST="Refactor" ;;
+      docs*|chore*)TASK_TYPE_FOR_TRUST="Maintenance" ;;
+      *)           TASK_TYPE_FOR_TRUST="Feature" ;;
+    esac
+  fi
+
+  TABLE_CELL_KEY="${TASK_TYPE_FOR_TRUST}::${RAW_PREFIXES}"
+  echo "=== PROVENANCE CELL KEY: ${TABLE_CELL_KEY} ==="
+
+  # Look up the cell in the provenance table
+  CELL_DATA=$(echo "$PROVENANCE_JSON" | jq -r \
+    --arg key "$TABLE_CELL_KEY" \
+    '.rows[] | select(.key == $key)' 2>/dev/null || echo "")
+
+  if [ -z "$CELL_DATA" ]; then
+    INTENSITY_TIER="NOVEL"
+    echo "=== PROVENANCE: cell not found — NOVEL (no prior data for this task-type × module-set) ==="
+  else
+    CELL_TRUSTED=$(echo "$CELL_DATA" | jq -r '.trusted' 2>/dev/null || echo "false")
+    CELL_TIER=$(echo "$CELL_DATA" | jq -r '.intensityTier' 2>/dev/null || echo "NOVEL")
+    CELL_SURVIVAL=$(echo "$CELL_DATA" | jq -r '.survivalRate // "null"' 2>/dev/null || echo "null")
+    CELL_SAMPLES=$(echo "$CELL_DATA" | jq -r '.sampleCount' 2>/dev/null || echo "0")
+
+    if [ "$CELL_TRUSTED" = "true" ]; then
+      INTENSITY_TIER="$CELL_TIER"
+      echo "=== PROVENANCE: cell found (${CELL_SAMPLES} samples, survival ${CELL_SURVIVAL}) — tier: ${INTENSITY_TIER} ==="
+    else
+      INTENSITY_TIER="NOVEL"
+      echo "=== PROVENANCE: cell found but not yet trusted (${CELL_SAMPLES} samples < min_samples) — tier: NOVEL ==="
+    fi
+  fi
+fi
+```
+
+#### Step 4: Apply intensity tier (shadow-mode gated)
+
+```bash
+echo "=== TRUST_SHADOW_MODE: ${TRUST_SHADOW_MODE} ==="
+echo "=== INTENSITY_TIER (pre-application): ${INTENSITY_TIER} ==="
+
+# Explicit skip guard (enforces the "Skip if" prose above in code): in THOROUGH or
+# milestone mode the full union dispatch is authoritative — provenance MUST NOT narrow
+# the roster here. Enforcing it at the application point means correctness no longer
+# depends on a downstream overwrite re-widening SELECTED_AGENTS. <!-- forge#1804 -->
+if [ "$THOROUGH" = "true" ] || [ "$IS_MILESTONE_TO_STAGING" = "true" ]; then
+  echo "=== TRUST ESCALATION: skipped (THOROUGH/milestone mode — full union dispatch is authoritative) ==="
+# Shadow mode: log the decision but do NOT modify SELECTED_AGENTS.
+# Set review.trust_shadow_mode: "false" in forge.yaml to enforce after the 30-day window.
+elif [ "$TRUST_SHADOW_MODE" != "false" ]; then
+  echo "=== TRUST ESCALATION: shadow-mode active — logging decision, roster unchanged ==="
+  # SELECTED_AGENTS is NOT modified — current behavior preserved
+else
+  case "$INTENSITY_TIER" in
+    PROVEN)
+      # PROVEN tier: may drop optional judgment agents, but NEVER the hard floor.
+      # The Security agent and any agents added by hard-signal escalation triggers
+      # (SCORE_AUTH >= 3, SCORE_BILLING >= 3, SCORE_DATABASE >= 3, SCORE_INFRA >= 3)
+      # are part of the floor — provenance trust MUST NOT remove them.
+      #
+      # Only agents added by the top-1/2-domain scoring (Step 1 baseline selection)
+      # that are NOT flagged by a hard escalation trigger are eligible for removal.
+      # For safety in the initial enforcement window, we only remove agents that
+      # scored exactly 1 (informational — file-presence only) and were not triggered
+      # by any cross-critical or churn escalation.
+      FLOOR_AGENTS="Security"
+      [ "$SCORE_AUTH"     -ge 3 ] && FLOOR_AGENTS="$FLOOR_AGENTS Auth"
+      [ "$SCORE_BILLING"  -ge 3 ] && FLOOR_AGENTS="$FLOOR_AGENTS Billing Concurrency"
+      [ "$SCORE_DATABASE" -ge 3 ] && FLOOR_AGENTS="$FLOOR_AGENTS Database"
+      [ "$SCORE_INFRA"    -ge 3 ] && FLOOR_AGENTS="$FLOOR_AGENTS Infrastructure"
+      [ "$CHURN_ESCALATION" = "true" ] && FLOOR_AGENTS="$FLOOR_AGENTS $TOP_CHURN_DOMAIN"
+      # Deduplicate floor
+      FLOOR_AGENTS=$(echo "$FLOOR_AGENTS" | tr ' ' '\n' | sort -u | tr '\n' ' ')
+      # PROVEN: keep only floor agents (drop optional judgment-only agents)
+      SELECTED_AGENTS="$FLOOR_AGENTS"
+      echo "=== TRUST ESCALATION: PROVEN — roster narrowed to floor: ${SELECTED_AGENTS} ==="
+      ;;
+    NOVEL|NOVEL_NEEDS_HUMAN)
+      # NOVEL tier: escalate to full affected-domain panel (add all scored domains)
+      for DOMAIN in AUTH BILLING CONCURRENCY DATABASE INFRA FRONTEND API; do
+        SCORE_VAR="SCORE_${DOMAIN}"
+        [ "${!SCORE_VAR:-0}" -gt 0 ] && add_agent "$DOMAIN"
+      done
+      SELECTED_AGENTS=$(echo "$SELECTED_AGENTS" | tr ' ' '\n' | sort -u | tr '\n' ' ')
+      echo "=== TRUST ESCALATION: ${INTENSITY_TIER} — roster widened to full panel: ${SELECTED_AGENTS} ==="
+      if [ "$INTENSITY_TIER" = "NOVEL_NEEDS_HUMAN" ]; then
+        echo "=== TRUST ESCALATION: NOVEL_NEEDS_HUMAN — needs-human will be added on merge ==="
+        TRUST_NEEDS_HUMAN=true
+      fi
+      ;;
+    SHADOW|*)
+      # SHADOW or unknown: no change
+      echo "=== TRUST ESCALATION: ${INTENSITY_TIER} — roster unchanged ==="
+      ;;
+  esac
+fi
+
+# Record TRUST_NEEDS_HUMAN default (set to false if not already set by NOVEL_NEEDS_HUMAN branch)
+TRUST_NEEDS_HUMAN="${TRUST_NEEDS_HUMAN:-false}"
+
+echo "=== FINAL ROSTER (after trust escalation): $SELECTED_AGENTS ==="
+echo "=== INTENSITY_TIER: ${INTENSITY_TIER} | TABLE_CELL_KEY: ${TABLE_CELL_KEY} | SHADOW: ${TRUST_SHADOW_MODE} | NEEDS_HUMAN: ${TRUST_NEEDS_HUMAN} ==="
+```
+
+<!-- Added: forge#1745 -->
 
 **Full union dispatch (THOROUGH=true or IS_MILESTONE_TO_STAGING=true):**
 
@@ -1586,20 +1843,112 @@ if [ "$ATTRIBUTION_PR_FOOTER" = "true" ]; then
 > Orchestrated with [ForgeDock](https://github.com/RapierCraftStudios/ForgeDock) — state, scheduling, review, and memory on GitHub."
 fi
 
+# Build trust annotation line for verdict body — always included so the decision is auditable.
+# INTENSITY_TIER and TABLE_CELL_KEY are set in Phase 3B.5 (defaults: SHADOW / unavailable).
+TRUST_ANNOTATION="**Intensity tier**: ${INTENSITY_TIER:-SHADOW} | **Cell**: \`${TABLE_CELL_KEY:-(unavailable)}\` | **Shadow mode**: ${TRUST_SHADOW_MODE:-true}"
+
 # Stale review:
 gh pr review $ARGUMENTS --comment --body "Review of commit $REVIEW_SHA_SHORT is stale — PR HEAD changed. Re-run /review-pr."
 
 # Clean (no blocking issues):
 gh pr review $ARGUMENTS --comment --body "APPROVED: commit $REVIEW_SHA_SHORT after context-aware review ([N] agents: [names]). [M] findings created as issues. Safe to merge.
+${TRUST_ANNOTATION}
 $([ "$MERGE_HEALTH" = "UNKNOWN" ] && echo "
 ⚠ Mergeability: GitHub is still computing merge state (UNKNOWN after retries). Verify manually before merging.")${ATTRIBUTION_FOOTER_LINE}"
 
 # Blocking issues (including merge conflicts and purpose regressions):
 gh pr review $ARGUMENTS --comment --body "CHANGES REQUESTED: commit $REVIEW_SHA_SHORT — [N] blocking issues found. See GitHub issues.
+${TRUST_ANNOTATION}
 $([ "$HAS_MERGE_CONFLICT" = "true" ] && echo "
 🔴 Merge Conflict: ${MERGE_CONFLICT_MSG}")
 $([ "$HAS_PURPOSE_REGRESSION" = "true" ] && echo "
 ⚠ Purpose Regression: [N] finding(s) contradict the milestone's stated goal and are automatically blocking regardless of runtime impact. See: ${PURPOSE_REGRESSION_FINDINGS[@]}")${ATTRIBUTION_FOOTER_LINE}"
+```
+
+---
+
+## Phase 7B.5: Calibration Threshold Consultation (Conditional) <!-- Added: forge#1741 -->
+
+**Skip if**: `AUTO_MERGE=false` AND no calibration-based routing is needed (this phase is informational even when not auto-merging — run it to populate `CALIBRATION_NEEDS_HUMAN` for Phase 8).
+
+**Purpose**: Read the confidence calibration table (published to the `forge-knowledge` branch by `scripts/calibration.mjs`) and check whether the current PR's task-type × confidence combination has a survival rate below the overconfidence threshold. If the table says HIGH-confidence in this task type has historically performed poorly (< 80% survival), route to needs-human regardless of the agent verdict.
+
+**Fail-safe**: ANY error reading the calibration table (branch absent, file missing, JSON parse error, git failure) MUST result in `CALIBRATION_NEEDS_HUMAN=false` and the current static blocking criteria (Phase 7B verdict) remaining authoritative. The calibration table can ONLY tighten behavior (add needs-human); it NEVER loosens behavior below the current static baseline.
+
+```bash
+# Phase 7B.5: Calibration threshold consultation
+CALIBRATION_NEEDS_HUMAN=false
+CALIBRATION_CELL=""
+CALIBRATION_NOTE=""
+
+# Read task type from FORGE:INVESTIGATOR on the linked issue
+# (MERGE_ISSUE is the issue number; passed from --auto-merge args)
+ISSUE_NUMBER="${MERGE_ISSUE:-}"
+
+if [ -n "$ISSUE_NUMBER" ]; then
+  INVESTIGATOR_BODY=$(gh api "repos/{GH_REPO}/issues/${ISSUE_NUMBER}/comments" \
+    --jq '[.[] | select(.body | contains("FORGE:INVESTIGATOR"))] | last | .body // ""' 2>/dev/null || echo '')
+  TASK_TYPE=$(echo "$INVESTIGATOR_BODY" | grep -oP '(?<=\*\*Task Type\*\*: )[^\n]+' | head -1 | tr -d ' \r')
+  CONFIDENCE=$(echo "$INVESTIGATOR_BODY" | grep -oP '(?<=\*\*Confidence\*\*: )[^\n]+' | head -1 | tr -d ' \r')
+  echo "Phase 7B.5: task_type=${TASK_TYPE:-unknown} confidence=${CONFIDENCE:-unknown} (from issue #${ISSUE_NUMBER})"
+fi
+
+# Read calibration table from forge-knowledge branch (fail-safe: any error → skip)
+if [ -n "${TASK_TYPE:-}" ] && [ -n "${CONFIDENCE:-}" ]; then
+  CALIB_RAW=$(git show "origin/forge-knowledge:calibration/table.json" 2>/dev/null || echo '')
+
+  if [ -n "$CALIB_RAW" ]; then
+    # Look up the task-type × confidence cell
+    CALIB_CELL=$(echo "$CALIB_RAW" | jq -r --arg tt "$TASK_TYPE" --arg c "$CONFIDENCE" \
+      '.rows[] | select(.taskType == $tt and .confidence == $c and .trusted == true)' 2>/dev/null || echo '')
+
+    if [ -n "$CALIB_CELL" ]; then
+      SURVIVAL_RATE=$(echo "$CALIB_CELL" | jq -r '.survivalRate // "null"' 2>/dev/null || echo 'null')
+      SAMPLE_COUNT=$(echo "$CALIB_CELL" | jq -r '.sampleCount // 0' 2>/dev/null || echo '0')
+      CELL_FLAG=$(echo "$CALIB_CELL" | jq -r '.flag // "null"' 2>/dev/null || echo 'null')
+
+      CALIBRATION_CELL="${TASK_TYPE} × ${CONFIDENCE}: survival=${SURVIVAL_RATE} (n=${SAMPLE_COUNT})"
+      echo "Phase 7B.5: calibration cell found — ${CALIBRATION_CELL} flag=${CELL_FLAG}"
+
+      # Check overconfidence threshold: HIGH confidence with survival < 0.8
+      if [ "$CONFIDENCE" = "HIGH" ] && [ "$CELL_FLAG" = "overconfidence" ]; then
+        CALIBRATION_NEEDS_HUMAN=true
+        CALIBRATION_NOTE="Calibration table: ${TASK_TYPE} × HIGH confidence has ${SURVIVAL_RATE} survival rate (< 0.80 threshold, n=${SAMPLE_COUNT}). Routing to needs-human per forge#1741 policy."
+        echo "Phase 7B.5: CALIBRATION_NEEDS_HUMAN=true — ${CALIBRATION_NOTE}"
+      else
+        CALIBRATION_NOTE="Calibration cell: ${CALIBRATION_CELL} — within acceptable threshold"
+        echo "Phase 7B.5: CALIBRATION_NEEDS_HUMAN=false — ${CALIBRATION_NOTE}"
+      fi
+    else
+      # Cell not found or not trusted (below min-samples) — static behavior applies
+      CALIBRATION_NOTE="Calibration cell for ${TASK_TYPE} × ${CONFIDENCE} is absent or untrusted — using static behavior"
+      echo "Phase 7B.5: no trusted cell — ${CALIBRATION_NOTE}"
+    fi
+  else
+    CALIBRATION_NOTE="forge-knowledge:calibration/table.json not found — using static behavior"
+    echo "Phase 7B.5: calibration table unavailable — ${CALIBRATION_NOTE}"
+  fi
+else
+  CALIBRATION_NOTE="task type or confidence not resolved from FORGE:INVESTIGATOR — using static behavior"
+  echo "Phase 7B.5: could not resolve task type/confidence — ${CALIBRATION_NOTE}"
+fi
+
+# Log threshold decision in TRAJECTORY (append to existing issue comment or note for Phase 6)
+# This satisfies the acceptance criterion: "Threshold adjustments appear in TRAJECTORY with the cell that justified them"
+if [ -n "$ISSUE_NUMBER" ]; then
+  gh issue comment "${ISSUE_NUMBER}" {MERGE_GH_FLAG} --body "<!-- FORGE:CALIBRATION_CHECK -->
+**Phase 7B.5 — Calibration Threshold Check**
+**Cell**: ${CALIBRATION_CELL:-not found}
+**CALIBRATION_NEEDS_HUMAN**: ${CALIBRATION_NEEDS_HUMAN}
+**Note**: ${CALIBRATION_NOTE}
+
+**Phase 3B.5 — Provenance Trust Decision**
+**Intensity tier**: ${INTENSITY_TIER:-SHADOW}
+**Provenance cell**: \`${TABLE_CELL_KEY:-(unavailable)}\`
+**Shadow mode**: ${TRUST_SHADOW_MODE:-true}
+**TRUST_NEEDS_HUMAN**: ${TRUST_NEEDS_HUMAN:-false}
+**Timestamp**: $(date -u +%Y-%m-%dT%H:%M:%SZ)" 2>/dev/null || true
+fi
 ```
 
 ---
@@ -1609,18 +1958,21 @@ $([ "$HAS_PURPOSE_REGRESSION" = "true" ] && echo "
 **Skip if** `AUTO_MERGE=false`.
 
 ```bash
-# §7B verdict + purpose-regression guard — check before any merge attempt <!-- Added: forge#1601 -->
-# HARD RULE 3 requires that VERDICT=CHANGES REQUESTED and HAS_PURPOSE_REGRESSION=true
-# always block merge, including under --auto-merge. These vars are set in Phase 7A/7B
-# earlier in the same agent session. An unset/empty VERDICT is safe — it evaluates to
-# "" which does not equal "CHANGES REQUESTED", so fast-lane PRs (no 7A run) are unaffected.
-if [ "$VERDICT" = "CHANGES REQUESTED" ] || [ "$HAS_PURPOSE_REGRESSION" = "true" ]; then
+# §7B verdict + purpose-regression + calibration + trust-escalation guard — check before any merge attempt <!-- Added: forge#1601, forge#1741, forge#1745 -->
+# HARD RULE 3 requires that VERDICT=CHANGES REQUESTED, HAS_PURPOSE_REGRESSION=true,
+# CALIBRATION_NEEDS_HUMAN=true, AND TRUST_NEEDS_HUMAN=true all block merge, including under --auto-merge.
+# These vars are set in Phase 7A/7B/7B.5/3B.5 earlier in the same agent session.
+# An unset/empty VERDICT is safe — it evaluates to "" which does not equal "CHANGES REQUESTED".
+# TRUST_NEEDS_HUMAN: set to true by Phase 3B.5 when INTENSITY_TIER=NOVEL_NEEDS_HUMAN AND shadow mode is off.
+if [ "$VERDICT" = "CHANGES REQUESTED" ] || [ "$HAS_PURPOSE_REGRESSION" = "true" ] || [ "$CALIBRATION_NEEDS_HUMAN" = "true" ] || [ "${TRUST_NEEDS_HUMAN:-false}" = "true" ]; then
     BLOCK_REASON=""
     [ "$VERDICT" = "CHANGES REQUESTED" ] && BLOCK_REASON="review verdict is CHANGES REQUESTED (blocking finding confirmed by Phase 7B)"
     [ "$HAS_PURPOSE_REGRESSION" = "true" ] && BLOCK_REASON="${BLOCK_REASON:+${BLOCK_REASON}; }purpose regression detected by Phase 7A (\`HAS_PURPOSE_REGRESSION=true\`)"
+    [ "$CALIBRATION_NEEDS_HUMAN" = "true" ] && BLOCK_REASON="${BLOCK_REASON:+${BLOCK_REASON}; }calibration threshold: ${CALIBRATION_NOTE}"
+    [ "${TRUST_NEEDS_HUMAN:-false}" = "true" ] && BLOCK_REASON="${BLOCK_REASON:+${BLOCK_REASON}; }provenance trust: NOVEL_NEEDS_HUMAN tier for cell \`${TABLE_CELL_KEY}\` — no sufficient prior data (forge#1745)"
     gh issue comment {MERGE_ISSUE} {MERGE_GH_FLAG} --body "⛔ Auto-merge aborted for PR #{PR_NUMBER}: ${BLOCK_REASON}. Manual review required before merging."
     gh issue edit {MERGE_ISSUE} {MERGE_GH_FLAG} --add-label "needs-human" 2>/dev/null || true
-    # STOP — do not attempt gh pr merge when §7B blocking conditions are active
+    # STOP — do not attempt gh pr merge when §7B/7B.5 blocking conditions are active
 else
 
 # Pre-merge mergeability guard — re-fetch fresh state before attempting merge <!-- Added: forge#194 -->
@@ -1635,6 +1987,31 @@ if [ "$PRE_MERGE_HEALTH" = "CONFLICTING" ] || [ "$PRE_MERGE_HEALTH_STATE" = "DIR
     gh issue edit {MERGE_ISSUE} {MERGE_GH_FLAG} --add-label "needs-human" 2>/dev/null || true
     # STOP — do not attempt gh pr merge on a CONFLICTING/DIRTY PR
 else
+
+# Previously-escalated re-review guard <!-- Added: forge#1810 -->
+# If the linked issue currently carries needs-human, this PR was escalated at some
+# earlier point (VERDICT/purpose-regression/calibration/trust/mergeability) and has
+# now been remediated + re-reviewed back to a clean, mergeable APPROVED state above.
+# The "auto-land bar" (≥2 independent adversarial approvals + domain gates — see
+# #1809 Q1) is not yet implemented (future #1809 sub-issues B/C/D), so the safe
+# default here is to land on workflow:awaiting-merge (clearing needs-human) rather
+# than silently auto-merging a PR that was once flagged human-risk.
+PREVIOUSLY_ESCALATED=$(gh issue view {MERGE_ISSUE} {MERGE_GH_FLAG} --json labels \
+  --jq '[.labels[].name] | any(. == "needs-human")' 2>/dev/null || echo "false")
+
+if [ "$PREVIOUSLY_ESCALATED" = "true" ]; then
+    gh issue comment {MERGE_ISSUE} {MERGE_GH_FLAG} --body "🟠 PR #{PR_NUMBER} was previously escalated (\`needs-human\`) and has now been re-reviewed to \`${VERDICT:-APPROVED}\` with a clean mergeability check. The automated auto-land bar for previously-escalated PRs is not yet implemented, so this PR is held at \`workflow:awaiting-merge\` for a human merge decision instead of auto-merging. Merge manually once reviewed: \`gh pr merge {PR_NUMBER} {MERGE_GH_FLAG} --merge\`."
+    RESOLUTION=$(resolve_script 'transition-label')
+    TIER="${RESOLUTION%%:*}"; SCRIPT_PATH="${RESOLUTION#*:}"
+    case "$TIER" in
+      adaptive|universal) bash "$SCRIPT_PATH" {MERGE_ISSUE} {MERGE_GH_FLAG} awaiting-merge ;;
+      prose)
+        gh issue edit {MERGE_ISSUE} {MERGE_GH_FLAG} --add-label "workflow:awaiting-merge" \
+          --remove-label "needs-human,workflow:investigating,workflow:ready-to-build,workflow:building,workflow:in-review,workflow:merged,workflow:invalid,workflow:decomposed" 2>/dev/null || true
+        ;;
+    esac
+    # STOP — do not attempt gh pr merge; a human decides the merge from here
+else
     # Checkpoint comment on issue
     gh issue comment {MERGE_ISSUE} {MERGE_GH_FLAG} --body "Review complete for PR #{PR_NUMBER}. Verdict: ${VERDICT:-APPROVED}. Proceeding to merge."
 
@@ -1644,6 +2021,7 @@ else
     # Verify
     MERGE_STATE=$(gh pr view {PR_NUMBER} {MERGE_GH_FLAG} --json state --jq '.state')
     [ "$MERGE_STATE" != "MERGED" ] && gh issue comment {MERGE_ISSUE} {MERGE_GH_FLAG} --body "PR #{PR_NUMBER} merge failed. State: $MERGE_STATE."
+fi
 fi
 fi
 ```

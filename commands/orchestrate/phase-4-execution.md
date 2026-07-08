@@ -8,6 +8,93 @@ install: internal
 
 ## Phase 4: Streaming DAG Execution
 
+### Step 4A-pre.0: Budget initialization (MANDATORY when --budget is set) <!-- Added: forge#1743 -->
+
+Initialize budget tracking state before the first dispatch. Read `--budget N` from the orchestrator's argument list (passed from the top-level `/orchestrate` invocation). When `--budget` is not set, `BUDGET_LIMIT` is `Infinity` (uncapped — current default behavior preserved).
+
+```bash
+# --- Budget initialization ---
+# Parse --budget N from ARGUMENTS (e.g. /orchestrate fast-lane --budget 5.00)
+BUDGET_LIMIT=$(echo "${ARGUMENTS:-}" | grep -oP '(?<=--budget )\S+' | head -1 || echo "")
+if [ -z "$BUDGET_LIMIT" ] || ! echo "$BUDGET_LIMIT" | grep -qP '^\d+(\.\d+)?$'; then
+  BUDGET_LIMIT="Infinity"
+fi
+
+PROJECTED_SPEND="0"          # sum of ISSUE_COST_ESTIMATE[] for dispatched issues
+ACTUAL_SPEND="0"             # sum of actual cost reported by completed agents (best-effort)
+DEFERRED_BUDGET_ISSUES=()    # issues deferred because projected spend would exceed budget
+EPSILON_DISPATCHED=false     # true once at least one ε-reserve issue has been dispatched
+
+if [ "$BUDGET_LIMIT" != "Infinity" ]; then
+  EPSILON_BUDGET=$(echo "scale=4; $BUDGET_LIMIT * 0.10" | bc 2>/dev/null || echo "0")
+  echo "Budget initialized: BUDGET_LIMIT=\$${BUDGET_LIMIT} EPSILON_BUDGET=\$${EPSILON_BUDGET} (10% ε-reserve)"
+  echo "Issues without cost priors (ε-reserve eligible): ${NO_PRIOR_ISSUES[*]:-none}"
+else
+  EPSILON_BUDGET="0"
+  echo "Budget: uncapped (no --budget flag) — dispatching all ready issues by score order"
+fi
+# --- End budget initialization ---
+```
+
+**Budget halt condition** (checked in Step 4A before each dispatch):
+
+Before dispatching issue `NUM`, check whether its estimated cost would exceed the remaining budget:
+
+```bash
+# Check budget before dispatching NUM
+should_dispatch() {
+  local NUM="$1"
+  local COST="${ISSUE_COST_ESTIMATE[$NUM]:-0.35}"
+
+  if [ "$BUDGET_LIMIT" = "Infinity" ]; then
+    return 0  # uncapped — always dispatch
+  fi
+
+  NEW_PROJECTED=$(echo "scale=4; $PROJECTED_SPEND + $COST" | bc 2>/dev/null || echo "$PROJECTED_SPEND")
+  MAIN_CEILING=$(echo "scale=4; $BUDGET_LIMIT - $EPSILON_BUDGET" | bc 2>/dev/null || echo "$BUDGET_LIMIT")
+
+  # ε-reserve logic: if this is a no-prior issue AND ε-budget has not yet been
+  # used AND the no-prior issue has NOT been dispatched yet, allow it even if
+  # the main ceiling is hit (up to BUDGET_LIMIT total).
+  if [ "${ISSUE_HAS_PRIOR[$NUM]:-false}" = "false" ] && [ "$EPSILON_DISPATCHED" = "false" ]; then
+    if echo "$NEW_PROJECTED $BUDGET_LIMIT" | awk '{exit ($1 <= $2) ? 0 : 1}' 2>/dev/null; then
+      EPSILON_DISPATCHED=true
+      echo "ε-reserve: dispatching #${NUM} (no-prior issue) from exploration reserve"
+      return 0
+    fi
+  fi
+
+  # Main budget check: defer if projected would exceed main ceiling
+  if echo "$NEW_PROJECTED $MAIN_CEILING" | awk '{exit ($1 <= $2) ? 0 : 1}' 2>/dev/null; then
+    DEFERRED_BUDGET_ISSUES+=("$NUM")
+    echo "BUDGET DEFER: #${NUM} (est. \$${COST}) would push projected spend to \$${NEW_PROJECTED} > main ceiling \$${MAIN_CEILING}"
+    return 1
+  fi
+
+  return 0
+}
+```
+
+**Budget deferred-issues report** (output when `BUDGET_LIMIT` is finite and `DEFERRED_BUDGET_ISSUES` is non-empty — print at end of Phase 4, before Phase 5):
+
+```
+## Budget Report
+
+**Budget limit**: $${BUDGET_LIMIT}
+**Projected spend (dispatched issues)**: $${PROJECTED_SPEND}
+**ε-reserve used**: ${EPSILON_DISPATCHED} (10% = $${EPSILON_BUDGET})
+
+### Deferred Issues (budget exhausted — never silently dropped)
+
+| Issue | Title | Score | Est. Cost | Reason |
+|-------|-------|-------|-----------|--------|
+| #{N} | {title} | {score} | ${cost} | Budget ceiling reached |
+
+**Action**: Re-run `/orchestrate {deferred_issue_numbers} [--budget N]` to process deferred issues, or increase `--budget`.
+```
+
+**When `BUDGET_LIMIT = Infinity`**: skip this check and report entirely — uncapped behavior.
+
 ### Step 4A-pre: Staging baseline tracking (MANDATORY — continuous)
 
 **WHY THIS EXISTS**: Milestone-code-onto-staging contamination incidents (see issue #150) produce unexpected growth on the staging branch that is otherwise invisible until after a deploy. In the streaming DAG model, there are no discrete wave boundaries — instead, track a running baseline and check after each agent completion.
@@ -174,14 +261,26 @@ Use `${ISSUE_LANE[$NUM]}` and `${ISSUE_PR_BASE[$NUM]}` to populate `{LANE}` and 
 **Engine-first dispatch (default)**: When `forgedock` is in PATH, dispatch each ready issue via the durable engine rather than spawning prose Agent sub-agents. The engine's phase table enforces gate semantics in code — its fail-closed review gate and deterministic phase ordering are not subject to LLM interpretation.
 
 ```bash
-# Engine-first dispatch: check CLI availability, then dispatch ready issues in parallel
+# Engine-first dispatch: check CLI availability, then dispatch ready issues in score order
+# Uses SORTED_READY_SET[] from Step 3E.5 (descending value/cost) and budget gate from Step 4A-pre.0
 FORGEDOCK_AVAILABLE=$(command -v forgedock >/dev/null 2>&1 && echo "true" || echo "false")
 
 if [ "$FORGEDOCK_AVAILABLE" = "true" ]; then
-  for NUM in {ready_issue_numbers}; do
+  for NUM in "${SORTED_READY_SET[@]:-{ready_issue_numbers}}"; do
+    # Budget gate (forge#1743): skip dispatch if projected spend would exceed budget ceiling.
+    # should_dispatch() also handles ε-reserve (no-prior issues get guaranteed slot).
+    if ! should_dispatch "$NUM"; then
+      continue  # Issue added to DEFERRED_BUDGET_ISSUES[] by should_dispatch()
+    fi
+
     LANE="${ISSUE_LANE[$NUM]}"
     PR_BASE="${ISSUE_PR_BASE[$NUM]}"
-    echo "Dispatching #$NUM via forgedock run-issue --lane $PR_BASE"
+    COST="${ISSUE_COST_ESTIMATE[$NUM]:-0.35}"
+
+    # Advance PROJECTED_SPEND before forking so subsequent iterations see the updated total
+    PROJECTED_SPEND=$(echo "scale=4; $PROJECTED_SPEND + $COST" | bc 2>/dev/null || echo "$PROJECTED_SPEND")
+
+    echo "Dispatching #$NUM via forgedock run-issue --lane $PR_BASE (score=${ISSUE_SCORE[$NUM]:-?} est_cost=\$${COST} projected_total=\$${PROJECTED_SPEND})"
     forgedock run-issue "$NUM" --lane "$PR_BASE" &
   done
   wait
@@ -217,7 +316,7 @@ Agent(
 
 **YOUR MISSION**: Invoke `/work-on` via the Skill tool and let it run to completion. `/work-on` is a self-contained routing loop that handles the ENTIRE pipeline: investigate → build (context → architect → implement → validate) → review (push → PR → /review-pr --auto-merge) → close (project board → trajectory log → worktree cleanup). Do NOT intervene, compensate, or manually close issues — `/work-on` handles everything including issue closure and label updates in its close phase.
 
-**CRITICAL — DO NOT STOP EARLY**: /work-on runs as a multi-phase routing loop. Each phase (investigate, build, review, close) returns an intermediate result — these are NOT completion signals. You are NOT done until the issue reaches a terminal state: `workflow:merged`, `workflow:invalid`, or `needs-human`. If /work-on returns after only one phase (e.g., investigation), you MUST invoke it again immediately — it will re-read GitHub state and continue to the next phase. Keep invoking /work-on until it reaches a terminal state. Never output 'done' or stop after an intermediate result.
+**CRITICAL — DO NOT STOP EARLY**: /work-on runs as a multi-phase routing loop. Each phase (investigate, build, review, close) returns an intermediate result — these are NOT completion signals. You are NOT done until the issue reaches a terminal state: `workflow:merged`, `workflow:invalid`, `needs-human`, or `workflow:awaiting-merge`. If /work-on returns after only one phase (e.g., investigation), you MUST invoke it again immediately — it will re-read GitHub state and continue to the next phase. Keep invoking /work-on until it reaches a terminal state. Never output 'done' or stop after an intermediate result.
 
 **HOW REVIEW FINDINGS WORK**: /review-pr may create GitHub issues (with `review-finding` label) for findings it discovers. These are NOT blockers — they are separate work items that will go through their own /work-on pipeline later. The original PR should ALWAYS merge after review. The only exception is build errors (code doesn't compile) — those must be fixed before merging.
 
@@ -239,7 +338,8 @@ After EVERY `Skill(skill='work-on', ...)` call returns, immediately check the is
 gh issue view {NUMBER} -R {GH_REPO} --json labels --jq '[.labels[].name | select(startswith("workflow:"))]'
 ```
 **Terminal labels** (only these allow you to stop): `workflow:merged`, `workflow:invalid`
-**Terminal condition also**: `needs-human` label present OR issue state is `closed`
+**Terminal condition also**: `needs-human` label present, `workflow:awaiting-merge` label present, OR issue state is `closed`
+`needs-human` and `workflow:awaiting-merge` are terminal-FOR-THIS-AGENT (this individual `/work-on` run stops here — a human decision or merge is now the blocking step) but are NOT "done" from the DAG's point of view; see Predecessor Classification in Step 4B for how the orchestrator's dependency logic treats them (`GATED`, not `DONE`).
 If the label is NOT terminal (e.g., `workflow:investigating`, `workflow:ready-to-build`, `workflow:building`, `workflow:in-review`), invoke `Skill(skill='work-on', args='{NUMBER}')` again immediately. The `/work-on` skill will re-read GitHub state and advance to the next phase. Do NOT output a summary, do NOT pause, do NOT ask for confirmation — just invoke it again.
 
 **CRITICAL — SOURCE BRANCH DETECTION**:
@@ -297,6 +397,30 @@ fi
 
 If `GIST_CONTEXT` is empty (no synthesis brief, no parent investigation, and no milestone index found), the variable resolves to a blank line in the template — no impact on the agent prompt. <!-- Updated: forge#341, forge#1192 -->
 
+**Claims board context injection** <!-- Added: forge#1736 -->: When a coordination issue exists for this batch (`FORGE_COORD_ISSUE` is set), append the claims board URL and the active-claims check instruction to the agent's context. This enables each `/work-on` agent to post its `FORGE:CLAIM` on build start.
+
+```bash
+# Inject coordination issue URL if claims board was created in Step 3D.1
+if [ -n "${FORGE_COORD_ISSUE:-}" ]; then
+  GIST_CONTEXT="${GIST_CONTEXT}
+
+**ORCHESTRATION CLAIMS BOARD**: This agent is running under an orchestration batch.
+Claims board issue URL: ${FORGE_COORD_ISSUE}
+
+On build start (Phase B2 / Phase 3C of /work-on), post a FORGE:CLAIM annotation on the
+coordination issue above. Required fields:
+  Holder: ##{NUMBER} / batch-$(date -u +%Y%m%dT%H%M%S)
+  Files: (list of files from your FORGE:CONTRACT deliverables table, one per line)
+  Interfaces: (public function/type signatures you will modify or that callers must preserve)
+  TTL: terminal state of Holder issue ##{NUMBER}
+
+On reaching terminal state (workflow:merged, workflow:invalid, needs-human, or workflow:awaiting-merge), post
+<!-- FORGE:CLAIM_RELEASED --> on the coordination issue to release your claim.
+
+Set FORGE_COORD_ISSUE=${FORGE_COORD_ISSUE} in your environment so /work-on phases can read it."
+fi
+```
+
 **Hot-copy CONTRACT context** (extends `{GIST_CONTEXT}` for milestone-lane issues where the parent issue already carries a `FORGE:CONTRACT` annotation): <!-- Added: forge#1277 -->
 
 When a DAG node issue was spawned from a decomposition (parent issue has `workflow:decomposed` label and the child issue body references `**Parent**: #NNN`), the parent issue may already have a `FORGE:CONTRACT` annotation that was posted before decomposition. Inject a scoped excerpt into the child's prompt so the child does not re-fetch it.
@@ -339,23 +463,71 @@ You will be automatically notified when each background agent completes. **Do NO
 
 **Successor dispatch latency is measured from `agent_completed`, not from orchestrator polling.** The moment you receive an `agent_completed` notification for issue N, that is t=0 for dispatching N's successors. Any successor whose predecessors are all now terminal MUST be dispatched in the same response that processes the notification — not after a poll cycle, not after a sleep. This is the design property that makes streaming DAG execution faster than wave-based execution. <!-- Added: forge#1251 -->
 
-**Core streaming dispatch loop**: After processing each agent completion, check the DAG for newly unblocked issues. If any issue now has all predecessors in a terminal state, dispatch it immediately (run Steps 4A.pre.0, 4A.pre, and 4A for the newly ready issues). This is the key difference from the wave model — issues dispatch as soon as their specific predecessors complete, not after an entire group finishes.
+**Predecessor Classification (DONE / GATED / FAILED)** <!-- Added: forge#1812 --> — every check in this file that asks "is predecessor X resolved enough for its dependents to proceed" MUST classify X into exactly one of three states below — never a single binary terminal/non-terminal grep. Earlier versions of this file independently patched `grep -qE 'workflow:merged|workflow:invalid|needs-human|CLOSED'` in multiple places, and the copies drifted: the readiness check (this step) treated `needs-human` as done-enough-to-dispatch-through, while the failure handler (item 6 below) treated the identical label as a hard failure that skips dependents. Both cannot be right at once — `needs-human` means the predecessor's code is paused pending a human decision and is NOT yet in the base branch, so dispatching a dependent against it is unsafe, but permanently skipping the dependent is also wrong once the human resolves the block. The fix is a third state:
+
+```bash
+classify_predecessor_state() {
+  local PRED="$1"
+  local PRED_INFO
+  # NOTE: the `workflow` array below deliberately also keeps `needs-human` — that label has NO
+  # `workflow:` prefix (see bin/labels.json), so a bare `select(startswith("workflow:"))` would
+  # drop it and the GATED branch's `needs-human` case would be dead code (forge#1812 primary case).
+  PRED_INFO=$(gh issue view "$PRED" -R {GH_REPO} --json labels,state \
+    --jq '{state: .state, workflow: [.labels[].name | select(startswith("workflow:") or . == "needs-human")]}' 2>/dev/null || echo '{}')
+  local PRED_STATE PRED_LABELS
+  PRED_STATE=$(echo "$PRED_INFO" | jq -r '.state // "OPEN"')
+  PRED_LABELS=$(echo "$PRED_INFO" | jq -r '.workflow[]?' 2>/dev/null)
+
+  if echo "$PRED_LABELS" | grep -qx "workflow:invalid"; then
+    echo "FAILED"
+  elif echo "$PRED_LABELS" | grep -qx "workflow:merged"; then
+    echo "DONE"
+  elif echo "$PRED_LABELS" | grep -qxE "needs-human|workflow:awaiting-merge"; then
+    echo "GATED"
+  elif [ "$PRED_STATE" = "CLOSED" ]; then
+    # Closed with no workflow:invalid/merged label (e.g. closed-not-planned) — treat as DONE,
+    # not a new deadlock state; there is no pending code for dependents to wait on.
+    echo "DONE"
+  else
+    echo "IN_PROGRESS"
+  fi
+}
+```
+
+- **DONE** — predecessor's code is in the base branch (`workflow:merged`), or the predecessor is closed with no pending code. Safe for dependents to dispatch.
+- **GATED** — predecessor is paused pending a human decision (`needs-human`) or pending only a human merge click (`workflow:awaiting-merge`). Its code is NOT yet in the base branch. Dependents are neither dispatched nor skipped — they move to the `blocked-on-human-merge` tracked state (item 6.5 below).
+- **FAILED** — predecessor was closed as `workflow:invalid`, or the agent explicitly reported a build/test error. Dependents are marked "skipped — dependency failed" (item 6 below) — unchanged from prior behavior.
+- **IN_PROGRESS** — predecessor is still mid-pipeline (`investigating`/`ready-to-build`/`building`/`in-review`). Dependent simply continues waiting; no special tracking needed.
+
+A GATED predecessor whose PR later merges reclassifies to DONE the next time `classify_predecessor_state` runs (its label flips to `workflow:merged`) — this is exactly what the merge-triggered wake check (item 6.6 below) relies on.
+
+**Core streaming dispatch loop**: After processing each agent completion, check the DAG for newly unblocked issues. If any issue now has all predecessors classified `DONE`, dispatch it immediately (run Steps 4A.pre.0, 4A.pre, and 4A for the newly ready issues). This is the key difference from the wave model — issues dispatch as soon as their specific predecessors complete, not after an entire group finishes.
 
 ```bash
 # After each agent completion, check for newly ready issues:
 for BLOCKED_NUM in {all_blocked_issue_numbers}; do
   ALL_PREDS_DONE=true
+  ANY_PRED_GATED=false
+  GATING_PREDS=()
   for PRED in {predecessors_of_BLOCKED_NUM}; do
-    PRED_STATE=$(gh issue view $PRED -R {GH_REPO} --json labels,state --jq '{state: .state, workflow: [.labels[].name | select(startswith("workflow:"))]}')
-    # Terminal states: workflow:merged, workflow:invalid, needs-human, or state=CLOSED
-    if ! echo "$PRED_STATE" | grep -qE 'workflow:merged|workflow:invalid|needs-human|CLOSED'; then
-      ALL_PREDS_DONE=false
-      break
-    fi
+    PRED_STATE=$(classify_predecessor_state "$PRED")
+    case "$PRED_STATE" in
+      DONE) ;;  # satisfied — no action
+      FAILED) ALL_PREDS_DONE=false ;;             # handled by item 6 (skip dependents)
+      GATED)
+        ALL_PREDS_DONE=false
+        ANY_PRED_GATED=true
+        GATING_PREDS+=("$PRED")
+        ;;                                        # handled by item 6.5 (blocked-on-human-merge)
+      IN_PROGRESS|*) ALL_PREDS_DONE=false ;;       # just keep waiting
+    esac
   done
   if [ "$ALL_PREDS_DONE" = "true" ]; then
-    echo "#{BLOCKED_NUM} is now READY — all predecessors resolved. Dispatching."
+    echo "#{BLOCKED_NUM} is now READY — all predecessors DONE (merged/resolved). Dispatching."
     # Add to dispatch batch for this completion cycle
+  elif [ "$ANY_PRED_GATED" = "true" ]; then
+    echo "#{BLOCKED_NUM} is BLOCKED-ON-HUMAN-MERGE — gated by: ${GATING_PREDS[*]}. See item 6.5."
+    # Do NOT dispatch. Do NOT mark skipped. Tracked via item 6.5.
   fi
 done
 # Run Steps 4A.pre.0 → 4A.pre → 4A for newly ready issues (batch them in a single message)
@@ -365,12 +537,16 @@ done
 
 1. **Check if the agent completed the FULL pipeline** — not just one phase:
    ```bash
-   # Check final workflow state — only workflow:merged or workflow:invalid means truly done
+   # Check final workflow state — workflow:merged, workflow:invalid, needs-human, and
+   # workflow:awaiting-merge all mean this agent's own /work-on run has stopped (the last
+   # two are human-gated pauses, not completions). See Predecessor Classification above for
+   # how the DAG's readiness/failure logic treats these same labels differently from "this
+   # agent is done running."
    FINAL_STATE=$(gh issue view $NUM -R {GH_REPO} --json labels,state --jq '{state: .state, workflow: [.labels[].name | select(startswith("workflow:"))]}')
    echo "#{NUM}: $FINAL_STATE"
    ```
 
-2. **If the issue is NOT in a terminal state** (`workflow:merged`, `workflow:invalid`, or `needs-human`), the agent stalled mid-pipeline. **Resume it immediately**:
+2. **If the issue is NOT in a terminal-for-this-agent state** (`workflow:merged`, `workflow:invalid`, `needs-human`, or `workflow:awaiting-merge`), the agent stalled mid-pipeline. **Resume it immediately**:
    ```
    Agent(
      resume=AGENT_ISSUE_MAP[{NUMBER}],
@@ -383,11 +559,100 @@ done
 
 3. **Track resume cycles per agent.** If an agent has been resumed 2+ times and still hasn't reached a terminal state, report it as a failure — do not resume again.
 
-4. **Record completed results**: Success (PR merged), Invalid (issue closed), Blocked (needs human), or Error
+4. **Post CLAIM_RELEASED on coordination issue** (when `FORGE_COORD_ISSUE` is set): <!-- Added: forge#1736 -->
+   ```bash
+   # After verifying terminal state for issue NUM, release its claim on the coordination issue
+   if [ -n "${FORGE_COORD_ISSUE:-}" ]; then
+     COORD_NUM=$(echo "$FORGE_COORD_ISSUE" | grep -oE '[0-9]+$')
+     if [ -n "$COORD_NUM" ]; then
+       gh issue comment "$COORD_NUM" -R {GH_REPO} --body "<!-- FORGE:CLAIM_RELEASED -->
+**Holder**: #${NUM} — reached terminal state: ${FINAL_WORKFLOW_STATE}
+**Released**: $(date -u +%Y-%m-%dT%H:%M:%SZ)" 2>/dev/null || true
+       echo "CLAIM_RELEASED posted for #${NUM} on coordination issue #${COORD_NUM}"
+     fi
+   fi
+   ```
+
+   **Claims-board relaxation sweep** (run after posting CLAIM_RELEASED): When a claim is released, check all remaining Layer-2/4-serialized issue pairs. If the now-released Holder's claimed files were the *only* conflict reason for a still-blocked issue, and that blocked issue already has an active `FORGE:CLAIM` with a disjoint file set, the blocking edge MAY be relaxed (blocked issue becomes ready). <!-- Added: forge#1736 -->
+
+   ```bash
+   # After CLAIM_RELEASED for issue NUM:
+   # Read all active FORGE:CLAIM annotations from coordination issue
+   if [ -n "${FORGE_COORD_ISSUE:-}" ] && [ -n "${COORD_NUM:-}" ]; then
+     ACTIVE_CLAIMS=$(gh api repos/{GH_REPO}/issues/${COORD_NUM}/comments \
+       --jq '[.[] | select(.body | contains("<!-- FORGE:CLAIM -->")) |
+              select(.body | contains("<!-- FORGE:CLAIM_RELEASED -->") | not)] |
+             map({holder: (.body | capture("\\*\\*Holder\\*\\*: (?P<h>[^\\n]+)").h),
+                  files: (.body | capture("\\*\\*Files\\*\\*: (?P<f>[^\\n]+)").f)})' 2>/dev/null || echo '[]')
+     # For each still-blocked issue in a Layer-2/4 pair: check if its claim's file set
+     # is disjoint from all remaining active claims. If so, mark it ready.
+     # (Layer-1 and Layer-3 edges are never relaxed — this check is Layer-2/4 only.)
+     for BLOCKED_NUM in {layer_2_4_blocked_issues}; do
+       BLOCKED_CLAIM_FILES=$(echo "$ACTIVE_CLAIMS" \
+         | jq -r --arg h "#${BLOCKED_NUM}" '.[] | select(.holder | startswith($h)) | .files' 2>/dev/null || echo "")
+       if [ -n "$BLOCKED_CLAIM_FILES" ]; then
+         # Compare file set with all other active claims — if disjoint, downgrade to ready
+         echo "Claims-board relaxation: checking if #${BLOCKED_NUM} can be unblocked based on disjoint claims"
+         # (Implementer: build a set-intersection check here using sorted file lists)
+       fi
+     done
+   fi
+   ```
+
+5. **Record completed results**: Success (PR merged), Invalid (issue closed), Blocked (needs human), Awaiting-merge (`workflow:awaiting-merge` — remediated + re-reviewed to APPROVED after an earlier `needs-human` escalation; needs only a human merge, not diagnosis — keep distinct from Blocked in any status output, see item 8), or Error
 
 5. **Check for newly unblocked issues** — run the DAG readiness check above. If any issues are now ready, dispatch them immediately (Steps 4A.pre.0 → 4A.pre → 4A). Batch all newly ready issues into a single dispatch message.
 
-6. **Handle predecessor failures** — if a completed agent's issue FAILED (needs-human, invalid, or error), check for dependent issues in the DAG. Mark all transitive dependents as "skipped — dependency #{X} failed" and report them. Do NOT dispatch them.
+6. **Handle predecessor failures** — if a completed agent's issue classifies as `FAILED` (`workflow:invalid`, or an explicit build/test error — see Predecessor Classification above; `needs-human` and `workflow:awaiting-merge` are GATED, not FAILED — see item 6.5), check for dependent issues in the DAG. Mark all transitive dependents as "skipped — dependency #{X} failed" and report them. Do NOT dispatch them.
+
+6.5. **Handle predecessor gating** (`GATED` — `needs-human` or `workflow:awaiting-merge`) <!-- Added: forge#1812 --> — if a completed agent's issue classifies as `GATED`, its direct dependents are neither dispatched nor marked failed/skipped. For each direct dependent `DEP` of the gated predecessor `PRED`:
+   ```bash
+   # Resolve PRED's open PR, if any, using the anchored search (forge#1634/#1646 precedent —
+   # do NOT fall back to a bare-number search here; a stale unrelated PR would misattribute gating).
+   GATING_PR=$(gh pr list -R {GH_REPO} --state open --search "\"Closes #${PRED}\" in:body" \
+     --json number --jq '.[0].number // empty' 2>/dev/null || echo "")
+   PRED_LABEL=$(gh issue view "$PRED" -R {GH_REPO} --json labels \
+     --jq '[.labels[].name | select(. == "needs-human" or . == "workflow:awaiting-merge")] | .[0] // "needs-human"' 2>/dev/null)
+
+   # Self-heal the label if it hasn't been bootstrapped yet (same pattern as review-pr.md 6C —
+   # colors match the canonical manifest bin/labels.json; --force makes this idempotent/cheap).
+   gh label create "blocked-on-human-merge" --color "006B75" --description "Dependent of a gated (needs-human/awaiting-merge) predecessor. Managed by ForgeDock." --force -R {GH_REPO} 2>/dev/null
+
+   # Idempotency: only post/label if not already tracked for this specific predecessor.
+   # Anchor on the exact "**Gating predecessor**: #N" label with a word boundary —
+   # a bare contains("#N") substring would false-match #50/#500 for predecessor #5. <!-- forge#1830 -->
+   ALREADY_TRACKED=$(gh api repos/{GH_REPO}/issues/${DEP}/comments \
+     --jq --arg prednum "${PRED}" '[.[] | select(.body | contains("FORGE:BLOCKED_ON_HUMAN_MERGE") and test("Gating predecessor\\*\\*: #" + $prednum + "\\b"))] | length' 2>/dev/null || echo "0")
+   if [ "$ALREADY_TRACKED" -eq 0 ]; then
+     gh issue comment "$DEP" -R {GH_REPO} --body "<!-- FORGE:BLOCKED_ON_HUMAN_MERGE -->
+**Gating predecessor**: #${PRED} (state: \`${PRED_LABEL}\`${GATING_PR:+, open PR #${GATING_PR}})
+**Status**: This issue is ready to dispatch as soon as #${PRED}'s gating PR merges. No action needed — the orchestrator (live session via item 6.6, or the next \`/orchestrate\` invocation via phase-3-dependency.md's wake reconstruction) will auto-dispatch it the moment #${PRED} reaches \`workflow:merged\`."
+     gh issue edit "$DEP" -R {GH_REPO} --add-label "blocked-on-human-merge" 2>/dev/null || true
+   fi
+   ```
+   Do NOT dispatch `DEP`. Do NOT mark it skipped — it remains visibly tracked as `blocked-on-human-merge` in the DAG, re-evaluated on the next completion event, stall-detection pass, or session wake.
+
+6.6. **Merge-triggered wake for blocked-on-human-merge dependents** <!-- Added: forge#1812 --> — whenever a completed agent's issue classifies as `DONE` via `workflow:merged` (i.e. it just merged), check whether any other issue is tracked as blocked on it — this makes gated dependents dispatch the instant the gating PR merges, with no manual `/orchestrate` re-run required:
+   ```bash
+   WOKEN=$(gh issue list -R {GH_REPO} --state open --label "blocked-on-human-merge" --json number \
+     --jq '.[].number' 2>/dev/null || echo "")
+   for DEP in $WOKEN; do
+     IS_GATED_BY_THIS=$(gh api repos/{GH_REPO}/issues/${DEP}/comments \
+       --jq --arg prednum "${NUM}" '[.[] | select(.body | contains("FORGE:BLOCKED_ON_HUMAN_MERGE") and test("Gating predecessor\\*\\*: #" + $prednum + "\\b"))] | length' 2>/dev/null || echo "0")
+     [ "$IS_GATED_BY_THIS" -gt 0 ] || continue
+     # Idempotency: only dispatch if DEP hasn't already been dispatched by another path.
+     DEP_ALREADY_DISPATCHED=$(gh issue view "$DEP" -R {GH_REPO} --json labels \
+       --jq '[.labels[].name | select(startswith("workflow:"))] | length' 2>/dev/null || echo "0")
+     if [ "$DEP_ALREADY_DISPATCHED" -eq 0 ]; then
+       gh issue edit "$DEP" -R {GH_REPO} --remove-label "blocked-on-human-merge" 2>/dev/null || true
+       gh issue comment "$DEP" -R {GH_REPO} --body "<!-- FORGE:UNBLOCKED -->
+Gating predecessor #${NUM} reached \`workflow:merged\` — dispatching now. (Was tracked via a prior FORGE:BLOCKED_ON_HUMAN_MERGE comment.)"
+       echo "#{DEP} unblocked by #{NUM} merge — dispatching immediately (Steps 4A.pre.0 → 4A.pre → 4A)."
+       # Add DEP to the same-response dispatch batch
+     fi
+   done
+   ```
+   This satisfies the live-session case. For the case where the gating PR merges after the orchestrator session has already ended, the equivalent check runs in `phase-3-dependency.md`'s wake/compaction reconstruction on the next `/orchestrate` invocation — see that file's "Orchestrator state reconstruction on wake / after compaction" section.
 
 7. **Verify pipeline compliance** — for each truly completed issue, check that the agent used `/work-on`:
    ```bash
@@ -404,13 +669,22 @@ done
    ✓ #{NUMBER} — {title} → PR #{PR} merged to {target}
    ✗ #{NUMBER} — {title} → {reason for failure}
    ⚠ #{NUMBER} — {title} → PIPELINE BYPASS (no /work-on — PR invalid)
+   ⏸ #{NUMBER} — {title} → PR #{PR} awaiting-merge (remediated + re-approved — human merge only, no diagnosis needed)
+   🔗 #{NUMBER} — {title} → blocked-on-human-merge (gated by #{PRED}, will auto-dispatch on #{PRED} merge)
    ⏳ Progress: {completed}/{total} complete, {active} active, {blocked} blocked
    → Dispatched #{NEWLY_READY} (predecessor #{PRED} completed)
    ```
 
+   `⏸` (awaiting-merge) is deliberately distinct from `⚠` (blocked/bypass) — do not collapse the
+   two. `⚠` means the pipeline hit something it cannot resolve and a human must diagnose it;
+   `⏸` means the PR already cleared re-review and only needs a merge click. `🔗` (blocked-on-human-merge,
+   forge#1812) is distinct from both: it marks a DEPENDENT of a GATED predecessor (item 6.5) — the
+   dependent itself has no problem at all, it is simply waiting on someone else's merge. See Phase 6's
+   "Merge-Ready" report section (`phase-6-report.md` Step 6A.5/6B) for the batch-level rollup.
+
 9. **Run staging integrity check** (from Step 4A-pre) if the completed agent merged a PR targeting staging.
 
-**Termination condition**: All issues in the DAG are in a terminal state (merged, invalid, needs-human, or skipped due to dependency failure). When this condition is met, check whether deferred review-spawned findings exist (accumulated in `DEFERRED_FINDINGS` during Step 4C). If deferred findings exist → proceed to Step 4F (Completion Sweep). If no deferred findings → proceed to Phase 5.
+**Termination condition**: All issues in the DAG have reached `DONE` or `FAILED` (merged, invalid, or skipped due to dependency failure) — OR are `blocked-on-human-merge` (item 6.5) with no further dispatchable work remaining in the batch. These two outcomes are reported differently: a batch where every issue is `DONE`/`FAILED` is a **clean drain**; a batch where one or more issues remain `blocked-on-human-merge` is a **paused drain** — the active dispatch loop stops (there is nothing left to do until a human merges a gating PR) but this MUST be reported as paused, not as fully complete (see `phase-6-report.md`'s `🔗 Blocked-on-Merge` section). `needs-human` predecessors with no open PR are neither — they remain GATED indefinitely until either a PR appears (dependent moves to blocked-on-human-merge) or the predecessor itself resolves; do not treat isolated `needs-human` issues with no dependents as blocking termination. When either drain condition is met, check whether deferred review-spawned findings exist (accumulated in `DEFERRED_FINDINGS` during Step 4C). If deferred findings exist → proceed to Step 4F (Completion Sweep). If no deferred findings → proceed to Phase 5.
 
 **Anti-pattern — DO NOT DO THIS:**
 - `sleep 60/120/180/300` loops to check status — you will be notified automatically
@@ -437,9 +711,12 @@ STALL_TIMEOUT=$(yq '.pipeline.stall_timeout_minutes // 15' forge.yaml 2>/dev/nul
 **For each non-terminal agent in the current batch**:
 ```bash
 for NUM in {active_issue_numbers}; do
-  # Skip issues already in terminal state
+  # Skip issues already in a terminal-for-this-agent state (merged/invalid/needs-human/awaiting-merge).
+  # workflow:awaiting-merge MUST be included here (forge#1812) — otherwise the stall detector
+  # re-escalates an already-remediated-and-re-approved PR back to needs-human after STALL_TIMEOUT,
+  # silently collapsing the Awaiting-Merge/Blocked distinction forge#1811 introduced.
   TERMINAL=$(gh issue view $NUM -R {GH_REPO} --json labels \
-    --jq '[.labels[].name | select(. == "workflow:merged" or . == "workflow:invalid" or . == "needs-human")] | length')
+    --jq '[.labels[].name | select(. == "workflow:merged" or . == "workflow:invalid" or . == "needs-human" or . == "workflow:awaiting-merge")] | length')
   [ "$TERMINAL" -gt 0 ] && continue
 
   # Get last activity timestamp — prefer last comment (catches FORGE:HEARTBEAT updates)
@@ -607,6 +884,114 @@ for FINDING_NUM in {spawned_finding_numbers}; do
 done
 ```
 
+**Surface-area batching for queued P3 findings (MANDATORY check before dispatch):** <!-- Added: forge#1818 -->
+
+Cascade-spawned findings collected within a single `/orchestrate` run never pass back through Phase 1's batching rule — Phase 1 only runs once, at the start. Without a check here, same-file P3 findings spawned mid-run always dispatch individually, defeating the batching policy for exactly the findings it exists to catch. Apply the same grouping rule from `commands/orchestrate/phase-1-resolve.md` ("P3 Review-Finding Batching") to `QUEUED_FINDINGS` before the dispatch step below:
+
+```bash
+# Group QUEUED_FINDINGS by exact affected file, reusing the SAME safety
+# exclusions as phase-1-resolve.md. Both sites go through jq test() (Oniguruma)
+# with identical patterns — NOT grep ERE — so the two batching checks cannot
+# classify the same issue body differently. <!-- forge#1837 -->
+declare -A SURFACE_FILE_MEMBERS
+SURFACE_BATCHED_FINDINGS=()
+
+# Defensive cap on gh issue view fan-out. QUEUED_FINDINGS is already bounded by
+# upstream cascade control; this cap holds even if that bound is later loosened,
+# so the loop can never scale API calls linearly with cascade-seeded findings. <!-- forge#1836 -->
+MAX_BATCH_SCAN=50
+SCANNED=0
+
+for FINDING_NUM in "${QUEUED_FINDINGS[@]}"; do
+  SCANNED=$((SCANNED + 1))
+  if [ "$SCANNED" -gt "$MAX_BATCH_SCAN" ]; then
+    echo "Surface-area batching: reached MAX_BATCH_SCAN=$MAX_BATCH_SCAN — remaining findings stay individually queued"
+    break
+  fi
+
+  FINDING_DATA=$(gh issue view $FINDING_NUM -R {GH_REPO} --json title,body,labels \
+    --jq '{title: .title, body: .body, labels: [.labels[].name]}')
+
+  # Safety exclusions — never batch, at any priority. Same jq test() engine and
+  # patterns as phase-1-resolve.md's batching rule (single shared mechanism).
+  echo "$FINDING_DATA" | jq -e '
+    (.title | test("security|billing|anti-bot|auth"; "i"))
+    or (.body  | test("## Problem[\\s\\S]{0,500}(security|billing|anti-bot|auth)"; "i"))
+    or ([.labels[]] | any(. == "security" or . == "billing" or . == "anti-bot" or . == "auth"))
+  ' >/dev/null && continue
+
+  # Only P3 findings are eligible (P1/P2 already dispatched individually above)
+  echo "$FINDING_DATA" | jq -e '[.labels[]] | any(. == "priority:P3")' >/dev/null || continue
+
+  FINDING_FILE=$(echo "$FINDING_DATA" | jq -r '.body' | grep -oE '`[^`]+\.(py|tsx?|jsx?|sql|json|ya?ml|sh|md)`' | head -1 | tr -d '`')
+  [ -z "$FINDING_FILE" ] && continue
+
+  SURFACE_FILE_MEMBERS["$FINDING_FILE"]="${SURFACE_FILE_MEMBERS[$FINDING_FILE]} $FINDING_NUM"
+done
+
+# For each same-file cluster of 2+, actually CREATE the batch issue (executable —
+# mirrors phase-1-resolve.md's "Batch creation rule") and REPLACE the members with
+# the batch issue in QUEUED_FINDINGS so the dispatch step below never double-dispatches
+# them. This is what makes SURFACE_BATCHED_FINDINGS a live control, not dead wiring. <!-- forge#1832, forge#1834 -->
+for FILE in "${!SURFACE_FILE_MEMBERS[@]}"; do
+  MEMBERS=(${SURFACE_FILE_MEMBERS[$FILE]})
+  [ "${#MEMBERS[@]}" -ge 2 ] || continue
+
+  # Sanitize the affected-file path before interpolating it into the issue title/body.
+  # Git filenames can legally carry shell metacharacters (`$()`, backticks, quotes);
+  # restrict to a validated charset so the value cannot break the gh argument
+  # boundary from an untrusted issue body. Shared guard with phase-1-resolve.md. <!-- forge#1833, forge#1835 -->
+  SAFE_SURFACE_AREA=$(printf '%s' "$FILE" | tr -cd 'A-Za-z0-9._/-')
+
+  echo "Same-run surface-area cluster: ${#MEMBERS[@]} P3 findings share $FILE — creating batch issue(s)"
+
+  # Cap at 8 members per batch (phase-1-resolve.md limit); split into batches of <=8.
+  for START in $(seq 0 8 $(( ${#MEMBERS[@]} - 1 ))); do
+    CHUNK=("${MEMBERS[@]:$START:8}")
+    [ "${#CHUNK[@]}" -ge 2 ] || continue
+
+    MEMBER_LINES=""
+    for M in "${CHUNK[@]}"; do
+      MTITLE=$(gh issue view "$M" -R {GH_REPO} --json title --jq '.title' 2>/dev/null || echo "")
+      MEMBER_LINES="${MEMBER_LINES}- [ ] #${M}: ${MTITLE}"$'\n'
+    done
+
+    BATCH_ISSUE_NUM=$(gh issue create {GH_FLAG} \
+      --title "fix(batch): P3 review findings — ${SAFE_SURFACE_AREA} (same-run batch)" \
+      --label "review-finding,priority:P3,batch" \
+      --body "$(cat <<BATCH_EOF
+## Problem
+
+Batch of P3 review findings in **${SAFE_SURFACE_AREA}** (same file), clustered mid-run by phase-4-execution.md to reduce per-finding pipeline overhead.
+
+## Member Findings
+
+<!-- FORGE:BATCH_MEMBERS -->
+${MEMBER_LINES}<!-- /FORGE:BATCH_MEMBERS -->
+
+## Acceptance Criteria
+
+- [ ] All member findings addressed or closed as false-positive
+- [ ] Member issues auto-closed with reference to this batch PR on merge
+- [ ] No security, billing, anti-bot, or auth paths touched (validated before batching)
+
+<!-- FORGE:BATCHABLE -->
+BATCH_EOF
+)" --json number --jq '.number')
+
+    # Consume the cluster: record members and REPLACE them in QUEUED_FINDINGS
+    # with the single batch issue, so the dispatch step below operates on the
+    # batch unit and skips the individual members.
+    SURFACE_BATCHED_FINDINGS+=("${CHUNK[@]}")
+    QUEUED_FINDINGS=($(printf '%s\n' "${QUEUED_FINDINGS[@]}" | grep -vxF -f <(printf '%s\n' "${CHUNK[@]}") || true))
+    [ -n "$BATCH_ISSUE_NUM" ] && QUEUED_FINDINGS+=("$BATCH_ISSUE_NUM")
+    echo "Batched ${#CHUNK[@]} findings into #${BATCH_ISSUE_NUM}; members removed from QUEUED_FINDINGS and the DAG."
+  done
+done
+```
+
+Findings clustered here are replaced by their batch issue in `QUEUED_FINDINGS` (and therefore the DAG, which is built from `QUEUED_FINDINGS` in the dispatch step below) — the individual member issues in `SURFACE_BATCHED_FINDINGS` are never dispatched. Findings that remain ungrouped (fewer than 2 sharing a file in this collection round) stay individually queued below; they retain default-batchable eligibility and will be picked up by the next `/orchestrate` invocation's Phase 1 resolve if a same-file or leaf-directory cluster later forms across runs.
+
 **For queued (non-deferred) findings:**
 
 1. **Add them to the dependency DAG.** They are implementation issues — same as issues spawned by investigations in Phase 2. Compute their predecessor sets using the same conflict detection (Step 3C Layers 1-4) against all remaining blocked/active issues.
@@ -761,11 +1146,13 @@ fi
 ### Step 4E: Handle individual agent failures
 
 If an agent reports failure or error:
-- **Merge conflict**: Report to user, mark issue as needing human attention
-- **Invalid issue**: Already handled by the agent (closed with comment) — just report it
-- **Build/test failure**: Report the error, suggest manual intervention
-- **Agent timeout**: Report which issue timed out, suggest re-running with `/work-on #{N}`
-- **Dependency cascade**: Mark all transitive dependents in the DAG as "skipped — dependency #{X} failed"
+- **Merge conflict**: Report to user, mark issue as needing human attention (`needs-human`). This classifies as **GATED**, not FAILED — see Predecessor Classification in Step 4B. Its dependents follow the Dependency cascade rule below, not a hard skip.
+- **Invalid issue**: Already handled by the agent (closed with comment) — just report it. This classifies as **FAILED**.
+- **Build/test failure**: Report the error, suggest manual intervention. This classifies as **FAILED**.
+- **Agent timeout**: Report which issue timed out, suggest re-running with `/work-on #{N}`. Not yet terminal — leave dependents in `IN_PROGRESS` wait, no cascade action.
+- **Dependency cascade** <!-- Updated: forge#1812 -->: Re-run `classify_predecessor_state` (Step 4B) for the failed/gated issue before cascading — do NOT assume every entry above is a hard failure:
+  - If it classifies **FAILED** (invalid, or build/test failure): mark all transitive dependents in the DAG as "skipped — dependency #{X} failed" (same as Step 4B item 6).
+  - If it classifies **GATED** (merge conflict → `needs-human`, or `workflow:awaiting-merge`): do NOT mark dependents skipped. Instead apply Step 4B item 6.5 — track each direct dependent as `blocked-on-human-merge` against this predecessor, so it auto-dispatches via item 6.6 the moment the predecessor reaches `workflow:merged`.
 
 **Do NOT retry failed agents automatically.** Report the failure and let the user decide.
 
@@ -921,7 +1308,7 @@ The context-gathering phase can fetch this index to discover all investigation G
 
 **YOUR MISSION**: Invoke \`/work-on\` via the Skill tool and let it run to completion. \`/work-on\` is a self-contained routing loop that handles the ENTIRE pipeline: investigate → build (context → architect → implement → validate) → review (push → PR → /review-pr --auto-merge) → close (project board → trajectory log → worktree cleanup). Do NOT intervene, compensate, or manually close issues — \`/work-on\` handles everything including issue closure and label updates in its close phase.
 
-**CRITICAL — DO NOT STOP EARLY**: /work-on runs as a multi-phase routing loop. Each phase (investigate, build, review, close) returns an intermediate result — these are NOT completion signals. You are NOT done until the issue reaches a terminal state: \`workflow:merged\`, \`workflow:invalid\`, or \`needs-human\`. If /work-on returns after only one phase (e.g., investigation), you MUST invoke it again immediately — it will re-read GitHub state and continue to the next phase. Keep invoking /work-on until it reaches a terminal state. Never output 'done' or stop after an intermediate result.
+**CRITICAL — DO NOT STOP EARLY**: /work-on runs as a multi-phase routing loop. Each phase (investigate, build, review, close) returns an intermediate result — these are NOT completion signals. You are NOT done until the issue reaches a terminal state: \`workflow:merged\`, \`workflow:invalid\`, \`needs-human\`, or \`workflow:awaiting-merge\`. If /work-on returns after only one phase (e.g., investigation), you MUST invoke it again immediately — it will re-read GitHub state and continue to the next phase. Keep invoking /work-on until it reaches a terminal state. Never output 'done' or stop after an intermediate result.
 
 **HOW REVIEW FINDINGS WORK**: /review-pr may create GitHub issues (with \`review-finding\` label) for findings it discovers. These are NOT blockers — they are separate work items that will go through their own /work-on pipeline later. The original PR should ALWAYS merge after review. The only exception is build errors (code doesn't compile) — those must be fixed before merging.
 
@@ -943,7 +1330,7 @@ After EVERY \`Skill(skill='work-on', ...)\` call returns, immediately check the 
 gh issue view ${FINDING_NUM} -R {GH_REPO} --json labels --jq '[.labels[].name | select(startswith(\"workflow:\"))]'
 \`\`\`
 **Terminal labels** (only these allow you to stop): \`workflow:merged\`, \`workflow:invalid\`
-**Terminal condition also**: \`needs-human\` label present OR issue state is \`closed\`
+**Terminal condition also**: \`needs-human\` label present, \`workflow:awaiting-merge\` label present, OR issue state is \`closed\`
 If the label is NOT terminal (e.g., \`workflow:investigating\`, \`workflow:ready-to-build\`, \`workflow:building\`, \`workflow:in-review\`), invoke \`Skill(skill='work-on', args='${FINDING_NUM}')\` again immediately. The \`/work-on\` skill will re-read GitHub state and advance to the next phase. Do NOT output a summary, do NOT pause, do NOT ask for confirmation — just invoke it again.
 
 **CRITICAL — SOURCE BRANCH DETECTION**:
@@ -975,12 +1362,44 @@ Completion Sweep Results:
   Permanently deferred (gen2): #{D} (generation >= 2 cascade cap)
 ```
 
-**After sweep agents complete** (or if no findings were dispatched): proceed to Phase 5.
+**After sweep agents complete** (or if no findings were dispatched): output the budget deferred-issues report (if applicable), then proceed to Phase 5.
 
 **Anti-patterns — DO NOT DO THIS:**
 - Re-sweeping findings spawned during the sweep itself — this creates unbounded recursion. Sweep is a single pass.
 - Overriding generation >= 2 deferrals — the cascade cap is absolute.
 - Skipping the sweep because "there are only a few" deferred findings — even one deferred finding represents unresolved work.
+
+### Step 4F.5: Budget Deferred-Issues Report (conditional) <!-- Added: forge#1743 -->
+
+**Run only when `BUDGET_LIMIT != "Infinity"` AND `${#DEFERRED_BUDGET_ISSUES[@]} > 0`.**
+
+Deferred issues are issues that were not dispatched because their estimated cost would have pushed projected spend past the budget ceiling (after reserving ε for no-prior issues). They are **never silently dropped** — this report makes them visible and actionable.
+
+```bash
+if [ "$BUDGET_LIMIT" != "Infinity" ] && [ "${#DEFERRED_BUDGET_ISSUES[@]}" -gt 0 ]; then
+  echo ""
+  echo "## Budget Report"
+  echo ""
+  echo "**Budget limit**: \$${BUDGET_LIMIT}"
+  echo "**Projected spend (dispatched issues)**: \$${PROJECTED_SPEND}"
+  echo "**Actual spend (completed issues, best-effort)**: \$${ACTUAL_SPEND}"
+  echo "**ε-reserve used**: ${EPSILON_DISPATCHED} (10% = \$${EPSILON_BUDGET})"
+  echo ""
+  echo "### Deferred Issues (budget exhausted — never silently dropped)"
+  echo ""
+  echo "| Issue | Title | Score | Est. Cost | Reason |"
+  echo "|-------|-------|-------|-----------|--------|"
+  for DNUM in "${DEFERRED_BUDGET_ISSUES[@]}"; do
+    DTITLE=$(gh issue view "$DNUM" -R {GH_REPO} --json title --jq '.title' 2>/dev/null || echo "(unknown)")
+    DSCORE="${ISSUE_SCORE[$DNUM]:-?}"
+    DCOST="${ISSUE_COST_ESTIMATE[$DNUM]:-?}"
+    echo "| #${DNUM} | ${DTITLE} | ${DSCORE} | \$${DCOST} | Budget ceiling reached |"
+  done
+  echo ""
+  DEFERRED_LIST=$(IFS=' '; echo "${DEFERRED_BUDGET_ISSUES[*]}")
+  echo "**Action**: Re-run \`/orchestrate ${DEFERRED_LIST} [--budget N]\` to process deferred issues, or increase \`--budget\`."
+fi
+```
 
 ---
 

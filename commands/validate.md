@@ -132,3 +132,55 @@ If NOT A PROBLEM — why the report was wrong:
 If NEEDS MORE DATA — what's missing:
   [specific questions to answer]
 ```
+
+---
+
+## Step 5: Finding Lifecycle Label Transition (MANDATORY when input is an issue number)
+
+**Skip if**: Input was not an issue number (e.g., `/validate` was invoked with a plain description, not `#NNN`).
+
+**Purpose**: If the validated issue is a review-finding with `needs-validation`, wire the verdict back into the finding lifecycle. This prevents `needs-validation` from becoming a permanent no-op label. <!-- Added: forge#1730 -->
+
+```bash
+# Parse issue number from input — skip if not an issue reference
+INPUT_ISSUE=$(echo "$ARGUMENTS" | grep -oE '#?([0-9]+)' | grep -oE '[0-9]+' | head -1)
+GH_FLAG=$(yq -r '"-R " + .project.owner + "/" + .project.repo' forge.yaml 2>/dev/null || echo "")
+
+if [ -n "$INPUT_ISSUE" ] && [ -n "$GH_FLAG" ]; then
+  ISSUE_LABELS=$(gh issue view "$INPUT_ISSUE" "$GH_FLAG" --json labels \
+    --jq '[.labels[].name] | join(",")' 2>/dev/null || echo "")
+
+  if echo "$ISSUE_LABELS" | grep -q "needs-validation"; then
+    echo "Issue #$INPUT_ISSUE has needs-validation — applying verdict label transition..."
+
+    # Map /validate verdict to transition-label.sh verdict format
+    # CONFIRMED → validated; NOT A PROBLEM / NEEDS MORE DATA → false-positive
+    case "$VALIDATION_VERDICT" in
+      CONFIRMED)         FORGE_VERDICT="CONFIRMED" ;;
+      "NOT A PROBLEM")   FORGE_VERDICT="NOT-CONFIRMED" ;;
+      "NEEDS MORE DATA") FORGE_VERDICT="NOT-CONFIRMED" ;;
+      *)                 FORGE_VERDICT="NOT-CONFIRMED" ;;
+    esac
+
+    # Resolve and call transition-label.sh --validate
+    REPO_PATH=$(yq -r '.paths.root' forge.yaml 2>/dev/null || echo ".")
+    SCRIPT="$REPO_PATH/scripts/transition-label.sh"
+    if [ -f "$SCRIPT" ]; then
+      bash "$SCRIPT" --validate "$FORGE_VERDICT" "$INPUT_ISSUE" "$GH_FLAG" || true
+    else
+      # Prose fallback: apply directly via gh
+      if [ "$FORGE_VERDICT" = "CONFIRMED" ]; then
+        gh issue edit "$INPUT_ISSUE" "$GH_FLAG" --add-label "validated" --remove-label "needs-validation" 2>/dev/null || true
+        echo "Applied: needs-validation → validated"
+      else
+        gh issue edit "$INPUT_ISSUE" "$GH_FLAG" --add-label "false-positive" --remove-label "needs-validation" 2>/dev/null || true
+        echo "Applied: needs-validation → false-positive"
+      fi
+    fi
+  else
+    echo "Issue #$INPUT_ISSUE does not have needs-validation — no label transition needed"
+  fi
+fi
+```
+
+**Note**: `$VALIDATION_VERDICT` is the verdict string from Step 4's output block. Extract it before this step runs. If extraction fails, default to `NOT-CONFIRMED` (conservative — do not auto-label as confirmed).
