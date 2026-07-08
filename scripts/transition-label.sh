@@ -2,6 +2,7 @@
 # transition-label.sh — Workflow label state machine for ForgeDock pipeline
 #
 # Usage: transition-label.sh <ISSUE_NUMBER> <GH_FLAG...> <TARGET_STATE>
+#   OR:  transition-label.sh --validate <VERDICT> <ISSUE_NUMBER> [GH_FLAG...]
 #
 #   ISSUE_NUMBER  GitHub issue number (e.g. 674)
 #   GH_FLAG       Repository flag passed to gh (e.g. -R RapierCraftStudios/forgedock)
@@ -9,22 +10,114 @@
 #   TARGET_STATE  One of: investigating, ready-to-build, building, in-review,
 #                         merged, invalid, decomposed
 #
+#   --validate    Sub-command mode: translate an investigation verdict into a
+#                 finding-lifecycle label (needs-validation → validated/false-positive).
+#   VERDICT       One of: CONFIRMED, NOT-CONFIRMED, INVALID, PARTIAL
+#                 CONFIRMED → validated; all others → false-positive
+#
 # Examples:
 #   transition-label.sh 674 -R RapierCraftStudios/forgedock investigating
 #   transition-label.sh 674 -R owner/repo ready-to-build
+#   transition-label.sh --validate CONFIRMED 674 -R owner/repo
+#   transition-label.sh --validate NOT-CONFIRMED 674 -R owner/repo
 #
-# Behavior:
+# Behavior (workflow mode):
 #   1. Validates ISSUE_NUMBER and TARGET_STATE
 #   2. Verifies the issue exists (exits 1 if not)
 #   3. Adds workflow:{TARGET_STATE} label
 #   4. Removes all other workflow:* labels atomically
+#
+# Behavior (--validate mode):
+#   1. Validates VERDICT and ISSUE_NUMBER
+#   2. Verifies issue exists and has needs-validation label (exits 0 silently if not)
+#   3. Adds validated (CONFIRMED) or false-positive (all other verdicts) label
+#   4. Removes needs-validation label
+#   5. Idempotent: if already labeled validated/false-positive, exits 0 silently
 #
 # Exit codes: 0 = success, 1 = error (bad args, issue not found, gh failure)
 
 set -euo pipefail
 
 # ---------------------------------------------------------------------------
-# Argument parsing
+# --validate sub-command: finding lifecycle label transition
+# Signature: --validate <VERDICT> <ISSUE_NUMBER> [GH_FLAG...]
+# Separate from the workflow state machine — operates on needs-validation,
+# validated, false-positive labels only; never touches workflow:* labels.
+# ---------------------------------------------------------------------------
+if [ "${1:-}" = "--validate" ]; then
+  shift
+
+  if [ "$#" -lt 2 ]; then
+    echo "ERROR: Usage: transition-label.sh --validate <VERDICT> <ISSUE_NUMBER> [GH_FLAG...]" >&2
+    echo "       VERDICT: CONFIRMED | NOT-CONFIRMED | INVALID | PARTIAL" >&2
+    echo "       Example: transition-label.sh --validate CONFIRMED 674 -R owner/repo" >&2
+    exit 1
+  fi
+
+  VERDICT="$1"
+  shift
+  ISSUE_NUMBER="$1"
+  shift
+  GH_ARGS=("$@")
+
+  # Validate verdict
+  case "$VERDICT" in
+    CONFIRMED|NOT-CONFIRMED|INVALID|PARTIAL) ;;
+    *)
+      echo "ERROR: Unknown verdict: '$VERDICT'" >&2
+      echo "       Valid verdicts: CONFIRMED, NOT-CONFIRMED, INVALID, PARTIAL" >&2
+      exit 1
+      ;;
+  esac
+
+  # Validate issue number
+  if ! [[ "$ISSUE_NUMBER" =~ ^[0-9]+$ ]]; then
+    echo "ERROR: ISSUE_NUMBER must be a positive integer, got: '$ISSUE_NUMBER'" >&2
+    exit 1
+  fi
+
+  # Verify issue exists
+  if ! gh issue view "$ISSUE_NUMBER" "${GH_ARGS[@]}" --json number >/dev/null 2>&1; then
+    echo "ERROR: Issue #$ISSUE_NUMBER not found (GH_FLAG: ${GH_ARGS[*]:-<none>})" >&2
+    exit 1
+  fi
+
+  # Check if issue carries needs-validation (idempotent gate)
+  CURRENT_LABELS=$(gh issue view "$ISSUE_NUMBER" "${GH_ARGS[@]}" --json labels \
+    --jq '[.labels[].name] | join(",")' 2>/dev/null || echo "")
+
+  if ! echo "$CURRENT_LABELS" | grep -q "needs-validation"; then
+    echo "OK: Issue #$ISSUE_NUMBER does not have needs-validation — no action taken (idempotent)"
+    exit 0
+  fi
+
+  # Check if already resolved (idempotent)
+  if echo "$CURRENT_LABELS" | grep -qE "validated|false-positive"; then
+    echo "OK: Issue #$ISSUE_NUMBER already has a resolved verdict label — no action taken (idempotent)"
+    exit 0
+  fi
+
+  # Map verdict to label
+  if [ "$VERDICT" = "CONFIRMED" ]; then
+    TARGET_VERDICT_LABEL="validated"
+    echo "Verdict CONFIRMED → adding 'validated' to issue #$ISSUE_NUMBER..."
+  else
+    TARGET_VERDICT_LABEL="false-positive"
+    echo "Verdict $VERDICT → adding 'false-positive' to issue #$ISSUE_NUMBER..."
+  fi
+
+  # Add verdict label
+  gh issue edit "$ISSUE_NUMBER" "${GH_ARGS[@]}" --add-label "$TARGET_VERDICT_LABEL"
+
+  # Remove needs-validation
+  gh issue edit "$ISSUE_NUMBER" "${GH_ARGS[@]}" --remove-label "needs-validation" 2>/dev/null || true
+
+  echo "OK: needs-validation → $TARGET_VERDICT_LABEL on issue #$ISSUE_NUMBER"
+  exit 0
+fi
+
+# ---------------------------------------------------------------------------
+# Argument parsing (workflow state machine mode)
 # Signature: <ISSUE_NUMBER> [GH_FLAG...] <TARGET_STATE>
 # We consume ISSUE_NUMBER as $1, TARGET_STATE as the last arg, everything
 # in between is GH_FLAG (e.g. -R RapierCraftStudios/forgedock).
@@ -33,6 +126,7 @@ set -euo pipefail
 if [ "$#" -lt 2 ]; then
   echo "ERROR: Usage: transition-label.sh <ISSUE_NUMBER> [GH_FLAG...] <TARGET_STATE>" >&2
   echo "       Example: transition-label.sh 674 -R RapierCraftStudios/forgedock investigating" >&2
+  echo "       OR:      transition-label.sh --validate CONFIRMED 674 -R owner/repo" >&2
   exit 1
 fi
 

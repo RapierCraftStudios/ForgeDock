@@ -45,7 +45,70 @@ gh issue list -R $REPO --state closed --label "review-finding" --json number,cre
   --jq "[.[] | select(.createdAt > \"$SINCE\")] | length"
 ```
 
-**False positive rate** = invalid / total closed. Target: < 10%.
+**False positive rate (proxy)** = invalid / total closed. Target: < 10%.
+
+**Note**: This proxy uses `workflow:invalid` as a stand-in for false-positive. Phase 2C.5 reports the actual false-positive rate from the `false-positive` label. Both metrics should be reported; they should converge as validation coverage increases.
+
+### 2C.5: Validation coverage (finding lifecycle health) <!-- Added: forge#1730 -->
+
+Measures whether the `needs-validation → validated/false-positive` lifecycle is operating. This is the primary health signal for the review system's calibration corpus.
+
+```bash
+# All finding-issue types: review-finding, staging-review, audit-finding
+FINDING_LABELS="review-finding staging-review audit-finding"
+
+TOTAL_FINDINGS=0
+TOTAL_VALIDATED=0
+TOTAL_FALSE_POSITIVE=0
+TOTAL_NEEDS_VALIDATION=0
+
+for LABEL in $FINDING_LABELS; do
+  COUNT=$(gh issue list -R $REPO --state all --label "$LABEL" --limit 1000 --json number \
+    --jq 'length' 2>/dev/null || echo 0)
+  TOTAL_FINDINGS=$((TOTAL_FINDINGS + COUNT))
+
+  VAL=$(gh issue list -R $REPO --state all --label "$LABEL,validated" --limit 1000 --json number \
+    --jq 'length' 2>/dev/null || echo 0)
+  TOTAL_VALIDATED=$((TOTAL_VALIDATED + VAL))
+
+  FP=$(gh issue list -R $REPO --state all --label "$LABEL,false-positive" --limit 1000 --json number \
+    --jq 'length' 2>/dev/null || echo 0)
+  TOTAL_FALSE_POSITIVE=$((TOTAL_FALSE_POSITIVE + FP))
+
+  NV=$(gh issue list -R $REPO --state all --label "$LABEL,needs-validation" --limit 1000 --json number \
+    --jq 'length' 2>/dev/null || echo 0)
+  TOTAL_NEEDS_VALIDATION=$((TOTAL_NEEDS_VALIDATION + NV))
+done
+
+TOTAL_RESOLVED=$((TOTAL_VALIDATED + TOTAL_FALSE_POSITIVE))
+if [ "$TOTAL_FINDINGS" -gt 0 ]; then
+  VALIDATION_COVERAGE_PCT=$(echo "scale=1; $TOTAL_RESOLVED * 100 / $TOTAL_FINDINGS" | bc 2>/dev/null || echo "N/A")
+  if [ "$TOTAL_RESOLVED" -gt 0 ]; then
+    FALSE_POSITIVE_RATE_PCT=$(echo "scale=1; $TOTAL_FALSE_POSITIVE * 100 / $TOTAL_RESOLVED" | bc 2>/dev/null || echo "N/A")
+  else
+    FALSE_POSITIVE_RATE_PCT="N/A (no resolved findings)"
+  fi
+else
+  VALIDATION_COVERAGE_PCT="N/A"
+  FALSE_POSITIVE_RATE_PCT="N/A"
+fi
+
+echo "=== Validation Coverage (2C.5) ==="
+echo "Total finding-issues:      $TOTAL_FINDINGS (review-finding + staging-review + audit-finding)"
+echo "  validated:               $TOTAL_VALIDATED"
+echo "  false-positive:          $TOTAL_FALSE_POSITIVE"
+echo "  resolved (total):        $TOTAL_RESOLVED"
+echo "  needs-validation (open): $TOTAL_NEEDS_VALIDATION"
+echo "Validation coverage:       ${VALIDATION_COVERAGE_PCT}% (target: ≥ 95% for newly closed findings)"
+echo "False-positive rate:       ${FALSE_POSITIVE_RATE_PCT}% of resolved findings (actual label-based rate)"
+```
+
+**Metrics to compute**:
+- **Validation coverage**: (validated + false-positive) / total finding-issues. Target: ≥ 95% for newly closed findings.
+- **False-positive rate (actual)**: false-positive / (validated + false-positive). Reports true negative rate, not the `workflow:invalid` proxy from 2C.
+- **Unresolved finding count**: Issues still holding `needs-validation` — actionable target for `/cleanup labels` backfill.
+
+**Why this matters**: The `needs-validation` label was previously a dead end — applied at creation, never resolved. With the lifecycle wired (#1730), these metrics become the primary signal for review system calibration quality. Validation coverage < 95% indicates pipeline runs are not completing the verdict transition; false-positive rate is now a reportable number instead of undefined.
 
 ### 2D: Build failure rate
 
