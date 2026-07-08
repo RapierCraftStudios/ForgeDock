@@ -90,6 +90,171 @@ Print these blocks to stdout before Phase 1A begins. During Phase 1B (step 3 —
 
 ---
 
+## Phase 0.6: Forge Ledger Pre-Recall <!-- Added: forge#1740 -->
+
+**Goal**: Query the Forge Ledger knowledge index for prior cards matching this issue's title terms, affected files, and symbols — **before reading any code**. Inject above-threshold results with explicit delta-verification framing so the investigator builds on prior knowledge rather than re-deriving it.
+
+**This phase is non-blocking** — if the index is absent, empty, or returns no match above threshold, log a single line and proceed to Phase 1A. Never stall the pipeline for recall.
+
+**Relationship to Phase 0.5**: Phase 0.5 retrieves structured priors from the Gist-based FORGE:MEMORY_INDEX (coarse keyword scoring over MEMORY_ENTRY lines). Phase 0.6 queries the Forge Ledger index (BM25 over structured knowledge cards, indexed by `build-knowledge-index.mjs`). Both are complementary and both run — neither replaces the other.
+
+### Step 1: Probe for index
+
+```bash
+RECALL_PATH="${REPO_PATH:-$(git rev-parse --show-toplevel 2>/dev/null)}/bin/recall.mjs"
+LEDGER_AVAILABLE=0
+
+if [ -f "$RECALL_PATH" ]; then
+  # Quick probe: does the index exist and have at least one card?
+  PROBE=$(node "$RECALL_PATH" --doctor 2>/dev/null | grep "^Total cards:" | grep -v "^Total cards:    0" || true)
+  [ -n "$PROBE" ] && LEDGER_AVAILABLE=1
+fi
+
+if [ "$LEDGER_AVAILABLE" -eq 0 ]; then
+  echo "[recall] Forge Ledger index absent or empty — skipping Phase 0.6, proceeding to Phase 1A"
+  # → Continue to Phase 1A
+fi
+```
+
+### Step 2: Build combined query (title terms + symbols + affected files)
+
+Extract query components from the issue body and title. The recall CLI accepts free text (BM25 ranked) plus repeated `--file` flags (exact-match boost):
+
+```bash
+# Extract title keywords: lowercase, remove stop words, keep noun/verb tokens (≥4 chars)
+ISSUE_TITLE=$(gh issue view {NUMBER} {GH_FLAG} --json title --jq '.title' 2>/dev/null || echo '')
+TITLE_TERMS=$(echo "$ISSUE_TITLE" | tr '[:upper:]' '[:lower:]' \
+  | sed 's/[^a-z0-9 ]/ /g' \
+  | tr ' ' '\n' \
+  | grep -E '^[a-z]{4,}$' \
+  | grep -vE '^(with|that|this|from|into|have|will|when|then|than|them|they|been|were|also|only|does|some|each|more|over|such|both|most|other|many|after|about|should|would|could|their|these|those|which|where|there|being|while|using|since|until|before|under|above)$' \
+  | sort -u | head -10 | tr '\n' ' ' | xargs)
+
+# Extract affected files from the issue body's ## Affected Files section
+ISSUE_BODY=$(gh issue view {NUMBER} {GH_FLAG} --json body --jq '.body' 2>/dev/null || echo '')
+AFFECTED_FILES_RAW=$(echo "$ISSUE_BODY" \
+  | sed -n '/^## Affected Files/,/^## /p' \
+  | grep -oE '`[^`]+\.(md|mjs|js|ts|py|sh|yaml|yml|json)`' \
+  | tr -d '`' | sort -u | head -5)
+
+# Extract symbols: backtick-quoted identifiers from the issue body (≥4 chars, camelCase or snake_case)
+SYMBOLS_RAW=$(echo "$ISSUE_BODY" \
+  | grep -oE '`[A-Za-z_][A-Za-z0-9_]{3,}`' \
+  | tr -d '`' | sort -u | head -5)
+
+# Build --file flags (one per affected file)
+FILE_FLAGS=""
+while IFS= read -r f; do
+  [ -n "$f" ] && FILE_FLAGS="$FILE_FLAGS --file $f"
+done <<< "$AFFECTED_FILES_RAW"
+
+# Build --symbol flag (first symbol only — recall supports one --symbol)
+SYMBOL_FLAG=""
+FIRST_SYMBOL=$(echo "$SYMBOLS_RAW" | head -1)
+[ -n "$FIRST_SYMBOL" ] && SYMBOL_FLAG="--symbol $FIRST_SYMBOL"
+```
+
+### Step 3: Run recall query and capture results
+
+```bash
+RECALL_RESULTS=""
+RECALL_ISSUE_CITATIONS=""
+
+if [ "$LEDGER_AVAILABLE" -eq 1 ] && [ -n "$TITLE_TERMS$FILE_FLAGS$SYMBOL_FLAG" ]; then
+  echo "[recall] Querying Forge Ledger: terms='${TITLE_TERMS}' files='${AFFECTED_FILES_RAW}' symbol='${FIRST_SYMBOL}'"
+
+  # Run combined query: title terms (free text) + file flags + symbol + min-score threshold
+  # --json for machine-readable output; --min-score 0.3 filters weak matches (noise gate)
+  RECALL_JSON=$(node "$RECALL_PATH" \
+    $TITLE_TERMS \
+    $FILE_FLAGS \
+    $SYMBOL_FLAG \
+    --k 5 \
+    --min-score 0.3 \
+    --json \
+    2>/dev/null || echo '[]')
+
+  # Count results
+  RECALL_COUNT=$(echo "$RECALL_JSON" | node -e "
+    let d = ''; process.stdin.on('data', c => d += c);
+    process.stdin.on('end', () => {
+      try { console.log(JSON.parse(d).length); } catch { console.log(0); }
+    });
+  " 2>/dev/null || echo "0")
+
+  if [ "${RECALL_COUNT:-0}" -gt 0 ]; then
+    echo "[recall] Found ${RECALL_COUNT} prior card(s) above threshold — injecting with delta-verification framing"
+
+    # Extract issue citations for the Prior Investigations field in the FORGE:INVESTIGATOR comment
+    RECALL_ISSUE_CITATIONS=$(echo "$RECALL_JSON" | node -e "
+      let d = ''; process.stdin.on('data', c => d += c);
+      process.stdin.on('end', () => {
+        try {
+          const cards = JSON.parse(d);
+          const seen = new Set();
+          const cites = cards
+            .filter(c => { if (seen.has(c.issue)) return false; seen.add(c.issue); return true; })
+            .map(c => '#' + c.issue)
+            .join(', ');
+          console.log(cites);
+        } catch { console.log(''); }
+      });
+    " 2>/dev/null || echo '')
+
+    # Format cards as human-readable text for injection (not raw JSON)
+    RECALL_FORMATTED=$(echo "$RECALL_JSON" | node -e "
+      let d = ''; process.stdin.on('data', c => d += c);
+      process.stdin.on('end', () => {
+        try {
+          const cards = JSON.parse(d);
+          const lines = [];
+          for (const c of cards) {
+            lines.push('── ' + c.kind.toUpperCase() + ' from #' + c.issue + ' (score: ' + c.score.toFixed(2) + ') ──');
+            if (c.rootCause)  lines.push('Root Cause: ' + c.rootCause);
+            if (c.prevention) lines.push('Fix/Prevention: ' + c.prevention);
+            if (c.pattern)    lines.push('Pattern: ' + c.pattern);
+            if (c.verdict)    lines.push('Verdict: ' + c.verdict + ' (' + (c.confidence || '?') + ')');
+            if (c.paths && c.paths.length) lines.push('Files: ' + c.paths.slice(0,3).join(', '));
+          }
+          console.log(lines.join('\n'));
+        } catch (e) { console.log(''); }
+      });
+    " 2>/dev/null || echo '')
+
+    # Cap at ≤ 2K chars (same budget as context C0 Gist summaries)
+    RECALL_RESULTS=$(echo "$RECALL_FORMATTED" | head -c 2048)
+  else
+    echo "[recall] No prior cards above threshold (min-score 0.3) — investigating from scratch"
+  fi
+fi
+```
+
+### Step 4: Inject recall results into investigation context
+
+If `RECALL_RESULTS` is non-empty, print the following block to stdout **before Phase 1A begins**. The investigation steps in Phase 1B MUST treat this as starting context — verify deltas against current code rather than re-deriving the prior model.
+
+**If `RECALL_RESULTS` is empty**: skip this step entirely and proceed to Phase 1A.
+
+```
+[FORGE:RECALL_PRIOR — Forge Ledger pre-recall results]
+Prior cards matched this issue above threshold (min-score 0.3).
+
+CRITICAL FRAMING: These cards describe prior findings on the same files/symbols.
+  → Verify the deltas against current code — do NOT re-derive the prior model.
+  → Stale cards (status: stale) are excluded by default — the query runs without
+     --include-stale. Do not treat any card as authoritative without confirming
+     the finding still exists in the current code.
+  → Cite confirmed priors in the FORGE:INVESTIGATOR "Prior Investigations" field.
+
+${RECALL_RESULTS}
+
+[END FORGE:RECALL_PRIOR]
+```
+
+Store `RECALL_ISSUE_CITATIONS` in a variable — it is used in Phase 1C to populate the `**Prior Investigations (via recall)**` field in the FORGE:INVESTIGATOR comment.
+
+---
+
 ## Phase 1A: Load Issue & Check Resume State
 
 ```bash
@@ -248,6 +413,7 @@ gh issue comment {NUMBER} {GH_FLAG} --body "<!-- FORGE:INVESTIGATOR -->
 **Last touched**: {hash — author — date — subject}
 **Pickaxe hits (prior fixes / regressions)**: {commit(s) found via \`git log -S\`/\`-G\`, or 'None found' — max 5}
 {This field is MANDATORY — populate from the git blame + pickaxe commands in step 4/5. If a file is newly created (no history), write 'New file — no history.'}
+**Prior Investigations (via recall)**: {Comma-separated issue citations from \`RECALL_ISSUE_CITATIONS\` (e.g. '#1172, #1243 — building on, not repeating'), or 'None — no Forge Ledger match above threshold' if \`RECALL_RESULTS\` was empty. Use the \`RECALL_ISSUE_CITATIONS\` variable populated in Phase 0.6.}
 
 ### Recommendation
 {what to build/fix, concrete and actionable}
