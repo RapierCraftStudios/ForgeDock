@@ -1790,3 +1790,114 @@ fi
 
 ---
 
+### 2R: Confidence Calibration Table (from run outcomes)
+
+**Purpose**: Surfaces whether the pipeline's stated confidence levels predict actual outcomes. A HIGH-confidence issue that frequently triggers review-findings or reverts within 14 days indicates systematic overconfidence — the investigator's confidence is not tracking reality. Conversely, needs-human routing on issues that almost always survive indicates overcaution. This section reads the calibration table produced by `scripts/calibration.mjs` and published to the `forge-knowledge` branch. <!-- Added: forge#1741 -->
+
+**Skip if**: forge-knowledge branch is absent or `calibration/table.json` does not exist on it — emit the unavailability note below and continue.
+
+**Read calibration table**:
+```bash
+# Read calibration table from forge-knowledge branch (fail-safe: any error → skip)
+CALIBRATION_TABLE=""
+CALIBRATION_AVAILABLE=false
+
+if git show-ref --quiet "refs/remotes/origin/${FORGE_KNOWLEDGE_BRANCH:-forge-knowledge}" 2>/dev/null || \
+   git ls-remote --exit-code origin "${FORGE_KNOWLEDGE_BRANCH:-forge-knowledge}" >/dev/null 2>&1; then
+  RAW_TABLE=$(git show "origin/${FORGE_KNOWLEDGE_BRANCH:-forge-knowledge}:calibration/table.json" 2>/dev/null || echo '')
+  if [ -n "$RAW_TABLE" ]; then
+    CALIBRATION_TABLE="$RAW_TABLE"
+    CALIBRATION_AVAILABLE=true
+    CALIB_COMPUTED_AT=$(echo "$CALIBRATION_TABLE" | jq -r '.computedAt // "unknown"' 2>/dev/null || echo 'unknown')
+    CALIB_TOTAL_RUNS=$(echo "$CALIBRATION_TABLE" | jq -r '.totalRuns // 0' 2>/dev/null || echo '0')
+    CALIB_WINDOW_DAYS=$(echo "$CALIBRATION_TABLE" | jq -r '.windowDays // 14' 2>/dev/null || echo '14')
+    CALIB_MIN_SAMPLES=$(echo "$CALIBRATION_TABLE" | jq -r '.minSamples // 10' 2>/dev/null || echo '10')
+    echo "Calibration table loaded: ${CALIB_TOTAL_RUNS} runs, computed ${CALIB_COMPUTED_AT}"
+  fi
+fi
+
+if [ "$CALIBRATION_AVAILABLE" = false ]; then
+  echo "Phase 2R: Calibration table unavailable (forge-knowledge:calibration/table.json not found)"
+  echo "  To compute: node scripts/calibration.mjs --repo ${REPO} --publish"
+  # Store unavailability for Phase 5A report
+  CALIBRATION_AVAILABILITY_NOTE="⚠ Calibration table unavailable — run: node scripts/calibration.mjs --repo ${REPO} --publish"
+fi
+```
+
+**Render calibration table** (when available):
+
+```bash
+if [ "$CALIBRATION_AVAILABLE" = true ]; then
+  echo "## Confidence Calibration Table"
+  echo "**Source**: forge-knowledge:calibration/table.json"
+  echo "**Computed**: ${CALIB_COMPUTED_AT}"
+  echo "**Outcome window**: ${CALIB_WINDOW_DAYS} days | **Min samples for trust**: ${CALIB_MIN_SAMPLES}"
+  echo "**Total runs in corpus**: ${CALIB_TOTAL_RUNS}"
+  echo ""
+
+  # Extract and render per-cell rows; flag overconfidence and overcaution cells
+  OVERCONFIDENCE_CELLS=""
+  OVERCAUTION_CELLS=""
+
+  echo "$CALIBRATION_TABLE" | jq -r '
+    .rows[] |
+    [
+      .taskType,
+      .confidence,
+      (if .trusted then (.survivalRate * 100 | floor | tostring) + "%" else "—(N<" + (.sampleCount | tostring) + ")" end),
+      (.sampleCount | tostring),
+      (if .trusted then
+        (if .flag == "overconfidence" then "⚠ OVERCONFIDENCE" elif .flag == "overcaution-candidate" then "ℹ OVERCAUTION?" else "✅ OK" end)
+      else "ℹ untrusted" end)
+    ] | @tsv
+  ' 2>/dev/null | while IFS=$'\t' read -r taskType confidence survivalRate sampleCount status; do
+    printf "| %-20s | %-8s | %-18s | %-7s | %s\n" \
+      "$taskType" "$confidence" "$survivalRate" "$sampleCount" "$status"
+
+    # Collect flagged cells for summary
+    if [[ "$status" == *"OVERCONFIDENCE"* ]]; then
+      OVERCONFIDENCE_CELLS="${OVERCONFIDENCE_CELLS}\n  - ${taskType} × ${confidence}: ${survivalRate} survival (${sampleCount} runs)"
+    elif [[ "$status" == *"OVERCAUTION"* ]]; then
+      OVERCAUTION_CELLS="${OVERCAUTION_CELLS}\n  - ${taskType} × ${confidence}: ${survivalRate} survival (${sampleCount} runs)"
+    fi
+  done
+
+  # Emit flag summaries
+  if [ -n "$OVERCONFIDENCE_CELLS" ]; then
+    echo ""
+    echo "### ⚠ Overconfidence Cells (HIGH confidence, survival < 80%)"
+    echo "These task-type × confidence combinations claim HIGH confidence but have poor real-world outcomes."
+    echo "The review threshold for these cells should be tightened (consider needs-human routing)."
+    echo -e "$OVERCONFIDENCE_CELLS"
+  fi
+
+  if [ -n "$OVERCAUTION_CELLS" ]; then
+    echo ""
+    echo "### ℹ Overcaution Candidates (survival > 95% — needs-human may be unnecessary)"
+    echo "These cells have very high survival rates. Needs-human routing on them may be unnecessary,"
+    echo "but any loosening of behavior requires the eval-gate to pass on the affected task-type corpus."
+    echo "Do NOT loosen automatically — flag for human review."
+    echo -e "$OVERCAUTION_CELLS"
+  fi
+
+  # 30-day trend (compare against prior report's PRIOR_CALIBRATION_COMPUTED_AT if available)
+  if [ -n "${PRIOR_CALIBRATION_COMPUTED_AT:-}" ]; then
+    echo ""
+    echo "### Calibration Trend"
+    echo "Prior table computed: ${PRIOR_CALIBRATION_COMPUTED_AT}"
+    echo "Current table computed: ${CALIB_COMPUTED_AT}"
+    echo "(Trend comparison requires prior report data — compare manually if prior available)"
+  fi
+fi
+```
+
+**Metrics to surface in Phase 5A report**:
+- **Calibration data coverage**: `${CALIB_TOTAL_RUNS}` runs in corpus (target: > 20 for meaningful cells)
+- **Overconfidence cells**: count of cells where HIGH-confidence survival < 80%
+- **Overcaution candidates**: count of cells where survival > 95% (informational — loosening requires eval-gate)
+- **Table freshness**: `computedAt` timestamp — flag as stale if > 7 days old
+
+**Why this matters**: Static confidence thresholds in review-pr.md (Phase 7B blocking criteria) are prose rules with no feedback from outcomes. The calibration table is the mechanism by which the pipeline learns whether its stated confidence is tracking reality. A task-type with persistent overconfidence should have its review intensity increased regardless of the agent's stated confidence. <!-- Added: forge#1741 -->
+
+---
+
