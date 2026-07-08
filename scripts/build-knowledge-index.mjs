@@ -39,7 +39,7 @@
  */
 
 import { createHash } from 'crypto';
-import { existsSync, mkdirSync, readFileSync, writeFileSync, appendFileSync } from 'fs';
+import { existsSync, mkdirSync, readFileSync, writeFileSync, appendFileSync, readdirSync } from 'fs';
 import { execSync, spawnSync } from 'child_process';
 import { homedir } from 'os';
 import { dirname, join, resolve } from 'path';
@@ -625,14 +625,21 @@ function hashCards(cards) {
  * Tier 1: blob sha match (cheapest)
  * Tier 2: symbol still present in file
  * Tier 3/4/5: handled offline — mark fresh by default for new cards
+ *
+ * Decision cards use 'needs-review' (not 'stale') when their anchor is dead —
+ * this signals human review is required before the ADR is retired, rather than
+ * silently treating the decision as invalidated. <!-- Added: forge#1737 -->
  */
 function checkStaleness(card, repoPath) {
   if (!card.anchor) return 'fresh';
   if (!card.anchor.path) return 'fresh';
 
+  const isDecision = card.kind === 'decision';
+  const deadStatus = isDecision ? 'needs-review' : 'stale';
+
   const filePath = join(repoPath, card.anchor.path);
   if (!existsSync(filePath)) {
-    return 'stale'; // File no longer exists
+    return deadStatus; // Anchor file no longer exists
   }
 
   // Tier 2: symbol check (regex-class, not AST)
@@ -641,7 +648,7 @@ function checkStaleness(card, repoPath) {
       const content = readFileSync(filePath, 'utf8');
       const symbolRe = new RegExp(`\\b${escapeRegExp(card.anchor.symbol)}\\b`);
       if (!symbolRe.test(content)) {
-        return 'stale'; // Symbol no longer present
+        return deadStatus; // Anchor symbol no longer present
       }
     } catch (_) {
       // If we can't read the file, assume fresh (don't break on binary files)
@@ -649,6 +656,49 @@ function checkStaleness(card, repoPath) {
   }
 
   return 'fresh';
+}
+
+/**
+ * Find the ADR file path for a decision card, if one has been written by close.md Phase C5.3.
+ * Returns the repo-relative path (e.g. 'devdocs/decisions/1737-auto-adrs-slug.md') or null.
+ * <!-- Added: forge#1737 -->
+ */
+function findADRPath(issueNumber, repoPath) {
+  const decisionsDir = join(repoPath, 'devdocs', 'decisions');
+  if (!existsSync(decisionsDir)) return null;
+
+  try {
+    const files = readdirSync(decisionsDir);
+    const prefix = `${issueNumber}-`;
+    const match = files.find(f => f.startsWith(prefix) && f.endsWith('.md'));
+    return match ? `devdocs/decisions/${match}` : null;
+  } catch (_) {
+    return null;
+  }
+}
+
+/**
+ * Update a staleness-detected ADR file's frontmatter status to 'needs-review'.
+ * Non-blocking: logs and returns on any error.
+ * <!-- Added: forge#1737 -->
+ */
+function updateADRStatus(adrPath, repoPath) {
+  const absPath = join(repoPath, adrPath);
+  if (!existsSync(absPath)) return;
+
+  try {
+    const content = readFileSync(absPath, 'utf8');
+    // Only update if status is currently 'fresh' (avoid overwriting manual changes)
+    if (!content.includes('status: fresh')) return;
+
+    const updated = content.replace(/^status: fresh$/m, 'status: needs-review');
+    if (updated !== content) {
+      writeFileSync(absPath, updated, 'utf8');
+      log(`[ADR] Flipped status to needs-review: ${adrPath}`);
+    }
+  } catch (e) {
+    log(`WARNING: Failed to update ADR status for ${adrPath}: ${e.message}`);
+  }
 }
 
 function escapeRegExp(str) {
@@ -1033,9 +1083,22 @@ async function main() {
     try {
       const cards = await extractCardsFromIssue(issueNumber, issue, comments);
 
-      // Run staleness detection
+      // Run staleness detection and link ADR files for decision cards
+      // <!-- Added: forge#1737 — ADR path linking + needs-review for dead-anchor decisions -->
       for (const card of cards) {
         card.status = checkStaleness(card, repoPath);
+
+        if (card.kind === 'decision') {
+          // Link the ADR file if one was written by close.md Phase C5.3
+          const adrPath = findADRPath(card.issue, repoPath);
+          if (adrPath) {
+            card.adrPath = adrPath;
+          }
+          // If anchor is dead, update ADR frontmatter status to needs-review
+          if (card.status === 'needs-review' && card.adrPath) {
+            updateADRStatus(card.adrPath, repoPath);
+          }
+        }
       }
 
       const hash = hashCards(cards);

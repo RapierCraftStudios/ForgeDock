@@ -931,6 +931,189 @@ position and does not re-scan already-indexed history.
 
 ---
 
+## Phase C5.4: Auto-ADR Extraction from TRAJECTORY Decisions <!-- Added: forge#1737 -->
+
+**Goal**: Promote tradeoff-shaped Decisions bullets from the FORGE:TRAJECTORY comment into
+human-readable, git-tracked ADR markdown files at `devdocs/decisions/NNN-{slug}.md`. Architect
+plans on future runs will load matching ADRs as constraints before writing any code.
+
+**This phase is non-blocking** — if ADR extraction, file write, or commit fails at any step,
+log the reason and continue to Phase C5.5. Never stall close for ADR generation.
+
+**Skip if**: Terminal state is `INVALID` (no useful decisions to record) OR a
+`<!-- FORGE:ADR_EXTRACTED -->` comment already exists on the issue (idempotency guard) OR
+`devdocs/decisions/` directory does not exist in the repository root (feature not installed).
+
+### What is a "tradeoff-shaped" decision?
+
+A Decisions bullet is extractable if it contains BOTH:
+1. A **choice indicator**: words like `chose`, `use`, `prefer`, `process substitution`, `over`,
+   `instead`, `rather than`, `not X`
+2. A **rationale connector**: `because`, `since`, `so`, `to avoid`, `prevents`, `due to`
+
+Generic bullets like `- Decomposition skipped: single-concern change` do NOT match and are ignored.
+
+### Step 1: Idempotency check
+
+```bash
+ADR_EXTRACTED=$(gh api repos/{GH_REPO}/issues/{NUMBER}/comments \
+  --jq '[.[] | select(.body | contains("FORGE:ADR_EXTRACTED"))] | length > 0' 2>/dev/null || echo "false")
+```
+
+**Skip to Phase C5.5 if `$ADR_EXTRACTED == "true"`**.
+
+### Step 2: Extract TRAJECTORY Decisions
+
+```bash
+# Read the TRAJECTORY comment posted in Phase C5
+TRAJECTORY_BODY=$(gh api repos/{GH_REPO}/issues/{NUMBER}/comments \
+  --jq '[.[] | select(.body | contains("FORGE:TRAJECTORY"))] | last | .body // ""' 2>/dev/null || echo '')
+
+# Extract the Decisions section (lines between **Decisions**: and **Anomalies**:)
+DECISIONS_RAW=$(echo "$TRAJECTORY_BODY" \
+  | awk '/^\*\*Decisions\*\*:/{found=1; next} /^\*\*Anomalies\*\*:/{found=0} found{print}' \
+  | grep -v '^\s*$' \
+  | head -20)  # Cap at 20 bullets to prevent runaway parsing
+
+if [ -z "$DECISIONS_RAW" ] || echo "$DECISIONS_RAW" | grep -qi "^- None$\|^None$"; then
+  echo "[ADR] No Decisions section found in TRAJECTORY — skipping ADR extraction"
+  ADR_FILES_WRITTEN=0
+fi
+```
+
+### Step 3: Parse and filter for tradeoff shape
+
+```bash
+ADR_FILES_WRITTEN=0
+DECISIONS_DIR="${REPO_PATH:-$(git rev-parse --show-toplevel 2>/dev/null)}/devdocs/decisions"
+
+if [ -z "$DECISIONS_RAW" ] || ! [ -d "$DECISIONS_DIR" ]; then
+  echo "[ADR] Skipping: no decisions or devdocs/decisions/ absent"
+else
+  # Get commit SHA for anchor citation
+  COMMIT_SHA=$(git -C "${REPO_PATH:-$(git rev-parse --show-toplevel 2>/dev/null)}" \
+    rev-parse HEAD 2>/dev/null | head -c 12 || echo "unknown")
+
+  while IFS= read -r bullet; do
+    # Strip leading "- " or "* "
+    text=$(echo "$bullet" | sed 's/^[-*]\s*//')
+    [ -z "$text" ] && continue
+
+    # Tradeoff shape filter: must have a choice indicator + rationale connector
+    CHOICE_MATCH=$(echo "$text" | grep -iE 'chose|use |prefer|instead|rather than|over |not [a-z]|process substitution|branched from|avoided' || true)
+    RATIONALE_MATCH=$(echo "$text" | grep -iE 'because|since[[:space:]]|so[[:space:]]|to avoid|prevents|due to' || true)
+
+    if [ -z "$CHOICE_MATCH" ] || [ -z "$RATIONALE_MATCH" ]; then
+      echo "[ADR] Skipped (not a tradeoff): $text"
+      continue
+    fi
+
+    # Extract anchor: first backtick-quoted path-like string in the decision text
+    ANCHOR_PATH=$(echo "$text" | grep -oE '`[a-zA-Z][^`]*/[^`]+`' | head -1 | tr -d '`' || true)
+
+    # Build slug from first 6 words of decision (lowercase, hyphenated)
+    SLUG=$(echo "$text" | tr '[:upper:]' '[:lower:]' | \
+      sed 's/[^a-z0-9 ]/ /g' | tr -s ' ' '-' | \
+      cut -c1-40 | sed 's/-$//')
+    ADR_FILENAME="${NUMBER}-${SLUG}.md"
+    ADR_PATH="$DECISIONS_DIR/$ADR_FILENAME"
+
+    # Idempotency: skip if file already exists
+    if [ -f "$ADR_PATH" ]; then
+      echo "[ADR] Already exists — skipping: $ADR_FILENAME"
+      ADR_FILES_WRITTEN=$((ADR_FILES_WRITTEN + 1))
+      continue
+    fi
+
+    # Write ADR file
+    PR_REF="${PR_NUMBER:-unknown}"
+    cat > "$ADR_PATH" <<ADR_EOF
+---
+issue: {NUMBER}
+pr: ${PR_REF}
+commit: ${COMMIT_SHA}
+status: fresh
+anchor: ${ANCHOR_PATH:-unknown}
+created: $(date -u +%Y-%m-%d)
+---
+
+# ADR — ${text}
+
+## Decision
+
+${text}
+
+## Context
+
+Auto-extracted from FORGE:TRAJECTORY Decisions section on issue #{NUMBER}.
+
+**Citations**:
+- Issue: https://github.com/{GH_REPO}/issues/{NUMBER}
+- PR: https://github.com/{GH_REPO}/pull/${PR_REF}
+- Commit: ${COMMIT_SHA}
+- Anchor: \`${ANCHOR_PATH:-no file anchor found}\`
+
+## Status
+
+\`fresh\` — anchor is active. Architect plans on future runs will inject this ADR as a constraint
+when the anchor path overlaps the contract files.
+
+Set \`status: needs-review\` manually (or the staleness pass in \`build-knowledge-index.mjs\` will
+flip it automatically) when the anchored code region no longer exists.
+ADR_EOF
+
+    echo "[ADR] Written: $ADR_FILENAME"
+    ADR_FILES_WRITTEN=$((ADR_FILES_WRITTEN + 1))
+  done <<< "$DECISIONS_RAW"
+fi
+```
+
+### Step 4: Commit and push ADR files (non-blocking)
+
+```bash
+if [ "$ADR_FILES_WRITTEN" -gt 0 ] && [ -n "{WORKTREE_PATH}" ] && [ -d "{WORKTREE_PATH}" ]; then
+  # Commit ADR files in the worktree so they ride the existing PR
+  (
+    cd "{WORKTREE_PATH}"
+    # Stage only the new/updated ADR files (not the whole tree)
+    git add devdocs/decisions/*.md 2>/dev/null || true
+    # Check if there's anything to commit
+    if ! git diff --cached --quiet 2>/dev/null; then
+      git commit -s -m "docs(decisions): auto-ADRs from TRAJECTORY decisions (#{NUMBER})" \
+        --no-verify 2>/dev/null && echo "[ADR] Committed ${ADR_FILES_WRITTEN} ADR file(s)" || \
+        echo "[ADR] WARNING: commit failed — ADR files on disk but not in git"
+    else
+      echo "[ADR] No staged changes — ADR files may already be committed"
+    fi
+  ) || echo "[ADR] WARNING: worktree operations failed — ADR files written but not committed"
+else
+  if [ "$ADR_FILES_WRITTEN" -gt 0 ]; then
+    echo "[ADR] No worktree available — ADR files written to repo root devdocs/decisions/ only"
+    echo "[ADR] Manually commit devdocs/decisions/*.md if needed"
+  fi
+fi
+```
+
+### Step 5: Post audit annotation
+
+```bash
+if [ "${ADR_FILES_WRITTEN:-0}" -gt 0 ]; then
+  gh issue comment {NUMBER} {GH_FLAG} --body "<!-- FORGE:ADR_EXTRACTED -->
+${ADR_FILES_WRITTEN} ADR file(s) auto-extracted from TRAJECTORY decisions and written to \`devdocs/decisions/\`.
+
+Future architect runs will load matching ADRs as constraints when anchor paths overlap contract files.
+
+ADRs are human-editable — update or remove them as the codebase evolves. The staleness pass in
+\`build-knowledge-index.mjs\` automatically flips \`status: needs-review\` when an anchor is dead.
+
+<!-- FORGE:ADR_EXTRACTED:COMPLETE -->" 2>/dev/null || true
+else
+  echo "[ADR] No tradeoff-shaped decisions found — no ADR files written"
+fi
+```
+
+---
+
 ## Phase C5.5: Graph Decision Record (MANDATORY when PR exists)
 
 **Skip if**: `{PR_NUMBER}` is empty OR `<!-- FORGE:DECISION_RECORD -->` already posted on the PR.
