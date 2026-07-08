@@ -269,3 +269,54 @@ test('parse(emit(...)): field value with multiple escape sequences round-trips l
   const [ann] = parse(emit('CONTEXT', { Note: original }));
   assert.equal(ann.fields['Note'], original);
 });
+
+// ── CARD annotation — Base64url machine-surface form (forge#1727) ──────────
+//
+// The FORGE:CARD type uses the colon inline-value syntax (§3.4):
+//   <!-- FORGE:CARD: v1 sha:<sha8hex> b64:<base64url_of_canonical_json> -->
+// parse() extracts the inline value "v1 sha:X b64:Y" as inlineValue.
+// The cli.js decodeCardInlineValue() function handles decoding; these tests
+// verify that parse() correctly identifies CARD as an inline-value annotation.
+
+test('parse: CARD annotation is recognized as inline-value type (forge#1727)', () => {
+  const body = '<!-- FORGE:CARD: v1 sha:7234c2d8 b64:eyJpc3N1ZSI6IjEzNzAiLCJzdGF0dXMiOiJtZXJnZWQiLCJ0eXBlIjoiQ0FSRCJ9 -->';
+  const annotations = parse(body);
+  assert.equal(annotations.length, 1);
+  const [ann] = annotations;
+  assert.equal(ann.type, 'CARD');
+  assert.equal(ann.isReserved, true);
+  assert.ok(ann.inlineValue !== null, 'CARD annotation should have an inlineValue');
+  assert.ok(ann.inlineValue.startsWith('v1 sha:'), `inlineValue should start with "v1 sha:", got: "${ann.inlineValue}"`);
+});
+
+test('parse: CARD annotation inlineValue contains sha8 prefix and b64 payload (forge#1727)', () => {
+  const body = '<!-- FORGE:CARD: v1 sha:7234c2d8 b64:eyJpc3N1ZSI6IjEzNzAiLCJzdGF0dXMiOiJtZXJnZWQiLCJ0eXBlIjoiQ0FSRCJ9 -->';
+  const [ann] = parse(body);
+  assert.match(ann.inlineValue, /^v1 sha:[0-9a-f]{8} b64:[A-Za-z0-9_-]+$/);
+});
+
+test('parse: CARD annotation following another annotation starts its own annotation (forge#1727)', () => {
+  const body = [
+    '<!-- FORGE:BUILDER -->',
+    '**Branch**: `fix/example`',
+    '**Commits**: abc123',
+    '**Files changed**: 1',
+    '<!-- FORGE:BUILDER:COMPLETE -->',
+    '<!-- FORGE:CARD: v1 sha:7234c2d8 b64:eyJpc3N1ZSI6IjEzNzAiLCJzdGF0dXMiOiJtZXJnZWQiLCJ0eXBlIjoiQ0FSRCJ9 -->',
+  ].join('\n');
+  const annotations = parse(body);
+  assert.equal(annotations.length, 2);
+  assert.equal(annotations[0].type, 'BUILDER');
+  assert.equal(annotations[1].type, 'CARD');
+  assert.ok(annotations[1].inlineValue, 'Second annotation should be a CARD with an inlineValue');
+});
+
+test('parse: CARD with inline value "COMPLETE" parses as real annotation (not dropped as sentinel) (forge#1727)', () => {
+  // CARD is an inline-value type — "COMPLETE" is a legitimate inline value, not a sentinel.
+  // This parallels the PRIOR_GIST / KNOWLEDGE_GIST / MILESTONE_INDEX fix from forge#1526.
+  const body = '<!-- FORGE:CARD: COMPLETE -->';
+  const annotations = parse(body);
+  assert.equal(annotations.length, 1);
+  assert.equal(annotations[0].type, 'CARD');
+  assert.equal(annotations[0].inlineValue, 'COMPLETE');
+});

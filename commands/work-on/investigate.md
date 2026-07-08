@@ -192,6 +192,20 @@ bash {REPO_PATH}/scripts/code-index.sh query --domain {DOMAIN_LABEL} --repo-path
 
 The comment MUST include `<!-- INVESTIGATION:COMPLETE -->` at the very end, AFTER all required sections are present. This marker signals the investigation finished successfully.
 
+**CODEC PATH (forge#1727)**: Construct the annotation body via the protocol codec — do NOT hand-roll the `<!-- FORGE:INVESTIGATOR -->` header. Use `forge-annotation.sh write INVESTIGATOR --field ...` or `node packages/protocol/src/cli.js emit INVESTIGATOR --field ...` to produce the opening tag and completion sentinel. Fill in the Markdown body sections below. The full pattern:
+
+```bash
+# Build the annotation body via codec (escaping and sentinel handled by codec)
+ANNOTATION_BODY=$(node packages/protocol/src/cli.js emit INVESTIGATOR \
+  --field "Verdict={VERDICT}" \
+  --field "Confidence={CONFIDENCE}" \
+  --field "Severity={SEVERITY}" \
+  --field "Task Type={TASK_TYPE}" \
+  --field "Decomposition Assessment={YES|NO} — {reason}")
+# ANNOTATION_BODY now has opening tag + required fields + INVESTIGATION:COMPLETE sentinel.
+# Append the Markdown body sections to it before posting.
+```
+
 Before posting, resolve the attribution annotation link from `forge.yaml`:
 
 ```bash

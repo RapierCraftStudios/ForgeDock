@@ -38,6 +38,18 @@
 #        default — and is completely skipped when --changed-files is absent
 #        (backward compatible with all existing callers).
 #
+#   5. Raw FORGE annotation construction in command specs (SOFT — warn)
+#        A command spec contains a raw `<!-- FORGE:` string in a heredoc or
+#        `--body` block, indicating hand-rolled annotation construction instead
+#        of using forge-annotation.sh or the protocol CLI. The codec path
+#        (forge-annotation.sh write / node packages/protocol/src/cli.js emit)
+#        is the single enforced write path; hand-rolled construction reintroduces
+#        the escaping whack-a-mole bug class (forge#1576, #1637, #1638, #1662).
+#        Files in the codec allowlist (packages/protocol/, docs/spec/,
+#        docs/FORGE-PROTOCOL.md, scripts/validate-spec-graph.sh) are excluded
+#        since they legitimately reference the raw format for documentation or
+#        implementation purposes. (forge#1727)
+#
 # Exit codes:
 #   0  no HARD inconsistencies (SOFT warnings / INFO may still be printed),
 #      or --soft was passed (warn-only mode)
@@ -453,6 +465,70 @@ check_clone_drift() {
 }
 
 # ---------------------------------------------------------------------------
+# Check 5: Raw FORGE annotation construction in command specs (forge#1727)
+# ---------------------------------------------------------------------------
+
+check_raw_forge_construction() {
+  # Allowlist: paths that legitimately contain raw <!-- FORGE: strings for
+  # documentation, implementation, or self-referential purposes.
+  # All paths are repo-root-relative prefixes.
+  local ALLOWLIST=(
+    "packages/protocol/"
+    "docs/spec/"
+    "docs/FORGE-PROTOCOL.md"
+    "scripts/validate-spec-graph.sh"
+    "scripts/forge-annotation.sh"
+  )
+
+  local commands_dir="$REPO_ROOT/commands"
+  [ -d "$commands_dir" ] || return 0
+
+  # Grep for raw <!-- FORGE: construction patterns. These indicate hand-rolled
+  # annotation bodies in specs — the codec path (forge-annotation.sh write /
+  # node cli.js emit) should be used instead.
+  # Pattern: a heredoc or --body block that starts a new <!-- FORGE: tag.
+  # Exclude lines that merely read/check for annotations (contains(), jq, grep patterns)
+  # since those are legitimate consumer-side reads.
+  local hits
+  hits="$(grep -rnE '"(<!--\s*FORGE:)|\'\''(<!--\s*FORGE:)' \
+    "$commands_dir" 2>/dev/null || true)"
+  # Also catch multiline heredoc bodies starting with <!-- FORGE: on a raw line
+  local heredoc_hits
+  heredoc_hits="$(grep -rn '^<!--\s*FORGE:[A-Z_]' \
+    "$commands_dir" 2>/dev/null || true)"
+  # Also catch --body "<!-- FORGE: patterns
+  local body_hits
+  body_hits="$(grep -rnE '--body\s+"<!--\s*FORGE:' \
+    "$commands_dir" 2>/dev/null || true)"
+
+  local all_hits
+  all_hits="$(printf '%s\n%s\n%s\n' "$hits" "$heredoc_hits" "$body_hits" | grep -v '^$' | sort -u || true)"
+
+  [ -n "$all_hits" ] || return 0
+
+  local line relpath
+  while IFS= read -r line; do
+    [ -n "$line" ] || continue
+    relpath="${line%%:*}"
+    relpath="${relpath#"$REPO_ROOT"/}"
+
+    # Check against allowlist — skip if any allowlist prefix matches.
+    local allowed=0
+    local prefix
+    for prefix in "${ALLOWLIST[@]}"; do
+      if [[ "$relpath" == "$prefix"* ]]; then
+        allowed=1
+        break
+      fi
+    done
+    [ "$allowed" -eq 1 ] && continue
+
+    add_finding SOFT raw-forge-construction \
+      "$relpath contains raw '<!-- FORGE:' annotation construction — use forge-annotation.sh write or node packages/protocol/src/cli.js emit instead (forge#1727)."
+  done <<< "$all_hits"
+}
+
+# ---------------------------------------------------------------------------
 # Run checks
 # ---------------------------------------------------------------------------
 
@@ -460,6 +536,7 @@ check_orphans
 check_dangling
 check_transitions
 check_clone_drift
+check_raw_forge_construction
 
 # Sort findings deterministically (severity rank, then class, then message).
 sev_rank() {
