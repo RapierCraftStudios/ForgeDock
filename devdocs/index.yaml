@@ -82,6 +82,15 @@ domains:
         authority: reference
         token_cost: 1200
 
+  decisions:
+    description: "Auto-generated ADRs from TRAJECTORY decisions — prior tradeoffs with anchors. Architect injects overlapping ADRs as constraints before implementation."
+    docs:
+      - path: decisions/*.md
+        authority: reference
+        token_cost: 300
+        glob: "decisions/*.md"
+        note: "ADRs injected by architect.md Phase A1.5 when anchor paths overlap contract files. Human-editable. status: needs-review when anchor is dead."
+
 # ---------------------------------------------------------------------------
 # Modules — each entry maps a file-path glob to a per-module dossier
 #
