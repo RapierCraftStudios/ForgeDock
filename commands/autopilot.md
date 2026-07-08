@@ -40,16 +40,19 @@ You are a fully autonomous deploy loop for this project. Your job is to **detect
 | (none) | Full autonomous loop — state detection → recon → fast lane → milestone → report |
 | `--dry-run` | Run all phases but do NOT create issues, merge PRs, or modify state — report only |
 | `--recon-only` | Phase 0 (state detection) and Phase 1 (recon) only — no loop execution |
+| `--fix` | Enable autonomous fix dispatch for this run (requires `autopilot.headless: true` in forge.yaml; refused otherwise) |
 
 Parse `$ARGUMENTS` and set:
 ```bash
 DRY_RUN=false
 RECON_ONLY=false
+AUTOPILOT_FIX=false
 
 for arg in $ARGUMENTS; do
   case "$arg" in
     --dry-run)     DRY_RUN=true ;;
     --recon-only)  RECON_ONLY=true ;;
+    --fix)         AUTOPILOT_FIX=true ;;
   esac
 done
 ```
@@ -85,6 +88,42 @@ CLEANUP_LABELS_FIXED=0
 # Autopilot ops issue — rolling issue where FORGE:AUTOPILOT_CYCLE annotations accumulate.
 # Created automatically on first run if absent. Label is configurable; defaults to autopilot-ops.
 AUTOPILOT_OPS_LABEL=$(yq '.autopilot.ops_issue_label // "autopilot-ops"' "$CONFIG_FILE" 2>/dev/null || echo 'autopilot-ops')
+
+# Declared autonomy policy (forge.yaml → autopilot.*).
+# All fields default to the conservative/safe value when absent so existing configs are unaffected.
+AUTOPILOT_HEADLESS=$(yq '.autopilot.headless // false' "$CONFIG_FILE" 2>/dev/null || echo 'false')
+AUTOPILOT_APPROVE_P0=$(yq '.autopilot.approve.p0 // "needs-human"' "$CONFIG_FILE" 2>/dev/null || echo 'needs-human')
+AUTOPILOT_APPROVE_P1=$(yq '.autopilot.approve.p1 // "needs-human"' "$CONFIG_FILE" 2>/dev/null || echo 'needs-human')
+AUTOPILOT_APPROVE_P2=$(yq '.autopilot.approve.p2 // "needs-human"' "$CONFIG_FILE" 2>/dev/null || echo 'needs-human')
+AUTOPILOT_APPROVE_P3=$(yq '.autopilot.approve.p3 // "needs-human"' "$CONFIG_FILE" 2>/dev/null || echo 'needs-human')
+BUDGET_PER_CYCLE_FIXES=$(yq '.autopilot.budget.per_cycle_fixes // "null"' "$CONFIG_FILE" 2>/dev/null || echo 'null')
+RECON_SOURCES=$(yq '.autopilot.recon_sources // ["ci","backlog"] | join(",")' "$CONFIG_FILE" 2>/dev/null || echo 'ci,backlog')
+
+# FIX_COUNT tracks how many issues have been dispatched as autonomous fixes this cycle.
+# Declared here (outside all loops) so it persists across Phase 2 and Phase 3 iterations.
+FIX_COUNT=0
+
+# Policy decision accumulators — populated during dispatch; written to FORGE:AUTOPILOT_CYCLE.
+POLICY_APPROVED_ISSUES=()   # issue numbers dispatched automatically by policy
+POLICY_GATED_ISSUES=()      # issue numbers whose plan was posted for async approval
+POLICY_DEFERRED_ISSUES=()   # issue numbers deferred due to budget ceiling
+
+# Headless guard: if --fix requested but headless: false (default), refuse and exit.
+# This guard runs after all config is read so the refusal message can include the fix target.
+if [ "$AUTOPILOT_FIX" = "true" ] && [ "$AUTOPILOT_HEADLESS" != "true" ]; then
+  echo ""
+  echo "ERROR: --fix requested but autopilot.headless is not set to true in forge.yaml."
+  echo ""
+  echo "Autonomous fix dispatch requires an explicit opt-in:"
+  echo "  autopilot:"
+  echo "    headless: true"
+  echo "    approve:"
+  echo "      p2: auto   # or whichever priorities you trust for autonomous fixing"
+  echo ""
+  echo "Without this declaration, /autopilot performs recon and reporting only — no fixes."
+  echo "Add the autopilot.headless: true block to forge.yaml to enable unattended fixing."
+  exit 1
+fi
 
 # Resolve or create the ops issue (idempotent — checks before creating)
 OPS_ISSUE_NUMBER=$(gh issue list $GH_FLAG \
@@ -124,7 +163,8 @@ else
   echo "Autopilot: ops issue found: #$OPS_ISSUE_NUMBER"
 fi
 
-echo "Autopilot: repo=$GH_REPO staging=$STAGING_BRANCH default=$DEFAULT_BRANCH dry_run=$DRY_RUN recon_only=$RECON_ONLY ops_issue=#$OPS_ISSUE_NUMBER"
+echo "Autopilot: repo=$GH_REPO staging=$STAGING_BRANCH default=$DEFAULT_BRANCH dry_run=$DRY_RUN recon_only=$RECON_ONLY fix=$AUTOPILOT_FIX ops_issue=#$OPS_ISSUE_NUMBER"
+echo "Autonomy policy: headless=$AUTOPILOT_HEADLESS approve={p0:$AUTOPILOT_APPROVE_P0,p1:$AUTOPILOT_APPROVE_P1,p2:$AUTOPILOT_APPROVE_P2,p3:$AUTOPILOT_APPROVE_P3} budget.per_cycle_fixes=$BUDGET_PER_CYCLE_FIXES"
 ```
 
 ---
@@ -610,6 +650,63 @@ while true; do
         2>/dev/null || echo '')
 
       for ISSUE_NUM in $FAST_LANE_ISSUE_NUMS; do
+        # Autonomy policy gate — evaluate approve map by issue priority.
+        # Only applies when --fix is set; without --fix all issues flow normally.
+        if [ "$AUTOPILOT_FIX" = "true" ]; then
+          # Read the priority label for this issue (format: priority:P0, priority:P1, etc.)
+          ISSUE_PRIORITY_LABEL=$(gh issue view "$ISSUE_NUM" $GH_FLAG \
+            --json labels --jq '.labels | map(.name) | map(select(startswith("priority:"))) | .[0] // ""' \
+            2>/dev/null || echo '')
+          # Normalize: "priority:P2" → "p2"; unlabeled → "p2" (treat as P2 for policy default)
+          PRIORITY_KEY=$(echo "$ISSUE_PRIORITY_LABEL" | sed 's/priority://;s/P/p/' | tr '[:upper:]' '[:lower:]')
+          [ -z "$PRIORITY_KEY" ] && PRIORITY_KEY="p2"
+
+          # Resolve approval action from the map
+          case "$PRIORITY_KEY" in
+            p0) APPROVE_ACTION="$AUTOPILOT_APPROVE_P0" ;;
+            p1) APPROVE_ACTION="$AUTOPILOT_APPROVE_P1" ;;
+            p2) APPROVE_ACTION="$AUTOPILOT_APPROVE_P2" ;;
+            p3) APPROVE_ACTION="$AUTOPILOT_APPROVE_P3" ;;
+            *)  APPROVE_ACTION="needs-human" ;;  # unknown priority → gate
+          esac
+
+          # Budget ceiling check (only for auto-approved issues)
+          if [ "$APPROVE_ACTION" = "auto" ]; then
+            if [ "$BUDGET_PER_CYCLE_FIXES" != "null" ] && [ -n "$BUDGET_PER_CYCLE_FIXES" ]; then
+              if [ "$FIX_COUNT" -ge "$BUDGET_PER_CYCLE_FIXES" ]; then
+                echo "  #$ISSUE_NUM deferred (budget ceiling: $FIX_COUNT/$BUDGET_PER_CYCLE_FIXES fixes dispatched)"
+                POLICY_DEFERRED_ISSUES+=("$ISSUE_NUM")
+                continue
+              fi
+            fi
+          fi
+
+          if [ "$APPROVE_ACTION" = "auto" ]; then
+            echo "  #$ISSUE_NUM approved-by-policy ($PRIORITY_KEY → auto) — dispatching"
+            POLICY_APPROVED_ISSUES+=("$ISSUE_NUM")
+            FIX_COUNT=$((FIX_COUNT + 1))
+          else
+            # needs-human: post the fix plan on the ops issue for async approval; never dispatch
+            echo "  #$ISSUE_NUM gated-by-policy ($PRIORITY_KEY → needs-human) — posting plan to ops issue #$OPS_ISSUE_NUMBER"
+            POLICY_GATED_ISSUES+=("$ISSUE_NUM")
+            ISSUE_TITLE=$(gh issue view "$ISSUE_NUM" $GH_FLAG --json title --jq '.title' 2>/dev/null || echo "#$ISSUE_NUM")
+            if [ -n "$OPS_ISSUE_NUMBER" ] && [ "$OPS_ISSUE_NUMBER" != "0" ]; then
+              gh issue comment "$OPS_ISSUE_NUMBER" $GH_FLAG --body "<!-- FORGE:AUTOPILOT_GATE -->
+## Gated Fix — Requires Human Approval
+
+**Issue**: #${ISSUE_NUM} — ${ISSUE_TITLE}
+**Priority**: \`${ISSUE_PRIORITY_LABEL:-unlabeled}\`
+**Policy**: \`autopilot.approve.${PRIORITY_KEY} = needs-human\`
+**Action needed**: Review #${ISSUE_NUM} and either approve for autonomous dispatch or resolve manually.
+
+To approve: remove \`needs-human\` label from #${ISSUE_NUM} and re-run \`/autopilot --fix\`, OR change \`autopilot.approve.${PRIORITY_KEY}\` to \`auto\` in forge.yaml.
+
+<!-- FORGE:AUTOPILOT_GATE:COMPLETE -->" 2>/dev/null || true
+            fi
+            continue  # skip dispatch for gated issues
+          fi
+        fi
+
         echo "Dispatching #$ISSUE_NUM via forgedock run-issue --lane staging"
         DISPATCHED_ISSUES+=("$ISSUE_NUM")
         forgedock run-issue "$ISSUE_NUM" --lane staging &
@@ -829,6 +926,58 @@ echo "$MILESTONES" | jq -c '.[]' | while IFS= read -r milestone; do
           2>/dev/null || echo '')
 
         for ISSUE_NUM in $MS_ISSUE_NUMS; do
+          # Autonomy policy gate — same approve map as Phase 2 fast lane.
+          # Only applies when --fix is set; without --fix all issues flow normally.
+          if [ "$AUTOPILOT_FIX" = "true" ]; then
+            ISSUE_PRIORITY_LABEL=$(gh issue view "$ISSUE_NUM" $GH_FLAG \
+              --json labels --jq '.labels | map(.name) | map(select(startswith("priority:"))) | .[0] // ""' \
+              2>/dev/null || echo '')
+            PRIORITY_KEY=$(echo "$ISSUE_PRIORITY_LABEL" | sed 's/priority://;s/P/p/' | tr '[:upper:]' '[:lower:]')
+            [ -z "$PRIORITY_KEY" ] && PRIORITY_KEY="p2"
+
+            case "$PRIORITY_KEY" in
+              p0) APPROVE_ACTION="$AUTOPILOT_APPROVE_P0" ;;
+              p1) APPROVE_ACTION="$AUTOPILOT_APPROVE_P1" ;;
+              p2) APPROVE_ACTION="$AUTOPILOT_APPROVE_P2" ;;
+              p3) APPROVE_ACTION="$AUTOPILOT_APPROVE_P3" ;;
+              *)  APPROVE_ACTION="needs-human" ;;
+            esac
+
+            if [ "$APPROVE_ACTION" = "auto" ]; then
+              if [ "$BUDGET_PER_CYCLE_FIXES" != "null" ] && [ -n "$BUDGET_PER_CYCLE_FIXES" ]; then
+                if [ "$FIX_COUNT" -ge "$BUDGET_PER_CYCLE_FIXES" ]; then
+                  echo "  #$ISSUE_NUM deferred (budget ceiling: $FIX_COUNT/$BUDGET_PER_CYCLE_FIXES fixes dispatched)"
+                  POLICY_DEFERRED_ISSUES+=("$ISSUE_NUM")
+                  continue
+                fi
+              fi
+            fi
+
+            if [ "$APPROVE_ACTION" = "auto" ]; then
+              echo "  #$ISSUE_NUM approved-by-policy ($PRIORITY_KEY → auto) — dispatching"
+              POLICY_APPROVED_ISSUES+=("$ISSUE_NUM")
+              FIX_COUNT=$((FIX_COUNT + 1))
+            else
+              echo "  #$ISSUE_NUM gated-by-policy ($PRIORITY_KEY → needs-human) — posting plan to ops issue #$OPS_ISSUE_NUMBER"
+              POLICY_GATED_ISSUES+=("$ISSUE_NUM")
+              ISSUE_TITLE=$(gh issue view "$ISSUE_NUM" $GH_FLAG --json title --jq '.title' 2>/dev/null || echo "#$ISSUE_NUM")
+              if [ -n "$OPS_ISSUE_NUMBER" ] && [ "$OPS_ISSUE_NUMBER" != "0" ]; then
+                gh issue comment "$OPS_ISSUE_NUMBER" $GH_FLAG --body "<!-- FORGE:AUTOPILOT_GATE -->
+## Gated Fix — Requires Human Approval
+
+**Issue**: #${ISSUE_NUM} — ${ISSUE_TITLE}
+**Priority**: \`${ISSUE_PRIORITY_LABEL:-unlabeled}\`
+**Policy**: \`autopilot.approve.${PRIORITY_KEY} = needs-human\`
+**Action needed**: Review #${ISSUE_NUM} and either approve for autonomous dispatch or resolve manually.
+
+To approve: remove \`needs-human\` label from #${ISSUE_NUM} and re-run \`/autopilot --fix\`, OR change \`autopilot.approve.${PRIORITY_KEY}\` to \`auto\` in forge.yaml.
+
+<!-- FORGE:AUTOPILOT_GATE:COMPLETE -->" 2>/dev/null || true
+              fi
+              continue  # skip dispatch for gated issues
+            fi
+          fi
+
           echo "Dispatching #$ISSUE_NUM via forgedock run-issue --lane milestone/$MS_SLUG"
           DISPATCHED_ISSUES+=("$ISSUE_NUM")
           forgedock run-issue "$ISSUE_NUM" --lane "milestone/$MS_SLUG" &
@@ -1045,6 +1194,14 @@ ${FINDINGS_SUMMARY}
 - Milestones processed: ${MILESTONE_ITERATIONS:-0}
 - Milestone ships: ${MILESTONE_DEPLOYS:-0}
 
+### Autonomy Policy Decisions
+- Fix mode: ${AUTOPILOT_FIX} (headless: ${AUTOPILOT_HEADLESS})
+- Approved by policy: ${#POLICY_APPROVED_ISSUES[@]:-0} issue(s)$([ "${#POLICY_APPROVED_ISSUES[@]:-0}" -gt 0 ] && echo " — ${POLICY_APPROVED_ISSUES[*]}" || echo "")
+- Gated (needs-human): ${#POLICY_GATED_ISSUES[@]:-0} issue(s)$([ "${#POLICY_GATED_ISSUES[@]:-0}" -gt 0 ] && echo " — ${POLICY_GATED_ISSUES[*]}" || echo "")
+- Deferred (budget ceiling): ${#POLICY_DEFERRED_ISSUES[@]:-0} issue(s)$([ "${#POLICY_DEFERRED_ISSUES[@]:-0}" -gt 0 ] && echo " — ${POLICY_DEFERRED_ISSUES[*]}" || echo "")
+- Budget used: ${FIX_COUNT:-0} / ${BUDGET_PER_CYCLE_FIXES:-unlimited}
+- Approve map: {p0:${AUTOPILOT_APPROVE_P0},p1:${AUTOPILOT_APPROVE_P1},p2:${AUTOPILOT_APPROVE_P2},p3:${AUTOPILOT_APPROVE_P3}}
+
 ### Final State
 - Open issues: ${FINAL_OPEN} total (${FINAL_FAST_LANE} unmilestoned)
 - CI failures (24h): ${FINAL_CI_FAILURES}
@@ -1056,6 +1213,7 @@ ${FINDINGS_SUMMARY}
 elif [ "$DRY_RUN" = "true" ]; then
   echo "[DRY-RUN] Would write FORGE:AUTOPILOT_CYCLE annotation to ops issue #$OPS_ISSUE_NUMBER"
   echo "[DRY-RUN] cycle_id=$CYCLE_ID baseline=$BASELINE_JSON phase_markers=$PHASE_MARKERS_COMMITTED"
+  echo "[DRY-RUN] policy: fix=$AUTOPILOT_FIX headless=$AUTOPILOT_HEADLESS approved=${#POLICY_APPROVED_ISSUES[@]:-0} gated=${#POLICY_GATED_ISSUES[@]:-0} deferred=${#POLICY_DEFERRED_ISSUES[@]:-0} budget_used=$FIX_COUNT/$BUDGET_PER_CYCLE_FIXES"
 fi
 ```
 
@@ -1188,6 +1346,13 @@ cat <<REPORT
 ### Milestone Loop
 - Milestones processed: $MILESTONE_ITERATIONS
 - Milestone ships: $MILESTONE_DEPLOYS
+
+### Autonomy Policy
+- Fix mode: $AUTOPILOT_FIX (headless: $AUTOPILOT_HEADLESS)
+- Approved by policy: ${#POLICY_APPROVED_ISSUES[@]:-0} issue(s)
+- Gated (needs-human, posted to ops issue): ${#POLICY_GATED_ISSUES[@]:-0} issue(s)
+- Deferred (budget ceiling hit): ${#POLICY_DEFERRED_ISSUES[@]:-0} issue(s)
+- Budget used: ${FIX_COUNT:-0} / ${BUDGET_PER_CYCLE_FIXES:-unlimited}
 
 ### Final State
 - Open issues: $FINAL_OPEN total ($FINAL_FAST_LANE unmilestoned)

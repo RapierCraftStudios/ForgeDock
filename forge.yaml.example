@@ -525,6 +525,42 @@ branches:
 #   # if no open issue with this label exists.
 #   # Default: "autopilot-ops"
 #   ops_issue_label: "autopilot-ops"
+#
+#   # Declared autonomy policy — controls unattended (headless) operation.
+#   # When headless: false (default), /autopilot with --fix refuses to dispatch
+#   # any fixes and explains why. Autonomy is opt-in per repo.
+#   #
+#   # headless: false   # explicit opt-in to unattended fixing; default: false
+#
+#   # Per-priority approval map — evaluated when headless: true.
+#   # Each priority maps to one of two actions:
+#   #   auto        — dispatch the fix autonomously
+#   #   needs-human — post the fix plan on the ops issue for async approval; never dispatch
+#   # Default for all priorities: needs-human (conservative)
+#   #
+#   # approve:
+#   #   p0: needs-human   # P0s are never autonomous — always gate
+#   #   p1: needs-human   # P1s require human approval
+#   #   p2: auto          # P2s are safe to auto-approve in unattended runs
+#   #   p3: auto          # P3s are safe to auto-approve in unattended runs
+#
+#   # Budget ceilings — enforced per cycle; cycle stops dispatching when hit.
+#   # per_cycle_fixes: max number of issues dispatched as fixes in one cycle.
+#   #   When reached, remaining eligible issues are deferred to the next cycle
+#   #   with a deferral report in the FORGE:AUTOPILOT_CYCLE annotation.
+#   # per_cycle_tokens: advisory spend cap (null = unlimited).
+#   #   Enforceable once #1743 (token accounting) is merged. Until then, treated
+#   #   as documentation-only; no runtime enforcement.
+#   #
+#   # budget:
+#   #   per_cycle_fixes: 3     # FIX_LIMIT ceiling; null or omit for unlimited
+#   #   per_cycle_tokens: null # optional hard spend cap (future enforcement via #1743)
+#
+#   # Recon sources — which collectors run during Phase 1 (Recon).
+#   # Values: ci (CI/CD health), backlog (issue backlog health)
+#   # Default: [ci, backlog] (both run)
+#   #
+#   # recon_sources: [ci, backlog]
 
 # =============================================================================
 # BILLING (OPTIONAL)
