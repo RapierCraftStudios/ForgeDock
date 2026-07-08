@@ -420,6 +420,11 @@ while true; do
       echo "Engine dispatch complete for fast-lane iteration $FAST_LANE_ITERATIONS"
     else
       echo "INFO: Using agent dispatch mode (forgedock CLI not in PATH — run \`npm install -g forgedock\` for engine-mode dispatch)"
+      # Safety Rule 2 (needs-human guarantee): The engine-first path above filters
+      # needs-human issues via an explicit jq selector. On this fallback path,
+      # /orchestrate enforces the same guarantee at its own phase entry — it skips
+      # any issue labeled needs-human before dispatching /work-on. Both paths
+      # implement Rule 2; the mechanism differs (jq filter vs. downstream check).
       Skill("orchestrate", args="fast-lane")
     fi
   else
@@ -545,6 +550,8 @@ echo "$MILESTONES" | jq -c '.[]' | while IFS= read -r milestone; do
         echo "Engine dispatch complete for milestone '$MS_TITLE'"
       else
         echo "INFO: Using agent dispatch mode (forgedock CLI not in PATH — run \`npm install -g forgedock\` for engine-mode dispatch)"
+        # Safety Rule 2 (needs-human guarantee): See fast-lane fallback comment above.
+        # /orchestrate enforces the needs-human exclusion at its own phase entry.
         Skill("orchestrate", args="milestone $MS_SLUG")
       fi
     else
@@ -730,15 +737,27 @@ done
 
 ## Safety Rules
 
-1. **Overrides "never merge to main"** — `/autopilot` IS the authorized deploy system. staging→main is normal operation.
-2. **Never skip investigation** — all issues go through full `/work-on` pipeline (via /orchestrate) before any fix lands.
-3. **Never process `needs-human` issues** — /orchestrate and /work-on skip these automatically.
-4. **Never create duplicate issues** — always dedup against existing open issues before creating.
-5. **Loop safety cap** — max 20 fast-lane iterations prevents infinite loops on stuck state.
-6. **DRY_RUN means NO side effects** — no issues created, no PRs merged, no labels changed. Report only.
-7. **Graceful sub-skill degradation** — if /recover-orphans is not installed, log a warning and continue.
-8. **State always re-read** — never trust a cached issue count. Re-query GitHub at each loop iteration.
-9. **deploy-pr result is authoritative** — if status is not "merged", do not assume the deploy succeeded. Log and continue the loop.
+Rules are listed in **precedence order** — when two rules appear to conflict, the rule with the lower number wins. Rule 0 is inviolable; no other rule can override it.
+
+**Rule 0 (INVIOLABLE): `--dry-run` means NO side effects.** When `DRY_RUN=true`, autopilot produces a report and exits. No issues are created, no PRs are merged, no labels are changed, no sub-skills with side effects are invoked. This holds regardless of priority (P0, P1, or any other), regardless of loop state, and regardless of what any other rule says. Every dispatch block in this spec checks `DRY_RUN` before acting. If a code path appears to conflict with this rule, `DRY_RUN` wins.
+
+**Rule 1: `/autopilot` overrides "never merge to main"** — autopilot IS the authorized deploy system. staging→main is normal operation in Phases 2 and 3.
+
+**Rule 2: Never process `needs-human` issues.** Issues labeled `needs-human` must never be autonomously worked on, regardless of priority. The engine-first dispatch path (Phase 2, Step 1 and Phase 3, Step 1) enforces this with an explicit jq filter. The /orchestrate fallback path delegates this guarantee to /orchestrate and /work-on, which skip `needs-human` issues at their own phase entry. A P0 issue labeled `needs-human` — meaning a human explicitly parked it as requiring human judgment — is reported in the Phase 1C recon output but never added to any dispatch queue. Rule 0 (dry-run) takes precedence over this rule: a dry-run run reports the `needs-human` P0 and takes no action.
+
+**Rule 3: Never skip investigation** — all issues go through the full `/work-on` pipeline (via /orchestrate or the durable engine) before any fix lands.
+
+**Rule 4: Never create duplicate issues** — always dedup against existing open issues before creating.
+
+**Rule 5: Loop safety cap** — max 20 fast-lane iterations prevents infinite loops on stuck state.
+
+**Rule 6: Graceful sub-skill degradation** — if /recover-orphans is not installed, log a warning and continue.
+
+**Rule 7: State always re-read** — never trust a cached issue count. Re-query GitHub at each loop iteration.
+
+**Rule 8: deploy-pr result is authoritative** — if status is not "merged", do not assume the deploy succeeded. Log and continue the loop.
+
+**Headless / unattended operation**: `/autopilot` has no human checkpoint and never waits for user input. When invoked via `/loop 4h /autopilot` or any other unattended runner, it runs to completion and exits. Human escalation is exclusively via the `needs-human` label (Rule 2 above) — autopilot surfaces `needs-human` issues in the recon report but never stalls waiting for a response. There is no "Phase 4B confirm before fixing" gate in the current design; that checkpoint was intentionally removed in the #1673 rewrite. If a future design adds a confirmation gate, it must be guarded by both Rule 0 (dry-run) and Rule 2 (needs-human) to remain safe.
 
 ---
 
