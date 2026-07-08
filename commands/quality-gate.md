@@ -266,6 +266,7 @@ Run ONLY the checks whose domain was identified in Step 1.5. Skip checks for dom
 - **2R (Registry checks)**: ALWAYS run — executes all promoted checks from `scripts/check-registry/manifest.json` <!-- Added: forge#1331 -->
 - **2R.5 (Adaptive gate.d checks)**: ALWAYS run when `adaptive_scripts.enabled` — executes `.forgedock/scripts/gate.d/*.sh`; each script is repo-specific and was promoted from a recurring finding pattern <!-- Added: forge#1739 -->
 - **2G.8 (Wire-through proof)**: Run if `WIRE_THROUGH` in DOMAINS — demands each newly added conditional path be demonstrably reachable <!-- Added: forge#1731 -->
+- **2G.9 (Danger-zone recurrence)**: Run if `FORGE_GRAPH` in DOMAINS — cross-references injected danger-zone rule cards from FORGE:CONTEXT against the diff; violations tagged `known-pattern-recurrence` (HIGH) <!-- Added: forge#1744 -->
 - **2S (Test failure classification)**: Run if any Step 2 check invoked a test suite and it failed — classifies the failure as PRE_BROKEN, FLAKY, or REAL using `scripts/flaky-quarantine.sh` <!-- Added: forge#1336 -->
 
 ### 2A: Security (ALL files)
@@ -703,6 +704,67 @@ fi
 - Ensure the conditional qualifies as a trivial re-guard (see criterion 3 above)
 
 Do NOT suppress the finding by making the check less strict or adding fake no-op tests. The intent is a real proof that the path is reachable. <!-- Added: forge#1731 -->
+
+### 2G.9: Danger-zone recurrence check (FORGE_GRAPH domain) <!-- Added: forge#1744 -->
+
+**Triggered when**: `FORGE_GRAPH` in DOMAINS (changed files include `commands/*.md` specs or `scripts/*` files). Skips silently when the FORGE:CONTEXT comment on the issue contains no `### Danger-Zone Rule Cards` section (i.e., Phase C0.5 injected zero cards — nothing to cross-reference).
+
+**Why this matters**: When Phase C0.5 injects danger-zone rule cards into the builder's context, those cards represent the highest-value risk knowledge for the files being changed. A violation of an injected rule card is the most embarrassing category of pipeline failure — the system knew about the recurring pattern and the builder violated it anyway. Detecting this at the quality gate (pre-merge) rather than at review (post-PR) is the highest-leverage intervention point. Each violation tagged `known-pattern-recurrence` feeds directly into pipeline-health metrics for A/B evaluation (cards-on vs cards-off first-review finding rate).
+
+```bash
+# 2G.9: Danger-zone recurrence check
+# Step 1: Read injected danger-zone cards from FORGE:CONTEXT comment on the issue
+CONTEXT_COMMENT=$(gh api repos/{GH_REPO}/issues/{ISSUE_NUMBER}/comments \
+  --jq '[.[] | select(.body | contains("<!-- FORGE:CONTEXT -->"))] | last | .body // ""' 2>/dev/null \
+  | timeout 10 cat || echo '')
+
+# Extract the Danger-Zone Rule Cards section
+DZ_SECTION=$(echo "$CONTEXT_COMMENT" \
+  | sed -n '/^### Danger-Zone Rule Cards/,/^### /p' \
+  | head -30)
+
+if [ -z "$DZ_SECTION" ] || ! echo "$DZ_SECTION" | grep -q '^- '; then
+  echo "2G.9: no injected danger-zone cards in FORGE:CONTEXT — skipping recurrence check"
+else
+  echo "2G.9: checking diff against injected danger-zone rule cards..."
+
+  # Extract pattern keywords from each card (text after "recurring: " up to " (" or ";")
+  # Card format: {file} — {N} findings/90d — recurring: {pattern} (#{issue}); rule: {prevention}
+  CARD_PATTERNS=$(echo "$DZ_SECTION" \
+    | grep '^- ' \
+    | sed -n 's/.*recurring: \([^;(]*\).*/\1/p' \
+    | sed 's/[[:space:]]*$//' \
+    | grep -v '^$' \
+    | head -10)
+
+  if [ -z "$CARD_PATTERNS" ]; then
+    echo "2G.9: no pattern keywords extracted from cards — skipping"
+  else
+    # Step 2: Read the diff and check for pattern keyword matches
+    DIFF_CONTENT=$(cd {WORKTREE_PATH} && git diff --cached 2>/dev/null || git diff HEAD 2>/dev/null)
+
+    while IFS= read -r pattern; do
+      [ -z "$pattern" ] && continue
+      # Escape pattern for grep (strip regex-unsafe chars, use literal substring match)
+      SAFE_PATTERN=$(echo "$pattern" | head -c 60 | sed 's/[.*+?^${}()|[\]\\]/\\&/g')
+      [ -z "$SAFE_PATTERN" ] && continue
+
+      # Check if the diff introduces lines matching the pattern (added lines only)
+      MATCH=$(echo "$DIFF_CONTENT" | grep -E '^\+' | grep -v '^+++' | grep -i "$SAFE_PATTERN" | head -3)
+      if [ -n "$MATCH" ]; then
+        MATCH_PREVIEW=$(echo "$MATCH" | head -1 | head -c 120)
+        echo "FORGE_GRAPH | HIGH | known-pattern-recurrence | Diff matches injected rule card pattern '${pattern}': ${MATCH_PREVIEW} — this is a known-pattern-recurrence: the pipeline injected this rule card and the implementation violated it anyway. Fix before merging."
+      fi
+    done <<< "$CARD_PATTERNS"
+
+    echo "2G.9: recurrence check complete"
+  fi
+fi
+```
+
+**Severity**: **HIGH** — `known-pattern-recurrence` is the highest embarrassment class. The pipeline had the risk knowledge in context and the implementation violated it regardless. This represents a failure of the context injection mechanism's effectiveness, and every recurrence degrades the A/B signal that measures whether memory injection changes agent behavior. The builder must fix the violation before the gate can pass.
+
+**Note**: This check fires only for FORGE_GRAPH domain changes (ForgeDock spec files). For application code changes, violations of injected rule cards are surfaced by the review agents in Phase 5 — the quality gate cross-reference here is specific to pipeline spec changes where the FORGE:CONTEXT from the issue is the definitive context source. <!-- Added: forge#1744 -->
 
 ### 2H: Asyncio cancellation safety (Python async code)
 
