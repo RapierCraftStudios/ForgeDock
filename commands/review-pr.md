@@ -1980,6 +1980,31 @@ if [ "$PRE_MERGE_HEALTH" = "CONFLICTING" ] || [ "$PRE_MERGE_HEALTH_STATE" = "DIR
     gh issue edit {MERGE_ISSUE} {MERGE_GH_FLAG} --add-label "needs-human" 2>/dev/null || true
     # STOP — do not attempt gh pr merge on a CONFLICTING/DIRTY PR
 else
+
+# Previously-escalated re-review guard <!-- Added: forge#1810 -->
+# If the linked issue currently carries needs-human, this PR was escalated at some
+# earlier point (VERDICT/purpose-regression/calibration/trust/mergeability) and has
+# now been remediated + re-reviewed back to a clean, mergeable APPROVED state above.
+# The "auto-land bar" (≥2 independent adversarial approvals + domain gates — see
+# #1809 Q1) is not yet implemented (future #1809 sub-issues B/C/D), so the safe
+# default here is to land on workflow:awaiting-merge (clearing needs-human) rather
+# than silently auto-merging a PR that was once flagged human-risk.
+PREVIOUSLY_ESCALATED=$(gh issue view {MERGE_ISSUE} {MERGE_GH_FLAG} --json labels \
+  --jq '[.labels[].name] | any(. == "needs-human")' 2>/dev/null || echo "false")
+
+if [ "$PREVIOUSLY_ESCALATED" = "true" ]; then
+    gh issue comment {MERGE_ISSUE} {MERGE_GH_FLAG} --body "🟠 PR #{PR_NUMBER} was previously escalated (\`needs-human\`) and has now been re-reviewed to \`${VERDICT:-APPROVED}\` with a clean mergeability check. The automated auto-land bar for previously-escalated PRs is not yet implemented, so this PR is held at \`workflow:awaiting-merge\` for a human merge decision instead of auto-merging. Merge manually once reviewed: \`gh pr merge {PR_NUMBER} {MERGE_GH_FLAG} --merge\`."
+    RESOLUTION=$(resolve_script 'transition-label')
+    TIER="${RESOLUTION%%:*}"; SCRIPT_PATH="${RESOLUTION#*:}"
+    case "$TIER" in
+      adaptive|universal) bash "$SCRIPT_PATH" {MERGE_ISSUE} {MERGE_GH_FLAG} awaiting-merge ;;
+      prose)
+        gh issue edit {MERGE_ISSUE} {MERGE_GH_FLAG} --add-label "workflow:awaiting-merge" \
+          --remove-label "needs-human,workflow:investigating,workflow:ready-to-build,workflow:building,workflow:in-review,workflow:merged,workflow:invalid,workflow:decomposed" 2>/dev/null || true
+        ;;
+    esac
+    # STOP — do not attempt gh pr merge; a human decides the merge from here
+else
     # Checkpoint comment on issue
     gh issue comment {MERGE_ISSUE} {MERGE_GH_FLAG} --body "Review complete for PR #{PR_NUMBER}. Verdict: ${VERDICT:-APPROVED}. Proceeding to merge."
 
@@ -1989,6 +2014,7 @@ else
     # Verify
     MERGE_STATE=$(gh pr view {PR_NUMBER} {MERGE_GH_FLAG} --json state --jq '.state')
     [ "$MERGE_STATE" != "MERGED" ] && gh issue comment {MERGE_ISSUE} {MERGE_GH_FLAG} --body "PR #{PR_NUMBER} merge failed. State: $MERGE_STATE."
+fi
 fi
 fi
 ```

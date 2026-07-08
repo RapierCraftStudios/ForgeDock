@@ -14,10 +14,13 @@ See also: [FORGE Annotation Protocol §6](forge-protocol-v1.md#6-label-state-mac
 | `workflow:ready-to-build` | Investigation complete, build not started | Investigator agent |
 | `workflow:building` | Build phase active | Builder agent |
 | `workflow:in-review` | PR created, review active | Orchestrator agent |
+| `workflow:awaiting-merge` | Remediated + re-reviewed, awaiting a human merge decision | Review-pr Phase 8 (auto-merge guard) |
 | `workflow:merged` | PR merged, issue closed | Close phase agent |
 | `workflow:invalid` | Issue closed as invalid | Investigator agent |
 | `workflow:decomposed` | Issue decomposed into sub-issues | Decomposer agent |
 | `needs-human` | Pipeline blocked, human intervention required | Any agent on error |
+
+`workflow:awaiting-merge` vs `needs-human`: both are terminal (the pipeline stops advancing the issue automatically), but they mean different things. `needs-human` means the pipeline hit a condition it cannot resolve on its own (genuinely blocked — conflicting PR, failed verdict, calibration/trust escalation, etc.) and a human must diagnose and act. `workflow:awaiting-merge` means the opposite: the PR was previously escalated to `needs-human`, has since been remediated and re-reviewed to a clean `APPROVED` verdict with no mergeability blockers, but does not yet meet the automated auto-land bar (see forge#1809 Q1) — a human only needs to click merge, not diagnose a problem. `scripts/transition-label.sh` clears `needs-human` (best-effort) on every transition, so moving an issue onto `workflow:awaiting-merge` also clears any stale `needs-human` label.
 
 ## Transitions
 
@@ -27,6 +30,7 @@ See also: [FORGE Annotation Protocol §6](forge-protocol-v1.md#6-label-state-mac
   → workflow:ready-to-build     [Phase 2: Investigation complete]
   → workflow:building           [Phase 3: Build started]
   → workflow:in-review          [Phase 4: PR created]
+  → workflow:awaiting-merge [TERMINAL] [Phase 5/review-pr: re-reviewed after needs-human, awaiting human merge]
   → workflow:merged  [TERMINAL] [Phase 5: PR merged]
   → workflow:invalid [TERMINAL] [Any phase: closed as invalid]
   → workflow:decomposed [TERMINAL] [Phase 2: split into sub-issues]
@@ -40,6 +44,7 @@ Processing stops when any of these labels is set:
 - `workflow:merged`
 - `workflow:invalid`
 - `workflow:decomposed`
+- `workflow:awaiting-merge`
 - `needs-human`
 
 ## Label Exclusivity
@@ -49,7 +54,7 @@ At most one `workflow:*` label should be active on an issue at any time. When tr
 ```bash
 gh issue edit {NUMBER} -R {REPO} \
   --add-label "workflow:building" \
-  --remove-label "workflow:investigating,workflow:ready-to-build,workflow:in-review,workflow:merged,workflow:invalid,workflow:decomposed"
+  --remove-label "workflow:investigating,workflow:ready-to-build,workflow:in-review,workflow:awaiting-merge,workflow:merged,workflow:invalid,workflow:decomposed"
 ```
 
 This is enforced by `scripts/transition-label.sh` — use `resolve_script 'transition-label'` rather than calling `gh issue edit` directly when possible.

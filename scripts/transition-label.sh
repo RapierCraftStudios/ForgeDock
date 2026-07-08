@@ -8,7 +8,7 @@
 #   GH_FLAG       Repository flag passed to gh (e.g. -R RapierCraftStudios/forgedock)
 #                 May be multiple tokens — pass before TARGET_STATE
 #   TARGET_STATE  One of: investigating, ready-to-build, building, in-review,
-#                         merged, invalid, decomposed
+#                         merged, invalid, decomposed, awaiting-merge
 #
 #   --validate    Sub-command mode: translate an investigation verdict into a
 #                 finding-lifecycle label (needs-validation → validated/false-positive).
@@ -159,6 +159,7 @@ VALID_STATES=(
   "merged"
   "invalid"
   "decomposed"
+  "awaiting-merge"
 )
 
 # ---------------------------------------------------------------------------
@@ -259,5 +260,26 @@ gh issue edit "$ISSUE_NUMBER" "${GH_ARGS[@]}" --add-label "$EFFECTIVE_LABEL"
 # ---------------------------------------------------------------------------
 echo "Removing stale workflow:* labels ($REMOVE_LABELS)..."
 gh issue edit "$ISSUE_NUMBER" "${GH_ARGS[@]}" --remove-label "$REMOVE_LABELS" 2>/dev/null || true
+
+# ---------------------------------------------------------------------------
+# Clear needs-human (best-effort)
+#
+# needs-human is NOT a workflow:* label, so it is never included in
+# VALID_STATES/REMOVE_LABELS above. Historically no code path ever cleared it
+# (forge#1809/#1810) — it was a write-only, sticky, terminal label even after
+# the pipeline made forward progress past the condition that set it.
+#
+# This script only runs at explicit forward-progress transition points (the
+# dispatcher STOPs on needs-human before ever reaching a transition-label.sh
+# call in normal operation — see commands/work-on.md's terminal-state checks),
+# so clearing needs-human here is safe: it only fires when something has
+# deliberately decided to move the issue/PR to a new state, most notably
+# workflow:awaiting-merge (a remediated + re-reviewed PR moving off
+# needs-human without yet meeting the auto-land bar — see #1809 Q1).
+# Best-effort: `|| true` so a missing label never fails the script under
+# `set -euo pipefail`.
+# ---------------------------------------------------------------------------
+echo "Clearing needs-human (best-effort)..."
+gh issue edit "$ISSUE_NUMBER" "${GH_ARGS[@]}" --remove-label "needs-human" 2>/dev/null || true
 
 echo "OK: $EFFECTIVE_LABEL set on issue #$ISSUE_NUMBER"

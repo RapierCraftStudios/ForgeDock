@@ -62,6 +62,7 @@ Orchestrator for the full issue lifecycle: investigate → decompose (if needed)
 - `workflow:merged` label is set
 - `workflow:invalid` label is set
 - `needs-human` label is set
+- `workflow:awaiting-merge` label is set (remediated + re-reviewed, awaiting a human merge decision — see #1810) <!-- Added: forge#1810 -->
 - `workflow:decomposed` label is set (sub-issues spawned)
 - Issue state is CLOSED with terminal label
 
@@ -216,7 +217,7 @@ fi
 Worktree/branch-already-exists and stale-label conditions are surfaced later (Phase 3E worktree creation and the `## Error Handling` section) with their own recovery guidance in `docs/site/troubleshooting.md`.
 
 ### 0A: Parse input
-Extract project prefix and issue number. If `next`/`pick`: list open issues sorted by priority, skip `needs-human` and `workflow:decomposed`, pick highest priority.
+Extract project prefix and issue number. If `next`/`pick`: list open issues sorted by priority, skip `needs-human`, `workflow:decomposed`, and `workflow:awaiting-merge`, pick highest priority.
 
 **Optional pre-flight**: Before committing to the full pipeline, run `/scope {NUMBER}` to get a complexity estimate (affected files, blast radius, risk flags, and decomposition recommendation). Especially useful for large or ambiguous issues.
 
@@ -234,7 +235,7 @@ gh issue comment {NUMBER} {GH_FLAG} --body "<!-- FORGE:HEARTBEAT -->
 
 **Also post at major phase entry points** (Phases 1, 3, and 5) — replace `Phase 0` with the correct phase name in each case. These mid-pipeline heartbeats ensure the stall detector sees recent activity during long phases (e.g., a build phase running for 20 minutes is not falsely classified as stalled). Inline snippets are embedded at Phase 1A, Phase 3A, and Phase 5A — agents resuming mid-pipeline encounter them without reading this section. <!-- Added: forge#740 -->
 
-**Skip if**: Issue already has a terminal label (`workflow:merged`, `workflow:invalid`, `needs-human`) — no heartbeat needed on a completed issue.
+**Skip if**: Issue already has a terminal label (`workflow:merged`, `workflow:invalid`, `needs-human`, `workflow:awaiting-merge`) — no heartbeat needed on a completed issue.
 
 ### 0B: Load issue + existing context
 ```bash
@@ -242,7 +243,7 @@ gh issue view {NUMBER} {GH_FLAG} --json number,title,body,labels,state,comments,
 gh api repos/{GH_REPO}/issues/{NUMBER}/comments --jq '.[] | {id: .id, author: .user.login, body: .body}'
 ```
 
-**Check**: state (closed → STOP), terminal labels (`workflow:merged`/`workflow:invalid` → STOP), existing agent comments (`FORGE:INVESTIGATOR`, `FORGE:DECOMPOSED`, `FORGE:CONTRACT`, `FORGE:BUILDER`, `FORGE:TRAJECTORY`, `FORGE:DECISION_RECORD`), parent tracker status, sub-issue status.
+**Check**: state (closed → STOP), terminal labels (`workflow:merged`/`workflow:invalid`/`workflow:awaiting-merge` → STOP), existing agent comments (`FORGE:INVESTIGATOR`, `FORGE:DECOMPOSED`, `FORGE:CONTRACT`, `FORGE:BUILDER`, `FORGE:TRAJECTORY`, `FORGE:DECISION_RECORD`), parent tracker status, sub-issue status.
 
 **Determine resume point**: No comments → Phase 1. Investigation exists + ready-to-build → Phase 3. Builder:COMPLETE + no PR → Phase 4. Builder without :COMPLETE (partial/interrupted build) + no PR → Phase 3 (partial-build cleanup). Builder + PR open → Phase 5. PR merged + issue open → Phase 6.
 
@@ -471,12 +472,12 @@ case "$TIER" in
   adaptive|universal) bash "$SCRIPT_PATH" {NUMBER} {GH_FLAG} investigating ;;
   prose)
     gh issue edit {NUMBER} {GH_FLAG} --add-label "workflow:investigating" \
-      --remove-label "workflow:ready-to-build,workflow:building,workflow:in-review,workflow:merged,workflow:invalid,workflow:decomposed" 2>/dev/null || true
+      --remove-label "workflow:ready-to-build,workflow:building,workflow:in-review,workflow:awaiting-merge,workflow:merged,workflow:invalid,workflow:decomposed" 2>/dev/null || true
     ;;
 esac
 ```
 
-**Post Phase 1 heartbeat** (skip if issue already has a terminal label — `workflow:merged`, `workflow:invalid`, `needs-human`):
+**Post Phase 1 heartbeat** (skip if issue already has a terminal label — `workflow:merged`, `workflow:invalid`, `needs-human`, `workflow:awaiting-merge`):
 ```bash
 PHASE_START_TIMESTAMP=$(date -u +%Y-%m-%dT%H:%M:%SZ)
 gh issue comment {NUMBER} {GH_FLAG} --body "<!-- FORGE:HEARTBEAT -->
@@ -748,7 +749,7 @@ case "$TIER" in
   adaptive|universal) bash "$SCRIPT_PATH" {NUMBER} {GH_FLAG} ready-to-build ;;
   prose)
     gh issue edit {NUMBER} {GH_FLAG} --add-label "workflow:ready-to-build" \
-      --remove-label "workflow:investigating,workflow:building,workflow:in-review,workflow:merged,workflow:invalid,workflow:decomposed" 2>/dev/null || true
+      --remove-label "workflow:investigating,workflow:building,workflow:in-review,workflow:awaiting-merge,workflow:merged,workflow:invalid,workflow:decomposed" 2>/dev/null || true
     ;;
 esac
 ```
@@ -797,7 +798,7 @@ case "$TIER" in
   adaptive|universal) bash "$SCRIPT_PATH" {NUMBER} {GH_FLAG} decomposed ;;
   prose)
     gh issue edit {NUMBER} {GH_FLAG} --add-label "workflow:decomposed" \
-      --remove-label "workflow:investigating,workflow:ready-to-build,workflow:building,workflow:in-review,workflow:merged,workflow:invalid" 2>/dev/null || true
+      --remove-label "workflow:investigating,workflow:ready-to-build,workflow:building,workflow:in-review,workflow:awaiting-merge,workflow:merged,workflow:invalid" 2>/dev/null || true
     ;;
 esac
 ```
@@ -821,7 +822,7 @@ case "$TIER" in
   adaptive|universal) bash "$SCRIPT_PATH" {NUMBER} {GH_FLAG} invalid ;;
   prose)
     gh issue edit {NUMBER} {GH_FLAG} --add-label "workflow:invalid" \
-      --remove-label "workflow:investigating,workflow:ready-to-build,workflow:building,workflow:in-review,workflow:merged,workflow:decomposed" 2>/dev/null || true
+      --remove-label "workflow:investigating,workflow:ready-to-build,workflow:building,workflow:in-review,workflow:awaiting-merge,workflow:merged,workflow:decomposed" 2>/dev/null || true
     ;;
 esac
 gh issue close {NUMBER} {GH_FLAG} --comment "Closing as invalid: {reason from investigation}"
@@ -927,7 +928,7 @@ case "$TIER" in
   adaptive|universal) bash "$SCRIPT_PATH" {NUMBER} {GH_FLAG} decomposed ;;
   prose)
     gh issue edit {NUMBER} {GH_FLAG} --add-label "workflow:decomposed" \
-      --remove-label "workflow:investigating,workflow:ready-to-build,workflow:building,workflow:in-review,workflow:merged,workflow:invalid" 2>/dev/null || true
+      --remove-label "workflow:investigating,workflow:ready-to-build,workflow:building,workflow:in-review,workflow:awaiting-merge,workflow:merged,workflow:invalid" 2>/dev/null || true
     ;;
 esac
 ```
@@ -958,7 +959,7 @@ fi
 
 ### 3A: Re-read state from GitHub (MANDATORY)
 
-**Post Phase 3 heartbeat** (skip if issue already has a terminal label — `workflow:merged`, `workflow:invalid`, `needs-human`):
+**Post Phase 3 heartbeat** (skip if issue already has a terminal label — `workflow:merged`, `workflow:invalid`, `needs-human`, `workflow:awaiting-merge`):
 ```bash
 PHASE_START_TIMESTAMP=$(date -u +%Y-%m-%dT%H:%M:%SZ)
 gh issue comment {NUMBER} {GH_FLAG} --body "<!-- FORGE:HEARTBEAT -->
@@ -1262,7 +1263,7 @@ case "$TIER" in
   adaptive|universal) bash "$SCRIPT_PATH" {NUMBER} {GH_FLAG} building ;;
   prose)
     gh issue edit {NUMBER} {GH_FLAG} --add-label "workflow:building" \
-      --remove-label "workflow:investigating,workflow:ready-to-build,workflow:in-review,workflow:merged,workflow:invalid,workflow:decomposed" 2>/dev/null || true
+      --remove-label "workflow:investigating,workflow:ready-to-build,workflow:in-review,workflow:awaiting-merge,workflow:merged,workflow:invalid,workflow:decomposed" 2>/dev/null || true
     ;;
 esac
 ```
@@ -1768,7 +1769,7 @@ case "$TIER" in
   adaptive|universal) bash "$SCRIPT_PATH" {NUMBER} {GH_FLAG} in-review ;;
   prose)
     gh issue edit {NUMBER} {GH_FLAG} --add-label "workflow:in-review" \
-      --remove-label "workflow:investigating,workflow:ready-to-build,workflow:building,workflow:merged,workflow:invalid,workflow:decomposed" 2>/dev/null || true
+      --remove-label "workflow:investigating,workflow:ready-to-build,workflow:building,workflow:awaiting-merge,workflow:merged,workflow:invalid,workflow:decomposed" 2>/dev/null || true
     ;;
 esac
 ```
@@ -1779,7 +1780,7 @@ esac
 
 ### 5A: Re-read state from GitHub (MANDATORY)
 
-**Post Phase 5 heartbeat** (skip if issue already has a terminal label — `workflow:merged`, `workflow:invalid`, `needs-human`):
+**Post Phase 5 heartbeat** (skip if issue already has a terminal label — `workflow:merged`, `workflow:invalid`, `needs-human`, `workflow:awaiting-merge`):
 ```bash
 PHASE_START_TIMESTAMP=$(date -u +%Y-%m-%dT%H:%M:%SZ)
 gh issue comment {NUMBER} {GH_FLAG} --body "<!-- FORGE:HEARTBEAT -->
@@ -1924,7 +1925,7 @@ case "$TIER" in
   adaptive|universal) bash "$SCRIPT_PATH" {NUMBER} {GH_FLAG} merged ;;
   prose)
     gh issue edit {NUMBER} {GH_FLAG} --add-label "workflow:merged" \
-      --remove-label "workflow:investigating,workflow:ready-to-build,workflow:building,workflow:in-review,workflow:invalid,workflow:decomposed" 2>/dev/null || true
+      --remove-label "workflow:investigating,workflow:ready-to-build,workflow:building,workflow:in-review,workflow:awaiting-merge,workflow:invalid,workflow:decomposed" 2>/dev/null || true
     ;;
 esac
 ```
