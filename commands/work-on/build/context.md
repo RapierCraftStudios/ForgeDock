@@ -553,6 +553,47 @@ For each related file found: note the file path and the nature of the relationsh
 
 ---
 
+---
+
+## Phase C3.5: Repo Map Slice (conditional) <!-- Added: forge#1734 -->
+
+**Skip if**: `scripts/build-repo-map.mjs` does not exist under `{REPO_PATH}` OR `{AFFECTED_FILES}` is empty. This phase is an acceleration layer — its absence never blocks context gathering.
+
+**Purpose**: Inject a ≤2KB orientation slice from the persistent blob-hash-keyed repo map. Agents reading this slice orient to the neighborhood of the contract files without re-reading 20–50KB of source they have already seen.
+
+```bash
+REPO_MAP_SCRIPT="{REPO_PATH}/scripts/build-repo-map.mjs"
+if [ -f "$REPO_MAP_SCRIPT" ] && [ -n "{AFFECTED_FILES}" ]; then
+  # Normalize file list: space-separated → comma-separated for --files flag
+  MAP_FILES=$(echo "{AFFECTED_FILES}" | tr ' ' ',')
+  MAP_SLICE=$(node "$REPO_MAP_SCRIPT" query \
+    --root "{REPO_PATH}" \
+    --files "$MAP_FILES" \
+    --max-bytes 2048 \
+    --quiet 2>/dev/null || true)
+  if [ -z "$MAP_SLICE" ] || echo "$MAP_SLICE" | grep -q "repo map not built"; then
+    # Map absent or empty — trigger a build (non-blocking: continue even if build fails)
+    node "$REPO_MAP_SCRIPT" build --root "{REPO_PATH}" --quiet 2>/dev/null || true
+    MAP_SLICE=$(node "$REPO_MAP_SCRIPT" query \
+      --root "{REPO_PATH}" \
+      --files "$MAP_FILES" \
+      --max-bytes 2048 \
+      --quiet 2>/dev/null || true)
+  fi
+else
+  MAP_SLICE=""
+fi
+```
+
+Include `MAP_SLICE` in the `### Repo Map Slice` section of the FORGE:CONTEXT output (see Output Format below). If `MAP_SLICE` is empty, write: `Repo map not available — run: node scripts/build-repo-map.mjs build`.
+
+**Format per line** (emitted by `query` subcommand):
+```
+<repo-relative-path> — exports: <symbol1, symbol2, …> — <summary or "summary pending">
+```
+
+**Non-blocking guarantee**: Any failure in this phase (script not found, build error, query error) logs a note and continues — do NOT stall or fail context gathering for a missing map.
+
 ## Phase C4: Successful Similar Implementations
 
 Find merged PRs that touched the same domain with a successful outcome — use as a positive pattern reference:
@@ -619,6 +660,12 @@ gh issue comment {NUMBER} -R {GH_REPO} --body "<!-- FORGE:CONTEXT -->
 <!-- Positive patterns from C4. If none: 'No similar merged PRs found.' -->
 - PR #{NUM}: \"{TITLE}\" — {FILE_COUNT} files, notes: {OBSERVATION}
 
+### Repo Map Slice
+<!-- ≤2KB orientation index for contract-file neighborhood from Phase C3.5.
+     Format: <path> — exports: <symbols> — <summary or "summary pending">
+     If map unavailable: 'Repo map not available — run: node scripts/build-repo-map.mjs build' -->
+{MAP_SLICE}
+
 <!-- FORGE:CONTEXT:COMPLETE -->
 "
 ```
@@ -658,6 +705,7 @@ This module runs at **Step 3C.5** — after Builder Contract is posted, before I
          Phase C1:  Past Review Findings on These Files
          Phase C2:  Past Bugs in the Same Module
          Phase C3:  Related Code Paths
+         Phase C3.5: Repo Map Slice (conditional — skip if script absent or TRIVIAL)
          Phase C4:  Successful Similar Implementations
 3F   → Implement (builder now has context briefing)
 ```
