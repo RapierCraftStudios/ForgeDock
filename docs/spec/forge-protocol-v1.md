@@ -449,6 +449,43 @@ artifact so a sub-issue builder can fetch upstream context directly.
 <!-- FORGE:PRIOR_GIST: {https://example.com/artifact} -->
 ```
 
+#### Security: Gist Visibility — Normative Requirement <!-- Added: forge#1729 -->
+
+**All FORGE gist types (`FORGE:KNOWLEDGE_GIST`, `FORGE:MILESTONE_INDEX`, `FORGE:PRIOR_GIST`,
+and the memory-index Gist referenced by `FORGE:MEMORY_INDEX` in `close.md`) MUST be created
+secret. Publishing them as public Gists is a protocol violation.**
+
+Rationale: these artifacts embed investigation findings — root causes, file paths, affected
+service names, and security details. A public Gist exposes this content to a world-readable
+URL with no access control. `gh gist create` is secret by default; the requirement is that
+no pipeline spec or operator script must pass `--public` when creating any of these artifacts.
+
+**Enforcement**: The `pre-tool-use.mjs` hook (Rule 3) hard-blocks `gh gist create --public`
+in pipeline sessions. The `doctor-pipeline-state.sh` check I8 audits existing annotation-referenced
+gists and reports a CRITICAL finding if any are public.
+
+**Migration** (if a public gist is found): GitHub does not support changing a Gist's visibility
+in place. To replace a public pipeline gist with a secret one:
+
+```bash
+# 1. Save current content
+gh gist view {GIST_ID} > /tmp/gist_migrate.md
+[ -s /tmp/gist_migrate.md ] || { echo "ABORT: empty save"; exit 1; }
+
+# 2. Delete the public gist
+gh gist delete {GIST_ID} --yes
+
+# 3. Recreate secret (no --public) with same description
+gh gist create /tmp/gist_migrate.md --desc "{ORIGINAL_DESCRIPTION}"
+# gh gist create without --public creates a secret gist.
+
+# 4. Update the FORGE annotation on the issue to point to the new URL
+```
+
+**Override**: set `FORGE_ALLOW_PUBLIC_GIST=1` in the operator's shell environment before
+starting Claude Code only if a public gist is genuinely required (e.g., sharing a demo
+artifact). This must not be used for pipeline memory gists.
+
 ### 4.3 Control and error markers
 
 These markers carry no Markdown body; their presence is the signal.

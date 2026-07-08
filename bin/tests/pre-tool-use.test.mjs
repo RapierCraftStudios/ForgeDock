@@ -457,6 +457,107 @@ describe("pre-tool-use hook — subprocess", () => {
 });
 
 // ---------------------------------------------------------------------------
+// Rule 3: Gist visibility guard (issue #1729)
+// Tests for the --public block on gh gist create commands.
+// ---------------------------------------------------------------------------
+
+describe("pre-tool-use hook — gist visibility guard (#1729)", () => {
+  it("exits 2 and prints BLOCKED for gh gist create --public", () => {
+    const { exitCode, stderr } = runHook({
+      hook_event_name: "PreToolUse",
+      tool_name: "Bash",
+      tool_input: { command: "gh gist create --public -f file.md" },
+    });
+    assert.equal(exitCode, 2);
+    assert.match(stderr, /BLOCKED/);
+    assert.match(stderr, /--public/);
+  });
+
+  it("exits 2 for gh gist create with --public after filename", () => {
+    const { exitCode, stderr } = runHook({
+      hook_event_name: "PreToolUse",
+      tool_name: "Bash",
+      tool_input: { command: "gh gist create file.md --public" },
+    });
+    assert.equal(exitCode, 2);
+    assert.match(stderr, /BLOCKED/);
+  });
+
+  it("exits 2 for gh gist create --public= form", () => {
+    const { exitCode, stderr } = runHook({
+      hook_event_name: "PreToolUse",
+      tool_name: "Bash",
+      tool_input: { command: "gh gist create --public=true -f file.md" },
+    });
+    assert.equal(exitCode, 2);
+    assert.match(stderr, /BLOCKED/);
+  });
+
+  it("exits 0 for gh gist create without --public (default is secret)", () => {
+    const { exitCode } = runHook({
+      hook_event_name: "PreToolUse",
+      tool_name: "Bash",
+      tool_input: { command: "gh gist create -f file.md -d 'description'" },
+    });
+    assert.equal(exitCode, 0);
+  });
+
+  it("exits 0 for gh gist list (not a create command)", () => {
+    const { exitCode } = runHook({
+      hook_event_name: "PreToolUse",
+      tool_name: "Bash",
+      tool_input: { command: "gh gist list --limit 100 --public" },
+    });
+    assert.equal(exitCode, 0);
+  });
+
+  it("exits 0 when FORGE_ALLOW_PUBLIC_GIST=1 env override is set", () => {
+    // Spawn the hook with FORGE_ALLOW_PUBLIC_GIST=1 in env
+    const result = spawnSync(process.execPath, [HOOK_PATH], {
+      input: JSON.stringify({
+        hook_event_name: "PreToolUse",
+        tool_name: "Bash",
+        tool_input: { command: "gh gist create --public -f file.md" },
+      }),
+      encoding: "utf-8",
+      timeout: 5000,
+      env: { ...process.env, NODE_OPTIONS: "", FORGE_ALLOW_PUBLIC_GIST: "1" },
+      cwd: DEFAULT_MANAGED_DIR,
+    });
+    assert.equal(result.status, 0, "FORGE_ALLOW_PUBLIC_GIST=1 should allow --public");
+  });
+
+  it("exits 0 (no-op) for gist --public in an unmanaged directory (#1729)", () => {
+    const unmanagedDir = mkdtempSync(join(osTop.tmpdir(), "fd-ptu-unmanaged-gist-"));
+    try {
+      const { exitCode } = runHook(
+        {
+          hook_event_name: "PreToolUse",
+          tool_name: "Bash",
+          tool_input: { command: "gh gist create --public -f file.md" },
+        },
+        { cwd: unmanagedDir },
+      );
+      assert.equal(exitCode, 0);
+    } finally {
+      rmSync(unmanagedDir, { recursive: true, force: true });
+    }
+  });
+
+  it("exits 2 even when --public appears inside a larger pipeline command (#1729)", () => {
+    const { exitCode, stderr } = runHook({
+      hook_event_name: "PreToolUse",
+      tool_name: "Bash",
+      tool_input: {
+        command: "echo content | gh gist create --public -f report.md -d 'findings'",
+      },
+    });
+    assert.equal(exitCode, 2);
+    assert.match(stderr, /BLOCKED/);
+  });
+});
+
+// ---------------------------------------------------------------------------
 // settings-hook.mjs — SubagentStop and PreToolUse wiring tests
 // ---------------------------------------------------------------------------
 

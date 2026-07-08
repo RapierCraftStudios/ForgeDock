@@ -20,4 +20,4 @@ jobs:
             # Allow these bots to skip the DCO requirement — they cannot sign off
             [bot]
             policy = "allowlist"
-            allow = ["github-actions[bot]", "dependabot[bot]", "dependabot-preview[bot]", "rapiercraft-forgedock[bot]"]
+            allow = ["github-actions[bot]", "dependabot[bot]", "dependabot-preview[bot]", "rapiercraft-forgedock[bot]", "rapiercraft-forge[bot]"]
