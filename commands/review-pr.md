@@ -27,6 +27,8 @@ allowed-tools: Task, Bash, Read, Grep, Glob, WebFetch, Skill
 
 4. **Route correctly at Phase 0.** If the input is "staging" or the PR targets `main`, invoke `Skill("review-pr-staging", ...)` — do NOT run the standard PR review pipeline against a staging→main PR.
 
+5. **`spec-evolution` PRs are NEVER auto-merged.** When a PR carries the `spec-evolution` label (created by `/spec-doctor`), Phase -1 MUST set `AUTO_MERGE=false` and add `needs-human` before any other processing. This cannot be overridden by the caller — the eval gate plus human review are the only permitted merge path. See Phase -1 `spec-evolution guard` block. <!-- Added: forge#1742 -->
+
 ## Forbidden Tools Self-Check
 
 **Before executing any phase**, verify you are NOT using any of these tools:
@@ -115,6 +117,29 @@ fi
 
 REVIEW_SHA_ROUTE=$(gh pr view ${ROUTE_PR_NUMBER:-$ARGUMENTS} --json headRefOid --jq '.headRefOid' 2>/dev/null | cut -c1-7 || echo "n/a")
 
+# spec-evolution guard — MUST run before posting FORGE:REVIEW_ROUTE <!-- Added: forge#1742 -->
+# spec-evolution PRs are produced by /spec-doctor and require eval-gate + human review.
+# Auto-merge is structurally excluded regardless of how review-pr was invoked.
+# This guard activates for single-PR mode only (staging/multi-pr modes don't auto-merge anyway).
+IS_SPEC_EVOLUTION=false
+if [ "$REVIEW_MODE" = "single-pr" ] && [ -n "$ROUTE_PR_NUMBER" ] && [ "$ROUTE_PR_NUMBER" != "(list mode)" ] && [ "$ROUTE_PR_NUMBER" != "(resolved by staging sub-command)" ]; then
+  SPEC_EVOL_CHECK=$(gh pr view "$ROUTE_PR_NUMBER" --json labels \
+    --jq '[.labels[].name] | any(. == "spec-evolution")' 2>/dev/null || echo "false")
+  if [ "$SPEC_EVOL_CHECK" = "true" ]; then
+    IS_SPEC_EVOLUTION=true
+    AUTO_MERGE=false
+    # Add needs-human label to the associated issue (if --issue was passed in $ARGUMENTS)
+    SPEC_EVOL_ISSUE=$(echo "$ARGUMENTS" | grep -oP '(?<=--issue )\d+' || echo "")
+    if [ -n "$SPEC_EVOL_ISSUE" ]; then
+      GH_FLAG_SPEC=$(echo "$ARGUMENTS" | grep -oP '(?<=-R )\S+' | head -1 | sed 's/^/-R /' || echo "")
+      gh issue edit "$SPEC_EVOL_ISSUE" $GH_FLAG_SPEC --add-label "needs-human" 2>/dev/null || true
+    fi
+    echo "SPEC-EVOLUTION GUARD: PR #${ROUTE_PR_NUMBER} carries 'spec-evolution' label."
+    echo "AUTO_MERGE forced to false. Human review + eval gate required before merge."
+    echo "HARD RULE 5: This cannot be overridden by the caller."
+  fi
+fi
+
 # Post the routing assertion marker to the PR (skip for list/keyword modes where no PR# is known yet)
 # CODEC PATH (forge#1727): REVIEW_ROUTE is a custom (non-RESERVED) annotation type; emit() tolerates
 # unknown types. Use the codec CLI to produce the opening tag for any FORGE: annotation.
@@ -123,7 +148,12 @@ REVIEW_SHA_ROUTE=$(gh pr view ${ROUTE_PR_NUMBER:-$ARGUMENTS} --json headRefOid -
 # pipeline-internal values, not user-supplied text). For annotations with user-supplied fields,
 # route through: forge-annotation.sh write REVIEWER --field Verdict=APPROVED ...
 if [ "$REVIEW_MODE" != "staging-keyword" ] && [ "$REVIEW_MODE" != "multi-pr" ]; then
-  gh pr comment "$ROUTE_PR_NUMBER" --body "<!-- FORGE:REVIEW_ROUTE mode=${REVIEW_MODE} spec=review-pr.md sha=${REVIEW_SHA_ROUTE} -->"
+  if [ "$IS_SPEC_EVOLUTION" = "true" ]; then
+    gh pr comment "$ROUTE_PR_NUMBER" --body "<!-- FORGE:REVIEW_ROUTE mode=spec-evolution-blocked spec=review-pr.md sha=${REVIEW_SHA_ROUTE} -->
+⚠️ **spec-evolution PR**: auto-merge is structurally excluded (HARD RULE 5). Eval gate must pass and a human must review and merge. See \`docs/design/eval-gate-runbook.md\`."
+  else
+    gh pr comment "$ROUTE_PR_NUMBER" --body "<!-- FORGE:REVIEW_ROUTE mode=${REVIEW_MODE} spec=review-pr.md sha=${REVIEW_SHA_ROUTE} -->"
+  fi
 fi
 ```
 
