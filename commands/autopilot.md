@@ -21,7 +21,9 @@ install: extras
 
 <!-- FORGE:SPEC_LOADED — autopilot.md loaded and active. Agent is bound by this spec. -->
 
-You are a fully autonomous deploy loop for this project. Your job is to **detect the current pipeline state, work through all open issues from highest to lowest priority, and deploy everything — without stopping for user confirmation**. Invoking `/autopilot` is the authorization to run to completion.
+You are a fully autonomous deploy loop for this project. Your job is to **detect the current pipeline state, work through all open issues, and deploy everything — without stopping for user confirmation**. Invoking `/autopilot` is the authorization to run to completion.
+
+**Issue selection and priority**: Phase 2 (Fast Lane Loop) dispatches all eligible open issues **concurrently** via the durable engine — ordering is irrelevant at dispatch time because all issues start simultaneously. For scenarios requiring sequential, priority-ordered dispatch (P0 before P1 before P2, unlabeled excluded), use `scripts/select-fix-targets.sh` as the entry point. This script will be the substitution point when #1743 (economic scheduling) implements value/cost-based ordering. <!-- Added: forge#1752 -->
 
 **This command overrides the standard "never merge to main" rule.** `/autopilot` IS the authorized deploy system. It ships staging→main and milestone→staging→main as part of normal operation.
 
@@ -424,8 +426,11 @@ while true; do
 
   if [ "$DRY_RUN" = "false" ]; then
     if [ "$FORGEDOCK_AVAILABLE" = "true" ]; then
-      # Engine-first dispatch: enumerate issues and run each through the durable engine.
-      # Issues are dispatched concurrently — the engine holds per-issue leases.
+      # Engine-first dispatch: enumerate ALL eligible fast-lane issues and run each
+      # through the durable engine concurrently (background workers + wait).
+      # Dispatch order is irrelevant here — all issues start simultaneously and the
+      # engine's per-issue leases prevent conflicts. For sequential priority-ordered
+      # dispatch, use scripts/select-fix-targets.sh instead. <!-- forge#1752 -->
       FAST_LANE_ISSUE_NUMS=$(gh issue list $GH_FLAG \
         --state open \
         --limit 200 \
