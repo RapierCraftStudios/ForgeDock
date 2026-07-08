@@ -581,7 +581,7 @@ function queryFile(filePath, indexDir, repoPath) {
   const result = {
     file: filePath,
     dangerZone: dz,
-    cochangePartners: partners.slice(0, 10),
+    cochangePartners: partners.slice(0, 50),
   };
 
   process.stdout.write(JSON.stringify(result, null, 2) + '\n');

@@ -619,8 +619,10 @@ done
    gh label create "blocked-on-human-merge" --color "006B75" --description "Dependent of a gated (needs-human/awaiting-merge) predecessor. Managed by ForgeDock." --force -R {GH_REPO} 2>/dev/null
 
    # Idempotency: only post/label if not already tracked for this specific predecessor.
+   # Anchor on the exact "**Gating predecessor**: #N" label with a word boundary —
+   # a bare contains("#N") substring would false-match #50/#500 for predecessor #5. <!-- forge#1830 -->
    ALREADY_TRACKED=$(gh api repos/{GH_REPO}/issues/${DEP}/comments \
-     --jq --arg pred "#${PRED}" '[.[] | select(.body | contains("FORGE:BLOCKED_ON_HUMAN_MERGE") and contains($pred))] | length' 2>/dev/null || echo "0")
+     --jq --arg prednum "${PRED}" '[.[] | select(.body | contains("FORGE:BLOCKED_ON_HUMAN_MERGE") and test("Gating predecessor\\*\\*: #" + $prednum + "\\b"))] | length' 2>/dev/null || echo "0")
    if [ "$ALREADY_TRACKED" -eq 0 ]; then
      gh issue comment "$DEP" -R {GH_REPO} --body "<!-- FORGE:BLOCKED_ON_HUMAN_MERGE -->
 **Gating predecessor**: #${PRED} (state: \`${PRED_LABEL}\`${GATING_PR:+, open PR #${GATING_PR}})
@@ -636,7 +638,7 @@ done
      --jq '.[].number' 2>/dev/null || echo "")
    for DEP in $WOKEN; do
      IS_GATED_BY_THIS=$(gh api repos/{GH_REPO}/issues/${DEP}/comments \
-       --jq --arg pred "#${NUM}" '[.[] | select(.body | contains("FORGE:BLOCKED_ON_HUMAN_MERGE") and contains($pred))] | length' 2>/dev/null || echo "0")
+       --jq --arg prednum "${NUM}" '[.[] | select(.body | contains("FORGE:BLOCKED_ON_HUMAN_MERGE") and test("Gating predecessor\\*\\*: #" + $prednum + "\\b"))] | length' 2>/dev/null || echo "0")
      [ "$IS_GATED_BY_THIS" -gt 0 ] || continue
      # Idempotency: only dispatch if DEP hasn't already been dispatched by another path.
      DEP_ALREADY_DISPATCHED=$(gh issue view "$DEP" -R {GH_REPO} --json labels \
@@ -887,45 +889,108 @@ done
 Cascade-spawned findings collected within a single `/orchestrate` run never pass back through Phase 1's batching rule — Phase 1 only runs once, at the start. Without a check here, same-file P3 findings spawned mid-run always dispatch individually, defeating the batching policy for exactly the findings it exists to catch. Apply the same grouping rule from `commands/orchestrate/phase-1-resolve.md` ("P3 Review-Finding Batching") to `QUEUED_FINDINGS` before the dispatch step below:
 
 ```bash
-# Group QUEUED_FINDINGS by exact affected file, reusing the same safety
-# exclusions as phase-1-resolve.md (security/billing/anti-bot/auth — never batch).
+# Group QUEUED_FINDINGS by exact affected file, reusing the SAME safety
+# exclusions as phase-1-resolve.md. Both sites go through jq test() (Oniguruma)
+# with identical patterns — NOT grep ERE — so the two batching checks cannot
+# classify the same issue body differently. <!-- forge#1837 -->
 declare -A SURFACE_FILE_MEMBERS
 SURFACE_BATCHED_FINDINGS=()
 
+# Defensive cap on gh issue view fan-out. QUEUED_FINDINGS is already bounded by
+# upstream cascade control; this cap holds even if that bound is later loosened,
+# so the loop can never scale API calls linearly with cascade-seeded findings. <!-- forge#1836 -->
+MAX_BATCH_SCAN=50
+SCANNED=0
+
 for FINDING_NUM in "${QUEUED_FINDINGS[@]}"; do
+  SCANNED=$((SCANNED + 1))
+  if [ "$SCANNED" -gt "$MAX_BATCH_SCAN" ]; then
+    echo "Surface-area batching: reached MAX_BATCH_SCAN=$MAX_BATCH_SCAN — remaining findings stay individually queued"
+    break
+  fi
+
   FINDING_DATA=$(gh issue view $FINDING_NUM -R {GH_REPO} --json title,body,labels \
     --jq '{title: .title, body: .body, labels: [.labels[].name]}')
 
-  # Safety exclusions — never batch, at any priority
-  echo "$FINDING_DATA" | jq -r '.title' | grep -qiE 'security|billing|anti-bot|auth' && continue
-  echo "$FINDING_DATA" | jq -r '.body' | grep -qziE '## Problem[\s\S]{0,500}(security|billing|anti-bot|auth)' && continue
-  echo "$FINDING_DATA" | jq -r '.labels[]' | grep -qiE '^(security|billing|anti-bot|auth)$' && continue
+  # Safety exclusions — never batch, at any priority. Same jq test() engine and
+  # patterns as phase-1-resolve.md's batching rule (single shared mechanism).
+  echo "$FINDING_DATA" | jq -e '
+    (.title | test("security|billing|anti-bot|auth"; "i"))
+    or (.body  | test("## Problem[\\s\\S]{0,500}(security|billing|anti-bot|auth)"; "i"))
+    or ([.labels[]] | any(. == "security" or . == "billing" or . == "anti-bot" or . == "auth"))
+  ' >/dev/null && continue
 
-  # Only P3 findings are eligible for batching (P1/P2 never batched — already dispatched individually above)
-  echo "$FINDING_DATA" | jq -r '.labels[]' | grep -q '^priority:P3$' || continue
+  # Only P3 findings are eligible (P1/P2 already dispatched individually above)
+  echo "$FINDING_DATA" | jq -e '[.labels[]] | any(. == "priority:P3")' >/dev/null || continue
 
-  FINDING_FILE=$(echo "$FINDING_DATA" | jq -r '.body' | grep -oP '`[^`]+\.(py|tsx?|jsx?|sql|json|ya?ml|sh|md)`' | head -1 | tr -d '`')
+  FINDING_FILE=$(echo "$FINDING_DATA" | jq -r '.body' | grep -oE '`[^`]+\.(py|tsx?|jsx?|sql|json|ya?ml|sh|md)`' | head -1 | tr -d '`')
   [ -z "$FINDING_FILE" ] && continue
 
   SURFACE_FILE_MEMBERS["$FINDING_FILE"]="${SURFACE_FILE_MEMBERS[$FINDING_FILE]} $FINDING_NUM"
 done
 
+# For each same-file cluster of 2+, actually CREATE the batch issue (executable —
+# mirrors phase-1-resolve.md's "Batch creation rule") and REPLACE the members with
+# the batch issue in QUEUED_FINDINGS so the dispatch step below never double-dispatches
+# them. This is what makes SURFACE_BATCHED_FINDINGS a live control, not dead wiring. <!-- forge#1832, forge#1834 -->
 for FILE in "${!SURFACE_FILE_MEMBERS[@]}"; do
   MEMBERS=(${SURFACE_FILE_MEMBERS[$FILE]})
-  if [ "${#MEMBERS[@]}" -ge 2 ]; then
-    echo "Same-run surface-area cluster: ${#MEMBERS[@]} P3 findings share $FILE — creating batch issue"
-    # Cap at 8 members per batch (split into multiple batches of <=8 if more share the file),
-    # then create the batch issue using the exact template from phase-1-resolve.md's
-    # "Batch creation rule" (title: "fix(batch): P3 review findings — {FILE} (batch #{BATCH_N})",
-    # labels: review-finding,priority:P3,batch, body includes FORGE:BATCH_MEMBERS block + FORGE:BATCHABLE marker).
-    # Substitute the resulting batch issue number for each of $MEMBERS in QUEUED_FINDINGS and the DAG,
-    # and record each member in SURFACE_BATCHED_FINDINGS so it is not double-dispatched below.
-    SURFACE_BATCHED_FINDINGS+=("${MEMBERS[@]}")
-  fi
+  [ "${#MEMBERS[@]}" -ge 2 ] || continue
+
+  # Sanitize the affected-file path before interpolating it into the issue title/body.
+  # Git filenames can legally carry shell metacharacters (`$()`, backticks, quotes);
+  # restrict to a validated charset so the value cannot break the gh argument
+  # boundary from an untrusted issue body. Shared guard with phase-1-resolve.md. <!-- forge#1833, forge#1835 -->
+  SAFE_SURFACE_AREA=$(printf '%s' "$FILE" | tr -cd 'A-Za-z0-9._/-')
+
+  echo "Same-run surface-area cluster: ${#MEMBERS[@]} P3 findings share $FILE — creating batch issue(s)"
+
+  # Cap at 8 members per batch (phase-1-resolve.md limit); split into batches of <=8.
+  for START in $(seq 0 8 $(( ${#MEMBERS[@]} - 1 ))); do
+    CHUNK=("${MEMBERS[@]:$START:8}")
+    [ "${#CHUNK[@]}" -ge 2 ] || continue
+
+    MEMBER_LINES=""
+    for M in "${CHUNK[@]}"; do
+      MTITLE=$(gh issue view "$M" -R {GH_REPO} --json title --jq '.title' 2>/dev/null || echo "")
+      MEMBER_LINES="${MEMBER_LINES}- [ ] #${M}: ${MTITLE}"$'\n'
+    done
+
+    BATCH_ISSUE_NUM=$(gh issue create {GH_FLAG} \
+      --title "fix(batch): P3 review findings — ${SAFE_SURFACE_AREA} (same-run batch)" \
+      --label "review-finding,priority:P3,batch" \
+      --body "$(cat <<BATCH_EOF
+## Problem
+
+Batch of P3 review findings in **${SAFE_SURFACE_AREA}** (same file), clustered mid-run by phase-4-execution.md to reduce per-finding pipeline overhead.
+
+## Member Findings
+
+<!-- FORGE:BATCH_MEMBERS -->
+${MEMBER_LINES}<!-- /FORGE:BATCH_MEMBERS -->
+
+## Acceptance Criteria
+
+- [ ] All member findings addressed or closed as false-positive
+- [ ] Member issues auto-closed with reference to this batch PR on merge
+- [ ] No security, billing, anti-bot, or auth paths touched (validated before batching)
+
+<!-- FORGE:BATCHABLE -->
+BATCH_EOF
+)" --json number --jq '.number')
+
+    # Consume the cluster: record members and REPLACE them in QUEUED_FINDINGS
+    # with the single batch issue, so the dispatch step below operates on the
+    # batch unit and skips the individual members.
+    SURFACE_BATCHED_FINDINGS+=("${CHUNK[@]}")
+    QUEUED_FINDINGS=($(printf '%s\n' "${QUEUED_FINDINGS[@]}" | grep -vxF -f <(printf '%s\n' "${CHUNK[@]}") || true))
+    [ -n "$BATCH_ISSUE_NUM" ] && QUEUED_FINDINGS+=("$BATCH_ISSUE_NUM")
+    echo "Batched ${#CHUNK[@]} findings into #${BATCH_ISSUE_NUM}; members removed from QUEUED_FINDINGS and the DAG."
+  done
 done
 ```
 
-Findings clustered here are replaced by their batch issue in `QUEUED_FINDINGS` and the DAG — do not dispatch the individual member issues. Findings that remain ungrouped (fewer than 2 sharing a file in this collection round) stay individually queued below; they retain default-batchable eligibility and will be picked up by the next `/orchestrate` invocation's Phase 1 resolve if a same-file or leaf-directory cluster later forms across runs.
+Findings clustered here are replaced by their batch issue in `QUEUED_FINDINGS` (and therefore the DAG, which is built from `QUEUED_FINDINGS` in the dispatch step below) — the individual member issues in `SURFACE_BATCHED_FINDINGS` are never dispatched. Findings that remain ungrouped (fewer than 2 sharing a file in this collection round) stay individually queued below; they retain default-batchable eligibility and will be picked up by the next `/orchestrate` invocation's Phase 1 resolve if a same-file or leaf-directory cluster later forms across runs.
 
 **For queued (non-deferred) findings:**
 

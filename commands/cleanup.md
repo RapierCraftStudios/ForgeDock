@@ -114,7 +114,7 @@ for NUM in {needs_validation_numbers}; do
 
   if [ -n "$INVESTIGATOR_COMMENT" ]; then
     # Extract verdict — matches "**Verdict**: CONFIRMED" etc.
-    VERDICT=$(echo "$INVESTIGATOR_COMMENT" | grep -oP '(?<=\*\*Verdict\*\*: )\w[\w-]*' | head -1)
+    VERDICT=$(echo "$INVESTIGATOR_COMMENT" | grep -oE '\*\*Verdict\*\*: [A-Za-z0-9_][A-Za-z0-9_-]*' | sed 's/^\*\*Verdict\*\*: //' | head -1)
 
     case "$VERDICT" in
       CONFIRMED)

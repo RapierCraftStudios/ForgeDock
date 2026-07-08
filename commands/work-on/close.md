@@ -337,7 +337,12 @@ if [ -n "$DOSSIER_UPDATED_MODULES" ]; then
   done | grep -v '^$')
 
   if [ -n "$CHANGED_DOSSIER_FILES" ]; then
-    git -C "{REPO_PATH}" add $CHANGED_DOSSIER_FILES 2>/dev/null || true
+    # CHANGED_DOSSIER_FILES is newline-separated — iterate so paths containing
+    # spaces are staged individually rather than word-split by the shell.
+    while IFS= read -r dossier_file; do
+      [ -n "$dossier_file" ] || continue
+      git -C "{REPO_PATH}" add "$dossier_file" 2>/dev/null || true
+    done <<< "$CHANGED_DOSSIER_FILES"
     # Only commit if there are staged changes (new or modified dossier files)
     if ! git -C "{REPO_PATH}" diff --cached --quiet 2>/dev/null; then
       git -C "{REPO_PATH}" commit -s -m "docs(dossier): append entry for PR #{PR_NUMBER} (#${NUMBER})" 2>/dev/null || true

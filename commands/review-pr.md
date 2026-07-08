@@ -1026,7 +1026,8 @@ echo "=== AGENT COUNT: $AGENT_COUNT ==="
 
 ### 3B.5: Provenance-Based Trust Escalation (Conditional)
 
-**Skip if**: `THOROUGH=true` OR `IS_MILESTONE_TO_STAGING=true` — these modes already run full union dispatch; provenance de-escalation must not narrow an already-thorough review.
+**Skip if**: `THOROUGH=true` OR `IS_MILESTONE_TO_STAGING=true` — these modes already run full union dispatch; provenance de-escalation must not narrow an already-thorough review. This skip is enforced in code at the Step 4 application block (not merely relied upon via a downstream overwrite). <!-- forge#1804 -->
+
 
 **Purpose**: Adjust the agent roster based on the PR's verifiable track record. Proven `(task-type × module-set)` combinations may drop optional judgment agents; novel combinations escalate to full panel plus `needs-human` on merge. The hard floor (Security agent + all Phase 2 automated checks) runs at every intensity tier, unconditionally.
 
@@ -1143,9 +1144,15 @@ fi
 echo "=== TRUST_SHADOW_MODE: ${TRUST_SHADOW_MODE} ==="
 echo "=== INTENSITY_TIER (pre-application): ${INTENSITY_TIER} ==="
 
+# Explicit skip guard (enforces the "Skip if" prose above in code): in THOROUGH or
+# milestone mode the full union dispatch is authoritative — provenance MUST NOT narrow
+# the roster here. Enforcing it at the application point means correctness no longer
+# depends on a downstream overwrite re-widening SELECTED_AGENTS. <!-- forge#1804 -->
+if [ "$THOROUGH" = "true" ] || [ "$IS_MILESTONE_TO_STAGING" = "true" ]; then
+  echo "=== TRUST ESCALATION: skipped (THOROUGH/milestone mode — full union dispatch is authoritative) ==="
 # Shadow mode: log the decision but do NOT modify SELECTED_AGENTS.
 # Set review.trust_shadow_mode: "false" in forge.yaml to enforce after the 30-day window.
-if [ "$TRUST_SHADOW_MODE" != "false" ]; then
+elif [ "$TRUST_SHADOW_MODE" != "false" ]; then
   echo "=== TRUST ESCALATION: shadow-mode active — logging decision, roster unchanged ==="
   # SELECTED_AGENTS is NOT modified — current behavior preserved
 else

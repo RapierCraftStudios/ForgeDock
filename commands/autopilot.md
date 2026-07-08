@@ -98,6 +98,13 @@ AUTOPILOT_APPROVE_P1=$(yq '.autopilot.approve.p1 // "needs-human"' "$CONFIG_FILE
 AUTOPILOT_APPROVE_P2=$(yq '.autopilot.approve.p2 // "needs-human"' "$CONFIG_FILE" 2>/dev/null || echo 'needs-human')
 AUTOPILOT_APPROVE_P3=$(yq '.autopilot.approve.p3 // "needs-human"' "$CONFIG_FILE" 2>/dev/null || echo 'needs-human')
 BUDGET_PER_CYCLE_FIXES=$(yq '.autopilot.budget.per_cycle_fixes // "null"' "$CONFIG_FILE" 2>/dev/null || echo 'null')
+# yq may emit a float (e.g. "5.0"); truncate to an integer so `[ "$FIX_COUNT" -ge ... ]`
+# does not error. Leaves the "null"/empty guard value untouched. Single assignment, so
+# both budget-ceiling checks (fast lane + milestone lane) read the truncated value.
+case "$BUDGET_PER_CYCLE_FIXES" in
+  ''|null) : ;;
+  *) BUDGET_PER_CYCLE_FIXES=$(echo "$BUDGET_PER_CYCLE_FIXES" | cut -d. -f1) ;;
+esac
 RECON_SOURCES=$(yq '.autopilot.recon_sources // ["ci","backlog"] | join(",")' "$CONFIG_FILE" 2>/dev/null || echo 'ci,backlog')
 
 # FIX_COUNT tracks how many issues have been dispatched as autonomous fixes this cycle.
@@ -406,8 +413,10 @@ fi
 Runs when `ci` is in `RECON_SOURCES` (default: always). Skip with `autopilot.recon_sources: ["backlog"]` in forge.yaml.
 
 ```bash
-# Collector gate — skip if 'ci' not declared in RECON_SOURCES
-if echo "$RECON_SOURCES" | grep -qw "ci"; then
+# Collector gate — skip if 'ci' not declared in RECON_SOURCES.
+# Exact comma-delimited match so 'ci' does not false-match 'ci-extended' (grep -qw
+# treats '-' as a word boundary and would match the hyphenated tag).
+if echo "$RECON_SOURCES" | grep -qE '(^|,)ci(,|$)'; then
   # Node.js is guaranteed by the npm installer; python3 is not (Windows alias issue)
   DATE_1D_AGO=$(node -e "console.log(new Date(Date.now()-86400000).toISOString())")
 
@@ -462,8 +471,9 @@ fi
 Runs when `backlog` is in `RECON_SOURCES` (default: always). Skip with `autopilot.recon_sources: ["ci"]` in forge.yaml.
 
 ```bash
-# Collector gate — skip if 'backlog' not declared in RECON_SOURCES
-if echo "$RECON_SOURCES" | grep -qw "backlog"; then
+# Collector gate — skip if 'backlog' not declared in RECON_SOURCES.
+# Exact comma-delimited match (see 1B) — avoids false-matching hyphenated tags.
+if echo "$RECON_SOURCES" | grep -qE '(^|,)backlog(,|$)'; then
   # Node.js is guaranteed by the npm installer; python3 is not (Windows alias issue)
   DATE_14D_AGO=$(node -e "console.log(new Date(Date.now()-14*86400000).toISOString())")
 
@@ -500,8 +510,9 @@ Runs only when ALL of: (a) `analytics` is in `RECON_SOURCES`, (b) `CREDENTIALS_F
 ```bash
 ANALYTICS_AVAILABLE=false
 
-# Collector gate — skip if 'analytics' not declared in RECON_SOURCES
-if ! echo "$RECON_SOURCES" | grep -qw "analytics"; then
+# Collector gate — skip if 'analytics' not declared in RECON_SOURCES.
+# Exact comma-delimited match (see 1B) — avoids false-matching hyphenated tags.
+if ! echo "$RECON_SOURCES" | grep -qE '(^|,)analytics(,|$)'; then
   echo "Analytics collector (1D): SKIPPED — 'analytics' not in autopilot.recon_sources"
 elif [ -z "$CREDENTIALS_FILE" ] || [ ! -f "$CREDENTIALS_FILE" ]; then
   echo "Analytics collector (1D): SKIPPED — paths.credentials.file not set in forge.yaml or file absent"
@@ -511,6 +522,9 @@ else
   # If the server is absent, the tool call would produce an agent error rather than a graceful skip.
   # Detection strategy: attempt a lightweight probe (list tools or a no-op call) and gate on exit code.
   # When the MCP server is present, proceed; when absent, log and skip without blocking the cycle.
+  # Dual-mode by design: an LLM agent interprets `mcp__gsc__search_analytics` as an MCP tool call
+  # (exit code = availability); a POSIX shell interprets it as an unknown command → 'command not
+  # found' → exit 1 → the else branch. Either interpretation yields a graceful skip when GSC is absent.
   if mcp__gsc__search_analytics --list-only 2>/dev/null; then
     ANALYTICS_AVAILABLE=true
     echo "Analytics pulse: GSC MCP available — proceeding with 7-day search analytics query"
@@ -838,7 +852,9 @@ To approve: remove \`needs-human\` label from #${ISSUE_NUM} and re-run \`/autopi
         elif echo "$ISSUE_LABEL_STR" | grep -q 'workflow:in-review'; then
           # Known recoverable stall class: PR merged but close phase did not run.
           # Verify PR state before invoking recover-orphans.
-          MERGED_PR=$(gh pr list $GH_FLAG --head "$(gh issue view "$ISSUE_NUM" $GH_FLAG --json title --jq '.title' 2>/dev/null | tr '[:upper:]' '[:lower:]' | sed 's/[^a-z0-9]/-/g')" \
+          # Search by issue number — ForgeDock branch slugs include the issue number,
+          # so a title-only --head slug lookup never matches (returned dead-empty).
+          MERGED_PR=$(gh pr list $GH_FLAG --search "closes #$ISSUE_NUM" \
             --state merged --limit 1 --json number --jq '.[0].number' 2>/dev/null || echo '')
           if [ -n "$MERGED_PR" ] || gh api repos/$GH_REPO/issues/$ISSUE_NUM/events \
               --jq '[.[] | select(.event == "labeled" and .label.name == "workflow:merged")] | length > 0' \
@@ -995,7 +1011,9 @@ echo "Found $MILESTONE_COUNT milestone(s)"
 echo "$MILESTONES" | jq -r '.[] | "\(.completion_pct)% — \(.title) (\(.open_issues) open, \(.closed_issues) closed)"'
 
 # Process each milestone — sorted by completion% descending, skip 0%
-echo "$MILESTONES" | jq -c '.[]' | while IFS= read -r milestone; do
+# Process substitution (not a pipe) so DISPATCHED_ISSUES+=() appends in the loop
+# body run in THIS shell, not a subshell, and survive for the Phase 4 report.
+while IFS= read -r milestone; do
   MS_TITLE=$(echo "$milestone" | jq -r '.title')
   MS_SLUG=$(echo "$milestone" | jq -r '.slug')
   MS_OPEN=$(echo "$milestone" | jq -r '.open_issues')
@@ -1208,7 +1226,7 @@ To approve: remove \`needs-human\` label from #${ISSUE_NUM} and re-run \`/autopi
     --jq '[.[] | select(.milestone == null and (.labels | map(.name) | any(. == "review-finding")))] | length' \
     2>/dev/null || echo '0')
   [ "$MS_FINDINGS" -gt 0 ] && echo "NOTE: $MS_FINDINGS review finding(s) now in fast lane — processed next cycle"
-done
+done < <(echo "$MILESTONES" | jq -c '.[]')
 
 echo "Milestone loop complete: $MILESTONE_ITERATIONS milestone(s) processed, $MILESTONE_DEPLOYS milestone ship(s)"
 
@@ -1344,7 +1362,7 @@ if [ "${#RECON_ISSUES[@]:-0}" -gt 0 ] && [ -n "$OPS_ISSUE_NUMBER" ] && [ "$OPS_I
       FINDING_PATTERN=$(echo "$FINDING_TITLE" | cut -c1-30)
 
       # Count how many of the 3 cycles contain this pattern in their findings section
-      MATCH_COUNT=$(echo "$LAST_3_CYCLES" | grep -c "$FINDING_PATTERN" || echo '0')
+      MATCH_COUNT=$(echo "$LAST_3_CYCLES" | grep -cF "$FINDING_PATTERN" || echo '0')
 
       if [ "${MATCH_COUNT:-0}" -ge 3 ]; then
         echo "RECURRENCE DETECTED: '$FINDING_PATTERN' appeared in all 3 recent cycles — creating meta-issue"

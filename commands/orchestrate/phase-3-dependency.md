@@ -978,8 +978,10 @@ for ENTRY in "${NEWLY_BLOCKED[@]:-}"; do
   [ -z "$ENTRY" ] && continue
   DEP="${ENTRY%%|*}"
   PRED="${ENTRY##*|}"
+  # Anchor on the exact "**Gating predecessor**: #N" label with a word boundary —
+  # a bare contains("#N") substring would false-match #50/#500 for predecessor #5. <!-- forge#1830 -->
   ALREADY_TRACKED=$(gh api repos/{GH_REPO}/issues/${DEP}/comments \
-    --jq --arg pred "#${PRED}" '[.[] | select(.body | contains("FORGE:BLOCKED_ON_HUMAN_MERGE") and contains($pred))] | length' 2>/dev/null || echo "0")
+    --jq --arg prednum "${PRED}" '[.[] | select(.body | contains("FORGE:BLOCKED_ON_HUMAN_MERGE") and test("Gating predecessor\\*\\*: #" + $prednum + "\\b"))] | length' 2>/dev/null || echo "0")
   if [ "$ALREADY_TRACKED" -eq 0 ]; then
     GATING_PR=$(gh pr list -R {GH_REPO} --state open --search "\"Closes #${PRED}\" in:body" \
       --json number --jq '.[0].number // empty' 2>/dev/null || echo "")
