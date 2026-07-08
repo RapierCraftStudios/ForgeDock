@@ -8,7 +8,7 @@
 #   GH_FLAG       Repository flag passed to gh (e.g. -R RapierCraftStudios/forgedock)
 #                 May be multiple tokens — pass before TARGET_STATE
 #   TARGET_STATE  One of: investigating, ready-to-build, building, in-review,
-#                         merged, invalid, decomposed
+#                         merged, invalid, decomposed, awaiting-merge
 #
 #   --validate    Sub-command mode: translate an investigation verdict into a
 #                 finding-lifecycle label (needs-validation → validated/false-positive).
@@ -159,6 +159,7 @@ VALID_STATES=(
   "merged"
   "invalid"
   "decomposed"
+  "awaiting-merge"
 )
 
 # ---------------------------------------------------------------------------
@@ -255,9 +256,65 @@ echo "Adding $EFFECTIVE_LABEL to issue #$ISSUE_NUMBER..."
 gh issue edit "$ISSUE_NUMBER" "${GH_ARGS[@]}" --add-label "$EFFECTIVE_LABEL"
 
 # ---------------------------------------------------------------------------
-# Remove all other workflow:* labels (best-effort — labels may not all exist)
+# Remove all other workflow:* labels currently on the issue (best-effort)
+#
+# IMPORTANT: `gh issue edit --remove-label` is atomic across its whole
+# comma-separated argument — if ANY label in the list is not a valid label
+# on the repo (e.g. a newly added VALID_STATES entry like awaiting-merge
+# whose repo-side `gh label create` / bootstrap hasn't run yet), the ENTIRE
+# call fails with "not found" and — under `set -euo pipefail` without the
+# `|| true` this used to silently swallow — no labels are removed at all,
+# including ones that DO exist and SHOULD have been cleared (forge#1810
+# follow-up: this exact bug was caught by dogfooding this script against
+# the live repo before `workflow:awaiting-merge` had been bootstrapped).
+#
+# Fix: only ask to remove labels that are BOTH (a) in REMOVE_LABELS (valid
+# states other than the target) AND (b) actually present on the issue right
+# now. A label that was never applied to this issue can't be "not found" on
+# the repo without failing the whole call, and a label the issue doesn't
+# have doesn't need removing anyway — so intersecting against the issue's
+# current labels sidesteps the all-or-nothing failure mode entirely instead
+# of relying on `|| true` to mask it.
 # ---------------------------------------------------------------------------
-echo "Removing stale workflow:* labels ($REMOVE_LABELS)..."
-gh issue edit "$ISSUE_NUMBER" "${GH_ARGS[@]}" --remove-label "$REMOVE_LABELS" 2>/dev/null || true
+CURRENT_ISSUE_LABELS=$(gh issue view "$ISSUE_NUMBER" "${GH_ARGS[@]}" --json labels \
+  --jq '[.labels[].name] | join(",")' 2>/dev/null || echo "")
+
+TO_REMOVE=""
+IFS=',' read -ra REMOVE_CANDIDATES <<< "$REMOVE_LABELS"
+for candidate in "${REMOVE_CANDIDATES[@]}"; do
+  case ",$CURRENT_ISSUE_LABELS," in
+    *",$candidate,"*)
+      TO_REMOVE="${TO_REMOVE:+$TO_REMOVE,}$candidate"
+      ;;
+  esac
+done
+
+if [ -n "$TO_REMOVE" ]; then
+  echo "Removing stale workflow:* labels present on the issue ($TO_REMOVE)..."
+  gh issue edit "$ISSUE_NUMBER" "${GH_ARGS[@]}" --remove-label "$TO_REMOVE" 2>/dev/null || true
+else
+  echo "No stale workflow:* labels present on the issue — nothing to remove."
+fi
+
+# ---------------------------------------------------------------------------
+# Clear needs-human (best-effort)
+#
+# needs-human is NOT a workflow:* label, so it is never included in
+# VALID_STATES/REMOVE_LABELS above. Historically no code path ever cleared it
+# (forge#1809/#1810) — it was a write-only, sticky, terminal label even after
+# the pipeline made forward progress past the condition that set it.
+#
+# This script only runs at explicit forward-progress transition points (the
+# dispatcher STOPs on needs-human before ever reaching a transition-label.sh
+# call in normal operation — see commands/work-on.md's terminal-state checks),
+# so clearing needs-human here is safe: it only fires when something has
+# deliberately decided to move the issue/PR to a new state, most notably
+# workflow:awaiting-merge (a remediated + re-reviewed PR moving off
+# needs-human without yet meeting the auto-land bar — see #1809 Q1).
+# Best-effort: `|| true` so a missing label never fails the script under
+# `set -euo pipefail`.
+# ---------------------------------------------------------------------------
+echo "Clearing needs-human (best-effort)..."
+gh issue edit "$ISSUE_NUMBER" "${GH_ARGS[@]}" --remove-label "needs-human" 2>/dev/null || true
 
 echo "OK: $EFFECTIVE_LABEL set on issue #$ISSUE_NUMBER"
