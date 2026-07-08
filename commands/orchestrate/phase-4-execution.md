@@ -8,6 +8,93 @@ install: internal
 
 ## Phase 4: Streaming DAG Execution
 
+### Step 4A-pre.0: Budget initialization (MANDATORY when --budget is set) <!-- Added: forge#1743 -->
+
+Initialize budget tracking state before the first dispatch. Read `--budget N` from the orchestrator's argument list (passed from the top-level `/orchestrate` invocation). When `--budget` is not set, `BUDGET_LIMIT` is `Infinity` (uncapped — current default behavior preserved).
+
+```bash
+# --- Budget initialization ---
+# Parse --budget N from ARGUMENTS (e.g. /orchestrate fast-lane --budget 5.00)
+BUDGET_LIMIT=$(echo "${ARGUMENTS:-}" | grep -oP '(?<=--budget )\S+' | head -1 || echo "")
+if [ -z "$BUDGET_LIMIT" ] || ! echo "$BUDGET_LIMIT" | grep -qP '^\d+(\.\d+)?$'; then
+  BUDGET_LIMIT="Infinity"
+fi
+
+PROJECTED_SPEND="0"          # sum of ISSUE_COST_ESTIMATE[] for dispatched issues
+ACTUAL_SPEND="0"             # sum of actual cost reported by completed agents (best-effort)
+DEFERRED_BUDGET_ISSUES=()    # issues deferred because projected spend would exceed budget
+EPSILON_DISPATCHED=false     # true once at least one ε-reserve issue has been dispatched
+
+if [ "$BUDGET_LIMIT" != "Infinity" ]; then
+  EPSILON_BUDGET=$(echo "scale=4; $BUDGET_LIMIT * 0.10" | bc 2>/dev/null || echo "0")
+  echo "Budget initialized: BUDGET_LIMIT=\$${BUDGET_LIMIT} EPSILON_BUDGET=\$${EPSILON_BUDGET} (10% ε-reserve)"
+  echo "Issues without cost priors (ε-reserve eligible): ${NO_PRIOR_ISSUES[*]:-none}"
+else
+  EPSILON_BUDGET="0"
+  echo "Budget: uncapped (no --budget flag) — dispatching all ready issues by score order"
+fi
+# --- End budget initialization ---
+```
+
+**Budget halt condition** (checked in Step 4A before each dispatch):
+
+Before dispatching issue `NUM`, check whether its estimated cost would exceed the remaining budget:
+
+```bash
+# Check budget before dispatching NUM
+should_dispatch() {
+  local NUM="$1"
+  local COST="${ISSUE_COST_ESTIMATE[$NUM]:-0.35}"
+
+  if [ "$BUDGET_LIMIT" = "Infinity" ]; then
+    return 0  # uncapped — always dispatch
+  fi
+
+  NEW_PROJECTED=$(echo "scale=4; $PROJECTED_SPEND + $COST" | bc 2>/dev/null || echo "$PROJECTED_SPEND")
+  MAIN_CEILING=$(echo "scale=4; $BUDGET_LIMIT - $EPSILON_BUDGET" | bc 2>/dev/null || echo "$BUDGET_LIMIT")
+
+  # ε-reserve logic: if this is a no-prior issue AND ε-budget has not yet been
+  # used AND the no-prior issue has NOT been dispatched yet, allow it even if
+  # the main ceiling is hit (up to BUDGET_LIMIT total).
+  if [ "${ISSUE_HAS_PRIOR[$NUM]:-false}" = "false" ] && [ "$EPSILON_DISPATCHED" = "false" ]; then
+    if echo "$NEW_PROJECTED $BUDGET_LIMIT" | awk '{exit ($1 <= $2) ? 0 : 1}' 2>/dev/null; then
+      EPSILON_DISPATCHED=true
+      echo "ε-reserve: dispatching #${NUM} (no-prior issue) from exploration reserve"
+      return 0
+    fi
+  fi
+
+  # Main budget check: defer if projected would exceed main ceiling
+  if echo "$NEW_PROJECTED $MAIN_CEILING" | awk '{exit ($1 <= $2) ? 0 : 1}' 2>/dev/null; then
+    DEFERRED_BUDGET_ISSUES+=("$NUM")
+    echo "BUDGET DEFER: #${NUM} (est. \$${COST}) would push projected spend to \$${NEW_PROJECTED} > main ceiling \$${MAIN_CEILING}"
+    return 1
+  fi
+
+  return 0
+}
+```
+
+**Budget deferred-issues report** (output when `BUDGET_LIMIT` is finite and `DEFERRED_BUDGET_ISSUES` is non-empty — print at end of Phase 4, before Phase 5):
+
+```
+## Budget Report
+
+**Budget limit**: $${BUDGET_LIMIT}
+**Projected spend (dispatched issues)**: $${PROJECTED_SPEND}
+**ε-reserve used**: ${EPSILON_DISPATCHED} (10% = $${EPSILON_BUDGET})
+
+### Deferred Issues (budget exhausted — never silently dropped)
+
+| Issue | Title | Score | Est. Cost | Reason |
+|-------|-------|-------|-----------|--------|
+| #{N} | {title} | {score} | ${cost} | Budget ceiling reached |
+
+**Action**: Re-run `/orchestrate {deferred_issue_numbers} [--budget N]` to process deferred issues, or increase `--budget`.
+```
+
+**When `BUDGET_LIMIT = Infinity`**: skip this check and report entirely — uncapped behavior.
+
 ### Step 4A-pre: Staging baseline tracking (MANDATORY — continuous)
 
 **WHY THIS EXISTS**: Milestone-code-onto-staging contamination incidents (see issue #150) produce unexpected growth on the staging branch that is otherwise invisible until after a deploy. In the streaming DAG model, there are no discrete wave boundaries — instead, track a running baseline and check after each agent completion.
@@ -174,14 +261,26 @@ Use `${ISSUE_LANE[$NUM]}` and `${ISSUE_PR_BASE[$NUM]}` to populate `{LANE}` and 
 **Engine-first dispatch (default)**: When `forgedock` is in PATH, dispatch each ready issue via the durable engine rather than spawning prose Agent sub-agents. The engine's phase table enforces gate semantics in code — its fail-closed review gate and deterministic phase ordering are not subject to LLM interpretation.
 
 ```bash
-# Engine-first dispatch: check CLI availability, then dispatch ready issues in parallel
+# Engine-first dispatch: check CLI availability, then dispatch ready issues in score order
+# Uses SORTED_READY_SET[] from Step 3E.5 (descending value/cost) and budget gate from Step 4A-pre.0
 FORGEDOCK_AVAILABLE=$(command -v forgedock >/dev/null 2>&1 && echo "true" || echo "false")
 
 if [ "$FORGEDOCK_AVAILABLE" = "true" ]; then
-  for NUM in {ready_issue_numbers}; do
+  for NUM in "${SORTED_READY_SET[@]:-{ready_issue_numbers}}"; do
+    # Budget gate (forge#1743): skip dispatch if projected spend would exceed budget ceiling.
+    # should_dispatch() also handles ε-reserve (no-prior issues get guaranteed slot).
+    if ! should_dispatch "$NUM"; then
+      continue  # Issue added to DEFERRED_BUDGET_ISSUES[] by should_dispatch()
+    fi
+
     LANE="${ISSUE_LANE[$NUM]}"
     PR_BASE="${ISSUE_PR_BASE[$NUM]}"
-    echo "Dispatching #$NUM via forgedock run-issue --lane $PR_BASE"
+    COST="${ISSUE_COST_ESTIMATE[$NUM]:-0.35}"
+
+    # Advance PROJECTED_SPEND before forking so subsequent iterations see the updated total
+    PROJECTED_SPEND=$(echo "scale=4; $PROJECTED_SPEND + $COST" | bc 2>/dev/null || echo "$PROJECTED_SPEND")
+
+    echo "Dispatching #$NUM via forgedock run-issue --lane $PR_BASE (score=${ISSUE_SCORE[$NUM]:-?} est_cost=\$${COST} projected_total=\$${PROJECTED_SPEND})"
     forgedock run-issue "$NUM" --lane "$PR_BASE" &
   done
   wait
@@ -1039,12 +1138,44 @@ Completion Sweep Results:
   Permanently deferred (gen2): #{D} (generation >= 2 cascade cap)
 ```
 
-**After sweep agents complete** (or if no findings were dispatched): proceed to Phase 5.
+**After sweep agents complete** (or if no findings were dispatched): output the budget deferred-issues report (if applicable), then proceed to Phase 5.
 
 **Anti-patterns — DO NOT DO THIS:**
 - Re-sweeping findings spawned during the sweep itself — this creates unbounded recursion. Sweep is a single pass.
 - Overriding generation >= 2 deferrals — the cascade cap is absolute.
 - Skipping the sweep because "there are only a few" deferred findings — even one deferred finding represents unresolved work.
+
+### Step 4F.5: Budget Deferred-Issues Report (conditional) <!-- Added: forge#1743 -->
+
+**Run only when `BUDGET_LIMIT != "Infinity"` AND `${#DEFERRED_BUDGET_ISSUES[@]} > 0`.**
+
+Deferred issues are issues that were not dispatched because their estimated cost would have pushed projected spend past the budget ceiling (after reserving ε for no-prior issues). They are **never silently dropped** — this report makes them visible and actionable.
+
+```bash
+if [ "$BUDGET_LIMIT" != "Infinity" ] && [ "${#DEFERRED_BUDGET_ISSUES[@]}" -gt 0 ]; then
+  echo ""
+  echo "## Budget Report"
+  echo ""
+  echo "**Budget limit**: \$${BUDGET_LIMIT}"
+  echo "**Projected spend (dispatched issues)**: \$${PROJECTED_SPEND}"
+  echo "**Actual spend (completed issues, best-effort)**: \$${ACTUAL_SPEND}"
+  echo "**ε-reserve used**: ${EPSILON_DISPATCHED} (10% = \$${EPSILON_BUDGET})"
+  echo ""
+  echo "### Deferred Issues (budget exhausted — never silently dropped)"
+  echo ""
+  echo "| Issue | Title | Score | Est. Cost | Reason |"
+  echo "|-------|-------|-------|-----------|--------|"
+  for DNUM in "${DEFERRED_BUDGET_ISSUES[@]}"; do
+    DTITLE=$(gh issue view "$DNUM" -R {GH_REPO} --json title --jq '.title' 2>/dev/null || echo "(unknown)")
+    DSCORE="${ISSUE_SCORE[$DNUM]:-?}"
+    DCOST="${ISSUE_COST_ESTIMATE[$DNUM]:-?}"
+    echo "| #${DNUM} | ${DTITLE} | ${DSCORE} | \$${DCOST} | Budget ceiling reached |"
+  done
+  echo ""
+  DEFERRED_LIST=$(IFS=' '; echo "${DEFERRED_BUDGET_ISSUES[*]}")
+  echo "**Action**: Re-run \`/orchestrate ${DEFERRED_LIST} [--budget N]\` to process deferred issues, or increase \`--budget\`."
+fi
+```
 
 ---
 

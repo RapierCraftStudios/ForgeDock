@@ -516,6 +516,223 @@ fi
 - If `EXCLUDED_CYCLE` is non-empty, report it clearly in the Step 3E plan before asking for user confirmation
 - If `ISSUES[]` is empty after cycle exclusion (all issues were cyclic), the guard above aborts with `exit 1` — Step 3E is never reached with an empty plan <!-- Added: forge#1110 -->
 
+### Step 3E.5: Value/Cost Scoring Pass (MANDATORY) <!-- Added: forge#1743 -->
+
+**Run immediately after Step 3D.5, before presenting the plan (Step 3E).** This step scores every issue in `ISSUES[]` by its expected value/cost ratio and re-orders the ready-set (issues with an empty predecessors set) in descending value/cost order. Dependency constraints are **never overridden** — this is a reordering pass within the existing ready-set only, not an edge-insertion pass. No new edges are added; cycle detection (Step 3D.5) has already completed.
+
+**Purpose**: Ensure that when a budget is finite (see `--budget` in Phase 4), the highest-value-per-token work dispatches first. When no budget is set (the default, uncapped behavior), dispatch order still reflects value/cost — useful for observability even without a hard cap.
+
+#### Value function (transparent heuristic — deferral decisions must be explainable)
+
+```
+value(issue) = priority_weight × danger_zone_weight
+```
+
+**Priority weight** (from issue labels):
+
+| Label | Weight |
+|-------|--------|
+| `priority:P0` | 4.0 |
+| `priority:P1` | 3.0 |
+| `priority:P2` | 2.0 |
+| `priority:P3` | 1.0 |
+| *(no priority label)* | 1.5 |
+
+**Danger-zone weight** (from affected files via FORGE:INVESTIGATOR comment): Read the `### Affected Files` section and check each file path against the danger-zone list from `forge.yaml → review.danger_zones[]`. Each affected file that appears in a danger zone adds 0.5 to the weight (additive, capped at 2.0). Default (no matches): 1.0.
+
+```
+danger_zone_weight = min(2.0, 1.0 + 0.5 × count_of_danger_zone_files_affected)
+```
+
+If `forge.yaml → review.danger_zones` is absent: danger_zone_weight = 1.0 for all issues.
+
+#### Cost function (fallback hierarchy)
+
+```
+cost_estimate(issue) → expected_spend_usd
+```
+
+Resolve in this order (use the first that produces a non-null result):
+
+1. **Cost-prior lookup** (primary): Read `~/.forge/index/cost-priors.json`. Compute key = `task_type:module` where:
+   - `task_type` = FORGE:INVESTIGATOR `**Task Type**` field (lower-cased, spaces→hyphens). If no investigator comment: infer from issue labels (`feature` → `feature`, `bug` → `bug-fix`, else `unknown`).
+   - `module` = basename (no ext, lowercase) of the primary affected file from FORGE:INVESTIGATOR. If absent: `_unknown`.
+   - If the key exists in cost-priors.json: use `priors[key].mean`. Mark the issue as `has_prior: true` for exploration-reserve logic below.
+
+2. **Label heuristic fallback** (when cost-priors.json absent or key not found):
+   ```
+   bug/fix: $0.20 · feature: $0.40 · refactor: $0.30 · investigation: $0.50 · unknown: $0.35
+   ```
+   Mark the issue as `has_prior: false`.
+
+3. **File-count proxy** (last resort — no labels and no prior):
+   ```
+   estimated_cost = 0.10 + 0.05 × count_of_affected_files
+   ```
+   Mark the issue as `has_prior: false`.
+
+#### Scoring and sorting
+
+```bash
+# --- Step 3E.5: Value/Cost Scoring Pass ---
+# Requires: ISSUES[] (post-cycle-detection), PREDECESSORS[], GH_REPO
+# Outputs: ISSUE_SCORE[], ISSUE_COST_ESTIMATE[], ISSUE_HAS_PRIOR[], SORTED_READY_SET[]
+
+declare -A ISSUE_SCORE        # issue → value/cost ratio (float)
+declare -A ISSUE_COST_ESTIMATE # issue → estimated cost (USD float string)
+declare -A ISSUE_HAS_PRIOR    # issue → true|false
+declare -A ISSUE_VALUE        # issue → value weight (float)
+
+COST_PRIORS_PATH="${HOME}/.forge/index/cost-priors.json"
+
+for NUM in "${ISSUES[@]}"; do
+  # 1. Fetch issue data for scoring (labels, investigator comment)
+  ISSUE_DATA=$(gh issue view "$NUM" -R {GH_REPO} --json labels,body \
+    --jq '{labels: [.labels[].name]}' 2>/dev/null || echo '{"labels":[]}')
+
+  LABELS=$(echo "$ISSUE_DATA" | jq -r '.labels[]' 2>/dev/null || echo '')
+
+  # --- Value: priority weight ---
+  if echo "$LABELS" | grep -q "priority:P0"; then
+    PRIO_WEIGHT=4.0
+  elif echo "$LABELS" | grep -q "priority:P1"; then
+    PRIO_WEIGHT=3.0
+  elif echo "$LABELS" | grep -q "priority:P2"; then
+    PRIO_WEIGHT=2.0
+  elif echo "$LABELS" | grep -q "priority:P3"; then
+    PRIO_WEIGHT=1.0
+  else
+    PRIO_WEIGHT=1.5
+  fi
+
+  # --- Value: danger-zone weight ---
+  DANGER_WEIGHT=1.0
+  DANGER_ZONES=$(yq '.review.danger_zones[]? // ""' forge.yaml 2>/dev/null || echo '')
+  if [ -n "$DANGER_ZONES" ]; then
+    # Fetch affected files from INVESTIGATOR comment
+    AFFECTED=$(gh api repos/{GH_REPO}/issues/${NUM}/comments \
+      --jq '.[] | select(.body | contains("FORGE:INVESTIGATOR")) | .body' 2>/dev/null \
+      | grep -oP '`[^`]+\.(py|mjs|ts|md|sh|yaml|yml)`' | tr -d '`' | head -20 || echo '')
+    ZONE_HIT_COUNT=0
+    while IFS= read -r dz; do
+      [ -z "$dz" ] && continue
+      if echo "$AFFECTED" | grep -q "$dz"; then
+        ZONE_HIT_COUNT=$((ZONE_HIT_COUNT + 1))
+      fi
+    done <<< "$DANGER_ZONES"
+    DZ_ADD=$(echo "scale=1; if ($ZONE_HIT_COUNT * 0.5 > 1.0) 1.0 else $ZONE_HIT_COUNT * 0.5" | bc 2>/dev/null || echo "0")
+    DANGER_WEIGHT=$(echo "scale=1; 1.0 + $DZ_ADD" | bc 2>/dev/null || echo "1.0")
+  fi
+
+  VALUE=$(echo "scale=4; $PRIO_WEIGHT * $DANGER_WEIGHT" | bc 2>/dev/null || echo "$PRIO_WEIGHT")
+  ISSUE_VALUE[$NUM]="$VALUE"
+
+  # --- Cost: prior lookup → label heuristic → file-count proxy ---
+  COST=""
+  HAS_PRIOR="false"
+
+  if [ -f "$COST_PRIORS_PATH" ]; then
+    # Derive task_type:module key
+    TASK_TYPE=$(gh api repos/{GH_REPO}/issues/${NUM}/comments \
+      --jq '[.[] | select(.body | contains("FORGE:INVESTIGATOR")) | .body] | last // ""' 2>/dev/null \
+      | grep -oP '(?<=\*\*Task Type\*\*: )\S+' | head -1 | tr '[:upper:]' '[:lower:]' \
+      | tr ' ' '-' || echo '')
+    [ -z "$TASK_TYPE" ] && {
+      if echo "$LABELS" | grep -q "^feature$"; then TASK_TYPE="feature"
+      elif echo "$LABELS" | grep -q "^bug$"; then TASK_TYPE="bug-fix"
+      else TASK_TYPE="unknown"; fi
+    }
+
+    PRIMARY_FILE=$(gh api repos/{GH_REPO}/issues/${NUM}/comments \
+      --jq '[.[] | select(.body | contains("FORGE:INVESTIGATOR")) | .body] | last // ""' 2>/dev/null \
+      | grep -oP '`[^`]+\.(py|mjs|ts|md|sh|yaml|yml)`' | tr -d '`' | head -1 || echo '')
+    MODULE=$(basename "${PRIMARY_FILE:-_unknown}" | sed 's/\.[^.]*$//' | tr '[:upper:]' '[:lower:]')
+    [ -z "$MODULE" ] && MODULE="_unknown"
+
+    PRIOR_KEY="${TASK_TYPE}:${MODULE}"
+    COST=$(jq -r --arg k "$PRIOR_KEY" '.priors[$k].mean // empty' "$COST_PRIORS_PATH" 2>/dev/null || echo '')
+    [ -n "$COST" ] && HAS_PRIOR="true"
+  fi
+
+  if [ -z "$COST" ]; then
+    # Label heuristic fallback
+    if echo "$LABELS" | grep -q "^feature$"; then COST="0.40"
+    elif echo "$LABELS" | grep -q "^bug$"; then COST="0.20"
+    elif echo "$LABELS" | grep -q "^refactor$"; then COST="0.30"
+    else COST="0.35"; fi
+  fi
+
+  # Score = value / cost (protected against divide-by-zero)
+  SCORE=$(echo "scale=4; if ($COST > 0) $VALUE / $COST else $VALUE / 0.01" | bc 2>/dev/null || echo "1.0")
+
+  ISSUE_SCORE[$NUM]="$SCORE"
+  ISSUE_COST_ESTIMATE[$NUM]="$COST"
+  ISSUE_HAS_PRIOR[$NUM]="$HAS_PRIOR"
+
+  echo "Score: #${NUM} value=${VALUE} cost_est=\$${COST} (prior=${HAS_PRIOR}) score=${SCORE}"
+done
+
+# --- ε-exploration reserve ---
+# ε = 10% of budget allocated to no-prior issues (high-variance unknowns).
+# A no-prior issue is guaranteed a dispatch slot within the ε reserve even if
+# its score would otherwise place it below the budget cutoff. This prevents
+# discovery starvation on novel modules with no cost history.
+#
+# Implementation: when --budget is set in Phase 4, the dispatch loop reserves
+# EPSILON_BUDGET = 0.10 × BUDGET_LIMIT for issues where ISSUE_HAS_PRIOR[N] == "false".
+# This step only MARKS the no-prior issues; Phase 4 reads ISSUE_HAS_PRIOR[] to apply the reserve.
+#
+# No-prior issues still compete in the main dispatch queue by score. The reserve
+# acts as a safety net: if no no-prior issue has been dispatched by the time
+# PROJECTED_SPEND reaches (BUDGET_LIMIT − EPSILON_BUDGET), the highest-scoring
+# no-prior issue is force-dispatched from the reserve before budget cutoff.
+
+NO_PRIOR_ISSUES=()
+for NUM in "${ISSUES[@]}"; do
+  [ "${ISSUE_HAS_PRIOR[$NUM]:-false}" = "false" ] && NO_PRIOR_ISSUES+=("$NUM")
+done
+echo "Exploration reserve: ${#NO_PRIOR_ISSUES[@]} no-prior issues (ε=10% of budget reserved for these)"
+
+# --- Sort the ready-set by descending score ---
+# The ready-set is the subset of ISSUES with empty PREDECESSORS[].
+# Dependency-constrained issues (non-empty PREDECESSORS[]) keep their original DAG ordering —
+# their dispatch is triggered by predecessor completion, not by score rank.
+# SORTED_READY_SET is consumed by Step 3E (plan) and Phase 4 (dispatch order).
+
+READY_SET=()
+for NUM in "${ISSUES[@]}"; do
+  [ -z "${PREDECESSORS[$NUM]:-}" ] && READY_SET+=("$NUM")
+done
+
+# Sort by score descending (bc-based comparison via temporary file)
+SCORE_PAIRS=""
+for NUM in "${READY_SET[@]}"; do
+  SCORE_PAIRS="${SCORE_PAIRS}${ISSUE_SCORE[$NUM]:-0} $NUM"$'\n'
+done
+SORTED_READY_SET=()
+while IFS=' ' read -r _score num; do
+  [ -n "$num" ] && SORTED_READY_SET+=("$num")
+done < <(echo "$SCORE_PAIRS" | sort -rn -k1,1 | grep -v '^$')
+
+echo ""
+echo "Ready-set dispatch order (descending value/cost):"
+for NUM in "${SORTED_READY_SET[@]}"; do
+  PRIOR_TAG="${ISSUE_HAS_PRIOR[$NUM]:-false}"
+  [ "$PRIOR_TAG" = "false" ] && PRIOR_NOTE=" [ε-reserve eligible]" || PRIOR_NOTE=" [prior known]"
+  echo "  #${NUM} score=${ISSUE_SCORE[$NUM]:-?} cost_est=\$${ISSUE_COST_ESTIMATE[$NUM]:-?}${PRIOR_NOTE}"
+done
+# --- End Step 3E.5 ---
+```
+
+**Output state** (consumed by Step 3E and Phase 4):
+- `ISSUE_SCORE[N]` — value/cost ratio for each issue
+- `ISSUE_COST_ESTIMATE[N]` — estimated spend in USD
+- `ISSUE_HAS_PRIOR[N]` — `true` if cost-priors.json had an entry; `false` = no-prior (ε-reserve eligible)
+- `SORTED_READY_SET[]` — ready issues sorted by descending score (used in Step 3E plan table and Phase 4 dispatch loop)
+- `NO_PRIOR_ISSUES[]` — issues with no cost history (a subset of `SORTED_READY_SET` + blocked issues)
+
+**Important**: `ISSUE_SCORE[]` and `ISSUE_COST_ESTIMATE[]` are also set for blocked issues (for reporting). The sorted order only affects the ready-set — blocked issues dispatch when their predecessors complete, regardless of score.
+
 ### Step 3E: Present the plan to the user
 
 ```
@@ -549,17 +766,22 @@ fi
 
 ### Dependency Graph
 
-| Issue | Predecessors | Domain | Status |
-|-------|-------------|--------|--------|
-| #{A} | — | FRONTEND | Ready (dispatches immediately) |
-| #{B} | — | BILLING | Ready (dispatches immediately) |
-| #{C} | — | WORKER | Ready (dispatches immediately) |
-| #{D} | #{A} | FRONTEND | Blocked (waits for #{A} only) |
-| #{E} | — | DATABASE | Ready (dispatches immediately) |
-| #{F} | #{E} | DATABASE | Blocked (serialized — waits for #{E}) |
+| Issue | Predecessors | Domain | Score | Est. Cost | Status |
+|-------|-------------|--------|-------|-----------|--------|
+| #{A} | — | FRONTEND | {score} | ${cost} | Ready (dispatches 1st by score) |
+| #{B} | — | BILLING | {score} | ${cost} | Ready (dispatches 2nd by score) |
+| #{C} | — | WORKER | {score} | ${cost} [ε] | Ready (dispatches 3rd — ε-reserve) |
+| #{D} | #{A} | FRONTEND | {score} | ${cost} | Blocked (waits for #{A} only) |
+| #{E} | — | DATABASE | {score} | ${cost} | Ready (dispatches 4th by score) |
+| #{F} | #{E} | DATABASE | {score} | ${cost} | Blocked (serialized — waits for #{E}) |
+
+**[ε]** = no cost prior; eligible for exploration reserve (10% of budget guaranteed for these)
+
+**Score** = value / estimated_cost (value = priority_weight × danger_zone_weight; higher = dispatches first within the ready-set)
+**Est. Cost** = cost-prior mean for (task_type × module), or label heuristic if no prior
 
 **Critical path**: #{E} → #{F} (2 steps, determines minimum wall-clock time)
-**Initial dispatch**: #{A}, #{B}, #{C}, #{E} (all predecessors resolved)
+**Initial dispatch**: #{A}, #{B}, #{C}, #{E} (all predecessors resolved — ordered by score)
 **Streaming**: #{D} dispatches as soon as #{A} completes — does NOT wait for #{B}, #{C}, or #{E}
 
 **Note**: Investigations may create additional issues that will be automatically added to the dependency graph. The final graph will be confirmed after investigations complete.
