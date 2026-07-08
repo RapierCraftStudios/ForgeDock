@@ -65,6 +65,11 @@
     "description": "Pipeline stalled — requires human intervention. Managed by ForgeDock."
   },
   {
+    "name": "blocked-on-human-merge",
+    "color": "006B75",
+    "description": "Dependent of a gated (needs-human/awaiting-merge) predecessor. Managed by ForgeDock."
+  },
+  {
     "name": "review-finding",
     "color": "D93F0B",
     "description": "Defect or improvement found during automated PR review. Managed by ForgeDock."

@@ -91,6 +91,41 @@ if [ "${#MERGE_READY_PRS[@]}" -gt 0 ]; then
 fi
 ```
 
+### Step 6A.6: Collect blocked-on-human-merge dependents (`blocked-on-human-merge`) <!-- Added: forge#1812 -->
+
+**Why a separate collection pass**: A `blocked-on-human-merge` issue is a *dependent* of a `GATED`
+predecessor (`needs-human` or `workflow:awaiting-merge` — see `phase-4-execution.md` Step 4B's
+Predecessor Classification), not itself blocked or failed. It has no PR of its own yet — it hasn't
+even been dispatched. It is excluded from both `{all_completed_issue_numbers}` (never ran) and
+`MERGE_READY_PRS` (Step 6A.5, which only covers issues that themselves reached `workflow:awaiting-merge`).
+Reporting it as `⏭ Skipped (dep)` would be wrong — that label means the predecessor `FAILED` and the
+work is abandoned; this state means the work is queued and will auto-dispatch on merge, no manual
+re-run required.
+
+```bash
+BLOCKED_ON_MERGE=()   # each entry: "NUM|GATING_PRED|GATING_PR|TITLE"
+
+for NUM in {all_batch_issue_numbers}; do
+  IS_BLOCKED=$(gh issue view "$NUM" -R {GH_REPO} --json labels \
+    --jq '[.labels[].name | select(. == "blocked-on-human-merge")] | length' 2>/dev/null || echo "0")
+  [ "$IS_BLOCKED" -gt 0 ] || continue
+
+  TITLE=$(gh issue view "$NUM" -R {GH_REPO} --json title --jq '.title' 2>/dev/null || echo "")
+  GATING_PRED=$(gh api repos/{GH_REPO}/issues/${NUM}/comments \
+    --jq '[.[] | select(.body | contains("FORGE:BLOCKED_ON_HUMAN_MERGE"))] | last | (.body | capture("Gating predecessor\\*\\*: #(?<p>[0-9]+)").p) // ""' 2>/dev/null || echo "")
+  GATING_PR=""
+  if [ -n "$GATING_PRED" ]; then
+    GATING_PR=$(gh pr list -R {GH_REPO} --state open --search "\"Closes #${GATING_PRED}\" in:body" \
+      --json number --jq '.[0].number // empty' 2>/dev/null || echo "")
+  fi
+
+  BLOCKED_ON_MERGE+=("${NUM}|${GATING_PRED}|${GATING_PR}|${TITLE}")
+done
+# BLOCKED_ON_MERGE now holds one entry per dependent queued behind a human-gated predecessor
+# (empty array if none). Feeds the "Blocked-on-Merge" report block and the Implementation
+# Results table row (Step 6B).
+```
+
 ### Step 6B: Present consolidated report
 
 ```
@@ -117,12 +152,21 @@ fi
 | #{D} | {title} | original | ⚠ Blocked | — | — |
 | #{F} | {title} | original | ⏸ Awaiting Merge | #{PR} | staging |
 | #{E} | {title} | original | ⏭ Skipped (dep) | — | — |
+| #{G} | {title} | original | 🔗 Blocked-on-Merge (gated by #{PRED}) | — | — |
 
 `⏸ Awaiting Merge` (`workflow:awaiting-merge`) is structurally distinct from `⚠ Blocked`
 (`needs-human`): a Blocked row means the pipeline hit something it cannot resolve on its own
 and a human must diagnose it; an Awaiting Merge row means the PR was already remediated and
 re-reviewed to a clean APPROVED verdict — a human only needs to click merge. Never render an
 awaiting-merge PR as `⚠ Blocked`.
+
+`🔗 Blocked-on-Merge` (`blocked-on-human-merge`, forge#1812) is distinct from all three of the
+above: it is a *dependent* of a GATED predecessor (one currently `⚠ Blocked` or `⏸ Awaiting
+Merge`) — the dependent issue itself was never dispatched and has no problem of its own. It is
+also distinct from `⏭ Skipped (dep)`, which means the predecessor `FAILED` outright and the work
+was abandoned. A Blocked-on-Merge row means the work is queued and will auto-dispatch the instant
+the gating predecessor's PR merges — no manual `/orchestrate` re-run required. Never render a
+blocked-on-human-merge dependent as `⏭ Skipped (dep)`.
 
 {IF `MERGE_READY_PRS` (Step 6A.5) is non-empty:}
 
@@ -141,6 +185,26 @@ These PRs were remediated and re-reviewed to a clean `APPROVED` verdict after an
 — render it verbatim here as plain text, no code fence.)
 
 {ELSE: omit this section entirely — do not print an empty "Merge-Ready" heading.}
+
+{IF `BLOCKED_ON_MERGE` (Step 6A.6) is non-empty:}
+
+### Blocked-on-Merge — {N} issue(s) queued behind a human-gated predecessor
+
+These issues are dependents of a predecessor that is currently `⚠ Blocked` or `⏸ Awaiting Merge`.
+They were never dispatched — no work has started on them — and they need no action right now.
+Each will auto-dispatch the instant its gating predecessor's PR merges (live-session wake via
+`phase-4-execution.md` Step 4B item 6.6, or next-`/orchestrate`-invocation wake via
+`phase-3-dependency.md`'s wake/compaction reconstruction). This batch is a **paused drain**, not
+a complete one — re-running `/orchestrate` after merging the gating PR(s) below will pick these up.
+
+| # | Issue | Gated By | Gating PR | Title |
+|---|-------|----------|-----------|-------|
+{one row per `BLOCKED_ON_MERGE` entry: | {n} | #{NUM} | #{GATING_PRED} | #{GATING_PR} | {title} |}
+
+**To unblock**: merge the gating PR(s) referenced above, then re-run `/orchestrate` (or let the
+current session's live wake pick them up automatically if it is still running).
+
+{ELSE: omit this section entirely — do not print an empty "Blocked-on-Merge" heading.}
 
 ### Review-Spawned Issues
 
@@ -171,6 +235,7 @@ These PRs were remediated and re-reviewed to a clean `APPROVED` verdict after an
 - **Succeeded**: {N} issues resolved (implementation + sweep)
 - **Failed**: {N} issues need attention
 - **Merge-ready**: {#MERGE_READY_PRS[@]:-0} PRs awaiting only a human merge (see "Merge-Ready" section above)
+- **Blocked-on-merge**: {#BLOCKED_ON_MERGE[@]:-0} issues queued behind a human-gated predecessor, will auto-dispatch on merge (see "Blocked-on-Merge" section above)
 - **Skipped**: {N} issues (dependency failures)
 
 ### Post-Batch Cleanup

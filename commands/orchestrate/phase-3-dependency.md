@@ -924,39 +924,101 @@ The orchestrator context window must stay small regardless of how many issues ha
 
 **Contract**: After any compaction event or orchestrator wake (session resumed after idle/restart), do NOT rely on in-context variables. Instead, reconstruct the DAG dispatch state from GitHub before checking for newly ready issues:
 
+This reconstruction MUST use the same three-way **DONE / GATED / FAILED** predecessor classification defined in `phase-4-execution.md` Step 4B ("Predecessor Classification") — not a binary terminal/non-terminal grep. A binary grep is exactly the bug forge#1812 fixed: it let `needs-human` simultaneously satisfy "predecessor is done, dispatch the successor" (this block, pre-fix) and "predecessor failed, skip the successor" (Step 4B's failure handler, pre-fix) — with no way to represent "predecessor is human-gated, its PR is still open, and its dependents should wait but not be abandoned." That third case is exactly what wake/compaction reconstruction hits most often, since a merge approved by a human typically happens *after* the orchestrator session that dispatched the predecessor has already ended — this block, not the live Step 4B loop, is the realistic trigger point for "gating PR merged while nobody was watching."
+
 ```bash
 # Reconstruct dispatch state from GitHub after compaction / wake
 # Run this block at the top of every resumed Phase 4 loop iteration.
 
-# 1. Re-fetch all issue labels to rebuild terminal-state knowledge
+# 1. Re-fetch all issue labels and classify each into DONE / GATED / FAILED / IN_PROGRESS
+#    (same classify_predecessor_state() function defined in phase-4-execution.md Step 4B —
+#    re-declare it here if this block runs in a fresh context that hasn't sourced Step 4B yet).
+declare -A ISSUE_CLASS
+DONE_ISSUES=()
+GATED_ISSUES=()
+FAILED_ISSUES=()
+ACTIVE_ISSUES=()   # IN_PROGRESS — still mid-pipeline, not yet terminal-for-this-agent
+
 for NUM in {all_issue_numbers_in_batch}; do
-  ISSUE_STATE=$(gh issue view "$NUM" -R {GH_REPO} --json state,labels \
-    --jq '{state: .state, workflow: [.labels[].name | select(startswith("workflow:"))]}' \
-    2>/dev/null || echo '{}')
-  # Classify: terminal if workflow:merged, workflow:invalid, needs-human, or CLOSED
-  if echo "$ISSUE_STATE" | grep -qE 'workflow:merged|workflow:invalid|needs-human|CLOSED'; then
-    TERMINAL_ISSUES+=("$NUM")
-  else
-    ACTIVE_ISSUES+=("$NUM")
+  CLASS=$(classify_predecessor_state "$NUM")
+  ISSUE_CLASS["$NUM"]="$CLASS"
+  case "$CLASS" in
+    DONE) DONE_ISSUES+=("$NUM") ;;
+    GATED) GATED_ISSUES+=("$NUM") ;;
+    FAILED) FAILED_ISSUES+=("$NUM") ;;
+    *) ACTIVE_ISSUES+=("$NUM") ;;
+  esac
+done
+
+# 2. Re-derive the ready set: any non-terminal issue whose predecessors are ALL classified DONE.
+#    A GATED predecessor blocks dispatch but does NOT fail the dependent — see step 2.5 below.
+READY_ISSUES=()
+NEWLY_BLOCKED=()   # dependents whose gating predecessor is GATED — need blocked-on-human-merge tracking
+for NUM in "${ACTIVE_ISSUES[@]}"; do
+  ALL_PREDS_DONE=true
+  GATING_PRED=""
+  for PRED in {predecessors_of_NUM}; do
+    case "${ISSUE_CLASS[$PRED]:-IN_PROGRESS}" in
+      DONE) ;;
+      GATED) ALL_PREDS_DONE=false; GATING_PRED="$PRED" ;;
+      *) ALL_PREDS_DONE=false ;;
+    esac
+  done
+  if [ "$ALL_PREDS_DONE" = "true" ]; then
+    READY_ISSUES+=("$NUM")
+  elif [ -n "$GATING_PRED" ]; then
+    NEWLY_BLOCKED+=("$NUM|$GATING_PRED")
   fi
 done
 
-# 2. Re-derive the ready set: any non-terminal issue whose predecessors are all terminal
-for NUM in "${ACTIVE_ISSUES[@]}"; do
-  ALL_PREDS_DONE=true
-  for PRED in {predecessors_of_NUM}; do
-    if ! printf '%s\n' "${TERMINAL_ISSUES[@]}" | grep -qx "$PRED"; then
-      ALL_PREDS_DONE=false
-      break
-    fi
-  done
-  $ALL_PREDS_DONE && READY_ISSUES+=("$NUM")
+# 2.5. Track newly-blocked dependents (mirrors phase-4-execution.md Step 4B item 6.5)
+# Self-heal the label if not yet bootstrapped (same pattern as review-pr.md 6C / phase-4-execution.md item 6.5).
+gh label create "blocked-on-human-merge" --color "006B75" --description "Dependent of a gated (needs-human/awaiting-merge) predecessor. Managed by ForgeDock." --force -R {GH_REPO} 2>/dev/null
+for ENTRY in "${NEWLY_BLOCKED[@]:-}"; do
+  [ -z "$ENTRY" ] && continue
+  DEP="${ENTRY%%|*}"
+  PRED="${ENTRY##*|}"
+  ALREADY_TRACKED=$(gh api repos/{GH_REPO}/issues/${DEP}/comments \
+    --jq --arg pred "#${PRED}" '[.[] | select(.body | contains("FORGE:BLOCKED_ON_HUMAN_MERGE") and contains($pred))] | length' 2>/dev/null || echo "0")
+  if [ "$ALREADY_TRACKED" -eq 0 ]; then
+    GATING_PR=$(gh pr list -R {GH_REPO} --state open --search "\"Closes #${PRED}\" in:body" \
+      --json number --jq '.[0].number // empty' 2>/dev/null || echo "")
+    gh issue comment "$DEP" -R {GH_REPO} --body "<!-- FORGE:BLOCKED_ON_HUMAN_MERGE -->
+**Gating predecessor**: #${PRED} (state: \`${ISSUE_CLASS[$PRED]}\`${GATING_PR:+, open PR #${GATING_PR}})
+**Status**: Detected on orchestrator wake/compaction reconstruction. Ready to dispatch as soon as #${PRED} reaches \`workflow:merged\`."
+    gh issue edit "$DEP" -R {GH_REPO} --add-label "blocked-on-human-merge" 2>/dev/null || true
+  fi
 done
 
-# 3. Dispatch the reconstructed ready set via standard Step 4A.pre.0 → 4A.pre → 4A flow
+# 3. Merge-triggered wake: any issue tracked as blocked-on-human-merge whose gating predecessor
+#    is now DONE gets un-blocked and added to the ready set. This is the wake-time equivalent of
+#    phase-4-execution.md Step 4B item 6.6 — it is what makes "auto-dispatch on merge, no manual
+#    /orchestrate re-run" hold true even when the merge happened after the session ended.
+BLOCKED_NOW=$(gh issue list -R {GH_REPO} --state open --label "blocked-on-human-merge" --json number \
+  --jq '.[].number' 2>/dev/null || echo "")
+for DEP in $BLOCKED_NOW; do
+  # Read which predecessor(s) this DEP is tracked against
+  GATING_PREDS_RAW=$(gh api repos/{GH_REPO}/issues/${DEP}/comments \
+    --jq '[.[] | select(.body | contains("FORGE:BLOCKED_ON_HUMAN_MERGE")) | (.body | capture("Gating predecessor\\*\\*: #(?<p>[0-9]+)").p)]' 2>/dev/null || echo '[]')
+  STILL_GATED=false
+  for GPRED in $(echo "$GATING_PREDS_RAW" | jq -r '.[]' 2>/dev/null); do
+    GPRED_CLASS=$(classify_predecessor_state "$GPRED")
+    [ "$GPRED_CLASS" != "DONE" ] && STILL_GATED=true
+  done
+  if [ "$STILL_GATED" = "false" ]; then
+    gh issue edit "$DEP" -R {GH_REPO} --remove-label "blocked-on-human-merge" 2>/dev/null || true
+    gh issue comment "$DEP" -R {GH_REPO} --body "<!-- FORGE:UNBLOCKED -->
+All gating predecessor(s) reached \`workflow:merged\` (detected on orchestrator wake) — dispatching now."
+    READY_ISSUES+=("$DEP")
+  fi
+done
+
+# 4. Dispatch the reconstructed ready set (DONE_ISSUES-unblocked + merge-triggered-woken) via the
+#    standard Step 4A.pre.0 → 4A.pre → 4A flow. FAILED_ISSUES' transitive dependents remain marked
+#    "skipped — dependency failed" per phase-4-execution.md Step 4B item 6 — do not re-add them here.
 ```
 
-**Why this keeps context small**: Each `Agent()` call returns an agent ID stored only in `AGENT_ISSUE_MAP`, which is rebuilt per Step 4A.pre dispatch batch. After compaction, the map is gone — but the DAG state is fully on GitHub. The reconstruction above re-derives the ready set from labels alone, so the orchestrator context never needs to hold cumulative dispatch history.
+**Why this keeps context small**: Each `Agent()` call returns an agent ID stored only in `AGENT_ISSUE_MAP`, which is rebuilt per Step 4A.pre dispatch batch. After compaction, the map is gone — but the DAG state, including `blocked-on-human-merge` tracking (a durable `FORGE:BLOCKED_ON_HUMAN_MERGE` comment plus label, not an in-context variable), is fully on GitHub. The reconstruction above re-derives the ready set, the gated set, and the blocked-on-human-merge set from labels and comments alone, so the orchestrator context never needs to hold cumulative dispatch history.
 
 ---
 
