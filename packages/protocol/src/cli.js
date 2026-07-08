@@ -8,7 +8,7 @@
  *     Emits a well-formed FORGE annotation body to stdout.
  *     Each --field KEY=VALUE pair is passed to emit() as a field.
  *     --b64  Produces the Base64url machine-surface form:
- *            <!-- FORGE:CARD v1 sha:<sha8> b64:<base64url_json> -->
+ *            <!-- FORGE:CARD: v1 sha:<sha8hex> b64:<base64url> -->
  *            (only valid for CARD type; TYPE is ignored when --b64 is passed)
  *     Exit code: 0 on success, 1 on error.
  *

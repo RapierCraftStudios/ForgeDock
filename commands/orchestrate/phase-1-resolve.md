@@ -105,9 +105,11 @@ BATCHABLE_P3=$(gh issue list {GH_FLAG} \
 - **Leaf-directory cluster** (broader grouping, existing threshold preserved): When **5+** batchable P3 issues share the same leaf directory but are not already covered by a same-file cluster above, OR the oldest batchable P3 in that leaf directory exceeds 72 hours, create a batch issue for that leaf-directory cluster.
 - Form same-file clusters first; evaluate any remaining ungrouped findings for leaf-directory clustering. A finding is claimed by at most one batch.
 
+**Sanitize the surface-area path before interpolation (MANDATORY):** `{SURFACE_AREA}` is an affected-file path derived from an issue body, and git filenames can legally carry shell metacharacters (`` ` ``, `$()`, quotes). Restrict it to a validated `[A-Za-z0-9._/-]` charset before templating it into `--title` / `--body`, so an untrusted issue body cannot break the `gh` argument boundary. The same guard is applied at the mirror site in `phase-4-execution.md`. <!-- forge#1833, forge#1835 -->
 ```bash
+SAFE_SURFACE_AREA=$(printf '%s' "{SURFACE_AREA}" | tr -cd 'A-Za-z0-9._/-')
 BATCH_ISSUE_NUM=$(gh issue create {GH_FLAG} \
-  --title "fix(batch): P3 review findings — {SURFACE_AREA} (batch #{BATCH_N})" \
+  --title "fix(batch): P3 review findings — ${SAFE_SURFACE_AREA} (batch #{BATCH_N})" \
   --label "review-finding,priority:P3,batch" \
   --body "$(cat <<'BATCH_EOF'
 ## Problem

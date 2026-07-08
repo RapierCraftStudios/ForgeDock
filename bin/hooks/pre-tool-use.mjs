@@ -12,11 +12,19 @@ const FORGE_HOME = resolvePath(dirname(fileURLToPath(import.meta.url)), "..", ".
 // Using a lazy import avoids top-level await and keeps the module synchronous
 // for the simple path — invariant loading only happens when a branch checkout
 // command is detected.
+// Sentinel states for _invariants:
+//   null   — import not yet attempted
+//   false  — a prior import attempt failed (do NOT retry; stay fail-open)
+//   object — successfully loaded module namespace (cached)
 let _invariants = null;
 let _invariantDecls = null;
 
 async function getInvariants() {
+  // A prior import attempt already failed — stay fail-open, do not retry.
+  if (_invariants === false) return { module: null, decls: [] };
+  // Successful load cached from a previous call.
   if (_invariants !== null) return { module: _invariants, decls: _invariantDecls };
+  // Not yet attempted — try importing now.
   try {
     _invariants = await import(
       pathToFileURL(join(FORGE_HOME, "bin", "engine", "invariants.mjs")).href
@@ -26,8 +34,11 @@ async function getInvariants() {
     );
   } catch {
     // invariants.mjs unavailable (fresh install, partial update) — fail-open.
-    _invariants = null;
+    // Mark the failure with a distinct sentinel so we don't re-attempt the
+    // import on every subsequent call.
+    _invariants = false;
     _invariantDecls = [];
+    return { module: null, decls: [] };
   }
   return { module: _invariants, decls: _invariantDecls };
 }

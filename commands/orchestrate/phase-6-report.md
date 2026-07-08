@@ -68,12 +68,19 @@ for NUM in {all_batch_issue_numbers}; do
 
   TITLE=$(gh issue view "$NUM" -R {GH_REPO} --json title --jq '.title' 2>/dev/null || echo "")
 
-  # Anchor on "Closes #N" first (forge#1634/#1646 precedent); bare-number fallback only if empty.
+  # Anchor on "Closes #N" first (forge#1634/#1646 precedent).
   PR_NUM=$(gh pr list -R {GH_REPO} --state open --search "\"Closes #${NUM}\" in:body" \
     --json number,updatedAt --jq 'sort_by(.updatedAt) | last | .number' 2>/dev/null || echo "")
   if [ -z "$PR_NUM" ]; then
+    # Fallback: a PR may close the issue via "Fixes #N"/"Resolves #N" rather than
+    # "Closes #N". Use the bare number only to generate candidates, then RE-VALIDATE
+    # each candidate's body against an anchored (Closes|Fixes|Resolves) #N word-boundary
+    # regex before accepting it — never accept a bare mention (changelog / cross-reference),
+    # which could resolve the wrong PR into the one-shot batch-merge command. This mirrors
+    # the recover-orphans.md re-validation precedent. <!-- forge#1822 -->
     PR_NUM=$(gh pr list -R {GH_REPO} --state open --search "${NUM} in:body" \
-      --json number,updatedAt --jq 'sort_by(.updatedAt) | last | .number' 2>/dev/null || echo "")
+      --json number,updatedAt,body \
+      --jq --arg n "${NUM}" '[ .[] | select(.body | test("(?i)(close[sd]?|fix(e[sd])?|resolve[sd]?)\\s+#" + $n + "\\b")) ] | sort_by(.updatedAt) | last | .number // empty' 2>/dev/null || echo "")
   fi
 
   [ -n "$PR_NUM" ] && MERGE_READY_PRS+=("${NUM}|${PR_NUM}|${TITLE}")

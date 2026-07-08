@@ -46,7 +46,7 @@
  */
 
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'fs';
-import { execSync, spawnSync } from 'child_process';
+import { spawnSync } from 'child_process';
 import { homedir } from 'os';
 import { dirname, join, resolve } from 'path';
 import { fileURLToPath } from 'url';

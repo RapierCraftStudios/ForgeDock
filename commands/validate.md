@@ -147,7 +147,7 @@ INPUT_ISSUE=$(echo "$ARGUMENTS" | grep -oE '#?([0-9]+)' | grep -oE '[0-9]+' | he
 GH_FLAG=$(yq -r '"-R " + .project.owner + "/" + .project.repo' forge.yaml 2>/dev/null || echo "")
 
 if [ -n "$INPUT_ISSUE" ] && [ -n "$GH_FLAG" ]; then
-  ISSUE_LABELS=$(gh issue view "$INPUT_ISSUE" $GH_FLAG --json labels \
+  ISSUE_LABELS=$(gh issue view "$INPUT_ISSUE" "$GH_FLAG" --json labels \
     --jq '[.labels[].name] | join(",")' 2>/dev/null || echo "")
 
   if echo "$ISSUE_LABELS" | grep -q "needs-validation"; then
@@ -166,14 +166,14 @@ if [ -n "$INPUT_ISSUE" ] && [ -n "$GH_FLAG" ]; then
     REPO_PATH=$(yq -r '.paths.root' forge.yaml 2>/dev/null || echo ".")
     SCRIPT="$REPO_PATH/scripts/transition-label.sh"
     if [ -f "$SCRIPT" ]; then
-      bash "$SCRIPT" --validate "$FORGE_VERDICT" "$INPUT_ISSUE" $GH_FLAG || true
+      bash "$SCRIPT" --validate "$FORGE_VERDICT" "$INPUT_ISSUE" "$GH_FLAG" || true
     else
       # Prose fallback: apply directly via gh
       if [ "$FORGE_VERDICT" = "CONFIRMED" ]; then
-        gh issue edit "$INPUT_ISSUE" $GH_FLAG --add-label "validated" --remove-label "needs-validation" 2>/dev/null || true
+        gh issue edit "$INPUT_ISSUE" "$GH_FLAG" --add-label "validated" --remove-label "needs-validation" 2>/dev/null || true
         echo "Applied: needs-validation → validated"
       else
-        gh issue edit "$INPUT_ISSUE" $GH_FLAG --add-label "false-positive" --remove-label "needs-validation" 2>/dev/null || true
+        gh issue edit "$INPUT_ISSUE" "$GH_FLAG" --add-label "false-positive" --remove-label "needs-validation" 2>/dev/null || true
         echo "Applied: needs-validation → false-positive"
       fi
     fi

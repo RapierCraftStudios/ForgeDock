@@ -114,6 +114,7 @@ function parseArgs(argv) {
         break;
       case '--issue':
         args.issue = parseInt(argv[++i], 10);
+        if (isNaN(args.issue)) throw new Error('--issue requires a numeric argument');
         break;
       case '--output':
         args.outputDir = argv[++i];
@@ -567,9 +568,28 @@ function buildAnchor(paths, symbols, issueNumber) {
 // Card extraction dispatcher
 // ---------------------------------------------------------------------------
 
+/**
+ * Parse a best-effort `cost_usd: <number>` telemetry line from an annotation body.
+ * Emitted per-phase by work-on (validate.md writes `cost_usd: ${PHASE_COST_USD}`
+ * into FORGE:INVESTIGATOR / FORGE:BUILDER / FORGE:REVIEWER annotations).
+ * Returns a finite positive number, or null if absent/unparseable.
+ */
+function parseCostUsd(body) {
+  const m = (body || '').match(/cost_usd:\s*([0-9]+(?:\.[0-9]+)?)/);
+  if (!m) return null;
+  const v = parseFloat(m[1]);
+  return isFinite(v) && v > 0 ? v : null;
+}
+
 async function extractCardsFromIssue(issueNumber, issueData, comments) {
   const parse = await getParser();
   const cards = [];
+
+  // Accumulate per-phase actual spend across all annotations on this issue so it
+  // can be attached to the issue's primary card as `costUsd` — the field
+  // aggregateCostPriors() reads to build economic-scheduling priors. Without this
+  // the field is never populated and cost-priors.json is always written empty.
+  const phaseCost = { investigation: null, build: null, review: null };
 
   const allBodies = [
     issueData.body || '',
@@ -589,6 +609,14 @@ async function extractCardsFromIssue(issueNumber, issueData, comments) {
     for (const annotation of annotations) {
       if (!CARD_PRODUCING_TYPES.has(annotation.type)) continue;
       if (annotation.sentinelState === 'interrupted') continue; // incomplete
+
+      // Capture per-phase actual spend (best-effort) from phase annotations.
+      const annCost = parseCostUsd(annotation.body);
+      if (annCost !== null) {
+        if (annotation.type === 'INVESTIGATOR') phaseCost.investigation = annCost;
+        else if (annotation.type === 'BUILDER') phaseCost.build = annCost;
+        else if (annotation.type === 'REVIEWER') phaseCost.review = annCost;
+      }
 
       try {
         switch (annotation.type) {
@@ -623,6 +651,22 @@ async function extractCardsFromIssue(issueNumber, issueData, comments) {
       } catch (e) {
         debug(`Error extracting cards from ${annotation.type} in issue #${issueNumber}: ${e.message}`);
       }
+    }
+  }
+
+  // Attach accumulated actual spend to the issue's primary card so downstream
+  // aggregateCostPriors() can bucket it by task_type:module. total is the sum of
+  // whichever phase costs were present (null when none were reported).
+  if (phaseCost.investigation !== null || phaseCost.build !== null || phaseCost.review !== null) {
+    const total = (phaseCost.investigation || 0) + (phaseCost.build || 0) + (phaseCost.review || 0);
+    const primaryCard = cards.find(c => c.kind === 'investigation' || c.kind === 'pattern') || cards[0];
+    if (primaryCard) {
+      primaryCard.costUsd = {
+        investigation: phaseCost.investigation,
+        build: phaseCost.build,
+        review: phaseCost.review,
+        total: total > 0 ? total : null,
+      };
     }
   }
 
@@ -1150,6 +1194,16 @@ function yqScalar(repoPath, expr) {
   return '';
 }
 
+/**
+ * Sanitize an external-sourced identifier (feed slug from forge.yaml, card slug
+ * from an exchange repo's `# Pattern:` header) before using it as a filesystem
+ * path component. Collapses any character outside [A-Za-z0-9._-] to '-' so that
+ * path-separator or traversal sequences (`/`, `..`) cannot escape LEDGER_ROOT.
+ */
+function sanitizePathComponent(value) {
+  return String(value || '').replace(/[^A-Za-z0-9._-]/g, '-').replace(/^\.+/, '');
+}
+
 /** Read a JSON value from forge.yaml via yq -o json. Returns null on error. */
 function yqJsonVal(repoPath, expr) {
   const result = spawnSync('yq', ['-o', 'json', expr, join(repoPath, 'forge.yaml')], {
@@ -1417,9 +1471,13 @@ async function pullFeeds(repoPath, args) {
         imported_at: new Date().toISOString(),
       };
 
-      const feedLedgerDir = join(LEDGER_ROOT, feedSlug);
-      const ledgerFilePath = join(feedLedgerDir, `${slug}.json`);
-      importedSlugs.add(slug);
+      // Sanitize external-sourced slugs before building filesystem paths so a
+      // crafted `# Pattern:` header or feed slug cannot traverse out of LEDGER_ROOT.
+      const safeFeedSlug = sanitizePathComponent(feedSlug);
+      const safeSlug = sanitizePathComponent(slug);
+      const feedLedgerDir = join(LEDGER_ROOT, safeFeedSlug);
+      const ledgerFilePath = join(feedLedgerDir, `${safeSlug}.json`);
+      importedSlugs.add(safeSlug);
 
       if (args.dryRun) {
         log(`  DRY RUN: would write ${ledgerFilePath}`);
@@ -1448,7 +1506,7 @@ async function pullFeeds(repoPath, args) {
 
     // Reconcile: remove cards no longer present upstream (clean unsubscribe)
     if (!args.dryRun) {
-      const feedLedgerDir = join(LEDGER_ROOT, feedSlug);
+      const feedLedgerDir = join(LEDGER_ROOT, sanitizePathComponent(feedSlug));
       if (existsSync(feedLedgerDir)) {
         for (const file of readdirSync(feedLedgerDir)) {
           if (!file.endsWith('.json')) continue;

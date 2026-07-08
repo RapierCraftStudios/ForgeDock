@@ -36,7 +36,7 @@
  * const results = assertCloseInvariants(invariants, events);
  */
 
-import { readFileSync, existsSync } from "node:fs";
+import { existsSync } from "node:fs";
 import { execFileSync } from "node:child_process";
 import { resolve } from "node:path";
 import { fileURLToPath } from "node:url";
