@@ -882,6 +882,51 @@ for FINDING_NUM in {spawned_finding_numbers}; do
 done
 ```
 
+**Surface-area batching for queued P3 findings (MANDATORY check before dispatch):** <!-- Added: forge#1818 -->
+
+Cascade-spawned findings collected within a single `/orchestrate` run never pass back through Phase 1's batching rule — Phase 1 only runs once, at the start. Without a check here, same-file P3 findings spawned mid-run always dispatch individually, defeating the batching policy for exactly the findings it exists to catch. Apply the same grouping rule from `commands/orchestrate/phase-1-resolve.md` ("P3 Review-Finding Batching") to `QUEUED_FINDINGS` before the dispatch step below:
+
+```bash
+# Group QUEUED_FINDINGS by exact affected file, reusing the same safety
+# exclusions as phase-1-resolve.md (security/billing/anti-bot/auth — never batch).
+declare -A SURFACE_FILE_MEMBERS
+SURFACE_BATCHED_FINDINGS=()
+
+for FINDING_NUM in "${QUEUED_FINDINGS[@]}"; do
+  FINDING_DATA=$(gh issue view $FINDING_NUM -R {GH_REPO} --json title,body,labels \
+    --jq '{title: .title, body: .body, labels: [.labels[].name]}')
+
+  # Safety exclusions — never batch, at any priority
+  echo "$FINDING_DATA" | jq -r '.title' | grep -qiE 'security|billing|anti-bot|auth' && continue
+  echo "$FINDING_DATA" | jq -r '.body' | grep -qziE '## Problem[\s\S]{0,500}(security|billing|anti-bot|auth)' && continue
+  echo "$FINDING_DATA" | jq -r '.labels[]' | grep -qiE '^(security|billing|anti-bot|auth)$' && continue
+
+  # Only P3 findings are eligible for batching (P1/P2 never batched — already dispatched individually above)
+  echo "$FINDING_DATA" | jq -r '.labels[]' | grep -q '^priority:P3$' || continue
+
+  FINDING_FILE=$(echo "$FINDING_DATA" | jq -r '.body' | grep -oP '`[^`]+\.(py|tsx?|jsx?|sql|json|ya?ml|sh|md)`' | head -1 | tr -d '`')
+  [ -z "$FINDING_FILE" ] && continue
+
+  SURFACE_FILE_MEMBERS["$FINDING_FILE"]="${SURFACE_FILE_MEMBERS[$FINDING_FILE]} $FINDING_NUM"
+done
+
+for FILE in "${!SURFACE_FILE_MEMBERS[@]}"; do
+  MEMBERS=(${SURFACE_FILE_MEMBERS[$FILE]})
+  if [ "${#MEMBERS[@]}" -ge 2 ]; then
+    echo "Same-run surface-area cluster: ${#MEMBERS[@]} P3 findings share $FILE — creating batch issue"
+    # Cap at 8 members per batch (split into multiple batches of <=8 if more share the file),
+    # then create the batch issue using the exact template from phase-1-resolve.md's
+    # "Batch creation rule" (title: "fix(batch): P3 review findings — {FILE} (batch #{BATCH_N})",
+    # labels: review-finding,priority:P3,batch, body includes FORGE:BATCH_MEMBERS block + FORGE:BATCHABLE marker).
+    # Substitute the resulting batch issue number for each of $MEMBERS in QUEUED_FINDINGS and the DAG,
+    # and record each member in SURFACE_BATCHED_FINDINGS so it is not double-dispatched below.
+    SURFACE_BATCHED_FINDINGS+=("${MEMBERS[@]}")
+  fi
+done
+```
+
+Findings clustered here are replaced by their batch issue in `QUEUED_FINDINGS` and the DAG — do not dispatch the individual member issues. Findings that remain ungrouped (fewer than 2 sharing a file in this collection round) stay individually queued below; they retain default-batchable eligibility and will be picked up by the next `/orchestrate` invocation's Phase 1 resolve if a same-file or leaf-directory cluster later forms across runs.
+
 **For queued (non-deferred) findings:**
 
 1. **Add them to the dependency DAG.** They are implementation issues — same as issues spawned by investigations in Phase 2. Compute their predecessor sets using the same conflict detection (Step 3C Layers 1-4) against all remaining blocked/active issues.

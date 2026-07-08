@@ -64,48 +64,55 @@ If a `workflow:decomposed` issue is found, automatically expand it to its open s
 ### P3 Review-Finding Batching (deterministic grouping rule)
 
 <!-- Added: forge#1333 -->
+<!-- Extended: forge#1818 — default-batchable eligibility, surface-area grouping, lowered same-file threshold -->
 
 Before finalizing the issue set, apply the P3 batching rule to reduce full-pipeline overhead on low-severity review findings.
 
-**Trigger conditions** (BOTH must be true to batch):
+**Trigger conditions** (default-batchable — no opt-in marker required):
 1. The issue has labels `review-finding` + `priority:P3`
-2. The issue has `<!-- FORGE:BATCHABLE -->` in its body
+2. The issue does NOT match any Safety exclusion below
 
-**Safety exclusions — NEVER batch** (override all trigger conditions):
-- Issue body contains the word "security" or "billing" anywhere in the title or `## Problem` section
-- Issue has a `security` label
-- Issue has a `billing` label
+The `<!-- FORGE:BATCHABLE -->` marker (still appended by `review-pr.md` at finding-creation time) is honored when present but is no longer REQUIRED for eligibility — a `review-finding`+`priority:P3` issue is batchable by default unless explicitly excluded. This closes the gap where cascade-spawned findings that never carried the marker sat un-batched indefinitely. <!-- Added: forge#1818 -->
 
-**Grouping algorithm:**
+**Safety exclusions — NEVER batch, at any priority** (override all trigger conditions):
+- Issue body contains the word "security", "billing", "anti-bot", or "auth" anywhere in the title or `## Problem` section
+- Issue has a `security`, `billing`, `anti-bot`, or `auth` label
+
+These exclusions apply regardless of priority: P1/P2 findings are already never batched (see Important limits), and P3 findings in these domains are excluded even though they would otherwise qualify for default-batchable treatment. <!-- Added: forge#1818 -->
+
+**Grouping algorithm (surface area — same file first, leaf directory as broader fallback):** <!-- Changed: forge#1818 — was domain-only -->
 ```bash
-# Fetch all open batchable P3 issues
+# Fetch all open batchable P3 issues (default-batchable; marker no longer required)
 BATCHABLE_P3=$(gh issue list {GH_FLAG} \
   --state open \
   --label "review-finding,priority:P3" \
   --limit 500 \
   --json number,title,body,labels \
-  --jq '.[] | select(.body | test("<!-- FORGE:BATCHABLE -->"))
-         | select((.title | test("security|billing"; "i")) | not)
-         | select(.body | test("## Problem[\\s\\S]{0,500}(security|billing)"; "i") | not)
-         | select(([.labels[].name] | any(. == "security" or . == "billing")) | not)')
+  --jq '.[] | select((.title | test("security|billing|anti-bot|auth"; "i")) | not)
+         | select(.body | test("## Problem[\\s\\S]{0,500}(security|billing|anti-bot|auth)"; "i") | not)
+         | select(([.labels[].name] | any(. == "security" or . == "billing" or . == "anti-bot" or . == "auth")) | not)')
 
-# Group by domain (file-cluster derived from the affected file path in each issue body)
-# Domain is the top-level directory of the first affected file listed under "## Affected Files"
-# e.g., "services/api/auth/login.py" → domain "services/api/auth"
-#        "web/src/app/billing/"     → EXCLUDED (billing path)
-#        "commands/review-pr.md"    → domain "commands"
+# Surface area = the exact affected file path listed first under "## Affected Files" (primary grouping key).
+# Leaf directory = dirname of that file (broader fallback grouping key, formerly called "domain").
+# e.g., "services/api/auth/login.py"              → EXCLUDED (auth path)
+#        "web/src/app/billing/page.tsx"           → EXCLUDED (billing path)
+#        "commands/orchestrate/phase-1-resolve.md" → file "commands/orchestrate/phase-1-resolve.md", leaf-dir "commands/orchestrate"
+#        "commands/review-pr.md"                   → file "commands/review-pr.md", leaf-dir "commands"
 ```
 
-**Batch creation rule**: When 5+ batchable P3 issues share the same domain, OR when the oldest batchable P3 in a domain exceeds 72 hours, create a single batch issue grouping those issues:
+**Batch creation rule (two-tier threshold):** <!-- Changed: forge#1818 — added lower same-file tier -->
+- **Same-file cluster** (primary, low threshold): When **2+** batchable P3 issues share the exact same affected file, create a batch issue for that file cluster. Same-file P3 findings are the dominant low-value token sink (dead imports, stale comments, style nits) and already conflict with each other if built individually — the low threshold reflects that they'd otherwise serialize into slow one-at-a-time chains regardless of count.
+- **Leaf-directory cluster** (broader grouping, existing threshold preserved): When **5+** batchable P3 issues share the same leaf directory but are not already covered by a same-file cluster above, OR the oldest batchable P3 in that leaf directory exceeds 72 hours, create a batch issue for that leaf-directory cluster.
+- Form same-file clusters first; evaluate any remaining ungrouped findings for leaf-directory clustering. A finding is claimed by at most one batch.
 
 ```bash
 BATCH_ISSUE_NUM=$(gh issue create {GH_FLAG} \
-  --title "fix(batch): P3 review findings — {DOMAIN} domain (batch #{BATCH_N})" \
+  --title "fix(batch): P3 review findings — {SURFACE_AREA} (batch #{BATCH_N})" \
   --label "review-finding,priority:P3,batch" \
   --body "$(cat <<'BATCH_EOF'
 ## Problem
 
-Batch of P3 review findings in the **{DOMAIN}** domain, grouped to reduce per-finding pipeline overhead.
+Batch of P3 review findings in **{SURFACE_AREA}** (same file or leaf directory), grouped to reduce per-finding pipeline overhead.
 
 ## Member Findings
 
@@ -117,11 +124,11 @@ Batch of P3 review findings in the **{DOMAIN}** domain, grouped to reduce per-fi
 
 - [ ] All member findings addressed or closed as false-positive
 - [ ] Member issues auto-closed with reference to this batch PR on merge
-- [ ] No security or billing paths touched (validated before batching)
+- [ ] No security, billing, anti-bot, or auth paths touched (validated before batching)
 
 ## Context
 
-**Batch policy**: 5+ open P3 findings in the same domain, or oldest > 72h.
+**Batch policy**: 2+ open P3 findings sharing the same file, or 5+ sharing the same leaf directory, or oldest > 72h.
 **Member issues**: #{N1}, #{N2}, #{N3}, ...
 
 <!-- FORGE:BATCHABLE -->
@@ -132,11 +139,12 @@ BATCH_EOF
 **Replace member issues with the batch issue** in the resolved issue set. Member issues are NOT individually dispatched to `/work-on` — the batch issue is the single pipeline unit.
 
 **Important limits**:
-- Max 10 members per batch issue — if more than 10 batchable P3s exist in a domain, create multiple batch issues of ≤ 10 each
+- Max **8** members per batch issue — if more than 8 batchable P3s exist in a surface-area cluster, create multiple batch issues of ≤ 8 each <!-- Changed: forge#1818 — was 10 -->
 - P1 and P2 issues are NEVER batched — they keep the standard one-issue-one-PR path
+- Security/billing/anti-bot/auth findings are NEVER batched at any priority (see Safety exclusions above) <!-- Added: forge#1818 -->
 - Batch issues themselves are never nested inside other batch issues
 
-If fewer than 5 batchable P3 findings exist in any domain AND none exceed 72h, skip batch creation entirely — individual P3s run through the standard pipeline.
+If fewer than 2 batchable P3 findings share a file, AND fewer than 5 share a leaf directory, AND none exceed 72h, skip batch creation entirely — individual P3s run through the standard pipeline.
 
 ### CRITICAL: No duplicate detection at orchestrator level
 
