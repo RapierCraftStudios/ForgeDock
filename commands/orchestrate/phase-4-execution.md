@@ -546,7 +546,7 @@ done
    fi
    ```
 
-5. **Record completed results**: Success (PR merged), Invalid (issue closed), Blocked (needs human), or Error
+5. **Record completed results**: Success (PR merged), Invalid (issue closed), Blocked (needs human), Awaiting-merge (`workflow:awaiting-merge` — remediated + re-reviewed to APPROVED after an earlier `needs-human` escalation; needs only a human merge, not diagnosis — keep distinct from Blocked in any status output, see item 8), or Error
 
 5. **Check for newly unblocked issues** — run the DAG readiness check above. If any issues are now ready, dispatch them immediately (Steps 4A.pre.0 → 4A.pre → 4A). Batch all newly ready issues into a single dispatch message.
 
@@ -567,9 +567,15 @@ done
    ✓ #{NUMBER} — {title} → PR #{PR} merged to {target}
    ✗ #{NUMBER} — {title} → {reason for failure}
    ⚠ #{NUMBER} — {title} → PIPELINE BYPASS (no /work-on — PR invalid)
+   ⏸ #{NUMBER} — {title} → PR #{PR} awaiting-merge (remediated + re-approved — human merge only, no diagnosis needed)
    ⏳ Progress: {completed}/{total} complete, {active} active, {blocked} blocked
    → Dispatched #{NEWLY_READY} (predecessor #{PRED} completed)
    ```
+
+   `⏸` (awaiting-merge) is deliberately distinct from `⚠` (blocked/bypass) — do not collapse the
+   two. `⚠` means the pipeline hit something it cannot resolve and a human must diagnose it;
+   `⏸` means the PR already cleared re-review and only needs a merge click. See Phase 6's
+   "Merge-Ready" report section (`phase-6-report.md` Step 6A.5/6B) for the batch-level rollup.
 
 9. **Run staging integrity check** (from Step 4A-pre) if the completed agent merged a PR targeting staging.
 
