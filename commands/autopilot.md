@@ -382,6 +382,8 @@ FAST_LANE_ITERATIONS=0
 MAX_FAST_LANE_ITERATIONS=20  # safety cap — prevents infinite loop on stuck state
 FAST_LANE_DEPLOYS=0
 FAST_LANE_FINDINGS_BOUNCED=0
+DISPATCHED_ISSUES=()        # accumulates every issue number dispatched this cycle (for Phase 4 report)
+STALLED_ISSUES=()           # issues that did not reach a terminal state after dispatch
 
 echo "=== Fast Lane Loop ==="
 
@@ -436,12 +438,54 @@ while true; do
 
       for ISSUE_NUM in $FAST_LANE_ISSUE_NUMS; do
         echo "Dispatching #$ISSUE_NUM via forgedock run-issue --lane staging"
+        DISPATCHED_ISSUES+=("$ISSUE_NUM")
         forgedock run-issue "$ISSUE_NUM" --lane staging &
       done
 
       # Wait for all engine workers to complete before proceeding to deploy step.
       wait
       echo "Engine dispatch complete for fast-lane iteration $FAST_LANE_ITERATIONS"
+
+      # Terminal-state verification sweep (MANDATORY after every dispatch batch).
+      # Query actual GitHub label state for each dispatched issue — the engine's
+      # exit code only reflects process completion, not pipeline terminal state.
+      # An issue whose PR merged but whose close phase was interrupted will show
+      # workflow:in-review (non-terminal) here and be flagged for targeted recovery.
+      echo "Verifying terminal state for $( echo "$FAST_LANE_ISSUE_NUMS" | wc -w | tr -d ' ') dispatched issue(s)..."
+      for ISSUE_NUM in $FAST_LANE_ISSUE_NUMS; do
+        ISSUE_LABELS=$(gh issue view "$ISSUE_NUM" $GH_FLAG \
+          --json labels,state \
+          --jq '(.labels | map(.name) | join(",")) + "|" + .state' \
+          2>/dev/null || echo "unknown|unknown")
+        ISSUE_LABEL_STR="${ISSUE_LABELS%%|*}"
+        ISSUE_STATE="${ISSUE_LABELS##*|}"
+
+        if echo "$ISSUE_LABEL_STR" | grep -qE 'workflow:merged|workflow:invalid|needs-human' || [ "$ISSUE_STATE" = "CLOSED" ]; then
+          echo "  #$ISSUE_NUM ✓ terminal ($ISSUE_LABEL_STR)"
+        elif echo "$ISSUE_LABEL_STR" | grep -q 'workflow:in-review'; then
+          # Known recoverable stall class: PR merged but close phase did not run.
+          # Verify PR state before invoking recover-orphans.
+          MERGED_PR=$(gh pr list $GH_FLAG --head "$(gh issue view "$ISSUE_NUM" $GH_FLAG --json title --jq '.title' 2>/dev/null | tr '[:upper:]' '[:lower:]' | sed 's/[^a-z0-9]/-/g')" \
+            --state merged --limit 1 --json number --jq '.[0].number' 2>/dev/null || echo '')
+          if [ -n "$MERGED_PR" ] || gh api repos/$GH_REPO/issues/$ISSUE_NUM/events \
+              --jq '[.[] | select(.event == "labeled" and .label.name == "workflow:merged")] | length > 0' \
+              2>/dev/null | grep -q true; then
+            echo "  #$ISSUE_NUM ⟳ stalled at workflow:in-review (PR merged) — resuming via recover-orphans"
+            if [ "$RECOVER_ORPHANS_AVAILABLE" = "true" ]; then
+              Skill("recover-orphans", args="--issue $ISSUE_NUM")
+            else
+              echo "  WARNING: recover-orphans not installed — cannot auto-resume #$ISSUE_NUM"
+              STALLED_ISSUES+=("$ISSUE_NUM")
+            fi
+          else
+            echo "  #$ISSUE_NUM ⚠ non-terminal ($ISSUE_LABEL_STR) — will retry next iteration"
+            STALLED_ISSUES+=("$ISSUE_NUM")
+          fi
+        else
+          echo "  #$ISSUE_NUM ⚠ non-terminal ($ISSUE_LABEL_STR) — will retry next iteration"
+          STALLED_ISSUES+=("$ISSUE_NUM")
+        fi
+      done
     else
       echo "INFO: Using agent dispatch mode (forgedock CLI not in PATH — run \`npm install -g forgedock\` for engine-mode dispatch)"
       # Safety Rule 2 (needs-human guarantee): The engine-first path above filters
@@ -449,7 +493,41 @@ while true; do
       # /orchestrate enforces the same guarantee at its own phase entry — it skips
       # any issue labeled needs-human before dispatching /work-on. Both paths
       # implement Rule 2; the mechanism differs (jq filter vs. downstream check).
+
+      # Snapshot the fast-lane issue list before orchestrate runs so we can verify
+      # terminal state afterward. orchestrate enumerates internally, so we cannot
+      # rely on FAST_LANE_ISSUE_NUMS (which was not set on this path).
+      PRE_DISPATCH_ISSUES=$(gh issue list $GH_FLAG \
+        --state open \
+        --limit 200 \
+        --json number,milestone,labels \
+        --jq '[.[] | select(
+          .milestone == null and
+          (.labels | map(.name) | any(. == "workflow:merged" or . == "workflow:invalid" or . == "workflow:decomposed" or . == "needs-human") | not)
+        )] | .[].number' \
+        2>/dev/null || echo '')
+      for N in $PRE_DISPATCH_ISSUES; do DISPATCHED_ISSUES+=("$N"); done
+
       Skill("orchestrate", args="fast-lane")
+
+      # Terminal-state verification after orchestrate (fallback path).
+      # Re-query GitHub state for each pre-dispatch issue.
+      echo "Verifying terminal state for $( echo "$PRE_DISPATCH_ISSUES" | wc -w | tr -d ' ') dispatched issue(s) (orchestrate path)..."
+      for ISSUE_NUM in $PRE_DISPATCH_ISSUES; do
+        ISSUE_LABELS=$(gh issue view "$ISSUE_NUM" $GH_FLAG \
+          --json labels,state \
+          --jq '(.labels | map(.name) | join(",")) + "|" + .state' \
+          2>/dev/null || echo "unknown|unknown")
+        ISSUE_LABEL_STR="${ISSUE_LABELS%%|*}"
+        ISSUE_STATE="${ISSUE_LABELS##*|}"
+
+        if echo "$ISSUE_LABEL_STR" | grep -qE 'workflow:merged|workflow:invalid|needs-human' || [ "$ISSUE_STATE" = "CLOSED" ]; then
+          echo "  #$ISSUE_NUM ✓ terminal ($ISSUE_LABEL_STR)"
+        else
+          echo "  #$ISSUE_NUM ⚠ non-terminal ($ISSUE_LABEL_STR)"
+          STALLED_ISSUES+=("$ISSUE_NUM")
+        fi
+      done
     fi
   else
     if [ "$FORGEDOCK_AVAILABLE" = "true" ]; then
@@ -567,16 +645,76 @@ echo "$MILESTONES" | jq -c '.[]' | while IFS= read -r milestone; do
 
         for ISSUE_NUM in $MS_ISSUE_NUMS; do
           echo "Dispatching #$ISSUE_NUM via forgedock run-issue --lane milestone/$MS_SLUG"
+          DISPATCHED_ISSUES+=("$ISSUE_NUM")
           forgedock run-issue "$ISSUE_NUM" --lane "milestone/$MS_SLUG" &
         done
 
         wait
         echo "Engine dispatch complete for milestone '$MS_TITLE'"
+
+        # Terminal-state verification sweep for milestone batch.
+        echo "Verifying terminal state for $( echo "$MS_ISSUE_NUMS" | wc -w | tr -d ' ') dispatched milestone issue(s)..."
+        for ISSUE_NUM in $MS_ISSUE_NUMS; do
+          ISSUE_LABELS=$(gh issue view "$ISSUE_NUM" $GH_FLAG \
+            --json labels,state \
+            --jq '(.labels | map(.name) | join(",")) + "|" + .state' \
+            2>/dev/null || echo "unknown|unknown")
+          ISSUE_LABEL_STR="${ISSUE_LABELS%%|*}"
+          ISSUE_STATE="${ISSUE_LABELS##*|}"
+
+          if echo "$ISSUE_LABEL_STR" | grep -qE 'workflow:merged|workflow:invalid|needs-human' || [ "$ISSUE_STATE" = "CLOSED" ]; then
+            echo "  #$ISSUE_NUM ✓ terminal ($ISSUE_LABEL_STR)"
+          elif echo "$ISSUE_LABEL_STR" | grep -q 'workflow:in-review'; then
+            echo "  #$ISSUE_NUM ⟳ stalled at workflow:in-review — resuming via recover-orphans"
+            if [ "$RECOVER_ORPHANS_AVAILABLE" = "true" ]; then
+              Skill("recover-orphans", args="--issue $ISSUE_NUM")
+            else
+              echo "  WARNING: recover-orphans not installed — cannot auto-resume #$ISSUE_NUM"
+              STALLED_ISSUES+=("$ISSUE_NUM")
+            fi
+          else
+            echo "  #$ISSUE_NUM ⚠ non-terminal ($ISSUE_LABEL_STR) — will surface in Phase 4 report"
+            STALLED_ISSUES+=("$ISSUE_NUM")
+          fi
+        done
       else
         echo "INFO: Using agent dispatch mode (forgedock CLI not in PATH — run \`npm install -g forgedock\` for engine-mode dispatch)"
         # Safety Rule 2 (needs-human guarantee): See fast-lane fallback comment above.
         # /orchestrate enforces the needs-human exclusion at its own phase entry.
+
+        # Snapshot milestone issue list before orchestrate so we can verify afterward.
+        MS_PRE_DISPATCH=$(gh issue list $GH_FLAG \
+          --state open \
+          --limit 200 \
+          --json number,milestone,labels \
+          --jq --arg slug "$MS_SLUG" \
+          '[.[] | select(
+            .milestone != null and
+            (.milestone.title | ascii_downcase | gsub("[^a-z0-9]+"; "-") | ltrimstr("-") | rtrimstr("-")) == $slug and
+            (.labels | map(.name) | any(. == "workflow:merged" or . == "workflow:invalid" or . == "workflow:decomposed" or . == "needs-human") | not)
+          )] | .[].number' \
+          2>/dev/null || echo '')
+        for N in $MS_PRE_DISPATCH; do DISPATCHED_ISSUES+=("$N"); done
+
         Skill("orchestrate", args="milestone $MS_SLUG")
+
+        # Terminal-state verification after orchestrate fallback.
+        echo "Verifying terminal state for $( echo "$MS_PRE_DISPATCH" | wc -w | tr -d ' ') dispatched milestone issue(s) (orchestrate path)..."
+        for ISSUE_NUM in $MS_PRE_DISPATCH; do
+          ISSUE_LABELS=$(gh issue view "$ISSUE_NUM" $GH_FLAG \
+            --json labels,state \
+            --jq '(.labels | map(.name) | join(",")) + "|" + .state' \
+            2>/dev/null || echo "unknown|unknown")
+          ISSUE_LABEL_STR="${ISSUE_LABELS%%|*}"
+          ISSUE_STATE="${ISSUE_LABELS##*|}"
+
+          if echo "$ISSUE_LABEL_STR" | grep -qE 'workflow:merged|workflow:invalid|needs-human' || [ "$ISSUE_STATE" = "CLOSED" ]; then
+            echo "  #$ISSUE_NUM ✓ terminal ($ISSUE_LABEL_STR)"
+          else
+            echo "  #$ISSUE_NUM ⚠ non-terminal ($ISSUE_LABEL_STR)"
+            STALLED_ISSUES+=("$ISSUE_NUM")
+          fi
+        done
       fi
     else
       if [ "$FORGEDOCK_AVAILABLE" = "true" ]; then
@@ -689,6 +827,46 @@ cat <<REPORT
 - Open issues: $FINAL_OPEN total ($FINAL_FAST_LANE unmilestoned)
 REPORT
 
+# Per-issue terminal-state disposition table (GitHub-verified).
+# Sources DISPATCHED_ISSUES accumulated across all dispatch paths this cycle.
+# This table is the canonical record of what autopilot dispatched and what state each reached.
+if [ "${#DISPATCHED_ISSUES[@]}" -gt 0 ]; then
+  echo ""
+  echo "### Dispatch Disposition (GitHub-verified terminal state)"
+  echo ""
+  echo "| Issue | Title (50 chars) | GitHub Label | Terminal? |"
+  echo "|-------|-----------------|-------------|-----------|"
+  DISPATCH_TERMINAL_COUNT=0
+  DISPATCH_STALLED_COUNT=0
+  for ISSUE_NUM in "${DISPATCHED_ISSUES[@]}"; do
+    ISSUE_DATA=$(gh issue view "$ISSUE_NUM" $GH_FLAG \
+      --json number,title,labels,state \
+      --jq '{n: .number, title: (.title | .[0:50]), labels: (.labels | map(.name) | join(",")), state: .state}' \
+      2>/dev/null || echo "{\"n\":$ISSUE_NUM,\"title\":\"(fetch failed)\",\"labels\":\"unknown\",\"state\":\"unknown\"}")
+    DISP_LABELS=$(echo "$ISSUE_DATA" | jq -r '.labels // "unknown"')
+    DISP_STATE=$(echo "$ISSUE_DATA" | jq -r '.state // "unknown"')
+    DISP_TITLE=$(echo "$ISSUE_DATA" | jq -r '.title // "(unknown)"')
+    if echo "$DISP_LABELS" | grep -qE 'workflow:merged|workflow:invalid|needs-human' || [ "$DISP_STATE" = "CLOSED" ]; then
+      echo "| #$ISSUE_NUM | $DISP_TITLE | \`$DISP_LABELS\` | ✓ yes |"
+      DISPATCH_TERMINAL_COUNT=$((DISPATCH_TERMINAL_COUNT + 1))
+    else
+      echo "| #$ISSUE_NUM | $DISP_TITLE | \`$DISP_LABELS\` | ✗ no — stalled |"
+      DISPATCH_STALLED_COUNT=$((DISPATCH_STALLED_COUNT + 1))
+    fi
+  done
+  echo ""
+  echo "**Summary**: ${DISPATCH_TERMINAL_COUNT}/${#DISPATCHED_ISSUES[@]} dispatched issues reached terminal state. ${DISPATCH_STALLED_COUNT} stalled."
+  if [ "$DISPATCH_STALLED_COUNT" -gt 0 ]; then
+    echo ""
+    echo "⚠ Stalled issues re-enter the fast-lane queue on the next /autopilot run."
+    echo "  Persistent stalls (3+ cycles): gh issue list $GH_FLAG --label workflow:building"
+  fi
+else
+  echo ""
+  echo "### Dispatch Disposition"
+  echo "No issues dispatched this cycle."
+fi
+
 if [ "$FINAL_FAST_LANE" -eq 0 ]; then
   echo ""
   echo "Zero open unmilestoned issues remain. Pipeline is clean."
@@ -786,6 +964,8 @@ Rules are listed in **precedence order** — when two rules appear to conflict, 
 **Rule 7: State always re-read** — never trust a cached issue count. Re-query GitHub at each loop iteration.
 
 **Rule 8: deploy-pr result is authoritative** — if status is not "merged", do not assume the deploy succeeded. Log and continue the loop.
+
+**Rule 9: Terminal-state verification is mandatory after every dispatch batch.** After every `forgedock run-issue … wait` block or `Skill(orchestrate)` call, autopilot MUST query the actual GitHub label state for each dispatched issue. An issue whose process exits 0 but whose GitHub label is still `workflow:in-review` or `workflow:building` is NOT done — the close phase may have been interrupted. Stalls at `workflow:in-review` with a merged PR are the known recoverable class; autopilot resumes them via `Skill("recover-orphans", args="--issue N")` once before recording them as stalled. The Phase 4 report MUST emit a per-issue disposition table sourced from these GitHub-verified states — self-reported sub-process success is not sufficient. <!-- Added: forge#1751 -->
 
 **Headless / unattended operation**: `/autopilot` has no human checkpoint and never waits for user input. When invoked via `/loop 4h /autopilot` or any other unattended runner, it runs to completion and exits. Human escalation is exclusively via the `needs-human` label (Rule 2 above) — autopilot surfaces `needs-human` issues in the recon report but never stalls waiting for a response. There is no "Phase 4B confirm before fixing" gate in the current design; that checkpoint was intentionally removed in the #1673 rewrite. If a future design adds a confirmation gate, it must be guarded by both Rule 0 (dry-run) and Rule 2 (needs-human) to remain safe.
 
