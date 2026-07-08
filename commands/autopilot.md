@@ -533,19 +533,39 @@ fi
 
 For each finding (recurring CI failures, critical stale issue patterns):
 
-**Deduplication check first** — search existing open issues before creating:
+**Deduplication check first** — deterministic script, then LLM fallback (canonical path from `issue.md §2D`):
 ```bash
-EXISTING_ISSUES=$(gh issue list $GH_FLAG --state open --limit 200 --json number,title \
-  --jq '.[] | "\(.number) \(.title)"' 2>/dev/null)
+# Authoritative deterministic check — uses token overlap algorithm (see scripts/issue-dedup.sh)
+DEDUP_RESULT=$(scripts/issue-dedup.sh "{finding_title}" "$GH_FLAG" 2>&1)
+DEDUP_EXIT=$?
+
+if [ "$DEDUP_EXIT" -eq 1 ]; then
+  echo "Near-duplicate detected: $DEDUP_RESULT"
+  echo "Existing issue found — skipping creation for this finding."
+  # STOP here for this finding — do not fall through to gh issue create
+elif [ "$DEDUP_EXIT" -eq 2 ]; then
+  echo "Dedup check usage error: $DEDUP_RESULT"
+  echo "Do NOT proceed to issue creation — fix the invocation and retry."
+  # STOP here — do not fall through to gh issue create
+fi
+
+# If script exits 0 (no match), also run LLM-side semantic search as a secondary pass
+if [ "$DEDUP_EXIT" -eq 0 ]; then
+  gh issue list $GH_FLAG --state open --limit 20 --search "{key_terms_from_finding}" \
+    --json number,title,labels \
+    --jq '.[] | "#\(.number) [\(.labels | map(.name) | join(","))] \(.title)"' 2>/dev/null || true
+  # LLM: if the secondary pass finds a semantic duplicate, treat it as DEDUP_EXIT=1 and skip
+fi
 ```
 
-For new findings that have no existing open duplicate:
+For new findings that have no existing open duplicate (DEDUP_EXIT=0 and no LLM match):
 ```bash
-if [ "$DRY_RUN" = "false" ]; then
-  gh issue create $GH_FLAG \
-    --title "fix: {finding_description}" \
-    --label "P2,bug" \
-    --body "$(cat <<'ISSUE_EOF'
+if [ "$DRY_RUN" = "false" ] && [ "${DEDUP_EXIT:-0}" -eq 0 ]; then
+  # Write body to a temp file to avoid heredoc shell-expansion and injection issues
+  BODY_TMPFILE=$(mktemp /tmp/autopilot-issue-body-XXXXXX.md)
+  trap 'rm -f "$BODY_TMPFILE"' EXIT
+
+  cat > "$BODY_TMPFILE" <<'ISSUE_BODY_EOF'
 ## Problem
 
 {Description of the finding with specific data points.}
@@ -556,7 +576,7 @@ if [ "$DRY_RUN" = "false" ]; then
 
 ## Affected Files
 
-Files that need changes:
+Files that need changes (ordered by dependency):
 1. `{filepath}` — {what needs to change}
 
 ## Acceptance Criteria
@@ -565,14 +585,57 @@ Files that need changes:
 
 ## Context
 
-Found by \`/autopilot\` cycle on $(date -u +%Y-%m-%dT%H:%M:%SZ).
+Found by `/autopilot` cycle on {CYCLE_TIMESTAMP}.
 
 ## Evidence
 
 {Concrete data — log lines, failure counts, metrics}
-ISSUE_EOF
-)"
-else
+ISSUE_BODY_EOF
+
+  # Substitute the cycle timestamp (not inside heredoc to avoid expansion-in-template issues)
+  sed -i "s|{CYCLE_TIMESTAMP}|$(date -u +%Y-%m-%dT%H:%M:%SZ)|g" "$BODY_TMPFILE"
+
+  NEW_NUMBER=$(gh issue create $GH_FLAG \
+    --title "fix: {finding_description}" \
+    --label "P2,bug" \
+    --body-file "$BODY_TMPFILE" \
+    --json number --jq '.number' 2>/dev/null)
+
+  rm -f "$BODY_TMPFILE"
+  trap - EXIT
+
+  # §4C.5: Body validation/repair — ensure mandatory pipeline sections are present
+  # (canonical pattern from issue.md §4C.5 — never fails/blocks, only repairs)
+  if [ -n "$NEW_NUMBER" ]; then
+    CREATED_BODY=$(gh issue view "$NEW_NUMBER" $GH_FLAG --json body --jq '.body' 2>/dev/null || echo '')
+    MISSING_SECTIONS=""
+    echo "$CREATED_BODY" | grep -q "^## Problem" || MISSING_SECTIONS="$MISSING_SECTIONS PROBLEM"
+    echo "$CREATED_BODY" | grep -q "^## Affected Files" || MISSING_SECTIONS="$MISSING_SECTIONS AFFECTED_FILES"
+    echo "$CREATED_BODY" | grep -q "^## Acceptance Criteria" || MISSING_SECTIONS="$MISSING_SECTIONS ACCEPTANCE_CRITERIA"
+
+    if [ -n "$MISSING_SECTIONS" ]; then
+      echo "WARNING: Issue #$NEW_NUMBER body is missing sections:$MISSING_SECTIONS — adding placeholders"
+      APPEND_TEXT=""
+      echo "$MISSING_SECTIONS" | grep -q "PROBLEM" && APPEND_TEXT="$APPEND_TEXT
+## Problem
+
+Root cause unknown — investigation needed."
+      echo "$MISSING_SECTIONS" | grep -q "AFFECTED_FILES" && APPEND_TEXT="$APPEND_TEXT
+## Affected Files
+
+Files to be identified during investigation."
+      echo "$MISSING_SECTIONS" | grep -q "ACCEPTANCE_CRITERIA" && APPEND_TEXT="$APPEND_TEXT
+## Acceptance Criteria
+
+- [ ] Fix confirmed during investigation."
+      REPAIRED_BODY="${CREATED_BODY}${APPEND_TEXT}"
+      gh issue edit "$NEW_NUMBER" $GH_FLAG --body "$REPAIRED_BODY"
+      echo "Body repaired — added:$MISSING_SECTIONS"
+    else
+      echo "Body validation passed for #$NEW_NUMBER — all mandatory sections present"
+    fi
+  fi
+elif [ "$DRY_RUN" = "true" ]; then
   echo "[DRY-RUN] Would create issue: fix: {finding_description}"
 fi
 ```
