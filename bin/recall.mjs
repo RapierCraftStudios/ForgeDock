@@ -9,11 +9,13 @@
  * knowledge cards with issue citations.
  *
  * Query modes:
- *   --file <path>     Exact file-path lookup (hash-map, O(1))
+ *   --file <path>     Exact file-path lookup (hash-map, O(1)); repeatable for multi-file union
  *   --symbol <name>   Exact symbol lookup (hash-map, O(1))
  *   free text         BM25-lite ranked search across all card fields
  *
  * Combined queries (--file + free text) take the union with exact-match boost.
+ * Multiple --file flags are unioned: cards matching any file receive a boost per
+ * matched file; results are deduped by card ID and ranked by combined score.
  *
  * Usage:
  *   forge recall <free-text query> [--file <path>] [--symbol <name>]
@@ -21,7 +23,7 @@
  *                [--include-stale] [--json]
  *
  * Options:
- *   --file <path>         Exact file path to look up cards for
+ *   --file <path>         Exact file path to look up cards for (repeatable — union across files)
  *   --symbol <name>       Exact symbol name to look up
  *   --k <number>          Maximum results to return (default: 5)
  *   --min-score <float>   Minimum BM25 score threshold (default: 0.1)
@@ -72,7 +74,7 @@ const EXACT_SYMBOL_BOOST = 3.0;
 function parseArgs(argv) {
   const args = {
     query: [],
-    file: null,
+    files: [],   // Array — accepts repeated --file flags (union query across multiple file paths)
     symbol: null,
     k: DEFAULT_K,
     minScore: DEFAULT_MIN_SCORE,
@@ -86,7 +88,7 @@ function parseArgs(argv) {
   for (let i = 2; i < argv.length; i++) {
     switch (argv[i]) {
       case '--file':
-        args.file = argv[++i];
+        args.files.push(argv[++i]);
         break;
       case '--symbol':
         args.symbol = argv[++i];
@@ -312,9 +314,13 @@ function applyRenameMap(queryPath, renameMap) {
 function executeQuery(args, cards, postings) {
   const renameMap = buildRenameMap(args.indexDir);
 
-  // Normalize query file path through rename map
-  const effectiveFile = args.file ? applyRenameMap(args.file, renameMap) : null;
-  const effectiveFileBasename = effectiveFile ? (effectiveFile.split('/').pop() || effectiveFile) : null;
+  // Normalize all query file paths through rename map (multi-file union support)
+  // args.files is an array; each entry may be a single path from repeated --file flags.
+  const effectiveFiles = (args.files || []).map(f => ({
+    original: f,
+    effective: applyRenameMap(f, renameMap),
+    basename: (applyRenameMap(f, renameMap).split('/').pop() || f),
+  }));
 
   // Pre-filter cards
   let candidates = cards.filter(card => {
@@ -328,12 +334,14 @@ function executeQuery(args, cards, postings) {
   const tokenCounts = candidates.map(c => cardTokenCount(c));
   const avgLen = tokenCounts.length > 0 ? tokenCounts.reduce((a, b) => a + b, 0) / tokenCounts.length : 1;
 
-  // Query tokenization
+  // Query tokenization: free text + all file paths + symbol
   const queryTerms = args.queryText ? tokenize(args.queryText) : [];
-  if (effectiveFile) queryTerms.push(...tokenize(effectiveFile));
+  for (const ef of effectiveFiles) queryTerms.push(...tokenize(ef.effective));
   if (args.symbol) queryTerms.push(...tokenize(args.symbol));
 
-  const results = [];
+  // Use a Map for dedup: card.id → {card, score}
+  // When the same card matches multiple files, accumulate the highest score.
+  const hitMap = new Map();
 
   for (let i = 0; i < candidates.length; i++) {
     const card = candidates[i];
@@ -347,17 +355,16 @@ function executeQuery(args, cards, postings) {
       score = bm25Score(queryTerms, card.id, postings, N, avgLen, cardLen, ageDays, card.status);
     }
 
-    // Exact file match boost
-    if (effectiveFile) {
+    // Per-file exact match boost (applied once per matching file — accumulates across files)
+    let hasExactMatch = false;
+    for (const ef of effectiveFiles) {
       const cardPaths = card.paths || [];
-      // Check both exact path and basename match
-      if (cardPaths.some(p => p === effectiveFile || p === args.file)) {
+      if (cardPaths.some(p => p === ef.effective || p === ef.original)) {
         score += EXACT_FILE_BOOST;
-      } else if (effectiveFileBasename && cardPaths.some(p => {
-        const bn = p.split('/').pop();
-        return bn === effectiveFileBasename;
-      })) {
+        hasExactMatch = true;
+      } else if (ef.basename && cardPaths.some(p => p.split('/').pop() === ef.basename)) {
         score += EXACT_FILE_BOOST * 0.5; // Partial boost for basename match
+        // basename match does not set hasExactMatch (not an exact path match)
       }
     }
 
@@ -366,17 +373,20 @@ function executeQuery(args, cards, postings) {
       const cardSymbols = card.symbols || [];
       if (cardSymbols.some(s => s === args.symbol || s.toLowerCase() === args.symbol.toLowerCase())) {
         score += EXACT_SYMBOL_BOOST;
+        hasExactMatch = true;
       }
     }
 
     // Include if: score > threshold, OR exact file/symbol match (always include even if score=0)
-    const hasExactMatch = (effectiveFile && (card.paths || []).some(p => p === effectiveFile || p === args.file)) ||
-                          (args.symbol && (card.symbols || []).some(s => s === args.symbol));
-
     if (score >= args.minScore || hasExactMatch) {
-      results.push({ card, score });
+      const existing = hitMap.get(card.id);
+      if (!existing || score > existing.score) {
+        hitMap.set(card.id, { card, score });
+      }
     }
   }
+
+  const results = Array.from(hitMap.values());
 
   // Sort by score descending, then by recency
   results.sort((a, b) => {
@@ -437,8 +447,9 @@ function main() {
   args.indexDir = resolve(args.indexDir);
 
   // Validate
-  if (!args.queryText && !args.file && !args.symbol && !args.doctor) {
+  if (!args.queryText && args.files.length === 0 && !args.symbol && !args.doctor) {
     process.stderr.write('Usage: forge recall <query> [--file <path>] [--symbol <name>] [--json] [--k N]\n');
+    process.stderr.write('       --file may be repeated for a multi-file union query\n');
     process.stderr.write('       forge recall --doctor   (check index health)\n');
     process.exit(0); // Not an error — just no query
   }
@@ -493,7 +504,7 @@ function main() {
     if (args.json) {
       process.stdout.write('[]\n');
     } else {
-      process.stderr.write(`[recall] No results found for query: ${args.queryText || args.file || args.symbol}\n`);
+      process.stderr.write(`[recall] No results found for query: ${args.queryText || args.files.join(', ') || args.symbol}\n`);
     }
     process.exit(0);
   }
