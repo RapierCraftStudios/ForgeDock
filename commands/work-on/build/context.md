@@ -401,6 +401,140 @@ fi
 
 ---
 
+## Phase C0.5: Danger-Zone Rule Cards (fixed 400-token slot) <!-- Added: forge#1744 -->
+
+Surface the highest-value risk knowledge for exactly the files this build will touch. Reads the persisted danger-zones index produced by `scripts/danger-zones.mjs`, filters to files that overlap the Builder Contract's deliverables table, ranks by risk score, and emits one-line rule cards cut at a hard 400-token ceiling. The slot is constant by construction — never more, never less — so risk injection adds zero variance to the builder's token budget.
+
+**Time budget**: 10 seconds. If exceeded, log a warning and continue without danger-zone cards.
+
+**Skip if**: `~/.forge/index/danger-zones.json` is absent (cold start — no index built yet). Zero cards → section omitted from FORGE:CONTEXT (no empty scaffolding). <!-- Cold-start safety: required — the index only exists after danger-zones.mjs has run at least once -->
+
+### Step 0: Locate danger-zones.json
+
+```bash
+# Resolve index directory — forge.yaml may override ~/.forge/index
+FORGE_INDEX_DIR="${HOME}/.forge/index"
+if [ -f "{REPO_PATH}/forge.yaml" ]; then
+  FORGE_INDEX_OVERRIDE=$(yq '.forge_index.directory // ""' "{REPO_PATH}/forge.yaml" 2>/dev/null || echo '')
+  [ -n "$FORGE_INDEX_OVERRIDE" ] && FORGE_INDEX_DIR="$FORGE_INDEX_OVERRIDE"
+fi
+
+DANGER_ZONES_PATH="${FORGE_INDEX_DIR}/danger-zones.json"
+
+if [ ! -f "$DANGER_ZONES_PATH" ]; then
+  echo "Phase C0.5: danger-zones.json absent at ${DANGER_ZONES_PATH} — skipping (cold start)"
+  DANGER_ZONE_CARDS=""
+  # → Continue to Phase C0 without emitting any cards
+fi
+```
+
+### Step 1: Extract contract-overlapping files
+
+Read the Builder Contract from the FORGE:CONTRACT comment on the issue. Extract the file paths listed in the Deliverables table:
+
+```bash
+CONTRACT_FILES=$(gh api repos/{GH_REPO}/issues/{NUMBER}/comments \
+  --jq '[.[] | select(.body | contains("FORGE:CONTRACT")) | .body] | last // ""' 2>/dev/null \
+  | grep -oE '`[^`]+\.(py|ts|tsx|js|mjs|md|sh|yaml|yml|json)[^`]*`' \
+  | tr -d '`' \
+  | sort -u)
+
+if [ -z "$CONTRACT_FILES" ]; then
+  # Fallback: use AFFECTED_FILES from arguments
+  CONTRACT_FILES=$(echo "{AFFECTED_FILES}" | tr ' ' '\n' | grep -v '^$' | sort -u)
+fi
+echo "Phase C0.5: contract files: $(echo "$CONTRACT_FILES" | tr '\n' ' ')"
+```
+
+### Step 2: Filter danger-zones.json to overlapping files
+
+Read the danger-zones index and select only entries whose `file` key matches (by basename or full path) any file in the contract:
+
+```bash
+DANGER_ZONE_CARDS=""
+TOKEN_BUDGET=400          # hard cap (tokens)
+CHAR_BUDGET=$((TOKEN_BUDGET * 4))   # proxy: 1 token ≈ 4 chars → 1600 chars
+CHARS_USED=0
+
+# Read and filter danger-zones.json entries (files key is a dict keyed by file path)
+# For each contract file: look up its entry in danger-zones.json by basename or full path
+while IFS= read -r contract_file; do
+  [ -z "$contract_file" ] && continue
+  BASENAME=$(basename "$contract_file")
+
+  # Look up by exact path first, then by basename match
+  DZ_ENTRY=$(python3 -c "
+import sys, json, os
+
+dz = json.load(open('${DANGER_ZONES_PATH}'))
+files = dz.get('files', {})
+
+# Try exact match first
+target = '${contract_file}'
+if target in files:
+    entry = files[target]
+    entry['file'] = target
+    print(json.dumps(entry))
+    sys.exit(0)
+
+# Basename fallback: match any file whose basename equals the target basename
+basename = os.path.basename(target)
+for path, entry in files.items():
+    if os.path.basename(path) == basename:
+        entry['file'] = path
+        print(json.dumps(entry))
+        sys.exit(0)
+" 2>/dev/null || echo '')
+
+  [ -z "$DZ_ENTRY" ] && continue
+
+  # Extract fields for the card
+  FILE_PATH=$(echo "$DZ_ENTRY" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('file',''))" 2>/dev/null || echo '')
+  FINDINGS=$(echo "$DZ_ENTRY" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('findingCount90d',0))" 2>/dev/null || echo '0')
+  TOP_PATTERN=$(echo "$DZ_ENTRY" | python3 -c "import sys,json; d=json.load(sys.stdin); p=d.get('topPatterns',[]); print(p[0] if p else '')" 2>/dev/null || echo '')
+  TOP_ISSUE=$(echo "$DZ_ENTRY" | python3 -c "import sys,json; d=json.load(sys.stdin); ci=d.get('citedIssues',[]); print('#'+str(ci[0]) if ci else '')" 2>/dev/null || echo '')
+  RISK_SCORE=$(echo "$DZ_ENTRY" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('riskScore',0))" 2>/dev/null || echo '0')
+
+  # Skip files with zero findings (only in danger-zones due to co-change, not findings)
+  [ "$FINDINGS" -eq 0 ] && continue
+
+  # Build one-line card in issue-spec format:
+  # {file} — {N} findings/90d — recurring: {pattern} (#{issue}); rule: {prevention}
+  if [ -n "$TOP_PATTERN" ] && [ -n "$TOP_ISSUE" ]; then
+    CARD="${FILE_PATH} — ${FINDINGS} findings/90d — recurring: ${TOP_PATTERN} (${TOP_ISSUE}); rule: do not repeat this pattern"
+  elif [ -n "$TOP_PATTERN" ]; then
+    CARD="${FILE_PATH} — ${FINDINGS} findings/90d — recurring: ${TOP_PATTERN}; rule: do not repeat this pattern"
+  else
+    CARD="${FILE_PATH} — ${FINDINGS} findings/90d; rule: review before modifying"
+  fi
+
+  # Enforce 400-token cap (1600 char proxy)
+  CARD_LEN=${#CARD}
+  if [ $((CHARS_USED + CARD_LEN + 2)) -gt $CHAR_BUDGET ]; then
+    echo "Phase C0.5: token cap reached at ${CHARS_USED} chars (≈$((CHARS_USED / 4)) tokens) — truncating card list"
+    break
+  fi
+
+  DANGER_ZONE_CARDS="${DANGER_ZONE_CARDS}
+- ${CARD}"
+  CHARS_USED=$((CHARS_USED + CARD_LEN + 2))
+
+done < <(echo "$CONTRACT_FILES")
+
+CARDS_TOKEN_COUNT=$((CHARS_USED / 4))
+if [ -n "$DANGER_ZONE_CARDS" ]; then
+  echo "Phase C0.5: emitting ${CARDS_TOKEN_COUNT} tokens of danger-zone cards (cap: ${TOKEN_BUDGET})"
+else
+  echo "Phase C0.5: no danger-zone entries for contract files — skipping section"
+fi
+```
+
+### Step 3: Store for output
+
+`DANGER_ZONE_CARDS` and `CARDS_TOKEN_COUNT` are used in the `### Danger-Zone Rule Cards` section of the FORGE:CONTEXT comment output. If `DANGER_ZONE_CARDS` is empty (no overlapping files with findings, or index absent), the section is **omitted entirely** — no empty scaffolding.
+
+---
+
 ## Phase C0: Prior Investigation Findings (from Gists)
 
 Scan the issue body for `<!-- FORGE:PRIOR_GIST: {url} -->` annotations embedded by the decompose or orchestrate phases (GIST-02). Also check for `<!-- FORGE:MILESTONE_INDEX: {url} -->` annotations — these reference a milestone-level index Gist (GIST-04) that aggregates all investigation Gist URLs for a milestone into a single reference. Both annotation types reference Knowledge Gists created during upstream investigation (GIST-01) and contain structured findings — verdict, root cause, recommendation, affected files — that the builder needs before writing code.
@@ -725,6 +859,14 @@ gh issue comment {NUMBER} -R {GH_REPO} --body "<!-- FORGE:CONTEXT -->
      'No devdocs found at {DEVDOCS_PATH} — skipping. Run `npx forgedock docs init` to scaffold.' -->
 {DEVDOCS_CONTENT}
 
+### Danger-Zone Rule Cards
+<!-- Ranked risk cards for contract-overlapping files from the Forge Ledger danger-zones index (Phase C0.5).
+     Token budget: {CARDS_TOKEN_COUNT} / 400 tokens used.
+     Each card: {file} — {N} findings/90d — recurring: {pattern} (#{issue}); rule: {prevention}
+     BINDING CONSTRAINT: treat each card as a must-not-violate rule before committing.
+     If danger-zones.json was absent or no contract files had findings — omit this section entirely (no empty scaffolding). -->
+{DANGER_ZONE_CARDS}
+
 ### Prior Investigation Findings
 <!-- Summarized Knowledge Gist content from upstream investigations (Phase C0).
      If no FORGE:PRIOR_GIST annotations were found in the issue body: omit this section entirely.
@@ -798,7 +940,9 @@ This module runs at **Step 3C.5** — after Builder Contract is posted, before I
 ```
 3C   → Builder Contract posted
 3C.5 → [THIS MODULE] Context gathering (max 2 min)
-         Phase C-1: Authoritative Devdocs (project-resident knowledge — highest precedence)
+         Phase C-1:  Authoritative Devdocs (project-resident knowledge — highest precedence)
+         Phase C-0.5: Active Peer Claims Reader (conditional — orchestration only)
+         Phase C0.5: Danger-Zone Rule Cards (fixed 400-token slot — forge#1744)
          Phase C0:  Prior Investigation Findings (from Gists)
          Phase C1:  Past Review Findings on These Files
          Phase C2:  Past Bugs in the Same Module
