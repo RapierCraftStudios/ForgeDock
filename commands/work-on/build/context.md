@@ -217,7 +217,7 @@ if [ -n "$DEVDOCS_PATH" ] && [ -f "$INDEX_PATH" ]; then
   if [ -n "${AFFECTED_FILES:-}" ] && [ -n "$DEVDOCS_PATH" ] && [ -f "$INDEX_PATH" ]; then
     # Extract modules[] entries from index.yaml
     # Format per entry: "name|glob|path"
-    MODULE_ENTRIES=$(yq e '.modules[]? | .name + "|" + .glob + "|" + .path' "$INDEX_PATH" 2>/dev/null || echo "")
+    MODULE_ENTRIES=$(yq '.modules[]? | .name + "|" + .glob + "|" + .path' "$INDEX_PATH" 2>/dev/null || echo "")
 
     if [ -n "$MODULE_ENTRIES" ]; then
       IFS=' ' read -ra AFFECTED_FILES_GLOB_ARR <<< "${AFFECTED_FILES}"

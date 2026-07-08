@@ -160,7 +160,7 @@ if [ ! -f "$INDEX_PATH" ]; then
 fi
 
 # Extract modules entries: "name|glob|path"
-MODULE_ENTRIES=$(yq e '.modules[]? | .name + "|" + .glob + "|" + .path' "$INDEX_PATH" 2>/dev/null || echo "")
+MODULE_ENTRIES=$(yq '.modules[]? | .name + "|" + .glob + "|" + .path' "$INDEX_PATH" 2>/dev/null || echo "")
 
 if [ -z "$MODULE_ENTRIES" ]; then
   echo "Phase C1.7: No modules[] section in index.yaml — skipping dossier append"
@@ -260,7 +260,7 @@ if [ -n "$DOSSIER_UPDATED_MODULES" ]; then
   # Commit the updated dossier files
   cd "{REPO_PATH}"
   CHANGED_DOSSIER_FILES=$(echo "$DOSSIER_UPDATED_MODULES" | tr ' ' '\n' | while IFS= read -r mod; do
-    yq e ".modules[]? | select(.name == \"${mod}\") | \"${DEVDOCS_REL}/\" + .path" "$INDEX_PATH" 2>/dev/null
+    yq ".modules[]? | select(.name == \"${mod}\") | \"${DEVDOCS_REL}/\" + .path" "$INDEX_PATH" 2>/dev/null
   done | grep -v '^$')
 
   if [ -n "$CHANGED_DOSSIER_FILES" ]; then
