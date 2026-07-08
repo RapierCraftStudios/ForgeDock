@@ -316,7 +316,7 @@ Agent(
 
 **YOUR MISSION**: Invoke `/work-on` via the Skill tool and let it run to completion. `/work-on` is a self-contained routing loop that handles the ENTIRE pipeline: investigate → build (context → architect → implement → validate) → review (push → PR → /review-pr --auto-merge) → close (project board → trajectory log → worktree cleanup). Do NOT intervene, compensate, or manually close issues — `/work-on` handles everything including issue closure and label updates in its close phase.
 
-**CRITICAL — DO NOT STOP EARLY**: /work-on runs as a multi-phase routing loop. Each phase (investigate, build, review, close) returns an intermediate result — these are NOT completion signals. You are NOT done until the issue reaches a terminal state: `workflow:merged`, `workflow:invalid`, or `needs-human`. If /work-on returns after only one phase (e.g., investigation), you MUST invoke it again immediately — it will re-read GitHub state and continue to the next phase. Keep invoking /work-on until it reaches a terminal state. Never output 'done' or stop after an intermediate result.
+**CRITICAL — DO NOT STOP EARLY**: /work-on runs as a multi-phase routing loop. Each phase (investigate, build, review, close) returns an intermediate result — these are NOT completion signals. You are NOT done until the issue reaches a terminal state: `workflow:merged`, `workflow:invalid`, `needs-human`, or `workflow:awaiting-merge`. If /work-on returns after only one phase (e.g., investigation), you MUST invoke it again immediately — it will re-read GitHub state and continue to the next phase. Keep invoking /work-on until it reaches a terminal state. Never output 'done' or stop after an intermediate result.
 
 **HOW REVIEW FINDINGS WORK**: /review-pr may create GitHub issues (with `review-finding` label) for findings it discovers. These are NOT blockers — they are separate work items that will go through their own /work-on pipeline later. The original PR should ALWAYS merge after review. The only exception is build errors (code doesn't compile) — those must be fixed before merging.
 
@@ -338,7 +338,8 @@ After EVERY `Skill(skill='work-on', ...)` call returns, immediately check the is
 gh issue view {NUMBER} -R {GH_REPO} --json labels --jq '[.labels[].name | select(startswith("workflow:"))]'
 ```
 **Terminal labels** (only these allow you to stop): `workflow:merged`, `workflow:invalid`
-**Terminal condition also**: `needs-human` label present OR issue state is `closed`
+**Terminal condition also**: `needs-human` label present, `workflow:awaiting-merge` label present, OR issue state is `closed`
+`needs-human` and `workflow:awaiting-merge` are terminal-FOR-THIS-AGENT (this individual `/work-on` run stops here — a human decision or merge is now the blocking step) but are NOT "done" from the DAG's point of view; see Predecessor Classification in Step 4B for how the orchestrator's dependency logic treats them (`GATED`, not `DONE`).
 If the label is NOT terminal (e.g., `workflow:investigating`, `workflow:ready-to-build`, `workflow:building`, `workflow:in-review`), invoke `Skill(skill='work-on', args='{NUMBER}')` again immediately. The `/work-on` skill will re-read GitHub state and advance to the next phase. Do NOT output a summary, do NOT pause, do NOT ask for confirmation — just invoke it again.
 
 **CRITICAL — SOURCE BRANCH DETECTION**:
@@ -413,7 +414,7 @@ coordination issue above. Required fields:
   Interfaces: (public function/type signatures you will modify or that callers must preserve)
   TTL: terminal state of Holder issue ##{NUMBER}
 
-On reaching terminal state (workflow:merged, workflow:invalid, or needs-human), post
+On reaching terminal state (workflow:merged, workflow:invalid, needs-human, or workflow:awaiting-merge), post
 <!-- FORGE:CLAIM_RELEASED --> on the coordination issue to release your claim.
 
 Set FORGE_COORD_ISSUE=${FORGE_COORD_ISSUE} in your environment so /work-on phases can read it."
@@ -462,23 +463,68 @@ You will be automatically notified when each background agent completes. **Do NO
 
 **Successor dispatch latency is measured from `agent_completed`, not from orchestrator polling.** The moment you receive an `agent_completed` notification for issue N, that is t=0 for dispatching N's successors. Any successor whose predecessors are all now terminal MUST be dispatched in the same response that processes the notification — not after a poll cycle, not after a sleep. This is the design property that makes streaming DAG execution faster than wave-based execution. <!-- Added: forge#1251 -->
 
-**Core streaming dispatch loop**: After processing each agent completion, check the DAG for newly unblocked issues. If any issue now has all predecessors in a terminal state, dispatch it immediately (run Steps 4A.pre.0, 4A.pre, and 4A for the newly ready issues). This is the key difference from the wave model — issues dispatch as soon as their specific predecessors complete, not after an entire group finishes.
+**Predecessor Classification (DONE / GATED / FAILED)** <!-- Added: forge#1812 --> — every check in this file that asks "is predecessor X resolved enough for its dependents to proceed" MUST classify X into exactly one of three states below — never a single binary terminal/non-terminal grep. Earlier versions of this file independently patched `grep -qE 'workflow:merged|workflow:invalid|needs-human|CLOSED'` in multiple places, and the copies drifted: the readiness check (this step) treated `needs-human` as done-enough-to-dispatch-through, while the failure handler (item 6 below) treated the identical label as a hard failure that skips dependents. Both cannot be right at once — `needs-human` means the predecessor's code is paused pending a human decision and is NOT yet in the base branch, so dispatching a dependent against it is unsafe, but permanently skipping the dependent is also wrong once the human resolves the block. The fix is a third state:
+
+```bash
+classify_predecessor_state() {
+  local PRED="$1"
+  local PRED_INFO
+  PRED_INFO=$(gh issue view "$PRED" -R {GH_REPO} --json labels,state \
+    --jq '{state: .state, workflow: [.labels[].name | select(startswith("workflow:"))]}' 2>/dev/null || echo '{}')
+  local PRED_STATE PRED_LABELS
+  PRED_STATE=$(echo "$PRED_INFO" | jq -r '.state // "OPEN"')
+  PRED_LABELS=$(echo "$PRED_INFO" | jq -r '.workflow[]?' 2>/dev/null)
+
+  if echo "$PRED_LABELS" | grep -qx "workflow:invalid"; then
+    echo "FAILED"
+  elif echo "$PRED_LABELS" | grep -qx "workflow:merged"; then
+    echo "DONE"
+  elif echo "$PRED_LABELS" | grep -qxE "needs-human|workflow:awaiting-merge"; then
+    echo "GATED"
+  elif [ "$PRED_STATE" = "CLOSED" ]; then
+    # Closed with no workflow:invalid/merged label (e.g. closed-not-planned) — treat as DONE,
+    # not a new deadlock state; there is no pending code for dependents to wait on.
+    echo "DONE"
+  else
+    echo "IN_PROGRESS"
+  fi
+}
+```
+
+- **DONE** — predecessor's code is in the base branch (`workflow:merged`), or the predecessor is closed with no pending code. Safe for dependents to dispatch.
+- **GATED** — predecessor is paused pending a human decision (`needs-human`) or pending only a human merge click (`workflow:awaiting-merge`). Its code is NOT yet in the base branch. Dependents are neither dispatched nor skipped — they move to the `blocked-on-human-merge` tracked state (item 6.5 below).
+- **FAILED** — predecessor was closed as `workflow:invalid`, or the agent explicitly reported a build/test error. Dependents are marked "skipped — dependency failed" (item 6 below) — unchanged from prior behavior.
+- **IN_PROGRESS** — predecessor is still mid-pipeline (`investigating`/`ready-to-build`/`building`/`in-review`). Dependent simply continues waiting; no special tracking needed.
+
+A GATED predecessor whose PR later merges reclassifies to DONE the next time `classify_predecessor_state` runs (its label flips to `workflow:merged`) — this is exactly what the merge-triggered wake check (item 6.6 below) relies on.
+
+**Core streaming dispatch loop**: After processing each agent completion, check the DAG for newly unblocked issues. If any issue now has all predecessors classified `DONE`, dispatch it immediately (run Steps 4A.pre.0, 4A.pre, and 4A for the newly ready issues). This is the key difference from the wave model — issues dispatch as soon as their specific predecessors complete, not after an entire group finishes.
 
 ```bash
 # After each agent completion, check for newly ready issues:
 for BLOCKED_NUM in {all_blocked_issue_numbers}; do
   ALL_PREDS_DONE=true
+  ANY_PRED_GATED=false
+  GATING_PREDS=()
   for PRED in {predecessors_of_BLOCKED_NUM}; do
-    PRED_STATE=$(gh issue view $PRED -R {GH_REPO} --json labels,state --jq '{state: .state, workflow: [.labels[].name | select(startswith("workflow:"))]}')
-    # Terminal states: workflow:merged, workflow:invalid, needs-human, or state=CLOSED
-    if ! echo "$PRED_STATE" | grep -qE 'workflow:merged|workflow:invalid|needs-human|CLOSED'; then
-      ALL_PREDS_DONE=false
-      break
-    fi
+    PRED_STATE=$(classify_predecessor_state "$PRED")
+    case "$PRED_STATE" in
+      DONE) ;;  # satisfied — no action
+      FAILED) ALL_PREDS_DONE=false ;;             # handled by item 6 (skip dependents)
+      GATED)
+        ALL_PREDS_DONE=false
+        ANY_PRED_GATED=true
+        GATING_PREDS+=("$PRED")
+        ;;                                        # handled by item 6.5 (blocked-on-human-merge)
+      IN_PROGRESS|*) ALL_PREDS_DONE=false ;;       # just keep waiting
+    esac
   done
   if [ "$ALL_PREDS_DONE" = "true" ]; then
-    echo "#{BLOCKED_NUM} is now READY — all predecessors resolved. Dispatching."
+    echo "#{BLOCKED_NUM} is now READY — all predecessors DONE (merged/resolved). Dispatching."
     # Add to dispatch batch for this completion cycle
+  elif [ "$ANY_PRED_GATED" = "true" ]; then
+    echo "#{BLOCKED_NUM} is BLOCKED-ON-HUMAN-MERGE — gated by: ${GATING_PREDS[*]}. See item 6.5."
+    # Do NOT dispatch. Do NOT mark skipped. Tracked via item 6.5.
   fi
 done
 # Run Steps 4A.pre.0 → 4A.pre → 4A for newly ready issues (batch them in a single message)
@@ -488,12 +534,16 @@ done
 
 1. **Check if the agent completed the FULL pipeline** — not just one phase:
    ```bash
-   # Check final workflow state — only workflow:merged or workflow:invalid means truly done
+   # Check final workflow state — workflow:merged, workflow:invalid, needs-human, and
+   # workflow:awaiting-merge all mean this agent's own /work-on run has stopped (the last
+   # two are human-gated pauses, not completions). See Predecessor Classification above for
+   # how the DAG's readiness/failure logic treats these same labels differently from "this
+   # agent is done running."
    FINAL_STATE=$(gh issue view $NUM -R {GH_REPO} --json labels,state --jq '{state: .state, workflow: [.labels[].name | select(startswith("workflow:"))]}')
    echo "#{NUM}: $FINAL_STATE"
    ```
 
-2. **If the issue is NOT in a terminal state** (`workflow:merged`, `workflow:invalid`, or `needs-human`), the agent stalled mid-pipeline. **Resume it immediately**:
+2. **If the issue is NOT in a terminal-for-this-agent state** (`workflow:merged`, `workflow:invalid`, `needs-human`, or `workflow:awaiting-merge`), the agent stalled mid-pipeline. **Resume it immediately**:
    ```
    Agent(
      resume=AGENT_ISSUE_MAP[{NUMBER}],
@@ -550,7 +600,54 @@ done
 
 5. **Check for newly unblocked issues** — run the DAG readiness check above. If any issues are now ready, dispatch them immediately (Steps 4A.pre.0 → 4A.pre → 4A). Batch all newly ready issues into a single dispatch message.
 
-6. **Handle predecessor failures** — if a completed agent's issue FAILED (needs-human, invalid, or error), check for dependent issues in the DAG. Mark all transitive dependents as "skipped — dependency #{X} failed" and report them. Do NOT dispatch them.
+6. **Handle predecessor failures** — if a completed agent's issue classifies as `FAILED` (`workflow:invalid`, or an explicit build/test error — see Predecessor Classification above; `needs-human` and `workflow:awaiting-merge` are GATED, not FAILED — see item 6.5), check for dependent issues in the DAG. Mark all transitive dependents as "skipped — dependency #{X} failed" and report them. Do NOT dispatch them.
+
+6.5. **Handle predecessor gating** (`GATED` — `needs-human` or `workflow:awaiting-merge`) <!-- Added: forge#1812 --> — if a completed agent's issue classifies as `GATED`, its direct dependents are neither dispatched nor marked failed/skipped. For each direct dependent `DEP` of the gated predecessor `PRED`:
+   ```bash
+   # Resolve PRED's open PR, if any, using the anchored search (forge#1634/#1646 precedent —
+   # do NOT fall back to a bare-number search here; a stale unrelated PR would misattribute gating).
+   GATING_PR=$(gh pr list -R {GH_REPO} --state open --search "\"Closes #${PRED}\" in:body" \
+     --json number --jq '.[0].number // empty' 2>/dev/null || echo "")
+   PRED_LABEL=$(gh issue view "$PRED" -R {GH_REPO} --json labels \
+     --jq '[.labels[].name | select(. == "needs-human" or . == "workflow:awaiting-merge")] | .[0] // "needs-human"' 2>/dev/null)
+
+   # Self-heal the label if it hasn't been bootstrapped yet (same pattern as review-pr.md 6C —
+   # colors match the canonical manifest bin/labels.json; --force makes this idempotent/cheap).
+   gh label create "blocked-on-human-merge" --color "006B75" --description "Dependent of a gated (needs-human/awaiting-merge) predecessor. Managed by ForgeDock." --force -R {GH_REPO} 2>/dev/null
+
+   # Idempotency: only post/label if not already tracked for this specific predecessor.
+   ALREADY_TRACKED=$(gh api repos/{GH_REPO}/issues/${DEP}/comments \
+     --jq --arg pred "#${PRED}" '[.[] | select(.body | contains("FORGE:BLOCKED_ON_HUMAN_MERGE") and contains($pred))] | length' 2>/dev/null || echo "0")
+   if [ "$ALREADY_TRACKED" -eq 0 ]; then
+     gh issue comment "$DEP" -R {GH_REPO} --body "<!-- FORGE:BLOCKED_ON_HUMAN_MERGE -->
+**Gating predecessor**: #${PRED} (state: \`${PRED_LABEL}\`${GATING_PR:+, open PR #${GATING_PR}})
+**Status**: This issue is ready to dispatch as soon as #${PRED}'s gating PR merges. No action needed — the orchestrator (live session via item 6.6, or the next \`/orchestrate\` invocation via phase-3-dependency.md's wake reconstruction) will auto-dispatch it the moment #${PRED} reaches \`workflow:merged\`."
+     gh issue edit "$DEP" -R {GH_REPO} --add-label "blocked-on-human-merge" 2>/dev/null || true
+   fi
+   ```
+   Do NOT dispatch `DEP`. Do NOT mark it skipped — it remains visibly tracked as `blocked-on-human-merge` in the DAG, re-evaluated on the next completion event, stall-detection pass, or session wake.
+
+6.6. **Merge-triggered wake for blocked-on-human-merge dependents** <!-- Added: forge#1812 --> — whenever a completed agent's issue classifies as `DONE` via `workflow:merged` (i.e. it just merged), check whether any other issue is tracked as blocked on it — this makes gated dependents dispatch the instant the gating PR merges, with no manual `/orchestrate` re-run required:
+   ```bash
+   WOKEN=$(gh issue list -R {GH_REPO} --state open --label "blocked-on-human-merge" --json number \
+     --jq '.[].number' 2>/dev/null || echo "")
+   for DEP in $WOKEN; do
+     IS_GATED_BY_THIS=$(gh api repos/{GH_REPO}/issues/${DEP}/comments \
+       --jq --arg pred "#${NUM}" '[.[] | select(.body | contains("FORGE:BLOCKED_ON_HUMAN_MERGE") and contains($pred))] | length' 2>/dev/null || echo "0")
+     [ "$IS_GATED_BY_THIS" -gt 0 ] || continue
+     # Idempotency: only dispatch if DEP hasn't already been dispatched by another path.
+     DEP_ALREADY_DISPATCHED=$(gh issue view "$DEP" -R {GH_REPO} --json labels \
+       --jq '[.labels[].name | select(startswith("workflow:"))] | length' 2>/dev/null || echo "0")
+     if [ "$DEP_ALREADY_DISPATCHED" -eq 0 ]; then
+       gh issue edit "$DEP" -R {GH_REPO} --remove-label "blocked-on-human-merge" 2>/dev/null || true
+       gh issue comment "$DEP" -R {GH_REPO} --body "<!-- FORGE:UNBLOCKED -->
+Gating predecessor #${NUM} reached \`workflow:merged\` — dispatching now. (Was tracked via a prior FORGE:BLOCKED_ON_HUMAN_MERGE comment.)"
+       echo "#{DEP} unblocked by #{NUM} merge — dispatching immediately (Steps 4A.pre.0 → 4A.pre → 4A)."
+       # Add DEP to the same-response dispatch batch
+     fi
+   done
+   ```
+   This satisfies the live-session case. For the case where the gating PR merges after the orchestrator session has already ended, the equivalent check runs in `phase-3-dependency.md`'s wake/compaction reconstruction on the next `/orchestrate` invocation — see that file's "Orchestrator state reconstruction on wake / after compaction" section.
 
 7. **Verify pipeline compliance** — for each truly completed issue, check that the agent used `/work-on`:
    ```bash
@@ -568,18 +665,21 @@ done
    ✗ #{NUMBER} — {title} → {reason for failure}
    ⚠ #{NUMBER} — {title} → PIPELINE BYPASS (no /work-on — PR invalid)
    ⏸ #{NUMBER} — {title} → PR #{PR} awaiting-merge (remediated + re-approved — human merge only, no diagnosis needed)
+   🔗 #{NUMBER} — {title} → blocked-on-human-merge (gated by #{PRED}, will auto-dispatch on #{PRED} merge)
    ⏳ Progress: {completed}/{total} complete, {active} active, {blocked} blocked
    → Dispatched #{NEWLY_READY} (predecessor #{PRED} completed)
    ```
 
    `⏸` (awaiting-merge) is deliberately distinct from `⚠` (blocked/bypass) — do not collapse the
    two. `⚠` means the pipeline hit something it cannot resolve and a human must diagnose it;
-   `⏸` means the PR already cleared re-review and only needs a merge click. See Phase 6's
+   `⏸` means the PR already cleared re-review and only needs a merge click. `🔗` (blocked-on-human-merge,
+   forge#1812) is distinct from both: it marks a DEPENDENT of a GATED predecessor (item 6.5) — the
+   dependent itself has no problem at all, it is simply waiting on someone else's merge. See Phase 6's
    "Merge-Ready" report section (`phase-6-report.md` Step 6A.5/6B) for the batch-level rollup.
 
 9. **Run staging integrity check** (from Step 4A-pre) if the completed agent merged a PR targeting staging.
 
-**Termination condition**: All issues in the DAG are in a terminal state (merged, invalid, needs-human, or skipped due to dependency failure). When this condition is met, check whether deferred review-spawned findings exist (accumulated in `DEFERRED_FINDINGS` during Step 4C). If deferred findings exist → proceed to Step 4F (Completion Sweep). If no deferred findings → proceed to Phase 5.
+**Termination condition**: All issues in the DAG have reached `DONE` or `FAILED` (merged, invalid, or skipped due to dependency failure) — OR are `blocked-on-human-merge` (item 6.5) with no further dispatchable work remaining in the batch. These two outcomes are reported differently: a batch where every issue is `DONE`/`FAILED` is a **clean drain**; a batch where one or more issues remain `blocked-on-human-merge` is a **paused drain** — the active dispatch loop stops (there is nothing left to do until a human merges a gating PR) but this MUST be reported as paused, not as fully complete (see `phase-6-report.md`'s `🔗 Blocked-on-Merge` section). `needs-human` predecessors with no open PR are neither — they remain GATED indefinitely until either a PR appears (dependent moves to blocked-on-human-merge) or the predecessor itself resolves; do not treat isolated `needs-human` issues with no dependents as blocking termination. When either drain condition is met, check whether deferred review-spawned findings exist (accumulated in `DEFERRED_FINDINGS` during Step 4C). If deferred findings exist → proceed to Step 4F (Completion Sweep). If no deferred findings → proceed to Phase 5.
 
 **Anti-pattern — DO NOT DO THIS:**
 - `sleep 60/120/180/300` loops to check status — you will be notified automatically
@@ -606,9 +706,12 @@ STALL_TIMEOUT=$(yq '.pipeline.stall_timeout_minutes // 15' forge.yaml 2>/dev/nul
 **For each non-terminal agent in the current batch**:
 ```bash
 for NUM in {active_issue_numbers}; do
-  # Skip issues already in terminal state
+  # Skip issues already in a terminal-for-this-agent state (merged/invalid/needs-human/awaiting-merge).
+  # workflow:awaiting-merge MUST be included here (forge#1812) — otherwise the stall detector
+  # re-escalates an already-remediated-and-re-approved PR back to needs-human after STALL_TIMEOUT,
+  # silently collapsing the Awaiting-Merge/Blocked distinction forge#1811 introduced.
   TERMINAL=$(gh issue view $NUM -R {GH_REPO} --json labels \
-    --jq '[.labels[].name | select(. == "workflow:merged" or . == "workflow:invalid" or . == "needs-human")] | length')
+    --jq '[.labels[].name | select(. == "workflow:merged" or . == "workflow:invalid" or . == "needs-human" or . == "workflow:awaiting-merge")] | length')
   [ "$TERMINAL" -gt 0 ] && continue
 
   # Get last activity timestamp — prefer last comment (catches FORGE:HEARTBEAT updates)
@@ -930,11 +1033,13 @@ fi
 ### Step 4E: Handle individual agent failures
 
 If an agent reports failure or error:
-- **Merge conflict**: Report to user, mark issue as needing human attention
-- **Invalid issue**: Already handled by the agent (closed with comment) — just report it
-- **Build/test failure**: Report the error, suggest manual intervention
-- **Agent timeout**: Report which issue timed out, suggest re-running with `/work-on #{N}`
-- **Dependency cascade**: Mark all transitive dependents in the DAG as "skipped — dependency #{X} failed"
+- **Merge conflict**: Report to user, mark issue as needing human attention (`needs-human`). This classifies as **GATED**, not FAILED — see Predecessor Classification in Step 4B. Its dependents follow the Dependency cascade rule below, not a hard skip.
+- **Invalid issue**: Already handled by the agent (closed with comment) — just report it. This classifies as **FAILED**.
+- **Build/test failure**: Report the error, suggest manual intervention. This classifies as **FAILED**.
+- **Agent timeout**: Report which issue timed out, suggest re-running with `/work-on #{N}`. Not yet terminal — leave dependents in `IN_PROGRESS` wait, no cascade action.
+- **Dependency cascade** <!-- Updated: forge#1812 -->: Re-run `classify_predecessor_state` (Step 4B) for the failed/gated issue before cascading — do NOT assume every entry above is a hard failure:
+  - If it classifies **FAILED** (invalid, or build/test failure): mark all transitive dependents in the DAG as "skipped — dependency #{X} failed" (same as Step 4B item 6).
+  - If it classifies **GATED** (merge conflict → `needs-human`, or `workflow:awaiting-merge`): do NOT mark dependents skipped. Instead apply Step 4B item 6.5 — track each direct dependent as `blocked-on-human-merge` against this predecessor, so it auto-dispatches via item 6.6 the moment the predecessor reaches `workflow:merged`.
 
 **Do NOT retry failed agents automatically.** Report the failure and let the user decide.
 
@@ -1090,7 +1195,7 @@ The context-gathering phase can fetch this index to discover all investigation G
 
 **YOUR MISSION**: Invoke \`/work-on\` via the Skill tool and let it run to completion. \`/work-on\` is a self-contained routing loop that handles the ENTIRE pipeline: investigate → build (context → architect → implement → validate) → review (push → PR → /review-pr --auto-merge) → close (project board → trajectory log → worktree cleanup). Do NOT intervene, compensate, or manually close issues — \`/work-on\` handles everything including issue closure and label updates in its close phase.
 
-**CRITICAL — DO NOT STOP EARLY**: /work-on runs as a multi-phase routing loop. Each phase (investigate, build, review, close) returns an intermediate result — these are NOT completion signals. You are NOT done until the issue reaches a terminal state: \`workflow:merged\`, \`workflow:invalid\`, or \`needs-human\`. If /work-on returns after only one phase (e.g., investigation), you MUST invoke it again immediately — it will re-read GitHub state and continue to the next phase. Keep invoking /work-on until it reaches a terminal state. Never output 'done' or stop after an intermediate result.
+**CRITICAL — DO NOT STOP EARLY**: /work-on runs as a multi-phase routing loop. Each phase (investigate, build, review, close) returns an intermediate result — these are NOT completion signals. You are NOT done until the issue reaches a terminal state: \`workflow:merged\`, \`workflow:invalid\`, \`needs-human\`, or \`workflow:awaiting-merge\`. If /work-on returns after only one phase (e.g., investigation), you MUST invoke it again immediately — it will re-read GitHub state and continue to the next phase. Keep invoking /work-on until it reaches a terminal state. Never output 'done' or stop after an intermediate result.
 
 **HOW REVIEW FINDINGS WORK**: /review-pr may create GitHub issues (with \`review-finding\` label) for findings it discovers. These are NOT blockers — they are separate work items that will go through their own /work-on pipeline later. The original PR should ALWAYS merge after review. The only exception is build errors (code doesn't compile) — those must be fixed before merging.
 
@@ -1112,7 +1217,7 @@ After EVERY \`Skill(skill='work-on', ...)\` call returns, immediately check the 
 gh issue view ${FINDING_NUM} -R {GH_REPO} --json labels --jq '[.labels[].name | select(startswith(\"workflow:\"))]'
 \`\`\`
 **Terminal labels** (only these allow you to stop): \`workflow:merged\`, \`workflow:invalid\`
-**Terminal condition also**: \`needs-human\` label present OR issue state is \`closed\`
+**Terminal condition also**: \`needs-human\` label present, \`workflow:awaiting-merge\` label present, OR issue state is \`closed\`
 If the label is NOT terminal (e.g., \`workflow:investigating\`, \`workflow:ready-to-build\`, \`workflow:building\`, \`workflow:in-review\`), invoke \`Skill(skill='work-on', args='${FINDING_NUM}')\` again immediately. The \`/work-on\` skill will re-read GitHub state and advance to the next phase. Do NOT output a summary, do NOT pause, do NOT ask for confirmation — just invoke it again.
 
 **CRITICAL — SOURCE BRANCH DETECTION**:
