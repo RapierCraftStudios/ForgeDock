@@ -8,6 +8,30 @@ const _require = createRequire(import.meta.url);
 /** Absolute path to the ForgeDock installation root (parent of bin/). */
 const FORGE_HOME = resolvePath(dirname(fileURLToPath(import.meta.url)), "..", "..");
 
+// Lazy-loaded invariants module and YAML declarations (loaded once on first use).
+// Using a lazy import avoids top-level await and keeps the module synchronous
+// for the simple path — invariant loading only happens when a branch checkout
+// command is detected.
+let _invariants = null;
+let _invariantDecls = null;
+
+async function getInvariants() {
+  if (_invariants !== null) return { module: _invariants, decls: _invariantDecls };
+  try {
+    _invariants = await import(
+      pathToFileURL(join(FORGE_HOME, "bin", "engine", "invariants.mjs")).href
+    );
+    _invariantDecls = _invariants.loadInvariants(
+      join(FORGE_HOME, "forge-invariants.yaml")
+    );
+  } catch {
+    // invariants.mjs unavailable (fresh install, partial update) — fail-open.
+    _invariants = null;
+    _invariantDecls = [];
+  }
+  return { module: _invariants, decls: _invariantDecls };
+}
+
 /**
  * bin/hooks/pre-tool-use.mjs — ForgeDock PreToolUse hook.
  *
@@ -36,6 +60,16 @@ const FORGE_HOME = resolvePath(dirname(fileURLToPath(import.meta.url)), "..", ".
  *    Hard-blocks PRs targeting main.
  *
  * 2. Label transition validation
+ *    Intercepts `gh issue edit --add-label` and validates the transition
+ *    against the workflow label state machine.
+ *    Blocks invalid transitions (e.g. jumping from investigating to merged).
+ *
+ * 3. Declared precondition checks (from forge-invariants.yaml)
+ *    Intercepts git checkout / git worktree add / git switch commands and
+ *    evaluates pretooluse-scope invariants declared in forge-invariants.yaml.
+ *    Currently: branch_must_exist_on_remote — blocks checkouts of branches
+ *    that don't exist on origin (catches hallucinated branch names before
+ *    they cause a mid-build git failure).
  *    Intercepts `gh issue edit --add-label` and validates the transition
  *    against the workflow label state machine.
  *    Blocks invalid transitions (e.g. jumping from investigating to merged).
@@ -139,7 +173,77 @@ async function main() {
     return;
   }
 
+  // --- Rule 3: Declared precondition checks (forge-invariants.yaml) ---
+  const preconditionViolation = await checkDeclaredPreconditions(command);
+  if (preconditionViolation) {
+    process.stderr.write(preconditionViolation);
+    process.exit(2);
+    return;
+  }
+
   process.exit(0);
+}
+
+// ---------------------------------------------------------------------------
+// Rule 3: Declared precondition checks (forge-invariants.yaml)
+// ---------------------------------------------------------------------------
+
+/**
+ * Check declared pretooluse-scope invariants from forge-invariants.yaml.
+ *
+ * Currently evaluates the branch_must_exist_on_remote precondition for:
+ *   - git checkout <branch>
+ *   - git worktree add <path> [-b <branch>] <base>
+ *   - git switch <branch>
+ *
+ * Wrapped in a try/catch in the caller (main()) — fail-open on any error.
+ *
+ * @param {string} command
+ * @returns {Promise<string|null>} Error message or null if allowed.
+ */
+async function checkDeclaredPreconditions(command) {
+  // Only intercept git commands that reference a branch.
+  const isCheckout = /git\s+(?:checkout|switch)/.test(command) &&
+    !/git\s+checkout\s+-[bf]/.test(command); // -b creates new branch (no check needed)
+  const isWorktreeAdd = /git\s+worktree\s+add/.test(command);
+
+  if (!isCheckout && !isWorktreeAdd) return null;
+
+  // Extract branch name from command.
+  let branch = null;
+  if (isCheckout) {
+    // git checkout <branch> or git switch <branch>
+    // Avoid matching flags: skip tokens starting with -
+    const m = command.match(/git\s+(?:checkout|switch)\s+(?:--\s+)?([^\s-][^\s]*)/);
+    if (m) branch = m[1];
+  } else if (isWorktreeAdd) {
+    // git worktree add <path> <base> — base is typically origin/<branch> or just <branch>
+    // Also handle: git worktree add <path> -b <new-branch> <base>
+    const tokens = tokenizeCommand(command).map((t) => t.value);
+    // Find -b flag if present (new branch — no remote check needed)
+    const bIdx = tokens.indexOf("-b");
+    if (bIdx !== -1) return null; // creating new branch — no remote existence check
+    // Otherwise the last non-option argument after 'add' and path is the base
+    const addIdx = tokens.findIndex((t) => t === "add");
+    if (addIdx !== -1 && addIdx + 2 < tokens.length) {
+      const base = tokens[addIdx + 2];
+      // base may be 'origin/<branch>' — strip the remote prefix
+      branch = base.replace(/^origin\//, "");
+    }
+  }
+
+  if (!branch || branch.startsWith("-") || branch === "HEAD") return null;
+
+  // Load invariants (cached after first load).
+  const { module, decls } = await getInvariants();
+  if (!module || !decls?.length) return null;
+
+  // Evaluate the branch_must_exist precondition.
+  const result = await module.checkPrecondition(decls, "branch_must_exist_on_remote", { branch });
+  if (!result.ok) {
+    return module.formatViolation(result) + "\n";
+  }
+  return null;
 }
 
 // ---------------------------------------------------------------------------

@@ -59,6 +59,79 @@ Extract from agent comments:
 
 ---
 
+## Phase C0.5: Close-Scope Invariant Assertions (MANDATORY)
+
+Run before any close actions. Evaluates `close`-scope invariants declared in
+`forge-invariants.yaml` via `bin/engine/invariants.mjs`. A failed assertion
+logs the violated proposition by name and flags the anomaly in the trajectory
+log — it does NOT abort the close phase (advisory enforcement: flag, then continue).
+
+**Skip if**: `forge-invariants.yaml` is absent or `bin/engine/invariants.mjs`
+is unavailable (e.g. fresh install before this file ships). Fail-open.
+
+```bash
+# Read local run-log for this issue (absolute path matches engine run-log dir)
+RUN_LOG_DIR="${HOME}/.forge/runs"
+RUN_LOG_FILE="${RUN_LOG_DIR}/{NUMBER}.jsonl"
+
+INVARIANT_ANOMALIES=""
+
+if [ -f "${RUN_LOG_FILE}" ] && [ -f "$(dirname "$(which node)")/node" ] 2>/dev/null; then
+  # Check close-scope invariants via the evaluator
+  INVARIANT_RESULT=$(node -e "
+    import(new URL('file://$(pwd)/bin/engine/invariants.mjs'))
+      .then(m => {
+        const decls = m.loadInvariants('$(pwd)/forge-invariants.yaml');
+        const fs = require('fs');
+        let events = [];
+        try {
+          const lines = fs.readFileSync('${RUN_LOG_FILE}', 'utf-8').split('
+').filter(Boolean);
+          events = lines.flatMap(l => { try { return [JSON.parse(l)]; } catch { return []; } });
+        } catch {}
+        const results = m.assertCloseInvariants(decls, events);
+        const failed = results.filter(r => !r.ok);
+        if (failed.length) {
+          failed.forEach(r => process.stderr.write(m.formatViolation(r) + '
+'));
+          process.exit(1);
+        }
+      })
+      .catch(() => process.exit(0));  // fail-open on any error
+  " 2>&1) || INVARIANT_ANOMALIES="${INVARIANT_RESULT}"
+
+  if [ -n "$INVARIANT_ANOMALIES" ]; then
+    echo "CLOSE-SCOPE INVARIANT ANOMALY (flagging — close continues):"
+    echo "$INVARIANT_ANOMALIES"
+    # The anomaly will be recorded in the trajectory log Anomalies field.
+    # It does NOT block the close phase.
+  fi
+fi
+
+# Also check: issue must be in CLOSED state after close attempt.
+# This check runs AFTER Phase C2 (ensure issue is closed). Set a sentinel
+# here to be evaluated post-C2:
+CLOSE_INVARIANT_ISSUE_CHECK=true
+```
+
+**Post-C2 check** (evaluate after Phase C2 runs the `gh issue close` command):
+
+```bash
+if [ "${CLOSE_INVARIANT_ISSUE_CHECK:-false}" = "true" ]; then
+  ISSUE_STATE=$(gh issue view {NUMBER} {GH_FLAG} --json state --jq '.state' 2>/dev/null || echo "UNKNOWN")
+  if [ "$ISSUE_STATE" != "CLOSED" ]; then
+    INVARIANT_ANOMALIES="${INVARIANT_ANOMALIES:+$INVARIANT_ANOMALIES; }issue_closed_at_terminal: issue state is ${ISSUE_STATE} (not CLOSED) after close attempt"
+    echo "INVARIANT ANOMALY: issue_closed_at_terminal — issue is ${ISSUE_STATE}, not CLOSED"
+    # Flag but continue — trajectory Anomalies field will surface this.
+  fi
+fi
+```
+
+The `INVARIANT_ANOMALIES` variable is read in Phase C4.5 (trajectory post) and written to the **Anomalies** field.
+
+---
+
+
 ## Phase C1: Final Issue Body Update
 
 **Multi-phase guard**: Before checking off items, detect whether the issue has multiple phases. Only check off items belonging to the current completed phase — not all remaining items across future phases.
