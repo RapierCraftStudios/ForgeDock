@@ -627,7 +627,14 @@ export function publishProvenanceTable(table, repoPath, dryRun = false) {
       return;
     }
 
-    spawnSync('git', ['checkout', MIRROR_BRANCH], { cwd: repoPath, encoding: 'utf8', timeout: 10000 });
+    // A checkout aborts on a dirty working tree; if it fails we must NOT proceed —
+    // otherwise the provenance table gets committed onto the CURRENT branch instead
+    // of the mirror. <!-- forge#1838 review SEC-1 -->
+    const switchResult = spawnSync('git', ['checkout', MIRROR_BRANCH], { cwd: repoPath, encoding: 'utf8', timeout: 10000 });
+    if (switchResult.status !== 0) {
+      log(`WARNING: Could not switch to ${MIRROR_BRANCH} (working tree dirty?) — skipping provenance publish`);
+      return;
+    }
 
     const calibDir = join(repoPath, CALIBRATION_DIR);
     mkdirSync(calibDir, { recursive: true });
@@ -742,10 +749,15 @@ export function publishTable(table, repoPath, dryRun = false) {
         // Create directory structure
         mkdirSync(join(repoPath, CALIBRATION_DIR), { recursive: true });
       } else {
-        spawnSync('git', ['checkout', MIRROR_BRANCH], { cwd: repoPath, encoding: 'utf8', timeout: 10000 });
+        const s = spawnSync('git', ['checkout', MIRROR_BRANCH], { cwd: repoPath, encoding: 'utf8', timeout: 10000 });
+        if (s.status !== 0) { log(`WARNING: Could not switch to ${MIRROR_BRANCH} (working tree dirty?) — skipping publish`); return; }
       }
     } else {
-      spawnSync('git', ['checkout', MIRROR_BRANCH], { cwd: repoPath, encoding: 'utf8', timeout: 10000 });
+      // A checkout aborts on a dirty working tree; if it fails we must NOT proceed —
+      // otherwise the table gets written and committed onto the CURRENT branch
+      // instead of the mirror. <!-- forge#1838 review SEC-1 -->
+      const switchResult = spawnSync('git', ['checkout', MIRROR_BRANCH], { cwd: repoPath, encoding: 'utf8', timeout: 10000 });
+      if (switchResult.status !== 0) { log(`WARNING: Could not switch to ${MIRROR_BRANCH} (working tree dirty?) — skipping publish`); return; }
     }
 
     // Ensure calibration directory exists on the branch

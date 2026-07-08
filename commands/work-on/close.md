@@ -85,15 +85,13 @@ if [ -f "${RUN_LOG_FILE}" ] && [ -f "$(dirname "$(which node)")/node" ] 2>/dev/n
         const fs = require('fs');
         let events = [];
         try {
-          const lines = fs.readFileSync('${RUN_LOG_FILE}', 'utf-8').split('
-').filter(Boolean);
+          const lines = fs.readFileSync('${RUN_LOG_FILE}', 'utf-8').split('\n').filter(Boolean);
           events = lines.flatMap(l => { try { return [JSON.parse(l)]; } catch { return []; } });
         } catch {}
         const results = m.assertCloseInvariants(decls, events);
         const failed = results.filter(r => !r.ok);
         if (failed.length) {
-          failed.forEach(r => process.stderr.write(m.formatViolation(r) + '
-'));
+          failed.forEach(r => process.stderr.write(m.formatViolation(r) + '\n'));
           process.exit(1);
         }
       })
