@@ -854,6 +854,83 @@ fi
 
 ---
 
+## Phase C5.3: Knowledge Ledger Index <!-- Added: forge#1732 -->
+
+**Goal**: Index the just-closed issue into the Forge Ledger so future context phases can retrieve
+its knowledge cards by file path or symbol without making live GitHub API calls.
+
+**This phase is non-blocking** — if the indexer fails, log the reason and continue to Phase C5.5.
+Never stall close for ledger indexing.
+
+**Skip if**: Terminal state is `INVALID` (no confirmed findings to index) OR a `<!-- FORGE:LEDGER_INDEXED -->` comment already exists on the issue (idempotency guard).
+
+**Requires**: `scripts/build-knowledge-index.mjs` present in the repository root. If absent, skip
+with a warning — the feature may not be installed on this version.
+
+### Step 1: Idempotency check
+
+```bash
+LEDGER_INDEXED=$(gh api repos/{GH_REPO}/issues/{NUMBER}/comments \
+  --jq '[.[] | select(.body | contains("FORGE:LEDGER_INDEXED"))] | length > 0' 2>/dev/null || echo "false")
+```
+
+**Skip to Phase C5.5 if `$LEDGER_INDEXED == "true"`**.
+
+### Step 2: Run incremental indexer
+
+Resolve the indexer script path relative to the repository root:
+
+```bash
+INDEXER_PATH="${REPO_PATH:-$(git rev-parse --show-toplevel 2>/dev/null)}/scripts/build-knowledge-index.mjs"
+
+if [ ! -f "$INDEXER_PATH" ]; then
+  echo "[LEDGER] scripts/build-knowledge-index.mjs not found — skipping Phase C5.3"
+  echo "[LEDGER] Install: update ForgeDock to a version that ships this file"
+else
+  # Run incremental indexer for this issue only — ~2 API calls
+  LEDGER_EXIT=0
+  LEDGER_OUTPUT=$(node "$INDEXER_PATH" \
+    --issue {NUMBER} \
+    --repo {GH_REPO} \
+    --no-mirror \
+    2>&1) || LEDGER_EXIT=$?
+
+  if [ $LEDGER_EXIT -eq 0 ]; then
+    echo "[LEDGER] Issue #{NUMBER} indexed into Forge Ledger"
+
+    # Mirror update: run separately after single-issue index so mirror has up-to-date postings
+    node "$INDEXER_PATH" --issue {NUMBER} --repo {GH_REPO} \
+      2>/dev/null || true  # Non-blocking: mirror failure does not affect local index
+
+    # Post audit annotation (idempotency guard for future close runs)
+    gh issue comment {NUMBER} {GH_FLAG} --body "<!-- FORGE:LEDGER_INDEXED -->
+Issue #{NUMBER} has been indexed into the Forge Ledger.
+
+Knowledge cards extracted from FORGE:INVESTIGATOR and FORGE:TRAJECTORY annotations are now
+queryable via \`forge recall\` (exact file/symbol lookup or free-text BM25 search).
+
+\`\`\`
+forge recall --file {PRIMARY_AFFECTED_FILE} --json
+\`\`\`
+
+<!-- FORGE:LEDGER_INDEXED:COMPLETE -->" 2>/dev/null || true
+
+  else
+    echo "[LEDGER] WARNING: Indexer exited with code ${LEDGER_EXIT} — continuing"
+    echo "[LEDGER] Output: ${LEDGER_OUTPUT}"
+  fi
+fi
+```
+
+### Watermark semantics
+
+The indexer's watermark is `max(issue.updated_at)` across all indexed issues. Indexing a
+single issue via `--issue` advances the watermark only if this issue's `updated_at` is newer
+than the stored watermark — ensuring the next full incremental run starts from the right
+position and does not re-scan already-indexed history.
+
+---
+
 ## Phase C5.5: Graph Decision Record (MANDATORY when PR exists)
 
 **Skip if**: `{PR_NUMBER}` is empty OR `<!-- FORGE:DECISION_RECORD -->` already posted on the PR.
