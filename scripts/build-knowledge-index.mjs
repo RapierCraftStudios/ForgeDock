@@ -31,6 +31,10 @@
  *   --dry-run               Parse and output without writing
  *   --verbose               Verbose logging
  *   --with-danger-zones     After indexing, run danger-zones.mjs to refresh risk data (non-blocking)
+ *   --pull-feeds            Pull subscribed pattern cards from exchange repos into the local ledger.
+ *                           Reads forge.yaml → pattern_feeds. Pinned-ref only — no floating HEAD.
+ *                           All imported cards are tagged origin:<feed-slug> and priority:LOW.
+ *   --feed <slug>           (with --pull-feeds) Only pull the feed with this slug.
  *
  * Exit codes: 0 = success, 1 = fatal error, 2 = partial (some issues failed)
  *
@@ -90,6 +94,9 @@ function parseArgs(argv) {
     dryRun: false,
     verbose: false,
     withDangerZones: false,
+    // Pattern exchange subscription pull (forge#1746)
+    pullFeeds: false,
+    feedFilter: null,
   };
 
   for (let i = 2; i < argv.length; i++) {
@@ -124,6 +131,13 @@ function parseArgs(argv) {
         // After indexing completes, run danger-zones.mjs to refresh risk data.
         // Non-blocking: a failure here does not affect the knowledge index.
         args.withDangerZones = true;
+        break;
+      // Pattern exchange subscription pull (forge#1746)
+      case '--pull-feeds':
+        args.pullFeeds = true;
+        break;
+      case '--feed':
+        args.feedFilter = argv[++i];
         break;
       default:
         // Ignore unknown flags for forward compatibility
@@ -1120,6 +1134,357 @@ function aggregateCostPriors(cards, indexDir, dryRun = false) {
 }
 
 // ---------------------------------------------------------------------------
+// Pattern exchange subscription pull (forge#1746)
+// Reads forge.yaml → pattern_feeds, fetches subscribed card files from
+// exchange repos at pinned refs via gh api, and merges them into the local
+// ledger as LOW-priority priors tagged by origin feed slug.
+// ---------------------------------------------------------------------------
+
+/** Read a yq scalar from forge.yaml in the repo root. Returns '' on error. */
+function yqScalar(repoPath, expr) {
+  const result = spawnSync('yq', [expr, join(repoPath, 'forge.yaml')], {
+    encoding: 'utf8',
+    timeout: 5000,
+  });
+  if (result.status === 0 && result.stdout.trim()) return result.stdout.trim();
+  return '';
+}
+
+/** Read a JSON value from forge.yaml via yq -o json. Returns null on error. */
+function yqJsonVal(repoPath, expr) {
+  const result = spawnSync('yq', ['-o', 'json', expr, join(repoPath, 'forge.yaml')], {
+    encoding: 'utf8',
+    timeout: 5000,
+  });
+  if (result.status !== 0 || !result.stdout.trim() || result.stdout.trim() === 'null') return null;
+  try { return JSON.parse(result.stdout.trim()); } catch { return null; }
+}
+
+/**
+ * Fetch a file from a GitHub repo at a specific pinned ref via gh api.
+ * Returns decoded string content, or null on error.
+ */
+function ghFetchFileContent(repo, ref, filePath) {
+  const endpoint = `repos/${repo}/contents/${filePath}?ref=${ref}`;
+  try {
+    const result = spawnSync('gh', ['api', endpoint, '--jq', '.content'], {
+      encoding: 'utf8',
+      timeout: 15000,
+    });
+    if (result.status !== 0 || !result.stdout.trim() || result.stdout.trim() === 'null') return null;
+    // GitHub encodes content as base64 with embedded newlines
+    return Buffer.from(result.stdout.trim().replace(/\n/g, ''), 'base64').toString('utf8');
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * List directory contents from a GitHub repo at a pinned ref.
+ * Returns array of { path, type } objects, or [] on error.
+ */
+function ghListContents(repo, ref, dirPath) {
+  const endpoint = `repos/${repo}/contents/${dirPath}?ref=${ref}`;
+  try {
+    const result = spawnSync('gh', ['api', endpoint, '--jq', '[.[] | {path: .path, type: .type}]'], {
+      encoding: 'utf8',
+      timeout: 15000,
+    });
+    if (result.status !== 0 || !result.stdout.trim() || result.stdout.trim() === 'null') return [];
+    return JSON.parse(result.stdout.trim());
+  } catch {
+    return [];
+  }
+}
+
+/**
+ * Parse a pattern card markdown file from the exchange repo schema.
+ * See forge.yaml.example § PATTERN_FEEDS for the card format.
+ * Returns a card object or null if malformed.
+ */
+function parseExchangeCard(markdown, filePath) {
+  const lines = markdown.split('\n');
+
+  function extractSection(heading) {
+    const start = lines.findIndex(l => l.trim() === `## ${heading}`);
+    if (start === -1) return '';
+    const end = lines.findIndex((l, i) => i > start && l.startsWith('## '));
+    const sectionLines = end === -1 ? lines.slice(start + 1) : lines.slice(start + 1, end);
+    return sectionLines.join('\n').trim();
+  }
+
+  const headerLine = lines.find(l => /^#\s+Pattern:\s+\S/.test(l));
+  if (!headerLine) {
+    log(`Exchange card at ${filePath}: missing "# Pattern: {slug}" header — skipping`);
+    return null;
+  }
+  const slug = headerLine.replace(/^#\s+Pattern:\s+/, '').trim();
+  if (!slug) { log(`Exchange card at ${filePath}: empty slug — skipping`); return null; }
+
+  const stacksRaw = extractSection('Stacks');
+  const stacks = stacksRaw.split(/[\n,]/).map(s => s.trim().toLowerCase()).filter(Boolean);
+  if (stacks.length === 0) {
+    log(`Exchange card "${slug}": no stacks — skipping (required by schema)`);
+    return null;
+  }
+
+  const rootCauseShape = extractSection('Root Cause Shape');
+  const prevention     = extractSection('Prevention Rule');
+  const summary        = extractSection('Summary');
+
+  // Optional gate.d check template — bash code block under "## gate.d Check Template"
+  let gateTemplate = '';
+  const gateSectionIdx = lines.findIndex(l => l.trim() === '## gate.d Check Template');
+  if (gateSectionIdx !== -1) {
+    const codeStart = lines.findIndex((l, i) => i > gateSectionIdx && l.trim() === '```bash');
+    if (codeStart !== -1) {
+      const codeEnd = lines.findIndex((l, i) => i > codeStart && l.trim() === '```');
+      if (codeEnd !== -1) {
+        gateTemplate = lines.slice(codeStart + 1, codeEnd).join('\n').trim();
+      }
+    }
+  }
+
+  return { slug, stacks, root_cause_shape: rootCauseShape, prevention, summary, gate_template: gateTemplate };
+}
+
+/**
+ * Pull all subscribed pattern feeds and merge into the local ledger.
+ * Entry point for --pull-feeds mode.
+ *
+ * Security model:
+ *   - Only pinned commit SHAs are accepted as refs (7–40 hex chars)
+ *   - Fetched content is stored as data (JSON); never executed at import time
+ *   - All imported cards carry origin:<feedSlug> and priority:LOW
+ *   - Local validated findings (no origin field) always outrank imported cards
+ *   - Unsubscribing from a feed removes stale cards on next run
+ */
+async function pullFeeds(repoPath, args) {
+  log('');
+  log('=== build-knowledge-index --pull-feeds ===');
+  log(`Run at: ${new Date().toISOString()}`);
+  if (args.dryRun)     log('Mode: DRY RUN — no files written');
+  if (args.feedFilter) log(`Feed filter: --feed ${args.feedFilter}`);
+  log('');
+
+  // Read pattern_feeds config from forge.yaml
+  const feedsEnabled = yqScalar(repoPath, '.pattern_feeds.enabled // "false"').toLowerCase();
+  if (feedsEnabled !== 'true') {
+    log('pattern_feeds.enabled is not true in forge.yaml — nothing to do.');
+    log('Set pattern_feeds.enabled: true and configure at least one feed.');
+    return;
+  }
+
+  const feeds = yqJsonVal(repoPath, '.pattern_feeds.feeds // []');
+  if (!Array.isArray(feeds) || feeds.length === 0) {
+    log('No feeds in forge.yaml → pattern_feeds.feeds — nothing to do.');
+    return;
+  }
+
+  const ledgerRelPath = yqScalar(repoPath, '.pattern_feeds.ledger_path // ".forge/ledger"') || '.forge/ledger';
+  const LEDGER_ROOT = resolve(repoPath, ledgerRelPath);
+
+  // Discover local validated finding slugs (no origin = local)
+  const LOCAL_SLUGS = new Set();
+  if (existsSync(LEDGER_ROOT)) {
+    try {
+      const walkDir = (dir) => {
+        for (const entry of readdirSync(dir, { withFileTypes: true })) {
+          const full = join(dir, entry.name);
+          if (entry.isDirectory()) walkDir(full);
+          else if (entry.name.endsWith('.json')) {
+            try {
+              const data = JSON.parse(readFileSync(full, 'utf8'));
+              if ((!data.origin || data.origin === 'local') && data.slug) {
+                LOCAL_SLUGS.add(data.slug);
+              }
+            } catch { /* malformed — skip */ }
+          }
+        }
+      };
+      walkDir(LEDGER_ROOT);
+    } catch { /* ledger unreadable — ok */ }
+  }
+
+  const PINNED_REF_RE = /^[0-9a-f]{7,40}$/i;
+  const stats = { feeds_processed: 0, feeds_skipped: 0, cards_imported: 0, cards_skipped: 0, cards_removed: 0, errors: [] };
+
+  for (const feed of feeds) {
+    const { slug: feedSlug, repo, ref, path: cardPath = 'cards', stacks: feedStacks } = feed ?? {};
+
+    if (!feedSlug || !repo || !ref) {
+      log(`[WARN] Feed entry missing required fields (slug, repo, ref) — skipping: ${JSON.stringify(feed)}`);
+      stats.feeds_skipped++;
+      continue;
+    }
+
+    if (args.feedFilter && feedSlug !== args.feedFilter) {
+      debug(`Skipping feed ${feedSlug} (--feed filter)`);
+      continue;
+    }
+
+    // Security gate: reject floating refs
+    if (!PINNED_REF_RE.test(ref)) {
+      log(`[WARN] Feed ${feedSlug}: ref "${ref}" is not a pinned commit SHA (7–40 hex chars). Floating refs rejected for supply-chain safety. Update forge.yaml → pattern_feeds.feeds → ref.`);
+      stats.feeds_skipped++;
+      stats.errors.push(`${feedSlug}: non-pinned ref rejected`);
+      continue;
+    }
+
+    log(`--- Feed: ${feedSlug} (${repo} @ ${ref.slice(0, 8)}…) ---`);
+    stats.feeds_processed++;
+
+    // Discover card files: list subdirectories (stacks), then files within each
+    const cardFiles = [];
+    const contents = ghListContents(repo, ref, cardPath);
+
+    if (contents.length === 0) {
+      log(`Feed ${feedSlug}: empty or inaccessible path ${cardPath} — skipping`);
+      stats.feeds_skipped++;
+      continue;
+    }
+
+    const subdirs = contents.filter(e => e.type === 'dir');
+    const topFiles = contents.filter(e => e.type === 'file' && e.path.endsWith('.md'));
+
+    if (subdirs.length === 0) {
+      // Flat layout: files directly under cardPath
+      cardFiles.push(...topFiles.map(f => f.path));
+    } else {
+      for (const subdir of subdirs) {
+        const stackName = subdir.path.split('/').pop();
+        if (feedStacks && Array.isArray(feedStacks) && feedStacks.length > 0) {
+          if (!feedStacks.includes(stackName)) {
+            debug(`Feed ${feedSlug}: skipping stack dir ${stackName} (not in feed stacks filter)`);
+            continue;
+          }
+        }
+        const subContents = ghListContents(repo, ref, subdir.path);
+        cardFiles.push(...subContents.filter(e => e.type === 'file' && e.path.endsWith('.md')).map(e => e.path));
+      }
+    }
+
+    if (cardFiles.length === 0) {
+      log(`Feed ${feedSlug}: no card files found — skipping`);
+      continue;
+    }
+
+    log(`Feed ${feedSlug}: found ${cardFiles.length} card file(s)`);
+    const importedSlugs = new Set();
+
+    for (const filePath of cardFiles) {
+      const markdown = ghFetchFileContent(repo, ref, filePath);
+      if (!markdown) {
+        log(`[WARN] Feed ${feedSlug}: could not fetch ${filePath} — skipping`);
+        stats.cards_skipped++;
+        continue;
+      }
+
+      const card = parseExchangeCard(markdown, filePath);
+      if (!card) { stats.cards_skipped++; continue; }
+
+      const { slug } = card;
+
+      if (LOCAL_SLUGS.has(slug)) {
+        debug(`Feed ${feedSlug}: slug "${slug}" exists as local validated finding — skipping import`);
+        stats.cards_skipped++;
+        continue;
+      }
+
+      // Apply feed-level stack filter at card level
+      if (feedStacks && Array.isArray(feedStacks) && feedStacks.length > 0) {
+        const overlap = card.stacks.filter(s => feedStacks.includes(s));
+        if (overlap.length === 0) {
+          debug(`Feed ${feedSlug}: card "${slug}" stacks [${card.stacks}] do not overlap feed filter — skipping`);
+          stats.cards_skipped++;
+          continue;
+        }
+      }
+
+      const ledgerEntry = {
+        schema_version: '1',
+        slug,
+        stacks: card.stacks,
+        root_cause_shape: card.root_cause_shape,
+        prevention: card.prevention,
+        summary: card.summary,
+        gate_template: card.gate_template || null,
+        origin: feedSlug,
+        source_repo: repo,
+        source_ref: ref,
+        source_path: filePath,
+        priority: 'LOW',   // always LOW for imported cards — never overridden
+        imported_at: new Date().toISOString(),
+      };
+
+      const feedLedgerDir = join(LEDGER_ROOT, feedSlug);
+      const ledgerFilePath = join(feedLedgerDir, `${slug}.json`);
+      importedSlugs.add(slug);
+
+      if (args.dryRun) {
+        log(`  DRY RUN: would write ${ledgerFilePath}`);
+        if (args.verbose) log(`  ${JSON.stringify(ledgerEntry)}`);
+        stats.cards_imported++;
+        continue;
+      }
+
+      // Idempotency: skip if same ref already imported
+      if (existsSync(ledgerFilePath)) {
+        try {
+          const existing = JSON.parse(readFileSync(ledgerFilePath, 'utf8'));
+          if (existing.source_ref === ref && existing.slug === slug) {
+            debug(`  SKIP ${slug} — already at ref ${ref.slice(0, 8)}`);
+            stats.cards_skipped++;
+            continue;
+          }
+        } catch { /* overwrite malformed */ }
+      }
+
+      mkdirSync(feedLedgerDir, { recursive: true });
+      writeFileSync(ledgerFilePath, JSON.stringify(ledgerEntry, null, 2) + '\n', 'utf8');
+      log(`  IMPORTED ${slug} → ${ledgerFilePath}`);
+      stats.cards_imported++;
+    }
+
+    // Reconcile: remove cards no longer present upstream (clean unsubscribe)
+    if (!args.dryRun) {
+      const feedLedgerDir = join(LEDGER_ROOT, feedSlug);
+      if (existsSync(feedLedgerDir)) {
+        for (const file of readdirSync(feedLedgerDir)) {
+          if (!file.endsWith('.json')) continue;
+          const existingSlug = file.replace(/\.json$/, '');
+          if (!importedSlugs.has(existingSlug)) {
+            const { unlinkSync } = await import('node:fs');
+            unlinkSync(join(feedLedgerDir, file));
+            log(`  REMOVED stale card ${existingSlug} (no longer in upstream @ ${ref.slice(0, 8)})`);
+            stats.cards_removed++;
+          }
+        }
+      }
+    }
+  }
+
+  log('');
+  log('=== Pull Feeds Summary ===');
+  log(`  Feeds processed: ${stats.feeds_processed}`);
+  log(`  Feeds skipped:   ${stats.feeds_skipped}`);
+  log(`  Cards imported:  ${stats.cards_imported}`);
+  log(`  Cards skipped:   ${stats.cards_skipped}`);
+  log(`  Cards removed:   ${stats.cards_removed}`);
+  if (stats.errors.length > 0) {
+    log(`  Errors (${stats.errors.length}):`);
+    for (const e of stats.errors) log(`    - ${e}`);
+  }
+  if (args.dryRun) log('');
+  if (args.dryRun) log('DRY RUN: no files written. Remove --dry-run to apply.');
+  log('');
+
+  if (stats.feeds_skipped > 0 && stats.feeds_processed === 0) {
+    process.exit(1);
+  }
+}
+
+// ---------------------------------------------------------------------------
 // Main entry point
 // ---------------------------------------------------------------------------
 
@@ -1129,6 +1494,13 @@ async function main() {
 
   const repoPath = process.env.FORGE_REPO_PATH || resolve(dirname(__dirname));
   const indexDir = resolve(args.outputDir);
+
+  // Pattern exchange feed pull mode (forge#1746)
+  // Invoked as: node scripts/build-knowledge-index.mjs --pull-feeds [--dry-run] [--feed <slug>]
+  if (args.pullFeeds) {
+    await pullFeeds(repoPath, args);
+    return;
+  }
 
   // Resolve GitHub repo from args or forge.yaml
   let repo = args.repo;

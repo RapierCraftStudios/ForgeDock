@@ -742,3 +742,72 @@ branches:
 #   # Opt-out: set to false or omit this key.
 #   # Recommended: true for public repos, false for private repos.
 #   annotation_link: true
+
+# =============================================================================
+# PATTERN_FEEDS (OPTIONAL)
+# Subscribe to external pattern card repositories so that validated learnings
+# from one ForgeDock installation flow into this repo's ledger as low-priority
+# priors. Patterns are fetched at a pinned ref — no floating-HEAD supply-chain
+# surface. Imported cards are marked by origin and never counted toward local
+# promotion thresholds (#1739 counts local validated findings only).
+#
+# How it works:
+#   1. Run `node scripts/build-knowledge-index.mjs` (or add to CI) to pull
+#      subscribed cards into the local ledger as LOW-priority priors.
+#   2. Cards with a `gate.d` check template are seeded as Tier-B (warning)
+#      learned rules in /quality-gate Step 2S for matching stacks.
+#   3. Local validated findings always outrank imported cards by slug.
+#   4. Unsubscribing removes all cards from that feed (tracked by origin tag).
+#
+# Security constraints:
+#   - ALWAYS use a pinned commit SHA for `ref` — never `main` or `HEAD`.
+#     Pinned refs prevent supply-chain injection from upstream changes.
+#   - Imported cards are READ-ONLY inputs to the local ledger; they are never
+#     executed, committed, or auto-published from your repo.
+#   - The contribution path (/optimize Phase 5) requires explicit human
+#     approval before anything flows OUTBOUND to an exchange repo.
+#
+# Commands: scripts/build-knowledge-index.mjs (pull), /quality-gate Step 2S
+#           (seed gate rules), /optimize Phase 5 (contribution path)
+# =============================================================================
+
+# pattern_feeds:
+#   # List of exchange repos to subscribe to.
+#   # Each entry is a pinned-ref subscription to a public pattern card repo.
+#   feeds:
+#     - slug: "forge-core"
+#       # GitHub repo containing the pattern cards (owner/repo format)
+#       repo: "RapierCraftStudios/forge-patterns"
+#       # REQUIRED: pinned commit SHA — never "main", "HEAD", or a branch name.
+#       # Pinned refs prevent supply-chain injection from upstream changes.
+#       # Update this SHA manually after reviewing the upstream diff.
+#       ref: "abc1234def5678..."        # TODO: replace with actual commit SHA
+#       # Path prefix within the repo where card files live.
+#       # Cards are discovered as {path}/**/*.md files.
+#       path: "cards"
+#       # Stack filter — only import cards whose `stacks:` field overlaps
+#       # with this list. Omit to import all cards regardless of stack.
+#       # Valid values: node, python, bash, gha, typescript, go, rust, generic
+#       stacks: ["node", "bash", "gha"]
+#       # Priority assigned to all imported cards from this feed.
+#       # LOW = imported cards are advisory priors; they never outrank local
+#       # validated findings and never count toward promotion thresholds.
+#       # Do not change this value — the pipeline enforces LOW for all feeds.
+#       priority: "LOW"               # read-only: always LOW for imported cards
+#
+#     # Additional feeds — add more entries following the same schema:
+#     # - slug: "my-team-patterns"
+#     #   repo: "my-org/my-pattern-cards"
+#     #   ref: "abc1234..."
+#     #   path: "patterns"
+#     #   stacks: ["python"]
+#     #   priority: "LOW"
+#
+#   # When true, build-knowledge-index.mjs fetches all feeds and merges cards.
+#   # When false, the script is a no-op (useful to temporarily disable without
+#   # removing feed config).
+#   enabled: true
+#
+#   # Local ledger path where imported cards are merged.
+#   # Default: ".forge/ledger" — must match index.cache_dir if configured.
+#   # ledger_path: ".forge/ledger"

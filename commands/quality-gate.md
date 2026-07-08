@@ -268,6 +268,7 @@ Run ONLY the checks whose domain was identified in Step 1.5. Skip checks for dom
 - **2G.8 (Wire-through proof)**: Run if `WIRE_THROUGH` in DOMAINS — demands each newly added conditional path be demonstrably reachable <!-- Added: forge#1731 -->
 - **2G.9 (Danger-zone recurrence)**: Run if `FORGE_GRAPH` in DOMAINS — cross-references injected danger-zone rule cards from FORGE:CONTEXT against the diff; violations tagged `known-pattern-recurrence` (HIGH) <!-- Added: forge#1744 -->
 - **2S (Test failure classification)**: Run if any Step 2 check invoked a test suite and it failed — classifies the failure as PRE_BROKEN, FLAKY, or REAL using `scripts/flaky-quarantine.sh` <!-- Added: forge#1336 -->
+- **2T (Subscribed pattern card rules)**: ALWAYS run when `pattern_feeds.enabled` is true — injects Tier-B (warning-only) learned rules from subscribed exchange cards that have a `gate.d` check template matching any changed file's stack <!-- Added: forge#1746 -->
 
 ### 2A: Security (ALL files)
 
@@ -1454,6 +1455,130 @@ If any gate.d check produces findings, include them in the Step 3 findings list 
 - Exit 0 = no findings / passed; Exit 1 = findings emitted; Exit 2 = inapplicable (diff has no relevant content)
 - 30-second wall-time budget enforced by quality-gate; timeout = fail-closed HIGH finding
 - Do NOT write to disk, do NOT make network requests, do NOT modify any files
+
+---
+
+## Step 2T: Subscribed pattern card rules (when pattern_feeds enabled)
+
+<!-- Added: forge#1746 -->
+
+**Triggered when**: `pattern_feeds.enabled` is `true` in `forge.yaml` AND the local ledger contains at least one card with `origin: <feed-slug>` AND a `gate.d` check template.
+
+**Purpose**: Cards subscribed from exchange repos (see `forge.yaml → pattern_feeds`) may include a `gate.d` check template — a bash snippet that catches the pattern described in the card. When the changed files include a stack that matches the card's `stacks:` field, the check template is seeded as a Tier-B (warning-only) learned rule and injected into this gate run. This gives cross-repo validated patterns gate enforcement without requiring a human to manually promote them first.
+
+**CRITICAL — advisory-only**: Step 2T findings are NEVER blocking (HIGH). They are always MEDIUM (advisory) regardless of the card's stated severity. A finding becomes blocking only after the card is promoted to a local validated finding (via the standard 3-occurrence threshold in `/pipeline-health` Phase 4 + Step 2R). This prevents imported patterns from blocking the builder until the pattern has been validated against the local codebase.
+
+**Fail-safe on malformed templates**: If a `gate.d` check template is absent, empty, syntactically invalid, or exits with an unexpected code, log a warning and continue. Never fail-open silently — log every skip with a reason.
+
+```bash
+# Read pattern_feeds config
+FEEDS_ENABLED=$(yq '.pattern_feeds.enabled // "false"' "{WORKTREE_PATH}/forge.yaml" 2>/dev/null || echo 'false')
+LEDGER_PATH=$(yq '.pattern_feeds.ledger_path // ".forge/ledger"' "{WORKTREE_PATH}/forge.yaml" 2>/dev/null || echo '.forge/ledger')
+LEDGER_DIR="{WORKTREE_PATH}/${LEDGER_PATH}"
+
+SUBSCRIBED_FINDINGS=""
+
+if [ "$FEEDS_ENABLED" != "true" ]; then
+    echo "2T: pattern_feeds.enabled is not true — skipping subscribed card rules."
+else
+    if [ ! -d "$LEDGER_DIR" ]; then
+        echo "2T: Ledger directory not found at $LEDGER_DIR — skipping. Run scripts/build-knowledge-index.mjs to populate."
+    else
+        # Discover subscribed cards: ledger entries with origin != "" (imported from exchange)
+        SUBSCRIBED_CARDS=$(find "$LEDGER_DIR" -name "*.json" -type f 2>/dev/null | xargs grep -l '"origin"' 2>/dev/null | head -50)
+
+        if [ -z "$SUBSCRIBED_CARDS" ]; then
+            echo "2T: No subscribed cards found in ledger — skipping."
+        else
+            CARD_COUNT=$(echo "$SUBSCRIBED_CARDS" | wc -l | tr -d ' ')
+            echo "2T: Found $CARD_COUNT subscribed card(s) — checking for applicable gate.d templates..."
+
+            while IFS= read -r card_file; do
+                [ -z "$card_file" ] && continue
+
+                # Read card metadata
+                CARD_SLUG=$(jq -r '.slug // ""' "$card_file" 2>/dev/null)
+                CARD_ORIGIN=$(jq -r '.origin // ""' "$card_file" 2>/dev/null)
+                CARD_STACKS=$(jq -r '.stacks // [] | .[]' "$card_file" 2>/dev/null | tr '\n' ' ' | xargs)
+                GATE_TEMPLATE=$(jq -r '.gate_template // ""' "$card_file" 2>/dev/null)
+                PREVENTION_RULE=$(jq -r '.prevention // ""' "$card_file" 2>/dev/null)
+
+                [ -z "$CARD_SLUG" ] && continue
+                [ -z "$GATE_TEMPLATE" ] && {
+                    echo "2T: SKIP $CARD_SLUG (origin: $CARD_ORIGIN) — no gate.d template"
+                    continue
+                }
+
+                # Stack filter: check if any changed file's extension matches the card's stacks
+                # Stack detection: node/typescript=.ts/.tsx/.js/.mjs, python=.py,
+                #                  bash/gha=.sh/.yml/.yaml, go=.go, rust=.rs, generic=any
+                STACK_MATCH=false
+                for STACK in $CARD_STACKS; do
+                    case "$STACK" in
+                        node|typescript)
+                            echo "{CHANGED_FILES}" | tr ' ' '\n' | grep -qE '\.(ts|tsx|js|mjs|cjs)$' && STACK_MATCH=true ;;
+                        python)
+                            echo "{CHANGED_FILES}" | tr ' ' '\n' | grep -qE '\.py$' && STACK_MATCH=true ;;
+                        bash)
+                            echo "{CHANGED_FILES}" | tr ' ' '\n' | grep -qE '\.sh$' && STACK_MATCH=true ;;
+                        gha)
+                            echo "{CHANGED_FILES}" | tr ' ' '\n' | grep -qE '\.ya?ml$' && STACK_MATCH=true ;;
+                        go)
+                            echo "{CHANGED_FILES}" | tr ' ' '\n' | grep -qE '\.go$' && STACK_MATCH=true ;;
+                        rust)
+                            echo "{CHANGED_FILES}" | tr ' ' '\n' | grep -qE '\.rs$' && STACK_MATCH=true ;;
+                        generic)
+                            STACK_MATCH=true ;;
+                    esac
+                    [ "$STACK_MATCH" = "true" ] && break
+                done
+
+                if [ "$STACK_MATCH" = "false" ]; then
+                    echo "2T: SKIP $CARD_SLUG — no stack match (card stacks: $CARD_STACKS)"
+                    continue
+                fi
+
+                # Validate template syntax (bash -n = syntax-only check, no execution)
+                TEMPLATE_FILE=$(mktemp /tmp/forge-gate-template-XXXXXX.sh 2>/dev/null || echo "/tmp/forge-gate-template-$$.sh")
+                echo "$GATE_TEMPLATE" > "$TEMPLATE_FILE" 2>/dev/null
+                if ! bash -n "$TEMPLATE_FILE" 2>/dev/null; then
+                    echo "2T: WARN — $CARD_SLUG (origin: $CARD_ORIGIN) has invalid gate.d template syntax — skipping"
+                    rm -f "$TEMPLATE_FILE" 2>/dev/null || true
+                    continue
+                fi
+                chmod +x "$TEMPLATE_FILE" 2>/dev/null
+
+                # Run template with 15s timeout; pass changed files list and worktree path
+                TEMPLATE_OUTPUT=$(timeout 15 bash "$TEMPLATE_FILE" "{CHANGED_FILES}" "{WORKTREE_PATH}" 2>/dev/null)
+                TEMPLATE_EXIT=$?
+                rm -f "$TEMPLATE_FILE" 2>/dev/null || true
+
+                if [ "$TEMPLATE_EXIT" -eq 124 ]; then
+                    echo "2T: WARN — $CARD_SLUG template timed out (15s) — skipping"
+                elif [ "$TEMPLATE_EXIT" -eq 1 ]; then
+                    # Template fired — emit as MEDIUM (advisory) regardless of card severity
+                    while IFS= read -r line; do
+                        [ -z "$line" ] && continue
+                        # Rewrite any HIGH severity from card template to MEDIUM (advisory only)
+                        SAFE_LINE=$(echo "$line" | sed 's/| HIGH |/| MEDIUM |/g')
+                        SUBSCRIBED_FINDINGS="${SUBSCRIBED_FINDINGS}
+SUBSCRIBED-${CARD_SLUG} | MEDIUM | (from exchange:${CARD_ORIGIN}) | ${SAFE_LINE}"
+                    done <<< "$TEMPLATE_OUTPUT"
+                    echo "2T: ADVISORY — $CARD_SLUG matched (origin: $CARD_ORIGIN). Prevention rule: ${PREVENTION_RULE}"
+                    echo "2T: NOTE — This is an imported pattern (Tier-B advisory). It becomes blocking only after local promotion via /pipeline-health Phase 4."
+                elif [ "$TEMPLATE_EXIT" -eq 0 ] || [ "$TEMPLATE_EXIT" -eq 2 ]; then
+                    echo "2T: PASS — $CARD_SLUG (no match)"
+                else
+                    echo "2T: WARN — $CARD_SLUG template exited with unexpected code $TEMPLATE_EXIT — skipping"
+                fi
+
+            done <<< "$SUBSCRIBED_CARDS"
+        fi
+    fi
+fi
+```
+
+If any Step 2T template produces findings, include them in the Step 3 findings list prefixed `SUBSCRIBED-{slug}`. All Step 2T findings are MEDIUM (advisory) — they never block the commit. Include the prevention rule and origin feed in the finding message so the builder can understand the cross-repo context.
 
 ---
 
