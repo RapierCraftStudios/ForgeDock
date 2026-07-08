@@ -541,6 +541,47 @@ fi
 
 ## Phase 1D: Update Labels & Return Verdict
 
+### 1D.0: Finding Lifecycle Label Transition (MANDATORY — run before workflow label update)
+
+**Purpose**: Wire the investigation verdict into the finding-validation lifecycle. If the issue under investigation is a review-finding (carries `needs-validation`), translate the verdict into `validated` or `false-positive` using `transition-label.sh --validate`. This is the primary mechanism that resolves the `needs-validation → validated/false-positive` lifecycle gap. <!-- Added: forge#1730 -->
+
+**Run this block regardless of verdict (CONFIRMED, PARTIAL, INVALID) — the verdict-to-label mapping handles all cases:**
+
+```bash
+# Check if this issue is a finding awaiting validation
+ISSUE_LABELS=$(gh issue view {NUMBER} {GH_FLAG} --json labels --jq '[.labels[].name] | join(",")' 2>/dev/null || echo "")
+
+if echo "$ISSUE_LABELS" | grep -q "needs-validation"; then
+  echo "Issue #{NUMBER} has needs-validation — applying verdict label transition..."
+  RESOLUTION=$(resolve_script 'transition-label')
+  TIER="${RESOLUTION%%:*}"
+  SCRIPT_PATH="${RESOLUTION#*:}"
+  case "$TIER" in
+    adaptive|universal)
+      bash "$SCRIPT_PATH" --validate {VERDICT} {NUMBER} {GH_FLAG} || true
+      ;;
+    prose)
+      # Prose fallback: apply label transition directly via gh
+      if [ "{VERDICT}" = "CONFIRMED" ]; then
+        gh issue edit {NUMBER} {GH_FLAG} --add-label "validated" --remove-label "needs-validation" 2>/dev/null || true
+        echo "Applied: needs-validation → validated (verdict: CONFIRMED)"
+      else
+        gh issue edit {NUMBER} {GH_FLAG} --add-label "false-positive" --remove-label "needs-validation" 2>/dev/null || true
+        echo "Applied: needs-validation → false-positive (verdict: {VERDICT})"
+      fi
+      ;;
+  esac
+else
+  echo "Issue #{NUMBER} does not have needs-validation — no finding lifecycle transition needed"
+fi
+```
+
+**Verdict → label mapping**: `CONFIRMED` → `validated`; `PARTIAL`, `NOT-CONFIRMED`, `INVALID` → `false-positive`.
+
+**Idempotency**: `transition-label.sh --validate` is a no-op if the issue already has `validated` or `false-positive`, or if it lacks `needs-validation`. Safe to call on any issue.
+
+---
+
 **CONFIRMED or PARTIAL with decompose: NO**:
 ```bash
 gh issue edit {NUMBER} {GH_FLAG} --add-label "workflow:ready-to-build" --remove-label "workflow:investigating"
