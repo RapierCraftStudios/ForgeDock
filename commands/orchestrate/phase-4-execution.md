@@ -187,7 +187,7 @@ if [ "$FORGEDOCK_AVAILABLE" = "true" ]; then
   wait
   echo "Engine dispatch complete — advancing to Step 4B (completion sweep)"
 else
-  echo "WARNING: forgedock CLI not in PATH — falling back to Agent-spawn path (markdown-spec execution)"
+  echo "INFO: Using agent dispatch mode (forgedock CLI not in PATH — run \`npm install -g forgedock\` for engine-mode dispatch)"
   # Fall through to Agent-spawn template below. The SubagentStop hook (bin/hooks/interactive-engine.mjs)
   # bridges these runs to the engine run-log for state persistence even on the fallback path.
 fi

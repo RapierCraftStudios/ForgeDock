@@ -16,7 +16,7 @@ export default defineConfig({
   ],
 
   themeConfig: {
-    logo: 'https://avatars.githubusercontent.com/in/3731547?s=40',
+    logo: 'https://avatars.githubusercontent.com/in/4051319?s=40',
     siteTitle: 'ForgeDock',
 
     nav: [

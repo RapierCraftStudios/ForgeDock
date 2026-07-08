@@ -419,7 +419,7 @@ while true; do
       wait
       echo "Engine dispatch complete for fast-lane iteration $FAST_LANE_ITERATIONS"
     else
-      echo "WARNING: forgedock CLI not in PATH — falling back to Skill(orchestrate, fast-lane)"
+      echo "INFO: Using agent dispatch mode (forgedock CLI not in PATH — run \`npm install -g forgedock\` for engine-mode dispatch)"
       Skill("orchestrate", args="fast-lane")
     fi
   else
@@ -544,7 +544,7 @@ echo "$MILESTONES" | jq -c '.[]' | while IFS= read -r milestone; do
         wait
         echo "Engine dispatch complete for milestone '$MS_TITLE'"
       else
-        echo "WARNING: forgedock CLI not in PATH — falling back to Skill(orchestrate, milestone $MS_SLUG)"
+        echo "INFO: Using agent dispatch mode (forgedock CLI not in PATH — run \`npm install -g forgedock\` for engine-mode dispatch)"
         Skill("orchestrate", args="milestone $MS_SLUG")
       fi
     else
