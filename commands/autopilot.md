@@ -421,7 +421,7 @@ if echo "$RECON_SOURCES" | grep -qE '(^|,)ci(,|$)'; then
   DATE_1D_AGO=$(node -e "console.log(new Date(Date.now()-86400000).toISOString())")
 
   # 3-minute timeout per collector — a hung gh call costs one report line, not the cycle
-  TIMEOUT_CMD=$(command -v timeout 2>/dev/null && echo "timeout 180" || echo "")
+  TIMEOUT_CMD=$(command -v timeout >/dev/null 2>&1 && echo "timeout 180" || echo "")
 
   RECENT_FAILURES=$(${TIMEOUT_CMD} gh run list $GH_FLAG --limit 30 --json conclusion,createdAt,workflowName \
     --jq "[.[] | select(.conclusion == \"failure\" and .createdAt > \"$DATE_1D_AGO\")] | length" \
@@ -478,7 +478,7 @@ if echo "$RECON_SOURCES" | grep -qE '(^|,)backlog(,|$)'; then
   DATE_14D_AGO=$(node -e "console.log(new Date(Date.now()-14*86400000).toISOString())")
 
   # Reuse TIMEOUT_CMD from 1B if set; detect if this is the first collector run
-  TIMEOUT_CMD=${TIMEOUT_CMD:-$(command -v timeout 2>/dev/null && echo "timeout 180" || echo "")}
+  TIMEOUT_CMD=${TIMEOUT_CMD:-$(command -v timeout >/dev/null 2>&1 && echo "timeout 180" || echo "")}
 
   # Count by priority
   P0_COUNT=$(${TIMEOUT_CMD} gh issue list $GH_FLAG --state open --limit 200 --json labels \

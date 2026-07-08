@@ -984,8 +984,14 @@ function mirrorToOrphanBranch(indexDir, repoPath) {
       // Remove all tracked files from orphan branch working tree
       spawnSync('git', ['rm', '-rf', '--quiet', '.'], { cwd: repoPath, encoding: 'utf8', timeout: 10000 });
     } else {
-      // Switch to the branch
-      spawnSync('git', ['checkout', MIRROR_BRANCH], { cwd: repoPath, encoding: 'utf8', timeout: 10000 });
+      // Switch to the branch. A checkout aborts on a dirty working tree; if it
+      // fails we must NOT proceed — otherwise the index files get written to the
+      // repo root and committed onto the CURRENT branch instead of the mirror. <!-- forge#1838 review SEC-1 -->
+      const switchResult = spawnSync('git', ['checkout', MIRROR_BRANCH], { cwd: repoPath, encoding: 'utf8', timeout: 10000 });
+      if (switchResult.status !== 0) {
+        log(`WARNING: Could not switch to ${MIRROR_BRANCH} (working tree dirty?) — skipping mirror`);
+        return;
+      }
     }
 
     // Copy index files to repo root (they will be committed to the orphan branch)

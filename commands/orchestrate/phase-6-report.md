@@ -88,13 +88,19 @@ done
 # MERGE_READY_PRS now holds one entry per merge-ready PR in the batch (empty array if none).
 # Feeds the "### Merge-Ready" report block and the Implementation Results table row (Step 6B).
 
-# Pre-build the single batch-merge command (rendered verbatim as {MERGE_READY_CMD} in Step 6B —
+# Pre-build the batch-merge command (rendered verbatim as {MERGE_READY_CMD} in Step 6B —
 # computed here, not inside the report template, so Step 6B stays plain template text with no
-# nested code fences of its own).
+# nested code fences of its own). `gh pr merge` accepts only ONE PR selector per invocation,
+# so chain one `gh pr merge` per PR with && rather than passing a space-separated list (which
+# `gh` rejects). <!-- forge#1838 review: BUG-3 -->
 MERGE_READY_CMD=""
 if [ "${#MERGE_READY_PRS[@]}" -gt 0 ]; then
-  PR_LIST=$(printf '%s\n' "${MERGE_READY_PRS[@]}" | cut -d'|' -f2 | tr '\n' ' ')
-  MERGE_READY_CMD="gh pr merge ${PR_LIST}--merge -R {GH_REPO}"
+  for _entry in "${MERGE_READY_PRS[@]}"; do
+    _pr=$(printf '%s' "$_entry" | cut -d'|' -f2)
+    [ -z "$_pr" ] && continue
+    [ -n "$MERGE_READY_CMD" ] && MERGE_READY_CMD="${MERGE_READY_CMD} && "
+    MERGE_READY_CMD="${MERGE_READY_CMD}gh pr merge ${_pr} --merge -R {GH_REPO}"
+  done
 fi
 ```
 
@@ -188,8 +194,9 @@ These PRs were remediated and re-reviewed to a clean `APPROVED` verdict after an
 
 **One action to land all {N}:** `{MERGE_READY_CMD}`
 
-(`{MERGE_READY_CMD}` is pre-built in Step 6A.5 by joining every PR number from `MERGE_READY_PRS`
-— render it verbatim here as plain text, no code fence.)
+(`{MERGE_READY_CMD}` is pre-built in Step 6A.5 by chaining one `gh pr merge <pr> --merge` per PR
+in `MERGE_READY_PRS` with `&&` — `gh pr merge` takes a single PR selector, so a space-separated
+list would be rejected. Render it verbatim here as plain text, no code fence.)
 
 {ELSE: omit this section entirely — do not print an empty "Merge-Ready" heading.}
 
