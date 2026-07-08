@@ -244,7 +244,50 @@ Build a **directed acyclic graph (DAG)** of per-issue dependencies. Each issue g
 - **Domain serialization edges**: DATABASE issues form a linear chain (each has the previous DATABASE issue as its predecessor). Same-small-directory issues (Layer 2) and high-fan-in file issues (Layer 3) get directed edges as per Step 3C rules.
 - **Conservative fallback edges**: Low-confidence issues (Layer 4) get edges to same-domain issues as per Step 3C rules.
 - **Co-change coupling edges** <!-- Added: forge#1196 -->: High co-change file pairs (Layer 5, 3+ shared commits in the bounded window) that span two different issues get a directed edge using the same lower-issue-number-is-predecessor convention as Layer 1. Verified-independent pairs (Layer 5, zero shared commits) may instead REMOVE an edge that Layer 2 or Layer 4 would otherwise have added for that pair — Layer 1 and Layer 3 edges are never removed by a Layer 5 downgrade.
+- **Claims-board downgrade (Layer 2/4 edges only)** <!-- Added: forge#1736 -->: After dispatch begins (Phase 4A), when both issues in a Layer-2 or Layer-4 serialized pair post `FORGE:CLAIM` annotations on the coordination issue and their claimed file sets are **disjoint** (no path appears in both claims), the serialization edge for that pair MAY be relaxed — the blocked issue becomes ready. This downgrade is **never** applied to Layer-1 (same-file) or Layer-3 (high-fan-in) edges. See Step 4B: Claims-board relaxation sweep for the runtime check.
 - **No artificial concurrency limit by default** — all issues with empty predecessor sets dispatch simultaneously. The only constraints are file overlap, explicit dependencies, and co-change coupling. When `forge.yaml → orchestration.max_concurrent` is set, the dispatch loop queues excess ready issues and releases them as running workers complete (see Engine mode § Concurrency model).
+
+### Step 3D.1: Create coordination issue (claims board) <!-- Added: forge#1736 -->
+
+**When to run**: Immediately after DAG construction (Step 3D), before Step 3D.5 cycle detection. Run once per orchestration batch. Skip if `FORGE_COORD_ISSUE` is already set (e.g., resumed session).
+
+**Purpose**: Create a dedicated GitHub issue that serves as the shared claims board for the batch. Agents post `FORGE:CLAIM` annotations here when they begin implementation; they post `FORGE:CLAIM_RELEASED` when they reach a terminal state. The orchestrator reads active claims during the Layer-2/4 relaxation sweep (Step 4B) to determine whether serialized pairs can now run in parallel.
+
+```bash
+# Create coordination issue for this orchestration batch
+BATCH_ISSUE_COUNT="${#ISSUES[@]}"
+BATCH_ID="$(date -u +%Y%m%dT%H%M%S)-$$"
+
+COORD_ISSUE_BODY="## Orchestration Batch Claims Board
+
+This issue is the claims board for an orchestration batch of ${BATCH_ISSUE_COUNT} issues.
+Agents post \`FORGE:CLAIM\` here on build start and \`FORGE:CLAIM_RELEASED\` on terminal state.
+
+**Batch ID**: ${BATCH_ID}
+**Issues in batch**: ${ISSUES[*]/#/#}
+**Created**: $(date -u +%Y-%m-%dT%H:%M:%SZ)
+
+<!-- FORGE:COORD_ISSUE -->
+<!-- FORGE:BATCH_ID: ${BATCH_ID} -->"
+
+COORD_ISSUE_URL=$(gh issue create -R {GH_REPO} \
+  --title "orchestrate: claims board for batch ${BATCH_ID}" \
+  --body "$COORD_ISSUE_BODY" \
+  --label "automation" 2>/dev/null || echo "")
+
+if [ -z "$COORD_ISSUE_URL" ]; then
+  echo "WARNING: failed to create coordination issue — claims board disabled for this batch. Layer-2/4 relaxation will not run."
+  FORGE_COORD_ISSUE=""
+else
+  COORD_ISSUE_NUMBER=$(echo "$COORD_ISSUE_URL" | grep -oE '[0-9]+$')
+  FORGE_COORD_ISSUE="$COORD_ISSUE_URL"
+  echo "Coordination issue created: ${COORD_ISSUE_URL} (#${COORD_ISSUE_NUMBER})"
+  export FORGE_COORD_ISSUE
+  export COORD_ISSUE_NUMBER
+fi
+```
+
+**Idempotency**: If `FORGE_COORD_ISSUE` is already set in the environment (e.g., after a compaction / orchestrator restart), skip creation and use the existing URL. The coordination issue persists for the lifetime of the batch.
 
 **Terminology:**
 - **Ready issues**: Issues whose predecessor set is empty (all predecessors have reached terminal state or were never added)

@@ -1,0 +1,9 @@
+{
+  "description": "CLAIM_RELEASED — control marker signals that a Holder's resource claim has been released",
+  "input": "<!-- FORGE:CLAIM_RELEASED -->",
+  "expect": {
+    "type": "CLAIM_RELEASED",
+    "valid": true,
+    "sentinelState": "complete"
+  }
+}

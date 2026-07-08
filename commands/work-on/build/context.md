@@ -314,6 +314,93 @@ done <<< "$DEVDOCS_APPLICABLE"
 
 ---
 
+## Phase C-0.5: Active Peer Claims Reader (conditional — when running under orchestration batch) <!-- Added: forge#1736 -->
+
+**Skip if**: `FORGE_COORD_ISSUE` is not set. This phase is a no-op when the agent is not running under an `/orchestrate` batch — no error, no output.
+
+**Purpose**: Before writing any code, check whether peer agents in the same orchestration batch have posted `FORGE:CLAIM` annotations on the coordination issue that overlap with this agent's planned files. If overlapping claims exist, inject them into the builder's mental model as explicit constraints so the builder avoids modifying interfaces the peer has reserved.
+
+**Time budget**: 20 seconds. If exceeded, log a warning and continue without peer-claim constraints.
+
+```bash
+if [ -n "${FORGE_COORD_ISSUE:-}" ]; then
+  COORD_NUM=$(echo "$FORGE_COORD_ISSUE" | grep -oE '[0-9]+$')
+  if [ -n "$COORD_NUM" ]; then
+    echo "Phase C-0.5: reading active peer claims from coordination issue #${COORD_NUM}"
+
+    # Fetch all comments from coordination issue
+    COORD_COMMENTS=$(gh api repos/{GH_REPO}/issues/${COORD_NUM}/comments \
+      --jq 'map(select(.body | contains("<!-- FORGE:CLAIM -->")))' 2>/dev/null || echo '[]')
+
+    # Extract active claims: FORGE:CLAIM comments that are NOT followed by FORGE:CLAIM_RELEASED
+    # from the same Holder. We identify active claims by the presence of CLAIM:COMPLETE
+    # and the absence of a subsequent CLAIM_RELEASED referencing the same Holder.
+    ACTIVE_PEER_CLAIMS=$(echo "$COORD_COMMENTS" | jq -r '.[] |
+      select(.body | contains("<!-- CLAIM:COMPLETE -->")) |
+      select(.body | contains("<!-- FORGE:CLAIM_RELEASED -->") | not) |
+      "Holder: " + (.body | capture("\\*\\*Holder\\*\\*: (?P<h>[^\n]+)").h // "unknown") +
+      "\nFiles: " + (.body | capture("\\*\\*Files\\*\\*: (?P<f>[^\n]+)").f // "none")
+    ' 2>/dev/null | grep -v "^Holder: #${NUMBER}" || echo "")
+    # Note: grep -v filters out this agent's own claim (same issue number) — peers only
+
+    if [ -n "$ACTIVE_PEER_CLAIMS" ]; then
+      echo "Active peer claims found:"
+      echo "$ACTIVE_PEER_CLAIMS"
+
+      # Extract claimed file paths from peer claims
+      PEER_CLAIMED_FILES=$(echo "$COORD_COMMENTS" | jq -r '.[] |
+        select(.body | contains("<!-- CLAIM:COMPLETE -->")) |
+        select(.body | contains("<!-- FORGE:CLAIM_RELEASED -->") | not) |
+        .body' 2>/dev/null \
+        | grep -v "^#${NUMBER}" \
+        | awk '/\*\*Files\*\*:/{found=1; next} /\*\*Interfaces\*\*:/{found=0} found{print}' \
+        | grep -oP '[a-zA-Z0-9._/-]+\.(py|tsx?|jsx?|sql|json|ya?ml|md|mjs|sh)' \
+        | sort -u || echo "")
+
+      # Check overlap with this agent's planned files (from FORGE:CONTRACT)
+      OWN_FILES=$(gh api repos/{GH_REPO}/issues/{NUMBER}/comments \
+        --jq '[.[] | select(.body | contains("FORGE:CONTRACT"))] | last | .body' 2>/dev/null \
+        | grep -oP '`[^`]+\.(py|tsx?|jsx?|sql|json|ya?ml|md|mjs|sh)`' \
+        | tr -d '`' | sort -u || echo "")
+
+      OVERLAP=$(comm -12 <(echo "$PEER_CLAIMED_FILES") <(echo "$OWN_FILES") 2>/dev/null || echo "")
+
+      if [ -n "$OVERLAP" ]; then
+        PEER_CLAIMS_CONSTRAINT="
+⚠ CLAIMS BOARD CONSTRAINT: The following files are claimed by peer agents in this orchestration batch.
+You MUST NOT modify the public interfaces of these files without first checking the peer's FORGE:CLAIM
+on coordination issue #${COORD_NUM} to understand what interfaces they have reserved.
+
+Overlapping claimed files:
+$(echo "$OVERLAP" | sed 's/^/  - /')
+
+Peer claims:
+$(echo "$ACTIVE_PEER_CLAIMS" | sed 's/^/  /')
+
+If you need to change an interface claimed by a peer, post a comment on coordination issue #${COORD_NUM}
+describing the conflict — this routes to Phase 2.5 arbitration."
+      else
+        PEER_CLAIMS_CONSTRAINT="
+ℹ CLAIMS BOARD: Peer claims exist but no file overlap with this agent's planned files.
+Peer agents are working on independent file sets — no interface constraint applies.
+Peer claims (for reference): $(echo "$ACTIVE_PEER_CLAIMS" | head -5)"
+      fi
+
+      # Store for injection into the FORGE:CONTEXT comment (Phase C4)
+      export PEER_CLAIMS_CONSTRAINT
+    else
+      echo "Phase C-0.5: no active peer claims found on coordination issue #${COORD_NUM}"
+      PEER_CLAIMS_CONSTRAINT=""
+      export PEER_CLAIMS_CONSTRAINT
+    fi
+  fi
+fi
+```
+
+**Constraint injection into FORGE:CONTEXT**: When `PEER_CLAIMS_CONSTRAINT` is set, append it to the `### Known Pitfalls for This Area` section of the FORGE:CONTEXT comment (Phase C4). This ensures the builder sees peer claims in the same context block as historical review findings — a single consolidated constraint surface. If `PEER_CLAIMS_CONSTRAINT` is empty, the section is omitted.
+
+---
+
 ## Phase C0: Prior Investigation Findings (from Gists)
 
 Scan the issue body for `<!-- FORGE:PRIOR_GIST: {url} -->` annotations embedded by the decompose or orchestrate phases (GIST-02). Also check for `<!-- FORGE:MILESTONE_INDEX: {url} -->` annotations — these reference a milestone-level index Gist (GIST-04) that aggregates all investigation Gist URLs for a milestone into a single reference. Both annotation types reference Knowledge Gists created during upstream investigation (GIST-01) and contain structured findings — verdict, root cause, recommendation, affected files — that the builder needs before writing code.
@@ -600,6 +687,12 @@ gh issue comment {NUMBER} -R {GH_REPO} --body "<!-- FORGE:CONTEXT -->
      If no FORGE:PRIOR_GIST annotations were found in the issue body: omit this section entirely.
      If Gist fetches failed: include the failure note so the builder knows context was attempted. -->
 {GIST_SUMMARIES}
+
+### Claims Board Constraints
+<!-- Active peer claims from the orchestration coordination issue (Phase C-0.5).
+     If FORGE_COORD_ISSUE is not set (not running under /orchestrate): omit this section entirely.
+     If no peer claims overlap this agent's planned files: write 'No overlapping peer claims.' -->
+{PEER_CLAIMS_CONSTRAINT}
 
 ### Known Pitfalls for This Area
 <!-- Structured prevention rules extracted from past review-finding issues (Pattern Metadata section).

@@ -18,8 +18,9 @@ export const SentinelState = {
 };
 
 /**
- * All 13 reserved annotation types from spec §4.
+ * All 15 reserved annotation types from spec §4.
  * Spec ref: §4.1 lifecycle, §4.2 cross-artifact, §4.3 control/error markers.
+ * Added CLAIM and CLAIM_RELEASED in forge#1736 — claims board for claim-level parallelism.
  */
 export const RESERVED_TYPES = {
   // §4.1 Lifecycle annotations
@@ -92,6 +93,25 @@ export const RESERVED_TYPES = {
     inlineValue: false,
     requiredFields: [],
   },
+  /**
+   * CLAIM — an agent's active resource reservation, posted on the coordination issue
+   * (claims board) when the agent begins implementation under an orchestration batch.
+   * Required fields:
+   *   Holder     — the issue/run reference holding this claim (e.g. "#1736 / run-abc")
+   *   Files      — newline-separated list of claimed file paths
+   *   Interfaces — preserved interface contracts (function signatures, API shapes)
+   *   TTL        — auto-expire condition ("terminal state of Holder issue")
+   * Released by posting a CLAIM_RELEASED control marker referencing the same Holder.
+   * <!-- Added: forge#1736 — claims board for claim-level parallelism -->
+   */
+  CLAIM: {
+    type: 'CLAIM',
+    category: Category.LIFECYCLE,
+    completionSentinel: 'CLAIM:COMPLETE',
+    partialSentinel: null,
+    inlineValue: false,
+    requiredFields: ['Holder', 'Files', 'Interfaces', 'TTL'],
+  },
 
   // §4.2 Cross-artifact annotations
   KNOWLEDGE_GIST: {
@@ -158,6 +178,23 @@ export const RESERVED_TYPES = {
   },
   PUSH_FAILED: {
     type: 'PUSH_FAILED',
+    category: Category.CONTROL,
+    completionSentinel: null,
+    partialSentinel: null,
+    inlineValue: false,
+    controlMarker: true,
+    requiredFields: [],
+  },
+  /**
+   * CLAIM_RELEASED — posted on the coordination issue when the Holder's issue reaches
+   * a terminal state (workflow:merged, workflow:invalid, needs-human). Signals that all
+   * files and interfaces declared in the preceding CLAIM annotation are no longer held.
+   * Consumers MUST treat any CLAIM without a subsequent CLAIM_RELEASED from the same
+   * Holder as expired when the Holder issue reaches a terminal state.
+   * <!-- Added: forge#1736 — claims board for claim-level parallelism -->
+   */
+  CLAIM_RELEASED: {
+    type: 'CLAIM_RELEASED',
     category: Category.CONTROL,
     completionSentinel: null,
     partialSentinel: null,
