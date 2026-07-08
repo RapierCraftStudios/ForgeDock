@@ -53,6 +53,7 @@ This quality gate uses **domain detection** to adapt to your project's actual te
 | FORGE_GRAPH | `commands/*.md` specs or `scripts/*` files change (ForgeDock self-consistency) |
 | CONFIG_SCHEMA | Config files for external tools (`traefik/`, `infra/nginx/`, `k8s/`, `terraform/`, `*.conf`, `*.toml` in infra paths, or `docker-compose*.yml` with service definition changes) |
 | BILLING | Files under `billing/`, `credits/`, `subscription`, `ledger`, or `payment` paths |
+| WIRE_THROUGH | Any code file where the diff adds new conditional lines (`if`/`elif`/`else`/`guard`/`feature flag`) — triggers wire-through proof check <!-- Added: forge#1731 --> |
 
 **Stack-agnostic coverage**: The example domains above reflect common patterns caught in production; they are not requirements. A Go or Ruby project benefits from SECURITY checks. A Node.js project benefits from FRONTEND, PROXY, and DEPLOY checks. Any project benefits from DATABASE and WORKFLOW checks when those file types are present. The stack-specific examples (Python routers, SOPS secrets chain, FastAPI layouts, appleboy SSH deploys) are illustrative — the domain detection system applies the applicable subset to any codebase.
 
@@ -107,6 +108,7 @@ Before running checks, classify the changed files into domains. This avoids runn
 | `*.py` in `routers/` where the diff removes a line containing an or-gate condition (lines starting with `-` containing `if.*or`) | ROUTER_BUG |
 | `commands/*.md` or `scripts/*` files (ForgeDock repo only — dogfoods its own spec graph) | FORGE_GRAPH |
 | Files under `traefik/`, `infra/nginx/`, `k8s/`, `terraform/`, or files matching `*.conf`, `*.toml` in infra paths, or `docker-compose*.yml` with service definition changes | CONFIG_SCHEMA |
+| Executable code files (`.py`, `.ts`, `.tsx`, `.js`, `.sh`) where the diff adds new `if`/`elif`/`else`/guard/feature-flag conditional lines — NOT `.md` prose spec files | WIRE_THROUGH *(universal — see 2G.8)* <!-- Added: forge#1731 --> |
 
 **Apply the classification:**
 
@@ -212,6 +214,22 @@ for f in "${CHANGED_FILES_ARR[@]}"; do
     esac
 done
 
+# Check for newly added conditional paths in code files — wire-through proof trigger <!-- Added: forge#1731 -->
+# Scoped to NEWLY ADDED lines only (lines starting with '+' in the diff, excluding the '+++' header).
+# Pre-existing conditionals are never flagged — only additions.
+# Applies to executable code files ONLY (.py, .ts, .tsx, .js, .sh) — NOT .md prose spec files,
+# which use 'if'/'else' in natural language and pseudocode that is never executed.
+while IFS= read -r f; do
+    [ -z "$f" ] && continue
+    NEW_CONDITIONALS=$(git diff HEAD -- "$f" 2>/dev/null \
+        | grep -E '^\+' | grep -v '^+++' \
+        | grep -E '^\+\s*(if |elif |else:?\s*$|if\(|elif\()|\bguard\b|\bfeature.?flag\b|FEATURE_FLAG|ENABLE_[A-Z_]+\s*=|DISABLE_[A-Z_]+\s*=')
+    if [ -n "$NEW_CONDITIONALS" ]; then
+        DOMAINS="$DOMAINS WIRE_THROUGH"
+        break
+    fi
+done < <(echo {CHANGED_FILES} | tr ' ' '\n' | grep -E '\.(py|ts|tsx|js|sh)$')
+
 # SECURITY is always included for any code file
 DOMAINS="SECURITY $DOMAINS"
 
@@ -246,6 +264,7 @@ Run ONLY the checks whose domain was identified in Step 1.5. Skip checks for dom
 - **2P (External tool config schema)**: Run if `CONFIG_SCHEMA` in DOMAINS
 - **2Q (Billing)**: Run if `BILLING` in DOMAINS
 - **2R (Registry checks)**: ALWAYS run — executes all promoted checks from `scripts/check-registry/manifest.json` <!-- Added: forge#1331 -->
+- **2G.8 (Wire-through proof)**: Run if `WIRE_THROUGH` in DOMAINS — demands each newly added conditional path be demonstrably reachable <!-- Added: forge#1731 -->
 - **2S (Test failure classification)**: Run if any Step 2 check invoked a test suite and it failed — classifies the failure as PRE_BROKEN, FLAKY, or REAL using `scripts/flaky-quarantine.sh` <!-- Added: forge#1336 -->
 
 ### 2A: Security (ALL files)
@@ -571,6 +590,94 @@ fi
 ```
 
 Report each conflict as **HIGH** — a shadowed native command is a silent user-facing regression (the native command becomes unreachable without warning). The builder must rename the conflicting file before the commit. Blocklist updates are in `scripts/check-native-conflicts.sh` (NATIVE_COMMANDS array).
+
+### 2G.8: Wire-through proof for newly added conditional paths
+
+<!-- Added: forge#1731 -->
+
+**Triggered when**: `WIRE_THROUGH` in DOMAINS — the diff adds new conditional lines (`if`/`elif`/`else`/guard/feature-flag) in executable code files (`.py`, `.ts`, `.tsx`, `.js`, `.sh`). Markdown spec files are explicitly excluded — prose docs use `if`/`else` as natural language, not executable conditionals.
+
+**Why this matters**: A recurring defect class ships dead-on-arrival: guards, feature flags, validators, and error branches that are added to the codebase but never actually execute. Examples: #1230 (orchestrate Layer 5 `LAYER1_FILES` never populated — dead code), #1522 (validator pointed at wrong path — permanent no-op), #1244 (guard added to fix Layer 5 itself never fires), #1580 (hook reads wrong transcript schema). Nothing in the quality gate previously asked the one question that kills this class: *prove this new conditional actually runs.*
+
+**Scope boundary — newly added lines ONLY**: This check scans lines beginning with `+` in the diff (excluding `+++` file-header lines). Pre-existing conditionals are **never** flagged. A conditional that existed before this diff is outside scope regardless of whether it has tests.
+
+**Acceptance criteria for each new conditional**:
+
+Each newly added `if`/`elif`/`else` block or guard construct must satisfy AT LEAST ONE of:
+
+1. **Test present in the diff**: The same diff (or any test file in the diff) contains a call that exercises the guarded path — a test function, an invocation with a parameter that triggers the condition, or an assertion on the conditional branch's output.
+2. **Execution trace annotation**: The new conditional line is immediately preceded or followed by a comment `# WIRE:PROVEN — <method>` where `<method>` describes how the path was verified to fire (e.g., `# WIRE:PROVEN — manual: ran with --debug flag, confirmed guard triggered`).
+3. **Trivial re-guard** (auto-exempt): The conditional is a null-check, length-check, or type-check on a value already validated upstream on the same code path AND the new condition's body is a `return`, `continue`, `break`, `pass`, or single-line assignment with no side effects. These are defensive re-guards with no new behavior.
+
+**Check logic**:
+
+```bash
+# WIRE_THROUGH check — runs when WIRE_THROUGH in DOMAINS
+WIRE_THROUGH_FINDINGS=""
+
+while IFS= read -r f; do
+    [ -z "$f" ] && continue
+    # Extract newly added conditional lines from the diff (+ lines, not +++ header)
+    NEW_CONDS=$(git diff HEAD -- "$f" 2>/dev/null \
+        | grep -E '^\+' | grep -v '^+++' \
+        | grep -nE '\bif\b|\belif\b|\belse\b|guard|feature.?flag|FEATURE_FLAG|ENABLE_|DISABLE_')
+
+    [ -z "$NEW_CONDS" ] && continue
+
+    # For each new conditional line, check for acceptance criteria
+    while IFS= read -r cond_line; do
+        [ -z "$cond_line" ] && continue
+        LINENO=$(echo "$cond_line" | cut -d: -f1 | tr -d '+')
+
+        # Criterion 3 auto-exempt: trivial re-guard (null/len/type check with no-side-effect body)
+        COND_TEXT=$(echo "$cond_line" | sed 's/^+//')
+        if echo "$COND_TEXT" | grep -qE '\bis (None|null|undefined)\b|\blen\s*\(|\bisinstance\s*\(|\btypeof\b|\bif not\b|\bif !\b'; then
+            # Check the body is trivial (next line is return/continue/break/pass/simple assign)
+            # Use git diff context to read adjacent lines — simplified: check annotation only
+            NEXT_CONTEXT=$(git diff HEAD -- "$f" 2>/dev/null | grep -A2 "^+${COND_TEXT}" | tail -2)
+            if echo "$NEXT_CONTEXT" | grep -qE '^\+\s*(return|continue|break|pass|[a-zA-Z_]+ = [^(]+$)'; then
+                continue  # Auto-exempt trivial re-guard
+            fi
+        fi
+
+        # Criterion 2: WIRE:PROVEN annotation present in diff near this line
+        if git diff HEAD -- "$f" 2>/dev/null | grep -qE '^\+.*#\s*WIRE:PROVEN'; then
+            continue  # Annotated — accepted
+        fi
+
+        # Criterion 1: test exercising this path present anywhere in the diff
+        # Look for test patterns added in the diff (test_, def test, it(, describe(, assert)
+        DIFF_HAS_TEST=$(git diff HEAD -- 2>/dev/null | grep -E '^\+' | grep -v '^+++' \
+            | grep -E 'def test_|test\(|it\(|describe\(|assert |expect\(' | head -1)
+        if [ -n "$DIFF_HAS_TEST" ]; then
+            continue  # Test present in diff — accepted
+        fi
+
+        # None of the criteria met — emit a finding
+        WIRE_THROUGH_FINDINGS="${WIRE_THROUGH_FINDINGS}
+WIRE_THROUGH | HIGH | $f:${LINENO:-?} | Newly added conditional '$(echo "$COND_TEXT" | xargs | head -c 80)' has no wire-through proof. Add a test that triggers this path, OR annotate with '# WIRE:PROVEN — <method>', OR verify it qualifies as a trivial re-guard (null/len/type check with no-side-effect body)."
+    done <<< "$NEW_CONDS"
+done < <(echo {CHANGED_FILES} | tr ' ' '\n' | grep -E '\.(py|ts|tsx|js|sh)$')
+
+# Emit findings
+if [ -n "$WIRE_THROUGH_FINDINGS" ]; then
+    echo "$WIRE_THROUGH_FINDINGS"
+fi
+```
+
+**Severity**: **HIGH** — a guard that never fires is functionally equivalent to dead code and defeats the purpose of the defensive check. The review agent has consistently flagged this class (see motivation issues above). Blocking at gate eliminates the 1–2 week detection lag.
+
+**Auto-exempt patterns** (builder does not need to prove these):
+- Null/None/undefined checks where body is `return`/`continue`/`break`/`pass`
+- Length checks where body is a single-line assignment or early return
+- Type checks (`isinstance`, `typeof`) where body is a single-line coercion
+
+**Escaping the check legitimately**:
+- Add a test in the same diff that exercises the conditional
+- Add `# WIRE:PROVEN — <method>` immediately before or after the new conditional
+- Ensure the conditional qualifies as a trivial re-guard (see criterion 3 above)
+
+Do NOT suppress the finding by making the check less strict or adding fake no-op tests. The intent is a real proof that the path is reachable. <!-- Added: forge#1731 -->
 
 ### 2H: Asyncio cancellation safety (Python async code)
 

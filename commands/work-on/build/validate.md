@@ -39,6 +39,34 @@ In all other cases, the gate MUST run.
 
 ---
 
+## Phase V1: Builder Self-Check — Wire-Through Proof (MANDATORY, run BEFORE quality gate loop)
+
+<!-- Added: forge#1731 -->
+
+Before invoking the quality gate, the builder MUST perform a self-check on newly added conditional paths. This mirrors the quality gate's 2G.8 check and allows the builder to resolve gaps before the gate invocation rather than after.
+
+**Self-check protocol**:
+
+1. Scan the staged diff for newly added conditional lines:
+   ```bash
+   git diff HEAD -- {CHANGED_FILES} | grep -E '^\+' | grep -v '^+++' \
+       | grep -E '\bif\b|\belif\b|\belse\b|guard|feature.?flag|FEATURE_FLAG|ENABLE_|DISABLE_'
+   ```
+
+2. For each new conditional found, confirm at least ONE of:
+   - **Test in diff**: A test function or assertion in the diff exercises this conditional branch (e.g., calls the function with parameters that trigger the `if`, asserts the guarded output, or triggers the error path deliberately)
+   - **WIRE:PROVEN annotation**: Add `# WIRE:PROVEN — <method>` immediately before or after the new conditional, describing how you verified it fires (e.g., `# WIRE:PROVEN — gate logic: condition is checked before every call; unreachable path would raise ValueError visible in tests`)
+   - **Trivial re-guard** (auto-exempt): The conditional is a null/length/type check whose body is `return`/`continue`/`break`/`pass` or a single-line assignment — defensive re-guards with no new behavior
+
+3. If none of the above is true for a new conditional, either:
+   - Add a test or trace that exercises the path before staging
+   - Add a `# WIRE:PROVEN — <method>` annotation explaining how you verified reachability
+   - Confirm it qualifies as a trivial re-guard
+
+**Why this matters**: Guards, flags, and validators that are never exercised are functionally dead code. This class has cost multiple sprint cycles in this pipeline (#1230, #1244, #1522, #1580). The self-check catches gaps before the quality gate fires, reducing iteration count. <!-- Added: forge#1731 -->
+
+---
+
 ## Phase V1: Quality Gate Loop
 
 **Loop protocol** — the gate MUST pass or exhaust iterations before returning:

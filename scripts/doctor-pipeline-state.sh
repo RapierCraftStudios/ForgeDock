@@ -29,9 +29,11 @@
 # are silently disabled and warrants investigating the underlying `gh` failure.
 #
 # Exit codes:
-#   0 = no findings (pipeline healthy)
+#   0 = no findings (pipeline healthy — all checks ran and passed)
 #   1 = findings present
 #   2 = error (missing deps, bad args)
+#   3 = inconclusive — checks were skipped due to gh API failures (total=0 but checks_skipped>0);
+#       pipeline health cannot be confirmed; treat as UNKNOWN, not healthy
 #
 # Depends on: gh (GitHub CLI), jq, date
 #
@@ -429,6 +431,12 @@ if $JSON_MODE; then
     --argjson findings "$FINDINGS_JSON" \
     --argjson summary "$SUMMARY_JSON" \
     '{findings:$findings,summary:$summary}'
+  # WIRE:PROVEN — reachable when gh API fails during a doctor run with no prior findings:
+  # all I1/I2/I3/I6 checks fail and add_skip() is called; CHECKS_SKIPPED > 0; TOTAL stays 0.
+  # Verified by the scenario in #1590: total gh outage → all list checks skipped → previously exit 0.
+  if [ "$TOTAL" -eq 0 ] && [ "$CHECKS_SKIPPED" -gt 0 ]; then
+    exit 3  # INCONCLUSIVE — checks skipped due to gh failures; cannot confirm healthy
+  fi
   [ "$TOTAL" -eq 0 ] && exit 0 || exit 1
 fi
 
@@ -443,11 +451,14 @@ if [ "$CHECKS_SKIPPED" -gt 0 ]; then
 fi
 
 if [ "$TOTAL" -eq 0 ]; then
+  # WIRE:PROVEN — same trigger as JSON mode branch above: TOTAL=0 and CHECKS_SKIPPED>0.
+  # This branch executes when the outer 'if [ "$TOTAL" -eq 0 ]' block is entered
+  # and CHECKS_SKIPPED > 0, i.e., at least one gh API call failed during the run.
   if [ "$CHECKS_SKIPPED" -gt 0 ]; then
     echo "  No stalls detected in checks that ran, but $CHECKS_SKIPPED check(s) were skipped"
     echo "  due to gh API failures — pipeline health is INCONCLUSIVE, not confirmed healthy."
     echo ""
-    exit 0
+    exit 3  # INCONCLUSIVE — cannot confirm healthy when checks were skipped
   fi
   echo "  No stalls detected. Pipeline is healthy."
   echo ""
