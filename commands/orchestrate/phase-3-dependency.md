@@ -162,11 +162,111 @@ When file extraction yields **fewer than 2 file paths** for an issue (common for
 
 **Rationale**: The cost of a false-negative (two agents conflict → one fails with merge error, wasting the full agent run) far exceeds the cost of a false-positive (an issue waits for one predecessor before starting). Always err toward serialization when uncertain.
 
-#### Layer 5: Historical co-change coupling <!-- Added: forge#1196 --> <!-- Empty-set guard: forge#1206 -->
+#### Layer 5: Historical co-change coupling <!-- Added: forge#1196 --> <!-- Empty-set guard: forge#1206 --> <!-- Matrix lookup: forge#1738 -->
 
-Layers 1-4 infer conflict risk from structure — path overlap, directory nesting, hard-coded high-fan-in lists. They miss the case where two files with no directory or naming relationship have historically changed together in the same commits (e.g. `models/user.py` and `services/billing/charge.py`), and they over-serialize the inverse case where files merely sit near each other but have never actually co-changed. Git commit history answers both questions directly and empirically. This layer reads **commit metadata only** — the list of files touched per commit — never file contents, so it does not violate Hard Rule 2 ("dispatcher, not a builder... never read code"). This is the same category of operation already established as compliant in `commands/work-on/investigate.md` and `commands/work-on/build/context.md`, which mine `git log` for issue cross-referencing.
+Layers 1-4 infer conflict risk from structure — path overlap, directory nesting, hard-coded high-fan-in lists. They miss the case where two files with no directory or naming relationship have historically changed together in the same commits (e.g. `models/user.py` and `services/billing/charge.py`), and they over-serialize the inverse case where files merely sit near each other but have never actually co-changed. Git commit history answers both questions directly and empirically. This layer reads **commit metadata only** — the list of files touched per commit — never file contents, so it does not violate Hard Rule 2 ("dispatcher, not a builder... never read code").
 
-**Bounded query** — restrict both the time window and the file set so this stays a small, deterministic, single-shot lookup (never a full-repo co-change matrix). An empty `ALL_AFFECTED_FILES` set MUST short-circuit before the query runs — passing an empty array to `git log --` does not mean "match nothing", it means "no pathspec restriction", which would silently widen the query to the entire repo:
+**Primary path — persisted co-change matrix** (O(1) lookup, repo-wide coverage): <!-- Added: forge#1738 -->
+
+Check whether `~/.forge/index/cochange.jsonl` (produced by `scripts/danger-zones.mjs`) exists before
+falling back to the live `git log` query. The matrix is repo-wide and covers file pairs outside the
+current batch — providing broader coupling signal than the batch-scoped live query alone.
+
+```bash
+COCHANGE_INDEX="${HOME}/.forge/index/cochange.jsonl"
+COCHANGE_META="${HOME}/.forge/index/cochange-meta.json"
+
+if [ -f "$COCHANGE_INDEX" ]; then
+  echo "Layer 5: co-change matrix found — using persisted index for pair lookups"
+  LAYER5_SOURCE="matrix"
+  TOTAL_COMMITS=$(cat "$COCHANGE_META" 2>/dev/null | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('totalCommits',0))" 2>/dev/null || echo "0")
+else
+  echo "Layer 5: co-change matrix absent — falling back to live git query (run 'node scripts/danger-zones.mjs' to build)"
+  LAYER5_SOURCE="live"
+  TOTAL_COMMITS=0
+fi
+```
+
+**Matrix lookup per file pair** (when `LAYER5_SOURCE=matrix`):
+
+For each pair of files across issues in the batch, query the matrix for coupling verdict:
+
+```bash
+# Query a single file pair from the matrix
+query_cochange_pair() {
+  local FILE_A="$1"
+  local FILE_B="$2"
+
+  # Find the record for FILE_A (matrix stores each pair once in lexicographic order,
+  # but also includes reverse-lookup entries for O(1) lookup from either side)
+  local RECORD
+  RECORD=$(grep -m1 "\"file\":\"${FILE_A}\"" "$COCHANGE_INDEX" 2>/dev/null || true)
+  if [ -z "$RECORD" ]; then
+    echo "unknown"  # FILE_A not in matrix — insufficient history
+    return
+  fi
+
+  # Extract n(A) — sum of monthly ring buffer
+  local N_A
+  N_A=$(echo "$RECORD" | python3 -c "
+import sys, json
+r = json.loads(sys.stdin.read())
+n = r.get('n', [0,0,0])
+print(sum(n))
+" 2>/dev/null || echo "0")
+
+  # Extract c(A,B) — co-occurrence count with FILE_B
+  local C_AB
+  C_AB=$(echo "$RECORD" | python3 -c "
+import sys, json
+r = json.loads(sys.stdin.read())
+partners = r.get('partners', {})
+c = partners.get('${FILE_B}', [0,0,0])
+print(sum(c))
+" 2>/dev/null || echo "0")
+
+  # Apply thresholds: cold-start check (n < 5), support (c >= 3), confidence
+  if [ "$N_A" -lt 5 ]; then
+    echo "unknown"  # Insufficient history for FILE_A
+    return
+  fi
+
+  local FILE_B_RECORD
+  FILE_B_RECORD=$(grep -m1 "\"file\":\"${FILE_B}\"" "$COCHANGE_INDEX" 2>/dev/null || true)
+  local N_B=0
+  if [ -n "$FILE_B_RECORD" ]; then
+    N_B=$(echo "$FILE_B_RECORD" | python3 -c "
+import sys, json
+r = json.loads(sys.stdin.read())
+n = r.get('n', [0,0,0])
+print(sum(n))
+" 2>/dev/null || echo "0")
+  fi
+
+  if [ "$N_B" -lt 5 ]; then
+    echo "unknown"  # Insufficient history for FILE_B
+    return
+  fi
+
+  # Use danger-zones.mjs --query for the authoritative normalization verdict
+  # (handles ubiquity, directional confidence, companions — avoids re-implementing)
+  VERDICT=$(node "$(git rev-parse --show-toplevel 2>/dev/null)/scripts/danger-zones.mjs" \
+    --query "$FILE_A" 2>/dev/null \
+    | python3 -c "
+import sys, json
+d = json.loads(sys.stdin.read())
+partners = d.get('cochangePartners', [])
+for p in partners:
+    if p['file'] == '${FILE_B}':
+        print(p['verdict'])
+        sys.exit(0)
+print('unknown')
+" 2>/dev/null || echo "unknown")
+  echo "$VERDICT"
+}
+```
+
+**Fallback path — live git query** (when matrix is absent or file pair not found in matrix):
 
 ```bash
 # Union of affected files across all issues in the CURRENT batch only (already
@@ -204,14 +304,16 @@ else
 fi
 ```
 
-**Scoring rule**: A file pair is **co-change coupled** when it appears together in **3 or more** of the commits captured by the bounded query above. A pair with **zero** co-occurrences across the entire window is **verified independent**.
+**Scoring rule**: A file pair is **co-change coupled** when it appears together in **3 or more** commits in the window. A pair with **zero** co-occurrences across the entire window (and both files have n ≥ 5 commits) is **verified independent**. Pairs where either file has fewer than 5 commits in the window are **unknown** — the matrix must NOT be used to downgrade edges for unknown pairs.
 
 **Apply the signal:**
 - **High co-change pair spans two different issues in the batch** → add a serialization edge between them (same directed-edge convention as Layers 1-4: lower issue number is predecessor), OR, if the pair also carries competing investigation recommendations, flag it for Phase 2.5 arbitration instead of a blind serialization edge (see cross-reference in Step 2.5B below).
-- **Verified-independent pair** → MAY be used to downgrade an existing Layer 2 "broad directory + different domain" or Layer 4 "conservative fallback" serialization to parallel. This downgrade is **never** applied to Layer 1 (same-file hard conflict, which is ground truth from the current batch, not historical inference) or to Layer 3 high-fan-in-file edges (a file can be structurally high-risk even with a thin history window, e.g. a newly added `main.py`).
-- If `ALL_AFFECTED_FILES` is empty, the guard above skips the query and Layer 5 contributes nothing for the entire batch. If the bounded query runs but returns no commits (e.g. brand-new files, or window/pair-set too small to have history) → Layer 5 contributes nothing; fall back silently to Layers 1-4's existing verdict for that pair.
+- **Verified-independent pair** → MAY be used to downgrade an existing Layer 2 "broad directory + different domain" or Layer 4 "conservative fallback" serialization to parallel. This downgrade is **never** applied to Layer 1 (same-file hard conflict, which is ground truth from the current batch, not historical inference) or to Layer 3 high-fan-in-file edges (a file can be structurally high-risk even with a thin history window, e.g. a newly added `main.py`). Ubiquitous-file pairs (n/N > 0.2 for either file) are **ineligible** for verified-independent downgrade even with zero co-occurrences.
+- If `ALL_AFFECTED_FILES` is empty, the guard above skips the query and Layer 5 contributes nothing for the entire batch. If the matrix or live query returns no data for a pair → Layer 5 contributes nothing; fall back silently to Layers 1-4's existing verdict for that pair.
 
-**Rationale**: Empirical co-change is a strictly stronger signal than directory proximity or naming convention — it is the actual observed outcome the other layers are trying to approximate. Bounding the window and pair-set keeps the query cheap and deterministic while still catching the cross-directory conflicts Layers 1-4 structurally cannot see.
+**Wire-through proof (mandatory check)**: When `LAYER5_SOURCE=matrix`, confirm the matrix lookup path executes on at least one pair in the batch and log the verdict. This proves the path is live, not dead code. If no pairs are in the matrix, log that the live fallback ran instead. <!-- Ref: forge#1731, forge#1230, forge#1244 — Layer 5 has had two dead-code defects; this check prevents recurrence. -->
+
+**Rationale**: The persisted matrix provides broader coverage (repo-wide, not batch-scoped) and O(1) lookup vs O(batch × commits) live query. The live fallback ensures no regression when the matrix is absent (cold start or first run). Bounding the live fallback to the batch file set keeps it cheap and deterministic.
 
 #### Combining all layers
 

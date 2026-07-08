@@ -759,35 +759,71 @@ echo "$DIFF" | grep -cE "subprocess|os\.system|eval\(|exec\(|pickle|yaml\.load[^
 echo "$FILES" | grep -cE "^sdk/|openapi.*\.json$|openapi-versions/" && echo "  SDK_OPENAPI" || true
 ```
 
-**Churn (hot-spot) signal**: The signals above are all derived from the current diff content — none of them measure historical change frequency, which is one of the strongest empirical predictors of defect density. Compute a bounded per-file churn tier for the PR's changed files only (never repo-wide) and carry it forward as `CHURN_CONTEXT` for Phase 3C:
+**Churn (hot-spot) signal**: The signals above are all derived from the current diff content — none of them measure historical change frequency or defect density. Compute both commit-churn tier and finding-density tier for the PR's changed files and carry them forward as `CHURN_CONTEXT` for Phase 3C: <!-- Finding-density signal: forge#1738 -->
 
 ```bash
 CHURN_WINDOW="90 days ago"   # named constant — must match the same window used in architect.md Phase A5
 CHURN_CONTEXT=""
+
+# Load danger-zones index for finding-density signal (non-blocking — absent index is not an error).
+# The index is produced by scripts/danger-zones.mjs and updated on each merge via
+# build-knowledge-index.mjs --with-danger-zones. When absent, only commit-count signal is used.
+DANGER_ZONES_INDEX="${HOME}/.forge/index/danger-zones.json"
+DZ_DATA=""
+if [ -f "$DANGER_ZONES_INDEX" ]; then
+  DZ_DATA=$(cat "$DANGER_ZONES_INDEX" 2>/dev/null || true)
+fi
+
 # Herestring (not a piped `| while read`) — a pipe would run the loop body in a
 # subshell in bash, silently discarding CHURN_CONTEXT once the loop exits. $FILES
 # is one path per line (gh pr diff --name-only), so `read -r` per line is safe
 # even when a path contains embedded spaces.
 while IFS= read -r FILE; do
   [ -z "$FILE" ] && continue
+
+  # Commit-churn signal (unchanged from original)
   COMMITS=$(git log --oneline --since="$CHURN_WINDOW" -- "$FILE" 2>/dev/null | wc -l)
+  COMMIT_TAG=""
   if [ "$COMMITS" -ge 15 ]; then
+    COMMIT_TAG=" — HOT (${COMMITS} commits/90d)"
+  fi
+
+  # Finding-density signal (new — reads from danger-zones index when available)
+  FINDING_TAG=""
+  if [ -n "$DZ_DATA" ]; then
+    FINDING_COUNT=$(echo "$DZ_DATA" | python3 -c "
+import sys, json
+d = json.loads(sys.stdin.read())
+files = d.get('files', {})
+entry = files.get('${FILE}', None)
+if entry:
+    print(entry.get('findingCount90d', 0))
+else:
+    print(0)
+" 2>/dev/null || echo "0")
+    if [ "${FINDING_COUNT:-0}" -ge 3 ]; then
+      FINDING_TAG=" — HOT-FINDINGS (${FINDING_COUNT} findings/90d)"
+    fi
+  fi
+
+  # Append to CHURN_CONTEXT when either signal fires
+  if [ -n "$COMMIT_TAG" ] || [ -n "$FINDING_TAG" ]; then
     # Real newline appended via $'\n' (ANSI-C quoting), not a literal backslash-n.
     # A literal "\n" would only be interpreted by `echo -e` — it survives
     # unprocessed into Phase 3C's raw template substitution ([CHURN_CONTEXT] ->
     # $CHURN_CONTEXT), which does not reprocess escapes, so with 2+ HOT files
     # multi-hotspot PRs would render squished in the agent prompt. A real
     # newline here makes the variable correct for every consumer.
-    CHURN_CONTEXT="${CHURN_CONTEXT}${FILE} (${COMMITS} commits in last 90 days — HOT)"$'\n'
+    CHURN_CONTEXT="${CHURN_CONTEXT}${FILE}${COMMIT_TAG}${FINDING_TAG}"$'\n'
   fi
 done <<< "$FILES"
 if [ -z "$CHURN_CONTEXT" ]; then
-  CHURN_CONTEXT="No hot-spot files detected (all changed files under 15 commits in the last 90 days)."
+  CHURN_CONTEXT="No hot-spot files detected (all changed files under 15 commits and under 3 findings in the last 90 days)."
 fi
 echo "$CHURN_CONTEXT"
 ```
 
-Tiers (fixed thresholds, identical to `architect.md` Phase A5): **HOT** = 15+ commits / 90 days, **MEDIUM** = 5–14, **LOW** = 0–4. Only HOT-tier files are listed in `CHURN_CONTEXT` — this keeps the agent prompt signal short and high-value rather than dumping a churn count for every file. This does not change agent selection (3B) — it is a scrutiny prior surfaced to whichever agents are already selected, substituted as `[CHURN_CONTEXT]` in Phase 3C.
+Tiers (fixed thresholds, identical to `architect.md` Phase A5): **HOT** = 15+ commits / 90 days, **MEDIUM** = 5–14, **LOW** = 0–4. **HOT-FINDINGS** = 3+ confirmed findings in 90 days (from Forge Ledger danger-zones index). Only files where at least one signal fires are listed in `CHURN_CONTEXT` — this keeps the agent prompt signal short and high-value. A file can appear with both tags (e.g., `commands/orchestrate.md — HOT (20 commits/90d) — HOT-FINDINGS (18 findings/90d)`). This does not change agent selection (3B) — it is a scrutiny prior surfaced to whichever agents are already selected, substituted as `[CHURN_CONTEXT]` in Phase 3C. When the danger-zones index is absent (cold start or pre-1738 install), `CHURN_CONTEXT` falls back to commit-count-only behavior (no HOT-FINDINGS tags). <!-- Added: forge#1738 -->
 
 ### 3B: Select Agents — Risk-Scaled Dispatch
 

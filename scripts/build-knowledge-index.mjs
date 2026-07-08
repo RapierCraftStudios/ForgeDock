@@ -30,6 +30,7 @@
  *   --no-mirror             Skip orphan branch mirror
  *   --dry-run               Parse and output without writing
  *   --verbose               Verbose logging
+ *   --with-danger-zones     After indexing, run danger-zones.mjs to refresh risk data (non-blocking)
  *
  * Exit codes: 0 = success, 1 = fatal error, 2 = partial (some issues failed)
  *
@@ -87,6 +88,7 @@ function parseArgs(argv) {
     noMirror: false,
     dryRun: false,
     verbose: false,
+    withDangerZones: false,
   };
 
   for (let i = 2; i < argv.length; i++) {
@@ -116,6 +118,11 @@ function parseArgs(argv) {
         break;
       case '--verbose':
         args.verbose = true;
+        break;
+      case '--with-danger-zones':
+        // After indexing completes, run danger-zones.mjs to refresh risk data.
+        // Non-blocking: a failure here does not affect the knowledge index.
+        args.withDangerZones = true;
         break;
       default:
         // Ignore unknown flags for forward compatibility
@@ -1098,6 +1105,31 @@ async function main() {
     if (!args.noMirror) {
       log('Mirroring to forge-knowledge branch...');
       mirrorToOrphanBranch(indexDir, repoPath);
+    }
+
+    // Update danger-zones index (non-blocking) — refreshes per-file finding stats
+    // and co-change matrix so Layer 5 and CHURN_CONTEXT consumers get fresh risk data.
+    if (args.withDangerZones) {
+      log('Updating danger-zones index (non-blocking)...');
+      const dangerZonesScript = join(__dirname, 'danger-zones.mjs');
+      if (existsSync(dangerZonesScript)) {
+        try {
+          const dzResult = spawnSync(
+            process.execPath,
+            [dangerZonesScript, '--output', indexDir, '--repo-path', repoPath],
+            { encoding: 'utf8', timeout: 120000, stdio: 'pipe' },
+          );
+          if (dzResult.status !== 0) {
+            log(`WARNING: danger-zones.mjs exited with ${dzResult.status} — ${dzResult.stderr || dzResult.stdout || '(no output)'}`);
+          } else {
+            log('danger-zones index updated');
+          }
+        } catch (e) {
+          log(`WARNING: danger-zones.mjs failed to run — ${e.message}`);
+        }
+      } else {
+        log(`WARNING: --with-danger-zones flag set but ${dangerZonesScript} not found — skipping`);
+      }
     }
   }
 
