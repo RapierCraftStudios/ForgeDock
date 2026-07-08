@@ -227,6 +227,8 @@ npx forgedock --global # global install: installs into ~/.claude/commands/ — a
 
 **Project-scoped is the default.** `npx forgedock` installs commands scoped to the current project directory. Use `--global` only when you want the commands available across all your projects on this machine.
 
+> **Want engine-mode dispatch?** `npx forgedock` is transient — the `forgedock` binary isn't persisted in PATH after install. `/orchestrate` and `/autopilot` use agent dispatch mode by default, which is fully functional. To enable engine-mode dispatch (`forgedock run-issue`) with its durable phase table and fail-closed review gate, run `npm install -g forgedock` instead.
+
 One command does everything: it checks your environment, installs the slash commands into Claude Code, detects your repo (owner, branches, paths), and hands you a single annotated `forge.yaml` to review — press Enter to accept. Run `npx forgedock init` any time afterward to re-generate the config only.
 
 Installing also registers a SessionStart hook, so every Claude Code session
