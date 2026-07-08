@@ -469,8 +469,11 @@ You will be automatically notified when each background agent completes. **Do NO
 classify_predecessor_state() {
   local PRED="$1"
   local PRED_INFO
+  # NOTE: the `workflow` array below deliberately also keeps `needs-human` — that label has NO
+  # `workflow:` prefix (see bin/labels.json), so a bare `select(startswith("workflow:"))` would
+  # drop it and the GATED branch's `needs-human` case would be dead code (forge#1812 primary case).
   PRED_INFO=$(gh issue view "$PRED" -R {GH_REPO} --json labels,state \
-    --jq '{state: .state, workflow: [.labels[].name | select(startswith("workflow:"))]}' 2>/dev/null || echo '{}')
+    --jq '{state: .state, workflow: [.labels[].name | select(startswith("workflow:") or . == "needs-human")]}' 2>/dev/null || echo '{}')
   local PRED_STATE PRED_LABELS
   PRED_STATE=$(echo "$PRED_INFO" | jq -r '.state // "OPEN"')
   PRED_LABELS=$(echo "$PRED_INFO" | jq -r '.workflow[]?' 2>/dev/null)
