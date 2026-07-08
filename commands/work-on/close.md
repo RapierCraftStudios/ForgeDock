@@ -669,7 +669,49 @@ TRAJECTORY_HEADER=$(node packages/protocol/src/cli.js emit TRAJECTORY)
 # Append the Markdown body sections, then post via gh issue comment.
 ```
 
-Post the `<!-- FORGE:TRAJECTORY -->` comment as the final pipeline record:
+Post the `<!-- FORGE:TRAJECTORY -->` comment as the final pipeline record.
+
+**Prior delta computation** — read cost-prior for this issue's task_type × module before posting (forge#1743):
+
+```bash
+# Compute actual vs prior cost delta for self-correction of cost priors
+COST_PRIORS_PATH="${HOME}/.forge/index/cost-priors.json"
+ACTUAL_TOTAL_USD=""
+PRIOR_EST_USD=""
+COST_DELTA_NOTE=""
+
+# Read actual spend from FORGE:BUILDER / FORGE:TRAJECTORY best-effort telemetry
+# (same extraction used in work-on.md Phase 7C DECISION_RECORD cost block)
+ACTUAL_TOTAL_USD=$(gh api repos/{GH_REPO}/issues/{NUMBER}/comments \
+  --jq '[.[] | select(.body | contains("FORGE:BUILDER")) | .body] | last // ""' 2>/dev/null \
+  | grep -oP '(?<=cost_usd: )\S+' | head -1 || echo "")
+
+if [ -n "$ACTUAL_TOTAL_USD" ] && [ -f "$COST_PRIORS_PATH" ]; then
+  # Derive task_type:module key (same logic as Step 3E.5)
+  TASK_TYPE=$(gh api repos/{GH_REPO}/issues/{NUMBER}/comments \
+    --jq '[.[] | select(.body | contains("FORGE:INVESTIGATOR")) | .body] | last // ""' 2>/dev/null \
+    | grep -oP '(?<=\*\*Task Type\*\*: )\S+' | head -1 | tr '[:upper:]' '[:lower:]' | tr ' ' '-' || echo 'unknown')
+  PRIMARY_FILE=$(gh api repos/{GH_REPO}/issues/{NUMBER}/comments \
+    --jq '[.[] | select(.body | contains("FORGE:INVESTIGATOR")) | .body] | last // ""' 2>/dev/null \
+    | grep -oP '`[^`]+\.(py|mjs|ts|md|sh|yaml|yml)`' | tr -d '`' | head -1 || echo '')
+  MODULE=$(basename "${PRIMARY_FILE:-_unknown}" | sed 's/\.[^.]*$//' | tr '[:upper:]' '[:lower:]')
+  [ -z "$MODULE" ] && MODULE="_unknown"
+  PRIOR_KEY="${TASK_TYPE}:${MODULE}"
+
+  PRIOR_EST_USD=$(jq -r --arg k "$PRIOR_KEY" '.priors[$k].mean // empty' "$COST_PRIORS_PATH" 2>/dev/null || echo '')
+
+  if [ -n "$PRIOR_EST_USD" ]; then
+    DELTA=$(echo "scale=4; $ACTUAL_TOTAL_USD - $PRIOR_EST_USD" | bc 2>/dev/null || echo "?")
+    COST_DELTA_NOTE="actual=\$${ACTUAL_TOTAL_USD} prior=\$${PRIOR_EST_USD} delta=${DELTA} key=${PRIOR_KEY}"
+  else
+    COST_DELTA_NOTE="actual=\$${ACTUAL_TOTAL_USD} prior=absent (no prior for key ${PRIOR_KEY})"
+  fi
+elif [ -n "$ACTUAL_TOTAL_USD" ]; then
+  COST_DELTA_NOTE="actual=\$${ACTUAL_TOTAL_USD} prior=index-absent"
+else
+  COST_DELTA_NOTE="no-telemetry"
+fi
+```
 
 ```bash
 gh issue comment {NUMBER} {GH_FLAG} --body "<!-- FORGE:TRAJECTORY -->
@@ -690,6 +732,8 @@ gh issue comment {NUMBER} {GH_FLAG} --body "<!-- FORGE:TRAJECTORY -->
 **Decisions**:
 - Decomposition skipped: {DECOMPOSE_REASON}
 - PR merged to: \`{PR_BASE}\` (feature lane, milestone branch)
+
+**Cost (economic scheduling)**: ${COST_DELTA_NOTE}
 
 **Anomalies**: None
 
@@ -728,6 +772,29 @@ Where:
 - `{PARENT_NOTES}` = `No parent tracker` or `Checked off in #{PARENT_REF}`
 - `{CLEANUP_STATUS}` = `✅ Removed` (worktree removed + branch deleted) or `⏭ Skipped` (no path provided or path not found)
 - `{TIMESTAMP}` = current date/time in ISO format
+
+---
+
+## Phase C5.1: Knowledge Index + Cost Prior Update (forge#1743) <!-- Added: forge#1743 -->
+
+**Goal**: Re-index this issue's knowledge cards and regenerate cost-priors.json so that economic scheduling (orchestrate Step 3E.5) has up-to-date data for future runs. The actual-vs-prior delta recorded in the TRAJECTORY above is the write side of the self-correction loop — this step performs the read/recompute.
+
+**This phase is non-blocking** — if the indexer fails, log the reason and continue to Phase C5.2. Never stall close for the cost-prior update.
+
+**Skip if**: Terminal state is `INVALID` (no useful cost data from invalid issues).
+
+```bash
+# Re-index this issue and regenerate cost priors — non-blocking
+INDEXER_PATH=$(dirname "$(realpath "$0" 2>/dev/null || echo '.')")/../../scripts/build-knowledge-index.mjs
+if node --version >/dev/null 2>&1 && [ -f "$INDEXER_PATH" ]; then
+  echo "[cost-prior] Re-indexing issue #${NUMBER} and regenerating cost priors..."
+  node "$INDEXER_PATH" --issue {NUMBER} --no-mirror 2>&1 | tail -5 \
+    && echo "[cost-prior] Cost priors updated" \
+    || echo "WARNING: Cost prior update failed — continuing (non-blocking)"
+else
+  echo "[cost-prior] Indexer not available — skipping cost prior update (non-blocking)"
+fi
+```
 
 ---
 

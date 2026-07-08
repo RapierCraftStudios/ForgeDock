@@ -57,6 +57,7 @@ const CARDS_FILE = 'knowledge.jsonl';
 const POSTINGS_FILE = 'postings.json';
 const MANIFEST_FILE = 'manifest.json';
 const RENAMES_FILE = 'renames.jsonl';
+const COST_PRIORS_FILE = 'cost-priors.json'; // economic scheduling — keyed by task_type:module
 const MIRROR_BRANCH = 'forge-knowledge';
 
 // Annotation types that produce knowledge cards
@@ -955,6 +956,113 @@ async function doctorCheck(manifest, repo, k = 5) {
 }
 
 // ---------------------------------------------------------------------------
+// Cost-prior aggregation (economic scheduling — forge#1743)
+// ---------------------------------------------------------------------------
+
+/**
+ * Aggregate historical FORGE:CARD spend into cost priors keyed by
+ * `task_type:module` (where module = the basename of the primary affected
+ * file, lower-cased, without extension).
+ *
+ * Input: `cards` array from knowledge.jsonl (all cards in the index).
+ *   Each card may carry a `costUsd` object (populated by close-phase
+ *   indexing of FORGE:TRAJECTORY actual-spend fields):
+ *     card.costUsd = { investigation: number|null, build: number|null, review: number|null, total: number|null }
+ *
+ * Output written to `~/.forge/index/cost-priors.json`:
+ * {
+ *   schemaVersion: 1,
+ *   generatedAt: ISO-string,
+ *   sampleCount: N,           // total spend samples across all keys
+ *   priors: {
+ *     "<task_type>:<module>": {
+ *       n: number,            // sample count
+ *       mean: number,         // mean total_usd
+ *       variance: number,     // sample variance (0 when n<2)
+ *       stddev: number,       // sqrt(variance)
+ *       min: number,
+ *       max: number,
+ *       p50: number,          // median
+ *     },
+ *     ...
+ *   }
+ * }
+ *
+ * Cards that have no costUsd total are skipped (counted as absent, not zero).
+ * Keys with only 1 sample have variance=0, stddev=0.
+ *
+ * @param {object[]} cards    — full knowledge card array
+ * @param {string}   indexDir — output directory for cost-priors.json
+ * @param {boolean}  dryRun   — if true, print priors to stdout, don't write
+ */
+function aggregateCostPriors(cards, indexDir, dryRun = false) {
+  // Group total_usd values by task_type:module key
+  // task_type from card.taskType (e.g. "Feature", "Bug Fix", "Refactor")
+  // module = basename (no ext, lowercase) of card.paths[0], or "_unknown"
+  const buckets = new Map(); // key → number[]
+
+  for (const card of cards) {
+    const total = card.costUsd?.total ?? null;
+    if (total === null || typeof total !== 'number' || !isFinite(total) || total <= 0) continue;
+
+    const rawTaskType = (card.taskType || 'unknown').trim().toLowerCase().replace(/\s+/g, '-');
+    const primaryPath = card.paths?.[0] || '';
+    const moduleName = primaryPath
+      ? primaryPath.split('/').pop().replace(/\.[^.]+$/, '').toLowerCase() || '_unknown'
+      : '_unknown';
+
+    const key = `${rawTaskType}:${moduleName}`;
+    if (!buckets.has(key)) buckets.set(key, []);
+    buckets.get(key).push(total);
+  }
+
+  // Compute statistics per bucket
+  const priors = {};
+  let totalSampleCount = 0;
+
+  for (const [key, values] of buckets) {
+    const n = values.length;
+    totalSampleCount += n;
+
+    const sorted = [...values].sort((a, b) => a - b);
+    const mean = values.reduce((s, v) => s + v, 0) / n;
+    const variance = n >= 2
+      ? values.reduce((s, v) => s + (v - mean) ** 2, 0) / (n - 1)
+      : 0;
+    const stddev = Math.sqrt(variance);
+    const p50 = n % 2 === 0
+      ? (sorted[n / 2 - 1] + sorted[n / 2]) / 2
+      : sorted[Math.floor(n / 2)];
+
+    priors[key] = {
+      n,
+      mean: Math.round(mean * 10000) / 10000,          // 4 decimal places (sub-cent precision)
+      variance: Math.round(variance * 10000) / 10000,
+      stddev: Math.round(stddev * 10000) / 10000,
+      min: Math.round(sorted[0] * 10000) / 10000,
+      max: Math.round(sorted[n - 1] * 10000) / 10000,
+      p50: Math.round(p50 * 10000) / 10000,
+    };
+  }
+
+  const output = {
+    schemaVersion: 1,
+    generatedAt: new Date().toISOString(),
+    sampleCount: totalSampleCount,
+    priors,
+  };
+
+  if (dryRun) {
+    process.stdout.write(JSON.stringify(output, null, 2) + '\n');
+    return output;
+  }
+
+  writeFileSync(join(indexDir, COST_PRIORS_FILE), JSON.stringify(output, null, 2), 'utf8');
+  log(`Cost priors: wrote ${Object.keys(priors).length} keys (${totalSampleCount} samples) to ${COST_PRIORS_FILE}`);
+  return output;
+}
+
+// ---------------------------------------------------------------------------
 // Main entry point
 // ---------------------------------------------------------------------------
 
@@ -1052,6 +1160,8 @@ async function main() {
         for (const card of cards) {
           process.stdout.write(JSON.stringify(card) + '\n');
         }
+        // Accumulate for dry-run cost-prior output (see end of main)
+        allCards.push(...cards);
       }
 
       // Advance watermark
@@ -1082,6 +1192,9 @@ async function main() {
     const postings = buildPostings(allCards);
     writeFileSync(join(indexDir, POSTINGS_FILE), JSON.stringify(postings), 'utf8');
 
+    // Aggregate cost priors for economic scheduling (forge#1743)
+    aggregateCostPriors(allCards, indexDir, false);
+
     // Update watermark in manifest
     manifest.watermark = newWatermark;
     manifest.schemaVersion = 1;
@@ -1099,6 +1212,11 @@ async function main() {
       log('Mirroring to forge-knowledge branch...');
       mirrorToOrphanBranch(indexDir, repoPath);
     }
+  }
+
+  if (args.dryRun) {
+    // Dry run: print cost priors to stdout
+    aggregateCostPriors(allCards, indexDir, true);
   }
 
   if (errorCount > 0 && successCount === 0) {

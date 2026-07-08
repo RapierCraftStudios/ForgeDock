@@ -133,6 +133,35 @@ done
 | Findings validated | {N} |
 | False positives | {N} ({%}) |
 | Anomalies flagged | {N} |
+| Budget limit | ${BUDGET_LIMIT:-uncapped} |
+| Projected spend (dispatched issues) | ${PROJECTED_SPEND:-—} |
+| Actual spend (best-effort telemetry) | ${ACTUAL_SPEND:-—} |
+| Issues deferred (budget ceiling) | {#DEFERRED_BUDGET_ISSUES[@]:-0} |
+| ε-reserve issued (no-prior dispatch) | {EPSILON_DISPATCHED:-no} |
+| **Value-weighted throughput** | **{VALUE_THROUGHPUT:-—} value-pts/USD** |
+
+`value-weighted throughput` = Σ(priority_weight × danger_zone_weight) for **merged** issues ÷ actual spend (USD). A higher value means more high-priority issues were resolved per dollar. Trend this across runs via `/pipeline-health` to measure the economic scheduling ROI. <!-- Added: forge#1743 -->
+
+**Compute value-weighted throughput** (populate before rendering the table):
+
+```bash
+# Collect value scores for merged issues (ISSUE_VALUE[] populated in Step 3E.5)
+MERGED_VALUE_SUM="0"
+for NUM in {all_completed_issue_numbers}; do
+  IS_MERGED=$(gh issue view "$NUM" -R {GH_REPO} --json labels \
+    --jq '[.labels[].name | select(. == "workflow:merged")] | length' 2>/dev/null || echo "0")
+  if [ "$IS_MERGED" -gt 0 ] && [ -n "${ISSUE_VALUE[$NUM]:-}" ]; then
+    MERGED_VALUE_SUM=$(echo "scale=4; $MERGED_VALUE_SUM + ${ISSUE_VALUE[$NUM]}" | bc 2>/dev/null \
+      || echo "$MERGED_VALUE_SUM")
+  fi
+done
+
+if [ "${ACTUAL_SPEND:-0}" != "0" ] && echo "${ACTUAL_SPEND:-0}" | grep -qP '^\d+(\.\d+)?$'; then
+  VALUE_THROUGHPUT=$(echo "scale=2; $MERGED_VALUE_SUM / $ACTUAL_SPEND" | bc 2>/dev/null || echo "—")
+else
+  VALUE_THROUGHPUT="—"  # no spend telemetry available
+fi
+```
 
 **Domain breakdown**: {N} scraping, {N} frontend, {N} billing, ...
 **Routing**: {N} fast-lane, {N} feature-lane
@@ -146,6 +175,7 @@ done
 - Contract divergences > 20% → investigation quality may need improvement
 - **Idle% > 50%** → agents stalling at phase boundaries; check work-on routing loop
 - **Avg resumes > 1** → orchestrator having to compensate for agent stops
+- **Value-weighted throughput trending down** → high-value issues deferred or blocked; check Step 3E.5 score distribution
 
 ### Next Steps
 {If milestone and all issues done: "Milestone ready to ship. Run `/milestone ship {slug}` when ready. The ship command includes a pre-merge hunk-loss audit (Step 2.5) that detects staging-only hunks in milestone-modified files and rebases the milestone branch to absorb them before creating the PR — protecting against squash-merge regressions."}
