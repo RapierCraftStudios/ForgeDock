@@ -304,6 +304,18 @@ branches:
 #     # ^^^ Uncomment scraping only if this project has a web-scraping domain.
 #     # ^^^ Leaving it commented out prevents the Scraper agent from spawning on Playwright E2E PRs.
 #
+#   # Provenance-based trust escalation (forge#1745).
+#   # Controls the 30-day shadow-mode window before enforcement begins.
+#   #
+#   # "true"  (default) — shadow mode: intensity tier is computed and logged in the FORGE:REVIEW
+#   #           annotation, but the agent roster is NOT modified. Use this during the initial
+#   #           30-day calibration window so the provenance table can accumulate data.
+#   # "false" — enforcement mode: the computed intensity tier DOES modify the agent roster
+#   #           (PROVEN cells may drop optional judgment agents; NOVEL cells escalate to full panel).
+#   #           Set this after the 30-day shadow window once the provenance table is trusted.
+#   #
+#   # trust_shadow_mode: "true"
+#
 #   # Domain-to-file mapping used by /work-on investigation and /review-pr agents
 #   # to quickly locate relevant files for a given issue domain.
 #   # Keys match issue label domain names; values are lists of file path patterns
