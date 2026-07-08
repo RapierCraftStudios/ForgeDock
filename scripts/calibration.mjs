@@ -24,15 +24,18 @@
  *   node scripts/calibration.mjs [options]
  *
  * Options:
- *   --repo <owner/repo>     GitHub repository (default: reads forge.yaml)
- *   --index <dir>           Override index directory (default: ~/.forge/index)
- *   --window <days>         Outcome window in days (default: 14)
- *   --min-samples <n>       Minimum samples before trusting a cell (default: 10)
- *   --publish               Publish table to forge-knowledge branch
- *   --no-mirror             Skip orphan branch mirror when --publish is used
- *   --dry-run               Compute table but do not write any files
- *   --verbose               Verbose logging
- *   --issue <number>        Compute outcome for a single issue only (debugging)
+ *   --repo <owner/repo>            GitHub repository (default: reads forge.yaml)
+ *   --index <dir>                  Override index directory (default: ~/.forge/index)
+ *   --window <days>                Outcome window in days (default: 14)
+ *   --min-samples <n>              Minimum samples before trusting a (task-type × confidence) cell (default: 10)
+ *   --provenance                   Also build and (when --publish) publish the provenance table
+ *                                  (task-type × normalized-modules) to calibration/provenance.json
+ *   --provenance-min-samples <n>   Minimum samples before trusting a provenance cell (default: 5)
+ *   --publish                      Publish calibration table (and provenance table when --provenance) to forge-knowledge branch
+ *   --no-mirror                    Skip orphan branch mirror when --publish is used
+ *   --dry-run                      Compute table(s) but do not write any files
+ *   --verbose                      Verbose logging
+ *   --issue <number>               Compute outcome for a single issue only (debugging)
  *
  * Exit codes:
  *   0  — success
@@ -61,10 +64,24 @@ const DEFAULT_INDEX_DIR = join(homedir(), '.forge', 'index');
 const CARDS_FILE = 'knowledge.jsonl';
 const CALIBRATION_DIR = 'calibration';
 const TABLE_FILE = 'table.json';
+const PROVENANCE_FILE = 'provenance.json';
 const MIRROR_BRANCH = 'forge-knowledge';
 const DEFAULT_WINDOW_DAYS = 14;
 const DEFAULT_MIN_SAMPLES = 10;
 const SCHEMA_VERSION = 1;
+
+// Minimum samples before a provenance cell is trusted for intensity decisions.
+// Lower than the confidence table default (10) because the module key-space is
+// larger and cells accumulate samples more slowly.
+const DEFAULT_PROVENANCE_MIN_SAMPLES = 5;
+
+// Survival rate threshold above which a cell is classified as PROVEN (eligible
+// for optional-agent de-escalation).
+const PROVENANCE_PROVEN_THRESHOLD = 0.90;
+
+// Survival rate floor below which a NOVEL-tier cell is marked for needs-human.
+// Below this threshold the cell has not accumulated enough evidence to trust.
+const PROVENANCE_NOVEL_NEEDS_HUMAN_THRESHOLD = 0.70;
 
 // ---------------------------------------------------------------------------
 // Argument parsing
@@ -81,7 +98,9 @@ export function parseArgs(argv) {
     indexDir: DEFAULT_INDEX_DIR,
     windowDays: DEFAULT_WINDOW_DAYS,
     minSamples: DEFAULT_MIN_SAMPLES,
+    provenanceMinSamples: DEFAULT_PROVENANCE_MIN_SAMPLES,
     publish: false,
+    provenance: false,
     noMirror: false,
     dryRun: false,
     verbose: false,
@@ -94,7 +113,9 @@ export function parseArgs(argv) {
     else if (arg === '--index' && argv[i + 1]) { args.indexDir = resolve(argv[++i]); }
     else if (arg === '--window' && argv[i + 1]) { args.windowDays = parseInt(argv[++i], 10); }
     else if (arg === '--min-samples' && argv[i + 1]) { args.minSamples = parseInt(argv[++i], 10); }
+    else if (arg === '--provenance-min-samples' && argv[i + 1]) { args.provenanceMinSamples = parseInt(argv[++i], 10); }
     else if (arg === '--publish') { args.publish = true; }
+    else if (arg === '--provenance') { args.provenance = true; }
     else if (arg === '--no-mirror') { args.noMirror = true; }
     else if (arg === '--dry-run') { args.dryRun = true; }
     else if (arg === '--verbose') { args.verbose = true; }
@@ -406,6 +427,248 @@ export function lookupCell(table, taskType, confidence) {
 }
 
 // ---------------------------------------------------------------------------
+// Provenance table — (task-type × normalized-modules) survival tracking
+// ---------------------------------------------------------------------------
+
+/**
+ * Normalize a list of changed file paths into a deterministic module-set key.
+ *
+ * Normalization rules:
+ *   1. Extract the top-level directory prefix for each path (e.g. "commands",
+ *      "scripts", "services/api").  For paths that start with a well-known
+ *      two-level prefix (services/, apps/, packages/, etc.), include the second
+ *      directory segment too.
+ *   2. Deduplicate.
+ *   3. Sort lexicographically.
+ *   4. Join with "|".
+ *
+ * Example:
+ *   ["commands/review-pr.md", "commands/work-on.md", "scripts/calibration.mjs"]
+ *   → "commands|scripts"
+ *
+ *   ["services/api/app/routers/billing.py", "services/worker/tasks/send.py"]
+ *   → "services/api|services/worker"
+ *
+ * @param {string[]} files - list of repo-relative file paths
+ * @returns {string} normalized module key
+ */
+export function normalizeModules(files) {
+  if (!files || files.length === 0) return '';
+
+  const TWO_LEVEL_PREFIXES = new Set(['services', 'apps', 'packages', 'clients', 'sdk']);
+
+  const prefixes = new Set();
+  for (const f of files) {
+    // Strip leading slashes
+    const clean = f.replace(/^\/+/, '');
+    const parts = clean.split('/');
+    if (parts.length === 0 || !parts[0]) continue;
+
+    const top = parts[0];
+    if (TWO_LEVEL_PREFIXES.has(top) && parts.length >= 2 && parts[1]) {
+      prefixes.add(`${top}/${parts[1]}`);
+    } else {
+      prefixes.add(top);
+    }
+  }
+
+  return [...prefixes].sort().join('|');
+}
+
+/**
+ * Build a per-(task-type × normalized-modules) provenance table from run records.
+ *
+ * Each cell tracks survival rate for a specific (task-type, module-set) pair.
+ * The table is published to calibration/provenance.json on the forge-knowledge
+ * branch for consumption by review-pr.md Phase 3B.5.
+ *
+ * @param {object[]} runs - array of { issueNumber, taskType, files, outcome }
+ * @param {number} minSamples - minimum samples before trusting a cell
+ * @returns {object} provenance table
+ */
+export function buildProvenanceTable(runs, minSamples = DEFAULT_PROVENANCE_MIN_SAMPLES) {
+  const cells = {};  // key: `${taskType}::${normalizedModules}`
+
+  for (const run of runs) {
+    const { taskType, files, outcome } = run;
+    if (!taskType || !outcome) continue;
+    const modules = normalizeModules(files || []);
+    if (!modules) continue;
+
+    const key = `${taskType}::${modules}`;
+    if (!cells[key]) {
+      cells[key] = { taskType, modules, survived: 0, failed: 0, total: 0 };
+    }
+    cells[key].total++;
+    if (outcome === 'survived') cells[key].survived++;
+    else cells[key].failed++;
+  }
+
+  const rows = Object.entries(cells).map(([key, cell]) => {
+    const survivalRate = cell.total > 0 ? cell.survived / cell.total : null;
+    const trusted = cell.total >= minSamples;
+    let intensityTier = 'NOVEL';  // default: no trusted data → treat as novel
+
+    if (trusted && survivalRate !== null) {
+      if (survivalRate >= PROVENANCE_PROVEN_THRESHOLD) {
+        intensityTier = 'PROVEN';
+      } else if (survivalRate < PROVENANCE_NOVEL_NEEDS_HUMAN_THRESHOLD) {
+        intensityTier = 'NOVEL_NEEDS_HUMAN';
+      } else {
+        intensityTier = 'NOVEL';
+      }
+    }
+
+    return {
+      key,
+      taskType: cell.taskType,
+      modules: cell.modules,
+      survivalRate: survivalRate !== null ? Math.round(survivalRate * 1000) / 1000 : null,
+      survived: cell.survived,
+      failed: cell.failed,
+      sampleCount: cell.total,
+      trusted,
+      intensityTier,
+    };
+  });
+
+  rows.sort((a, b) => {
+    const tt = a.taskType.localeCompare(b.taskType);
+    if (tt !== 0) return tt;
+    return a.modules.localeCompare(b.modules);
+  });
+
+  return {
+    schemaVersion: SCHEMA_VERSION,
+    computedAt: new Date().toISOString(),
+    windowDays: DEFAULT_WINDOW_DAYS,
+    minSamples,
+    provenThreshold: PROVENANCE_PROVEN_THRESHOLD,
+    totalRuns: runs.length,
+    rows,
+  };
+}
+
+/**
+ * Lookup a provenance table cell for a specific task type and module-set key.
+ * Returns null if the cell is absent or not trusted (below minSamples).
+ *
+ * @param {object} table - provenance table from buildProvenanceTable()
+ * @param {string} taskType
+ * @param {string} modules - normalized module key from normalizeModules()
+ * @returns {object|null} table row or null
+ */
+export function lookupProvenanceCell(table, taskType, modules) {
+  if (!table || !Array.isArray(table.rows)) return null;
+  const key = `${taskType}::${modules}`;
+  const row = table.rows.find(r => r.key === key);
+  if (!row || !row.trusted) return null;
+  return row;
+}
+
+/**
+ * Read the provenance table from the forge-knowledge branch (if it exists).
+ * Returns null on any error (fail-safe: caller falls back to SHADOW mode).
+ *
+ * @param {string} repoPath - absolute path to the git repo
+ * @returns {object|null} parsed provenance table or null
+ */
+export function readPublishedProvenanceTable(repoPath) {
+  try {
+    const result = spawnSync(
+      'git',
+      ['show', `${MIRROR_BRANCH}:${CALIBRATION_DIR}/${PROVENANCE_FILE}`],
+      { cwd: repoPath, encoding: 'utf8', timeout: 10000 }
+    );
+    if (result.status !== 0) return null;
+    return JSON.parse(result.stdout);
+  } catch (_) {
+    return null;
+  }
+}
+
+/**
+ * Publish the provenance table to the forge-knowledge orphan branch alongside
+ * the existing calibration/table.json. Non-blocking: any failure is logged.
+ *
+ * @param {object} table - provenance table from buildProvenanceTable()
+ * @param {string} repoPath - absolute path to the git repo
+ * @param {boolean} dryRun
+ */
+export function publishProvenanceTable(table, repoPath, dryRun = false) {
+  if (dryRun) {
+    log('--dry-run: skipping provenance table publish to forge-knowledge branch');
+    return;
+  }
+
+  try {
+    const currentBranchResult = spawnSync('git', ['branch', '--show-current'], {
+      cwd: repoPath, encoding: 'utf8', timeout: 5000,
+    });
+    const currentBranch = (currentBranchResult.stdout || '').trim();
+
+    // Ensure the forge-knowledge branch is present (reuse publishTable's checkout logic)
+    const branchCheck = spawnSync('git', ['show-ref', '--quiet', `refs/heads/${MIRROR_BRANCH}`], {
+      cwd: repoPath, encoding: 'utf8', timeout: 5000,
+    });
+
+    if (branchCheck.status !== 0) {
+      spawnSync('git', ['fetch', 'origin', `${MIRROR_BRANCH}:${MIRROR_BRANCH}`], {
+        cwd: repoPath, encoding: 'utf8', timeout: 30000,
+      });
+    }
+
+    // Check again after fetch
+    const recheckResult = spawnSync('git', ['show-ref', '--quiet', `refs/heads/${MIRROR_BRANCH}`], {
+      cwd: repoPath, encoding: 'utf8', timeout: 5000,
+    });
+    if (recheckResult.status !== 0) {
+      log(`WARNING: ${MIRROR_BRANCH} branch not found after fetch — skipping provenance publish`);
+      return;
+    }
+
+    spawnSync('git', ['checkout', MIRROR_BRANCH], { cwd: repoPath, encoding: 'utf8', timeout: 10000 });
+
+    const calibDir = join(repoPath, CALIBRATION_DIR);
+    mkdirSync(calibDir, { recursive: true });
+
+    const provenanceFile = join(calibDir, PROVENANCE_FILE);
+    writeFileSync(provenanceFile, JSON.stringify(table, null, 2) + '\n', 'utf8');
+
+    spawnSync('git', ['add', join(CALIBRATION_DIR, PROVENANCE_FILE)], {
+      cwd: repoPath, encoding: 'utf8', timeout: 10000,
+    });
+
+    const commitResult = spawnSync('git', [
+      'commit', '-m', `chore(calibration): update provenance trust table [skip ci]`,
+      '--allow-empty',
+    ], { cwd: repoPath, encoding: 'utf8', timeout: 10000 });
+
+    if (commitResult.status === 0) {
+      const pushResult = spawnSync('git', ['push', 'origin', MIRROR_BRANCH, '--force-with-lease'], {
+        cwd: repoPath, encoding: 'utf8', timeout: 30000,
+      });
+      if (pushResult.status === 0) {
+        log(`Published provenance table to ${MIRROR_BRANCH}:${CALIBRATION_DIR}/${PROVENANCE_FILE}`);
+      } else {
+        log(`WARNING: Push of provenance table to ${MIRROR_BRANCH} failed — ${pushResult.stderr || ''}`);
+      }
+    } else {
+      log(`WARNING: Commit of provenance table to ${MIRROR_BRANCH} failed — ${commitResult.stderr || ''}`);
+    }
+
+    if (currentBranch) {
+      spawnSync('git', ['checkout', currentBranch], { cwd: repoPath, encoding: 'utf8', timeout: 10000 });
+    }
+  } catch (e) {
+    log(`WARNING: publishProvenanceTable to ${MIRROR_BRANCH} failed: ${e.message} — continuing`);
+    try {
+      spawnSync('git', ['checkout', '-'], { cwd: repoPath, encoding: 'utf8', timeout: 5000 });
+    } catch (_) { /* ignore */ }
+  }
+}
+
+// ---------------------------------------------------------------------------
 // Publishing
 // ---------------------------------------------------------------------------
 
@@ -650,6 +913,7 @@ export async function run(args, repoPath) {
         outcome,
         reason,
         mergedAt,
+        files: changedFiles,
         filesCount: changedFiles.length,
       });
 
@@ -661,11 +925,18 @@ export async function run(args, repoPath) {
 
   log(`Processed ${runs.length} runs (${errorCount} errors)`);
 
-  // Build the calibration table
+  // Build the calibration table (task-type × confidence)
   const table = buildTable(runs, args.minSamples);
-  log(`Table: ${table.rows.length} cells from ${table.totalRuns} runs`);
+  log(`Calibration table: ${table.rows.length} cells from ${table.totalRuns} runs`);
 
-  return { table, runs, errorCount };
+  // Optionally build the provenance table (task-type × normalized-modules)
+  let provenanceTable = null;
+  if (args.provenance) {
+    provenanceTable = buildProvenanceTable(runs, args.provenanceMinSamples);
+    log(`Provenance table: ${provenanceTable.rows.length} cells from ${provenanceTable.totalRuns} runs`);
+  }
+
+  return { table, provenanceTable, runs, errorCount };
 }
 
 // ---------------------------------------------------------------------------
@@ -680,20 +951,28 @@ if (process.argv[1] === fileURLToPath(import.meta.url)) {
   run(args, repoPath)
     .then(result => {
       const table = result.table || result;
+      const provenanceTable = result.provenanceTable || null;
       const errorCount = result.errorCount || 0;
 
       if (args.dryRun) {
-        // Print table to stdout
+        // Print calibration table to stdout
         process.stdout.write(JSON.stringify(table, null, 2) + '\n');
+        if (provenanceTable) {
+          process.stderr.write('[calibration] Provenance table (dry-run):\n');
+          process.stderr.write(JSON.stringify(provenanceTable, null, 2) + '\n');
+        }
         log('--dry-run complete — no files written');
         process.exit(0);
       }
 
       if (args.publish) {
         publishTable(table, repoPath, false);
+        if (provenanceTable) {
+          publishProvenanceTable(provenanceTable, repoPath, false);
+        }
       }
 
-      // Always print table to stdout
+      // Always print calibration table to stdout
       process.stdout.write(JSON.stringify(table, null, 2) + '\n');
 
       process.exit(errorCount > 0 ? 2 : 0);
