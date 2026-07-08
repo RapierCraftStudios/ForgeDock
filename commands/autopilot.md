@@ -15,6 +15,7 @@ install: extras
 - `{SERVER_SSH}` ← `services.server_ssh` (optional) — SSH target for production server health checks
 - `{OPS_INBOX_PATH}` ← `services.ops_inbox_path` (optional) — path on production server to ops work-item files
 - `{BILLING_ENABLED}` ← `billing.enabled` (optional, default `false`) — set to `true` to enable Stripe data in Analytics Snapshot
+- `{RECON_SOURCES}` ← `autopilot.recon_sources` (optional, default `["ci","backlog"]`) — list of collectors to run in Phase 1. Built-in tags: `ci` (Phase 1B), `backlog` (Phase 1C), `analytics` (Phase 1D). Omit the key to run `ci` and `backlog` only.
 
 **NEVER use plan mode (EnterPlanMode).**
 **NEVER use the Agent tool** — autopilot dispatches all work via `Skill(...)` calls only. The Agent tool bypasses the Skill pipeline's label state machine, investigation comments, and structured review — leaving no audit trail.
@@ -402,24 +403,38 @@ fi
 
 ### 1B: CI/CD Health
 
+Runs when `ci` is in `RECON_SOURCES` (default: always). Skip with `autopilot.recon_sources: ["backlog"]` in forge.yaml.
+
 ```bash
-DATE_1D_AGO=$(python3 -c "from datetime import datetime, timedelta, timezone; print((datetime.now(timezone.utc) - timedelta(days=1)).strftime('%Y-%m-%dT%H:%M:%SZ'))")
+# Collector gate — skip if 'ci' not declared in RECON_SOURCES
+if echo "$RECON_SOURCES" | grep -qw "ci"; then
+  # Node.js is guaranteed by the npm installer; python3 is not (Windows alias issue)
+  DATE_1D_AGO=$(node -e "console.log(new Date(Date.now()-86400000).toISOString())")
 
-RECENT_FAILURES=$(gh run list $GH_FLAG --limit 30 --json conclusion,createdAt,workflowName \
-  --jq "[.[] | select(.conclusion == \"failure\" and .createdAt > \"$DATE_1D_AGO\")] | length" \
-  2>/dev/null || echo "0")
+  # 3-minute timeout per collector — a hung gh call costs one report line, not the cycle
+  TIMEOUT_CMD=$(command -v timeout 2>/dev/null && echo "timeout 180" || echo "")
 
-RECENT_RUNS=$(gh run list $GH_FLAG --limit 30 --json conclusion,createdAt \
-  --jq "[.[] | select(.createdAt > \"$DATE_1D_AGO\")] | length" \
-  2>/dev/null || echo "0")
+  RECENT_FAILURES=$(${TIMEOUT_CMD} gh run list $GH_FLAG --limit 30 --json conclusion,createdAt,workflowName \
+    --jq "[.[] | select(.conclusion == \"failure\" and .createdAt > \"$DATE_1D_AGO\")] | length" \
+    2>/dev/null || echo "0")
 
-echo "CI (24h): $RECENT_FAILURES/$RECENT_RUNS failures"
+  RECENT_RUNS=$(${TIMEOUT_CMD} gh run list $GH_FLAG --limit 30 --json conclusion,createdAt \
+    --jq "[.[] | select(.createdAt > \"$DATE_1D_AGO\")] | length" \
+    2>/dev/null || echo "0")
 
-# Recurring failures (same workflow failing multiple times)
-RECURRING=$(gh run list $GH_FLAG --limit 30 --json conclusion,workflowName \
-  --jq '[.[] | select(.conclusion == "failure")] | group_by(.workflowName) | .[] | select(length > 1) | "\(length)x \(.[0].workflowName)"' \
-  2>/dev/null || echo '')
-[ -n "$RECURRING" ] && echo "Recurring CI failures: $RECURRING"
+  echo "CI (24h): $RECENT_FAILURES/$RECENT_RUNS failures"
+
+  # Recurring failures (same workflow failing multiple times)
+  RECURRING=$(${TIMEOUT_CMD} gh run list $GH_FLAG --limit 30 --json conclusion,workflowName \
+    --jq '[.[] | select(.conclusion == "failure")] | group_by(.workflowName) | .[] | select(length > 1) | "\(length)x \(.[0].workflowName)"' \
+    2>/dev/null || echo '')
+  [ -n "$RECURRING" ] && echo "Recurring CI failures: $RECURRING"
+else
+  echo "CI collector (1B): SKIPPED — 'ci' not in autopilot.recon_sources"
+  RECENT_FAILURES=0
+  RECENT_RUNS=0
+  RECURRING=""
+fi
 ```
 
 ### 1B.5: Label Hygiene Delegation
@@ -444,48 +459,73 @@ fi
 
 ### 1C: Issue Backlog Health
 
+Runs when `backlog` is in `RECON_SOURCES` (default: always). Skip with `autopilot.recon_sources: ["ci"]` in forge.yaml.
+
 ```bash
-DATE_14D_AGO=$(python3 -c "from datetime import datetime, timedelta, timezone; print((datetime.now(timezone.utc) - timedelta(days=14)).strftime('%Y-%m-%dT%H:%M:%SZ'))")
+# Collector gate — skip if 'backlog' not declared in RECON_SOURCES
+if echo "$RECON_SOURCES" | grep -qw "backlog"; then
+  # Node.js is guaranteed by the npm installer; python3 is not (Windows alias issue)
+  DATE_14D_AGO=$(node -e "console.log(new Date(Date.now()-14*86400000).toISOString())")
 
-# Count by priority
-P0_COUNT=$(gh issue list $GH_FLAG --state open --limit 200 --json labels \
-  --jq '[.[] | select(.labels | map(.name) | any(. == "P0"))] | length' 2>/dev/null || echo "0")
-P1_COUNT=$(gh issue list $GH_FLAG --state open --limit 200 --json labels \
-  --jq '[.[] | select(.labels | map(.name) | any(. == "P1"))] | length' 2>/dev/null || echo "0")
-P2_COUNT=$(gh issue list $GH_FLAG --state open --limit 200 --json labels \
-  --jq '[.[] | select(.labels | map(.name) | any(. == "P2"))] | length' 2>/dev/null || echo "0")
+  # Reuse TIMEOUT_CMD from 1B if set; detect if this is the first collector run
+  TIMEOUT_CMD=${TIMEOUT_CMD:-$(command -v timeout 2>/dev/null && echo "timeout 180" || echo "")}
 
-# Stale issues (open >14d, no workflow label, no milestone)
-STALE_COUNT=$(gh issue list $GH_FLAG --state open --limit 200 --json number,labels,createdAt,milestone \
-  --jq "[.[] | select(
-    (.labels | map(.name) | any(startswith(\"workflow:\")) | not) and
-    (.createdAt < \"$DATE_14D_AGO\") and
-    .milestone == null
-  )] | length" 2>/dev/null || echo "0")
+  # Count by priority
+  P0_COUNT=$(${TIMEOUT_CMD} gh issue list $GH_FLAG --state open --limit 200 --json labels \
+    --jq '[.[] | select(.labels | map(.name) | any(. == "P0"))] | length' 2>/dev/null || echo "0")
+  P1_COUNT=$(${TIMEOUT_CMD} gh issue list $GH_FLAG --state open --limit 200 --json labels \
+    --jq '[.[] | select(.labels | map(.name) | any(. == "P1"))] | length' 2>/dev/null || echo "0")
+  P2_COUNT=$(${TIMEOUT_CMD} gh issue list $GH_FLAG --state open --limit 200 --json labels \
+    --jq '[.[] | select(.labels | map(.name) | any(. == "P2"))] | length' 2>/dev/null || echo "0")
 
-echo "Backlog: P0=$P0_COUNT P1=$P1_COUNT P2=$P2_COUNT stale=$STALE_COUNT"
+  # Stale issues (open >14d, no workflow label, no milestone)
+  STALE_COUNT=$(${TIMEOUT_CMD} gh issue list $GH_FLAG --state open --limit 200 --json number,labels,createdAt,milestone \
+    --jq "[.[] | select(
+      (.labels | map(.name) | any(startswith(\"workflow:\")) | not) and
+      (.createdAt < \"$DATE_14D_AGO\") and
+      .milestone == null
+    )] | length" 2>/dev/null || echo "0")
+
+  echo "Backlog: P0=$P0_COUNT P1=$P1_COUNT P2=$P2_COUNT stale=$STALE_COUNT"
+else
+  echo "Backlog collector (1C): SKIPPED — 'backlog' not in autopilot.recon_sources"
+  P0_COUNT=0; P1_COUNT=0; P2_COUNT=0; STALE_COUNT=0
+fi
 ```
 
-### 1D: Analytics Pulse (optional — forge.yaml-gated)
+### 1D: Analytics Pulse (optional — forge.yaml-gated, recon_sources-gated)
+
+Runs only when ALL of: (a) `analytics` is in `RECON_SOURCES`, (b) `CREDENTIALS_FILE` is set and exists, (c) the relevant MCP server is reachable. Enable with `autopilot.recon_sources: ["ci","backlog","analytics"]` in forge.yaml.
 
 ```bash
-# Only run if CREDENTIALS_FILE is configured and the file exists
-if [ -n "$CREDENTIALS_FILE" ] && [ -f "$CREDENTIALS_FILE" ]; then
-  echo "Analytics pulse: credentials at $CREDENTIALS_FILE — checking GSC..."
-  # GSC: last 7 days via mcp__gsc__search_analytics (if MCP available)
-  # If MCP unavailable, log and skip — do not block
-  ANALYTICS_AVAILABLE=true
+ANALYTICS_AVAILABLE=false
+
+# Collector gate — skip if 'analytics' not declared in RECON_SOURCES
+if ! echo "$RECON_SOURCES" | grep -qw "analytics"; then
+  echo "Analytics collector (1D): SKIPPED — 'analytics' not in autopilot.recon_sources"
+elif [ -z "$CREDENTIALS_FILE" ] || [ ! -f "$CREDENTIALS_FILE" ]; then
+  echo "Analytics collector (1D): SKIPPED — paths.credentials.file not set in forge.yaml or file absent"
 else
-  echo "Analytics pulse: SKIPPED — paths.credentials.file not set in forge.yaml or file absent"
-  ANALYTICS_AVAILABLE=false
+  echo "Analytics pulse: credentials at $CREDENTIALS_FILE — checking MCP availability..."
+  # MCP capability detection: verify the GSC MCP server is reachable before invoking.
+  # If the server is absent, the tool call would produce an agent error rather than a graceful skip.
+  # Detection strategy: attempt a lightweight probe (list tools or a no-op call) and gate on exit code.
+  # When the MCP server is present, proceed; when absent, log and skip without blocking the cycle.
+  if mcp__gsc__search_analytics --list-only 2>/dev/null; then
+    ANALYTICS_AVAILABLE=true
+    echo "Analytics pulse: GSC MCP available — proceeding with 7-day search analytics query"
+    # Full GSC analytics query runs here when MCP is present
+  else
+    echo "Analytics pulse: SKIPPED — GSC MCP server not reachable (mcp__gsc__search_analytics unavailable)"
+  fi
 fi
 
-# Stripe balance: only if billing.enabled is true AND credentials are present
+# Stripe balance: only if billing.enabled is true AND analytics collector ran successfully
 if [ "$BILLING_ENABLED" = "true" ] && [ "$ANALYTICS_AVAILABLE" = "true" ]; then
   echo "Billing analytics: checking Stripe balance..."
   # mcp__stripe__retrieve_balance — skip gracefully if MCP unavailable
 else
-  echo "Billing analytics: SKIPPED — billing.enabled is false (or credentials absent)"
+  echo "Billing analytics: SKIPPED — billing.enabled is false, credentials absent, or analytics collector skipped"
 fi
 ```
 
@@ -1508,4 +1548,4 @@ Rules are listed in **precedence order** — when two rules appear to conflict, 
 - **Token budget**: Recon is cheap (mostly API calls). Each orchestrate+deploy cycle is expensive (full /work-on per issue via /orchestrate).
 - **Idempotent**: Safe to run multiple times — /work-on resumes from pipeline checkpoints, /deploy-pr detects existing open PRs.
 - **Pairs with /loop**: Run `/loop 4h /autopilot` for continuous improvement cycles.
-- **Event-driven complement**: `/autopilot` is a periodic loop. For targeted signal-driven response (metric regression, incident, GEO gap), use `/signal-planner` instead — it converts a specific signal into a dependency-ordered issue DAG, executes via `/orchestrate`, and verifies the originating signal is resolved after the work merges. Use `/autopilot` for scheduled sweeps; use `/signal-planner` for targeted responses.
+- **Event-driven complement**: `/autopilot` is a periodic loop. For targeted signal-driven response (metric regression, incident, CI failure spike), use `/signal-planner` instead — it converts a specific signal into a dependency-ordered issue DAG, executes via `/orchestrate`, and verifies the originating signal is resolved after the work merges. Use `/autopilot` for scheduled sweeps; use `/signal-planner` for targeted responses.
