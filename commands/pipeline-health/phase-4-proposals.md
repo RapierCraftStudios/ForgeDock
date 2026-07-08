@@ -100,6 +100,133 @@ done <<< "$PATTERN_LIST"
 
 ---
 
+### 4A.5: Spec-file concentration analysis — spec-doctor trigger <!-- Added: forge#1742 -->
+
+After the check-promotion pass (§4A), scan for spec files whose 30-day review-finding
+concentration exceeds the trigger threshold (≥5 findings referencing the same spec file).
+When the threshold is met, queue a `/spec-doctor` run by creating a trigger issue.
+
+**Threshold**: 5 findings per spec file in the 30-day window. Higher than §4A's check-promotion
+threshold (3) because spec changes carry more risk than static check additions — each proposed
+change goes through eval-gate before merge.
+
+```bash
+# Group closed review-findings by referenced spec file (last 30 days)
+# $SINCE is set in Phase 1 (30-day window)
+ALL_FINDINGS=$(gh issue list {GH_FLAG} \
+  --label "review-finding" \
+  --state closed \
+  --limit 200 \
+  --json number,title,body,closedAt \
+  --jq ".[] | select(.closedAt >= \"$SINCE\")" 2>/dev/null || echo "")
+
+# Extract spec file references from finding bodies (commands/*.md paths)
+# Write one "FINDING_NUM|spec/file.md" line per match
+SPEC_REFS_FILE=$(mktemp)
+echo "$ALL_FINDINGS" | jq -r '
+  . |
+  (.body | match("commands/[a-z0-9_/-]+\\.md").string // null) as $spec |
+  if $spec then "\(.number)|\($spec)" else empty end
+' 2>/dev/null > "$SPEC_REFS_FILE" || true
+
+# Build concentration table: count occurrences per spec file
+SPEC_CONCENTRATION=$(sort -t'|' -k2 "$SPEC_REFS_FILE" | \
+  awk -F'|' '{
+    spec[$2]++
+    nums[$2] = (nums[$2] ? nums[$2] "," : "") "#"$1
+  }
+  END {
+    for (s in spec) print spec[s] " " s " " nums[s]
+  }' | sort -rn)
+rm -f "$SPEC_REFS_FILE"
+
+echo "Spec concentration ranking (last 30 days):"
+echo "$SPEC_CONCENTRATION" | head -10
+
+# Emit spec-doctor trigger for each spec at or above threshold
+SPEC_DOCTOR_THRESHOLD=5
+
+echo "$SPEC_CONCENTRATION" | while IFS=' ' read -r count spec_file finding_nums; do
+  [ -z "$spec_file" ] && continue
+  [ "${count:-0}" -lt "$SPEC_DOCTOR_THRESHOLD" ] && continue
+
+  # Skip if a spec-doctor trigger issue already exists for this spec (dedup)
+  EXISTING_TRIGGER=$(gh issue list {GH_FLAG} \
+    --label "spec-doctor-trigger" \
+    --state open \
+    --search "$spec_file" \
+    --limit 3 \
+    --json number --jq '.[0].number' 2>/dev/null || echo "")
+
+  if [ -n "$EXISTING_TRIGGER" ]; then
+    echo "Spec-doctor trigger already open for '$spec_file' as #${EXISTING_TRIGGER} — skipping."
+    continue
+  fi
+
+  # Format finding list as markdown links
+  FINDING_LINKS=$(echo "$finding_nums" | tr ',' '\n' | \
+    awk '{print "- " $0}' | head -20 | tr '\n' '\n')
+
+  gh issue create {GH_FLAG} \
+    --title "feat(spec-doctor): queue spec evolution pass for $(basename $spec_file .md) (${count} concentrated findings)" \
+    --label "spec-doctor-trigger,priority:P2" \
+    --body "$(cat <<TRIGGER_EOF
+## Problem
+
+\`$spec_file\` has accumulated **${count} review findings** in the last 30 days.
+Finding concentration above the 5-finding threshold triggers an evidence-backed
+spec evolution pass via \`/spec-doctor\`.
+
+## Source Findings (last 30 days)
+
+${FINDING_LINKS}
+
+## Task
+
+Run \`/spec-doctor $spec_file\` to:
+1. Read the concentrated findings above
+2. Identify recurring defect classes
+3. Draft a spec diff with per-change finding citations
+4. Open a \`spec-evolution\` PR gated by the eval corpus
+
+The spec-evolution PR is **never auto-merged** — the eval gate must pass and a human
+must review and approve.
+
+## Acceptance Criteria
+
+- [ ] \`/spec-doctor $spec_file\` produces a \`spec-evolution\` PR
+- [ ] PR body cites every finding from the list above that it addresses
+- [ ] Eval gate passes on the spec-evolution PR (no regression)
+- [ ] Human reviews and merges
+
+## Context
+
+Trigger threshold: **${SPEC_DOCTOR_THRESHOLD} findings / 30 days** per spec file.
+This issue was auto-created by \`pipeline-health\` Phase 4A.5.
+
+<!-- AUTO-CREATED: pipeline-health Phase 4A.5 — spec concentration threshold exceeded -->
+TRIGGER_EOF
+  )"
+  echo "Created spec-doctor trigger for '$spec_file' (${count} findings: $finding_nums)"
+done
+```
+
+**Spec-doctor trigger label**: `spec-doctor-trigger`. Create it if absent:
+
+```bash
+gh label create "spec-doctor-trigger" \
+  --color "1D76DB" \
+  --description "Queued for /spec-doctor pass. Managed by ForgeDock." \
+  --force \
+  {GH_FLAG} 2>/dev/null || true
+```
+
+**Output**: Zero or more `spec-doctor-trigger` issues — one per spec file at threshold.
+When multiple specs are above threshold, all get trigger issues. The worst offender (highest
+count) is processed first when the `/spec-doctor auto` mode is used.
+
+---
+
 ### 4B: General improvement proposals
 
 For each of the top 3 defect categories:
