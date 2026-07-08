@@ -580,6 +580,39 @@ branches:
 #   # true: remove .forgedock/scripts/ from .gitignore to share scripts with your team
 #   # To opt in: remove the .forgedock/scripts/ entry from .gitignore
 #   commit: false
+#
+#   # gate.d/ — learned quality-gate checks (Tier-A mechanizable patterns)
+#   #
+#   # Scripts placed in <directory>/gate.d/ are executed by /quality-gate after
+#   # the built-in domain checks and the static check-registry (Step 2R). They
+#   # run on every quality-gate invocation when adaptive_scripts.enabled is true.
+#   #
+#   # CONTRACT:
+#   #   Input:   $1 = absolute path to the unified diff file (git diff HEAD)
+#   #            $2 = absolute path to the worktree root
+#   #   Output:  findings lines on stdout, one per line, in the standard format:
+#   #              SLUG | HIGH|MEDIUM|LOW | FILE | MESSAGE
+#   #            (e.g.  GATD-stderr-contamination | HIGH | scripts/doctor.sh | ...)
+#   #   Exit codes:
+#   #     0  — no findings / check passed (stdout may be empty)
+#   #     1  — one or more findings emitted on stdout
+#   #     2  — check is inapplicable to this diff (skip silently)
+#   #   Timeout: 30 seconds per script, enforced by quality-gate.
+#   #            Timeout is treated as a HIGH finding (fail-closed).
+#   #
+#   # Promotion: /optimize Phase 5 drafts gate.d scripts when a pattern reaches
+#   # ≥3 validated occurrences in the Forge Ledger. Scripts arrive as a PR for
+#   # human review before enforcement — they are never silently auto-enforced.
+#   #
+#   # Example gate.d script (checks for stderr contamination in doctor scripts):
+#   #   #!/usr/bin/env bash
+#   #   # gate.d/stderr-contamination.sh
+#   #   # Flags 'command 2>&1' patterns in doctor/*.sh (contaminates stdout health output)
+#   #   DIFF_PATH="$1"
+#   #   grep -n '2>&1' "$DIFF_PATH" | grep -E '^[+][^+].*doctor' | while IFS= read -r line; do
+#   #     echo "GATD-stderr-contamination | HIGH | (diff) | 2>&1 in doctor script contaminates stdout"
+#   #     exit 1
+#   #   done
 
 # =============================================================================
 # LEARNED (OPTIONAL)
