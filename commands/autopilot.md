@@ -82,7 +82,49 @@ BILLING_ENABLED=$(yq '.billing.enabled // false' "$CONFIG_FILE" 2>/dev/null || e
 # Hygiene counters — populated by Phase 1B.5 (/cleanup) and Phase 1A (/recover-orphans)
 CLEANUP_LABELS_FIXED=0
 
-echo "Autopilot: repo=$GH_REPO staging=$STAGING_BRANCH default=$DEFAULT_BRANCH dry_run=$DRY_RUN recon_only=$RECON_ONLY"
+# Autopilot ops issue — rolling issue where FORGE:AUTOPILOT_CYCLE annotations accumulate.
+# Created automatically on first run if absent. Label is configurable; defaults to autopilot-ops.
+AUTOPILOT_OPS_LABEL=$(yq '.autopilot.ops_issue_label // "autopilot-ops"' "$CONFIG_FILE" 2>/dev/null || echo 'autopilot-ops')
+
+# Resolve or create the ops issue (idempotent — checks before creating)
+OPS_ISSUE_NUMBER=$(gh issue list $GH_FLAG \
+  --state open \
+  --label "$AUTOPILOT_OPS_LABEL" \
+  --limit 1 \
+  --json number \
+  --jq '.[0].number // empty' 2>/dev/null || echo '')
+
+if [ -z "$OPS_ISSUE_NUMBER" ]; then
+  echo "Autopilot: ops issue not found — creating one with label '$AUTOPILOT_OPS_LABEL'"
+  if [ "$DRY_RUN" = "false" ]; then
+    # Ensure the label exists before creating the issue
+    gh label create "$AUTOPILOT_OPS_LABEL" \
+      --description "Autopilot ops issue — rolling FORGE:AUTOPILOT_CYCLE annotations. Managed by /autopilot." \
+      --color "0075CA" \
+      $GH_FLAG 2>/dev/null || true
+    OPS_ISSUE_NUMBER=$(gh issue create $GH_FLAG \
+      --title "ops: autopilot cycle log" \
+      --label "$AUTOPILOT_OPS_LABEL" \
+      --body "$(cat <<'OPS_EOF'
+## Autopilot Ops Issue
+
+This issue is the rolling log for `/autopilot` cycle annotations. Each cycle appends a `<!-- FORGE:AUTOPILOT_CYCLE -->` comment with its metrics and phase-completion markers. Cycle N+1 reads the latest comment for baseline deltas and resume state.
+
+**Do not close this issue manually.** It is managed by `/autopilot`.
+OPS_EOF
+)" \
+      --json number \
+      --jq '.number' 2>/dev/null || echo '')
+    echo "Autopilot: ops issue created: #$OPS_ISSUE_NUMBER"
+  else
+    echo "[DRY-RUN] Would create ops issue with label '$AUTOPILOT_OPS_LABEL'"
+    OPS_ISSUE_NUMBER="0"
+  fi
+else
+  echo "Autopilot: ops issue found: #$OPS_ISSUE_NUMBER"
+fi
+
+echo "Autopilot: repo=$GH_REPO staging=$STAGING_BRANCH default=$DEFAULT_BRANCH dry_run=$DRY_RUN recon_only=$RECON_ONLY ops_issue=#$OPS_ISSUE_NUMBER"
 ```
 
 ---
@@ -177,6 +219,104 @@ echo "STATE: $OPEN_FAST_LANE open unmilestoned issue(s) for fast lane"
 - If `STAGING_PR_NUMBER` is set → that deploy is in progress; `/deploy-pr` will detect and resume it
 - Otherwise → proceed through phases in order
 
+### 0G: Read prior cycle baseline (for delta computation)
+
+Read the latest `FORGE:AUTOPILOT_CYCLE` annotation from the ops issue. Extract baseline metrics so Phase 4 can compute deltas showing what changed since the last cycle.
+
+```bash
+# Read the latest AUTOPILOT_CYCLE annotation from the ops issue
+PREV_CYCLE_COMMENT=""
+PREV_CYCLE_ID=""
+PREV_CYCLE_BASELINE=""
+PREV_CYCLE_OPEN_ISSUES=""
+PREV_CYCLE_CI_FAILURES=""
+PREV_CYCLE_PENDING_FINDINGS=""
+
+if [ -n "$OPS_ISSUE_NUMBER" ] && [ "$OPS_ISSUE_NUMBER" != "0" ]; then
+  PREV_CYCLE_COMMENT=$(gh api repos/${GH_REPO}/issues/${OPS_ISSUE_NUMBER}/comments \
+    --jq '[.[] | select(.body | contains("FORGE:AUTOPILOT_CYCLE"))] | last | .body // ""' \
+    2>/dev/null || echo '')
+
+  if [ -n "$PREV_CYCLE_COMMENT" ]; then
+    # Check it's a complete (not interrupted) cycle
+    PREV_COMPLETE=$(echo "$PREV_CYCLE_COMMENT" | grep -c "FORGE:AUTOPILOT_CYCLE:COMPLETE" || echo "0")
+
+    if [ "${PREV_COMPLETE:-0}" -gt 0 ]; then
+      PREV_CYCLE_ID=$(echo "$PREV_CYCLE_COMMENT" \
+        | grep -oP '(?<=\*\*cycle_id\*\*: )[^\n]+' | head -1 | tr -d '[:space:]' || echo '')
+      PREV_CYCLE_BASELINE=$(echo "$PREV_CYCLE_COMMENT" \
+        | grep -oP '(?<=\*\*baseline\*\*: ).+' | head -1 || echo '{}')
+      # Extract numeric metrics from the baseline JSON string
+      PREV_CYCLE_OPEN_ISSUES=$(echo "$PREV_CYCLE_BASELINE" \
+        | jq -r '.open_issues // empty' 2>/dev/null || echo '')
+      PREV_CYCLE_CI_FAILURES=$(echo "$PREV_CYCLE_BASELINE" \
+        | jq -r '.ci_failures // empty' 2>/dev/null || echo '')
+      PREV_CYCLE_PENDING_FINDINGS=$(echo "$PREV_CYCLE_BASELINE" \
+        | jq -r '.pending_findings // empty' 2>/dev/null || echo '')
+      echo "Prior cycle: $PREV_CYCLE_ID — open_issues=$PREV_CYCLE_OPEN_ISSUES ci_failures=$PREV_CYCLE_CI_FAILURES findings=$PREV_CYCLE_PENDING_FINDINGS"
+    else
+      echo "Prior cycle annotation found but not complete — will check for resume in Phase 0H"
+    fi
+  else
+    echo "No prior FORGE:AUTOPILOT_CYCLE annotation found — this is the first cycle"
+  fi
+fi
+```
+
+### 0H: Resume detection (skip committed phases on restart)
+
+If the latest cycle annotation on the ops issue is **incomplete** (lacks `FORGE:AUTOPILOT_CYCLE:COMPLETE`), this cycle was interrupted. Read `phase_markers` to determine which phases already committed and skip them — avoiding duplicate issue creation, duplicate deploys, and redundant work.
+
+```bash
+RESUME_FROM_PHASE=""
+SKIP_RECON=false
+SKIP_FAST_LANE=false
+SKIP_MILESTONE=false
+
+if [ -n "$PREV_CYCLE_COMMENT" ]; then
+  PREV_COMPLETE=$(echo "$PREV_CYCLE_COMMENT" | grep -c "FORGE:AUTOPILOT_CYCLE:COMPLETE" || echo "0")
+
+  if [ "${PREV_COMPLETE:-0}" -eq 0 ]; then
+    # Incomplete cycle — extract committed phase_markers
+    PREV_PHASE_MARKERS=$(echo "$PREV_CYCLE_COMMENT" \
+      | grep -oP '(?<=\*\*phase_markers\*\*: )[^\n]+' | head -1 | tr -d '[:space:]' || echo '')
+
+    echo "RESUME: Incomplete prior cycle detected. Committed phases: ${PREV_PHASE_MARKERS:-none}"
+
+    # Set skip flags for phases already committed
+    echo "$PREV_PHASE_MARKERS" | grep -q "recon"      && SKIP_RECON=true      && echo "RESUME: Skipping Phase 1 (recon already committed)"
+    echo "$PREV_PHASE_MARKERS" | grep -q "fast-lane"  && SKIP_FAST_LANE=true  && echo "RESUME: Skipping Phase 2 (fast-lane already committed)"
+    echo "$PREV_PHASE_MARKERS" | grep -q "milestone"  && SKIP_MILESTONE=true  && echo "RESUME: Skipping Phase 3 (milestone already committed)"
+
+    # Inherit the cycle_id from the interrupted cycle so the resume writes to the same annotation
+    RESUME_CYCLE_ID=$(echo "$PREV_CYCLE_COMMENT" \
+      | grep -oP '(?<=\*\*cycle_id\*\*: )[^\n]+' | head -1 | tr -d '[:space:]' || echo '')
+    [ -n "$RESUME_CYCLE_ID" ] && echo "RESUME: Continuing as cycle $RESUME_CYCLE_ID"
+  fi
+fi
+
+# Generate a new cycle_id if not resuming an interrupted cycle
+if [ -z "$RESUME_CYCLE_ID" ]; then
+  # Count completed cycles today to produce a unique counter
+  TODAY=$(date -u +%Y%m%d)
+  if [ -n "$OPS_ISSUE_NUMBER" ] && [ "$OPS_ISSUE_NUMBER" != "0" ]; then
+    TODAY_CYCLE_COUNT=$(gh api repos/${GH_REPO}/issues/${OPS_ISSUE_NUMBER}/comments \
+      --jq "[.[] | select(.body | contains(\"FORGE:AUTOPILOT_CYCLE\") and contains(\"FORGE:AUTOPILOT_CYCLE:COMPLETE\") and contains(\"$TODAY\"))] | length" \
+      2>/dev/null || echo '0')
+  else
+    TODAY_CYCLE_COUNT=0
+  fi
+  CYCLE_COUNTER=$((TODAY_CYCLE_COUNT + 1))
+  CYCLE_ID="${TODAY}-${CYCLE_COUNTER}"
+  echo "New cycle: $CYCLE_ID"
+else
+  CYCLE_ID="$RESUME_CYCLE_ID"
+fi
+
+# Initialize phase_markers (will be extended as phases complete)
+PHASE_MARKERS_COMMITTED="${PREV_PHASE_MARKERS:-}"
+```
+
 ---
 
 ## Phase 1: Recon
@@ -184,6 +324,20 @@ echo "STATE: $OPEN_FAST_LANE open unmilestoned issue(s) for fast lane"
 **Goal**: Surface signals that need new GitHub issues. Lightweight — CI health, issue backlog, optional analytics pulse.
 
 If `RECON_ONLY=true`, print the recon report and **stop after this phase**.
+
+**Resume guard**: If `SKIP_RECON=true` (set in Phase 0H — recon was already committed in the interrupted cycle), skip Phase 1 entirely and proceed to Phase 2.
+
+```bash
+if [ "$SKIP_RECON" = "true" ]; then
+  echo "RESUME: Phase 1 (recon) already committed in cycle $CYCLE_ID — skipping"
+  RECON_ISSUES=()
+  RECENT_FAILURES=0
+  RECENT_RUNS=0
+  RECURRING=""
+else
+```
+
+*(Close the skip block at the end of Phase 1, after the RECON_ONLY stop point.)*
 
 ### 1A: Recover orphaned pipeline state (MANDATORY — run before recon)
 
@@ -371,6 +525,14 @@ If `RECON_ONLY=true`, print recon report and **stop here**:
 Run without --recon-only to execute the full autonomous loop.
 ```
 
+```bash
+fi  # end SKIP_RECON guard
+
+# Phase 1 complete — record phase marker
+PHASE_MARKERS_COMMITTED="${PHASE_MARKERS_COMMITTED:+$PHASE_MARKERS_COMMITTED,}recon"
+echo "Phase 1 complete. Committed phases: $PHASE_MARKERS_COMMITTED"
+```
+
 ---
 
 ## Phase 2: Fast Lane Loop
@@ -379,6 +541,8 @@ Run without --recon-only to execute the full autonomous loop.
 
 **Overrides "never merge to main"**: This phase deploys staging→main after each iteration. `/autopilot` is the authorized deploy system.
 
+**Resume guard**: If `SKIP_FAST_LANE=true` (set in Phase 0H — fast lane was already committed in the interrupted cycle), skip Phase 2 entirely and proceed to Phase 3.
+
 ```bash
 FAST_LANE_ITERATIONS=0
 MAX_FAST_LANE_ITERATIONS=20  # safety cap — prevents infinite loop on stuck state
@@ -386,6 +550,10 @@ FAST_LANE_DEPLOYS=0
 FAST_LANE_FINDINGS_BOUNCED=0
 DISPATCHED_ISSUES=()        # accumulates every issue number dispatched this cycle (for Phase 4 report)
 STALLED_ISSUES=()           # issues that did not reach a terminal state after dispatch
+
+if [ "$SKIP_FAST_LANE" = "true" ]; then
+  echo "RESUME: Phase 2 (fast-lane) already committed in cycle $CYCLE_ID — skipping"
+else
 
 echo "=== Fast Lane Loop ==="
 
@@ -581,6 +749,12 @@ while true; do
 done
 
 echo "Fast lane complete: $FAST_LANE_ITERATIONS iteration(s), $FAST_LANE_DEPLOYS deploy(s)"
+
+fi  # end SKIP_FAST_LANE guard
+
+# Phase 2 complete — record phase marker
+PHASE_MARKERS_COMMITTED="${PHASE_MARKERS_COMMITTED:+$PHASE_MARKERS_COMMITTED,}fast-lane"
+echo "Phase 2 complete. Committed phases: $PHASE_MARKERS_COMMITTED"
 ```
 
 ---
@@ -591,9 +765,15 @@ echo "Fast lane complete: $FAST_LANE_ITERATIONS iteration(s), $FAST_LANE_DEPLOYS
 
 **Each milestone cycle**: orchestrate all open issues in the milestone → ship milestone branch to staging → deploy staging to main.
 
+**Resume guard**: If `SKIP_MILESTONE=true` (set in Phase 0H — milestone loop was already committed in the interrupted cycle), skip Phase 3 entirely and proceed to Phase 4.
+
 ```bash
 MILESTONE_ITERATIONS=0
 MILESTONE_DEPLOYS=0
+
+if [ "$SKIP_MILESTONE" = "true" ]; then
+  echo "RESUME: Phase 3 (milestone) already committed in cycle $CYCLE_ID — skipping"
+else
 
 echo "=== Milestone Loop ==="
 
@@ -779,22 +959,200 @@ echo "$MILESTONES" | jq -c '.[]' | while IFS= read -r milestone; do
 done
 
 echo "Milestone loop complete: $MILESTONE_ITERATIONS milestone(s) processed, $MILESTONE_DEPLOYS milestone ship(s)"
+
+fi  # end SKIP_MILESTONE guard
+
+# Phase 3 complete — record phase marker
+PHASE_MARKERS_COMMITTED="${PHASE_MARKERS_COMMITTED:+$PHASE_MARKERS_COMMITTED,}milestone"
+echo "Phase 3 complete. Committed phases: $PHASE_MARKERS_COMMITTED"
 ```
 
 ---
 
-## Phase 4: Final Report
+## Phase 4: Final Report and Durable Cycle Annotation
 
-Print a summary of everything done in this autopilot run:
+Write the machine-readable `FORGE:AUTOPILOT_CYCLE` annotation to the ops issue, then print the human-readable terminal summary. The annotation is written FIRST so that partial-report crashes do not leave a terminal-appearing state without the durable record.
+
+### 4A: Collect final metrics and write FORGE:AUTOPILOT_CYCLE annotation
 
 ```bash
 CYCLE_END=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+CYCLE_START_TIMESTAMP=$(date -u +%Y-%m-%dT%H:%M:%SZ)  # best-effort — pipeline start is earlier
 
 # Re-check final open issue count
 FINAL_OPEN=$(gh issue list $GH_FLAG --state open --limit 200 --json number --jq 'length' 2>/dev/null || echo '0')
 FINAL_FAST_LANE=$(gh issue list $GH_FLAG --state open --limit 200 --json number,milestone \
   --jq '[.[] | select(.milestone == null)] | length' 2>/dev/null || echo '0')
+FINAL_CI_FAILURES="${RECENT_FAILURES:-0}"
+FINAL_PENDING_FINDINGS=$(gh issue list $GH_FLAG --state open --label "review-finding" --limit 200 --json number --jq 'length' 2>/dev/null || echo '0')
 
+# Phase 4 complete — record phase marker (before annotation write so it's in the sentinel block)
+PHASE_MARKERS_COMMITTED="${PHASE_MARKERS_COMMITTED:+$PHASE_MARKERS_COMMITTED,}report"
+
+# Build baseline JSON for this cycle (consumed by cycle N+1's Phase 0G)
+BASELINE_JSON="{\"open_issues\":${FINAL_OPEN},\"ci_failures\":${FINAL_CI_FAILURES},\"pending_findings\":${FINAL_PENDING_FINDINGS}}"
+
+# Build findings summary (recon-created issue numbers)
+FINDINGS_SUMMARY="${#RECON_ISSUES[@]:-0} recon issue(s) created"
+if [ "${#RECON_ISSUES[@]}" -gt 0 ]; then
+  FINDINGS_SUMMARY="$FINDINGS_SUMMARY: ${RECON_ISSUES[*]}"
+fi
+
+# Build delta section vs prior cycle
+DELTA_LINES=""
+if [ -n "$PREV_CYCLE_ID" ]; then
+  if [ -n "$PREV_CYCLE_OPEN_ISSUES" ]; then
+    DELTA_OPEN=$((FINAL_OPEN - PREV_CYCLE_OPEN_ISSUES))
+    DELTA_SIGN=$( [ "$DELTA_OPEN" -lt 0 ] && echo "" || echo "+")
+    DELTA_LINES="${DELTA_LINES}- Open issues: $PREV_CYCLE_OPEN_ISSUES → $FINAL_OPEN (${DELTA_SIGN}${DELTA_OPEN})\n"
+  fi
+  if [ -n "$PREV_CYCLE_CI_FAILURES" ]; then
+    DELTA_CI=$((FINAL_CI_FAILURES - PREV_CYCLE_CI_FAILURES))
+    DELTA_CI_SIGN=$( [ "$DELTA_CI" -lt 0 ] && echo "" || echo "+")
+    DELTA_LINES="${DELTA_LINES}- CI failures: $PREV_CYCLE_CI_FAILURES → $FINAL_CI_FAILURES (${DELTA_CI_SIGN}${DELTA_CI})\n"
+  fi
+  if [ -n "$PREV_CYCLE_PENDING_FINDINGS" ]; then
+    DELTA_PF=$((FINAL_PENDING_FINDINGS - PREV_CYCLE_PENDING_FINDINGS))
+    DELTA_PF_SIGN=$( [ "$DELTA_PF" -lt 0 ] && echo "" || echo "+")
+    DELTA_LINES="${DELTA_LINES}- Pending findings: $PREV_CYCLE_PENDING_FINDINGS → $FINAL_PENDING_FINDINGS (${DELTA_PF_SIGN}${DELTA_PF})\n"
+  fi
+  DELTA_SECTION="### Deltas vs Cycle ${PREV_CYCLE_ID}\n$(printf '%b' "$DELTA_LINES")"
+else
+  DELTA_SECTION="### Deltas vs Prior Cycle\nNo prior complete cycle found — this is the baseline cycle."
+fi
+
+# Write FORGE:AUTOPILOT_CYCLE annotation to the ops issue (machine-readable durable record)
+if [ -n "$OPS_ISSUE_NUMBER" ] && [ "$OPS_ISSUE_NUMBER" != "0" ] && [ "$DRY_RUN" = "false" ]; then
+  gh issue comment "$OPS_ISSUE_NUMBER" $GH_FLAG --body "<!-- FORGE:AUTOPILOT_CYCLE -->
+## Autopilot Cycle — ${CYCLE_ID}
+
+**cycle_id**: ${CYCLE_ID}
+**timestamp**: ${CYCLE_END}
+**baseline**: ${BASELINE_JSON}
+**phase_markers**: ${PHASE_MARKERS_COMMITTED}
+
+$(printf '%b' "$DELTA_SECTION")
+
+### Findings Created This Cycle
+${FINDINGS_SUMMARY}
+
+### Fast Lane
+- Iterations: ${FAST_LANE_ITERATIONS:-0}
+- Deploys (staging→${DEFAULT_BRANCH}): ${FAST_LANE_DEPLOYS:-0}
+- Issues dispatched: ${#DISPATCHED_ISSUES[@]:-0}
+
+### Milestone Loop
+- Milestones processed: ${MILESTONE_ITERATIONS:-0}
+- Milestone ships: ${MILESTONE_DEPLOYS:-0}
+
+### Final State
+- Open issues: ${FINAL_OPEN} total (${FINAL_FAST_LANE} unmilestoned)
+- CI failures (24h): ${FINAL_CI_FAILURES}
+- Pending review findings: ${FINAL_PENDING_FINDINGS}
+
+<!-- FORGE:AUTOPILOT_CYCLE:COMPLETE -->" 2>/dev/null \
+    && echo "FORGE:AUTOPILOT_CYCLE annotation written to ops issue #$OPS_ISSUE_NUMBER" \
+    || echo "WARNING: Failed to write FORGE:AUTOPILOT_CYCLE annotation — ops issue #$OPS_ISSUE_NUMBER may be inaccessible"
+elif [ "$DRY_RUN" = "true" ]; then
+  echo "[DRY-RUN] Would write FORGE:AUTOPILOT_CYCLE annotation to ops issue #$OPS_ISSUE_NUMBER"
+  echo "[DRY-RUN] cycle_id=$CYCLE_ID baseline=$BASELINE_JSON phase_markers=$PHASE_MARKERS_COMMITTED"
+fi
+```
+
+### 4B: Recurrence detection
+
+After writing the current cycle annotation, fetch the last 3 COMPLETE cycle annotations from the ops issue. If the same recon-created issue title prefix appears in ALL 3, create a meta-issue citing the cycle annotations — implementing the recurrence detection claim.
+
+```bash
+# Recurrence detection — only run if there are recon findings this cycle and ops issue exists
+if [ "${#RECON_ISSUES[@]:-0}" -gt 0 ] && [ -n "$OPS_ISSUE_NUMBER" ] && [ "$OPS_ISSUE_NUMBER" != "0" ]; then
+  # Fetch last 3 complete AUTOPILOT_CYCLE annotations (now includes the one we just wrote)
+  LAST_3_CYCLES=$(gh api repos/${GH_REPO}/issues/${OPS_ISSUE_NUMBER}/comments \
+    --jq '[.[] | select(.body | contains("FORGE:AUTOPILOT_CYCLE:COMPLETE"))] | .[-3:] | .[].body' \
+    2>/dev/null || echo '')
+
+  CYCLE_COUNT=$(echo "$LAST_3_CYCLES" | grep -c "FORGE:AUTOPILOT_CYCLE:COMPLETE" || echo '0')
+
+  if [ "${CYCLE_COUNT:-0}" -ge 3 ]; then
+    # Check each recon finding title prefix against all 3 cycle annotations
+    for ISSUE_NUM in "${RECON_ISSUES[@]}"; do
+      FINDING_TITLE=$(gh issue view "$ISSUE_NUM" $GH_FLAG --json title --jq '.title' 2>/dev/null | cut -c1-60 || echo '')
+      [ -z "$FINDING_TITLE" ] && continue
+
+      # Extract the first 30 chars as a pattern (enough to distinguish issues without being too strict)
+      FINDING_PATTERN=$(echo "$FINDING_TITLE" | cut -c1-30)
+
+      # Count how many of the 3 cycles contain this pattern in their findings section
+      MATCH_COUNT=$(echo "$LAST_3_CYCLES" | grep -c "$FINDING_PATTERN" || echo '0')
+
+      if [ "${MATCH_COUNT:-0}" -ge 3 ]; then
+        echo "RECURRENCE DETECTED: '$FINDING_PATTERN' appeared in all 3 recent cycles — creating meta-issue"
+
+        # Extract cycle IDs from the last 3 annotations for citation
+        CITING_CYCLES=$(echo "$LAST_3_CYCLES" \
+          | grep -oP '(?<=\*\*cycle_id\*\*: )[^\n]+' | tr -d '[:space:]' | tr '\n' ', ' | sed 's/,$//')
+
+        # Dedup check — avoid creating a duplicate meta-issue for the same pattern
+        EXISTING_META=$(gh issue list $GH_FLAG --state open \
+          --search "meta: recurring autopilot finding $FINDING_PATTERN" \
+          --limit 1 --json number --jq '.[0].number // empty' 2>/dev/null || echo '')
+
+        if [ -z "$EXISTING_META" ] && [ "$DRY_RUN" = "false" ]; then
+          gh issue create $GH_FLAG \
+            --title "meta: recurring autopilot finding — $FINDING_PATTERN" \
+            --label "priority:P2" \
+            --body "$(cat <<META_EOF
+## Problem
+
+The following finding pattern has appeared in **3 or more consecutive /autopilot cycles**, indicating a systemic issue rather than a one-off occurrence.
+
+**Pattern**: \`${FINDING_PATTERN}\`
+**Detected in cycles**: ${CITING_CYCLES}
+
+This meta-issue is created by /autopilot recurrence detection (Phase 4B) when the same finding pattern appears in 3 consecutive complete cycle annotations on the ops issue (#${OPS_ISSUE_NUMBER}).
+
+## Root Cause (if known)
+
+Root cause unknown — the recurrent nature suggests either:
+1. The underlying issue is not being fixed by the regular work-on pipeline (check if prior issues for this pattern were closed with workflow:invalid or blocked)
+2. A systemic condition keeps re-triggering the finding (e.g., a flaky CI step, a recurring deployment error)
+3. The issue is being created and merged but the fix does not hold (regression)
+
+## Affected Files
+
+Files to be identified during investigation.
+
+## Acceptance Criteria
+
+- [ ] Root cause of recurrence identified
+- [ ] Fix confirmed: pattern does not appear in 3 subsequent /autopilot cycles after merge
+- [ ] Prior per-cycle issues for this pattern are closed with explanation
+
+## Context
+
+**Ops issue (cycle annotations)**: #${OPS_ISSUE_NUMBER}
+**Citing cycles**: ${CITING_CYCLES}
+**Detected by**: /autopilot Phase 4B recurrence detection
+META_EOF
+)" \
+            --json number --jq '"Created meta-issue #\(.number) for recurrent pattern: $ENV.FINDING_PATTERN"' \
+            2>/dev/null || echo "WARNING: Failed to create meta-issue for recurrence pattern: $FINDING_PATTERN"
+        elif [ -n "$EXISTING_META" ]; then
+          echo "Recurrence meta-issue already exists (#$EXISTING_META) for pattern '$FINDING_PATTERN' — skipping"
+        elif [ "$DRY_RUN" = "true" ]; then
+          echo "[DRY-RUN] Would create meta-issue for recurrent pattern: $FINDING_PATTERN (cycles: $CITING_CYCLES)"
+        fi
+      fi
+    done
+  else
+    echo "Recurrence check: only $CYCLE_COUNT complete cycle(s) on record — need 3 for detection (will activate after more cycles)"
+  fi
+fi
+```
+
+### 4C: Human-readable terminal summary
+
+```bash
 echo ""
 echo "╔═══════════════════════════════════════════════════╗"
 echo "║  Autopilot Complete                               ║"
@@ -803,6 +1161,9 @@ echo "║                                                   ║"
 
 cat <<REPORT
 ## Autopilot Cycle Report — $CYCLE_END
+
+**Cycle ID**: ${CYCLE_ID}
+**Ops Issue**: #${OPS_ISSUE_NUMBER} (FORGE:AUTOPILOT_CYCLE annotation written)
 
 ### Pipeline State at Start
 - staging→main PR: ${STAGING_PR_NUMBER:-none}

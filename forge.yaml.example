@@ -514,6 +514,19 @@ branches:
 #   secrets_backend: "sops"
 
 # =============================================================================
+# AUTOPILOT (OPTIONAL)
+# Configuration for the /autopilot autonomous deploy loop.
+# Commands: autopilot
+# =============================================================================
+
+# autopilot:
+#   # Label used to identify the rolling ops issue where FORGE:AUTOPILOT_CYCLE
+#   # annotations accumulate. The ops issue is created automatically on first run
+#   # if no open issue with this label exists.
+#   # Default: "autopilot-ops"
+#   ops_issue_label: "autopilot-ops"
+
+# =============================================================================
 # BILLING (OPTIONAL)
 # Controls whether financial integrity checks run in security-audit.md.
 # Only relevant if your project uses Stripe or similar billing infrastructure.

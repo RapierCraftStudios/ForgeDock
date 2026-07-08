@@ -1,0 +1,9 @@
+{
+  "description": "AUTOPILOT_CYCLE — missing FORGE:AUTOPILOT_CYCLE:COMPLETE completion sentinel (interrupted cycle)",
+  "input": "<!-- FORGE:AUTOPILOT_CYCLE -->\n## Autopilot Cycle — 20260708-2\n\n**cycle_id**: 20260708-2\n**timestamp**: 2026-07-08T10:00:00Z\n**baseline**: {\"open_issues\":8,\"ci_failures\":0,\"pending_findings\":3}\n**phase_markers**: recon,fast-lane\n\n### Phases Completed\n- [x] recon\n- [x] fast-lane (2 issues merged)\n- [ ] milestone\n- [ ] report",
+  "expect": {
+    "type": "AUTOPILOT_CYCLE",
+    "valid": false,
+    "sentinelState": "interrupted"
+  }
+}
