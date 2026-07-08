@@ -77,6 +77,9 @@ SERVER_SSH=$(yq '.services.server_ssh // ""' "$CONFIG_FILE" 2>/dev/null || echo 
 OPS_INBOX_PATH=$(yq '.services.ops_inbox_path // ""' "$CONFIG_FILE" 2>/dev/null || echo '')
 BILLING_ENABLED=$(yq '.billing.enabled // false' "$CONFIG_FILE" 2>/dev/null || echo 'false')
 
+# Hygiene counters — populated by Phase 1B.5 (/cleanup) and Phase 1A (/recover-orphans)
+CLEANUP_LABELS_FIXED=0
+
 echo "Autopilot: repo=$GH_REPO staging=$STAGING_BRANCH default=$DEFAULT_BRANCH dry_run=$DRY_RUN recon_only=$RECON_ONLY"
 ```
 
@@ -223,6 +226,26 @@ RECURRING=$(gh run list $GH_FLAG --limit 30 --json conclusion,workflowName \
 [ -n "$RECURRING" ] && echo "Recurring CI failures: $RECURRING"
 ```
 
+### 1B.5: Label Hygiene Delegation
+
+Sweep stale workflow labels from closed issues. Delegates to `/cleanup labels` — the command that verifies state before acting and maintains an audit trail. Autopilot never performs label mutations directly.
+
+```bash
+CLEANUP_AVAILABLE=$(ls ~/.claude/commands/cleanup.md 2>/dev/null && echo "true" || echo "false")
+
+if [ "$DRY_RUN" = "false" ]; then
+  if [ "$CLEANUP_AVAILABLE" = "true" ]; then
+    echo "Running label hygiene sweep via /cleanup..."
+    Skill("cleanup", args="labels")
+    CLEANUP_LABELS_FIXED=1  # /cleanup ran; detailed counts are in its own output
+  else
+    echo "INFO: /cleanup not installed (extras tier) — skipping label hygiene sweep. Install with: npx forgedock install --extras"
+  fi
+else
+  echo "[DRY-RUN] Would invoke: Skill(cleanup, labels)"
+fi
+```
+
 ### 1C: Issue Backlog Health
 
 ```bash
@@ -339,7 +362,8 @@ If `RECON_ONLY=true`, print recon report and **stop here**:
 - Stale (>14d, no workflow): $STALE_COUNT
 
 ### Actions Taken
-- Orphans recovered: $INFLIGHT_ISSUES
+- Orphans recovered (/recover-orphans): $INFLIGHT_ISSUES
+- Label hygiene (/cleanup labels): $([ "${CLEANUP_LABELS_FIXED:-0}" -eq 1 ] && echo "ran" || echo "skipped (not installed or dry-run)")
 - Issues created from recon: ${#RECON_ISSUES[@]}
 
 Run without --recon-only to execute the full autonomous loop.
@@ -648,6 +672,10 @@ cat <<REPORT
 - Recurring failures: ${RECURRING:-none}
 - Issues created from recon: ${#RECON_ISSUES[@]:-0}
 
+### Hygiene
+- Orphaned issues recovered (/recover-orphans): $INFLIGHT_ISSUES
+- Label hygiene sweep (/cleanup labels): $([ "${CLEANUP_LABELS_FIXED:-0}" -eq 1 ] && echo "ran — see /cleanup output for counts" || echo "skipped (not installed or dry-run)")
+
 ### Fast Lane
 - Iterations: $FAST_LANE_ITERATIONS
 - Deploys (staging→$DEFAULT_BRANCH): $FAST_LANE_DEPLOYS
@@ -751,7 +779,9 @@ Rules are listed in **precedence order** — when two rules appear to conflict, 
 
 **Rule 5: Loop safety cap** — max 20 fast-lane iterations prevents infinite loops on stuck state.
 
-**Rule 6: Graceful sub-skill degradation** — if /recover-orphans is not installed, log a warning and continue.
+**Rule 6: Autopilot never directly mutates issues or labels.** All issue close and workflow label changes must route through `/cleanup` (for label hygiene) or `/recover-orphans` (for orphan recovery) — commands that verify state before acting and maintain an audit trail. Autopilot composes; it does not own destructive writes. If either command is not installed, log an informational message and continue — no bare `gh issue close` or `gh issue edit --add-label` calls are acceptable in this spec.
+
+**Rule 6a: Graceful sub-skill degradation** — if /recover-orphans or /cleanup is not installed (extras tier), log an informational message and continue. The pipeline proceeds without hygiene rather than failing.
 
 **Rule 7: State always re-read** — never trust a cached issue count. Re-query GitHub at each loop iteration.
 
