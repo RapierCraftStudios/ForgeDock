@@ -256,10 +256,45 @@ echo "Adding $EFFECTIVE_LABEL to issue #$ISSUE_NUMBER..."
 gh issue edit "$ISSUE_NUMBER" "${GH_ARGS[@]}" --add-label "$EFFECTIVE_LABEL"
 
 # ---------------------------------------------------------------------------
-# Remove all other workflow:* labels (best-effort — labels may not all exist)
+# Remove all other workflow:* labels currently on the issue (best-effort)
+#
+# IMPORTANT: `gh issue edit --remove-label` is atomic across its whole
+# comma-separated argument — if ANY label in the list is not a valid label
+# on the repo (e.g. a newly added VALID_STATES entry like awaiting-merge
+# whose repo-side `gh label create` / bootstrap hasn't run yet), the ENTIRE
+# call fails with "not found" and — under `set -euo pipefail` without the
+# `|| true` this used to silently swallow — no labels are removed at all,
+# including ones that DO exist and SHOULD have been cleared (forge#1810
+# follow-up: this exact bug was caught by dogfooding this script against
+# the live repo before `workflow:awaiting-merge` had been bootstrapped).
+#
+# Fix: only ask to remove labels that are BOTH (a) in REMOVE_LABELS (valid
+# states other than the target) AND (b) actually present on the issue right
+# now. A label that was never applied to this issue can't be "not found" on
+# the repo without failing the whole call, and a label the issue doesn't
+# have doesn't need removing anyway — so intersecting against the issue's
+# current labels sidesteps the all-or-nothing failure mode entirely instead
+# of relying on `|| true` to mask it.
 # ---------------------------------------------------------------------------
-echo "Removing stale workflow:* labels ($REMOVE_LABELS)..."
-gh issue edit "$ISSUE_NUMBER" "${GH_ARGS[@]}" --remove-label "$REMOVE_LABELS" 2>/dev/null || true
+CURRENT_ISSUE_LABELS=$(gh issue view "$ISSUE_NUMBER" "${GH_ARGS[@]}" --json labels \
+  --jq '[.labels[].name] | join(",")' 2>/dev/null || echo "")
+
+TO_REMOVE=""
+IFS=',' read -ra REMOVE_CANDIDATES <<< "$REMOVE_LABELS"
+for candidate in "${REMOVE_CANDIDATES[@]}"; do
+  case ",$CURRENT_ISSUE_LABELS," in
+    *",$candidate,"*)
+      TO_REMOVE="${TO_REMOVE:+$TO_REMOVE,}$candidate"
+      ;;
+  esac
+done
+
+if [ -n "$TO_REMOVE" ]; then
+  echo "Removing stale workflow:* labels present on the issue ($TO_REMOVE)..."
+  gh issue edit "$ISSUE_NUMBER" "${GH_ARGS[@]}" --remove-label "$TO_REMOVE" 2>/dev/null || true
+else
+  echo "No stale workflow:* labels present on the issue — nothing to remove."
+fi
 
 # ---------------------------------------------------------------------------
 # Clear needs-human (best-effort)
