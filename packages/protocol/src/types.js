@@ -18,9 +18,10 @@ export const SentinelState = {
 };
 
 /**
- * All 15 reserved annotation types from spec §4.
+ * All 16 reserved annotation types from spec §4.
  * Spec ref: §4.1 lifecycle, §4.2 cross-artifact, §4.3 control/error markers.
  * Added CLAIM and CLAIM_RELEASED in forge#1736 — claims board for claim-level parallelism.
+ * Added AUTOPILOT_CYCLE in forge#1753 — durable cycle state for /autopilot.
  */
 export const RESERVED_TYPES = {
   // §4.1 Lifecycle annotations
@@ -92,6 +93,29 @@ export const RESERVED_TYPES = {
     partialSentinel: null,
     inlineValue: false,
     requiredFields: [],
+  },
+  /**
+   * AUTOPILOT_CYCLE — durable record of one /autopilot execution cycle.
+   * Posted as a comment on the designated ops issue (label: autopilot-ops) at
+   * the end of every cycle so that cycle N+1 can read baseline metrics, compute
+   * deltas, and resume an interrupted cycle without re-executing committed phases.
+   *
+   * Required fields:
+   *   cycle_id      — unique cycle identifier (e.g. "20260708-1" — date + counter)
+   *   timestamp     — ISO-8601 UTC timestamp of cycle start
+   *   baseline      — snapshot of key metrics at cycle start (JSON-encoded string)
+   *   phase_markers — comma-separated list of completed phase names for resume
+   *
+   * Completion sentinel: <!-- FORGE:AUTOPILOT_CYCLE:COMPLETE -->
+   * <!-- Added: forge#1753 — durable cycle state + baseline deltas + resume -->
+   */
+  AUTOPILOT_CYCLE: {
+    type: 'AUTOPILOT_CYCLE',
+    category: Category.LIFECYCLE,
+    completionSentinel: 'FORGE:AUTOPILOT_CYCLE:COMPLETE',
+    partialSentinel: null,
+    inlineValue: false,
+    requiredFields: ['cycle_id', 'timestamp', 'baseline', 'phase_markers'],
   },
   /**
    * CLAIM — an agent's active resource reservation, posted on the coordination issue
