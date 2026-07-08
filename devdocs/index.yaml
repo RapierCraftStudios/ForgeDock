@@ -83,6 +83,34 @@ domains:
         token_cost: 1200
 
 # ---------------------------------------------------------------------------
+# Modules — each entry maps a file-path glob to a per-module dossier
+#
+# Injected by context.md Phase C-1 when any AFFECTED_FILE matches the glob.
+# Written by close.md Phase C1.7 after merge — rolling entries (3–5 lines
+# each) with issue/PR citations; hard cap 150 lines per dossier.
+#
+# glob: shell glob pattern matched against each contract file path
+#       (basename or relative path — use fnmatch/case-in semantics)
+# path: repo-relative path under devdocs/ to the dossier file
+# authority: required — context phase MUST inject when matched
+# token_cost: approximate token count for the dossier (grows over time;
+#             update estimate when dossier is compacted)
+# ---------------------------------------------------------------------------
+
+modules:
+  - name: runner
+    glob: "bin/runner*"
+    path: modules/runner.md
+    authority: required
+    token_cost: 400
+
+  - name: orchestrate
+    glob: "commands/orchestrate*"
+    path: modules/orchestrate.md
+    authority: required
+    token_cost: 400
+
+# ---------------------------------------------------------------------------
 # Always Load
 # Loaded for EVERY task regardless of domain label match.
 # Keep short — every entry adds tokens to every task.

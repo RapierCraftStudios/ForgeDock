@@ -202,6 +202,50 @@ if [ -n "$DEVDOCS_PATH" ] && [ -f "$INDEX_PATH" ]; then
 
   DEVDOCS_APPLICABLE=$(printf "%s" "$DEVDOCS_APPLICABLE" | sort | cut -d'|' -f2-)
 
+  # --- Module dossier glob pass (index-first path only) ---
+  # When AFFECTED_FILES are known (passed via --repo-path or from the contract),
+  # match each file against every modules[].glob in index.yaml. Inject matched
+  # dossier files into DEVDOCS_APPLICABLE as authority:required entries.
+  #
+  # Skip if: AFFECTED_FILES is empty, modules section absent, or DEVDOCS_PATH unset.
+  #
+  # Glob matching uses bash `case` (fnmatch semantics): supports * ? and [class].
+  # Operators must use patterns that match the BASENAME of the affected file
+  # (e.g. "runner*" matches "bin/runner.mjs" via basename extraction below)
+  # OR a relative-path prefix pattern (e.g. "bin/runner*").
+  # Both forms are tried; first match wins for each module entry.
+  if [ -n "${AFFECTED_FILES:-}" ] && [ -n "$DEVDOCS_PATH" ] && [ -f "$INDEX_PATH" ]; then
+    # Extract modules[] entries from index.yaml
+    # Format per entry: "name|glob|path"
+    MODULE_ENTRIES=$(yq '.modules[]? | .name + "|" + .glob + "|" + .path' "$INDEX_PATH" 2>/dev/null || echo "")
+
+    if [ -n "$MODULE_ENTRIES" ]; then
+      IFS=' ' read -ra AFFECTED_FILES_GLOB_ARR <<< "${AFFECTED_FILES}"
+      while IFS='|' read -r MOD_NAME MOD_GLOB MOD_PATH; do
+        [ -z "$MOD_GLOB" ] || [ -z "$MOD_PATH" ] && continue
+        DOSSIER_ABS="${DEVDOCS_PATH}/${MOD_PATH}"
+        [ -f "$DOSSIER_ABS" ] || { echo "WARN: modules[${MOD_NAME}] references missing dossier '${MOD_PATH}' — skipping"; continue; }
+        MATCHED=0
+        for af in "${AFFECTED_FILES_GLOB_ARR[@]}"; do
+          [ -z "$af" ] && continue
+          AF_BASENAME=$(basename "$af")
+          # Try basename match first, then relative-path match
+          case "$AF_BASENAME" in
+            $MOD_GLOB) MATCHED=1; break ;;
+          esac
+          case "$af" in
+            $MOD_GLOB) MATCHED=1; break ;;
+          esac
+        done
+        if [ "$MATCHED" -eq 1 ]; then
+          echo "Module dossier matched: '${MOD_GLOB}' → ${MOD_PATH} (module: ${MOD_NAME})"
+          # Add as sort key "0" (higher priority than required=1) so dossier appears first
+          DEVDOCS_APPLICABLE="0|${DOSSIER_ABS}"$'\n'"${DEVDOCS_APPLICABLE}"
+        fi
+      done <<< "$MODULE_ENTRIES"
+    fi
+  fi
+
 elif [ -n "$DEVDOCS_PATH" ]; then
   # --- Fallback: O(N) enumerate (backward compatible — no index.yaml present) ---
   echo "No index.yaml found at ${INDEX_PATH} — falling back to full enumerate (backward compatible)"
@@ -265,6 +309,8 @@ done <<< "$DEVDOCS_APPLICABLE"
 ### Step 3: Store for output
 
 `DEVDOCS_CONTENT` is used in the `### Authoritative Devdocs` section of the FORGE:CONTEXT comment output. If empty (path absent or no applicable files), the section is replaced with a skip note.
+
+**Module dossier injection**: When the glob pass (Step 1, index-first path) matched one or more dossiers, they appear first in `DEVDOCS_APPLICABLE` (sort key `0`) and are rendered as `#### Module Dossier: {name}` sub-sections within `### Authoritative Devdocs`. The 200-line/file cap applies to each dossier individually — the same cap used for all other devdocs files. This ensures dossier injection is bounded by the existing token budget even as dossiers grow. <!-- Added: forge#1733 -->
 
 ---
 
