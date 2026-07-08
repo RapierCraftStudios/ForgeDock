@@ -106,6 +106,189 @@ The `REMAINING_AFTER` variable is passed to Phase C2 to decide whether to close.
 
 ---
 
+## Phase C1.7: Module Dossier Append (MANDATORY when PR exists) <!-- Added: forge#1733 -->
+
+**Goal**: After each merge that touches a module covered by `devdocs/modules/`, append a dated entry so future agents working on that module receive current institutional knowledge through the binding devdocs channel.
+
+**This phase is non-blocking** — if the dossier write fails, log the reason and continue to Phase C1.5. Never stall close for dossier maintenance.
+
+**Skip if**: `{PR_NUMBER}` is empty (investigation-only tasks) OR `{REPO_PATH}` is unset OR `devdocs/index.yaml` does not contain a `modules:` section OR no PR files match any module glob.
+
+### Step 1: Resolve affected files from FORGE:BUILDER comment
+
+```bash
+# Read FORGE:BUILDER comment to get the list of changed files
+BUILDER_COMMENT=$(gh api repos/{GH_REPO}/issues/{NUMBER}/comments \
+  --jq '[.[] | select(.body | contains("FORGE:BUILDER"))] | last | .body // ""' 2>/dev/null || echo "")
+
+# Extract file paths from the Changes section (lines starting with `- \`filepath\``)
+CHANGED_FILES_RAW=$(echo "$BUILDER_COMMENT" \
+  | sed -n '/^### Changes/,/^###/p' \
+  | grep -oE '`[^`]+`' \
+  | tr -d '`' \
+  | grep -E '\.' \
+  | head -20)
+
+# Fallback: try the FORGE:INVESTIGATOR affected files list
+if [ -z "$CHANGED_FILES_RAW" ]; then
+  CHANGED_FILES_RAW=$(gh api repos/{GH_REPO}/issues/{NUMBER}/comments \
+    --jq '[.[] | select(.body | contains("FORGE:INVESTIGATOR"))] | last | .body // ""' 2>/dev/null \
+    | sed -n '/### Affected Files/,/###/p' \
+    | grep -oE '`[^`]+`' \
+    | tr -d '`' \
+    | grep -E '\.' \
+    | head -20)
+fi
+
+if [ -z "$CHANGED_FILES_RAW" ]; then
+  echo "Phase C1.7: No changed files found from FORGE:BUILDER or FORGE:INVESTIGATOR — skipping dossier append"
+  # → continue to Phase C1.5
+fi
+```
+
+### Step 2: Match against module globs and append entries
+
+```bash
+CONFIG_FILE="${FORGE_CONFIG:-forge.yaml}"
+DEVDOCS_REL=$(yq '.devdocs.path // "devdocs"' "$CONFIG_FILE" 2>/dev/null || echo "devdocs")
+DEVDOCS_PATH="${REPO_PATH:-{REPO_PATH}}/${DEVDOCS_REL}"
+INDEX_PATH="${DEVDOCS_PATH}/index.yaml"
+
+if [ ! -f "$INDEX_PATH" ]; then
+  echo "Phase C1.7: ${INDEX_PATH} not found — skipping dossier append"
+  # → continue to Phase C1.5
+fi
+
+# Extract modules entries: "name|glob|path"
+MODULE_ENTRIES=$(yq e '.modules[]? | .name + "|" + .glob + "|" + .path' "$INDEX_PATH" 2>/dev/null || echo "")
+
+if [ -z "$MODULE_ENTRIES" ]; then
+  echo "Phase C1.7: No modules[] section in index.yaml — skipping dossier append"
+  # → continue to Phase C1.5
+fi
+
+DOSSIER_TIMESTAMP=$(date -u +"%Y-%m-%d")
+DOSSIER_UPDATED_MODULES=""
+
+# Iterate module entries; for each: check if any changed file matches the glob
+while IFS='|' read -r MOD_NAME MOD_GLOB MOD_PATH; do
+  [ -z "$MOD_GLOB" ] || [ -z "$MOD_PATH" ] && continue
+  DOSSIER_ABS="${DEVDOCS_PATH}/${MOD_PATH}"
+
+  MATCHED=0
+  # Iterate changed files using while read — not bare for-in (IFS word-split guard per c39758d)
+  while IFS= read -r af; do
+    [ -z "$af" ] && continue
+    AF_BASENAME=$(basename "$af")
+    case "$AF_BASENAME" in
+      $MOD_GLOB) MATCHED=1; break ;;
+    esac
+    case "$af" in
+      $MOD_GLOB) MATCHED=1; break ;;
+    esac
+  done <<< "$CHANGED_FILES_RAW"
+
+  if [ "$MATCHED" -eq 0 ]; then
+    continue
+  fi
+
+  echo "Phase C1.7: Module '${MOD_NAME}' matched (glob '${MOD_GLOB}') — appending entry to ${MOD_PATH}"
+
+  # Build entry text
+  # One-line summary from the PR title + issue number
+  PR_TITLE=$(gh pr view {PR_NUMBER} {GH_FLAG} --json title --jq '.title' 2>/dev/null || echo "untitled")
+  DOSSIER_ENTRY="## Entry ${DOSSIER_TIMESTAMP} — ${PR_TITLE} (#{NUMBER})
+
+PR #{PR_NUMBER} touched \`${MOD_NAME}\`. See FORGE:BUILDER comment on issue #{NUMBER} for full change list.
+Key gotcha recorded: (update this entry by editing \`${MOD_PATH}\` in a follow-up PR if the change revealed a new failure mode).
+Cite: #${NUMBER} / PR #{PR_NUMBER}."
+
+  # Ensure dossier file exists (create skeleton if missing — allows operator to create
+  # a new module entry in index.yaml before the dossier file is seeded)
+  if [ ! -f "$DOSSIER_ABS" ]; then
+    mkdir -p "$(dirname "$DOSSIER_ABS")"
+    cat > "$DOSSIER_ABS" <<DOSSIER_INIT_EOF
+---
+module: ${MOD_NAME}
+glob: "${MOD_GLOB}"
+authority: required
+token_cost: 200
+last_compacted: "${DOSSIER_TIMESTAMP}"
+---
+
+# Module Dossier: ${MOD_NAME}
+
+Rolling per-module knowledge log. Each entry is 3–5 lines with a citation.
+Hard cap: 150 lines. Entries are appended by close.md Phase C1.7 after each
+PR that touches this module. When the file exceeds 150 lines, oldest entries
+are compacted into the Summary block (LLM compaction, in-run).
+
+## Summary
+
+_No compacted history yet. Dossier was auto-created on ${DOSSIER_TIMESTAMP} by close.md Phase C1.7._
+DOSSIER_INIT_EOF
+    echo "Phase C1.7: Created new dossier skeleton at ${DOSSIER_ABS}"
+  fi
+
+  # Append entry (avoid subshell — use file redirect directly)
+  printf '\n%s\n' "$DOSSIER_ENTRY" >> "$DOSSIER_ABS"
+
+  # Compact if over 150 lines
+  DOSSIER_LINE_COUNT=$(wc -l < "$DOSSIER_ABS" 2>/dev/null || echo 0)
+  if [ "$DOSSIER_LINE_COUNT" -gt 150 ]; then
+    echo "Phase C1.7: Dossier ${MOD_PATH} has ${DOSSIER_LINE_COUNT} lines (>150) — compacting oldest entries"
+    # LLM compaction: read the dossier, summarize oldest Entry blocks into the ## Summary
+    # section, keeping the most recent 3 entries intact.
+    # Implementation note: this is prose-instruction compaction (LLM reads the file and
+    # rewrites it). The compacted file must preserve the frontmatter and ## Summary block;
+    # it may replace old ## Entry blocks with a single "## Archived Summary (compacted)"
+    # block. After compaction, update frontmatter last_compacted to today's date.
+    # The compacted file MUST be ≤ 150 lines. If compaction fails (e.g. LLM context
+    # overflow), log a warning and leave the file as-is — never delete entries silently.
+    echo "COMPACT INSTRUCTION: Read ${DOSSIER_ABS}. Keep the frontmatter (lines between ---), keep the ## Summary section, keep the 3 most recent ## Entry blocks, and replace all older ## Entry blocks with a single '## Archived Summary (compacted — ${DOSSIER_TIMESTAMP})' block containing a 5–8 line distillation of the key failure modes, gotchas, and citations from the archived entries. Write the result back to ${DOSSIER_ABS}. The output MUST be ≤ 150 lines. Update frontmatter last_compacted to ${DOSSIER_TIMESTAMP}."
+  fi
+
+  DOSSIER_UPDATED_MODULES="${DOSSIER_UPDATED_MODULES} ${MOD_NAME}"
+
+done <<< "$MODULE_ENTRIES"
+```
+
+### Step 3: Commit dossier changes and post annotation
+
+```bash
+if [ -n "$DOSSIER_UPDATED_MODULES" ]; then
+  # Commit the updated dossier files
+  cd "{REPO_PATH}"
+  CHANGED_DOSSIER_FILES=$(echo "$DOSSIER_UPDATED_MODULES" | tr ' ' '\n' | while IFS= read -r mod; do
+    yq e ".modules[]? | select(.name == \"${mod}\") | \"${DEVDOCS_REL}/\" + .path" "$INDEX_PATH" 2>/dev/null
+  done | grep -v '^$')
+
+  if [ -n "$CHANGED_DOSSIER_FILES" ]; then
+    git -C "{REPO_PATH}" add $CHANGED_DOSSIER_FILES 2>/dev/null || true
+    # Only commit if there are staged changes (new or modified dossier files)
+    if ! git -C "{REPO_PATH}" diff --cached --quiet 2>/dev/null; then
+      git -C "{REPO_PATH}" commit -s -m "docs(dossier): append entry for PR #{PR_NUMBER} (#${NUMBER})" 2>/dev/null || true
+      echo "Phase C1.7: Dossier commit created for modules:${DOSSIER_UPDATED_MODULES}"
+    else
+      echo "Phase C1.7: No staged dossier changes — skipping commit"
+    fi
+  fi
+
+  # Post annotation on the issue
+  gh issue comment {NUMBER} {GH_FLAG} --body "<!-- FORGE:DOSSIER_UPDATED -->
+Module dossier(s) updated:${DOSSIER_UPDATED_MODULES}
+
+Entries appended to \`devdocs/modules/\` after PR #{PR_NUMBER} merged. Future agents working
+on these modules will receive the updated knowledge through the devdocs channel (context.md Phase C-1).
+
+<!-- FORGE:DOSSIER_UPDATED:COMPLETE -->" 2>/dev/null || true
+else
+  echo "Phase C1.7: No module dossiers matched changed files — skipping"
+fi
+```
+
+---
+
 ## Phase C1.5: Project Board Update (Status=Done, Workflow=Merged)
 
 Update the project board to reflect the merged state. This replaces the old Phase 5E project board update that existed before the modular refactor.
