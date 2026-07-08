@@ -46,6 +46,51 @@ done
 # Skip any issue whose card is absent — pre-card runs or non-merged terminal states degrade gracefully.
 ```
 
+### Step 6A.5: Collect merge-ready PRs (`workflow:awaiting-merge`) <!-- Added: forge#1811 -->
+
+**Why a separate collection pass**: `workflow:awaiting-merge` issues are open (their PR hasn't
+merged yet), so they are excluded from `{all_completed_issue_numbers}` above — that set only
+contains issues that reached a closed/merged terminal state. Iterate the full batch issue set
+(`{all_batch_issue_numbers}` — same prose-variable used by the batch-wide loops in
+`phase-4-execution.md`) instead, and filter to the awaiting-merge label.
+
+For each awaiting-merge issue, resolve its open PR using the `"Closes #N"`-anchored search
+established by forge#1634/#1646 — **do not** use a bare-number `search "${NUM} in:body"`, which
+can false-positive on changelogs or cross-references and resolve the wrong PR:
+
+```bash
+MERGE_READY_PRS=()   # each entry: "NUM|PR_NUMBER|TITLE"
+
+for NUM in {all_batch_issue_numbers}; do
+  IS_AWAITING=$(gh issue view "$NUM" -R {GH_REPO} --json labels \
+    --jq '[.labels[].name | select(. == "workflow:awaiting-merge")] | length' 2>/dev/null || echo "0")
+  [ "$IS_AWAITING" -gt 0 ] || continue
+
+  TITLE=$(gh issue view "$NUM" -R {GH_REPO} --json title --jq '.title' 2>/dev/null || echo "")
+
+  # Anchor on "Closes #N" first (forge#1634/#1646 precedent); bare-number fallback only if empty.
+  PR_NUM=$(gh pr list -R {GH_REPO} --state open --search "\"Closes #${NUM}\" in:body" \
+    --json number,updatedAt --jq 'sort_by(.updatedAt) | last | .number' 2>/dev/null || echo "")
+  if [ -z "$PR_NUM" ]; then
+    PR_NUM=$(gh pr list -R {GH_REPO} --state open --search "${NUM} in:body" \
+      --json number,updatedAt --jq 'sort_by(.updatedAt) | last | .number' 2>/dev/null || echo "")
+  fi
+
+  [ -n "$PR_NUM" ] && MERGE_READY_PRS+=("${NUM}|${PR_NUM}|${TITLE}")
+done
+# MERGE_READY_PRS now holds one entry per merge-ready PR in the batch (empty array if none).
+# Feeds the "### Merge-Ready" report block and the Implementation Results table row (Step 6B).
+
+# Pre-build the single batch-merge command (rendered verbatim as {MERGE_READY_CMD} in Step 6B —
+# computed here, not inside the report template, so Step 6B stays plain template text with no
+# nested code fences of its own).
+MERGE_READY_CMD=""
+if [ "${#MERGE_READY_PRS[@]}" -gt 0 ]; then
+  PR_LIST=$(printf '%s\n' "${MERGE_READY_PRS[@]}" | cut -d'|' -f2 | tr '\n' ' ')
+  MERGE_READY_CMD="gh pr merge ${PR_LIST}--merge -R {GH_REPO}"
+fi
+```
+
 ### Step 6B: Present consolidated report
 
 ```
@@ -70,7 +115,32 @@ done
 | #{N1} | {title} | from #{INV1} | ✓ Merged | #{PR} | staging |
 | #{C} | {title} | original | ✗ Invalid | — | — |
 | #{D} | {title} | original | ⚠ Blocked | — | — |
+| #{F} | {title} | original | ⏸ Awaiting Merge | #{PR} | staging |
 | #{E} | {title} | original | ⏭ Skipped (dep) | — | — |
+
+`⏸ Awaiting Merge` (`workflow:awaiting-merge`) is structurally distinct from `⚠ Blocked`
+(`needs-human`): a Blocked row means the pipeline hit something it cannot resolve on its own
+and a human must diagnose it; an Awaiting Merge row means the PR was already remediated and
+re-reviewed to a clean APPROVED verdict — a human only needs to click merge. Never render an
+awaiting-merge PR as `⚠ Blocked`.
+
+{IF `MERGE_READY_PRS` (Step 6A.5) is non-empty:}
+
+### Merge-Ready — {N} PR(s) awaiting only a human merge
+
+These PRs were remediated and re-reviewed to a clean `APPROVED` verdict after an earlier
+`needs-human` escalation. They do not need further diagnosis — merge them to land the batch.
+
+| # | Issue | PR | Title |
+|---|-------|----|----|
+{one row per `MERGE_READY_PRS` entry: | {n} | #{NUM} | #{PR} | {title} |}
+
+**One action to land all {N}:** `{MERGE_READY_CMD}`
+
+(`{MERGE_READY_CMD}` is pre-built in Step 6A.5 by joining every PR number from `MERGE_READY_PRS`
+— render it verbatim here as plain text, no code fence.)
+
+{ELSE: omit this section entirely — do not print an empty "Merge-Ready" heading.}
 
 ### Review-Spawned Issues
 
@@ -100,6 +170,7 @@ done
 - **Review findings**: {N} spawned, {M} resolved in-batch, {K} swept, {J} deferred (cosmetic), {L} deferred (gen2)
 - **Succeeded**: {N} issues resolved (implementation + sweep)
 - **Failed**: {N} issues need attention
+- **Merge-ready**: {#MERGE_READY_PRS[@]:-0} PRs awaiting only a human merge (see "Merge-Ready" section above)
 - **Skipped**: {N} issues (dependency failures)
 
 ### Post-Batch Cleanup
