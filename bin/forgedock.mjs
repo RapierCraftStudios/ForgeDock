@@ -412,6 +412,14 @@ function getVersion() {
  * would reject the whole component as NaN). Components with no leading
  * numeric prefix, or missing components, are treated as 0.
  *
+ * Note: `parseInt(n, 10)` is used deliberately, not `Number(n)`. This means
+ * component parsing only targets plain decimal digit runs — it does not
+ * interpret hex (`"0x10"`) or exponential (`"1e3"`) numeric-literal forms
+ * the way `Number()` would. That's intentional: real semver/npm version
+ * segments are never hex- or exponential-shaped, and swapping back to
+ * `Number()` to "fix" that mismatch would reintroduce the prerelease-suffix
+ * coercion bug this function was fixed for (see the note above).
+ *
  * @param {string} a
  * @param {string} b
  * @returns {number} negative if a < b, positive if a > b, 0 if equal
