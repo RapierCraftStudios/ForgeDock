@@ -551,6 +551,33 @@ branches:
 #   #     test: "cargo test"
 #   #     build: "cargo build"
 #
+#   # Known-slow / hanging test suites to skip or narrow during automated pipeline
+#   # runs. Some test files make live network/LLM calls or otherwise hang far
+#   # longer than a normal unit-test pass — without this list, /work-on Phase 3H
+#   # (and any `learned.test_commands` entry) will re-launch the full hanging
+#   # suite on every pass, and each stall-triggered resume reloads full context.
+#   #
+#   # Each entry's `pattern` is matched as a substring against the full command
+#   # text (e.g. "pytest tests/test_agents.py -x -q") — not just a bare filename.
+#   # Exactly one of `skip` or `subset` should be set per entry:
+#   #   skip: true       — the matched command is skipped entirely (logged, not run)
+#   #   subset: "<cmd>"  — the matched command is replaced with this safe-subset
+#   #                      command instead of running the full command
+#   # `reason` is free text surfaced in the skip/substitution log line.
+#   #
+#   # Default: [] (no known-slow tests configured — all commands run unchanged,
+#   # same as today's behavior). This is additive and fully backward compatible —
+#   # repos that don't set this field see no behavior change.
+#   # Used by: work-on (Phase 3H, before running learned.test_commands)
+#   #
+#   # known_slow_tests:
+#   #   - pattern: "test_agents.py"
+#   #     reason: "Makes real network/LLM calls — hangs pipeline agents waiting on live responses"
+#   #     skip: true
+#   #   - pattern: "test_integration.py"
+#   #     reason: "Full suite requires a live DB; subset covers unit-safe cases only"
+#   #     subset: "pytest tests/test_integration.py -k 'not live_db' -x -q"
+#
 #   # Integration test suites run by /test-gate against the provisioned cluster.
 #   # Each entry specifies a logical cluster (matched to test_services), the shell
 #   # command to execute, and the working directory (relative to project root).
