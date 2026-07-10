@@ -320,11 +320,13 @@ current session's live wake pick them up automatically if it is still running).
 | Review findings created | {N_total} |
 | Findings queued after cascade control | {N_queued}/{N_total} ({N_deferred} deferred — see Step 4C) |
 | Findings deferred — idle policy (forge#1814) | {IDLE_POLICY_DEFERRED_COUNT} (batch fully human-gated at defer time — see Step 4B item 6.7) |
+| P3 findings clubbed (surface-area batching, forge#1818) | {SURFACE_BATCH_COUNT:-0} batch(es) covering {#SURFACE_BATCHED_FINDINGS[@]:-0} finding(s) — see Step 4C |
+| Findings deferred — token budget (forge#1858) | {#TOKEN_DEFERRED[@]:-0} (batch spend ${BATCH_TOKEN_SPEND:-0}/${TOKEN_BUDGET:-uncapped} tokens — see Step 4C) |
 | Competing recommendations reconciled (Phase 2.5) | {RECONCILED_COUNT} (investigation plans arbitrated in place + serialized) |
 | Findings validated | {N} |
 | False positives | {N} ({%}) |
 | Anomalies flagged | {N} |
-| Budget limit | ${BUDGET_LIMIT:-uncapped} |
+| Budget limit ($) | ${BUDGET_LIMIT:-uncapped} |
 | Projected spend (dispatched issues) | ${PROJECTED_SPEND:-—} |
 | Actual spend (best-effort telemetry) | ${ACTUAL_SPEND:-—} |
 | Issues deferred (budget ceiling) | {#DEFERRED_BUDGET_ISSUES[@]:-0} |
@@ -332,6 +334,8 @@ current session's live wake pick them up automatically if it is still running).
 | **Value-weighted throughput** | **{VALUE_THROUGHPUT:-—} value-pts/USD** |
 
 `value-weighted throughput` = Σ(priority_weight × danger_zone_weight) for **merged** issues ÷ actual spend (USD). A higher value means more high-priority issues were resolved per dollar. Trend this across runs via `/pipeline-health` to measure the economic scheduling ROI. <!-- Added: forge#1743 -->
+
+`P3 findings clubbed` and `Findings deferred — token budget` are a DIFFERENT mechanism from the `$`-denominated `Budget limit`/`Projected spend`/`Actual spend`/`Issues deferred (budget ceiling)` rows above (forge#1743, opt-in `--budget N` flag, gates the *original* issue dispatch order). The token-budget row reads the always-on, token-denominated ceiling that scopes ONLY to Step 4C's review-finding cascade dispatch (forge#1858); `SURFACE_BATCH_COUNT` and `SURFACE_BATCHED_FINDINGS` are populated by the same Step 4C surface-area-batching block (forge#1818) that clubs P3 findings sharing a file/leaf-directory into one dispatched pipeline. Both degrade gracefully to `0`/`uncapped` when the batch had no review findings or ran with defaults. <!-- Added: forge#1858 -->
 
 **Compute value-weighted throughput** (populate before rendering the table):
 
