@@ -76,7 +76,7 @@ Orchestrator for the full issue lifecycle: investigate → decompose (if needed)
 
 <!-- FORGE:SPAWN_POLICY — Canonical spawn-decision table. Sibling specs (orchestrate.md, review-pr.md) link to this section. Sub-issues #1276–#1279 reference this table. -->
 
-**Default: run inline.** Every skill, phase, and sub-agent runs inline in the current context unless one of the three criteria below explicitly applies. A sub-agent buys exactly two things — parallelism and context isolation. If neither is needed, forking is waste.
+**Default: run inline.** Every skill, phase, and sub-agent runs inline in the current context unless one of the four criteria below explicitly applies. A sub-agent buys exactly three things — parallelism, context isolation, and (below) prompt-cache preservation. If none is needed, forking is waste.
 
 ### Spawn-Decision Table
 
@@ -85,8 +85,9 @@ Orchestrator for the full issue lifecycle: investigate → decompose (if needed)
 | a | **Parallel fan-out** — two or more independent work units can execute concurrently and the total wall time saving justifies the fork overhead | YES — spawn one sub-agent per work unit | `/orchestrate` dispatching multiple `/work-on` agents; `review-pr` spawning domain-specific reviewers in parallel |
 | b | **Fresh-context isolation** — the work unit is a structured review or audit whose value depends on seeing the artefact without the builder's accumulated context bias, AND the review result is load-bearing for the merge decision | YES — spawn a dedicated sub-agent | Phase 5C review-fork when build context is large (see Row c for the quantitative threshold) |
 | c | **Parent context near overflow** — the parent agent has made ≥20 Skill invocations OR the build changed ≥10 files, meaning delegating review inline risks a mid-review token overflow | YES — spawn a fresh sub-agent for review | Phase 5C: `Skill(skill="work-on/review", …)` instead of direct `review-pr` invocation |
+| d | **Prompt-cache TTL** — the sub-operation (multi-domain review, multi-iteration quality-gate) is expected to run for several minutes, longer than Anthropic's ~5-minute prompt-cache TTL. Leaving it inline lets the parent's already-large accumulated context (investigation/contract/context/architect/implement annotations) sit idle past the TTL; the parent's next turn then re-hydrates that entire context **uncached**, roughly doubling effective token cost for that turn. This is independent of build size — a 1-file fix idles the parent exactly as long as a 20-file one once the sub-operation starts running | YES — spawn a fresh sub-agent, **unconditionally**, regardless of file count or Skill-invocation count | Phase 5C review (always forks — Row d supersedes Row c's threshold as the controlling reason); Phase 3G quality-gate loop (forks under Row d even though it never qualified under Row c) <!-- Added: forge#1825 --> |
 
-**If none of the three rows match: run inline.** Do not fork for convenience, narrative clarity, or to avoid reading a large file. Context cost of a fork (spawning, context reconstruction, result aggregation) is paid every time, even when parallelism or isolation adds no value.
+**If none of the four rows match: run inline.** Do not fork for convenience, narrative clarity, or to avoid reading a large file. Context cost of a fork (spawning, context reconstruction, result aggregation) is paid every time, even when parallelism, isolation, or cache preservation adds no value.
 
 ### Depth Budget
 
@@ -98,15 +99,19 @@ Orchestrator for the full issue lifecycle: investigate → decompose (if needed)
 |-------|-------|-------|
 | 1 | `/orchestrate` | Top-level dispatcher — never implements directly |
 | 2 | `/work-on` | Issue pipeline — runs build phases inline |
-| 3 | Parallel reviewers (Row a/b/c fork) | Domain review agents spawned by Phase 5C |
+| 3 | Parallel reviewers (Row a/b/c/d fork); quality-gate loop (Row d fork) | Domain review agents spawned by Phase 5C; quality-gate sub-agent spawned by Phase 3G |
 
-**Build phases (3A–3M) run inline at depth 2** — they are sequential sub-phases of `/work-on`, not independent agents. Forking the build into a sub-agent (depth 3) is a violation of Row a/b/c unless the build itself fans out independently scoped work units.
+**Build phases (3A–3M) run inline at depth 2** — they are sequential sub-phases of `/work-on`, not independent agents. Forking the build into a sub-agent (depth 3) is a violation of Row a/b/c/d unless the build itself fans out independently scoped work units, **except** the Phase 3G quality-gate loop, which forks unconditionally under Row d (cache-TTL economics) regardless of build size. <!-- Updated: forge#1825 -->
 
 **Depth 4–5 are reserved** for exceptional cases (e.g. an orchestrate agent that itself spawns an orchestrate agent for a sub-milestone). Agents that reach depth 4 MUST log a justification comment on the relevant issue.
 
 ### Phase 5C Cross-Reference
 
-The existing Phase 5C context-budget check (≥10 changed files OR ≥20 Skill invocations → spawn `work-on/review` sub-agent) is an instance of **Row (c)** above. The quantitative thresholds are not changed — only their framing: they are now a specific application of the spawn-decision table, not a standalone ad-hoc rule.
+The Phase 5C review fork is now unconditional, controlled by **Row (d)** (prompt-cache TTL economics — independent of build size). It was previously gated by **Row (c)** alone (≥10 changed files OR ≥20 Skill invocations, i.e. parent-context-overflow risk); that threshold is preserved as a *documented, non-gating* reason the fork is also correct for large builds, but no longer determines *whether* the fork happens — Row (d) means it always does. <!-- Updated: forge#1825 (previously: "quantitative thresholds are not changed") -->
+
+### Phase 3G Cross-Reference
+
+The Phase 3G quality-gate loop forks unconditionally under **Row (d)**: it scans 14+ domains across up to 3 iterations, long enough to idle the parent's accumulated context past the prompt-cache TTL regardless of how many files changed. Unlike Phase 5C, quality-gate never had a Row (c) (file-count) exception — Row (d) is the sole justification for forking it. <!-- Added: forge#1825 -->
 
 ---
 
@@ -941,7 +946,7 @@ esac
 
 <!-- FORGE:PHASE_COMPLETE — Entering Phase 3 (Build). See Universal Phase Dispatcher: sub-phases 3A–3M execute in sequence. No sub-phase completion is terminal. -->
 
-**Canonical path**: Sub-phases 3A–3M run **inline** in the current context window for STANDARD and fast-lane issues. This is the single authoritative build topology. `work-on/build.md` and `work-on-monolithic.md` ([BENCHMARK]) describe the same inline model with different levels of detail; they are not separate competing paths. `Skill()` sub-agent spawns for build sub-phases are only permitted under the Spawn-Decision Table Row (c) exception (≥20 Skill invocations or ≥10 files changed before the build). <!-- Added: forge#1276 -->
+**Canonical path**: Sub-phases 3A–3M run **inline** in the current context window for STANDARD and fast-lane issues, with one standing exception: 3G (quality gate) always forks to a sub-agent under Row (d). This is the single authoritative build topology. `work-on/build.md` and `work-on-monolithic.md` ([BENCHMARK]) describe the same inline model with different levels of detail; they are not separate competing paths. `Skill()`/`Agent()` sub-agent spawns for build sub-phases are only permitted under a Spawn-Decision Table Row (c) or Row (d) exception — Row (c): ≥20 Skill invocations or ≥10 files changed before the build; Row (d): the sub-phase's own runtime risks exceeding the prompt-cache TTL regardless of build size (3G's standing exception). <!-- Added: forge#1276, updated: forge#1825 -->
 
 **Skip if**: `<!-- FORGE:BUILDER:COMPLETE -->` is present in a BUILDER comment. <!-- Added: forge#1305 — require completion marker, not mere presence of BUILDER annotation -->
 
@@ -1386,6 +1391,41 @@ This advisory is informational — it does NOT block the commit. But the impleme
 
 Skip for 1-file config/docs edits.
 
+**Fork the loop unconditionally under Spawn-Decision Table Row (d)** (see Phase 3G Cross-Reference above): quality-gate scans 14+ domains across up to 3 iterations — long enough to idle the parent's already-large accumulated context past the prompt-cache's ~5-minute TTL, forcing an uncached re-hydration on the parent's next turn. This applies regardless of changed-file count; there is no small-build exception. Dispatch with the `Agent` tool, not a nested `Skill()` call — a nested `Skill()` call still executes inside the parent's own context and would not stop the parent from idling past the cache TTL while the loop runs. The sub-agent needs nothing from the parent's context: it works directly against files on disk at `{WORKTREE_PATH}`. <!-- Added: forge#1825 -->
+
+```
+Agent(
+  subagent_type="general-purpose",
+  model="sonnet",
+  description="Quality gate for #{NUMBER}",
+  run_in_background=false,
+  prompt="Run the quality gate loop for issue #{NUMBER} in worktree {WORKTREE_PATH}.
+    NEVER use plan mode (EnterPlanMode).
+    Changed files: {CHANGED_FILES}
+
+    iteration = 0
+    max_iterations = 3
+    while iteration < max_iterations:
+        iteration += 1
+        Skill('quality-gate', args='{CHANGED_FILES} --worktree {WORKTREE_PATH}')
+        if result == 'QUALITY GATE: PASS':
+            GATE_PASSED = true
+            break
+        else:
+            Fix each HIGH and MEDIUM finding directly in the files at {WORKTREE_PATH}
+            Re-stage the fixes (do not commit, do not push)
+
+    Do not touch GitHub issue state — the caller handles labels/comments.
+    Return exactly one line: 'GATE_RESULT: passed={true|false} iterations={N} summary={one-line summary of remaining findings if failed, else \"clean\"}'"
+)
+```
+
+Parse the returned `GATE_RESULT` line:
+- `passed=true` → `GATE_PASSED = true` → continue to sub-phase 3H.
+- `passed=false` (loop exhausted 3 iterations) → post "Quality Gate Failed After 3 Iterations" comment using the returned `summary` → add `needs-human` label → STOP.
+
+**Fallback**: if the `Agent` tool is unavailable in the current runtime (partial install), run the loop inline as before —
+
 ```
 iteration = 0
 max_iterations = 3
@@ -1405,11 +1445,13 @@ if iteration == max_iterations AND not PASS:
     Add needs-human label → STOP
 ```
 
+— and note in the builder comment that context isolation was degraded for this run.
+
 # MUST CONTINUE to sub-phase 3H (Format and verify) — quality gate PASS is intermediate, NOT terminal. <!-- Added: forge#220 -->
 
-**After quality gate completes (PASS or fixes applied): proceed immediately to sub-phase 3H below. Quality gate is an intermediate check — "PASS" means the code is clean, NOT that the build is done. Do NOT stop.**
+**After the sub-agent returns `passed=true`: proceed immediately to sub-phase 3H below. Quality gate is an intermediate check — "PASS" means the code is clean, NOT that the build is done. Do NOT stop.**
 
-**After PASS: Do NOT re-read GitHub state, issue body, labels, or any file. Do NOT run any gh commands. Do NOT check PR status. Proceed directly to Phase 3H (Format and verify) below.** <!-- Added: forge#93 -->
+**After PASS: Do NOT re-read GitHub state, issue body, labels, or any file beyond what the sub-agent already changed on disk. Do NOT run any gh commands. Do NOT check PR status. Proceed directly to Phase 3H (Format and verify) below.** <!-- Added: forge#93 -->
 
 ### 3H: Format and verify
 
@@ -1805,20 +1847,14 @@ PR #${PR_NUMBER} created targeting \`{PR_BASE}\`. Invoking /review-pr with --aut
 
 ### 5C: Invoke /review-pr with --auto-merge
 
-**Context budget check** (run before invoking review-pr): <!-- Added: forge#93 -->
+**Always fork — Row (d) supersedes Row (c) as the controlling reason** (run before invoking review-pr): <!-- Updated: forge#1825 (previously threshold-gated by Row (c) alone — forge#93) -->
 
-Large-context sessions that accumulated significant build history cause review-pr to hit the token limit mid-review. This check is an instance of **Spawn-Decision Policy Row (c)** (parent context near overflow) — see the [Spawn-Decision Table](#spawn-decision-table) for the general policy. Check the accumulated context before delegating:
+`/review-pr` spawns domain review agent(s) (observed at `effort: xhigh`) that run for minutes — long enough to idle the parent's accumulated context past the prompt cache's ~5-minute TTL under **Spawn-Decision Policy Row (d)**, regardless of build size — see the [Spawn-Decision Table](#spawn-decision-table). There is no small-build exception: review ALWAYS forks.
 
-- If the build changed **≥10 files** OR this agent has made **≥20 Skill invocations** since it started: invoke `work-on/review` as a fresh sub-agent (via `Skill(skill="work-on/review", args="...")`) rather than calling review-pr directly. The sub-agent starts with a clean context window.
-- Otherwise (small build, few skill calls): invoke review-pr directly as below.
-- **Fallback**: if `work-on/review` is not available (partial install), invoke review-pr directly regardless of file count and add a note that context may be large.
+- ALWAYS invoke `work-on/review` as a fresh sub-agent (via `Skill(skill="work-on/review", args="...")`) rather than calling review-pr directly. The sub-agent starts with a clean context window and re-reads all needed state from GitHub (Phase R0) — it does not depend on anything the parent accumulated.
+- **Fallback only**: if `work-on/review` is not available (partial install), invoke review-pr directly and add a note in the progress comment that context isolation was degraded for this run.
 
-**Direct invocation** (small builds — <10 changed files AND <20 Skill invocations):
-```
-Skill(skill="review-pr", args="{PR_NUMBER} --auto-merge --issue {NUMBER} --base {PR_BASE} --gh-flag {GH_FLAG}")
-```
-
-**Sub-agent invocation** (large builds — ≥10 changed files OR ≥20 Skill invocations):
+**Sub-agent invocation** (always, regardless of changed-file count or Skill-invocation count):
 
 Before spawning, build a distilled hot-copy of the key annotations the review sub-agent would otherwise re-fetch from GitHub. This reduces gh round-trips in the child without replacing the durable FORGE annotation record. <!-- Added: forge#1277 -->
 
@@ -1852,6 +1888,11 @@ Skill(skill="work-on/review", args="{NUMBER} --repo {GH_REPO} --gh-flag {GH_FLAG
 ```
 
 The `{HOT_COPY_BLOCK}` is an optimization that avoids the child re-discovering context already held by the parent. The FORGE annotations on GitHub remain the durable, compaction-safe record. If the hot-copy block is empty (annotations not yet posted), the sub-agent falls back to reading them from GitHub as before.
+
+**Fallback invocation** (only when `work-on/review` is unavailable):
+```
+Skill(skill="review-pr", args="{PR_NUMBER} --auto-merge --issue {NUMBER} --base {PR_BASE} --gh-flag {GH_FLAG}")
+```
 
 Review-pr handles: full domain-agent review → post findings as separate issues → merge PR. It does NOT close the issue or clean up the worktree — those run in Phase 6.
 
