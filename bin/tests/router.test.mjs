@@ -108,12 +108,17 @@ describe("router", () => {
     assert.deepEqual(manifest.files, {}, "manifest should be cleared of removed entries");
   });
 
-  it("update in a forgeHome without .git prints the npm-update hint, relinks via forge, and exits 0", () => {
+  it("update in a forgeHome without .git checks the npm registry (not the old dead 'npm update -g' hint), relinks via forge, and exits 0 (#1902)", () => {
     // FORGE_HOME is derived from the CLI file's location — to exercise the
     // "installed via npm" branch (no .git), copy bin/ into a temp forgeHome
     // and spawn the copy. update() checks for .git before touching anything
     // else. forge() now runs as the repair path even here, so give it a
     // commands/ directory to link.
+    //
+    // package.json is intentionally NOT copied into forgeHome, so getVersion()
+    // resolves to "" here — the branch taken then depends only on whether the
+    // sandbox has network access to the npm registry, so the assertion below
+    // accepts either outcome rather than asserting on a live network result.
     const forgeHome = mkdtempSync(join(os.tmpdir(), "fd-npm-"));
     cpSync(join(dirname(CLI)), join(forgeHome, "bin"), {
       recursive: true,
@@ -129,7 +134,16 @@ describe("router", () => {
       timeout: 30000,
     });
     assert.equal(res.status, 0);
-    assert.match(res.stdout, /npm update -g forgedock/);
+    // The old dead-end advice ("forgedock was never installed via npm -g, so
+    // this is a no-op") must never appear again (#1902).
+    assert.doesNotMatch(res.stdout, /npm update -g forgedock/);
+    // Either the registry lookup succeeded (reports the latest published
+    // version) or it failed gracefully (network unavailable in the sandbox) —
+    // both are correct outcomes of the real version check.
+    assert.match(
+      res.stdout,
+      /Latest published version is|New version available|Already up to date|Could not check npm for the latest version/,
+    );
     // forge() now runs as a repair path — commands get (re)linked/copied.
     assert.match(res.stdout, /slash command/i);
     assert.ok(existsSync(join(home, ".claude", "commands", "one.md")));
