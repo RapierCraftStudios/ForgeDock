@@ -123,6 +123,13 @@ fi
 # in between is GH_FLAG (e.g. -R RapierCraftStudios/forgedock).
 # ---------------------------------------------------------------------------
 
+# Deferred exit code (forge#1929) — set to 1 by the persistent stale-label
+# removal failure branch below instead of exiting immediately, so that the
+# unconditional needs-human clear step (scoped to awaiting-merge) always
+# gets a chance to run before the script actually exits. Initialized here,
+# before any conditional logic, so `set -u` never sees it unbound.
+TRANSITION_EXIT_CODE=0
+
 if [ "$#" -lt 2 ]; then
   echo "ERROR: Usage: transition-label.sh <ISSUE_NUMBER> [GH_FLAG...] <TARGET_STATE>" >&2
   echo "       Example: transition-label.sh 674 -R RapierCraftStudios/forgedock investigating" >&2
@@ -311,6 +318,14 @@ if [ -n "$TO_REMOVE" ]; then
   # $TO_REMOVE is still present, retry the removal once. If it's *still*
   # present after the retry, this is a real, persistent failure — surface it
   # loudly (stderr ERROR + non-zero exit) instead of the unconditional "OK".
+  #
+  # forge#1929: the non-zero exit is DEFERRED (via $TRANSITION_EXIT_CODE)
+  # rather than immediate. This block runs before the needs-human clear step
+  # further down, which is scoped to TARGET_STATE=awaiting-merge and must
+  # run regardless of this failure — it is unrelated to stale-label removal.
+  # An immediate `exit 1` here would silently skip that unrelated cleanup
+  # step in the one case (persistent removal failure) it's most important
+  # for the caller to see a consistent, fully-applied label state.
   # -------------------------------------------------------------------------
   POST_REMOVE_LABELS=$(gh issue view "$ISSUE_NUMBER" "${GH_ARGS[@]}" --json labels \
     --jq '[.labels[].name] | join(",")' 2>/dev/null || echo "")
@@ -344,10 +359,10 @@ if [ -n "$TO_REMOVE" ]; then
 
     if [ -n "$STILL_PRESENT_AFTER_RETRY" ]; then
       echo "ERROR: failed to remove stale label(s) ($STILL_PRESENT_AFTER_RETRY) from issue #$ISSUE_NUMBER after retry — label state machine now inconsistent (issue carries both '$EFFECTIVE_LABEL' and the stale label(s) above)." >&2
-      exit 1
+      TRANSITION_EXIT_CODE=1
+    else
+      echo "Retry succeeded — stale label(s) removed."
     fi
-
-    echo "Retry succeeded — stale label(s) removed."
   fi
 else
   echo "No stale workflow:* labels present on the issue — nothing to remove."
@@ -376,6 +391,18 @@ if [ "$TARGET_STATE" = "awaiting-merge" ]; then
   gh issue edit "$ISSUE_NUMBER" "${GH_ARGS[@]}" --remove-label "needs-human" 2>/dev/null || true
 else
   echo "Skipping needs-human clear — TARGET_STATE is '$TARGET_STATE', not 'awaiting-merge'."
+fi
+
+# ---------------------------------------------------------------------------
+# Final exit (forge#1929) — honor any deferred failure from the persistent
+# stale-label removal check above. The needs-human clear step just above
+# always ran first, regardless of that failure, so the caller-visible exit
+# code still surfaces the same "fail loud" signal introduced by forge#1915,
+# just after the unrelated cleanup step has had a chance to run.
+# ---------------------------------------------------------------------------
+if [ "$TRANSITION_EXIT_CODE" -ne 0 ]; then
+  echo "FAILED: $EFFECTIVE_LABEL set on issue #$ISSUE_NUMBER, but persistent stale-label removal failure occurred (see ERROR above)." >&2
+  exit "$TRANSITION_EXIT_CODE"
 fi
 
 echo "OK: $EFFECTIVE_LABEL set on issue #$ISSUE_NUMBER"
