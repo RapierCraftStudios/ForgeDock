@@ -760,6 +760,15 @@ async function linkPipelineScripts(ctx) {
   return { installed, updated, skipped, copied, total: PIPELINE_SCRIPTS.size };
 }
 
+// Windows -> WSL UNC probing in detectCrossEnvInstall() below hits a real
+// blocking syscall per distro/root: fs.existsSync() on a stopped WSL
+// distro's UNC path triggers Windows to synchronously spin up that distro's
+// VM before the stat resolves, which can take multiple seconds. Bound both
+// how many distros get probed and how long the loop is willing to keep
+// probing before giving up (forge#1917).
+const CROSS_ENV_PROBE_MAX_DISTROS = 5;
+const CROSS_ENV_PROBE_BUDGET_MS = 3000;
+
 /**
  * Detect whether this repo is also installed from the "other" environment —
  * WSL vs native Windows — for the SAME physical repo (forge#1893).
@@ -788,16 +797,21 @@ async function linkPipelineScripts(ctx) {
  *
  * Never throws — any failure (WSL not installed, `wsl -l -q` unavailable,
  * an inaccessible/slow UNC path, or a `cwd` that doesn't match either shape)
- * degrades to "no conflict".
+ * degrades to "no conflict". The Windows -> WSL probe loop is additionally
+ * bounded by `CROSS_ENV_PROBE_MAX_DISTROS` and `CROSS_ENV_PROBE_BUDGET_MS` —
+ * exceeding either bound also degrades to "no conflict" rather than
+ * continuing to block (forge#1917).
  *
  * @param {{ cwd: string, exec: (cmd: string, args: string[]) => string }} ctx
  * @param {import('./env-detect.mjs').EnvironmentInfo} envInfo
- * @param {{ existsSyncFn?: (p: string) => boolean }} [deps] - inject for tests;
- *   defaults to the real `fs.existsSync`.
+ * @param {{ existsSyncFn?: (p: string) => boolean, nowFn?: () => number }} [deps] - inject
+ *   for tests; `existsSyncFn` defaults to the real `fs.existsSync`, `nowFn` defaults to
+ *   `Date.now`.
  * @returns {{ conflict: boolean, otherPath: string | null, direction: "windows" | "wsl" | null }}
  */
 export function detectCrossEnvInstall(ctx, envInfo, deps = {}) {
   const existsSyncFn = deps.existsSyncFn ?? existsSync;
+  const nowFn = deps.nowFn ?? Date.now;
   const none = { conflict: false, otherPath: null, direction: null };
 
   try {
@@ -835,8 +849,19 @@ export function detectCrossEnvInstall(ctx, envInfo, deps = {}) {
         return none; // WSL not installed, or `wsl` isn't on PATH — no conflict possible.
       }
 
-      for (const distro of distros) {
+      // Bound worst-case blocking time: cap how many distros get probed, and
+      // stop probing once the wall-clock budget is exhausted. Each existsSync
+      // call below is a real blocking syscall — a stopped WSL distro auto-
+      // starts its VM synchronously to service the UNC stat, which can take
+      // multiple seconds. Checking the deadline before every probe (not just
+      // once per distro) stops the delay from compounding once the budget
+      // is gone; it can't preempt a single already-in-flight call, but it
+      // does bound the total across distros/roots (forge#1917).
+      const probeDeadline = nowFn() + CROSS_ENV_PROBE_BUDGET_MS;
+      for (const distro of distros.slice(0, CROSS_ENV_PROBE_MAX_DISTROS)) {
+        if (nowFn() > probeDeadline) break;
         for (const root of [`\\\\wsl.localhost\\${distro}`, `\\\\wsl$\\${distro}`]) {
+          if (nowFn() > probeDeadline) break;
           const checkPath = `${root}\\home\\${user}\\.claude\\forgedock`;
           try {
             if (existsSyncFn(checkPath)) {
