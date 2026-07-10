@@ -592,6 +592,7 @@ These are invoked automatically by `/work-on` but can also be run standalone.
 | `/work-on/review` | Phase 5 | Review only |
 | `/work-on/close` | Phase 6 | Close & cleanup only |
 | `/work-on/decompose` | Phase 2 | Decompose into sub-issues |
+| `/work-on/remediate` | Phase 0A.1 | Remediate a `needs-human` PR: fix findings, re-review, re-gate (`/work-on <pr> --remediate`) |
 | `/review-pr-agents` | PR review | Agent catalog router read by `/review-pr` during dispatch (not user-invokable directly) |
 
 `/review-pr` (core) reads the following per-persona and shared-protocol templates from `commands/review-pr-agents/` at runtime during Phase 3C dispatch. They ship as part of every install alongside `/review-pr` — not user-invokable directly.
