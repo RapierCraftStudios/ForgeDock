@@ -281,9 +281,10 @@ function buildRenameMap(indexDir) {
     const lines = readFileSync(renamesPath, 'utf8').split('\n').filter(l => l.trim());
     for (const line of lines) {
       const entry = JSON.parse(line);
-      // Chain renames: if `from` was already renamed, update through
-      const effectiveFrom = map[entry.from] !== undefined ? null : entry.from; // Don't double-chain
-      if (effectiveFrom) map[effectiveFrom] = entry.to;
+      // One-hop record only (last entry for a given `from` wins, matching
+      // append-only log semantics). Multi-hop chains (A->B->C) are resolved
+      // transitively at lookup time in applyRenameMap — see below.
+      if (entry && entry.from) map[entry.from] = entry.to;
     }
   } catch (_) {
     // Return empty map on error
@@ -293,10 +294,21 @@ function buildRenameMap(indexDir) {
 
 /**
  * Apply rename map to query file path.
- * Returns the current canonical path for a queried old path.
+ * Follows the rename chain to a fixed point so multi-hop renames
+ * (e.g. A -> B -> C) resolve to the final current path, not just the
+ * first hop. Guards against cycles (e.g. A -> B, B -> A) with a visited
+ * set so a malformed/cyclic rename log can't cause an infinite loop.
  */
 function applyRenameMap(queryPath, renameMap) {
-  return renameMap[queryPath] || queryPath;
+  let current = queryPath;
+  const seen = new Set([current]);
+  while (Object.prototype.hasOwnProperty.call(renameMap, current)) {
+    const next = renameMap[current];
+    if (next === undefined || next === current || seen.has(next)) break;
+    current = next;
+    seen.add(current);
+  }
+  return current;
 }
 
 // ---------------------------------------------------------------------------
