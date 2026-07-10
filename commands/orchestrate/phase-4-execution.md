@@ -8,6 +8,8 @@ install: core
 
 ## Phase 4: Streaming DAG Execution
 
+**Entry requires `phase-3-dependency.md`'s Step 3D.6 completion gate to have passed.** <!-- Added: forge#1913 --> Every step below (budget init, dispatch, dependency resolution) reads `ISSUES[]`, `PREDECESSORS[]`, `ISSUE_DOMAIN[]`, `ISSUE_SCORE[]`, `ISSUE_COST_ESTIMATE[]`, and `ISSUE_HAS_PRIOR[]` as authoritative Phase 3 output — none of these are re-derived here. If Phase 4 is being entered without having actually run Phase 3's Steps 3A–3E.5 in this session (e.g. a fresh session resuming mid-batch), reconstruct from GitHub via the "Orchestrator state reconstruction on wake / after compaction" procedure in `phase-3-dependency.md` rather than assuming these variables are already populated.
+
 ### Step 4A-pre.0: Budget initialization (MANDATORY when --budget is set) <!-- Added: forge#1743 -->
 
 Initialize budget tracking state before the first dispatch. Read `--budget N` from the orchestrator's argument list (passed from the top-level `/orchestrate` invocation). When `--budget` is not set, `BUDGET_LIMIT` is `Infinity` (uncapped — current default behavior preserved).
