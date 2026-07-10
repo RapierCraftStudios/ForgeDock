@@ -303,14 +303,19 @@ describe("detectConfig — staging branch detection", async () => {
     assert.equal(draft.branches.staging.confidence, "high");
   });
 
-  it("falls back to default branch at medium confidence when no staging remote", async () => {
+  it("falls back to default branch at LOW confidence when no staging remote (forge#1850)", async () => {
     stagingRepoPath = join(tmpDir, "no-staging-repo");
     makeLocalRepo(stagingRepoPath, "main");
     addRemote(stagingRepoPath, "origin", "git@github.com:org/repo.git");
     // No fetch — no remote branches visible → no origin/staging
     const draft = await detectConfig(stagingRepoPath);
-    // Should fall back to default branch (or 'main') at medium confidence
-    assert.equal(draft.branches.staging.confidence, "medium");
+    // Deriving a merge target (staging is the fast-lane PR target) from a
+    // failed lookup is a guess, not a "likely correct" inference — it must
+    // be flagged "low" so it gets a # TODO comment and the [low] badge
+    // instead of silently blending in as verified. Regression guard for
+    // forge#1850 (medium confidence let a guessed staging: "main" ship
+    // silently, turning a routine PR into a production deploy trigger).
+    assert.equal(draft.branches.staging.confidence, "low");
     assert.ok(draft.branches.staging.value.length > 0);
   });
 
@@ -385,6 +390,66 @@ describe("detectConfig — non-git directory (graceful fallback)", async () => {
   it("paths.root equals the injected cwd even for non-git directory", async () => {
     const draft = await detectConfig(tmpDir);
     assert.equal(draft.paths.root.value, tmpDir);
+  });
+});
+
+// =============================================================================
+// Monorepo-adjacent directory detection (forge#1850)
+// =============================================================================
+//
+// Regression coverage for defect 3: `cwd` is not itself a git repository, but
+// holds exactly one immediate subdirectory that is (the ScraperAPI/alterlab
+// layout from the issue). Detection must resolve to that subdirectory instead
+// of falling straight to "your-github-org"/"your-repo-name" placeholders.
+
+describe("detectConfig — monorepo-adjacent subdirectory detection (forge#1850)", async () => {
+  let tmpDir;
+
+  before(() => {
+    tmpDir = mkdtempSync(join(os.tmpdir(), "forge-detect-monorepo-"));
+  });
+
+  after(() => {
+    rmSync(tmpDir, { recursive: true, force: true });
+  });
+
+  it("resolves to the single git subdirectory when cwd itself is not a repo", async () => {
+    const parentDir = join(tmpDir, "ScraperAPI");
+    const repoDir = join(parentDir, "alterlab");
+    makeLocalRepo(repoDir, "main");
+    addRemote(repoDir, "origin", "https://github.com/RapierCraftStudios/alterlab.git");
+
+    const draft = await detectConfig(parentDir);
+
+    // Owner/repo detected from the subdirectory's remote, not placeholders.
+    assert.equal(draft.project.owner.value, "RapierCraftStudios");
+    assert.equal(draft.project.repo.value, "alterlab");
+    assert.notEqual(draft.project.owner.confidence, "low");
+    // paths.root redirected to the subdirectory, not the (non-repo) parent.
+    assert.equal(draft.paths.root.value, repoDir);
+    assert.match(draft.paths.root.why, /alterlab/);
+  });
+
+  it("falls back to placeholders when cwd has zero git subdirectories", async () => {
+    const parentDir = join(tmpDir, "no-subdirs");
+    mkdirSync(join(parentDir, "not-a-repo"), { recursive: true });
+
+    const draft = await detectConfig(parentDir);
+
+    assert.equal(draft.project.owner.value, "your-github-org");
+    assert.equal(draft.paths.root.value, parentDir);
+  });
+
+  it("falls back to placeholders when cwd has multiple git subdirectories (ambiguous)", async () => {
+    const parentDir = join(tmpDir, "multi-repo");
+    makeLocalRepo(join(parentDir, "repo-a"), "main");
+    makeLocalRepo(join(parentDir, "repo-b"), "main");
+
+    const draft = await detectConfig(parentDir);
+
+    // Ambiguous — must not guess which subdirectory is "the" repo.
+    assert.equal(draft.project.owner.value, "your-github-org");
+    assert.equal(draft.paths.root.value, parentDir);
   });
 });
 

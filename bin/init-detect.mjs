@@ -21,7 +21,8 @@
  */
 
 import { execFileSync } from "child_process";
-import { join } from "path";
+import { join, resolve } from "path";
+import { readdirSync, existsSync } from "fs";
 
 // ---------------------------------------------------------------------------
 // Field factory helpers
@@ -228,11 +229,81 @@ function detectStagingBranch(cwd, defaultBranch) {
     // git not available or no remotes
   }
 
-  return medium(
+  // No 'origin/staging' found. Deriving a merge target from a failed lookup
+  // is not a "likely correct" inference — it's a guess, and `staging` is the
+  // single most destructive field to get wrong (it's the fast-lane PR merge
+  // target). Flag it "low" so it gets a # TODO comment and the [low] badge
+  // instead of silently blending in as if it were verified. <!-- Added: forge#1850 -->
+  return low(
     defaultBranch,
-    "derived from default branch",
-    `No 'origin/staging' remote branch found; staging defaults to the default branch '${defaultBranch}'`,
+    "default placeholder",
+    `No 'origin/staging' remote branch found; guessed the default branch '${defaultBranch}' — verify this is actually your staging branch`,
   );
+}
+
+/**
+ * Resolve the effective git repository root for detection purposes.
+ *
+ * `execFileSync("git", ...)` already searches UPWARD through parent
+ * directories to find a repo root, so a `cwd` nested inside a repo is
+ * already handled correctly with no extra code here. The gap this closes is
+ * the other direction: `cwd` is a *parent* of the actual repo (a common
+ * monorepo-adjacent layout, e.g. `ScraperAPI/` containing the real repo at
+ * `ScraperAPI/alterlab/`) — git has no way to discover a repo by looking
+ * downward, so every detector below would otherwise degrade straight to
+ * placeholders.
+ *
+ * Never throws; falls back to the original `cwd` unchanged when neither
+ * case applies (no repo found at all, or the subdirectory scan is
+ * ambiguous — zero or multiple candidates).
+ *
+ * @param {string} cwd
+ * @returns {{ root: string, resolved: boolean, why: string }}
+ */
+function resolveGitRoot(cwd) {
+  // cwd is already inside a repo (possibly nested) — `--show-toplevel` finds
+  // the true root regardless of depth. Compare with path.resolve() so a pure
+  // separator-style difference (git always emits forward slashes, even on
+  // Windows) doesn't get mistaken for an actual resolution.
+  try {
+    const toplevel = execFileSync(
+      "git",
+      ["rev-parse", "--show-toplevel"],
+      { cwd, encoding: "utf-8", stdio: ["pipe", "pipe", "pipe"], timeout: 5000 },
+    ).trim();
+    if (toplevel) {
+      const resolved = resolve(toplevel) !== resolve(cwd);
+      return {
+        root: resolved ? toplevel : cwd,
+        resolved,
+        why: `'${cwd}' is nested inside a git repository rooted at '${toplevel}'`,
+      };
+    }
+  } catch {
+    // Not inside any git repository — try the subdirectory scan below.
+  }
+
+  // cwd itself isn't a repo — check whether it holds exactly one immediate
+  // subdirectory that is. Ambiguous (0 or 2+) candidates fall through
+  // unchanged, preserving the existing placeholder behavior.
+  try {
+    const entries = readdirSync(cwd, { withFileTypes: true });
+    const gitDirs = entries.filter(
+      (e) => e.isDirectory() && existsSync(join(cwd, e.name, ".git")),
+    );
+    if (gitDirs.length === 1) {
+      const sub = join(cwd, gitDirs[0].name);
+      return {
+        root: sub,
+        resolved: true,
+        why: `'${cwd}' is not a git repository, but its only subdirectory '${gitDirs[0].name}' is — resolved detection to that subdirectory`,
+      };
+    }
+  } catch {
+    // cwd unreadable — fall through to the unresolved case.
+  }
+
+  return { root: cwd, resolved: false, why: "" };
 }
 
 /**
@@ -295,23 +366,32 @@ function deriveProjectName(repoSlug) {
  * @returns {Promise<ConfigDraft>}
  */
 export async function detectConfig(cwd = process.cwd()) {
+  // Resolve the effective repo root FIRST — every detector below runs
+  // against this, not the raw cwd argument. See resolveGitRoot() docblock.
+  const { root: gitRoot, resolved: rootResolved, why: rootWhy } = resolveGitRoot(cwd);
+
   // Project identity
-  const { owner, repo, remoteDetected } = detectRemote(cwd);
+  const { owner, repo, remoteDetected } = detectRemote(gitRoot);
 
   // Project name derived from the repo slug
   const name = deriveProjectName(repo.value);
 
-  // Paths — always high confidence (derived from the cwd argument)
-  const root = high(cwd, "process.cwd()", "Absolute path passed to detectConfig — the project root");
+  // Paths — high confidence in the common case (root === cwd, nothing to
+  // resolve). When detection had to redirect to a git subdirectory or a
+  // parent toplevel, flag it medium confidence with an explanatory `why` so
+  // the review screen surfaces the redirection instead of silently adopting it.
+  const root = rootResolved
+    ? medium(gitRoot, "resolved git repository root", rootWhy)
+    : high(cwd, "process.cwd()", "Absolute path passed to detectConfig — the project root");
   const worktreeBase = high(
-    join(cwd, ".claude", "worktrees"),
+    join(gitRoot, ".claude", "worktrees"),
     "derived from root",
-    `Convention: {root}/.claude/worktrees (root = ${cwd})`,
+    `Convention: {root}/.claude/worktrees (root = ${gitRoot})`,
   );
 
   // Branch detection
-  const defaultBranchField = detectDefaultBranch(cwd);
-  const stagingBranchField = detectStagingBranch(cwd, defaultBranchField.value);
+  const defaultBranchField = detectDefaultBranch(gitRoot);
+  const stagingBranchField = detectStagingBranch(gitRoot, defaultBranchField.value);
 
   return {
     project: { owner, repo, name },

@@ -2,9 +2,9 @@
  * bin/tests/journey.test.mjs — Unit tests for bin/journey.mjs.
  * Run with: node --test bin/tests/journey.test.mjs
  */
-import { describe, it, beforeEach } from "node:test";
+import { describe, it, beforeEach, afterEach } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, readFileSync, writeFileSync, existsSync, mkdirSync } from "node:fs";
+import { mkdtempSync, readFileSync, writeFileSync, existsSync, mkdirSync, readdirSync } from "node:fs";
 import { join } from "node:path";
 import os from "node:os";
 import { writeForgeYaml, backupExisting, detectDescription, makeCtx, preflight, forge, read, review, celebrate, connect, openUrl, runJourney, manualLowConfidenceKeys, parseInstallTier, findMarkdownFiles } from "../journey.mjs";
@@ -87,11 +87,50 @@ describe("backupExisting", () => {
     assert.ok(existsSync(join(dir, "forge.yaml.bak")));
     assert.ok(!existsSync(out));
   });
-  it("timestamps the backup when forge.yaml.bak already exists", () => {
-    writeFileSync(join(dir, "forge.yaml"), "x", "utf-8");
-    writeFileSync(join(dir, "forge.yaml.bak"), "old", "utf-8");
+  it("rotates the existing .bak to a timestamped file, then takes its place (forge#1850)", () => {
+    // Regression fix: .bak must always hold the MOST RECENT pre-write state,
+    // not just the FIRST one ever captured. Before this fix, a second clobber
+    // left the original good .bak untouched and rotated the already-stubbed
+    // current file into a timestamped sibling instead — the exact inversion
+    // that buried the one good copy behind newer-looking garbage.
+    writeFileSync(join(dir, "forge.yaml.bak"), "generation-1 (old)", "utf-8");
+    writeFileSync(join(dir, "forge.yaml"), "generation-2 (current)", "utf-8");
     const res = backupExisting(join(dir, "forge.yaml"));
-    assert.match(res.backupName, /^forge\.yaml\.bak\..+/);
+    // .bak now holds the just-clobbered "current" content, not the old one.
+    assert.equal(res.backupName, "forge.yaml.bak");
+    assert.equal(readFileSync(join(dir, "forge.yaml.bak"), "utf-8"), "generation-2 (current)");
+    // The old generation-1 content survived — rotated to a timestamped file.
+    const files = readdirSync(dir);
+    const rotated = files.filter((f) => /^forge\.yaml\.bak\..+/.test(f));
+    assert.equal(rotated.length, 1, "exactly one rotated (timestamped) backup should exist");
+    assert.equal(readFileSync(join(dir, rotated[0]), "utf-8"), "generation-1 (old)");
+  });
+
+  it("preserves full history across 3 successive overwrites — nothing silently destroyed (forge#1850)", () => {
+    writeFileSync(join(dir, "forge.yaml"), "gen-1 (originally good config)", "utf-8");
+    backupExisting(join(dir, "forge.yaml")); // gen-1 -> .bak
+
+    writeFileSync(join(dir, "forge.yaml"), "gen-2 (stub)", "utf-8");
+    backupExisting(join(dir, "forge.yaml")); // gen-1 -> timestamped, gen-2 -> .bak
+
+    writeFileSync(join(dir, "forge.yaml"), "gen-3 (stub)", "utf-8");
+    backupExisting(join(dir, "forge.yaml")); // gen-2 -> timestamped, gen-3 -> .bak
+
+    // .bak always holds the most recent pre-write state (gen-3, the content
+    // just moved out of forge.yaml) — the best next guess for "undo my last mistake".
+    assert.equal(readFileSync(join(dir, "forge.yaml.bak"), "utf-8"), "gen-3 (stub)");
+
+    // Every generation is recoverable somewhere on disk — nothing was ever
+    // silently overwritten without a trace, including the original good config.
+    const files = readdirSync(dir);
+    const allBackupContents = files
+      .filter((f) => f.startsWith("forge.yaml.bak"))
+      .map((f) => readFileSync(join(dir, f), "utf-8"));
+    assert.ok(
+      allBackupContents.includes("gen-1 (originally good config)"),
+      "the original good config must still be recoverable from a timestamped backup",
+    );
+    assert.ok(allBackupContents.includes("gen-2 (stub)"));
   });
 });
 
@@ -702,6 +741,117 @@ describe("review (Act IV)", () => {
   });
 });
 
+describe("review (Act IV) — TTY overwrite confirmation gate (forge#1850, regression of #578)", () => {
+  // annotatedReviewScreen and review() both branch on the global
+  // process.stdin.isTTY. Spoof it for the duration of these tests so the
+  // hasExisting && isTTY===true branch (the one that was silently
+  // unprotected) is actually exercised, then restore it. setRawMode() throws
+  // on this non-real TTY, so annotatedReviewScreen falls back to its
+  // accept-all branch instantly (no hang) when the confirm gate lets it
+  // through — verified manually before writing these tests.
+  let originalIsTTY;
+  beforeEach(() => {
+    originalIsTTY = process.stdin.isTTY;
+    process.stdin.isTTY = true;
+  });
+  afterEach(() => {
+    process.stdin.isTTY = originalIsTTY;
+  });
+
+  it("declining the confirm prompt aborts before any backup or write", async () => {
+    const cwd = mkdtempSync(join(os.tmpdir(), "fd-review-tty-decline-"));
+    writeFileSync(join(cwd, "forge.yaml"), "precious: true\n", "utf-8");
+    let confirmCalled = false;
+    let confirmMessage = "";
+    const { ctx } = stubCtx({
+      cwd,
+      confirmFn: async (message) => {
+        confirmCalled = true;
+        confirmMessage = message;
+        return false;
+      },
+    });
+    const res0 = await read(ctx);
+    const res = await review(ctx, res0.draft, res0.description);
+
+    assert.equal(confirmCalled, true, "confirmFn must be called for an existing config in TTY mode");
+    assert.match(confirmMessage, /overwrite/i);
+    assert.equal(res.aborted, true);
+    assert.equal(res.written, false);
+    assert.equal(readFileSync(join(cwd, "forge.yaml"), "utf-8"), "precious: true\n");
+    assert.ok(!existsSync(join(cwd, "forge.yaml.bak")), "no backup should be created when the user declines");
+  });
+
+  it("accepting the confirm prompt proceeds to backup + write", async () => {
+    const cwd = mkdtempSync(join(os.tmpdir(), "fd-review-tty-accept-"));
+    writeFileSync(join(cwd, "forge.yaml"), "precious: true\n", "utf-8");
+    const { ctx } = stubCtx({
+      cwd,
+      confirmFn: async () => true,
+    });
+    // Build a resolved (non-placeholder) draft directly rather than via
+    // read()/detectConfig(), since cwd has no git remote and would otherwise
+    // resolve to placeholders — a scenario covered by the dedicated
+    // hard-fail test below.
+    const draft = {
+      project: {
+        owner: { value: "test-owner", confidence: "high", source: "git remote", why: "" },
+        repo: { value: "test-repo", confidence: "high", source: "git remote", why: "" },
+        name: { value: "Test Repo", confidence: "medium", source: "derived from repo slug", why: "" },
+      },
+      paths: {
+        root: { value: cwd, confidence: "high", source: "process.cwd()", why: "" },
+        worktreeBase: { value: join(cwd, ".claude", "worktrees"), confidence: "high", source: "derived from root", why: "" },
+      },
+      branches: {
+        default: { value: "main", confidence: "high", source: "git symbolic-ref", why: "" },
+        staging: { value: "staging", confidence: "high", source: "git branch -r", why: "" },
+      },
+      meta: { remoteDetected: true },
+    };
+    const res = await review(ctx, draft, { value: "", source: "" });
+
+    assert.equal(res.aborted, false);
+    assert.equal(res.written, true);
+    assert.ok(existsSync(join(cwd, "forge.yaml.bak")), "the old file must be backed up");
+    assert.equal(readFileSync(join(cwd, "forge.yaml.bak"), "utf-8"), "precious: true\n");
+  });
+
+  it("no existing config: confirmFn is never called (nothing to confirm)", async () => {
+    const cwd = mkdtempSync(join(os.tmpdir(), "fd-review-tty-fresh-"));
+    let confirmCalled = false;
+    const { ctx } = stubCtx({
+      cwd,
+      confirmFn: async () => {
+        confirmCalled = true;
+        return true;
+      },
+    });
+    const res0 = await read(ctx);
+    const res = await review(ctx, res0.draft, res0.description);
+
+    assert.equal(confirmCalled, false);
+    assert.equal(res.written, true);
+  });
+
+  it("hard-fails when overwrite is confirmed but owner/repo are unresolved placeholders", async () => {
+    // cwd has no git remote, so detection resolves owner/repo to placeholders.
+    const cwd = mkdtempSync(join(os.tmpdir(), "fd-review-tty-placeholder-"));
+    writeFileSync(join(cwd, "forge.yaml"), "precious: true\n", "utf-8");
+    const { ctx } = stubCtx({
+      cwd,
+      confirmFn: async () => true, // user says "yes, overwrite"
+    });
+    const res0 = await read(ctx);
+    const res = await review(ctx, res0.draft, res0.description);
+
+    assert.equal(res.aborted, true);
+    assert.equal(res.written, false);
+    assert.equal(readFileSync(join(cwd, "forge.yaml"), "utf-8"), "precious: true\n");
+    assert.ok(!existsSync(join(cwd, "forge.yaml.bak")), "no backup should be created — the write never proceeds");
+  });
+});
+
 describe("celebrate (Act V)", () => {
   it("prints elapsed time, receipt, and next steps", () => {
     const { ctx, w } = stubCtx({});
@@ -740,21 +890,31 @@ describe("connect (Act V.5)", () => {
     assert.match(w.text, /rapiercraft-forgedock/);
   });
 
-  it("calls openFn with the app URL when user confirms (yes)", async () => {
+  it("calls openFn with the app URL when user confirms (yes), via non-TTY defaultValue", async () => {
     let openedUrl = null;
     const { ctx, w } = stubCtx({
       openFn: (url) => { openedUrl = url; },
-      // confirm() returns defaultValue (false) in non-TTY. Simulate "yes" by
-      // overriding the confirmFn — but since we can't inject confirm() directly,
-      // we use stdin.isTTY being false and defaultValue=false means we can't
-      // simulate "yes" without a stdin mock. Instead test the non-TTY path
-      // (returns opened: false) and trust the openFn injection for integration.
     });
     const result = await connect(ctx);
     // In non-TTY (test environment), confirm() returns false (defaultValue).
     assert.equal(result.opened, false);
     assert.equal(openedUrl, null); // openFn NOT called when confirm returns false
     assert.match(w.text, /Skipped/);
+  });
+
+  it("calls openFn with the app URL when confirmFn resolves true (forge#1850: confirmFn now injectable)", async () => {
+    // ctx.confirmFn is now injectable (added for the forge.yaml overwrite gate
+    // in review()), which also closes the testability gap noted above — the
+    // "yes" path can finally be exercised directly instead of only trusted.
+    let openedUrl = null;
+    const { ctx, w } = stubCtx({
+      openFn: (url) => { openedUrl = url; },
+      confirmFn: async () => true,
+    });
+    const result = await connect(ctx);
+    assert.equal(result.opened, true);
+    assert.match(openedUrl, /rapiercraft-forgedock/);
+    assert.match(w.text, /Opening/);
   });
 
   it("does NOT call openFn when user declines (non-TTY auto-skip)", async () => {
