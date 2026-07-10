@@ -65,6 +65,15 @@ import {
   CYAN,
 } from "./tui.mjs";
 import { buildMinimalForgeYaml } from "./init-detect.mjs";
+import {
+  parseNameStatusDiff,
+  classifyCommandChanges,
+  countBreakingCommits,
+  parseGitHubOwnerRepo,
+  classifyConventionalCommitLines,
+  formatUpdateChangelogSummary,
+  formatVersionAvailableSummary,
+} from "./forge-utils.mjs";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
@@ -485,6 +494,86 @@ function fetchLatestVersion() {
       req.on("error", () => done(""));
     } catch {
       done("");
+    }
+  });
+}
+
+/**
+ * Fetch the release notes ("What's Changed" body + html_url) for a tagged
+ * GitHub release, used to build the diff-aware changelog summary
+ * (forge#1947) when a newer version is available in npm/npx mode.
+ *
+ * Mirrors fetchLatestVersion()'s defensive contract: resolves to `null`
+ * (never rejects) on any failure — offline, DNS failure, non-200 response
+ * (including 404 for an unpublished tag or 403 for rate-limiting), oversized
+ * response body, malformed JSON, or timeout. Callers treat `null` as
+ * "changelog unavailable" and skip the summary silently — this must never
+ * block or fail the update itself.
+ *
+ * @param {string} owner
+ * @param {string} repo
+ * @param {string} tag - Release tag, e.g. "v1.1.9".
+ * @returns {Promise<{body: string, html_url: string}|null>}
+ */
+function fetchGitHubReleaseNotes(owner, repo, tag) {
+  return new Promise((resolve) => {
+    let settled = false;
+    const done = (value) => {
+      if (settled) return;
+      settled = true;
+      resolve(value);
+    };
+
+    // Release bodies can be a few KB for a busy release — generous headroom
+    // against an unbounded response body buffering before JSON.parse.
+    const MAX_RESPONSE_BYTES = 262144;
+
+    try {
+      const req = https.get(
+        `https://api.github.com/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/releases/tags/${encodeURIComponent(tag)}`,
+        {
+          timeout: 5000,
+          headers: {
+            Accept: "application/vnd.github+json",
+            "User-Agent": "forgedock-cli",
+          },
+        },
+        (res) => {
+          if (res.statusCode !== 200) {
+            res.resume();
+            return done(null);
+          }
+          let data = "";
+          res.on("data", (chunk) => {
+            if (settled) return;
+            data += chunk;
+            if (data.length > MAX_RESPONSE_BYTES) {
+              res.destroy();
+              done(null);
+            }
+          });
+          res.on("end", () => {
+            try {
+              const json = JSON.parse(data);
+              if (typeof json.body !== "string") return done(null);
+              done({
+                body: json.body,
+                html_url: typeof json.html_url === "string" ? json.html_url : "",
+              });
+            } catch {
+              done(null);
+            }
+          });
+          res.on("error", () => done(null));
+        },
+      );
+      req.on("timeout", () => {
+        req.destroy();
+        done(null);
+      });
+      req.on("error", () => done(null));
+    } catch {
+      done(null);
     }
   });
 }
@@ -1104,6 +1193,140 @@ async function relinkAndHint() {
   }
 }
 
+/**
+ * Print a condensed, diff-aware changelog summary after a successful
+ * git-clone-mode fast-forward update (forge#1947).
+ *
+ * Sourced entirely from local git history — no network call needed here,
+ * since the git-clone install already has the full commit range available.
+ * Reads old/new package.json versions from the before/after commits, diffs
+ * `commands/` + `bin/engine/` for added/updated/removed files, scans commit
+ * subjects for breaking-change markers, and derives a compare-URL from the
+ * `origin` remote (omitted if the remote isn't a recognizable GitHub URL).
+ *
+ * Best-effort and read-only: any failure (git command error, JSON parse
+ * error, unparseable remote) is swallowed silently so it can never block or
+ * fail the update itself — the caller has already printed "Updated to
+ * latest." by the time this runs.
+ *
+ * All git subprocess calls use execFileSync with an argument array (never a
+ * template-literal string passed to execSync) — see forge#1703/forge#413:
+ * interpolating a variable into an execSync string spawns `/bin/sh -c` and
+ * shell-parses it.
+ *
+ * @param {string} before - HEAD SHA before the merge.
+ * @param {string} after - HEAD SHA after the merge.
+ */
+function printGitCloneChangelogSummary(before, after) {
+  try {
+    let fromVersion = "";
+    try {
+      const beforePkgRaw = execFileSync("git", ["show", `${before}:package.json`], {
+        cwd: FORGE_HOME,
+        encoding: "utf-8",
+      });
+      fromVersion = JSON.parse(beforePkgRaw).version || "";
+    } catch {
+      // package.json may not have existed at `before` (fresh install range)
+      // or failed to parse — the summary still works without a from-version.
+    }
+    const toVersion = getVersion();
+
+    const diffOutput = execFileSync(
+      "git",
+      ["diff", "--name-status", before, after, "--", "commands/", "bin/engine/"],
+      { cwd: FORGE_HOME, encoding: "utf-8" },
+    );
+    const { commandsAdded, commandsUpdated, commandsRemoved, engineChanged } =
+      classifyCommandChanges(parseNameStatusDiff(diffOutput));
+
+    const subjectsOutput = execFileSync(
+      "git",
+      ["log", "--pretty=%s", `${before}..${after}`],
+      { cwd: FORGE_HOME, encoding: "utf-8" },
+    );
+    const breakingCount = countBreakingCommits(subjectsOutput.split(/\r?\n/));
+
+    let compareUrl;
+    try {
+      const remoteUrl = execFileSync("git", ["remote", "get-url", "origin"], {
+        cwd: FORGE_HOME,
+        encoding: "utf-8",
+      }).trim();
+      const ownerRepo = parseGitHubOwnerRepo(remoteUrl);
+      if (ownerRepo && fromVersion && toVersion) {
+        compareUrl = `https://github.com/${ownerRepo.owner}/${ownerRepo.repo}/compare/v${fromVersion}...v${toVersion}`;
+      }
+    } catch {
+      // No `origin` remote, or an unparseable/non-GitHub URL — the summary
+      // still prints, just without a compare link.
+    }
+
+    const summary = formatUpdateChangelogSummary({
+      fromVersion,
+      toVersion,
+      commandsAdded,
+      commandsUpdated,
+      commandsRemoved,
+      engineChanged,
+      breakingCount,
+      compareUrl,
+    });
+    for (const line of summary.split("\n")) {
+      console.log(`  ${dim(line)}`);
+    }
+  } catch {
+    // Changelog summary is best-effort only — never block or fail the
+    // update itself over a diff/parse error.
+  }
+}
+
+/**
+ * Best-effort fetch + print of a diff-aware changelog summary when a newer
+ * version is available in npm/npx mode (forge#1947).
+ *
+ * npm/npx mode never runs the actual update itself (the user is told to run
+ * `npx forgedock@latest`), so there is no local before/after diff to source
+ * from. Instead, this fetches the newest published GitHub release's notes
+ * (hardcoded canonical repo — npm-installed forgedock always originates
+ * there, there is no local git remote to inspect) and condenses its
+ * auto-generated "What's Changed" bullet list into conventional-commit-type
+ * counts.
+ *
+ * Any failure (network down, rate-limited, unpublished tag) resolves to
+ * `null` from fetchGitHubReleaseNotes() and is silently skipped — the
+ * existing "New version available" message has already been printed by the
+ * caller regardless.
+ *
+ * @param {string} localVersion
+ * @param {string} latestVersion
+ */
+async function printVersionAvailableChangelog(localVersion, latestVersion) {
+  try {
+    const notes = await fetchGitHubReleaseNotes(
+      "RapierCraftStudios",
+      "ForgeDock",
+      `v${latestVersion}`,
+    );
+    if (!notes) return;
+
+    const { counts, breakingCount } = classifyConventionalCommitLines(notes.body);
+    const summary = formatVersionAvailableSummary({
+      currentVersion: localVersion,
+      latestVersion,
+      typeCounts: counts,
+      breakingCount,
+      releaseUrl: notes.html_url,
+    });
+    for (const line of summary.split("\n")) {
+      console.log(`  ${dim(line)}`);
+    }
+  } catch {
+    // Best-effort only — a failure here must never block the update advice
+    // already printed by the caller.
+  }
+}
+
 async function update() {
   console.log("");
   console.log(`${BOLD}ForgeDock${RESET} — Checking for updates`);
@@ -1155,6 +1378,7 @@ async function update() {
         console.log(`  Already up to date.`);
       } else {
         console.log(`  ${GREEN}Updated to latest.${RESET}`);
+        printGitCloneChangelogSummary(before, after);
       }
       await relinkAndHint();
 
@@ -1197,6 +1421,7 @@ async function update() {
         `  ${GREEN}New version available: v${latestVersion}${RESET} (you have v${localVersion}).`,
       );
       console.log(`  Run ${CYAN}npx forgedock@latest${RESET} to fetch it.`);
+      await printVersionAvailableChangelog(localVersion, latestVersion);
     } else {
       console.log(`  Already up to date (v${localVersion}).`);
     }
