@@ -10,7 +10,7 @@ install: core
 
 1. **Every agent MUST invoke `/work-on` via the Skill tool.** No custom prompts. No manual implementation. Copy the Phase 4A template, fill in variables, done. (See HARD RULES at top of file.)
 2. **NEVER merge anything to `main`** — agents merge to `staging` or `milestone/{slug}` only
-3. **No artificial concurrency limit by default** — spawn as many agents as there are independent issues. Only file overlap and dependencies require sequencing. Set `forge.yaml → orchestration.max_concurrent` to cap in-flight workers and prevent rate-limit storms on large batches (see Engine mode § Concurrency model).
+3. **Concurrency is capped by default (12 in-flight agents)** <!-- Updated: forge#1912 --> — file overlap and dependencies still determine which issues are *eligible* to run in parallel, but Phase 4 never dispatches more than `MAX_CONCURRENT` at once (default 12); the rest queue and dispatch as running agents complete. Set `forge.yaml → orchestration.max_concurrent` to raise or lower the cap (see Engine mode § Concurrency model, and `phase-4-execution.md` Step 4A-pre.0.2).
 4. **Always confirm with user before launching** — Step 3E is the mandatory checkpoint
 5. **No retries** — if an agent fails, report it and move on
 6. **Respect existing work** — skip issues already being worked on (`workflow:building`, `workflow:in-review`)

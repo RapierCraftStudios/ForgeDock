@@ -97,6 +97,47 @@ should_dispatch() {
 
 **When `BUDGET_LIMIT = Infinity`**: skip this check and report entirely — uncapped behavior.
 
+### Step 4A-pre.0.2: Concurrency gate initialization (MANDATORY) <!-- Added: forge#1912 -->
+
+**WHY THIS EXISTS** <!-- Added: forge#1912 -->: Phase 4's dispatch loops previously launched every DAG-ready issue in one shot — the engine-first bash loop backgrounded every `should_dispatch()`-passing issue with no count limit, and the Agent-spawn-fallback path was explicitly instructed to "launch all ready agents simultaneously." On a large ready set this saturates the Anthropic API rate limit in one burst, causing cascading failures across most of the batch. This is a distinct, count-denominated gate from the dollar-denominated `--budget` gate above (Step 4A-pre.0) — an issue can be deferred for budget reasons, concurrency reasons, or both; each gate accumulates its own deferred list independently.
+
+Initialize the concurrency cap and its batch-scope tracking state before the first dispatch:
+
+```bash
+# --- Concurrency gate initialization ---
+MAX_CONCURRENT=$(yq '.orchestration.max_concurrent // 12' forge.yaml 2>/dev/null || echo 12)
+
+# Validate MAX_CONCURRENT is a bare positive integer before it is ever used in arithmetic
+# expansion or array-slice-length position below. Bash's `$(( ))` and `${arr[@]:off:len}`
+# both re-evaluate an unquoted variable's contents as an expression — an unvalidated value
+# (e.g. a malicious or malformed forge.yaml, or a stray non-numeric string) can inject
+# arbitrary command substitution into the arithmetic context, and 0/negative values make
+# the chunked dispatch loop below (Step 4A) never advance its index, spinning forever.
+# Same validation convention as BUDGET_LIMIT in Step 4A-pre.0 above. <!-- Added: forge#1912 -->
+if [ "$MAX_CONCURRENT" = "null" ] || ! echo "$MAX_CONCURRENT" | grep -qP '^[1-9][0-9]*$'; then
+  echo "WARNING: forge.yaml → orchestration.max_concurrent is not a positive integer (\"${MAX_CONCURRENT}\") — falling back to default 12"
+  MAX_CONCURRENT=12
+fi
+
+ACTIVE_DISPATCH_COUNT=0             # in-flight dispatched-but-not-yet-completed agents, this batch
+DEFERRED_CONCURRENCY_ISSUES=()      # ready issues held back because no headroom was available
+
+echo "Concurrency gate initialized: MAX_CONCURRENT=${MAX_CONCURRENT} (forge.yaml → orchestration.max_concurrent; default 12 when unset or invalid)"
+# --- End concurrency gate initialization ---
+```
+
+**Headroom helper** (used by every dispatch site below — Step 4A's engine-first loop, Step 4A's Agent-spawn-fallback path, and Step 4B's newly-ready dispatch):
+
+```bash
+dispatch_headroom() {
+  local HEADROOM=$((MAX_CONCURRENT - ACTIVE_DISPATCH_COUNT))
+  [ "$HEADROOM" -lt 0 ] && HEADROOM=0
+  echo "$HEADROOM"
+}
+```
+
+**This is a hard cap, not a suggestion.** No dispatch site in Phase 4 may background/spawn more than `dispatch_headroom` new agents without first waiting for in-flight agents to complete. Issues that cannot be dispatched due to the cap go into `DEFERRED_CONCURRENCY_ISSUES[]` and are released — in the order they were deferred — as running agents complete (Step 4B), the same event-driven model (no sleep/poll loops) the file already uses for DAG-readiness and budget gating.
+
 ### Step 4A-pre: Staging baseline tracking (MANDATORY — continuous)
 
 **WHY THIS EXISTS**: Milestone-code-onto-staging contamination incidents (see issue #150) produce unexpected growth on the staging branch that is otherwise invisible until after a deploy. In the streaming DAG model, there are no discrete wave boundaries — instead, track a running baseline and check after each agent completion.
@@ -301,24 +342,38 @@ Use `${ISSUE_LANE[$NUM]}` and `${ISSUE_PR_BASE[$NUM]}` to populate `{LANE}` and 
 FORGEDOCK_AVAILABLE=$(command -v forgedock >/dev/null 2>&1 && echo "true" || echo "false")
 
 if [ "$FORGEDOCK_AVAILABLE" = "true" ]; then
+  # Build the budget-gated dispatch queue first (forge#1743's should_dispatch() still applies
+  # per-issue, independent of the concurrency cap below).
+  DISPATCH_QUEUE=()
   for NUM in "${SORTED_READY_SET[@]:-{ready_issue_numbers}}"; do
-    # Budget gate (forge#1743): skip dispatch if projected spend would exceed budget ceiling.
-    # should_dispatch() also handles ε-reserve (no-prior issues get guaranteed slot).
-    if ! should_dispatch "$NUM"; then
-      continue  # Issue added to DEFERRED_BUDGET_ISSUES[] by should_dispatch()
-    fi
-
-    LANE="${ISSUE_LANE[$NUM]}"
-    PR_BASE="${ISSUE_PR_BASE[$NUM]}"
-    COST="${ISSUE_COST_ESTIMATE[$NUM]:-0.35}"
-
-    # Advance PROJECTED_SPEND before forking so subsequent iterations see the updated total
-    PROJECTED_SPEND=$(echo "scale=4; $PROJECTED_SPEND + $COST" | bc 2>/dev/null || echo "$PROJECTED_SPEND")
-
-    echo "Dispatching #$NUM via forgedock run-issue --lane $PR_BASE (score=${ISSUE_SCORE[$NUM]:-?} est_cost=\$${COST} projected_total=\$${PROJECTED_SPEND})"
-    forgedock run-issue "$NUM" --lane "$PR_BASE" &
+    if should_dispatch "$NUM"; then
+      DISPATCH_QUEUE+=("$NUM")
+    fi  # else: added to DEFERRED_BUDGET_ISSUES[] by should_dispatch()
   done
-  wait
+
+  # Concurrency gate (forge#1912): dispatch in chunks of MAX_CONCURRENT, waiting for each
+  # chunk to finish before starting the next. This is the code-form equivalent of the
+  # Agent-spawn-fallback cap below — never more than MAX_CONCURRENT `forgedock run-issue`
+  # processes in flight at once, regardless of how many issues are ready.
+  IDX=0
+  while [ "$IDX" -lt "${#DISPATCH_QUEUE[@]}" ]; do
+    CHUNK=("${DISPATCH_QUEUE[@]:$IDX:$MAX_CONCURRENT}")
+    echo "Dispatching chunk of ${#CHUNK[@]} issue(s) — concurrency cap ${MAX_CONCURRENT}"
+
+    for NUM in "${CHUNK[@]}"; do
+      LANE="${ISSUE_LANE[$NUM]}"
+      PR_BASE="${ISSUE_PR_BASE[$NUM]}"
+      COST="${ISSUE_COST_ESTIMATE[$NUM]:-0.35}"
+
+      # Advance PROJECTED_SPEND before forking so subsequent iterations see the updated total
+      PROJECTED_SPEND=$(echo "scale=4; $PROJECTED_SPEND + $COST" | bc 2>/dev/null || echo "$PROJECTED_SPEND")
+
+      echo "Dispatching #$NUM via forgedock run-issue --lane $PR_BASE (score=${ISSUE_SCORE[$NUM]:-?} est_cost=\$${COST} projected_total=\$${PROJECTED_SPEND})"
+      forgedock run-issue "$NUM" --lane "$PR_BASE" &
+    done
+    wait   # cap enforced here — no more than MAX_CONCURRENT processes run concurrently
+    IDX=$((IDX + MAX_CONCURRENT))
+  done
   echo "Engine dispatch complete — advancing to Step 4B (completion sweep)"
 else
   echo "INFO: Using agent dispatch mode (forgedock CLI not in PATH — run \`npm install -g forgedock\` for engine-mode dispatch)"
@@ -509,11 +564,42 @@ AGENT_ISSUE_MAP[{NUMBER}] = <agent_id returned by Agent()>
 
 `AGENT_ISSUE_MAP` starts empty and accumulates entries as agents are spawned. For parallel dispatch (all Agent() calls in one message), capture the returned IDs from the batch response — one entry per issue — before entering Step 4B's monitoring loop. Without this capture, `resume=` calls in Steps 4B and 4B.5 will have no agent ID to reference and the resume will fail. <!-- Added: forge#1083 -->
 
-**Launch all ready agents simultaneously** by putting multiple Agent tool calls in a single message. Use `run_in_background=true` so they execute in parallel.
+**Launch only up to the concurrency cap** (forge#1912) — never put more than `dispatch_headroom` (`MAX_CONCURRENT - ACTIVE_DISPATCH_COUNT`, from Step 4A-pre.0.2) Agent tool calls into a single message. Use `run_in_background=true` so the dispatched agents execute in parallel with each other, within the cap.
+
+```bash
+# Compute this dispatch batch (forge#1912): merge any previously-deferred concurrency
+# issues (oldest first, for fairness) with the current ready set, then take only as many
+# as headroom allows. The remainder is re-queued, not dropped.
+HEADROOM=$(dispatch_headroom)
+CANDIDATES=("${DEFERRED_CONCURRENCY_ISSUES[@]}" {ready_issue_numbers})
+DEFERRED_CONCURRENCY_ISSUES=()
+
+DISPATCH_NOW=()
+for NUM in "${CANDIDATES[@]}"; do
+  if [ "${#DISPATCH_NOW[@]}" -lt "$HEADROOM" ]; then
+    DISPATCH_NOW+=("$NUM")
+  else
+    DEFERRED_CONCURRENCY_ISSUES+=("$NUM")
+  fi
+done
+
+if [ "${#DEFERRED_CONCURRENCY_ISSUES[@]}" -gt 0 ]; then
+  echo "CONCURRENCY DEFER: ${#DEFERRED_CONCURRENCY_ISSUES[@]} ready issue(s) held back — ${ACTIVE_DISPATCH_COUNT}/${MAX_CONCURRENT} already in flight. Will dispatch as slots free up: ${DEFERRED_CONCURRENCY_ISSUES[*]}"
+fi
+echo "Dispatching ${#DISPATCH_NOW[@]} issue(s) this message (headroom was ${HEADROOM})"
+```
+
+Spawn `Agent()` for every issue in `DISPATCH_NOW` (not the raw ready set) using the template above. After the batch spawn, increment `ACTIVE_DISPATCH_COUNT` by `${#DISPATCH_NOW[@]}` — this happens in addition to, not instead of, capturing each returned agent ID into `AGENT_ISSUE_MAP` above.
+
+If `DISPATCH_NOW` is empty (headroom is 0), do not spawn any agents this cycle — wait for the next `agent_completed` notification, which frees a slot and re-triggers this dispatch computation (Step 4B).
 
 ### Step 4B: Monitor completions and dispatch newly ready issues
 
 You will be automatically notified when each background agent completes. **Do NOT use `sleep` loops to poll for completion.** Instead, wait for the automatic notification. When you receive a notification that an agent completed, immediately process it.
+
+**Concurrency slot release (MANDATORY — first action on every completion)** <!-- Added: forge#1912 -->: The instant an `agent_completed` notification arrives, decrement `ACTIVE_DISPATCH_COUNT` by 1 — a worker slot has just freed, regardless of what terminal state the issue ended up in. Do this before any stall-recovery/resume logic below. If that agent is then resumed (item 2 below, or Step 4B.5's stall recovery) because it stalled mid-pipeline rather than truly finishing, re-increment `ACTIVE_DISPATCH_COUNT` when the `Agent(resume=...)` call is issued — a resume re-occupies a worker slot exactly like a fresh dispatch does.
+
+**Ordering requirement (MANDATORY — prevents transient over-cap)**: For every agent that completed in this notification batch, finish its terminal-state check and, if applicable, its resume re-increment (items 1-2 below) BEFORE computing `dispatch_headroom` for item 5's newly-ready-issue dispatch. Computing headroom before a to-be-resumed agent's re-increment would let a genuinely-still-running agent's freed slot be double-booked — once by a fresh dispatch, once by the resume itself — transiently exceeding `MAX_CONCURRENT`. Process every completed agent's items 1-2 to a decision (terminal vs. resumed) first; only then compute headroom once for the batch's item 5 dispatch.
 
 **Successor dispatch latency is measured from `agent_completed`, not from orchestrator polling.** The moment you receive an `agent_completed` notification for issue N, that is t=0 for dispatching N's successors. Any successor whose predecessors are all now terminal MUST be dispatched in the same response that processes the notification — not after a poll cycle, not after a sleep. This is the design property that makes streaming DAG execution faster than wave-based execution. <!-- Added: forge#1251 -->
 
@@ -627,7 +713,11 @@ for BLOCKED_NUM in {all_blocked_issue_numbers}; do
     # Do NOT dispatch. Do NOT mark skipped. Tracked via item 6.5.
   fi
 done
-# Run Steps 4A.pre.0 → 4A.pre → 4A for newly ready issues (batch them in a single message)
+# Run Steps 4A.pre.0 → 4A.pre → 4A for newly ready issues. Step 4A's own dispatch-batch
+# computation (the HEADROOM/DISPATCH_NOW logic, forge#1912) is what actually caps this —
+# "newly ready" here just means "eligible," not "guaranteed to dispatch this cycle." Any
+# issue that doesn't fit current headroom lands in DEFERRED_CONCURRENCY_ISSUES and is
+# retried automatically on the next completion, same as every other concurrency-deferred issue.
 ```
 
 **CRITICAL — Stall detection and recovery**: Background agents sometimes stop mid-pipeline (`stop_reason=end_turn`) after completing a sub-phase (e.g., investigation completes but build never starts). This causes the agent to "complete" from the Agent tool's perspective even though the `/work-on` pipeline is only partially done. When you receive a completion notification:
@@ -652,7 +742,7 @@ done
      prompt="The previous /work-on invocation stopped before completing the full pipeline. The issue is currently at {CURRENT_WORKFLOW_STATE}. Continue — invoke Skill(skill='work-on', args='{NUMBER} --under-orchestration') to resume the routing loop from the current state. /work-on will re-read GitHub state and pick up where it left off."
    )
    ```
-   **Resume ALL stalled agents in a single message** (parallel resume). Do not wait between resumes.
+   **Resume ALL stalled agents in a single message** (parallel resume). Do not wait between resumes. Each resume re-occupies a worker slot — increment `ACTIVE_DISPATCH_COUNT` by 1 per agent resumed here (it was already decremented by the "Concurrency slot release" rule above when the stall was first observed as a completion). <!-- Added: forge#1912 -->
 
 3. **Track resume cycles per agent.** If an agent has been resumed 2+ times and still hasn't reached a terminal state, report it as a failure — do not resume again.
 
@@ -698,7 +788,7 @@ done
 
 5. **Record completed results**: Success (PR merged), Invalid (issue closed), Blocked (needs human), Awaiting-merge (`workflow:awaiting-merge` — remediated + re-reviewed to APPROVED after an earlier `needs-human` escalation; needs only a human merge, not diagnosis — keep distinct from Blocked in any status output, see item 8), or Error
 
-5. **Check for newly unblocked issues** — run the DAG readiness check above. If any issues are now ready, dispatch them immediately (Steps 4A.pre.0 → 4A.pre → 4A). Batch all newly ready issues into a single dispatch message.
+5. **Check for newly unblocked issues** — run the DAG readiness check above. If any issues are now ready, run Steps 4A.pre.0 → 4A.pre → 4A for them. **Step 4A's own headroom computation is the cap** (forge#1912) — "batch all newly ready issues into a single dispatch message" means one message covers `DISPATCH_NOW` (ready issues that fit current headroom), not necessarily every newly-ready issue; any that don't fit go to `DEFERRED_CONCURRENCY_ISSUES` and retry on the next completion.
 
 6. **Handle predecessor failures** — if a completed agent's issue classifies as `FAILED` (`workflow:invalid`, or an explicit build/test error — see Predecessor Classification above; `needs-human` and `workflow:awaiting-merge` are GATED, not FAILED — see item 6.5), check for dependent issues in the DAG. Mark all transitive dependents as "skipped — dependency #{X} failed" and report them. Do NOT dispatch them.
 
@@ -890,6 +980,8 @@ Gating predecessor #${NUM} reached \`workflow:merged\` — dispatching now. (Was
 9. **Run staging integrity check** (from Step 4A-pre) if the completed agent merged a PR targeting staging.
 
 **Termination condition**: All issues in the DAG have reached `DONE` or `FAILED` (merged, invalid, or skipped due to dependency failure) — OR are `blocked-on-human-merge` (item 6.5) with no further dispatchable work remaining in the batch. These two outcomes are reported differently: a batch where every issue is `DONE`/`FAILED` is a **clean drain**; a batch where one or more issues remain `blocked-on-human-merge` is a **paused drain** — the active dispatch loop stops (there is nothing left to do until a human merges a gating PR) but this MUST be reported as paused, not as fully complete (see `phase-6-report.md`'s `🔗 Blocked-on-Merge` section). `needs-human` predecessors with no open PR are neither — they remain GATED indefinitely until either a PR appears (dependent moves to blocked-on-human-merge) or the predecessor itself resolves; do not treat isolated `needs-human` issues with no dependents as blocking termination. When either drain condition is met, check whether deferred review-spawned findings exist (accumulated in `DEFERRED_FINDINGS` during Step 4C). If deferred findings exist → proceed to Step 4F (Completion Sweep). If no deferred findings → proceed to Phase 5.
+
+**Relationship to `DEFERRED_CONCURRENCY_ISSUES` (forge#1912)**: A non-empty `DEFERRED_CONCURRENCY_ISSUES[]` never satisfies either termination condition above — it means dispatchable work exists but is temporarily held back by the concurrency cap, not that the DAG has stalled. Unlike `blocked-on-human-merge`, this is never reported as a "paused drain" requiring human action — it self-resolves automatically the moment any in-flight agent completes and frees a slot (Step 4A's `dispatch_headroom` recomputes every cycle). Only treat the DAG as drained once `DEFERRED_CONCURRENCY_ISSUES` is also empty.
 
 **Relationship to `BATCH_FULLY_GATED` (item 6.7, forge#1814)**: A paused drain (above) describes the *original batch DAG* reaching a stable, non-progressing state. `BATCH_FULLY_GATED` is the mechanism that keeps that stable state from being masked by cascade churn — without it, Step 4C would keep dispatching new review-finding issues indefinitely (each with its own predecessors/dependents), so the DAG would never actually look "drained" even though the original batch's productive work stopped the moment the last non-gated issue completed. Once `BATCH_FULLY_GATED` is true, Step 4C stops adding new dispatchable work (rule 0 defers all newly-spawned findings), which lets the batch actually reach the paused-drain termination condition above instead of chasing an ever-growing cascade tail. Report this state using the idle report from item 6.7, not a plain "waiting for agents" message — the whole point is to make the pause visible and actionable (which PR(s) to merge), not silent.
 
