@@ -196,3 +196,54 @@ export function detectEnvironment(opts = {}) {
 
   return { platform, platformLabel, isWSL, wslDistro, shell, symlinkSupport };
 }
+
+// ---------------------------------------------------------------------------
+// Cross-environment path translation (forge#1893)
+// ---------------------------------------------------------------------------
+
+/**
+ * Translate a WSL-mounted-drive path to its native Windows equivalent.
+ *
+ * WSL exposes Windows drives under `/mnt/<drive>/...` (lowercase drive
+ * letter, single character). This is a live bind mount — `/mnt/c/Users/foo`
+ * and `C:\Users\foo` refer to the exact same files on disk. Only that shape
+ * is recognized; a plain WSL-native path (`/home/foo/...`) has no Windows
+ * equivalent and returns `null` rather than guessing.
+ *
+ * Pure, never throws.
+ *
+ * @param {string} p - Absolute POSIX path, e.g. `/mnt/c/Users/foo/repo`.
+ * @returns {string | null} e.g. `C:\Users\foo\repo`, or `null` if `p` isn't
+ *   a `/mnt/<drive>/...` path.
+ */
+export function wslPathToWindows(p) {
+  if (!p || typeof p !== "string") return null;
+  const m = p.match(/^\/mnt\/([a-z])(\/.*)?$/i);
+  if (!m) return null;
+  const drive = m[1].toUpperCase();
+  const rest = (m[2] || "").replace(/\//g, "\\");
+  return `${drive}:${rest}`;
+}
+
+/**
+ * Translate a native Windows path to its WSL-mounted-drive equivalent.
+ *
+ * Mirrors `wslPathToWindows()`: `C:\Users\foo\repo` (or the forward-slash
+ * variant `C:/Users/foo/repo`, which Node also accepts on win32) becomes
+ * `/mnt/c/Users/foo/repo`. Only a `<drive>:` prefix is recognized; anything
+ * else (UNC paths, relative paths) returns `null` rather than guessing.
+ *
+ * Pure, never throws.
+ *
+ * @param {string} p - Absolute Windows path, e.g. `C:\Users\foo\repo`.
+ * @returns {string | null} e.g. `/mnt/c/Users/foo/repo`, or `null` if `p`
+ *   isn't a `<drive>:...` path.
+ */
+export function windowsPathToWsl(p) {
+  if (!p || typeof p !== "string") return null;
+  const m = p.match(/^([a-z]):[\\/]?(.*)$/i);
+  if (!m) return null;
+  const drive = m[1].toLowerCase();
+  const rest = m[2].replace(/\\/g, "/");
+  return `/mnt/${drive}${rest ? `/${rest}` : ""}`;
+}
