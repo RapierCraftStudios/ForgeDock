@@ -272,6 +272,7 @@ import {
   renderMark, ember, shimmer, revealRows, moltenBar, fixCard,
   colorMode, motionEnabled, CHROME_STOPS, HERO_MARK, COMPACT_MARK, sleep,
 } from "./cinema.mjs";
+import { detectEnvironment } from "./env-detect.mjs";
 
 // ---------------------------------------------------------------------------
 // URL opener (default openFn implementation — injectable for tests)
@@ -312,6 +313,15 @@ export function makeCtx(overrides = {}) {
   const enrichFn = overrides.enrichFn ?? enrich;
   const openFn = overrides.openFn ?? openUrl;
   const confirmFn = overrides.confirmFn ?? confirm;
+  const platform = overrides.platform ?? process.platform;
+  let release = overrides.release;
+  if (release === undefined) {
+    try {
+      release = os.release();
+    } catch {
+      release = "";
+    }
+  }
   return {
     cwd: process.cwd(),
     home: env.HOME || env.USERPROFILE || os.homedir(),
@@ -322,6 +332,8 @@ export function makeCtx(overrides = {}) {
     mode: colorMode(env, stdout),
     motion: motionEnabled(argv, env, stdout),
     nodeVersion,
+    platform,
+    release,
     linkStrategy: "symlink",
     enrichFn,
     openFn,
@@ -345,7 +357,9 @@ const dimLine = (ctx, s) => (ctx.mode === "none" ? s : `\x1b[2m${s}\x1b[22m`);
 
 /**
  * Render the hero banner and run preflight checks. Failures render fix cards
- * and the journey continues — advisory, never fatal.
+ * and the journey continues — advisory, never fatal. Includes informational
+ * Platform/WSL/Shell rows (via env-detect.mjs) after the pass/fail checks —
+ * those three always report `ok: true`, they surface state rather than gate it.
  * @returns {Promise<{ checks: Array<{name, ok, detail, fix?}>, ghReady: boolean }>}
  */
 export async function preflight(ctx) {
@@ -406,6 +420,31 @@ export async function preflight(ctx) {
       },
     },
   ];
+
+  // Environment reveal rows (platform/WSL/shell) — informational only, never
+  // fail the preflight. Appended after the existing 4 checks so `named[3]`
+  // (GitHub CLI, used for `ghReady` below) keeps its index.
+  const envInfo = detectEnvironment({ platform: ctx.platform, env: ctx.env, release: ctx.release });
+  rows.push(
+    {
+      label: "Platform",
+      run: async () => {
+        const wslNote = envInfo.isWSL ? ` (WSL${envInfo.wslDistro ? `: ${envInfo.wslDistro}` : ""})` : "";
+        return { ok: true, detail: `${envInfo.platformLabel}${wslNote} (${envInfo.shell})` };
+      },
+    },
+    {
+      label: "WSL",
+      run: async () => ({
+        ok: true,
+        detail: envInfo.isWSL ? envInfo.wslDistro || "detected" : "not detected",
+      }),
+    },
+    {
+      label: "Shell",
+      run: async () => ({ ok: true, detail: envInfo.shell }),
+    },
+  );
 
   const results = await revealRows(rows, { mode: ctx.mode, motion: ctx.motion, writer: w });
   const named = rows.map((r, i) => ({ name: r.label, ...results[i] }));

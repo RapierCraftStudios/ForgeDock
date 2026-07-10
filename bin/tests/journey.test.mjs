@@ -334,6 +334,73 @@ describe("preflight", () => {
     assert.equal(node.ok, false);
     assert.match(w.text, /nodejs\.org/);
   });
+
+  it("adds Platform/WSL/Shell rows after GitHub CLI without disturbing ghReady's index", async () => {
+    const home = mkdtempSync(join(os.tmpdir(), "fd-home6-"));
+    mkdirSync(join(home, ".claude"), { recursive: true });
+    const { ctx } = stubCtx({
+      home,
+      platform: "linux",
+      env: { SHELL: "/bin/bash" },
+      execMap: {
+        "git --version": "git version 2.45.0",
+        "gh --version": "gh version 2.52.0",
+        "gh auth status": "Logged in to github.com",
+      },
+    });
+    const res = await preflight(ctx);
+    assert.equal(res.checks.length, 7);
+    assert.equal(res.checks[3].name, "GitHub CLI");
+    assert.equal(res.ghReady, true);
+
+    const platformRow = res.checks.find((c) => c.name === "Platform");
+    const wslRow = res.checks.find((c) => c.name === "WSL");
+    const shellRow = res.checks.find((c) => c.name === "Shell");
+    assert.equal(platformRow.ok, true);
+    assert.match(platformRow.detail, /Linux/);
+    assert.match(platformRow.detail, /bash/);
+    assert.equal(wslRow.ok, true);
+    assert.equal(wslRow.detail, "not detected");
+    assert.equal(shellRow.ok, true);
+    assert.equal(shellRow.detail, "bash");
+
+    // Existing checks unaffected — still all-green with the informational rows included.
+    assert.equal(res.checks.every((c) => c.ok), true);
+  });
+
+  it("Platform/WSL rows reflect WSL detection when WSL_DISTRO_NAME is injected", async () => {
+    const home = mkdtempSync(join(os.tmpdir(), "fd-home7-"));
+    mkdirSync(join(home, ".claude"), { recursive: true });
+    const { ctx } = stubCtx({
+      home,
+      platform: "linux",
+      env: { WSL_DISTRO_NAME: "Ubuntu-22.04" },
+      execMap: { "git --version": "git version 2.45.0" },
+    });
+    const res = await preflight(ctx);
+    const wslRow = res.checks.find((c) => c.name === "WSL");
+    const platformRow = res.checks.find((c) => c.name === "Platform");
+    assert.equal(wslRow.detail, "Ubuntu-22.04");
+    assert.match(platformRow.detail, /WSL: Ubuntu-22\.04/);
+  });
+
+  it("Platform row reports Windows label + shell when platform/release are injected as win32", async () => {
+    const home = mkdtempSync(join(os.tmpdir(), "fd-home8-"));
+    mkdirSync(join(home, ".claude"), { recursive: true });
+    const { ctx } = stubCtx({
+      home,
+      platform: "win32",
+      release: "10.0.22631",
+      env: { PSModulePath: "C:\\Program Files\\WindowsPowerShell\\Modules" },
+      execMap: { "git --version": "git version 2.45.0" },
+    });
+    const res = await preflight(ctx);
+    const platformRow = res.checks.find((c) => c.name === "Platform");
+    const shellRow = res.checks.find((c) => c.name === "Shell");
+    assert.match(platformRow.detail, /Windows 11/);
+    assert.match(platformRow.detail, /PowerShell/);
+    assert.equal(shellRow.detail, "PowerShell");
+  });
 });
 
 // ---------------------------------------------------------------------------
