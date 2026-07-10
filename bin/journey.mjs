@@ -971,6 +971,7 @@ export function celebrate(ctx, summary) {
       { title: "what's next" },
     ),
   );
+  w.write("  " + dimLine(ctx, "not for you? npx forgedock uninstall removes everything · full command list: npx forgedock help") + "\n");
   w.write("  " + dimLine(ctx, "docs: github.com/RapierCraftStudios/ForgeDock · ⭐ a star is the whole marketing budget") + "\n\n");
 }
 
