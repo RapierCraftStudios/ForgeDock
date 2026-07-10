@@ -322,8 +322,9 @@ Agent(
 
 **IMPORTANT RULES**:
 - **MANDATORY**: You MUST use the Skill tool to invoke 'work-on' with args '{PROJECT_PREFIX}{NUMBER}'. Do NOT implement manually — /work-on handles the full pipeline including label state machine (workflow:investigating → workflow:building → workflow:in-review → workflow:merged), investigation reports, PR creation, and cleanup.
-  - For default repo issues: `Skill(skill='work-on', args='{NUMBER}')`
-  - For satellite repo issues: `Skill(skill='work-on', args='{SATELLITE_PREFIX}:{NUMBER}')` (prefix from forge.yaml → repos.satellites)
+  - For default repo issues: `Skill(skill='work-on', args='{NUMBER} --under-orchestration')`
+  - For satellite repo issues: `Skill(skill='work-on', args='{SATELLITE_PREFIX}:{NUMBER} --under-orchestration')` (prefix from forge.yaml → repos.satellites)
+  - The `--under-orchestration` flag tells `/work-on` to post its phase-entry `FORGE:HEARTBEAT` comments (Phases 0/1/3/5) — this orchestrator's Step 4B.5 stall detector depends on those timestamps. A solo `/work-on` run omits the flag and skips those writes entirely (see `commands/work-on.md` → Orchestration Flag).
 - NEVER bypass /work-on with manual git/gh commands — the label updates and structured comments are critical for tracking
 - NEVER target `main` for PRs targeting the default repo. Use `{STAGING_BRANCH}` for fast-lane issues, or `milestone/{slug}` for milestone issues.
 - Satellite repos (MCP, n8n) have no staging branch — fast-lane PRs go to `main` for those.
@@ -340,7 +341,7 @@ gh issue view {NUMBER} -R {GH_REPO} --json labels --jq '[.labels[].name | select
 **Terminal labels** (only these allow you to stop): `workflow:merged`, `workflow:invalid`
 **Terminal condition also**: `needs-human` label present, `workflow:awaiting-merge` label present, OR issue state is `closed`
 `needs-human` and `workflow:awaiting-merge` are terminal-FOR-THIS-AGENT (this individual `/work-on` run stops here — a human decision or merge is now the blocking step) but are NOT "done" from the DAG's point of view; see Predecessor Classification in Step 4B for how the orchestrator's dependency logic treats them (`GATED`, not `DONE`).
-If the label is NOT terminal (e.g., `workflow:investigating`, `workflow:ready-to-build`, `workflow:building`, `workflow:in-review`), invoke `Skill(skill='work-on', args='{NUMBER}')` again immediately. The `/work-on` skill will re-read GitHub state and advance to the next phase. Do NOT output a summary, do NOT pause, do NOT ask for confirmation — just invoke it again.
+If the label is NOT terminal (e.g., `workflow:investigating`, `workflow:ready-to-build`, `workflow:building`, `workflow:in-review`), invoke `Skill(skill='work-on', args='{NUMBER} --under-orchestration')` again immediately. The `/work-on` skill will re-read GitHub state and advance to the next phase. Do NOT output a summary, do NOT pause, do NOT ask for confirmation — just invoke it again.
 
 **CRITICAL — SOURCE BRANCH DETECTION**:
 - If the issue has the `review-finding` label, read the issue body for `**Code branch**: \`{branch}\``
@@ -556,7 +557,7 @@ done
      resume=AGENT_ISSUE_MAP[{NUMBER}],
      description="Resume #{NUMBER} pipeline",
      run_in_background=true,
-     prompt="The previous /work-on invocation stopped before completing the full pipeline. The issue is currently at {CURRENT_WORKFLOW_STATE}. Continue — invoke Skill(skill='work-on', args='{NUMBER}') to resume the routing loop from the current state. /work-on will re-read GitHub state and pick up where it left off."
+     prompt="The previous /work-on invocation stopped before completing the full pipeline. The issue is currently at {CURRENT_WORKFLOW_STATE}. Continue — invoke Skill(skill='work-on', args='{NUMBER} --under-orchestration') to resume the routing loop from the current state. /work-on will re-read GitHub state and pick up where it left off."
    )
    ```
    **Resume ALL stalled agents in a single message** (parallel resume). Do not wait between resumes.
@@ -1321,8 +1322,8 @@ The context-gathering phase can fetch this index to discover all investigation G
 
 **IMPORTANT RULES**:
 - **MANDATORY**: You MUST use the Skill tool to invoke 'work-on' with args '${FINDING_NUM}'. Do NOT implement manually — /work-on handles the full pipeline including label state machine (workflow:investigating → workflow:building → workflow:in-review → workflow:merged), investigation reports, PR creation, and cleanup.
-  - For default repo issues: \`Skill(skill='work-on', args='${FINDING_NUM}')\`
-  - For satellite repo issues: \`Skill(skill='work-on', args='{SATELLITE_PREFIX}:${FINDING_NUM}')\` (prefix from forge.yaml → repos.satellites)
+  - For default repo issues: \`Skill(skill='work-on', args='${FINDING_NUM} --under-orchestration')\`
+  - For satellite repo issues: \`Skill(skill='work-on', args='{SATELLITE_PREFIX}:${FINDING_NUM} --under-orchestration')\` (prefix from forge.yaml → repos.satellites)
 - NEVER bypass /work-on with manual git/gh commands — the label updates and structured comments are critical for tracking
 - NEVER target \`main\` for PRs targeting the default repo. Use \`{STAGING_BRANCH}\` for fast-lane issues, or \`milestone/{slug}\` for milestone issues.
 - Satellite repos (MCP, n8n) have no staging branch — fast-lane PRs go to \`main\` for those.
@@ -1338,7 +1339,7 @@ gh issue view ${FINDING_NUM} -R {GH_REPO} --json labels --jq '[.labels[].name | 
 \`\`\`
 **Terminal labels** (only these allow you to stop): \`workflow:merged\`, \`workflow:invalid\`
 **Terminal condition also**: \`needs-human\` label present, \`workflow:awaiting-merge\` label present, OR issue state is \`closed\`
-If the label is NOT terminal (e.g., \`workflow:investigating\`, \`workflow:ready-to-build\`, \`workflow:building\`, \`workflow:in-review\`), invoke \`Skill(skill='work-on', args='${FINDING_NUM}')\` again immediately. The \`/work-on\` skill will re-read GitHub state and advance to the next phase. Do NOT output a summary, do NOT pause, do NOT ask for confirmation — just invoke it again.
+If the label is NOT terminal (e.g., \`workflow:investigating\`, \`workflow:ready-to-build\`, \`workflow:building\`, \`workflow:in-review\`), invoke \`Skill(skill='work-on', args='${FINDING_NUM} --under-orchestration')\` again immediately. The \`/work-on\` skill will re-read GitHub state and advance to the next phase. Do NOT output a summary, do NOT pause, do NOT ask for confirmation — just invoke it again.
 
 **CRITICAL — SOURCE BRANCH DETECTION**:
 - If the issue has the \`review-finding\` label, read the issue body for \`**Code branch**: \\\`{branch}\\\`\`
