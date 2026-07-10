@@ -319,6 +319,11 @@ describe("router", () => {
 
     const doctorRes = runCli(["doctor"], { cwd, home, extraEnv: stubEnv });
     assert.equal(doctorRes.status, 0, doctorRes.stdout + doctorRes.stderr);
+    // forge#1895: the new hook-script-path-integrity check must PASS here —
+    // FORGE_HOME in this test is the real, on-disk repo location, so the
+    // baked-in hook script path genuinely exists.
+    assert.match(doctorRes.stdout, /SessionStart hook script path/i);
+    assert.doesNotMatch(doctorRes.stdout, /no longer exists/i);
   });
 
   it("install/status/doctor agree on location when cwd has its own unrelated .claude/commands/ (#1589)", () => {
@@ -497,5 +502,67 @@ describe("doctor — forge.yaml placeholder / staleness checks (forge#1850)", ()
     assert.doesNotMatch(res.stdout, /forge\.yaml identity/i);
     assert.doesNotMatch(res.stdout, /branches\.staging equals branches\.default/i);
     assert.doesNotMatch(res.stdout, /forge\.yaml placeholders/i);
+  });
+});
+
+describe("doctor: SessionStart hook script path integrity (Check 5c, forge#1895)", () => {
+  function stubTools() {
+    const stubBin = mkdtempSync(join(os.tmpdir(), "fd-hookcheck-stub-bin-"));
+    writeFileSync(join(stubBin, "gh"), "#!/bin/sh\necho 'gh version 2.60.0'\n", { mode: 0o755 });
+    writeFileSync(join(stubBin, "yq"), "#!/bin/sh\necho 'yq (https://github.com/mikefarah/yq/) version v4.44.0'\n", { mode: 0o755 });
+    return { PATH: `${stubBin}:${process.env.PATH}` };
+  }
+
+  /**
+   * Runs a real `install --fast` (so a genuine SessionStart hook entry is
+   * registered pointing at the real, existing hook script), then rewrites
+   * that entry's command to point at a path that does not exist — simulating
+   * a hook script that has since gone missing (e.g. a pruned npx cache).
+   */
+  function installThenBreakHookPath(brokenPath) {
+    const home = mkdtempSync(join(os.tmpdir(), "fd-hookcheck-home-"));
+    const cwd = mkdtempSync(join(os.tmpdir(), "fd-hookcheck-cwd-"));
+    writeFileSync(
+      join(home, ".gitconfig"),
+      "[user]\n\tname = Test User\n\temail = test@example.com\n",
+      "utf-8",
+    );
+    const extraEnv = stubTools();
+    const installRes = runCli(["install", "--fast"], { cwd, home, extraEnv });
+    assert.equal(installRes.status, 0, installRes.stdout + installRes.stderr);
+
+    const settingsPath = join(home, ".claude", "settings.json");
+    const settings = JSON.parse(readFileSync(settingsPath, "utf-8"));
+    for (const entry of settings.hooks.SessionStart) {
+      for (const h of entry.hooks) {
+        if (typeof h.command === "string" && h.command.includes("session-start.mjs")) {
+          h.command = `node "${brokenPath}"`;
+        }
+      }
+    }
+    writeFileSync(settingsPath, JSON.stringify(settings, null, 2), "utf-8");
+    return { home, cwd, extraEnv };
+  }
+
+  it("fails with a generic fix hint when the hook script path is missing (non-cache path)", () => {
+    const brokenPath = join(os.tmpdir(), "fd-hookcheck-gone-", "bin", "hooks", "session-start.mjs");
+    const { home, cwd, extraEnv } = installThenBreakHookPath(brokenPath);
+
+    const res = runCli(["doctor"], { cwd, home, extraEnv });
+    assert.equal(res.status, 1, res.stdout + res.stderr);
+    assert.match(res.stdout, /SessionStart hook script path/i);
+    assert.match(res.stdout, /no longer exists/i);
+    assert.doesNotMatch(res.stdout, /ephemeral npm\/npx\/pnpm\/yarn cache/i);
+  });
+
+  it("fails with an ephemeral-cache-aware fix hint when the missing path sits inside an npx cache shape", () => {
+    const brokenPath = join(os.tmpdir(), "fd-hookcheck-npx-", "_npx", "a1b2c3", "node_modules", "forgedock", "bin", "hooks", "session-start.mjs");
+    const { home, cwd, extraEnv } = installThenBreakHookPath(brokenPath);
+
+    const res = runCli(["doctor"], { cwd, home, extraEnv });
+    assert.equal(res.status, 1, res.stdout + res.stderr);
+    assert.match(res.stdout, /SessionStart hook script path/i);
+    assert.match(res.stdout, /ephemeral npm\/npx\/pnpm\/yarn cache/i);
+    assert.match(res.stdout, /npm install -g forgedock/);
   });
 });

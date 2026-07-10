@@ -592,6 +592,44 @@ async function pruneOrphanedSymlinks(targetDir, commandsDir) {
 }
 
 /**
+ * Detect whether `p` sits inside a known ephemeral npm/npx/pnpm/yarn cache
+ * directory rather than a durable install location (global npm install,
+ * local repo clone, or a project's own `node_modules`).
+ *
+ * Used to warn when `ctx.forgeHome` — and therefore the SessionStart hook
+ * script path baked into `~/.claude/settings.json` — resolves somewhere that
+ * can be silently pruned later (`npm cache clean`, OS temp cleanup, npx's
+ * own eviction), which would break context injection with no error surfaced.
+ *
+ * Matching is path-SEGMENT based (split on `/` and `\`), never a bare
+ * substring match — this keeps the check conservative and avoids false
+ * positives on a real install whose path merely contains one of these
+ * strings (e.g. a project directory named `npx-utils` or `my-dlx-tool`).
+ *
+ * Recognized shapes:
+ *   - npm's npx cache: a `_npx` segment — covers both
+ *     `~/.npm/_npx/<hash>/node_modules/<pkg>` (POSIX) and
+ *     `%LocalAppData%\npm-cache\_npx\<hash>\node_modules\<pkg>` (Windows).
+ *   - pnpm's dlx cache: a `dlx` segment — pnpm's ephemeral `dlx` subdir,
+ *     distinct from `node_modules/.pnpm/` (pnpm's persistent
+ *     content-addressable store used by ordinary local installs, which must
+ *     NOT be flagged here).
+ *   - yarn (Berry) dlx: a segment matching `/^xfs-/i` — `yarn dlx` builds its
+ *     throwaway project in a temp directory created via `xfs.mktempPromise()`,
+ *     which yarn names with an `xfs-` prefix.
+ *
+ * @param {string} p - Absolute path to test (typically `ctx.forgeHome`).
+ * @returns {boolean}
+ */
+export function isEphemeralCachePath(p) {
+  if (!p || typeof p !== "string") return false;
+  const segments = p.split(/[\\/]/).filter(Boolean);
+  return segments.some(
+    (seg) => seg === "_npx" || seg === "dlx" || /^xfs-/i.test(seg),
+  );
+}
+
+/**
  * Act II: link commands into ~/.claude/commands with a molten progress line,
  * then register the SessionStart hook.
  * Symlink semantics preserved verbatim from the original install():
@@ -787,6 +825,22 @@ export async function forge(ctx) {
     w.write(fixCard([`Fix the JSON in ${settingsPath}, then re-run: npx forgedock install`], ctx.mode) + "\n");
   } else {
     w.write(`  ${glyph(true)} SessionStart hook ${hookStatus === "already" ? "active" : "registered"} ${dimLine(ctx, settingsPath)}\n`);
+  }
+
+  // Ephemeral-cache advisory (forge#1895): if FORGE_HOME resolves inside a
+  // known npx/dlx cache shape, the hook script path just baked into
+  // settingsPath above can silently stop existing once that cache is pruned.
+  // Non-fatal — the install itself is fine right now — but worth surfacing
+  // since there is no stable path to substitute (unlike the git-worktree
+  // case handled by resolveRealForgeHome() in bin/forgedock.mjs).
+  if (hookStatus !== "skipped-malformed" && isEphemeralCachePath(ctx.forgeHome)) {
+    w.write(`  ${glyph(false)} FORGE_HOME resolves inside an ephemeral cache directory ${dimLine(ctx, ctx.forgeHome)}\n`);
+    w.write(fixCard([
+      "This path (npx/pnpm dlx/yarn dlx cache) can be pruned by npm/npx/pnpm/yarn",
+      "or OS temp cleanup. If that happens, the SessionStart hook silently stops",
+      "injecting ForgeDock context — no error is shown.",
+      "Mitigation: npm install -g forgedock  (or re-run npx forgedock periodically).",
+    ], ctx.mode) + "\n");
   }
 
   // Report enforcement hook status.
