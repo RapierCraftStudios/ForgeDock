@@ -1420,8 +1420,14 @@ function readForgedockVersion(forgeHome) {
 /**
  * Write a machine-readable install-receipt.json to {ctx.home}/.forge/ after a
  * successful install (runJourney) or update (bin/forgedock.mjs's
- * relinkAndHint — shared by both update() branches and the install
- * reinstall-guard). See docs/CONFIG.md "Install Receipt" for the schema.
+ * relinkAndHint — shared by both update() branches: the git-clone
+ * fast-forward path and the npm version-check path). Note: re-running
+ * `npx forgedock install` on an already-managed-active repo takes the
+ * statusScreen() short-circuit instead of runJourney()/relinkAndHint() — that
+ * path does not refresh the receipt (it also does not touch forge() or
+ * anything else, so this is consistent with the rest of that short-circuit's
+ * no-op behavior, not a gap specific to this feature). See docs/CONFIG.md
+ * "Install Receipt" for the schema.
  *
  * Deliberately narrow field set — no PII/secrets: no process.env values, no
  * GitHub tokens, no forge.yaml file contents (only a presence/shape boolean
@@ -1446,8 +1452,14 @@ function readForgedockVersion(forgeHome) {
  * @returns {Promise<{ written: boolean, path: string }>}
  */
 export async function writeInstallReceipt(ctx, summary = {}) {
-  const receiptPath = join(ctx.home, ".forge", "install-receipt.json");
+  // Computed inside the try block (not before it): ctx.home is expected to
+  // always be a string in production (makeCtx()/ctx() both default it via
+  // env.HOME || env.USERPROFILE || os.homedir()), but this function's own
+  // contract is "never throws" — join() on a malformed ctx.home must degrade
+  // to written:false, not escape uncaught to the CLI entrypoint.
+  let receiptPath = join(os.homedir(), ".forge", "install-receipt.json");
   try {
+    receiptPath = join(ctx.home, ".forge", "install-receipt.json");
     const { forged = {} } = summary;
     const envInfo = detectEnvironment({ platform: ctx.platform, env: ctx.env, release: ctx.release });
     const installMode = existsSync(join(ctx.forgeHome, ".git")) ? "git-clone" : "npm";

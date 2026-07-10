@@ -1099,10 +1099,13 @@ async function uninstall() {
 async function relinkAndHint() {
   const c = ctx();
   const forged = await forge(c);
-  // Refresh the install receipt (#1946) — this is the shared repair path for
-  // both update() branches (git-clone and npm) plus install's reinstall-guard,
-  // so wiring it here covers "refreshed after every successful update" without
-  // duplicating the call at each update() branch.
+  // Refresh the install receipt (#1946) — relinkAndHint() is called from
+  // BOTH update() branches (the git-clone fast-forward path and the npm
+  // version-check path), so wiring it here covers "refreshed after every
+  // successful update" without duplicating the call at each branch. Note:
+  // this is NOT reached by install's already-managed-active short-circuit
+  // (that path calls statusScreen(), never relinkAndHint()) — see the
+  // writeInstallReceipt() JSDoc in journey.mjs for the full picture.
   await writeInstallReceipt(c, { forged });
   if (!existsSync(join(c.cwd, "forge.yaml"))) {
     const dim = (s) => (c.mode === "none" ? s : `\x1b[2m${s}\x1b[22m`);

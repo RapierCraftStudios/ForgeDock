@@ -1725,6 +1725,18 @@ describe("writeInstallReceipt", () => {
     assert.equal(res.written, false);
   });
 
+  it("never throws even when ctx.home is malformed (regression: path.join must not run before the try block)", async () => {
+    // ctx.home = undefined would make an unguarded `join(ctx.home, ...)`
+    // ahead of the try block throw synchronously (path.join rejects
+    // non-string args), escaping writeInstallReceipt's own "never throws"
+    // contract and propagating uncaught to runJourney()'s bare try/finally.
+    const ctx = makeReceiptCtx({ home: undefined });
+    await assert.doesNotReject(async () => {
+      const res = await writeInstallReceipt(ctx, { forged: {} });
+      assert.equal(res.written, false);
+    });
+  });
+
   it("works with a minimal summary (no forged data) — the relinkAndHint() call shape", async () => {
     const ctx = makeReceiptCtx();
     const res = await writeInstallReceipt(ctx, {});
