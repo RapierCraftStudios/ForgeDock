@@ -10,7 +10,7 @@ install: internal
 
 
 
-**Type**: `security-exploit-auditor` | **Model**: `sonnet`
+**Type**: `security-exploit-auditor` | **Model**: `{SUBAGENT_MODEL}`
 
 **Prompt template:**
 ```

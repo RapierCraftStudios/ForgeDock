@@ -11,7 +11,7 @@ install: internal
 **Note**: This agent is for projects with a web-scraping or browser-automation domain. It only spawns when `review.domains.scraping` is set in `forge.yaml`. Projects using Playwright solely for E2E testing do not spawn this agent.
 
 **Trigger**: SCRAPING domain detected AND `review.domains.scraping` is configured in forge.yaml
-**Type**: `codebase-explorer` | **Model**: `sonnet`
+**Type**: `codebase-explorer` | **Model**: `{SUBAGENT_MODEL}`
 
 **Prompt template:**
 ```

@@ -234,6 +234,20 @@ function buildActiveContext(dir, forgeYaml) {
     100,
   ) ?? "sonnet";
 
+  // Sub-agent model — resolved from forge.yaml's optional
+  // `agents.subagent_model` field. Governs child agents that a top-level
+  // command spawns internally (e.g. /orchestrate's per-issue /work-on
+  // agents, /review-pr's domain persona reviewers), which is a distinct
+  // hardcoded call-site from the top-level "Agent model policy" banner that
+  // `defaultModel` above already covers. Falls back to `defaultModel` (not
+  // directly to "sonnet") so a project that only sets `default_model` gets
+  // consistent behavior across both the main agent and its children.
+  // Rendered unconditionally, same as defaultModel above. <!-- issue #1852 -->
+  const subagentModel = sanitizeContextValue(
+    forgeYaml.agents?.subagent_model ?? defaultModel,
+    100,
+  ) ?? defaultModel;
+
   return `\
 <!-- ForgeDock: managed-active -->
 **ForgeDock** is active in this directory (${safeDir}).
@@ -241,6 +255,7 @@ ${nameNote}${repoNote}${descNote}${milestoneNote}
 - **Staging branch**: \`${stagingBranch}\`
 - **Feature branch pattern**: \`${featurePattern}\`
 - **Default agent model**: \`${defaultModel}\`
+- **Sub-agent model**: \`${subagentModel}\`
 
 ### Available pipeline commands
 

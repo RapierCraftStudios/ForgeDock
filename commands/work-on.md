@@ -1400,7 +1400,7 @@ Skip for 1-file config/docs edits.
 ```
 Agent(
   subagent_type="general-purpose",
-  model="sonnet",
+  model="{SUBAGENT_MODEL}",
   description="Quality gate for #{NUMBER}",
   run_in_background=false,
   prompt="Run the quality gate loop for issue #{NUMBER} in worktree {WORKTREE_PATH}.

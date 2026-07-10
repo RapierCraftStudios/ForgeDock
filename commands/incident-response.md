@@ -109,7 +109,7 @@ gh api repos/{owner}/{repo}/issues/{NUMBER}/comments \
 Spawn a validation agent to check the proposed fix:
 
 ```
-Agent(model="sonnet", prompt="
+Agent(model="{SUBAGENT_MODEL}", prompt="
 You are validating a hotfix for a P0 production incident.
 
 Issue: #{NUMBER} — {TITLE}
@@ -242,7 +242,7 @@ gh pr list --state merged --base main --json number,title,mergedAt \
 Spawn an investigation agent:
 
 ```
-Agent(model="sonnet", prompt="
+Agent(model="{SUBAGENT_MODEL}", prompt="
 You are conducting a post-incident root cause analysis.
 
 Incident: #{NUMBER} — {TITLE}

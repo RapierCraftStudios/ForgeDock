@@ -141,6 +141,19 @@ describe("parseForgeYaml", () => {
     const result = parseForgeYaml(yaml);
     assert.equal(result.agents?.default_model, "opus");
   });
+
+  it("parses agents.subagent_model (issue #1852)", () => {
+    const yaml = 'agents:\n  subagent_model: "haiku"\n';
+    const result = parseForgeYaml(yaml);
+    assert.equal(result.agents?.subagent_model, "haiku");
+  });
+
+  it("parses agents.default_model and agents.subagent_model together (issue #1852)", () => {
+    const yaml = 'agents:\n  default_model: "opus"\n  subagent_model: "haiku"\n';
+    const result = parseForgeYaml(yaml);
+    assert.equal(result.agents?.default_model, "opus");
+    assert.equal(result.agents?.subagent_model, "haiku");
+  });
 });
 
 // =============================================================================

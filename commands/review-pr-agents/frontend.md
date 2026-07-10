@@ -11,7 +11,7 @@ install: internal
 
 
 **Trigger**: WEB service touched
-**Type**: `codebase-explorer` | **Model**: `sonnet`
+**Type**: `codebase-explorer` | **Model**: `{SUBAGENT_MODEL}`
 
 **Prompt template:**
 ```

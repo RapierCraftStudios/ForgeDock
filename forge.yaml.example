@@ -126,6 +126,23 @@ branches:
 #   #
 #   # Omit this field entirely for no change from today's behavior.
 #   default_model: "sonnet"
+#
+#   # Model override for CHILD sub-agents that a top-level command spawns
+#   # internally — e.g. /orchestrate's per-issue /work-on agents, /review-pr's
+#   # domain persona reviewers, /analytics's parallel data-collection agents.
+#   # This is distinct from `default_model` above, which only governs the
+#   # main agent you invoke directly (the one running the command spec).
+#   #
+#   # Accepts the same short alias as `default_model` ("sonnet"/"opus"/"haiku").
+#   #
+#   # Resolution order (highest precedence first):
+#   #   1. agents.subagent_model     (this field)
+#   #   2. agents.default_model      (falls back here if subagent_model is unset)
+#   #   3. Hardcoded default         ("sonnet")
+#   #
+#   # Omit this field to have sub-agents inherit default_model (or "sonnet"
+#   # if that's unset too) — no change from today's behavior.
+#   subagent_model: "sonnet"
 
 # =============================================================================
 # REPOS (OPTIONAL)

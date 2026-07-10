@@ -11,7 +11,7 @@ install: internal
 
 
 **Trigger**: New or modified routers/routes, OR SDK/OpenAPI files changed (`sdk/`, `openapi*.json`, `openapi-versions/`)
-**Type**: `general-purpose` | **Model**: `sonnet`
+**Type**: `general-purpose` | **Model**: `{SUBAGENT_MODEL}`
 
 **Prompt template:**
 ```
