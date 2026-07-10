@@ -519,6 +519,24 @@ describe("detectCrossEnvInstall (forge#1893)", () => {
     assert.equal(res.otherPath, "\\\\wsl.localhost\\Ubuntu-22.04\\home\\testuser\\.claude\\forgedock");
   });
 
+  it("Windows -> WSL: matches a lowercase `users` path segment (case-insensitive, symmetric with the WSL -> Windows branch)", () => {
+    const envInfo = detectEnvironment({ platform: "win32", env: {}, release: "10.0.22631" });
+    const rawDistroOutput = "Ubuntu-22.04".split("").join("\0") + "\0\r\n";
+    const ctx = {
+      cwd: "C:\\users\\testuser\\projects\\repo",
+      exec: (cmd, args) => {
+        assert.equal(cmd, "wsl");
+        assert.deepEqual(args, ["-l", "-q"]);
+        return rawDistroOutput;
+      },
+    };
+    const existsSyncFn = (p) => p === "\\\\wsl.localhost\\Ubuntu-22.04\\home\\testuser\\.claude\\forgedock";
+    const res = detectCrossEnvInstall(ctx, envInfo, { existsSyncFn });
+    assert.equal(res.conflict, true);
+    assert.equal(res.direction, "wsl");
+    assert.equal(res.otherPath, "\\\\wsl.localhost\\Ubuntu-22.04\\home\\testuser\\.claude\\forgedock");
+  });
+
   it("Windows -> WSL: falls back to the \\\\wsl$\\ UNC root when \\\\wsl.localhost\\ isn't found", () => {
     const envInfo = detectEnvironment({ platform: "win32", env: {}, release: "10.0.22631" });
     const ctx = {

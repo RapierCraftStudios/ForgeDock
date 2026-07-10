@@ -815,7 +815,7 @@ export function detectCrossEnvInstall(ctx, envInfo, deps = {}) {
     }
 
     if (envInfo.platform === "win32") {
-      const m = cwd.match(/^([a-zA-Z]):[\\/]Users[\\/]([^\\/]+)/);
+      const m = cwd.match(/^([a-zA-Z]):[\\/]Users[\\/]([^\\/]+)/i);
       if (!m) return none;
       const user = m[2];
 
