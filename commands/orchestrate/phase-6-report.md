@@ -323,7 +323,7 @@ current session's live wake pick them up automatically if it is still running).
 | Findings queued after cascade control | {N_queued}/{N_total} ({N_deferred} deferred — see Step 4C) |
 | Findings deferred — idle policy (forge#1814) | {IDLE_POLICY_DEFERRED_COUNT} (batch fully human-gated at defer time — see Step 4B item 6.7) |
 | P3 findings clubbed (surface-area batching, forge#1818) | {SURFACE_BATCH_COUNT:-0} batch(es) covering {#SURFACE_BATCHED_FINDINGS[@]:-0} finding(s) — see Step 4C |
-| Findings deferred — token budget (forge#1858) | {#TOKEN_DEFERRED[@]:-0} (batch spend ${BATCH_TOKEN_SPEND:-0}/${TOKEN_BUDGET:-uncapped} tokens — see Step 4C) |
+| Findings deferred — token budget (forge#1858) | {#TOKEN_DEFERRED[@]:-0} (batch spend {BATCH_TOKEN_SPEND:-0}/{TOKEN_BUDGET:-uncapped} tokens — see Step 4C) |
 | Competing recommendations reconciled (Phase 2.5) | {RECONCILED_COUNT} (investigation plans arbitrated in place + serialized) |
 | Findings validated | {N} |
 | False positives | {N} ({%}) |
