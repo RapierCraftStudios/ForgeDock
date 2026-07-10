@@ -569,6 +569,24 @@ async function saveCopiedManifest(manifestPath, manifest) {
 const isLinkPermissionError = (err) => err.code === "EPERM" || err.code === "EACCES";
 
 /**
+ * Allowlist of universal pipeline-agent scripts installed to
+ * ~/.claude/scripts/ by forge() (linkPipelineScripts()) and cleaned up by
+ * forgedock.mjs's uninstall(). This is the single source of truth for both
+ * directions — re-export from forgedock.mjs rather than duplicating it.
+ *
+ * Deliberately narrow (forge#715): project-specific/internal tooling that
+ * lives in scripts/ (verify-*.sh, doctor-pipeline-state.sh, gen-logo.mjs,
+ * the self-dogfooding *.mjs analysis scripts, etc.) must NOT be copied here
+ * — only scripts meant to be invoked generically by command specs without
+ * knowing ForgeDock's own install path belong in this set.
+ */
+export const PIPELINE_SCRIPTS = new Set([
+  "classify-lane.sh",
+  "transition-label.sh",
+  "validate-pr-target.sh",
+]);
+
+/**
  * Recursively walk targetDir and remove any symlink whose target begins with
  * commandsDir (i.e. a ForgeDock-managed link) but whose target file no longer
  * exists on disk. These are "orphaned" symlinks left behind when a command is
@@ -666,6 +684,80 @@ export function isEphemeralCachePath(p) {
   return segments.some(
     (seg) => seg === "_npx" || seg === "dlx" || /^xfs-/i.test(seg),
   );
+}
+
+/**
+ * Link the PIPELINE_SCRIPTS allowlist from {forgeHome}/scripts/ into
+ * ~/.claude/scripts/, using the same symlink-first / copy-fallback strategy
+ * as command installation (isLinkPermissionError-gated). Flat set, no
+ * subdirectories, no ownership manifest needed — three well-known filenames.
+ *
+ * Restores the linkScripts() step (commit 9bf382a, forge#677) that was
+ * silently dropped when install moved from the legacy install()/update()
+ * flow to this journey-based forge() (forge#1885).
+ *
+ * @param {{forgeHome: string, home: string, linkStrategy?: string}} ctx
+ * @returns {Promise<{installed: number, updated: number, skipped: number, copied: number, total: number}>}
+ */
+async function linkPipelineScripts(ctx) {
+  const scriptsSourceDir = join(ctx.forgeHome, "scripts");
+  const scriptsTargetDir = join(ctx.home, ".claude", "scripts");
+  const wantSymlink = ctx.linkStrategy !== "copy";
+
+  await mkdir(scriptsTargetDir, { recursive: true });
+
+  let installed = 0, updated = 0, skipped = 0, copied = 0;
+
+  for (const name of PIPELINE_SCRIPTS) {
+    const file = join(scriptsSourceDir, name);
+    if (!existsSync(file)) continue; // source missing (unusual package layout) — skip silently
+
+    const target = join(scriptsTargetDir, name);
+    let existed = false;
+    let alreadyCorrect = false;
+
+    try {
+      const stats = await lstat(target);
+      existed = true;
+      if (stats.isSymbolicLink()) {
+        const current = await readlink(target);
+        if (current === file) alreadyCorrect = true;
+      }
+    } catch (err) {
+      if (err.code !== "ENOENT") throw err;
+    }
+
+    if (alreadyCorrect) {
+      skipped++;
+      continue;
+    }
+
+    if (existed) {
+      await unlink(target).catch((err) => {
+        if (err.code !== "ENOENT") throw err;
+      });
+    }
+
+    let linked = false;
+    if (wantSymlink) {
+      try {
+        await symlink(file, target);
+        linked = true;
+      } catch (linkErr) {
+        if (!isLinkPermissionError(linkErr)) throw linkErr;
+      }
+    }
+    if (!linked) {
+      await copyFile(file, target);
+      copied++;
+    } else if (existed) {
+      updated++;
+    } else {
+      installed++;
+    }
+  }
+
+  return { installed, updated, skipped, copied, total: PIPELINE_SCRIPTS.size };
 }
 
 /**
@@ -813,6 +905,9 @@ export async function forge(ctx) {
   // target file no longer exists (e.g. after a command is renamed or deleted).
   const pruned = await pruneOrphanedSymlinks(targetDir, commandsDir);
 
+  // Link the small set of universal pipeline-agent scripts (forge#1885).
+  const scriptsResult = await linkPipelineScripts(ctx);
+
   const hookScript = join(ctx.forgeHome, "bin", "hooks", "session-start.mjs");
   const settingsPath = join(ctx.home, ".claude", "settings.json");
   const { status: hookStatus } = installSessionStartHook(settingsPath, hookScript);
@@ -856,6 +951,13 @@ export async function forge(ctx) {
   if (copied > 0) {
     w.write(`  ${glyph(false)} ${copied} copied (not linked) ${dimLine(ctx, "— enable Windows Developer Mode for live-updating links")}\n`);
   }
+  if (scriptsResult.total > 0) {
+    const scriptsChanged = scriptsResult.installed + scriptsResult.updated + scriptsResult.copied;
+    const scriptsDetail = scriptsChanged > 0
+      ? `(new ${scriptsResult.installed}, updated ${scriptsResult.updated}, copied ${scriptsResult.copied}, unchanged ${scriptsResult.skipped})`
+      : `(unchanged ${scriptsResult.skipped})`;
+    w.write(`  ${glyph(true)} ${scriptsResult.total} pipeline scripts linked into ~/.claude/scripts ${dimLine(ctx, scriptsDetail)}\n`);
+  }
   if (manifestSaveFailed) {
     w.write("  " + dimLine(ctx, "manifest not saved — re-runs may warn about copied files") + "\n");
   }
@@ -898,7 +1000,7 @@ export async function forge(ctx) {
     w.write(`  ${glyph(true)} SubagentStop enforcement hook removed ${dimLine(ctx, "(non-functional — see forge#1527)")}\n`);
   }
 
-  return { installed, updated, skipped, copied, pruned, total: files.length, hookStatus, preToolUseStatus, subagentStopEnforceStatus };
+  return { installed, updated, skipped, copied, pruned, total: files.length, hookStatus, preToolUseStatus, subagentStopEnforceStatus, scriptsResult };
 }
 
 // ---------------------------------------------------------------------------
@@ -1048,6 +1150,9 @@ export function celebrate(ctx, summary) {
     const hookNote = summary.hookStatus === "skipped-malformed" ? "hook NOT active — see fix above" : "Claude Code knows this repo";
     w.write(`  ${glyph} ${summary.total} commands · hook ${summary.hookStatus === "skipped-malformed" ? "skipped" : "active"}   ${dimLine(ctx, hookNote)}\n`);
   }
+  if (summary.scriptsResult && summary.scriptsResult.total > 0) {
+    w.write(`  ${glyph} ${summary.scriptsResult.total} pipeline scripts   ${dimLine(ctx, "~/.claude/scripts — classify-lane, transition-label, validate-pr-target")}\n`);
+  }
   w.write("\n");
   if (summary.isMinimal) {
     w.write("  " + dimLine(ctx, "see docs/CONFIG.md for optional sections") + "\n");
@@ -1060,6 +1165,8 @@ export function celebrate(ctx, summary) {
         `  3. run npx forgedock doctor     — verify the install is green`,
         `  4. open claude in this repo`,
         `  5. run /issue <title> then /work-on <number>`,
+        `  6. run npx forgedock run-issue <N> — drive an issue via the durable engine`,
+        `  7. run npx forgedock watch      — monitor pipeline state`,
       ],
       { title: "what's next" },
     ),
@@ -1128,7 +1235,7 @@ export async function runJourney(ctx) {
     const { draft, description } = await read(ctx);
     const reviewed = await review(ctx, draft, description);
     const connected = await connect(ctx);
-    celebrate(ctx, { ...reviewed, ...connected, total: forged.total, hookStatus: forged.hookStatus });
+    celebrate(ctx, { ...reviewed, ...connected, total: forged.total, hookStatus: forged.hookStatus, scriptsResult: forged.scriptsResult });
     return reviewed.aborted ? 1 : 0;
   } finally {
     process.removeListener("SIGINT", onSigint);
