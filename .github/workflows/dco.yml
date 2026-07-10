@@ -9,7 +9,7 @@ jobs:
     name: DCO Sign-Off Verification
     runs-on: ubuntu-latest
     permissions:
-      pull-requests: read
+      pull-requests: write
       statuses: write
 
     steps:
@@ -19,6 +19,8 @@ jobs:
           config: |
             # Project maintainer emails — exempt from DCO sign-off
             exempt-authors = ["yash.dubey803at@gmail.com", "rapiercraftstudios@gmail.com"]
+
+            comment = true
 
             # Allow these bots to skip the DCO requirement
             [bots]
