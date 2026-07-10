@@ -962,6 +962,32 @@ describe("forge (Act II)", () => {
     assert.match(w.text, /WARNING/);
   });
 
+  it("adopts pre-manifest regular file into manifest when content matches source", async () => {
+    const home = mkdtempSync(join(os.tmpdir(), "fd-forge-adopt-"));
+    const forgeHome = mkdtempSync(join(os.tmpdir(), "fd-forge-adopt-src-"));
+    mkdirSyncFs(join(forgeHome, "commands"), { recursive: true });
+    mkdirSyncFs(join(forgeHome, "bin", "hooks"), { recursive: true });
+    writeFileSync(join(forgeHome, "commands", "a.md"), "A", "utf-8");
+    writeFileSync(join(forgeHome, "bin", "hooks", "session-start.mjs"), "// hook", "utf-8");
+
+    // Pre-create target as a regular file with identical content — no manifest entry.
+    const target = join(home, ".claude", "commands", "a.md");
+    mkdirSyncFs(join(home, ".claude", "commands"), { recursive: true });
+    writeFileSync(target, "A", "utf-8");
+
+    const { ctx, w } = stubCtx({ home });
+    ctx.forgeHome = forgeHome;
+    const res = await forge(ctx);
+
+    assert.equal(readFileSync(target, "utf-8"), "A");
+    assert.equal(res.skipped, 1);
+    assert.ok(!w.text.includes("WARNING"), "should not warn for content-matching file");
+    const manifest = JSON.parse(
+      readFileSync(join(home, ".claude", "forgedock", "copied-commands.json"), "utf-8"),
+    );
+    assert.equal(manifest.files["a.md"], true, "file should be adopted into manifest");
+  });
+
   // forge#1527: the SubagentStop annotation-enforcement hook's trigger
   // (`FORGE:PHASE_START` in the transcript) is never emitted anywhere in the
   // pipeline, so it was dead code that always exited 0 with zero enforcement
