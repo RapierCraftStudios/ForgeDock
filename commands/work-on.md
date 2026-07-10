@@ -119,6 +119,17 @@ The Phase 5C review fork is now unconditional, controlled by **Row (d)** (prompt
 
 The Phase 3G quality-gate loop forks unconditionally under **Row (d)**: it scans 14+ domains across up to 3 iterations, long enough to idle the parent's accumulated context past the prompt-cache TTL regardless of how many files changed. Unlike Phase 5C, quality-gate never had a Row (c) (file-count) exception — Row (d) is the sole justification for forking it. <!-- Added: forge#1825 -->
 
+### Model and Effort Tiering — What Actually Applies
+
+<!-- FORGE:MODEL_TIER_NOTE — Canonical explanation of the real vs. aspirational tiering mechanism. Every work-on/*.md "Agent model policy" line cross-references this section instead of restating it. -->
+
+Every `work-on/*.md` sub-phase file carries an "Agent model policy" line naming a `model` and an `effort`. These are two different mechanisms with two different scopes, and only one of them changes anything for an in-process `Skill()` call:
+
+- **`effort` is real and applies per `Skill()` invocation.** It is genuine reasoning-depth tuning on the model already running the session, gated correctly on Claude Code >= 2.1.154. Setting `effort: low` on a sub-phase file that is mechanical end-to-end (deterministic label edits, annotation posting, board sync — no root-cause analysis, no architecture planning) is a real, no-fork-required cost reduction.
+- **`model` overrides are NOT functional for `Skill()`-dispatched sub-phases.** The `Skill` tool executes "within the main conversation" — it has no model parameter and does not fork a new agent/session, so a sub-phase file cannot switch the model that's already generating the current run. The only tool with real model-override semantics is `Agent(model=...)` (see `tool_param_value_permission_rules`, Claude Code >= 2.1.178) — and HARD RULE #2 above explicitly forbids using the `Agent` tool for `/work-on` sub-phase dispatch, to keep the FORGE-annotation paper trail and phase protocol intact. In practice, the only place a `/work-on` run's model is genuinely chosen is `/orchestrate`'s single `Agent(model=..., ...)` spawn for the entire run (see `commands/orchestrate/phase-4-execution.md`) — every internal `Skill()` call inside that run inherits that same model, with no per-sub-phase override.
+
+**What this means concretely**: a sub-phase file's "Agent model policy" line documents *effort* tiering that genuinely takes effect, plus a *model* value that is aspirational/no-op unless that file is one day dispatched via `Agent(...)` instead of `Skill(...)`. Because mechanical bits (label transitions, `FORGE:CHECKPOINT` writes, heartbeat posts, task-type classification) are interleaved with reasoning-heavy content within the same `Skill()`-invoked file in most sub-phases, they cannot be selectively downtiered without either degrading the reasoning phases sharing that file, or extracting them into a brand-new fork — which the Spawn-Decision Policy above correctly discourages for operations this small (a single `gh issue edit` call does not clear Row a/b/c/d). Do not add a `model: "haiku"` claim to a sub-phase file expecting it to have effect; only add `effort: low`, and only when the whole file is mechanical end-to-end. <!-- Added: forge#1827 -->
+
 ---
 
 ## Pipeline Rules

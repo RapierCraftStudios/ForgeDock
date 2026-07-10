@@ -12,7 +12,7 @@ argument-hint: [issue number] [--repo GH_REPO] [--gh-flag GH_FLAG] [--pr PR_NUMB
 **Invoked by**: `work-on.md` Phase 6–7, after `review.md` returns `REVIEW_RESULT: status: COMPLETE`.
 **Output**: Update project board, close issue, update parent tracker, post trajectory log. Return final summary.
 
-**Agent model policy**: `model: "haiku"`, `effort: low` (mechanical tier — label transitions, annotation posting, board updates). Fallback: `model: "sonnet"` if rate-limited. Feature gate: pass `effort` only on Claude Code >= 2.1.154.
+**Agent model policy**: `effort: low` (mechanical tier — label transitions, annotation posting, board updates; this file is mechanical end-to-end, so a low effort level is safe here). Fallback: `model: "sonnet"` if rate-limited. Feature gate: pass `effort` only on Claude Code >= 2.1.154. **Note**: this file is dispatched via `Skill("work-on:close", ...)`, which does not support a `model` override — see `work-on.md` section "Model and Effort Tiering — What Actually Applies" for why a `model: "haiku"` claim here would not take effect. <!-- Corrected: forge#1827 -->
 **NEVER use plan mode (EnterPlanMode).**
 
 <!-- FORGE:SPEC_LOADED — work-on/close.md loaded and active. Agent is bound by this spec. -->

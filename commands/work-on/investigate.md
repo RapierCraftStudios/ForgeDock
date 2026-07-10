@@ -11,7 +11,7 @@ argument-hint: [issue number] [--repo {owner}/{repo}] [--gh-flag "-R {owner}/{re
 
 Standalone investigation phase for the work-on pipeline. Validates whether an issue is real, determines root cause, posts a structured FORGE:INVESTIGATOR comment to GitHub, and updates workflow labels.
 
-**Agent model policy**: `model: "{DEFAULT_MODEL}"` — resolved from forge.yaml `agents.default_model`, else "sonnet" (standard tier). Fallback: `model: "opus"` if rate-limited. Feature gate: pass `effort` in Task/Skill spawns only on Claude Code >= 2.1.154.
+**Agent model policy**: `model: "{DEFAULT_MODEL}"` — resolved from forge.yaml `agents.default_model`, else "sonnet" (standard tier). Fallback: `model: "opus"` if rate-limited. Feature gate: pass `effort` in Task/Skill spawns only on Claude Code >= 2.1.154. This file's mechanical bits (1A label set, `FORGE:CHECKPOINT` writes) stay at this tier because they're interleaved with the reasoning-heavy investigation steps in the same `Skill()` invocation — see `work-on.md` section "Model and Effort Tiering — What Actually Applies". <!-- Added: forge#1827 -->
 **NEVER use plan mode (EnterPlanMode).**
 
 <!-- FORGE:SPEC_LOADED — work-on/investigate.md loaded and active. Agent is bound by this spec. -->
