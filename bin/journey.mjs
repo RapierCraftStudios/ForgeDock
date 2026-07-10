@@ -1254,9 +1254,24 @@ export async function forge(ctx) {
           }
         }
       } else {
-        if (barShown) { w.write("\x1b[1A\x1b[2K"); barShown = false; }
-        w.write(`  WARNING: ${rel} is a regular file — skipping (remove it manually to let ForgeDock manage it)\n`);
-        skipped++;
+        // Regular file not in manifest — could be a copy from a pre-manifest
+        // ForgeDock version, or a user-owned file. Content-compare: if it
+        // matches source exactly, adopt it into the manifest silently (it was
+        // ours). If it differs, leave it untouched — it may be user-customized.
+        let adopted = false;
+        try {
+          const [src, dst] = await Promise.all([readFile(file), readFile(target)]);
+          if (src.equals(dst)) {
+            recordCopy(rel);
+            skipped++;
+            adopted = true;
+          }
+        } catch { /* readFile failure — fall through to warning */ }
+        if (!adopted) {
+          if (barShown) { w.write("\x1b[1A\x1b[2K"); barShown = false; }
+          w.write(`  WARNING: ${rel} is a regular file — skipping (remove it manually to let ForgeDock manage it)\n`);
+          skipped++;
+        }
       }
     } catch (err) {
       if (err.code !== "ENOENT") throw err;
