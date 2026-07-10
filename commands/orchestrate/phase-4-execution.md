@@ -106,12 +106,23 @@ Initialize the concurrency cap and its batch-scope tracking state before the fir
 ```bash
 # --- Concurrency gate initialization ---
 MAX_CONCURRENT=$(yq '.orchestration.max_concurrent // 12' forge.yaml 2>/dev/null || echo 12)
-[ "$MAX_CONCURRENT" = "null" ] && MAX_CONCURRENT=12
+
+# Validate MAX_CONCURRENT is a bare positive integer before it is ever used in arithmetic
+# expansion or array-slice-length position below. Bash's `$(( ))` and `${arr[@]:off:len}`
+# both re-evaluate an unquoted variable's contents as an expression — an unvalidated value
+# (e.g. a malicious or malformed forge.yaml, or a stray non-numeric string) can inject
+# arbitrary command substitution into the arithmetic context, and 0/negative values make
+# the chunked dispatch loop below (Step 4A) never advance its index, spinning forever.
+# Same validation convention as BUDGET_LIMIT in Step 4A-pre.0 above. <!-- Added: forge#1912 -->
+if [ "$MAX_CONCURRENT" = "null" ] || ! echo "$MAX_CONCURRENT" | grep -qP '^[1-9][0-9]*$'; then
+  echo "WARNING: forge.yaml → orchestration.max_concurrent is not a positive integer (\"${MAX_CONCURRENT}\") — falling back to default 12"
+  MAX_CONCURRENT=12
+fi
 
 ACTIVE_DISPATCH_COUNT=0             # in-flight dispatched-but-not-yet-completed agents, this batch
 DEFERRED_CONCURRENCY_ISSUES=()      # ready issues held back because no headroom was available
 
-echo "Concurrency gate initialized: MAX_CONCURRENT=${MAX_CONCURRENT} (forge.yaml → orchestration.max_concurrent; default 12 when unset)"
+echo "Concurrency gate initialized: MAX_CONCURRENT=${MAX_CONCURRENT} (forge.yaml → orchestration.max_concurrent; default 12 when unset or invalid)"
 # --- End concurrency gate initialization ---
 ```
 
@@ -587,6 +598,8 @@ If `DISPATCH_NOW` is empty (headroom is 0), do not spawn any agents this cycle �
 You will be automatically notified when each background agent completes. **Do NOT use `sleep` loops to poll for completion.** Instead, wait for the automatic notification. When you receive a notification that an agent completed, immediately process it.
 
 **Concurrency slot release (MANDATORY — first action on every completion)** <!-- Added: forge#1912 -->: The instant an `agent_completed` notification arrives, decrement `ACTIVE_DISPATCH_COUNT` by 1 — a worker slot has just freed, regardless of what terminal state the issue ended up in. Do this before any stall-recovery/resume logic below. If that agent is then resumed (item 2 below, or Step 4B.5's stall recovery) because it stalled mid-pipeline rather than truly finishing, re-increment `ACTIVE_DISPATCH_COUNT` when the `Agent(resume=...)` call is issued — a resume re-occupies a worker slot exactly like a fresh dispatch does.
+
+**Ordering requirement (MANDATORY — prevents transient over-cap)**: For every agent that completed in this notification batch, finish its terminal-state check and, if applicable, its resume re-increment (items 1-2 below) BEFORE computing `dispatch_headroom` for item 5's newly-ready-issue dispatch. Computing headroom before a to-be-resumed agent's re-increment would let a genuinely-still-running agent's freed slot be double-booked — once by a fresh dispatch, once by the resume itself — transiently exceeding `MAX_CONCURRENT`. Process every completed agent's items 1-2 to a decision (terminal vs. resumed) first; only then compute headroom once for the batch's item 5 dispatch.
 
 **Successor dispatch latency is measured from `agent_completed`, not from orchestrator polling.** The moment you receive an `agent_completed` notification for issue N, that is t=0 for dispatching N's successors. Any successor whose predecessors are all now terminal MUST be dispatched in the same response that processes the notification — not after a poll cycle, not after a sleep. This is the design property that makes streaming DAG execution faster than wave-based execution. <!-- Added: forge#1251 -->
 
