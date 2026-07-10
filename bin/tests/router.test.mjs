@@ -631,6 +631,31 @@ describe("doctor --fix (forge#1944)", () => {
     return { home, cwd, extraEnv };
   }
 
+  // Register `rel` (a command file path relative to ~/.claude/commands) as a
+  // copy-mode-managed entry in forge()'s ownership manifest
+  // (bin/journey.mjs loadCopiedManifest/saveCopiedManifest). forge() only
+  // re-copies a regular file it finds at a symlink's target path if that
+  // path is recorded here — otherwise it treats the file as user-owned and
+  // skips it with a warning (see journey.mjs:1014-1018). Tests that simulate
+  // a "stale copy-mode install" and then expect `doctor --fix` to repair it
+  // must mark the file as copied first, or forge()'s repair path is a no-op
+  // against it. <!-- Added: forge#1944 CI fix -->
+  function markAsCopiedFile(home, rel) {
+    const manifestPath = join(home, ".claude", "forgedock", "copied-commands.json");
+    mkdirSync(dirname(manifestPath), { recursive: true });
+    let manifest = { version: 1, files: {} };
+    if (existsSync(manifestPath)) {
+      try {
+        manifest = JSON.parse(readFileSync(manifestPath, "utf-8"));
+      } catch {
+        // Corrupt/missing — start fresh, matches loadCopiedManifest()'s own fallback.
+      }
+    }
+    manifest.files = manifest.files || {};
+    manifest.files[rel] = true;
+    writeFileSync(manifestPath, JSON.stringify(manifest, null, 2) + "\n", "utf-8");
+  }
+
   it("repairs a stale copy-mode command file (Check 1) and is idempotent", () => {
     const { home, cwd, extraEnv } = setupInstall();
     const targetDir = join(home, ".claude", "commands");
@@ -646,6 +671,10 @@ describe("doctor --fix (forge#1944)", () => {
     // install mode. <!-- Added: forge#1944 CI fix -->
     unlinkSync(targetPath);
     writeFileSync(targetPath, files + "\nstale local edit\n", "utf-8");
+    // Mark it as copy-managed so forge()'s repair path (invoked by
+    // `doctor --fix`) recognizes this regular file as ours to re-copy,
+    // instead of skipping it as a foreign user file.
+    markAsCopiedFile(home, "work-on.md");
 
     const before = runCli(["doctor"], { cwd, home, extraEnv });
     assert.equal(before.status, 1, before.stdout + before.stderr);
