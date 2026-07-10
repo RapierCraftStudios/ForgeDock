@@ -374,7 +374,11 @@ if [ -n "$SYNTHESIS_BRIEF" ]; then
 ${SYNTHESIS_BRIEF}"
 else
   # Fallback: Phase 2.5 did not run (0/1 investigations). Use the raw gist behavior.
+  # Markdown emphasis markers (**bold**, __bold__, *italic*) are stripped before matching,
+  # since sub-issue bodies commonly render the label as "**Parent**: #NNN" and the bare
+  # label alternation below would otherwise fail to match past the emphasis characters.
   PARENT_INV=$(gh issue view {NUMBER} -R {GH_REPO} --json body --jq '.body' \
+    | sed -E 's/[*_]+//g' \
     | grep -oP '(?i)parent[: ]*#\K\d+|spawned from[: ]*#\K\d+' | head -1)
 
   if [ -n "$PARENT_INV" ] && [ -n "${INVESTIGATION_GISTS[$PARENT_INV]:-}" ]; then
@@ -1275,7 +1279,10 @@ if [ ${#SWEEP_EXECUTE[@]} -gt 0 ]; then
     # synthesis brief (Phase 2.5 runs only over the original batch's investigations), so
     # there is nothing to prefer. Keep this block in sync with 4A's fallback branch only.
     GIST_CONTEXT=""
+    # Markdown emphasis markers (**bold**, __bold__, *italic*) are stripped before matching —
+    # kept in sync with 4A's fallback branch above.
     PARENT_INV=$(gh issue view "$FINDING_NUM" -R {GH_REPO} --json body --jq '.body' \
+      | sed -E 's/[*_]+//g' \
       | grep -oP '(?i)parent[: ]*#\K\d+|spawned from[: ]*#\K\d+' | head -1)
 
     if [ -n "$PARENT_INV" ] && [ -n "${INVESTIGATION_GISTS[$PARENT_INV]:-}" ]; then
