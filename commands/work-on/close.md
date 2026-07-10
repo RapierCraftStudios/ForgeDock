@@ -476,9 +476,10 @@ gh issue edit {NUMBER} {GH_FLAG} \
 
 **Skip if**: Issue body does NOT contain a parent issue reference (e.g. `Part of #NNN`) or the issue has no parent in its milestone tracker.
 
-Detect parent reference:
+Detect parent reference. Markdown emphasis markers (`**bold**`, `__bold__`, `*italic*`) are stripped before matching, since sub-issue bodies commonly render the label as `**Parent**: #NNN` and the bare label alternation below would otherwise fail to match past the emphasis characters:
 ```bash
 PARENT_REF=$(gh issue view {NUMBER} {GH_FLAG} --json body --jq '.body' \
+  | sed -E 's/[*_]+//g' \
   | grep -oP '(?i)(part of|spawned from|sub-issue of|parent issue[:]?|parent[:])\s*#\K\d+' \
   | head -1)
 ```

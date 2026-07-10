@@ -1934,8 +1934,10 @@ esac
 
 **Skip if**: Not a sub-issue (no parent reference in body).
 
+Markdown emphasis markers (`**bold**`, `__bold__`, `*italic*`) are stripped before matching, since sub-issue bodies commonly render the label as `**Parent**: #NNN` and the bare label alternation below would otherwise fail to match past the emphasis characters:
 ```bash
 PARENT_REF=$(gh issue view {NUMBER} {GH_FLAG} --json body --jq '.body' \
+  | sed -E 's/[*_]+//g' \
   | grep -iE '(part of|spawned from|sub-issue of|parent issue:?|parent:)\s*#[0-9]+' \
   | sed -n 's/.*#\([0-9][0-9]*\).*/\1/p' | head -1)
 ```
