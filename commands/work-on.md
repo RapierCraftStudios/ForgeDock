@@ -30,9 +30,15 @@ Orchestrator for the full issue lifecycle: investigate → decompose (if needed)
 ### Compaction Resilience
 
 1. Write state to GitHub after EVERY significant step
-2. Re-read GitHub state at the START of each phase (don't rely on in-memory context)
+2. Read full GitHub state (issue body + comments + labels) ONCE, in Phase 0B. Carry those values in-context for the rest of the run — do NOT re-fetch them at later phase boundaries. The only trigger for a fresh re-read of something already read this session is a **detected compaction**: if a later phase needs a value (issue body, a specific FORGE:* comment, labels) that this session does not actually have in its visible context — because compaction dropped the earlier tool output, or this is a brand-new session resuming mid-pipeline — re-fetch ONLY that missing value, not the full state.
 3. After compaction: re-read issue (body + comments + labels) to reconstruct state
 4. Key principle: A NEW session running `/work-on {number}` should pick up where the last left off by reading GitHub state alone
+
+**Session state cache convention**: Phases 1A.5, 3A, and 5A previously re-ran `gh issue view`/`gh api .../comments` unconditionally "for safety." That default is now inverted: reuse the value if this session already produced it (e.g., you already have `ISSUE_BODY` from Phase 0B, or already read the FORGE:INVESTIGATOR comment during Phase 1). Only issue the `gh` call if the value is genuinely absent from context. This is what makes re-reads free for a normal single-turn run while remaining exactly as resilient across a real compaction or resume. (Phase 6A's body read is a deliberate exception — see its note — because it immediately precedes a body-mutating write and Phase 5 can involve an external `/review-pr` process.)
+
+### Orchestration Flag
+
+`UNDER_ORCHESTRATION` — resolved once in Phase 0A. Defaults to `false` (solo run). Set to `true` when the invocation args include `--under-orchestration` (this is how `/orchestrate` dispatches `/work-on`; see `commands/orchestrate/phase-4-execution.md`). This flag gates the 4 heartbeat comments below — they exist solely to feed `/orchestrate`'s Step 4B.5 time-based stall detector (which reads the last comment's `updated_at`) and have no consumer in a solo run.
 
 ### Universal Phase Dispatcher
 
@@ -224,11 +230,15 @@ Worktree/branch-already-exists and stale-label conditions are surfaced later (Ph
 ### 0A: Parse input
 Extract project prefix and issue number. If `next`/`pick`: list open issues sorted by priority, skip `needs-human`, `workflow:decomposed`, and `workflow:awaiting-merge`, pick highest priority.
 
+**Resolve `UNDER_ORCHESTRATION`**: `true` if the invocation args contain `--under-orchestration`, else `false`. This is a single parse done once, here — every later gated block (heartbeats) just checks this variable, no re-parsing.
+
 **Optional pre-flight**: Before committing to the full pipeline, run `/scope {NUMBER}` to get a complexity estimate (affected files, blast radius, risk flags, and decomposition recommendation). Especially useful for large or ambiguous issues.
 
-### 0A.5: Post Heartbeat Annotation
+### 0A.5: Post Heartbeat Annotation (orchestration-only)
 
-Post a lightweight activity signal immediately after resolving the issue number. This gives the stall detector (orchestrate Step 4B.5) a fresh timestamp to compare against `STALL_TIMEOUT`. Without this, the stall detector can only see the last structured comment (INVESTIGATOR, BUILDER, etc.) which may be hours old during a valid long-running phase.
+**Skip entirely if `UNDER_ORCHESTRATION` is `false`** — a solo run has no stall detector polling comment timestamps, so this write has zero consumer. Do not post it "just in case."
+
+When `UNDER_ORCHESTRATION` is `true`: post a lightweight activity signal immediately after resolving the issue number. This gives the stall detector (orchestrate Step 4B.5) a fresh timestamp to compare against `STALL_TIMEOUT`. Without this, the stall detector can only see the last structured comment (INVESTIGATOR, BUILDER, etc.) which may be hours old during a valid long-running phase.
 
 ```bash
 PHASE_START_TIMESTAMP=$(date -u +%Y-%m-%dT%H:%M:%SZ)
@@ -238,9 +248,9 @@ gh issue comment {NUMBER} {GH_FLAG} --body "<!-- FORGE:HEARTBEAT -->
 **Issue**: #{NUMBER}"
 ```
 
-**Also post at major phase entry points** (Phases 1, 3, and 5) — replace `Phase 0` with the correct phase name in each case. These mid-pipeline heartbeats ensure the stall detector sees recent activity during long phases (e.g., a build phase running for 20 minutes is not falsely classified as stalled). Inline snippets are embedded at Phase 1A, Phase 3A, and Phase 5A — agents resuming mid-pipeline encounter them without reading this section. <!-- Added: forge#740 -->
+**Also post at major phase entry points** (Phases 1, 3, and 5) — replace `Phase 0` with the correct phase name in each case, and same `UNDER_ORCHESTRATION` gate. These mid-pipeline heartbeats ensure the stall detector sees recent activity during long phases (e.g., a build phase running for 20 minutes is not falsely classified as stalled). Inline snippets are embedded at Phase 1A, Phase 3A, and Phase 5A — agents resuming mid-pipeline encounter them without reading this section. <!-- Added: forge#740 -->
 
-**Skip if**: Issue already has a terminal label (`workflow:merged`, `workflow:invalid`, `needs-human`, `workflow:awaiting-merge`) — no heartbeat needed on a completed issue.
+**Skip if**: Issue already has a terminal label (`workflow:merged`, `workflow:invalid`, `needs-human`, `workflow:awaiting-merge`) — no heartbeat needed on a completed issue. (This is in addition to, not instead of, the `UNDER_ORCHESTRATION` gate above.)
 
 ### 0B: Load issue + existing context
 ```bash
@@ -277,6 +287,8 @@ fi
 | `REVIEW` | Phase 4 (skip Phase 1–3) |
 | `CLOSE` | Phase 6 (skip Phase 1–5) |
 | *(absent or unrecognized)* | Fall back to prose heuristics above |
+
+Note: Phase 1D no longer writes `next_phase: BUILD`/`DECOMPOSE` CHECKPOINT comments (removed as redundant with the `workflow:ready-to-build`/`workflow:decomposed` label transition — see Phase 1D). Those two rows remain here only to route older, pre-existing CHECKPOINT comments correctly; new runs land on the prose-heuristic fallback for those two cases instead, which is equally precise. `REVIEW` and `CLOSE` are still written (Phase 3M and Phase 5D) because each covers a real gap before the corresponding label transition.
 
 **If no checkpoint exists**: fall back to prose resume heuristics in Phase 0B above — treat as fresh start at Phase 1.
 
@@ -482,7 +494,7 @@ case "$TIER" in
 esac
 ```
 
-**Post Phase 1 heartbeat** (skip if issue already has a terminal label — `workflow:merged`, `workflow:invalid`, `needs-human`, `workflow:awaiting-merge`):
+**Post Phase 1 heartbeat** (skip unless `UNDER_ORCHESTRATION` is `true`; also skip if issue already has a terminal label — `workflow:merged`, `workflow:invalid`, `needs-human`, `workflow:awaiting-merge`):
 ```bash
 PHASE_START_TIMESTAMP=$(date -u +%Y-%m-%dT%H:%M:%SZ)
 gh issue comment {NUMBER} {GH_FLAG} --body "<!-- FORGE:HEARTBEAT -->
@@ -496,6 +508,8 @@ gh issue comment {NUMBER} {GH_FLAG} --body "<!-- FORGE:HEARTBEAT -->
 Before investigation begins, verify the issue body contains the four mandatory pipeline sections. If any are missing, add placeholder content so the investigator has the correct scaffolding.
 
 **Skip if**: All four sections (`## Problem`, `## Affected Files`, `## Expected Behavior`, `## Acceptance Criteria`) are already present.
+
+**Reuse `ISSUE_BODY` from Phase 0B** — it was already read in full there. Only re-fetch with the command below if `ISSUE_BODY` is not actually present in this session's context (compaction or a fresh resume).
 
 ```bash
 ISSUE_BODY=$(gh issue view {NUMBER} {GH_FLAG} --json body --jq '.body')
@@ -784,14 +798,7 @@ Inspect the subcommand output above for errors. <!-- forge#1418 -->"
 fi
 ```
 
-Write machine-readable phase checkpoint (MUST execute immediately after label transition, before continuing):
-```bash
-CHECKPOINT_TIMESTAMP=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
-gh issue comment {NUMBER} {GH_FLAG} --body "<!-- FORGE:CHECKPOINT -->
-\`\`\`json
-{\"phase\": \"INVESTIGATION\", \"status\": \"COMPLETE\", \"next_phase\": \"BUILD\", \"timestamp\": \"${CHECKPOINT_TIMESTAMP}\"}
-\`\`\`"
-```
+**No separate CHECKPOINT write here** — the `workflow:ready-to-build` label set above already fully disambiguates the resume point ("Investigation exists + ready-to-build → Phase 3" per Phase 0B's prose heuristics); a `next_phase: BUILD` CHECKPOINT comment would duplicate that signal with an extra write. <!-- Removed redundant FORGE:CHECKPOINT write: forge#1826 -->
 <!-- FORGE:PHASE_COMPLETE — Investigation routed to build. See Universal Phase Dispatcher: next phase is Phase 3. Not terminal — continue immediately. -->
 → Continue to Phase 3.
 
@@ -808,14 +815,7 @@ case "$TIER" in
 esac
 ```
 
-Write machine-readable phase checkpoint (MUST execute immediately after label transition, before continuing):
-```bash
-CHECKPOINT_TIMESTAMP=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
-gh issue comment {NUMBER} {GH_FLAG} --body "<!-- FORGE:CHECKPOINT -->
-\`\`\`json
-{\"phase\": \"INVESTIGATION\", \"status\": \"COMPLETE\", \"next_phase\": \"DECOMPOSE\", \"timestamp\": \"${CHECKPOINT_TIMESTAMP}\"}
-\`\`\`"
-```
+**No separate CHECKPOINT write here** — the `workflow:decomposed` label set above is itself a terminal state for this run; nothing needs to resume past it, so a `next_phase: DECOMPOSE` CHECKPOINT comment adds no information. <!-- Removed redundant FORGE:CHECKPOINT write: forge#1826 -->
 <!-- FORGE:PHASE_COMPLETE — Investigation routed to decomposition. See Universal Phase Dispatcher: next phase is Phase 2. Not terminal — continue immediately. -->
 → Continue to Phase 2 (Decomposition).
 
@@ -962,9 +962,9 @@ fi
 
 **CRITICAL: You MUST execute ALL sub-phases 3A–3M in order. Sub-phases 3C.5 (context) and 3C.6 (architect) are skipped ONLY for TRIVIAL tasks and Investigation tasks — see Phase 3B for classification. For STANDARD and COMPLEX tasks they post mandatory `FORGE:CONTEXT` and `FORGE:ARCHITECT` comments that Phase 3F reads as its primary input. Skipping them without a TRIVIAL/Investigation classification degrades build quality and causes review findings. After each sub-phase, continue to the next — no sub-phase is terminal.**
 
-### 3A: Re-read state from GitHub (MANDATORY)
+### 3A: Confirm state (reuse in-context; re-read only on compaction)
 
-**Post Phase 3 heartbeat** (skip if issue already has a terminal label — `workflow:merged`, `workflow:invalid`, `needs-human`, `workflow:awaiting-merge`):
+**Post Phase 3 heartbeat** (skip unless `UNDER_ORCHESTRATION` is `true`; also skip if issue already has a terminal label — `workflow:merged`, `workflow:invalid`, `needs-human`, `workflow:awaiting-merge`):
 ```bash
 PHASE_START_TIMESTAMP=$(date -u +%Y-%m-%dT%H:%M:%SZ)
 gh issue comment {NUMBER} {GH_FLAG} --body "<!-- FORGE:HEARTBEAT -->
@@ -972,6 +972,8 @@ gh issue comment {NUMBER} {GH_FLAG} --body "<!-- FORGE:HEARTBEAT -->
 **Timestamp**: ${PHASE_START_TIMESTAMP}
 **Issue**: #{NUMBER}"
 ```
+
+If this is a continuous run (Phase 1 already executed in this same session), you already have the issue view, the FORGE:INVESTIGATOR body, and know whether FORGE:BUILDER:COMPLETE/FORGE:FAST_PATH exist from having posted or checked for them earlier — reuse those values, do not re-fetch. Only run the block below if one of those values is genuinely missing from this session's context (fresh/resumed session after compaction, or checkpoint routing jumped straight here):
 
 ```bash
 gh issue view {NUMBER} {GH_FLAG} --json number,title,body,labels,state,milestone
@@ -1099,7 +1101,9 @@ FUNCTION_NAMES=$(gh api repos/{GH_REPO}/issues/{NUMBER}/comments \
 
 **The ONLY acceptable skip conditions** (all must be true): Issue is a 1-file config/docs edit with no code logic AND affected files have zero git history. In all other cases, run context gathering.
 
-Run these queries (20s timeout each, 2 min total budget):
+**Batch execution (MANDATORY)**: C1, C2 (including the direct commit-body read and the pickaxe pass), C3, and C4 below are mutually independent — none consumes another's output. Issue ALL of their underlying `gh`/`git`/`grep` calls as a single batch of parallel tool calls in one message, not as four sequential steps. This is the same rule as the "independent tool calls → same message" convention used elsewhere in the pipeline; it turns a ~4x serial round-trip chain (each `gh api` call is 0.5-2s) into one wall-clock round-trip. The per-file loop inside C1 and the per-function loop inside C3 are themselves independent across iterations — include every iteration's call in the same batch rather than looping turn-by-turn. Total budget is still 20s per query / 2 min overall; batching only removes serialization, it does not change the timeout.
+
+Queries to batch (20s timeout each, 2 min total budget):
 
 **C1: Past Review Findings on These Files**
 ```bash
@@ -1782,7 +1786,7 @@ gh issue edit {NUMBER} {GH_FLAG} --add-label "needs-human"
 
 ### 4D: Create PR
 ```bash
-gh pr create {GH_FLAG} --base {PR_BASE} --head {BRANCH} \
+PR_URL=$(gh pr create {GH_FLAG} --base {PR_BASE} --head {BRANCH} \
   --title "{Fix|Feat|Refactor}: {description}" \
   --body "## Summary
 {BRIEF_DESCRIPTION}
@@ -1796,10 +1800,11 @@ gh pr create {GH_FLAG} --base {PR_BASE} --head {BRANCH} \
 ---
 Closes #{NUMBER}
 **Implementation branch**: \`{BRANCH}\`
-**Base**: \`{PR_BASE}\`"
+**Base**: \`{PR_BASE}\`")
+PR_NUMBER=$(echo "$PR_URL" | grep -oE '[0-9]+$')
 ```
 
-`Closes #{NUMBER}` documents intent but does NOT auto-close for non-default-branch PRs.
+`Closes #{NUMBER}` documents intent but does NOT auto-close for non-default-branch PRs. Capture `PR_NUMBER` here — Phase 5A reuses it instead of re-querying `gh pr list`.
 
 If PR already exists for this branch, use the existing PR number.
 
@@ -1820,9 +1825,9 @@ esac
 
 ## Phase 5: Auto-Review
 
-### 5A: Re-read state from GitHub (MANDATORY)
+### 5A: Confirm state (reuse in-context; re-read only on compaction)
 
-**Post Phase 5 heartbeat** (skip if issue already has a terminal label — `workflow:merged`, `workflow:invalid`, `needs-human`, `workflow:awaiting-merge`):
+**Post Phase 5 heartbeat** (skip unless `UNDER_ORCHESTRATION` is `true`; also skip if issue already has a terminal label — `workflow:merged`, `workflow:invalid`, `needs-human`, `workflow:awaiting-merge`):
 ```bash
 PHASE_START_TIMESTAMP=$(date -u +%Y-%m-%dT%H:%M:%SZ)
 gh issue comment {NUMBER} {GH_FLAG} --body "<!-- FORGE:HEARTBEAT -->
@@ -1831,6 +1836,7 @@ gh issue comment {NUMBER} {GH_FLAG} --body "<!-- FORGE:HEARTBEAT -->
 **Issue**: #{NUMBER}"
 ```
 
+`PR_NUMBER` was already captured from `gh pr create`'s output in Phase 4D — reuse it. Only run the lookup below if `PR_NUMBER` is genuinely unset (resumed session after compaction, or checkpoint routing jumped straight to Phase 4/5):
 ```bash
 gh issue view {NUMBER} {GH_FLAG} --json number,title,body,labels,state
 PR_NUMBER=$(gh pr list {GH_FLAG} --head {BRANCH} --json number --jq '.[0].number')
@@ -1929,6 +1935,8 @@ gh issue comment {NUMBER} {GH_FLAG} --body "<!-- FORGE:CHECKPOINT -->
 ### 6A: Final issue body update
 
 **Multi-phase guard**: Detect whether the issue has multiple phases. Only check off items belonging to the current completed phase.
+
+**This read is intentionally NOT covered by the session-state-cache rule** — the body is about to be rewritten below, and Phase 5's `/review-pr` invocation is an external process that can post comments/edits between the last read and here. Writing back a stale cached body would silently revert any concurrent change, so always fetch fresh immediately before a body mutation.
 
 ```bash
 BODY=$(gh issue view {NUMBER} {GH_FLAG} --json body --jq '.body')
