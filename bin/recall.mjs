@@ -404,7 +404,7 @@ function executeQuery(args, cards, postings) {
 function formatCard(card, score, showScore = true) {
   const lines = [];
   const cite = `#${card.issue}`;
-  const kind = card.kind.toUpperCase();
+  const kind = typeof card.kind === 'string' && card.kind ? card.kind.toUpperCase() : 'UNKNOWN';
   const scoreStr = showScore ? ` (score: ${score.toFixed(2)})` : '';
   const staleStr = card.status === 'stale' ? ' [STALE]' : '';
 
@@ -537,4 +537,9 @@ function main() {
   }
 }
 
-main();
+try {
+  main();
+} catch (e) {
+  process.stderr.write(`[recall] ERROR: ${e.message}\n`);
+  process.exit(1);
+}
