@@ -22,7 +22,7 @@ import assert from "node:assert/strict";
 import { mkdtempSync, mkdirSync, cpSync, renameSync, rmSync } from "node:fs";
 import { join, resolve, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
-import { spawnSync } from "node:child_process";
+import { spawnSync, execFileSync } from "node:child_process";
 import os from "node:os";
 import {
   parseForgeYaml,
@@ -402,6 +402,167 @@ describe("session-start fail-open when forge-utils.mjs is missing", async () => 
       "",
       `Hook must produce no stdout when forge-utils.mjs is missing. ` +
         `Got: ${JSON.stringify(result.stdout)}`,
+    );
+  });
+});
+
+// =============================================================================
+// session-start.mjs: nudge tracking uses resolved git root, not parent dir
+// <!-- fix: forge#1927 -->
+// =============================================================================
+//
+// Regression coverage: handleUnmanaged() previously keyed nudgeSeen/
+// markNudgeSeen by the raw process.cwd(). When cwd is a parent directory that
+// merely contains the real git repo as its single subdirectory (the
+// "Coding Projects/AlterLab/" containing "alterlab/.git" layout — see
+// bin/init-detect.mjs's resolveGitRoot), the nudge must still be tracked
+// against the resolved repo root so that two independent projects sharing a
+// common grandparent directory each get their own nudge-seen state.
+//
+// Runs the real session-start.mjs hook as a child process (spawnSync) against
+// real temp-directory git fixtures, with HOME/USERPROFILE overridden so the
+// registry.json read/write is fully isolated from the developer's real
+// ~/.claude/forgedock/registry.json.
+
+describe("session-start nudge tracking resolves git root (forge#1927)", async () => {
+  let tmpDir;
+  let fakeHome;
+  let hookPath;
+
+  before(() => {
+    tmpDir = mkdtempSync(join(os.tmpdir(), "forge-nudge-gitroot-"));
+    fakeHome = join(tmpDir, "fake-home");
+    mkdirSync(fakeHome, { recursive: true });
+    hookPath = join(BIN_DIR, "hooks", "session-start.mjs");
+  });
+
+  after(() => {
+    rmSync(tmpDir, { recursive: true, force: true });
+  });
+
+  /**
+   * Create a non-repo parent directory containing exactly one git-repo
+   * subdirectory (the resolveGitRoot single-child-parent layout).
+   *
+   * @param {string} parentName
+   * @param {string} childRepoName
+   * @returns {string} Absolute path to the parent directory (the cwd to use).
+   */
+  function makeParentWithSingleChildRepo(parentName, childRepoName) {
+    const parentDir = join(tmpDir, parentName);
+    const repoDir = join(parentDir, childRepoName);
+    mkdirSync(repoDir, { recursive: true });
+    execFileSync("git", ["init", "-b", "main", repoDir], {
+      cwd: tmpDir,
+      encoding: "utf-8",
+      stdio: ["pipe", "pipe", "pipe"],
+      timeout: 10000,
+      env: { ...process.env, GIT_TERMINAL_PROMPT: "0", GIT_CONFIG_GLOBAL: "" },
+    });
+    execFileSync("git", ["commit", "--allow-empty", "-m", "initial"], {
+      cwd: repoDir,
+      encoding: "utf-8",
+      stdio: ["pipe", "pipe", "pipe"],
+      timeout: 10000,
+      env: {
+        ...process.env,
+        GIT_TERMINAL_PROMPT: "0",
+        GIT_CONFIG_GLOBAL: "",
+        GIT_AUTHOR_NAME: "Test",
+        GIT_AUTHOR_EMAIL: "test@test.com",
+        GIT_COMMITTER_NAME: "Test",
+        GIT_COMMITTER_EMAIL: "test@test.com",
+      },
+    });
+    return parentDir;
+  }
+
+  function runHook(cwd) {
+    return spawnSync(process.execPath, [hookPath], {
+      cwd,
+      encoding: "utf-8",
+      timeout: 10000,
+      env: { ...process.env, HOME: fakeHome, USERPROFILE: fakeHome },
+    });
+  }
+
+  it("shows the nudge independently for two sibling projects under the same grandparent directory", () => {
+    // Two distinct projects, each structured as a non-repo parent folder
+    // holding exactly one git-repo subdirectory, both living under the same
+    // grandparent tmpDir — the exact layout the issue describes.
+    const projectAParent = makeParentWithSingleChildRepo("ProjectA", "alterlab");
+    const projectBParent = makeParentWithSingleChildRepo("ProjectB", "otherapp");
+
+    // First session for project A: nudge must show.
+    const firstA = runHook(projectAParent);
+    assert.equal(firstA.status, 0, `hook must exit 0. stderr: ${firstA.stderr}`);
+    assert.match(
+      firstA.stdout,
+      /ForgeDock: unmanaged nudge/,
+      "first run for project A must show the nudge",
+    );
+
+    // First session for project B (sibling project, same grandparent dir):
+    // must ALSO show the nudge — must not be suppressed by project A's
+    // already-recorded nudge-seen state.
+    const firstB = runHook(projectBParent);
+    assert.equal(firstB.status, 0, `hook must exit 0. stderr: ${firstB.stderr}`);
+    assert.match(
+      firstB.stdout,
+      /ForgeDock: unmanaged nudge/,
+      "first run for sibling project B must show the nudge independently of project A",
+    );
+
+    // Second session for project A: nudge must now be suppressed (already
+    // recorded against A's own resolved git root).
+    const secondA = runHook(projectAParent);
+    assert.equal(secondA.status, 0, `hook must exit 0. stderr: ${secondA.stderr}`);
+    assert.equal(
+      secondA.stdout,
+      "",
+      "second run for project A must stay silent (nudge already recorded)",
+    );
+
+    // Second session for project B: independently suppressed too.
+    const secondB = runHook(projectBParent);
+    assert.equal(secondB.status, 0, `hook must exit 0. stderr: ${secondB.stderr}`);
+    assert.equal(
+      secondB.stdout,
+      "",
+      "second run for project B must stay silent (nudge already recorded)",
+    );
+  });
+
+  it("tracks the same project consistently whether cwd is the parent or the resolved repo root itself (regression demo)", () => {
+    // This is the precise scenario resolveGitRoot fixes: the SAME underlying
+    // project can be entered either via its outer parent directory (the
+    // "Coding Projects/AlterLab/" layout, one level above the actual
+    // "alterlab/.git" repo) or, on another occasion, directly via the repo
+    // root itself. Before this fix, nudgeSeen/markNudgeSeen keyed by the raw
+    // cwd would treat these as two DIFFERENT directories and show the nudge
+    // a second, spurious time for what is really the same project — because
+    // resolveGitRoot(parentDir).root === repoDir === resolveGitRoot(repoDir).root,
+    // both cwd forms must now collapse to one shared nudge-seen entry.
+    const parentDir = makeParentWithSingleChildRepo("SharedIdentity", "the-repo");
+    const repoDir = join(parentDir, "the-repo");
+
+    // First session, entered via the outer parent directory: nudge shows.
+    const viaParent = runHook(parentDir);
+    assert.equal(viaParent.status, 0, `hook must exit 0. stderr: ${viaParent.stderr}`);
+    assert.match(
+      viaParent.stdout,
+      /ForgeDock: unmanaged nudge/,
+      "first run via the parent directory must show the nudge",
+    );
+
+    // Second session, entered directly via the actual repo root: must be
+    // silent — it resolves to the same identity already nudged above.
+    const viaRepoRoot = runHook(repoDir);
+    assert.equal(viaRepoRoot.status, 0, `hook must exit 0. stderr: ${viaRepoRoot.stderr}`);
+    assert.equal(
+      viaRepoRoot.stdout,
+      "",
+      "run via the resolved repo root must stay silent — same project identity as the parent-dir run",
     );
   });
 });
