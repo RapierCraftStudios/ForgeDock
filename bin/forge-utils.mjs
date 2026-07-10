@@ -8,6 +8,7 @@
  * Exports:
  *   parseForgeYaml(raw)               → object  (parse a forge.yaml string)
  *   sanitizeContextValue(value, max)  → string|null  (sanitize before injection)
+ *   resolveModelAlias(value)          → string|null  (short alias → full model ID)
  *
  * Contract guarantees:
  *   - Pure: no I/O, no side effects, no global state
@@ -158,6 +159,58 @@ export function sanitizeContextValue(value, maxLen) {
     } while (stripped !== prev);
     const str = stripped.trim().slice(0, maxLen);
     return str.length > 0 ? str : null;
+  } catch {
+    return null;
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Model alias resolution
+// ---------------------------------------------------------------------------
+
+/**
+ * Short model aliases mapped to their current full Anthropic model IDs.
+ *
+ * These are the same aliases accepted by the Agent/Task tool's `model`
+ * parameter in Claude Code (enum: "sonnet" | "opus" | "haiku" | "fable").
+ * forge.yaml's `agents.default_model` field is documented to use one of
+ * these aliases so the same configured value drives both interactive
+ * (Agent/Task tool) and headless (bin/runner.mjs, raw Anthropic SDK) use.
+ *
+ * Keep in sync with the other hardcoded model IDs in this codebase (e.g.
+ * bin/runner.mjs's DEFAULT_MODEL, bin/init-enrich-api.mjs's ENRICH_MODEL)
+ * if those are ever bumped.
+ */
+const MODEL_ALIASES = {
+  sonnet: "claude-sonnet-5",
+  opus: "claude-opus-4-6",
+  haiku: "claude-haiku-4-5",
+};
+
+/**
+ * Resolve a forge.yaml `agents.default_model` value to a full Anthropic
+ * model ID, for use with the raw Anthropic SDK (bin/runner.mjs).
+ *
+ * Recognized short aliases ("sonnet", "opus", "haiku" — case-insensitive)
+ * are mapped to their current full model ID via MODEL_ALIASES. Any other
+ * non-empty string is returned unchanged (pass-through), so a full model ID
+ * configured directly still works for the headless runner — though it will
+ * NOT work for interactive Agent/Task tool calls in command specs, which
+ * only accept the short-alias enum. This constraint is documented in
+ * docs/CONFIG.md and forge.yaml.example.
+ *
+ * Never throws. Returns null for null/undefined/empty input.
+ *
+ * @param {string|null|undefined} value - Raw `agents.default_model` value.
+ * @returns {string|null}
+ */
+export function resolveModelAlias(value) {
+  try {
+    if (value == null) return null;
+    const trimmed = String(value).trim();
+    if (!trimmed) return null;
+    const alias = MODEL_ALIASES[trimmed.toLowerCase()];
+    return alias ?? trimmed;
   } catch {
     return null;
   }

@@ -12,7 +12,7 @@ install: internal
 
 Orchestrator for the full issue lifecycle: investigate → build → review → merge → close. GitHub issues are the persistent context layer — read existing comments before starting, write structured reports back, use `workflow:*` labels to track state.
 
-**Agent model policy**: `model: "sonnet"` (standard tier). Fallback: `model: "opus"` if rate-limited. Feature gate: pass `effort` in Task/Skill spawns only on Claude Code >= 2.1.154.
+**Agent model policy**: `model: "{DEFAULT_MODEL}"` — resolved from forge.yaml `agents.default_model`, else "sonnet" (standard tier). Fallback: `model: "opus"` if rate-limited. Feature gate: pass `effort` in Task/Skill spawns only on Claude Code >= 2.1.154.
 **NEVER use plan mode (EnterPlanMode).**
 
 > **Relationship to `/work-on` (canonical path)**: This file is a `[BENCHMARK]` reference variant. It documents the same inline-execution model that `/work-on` Phase 3 and `work-on/build.md` use as their **default** for STANDARD/fast-lane issues — all build sub-phases (context → architect → implement → validate) run inline in the current context window with no `Skill()` sub-agent spawns. The difference is that this file omits the worktree lifecycle, `FORGE:CONTRACT` posting, and the Spawn-Decision exception path for large builds. Use `/work-on` for production runs; use this file for baseline benchmarking or when comparing single-prompt token cost against the modular path. See `work-on/build.md` (Canonical Build Path section) for the reconciled build topology. <!-- Added: forge#1276 -->

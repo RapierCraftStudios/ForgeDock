@@ -12,7 +12,7 @@ argument-hint: [issue number] [--repo GH_REPO] [--gh-flag GH_FLAG] [--base PR_BA
 **Invoked by**: `work-on.md` Phase 3 — entered when the issue carries label `workflow:ready-to-build` or `workflow:building` (see Universal Phase Dispatcher in work-on.md).
 **Output**: Create worktree, post contract, run build phases, return result to work-on.md.
 
-**Agent model policy**: `model: "sonnet"` (standard tier). Fallback: `model: "opus"` if rate-limited. Feature gate: pass `effort` in Task/Skill spawns only on Claude Code >= 2.1.154.
+**Agent model policy**: `model: "{DEFAULT_MODEL}"` — resolved from forge.yaml `agents.default_model`, else "sonnet" (standard tier). Fallback: `model: "opus"` if rate-limited. Feature gate: pass `effort` in Task/Skill spawns only on Claude Code >= 2.1.154.
 **NEVER use plan mode (EnterPlanMode).**
 
 **CRITICAL: You MUST execute ALL phases B0–B6 in order. Phases B3 (context) and B4 (architect) are skipped ONLY when COMPLEXITY_BAND: TRIVIAL (read from FORGE:FAST_PATH comment in Phase B0). For STANDARD and COMPLEX tasks they are NOT optional — skipping them degrades build quality.**

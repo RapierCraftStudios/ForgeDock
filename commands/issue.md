@@ -11,7 +11,7 @@ argument-hint: [description of the problem or feature]
 
 You create GitHub issues with the exact structure the `/work-on` pipeline expects. Every issue you create must give the investigation agent enough context to find the right files on the first pass — no vague descriptions, no missing domains, no ambiguous scope.
 
-**Agent model policy**: `model: "sonnet"` (standard tier). Fallback: `model: "opus"` if rate-limited. Feature gate: pass `effort` in Task/Skill spawns only on Claude Code >= 2.1.154.
+**Agent model policy**: `model: "{DEFAULT_MODEL}"` — resolved from forge.yaml `agents.default_model`, else "sonnet" (standard tier). Fallback: `model: "opus"` if rate-limited. Feature gate: pass `effort` in Task/Skill spawns only on Claude Code >= 2.1.154.
 **NEVER use plan mode (EnterPlanMode).**
 
 ---

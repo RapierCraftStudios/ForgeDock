@@ -1911,11 +1911,17 @@ function help() {
  *
  * Flags:
  *   --dry-run               Preview the assembled prompt + tool plan; no API call.
- *   --model <id>            Override the model (default: claude-sonnet-5 or $FORGEDOCK_MODEL).
+ *   --model <id>            Override the model (see resolution order below).
  *   --max-iterations <n>    Bound the tool-use loop (default: 50).
  *
  * The live loop requires ANTHROPIC_API_KEY and the optional @anthropic-ai/sdk
  * dependency. The runtime itself lives in bin/runner.mjs.
+ *
+ * Model resolution order (highest precedence first):
+ *   1. --model <id>                        This flag.
+ *   2. $FORGEDOCK_MODEL                    Env var, below.
+ *   3. forge.yaml `agents.default_model`   Read from the run's cwd, if present.
+ *   4. Hardcoded default                   "claude-sonnet-5" (bin/runner.mjs DEFAULT_MODEL).
  *
  * Env:
  *   FORGEDOCK_MODEL   Default model id when --model is omitted.

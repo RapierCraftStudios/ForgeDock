@@ -10,7 +10,7 @@
 #   # Add forge.yaml to your .gitignore if it contains sensitive paths
 #
 # Required sections: project, paths, branches
-# Optional sections: repos, project_board, services, review, verification, deploy, billing, devdocs, adaptive_scripts, learned, attribution
+# Optional sections: agents, repos, project_board, services, review, verification, deploy, billing, devdocs, adaptive_scripts, learned, attribution
 
 # =============================================================================
 # PROJECT (REQUIRED)
@@ -96,6 +96,36 @@ branches:
   # {slug} is replaced with the milestone title converted to kebab-case
   # Example: milestone "User Auth v2" → "milestone/user-auth-v2"
   feature_pattern: "milestone/{slug}"
+
+# =============================================================================
+# AGENTS (OPTIONAL)
+# Default model for pipeline agents — the main orchestrator and every
+# sub-agent spawned via the Agent/Task tool while following a command spec
+# (work-on, orchestrate, review-pr, etc.).
+# Commands: all commands with an "Agent model policy" line
+# =============================================================================
+
+# agents:
+#   # Accepts a short alias: "sonnet", "opus", or "haiku" — the same values
+#   # the Agent/Task tool's `model` parameter already accepts. This is the
+#   # only form that works for interactive command-spec sub-agent spawning.
+#   #
+#   # bin/runner.mjs (the headless/CI runner, which calls the Anthropic SDK
+#   # directly) also accepts a full Anthropic model ID here as a pass-through
+#   # escape hatch (e.g. "claude-opus-4-6") — but a full ID does NOT work for
+#   # interactive Agent/Task tool calls, which only accept the short-alias
+#   # enum above. Prefer the short alias unless you specifically need a
+#   # headless-only override.
+#   #
+#   # Resolution order (highest precedence first):
+#   #   1. --model <id>              (forgedock run CLI flag, headless only)
+#   #   2. FORGEDOCK_MODEL env var   (headless runner only)
+#   #   3. agents.default_model      (this field)
+#   #   4. Hardcoded default         ("sonnet" for interactive agents /
+#   #                                 "claude-sonnet-5" for the headless runner)
+#   #
+#   # Omit this field entirely for no change from today's behavior.
+#   default_model: "sonnet"
 
 # =============================================================================
 # REPOS (OPTIONAL)

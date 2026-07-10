@@ -42,6 +42,7 @@ The default (no flags) is the annotated review screen: detection runs, AI enrich
 | [`project`](#project-required) | **Yes** | GitHub identity (owner, repo, name) |
 | [`paths`](#paths-required) | **Yes** | Local filesystem locations |
 | [`branches`](#branches-required) | **Yes** | Branch naming conventions |
+| [`agents`](#agents-optional) | No | Default model for pipeline agents |
 | [`repos`](#repos-optional) | No | Multi-repository routing |
 | [`project_board`](#project_board-optional) | No | GitHub Projects v2 integration |
 | [`services`](#services-optional) | No | External service URLs and IDs |
@@ -122,6 +123,33 @@ branches:
 - Issue has milestone → feature lane → PR targets branch matching `branches.feature_pattern`
 
 **Commands that use this section**: `work-on`, `review-pr`, `cleanup`
+
+---
+
+## `agents` (OPTIONAL)
+
+Default model for pipeline agents — the main orchestrator and every sub-agent spawned via the Agent/Task tool while following a command spec (`work-on`, `orchestrate`, `review-pr`, etc.).
+
+```yaml
+agents:
+  default_model: "sonnet"
+```
+
+| Field | Type | Required | Default | Description |
+|-------|------|----------|---------|-------------|
+| `default_model` | string | No | `"sonnet"` | Short alias — `"sonnet"`, `"opus"`, or `"haiku"` — the same values the Agent/Task tool's `model` parameter accepts. This is the only form that works for interactive command-spec sub-agent spawning. |
+
+**Resolution order** (highest precedence first):
+1. `--model <id>` — CLI flag, `npx forgedock run` only (headless).
+2. `FORGEDOCK_MODEL` env var — headless runner only.
+3. `agents.default_model` — this field.
+4. Hardcoded default — `"sonnet"` for interactive agents, `"claude-sonnet-5"` for the headless runner (`bin/runner.mjs`'s `DEFAULT_MODEL`).
+
+**Headless runner note**: `bin/runner.mjs` (`npx forgedock run`, used for CI/headless invocations) calls the Anthropic SDK directly and also accepts a full Anthropic model ID here as a pass-through escape hatch (e.g. `"claude-opus-4-6"`). A full model ID does **not** work for interactive Agent/Task tool calls in command specs — those only accept the short-alias enum (`sonnet`/`opus`/`haiku`/`fable`). Prefer the short alias unless you specifically need a headless-only override.
+
+Projects without this section see no behavior change — everything defaults exactly as it did before this field existed.
+
+**Commands that use this section**: all commands with an "Agent model policy" line (nearly every command spec)
 
 ---
 

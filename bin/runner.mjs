@@ -23,6 +23,7 @@
  *   getToolHandlers(cwd)                    → Record<string, fn>
  *   renderDryRun(ctx)                       → string
  *   renderSummaryCard(ctx)                  → string
+ *   resolveConfiguredDefaultModel(cwd)      → string|null   (forge.yaml agents.default_model, resolved)
  *   runCommand(opts)                        → Promise<{status, ...}>
  *
  * Design notes:
@@ -45,6 +46,7 @@ import {
 } from "fs";
 import { join, dirname, basename, relative, isAbsolute } from "path";
 import { execSync, spawnSync } from "child_process";
+import { parseForgeYaml, resolveModelAlias } from "./forge-utils.mjs";
 
 const DEFAULT_MODEL = "claude-sonnet-5";
 const DEFAULT_MAX_ITERATIONS = 50;
@@ -72,6 +74,36 @@ export function truncateToolResult(content) {
   const str = String(content ?? "");
   if (str.length <= MAX_TOOL_RESULT_CHARS) return str;
   return str.slice(0, MAX_TOOL_RESULT_CHARS) + TRUNCATION_MARKER;
+}
+
+/**
+ * Resolve the project-configured default model from forge.yaml's
+ * `agents.default_model` field, if present.
+ *
+ * Reads `{cwd}/forge.yaml` (a fixed, non-agent-controlled filename — not the
+ * LLM-facing `resolveConfinedPath` path-confinement helper used for tool-call
+ * paths below), parses it with the shared `parseForgeYaml`, and resolves the
+ * `agents.default_model` alias (`sonnet`/`opus`/`haiku`, or a pass-through
+ * full model ID) via `resolveModelAlias`.
+ *
+ * Fail-soft: returns `null` on any failure (forge.yaml missing, unreadable,
+ * malformed, or the field absent) so the headless runner keeps working with
+ * zero configuration — this is a fallback tier, not a requirement.
+ *
+ * @param {string} cwd - Working directory to look for forge.yaml in.
+ * @returns {string|null}
+ */
+export function resolveConfiguredDefaultModel(cwd) {
+  try {
+    const forgeYamlPath = join(cwd, "forge.yaml");
+    if (!existsSync(forgeYamlPath)) return null;
+    const raw = readFileSync(forgeYamlPath, "utf-8");
+    const parsed = parseForgeYaml(raw);
+    const configured = parsed?.agents?.default_model;
+    return resolveModelAlias(configured);
+  } catch {
+    return null;
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -734,7 +766,9 @@ export function renderSummaryCard(ctx) {
  * @param {string[]} [opts.args]             - Command arguments.
  * @param {string} [opts.cwd]                - Working directory (default cwd).
  * @param {string} [opts.apiKey]             - Anthropic API key (default env).
- * @param {string} [opts.model]              - Model id.
+ * @param {string} [opts.model]              - Model id. Resolution order when
+ *   omitted: $FORGEDOCK_MODEL env > forge.yaml `agents.default_model` (in
+ *   `cwd`) > hardcoded DEFAULT_MODEL.
  * @param {number} [opts.maxIterations]      - Tool-loop bound.
  * @param {boolean} [opts.dryRun]            - Preview without an API call.
  * @param {{log: Function, error?: Function}} [opts.logger] - Output sink.
@@ -747,7 +781,9 @@ export async function runCommand(opts = {}) {
     args = [],
     cwd = process.cwd(),
     apiKey = process.env.ANTHROPIC_API_KEY,
-    model = process.env.FORGEDOCK_MODEL || DEFAULT_MODEL,
+    model = process.env.FORGEDOCK_MODEL ||
+      resolveConfiguredDefaultModel(cwd) ||
+      DEFAULT_MODEL,
     maxIterations = DEFAULT_MAX_ITERATIONS,
     dryRun = false,
     logger = console,
