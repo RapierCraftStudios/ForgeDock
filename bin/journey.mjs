@@ -1308,6 +1308,15 @@ const GITHUB_APP_URL = "https://github.com/apps/rapiercraft-forgedock/installati
  * non-TTY environments (piped stdin, --fast) confirm() resolves immediately
  * to false (the defaultValue), so no prompt is shown.
  *
+ * IMPORTANT: installing the app today only registers it against the
+ * account/org — it does NOT mint a bot token, does NOT auto-refresh
+ * anything, and does NOT change which `gh` auth pipeline commands use.
+ * Minting an installation token requires the app's private key, which only
+ * RapierCraft Studios (the app owner) holds — an end user's installation
+ * cannot self-serve a token without a hosted minting backend, which does
+ * not exist yet (forge#1890). Keep this prompt's copy honest about that
+ * until such a backend ships — see docs/CONFIG.md "GitHub App Install".
+ *
  * @returns {Promise<{ opened: boolean }>}
  */
 export async function connect(ctx) {
@@ -1315,7 +1324,7 @@ export async function connect(ctx) {
   w.write("\n  " + ember("Connect to GitHub", ctx.mode) + "\n\n");
 
   const yes = await ctx.confirmFn(
-    "Install the ForgeDock GitHub App for automatic pipeline triggers?",
+    "Install the ForgeDock GitHub App on this account/org?",
     false,
   );
 
@@ -1323,7 +1332,8 @@ export async function connect(ctx) {
     ctx.openFn(GITHUB_APP_URL);
     w.write(
       `  \x1b[38;2;255;179;71m✔\x1b[0m Opening ${GITHUB_APP_URL}\n` +
-      `  ${ctx.mode === "none" ? "" : "\x1b[2m"}Install account-wide (all repositories) to enable webhook triggers.\x1b[22m\n`,
+      `  ${ctx.mode === "none" ? "" : "\x1b[2m"}This registers the app only — it does not create a bot token yet.\x1b[22m\n` +
+      `  ${ctx.mode === "none" ? "" : "\x1b[2m"}Pipeline commands keep using your personal \`gh\` auth. See docs/CONFIG.md.\x1b[22m\n`,
     );
     return { opened: true };
   }
