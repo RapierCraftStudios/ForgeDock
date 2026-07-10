@@ -21,3 +21,8 @@ jobs:
             [bot]
             policy = "allowlist"
             allow = ["github-actions[bot]", "dependabot[bot]", "dependabot-preview[bot]", "rapiercraft-forgedock[bot]", "rapiercraft-forge[bot]"]
+
+            # Project maintainer identities — trusted committers exempt from DCO
+            [contributor]
+            policy = "allowlist"
+            allow = ["RapierCraft Studios & IT <yash.dubey803at@gmail.com>", "RapierCraft <rapiercraftstudios@gmail.com>"]
