@@ -430,8 +430,9 @@ function compareVersions(a, b) {
  * and matches what npm's own update-notifier does internally.
  *
  * Resolves to "" (never rejects) on any failure — offline, DNS failure,
- * non-200 response, malformed JSON, or timeout — so callers can treat ""
- * as "could not determine" without their own try/catch.
+ * non-200 response, oversized response body, malformed JSON, or timeout —
+ * so callers can treat "" as "could not determine" without their own
+ * try/catch.
  *
  * @returns {Promise<string>} latest version string, or "" if unknown
  */
@@ -444,6 +445,10 @@ function fetchLatestVersion() {
       resolve(value);
     };
 
+    // Real payload is ~1-2 KB; this is generous headroom against an
+    // unbounded response body buffering before JSON.parse (issue #1931).
+    const MAX_RESPONSE_BYTES = 65536;
+
     try {
       const req = https.get(
         "https://registry.npmjs.org/forgedock/latest",
@@ -454,7 +459,14 @@ function fetchLatestVersion() {
             return done("");
           }
           let data = "";
-          res.on("data", (chunk) => (data += chunk));
+          res.on("data", (chunk) => {
+            if (settled) return;
+            data += chunk;
+            if (data.length > MAX_RESPONSE_BYTES) {
+              res.destroy();
+              done("");
+            }
+          });
           res.on("end", () => {
             try {
               const json = JSON.parse(data);
