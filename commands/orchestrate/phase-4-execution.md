@@ -645,6 +645,94 @@ classify_predecessor_state() {
 
 A GATED predecessor whose PR later merges reclassifies to DONE the next time `classify_predecessor_state` runs (its label flips to `workflow:merged`) — this is exactly what the merge-triggered wake check (item 6.6 below) relies on.
 
+**File-overlap edge re-verification** <!-- Added: forge#1904 --> — `classify_predecessor_state()` answers "is the predecessor resolved enough to proceed," but it says nothing about whether a specific Layer 1/2/3 file-overlap edge (`EDGE_KIND`/`EDGE_FILES`, tagged in `phase-3-dependency.md` Step 3C/3D) was ever real. Both were built from a **pre-build guess** — the predecessor's `FORGE:INVESTIGATOR` "Affected Files" list, or a raw issue-body parse if no investigation existed yet. Once a predecessor reaches FAILED or GATED, that guess must be checked against ground truth (the predecessor's actual PR diff, or the absence of any PR) before the edge is allowed to keep blocking a dependent. Without this, a predecessor that reaches `needs-human` or `workflow:invalid` having never touched the guessed shared file (or never opened a PR at all) leaves its dependents gated/skipped on a conflict that never existed.
+
+```bash
+verify_file_overlap_edge() {
+  local PRED="$1"
+  local DEP="$2"
+  local EDGE_TYPE="${EDGE_KIND["${PRED}:${DEP}"]:-}"
+
+  # Only Layer 1/2/3 structural edges (same-file / directory / shared-module, tagged in
+  # phase-3-dependency.md Step 3C) are eligible for this check. Explicit `Depends on`, the
+  # DATABASE domain chain, Layer 4 conservative-fallback edges, and Layer 5 co-change edges
+  # never populate EDGE_KIND for a pair — they encode a declared or historical dependency,
+  # not a guessed file list, and are NEVER dropped here.
+  if [ -z "$EDGE_TYPE" ]; then
+    echo "KEEP"
+    return
+  fi
+
+  # Resolve PRED's PR using the same anchored search already used elsewhere in this file
+  # (forge#1634/#1646/#1830 precedent — a bare "#${PRED}" substring grep would false-match
+  # #50/#500 for predecessor #5, so this always goes through gh's search query, never a
+  # hand-rolled grep against comment/PR body text).
+  #
+  # Exclude CLOSED-unmerged PRs (same precedent as the milestone-base-consistency check
+  # elsewhere in this file: "a closed-but-not-merged PR is a superseded/abandoned routing
+  # attempt and does NOT reflect the live lane"). For a FAILED (workflow:invalid) or GATED
+  # (needs-human/workflow:awaiting-merge) predecessor this can only ever surface an OPEN PR —
+  # a MERGED PR would already classify the predecessor DONE, not FAILED/GATED — so this filter
+  # also guarantees `gh pr diff` below targets a live, still-open branch rather than an
+  # abandoned PR whose branch may since have been force-deleted (e.g. by /cleanup).
+  local PRED_PR
+  PRED_PR=$(gh pr list -R {GH_REPO} --state all --search "\"Closes #${PRED}\" in:body" \
+    --json number,state --jq '[.[] | select(.state != "CLOSED")][0].number // empty' 2>/dev/null || echo "")
+
+  if [ -z "$PRED_PR" ]; then
+    # Predecessor reached a terminal/gated state having never opened a PR (or only ever had
+    # an abandoned/closed-unmerged one) — there is no live code that could possibly conflict
+    # with DEP's files. The edge was based purely on the pre-build guess and never materialized.
+    echo "DROP"
+    return
+  fi
+
+  # A PR exists — compare the file(s) that actually triggered this edge (EDGE_FILES, set at
+  # Layer 1/2/3 in phase-3-dependency.md) against the PR's real changed-file list.
+  local ACTUAL_FILES
+  local DIFF_EXIT
+  ACTUAL_FILES=$(gh pr diff "$PRED_PR" -R {GH_REPO} --name-only 2>/dev/null)
+  DIFF_EXIT=$?
+  if [ "$DIFF_EXIT" -ne 0 ]; then
+    # Fail-safe: could not fetch the actual diff (transient API error, rate limit, etc.) —
+    # an empty result here must NOT be conflated with "confirmed no overlap." Keep the edge
+    # blocking rather than risk dropping a real conflict on a fetch failure.
+    echo "KEEP"
+    return
+  fi
+  local EDGE_FILE_LIST="${EDGE_FILES["${PRED}:${DEP}"]:-}"
+
+  local OVERLAP_FOUND=false
+  for EF in $EDGE_FILE_LIST; do
+    [ -z "$EF" ] && continue
+    # Strip a trailing slash (Layer 2 directory-type edges store a bare directory path) and
+    # escape regex metacharacters, then anchor the match to a path-component boundary. A raw
+    # `grep -qF` substring test would let a short directory name like "utils" false-match an
+    # unrelated path such as "some_utils_helper.py" or "shared_utils/" — anchoring on `/`
+    # boundaries requires the shared file/directory to appear as a whole path segment.
+    EF_CLEAN="${EF%/}"
+    EF_ESCAPED=$(printf '%s' "$EF_CLEAN" | sed 's/[.[\*^$()+?{|]/\\&/g')
+    if echo "$ACTUAL_FILES" | grep -qE "(^|/)${EF_ESCAPED}(/|$)"; then
+      OVERLAP_FOUND=true
+      break
+    fi
+  done
+
+  if [ "$OVERLAP_FOUND" = "true" ]; then
+    echo "KEEP"   # PR's actual diff confirms the shared file was really touched — real conflict
+  else
+    echo "DROP"   # PR exists but its actual diff never touched the guessed shared file(s) —
+                  # the Layer 1/2/3 guess was wrong for this predecessor; the edge is spurious
+  fi
+}
+```
+
+**Call sites**: item 6 (FAILED handling, below) and item 6.5 (GATED handling, below) both call this helper — once per `EDGE_KIND`-tagged predecessor edge — before cascading a skip or tracking `blocked-on-human-merge`. `phase-3-dependency.md`'s wake/compaction reconstruction block calls the identical logic (mirrored verbatim, not re-derived) for the case where the predecessor resolves after the orchestrator session has already ended — see that file's "Orchestrator state reconstruction on wake / after compaction" section. This mirroring is deliberate: keeping the check in exactly one function definition, called (not reimplemented) from both files, avoids the same drift class forge#1812 had to fix once already for DONE/GATED/FAILED classification itself.
+
+**Recursive cascade note (item 6 only)**: when a dependent `DEP` is itself marked "skipped — dependency failed" (edge confirmed `KEEP`, not dropped), `DEP` becomes the new FAILED anchor for its own direct dependents — re-run this same `verify_file_overlap_edge` check at that next hop too, rather than assuming every transitive descendant is unconditionally skipped. A grandchild dependent whose only path to the failure runs through a spurious (droppable) edge one hop down must not be skipped just because its parent was.
+
+**Never called from**: the DONE branch (that predecessor's code is already merged — the edge, if real, is already resolved) or the `IN_PROGRESS` branch (nothing to re-verify yet — the predecessor hasn't concluded).
+
 **Core streaming dispatch loop**: After processing each agent completion, check the DAG for newly unblocked issues. If any issue now has all predecessors classified `DONE`, dispatch it immediately (run Steps 4A.pre.0, 4A.pre, and 4A for the newly ready issues). This is the key difference from the wave model — issues dispatch as soon as their specific predecessors complete, not after an entire group finishes.
 
 ```bash
@@ -794,7 +882,11 @@ done
 
 5. **Check for newly unblocked issues** — run the DAG readiness check above. If any issues are now ready, run Steps 4A.pre.0 → 4A.pre → 4A for them. **Step 4A's own headroom computation is the cap** (forge#1912) — "batch all newly ready issues into a single dispatch message" means one message covers `DISPATCH_NOW` (ready issues that fit current headroom), not necessarily every newly-ready issue; any that don't fit go to `DEFERRED_CONCURRENCY_ISSUES` and retry on the next completion.
 
-6. **Handle predecessor failures** — if a completed agent's issue classifies as `FAILED` (`workflow:invalid`, or an explicit build/test error — see Predecessor Classification above; `needs-human` and `workflow:awaiting-merge` are GATED, not FAILED — see item 6.5), check for dependent issues in the DAG. Mark all transitive dependents as "skipped — dependency #{X} failed" and report them. Do NOT dispatch them.
+6. **Handle predecessor failures** — if a completed agent's issue classifies as `FAILED` (`workflow:invalid`, or an explicit build/test error — see Predecessor Classification above; `needs-human` and `workflow:awaiting-merge` are GATED, not FAILED — see item 6.5), check for dependent issues in the DAG.
+
+   **Edge re-verification before cascading the skip** <!-- Added: forge#1904 -->: For each direct dependent `DEP` of the FAILED predecessor `PRED`, call `verify_file_overlap_edge "$PRED" "$DEP"` (defined above, alongside `classify_predecessor_state`). If the pair has no `EDGE_KIND` entry (explicit dependency, DATABASE chain, Layer 4/5 edge), the helper returns `KEEP` immediately and behavior is unchanged — cascade the skip as before. If the pair IS an `EDGE_KIND` edge (Layer 1/2/3) and the helper returns `DROP` (FAILED predecessor never opened a PR, or its PR's actual diff never touched the guessed shared file), do NOT cascade the skip through that specific predecessor for that specific dependent — remove `PRED` from `DEP`'s predecessor set instead. If `DEP` has other still-unresolved predecessors it continues waiting on them normally; if `PRED` was `DEP`'s only predecessor, `DEP` becomes immediately ready (run Steps 4A.pre.0 → 4A.pre → 4A for it this cycle). Only when the helper returns `KEEP` (or there is no `EDGE_KIND` entry) does the "skipped — dependency #{X} failed" outcome apply, unchanged from prior behavior.
+
+   Report every dependent whose skip was avoided this way — e.g. "#{DEP} — predecessor #{PRED} failed but never touched the shared file(s); edge dropped, #{DEP} not skipped." For all remaining dependents (real `EDGE_KIND` overlap confirmed, or a non-`EDGE_KIND` edge type), mark them "skipped — dependency #{X} failed" and report them. Do NOT dispatch them.
 
 6.4. **Auto-dispatch remediation against a `needs-human`-gated predecessor's own PR** <!-- Added: forge#1813 --> — item 6.5 below tracks the *dependents* of a `GATED` predecessor; this item handles the predecessor's own PR, which item 6.5/6.6 never re-drive on their own. Run this check whenever a completed agent's issue classifies `GATED` **specifically via `needs-human`** — NOT `workflow:awaiting-merge`. That second state already means "remediated and re-reviewed to a clean verdict, just needs a human's merge click" (see forge#1810's guard) — dispatching remediation again would be redundant, not just wasteful, since there is nothing left to fix.
 
@@ -842,6 +934,24 @@ Do not ask the user questions — you are running autonomously in the background
    This satisfies #1809 Q2 (the orchestrator auto-dispatches remediation against the gated predecessor itself — the exact gap forge#1812's item 6.5/6.6 left open, since those items only ever track and wake *dependents*, never the gated PR's own remediation). The remediation agent's outcome is picked up on the **next** completion-monitoring cycle of this same Step 4B loop: if it lands (`workflow:merged`), item 6.6 below fires normally and wakes any `blocked-on-human-merge` dependents; if it holds/re-escalates, the predecessor simply remains `GATED` and item 6.5 continues tracking its dependents unchanged.
 
 6.5. **Handle predecessor gating** (`GATED` — `needs-human` or `workflow:awaiting-merge`) <!-- Added: forge#1812 --> — if a completed agent's issue classifies as `GATED`, its direct dependents are neither dispatched nor marked failed/skipped. For each direct dependent `DEP` of the gated predecessor `PRED`:
+
+   **Edge re-verification gate (run FIRST, before any tracking)** <!-- Added: forge#1904 -->:
+   ```bash
+   EDGE_VERDICT=$(verify_file_overlap_edge "$PRED" "$DEP")
+   if [ "$EDGE_VERDICT" = "DROP" ]; then
+     echo "#{DEP} — predecessor #{PRED} is GATED but its EDGE_KIND file-overlap edge does not hold (no PR ever opened, or its actual diff never touched the guessed shared file(s)). Dropping the edge — not tracking #{DEP} as blocked-on-human-merge for this predecessor."
+     # Remove PRED from DEP's predecessor set. If DEP has other unresolved predecessors it
+     # keeps waiting on those normally. If PRED was DEP's only predecessor, DEP is immediately
+     # ready — run Steps 4A.pre.0 → 4A.pre → 4A for it this cycle (same as any other newly
+     # ready issue in the core streaming dispatch loop above).
+     continue   # skip the tracking block below entirely for this (PRED, DEP) pair
+   fi
+   # EDGE_VERDICT = KEEP (real EDGE_KIND overlap confirmed, or no EDGE_KIND entry at all —
+   # explicit dependency / DATABASE chain / Layer 4-5 edges always fall through to KEEP and
+   # proceed with tracking exactly as before this fix).
+   ```
+
+   **Existing tracking logic (unchanged for the KEEP case)**:
    ```bash
    # Resolve PRED's open PR, if any, using the anchored search (forge#1634/#1646 precedent —
    # do NOT fall back to a bare-number search here; a stale unrelated PR would misattribute gating).
