@@ -297,24 +297,28 @@ else
 fi
 
 # ---------------------------------------------------------------------------
-# Clear needs-human (best-effort)
+# Clear needs-human (best-effort) — SCOPED to workflow:awaiting-merge only
 #
 # needs-human is NOT a workflow:* label, so it is never included in
-# VALID_STATES/REMOVE_LABELS above. Historically no code path ever cleared it
-# (forge#1809/#1810) — it was a write-only, sticky, terminal label even after
-# the pipeline made forward progress past the condition that set it.
+# VALID_STATES/REMOVE_LABELS above. It is a write-only, sticky, terminal
+# label: once a human flags an issue/PR as needing attention, no routine
+# forward-progress transition (investigating, ready-to-build, building,
+# in-review, merged, invalid, decomposed) should silently clear it.
 #
-# This script only runs at explicit forward-progress transition points (the
-# dispatcher STOPs on needs-human before ever reaching a transition-label.sh
-# call in normal operation — see commands/work-on.md's terminal-state checks),
-# so clearing needs-human here is safe: it only fires when something has
-# deliberately decided to move the issue/PR to a new state, most notably
-# workflow:awaiting-merge (a remediated + re-reviewed PR moving off
-# needs-human without yet meeting the auto-land bar — see #1809 Q1).
+# The ONE deliberate exception is workflow:awaiting-merge (forge#1809/#1810):
+# a remediated + re-reviewed PR that has moved off needs-human without yet
+# meeting the auto-land bar. That is the single code path allowed to clear
+# needs-human — every other TARGET_STATE must leave a pre-existing
+# needs-human label untouched.
+#
 # Best-effort: `|| true` so a missing label never fails the script under
 # `set -euo pipefail`.
 # ---------------------------------------------------------------------------
-echo "Clearing needs-human (best-effort)..."
-gh issue edit "$ISSUE_NUMBER" "${GH_ARGS[@]}" --remove-label "needs-human" 2>/dev/null || true
+if [ "$TARGET_STATE" = "awaiting-merge" ]; then
+  echo "Clearing needs-human (best-effort, scoped to awaiting-merge)..."
+  gh issue edit "$ISSUE_NUMBER" "${GH_ARGS[@]}" --remove-label "needs-human" 2>/dev/null || true
+else
+  echo "Skipping needs-human clear — TARGET_STATE is '$TARGET_STATE', not 'awaiting-merge'."
+fi
 
 echo "OK: $EFFECTIVE_LABEL set on issue #$ISSUE_NUMBER"
