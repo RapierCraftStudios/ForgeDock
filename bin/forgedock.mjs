@@ -53,6 +53,7 @@ import {
 import { renderMark, ember } from "./cinema.mjs";
 import {
   renderLogo,
+  getLogoTagline,
   box,
   table,
   input,
@@ -911,7 +912,8 @@ async function statusScreen(c) {
   const dim = (s) => (c.mode === "none" ? s : `\x1b[2m${s}\x1b[22m`);
   c.stdout.write("\n" + mark[0] + "\n");
   c.stdout.write(mark[1] + "  " + ember("FORGEDOCK", c.mode) + " " + dim("status") + "\n");
-  c.stdout.write(mark[2] + "\n" + mark[3] + "\n\n");
+  c.stdout.write(mark[2] + "\n" + mark[3] + "\n");
+  c.stdout.write("  " + dim(getLogoTagline("status")) + "\n\n");
   const configured = existsSync(join(c.cwd, "forge.yaml"));
   c.stdout.write(`  directory   ${state}\n`);
   c.stdout.write(`  forge.yaml  ${configured ? "present" : "missing"}\n`);
@@ -1048,6 +1050,7 @@ async function uninstall() {
 
   const { targetDir, scriptsTargetDir, manifestPath } = detectInstallPaths();
   console.log(`  Mode: global (~/.claude)`);
+  console.log(`  ${dim(getLogoTagline("uninstall"))}`);
   console.log("");
 
   const files = await findMarkdownFiles(COMMANDS_DIR);
@@ -1462,6 +1465,7 @@ async function update() {
   console.log("");
 
   console.log(`  Mode: global (~/.claude)`);
+  console.log(`  ${dim(getLogoTagline("update"))}`);
 
   // Check if installed via npm (no .git directory) or via git clone
   const gitDir = join(FORGE_HOME, ".git");
