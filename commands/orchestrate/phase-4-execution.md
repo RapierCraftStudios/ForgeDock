@@ -578,7 +578,10 @@ for BLOCKED_NUM in {all_blocked_issue_numbers}; do
             # full comment dump. Fall back to the comment's Approach/Changes section if
             # the file's basename doesn't literally appear (e.g. a directory-level edge).
             FIRST_SHARED_FILE=$(echo "$SHARED_FILE" | awk '{print $1}')
-            EXCERPT=$(echo "$BRIEF_SRC" | grep -iF "$(basename "${FIRST_SHARED_FILE:-.}" 2>/dev/null)" | head -3)
+            EXCERPT=""
+            if [ -n "$FIRST_SHARED_FILE" ]; then
+              EXCERPT=$(echo "$BRIEF_SRC" | grep -iF "$(basename "$FIRST_SHARED_FILE" 2>/dev/null)" | head -3)
+            fi
             [ -z "$EXCERPT" ] && EXCERPT=$(echo "$BRIEF_SRC" | sed -n '/### Approach/,/^### /p' | head -6)
             SAME_FILE_BRIEF["$BLOCKED_NUM"]="${SAME_FILE_BRIEF["$BLOCKED_NUM"]:-}
 - **#${PRED}** (${EDGE_TYPE} edge, from its ${BRIEF_SRC_LABEL} comment, \`${SHARED_FILE:-shared file}\`): ${EXCERPT:-see #${PRED}'s ${BRIEF_SRC_LABEL} comment for details}"
