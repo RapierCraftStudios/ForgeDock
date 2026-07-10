@@ -9,7 +9,7 @@
  *   init-detect.mjs, init-enrich-api.mjs, tui.annotatedReviewScreen, registry.mjs
  */
 
-import { existsSync, readFileSync, writeFileSync, renameSync, unlinkSync } from "fs";
+import { existsSync, lstatSync, readFileSync, writeFileSync, renameSync, unlinkSync } from "fs";
 import { join, basename } from "path";
 
 // ---------------------------------------------------------------------------
@@ -707,6 +707,248 @@ export function isEphemeralCachePath(p) {
   );
 }
 
+// ---------------------------------------------------------------------------
+// Act 0/I.5 — Persist Home: copy the toolset into a stable ~/.forge/ (#1943)
+// ---------------------------------------------------------------------------
+
+/**
+ * The four top-level directories that make up ForgeDock's installable
+ * payload. Kept as a single list so persistHome() and its tests agree on
+ * exactly what gets copied.
+ */
+const PERSIST_HOME_DIRS = ["bin", "commands", "scripts", "templates"];
+
+/**
+ * Detect whether `dir` is a git working tree — has a `.git` entry at all,
+ * regardless of whether it's a directory (ordinary clone) or a file (git
+ * worktree, whose `.git` is a pointer file back to the main repo's `.git`
+ * dir). Both shapes mean "this is a stable, user-owned git checkout" for
+ * persistHome()'s purposes — neither should ever be copied into ~/.forge/.
+ *
+ * Uses lstatSync (not existsSync) so the check reflects the real entry on
+ * disk rather than following symlinks, mirroring the detection *style* of
+ * resolveRealForgeHome() in bin/forgedock.mjs (which additionally has to
+ * distinguish file-vs-directory to resolve worktrees to their main repo
+ * root — a distinction persistHome() doesn't need, since both shapes skip
+ * identically here).
+ *
+ * @param {string} dir
+ * @returns {boolean}
+ */
+function isGitWorkingTree(dir) {
+  try {
+    lstatSync(join(dir, ".git"));
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Recursively copy `srcDir` into `destDir`, content-comparing existing files
+ * before overwriting so unchanged bytes are never rewritten (same idempotency
+ * discipline as forge()'s command-linking loop and linkPipelineScripts() —
+ * forge#1916). A missing `srcDir` is treated as "nothing to copy" rather than
+ * an error, since not every ForgeDock release necessarily ships every one of
+ * PERSIST_HOME_DIRS.
+ *
+ * @param {string} srcDir
+ * @param {string} destDir
+ * @returns {Promise<{ copied: number, unchanged: number }>}
+ */
+async function copyDirIfChanged(srcDir, destDir) {
+  let entries;
+  try {
+    entries = await readdir(srcDir, { withFileTypes: true });
+  } catch (err) {
+    if (err.code === "ENOENT") return { copied: 0, unchanged: 0 };
+    throw err;
+  }
+
+  await mkdir(destDir, { recursive: true });
+
+  let copied = 0;
+  let unchanged = 0;
+
+  for (const entry of entries) {
+    const srcPath = join(srcDir, entry.name);
+    const destPath = join(destDir, entry.name);
+
+    if (entry.isDirectory()) {
+      const sub = await copyDirIfChanged(srcPath, destPath);
+      copied += sub.copied;
+      unchanged += sub.unchanged;
+      continue;
+    }
+    if (!entry.isFile()) continue; // symlinks/sockets/etc. — not expected in this payload
+
+    let needsCopy = true;
+    try {
+      const [src, dst] = await Promise.all([readFile(srcPath), readFile(destPath)]);
+      if (src.equals(dst)) needsCopy = false;
+    } catch (err) {
+      if (err.code !== "ENOENT") throw err;
+      // destPath missing — needs copy, needsCopy stays true.
+    }
+
+    if (needsCopy) {
+      await copyFile(srcPath, destPath);
+      copied++;
+    } else {
+      unchanged++;
+    }
+  }
+
+  return { copied, unchanged };
+}
+
+/**
+ * Copy ForgeDock's own installable payload (bin/, commands/, scripts/,
+ * templates/) from wherever the package currently resolved — npm global
+ * install, npx/dlx cache, or any other non-git extraction — into a stable
+ * `{ctx.home}/.forge/` home, and point `ctx.forgeHome` at it for the rest of
+ * the journey. This is what makes `~/.claude/commands/` symlinks and the
+ * SessionStart hook's baked-in script path survive npm/npx cache eviction
+ * (issue #1943) — before this, both were built directly from the ephemeral
+ * source location and broke silently once that cache was pruned.
+ *
+ * Skipped entirely when `ctx.forgeHome` is a git working tree (see
+ * isGitWorkingTree() above): a git clone (or worktree) is already a stable,
+ * user-owned location. Copying it into ~/.forge/ would silently disconnect
+ * `git pull`/`npx forgedock update` from what's actually linked into
+ * ~/.claude/commands/ — the regression issue #1943's Acceptance Criteria #5
+ * explicitly calls out.
+ *
+ * Content-compares before overwriting (see copyDirIfChanged() above) so
+ * steady-state re-runs (every `npx forgedock` invocation) don't rewrite
+ * byte-identical files.
+ *
+ * IMPORTANT: consumes `ctx.forgeHome` exactly as already resolved by the
+ * caller — it must never re-derive its own "where does ForgeDock actually
+ * live" path. Re-deriving risks reintroducing the worktree-leakage
+ * regression fixed by resolveRealForgeHome() (forge#1700): a worktree-scoped
+ * FORGE_HOME baked into a persisted copy would dangle once the worktree is
+ * removed.
+ *
+ * Fail-open: any filesystem error (permission denied, disk full, etc.) is
+ * caught and reported via the returned `skipped`/`reason` fields rather than
+ * thrown. Callers must treat a `skipped: true` result as "fall back to the
+ * original ctx.forgeHome" — the pre-existing ephemeral-FORGE_HOME behavior.
+ *
+ * @param {{ forgeHome: string, home: string }} ctx
+ * @returns {Promise<{
+ *   forgeHome: string,
+ *   migrated: boolean,
+ *   skipped: boolean,
+ *   reason?: string,
+ *   version: string,
+ *   filesCopied?: number,
+ *   filesUnchanged?: number,
+ * }>}
+ */
+export async function persistHome(ctx) {
+  const source = ctx.forgeHome;
+  const persistedHome = join(ctx.home, ".forge");
+
+  if (isGitWorkingTree(source)) {
+    return {
+      forgeHome: source,
+      migrated: false,
+      skipped: true,
+      reason: "git working tree — linked directly from the clone, not persisted",
+      version: "",
+    };
+  }
+
+  // Read the source package's version up front — best-effort, never fatal.
+  // A missing/unreadable package.json degrades to an empty version string
+  // rather than aborting the whole persist step.
+  let version = "";
+  try {
+    const pkg = JSON.parse(readFileSync(join(source, "package.json"), "utf-8"));
+    version = pkg.version || "";
+  } catch {
+    // proceed with version === ""
+  }
+
+  try {
+    await mkdir(persistedHome, { recursive: true });
+
+    let filesCopied = 0;
+    let filesUnchanged = 0;
+    for (const name of PERSIST_HOME_DIRS) {
+      const res = await copyDirIfChanged(join(source, name), join(persistedHome, name));
+      filesCopied += res.copied;
+      filesUnchanged += res.unchanged;
+    }
+
+    // Also persist package.json itself (not just PERSIST_HOME_DIRS) — several
+    // callers read `{forgeHome}/package.json` directly (readForgedockVersion()
+    // in this file, used by writeInstallReceipt() — forge#1946) and expect it
+    // to resolve relative to whatever ctx.forgeHome currently points at. Once
+    // this function reassigns ctx.forgeHome to the persisted copy, those
+    // callers would otherwise find no package.json there and silently degrade
+    // to an empty version string. Copying it keeps ~/.forge a complete
+    // drop-in stand-in for the original forgeHome, not just a commands/hooks
+    // mirror. Missing source package.json (unusual layout) is a no-op, same
+    // as any other PERSIST_HOME_DIRS entry.
+    try {
+      const [src, dst] = await Promise.all([
+        readFile(join(source, "package.json")),
+        readFile(join(persistedHome, "package.json")).catch(() => null),
+      ]);
+      if (!dst || !src.equals(dst)) {
+        await copyFile(join(source, "package.json"), join(persistedHome, "package.json"));
+        filesCopied++;
+      } else {
+        filesUnchanged++;
+      }
+    } catch (err) {
+      if (err.code !== "ENOENT") throw err;
+      // source package.json missing — nothing to persist, not an error.
+    }
+
+    // Write ~/.forge/version — content-compared like everything else here so
+    // an unchanged version doesn't touch the file's mtime on every re-run.
+    const versionPath = join(persistedHome, "version");
+    let versionChanged = true;
+    try {
+      versionChanged = readFileSync(versionPath, "utf-8").trim() !== version;
+    } catch {
+      // missing/unreadable — treat as changed
+    }
+    if (versionChanged) {
+      const tmpVersionPath = versionPath + ".tmp";
+      try {
+        writeFileSync(tmpVersionPath, version + "\n", "utf-8");
+        renameSync(tmpVersionPath, versionPath);
+      } catch (err) {
+        try { unlinkSync(tmpVersionPath); } catch { /* best-effort cleanup */ }
+        throw err;
+      }
+    }
+
+    return {
+      forgeHome: persistedHome,
+      migrated: filesCopied > 0 || versionChanged,
+      skipped: false,
+      version,
+      filesCopied,
+      filesUnchanged,
+    };
+  } catch (err) {
+    // Fail-open (forge#383): a permission error, disk-full, etc. must never
+    // abort install/update — fall back to the original, un-persisted forgeHome.
+    return {
+      forgeHome: source,
+      migrated: false,
+      skipped: true,
+      reason: `error: ${err && err.message ? err.message : String(err)}`,
+      version,
+    };
+  }
+}
+
 /**
  * Link the PIPELINE_SCRIPTS allowlist from {forgeHome}/scripts/ into
  * ~/.claude/scripts/, using the same symlink-first / copy-fallback strategy
@@ -1116,13 +1358,30 @@ export async function forge(ctx) {
     w.write(`  ${glyph(true)} SessionStart hook ${hookStatus === "already" ? "active" : "registered"} ${dimLine(ctx, settingsPath)}\n`);
   }
 
-  // Ephemeral-cache advisory (forge#1895): if FORGE_HOME resolves inside a
-  // known npx/dlx cache shape, the hook script path just baked into
-  // settingsPath above can silently stop existing once that cache is pruned.
-  // Non-fatal — the install itself is fine right now — but worth surfacing
-  // since there is no stable path to substitute (unlike the git-worktree
-  // case handled by resolveRealForgeHome() in bin/forgedock.mjs).
-  if (hookStatus !== "skipped-malformed" && isEphemeralCachePath(ctx.forgeHome)) {
+  // Persisted-home / ephemeral-cache advisory (forge#1895, extended #1943):
+  // runJourney() calls persistHome(ctx) right before forge() and stashes its
+  // result on ctx.persistHomeResult; when persistHome() actually ran (i.e.
+  // wasn't skipped), ctx.forgeHome above has ALREADY been reassigned to the
+  // stable ~/.forge/ copy, so report that outcome instead of the raw
+  // ephemeral-cache warning. Direct forge() callers that never set
+  // ctx.persistHomeResult (e.g. relinkAndHint() in bin/forgedock.mjs) fall
+  // through to the original ephemeral-cache-only check unchanged.
+  const persistResult = ctx.persistHomeResult;
+  if (persistResult && !persistResult.skipped) {
+    if (persistResult.migrated) {
+      w.write(`  ${glyph(true)} toolset migrated to persisted home ${dimLine(ctx, persistResult.forgeHome)}\n`);
+    } else {
+      w.write(`  ${glyph(true)} persisted home already current ${dimLine(ctx, `v${persistResult.version || "unknown"} at ${persistResult.forgeHome}`)}\n`);
+    }
+  } else if (persistResult && persistResult.skipped && !isEphemeralCachePath(ctx.forgeHome)) {
+    // Skipped for a reason OTHER than "still ephemeral" — today that's always
+    // the git-working-tree exemption (Acceptance Criteria #5). Informational,
+    // not a warning: this is the expected, correct state for a git-clone install.
+    w.write(`  ${dimLine(ctx, `persisted home skipped — ${persistResult.reason || "not applicable"}`)}\n`);
+  } else if (hookStatus !== "skipped-malformed" && isEphemeralCachePath(ctx.forgeHome)) {
+    // Either persistHome() was never run (no ctx.persistHomeResult), or it
+    // ran but failed and left ctx.forgeHome pointing at the original
+    // ephemeral source (fail-open — see persistHome()'s error branch).
     w.write(`  ${glyph(false)} FORGE_HOME resolves inside an ephemeral cache directory ${dimLine(ctx, ctx.forgeHome)}\n`);
     w.write(fixCard([
       "This path (npx/pnpm dlx/yarn dlx cache) can be pruned by npm/npx/pnpm/yarn",
@@ -1527,6 +1786,17 @@ export async function runJourney(ctx) {
   process.on("SIGINT", onSigint);
   try {
     await preflight(ctx);
+    // Persist the toolset into ~/.forge/ before linking anything (#1943): when
+    // not skipped (git-clone installs are exempt), reassign ctx.forgeHome so
+    // every symlink/hook path forge() creates below originates from the
+    // stable copy, not the ephemeral npm/npx/git source. Stashed on ctx so
+    // forge()'s reporting block can surface the outcome (see isEphemeralCachePath
+    // advisory extension above).
+    const persistResult = await persistHome(ctx);
+    ctx.persistHomeResult = persistResult;
+    if (!persistResult.skipped) {
+      ctx.forgeHome = persistResult.forgeHome;
+    }
     const forged = await forge(ctx);
     const { draft, description } = await read(ctx);
     const reviewed = await review(ctx, draft, description);

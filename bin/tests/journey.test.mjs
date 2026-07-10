@@ -7,7 +7,7 @@ import assert from "node:assert/strict";
 import { mkdtempSync, readFileSync, writeFileSync, existsSync, mkdirSync, readdirSync } from "node:fs";
 import { join } from "node:path";
 import os from "node:os";
-import { writeForgeYaml, backupExisting, detectDescription, makeCtx, preflight, forge, read, review, celebrate, connect, openUrl, runJourney, manualLowConfidenceKeys, parseInstallTier, findMarkdownFiles, isEphemeralCachePath, detectCrossEnvInstall, validateForgeYamlShape, writeInstallReceipt } from "../journey.mjs";
+import { writeForgeYaml, backupExisting, detectDescription, makeCtx, preflight, forge, read, review, celebrate, connect, openUrl, runJourney, manualLowConfidenceKeys, parseInstallTier, findMarkdownFiles, isEphemeralCachePath, detectCrossEnvInstall, validateForgeYamlShape, writeInstallReceipt, persistHome } from "../journey.mjs";
 import { detectEnvironment } from "../env-detect.mjs";
 
 const VALUES = {
@@ -408,7 +408,7 @@ describe("preflight", () => {
 // Task 6: forge & findMarkdownFiles tests
 // ---------------------------------------------------------------------------
 
-import { lstatSync, mkdirSync as mkdirSyncFs, symlinkSync } from "node:fs";
+import { lstatSync, mkdirSync as mkdirSyncFs, symlinkSync, statSync } from "node:fs";
 
 /**
  * A command is installed if the target is a symlink (Developer Mode / admin /
@@ -468,6 +468,122 @@ describe("isEphemeralCachePath", () => {
     assert.equal(isEphemeralCachePath(""), false);
     assert.equal(isEphemeralCachePath(null), false);
     assert.equal(isEphemeralCachePath(undefined), false);
+  });
+});
+
+describe("persistHome (forge#1943)", () => {
+  /** Populate a fake forgeHome source tree with a minimal payload + package.json. */
+  function makeSourceForgeHome({ version = "1.2.3" } = {}) {
+    const forgeHome = mkdtempSync(join(os.tmpdir(), "fd-persist-src-"));
+    mkdirSyncFs(join(forgeHome, "bin", "hooks"), { recursive: true });
+    mkdirSyncFs(join(forgeHome, "commands"), { recursive: true });
+    mkdirSyncFs(join(forgeHome, "scripts"), { recursive: true });
+    // templates/ deliberately omitted from some tests below to exercise the
+    // "missing source subdirectory" tolerance.
+    writeFileSync(join(forgeHome, "bin", "hooks", "session-start.mjs"), "// hook\n", "utf-8");
+    writeFileSync(join(forgeHome, "commands", "one.md"), "# /one\n", "utf-8");
+    writeFileSync(join(forgeHome, "scripts", "classify-lane.sh"), "#!/bin/sh\n", "utf-8");
+    writeFileSync(join(forgeHome, "package.json"), JSON.stringify({ name: "forgedock", version }), "utf-8");
+    return forgeHome;
+  }
+
+  it("fresh copy: copies bin/commands/scripts into ~/.forge/ and writes version", async () => {
+    const forgeHome = makeSourceForgeHome({ version: "1.2.3" });
+    const home = mkdtempSync(join(os.tmpdir(), "fd-persist-home-"));
+
+    const res = await persistHome({ forgeHome, home });
+
+    assert.equal(res.skipped, false);
+    assert.equal(res.migrated, true);
+    assert.equal(res.version, "1.2.3");
+    assert.equal(res.forgeHome, join(home, ".forge"));
+
+    assert.equal(readFileSync(join(home, ".forge", "commands", "one.md"), "utf-8"), "# /one\n");
+    assert.equal(readFileSync(join(home, ".forge", "bin", "hooks", "session-start.mjs"), "utf-8"), "// hook\n");
+    assert.equal(readFileSync(join(home, ".forge", "scripts", "classify-lane.sh"), "utf-8"), "#!/bin/sh\n");
+    assert.equal(readFileSync(join(home, ".forge", "version"), "utf-8").trim(), "1.2.3");
+  });
+
+  it("git-clone skip: does not touch ~/.forge/ at all when ctx.forgeHome is a real git clone", async () => {
+    const forgeHome = makeSourceForgeHome();
+    mkdirSyncFs(join(forgeHome, ".git"), { recursive: true }); // real clone: .git is a DIRECTORY
+    const home = mkdtempSync(join(os.tmpdir(), "fd-persist-home-git-"));
+
+    const res = await persistHome({ forgeHome, home });
+
+    assert.equal(res.skipped, true);
+    assert.equal(res.migrated, false);
+    assert.equal(res.forgeHome, forgeHome);
+    assert.match(res.reason, /git working tree/i);
+    assert.equal(existsSync(join(home, ".forge")), false);
+  });
+
+  it("idempotent re-run: unchanged source content does not rewrite files (mtime preserved, migrated: false)", async () => {
+    const forgeHome = makeSourceForgeHome({ version: "2.0.0" });
+    const home = mkdtempSync(join(os.tmpdir(), "fd-persist-home-idempotent-"));
+
+    const first = await persistHome({ forgeHome, home });
+    assert.equal(first.migrated, true);
+
+    const commandFile = join(home, ".forge", "commands", "one.md");
+    const mtimeBefore = statSync(commandFile).mtimeMs;
+
+    // Re-run with byte-identical source content.
+    const second = await persistHome({ forgeHome, home });
+    assert.equal(second.skipped, false);
+    assert.equal(second.migrated, false, "no file content changed, so nothing should have been rewritten");
+
+    const mtimeAfter = statSync(commandFile).mtimeMs;
+    assert.equal(mtimeAfter, mtimeBefore, "unchanged file must not be rewritten (content-compare before overwrite)");
+  });
+
+  it("re-run after a real content change re-copies only the changed file and reports migrated: true", async () => {
+    const forgeHome = makeSourceForgeHome({ version: "2.0.0" });
+    const home = mkdtempSync(join(os.tmpdir(), "fd-persist-home-changed-"));
+
+    await persistHome({ forgeHome, home });
+    writeFileSync(join(forgeHome, "commands", "one.md"), "# /one (edited)\n", "utf-8");
+
+    const second = await persistHome({ forgeHome, home });
+    assert.equal(second.migrated, true);
+    assert.equal(readFileSync(join(home, ".forge", "commands", "one.md"), "utf-8"), "# /one (edited)\n");
+  });
+
+  it("degrades gracefully when a source subdirectory (templates/) does not exist", async () => {
+    const forgeHome = makeSourceForgeHome(); // no templates/ dir created
+    const home = mkdtempSync(join(os.tmpdir(), "fd-persist-home-notemplates-"));
+
+    await assert.doesNotReject(persistHome({ forgeHome, home }));
+    const res = await persistHome({ forgeHome, home });
+
+    assert.equal(res.skipped, false);
+    assert.equal(existsSync(join(home, ".forge", "templates")), false);
+    // The dirs that DO exist in the source were still copied correctly.
+    assert.equal(readFileSync(join(home, ".forge", "commands", "one.md"), "utf-8"), "# /one\n");
+  });
+
+  it("worktree shape (.git is a FILE, not a directory) is also skipped — not just real clones", async () => {
+    const forgeHome = makeSourceForgeHome();
+    writeFileSync(join(forgeHome, ".git"), "gitdir: /somewhere/else/.git/worktrees/foo\n", "utf-8");
+    const home = mkdtempSync(join(os.tmpdir(), "fd-persist-home-worktree-"));
+
+    const res = await persistHome({ forgeHome, home });
+
+    assert.equal(res.skipped, true);
+    assert.equal(existsSync(join(home, ".forge")), false);
+  });
+
+  it("missing package.json degrades to an empty version string rather than throwing", async () => {
+    const forgeHome = mkdtempSync(join(os.tmpdir(), "fd-persist-src-nopkg-"));
+    mkdirSyncFs(join(forgeHome, "commands"), { recursive: true });
+    writeFileSync(join(forgeHome, "commands", "one.md"), "# /one\n", "utf-8");
+    const home = mkdtempSync(join(os.tmpdir(), "fd-persist-home-nopkg-"));
+
+    const res = await persistHome({ forgeHome, home });
+
+    assert.equal(res.skipped, false);
+    assert.equal(res.version, "");
+    assert.equal(readFileSync(join(home, ".forge", "version"), "utf-8").trim(), "");
   });
 });
 
