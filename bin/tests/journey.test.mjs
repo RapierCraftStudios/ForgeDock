@@ -7,7 +7,7 @@ import assert from "node:assert/strict";
 import { mkdtempSync, readFileSync, writeFileSync, existsSync, mkdirSync, readdirSync } from "node:fs";
 import { join } from "node:path";
 import os from "node:os";
-import { writeForgeYaml, backupExisting, detectDescription, makeCtx, preflight, forge, read, review, celebrate, connect, openUrl, runJourney, manualLowConfidenceKeys, parseInstallTier, findMarkdownFiles } from "../journey.mjs";
+import { writeForgeYaml, backupExisting, detectDescription, makeCtx, preflight, forge, read, review, celebrate, connect, openUrl, runJourney, manualLowConfidenceKeys, parseInstallTier, findMarkdownFiles, isEphemeralCachePath } from "../journey.mjs";
 
 const VALUES = {
   owner: "RapierCraftStudios",
@@ -353,6 +353,56 @@ function assertInstalled(target, sourceContent) {
   assert.equal(readFileSync(target, "utf-8"), sourceContent);
 }
 
+describe("isEphemeralCachePath", () => {
+  it("recognizes npm's npx cache (POSIX shape)", () => {
+    assert.equal(isEphemeralCachePath("/home/user/.npm/_npx/a1b2c3/node_modules/forgedock"), true);
+  });
+
+  it("recognizes npm's npx cache (Windows shape)", () => {
+    assert.equal(
+      isEphemeralCachePath("C:\\Users\\user\\AppData\\Local\\npm-cache\\_npx\\a1b2c3\\node_modules\\forgedock"),
+      true,
+    );
+  });
+
+  it("recognizes pnpm's dlx cache", () => {
+    assert.equal(isEphemeralCachePath("/home/user/.local/share/pnpm/dlx/a1b2c3/node_modules/forgedock"), true);
+  });
+
+  it("recognizes yarn (Berry) dlx's xfs- prefixed temp dir, case-insensitively", () => {
+    assert.equal(isEphemeralCachePath("/tmp/xfs-6a8c1f2e/node_modules/forgedock"), true);
+    assert.equal(isEphemeralCachePath("/tmp/XFS-6A8C1F2E/node_modules/forgedock"), true);
+  });
+
+  it("does not false-positive on a global npm install path", () => {
+    assert.equal(isEphemeralCachePath("/usr/lib/node_modules/forgedock"), false);
+    assert.equal(isEphemeralCachePath("C:\\Users\\user\\AppData\\Roaming\\npm\\node_modules\\forgedock"), false);
+  });
+
+  it("does not false-positive on a local repo clone path", () => {
+    assert.equal(isEphemeralCachePath("C:/Users/ItsMr/Documents/Projects/ForgeDock"), false);
+    assert.equal(isEphemeralCachePath("/home/user/projects/ForgeDock"), false);
+  });
+
+  it("does not false-positive on pnpm's persistent content-addressable store (.pnpm, not dlx)", () => {
+    assert.equal(
+      isEphemeralCachePath("/home/user/projects/node_modules/.pnpm/forgedock@1.0.0/node_modules/forgedock"),
+      false,
+    );
+  });
+
+  it("matches by path segment, not substring — 'my-dlx-tool' and 'npx-utils' project names are not flagged", () => {
+    assert.equal(isEphemeralCachePath("/home/user/projects/my-dlx-tool"), false);
+    assert.equal(isEphemeralCachePath("/home/user/projects/npx-utils"), false);
+  });
+
+  it("handles empty/non-string input without throwing", () => {
+    assert.equal(isEphemeralCachePath(""), false);
+    assert.equal(isEphemeralCachePath(null), false);
+    assert.equal(isEphemeralCachePath(undefined), false);
+  });
+});
+
 describe("forge (Act II)", () => {
   it("installs commands (symlink or copy-fallback), registers hook, reports counts", async () => {
     const home = mkdtempSync(join(os.tmpdir(), "fd-forge-home-"));
@@ -398,6 +448,37 @@ describe("forge (Act II)", () => {
   it("makeCtx defaults linkStrategy to 'symlink'", () => {
     const { ctx } = stubCtx({});
     assert.equal(ctx.linkStrategy, "symlink");
+  });
+
+  it("warns when ctx.forgeHome resolves inside an ephemeral npx cache (forge#1895)", async () => {
+    const home = mkdtempSync(join(os.tmpdir(), "fd-forge-home-npx-"));
+    const forgeHome = join(mkdtempSync(join(os.tmpdir(), "fd-forge-src-npx-")), "_npx", "abcd1234", "node_modules", "forgedock");
+    mkdirSyncFs(join(forgeHome, "commands"), { recursive: true });
+    mkdirSyncFs(join(forgeHome, "bin", "hooks"), { recursive: true });
+    writeFileSync(join(forgeHome, "commands", "a.md"), "A", "utf-8");
+    writeFileSync(join(forgeHome, "bin", "hooks", "session-start.mjs"), "// hook", "utf-8");
+
+    const { ctx, w } = stubCtx({ home });
+    ctx.forgeHome = forgeHome;
+    await forge(ctx);
+
+    assert.match(w.text, /ephemeral cache/i);
+    assert.match(w.text, /npm install -g forgedock/);
+  });
+
+  it("does NOT warn for a durable forgeHome (global install / local clone) — no false positive (forge#1895)", async () => {
+    const home = mkdtempSync(join(os.tmpdir(), "fd-forge-home-durable-"));
+    const forgeHome = mkdtempSync(join(os.tmpdir(), "fd-forge-src-durable-"));
+    mkdirSyncFs(join(forgeHome, "commands"), { recursive: true });
+    mkdirSyncFs(join(forgeHome, "bin", "hooks"), { recursive: true });
+    writeFileSync(join(forgeHome, "commands", "a.md"), "A", "utf-8");
+    writeFileSync(join(forgeHome, "bin", "hooks", "session-start.mjs"), "// hook", "utf-8");
+
+    const { ctx, w } = stubCtx({ home });
+    ctx.forgeHome = forgeHome; // an mkdtemp path with no _npx/dlx/xfs- segment
+    await forge(ctx);
+
+    assert.doesNotMatch(w.text, /ephemeral cache/i);
   });
 
   it("re-run over our copied files is idempotent (manifest recognizes our copies)", async () => {

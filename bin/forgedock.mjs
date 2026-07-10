@@ -27,6 +27,7 @@ import {
   writeForgeYaml,
   backupExisting,
   manualLowConfidenceKeys,
+  isEphemeralCachePath,
 } from "./journey.mjs";
 import {
   removeSessionStartHook,
@@ -1567,6 +1568,66 @@ async function doctor() {
           `v${vStr} — unavailable: ${unavailable.join(", ")}. Update Claude Code to unlock.`,
         );
       }
+    }
+  }
+
+  // ── Check 5c: SessionStart hook script path integrity ─────────────────────
+  // Check 5 only verifies a ForgeDock SessionStart hook ENTRY is registered
+  // in settings.json — it never checks whether the script path baked into
+  // that entry's command still exists on disk. For `npx forgedock` installs,
+  // FORGE_HOME (and therefore the hook's script path) can resolve inside an
+  // ephemeral npm/npx/pnpm/yarn cache directory (see isEphemeralCachePath()
+  // in journey.mjs). If that cache is later pruned, the registered entry
+  // still looks healthy to Check 5 while the file it points at is gone —
+  // Claude Code sessions get no ForgeDock context injected and no error is
+  // ever surfaced. This check catches that silent-failure case. (forge#1895)
+  {
+    try {
+      const settings = readClaudeSettings();
+      const sessionStartEntries = Array.isArray(settings?.hooks?.SessionStart)
+        ? settings.hooks.SessionStart
+        : [];
+
+      let hookCommand = null;
+      outer: for (const entry of sessionStartEntries) {
+        if (!entry || typeof entry !== "object") continue;
+        const hooks = Array.isArray(entry.hooks) ? entry.hooks : [];
+        for (const h of hooks) {
+          if (h && typeof h.command === "string" && isForgeSessionStartHook(h.command)) {
+            hookCommand = h.command;
+            break outer;
+          }
+        }
+      }
+
+      if (!hookCommand) {
+        // No registered entry — Check 5 already reports this; nothing new here.
+        pass("SessionStart hook script path", "skipped — no registered hook entry (see SessionStart hook check above)");
+      } else {
+        // installSessionStartHook() (bin/settings-hook.mjs) always writes
+        // command: `node "${hookScriptPath}"` — extract the quoted path.
+        const pathMatch = hookCommand.match(/node\s+"([^"]+)"/);
+        const hookScriptPath = pathMatch ? pathMatch[1] : null;
+
+        if (!hookScriptPath) {
+          warn(
+            "SessionStart hook script path",
+            `Could not parse a script path out of the registered hook command ("${hookCommand}"). Run: npx forgedock install`,
+          );
+        } else if (existsSync(hookScriptPath)) {
+          pass("SessionStart hook script path", `exists on disk (${hookScriptPath})`);
+        } else {
+          const ephemeral = isEphemeralCachePath(hookScriptPath);
+          fail(
+            "SessionStart hook script path",
+            ephemeral
+              ? `${hookScriptPath} no longer exists — it was installed from an ephemeral npm/npx/pnpm/yarn cache directory that has since been cleared. Run: npm install -g forgedock  then  npx forgedock install`
+              : `${hookScriptPath} no longer exists. Run: npx forgedock install`,
+          );
+        }
+      }
+    } catch (err) {
+      fail("SessionStart hook script path", `Cannot verify hook script path: ${err.message}. Run: npx forgedock install`);
     }
   }
 
