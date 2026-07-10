@@ -580,3 +580,65 @@ describe("doctor: SessionStart hook script path integrity (Check 5c, forge#1895)
     assert.match(res.stdout, /npm install -g forgedock/);
   });
 });
+
+describe("status — re-entry mini-dashboard (#1945)", () => {
+  /** Same install + forge.yaml overwrite pattern as the doctor placeholder suite above. */
+  function setupConfigured(forgeYamlContent, { gh } = {}) {
+    const home = mkdtempSync(join(os.tmpdir(), "fd-dash-home-"));
+    const cwd = mkdtempSync(join(os.tmpdir(), "fd-dash-cwd-"));
+    writeFileSync(
+      join(home, ".gitconfig"),
+      "[user]\n\tname = Test User\n\temail = test@example.com\n",
+      "utf-8",
+    );
+    const stubBin = mkdtempSync(join(os.tmpdir(), "fd-dash-stub-bin-"));
+    writeFileSync(join(stubBin, "gh"), gh ?? "#!/bin/sh\necho 'gh version 2.60.0'\n", { mode: 0o755 });
+    writeFileSync(join(stubBin, "yq"), "#!/bin/sh\necho 'yq (https://github.com/mikefarah/yq/) version v4.44.0'\n", { mode: 0o755 });
+    const extraEnv = { PATH: `${stubBin}:${process.env.PATH}` };
+    const installRes = runCli(["install", "--fast"], { cwd, home, extraEnv });
+    assert.equal(installRes.status, 0, installRes.stdout + installRes.stderr);
+    writeFileSync(join(cwd, "forge.yaml"), forgeYamlContent, "utf-8");
+    return { home, cwd, extraEnv };
+  }
+
+  // Deliberately a repo slug that cannot exist on GitHub — this test asserts
+  // graceful degradation of the dashboard, not any specific gh response, so it
+  // must hold whether the process-level PATH override below actually reaches
+  // a stub binary or falls through to a real `gh` on the host (the exact
+  // classification/counting logic is unit-tested in isolation, with an
+  // injectable `io.gh`, in bin/tests/engine-cli.test.mjs — this test only
+  // needs to prove statusScreen() never crashes and always renders all rows).
+  const FORGE_YAML = [
+    "project:",
+    '  name: "Real Project"',
+    '  owner: "forgedock-test-nonexistent-org-zzz"',
+    '  repo: "forgedock-test-nonexistent-repo-zzz"',
+    "paths:",
+    '  root: "/tmp/x"',
+    "branches:",
+    '  default: "main"',
+    '  staging: "staging"',
+    "",
+  ].join("\n");
+
+  it("degrades gracefully to unknown/none for an unreachable repo (no crash)", () => {
+    const { home, cwd, extraEnv } = setupConfigured(FORGE_YAML);
+
+    const res = runCli(["status"], { cwd, home, extraEnv });
+    assert.equal(res.status, 0, res.stdout + res.stderr);
+    assert.match(res.stdout, /staging PRs\s+(unknown|\d+ open)/i);
+    assert.match(res.stdout, /bot token\s+not available/i);
+    // engine/last-run rows must render some value, not throw past statusScreen.
+    assert.match(res.stdout, /engine\s+(unknown|none in-flight|\d+ in-flight)/i);
+    assert.match(res.stdout, /last run\s+(none|#\d+)/i);
+  });
+
+  it("does not render dashboard rows for an unconfigured directory (no forge.yaml)", () => {
+    const home = mkdtempSync(join(os.tmpdir(), "fd-dash-unconf-home-"));
+    const cwd = mkdtempSync(join(os.tmpdir(), "fd-dash-unconf-cwd-"));
+    const res = runCli(["status"], { cwd, home });
+    assert.equal(res.status, 0, res.stdout + res.stderr);
+    assert.doesNotMatch(res.stdout, /staging PRs/i);
+    assert.doesNotMatch(res.stdout, /bot token/i);
+  });
+});
