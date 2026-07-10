@@ -291,6 +291,20 @@ branches:
 #   # not once per member finding. Default: 150000 (midpoint of the commonly
 #   # observed 75k-260k token range for a single P3 review-finding pipeline).
 #   token_estimate_per_finding: 150000
+#
+#   # Narration verbosity for /orchestrate Step 4B per-completion status updates.
+#   #   "terse"   (default when unset) — one line per completion only, e.g.
+#   #             "✓ #123 — {title} → PR #456 merged to staging". No recap
+#   #             table is printed between completions. Matches today's
+#   #             existing behavior — setting this explicitly is a no-op.
+#   #   "verbose" — same one-liners, plus a running per-completion recap table
+#   #             (issue, title, PR, target, elapsed). Useful when babysitting
+#   #             a batch interactively; noisier for long unattended runs.
+#   # This setting is cosmetic only — it never changes which phases run or
+#   # what gets committed. The Step 6B consolidated report (Implementation
+#   # Results, Review-Spawned Issues, Batch Trajectory Analytics — full tables)
+#   # always renders in full exactly once at the end, regardless of this value.
+#   narration: "terse"
 
 # =============================================================================
 # SERVICES (OPTIONAL)

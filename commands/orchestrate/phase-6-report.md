@@ -169,6 +169,8 @@ done
 
 ### Step 6B: Present consolidated report
 
+Always rendered in full, once, regardless of `{NARRATION_MODE}` — `pipeline.narration` (see `config.md`) only gates the per-completion recap in Step 4B item 8. This is the one place full tables are guaranteed to appear.
+
 ```
 {IF ORCHESTRATION_ENDED_IDLE == "true":}
 ## Orchestration Paused — Idle (waiting on {#MERGE_READY_PRS[@]:-0} + {#BLOCKED_ON_MERGE[@]:-0} merge(s))

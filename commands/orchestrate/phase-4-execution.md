@@ -854,7 +854,9 @@ Gating predecessor #${NUM} reached \`workflow:merged\` — dispatching now. (Was
    ```
    If an agent bypassed the pipeline, report it as a **failure** regardless of whether a PR exists.
 
-8. **Post a brief status update** to the user after each agent reaches terminal state:
+8. **Post a status update** to the user after each agent reaches terminal state. Format is gated by `{NARRATION_MODE}` (resolved in `config.md` from `pipeline.narration`, default `"terse"`):
+
+   **`terse` (default)** — one line per completion, no table, nothing repeated between completions:
    ```
    ✓ #{NUMBER} — {title} → PR #{PR} merged to {target}
    ✗ #{NUMBER} — {title} → {reason for failure}
@@ -864,6 +866,17 @@ Gating predecessor #${NUM} reached \`workflow:merged\` — dispatching now. (Was
    ⏳ Progress: {completed}/{total} complete, {active} active, {blocked} blocked
    → Dispatched #{NEWLY_READY} (predecessor #{PRED} completed)
    ```
+
+   **`verbose`** — same one-liners, plus a running per-completion recap table (title, PR, target, elapsed):
+   ```
+   ✓ #{NUMBER} — {title} → PR #{PR} merged to {target}
+
+   | # | Title | PR | Target | Elapsed |
+   |---|-------|----|--------|---------|
+   {one row per issue completed so far in this batch}
+   ```
+
+   **This gate is cosmetic only** — it changes what prints to the terminal between completions, never which phases run or what gets committed. Step 6B's full tables (Implementation Results, Review-Spawned Issues, Batch Trajectory Analytics) always render once at the end regardless of `{NARRATION_MODE}`; terse mode just skips the redundant per-completion recap, since Step 6B already aggregates everything.
 
    `⏸` (awaiting-merge) is deliberately distinct from `⚠` (blocked/bypass) — do not collapse the
    two. `⚠` means the pipeline hit something it cannot resolve and a human must diagnose it;
