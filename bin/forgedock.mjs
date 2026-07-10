@@ -1233,6 +1233,10 @@ async function labelsSetup(repo) {
  *   9.  Playwright MCP registered in ~/.claude/mcp_servers.json (advisory warn — required for /qa-sweep)
  *   10. yq installed (hard dependency for forge.yaml parsing)
  *   11. Claude Code installed and version compatible (advisory warn if not on PATH)
+ *   12. GitHub App / bot token status — informational only; reports that
+ *       pipeline gh calls use the active `gh auth` context (personal token
+ *       unless the operator has manually configured a bot token). Installing
+ *       the GitHub App alone does not create a bot token (see forge#1890).
  *
  * Returns 0 if all checks pass (warnings allowed), 1 if any hard check fails.
  */
@@ -1904,6 +1908,21 @@ async function doctor() {
         }
       }
     }
+  }
+
+  // ── Check 12: GitHub App / bot token status ─────────────────────────────────
+  // Informational only — never a hard failure. Installing the ForgeDock GitHub
+  // App registers it against the account/org but does not, by itself, mint a
+  // bot token: that requires the app's private key, which only the app owner
+  // holds. Pipeline gh calls always use whatever `gh auth` context is active
+  // locally (personal token unless the operator manually configured a bot
+  // token) — this check exists so that state is surfaced instead of silent.
+  // See docs/CONFIG.md "GitHub App Install" and forge#1890.
+  {
+    warn(
+      "GitHub App / bot token",
+      "pipeline commands use your active `gh auth` (personal token, unless you've manually configured a bot token). Installing the GitHub App alone does not create one — see docs/CONFIG.md \"GitHub App Install\".",
+    );
   }
 
   // ── Summary ────────────────────────────────────────────────────────────────

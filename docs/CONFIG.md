@@ -606,6 +606,26 @@ Colors are grouped by semantic meaning:
 
 ---
 
+## GitHub App Install
+
+During `npx forgedock`, the installer prompts you to install the ForgeDock GitHub App (`rapiercraft-forgedock`) on your account or org.
+
+**What installing it does today**: registers the app against the account/org you choose. That's it.
+
+**What it does NOT do (yet)**:
+- It does **not** create a bot token. GitHub App *installation* tokens can only be minted with the app's private key, and that key is held solely by RapierCraft Studios (the app's owner) — your installation grants *your* installation ID against *RapierCraft's* app, not a key you can use yourself.
+- It does **not** auto-refresh anything, and there is no background process managing token expiry.
+- It does **not** change which `gh` auth context pipeline commands (`/work-on`, `/orchestrate`, etc.) use. Every pipeline `gh` call always uses whatever auth is currently active in your shell — your personal token unless you've manually configured something else.
+- It does **not** wire up webhook-driven "automatic pipeline triggers" — no webhook receiver exists yet.
+
+**Why this matters**: GitHub App installation tokens get materially higher API rate limits than a personal access token, and actions taken with them are attributed to the bot (`rapiercraft-forgedock[bot]`) rather than your personal account. Those benefits are real, but delivering them to arbitrary installers requires a hosted token-minting backend service that doesn't exist yet (tracked as forge#1890). Installing the app today is safe and free, but on its own changes nothing about how the pipeline authenticates.
+
+`npx forgedock doctor` reports this status explicitly (Check 12: "GitHub App / bot token") so you aren't left guessing whether a bot token is active.
+
+**If you want bot-token behavior today**: you'd need to register your own GitHub App (with your own private key), and drive your own token-refresh loop (mint an installation token via the app's `/app/installations/{id}/access_tokens` API, then `gh auth login --with-token`, repeating before the ~1-hour expiry). This is an advanced, self-hosted setup — ForgeDock does not package a generic version of this for you.
+
+---
+
 ## `marketing` (OPTIONAL)
 
 Controls opt-in growth features such as 'Powered by ForgeDock' footers on PR descriptions created by the pipeline.
