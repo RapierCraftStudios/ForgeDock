@@ -60,6 +60,8 @@ Domain estimation (above) catches broad category overlap but misses cases where 
 
 ```bash
 LAYER1_FILES=()
+declare -A EDGE_KIND   # "{PRED}:{SUCCESSOR}" → same-file | directory | shared-module (forge#1860)
+declare -A EDGE_FILES  # "{PRED}:{SUCCESSOR}" → the specific file(s) that triggered the edge (forge#1860)
 for NUM in {issue_numbers}; do
   echo "=== #$NUM ==="
   FILES_FOR_NUM=$(gh api repos/{GH_REPO}/issues/${NUM}/comments \
@@ -86,6 +88,7 @@ done
 - If two issues share ANY affected file → one MUST be a predecessor of the other (serialized)
 - The issue with lower issue number goes first (stable ordering), unless an explicit `Depends on #` says otherwise
 - Add a conflict note to the DAG plan: "#{A} and #{B} both modify `{file}` — #{A} is predecessor of #{B}"
+- **Record the edge kind and shared file(s)** <!-- Added: forge#1860 -->: alongside the predecessor relationship, set `EDGE_KIND["${A}:${B}"]="same-file"` and `EDGE_FILES["${A}:${B}"]="{file}"` (space-separated if multiple files overlap). Layer 1 is the only point where the specific overlapping file is known — Step 3D's DAG only records that a predecessor relationship exists, not why. Step 4B reads these two maps to forward a "what changed in this file" brief from #{A} to #{B} once #{A} completes (see Step 4B's "Same-file current-state brief" handling in its core streaming dispatch loop).
 
 #### Layer 2: Directory-proximity detection
 
@@ -112,6 +115,7 @@ done
   - `web/src/lib/` (shared utilities)
   - `shared/` (volume-mounted, affects all services)
   - `infra/migrations/` (already covered by DATABASE hard rule, but explicit here too)
+- **Record the edge kind and shared directory** <!-- Added: forge#1860 -->: whenever this layer actually serializes a pair (small-directory match, broad-directory + same-domain match, or a known high-conflict directory), set `EDGE_KIND["${A}:${B}"]="directory"` and `EDGE_FILES["${A}:${B}"]="{shared_directory}"`. Same consumption contract as Layer 1 — read by Step 4B's same-file brief forwarding.
 
 #### Layer 3: Shared-module inference
 
@@ -149,6 +153,11 @@ HIGH_FAN_IN = [
 
 # For each issue, check if affected files include a high-fan-in file
 # If yes: that issue cannot be parallelized with any other issue touching the same service
+
+# Record edge metadata for any pair actually serialized by this layer <!-- Added: forge#1860 -->:
+#   EDGE_KIND["${A}:${B}"]="shared-module"
+#   EDGE_FILES["${A}:${B}"]="{the shared high-fan-in file, or the inferred barrel/init/registry module}"
+# Same consumption contract as Layers 1-2 — read by Step 4B's same-file brief forwarding.
 ```
 
 #### Layer 4: Conservative fallback (low-confidence cases)
@@ -344,6 +353,7 @@ Build a **directed acyclic graph (DAG)** of per-issue dependencies. Each issue g
 - **Explicit dependencies**: If issue B says "Depends on #A" or "Blocked by #A", add A to B's predecessors
 - **File-conflict edges**: If two issues share affected files (from Step 3C Layer 1), add a directed edge: lower issue number → higher issue number (unless explicit deps say otherwise). The later issue has the earlier issue in its predecessors.
 - **Domain serialization edges**: DATABASE issues form a linear chain (each has the previous DATABASE issue as its predecessor). Same-small-directory issues (Layer 2) and high-fan-in file issues (Layer 3) get directed edges as per Step 3C rules.
+- **Edge-kind tagging for same-file/directory/shared-module briefing** <!-- Added: forge#1860 -->: Layer 1/2/3 edges are additionally tagged with `EDGE_KIND` (`same-file` / `directory` / `shared-module`) and `EDGE_FILES` at the point they're added (see Step 3C). Explicit-dependency edges, the DATABASE domain chain, Layer 4 conservative-fallback edges, and Layer 5 co-change edges deliberately do NOT receive one of these three `EDGE_KIND` values. This is what lets Step 4B distinguish "predecessor edge came from Step 3C Layer 1/2/3" (eligible for a same-file current-state brief) from every other edge type (not eligible).
 - **Conservative fallback edges**: Low-confidence issues (Layer 4) get edges to same-domain issues as per Step 3C rules.
 - **Co-change coupling edges** <!-- Added: forge#1196 -->: High co-change file pairs (Layer 5, 3+ shared commits in the bounded window) that span two different issues get a directed edge using the same lower-issue-number-is-predecessor convention as Layer 1. Verified-independent pairs (Layer 5, zero shared commits) may instead REMOVE an edge that Layer 2 or Layer 4 would otherwise have added for that pair — Layer 1 and Layer 3 edges are never removed by a Layer 5 downgrade.
 - **Claims-board downgrade (Layer 2/4 edges only)** <!-- Added: forge#1736 -->: After dispatch begins (Phase 4A), when both issues in a Layer-2 or Layer-4 serialized pair post `FORGE:CLAIM` annotations on the coordination issue and their claimed file sets are **disjoint** (no path appears in both claims), the serialization edge for that pair MAY be relaxed — the blocked issue becomes ready. This downgrade is **never** applied to Layer-1 (same-file) or Layer-3 (high-fan-in) edges. See Step 4B: Claims-board relaxation sweep for the runtime check.

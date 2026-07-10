@@ -236,6 +236,14 @@ QUEUED_FINDINGS=()
 declare -A DEFERRED_REASONS
 declare -A AGENT_ISSUE_MAP
 
+# Same-file current-state brief forwarding (forge#1860). Populated by the core streaming
+# dispatch loop below (Step 4B) whenever a Layer 1/2/3 structural predecessor edge (see
+# EDGE_KIND/EDGE_FILES from phase-3-dependency.md Step 3C) resolves; consumed by Step 4A's
+# {GIST_CONTEXT} generation. EDGE_BRIEFED guards against re-appending the same predecessor's
+# brief on every completion cycle this loop re-runs before BLOCKED_NUM actually dispatches.
+declare -A SAME_FILE_BRIEF
+declare -A EDGE_BRIEFED
+
 # Human-gated idle/backpressure flag (Step 4B item 6.7, forge#1814). Starts false —
 # recomputed every completion cycle over {all_batch_issue_numbers}. Declared at batch
 # scope (not per-agent) so Step 4C can read the latest value on every iteration.
@@ -456,6 +464,20 @@ fi
 
 If the issue has no parent reference, or the parent has no `FORGE:CONTRACT` annotation, this block produces no output and `GIST_CONTEXT` is unchanged. The hot-copy is an optimization — the durable annotation on the parent issue remains the authoritative record for compaction recovery.
 
+**Same-file current-state brief injection** <!-- Added: forge#1860 --> — a separate, parallel mechanism to the `FORGE:SYNTHESIS_BRIEF` handling above: it does not replace or interact with Phase 2.5 investigation→implementation forwarding. When this issue was dispatched because a Layer 1/2/3 structural predecessor edge just resolved, Step 4B's core streaming dispatch loop has already populated `SAME_FILE_BRIEF[{NUMBER}]` with a short excerpt of what each such predecessor changed in the shared file/directory/module. Append it here:
+
+```bash
+# Append same-file/directory/shared-module briefs from resolved structural-edge predecessors.
+if [ -n "${SAME_FILE_BRIEF[{NUMBER}]:-}" ]; then
+  GIST_CONTEXT="${GIST_CONTEXT}
+
+**SAME-FILE STATE BRIEF (structural DAG predecessor)**: One or more predecessors in this batch were serialized against you because they touch the same file/directory/module (Step 3C Layer 1/2/3 — not an explicit \`Depends on\`). Here is what they just changed — use this as your starting understanding of the file's current state; do not re-investigate it cold:
+${SAME_FILE_BRIEF[{NUMBER}]}"
+fi
+```
+
+This block is a no-op — `GIST_CONTEXT` resolves exactly as before — whenever `SAME_FILE_BRIEF[{NUMBER}]` is unset: the issue had no predecessors, its only predecessors were explicit-dependency/DATABASE-chain/Layer 4/Layer 5 edges (none of which populate `SAME_FILE_BRIEF`), or the orchestrator session was compacted and restarted between Phase 3 and this dispatch (in which case `EDGE_KIND`/`EDGE_FILES`/`SAME_FILE_BRIEF` are in-memory-only and are not reconstructed by the wake/compaction recovery in `phase-3-dependency.md` — the dispatched agent simply proceeds without the brief, exactly as it would have before this mechanism existed).
+
 **Capture agent IDs after the batch spawn (MANDATORY)**: Each `Agent(...)` call returns an agent ID. Store each returned ID in `AGENT_ISSUE_MAP` keyed by issue number. This map is the only way to resume a stalled agent by ID in Steps 4B and 4B.5:
 
 ```
@@ -522,7 +544,50 @@ for BLOCKED_NUM in {all_blocked_issue_numbers}; do
   for PRED in {predecessors_of_BLOCKED_NUM}; do
     PRED_STATE=$(classify_predecessor_state "$PRED")
     case "$PRED_STATE" in
-      DONE) ;;  # satisfied — no action
+      DONE)
+        # Same-file current-state brief forwarding (forge#1860): only fires when the
+        # RESOLVED edge from this specific PRED to this specific BLOCKED_NUM is a
+        # Layer 1/2/3 structural edge (EDGE_KIND set to same-file/directory/shared-module
+        # in phase-3-dependency.md Step 3C) — never for explicit `Depends on`, the
+        # DATABASE domain chain, Layer 4 conservative-fallback, or Layer 5 co-change edges,
+        # since those never populate EDGE_KIND for this pair.
+        EDGE_TYPE="${EDGE_KIND["${PRED}:${BLOCKED_NUM}"]:-}"
+        if [ -n "$EDGE_TYPE" ] && [ -z "${EDGE_BRIEFED["${PRED}:${BLOCKED_NUM}"]:-}" ]; then
+          EDGE_BRIEFED["${PRED}:${BLOCKED_NUM}"]=1
+          SHARED_FILE="${EDGE_FILES["${PRED}:${BLOCKED_NUM}"]:-}"
+
+          # Prefer FORGE:BUILDER (the concrete "what changed" record). Fall back to
+          # FORGE:ARCHITECT, then FORGE:INVESTIGATOR, for predecessors that never reached
+          # implementation (e.g. closed workflow:invalid, or resolved via Phase 2 decomposition).
+          BRIEF_SRC=$(gh api repos/{GH_REPO}/issues/${PRED}/comments \
+            --jq '[.[] | select(.body | contains("FORGE:BUILDER"))] | last | .body // ""' 2>/dev/null)
+          BRIEF_SRC_LABEL="FORGE:BUILDER"
+          if [ -z "$BRIEF_SRC" ]; then
+            BRIEF_SRC=$(gh api repos/{GH_REPO}/issues/${PRED}/comments \
+              --jq '[.[] | select(.body | contains("FORGE:ARCHITECT"))] | last | .body // ""' 2>/dev/null)
+            BRIEF_SRC_LABEL="FORGE:ARCHITECT"
+          fi
+          if [ -z "$BRIEF_SRC" ]; then
+            BRIEF_SRC=$(gh api repos/{GH_REPO}/issues/${PRED}/comments \
+              --jq '[.[] | select(.body | contains("FORGE:INVESTIGATOR"))] | last | .body // ""' 2>/dev/null)
+            BRIEF_SRC_LABEL="FORGE:INVESTIGATOR"
+          fi
+
+          if [ -n "$BRIEF_SRC" ]; then
+            # Scope the excerpt to the shared file — a few lines, never a raw diff or
+            # full comment dump. Fall back to the comment's Approach/Changes section if
+            # the file's basename doesn't literally appear (e.g. a directory-level edge).
+            FIRST_SHARED_FILE=$(echo "$SHARED_FILE" | awk '{print $1}')
+            EXCERPT=""
+            if [ -n "$FIRST_SHARED_FILE" ]; then
+              EXCERPT=$(echo "$BRIEF_SRC" | grep -iF "$(basename "$FIRST_SHARED_FILE" 2>/dev/null)" | head -3)
+            fi
+            [ -z "$EXCERPT" ] && EXCERPT=$(echo "$BRIEF_SRC" | sed -n '/### Approach/,/^### /p' | head -6)
+            SAME_FILE_BRIEF["$BLOCKED_NUM"]="${SAME_FILE_BRIEF["$BLOCKED_NUM"]:-}
+- **#${PRED}** (${EDGE_TYPE} edge, from its ${BRIEF_SRC_LABEL} comment, \`${SHARED_FILE:-shared file}\`): ${EXCERPT:-see #${PRED}'s ${BRIEF_SRC_LABEL} comment for details}"
+          fi
+        fi
+        ;;  # satisfied — no dispatch-readiness action beyond the brief above
       FAILED) ALL_PREDS_DONE=false ;;             # handled by item 6 (skip dependents)
       GATED)
         ALL_PREDS_DONE=false
