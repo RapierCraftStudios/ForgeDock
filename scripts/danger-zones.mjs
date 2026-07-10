@@ -346,7 +346,9 @@ function collectCommits(repoPath, sinceDate) {
   );
 
   if (result.error || result.status !== 0) {
-    const reason = result.error ? result.error.message : `exit code ${result.status}`;
+    const reason = result.error
+      ? result.error.message
+      : `exit code ${result.status}${result.signal ? ` (signal ${result.signal})` : ''}`;
     log(`WARNING: git log failed — ${reason}`);
     return [];
   }
