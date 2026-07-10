@@ -26,3 +26,7 @@ jobs:
             [bots]
             policy = "allowlist"
             allow = ["github-actions[bot]", "dependabot[bot]", "dependabot-preview[bot]", "rapiercraft-forgedock[bot]", "rapiercraft-forge[bot]"]
+
+            # Map commit author emails to accepted sign-off emails
+            [alias-signoffs.aliases]
+            "rapiercraftstudios@gmail.com" = ["yash.dubey803at@gmail.com"]
