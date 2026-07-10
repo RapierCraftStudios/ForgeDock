@@ -1276,8 +1276,13 @@ else
   if [[ -f "$REPO_PATH/commands/review-pr-agents/protocols.md" ]]; then
     TEMPLATE_BASE="$REPO_PATH/commands/review-pr-agents"
     TEMPLATE_SOURCE="repo_path"
-  elif [[ -f "$REPO_PATH/commands/review-pr-agents.md" ]]; then
-    # Tier 3: monolithic catalog — last resort, contains all personas + protocols in one file
+  elif [[ -f "$REPO_PATH/commands/review-pr-agents.md" ]] && grep -q "^### Agent:" "$REPO_PATH/commands/review-pr-agents.md" 2>/dev/null; then
+    # Tier 3: monolithic catalog — last resort, contains all personas + protocols in one file.
+    # The content check (`### Agent:` headers) is required, not just file existence: a
+    # post-split repo still ships a small router stub at this same path that only points
+    # BACK to the (missing) commands/review-pr-agents/ directory — reading it would not
+    # provide any actual protocol/persona content, silently reproducing the original bug
+    # one tier deeper. <!-- Added: forge#1849 -->
     TEMPLATE_BASE=""
     MONOLITHIC_CATALOG="$REPO_PATH/commands/review-pr-agents.md"
     TEMPLATE_SOURCE="monolithic_catalog"
@@ -2167,7 +2172,12 @@ A degraded run that skipped Task-based agent dispatch must be visible from this 
 ```bash
 ACTUAL_AGENT_DOMAINS=$(gh api "repos/${REPO}/issues/${PR_NUMBER}/comments" \
     --jq '[.[].body | scan("<!-- FORGE:REVIEW-AGENT:([a-z-]+) -->") | .[0]] | unique | join(", ")' 2>/dev/null || echo "")
-ACTUAL_AGENT_COUNT=$(echo "$ACTUAL_AGENT_DOMAINS" | tr ',' '\n' | grep -c '.' 2>/dev/null || echo 0)
+# NOTE: no `|| echo 0` fallback here — grep -c always prints a count (including 0 on
+# no match) even though it exits 1 in that case. Appending `|| echo 0` after a `grep -c`
+# pipeline double-counts: the pipeline already printed "0", then the fallback prints a
+# second "0" line, corrupting the value to "0\n0" in exactly the zero-agent case this
+# check exists to detect. <!-- Added: forge#1849 -->
+ACTUAL_AGENT_COUNT=$(echo "$ACTUAL_AGENT_DOMAINS" | tr ',' '\n' | grep -c '.' 2>/dev/null)
 ```
 
 Substitute `ACTUAL_AGENT_COUNT`/`ACTUAL_AGENT_DOMAINS` into the summary's `**Agents**: [N] ([names])` field below — do NOT substitute a manually-counted or remembered figure. If the agent's own recollection of what it launched disagrees with `ACTUAL_AGENT_COUNT` (e.g. it believes it ran agents but zero `FORGE:REVIEW-AGENT` comments exist), that mismatch itself is the signal this check exists to surface: report `ACTUAL_AGENT_COUNT` as-is (it is the ground truth) and add a note in the Recommendation section flagging the discrepancy — never suppress it to make the summary look complete. If `ACTUAL_AGENT_COUNT` is `0`, the review degraded to solo/inline mode (the exact failure mode this guard exists to catch) and the verdict MUST reflect that (`NEEDS RE-REVIEW`), regardless of what analysis was performed inline.

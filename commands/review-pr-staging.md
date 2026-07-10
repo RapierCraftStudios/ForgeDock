@@ -450,12 +450,20 @@ else
   if [[ -f "$REPO_PATH/commands/review-pr-agents/protocols.md" ]]; then
     TEMPLATE_BASE="$REPO_PATH/commands/review-pr-agents"
     TEMPLATE_SOURCE="repo_path"
-  elif [[ -f "$REPO_PATH/commands/review-pr-agents.md" ]]; then
+  elif [[ -f "$REPO_PATH/commands/review-pr-agents.md" ]] && grep -q "^### Agent:" "$REPO_PATH/commands/review-pr-agents.md" 2>/dev/null; then
+    # Content check (not just existence) required: a post-split repo still ships a small
+    # router stub at this same path that only points back to the (missing) persona
+    # directory — reading it would provide no actual protocol/persona content.
     MONOLITHIC_CATALOG="$REPO_PATH/commands/review-pr-agents.md"
     TEMPLATE_SOURCE="monolithic_catalog"
   else
     TEMPLATE_SOURCE="none"
   fi
+fi
+
+if [[ "$TEMPLATE_SOURCE" == "none" ]]; then
+  echo "FATAL: no review-pr-agents template source resolved (checked \$FORGE_HOME, repo-path fallback, monolithic catalog)."
+  # HARD STOP — post error, add needs-human, do NOT review
 fi
 ```
 
