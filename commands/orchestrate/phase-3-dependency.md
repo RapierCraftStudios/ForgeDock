@@ -99,7 +99,7 @@ done
 - If two issues share ANY affected file → one MUST be a predecessor of the other (serialized)
 - The issue with lower issue number goes first (stable ordering), unless an explicit `Depends on #` says otherwise
 - Add a conflict note to the DAG plan: "#{A} and #{B} both modify `{file}` — #{A} is predecessor of #{B}"
-- **Record the edge kind and shared file(s)** <!-- Added: forge#1860 -->: alongside the predecessor relationship, set `EDGE_KIND["${A}:${B}"]="same-file"` and `EDGE_FILES["${A}:${B}"]="{file}"` (space-separated if multiple files overlap). Layer 1 is the only point where the specific overlapping file is known — Step 3D's DAG only records that a predecessor relationship exists, not why. Step 4B reads these two maps to forward a "what changed in this file" brief from #{A} to #{B} once #{A} completes (see Step 4B's "Same-file current-state brief" handling in its core streaming dispatch loop).
+- **Record the edge kind and shared file(s)** <!-- Added: forge#1860 -->: alongside the predecessor relationship, set `EDGE_KIND["${A}:${B}"]="same-file"` and `EDGE_FILES["${A}:${B}"]="{file}"` (space-separated if multiple files overlap). Layer 1 is the only point where the specific overlapping file is known — Step 3D's DAG only records that a predecessor relationship exists, not why. `EDGE_KIND`/`EDGE_FILES` have two consumers in `phase-4-execution.md` Step 4B: (1) the DONE-case "same-file current-state brief" forwarding (forge#1860, unchanged), and (2) `verify_file_overlap_edge()` (forge#1904), which re-checks this guessed file list against the predecessor's *actual* PR diff once it reaches FAILED or GATED — since Layer 1's file list is extracted from a pre-build investigation guess or a raw issue-body parse, never from real code, it can be wrong, and a predecessor that concludes without ever touching the guessed file should not keep a dependent gated/skipped on it. See `phase-4-execution.md`'s "File-overlap edge re-verification" section for the full mechanism.
 
 #### Layer 2: Directory-proximity detection
 
@@ -364,7 +364,7 @@ Build a **directed acyclic graph (DAG)** of per-issue dependencies. Each issue g
 - **Explicit dependencies**: If issue B says "Depends on #A" or "Blocked by #A", add A to B's predecessors
 - **File-conflict edges**: If two issues share affected files (from Step 3C Layer 1), add a directed edge: lower issue number → higher issue number (unless explicit deps say otherwise). The later issue has the earlier issue in its predecessors.
 - **Domain serialization edges**: DATABASE issues form a linear chain (each has the previous DATABASE issue as its predecessor). Same-small-directory issues (Layer 2) and high-fan-in file issues (Layer 3) get directed edges as per Step 3C rules.
-- **Edge-kind tagging for same-file/directory/shared-module briefing** <!-- Added: forge#1860 -->: Layer 1/2/3 edges are additionally tagged with `EDGE_KIND` (`same-file` / `directory` / `shared-module`) and `EDGE_FILES` at the point they're added (see Step 3C). Explicit-dependency edges, the DATABASE domain chain, Layer 4 conservative-fallback edges, and Layer 5 co-change edges deliberately do NOT receive one of these three `EDGE_KIND` values. This is what lets Step 4B distinguish "predecessor edge came from Step 3C Layer 1/2/3" (eligible for a same-file current-state brief) from every other edge type (not eligible).
+- **Edge-kind tagging for same-file/directory/shared-module briefing and re-verification** <!-- Added: forge#1860; extended forge#1904 -->: Layer 1/2/3 edges are additionally tagged with `EDGE_KIND` (`same-file` / `directory` / `shared-module`) and `EDGE_FILES` at the point they're added (see Step 3C). Explicit-dependency edges, the DATABASE domain chain, Layer 4 conservative-fallback edges, and Layer 5 co-change edges deliberately do NOT receive one of these three `EDGE_KIND` values. This is what lets Step 4B distinguish "predecessor edge came from Step 3C Layer 1/2/3" from every other edge type, for two purposes: a same-file current-state brief (DONE case, forge#1860) and edge re-verification against the predecessor's actual PR diff once it reaches FAILED or GATED (`verify_file_overlap_edge()`, forge#1904 — see `phase-4-execution.md` Step 4B). Non-`EDGE_KIND` edges are eligible for neither — they always `KEEP` in the re-verification check and are never candidates for the same-file brief.
 - **Conservative fallback edges**: Low-confidence issues (Layer 4) get edges to same-domain issues as per Step 3C rules.
 - **Co-change coupling edges** <!-- Added: forge#1196 -->: High co-change file pairs (Layer 5, 3+ shared commits in the bounded window) that span two different issues get a directed edge using the same lower-issue-number-is-predecessor convention as Layer 1. Verified-independent pairs (Layer 5, zero shared commits) may instead REMOVE an edge that Layer 2 or Layer 4 would otherwise have added for that pair — Layer 1 and Layer 3 edges are never removed by a Layer 5 downgrade.
 - **Claims-board downgrade (Layer 2/4 edges only)** <!-- Added: forge#1736 -->: After dispatch begins (Phase 4A), when both issues in a Layer-2 or Layer-4 serialized pair post `FORGE:CLAIM` annotations on the coordination issue and their claimed file sets are **disjoint** (no path appears in both claims), the serialization edge for that pair MAY be relaxed — the blocked issue becomes ready. This downgrade is **never** applied to Layer-1 (same-file) or Layer-3 (high-fan-in) edges. See Step 4B: Claims-board relaxation sweep for the runtime check.
@@ -1006,6 +1006,8 @@ The orchestrator context window must stay small regardless of how many issues ha
 
 This reconstruction MUST use the same three-way **DONE / GATED / FAILED** predecessor classification defined in `phase-4-execution.md` Step 4B ("Predecessor Classification") — not a binary terminal/non-terminal grep. A binary grep is exactly the bug forge#1812 fixed: it let `needs-human` simultaneously satisfy "predecessor is done, dispatch the successor" (this block, pre-fix) and "predecessor failed, skip the successor" (Step 4B's failure handler, pre-fix) — with no way to represent "predecessor is human-gated, its PR is still open, and its dependents should wait but not be abandoned." That third case is exactly what wake/compaction reconstruction hits most often, since a merge approved by a human typically happens *after* the orchestrator session that dispatched the predecessor has already ended — this block, not the live Step 4B loop, is the realistic trigger point for "gating PR merged while nobody was watching."
 
+For the same reason, this reconstruction also MUST call `verify_file_overlap_edge()` (also defined in `phase-4-execution.md` Step 4B, alongside `classify_predecessor_state()` — re-declare it here too if this block runs in a fresh context) before treating a GATED or FAILED predecessor's `EDGE_KIND` edge as still blocking. <!-- Added: forge#1904 --> A predecessor that reached `needs-human`/`workflow:invalid` with no PR, or whose PR never actually touched the guessed shared file, most realistically gets *discovered* at wake time — the session that would have caught it live has already ended. Re-verifying only in the live Step 4B loop and not here would leave this exact wake-time case unfixed.
+
 ```bash
 # Reconstruct dispatch state from GitHub after compaction / wake
 # Run this block at the top of every resumed Phase 4 loop iteration.
@@ -1030,17 +1032,40 @@ for NUM in {all_issue_numbers_in_batch}; do
   esac
 done
 
-# 2. Re-derive the ready set: any non-terminal issue whose predecessors are ALL classified DONE.
+# 2. Re-derive the ready set: any non-terminal issue whose predecessors are ALL classified DONE
+#    (or GATED-but-edge-dropped — see the re-verification gate below).
 #    A GATED predecessor blocks dispatch but does NOT fail the dependent — see step 2.5 below.
+#
+# Edge re-verification (forge#1904): a GATED (or FAILED) predecessor's file-overlap edge is only
+# a real block if `verify_file_overlap_edge()` (phase-4-execution.md Step 4B, defined alongside
+# `classify_predecessor_state()`) confirms it. This block is the wake/compaction-time mirror of
+# phase-4-execution.md item 6.5's live-session check — it MUST call the identical function, not a
+# re-derived equivalent, to avoid the drift class forge#1812/#1837 already had to fix once for
+# classification and regex tooling respectively. This is what handles the case where a GATED
+# predecessor with no PR (or a PR that never touched the guessed shared file) resolves the
+# `needs-human`/`workflow:invalid` state AFTER the orchestrator session that dispatched it has
+# already ended — the realistic trigger point named in the "Why this matters" note above.
 READY_ISSUES=()
-NEWLY_BLOCKED=()   # dependents whose gating predecessor is GATED — need blocked-on-human-merge tracking
+NEWLY_BLOCKED=()   # dependents whose gating predecessor is GATED with a still-live edge — need blocked-on-human-merge tracking
 for NUM in "${ACTIVE_ISSUES[@]}"; do
   ALL_PREDS_DONE=true
   GATING_PRED=""
   for PRED in {predecessors_of_NUM}; do
     case "${ISSUE_CLASS[$PRED]:-IN_PROGRESS}" in
       DONE) ;;
-      GATED) ALL_PREDS_DONE=false; GATING_PRED="$PRED" ;;
+      GATED|FAILED)
+        EDGE_VERDICT=$(verify_file_overlap_edge "$PRED" "$NUM")
+        if [ "$EDGE_VERDICT" = "DROP" ]; then
+          echo "Edge re-verification: #${PRED} → #${NUM} dropped (GATED/FAILED predecessor never opened a PR, or its actual diff never touched the guessed shared file). Treating this predecessor as resolved for #${NUM}."
+          # Do NOT set ALL_PREDS_DONE=false for this predecessor — the guessed edge never
+          # materialized into a real conflict, so it does not gate #${NUM}.
+        elif [ "${ISSUE_CLASS[$PRED]}" = "GATED" ]; then
+          ALL_PREDS_DONE=false
+          GATING_PRED="$PRED"
+        else
+          ALL_PREDS_DONE=false   # FAILED with a confirmed real edge — dependent stays blocked/skipped, handled by existing FAILED-cascade logic elsewhere
+        fi
+        ;;
       *) ALL_PREDS_DONE=false ;;
     esac
   done
@@ -1095,9 +1120,12 @@ All gating predecessor(s) reached \`workflow:merged\` (detected on orchestrator 
   fi
 done
 
-# 4. Dispatch the reconstructed ready set (DONE_ISSUES-unblocked + merge-triggered-woken) via the
-#    standard Step 4A.pre.0 → 4A.pre → 4A flow. FAILED_ISSUES' transitive dependents remain marked
-#    "skipped — dependency failed" per phase-4-execution.md Step 4B item 6 — do not re-add them here.
+# 4. Dispatch the reconstructed ready set (DONE_ISSUES-unblocked + merge-triggered-woken +
+#    edge-dropped-into-READY_ISSUES from step 2 above) via the standard Step 4A.pre.0 → 4A.pre →
+#    4A flow. FAILED_ISSUES' transitive dependents remain marked "skipped — dependency failed" per
+#    phase-4-execution.md Step 4B item 6 — do not re-add them here — UNLESS step 2's
+#    `verify_file_overlap_edge()` check already placed them in READY_ISSUES because the FAILED
+#    predecessor's edge dropped (forge#1904); that case is legitimately ready, not a re-add.
 ```
 
 **Why this keeps context small**: Each `Agent()` call returns an agent ID stored only in `AGENT_ISSUE_MAP`, which is rebuilt per Step 4A.pre dispatch batch. After compaction, the map is gone — but the DAG state, including `blocked-on-human-merge` tracking (a durable `FORGE:BLOCKED_ON_HUMAN_MERGE` comment plus label, not an in-context variable), is fully on GitHub. The reconstruction above re-derives the ready set, the gated set, and the blocked-on-human-merge set from labels and comments alone, so the orchestrator context never needs to hold cumulative dispatch history.
