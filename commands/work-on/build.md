@@ -373,7 +373,7 @@ The acceptance spec contains only a skip sentinel (\`type=skipped\`). No automat
 <!-- FORGE:ACCEPTANCE_GATE:PASSED -->"
 ```
 
-**Otherwise — execute each check**:
+**Otherwise — execute each check**: <!-- Added: forge#1829 -->
 
 ```bash
 GATE_PASS=true
@@ -382,8 +382,16 @@ FAILED_CHECKS=""
 while IFS= read -r check_line; do
   ID=$(echo "$check_line"    | sed -n 's/.*id=\([^ ]*\).*/\1/p')
   TYPE=$(echo "$check_line"  | sed -n 's/.*type=\([^ ]*\).*/\1/p')
-  TARGET=$(echo "$check_line"| sed -n 's/.*target=\([^ ]*\).*/\1/p')
-  MATCHER=$(echo "$check_line"| sed -n 's/.*matcher=\([^ ]*\).*/\1/p')
+  # target=/matcher= are quoted (target="..." matcher="...") per the investigate.md wire format —
+  # quoting is required so multi-word/piped shell-command values (e.g. `target="grep -qE '...' file"`)
+  # survive extraction instead of being truncated at the first space. Fall back to the legacy
+  # unquoted [^ ]* extraction only for older ACCEPTANCE_CHECK comments emitted before this fix
+  # (still correct for single-token exists/contains targets; multi-word legacy targets remain
+  # truncated until the issue's investigation is re-run to emit the quoted format).
+  TARGET=$(echo "$check_line"| sed -n 's/.*target="\([^"]*\)".*/\1/p')
+  [ -z "$TARGET" ] && TARGET=$(echo "$check_line"| sed -n 's/.*target=\([^ ]*\).*/\1/p')
+  MATCHER=$(echo "$check_line"| sed -n 's/.*matcher="\([^"]*\)".*/\1/p')
+  [ -z "$MATCHER" ] && MATCHER=$(echo "$check_line"| sed -n 's/.*matcher=\([^ ]*\).*/\1/p')
   DESC=$(echo "$check_line"  | sed -n 's/.*description=\(.*\)/\1/p')
 
   [ "$TYPE" = "skipped" ] && continue
