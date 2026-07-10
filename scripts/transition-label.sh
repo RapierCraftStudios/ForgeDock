@@ -292,6 +292,63 @@ done
 if [ -n "$TO_REMOVE" ]; then
   echo "Removing stale workflow:* labels present on the issue ($TO_REMOVE)..."
   gh issue edit "$ISSUE_NUMBER" "${GH_ARGS[@]}" --remove-label "$TO_REMOVE" 2>/dev/null || true
+
+  # -------------------------------------------------------------------------
+  # Post-condition verification + single retry (forge#1915)
+  #
+  # The intersection fix above (forge#1810) already prevents the "unbootstrapped
+  # label 404" all-or-nothing failure — every candidate in $TO_REMOVE is known
+  # to exist on the issue at the time it was computed. But the removal call
+  # itself can still fail for reasons unrelated to label existence (a transient
+  # `gh`/GitHub API hiccup, rate limiting, a dropped connection), and that
+  # failure was previously swallowed unconditionally by `2>/dev/null || true`
+  # with no verification — leaving stale workflow:* labels stacked alongside
+  # the newly-added terminal label with no diagnostic trail. Live evidence:
+  # issue #1892 closed with both workflow:in-review and workflow:merged applied
+  # simultaneously because this exact removal call silently failed once.
+  #
+  # Fix: re-fetch the issue's labels after the removal call. If any label in
+  # $TO_REMOVE is still present, retry the removal once. If it's *still*
+  # present after the retry, this is a real, persistent failure — surface it
+  # loudly (stderr ERROR + non-zero exit) instead of the unconditional "OK".
+  # -------------------------------------------------------------------------
+  POST_REMOVE_LABELS=$(gh issue view "$ISSUE_NUMBER" "${GH_ARGS[@]}" --json labels \
+    --jq '[.labels[].name] | join(",")' 2>/dev/null || echo "")
+
+  STILL_PRESENT=""
+  IFS=',' read -ra TO_REMOVE_CHECK <<< "$TO_REMOVE"
+  for candidate in "${TO_REMOVE_CHECK[@]}"; do
+    case ",$POST_REMOVE_LABELS," in
+      *",$candidate,"*)
+        STILL_PRESENT="${STILL_PRESENT:+$STILL_PRESENT,}$candidate"
+        ;;
+    esac
+  done
+
+  if [ -n "$STILL_PRESENT" ]; then
+    echo "WARNING: label removal did not take effect for ($STILL_PRESENT) — retrying once..." >&2
+    gh issue edit "$ISSUE_NUMBER" "${GH_ARGS[@]}" --remove-label "$STILL_PRESENT" 2>/dev/null || true
+
+    POST_RETRY_LABELS=$(gh issue view "$ISSUE_NUMBER" "${GH_ARGS[@]}" --json labels \
+      --jq '[.labels[].name] | join(",")' 2>/dev/null || echo "")
+
+    STILL_PRESENT_AFTER_RETRY=""
+    IFS=',' read -ra RETRY_CHECK <<< "$STILL_PRESENT"
+    for candidate in "${RETRY_CHECK[@]}"; do
+      case ",$POST_RETRY_LABELS," in
+        *",$candidate,"*)
+          STILL_PRESENT_AFTER_RETRY="${STILL_PRESENT_AFTER_RETRY:+$STILL_PRESENT_AFTER_RETRY,}$candidate"
+          ;;
+      esac
+    done
+
+    if [ -n "$STILL_PRESENT_AFTER_RETRY" ]; then
+      echo "ERROR: failed to remove stale label(s) ($STILL_PRESENT_AFTER_RETRY) from issue #$ISSUE_NUMBER after retry — label state machine now inconsistent (issue carries both '$EFFECTIVE_LABEL' and the stale label(s) above)." >&2
+      exit 1
+    fi
+
+    echo "Retry succeeded — stale label(s) removed."
+  fi
 else
   echo "No stale workflow:* labels present on the issue — nothing to remove."
 fi
