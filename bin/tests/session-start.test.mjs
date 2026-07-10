@@ -419,6 +419,14 @@ describe("session-start fail-open when forge-utils.mjs is missing", async () => 
 // against the resolved repo root so that two independent projects sharing a
 // common grandparent directory each get their own nudge-seen state.
 //
+// Of the two subtests below, only the second ("tracks the same project
+// consistently whether cwd is the parent or the resolved repo root itself")
+// actually exercises the resolveGitRoot fix — it enters the SAME repo via
+// two different cwd forms and requires them to collapse to one identity,
+// which only holds true with git-root resolution in place. The first
+// subtest is a general sanity check for independent nudge tracking across
+// distinct projects; it does not isolate the fix (see its own comment below).
+//
 // Runs the real session-start.mjs hook as a child process (spawnSync) against
 // real temp-directory git fixtures, with HOME/USERPROFILE overridden so the
 // registry.json read/write is fully isolated from the developer's real
@@ -490,6 +498,14 @@ describe("session-start nudge tracking resolves git root (forge#1927)", async ()
     // Two distinct projects, each structured as a non-repo parent folder
     // holding exactly one git-repo subdirectory, both living under the same
     // grandparent tmpDir — the exact layout the issue describes.
+    //
+    // NOTE: This is a general sanity check, not fix-specific regression
+    // coverage. "ProjectA" and "ProjectB" are already distinct raw cwd
+    // paths, so this test passes under both the pre-fix (raw-cwd-keyed) and
+    // post-fix (resolved-git-root-keyed) tracking strategies — it does not
+    // isolate resolveGitRoot's behavior. The genuinely fix-dependent case is
+    // the next test below, where the SAME repo is entered via two different
+    // cwd forms.
     const projectAParent = makeParentWithSingleChildRepo("ProjectA", "alterlab");
     const projectBParent = makeParentWithSingleChildRepo("ProjectB", "otherapp");
 
