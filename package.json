@@ -1,6 +1,6 @@
 {
   "name": "forgedock",
-  "version": "1.1.8",
+  "version": "1.1.9",
   "description": "Autonomous dev pipeline for Claude Code. GitHub as institutional memory — every issue, PR, and annotation survives context resets and makes the next agent smarter.",
   "bin": {
     "forgedock": "bin/forgedock.mjs"
