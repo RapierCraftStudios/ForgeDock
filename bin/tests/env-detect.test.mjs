@@ -24,7 +24,7 @@
 
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { detectEnvironment } from "../env-detect.mjs";
+import { detectEnvironment, wslPathToWindows, windowsPathToWsl } from "../env-detect.mjs";
 
 describe("detectEnvironment — platform label", () => {
   it("win32 with build >= 22000 reports Windows 11", () => {
@@ -185,5 +185,75 @@ describe("detectEnvironment — never throws", () => {
       assert.equal(typeof info.shell, "string");
       assert.equal(typeof info.symlinkSupport, "boolean");
     });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Cross-environment path translation (forge#1893)
+// ---------------------------------------------------------------------------
+
+describe("wslPathToWindows", () => {
+  it("translates a /mnt/<drive>/... path to <DRIVE>:\\...", () => {
+    assert.equal(wslPathToWindows("/mnt/c/Users/foo/repo"), "C:\\Users\\foo\\repo");
+  });
+
+  it("uppercases the drive letter", () => {
+    assert.equal(wslPathToWindows("/mnt/d/projects"), "D:\\projects");
+  });
+
+  it("handles the bare mount root with no trailing path", () => {
+    assert.equal(wslPathToWindows("/mnt/c"), "C:");
+  });
+
+  it("returns null for a plain WSL-native path with no Windows equivalent", () => {
+    assert.equal(wslPathToWindows("/home/foo/projects/repo"), null);
+  });
+
+  it("returns null for a non-mount POSIX path", () => {
+    assert.equal(wslPathToWindows("/usr/lib/node_modules/forgedock"), null);
+  });
+
+  it("handles empty/non-string input without throwing", () => {
+    assert.equal(wslPathToWindows(""), null);
+    assert.equal(wslPathToWindows(null), null);
+    assert.equal(wslPathToWindows(undefined), null);
+  });
+});
+
+describe("windowsPathToWsl", () => {
+  it("translates a <drive>:\\... path to /mnt/<drive>/...", () => {
+    assert.equal(windowsPathToWsl("C:\\Users\\foo\\repo"), "/mnt/c/Users/foo/repo");
+  });
+
+  it("lowercases the drive letter", () => {
+    assert.equal(windowsPathToWsl("D:\\projects"), "/mnt/d/projects");
+  });
+
+  it("accepts the forward-slash variant Node also accepts on win32", () => {
+    assert.equal(windowsPathToWsl("C:/Users/foo/repo"), "/mnt/c/Users/foo/repo");
+  });
+
+  it("handles a bare drive root with no trailing path", () => {
+    assert.equal(windowsPathToWsl("C:\\"), "/mnt/c");
+    assert.equal(windowsPathToWsl("C:"), "/mnt/c");
+  });
+
+  it("returns null for a UNC path", () => {
+    assert.equal(windowsPathToWsl("\\\\wsl$\\Ubuntu\\home\\foo"), null);
+  });
+
+  it("returns null for a relative path", () => {
+    assert.equal(windowsPathToWsl("Users\\foo\\repo"), null);
+  });
+
+  it("handles empty/non-string input without throwing", () => {
+    assert.equal(windowsPathToWsl(""), null);
+    assert.equal(windowsPathToWsl(null), null);
+    assert.equal(windowsPathToWsl(undefined), null);
+  });
+
+  it("round-trips with wslPathToWindows", () => {
+    const original = "/mnt/c/Users/foo/repo";
+    assert.equal(windowsPathToWsl(wslPathToWindows(original)), original);
   });
 });

@@ -7,7 +7,8 @@ import assert from "node:assert/strict";
 import { mkdtempSync, readFileSync, writeFileSync, existsSync, mkdirSync, readdirSync } from "node:fs";
 import { join } from "node:path";
 import os from "node:os";
-import { writeForgeYaml, backupExisting, detectDescription, makeCtx, preflight, forge, read, review, celebrate, connect, openUrl, runJourney, manualLowConfidenceKeys, parseInstallTier, findMarkdownFiles, isEphemeralCachePath } from "../journey.mjs";
+import { writeForgeYaml, backupExisting, detectDescription, makeCtx, preflight, forge, read, review, celebrate, connect, openUrl, runJourney, manualLowConfidenceKeys, parseInstallTier, findMarkdownFiles, isEphemeralCachePath, detectCrossEnvInstall } from "../journey.mjs";
+import { detectEnvironment } from "../env-detect.mjs";
 
 const VALUES = {
   owner: "RapierCraftStudios",
@@ -467,6 +468,122 @@ describe("isEphemeralCachePath", () => {
     assert.equal(isEphemeralCachePath(""), false);
     assert.equal(isEphemeralCachePath(null), false);
     assert.equal(isEphemeralCachePath(undefined), false);
+  });
+});
+
+describe("detectCrossEnvInstall (forge#1893)", () => {
+  it("WSL -> Windows: finds a Windows-native install via the live /mnt mount", () => {
+    const envInfo = detectEnvironment({ platform: "linux", env: { WSL_DISTRO_NAME: "Ubuntu-22.04" } });
+    const ctx = { cwd: "/mnt/c/Users/testuser/projects/repo", exec: () => { throw new Error("should not be called"); } };
+    const existsSyncFn = (p) => p === "/mnt/c/Users/testuser/.claude/forgedock";
+    const res = detectCrossEnvInstall(ctx, envInfo, { existsSyncFn });
+    assert.equal(res.conflict, true);
+    assert.equal(res.direction, "windows");
+    assert.equal(res.otherPath, "C:\\Users\\testuser\\.claude\\forgedock");
+  });
+
+  it("WSL -> Windows: no conflict when no Windows install marker exists (the common case)", () => {
+    const envInfo = detectEnvironment({ platform: "linux", env: { WSL_DISTRO_NAME: "Ubuntu-22.04" } });
+    const ctx = { cwd: "/mnt/c/Users/testuser/projects/repo", exec: () => { throw new Error("should not be called"); } };
+    const res = detectCrossEnvInstall(ctx, envInfo, { existsSyncFn: () => false });
+    assert.equal(res.conflict, false);
+    assert.equal(res.otherPath, null);
+  });
+
+  it("WSL -> Windows: no conflict, no crash when cwd isn't under /mnt/<drive>/Users/<user>", () => {
+    const envInfo = detectEnvironment({ platform: "linux", env: { WSL_DISTRO_NAME: "Ubuntu-22.04" } });
+    const ctx = { cwd: "/home/testuser/projects/repo", exec: () => { throw new Error("should not be called"); } };
+    let existsCalled = false;
+    const res = detectCrossEnvInstall(ctx, envInfo, { existsSyncFn: () => { existsCalled = true; return true; } });
+    assert.equal(res.conflict, false);
+    assert.equal(existsCalled, false); // never even probes — path shape doesn't apply
+  });
+
+  it("Windows -> WSL: finds a WSL install by enumerating distros via `wsl -l -q`", () => {
+    const envInfo = detectEnvironment({ platform: "win32", env: {}, release: "10.0.22631" });
+    // Simulate `wsl -l -q`'s real UTF-16LE-decoded-as-UTF-8 output: ASCII
+    // characters interleaved with NUL bytes.
+    const rawDistroOutput = "Ubuntu-22.04".split("").join("\0") + "\0\r\n";
+    const ctx = {
+      cwd: "C:\\Users\\testuser\\projects\\repo",
+      exec: (cmd, args) => {
+        assert.equal(cmd, "wsl");
+        assert.deepEqual(args, ["-l", "-q"]);
+        return rawDistroOutput;
+      },
+    };
+    const existsSyncFn = (p) => p === "\\\\wsl.localhost\\Ubuntu-22.04\\home\\testuser\\.claude\\forgedock";
+    const res = detectCrossEnvInstall(ctx, envInfo, { existsSyncFn });
+    assert.equal(res.conflict, true);
+    assert.equal(res.direction, "wsl");
+    assert.equal(res.otherPath, "\\\\wsl.localhost\\Ubuntu-22.04\\home\\testuser\\.claude\\forgedock");
+  });
+
+  it("Windows -> WSL: falls back to the \\\\wsl$\\ UNC root when \\\\wsl.localhost\\ isn't found", () => {
+    const envInfo = detectEnvironment({ platform: "win32", env: {}, release: "10.0.22631" });
+    const ctx = {
+      cwd: "C:\\Users\\testuser\\projects\\repo",
+      exec: () => "Ubuntu\0\r\n",
+    };
+    const existsSyncFn = (p) => p === "\\\\wsl$\\Ubuntu\\home\\testuser\\.claude\\forgedock";
+    const res = detectCrossEnvInstall(ctx, envInfo, { existsSyncFn });
+    assert.equal(res.conflict, true);
+    assert.equal(res.direction, "wsl");
+  });
+
+  it("Windows -> WSL: no conflict when `wsl` isn't installed/on PATH (common case)", () => {
+    const envInfo = detectEnvironment({ platform: "win32", env: {}, release: "10.0.22631" });
+    const ctx = {
+      cwd: "C:\\Users\\testuser\\projects\\repo",
+      exec: () => { throw new Error("ENOENT: wsl"); },
+    };
+    const res = detectCrossEnvInstall(ctx, envInfo, { existsSyncFn: () => true });
+    assert.equal(res.conflict, false);
+  });
+
+  it("Windows -> WSL: no conflict when distros exist but none has a ForgeDock install", () => {
+    const envInfo = detectEnvironment({ platform: "win32", env: {}, release: "10.0.22631" });
+    const ctx = {
+      cwd: "C:\\Users\\testuser\\projects\\repo",
+      exec: () => "Ubuntu\0\r\n",
+    };
+    const res = detectCrossEnvInstall(ctx, envInfo, { existsSyncFn: () => false });
+    assert.equal(res.conflict, false);
+  });
+
+  it("Windows -> WSL: no conflict, no crash when cwd isn't under <drive>:\\Users\\<user>", () => {
+    const envInfo = detectEnvironment({ platform: "win32", env: {}, release: "10.0.22631" });
+    let execCalled = false;
+    const ctx = {
+      cwd: "C:\\ForgeDock\\repo",
+      exec: () => { execCalled = true; return "Ubuntu\0\r\n"; },
+    };
+    const res = detectCrossEnvInstall(ctx, envInfo, { existsSyncFn: () => true });
+    assert.equal(res.conflict, false);
+    assert.equal(execCalled, false); // never enumerates distros — path shape doesn't apply
+  });
+
+  it("macOS/Linux (non-WSL, non-Windows): no conflict, never probes anything", () => {
+    const envInfo = detectEnvironment({ platform: "darwin", env: {} });
+    let called = false;
+    const ctx = {
+      cwd: "/Users/testuser/projects/repo",
+      exec: () => { called = true; return ""; },
+    };
+    const res = detectCrossEnvInstall(ctx, envInfo, { existsSyncFn: () => { called = true; return true; } });
+    assert.equal(res.conflict, false);
+    assert.equal(called, false);
+  });
+
+  it("never throws even when existsSyncFn itself throws", () => {
+    const envInfo = detectEnvironment({ platform: "linux", env: { WSL_DISTRO_NAME: "Ubuntu" } });
+    const ctx = { cwd: "/mnt/c/Users/testuser/repo", exec: () => "" };
+    assert.doesNotThrow(() => {
+      const res = detectCrossEnvInstall(ctx, envInfo, {
+        existsSyncFn: () => { throw new Error("boom"); },
+      });
+      assert.equal(res.conflict, false);
+    });
   });
 });
 

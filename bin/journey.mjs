@@ -272,7 +272,7 @@ import {
   renderMark, ember, shimmer, revealRows, moltenBar, fixCard,
   colorMode, motionEnabled, CHROME_STOPS, HERO_MARK, COMPACT_MARK, sleep,
 } from "./cinema.mjs";
-import { detectEnvironment } from "./env-detect.mjs";
+import { detectEnvironment, wslPathToWindows } from "./env-detect.mjs";
 
 // ---------------------------------------------------------------------------
 // URL opener (default openFn implementation — injectable for tests)
@@ -761,6 +761,102 @@ async function linkPipelineScripts(ctx) {
 }
 
 /**
+ * Detect whether this repo is also installed from the "other" environment —
+ * WSL vs native Windows — for the SAME physical repo (forge#1893).
+ *
+ * ForgeDock installs are always global (`~/.claude` — see #1589's split-brain
+ * finding: there is no per-repo install state), so there is no per-repo
+ * install record to compare directly. Instead: when the repo itself is
+ * reachable from both sides, the *other* environment's home directory is
+ * directly derivable, and its `.claude/forgedock` manifest dir (written by
+ * `forge()` below) tells us whether ForgeDock has ever run there.
+ *
+ * Two directions:
+ *   - WSL → Windows: well-defined. If `ctx.cwd` is under
+ *     `/mnt/<drive>/Users/<user>/...`, that's a live bind mount onto the
+ *     Windows drive — the Windows home for that same user is
+ *     `/mnt/<drive>/Users/<user>`, directly checkable through the mount, no
+ *     cross-OS trickery needed.
+ *   - Windows → WSL: best-effort. If `ctx.cwd` is under
+ *     `<drive>:\Users\<user>\...`, enumerate installed WSL distros
+ *     (`wsl -l -q`) and probe each one's
+ *     `\\wsl.localhost\<distro>\home\<user>\.claude\forgedock` (falling back
+ *     to the older `\\wsl$\<distro>\...` UNC root), guessing the Linux
+ *     username equals the Windows username. A wrong guess only produces a
+ *     false NEGATIVE (silently skips a real conflict) — never a false
+ *     positive, matching this feature's "no false positives" requirement.
+ *
+ * Never throws — any failure (WSL not installed, `wsl -l -q` unavailable,
+ * an inaccessible/slow UNC path, or a `cwd` that doesn't match either shape)
+ * degrades to "no conflict".
+ *
+ * @param {{ cwd: string, exec: (cmd: string, args: string[]) => string }} ctx
+ * @param {import('./env-detect.mjs').EnvironmentInfo} envInfo
+ * @param {{ existsSyncFn?: (p: string) => boolean }} [deps] - inject for tests;
+ *   defaults to the real `fs.existsSync`.
+ * @returns {{ conflict: boolean, otherPath: string | null, direction: "windows" | "wsl" | null }}
+ */
+export function detectCrossEnvInstall(ctx, envInfo, deps = {}) {
+  const existsSyncFn = deps.existsSyncFn ?? existsSync;
+  const none = { conflict: false, otherPath: null, direction: null };
+
+  try {
+    const cwd = String(ctx.cwd ?? "");
+
+    if (envInfo.isWSL) {
+      const m = cwd.match(/^(\/mnt\/[a-z])\/Users\/([^/]+)/i);
+      if (!m) return none;
+      const windowsHomeOnMount = `${m[1]}/Users/${m[2]}`;
+      const checkPath = `${windowsHomeOnMount}/.claude/forgedock`;
+      if (existsSyncFn(checkPath)) {
+        return { conflict: true, otherPath: wslPathToWindows(checkPath) ?? checkPath, direction: "windows" };
+      }
+      return none;
+    }
+
+    if (envInfo.platform === "win32") {
+      const m = cwd.match(/^([a-zA-Z]):[\\/]Users[\\/]([^\\/]+)/);
+      if (!m) return none;
+      const user = m[2];
+
+      let distros = [];
+      try {
+        const raw = ctx.exec("wsl", ["-l", "-q"]);
+        // `wsl -l -q` prints its distro list as UTF-16LE. `ctx.exec` decodes
+        // process output as UTF-8, so ASCII characters come back interleaved
+        // with NUL bytes (e.g. "Ubuntu" -> "U\0b\0u\0n\0t\0u\0"). Strip them
+        // before splitting into lines.
+        distros = raw
+          .replace(/\0/g, "")
+          .split(/\r?\n/)
+          .map((s) => s.trim())
+          .filter(Boolean);
+      } catch {
+        return none; // WSL not installed, or `wsl` isn't on PATH — no conflict possible.
+      }
+
+      for (const distro of distros) {
+        for (const root of [`\\\\wsl.localhost\\${distro}`, `\\\\wsl$\\${distro}`]) {
+          const checkPath = `${root}\\home\\${user}\\.claude\\forgedock`;
+          try {
+            if (existsSyncFn(checkPath)) {
+              return { conflict: true, otherPath: checkPath, direction: "wsl" };
+            }
+          } catch {
+            // Inaccessible/unresponsive UNC path — treat as not found, try the next one.
+          }
+        }
+      }
+      return none;
+    }
+
+    return none;
+  } catch {
+    return none;
+  }
+}
+
+/**
  * Act II: link commands into ~/.claude/commands with a molten progress line,
  * then register the SessionStart hook.
  * Symlink semantics preserved verbatim from the original install():
@@ -981,6 +1077,27 @@ export async function forge(ctx) {
       "or OS temp cleanup. If that happens, the SessionStart hook silently stops",
       "injecting ForgeDock context — no error is shown.",
       "Mitigation: npm install -g forgedock  (or re-run npx forgedock periodically).",
+    ], ctx.mode) + "\n");
+  }
+
+  // Cross-environment install advisory (forge#1893): warn when this repo is
+  // reachable from both WSL and native Windows and BOTH sides already have a
+  // ForgeDock install. Each environment's install is fully independent (see
+  // #1589 — installs are always global, never per-repo), so running from
+  // both silently leaves forge.yaml/hook paths pointing at whichever side ran
+  // most recently, clobbering the other's config with no error surfaced.
+  // Advisory only — never fails the install.
+  const envInfo = detectEnvironment({ platform: ctx.platform, env: ctx.env, release: ctx.release });
+  const crossEnv = detectCrossEnvInstall(ctx, envInfo);
+  if (crossEnv.conflict) {
+    const otherLabel = crossEnv.direction === "windows" ? "a native Windows" : "a WSL";
+    w.write(`  ${glyph(false)} ${otherLabel} ForgeDock install detected for this repo ${dimLine(ctx, crossEnv.otherPath)}\n`);
+    w.write(fixCard([
+      `This repo is reachable from both WSL and native Windows, and ${otherLabel}`,
+      "install already exists. Each side's install is independent — running",
+      "forgedock from both can leave forge.yaml and hook paths pointing at",
+      "whichever environment ran last, silently overwriting the other's config.",
+      "Mitigation: pick one environment for this repo, or sync forge.yaml manually.",
     ], ctx.mode) + "\n");
   }
 
