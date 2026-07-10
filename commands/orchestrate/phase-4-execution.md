@@ -680,6 +680,51 @@ done
 
 6. **Handle predecessor failures** — if a completed agent's issue classifies as `FAILED` (`workflow:invalid`, or an explicit build/test error — see Predecessor Classification above; `needs-human` and `workflow:awaiting-merge` are GATED, not FAILED — see item 6.5), check for dependent issues in the DAG. Mark all transitive dependents as "skipped — dependency #{X} failed" and report them. Do NOT dispatch them.
 
+6.4. **Auto-dispatch remediation against a `needs-human`-gated predecessor's own PR** <!-- Added: forge#1813 --> — item 6.5 below tracks the *dependents* of a `GATED` predecessor; this item handles the predecessor's own PR, which item 6.5/6.6 never re-drive on their own. Run this check whenever a completed agent's issue classifies `GATED` **specifically via `needs-human`** — NOT `workflow:awaiting-merge`. That second state already means "remediated and re-reviewed to a clean verdict, just needs a human's merge click" (see forge#1810's guard) — dispatching remediation again would be redundant, not just wasteful, since there is nothing left to fix.
+
+   ```bash
+   PRED_CURRENT_LABEL=$(gh issue view "$PRED" -R {GH_REPO} --json labels \
+     --jq '[.labels[].name | select(. == "needs-human" or . == "workflow:awaiting-merge")] | .[0] // empty' 2>/dev/null)
+
+   if [ "$PRED_CURRENT_LABEL" = "needs-human" ]; then
+     # Resolve PRED's open PR using the anchored search (forge#1634/#1646 precedent —
+     # never a bare-number search, which would misattribute an unrelated PR).
+     GATING_PR=$(gh pr list -R {GH_REPO} --state open --search "\"Closes #${PRED}\" in:body" \
+       --json number --jq '.[0].number // empty' 2>/dev/null || echo "")
+
+     if [ -n "$GATING_PR" ]; then
+       # Idempotency guard: only one remediation attempt per PR, ever (single-attempt
+       # semantics — remediate.md's own Phase M0 enforces this too, but checking here
+       # avoids spawning a redundant agent that would immediately no-op on entry).
+       ALREADY_REMEDIATED=$(gh api repos/{GH_REPO}/issues/${GATING_PR}/comments \
+         --jq '[.[] | select(.body | contains("FORGE:REMEDIATION"))] | length' 2>/dev/null || echo "0")
+
+       if [ "$ALREADY_REMEDIATED" -eq 0 ]; then
+         echo "Dispatching remediation for #{PRED}'s gating PR #{GATING_PR} (needs-human)"
+         # Same Agent-spawn-fallback style as Step 4A's template — one background agent,
+         # whose sole job is to invoke /work-on in remediation mode and let it run to
+         # completion (AUTO-LANDED, HELD-AWAITING-MERGE, RE-ESCALATED, or UNFIXABLE — all
+         # are terminal-for-this-agent; see work-on/remediate.md Output).
+         Agent(
+           subagent_type="general-purpose",
+           model="{SUBAGENT_MODEL}",
+           description="Remediate PR #{GATING_PR} (needs-human, blocks #{PRED})",
+           run_in_background=true,
+           prompt="You are remediating GitHub PR #{GATING_PR} for the {PROJECT_NAME} project (repo: {GH_REPO}), which is currently held at `needs-human` on its linked issue #{PRED}.
+
+**YOUR MISSION**: Invoke `Skill(skill='work-on', args='{GATING_PR} --remediate --issue {PRED} --repo {GH_REPO} --gh-flag {GH_FLAG}')` and let it run to completion. This is a self-contained flow: it checks out the PR branch, fixes any fixable review findings, re-reviews, and either auto-lands the PR, holds it at `workflow:awaiting-merge` for a human, re-escalates back to `needs-human`, or reports the block as policy-level and unfixable. Do NOT intervene manually — do not run raw git/gh commands yourself.
+
+**DO NOT STOP EARLY**: if the Skill call returns without a terminal `REMEDIATE_RESULT.status`, invoke it again — it re-reads GitHub state and resumes. Terminal statuses are: `COMPLETE`, `ALREADY_DONE`, `UNFIXABLE`, `BLOCKED`.
+
+Do not ask the user questions — you are running autonomously in the background."
+         )
+       fi
+     fi
+   fi
+   ```
+
+   This satisfies #1809 Q2 (the orchestrator auto-dispatches remediation against the gated predecessor itself — the exact gap forge#1812's item 6.5/6.6 left open, since those items only ever track and wake *dependents*, never the gated PR's own remediation). The remediation agent's outcome is picked up on the **next** completion-monitoring cycle of this same Step 4B loop: if it lands (`workflow:merged`), item 6.6 below fires normally and wakes any `blocked-on-human-merge` dependents; if it holds/re-escalates, the predecessor simply remains `GATED` and item 6.5 continues tracking its dependents unchanged.
+
 6.5. **Handle predecessor gating** (`GATED` — `needs-human` or `workflow:awaiting-merge`) <!-- Added: forge#1812 --> — if a completed agent's issue classifies as `GATED`, its direct dependents are neither dispatched nor marked failed/skipped. For each direct dependent `DEP` of the gated predecessor `PRED`:
    ```bash
    # Resolve PRED's open PR, if any, using the anchored search (forge#1634/#1646 precedent —

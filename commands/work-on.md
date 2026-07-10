@@ -245,6 +245,38 @@ Extract project prefix and issue number. If `next`/`pick`: list open issues sort
 
 **Optional pre-flight**: Before committing to the full pipeline, run `/scope {NUMBER}` to get a complexity estimate (affected files, blast radius, risk flags, and decomposition recommendation). Especially useful for large or ambiguous issues.
 
+### 0A.1: Remediation Mode Detection (`--remediate`) <!-- Added: forge#1813 -->
+
+**Check first, before any other Phase 0 routing** — if `$ARGUMENTS` contains `--remediate`, this is NOT a normal issue-pipeline invocation. The first positional argument is a **PR number**, not an issue number:
+
+```bash
+if echo "$ARGUMENTS" | grep -qE -- '--remediate\b'; then
+  REMEDIATE_PR_NUMBER=$(echo "$ARGUMENTS" | grep -oP '^\s*\K[0-9]+' | head -1)
+  REMEDIATE_ISSUE_FLAG=""
+  REMEDIATE_ISSUE_NUMBER=$(echo "$ARGUMENTS" | grep -oP -- '--issue\s+\K[0-9]+' | head -1)
+  [ -n "$REMEDIATE_ISSUE_NUMBER" ] && REMEDIATE_ISSUE_FLAG="--issue ${REMEDIATE_ISSUE_NUMBER}"
+
+  if [ -z "$REMEDIATE_PR_NUMBER" ]; then
+    echo "ERROR: --remediate requires a PR number as the first argument, e.g. /work-on 1234 --remediate"
+    exit 1
+  fi
+
+  echo "Remediation mode: routing PR #${REMEDIATE_PR_NUMBER} to work-on/remediate (issue flag: ${REMEDIATE_ISSUE_FLAG:-<resolved from PR body>})"
+fi
+```
+
+If detected, dispatch immediately and STOP — do NOT fall through to Phase 0B's normal issue-number resume logic (an issue number is not even known yet; `work-on/remediate.md` Phase M0 resolves it):
+
+```
+Skill(skill="work-on/remediate", args="${REMEDIATE_PR_NUMBER} ${REMEDIATE_ISSUE_FLAG} --repo {GH_REPO} --gh-flag {GH_FLAG}")
+```
+
+**After `REMEDIATE_RESULT` returns, STOP unconditionally** — do not run any further Phase 0–7 logic in this file. `work-on/remediate.md` is self-contained: when `re_gate_outcome: AUTO-LANDED`, it drives its own close phase internally (Phase M8 invokes `Skill("work-on:close", ...)` directly) before returning. For every other outcome (`HELD-AWAITING-MERGE`, `RE-ESCALATED`, `UNFIXABLE`, `BLOCKED`, `ALREADY_DONE`), the issue is already at a terminal state (`workflow:awaiting-merge` or `needs-human`, or already closed) per the Universal Phase Dispatcher — nothing further to do.
+
+This mode is reachable both standalone (a human or script running `/work-on <pr> --remediate` directly) and via the orchestrator (`commands/orchestrate/phase-4-execution.md` item 6.4 auto-dispatches the identical `Skill(skill='work-on', args='{PR} --remediate --issue {N} ...')` invocation against a `needs-human`-gated predecessor's own PR).
+
+**Skip this entire section if `--remediate` is absent from `$ARGUMENTS`** — proceed to the normal parse below.
+
 ### 0A.5: Post Heartbeat Annotation (orchestration-only)
 
 **Skip entirely if `UNDER_ORCHESTRATION` is `false`** — a solo run has no stall detector polling comment timestamps, so this write has zero consumer. Do not post it "just in case."
