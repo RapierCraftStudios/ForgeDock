@@ -603,6 +603,48 @@ describe("detectCrossEnvInstall (forge#1893)", () => {
       assert.equal(res.conflict, false);
     });
   });
+
+  it("Windows -> WSL: probe loop is bounded by distro count — stops after the cap even with more distros registered (forge#1917)", () => {
+    const envInfo = detectEnvironment({ platform: "win32", env: {}, release: "10.0.22631" });
+    // 8 registered distros, none has a ForgeDock install — more than the cap.
+    const rawDistroOutput = ["one", "two", "three", "four", "five", "six", "seven", "eight"]
+      .map((d) => d.split("").join("\0") + "\0")
+      .join("\r\n");
+    const ctx = {
+      cwd: "C:\\Users\\testuser\\projects\\repo",
+      exec: () => rawDistroOutput,
+    };
+    let probeCount = 0;
+    const res = detectCrossEnvInstall(ctx, envInfo, {
+      existsSyncFn: () => { probeCount++; return false; },
+    });
+    assert.equal(res.conflict, false);
+    // 2 UNC roots probed per distro; capped at 5 distros = 10 probes max.
+    assert.ok(probeCount <= 10, `expected at most 10 probes (5 distros x 2 roots), got ${probeCount}`);
+    assert.ok(probeCount > 0);
+  });
+
+  it("Windows -> WSL: probe loop stops early once the wall-clock budget is exhausted (forge#1917)", () => {
+    const envInfo = detectEnvironment({ platform: "win32", env: {}, release: "10.0.22631" });
+    const rawDistroOutput = ["one", "two", "three"].map((d) => d.split("").join("\0") + "\0").join("\r\n");
+    const ctx = {
+      cwd: "C:\\Users\\testuser\\projects\\repo",
+      exec: () => rawDistroOutput,
+    };
+    // Fake clock: first call establishes the deadline, every call after that
+    // reports time already past the budget — so only the very first probe
+    // (checked against the deadline established on the same first call) can
+    // still run before the loop bails.
+    let tick = 0;
+    const nowFn = () => (tick++ === 0 ? 0 : 999999);
+    let probeCount = 0;
+    const res = detectCrossEnvInstall(ctx, envInfo, {
+      nowFn,
+      existsSyncFn: () => { probeCount++; return false; },
+    });
+    assert.equal(res.conflict, false);
+    assert.equal(probeCount, 0); // deadline already exceeded before the first probe check
+  });
 });
 
 describe("forge (Act II)", () => {
