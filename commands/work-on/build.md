@@ -380,18 +380,25 @@ GATE_PASS=true
 FAILED_CHECKS=""
 
 while IFS= read -r check_line; do
-  ID=$(echo "$check_line"    | sed -n 's/.*id=\([^ ]*\).*/\1/p')
-  TYPE=$(echo "$check_line"  | sed -n 's/.*type=\([^ ]*\).*/\1/p')
+  # description= is always the LAST field in the wire format (investigate.md) and is unconstrained
+  # free text — if it contains a key="value"-shaped substring (e.g. `description=works when target="prod"`),
+  # a greedy `.*field=` sed prefix matches the LAST occurrence on the line (inside description=) instead
+  # of the real field. Strip everything from the first description= onward before extracting any other
+  # field, so description= text can never be mistaken for id=/type=/target=/matcher=. Falls back to the
+  # full line unchanged if description= is absent (no-op, safe for malformed lines).
+  PREFIX="${check_line%%description=*}"
+  ID=$(echo "$PREFIX"    | sed -n 's/.*id=\([^ ]*\).*/\1/p')
+  TYPE=$(echo "$PREFIX"  | sed -n 's/.*type=\([^ ]*\).*/\1/p')
   # target=/matcher= are quoted (target="..." matcher="...") per the investigate.md wire format —
   # quoting is required so multi-word/piped shell-command values (e.g. `target="grep -qE '...' file"`)
   # survive extraction instead of being truncated at the first space. Fall back to the legacy
   # unquoted [^ ]* extraction only for older ACCEPTANCE_CHECK comments emitted before this fix
   # (still correct for single-token exists/contains targets; multi-word legacy targets remain
   # truncated until the issue's investigation is re-run to emit the quoted format).
-  TARGET=$(echo "$check_line"| sed -n 's/.*target="\([^"]*\)".*/\1/p')
-  [ -z "$TARGET" ] && TARGET=$(echo "$check_line"| sed -n 's/.*target=\([^ ]*\).*/\1/p')
-  MATCHER=$(echo "$check_line"| sed -n 's/.*matcher="\([^"]*\)".*/\1/p')
-  [ -z "$MATCHER" ] && MATCHER=$(echo "$check_line"| sed -n 's/.*matcher=\([^ ]*\).*/\1/p')
+  TARGET=$(echo "$PREFIX"| sed -n 's/.*target="\([^"]*\)".*/\1/p')
+  [ -z "$TARGET" ] && TARGET=$(echo "$PREFIX"| sed -n 's/.*target=\([^ ]*\).*/\1/p')
+  MATCHER=$(echo "$PREFIX"| sed -n 's/.*matcher="\([^"]*\)".*/\1/p')
+  [ -z "$MATCHER" ] && MATCHER=$(echo "$PREFIX"| sed -n 's/.*matcher=\([^ ]*\).*/\1/p')
   DESC=$(echo "$check_line"  | sed -n 's/.*description=\(.*\)/\1/p')
 
   [ "$TYPE" = "skipped" ] && continue
