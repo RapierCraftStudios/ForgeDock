@@ -15,6 +15,7 @@ import {
 } from "fs";
 import { execSync, execFileSync } from "child_process";
 import { homedir } from "os";
+import https from "https";
 import {
   makeCtx,
   runJourney,
@@ -386,6 +387,86 @@ function getVersion() {
   } catch {
     return "";
   }
+}
+
+/**
+ * Compare two dotted version strings component-wise (numeric, not
+ * lexicographic — "1.9.0" must compare as older than "1.10.0").
+ * Non-numeric or missing components are treated as 0.
+ *
+ * @param {string} a
+ * @param {string} b
+ * @returns {number} negative if a < b, positive if a > b, 0 if equal
+ */
+function compareVersions(a, b) {
+  const pa = String(a).split(".").map((n) => Number(n) || 0);
+  const pb = String(b).split(".").map((n) => Number(n) || 0);
+  const len = Math.max(pa.length, pb.length);
+  for (let i = 0; i < len; i++) {
+    const na = pa[i] || 0;
+    const nb = pb[i] || 0;
+    if (na !== nb) return na - nb;
+  }
+  return 0;
+}
+
+/**
+ * Fetch the latest published version of the `forgedock` package straight
+ * from the npm registry over HTTPS.
+ *
+ * Deliberately does NOT shell out to `npm view` — on some Windows setups
+ * `execSync("npm view ...")` reliably hangs until the timeout kills it
+ * (npm.cmd spawned via cmd.exe), even though the same command runs
+ * instantly from an interactive shell. A direct registry request has no
+ * such dependency on npm being on PATH or well-behaved under a subshell,
+ * and matches what npm's own update-notifier does internally.
+ *
+ * Resolves to "" (never rejects) on any failure — offline, DNS failure,
+ * non-200 response, malformed JSON, or timeout — so callers can treat ""
+ * as "could not determine" without their own try/catch.
+ *
+ * @returns {Promise<string>} latest version string, or "" if unknown
+ */
+function fetchLatestVersion() {
+  return new Promise((resolve) => {
+    let settled = false;
+    const done = (value) => {
+      if (settled) return;
+      settled = true;
+      resolve(value);
+    };
+
+    try {
+      const req = https.get(
+        "https://registry.npmjs.org/forgedock/latest",
+        { timeout: 5000, headers: { Accept: "application/json" } },
+        (res) => {
+          if (res.statusCode !== 200) {
+            res.resume();
+            return done("");
+          }
+          let data = "";
+          res.on("data", (chunk) => (data += chunk));
+          res.on("end", () => {
+            try {
+              const json = JSON.parse(data);
+              done(typeof json.version === "string" ? json.version : "");
+            } catch {
+              done("");
+            }
+          });
+          res.on("error", () => done(""));
+        },
+      );
+      req.on("timeout", () => {
+        req.destroy();
+        done("");
+      });
+      req.on("error", () => done(""));
+    } catch {
+      done("");
+    }
+  });
 }
 
 function splash() {
@@ -1076,9 +1157,29 @@ async function update() {
       );
     }
   } else {
-    console.log(
-      `  Installed via npm. Run ${CYAN}npm update -g forgedock${RESET} to update.`,
-    );
+    // npm/npx install (no .git dir in FORGE_HOME) — most commonly the npx
+    // cache path (`npx forgedock`), which was never globally installed, so
+    // "npm update -g forgedock" is a no-op. Check the actual published
+    // version instead and give advice that reflects the real install model.
+    const localVersion = getVersion();
+    const latestVersion = await fetchLatestVersion();
+
+    if (!latestVersion) {
+      console.log(
+        `  ${YELLOW}Could not check npm for the latest version.${RESET} To force a refresh: ${CYAN}npx forgedock@latest${RESET}`,
+      );
+    } else if (!localVersion) {
+      console.log(
+        `  Latest published version is ${CYAN}v${latestVersion}${RESET}. To update: ${CYAN}npx forgedock@latest${RESET}`,
+      );
+    } else if (compareVersions(latestVersion, localVersion) > 0) {
+      console.log(
+        `  ${GREEN}New version available: v${latestVersion}${RESET} (you have v${localVersion}).`,
+      );
+      console.log(`  Run ${CYAN}npx forgedock@latest${RESET} to fetch it.`);
+    } else {
+      console.log(`  Already up to date (v${localVersion}).`);
+    }
     await relinkAndHint();
   }
   console.log("");
