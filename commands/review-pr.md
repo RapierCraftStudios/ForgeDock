@@ -1257,11 +1257,54 @@ DOMAIN_FILES_API=$(echo "$FILES" | grep -iE "router|route|endpoint|openapi|sdk|a
 
 ### 3C: Load Agent Templates & Launch
 
-**>>> INVOCATION: Read shared protocols + selected persona files:**
+**>>> MANDATORY TEMPLATE-RESOLUTION GUARD — run BEFORE any Read of persona templates:**
+
+Missing persona templates are a fatal setup error, not permission to skip multi-agent review. Resolve the template source through this ordered chain and STOP if none resolve — never fall through to reviewing inline in the main context:
+
+```bash
+# Tier 1: $FORGE_HOME (the installed location — the common case)
+TEMPLATE_BASE=""
+if [[ -f "$FORGE_HOME/commands/review-pr-agents/protocols.md" ]]; then
+  TEMPLATE_BASE="$FORGE_HOME/commands/review-pr-agents"
+  TEMPLATE_SOURCE="forge_home"
+else
+  # Tier 2: repo-path fallback — same resolution already used for the code index below.
+  # FORGE_YAML is resolved independently here (not yet loaded — that happens further
+  # down in this phase) so the guard does not depend on later-phase ordering.
+  FORGE_YAML="${FORGE_CONFIG:-$(git rev-parse --show-toplevel 2>/dev/null)/forge.yaml}"
+  REPO_PATH=$(yq '.paths.root' "$FORGE_YAML" 2>/dev/null || git rev-parse --show-toplevel 2>/dev/null || pwd)
+  if [[ -f "$REPO_PATH/commands/review-pr-agents/protocols.md" ]]; then
+    TEMPLATE_BASE="$REPO_PATH/commands/review-pr-agents"
+    TEMPLATE_SOURCE="repo_path"
+  elif [[ -f "$REPO_PATH/commands/review-pr-agents.md" ]]; then
+    # Tier 3: monolithic catalog — last resort, contains all personas + protocols in one file
+    TEMPLATE_BASE=""
+    MONOLITHIC_CATALOG="$REPO_PATH/commands/review-pr-agents.md"
+    TEMPLATE_SOURCE="monolithic_catalog"
+  else
+    TEMPLATE_SOURCE="none"
+  fi
+fi
+
+if [[ "$TEMPLATE_SOURCE" == "none" ]]; then
+  echo "FATAL: no review-pr-agents template source resolved (checked \$FORGE_HOME, repo-path fallback, monolithic catalog)."
+  # HARD STOP — post error, add needs-human, do NOT review
+fi
 ```
-Read: $FORGE_HOME/commands/review-pr-agents/protocols.md
-Read: $FORGE_HOME/commands/review-pr-agents/<persona>.md   (one per selected agent from Phase 3B)
+
+**If `TEMPLATE_SOURCE` is `none`**: HARD STOP. Post a PR comment explaining the setup is broken (`gh pr comment $ARGUMENTS --body "..."`) instructing the user to run `npx forgedock update` to repair the install, add `needs-human`, and exit Phase 3 without posting any findings or a `FORGE:REVIEW` verdict. **NEVER perform the review inline in the main agent context as a substitute.** A degraded solo review that presents itself as complete is worse than no review — missing templates must fail loudly, not silently.
+
+**If `TEMPLATE_SOURCE` is `forge_home` or `repo_path`** (the normal cases — behavior unchanged from before this guard existed):
 ```
+Read: $TEMPLATE_BASE/protocols.md
+Read: $TEMPLATE_BASE/<persona>.md   (one per selected agent from Phase 3B)
+```
+
+**If `TEMPLATE_SOURCE` is `monolithic_catalog`** (last-resort fallback):
+```
+Read: $MONOLITHIC_CATALOG
+```
+Then extract the shared protocols section and each selected persona's section from within that single file — same content, different packaging.
 
 Persona file names: `security.md` (always), `auth.md`, `billing.md`, `concurrency.md`, `scraper.md`, `frontend.md`, `api.md`, `database.md`, `infra.md`.
 See `review-pr-agents.md` for the full routing table mapping domains → persona files.
@@ -2116,6 +2159,18 @@ CURRENT_SHA=$(gh pr view $ARGUMENTS --json headRefOid --jq '.headRefOid')
 REVIEW_IS_STALE="false"
 if [ "$CURRENT_SHA" != "$REVIEW_SHA" ]; then REVIEW_IS_STALE="true"; fi
 ```
+
+**Verifiable agent count (MANDATORY — do not report a self-asserted `Agents: [N]` figure)** <!-- Added: forge#1849 -->
+
+A degraded run that skipped Task-based agent dispatch must be visible from this summary alone, without interrogating the agent afterward. Compute the actual launched-agent count from the `<!-- FORGE:REVIEW-AGENT:{domain} -->` comments each agent is required to post (Phase 3C), rather than trusting a free-text tally:
+
+```bash
+ACTUAL_AGENT_DOMAINS=$(gh api "repos/${REPO}/issues/${PR_NUMBER}/comments" \
+    --jq '[.[].body | scan("<!-- FORGE:REVIEW-AGENT:([a-z-]+) -->") | .[0]] | unique | join(", ")' 2>/dev/null || echo "")
+ACTUAL_AGENT_COUNT=$(echo "$ACTUAL_AGENT_DOMAINS" | tr ',' '\n' | grep -c '.' 2>/dev/null || echo 0)
+```
+
+Substitute `ACTUAL_AGENT_COUNT`/`ACTUAL_AGENT_DOMAINS` into the summary's `**Agents**: [N] ([names])` field below — do NOT substitute a manually-counted or remembered figure. If the agent's own recollection of what it launched disagrees with `ACTUAL_AGENT_COUNT` (e.g. it believes it ran agents but zero `FORGE:REVIEW-AGENT` comments exist), that mismatch itself is the signal this check exists to surface: report `ACTUAL_AGENT_COUNT` as-is (it is the ground truth) and add a note in the Recommendation section flagging the discrepancy — never suppress it to make the summary look complete. If `ACTUAL_AGENT_COUNT` is `0`, the review degraded to solo/inline mode (the exact failure mode this guard exists to catch) and the verdict MUST reflect that (`NEEDS RE-REVIEW`), regardless of what analysis was performed inline.
 
 ```bash
 gh pr comment $ARGUMENTS --body "$(cat <<'EOF'

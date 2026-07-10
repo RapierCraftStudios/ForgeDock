@@ -435,7 +435,37 @@ gh pr comment ${PR_NUMBER} -R ${GH_REPO} --body "<!-- FORGE:REVIEW-AGENT:code-qu
 
 ## Phase 5: Security & Billing Deep Dive
 
-Read agent catalog from `.claude/commands/review-pr-agents.md`. Launch domain-specific agents based on which domains have changes. Substitute PR diff commands with staging diff commands. Agents: General Security (always), Auth, Billing, Concurrency, Scraper, API Design, Database, Infrastructure.
+**MANDATORY TEMPLATE-RESOLUTION GUARD — run BEFORE reading the agent catalog:**
+
+Missing persona templates are a fatal setup error, not permission to skip multi-agent review. Resolve the template source through this ordered chain (identical to the one used by `/review-pr` Phase 3C — do not diverge) and STOP if none resolve — never fall through to reviewing inline in the main context:
+
+```bash
+TEMPLATE_BASE=""
+if [[ -f "$FORGE_HOME/commands/review-pr-agents/protocols.md" ]]; then
+  TEMPLATE_BASE="$FORGE_HOME/commands/review-pr-agents"
+  TEMPLATE_SOURCE="forge_home"
+else
+  FORGE_YAML="${FORGE_CONFIG:-$(git rev-parse --show-toplevel 2>/dev/null)/forge.yaml}"
+  REPO_PATH=$(yq '.paths.root' "$FORGE_YAML" 2>/dev/null || git rev-parse --show-toplevel 2>/dev/null || pwd)
+  if [[ -f "$REPO_PATH/commands/review-pr-agents/protocols.md" ]]; then
+    TEMPLATE_BASE="$REPO_PATH/commands/review-pr-agents"
+    TEMPLATE_SOURCE="repo_path"
+  elif [[ -f "$REPO_PATH/commands/review-pr-agents.md" ]]; then
+    MONOLITHIC_CATALOG="$REPO_PATH/commands/review-pr-agents.md"
+    TEMPLATE_SOURCE="monolithic_catalog"
+  else
+    TEMPLATE_SOURCE="none"
+  fi
+fi
+```
+
+**If `TEMPLATE_SOURCE` is `none`**: HARD STOP. Post a PR comment explaining the setup is broken, instructing the user to run `npx forgedock update` to repair the install, add `needs-human`, and exit without posting any findings or a verdict. **NEVER perform the review inline in the main agent context as a substitute.**
+
+**If `TEMPLATE_SOURCE` is `forge_home` or `repo_path`** (normal cases — behavior unchanged): `Read: $TEMPLATE_BASE/protocols.md` and `Read: $TEMPLATE_BASE/<persona>.md` per selected agent.
+
+**If `TEMPLATE_SOURCE` is `monolithic_catalog`** (last resort): `Read: $MONOLITHIC_CATALOG` and extract the shared protocols section plus each selected persona's section from within that single file.
+
+Launch domain-specific agents based on which domains have changes. Substitute PR diff commands with staging diff commands. Agents: General Security (always), Auth, Billing, Concurrency, Scraper, API Design, Database, Infrastructure.
 
 **MANDATORY — each domain agent MUST post its findings directly to the PR immediately upon completion** (not batched by the orchestrator):
 ```bash
