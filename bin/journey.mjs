@@ -388,7 +388,7 @@ export async function preflight(ctx) {
   w.write("\n");
   await shimmer(HERO_MARK, CHROME_STOPS, { mode: ctx.mode, motion: ctx.motion, writer: w });
   w.write("\n  " + ember("F O R G E D O C K", ctx.mode) + "\n");
-  w.write("  " + dimLine(ctx, "──── lighting the forge ────────────────────") + "\n\n");
+  w.write("  " + dimLine(ctx, `──── ${getLogoTagline("install")} ────────────────────`) + "\n\n");
 
   const rows = [
     {
@@ -1388,7 +1388,7 @@ export async function forge(ctx) {
       "or OS temp cleanup. If that happens, the SessionStart hook silently stops",
       "injecting ForgeDock context — no error is shown.",
       "Mitigation: npm install -g forgedock  (or re-run npx forgedock periodically).",
-    ], ctx.mode) + "\n");
+    ], ctx.mode, "warning") + "\n");
   }
 
   // Cross-environment install advisory (forge#1893): warn when this repo is
@@ -1409,7 +1409,7 @@ export async function forge(ctx) {
       "forgedock from both can leave forge.yaml and hook paths pointing at",
       "whichever environment ran last, silently overwriting the other's config.",
       "Mitigation: pick one environment for this repo, or sync forge.yaml manually.",
-    ], ctx.mode) + "\n");
+    ], ctx.mode, "warning") + "\n");
   }
 
   // Report enforcement hook status.
@@ -1437,7 +1437,7 @@ export async function forge(ctx) {
 
 import { detectConfig } from "./init-detect.mjs";
 import { enrich } from "./init-enrich-api.mjs";
-import { annotatedReviewScreen, box, confirm } from "./tui.mjs";
+import { annotatedReviewScreen, box, confirm, getLogoTagline } from "./tui.mjs";
 
 const badgeOf = (field) => field.confidence;
 
