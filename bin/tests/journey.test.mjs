@@ -876,6 +876,13 @@ describe("celebrate (Act V)", () => {
     assert.match(w.text, /install GitHub App/i);
     assert.match(w.text, /rapiercraft-forgedock/);
   });
+
+  it("mentions uninstall and the full help command so removal is discoverable (#1881)", () => {
+    const { ctx, w } = stubCtx({});
+    celebrate(ctx, { written: true, todoCount: 0, total: 5, hookStatus: "installed" });
+    assert.match(w.text, /npx forgedock uninstall/);
+    assert.match(w.text, /npx forgedock help/);
+  });
 });
 
 // ---------------------------------------------------------------------------
