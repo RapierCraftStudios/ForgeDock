@@ -590,6 +590,18 @@ describe("renderLogo — context-based tagline", () => {
     assert.ok(result.includes("GitHub as a knowledge graph for AI agents"),
       "omitted context must fall back to the default tagline");
   });
+
+  it("falls back to the default tagline for Object.prototype-colliding contexts", () => {
+    for (const context of ["__proto__", "constructor", "toString", "hasOwnProperty", "valueOf"]) {
+      const result = renderLogo({ context });
+      assert.ok(result.includes("GitHub as a knowledge graph for AI agents"),
+        `context '${context}' must fall back to the default tagline, not a prototype member`);
+      assert.ok(!/\[native code\]/.test(result),
+        `context '${context}' must not leak a native-code function string`);
+      assert.ok(!result.includes("function Object()"),
+        `context '${context}' must not leak the Object constructor's string form`);
+    }
+  });
 });
 
 // ---------------------------------------------------------------------------

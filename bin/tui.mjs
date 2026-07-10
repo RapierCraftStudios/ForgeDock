@@ -1625,7 +1625,9 @@ const LOGO_TAGLINES = {
  * @returns {string} Rendered logo string (may contain ANSI sequences)
  */
 export function renderLogo({ version = "", context = "" } = {}) {
-  const tagline = LOGO_TAGLINES[context] || DEFAULT_TAGLINE;
+  const tagline = Object.hasOwn(LOGO_TAGLINES, context)
+    ? LOGO_TAGLINES[context]
+    : DEFAULT_TAGLINE;
   const versionStr = version ? `ForgeDock · v${version}` : "ForgeDock";
 
   if (!USE_TRUECOLOR) {
