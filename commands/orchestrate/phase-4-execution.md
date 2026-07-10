@@ -307,8 +307,12 @@ TOKEN_DEFERRED=()   # findings deferred by the token-budget rule this run (re-ev
 # Surface-area batching accumulators (forge#1818), promoted to batch scope here so the
 # Step 6B report (forge#1858) sees the full-run total instead of only the last Step 4C
 # completion cycle to touch them. SURFACE_FILE_MEMBERS (the per-cycle file->members grouping
-# map used inside Step 4C) is intentionally re-declared fresh each cycle — it is rebuilt from
-# the current QUEUED_FINDINGS every time and carries no cross-cycle state of its own.
+# map used inside Step 4C) is rebuilt from the current QUEUED_FINDINGS every cycle and must
+# carry no cross-cycle state of its own — but `declare -A` alone does NOT guarantee this: on
+# an already-declared associative array it is a no-op on existing contents. Step 4C enforces
+# the freshness guarantee explicitly via `unset SURFACE_FILE_MEMBERS` immediately before its
+# `declare -A SURFACE_FILE_MEMBERS` each cycle (see below) — do not rely on re-declaration
+# alone. <!-- Added: forge#1909 -->
 SURFACE_BATCHED_FINDINGS=()   # all member issue numbers absorbed into a batch across the run
 SURFACE_BATCH_COUNT=0         # count of batch issues created across the run
 
@@ -1201,6 +1205,11 @@ Cascade-spawned findings collected within a single `/orchestrate` run never pass
 # classify the same issue body differently. <!-- forge#1837 -->
 # NOTE: SURFACE_BATCHED_FINDINGS and SURFACE_BATCH_COUNT are declared once in Step 4A.pre
 # (batch scope) — do NOT re-initialize them here, this block runs per-agent-completion cycle.
+# SURFACE_FILE_MEMBERS itself must NOT survive across cycles — `declare -A` on an
+# already-declared associative array is a no-op on its existing contents in bash, so an
+# explicit `unset` is required to actually clear it before each cycle repopulates it.
+# <!-- Added: forge#1909 -->
+unset SURFACE_FILE_MEMBERS
 declare -A SURFACE_FILE_MEMBERS
 
 # Defensive cap on gh issue view fan-out. QUEUED_FINDINGS is already bounded by
