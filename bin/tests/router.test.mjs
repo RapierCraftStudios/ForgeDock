@@ -579,4 +579,154 @@ describe("doctor: SessionStart hook script path integrity (Check 5c, forge#1895)
     assert.match(res.stdout, /ephemeral npm\/npx\/pnpm\/yarn cache/i);
     assert.match(res.stdout, /npm install -g forgedock/);
   });
+
+  it("doctor --fix refreshes a dangling hook script path (forge#1944)", () => {
+    const brokenPath = join(os.tmpdir(), "fd-hookcheck-fix-gone-", "bin", "hooks", "session-start.mjs");
+    const { home, cwd, extraEnv } = installThenBreakHookPath(brokenPath);
+
+    // Plain doctor still fails — --fix must never run implicitly.
+    const before = runCli(["doctor"], { cwd, home, extraEnv });
+    assert.equal(before.status, 1, before.stdout + before.stderr);
+    assert.match(before.stdout, /SessionStart hook script path/i);
+    assert.doesNotMatch(before.stdout, /auto-fixed/i);
+
+    const fixRes = runCli(["doctor", "--fix"], { cwd, home, extraEnv });
+    assert.equal(fixRes.status, 0, fixRes.stdout + fixRes.stderr);
+    assert.match(fixRes.stdout, /SessionStart hook script path/i);
+    assert.match(fixRes.stdout, /issue\(s\) auto-fixed/i);
+
+    // The registered entry must now point at a real, existing script.
+    const settings = JSON.parse(readFileSync(join(home, ".claude", "settings.json"), "utf-8"));
+    const commands = settings.hooks.SessionStart.flatMap((e) => e.hooks.map((h) => h.command));
+    const ours = commands.find((c) => c.includes("session-start.mjs"));
+    assert.ok(ours, "a SessionStart hook entry must still be registered");
+    assert.doesNotMatch(ours, /fd-hookcheck-fix-gone-/, "the dangling path must have been replaced");
+
+    // Idempotent: a second --fix run reports all-clear, no further fixes.
+    const secondFix = runCli(["doctor", "--fix"], { cwd, home, extraEnv });
+    assert.equal(secondFix.status, 0, secondFix.stdout + secondFix.stderr);
+    assert.doesNotMatch(secondFix.stdout, /issue\(s\) auto-fixed/i);
+  });
+});
+
+describe("doctor --fix (forge#1944)", () => {
+  function stubTools() {
+    const stubBin = mkdtempSync(join(os.tmpdir(), "fd-doctor-fix-stub-bin-"));
+    writeFileSync(join(stubBin, "gh"), "#!/bin/sh\necho 'gh version 2.60.0'\n", { mode: 0o755 });
+    writeFileSync(join(stubBin, "yq"), "#!/bin/sh\necho 'yq (https://github.com/mikefarah/yq/) version v4.44.0'\n", { mode: 0o755 });
+    return { PATH: `${stubBin}:${process.env.PATH}` };
+  }
+
+  function setupInstall() {
+    const home = mkdtempSync(join(os.tmpdir(), "fd-doctor-fix-home-"));
+    const cwd = mkdtempSync(join(os.tmpdir(), "fd-doctor-fix-cwd-"));
+    writeFileSync(
+      join(home, ".gitconfig"),
+      "[user]\n\tname = Test User\n\temail = test@example.com\n",
+      "utf-8",
+    );
+    const extraEnv = stubTools();
+    const installRes = runCli(["install", "--fast"], { cwd, home, extraEnv });
+    assert.equal(installRes.status, 0, installRes.stdout + installRes.stderr);
+    return { home, cwd, extraEnv };
+  }
+
+  it("repairs a stale copy-mode command file (Check 1) and is idempotent", () => {
+    const { home, cwd, extraEnv } = setupInstall();
+    const targetDir = join(home, ".claude", "commands");
+    const files = readFileSync(join(targetDir, "work-on.md"), "utf-8");
+    // Corrupt the installed copy so it no longer matches the source — this is
+    // the "stale copy" branch of Check 1's copy-mode detection.
+    writeFileSync(join(targetDir, "work-on.md"), files + "\nstale local edit\n", "utf-8");
+
+    const before = runCli(["doctor"], { cwd, home, extraEnv });
+    assert.equal(before.status, 1, before.stdout + before.stderr);
+    assert.match(before.stdout, /Command files/i);
+    assert.doesNotMatch(before.stdout, /auto-fixed/i);
+    assert.match(before.stdout, /doctor --fix/);
+
+    const fixRes = runCli(["doctor", "--fix"], { cwd, home, extraEnv });
+    assert.equal(fixRes.status, 0, fixRes.stdout + fixRes.stderr);
+    assert.match(fixRes.stdout, /Command files/i);
+    assert.match(fixRes.stdout, /issue\(s\) auto-fixed/i);
+
+    // Second consecutive --fix run reports no further fixes (idempotent).
+    const secondFix = runCli(["doctor", "--fix"], { cwd, home, extraEnv });
+    assert.equal(secondFix.status, 0, secondFix.stdout + secondFix.stderr);
+    assert.doesNotMatch(secondFix.stdout, /issue\(s\) auto-fixed/i);
+  });
+
+  it("re-registers a completely missing SessionStart hook (Check 5)", () => {
+    const { home, cwd, extraEnv } = setupInstall();
+    const settingsPath = join(home, ".claude", "settings.json");
+    const settings = JSON.parse(readFileSync(settingsPath, "utf-8"));
+    // Simulate the hook entry having been wiped out entirely (not merely
+    // pointing at a dangling path — that's Check 5c's scenario).
+    settings.hooks.SessionStart = [];
+    writeFileSync(settingsPath, JSON.stringify(settings, null, 2), "utf-8");
+
+    const before = runCli(["doctor"], { cwd, home, extraEnv });
+    assert.equal(before.status, 1, before.stdout + before.stderr);
+    assert.match(before.stdout, /SessionStart hook\b/);
+
+    const fixRes = runCli(["doctor", "--fix"], { cwd, home, extraEnv });
+    assert.equal(fixRes.status, 0, fixRes.stdout + fixRes.stderr);
+    assert.match(fixRes.stdout, /SessionStart hook\b/);
+    assert.match(fixRes.stdout, /issue\(s\) auto-fixed/i);
+
+    const after = JSON.parse(readFileSync(settingsPath, "utf-8"));
+    assert.ok(
+      after.hooks.SessionStart.some((e) =>
+        e.hooks.some((h) => typeof h.command === "string" && h.command.includes("session-start.mjs")),
+      ),
+      "hook entry must be re-registered",
+    );
+  });
+
+  it("removes a legacy CLAUDE.md managed block (Check 6)", () => {
+    const { home, cwd, extraEnv } = setupInstall();
+    writeFileSync(
+      join(cwd, "CLAUDE.md"),
+      "# Notes\n\n<!-- BEGIN FORGEDOCK -->\nSome legacy injected content.\n<!-- END FORGEDOCK -->\n\nUser content below.\n",
+      "utf-8",
+    );
+
+    const before = runCli(["doctor"], { cwd, home, extraEnv });
+    assert.equal(before.status, 0, before.stdout + before.stderr);
+    assert.match(before.stdout, /CLAUDE\.md legacy block/i);
+    assert.match(before.stdout, /legacy ForgeDock block found/i);
+
+    const fixRes = runCli(["doctor", "--fix"], { cwd, home, extraEnv });
+    assert.equal(fixRes.status, 0, fixRes.stdout + fixRes.stderr);
+    assert.match(fixRes.stdout, /CLAUDE\.md legacy block/i);
+    assert.match(fixRes.stdout, /issue\(s\) auto-fixed/i);
+
+    const content = readFileSync(join(cwd, "CLAUDE.md"), "utf-8");
+    assert.doesNotMatch(content, /BEGIN FORGEDOCK/);
+    assert.match(content, /User content below\./);
+
+    const secondFix = runCli(["doctor", "--fix"], { cwd, home, extraEnv });
+    assert.equal(secondFix.status, 0, secondFix.stdout + secondFix.stderr);
+    assert.doesNotMatch(secondFix.stdout, /issue\(s\) auto-fixed/i);
+  });
+
+  it("plain `doctor` (no --fix) is unaffected — never auto-repairs, never prints an auto-fixed summary", () => {
+    const { home, cwd, extraEnv } = setupInstall();
+    const targetDir = join(home, ".claude", "commands");
+    const original = readFileSync(join(targetDir, "work-on.md"), "utf-8");
+    writeFileSync(join(targetDir, "work-on.md"), original + "\nstale local edit\n", "utf-8");
+
+    const res1 = runCli(["doctor"], { cwd, home, extraEnv });
+    assert.equal(res1.status, 1, res1.stdout + res1.stderr);
+    assert.doesNotMatch(res1.stdout, /auto-fixed/i);
+
+    // Running plain doctor again must not have repaired anything either.
+    const res2 = runCli(["doctor"], { cwd, home, extraEnv });
+    assert.equal(res2.status, 1, res2.stdout + res2.stderr);
+    assert.equal(
+      readFileSync(join(targetDir, "work-on.md"), "utf-8"),
+      original + "\nstale local edit\n",
+      "plain doctor must never modify the install",
+    );
+  });
 });
