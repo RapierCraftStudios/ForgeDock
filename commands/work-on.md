@@ -1502,7 +1502,7 @@ if iteration == max_iterations AND not PASS:
 
 ### 3H: Format and verify
 
-All tool commands are read from `forge.yaml → verification.commands`. When a key is absent, the step logs `SKIPPED — not configured in verification.commands` and continues rather than silently passing.
+All tool commands are read from `forge.yaml → verification.commands`. When a key is absent, the step logs `SKIPPED — not configured in verification.commands` and continues rather than silently passing. Before any test command executes (`learned.test_commands`, or a future `verification.commands.*.test` invocation), it is first checked against `verification.known_slow_tests` — a repo-declared list of patterns for suites known to hang or make live network/LLM calls — and skipped or narrowed to a safe subset on a match. When that config is absent, this gate is a no-op and behavior is unchanged. <!-- Added: forge#1861 -->
 
 **Track skipped checks** — initialize before any check runs:
 ```bash
@@ -1555,7 +1555,47 @@ fi
 ```
 Typecheck or build failures are BLOCKING.
 
-**Learned test commands** — After all `verification.commands` steps complete, run any commands from `learned.test_commands` (captured from owner corrections in Phase 1D or set manually in forge.yaml):
+**Known-slow test gate** — Before running any test command below, check it against `verification.known_slow_tests` (a repo-declared list of test patterns known to hang or make live network/LLM calls). When absent or empty, this is a no-op and behavior is unchanged. <!-- Added: forge#1861 -->
+
+```bash
+# KNOWN_SLOW_TESTS read directly from verification.known_slow_tests (a static,
+# operator-declared config — unlike learned.test_commands, it is NOT part of the
+# agent-writable `learned:` section, so it is read inline here rather than
+# pre-loaded in Phase 0B.1).
+KNOWN_SLOW_TESTS=$(yq -o=json -I=0 '.verification.known_slow_tests // []' forge.yaml 2>/dev/null || echo '[]')
+
+# apply_known_slow_filter <cmd> — echoes the command to actually run, or "" to
+# skip it entirely. Matching is substring match of `pattern` against the full
+# command text. Exactly one of skip/subset is expected per matched entry.
+apply_known_slow_filter() {
+  local cmd="$1"
+  local out="$cmd"
+  if [ -n "$KNOWN_SLOW_TESTS" ] && [ "$KNOWN_SLOW_TESTS" != "[]" ] && [ "$KNOWN_SLOW_TESTS" != "null" ]; then
+    while IFS= read -r entry; do
+      [ -z "$entry" ] && continue
+      pattern=$(echo "$entry" | yq '.pattern // ""')
+      skip=$(echo "$entry" | yq '.skip // false')
+      subset=$(echo "$entry" | yq '.subset // ""')
+      reason=$(echo "$entry" | yq '.reason // "no reason given"')
+      [ -z "$pattern" ] && continue
+      case "$cmd" in
+        *"$pattern"*)
+          if [ "$skip" = "true" ]; then
+            echo "SKIPPED — known-slow test matched pattern '$pattern' ($reason)" >&2
+            out=""
+          elif [ -n "$subset" ]; then
+            echo "SUBSTITUTED — known-slow test matched pattern '$pattern' ($reason); running safe subset instead" >&2
+            out="$subset"
+          fi
+          ;;
+      esac
+    done < <(echo "$KNOWN_SLOW_TESTS" | yq -o=json -I=0 '.[]' 2>/dev/null)
+  fi
+  echo "$out"
+}
+```
+
+**Learned test commands** — After all `verification.commands` steps complete, run any commands from `learned.test_commands` (captured from owner corrections in Phase 1D or set manually in forge.yaml), filtered through the known-slow gate above:
 
 ```bash
 # LEARNED_TEST_COMMANDS was set in Phase 0B.1 from forge.yaml → learned.test_commands
@@ -1565,11 +1605,15 @@ if [ -n "$LEARNED_TEST_COMMANDS" ] && [ "$LEARNED_TEST_COMMANDS" != "[]" ]; then
   # yq outputs each entry on its own line with -r flag
   echo "$LEARNED_TEST_COMMANDS" | yq '.[]' | while IFS= read -r cmd; do
     [ -z "$cmd" ] && continue
-    echo "Running learned command: $cmd"
-    eval "$cmd" 2>&1 | tail -30
+    FILTERED_CMD=$(apply_known_slow_filter "$cmd")
+    if [ -z "$FILTERED_CMD" ]; then
+      continue
+    fi
+    echo "Running learned command: $FILTERED_CMD"
+    eval "$FILTERED_CMD" 2>&1 | tail -30
     CMD_EXIT=$?
     if [ $CMD_EXIT -ne 0 ]; then
-      echo "FAILED (exit $CMD_EXIT): $cmd"
+      echo "FAILED (exit $CMD_EXIT): $FILTERED_CMD"
       exit $CMD_EXIT
     fi
   done
@@ -1577,7 +1621,7 @@ else
   echo "No learned test commands configured — skipping"
 fi
 ```
-Learned test command failures are BLOCKING (same as verification.commands failures). <!-- Added: forge#667 -->
+Learned test command failures are BLOCKING (same as verification.commands failures). A command matched and skipped by the known-slow gate is never executed and never counted as a failure. <!-- Added: forge#667, forge#1861 -->
 
 ### 3I: Frontend proxy wiring check (MANDATORY)
 
