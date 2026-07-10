@@ -17,12 +17,10 @@ jobs:
         uses: KineticCafe/actions-dco@1da04282bbf757dab7d92a5c8535dbfb8113da5c # v3.1.0
         with:
           config: |
-            # Allow these bots to skip the DCO requirement — they cannot sign off
-            [bot]
+            # Project maintainer emails — exempt from DCO sign-off
+            exempt-authors = ["yash.dubey803at@gmail.com", "rapiercraftstudios@gmail.com"]
+
+            # Allow these bots to skip the DCO requirement
+            [bots]
             policy = "allowlist"
             allow = ["github-actions[bot]", "dependabot[bot]", "dependabot-preview[bot]", "rapiercraft-forgedock[bot]", "rapiercraft-forge[bot]"]
-
-            # Project maintainer identities — trusted committers exempt from DCO
-            [contributor]
-            policy = "allowlist"
-            allow = ["RapierCraft Studios & IT <yash.dubey803at@gmail.com>", "RapierCraft <rapiercraftstudios@gmail.com>"]
