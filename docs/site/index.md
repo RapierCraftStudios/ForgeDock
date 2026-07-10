@@ -56,7 +56,7 @@ No more coordinating between agent sessions. No more lost context. No more start
 npx forgedock
 ```
 
-Installs commands into the current project (project-scoped by default). Add `--global` to install into `~/.claude/commands/` for all projects on this machine.
+Installs commands into `~/.claude/commands/`, available in every Claude Code session on this machine. `--global` is still accepted as a flag for backward compatibility, but install is always global — there's nothing to opt into.
 
 **Requirements**: Claude Code, Node.js 18+, `gh` CLI authenticated with GitHub.
 

@@ -66,7 +66,7 @@ commands/              # Authoritative pipeline specs — what agents READ and E
   quality-gate.md      # Pre-commit checks (14+ domains)
   autopilot.md         # Self-improvement cycle
 bin/                   # npm installer
-  forgedock.mjs        # npx forgedock — project-scoped install (default); npx forgedock --global installs into ~/.claude/commands/
+  forgedock.mjs        # npx forgedock — always installs into ~/.claude/commands/ (--global accepted but is a no-op)
 scripts/               # Universal deterministic scripts (ship with npm)
   classify-lane.sh     # Lane routing: milestone → feature lane, no milestone → staging
   transition-label.sh  # Label state machine validation
@@ -113,7 +113,7 @@ Runs the full pipeline for a single issue. Re-invoking picks up from the last st
 /work-on next     # pick highest-priority open issue
 ```
 
-**When dogfooding**: `/work-on` reads its own spec from the project-scoped install location (symlinked from `commands/work-on.md`). On a global install (`--global`), the spec lives at `~/.claude/commands/work-on.md`. Changes to `commands/work-on.md` take effect in the NEXT session, not the current one.
+**When dogfooding**: `/work-on` reads its own spec from `~/.claude/commands/work-on.md` (symlinked from `commands/work-on.md` — install is always global). Changes to `commands/work-on.md` take effect in the NEXT session, not the current one.
 
 ### `/orchestrate [milestone_slug]`
 
