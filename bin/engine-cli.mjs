@@ -29,10 +29,25 @@ export const ACTIVE_WORKFLOW_LABELS = [
 
 const pexec = promisify(execFile);
 
-/** Real gh/git accessors. */
+/**
+ * Real gh/git accessors.
+ *
+ * `timeout: 10000` matches the convention already used for the sibling
+ * `gh pr list` call in the interactive dashboard (bin/forgedock.mjs's
+ * gatherDashboardData()). Every io.gh()/io.git() call site issues a single,
+ * normally-fast metadata command (gh issue view, gh api .../comments,
+ * gh pr list/view, git rev-list --count) — none are legitimately
+ * long-running — so one shared timeout is appropriate across all callers
+ * (the interactive status dashboard, run-issue, and resume-stalled). A
+ * hung/black-holed gh process (flaky network, corporate proxy, stuck auth
+ * prompt) would otherwise hang commands like `npx forgedock status`
+ * indefinitely (#1962). Callers already wrap every io.gh()/io.git() call in
+ * try/catch and degrade to null/"unknown" on any rejection, so a timeout
+ * fails closed gracefully with no additional error handling required.
+ */
 export function makeIo() {
   const run = (bin) => async (args) => {
-    const { stdout } = await pexec(bin, args, { maxBuffer: 100 * 1024 * 1024 });
+    const { stdout } = await pexec(bin, args, { maxBuffer: 100 * 1024 * 1024, timeout: 10000 });
     return stdout;
   };
   return { gh: run("gh"), git: run("git") };
