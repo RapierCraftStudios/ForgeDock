@@ -228,7 +228,7 @@ export const RESERVED_TYPES = {
   },
 
   // §4.2 Machine-surface cross-artifact annotation (Base64url encoded — design decision 2026-07-08)
-  // Format: <!-- FORGE:CARD v1 sha:{sha8hex} b64:{base64url_of_canonical_json} -->
+  // Format: <!-- FORGE:CARD: v1 sha:{sha8hex} b64:{base64url_of_canonical_json} -->
   // The inline value carries the full encoding: "v1 sha:XXXXXXXX b64:YYYYYY..."
   // This is an inline-value type — parse() extracts the full encoding as inlineValue.
   CARD: {
