@@ -28,17 +28,28 @@ done
 For each issue, estimate which domains it touches based on title, body, and labels. This improves DAG construction — issues in the same domain likely touch the same files and should be serialized (one becomes a predecessor of the other).
 
 ```bash
+declare -A ISSUE_DOMAIN   # issue → comma-separated matched domain tags, or "NONE" (forge#1913)
 for NUM in {issue_numbers}; do
   ISSUE=$(gh issue view $NUM --json title,body,labels --jq '{title: .title, labels: [.labels[].name], body: (.body[:300])}')
   echo "=== #$NUM ==="
-  echo "$ISSUE" | grep -qiE "credit|billing|pricing|stripe|charge|refund" && echo "  BILLING" || true
-  echo "$ISSUE" | grep -qiE "auth|session|jwt|login|permission|oauth" && echo "  AUTH" || true
-  echo "$ISSUE" | grep -qiE "worker|queue|job|task|background|consumer" && echo "  WORKER" || true
-  echo "$ISSUE" | grep -qiE "migration|\.sql|database|postgres|alembic" && echo "  DATABASE" || true
-  echo "$ISSUE" | grep -qiE "component|page|layout|dashboard|ui|ux|frontend|web/src" && echo "  FRONTEND" || true
-  echo "$ISSUE" | grep -qiE "docker|deploy|traefik|nginx|ci|cd|infra|github.action" && echo "  INFRA" || true
-  echo "$ISSUE" | grep -qiE "llm|extract|schema|format|embedding|model" && echo "  AI" || true
+  MATCHED_DOMAINS=()
+  if echo "$ISSUE" | grep -qiE "credit|billing|pricing|stripe|charge|refund"; then echo "  BILLING"; MATCHED_DOMAINS+=("BILLING"); fi
+  if echo "$ISSUE" | grep -qiE "auth|session|jwt|login|permission|oauth"; then echo "  AUTH"; MATCHED_DOMAINS+=("AUTH"); fi
+  if echo "$ISSUE" | grep -qiE "worker|queue|job|task|background|consumer"; then echo "  WORKER"; MATCHED_DOMAINS+=("WORKER"); fi
+  if echo "$ISSUE" | grep -qiE "migration|\.sql|database|postgres|alembic"; then echo "  DATABASE"; MATCHED_DOMAINS+=("DATABASE"); fi
+  if echo "$ISSUE" | grep -qiE "component|page|layout|dashboard|ui|ux|frontend|web/src"; then echo "  FRONTEND"; MATCHED_DOMAINS+=("FRONTEND"); fi
+  if echo "$ISSUE" | grep -qiE "docker|deploy|traefik|nginx|ci|cd|infra|github.action"; then echo "  INFRA"; MATCHED_DOMAINS+=("INFRA"); fi
+  if echo "$ISSUE" | grep -qiE "llm|extract|schema|format|embedding|model"; then echo "  AI"; MATCHED_DOMAINS+=("AI"); fi
   # For project-specific domains, configure keywords in forge.yaml → review.domains and extend above
+
+  # Materialize the result — every issue gets an explicit ISSUE_DOMAIN entry, even when no
+  # keyword matched ("NONE"). This is what Step 3D.6's completion gate checks for key presence
+  # (not truthiness) — an un-set key means this loop never ran for that issue. <!-- forge#1913 -->
+  if [ "${#MATCHED_DOMAINS[@]}" -eq 0 ]; then
+    ISSUE_DOMAIN[$NUM]="NONE"
+  else
+    ISSUE_DOMAIN[$NUM]=$(IFS=,; echo "${MATCHED_DOMAINS[*]}")
+  fi
 done
 ```
 
@@ -48,7 +59,7 @@ done
 - BILLING + AUTH issues should be prioritized early (security-critical)
 - **DATABASE issues are ALWAYS serialized — hard rule, no exceptions.** Multiple agents writing migrations simultaneously will produce duplicate migration numbers (e.g., two `0067_*.sql` files), which breaks the migration runner. DATABASE issues form a linear predecessor chain in the DAG. If 3 DATABASE issues are in a batch: A has no predecessors, B has {A} as predecessor, C has {B} as predecessor.
 
-**Store domain tags per issue** for use in the plan presentation (Step 3E).
+**Domain tags are stored in `ISSUE_DOMAIN[$NUM]`** (materialized above) for use in the plan presentation (Step 3E) and the Step 3D.6 completion gate.
 
 ### Step 3C: Multi-layer conflict detection
 
@@ -359,6 +370,27 @@ Build a **directed acyclic graph (DAG)** of per-issue dependencies. Each issue g
 - **Claims-board downgrade (Layer 2/4 edges only)** <!-- Added: forge#1736 -->: After dispatch begins (Phase 4A), when both issues in a Layer-2 or Layer-4 serialized pair post `FORGE:CLAIM` annotations on the coordination issue and their claimed file sets are **disjoint** (no path appears in both claims), the serialization edge for that pair MAY be relaxed — the blocked issue becomes ready. This downgrade is **never** applied to Layer-1 (same-file) or Layer-3 (high-fan-in) edges. See Step 4B: Claims-board relaxation sweep for the runtime check.
 - **No artificial concurrency limit by default** — all issues with empty predecessor sets dispatch simultaneously. The only constraints are file overlap, explicit dependencies, and co-change coupling. When `forge.yaml → orchestration.max_concurrent` is set, the dispatch loop queues excess ready issues and releases them as running workers complete (see Engine mode § Concurrency model).
 
+**Materialize the DAG** <!-- Added: forge#1913 -->: The rules above describe how edges are derived, but they must be applied into real, checkable data structures — not carried in prose or reconstructed from memory later. Step 3D.1 (coordination issue), Step 3D.5 (cycle detection), Step 3E.5 (scoring), and Step 3E (plan presentation) all read `ISSUES[]` and `PREDECESSORS[]` as if this already happened; this is the one place they're actually built:
+
+```bash
+# --- Step 3D: Materialize the DAG ---
+ISSUES=({issue_numbers})   # all issues in this batch, excluding Phase 2 investigations
+declare -A PREDECESSORS    # issue → space-separated predecessor issue numbers ("" = no predecessors)
+
+for NUM in "${ISSUES[@]}"; do
+  PREDECESSORS[$NUM]=""    # every issue gets an explicit entry — even an empty one — so
+                           # Step 3D.6's gate can tell "no predecessors" (valid) apart from
+                           # "never processed" (the bug this gate exists to catch)
+done
+
+# Apply edges in the order described above — explicit deps, then Layer 1/2/3 conflicts
+# (Step 3C), then the DATABASE domain chain, then Layer 4 conservative fallback, then
+# Layer 5 co-change coupling/downgrades. Each edge appends the predecessor's number to
+# the successor's entry:
+#   PREDECESSORS[$SUCCESSOR]="${PREDECESSORS[$SUCCESSOR]:+${PREDECESSORS[$SUCCESSOR]} }$PREDECESSOR_NUM"
+# --- End Step 3D materialization ---
+```
+
 ### Step 3D.1: Create coordination issue (claims board) <!-- Added: forge#1736 -->
 
 **When to run**: Immediately after DAG construction (Step 3D), before Step 3D.5 cycle detection. Run once per orchestration batch. Skip if `FORGE_COORD_ISSUE` is already set (e.g., resumed session).
@@ -525,6 +557,41 @@ fi
 - `EXCLUDED_CYCLE[]` contains cyclic issue numbers — reported in Step 3E, never dispatched
 - If `EXCLUDED_CYCLE` is non-empty, report it clearly in the Step 3E plan before asking for user confirmation
 - If `ISSUES[]` is empty after cycle exclusion (all issues were cyclic), the guard above aborts with `exit 1` — Step 3E is never reached with an empty plan <!-- Added: forge#1110 -->
+- Proceed next to **Step 3D.6** before Step 3E.5's scoring pass. <!-- Added: forge#1913 -->
+
+### Step 3D.6: Phase 3 Completion Gate (MANDATORY) <!-- Added: forge#1913 -->
+
+**Run immediately after Step 3D.5's cycle detection, before Step 3E.5's scoring pass and Step 3E's plan presentation.** Steps 3D.1, 3D.5, 3E.5, and 3E all read `ISSUES[]`, `PREDECESSORS[]`, and `ISSUE_DOMAIN[]` as if Step 3B/3D already built them for real. Without this gate, an orchestrator under time or context pressure (e.g. a 73-issue batch) can skip the actual extraction loops in Steps 3A–3D and hand-write a plausible-looking DAG from memory instead — Step 3E.5's scoring and Phase 4's dispatch would then run against fabricated data with no error, because the `${PREDECESSORS[$NUM]:-}` defaulting used throughout Step 3D.5 silently tolerates a missing entry instead of failing loudly.
+
+**Check**: every issue in `ISSUES[]` must have an explicit key in `PREDECESSORS` and in `ISSUE_DOMAIN` — checked by **key presence**, not by whether the value is non-empty. An issue with zero real predecessors (`PREDECESSORS[$NUM]=""`) or no matched domain (`ISSUE_DOMAIN[$NUM]="NONE"`) is a valid, common outcome and must NOT trip this gate — only a genuinely *absent* key means the upstream step never ran for that issue.
+
+```bash
+# --- Step 3D.6: Phase 3 Completion Gate ---
+MISSING_PREDECESSORS=()
+MISSING_DOMAIN=()
+for NUM in "${ISSUES[@]}"; do
+  # Key-presence test (${arr[key]+x}), NOT emptiness — PREDECESSORS[$NUM]="" and
+  # ISSUE_DOMAIN[$NUM]="NONE" are valid values and must pass this check.
+  [ -z "${PREDECESSORS[$NUM]+x}" ] && MISSING_PREDECESSORS+=("$NUM")
+  [ -z "${ISSUE_DOMAIN[$NUM]+x}" ] && MISSING_DOMAIN+=("$NUM")
+done
+
+if [ "${#MISSING_PREDECESSORS[@]}" -gt 0 ] || [ "${#MISSING_DOMAIN[@]}" -gt 0 ]; then
+  echo "FATAL: Phase 3 DAG construction is incomplete — cannot proceed to Step 3E.5, Step 3E, or Phase 4."
+  [ "${#MISSING_PREDECESSORS[@]}" -gt 0 ] && echo "  Missing PREDECESSORS[] entry for: ${MISSING_PREDECESSORS[*]/#/#}"
+  [ "${#MISSING_DOMAIN[@]}" -gt 0 ] && echo "  Missing ISSUE_DOMAIN[] entry for: ${MISSING_DOMAIN[*]/#/#}"
+  echo "This means Step 3B (domain estimation) and/or Step 3D (DAG edge construction) were"
+  echo "skipped, or did not run for every issue in the batch. Do NOT hand-write the missing"
+  echo "entries from memory or by re-reading issue titles — go back and run Steps 3A-3D for"
+  echo "the listed issues, then re-run this gate before proceeding."
+  exit 1
+else
+  echo "Phase 3 completion gate: PASS — ${#ISSUES[@]} issues all have PREDECESSORS[] and ISSUE_DOMAIN[] entries."
+fi
+# --- End Step 3D.6 ---
+```
+
+**After this gate passes**: Step 3E.5 (scoring) and Step 3E (plan presentation) may proceed. Do not present the Step 3E plan, run Step 3E.5, or hand off to Phase 4 while this gate is failing.
 
 ### Step 3E.5: Value/Cost Scoring Pass (MANDATORY) <!-- Added: forge#1743 -->
 
@@ -744,6 +811,8 @@ done
 **Important**: `ISSUE_SCORE[]` and `ISSUE_COST_ESTIMATE[]` are also set for blocked issues (for reporting). The sorted order only affects the ready-set — blocked issues dispatch when their predecessors complete, regardless of score.
 
 ### Step 3E: Present the plan to the user
+
+**Populate every row below by dereferencing `PREDECESSORS[$NUM]`, `ISSUE_DOMAIN[$NUM]`, `ISSUE_SCORE[$NUM]`, and `ISSUE_COST_ESTIMATE[$NUM]` computed in Steps 3B–3E.5 — do not fabricate values from memory or by re-reading issue titles at this point.** The Step 3D.6 gate having passed only guarantees the data structures exist; it does not substitute for actually reading them here. <!-- Added: forge#1913 -->
 
 ```
 ## Orchestration Plan
