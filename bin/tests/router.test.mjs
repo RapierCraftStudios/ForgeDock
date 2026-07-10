@@ -758,31 +758,32 @@ describe("doctor --fix (forge#1944)", () => {
   // create --force semantics closely enough for Check 7's detect/fix/recheck
   // logic, without any network access or a real GitHub repo.
   //
-  // Cross-platform note: forgedock.mjs calls `execFileSync("gh", [...])` for
-  // label list/create (no shell). On Windows, execFileSync resolves commands
-  // via PATHEXT — a bare `gh` shell script is invisible. The stub logic
-  // therefore lives in a Node.js script (gh-stub.js) with thin launchers:
-  //   - `gh`     (#!/bin/sh wrapper for Unix)
-  //   - `gh.cmd` (@node wrapper for Windows — found via PATHEXT by
-  //               execFileSync and auto-run through cmd.exe by libuv)
-  // PATH is joined with the platform-correct separator (`;` on Windows,
-  // `:` elsewhere) so the stub dir is actually first in the search order.
+  // POSIX-only: forgedock.mjs calls execFileSync("gh", [...]) (no shell) for
+  // label list/create. execFileSync without `shell: true` can only launch a
+  // real executable — on POSIX that includes an extensionless script with a
+  // `#!/bin/sh` shebang (the kernel itself handles it), so a plain shell
+  // stub placed first on PATH is sufficient and deterministic. On Windows,
+  // execFileSync without a shell cannot invoke a .cmd/.bat launcher at all
+  // (Windows' CreateProcess only recognizes real PE binaries for a bare,
+  // non-shell spawn — confirmed empirically: spawnSync("gh.cmd", ...) with
+  // shell:false fails with EINVAL even given the file's exact name), so
+  // there is no reliable way to fake `gh` for execFileSync callers on
+  // Windows without shipping a compiled binary. This test therefore only
+  // runs on POSIX platforms, which matches the project's CI (ubuntu-latest
+  // — see .github/workflows/ci.yml) and is where the real coverage lives.
   function stubToolsWithLabels() {
     const stubBin = mkdtempSync(join(os.tmpdir(), "fd-doctor-fix-label-stub-bin-"));
-    const presentJson = JSON.stringify(
-      [
-        "workflow:investigating",
-        "workflow:ready-to-build",
-        "workflow:building",
-        "workflow:in-review",
-        "workflow:awaiting-merge",
-        "workflow:merged",
-        "workflow:decomposed",
-        "workflow:invalid",
-      ].map((name) => ({ name })),
-    );
+    const present = [
+      "workflow:investigating",
+      "workflow:ready-to-build",
+      "workflow:building",
+      "workflow:in-review",
+      "workflow:awaiting-merge",
+      "workflow:merged",
+      "workflow:decomposed",
+      "workflow:invalid",
+    ].map((name) => ({ name }));
 
-    // Core logic as a standalone Node.js script — both launchers delegate here.
     const ghStubPath = join(stubBin, "gh-stub.js");
     writeFileSync(
       ghStubPath,
@@ -791,7 +792,7 @@ describe("doctor --fix (forge#1944)", () => {
         'const path = require("path");',
         'const marker = path.join(__dirname, ".labels-created");',
         'const args = process.argv.slice(2);',
-        `const present = ${JSON.stringify(presentJson)};`,
+        `const present = ${JSON.stringify(JSON.stringify(present))};`,
         'if (args[0] === "label" && args[1] === "list") {',
         '  console.log(fs.existsSync(marker) ? present : "[]");',
         "  process.exit(0);",
@@ -805,36 +806,26 @@ describe("doctor --fix (forge#1944)", () => {
       ].join("\n") + "\n",
       "utf-8",
     );
-
-    // Unix launcher (sh shebang — used by execSync and execFileSync on
-    // Linux/macOS where extensionless files with a shebang are executable).
     writeFileSync(
       join(stubBin, "gh"),
       `#!/bin/sh\nexec node "${ghStubPath}" "$@"\n`,
       { mode: 0o755 },
     );
-    // Windows launcher (.cmd — found by execFileSync via PATHEXT; libuv
-    // auto-wraps .cmd files with cmd.exe /c, so this Just Works).
-    writeFileSync(join(stubBin, "gh.cmd"), `@node "${ghStubPath}" %*\r\n`);
-
-    // yq stubs — same version-echo as sibling tests, with a .cmd launcher
-    // so Windows environments without a real yq.exe installed still pass
-    // the doctor yq-version check.
     writeFileSync(
       join(stubBin, "yq"),
       "#!/bin/sh\necho 'yq (https://github.com/mikefarah/yq/) version v4.44.0'\n",
       { mode: 0o755 },
     );
-    writeFileSync(
-      join(stubBin, "yq.cmd"),
-      "@echo yq (https://github.com/mikefarah/yq/) version v4.44.0\r\n",
-    );
 
-    const sep = process.platform === "win32" ? ";" : ":";
-    return { PATH: `${stubBin}${sep}${process.env.PATH}` };
+    return { PATH: `${stubBin}:${process.env.PATH}` };
   }
 
-  it("bootstraps missing GitHub workflow labels (Check 7) and is idempotent", () => {
+  // See the POSIX-only note above stubToolsWithLabels() — execFileSync
+  // cannot deterministically invoke a stub `gh` on Windows without a shell,
+  // so this test is skipped there. CI (ubuntu-latest) provides real coverage.
+  const itPosix = process.platform === "win32" ? it.skip : it;
+
+  itPosix("bootstraps missing GitHub workflow labels (Check 7) and is idempotent", () => {
     const home = mkdtempSync(join(os.tmpdir(), "fd-doctor-fix-home-"));
     const cwd = mkdtempSync(join(os.tmpdir(), "fd-doctor-fix-cwd-"));
     writeFileSync(
