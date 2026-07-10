@@ -11,7 +11,7 @@ install: internal
 
 
 **Trigger**: INFRA service touched
-**Type**: `general-purpose` | **Model**: `sonnet`
+**Type**: `general-purpose` | **Model**: `{SUBAGENT_MODEL}`
 
 **Prompt template:**
 ```

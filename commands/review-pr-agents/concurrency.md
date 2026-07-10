@@ -11,7 +11,7 @@ install: internal
 
 
 **Trigger**: CONCURRENCY domain detected OR BILLING domain detected
-**Type**: `general-purpose` | **Model**: `sonnet`
+**Type**: `general-purpose` | **Model**: `{SUBAGENT_MODEL}`
 
 **Prompt template:**
 ```

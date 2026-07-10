@@ -310,7 +310,7 @@ For each **ready** issue (all predecessors resolved or no predecessors), spawn a
 ```
 Agent(
   subagent_type="general-purpose",
-  model="sonnet",
+  model="{SUBAGENT_MODEL}",
   description="Work on {PROJECT_PREFIX}#{NUMBER}",
   run_in_background=true,
   prompt="You are working on GitHub issue #{NUMBER} for the {PROJECT_NAME} project.
@@ -1414,7 +1414,7 @@ The context-gathering phase can fetch this index to discover all investigation G
     # the complete pipeline contract. Keep in sync with Step 4A when the template changes.
     Agent(
       subagent_type="general-purpose",
-      model="sonnet",
+      model="{SUBAGENT_MODEL}",
       description="Work on {PROJECT_PREFIX}#${FINDING_NUM}",
       run_in_background=true,
       prompt="You are working on GitHub issue #${FINDING_NUM} for the {PROJECT_NAME} project.

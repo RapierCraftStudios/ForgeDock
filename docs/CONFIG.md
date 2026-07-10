@@ -128,28 +128,35 @@ branches:
 
 ## `agents` (OPTIONAL)
 
-Default model for pipeline agents — the main orchestrator and every sub-agent spawned via the Agent/Task tool while following a command spec (`work-on`, `orchestrate`, `review-pr`, etc.).
+Model configuration for pipeline agents. `default_model` governs the main agent — the one you invoke directly (`work-on`, `orchestrate`, `review-pr`, etc.), referenced by every command spec's "Agent model policy" line. `subagent_model` governs the **child** sub-agents that a top-level command spawns internally — e.g. `/orchestrate`'s per-issue `/work-on` agents, `/review-pr`'s domain persona reviewers, `/analytics`'s parallel data-collection agents, `/incident-response`'s validation/root-cause agents.
 
 ```yaml
 agents:
   default_model: "sonnet"
+  subagent_model: "sonnet"
 ```
 
 | Field | Type | Required | Default | Description |
 |-------|------|----------|---------|-------------|
 | `default_model` | string | No | `"sonnet"` | Short alias — `"sonnet"`, `"opus"`, or `"haiku"` — the same values the Agent/Task tool's `model` parameter accepts. This is the only form that works for interactive command-spec sub-agent spawning. |
+| `subagent_model` | string | No | `default_model`, else `"sonnet"` | Short alias, same accepted values as `default_model`. Overrides the model used for child agents spawned internally by a top-level command (see above). Omit to inherit `default_model`. |
 
 **Resolution order** (highest precedence first):
-1. `--model <id>` — CLI flag, `npx forgedock run` only (headless).
-2. `FORGEDOCK_MODEL` env var — headless runner only.
-3. `agents.default_model` — this field.
+1. `--model <id>` — CLI flag, `npx forgedock run` only (headless; main agent only).
+2. `FORGEDOCK_MODEL` env var — headless runner only (main agent only).
+3. `agents.default_model` — this field. Governs the main agent.
 4. Hardcoded default — `"sonnet"` for interactive agents, `"claude-sonnet-5"` for the headless runner (`bin/runner.mjs`'s `DEFAULT_MODEL`).
 
-**Headless runner note**: `bin/runner.mjs` (`npx forgedock run`, used for CI/headless invocations) calls the Anthropic SDK directly and also accepts a full Anthropic model ID here as a pass-through escape hatch (e.g. `"claude-opus-4-6"`). A full model ID does **not** work for interactive Agent/Task tool calls in command specs — those only accept the short-alias enum (`sonnet`/`opus`/`haiku`/`fable`). Prefer the short alias unless you specifically need a headless-only override.
+**Sub-agent resolution order** (highest precedence first):
+1. `agents.subagent_model` — this field. Governs child agents spawned by a top-level command.
+2. `agents.default_model` — falls back here when `subagent_model` is unset.
+3. Hardcoded default — `"sonnet"`.
 
-Projects without this section see no behavior change — everything defaults exactly as it did before this field existed.
+**Headless runner note**: `bin/runner.mjs` (`npx forgedock run`, used for CI/headless invocations) calls the Anthropic SDK directly and also accepts a full Anthropic model ID here as a pass-through escape hatch (e.g. `"claude-opus-4-6"`). A full model ID does **not** work for interactive Agent/Task tool calls in command specs — those only accept the short-alias enum (`sonnet`/`opus`/`haiku`/`fable`). Prefer the short alias unless you specifically need a headless-only override. `subagent_model` is interactive-only — it has no headless-runner equivalent, since the headless runner does not spawn child sub-agents.
 
-**Commands that use this section**: all commands with an "Agent model policy" line (nearly every command spec)
+Projects without this section see no behavior change — everything defaults exactly as it did before these fields existed.
+
+**Commands that use this section**: all commands with an "Agent model policy" line (`default_model`, nearly every command spec) and all commands that spawn internal sub-agents — `orchestrate`, `review-pr`, `analytics`, `incident-response` (`subagent_model`).
 
 ---
 
