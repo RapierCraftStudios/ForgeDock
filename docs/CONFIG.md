@@ -865,6 +865,90 @@ npx forgedock status [dir]   # Show a directory's resolved state (default: cwd)
 
 ---
 
+## Install Receipt
+
+ForgeDock writes a machine-readable receipt of what the last install or update actually did, so debugging drift (wrong commands installed, wrong tier, stale hooks) can start from a recorded fact instead of re-deriving state from scratch.
+
+### Receipt File Location
+
+```
+~/.forge/install-receipt.json
+```
+
+The directory (`~/.forge/`) is created automatically on first write with `mkdir(..., { recursive: true })`. The file is never committed to version control — it is per-user, per-machine state.
+
+### When It's Written
+
+- After every successful `npx forgedock install` (end of the onboarding journey, right after the "Forged." celebration screen).
+- After every `npx forgedock update` — both the git-clone branch (fast-forward pull) and the npm branch (version-check advisory) route through the same repair step (`relinkAndHint()`), so the receipt is refreshed either way.
+
+The write is best-effort and never blocks or fails the install/update it records: any error (permission denied, disk full, unusual `FORGE_HOME` layout) degrades silently to a no-op, matching the fail-open contract already used by the command-manifest and hook-registration steps.
+
+### Receipt Schema
+
+```json
+{
+  "schemaVersion": 1,
+  "timestamp": "2026-07-10T12:00:00.000Z",
+  "forgedockVersion": "1.1.6",
+  "installMode": "npm",
+  "forgeHome": "/home/user/.npm/_npx/abc123/node_modules/forgedock",
+  "cwd": "/home/user/projects/my-repo",
+  "platform": {
+    "platform": "linux",
+    "platformLabel": "Linux",
+    "isWSL": false,
+    "wslDistro": null,
+    "shell": "bash"
+  },
+  "tier": "core",
+  "commands": {
+    "count": 42,
+    "list": ["work-on", "review-pr", "quality-gate", "orchestrate/phase-1-resolve"]
+  },
+  "hooks": {
+    "sessionStart": "registered",
+    "preToolUse": "registered",
+    "subagentStopEnforce": null
+  },
+  "forgeYaml": {
+    "present": true,
+    "validShape": true
+  }
+}
+```
+
+| Field | Type | Description |
+|-------|------|--------------|
+| `schemaVersion` | number | Schema version — currently `1` |
+| `timestamp` | string | ISO-8601 timestamp of this install/update |
+| `forgedockVersion` | string | `version` field from `{forgeHome}/package.json` (empty string if unreadable) |
+| `installMode` | `"npm"` \| `"git-clone"` | Detected from whether `{forgeHome}/.git` exists — same predicate `update()` already uses to choose its update strategy |
+| `forgeHome` | string | Absolute path to the ForgeDock package install (`FORGE_HOME`) |
+| `cwd` | string | Absolute path to the project directory the command was run in |
+| `platform` | object | `detectEnvironment()`'s output — platform, human label, WSL status/distro, detected shell |
+| `tier` | `"core"` \| `"extras"` | Whether `--extras` was passed (opt-in command tier, see `install: extras` frontmatter) |
+| `commands` | object | `count` and `list` (relative slash-command names) of everything installed for the resolved tier, sourced from `findMarkdownFiles()` — never a separately maintained list |
+| `hooks.sessionStart` | string \| null | SessionStart hook registration status (`"registered"`, `"already"`, `"skipped-malformed"`) |
+| `hooks.preToolUse` | string \| null | PreToolUse enforcement hook status, or `null` when the installed Claude Code version doesn't support it |
+| `hooks.subagentStopEnforce` | string \| null | Cleanup status of the (retired) SubagentStop enforce hook |
+| `forgeYaml.present` | boolean | Whether `forge.yaml` exists in `cwd` at receipt-write time |
+| `forgeYaml.validShape` | boolean | Whether `forge.yaml` contains the 3 required top-level sections (`project:`, `paths:`, `branches:`) — a lightweight regex check, not a full YAML parse |
+
+### No PII or Secrets
+
+The receipt never contains `process.env` values, GitHub tokens, API keys, or the contents of `forge.yaml` — only the `present`/`validShape` booleans above. Absolute filesystem paths (`forgeHome`, `cwd`) are included for drift debugging; they typically contain the OS username but nothing more sensitive, consistent with other per-machine ForgeDock state (e.g. `registry.json`'s path-keyed entries, see above).
+
+### Reading the Receipt
+
+```bash
+cat ~/.forge/install-receipt.json
+```
+
+There is no CLI subcommand to read it yet — `doctor()` reading the receipt to detect drift is a deliberately deferred stretch goal, not part of this feature.
+
+---
+
 ## Complete Example
 
 See [`forge.yaml.example`](../forge.yaml.example) at the repository root for a fully annotated example covering all sections.
