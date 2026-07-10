@@ -52,7 +52,7 @@ function detectWSL(platform, env, readFile) {
     try {
       const version = readFile("/proc/version", "utf-8");
       if (/microsoft/i.test(version)) {
-        return { isWSL: true, wslDistro: env.WSL_DISTRO_NAME || null };
+        return { isWSL: true, wslDistro: null };
       }
     } catch {
       // /proc/version missing or unreadable — not WSL, or undetectable; degrade quietly.
