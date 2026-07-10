@@ -28,6 +28,7 @@ import {
   backupExisting,
   manualLowConfidenceKeys,
   isEphemeralCachePath,
+  PIPELINE_SCRIPTS,
 } from "./journey.mjs";
 import {
   removeSessionStartHook,
@@ -179,22 +180,17 @@ function detectInstallPaths() {
 
 const SCRIPTS_DIR = join(FORGE_HOME, "scripts");
 
-/**
- * Allowlist of pipeline-agent scripts that `uninstall` cleans up from
- * ~/.claude/scripts/. The journey-based install no longer writes these
- * itself — this set only identifies leftovers from legacy installs so
- * `uninstall` can find and remove them.
- *
- * Internal tooling (gen-logo.mjs, verify-*.sh) lives in scripts/ but is NOT
- * covered here — those scripts are invoked directly via $FORGE_HOME/scripts/ by
- * review-pr.md and quality-gate.md and should not pollute the user's Claude
- * scripts namespace.
- */
-const PIPELINE_SCRIPTS = new Set([
-  "classify-lane.sh",
-  "transition-label.sh",
-  "validate-pr-target.sh",
-]);
+// PIPELINE_SCRIPTS (the allowlist of universal pipeline-agent scripts linked
+// to ~/.claude/scripts/) is defined in journey.mjs — forge()'s
+// linkPipelineScripts() step is what writes them there (forge#1885,
+// restoring the linkScripts() step dropped from the legacy install()/
+// update() flow). Imported here so uninstall() removes exactly what forge()
+// installs, off a single source of truth.
+//
+// Internal tooling (gen-logo.mjs, verify-*.sh) lives in scripts/ but is NOT
+// covered here — those scripts are invoked directly via $FORGE_HOME/scripts/ by
+// review-pr.md and quality-gate.md and should not pollute the user's Claude
+// scripts namespace (forge#715).
 
 // Journey flags are stripped from positionals and fed to makeCtx via ctx().
 // --minimal is init-only. Subcommands with their own flag parsing (run,

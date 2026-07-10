@@ -222,7 +222,7 @@ Before building agent prompts, run `classify-lane.sh` for every issue in the cur
 
 ```bash
 # Requires classify-lane.sh to be available at ~/.claude/scripts/classify-lane.sh
-# (installed by `npx forgedock` — see bin/forgedock.mjs linkScripts step)
+# (installed by `npx forgedock` — see bin/journey.mjs: forge()'s linkPipelineScripts() step)
 # Fallback: bash "$FORGE_HOME/scripts/classify-lane.sh" if ~/.claude/scripts/ is unavailable
 
 declare -A ISSUE_LANE
