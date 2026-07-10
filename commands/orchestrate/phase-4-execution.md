@@ -236,6 +236,11 @@ QUEUED_FINDINGS=()
 declare -A DEFERRED_REASONS
 declare -A AGENT_ISSUE_MAP
 
+# Human-gated idle/backpressure flag (Step 4B item 6.7, forge#1814). Starts false —
+# recomputed every completion cycle over {all_batch_issue_numbers}. Declared at batch
+# scope (not per-agent) so Step 4C can read the latest value on every iteration.
+BATCH_FULLY_GATED=false
+
 for NUM in {ready_issue_numbers}; do
   PR_BASE=$(bash ~/.claude/scripts/classify-lane.sh "$NUM" -R {GH_REPO}) || {
     echo "ERROR: classify-lane.sh failed for #$NUM — adding needs-human label and skipping" >&2
@@ -658,6 +663,56 @@ Gating predecessor #${NUM} reached \`workflow:merged\` — dispatching now. (Was
    ```
    This satisfies the live-session case. For the case where the gating PR merges after the orchestrator session has already ended, the equivalent check runs in `phase-3-dependency.md`'s wake/compaction reconstruction on the next `/orchestrate` invocation — see that file's "Orchestrator state reconstruction on wake / after compaction" section.
 
+6.7. **Human-gated idle/backpressure check** (`BATCH_FULLY_GATED`) <!-- Added: forge#1814 --> — run this after every completion cycle, once the per-issue classification above (items 5-6.6) has been applied for this cycle. It answers a different question than the paused-drain/blocked-on-human-merge tracking above: those items handle *individual* gated predecessors and their *direct* dependents; this check asks whether the **entire original batch** has now exhausted into human-gated states, which is the condition under which continuing to dispatch cascade-spawned review findings (Step 4C) produces net-negative churn — closing 1 issue while opening 2-4 more, with the real blockers (the GATED issues) unresolved:
+
+   ```bash
+   # BATCH_FULLY_GATED is computed over {all_batch_issue_numbers} — the ORIGINAL batch issues
+   # this /orchestrate invocation was given, NOT cascade-spawned review-finding issues (those are
+   # a separate, currently-unbounded-looking stream that this check exists to cap). Cascade
+   # findings are excluded here because they are the SYMPTOM (Step 4C keeps producing them);
+   # counting them as "still IN_PROGRESS" would make this check permanently false and defeat
+   # its own purpose.
+   ANY_ORIGINAL_IN_PROGRESS=false
+   ANY_ORIGINAL_GATED=false
+   for ORIG_NUM in {all_batch_issue_numbers}; do
+     ORIG_STATE=$(classify_predecessor_state "$ORIG_NUM")
+     case "$ORIG_STATE" in
+       IN_PROGRESS) ANY_ORIGINAL_IN_PROGRESS=true ;;
+       GATED) ANY_ORIGINAL_GATED=true ;;
+       DONE|FAILED) ;;  # exhausted — no action
+     esac
+   done
+
+   if [ "$ANY_ORIGINAL_IN_PROGRESS" = "false" ] && [ "$ANY_ORIGINAL_GATED" = "true" ]; then
+     BATCH_FULLY_GATED=true
+   else
+     BATCH_FULLY_GATED=false
+   fi
+   ```
+
+   - **`BATCH_FULLY_GATED=true`** requires BOTH: no original-batch issue is still `IN_PROGRESS` (i.e. nothing from the original scope will complete on its own without a human), AND at least one original-batch issue is `GATED` (`needs-human`/`workflow:awaiting-merge`, or a dependent already tracked `blocked-on-human-merge`). A batch that finishes entirely `DONE`/`FAILED` with zero `GATED` issues is NOT idle — it is simply complete; do not confuse the two.
+   - **This is a live, recomputed flag, not a one-way latch.** Re-run it every completion cycle. If a gating PR merges (item 6.6 fires) and unblocks an original-batch dependent that becomes dispatchable again, `ANY_ORIGINAL_IN_PROGRESS` flips back to `true` on the next cycle and `BATCH_FULLY_GATED` flips back to `false` — normal dispatch resumes automatically. This is what prevents a permanent idle state and satisfies "no regression: when productive non-gated work remains, the orchestrator continues normally."
+   - **Effect when true**: Step 4C's cascade-finding dispatch (the "For queued (non-deferred) findings" block) is suppressed — see the `BATCH_FULLY_GATED` check added there. The first time the flag flips from `false`/unset to `true` in a completion cycle, print the idle report below and stop actively dispatching new cascade work; the batch remains resumable exactly as item 6.6 and `phase-3-dependency.md`'s wake reconstruction already guarantee.
+
+   **Idle report** (print once, the cycle `BATCH_FULLY_GATED` first becomes true):
+   ```
+   ⏸ Orchestrator Idle — Waiting on N Merge(s)
+
+   The remaining batch is fully human-gated: every original issue is either merged/invalid, or
+   blocked on a human decision/merge. No further autonomous progress is possible until one of the
+   PRs below is merged. Newly-spawned review-finding issues are being deferred (not dispatched) so
+   the open-issue count does not inflate while nothing productive can close.
+
+   {reuse the Merge-Ready table computation from phase-6-report.md Step 6A.5 (MERGE_READY_PRS) and
+    the Blocked-on-Merge table from Step 6A.6 (BLOCKED_ON_MERGE) — both already anchor their PR
+    lookups on "Closes #N" in:body per forge#1634/#1646/#1822, so this reuses that logic verbatim
+    rather than re-implementing a parallel PR-resolution path}
+
+   Findings deferred (idle policy): {count of newly-queued findings deferred this cycle}
+   ```
+
+   This report is an interim, in-progress print — it does NOT replace the final consolidated report from Phase 6, which runs once the session actually ends or the next `/orchestrate` invocation picks the batch back up; see `phase-6-report.md` Step 6B for the corresponding "Orchestration Paused — Idle" header.
+
 7. **Verify pipeline compliance** — for each truly completed issue, check that the agent used `/work-on`:
    ```bash
    LABELS=$(gh issue view $NUM -R {GH_REPO} --json labels --jq '[.labels[].name | select(startswith("workflow:"))] | length')
@@ -689,6 +744,8 @@ Gating predecessor #${NUM} reached \`workflow:merged\` — dispatching now. (Was
 9. **Run staging integrity check** (from Step 4A-pre) if the completed agent merged a PR targeting staging.
 
 **Termination condition**: All issues in the DAG have reached `DONE` or `FAILED` (merged, invalid, or skipped due to dependency failure) — OR are `blocked-on-human-merge` (item 6.5) with no further dispatchable work remaining in the batch. These two outcomes are reported differently: a batch where every issue is `DONE`/`FAILED` is a **clean drain**; a batch where one or more issues remain `blocked-on-human-merge` is a **paused drain** — the active dispatch loop stops (there is nothing left to do until a human merges a gating PR) but this MUST be reported as paused, not as fully complete (see `phase-6-report.md`'s `🔗 Blocked-on-Merge` section). `needs-human` predecessors with no open PR are neither — they remain GATED indefinitely until either a PR appears (dependent moves to blocked-on-human-merge) or the predecessor itself resolves; do not treat isolated `needs-human` issues with no dependents as blocking termination. When either drain condition is met, check whether deferred review-spawned findings exist (accumulated in `DEFERRED_FINDINGS` during Step 4C). If deferred findings exist → proceed to Step 4F (Completion Sweep). If no deferred findings → proceed to Phase 5.
+
+**Relationship to `BATCH_FULLY_GATED` (item 6.7, forge#1814)**: A paused drain (above) describes the *original batch DAG* reaching a stable, non-progressing state. `BATCH_FULLY_GATED` is the mechanism that keeps that stable state from being masked by cascade churn — without it, Step 4C would keep dispatching new review-finding issues indefinitely (each with its own predecessors/dependents), so the DAG would never actually look "drained" even though the original batch's productive work stopped the moment the last non-gated issue completed. Once `BATCH_FULLY_GATED` is true, Step 4C stops adding new dispatchable work (rule 0 defers all newly-spawned findings), which lets the batch actually reach the paused-drain termination condition above instead of chasing an ever-growing cascade tail. Report this state using the idle report from item 6.7, not a plain "waiting for agents" message — the whole point is to make the pause visible and actionable (which PR(s) to merge), not silent.
 
 **Anti-pattern — DO NOT DO THIS:**
 - `sleep 60/120/180/300` loops to check status — you will be notified automatically
@@ -809,16 +866,17 @@ gh issue list -R {GH_REPO} --state open --label "review-finding" --limit 20 \
 For each spawned finding, determine whether it should be **executed** or **deferred**:
 
 **Evaluation order** (first matching rule wins):
+0. **Batch fully human-gated** (`BATCH_FULLY_GATED == true`, always defer, even for P1/P2) <!-- Added: forge#1814 -->: The original batch (see Step 4B item 6.7) has exhausted into DONE/FAILED/GATED with nothing left `IN_PROGRESS` — the real blockers are the GATED issues, not a lack of dispatchable findings. Dispatching a new review-finding here cannot produce net batch progress; it only inflates the open-issue count while the productive path waits on a human merge. Always defer, checked before generation and priority. Rationale: this is the idle/backpressure policy this issue adds — without it, rule 2 (below) unconditionally executes P1/P2 findings regardless of how gated the rest of the batch is, which is the root cause of the net-negative churn this policy exists to stop.
 1. **Generation ≥ 2** (always defer, even for P1/P2): Finding was spawned by an issue that was itself a review-finding. Check the source issue's labels for `review-finding` — if the source has that label, the new finding is generation 2. Always defer. Rationale: gen-2+ cascade is theoretically unbounded — cap it here.
 2. **Priority override** (P1 or P2 → always execute): If the finding is labeled P1 or P2, skip all remaining heuristics and execute. Rationale: high-priority findings must never be suppressed by keyword matching.
 3. **Comment/typo heuristic** (P3 and below only): Finding title contains the word "comment" or "typo" (case-insensitive). These are 1-line cosmetic fixes that do not block other work.
 4. **P3 + same-file overlap**: Finding is labeled `P3` AND the file it targets overlaps with ANY file already in the current batch (active or queued in the DAG). Rationale: same-file P3 findings add predecessor edges that serialize agents — one finding per original issue increases wall-clock time with no proportional value.
 
-**Defer** (do NOT add to the DAG) if rules 1, 3, or 4 match.
+**Defer** (do NOT add to the DAG) if rules 0, 1, 3, or 4 match.
 
 **Execute** (add to the DAG) if:
-- Rule 2 matches (P1 or P2)
-- None of the defer rules matched (generation 1, P3 with no file overlap, not a keyword match)
+- Rule 2 matches (P1 or P2) — AND rule 0 did not already match (rule 0 is checked first and overrides rule 2)
+- None of the defer rules matched (generation 1, P3 with no file overlap, not a keyword match, batch not fully gated)
 
 **Before running the loop, build the batch file list (MANDATORY for Heuristic 3):**
 
@@ -854,8 +912,13 @@ for FINDING_NUM in {spawned_finding_numbers}; do
   PRIORITY=$(echo "$FINDING_DATA" | jq -r '.labels[] | select(startswith("priority:P")) | ltrimstr("priority:")' | head -1)
   TITLE=$(echo "$FINDING_DATA" | jq -r '.title')
 
+  # Rule 0: Batch fully human-gated — checked FIRST, overrides even the P1/P2 priority
+  # override below. BATCH_FULLY_GATED is computed once per completion cycle in Step 4B
+  # item 6.7; read it here, do not recompute. <!-- Added: forge#1814 -->
+  if [ "${BATCH_FULLY_GATED:-false}" = "true" ]; then
+    DEFER=true; DEFER_REASON="batch fully human-gated — idle policy"
   # Heuristic 1: Generation check — source issue has review-finding label (always defer, even for P1/P2)
-  if SOURCE_NUM=$(echo "$FINDING_DATA" | jq -r '.body' | grep -oP '(?i)spawned from issue #\K\d+|source issue[: #]+\K\d+' | head -1) && \
+  elif SOURCE_NUM=$(echo "$FINDING_DATA" | jq -r '.body' | grep -oP '(?i)spawned from issue #\K\d+|source issue[: #]+\K\d+' | head -1) && \
        [ -n "$SOURCE_NUM" ] && \
        gh issue view $SOURCE_NUM -R {GH_REPO} --json labels --jq '[.labels[].name]' 2>/dev/null | grep -q "review-finding"; then
     DEFER=true; DEFER_REASON="generation >= 2 (source #${SOURCE_NUM} is also a review-finding)"
@@ -1166,11 +1229,12 @@ If an agent reports failure or error:
 
 **WHY THIS EXISTS**: Deferred findings accumulate during the batch because of file-overlap and cascade-control heuristics (Step 4C). But once the DAG drains, the conditions that caused deferral often no longer apply — completed issues no longer occupy files, so same-file overlap vanishes. Without this sweep, deferred findings silently pile up across runs and never get resolved.
 
-**Step 4F.1: Classify deferred findings into permanent vs re-evaluable**
+**Step 4F.1: Classify deferred findings into permanent vs re-evaluable vs idle-gated**
 
 ```bash
 PERMANENT_DEFERRED=()
 SWEEP_CANDIDATES=()
+IDLE_DEFERRED=()   # <!-- Added: forge#1814 -->
 
 for FINDING_NUM in "${DEFERRED_FINDINGS[@]}"; do
   DEFER_REASON="${DEFERRED_REASONS[$FINDING_NUM]}"
@@ -1178,13 +1242,22 @@ for FINDING_NUM in "${DEFERRED_FINDINGS[@]}"; do
   # Generation >= 2 deferrals are PERMANENT — unbounded cascade prevention
   if echo "$DEFER_REASON" | grep -qi "generation"; then
     PERMANENT_DEFERRED+=($FINDING_NUM)
+  # "Batch fully human-gated" deferrals (forge#1814) are their OWN bucket — they must NOT be
+  # re-evaluated by the file-overlap logic in Step 4F.2 below, because the reason they were
+  # deferred has nothing to do with file overlap. Re-evaluating them the same way as
+  # comment/typo or P3-same-file deferrals would silently undo the idle policy: a sweep can
+  # run while the batch is still a "paused drain" (Step 4B's Termination condition explicitly
+  # allows Step 4F to run in that state), and BATCH_FULLY_GATED would still be true at sweep
+  # time unless a human has actually merged a gating PR in the meantime.
+  elif echo "$DEFER_REASON" | grep -qi "batch fully human-gated"; then
+    IDLE_DEFERRED+=($FINDING_NUM)
   else
     # All other deferrals (comment/typo, P3 same-file) are re-evaluable
     SWEEP_CANDIDATES+=($FINDING_NUM)
   fi
 done
 
-echo "Completion sweep: ${#SWEEP_CANDIDATES[@]} re-evaluable, ${#PERMANENT_DEFERRED[@]} permanent"
+echo "Completion sweep: ${#SWEEP_CANDIDATES[@]} re-evaluable, ${#PERMANENT_DEFERRED[@]} permanent, ${#IDLE_DEFERRED[@]} idle-gated"
 ```
 
 **Step 4F.2: Re-evaluate sweep candidates**
@@ -1216,6 +1289,42 @@ for FINDING_NUM in "${SWEEP_CANDIDATES[@]}"; do
     # All other findings are safe to execute
     SWEEP_EXECUTE+=($FINDING_NUM)
     echo "Sweep: #${FINDING_NUM} cleared for execution (file overlap resolved)"
+  fi
+done
+```
+
+**Step 4F.2.5: Re-evaluate idle-gated deferrals** <!-- Added: forge#1814 -->
+
+Recompute `BATCH_FULLY_GATED` fresh at sweep time (same check as Step 4B item 6.7, over `{all_batch_issue_numbers}`) — do NOT reuse a stale value captured when the finding was originally deferred. If a human has merged a gating PR since the finding was deferred, the original batch is no longer fully gated and the finding is safe to execute; otherwise it stays deferred.
+
+```bash
+# Skip the recompute entirely if nothing was idle-gated this run — no need to spend API
+# calls re-classifying the original batch for a bucket with zero members.
+if [ "${#IDLE_DEFERRED[@]}" -gt 0 ]; then
+  ANY_ORIGINAL_IN_PROGRESS=false
+  ANY_ORIGINAL_GATED=false
+  for ORIG_NUM in {all_batch_issue_numbers}; do
+    ORIG_STATE=$(classify_predecessor_state "$ORIG_NUM")
+    case "$ORIG_STATE" in
+      IN_PROGRESS) ANY_ORIGINAL_IN_PROGRESS=true ;;
+      GATED) ANY_ORIGINAL_GATED=true ;;
+      DONE|FAILED) ;;
+    esac
+  done
+  if [ "$ANY_ORIGINAL_IN_PROGRESS" = "false" ] && [ "$ANY_ORIGINAL_GATED" = "true" ]; then
+    BATCH_FULLY_GATED=true
+  else
+    BATCH_FULLY_GATED=false
+  fi
+fi
+
+for FINDING_NUM in "${IDLE_DEFERRED[@]}"; do
+  if [ "${BATCH_FULLY_GATED:-false}" = "true" ]; then
+    SWEEP_STILL_DEFERRED+=($FINDING_NUM)
+    echo "Sweep: #${FINDING_NUM} still deferred (batch still fully human-gated — idle policy)"
+  else
+    SWEEP_EXECUTE+=($FINDING_NUM)
+    echo "Sweep: #${FINDING_NUM} cleared for execution (batch no longer fully gated — a gating PR merged)"
   fi
 done
 ```
@@ -1367,6 +1476,8 @@ Completion Sweep Results:
   Dispatched: #{A}, #{B} (file overlap cleared after DAG drain)
   Still deferred (cosmetic): #{C} (comment/typo)
   Permanently deferred (gen2): #{D} (generation >= 2 cascade cap)
+  Idle-gated — still deferred: #{E} (batch still fully human-gated — waiting on a merge)
+  Idle-gated — cleared: #{F} (a gating PR merged since deferral — no longer idle)
 ```
 
 **After sweep agents complete** (or if no findings were dispatched): output the budget deferred-issues report (if applicable), then proceed to Phase 5.
@@ -1375,6 +1486,7 @@ Completion Sweep Results:
 - Re-sweeping findings spawned during the sweep itself — this creates unbounded recursion. Sweep is a single pass.
 - Overriding generation >= 2 deferrals — the cascade cap is absolute.
 - Skipping the sweep because "there are only a few" deferred findings — even one deferred finding represents unresolved work.
+- Clearing an idle-gated deferral (forge#1814) without recomputing `BATCH_FULLY_GATED` fresh at sweep time — a stale "not gated" read would re-introduce the exact net-negative churn this policy exists to stop.
 
 ### Step 4F.5: Budget Deferred-Issues Report (conditional) <!-- Added: forge#1743 -->
 
