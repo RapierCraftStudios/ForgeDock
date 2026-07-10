@@ -747,6 +747,142 @@ describe("doctor --fix (forge#1944)", () => {
     assert.doesNotMatch(secondFix.stdout, /issue\(s\) auto-fixed/i);
   });
 
+  // Stub `gh` so it also answers Check 7's two subcommands (`label list` /
+  // `label create`), on top of the `--version`/`auth status` calls the plain
+  // stubTools() above already covers. State is tracked via a marker file
+  // written by the `label create` branch: before it exists, `label list`
+  // reports the workflow:* labels as absent (simulating a repo that has
+  // never had ForgeDock labels bootstrapped); once labelsSetup() has called
+  // `label create` for every label in bin/labels.json (forge#1944), `label
+  // list` reports them all present — mirroring gh's real idempotent
+  // create --force semantics closely enough for Check 7's detect/fix/recheck
+  // logic, without any network access or a real GitHub repo.
+  //
+  // Cross-platform note: forgedock.mjs calls `execFileSync("gh", [...])` for
+  // label list/create (no shell). On Windows, execFileSync resolves commands
+  // via PATHEXT — a bare `gh` shell script is invisible. The stub logic
+  // therefore lives in a Node.js script (gh-stub.js) with thin launchers:
+  //   - `gh`     (#!/bin/sh wrapper for Unix)
+  //   - `gh.cmd` (@node wrapper for Windows — found via PATHEXT by
+  //               execFileSync and auto-run through cmd.exe by libuv)
+  // PATH is joined with the platform-correct separator (`;` on Windows,
+  // `:` elsewhere) so the stub dir is actually first in the search order.
+  function stubToolsWithLabels() {
+    const stubBin = mkdtempSync(join(os.tmpdir(), "fd-doctor-fix-label-stub-bin-"));
+    const presentJson = JSON.stringify(
+      [
+        "workflow:investigating",
+        "workflow:ready-to-build",
+        "workflow:building",
+        "workflow:in-review",
+        "workflow:awaiting-merge",
+        "workflow:merged",
+        "workflow:decomposed",
+        "workflow:invalid",
+      ].map((name) => ({ name })),
+    );
+
+    // Core logic as a standalone Node.js script — both launchers delegate here.
+    const ghStubPath = join(stubBin, "gh-stub.js");
+    writeFileSync(
+      ghStubPath,
+      [
+        'const fs = require("fs");',
+        'const path = require("path");',
+        'const marker = path.join(__dirname, ".labels-created");',
+        'const args = process.argv.slice(2);',
+        `const present = ${JSON.stringify(presentJson)};`,
+        'if (args[0] === "label" && args[1] === "list") {',
+        '  console.log(fs.existsSync(marker) ? present : "[]");',
+        "  process.exit(0);",
+        "}",
+        'if (args[0] === "label" && args[1] === "create") {',
+        '  fs.writeFileSync(marker, "");',
+        "  process.exit(0);",
+        "}",
+        'if (args[0] === "auth" && args[1] === "status") process.exit(0);',
+        'console.log("gh version 2.60.0");',
+      ].join("\n") + "\n",
+      "utf-8",
+    );
+
+    // Unix launcher (sh shebang — used by execSync and execFileSync on
+    // Linux/macOS where extensionless files with a shebang are executable).
+    writeFileSync(
+      join(stubBin, "gh"),
+      `#!/bin/sh\nexec node "${ghStubPath}" "$@"\n`,
+      { mode: 0o755 },
+    );
+    // Windows launcher (.cmd — found by execFileSync via PATHEXT; libuv
+    // auto-wraps .cmd files with cmd.exe /c, so this Just Works).
+    writeFileSync(join(stubBin, "gh.cmd"), `@node "${ghStubPath}" %*\r\n`);
+
+    // yq stubs — same version-echo as sibling tests, with a .cmd launcher
+    // so Windows environments without a real yq.exe installed still pass
+    // the doctor yq-version check.
+    writeFileSync(
+      join(stubBin, "yq"),
+      "#!/bin/sh\necho 'yq (https://github.com/mikefarah/yq/) version v4.44.0'\n",
+      { mode: 0o755 },
+    );
+    writeFileSync(
+      join(stubBin, "yq.cmd"),
+      "@echo yq (https://github.com/mikefarah/yq/) version v4.44.0\r\n",
+    );
+
+    const sep = process.platform === "win32" ? ";" : ":";
+    return { PATH: `${stubBin}${sep}${process.env.PATH}` };
+  }
+
+  it("bootstraps missing GitHub workflow labels (Check 7) and is idempotent", () => {
+    const home = mkdtempSync(join(os.tmpdir(), "fd-doctor-fix-home-"));
+    const cwd = mkdtempSync(join(os.tmpdir(), "fd-doctor-fix-cwd-"));
+    writeFileSync(
+      join(home, ".gitconfig"),
+      "[user]\n\tname = Test User\n\temail = test@example.com\n",
+      "utf-8",
+    );
+    const extraEnv = stubToolsWithLabels();
+    const installRes = runCli(["install", "--fast"], { cwd, home, extraEnv });
+    assert.equal(installRes.status, 0, installRes.stdout + installRes.stderr);
+
+    // A real (non-placeholder) owner/repo so Check 4 resolves forgeOwner/
+    // forgeRepo and Check 7 actually runs instead of reporting "Skipped".
+    writeFileSync(
+      join(cwd, "forge.yaml"),
+      [
+        "project:",
+        '  name: "Real Project"',
+        '  owner: "real-org"',
+        '  repo: "real-repo"',
+        "paths:",
+        '  root: "/tmp/x"',
+        "branches:",
+        '  default: "main"',
+        '  staging: "staging"',
+        "",
+      ].join("\n"),
+      "utf-8",
+    );
+
+    const before = runCli(["doctor"], { cwd, home, extraEnv });
+    assert.equal(before.status, 1, before.stdout + before.stderr);
+    assert.match(before.stdout, /GitHub workflow labels/i);
+    assert.doesNotMatch(before.stdout, /issue\(s\) auto-fixed/i);
+
+    const fixRes = runCli(["doctor", "--fix"], { cwd, home, extraEnv });
+    assert.equal(fixRes.status, 0, fixRes.stdout + fixRes.stderr);
+    assert.match(fixRes.stdout, /GitHub workflow labels/i);
+    assert.match(fixRes.stdout, /issue\(s\) auto-fixed/i);
+
+    // Second consecutive --fix run reports no further fixes (idempotent) —
+    // the stub's marker file now makes `label list` report all workflow:*
+    // labels already present.
+    const secondFix = runCli(["doctor", "--fix"], { cwd, home, extraEnv });
+    assert.equal(secondFix.status, 0, secondFix.stdout + secondFix.stderr);
+    assert.doesNotMatch(secondFix.stdout, /issue\(s\) auto-fixed/i);
+  });
+
   it("plain `doctor` (no --fix) is unaffected — never auto-repairs, never prints an auto-fixed summary", () => {
     const { home, cwd, extraEnv } = setupInstall();
     const targetDir = join(home, ".claude", "commands");
