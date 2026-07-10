@@ -631,7 +631,9 @@ const STEP_STATUS = {
  * their own ASCII symbols.
  */
 export function stepHeader(current, total, label, status = "active") {
-  const icon = STEP_STATUS[status] || STEP_STATUS.active;
+  const icon = Object.hasOwn(STEP_STATUS, status)
+    ? STEP_STATUS[status]
+    : STEP_STATUS.active;
   const counter = dim(`Step ${current} of ${total}`);
   const dash = dim(" — ");
   const name =
