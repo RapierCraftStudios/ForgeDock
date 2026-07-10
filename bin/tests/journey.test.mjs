@@ -975,6 +975,63 @@ describe("forge (Act II)", () => {
     assert.ok(existsSync(userLink), "user-owned symlink preserved");
     assert.equal(res.pruned, 0);
   });
+
+  describe("linkPipelineScripts copy-fallback content comparison (forge#1916)", () => {
+    it("byte-identical plain-file target is skipped, not recopied", async () => {
+      const home = mkdtempSync(join(os.tmpdir(), "fd-forge-home-scripts1-"));
+      const forgeHome = mkdtempSync(join(os.tmpdir(), "fd-forge-src-scripts1-"));
+      mkdirSyncFs(join(forgeHome, "commands"), { recursive: true });
+      mkdirSyncFs(join(forgeHome, "bin", "hooks"), { recursive: true });
+      mkdirSyncFs(join(forgeHome, "scripts"), { recursive: true });
+      writeFileSync(join(forgeHome, "commands", "a.md"), "A", "utf-8");
+      writeFileSync(join(forgeHome, "bin", "hooks", "session-start.mjs"), "// hook", "utf-8");
+      writeFileSync(join(forgeHome, "scripts", "classify-lane.sh"), "#!/bin/sh\necho lane\n", "utf-8");
+
+      // Pre-seed the target as an already-correct plain file (simulates a
+      // prior copy-fallback install on Windows without Developer Mode).
+      const scriptsTargetDir = join(home, ".claude", "scripts");
+      mkdirSyncFs(scriptsTargetDir, { recursive: true });
+      writeFileSync(join(scriptsTargetDir, "classify-lane.sh"), "#!/bin/sh\necho lane\n", "utf-8");
+
+      const { ctx } = stubCtx({ home, linkStrategy: "copy" });
+      ctx.forgeHome = forgeHome;
+      const res = await forge(ctx);
+
+      assert.equal(res.scriptsResult.copied, 0, "byte-identical content must not be recopied");
+      assert.equal(res.scriptsResult.skipped, 1);
+      assert.equal(
+        readFileSync(join(scriptsTargetDir, "classify-lane.sh"), "utf-8"),
+        "#!/bin/sh\necho lane\n",
+      );
+    });
+
+    it("differing plain-file target is still recopied (unchanged behavior)", async () => {
+      const home = mkdtempSync(join(os.tmpdir(), "fd-forge-home-scripts2-"));
+      const forgeHome = mkdtempSync(join(os.tmpdir(), "fd-forge-src-scripts2-"));
+      mkdirSyncFs(join(forgeHome, "commands"), { recursive: true });
+      mkdirSyncFs(join(forgeHome, "bin", "hooks"), { recursive: true });
+      mkdirSyncFs(join(forgeHome, "scripts"), { recursive: true });
+      writeFileSync(join(forgeHome, "commands", "a.md"), "A", "utf-8");
+      writeFileSync(join(forgeHome, "bin", "hooks", "session-start.mjs"), "// hook", "utf-8");
+      writeFileSync(join(forgeHome, "scripts", "classify-lane.sh"), "#!/bin/sh\necho new\n", "utf-8");
+
+      // Pre-seed the target with stale content — must be detected as different
+      // and recopied.
+      const scriptsTargetDir = join(home, ".claude", "scripts");
+      mkdirSyncFs(scriptsTargetDir, { recursive: true });
+      writeFileSync(join(scriptsTargetDir, "classify-lane.sh"), "#!/bin/sh\necho old\n", "utf-8");
+
+      const { ctx } = stubCtx({ home, linkStrategy: "copy" });
+      ctx.forgeHome = forgeHome;
+      const res = await forge(ctx);
+
+      assert.equal(res.scriptsResult.copied, 1, "differing content must still be recopied");
+      assert.equal(
+        readFileSync(join(scriptsTargetDir, "classify-lane.sh"), "utf-8"),
+        "#!/bin/sh\necho new\n",
+      );
+    });
+  });
 });
 
 // ---------------------------------------------------------------------------

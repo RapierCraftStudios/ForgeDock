@@ -722,6 +722,12 @@ async function linkPipelineScripts(ctx) {
       if (stats.isSymbolicLink()) {
         const current = await readlink(target);
         if (current === file) alreadyCorrect = true;
+      } else if (stats.isFile() && !wantSymlink) {
+        // Copy-fallback path (Windows without Developer Mode): content-compare
+        // before unlinking/recopying, matching the sibling linkCommands() loop
+        // and the legacy linkScripts() this restores (forge#1916).
+        const [src, dst] = await Promise.all([readFile(file), readFile(target)]);
+        if (src.equals(dst)) alreadyCorrect = true;
       }
     } catch (err) {
       if (err.code !== "ENOENT") throw err;
