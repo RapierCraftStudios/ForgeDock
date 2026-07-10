@@ -667,14 +667,22 @@ verify_file_overlap_edge() {
   # (forge#1634/#1646/#1830 precedent — a bare "#${PRED}" substring grep would false-match
   # #50/#500 for predecessor #5, so this always goes through gh's search query, never a
   # hand-rolled grep against comment/PR body text).
+  #
+  # Exclude CLOSED-unmerged PRs (same precedent as the milestone-base-consistency check
+  # elsewhere in this file: "a closed-but-not-merged PR is a superseded/abandoned routing
+  # attempt and does NOT reflect the live lane"). For a FAILED (workflow:invalid) or GATED
+  # (needs-human/workflow:awaiting-merge) predecessor this can only ever surface an OPEN PR —
+  # a MERGED PR would already classify the predecessor DONE, not FAILED/GATED — so this filter
+  # also guarantees `gh pr diff` below targets a live, still-open branch rather than an
+  # abandoned PR whose branch may since have been force-deleted (e.g. by /cleanup).
   local PRED_PR
   PRED_PR=$(gh pr list -R {GH_REPO} --state all --search "\"Closes #${PRED}\" in:body" \
-    --json number --jq '.[0].number // empty' 2>/dev/null || echo "")
+    --json number,state --jq '[.[] | select(.state != "CLOSED")][0].number // empty' 2>/dev/null || echo "")
 
   if [ -z "$PRED_PR" ]; then
-    # Predecessor reached a terminal/gated state having never opened a PR — there is no code
-    # that could possibly conflict with DEP's files. The edge was based purely on the
-    # pre-build guess and never materialized.
+    # Predecessor reached a terminal/gated state having never opened a PR (or only ever had
+    # an abandoned/closed-unmerged one) — there is no live code that could possibly conflict
+    # with DEP's files. The edge was based purely on the pre-build guess and never materialized.
     echo "DROP"
     return
   fi
@@ -682,13 +690,29 @@ verify_file_overlap_edge() {
   # A PR exists — compare the file(s) that actually triggered this edge (EDGE_FILES, set at
   # Layer 1/2/3 in phase-3-dependency.md) against the PR's real changed-file list.
   local ACTUAL_FILES
-  ACTUAL_FILES=$(gh pr diff "$PRED_PR" -R {GH_REPO} --name-only 2>/dev/null || echo "")
+  local DIFF_EXIT
+  ACTUAL_FILES=$(gh pr diff "$PRED_PR" -R {GH_REPO} --name-only 2>/dev/null)
+  DIFF_EXIT=$?
+  if [ "$DIFF_EXIT" -ne 0 ]; then
+    # Fail-safe: could not fetch the actual diff (transient API error, rate limit, etc.) —
+    # an empty result here must NOT be conflated with "confirmed no overlap." Keep the edge
+    # blocking rather than risk dropping a real conflict on a fetch failure.
+    echo "KEEP"
+    return
+  fi
   local EDGE_FILE_LIST="${EDGE_FILES["${PRED}:${DEP}"]:-}"
 
   local OVERLAP_FOUND=false
   for EF in $EDGE_FILE_LIST; do
     [ -z "$EF" ] && continue
-    if echo "$ACTUAL_FILES" | grep -qF "$EF"; then
+    # Strip a trailing slash (Layer 2 directory-type edges store a bare directory path) and
+    # escape regex metacharacters, then anchor the match to a path-component boundary. A raw
+    # `grep -qF` substring test would let a short directory name like "utils" false-match an
+    # unrelated path such as "some_utils_helper.py" or "shared_utils/" — anchoring on `/`
+    # boundaries requires the shared file/directory to appear as a whole path segment.
+    EF_CLEAN="${EF%/}"
+    EF_ESCAPED=$(printf '%s' "$EF_CLEAN" | sed 's/[.[\*^$()+?{|]/\\&/g')
+    if echo "$ACTUAL_FILES" | grep -qE "(^|/)${EF_ESCAPED}(/|$)"; then
       OVERLAP_FOUND=true
       break
     fi
@@ -698,12 +722,14 @@ verify_file_overlap_edge() {
     echo "KEEP"   # PR's actual diff confirms the shared file was really touched — real conflict
   else
     echo "DROP"   # PR exists but its actual diff never touched the guessed shared file(s) —
-                  # the Layer 1 guess was wrong for this predecessor; the edge is spurious
+                  # the Layer 1/2/3 guess was wrong for this predecessor; the edge is spurious
   fi
 }
 ```
 
 **Call sites**: item 6 (FAILED handling, below) and item 6.5 (GATED handling, below) both call this helper — once per `EDGE_KIND`-tagged predecessor edge — before cascading a skip or tracking `blocked-on-human-merge`. `phase-3-dependency.md`'s wake/compaction reconstruction block calls the identical logic (mirrored verbatim, not re-derived) for the case where the predecessor resolves after the orchestrator session has already ended — see that file's "Orchestrator state reconstruction on wake / after compaction" section. This mirroring is deliberate: keeping the check in exactly one function definition, called (not reimplemented) from both files, avoids the same drift class forge#1812 had to fix once already for DONE/GATED/FAILED classification itself.
+
+**Recursive cascade note (item 6 only)**: when a dependent `DEP` is itself marked "skipped — dependency failed" (edge confirmed `KEEP`, not dropped), `DEP` becomes the new FAILED anchor for its own direct dependents — re-run this same `verify_file_overlap_edge` check at that next hop too, rather than assuming every transitive descendant is unconditionally skipped. A grandchild dependent whose only path to the failure runs through a spurious (droppable) edge one hop down must not be skipped just because its parent was.
 
 **Never called from**: the DONE branch (that predecessor's code is already merged — the edge, if real, is already resolved) or the `IN_PROGRESS` branch (nothing to re-verify yet — the predecessor hasn't concluded).
 
