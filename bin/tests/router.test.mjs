@@ -5,7 +5,7 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { mkdtempSync, writeFileSync, readFileSync, existsSync, mkdirSync, cpSync } from "node:fs";
+import { mkdtempSync, writeFileSync, readFileSync, existsSync, mkdirSync, cpSync, unlinkSync } from "node:fs";
 import { join, dirname } from "node:path";
 import os from "node:os";
 import { fileURLToPath } from "node:url";
@@ -634,10 +634,18 @@ describe("doctor --fix (forge#1944)", () => {
   it("repairs a stale copy-mode command file (Check 1) and is idempotent", () => {
     const { home, cwd, extraEnv } = setupInstall();
     const targetDir = join(home, ".claude", "commands");
-    const files = readFileSync(join(targetDir, "work-on.md"), "utf-8");
+    const targetPath = join(targetDir, "work-on.md");
+    const files = readFileSync(targetPath, "utf-8");
     // Corrupt the installed copy so it no longer matches the source — this is
-    // the "stale copy" branch of Check 1's copy-mode detection.
-    writeFileSync(join(targetDir, "work-on.md"), files + "\nstale local edit\n", "utf-8");
+    // the "stale copy" branch of Check 1's copy-mode detection. On platforms
+    // where install --fast created a real symlink (Linux/macOS CI, or Windows
+    // with Developer Mode), writing straight to the target path follows the
+    // symlink and mutates the SOURCE file instead, leaving content identical
+    // and defeating the test. Unlink first so the target is guaranteed to be
+    // a plain regular file with genuinely divergent content, regardless of
+    // install mode. <!-- Added: forge#1944 CI fix -->
+    unlinkSync(targetPath);
+    writeFileSync(targetPath, files + "\nstale local edit\n", "utf-8");
 
     const before = runCli(["doctor"], { cwd, home, extraEnv });
     assert.equal(before.status, 1, before.stdout + before.stderr);
@@ -713,8 +721,13 @@ describe("doctor --fix (forge#1944)", () => {
   it("plain `doctor` (no --fix) is unaffected — never auto-repairs, never prints an auto-fixed summary", () => {
     const { home, cwd, extraEnv } = setupInstall();
     const targetDir = join(home, ".claude", "commands");
-    const original = readFileSync(join(targetDir, "work-on.md"), "utf-8");
-    writeFileSync(join(targetDir, "work-on.md"), original + "\nstale local edit\n", "utf-8");
+    const targetPath = join(targetDir, "work-on.md");
+    const original = readFileSync(targetPath, "utf-8");
+    // See the identical unlink-before-write note in the Check 1 test above —
+    // writing straight to a symlinked target would silently corrupt the
+    // source file instead of the copy on symlink-capable platforms.
+    unlinkSync(targetPath);
+    writeFileSync(targetPath, original + "\nstale local edit\n", "utf-8");
 
     const res1 = runCli(["doctor"], { cwd, home, extraEnv });
     assert.equal(res1.status, 1, res1.stdout + res1.stderr);
