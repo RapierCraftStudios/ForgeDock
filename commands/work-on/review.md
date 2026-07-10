@@ -12,7 +12,7 @@ argument-hint: [issue number] [--repo GH_REPO] [--gh-flag GH_FLAG] [--worktree P
 **Invoked by**: `work-on.md` Phase 4–5, after `build/validate.md` returns `GATE_PASSED: true`.
 **Output**: Push branch, create PR, invoke /review-pr --auto-merge, return result to caller.
 
-**Agent model policy**: `model: "{DEFAULT_MODEL}"` — resolved from forge.yaml `agents.default_model`, else "sonnet" (standard tier). Fallback: `model: "opus"` if rate-limited. Feature gate: pass `effort` in Task/Skill spawns only on Claude Code >= 2.1.154.
+**Agent model policy**: `model: "{DEFAULT_MODEL}"` — resolved from forge.yaml `agents.default_model`, else "sonnet" (standard tier). Fallback: `model: "opus"` if rate-limited. Feature gate: pass `effort` in Task/Skill spawns only on Claude Code >= 2.1.154. This file's mechanical bits (label transitions, `FORGE:CHECKPOINT` writes) stay at this tier because they're interleaved with the review/merge-decision steps in the same `Skill()` invocation — see `work-on.md` section "Model and Effort Tiering — What Actually Applies". <!-- Added: forge#1827 -->
 **NEVER use plan mode (EnterPlanMode).**
 
 <!-- FORGE:SPEC_LOADED — work-on/review.md loaded and active. Agent is bound by this spec. -->
