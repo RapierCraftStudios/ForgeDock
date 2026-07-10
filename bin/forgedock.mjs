@@ -30,6 +30,7 @@ import {
   manualLowConfidenceKeys,
   isEphemeralCachePath,
   writeInstallReceipt,
+  persistHome,
   PIPELINE_SCRIPTS,
 } from "./journey.mjs";
 import {
@@ -45,6 +46,8 @@ import {
   detectClaudeVersion,
   loadBreakpoints,
   hasFeature,
+  getPersistedHomeState,
+  setPersistedHomeState,
 } from "./registry.mjs";
 import { renderMark, ember } from "./cinema.mjs";
 import {
@@ -1434,6 +1437,33 @@ async function update() {
     } else {
       console.log(`  Already up to date (v${localVersion}).`);
     }
+
+    // Refresh the persisted ~/.forge/ copy from the currently-resolved
+    // package (forge#1943). The version-check above is advisory only — it
+    // tells the user to re-run npx forgedock@latest but never touched disk.
+    // This actually copies whatever payload FORGE_HOME resolves to right now
+    // (the just-fetched npx package on `npx forgedock@latest update`, or
+    // whatever was already resolved on a plain `npx forgedock update`) into
+    // ~/.forge/, so the persisted copy doesn't go stale between full
+    // install/init runs. Skipped as a no-op for git-clone installs (handled
+    // by the `if (existsSync(gitDir))` branch above — this code path only
+    // runs for npm/npx installs). Fail-open: any error here must never block
+    // relinkAndHint() below.
+    try {
+      const persisted = await persistHome(ctx());
+      if (!persisted.skipped) {
+        await setPersistedHomeState({
+          path: persisted.forgeHome,
+          version: persisted.version,
+        });
+        if (persisted.migrated) {
+          console.log(`  ${GREEN}Refreshed ~/.forge/${RESET} (v${persisted.version || "unknown"}).`);
+        }
+      }
+    } catch {
+      // Best-effort — persisted-home refresh must never block the update.
+    }
+
     await relinkAndHint();
   }
   console.log("");
@@ -1983,6 +2013,79 @@ async function doctor() {
       }
     } catch (err) {
       fail("SessionStart hook script path", `Cannot verify hook script path: ${err.message}. Run: npx forgedock install`);
+    }
+  }
+
+  // ── Check 5d: Persisted toolset home (~/.forge) ────────────────────────────
+  // persistHome() (bin/journey.mjs, forge#1943) copies bin/commands/scripts/
+  // templates from wherever FORGE_HOME resolved into a stable ~/.forge/ copy
+  // on every `npx forgedock` install/init/update run, so ~/.claude/commands
+  // symlinks and the SessionStart hook keep working after the npm/npx cache
+  // that originally served them is evicted. This check reports that copy's
+  // state — it is a SIBLING of (and unrelated to) the pre-existing
+  // ~/.forge/{runs,index} engine-data directories used by the run-issue
+  // engine (bin/engine.mjs) and the recall knowledge index (bin/recall.mjs);
+  // this check never reads or writes those.
+  //
+  // A git-clone dev install is explicitly exempt: persistHome() skips it on
+  // purpose (a clone is already stable and user-owned — see Acceptance
+  // Criteria #5 on #1943), so ~/.forge/{bin,commands,...} correctly does not
+  // exist for that install mode. pass() silently rather than warn — an
+  // absence that isn't a problem should not read as one.
+  {
+    try {
+      const isGitCloneInstall = existsSync(join(FORGE_HOME, ".git"));
+      if (isGitCloneInstall) {
+        pass("Persisted toolset home (~/.forge)", "skipped — git-clone install links directly from the clone");
+      } else {
+        const persistedHome = join(HOME, ".forge");
+        const payloadDirs = ["bin", "commands", "scripts", "templates"];
+        const missingDirs = payloadDirs.filter((d) => !existsSync(join(persistedHome, d)));
+        const versionPath = join(persistedHome, "version");
+
+        if (missingDirs.length === payloadDirs.length && !existsSync(versionPath)) {
+          // Pre-migration state — persistHome() simply hasn't run yet for
+          // this user. Not a failure: the very next `npx forgedock` run
+          // creates it.
+          warn(
+            "Persisted toolset home (~/.forge)",
+            "not yet created — run: npx forgedock install  (or npx forgedock update)",
+          );
+        } else if (missingDirs.length > 0) {
+          warn(
+            "Persisted toolset home (~/.forge)",
+            `incomplete (missing: ${missingDirs.join(", ")}). Run: npx forgedock install`,
+          );
+        } else {
+          // Prefer the version registry.mjs last recorded for this exact
+          // write (getPersistedHomeState()) — the single source of truth
+          // update()/install also write through — falling back to reading
+          // ~/.forge/version directly on disk when the registry has no entry
+          // (e.g. an older ForgeDock version wrote ~/.forge/ before #1943
+          // added registry tracking). Reading both keeps doctor() honest
+          // even if the registry ever drifts from what's actually on disk.
+          const recorded = getPersistedHomeState();
+          let persistedVersion = recorded?.version || "";
+          if (!persistedVersion) {
+            try {
+              persistedVersion = readFileSync(versionPath, "utf-8").trim();
+            } catch {
+              // version file missing/unreadable — reported below as "unknown"
+            }
+          }
+          const sourceVersion = getVersion();
+          if (persistedVersion && sourceVersion && compareVersions(persistedVersion, sourceVersion) < 0) {
+            warn(
+              "Persisted toolset home (~/.forge)",
+              `v${persistedVersion} — source is v${sourceVersion}. Run: npx forgedock update`,
+            );
+          } else {
+            pass("Persisted toolset home (~/.forge)", `v${persistedVersion || "unknown"} at ${persistedHome}`);
+          }
+        }
+      }
+    } catch (err) {
+      warn("Persisted toolset home (~/.forge)", `Could not verify: ${err.message}`);
     }
   }
 
@@ -2692,6 +2795,22 @@ switch (command) {
       statusScreen(c);
     } else {
       exitCode = await runJourney(c);
+      // Record persistHome()'s outcome (set on c.persistHomeResult inside
+      // runJourney()) in the registry (forge#1943), mirroring update()'s npm
+      // branch — a single, centrally-updated source of truth for doctor()
+      // rather than each command re-deriving persisted-home state on its own
+      // (forge#1589 split-brain precedent). Best-effort: a failed write here
+      // must never turn a successful install into a failing one.
+      if (c.persistHomeResult && !c.persistHomeResult.skipped) {
+        try {
+          await setPersistedHomeState({
+            path: c.persistHomeResult.forgeHome,
+            version: c.persistHomeResult.version,
+          });
+        } catch {
+          // best-effort — see comment above
+        }
+      }
     }
     break;
   }

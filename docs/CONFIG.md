@@ -785,6 +785,53 @@ See [Per-Directory State Registry](#per-directory-state-registry) below for how 
 
 ---
 
+## Persisted Toolset Home (`~/.forge/`)
+
+`npx`/`npm` never installs `forgedock` to a stable location on your machine — it resolves to wherever `npx`'s cache (or a global npm install, or a git clone) happens to physically live. Historically, `~/.claude/commands/` and the SessionStart hook's script path were symlinked **directly** from that ephemeral location. When npm/npx (or the OS) later evicted its cache, those symlinks silently dangled — Claude Code sessions stopped getting ForgeDock context with no error shown.
+
+As of this feature, every `npx forgedock` (or `npx forgedock update`) run copies ForgeDock's own installable payload into a stable, version-independent home:
+
+```
+~/.forge/
+  bin/          — the same bin/ tree bundled with the resolved package (hooks, CLI entry points)
+  commands/     — the slash-command specs (.md)
+  scripts/      — the universal pipeline-agent scripts (classify-lane.sh, etc.)
+  templates/    — scaffold templates (e.g. the demo repo)
+  version       — plain-text file containing the source package's version (e.g. "1.7.2")
+```
+
+`~/.claude/commands/` symlinks and the SessionStart hook's baked-in script path are then built from **this** copy, not the original ephemeral source — so they keep working even after the npm/npx cache that originally served them is cleared.
+
+### When It Runs
+
+| Command | Behavior |
+|---------|----------|
+| `npx forgedock` / `npx forgedock install` | Copies the resolved package's payload into `~/.forge/` (content-compared — unchanged files are never rewritten) before linking commands, then links from `~/.forge/`, not the original source |
+| `npx forgedock init` | Does not touch `~/.forge/` — `init` only writes `forge.yaml`, it never installs commands |
+| `npx forgedock update` (npm/npx install) | Refreshes `~/.forge/` from whatever the currently-resolved package looks like, then relinks |
+| `npx forgedock update` (git-clone install) | **Does not** touch `~/.forge/` at all — see the exemption below |
+| `npx forgedock doctor` | Reports `~/.forge/version` and confirms `~/.forge/{bin,commands,scripts,templates}` exist |
+
+The copy is idempotent: files whose content is already byte-identical are never rewritten, so steady-state re-runs are fast and don't generate false "updated" noise.
+
+### The Git-Clone Exemption
+
+If you run ForgeDock from a git clone (or a git worktree) of the repo itself — the development/self-hosted install mode — nothing is copied into `~/.forge/`. A git clone is already a stable, user-owned location; copying it into `~/.forge/` and linking commands from the copy instead of the clone would silently disconnect `git pull` (or `npx forgedock update`'s git branch) from what's actually linked into `~/.claude/commands/`. So:
+
+- `~/.claude/commands/` continues to symlink directly from the clone, exactly as before this feature.
+- `~/.forge/{bin,commands,scripts,templates}` correctly does **not** exist for this install mode — `npx forgedock doctor` treats that absence as healthy, not a warning.
+
+### Not the Same as `~/.forge/{runs,index}`
+
+`~/.forge/` also hosts two **unrelated, pre-existing** directories used by other parts of ForgeDock:
+
+- `~/.forge/runs/` — durable engine run state for `npx forgedock run-issue` / `resume-stalled` (see `bin/engine.mjs`).
+- `~/.forge/index/` — the `recall` knowledge index (see `bin/recall.mjs`, `docs/FORGE-PROTOCOL.md`).
+
+These are **engine data**, not the toolset itself, and this feature does not read, write, or otherwise change them. `~/.forge/{bin,commands,scripts,templates,version}` (this section) and `~/.forge/{runs,index}` (engine data) are unrelated siblings that merely happen to live under the same `~/.forge/` root — don't conflate the two when reading `~/.forge/`'s contents.
+
+---
+
 ## Per-Directory State Registry
 
 ForgeDock tracks per-directory opt-out state in a central registry file on the local machine.
