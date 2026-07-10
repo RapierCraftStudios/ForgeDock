@@ -20,7 +20,7 @@ The `forgedock-review.yml` workflow template triggers on every pull request (ope
 ## Prerequisites
 
 1. **Anthropic API key** — Claude Code runs against the Anthropic API. Get one at [console.anthropic.com](https://console.anthropic.com).
-2. **ForgeDock installed** — The workflow installs ForgeDock automatically via `npx forgedock install --global` (CI uses global install so commands are available system-wide in the runner).
+2. **ForgeDock installed** — The workflow installs ForgeDock automatically via `npx forgedock install` (install is always global, so commands are available system-wide in the runner).
 3. **GitHub Actions enabled** — Standard for all public repos; enabled by default for private repos.
 
 ---
@@ -61,7 +61,7 @@ mkdir -p .github/workflows
 cp "$(npx forgedock which-dir)/templates/workflows/forgedock-review.yml" .github/workflows/forgedock-review.yml
 ```
 
-Or copy it manually — the file is in `~/.claude/commands/../templates/workflows/forgedock-review.yml` after running `npx forgedock install --global`.
+Or copy it manually — the file is in `~/.claude/commands/../templates/workflows/forgedock-review.yml` after running `npx forgedock install`.
 
 ### 3. Commit and push
 

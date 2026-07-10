@@ -10,7 +10,7 @@ install: extras
 
 You are the ForgeDock compatibility auditor. Produce a point-in-time advisory report that shows whether the user's installed Claude Code version is current and which ForgeDock features may behave differently on their runtime. This command is **non-blocking** — it never aborts the session. All output is advisory.
 
-**Agent model policy**: `model: "sonnet"` (standard tier). Fallback: `model: "opus"` if rate-limited. Feature gate: pass `effort` in Task/Skill spawns only on Claude Code >= 2.1.154.
+**Agent model policy**: `model: "{DEFAULT_MODEL}"` — resolved from forge.yaml `agents.default_model`, else "sonnet" (standard tier). Fallback: `model: "opus"` if rate-limited. Feature gate: pass `effort` in Task/Skill spawns only on Claude Code >= 2.1.154.
 **NEVER use plan mode (EnterPlanMode).**
 
 ---

@@ -13,7 +13,7 @@ You are the analytics orchestrator. Pull data from ALL available analytics platf
 
 **NEVER use plan mode (EnterPlanMode)** — it breaks execution context.
 
-**Agent model policy**: `model: "sonnet"` (standard tier). Fallback: `model: "opus"` if rate-limited. User can override with `--model <name>`. Pass model explicitly in every `Agent` tool call. Feature gate: pass `effort` in Task/Skill spawns only on Claude Code >= 2.1.154.
+**Agent model policy**: `model: "{DEFAULT_MODEL}"` — resolved from forge.yaml `agents.default_model`, else "sonnet" (standard tier). Fallback: `model: "opus"` if rate-limited. User can override with `--model <name>`. Pass model explicitly in every `Agent` tool call. Feature gate: pass `effort` in Task/Skill spawns only on Claude Code >= 2.1.154.
 
 <!-- FORGE:SPEC_LOADED — analytics.md loaded and active. Agent is bound by this spec. -->
 
@@ -163,7 +163,7 @@ Launch ALL 7 data collection agents simultaneously using `run_in_background=true
 
 ### Agent 1: GSC Data Collector
 
-Launch as a background Agent (subagent_type: general-purpose, model: sonnet):
+Launch as a background Agent (subagent_type: general-purpose, model: {SUBAGENT_MODEL}):
 
 **Mission**: Collect Google Search Console data for `{DOMAIN}`. Use the MCP GSC tools directly.
 
@@ -183,7 +183,7 @@ All queries use `siteUrl: "{SITE_URL}"`.
 
 ### Agent 2: Clarity Data Collector
 
-Launch as a background Agent (subagent_type: general-purpose, model: sonnet):
+Launch as a background Agent (subagent_type: general-purpose, model: {SUBAGENT_MODEL}):
 
 **Mission**: Collect Microsoft Clarity behavior analytics. Use `mcp__clarity__query-analytics-dashboard` and `mcp__clarity__list-session-recordings` tools.
 
@@ -211,7 +211,7 @@ Launch as a background Agent (subagent_type: general-purpose, model: sonnet):
 
 ### Agent 3: Umami Data Collector
 
-Launch as a background Agent (subagent_type: general-purpose, model: sonnet):
+Launch as a background Agent (subagent_type: general-purpose, model: {SUBAGENT_MODEL}):
 
 **Mission**: Collect Umami analytics via REST API.
 
@@ -238,7 +238,7 @@ python3 -c "import yaml; c=yaml.safe_load(open('{CREDENTIALS_FILE}')); print(c['
 
 ### Agent 4: Cloudflare Data Collector
 
-Launch as a background Agent (subagent_type: general-purpose, model: sonnet):
+Launch as a background Agent (subagent_type: general-purpose, model: {SUBAGENT_MODEL}):
 
 **Mission**: Collect Cloudflare traffic/performance data via GraphQL API.
 
@@ -261,7 +261,7 @@ CF_ZONE=$(python3 -c "import yaml; print(yaml.safe_load(open('{CREDENTIALS_FILE}
 
 ### Agent 5: Bing Webmaster Data Collector
 
-Launch as a background Agent (subagent_type: general-purpose, model: sonnet):
+Launch as a background Agent (subagent_type: general-purpose, model: {SUBAGENT_MODEL}):
 
 **Mission**: Collect Bing Webmaster Tools data for `{DOMAIN}` via REST API. Bing powers ChatGPT search, so Bing indexing/ranking data = AI discoverability signal.
 
@@ -288,7 +288,7 @@ BING_BASE=$(python3 -c "import yaml; print(yaml.safe_load(open('{CREDENTIALS_FIL
 
 ### Agent 6: Stripe Revenue Collector
 
-Launch as a background Agent (subagent_type: general-purpose, model: sonnet):
+Launch as a background Agent (subagent_type: general-purpose, model: {SUBAGENT_MODEL}):
 
 **Mission**: Collect Stripe billing and revenue data using Stripe MCP tools. First load them via `ToolSearch query: "+stripe"`, then call the relevant tools.
 
@@ -309,7 +309,7 @@ Launch as a background Agent (subagent_type: general-purpose, model: sonnet):
 
 ### Agent 7: GA4 Data Collector
 
-Launch as a background Agent (subagent_type: general-purpose, model: sonnet):
+Launch as a background Agent (subagent_type: general-purpose, model: {SUBAGENT_MODEL}):
 
 **Mission**: Collect Google Analytics 4 data via the GA4 Data API (v1beta) using a service account.
 

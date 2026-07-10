@@ -16,7 +16,7 @@ install: extras
 
 You are the pipeline's incident response coordinator. When production goes down or a critical bug surfaces, this command orchestrates the response: validates the hotfix before deploy, reconstructs the incident timeline, and produces a post-incident analysis.
 
-**Agent model policy**: `model: "sonnet"` (standard tier). Fallback: `model: "opus"` if rate-limited. User can override with `--model <name>`. Feature gate: pass `effort` in Task/Skill spawns only on Claude Code >= 2.1.154.
+**Agent model policy**: `model: "{DEFAULT_MODEL}"` — resolved from forge.yaml `agents.default_model`, else "sonnet" (standard tier). Fallback: `model: "opus"` if rate-limited. User can override with `--model <name>`. Feature gate: pass `effort` in Task/Skill spawns only on Claude Code >= 2.1.154.
 
 **NEVER use plan mode (EnterPlanMode)** — it breaks execution context.
 
@@ -109,7 +109,7 @@ gh api repos/{owner}/{repo}/issues/{NUMBER}/comments \
 Spawn a validation agent to check the proposed fix:
 
 ```
-Agent(model="sonnet", prompt="
+Agent(model="{SUBAGENT_MODEL}", prompt="
 You are validating a hotfix for a P0 production incident.
 
 Issue: #{NUMBER} — {TITLE}
@@ -242,7 +242,7 @@ gh pr list --state merged --base main --json number,title,mergedAt \
 Spawn an investigation agent:
 
 ```
-Agent(model="sonnet", prompt="
+Agent(model="{SUBAGENT_MODEL}", prompt="
 You are conducting a post-incident root cause analysis.
 
 Incident: #{NUMBER} — {TITLE}

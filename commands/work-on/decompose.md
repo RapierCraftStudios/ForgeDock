@@ -12,7 +12,7 @@ argument-hint: [issue number] [--repo GH_REPO] [--gh-flag GH_FLAG]
 **Invoked by**: `work-on.md` routing loop, when `INVESTIGATE_RESULT.decompose = YES`.
 **Output**: Create sub-issues, update parent tracker, post `<!-- FORGE:DECOMPOSED -->` comment, set labels. STOP — each sub-issue runs its own /work-on.
 
-**Agent model policy**: `model: "sonnet"` (standard tier). Fallback: `model: "opus"` if rate-limited. Feature gate: pass `effort` in Task/Skill spawns only on Claude Code >= 2.1.154.
+**Agent model policy**: `model: "{DEFAULT_MODEL}"` — resolved from forge.yaml `agents.default_model`, else "sonnet" (standard tier). Fallback: `model: "opus"` if rate-limited. Feature gate: pass `effort` in Task/Skill spawns only on Claude Code >= 2.1.154. This file's mechanical bits (label transitions, sub-issue creation) stay at this tier because they're interleaved with the reasoning-heavy sub-issue design steps in the same `Skill()` invocation — see `work-on.md` section "Model and Effort Tiering — What Actually Applies". <!-- Added: forge#1827 -->
 **NEVER use plan mode (EnterPlanMode).**
 
 ---

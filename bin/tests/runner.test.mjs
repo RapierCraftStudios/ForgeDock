@@ -43,6 +43,7 @@ import {
   getToolHandlers,
   renderDryRun,
   renderSummaryCard,
+  resolveConfiguredDefaultModel,
   runCommand,
 } from "../runner.mjs";
 
@@ -931,5 +932,184 @@ describe("runCommand", () => {
     });
     assert.equal(result.status, "dry-run");
     assert.equal(result.model, "claude-test-model", "dry-run result must include model field");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// resolveConfiguredDefaultModel (issue #1851 — forge.yaml agents.default_model)
+// ---------------------------------------------------------------------------
+
+describe("resolveConfiguredDefaultModel", () => {
+  let modelTmp;
+
+  before(() => {
+    modelTmp = mkdtempSync(join(os.tmpdir(), "forgedock-model-cfg-"));
+  });
+
+  after(() => {
+    rmSync(modelTmp, { recursive: true, force: true });
+  });
+
+  it("returns null when forge.yaml does not exist", () => {
+    const dir = join(modelTmp, "no-forge-yaml");
+    mkdirSync(dir, { recursive: true });
+    assert.equal(resolveConfiguredDefaultModel(dir), null);
+  });
+
+  it("returns null when forge.yaml has no agents section", () => {
+    const dir = join(modelTmp, "no-agents-section");
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(join(dir, "forge.yaml"), 'project:\n  name: "Test"\n');
+    assert.equal(resolveConfiguredDefaultModel(dir), null);
+  });
+
+  it("resolves a short alias to its full model ID", () => {
+    const dir = join(modelTmp, "alias-opus");
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(
+      dir + "/forge.yaml",
+      'project:\n  name: "Test"\nagents:\n  default_model: "opus"\n',
+    );
+    assert.equal(resolveConfiguredDefaultModel(dir), "claude-opus-4-6");
+  });
+
+  it("resolves the sonnet alias to the runner's current default ID", () => {
+    const dir = join(modelTmp, "alias-sonnet");
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(
+      join(dir, "forge.yaml"),
+      "agents:\n  default_model: sonnet\n",
+    );
+    assert.equal(resolveConfiguredDefaultModel(dir), "claude-sonnet-5");
+  });
+
+  it("passes through an unrecognized value (e.g. a full model ID) unchanged", () => {
+    const dir = join(modelTmp, "full-id-passthrough");
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(
+      join(dir, "forge.yaml"),
+      'agents:\n  default_model: "claude-custom-future-model"\n',
+    );
+    assert.equal(
+      resolveConfiguredDefaultModel(dir),
+      "claude-custom-future-model",
+    );
+  });
+
+  it("fails soft (returns null, does not throw) when forge.yaml is unreadable", () => {
+    // A directory named "forge.yaml" makes readFileSync throw EISDIR.
+    const dir = join(modelTmp, "unreadable-forge-yaml");
+    mkdirSync(join(dir, "forge.yaml"), { recursive: true });
+    assert.doesNotThrow(() => resolveConfiguredDefaultModel(dir));
+    assert.equal(resolveConfiguredDefaultModel(dir), null);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// runCommand — model resolution precedence (issue #1851)
+// ---------------------------------------------------------------------------
+
+describe("runCommand model resolution precedence", () => {
+  let precTmp;
+  let originalForgedockModel;
+
+  before(() => {
+    precTmp = mkdtempSync(join(os.tmpdir(), "forgedock-model-prec-"));
+    originalForgedockModel = process.env.FORGEDOCK_MODEL;
+    delete process.env.FORGEDOCK_MODEL;
+  });
+
+  after(() => {
+    rmSync(precTmp, { recursive: true, force: true });
+    if (originalForgedockModel === undefined) {
+      delete process.env.FORGEDOCK_MODEL;
+    } else {
+      process.env.FORGEDOCK_MODEL = originalForgedockModel;
+    }
+  });
+
+  it("uses forge.yaml agents.default_model when FORGEDOCK_MODEL and opts.model are unset", async () => {
+    const dir = join(precTmp, "cwd-with-forge-yaml");
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(join(dir, "forge.yaml"), 'agents:\n  default_model: "opus"\n');
+
+    const result = await runCommand({
+      commandsDir: COMMANDS_DIR,
+      commandName: "work-on",
+      args: ["1851"],
+      cwd: dir,
+      dryRun: true,
+      logger: { log() {} },
+    });
+    assert.equal(result.model, "claude-opus-4-6");
+  });
+
+  it("FORGEDOCK_MODEL env var still takes precedence over forge.yaml", async () => {
+    const dir = join(precTmp, "cwd-env-wins");
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(join(dir, "forge.yaml"), 'agents:\n  default_model: "opus"\n');
+    process.env.FORGEDOCK_MODEL = "claude-env-override";
+
+    try {
+      const result = await runCommand({
+        commandsDir: COMMANDS_DIR,
+        commandName: "work-on",
+        args: ["1851"],
+        cwd: dir,
+        dryRun: true,
+        logger: { log() {} },
+      });
+      assert.equal(result.model, "claude-env-override");
+    } finally {
+      delete process.env.FORGEDOCK_MODEL;
+    }
+  });
+
+  it("opts.model (the --model flag) still wins over forge.yaml", async () => {
+    const dir = join(precTmp, "cwd-flag-wins");
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(join(dir, "forge.yaml"), 'agents:\n  default_model: "opus"\n');
+
+    const result = await runCommand({
+      commandsDir: COMMANDS_DIR,
+      commandName: "work-on",
+      args: ["1851"],
+      cwd: dir,
+      dryRun: true,
+      model: "claude-explicit-flag",
+      logger: { log() {} },
+    });
+    assert.equal(result.model, "claude-explicit-flag");
+  });
+
+  it("falls back to the hardcoded default when forge.yaml has no agents section", async () => {
+    const dir = join(precTmp, "cwd-hardcoded-fallback");
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(join(dir, "forge.yaml"), 'project:\n  name: "Test"\n');
+
+    const result = await runCommand({
+      commandsDir: COMMANDS_DIR,
+      commandName: "work-on",
+      args: ["1851"],
+      cwd: dir,
+      dryRun: true,
+      logger: { log() {} },
+    });
+    assert.equal(result.model, "claude-sonnet-5");
+  });
+
+  it("falls back to the hardcoded default when forge.yaml does not exist", async () => {
+    const dir = join(precTmp, "cwd-no-forge-yaml");
+    mkdirSync(dir, { recursive: true });
+
+    const result = await runCommand({
+      commandsDir: COMMANDS_DIR,
+      commandName: "work-on",
+      args: ["1851"],
+      cwd: dir,
+      dryRun: true,
+      logger: { log() {} },
+    });
+    assert.equal(result.model, "claude-sonnet-5");
   });
 });

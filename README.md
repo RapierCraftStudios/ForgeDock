@@ -221,11 +221,10 @@ More ship today (web-property analytics, browser QA sweeps, self-benchmarking) �
 **Requirements:** [Claude Code](https://docs.anthropic.com/en/docs/claude-code) · [GitHub CLI](https://cli.github.com/) (authenticated) · Node.js ≥ 18.
 
 ```bash
-npx forgedock          # project-scoped install: checks your environment, installs commands for this repo, detects your repo, and hands you a reviewed forge.yaml
-npx forgedock --global # global install: installs into ~/.claude/commands/ — available in every Claude Code session on this machine
+npx forgedock # checks your environment, installs commands into ~/.claude/commands/ (available in every Claude Code session on this machine), detects your repo, and hands you a reviewed forge.yaml
 ```
 
-**Project-scoped is the default.** `npx forgedock` installs commands scoped to the current project directory. Use `--global` only when you want the commands available across all your projects on this machine.
+**Install is always global**, to `~/.claude/commands/`. `--global` is still accepted on the command line for backward compatibility but has no effect — there's no other install location to opt out of.
 
 > **Want engine-mode dispatch?** `npx forgedock` is transient — the `forgedock` binary isn't persisted in PATH after install. `/orchestrate` and `/autopilot` use agent dispatch mode by default, which is fully functional. To enable engine-mode dispatch (`forgedock run-issue`) with its durable phase table and fail-closed review gate, run `npm install -g forgedock` instead.
 
@@ -253,14 +252,12 @@ Commands then appear as `/forgedock:work-on`, etc. You still run `npx forgedock 
 
 **Headless / CI:** the pipeline also runs outside Claude Code. `npx forgedock run work-on <issue> --dry-run` previews the assembled prompt and tool plan; with an `ANTHROPIC_API_KEY`, `npx forgedock run` drives the same command specs through a hardened tool-use loop, and `npx forgedock run-issue <issue>` executes them on the durable engine (event-sourced run log, leases, crash-safe resume).
 
-**Install modes:**
+**Explicit install command:**
 
 ```bash
-npx forgedock install           # project-scoped: <cwd>/.claude/commands/ (default)
-npx forgedock install --global  # global: ~/.claude/commands/ (opt-in)
+npx forgedock install           # installs into ~/.claude/commands/
+npx forgedock install --global  # same thing — --global is accepted but is a no-op
 ```
-
-`uninstall`, `update`, and `doctor` auto-detect which mode is installed — no need to re-specify `--global` after a global install. To explicitly target global: `npx forgedock doctor --global`.
 
 **Maintenance:**
 
@@ -269,9 +266,9 @@ npx forgedock update      # relink commands + refresh the SessionStart hook
 npx forgedock enable      # turn ForgeDock on for this directory
 npx forgedock disable     # turn ForgeDock off for this directory
 npx forgedock status      # show ForgeDock's state for this directory
-npx forgedock doctor      # installation health check with fix hints (auto-detects mode)
+npx forgedock doctor      # installation health check with fix hints
 npx forgedock report      # 30-day pipeline impact receipts (--md for Markdown, --json for scripting)
-npx forgedock uninstall   # remove commands, the hook, and tracked copies (auto-detects mode)
+npx forgedock uninstall   # remove commands, the hook, and tracked copies
 npx forgedock help        # show everything
 ```
 
@@ -280,31 +277,11 @@ npx forgedock help        # show everything
 </details>
 
 <details>
-<summary><strong>Migrating from a global install</strong></summary>
+<summary><strong>A note on install location</strong></summary>
 
-If you installed ForgeDock before project-scoped became the default, your commands live in `~/.claude/commands/`. You have two paths forward:
+ForgeDock briefly experimented with a project-scoped-by-default install mode. It was backed out after causing a "split-brain" bug (`detect` assumed project-scoped while the installer still wrote globally — [#1589](https://github.com/RapierCraftStudios/ForgeDock/issues/1589)), so every version you'd realistically install today only ever writes to `~/.claude/commands/`. `--global` is still accepted as a flag for old scripts/muscle memory, but it changes nothing.
 
-**Keep the global install** — add `--global` going forward and nothing changes:
-
-```bash
-npx forgedock --global   # install / update globally as before
-```
-
-**Switch to project-scoped** (recommended for multi-repo setups):
-
-```bash
-# 1. Check your current install mode
-npx forgedock status
-
-# 2. Remove the global install
-npx forgedock uninstall --global
-
-# 3. Install project-scoped in each repo you use ForgeDock in
-cd /path/to/your/project
-npx forgedock
-```
-
-Run `npx forgedock doctor` after switching to confirm everything is healthy.
+If you're carrying an older `--global` habit in scripts or CI, it's harmless to leave it — `npx forgedock --global` and `npx forgedock` do exactly the same thing.
 
 </details>
 

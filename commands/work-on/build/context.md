@@ -335,24 +335,27 @@ if [ -n "${FORGE_COORD_ISSUE:-}" ]; then
     # Extract active claims: FORGE:CLAIM comments that are NOT followed by FORGE:CLAIM_RELEASED
     # from the same Holder. We identify active claims by the presence of CLAIM:COMPLETE
     # and the absence of a subsequent CLAIM_RELEASED referencing the same Holder.
-    ACTIVE_PEER_CLAIMS=$(echo "$COORD_COMMENTS" | jq -r '.[] |
+    # Self-exclusion is done via jq select() against the **Holder**: #{NUMBER} field —
+    # the actual encoding of the owning issue number — not by grep-matching flattened text
+    # (claim comment lines never start with a bare #N, so a line-prefix grep can never match).
+    ACTIVE_PEER_CLAIMS=$(echo "$COORD_COMMENTS" | jq -r --arg num "$NUMBER" '.[] |
       select(.body | contains("<!-- CLAIM:COMPLETE -->")) |
       select(.body | contains("<!-- FORGE:CLAIM_RELEASED -->") | not) |
+      select((.body | capture("\\*\\*Holder\\*\\*: #(?<n>[0-9]+)").n // "") != $num) |
       "Holder: " + (.body | capture("\\*\\*Holder\\*\\*: (?P<h>[^\n]+)").h // "unknown") +
       "\nFiles: " + (.body | capture("\\*\\*Files\\*\\*: (?P<f>[^\n]+)").f // "none")
-    ' 2>/dev/null | grep -v "^Holder: #${NUMBER}" || echo "")
-    # Note: grep -v filters out this agent's own claim (same issue number) — peers only
+    ' 2>/dev/null || echo "")
 
     if [ -n "$ACTIVE_PEER_CLAIMS" ]; then
       echo "Active peer claims found:"
       echo "$ACTIVE_PEER_CLAIMS"
 
-      # Extract claimed file paths from peer claims
-      PEER_CLAIMED_FILES=$(echo "$COORD_COMMENTS" | jq -r '.[] |
+      # Extract claimed file paths from peer claims (self already excluded above via jq select)
+      PEER_CLAIMED_FILES=$(echo "$COORD_COMMENTS" | jq -r --arg num "$NUMBER" '.[] |
         select(.body | contains("<!-- CLAIM:COMPLETE -->")) |
         select(.body | contains("<!-- FORGE:CLAIM_RELEASED -->") | not) |
+        select((.body | capture("\\*\\*Holder\\*\\*: #(?<n>[0-9]+)").n // "") != $num) |
         .body' 2>/dev/null \
-        | grep -v "^#${NUMBER}" \
         | awk '/\*\*Files\*\*:/{found=1; next} /\*\*Interfaces\*\*:/{found=0} found{print}' \
         | grep -oP '[a-zA-Z0-9._/-]+\.(py|tsx?|jsx?|sql|json|ya?ml|md|mjs|sh)' \
         | sort -u || echo "")

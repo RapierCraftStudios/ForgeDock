@@ -16,7 +16,7 @@ install: extras
 
 You are the pipeline's deploy awareness layer. Before the user merges staging → main (triggering CI/CD deployment), this command shows exactly what's going out: which PRs, which issues, what changed, and what risks exist.
 
-**Agent model policy**: `model: "sonnet"` (standard tier). Fallback: `model: "opus"` if rate-limited. User can override with `--model <name>`. Feature gate: pass `effort` in Task/Skill spawns only on Claude Code >= 2.1.154.
+**Agent model policy**: `model: "{DEFAULT_MODEL}"` — resolved from forge.yaml `agents.default_model`, else "sonnet" (standard tier). Fallback: `model: "opus"` if rate-limited. User can override with `--model <name>`. Feature gate: pass `effort` in Task/Skill spawns only on Claude Code >= 2.1.154.
 
 **NEVER use plan mode (EnterPlanMode)** — it breaks execution context.
 

@@ -333,20 +333,27 @@ function buildFileFindingStats(cards) {
 function collectCommits(repoPath, sinceDate) {
   const since = sinceDate || `${WINDOW_DAYS} days ago`;
 
-  let gitOutput;
-  try {
-    // --name-only: list files changed per commit
-    // --pretty=format:'COMMIT %H %ai': commit hash + author date (ISO)
-    // No pathspec = full repo scan for matrix building (this is intentional —
-    // we need the global commit stream to compute n(a) and N correctly)
-    gitOutput = execSync(
-      `git -C "${repoPath}" log --name-only --since="${since}" --pretty=format:"COMMIT %H %ai"`,
-      { encoding: 'utf8', maxBuffer: 50 * 1024 * 1024, timeout: 60000 },
-    );
-  } catch (e) {
-    log(`WARNING: git log failed — ${e.message}`);
+  // --name-only: list files changed per commit
+  // --pretty=format:COMMIT %H %ai: commit hash + author date (ISO)
+  // No pathspec = full repo scan for matrix building (this is intentional —
+  // we need the global commit stream to compute n(a) and N correctly)
+  // spawnSync with an argument array avoids shell interpolation of repoPath
+  // (operator/env-controlled input) — see #1842.
+  const result = spawnSync(
+    'git',
+    ['-C', repoPath, 'log', '--name-only', `--since=${since}`, '--pretty=format:COMMIT %H %ai'],
+    { encoding: 'utf8', maxBuffer: 50 * 1024 * 1024, timeout: 60000 },
+  );
+
+  if (result.error || result.status !== 0) {
+    const reason = result.error
+      ? result.error.message
+      : `exit code ${result.status}${result.signal ? ` (signal ${result.signal})` : ''}`;
+    log(`WARNING: git log failed — ${reason}`);
     return [];
   }
+
+  const gitOutput = result.stdout;
 
   const commits = [];
   let current = null;

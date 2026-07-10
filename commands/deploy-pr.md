@@ -13,7 +13,7 @@ allowed-tools: Bash, Read, Grep, Glob, Skill
 **NEVER use plan mode (EnterPlanMode)** — it breaks execution context.
 **NEVER use the Agent tool** — deploy-pr dispatches sub-skills via `Skill(...)` only. The Agent tool bypasses the allowed-tools constraint and produces opaque output that cannot be structured into the deploy result.
 
-**Agent model policy**: `model: "sonnet"` (standard tier). Fallback: `model: "opus"` if rate-limited. User can override with `--model <name>`.
+**Agent model policy**: `model: "{DEFAULT_MODEL}"` — resolved from forge.yaml `agents.default_model`, else "sonnet" (standard tier). Fallback: `model: "opus"` if rate-limited. User can override with `--model <name>`.
 
 <!-- FORGE:SPEC_LOADED — deploy-pr.md loaded and active. Agent is bound by this spec. -->
 

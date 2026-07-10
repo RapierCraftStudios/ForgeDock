@@ -2,12 +2,13 @@
  * bin/tests/journey.test.mjs — Unit tests for bin/journey.mjs.
  * Run with: node --test bin/tests/journey.test.mjs
  */
-import { describe, it, beforeEach } from "node:test";
+import { describe, it, beforeEach, afterEach } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, readFileSync, writeFileSync, existsSync, mkdirSync } from "node:fs";
+import { mkdtempSync, readFileSync, writeFileSync, existsSync, mkdirSync, readdirSync } from "node:fs";
 import { join } from "node:path";
 import os from "node:os";
-import { writeForgeYaml, backupExisting, detectDescription, makeCtx, preflight, forge, read, review, celebrate, connect, openUrl, runJourney, manualLowConfidenceKeys, parseInstallTier, findMarkdownFiles } from "../journey.mjs";
+import { writeForgeYaml, backupExisting, detectDescription, makeCtx, preflight, forge, read, review, celebrate, connect, maybeOfferDemo, openUrl, runJourney, manualLowConfidenceKeys, parseInstallTier, findMarkdownFiles, isEphemeralCachePath, detectCrossEnvInstall, validateForgeYamlShape, writeInstallReceipt, persistHome } from "../journey.mjs";
+import { detectEnvironment } from "../env-detect.mjs";
 
 const VALUES = {
   owner: "RapierCraftStudios",
@@ -87,11 +88,50 @@ describe("backupExisting", () => {
     assert.ok(existsSync(join(dir, "forge.yaml.bak")));
     assert.ok(!existsSync(out));
   });
-  it("timestamps the backup when forge.yaml.bak already exists", () => {
-    writeFileSync(join(dir, "forge.yaml"), "x", "utf-8");
-    writeFileSync(join(dir, "forge.yaml.bak"), "old", "utf-8");
+  it("rotates the existing .bak to a timestamped file, then takes its place (forge#1850)", () => {
+    // Regression fix: .bak must always hold the MOST RECENT pre-write state,
+    // not just the FIRST one ever captured. Before this fix, a second clobber
+    // left the original good .bak untouched and rotated the already-stubbed
+    // current file into a timestamped sibling instead — the exact inversion
+    // that buried the one good copy behind newer-looking garbage.
+    writeFileSync(join(dir, "forge.yaml.bak"), "generation-1 (old)", "utf-8");
+    writeFileSync(join(dir, "forge.yaml"), "generation-2 (current)", "utf-8");
     const res = backupExisting(join(dir, "forge.yaml"));
-    assert.match(res.backupName, /^forge\.yaml\.bak\..+/);
+    // .bak now holds the just-clobbered "current" content, not the old one.
+    assert.equal(res.backupName, "forge.yaml.bak");
+    assert.equal(readFileSync(join(dir, "forge.yaml.bak"), "utf-8"), "generation-2 (current)");
+    // The old generation-1 content survived — rotated to a timestamped file.
+    const files = readdirSync(dir);
+    const rotated = files.filter((f) => /^forge\.yaml\.bak\..+/.test(f));
+    assert.equal(rotated.length, 1, "exactly one rotated (timestamped) backup should exist");
+    assert.equal(readFileSync(join(dir, rotated[0]), "utf-8"), "generation-1 (old)");
+  });
+
+  it("preserves full history across 3 successive overwrites — nothing silently destroyed (forge#1850)", () => {
+    writeFileSync(join(dir, "forge.yaml"), "gen-1 (originally good config)", "utf-8");
+    backupExisting(join(dir, "forge.yaml")); // gen-1 -> .bak
+
+    writeFileSync(join(dir, "forge.yaml"), "gen-2 (stub)", "utf-8");
+    backupExisting(join(dir, "forge.yaml")); // gen-1 -> timestamped, gen-2 -> .bak
+
+    writeFileSync(join(dir, "forge.yaml"), "gen-3 (stub)", "utf-8");
+    backupExisting(join(dir, "forge.yaml")); // gen-2 -> timestamped, gen-3 -> .bak
+
+    // .bak always holds the most recent pre-write state (gen-3, the content
+    // just moved out of forge.yaml) — the best next guess for "undo my last mistake".
+    assert.equal(readFileSync(join(dir, "forge.yaml.bak"), "utf-8"), "gen-3 (stub)");
+
+    // Every generation is recoverable somewhere on disk — nothing was ever
+    // silently overwritten without a trace, including the original good config.
+    const files = readdirSync(dir);
+    const allBackupContents = files
+      .filter((f) => f.startsWith("forge.yaml.bak"))
+      .map((f) => readFileSync(join(dir, f), "utf-8"));
+    assert.ok(
+      allBackupContents.includes("gen-1 (originally good config)"),
+      "the original good config must still be recoverable from a timestamped backup",
+    );
+    assert.ok(allBackupContents.includes("gen-2 (stub)"));
   });
 });
 
@@ -295,13 +335,80 @@ describe("preflight", () => {
     assert.equal(node.ok, false);
     assert.match(w.text, /nodejs\.org/);
   });
+
+  it("adds Platform/WSL/Shell rows after GitHub CLI without disturbing ghReady's index", async () => {
+    const home = mkdtempSync(join(os.tmpdir(), "fd-home6-"));
+    mkdirSync(join(home, ".claude"), { recursive: true });
+    const { ctx } = stubCtx({
+      home,
+      platform: "linux",
+      env: { SHELL: "/bin/bash" },
+      execMap: {
+        "git --version": "git version 2.45.0",
+        "gh --version": "gh version 2.52.0",
+        "gh auth status": "Logged in to github.com",
+      },
+    });
+    const res = await preflight(ctx);
+    assert.equal(res.checks.length, 7);
+    assert.equal(res.checks[3].name, "GitHub CLI");
+    assert.equal(res.ghReady, true);
+
+    const platformRow = res.checks.find((c) => c.name === "Platform");
+    const wslRow = res.checks.find((c) => c.name === "WSL");
+    const shellRow = res.checks.find((c) => c.name === "Shell");
+    assert.equal(platformRow.ok, true);
+    assert.match(platformRow.detail, /Linux/);
+    assert.match(platformRow.detail, /bash/);
+    assert.equal(wslRow.ok, true);
+    assert.equal(wslRow.detail, "not detected");
+    assert.equal(shellRow.ok, true);
+    assert.equal(shellRow.detail, "bash");
+
+    // Existing checks unaffected — still all-green with the informational rows included.
+    assert.equal(res.checks.every((c) => c.ok), true);
+  });
+
+  it("Platform/WSL rows reflect WSL detection when WSL_DISTRO_NAME is injected", async () => {
+    const home = mkdtempSync(join(os.tmpdir(), "fd-home7-"));
+    mkdirSync(join(home, ".claude"), { recursive: true });
+    const { ctx } = stubCtx({
+      home,
+      platform: "linux",
+      env: { WSL_DISTRO_NAME: "Ubuntu-22.04" },
+      execMap: { "git --version": "git version 2.45.0" },
+    });
+    const res = await preflight(ctx);
+    const wslRow = res.checks.find((c) => c.name === "WSL");
+    const platformRow = res.checks.find((c) => c.name === "Platform");
+    assert.equal(wslRow.detail, "Ubuntu-22.04");
+    assert.match(platformRow.detail, /WSL: Ubuntu-22\.04/);
+  });
+
+  it("Platform row reports Windows label + shell when platform/release are injected as win32", async () => {
+    const home = mkdtempSync(join(os.tmpdir(), "fd-home8-"));
+    mkdirSync(join(home, ".claude"), { recursive: true });
+    const { ctx } = stubCtx({
+      home,
+      platform: "win32",
+      release: "10.0.22631",
+      env: { PSModulePath: "C:\\Program Files\\WindowsPowerShell\\Modules" },
+      execMap: { "git --version": "git version 2.45.0" },
+    });
+    const res = await preflight(ctx);
+    const platformRow = res.checks.find((c) => c.name === "Platform");
+    const shellRow = res.checks.find((c) => c.name === "Shell");
+    assert.match(platformRow.detail, /Windows 11/);
+    assert.match(platformRow.detail, /PowerShell/);
+    assert.equal(shellRow.detail, "PowerShell");
+  });
 });
 
 // ---------------------------------------------------------------------------
 // Task 6: forge & findMarkdownFiles tests
 // ---------------------------------------------------------------------------
 
-import { lstatSync, mkdirSync as mkdirSyncFs, symlinkSync } from "node:fs";
+import { lstatSync, mkdirSync as mkdirSyncFs, symlinkSync, statSync } from "node:fs";
 
 /**
  * A command is installed if the target is a symlink (Developer Mode / admin /
@@ -313,6 +420,348 @@ function assertInstalled(target, sourceContent) {
   if (st.isSymbolicLink()) return;
   assert.equal(readFileSync(target, "utf-8"), sourceContent);
 }
+
+describe("isEphemeralCachePath", () => {
+  it("recognizes npm's npx cache (POSIX shape)", () => {
+    assert.equal(isEphemeralCachePath("/home/user/.npm/_npx/a1b2c3/node_modules/forgedock"), true);
+  });
+
+  it("recognizes npm's npx cache (Windows shape)", () => {
+    assert.equal(
+      isEphemeralCachePath("C:\\Users\\user\\AppData\\Local\\npm-cache\\_npx\\a1b2c3\\node_modules\\forgedock"),
+      true,
+    );
+  });
+
+  it("recognizes pnpm's dlx cache", () => {
+    assert.equal(isEphemeralCachePath("/home/user/.local/share/pnpm/dlx/a1b2c3/node_modules/forgedock"), true);
+  });
+
+  it("recognizes yarn (Berry) dlx's xfs- prefixed temp dir, case-insensitively", () => {
+    assert.equal(isEphemeralCachePath("/tmp/xfs-6a8c1f2e/node_modules/forgedock"), true);
+    assert.equal(isEphemeralCachePath("/tmp/XFS-6A8C1F2E/node_modules/forgedock"), true);
+  });
+
+  it("does not false-positive on a global npm install path", () => {
+    assert.equal(isEphemeralCachePath("/usr/lib/node_modules/forgedock"), false);
+    assert.equal(isEphemeralCachePath("C:\\Users\\user\\AppData\\Roaming\\npm\\node_modules\\forgedock"), false);
+  });
+
+  it("does not false-positive on a local repo clone path", () => {
+    assert.equal(isEphemeralCachePath("C:/Users/ItsMr/Documents/Projects/ForgeDock"), false);
+    assert.equal(isEphemeralCachePath("/home/user/projects/ForgeDock"), false);
+  });
+
+  it("does not false-positive on pnpm's persistent content-addressable store (.pnpm, not dlx)", () => {
+    assert.equal(
+      isEphemeralCachePath("/home/user/projects/node_modules/.pnpm/forgedock@1.0.0/node_modules/forgedock"),
+      false,
+    );
+  });
+
+  it("matches by path segment, not substring — 'my-dlx-tool' and 'npx-utils' project names are not flagged", () => {
+    assert.equal(isEphemeralCachePath("/home/user/projects/my-dlx-tool"), false);
+    assert.equal(isEphemeralCachePath("/home/user/projects/npx-utils"), false);
+  });
+
+  it("handles empty/non-string input without throwing", () => {
+    assert.equal(isEphemeralCachePath(""), false);
+    assert.equal(isEphemeralCachePath(null), false);
+    assert.equal(isEphemeralCachePath(undefined), false);
+  });
+});
+
+describe("persistHome (forge#1943)", () => {
+  /** Populate a fake forgeHome source tree with a minimal payload + package.json. */
+  function makeSourceForgeHome({ version = "1.2.3" } = {}) {
+    const forgeHome = mkdtempSync(join(os.tmpdir(), "fd-persist-src-"));
+    mkdirSyncFs(join(forgeHome, "bin", "hooks"), { recursive: true });
+    mkdirSyncFs(join(forgeHome, "commands"), { recursive: true });
+    mkdirSyncFs(join(forgeHome, "scripts"), { recursive: true });
+    // templates/ deliberately omitted from some tests below to exercise the
+    // "missing source subdirectory" tolerance.
+    writeFileSync(join(forgeHome, "bin", "hooks", "session-start.mjs"), "// hook\n", "utf-8");
+    writeFileSync(join(forgeHome, "commands", "one.md"), "# /one\n", "utf-8");
+    writeFileSync(join(forgeHome, "scripts", "classify-lane.sh"), "#!/bin/sh\n", "utf-8");
+    writeFileSync(join(forgeHome, "package.json"), JSON.stringify({ name: "forgedock", version }), "utf-8");
+    return forgeHome;
+  }
+
+  it("fresh copy: copies bin/commands/scripts into ~/.forge/ and writes version", async () => {
+    const forgeHome = makeSourceForgeHome({ version: "1.2.3" });
+    const home = mkdtempSync(join(os.tmpdir(), "fd-persist-home-"));
+
+    const res = await persistHome({ forgeHome, home });
+
+    assert.equal(res.skipped, false);
+    assert.equal(res.migrated, true);
+    assert.equal(res.version, "1.2.3");
+    assert.equal(res.forgeHome, join(home, ".forge"));
+
+    assert.equal(readFileSync(join(home, ".forge", "commands", "one.md"), "utf-8"), "# /one\n");
+    assert.equal(readFileSync(join(home, ".forge", "bin", "hooks", "session-start.mjs"), "utf-8"), "// hook\n");
+    assert.equal(readFileSync(join(home, ".forge", "scripts", "classify-lane.sh"), "utf-8"), "#!/bin/sh\n");
+    assert.equal(readFileSync(join(home, ".forge", "version"), "utf-8").trim(), "1.2.3");
+  });
+
+  it("git-clone skip: does not touch ~/.forge/ at all when ctx.forgeHome is a real git clone", async () => {
+    const forgeHome = makeSourceForgeHome();
+    mkdirSyncFs(join(forgeHome, ".git"), { recursive: true }); // real clone: .git is a DIRECTORY
+    const home = mkdtempSync(join(os.tmpdir(), "fd-persist-home-git-"));
+
+    const res = await persistHome({ forgeHome, home });
+
+    assert.equal(res.skipped, true);
+    assert.equal(res.migrated, false);
+    assert.equal(res.forgeHome, forgeHome);
+    assert.match(res.reason, /git working tree/i);
+    assert.equal(existsSync(join(home, ".forge")), false);
+  });
+
+  it("idempotent re-run: unchanged source content does not rewrite files (mtime preserved, migrated: false)", async () => {
+    const forgeHome = makeSourceForgeHome({ version: "2.0.0" });
+    const home = mkdtempSync(join(os.tmpdir(), "fd-persist-home-idempotent-"));
+
+    const first = await persistHome({ forgeHome, home });
+    assert.equal(first.migrated, true);
+
+    const commandFile = join(home, ".forge", "commands", "one.md");
+    const mtimeBefore = statSync(commandFile).mtimeMs;
+
+    // Re-run with byte-identical source content.
+    const second = await persistHome({ forgeHome, home });
+    assert.equal(second.skipped, false);
+    assert.equal(second.migrated, false, "no file content changed, so nothing should have been rewritten");
+
+    const mtimeAfter = statSync(commandFile).mtimeMs;
+    assert.equal(mtimeAfter, mtimeBefore, "unchanged file must not be rewritten (content-compare before overwrite)");
+  });
+
+  it("re-run after a real content change re-copies only the changed file and reports migrated: true", async () => {
+    const forgeHome = makeSourceForgeHome({ version: "2.0.0" });
+    const home = mkdtempSync(join(os.tmpdir(), "fd-persist-home-changed-"));
+
+    await persistHome({ forgeHome, home });
+    writeFileSync(join(forgeHome, "commands", "one.md"), "# /one (edited)\n", "utf-8");
+
+    const second = await persistHome({ forgeHome, home });
+    assert.equal(second.migrated, true);
+    assert.equal(readFileSync(join(home, ".forge", "commands", "one.md"), "utf-8"), "# /one (edited)\n");
+  });
+
+  it("degrades gracefully when a source subdirectory (templates/) does not exist", async () => {
+    const forgeHome = makeSourceForgeHome(); // no templates/ dir created
+    const home = mkdtempSync(join(os.tmpdir(), "fd-persist-home-notemplates-"));
+
+    await assert.doesNotReject(persistHome({ forgeHome, home }));
+    const res = await persistHome({ forgeHome, home });
+
+    assert.equal(res.skipped, false);
+    assert.equal(existsSync(join(home, ".forge", "templates")), false);
+    // The dirs that DO exist in the source were still copied correctly.
+    assert.equal(readFileSync(join(home, ".forge", "commands", "one.md"), "utf-8"), "# /one\n");
+  });
+
+  it("worktree shape (.git is a FILE, not a directory) is also skipped — not just real clones", async () => {
+    const forgeHome = makeSourceForgeHome();
+    writeFileSync(join(forgeHome, ".git"), "gitdir: /somewhere/else/.git/worktrees/foo\n", "utf-8");
+    const home = mkdtempSync(join(os.tmpdir(), "fd-persist-home-worktree-"));
+
+    const res = await persistHome({ forgeHome, home });
+
+    assert.equal(res.skipped, true);
+    assert.equal(existsSync(join(home, ".forge")), false);
+  });
+
+  it("missing package.json degrades to an empty version string rather than throwing", async () => {
+    const forgeHome = mkdtempSync(join(os.tmpdir(), "fd-persist-src-nopkg-"));
+    mkdirSyncFs(join(forgeHome, "commands"), { recursive: true });
+    writeFileSync(join(forgeHome, "commands", "one.md"), "# /one\n", "utf-8");
+    const home = mkdtempSync(join(os.tmpdir(), "fd-persist-home-nopkg-"));
+
+    const res = await persistHome({ forgeHome, home });
+
+    assert.equal(res.skipped, false);
+    assert.equal(res.version, "");
+    assert.equal(readFileSync(join(home, ".forge", "version"), "utf-8").trim(), "");
+  });
+});
+
+describe("detectCrossEnvInstall (forge#1893)", () => {
+  it("WSL -> Windows: finds a Windows-native install via the live /mnt mount", () => {
+    const envInfo = detectEnvironment({ platform: "linux", env: { WSL_DISTRO_NAME: "Ubuntu-22.04" } });
+    const ctx = { cwd: "/mnt/c/Users/testuser/projects/repo", exec: () => { throw new Error("should not be called"); } };
+    const existsSyncFn = (p) => p === "/mnt/c/Users/testuser/.claude/forgedock";
+    const res = detectCrossEnvInstall(ctx, envInfo, { existsSyncFn });
+    assert.equal(res.conflict, true);
+    assert.equal(res.direction, "windows");
+    assert.equal(res.otherPath, "C:\\Users\\testuser\\.claude\\forgedock");
+  });
+
+  it("WSL -> Windows: no conflict when no Windows install marker exists (the common case)", () => {
+    const envInfo = detectEnvironment({ platform: "linux", env: { WSL_DISTRO_NAME: "Ubuntu-22.04" } });
+    const ctx = { cwd: "/mnt/c/Users/testuser/projects/repo", exec: () => { throw new Error("should not be called"); } };
+    const res = detectCrossEnvInstall(ctx, envInfo, { existsSyncFn: () => false });
+    assert.equal(res.conflict, false);
+    assert.equal(res.otherPath, null);
+  });
+
+  it("WSL -> Windows: no conflict, no crash when cwd isn't under /mnt/<drive>/Users/<user>", () => {
+    const envInfo = detectEnvironment({ platform: "linux", env: { WSL_DISTRO_NAME: "Ubuntu-22.04" } });
+    const ctx = { cwd: "/home/testuser/projects/repo", exec: () => { throw new Error("should not be called"); } };
+    let existsCalled = false;
+    const res = detectCrossEnvInstall(ctx, envInfo, { existsSyncFn: () => { existsCalled = true; return true; } });
+    assert.equal(res.conflict, false);
+    assert.equal(existsCalled, false); // never even probes — path shape doesn't apply
+  });
+
+  it("Windows -> WSL: finds a WSL install by enumerating distros via `wsl -l -q`", () => {
+    const envInfo = detectEnvironment({ platform: "win32", env: {}, release: "10.0.22631" });
+    // Simulate `wsl -l -q`'s real UTF-16LE-decoded-as-UTF-8 output: ASCII
+    // characters interleaved with NUL bytes.
+    const rawDistroOutput = "Ubuntu-22.04".split("").join("\0") + "\0\r\n";
+    const ctx = {
+      cwd: "C:\\Users\\testuser\\projects\\repo",
+      exec: (cmd, args) => {
+        assert.equal(cmd, "wsl");
+        assert.deepEqual(args, ["-l", "-q"]);
+        return rawDistroOutput;
+      },
+    };
+    const existsSyncFn = (p) => p === "\\\\wsl.localhost\\Ubuntu-22.04\\home\\testuser\\.claude\\forgedock";
+    const res = detectCrossEnvInstall(ctx, envInfo, { existsSyncFn });
+    assert.equal(res.conflict, true);
+    assert.equal(res.direction, "wsl");
+    assert.equal(res.otherPath, "\\\\wsl.localhost\\Ubuntu-22.04\\home\\testuser\\.claude\\forgedock");
+  });
+
+  it("Windows -> WSL: matches a lowercase `users` path segment (case-insensitive, symmetric with the WSL -> Windows branch)", () => {
+    const envInfo = detectEnvironment({ platform: "win32", env: {}, release: "10.0.22631" });
+    const rawDistroOutput = "Ubuntu-22.04".split("").join("\0") + "\0\r\n";
+    const ctx = {
+      cwd: "C:\\users\\testuser\\projects\\repo",
+      exec: (cmd, args) => {
+        assert.equal(cmd, "wsl");
+        assert.deepEqual(args, ["-l", "-q"]);
+        return rawDistroOutput;
+      },
+    };
+    const existsSyncFn = (p) => p === "\\\\wsl.localhost\\Ubuntu-22.04\\home\\testuser\\.claude\\forgedock";
+    const res = detectCrossEnvInstall(ctx, envInfo, { existsSyncFn });
+    assert.equal(res.conflict, true);
+    assert.equal(res.direction, "wsl");
+    assert.equal(res.otherPath, "\\\\wsl.localhost\\Ubuntu-22.04\\home\\testuser\\.claude\\forgedock");
+  });
+
+  it("Windows -> WSL: falls back to the \\\\wsl$\\ UNC root when \\\\wsl.localhost\\ isn't found", () => {
+    const envInfo = detectEnvironment({ platform: "win32", env: {}, release: "10.0.22631" });
+    const ctx = {
+      cwd: "C:\\Users\\testuser\\projects\\repo",
+      exec: () => "Ubuntu\0\r\n",
+    };
+    const existsSyncFn = (p) => p === "\\\\wsl$\\Ubuntu\\home\\testuser\\.claude\\forgedock";
+    const res = detectCrossEnvInstall(ctx, envInfo, { existsSyncFn });
+    assert.equal(res.conflict, true);
+    assert.equal(res.direction, "wsl");
+  });
+
+  it("Windows -> WSL: no conflict when `wsl` isn't installed/on PATH (common case)", () => {
+    const envInfo = detectEnvironment({ platform: "win32", env: {}, release: "10.0.22631" });
+    const ctx = {
+      cwd: "C:\\Users\\testuser\\projects\\repo",
+      exec: () => { throw new Error("ENOENT: wsl"); },
+    };
+    const res = detectCrossEnvInstall(ctx, envInfo, { existsSyncFn: () => true });
+    assert.equal(res.conflict, false);
+  });
+
+  it("Windows -> WSL: no conflict when distros exist but none has a ForgeDock install", () => {
+    const envInfo = detectEnvironment({ platform: "win32", env: {}, release: "10.0.22631" });
+    const ctx = {
+      cwd: "C:\\Users\\testuser\\projects\\repo",
+      exec: () => "Ubuntu\0\r\n",
+    };
+    const res = detectCrossEnvInstall(ctx, envInfo, { existsSyncFn: () => false });
+    assert.equal(res.conflict, false);
+  });
+
+  it("Windows -> WSL: no conflict, no crash when cwd isn't under <drive>:\\Users\\<user>", () => {
+    const envInfo = detectEnvironment({ platform: "win32", env: {}, release: "10.0.22631" });
+    let execCalled = false;
+    const ctx = {
+      cwd: "C:\\ForgeDock\\repo",
+      exec: () => { execCalled = true; return "Ubuntu\0\r\n"; },
+    };
+    const res = detectCrossEnvInstall(ctx, envInfo, { existsSyncFn: () => true });
+    assert.equal(res.conflict, false);
+    assert.equal(execCalled, false); // never enumerates distros — path shape doesn't apply
+  });
+
+  it("macOS/Linux (non-WSL, non-Windows): no conflict, never probes anything", () => {
+    const envInfo = detectEnvironment({ platform: "darwin", env: {} });
+    let called = false;
+    const ctx = {
+      cwd: "/Users/testuser/projects/repo",
+      exec: () => { called = true; return ""; },
+    };
+    const res = detectCrossEnvInstall(ctx, envInfo, { existsSyncFn: () => { called = true; return true; } });
+    assert.equal(res.conflict, false);
+    assert.equal(called, false);
+  });
+
+  it("never throws even when existsSyncFn itself throws", () => {
+    const envInfo = detectEnvironment({ platform: "linux", env: { WSL_DISTRO_NAME: "Ubuntu" } });
+    const ctx = { cwd: "/mnt/c/Users/testuser/repo", exec: () => "" };
+    assert.doesNotThrow(() => {
+      const res = detectCrossEnvInstall(ctx, envInfo, {
+        existsSyncFn: () => { throw new Error("boom"); },
+      });
+      assert.equal(res.conflict, false);
+    });
+  });
+
+  it("Windows -> WSL: probe loop is bounded by distro count — stops after the cap even with more distros registered (forge#1917)", () => {
+    const envInfo = detectEnvironment({ platform: "win32", env: {}, release: "10.0.22631" });
+    // 8 registered distros, none has a ForgeDock install — more than the cap.
+    const rawDistroOutput = ["one", "two", "three", "four", "five", "six", "seven", "eight"]
+      .map((d) => d.split("").join("\0") + "\0")
+      .join("\r\n");
+    const ctx = {
+      cwd: "C:\\Users\\testuser\\projects\\repo",
+      exec: () => rawDistroOutput,
+    };
+    let probeCount = 0;
+    const res = detectCrossEnvInstall(ctx, envInfo, {
+      existsSyncFn: () => { probeCount++; return false; },
+    });
+    assert.equal(res.conflict, false);
+    // 2 UNC roots probed per distro; capped at 5 distros = 10 probes max.
+    assert.ok(probeCount <= 10, `expected at most 10 probes (5 distros x 2 roots), got ${probeCount}`);
+    assert.ok(probeCount > 0);
+  });
+
+  it("Windows -> WSL: probe loop stops early once the wall-clock budget is exhausted (forge#1917)", () => {
+    const envInfo = detectEnvironment({ platform: "win32", env: {}, release: "10.0.22631" });
+    const rawDistroOutput = ["one", "two", "three"].map((d) => d.split("").join("\0") + "\0").join("\r\n");
+    const ctx = {
+      cwd: "C:\\Users\\testuser\\projects\\repo",
+      exec: () => rawDistroOutput,
+    };
+    // Fake clock: first call establishes the deadline, every call after that
+    // reports time already past the budget — so only the very first probe
+    // (checked against the deadline established on the same first call) can
+    // still run before the loop bails.
+    let tick = 0;
+    const nowFn = () => (tick++ === 0 ? 0 : 999999);
+    let probeCount = 0;
+    const res = detectCrossEnvInstall(ctx, envInfo, {
+      nowFn,
+      existsSyncFn: () => { probeCount++; return false; },
+    });
+    assert.equal(res.conflict, false);
+    assert.equal(probeCount, 0); // deadline already exceeded before the first probe check
+  });
+});
 
 describe("forge (Act II)", () => {
   it("installs commands (symlink or copy-fallback), registers hook, reports counts", async () => {
@@ -359,6 +808,37 @@ describe("forge (Act II)", () => {
   it("makeCtx defaults linkStrategy to 'symlink'", () => {
     const { ctx } = stubCtx({});
     assert.equal(ctx.linkStrategy, "symlink");
+  });
+
+  it("warns when ctx.forgeHome resolves inside an ephemeral npx cache (forge#1895)", async () => {
+    const home = mkdtempSync(join(os.tmpdir(), "fd-forge-home-npx-"));
+    const forgeHome = join(mkdtempSync(join(os.tmpdir(), "fd-forge-src-npx-")), "_npx", "abcd1234", "node_modules", "forgedock");
+    mkdirSyncFs(join(forgeHome, "commands"), { recursive: true });
+    mkdirSyncFs(join(forgeHome, "bin", "hooks"), { recursive: true });
+    writeFileSync(join(forgeHome, "commands", "a.md"), "A", "utf-8");
+    writeFileSync(join(forgeHome, "bin", "hooks", "session-start.mjs"), "// hook", "utf-8");
+
+    const { ctx, w } = stubCtx({ home });
+    ctx.forgeHome = forgeHome;
+    await forge(ctx);
+
+    assert.match(w.text, /ephemeral cache/i);
+    assert.match(w.text, /npm install -g forgedock/);
+  });
+
+  it("does NOT warn for a durable forgeHome (global install / local clone) — no false positive (forge#1895)", async () => {
+    const home = mkdtempSync(join(os.tmpdir(), "fd-forge-home-durable-"));
+    const forgeHome = mkdtempSync(join(os.tmpdir(), "fd-forge-src-durable-"));
+    mkdirSyncFs(join(forgeHome, "commands"), { recursive: true });
+    mkdirSyncFs(join(forgeHome, "bin", "hooks"), { recursive: true });
+    writeFileSync(join(forgeHome, "commands", "a.md"), "A", "utf-8");
+    writeFileSync(join(forgeHome, "bin", "hooks", "session-start.mjs"), "// hook", "utf-8");
+
+    const { ctx, w } = stubCtx({ home });
+    ctx.forgeHome = forgeHome; // an mkdtemp path with no _npx/dlx/xfs- segment
+    await forge(ctx);
+
+    assert.doesNotMatch(w.text, /ephemeral cache/i);
   });
 
   it("re-run over our copied files is idempotent (manifest recognizes our copies)", async () => {
@@ -611,6 +1091,63 @@ describe("forge (Act II)", () => {
     assert.ok(existsSync(userLink), "user-owned symlink preserved");
     assert.equal(res.pruned, 0);
   });
+
+  describe("linkPipelineScripts copy-fallback content comparison (forge#1916)", () => {
+    it("byte-identical plain-file target is skipped, not recopied", async () => {
+      const home = mkdtempSync(join(os.tmpdir(), "fd-forge-home-scripts1-"));
+      const forgeHome = mkdtempSync(join(os.tmpdir(), "fd-forge-src-scripts1-"));
+      mkdirSyncFs(join(forgeHome, "commands"), { recursive: true });
+      mkdirSyncFs(join(forgeHome, "bin", "hooks"), { recursive: true });
+      mkdirSyncFs(join(forgeHome, "scripts"), { recursive: true });
+      writeFileSync(join(forgeHome, "commands", "a.md"), "A", "utf-8");
+      writeFileSync(join(forgeHome, "bin", "hooks", "session-start.mjs"), "// hook", "utf-8");
+      writeFileSync(join(forgeHome, "scripts", "classify-lane.sh"), "#!/bin/sh\necho lane\n", "utf-8");
+
+      // Pre-seed the target as an already-correct plain file (simulates a
+      // prior copy-fallback install on Windows without Developer Mode).
+      const scriptsTargetDir = join(home, ".claude", "scripts");
+      mkdirSyncFs(scriptsTargetDir, { recursive: true });
+      writeFileSync(join(scriptsTargetDir, "classify-lane.sh"), "#!/bin/sh\necho lane\n", "utf-8");
+
+      const { ctx } = stubCtx({ home, linkStrategy: "copy" });
+      ctx.forgeHome = forgeHome;
+      const res = await forge(ctx);
+
+      assert.equal(res.scriptsResult.copied, 0, "byte-identical content must not be recopied");
+      assert.equal(res.scriptsResult.skipped, 1);
+      assert.equal(
+        readFileSync(join(scriptsTargetDir, "classify-lane.sh"), "utf-8"),
+        "#!/bin/sh\necho lane\n",
+      );
+    });
+
+    it("differing plain-file target is still recopied (unchanged behavior)", async () => {
+      const home = mkdtempSync(join(os.tmpdir(), "fd-forge-home-scripts2-"));
+      const forgeHome = mkdtempSync(join(os.tmpdir(), "fd-forge-src-scripts2-"));
+      mkdirSyncFs(join(forgeHome, "commands"), { recursive: true });
+      mkdirSyncFs(join(forgeHome, "bin", "hooks"), { recursive: true });
+      mkdirSyncFs(join(forgeHome, "scripts"), { recursive: true });
+      writeFileSync(join(forgeHome, "commands", "a.md"), "A", "utf-8");
+      writeFileSync(join(forgeHome, "bin", "hooks", "session-start.mjs"), "// hook", "utf-8");
+      writeFileSync(join(forgeHome, "scripts", "classify-lane.sh"), "#!/bin/sh\necho new\n", "utf-8");
+
+      // Pre-seed the target with stale content — must be detected as different
+      // and recopied.
+      const scriptsTargetDir = join(home, ".claude", "scripts");
+      mkdirSyncFs(scriptsTargetDir, { recursive: true });
+      writeFileSync(join(scriptsTargetDir, "classify-lane.sh"), "#!/bin/sh\necho old\n", "utf-8");
+
+      const { ctx } = stubCtx({ home, linkStrategy: "copy" });
+      ctx.forgeHome = forgeHome;
+      const res = await forge(ctx);
+
+      assert.equal(res.scriptsResult.copied, 1, "differing content must still be recopied");
+      assert.equal(
+        readFileSync(join(scriptsTargetDir, "classify-lane.sh"), "utf-8"),
+        "#!/bin/sh\necho new\n",
+      );
+    });
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -702,6 +1239,117 @@ describe("review (Act IV)", () => {
   });
 });
 
+describe("review (Act IV) — TTY overwrite confirmation gate (forge#1850, regression of #578)", () => {
+  // annotatedReviewScreen and review() both branch on the global
+  // process.stdin.isTTY. Spoof it for the duration of these tests so the
+  // hasExisting && isTTY===true branch (the one that was silently
+  // unprotected) is actually exercised, then restore it. setRawMode() throws
+  // on this non-real TTY, so annotatedReviewScreen falls back to its
+  // accept-all branch instantly (no hang) when the confirm gate lets it
+  // through — verified manually before writing these tests.
+  let originalIsTTY;
+  beforeEach(() => {
+    originalIsTTY = process.stdin.isTTY;
+    process.stdin.isTTY = true;
+  });
+  afterEach(() => {
+    process.stdin.isTTY = originalIsTTY;
+  });
+
+  it("declining the confirm prompt aborts before any backup or write", async () => {
+    const cwd = mkdtempSync(join(os.tmpdir(), "fd-review-tty-decline-"));
+    writeFileSync(join(cwd, "forge.yaml"), "precious: true\n", "utf-8");
+    let confirmCalled = false;
+    let confirmMessage = "";
+    const { ctx } = stubCtx({
+      cwd,
+      confirmFn: async (message) => {
+        confirmCalled = true;
+        confirmMessage = message;
+        return false;
+      },
+    });
+    const res0 = await read(ctx);
+    const res = await review(ctx, res0.draft, res0.description);
+
+    assert.equal(confirmCalled, true, "confirmFn must be called for an existing config in TTY mode");
+    assert.match(confirmMessage, /overwrite/i);
+    assert.equal(res.aborted, true);
+    assert.equal(res.written, false);
+    assert.equal(readFileSync(join(cwd, "forge.yaml"), "utf-8"), "precious: true\n");
+    assert.ok(!existsSync(join(cwd, "forge.yaml.bak")), "no backup should be created when the user declines");
+  });
+
+  it("accepting the confirm prompt proceeds to backup + write", async () => {
+    const cwd = mkdtempSync(join(os.tmpdir(), "fd-review-tty-accept-"));
+    writeFileSync(join(cwd, "forge.yaml"), "precious: true\n", "utf-8");
+    const { ctx } = stubCtx({
+      cwd,
+      confirmFn: async () => true,
+    });
+    // Build a resolved (non-placeholder) draft directly rather than via
+    // read()/detectConfig(), since cwd has no git remote and would otherwise
+    // resolve to placeholders — a scenario covered by the dedicated
+    // hard-fail test below.
+    const draft = {
+      project: {
+        owner: { value: "test-owner", confidence: "high", source: "git remote", why: "" },
+        repo: { value: "test-repo", confidence: "high", source: "git remote", why: "" },
+        name: { value: "Test Repo", confidence: "medium", source: "derived from repo slug", why: "" },
+      },
+      paths: {
+        root: { value: cwd, confidence: "high", source: "process.cwd()", why: "" },
+        worktreeBase: { value: join(cwd, ".claude", "worktrees"), confidence: "high", source: "derived from root", why: "" },
+      },
+      branches: {
+        default: { value: "main", confidence: "high", source: "git symbolic-ref", why: "" },
+        staging: { value: "staging", confidence: "high", source: "git branch -r", why: "" },
+      },
+      meta: { remoteDetected: true },
+    };
+    const res = await review(ctx, draft, { value: "", source: "" });
+
+    assert.equal(res.aborted, false);
+    assert.equal(res.written, true);
+    assert.ok(existsSync(join(cwd, "forge.yaml.bak")), "the old file must be backed up");
+    assert.equal(readFileSync(join(cwd, "forge.yaml.bak"), "utf-8"), "precious: true\n");
+  });
+
+  it("no existing config: confirmFn is never called (nothing to confirm)", async () => {
+    const cwd = mkdtempSync(join(os.tmpdir(), "fd-review-tty-fresh-"));
+    let confirmCalled = false;
+    const { ctx } = stubCtx({
+      cwd,
+      confirmFn: async () => {
+        confirmCalled = true;
+        return true;
+      },
+    });
+    const res0 = await read(ctx);
+    const res = await review(ctx, res0.draft, res0.description);
+
+    assert.equal(confirmCalled, false);
+    assert.equal(res.written, true);
+  });
+
+  it("hard-fails when overwrite is confirmed but owner/repo are unresolved placeholders", async () => {
+    // cwd has no git remote, so detection resolves owner/repo to placeholders.
+    const cwd = mkdtempSync(join(os.tmpdir(), "fd-review-tty-placeholder-"));
+    writeFileSync(join(cwd, "forge.yaml"), "precious: true\n", "utf-8");
+    const { ctx } = stubCtx({
+      cwd,
+      confirmFn: async () => true, // user says "yes, overwrite"
+    });
+    const res0 = await read(ctx);
+    const res = await review(ctx, res0.draft, res0.description);
+
+    assert.equal(res.aborted, true);
+    assert.equal(res.written, false);
+    assert.equal(readFileSync(join(cwd, "forge.yaml"), "utf-8"), "precious: true\n");
+    assert.ok(!existsSync(join(cwd, "forge.yaml.bak")), "no backup should be created — the write never proceeds");
+  });
+});
+
 describe("celebrate (Act V)", () => {
   it("prints elapsed time, receipt, and next steps", () => {
     const { ctx, w } = stubCtx({});
@@ -726,6 +1374,13 @@ describe("celebrate (Act V)", () => {
     assert.match(w.text, /install GitHub App/i);
     assert.match(w.text, /rapiercraft-forgedock/);
   });
+
+  it("mentions uninstall and the full help command so removal is discoverable (#1881)", () => {
+    const { ctx, w } = stubCtx({});
+    celebrate(ctx, { written: true, todoCount: 0, total: 5, hookStatus: "installed" });
+    assert.match(w.text, /npx forgedock uninstall/);
+    assert.match(w.text, /npx forgedock help/);
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -740,21 +1395,31 @@ describe("connect (Act V.5)", () => {
     assert.match(w.text, /rapiercraft-forgedock/);
   });
 
-  it("calls openFn with the app URL when user confirms (yes)", async () => {
+  it("calls openFn with the app URL when user confirms (yes), via non-TTY defaultValue", async () => {
     let openedUrl = null;
     const { ctx, w } = stubCtx({
       openFn: (url) => { openedUrl = url; },
-      // confirm() returns defaultValue (false) in non-TTY. Simulate "yes" by
-      // overriding the confirmFn — but since we can't inject confirm() directly,
-      // we use stdin.isTTY being false and defaultValue=false means we can't
-      // simulate "yes" without a stdin mock. Instead test the non-TTY path
-      // (returns opened: false) and trust the openFn injection for integration.
     });
     const result = await connect(ctx);
     // In non-TTY (test environment), confirm() returns false (defaultValue).
     assert.equal(result.opened, false);
     assert.equal(openedUrl, null); // openFn NOT called when confirm returns false
     assert.match(w.text, /Skipped/);
+  });
+
+  it("calls openFn with the app URL when confirmFn resolves true (forge#1850: confirmFn now injectable)", async () => {
+    // ctx.confirmFn is now injectable (added for the forge.yaml overwrite gate
+    // in review()), which also closes the testability gap noted above — the
+    // "yes" path can finally be exercised directly instead of only trusted.
+    let openedUrl = null;
+    const { ctx, w } = stubCtx({
+      openFn: (url) => { openedUrl = url; },
+      confirmFn: async () => true,
+    });
+    const result = await connect(ctx);
+    assert.equal(result.opened, true);
+    assert.match(openedUrl, /rapiercraft-forgedock/);
+    assert.match(w.text, /Opening/);
   });
 
   it("does NOT call openFn when user declines (non-TTY auto-skip)", async () => {
@@ -771,6 +1436,75 @@ describe("connect (Act V.5)", () => {
     assert.equal(typeof result.opened, "boolean");
     // Non-TTY → auto-skip → opened must be false
     assert.equal(result.opened, false);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// maybeOfferDemo (Act V.6, issue #1945)
+// ---------------------------------------------------------------------------
+
+describe("maybeOfferDemo (Act V.6)", () => {
+  it("shows the demo prompt and skips cleanly in non-TTY (default false, no hang)", async () => {
+    let demoCalled = false;
+    const { ctx, w } = stubCtx({ runDemoFn: async () => { demoCalled = true; return { status: "ok" }; } });
+    const result = await maybeOfferDemo(ctx);
+    assert.equal(result.offered, true);
+    assert.equal(result.ranDemo, false);
+    assert.equal(demoCalled, false);
+    assert.match(w.text, /Skipped/);
+  });
+
+  it("runs the demo when confirmFn resolves true", async () => {
+    let calledWith = null;
+    const { ctx } = stubCtx({
+      confirmFn: async () => true,
+      runDemoFn: async (opts) => { calledWith = opts; return { status: "ok", target: "/fake/demo" }; },
+    });
+    const result = await maybeOfferDemo(ctx);
+    assert.equal(result.offered, true);
+    assert.equal(result.ranDemo, true);
+    assert.ok(calledWith);
+    assert.equal(calledWith.forgeHome, ctx.forgeHome);
+    assert.equal(calledWith.cwd, ctx.cwd);
+  });
+
+  it("does NOT run the demo when user declines", async () => {
+    let demoCalled = false;
+    const { ctx } = stubCtx({
+      confirmFn: async () => false,
+      runDemoFn: async () => { demoCalled = true; return { status: "ok" }; },
+    });
+    await maybeOfferDemo(ctx);
+    assert.equal(demoCalled, false);
+  });
+
+  it("treats a returned {status:'error'} as a non-fatal failure, not a thrown exception", async () => {
+    const { ctx, w } = stubCtx({
+      confirmFn: async () => true,
+      runDemoFn: async () => ({ status: "error", error: "network unavailable" }),
+    });
+    const result = await maybeOfferDemo(ctx);
+    assert.equal(result.offered, true);
+    assert.equal(result.ranDemo, false);
+    assert.match(w.text, /Could not start the demo/);
+  });
+
+  it("swallows a thrown runDemoFn error without throwing past maybeOfferDemo", async () => {
+    const { ctx, w } = stubCtx({
+      confirmFn: async () => true,
+      runDemoFn: async () => { throw new Error("boom"); },
+    });
+    const result = await maybeOfferDemo(ctx);
+    assert.equal(result.offered, true);
+    assert.equal(result.ranDemo, false);
+    assert.match(w.text, /Could not start the demo/);
+  });
+
+  it("swallows a thrown confirmFn error without throwing", async () => {
+    const { ctx } = stubCtx({ confirmFn: async () => { throw new Error("boom"); } });
+    const result = await maybeOfferDemo(ctx);
+    assert.equal(result.offered, false);
+    assert.equal(result.ranDemo, false);
   });
 });
 
@@ -1021,5 +1755,180 @@ describe("findMarkdownFiles — install tier filter", () => {
     assert.ok(foundNames.includes("work-on.md"), "work-on.md must be included");
     assert.ok(foundNames.includes("review-pr.md"), "review-pr.md must be included");
     assert.ok(foundNames.includes("quality-gate.md"), "quality-gate.md must be included");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// validateForgeYamlShape — install receipt's forge.yaml status (Issue #1946)
+// ---------------------------------------------------------------------------
+
+describe("validateForgeYamlShape", () => {
+  let cwd;
+  beforeEach(() => {
+    cwd = mkdtempSync(join(os.tmpdir(), "fd-yamlshape-"));
+  });
+
+  it("returns present:false, validShape:false when forge.yaml is absent", () => {
+    assert.deepEqual(validateForgeYamlShape(cwd), { present: false, validShape: false });
+  });
+
+  it("returns present:true, validShape:true when all 3 required sections exist", () => {
+    writeFileSync(join(cwd, "forge.yaml"), 'project:\n  owner: "x"\npaths:\n  root: "y"\nbranches:\n  default: "main"\n', "utf-8");
+    assert.deepEqual(validateForgeYamlShape(cwd), { present: true, validShape: true });
+  });
+
+  it("returns present:true, validShape:false when a required section is missing", () => {
+    writeFileSync(join(cwd, "forge.yaml"), 'project:\n  owner: "x"\npaths:\n  root: "y"\n', "utf-8");
+    assert.deepEqual(validateForgeYamlShape(cwd), { present: true, validShape: false });
+  });
+
+  it("does not throw and does not leak file contents on a garbage file", () => {
+    writeFileSync(join(cwd, "forge.yaml"), "not yaml at all {{{", "utf-8");
+    const res = validateForgeYamlShape(cwd);
+    assert.equal(res.present, true);
+    assert.equal(res.validShape, false);
+    assert.deepEqual(Object.keys(res).sort(), ["present", "validShape"]);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// writeInstallReceipt — machine-readable install-receipt.json (Issue #1946)
+// ---------------------------------------------------------------------------
+
+describe("writeInstallReceipt", () => {
+  let home, forgeHome, cwd;
+  beforeEach(() => {
+    home = mkdtempSync(join(os.tmpdir(), "fd-receipt-home-"));
+    forgeHome = mkdtempSync(join(os.tmpdir(), "fd-receipt-forgehome-"));
+    cwd = mkdtempSync(join(os.tmpdir(), "fd-receipt-cwd-"));
+    mkdirSync(join(forgeHome, "commands"), { recursive: true });
+    writeFileSync(join(forgeHome, "commands", "one.md"), "# /one\n\nTest command\n", "utf-8");
+    writeFileSync(join(forgeHome, "commands", "two.md"), "---\ninstall: extras\n---\n# /two\n\nExtras command\n", "utf-8");
+    writeFileSync(join(forgeHome, "package.json"), JSON.stringify({ name: "forgedock", version: "9.9.9" }), "utf-8");
+  });
+
+  function makeReceiptCtx(overrides = {}) {
+    return makeCtx({
+      home,
+      forgeHome,
+      cwd,
+      env: {},
+      platform: "linux",
+      release: "",
+      includeExtras: false,
+      ...overrides,
+    });
+  }
+
+  it("writes install-receipt.json under {home}/.forge/ with schemaVersion, timestamp, version, mode", async () => {
+    const ctx = makeReceiptCtx();
+    const res = await writeInstallReceipt(ctx, { forged: { hookStatus: "registered", preToolUseStatus: "registered", subagentStopEnforceStatus: null } });
+    assert.equal(res.written, true);
+    const receiptPath = join(home, ".forge", "install-receipt.json");
+    assert.ok(existsSync(receiptPath));
+    const receipt = JSON.parse(readFileSync(receiptPath, "utf-8"));
+    assert.equal(receipt.schemaVersion, 1);
+    assert.match(receipt.timestamp, /^\d{4}-\d{2}-\d{2}T/);
+    assert.equal(receipt.forgedockVersion, "9.9.9");
+    // no .git dir in forgeHome -> npm install mode
+    assert.equal(receipt.installMode, "npm");
+    assert.equal(receipt.hooks.sessionStart, "registered");
+    assert.equal(receipt.hooks.preToolUse, "registered");
+    assert.equal(receipt.hooks.subagentStopEnforce, null);
+  });
+
+  it("detects git-clone install mode when {forgeHome}/.git exists", async () => {
+    mkdirSync(join(forgeHome, ".git"), { recursive: true });
+    const ctx = makeReceiptCtx();
+    await writeInstallReceipt(ctx, { forged: {} });
+    const receipt = JSON.parse(readFileSync(join(home, ".forge", "install-receipt.json"), "utf-8"));
+    assert.equal(receipt.installMode, "git-clone");
+  });
+
+  it("tier reflects ctx.includeExtras (core by default, extras when set)", async () => {
+    const ctxCore = makeReceiptCtx({ includeExtras: false });
+    await writeInstallReceipt(ctxCore, { forged: {} });
+    let receipt = JSON.parse(readFileSync(join(home, ".forge", "install-receipt.json"), "utf-8"));
+    assert.equal(receipt.tier, "core");
+    assert.ok(!receipt.commands.list.includes("two"), "extras command excluded when tier is core");
+
+    const ctxExtras = makeReceiptCtx({ includeExtras: true });
+    await writeInstallReceipt(ctxExtras, { forged: {} });
+    receipt = JSON.parse(readFileSync(join(home, ".forge", "install-receipt.json"), "utf-8"));
+    assert.equal(receipt.tier, "extras");
+    assert.ok(receipt.commands.list.includes("two"), "extras command included when tier is extras");
+  });
+
+  it("commands list is sourced from findMarkdownFiles (not a duplicated literal list, ref #1633)", async () => {
+    const ctx = makeReceiptCtx();
+    await writeInstallReceipt(ctx, { forged: {} });
+    const receipt = JSON.parse(readFileSync(join(home, ".forge", "install-receipt.json"), "utf-8"));
+    assert.equal(receipt.commands.count, 1);
+    assert.deepEqual(receipt.commands.list, ["one"]);
+  });
+
+  it("captures platform info from detectEnvironment (platform/isWSL/shell)", async () => {
+    const ctx = makeReceiptCtx({ platform: "linux", env: { SHELL: "/bin/bash" } });
+    await writeInstallReceipt(ctx, { forged: {} });
+    const receipt = JSON.parse(readFileSync(join(home, ".forge", "install-receipt.json"), "utf-8"));
+    assert.equal(receipt.platform.platform, "linux");
+    assert.equal(receipt.platform.shell, "bash");
+    assert.equal(receipt.platform.isWSL, false);
+  });
+
+  it("reflects forge.yaml presence/shape via validateForgeYamlShape, without copying file contents", async () => {
+    writeFileSync(join(cwd, "forge.yaml"), 'project:\n  owner: "secret-org"\npaths:\n  root: "x"\nbranches:\n  default: "main"\n', "utf-8");
+    const ctx = makeReceiptCtx();
+    await writeInstallReceipt(ctx, { forged: {} });
+    const receipt = JSON.parse(readFileSync(join(home, ".forge", "install-receipt.json"), "utf-8"));
+    assert.deepEqual(receipt.forgeYaml, { present: true, validShape: true });
+    assert.ok(!JSON.stringify(receipt).includes("secret-org"), "forge.yaml field values must not leak into the receipt");
+  });
+
+  it("does not include process.env values or token-like strings (no PII/secrets)", async () => {
+    const ctx = makeReceiptCtx({ env: { GH_TOKEN: "ghp_supersecrettoken1234567890", ANTHROPIC_API_KEY: "sk-ant-secret" } });
+    await writeInstallReceipt(ctx, { forged: {} });
+    const raw = readFileSync(join(home, ".forge", "install-receipt.json"), "utf-8");
+    assert.ok(!raw.includes("ghp_supersecrettoken1234567890"));
+    assert.ok(!raw.includes("sk-ant-secret"));
+  });
+
+  it("is atomic: no stale .tmp file left after a successful write", async () => {
+    const ctx = makeReceiptCtx();
+    await writeInstallReceipt(ctx, { forged: {} });
+    assert.ok(!existsSync(join(home, ".forge", "install-receipt.json.tmp")));
+  });
+
+  it("never throws: degrades to written:false when the target directory cannot be created", async () => {
+    // Point ctx.home at a path whose parent is a FILE, not a directory —
+    // mkdir(..., {recursive:true}) will fail with ENOTDIR, and the function
+    // must swallow it rather than propagate.
+    const blockerFile = join(mkdtempSync(join(os.tmpdir(), "fd-receipt-blocker-")), "im-a-file");
+    writeFileSync(blockerFile, "x", "utf-8");
+    const ctx = makeReceiptCtx({ home: join(blockerFile, "nested", "home") });
+    const res = await writeInstallReceipt(ctx, { forged: {} });
+    assert.equal(res.written, false);
+  });
+
+  it("never throws even when ctx.home is malformed (regression: path.join must not run before the try block)", async () => {
+    // ctx.home = undefined would make an unguarded `join(ctx.home, ...)`
+    // ahead of the try block throw synchronously (path.join rejects
+    // non-string args), escaping writeInstallReceipt's own "never throws"
+    // contract and propagating uncaught to runJourney()'s bare try/finally.
+    const ctx = makeReceiptCtx({ home: undefined });
+    await assert.doesNotReject(async () => {
+      const res = await writeInstallReceipt(ctx, { forged: {} });
+      assert.equal(res.written, false);
+    });
+  });
+
+  it("works with a minimal summary (no forged data) — the relinkAndHint() call shape", async () => {
+    const ctx = makeReceiptCtx();
+    const res = await writeInstallReceipt(ctx, {});
+    assert.equal(res.written, true);
+    const receipt = JSON.parse(readFileSync(join(home, ".forge", "install-receipt.json"), "utf-8"));
+    assert.equal(receipt.hooks.sessionStart, null);
+    assert.equal(receipt.hooks.preToolUse, null);
+    assert.equal(receipt.hooks.subagentStopEnforce, null);
   });
 });

@@ -9,7 +9,7 @@
  *   init-detect.mjs, init-enrich-api.mjs, tui.annotatedReviewScreen, registry.mjs
  */
 
-import { existsSync, readFileSync, writeFileSync, renameSync, unlinkSync } from "fs";
+import { existsSync, lstatSync, readFileSync, writeFileSync, renameSync, unlinkSync } from "fs";
 import { join, basename } from "path";
 
 // ---------------------------------------------------------------------------
@@ -179,14 +179,63 @@ export function manualLowConfidenceKeys(draft, description, values) {
  * Back up an existing file to <name>.bak (timestamped if .bak exists).
  * @returns {{ backupName: string } | null} null when the file didn't exist.
  */
+/**
+ * Back up an existing file to <name>.bak, keeping `.bak` as the newest copy.
+ *
+ * Regression fix (forge#1850): the previous implementation left the bare
+ * `.bak` untouched once created, so only the FIRST-ever clobber's content
+ * ever lived there — every later overwrite rotated the (by then already
+ * stubbed) current file into a timestamped sibling instead. The net effect
+ * was that the newest-looking backup (by filename/mtime) was the most
+ * stubbed one, while the one recoverable good copy sat forever under the
+ * unindicated bare name. A user restoring "the .bak" or "the newest backup"
+ * got garbage either way.
+ *
+ * Fixed behavior: before writing the current file into `.bak`, rotate any
+ * existing `.bak` out to a timestamped file first. `.bak` therefore always
+ * holds the immediately-prior state (the best next guess for "undo my last
+ * run"), and the full chronological history is preserved in timestamped
+ * files — nothing is ever silently buried.
+ *
+ * @returns {{ backupName: string } | null} null when the file didn't exist.
+ */
 export function backupExisting(outputPath) {
   if (!existsSync(outputPath)) return null;
   const baseBak = outputPath + ".bak";
-  const backupPath = existsSync(baseBak)
-    ? `${baseBak}.${new Date().toISOString().replace(/[:.]/g, "-")}`
-    : baseBak;
-  renameSync(outputPath, backupPath);
-  return { backupName: basename(backupPath) };
+  if (existsSync(baseBak)) {
+    // Guard against two rotations landing on the same millisecond timestamp
+    // (e.g. rapid successive calls in tests, or a fast disk) silently
+    // clobbering an already-rotated generation.
+    let rotatedPath = `${baseBak}.${new Date().toISOString().replace(/[:.]/g, "-")}`;
+    let suffix = 1;
+    while (existsSync(rotatedPath)) {
+      rotatedPath = `${baseBak}.${new Date().toISOString().replace(/[:.]/g, "-")}-${suffix++}`;
+    }
+    renameSync(baseBak, rotatedPath);
+  }
+  renameSync(outputPath, baseBak);
+  return { backupName: basename(baseBak) };
+}
+
+/**
+ * Lightweight forge.yaml presence/shape check for the install receipt
+ * (Issue #1946) — no YAML parser dependency, mirrors the regex-based
+ * approach already used by resolveLabelsRepo() in bin/forgedock.mjs. Only
+ * checks that the three REQUIRED top-level section keys are present; never
+ * reads field values or copies file contents into the caller's result.
+ * @param {string} cwd
+ * @returns {{ present: boolean, validShape: boolean }}
+ */
+export function validateForgeYamlShape(cwd) {
+  const p = join(cwd, "forge.yaml");
+  if (!existsSync(p)) return { present: false, validShape: false };
+  try {
+    const raw = readFileSync(p, "utf-8");
+    const validShape = /^project:/m.test(raw) && /^paths:/m.test(raw) && /^branches:/m.test(raw);
+    return { present: true, validShape };
+  } catch {
+    return { present: true, validShape: false };
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -244,6 +293,7 @@ import {
   renderMark, ember, shimmer, revealRows, moltenBar, fixCard,
   colorMode, motionEnabled, CHROME_STOPS, HERO_MARK, COMPACT_MARK, sleep,
 } from "./cinema.mjs";
+import { detectEnvironment, wslPathToWindows } from "./env-detect.mjs";
 
 // ---------------------------------------------------------------------------
 // URL opener (default openFn implementation — injectable for tests)
@@ -283,6 +333,16 @@ export function makeCtx(overrides = {}) {
   const nodeVersion = overrides.nodeVersion ?? process.versions.node;
   const enrichFn = overrides.enrichFn ?? enrich;
   const openFn = overrides.openFn ?? openUrl;
+  const confirmFn = overrides.confirmFn ?? confirm;
+  const platform = overrides.platform ?? process.platform;
+  let release = overrides.release;
+  if (release === undefined) {
+    try {
+      release = os.release();
+    } catch {
+      release = "";
+    }
+  }
   return {
     cwd: process.cwd(),
     home: env.HOME || env.USERPROFILE || os.homedir(),
@@ -293,9 +353,12 @@ export function makeCtx(overrides = {}) {
     mode: colorMode(env, stdout),
     motion: motionEnabled(argv, env, stdout),
     nodeVersion,
+    platform,
+    release,
     linkStrategy: "symlink",
     enrichFn,
     openFn,
+    confirmFn,
     exec: (cmd, args) =>
       execFileSync(cmd, args, {
         encoding: "utf-8",
@@ -315,7 +378,9 @@ const dimLine = (ctx, s) => (ctx.mode === "none" ? s : `\x1b[2m${s}\x1b[22m`);
 
 /**
  * Render the hero banner and run preflight checks. Failures render fix cards
- * and the journey continues — advisory, never fatal.
+ * and the journey continues — advisory, never fatal. Includes informational
+ * Platform/WSL/Shell rows (via env-detect.mjs) after the pass/fail checks —
+ * those three always report `ok: true`, they surface state rather than gate it.
  * @returns {Promise<{ checks: Array<{name, ok, detail, fix?}>, ghReady: boolean }>}
  */
 export async function preflight(ctx) {
@@ -323,7 +388,7 @@ export async function preflight(ctx) {
   w.write("\n");
   await shimmer(HERO_MARK, CHROME_STOPS, { mode: ctx.mode, motion: ctx.motion, writer: w });
   w.write("\n  " + ember("F O R G E D O C K", ctx.mode) + "\n");
-  w.write("  " + dimLine(ctx, "──── lighting the forge ────────────────────") + "\n\n");
+  w.write("  " + dimLine(ctx, `──── ${getLogoTagline("install")} ────────────────────`) + "\n\n");
 
   const rows = [
     {
@@ -376,6 +441,31 @@ export async function preflight(ctx) {
       },
     },
   ];
+
+  // Environment reveal rows (platform/WSL/shell) — informational only, never
+  // fail the preflight. Appended after the existing 4 checks so `named[3]`
+  // (GitHub CLI, used for `ghReady` below) keeps its index.
+  const envInfo = detectEnvironment({ platform: ctx.platform, env: ctx.env, release: ctx.release });
+  rows.push(
+    {
+      label: "Platform",
+      run: async () => {
+        const wslNote = envInfo.isWSL ? ` (WSL${envInfo.wslDistro ? `: ${envInfo.wslDistro}` : ""})` : "";
+        return { ok: true, detail: `${envInfo.platformLabel}${wslNote} (${envInfo.shell})` };
+      },
+    },
+    {
+      label: "WSL",
+      run: async () => ({
+        ok: true,
+        detail: envInfo.isWSL ? envInfo.wslDistro || "detected" : "not detected",
+      }),
+    },
+    {
+      label: "Shell",
+      run: async () => ({ ok: true, detail: envInfo.shell }),
+    },
+  );
 
   const results = await revealRows(rows, { mode: ctx.mode, motion: ctx.motion, writer: w });
   const named = rows.map((r, i) => ({ name: r.label, ...results[i] }));
@@ -500,6 +590,24 @@ async function saveCopiedManifest(manifestPath, manifest) {
 const isLinkPermissionError = (err) => err.code === "EPERM" || err.code === "EACCES";
 
 /**
+ * Allowlist of universal pipeline-agent scripts installed to
+ * ~/.claude/scripts/ by forge() (linkPipelineScripts()) and cleaned up by
+ * forgedock.mjs's uninstall(). This is the single source of truth for both
+ * directions — re-export from forgedock.mjs rather than duplicating it.
+ *
+ * Deliberately narrow (forge#715): project-specific/internal tooling that
+ * lives in scripts/ (verify-*.sh, doctor-pipeline-state.sh, gen-logo.mjs,
+ * the self-dogfooding *.mjs analysis scripts, etc.) must NOT be copied here
+ * — only scripts meant to be invoked generically by command specs without
+ * knowing ForgeDock's own install path belong in this set.
+ */
+export const PIPELINE_SCRIPTS = new Set([
+  "classify-lane.sh",
+  "transition-label.sh",
+  "validate-pr-target.sh",
+]);
+
+/**
  * Recursively walk targetDir and remove any symlink whose target begins with
  * commandsDir (i.e. a ForgeDock-managed link) but whose target file no longer
  * exists on disk. These are "orphaned" symlinks left behind when a command is
@@ -559,6 +667,487 @@ async function pruneOrphanedSymlinks(targetDir, commandsDir) {
 
   await walk(targetDir);
   return pruned;
+}
+
+/**
+ * Detect whether `p` sits inside a known ephemeral npm/npx/pnpm/yarn cache
+ * directory rather than a durable install location (global npm install,
+ * local repo clone, or a project's own `node_modules`).
+ *
+ * Used to warn when `ctx.forgeHome` — and therefore the SessionStart hook
+ * script path baked into `~/.claude/settings.json` — resolves somewhere that
+ * can be silently pruned later (`npm cache clean`, OS temp cleanup, npx's
+ * own eviction), which would break context injection with no error surfaced.
+ *
+ * Matching is path-SEGMENT based (split on `/` and `\`), never a bare
+ * substring match — this keeps the check conservative and avoids false
+ * positives on a real install whose path merely contains one of these
+ * strings (e.g. a project directory named `npx-utils` or `my-dlx-tool`).
+ *
+ * Recognized shapes:
+ *   - npm's npx cache: a `_npx` segment — covers both
+ *     `~/.npm/_npx/<hash>/node_modules/<pkg>` (POSIX) and
+ *     `%LocalAppData%\npm-cache\_npx\<hash>\node_modules\<pkg>` (Windows).
+ *   - pnpm's dlx cache: a `dlx` segment — pnpm's ephemeral `dlx` subdir,
+ *     distinct from `node_modules/.pnpm/` (pnpm's persistent
+ *     content-addressable store used by ordinary local installs, which must
+ *     NOT be flagged here).
+ *   - yarn (Berry) dlx: a segment matching `/^xfs-/i` — `yarn dlx` builds its
+ *     throwaway project in a temp directory created via `xfs.mktempPromise()`,
+ *     which yarn names with an `xfs-` prefix.
+ *
+ * @param {string} p - Absolute path to test (typically `ctx.forgeHome`).
+ * @returns {boolean}
+ */
+export function isEphemeralCachePath(p) {
+  if (!p || typeof p !== "string") return false;
+  const segments = p.split(/[\\/]/).filter(Boolean);
+  return segments.some(
+    (seg) => seg === "_npx" || seg === "dlx" || /^xfs-/i.test(seg),
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Act 0/I.5 — Persist Home: copy the toolset into a stable ~/.forge/ (#1943)
+// ---------------------------------------------------------------------------
+
+/**
+ * The four top-level directories that make up ForgeDock's installable
+ * payload. Kept as a single list so persistHome() and its tests agree on
+ * exactly what gets copied.
+ */
+const PERSIST_HOME_DIRS = ["bin", "commands", "scripts", "templates"];
+
+/**
+ * Detect whether `dir` is a git working tree — has a `.git` entry at all,
+ * regardless of whether it's a directory (ordinary clone) or a file (git
+ * worktree, whose `.git` is a pointer file back to the main repo's `.git`
+ * dir). Both shapes mean "this is a stable, user-owned git checkout" for
+ * persistHome()'s purposes — neither should ever be copied into ~/.forge/.
+ *
+ * Uses lstatSync (not existsSync) so the check reflects the real entry on
+ * disk rather than following symlinks, mirroring the detection *style* of
+ * resolveRealForgeHome() in bin/forgedock.mjs (which additionally has to
+ * distinguish file-vs-directory to resolve worktrees to their main repo
+ * root — a distinction persistHome() doesn't need, since both shapes skip
+ * identically here).
+ *
+ * @param {string} dir
+ * @returns {boolean}
+ */
+function isGitWorkingTree(dir) {
+  try {
+    lstatSync(join(dir, ".git"));
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Recursively copy `srcDir` into `destDir`, content-comparing existing files
+ * before overwriting so unchanged bytes are never rewritten (same idempotency
+ * discipline as forge()'s command-linking loop and linkPipelineScripts() —
+ * forge#1916). A missing `srcDir` is treated as "nothing to copy" rather than
+ * an error, since not every ForgeDock release necessarily ships every one of
+ * PERSIST_HOME_DIRS.
+ *
+ * @param {string} srcDir
+ * @param {string} destDir
+ * @returns {Promise<{ copied: number, unchanged: number }>}
+ */
+async function copyDirIfChanged(srcDir, destDir) {
+  let entries;
+  try {
+    entries = await readdir(srcDir, { withFileTypes: true });
+  } catch (err) {
+    if (err.code === "ENOENT") return { copied: 0, unchanged: 0 };
+    throw err;
+  }
+
+  await mkdir(destDir, { recursive: true });
+
+  let copied = 0;
+  let unchanged = 0;
+
+  for (const entry of entries) {
+    const srcPath = join(srcDir, entry.name);
+    const destPath = join(destDir, entry.name);
+
+    if (entry.isDirectory()) {
+      const sub = await copyDirIfChanged(srcPath, destPath);
+      copied += sub.copied;
+      unchanged += sub.unchanged;
+      continue;
+    }
+    if (!entry.isFile()) continue; // symlinks/sockets/etc. — not expected in this payload
+
+    let needsCopy = true;
+    try {
+      const [src, dst] = await Promise.all([readFile(srcPath), readFile(destPath)]);
+      if (src.equals(dst)) needsCopy = false;
+    } catch (err) {
+      if (err.code !== "ENOENT") throw err;
+      // destPath missing — needs copy, needsCopy stays true.
+    }
+
+    if (needsCopy) {
+      await copyFile(srcPath, destPath);
+      copied++;
+    } else {
+      unchanged++;
+    }
+  }
+
+  return { copied, unchanged };
+}
+
+/**
+ * Copy ForgeDock's own installable payload (bin/, commands/, scripts/,
+ * templates/) from wherever the package currently resolved — npm global
+ * install, npx/dlx cache, or any other non-git extraction — into a stable
+ * `{ctx.home}/.forge/` home, and point `ctx.forgeHome` at it for the rest of
+ * the journey. This is what makes `~/.claude/commands/` symlinks and the
+ * SessionStart hook's baked-in script path survive npm/npx cache eviction
+ * (issue #1943) — before this, both were built directly from the ephemeral
+ * source location and broke silently once that cache was pruned.
+ *
+ * Skipped entirely when `ctx.forgeHome` is a git working tree (see
+ * isGitWorkingTree() above): a git clone (or worktree) is already a stable,
+ * user-owned location. Copying it into ~/.forge/ would silently disconnect
+ * `git pull`/`npx forgedock update` from what's actually linked into
+ * ~/.claude/commands/ — the regression issue #1943's Acceptance Criteria #5
+ * explicitly calls out.
+ *
+ * Content-compares before overwriting (see copyDirIfChanged() above) so
+ * steady-state re-runs (every `npx forgedock` invocation) don't rewrite
+ * byte-identical files.
+ *
+ * IMPORTANT: consumes `ctx.forgeHome` exactly as already resolved by the
+ * caller — it must never re-derive its own "where does ForgeDock actually
+ * live" path. Re-deriving risks reintroducing the worktree-leakage
+ * regression fixed by resolveRealForgeHome() (forge#1700): a worktree-scoped
+ * FORGE_HOME baked into a persisted copy would dangle once the worktree is
+ * removed.
+ *
+ * Fail-open: any filesystem error (permission denied, disk full, etc.) is
+ * caught and reported via the returned `skipped`/`reason` fields rather than
+ * thrown. Callers must treat a `skipped: true` result as "fall back to the
+ * original ctx.forgeHome" — the pre-existing ephemeral-FORGE_HOME behavior.
+ *
+ * @param {{ forgeHome: string, home: string }} ctx
+ * @returns {Promise<{
+ *   forgeHome: string,
+ *   migrated: boolean,
+ *   skipped: boolean,
+ *   reason?: string,
+ *   version: string,
+ *   filesCopied?: number,
+ *   filesUnchanged?: number,
+ * }>}
+ */
+export async function persistHome(ctx) {
+  const source = ctx.forgeHome;
+  const persistedHome = join(ctx.home, ".forge");
+
+  if (isGitWorkingTree(source)) {
+    return {
+      forgeHome: source,
+      migrated: false,
+      skipped: true,
+      reason: "git working tree — linked directly from the clone, not persisted",
+      version: "",
+    };
+  }
+
+  // Read the source package's version up front — best-effort, never fatal.
+  // A missing/unreadable package.json degrades to an empty version string
+  // rather than aborting the whole persist step.
+  let version = "";
+  try {
+    const pkg = JSON.parse(readFileSync(join(source, "package.json"), "utf-8"));
+    version = pkg.version || "";
+  } catch {
+    // proceed with version === ""
+  }
+
+  try {
+    await mkdir(persistedHome, { recursive: true });
+
+    let filesCopied = 0;
+    let filesUnchanged = 0;
+    for (const name of PERSIST_HOME_DIRS) {
+      const res = await copyDirIfChanged(join(source, name), join(persistedHome, name));
+      filesCopied += res.copied;
+      filesUnchanged += res.unchanged;
+    }
+
+    // Also persist package.json itself (not just PERSIST_HOME_DIRS) — several
+    // callers read `{forgeHome}/package.json` directly (readForgedockVersion()
+    // in this file, used by writeInstallReceipt() — forge#1946) and expect it
+    // to resolve relative to whatever ctx.forgeHome currently points at. Once
+    // this function reassigns ctx.forgeHome to the persisted copy, those
+    // callers would otherwise find no package.json there and silently degrade
+    // to an empty version string. Copying it keeps ~/.forge a complete
+    // drop-in stand-in for the original forgeHome, not just a commands/hooks
+    // mirror. Missing source package.json (unusual layout) is a no-op, same
+    // as any other PERSIST_HOME_DIRS entry.
+    try {
+      const [src, dst] = await Promise.all([
+        readFile(join(source, "package.json")),
+        readFile(join(persistedHome, "package.json")).catch(() => null),
+      ]);
+      if (!dst || !src.equals(dst)) {
+        await copyFile(join(source, "package.json"), join(persistedHome, "package.json"));
+        filesCopied++;
+      } else {
+        filesUnchanged++;
+      }
+    } catch (err) {
+      if (err.code !== "ENOENT") throw err;
+      // source package.json missing — nothing to persist, not an error.
+    }
+
+    // Write ~/.forge/version — content-compared like everything else here so
+    // an unchanged version doesn't touch the file's mtime on every re-run.
+    const versionPath = join(persistedHome, "version");
+    let versionChanged = true;
+    try {
+      versionChanged = readFileSync(versionPath, "utf-8").trim() !== version;
+    } catch {
+      // missing/unreadable — treat as changed
+    }
+    if (versionChanged) {
+      const tmpVersionPath = versionPath + ".tmp";
+      try {
+        writeFileSync(tmpVersionPath, version + "\n", "utf-8");
+        renameSync(tmpVersionPath, versionPath);
+      } catch (err) {
+        try { unlinkSync(tmpVersionPath); } catch { /* best-effort cleanup */ }
+        throw err;
+      }
+    }
+
+    return {
+      forgeHome: persistedHome,
+      migrated: filesCopied > 0 || versionChanged,
+      skipped: false,
+      version,
+      filesCopied,
+      filesUnchanged,
+    };
+  } catch (err) {
+    // Fail-open (forge#383): a permission error, disk-full, etc. must never
+    // abort install/update — fall back to the original, un-persisted forgeHome.
+    return {
+      forgeHome: source,
+      migrated: false,
+      skipped: true,
+      reason: `error: ${err && err.message ? err.message : String(err)}`,
+      version,
+    };
+  }
+}
+
+/**
+ * Link the PIPELINE_SCRIPTS allowlist from {forgeHome}/scripts/ into
+ * ~/.claude/scripts/, using the same symlink-first / copy-fallback strategy
+ * as command installation (isLinkPermissionError-gated). Flat set, no
+ * subdirectories, no ownership manifest needed — three well-known filenames.
+ *
+ * Restores the linkScripts() step (commit 9bf382a, forge#677) that was
+ * silently dropped when install moved from the legacy install()/update()
+ * flow to this journey-based forge() (forge#1885).
+ *
+ * @param {{forgeHome: string, home: string, linkStrategy?: string}} ctx
+ * @returns {Promise<{installed: number, updated: number, skipped: number, copied: number, total: number}>}
+ */
+async function linkPipelineScripts(ctx) {
+  const scriptsSourceDir = join(ctx.forgeHome, "scripts");
+  const scriptsTargetDir = join(ctx.home, ".claude", "scripts");
+  const wantSymlink = ctx.linkStrategy !== "copy";
+
+  await mkdir(scriptsTargetDir, { recursive: true });
+
+  let installed = 0, updated = 0, skipped = 0, copied = 0;
+
+  for (const name of PIPELINE_SCRIPTS) {
+    const file = join(scriptsSourceDir, name);
+    if (!existsSync(file)) continue; // source missing (unusual package layout) — skip silently
+
+    const target = join(scriptsTargetDir, name);
+    let existed = false;
+    let alreadyCorrect = false;
+
+    try {
+      const stats = await lstat(target);
+      existed = true;
+      if (stats.isSymbolicLink()) {
+        const current = await readlink(target);
+        if (current === file) alreadyCorrect = true;
+      } else if (stats.isFile() && !wantSymlink) {
+        // Copy-fallback path (Windows without Developer Mode): content-compare
+        // before unlinking/recopying, matching the sibling linkCommands() loop
+        // and the legacy linkScripts() this restores (forge#1916).
+        const [src, dst] = await Promise.all([readFile(file), readFile(target)]);
+        if (src.equals(dst)) alreadyCorrect = true;
+      }
+    } catch (err) {
+      if (err.code !== "ENOENT") throw err;
+    }
+
+    if (alreadyCorrect) {
+      skipped++;
+      continue;
+    }
+
+    if (existed) {
+      await unlink(target).catch((err) => {
+        if (err.code !== "ENOENT") throw err;
+      });
+    }
+
+    let linked = false;
+    if (wantSymlink) {
+      try {
+        await symlink(file, target);
+        linked = true;
+      } catch (linkErr) {
+        if (!isLinkPermissionError(linkErr)) throw linkErr;
+      }
+    }
+    if (!linked) {
+      await copyFile(file, target);
+      copied++;
+    } else if (existed) {
+      updated++;
+    } else {
+      installed++;
+    }
+  }
+
+  return { installed, updated, skipped, copied, total: PIPELINE_SCRIPTS.size };
+}
+
+// Windows -> WSL UNC probing in detectCrossEnvInstall() below hits a real
+// blocking syscall per distro/root: fs.existsSync() on a stopped WSL
+// distro's UNC path triggers Windows to synchronously spin up that distro's
+// VM before the stat resolves, which can take multiple seconds. Bound both
+// how many distros get probed and how long the loop is willing to keep
+// probing before giving up (forge#1917).
+const CROSS_ENV_PROBE_MAX_DISTROS = 5;
+const CROSS_ENV_PROBE_BUDGET_MS = 3000;
+
+/**
+ * Detect whether this repo is also installed from the "other" environment —
+ * WSL vs native Windows — for the SAME physical repo (forge#1893).
+ *
+ * ForgeDock installs are always global (`~/.claude` — see #1589's split-brain
+ * finding: there is no per-repo install state), so there is no per-repo
+ * install record to compare directly. Instead: when the repo itself is
+ * reachable from both sides, the *other* environment's home directory is
+ * directly derivable, and its `.claude/forgedock` manifest dir (written by
+ * `forge()` below) tells us whether ForgeDock has ever run there.
+ *
+ * Two directions:
+ *   - WSL → Windows: well-defined. If `ctx.cwd` is under
+ *     `/mnt/<drive>/Users/<user>/...`, that's a live bind mount onto the
+ *     Windows drive — the Windows home for that same user is
+ *     `/mnt/<drive>/Users/<user>`, directly checkable through the mount, no
+ *     cross-OS trickery needed.
+ *   - Windows → WSL: best-effort. If `ctx.cwd` is under
+ *     `<drive>:\Users\<user>\...`, enumerate installed WSL distros
+ *     (`wsl -l -q`) and probe each one's
+ *     `\\wsl.localhost\<distro>\home\<user>\.claude\forgedock` (falling back
+ *     to the older `\\wsl$\<distro>\...` UNC root), guessing the Linux
+ *     username equals the Windows username. A wrong guess only produces a
+ *     false NEGATIVE (silently skips a real conflict) — never a false
+ *     positive, matching this feature's "no false positives" requirement.
+ *
+ * Never throws — any failure (WSL not installed, `wsl -l -q` unavailable,
+ * an inaccessible/slow UNC path, or a `cwd` that doesn't match either shape)
+ * degrades to "no conflict". The Windows -> WSL probe loop is additionally
+ * bounded by `CROSS_ENV_PROBE_MAX_DISTROS` and `CROSS_ENV_PROBE_BUDGET_MS` —
+ * exceeding either bound also degrades to "no conflict" rather than
+ * continuing to block (forge#1917).
+ *
+ * @param {{ cwd: string, exec: (cmd: string, args: string[]) => string }} ctx
+ * @param {import('./env-detect.mjs').EnvironmentInfo} envInfo
+ * @param {{ existsSyncFn?: (p: string) => boolean, nowFn?: () => number }} [deps] - inject
+ *   for tests; `existsSyncFn` defaults to the real `fs.existsSync`, `nowFn` defaults to
+ *   `Date.now`.
+ * @returns {{ conflict: boolean, otherPath: string | null, direction: "windows" | "wsl" | null }}
+ */
+export function detectCrossEnvInstall(ctx, envInfo, deps = {}) {
+  const existsSyncFn = deps.existsSyncFn ?? existsSync;
+  const nowFn = deps.nowFn ?? Date.now;
+  const none = { conflict: false, otherPath: null, direction: null };
+
+  try {
+    const cwd = String(ctx.cwd ?? "");
+
+    if (envInfo.isWSL) {
+      const m = cwd.match(/^(\/mnt\/[a-z])\/Users\/([^/]+)/i);
+      if (!m) return none;
+      const windowsHomeOnMount = `${m[1]}/Users/${m[2]}`;
+      const checkPath = `${windowsHomeOnMount}/.claude/forgedock`;
+      if (existsSyncFn(checkPath)) {
+        return { conflict: true, otherPath: wslPathToWindows(checkPath) ?? checkPath, direction: "windows" };
+      }
+      return none;
+    }
+
+    if (envInfo.platform === "win32") {
+      const m = cwd.match(/^([a-zA-Z]):[\\/]Users[\\/]([^\\/]+)/i);
+      if (!m) return none;
+      const user = m[2];
+
+      let distros = [];
+      try {
+        const raw = ctx.exec("wsl", ["-l", "-q"]);
+        // `wsl -l -q` prints its distro list as UTF-16LE. `ctx.exec` decodes
+        // process output as UTF-8, so ASCII characters come back interleaved
+        // with NUL bytes (e.g. "Ubuntu" -> "U\0b\0u\0n\0t\0u\0"). Strip them
+        // before splitting into lines.
+        distros = raw
+          .replace(/\0/g, "")
+          .split(/\r?\n/)
+          .map((s) => s.trim())
+          .filter(Boolean);
+      } catch {
+        return none; // WSL not installed, or `wsl` isn't on PATH — no conflict possible.
+      }
+
+      // Bound worst-case blocking time: cap how many distros get probed, and
+      // stop probing once the wall-clock budget is exhausted. Each existsSync
+      // call below is a real blocking syscall — a stopped WSL distro auto-
+      // starts its VM synchronously to service the UNC stat, which can take
+      // multiple seconds. Checking the deadline before every probe (not just
+      // once per distro) stops the delay from compounding once the budget
+      // is gone; it can't preempt a single already-in-flight call, but it
+      // does bound the total across distros/roots (forge#1917).
+      const probeDeadline = nowFn() + CROSS_ENV_PROBE_BUDGET_MS;
+      for (const distro of distros.slice(0, CROSS_ENV_PROBE_MAX_DISTROS)) {
+        if (nowFn() > probeDeadline) break;
+        for (const root of [`\\\\wsl.localhost\\${distro}`, `\\\\wsl$\\${distro}`]) {
+          if (nowFn() > probeDeadline) break;
+          const checkPath = `${root}\\home\\${user}\\.claude\\forgedock`;
+          try {
+            if (existsSyncFn(checkPath)) {
+              return { conflict: true, otherPath: checkPath, direction: "wsl" };
+            }
+          } catch {
+            // Inaccessible/unresponsive UNC path — treat as not found, try the next one.
+          }
+        }
+      }
+      return none;
+    }
+
+    return none;
+  } catch {
+    return none;
+  }
 }
 
 /**
@@ -706,6 +1295,9 @@ export async function forge(ctx) {
   // target file no longer exists (e.g. after a command is renamed or deleted).
   const pruned = await pruneOrphanedSymlinks(targetDir, commandsDir);
 
+  // Link the small set of universal pipeline-agent scripts (forge#1885).
+  const scriptsResult = await linkPipelineScripts(ctx);
+
   const hookScript = join(ctx.forgeHome, "bin", "hooks", "session-start.mjs");
   const settingsPath = join(ctx.home, ".claude", "settings.json");
   const { status: hookStatus } = installSessionStartHook(settingsPath, hookScript);
@@ -749,6 +1341,13 @@ export async function forge(ctx) {
   if (copied > 0) {
     w.write(`  ${glyph(false)} ${copied} copied (not linked) ${dimLine(ctx, "— enable Windows Developer Mode for live-updating links")}\n`);
   }
+  if (scriptsResult.total > 0) {
+    const scriptsChanged = scriptsResult.installed + scriptsResult.updated + scriptsResult.copied;
+    const scriptsDetail = scriptsChanged > 0
+      ? `(new ${scriptsResult.installed}, updated ${scriptsResult.updated}, copied ${scriptsResult.copied}, unchanged ${scriptsResult.skipped})`
+      : `(unchanged ${scriptsResult.skipped})`;
+    w.write(`  ${glyph(true)} ${scriptsResult.total} pipeline scripts linked into ~/.claude/scripts ${dimLine(ctx, scriptsDetail)}\n`);
+  }
   if (manifestSaveFailed) {
     w.write("  " + dimLine(ctx, "manifest not saved — re-runs may warn about copied files") + "\n");
   }
@@ -757,6 +1356,60 @@ export async function forge(ctx) {
     w.write(fixCard([`Fix the JSON in ${settingsPath}, then re-run: npx forgedock install`], ctx.mode) + "\n");
   } else {
     w.write(`  ${glyph(true)} SessionStart hook ${hookStatus === "already" ? "active" : "registered"} ${dimLine(ctx, settingsPath)}\n`);
+  }
+
+  // Persisted-home / ephemeral-cache advisory (forge#1895, extended #1943):
+  // runJourney() calls persistHome(ctx) right before forge() and stashes its
+  // result on ctx.persistHomeResult; when persistHome() actually ran (i.e.
+  // wasn't skipped), ctx.forgeHome above has ALREADY been reassigned to the
+  // stable ~/.forge/ copy, so report that outcome instead of the raw
+  // ephemeral-cache warning. Direct forge() callers that never set
+  // ctx.persistHomeResult (e.g. relinkAndHint() in bin/forgedock.mjs) fall
+  // through to the original ephemeral-cache-only check unchanged.
+  const persistResult = ctx.persistHomeResult;
+  if (persistResult && !persistResult.skipped) {
+    if (persistResult.migrated) {
+      w.write(`  ${glyph(true)} toolset migrated to persisted home ${dimLine(ctx, persistResult.forgeHome)}\n`);
+    } else {
+      w.write(`  ${glyph(true)} persisted home already current ${dimLine(ctx, `v${persistResult.version || "unknown"} at ${persistResult.forgeHome}`)}\n`);
+    }
+  } else if (persistResult && persistResult.skipped && !isEphemeralCachePath(ctx.forgeHome)) {
+    // Skipped for a reason OTHER than "still ephemeral" — today that's always
+    // the git-working-tree exemption (Acceptance Criteria #5). Informational,
+    // not a warning: this is the expected, correct state for a git-clone install.
+    w.write(`  ${dimLine(ctx, `persisted home skipped — ${persistResult.reason || "not applicable"}`)}\n`);
+  } else if (hookStatus !== "skipped-malformed" && isEphemeralCachePath(ctx.forgeHome)) {
+    // Either persistHome() was never run (no ctx.persistHomeResult), or it
+    // ran but failed and left ctx.forgeHome pointing at the original
+    // ephemeral source (fail-open — see persistHome()'s error branch).
+    w.write(`  ${glyph(false)} FORGE_HOME resolves inside an ephemeral cache directory ${dimLine(ctx, ctx.forgeHome)}\n`);
+    w.write(fixCard([
+      "This path (npx/pnpm dlx/yarn dlx cache) can be pruned by npm/npx/pnpm/yarn",
+      "or OS temp cleanup. If that happens, the SessionStart hook silently stops",
+      "injecting ForgeDock context — no error is shown.",
+      "Mitigation: npm install -g forgedock  (or re-run npx forgedock periodically).",
+    ], ctx.mode, "warning") + "\n");
+  }
+
+  // Cross-environment install advisory (forge#1893): warn when this repo is
+  // reachable from both WSL and native Windows and BOTH sides already have a
+  // ForgeDock install. Each environment's install is fully independent (see
+  // #1589 — installs are always global, never per-repo), so running from
+  // both silently leaves forge.yaml/hook paths pointing at whichever side ran
+  // most recently, clobbering the other's config with no error surfaced.
+  // Advisory only — never fails the install.
+  const envInfo = detectEnvironment({ platform: ctx.platform, env: ctx.env, release: ctx.release });
+  const crossEnv = detectCrossEnvInstall(ctx, envInfo);
+  if (crossEnv.conflict) {
+    const otherLabel = crossEnv.direction === "windows" ? "a native Windows" : "a WSL";
+    w.write(`  ${glyph(false)} ${otherLabel} ForgeDock install detected for this repo ${dimLine(ctx, crossEnv.otherPath)}\n`);
+    w.write(fixCard([
+      `This repo is reachable from both WSL and native Windows, and ${otherLabel}`,
+      "install already exists. Each side's install is independent — running",
+      "forgedock from both can leave forge.yaml and hook paths pointing at",
+      "whichever environment ran last, silently overwriting the other's config.",
+      "Mitigation: pick one environment for this repo, or sync forge.yaml manually.",
+    ], ctx.mode, "warning") + "\n");
   }
 
   // Report enforcement hook status.
@@ -775,7 +1428,7 @@ export async function forge(ctx) {
     w.write(`  ${glyph(true)} SubagentStop enforcement hook removed ${dimLine(ctx, "(non-functional — see forge#1527)")}\n`);
   }
 
-  return { installed, updated, skipped, copied, pruned, total: files.length, hookStatus, preToolUseStatus, subagentStopEnforceStatus };
+  return { installed, updated, skipped, copied, pruned, total: files.length, hookStatus, preToolUseStatus, subagentStopEnforceStatus, scriptsResult };
 }
 
 // ---------------------------------------------------------------------------
@@ -784,7 +1437,7 @@ export async function forge(ctx) {
 
 import { detectConfig } from "./init-detect.mjs";
 import { enrich } from "./init-enrich-api.mjs";
-import { annotatedReviewScreen, box, confirm } from "./tui.mjs";
+import { annotatedReviewScreen, box, confirm, getLogoTagline } from "./tui.mjs";
 
 const badgeOf = (field) => field.confidence;
 
@@ -837,6 +1490,13 @@ export async function read(ctx) {
  * Act IV: the single interaction. Non-TTY + existing config aborts to protect
  * the file; non-TTY + fresh config writes detection values with TODO flags
  * (annotatedReviewScreen's non-TTY path returns them directly).
+ *
+ * Overwrite protection (forge#1850, regression of #578): a TTY session with
+ * an existing forge.yaml must give EXPLICIT default-No consent before any
+ * backup or write happens — the review screen's own "Overwrite Mode" banner
+ * is advisory, not consent. This restores the #578 gate via ctx.confirmFn
+ * (defaults to tui.mjs's confirm(), which is non-TTY-safe on its own —
+ * belt-and-suspenders with the explicit isTTY check above it).
  */
 export async function review(ctx, draft, description) {
   const { stdout: w } = ctx;
@@ -849,6 +1509,17 @@ export async function review(ctx, draft, description) {
     return { written: false, todoCount: 0, backupName: null, aborted: true };
   }
 
+  if (hasExisting) {
+    const confirmed = await ctx.confirmFn(
+      "forge.yaml already exists. Overwrite it? A backup will be created.",
+      false,
+    );
+    if (!confirmed) {
+      w.write("\n  Overwrite cancelled — forge.yaml left untouched.\n");
+      return { written: false, todoCount: 0, backupName: null, aborted: true };
+    }
+  }
+
   const extraFields = description.value
     ? { description: { value: description.value, confidence: "medium", source: description.source, why: `First paragraph of ${description.source}` } }
     : {};
@@ -858,6 +1529,19 @@ export async function review(ctx, draft, description) {
     showSources: ctx.argv.includes("--verbose"),
     extraFields,
   });
+
+  // Hard-fail on unresolved identity placeholders when OVERWRITING an
+  // existing config (forge#1850 spec item 4): never destroy a working
+  // forge.yaml in favor of one that can't address a repo. A brand-new
+  // (non-existing) config is allowed to write placeholders — that's the
+  // existing, already-flagged (# TODO comments) greenfield-setup path, and
+  // there's nothing valuable to lose. Checked AFTER the review screen so an
+  // interactive edit that fixes the field still passes.
+  if (hasExisting && (accepted.owner === "your-github-org" || accepted.repo === "your-repo-name")) {
+    w.write("\n  Could not determine the GitHub owner/repo for this project.\n");
+    w.write("  " + dimLine(ctx, "Run this inside the target git repository, or edit those fields before accepting.") + "\n");
+    return { written: false, todoCount: 0, backupName: null, aborted: true };
+  }
 
   const backup = backupExisting(outputPath);
   if (backup) w.write(`  Backed up: forge.yaml → ${backup.backupName}\n`);
@@ -894,6 +1578,9 @@ export function celebrate(ctx, summary) {
     const hookNote = summary.hookStatus === "skipped-malformed" ? "hook NOT active — see fix above" : "Claude Code knows this repo";
     w.write(`  ${glyph} ${summary.total} commands · hook ${summary.hookStatus === "skipped-malformed" ? "skipped" : "active"}   ${dimLine(ctx, hookNote)}\n`);
   }
+  if (summary.scriptsResult && summary.scriptsResult.total > 0) {
+    w.write(`  ${glyph} ${summary.scriptsResult.total} pipeline scripts   ${dimLine(ctx, "~/.claude/scripts — classify-lane, transition-label, validate-pr-target")}\n`);
+  }
   w.write("\n");
   if (summary.isMinimal) {
     w.write("  " + dimLine(ctx, "see docs/CONFIG.md for optional sections") + "\n");
@@ -906,10 +1593,13 @@ export function celebrate(ctx, summary) {
         `  3. run npx forgedock doctor     — verify the install is green`,
         `  4. open claude in this repo`,
         `  5. run /issue <title> then /work-on <number>`,
+        `  6. run npx forgedock run-issue <N> — drive an issue via the durable engine`,
+        `  7. run npx forgedock watch      — monitor pipeline state`,
       ],
       { title: "what's next" },
     ),
   );
+  w.write("  " + dimLine(ctx, "not for you? npx forgedock uninstall removes everything · full command list: npx forgedock help") + "\n");
   w.write("  " + dimLine(ctx, "docs: github.com/RapierCraftStudios/ForgeDock · ⭐ a star is the whole marketing budget") + "\n\n");
 }
 
@@ -925,8 +1615,18 @@ const GITHUB_APP_URL = "https://github.com/apps/rapiercraft-forgedock/installati
  * the journey without error.
  *
  * Uses ctx.openFn (injectable for tests) to open the URL in the default
- * browser. In non-TTY environments (piped stdin, --fast) confirm() resolves
- * immediately to false (the defaultValue), so no prompt is shown.
+ * browser, and ctx.confirmFn (injectable for tests) to ask for consent. In
+ * non-TTY environments (piped stdin, --fast) confirm() resolves immediately
+ * to false (the defaultValue), so no prompt is shown.
+ *
+ * IMPORTANT: installing the app today only registers it against the
+ * account/org — it does NOT mint a bot token, does NOT auto-refresh
+ * anything, and does NOT change which `gh` auth pipeline commands use.
+ * Minting an installation token requires the app's private key, which only
+ * RapierCraft Studios (the app owner) holds — an end user's installation
+ * cannot self-serve a token without a hosted minting backend, which does
+ * not exist yet (forge#1890). Keep this prompt's copy honest about that
+ * until such a backend ships — see docs/CONFIG.md "GitHub App Install".
  *
  * @returns {Promise<{ opened: boolean }>}
  */
@@ -934,8 +1634,8 @@ export async function connect(ctx) {
   const { stdout: w } = ctx;
   w.write("\n  " + ember("Connect to GitHub", ctx.mode) + "\n\n");
 
-  const yes = await confirm(
-    "Install the ForgeDock GitHub App for automatic pipeline triggers?",
+  const yes = await ctx.confirmFn(
+    "Install the ForgeDock GitHub App on this account/org?",
     false,
   );
 
@@ -943,13 +1643,201 @@ export async function connect(ctx) {
     ctx.openFn(GITHUB_APP_URL);
     w.write(
       `  \x1b[38;2;255;179;71m✔\x1b[0m Opening ${GITHUB_APP_URL}\n` +
-      `  ${ctx.mode === "none" ? "" : "\x1b[2m"}Install account-wide (all repositories) to enable webhook triggers.\x1b[22m\n`,
+      `  ${ctx.mode === "none" ? "" : "\x1b[2m"}This registers the app only — it does not create a bot token yet.\x1b[22m\n` +
+      `  ${ctx.mode === "none" ? "" : "\x1b[2m"}Pipeline commands keep using your personal \`gh\` auth. See docs/CONFIG.md.\x1b[22m\n`,
     );
     return { opened: true };
   }
 
   w.write(`  ${ctx.mode === "none" ? "" : "\x1b[2m"}Skipped — install anytime: ${GITHUB_APP_URL}\x1b[22m\n`);
   return { opened: false };
+}
+
+// ---------------------------------------------------------------------------
+// Install Receipt (Issue #1946) — machine-readable record of what an
+// install/update actually did, so drift debugging can read a receipt instead
+// of re-deriving state from scratch.
+// ---------------------------------------------------------------------------
+
+/**
+ * Read the installed forgedock package version from {forgeHome}/package.json.
+ * Best-effort — returns "" on any read/parse failure. Duplicated (rather than
+ * imported) from bin/forgedock.mjs's getVersion() to avoid a circular import:
+ * forgedock.mjs already imports from journey.mjs.
+ * @param {string} forgeHome
+ * @returns {string}
+ */
+function readForgedockVersion(forgeHome) {
+  try {
+    const pkg = JSON.parse(readFileSync(join(forgeHome, "package.json"), "utf-8"));
+    return typeof pkg.version === "string" ? pkg.version : "";
+  } catch {
+    return "";
+  }
+}
+
+/**
+ * Write a machine-readable install-receipt.json to {ctx.home}/.forge/ after a
+ * successful install (runJourney) or update (bin/forgedock.mjs's
+ * relinkAndHint — shared by both update() branches: the git-clone
+ * fast-forward path and the npm version-check path). Note: re-running
+ * `npx forgedock install` on an already-managed-active repo takes the
+ * statusScreen() short-circuit instead of runJourney()/relinkAndHint() — that
+ * path does not refresh the receipt (it also does not touch forge() or
+ * anything else, so this is consistent with the rest of that short-circuit's
+ * no-op behavior, not a gap specific to this feature). See docs/CONFIG.md
+ * "Install Receipt" for the schema.
+ *
+ * Deliberately narrow field set — no PII/secrets: no process.env values, no
+ * GitHub tokens, no forge.yaml file contents (only a presence/shape boolean
+ * from validateForgeYamlShape()). Absolute paths (forgeHome/cwd) ARE included
+ * for drift debugging; they are not secrets, matching existing precedent
+ * (ctx.cwd/ctx.home already appear in on-disk state such as registry.json's
+ * path-keyed entries).
+ *
+ * Never throws: any failure (permission denied, disk full, malformed
+ * forgeHome) degrades to a silent no-op, matching every other housekeeping
+ * step in forge() (manifest save, hook install) — a receipt write must never
+ * fail the install/update it merely records.
+ *
+ * @param {object} ctx - Journey context (forgeHome, home, cwd, platform, env,
+ *   release, includeExtras — see makeCtx()).
+ * @param {{ forged?: Awaited<ReturnType<typeof forge>> }} summary
+ *   `forged` is forge()'s return value (hook statuses, script results). The
+ *   caller does not need to pass `reviewed` — forgeYaml status is recomputed
+ *   independently via validateForgeYamlShape() so this works identically
+ *   whether called from runJourney() (after Act III/IV) or relinkAndHint()
+ *   (which never reaches Act III/IV).
+ * @returns {Promise<{ written: boolean, path: string }>}
+ */
+export async function writeInstallReceipt(ctx, summary = {}) {
+  // Computed inside the try block (not before it): ctx.home is expected to
+  // always be a string in production (makeCtx()/ctx() both default it via
+  // env.HOME || env.USERPROFILE || os.homedir()), but this function's own
+  // contract is "never throws" — join() on a malformed ctx.home must degrade
+  // to written:false, not escape uncaught to the CLI entrypoint.
+  let receiptPath = join(os.homedir(), ".forge", "install-receipt.json");
+  try {
+    receiptPath = join(ctx.home, ".forge", "install-receipt.json");
+    const { forged = {} } = summary;
+    const envInfo = detectEnvironment({ platform: ctx.platform, env: ctx.env, release: ctx.release });
+    const installMode = existsSync(join(ctx.forgeHome, ".git")) ? "git-clone" : "npm";
+    const tier = ctx.includeExtras ? "extras" : "core";
+
+    const commandsDir = join(ctx.forgeHome, "commands");
+    let commands = [];
+    if (existsSync(commandsDir)) {
+      try {
+        const files = await findMarkdownFiles(commandsDir, { includeExtras: !!ctx.includeExtras });
+        commands = files.map((f) => relative(commandsDir, f).replace(/\.md$/, "").replace(/\\/g, "/"));
+      } catch {
+        commands = [];
+      }
+    }
+
+    const receipt = {
+      schemaVersion: 1,
+      timestamp: new Date().toISOString(),
+      forgedockVersion: readForgedockVersion(ctx.forgeHome),
+      installMode,
+      forgeHome: ctx.forgeHome,
+      cwd: ctx.cwd,
+      platform: {
+        platform: envInfo.platform,
+        platformLabel: envInfo.platformLabel,
+        isWSL: envInfo.isWSL,
+        wslDistro: envInfo.wslDistro,
+        shell: envInfo.shell,
+      },
+      tier,
+      commands: { count: commands.length, list: commands },
+      hooks: {
+        sessionStart: forged.hookStatus ?? null,
+        preToolUse: forged.preToolUseStatus ?? null,
+        subagentStopEnforce: forged.subagentStopEnforceStatus ?? null,
+      },
+      forgeYaml: validateForgeYamlShape(ctx.cwd),
+    };
+
+    await mkdir(join(ctx.home, ".forge"), { recursive: true });
+    const tmpPath = receiptPath + ".tmp";
+    await writeFile(tmpPath, JSON.stringify(receipt, null, 2) + "\n", "utf-8");
+    await rename(tmpPath, receiptPath);
+    return { written: true, path: receiptPath };
+  } catch {
+    // Best-effort only — a receipt write failure must never fail install/update.
+    return { written: false, path: receiptPath };
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Act V.6 — Proactive demo offer (Issue #1945)
+// ---------------------------------------------------------------------------
+
+/**
+ * Act V.6: after a fresh (non-update) install, proactively offer the
+ * risk-free interactive demo (`bin/demo.mjs`, issue #1145) instead of leaving
+ * it as an undiscoverable opt-in buried in help text.
+ *
+ * Modeled directly on `connect()` above: `ctx.confirmFn` defaults to
+ * `false` and is already non-TTY-safe (see `tui.mjs`'s `confirm()` — a
+ * non-interactive stdin resolves immediately to the default, no prompt is
+ * shown). No separate `--fast`/non-TTY guard is needed here for the same
+ * reason `connect()` doesn't need one.
+ *
+ * `ctx.runDemoFn` is injectable (defaults to a dynamic `import("./demo.mjs")`
+ * wrapper, the same call shape `demo()` in bin/forgedock.mjs already uses) so
+ * tests can stub it without spawning real `git clone`/network calls.
+ * `runDemo()` reports failure via a returned `{status: "error"}` rather than
+ * throwing (see bin/demo.mjs), so both the returned status and a thrown
+ * exception are treated as "could not start the demo" here.
+ *
+ * Never throws past this function: a failed dynamic import, a thrown error,
+ * or an error status from `runDemo()` must not turn an otherwise-successful
+ * install into a non-zero exit — same best-effort posture as `openUrl()`.
+ *
+ * Only ever called from genuinely fresh/reconfigure flows (`runJourney()`
+ * below, and `initFlow()` in bin/forgedock.mjs) — `npx forgedock update`
+ * calls `relinkAndHint()` instead of `celebrate()`/this function, so the
+ * repair path is structurally excluded already.
+ *
+ * @param {{confirmFn: Function, forgeHome: string, cwd: string, stdout: object,
+ *          mode: string, runDemoFn?: Function}} ctx
+ * @returns {Promise<{ offered: boolean, ranDemo: boolean }>}
+ */
+export async function maybeOfferDemo(ctx) {
+  const { stdout: w } = ctx;
+  const dim = (s) => (ctx.mode === "none" ? s : `\x1b[2m${s}\x1b[22m`);
+
+  let yes = false;
+  try {
+    yes = await ctx.confirmFn("Run the interactive demo now?", false);
+  } catch {
+    return { offered: false, ranDemo: false };
+  }
+
+  if (!yes) {
+    w.write("  " + dim("Skipped — try it anytime: npx forgedock demo") + "\n");
+    return { offered: true, ranDemo: false };
+  }
+
+  const runDemoFn = ctx.runDemoFn ?? (async (opts) => {
+    const { runDemo } = await import("./demo.mjs");
+    return runDemo(opts);
+  });
+
+  try {
+    const result = await runDemoFn({ forgeHome: ctx.forgeHome, cwd: ctx.cwd });
+    if (result && result.status === "error") {
+      w.write("  " + dim(`Could not start the demo — try it later: npx forgedock demo (${result.error || "unknown error"})`) + "\n");
+      return { offered: true, ranDemo: false };
+    }
+    return { offered: true, ranDemo: true };
+  } catch {
+    // Best-effort — a failed demo run must not fail the install itself.
+    w.write("  " + dim("Could not start the demo — try it later: npx forgedock demo") + "\n");
+    return { offered: true, ranDemo: false };
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -968,11 +1856,24 @@ export async function runJourney(ctx) {
   process.on("SIGINT", onSigint);
   try {
     await preflight(ctx);
+    // Persist the toolset into ~/.forge/ before linking anything (#1943): when
+    // not skipped (git-clone installs are exempt), reassign ctx.forgeHome so
+    // every symlink/hook path forge() creates below originates from the
+    // stable copy, not the ephemeral npm/npx/git source. Stashed on ctx so
+    // forge()'s reporting block can surface the outcome (see isEphemeralCachePath
+    // advisory extension above).
+    const persistResult = await persistHome(ctx);
+    ctx.persistHomeResult = persistResult;
+    if (!persistResult.skipped) {
+      ctx.forgeHome = persistResult.forgeHome;
+    }
     const forged = await forge(ctx);
     const { draft, description } = await read(ctx);
     const reviewed = await review(ctx, draft, description);
     const connected = await connect(ctx);
-    celebrate(ctx, { ...reviewed, ...connected, total: forged.total, hookStatus: forged.hookStatus });
+    celebrate(ctx, { ...reviewed, ...connected, total: forged.total, hookStatus: forged.hookStatus, scriptsResult: forged.scriptsResult });
+    await writeInstallReceipt(ctx, { forged });
+    if (!reviewed.aborted) await maybeOfferDemo(ctx);
     return reviewed.aborted ? 1 : 0;
   } finally {
     process.removeListener("SIGINT", onSigint);
