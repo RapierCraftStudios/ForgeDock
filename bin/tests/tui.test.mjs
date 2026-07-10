@@ -560,6 +560,39 @@ describe("renderLogo — plain-text fallback in non-TTY/NO_COLOR environment", (
 });
 
 // ---------------------------------------------------------------------------
+// renderLogo — context-based tagline selection
+// ---------------------------------------------------------------------------
+
+describe("renderLogo — context-based tagline", () => {
+  it("selects the doctor tagline when context is 'doctor'", () => {
+    const result = renderLogo({ context: "doctor" });
+    assert.ok(result.includes("inspecting the anvil"),
+      "context 'doctor' must select its mapped tagline");
+    assert.ok(!result.includes("GitHub as a knowledge graph for AI agents"),
+      "context 'doctor' must not fall back to the default tagline");
+  });
+
+  it("selects distinct taglines for install/update/uninstall/status", () => {
+    assert.ok(renderLogo({ context: "install" }).includes("lighting the forge"));
+    assert.ok(renderLogo({ context: "update" }).includes("tempering the blade"));
+    assert.ok(renderLogo({ context: "uninstall" }).includes("banking the coals"));
+    assert.ok(renderLogo({ context: "status" }).includes("reading the heat"));
+  });
+
+  it("falls back to the default tagline for an unmapped context", () => {
+    const result = renderLogo({ context: "some-unknown-command" });
+    assert.ok(result.includes("GitHub as a knowledge graph for AI agents"),
+      "unmapped context must fall back to the default tagline");
+  });
+
+  it("falls back to the default tagline when context is omitted", () => {
+    const result = renderLogo({ version: "1.2.3" });
+    assert.ok(result.includes("GitHub as a knowledge graph for AI agents"),
+      "omitted context must fall back to the default tagline");
+  });
+});
+
+// ---------------------------------------------------------------------------
 // annotatedReviewScreen extraFields
 // ---------------------------------------------------------------------------
 

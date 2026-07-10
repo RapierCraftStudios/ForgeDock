@@ -1590,6 +1590,26 @@ function gradientText(text, start, end) {
 }
 
 /**
+ * Default tagline — used when no context is given, or the given context has
+ * no mapped entry in LOGO_TAGLINES.
+ */
+const DEFAULT_TAGLINE = "GitHub as a knowledge graph for AI agents";
+
+/**
+ * Context-specific taglines shown under the logo. Keyed by the invoking
+ * command/context name. Any context not listed here falls back to
+ * DEFAULT_TAGLINE — this map is additive, never a requirement to cover every
+ * caller.
+ */
+const LOGO_TAGLINES = {
+  install: "lighting the forge",
+  update: "tempering the blade",
+  uninstall: "banking the coals",
+  doctor: "inspecting the anvil",
+  status: "reading the heat",
+};
+
+/**
  * Render the ForgeDock logo for display in the terminal.
  *
  * On truecolor TTY: angular F-monogram with gradient, brand name with gradient
@@ -1598,10 +1618,14 @@ function gradientText(text, start, end) {
  *
  * @param {object} [opts]
  * @param {string} [opts.version]  - Package version string (e.g. "1.0.14")
+ * @param {string} [opts.context]  - Invocation context (e.g. "install",
+ *   "update", "uninstall", "doctor", "status"). Selects the tagline shown
+ *   under the logo. Unmapped or omitted contexts fall back to the default
+ *   tagline.
  * @returns {string} Rendered logo string (may contain ANSI sequences)
  */
-export function renderLogo({ version = "" } = {}) {
-  const tagline = "GitHub as a knowledge graph for AI agents";
+export function renderLogo({ version = "", context = "" } = {}) {
+  const tagline = LOGO_TAGLINES[context] || DEFAULT_TAGLINE;
   const versionStr = version ? `ForgeDock · v${version}` : "ForgeDock";
 
   if (!USE_TRUECOLOR) {

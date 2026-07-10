@@ -477,9 +477,9 @@ function fetchLatestVersion() {
   });
 }
 
-function splash() {
+function splash(context = "") {
   const version = getVersion();
-  process.stderr.write(renderLogo({ version }) + "\n");
+  process.stderr.write(renderLogo({ version, context }) + "\n");
 }
 
 // ---------------------------------------------------------------------------
@@ -2410,7 +2410,7 @@ const KNOWN_COMMANDS = new Set([
   "install", "init", "enable", "disable", "status", "uninstall", "update",
   "run", "run-issue", "resume-stalled", "demo", "doctor", "watch", "labels", "help", "--help", "-h",
 ]);
-if (SPLASH_COMMANDS.has(command) || !KNOWN_COMMANDS.has(command)) splash();
+if (SPLASH_COMMANDS.has(command) || !KNOWN_COMMANDS.has(command)) splash(command);
 
 let exitCode = 0;
 switch (command) {
