@@ -1732,9 +1732,18 @@ async function labelsSetup(repo) {
  *       unless the operator has manually configured a bot token). Installing
  *       the GitHub App alone does not create a bot token (see forge#1890).
  *
+ * `--fix` (fix=true): auto-applies remediation for checks with a safe,
+ * deterministic, no-input-needed fix — Command symlinks (1), SessionStart
+ * hook registration (5), SessionStart hook script path integrity (5c),
+ * CLAUDE.md legacy block (6), and GitHub workflow labels (7). Checks that
+ * require user interaction (gh auth login, git identity, forge.yaml init,
+ * yq/Claude Code installs, Playwright MCP registration) are always
+ * report-only — `--fix` never touches them. See forge#1944.
+ *
  * Returns 0 if all checks pass (warnings allowed), 1 if any hard check fails.
+ * @param {boolean} [fix] - When true, auto-apply deterministic remediations.
  */
-async function doctor() {
+async function doctor(fix = false) {
   console.log("");
   console.log(`${BOLD}ForgeDock Doctor${RESET} — Installation Health Check`);
   console.log("");
@@ -1778,71 +1787,179 @@ async function doctor() {
     console.log(`       Note: ${hint}`);
   }
 
-  // ── Check 1: Command symlinks ──────────────────────────────────────────────
-  {
-    let symlinkOk = true;
-    let checked = 0;
-    let broken = 0;
-    const brokenLinks = [];
+  /**
+   * Print a "fixed" line — distinct from pass/fail/warn — for a check that
+   * failed or warned on first detection but was successfully auto-remediated
+   * during this run. Does not count toward failures/warnings.
+   * @param {string} label
+   * @param {string} [detail]
+   */
+  let fixesApplied = 0;
+  function fixed(label, detail) {
+    fixesApplied++;
+    const suffix = detail ? `  ${detail}` : "";
+    console.log(`  ${CYAN}↻${RESET}  ${BOLD}${label}${RESET}${suffix}`);
+  }
 
+  const settingsPath = join(HOME, ".claude", "settings.json");
+
+  /**
+   * Detect whether the registered SessionStart hook entry (if any) points at
+   * a script path that no longer exists on disk — the same detection Check 5c
+   * reports on. Shared with runInstallRepairOnce() below: forge()'s
+   * installSessionStartHook() treats ANY existing ForgeDock-marked entry as
+   * "already registered" regardless of whether its script path still
+   * resolves, so a dangling entry must be explicitly cleared before forge()
+   * will register a fresh one. (forge#1895)
+   * @returns {{state: 'ok'|'no-entry'|'unparseable'|'dangling'|'error', path: (string|null), command?: string, ephemeral?: boolean, error: (string|null)}}
+   */
+  function detectSessionStartHookPath() {
     try {
-      // Collect installable .md files from COMMANDS_DIR using the same tier filter
-      // applied by forge() / findMarkdownFiles() — doctor() must validate the filtered
-      // install surface, not the raw directory walk, or it would report false failures
-      // for 'internal' specs that were deliberately excluded from the install.
-      const sourceFiles = await findMarkdownFiles(COMMANDS_DIR);
+      const settings = readClaudeSettings();
+      const sessionStartEntries = Array.isArray(settings?.hooks?.SessionStart)
+        ? settings.hooks.SessionStart
+        : [];
 
-      for (const src of sourceFiles) {
-        const rel = relative(COMMANDS_DIR, src);
-        const tgt = join(TARGET_DIR, rel);
-        checked++;
-        try {
-          const lstats = await lstat(tgt);
-          if (lstats.isSymbolicLink()) {
-            const dest = await readlink(tgt);
-            if (dest !== src) {
-              broken++;
-              brokenLinks.push(rel);
-              symlinkOk = false;
-            }
-          } else {
-            // Regular file — copy-mode install (Windows without Developer Mode).
-            // forge() falls back to copyFile() on EPERM/EACCES, so a regular
-            // file is valid as long as its content matches the source. <!-- Added: forge#1174 -->
-            try {
-              const srcContent = readFileSync(src, "utf-8");
-              const tgtContent = readFileSync(tgt, "utf-8");
-              if (srcContent !== tgtContent) {
-                broken++;
-                brokenLinks.push(`${rel} (stale copy)`);
-                symlinkOk = false;
-              }
-              // else: content matches — valid copy-mode install, not broken
-            } catch {
-              // Could not read one of the files — treat as broken.
-              broken++;
-              brokenLinks.push(`${rel} (unreadable)`);
-              symlinkOk = false;
-            }
+      let hookCommand = null;
+      outer: for (const entry of sessionStartEntries) {
+        if (!entry || typeof entry !== "object") continue;
+        const hooks = Array.isArray(entry.hooks) ? entry.hooks : [];
+        for (const h of hooks) {
+          if (h && typeof h.command === "string" && isForgeSessionStartHook(h.command)) {
+            hookCommand = h.command;
+            break outer;
           }
-        } catch {
-          // File missing
-          broken++;
-          brokenLinks.push(`${rel} (missing)`);
-          symlinkOk = false;
         }
       }
 
-      if (symlinkOk) {
-        pass("Command files", `${checked} files installed`);
-      } else {
-        fail(
-          "Command files",
-          `Run: npx forgedock install  (${broken}/${checked} broken: ${brokenLinks.slice(0, 3).join(", ")}${brokenLinks.length > 3 ? "…" : ""})`,
-        );
+      if (!hookCommand) return { state: "no-entry", path: null, error: null };
+
+      const pathMatch = hookCommand.match(/node\s+"([^"]+)"/);
+      const hookScriptPath = pathMatch ? pathMatch[1] : null;
+      if (!hookScriptPath) {
+        return { state: "unparseable", path: null, command: hookCommand, error: null };
       }
+      if (existsSync(hookScriptPath)) {
+        return { state: "ok", path: hookScriptPath, error: null };
+      }
+      return {
+        state: "dangling",
+        path: hookScriptPath,
+        ephemeral: isEphemeralCachePath(hookScriptPath),
+        error: null,
+      };
     } catch (err) {
-      fail("Command files", `Could not read commands directory: ${err.message}`);
+      return { state: "error", path: null, error: err.message };
+    }
+  }
+
+  /**
+   * Shared repair primitive for Checks 1 (command symlinks), 5 (SessionStart
+   * hook registration), and 5c (SessionStart hook script path integrity).
+   * Memoized so it only runs once per `doctor --fix` invocation even though
+   * more than one check can trigger it.
+   *
+   * Reuses forge() (bin/journey.mjs) verbatim — the same repair path already
+   * used by `npx forgedock update` (see relinkAndHint()) — rather than
+   * duplicating symlink/copy-mode or hook-registration logic here.
+   */
+  let installRepairRan = false;
+  async function runInstallRepairOnce() {
+    if (installRepairRan) return;
+    installRepairRan = true;
+    console.log(`  ${CYAN}↻${RESET}  Repairing command links + SessionStart hook...`);
+    try {
+      const staleHook = detectSessionStartHookPath();
+      if (staleHook.state === "dangling") {
+        removeSessionStartHook(settingsPath);
+      }
+      await forge(ctx());
+    } catch (err) {
+      console.log(`  ${RED}Repair failed:${RESET} ${err.message}`);
+    }
+  }
+
+  // ── Check 1: Command symlinks ──────────────────────────────────────────────
+  {
+    async function detectCommandFiles() {
+      let symlinkOk = true;
+      let checked = 0;
+      let broken = 0;
+      const brokenLinks = [];
+
+      try {
+        // Collect installable .md files from COMMANDS_DIR using the same tier filter
+        // applied by forge() / findMarkdownFiles() — doctor() must validate the filtered
+        // install surface, not the raw directory walk, or it would report false failures
+        // for 'internal' specs that were deliberately excluded from the install.
+        const sourceFiles = await findMarkdownFiles(COMMANDS_DIR);
+
+        for (const src of sourceFiles) {
+          const rel = relative(COMMANDS_DIR, src);
+          const tgt = join(TARGET_DIR, rel);
+          checked++;
+          try {
+            const lstats = await lstat(tgt);
+            if (lstats.isSymbolicLink()) {
+              const dest = await readlink(tgt);
+              if (dest !== src) {
+                broken++;
+                brokenLinks.push(rel);
+                symlinkOk = false;
+              }
+            } else {
+              // Regular file — copy-mode install (Windows without Developer Mode).
+              // forge() falls back to copyFile() on EPERM/EACCES, so a regular
+              // file is valid as long as its content matches the source. <!-- Added: forge#1174 -->
+              try {
+                const srcContent = readFileSync(src, "utf-8");
+                const tgtContent = readFileSync(tgt, "utf-8");
+                if (srcContent !== tgtContent) {
+                  broken++;
+                  brokenLinks.push(`${rel} (stale copy)`);
+                  symlinkOk = false;
+                }
+                // else: content matches — valid copy-mode install, not broken
+              } catch {
+                // Could not read one of the files — treat as broken.
+                broken++;
+                brokenLinks.push(`${rel} (unreadable)`);
+                symlinkOk = false;
+              }
+            }
+          } catch {
+            // File missing
+            broken++;
+            brokenLinks.push(`${rel} (missing)`);
+            symlinkOk = false;
+          }
+        }
+
+        return { ok: symlinkOk, checked, broken, brokenLinks, error: null };
+      } catch (err) {
+        return { ok: false, checked, broken, brokenLinks, error: err.message };
+      }
+    }
+
+    let cmdFiles = await detectCommandFiles();
+    if (!cmdFiles.error && !cmdFiles.ok && fix) {
+      await runInstallRepairOnce();
+      cmdFiles = await detectCommandFiles();
+    }
+
+    if (cmdFiles.error) {
+      fail("Command files", `Could not read commands directory: ${cmdFiles.error}`);
+    } else if (cmdFiles.ok) {
+      if (fix && installRepairRan) {
+        fixed("Command files", `${cmdFiles.checked} files installed (repaired)`);
+      } else {
+        pass("Command files", `${cmdFiles.checked} files installed`);
+      }
+    } else {
+      fail(
+        "Command files",
+        `Run: npx forgedock doctor --fix  (or: npx forgedock install)  (${cmdFiles.broken}/${cmdFiles.checked} broken: ${cmdFiles.brokenLinks.slice(0, 3).join(", ")}${cmdFiles.brokenLinks.length > 3 ? "…" : ""})`,
+      );
     }
   }
 
@@ -2001,32 +2118,47 @@ async function doctor() {
 
   // ── Check 5: SessionStart hook registered ─────────────────────────────────
   {
-    try {
-      const settings = readClaudeSettings();
-      const sessionStartEntries = Array.isArray(settings?.hooks?.SessionStart)
-        ? settings.hooks.SessionStart
-        : [];
-      const hookPresent = sessionStartEntries.some((entry) => {
-        if (!entry || typeof entry !== "object") return false;
-        const hooks = Array.isArray(entry.hooks) ? entry.hooks : [];
-        return hooks.some(
-          (h) =>
-            h &&
-            typeof h.command === "string" &&
-            isForgeSessionStartHook(h.command),
-        );
-      });
-
-      if (hookPresent) {
-        pass("SessionStart hook", "registered in ~/.claude/settings.json");
-      } else {
-        fail(
-          "SessionStart hook",
-          "Run: npx forgedock install  (writes hook entry to ~/.claude/settings.json)",
-        );
+    function detectSessionStartHookRegistered() {
+      try {
+        const settings = readClaudeSettings();
+        const sessionStartEntries = Array.isArray(settings?.hooks?.SessionStart)
+          ? settings.hooks.SessionStart
+          : [];
+        const hookPresent = sessionStartEntries.some((entry) => {
+          if (!entry || typeof entry !== "object") return false;
+          const hooks = Array.isArray(entry.hooks) ? entry.hooks : [];
+          return hooks.some(
+            (h) =>
+              h &&
+              typeof h.command === "string" &&
+              isForgeSessionStartHook(h.command),
+          );
+        });
+        return { ok: hookPresent, error: null };
+      } catch (err) {
+        return { ok: false, error: err.message };
       }
-    } catch (err) {
-      fail("SessionStart hook", `Cannot read ~/.claude/settings.json: ${err.message}. Run: npx forgedock install`);
+    }
+
+    let hookReg = detectSessionStartHookRegistered();
+    if (!hookReg.error && !hookReg.ok && fix) {
+      await runInstallRepairOnce();
+      hookReg = detectSessionStartHookRegistered();
+    }
+
+    if (hookReg.error) {
+      fail("SessionStart hook", `Cannot read ~/.claude/settings.json: ${hookReg.error}. Run: npx forgedock install`);
+    } else if (hookReg.ok) {
+      if (fix && installRepairRan) {
+        fixed("SessionStart hook", "registered in ~/.claude/settings.json (repaired)");
+      } else {
+        pass("SessionStart hook", "registered in ~/.claude/settings.json");
+      }
+    } else {
+      fail(
+        "SessionStart hook",
+        "Run: npx forgedock doctor --fix  (or: npx forgedock install)  (writes hook entry to ~/.claude/settings.json)",
+      );
     }
   }
 
@@ -2076,52 +2208,37 @@ async function doctor() {
   // Claude Code sessions get no ForgeDock context injected and no error is
   // ever surfaced. This check catches that silent-failure case. (forge#1895)
   {
-    try {
-      const settings = readClaudeSettings();
-      const sessionStartEntries = Array.isArray(settings?.hooks?.SessionStart)
-        ? settings.hooks.SessionStart
-        : [];
+    let hookPathResult = detectSessionStartHookPath();
+    if (hookPathResult.state === "dangling" && fix) {
+      await runInstallRepairOnce();
+      hookPathResult = detectSessionStartHookPath();
+    }
 
-      let hookCommand = null;
-      outer: for (const entry of sessionStartEntries) {
-        if (!entry || typeof entry !== "object") continue;
-        const hooks = Array.isArray(entry.hooks) ? entry.hooks : [];
-        for (const h of hooks) {
-          if (h && typeof h.command === "string" && isForgeSessionStartHook(h.command)) {
-            hookCommand = h.command;
-            break outer;
-          }
-        }
-      }
-
-      if (!hookCommand) {
-        // No registered entry — Check 5 already reports this; nothing new here.
-        pass("SessionStart hook script path", "skipped — no registered hook entry (see SessionStart hook check above)");
+    if (hookPathResult.state === "error") {
+      fail("SessionStart hook script path", `Cannot verify hook script path: ${hookPathResult.error}. Run: npx forgedock install`);
+    } else if (hookPathResult.state === "no-entry") {
+      // No registered entry — Check 5 already reports this; nothing new here.
+      pass("SessionStart hook script path", "skipped — no registered hook entry (see SessionStart hook check above)");
+    } else if (hookPathResult.state === "unparseable") {
+      warn(
+        "SessionStart hook script path",
+        `Could not parse a script path out of the registered hook command ("${hookPathResult.command}"). Run: npx forgedock install`,
+      );
+    } else if (hookPathResult.state === "ok") {
+      if (fix && installRepairRan) {
+        fixed("SessionStart hook script path", `refreshed to a valid path (${hookPathResult.path})`);
       } else {
-        // installSessionStartHook() (bin/settings-hook.mjs) always writes
-        // command: `node "${hookScriptPath}"` — extract the quoted path.
-        const pathMatch = hookCommand.match(/node\s+"([^"]+)"/);
-        const hookScriptPath = pathMatch ? pathMatch[1] : null;
-
-        if (!hookScriptPath) {
-          warn(
-            "SessionStart hook script path",
-            `Could not parse a script path out of the registered hook command ("${hookCommand}"). Run: npx forgedock install`,
-          );
-        } else if (existsSync(hookScriptPath)) {
-          pass("SessionStart hook script path", `exists on disk (${hookScriptPath})`);
-        } else {
-          const ephemeral = isEphemeralCachePath(hookScriptPath);
-          fail(
-            "SessionStart hook script path",
-            ephemeral
-              ? `${hookScriptPath} no longer exists — it was installed from an ephemeral npm/npx/pnpm/yarn cache directory that has since been cleared. Run: npm install -g forgedock  then  npx forgedock install`
-              : `${hookScriptPath} no longer exists. Run: npx forgedock install`,
-          );
-        }
+        pass("SessionStart hook script path", `exists on disk (${hookPathResult.path})`);
       }
-    } catch (err) {
-      fail("SessionStart hook script path", `Cannot verify hook script path: ${err.message}. Run: npx forgedock install`);
+    } else {
+      // Still dangling — either --fix wasn't passed, or the repair attempt
+      // above failed to produce a resolvable path.
+      fail(
+        "SessionStart hook script path",
+        hookPathResult.ephemeral
+          ? `${hookPathResult.path} no longer exists — it was installed from an ephemeral npm/npx/pnpm/yarn cache directory that has since been cleared. Run: npx forgedock doctor --fix  (or: npm install -g forgedock  then  npx forgedock install)`
+          : `${hookPathResult.path} no longer exists. Run: npx forgedock doctor --fix  (or: npx forgedock install)`,
+      );
     }
   }
 
@@ -2206,31 +2323,50 @@ async function doctor() {
   // `npx forgedock uninstall` removes it.
   {
     const claudeMdPath = join(process.cwd(), "CLAUDE.md");
-    if (!existsSync(claudeMdPath)) {
+
+    function detectClaudeMdBlock() {
+      if (!existsSync(claudeMdPath)) return { state: "no-file", error: null };
+      try {
+        const content = readFileSync(claudeMdPath, "utf-8");
+        if (content.includes(CLAUDE_BLOCK_BEGIN) && content.includes(CLAUDE_BLOCK_END)) {
+          return { state: "has-block", error: null };
+        }
+        return { state: "no-block", error: null };
+      } catch (err) {
+        return { state: "error", error: err.message };
+      }
+    }
+
+    let claudeMdResult = detectClaudeMdBlock();
+    let claudeMdFixed = false;
+    if (claudeMdResult.state === "has-block" && fix) {
+      if (removeManagedBlock(claudeMdPath) === "removed") {
+        claudeMdFixed = true;
+        claudeMdResult = detectClaudeMdBlock();
+      }
+    }
+
+    if (claudeMdResult.state === "error") {
+      fail("CLAUDE.md legacy block", `Cannot read CLAUDE.md: ${claudeMdResult.error}`);
+    } else if (claudeMdResult.state === "no-file") {
       pass(
         "CLAUDE.md legacy block",
         "no CLAUDE.md found — session context comes from the SessionStart hook",
       );
-    } else {
-      try {
-        const content = readFileSync(claudeMdPath, "utf-8");
-        if (
-          content.includes(CLAUDE_BLOCK_BEGIN) &&
-          content.includes(CLAUDE_BLOCK_END)
-        ) {
-          warn(
-            "CLAUDE.md legacy block",
-            `legacy ForgeDock block found in ${claudeMdPath} — uninstall removes it; the SessionStart hook has replaced it`,
-          );
-        } else {
-          pass(
-            "CLAUDE.md legacy block",
-            "no legacy ForgeDock block — session context comes from the SessionStart hook",
-          );
-        }
-      } catch (err) {
-        fail("CLAUDE.md legacy block", `Cannot read CLAUDE.md: ${err.message}`);
+    } else if (claudeMdResult.state === "no-block") {
+      if (claudeMdFixed) {
+        fixed("CLAUDE.md legacy block", `removed legacy ForgeDock block from ${claudeMdPath}`);
+      } else {
+        pass(
+          "CLAUDE.md legacy block",
+          "no legacy ForgeDock block — session context comes from the SessionStart hook",
+        );
       }
+    } else {
+      warn(
+        "CLAUDE.md legacy block",
+        `legacy ForgeDock block found in ${claudeMdPath} — uninstall removes it; the SessionStart hook has replaced it.${fix ? "" : " Run: npx forgedock doctor --fix"}`,
+      );
     }
   }
 
@@ -2285,18 +2421,48 @@ async function doctor() {
         }
 
         if (ghLabelOk) {
-          const missingLabels = expectedLabels.filter(
+          let missingLabels = expectedLabels.filter(
             (l) => !existingLabels.includes(l),
           );
-          if (missingLabels.length === 0) {
-            pass(
-              "GitHub workflow labels",
-              `all ${expectedLabels.length} workflow labels present on ${forgeOwner}/${forgeRepo}`,
+          let labelsFixed = false;
+
+          if (missingLabels.length > 0 && fix) {
+            console.log(
+              `  ${CYAN}↻${RESET}  Bootstrapping ${missingLabels.length} missing workflow label(s) on ${forgeOwner}/${forgeRepo}...`,
             );
+            try {
+              await labelsSetup(`${forgeOwner}/${forgeRepo}`);
+              labelsFixed = true;
+              const recheckOut = execFileSync(
+                "gh",
+                ["label", "list", "-R", `${forgeOwner}/${forgeRepo}`, "--json", "name", "--limit", "200"],
+                { stdio: ["ignore", "pipe", "ignore"], encoding: "utf-8" },
+              );
+              existingLabels = JSON.parse(recheckOut).map((l) => l.name);
+              missingLabels = expectedLabels.filter((l) => !existingLabels.includes(l));
+            } catch {
+              // labelsSetup() already reports its own per-label failures to
+              // stdout; leave missingLabels as computed pre-fix if the
+              // recheck itself fails (e.g. transient network error).
+            }
+          }
+
+          if (missingLabels.length === 0) {
+            if (fix && labelsFixed) {
+              fixed(
+                "GitHub workflow labels",
+                `all ${expectedLabels.length} workflow labels now present on ${forgeOwner}/${forgeRepo}`,
+              );
+            } else {
+              pass(
+                "GitHub workflow labels",
+                `all ${expectedLabels.length} workflow labels present on ${forgeOwner}/${forgeRepo}`,
+              );
+            }
           } else {
             fail(
               "GitHub workflow labels",
-              `Create the missing labels manually, e.g.: gh label create "<name>" --color <hex> --description "<desc>" -R ${forgeOwner}/${forgeRepo}  (see bin/labels.json for definitions; missing: ${missingLabels.join(", ")})`,
+              `Run: npx forgedock doctor --fix  (or: npx forgedock labels setup --repo ${forgeOwner}/${forgeRepo})  (see bin/labels.json for definitions; missing: ${missingLabels.join(", ")})`,
             );
           }
         }
@@ -2494,6 +2660,9 @@ async function doctor() {
 
   // ── Summary ────────────────────────────────────────────────────────────────
   console.log("");
+  if (fix && fixesApplied > 0) {
+    console.log(`${CYAN}${BOLD}${fixesApplied} issue(s) auto-fixed.${RESET}`);
+  }
   if (failures === 0 && warnings === 0) {
     console.log(`${GREEN}${BOLD}All checks passed.${RESET} ForgeDock installation is healthy.`);
   } else if (failures === 0) {
@@ -2502,6 +2671,9 @@ async function doctor() {
     console.log(
       `${RED}${BOLD}${failures} check(s) failed${warnings > 0 ? `, ${warnings} warning(s)` : ""}.${RESET} See fix hints above.`,
     );
+    if (!fix) {
+      console.log(`  Some of these may be auto-fixable: run ${CYAN}npx forgedock doctor --fix${RESET}`);
+    }
   }
   console.log("");
 
@@ -2528,6 +2700,7 @@ function help() {
     ["npx forgedock watch [--repo owner/repo]", "Live per-agent orchestration view (Ctrl+C to exit)"],
     ["npx forgedock report [--days 30] [--md] [--json]", "30-day pipeline impact receipts for your repo"],
     ["npx forgedock doctor", "Check installation health"],
+    ["npx forgedock doctor --fix", "Auto-fix deterministic issues (symlinks, hook, labels, legacy block)"],
     ["npx forgedock update", "Pull latest & reinstall"],
     ["npx forgedock uninstall", "Remove commands"],
     ["npx forgedock help", "Show this help"],
@@ -2983,7 +3156,7 @@ switch (command) {
     await demo();
     break;
   case "doctor":
-    exitCode = await doctor();
+    exitCode = await doctor(restArgs.includes("--fix"));
     break;
   case "report": {
     const { runReport } = await import("./report.mjs");
