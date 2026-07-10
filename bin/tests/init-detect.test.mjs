@@ -23,10 +23,10 @@
 import { describe, it, before, after } from "node:test";
 import assert from "node:assert/strict";
 import { mkdtempSync, rmSync, mkdirSync } from "node:fs";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 import os from "node:os";
 import { execFileSync } from "node:child_process";
-import { detectConfig, buildMinimalForgeYaml } from "../init-detect.mjs";
+import { detectConfig, buildMinimalForgeYaml, resolveGitRoot } from "../init-detect.mjs";
 
 // ---------------------------------------------------------------------------
 // Fixture helpers
@@ -450,6 +450,96 @@ describe("detectConfig — monorepo-adjacent subdirectory detection (forge#1850)
     // Ambiguous — must not guess which subdirectory is "the" repo.
     assert.equal(draft.project.owner.value, "your-github-org");
     assert.equal(draft.paths.root.value, parentDir);
+  });
+});
+
+// =============================================================================
+// resolveGitRoot (direct unit tests — forge#1927)
+// =============================================================================
+//
+// resolveGitRoot() was previously only exercised indirectly through
+// detectConfig() (see the monorepo-adjacent describe block above). It is now
+// exported directly so bin/hooks/session-start.mjs can reuse it for
+// nudge-tracking. These tests cover it in isolation, independent of the rest
+// of detectConfig()'s detection pipeline.
+
+describe("resolveGitRoot", async () => {
+  let tmpDir;
+
+  before(() => {
+    tmpDir = mkdtempSync(join(os.tmpdir(), "forge-resolve-git-root-"));
+  });
+
+  after(() => {
+    rmSync(tmpDir, { recursive: true, force: true });
+  });
+
+  it("returns cwd unresolved when cwd is itself a git repo root", () => {
+    const repoDir = join(tmpDir, "own-repo");
+    makeLocalRepo(repoDir, "main");
+
+    const result = resolveGitRoot(repoDir);
+
+    assert.equal(result.root, repoDir);
+    assert.equal(result.resolved, false);
+  });
+
+  it("resolves to the true toplevel when cwd is nested inside a repo", () => {
+    const repoDir = join(tmpDir, "nested-repo");
+    makeLocalRepo(repoDir, "main");
+    const nestedDir = join(repoDir, "src", "components");
+    mkdirSync(nestedDir, { recursive: true });
+
+    const result = resolveGitRoot(nestedDir);
+
+    // git rev-parse --show-toplevel always emits forward slashes, even on
+    // Windows (see resolveGitRoot's own doc comment) — normalize with
+    // path.resolve() before comparing so a pure separator-style difference
+    // doesn't fail the assertion.
+    assert.equal(resolve(result.root), resolve(repoDir));
+    assert.equal(result.resolved, true);
+  });
+
+  it("resolves to the single git subdirectory when cwd is a non-repo parent", () => {
+    const parentDir = join(tmpDir, "single-child-parent");
+    const repoDir = join(parentDir, "my-app");
+    makeLocalRepo(repoDir, "main");
+
+    const result = resolveGitRoot(parentDir);
+
+    assert.equal(result.root, repoDir);
+    assert.equal(result.resolved, true);
+    assert.match(result.why, /my-app/);
+  });
+
+  it("falls back to unresolved cwd when there are zero git subdirectories", () => {
+    const parentDir = join(tmpDir, "no-child-repos");
+    mkdirSync(join(parentDir, "not-a-repo"), { recursive: true });
+
+    const result = resolveGitRoot(parentDir);
+
+    assert.equal(result.root, parentDir);
+    assert.equal(result.resolved, false);
+  });
+
+  it("falls back to unresolved cwd when there are two or more git subdirectories (ambiguous)", () => {
+    const parentDir = join(tmpDir, "two-sibling-repos");
+    makeLocalRepo(join(parentDir, "repo-a"), "main");
+    makeLocalRepo(join(parentDir, "repo-b"), "main");
+
+    const result = resolveGitRoot(parentDir);
+
+    assert.equal(result.root, parentDir);
+    assert.equal(result.resolved, false);
+  });
+
+  it("falls back to unresolved cwd when cwd does not exist", () => {
+    const missingDir = join(tmpDir, "does-not-exist");
+
+    const result = resolveGitRoot(missingDir);
+
+    assert.equal(result.root, missingDir);
+    assert.equal(result.resolved, false);
   });
 });
 

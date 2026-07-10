@@ -64,6 +64,16 @@ let parseForgeYaml;
 let sanitizeContextValue;
 
 // ---------------------------------------------------------------------------
+// init-detect helpers — populated inside the try block to honour fail-open
+// ---------------------------------------------------------------------------
+
+// Declared at module scope so it is accessible from handler functions
+// (handleUnmanaged) called from within the try block. Assigned inside the
+// try/catch so that any import failure (missing file, permissions error,
+// syntax error) is caught and the hook still exits 0. <!-- fix: forge#1927 -->
+let resolveGitRoot;
+
+// ---------------------------------------------------------------------------
 // Main — wrapped in try/catch to guarantee fail-open
 // ---------------------------------------------------------------------------
 
@@ -95,6 +105,21 @@ try {
   (
     { parseForgeYaml, sanitizeContextValue } = await import(
       pathToFileURL(join(FORGE_HOME, "bin", "forge-utils.mjs")).href
+    )
+  );
+
+  // Import the git-root resolver from the same installation.
+  // Placed inside try/catch to honour the fail-open contract: if init-detect.mjs
+  // cannot be loaded (broken install, missing file, permissions error) the
+  // catch block below ensures we still exit 0 without blocking Claude Code.
+  //
+  // Use pathToFileURL() to convert the OS-native path to a file:// URL before
+  // passing it to dynamic import(). On Windows, join() produces backslash paths
+  // that import() rejects with ERR_UNSUPPORTED_ESM_URL_SCHEME.
+  /** @type {import('../init-detect.mjs')} */
+  (
+    { resolveGitRoot } = await import(
+      pathToFileURL(join(FORGE_HOME, "bin", "init-detect.mjs")).href
     )
   );
 
@@ -165,19 +190,32 @@ async function handleManagedActive(dir) {
  * Uses the registry to ensure the nudge fires at most once per directory.
  * After showing, records the directory so subsequent sessions are silent.
  *
+ * The nudge-tracking key is the *resolved git root*, not the raw `dir` — a
+ * user who launches Claude Code from a parent directory that merely contains
+ * the real git repo as its single subdirectory (e.g. `Projects/` containing
+ * `Projects/my-app/.git`) would otherwise have every sibling project under
+ * that same parent share one nudge-seen entry: the first project to trigger
+ * the nudge silently suppresses it for all the others. `resolveGitRoot`
+ * degrades gracefully (falls back to the unresolved `dir`) when the case
+ * doesn't apply, so this is safe to call unconditionally. <!-- fix: forge#1927 -->
+ *
  * @param {string} dir - Absolute path to the project directory.
  */
 async function handleUnmanaged(dir) {
-  if (nudgeSeen(dir)) {
+  const trackingKey = resolveGitRoot(dir).root;
+
+  if (nudgeSeen(trackingKey)) {
     // Nudge already shown — stay silent
     return;
   }
 
-  // Show the nudge, then record it so it won't show again
+  // Show the nudge, then record it so it won't show again. The displayed
+  // message still shows the raw `dir` the user is actually in — only the
+  // tracking key changes.
   console.log(buildNudgeContext(dir));
 
   // Best-effort — if this fails the nudge may show once more next session
-  await markNudgeSeen(dir).catch(() => {});
+  await markNudgeSeen(trackingKey).catch(() => {});
 }
 
 // ---------------------------------------------------------------------------

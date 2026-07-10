@@ -2,7 +2,11 @@
 /**
  * init-detect.mjs — Pure deterministic config detection for ForgeDock.
  *
- * Exports a single function: detectConfig(cwd)
+ * Exports:
+ *   detectConfig(cwd)   → Promise<ConfigDraft>  (main deterministic detector)
+ *   resolveGitRoot(cwd) → { root, resolved, why }  (git-root resolution,
+ *                          reused outside this module by session-start.mjs's
+ *                          nudge-tracking path — see forge#1927)
  *
  * Returns a ConfigDraft: a structured object mirroring forge.yaml's required
  * sections (project, paths, branches) where every leaf is:
@@ -257,10 +261,15 @@ function detectStagingBranch(cwd, defaultBranch) {
  * case applies (no repo found at all, or the subdirectory scan is
  * ambiguous — zero or multiple candidates).
  *
+ * Exported for reuse outside `detectConfig()` — `bin/hooks/session-start.mjs`
+ * uses it to resolve the nudge-tracking key so that a directory which is a
+ * parent of the real git repo doesn't collide with sibling projects sharing
+ * the same parent. <!-- Added: forge#1927 -->
+ *
  * @param {string} cwd
  * @returns {{ root: string, resolved: boolean, why: string }}
  */
-function resolveGitRoot(cwd) {
+export function resolveGitRoot(cwd) {
   // cwd is already inside a repo (possibly nested) — `--show-toplevel` finds
   // the true root regardless of depth. Compare with path.resolve() so a pure
   // separator-style difference (git always emits forward slashes, even on
