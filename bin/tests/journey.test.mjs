@@ -7,7 +7,7 @@ import assert from "node:assert/strict";
 import { mkdtempSync, readFileSync, writeFileSync, existsSync, mkdirSync, readdirSync } from "node:fs";
 import { join } from "node:path";
 import os from "node:os";
-import { writeForgeYaml, backupExisting, detectDescription, makeCtx, preflight, forge, read, review, celebrate, connect, openUrl, runJourney, manualLowConfidenceKeys, parseInstallTier, findMarkdownFiles, isEphemeralCachePath, detectCrossEnvInstall } from "../journey.mjs";
+import { writeForgeYaml, backupExisting, detectDescription, makeCtx, preflight, forge, read, review, celebrate, connect, openUrl, runJourney, manualLowConfidenceKeys, parseInstallTier, findMarkdownFiles, isEphemeralCachePath, detectCrossEnvInstall, validateForgeYamlShape, writeInstallReceipt } from "../journey.mjs";
 import { detectEnvironment } from "../env-detect.mjs";
 
 const VALUES = {
@@ -1570,5 +1570,168 @@ describe("findMarkdownFiles — install tier filter", () => {
     assert.ok(foundNames.includes("work-on.md"), "work-on.md must be included");
     assert.ok(foundNames.includes("review-pr.md"), "review-pr.md must be included");
     assert.ok(foundNames.includes("quality-gate.md"), "quality-gate.md must be included");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// validateForgeYamlShape — install receipt's forge.yaml status (Issue #1946)
+// ---------------------------------------------------------------------------
+
+describe("validateForgeYamlShape", () => {
+  let cwd;
+  beforeEach(() => {
+    cwd = mkdtempSync(join(os.tmpdir(), "fd-yamlshape-"));
+  });
+
+  it("returns present:false, validShape:false when forge.yaml is absent", () => {
+    assert.deepEqual(validateForgeYamlShape(cwd), { present: false, validShape: false });
+  });
+
+  it("returns present:true, validShape:true when all 3 required sections exist", () => {
+    writeFileSync(join(cwd, "forge.yaml"), 'project:\n  owner: "x"\npaths:\n  root: "y"\nbranches:\n  default: "main"\n', "utf-8");
+    assert.deepEqual(validateForgeYamlShape(cwd), { present: true, validShape: true });
+  });
+
+  it("returns present:true, validShape:false when a required section is missing", () => {
+    writeFileSync(join(cwd, "forge.yaml"), 'project:\n  owner: "x"\npaths:\n  root: "y"\n', "utf-8");
+    assert.deepEqual(validateForgeYamlShape(cwd), { present: true, validShape: false });
+  });
+
+  it("does not throw and does not leak file contents on a garbage file", () => {
+    writeFileSync(join(cwd, "forge.yaml"), "not yaml at all {{{", "utf-8");
+    const res = validateForgeYamlShape(cwd);
+    assert.equal(res.present, true);
+    assert.equal(res.validShape, false);
+    assert.deepEqual(Object.keys(res).sort(), ["present", "validShape"]);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// writeInstallReceipt — machine-readable install-receipt.json (Issue #1946)
+// ---------------------------------------------------------------------------
+
+describe("writeInstallReceipt", () => {
+  let home, forgeHome, cwd;
+  beforeEach(() => {
+    home = mkdtempSync(join(os.tmpdir(), "fd-receipt-home-"));
+    forgeHome = mkdtempSync(join(os.tmpdir(), "fd-receipt-forgehome-"));
+    cwd = mkdtempSync(join(os.tmpdir(), "fd-receipt-cwd-"));
+    mkdirSync(join(forgeHome, "commands"), { recursive: true });
+    writeFileSync(join(forgeHome, "commands", "one.md"), "# /one\n\nTest command\n", "utf-8");
+    writeFileSync(join(forgeHome, "commands", "two.md"), "---\ninstall: extras\n---\n# /two\n\nExtras command\n", "utf-8");
+    writeFileSync(join(forgeHome, "package.json"), JSON.stringify({ name: "forgedock", version: "9.9.9" }), "utf-8");
+  });
+
+  function makeReceiptCtx(overrides = {}) {
+    return makeCtx({
+      home,
+      forgeHome,
+      cwd,
+      env: {},
+      platform: "linux",
+      release: "",
+      includeExtras: false,
+      ...overrides,
+    });
+  }
+
+  it("writes install-receipt.json under {home}/.forge/ with schemaVersion, timestamp, version, mode", async () => {
+    const ctx = makeReceiptCtx();
+    const res = await writeInstallReceipt(ctx, { forged: { hookStatus: "registered", preToolUseStatus: "registered", subagentStopEnforceStatus: null } });
+    assert.equal(res.written, true);
+    const receiptPath = join(home, ".forge", "install-receipt.json");
+    assert.ok(existsSync(receiptPath));
+    const receipt = JSON.parse(readFileSync(receiptPath, "utf-8"));
+    assert.equal(receipt.schemaVersion, 1);
+    assert.match(receipt.timestamp, /^\d{4}-\d{2}-\d{2}T/);
+    assert.equal(receipt.forgedockVersion, "9.9.9");
+    // no .git dir in forgeHome -> npm install mode
+    assert.equal(receipt.installMode, "npm");
+    assert.equal(receipt.hooks.sessionStart, "registered");
+    assert.equal(receipt.hooks.preToolUse, "registered");
+    assert.equal(receipt.hooks.subagentStopEnforce, null);
+  });
+
+  it("detects git-clone install mode when {forgeHome}/.git exists", async () => {
+    mkdirSync(join(forgeHome, ".git"), { recursive: true });
+    const ctx = makeReceiptCtx();
+    await writeInstallReceipt(ctx, { forged: {} });
+    const receipt = JSON.parse(readFileSync(join(home, ".forge", "install-receipt.json"), "utf-8"));
+    assert.equal(receipt.installMode, "git-clone");
+  });
+
+  it("tier reflects ctx.includeExtras (core by default, extras when set)", async () => {
+    const ctxCore = makeReceiptCtx({ includeExtras: false });
+    await writeInstallReceipt(ctxCore, { forged: {} });
+    let receipt = JSON.parse(readFileSync(join(home, ".forge", "install-receipt.json"), "utf-8"));
+    assert.equal(receipt.tier, "core");
+    assert.ok(!receipt.commands.list.includes("two"), "extras command excluded when tier is core");
+
+    const ctxExtras = makeReceiptCtx({ includeExtras: true });
+    await writeInstallReceipt(ctxExtras, { forged: {} });
+    receipt = JSON.parse(readFileSync(join(home, ".forge", "install-receipt.json"), "utf-8"));
+    assert.equal(receipt.tier, "extras");
+    assert.ok(receipt.commands.list.includes("two"), "extras command included when tier is extras");
+  });
+
+  it("commands list is sourced from findMarkdownFiles (not a duplicated literal list, ref #1633)", async () => {
+    const ctx = makeReceiptCtx();
+    await writeInstallReceipt(ctx, { forged: {} });
+    const receipt = JSON.parse(readFileSync(join(home, ".forge", "install-receipt.json"), "utf-8"));
+    assert.equal(receipt.commands.count, 1);
+    assert.deepEqual(receipt.commands.list, ["one"]);
+  });
+
+  it("captures platform info from detectEnvironment (platform/isWSL/shell)", async () => {
+    const ctx = makeReceiptCtx({ platform: "linux", env: { SHELL: "/bin/bash" } });
+    await writeInstallReceipt(ctx, { forged: {} });
+    const receipt = JSON.parse(readFileSync(join(home, ".forge", "install-receipt.json"), "utf-8"));
+    assert.equal(receipt.platform.platform, "linux");
+    assert.equal(receipt.platform.shell, "bash");
+    assert.equal(receipt.platform.isWSL, false);
+  });
+
+  it("reflects forge.yaml presence/shape via validateForgeYamlShape, without copying file contents", async () => {
+    writeFileSync(join(cwd, "forge.yaml"), 'project:\n  owner: "secret-org"\npaths:\n  root: "x"\nbranches:\n  default: "main"\n', "utf-8");
+    const ctx = makeReceiptCtx();
+    await writeInstallReceipt(ctx, { forged: {} });
+    const receipt = JSON.parse(readFileSync(join(home, ".forge", "install-receipt.json"), "utf-8"));
+    assert.deepEqual(receipt.forgeYaml, { present: true, validShape: true });
+    assert.ok(!JSON.stringify(receipt).includes("secret-org"), "forge.yaml field values must not leak into the receipt");
+  });
+
+  it("does not include process.env values or token-like strings (no PII/secrets)", async () => {
+    const ctx = makeReceiptCtx({ env: { GH_TOKEN: "ghp_supersecrettoken1234567890", ANTHROPIC_API_KEY: "sk-ant-secret" } });
+    await writeInstallReceipt(ctx, { forged: {} });
+    const raw = readFileSync(join(home, ".forge", "install-receipt.json"), "utf-8");
+    assert.ok(!raw.includes("ghp_supersecrettoken1234567890"));
+    assert.ok(!raw.includes("sk-ant-secret"));
+  });
+
+  it("is atomic: no stale .tmp file left after a successful write", async () => {
+    const ctx = makeReceiptCtx();
+    await writeInstallReceipt(ctx, { forged: {} });
+    assert.ok(!existsSync(join(home, ".forge", "install-receipt.json.tmp")));
+  });
+
+  it("never throws: degrades to written:false when the target directory cannot be created", async () => {
+    // Point ctx.home at a path whose parent is a FILE, not a directory —
+    // mkdir(..., {recursive:true}) will fail with ENOTDIR, and the function
+    // must swallow it rather than propagate.
+    const blockerFile = join(mkdtempSync(join(os.tmpdir(), "fd-receipt-blocker-")), "im-a-file");
+    writeFileSync(blockerFile, "x", "utf-8");
+    const ctx = makeReceiptCtx({ home: join(blockerFile, "nested", "home") });
+    const res = await writeInstallReceipt(ctx, { forged: {} });
+    assert.equal(res.written, false);
+  });
+
+  it("works with a minimal summary (no forged data) — the relinkAndHint() call shape", async () => {
+    const ctx = makeReceiptCtx();
+    const res = await writeInstallReceipt(ctx, {});
+    assert.equal(res.written, true);
+    const receipt = JSON.parse(readFileSync(join(home, ".forge", "install-receipt.json"), "utf-8"));
+    assert.equal(receipt.hooks.sessionStart, null);
+    assert.equal(receipt.hooks.preToolUse, null);
+    assert.equal(receipt.hooks.subagentStopEnforce, null);
   });
 });

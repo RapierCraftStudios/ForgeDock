@@ -217,6 +217,27 @@ export function backupExisting(outputPath) {
   return { backupName: basename(baseBak) };
 }
 
+/**
+ * Lightweight forge.yaml presence/shape check for the install receipt
+ * (Issue #1946) — no YAML parser dependency, mirrors the regex-based
+ * approach already used by resolveLabelsRepo() in bin/forgedock.mjs. Only
+ * checks that the three REQUIRED top-level section keys are present; never
+ * reads field values or copies file contents into the caller's result.
+ * @param {string} cwd
+ * @returns {{ present: boolean, validShape: boolean }}
+ */
+export function validateForgeYamlShape(cwd) {
+  const p = join(cwd, "forge.yaml");
+  if (!existsSync(p)) return { present: false, validShape: false };
+  try {
+    const raw = readFileSync(p, "utf-8");
+    const validShape = /^project:/m.test(raw) && /^paths:/m.test(raw) && /^branches:/m.test(raw);
+    return { present: true, validShape };
+  } catch {
+    return { present: true, validShape: false };
+  }
+}
+
 // ---------------------------------------------------------------------------
 // Description detection (moved from forgedock.mjs init(), Task 4)
 // ---------------------------------------------------------------------------
@@ -1374,6 +1395,111 @@ export async function connect(ctx) {
 }
 
 // ---------------------------------------------------------------------------
+// Install Receipt (Issue #1946) — machine-readable record of what an
+// install/update actually did, so drift debugging can read a receipt instead
+// of re-deriving state from scratch.
+// ---------------------------------------------------------------------------
+
+/**
+ * Read the installed forgedock package version from {forgeHome}/package.json.
+ * Best-effort — returns "" on any read/parse failure. Duplicated (rather than
+ * imported) from bin/forgedock.mjs's getVersion() to avoid a circular import:
+ * forgedock.mjs already imports from journey.mjs.
+ * @param {string} forgeHome
+ * @returns {string}
+ */
+function readForgedockVersion(forgeHome) {
+  try {
+    const pkg = JSON.parse(readFileSync(join(forgeHome, "package.json"), "utf-8"));
+    return typeof pkg.version === "string" ? pkg.version : "";
+  } catch {
+    return "";
+  }
+}
+
+/**
+ * Write a machine-readable install-receipt.json to {ctx.home}/.forge/ after a
+ * successful install (runJourney) or update (bin/forgedock.mjs's
+ * relinkAndHint — shared by both update() branches and the install
+ * reinstall-guard). See docs/CONFIG.md "Install Receipt" for the schema.
+ *
+ * Deliberately narrow field set — no PII/secrets: no process.env values, no
+ * GitHub tokens, no forge.yaml file contents (only a presence/shape boolean
+ * from validateForgeYamlShape()). Absolute paths (forgeHome/cwd) ARE included
+ * for drift debugging; they are not secrets, matching existing precedent
+ * (ctx.cwd/ctx.home already appear in on-disk state such as registry.json's
+ * path-keyed entries).
+ *
+ * Never throws: any failure (permission denied, disk full, malformed
+ * forgeHome) degrades to a silent no-op, matching every other housekeeping
+ * step in forge() (manifest save, hook install) — a receipt write must never
+ * fail the install/update it merely records.
+ *
+ * @param {object} ctx - Journey context (forgeHome, home, cwd, platform, env,
+ *   release, includeExtras — see makeCtx()).
+ * @param {{ forged?: Awaited<ReturnType<typeof forge>> }} summary
+ *   `forged` is forge()'s return value (hook statuses, script results). The
+ *   caller does not need to pass `reviewed` — forgeYaml status is recomputed
+ *   independently via validateForgeYamlShape() so this works identically
+ *   whether called from runJourney() (after Act III/IV) or relinkAndHint()
+ *   (which never reaches Act III/IV).
+ * @returns {Promise<{ written: boolean, path: string }>}
+ */
+export async function writeInstallReceipt(ctx, summary = {}) {
+  const receiptPath = join(ctx.home, ".forge", "install-receipt.json");
+  try {
+    const { forged = {} } = summary;
+    const envInfo = detectEnvironment({ platform: ctx.platform, env: ctx.env, release: ctx.release });
+    const installMode = existsSync(join(ctx.forgeHome, ".git")) ? "git-clone" : "npm";
+    const tier = ctx.includeExtras ? "extras" : "core";
+
+    const commandsDir = join(ctx.forgeHome, "commands");
+    let commands = [];
+    if (existsSync(commandsDir)) {
+      try {
+        const files = await findMarkdownFiles(commandsDir, { includeExtras: !!ctx.includeExtras });
+        commands = files.map((f) => relative(commandsDir, f).replace(/\.md$/, "").replace(/\\/g, "/"));
+      } catch {
+        commands = [];
+      }
+    }
+
+    const receipt = {
+      schemaVersion: 1,
+      timestamp: new Date().toISOString(),
+      forgedockVersion: readForgedockVersion(ctx.forgeHome),
+      installMode,
+      forgeHome: ctx.forgeHome,
+      cwd: ctx.cwd,
+      platform: {
+        platform: envInfo.platform,
+        platformLabel: envInfo.platformLabel,
+        isWSL: envInfo.isWSL,
+        wslDistro: envInfo.wslDistro,
+        shell: envInfo.shell,
+      },
+      tier,
+      commands: { count: commands.length, list: commands },
+      hooks: {
+        sessionStart: forged.hookStatus ?? null,
+        preToolUse: forged.preToolUseStatus ?? null,
+        subagentStopEnforce: forged.subagentStopEnforceStatus ?? null,
+      },
+      forgeYaml: validateForgeYamlShape(ctx.cwd),
+    };
+
+    await mkdir(join(ctx.home, ".forge"), { recursive: true });
+    const tmpPath = receiptPath + ".tmp";
+    await writeFile(tmpPath, JSON.stringify(receipt, null, 2) + "\n", "utf-8");
+    await rename(tmpPath, receiptPath);
+    return { written: true, path: receiptPath };
+  } catch {
+    // Best-effort only — a receipt write failure must never fail install/update.
+    return { written: false, path: receiptPath };
+  }
+}
+
+// ---------------------------------------------------------------------------
 // The full journey (Task 8)
 // ---------------------------------------------------------------------------
 
@@ -1394,6 +1520,7 @@ export async function runJourney(ctx) {
     const reviewed = await review(ctx, draft, description);
     const connected = await connect(ctx);
     celebrate(ctx, { ...reviewed, ...connected, total: forged.total, hookStatus: forged.hookStatus, scriptsResult: forged.scriptsResult });
+    await writeInstallReceipt(ctx, { forged });
     return reviewed.aborted ? 1 : 0;
   } finally {
     process.removeListener("SIGINT", onSigint);

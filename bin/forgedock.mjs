@@ -29,6 +29,7 @@ import {
   backupExisting,
   manualLowConfidenceKeys,
   isEphemeralCachePath,
+  writeInstallReceipt,
   PIPELINE_SCRIPTS,
 } from "./journey.mjs";
 import {
@@ -1097,7 +1098,12 @@ async function uninstall() {
 // symlinks or hook registration got out of sync.
 async function relinkAndHint() {
   const c = ctx();
-  await forge(c);
+  const forged = await forge(c);
+  // Refresh the install receipt (#1946) — this is the shared repair path for
+  // both update() branches (git-clone and npm) plus install's reinstall-guard,
+  // so wiring it here covers "refreshed after every successful update" without
+  // duplicating the call at each update() branch.
+  await writeInstallReceipt(c, { forged });
   if (!existsSync(join(c.cwd, "forge.yaml"))) {
     const dim = (s) => (c.mode === "none" ? s : `\x1b[2m${s}\x1b[22m`);
     c.stdout.write("  " + dim("Configure this repo: npx forgedock init") + "\n");
