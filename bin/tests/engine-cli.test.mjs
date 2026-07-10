@@ -1,6 +1,9 @@
 import { describe, it, mock } from "node:test";
 import assert from "node:assert/strict";
-import { scanStalls, resumeStalledFromCli, runFromCli } from "../engine-cli.mjs";
+import { mkdtempSync, writeFileSync, rmSync, utimesSync } from "node:fs";
+import { join } from "node:path";
+import os from "node:os";
+import { scanStalls, resumeStalledFromCli, runFromCli, countEngineActivity, lastLocalRun } from "../engine-cli.mjs";
 import { serializeState } from "../engine/state.mjs";
 
 /** Builds a fake io.gh that serves `issue list` (only for `label`) and `issue view` (state) calls. */
@@ -229,6 +232,104 @@ describe("resumeStalledFromCli", () => {
 
       assert.ok(!io.calls.some((c) => c[0] === "repo" && c[1] === "view"));
     });
+  });
+});
+
+describe("countEngineActivity (re-entry dashboard, #1945)", () => {
+  it("returns zeros when no issues carry any active workflow label", async () => {
+    const io = { gh: async () => JSON.stringify([]) };
+    const result = await countEngineActivity(io, null, 10_000);
+    assert.deepEqual(result, { total: 0, inFlight: 0, stalled: 0 });
+  });
+
+  it("classifies in-flight vs stalled using the same lease-expiry rule as scanStalls", async () => {
+    const states = {
+      400: { terminal: false, lease: { by: "a", until: 1_000 } },  // expired → stalled
+      401: { terminal: false, lease: { by: "b", until: 20_000 } }, // live → in-flight
+      402: { terminal: false, lease: { by: "c", until: 20_000 } }, // live → in-flight
+    };
+    const io = makeFakeIo(states, { fanOutLabel: "workflow:building" });
+    const result = await countEngineActivity(io, null, 10_000);
+    assert.deepEqual(result, { total: 3, inFlight: 2, stalled: 1 });
+  });
+
+  it("threads --repo through to the issue-list enumeration", async () => {
+    const calls = [];
+    const io = {
+      gh: async (args) => {
+        calls.push(args);
+        if (args[0] === "issue" && args[1] === "list") return JSON.stringify([]);
+        throw new Error(`unexpected gh call: ${args.join(" ")}`);
+      },
+    };
+    await countEngineActivity(io, "acme/target-repo", 10_000);
+    assert.ok(calls.every((c) => c.includes("--repo") && c.includes("acme/target-repo")));
+  });
+
+  it("treats a gh failure on one label as zero matches for that label, not a thrown error", async () => {
+    const io = {
+      gh: async (args) => {
+        const label = args[args.indexOf("--label") + 1];
+        if (label === "workflow:building") throw new Error("gh: transient failure");
+        return JSON.stringify([]);
+      },
+    };
+    const result = await countEngineActivity(io, null, 10_000);
+    assert.deepEqual(result, { total: 0, inFlight: 0, stalled: 0 });
+  });
+});
+
+describe("lastLocalRun (re-entry dashboard, #1945)", () => {
+  it("returns null when the runs dir does not exist", () => {
+    assert.equal(lastLocalRun(join(os.tmpdir(), "fd-nonexistent-runs-dir-xyz")), null);
+  });
+
+  it("returns null when the runs dir has no .jsonl files", () => {
+    const dir = mkdtempSync(join(os.tmpdir(), "fd-runs-empty-"));
+    try {
+      writeFileSync(join(dir, "notes.txt"), "not a run log");
+      assert.equal(lastLocalRun(dir), null);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("returns the most recently modified run's summary", () => {
+    const dir = mkdtempSync(join(os.tmpdir(), "fd-runs-multi-"));
+    try {
+      writeFileSync(join(dir, "100.jsonl"), JSON.stringify({ seq: 1, event: "RUN_START", run: "r1", issue: 100 }) + "\n");
+      // Write the second file after a tick so its mtime is newer.
+      const later = Date.now() + 1000;
+      writeFileSync(join(dir, "200.jsonl"), JSON.stringify({ seq: 1, event: "RUN_START", run: "r2", issue: 200 }) + "\n" +
+        JSON.stringify({ seq: 2, event: "RUN_TERMINAL", reason: "workflow:merged" }) + "\n");
+      // Force mtimes explicitly (avoids flakiness on fast filesystems where both writes land in the same tick).
+      utimesSync(join(dir, "100.jsonl"), new Date(1000), new Date(1000));
+      utimesSync(join(dir, "200.jsonl"), new Date(later), new Date(later));
+
+      const result = lastLocalRun(dir);
+      assert.deepEqual(result, { issue: 200, terminal: true, terminalReason: "workflow:merged" });
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("skips a corrupt newest file and falls back to the next-newest readable one", () => {
+    const dir = mkdtempSync(join(os.tmpdir(), "fd-runs-corrupt-"));
+    try {
+      writeFileSync(join(dir, "300.jsonl"), JSON.stringify({ seq: 1, event: "RUN_START", run: "r3", issue: 300 }) + "\n");
+      writeFileSync(join(dir, "301.jsonl"), "{not valid json at all");
+      utimesSync(join(dir, "300.jsonl"), new Date(1000), new Date(1000));
+      utimesSync(join(dir, "301.jsonl"), new Date(2000), new Date(2000)); // newest, but corrupt
+
+      const result = lastLocalRun(dir);
+      // 301.jsonl's single line fails to parse; readLog() tolerates a malformed
+      // *final* line (crash-mid-write case) by silently dropping it, yielding an
+      // empty event list — lastLocalRun() treats "no events" the same as
+      // "unreadable" and falls back to the next-newest file (300).
+      assert.deepEqual(result, { issue: 300, terminal: false, terminalReason: null });
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 });
 

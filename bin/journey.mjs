@@ -1771,6 +1771,76 @@ export async function writeInstallReceipt(ctx, summary = {}) {
 }
 
 // ---------------------------------------------------------------------------
+// Act V.6 — Proactive demo offer (Issue #1945)
+// ---------------------------------------------------------------------------
+
+/**
+ * Act V.6: after a fresh (non-update) install, proactively offer the
+ * risk-free interactive demo (`bin/demo.mjs`, issue #1145) instead of leaving
+ * it as an undiscoverable opt-in buried in help text.
+ *
+ * Modeled directly on `connect()` above: `ctx.confirmFn` defaults to
+ * `false` and is already non-TTY-safe (see `tui.mjs`'s `confirm()` — a
+ * non-interactive stdin resolves immediately to the default, no prompt is
+ * shown). No separate `--fast`/non-TTY guard is needed here for the same
+ * reason `connect()` doesn't need one.
+ *
+ * `ctx.runDemoFn` is injectable (defaults to a dynamic `import("./demo.mjs")`
+ * wrapper, the same call shape `demo()` in bin/forgedock.mjs already uses) so
+ * tests can stub it without spawning real `git clone`/network calls.
+ * `runDemo()` reports failure via a returned `{status: "error"}` rather than
+ * throwing (see bin/demo.mjs), so both the returned status and a thrown
+ * exception are treated as "could not start the demo" here.
+ *
+ * Never throws past this function: a failed dynamic import, a thrown error,
+ * or an error status from `runDemo()` must not turn an otherwise-successful
+ * install into a non-zero exit — same best-effort posture as `openUrl()`.
+ *
+ * Only ever called from genuinely fresh/reconfigure flows (`runJourney()`
+ * below, and `initFlow()` in bin/forgedock.mjs) — `npx forgedock update`
+ * calls `relinkAndHint()` instead of `celebrate()`/this function, so the
+ * repair path is structurally excluded already.
+ *
+ * @param {{confirmFn: Function, forgeHome: string, cwd: string, stdout: object,
+ *          mode: string, runDemoFn?: Function}} ctx
+ * @returns {Promise<{ offered: boolean, ranDemo: boolean }>}
+ */
+export async function maybeOfferDemo(ctx) {
+  const { stdout: w } = ctx;
+  const dim = (s) => (ctx.mode === "none" ? s : `\x1b[2m${s}\x1b[22m`);
+
+  let yes = false;
+  try {
+    yes = await ctx.confirmFn("Run the interactive demo now?", false);
+  } catch {
+    return { offered: false, ranDemo: false };
+  }
+
+  if (!yes) {
+    w.write("  " + dim("Skipped — try it anytime: npx forgedock demo") + "\n");
+    return { offered: true, ranDemo: false };
+  }
+
+  const runDemoFn = ctx.runDemoFn ?? (async (opts) => {
+    const { runDemo } = await import("./demo.mjs");
+    return runDemo(opts);
+  });
+
+  try {
+    const result = await runDemoFn({ forgeHome: ctx.forgeHome, cwd: ctx.cwd });
+    if (result && result.status === "error") {
+      w.write("  " + dim(`Could not start the demo — try it later: npx forgedock demo (${result.error || "unknown error"})`) + "\n");
+      return { offered: true, ranDemo: false };
+    }
+    return { offered: true, ranDemo: true };
+  } catch {
+    // Best-effort — a failed demo run must not fail the install itself.
+    w.write("  " + dim("Could not start the demo — try it later: npx forgedock demo") + "\n");
+    return { offered: true, ranDemo: false };
+  }
+}
+
+// ---------------------------------------------------------------------------
 // The full journey (Task 8)
 // ---------------------------------------------------------------------------
 
@@ -1803,6 +1873,7 @@ export async function runJourney(ctx) {
     const connected = await connect(ctx);
     celebrate(ctx, { ...reviewed, ...connected, total: forged.total, hookStatus: forged.hookStatus, scriptsResult: forged.scriptsResult });
     await writeInstallReceipt(ctx, { forged });
+    if (!reviewed.aborted) await maybeOfferDemo(ctx);
     return reviewed.aborted ? 1 : 0;
   } finally {
     process.removeListener("SIGINT", onSigint);

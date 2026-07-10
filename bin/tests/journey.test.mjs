@@ -7,7 +7,7 @@ import assert from "node:assert/strict";
 import { mkdtempSync, readFileSync, writeFileSync, existsSync, mkdirSync, readdirSync } from "node:fs";
 import { join } from "node:path";
 import os from "node:os";
-import { writeForgeYaml, backupExisting, detectDescription, makeCtx, preflight, forge, read, review, celebrate, connect, openUrl, runJourney, manualLowConfidenceKeys, parseInstallTier, findMarkdownFiles, isEphemeralCachePath, detectCrossEnvInstall, validateForgeYamlShape, writeInstallReceipt, persistHome } from "../journey.mjs";
+import { writeForgeYaml, backupExisting, detectDescription, makeCtx, preflight, forge, read, review, celebrate, connect, maybeOfferDemo, openUrl, runJourney, manualLowConfidenceKeys, parseInstallTier, findMarkdownFiles, isEphemeralCachePath, detectCrossEnvInstall, validateForgeYamlShape, writeInstallReceipt, persistHome } from "../journey.mjs";
 import { detectEnvironment } from "../env-detect.mjs";
 
 const VALUES = {
@@ -1436,6 +1436,75 @@ describe("connect (Act V.5)", () => {
     assert.equal(typeof result.opened, "boolean");
     // Non-TTY → auto-skip → opened must be false
     assert.equal(result.opened, false);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// maybeOfferDemo (Act V.6, issue #1945)
+// ---------------------------------------------------------------------------
+
+describe("maybeOfferDemo (Act V.6)", () => {
+  it("shows the demo prompt and skips cleanly in non-TTY (default false, no hang)", async () => {
+    let demoCalled = false;
+    const { ctx, w } = stubCtx({ runDemoFn: async () => { demoCalled = true; return { status: "ok" }; } });
+    const result = await maybeOfferDemo(ctx);
+    assert.equal(result.offered, true);
+    assert.equal(result.ranDemo, false);
+    assert.equal(demoCalled, false);
+    assert.match(w.text, /Skipped/);
+  });
+
+  it("runs the demo when confirmFn resolves true", async () => {
+    let calledWith = null;
+    const { ctx } = stubCtx({
+      confirmFn: async () => true,
+      runDemoFn: async (opts) => { calledWith = opts; return { status: "ok", target: "/fake/demo" }; },
+    });
+    const result = await maybeOfferDemo(ctx);
+    assert.equal(result.offered, true);
+    assert.equal(result.ranDemo, true);
+    assert.ok(calledWith);
+    assert.equal(calledWith.forgeHome, ctx.forgeHome);
+    assert.equal(calledWith.cwd, ctx.cwd);
+  });
+
+  it("does NOT run the demo when user declines", async () => {
+    let demoCalled = false;
+    const { ctx } = stubCtx({
+      confirmFn: async () => false,
+      runDemoFn: async () => { demoCalled = true; return { status: "ok" }; },
+    });
+    await maybeOfferDemo(ctx);
+    assert.equal(demoCalled, false);
+  });
+
+  it("treats a returned {status:'error'} as a non-fatal failure, not a thrown exception", async () => {
+    const { ctx, w } = stubCtx({
+      confirmFn: async () => true,
+      runDemoFn: async () => ({ status: "error", error: "network unavailable" }),
+    });
+    const result = await maybeOfferDemo(ctx);
+    assert.equal(result.offered, true);
+    assert.equal(result.ranDemo, false);
+    assert.match(w.text, /Could not start the demo/);
+  });
+
+  it("swallows a thrown runDemoFn error without throwing past maybeOfferDemo", async () => {
+    const { ctx, w } = stubCtx({
+      confirmFn: async () => true,
+      runDemoFn: async () => { throw new Error("boom"); },
+    });
+    const result = await maybeOfferDemo(ctx);
+    assert.equal(result.offered, true);
+    assert.equal(result.ranDemo, false);
+    assert.match(w.text, /Could not start the demo/);
+  });
+
+  it("swallows a thrown confirmFn error without throwing", async () => {
+    const { ctx } = stubCtx({ confirmFn: async () => { throw new Error("boom"); } });
+    const result = await maybeOfferDemo(ctx);
+    assert.equal(result.offered, false);
+    assert.equal(result.ranDemo, false);
   });
 });
 

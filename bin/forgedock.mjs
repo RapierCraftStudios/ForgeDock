@@ -23,6 +23,7 @@ import {
   read,
   review,
   celebrate,
+  maybeOfferDemo,
   findMarkdownFiles,
   parseInstallTier,
   writeForgeYaml,
@@ -809,8 +810,94 @@ function ctx() {
   return c;
 }
 
+/**
+ * Extract `project.owner`/`project.repo` and `branches.staging` from a
+ * forge.yaml's raw text, using the same tolerant, no-YAML-parser regex style
+ * as resolveLabelsRepo()/doctor's Check 4 (quoted or unquoted scalar, ignores
+ * inline comments). Deliberately separate from resolveLabelsRepo() — that
+ * function also consults a CLI `--repo` flag, which doesn't apply here.
+ * @param {string} raw - forge.yaml file contents
+ * @returns {{repo: string|null, staging: string|null}}
+ */
+function extractRepoAndStaging(raw) {
+  const ownerMatch = raw.match(/^\s*owner:\s*["']?([^\s"'#]+)["']?/m);
+  const repoMatch = raw.match(/^\s*repo:\s*["']?([^\s"'#]+)["']?/m);
+  const stagingMatch = raw.match(/^\s*staging:\s*["']?([^\s"'#]+)["']?/m);
+  return {
+    repo: ownerMatch && repoMatch ? `${ownerMatch[1]}/${repoMatch[1]}` : null,
+    staging: stagingMatch ? stagingMatch[1] : null,
+  };
+}
+
+/**
+ * Best-effort re-entry dashboard data (issue #1945): staging PR count and
+ * engine in-flight/stalled counts. Every source is independently try/caught —
+ * one failing (no gh auth, no forge.yaml, empty ~/.forge/runs) degrades that
+ * row to "unknown"/"none" rather than blocking the others or crashing the
+ * whole status screen. `engine-cli.mjs` is dynamically imported (matching the
+ * existing `run-issue`/`resume-stalled` call sites in this file) so `status`
+ * doesn't pay the engine module's load cost unless it's actually reachable.
+ * @param {string} cwd
+ * @returns {Promise<{repo: string|null, staging: string|null,
+ *   prCount: number|null, engine: {total:number,inFlight:number,stalled:number}|null,
+ *   lastRun: {issue:number,terminal:boolean,terminalReason:string|null}|null}>}
+ */
+async function gatherDashboardData(cwd) {
+  const result = { repo: null, staging: null, prCount: null, engine: null, lastRun: null };
+
+  const forgeYamlPath = join(cwd, "forge.yaml");
+  if (existsSync(forgeYamlPath)) {
+    try {
+      const raw = readFileSync(forgeYamlPath, "utf-8");
+      const { repo, staging } = extractRepoAndStaging(raw);
+      result.repo = repo;
+      result.staging = staging;
+    } catch {
+      // leave repo/staging null — dashboard rows degrade below
+    }
+  }
+
+  let engineCli = null;
+  try {
+    engineCli = await import("./engine-cli.mjs");
+  } catch {
+    // engine module unavailable — engine/lastRun rows stay null
+  }
+
+  if (result.repo) {
+    try {
+      const args = ["pr", "list", "-R", result.repo, "--state", "open", "--json", "number"];
+      if (result.staging) args.push("--base", result.staging);
+      const out = execFileSync("gh", args, {
+        stdio: ["ignore", "pipe", "ignore"],
+        encoding: "utf-8",
+        timeout: 10000,
+      });
+      result.prCount = JSON.parse(out).length;
+    } catch {
+      // gh not authenticated, not installed, or timed out — leave prCount null ("unknown")
+    }
+  }
+
+  if (engineCli) {
+    try {
+      const io = engineCli.makeIo();
+      result.engine = await engineCli.countEngineActivity(io, result.repo, Date.now());
+    } catch {
+      // leave engine null ("unknown")
+    }
+    try {
+      result.lastRun = engineCli.lastLocalRun(engineCli.runDir());
+    } catch {
+      // leave lastRun null ("none")
+    }
+  }
+
+  return result;
+}
+
 /** Compact status screen for configured/managed directories. */
-function statusScreen(c) {
+async function statusScreen(c) {
   const state = resolveState(c.cwd);
   const mark = renderMark("compact", c.mode);
   const dim = (s) => (c.mode === "none" ? s : `\x1b[2m${s}\x1b[22m`);
@@ -822,6 +909,25 @@ function statusScreen(c) {
   c.stdout.write(`  forge.yaml  ${configured ? "present" : "missing"}\n`);
   const { targetDir: statusTargetDir } = detectInstallPaths();
   c.stdout.write(`  commands    ${existsSync(statusTargetDir) ? "installed at " + statusTargetDir : "not installed"}\n`);
+
+  // Re-entry mini-dashboard (#1945) — only meaningful once the repo is
+  // actually configured; an unconfigured/unmanaged directory has nothing to
+  // report yet and would otherwise render a wall of "unknown" rows.
+  if (configured && (state === "managed-active")) {
+    const data = await gatherDashboardData(c.cwd);
+    c.stdout.write("\n");
+    c.stdout.write(
+      `  staging PRs  ${data.prCount === null ? dim("unknown") : `${data.prCount} open${data.staging ? " → " + data.staging : ""}`}\n`,
+    );
+    c.stdout.write(
+      `  engine       ${data.engine === null ? dim("unknown") : (data.engine.total === 0 ? "none in-flight" : `${data.engine.inFlight} in-flight, ${data.engine.stalled} stalled`)}\n`,
+    );
+    c.stdout.write(`  bot token    ${dim("not available — see docs/CONFIG.md (GitHub App Install)")}\n`);
+    c.stdout.write(
+      `  last run     ${data.lastRun === null ? dim("none") : `#${data.lastRun.issue} — ${data.lastRun.terminal ? (data.lastRun.terminalReason || "done") : "in progress"}`}\n`,
+    );
+  }
+
   if (state === "managed-optedout") {
     c.stdout.write(`\n  ForgeDock is disabled (opted out) here. Re-enable: npx forgedock enable\n`);
   } else if (state === "unmanaged") {
@@ -888,6 +994,7 @@ async function initFlow(c) {
     });
     atomicWriteFile(outputPath, content);
     celebrate(c, { written: true, todoCount: 0, isMinimal: true });
+    await maybeOfferDemo(c);
     return 0;
   }
 
@@ -916,11 +1023,13 @@ async function initFlow(c) {
     const lowKeys = manualLowConfidenceKeys(draft, description, v);
     const { todoCount } = writeForgeYaml(v, lowKeys, outputPath);
     celebrate(c, { written: true, todoCount });
+    await maybeOfferDemo(c);
     return 0;
   }
   const { draft, description } = await read(c);
   const reviewed = await review(c, draft, description);
   celebrate(c, reviewed);
+  if (!reviewed.aborted) await maybeOfferDemo(c);
   return reviewed.aborted ? 1 : 0;
 }
 
@@ -2792,7 +2901,7 @@ switch (command) {
       }
     }
     if (existsSync(join(c.cwd, "forge.yaml")) && resolveState(c.cwd) === "managed-active") {
-      statusScreen(c);
+      await statusScreen(c);
     } else {
       exitCode = await runJourney(c);
       // Record persistHome()'s outcome (set on c.persistHomeResult inside
@@ -2837,7 +2946,7 @@ switch (command) {
   case "status": {
     const c = ctx();
     if (positional[1]) c.cwd = resolve(positional[1]);
-    statusScreen(c);
+    await statusScreen(c);
     break;
   }
   case "uninstall":

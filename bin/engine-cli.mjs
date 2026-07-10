@@ -6,10 +6,26 @@
  */
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
+import { readdirSync, statSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { runIssue } from "./engine.mjs";
 import { makeProjector } from "./engine/projector.mjs";
+import { readLog, deriveState } from "./engine/runlog.mjs";
+
+/**
+ * Workflow labels that mark an issue as "in the pipeline" (not yet terminal).
+ * Shared by resume-stalled's candidate enumeration and countEngineActivity()
+ * (the re-entry dashboard's in-flight/stalled counter, #1945) so both surfaces
+ * agree on what "in-flight" means — a single source of truth rather than two
+ * lists that can silently drift apart.
+ */
+export const ACTIVE_WORKFLOW_LABELS = [
+  "workflow:investigating",
+  "workflow:ready-to-build",
+  "workflow:building",
+  "workflow:in-review",
+];
 
 const pexec = promisify(execFile);
 
@@ -89,6 +105,106 @@ export async function scanStalls(issues, io, now) {
 }
 
 /**
+ * Read-only in-flight/stalled counter for the `status`/`install` re-entry
+ * dashboard (#1945). Reuses the exact same enumeration + lease-expiry logic
+ * as `resumeStalledFromCli` (workflow-label search via `gh issue list`, then
+ * `scanStalls` against the GitHub-authoritative FORGE:STATE via the
+ * projector) — GitHub is this codebase's source of truth for run state, not
+ * the local `~/.forge/runs` hot-path log, so the dashboard counts the same
+ * way the orchestrator does. Never dispatches or mutates anything.
+ *
+ * Best-effort: a `gh issue list` failure for one label is swallowed (treated
+ * as zero matches for that label) — consistent with resumeStalledFromCli's
+ * existing tolerance — so one bad label search never blocks the others.
+ *
+ * @param {{gh: Function}} io
+ * @param {string|null} repo - "owner/repo", or null to use gh's cwd-resolved default
+ * @param {number} now
+ * @returns {Promise<{total: number, inFlight: number, stalled: number}>}
+ */
+export async function countEngineActivity(io, repo, now) {
+  const repoFlag = repo ? ["--repo", repo] : [];
+  const issueSet = new Set();
+
+  for (const label of ACTIVE_WORKFLOW_LABELS) {
+    try {
+      const out = await io.gh([
+        "issue", "list",
+        ...repoFlag,
+        "--state", "open",
+        "--label", label,
+        "--limit", "100",
+        "--json", "number",
+      ]);
+      const items = JSON.parse(out);
+      for (const { number } of items) issueSet.add(number);
+    } catch {
+      // gh may return non-zero when no issues match, or fail transiently —
+      // treat as empty for this label rather than aborting the whole count.
+    }
+  }
+
+  if (issueSet.size === 0) return { total: 0, inFlight: 0, stalled: 0 };
+
+  const projector = makeProjector(io);
+  const candidates = [...issueSet];
+  const stalled = await scanStalls(candidates, projector, now);
+  return { total: candidates.length, inFlight: candidates.length - stalled.length, stalled: stalled.length };
+}
+
+/**
+ * Best-effort summary of the most recently modified local run-log under
+ * `~/.forge/runs` (runDir()). This is a MACHINE-LOCAL view — the crash-safe
+ * hot-path log described in engine/runlog.mjs, not the GitHub-authoritative
+ * state used by countEngineActivity() above. Appropriate only for a "what did
+ * I last run here" dashboard row, not for cross-machine in-flight/stalled
+ * counts.
+ *
+ * Never throws: returns null when the runs dir doesn't exist, holds no
+ * `.jsonl` files, or the newest file can't be read/parsed. A single corrupt
+ * or unreadable file is skipped in favor of the next-newest one rather than
+ * failing the whole lookup (forge#1528 — batch operations here must not abort
+ * on one bad item).
+ *
+ * @param {string} dir - runDir()
+ * @returns {{issue: number, terminal: boolean, terminalReason: string|null} | null}
+ */
+export function lastLocalRun(dir) {
+  let entries;
+  try {
+    entries = readdirSync(dir).filter((f) => f.endsWith(".jsonl"));
+  } catch {
+    return null;
+  }
+
+  // Sort newest-first by mtime so a corrupt newest file falls through to the
+  // next-newest candidate instead of giving up entirely.
+  const withMtime = [];
+  for (const f of entries) {
+    try {
+      withMtime.push({ f, mtime: statSync(join(dir, f)).mtimeMs });
+    } catch {
+      // unreadable — skip
+    }
+  }
+  withMtime.sort((a, b) => b.mtime - a.mtime);
+
+  for (const { f } of withMtime) {
+    const issue = parseInt(f.slice(0, -".jsonl".length), 10);
+    if (!Number.isInteger(issue)) continue;
+    try {
+      const events = readLog(dir, issue);
+      if (events.length === 0) continue;
+      const state = deriveState(events);
+      return { issue, terminal: state.terminal, terminalReason: state.terminalReason };
+    } catch {
+      continue; // corrupt file — try the next-newest
+    }
+  }
+  return null;
+}
+
+/**
  * @param {string[]} argv
  * @param {{io?: {gh: Function}, runIssue?: Function}} [deps]
  *   Injectable for tests — defaults to real `gh`/`git` (makeIo()) and the real
@@ -147,18 +263,13 @@ export async function resumeStalledFromCli(argv, deps = {}) {
   const projector = makeProjector(io);
   const now = Date.now();
 
-  // Collect candidate issue numbers from all non-terminal workflow labels.
-  const ACTIVE_LABELS = [
-    "workflow:investigating",
-    "workflow:ready-to-build",
-    "workflow:building",
-    "workflow:in-review",
-  ];
-
+  // Collect candidate issue numbers from all non-terminal workflow labels
+  // (ACTIVE_WORKFLOW_LABELS — shared with countEngineActivity() so both
+  // surfaces agree on what "in-flight" means).
   const repoFlag = repo ? ["--repo", repo] : [];
   const issueSet = new Set();
 
-  for (const label of ACTIVE_LABELS) {
+  for (const label of ACTIVE_WORKFLOW_LABELS) {
     try {
       const out = await io.gh([
         "issue", "list",
