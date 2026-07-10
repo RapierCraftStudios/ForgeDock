@@ -403,3 +403,99 @@ describe("router", () => {
     );
   });
 });
+
+describe("doctor — forge.yaml placeholder / staleness checks (forge#1850)", () => {
+  function stubTools() {
+    const stubBin = mkdtempSync(join(os.tmpdir(), "fd-doctor-stub-bin-"));
+    writeFileSync(join(stubBin, "gh"), "#!/bin/sh\necho 'gh version 2.60.0'\n", { mode: 0o755 });
+    writeFileSync(join(stubBin, "yq"), "#!/bin/sh\necho 'yq (https://github.com/mikefarah/yq/) version v4.44.0'\n", { mode: 0o755 });
+    return { PATH: `${stubBin}:${process.env.PATH}` };
+  }
+
+  /**
+   * Runs a full `install --fast` first (so command files + SessionStart hook
+   * checks are satisfied), then overwrites forge.yaml with custom content —
+   * isolating these tests to just the forge.yaml placeholder/staleness checks
+   * under test, not the whole install surface.
+   */
+  function setupWithForgeYaml(forgeYamlContent) {
+    const home = mkdtempSync(join(os.tmpdir(), "fd-doctor-ph-home-"));
+    const cwd = mkdtempSync(join(os.tmpdir(), "fd-doctor-ph-cwd-"));
+    writeFileSync(
+      join(home, ".gitconfig"),
+      "[user]\n\tname = Test User\n\temail = test@example.com\n",
+      "utf-8",
+    );
+    const extraEnv = stubTools();
+    const installRes = runCli(["install", "--fast"], { cwd, home, extraEnv });
+    assert.equal(installRes.status, 0, installRes.stdout + installRes.stderr);
+    writeFileSync(join(cwd, "forge.yaml"), forgeYamlContent, "utf-8");
+    return { home, cwd, extraEnv };
+  }
+
+  it("warns (but does not fail) on placeholder owner/repo — advisory, not a broken-install exit code", () => {
+    const { home, cwd, extraEnv } = setupWithForgeYaml(
+      [
+        "project:",
+        '  name: "Your Repo Name"',
+        '  owner: "your-github-org"  # TODO(forgedock:owner) — verify this value',
+        '  repo: "your-repo-name"  # TODO(forgedock:repo) — verify this value',
+        "paths:",
+        '  root: "/tmp/x"',
+        "branches:",
+        '  default: "main"',
+        '  staging: "main"',
+        "",
+      ].join("\n"),
+    );
+
+    const res = runCli(["doctor"], { cwd, home, extraEnv });
+    assert.equal(res.status, 0, res.stdout + res.stderr);
+    assert.match(res.stdout, /forge\.yaml identity/i);
+    assert.match(res.stdout, /placeholder values/i);
+  });
+
+  it("warns when branches.staging equals branches.default", () => {
+    const { home, cwd, extraEnv } = setupWithForgeYaml(
+      [
+        "project:",
+        '  name: "Real Project"',
+        '  owner: "real-org"',
+        '  repo: "real-repo"',
+        "paths:",
+        '  root: "/tmp/x"',
+        "branches:",
+        '  default: "main"',
+        '  staging: "main"',
+        "",
+      ].join("\n"),
+    );
+
+    const res = runCli(["doctor"], { cwd, home, extraEnv });
+    assert.equal(res.status, 0, res.stdout + res.stderr);
+    assert.match(res.stdout, /branches\.staging equals branches\.default/i);
+  });
+
+  it("stays clean for a fully-resolved config — no placeholder or staging warnings", () => {
+    const { home, cwd, extraEnv } = setupWithForgeYaml(
+      [
+        "project:",
+        '  name: "Real Project"',
+        '  owner: "real-org"',
+        '  repo: "real-repo"',
+        "paths:",
+        '  root: "/tmp/x"',
+        "branches:",
+        '  default: "main"',
+        '  staging: "staging"',
+        "",
+      ].join("\n"),
+    );
+
+    const res = runCli(["doctor"], { cwd, home, extraEnv });
+    assert.equal(res.status, 0, res.stdout + res.stderr);
+    assert.doesNotMatch(res.stdout, /forge\.yaml identity/i);
+    assert.doesNotMatch(res.stdout, /branches\.staging equals branches\.default/i);
+    assert.doesNotMatch(res.stdout, /forge\.yaml placeholders/i);
+  });
+});

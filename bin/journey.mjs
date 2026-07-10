@@ -179,14 +179,42 @@ export function manualLowConfidenceKeys(draft, description, values) {
  * Back up an existing file to <name>.bak (timestamped if .bak exists).
  * @returns {{ backupName: string } | null} null when the file didn't exist.
  */
+/**
+ * Back up an existing file to <name>.bak, keeping `.bak` as the newest copy.
+ *
+ * Regression fix (forge#1850): the previous implementation left the bare
+ * `.bak` untouched once created, so only the FIRST-ever clobber's content
+ * ever lived there — every later overwrite rotated the (by then already
+ * stubbed) current file into a timestamped sibling instead. The net effect
+ * was that the newest-looking backup (by filename/mtime) was the most
+ * stubbed one, while the one recoverable good copy sat forever under the
+ * unindicated bare name. A user restoring "the .bak" or "the newest backup"
+ * got garbage either way.
+ *
+ * Fixed behavior: before writing the current file into `.bak`, rotate any
+ * existing `.bak` out to a timestamped file first. `.bak` therefore always
+ * holds the immediately-prior state (the best next guess for "undo my last
+ * run"), and the full chronological history is preserved in timestamped
+ * files — nothing is ever silently buried.
+ *
+ * @returns {{ backupName: string } | null} null when the file didn't exist.
+ */
 export function backupExisting(outputPath) {
   if (!existsSync(outputPath)) return null;
   const baseBak = outputPath + ".bak";
-  const backupPath = existsSync(baseBak)
-    ? `${baseBak}.${new Date().toISOString().replace(/[:.]/g, "-")}`
-    : baseBak;
-  renameSync(outputPath, backupPath);
-  return { backupName: basename(backupPath) };
+  if (existsSync(baseBak)) {
+    // Guard against two rotations landing on the same millisecond timestamp
+    // (e.g. rapid successive calls in tests, or a fast disk) silently
+    // clobbering an already-rotated generation.
+    let rotatedPath = `${baseBak}.${new Date().toISOString().replace(/[:.]/g, "-")}`;
+    let suffix = 1;
+    while (existsSync(rotatedPath)) {
+      rotatedPath = `${baseBak}.${new Date().toISOString().replace(/[:.]/g, "-")}-${suffix++}`;
+    }
+    renameSync(baseBak, rotatedPath);
+  }
+  renameSync(outputPath, baseBak);
+  return { backupName: basename(baseBak) };
 }
 
 // ---------------------------------------------------------------------------
@@ -283,6 +311,7 @@ export function makeCtx(overrides = {}) {
   const nodeVersion = overrides.nodeVersion ?? process.versions.node;
   const enrichFn = overrides.enrichFn ?? enrich;
   const openFn = overrides.openFn ?? openUrl;
+  const confirmFn = overrides.confirmFn ?? confirm;
   return {
     cwd: process.cwd(),
     home: env.HOME || env.USERPROFILE || os.homedir(),
@@ -296,6 +325,7 @@ export function makeCtx(overrides = {}) {
     linkStrategy: "symlink",
     enrichFn,
     openFn,
+    confirmFn,
     exec: (cmd, args) =>
       execFileSync(cmd, args, {
         encoding: "utf-8",
@@ -837,6 +867,13 @@ export async function read(ctx) {
  * Act IV: the single interaction. Non-TTY + existing config aborts to protect
  * the file; non-TTY + fresh config writes detection values with TODO flags
  * (annotatedReviewScreen's non-TTY path returns them directly).
+ *
+ * Overwrite protection (forge#1850, regression of #578): a TTY session with
+ * an existing forge.yaml must give EXPLICIT default-No consent before any
+ * backup or write happens — the review screen's own "Overwrite Mode" banner
+ * is advisory, not consent. This restores the #578 gate via ctx.confirmFn
+ * (defaults to tui.mjs's confirm(), which is non-TTY-safe on its own —
+ * belt-and-suspenders with the explicit isTTY check above it).
  */
 export async function review(ctx, draft, description) {
   const { stdout: w } = ctx;
@@ -849,6 +886,17 @@ export async function review(ctx, draft, description) {
     return { written: false, todoCount: 0, backupName: null, aborted: true };
   }
 
+  if (hasExisting) {
+    const confirmed = await ctx.confirmFn(
+      "forge.yaml already exists. Overwrite it? A backup will be created.",
+      false,
+    );
+    if (!confirmed) {
+      w.write("\n  Overwrite cancelled — forge.yaml left untouched.\n");
+      return { written: false, todoCount: 0, backupName: null, aborted: true };
+    }
+  }
+
   const extraFields = description.value
     ? { description: { value: description.value, confidence: "medium", source: description.source, why: `First paragraph of ${description.source}` } }
     : {};
@@ -858,6 +906,19 @@ export async function review(ctx, draft, description) {
     showSources: ctx.argv.includes("--verbose"),
     extraFields,
   });
+
+  // Hard-fail on unresolved identity placeholders when OVERWRITING an
+  // existing config (forge#1850 spec item 4): never destroy a working
+  // forge.yaml in favor of one that can't address a repo. A brand-new
+  // (non-existing) config is allowed to write placeholders — that's the
+  // existing, already-flagged (# TODO comments) greenfield-setup path, and
+  // there's nothing valuable to lose. Checked AFTER the review screen so an
+  // interactive edit that fixes the field still passes.
+  if (hasExisting && (accepted.owner === "your-github-org" || accepted.repo === "your-repo-name")) {
+    w.write("\n  Could not determine the GitHub owner/repo for this project.\n");
+    w.write("  " + dimLine(ctx, "Run this inside the target git repository, or edit those fields before accepting.") + "\n");
+    return { written: false, todoCount: 0, backupName: null, aborted: true };
+  }
 
   const backup = backupExisting(outputPath);
   if (backup) w.write(`  Backed up: forge.yaml → ${backup.backupName}\n`);
@@ -925,8 +986,9 @@ const GITHUB_APP_URL = "https://github.com/apps/rapiercraft-forgedock/installati
  * the journey without error.
  *
  * Uses ctx.openFn (injectable for tests) to open the URL in the default
- * browser. In non-TTY environments (piped stdin, --fast) confirm() resolves
- * immediately to false (the defaultValue), so no prompt is shown.
+ * browser, and ctx.confirmFn (injectable for tests) to ask for consent. In
+ * non-TTY environments (piped stdin, --fast) confirm() resolves immediately
+ * to false (the defaultValue), so no prompt is shown.
  *
  * @returns {Promise<{ opened: boolean }>}
  */
@@ -934,7 +996,7 @@ export async function connect(ctx) {
   const { stdout: w } = ctx;
   w.write("\n  " + ember("Connect to GitHub", ctx.mode) + "\n\n");
 
-  const yes = await confirm(
+  const yes = await ctx.confirmFn(
     "Install the ForgeDock GitHub App for automatic pipeline triggers?",
     false,
   );

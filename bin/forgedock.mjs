@@ -48,6 +48,7 @@ import {
   box,
   table,
   input,
+  confirm,
   dim,
   green,
   yellow,
@@ -644,11 +645,29 @@ function statusScreen(c) {
 
 async function initFlow(c) {
   const outputPath = join(c.cwd, "forge.yaml");
-  if (existsSync(outputPath) && process.stdin.isTTY !== true) {
+  const hasExisting = existsSync(outputPath);
+  if (hasExisting && process.stdin.isTTY !== true) {
     const dim = (s) => (c.mode === "none" ? s : `\x1b[2m${s}\x1b[22m`);
     c.stdout.write("\n  forge.yaml already exists — non-interactive run, aborting to protect it.\n");
     c.stdout.write("  " + dim("Run interactively (or delete forge.yaml) to regenerate.") + "\n");
     return 1;
+  }
+
+  // Restore the #578 overwrite-confirmation gate for the --minimal/--manual
+  // escape hatches (forge#1850): these branches previously went straight to
+  // backupExisting() + write with ZERO on-screen warning in TTY mode — worse
+  // than the default review() flow below, which at least shows an
+  // "Overwrite Mode" banner. The default flow's own gate lives in
+  // journey.mjs review() (ctx.confirmFn).
+  if (hasExisting && (flags.includes("--minimal") || flags.includes("--manual"))) {
+    const confirmed = await confirm(
+      "forge.yaml already exists. Overwrite it? A backup will be created.",
+      false,
+    );
+    if (!confirmed) {
+      c.stdout.write("\n  Overwrite cancelled — forge.yaml left untouched.\n");
+      return 1;
+    }
   }
 
   if (flags.includes("--minimal")) {
@@ -656,6 +675,14 @@ async function initFlow(c) {
     // only the three required sections. No review screen — this is the
     // power-user escape hatch for a ~20-line forge.yaml.
     const { draft, description } = await read(c);
+    // Hard-fail on unresolved identity placeholders when overwriting an
+    // existing config (forge#1850 spec item 4) — never destroy a working
+    // forge.yaml in favor of one that can't address a repo.
+    if (hasExisting && (draft.project.owner.value === "your-github-org" || draft.project.repo.value === "your-repo-name")) {
+      c.stdout.write("\n  Could not determine the GitHub owner/repo for this project.\n");
+      c.stdout.write("  Run this inside the target git repository, or use interactive init (npx forgedock init) to edit those fields.\n");
+      return 1;
+    }
     const backup = backupExisting(outputPath);
     if (backup) c.stdout.write(`  Backed up: forge.yaml → ${backup.backupName}\n`);
     const content = buildMinimalForgeYaml({
@@ -686,6 +713,13 @@ async function initFlow(c) {
       defaultBranch: await input("Default branch", draft.branches.default.value),
       stagingBranch: await input("Staging branch", draft.branches.staging.value),
     };
+    // Checked on the FINAL accepted values (post-prompt), not the draft —
+    // the user may have typed over a placeholder default.
+    if (hasExisting && (v.owner === "your-github-org" || v.repo === "your-repo-name")) {
+      c.stdout.write("\n  Could not determine the GitHub owner/repo for this project.\n");
+      c.stdout.write("  Enter real values, or run this inside the target git repository.\n");
+      return 1;
+    }
     const backup = backupExisting(outputPath);
     if (backup) c.stdout.write(`  Backed up: forge.yaml → ${backup.backupName}\n`);
     const lowKeys = manualLowConfidenceKeys(draft, description, v);
@@ -1413,11 +1447,56 @@ async function doctor() {
 
         if (missing.length === 0) {
           pass("forge.yaml", "exists with required keys");
-          // Extract owner and repo for the label check (simple regex, no YAML parser needed)
-          const ownerMatch = content.match(/^\s+owner:\s+"?([^"\n]+)"?\s*$/m);
-          const repoMatch = content.match(/^\s+repo:\s+"?([^"\n]+)"?\s*$/m);
+          // Extract owner and repo for the label check (simple regex, no YAML
+          // parser needed). Anchored on the quoted value only (not "rest of
+          // line must be blank") so a trailing `# TODO(forgedock:...)`
+          // comment — exactly what a placeholder/low-confidence field gets —
+          // doesn't prevent extraction. (forge#1850: the previous `\s*$`
+          // anchor silently failed to extract any TODO-flagged value, which
+          // is the one case doctor most needs to see.)
+          const ownerMatch = content.match(/^\s+owner:\s+"([^"]*)"/m);
+          const repoMatch = content.match(/^\s+repo:\s+"([^"]*)"/m);
           if (ownerMatch) forgeOwner = ownerMatch[1].trim();
           if (repoMatch) forgeRepo = repoMatch[1].trim();
+
+          // ── Placeholder / staleness checks (forge#1850) ────────────────
+          // A config can pass the structural check above (has all three
+          // required top-level keys) and still be a stubbed placeholder —
+          // catch that here so it's flagged before any pipeline command
+          // silently consumes it (e.g. opening PRs against a wrong/guessed
+          // branches.staging). Advisory (warn, not fail): a bare `--fast`
+          // install with no git remote yet is a legitimate, already-tested
+          // "get started, fill in details later" path — doctor should
+          // surface the gap loudly without turning normal onboarding into a
+          // broken-install exit code.
+          if (forgeOwner === "your-github-org" || forgeRepo === "your-repo-name") {
+            warn(
+              "forge.yaml identity",
+              "owner/repo are still placeholder values (your-github-org / your-repo-name). Run: npx forgedock init",
+            );
+          }
+
+          const todoMarkers = content.match(/# TODO\(forgedock:[a-zA-Z]+\)/g) || [];
+          if (todoMarkers.length > 0) {
+            const uniqueFields = [...new Set(todoMarkers)].join(", ");
+            warn(
+              "forge.yaml placeholders",
+              `${todoMarkers.length} field(s) still flagged with # TODO(forgedock:...) — verify and fill in: ${uniqueFields}`,
+            );
+          }
+
+          const defaultMatch = content.match(/^\s+default:\s+"([^"]*)"/m);
+          const stagingMatch = content.match(/^\s+staging:\s+"([^"]*)"/m);
+          if (
+            defaultMatch &&
+            stagingMatch &&
+            defaultMatch[1].trim() === stagingMatch[1].trim()
+          ) {
+            warn(
+              "forge.yaml branches",
+              `branches.staging equals branches.default ('${stagingMatch[1].trim()}') — verify this is intentional (some projects have no separate staging branch) rather than an undetected 'origin/staging' fallback. See docs/CONFIG.md.`,
+            );
+          }
         } else {
           fail("forge.yaml", `Missing required keys: ${missing.join(", ")}. Edit forge.yaml or run: npx forgedock init`);
         }
