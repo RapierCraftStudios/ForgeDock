@@ -336,7 +336,7 @@ for NUM in $ORPHAN_LIST; do
       else
         gh issue edit "$NUM" ${GH_FLAG} \
           --add-label "workflow:merged" \
-          --remove-label "workflow:investigating,workflow:ready-to-build,workflow:building,workflow:in-review,workflow:invalid,workflow:decomposed" \
+          --remove-label "workflow:investigating,workflow:ready-to-build,workflow:building,workflow:in-review,workflow:awaiting-merge,workflow:invalid,workflow:decomposed" \
           2>/dev/null || true
         gh issue close "$NUM" ${GH_FLAG} \
           --comment "Closed by /recover-orphans: PR #${PR_NUM} was already merged. Labels corrected." \
@@ -362,7 +362,7 @@ for NUM in $ORPHAN_LIST; do
             2>/dev/null || true
           gh issue edit "$NUM" ${GH_FLAG} \
             --add-label "workflow:merged" \
-            --remove-label "workflow:investigating,workflow:ready-to-build,workflow:building,workflow:in-review,workflow:invalid,workflow:decomposed" \
+            --remove-label "workflow:investigating,workflow:ready-to-build,workflow:building,workflow:in-review,workflow:awaiting-merge,workflow:invalid,workflow:decomposed" \
             2>/dev/null || true
         fi
       fi
@@ -378,7 +378,7 @@ for NUM in $ORPHAN_LIST; do
         Skill(skill="review-pr", args="${PR_NUM} --auto-merge --issue ${NUM} --gh-flag ${GH_FLAG}")
         # After review: update label
         gh issue edit "$NUM" ${GH_FLAG} --add-label "workflow:in-review" \
-          --remove-label "workflow:building" 2>/dev/null || true
+          --remove-label "workflow:building,workflow:awaiting-merge" 2>/dev/null || true
       fi
       RECOVERY_RESULTS="${RECOVERY_RESULTS}| #${NUM} | review-pr | PR #${PR_NUM} submitted for review |\n"
       ;;
@@ -401,7 +401,7 @@ for NUM in $ORPHAN_LIST; do
         echo "  [DRY-RUN] Would: remove workflow:investigating, workflow:ready-to-build, workflow:building, workflow:in-review"
       else
         gh issue edit "$NUM" ${GH_FLAG} \
-          --remove-label "workflow:investigating,workflow:ready-to-build,workflow:building,workflow:in-review" \
+          --remove-label "workflow:investigating,workflow:ready-to-build,workflow:building,workflow:in-review,workflow:awaiting-merge" \
           2>/dev/null || true
         gh issue comment "$NUM" ${GH_FLAG} \
           --body "<!-- FORGE:ORPHAN_RECOVERED -->

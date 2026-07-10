@@ -68,6 +68,9 @@ gh issue list {GH_FLAG} --state closed --label "workflow:in-review" --limit 100 
 echo "=== Stale workflow:building ==="
 gh issue list {GH_FLAG} --state closed --label "workflow:building" --limit 100 --json number,title --jq '.[] | "#\(.number) — \(.title)"'
 
+echo "=== Stale workflow:awaiting-merge ==="
+gh issue list {GH_FLAG} --state closed --label "workflow:awaiting-merge" --limit 100 --json number,title --jq '.[] | "#\(.number) — \(.title)"'
+
 echo "=== Stale workflow:investigating ==="
 gh issue list {GH_FLAG} --state closed --label "workflow:investigating" --limit 100 --json number,title --jq '.[] | "#\(.number) — \(.title)"'
 
@@ -79,11 +82,11 @@ gh issue list {GH_FLAG} --state closed --label "needs-validation" --limit 100 --
 
 For each closed issue with a stale intermediate label:
 
-**Stale `workflow:in-review`, `workflow:building`** — these were merged but label wasn't updated:
+**Stale `workflow:in-review`, `workflow:building`, `workflow:awaiting-merge`** — these were merged but label wasn't updated:
 ```bash
 for NUM in {stale_issue_numbers}; do
   gh issue edit $NUM {GH_FLAG} --add-label "workflow:merged"
-  gh issue edit $NUM {GH_FLAG} --remove-label "workflow:in-review,workflow:building,needs-validation" 2>/dev/null || true
+  gh issue edit $NUM {GH_FLAG} --remove-label "workflow:in-review,workflow:building,workflow:awaiting-merge,needs-validation" 2>/dev/null || true
 done
 ```
 
@@ -223,7 +226,7 @@ For each orphaned issue found:
 ```bash
 gh issue close $NUM {GH_FLAG} --comment "Closed by cleanup — PR #$MERGED_PR was already merged."
 gh issue edit $NUM {GH_FLAG} --add-label "workflow:merged"
-gh issue edit $NUM {GH_FLAG} --remove-label "workflow:in-review" 2>/dev/null || true
+gh issue edit $NUM {GH_FLAG} --remove-label "workflow:in-review,workflow:awaiting-merge" 2>/dev/null || true
 ```
 
 Also check open issues with `workflow:building` — same pattern (search for merged PRs referencing them).
