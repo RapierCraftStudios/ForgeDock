@@ -392,15 +392,23 @@ function getVersion() {
 /**
  * Compare two dotted version strings component-wise (numeric, not
  * lexicographic — "1.9.0" must compare as older than "1.10.0").
- * Non-numeric or missing components are treated as 0.
+ * Each component's leading numeric prefix is used (e.g. a prerelease-suffixed
+ * component like "3-beta" compares as 3, not 0 — parseInt reads the leading
+ * digits and stops at the first non-digit character, unlike Number() which
+ * would reject the whole component as NaN). Components with no leading
+ * numeric prefix, or missing components, are treated as 0.
  *
  * @param {string} a
  * @param {string} b
  * @returns {number} negative if a < b, positive if a > b, 0 if equal
  */
 function compareVersions(a, b) {
-  const pa = String(a).split(".").map((n) => Number(n) || 0);
-  const pb = String(b).split(".").map((n) => Number(n) || 0);
+  const pa = String(a)
+    .split(".")
+    .map((n) => parseInt(n, 10) || 0);
+  const pb = String(b)
+    .split(".")
+    .map((n) => parseInt(n, 10) || 0);
   const len = Math.max(pa.length, pb.length);
   for (let i = 0; i < len; i++) {
     const na = pa[i] || 0;
