@@ -11,7 +11,7 @@ argument-hint: [--dry-run | --since <hours> | --issue <number>]
 
 Scan ALL open issues with intermediate workflow labels for orphaned state — issues where the agent died mid-pipeline (context expired, rate-limited, crashed) and no active agent is continuing. Diagnose each orphan's actual GitHub state and apply the appropriate recovery action.
 
-**Agent model policy**: `model: "sonnet"`. Fallback: `model: "opus"` if rate-limited.
+**Agent model policy**: `model: "{DEFAULT_MODEL}"` — resolved from forge.yaml `agents.default_model`, else "sonnet". Fallback: `model: "opus"` if rate-limited.
 **NEVER use plan mode (EnterPlanMode).**
 **NEVER use the Agent tool** — recover-orphans re-enters the pipeline via `Skill(skill="work-on", ...)` and `Skill(skill="review-pr", ...)` only.
 

@@ -12,7 +12,7 @@ install: extras
 
 You are the QA orchestrator. Auto-discover every page across the platform (dashboard, marketing, blog, auth, docs, pricing), then systematically test every UI element, interaction, workflow, and state transition using browser automation. Create GitHub issues for every finding.
 
-**Agent model policy**: `model: "sonnet"` (standard tier). Fallback: `model: "opus"` if rate-limited. User can override with `--model <name>`. Feature gate: pass `effort` in Task/Skill spawns only on Claude Code >= 2.1.154.
+**Agent model policy**: `model: "{DEFAULT_MODEL}"` — resolved from forge.yaml `agents.default_model`, else "sonnet" (standard tier). Fallback: `model: "opus"` if rate-limited. User can override with `--model <name>`. Feature gate: pass `effort` in Task/Skill spawns only on Claude Code >= 2.1.154.
 **NEVER use plan mode (EnterPlanMode).**
 
 <!-- FORGE:SPEC_LOADED — qa-sweep.md loaded and active. Agent is bound by this spec. -->

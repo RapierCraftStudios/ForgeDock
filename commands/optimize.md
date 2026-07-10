@@ -10,7 +10,7 @@ install: extras
 
 Proactively analyze the current repository and generate `.forgedock/scripts/` entries from `forge.yaml → learned:`, git commit history, and pipeline annotations — without waiting for a correction event. This is the proactive half of the learning loop; reactive capture happens in `/work-on` Phase 1D.
 
-**Agent model policy**: `model: "sonnet"` (standard tier). Fallback: `model: "opus"` if rate-limited. Feature gate: pass `effort` in Task/Skill spawns only on Claude Code >= 2.1.154.
+**Agent model policy**: `model: "{DEFAULT_MODEL}"` — resolved from forge.yaml `agents.default_model`, else "sonnet" (standard tier). Fallback: `model: "opus"` if rate-limited. Feature gate: pass `effort` in Task/Skill spawns only on Claude Code >= 2.1.154.
 **NEVER use plan mode (EnterPlanMode).**
 
 ---

@@ -223,12 +223,24 @@ function buildActiveContext(dir, forgeYaml) {
     200,
   );
 
+  // Default agent model — resolved from forge.yaml's optional
+  // `agents.default_model` field, falling back to "sonnet" (the hardcoded
+  // default every command spec's "Agent model policy" line already uses).
+  // Rendered unconditionally, like stagingBranch/featurePattern above, so
+  // command specs always have a concrete value to reference — not a
+  // conditional *Note line like milestoneNote, which is omitted when unset.
+  const defaultModel = sanitizeContextValue(
+    forgeYaml.agents?.default_model ?? "sonnet",
+    100,
+  ) ?? "sonnet";
+
   return `\
 <!-- ForgeDock: managed-active -->
 **ForgeDock** is active in this directory (${safeDir}).
 ${nameNote}${repoNote}${descNote}${milestoneNote}
 - **Staging branch**: \`${stagingBranch}\`
 - **Feature branch pattern**: \`${featurePattern}\`
+- **Default agent model**: \`${defaultModel}\`
 
 ### Available pipeline commands
 

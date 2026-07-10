@@ -24,7 +24,11 @@ import { join, resolve, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { spawnSync } from "node:child_process";
 import os from "node:os";
-import { parseForgeYaml, sanitizeContextValue } from "../forge-utils.mjs";
+import {
+  parseForgeYaml,
+  sanitizeContextValue,
+  resolveModelAlias,
+} from "../forge-utils.mjs";
 
 // ---------------------------------------------------------------------------
 // Paths used by fail-open integration tests
@@ -130,6 +134,57 @@ describe("parseForgeYaml", () => {
     const yaml = "paths:\n  root: C:\\Users\\user\\project\n";
     const result = parseForgeYaml(yaml);
     assert.ok(result.paths?.root.includes("C:"), "Windows path should be preserved");
+  });
+
+  it("parses agents.default_model (issue #1851)", () => {
+    const yaml = 'agents:\n  default_model: "opus"\n';
+    const result = parseForgeYaml(yaml);
+    assert.equal(result.agents?.default_model, "opus");
+  });
+});
+
+// =============================================================================
+// resolveModelAlias (issue #1851 — forge.yaml agents.default_model)
+// =============================================================================
+
+describe("resolveModelAlias", () => {
+  it("returns null for null input", () => {
+    assert.equal(resolveModelAlias(null), null);
+  });
+
+  it("returns null for undefined input", () => {
+    assert.equal(resolveModelAlias(undefined), null);
+  });
+
+  it("returns null for an empty/whitespace-only string", () => {
+    assert.equal(resolveModelAlias(""), null);
+    assert.equal(resolveModelAlias("   "), null);
+  });
+
+  it("resolves the 'sonnet' alias to a full model ID", () => {
+    assert.equal(resolveModelAlias("sonnet"), "claude-sonnet-5");
+  });
+
+  it("resolves the 'opus' alias to a full model ID", () => {
+    assert.equal(resolveModelAlias("opus"), "claude-opus-4-6");
+  });
+
+  it("resolves the 'haiku' alias to a full model ID", () => {
+    assert.equal(resolveModelAlias("haiku"), "claude-haiku-4-5");
+  });
+
+  it("is case-insensitive", () => {
+    assert.equal(resolveModelAlias("OPUS"), "claude-opus-4-6");
+    assert.equal(resolveModelAlias("Sonnet"), "claude-sonnet-5");
+  });
+
+  it("passes through an unrecognized value unchanged (e.g. a full model ID)", () => {
+    assert.equal(resolveModelAlias("claude-opus-4-6"), "claude-opus-4-6");
+    assert.equal(resolveModelAlias("some-future-model"), "some-future-model");
+  });
+
+  it("trims surrounding whitespace before resolving", () => {
+    assert.equal(resolveModelAlias("  opus  "), "claude-opus-4-6");
   });
 });
 
