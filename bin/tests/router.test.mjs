@@ -747,6 +747,133 @@ describe("doctor --fix (forge#1944)", () => {
     assert.doesNotMatch(secondFix.stdout, /issue\(s\) auto-fixed/i);
   });
 
+  // Stub `gh` so it also answers Check 7's two subcommands (`label list` /
+  // `label create`), on top of the `--version`/`auth status` calls the plain
+  // stubTools() above already covers. State is tracked via a marker file
+  // written by the `label create` branch: before it exists, `label list`
+  // reports the workflow:* labels as absent (simulating a repo that has
+  // never had ForgeDock labels bootstrapped); once labelsSetup() has called
+  // `label create` for every label in bin/labels.json (forge#1944), `label
+  // list` reports them all present — mirroring gh's real idempotent
+  // create --force semantics closely enough for Check 7's detect/fix/recheck
+  // logic, without any network access or a real GitHub repo.
+  //
+  // POSIX-only: forgedock.mjs calls execFileSync("gh", [...]) (no shell) for
+  // label list/create. execFileSync without `shell: true` can only launch a
+  // real executable — on POSIX that includes an extensionless script with a
+  // `#!/bin/sh` shebang (the kernel itself handles it), so a plain shell
+  // stub placed first on PATH is sufficient and deterministic. On Windows,
+  // execFileSync without a shell cannot invoke a .cmd/.bat launcher at all
+  // (Windows' CreateProcess only recognizes real PE binaries for a bare,
+  // non-shell spawn — confirmed empirically: spawnSync("gh.cmd", ...) with
+  // shell:false fails with EINVAL even given the file's exact name), so
+  // there is no reliable way to fake `gh` for execFileSync callers on
+  // Windows without shipping a compiled binary. This test therefore only
+  // runs on POSIX platforms, which matches the project's CI (ubuntu-latest
+  // — see .github/workflows/ci.yml) and is where the real coverage lives.
+  function stubToolsWithLabels() {
+    const stubBin = mkdtempSync(join(os.tmpdir(), "fd-doctor-fix-label-stub-bin-"));
+    const present = [
+      "workflow:investigating",
+      "workflow:ready-to-build",
+      "workflow:building",
+      "workflow:in-review",
+      "workflow:awaiting-merge",
+      "workflow:merged",
+      "workflow:decomposed",
+      "workflow:invalid",
+    ].map((name) => ({ name }));
+
+    const ghStubPath = join(stubBin, "gh-stub.js");
+    writeFileSync(
+      ghStubPath,
+      [
+        'const fs = require("fs");',
+        'const path = require("path");',
+        'const marker = path.join(__dirname, ".labels-created");',
+        'const args = process.argv.slice(2);',
+        `const present = ${JSON.stringify(JSON.stringify(present))};`,
+        'if (args[0] === "label" && args[1] === "list") {',
+        '  console.log(fs.existsSync(marker) ? present : "[]");',
+        "  process.exit(0);",
+        "}",
+        'if (args[0] === "label" && args[1] === "create") {',
+        '  fs.writeFileSync(marker, "");',
+        "  process.exit(0);",
+        "}",
+        'if (args[0] === "auth" && args[1] === "status") process.exit(0);',
+        'console.log("gh version 2.60.0");',
+      ].join("\n") + "\n",
+      "utf-8",
+    );
+    writeFileSync(
+      join(stubBin, "gh"),
+      `#!/bin/sh\nexec node "${ghStubPath}" "$@"\n`,
+      { mode: 0o755 },
+    );
+    writeFileSync(
+      join(stubBin, "yq"),
+      "#!/bin/sh\necho 'yq (https://github.com/mikefarah/yq/) version v4.44.0'\n",
+      { mode: 0o755 },
+    );
+
+    return { PATH: `${stubBin}:${process.env.PATH}` };
+  }
+
+  // See the POSIX-only note above stubToolsWithLabels() — execFileSync
+  // cannot deterministically invoke a stub `gh` on Windows without a shell,
+  // so this test is skipped there. CI (ubuntu-latest) provides real coverage.
+  const itPosix = process.platform === "win32" ? it.skip : it;
+
+  itPosix("bootstraps missing GitHub workflow labels (Check 7) and is idempotent", () => {
+    const home = mkdtempSync(join(os.tmpdir(), "fd-doctor-fix-home-"));
+    const cwd = mkdtempSync(join(os.tmpdir(), "fd-doctor-fix-cwd-"));
+    writeFileSync(
+      join(home, ".gitconfig"),
+      "[user]\n\tname = Test User\n\temail = test@example.com\n",
+      "utf-8",
+    );
+    const extraEnv = stubToolsWithLabels();
+    const installRes = runCli(["install", "--fast"], { cwd, home, extraEnv });
+    assert.equal(installRes.status, 0, installRes.stdout + installRes.stderr);
+
+    // A real (non-placeholder) owner/repo so Check 4 resolves forgeOwner/
+    // forgeRepo and Check 7 actually runs instead of reporting "Skipped".
+    writeFileSync(
+      join(cwd, "forge.yaml"),
+      [
+        "project:",
+        '  name: "Real Project"',
+        '  owner: "real-org"',
+        '  repo: "real-repo"',
+        "paths:",
+        '  root: "/tmp/x"',
+        "branches:",
+        '  default: "main"',
+        '  staging: "staging"',
+        "",
+      ].join("\n"),
+      "utf-8",
+    );
+
+    const before = runCli(["doctor"], { cwd, home, extraEnv });
+    assert.equal(before.status, 1, before.stdout + before.stderr);
+    assert.match(before.stdout, /GitHub workflow labels/i);
+    assert.doesNotMatch(before.stdout, /issue\(s\) auto-fixed/i);
+
+    const fixRes = runCli(["doctor", "--fix"], { cwd, home, extraEnv });
+    assert.equal(fixRes.status, 0, fixRes.stdout + fixRes.stderr);
+    assert.match(fixRes.stdout, /GitHub workflow labels/i);
+    assert.match(fixRes.stdout, /issue\(s\) auto-fixed/i);
+
+    // Second consecutive --fix run reports no further fixes (idempotent) —
+    // the stub's marker file now makes `label list` report all workflow:*
+    // labels already present.
+    const secondFix = runCli(["doctor", "--fix"], { cwd, home, extraEnv });
+    assert.equal(secondFix.status, 0, secondFix.stdout + secondFix.stderr);
+    assert.doesNotMatch(secondFix.stdout, /issue\(s\) auto-fixed/i);
+  });
+
   it("plain `doctor` (no --fix) is unaffected — never auto-repairs, never prints an auto-fixed summary", () => {
     const { home, cwd, extraEnv } = setupInstall();
     const targetDir = join(home, ".claude", "commands");
