@@ -10,7 +10,7 @@
 #   # Add forge.yaml to your .gitignore if it contains sensitive paths
 #
 # Required sections: project, paths, branches
-# Optional sections: agents, repos, project_board, services, review, verification, deploy, billing, devdocs, adaptive_scripts, learned, attribution
+# Optional sections: agents, repos, project_board, pipeline, services, review, verification, deploy, billing, devdocs, adaptive_scripts, learned, attribution
 
 # =============================================================================
 # PROJECT (REQUIRED)
@@ -255,6 +255,42 @@ branches:
 #     - repo: "acme-org/acme-mcp-server"
 #       option_id: "xxxxxxxx"
 #       label: "MCP Server"
+
+# =============================================================================
+# PIPELINE (OPTIONAL)
+# Tuning knobs for the /orchestrate batch engine — stall detection and the
+# review-finding cascade-control token budget. All keys optional; sane
+# defaults apply when omitted (read via `yq '.pipeline.KEY // default'`).
+# Commands: orchestrate
+# =============================================================================
+
+# pipeline:
+#   # Minutes an agent may sit idle (no FORGE:HEARTBEAT / label change) before
+#   # /orchestrate's Step 4B.5 stall detector treats it as stuck and attempts
+#   # an auto-resume. Default: 15.
+#   stall_timeout_minutes: 15
+#
+#   # Per-batch token ceiling for /orchestrate's Step 4C review-finding cascade
+#   # control. Distinct from the `--budget N` dollar-cost flag (economic
+#   # scheduling, forge#1743): that mechanism is opt-in, dollar-denominated, and
+#   # gates the *original* issue dispatch order. This ceiling is always-on,
+#   # token-denominated, and scopes ONLY to Step 4C's cascade dispatch of
+#   # review-finding issues spawned mid-batch. P1/P2 findings are NEVER gated by
+#   # this budget — only P3-and-below dispatch volume is reduced once the
+#   # ceiling is approached; additional findings defer to the Step 4F
+#   # Completion Sweep instead of spawning more individual /work-on pipelines.
+#   # Default: 900000 (sized for ~6 average P3 pipelines at the estimate below).
+#   token_budget_per_batch: 900000
+#
+#   # Estimated token cost of a single P3-or-lower review-finding /work-on
+#   # pipeline, used to decrement token_budget_per_batch above. There is no
+#   # live per-agent token telemetry to read yet (see commands/audit-agents.md,
+#   # which tracks idle%/active-time/resumes, not token counts) — this is a
+#   # fixed estimate, not a measurement. A same-run surface-area-clubbed batch
+#   # issue (forge#1818) is charged this estimate ONCE for the whole cluster,
+#   # not once per member finding. Default: 150000 (midpoint of the commonly
+#   # observed 75k-260k token range for a single P3 review-finding pipeline).
+#   token_estimate_per_finding: 150000
 
 # =============================================================================
 # SERVICES (OPTIONAL)

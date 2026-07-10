@@ -249,6 +249,26 @@ declare -A EDGE_BRIEFED
 # scope (not per-agent) so Step 4C can read the latest value on every iteration.
 BATCH_FULLY_GATED=false
 
+# Per-batch token budget for Step 4C's review-finding cascade control (forge#1858).
+# Distinct from the $-denominated `--budget N` flag (economic scheduling, forge#1743,
+# Step 4A-pre.0 above) — that mechanism is opt-in and gates the *original* issue
+# dispatch order; this ceiling is always-on, token-denominated, and scopes ONLY to
+# Step 4C's cascade dispatch of review-finding issues. Declared once here (batch scope,
+# not per-agent) so BATCH_TOKEN_SPEND accumulates correctly across every Step 4C run
+# this session performs.
+TOKEN_BUDGET=$(yq '.pipeline.token_budget_per_batch // 900000' forge.yaml 2>/dev/null || echo 900000)
+TOKEN_ESTIMATE_PER_FINDING=$(yq '.pipeline.token_estimate_per_finding // 150000' forge.yaml 2>/dev/null || echo 150000)
+BATCH_TOKEN_SPEND=0
+TOKEN_DEFERRED=()   # findings deferred by the token-budget rule this run (re-evaluable in Step 4F.2.6)
+
+# Surface-area batching accumulators (forge#1818), promoted to batch scope here so the
+# Step 6B report (forge#1858) sees the full-run total instead of only the last Step 4C
+# completion cycle to touch them. SURFACE_FILE_MEMBERS (the per-cycle file->members grouping
+# map used inside Step 4C) is intentionally re-declared fresh each cycle — it is rebuilt from
+# the current QUEUED_FINDINGS every time and carries no cross-cycle state of its own.
+SURFACE_BATCHED_FINDINGS=()   # all member issue numbers absorbed into a batch across the run
+SURFACE_BATCH_COUNT=0         # count of batch issues created across the run
+
 for NUM in {ready_issue_numbers}; do
   PR_BASE=$(bash ~/.claude/scripts/classify-lane.sh "$NUM" -R {GH_REPO}) || {
     echo "ERROR: classify-lane.sh failed for #$NUM — adding needs-human label and skipping" >&2
@@ -982,12 +1002,13 @@ For each spawned finding, determine whether it should be **executed** or **defer
 2. **Priority override** (P1 or P2 → always execute): If the finding is labeled P1 or P2, skip all remaining heuristics and execute. Rationale: high-priority findings must never be suppressed by keyword matching.
 3. **Comment/typo heuristic** (P3 and below only): Finding title contains the word "comment" or "typo" (case-insensitive). These are 1-line cosmetic fixes that do not block other work.
 4. **P3 + same-file overlap**: Finding is labeled `P3` AND the file it targets overlaps with ANY file already in the current batch (active or queued in the DAG). Rationale: same-file P3 findings add predecessor edges that serialize agents — one finding per original issue increases wall-clock time with no proportional value.
+5. **Per-batch token budget** (P3 and below only, applied AFTER surface-area batching below — see "Per-batch token budget gate") <!-- Added: forge#1858 -->: Once `BATCH_TOKEN_SPEND` would exceed `TOKEN_BUDGET`, additional P3-and-below units (an unclubbed finding, or an already-clubbed batch issue) defer rather than dispatch. This is NOT part of the per-finding rule 0-4 chain immediately below — it is a quantity gate applied to the POST-clubbing `QUEUED_FINDINGS` list, so a same-run surface-area batch issue (surface-area batching below) is charged once for the whole cluster, not once per member. P1/P2 are NEVER gated by it (they are excluded by rule 2 before reaching this gate, same as they are excluded from rules 3-4).
 
-**Defer** (do NOT add to the DAG) if rules 0, 1, 3, or 4 match.
+**Defer** (do NOT add to the DAG) if rules 0, 1, 3, 4, or 5 match.
 
 **Execute** (add to the DAG) if:
 - Rule 2 matches (P1 or P2) — AND rule 0 did not already match (rule 0 is checked first and overrides rule 2)
-- None of the defer rules matched (generation 1, P3 with no file overlap, not a keyword match, batch not fully gated)
+- None of the defer rules matched (generation 1, P3 with no file overlap, not a keyword match, batch not fully gated) AND rule 5's token budget still has headroom for this unit
 
 **Before running the loop, build the batch file list (MANDATORY for Heuristic 3):**
 
@@ -1071,8 +1092,9 @@ Cascade-spawned findings collected within a single `/orchestrate` run never pass
 # exclusions as phase-1-resolve.md. Both sites go through jq test() (Oniguruma)
 # with identical patterns — NOT grep ERE — so the two batching checks cannot
 # classify the same issue body differently. <!-- forge#1837 -->
+# NOTE: SURFACE_BATCHED_FINDINGS and SURFACE_BATCH_COUNT are declared once in Step 4A.pre
+# (batch scope) — do NOT re-initialize them here, this block runs per-agent-completion cycle.
 declare -A SURFACE_FILE_MEMBERS
-SURFACE_BATCHED_FINDINGS=()
 
 # Defensive cap on gh issue view fan-out. QUEUED_FINDINGS is already bounded by
 # upstream cascade control; this cap holds even if that bound is later loosened,
@@ -1161,6 +1183,7 @@ BATCH_EOF
     # with the single batch issue, so the dispatch step below operates on the
     # batch unit and skips the individual members.
     SURFACE_BATCHED_FINDINGS+=("${CHUNK[@]}")
+    [ -n "$BATCH_ISSUE_NUM" ] && SURFACE_BATCH_COUNT=$((SURFACE_BATCH_COUNT + 1))   # forge#1858 Step 6B counter
     QUEUED_FINDINGS=($(printf '%s\n' "${QUEUED_FINDINGS[@]}" | grep -vxF -f <(printf '%s\n' "${CHUNK[@]}") || true))
     [ -n "$BATCH_ISSUE_NUM" ] && QUEUED_FINDINGS+=("$BATCH_ISSUE_NUM")
     echo "Batched ${#CHUNK[@]} findings into #${BATCH_ISSUE_NUM}; members removed from QUEUED_FINDINGS and the DAG."
@@ -1170,6 +1193,44 @@ done
 
 Findings clustered here are replaced by their batch issue in `QUEUED_FINDINGS` (and therefore the DAG, which is built from `QUEUED_FINDINGS` in the dispatch step below) — the individual member issues in `SURFACE_BATCHED_FINDINGS` are never dispatched. Findings that remain ungrouped (fewer than 2 sharing a file in this collection round) stay individually queued below; they retain default-batchable eligibility and will be picked up by the next `/orchestrate` invocation's Phase 1 resolve if a same-file or leaf-directory cluster later forms across runs.
 
+**Per-batch token budget gate (P3-and-below only — MANDATORY, runs on the POST-clubbing `QUEUED_FINDINGS` list):** <!-- Added: forge#1858 -->
+
+Rule 5 from the evaluation order above. Charges ONE `TOKEN_ESTIMATE_PER_FINDING` per unit remaining in `QUEUED_FINDINGS` at this point — a same-run surface-area-clubbed batch issue counts as a single unit (its members were already replaced by the batch issue number above), never once per member. `TOKEN_BUDGET`, `TOKEN_ESTIMATE_PER_FINDING`, and `BATCH_TOKEN_SPEND` were declared in Step 4A.pre and persist across every Step 4C run this session performs — do NOT re-initialize `BATCH_TOKEN_SPEND` here. This is a DIFFERENT mechanism from the `--budget N` dollar-cost flag (economic scheduling, forge#1743, `should_dispatch()` in Step 4A-pre.0): that one is opt-in, dollar-denominated, and gates only the *original* `SORTED_READY_SET` dispatch loop — it is never consulted here.
+
+```bash
+TOKEN_BUDGET_DEFERRED_THIS_RUN=()
+
+for FINDING_NUM in "${QUEUED_FINDINGS[@]}"; do
+  FINDING_PRIORITY=$(gh issue view "$FINDING_NUM" -R {GH_REPO} --json labels \
+    --jq '([.labels[].name | select(startswith("priority:P"))] | .[0] // "priority:P3") | ltrimstr("priority:")' 2>/dev/null || echo "P3")
+
+  # P1/P2 are NEVER gated by the token budget — they were queued by rule 2 above
+  # regardless of budget headroom; skip them here and leave them in QUEUED_FINDINGS.
+  if [ "$FINDING_PRIORITY" = "P1" ] || [ "$FINDING_PRIORITY" = "P2" ]; then
+    continue
+  fi
+
+  PROJECTED_TOKEN_SPEND=$((BATCH_TOKEN_SPEND + TOKEN_ESTIMATE_PER_FINDING))
+  if [ "$PROJECTED_TOKEN_SPEND" -gt "$TOKEN_BUDGET" ]; then
+    TOKEN_DEFERRED+=("$FINDING_NUM")
+    TOKEN_BUDGET_DEFERRED_THIS_RUN+=("$FINDING_NUM")
+    DEFERRED_REASONS[$FINDING_NUM]="token budget exceeded (est. ${TOKEN_ESTIMATE_PER_FINDING} tokens would push batch spend to ${PROJECTED_TOKEN_SPEND} > ceiling ${TOKEN_BUDGET})"
+    echo "TOKEN BUDGET DEFER: #${FINDING_NUM} (est. ${TOKEN_ESTIMATE_PER_FINDING} tokens, projected total ${PROJECTED_TOKEN_SPEND} > ${TOKEN_BUDGET})"
+  else
+    BATCH_TOKEN_SPEND=$PROJECTED_TOKEN_SPEND
+  fi
+done
+
+# Remove budget-deferred units from QUEUED_FINDINGS — they move to DEFERRED_FINDINGS/
+# TOKEN_DEFERRED instead of dispatching this cycle. Re-evaluable in Step 4F.2.6, never
+# permanent (distinct from the generation>=2 bucket in Step 4F.1).
+if [ "${#TOKEN_BUDGET_DEFERRED_THIS_RUN[@]}" -gt 0 ]; then
+  QUEUED_FINDINGS=($(printf '%s\n' "${QUEUED_FINDINGS[@]}" | grep -vxF -f <(printf '%s\n' "${TOKEN_BUDGET_DEFERRED_THIS_RUN[@]}") || true))
+  DEFERRED_FINDINGS+=("${TOKEN_BUDGET_DEFERRED_THIS_RUN[@]}")
+  echo "Token budget: deferred ${#TOKEN_BUDGET_DEFERRED_THIS_RUN[@]} P3-and-below unit(s) this cycle — batch spend now ${BATCH_TOKEN_SPEND}/${TOKEN_BUDGET}"
+fi
+```
+
 **For queued (non-deferred) findings:**
 
 1. **Add them to the dependency DAG.** They are implementation issues — same as issues spawned by investigations in Phase 2. Compute their predecessor sets using the same conflict detection (Step 3C Layers 1-4) against all remaining blocked/active issues.
@@ -1178,7 +1239,7 @@ Findings clustered here are replaced by their batch issue in `QUEUED_FINDINGS` (
    ```
    Agent #{COMPLETED} spawned {count} new finding issues: #{A}, #{B}
    Added to DAG: #{A} (predecessors: {}), #{B} (predecessors: {#{X}})
-   Deferred (cascade control): #{C} (P3 same-file), #{D} (comment heuristic)
+   Deferred (cascade control): #{C} (P3 same-file), #{D} (comment heuristic), #{E} (token budget)
    ```
 4. **Re-run file-overlap detection** (Step 3C) on the expanded issue set — finding issues may conflict with active or queued issues that touch the same files. Ready findings dispatch immediately via the standard Step 4B dispatch loop.
 
@@ -1340,12 +1401,13 @@ If an agent reports failure or error:
 
 **WHY THIS EXISTS**: Deferred findings accumulate during the batch because of file-overlap and cascade-control heuristics (Step 4C). But once the DAG drains, the conditions that caused deferral often no longer apply — completed issues no longer occupy files, so same-file overlap vanishes. Without this sweep, deferred findings silently pile up across runs and never get resolved.
 
-**Step 4F.1: Classify deferred findings into permanent vs re-evaluable vs idle-gated**
+**Step 4F.1: Classify deferred findings into permanent vs re-evaluable vs idle-gated vs token-gated**
 
 ```bash
 PERMANENT_DEFERRED=()
 SWEEP_CANDIDATES=()
 IDLE_DEFERRED=()   # <!-- Added: forge#1814 -->
+TOKEN_GATED=()     # <!-- Added: forge#1858 -->
 
 for FINDING_NUM in "${DEFERRED_FINDINGS[@]}"; do
   DEFER_REASON="${DEFERRED_REASONS[$FINDING_NUM]}"
@@ -1362,13 +1424,19 @@ for FINDING_NUM in "${DEFERRED_FINDINGS[@]}"; do
   # time unless a human has actually merged a gating PR in the meantime.
   elif echo "$DEFER_REASON" | grep -qi "batch fully human-gated"; then
     IDLE_DEFERRED+=($FINDING_NUM)
+  # "Token budget exceeded" deferrals (forge#1858) are ALSO their own bucket — re-evaluating
+  # them via the file-overlap logic in Step 4F.2 would incorrectly clear them (they were never
+  # deferred for file-overlap reasons) without checking whether token headroom actually exists.
+  # See Step 4F.2.6 below, which mirrors the Step 4F.2.5 idle-gated pattern.
+  elif echo "$DEFER_REASON" | grep -qi "token budget"; then
+    TOKEN_GATED+=($FINDING_NUM)
   else
     # All other deferrals (comment/typo, P3 same-file) are re-evaluable
     SWEEP_CANDIDATES+=($FINDING_NUM)
   fi
 done
 
-echo "Completion sweep: ${#SWEEP_CANDIDATES[@]} re-evaluable, ${#PERMANENT_DEFERRED[@]} permanent, ${#IDLE_DEFERRED[@]} idle-gated"
+echo "Completion sweep: ${#SWEEP_CANDIDATES[@]} re-evaluable, ${#PERMANENT_DEFERRED[@]} permanent, ${#IDLE_DEFERRED[@]} idle-gated, ${#TOKEN_GATED[@]} token-gated"
 ```
 
 **Step 4F.2: Re-evaluate sweep candidates**
@@ -1439,6 +1507,34 @@ for FINDING_NUM in "${IDLE_DEFERRED[@]}"; do
   fi
 done
 ```
+
+**Step 4F.2.6: Re-evaluate token-gated deferrals** <!-- Added: forge#1858 -->
+
+The original batch has now drained — the token spend that caused these deferrals belongs to a batch that is no longer competing for dispatch. Re-evaluate `TOKEN_GATED` against a **fresh, sweep-scoped** token allowance (`SWEEP_TOKEN_SPEND`, separate from the drained `BATCH_TOKEN_SPEND` — do NOT reuse or reset the original batch counter, which other reporting still reads in Step 6B). This mirrors the file-overlap re-check in Step 4F.2 (which also benefits from the drained-DAG state) rather than the idle-gated re-check in Step 4F.2.5 (which re-tests an external condition, not a resettable budget).
+
+```bash
+# Skip entirely if nothing was token-gated this run.
+if [ "${#TOKEN_GATED[@]}" -gt 0 ]; then
+  SWEEP_TOKEN_SPEND=0
+
+  for FINDING_NUM in "${TOKEN_GATED[@]}"; do
+    STATE=$(gh issue view "$FINDING_NUM" -R {GH_REPO} --json state --jq '.state' 2>/dev/null || echo "")
+    [ "$STATE" = "CLOSED" ] && continue   # resolved by another process — drop silently
+
+    PROJECTED_SWEEP_SPEND=$((SWEEP_TOKEN_SPEND + TOKEN_ESTIMATE_PER_FINDING))
+    if [ "$PROJECTED_SWEEP_SPEND" -gt "$TOKEN_BUDGET" ]; then
+      SWEEP_STILL_DEFERRED+=($FINDING_NUM)
+      echo "Sweep: #${FINDING_NUM} still deferred (token budget — sweep allowance ${TOKEN_BUDGET} would be exceeded at ${PROJECTED_SWEEP_SPEND})"
+    else
+      SWEEP_TOKEN_SPEND=$PROJECTED_SWEEP_SPEND
+      SWEEP_EXECUTE+=($FINDING_NUM)
+      echo "Sweep: #${FINDING_NUM} cleared for execution (fits fresh sweep token allowance — ${SWEEP_TOKEN_SPEND}/${TOKEN_BUDGET})"
+    fi
+  done
+fi
+```
+
+Findings that still don't fit the fresh sweep allowance remain deferred — never permanent (unlike `generation >= 2`). They are re-evaluated again on the next `/orchestrate` invocation or completion sweep, exactly like comment/typo and P3-same-file deferrals.
 
 **Step 4F.3: Dispatch cleared findings**
 
@@ -1589,6 +1685,8 @@ Completion Sweep Results:
   Permanently deferred (gen2): #{D} (generation >= 2 cascade cap)
   Idle-gated — still deferred: #{E} (batch still fully human-gated — waiting on a merge)
   Idle-gated — cleared: #{F} (a gating PR merged since deferral — no longer idle)
+  Token-gated — cleared: #{G} (fits fresh sweep token allowance — batch spend ${SWEEP_TOKEN_SPEND}/${TOKEN_BUDGET})
+  Token-gated — still deferred: #{H} (sweep allowance also exhausted — re-evaluable next run)
 ```
 
 **After sweep agents complete** (or if no findings were dispatched): output the budget deferred-issues report (if applicable), then proceed to Phase 5.
@@ -1598,6 +1696,7 @@ Completion Sweep Results:
 - Overriding generation >= 2 deferrals — the cascade cap is absolute.
 - Skipping the sweep because "there are only a few" deferred findings — even one deferred finding represents unresolved work.
 - Clearing an idle-gated deferral (forge#1814) without recomputing `BATCH_FULLY_GATED` fresh at sweep time — a stale "not gated" read would re-introduce the exact net-negative churn this policy exists to stop.
+- Clearing a token-gated deferral (forge#1858) by reusing the drained `BATCH_TOKEN_SPEND` instead of the fresh `SWEEP_TOKEN_SPEND` allowance — the whole point of Step 4F.2.6 is that the *original* batch's spend is no longer relevant once it has drained.
 
 ### Step 4F.5: Budget Deferred-Issues Report (conditional) <!-- Added: forge#1743 -->
 
