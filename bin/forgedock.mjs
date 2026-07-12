@@ -28,6 +28,7 @@ import {
   parseInstallTier,
   writeForgeYaml,
   backupExisting,
+  backfillForgeYaml,
   manualLowConfidenceKeys,
   isEphemeralCachePath,
   writeInstallReceipt,
@@ -2725,6 +2726,7 @@ function help() {
     ["npx forgedock resume-stalled [--dry-run]", "Fleet stall recovery — re-dispatch expired-lease issues"],
     ["npx forgedock demo", "Set up a risk-free demo repo and print next steps"],
     ["npx forgedock labels [setup] [--repo owner/repo]", "Bootstrap ForgeDock-managed labels on a GitHub repo (idempotent)"],
+    ["npx forgedock config migrate [dir]", "Backfill missing optional sections into an existing forge.yaml (idempotent)"],
     ["npx forgedock watch [--repo owner/repo]", "Live per-agent orchestration view (Ctrl+C to exit)"],
     ["npx forgedock report [--days 30] [--md] [--json]", "30-day pipeline impact receipts for your repo"],
     ["npx forgedock doctor", "Check installation health"],
@@ -3069,7 +3071,7 @@ async function watch() {
 const SPLASH_COMMANDS = new Set(["run", "run-issue", "resume-stalled", "demo", "doctor", "watch", "help", "--help", "-h"]);
 const KNOWN_COMMANDS = new Set([
   "install", "init", "enable", "disable", "status", "uninstall", "update",
-  "run", "run-issue", "resume-stalled", "demo", "doctor", "watch", "labels", "help", "--help", "-h",
+  "run", "run-issue", "resume-stalled", "demo", "doctor", "watch", "labels", "config", "help", "--help", "-h",
   "version", "--version", "-v",
 ]);
 if (SPLASH_COMMANDS.has(command) || !KNOWN_COMMANDS.has(command)) splash(command);
@@ -3214,6 +3216,38 @@ switch (command) {
       console.log(`${RED}Unknown labels subcommand: ${subcommand}${RESET}`);
       console.log(
         `Usage: ${CYAN}npx forgedock labels [setup] [--repo owner/repo]${RESET}`,
+      );
+      exitCode = 1;
+    }
+    break;
+  }
+  case "config": {
+    const subcommand = positional[1];
+    if (subcommand === "migrate") {
+      // Directory override mirrors `status [dir]` — defaults to cwd.
+      const dir = positional[2] ? resolve(positional[2]) : process.cwd();
+      const result = backfillForgeYaml(dir);
+      if (!result.present) {
+        console.log(
+          `${RED}No forge.yaml found in ${dir}.${RESET}\n` +
+            `  Run ${cyan("npx forgedock init")} to generate one.`,
+        );
+        exitCode = 1;
+      } else if (result.added.length === 0) {
+        console.log(
+          `${GREEN}forge.yaml already has all ${result.alreadyPresent.length} optional sections.${RESET} Nothing to migrate.`,
+        );
+      } else {
+        console.log(`${GREEN}Backfilled ${result.added.length} missing optional section(s) into forge.yaml:${RESET}`);
+        for (const key of result.added) console.log(`  ${GREEN}+${RESET} ${key}`);
+        console.log(`\n  Sections already present (unchanged): ${result.alreadyPresent.join(", ") || "none"}`);
+        console.log(`\n  All added sections are commented out — edit forge.yaml to enable the ones you need.`);
+      }
+    } else {
+      console.log(`${RED}Unknown config subcommand: ${subcommand ?? "(none)"}${RESET}`);
+      console.log(
+        `Usage: ${CYAN}npx forgedock config migrate [dir]${RESET}\n` +
+          `  Backfills any of the 16 optional forge.yaml sections missing from an existing config (idempotent).`,
       );
       exitCode = 1;
     }
