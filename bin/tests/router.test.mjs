@@ -693,6 +693,42 @@ describe("doctor --fix (forge#1944)", () => {
     assert.doesNotMatch(secondFix.stdout, /issue\(s\) auto-fixed/i);
   });
 
+  // Checks 1, 5, and 5c all funnel repair through the shared
+  // runInstallRepairOnce()/installRepairRan memoization. Before forge#1975,
+  // the fixed()-vs-pass() decision for each check read that SHARED flag
+  // instead of tracking its own pre-repair broken state — so when Check 1
+  // was broken and triggered repair, Checks 5 and 5c (already healthy,
+  // never broken themselves) would also report "repaired" and inflate the
+  // fixesApplied counter from 1 to 3. This test corrupts ONLY Check 1's
+  // state — a fresh install leaves the SessionStart hook (Check 5) and its
+  // script path (Check 5c) healthy — and asserts the counter reports
+  // exactly 1 fix, not 3.
+  it("does not inflate fixesApplied for healthy sibling checks when only one check is broken (forge#1975)", () => {
+    const { home, cwd, extraEnv } = setupInstall();
+    const targetDir = join(home, ".claude", "commands");
+    const targetPath = join(targetDir, "work-on.md");
+    const files = readFileSync(targetPath, "utf-8");
+    unlinkSync(targetPath);
+    writeFileSync(targetPath, files + "\nstale local edit\n", "utf-8");
+    markAsCopiedFile(home, "work-on.md");
+
+    const before = runCli(["doctor"], { cwd, home, extraEnv });
+    assert.equal(before.status, 1, before.stdout + before.stderr);
+    assert.match(before.stdout, /Command files/i);
+
+    const fixRes = runCli(["doctor", "--fix"], { cwd, home, extraEnv });
+    assert.equal(fixRes.status, 0, fixRes.stdout + fixRes.stderr);
+    assert.match(fixRes.stdout, /Command files/i);
+    // Exactly one check was actually broken and repaired — the counter must
+    // report 1, not 3 (Checks 5/5c riding along on the shared repair flag).
+    assert.match(fixRes.stdout, /\b1 issue\(s\) auto-fixed\b/i);
+    assert.doesNotMatch(fixRes.stdout, /\b[23] issue\(s\) auto-fixed\b/i);
+    // SessionStart hook / script path checks were healthy the whole time —
+    // they must report as a plain pass, never as "(repaired)".
+    assert.doesNotMatch(fixRes.stdout, /SessionStart hook\b.*\(repaired\)/i);
+    assert.doesNotMatch(fixRes.stdout, /SessionStart hook script path\b.*\(repaired\)/i);
+  });
+
   it("re-registers a completely missing SessionStart hook (Check 5)", () => {
     const { home, cwd, extraEnv } = setupInstall();
     const settingsPath = join(home, ".claude", "settings.json");

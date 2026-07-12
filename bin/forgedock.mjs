@@ -1874,6 +1874,16 @@ async function doctor(fix = false) {
    * Reuses forge() (bin/journey.mjs) verbatim — the same repair path already
    * used by `npx forgedock update` (see relinkAndHint()) — rather than
    * duplicating symlink/copy-mode or hook-registration logic here.
+   *
+   * NOTE: `installRepairRan` only memoizes whether the repair primitive
+   * itself has executed during this invocation — it is a cross-check flag
+   * by necessity (any of the three checks below can trigger it, and it must
+   * not re-run for the other two). It must NOT be read by an individual
+   * check to decide whether THAT check was fixed — a check that was already
+   * healthy before a sibling check triggered repair would incorrectly
+   * report "repaired" too. Each check below tracks its own pre-repair
+   * broken state in a local `*WasBroken` variable for that decision instead.
+   * (forge#1975)
    */
   let installRepairRan = false;
   async function runInstallRepairOnce() {
@@ -1954,7 +1964,9 @@ async function doctor(fix = false) {
     }
 
     let cmdFiles = await detectCommandFiles();
+    let cmdFilesWasBroken = false;
     if (!cmdFiles.error && !cmdFiles.ok && fix) {
+      cmdFilesWasBroken = true;
       await runInstallRepairOnce();
       cmdFiles = await detectCommandFiles();
     }
@@ -1962,7 +1974,7 @@ async function doctor(fix = false) {
     if (cmdFiles.error) {
       fail("Command files", `Could not read commands directory: ${cmdFiles.error}`);
     } else if (cmdFiles.ok) {
-      if (fix && installRepairRan) {
+      if (fix && cmdFilesWasBroken) {
         fixed("Command files", `${cmdFiles.checked} files installed (repaired)`);
       } else {
         pass("Command files", `${cmdFiles.checked} files installed`);
@@ -2153,7 +2165,9 @@ async function doctor(fix = false) {
     }
 
     let hookReg = detectSessionStartHookRegistered();
+    let hookRegWasBroken = false;
     if (!hookReg.error && !hookReg.ok && fix) {
+      hookRegWasBroken = true;
       await runInstallRepairOnce();
       hookReg = detectSessionStartHookRegistered();
     }
@@ -2161,7 +2175,7 @@ async function doctor(fix = false) {
     if (hookReg.error) {
       fail("SessionStart hook", `Cannot read ~/.claude/settings.json: ${hookReg.error}. Run: npx forgedock install`);
     } else if (hookReg.ok) {
-      if (fix && installRepairRan) {
+      if (fix && hookRegWasBroken) {
         fixed("SessionStart hook", "registered in ~/.claude/settings.json (repaired)");
       } else {
         pass("SessionStart hook", "registered in ~/.claude/settings.json");
@@ -2221,7 +2235,9 @@ async function doctor(fix = false) {
   // ever surfaced. This check catches that silent-failure case. (forge#1895)
   {
     let hookPathResult = detectSessionStartHookPath();
+    let hookPathWasBroken = false;
     if (hookPathResult.state === "dangling" && fix) {
+      hookPathWasBroken = true;
       await runInstallRepairOnce();
       hookPathResult = detectSessionStartHookPath();
     }
@@ -2237,7 +2253,7 @@ async function doctor(fix = false) {
         `Could not parse a script path out of the registered hook command ("${hookPathResult.command}"). Run: npx forgedock install`,
       );
     } else if (hookPathResult.state === "ok") {
-      if (fix && installRepairRan) {
+      if (fix && hookPathWasBroken) {
         fixed("SessionStart hook script path", `refreshed to a valid path (${hookPathResult.path})`);
       } else {
         pass("SessionStart hook script path", `exists on disk (${hookPathResult.path})`);
