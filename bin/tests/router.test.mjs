@@ -423,6 +423,54 @@ describe("router", () => {
   });
 });
 
+describe("version command / --version, -v flags (#1981)", () => {
+  it("`version` prints the local version and exits 0", () => {
+    const res = runCli(["version"], { home: mkdtempSync(join(os.tmpdir(), "fd-ver-")) });
+    assert.equal(res.status, 0, res.stdout + res.stderr);
+    assert.match(res.stdout, /forgedock v\d+\.\d+\.\d+/);
+  });
+
+  it("`--version` behaves identically to `version`", () => {
+    const res = runCli(["--version"], { home: mkdtempSync(join(os.tmpdir(), "fd-ver-flag-")) });
+    assert.equal(res.status, 0, res.stdout + res.stderr);
+    assert.match(res.stdout, /forgedock v\d+\.\d+\.\d+/);
+  });
+
+  it("`-v` behaves identically to `version`", () => {
+    const res = runCli(["-v"], { home: mkdtempSync(join(os.tmpdir(), "fd-ver-short-")) });
+    assert.equal(res.status, 0, res.stdout + res.stderr);
+    assert.match(res.stdout, /forgedock v\d+\.\d+\.\d+/);
+  });
+
+  it("does not double-print the branded splash logo before the version line", () => {
+    // version/--version/-v are deliberately excluded from SPLASH_COMMANDS —
+    // splash() renders to stderr, so stdout must contain only the version
+    // output, not a duplicated logo block.
+    const res = runCli(["version"], { home: mkdtempSync(join(os.tmpdir(), "fd-ver-nosplash-")) });
+    assert.equal(res.status, 0, res.stdout + res.stderr);
+    const versionLines = res.stdout.split("\n").filter((l) => /forgedock v/.test(l));
+    assert.equal(versionLines.length, 1, res.stdout);
+  });
+
+  it("help lists the version command and flag", () => {
+    const res = runCli(["help"], { home: mkdtempSync(join(os.tmpdir(), "fd-ver-help-")) });
+    assert.equal(res.status, 0);
+    assert.match(res.stdout, /npx forgedock version/);
+    assert.match(res.stdout, /--version/);
+  });
+
+  it("does not hang or crash when the npm registry is unreachable (offline-safe)", () => {
+    // No network stub is injectable for fetchLatestVersion() (it hits the
+    // real registry directly by design — see bin/forgedock.mjs comment on
+    // fetchLatestVersion), so this exercises the real best-effort path: the
+    // command must still print the local version and exit 0 within the
+    // process timeout, proving the 5s internal timeout on the latest-version
+    // check never blocks the primary output.
+    const res = runCli(["version"], { home: mkdtempSync(join(os.tmpdir(), "fd-ver-net-"))});
+    assert.equal(res.status, 0, res.stdout + res.stderr);
+  });
+});
+
 describe("doctor — forge.yaml placeholder / staleness checks (forge#1850)", () => {
   function stubTools() {
     const stubBin = mkdtempSync(join(os.tmpdir(), "fd-doctor-stub-bin-"));
