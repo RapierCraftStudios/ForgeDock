@@ -2731,6 +2731,7 @@ function help() {
     ["npx forgedock doctor --fix", "Auto-fix deterministic issues (symlinks, hook, labels, legacy block)"],
     ["npx forgedock update", "Pull latest & reinstall"],
     ["npx forgedock uninstall", "Remove commands"],
+    ["npx forgedock version", "Print the installed version and check for updates"],
     ["npx forgedock help", "Show this help"],
   ];
   const flagRows = [
@@ -2739,6 +2740,7 @@ function help() {
     ["--manual", "Plain text prompts instead of the review screen (init)"],
     ["--verbose", "Show detection sources for every field (init)"],
     ["--minimal", "Generate a minimal forge.yaml with required sections only (init)"],
+    ["--version, -v", "Print the installed version and check for updates"],
   ];
 
   process.stdout.write(
@@ -3068,6 +3070,7 @@ const SPLASH_COMMANDS = new Set(["run", "run-issue", "resume-stalled", "demo", "
 const KNOWN_COMMANDS = new Set([
   "install", "init", "enable", "disable", "status", "uninstall", "update",
   "run", "run-issue", "resume-stalled", "demo", "doctor", "watch", "labels", "help", "--help", "-h",
+  "version", "--version", "-v",
 ]);
 if (SPLASH_COMMANDS.has(command) || !KNOWN_COMMANDS.has(command)) splash(command);
 
@@ -3213,6 +3216,28 @@ switch (command) {
         `Usage: ${CYAN}npx forgedock labels [setup] [--repo owner/repo]${RESET}`,
       );
       exitCode = 1;
+    }
+    break;
+  }
+  case "version":
+  case "--version":
+  case "-v": {
+    // Print the local version immediately — must work offline/instantly,
+    // no network dependency for the primary output (getVersion() reads
+    // package.json off disk only). The latest-version check below is
+    // best-effort: fetchLatestVersion() has its own 5s timeout and never
+    // rejects, so a slow/offline network never blocks or fails this
+    // command. Mirrors the version-check message pattern already used by
+    // update() (see the npm/npx branch above).
+    const localVersion = getVersion();
+    console.log(`forgedock ${localVersion ? `v${localVersion}` : `${YELLOW}version unknown${RESET}`}`);
+
+    const latestVersion = await fetchLatestVersion();
+    if (latestVersion && localVersion && compareVersions(latestVersion, localVersion) > 0) {
+      console.log(
+        `  ${GREEN}New version available: v${latestVersion}${RESET} (you have v${localVersion}). ` +
+          `Run ${CYAN}npx forgedock update${RESET} to fetch it.`,
+      );
     }
     break;
   }
