@@ -282,9 +282,27 @@ gh issue edit "$ISSUE_NUMBER" "${GH_ARGS[@]}" --add-label "$EFFECTIVE_LABEL"
 # have doesn't need removing anyway — so intersecting against the issue's
 # current labels sidesteps the all-or-nothing failure mode entirely instead
 # of relying on `|| true` to mask it.
+#
+# forge#1990: this fetch itself can fail (transient network error, rate
+# limit) independently of whether the issue actually has any stale labels.
+# A bare `2>/dev/null || echo ""` collapsed "fetch failed" and "fetch
+# succeeded, issue has no labels" into the same empty string — so a failed
+# fetch here silently skipped the ENTIRE removal/verification block below
+# (not just its post-hoc confirmation) while the script still reported `OK`
+# on exit 0. Use the same `if VAR=$(cmd); then ... else ... fi` idiom
+# already applied to the post-removal verification fetch below (forge#1977/
+# #1988) to keep the two outcomes distinguishable, and defer a non-zero
+# exit via TRANSITION_EXIT_CODE (forge#1929 convention) instead of masking
+# the failure as success.
 # ---------------------------------------------------------------------------
-CURRENT_ISSUE_LABELS=$(gh issue view "$ISSUE_NUMBER" "${GH_ARGS[@]}" --json labels \
-  --jq '[.labels[].name] | join(",")' 2>/dev/null || echo "")
+if CURRENT_ISSUE_LABELS=$(gh issue view "$ISSUE_NUMBER" "${GH_ARGS[@]}" --json labels \
+  --jq '[.labels[].name] | join(",")' 2>/dev/null); then
+  : # fetch succeeded; CURRENT_ISSUE_LABELS may legitimately be an empty string
+else
+  echo "ERROR: pre-removal label fetch failed (transient network error / rate limit?) for issue #$ISSUE_NUMBER — cannot determine which stale workflow:* labels to remove. Skipping removal to avoid acting on incomplete data." >&2
+  CURRENT_ISSUE_LABELS=""
+  TRANSITION_EXIT_CODE=1
+fi
 
 TO_REMOVE=""
 IFS=',' read -ra REMOVE_CANDIDATES <<< "$REMOVE_LABELS"
