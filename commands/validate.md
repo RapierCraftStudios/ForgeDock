@@ -147,10 +147,18 @@ INPUT_ISSUE=$(echo "$ARGUMENTS" | grep -oE '#?([0-9]+)' | grep -oE '[0-9]+' | he
 GH_FLAG=$(yq -r '"-R " + .project.owner + "/" + .project.repo' forge.yaml 2>/dev/null || echo "")
 
 if [ -n "$INPUT_ISSUE" ] && [ -n "$GH_FLAG" ]; then
-  ISSUE_LABELS=$(gh issue view "$INPUT_ISSUE" "$GH_FLAG" --json labels \
-    --jq '[.labels[].name] | join(",")' 2>/dev/null || echo "")
-
-  if echo "$ISSUE_LABELS" | grep -q "needs-validation"; then
+  # forge#1997: a bare `2>/dev/null || echo ""` here collapsed "fetch
+  # failed" and "fetch succeeded, issue has no labels" into the same empty
+  # string, so a failed fetch fell through to the "no needs-validation —
+  # no label transition needed" branch below, silently misreporting a
+  # transient API failure as a legitimate no-op. Use the same
+  # `if VAR=$(cmd); then ... else ... fi` idiom already applied to
+  # scripts/transition-label.sh (forge#1991) to keep the two outcomes
+  # distinguishable.
+  if ! ISSUE_LABELS=$(gh issue view "$INPUT_ISSUE" "$GH_FLAG" --json labels \
+    --jq '[.labels[].name] | join(",")' 2>/dev/null); then
+    echo "WARNING: needs-validation label fetch failed (transient network error / rate limit?) for issue #$INPUT_ISSUE — cannot determine finding-lifecycle state. Skipping label transition." >&2
+  elif echo "$ISSUE_LABELS" | grep -q "needs-validation"; then
     echo "Issue #$INPUT_ISSUE has needs-validation — applying verdict label transition..."
 
     # Map /validate verdict to transition-label.sh verdict format
