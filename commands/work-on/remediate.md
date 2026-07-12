@@ -240,13 +240,21 @@ POST_REVIEW_LABELS=$(gh issue view {ISSUE_NUMBER} {GH_FLAG} --json labels --jq '
 **If `workflow:awaiting-merge` is present** (clean re-review case — the only branch where `review-pr.md`'s guard has already safely parked this PR): compute the bar.
 
 ```bash
+# Trust filter: only reviews/comments from repo collaborators (OWNER/MEMBER/COLLABORATOR
+# authorAssociation) can contribute to the auto-land bar. Unlike work-on.md Phase 7A's
+# informational-only APPROVED: count (a summary-card/decision-record annotation, not a
+# merge gate), this count directly drives `gh pr merge` below — so it must not trust
+# unauthenticated signal. Any GitHub user can comment "APPROVED: ..." on a public PR;
+# authorAssociation is GitHub's own repo-permission classification and cannot be spoofed
+# by comment text. (Ref: forge#1976)
 REVIEW_BODIES=$(gh pr view {PR_NUMBER} {GH_FLAG} --json reviews,comments \
-  --jq '[.reviews[].body // ""] + [.comments[].body // ""] | .[]')
+  --jq '[.reviews[] | select(.authorAssociation == "OWNER" or .authorAssociation == "MEMBER" or .authorAssociation == "COLLABORATOR") | .body // ""] +
+        [.comments[] | select(.authorAssociation == "OWNER" or .authorAssociation == "MEMBER" or .authorAssociation == "COLLABORATOR") | .body // ""] | .[]')
 APPROVED_COUNT=$(echo "$REVIEW_BODIES" | grep -cE 'APPROVED:' 2>/dev/null || true); APPROVED_COUNT=${APPROVED_COUNT:-0}
 ```
 
 **Auto-land bar** (per #1809 Q1) — BOTH conditions required:
-1. `APPROVED_COUNT >= 2` — at least two distinct adversarial `APPROVED:` review comments (same counting convention as `work-on.md` Phase 7A).
+1. `APPROVED_COUNT >= 2` — at least two distinct adversarial `APPROVED:` review comments from repo collaborators (`OWNER`/`MEMBER`/`COLLABORATOR` authorAssociation only — see trust filter above; same counting convention as `work-on.md` Phase 7A).
 2. `GATE_PASSED = true` from this remediation's own Phase M3 quality-gate loop.
 
 **If the bar is met**:
