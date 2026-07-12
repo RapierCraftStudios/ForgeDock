@@ -283,7 +283,7 @@ export function resolveGitRoot(cwd) {
     if (toplevel) {
       const resolved = resolve(toplevel) !== resolve(cwd);
       return {
-        root: resolved ? toplevel : cwd,
+        root: resolved ? resolve(toplevel) : cwd,
         resolved,
         why: `'${cwd}' is nested inside a git repository rooted at '${toplevel}'`,
       };
