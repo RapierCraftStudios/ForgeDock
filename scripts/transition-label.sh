@@ -83,8 +83,25 @@ if [ "${1:-}" = "--validate" ]; then
   fi
 
   # Check if issue carries needs-validation (idempotent gate)
-  CURRENT_LABELS=$(gh issue view "$ISSUE_NUMBER" "${GH_ARGS[@]}" --json labels \
-    --jq '[.labels[].name] | join(",")' 2>/dev/null || echo "")
+  #
+  # forge#1991: a bare `2>/dev/null || echo ""` here collapsed "fetch
+  # failed" and "fetch succeeded, issue has no labels" into the same empty
+  # string, so a failed fetch fell through to the "no needs-validation —
+  # no action taken (idempotent)" branch below and exited 0, silently
+  # misreporting a transient API failure as successful idempotent no-op.
+  # Use the same `if VAR=$(cmd); then ... else ... fi` idiom already
+  # applied to the workflow-mode label fetches (forge#1977/#1988/#1990) to
+  # keep the two outcomes distinguishable. This block has no
+  # TRANSITION_EXIT_CODE deferred-exit convention (that only exists in the
+  # workflow-mode block below), so failure exits 1 directly here, matching
+  # this script's documented exit codes (0 = success, 1 = error).
+  if CURRENT_LABELS=$(gh issue view "$ISSUE_NUMBER" "${GH_ARGS[@]}" --json labels \
+    --jq '[.labels[].name] | join(",")' 2>/dev/null); then
+    : # fetch succeeded; CURRENT_LABELS may legitimately be an empty string
+  else
+    echo "ERROR: needs-validation label fetch failed (transient network error / rate limit?) for issue #$ISSUE_NUMBER — cannot determine finding-lifecycle state. Aborting without action." >&2
+    exit 1
+  fi
 
   if ! echo "$CURRENT_LABELS" | grep -q "needs-validation"; then
     echo "OK: Issue #$ISSUE_NUMBER does not have needs-validation — no action taken (idempotent)"
@@ -282,9 +299,27 @@ gh issue edit "$ISSUE_NUMBER" "${GH_ARGS[@]}" --add-label "$EFFECTIVE_LABEL"
 # have doesn't need removing anyway — so intersecting against the issue's
 # current labels sidesteps the all-or-nothing failure mode entirely instead
 # of relying on `|| true` to mask it.
+#
+# forge#1990: this fetch itself can fail (transient network error, rate
+# limit) independently of whether the issue actually has any stale labels.
+# A bare `2>/dev/null || echo ""` collapsed "fetch failed" and "fetch
+# succeeded, issue has no labels" into the same empty string — so a failed
+# fetch here silently skipped the ENTIRE removal/verification block below
+# (not just its post-hoc confirmation) while the script still reported `OK`
+# on exit 0. Use the same `if VAR=$(cmd); then ... else ... fi` idiom
+# already applied to the post-removal verification fetch below (forge#1977/
+# #1988) to keep the two outcomes distinguishable, and defer a non-zero
+# exit via TRANSITION_EXIT_CODE (forge#1929 convention) instead of masking
+# the failure as success.
 # ---------------------------------------------------------------------------
-CURRENT_ISSUE_LABELS=$(gh issue view "$ISSUE_NUMBER" "${GH_ARGS[@]}" --json labels \
-  --jq '[.labels[].name] | join(",")' 2>/dev/null || echo "")
+if CURRENT_ISSUE_LABELS=$(gh issue view "$ISSUE_NUMBER" "${GH_ARGS[@]}" --json labels \
+  --jq '[.labels[].name] | join(",")' 2>/dev/null); then
+  : # fetch succeeded; CURRENT_ISSUE_LABELS may legitimately be an empty string
+else
+  echo "ERROR: pre-removal label fetch failed (transient network error / rate limit?) for issue #$ISSUE_NUMBER — cannot determine which stale workflow:* labels to remove. Skipping removal to avoid acting on incomplete data." >&2
+  CURRENT_ISSUE_LABELS=""
+  TRANSITION_EXIT_CODE=1
+fi
 
 TO_REMOVE=""
 IFS=',' read -ra REMOVE_CANDIDATES <<< "$REMOVE_LABELS"
@@ -327,35 +362,52 @@ if [ -n "$TO_REMOVE" ]; then
   # step in the one case (persistent removal failure) it's most important
   # for the caller to see a consistent, fully-applied label state.
   # -------------------------------------------------------------------------
-  POST_REMOVE_LABELS=$(gh issue view "$ISSUE_NUMBER" "${GH_ARGS[@]}" --json labels \
-    --jq '[.labels[].name] | join(",")' 2>/dev/null || echo "")
-
-  STILL_PRESENT=""
-  IFS=',' read -ra TO_REMOVE_CHECK <<< "$TO_REMOVE"
-  for candidate in "${TO_REMOVE_CHECK[@]}"; do
-    case ",$POST_REMOVE_LABELS," in
-      *",$candidate,"*)
-        STILL_PRESENT="${STILL_PRESENT:+$STILL_PRESENT,}$candidate"
-        ;;
-    esac
-  done
+  # forge#1977: the fetch itself can fail (transient network error, rate
+  # limit) independently of whether the label was actually removed. A bare
+  # `2>/dev/null || echo ""` collapses "fetch failed" and "fetch succeeded,
+  # label absent" into the same empty string, so a failed verification call
+  # was previously indistinguishable from a confirmed-clean result — masking
+  # the exact failure mode this block exists to catch. Use `if VAR=$(cmd);
+  # then ... else ... fi` (set -e-safe: command substitution failure inside
+  # an `if` condition does not trigger `set -e`) to keep the two outcomes
+  # distinguishable, and treat a failed fetch as "still present" so it flows
+  # into the existing retry / fail-loud path below instead of silently
+  # reporting success.
+  if POST_REMOVE_LABELS=$(gh issue view "$ISSUE_NUMBER" "${GH_ARGS[@]}" --json labels \
+    --jq '[.labels[].name] | join(",")' 2>/dev/null); then
+    STILL_PRESENT=""
+    IFS=',' read -ra TO_REMOVE_CHECK <<< "$TO_REMOVE"
+    for candidate in "${TO_REMOVE_CHECK[@]}"; do
+      case ",$POST_REMOVE_LABELS," in
+        *",$candidate,"*)
+          STILL_PRESENT="${STILL_PRESENT:+$STILL_PRESENT,}$candidate"
+          ;;
+      esac
+    done
+  else
+    echo "WARNING: post-removal verification API call failed (transient network error / rate limit?) — cannot confirm removal, treating ($TO_REMOVE) as unverified..." >&2
+    STILL_PRESENT="$TO_REMOVE"
+  fi
 
   if [ -n "$STILL_PRESENT" ]; then
     echo "WARNING: label removal did not take effect for ($STILL_PRESENT) — retrying once..." >&2
     gh issue edit "$ISSUE_NUMBER" "${GH_ARGS[@]}" --remove-label "$STILL_PRESENT" 2>/dev/null || true
 
-    POST_RETRY_LABELS=$(gh issue view "$ISSUE_NUMBER" "${GH_ARGS[@]}" --json labels \
-      --jq '[.labels[].name] | join(",")' 2>/dev/null || echo "")
-
-    STILL_PRESENT_AFTER_RETRY=""
-    IFS=',' read -ra RETRY_CHECK <<< "$STILL_PRESENT"
-    for candidate in "${RETRY_CHECK[@]}"; do
-      case ",$POST_RETRY_LABELS," in
-        *",$candidate,"*)
-          STILL_PRESENT_AFTER_RETRY="${STILL_PRESENT_AFTER_RETRY:+$STILL_PRESENT_AFTER_RETRY,}$candidate"
-          ;;
-      esac
-    done
+    if POST_RETRY_LABELS=$(gh issue view "$ISSUE_NUMBER" "${GH_ARGS[@]}" --json labels \
+      --jq '[.labels[].name] | join(",")' 2>/dev/null); then
+      STILL_PRESENT_AFTER_RETRY=""
+      IFS=',' read -ra RETRY_CHECK <<< "$STILL_PRESENT"
+      for candidate in "${RETRY_CHECK[@]}"; do
+        case ",$POST_RETRY_LABELS," in
+          *",$candidate,"*)
+            STILL_PRESENT_AFTER_RETRY="${STILL_PRESENT_AFTER_RETRY:+$STILL_PRESENT_AFTER_RETRY,}$candidate"
+            ;;
+        esac
+      done
+    else
+      echo "WARNING: post-retry verification API call also failed (transient network error / rate limit?) — cannot confirm removal after retry, treating ($STILL_PRESENT) as unverified..." >&2
+      STILL_PRESENT_AFTER_RETRY="$STILL_PRESENT"
+    fi
 
     if [ -n "$STILL_PRESENT_AFTER_RETRY" ]; then
       echo "ERROR: failed to remove stale label(s) ($STILL_PRESENT_AFTER_RETRY) from issue #$ISSUE_NUMBER after retry — label state machine now inconsistent (issue carries both '$EFFECTIVE_LABEL' and the stale label(s) above)." >&2

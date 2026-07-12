@@ -28,6 +28,7 @@ import {
   parseInstallTier,
   writeForgeYaml,
   backupExisting,
+  backfillForgeYaml,
   manualLowConfidenceKeys,
   isEphemeralCachePath,
   writeInstallReceipt,
@@ -1874,6 +1875,16 @@ async function doctor(fix = false) {
    * Reuses forge() (bin/journey.mjs) verbatim — the same repair path already
    * used by `npx forgedock update` (see relinkAndHint()) — rather than
    * duplicating symlink/copy-mode or hook-registration logic here.
+   *
+   * NOTE: `installRepairRan` only memoizes whether the repair primitive
+   * itself has executed during this invocation — it is a cross-check flag
+   * by necessity (any of the three checks below can trigger it, and it must
+   * not re-run for the other two). It must NOT be read by an individual
+   * check to decide whether THAT check was fixed — a check that was already
+   * healthy before a sibling check triggered repair would incorrectly
+   * report "repaired" too. Each check below tracks its own pre-repair
+   * broken state in a local `*WasBroken` variable for that decision instead.
+   * (forge#1975)
    */
   let installRepairRan = false;
   async function runInstallRepairOnce() {
@@ -1954,7 +1965,9 @@ async function doctor(fix = false) {
     }
 
     let cmdFiles = await detectCommandFiles();
+    let cmdFilesWasBroken = false;
     if (!cmdFiles.error && !cmdFiles.ok && fix) {
+      cmdFilesWasBroken = true;
       await runInstallRepairOnce();
       cmdFiles = await detectCommandFiles();
     }
@@ -1962,7 +1975,7 @@ async function doctor(fix = false) {
     if (cmdFiles.error) {
       fail("Command files", `Could not read commands directory: ${cmdFiles.error}`);
     } else if (cmdFiles.ok) {
-      if (fix && installRepairRan) {
+      if (fix && cmdFilesWasBroken) {
         fixed("Command files", `${cmdFiles.checked} files installed (repaired)`);
       } else {
         pass("Command files", `${cmdFiles.checked} files installed`);
@@ -2153,7 +2166,9 @@ async function doctor(fix = false) {
     }
 
     let hookReg = detectSessionStartHookRegistered();
+    let hookRegWasBroken = false;
     if (!hookReg.error && !hookReg.ok && fix) {
+      hookRegWasBroken = true;
       await runInstallRepairOnce();
       hookReg = detectSessionStartHookRegistered();
     }
@@ -2161,7 +2176,7 @@ async function doctor(fix = false) {
     if (hookReg.error) {
       fail("SessionStart hook", `Cannot read ~/.claude/settings.json: ${hookReg.error}. Run: npx forgedock install`);
     } else if (hookReg.ok) {
-      if (fix && installRepairRan) {
+      if (fix && hookRegWasBroken) {
         fixed("SessionStart hook", "registered in ~/.claude/settings.json (repaired)");
       } else {
         pass("SessionStart hook", "registered in ~/.claude/settings.json");
@@ -2221,7 +2236,9 @@ async function doctor(fix = false) {
   // ever surfaced. This check catches that silent-failure case. (forge#1895)
   {
     let hookPathResult = detectSessionStartHookPath();
+    let hookPathWasBroken = false;
     if (hookPathResult.state === "dangling" && fix) {
+      hookPathWasBroken = true;
       await runInstallRepairOnce();
       hookPathResult = detectSessionStartHookPath();
     }
@@ -2237,7 +2254,7 @@ async function doctor(fix = false) {
         `Could not parse a script path out of the registered hook command ("${hookPathResult.command}"). Run: npx forgedock install`,
       );
     } else if (hookPathResult.state === "ok") {
-      if (fix && installRepairRan) {
+      if (fix && hookPathWasBroken) {
         fixed("SessionStart hook script path", `refreshed to a valid path (${hookPathResult.path})`);
       } else {
         pass("SessionStart hook script path", `exists on disk (${hookPathResult.path})`);
@@ -2709,12 +2726,14 @@ function help() {
     ["npx forgedock resume-stalled [--dry-run]", "Fleet stall recovery — re-dispatch expired-lease issues"],
     ["npx forgedock demo", "Set up a risk-free demo repo and print next steps"],
     ["npx forgedock labels [setup] [--repo owner/repo]", "Bootstrap ForgeDock-managed labels on a GitHub repo (idempotent)"],
+    ["npx forgedock config migrate [dir]", "Backfill missing optional sections into an existing forge.yaml (idempotent)"],
     ["npx forgedock watch [--repo owner/repo]", "Live per-agent orchestration view (Ctrl+C to exit)"],
     ["npx forgedock report [--days 30] [--md] [--json]", "30-day pipeline impact receipts for your repo"],
     ["npx forgedock doctor", "Check installation health"],
     ["npx forgedock doctor --fix", "Auto-fix deterministic issues (symlinks, hook, labels, legacy block)"],
     ["npx forgedock update", "Pull latest & reinstall"],
     ["npx forgedock uninstall", "Remove commands"],
+    ["npx forgedock version", "Print the installed version and check for updates"],
     ["npx forgedock help", "Show this help"],
   ];
   const flagRows = [
@@ -2723,6 +2742,7 @@ function help() {
     ["--manual", "Plain text prompts instead of the review screen (init)"],
     ["--verbose", "Show detection sources for every field (init)"],
     ["--minimal", "Generate a minimal forge.yaml with required sections only (init)"],
+    ["--version, -v", "Print the installed version and check for updates"],
   ];
 
   process.stdout.write(
@@ -3051,7 +3071,8 @@ async function watch() {
 const SPLASH_COMMANDS = new Set(["run", "run-issue", "resume-stalled", "demo", "doctor", "watch", "help", "--help", "-h"]);
 const KNOWN_COMMANDS = new Set([
   "install", "init", "enable", "disable", "status", "uninstall", "update",
-  "run", "run-issue", "resume-stalled", "demo", "doctor", "watch", "labels", "help", "--help", "-h",
+  "run", "run-issue", "resume-stalled", "demo", "doctor", "watch", "labels", "config", "help", "--help", "-h",
+  "version", "--version", "-v",
 ]);
 if (SPLASH_COMMANDS.has(command) || !KNOWN_COMMANDS.has(command)) splash(command);
 
@@ -3197,6 +3218,60 @@ switch (command) {
         `Usage: ${CYAN}npx forgedock labels [setup] [--repo owner/repo]${RESET}`,
       );
       exitCode = 1;
+    }
+    break;
+  }
+  case "config": {
+    const subcommand = positional[1];
+    if (subcommand === "migrate") {
+      // Directory override mirrors `status [dir]` — defaults to cwd.
+      const dir = positional[2] ? resolve(positional[2]) : process.cwd();
+      const result = backfillForgeYaml(dir);
+      if (!result.present) {
+        console.log(
+          `${RED}No forge.yaml found in ${dir}.${RESET}\n` +
+            `  Run ${cyan("npx forgedock init")} to generate one.`,
+        );
+        exitCode = 1;
+      } else if (result.added.length === 0) {
+        console.log(
+          `${GREEN}forge.yaml already has all ${result.alreadyPresent.length} optional sections.${RESET} Nothing to migrate.`,
+        );
+      } else {
+        console.log(`${GREEN}Backfilled ${result.added.length} missing optional section(s) into forge.yaml:${RESET}`);
+        for (const key of result.added) console.log(`  ${GREEN}+${RESET} ${key}`);
+        console.log(`\n  Sections already present (unchanged): ${result.alreadyPresent.join(", ") || "none"}`);
+        console.log(`\n  All added sections are commented out — edit forge.yaml to enable the ones you need.`);
+      }
+    } else {
+      console.log(`${RED}Unknown config subcommand: ${subcommand ?? "(none)"}${RESET}`);
+      console.log(
+        `Usage: ${CYAN}npx forgedock config migrate [dir]${RESET}\n` +
+          `  Backfills any of the 16 optional forge.yaml sections missing from an existing config (idempotent).`,
+      );
+      exitCode = 1;
+    }
+    break;
+  }
+  case "version":
+  case "--version":
+  case "-v": {
+    // Print the local version immediately — must work offline/instantly,
+    // no network dependency for the primary output (getVersion() reads
+    // package.json off disk only). The latest-version check below is
+    // best-effort: fetchLatestVersion() has its own 5s timeout and never
+    // rejects, so a slow/offline network never blocks or fails this
+    // command. Mirrors the version-check message pattern already used by
+    // update() (see the npm/npx branch above).
+    const localVersion = getVersion();
+    console.log(`forgedock ${localVersion ? `v${localVersion}` : `${YELLOW}version unknown${RESET}`}`);
+
+    const latestVersion = await fetchLatestVersion();
+    if (latestVersion && localVersion && compareVersions(latestVersion, localVersion) > 0) {
+      console.log(
+        `  ${GREEN}New version available: v${latestVersion}${RESET} (you have v${localVersion}). ` +
+          `Run ${CYAN}npx forgedock update${RESET} to fetch it.`,
+      );
     }
     break;
   }

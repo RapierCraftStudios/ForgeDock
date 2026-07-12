@@ -7,7 +7,7 @@ import assert from "node:assert/strict";
 import { mkdtempSync, readFileSync, writeFileSync, existsSync, mkdirSync, readdirSync } from "node:fs";
 import { join } from "node:path";
 import os from "node:os";
-import { writeForgeYaml, backupExisting, detectDescription, makeCtx, preflight, forge, read, review, celebrate, connect, maybeOfferDemo, openUrl, runJourney, manualLowConfidenceKeys, parseInstallTier, findMarkdownFiles, isEphemeralCachePath, detectCrossEnvInstall, validateForgeYamlShape, writeInstallReceipt, persistHome } from "../journey.mjs";
+import { writeForgeYaml, backfillForgeYaml, backupExisting, detectDescription, makeCtx, preflight, forge, read, review, celebrate, connect, maybeOfferDemo, openUrl, runJourney, manualLowConfidenceKeys, parseInstallTier, findMarkdownFiles, isEphemeralCachePath, detectCrossEnvInstall, validateForgeYamlShape, writeInstallReceipt, persistHome } from "../journey.mjs";
 import { detectEnvironment } from "../env-detect.mjs";
 
 const VALUES = {
@@ -73,6 +73,157 @@ describe("writeForgeYaml", () => {
     writeForgeYaml(VALUES, [], out);
     assert.ok(existsSync(out), "forge.yaml must exist after write");
     assert.ok(!existsSync(out + ".tmp"), ".tmp must be gone after successful write");
+  });
+  it("emits all 16 optional sections from forge.yaml.example (#1983)", () => {
+    const out = join(dir, "forge.yaml");
+    writeForgeYaml(VALUES, [], out);
+    const yaml = readFileSync(out, "utf-8");
+    const optionalSections = [
+      "AGENTS",
+      "REPOS",
+      "PROJECT BOARD",
+      "PIPELINE",
+      "SERVICES",
+      "REVIEW",
+      "VERIFICATION",
+      "DEPLOY",
+      "AUTOPILOT",
+      "BILLING",
+      "DEVDOCS",
+      "ADAPTIVE_SCRIPTS",
+      "LEARNED",
+      "INDEX",
+      "ATTRIBUTION",
+      "PATTERN_FEEDS",
+    ];
+    for (const name of optionalSections) {
+      assert.match(
+        yaml,
+        new RegExp(`# ${name} \\(OPTIONAL\\)`),
+        `missing optional section banner: ${name}`,
+      );
+    }
+    // Every line of every new/existing optional section must stay commented out —
+    // never parsed as active YAML.
+    assert.doesNotMatch(yaml, /^agents:/m);
+    assert.doesNotMatch(yaml, /^pipeline:/m);
+    assert.doesNotMatch(yaml, /^services:/m);
+    assert.doesNotMatch(yaml, /^deploy:/m);
+    assert.doesNotMatch(yaml, /^autopilot:/m);
+    assert.doesNotMatch(yaml, /^billing:/m);
+    assert.doesNotMatch(yaml, /^devdocs:/m);
+    assert.doesNotMatch(yaml, /^adaptive_scripts:/m);
+    assert.doesNotMatch(yaml, /^learned:/m);
+    assert.doesNotMatch(yaml, /^index:/m);
+    assert.doesNotMatch(yaml, /^attribution:/m);
+    assert.doesNotMatch(yaml, /^pattern_feeds:/m);
+  });
+});
+
+describe("backfillForgeYaml (#1982)", () => {
+  const ALL_16_KEYS = [
+    "agents", "repos", "project_board", "pipeline", "services", "review",
+    "verification", "deploy", "autopilot", "billing", "devdocs",
+    "adaptive_scripts", "learned", "index", "attribution", "pattern_feeds",
+  ];
+
+  it("returns present:false and does nothing when forge.yaml does not exist", () => {
+    const res = backfillForgeYaml(dir);
+    assert.deepEqual(res, { present: false, added: [], alreadyPresent: [] });
+    assert.ok(!existsSync(join(dir, "forge.yaml")));
+  });
+
+  it("adds all 16 optional sections to a minimal (required-only) forge.yaml", () => {
+    const out = join(dir, "forge.yaml");
+    writeFileSync(
+      out,
+      `project:\n  name: "X"\n  owner: "o"\n  repo: "r"\n  description: "d"\n\npaths:\n  root: "/tmp"\n  worktree_base: "/tmp/wt"\n\nbranches:\n  default: "main"\n  staging: "staging"\n  feature_pattern: "milestone/{slug}"\n`,
+      "utf-8",
+    );
+    const res = backfillForgeYaml(dir);
+    assert.equal(res.present, true);
+    assert.deepEqual([...res.added].sort(), [...ALL_16_KEYS].sort());
+    assert.deepEqual(res.alreadyPresent, []);
+
+    const yaml = readFileSync(out, "utf-8");
+    for (const key of ALL_16_KEYS) {
+      assert.match(yaml, new RegExp(`^#\\s?${key}:`, "m"), `missing backfilled stub for ${key}`);
+    }
+    // Backfilled sections stay commented out — never parsed as active YAML.
+    for (const key of ALL_16_KEYS) {
+      assert.doesNotMatch(yaml, new RegExp(`^${key}:`, "m"), `${key} must remain commented out`);
+    }
+  });
+
+  it("is a no-op when writeForgeYaml() already emitted all 16 sections", () => {
+    const out = join(dir, "forge.yaml");
+    writeForgeYaml(VALUES, [], out);
+    const before = readFileSync(out, "utf-8");
+    const res = backfillForgeYaml(dir);
+    assert.equal(res.added.length, 0);
+    assert.equal(res.alreadyPresent.length, 16);
+    assert.equal(readFileSync(out, "utf-8"), before, "file must be untouched when nothing is missing");
+  });
+
+  it("adds only the sections missing from a partially-migrated forge.yaml, leaving the rest untouched", () => {
+    const out = join(dir, "forge.yaml");
+    // Simulate a pre-#1983 file: required sections + only 2 of the 16 optional stubs.
+    const original = `project:\n  name: "X"\n  owner: "o"\n  repo: "r"\n  description: "d"\n\npaths:\n  root: "/tmp"\n  worktree_base: "/tmp/wt"\n\nbranches:\n  default: "main"\n  staging: "staging"\n  feature_pattern: "milestone/{slug}"\n\n# repos:\n#   default:\n#     repo: "o/r"\n\n# billing:\n#   enabled: false\n`;
+    writeFileSync(out, original, "utf-8");
+    const res = backfillForgeYaml(dir);
+    assert.deepEqual([...res.alreadyPresent].sort(), ["billing", "repos"]);
+    assert.equal(res.added.length, 14);
+    assert.ok(!res.added.includes("repos"));
+    assert.ok(!res.added.includes("billing"));
+
+    const yaml = readFileSync(out, "utf-8");
+    // Original content must remain byte-for-byte at the start of the file.
+    assert.ok(yaml.startsWith(original.trimEnd()), "existing content must be preserved unchanged as a prefix");
+    for (const key of res.added) {
+      assert.match(yaml, new RegExp(`^#\\s?${key}:`, "m"));
+    }
+  });
+
+  it("is idempotent — running twice produces no further changes on the second run", () => {
+    const out = join(dir, "forge.yaml");
+    writeFileSync(
+      out,
+      `project:\n  name: "X"\n  owner: "o"\n  repo: "r"\n  description: "d"\n\npaths:\n  root: "/tmp"\n  worktree_base: "/tmp/wt"\n\nbranches:\n  default: "main"\n  staging: "staging"\n  feature_pattern: "milestone/{slug}"\n`,
+      "utf-8",
+    );
+    backfillForgeYaml(dir);
+    const afterFirst = readFileSync(out, "utf-8");
+    const res2 = backfillForgeYaml(dir);
+    assert.equal(res2.added.length, 0);
+    assert.equal(res2.alreadyPresent.length, 16);
+    assert.equal(readFileSync(out, "utf-8"), afterFirst, "second run must not modify the file");
+  });
+
+  it("treats an active (uncommented) section as already present and does not duplicate it", () => {
+    const out = join(dir, "forge.yaml");
+    writeFileSync(
+      out,
+      `project:\n  name: "X"\n  owner: "o"\n  repo: "r"\n  description: "d"\n\npaths:\n  root: "/tmp"\n  worktree_base: "/tmp/wt"\n\nbranches:\n  default: "main"\n  staging: "staging"\n  feature_pattern: "milestone/{slug}"\n\nbilling:\n  enabled: true\n`,
+      "utf-8",
+    );
+    const res = backfillForgeYaml(dir);
+    assert.ok(res.alreadyPresent.includes("billing"));
+    assert.ok(!res.added.includes("billing"));
+    const yaml = readFileSync(out, "utf-8");
+    assert.match(yaml, /^billing:\n  enabled: true$/m);
+    // Only one "billing:" (active or stub) occurrence — no duplicate stub appended.
+    assert.equal((yaml.match(/^#?\s?billing:/gm) || []).length, 1);
+  });
+
+  it("uses atomic tmp+rename: no stale .tmp left after a successful backfill (ref: #1396)", () => {
+    const out = join(dir, "forge.yaml");
+    writeFileSync(
+      out,
+      `project:\n  name: "X"\n  owner: "o"\n  repo: "r"\n  description: "d"\n\npaths:\n  root: "/tmp"\n  worktree_base: "/tmp/wt"\n\nbranches:\n  default: "main"\n  staging: "staging"\n  feature_pattern: "milestone/{slug}"\n`,
+      "utf-8",
+    );
+    backfillForgeYaml(dir);
+    assert.ok(!existsSync(out + ".tmp"), ".tmp must be gone after a successful backfill");
   });
 });
 

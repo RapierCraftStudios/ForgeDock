@@ -423,6 +423,54 @@ describe("router", () => {
   });
 });
 
+describe("version command / --version, -v flags (#1981)", () => {
+  it("`version` prints the local version and exits 0", () => {
+    const res = runCli(["version"], { home: mkdtempSync(join(os.tmpdir(), "fd-ver-")) });
+    assert.equal(res.status, 0, res.stdout + res.stderr);
+    assert.match(res.stdout, /forgedock v\d+\.\d+\.\d+/);
+  });
+
+  it("`--version` behaves identically to `version`", () => {
+    const res = runCli(["--version"], { home: mkdtempSync(join(os.tmpdir(), "fd-ver-flag-")) });
+    assert.equal(res.status, 0, res.stdout + res.stderr);
+    assert.match(res.stdout, /forgedock v\d+\.\d+\.\d+/);
+  });
+
+  it("`-v` behaves identically to `version`", () => {
+    const res = runCli(["-v"], { home: mkdtempSync(join(os.tmpdir(), "fd-ver-short-")) });
+    assert.equal(res.status, 0, res.stdout + res.stderr);
+    assert.match(res.stdout, /forgedock v\d+\.\d+\.\d+/);
+  });
+
+  it("does not double-print the branded splash logo before the version line", () => {
+    // version/--version/-v are deliberately excluded from SPLASH_COMMANDS —
+    // splash() renders to stderr, so stdout must contain only the version
+    // output, not a duplicated logo block.
+    const res = runCli(["version"], { home: mkdtempSync(join(os.tmpdir(), "fd-ver-nosplash-")) });
+    assert.equal(res.status, 0, res.stdout + res.stderr);
+    const versionLines = res.stdout.split("\n").filter((l) => /forgedock v/.test(l));
+    assert.equal(versionLines.length, 1, res.stdout);
+  });
+
+  it("help lists the version command and flag", () => {
+    const res = runCli(["help"], { home: mkdtempSync(join(os.tmpdir(), "fd-ver-help-")) });
+    assert.equal(res.status, 0);
+    assert.match(res.stdout, /npx forgedock version/);
+    assert.match(res.stdout, /--version/);
+  });
+
+  it("does not hang or crash when the npm registry is unreachable (offline-safe)", () => {
+    // No network stub is injectable for fetchLatestVersion() (it hits the
+    // real registry directly by design — see bin/forgedock.mjs comment on
+    // fetchLatestVersion), so this exercises the real best-effort path: the
+    // command must still print the local version and exit 0 within the
+    // process timeout, proving the 5s internal timeout on the latest-version
+    // check never blocks the primary output.
+    const res = runCli(["version"], { home: mkdtempSync(join(os.tmpdir(), "fd-ver-net-"))});
+    assert.equal(res.status, 0, res.stdout + res.stderr);
+  });
+});
+
 describe("doctor — forge.yaml placeholder / staleness checks (forge#1850)", () => {
   function stubTools() {
     const stubBin = mkdtempSync(join(os.tmpdir(), "fd-doctor-stub-bin-"));
@@ -691,6 +739,42 @@ describe("doctor --fix (forge#1944)", () => {
     const secondFix = runCli(["doctor", "--fix"], { cwd, home, extraEnv });
     assert.equal(secondFix.status, 0, secondFix.stdout + secondFix.stderr);
     assert.doesNotMatch(secondFix.stdout, /issue\(s\) auto-fixed/i);
+  });
+
+  // Checks 1, 5, and 5c all funnel repair through the shared
+  // runInstallRepairOnce()/installRepairRan memoization. Before forge#1975,
+  // the fixed()-vs-pass() decision for each check read that SHARED flag
+  // instead of tracking its own pre-repair broken state — so when Check 1
+  // was broken and triggered repair, Checks 5 and 5c (already healthy,
+  // never broken themselves) would also report "repaired" and inflate the
+  // fixesApplied counter from 1 to 3. This test corrupts ONLY Check 1's
+  // state — a fresh install leaves the SessionStart hook (Check 5) and its
+  // script path (Check 5c) healthy — and asserts the counter reports
+  // exactly 1 fix, not 3.
+  it("does not inflate fixesApplied for healthy sibling checks when only one check is broken (forge#1975)", () => {
+    const { home, cwd, extraEnv } = setupInstall();
+    const targetDir = join(home, ".claude", "commands");
+    const targetPath = join(targetDir, "work-on.md");
+    const files = readFileSync(targetPath, "utf-8");
+    unlinkSync(targetPath);
+    writeFileSync(targetPath, files + "\nstale local edit\n", "utf-8");
+    markAsCopiedFile(home, "work-on.md");
+
+    const before = runCli(["doctor"], { cwd, home, extraEnv });
+    assert.equal(before.status, 1, before.stdout + before.stderr);
+    assert.match(before.stdout, /Command files/i);
+
+    const fixRes = runCli(["doctor", "--fix"], { cwd, home, extraEnv });
+    assert.equal(fixRes.status, 0, fixRes.stdout + fixRes.stderr);
+    assert.match(fixRes.stdout, /Command files/i);
+    // Exactly one check was actually broken and repaired — the counter must
+    // report 1, not 3 (Checks 5/5c riding along on the shared repair flag).
+    assert.match(fixRes.stdout, /\b1 issue\(s\) auto-fixed\b/i);
+    assert.doesNotMatch(fixRes.stdout, /\b[23] issue\(s\) auto-fixed\b/i);
+    // SessionStart hook / script path checks were healthy the whole time —
+    // they must report as a plain pass, never as "(repaired)".
+    assert.doesNotMatch(fixRes.stdout, /SessionStart hook\b.*\(repaired\)/i);
+    assert.doesNotMatch(fixRes.stdout, /SessionStart hook script path\b.*\(repaired\)/i);
   });
 
   it("re-registers a completely missing SessionStart hook (Check 5)", () => {

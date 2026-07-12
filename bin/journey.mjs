@@ -24,6 +24,242 @@ function todo(key, low) {
 }
 
 /**
+ * Ordered list of the 16 optional forge.yaml sections. Each entry is a
+ * self-contained, fully-commented stub block (banner + example content).
+ * This is the single source of truth for optional-section text, shared by
+ * writeForgeYaml() (full-file generation for `npx forgedock init`) and
+ * backfillForgeYaml() (append-only migration for existing files, #1982) —
+ * keeping the two paths from drifting apart the same way full-generation
+ * itself drifted from forge.yaml.example before #1983.
+ *
+ * `key` is the top-level YAML key the section introduces (used by
+ * backfillForgeYaml() to detect whether a section is already present).
+ * `block(v)` renders the stub text; blocks never end with a trailing
+ * newline of their own — callers join them with `"\n\n"` to reproduce the
+ * blank-line separation between sections.
+ * @type {Array<{ key: string, block: (v: object) => string }>}
+ */
+const OPTIONAL_SECTIONS = [
+  {
+    key: "agents",
+    block: () => `# =============================================================================
+# AGENTS (OPTIONAL) — model overrides for pipeline agents.
+# Commands: all commands with an "Agent model policy" line
+# =============================================================================
+
+# agents:
+#   default_model: "sonnet"      # main orchestrator/agent model: "sonnet" | "opus" | "haiku"
+#   subagent_model: "sonnet"     # model for child sub-agents (orchestrate, review-pr, ...)`,
+  },
+  {
+    key: "repos",
+    block: (v) => `# =============================================================================
+# REPOS (OPTIONAL) — multi-repo configuration. Remove the # to enable.
+# =============================================================================
+
+# repos:
+#   default:
+#     repo: "${esc(v.owner)}/${esc(v.repo)}"
+#     staging_branch: "${esc(v.stagingBranch)}"
+#   satellites:
+#     - prefix: "mcp"
+#       repo: "${esc(v.owner)}/your-satellite-repo"
+#       staging_branch: "main"`,
+  },
+  {
+    key: "project_board",
+    block: (v) => `# =============================================================================
+# PROJECT BOARD (OPTIONAL) — GitHub Projects v2 integration.
+# To find IDs: gh project list --owner ${esc(v.owner)}
+# =============================================================================
+
+# project_board:
+#   owner: "${esc(v.owner)}"
+#   project_number: 1
+#   project_id: "PVT_kwHOxxxxxxxxxxxxxxxx"
+#   field_ids:
+#     status: "PVTSSF_xxxxxxxxxxxxxxxxxxxxxxxx"`,
+  },
+  {
+    key: "pipeline",
+    block: () => `# =============================================================================
+# PIPELINE (OPTIONAL) — tuning knobs for the /orchestrate batch engine.
+# Commands: orchestrate
+# =============================================================================
+
+# pipeline:
+#   stall_timeout_minutes: 15        # minutes an agent may sit idle before auto-resume
+#   token_budget_per_batch: 900000   # per-batch token ceiling for the review-finding cascade
+#   token_estimate_per_finding: 150000
+#   narration: "terse"               # "terse" | "verbose"`,
+  },
+  {
+    key: "services",
+    block: () => `# =============================================================================
+# SERVICES (OPTIONAL) — external service URLs for analytics/monitoring/GEO audit.
+# Commands: analytics, geo-audit, autopilot (analytics snapshot)
+# =============================================================================
+
+# services:
+#   domain: "acme.io"
+#   gsc_property: "https://acme.io"
+#   app_url: "https://acme.io"
+#   api_url: "https://api.acme.io"
+#   analytics:
+#     umami:
+#       url: "https://umami.acme.io"
+#       website_id: "xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx"
+#     clarity:
+#       project_id: "xxxxxxxxxx"
+#     ga4:
+#       property_id: "000000000"`,
+  },
+  {
+    key: "review",
+    block: () => `# =============================================================================
+# REVIEW (OPTIONAL) — context injected into review agent prompts.
+# =============================================================================
+
+# review:
+#   tech_stack: "Node.js, TypeScript, PostgreSQL"
+#   context: |
+#     Describe your repo structure and any unusual conventions here.`,
+  },
+  {
+    key: "verification",
+    block: () => `# =============================================================================
+# VERIFICATION (OPTIONAL) — health checks for quality gate / validate.
+# =============================================================================
+
+# verification:
+#   health_endpoint: "https://api.example.com/health"
+#   health_patterns:
+#     - '"status": "ok"'`,
+  },
+  {
+    key: "deploy",
+    block: () => `# =============================================================================
+# DEPLOY (OPTIONAL) — deployment model configuration.
+# Commands: deploy-info, incident-response, rollback, work-on (Phase 3J)
+# =============================================================================
+
+# deploy:
+#   workflow: "deploy.yml"           # GitHub Actions workflow filename used to trigger deploys
+#   workflow_inputs:
+#     services: "services"
+#     reason: "reason"
+#   secrets_backend: "sops"          # sops | aws-sm | vault | ci-env | none`,
+  },
+  {
+    key: "autopilot",
+    block: () => `# =============================================================================
+# AUTOPILOT (OPTIONAL) — configuration for the /autopilot autonomous deploy loop.
+# Commands: autopilot
+# =============================================================================
+
+# autopilot:
+#   ops_issue_label: "autopilot-ops"
+#   headless: false                  # opt-in to unattended fixing; default: false
+#   approve:
+#     p0: needs-human
+#     p1: needs-human
+#     p2: auto
+#     p3: auto
+#   budget:
+#     per_cycle_fixes: 3
+#     per_cycle_tokens: null`,
+  },
+  {
+    key: "billing",
+    block: () => `# =============================================================================
+# BILLING (OPTIONAL) — financial integrity checks in /security-audit.
+# Commands: security-audit (Phase 4 — Financial Integrity)
+# =============================================================================
+
+# billing:
+#   enabled: false`,
+  },
+  {
+    key: "devdocs",
+    block: () => `# =============================================================================
+# DEVDOCS (OPTIONAL) — path to the devdocs knowledge tree.
+# Commands: docs init
+# =============================================================================
+
+# devdocs:
+#   path: "devdocs"`,
+  },
+  {
+    key: "adaptive_scripts",
+    block: () => `# =============================================================================
+# ADAPTIVE_SCRIPTS (OPTIONAL) — per-repo scripts ForgeDock learns and updates.
+# Commands: work-on (script discovery), optimize (script generation)
+# =============================================================================
+
+# adaptive_scripts:
+#   enabled: true
+#   directory: ".forgedock/scripts"
+#   commit: false`,
+  },
+  {
+    key: "learned",
+    block: () => `# =============================================================================
+# LEARNED (OPTIONAL) — agent-writable patterns captured across sessions.
+# Commands: work-on (Phase 0B reads; Phase 1D writes)
+# =============================================================================
+
+# learned:
+#   branch_targets:
+#     staging: "develop"
+#   test_commands:
+#     - "pnpm typecheck"
+#   label_map:
+#     "workflow:investigating": "needs-triage"
+#   commit_style: "conventional-with-scope"`,
+  },
+  {
+    key: "index",
+    block: () => `# =============================================================================
+# INDEX (OPTIONAL) — per-commit code index for scripts/code-index.sh.
+# Commands: work-on:investigate, work-on/build/architect, review-pr
+# =============================================================================
+
+# index:
+#   languages: "Python,JavaScript,TypeScript,Go"
+#   cache_dir: ".forge/index"
+#   enabled: true`,
+  },
+  {
+    key: "attribution",
+    block: () => `# =============================================================================
+# ATTRIBUTION (OPTIONAL) — opt-in growth features (PR/annotation footer links).
+# Commands: work-on/review, review-pr
+# =============================================================================
+
+# attribution:
+#   pr_footer: true
+#   annotation_link: true`,
+  },
+  {
+    key: "pattern_feeds",
+    block: () => `# =============================================================================
+# PATTERN_FEEDS (OPTIONAL) — subscribe to external pattern card repositories.
+# Commands: scripts/build-knowledge-index.mjs, quality-gate, optimize
+# =============================================================================
+
+# pattern_feeds:
+#   feeds:
+#     - slug: "forge-core"
+#       repo: "RapierCraftStudios/forge-patterns"
+#       ref: "abc1234def5678..."   # REQUIRED: pinned commit SHA — never a branch name
+#       path: "cards"
+#       stacks: ["node", "bash", "gha"]
+#       priority: "LOW"
+#   enabled: true`,
+  },
+];
+
+/**
  * Write forge.yaml from reviewed values.
  * @param {{owner:string,repo:string,name:string,description:string,root:string,
  *          worktreeBase:string,defaultBranch:string,stagingBranch:string}} v
@@ -34,13 +270,15 @@ function todo(key, low) {
  */
 export function writeForgeYaml(v, lowConfidenceKeys, outputPath) {
   const low = lowConfidenceKeys;
-  const content = `# forge.yaml — ForgeDock Configuration
+  const header = `# forge.yaml — ForgeDock Configuration
 #
 # Auto-generated by: npx forgedock
 # Fields marked with TODO comments below were guessed — verify them.
 #
 # Required sections: project, paths, branches
-# Optional sections: repos, project_board, services, review, verification
+# Optional sections: agents, repos, project_board, pipeline, services, review,
+#   verification, deploy, autopilot, billing, devdocs, adaptive_scripts,
+#   learned, index, attribution, pattern_feeds
 #
 # See docs/CONFIG.md for full reference.
 
@@ -69,51 +307,9 @@ paths:
 branches:
   default: "${esc(v.defaultBranch)}"${todo("defaultBranch", low)}
   staging: "${esc(v.stagingBranch)}"${todo("stagingBranch", low)}
-  feature_pattern: "milestone/{slug}"
+  feature_pattern: "milestone/{slug}"`;
 
-# =============================================================================
-# REPOS (OPTIONAL) — multi-repo configuration. Remove the # to enable.
-# =============================================================================
-
-# repos:
-#   default:
-#     repo: "${esc(v.owner)}/${esc(v.repo)}"
-#     staging_branch: "${esc(v.stagingBranch)}"
-#   satellites:
-#     - prefix: "mcp"
-#       repo: "${esc(v.owner)}/your-satellite-repo"
-#       staging_branch: "main"
-
-# =============================================================================
-# PROJECT BOARD (OPTIONAL) — GitHub Projects v2 integration.
-# To find IDs: gh project list --owner ${esc(v.owner)}
-# =============================================================================
-
-# project_board:
-#   owner: "${esc(v.owner)}"
-#   project_number: 1
-#   project_id: "PVT_kwHOxxxxxxxxxxxxxxxx"
-#   field_ids:
-#     status: "PVTSSF_xxxxxxxxxxxxxxxxxxxxxxxx"
-
-# =============================================================================
-# REVIEW (OPTIONAL) — context injected into review agent prompts.
-# =============================================================================
-
-# review:
-#   tech_stack: "Node.js, TypeScript, PostgreSQL"
-#   context: |
-#     Describe your repo structure and any unusual conventions here.
-
-# =============================================================================
-# VERIFICATION (OPTIONAL) — health checks for quality gate / validate.
-# =============================================================================
-
-# verification:
-#   health_endpoint: "https://api.example.com/health"
-#   health_patterns:
-#     - '"status": "ok"'
-`;
+  const content = [header, ...OPTIONAL_SECTIONS.map((s) => s.block(v))].join("\n\n") + "\n";
   // Atomic write: write to a temp file first, then rename into place.
   // If the write fails (e.g. ENOSPC), the original file is untouched and
   // any partial .tmp is cleaned up — no corrupt or missing forge.yaml.
@@ -127,6 +323,79 @@ branches:
   }
   const todoCount = (content.match(/# TODO\(forgedock:/g) || []).length;
   return { todoCount };
+}
+
+/**
+ * Backfill any of the 16 optional forge.yaml sections missing from an
+ * existing config file (#1982). Additive only — never edits, reorders, or
+ * removes existing content. Required sections, already-present optional
+ * sections, and any hand-edited content are left byte-for-byte untouched;
+ * only trailing whitespace at the very end of the file is trimmed before
+ * appending. Follows the same atomic temp+rename write pattern as
+ * writeForgeYaml() (ref: #1396 — a non-atomic write here could corrupt the
+ * user's forge.yaml on disk-full).
+ *
+ * A section counts as "present" if its top-level key appears either active
+ * (`key:` at column 0 — the user enabled it) or as the standard commented
+ * stub (`# key:`) anywhere in the file. Detection is intentionally strict
+ * about indentation (no arbitrary leading whitespace) so a same-named key
+ * nested under an unrelated section can never produce a false "present".
+ *
+ * @param {string} cwd - directory containing forge.yaml
+ * @returns {{ present: boolean, added: string[], alreadyPresent: string[] }}
+ *   `present: false` means no forge.yaml exists at cwd — added/alreadyPresent
+ *   are both empty; the caller should direct the user to `npx forgedock init`
+ *   instead of migrate.
+ */
+export function backfillForgeYaml(cwd) {
+  const outputPath = join(cwd, "forge.yaml");
+  if (!existsSync(outputPath)) {
+    return { present: false, added: [], alreadyPresent: [] };
+  }
+  const raw = readFileSync(outputPath, "utf-8");
+
+  // Best-effort values for the blocks that interpolate project identity
+  // (repos/project_board examples) — read from the existing file's REQUIRED
+  // sections so backfilled examples reference this project rather than a
+  // generic placeholder. Falls back to placeholders if unset/unparseable;
+  // these only ever land inside commented-out example text.
+  const v = {
+    owner: raw.match(/^\s*owner:\s*"([^"]*)"/m)?.[1] || "your-org",
+    repo: raw.match(/^\s*repo:\s*"([^"]*)"/m)?.[1] || "your-repo",
+    stagingBranch: raw.match(/^\s*staging:\s*"([^"]*)"/m)?.[1] || "staging",
+  };
+
+  const added = [];
+  const alreadyPresent = [];
+  const newBlocks = [];
+  for (const section of OPTIONAL_SECTIONS) {
+    const isActive = new RegExp(`^${section.key}:`, "m").test(raw);
+    const isStub = new RegExp(`^#\\s?${section.key}:`, "m").test(raw);
+    if (isActive || isStub) {
+      alreadyPresent.push(section.key);
+    } else {
+      added.push(section.key);
+      newBlocks.push(section.block(v));
+    }
+  }
+
+  if (added.length === 0) {
+    return { present: true, added, alreadyPresent };
+  }
+
+  const trimmedRaw = raw.replace(/\s+$/, "");
+  const content = `${trimmedRaw}\n\n${newBlocks.join("\n\n")}\n`;
+
+  const tmpPath = outputPath + ".tmp";
+  try {
+    writeFileSync(tmpPath, content, "utf-8");
+    renameSync(tmpPath, outputPath);
+  } catch (err) {
+    try { unlinkSync(tmpPath); } catch { /* best-effort cleanup */ }
+    throw err;
+  }
+
+  return { present: true, added, alreadyPresent };
 }
 
 /** Maps manual-flow value keys to their location in a ConfigDraft. */
