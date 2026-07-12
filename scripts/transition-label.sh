@@ -83,8 +83,25 @@ if [ "${1:-}" = "--validate" ]; then
   fi
 
   # Check if issue carries needs-validation (idempotent gate)
-  CURRENT_LABELS=$(gh issue view "$ISSUE_NUMBER" "${GH_ARGS[@]}" --json labels \
-    --jq '[.labels[].name] | join(",")' 2>/dev/null || echo "")
+  #
+  # forge#1991: a bare `2>/dev/null || echo ""` here collapsed "fetch
+  # failed" and "fetch succeeded, issue has no labels" into the same empty
+  # string, so a failed fetch fell through to the "no needs-validation —
+  # no action taken (idempotent)" branch below and exited 0, silently
+  # misreporting a transient API failure as successful idempotent no-op.
+  # Use the same `if VAR=$(cmd); then ... else ... fi` idiom already
+  # applied to the workflow-mode label fetches (forge#1977/#1988/#1990) to
+  # keep the two outcomes distinguishable. This block has no
+  # TRANSITION_EXIT_CODE deferred-exit convention (that only exists in the
+  # workflow-mode block below), so failure exits 1 directly here, matching
+  # this script's documented exit codes (0 = success, 1 = error).
+  if CURRENT_LABELS=$(gh issue view "$ISSUE_NUMBER" "${GH_ARGS[@]}" --json labels \
+    --jq '[.labels[].name] | join(",")' 2>/dev/null); then
+    : # fetch succeeded; CURRENT_LABELS may legitimately be an empty string
+  else
+    echo "ERROR: needs-validation label fetch failed (transient network error / rate limit?) for issue #$ISSUE_NUMBER — cannot determine finding-lifecycle state. Aborting without action." >&2
+    exit 1
+  fi
 
   if ! echo "$CURRENT_LABELS" | grep -q "needs-validation"; then
     echo "OK: Issue #$ISSUE_NUMBER does not have needs-validation — no action taken (idempotent)"
