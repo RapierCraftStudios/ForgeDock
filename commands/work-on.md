@@ -382,7 +382,16 @@ if [[ "$ADAPTIVE_DIR" != "${REPO_PATH_NORM}/"* ]]; then
   echo "WARNING: adaptive_scripts.directory resolves outside repo root ('$ADAPTIVE_DIR') — adaptive tier disabled" >&2
   ADAPTIVE_ENABLED=false
 fi
-UNIVERSAL_DIR="${FORGEDOCK_HOME:-$(dirname "$(which classify-lane.sh 2>/dev/null || echo 'scripts')")}/scripts"
+UNIVERSAL_DIR="${FORGEDOCK_HOME:-$REPO_PATH}/scripts"
+# NOTE: never resolve this via `which` or `find` — universal scripts are
+# repo-relative, not installed on $PATH, so a PATH lookup always misses.
+# REPO_PATH is already resolved from forge.yaml → paths.root earlier in
+# Phase 0, so it is the deterministic fallback when FORGEDOCK_HOME is unset.
+# Pipeline agents MUST NOT use `find` (unbounded or filesystem-wide) to
+# locate pipeline scripts under any circumstances: if UNIVERSAL_DIR/${operation}.sh
+# does not exist, resolve_script() falls through to Tier 4 (prose) below,
+# which is always safe and available. A missing script is never a reason
+# to search the filesystem. <!-- Added: forge#1984 -->
 
 resolve_script() {
   local operation="$1"
