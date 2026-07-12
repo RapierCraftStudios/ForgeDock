@@ -40,7 +40,9 @@ export function writeForgeYaml(v, lowConfidenceKeys, outputPath) {
 # Fields marked with TODO comments below were guessed — verify them.
 #
 # Required sections: project, paths, branches
-# Optional sections: repos, project_board, services, review, verification
+# Optional sections: agents, repos, project_board, pipeline, services, review,
+#   verification, deploy, autopilot, billing, devdocs, adaptive_scripts,
+#   learned, index, attribution, pattern_feeds
 #
 # See docs/CONFIG.md for full reference.
 
@@ -72,6 +74,15 @@ branches:
   feature_pattern: "milestone/{slug}"
 
 # =============================================================================
+# AGENTS (OPTIONAL) — model overrides for pipeline agents.
+# Commands: all commands with an "Agent model policy" line
+# =============================================================================
+
+# agents:
+#   default_model: "sonnet"      # main orchestrator/agent model: "sonnet" | "opus" | "haiku"
+#   subagent_model: "sonnet"     # model for child sub-agents (orchestrate, review-pr, ...)
+
+# =============================================================================
 # REPOS (OPTIONAL) — multi-repo configuration. Remove the # to enable.
 # =============================================================================
 
@@ -97,6 +108,36 @@ branches:
 #     status: "PVTSSF_xxxxxxxxxxxxxxxxxxxxxxxx"
 
 # =============================================================================
+# PIPELINE (OPTIONAL) — tuning knobs for the /orchestrate batch engine.
+# Commands: orchestrate
+# =============================================================================
+
+# pipeline:
+#   stall_timeout_minutes: 15        # minutes an agent may sit idle before auto-resume
+#   token_budget_per_batch: 900000   # per-batch token ceiling for the review-finding cascade
+#   token_estimate_per_finding: 150000
+#   narration: "terse"               # "terse" | "verbose"
+
+# =============================================================================
+# SERVICES (OPTIONAL) — external service URLs for analytics/monitoring/GEO audit.
+# Commands: analytics, geo-audit, autopilot (analytics snapshot)
+# =============================================================================
+
+# services:
+#   domain: "acme.io"
+#   gsc_property: "https://acme.io"
+#   app_url: "https://acme.io"
+#   api_url: "https://api.acme.io"
+#   analytics:
+#     umami:
+#       url: "https://umami.acme.io"
+#       website_id: "xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx"
+#     clarity:
+#       project_id: "xxxxxxxxxx"
+#     ga4:
+#       property_id: "000000000"
+
+# =============================================================================
 # REVIEW (OPTIONAL) — context injected into review agent prompts.
 # =============================================================================
 
@@ -113,6 +154,109 @@ branches:
 #   health_endpoint: "https://api.example.com/health"
 #   health_patterns:
 #     - '"status": "ok"'
+
+# =============================================================================
+# DEPLOY (OPTIONAL) — deployment model configuration.
+# Commands: deploy-info, incident-response, rollback, work-on (Phase 3J)
+# =============================================================================
+
+# deploy:
+#   workflow: "deploy.yml"           # GitHub Actions workflow filename used to trigger deploys
+#   workflow_inputs:
+#     services: "services"
+#     reason: "reason"
+#   secrets_backend: "sops"          # sops | aws-sm | vault | ci-env | none
+
+# =============================================================================
+# AUTOPILOT (OPTIONAL) — configuration for the /autopilot autonomous deploy loop.
+# Commands: autopilot
+# =============================================================================
+
+# autopilot:
+#   ops_issue_label: "autopilot-ops"
+#   headless: false                  # opt-in to unattended fixing; default: false
+#   approve:
+#     p0: needs-human
+#     p1: needs-human
+#     p2: auto
+#     p3: auto
+#   budget:
+#     per_cycle_fixes: 3
+#     per_cycle_tokens: null
+
+# =============================================================================
+# BILLING (OPTIONAL) — financial integrity checks in /security-audit.
+# Commands: security-audit (Phase 4 — Financial Integrity)
+# =============================================================================
+
+# billing:
+#   enabled: false
+
+# =============================================================================
+# DEVDOCS (OPTIONAL) — path to the devdocs knowledge tree.
+# Commands: docs init
+# =============================================================================
+
+# devdocs:
+#   path: "devdocs"
+
+# =============================================================================
+# ADAPTIVE_SCRIPTS (OPTIONAL) — per-repo scripts ForgeDock learns and updates.
+# Commands: work-on (script discovery), optimize (script generation)
+# =============================================================================
+
+# adaptive_scripts:
+#   enabled: true
+#   directory: ".forgedock/scripts"
+#   commit: false
+
+# =============================================================================
+# LEARNED (OPTIONAL) — agent-writable patterns captured across sessions.
+# Commands: work-on (Phase 0B reads; Phase 1D writes)
+# =============================================================================
+
+# learned:
+#   branch_targets:
+#     staging: "develop"
+#   test_commands:
+#     - "pnpm typecheck"
+#   label_map:
+#     "workflow:investigating": "needs-triage"
+#   commit_style: "conventional-with-scope"
+
+# =============================================================================
+# INDEX (OPTIONAL) — per-commit code index for scripts/code-index.sh.
+# Commands: work-on:investigate, work-on/build/architect, review-pr
+# =============================================================================
+
+# index:
+#   languages: "Python,JavaScript,TypeScript,Go"
+#   cache_dir: ".forge/index"
+#   enabled: true
+
+# =============================================================================
+# ATTRIBUTION (OPTIONAL) — opt-in growth features (PR/annotation footer links).
+# Commands: work-on/review, review-pr
+# =============================================================================
+
+# attribution:
+#   pr_footer: true
+#   annotation_link: true
+
+# =============================================================================
+# PATTERN_FEEDS (OPTIONAL) — subscribe to external pattern card repositories.
+# Commands: scripts/build-knowledge-index.mjs, quality-gate, optimize
+# =============================================================================
+
+# pattern_feeds:
+#   feeds:
+#     - slug: "forge-core"
+#       repo: "RapierCraftStudios/forge-patterns"
+#       ref: "abc1234def5678..."   # REQUIRED: pinned commit SHA — never a branch name
+#       path: "cards"
+#       stacks: ["node", "bash", "gha"]
+#       priority: "LOW"
+#   enabled: true
 `;
   // Atomic write: write to a temp file first, then rename into place.
   // If the write fails (e.g. ENOSPC), the original file is untouched and

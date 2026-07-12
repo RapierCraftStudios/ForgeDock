@@ -74,6 +74,50 @@ describe("writeForgeYaml", () => {
     assert.ok(existsSync(out), "forge.yaml must exist after write");
     assert.ok(!existsSync(out + ".tmp"), ".tmp must be gone after successful write");
   });
+  it("emits all 16 optional sections from forge.yaml.example (#1983)", () => {
+    const out = join(dir, "forge.yaml");
+    writeForgeYaml(VALUES, [], out);
+    const yaml = readFileSync(out, "utf-8");
+    const optionalSections = [
+      "AGENTS",
+      "REPOS",
+      "PROJECT BOARD",
+      "PIPELINE",
+      "SERVICES",
+      "REVIEW",
+      "VERIFICATION",
+      "DEPLOY",
+      "AUTOPILOT",
+      "BILLING",
+      "DEVDOCS",
+      "ADAPTIVE_SCRIPTS",
+      "LEARNED",
+      "INDEX",
+      "ATTRIBUTION",
+      "PATTERN_FEEDS",
+    ];
+    for (const name of optionalSections) {
+      assert.match(
+        yaml,
+        new RegExp(`# ${name} \\(OPTIONAL\\)`),
+        `missing optional section banner: ${name}`,
+      );
+    }
+    // Every line of every new/existing optional section must stay commented out —
+    // never parsed as active YAML.
+    assert.doesNotMatch(yaml, /^agents:/m);
+    assert.doesNotMatch(yaml, /^pipeline:/m);
+    assert.doesNotMatch(yaml, /^services:/m);
+    assert.doesNotMatch(yaml, /^deploy:/m);
+    assert.doesNotMatch(yaml, /^autopilot:/m);
+    assert.doesNotMatch(yaml, /^billing:/m);
+    assert.doesNotMatch(yaml, /^devdocs:/m);
+    assert.doesNotMatch(yaml, /^adaptive_scripts:/m);
+    assert.doesNotMatch(yaml, /^learned:/m);
+    assert.doesNotMatch(yaml, /^index:/m);
+    assert.doesNotMatch(yaml, /^attribution:/m);
+    assert.doesNotMatch(yaml, /^pattern_feeds:/m);
+  });
 });
 
 describe("backupExisting", () => {
