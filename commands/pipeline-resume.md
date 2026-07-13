@@ -1,6 +1,6 @@
 ---
 description: Recover full pipeline context after compaction — find the last active issue, reconstruct FORGE annotations, and resume work
-argument-hint: [issue number (optional — auto-detects if omitted)]
+argument-hint: "[issue number (optional — auto-detects if omitted)]"
 install: extras
 ---
 

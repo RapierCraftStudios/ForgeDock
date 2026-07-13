@@ -1,6 +1,6 @@
 ---
 description: Autonomous deploy loop — runs until zero open issues remain. Detects pipeline state and resumes from any position. Fully autonomous after invocation.
-argument-hint: [--dry-run | --recon-only]
+argument-hint: "[--dry-run | --recon-only]"
 install: extras
 ---
 <!-- SPDX-FileCopyrightText: Copyright (c) RapierCraft Studios -->
