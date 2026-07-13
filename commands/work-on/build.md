@@ -1,6 +1,6 @@
 ---
 description: Build subcommand — create worktree, post contract, sequence context/architect/implement/validate
-argument-hint: [issue number] [--repo GH_REPO] [--gh-flag GH_FLAG] [--base PR_BASE]
+argument-hint: "[issue number] [--repo GH_REPO] [--gh-flag GH_FLAG] [--base PR_BASE]"
 ---
 <!-- SPDX-FileCopyrightText: Copyright (c) RapierCraft Studios -->
 <!-- SPDX-License-Identifier: AGPL-3.0-or-later -->

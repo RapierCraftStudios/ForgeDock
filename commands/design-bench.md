@@ -1,6 +1,6 @@
 ---
 description: Run the ABC benchmark — reference URL → design-blind brief → render arms A/B/C → blind judge → scorecard with win-rates over n runs
-argument-hint: [<brief-name>|all] [--n <runs>] [--corpus-version <ver>]
+argument-hint: "[<brief-name>|all] [--n <runs>] [--corpus-version <ver>]"
 install: internal
 ---
 <!-- SPDX-FileCopyrightText: Copyright (c) RapierCraft Studios -->
