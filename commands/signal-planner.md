@@ -1,6 +1,6 @@
 ---
 description: Closed-loop autonomy — convert a production/analytics/incident signal into a dependency-ordered issue DAG, execute via /orchestrate, then verify the originating signal is resolved. Event-driven companion to /autopilot.
-argument-hint: [--signal '<json>' | --metric '<name> <threshold>' | --incident <issue#> | --geo | --dry-run | --max-issues N]
+argument-hint: "[--signal '<json>' | --metric '<name> <threshold>' | --incident <issue#> | --geo | --dry-run | --max-issues N]"
 install: extras
 ---
 <!-- SPDX-FileCopyrightText: Copyright (c) RapierCraft Studios -->

@@ -1,6 +1,6 @@
 ---
 description: Pick up a GitHub issue and run the full investigate-build-review-merge pipeline
-argument-hint: [issue number or "next" to pick highest priority]
+argument-hint: "[issue number or \"next\" to pick highest priority]"
 ---
 <!-- SPDX-FileCopyrightText: Copyright (c) RapierCraft Studios -->
 <!-- SPDX-License-Identifier: AGPL-3.0-or-later -->

@@ -1,6 +1,6 @@
 ---
 description: Investigate a GitHub issue — validate it's real, determine root cause, post findings
-argument-hint: [issue number] [--repo {owner}/{repo}] [--gh-flag "-R {owner}/{repo}"]
+argument-hint: "[issue number] [--repo {owner}/{repo}] [--gh-flag \"-R {owner}/{repo}\"]"
 ---
 <!-- SPDX-FileCopyrightText: Copyright (c) RapierCraft Studios -->
 <!-- SPDX-License-Identifier: AGPL-3.0-or-later -->

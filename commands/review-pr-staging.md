@@ -1,6 +1,6 @@
 ---
 description: Staging review mode — comprehensive review of staging branch before deploy to main
-argument-hint: [PR number or "staging"]
+argument-hint: "[PR number or \"staging\"]"
 allowed-tools: Task, Bash, Read, Grep, Glob, WebFetch
 install: extras
 ---

@@ -1,6 +1,6 @@
 ---
 description: Bootstrap an existing repo for ForgeDock — triage open issues, apply labels, suggest a starter milestone, and identify first /work-on candidates
-argument-hint: [--dry-run | --limit <N> | --milestone | --no-milestone]
+argument-hint: "[--dry-run | --limit <N> | --milestone | --no-milestone]"
 install: extras
 ---
 

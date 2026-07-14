@@ -1,6 +1,6 @@
 ---
 description: Ship a branch to its deploy target — detect or create PR, fix CI, review, merge. Returns structured result for callers.
-argument-hint: [source_branch | "staging" | "milestone/{slug}"] [--target TARGET] [--issue ISSUE_NUMBER] [--repo REPO] [--max-ci-iterations N] [--max-review-iterations N] [--dry-run]
+argument-hint: "[source_branch | \"staging\" | \"milestone/{slug}\"] [--target TARGET] [--issue ISSUE_NUMBER] [--repo REPO] [--max-ci-iterations N] [--max-review-iterations N] [--dry-run]"
 allowed-tools: Bash, Read, Grep, Glob, Skill
 ---
 <!-- SPDX-FileCopyrightText: Copyright (c) RapierCraft Studios -->

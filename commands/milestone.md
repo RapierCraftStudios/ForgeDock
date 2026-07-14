@@ -1,6 +1,6 @@
 ---
 description: Create, manage, and ship milestones — the top-level planning layer for feature development
-argument-hint: [create <name> | status | ship <slug> | sync <slug>]
+argument-hint: "[create <name> | status | ship <slug> | sync <slug>]"
 install: extras
 ---
 <!-- SPDX-FileCopyrightText: Copyright (c) RapierCraft Studios -->

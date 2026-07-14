@@ -1,6 +1,6 @@
 ---
 description: Auto-generate release notes from merged PRs and FORGE:TRAJECTORY annotations — grouped by conventional commit type
-argument-hint: [v1.0.0..v1.1.0 | since:YYYY-MM-DD | last-N]
+argument-hint: "[v1.0.0..v1.1.0 | since:YYYY-MM-DD | last-N]"
 install: extras
 ---
 

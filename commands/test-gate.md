@@ -1,6 +1,6 @@
 ---
 description: Deterministic deploy-gate — verify a staging→main bundle's acceptance criteria against running code before deploy
-argument-hint: [--prs "<N1 N2 ...>"] [--base <branch>]
+argument-hint: "[--prs \"<N1 N2 ...>\"] [--base <branch>]"
 allowed-tools: Task, Bash, Read, Grep, Glob
 install: extras
 ---
