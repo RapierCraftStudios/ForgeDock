@@ -45,6 +45,8 @@ import {
   renderSummaryCard,
   resolveConfiguredDefaultModel,
   runCommand,
+  isClaudeCliAvailable,
+  resolveBackend,
 } from "../runner.mjs";
 
 // ---------------------------------------------------------------------------
@@ -880,7 +882,13 @@ describe("runCommand", () => {
     assert.match(lines[0], /dry-run/);
   });
 
-  it("throws NO_API_KEY for a live run with no key", async () => {
+  it("throws NO_API_KEY for a live run with no key on the api backend", async () => {
+    // backend is pinned to "api" explicitly (issue #2003): with the default
+    // "auto" ladder, this assertion would only hold on a machine without the
+    // `claude` CLI on PATH — auto-detection could otherwise pick the cli
+    // backend and never reach the NO_API_KEY guard at all. Pinning makes the
+    // test deterministic regardless of what's installed on the host running
+    // it, while still exercising exactly the guard this test is about.
     await assert.rejects(
       runCommand({
         commandsDir: COMMANDS_DIR,
@@ -889,6 +897,7 @@ describe("runCommand", () => {
         cwd: TMP,
         dryRun: false,
         apiKey: "",
+        backend: "api",
         logger: { log() {} },
       }),
       (err) => err.code === "NO_API_KEY",
@@ -1111,5 +1120,154 @@ describe("runCommand model resolution precedence", () => {
       logger: { log() {} },
     });
     assert.equal(result.model, "claude-sonnet-5");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Backend selection — isClaudeCliAvailable / resolveBackend (issue #2003)
+// ---------------------------------------------------------------------------
+
+describe("isClaudeCliAvailable", () => {
+  it("returns a boolean and never throws, regardless of whether `claude` is installed", () => {
+    // Deliberately does not assert true/false — whether `claude` happens to be
+    // on PATH is host-dependent. What matters (and is the whole point of the
+    // function) is that it never throws and always resolves to a boolean.
+    let result;
+    assert.doesNotThrow(() => {
+      result = isClaudeCliAvailable(TMP);
+    });
+    assert.equal(typeof result, "boolean");
+  });
+});
+
+describe("resolveBackend", () => {
+  it("returns 'cli' immediately when explicitly requested, without probing", () => {
+    assert.equal(resolveBackend({ requested: "cli", cwd: TMP }), "cli");
+  });
+
+  it("returns 'api' immediately when explicitly requested, without probing", () => {
+    assert.equal(resolveBackend({ requested: "api", cwd: TMP }), "api");
+  });
+
+  it("'auto' resolves to either 'cli' or 'api' based on CLI detection (never throws)", () => {
+    let result;
+    assert.doesNotThrow(() => {
+      result = resolveBackend({ requested: "auto", cwd: TMP });
+    });
+    assert.ok(result === "cli" || result === "api");
+  });
+
+  it("defaults to 'auto' behavior when requested is omitted", () => {
+    let result;
+    assert.doesNotThrow(() => {
+      result = resolveBackend({ cwd: TMP });
+    });
+    assert.ok(result === "cli" || result === "api");
+  });
+
+  it("throws a descriptive error for an unrecognized backend value", () => {
+    assert.throws(
+      () => resolveBackend({ requested: "not-a-real-backend", cwd: TMP }),
+      /Invalid backend "not-a-real-backend"/,
+    );
+  });
+});
+
+// ---------------------------------------------------------------------------
+// runCommand — backend plumbing (issue #2003)
+// ---------------------------------------------------------------------------
+
+describe("runCommand backend resolution", () => {
+  it("dry-run result includes a resolved backend field ('cli' or 'api')", async () => {
+    const result = await runCommand({
+      commandsDir: COMMANDS_DIR,
+      commandName: "work-on",
+      args: ["2003"],
+      cwd: TMP,
+      dryRun: true,
+      logger: { log() {} },
+    });
+    assert.equal(result.status, "dry-run");
+    assert.ok(result.backend === "cli" || result.backend === "api");
+  });
+
+  it("dry-run output documents which backend would run", async () => {
+    const lines = [];
+    await runCommand({
+      commandsDir: COMMANDS_DIR,
+      commandName: "work-on",
+      args: ["2003"],
+      cwd: TMP,
+      dryRun: true,
+      backend: "api",
+      logger: { log: (s) => lines.push(s) },
+    });
+    assert.match(lines[0], /backend:\s+api/);
+  });
+
+  it("dry-run output reflects an explicit --backend cli override", async () => {
+    const lines = [];
+    await runCommand({
+      commandsDir: COMMANDS_DIR,
+      commandName: "work-on",
+      args: ["2003"],
+      cwd: TMP,
+      dryRun: true,
+      backend: "cli",
+      logger: { log: (s) => lines.push(s) },
+    });
+    assert.match(lines[0], /backend:\s+cli/);
+  });
+
+  it("dry-run rejects an invalid backend value instead of silently ignoring it", async () => {
+    await assert.rejects(
+      runCommand({
+        commandsDir: COMMANDS_DIR,
+        commandName: "work-on",
+        args: ["2003"],
+        cwd: TMP,
+        dryRun: true,
+        backend: "not-a-real-backend",
+        logger: { log() {} },
+      }),
+      /Invalid backend/,
+    );
+  });
+
+  it("NO_API_KEY is never thrown when backend is explicitly 'cli', even with no key set", async () => {
+    // This exercises the core acceptance criterion: the cli backend must not
+    // require ANTHROPIC_API_KEY. runCommand's control flow returns from
+    // runCliBackend() before the `if (!apiKey)` guard is ever reached when
+    // resolvedBackend === "cli", so no NO_API_KEY error is reachable on this
+    // path regardless of whether the `claude` CLI is actually installed.
+    //
+    // A tiny FORGEDOCK_CLI_TIMEOUT_MS bounds this test to a near-instant
+    // timeout (real `claude --print` startup takes far longer than a few
+    // milliseconds) so the test suite never spends real wall-clock time —
+    // or a real Claude Code session — actually running the CLI. The only
+    // assertion that matters is the *absence* of NO_API_KEY; a timeout or a
+    // "claude not found" failure are both acceptable, expected outcomes here.
+    const originalTimeout = process.env.FORGEDOCK_CLI_TIMEOUT_MS;
+    process.env.FORGEDOCK_CLI_TIMEOUT_MS = "1";
+    try {
+      await runCommand({
+        commandsDir: COMMANDS_DIR,
+        commandName: "work-on",
+        args: ["2003"],
+        cwd: TMP,
+        dryRun: false,
+        apiKey: "",
+        backend: "cli",
+        logger: { log() {} },
+      });
+    } catch (err) {
+      assert.notEqual(err.code, "NO_API_KEY");
+    } finally {
+      if (originalTimeout === undefined) {
+        delete process.env.FORGEDOCK_CLI_TIMEOUT_MS;
+      } else {
+        process.env.FORGEDOCK_CLI_TIMEOUT_MS = originalTimeout;
+      }
+    }
   });
 });
