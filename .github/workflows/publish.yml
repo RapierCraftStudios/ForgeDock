@@ -1,5 +1,30 @@
 name: Publish to npm
 
+# ROLLBACK RUNBOOK (see forge#2025 / PR #2018 staging review finding REG-2):
+# This workflow publishes to the `latest` npm dist-tag on every qualifying push
+# to `main`. If a bad release is published:
+#   1. Do NOT run `npm unpublish`. Unpublishing removes the version entirely,
+#      which breaks any consumer that has already resolved/installed it and
+#      forfeits the version number (npm blocks republishing the same version
+#      for 24h+). It also does not un-ship whatever already propagated.
+#   2. Instead: `git revert` the offending commit(s) on `main`, push the
+#      revert, and let this workflow publish a new patch version containing
+#      the revert. This is the only supported rollback path — a forward-fix
+#      release, not a destructive unpublish.
+#   3. If the bad release must be hidden from new installs immediately while
+#      the revert is prepared, use `npm dist-tag` to move `latest` back to the
+#      last-known-good version (this does not remove the bad version, it only
+#      stops it from being the default resolution target):
+#       npm dist-tag add forgedock@<last-good-version> latest
+#
+# The `concurrency` group below serializes publish runs so two qualifying
+# pushes landing close together (e.g. a merge immediately followed by this
+# workflow's own auto-generated "chore: bump version" push) cannot race on
+# the version bump / npm publish steps.
+concurrency:
+  group: publish-main
+  cancel-in-progress: false
+
 on:
   push:
     branches: [main]
