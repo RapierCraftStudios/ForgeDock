@@ -1,8 +1,9 @@
 /**
  * init-enrich-api.mjs — Anthropic API enrichment backend for ForgeDock init.
  *
- * Implements the same enrich(ConfigDraft) contract as the skill backend so the
- * selection ladder in forgedock.mjs can treat both backends interchangeably.
+ * Implements the same enrich(ConfigDraft) contract as the cli backend
+ * (bin/init-enrich-cli.mjs) so the selection ladder in bin/init-enrich.mjs
+ * can treat both backends interchangeably.
  *
  * Uses Node.js built-in fetch (Node 18+) — no SDK dependency required.
  * Reads ANTHROPIC_API_KEY from the environment; cleanly skips enrichment with

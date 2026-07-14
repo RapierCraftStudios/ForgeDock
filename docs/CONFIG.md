@@ -31,7 +31,7 @@ echo "forge.yaml" >> .gitignore  # if your credentials path is sensitive
 | `NO_COLOR=1` | Disables ANSI color output only. Motion is unaffected (monochrome choreography). |
 | Non-TTY / piped output (or `CI=1`) | Plain sequential log: no color **and** no animation. |
 
-The default (no flags) is the annotated review screen: detection runs, AI enrichment fills in what it can (when an API key is available), and you review the result on a single screen — Enter accepts everything, low-confidence fields are flagged with a `# TODO(forgedock:<field>)` comment if left unedited.
+The default (no flags) is the annotated review screen: detection runs, AI enrichment fills in what it can — using a local, authenticated `claude` CLI when available, otherwise falling back to the Anthropic API when `ANTHROPIC_API_KEY` is set, otherwise skipped — and you review the result on a single screen — Enter accepts everything, low-confidence fields are flagged with a `# TODO(forgedock:<field>)` comment if left unedited.
 
 ---
 
@@ -741,7 +741,7 @@ const draft = await detectConfig(process.cwd());
 
 Downstream consumers read `field.value` for the raw value and `field.confidence` to decide how to handle it:
 
-- **`init-enrich`** (AI enrichment): passes `low`- and `medium`-confidence fields to the AI backend to raise their confidence; leaves `high`-confidence fields untouched.
+- **`init-enrich`** (AI enrichment): passes `low`- and `medium`-confidence fields to the selected AI backend (a local `claude` CLI when available, otherwise the Anthropic API with `ANTHROPIC_API_KEY`) to raise their confidence; leaves `high`-confidence fields untouched.
 - **`review-render`** (TUI review screen): shows each field with its source and why; highlights `low`-confidence fields with a `# TODO(forgedock:<field>)` annotation in the generated YAML.
 
 ---
