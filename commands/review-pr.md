@@ -1,6 +1,6 @@
 ---
 description: Context-aware PR review — analyzes what the PR touches, spawns domain-specific agents with project conventions. Supports staging reviews.
-argument-hint: [PR number, URL, "open", or "staging" for feature→main review]
+argument-hint: "[PR number, URL, \"open\", or \"staging\" for feature→main review]"
 allowed-tools: Task, Bash, Read, Grep, Glob, WebFetch, Skill
 ---
 <!-- SPDX-FileCopyrightText: Copyright (c) RapierCraft Studios -->

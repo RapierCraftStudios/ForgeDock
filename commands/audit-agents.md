@@ -1,6 +1,6 @@
 ---
 description: Audit agent outputs from an orchestration run — timeline analysis, stall detection, active vs idle time breakdown
-argument-hint: [session-id | latest | <agent-id>]
+argument-hint: "[session-id | latest | <agent-id>]"
 install: extras
 ---
 <!-- SPDX-FileCopyrightText: Copyright (c) RapierCraft Studios -->

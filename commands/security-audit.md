@@ -1,6 +1,6 @@
 ---
 description: Periodic security posture audit — runs a scripted 4-phase checklist against repo files (not diffs), creates GitHub issues for confirmed findings
-argument-hint: [--repo <prefix>] [--phase 1|2|3|4|all] [--dry-run]
+argument-hint: "[--repo <prefix>] [--phase 1|2|3|4|all] [--dry-run]"
 install: extras
 ---
 <!-- SPDX-FileCopyrightText: Copyright (c) RapierCraft Studios -->

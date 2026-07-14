@@ -1,6 +1,6 @@
 ---
 description: Scan for pipeline-orphaned issues stuck in intermediate workflow states and recover them — diagnose each orphan's actual GitHub state, apply recovery actions, clean up worktrees
-argument-hint: [--dry-run | --since <hours> | --issue <number>]
+argument-hint: "[--dry-run | --since <hours> | --issue <number>]"
 ---
 <!-- SPDX-FileCopyrightText: Copyright (c) RapierCraft Studios -->
 <!-- SPDX-License-Identifier: AGPL-3.0-or-later -->

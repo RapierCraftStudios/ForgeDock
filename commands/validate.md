@@ -1,6 +1,6 @@
 ---
 description: Independently verify if a reported issue is actually a problem before making code changes.
-argument-hint: [issue description or #number]
+argument-hint: "[issue description or #number]"
 install: extras
 ---
 <!-- SPDX-FileCopyrightText: Copyright (c) RapierCraft Studios -->
