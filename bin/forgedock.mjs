@@ -2721,7 +2721,7 @@ function help() {
     ["npx forgedock enable [dir]", "Activate ForgeDock in a directory"],
     ["npx forgedock disable [dir]", "Opt a directory out of ForgeDock"],
     ["npx forgedock status [dir]", "Show ForgeDock state for a directory"],
-    ["npx forgedock run <cmd> [args]", "Run a command headlessly via the Anthropic API"],
+    ["npx forgedock run <cmd> [args]", "Run a command headlessly (local claude CLI or Anthropic API)"],
     ["npx forgedock run-issue <issue>", "Drive one issue through the durable engine"],
     ["npx forgedock resume-stalled [--dry-run]", "Fleet stall recovery — re-dispatch expired-lease issues"],
     ["npx forgedock demo", "Set up a risk-free demo repo and print next steps"],
@@ -2755,33 +2755,50 @@ function help() {
 
 /**
  * `forgedock run <command> [args...]` — execute a ForgeDock command spec
- * directly via the Anthropic API, outside of Claude Code (headless / CI).
+ * headlessly, outside of an interactive Claude Code session (CI or local).
  *
  * Flags:
- *   --dry-run               Preview the assembled prompt + tool plan; no API call.
- *   --model <id>            Override the model (see resolution order below).
- *   --max-iterations <n>    Bound the tool-use loop (default: 50).
+ *   --dry-run                    Preview the assembled prompt + tool plan; no call made.
+ *   --model <id>                 Override the model (see resolution order below; api backend only).
+ *   --max-iterations <n>         Bound the tool-use loop (default: 50; api backend only).
+ *   --backend <cli|api|auto>     Execution backend (see below; default: auto).
  *
- * The live loop requires ANTHROPIC_API_KEY and the optional @anthropic-ai/sdk
- * dependency. The runtime itself lives in bin/runner.mjs.
+ * Two execution backends (issue #2003):
+ *   - "cli": shells out to the local Claude Code CLI (`claude --print ...`),
+ *     reusing whatever credentials it already has (Pro/Max OAuth or a
+ *     CLI-managed key). No ANTHROPIC_API_KEY needed. Requires `claude` on PATH.
+ *   - "api": drives the Anthropic SDK directly. Requires ANTHROPIC_API_KEY and
+ *     the optional @anthropic-ai/sdk dependency. Needed for CI/headless
+ *     environments without an interactively-authenticated `claude` CLI.
+ *   - "auto" (default): prefers "cli" when a working `claude` install is
+ *     detected, otherwise falls back to "api" unchanged — existing callers
+ *     that never pass --backend see no behavior change when `claude` isn't
+ *     installed.
  *
- * Model resolution order (highest precedence first):
+ * The runtime itself lives in bin/runner.mjs.
+ *
+ * Model resolution order (highest precedence first; api backend only — the
+ * cli backend uses whatever model the `claude` CLI itself is configured for):
  *   1. --model <id>                        This flag.
  *   2. $FORGEDOCK_MODEL                    Env var, below.
  *   3. forge.yaml `agents.default_model`   Read from the run's cwd, if present.
  *   4. Hardcoded default                   "claude-sonnet-5" (bin/runner.mjs DEFAULT_MODEL).
  *
  * Env:
- *   FORGEDOCK_MODEL   Default model id when --model is omitted.
- *   FORGEDOCK_SHELL   Override the shell used by run_bash. Defaults to bash when
- *                     found (Git Bash / WSL on Windows, /bin/bash on POSIX),
- *                     falling back to the platform default shell otherwise.
+ *   FORGEDOCK_BACKEND      Default backend ("cli"|"api"|"auto") when --backend is omitted.
+ *   FORGEDOCK_MODEL        Default model id when --model is omitted.
+ *   FORGEDOCK_CLI_TIMEOUT_MS  Wall-clock timeout (ms) for the cli backend invocation.
+ *   FORGEDOCK_SHELL        Override the shell used by run_bash / the cli backend.
+ *                          Defaults to bash when found (Git Bash / WSL on
+ *                          Windows, /bin/bash on POSIX), falling back to the
+ *                          platform default shell otherwise.
  */
 async function run() {
   const runArgs = restArgs;
   let dryRun = false;
   let model;
   let maxIterations;
+  let backend;
   const positional = [];
   for (let i = 0; i < runArgs.length; i++) {
     const a = runArgs[i];
@@ -2795,6 +2812,10 @@ async function run() {
       maxIterations = parseInt(runArgs[++i], 10);
     } else if (a.startsWith("--max-iterations=")) {
       maxIterations = parseInt(a.slice("--max-iterations=".length), 10);
+    } else if (a === "--backend") {
+      backend = runArgs[++i];
+    } else if (a.startsWith("--backend=")) {
+      backend = a.slice("--backend=".length);
     } else {
       positional.push(a);
     }
@@ -2805,7 +2826,15 @@ async function run() {
 
   if (!commandName) {
     process.stderr.write(
-      `${RED}Usage: forgedock run <command> [args...] [--dry-run] [--model <id>] [--max-iterations <n>]${RESET}\n`,
+      `${RED}Usage: forgedock run <command> [args...] [--dry-run] [--model <id>] [--max-iterations <n>] [--backend <cli|api|auto>]${RESET}\n`,
+    );
+    process.exit(1);
+  }
+
+  const VALID_RUN_BACKENDS = new Set(["cli", "api", "auto"]);
+  if (backend !== undefined && !VALID_RUN_BACKENDS.has(backend)) {
+    process.stderr.write(
+      `${RED}Invalid --backend "${backend}". Must be one of: cli, api, auto.${RESET}\n`,
     );
     process.exit(1);
   }
@@ -2822,6 +2851,7 @@ async function run() {
       ...(Number.isInteger(maxIterations) && maxIterations > 0
         ? { maxIterations }
         : {}),
+      ...(backend ? { backend } : {}),
     });
     // Treat a non-clean stop (iteration cap hit, or a max_tokens-truncated
     // turn) as a failed run so CI/headless callers notice.
