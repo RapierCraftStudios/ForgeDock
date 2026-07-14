@@ -200,6 +200,120 @@ describe("pre-tool-use hook — subprocess", () => {
   });
 
   // -------------------------------------------------------------------------
+  // Regression tests for issue #1920 — the --base guard must only govern the
+  // configured project repo. A third-party repo (upstream awesome-list, docs
+  // typo fix) usually has `main` as its ONLY valid base and no `staging`
+  // branch at all, so blocking it is a guaranteed false positive that makes
+  // legitimate external contribution impossible.
+  //
+  // DEFAULT_MANAGED_DIR's forge.yaml declares owner: test / repo: test, so
+  // "test/test" is this project's slug and anything else is external.
+  // -------------------------------------------------------------------------
+
+  it("exits 0 for gh pr create -R external/repo --base main (#1920)", () => {
+    const { exitCode } = runHook({
+      hook_event_name: "PreToolUse",
+      tool_name: "Bash",
+      tool_input: {
+        command: "gh pr create --repo punkpeye/awesome-mcp-servers --base main --title foo",
+      },
+    });
+    assert.equal(exitCode, 0, "external repo must not be governed by our lane rules");
+  });
+
+  it("exits 0 for the -R short form against an external repo (#1920)", () => {
+    const { exitCode } = runHook({
+      hook_event_name: "PreToolUse",
+      tool_name: "Bash",
+      tool_input: { command: "gh pr create -R other/thing --base main --title foo" },
+    });
+    assert.equal(exitCode, 0);
+  });
+
+  it("STILL blocks --base main when -R names our own project repo (#1920)", () => {
+    const { exitCode, stderr } = runHook({
+      hook_event_name: "PreToolUse",
+      tool_name: "Bash",
+      tool_input: { command: "gh pr create -R test/test --base main --title foo" },
+    });
+    assert.equal(exitCode, 2, "own repo must still be governed");
+    assert.match(stderr, /BLOCKED/);
+  });
+
+  it("STILL blocks --base main when -R names our repo in different case (#1920)", () => {
+    const { exitCode } = runHook({
+      hook_event_name: "PreToolUse",
+      tool_name: "Bash",
+      tool_input: { command: "gh pr create -R TEST/TEST --base main --title foo" },
+    });
+    assert.equal(exitCode, 2, "slug comparison must be case-insensitive");
+  });
+
+  it("STILL blocks --base main when no -R is given at all (#1920)", () => {
+    const { exitCode } = runHook({
+      hook_event_name: "PreToolUse",
+      tool_name: "Bash",
+      tool_input: { command: "gh pr create --base main --title foo" },
+    });
+    assert.equal(exitCode, 2, "absent -R means the cwd project — still governed");
+  });
+
+  it("STILL blocks external -R when project slug is undeterminable (#1920)", () => {
+    // forge.yaml exists (so the dir is managed and the hook enforces) but
+    // declares no project.owner/repo. The guard must fall through to
+    // enforcement rather than silently disarming on a malformed config.
+    const dir = mkdtempSync(join(osTop.tmpdir(), "fd-ptu-noslug-"));
+    try {
+      writeFileSyncTop(join(dir, "forge.yaml"), "branches:\n  staging: staging\n", "utf-8");
+      const { exitCode } = runHook(
+        {
+          hook_event_name: "PreToolUse",
+          tool_name: "Bash",
+          tool_input: { command: "gh pr create -R other/thing --base main --title foo" },
+        },
+        { cwd: dir },
+      );
+      assert.equal(exitCode, 2, "undeterminable slug must fail closed, not open");
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("ignores the commented-out repos: template block when reading the slug (#1920)", () => {
+    // `forgedock init` emits a commented `repos:` block containing `repo:`
+    // keys. The line-anchored regex must not pick those up as the project repo.
+    const dir = mkdtempSync(join(osTop.tmpdir(), "fd-ptu-commented-"));
+    try {
+      writeFileSyncTop(
+        join(dir, "forge.yaml"),
+        'project:\n  owner: "real"\n  repo: "proj"\n\n# repos:\n#   satellites:\n#     - repo: "bogus/sat"\n',
+        "utf-8",
+      );
+      const external = runHook(
+        {
+          hook_event_name: "PreToolUse",
+          tool_name: "Bash",
+          tool_input: { command: "gh pr create -R other/thing --base main --title foo" },
+        },
+        { cwd: dir },
+      );
+      assert.equal(external.exitCode, 0, "quoted owner/repo must parse; external exempt");
+
+      const own = runHook(
+        {
+          hook_event_name: "PreToolUse",
+          tool_name: "Bash",
+          tool_input: { command: "gh pr create -R real/proj --base main --title foo" },
+        },
+        { cwd: dir },
+      );
+      assert.equal(own.exitCode, 2, "own repo still governed");
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  // -------------------------------------------------------------------------
   // Regression tests for issue #1519 — extractFlag() must not misread
   // flag-shaped text embedded inside a quoted --title/--body value as a
   // real --base/-B flag. These run against the actual hook file via
