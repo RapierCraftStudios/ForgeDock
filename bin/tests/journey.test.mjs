@@ -400,6 +400,13 @@ function stubCtx({ execMap = {}, home = os.tmpdir(), cwd = os.tmpdir(), ...overr
       mode: "none",
       motion: false,
       startedAt: 0,
+      // Default to "CLI not available" so tests never depend on whether the
+      // host running the suite happens to have a real, authenticated
+      // `claude` binary on PATH — that would make Act III's enrichment
+      // ladder resolve to the cli backend and shell out for real (issue
+      // #2004). Individual tests override this via `overrides` to exercise
+      // the cli-backend-present path deterministically.
+      isCliAvailableFn: () => false,
       exec: (cmd, args) => {
         const key = [cmd, ...(args || [])].join(" ");
         if (key in execMap) {
@@ -1335,7 +1342,7 @@ describe("read (Act III)", () => {
   it("returns a draft + description without a git repo (placeholders, low confidence)", async () => {
     const cwd = mkdtempSync(join(os.tmpdir(), "fd-read-"));
     writeFileSync(join(cwd, "README.md"), "# X\n\nA test project.\n", "utf-8");
-    const { ctx, w } = stubCtx({ cwd });
+    const { ctx, w } = stubCtx({ cwd, isCliAvailableFn: () => false });
     const res = await read(ctx);
     assert.equal(res.draft.project.owner.value, "your-github-org");
     assert.equal(res.description.value, "A test project.");
@@ -1344,10 +1351,11 @@ describe("read (Act III)", () => {
 
   it("enrichFn is called when ANTHROPIC_API_KEY is set and returns enriched draft", async () => {
     const cwd = mkdtempSync(join(os.tmpdir(), "fd-read-enrich-"));
-    const original = await read(stubCtx({ cwd }).ctx);
+    const original = await read(stubCtx({ cwd, isCliAvailableFn: () => false }).ctx);
     const { ctx, w } = stubCtx({
       cwd,
       env: { ANTHROPIC_API_KEY: "test-key" },
+      isCliAvailableFn: () => false,
       enrichFn: (draft) => {
         // Return a structuredClone with the name enriched
         const enriched = structuredClone(draft);
@@ -1365,6 +1373,7 @@ describe("read (Act III)", () => {
     const { ctx, w } = stubCtx({
       cwd,
       env: { ANTHROPIC_API_KEY: "test-key" },
+      isCliAvailableFn: () => false,
       enrichFn: () => {
         throw new Error("API failed");
       },
@@ -1374,12 +1383,13 @@ describe("read (Act III)", () => {
     assert.match(w.text, /unavailable/);
   });
 
-  it("no ANTHROPIC_API_KEY: enrichFn is never called", async () => {
+  it("no ANTHROPIC_API_KEY and no CLI: enrichFn is never called", async () => {
     const cwd = mkdtempSync(join(os.tmpdir(), "fd-read-no-key-"));
     let enrichFnCalled = false;
     const { ctx, w } = stubCtx({
       cwd,
       env: {},
+      isCliAvailableFn: () => false,
       enrichFn: () => {
         enrichFnCalled = true;
         return null;
@@ -1387,7 +1397,27 @@ describe("read (Act III)", () => {
     });
     const res = await read(ctx);
     assert.equal(enrichFnCalled, false);
-    assert.match(w.text, /no ANTHROPIC_API_KEY/);
+    assert.match(w.text, /no Claude Code CLI or ANTHROPIC_API_KEY/);
+  });
+
+  it("CLI available and no ANTHROPIC_API_KEY: enrichFn is still called (cli backend)", async () => {
+    const cwd = mkdtempSync(join(os.tmpdir(), "fd-read-cli-backend-"));
+    let receivedOpts;
+    const { ctx, w } = stubCtx({
+      cwd,
+      env: {},
+      isCliAvailableFn: () => true,
+      enrichFn: (draft, opts) => {
+        receivedOpts = opts;
+        const enriched = structuredClone(draft);
+        enriched.project.name.value = "ENRICHED-VIA-CLI";
+        return enriched;
+      },
+    });
+    const res = await read(ctx);
+    assert.equal(res.draft.project.name.value, "ENRICHED-VIA-CLI");
+    assert.equal(receivedOpts.backend, "cli");
+    assert.match(w.text, /enriching with AI/);
   });
 });
 
@@ -1708,6 +1738,7 @@ describe("runJourney", () => {
       mode: "none",
       motion: false,
       linkStrategy: "copy",
+      isCliAvailableFn: () => false,
     });
     const exitCode = await runJourney(ctx);
     const finalListenerCount = process.listenerCount("SIGINT");
@@ -1737,6 +1768,7 @@ describe("runJourney", () => {
       mode: "none",
       motion: false,
       linkStrategy: "copy",
+      isCliAvailableFn: () => false,
     });
     const exitCode = await runJourney(ctx);
     const postContent = readFileSync(join(cwd, "forge.yaml"), "utf-8");
@@ -1763,6 +1795,7 @@ describe("runJourney", () => {
       mode: "none",
       motion: false,
       linkStrategy: "copy",
+      isCliAvailableFn: () => false,
     });
 
     try {
