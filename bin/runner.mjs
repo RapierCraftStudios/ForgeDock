@@ -191,30 +191,42 @@ export function resolveBackend({ requested = "auto", cwd = process.cwd() } = {})
 }
 
 /**
- * Quote a value as a single POSIX/cmd-compatible double-quoted shell
- * argument for embedding in a command *string* passed to spawnSync's
- * `shell: true` execution path (the same string-command style already used
- * by run_bash below). Escapes backslashes and embedded double quotes.
- *
- * resolveBashShell() prefers a real bash installation (Git Bash on Windows,
- * /bin/bash on POSIX) when one is found, so this quoting targets that common
- * case; the cmd.exe fallback (no bash found) also accepts a plain
- * double-quoted argument with no interior quotes/backslashes, which covers
- * buildUserMessage()'s typical output ("Execute: /{command} {args}").
- *
- * @param {string} value
- * @returns {string}
- */
-function shellQuoteArg(value) {
-  return `"${String(value).replace(/\\/g, "\\\\").replace(/"/g, '\\"')}"`;
-}
-
-/**
  * Run a command via the local Claude Code CLI instead of the Anthropic SDK
  * (issue #2003's "cli" backend). Shells out to headless print mode
  * (`claude --print "<message>" --dangerously-skip-permissions`), reusing
  * whatever the CLI is already authenticated with — no ANTHROPIC_API_KEY is
  * read or required anywhere on this path.
+ *
+ * SECURITY — argv array, NEVER `shell: true`: `userMessage` is built from
+ * `buildUserMessage(commandName, args)`, and `args` originates from
+ * user-supplied CLI arguments to `forgedock run <command> <args...>` — it is
+ * untrusted input from this function's point of view. `spawnSync("claude",
+ * [...argv], { shell: false (default) })` passes each argument as a discrete,
+ * unparsed argv element: the target process receives `userMessage` as one
+ * literal string, with no shell ever tokenizing or expanding it, so shell
+ * metacharacters (`$(...)`, backticks, `;`, `&&`, `|`, `!`) inside it cannot
+ * trigger command injection. An earlier version of this function built a
+ * shell command *string* (`claude --print "<quoted message>" ...`) run via
+ * `spawnSync(command, { shell: true })` with hand-rolled quoting
+ * (backslash/double-quote escaping only) — that does NOT neutralize
+ * `$(...)`/backtick/`!` expansion inside POSIX double quotes and was an
+ * exploitable injection (verified: a crafted `userMessage` could execute
+ * arbitrary shell commands with this process's privileges). Do not
+ * reintroduce `shell: true` or string-command interpolation here.
+ *
+ * Windows `.cmd` shim resolution works WITHOUT `shell: true`: Node's
+ * spawn/spawnSync resolve a bare `"claude"` command via PATH+PATHEXT and
+ * safely re-invoke through cmd.exe internally when the resolved target is a
+ * `.cmd`/`.bat` file, using a properly escaped mechanism, and argv elements
+ * are never parsed as shell syntax (verified empirically on Windows: a
+ * malicious-looking argv element is delivered to the child process
+ * byte-for-byte, not executed). This is the correct fix for the
+ * `execFileSync("claude", [...])` ENOENT-on-Windows regression from issue
+ * #382 — that regression was about USING execFileSync with an unresolved
+ * bare command name in an older/incompatible way, not about needing
+ * `shell: true`; spawnSync's own PATH/PATHEXT resolution (unlike
+ * execFileSync's, in the failure mode #382 hit) handles the `.cmd` shim
+ * transparently here.
  *
  * `--dangerously-skip-permissions` mirrors the established headless-CI
  * invocation pattern already documented in docs/CI.md and
@@ -236,22 +248,36 @@ function shellQuoteArg(value) {
  * @param {string[]} [opts.args]
  * @param {string} opts.cwd
  * @param {{log: Function, error?: Function}} [opts.logger]
+ * @param {string} [opts.bin] - Executable to invoke (default "claude"). Test
+ *   seam only — production callers must never override this; it exists so
+ *   tests can point at a controlled fake binary instead of either invoking
+ *   the real `claude` CLI (slow, non-deterministic, real side effects) or
+ *   fighting platform-specific PATH-resolution semantics to shim "claude"
+ *   itself (Windows resolves a bare executable name via the *calling*
+ *   process's search path at the OS level, which is not reliably
+ *   overridable per-call from within the same process).
  * @returns {{status: string, command: string, iterations: number, stopReason: string, usage: null, model: string, backend: "cli"}}
  */
-export function runCliBackend({ spec, userMessage, args = [], cwd, logger = console }) {
-  const shell = resolveBashShell();
-  const command = `claude --print ${shellQuoteArg(userMessage)} --dangerously-skip-permissions`;
-
+export function runCliBackend({
+  spec,
+  userMessage,
+  args = [],
+  cwd,
+  logger = console,
+  bin = "claude",
+}) {
   const rawTimeout = parseInt(process.env.FORGEDOCK_CLI_TIMEOUT_MS, 10);
   const timeoutMs =
     Number.isFinite(rawTimeout) && rawTimeout > 0 ? rawTimeout : DEFAULT_CLI_TIMEOUT_MS;
 
-  const result = spawnSync(command, {
+  // No `shell` option (defaults to false): argv is passed as discrete,
+  // unparsed elements — see the SECURITY note above. This also correctly
+  // resolves the Windows `.cmd` shim without needing shell:true.
+  const result = spawnSync(bin, ["--print", userMessage, "--dangerously-skip-permissions"], {
     cwd,
     encoding: "utf-8",
     maxBuffer: 50 * 1024 * 1024,
     timeout: timeoutMs,
-    shell: shell || true,
   });
 
   const stdout = result.stdout ? String(result.stdout) : "";

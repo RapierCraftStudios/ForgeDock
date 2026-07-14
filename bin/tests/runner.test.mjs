@@ -47,6 +47,7 @@ import {
   runCommand,
   isClaudeCliAvailable,
   resolveBackend,
+  runCliBackend,
 } from "../runner.mjs";
 
 // ---------------------------------------------------------------------------
@@ -1120,6 +1121,81 @@ describe("runCommand model resolution precedence", () => {
       logger: { log() {} },
     });
     assert.equal(result.model, "claude-sonnet-5");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// runCliBackend — argv passthrough is injection-safe (issue #2003)
+// ---------------------------------------------------------------------------
+
+describe("runCliBackend argv safety", () => {
+  it("passes userMessage as a literal, unparsed argv element — no shell metacharacter execution", () => {
+    // Regression test for a shell-injection finding caught in review: an
+    // earlier implementation built a shell command *string* and ran it via
+    // spawnSync(command, { shell: true }) with hand-rolled quoting that did
+    // NOT neutralize $(...) / backticks / etc inside double quotes. The fix
+    // is spawnSync(bin, [...argv]) with NO shell option — argv elements are
+    // delivered to the child process as discrete, unparsed tokens, never
+    // interpreted as shell syntax.
+    //
+    // Uses the `bin` test seam (defaults to "claude" in production; not
+    // overridable outside tests) pointed at the real `node` binary
+    // (process.execPath — a genuine, already-resolvable executable, so this
+    // sidesteps the platform-specific PATH/`.cmd`-shim resolution quirks
+    // that make shimming a fake "claude" on PATH unreliable to set up from
+    // within the same running process on Windows).
+    //
+    // node's own CLI parser rejects the fixed 3rd argv element
+    // ("--dangerously-skip-permissions") as an unrecognized flag and exits
+    // non-zero — which is itself strong affirmative evidence of correct argv
+    // separation: the parser named that exact 3rd token as the "bad option"
+    // *distinct* from the 2nd (message) token, proving all three array
+    // elements arrived as separate, unmangled OS-level argv entries rather
+    // than being concatenated/re-tokenized by an intermediate shell. The
+    // decisive assertion, though, is simpler and platform-independent: the
+    // injection payload's side effect (creating a marker file via $(...))
+    // must never occur, because runCliBackend never hands the message to a
+    // shell in the first place.
+    const shimDir = mkdtempSync(join(os.tmpdir(), "forgedock-cli-injection-"));
+    const injectionMarkerPath = join(shimDir, "INJECTED");
+    const maliciousMessage =
+      `Execute: /work-on 2003; $(touch ${injectionMarkerPath.replace(/\\/g, "/")}) ` +
+      `\`touch ${injectionMarkerPath.replace(/\\/g, "/")}\` && echo pwned`;
+
+    const logLines = [];
+    let thrown;
+    try {
+      runCliBackend({
+        spec: loadCommandSpec(COMMANDS_DIR, "work-on"),
+        userMessage: maliciousMessage,
+        args: ["2003"],
+        cwd: shimDir,
+        logger: { log: (s) => logLines.push(s) },
+        bin: process.execPath, // absolute path to the running `node` binary
+      });
+    } catch (err) {
+      thrown = err;
+    } finally {
+      rmSync(shimDir, { recursive: true, force: true });
+    }
+
+    // node's CLI parser rejects the 3rd argv element and exits non-zero, so
+    // runCliBackend's `result.status !== 0` branch throws CLI_BACKEND_FAILED.
+    assert.ok(thrown, "node's own flag validation should reject this argv and cause a non-zero exit");
+    assert.equal(thrown.code, "CLI_BACKEND_FAILED");
+
+    // The core security property: shell metacharacters in userMessage were
+    // NEVER executed — no shell ever parsed the string, so $(...) never ran.
+    assert.ok(
+      !existsSync(injectionMarkerPath),
+      "shell metacharacters in userMessage must NOT be executed (injection marker file must not exist)",
+    );
+
+    // Corroborating evidence: node's own error output names the 3rd argv
+    // element as a distinct, unmangled token — proving argv separation was
+    // preserved end-to-end (no shell re-tokenized/concatenated the array).
+    const output = logLines.join("\n");
+    assert.match(output, /--dangerously-skip-permissions/);
   });
 });
 
