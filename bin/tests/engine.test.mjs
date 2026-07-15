@@ -458,6 +458,10 @@ describe("runIssue", () => {
       "VALID_BACKENDS contents must be unchanged after the rejected mutation attempts");
     assert.deepEqual([...VALID_BACKENDS].sort(), ["api", "auto", "cli"],
       "VALID_BACKENDS values must be unchanged after the rejected mutation attempts");
+    assert.equal(VALID_BACKENDS.constructor, Set,
+      "VALID_BACKENDS.constructor must still be Set — the readOnlySet() Proxy " +
+      "special-cases the constructor trap so brand/identity checks against a " +
+      "plain Set continue to work");
 
     // 2. Static source check: engine.mjs must import VALID_BACKENDS from
     //    runner.mjs and must NOT declare its own local `VALID_BACKENDS =

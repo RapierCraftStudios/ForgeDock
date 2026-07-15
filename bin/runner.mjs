@@ -80,6 +80,15 @@ const CLI_PROBE_TIMEOUT_MS = 5000;
  * — which only locks down property descriptors — has no effect on them;
  * `.add()` on a frozen Set still silently succeeds. A Proxy trapping the
  * mutator method names is the only reliable way to make a Set read-only.
+ *
+ * Two known, intentionally-accepted deviations from a plain Set (neither
+ * is exercised by any current caller — grep confirms only `.has()` and
+ * spread/iteration are used):
+ *   - `structuredClone()` throws on a Proxy (no native [[SetData]] slot to
+ *     brand-check), where it would succeed on a plain Set.
+ *   - Without the `constructor` passthrough below, `.constructor` would
+ *     resolve to a bound wrapper rather than `Set` itself. Special-cased
+ *     here so `VALID_BACKENDS.constructor === Set` still holds.
  */
 function readOnlySet(values) {
   const target = new Set(values);
@@ -92,6 +101,9 @@ function readOnlySet(values) {
           );
         };
       }
+      // Return the real Set constructor, not a bound wrapper — keeps
+      // `VALID_BACKENDS.constructor === Set` true, matching a plain Set.
+      if (prop === "constructor") return Set;
       const value = Reflect.get(t, prop, t);
       return typeof value === "function" ? value.bind(t) : value;
     },
