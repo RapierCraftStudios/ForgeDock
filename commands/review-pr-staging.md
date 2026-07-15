@@ -680,8 +680,10 @@ Sequential creation. Title: `Staging Review: {summary} (staging → main)`. Labe
 **For each finding** (that passes dedup), create issue through the `/issue` create-hook's programmatic invocation contract (see `commands/issue.md` § "Programmatic Invocation Contract") instead of calling the raw issue-creation command directly:
 ```bash
 STAGING_FINDING_TITLE="chore: [summary] (staging review — PR #${PR_NUMBER})"
-# Sanitize before it reaches /issue's `eval "set -- $ARGUMENTS"` tokenizer — double-quoting
-# alone does not stop backtick/$(...) command substitution inside double quotes in bash.
+# Defense-in-depth: /issue's arg tokenizer (commands/issue.md, forge#2094) uses
+# an xargs-based tokenizer that never expands backtick/$(...) substitution, so
+# this is no longer required for safety — but strip it anyway so the raw title
+# stays readable if it round-trips through any other eval-based consumer.
 STAGING_FINDING_TITLE=$(printf '%s' "$STAGING_FINDING_TITLE" | tr '`' "'" | sed 's/\$(/$ (/g')
 STAGING_FINDING_BODY_FILE=$(mktemp)
 cat <<'ISSUE_EOF' > "$STAGING_FINDING_BODY_FILE"
