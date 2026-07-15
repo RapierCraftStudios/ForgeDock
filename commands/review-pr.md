@@ -1643,7 +1643,7 @@ if [ "$DEDUP_EXIT" -eq 1 ]; then
   # Add a comment on the existing issue referencing this recurrence in PR #${PR_NUMBER}
 elif [ "$DEDUP_EXIT" -eq 2 ]; then
   echo "DEDUP: Usage error — $DEDUP_RESULT"
-  # Skip this finding — do NOT fall through to gh issue create on a usage error
+  # Skip this finding — do NOT fall through to issue creation on a usage error
 fi
 ```
 
@@ -1702,13 +1702,11 @@ fi
 - Open `review-finding` issue at same file with similar title (3+ shared keywords) → **skip** (likely same finding despite line drift)
 - Closed `review-finding` at same file within ±5 lines → create with regression warning, elevate to `priority:P1`
 
-**For each finding** (that passes dedup), create issue:
+**For each finding** (that passes dedup), create issue through the `/issue` create-hook's programmatic invocation contract (see `commands/issue.md` § "Programmatic Invocation Contract") — this preserves the bespoke line-range/title dedup above as a precise pre-check, while `/issue`'s own Phase 2D dedup runs as a coarser second pass:
 ```bash
-ISSUE_NUM=$(gh issue create \
-  --title "fix: [summary] (review finding — PR #${PR_NUMBER})" \
-  --label "review-finding,needs-validation,{priority}" \
-  ${MILESTONE_FLAG} \
-  --body "$(cat <<'ISSUE_EOF'
+FINDING_ISSUE_TITLE="fix: [summary] (review finding — PR #${PR_NUMBER})"
+FINDING_ISSUE_BODY_FILE=$(mktemp)
+cat <<'ISSUE_EOF' > "$FINDING_ISSUE_BODY_FILE"
 ## Problem
 
 [One sentence: what bug or issue was found. Where it occurs (`file:line`) and what it causes.]
@@ -1759,7 +1757,16 @@ Files that need changes:
 - [ ] Reproduce or construct proof-of-concept
 [BATCHABLE_ANNOTATION]
 ISSUE_EOF
-)" --json number --jq '.number')
+
+# --label is repeatable (not comma-joined) per the /issue programmatic contract.
+Skill(skill="issue", args="--title \"$FINDING_ISSUE_TITLE\" --body-file \"$FINDING_ISSUE_BODY_FILE\" --label review-finding --label needs-validation --label \"{priority}\" ${MILESTONE_FLAG}")
+rm -f "$FINDING_ISSUE_BODY_FILE"
+
+# /issue has no machine-readable return contract (it's a user-facing command, not a work-on
+# subcommand) — resolve the created issue's number by exact-title search immediately after
+# the call. The title embeds ${PR_NUMBER} and the finding summary, making it unique enough
+# for a reliable single-match lookup.
+ISSUE_NUM=$(gh issue list -R ${REPO} --search "in:title \"${FINDING_ISSUE_TITLE}\"" --state open --limit 1 --json number --jq '.[0].number // empty')
 ```
 
 Labels: `review-finding` + `needs-validation` + priority (`priority:P1` CONFIRMED, `priority:P2` LIKELY, `priority:P3` POSSIBLE).

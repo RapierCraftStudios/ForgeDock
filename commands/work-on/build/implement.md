@@ -102,7 +102,7 @@ Extract from contract:
 | Refactor / Maintenance | Implement directly following contract deliverables |
 | Investigation | Spawn research agents, create GitHub issues for findings, skip to I5 |
 
-**Investigation task special case**: Research deeply, create GitHub issues for each finding using the Pipeline Issue Template (see `commands/issue.md` § "Pipeline Issue Template"). Each issue MUST include `## Problem`, `## Affected Files`, and `## Acceptance Criteria`. Use `gh issue create {GH_FLAG}` with a fully-structured body. Post a deliverables comment listing the created issues, close the original issue, return `IMPLEMENT_RESULT: status: INVESTIGATION_COMPLETE`.
+**Investigation task special case**: Research deeply, create GitHub issues for each finding using the Pipeline Issue Template (see `commands/issue.md` § "Pipeline Issue Template"). Each issue MUST include `## Problem`, `## Affected Files`, and `## Acceptance Criteria`. Create each issue via the `/issue` create-hook's programmatic invocation contract (see `commands/issue.md` § "Programmatic Invocation Contract") — `Skill(skill="issue", args="--title \"...\" --body-file <path> --label ...")` — instead of calling the raw issue-creation command directly; this gets dedup and body validation for free. Post a deliverables comment listing the created issues, close the original issue, return `IMPLEMENT_RESULT: status: INVESTIGATION_COMPLETE`.
 
 ---
 
