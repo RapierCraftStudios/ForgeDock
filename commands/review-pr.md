@@ -1705,6 +1705,11 @@ fi
 **For each finding** (that passes dedup), create issue through the `/issue` create-hook's programmatic invocation contract (see `commands/issue.md` § "Programmatic Invocation Contract") — this preserves the bespoke line-range/title dedup above as a precise pre-check, while `/issue`'s own Phase 2D dedup runs as a coarser second pass:
 ```bash
 FINDING_ISSUE_TITLE="fix: [summary] (review finding — PR #${PR_NUMBER})"
+# Sanitize before it reaches /issue's `eval "set -- $ARGUMENTS"` tokenizer (commands/issue.md
+# Argument Parsing) — double-quoting the title in the Skill() args string below does NOT stop
+# backtick or $(...) command substitution, since bash still expands both INSIDE double quotes.
+# Neutralize both before interpolating into args.
+FINDING_ISSUE_TITLE=$(printf '%s' "$FINDING_ISSUE_TITLE" | tr '`' "'" | sed 's/\$(/$ (/g')
 FINDING_ISSUE_BODY_FILE=$(mktemp)
 cat <<'ISSUE_EOF' > "$FINDING_ISSUE_BODY_FILE"
 ## Problem
@@ -1765,8 +1770,13 @@ rm -f "$FINDING_ISSUE_BODY_FILE"
 # /issue has no machine-readable return contract (it's a user-facing command, not a work-on
 # subcommand) — resolve the created issue's number by exact-title search immediately after
 # the call. The title embeds ${PR_NUMBER} and the finding summary, making it unique enough
-# for a reliable single-match lookup.
-ISSUE_NUM=$(gh issue list -R ${REPO} --search "in:title \"${FINDING_ISSUE_TITLE}\"" --state open --limit 1 --json number --jq '.[0].number // empty')
+# for a reliable single-match lookup. Retry to absorb GitHub Search API indexing lag.
+ISSUE_NUM=""
+for _resolve_attempt in 1 2 3; do
+  ISSUE_NUM=$(gh issue list -R ${REPO} --search "in:title \"${FINDING_ISSUE_TITLE}\"" --state open --limit 1 --json number --jq '.[0].number // empty')
+  [ -n "$ISSUE_NUM" ] && break
+  sleep 2
+done
 ```
 
 Labels: `review-finding` + `needs-validation` + priority (`priority:P1` CONFIRMED, `priority:P2` LIKELY, `priority:P3` POSSIBLE).

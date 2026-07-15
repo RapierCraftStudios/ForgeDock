@@ -95,6 +95,9 @@ Route through the `/issue` create-hook's programmatic invocation contract (see `
 
 ```bash
 VALIDATE_ISSUE_TITLE="fix: [concise description of the confirmed bug]"
+# Sanitize before it reaches /issue's `eval "set -- $ARGUMENTS"` tokenizer — double-quoting
+# alone does not stop backtick/$(...) command substitution inside double quotes in bash.
+VALIDATE_ISSUE_TITLE=$(printf '%s' "$VALIDATE_ISSUE_TITLE" | tr '`' "'" | sed 's/\$(/$ (/g')
 VALIDATE_ISSUE_BODY_FILE=$(mktemp)
 cat <<'BODY_EOF' > "$VALIDATE_ISSUE_BODY_FILE"
 ## Problem

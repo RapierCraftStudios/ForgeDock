@@ -931,6 +931,9 @@ Route through the `/issue` create-hook's programmatic invocation contract (see `
 
 ```bash
 SUB_ISSUE_TITLE_FULL="{fix|feat|refactor}: {SUB_ISSUE_TITLE}"
+# Sanitize before it reaches /issue's `eval "set -- $ARGUMENTS"` tokenizer — double-quoting
+# alone does not stop backtick/$(...) command substitution inside double quotes in bash.
+SUB_ISSUE_TITLE_FULL=$(printf '%s' "$SUB_ISSUE_TITLE_FULL" | tr '`' "'" | sed 's/\$(/$ (/g')
 SUB_ISSUE_BODY_FILE=$(mktemp)
 cat <<'SUB_BODY_EOF' > "$SUB_ISSUE_BODY_FILE"
 ## Problem
@@ -967,7 +970,13 @@ rm -f "$SUB_ISSUE_BODY_FILE"
 
 # /issue has no machine-readable return contract — resolve the created issue's number by
 # exact-title search immediately after the call (used by Phase 2D's tracker checklist).
-SUB_ISSUE_NUM=$(gh issue list {GH_FLAG} --search "in:title \"${SUB_ISSUE_TITLE_FULL}\"" --state open --limit 1 --json number --jq '.[0].number // empty')
+# Retry to absorb GitHub Search API indexing lag.
+SUB_ISSUE_NUM=""
+for _resolve_attempt in 1 2 3; do
+  SUB_ISSUE_NUM=$(gh issue list {GH_FLAG} --search "in:title \"${SUB_ISSUE_TITLE_FULL}\"" --state open --limit 1 --json number --jq '.[0].number // empty')
+  [ -n "$SUB_ISSUE_NUM" ] && break
+  sleep 2
+done
 ```
 
 ### 2D: Update parent issue body

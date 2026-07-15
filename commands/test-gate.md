@@ -521,6 +521,11 @@ else
     done
 
     TESTGATE_FAIL_TITLE="fix: test-gate FAIL — cluster '${cluster}' broken by staging→${DEFAULT_BRANCH} bundle"
+    # Sanitize before it reaches /issue's `eval "set -- $ARGUMENTS"` tokenizer — double-quoting
+    # alone does not stop backtick/$(...) command substitution inside double quotes in bash.
+    # ${cluster} is config-controlled (forge.yaml verification.integration_tests), but sanitize
+    # unconditionally for defense-in-depth consistency with the other 4 converted call sites.
+    TESTGATE_FAIL_TITLE=$(printf '%s' "$TESTGATE_FAIL_TITLE" | tr '`' "'" | sed 's/\$(/$ (/g')
     TESTGATE_FAIL_BODY_FILE=$(mktemp)
     cat <<ISSUE_EOF > "$TESTGATE_FAIL_BODY_FILE"
 ## Problem
@@ -576,8 +581,14 @@ ISSUE_EOF
     rm -f "$TESTGATE_FAIL_BODY_FILE"
 
     # /issue has no machine-readable return contract — resolve the created issue's number by
-    # exact-title search immediately after the call.
-    ISSUE_NUM=$(gh issue list ${GH_FLAG} --search "in:title \"${TESTGATE_FAIL_TITLE}\"" --state open --limit 1 --json number --jq '.[0].number // empty' 2>/dev/null || echo "FAILED")
+    # exact-title search immediately after the call. Retry to absorb GitHub Search API indexing lag.
+    ISSUE_NUM=""
+    for _resolve_attempt in 1 2 3; do
+      ISSUE_NUM=$(gh issue list ${GH_FLAG} --search "in:title \"${TESTGATE_FAIL_TITLE}\"" --state open --limit 1 --json number --jq '.[0].number // empty' 2>/dev/null || echo "")
+      [ -n "$ISSUE_NUM" ] && break
+      sleep 2
+    done
+    [ -z "$ISSUE_NUM" ] && ISSUE_NUM="FAILED"
 
     if [ "$ISSUE_NUM" != "FAILED" ] && [ -n "$ISSUE_NUM" ]; then
       echo "Filed test-failure issue #${ISSUE_NUM} for cluster '${cluster}'"
@@ -794,6 +805,9 @@ if [ "${UNCOVERED_COUNT}" -gt 0 ]; then
     fi
 
     TESTGAP_TITLE="fix: test-gap — uncovered criterion in issue #${GAP_ISSUE} (${GAP_TYPE})"
+    # Sanitize before it reaches /issue's `eval "set -- $ARGUMENTS"` tokenizer — double-quoting
+    # alone does not stop backtick/$(...) command substitution inside double quotes in bash.
+    TESTGAP_TITLE=$(printf '%s' "$TESTGAP_TITLE" | tr '`' "'" | sed 's/\$(/$ (/g')
     TESTGAP_BODY_FILE=$(mktemp)
     cat <<TGAP_EOF > "$TESTGAP_BODY_FILE"
 ## Problem
@@ -835,8 +849,14 @@ TGAP_EOF
     rm -f "$TESTGAP_BODY_FILE"
 
     # /issue has no machine-readable return contract — resolve the created issue's number by
-    # exact-title search immediately after the call.
-    GAP_ISSUE_NUM=$(gh issue list ${GH_FLAG} --search "in:title \"${TESTGAP_TITLE}\"" --state open --limit 1 --json number --jq '.[0].number // empty' 2>/dev/null || echo "FAILED")
+    # exact-title search immediately after the call. Retry to absorb GitHub Search API indexing lag.
+    GAP_ISSUE_NUM=""
+    for _resolve_attempt in 1 2 3; do
+      GAP_ISSUE_NUM=$(gh issue list ${GH_FLAG} --search "in:title \"${TESTGAP_TITLE}\"" --state open --limit 1 --json number --jq '.[0].number // empty' 2>/dev/null || echo "")
+      [ -n "$GAP_ISSUE_NUM" ] && break
+      sleep 2
+    done
+    [ -z "$GAP_ISSUE_NUM" ] && GAP_ISSUE_NUM="FAILED"
 
     if [ "$GAP_ISSUE_NUM" != "FAILED" ] && [ -n "$GAP_ISSUE_NUM" ]; then
       echo "Filed test-gap issue #${GAP_ISSUE_NUM} for uncovered criterion in #${GAP_ISSUE} (${GAP_TYPE})"
