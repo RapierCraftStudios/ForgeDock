@@ -2867,15 +2867,20 @@ async function run() {
     process.exit(1);
   }
 
-  const VALID_RUN_BACKENDS = new Set(["cli", "api", "auto"]);
-  if (backend !== undefined && !VALID_RUN_BACKENDS.has(backend)) {
+  // VALID_BACKENDS is imported from bin/runner.mjs (not re-hardcoded here) so
+  // this CLI-layer flag check and runner.mjs's own library-layer
+  // resolveBackend() validation can never structurally diverge on the set of
+  // accepted values or the wording of the resulting error message (issue
+  // #2013 — the two were previously independently-hardcoded Sets with
+  // near-identical but not-quite-matching error text).
+  const { runCommand, VALID_BACKENDS } = await import("./runner.mjs");
+  if (backend !== undefined && !VALID_BACKENDS.has(backend)) {
     process.stderr.write(
-      `${RED}Invalid --backend "${backend}". Must be one of: cli, api, auto.${RESET}\n`,
+      `${RED}Invalid --backend "${backend}". Must be one of: ${[...VALID_BACKENDS].join(", ")}.${RESET}\n`,
     );
     process.exit(1);
   }
 
-  const { runCommand } = await import("./runner.mjs");
   try {
     const result = await runCommand({
       commandsDir: COMMANDS_DIR,

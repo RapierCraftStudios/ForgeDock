@@ -50,6 +50,7 @@ import {
   resolveBackend,
   resolveBackendLadder,
   runCliBackend,
+  VALID_BACKENDS,
 } from "../runner.mjs";
 
 // ---------------------------------------------------------------------------
@@ -1490,6 +1491,98 @@ describe("runCliBackend env scrub (issue #2021)", () => {
       if (origMarker === undefined) delete process.env.FORGEDOCK_TEST_MARKER;
       else process.env.FORGEDOCK_TEST_MARKER = origMarker;
     }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// runCliBackend — spawnFn injection seam (issue #2033)
+//
+// Additive to the `bin`-override tests above (real fake binary on disk, real
+// spawnSync). This exercises the same `spawnFn` dependency-injection seam
+// already used by bin/init-enrich-cli.mjs's enrich() (see
+// bin/tests/init-enrich-cli.test.mjs), so the two mirrored CLI-spawn
+// backends can be tested — and any future behavioral drift between them
+// caught — with equivalent fixtures. Platform-agnostic: unlike the
+// `bin`-override tests, no `#!/bin/sh` shim is written to disk, so this
+// suite is not skipped on win32.
+// ---------------------------------------------------------------------------
+
+describe("runCliBackend spawnFn seam (issue #2033)", () => {
+  it("uses the injected spawnFn instead of the real spawnSync, and forwards argv/opts", () => {
+    let capturedBin, capturedArgv, capturedOpts;
+    const spawnFn = (bin, argv, opts) => {
+      capturedBin = bin;
+      capturedArgv = argv;
+      capturedOpts = opts;
+      return { status: 0, stdout: "ok", stderr: "", error: undefined };
+    };
+
+    const result = runCliBackend({
+      spec: loadCommandSpec(COMMANDS_DIR, "work-on"),
+      userMessage: "Execute: /work-on 2033",
+      args: ["2033"],
+      cwd: TMP,
+      logger: { log: () => {} },
+      bin: "claude",
+      spawnFn,
+    });
+
+    assert.equal(result.status, "complete");
+    assert.equal(result.backend, "cli");
+    assert.equal(capturedBin, "claude");
+    // argv must be a literal array — never a single interpolated shell string
+    // (mirrors the equivalent guard in init-enrich-cli.test.mjs).
+    assert.ok(Array.isArray(capturedArgv));
+    assert.equal(capturedArgv[0], "--print");
+    assert.equal(capturedArgv[1], "Execute: /work-on 2033");
+    assert.equal(capturedOpts.cwd, TMP);
+    assert.notEqual(
+      capturedOpts.shell,
+      true,
+      "must never invoke spawnFn with shell:true (shell-injection guard, mirrors issue #2031)",
+    );
+  });
+
+  it("propagates a non-zero exit status from the injected spawnFn as CLI_BACKEND_FAILED", () => {
+    const spawnFn = () => ({
+      status: 1,
+      stdout: "",
+      stderr: "boom",
+      error: undefined,
+    });
+
+    assert.throws(
+      () =>
+        runCliBackend({
+          spec: loadCommandSpec(COMMANDS_DIR, "work-on"),
+          userMessage: "Execute: /work-on 2033",
+          args: ["2033"],
+          cwd: TMP,
+          logger: { log: () => {} },
+          bin: "claude",
+          spawnFn,
+        }),
+      (err) => err.code === "CLI_BACKEND_FAILED",
+    );
+  });
+
+  it("defaults to the real spawnSync when spawnFn is omitted (backward compatibility)", () => {
+    // No behavior assertion beyond "does not throw a TypeError from a missing
+    // spawnFn" — this just confirms the default parameter wiring is correct.
+    // Point `bin` at a definitely-nonexistent executable so the real
+    // spawnSync fails fast via ENOENT instead of actually invoking `claude`.
+    assert.throws(
+      () =>
+        runCliBackend({
+          spec: loadCommandSpec(COMMANDS_DIR, "work-on"),
+          userMessage: "Execute: /work-on 2033",
+          args: ["2033"],
+          cwd: TMP,
+          logger: { log: () => {} },
+          bin: join(TMP, "definitely-does-not-exist-forgedock-2033"),
+        }),
+      /Failed to invoke claude CLI/,
+    );
   });
 });
 
