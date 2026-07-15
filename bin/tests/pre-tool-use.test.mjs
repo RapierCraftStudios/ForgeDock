@@ -768,6 +768,77 @@ describe("pre-tool-use hook — filesystem-root find guard (#2034)", () => {
     assert.equal(exitCode, 2);
     assert.match(stderr, /BLOCKED/);
   });
+
+  // Regression tests for a review finding on PR #2049 (#2059, CONFIRMED
+  // MEDIUM): tokenizeCommand() sets a token's `quoted` flag to true the
+  // moment ANY quote character appears in it, even a degenerate empty pair
+  // (`""`, `''`) glued onto otherwise-unquoted text. extractLogicalTokens()
+  // used that coarse flag alone to decide whether to skip the shell-
+  // metacharacter split, so an empty-quote injection glued to a
+  // metacharacter (e.g. `;""find`) fused `find` into the surrounding token
+  // (`/tmp;find`) and bypassed detection. The fix requires the quoting to
+  // also span embedded whitespace — the same discriminator extractFlag()
+  // already uses for the identical decoy class (issues #1519, #1591).
+  it('exits 2 for find / after a semicolon glued to an empty double-quote pair (cd /tmp;""find /)', () => {
+    const { exitCode, stderr } = runHook({
+      hook_event_name: "PreToolUse",
+      tool_name: "Bash",
+      tool_input: { command: 'cd /tmp;""find / -name x' },
+    });
+    assert.equal(exitCode, 2);
+    assert.match(stderr, /BLOCKED/);
+  });
+
+  it("exits 2 for find / after a semicolon glued to an empty single-quote pair (cd /tmp;''find /)", () => {
+    const { exitCode, stderr } = runHook({
+      hook_event_name: "PreToolUse",
+      tool_name: "Bash",
+      tool_input: { command: "cd /tmp;''find / -name x" },
+    });
+    assert.equal(exitCode, 2);
+    assert.match(stderr, /BLOCKED/);
+  });
+
+  it('exits 2 for find / glued to && with a degenerate single-char quote inside the command name ("f"ind)', () => {
+    const { exitCode, stderr } = runHook({
+      hook_event_name: "PreToolUse",
+      tool_name: "Bash",
+      tool_input: { command: 'echo x&&"f"ind /' },
+    });
+    assert.equal(exitCode, 2);
+    assert.match(stderr, /BLOCKED/);
+  });
+
+  // Regression test for a CONFIRMED HIGH finding surfaced during review of
+  // this same fix (PR #2067, issue #2059): backslash-escaping is a separate,
+  // unaddressed way to smuggle the literal token `find` past the guard.
+  // `f\ind` is real bash for the plain word `find` (a backslash strips the
+  // special meaning of the next character and collapses to it literally,
+  // outside quotes). tokenizeCommand() now handles this the same way it
+  // handles quoting.
+  it('exits 2 for find / with a backslash-escaped command name (cd /tmp;f\\ind /)', () => {
+    const { exitCode, stderr } = runHook({
+      hook_event_name: "PreToolUse",
+      tool_name: "Bash",
+      tool_input: { command: "cd /tmp;f\\ind /" },
+    });
+    assert.equal(exitCode, 2);
+    assert.match(stderr, /BLOCKED/);
+  });
+
+  it("still allows the multi-word quoted --body decoy after the embedded-whitespace fix (no false positive regression)", () => {
+    const { exitCode } = runHook({
+      hook_event_name: "PreToolUse",
+      tool_name: "Bash",
+      tool_input: {
+        command: 'gh issue comment 1 --body "do not run find / to locate files"',
+      },
+    });
+    // Genuine multi-word quoting (embedded whitespace) must still be treated
+    // as inert argument text and left unsplit — only degenerate/empty
+    // quoting with NO embedded whitespace loses the unsplit protection.
+    assert.equal(exitCode, 0);
+  });
 });
 
 // ---------------------------------------------------------------------------
