@@ -1,6 +1,6 @@
 ---
 description: Build subcommand — create worktree, post contract, sequence context/architect/implement/validate
-argument-hint: [issue number] [--repo GH_REPO] [--gh-flag GH_FLAG] [--base PR_BASE]
+argument-hint: "[issue number] [--repo GH_REPO] [--gh-flag GH_FLAG] [--base PR_BASE]"
 ---
 <!-- SPDX-FileCopyrightText: Copyright (c) RapierCraft Studios -->
 <!-- SPDX-License-Identifier: AGPL-3.0-or-later -->
@@ -12,7 +12,7 @@ argument-hint: [issue number] [--repo GH_REPO] [--gh-flag GH_FLAG] [--base PR_BA
 **Invoked by**: `work-on.md` Phase 3 — entered when the issue carries label `workflow:ready-to-build` or `workflow:building` (see Universal Phase Dispatcher in work-on.md).
 **Output**: Create worktree, post contract, run build phases, return result to work-on.md.
 
-**Agent model policy**: `model: "sonnet"` (standard tier). Fallback: `model: "opus"` if rate-limited. Feature gate: pass `effort` in Task/Skill spawns only on Claude Code >= 2.1.154.
+**Agent model policy**: `model: "{DEFAULT_MODEL}"` — resolved from forge.yaml `agents.default_model`, else "sonnet" (standard tier). Fallback: `model: "opus"` if rate-limited. Feature gate: pass `effort` in Task/Skill spawns only on Claude Code >= 2.1.154. This file's mechanical bits (3B classification, 3D label transitions) stay at this tier because they're interleaved with the reasoning-heavy build steps (3C.5/3C.6/3F) in the same `Skill()` invocation — see `work-on.md` section "Model and Effort Tiering — What Actually Applies". <!-- Added: forge#1827 -->
 **NEVER use plan mode (EnterPlanMode).**
 
 **CRITICAL: You MUST execute ALL phases B0–B6 in order. Phases B3 (context) and B4 (architect) are skipped ONLY when COMPLEXITY_BAND: TRIVIAL (read from FORGE:FAST_PATH comment in Phase B0). For STANDARD and COMPLEX tasks they are NOT optional — skipping them degrades build quality.**
@@ -373,17 +373,42 @@ The acceptance spec contains only a skip sentinel (\`type=skipped\`). No automat
 <!-- FORGE:ACCEPTANCE_GATE:PASSED -->"
 ```
 
-**Otherwise — execute each check**:
+**Otherwise — execute each check**: <!-- Added: forge#1829 -->
 
 ```bash
 GATE_PASS=true
 FAILED_CHECKS=""
 
 while IFS= read -r check_line; do
-  ID=$(echo "$check_line"    | sed -n 's/.*id=\([^ ]*\).*/\1/p')
-  TYPE=$(echo "$check_line"  | sed -n 's/.*type=\([^ ]*\).*/\1/p')
-  TARGET=$(echo "$check_line"| sed -n 's/.*target=\([^ ]*\).*/\1/p')
-  MATCHER=$(echo "$check_line"| sed -n 's/.*matcher=\([^ ]*\).*/\1/p')
+  # Fields are extracted by anchoring each sed pattern to `^ACCEPTANCE_CHECK:` and walking
+  # through the fixed field order from investigate.md (id= type= target="..." matcher="..."
+  # description=<free text to EOL>) instead of truncating the line before extraction. This
+  # is deliberate: description= is unconstrained free text and can legitimately contain
+  # key="value"-shaped substrings (e.g. `description=works when target="prod"`), while
+  # target=/matcher= are themselves free-form shell commands/regexes and can legitimately
+  # contain the literal substring "description=" (e.g. `target="grep -c description= file"`).
+  # A prior fix truncated the line at the first description= to keep free text from being
+  # mistaken for a real field — but that truncation then broke whenever a *real* target=/
+  # matcher= value contained "description=" text, cutting mid-quote. Anchoring from the start
+  # of the line through each preceding field in order avoids truncation entirely: every
+  # anchored pattern matches only the one fixed position where that field can occur, so
+  # neither direction of collision (fake fields inside description=, or description=-like
+  # text inside target=/matcher=) can hijack extraction. Falls back to the full line
+  # unchanged if a field is absent (no-op, safe for malformed lines).
+  ID=$(echo "$check_line" | sed -n 's/^ACCEPTANCE_CHECK: id=\([^ ]*\) type=.*/\1/p')
+  TYPE=$(echo "$check_line" | sed -n 's/^ACCEPTANCE_CHECK: id=[^ ]* type=\([^ ]*\) target=.*/\1/p')
+  # target=/matcher= are quoted (target="..." matcher="...") per the investigate.md wire format —
+  # quoting is required so multi-word/piped shell-command values (e.g. `target="grep -qE '...' file"`)
+  # survive extraction instead of being truncated at the first space. The quote-bounded pattern
+  # (`"\([^"]*\)"`) captures everything up to the next literal quote verbatim, including a literal
+  # "description=" substring inside the value. Fall back to the legacy unquoted [^ ]* extraction
+  # only for older ACCEPTANCE_CHECK comments emitted before this fix (still correct for
+  # single-token exists/contains targets; multi-word legacy targets remain truncated until the
+  # issue's investigation is re-run to emit the quoted format).
+  TARGET=$(echo "$check_line" | sed -n 's/^ACCEPTANCE_CHECK: id=[^ ]* type=[^ ]* target="\([^"]*\)".*/\1/p')
+  [ -z "$TARGET" ] && TARGET=$(echo "$check_line" | sed -n 's/^ACCEPTANCE_CHECK: id=[^ ]* type=[^ ]* target=\([^ ]*\).*/\1/p')
+  MATCHER=$(echo "$check_line" | sed -n 's/^ACCEPTANCE_CHECK: id=[^ ]* type=[^ ]* target="[^"]*" matcher="\([^"]*\)".*/\1/p')
+  [ -z "$MATCHER" ] && MATCHER=$(echo "$check_line" | sed -n 's/^ACCEPTANCE_CHECK: id=[^ ]* type=[^ ]* target=[^ ]* matcher=\([^ ]*\).*/\1/p')
   DESC=$(echo "$check_line"  | sed -n 's/.*description=\(.*\)/\1/p')
 
   [ "$TYPE" = "skipped" ] && continue

@@ -16,6 +16,7 @@
  *   listCommands(commandsDir)               → string[]      (available command names)
  *   loadCommandSpec(commandsDir, name)      → {path,name,content}
  *   buildSystemPrompt(spec, opts)           → string
+ *   buildCliSystemPrompt(spec)              → string        (cli-backend system prompt)
  *   buildUserMessage(name, args)            → string
  *   TOOL_DEFINITIONS                        → object[]      (Anthropic tool schemas)
  *   truncateToolResult(content)             → string        (cap + truncation marker)
@@ -23,6 +24,7 @@
  *   getToolHandlers(cwd)                    → Record<string, fn>
  *   renderDryRun(ctx)                       → string
  *   renderSummaryCard(ctx)                  → string
+ *   resolveConfiguredDefaultModel(cwd)      → string|null   (forge.yaml agents.default_model, resolved)
  *   runCommand(opts)                        → Promise<{status, ...}>
  *
  * Design notes:
@@ -41,10 +43,14 @@ import {
   writeFileSync,
   readdirSync,
   mkdirSync,
+  mkdtempSync,
+  rmSync,
   realpathSync,
 } from "fs";
 import { join, dirname, basename, relative, isAbsolute } from "path";
+import os from "os";
 import { execSync, spawnSync } from "child_process";
+import { parseForgeYaml, resolveModelAlias } from "./forge-utils.mjs";
 
 const DEFAULT_MODEL = "claude-sonnet-5";
 const DEFAULT_MAX_ITERATIONS = 50;
@@ -53,6 +59,31 @@ const DEFAULT_MAX_TOKENS = 16384;
 // generous enough for CI steps (git clones, test suites) while bounding
 // the worst-case hang to 5 minutes. Override via FORGEDOCK_BASH_TIMEOUT (ms).
 const DEFAULT_BASH_TIMEOUT_MS = 5 * 60 * 1000;
+// Default wall-clock limit for a single `claude --print` CLI-backend
+// invocation (issue #2003). This bounds an entire command run (the CLI's own
+// internal tool-use loop), not one bash step, so it is deliberately larger
+// than DEFAULT_BASH_TIMEOUT_MS. Override via FORGEDOCK_CLI_TIMEOUT_MS (ms).
+const DEFAULT_CLI_TIMEOUT_MS = 15 * 60 * 1000;
+// Short bound for the `claude --version` presence probe used by backend
+// auto-detection — this must never make --dry-run (or a live run) hang, so
+// it is far shorter than DEFAULT_CLI_TIMEOUT_MS. Mirrors the timeout already
+// used by the `claude --version` doctor check in bin/forgedock.mjs.
+const CLI_PROBE_TIMEOUT_MS = 5000;
+/** Valid values for the `backend` option / --backend flag / FORGEDOCK_BACKEND env. */
+const VALID_BACKENDS = new Set(["cli", "api", "auto"]);
+// Per-process memoization for isClaudeCliAvailable(), keyed by `cwd` (issue
+// #2011). `runCommand()` calls resolveBackend() — and therefore, for the
+// default "auto" backend, isClaudeCliAvailable() — unconditionally on every
+// invocation, including every `--dry-run`. Without caching, a process that
+// calls runCommand() repeatedly (e.g. bin/batch-runner.mjs driving many
+// commands, or an orchestration loop) re-spawns `claude --version` on every
+// single call. The cache is intentionally scoped to this process's lifetime
+// only (never persisted to disk): a long-lived process where `claude` gets
+// installed/uninstalled mid-run could observe a stale cached result, but
+// this runner's typical usage is a one-shot CLI invocation or a bounded
+// batch run, so that staleness window is negligible next to the guaranteed
+// win of not re-probing on every call.
+const cliAvailabilityCache = new Map();
 // Cap tool-result payloads so a large file read or verbose command does not
 // blow the context window in a single turn.
 const MAX_TOOL_RESULT_CHARS = 100_000;
@@ -72,6 +103,319 @@ export function truncateToolResult(content) {
   const str = String(content ?? "");
   if (str.length <= MAX_TOOL_RESULT_CHARS) return str;
   return str.slice(0, MAX_TOOL_RESULT_CHARS) + TRUNCATION_MARKER;
+}
+
+/**
+ * Resolve the project-configured default model from forge.yaml's
+ * `agents.default_model` field, if present.
+ *
+ * Reads `{cwd}/forge.yaml` (a fixed, non-agent-controlled filename — not the
+ * LLM-facing `resolveConfinedPath` path-confinement helper used for tool-call
+ * paths below), parses it with the shared `parseForgeYaml`, and resolves the
+ * `agents.default_model` alias (`sonnet`/`opus`/`haiku`, or a pass-through
+ * full model ID) via `resolveModelAlias`.
+ *
+ * Fail-soft: returns `null` on any failure (forge.yaml missing, unreadable,
+ * malformed, or the field absent) so the headless runner keeps working with
+ * zero configuration — this is a fallback tier, not a requirement.
+ *
+ * @param {string} cwd - Working directory to look for forge.yaml in.
+ * @returns {string|null}
+ */
+export function resolveConfiguredDefaultModel(cwd) {
+  try {
+    const forgeYamlPath = join(cwd, "forge.yaml");
+    if (!existsSync(forgeYamlPath)) return null;
+    const raw = readFileSync(forgeYamlPath, "utf-8");
+    const parsed = parseForgeYaml(raw);
+    const configured = parsed?.agents?.default_model;
+    return resolveModelAlias(configured);
+  } catch {
+    return null;
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Backend selection (issue #2003) — CLI vs API execution backend
+// ---------------------------------------------------------------------------
+
+/**
+ * Probe whether the Claude Code CLI (`claude`) is present and responds on
+ * this machine, so `forgedock run` can drive it directly instead of
+ * requiring a separate, billable ANTHROPIC_API_KEY.
+ *
+ * Deliberately uses `execSync("claude --version", ...)` — a single command
+ * *string* executed through a shell — rather than
+ * `execFileSync("claude", [...])`. On Windows, `claude` is installed as a
+ * `claude.cmd` shim; `execFileSync` does not resolve `.cmd` shims and throws
+ * ENOENT even though the CLI is genuinely installed and on PATH (this exact
+ * regression previously made an unrelated skill-based enrichment backend
+ * silently dead on Windows — see issue #382). `execSync` always runs its
+ * command through a shell, which resolves PATHEXT-registered `.cmd`/`.bat`
+ * shims correctly on Windows and behaves identically on POSIX. This mirrors
+ * the pre-existing `claude --version` doctor check in bin/forgedock.mjs.
+ *
+ * Bounded by CLI_PROBE_TIMEOUT_MS so a hung or misbehaving `claude` binary
+ * can never make backend resolution (and therefore --dry-run, or the start
+ * of a live run) hang indefinitely. Any failure — not installed, not on
+ * PATH, times out, non-zero exit — is treated as "not available" and never
+ * throws; the caller (resolveBackend) falls back to the API backend.
+ *
+ * Memoized per `cwd` for the lifetime of this process (see
+ * `cliAvailabilityCache` above, issue #2011) — the first call for a given
+ * `cwd` pays the probe cost; every subsequent call for that same `cwd`
+ * returns the cached result instantly, with no new child process spawned.
+ *
+ * @param {string} [cwd] - Working directory for the probe (default cwd).
+ * @param {object} [opts]
+ * @param {typeof execSync} [opts.execImpl] - Test seam only — production
+ *   callers must never override this; built-in ESM modules like
+ *   `node:child_process` export non-configurable bindings that `node:test`'s
+ *   `mock.method` cannot redefine, so tests inject a stub here directly
+ *   instead. Mirrors the existing `bin` test-seam parameter on
+ *   `runCliBackend()`.
+ * @returns {boolean}
+ */
+export function isClaudeCliAvailable(cwd = process.cwd(), { execImpl = execSync } = {}) {
+  if (cliAvailabilityCache.has(cwd)) {
+    return cliAvailabilityCache.get(cwd);
+  }
+  let available;
+  try {
+    execImpl("claude --version", {
+      cwd,
+      stdio: ["ignore", "pipe", "ignore"],
+      encoding: "utf-8",
+      timeout: CLI_PROBE_TIMEOUT_MS,
+    });
+    available = true;
+  } catch {
+    available = false;
+  }
+  cliAvailabilityCache.set(cwd, available);
+  return available;
+}
+
+/**
+ * Resolve which execution backend `runCommand()` should use.
+ *
+ * Ladder (issue #2003):
+ *   1. An explicit `"cli"` or `"api"` request always wins outright — no
+ *      probing, no fallback. This is what `--backend cli|api` and
+ *      `FORGEDOCK_BACKEND=cli|api` produce.
+ *   2. `"auto"` (the default) probes `isClaudeCliAvailable()`: prefers the
+ *      CLI backend when a working `claude` install is detected (reuses
+ *      whatever credentials the CLI already has — Pro/Max OAuth or a
+ *      CLI-managed key — with no ANTHROPIC_API_KEY required), otherwise
+ *      falls back to the API backend unchanged (existing behavior for every
+ *      caller that never opts in to this feature).
+ *
+ * @param {object} [opts]
+ * @param {string} [opts.requested] - "cli" | "api" | "auto" (default "auto").
+ * @param {string} [opts.cwd]       - Working directory for the CLI probe.
+ * @returns {"cli"|"api"}
+ */
+export function resolveBackend({ requested = "auto", cwd = process.cwd() } = {}) {
+  if (!VALID_BACKENDS.has(requested)) {
+    throw new Error(
+      `Invalid backend "${requested}". Must be one of: ${[...VALID_BACKENDS].join(", ")}.`,
+    );
+  }
+  if (requested === "cli" || requested === "api") return requested;
+  return isClaudeCliAvailable(cwd) ? "cli" : "api";
+}
+
+/**
+ * Run a command via the local Claude Code CLI instead of the Anthropic SDK
+ * (issue #2003's "cli" backend). Shells out to headless print mode
+ * (`claude --print "<message>" --dangerously-skip-permissions`), reusing
+ * whatever the CLI is already authenticated with — no ANTHROPIC_API_KEY is
+ * read or required anywhere on this path.
+ *
+ * SECURITY — argv array, NEVER `shell: true`: `userMessage` is built from
+ * `buildUserMessage(commandName, args)`, and `args` originates from
+ * user-supplied CLI arguments to `forgedock run <command> <args...>` — it is
+ * untrusted input from this function's point of view. `spawnSync("claude",
+ * [...argv], { shell: false (default) })` passes each argument as a discrete,
+ * unparsed argv element: the target process receives `userMessage` as one
+ * literal string, with no shell ever tokenizing or expanding it, so shell
+ * metacharacters (`$(...)`, backticks, `;`, `&&`, `|`, `!`) inside it cannot
+ * trigger command injection. An earlier version of this function built a
+ * shell command *string* (`claude --print "<quoted message>" ...`) run via
+ * `spawnSync(command, { shell: true })` with hand-rolled quoting
+ * (backslash/double-quote escaping only) — that does NOT neutralize
+ * `$(...)`/backtick/`!` expansion inside POSIX double quotes and was an
+ * exploitable injection (verified: a crafted `userMessage` could execute
+ * arbitrary shell commands with this process's privileges). Do not
+ * reintroduce `shell: true` or string-command interpolation here.
+ *
+ * Windows `.cmd` shim resolution works WITHOUT `shell: true`: Node's
+ * spawn/spawnSync resolve a bare `"claude"` command via PATH+PATHEXT and
+ * safely re-invoke through cmd.exe internally when the resolved target is a
+ * `.cmd`/`.bat` file, using a properly escaped mechanism, and argv elements
+ * are never parsed as shell syntax (verified empirically on Windows: a
+ * malicious-looking argv element is delivered to the child process
+ * byte-for-byte, not executed). This is the correct fix for the
+ * `execFileSync("claude", [...])` ENOENT-on-Windows regression from issue
+ * #382 — that regression was about USING execFileSync with an unresolved
+ * bare command name in an older/incompatible way, not about needing
+ * `shell: true`; spawnSync's own PATH/PATHEXT resolution (unlike
+ * execFileSync's, in the failure mode #382 hit) handles the `.cmd` shim
+ * transparently here.
+ *
+ * `--dangerously-skip-permissions` mirrors the established headless-CI
+ * invocation pattern already documented in docs/CI.md and
+ * templates/workflows/forgedock-review.yml: without it, the CLI would block
+ * on an interactive permission prompt that a headless caller can never
+ * answer, hanging until FORGEDOCK_CLI_TIMEOUT_MS/DEFAULT_CLI_TIMEOUT_MS
+ * kills it.
+ *
+ * SYSTEM PROMPT / COMMAND SPEC DELIVERY (issue #2019): `systemPrompt` (built
+ * by `buildCliSystemPrompt(spec)` — see below) is written to a private
+ * temp file and forwarded via `--append-system-prompt-file <path>`, NOT
+ * passed inline as a `--system-prompt`/`--append-system-prompt` argv string.
+ * Two reasons this matters:
+ *   1. Size: a command spec like `commands/work-on.md` is 100+ KB, and the
+ *      full `commands/*.md` corpus is over 1MB. Windows' CreateProcess has a
+ *      ~32K character command-line limit; spawnSync here uses `shell: false`
+ *      so it hits that OS-level argv limit directly. A file path is always
+ *      short regardless of spec size.
+ *   2. Semantics: `--append-system-prompt-file` *appends* to the CLI's own
+ *      default system prompt (tool descriptions, environment info, etc.),
+ *      matching how a real `/work-on` slash-command invocation inside Claude
+ *      Code behaves — the ForgeDock spec augments the CLI's native
+ *      capabilities rather than replacing them. `--system-prompt-file` would
+ *      instead *replace* the CLI's default prompt entirely, which would
+ *      strip the CLI of its own operating instructions.
+ * The temp file lives in a per-call `mkdtempSync` directory and is always
+ * removed in a `finally` block, covering the timeout/spawn-error/non-zero-exit
+ * paths as well as the success path.
+ *
+ * Model selection is intentionally NOT forwarded to the CLI in this first
+ * increment — the CLI backend uses whatever model the `claude` CLI itself is
+ * configured for. `opts.model`/FORGEDOCK_MODEL only affects the API backend.
+ * Likewise, structured token usage is not available the same way the
+ * Anthropic SDK exposes it; `usage` is reported as `null` (an already
+ * fully-supported value throughout renderSummaryCard/renderDryRun).
+ *
+ * @param {object} opts
+ * @param {{path: string, name: string, content: string}} opts.spec
+ * @param {string} opts.userMessage
+ * @param {string} [opts.systemPrompt] - CLI-appropriate system prompt (see
+ *   `buildCliSystemPrompt`), forwarded via `--append-system-prompt-file`.
+ *   Omitted/empty is tolerated (no flag is added) so existing callers that
+ *   have not been updated yet do not break, but production callers should
+ *   always supply it — see issue #2019.
+ * @param {string[]} [opts.args]
+ * @param {string} opts.cwd
+ * @param {{log: Function, error?: Function}} [opts.logger]
+ * @param {string} [opts.bin] - Executable to invoke (default "claude"). Test
+ *   seam only — production callers must never override this; it exists so
+ *   tests can point at a controlled fake binary instead of either invoking
+ *   the real `claude` CLI (slow, non-deterministic, real side effects) or
+ *   fighting platform-specific PATH-resolution semantics to shim "claude"
+ *   itself (Windows resolves a bare executable name via the *calling*
+ *   process's search path at the OS level, which is not reliably
+ *   overridable per-call from within the same process).
+ * @returns {{status: string, command: string, iterations: number, stopReason: string, usage: null, model: string, backend: "cli"}}
+ */
+export function runCliBackend({
+  spec,
+  userMessage,
+  systemPrompt = "",
+  args = [],
+  cwd,
+  logger = console,
+  bin = "claude",
+}) {
+  const rawTimeout = parseInt(process.env.FORGEDOCK_CLI_TIMEOUT_MS, 10);
+  const timeoutMs =
+    Number.isFinite(rawTimeout) && rawTimeout > 0 ? rawTimeout : DEFAULT_CLI_TIMEOUT_MS;
+
+  // Write the system prompt (command spec + framing) to a private temp file
+  // rather than passing it inline as an argv string — see the SYSTEM PROMPT
+  // block comment above for why. The directory is created fresh per call and
+  // always removed in `finally`, regardless of how spawnSync exits below.
+  let tmpDir = null;
+  let cliArgs = ["--print", userMessage, "--dangerously-skip-permissions"];
+  if (systemPrompt) {
+    tmpDir = mkdtempSync(join(os.tmpdir(), "forgedock-cli-system-prompt-"));
+    const systemPromptPath = join(tmpDir, "system-prompt.txt");
+    writeFileSync(systemPromptPath, systemPrompt, "utf-8");
+    cliArgs = [
+      "--print",
+      userMessage,
+      "--append-system-prompt-file",
+      systemPromptPath,
+      "--dangerously-skip-permissions",
+    ];
+  }
+
+  try {
+    // No `shell` option (defaults to false): argv is passed as discrete,
+    // unparsed elements — see the SECURITY note above. This also correctly
+    // resolves the Windows `.cmd` shim without needing shell:true.
+    const result = spawnSync(bin, cliArgs, {
+      cwd,
+      encoding: "utf-8",
+      maxBuffer: 50 * 1024 * 1024,
+      timeout: timeoutMs,
+    });
+
+    const stdout = result.stdout ? String(result.stdout) : "";
+    const stderr = result.stderr ? String(result.stderr) : "";
+
+    // Same timeout-detection shape as run_bash below: ETIMEDOUT is the
+    // authoritative Node-initiated kill signal; the elapsed-time fallback is
+    // intentionally omitted here since spawnSync's own `timeout` + ETIMEDOUT is
+    // reliable for this single, non-looped invocation.
+    const timedOut = result.status === null && result.error?.code === "ETIMEDOUT";
+    if (timedOut) {
+      const timeoutSecs = Math.round(timeoutMs / 1000);
+      throw new Error(
+        `claude CLI invocation timed out after ${timeoutSecs}s and was killed. ` +
+          `Set FORGEDOCK_CLI_TIMEOUT_MS (ms) to adjust, or use --backend api.`,
+      );
+    }
+    if (result.error) {
+      throw new Error(`Failed to invoke claude CLI: ${result.error.message}`);
+    }
+
+    const output = (stdout + stderr).trim();
+    if (output) logger.log(output);
+
+    if (result.status !== 0) {
+      const err = new Error(
+        `claude CLI exited with status ${result.status ?? "?"}. See output above for details.`,
+      );
+      err.code = "CLI_BACKEND_FAILED";
+      throw err;
+    }
+
+    logger.log(
+      renderSummaryCard({
+        command: spec.name,
+        args,
+        iterations: 1,
+        stopReason: "cli_exit_0",
+        usage: null,
+      }),
+    );
+
+    return {
+      status: "complete",
+      command: spec.name,
+      iterations: 1,
+      stopReason: "cli_exit_0",
+      usage: null,
+      model: "cli",
+      backend: "cli",
+    };
+  } finally {
+    if (tmpDir) {
+      rmSync(tmpDir, { recursive: true, force: true });
+    }
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -197,6 +541,36 @@ export function buildSystemPrompt(spec, opts = {}) {
   ]
     .filter((line) => line !== false && line !== undefined && line !== null)
     .join("\n");
+}
+
+/**
+ * Assemble the system prompt to forward to the CLI backend (issue #2019).
+ *
+ * This is deliberately NOT `buildSystemPrompt()` reused verbatim:
+ * `buildSystemPrompt()` was written for the API backend's custom, minimal
+ * 3-tool loop (`read_file`/`write_file`/`run_bash`) and explicitly tells the
+ * model "You have three tools to do real work" — that claim is false for the
+ * CLI backend, which runs inside the full `claude` CLI with its own native
+ * tool set (Read/Write/Edit/Bash/etc.) and its own default system prompt.
+ * Passing the API-flavored prompt to the CLI via `--append-system-prompt-file`
+ * would misinform the model about which tools it actually has.
+ *
+ * Forwarded via `--append-system-prompt-file` (see `runCliBackend`), which
+ * *appends* to the CLI's own default system prompt rather than replacing it
+ * — the CLI keeps its normal tool descriptions/environment info, with the
+ * ForgeDock command specification layered on top, mirroring how invoking
+ * `/${spec.name}` as a real Claude Code slash command would behave.
+ *
+ * @param {{name: string, content: string}} spec
+ * @returns {string}
+ */
+export function buildCliSystemPrompt(spec) {
+  return [
+    `You are executing the ForgeDock "/${spec.name}" command. Follow the command specification below exactly, using your normal available tools to do the work (file edits, git, gh, running scripts/build/test commands, etc.). Post FORGE annotations to GitHub via the gh CLI exactly as the spec instructs. Do not ask the user questions — this is a headless run. When the command is fully complete, stop and emit a concise final summary of what was accomplished.`,
+    ``,
+    `=== COMMAND SPECIFICATION (commands/${spec.name}.md) ===`,
+    spec.content,
+  ].join("\n");
 }
 
 /**
@@ -666,25 +1040,53 @@ export function getToolHandlers(cwd) {
 
 /**
  * Render the dry-run preview: what would be sent to the API, no network.
- * @param {{spec: object, systemPrompt: string, userMessage: string, model: string, maxIterations: number}} ctx
+ *
+ * `systemPrompt` in `ctx` must already be the backend-appropriate prompt —
+ * callers resolve `backend === "cli" ? cliSystemPrompt : systemPrompt` before
+ * calling this (see `runCommand`). This function branches the `tools:` line
+ * (and the on-disk-vs-inline framing of the system-prompt line) on `backend`
+ * so the preview accurately reflects what each backend actually sends: the
+ * `api` backend sends `TOOL_DEFINITIONS` (its custom read_file/write_file/
+ * run_bash loop) inline as `system`; the `cli` backend uses the `claude`
+ * CLI's own native tool set and receives the prompt via
+ * `--append-system-prompt-file`, not inline (issue #2019).
+ *
+ * @param {{spec: object, systemPrompt: string, userMessage: string, model: string, maxIterations: number, backend?: "cli"|"api"}} ctx
  * @returns {string}
  */
 export function renderDryRun(ctx) {
-  const { spec, systemPrompt, userMessage, model, maxIterations } = ctx;
+  const { spec, systemPrompt, userMessage, model, maxIterations, backend } = ctx;
+  const backendLine =
+    backend === "cli"
+      ? `│ backend:        cli (claude CLI detected — no ANTHROPIC_API_KEY needed)`
+      : backend === "api"
+        ? `│ backend:        api (ANTHROPIC_API_KEY required)`
+        : null;
+  const toolsLine =
+    backend === "cli"
+      ? `│ tools:          claude CLI's native tools (Read/Write/Edit/Bash/etc. — not TOOL_DEFINITIONS below)`
+      : `│ tools:          ${TOOL_DEFINITIONS.map((t) => t.name).join(", ")}`;
+  const systemPromptLine =
+    backend === "cli"
+      ? `│ system prompt:  ${systemPrompt.length} chars (appended to CLI's default via --append-system-prompt-file)`
+      : `│ system prompt:  ${systemPrompt.length} chars`;
   return [
     `┌─ ForgeDock run (dry-run) ───────────────────────────────`,
     `│ command:        /${spec.name}`,
     `│ spec:           ${spec.path}`,
+    backendLine,
     `│ model:          ${model}`,
     `│ max iterations: ${maxIterations}`,
-    `│ tools:          ${TOOL_DEFINITIONS.map((t) => t.name).join(", ")}`,
-    `│ system prompt:  ${systemPrompt.length} chars`,
+    toolsLine,
+    systemPromptLine,
     `│ user message:   ${userMessage}`,
     `└─────────────────────────────────────────────────────────`,
     ``,
     `(dry-run) No API call made. Set ANTHROPIC_API_KEY and install`,
     `@anthropic-ai/sdk, then drop --dry-run to execute the pipeline.`,
-  ].join("\n");
+  ]
+    .filter((line) => line !== null && line !== undefined)
+    .join("\n");
 }
 
 /**
@@ -734,9 +1136,15 @@ export function renderSummaryCard(ctx) {
  * @param {string[]} [opts.args]             - Command arguments.
  * @param {string} [opts.cwd]                - Working directory (default cwd).
  * @param {string} [opts.apiKey]             - Anthropic API key (default env).
- * @param {string} [opts.model]              - Model id.
+ * @param {string} [opts.model]              - Model id. Resolution order when
+ *   omitted: $FORGEDOCK_MODEL env > forge.yaml `agents.default_model` (in
+ *   `cwd`) > hardcoded DEFAULT_MODEL.
  * @param {number} [opts.maxIterations]      - Tool-loop bound.
  * @param {boolean} [opts.dryRun]            - Preview without an API call.
+ * @param {string} [opts.backend]            - "cli" | "api" | "auto" (default
+ *   "auto"). Resolution order when omitted: $FORGEDOCK_BACKEND env > "auto".
+ *   "auto" prefers the local Claude Code CLI when detected (no
+ *   ANTHROPIC_API_KEY needed), else falls back to the API backend.
  * @param {{log: Function, error?: Function}} [opts.logger] - Output sink.
  * @returns {Promise<{status: string, command: string, [k: string]: any}>}
  */
@@ -747,24 +1155,85 @@ export async function runCommand(opts = {}) {
     args = [],
     cwd = process.cwd(),
     apiKey = process.env.ANTHROPIC_API_KEY,
-    model = process.env.FORGEDOCK_MODEL || DEFAULT_MODEL,
+    model = process.env.FORGEDOCK_MODEL ||
+      resolveConfiguredDefaultModel(cwd) ||
+      DEFAULT_MODEL,
     maxIterations = DEFAULT_MAX_ITERATIONS,
     dryRun = false,
+    backend = process.env.FORGEDOCK_BACKEND || "auto",
     logger = console,
   } = opts;
 
   const spec = loadCommandSpec(commandsDir, commandName);
   const systemPrompt = buildSystemPrompt(spec, { repoRoot: cwd });
+  // CLI-backend-specific prompt (issue #2019) — see buildCliSystemPrompt's
+  // doc comment for why this must NOT be the same string as `systemPrompt`
+  // above (that one is written for the API backend's custom 3-tool loop).
+  const cliSystemPrompt = buildCliSystemPrompt(spec);
   const userMessage = buildUserMessage(commandName, args);
 
+  // Resolve the backend before dry-run so the preview reports what would
+  // actually run. isClaudeCliAvailable() is bounded by CLI_PROBE_TIMEOUT_MS
+  // and never throws on detection failure, so this cannot make --dry-run (or
+  // the start of a live run) hang or fail even when `claude` is absent or
+  // misbehaving. An explicitly invalid `backend` value DOES throw here —
+  // surfacing a bad --backend/FORGEDOCK_BACKEND value immediately, before any
+  // work is attempted, rather than silently ignoring it.
+  const resolvedBackend = resolveBackend({ requested: backend, cwd });
+
   if (dryRun) {
-    logger.log(renderDryRun({ spec, systemPrompt, userMessage, model, maxIterations }));
-    return { status: "dry-run", command: spec.name, args, specPath: spec.path, model };
+    logger.log(
+      renderDryRun({
+        spec,
+        systemPrompt: resolvedBackend === "cli" ? cliSystemPrompt : systemPrompt,
+        userMessage,
+        model,
+        maxIterations,
+        backend: resolvedBackend,
+      }),
+    );
+    return {
+      status: "dry-run",
+      command: spec.name,
+      args,
+      specPath: spec.path,
+      model,
+      backend: resolvedBackend,
+    };
+  }
+
+  if (resolvedBackend === "cli") {
+    // model/maxIterations only apply to the api backend — the cli backend
+    // uses whatever model the `claude` CLI itself is configured for, and has
+    // no equivalent iteration-cap concept for a single `claude --print`
+    // invocation. Warn (rather than silently drop) when the caller explicitly
+    // supplied either, so the behavior is discoverable outside of --dry-run.
+    // hasOwnProperty on the raw opts (not the destructured, default-applied
+    // values above) is required here: model/maxIterations always resolve to
+    // a computed default, so checking their truthiness would fire this
+    // warning on every single cli-backend run.
+    const ignoredOptions = [];
+    if (Object.prototype.hasOwnProperty.call(opts, "model")) ignoredOptions.push("model");
+    if (Object.prototype.hasOwnProperty.call(opts, "maxIterations"))
+      ignoredOptions.push("maxIterations");
+    if (ignoredOptions.length > 0) {
+      logger.log(
+        `Warning: --${ignoredOptions.join(" and --")} ${
+          ignoredOptions.length > 1 ? "are" : "is"
+        } ignored on the cli backend (backend: cli uses whatever model the ` +
+          `claude CLI itself is configured for). Use --backend api to honor ${
+            ignoredOptions.length > 1 ? "these options" : "this option"
+          }.`,
+      );
+    }
+    return runCliBackend({ spec, userMessage, systemPrompt: cliSystemPrompt, args, cwd, logger });
   }
 
   if (!apiKey) {
     const err = new Error(
-      "ANTHROPIC_API_KEY is not set. Export your Anthropic API key to run the live pipeline, or pass --dry-run to preview.",
+      "ANTHROPIC_API_KEY is not set. Export your Anthropic API key to run the live pipeline, " +
+        "pass --dry-run to preview, or use --backend cli (requires the `claude` CLI on PATH, " +
+        "already authenticated) to run without an API key.",
     );
     err.code = "NO_API_KEY";
     throw err;
@@ -858,6 +1327,7 @@ export async function runCommand(opts = {}) {
         stopReason: response.stop_reason,
         usage,
         model,
+        backend: "api",
       };
     }
 
@@ -893,5 +1363,12 @@ export async function runCommand(opts = {}) {
       usage,
     }),
   );
-  return { status: "max-iterations", command: spec.name, iterations, usage, model };
+  return {
+    status: "max-iterations",
+    command: spec.name,
+    iterations,
+    usage,
+    model,
+    backend: "api",
+  };
 }

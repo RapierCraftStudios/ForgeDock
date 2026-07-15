@@ -1,5 +1,5 @@
 ---
-install: internal
+install: core
 ---
 <!-- SPDX-FileCopyrightText: Copyright (c) RapierCraft Studios -->
 <!-- SPDX-License-Identifier: AGPL-3.0-or-later -->
@@ -139,10 +139,52 @@ done
 # Results table row (Step 6B).
 ```
 
+### Step 6A.7: Determine idle-policy end state <!-- Added: forge#1814 -->
+
+**Why**: `phase-4-execution.md` Step 4B item 6.7 can end the live monitoring loop in two visibly
+different ways: a **clean/paused drain** (every original-batch issue reached `DONE`/`FAILED`, or
+is `blocked-on-human-merge` with no cascade activity left to suppress), or an **idle-policy
+pause** (`BATCH_FULLY_GATED` was true at the moment the batch stopped, meaning Step 4C actively
+suppressed one or more newly-spawned review-finding dispatches). Both are legitimate stopping
+points, but rendering an idle-policy pause under the same "Orchestration Complete" header as a
+genuine full drain misrepresents a paused run as finished — the whole point of #1814 is to make
+this pause visible, not silent.
+
+```bash
+# BATCH_FULLY_GATED is the value computed in phase-4-execution.md Step 4B item 6.7 at the point
+# the live loop stopped — threaded into Phase 6 as a plain boolean, not recomputed here (Phase 6
+# runs after the live loop has already ended, so re-running item 6.7's per-issue classification
+# would be redundant; carry the value forward instead).
+ORCHESTRATION_ENDED_IDLE="${BATCH_FULLY_GATED:-false}"
+
+# Count of findings deferred this run for the idle-policy reason specifically (distinct from
+# generation>=2 and comment/typo/P3-same-file deferrals, which are unaffected by this policy).
+IDLE_POLICY_DEFERRED_COUNT=0
+for FINDING_NUM in "${DEFERRED_FINDINGS[@]:-}"; do
+  [ -z "$FINDING_NUM" ] && continue
+  echo "${DEFERRED_REASONS[$FINDING_NUM]:-}" | grep -qi "batch fully human-gated" && \
+    IDLE_POLICY_DEFERRED_COUNT=$((IDLE_POLICY_DEFERRED_COUNT + 1))
+done
+```
+
 ### Step 6B: Present consolidated report
 
+Always rendered in full, once, regardless of `{NARRATION_MODE}` — `pipeline.narration` (see `config.md`) only gates the per-completion recap in Step 4B item 8. This is the one place full tables are guaranteed to appear.
+
 ```
+{IF ORCHESTRATION_ENDED_IDLE == "true":}
+## Orchestration Paused — Idle (waiting on {#MERGE_READY_PRS[@]:-0} + {#BLOCKED_ON_MERGE[@]:-0} merge(s))
+
+This run stopped because the remaining batch is fully human-gated — every original issue is
+merged/invalid, or blocked on a human decision/merge. {IDLE_POLICY_DEFERRED_COUNT} newly-spawned
+review-finding issue(s) were deferred (not dispatched) rather than added to the open-issue count.
+See "Merge-Ready" and "Blocked-on-Merge" below for the exact action needed to resume. Re-run
+`/orchestrate` (or let a still-running session's live wake pick it up) once you've merged the
+PR(s) listed there — deferred findings are re-evaluated automatically by the next Completion
+Sweep (Step 4F.2.5) once the batch is no longer fully gated.
+{ELSE:}
 ## Orchestration Complete
+{END IF}
 
 **Scope**: {milestone / issue list}
 **Duration**: {approximate time}
@@ -245,7 +287,7 @@ current session's live wake pick them up automatically if it is still running).
 
 ### Summary
 - **Investigations**: {N} completed, spawned {M} new issues
-- **Review findings**: {N} spawned, {M} resolved in-batch, {K} swept, {J} deferred (cosmetic), {L} deferred (gen2)
+- **Review findings**: {N} spawned, {M} resolved in-batch, {K} swept, {J} deferred (cosmetic), {L} deferred (gen2), {IDLE_POLICY_DEFERRED_COUNT} deferred (idle policy, forge#1814)
 - **Succeeded**: {N} issues resolved (implementation + sweep)
 - **Failed**: {N} issues need attention
 - **Merge-ready**: {#MERGE_READY_PRS[@]:-0} PRs awaiting only a human merge (see "Merge-Ready" section above)
@@ -279,11 +321,14 @@ current session's live wake pick them up automatically if it is still running).
 | Contract→code divergences | {N} (agents that updated contract mid-build) |
 | Review findings created | {N_total} |
 | Findings queued after cascade control | {N_queued}/{N_total} ({N_deferred} deferred — see Step 4C) |
+| Findings deferred — idle policy (forge#1814) | {IDLE_POLICY_DEFERRED_COUNT} (batch fully human-gated at defer time — see Step 4B item 6.7) |
+| P3 findings clubbed (surface-area batching, forge#1818) | {SURFACE_BATCH_COUNT:-0} batch(es) covering {#SURFACE_BATCHED_FINDINGS[@]:-0} finding(s) — see Step 4C |
+| Findings deferred — token budget (forge#1858) | {#TOKEN_DEFERRED[@]:-0} (batch spend {BATCH_TOKEN_SPEND:-0}/{TOKEN_BUDGET:-uncapped} tokens — see Step 4C) |
 | Competing recommendations reconciled (Phase 2.5) | {RECONCILED_COUNT} (investigation plans arbitrated in place + serialized) |
 | Findings validated | {N} |
 | False positives | {N} ({%}) |
 | Anomalies flagged | {N} |
-| Budget limit | ${BUDGET_LIMIT:-uncapped} |
+| Budget limit ($) | ${BUDGET_LIMIT:-uncapped} |
 | Projected spend (dispatched issues) | ${PROJECTED_SPEND:-—} |
 | Actual spend (best-effort telemetry) | ${ACTUAL_SPEND:-—} |
 | Issues deferred (budget ceiling) | {#DEFERRED_BUDGET_ISSUES[@]:-0} |
@@ -291,6 +336,8 @@ current session's live wake pick them up automatically if it is still running).
 | **Value-weighted throughput** | **{VALUE_THROUGHPUT:-—} value-pts/USD** |
 
 `value-weighted throughput` = Σ(priority_weight × danger_zone_weight) for **merged** issues ÷ actual spend (USD). A higher value means more high-priority issues were resolved per dollar. Trend this across runs via `/pipeline-health` to measure the economic scheduling ROI. <!-- Added: forge#1743 -->
+
+`P3 findings clubbed` and `Findings deferred — token budget` are a DIFFERENT mechanism from the `$`-denominated `Budget limit`/`Projected spend`/`Actual spend`/`Issues deferred (budget ceiling)` rows above (forge#1743, opt-in `--budget N` flag, gates the *original* issue dispatch order). The token-budget row reads the always-on, token-denominated ceiling that scopes ONLY to Step 4C's review-finding cascade dispatch (forge#1858); `SURFACE_BATCH_COUNT` and `SURFACE_BATCHED_FINDINGS` are populated by the same Step 4C surface-area-batching block (forge#1818) that clubs P3 findings sharing a file/leaf-directory into one dispatched pipeline. Both degrade gracefully to `0`/`uncapped` when the batch had no review findings or ran with defaults. <!-- Added: forge#1858 -->
 
 **Compute value-weighted throughput** (populate before rendering the table):
 
@@ -328,6 +375,7 @@ fi
 - **Value-weighted throughput trending down** → high-value issues deferred or blocked; check Step 3E.5 score distribution
 
 ### Next Steps
+{If ORCHESTRATION_ENDED_IDLE == "true": "This run paused on the human-gated idle policy (forge#1814) — merge the PR(s) listed in the Merge-Ready section above, then re-run `/orchestrate` (or let a still-running session's live wake pick it up automatically) to resume dispatch of blocked-on-merge dependents and re-evaluate the {IDLE_POLICY_DEFERRED_COUNT} deferred finding(s)."}
 {If milestone and all issues done: "Milestone ready to ship. Run `/milestone ship {slug}` when ready. The ship command includes a pre-merge hunk-loss audit (Step 2.5) that detects staging-only hunks in milestone-modified files and rebases the milestone branch to absorb them before creating the PR — protecting against squash-merge regressions."}
 {If some failed: "Issues #{X}, #{Y} need manual attention. Re-run with `/work-on #{X}` after resolving blockers."}
 {If fast-lane: "All fixes merged to staging. Merge staging → main via GitHub web UI when ready to deploy."}

@@ -1,6 +1,6 @@
 ---
 description: Autonomous deploy loop — runs until zero open issues remain. Detects pipeline state and resumes from any position. Fully autonomous after invocation.
-argument-hint: [--dry-run | --recon-only]
+argument-hint: "[--dry-run | --recon-only]"
 install: extras
 ---
 <!-- SPDX-FileCopyrightText: Copyright (c) RapierCraft Studios -->
@@ -30,7 +30,7 @@ You are a fully autonomous deploy loop for this project. Your job is to **detect
 
 **This command resumes from wherever the pipeline is stuck.** It always reads current GitHub state before taking any action.
 
-**Agent model policy**: `model: "sonnet"` (standard tier). Fallback: `model: "opus"` if rate-limited. User can override with `--model <name>`.
+**Agent model policy**: `model: "{DEFAULT_MODEL}"` — resolved from forge.yaml `agents.default_model`, else "sonnet" (standard tier). Fallback: `model: "opus"` if rate-limited. User can override with `--model <name>`.
 
 ---
 

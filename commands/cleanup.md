@@ -1,6 +1,6 @@
 ---
 description: Sweep closed issues for stale labels, missing workflow state, and Project board gaps — plus prune worktrees, branches, and milestones
-argument-hint: [labels | branches | milestones | board | orphans | all]
+argument-hint: "[labels | branches | milestones | board | orphans | all]"
 install: extras
 ---
 <!-- SPDX-FileCopyrightText: Copyright (c) RapierCraft Studios -->
@@ -50,7 +50,7 @@ All `{GH_REPO}`, `{GH_FLAG}`, `{REPO_PATH}`, `{STAGING_BRANCH}`, `{PROJECT_BOARD
 | `branches` | Prune worktrees and remote branches for merged PRs |
 | `milestones` | Report milestones with 0 open issues (advisory — never closes) |
 | `board` | Sync closed issues to Project board with correct terminal state |
-| `batch-p3` | Sweep: fold stale unbatched P3 review findings into domain-grouped batch issues |
+| `batch-p3` | Sweep: fold stale unbatched P3 review findings into surface-area-grouped batch issues (same file, then leaf directory) |
 | `all` | All of the above, in order |
 
 ---
@@ -68,6 +68,9 @@ gh issue list {GH_FLAG} --state closed --label "workflow:in-review" --limit 100 
 echo "=== Stale workflow:building ==="
 gh issue list {GH_FLAG} --state closed --label "workflow:building" --limit 100 --json number,title --jq '.[] | "#\(.number) — \(.title)"'
 
+echo "=== Stale workflow:awaiting-merge ==="
+gh issue list {GH_FLAG} --state closed --label "workflow:awaiting-merge" --limit 100 --json number,title --jq '.[] | "#\(.number) — \(.title)"'
+
 echo "=== Stale workflow:investigating ==="
 gh issue list {GH_FLAG} --state closed --label "workflow:investigating" --limit 100 --json number,title --jq '.[] | "#\(.number) — \(.title)"'
 
@@ -79,11 +82,11 @@ gh issue list {GH_FLAG} --state closed --label "needs-validation" --limit 100 --
 
 For each closed issue with a stale intermediate label:
 
-**Stale `workflow:in-review`, `workflow:building`** — these were merged but label wasn't updated:
+**Stale `workflow:in-review`, `workflow:building`, `workflow:awaiting-merge`** — these were merged but label wasn't updated:
 ```bash
 for NUM in {stale_issue_numbers}; do
   gh issue edit $NUM {GH_FLAG} --add-label "workflow:merged"
-  gh issue edit $NUM {GH_FLAG} --remove-label "workflow:in-review,workflow:building,needs-validation" 2>/dev/null || true
+  gh issue edit $NUM {GH_FLAG} --remove-label "workflow:in-review,workflow:building,workflow:awaiting-merge,needs-validation" 2>/dev/null || true
 done
 ```
 
@@ -223,7 +226,7 @@ For each orphaned issue found:
 ```bash
 gh issue close $NUM {GH_FLAG} --comment "Closed by cleanup — PR #$MERGED_PR was already merged."
 gh issue edit $NUM {GH_FLAG} --add-label "workflow:merged"
-gh issue edit $NUM {GH_FLAG} --remove-label "workflow:in-review" 2>/dev/null || true
+gh issue edit $NUM {GH_FLAG} --remove-label "workflow:in-review,workflow:awaiting-merge" 2>/dev/null || true
 ```
 
 Also check open issues with `workflow:building` — same pattern (search for merged PRs referencing them).
@@ -370,101 +373,132 @@ Do NOT call `gh api ... -X PATCH -f state=closed` on any milestone. This phase i
 ## Phase 4B: P3 Batch Sweep (if `batch-p3` or `all`)
 
 <!-- Added: forge#1333 -->
+<!-- Extended: forge#1828 — brought into lockstep with the P3 batching rule extension in orchestrate/phase-1-resolve.md and orchestrate/phase-4-execution.md (forge#1818): default-batchable eligibility, surface-area grouping, two-tier threshold, extended safety exclusions -->
 
-**Purpose**: Fold stale unbatched P3 review findings into domain-grouped batch issues. Reduces pipeline overhead from individual per-finding full-pipeline runs.
+**Purpose**: Fold stale unbatched P3 review findings into surface-area-grouped batch issues (same file first, leaf directory as broader fallback). Reduces pipeline overhead from individual per-finding full-pipeline runs. This sweep applies the same batching rule as `orchestrate/phase-1-resolve.md`'s "P3 Review-Finding Batching" section (the canonical definition) — this file is a periodic, cross-run pass over the same policy that Phase 1 (at `/orchestrate` start) and Phase 4C (mid-run cascade findings, `phase-4-execution.md`) already apply.
 
 **Skip if**: Input is not `batch-p3` and not `all`.
 
 ### Step 4B.1: Fetch open batchable P3 findings
 
+Eligibility is **default-batchable**: any open `review-finding` + `priority:P3` issue qualifies unless excluded below. The `<!-- FORGE:BATCHABLE -->` marker (still appended by `review-pr.md` at finding-creation time) is honored when present but is no longer required — matching `phase-1-resolve.md`'s eligibility rule. <!-- Changed: forge#1828 — marker was previously mandatory -->
+
 ```bash
-# Find all open P3 review findings that carry the FORGE:BATCHABLE annotation
-# and are not already members of a batch (no "batch" label)
+# Find all open, unbatched P3 review findings. Excludes findings already
+# claimed by a batch ("batch" label), and applies the same extended safety
+# exclusions (security, billing, anti-bot, auth) as the other two batching
+# sites, using the identical jq test() (Oniguruma) patterns so classification
+# cannot diverge between the three sweep locations. <!-- Changed: forge#1828 -->
 UNBATCHED_P3=$(gh issue list {GH_FLAG} \
   --state open \
   --label "review-finding,priority:P3" \
   --limit 500 \
   --json number,title,body,labels,createdAt \
-  --jq '.[] | select(.body | test("<!-- FORGE:BATCHABLE -->"))
-         | select(([.labels[].name] | any(. == "batch")) | not)
-         | select(([.labels[].name] | any(. == "security" or . == "billing")) | not)
-         | select((.title | test("security|billing|payment|stripe"; "i")) | not)')
+  --jq '.[] | select(([.labels[].name] | any(. == "batch")) | not)
+         | select((.title | test("security|billing|anti-bot|auth"; "i")) | not)
+         | select(.body | test("## Problem[\\s\\S]{0,500}(security|billing|anti-bot|auth)"; "i") | not)
+         | select(([.labels[].name] | any(. == "security" or . == "billing" or . == "anti-bot" or . == "auth")) | not)')
 
 echo "Unbatched batchable P3 findings: $(echo "$UNBATCHED_P3" | jq -s 'length')"
 ```
 
-### Step 4B.2: Group by domain
+### Step 4B.2: Group by surface area (same file, then leaf directory)
 
-For each finding, extract the domain from the first affected file path under `## Affected Files`:
+<!-- Changed: forge#1828 — was coarse domain grouping (`cut -d/ -f1,2,3`); now surface area, matching phase-1-resolve.md -->
+
+For each finding, extract the exact affected-file path under `## Affected Files` (primary grouping key) and its leaf directory — `dirname` of that path — as a broader fallback key:
 
 ```bash
-# Domain = top-level directory of the first affected file
-# e.g., "services/api/auth/login.py" → "services/api/auth"
-#        "commands/review-pr.md"     → "commands"
-# Exclude findings where the domain contains "billing" or "security"
+# Surface area = the exact affected file path listed first under "## Affected
+# Files" (primary key). Leaf directory = dirname of that file (fallback key).
+# e.g., "commands/orchestrate/phase-1-resolve.md" → file "commands/orchestrate/phase-1-resolve.md", leaf-dir "commands/orchestrate"
+#        "commands/review-pr.md"                   → file "commands/review-pr.md", leaf-dir "commands"
+# (security/billing/anti-bot/auth paths are already excluded in Step 4B.1)
 
-# Group findings by domain, track oldest creation timestamp per group
-declare -A DOMAIN_ISSUES
-declare -A DOMAIN_OLDEST
+# Group findings by file (primary) and by leaf directory (fallback), tracking
+# oldest creation timestamp per group
+declare -A FILE_ISSUES
+declare -A FILE_OLDEST
+declare -A DIR_ISSUES
+declare -A DIR_OLDEST
 
 echo "$UNBATCHED_P3" | jq -c '.[]' | while read -r issue; do
   NUM=$(echo "$issue" | jq -r '.number')
   CREATED=$(echo "$issue" | jq -r '.createdAt')
   BODY=$(echo "$issue" | jq -r '.body')
 
-  # Extract first affected file path from body
-  FIRST_FILE=$(echo "$BODY" | sed -n '/^## Affected Files/,/^## /p' | grep -oP '`[^`]+`' | head -1 | tr -d '`')
+  # Extract first affected file path from body. Uses POSIX ERE (`grep -oE`),
+  # NOT PCRE lookbehind (`grep -oP '(?<=...)'`) — the prior fallback line here
+  # used `-P`, which BSD grep on macOS does not support (forge#1767). This
+  # pattern matches the portable one already used in phase-4-execution.md's
+  # same-run surface-area batching. <!-- Changed: forge#1828 -->
+  FIRST_FILE=$(echo "$BODY" | sed -n '/^## Affected Files/,/^## /p' | grep -oE '`[^`]+`' | head -1 | tr -d '`')
   if [ -z "$FIRST_FILE" ]; then
-    FIRST_FILE=$(echo "$BODY" | grep -oP '(?<=\`)[^`]+\.(?:py|ts|tsx|js|go|rs|java|sh|md)(?=\`)' | head -1 || echo "unknown")
+    FIRST_FILE=$(echo "$BODY" | grep -oE '`[^`]+\.(py|tsx?|jsx?|sql|json|ya?ml|sh|md)`' | head -1 | tr -d '`')
   fi
-  DOMAIN=$(echo "$FIRST_FILE" | cut -d/ -f1,2,3 | sed 's|/[^/]*$||')
-  [ -z "$DOMAIN" ] && DOMAIN="general"
+  [ -z "$FIRST_FILE" ] && FIRST_FILE="unknown"
+  LEAF_DIR=$(dirname "$FIRST_FILE")
 
-  echo "${NUM}:${DOMAIN}:${CREATED}"
+  echo "${NUM}:${FIRST_FILE}:${LEAF_DIR}:${CREATED}"
 done
 ```
 
-### Step 4B.3: Apply batching threshold
+### Step 4B.3: Apply two-tier batching threshold
 
-For each domain group:
-- **Trigger**: 5+ unbatched batchable P3 findings in the domain, **OR** the oldest finding in the domain is > 72 hours old
-- **No trigger**: fewer than 5 findings AND none older than 72 hours → skip (no batch created)
+<!-- Changed: forge#1828 — added lower same-file tier, matching phase-1-resolve.md's two-tier threshold -->
+
+- **Same-file cluster** (primary, low threshold): **2+** unbatched batchable P3 findings share the exact same affected file → create a batch issue for that file cluster.
+- **Leaf-directory cluster** (broader fallback, existing threshold preserved): among findings NOT already claimed by a same-file cluster above, **5+** share the same leaf directory, **OR** the oldest finding in that leaf directory is > 72 hours old → create a batch issue for that leaf-directory cluster.
+- Form same-file clusters first; only findings left ungrouped after that pass are evaluated for leaf-directory clustering. A finding is claimed by at most one batch.
 
 ```bash
 NOW_EPOCH=$(date +%s)
 HOURS_72=$((72 * 3600))
+MAX_MEMBERS=8   # Changed: forge#1828 — was 10, matching phase-1-resolve.md's cap
 
-# For each domain group that meets the threshold, create a batch issue
-# (max 10 members per batch — if more, create multiple batches of ≤ 10 each)
+# Pass 1 — same-file clusters (2+ members). Claim member issue numbers into
+# CLAIMED_BY_FILE so Pass 2 (leaf-directory) skips them.
+CLAIMED_BY_FILE=""
+echo "$FILE_ISSUES" | while IFS=: read -r file issue_list; do
+  COUNT=$(echo "$issue_list" | tr ',' '\n' | grep -c .)
+  if [ "$COUNT" -ge 2 ]; then
+    echo "Batching $COUNT P3 findings — same-file cluster: ${file}"
+    # Create batch issue(s) in chunks of <= MAX_MEMBERS members (see Batch
+    # creation below). Record consumed issue numbers in CLAIMED_BY_FILE.
+  fi
+done
 
-# Exclude domains with "security" or "billing" in the domain path
-echo "$DOMAIN_ISSUES" | while IFS=: read -r domain issue_list; do
-  echo "$domain" | grep -qiE 'security|billing' && continue
+# Pass 2 — leaf-directory clusters (5+ members, or oldest > 72h), excluding
+# any issue already claimed by a same-file cluster in Pass 1
+echo "$DIR_ISSUES" | while IFS=: read -r dir issue_list; do
+  REMAINING=$(echo "$issue_list" | tr ',' '\n' | grep -vxF -f <(printf '%s\n' "$CLAIMED_BY_FILE" | tr ',' '\n') || true)
+  COUNT=$(echo "$REMAINING" | grep -c . || echo 0)
+  [ "$COUNT" -eq 0 ] && continue
 
-  COUNT=$(echo "$issue_list" | tr ',' '\n' | wc -l)
-  OLDEST_EPOCH=$(echo "$DOMAIN_OLDEST[$domain]" | date -d "$..." +%s 2>/dev/null || echo "$NOW_EPOCH")
+  OLDEST_EPOCH=$(echo "${DIR_OLDEST[$dir]}" | date -d "$..." +%s 2>/dev/null || echo "$NOW_EPOCH")
   AGE_SECS=$((NOW_EPOCH - OLDEST_EPOCH))
 
   if [ "$COUNT" -ge 5 ] || [ "$AGE_SECS" -ge "$HOURS_72" ]; then
-    echo "Batching $COUNT P3 findings in domain: ${domain}"
-    # Create batch issues (in chunks of ≤ 10)
-    # See orchestrate.md Phase 1 for the batch creation template
+    echo "Batching $COUNT P3 findings — leaf-directory cluster: ${dir}"
+    # Create batch issue(s) in chunks of <= MAX_MEMBERS members (see Batch
+    # creation below).
   fi
 done
 ```
 
-**Batch creation** uses the same template as `orchestrate.md Phase 1 → P3 Review-Finding Batching`. After creating the batch issue, add the `batch` label to each member issue to prevent re-batching on the next sweep.
+**Batch creation** uses the same template as `orchestrate.md Phase 1 → P3 Review-Finding Batching`, including its surface-area path sanitization (`tr -cd 'A-Za-z0-9._/-'` on the file/directory value before interpolating it into the batch issue's `--title`/`--body`). After creating the batch issue, add the `batch` label to each member issue to prevent re-batching on the next sweep.
 
 ### Step 4B.4: Report
 
 ```
 ## P3 Batch Sweep
 
-| Domain | Unbatched P3s | Threshold Met | Action |
-|--------|--------------|---------------|--------|
-| {domain} | {N} | ≥5 issues | Created batch #{NUM} ({M} members) |
-| {domain} | {N} | Oldest > 72h | Created batch #{NUM} ({M} members) |
-| {domain} | {N} | Below threshold | No action |
+| Surface Area | Unbatched P3s | Threshold Met | Action |
+|---------------|--------------|---------------|--------|
+| {file} | {N} | ≥2 same-file | Created batch #{NUM} ({M} members) |
+| {leaf-dir} | {N} | ≥5 issues | Created batch #{NUM} ({M} members) |
+| {leaf-dir} | {N} | Oldest > 72h | Created batch #{NUM} ({M} members) |
+| {leaf-dir} | {N} | Below threshold | No action |
 
 Total batch issues created: {N}
 Total P3 findings batched: {N}
@@ -550,8 +584,9 @@ fi
 {N} closed issues have no workflow label (closed outside pipeline — no action needed)
 
 ### P3 Batch Sweep Results
-| Domain | Unbatched P3s | Action |
-|--------|--------------|--------|
-| {domain} | {N} | Created batch #{NUM} with {M} members |
-| {domain} | {N} | Below threshold — no action (< 5 findings, none > 72h) |
+| Surface Area | Unbatched P3s | Action |
+|---------------|--------------|--------|
+| {file} | {N} | Created batch #{NUM} with {M} members (same-file, ≥2) |
+| {leaf-dir} | {N} | Created batch #{NUM} with {M} members (leaf-directory, ≥5 or >72h) |
+| {leaf-dir} | {N} | Below threshold — no action (< 5 findings, none > 72h, no same-file pair) |
 ```

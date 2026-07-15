@@ -16,7 +16,7 @@
  * Run with: node --test bin/tests/runner.test.mjs
  */
 
-import { describe, it, before, after } from "node:test";
+import { describe, it, before, after, mock } from "node:test";
 import assert from "node:assert/strict";
 import {
   mkdtempSync,
@@ -35,6 +35,7 @@ import {
   listCommands,
   loadCommandSpec,
   buildSystemPrompt,
+  buildCliSystemPrompt,
   buildUserMessage,
   TOOL_DEFINITIONS,
   truncateToolResult,
@@ -43,7 +44,11 @@ import {
   getToolHandlers,
   renderDryRun,
   renderSummaryCard,
+  resolveConfiguredDefaultModel,
   runCommand,
+  isClaudeCliAvailable,
+  resolveBackend,
+  runCliBackend,
 } from "../runner.mjs";
 
 // ---------------------------------------------------------------------------
@@ -879,7 +884,13 @@ describe("runCommand", () => {
     assert.match(lines[0], /dry-run/);
   });
 
-  it("throws NO_API_KEY for a live run with no key", async () => {
+  it("throws NO_API_KEY for a live run with no key on the api backend", async () => {
+    // backend is pinned to "api" explicitly (issue #2003): with the default
+    // "auto" ladder, this assertion would only hold on a machine without the
+    // `claude` CLI on PATH — auto-detection could otherwise pick the cli
+    // backend and never reach the NO_API_KEY guard at all. Pinning makes the
+    // test deterministic regardless of what's installed on the host running
+    // it, while still exercising exactly the guard this test is about.
     await assert.rejects(
       runCommand({
         commandsDir: COMMANDS_DIR,
@@ -888,6 +899,7 @@ describe("runCommand", () => {
         cwd: TMP,
         dryRun: false,
         apiKey: "",
+        backend: "api",
         logger: { log() {} },
       }),
       (err) => err.code === "NO_API_KEY",
@@ -931,5 +943,813 @@ describe("runCommand", () => {
     });
     assert.equal(result.status, "dry-run");
     assert.equal(result.model, "claude-test-model", "dry-run result must include model field");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// resolveConfiguredDefaultModel (issue #1851 — forge.yaml agents.default_model)
+// ---------------------------------------------------------------------------
+
+describe("resolveConfiguredDefaultModel", () => {
+  let modelTmp;
+
+  before(() => {
+    modelTmp = mkdtempSync(join(os.tmpdir(), "forgedock-model-cfg-"));
+  });
+
+  after(() => {
+    rmSync(modelTmp, { recursive: true, force: true });
+  });
+
+  it("returns null when forge.yaml does not exist", () => {
+    const dir = join(modelTmp, "no-forge-yaml");
+    mkdirSync(dir, { recursive: true });
+    assert.equal(resolveConfiguredDefaultModel(dir), null);
+  });
+
+  it("returns null when forge.yaml has no agents section", () => {
+    const dir = join(modelTmp, "no-agents-section");
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(join(dir, "forge.yaml"), 'project:\n  name: "Test"\n');
+    assert.equal(resolveConfiguredDefaultModel(dir), null);
+  });
+
+  it("resolves a short alias to its full model ID", () => {
+    const dir = join(modelTmp, "alias-opus");
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(
+      dir + "/forge.yaml",
+      'project:\n  name: "Test"\nagents:\n  default_model: "opus"\n',
+    );
+    assert.equal(resolveConfiguredDefaultModel(dir), "claude-opus-4-6");
+  });
+
+  it("resolves the sonnet alias to the runner's current default ID", () => {
+    const dir = join(modelTmp, "alias-sonnet");
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(
+      join(dir, "forge.yaml"),
+      "agents:\n  default_model: sonnet\n",
+    );
+    assert.equal(resolveConfiguredDefaultModel(dir), "claude-sonnet-5");
+  });
+
+  it("passes through an unrecognized value (e.g. a full model ID) unchanged", () => {
+    const dir = join(modelTmp, "full-id-passthrough");
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(
+      join(dir, "forge.yaml"),
+      'agents:\n  default_model: "claude-custom-future-model"\n',
+    );
+    assert.equal(
+      resolveConfiguredDefaultModel(dir),
+      "claude-custom-future-model",
+    );
+  });
+
+  it("fails soft (returns null, does not throw) when forge.yaml is unreadable", () => {
+    // A directory named "forge.yaml" makes readFileSync throw EISDIR.
+    const dir = join(modelTmp, "unreadable-forge-yaml");
+    mkdirSync(join(dir, "forge.yaml"), { recursive: true });
+    assert.doesNotThrow(() => resolveConfiguredDefaultModel(dir));
+    assert.equal(resolveConfiguredDefaultModel(dir), null);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// runCommand — model resolution precedence (issue #1851)
+// ---------------------------------------------------------------------------
+
+describe("runCommand model resolution precedence", () => {
+  let precTmp;
+  let originalForgedockModel;
+
+  before(() => {
+    precTmp = mkdtempSync(join(os.tmpdir(), "forgedock-model-prec-"));
+    originalForgedockModel = process.env.FORGEDOCK_MODEL;
+    delete process.env.FORGEDOCK_MODEL;
+  });
+
+  after(() => {
+    rmSync(precTmp, { recursive: true, force: true });
+    if (originalForgedockModel === undefined) {
+      delete process.env.FORGEDOCK_MODEL;
+    } else {
+      process.env.FORGEDOCK_MODEL = originalForgedockModel;
+    }
+  });
+
+  it("uses forge.yaml agents.default_model when FORGEDOCK_MODEL and opts.model are unset", async () => {
+    const dir = join(precTmp, "cwd-with-forge-yaml");
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(join(dir, "forge.yaml"), 'agents:\n  default_model: "opus"\n');
+
+    const result = await runCommand({
+      commandsDir: COMMANDS_DIR,
+      commandName: "work-on",
+      args: ["1851"],
+      cwd: dir,
+      dryRun: true,
+      logger: { log() {} },
+    });
+    assert.equal(result.model, "claude-opus-4-6");
+  });
+
+  it("FORGEDOCK_MODEL env var still takes precedence over forge.yaml", async () => {
+    const dir = join(precTmp, "cwd-env-wins");
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(join(dir, "forge.yaml"), 'agents:\n  default_model: "opus"\n');
+    process.env.FORGEDOCK_MODEL = "claude-env-override";
+
+    try {
+      const result = await runCommand({
+        commandsDir: COMMANDS_DIR,
+        commandName: "work-on",
+        args: ["1851"],
+        cwd: dir,
+        dryRun: true,
+        logger: { log() {} },
+      });
+      assert.equal(result.model, "claude-env-override");
+    } finally {
+      delete process.env.FORGEDOCK_MODEL;
+    }
+  });
+
+  it("opts.model (the --model flag) still wins over forge.yaml", async () => {
+    const dir = join(precTmp, "cwd-flag-wins");
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(join(dir, "forge.yaml"), 'agents:\n  default_model: "opus"\n');
+
+    const result = await runCommand({
+      commandsDir: COMMANDS_DIR,
+      commandName: "work-on",
+      args: ["1851"],
+      cwd: dir,
+      dryRun: true,
+      model: "claude-explicit-flag",
+      logger: { log() {} },
+    });
+    assert.equal(result.model, "claude-explicit-flag");
+  });
+
+  it("falls back to the hardcoded default when forge.yaml has no agents section", async () => {
+    const dir = join(precTmp, "cwd-hardcoded-fallback");
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(join(dir, "forge.yaml"), 'project:\n  name: "Test"\n');
+
+    const result = await runCommand({
+      commandsDir: COMMANDS_DIR,
+      commandName: "work-on",
+      args: ["1851"],
+      cwd: dir,
+      dryRun: true,
+      logger: { log() {} },
+    });
+    assert.equal(result.model, "claude-sonnet-5");
+  });
+
+  it("falls back to the hardcoded default when forge.yaml does not exist", async () => {
+    const dir = join(precTmp, "cwd-no-forge-yaml");
+    mkdirSync(dir, { recursive: true });
+
+    const result = await runCommand({
+      commandsDir: COMMANDS_DIR,
+      commandName: "work-on",
+      args: ["1851"],
+      cwd: dir,
+      dryRun: true,
+      logger: { log() {} },
+    });
+    assert.equal(result.model, "claude-sonnet-5");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// runCliBackend — argv passthrough is injection-safe (issue #2003)
+// ---------------------------------------------------------------------------
+
+describe("runCliBackend argv safety", () => {
+  it("passes userMessage as a literal, unparsed argv element — no shell metacharacter execution", () => {
+    // Regression test for a shell-injection finding caught in review: an
+    // earlier implementation built a shell command *string* and ran it via
+    // spawnSync(command, { shell: true }) with hand-rolled quoting that did
+    // NOT neutralize $(...) / backticks / etc inside double quotes. The fix
+    // is spawnSync(bin, [...argv]) with NO shell option — argv elements are
+    // delivered to the child process as discrete, unparsed tokens, never
+    // interpreted as shell syntax.
+    //
+    // Uses the `bin` test seam (defaults to "claude" in production; not
+    // overridable outside tests) pointed at the real `node` binary
+    // (process.execPath — a genuine, already-resolvable executable, so this
+    // sidesteps the platform-specific PATH/`.cmd`-shim resolution quirks
+    // that make shimming a fake "claude" on PATH unreliable to set up from
+    // within the same running process on Windows).
+    //
+    // node's own CLI parser rejects the fixed 3rd argv element
+    // ("--dangerously-skip-permissions") as an unrecognized flag and exits
+    // non-zero — which is itself strong affirmative evidence of correct argv
+    // separation: the parser named that exact 3rd token as the "bad option"
+    // *distinct* from the 2nd (message) token, proving all three array
+    // elements arrived as separate, unmangled OS-level argv entries rather
+    // than being concatenated/re-tokenized by an intermediate shell. The
+    // decisive assertion, though, is simpler and platform-independent: the
+    // injection payload's side effect (creating a marker file via $(...))
+    // must never occur, because runCliBackend never hands the message to a
+    // shell in the first place.
+    const shimDir = mkdtempSync(join(os.tmpdir(), "forgedock-cli-injection-"));
+    const injectionMarkerPath = join(shimDir, "INJECTED");
+    const maliciousMessage =
+      `Execute: /work-on 2003; $(touch ${injectionMarkerPath.replace(/\\/g, "/")}) ` +
+      `\`touch ${injectionMarkerPath.replace(/\\/g, "/")}\` && echo pwned`;
+
+    const logLines = [];
+    let thrown;
+    try {
+      runCliBackend({
+        spec: loadCommandSpec(COMMANDS_DIR, "work-on"),
+        userMessage: maliciousMessage,
+        args: ["2003"],
+        cwd: shimDir,
+        logger: { log: (s) => logLines.push(s) },
+        bin: process.execPath, // absolute path to the running `node` binary
+      });
+    } catch (err) {
+      thrown = err;
+    } finally {
+      rmSync(shimDir, { recursive: true, force: true });
+    }
+
+    // node's CLI parser rejects the 3rd argv element and exits non-zero, so
+    // runCliBackend's `result.status !== 0` branch throws CLI_BACKEND_FAILED.
+    assert.ok(thrown, "node's own flag validation should reject this argv and cause a non-zero exit");
+    assert.equal(thrown.code, "CLI_BACKEND_FAILED");
+
+    // The core security property: shell metacharacters in userMessage were
+    // NEVER executed — no shell ever parsed the string, so $(...) never ran.
+    assert.ok(
+      !existsSync(injectionMarkerPath),
+      "shell metacharacters in userMessage must NOT be executed (injection marker file must not exist)",
+    );
+
+    // Corroborating evidence: node's own error output names the 3rd argv
+    // element as a distinct, unmangled token — proving argv separation was
+    // preserved end-to-end (no shell re-tokenized/concatenated the array).
+    const output = logLines.join("\n");
+    assert.match(output, /--dangerously-skip-permissions/);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// runCliBackend — content passthrough (review finding BUG-3, issue #2029;
+// fixed for #2019)
+//
+// The injection-safety test above proves shell metacharacters in
+// `userMessage` are never *executed*, but it never asserts on the actual
+// *content* the CLI binary receives. That gap is precisely why BUG-1 (#2019
+// — the CLI backend silently dropped `systemPrompt`/`spec.content`, so the
+// spawned `claude` process never saw the command specification at all) went
+// uncaught by an otherwise-strong suite. This test closes that gap by
+// capturing the literal argv delivered to the spawned binary and asserting
+// on it directly, using a recording stub binary via the `bin` test seam
+// (same POSIX-shebang stub-binary pattern already used in
+// bin/tests/router.test.mjs — CI runs ubuntu-only, see .github/workflows/ci.yml).
+//
+// UPDATED for #2019: `runCliBackend` now receives `systemPrompt` and forwards
+// it to the CLI via `--append-system-prompt-file <path>` (a temp file, not an
+// inline argv string — see the SYSTEM PROMPT block comment above
+// `runCliBackend` in bin/runner.mjs for why). This test now asserts that flag
+// is present with a path whose file contents include the spec content, and
+// that the temp directory is cleaned up afterward.
+// ---------------------------------------------------------------------------
+
+describe("runCliBackend content passthrough (issue #2029, updated for #2019)", () => {
+  it("forwards systemPrompt to the spawned CLI binary via --append-system-prompt-file", () => {
+    // The stub relies on a POSIX shebang; CI runs ubuntu-only (see
+    // .github/workflows/ci.yml), matching the existing precedent in
+    // bin/tests/router.test.mjs. Skip on other platforms rather than fail.
+    if (process.platform === "win32") {
+      return;
+    }
+
+    const shimDir = mkdtempSync(join(os.tmpdir(), "forgedock-cli-argv-capture-"));
+    const captureFile = join(shimDir, "captured-argv.json");
+    const recorderPath = join(shimDir, "record-argv.mjs");
+    const fakeClaudePath = join(shimDir, "fake-claude");
+
+    // The recorder writes its own received argv (everything after the
+    // recorder script path) to captureFile as JSON — this is what actually
+    // reached the "CLI".
+    writeFileSync(
+      recorderPath,
+      [
+        'import { writeFileSync } from "node:fs";',
+        "writeFileSync(process.argv[2], JSON.stringify(process.argv.slice(3)));",
+      ].join("\n") + "\n",
+      "utf-8",
+    );
+
+    // The stub binary is what `runCliBackend` actually spawns (via the `bin`
+    // seam). It re-execs node against the recorder, passing its own argv
+    // through untouched via "$@" — this avoids node's own -p/--print flag
+    // parsing (which would otherwise swallow "--print" as node's own CLI
+    // flag, as happens in the sibling injection-safety test above).
+    writeFileSync(
+      fakeClaudePath,
+      ["#!/bin/sh", `exec node "${recorderPath}" "${captureFile}" "$@"`, ""].join("\n"),
+      { mode: 0o755 },
+    );
+
+    const message = "Execute: /work-on 2003";
+    const logLines = [];
+    const spec = loadCommandSpec(COMMANDS_DIR, "work-on");
+    const systemPrompt = buildCliSystemPrompt(spec);
+    let capturedSystemPromptPath;
+
+    // try/finally so shimDir is always cleaned up, even if an assertion
+    // below throws — matches the cleanup discipline already established by
+    // the "runCliBackend argv safety" test directly above this one.
+    try {
+      const result = runCliBackend({
+        spec,
+        userMessage: message,
+        systemPrompt,
+        args: ["2003"],
+        cwd: shimDir,
+        logger: { log: (s) => logLines.push(s) },
+        bin: fakeClaudePath,
+      });
+
+      assert.equal(result.status, "complete");
+      assert.ok(existsSync(captureFile), "the stub binary must have run and recorded its argv");
+
+      const capturedArgv = JSON.parse(readFileSync(captureFile, "utf-8"));
+
+      // The exact content reaching the CLI invocation now includes the
+      // system-prompt file flag — this is the fix for BUG-1 / #2019.
+      assert.deepStrictEqual(capturedArgv.slice(0, 2), ["--print", message]);
+      assert.equal(capturedArgv[2], "--append-system-prompt-file");
+      capturedSystemPromptPath = capturedArgv[3];
+      assert.ok(
+        typeof capturedSystemPromptPath === "string" && capturedSystemPromptPath.length > 0,
+        "argv must include a system-prompt file path",
+      );
+      assert.equal(capturedArgv[4], "--dangerously-skip-permissions");
+
+      // The file must exist AT THE TIME the CLI process ran (captured via the
+      // recorder before this test's own cleanup) and contain the command
+      // spec content — proving the spec is no longer dropped.
+      assert.ok(existsSync(capturedSystemPromptPath), "system-prompt temp file must exist while the CLI runs");
+      const fileContents = readFileSync(capturedSystemPromptPath, "utf-8");
+      assert.match(fileContents, /COMMAND SPECIFICATION/);
+      assert.match(fileContents, /# work-on spec/); // fixture spec content from COMMANDS_DIR
+    } finally {
+      rmSync(shimDir, { recursive: true, force: true });
+    }
+
+    // Cleanup assertion: runCliBackend's own temp dir (parent of the
+    // captured file, NOT shimDir above) must be removed after the call
+    // returns — the finally block inside runCliBackend runs before this
+    // test's try/finally above even begins its own cleanup.
+    assert.ok(
+      !existsSync(capturedSystemPromptPath),
+      "runCliBackend must clean up its own system-prompt temp file after the call completes",
+    );
+  });
+
+  it("omits --append-system-prompt-file entirely when no systemPrompt is supplied (back-compat)", () => {
+    if (process.platform === "win32") {
+      return;
+    }
+
+    const shimDir = mkdtempSync(join(os.tmpdir(), "forgedock-cli-argv-capture-nosysprompt-"));
+    const captureFile = join(shimDir, "captured-argv.json");
+    const recorderPath = join(shimDir, "record-argv.mjs");
+    const fakeClaudePath = join(shimDir, "fake-claude");
+
+    writeFileSync(
+      recorderPath,
+      [
+        'import { writeFileSync } from "node:fs";',
+        "writeFileSync(process.argv[2], JSON.stringify(process.argv.slice(3)));",
+      ].join("\n") + "\n",
+      "utf-8",
+    );
+    writeFileSync(
+      fakeClaudePath,
+      ["#!/bin/sh", `exec node "${recorderPath}" "${captureFile}" "$@"`, ""].join("\n"),
+      { mode: 0o755 },
+    );
+
+    const message = "Execute: /work-on 2003";
+
+    try {
+      const result = runCliBackend({
+        spec: loadCommandSpec(COMMANDS_DIR, "work-on"),
+        userMessage: message,
+        args: ["2003"],
+        cwd: shimDir,
+        logger: { log: () => {} },
+        bin: fakeClaudePath,
+      });
+
+      assert.equal(result.status, "complete");
+      const capturedArgv = JSON.parse(readFileSync(captureFile, "utf-8"));
+      assert.deepStrictEqual(capturedArgv, ["--print", message, "--dangerously-skip-permissions"]);
+    } finally {
+      rmSync(shimDir, { recursive: true, force: true });
+    }
+  });
+
+  it("cleans up the system-prompt temp file when the CLI invocation fails (non-zero exit)", () => {
+    if (process.platform === "win32") {
+      return;
+    }
+
+    const shimDir = mkdtempSync(join(os.tmpdir(), "forgedock-cli-argv-capture-fail-"));
+    const captureFile = join(shimDir, "captured-argv.json");
+    const recorderPath = join(shimDir, "record-argv.mjs");
+    const fakeClaudePath = join(shimDir, "fake-claude-fail");
+
+    // Recorder captures argv AND always exits non-zero, simulating a failed
+    // CLI invocation — this exercises the throw path inside runCliBackend's
+    // try/finally, proving the temp file is still cleaned up.
+    writeFileSync(
+      recorderPath,
+      [
+        'import { writeFileSync } from "node:fs";',
+        "writeFileSync(process.argv[2], JSON.stringify(process.argv.slice(3)));",
+        "process.exit(1);",
+      ].join("\n") + "\n",
+      "utf-8",
+    );
+    writeFileSync(
+      fakeClaudePath,
+      ["#!/bin/sh", `exec node "${recorderPath}" "${captureFile}" "$@"`, ""].join("\n"),
+      { mode: 0o755 },
+    );
+
+    const spec = loadCommandSpec(COMMANDS_DIR, "work-on");
+    const systemPrompt = buildCliSystemPrompt(spec);
+    let capturedSystemPromptPath;
+
+    try {
+      assert.throws(() => {
+        runCliBackend({
+          spec,
+          userMessage: "Execute: /work-on 2003",
+          systemPrompt,
+          args: ["2003"],
+          cwd: shimDir,
+          logger: { log: () => {} },
+          bin: fakeClaudePath,
+        });
+      }, /CLI_BACKEND_FAILED|exited with status/);
+
+      const capturedArgv = JSON.parse(readFileSync(captureFile, "utf-8"));
+      capturedSystemPromptPath = capturedArgv[3];
+      assert.ok(typeof capturedSystemPromptPath === "string" && capturedSystemPromptPath.length > 0);
+    } finally {
+      rmSync(shimDir, { recursive: true, force: true });
+    }
+
+    assert.ok(
+      !existsSync(capturedSystemPromptPath),
+      "temp file must be cleaned up even when the CLI invocation throws (non-zero exit)",
+    );
+  });
+});
+
+// ---------------------------------------------------------------------------
+// buildCliSystemPrompt (issue #2019)
+// ---------------------------------------------------------------------------
+
+describe("buildCliSystemPrompt", () => {
+  it("includes the command spec content", () => {
+    const spec = loadCommandSpec(COMMANDS_DIR, "work-on");
+    const prompt = buildCliSystemPrompt(spec);
+    assert.match(prompt, /COMMAND SPECIFICATION \(commands\/work-on\.md\)/);
+    assert.match(prompt, /# work-on spec/);
+    assert.match(prompt, /Do the work\./);
+  });
+
+  it("does NOT claim the API backend's custom 3-tool loop", () => {
+    const spec = loadCommandSpec(COMMANDS_DIR, "work-on");
+    const prompt = buildCliSystemPrompt(spec);
+    // buildSystemPrompt() (API backend) says this; buildCliSystemPrompt()
+    // (CLI backend) must not, since the CLI has its own native tools.
+    assert.ok(
+      !prompt.includes("You have three tools to do real work"),
+      "CLI system prompt must not claim the API-only read_file/write_file/run_bash loop",
+    );
+    assert.ok(!prompt.includes("read_file: read a file from disk"));
+  });
+
+  it("differs from buildSystemPrompt's API-flavored output for the same spec", () => {
+    const spec = loadCommandSpec(COMMANDS_DIR, "work-on");
+    const apiPrompt = buildSystemPrompt(spec, { repoRoot: "/tmp/repo" });
+    const cliPrompt = buildCliSystemPrompt(spec);
+    assert.notEqual(apiPrompt, cliPrompt);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Backend selection — isClaudeCliAvailable / resolveBackend (issue #2003)
+// ---------------------------------------------------------------------------
+
+describe("isClaudeCliAvailable", () => {
+  it("returns a boolean and never throws, regardless of whether `claude` is installed", () => {
+    // Deliberately does not assert true/false — whether `claude` happens to be
+    // on PATH is host-dependent. What matters (and is the whole point of the
+    // function) is that it never throws and always resolves to a boolean.
+    let result;
+    assert.doesNotThrow(() => {
+      result = isClaudeCliAvailable(TMP);
+    });
+    assert.equal(typeof result, "boolean");
+  });
+
+  // Per-cwd memoization (issue #2011): resolveBackend()/runCommand() call
+  // isClaudeCliAvailable() unconditionally on every "auto"-backend call,
+  // including every --dry-run. Without caching, a process invoking
+  // runCommand() repeatedly (e.g. bin/batch-runner.mjs) re-spawns
+  // `claude --version` on every single call. These tests inject a fake
+  // `execImpl` via the test-seam second parameter (rather than mocking
+  // `node:child_process`'s `execSync` export directly — built-in ESM modules
+  // export non-configurable bindings that `node:test`'s `mock.method` cannot
+  // redefine) to assert the probe is only actually invoked once per distinct
+  // cwd.
+  it("only spawns the probe once per cwd across repeated calls", () => {
+    const execImpl = mock.fn(() => "1.2.3");
+    const cwd = mkdtempSync(join(os.tmpdir(), "forgedock-cli-cache-"));
+    try {
+      const first = isClaudeCliAvailable(cwd, { execImpl });
+      const second = isClaudeCliAvailable(cwd, { execImpl });
+      const third = isClaudeCliAvailable(cwd, { execImpl });
+      assert.equal(first, true);
+      assert.equal(second, true);
+      assert.equal(third, true);
+      assert.equal(
+        execImpl.mock.callCount(),
+        1,
+        "execImpl should only be invoked once for repeated calls with the same cwd",
+      );
+    } finally {
+      rmSync(cwd, { recursive: true, force: true });
+    }
+  });
+
+  it("caches a negative (not-available) result too, not just a positive one", () => {
+    const execImpl = mock.fn(() => {
+      throw new Error("ENOENT: claude not found");
+    });
+    const cwd = mkdtempSync(join(os.tmpdir(), "forgedock-cli-cache-neg-"));
+    try {
+      const first = isClaudeCliAvailable(cwd, { execImpl });
+      const second = isClaudeCliAvailable(cwd, { execImpl });
+      assert.equal(first, false);
+      assert.equal(second, false);
+      assert.equal(
+        execImpl.mock.callCount(),
+        1,
+        "a cached 'not available' result must not re-probe on subsequent calls",
+      );
+    } finally {
+      rmSync(cwd, { recursive: true, force: true });
+    }
+  });
+
+  it("probes independently for different cwd values", () => {
+    const execImpl = mock.fn(() => "1.2.3");
+    const cwdA = mkdtempSync(join(os.tmpdir(), "forgedock-cli-cache-a-"));
+    const cwdB = mkdtempSync(join(os.tmpdir(), "forgedock-cli-cache-b-"));
+    try {
+      isClaudeCliAvailable(cwdA, { execImpl });
+      isClaudeCliAvailable(cwdB, { execImpl });
+      assert.equal(
+        execImpl.mock.callCount(),
+        2,
+        "distinct cwd values must each be probed independently, not share a cache entry",
+      );
+    } finally {
+      rmSync(cwdA, { recursive: true, force: true });
+      rmSync(cwdB, { recursive: true, force: true });
+    }
+  });
+});
+
+describe("resolveBackend", () => {
+  it("returns 'cli' immediately when explicitly requested, without probing", () => {
+    assert.equal(resolveBackend({ requested: "cli", cwd: TMP }), "cli");
+  });
+
+  it("returns 'api' immediately when explicitly requested, without probing", () => {
+    assert.equal(resolveBackend({ requested: "api", cwd: TMP }), "api");
+  });
+
+  it("'auto' resolves to either 'cli' or 'api' based on CLI detection (never throws)", () => {
+    let result;
+    assert.doesNotThrow(() => {
+      result = resolveBackend({ requested: "auto", cwd: TMP });
+    });
+    assert.ok(result === "cli" || result === "api");
+  });
+
+  it("defaults to 'auto' behavior when requested is omitted", () => {
+    let result;
+    assert.doesNotThrow(() => {
+      result = resolveBackend({ cwd: TMP });
+    });
+    assert.ok(result === "cli" || result === "api");
+  });
+
+  it("throws a descriptive error for an unrecognized backend value", () => {
+    assert.throws(
+      () => resolveBackend({ requested: "not-a-real-backend", cwd: TMP }),
+      /Invalid backend "not-a-real-backend"/,
+    );
+  });
+});
+
+// ---------------------------------------------------------------------------
+// runCommand — backend plumbing (issue #2003)
+// ---------------------------------------------------------------------------
+
+describe("runCommand backend resolution", () => {
+  it("dry-run result includes a resolved backend field ('cli' or 'api')", async () => {
+    const result = await runCommand({
+      commandsDir: COMMANDS_DIR,
+      commandName: "work-on",
+      args: ["2003"],
+      cwd: TMP,
+      dryRun: true,
+      logger: { log() {} },
+    });
+    assert.equal(result.status, "dry-run");
+    assert.ok(result.backend === "cli" || result.backend === "api");
+  });
+
+  it("dry-run output documents which backend would run", async () => {
+    const lines = [];
+    await runCommand({
+      commandsDir: COMMANDS_DIR,
+      commandName: "work-on",
+      args: ["2003"],
+      cwd: TMP,
+      dryRun: true,
+      backend: "api",
+      logger: { log: (s) => lines.push(s) },
+    });
+    assert.match(lines[0], /backend:\s+api/);
+  });
+
+  it("dry-run output reflects an explicit --backend cli override", async () => {
+    const lines = [];
+    await runCommand({
+      commandsDir: COMMANDS_DIR,
+      commandName: "work-on",
+      args: ["2003"],
+      cwd: TMP,
+      dryRun: true,
+      backend: "cli",
+      logger: { log: (s) => lines.push(s) },
+    });
+    assert.match(lines[0], /backend:\s+cli/);
+  });
+
+  it("dry-run rejects an invalid backend value instead of silently ignoring it", async () => {
+    await assert.rejects(
+      runCommand({
+        commandsDir: COMMANDS_DIR,
+        commandName: "work-on",
+        args: ["2003"],
+        cwd: TMP,
+        dryRun: true,
+        backend: "not-a-real-backend",
+        logger: { log() {} },
+      }),
+      /Invalid backend/,
+    );
+  });
+
+  it("NO_API_KEY is never thrown when backend is explicitly 'cli', even with no key set", async () => {
+    // This exercises the core acceptance criterion: the cli backend must not
+    // require ANTHROPIC_API_KEY. runCommand's control flow returns from
+    // runCliBackend() before the `if (!apiKey)` guard is ever reached when
+    // resolvedBackend === "cli", so no NO_API_KEY error is reachable on this
+    // path regardless of whether the `claude` CLI is actually installed.
+    //
+    // A tiny FORGEDOCK_CLI_TIMEOUT_MS bounds this test to a near-instant
+    // timeout (real `claude --print` startup takes far longer than a few
+    // milliseconds) so the test suite never spends real wall-clock time —
+    // or a real Claude Code session — actually running the CLI. The only
+    // assertion that matters is the *absence* of NO_API_KEY; a timeout or a
+    // "claude not found" failure are both acceptable, expected outcomes here.
+    const originalTimeout = process.env.FORGEDOCK_CLI_TIMEOUT_MS;
+    process.env.FORGEDOCK_CLI_TIMEOUT_MS = "1";
+    try {
+      await runCommand({
+        commandsDir: COMMANDS_DIR,
+        commandName: "work-on",
+        args: ["2003"],
+        cwd: TMP,
+        dryRun: false,
+        apiKey: "",
+        backend: "cli",
+        logger: { log() {} },
+      });
+    } catch (err) {
+      assert.notEqual(err.code, "NO_API_KEY");
+    } finally {
+      if (originalTimeout === undefined) {
+        delete process.env.FORGEDOCK_CLI_TIMEOUT_MS;
+      } else {
+        process.env.FORGEDOCK_CLI_TIMEOUT_MS = originalTimeout;
+      }
+    }
+  });
+
+  // silent-flag-drop-on-backend-switch (issue #2010): model/maxIterations
+  // only apply to the api backend. When the cli backend is resolved, any
+  // explicitly-supplied model/maxIterations must be surfaced via a warning
+  // rather than dropped with no diagnostic. The warning is logged
+  // synchronously before runCliBackend() is invoked, so it is captured
+  // regardless of whether the subsequent (intentionally near-instant,
+  // FORGEDOCK_CLI_TIMEOUT_MS-bounded) cli invocation succeeds or throws.
+  it("warns when --model and --max-iterations are explicitly supplied but backend resolves to cli", async () => {
+    const originalTimeout = process.env.FORGEDOCK_CLI_TIMEOUT_MS;
+    process.env.FORGEDOCK_CLI_TIMEOUT_MS = "1";
+    const lines = [];
+    try {
+      await runCommand({
+        commandsDir: COMMANDS_DIR,
+        commandName: "work-on",
+        args: ["2003"],
+        cwd: TMP,
+        dryRun: false,
+        apiKey: "",
+        backend: "cli",
+        model: "some-model",
+        maxIterations: 5,
+        logger: { log: (s) => lines.push(s) },
+      });
+    } catch {
+      // Expected — the bounded timeout/missing-CLI failure is not under test here.
+    } finally {
+      if (originalTimeout === undefined) {
+        delete process.env.FORGEDOCK_CLI_TIMEOUT_MS;
+      } else {
+        process.env.FORGEDOCK_CLI_TIMEOUT_MS = originalTimeout;
+      }
+    }
+    const warning = lines.find((l) => /ignored on the cli backend/.test(l));
+    assert.ok(warning, "expected a warning about ignored options to be logged");
+    assert.match(warning, /--model/);
+    assert.match(warning, /--maxIterations/);
+  });
+
+  it("does not warn when model/maxIterations are only default-computed and backend resolves to cli", async () => {
+    const originalTimeout = process.env.FORGEDOCK_CLI_TIMEOUT_MS;
+    process.env.FORGEDOCK_CLI_TIMEOUT_MS = "1";
+    const lines = [];
+    try {
+      await runCommand({
+        commandsDir: COMMANDS_DIR,
+        commandName: "work-on",
+        args: ["2003"],
+        cwd: TMP,
+        dryRun: false,
+        apiKey: "",
+        backend: "cli",
+        logger: { log: (s) => lines.push(s) },
+      });
+    } catch {
+      // Expected — the bounded timeout/missing-CLI failure is not under test here.
+    } finally {
+      if (originalTimeout === undefined) {
+        delete process.env.FORGEDOCK_CLI_TIMEOUT_MS;
+      } else {
+        process.env.FORGEDOCK_CLI_TIMEOUT_MS = originalTimeout;
+      }
+    }
+    const warning = lines.find((l) => /ignored on the cli backend/.test(l));
+    assert.equal(warning, undefined, "no warning expected when model/maxIterations were not explicitly supplied");
+  });
+
+  it("does not warn about ignored model/maxIterations when backend resolves to api", async () => {
+    const lines = [];
+    await runCommand({
+      commandsDir: COMMANDS_DIR,
+      commandName: "work-on",
+      args: ["2003"],
+      cwd: TMP,
+      dryRun: true,
+      backend: "api",
+      model: "some-model",
+      maxIterations: 5,
+      logger: { log: (s) => lines.push(s) },
+    });
+    const warning = lines.find((l) => /ignored on the cli backend/.test(l));
+    assert.equal(warning, undefined, "no cli-ignored-options warning expected on the api backend");
   });
 });

@@ -1,6 +1,6 @@
 ---
 description: Context-aware PR review — analyzes what the PR touches, spawns domain-specific agents with project conventions. Supports staging reviews.
-argument-hint: [PR number, URL, "open", or "staging" for feature→main review]
+argument-hint: "[PR number, URL, \"open\", or \"staging\" for feature→main review]"
 allowed-tools: Task, Bash, Read, Grep, Glob, WebFetch, Skill
 ---
 <!-- SPDX-FileCopyrightText: Copyright (c) RapierCraft Studios -->
@@ -13,7 +13,7 @@ allowed-tools: Task, Bash, Read, Grep, Glob, WebFetch, Skill
 **NEVER use plan mode (EnterPlanMode)** during review — it breaks execution context.
 **NEVER use the Agent tool** — review-pr dispatches domain agents via `Task` tool only. `Agent` spawns opaque subprocesses that bypass the allowed-tools constraint and cannot post structured findings to the PR. Always use `Task(...)` for review agent launch (Phase 3C).
 
-**Agent model policy**: `model: "sonnet"` (standard tier); the General Security & Quality reviewer spawned as always-runs Task uses `effort: xhigh` (deep tier). Fallback: `model: "opus"` if rate-limited. User can override with `--model <name>`. Pass model and effort explicitly in every `Task` tool call. Feature gate: pass `effort` only on Claude Code >= 2.1.154.
+**Agent model policy**: `model: "{DEFAULT_MODEL}"` — resolved from forge.yaml `agents.default_model`, else "sonnet" (standard tier); the General Security & Quality reviewer spawned as always-runs Task uses `effort: xhigh` (deep tier). Fallback: `model: "opus"` if rate-limited. User can override with `--model <name>`. Pass model and effort explicitly in every `Task` tool call. Feature gate: pass `effort` only on Claude Code >= 2.1.154. **The domain-review Task agents this file dispatches** (per `commands/review-pr-agents/*.md`) resolve via `model: "{SUBAGENT_MODEL}"` — forge.yaml `agents.subagent_model`, else `agents.default_model`, else `"sonnet"` — not `{DEFAULT_MODEL}` directly.
 
 <!-- FORGE:SPEC_LOADED — review-pr.md loaded and active. Agent is bound by this spec. -->
 
@@ -48,11 +48,11 @@ This is the **orchestrator**. It routes to the right review mode, runs automated
 
 | File | What | How to invoke |
 |------|------|---------------|
-| `$FORGE_HOME/commands/review-pr-agents/protocols.md` | Shared review protocols (Evidence-Based + Structured Findings + Input Scoping) | `Read` tool during Phase 3C (always) |
-| `$FORGE_HOME/commands/review-pr-agents/<persona>.md` | Per-persona agent prompt templates (9 files) | `Read` tool during Phase 3C (selected agents only) |
-| `$FORGE_HOME/commands/review-pr-staging.md` | Full staging→main review pipeline | `Skill("review-pr-staging", ...)` during Phase 0 |
+| `${FORGE_HOME:-$REPO_PATH}/commands/review-pr-agents/protocols.md` | Shared review protocols (Evidence-Based + Structured Findings + Input Scoping) | `Read` tool during Phase 3C (always) |
+| `${FORGE_HOME:-$REPO_PATH}/commands/review-pr-agents/<persona>.md` | Per-persona agent prompt templates (9 files) | `Read` tool during Phase 3C (selected agents only) |
+| `${FORGE_HOME:-$REPO_PATH}/commands/review-pr-staging.md` | Full staging→main review pipeline | `Skill("review-pr-staging", ...)` during Phase 0 |
 
-`$FORGE_HOME` defaults to `~/.claude` (the directory where `npx forgedock` symlinks commands). Override by setting `FORGE_HOME` in your environment.
+`$FORGE_HOME` defaults to `~/.claude` (the directory where `npx forgedock` symlinks commands). When unset, every resolution in this file falls back to `$REPO_PATH` (the repo root, from `forge.yaml → paths.root`) rather than degrading to a bare root-anchored path — see the `TEMPLATE_BASE` tiered guard in Phase 3C and the verification-script resolution in Step 2.5B for the actual fallback chains. Never resolve a missing file via a filesystem-wide `find` — see the guardrail in `commands/review-pr-agents/protocols.md`.
 
 **Invocation flow:**
 ```
@@ -580,13 +580,27 @@ Map each changed file to its activation requirements.
 
 ### Step 2.5B: Run Verification
 
-For each changed file, execute the relevant checks using the standalone verification scripts in `$FORGE_HOME/scripts/`. These scripts can also be run independently outside the review context (e.g., from `/quality-gate` or `/work-on` builder steps).
+For each changed file, execute the relevant checks using the standalone verification scripts in `${FORGE_HOME:-$SCRIPTS_HOME}/scripts/`. These scripts can also be run independently outside the review context (e.g., from `/quality-gate` or `/work-on` builder steps).
 
 **Platform note**: The verify-*.sh scripts require bash and standard POSIX tools. On Windows without bash (Git Bash / WSL / MSYS2), these checks are skipped with an explicit message — the review continues without them.
 
 ```bash
 CHANGED_FILES=$(gh pr diff $ARGUMENTS --name-only)
 REPO_ROOT="."  # Assumes cwd is the repo root
+
+# Resolve the verify-*.sh scripts source directory with the same deterministic
+# fallback as the Phase 3C TEMPLATE_BASE guard: $FORGE_HOME first (the installed
+# ForgeDock location), then this repo's own root (forge.yaml -> paths.root, or
+# git top-level). A bare/unset $FORGE_HOME must never be used directly in a path —
+# that degrades to a root-anchored path (/scripts/verify-*.sh) and silently skips
+# every check below. Never fall back to a filesystem-wide `find`.
+# <!-- Added: forge#2035 -->
+if [ -n "$FORGE_HOME" ] && [ -f "$FORGE_HOME/scripts/verify-route-registration.sh" ]; then
+    SCRIPTS_HOME="$FORGE_HOME"
+else
+    FORGE_YAML="${FORGE_CONFIG:-$(git rev-parse --show-toplevel 2>/dev/null)/forge.yaml}"
+    SCRIPTS_HOME=$(yq '.paths.root' "$FORGE_YAML" 2>/dev/null || git rev-parse --show-toplevel 2>/dev/null || pwd)
+fi
 
 # --- Platform / bash capability guard ---
 # The verify-*.sh scripts require bash. Detect availability before invoking.
@@ -627,11 +641,11 @@ if [ "$BASH_AVAILABLE" = "true" ]; then
         [ -n "$_API_MIDDLEWARE" ] && export FORGE_API_MIDDLEWARE_DIR="$_API_MIDDLEWARE"
     fi
     echo "=== Running: verify-route-registration.sh ==="
-    bash "$FORGE_HOME/scripts/verify-route-registration.sh" "$CHANGED_FILES_TMP" "$REPO_ROOT" || true
+    bash "$SCRIPTS_HOME/scripts/verify-route-registration.sh" "$CHANGED_FILES_TMP" "$REPO_ROOT" || true
 
     # 2. Environment variable wiring (checks .env.example, docker-compose, env_validation, SOPS mapping)
     echo "=== Running: verify-env-vars.sh ==="
-    bash "$FORGE_HOME/scripts/verify-env-vars.sh" "$DIFF_TMP" "$REPO_ROOT" || true
+    bash "$SCRIPTS_HOME/scripts/verify-env-vars.sh" "$DIFF_TMP" "$REPO_ROOT" || true
 
     # 3. Host headers in shell scripts + client-side proxy bypass check
     # Read project-specific internal service patterns from forge.yaml (if present)
@@ -645,11 +659,11 @@ if [ "$BASH_AVAILABLE" = "true" ]; then
     fi
     export FORGE_INTERNAL_PATTERNS
     echo "=== Running: verify-host-headers.sh ==="
-    bash "$FORGE_HOME/scripts/verify-host-headers.sh" "$CHANGED_FILES_TMP" "$REPO_ROOT" || true
+    bash "$SCRIPTS_HOME/scripts/verify-host-headers.sh" "$CHANGED_FILES_TMP" "$REPO_ROOT" || true
 
     # 4. SOPS deploy chain (ENV_MAPPING consistency, deploy path drift, hotfix sync)
     echo "=== Running: verify-sops-chain.sh ==="
-    bash "$FORGE_HOME/scripts/verify-sops-chain.sh" "$DIFF_TMP" "$CHANGED_FILES_TMP" "$REPO_ROOT" || true
+    bash "$SCRIPTS_HOME/scripts/verify-sops-chain.sh" "$DIFF_TMP" "$CHANGED_FILES_TMP" "$REPO_ROOT" || true
 
     # Cleanup temp files
     rm -f "$CHANGED_FILES_TMP" "$DIFF_TMP"
@@ -1257,11 +1271,59 @@ DOMAIN_FILES_API=$(echo "$FILES" | grep -iE "router|route|endpoint|openapi|sdk|a
 
 ### 3C: Load Agent Templates & Launch
 
-**>>> INVOCATION: Read shared protocols + selected persona files:**
+**>>> MANDATORY TEMPLATE-RESOLUTION GUARD — run BEFORE any Read of persona templates:**
+
+Missing persona templates are a fatal setup error, not permission to skip multi-agent review. Resolve the template source through this ordered chain and STOP if none resolve — never fall through to reviewing inline in the main context:
+
+```bash
+# Tier 1: $FORGE_HOME (the installed location — the common case)
+TEMPLATE_BASE=""
+if [[ -f "$FORGE_HOME/commands/review-pr-agents/protocols.md" ]]; then
+  TEMPLATE_BASE="$FORGE_HOME/commands/review-pr-agents"
+  TEMPLATE_SOURCE="forge_home"
+else
+  # Tier 2: repo-path fallback — same resolution already used for the code index below.
+  # FORGE_YAML is resolved independently here (not yet loaded — that happens further
+  # down in this phase) so the guard does not depend on later-phase ordering.
+  FORGE_YAML="${FORGE_CONFIG:-$(git rev-parse --show-toplevel 2>/dev/null)/forge.yaml}"
+  REPO_PATH=$(yq '.paths.root' "$FORGE_YAML" 2>/dev/null || git rev-parse --show-toplevel 2>/dev/null || pwd)
+  if [[ -f "$REPO_PATH/commands/review-pr-agents/protocols.md" ]]; then
+    TEMPLATE_BASE="$REPO_PATH/commands/review-pr-agents"
+    TEMPLATE_SOURCE="repo_path"
+  elif [[ -f "$REPO_PATH/commands/review-pr-agents.md" ]] && grep -q "^### Agent:" "$REPO_PATH/commands/review-pr-agents.md" 2>/dev/null; then
+    # Tier 3: monolithic catalog — last resort, contains all personas + protocols in one file.
+    # The content check (`### Agent:` headers) is required, not just file existence: a
+    # post-split repo still ships a small router stub at this same path that only points
+    # BACK to the (missing) commands/review-pr-agents/ directory — reading it would not
+    # provide any actual protocol/persona content, silently reproducing the original bug
+    # one tier deeper. <!-- Added: forge#1849 -->
+    TEMPLATE_BASE=""
+    MONOLITHIC_CATALOG="$REPO_PATH/commands/review-pr-agents.md"
+    TEMPLATE_SOURCE="monolithic_catalog"
+  else
+    TEMPLATE_SOURCE="none"
+  fi
+fi
+
+if [[ "$TEMPLATE_SOURCE" == "none" ]]; then
+  echo "FATAL: no review-pr-agents template source resolved (checked \$FORGE_HOME, repo-path fallback, monolithic catalog)."
+  # HARD STOP — post error, add needs-human, do NOT review
+fi
 ```
-Read: $FORGE_HOME/commands/review-pr-agents/protocols.md
-Read: $FORGE_HOME/commands/review-pr-agents/<persona>.md   (one per selected agent from Phase 3B)
+
+**If `TEMPLATE_SOURCE` is `none`**: HARD STOP. Post a PR comment explaining the setup is broken (`gh pr comment $ARGUMENTS --body "..."`) instructing the user to run `npx forgedock update` to repair the install, add `needs-human`, and exit Phase 3 without posting any findings or a `FORGE:REVIEW` verdict. **NEVER perform the review inline in the main agent context as a substitute.** A degraded solo review that presents itself as complete is worse than no review — missing templates must fail loudly, not silently.
+
+**If `TEMPLATE_SOURCE` is `forge_home` or `repo_path`** (the normal cases — behavior unchanged from before this guard existed):
 ```
+Read: $TEMPLATE_BASE/protocols.md
+Read: $TEMPLATE_BASE/<persona>.md   (one per selected agent from Phase 3B)
+```
+
+**If `TEMPLATE_SOURCE` is `monolithic_catalog`** (last-resort fallback):
+```
+Read: $MONOLITHIC_CATALOG
+```
+Then extract the shared protocols section and each selected persona's section from within that single file — same content, different packaging.
 
 Persona file names: `security.md` (always), `auth.md`, `billing.md`, `concurrency.md`, `scraper.md`, `frontend.md`, `api.md`, `database.md`, `infra.md`.
 See `review-pr-agents.md` for the full routing table mapping domains → persona files.
@@ -1437,7 +1499,7 @@ The `protocols.md` file contains the Evidence-Based Review Protocol, Structured 
 6. Substitute code index slice: `[INDEX_SLICE]` → the matching `$INDEX_SLICE_{DOMAIN}` variable for this agent (e.g., `$INDEX_SLICE_AUTH` for the auth agent). Agents MUST query index data first; fall back to grep only when index slice is empty or unavailable.
 7. Substitute per-agent diff slice: `[DOMAIN_DIFF_SLICE]` → the matching `$DIFF_SLICE_*` variable (e.g., `$DIFF_SLICE_AUTH` for the auth agent, `$DIFF_SLICE_SECURITY` for the security agent). This replaces any `gh pr diff [PR_NUMBER]` call inside the agent template — the agent works from the pre-computed slice, not the full changeset.
 8. If Phase 2.5 found broken assumptions, append them to the agent's prompt as "Pre-found integration issues to verify"
-9. Launch via `Task` tool with the resolved model (default `"sonnet"`, fallback `"opus"` if rate-limited)
+9. Launch via `Task` tool with `model: "{SUBAGENT_MODEL}"` (forge.yaml `agents.subagent_model`, else `agents.default_model`, else `"sonnet"`; fallback `"opus"` if rate-limited)
 
 **CRITICAL**: Launch ALL selected agents in a SINGLE message using multiple Task tool calls. Each agent posts findings directly to the PR via `gh pr comment`.
 
@@ -1487,7 +1549,7 @@ AGENT_COUNT=$(gh api "repos/${REPO}/issues/${PR_NUMBER}/comments" --jq '[.[] | s
 FINDING_COUNT=$(echo "$ALL_FINDINGS" | grep -c '.' || echo 0)
 ```
 
-If synthesis needed, launch a `general-purpose` Task (model: resolved per policy — default sonnet, fallback opus):
+If synthesis needed, launch a `general-purpose` Task (model: `"{SUBAGENT_MODEL}"`, fallback `"opus"` if rate-limited):
 - Deduplicate findings by file + line range ±5 (keep higher confidence)
 - Resolve contradictions by reading disputed code
 - Dismiss false positives with evidence
@@ -2116,6 +2178,23 @@ CURRENT_SHA=$(gh pr view $ARGUMENTS --json headRefOid --jq '.headRefOid')
 REVIEW_IS_STALE="false"
 if [ "$CURRENT_SHA" != "$REVIEW_SHA" ]; then REVIEW_IS_STALE="true"; fi
 ```
+
+**Verifiable agent count (MANDATORY — do not report a self-asserted `Agents: [N]` figure)** <!-- Added: forge#1849 -->
+
+A degraded run that skipped Task-based agent dispatch must be visible from this summary alone, without interrogating the agent afterward. Compute the actual launched-agent count from the `<!-- FORGE:REVIEW-AGENT:{domain} -->` comments each agent is required to post (Phase 3C), rather than trusting a free-text tally:
+
+```bash
+ACTUAL_AGENT_DOMAINS=$(gh api "repos/${REPO}/issues/${PR_NUMBER}/comments" \
+    --jq '[.[].body | scan("<!-- FORGE:REVIEW-AGENT:([a-z-]+) -->") | .[0]] | unique | join(", ")' 2>/dev/null || echo "")
+# NOTE: no `|| echo 0` fallback here — grep -c always prints a count (including 0 on
+# no match) even though it exits 1 in that case. Appending `|| echo 0` after a `grep -c`
+# pipeline double-counts: the pipeline already printed "0", then the fallback prints a
+# second "0" line, corrupting the value to "0\n0" in exactly the zero-agent case this
+# check exists to detect. <!-- Added: forge#1849 -->
+ACTUAL_AGENT_COUNT=$(echo "$ACTUAL_AGENT_DOMAINS" | tr ',' '\n' | grep -c '.' 2>/dev/null)
+```
+
+Substitute `ACTUAL_AGENT_COUNT`/`ACTUAL_AGENT_DOMAINS` into the summary's `**Agents**: [N] ([names])` field below — do NOT substitute a manually-counted or remembered figure. If the agent's own recollection of what it launched disagrees with `ACTUAL_AGENT_COUNT` (e.g. it believes it ran agents but zero `FORGE:REVIEW-AGENT` comments exist), that mismatch itself is the signal this check exists to surface: report `ACTUAL_AGENT_COUNT` as-is (it is the ground truth) and add a note in the Recommendation section flagging the discrepancy — never suppress it to make the summary look complete. If `ACTUAL_AGENT_COUNT` is `0`, the review degraded to solo/inline mode (the exact failure mode this guard exists to catch) and the verdict MUST reflect that (`NEEDS RE-REVIEW`), regardless of what analysis was performed inline.
 
 ```bash
 gh pr comment $ARGUMENTS --body "$(cat <<'EOF'

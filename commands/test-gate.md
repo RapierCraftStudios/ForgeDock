@@ -1,6 +1,6 @@
 ---
 description: Deterministic deploy-gate — verify a staging→main bundle's acceptance criteria against running code before deploy
-argument-hint: [--prs "<N1 N2 ...>"] [--base <branch>]
+argument-hint: "[--prs \"<N1 N2 ...>\"] [--base <branch>]"
 allowed-tools: Task, Bash, Read, Grep, Glob
 install: extras
 ---
@@ -13,7 +13,7 @@ install: extras
 
 Verifies a staging→main bundle's acceptance criteria against running code before deploy. Called by `/review-pr-staging` (Phase 6.5) with the bundle PRs, or run standalone when `--prs` is absent (computes the bundle itself). Returns a machine-readable BLOCK / PASS / SKIP verdict for the caller to consume.
 
-**Agent model policy**: `model: "sonnet"` (standard tier). Fallback: `model: "opus"` if rate-limited. Feature gate: pass `effort` in Task/Skill spawns only on Claude Code >= 2.1.154.
+**Agent model policy**: `model: "{DEFAULT_MODEL}"` — resolved from forge.yaml `agents.default_model`, else "sonnet" (standard tier). Fallback: `model: "opus"` if rate-limited. Feature gate: pass `effort` in Task/Skill spawns only on Claude Code >= 2.1.154.
 **NEVER use plan mode (EnterPlanMode).**
 **NEVER use the Agent tool** — test-gate dispatches test clusters via `Task` only. The Agent tool bypasses the allowed-tools constraint and produces output that cannot be structured into the machine-readable BLOCK / PASS / SKIP verdict.
 

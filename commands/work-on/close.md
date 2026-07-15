@@ -1,6 +1,6 @@
 ---
 description: Close subcommand — update project board, final issue body, parent tracker, summary report, trajectory log
-argument-hint: [issue number] [--repo GH_REPO] [--gh-flag GH_FLAG] [--pr PR_NUMBER] [--base PR_BASE] [--branch BRANCH] [--worktree WORKTREE_PATH]
+argument-hint: "[issue number] [--repo GH_REPO] [--gh-flag GH_FLAG] [--pr PR_NUMBER] [--base PR_BASE] [--branch BRANCH] [--worktree WORKTREE_PATH]"
 ---
 <!-- SPDX-FileCopyrightText: Copyright (c) RapierCraft Studios -->
 <!-- SPDX-License-Identifier: AGPL-3.0-or-later -->
@@ -12,7 +12,7 @@ argument-hint: [issue number] [--repo GH_REPO] [--gh-flag GH_FLAG] [--pr PR_NUMB
 **Invoked by**: `work-on.md` Phase 6–7, after `review.md` returns `REVIEW_RESULT: status: COMPLETE`.
 **Output**: Update project board, close issue, update parent tracker, post trajectory log. Return final summary.
 
-**Agent model policy**: `model: "haiku"`, `effort: low` (mechanical tier — label transitions, annotation posting, board updates). Fallback: `model: "sonnet"` if rate-limited. Feature gate: pass `effort` only on Claude Code >= 2.1.154.
+**Agent model policy**: `effort: low` (mechanical tier — label transitions, annotation posting, board updates; this file is mechanical end-to-end, so a low effort level is safe here). Fallback: `model: "sonnet"` if rate-limited. Feature gate: pass `effort` only on Claude Code >= 2.1.154. **Note**: this file is dispatched via `Skill("work-on:close", ...)`, which does not support a `model` override — see `work-on.md` section "Model and Effort Tiering — What Actually Applies" for why a `model: "haiku"` claim here would not take effect. <!-- Corrected: forge#1827 -->
 **NEVER use plan mode (EnterPlanMode).**
 
 <!-- FORGE:SPEC_LOADED — work-on/close.md loaded and active. Agent is bound by this spec. -->
@@ -476,9 +476,10 @@ gh issue edit {NUMBER} {GH_FLAG} \
 
 **Skip if**: Issue body does NOT contain a parent issue reference (e.g. `Part of #NNN`) or the issue has no parent in its milestone tracker.
 
-Detect parent reference:
+Detect parent reference. Markdown emphasis markers (`**bold**`, `__bold__`, `*italic*`) are stripped before matching, since sub-issue bodies commonly render the label as `**Parent**: #NNN` and the bare label alternation below would otherwise fail to match past the emphasis characters:
 ```bash
 PARENT_REF=$(gh issue view {NUMBER} {GH_FLAG} --json body --jq '.body' \
+  | sed -E 's/[*_]+//g' \
   | grep -oP '(?i)(part of|spawned from|sub-issue of|parent issue[:]?|parent[:])\s*#\K\d+' \
   | head -1)
 ```

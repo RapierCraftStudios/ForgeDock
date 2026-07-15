@@ -1,6 +1,6 @@
 ---
 description: Pick up a GitHub issue and run the full investigate-build-review-merge pipeline
-argument-hint: [issue number or "next" to pick highest priority]
+argument-hint: "[issue number or \"next\" to pick highest priority]"
 ---
 <!-- SPDX-FileCopyrightText: Copyright (c) RapierCraft Studios -->
 <!-- SPDX-License-Identifier: AGPL-3.0-or-later -->
@@ -11,7 +11,7 @@ argument-hint: [issue number or "next" to pick highest priority]
 
 Orchestrator for the full issue lifecycle: investigate → decompose (if needed) → build → review → merge → close. GitHub issues are the persistent context layer — read existing comments before starting, write structured reports back, use `workflow:*` labels to track state.
 
-**Agent model policy**: `model: "sonnet"` (standard tier). Fallback: `model: "opus"` if rate-limited. Feature gate: pass `effort` in Task/Skill spawns only on Claude Code >= 2.1.154.
+**Agent model policy**: `model: "{DEFAULT_MODEL}"` — resolved from forge.yaml `agents.default_model`, else "sonnet" (standard tier). Fallback: `model: "opus"` if rate-limited. Feature gate: pass `effort` in Task/Skill spawns only on Claude Code >= 2.1.154.
 **NEVER use plan mode (EnterPlanMode).**
 **NEVER use the Agent tool** — this spec uses `Skill(...)` for sub-phase dispatch. The Agent tool spawns opaque subprocesses that bypass phase protocols, skip FORGE annotations, and cannot be constrained by allowed-tools. Always use `Skill(skill="...", args="...")` for sub-phase invocations.
 
@@ -30,9 +30,15 @@ Orchestrator for the full issue lifecycle: investigate → decompose (if needed)
 ### Compaction Resilience
 
 1. Write state to GitHub after EVERY significant step
-2. Re-read GitHub state at the START of each phase (don't rely on in-memory context)
+2. Read full GitHub state (issue body + comments + labels) ONCE, in Phase 0B. Carry those values in-context for the rest of the run — do NOT re-fetch them at later phase boundaries. The only trigger for a fresh re-read of something already read this session is a **detected compaction**: if a later phase needs a value (issue body, a specific FORGE:* comment, labels) that this session does not actually have in its visible context — because compaction dropped the earlier tool output, or this is a brand-new session resuming mid-pipeline — re-fetch ONLY that missing value, not the full state.
 3. After compaction: re-read issue (body + comments + labels) to reconstruct state
 4. Key principle: A NEW session running `/work-on {number}` should pick up where the last left off by reading GitHub state alone
+
+**Session state cache convention**: Phases 1A.5, 3A, and 5A previously re-ran `gh issue view`/`gh api .../comments` unconditionally "for safety." That default is now inverted: reuse the value if this session already produced it (e.g., you already have `ISSUE_BODY` from Phase 0B, or already read the FORGE:INVESTIGATOR comment during Phase 1). Only issue the `gh` call if the value is genuinely absent from context. This is what makes re-reads free for a normal single-turn run while remaining exactly as resilient across a real compaction or resume. (Phase 6A's body read is a deliberate exception — see its note — because it immediately precedes a body-mutating write and Phase 5 can involve an external `/review-pr` process.)
+
+### Orchestration Flag
+
+`UNDER_ORCHESTRATION` — resolved once in Phase 0A. Defaults to `false` (solo run). Set to `true` when the invocation args include `--under-orchestration` (this is how `/orchestrate` dispatches `/work-on`; see `commands/orchestrate/phase-4-execution.md`). This flag gates the 4 heartbeat comments below — they exist solely to feed `/orchestrate`'s Step 4B.5 time-based stall detector (which reads the last comment's `updated_at`) and have no consumer in a solo run.
 
 ### Universal Phase Dispatcher
 
@@ -76,7 +82,7 @@ Orchestrator for the full issue lifecycle: investigate → decompose (if needed)
 
 <!-- FORGE:SPAWN_POLICY — Canonical spawn-decision table. Sibling specs (orchestrate.md, review-pr.md) link to this section. Sub-issues #1276–#1279 reference this table. -->
 
-**Default: run inline.** Every skill, phase, and sub-agent runs inline in the current context unless one of the three criteria below explicitly applies. A sub-agent buys exactly two things — parallelism and context isolation. If neither is needed, forking is waste.
+**Default: run inline.** Every skill, phase, and sub-agent runs inline in the current context unless one of the four criteria below explicitly applies. A sub-agent buys exactly three things — parallelism, context isolation, and (below) prompt-cache preservation. If none is needed, forking is waste.
 
 ### Spawn-Decision Table
 
@@ -85,8 +91,9 @@ Orchestrator for the full issue lifecycle: investigate → decompose (if needed)
 | a | **Parallel fan-out** — two or more independent work units can execute concurrently and the total wall time saving justifies the fork overhead | YES — spawn one sub-agent per work unit | `/orchestrate` dispatching multiple `/work-on` agents; `review-pr` spawning domain-specific reviewers in parallel |
 | b | **Fresh-context isolation** — the work unit is a structured review or audit whose value depends on seeing the artefact without the builder's accumulated context bias, AND the review result is load-bearing for the merge decision | YES — spawn a dedicated sub-agent | Phase 5C review-fork when build context is large (see Row c for the quantitative threshold) |
 | c | **Parent context near overflow** — the parent agent has made ≥20 Skill invocations OR the build changed ≥10 files, meaning delegating review inline risks a mid-review token overflow | YES — spawn a fresh sub-agent for review | Phase 5C: `Skill(skill="work-on/review", …)` instead of direct `review-pr` invocation |
+| d | **Prompt-cache TTL** — the sub-operation (multi-domain review, multi-iteration quality-gate) is expected to run for several minutes, longer than Anthropic's ~5-minute prompt-cache TTL. Leaving it inline lets the parent's already-large accumulated context (investigation/contract/context/architect/implement annotations) sit idle past the TTL; the parent's next turn then re-hydrates that entire context **uncached**, roughly doubling effective token cost for that turn. This is independent of build size — a 1-file fix idles the parent exactly as long as a 20-file one once the sub-operation starts running | YES — spawn a fresh sub-agent, **unconditionally**, regardless of file count or Skill-invocation count | Phase 5C review (always forks — Row d supersedes Row c's threshold as the controlling reason); Phase 3G quality-gate loop (forks under Row d even though it never qualified under Row c) <!-- Added: forge#1825 --> |
 
-**If none of the three rows match: run inline.** Do not fork for convenience, narrative clarity, or to avoid reading a large file. Context cost of a fork (spawning, context reconstruction, result aggregation) is paid every time, even when parallelism or isolation adds no value.
+**If none of the four rows match: run inline.** Do not fork for convenience, narrative clarity, or to avoid reading a large file. Context cost of a fork (spawning, context reconstruction, result aggregation) is paid every time, even when parallelism, isolation, or cache preservation adds no value.
 
 ### Depth Budget
 
@@ -98,15 +105,30 @@ Orchestrator for the full issue lifecycle: investigate → decompose (if needed)
 |-------|-------|-------|
 | 1 | `/orchestrate` | Top-level dispatcher — never implements directly |
 | 2 | `/work-on` | Issue pipeline — runs build phases inline |
-| 3 | Parallel reviewers (Row a/b/c fork) | Domain review agents spawned by Phase 5C |
+| 3 | Parallel reviewers (Row a/b/c/d fork); quality-gate loop (Row d fork) | Domain review agents spawned by Phase 5C; quality-gate sub-agent spawned by Phase 3G |
 
-**Build phases (3A–3M) run inline at depth 2** — they are sequential sub-phases of `/work-on`, not independent agents. Forking the build into a sub-agent (depth 3) is a violation of Row a/b/c unless the build itself fans out independently scoped work units.
+**Build phases (3A–3M) run inline at depth 2** — they are sequential sub-phases of `/work-on`, not independent agents. Forking the build into a sub-agent (depth 3) is a violation of Row a/b/c/d unless the build itself fans out independently scoped work units, **except** the Phase 3G quality-gate loop, which forks unconditionally under Row d (cache-TTL economics) regardless of build size. <!-- Updated: forge#1825 -->
 
 **Depth 4–5 are reserved** for exceptional cases (e.g. an orchestrate agent that itself spawns an orchestrate agent for a sub-milestone). Agents that reach depth 4 MUST log a justification comment on the relevant issue.
 
 ### Phase 5C Cross-Reference
 
-The existing Phase 5C context-budget check (≥10 changed files OR ≥20 Skill invocations → spawn `work-on/review` sub-agent) is an instance of **Row (c)** above. The quantitative thresholds are not changed — only their framing: they are now a specific application of the spawn-decision table, not a standalone ad-hoc rule.
+The Phase 5C review fork is now unconditional, controlled by **Row (d)** (prompt-cache TTL economics — independent of build size). It was previously gated by **Row (c)** alone (≥10 changed files OR ≥20 Skill invocations, i.e. parent-context-overflow risk); that threshold is preserved as a *documented, non-gating* reason the fork is also correct for large builds, but no longer determines *whether* the fork happens — Row (d) means it always does. <!-- Updated: forge#1825 (previously: "quantitative thresholds are not changed") -->
+
+### Phase 3G Cross-Reference
+
+The Phase 3G quality-gate loop forks unconditionally under **Row (d)**: it scans 14+ domains across up to 3 iterations, long enough to idle the parent's accumulated context past the prompt-cache TTL regardless of how many files changed. Unlike Phase 5C, quality-gate never had a Row (c) (file-count) exception — Row (d) is the sole justification for forking it. <!-- Added: forge#1825 -->
+
+### Model and Effort Tiering — What Actually Applies
+
+<!-- FORGE:MODEL_TIER_NOTE — Canonical explanation of the real vs. aspirational tiering mechanism. Every work-on/*.md "Agent model policy" line cross-references this section instead of restating it. -->
+
+Every `work-on/*.md` sub-phase file carries an "Agent model policy" line naming a `model` and an `effort`. These are two different mechanisms with two different scopes, and only one of them changes anything for an in-process `Skill()` call:
+
+- **`effort` is real and applies per `Skill()` invocation.** It is genuine reasoning-depth tuning on the model already running the session, gated correctly on Claude Code >= 2.1.154. Setting `effort: low` on a sub-phase file that is mechanical end-to-end (deterministic label edits, annotation posting, board sync — no root-cause analysis, no architecture planning) is a real, no-fork-required cost reduction.
+- **`model` overrides are NOT functional for `Skill()`-dispatched sub-phases.** The `Skill` tool executes "within the main conversation" — it has no model parameter and does not fork a new agent/session, so a sub-phase file cannot switch the model that's already generating the current run. The only tool with real model-override semantics is `Agent(model=...)` (see `tool_param_value_permission_rules`, Claude Code >= 2.1.178) — and HARD RULE #2 above explicitly forbids using the `Agent` tool for `/work-on` sub-phase dispatch, to keep the FORGE-annotation paper trail and phase protocol intact. In practice, the only place a `/work-on` run's model is genuinely chosen is `/orchestrate`'s single `Agent(model=..., ...)` spawn for the entire run (see `commands/orchestrate/phase-4-execution.md`) — every internal `Skill()` call inside that run inherits that same model, with no per-sub-phase override.
+
+**What this means concretely**: a sub-phase file's "Agent model policy" line documents *effort* tiering that genuinely takes effect, plus a *model* value that is aspirational/no-op unless that file is one day dispatched via `Agent(...)` instead of `Skill(...)`. Because mechanical bits (label transitions, `FORGE:CHECKPOINT` writes, heartbeat posts, task-type classification) are interleaved with reasoning-heavy content within the same `Skill()`-invoked file in most sub-phases, they cannot be selectively downtiered without either degrading the reasoning phases sharing that file, or extracting them into a brand-new fork — which the Spawn-Decision Policy above correctly discourages for operations this small (a single `gh issue edit` call does not clear Row a/b/c/d). Do not add a `model: "haiku"` claim to a sub-phase file expecting it to have effect; only add `effort: low`, and only when the whole file is mechanical end-to-end. <!-- Added: forge#1827 -->
 
 ---
 
@@ -219,11 +241,47 @@ Worktree/branch-already-exists and stale-label conditions are surfaced later (Ph
 ### 0A: Parse input
 Extract project prefix and issue number. If `next`/`pick`: list open issues sorted by priority, skip `needs-human`, `workflow:decomposed`, and `workflow:awaiting-merge`, pick highest priority.
 
+**Resolve `UNDER_ORCHESTRATION`**: `true` if the invocation args contain `--under-orchestration`, else `false`. This is a single parse done once, here — every later gated block (heartbeats) just checks this variable, no re-parsing.
+
 **Optional pre-flight**: Before committing to the full pipeline, run `/scope {NUMBER}` to get a complexity estimate (affected files, blast radius, risk flags, and decomposition recommendation). Especially useful for large or ambiguous issues.
 
-### 0A.5: Post Heartbeat Annotation
+### 0A.1: Remediation Mode Detection (`--remediate`) <!-- Added: forge#1813 -->
 
-Post a lightweight activity signal immediately after resolving the issue number. This gives the stall detector (orchestrate Step 4B.5) a fresh timestamp to compare against `STALL_TIMEOUT`. Without this, the stall detector can only see the last structured comment (INVESTIGATOR, BUILDER, etc.) which may be hours old during a valid long-running phase.
+**Check first, before any other Phase 0 routing** — if `$ARGUMENTS` contains `--remediate`, this is NOT a normal issue-pipeline invocation. The first positional argument is a **PR number**, not an issue number:
+
+```bash
+if echo "$ARGUMENTS" | grep -qE -- '--remediate\b'; then
+  REMEDIATE_PR_NUMBER=$(echo "$ARGUMENTS" | grep -oP '^\s*\K[0-9]+' | head -1)
+  REMEDIATE_ISSUE_FLAG=""
+  REMEDIATE_ISSUE_NUMBER=$(echo "$ARGUMENTS" | grep -oP -- '--issue\s+\K[0-9]+' | head -1)
+  [ -n "$REMEDIATE_ISSUE_NUMBER" ] && REMEDIATE_ISSUE_FLAG="--issue ${REMEDIATE_ISSUE_NUMBER}"
+
+  if [ -z "$REMEDIATE_PR_NUMBER" ]; then
+    echo "ERROR: --remediate requires a PR number as the first argument, e.g. /work-on 1234 --remediate"
+    exit 1
+  fi
+
+  echo "Remediation mode: routing PR #${REMEDIATE_PR_NUMBER} to work-on/remediate (issue flag: ${REMEDIATE_ISSUE_FLAG:-<resolved from PR body>})"
+fi
+```
+
+If detected, dispatch immediately and STOP — do NOT fall through to Phase 0B's normal issue-number resume logic (an issue number is not even known yet; `work-on/remediate.md` Phase M0 resolves it):
+
+```
+Skill(skill="work-on/remediate", args="${REMEDIATE_PR_NUMBER} ${REMEDIATE_ISSUE_FLAG} --repo {GH_REPO} --gh-flag {GH_FLAG}")
+```
+
+**After `REMEDIATE_RESULT` returns, STOP unconditionally** — do not run any further Phase 0–7 logic in this file. `work-on/remediate.md` is self-contained: when `re_gate_outcome: AUTO-LANDED`, it drives its own close phase internally (Phase M8 invokes `Skill("work-on:close", ...)` directly) before returning. For every other outcome (`HELD-AWAITING-MERGE`, `RE-ESCALATED`, `UNFIXABLE`, `BLOCKED`, `ALREADY_DONE`), the issue is already at a terminal state (`workflow:awaiting-merge` or `needs-human`, or already closed) per the Universal Phase Dispatcher — nothing further to do.
+
+This mode is reachable both standalone (a human or script running `/work-on <pr> --remediate` directly) and via the orchestrator (`commands/orchestrate/phase-4-execution.md` item 6.4 auto-dispatches the identical `Skill(skill='work-on', args='{PR} --remediate --issue {N} ...')` invocation against a `needs-human`-gated predecessor's own PR).
+
+**Skip this entire section if `--remediate` is absent from `$ARGUMENTS`** — proceed to the normal parse below.
+
+### 0A.5: Post Heartbeat Annotation (orchestration-only)
+
+**Skip entirely if `UNDER_ORCHESTRATION` is `false`** — a solo run has no stall detector polling comment timestamps, so this write has zero consumer. Do not post it "just in case."
+
+When `UNDER_ORCHESTRATION` is `true`: post a lightweight activity signal immediately after resolving the issue number. This gives the stall detector (orchestrate Step 4B.5) a fresh timestamp to compare against `STALL_TIMEOUT`. Without this, the stall detector can only see the last structured comment (INVESTIGATOR, BUILDER, etc.) which may be hours old during a valid long-running phase.
 
 ```bash
 PHASE_START_TIMESTAMP=$(date -u +%Y-%m-%dT%H:%M:%SZ)
@@ -233,9 +291,9 @@ gh issue comment {NUMBER} {GH_FLAG} --body "<!-- FORGE:HEARTBEAT -->
 **Issue**: #{NUMBER}"
 ```
 
-**Also post at major phase entry points** (Phases 1, 3, and 5) — replace `Phase 0` with the correct phase name in each case. These mid-pipeline heartbeats ensure the stall detector sees recent activity during long phases (e.g., a build phase running for 20 minutes is not falsely classified as stalled). Inline snippets are embedded at Phase 1A, Phase 3A, and Phase 5A — agents resuming mid-pipeline encounter them without reading this section. <!-- Added: forge#740 -->
+**Also post at major phase entry points** (Phases 1, 3, and 5) — replace `Phase 0` with the correct phase name in each case, and same `UNDER_ORCHESTRATION` gate. These mid-pipeline heartbeats ensure the stall detector sees recent activity during long phases (e.g., a build phase running for 20 minutes is not falsely classified as stalled). Inline snippets are embedded at Phase 1A, Phase 3A, and Phase 5A — agents resuming mid-pipeline encounter them without reading this section. <!-- Added: forge#740 -->
 
-**Skip if**: Issue already has a terminal label (`workflow:merged`, `workflow:invalid`, `needs-human`, `workflow:awaiting-merge`) — no heartbeat needed on a completed issue.
+**Skip if**: Issue already has a terminal label (`workflow:merged`, `workflow:invalid`, `needs-human`, `workflow:awaiting-merge`) — no heartbeat needed on a completed issue. (This is in addition to, not instead of, the `UNDER_ORCHESTRATION` gate above.)
 
 ### 0B: Load issue + existing context
 ```bash
@@ -272,6 +330,8 @@ fi
 | `REVIEW` | Phase 4 (skip Phase 1–3) |
 | `CLOSE` | Phase 6 (skip Phase 1–5) |
 | *(absent or unrecognized)* | Fall back to prose heuristics above |
+
+Note: Phase 1D no longer writes `next_phase: BUILD`/`DECOMPOSE` CHECKPOINT comments (removed as redundant with the `workflow:ready-to-build`/`workflow:decomposed` label transition — see Phase 1D). Those two rows remain here only to route older, pre-existing CHECKPOINT comments correctly; new runs land on the prose-heuristic fallback for those two cases instead, which is equally precise. `REVIEW` and `CLOSE` are still written (Phase 3M and Phase 5D) because each covers a real gap before the corresponding label transition.
 
 **If no checkpoint exists**: fall back to prose resume heuristics in Phase 0B above — treat as fresh start at Phase 1.
 
@@ -322,7 +382,16 @@ if [[ "$ADAPTIVE_DIR" != "${REPO_PATH_NORM}/"* ]]; then
   echo "WARNING: adaptive_scripts.directory resolves outside repo root ('$ADAPTIVE_DIR') — adaptive tier disabled" >&2
   ADAPTIVE_ENABLED=false
 fi
-UNIVERSAL_DIR="${FORGEDOCK_HOME:-$(dirname "$(which classify-lane.sh 2>/dev/null || echo 'scripts')")}/scripts"
+UNIVERSAL_DIR="${FORGEDOCK_HOME:-$REPO_PATH}/scripts"
+# NOTE: never resolve this via `which` or `find` — universal scripts are
+# repo-relative, not installed on $PATH, so a PATH lookup always misses.
+# REPO_PATH is already resolved from forge.yaml → paths.root earlier in
+# Phase 0, so it is the deterministic fallback when FORGEDOCK_HOME is unset.
+# Pipeline agents MUST NOT use `find` (unbounded or filesystem-wide) to
+# locate pipeline scripts under any circumstances: if UNIVERSAL_DIR/${operation}.sh
+# does not exist, resolve_script() falls through to Tier 4 (prose) below,
+# which is always safe and available. A missing script is never a reason
+# to search the filesystem. <!-- Added: forge#1984 -->
 
 resolve_script() {
   local operation="$1"
@@ -477,7 +546,7 @@ case "$TIER" in
 esac
 ```
 
-**Post Phase 1 heartbeat** (skip if issue already has a terminal label — `workflow:merged`, `workflow:invalid`, `needs-human`, `workflow:awaiting-merge`):
+**Post Phase 1 heartbeat** (skip unless `UNDER_ORCHESTRATION` is `true`; also skip if issue already has a terminal label — `workflow:merged`, `workflow:invalid`, `needs-human`, `workflow:awaiting-merge`):
 ```bash
 PHASE_START_TIMESTAMP=$(date -u +%Y-%m-%dT%H:%M:%SZ)
 gh issue comment {NUMBER} {GH_FLAG} --body "<!-- FORGE:HEARTBEAT -->
@@ -491,6 +560,8 @@ gh issue comment {NUMBER} {GH_FLAG} --body "<!-- FORGE:HEARTBEAT -->
 Before investigation begins, verify the issue body contains the four mandatory pipeline sections. If any are missing, add placeholder content so the investigator has the correct scaffolding.
 
 **Skip if**: All four sections (`## Problem`, `## Affected Files`, `## Expected Behavior`, `## Acceptance Criteria`) are already present.
+
+**Reuse `ISSUE_BODY` from Phase 0B** — it was already read in full there. Only re-fetch with the command below if `ISSUE_BODY` is not actually present in this session's context (compaction or a fresh resume).
 
 ```bash
 ISSUE_BODY=$(gh issue view {NUMBER} {GH_FLAG} --json body --jq '.body')
@@ -779,14 +850,7 @@ Inspect the subcommand output above for errors. <!-- forge#1418 -->"
 fi
 ```
 
-Write machine-readable phase checkpoint (MUST execute immediately after label transition, before continuing):
-```bash
-CHECKPOINT_TIMESTAMP=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
-gh issue comment {NUMBER} {GH_FLAG} --body "<!-- FORGE:CHECKPOINT -->
-\`\`\`json
-{\"phase\": \"INVESTIGATION\", \"status\": \"COMPLETE\", \"next_phase\": \"BUILD\", \"timestamp\": \"${CHECKPOINT_TIMESTAMP}\"}
-\`\`\`"
-```
+**No separate CHECKPOINT write here** — the `workflow:ready-to-build` label set above already fully disambiguates the resume point ("Investigation exists + ready-to-build → Phase 3" per Phase 0B's prose heuristics); a `next_phase: BUILD` CHECKPOINT comment would duplicate that signal with an extra write. <!-- Removed redundant FORGE:CHECKPOINT write: forge#1826 -->
 <!-- FORGE:PHASE_COMPLETE — Investigation routed to build. See Universal Phase Dispatcher: next phase is Phase 3. Not terminal — continue immediately. -->
 → Continue to Phase 3.
 
@@ -803,14 +867,7 @@ case "$TIER" in
 esac
 ```
 
-Write machine-readable phase checkpoint (MUST execute immediately after label transition, before continuing):
-```bash
-CHECKPOINT_TIMESTAMP=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
-gh issue comment {NUMBER} {GH_FLAG} --body "<!-- FORGE:CHECKPOINT -->
-\`\`\`json
-{\"phase\": \"INVESTIGATION\", \"status\": \"COMPLETE\", \"next_phase\": \"DECOMPOSE\", \"timestamp\": \"${CHECKPOINT_TIMESTAMP}\"}
-\`\`\`"
-```
+**No separate CHECKPOINT write here** — the `workflow:decomposed` label set above is itself a terminal state for this run; nothing needs to resume past it, so a `next_phase: DECOMPOSE` CHECKPOINT comment adds no information. <!-- Removed redundant FORGE:CHECKPOINT write: forge#1826 -->
 <!-- FORGE:PHASE_COMPLETE — Investigation routed to decomposition. See Universal Phase Dispatcher: next phase is Phase 2. Not terminal — continue immediately. -->
 → Continue to Phase 2 (Decomposition).
 
@@ -941,7 +998,7 @@ esac
 
 <!-- FORGE:PHASE_COMPLETE — Entering Phase 3 (Build). See Universal Phase Dispatcher: sub-phases 3A–3M execute in sequence. No sub-phase completion is terminal. -->
 
-**Canonical path**: Sub-phases 3A–3M run **inline** in the current context window for STANDARD and fast-lane issues. This is the single authoritative build topology. `work-on/build.md` and `work-on-monolithic.md` ([BENCHMARK]) describe the same inline model with different levels of detail; they are not separate competing paths. `Skill()` sub-agent spawns for build sub-phases are only permitted under the Spawn-Decision Table Row (c) exception (≥20 Skill invocations or ≥10 files changed before the build). <!-- Added: forge#1276 -->
+**Canonical path**: Sub-phases 3A–3M run **inline** in the current context window for STANDARD and fast-lane issues, with one standing exception: 3G (quality gate) always forks to a sub-agent under Row (d). This is the single authoritative build topology. `work-on/build.md` and `work-on-monolithic.md` ([BENCHMARK]) describe the same inline model with different levels of detail; they are not separate competing paths. `Skill()`/`Agent()` sub-agent spawns for build sub-phases are only permitted under a Spawn-Decision Table Row (c) or Row (d) exception — Row (c): ≥20 Skill invocations or ≥10 files changed before the build; Row (d): the sub-phase's own runtime risks exceeding the prompt-cache TTL regardless of build size (3G's standing exception). <!-- Added: forge#1276, updated: forge#1825 -->
 
 **Skip if**: `<!-- FORGE:BUILDER:COMPLETE -->` is present in a BUILDER comment. <!-- Added: forge#1305 — require completion marker, not mere presence of BUILDER annotation -->
 
@@ -957,9 +1014,9 @@ fi
 
 **CRITICAL: You MUST execute ALL sub-phases 3A–3M in order. Sub-phases 3C.5 (context) and 3C.6 (architect) are skipped ONLY for TRIVIAL tasks and Investigation tasks — see Phase 3B for classification. For STANDARD and COMPLEX tasks they post mandatory `FORGE:CONTEXT` and `FORGE:ARCHITECT` comments that Phase 3F reads as its primary input. Skipping them without a TRIVIAL/Investigation classification degrades build quality and causes review findings. After each sub-phase, continue to the next — no sub-phase is terminal.**
 
-### 3A: Re-read state from GitHub (MANDATORY)
+### 3A: Confirm state (reuse in-context; re-read only on compaction)
 
-**Post Phase 3 heartbeat** (skip if issue already has a terminal label — `workflow:merged`, `workflow:invalid`, `needs-human`, `workflow:awaiting-merge`):
+**Post Phase 3 heartbeat** (skip unless `UNDER_ORCHESTRATION` is `true`; also skip if issue already has a terminal label — `workflow:merged`, `workflow:invalid`, `needs-human`, `workflow:awaiting-merge`):
 ```bash
 PHASE_START_TIMESTAMP=$(date -u +%Y-%m-%dT%H:%M:%SZ)
 gh issue comment {NUMBER} {GH_FLAG} --body "<!-- FORGE:HEARTBEAT -->
@@ -967,6 +1024,8 @@ gh issue comment {NUMBER} {GH_FLAG} --body "<!-- FORGE:HEARTBEAT -->
 **Timestamp**: ${PHASE_START_TIMESTAMP}
 **Issue**: #{NUMBER}"
 ```
+
+If this is a continuous run (Phase 1 already executed in this same session), you already have the issue view, the FORGE:INVESTIGATOR body, and know whether FORGE:BUILDER:COMPLETE/FORGE:FAST_PATH exist from having posted or checked for them earlier — reuse those values, do not re-fetch. Only run the block below if one of those values is genuinely missing from this session's context (fresh/resumed session after compaction, or checkpoint routing jumped straight here):
 
 ```bash
 gh issue view {NUMBER} {GH_FLAG} --json number,title,body,labels,state,milestone
@@ -1094,7 +1153,9 @@ FUNCTION_NAMES=$(gh api repos/{GH_REPO}/issues/{NUMBER}/comments \
 
 **The ONLY acceptable skip conditions** (all must be true): Issue is a 1-file config/docs edit with no code logic AND affected files have zero git history. In all other cases, run context gathering.
 
-Run these queries (20s timeout each, 2 min total budget):
+**Batch execution (MANDATORY)**: C1, C2 (including the direct commit-body read and the pickaxe pass), C3, and C4 below are mutually independent — none consumes another's output. Issue ALL of their underlying `gh`/`git`/`grep` calls as a single batch of parallel tool calls in one message, not as four sequential steps. This is the same rule as the "independent tool calls → same message" convention used elsewhere in the pipeline; it turns a ~4x serial round-trip chain (each `gh api` call is 0.5-2s) into one wall-clock round-trip. The per-file loop inside C1 and the per-function loop inside C3 are themselves independent across iterations — include every iteration's call in the same batch rather than looping turn-by-turn. Total budget is still 20s per query / 2 min overall; batching only removes serialization, it does not change the timeout.
+
+Queries to batch (20s timeout each, 2 min total budget):
 
 **C1: Past Review Findings on These Files**
 ```bash
@@ -1386,6 +1447,41 @@ This advisory is informational — it does NOT block the commit. But the impleme
 
 Skip for 1-file config/docs edits.
 
+**Fork the loop unconditionally under Spawn-Decision Table Row (d)** (see Phase 3G Cross-Reference above): quality-gate scans 14+ domains across up to 3 iterations — long enough to idle the parent's already-large accumulated context past the prompt-cache's ~5-minute TTL, forcing an uncached re-hydration on the parent's next turn. This applies regardless of changed-file count; there is no small-build exception. Dispatch with the `Agent` tool, not a nested `Skill()` call — a nested `Skill()` call still executes inside the parent's own context and would not stop the parent from idling past the cache TTL while the loop runs. The sub-agent needs nothing from the parent's context: it works directly against files on disk at `{WORKTREE_PATH}`. <!-- Added: forge#1825 -->
+
+```
+Agent(
+  subagent_type="general-purpose",
+  model="{SUBAGENT_MODEL}",
+  description="Quality gate for #{NUMBER}",
+  run_in_background=false,
+  prompt="Run the quality gate loop for issue #{NUMBER} in worktree {WORKTREE_PATH}.
+    NEVER use plan mode (EnterPlanMode).
+    Changed files: {CHANGED_FILES}
+
+    iteration = 0
+    max_iterations = 3
+    while iteration < max_iterations:
+        iteration += 1
+        Skill('quality-gate', args='{CHANGED_FILES} --worktree {WORKTREE_PATH}')
+        if result == 'QUALITY GATE: PASS':
+            GATE_PASSED = true
+            break
+        else:
+            Fix each HIGH and MEDIUM finding directly in the files at {WORKTREE_PATH}
+            Re-stage the fixes (do not commit, do not push)
+
+    Do not touch GitHub issue state — the caller handles labels/comments.
+    Return exactly one line: 'GATE_RESULT: passed={true|false} iterations={N} summary={one-line summary of remaining findings if failed, else \"clean\"}'"
+)
+```
+
+Parse the returned `GATE_RESULT` line:
+- `passed=true` → `GATE_PASSED = true` → continue to sub-phase 3H.
+- `passed=false` (loop exhausted 3 iterations) → post "Quality Gate Failed After 3 Iterations" comment using the returned `summary` → add `needs-human` label → STOP.
+
+**Fallback**: if the `Agent` tool is unavailable in the current runtime (partial install), run the loop inline as before —
+
 ```
 iteration = 0
 max_iterations = 3
@@ -1405,15 +1501,17 @@ if iteration == max_iterations AND not PASS:
     Add needs-human label → STOP
 ```
 
+— and note in the builder comment that context isolation was degraded for this run.
+
 # MUST CONTINUE to sub-phase 3H (Format and verify) — quality gate PASS is intermediate, NOT terminal. <!-- Added: forge#220 -->
 
-**After quality gate completes (PASS or fixes applied): proceed immediately to sub-phase 3H below. Quality gate is an intermediate check — "PASS" means the code is clean, NOT that the build is done. Do NOT stop.**
+**After the sub-agent returns `passed=true`: proceed immediately to sub-phase 3H below. Quality gate is an intermediate check — "PASS" means the code is clean, NOT that the build is done. Do NOT stop.**
 
-**After PASS: Do NOT re-read GitHub state, issue body, labels, or any file. Do NOT run any gh commands. Do NOT check PR status. Proceed directly to Phase 3H (Format and verify) below.** <!-- Added: forge#93 -->
+**After PASS: Do NOT re-read GitHub state, issue body, labels, or any file beyond what the sub-agent already changed on disk. Do NOT run any gh commands. Do NOT check PR status. Proceed directly to Phase 3H (Format and verify) below.** <!-- Added: forge#93 -->
 
 ### 3H: Format and verify
 
-All tool commands are read from `forge.yaml → verification.commands`. When a key is absent, the step logs `SKIPPED — not configured in verification.commands` and continues rather than silently passing.
+All tool commands are read from `forge.yaml → verification.commands`. When a key is absent, the step logs `SKIPPED — not configured in verification.commands` and continues rather than silently passing. Before any test command executes (`learned.test_commands`, or a future `verification.commands.*.test` invocation), it is first checked against `verification.known_slow_tests` — a repo-declared list of patterns for suites known to hang or make live network/LLM calls — and skipped or narrowed to a safe subset on a match. When that config is absent, this gate is a no-op and behavior is unchanged. <!-- Added: forge#1861 -->
 
 **Track skipped checks** — initialize before any check runs:
 ```bash
@@ -1466,7 +1564,47 @@ fi
 ```
 Typecheck or build failures are BLOCKING.
 
-**Learned test commands** — After all `verification.commands` steps complete, run any commands from `learned.test_commands` (captured from owner corrections in Phase 1D or set manually in forge.yaml):
+**Known-slow test gate** — Before running any test command below, check it against `verification.known_slow_tests` (a repo-declared list of test patterns known to hang or make live network/LLM calls). When absent or empty, this is a no-op and behavior is unchanged. <!-- Added: forge#1861 -->
+
+```bash
+# KNOWN_SLOW_TESTS read directly from verification.known_slow_tests (a static,
+# operator-declared config — unlike learned.test_commands, it is NOT part of the
+# agent-writable `learned:` section, so it is read inline here rather than
+# pre-loaded in Phase 0B.1).
+KNOWN_SLOW_TESTS=$(yq -o=json -I=0 '.verification.known_slow_tests // []' forge.yaml 2>/dev/null || echo '[]')
+
+# apply_known_slow_filter <cmd> — echoes the command to actually run, or "" to
+# skip it entirely. Matching is substring match of `pattern` against the full
+# command text. Exactly one of skip/subset is expected per matched entry.
+apply_known_slow_filter() {
+  local cmd="$1"
+  local out="$cmd"
+  if [ -n "$KNOWN_SLOW_TESTS" ] && [ "$KNOWN_SLOW_TESTS" != "[]" ] && [ "$KNOWN_SLOW_TESTS" != "null" ]; then
+    while IFS= read -r entry; do
+      [ -z "$entry" ] && continue
+      pattern=$(echo "$entry" | yq '.pattern // ""')
+      skip=$(echo "$entry" | yq '.skip // false')
+      subset=$(echo "$entry" | yq '.subset // ""')
+      reason=$(echo "$entry" | yq '.reason // "no reason given"')
+      [ -z "$pattern" ] && continue
+      case "$cmd" in
+        *"$pattern"*)
+          if [ "$skip" = "true" ]; then
+            echo "SKIPPED — known-slow test matched pattern '$pattern' ($reason)" >&2
+            out=""
+          elif [ -n "$subset" ]; then
+            echo "SUBSTITUTED — known-slow test matched pattern '$pattern' ($reason); running safe subset instead" >&2
+            out="$subset"
+          fi
+          ;;
+      esac
+    done < <(echo "$KNOWN_SLOW_TESTS" | yq -o=json -I=0 '.[]' 2>/dev/null)
+  fi
+  echo "$out"
+}
+```
+
+**Learned test commands** — After all `verification.commands` steps complete, run any commands from `learned.test_commands` (captured from owner corrections in Phase 1D or set manually in forge.yaml), filtered through the known-slow gate above:
 
 ```bash
 # LEARNED_TEST_COMMANDS was set in Phase 0B.1 from forge.yaml → learned.test_commands
@@ -1476,11 +1614,15 @@ if [ -n "$LEARNED_TEST_COMMANDS" ] && [ "$LEARNED_TEST_COMMANDS" != "[]" ]; then
   # yq outputs each entry on its own line with -r flag
   echo "$LEARNED_TEST_COMMANDS" | yq '.[]' | while IFS= read -r cmd; do
     [ -z "$cmd" ] && continue
-    echo "Running learned command: $cmd"
-    eval "$cmd" 2>&1 | tail -30
+    FILTERED_CMD=$(apply_known_slow_filter "$cmd")
+    if [ -z "$FILTERED_CMD" ]; then
+      continue
+    fi
+    echo "Running learned command: $FILTERED_CMD"
+    eval "$FILTERED_CMD" 2>&1 | tail -30
     CMD_EXIT=$?
     if [ $CMD_EXIT -ne 0 ]; then
-      echo "FAILED (exit $CMD_EXIT): $cmd"
+      echo "FAILED (exit $CMD_EXIT): $FILTERED_CMD"
       exit $CMD_EXIT
     fi
   done
@@ -1488,7 +1630,7 @@ else
   echo "No learned test commands configured — skipping"
 fi
 ```
-Learned test command failures are BLOCKING (same as verification.commands failures). <!-- Added: forge#667 -->
+Learned test command failures are BLOCKING (same as verification.commands failures). A command matched and skipped by the known-slow gate is never executed and never counted as a failure. <!-- Added: forge#667, forge#1861 -->
 
 ### 3I: Frontend proxy wiring check (MANDATORY)
 
@@ -1740,7 +1882,7 @@ gh issue edit {NUMBER} {GH_FLAG} --add-label "needs-human"
 
 ### 4D: Create PR
 ```bash
-gh pr create {GH_FLAG} --base {PR_BASE} --head {BRANCH} \
+PR_URL=$(gh pr create {GH_FLAG} --base {PR_BASE} --head {BRANCH} \
   --title "{Fix|Feat|Refactor}: {description}" \
   --body "## Summary
 {BRIEF_DESCRIPTION}
@@ -1754,10 +1896,11 @@ gh pr create {GH_FLAG} --base {PR_BASE} --head {BRANCH} \
 ---
 Closes #{NUMBER}
 **Implementation branch**: \`{BRANCH}\`
-**Base**: \`{PR_BASE}\`"
+**Base**: \`{PR_BASE}\`")
+PR_NUMBER=$(echo "$PR_URL" | grep -oE '[0-9]+$')
 ```
 
-`Closes #{NUMBER}` documents intent but does NOT auto-close for non-default-branch PRs.
+`Closes #{NUMBER}` documents intent but does NOT auto-close for non-default-branch PRs. Capture `PR_NUMBER` here — Phase 5A reuses it instead of re-querying `gh pr list`.
 
 If PR already exists for this branch, use the existing PR number.
 
@@ -1778,9 +1921,9 @@ esac
 
 ## Phase 5: Auto-Review
 
-### 5A: Re-read state from GitHub (MANDATORY)
+### 5A: Confirm state (reuse in-context; re-read only on compaction)
 
-**Post Phase 5 heartbeat** (skip if issue already has a terminal label — `workflow:merged`, `workflow:invalid`, `needs-human`, `workflow:awaiting-merge`):
+**Post Phase 5 heartbeat** (skip unless `UNDER_ORCHESTRATION` is `true`; also skip if issue already has a terminal label — `workflow:merged`, `workflow:invalid`, `needs-human`, `workflow:awaiting-merge`):
 ```bash
 PHASE_START_TIMESTAMP=$(date -u +%Y-%m-%dT%H:%M:%SZ)
 gh issue comment {NUMBER} {GH_FLAG} --body "<!-- FORGE:HEARTBEAT -->
@@ -1789,6 +1932,7 @@ gh issue comment {NUMBER} {GH_FLAG} --body "<!-- FORGE:HEARTBEAT -->
 **Issue**: #{NUMBER}"
 ```
 
+`PR_NUMBER` was already captured from `gh pr create`'s output in Phase 4D — reuse it. Only run the lookup below if `PR_NUMBER` is genuinely unset (resumed session after compaction, or checkpoint routing jumped straight to Phase 4/5):
 ```bash
 gh issue view {NUMBER} {GH_FLAG} --json number,title,body,labels,state
 PR_NUMBER=$(gh pr list {GH_FLAG} --head {BRANCH} --json number --jq '.[0].number')
@@ -1805,20 +1949,14 @@ PR #${PR_NUMBER} created targeting \`{PR_BASE}\`. Invoking /review-pr with --aut
 
 ### 5C: Invoke /review-pr with --auto-merge
 
-**Context budget check** (run before invoking review-pr): <!-- Added: forge#93 -->
+**Always fork — Row (d) supersedes Row (c) as the controlling reason** (run before invoking review-pr): <!-- Updated: forge#1825 (previously threshold-gated by Row (c) alone — forge#93) -->
 
-Large-context sessions that accumulated significant build history cause review-pr to hit the token limit mid-review. This check is an instance of **Spawn-Decision Policy Row (c)** (parent context near overflow) — see the [Spawn-Decision Table](#spawn-decision-table) for the general policy. Check the accumulated context before delegating:
+`/review-pr` spawns domain review agent(s) (observed at `effort: xhigh`) that run for minutes — long enough to idle the parent's accumulated context past the prompt cache's ~5-minute TTL under **Spawn-Decision Policy Row (d)**, regardless of build size — see the [Spawn-Decision Table](#spawn-decision-table). There is no small-build exception: review ALWAYS forks.
 
-- If the build changed **≥10 files** OR this agent has made **≥20 Skill invocations** since it started: invoke `work-on/review` as a fresh sub-agent (via `Skill(skill="work-on/review", args="...")`) rather than calling review-pr directly. The sub-agent starts with a clean context window.
-- Otherwise (small build, few skill calls): invoke review-pr directly as below.
-- **Fallback**: if `work-on/review` is not available (partial install), invoke review-pr directly regardless of file count and add a note that context may be large.
+- ALWAYS invoke `work-on/review` as a fresh sub-agent (via `Skill(skill="work-on/review", args="...")`) rather than calling review-pr directly. The sub-agent starts with a clean context window and re-reads all needed state from GitHub (Phase R0) — it does not depend on anything the parent accumulated.
+- **Fallback only**: if `work-on/review` is not available (partial install), invoke review-pr directly and add a note in the progress comment that context isolation was degraded for this run.
 
-**Direct invocation** (small builds — <10 changed files AND <20 Skill invocations):
-```
-Skill(skill="review-pr", args="{PR_NUMBER} --auto-merge --issue {NUMBER} --base {PR_BASE} --gh-flag {GH_FLAG}")
-```
-
-**Sub-agent invocation** (large builds — ≥10 changed files OR ≥20 Skill invocations):
+**Sub-agent invocation** (always, regardless of changed-file count or Skill-invocation count):
 
 Before spawning, build a distilled hot-copy of the key annotations the review sub-agent would otherwise re-fetch from GitHub. This reduces gh round-trips in the child without replacing the durable FORGE annotation record. <!-- Added: forge#1277 -->
 
@@ -1852,6 +1990,11 @@ Skill(skill="work-on/review", args="{NUMBER} --repo {GH_REPO} --gh-flag {GH_FLAG
 ```
 
 The `{HOT_COPY_BLOCK}` is an optimization that avoids the child re-discovering context already held by the parent. The FORGE annotations on GitHub remain the durable, compaction-safe record. If the hot-copy block is empty (annotations not yet posted), the sub-agent falls back to reading them from GitHub as before.
+
+**Fallback invocation** (only when `work-on/review` is unavailable):
+```
+Skill(skill="review-pr", args="{PR_NUMBER} --auto-merge --issue {NUMBER} --base {PR_BASE} --gh-flag {GH_FLAG}")
+```
 
 Review-pr handles: full domain-agent review → post findings as separate issues → merge PR. It does NOT close the issue or clean up the worktree — those run in Phase 6.
 
@@ -1888,6 +2031,8 @@ gh issue comment {NUMBER} {GH_FLAG} --body "<!-- FORGE:CHECKPOINT -->
 ### 6A: Final issue body update
 
 **Multi-phase guard**: Detect whether the issue has multiple phases. Only check off items belonging to the current completed phase.
+
+**This read is intentionally NOT covered by the session-state-cache rule** — the body is about to be rewritten below, and Phase 5's `/review-pr` invocation is an external process that can post comments/edits between the last read and here. Writing back a stale cached body would silently revert any concurrent change, so always fetch fresh immediately before a body mutation.
 
 ```bash
 BODY=$(gh issue view {NUMBER} {GH_FLAG} --json body --jq '.body')
@@ -1934,8 +2079,10 @@ esac
 
 **Skip if**: Not a sub-issue (no parent reference in body).
 
+Markdown emphasis markers (`**bold**`, `__bold__`, `*italic*`) are stripped before matching, since sub-issue bodies commonly render the label as `**Parent**: #NNN` and the bare label alternation below would otherwise fail to match past the emphasis characters:
 ```bash
 PARENT_REF=$(gh issue view {NUMBER} {GH_FLAG} --json body --jq '.body' \
+  | sed -E 's/[*_]+//g' \
   | grep -iE '(part of|spawned from|sub-issue of|parent issue:?|parent:)\s*#[0-9]+' \
   | sed -n 's/.*#\([0-9][0-9]*\).*/\1/p' | head -1)
 ```

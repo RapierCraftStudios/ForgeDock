@@ -1,8 +1,8 @@
 ---
 description: Staging review mode — comprehensive review of staging branch before deploy to main
-argument-hint: [PR number or "staging"]
+argument-hint: "[PR number or \"staging\"]"
 allowed-tools: Task, Bash, Read, Grep, Glob, WebFetch
-install: extras
+install: core
 ---
 <!-- SPDX-FileCopyrightText: Copyright (c) RapierCraft Studios -->
 <!-- SPDX-License-Identifier: AGPL-3.0-or-later -->
@@ -13,7 +13,7 @@ install: extras
 
 Performs comprehensive review of `staging` before merging to `main`. Handles large diffs (1,000-10,000+ lines), diverse changes, deep analysis, and business impact assessment.
 
-**Agent model policy**: `model: "sonnet"` (standard tier). Fallback: `model: "opus"` if rate-limited. User can override with `--model <name>`. Feature gate: pass `effort` in Task/Skill spawns only on Claude Code >= 2.1.154.
+**Agent model policy**: `model: "{DEFAULT_MODEL}"` — resolved from forge.yaml `agents.default_model`, else "sonnet" (standard tier). Fallback: `model: "opus"` if rate-limited. User can override with `--model <name>`. Feature gate: pass `effort` in Task/Skill spawns only on Claude Code >= 2.1.154.
 **NEVER use plan mode (EnterPlanMode).**
 **NEVER use the Agent tool** — this spec uses `Task` for domain agent dispatch. The Agent tool bypasses the allowed-tools constraint declared in this spec's frontmatter and produces opaque output that cannot be structured into the review verdict.
 
@@ -370,7 +370,7 @@ For fixable failures: checkout staging, apply fix, verify locally, commit as `fi
 
 ## Phase 2: Material Change Analysis
 
-Launch agent (model: sonnet) to analyze all commits since last deploy. Categorize as: NEW FEATURE, ENHANCEMENT, BUG FIX, REFACTOR, SECURITY, PERFORMANCE, INFRASTRUCTURE, DEPENDENCY. Separate user-facing vs internal. Document breaking changes and required pre-deploy actions.
+Launch agent (model: {SUBAGENT_MODEL}) to analyze all commits since last deploy. Categorize as: NEW FEATURE, ENHANCEMENT, BUG FIX, REFACTOR, SECURITY, PERFORMANCE, INFRASTRUCTURE, DEPENDENCY. Separate user-facing vs internal. Document breaking changes and required pre-deploy actions.
 
 **MANDATORY — post findings as PR comment**: After completing analysis, the agent MUST post its full report directly to the PR:
 ```bash
@@ -435,7 +435,45 @@ gh pr comment ${PR_NUMBER} -R ${GH_REPO} --body "<!-- FORGE:REVIEW-AGENT:code-qu
 
 ## Phase 5: Security & Billing Deep Dive
 
-Read agent catalog from `.claude/commands/review-pr-agents.md`. Launch domain-specific agents based on which domains have changes. Substitute PR diff commands with staging diff commands. Agents: General Security (always), Auth, Billing, Concurrency, Scraper, API Design, Database, Infrastructure.
+**MANDATORY TEMPLATE-RESOLUTION GUARD — run BEFORE reading the agent catalog:**
+
+Missing persona templates are a fatal setup error, not permission to skip multi-agent review. Resolve the template source through this ordered chain (identical to the one used by `/review-pr` Phase 3C — do not diverge) and STOP if none resolve — never fall through to reviewing inline in the main context:
+
+```bash
+TEMPLATE_BASE=""
+if [[ -f "$FORGE_HOME/commands/review-pr-agents/protocols.md" ]]; then
+  TEMPLATE_BASE="$FORGE_HOME/commands/review-pr-agents"
+  TEMPLATE_SOURCE="forge_home"
+else
+  FORGE_YAML="${FORGE_CONFIG:-$(git rev-parse --show-toplevel 2>/dev/null)/forge.yaml}"
+  REPO_PATH=$(yq '.paths.root' "$FORGE_YAML" 2>/dev/null || git rev-parse --show-toplevel 2>/dev/null || pwd)
+  if [[ -f "$REPO_PATH/commands/review-pr-agents/protocols.md" ]]; then
+    TEMPLATE_BASE="$REPO_PATH/commands/review-pr-agents"
+    TEMPLATE_SOURCE="repo_path"
+  elif [[ -f "$REPO_PATH/commands/review-pr-agents.md" ]] && grep -q "^### Agent:" "$REPO_PATH/commands/review-pr-agents.md" 2>/dev/null; then
+    # Content check (not just existence) required: a post-split repo still ships a small
+    # router stub at this same path that only points back to the (missing) persona
+    # directory — reading it would provide no actual protocol/persona content.
+    MONOLITHIC_CATALOG="$REPO_PATH/commands/review-pr-agents.md"
+    TEMPLATE_SOURCE="monolithic_catalog"
+  else
+    TEMPLATE_SOURCE="none"
+  fi
+fi
+
+if [[ "$TEMPLATE_SOURCE" == "none" ]]; then
+  echo "FATAL: no review-pr-agents template source resolved (checked \$FORGE_HOME, repo-path fallback, monolithic catalog)."
+  # HARD STOP — post error, add needs-human, do NOT review
+fi
+```
+
+**If `TEMPLATE_SOURCE` is `none`**: HARD STOP. Post a PR comment explaining the setup is broken, instructing the user to run `npx forgedock update` to repair the install, add `needs-human`, and exit without posting any findings or a verdict. **NEVER perform the review inline in the main agent context as a substitute.**
+
+**If `TEMPLATE_SOURCE` is `forge_home` or `repo_path`** (normal cases — behavior unchanged): `Read: $TEMPLATE_BASE/protocols.md` and `Read: $TEMPLATE_BASE/<persona>.md` per selected agent.
+
+**If `TEMPLATE_SOURCE` is `monolithic_catalog`** (last resort): `Read: $MONOLITHIC_CATALOG` and extract the shared protocols section plus each selected persona's section from within that single file.
+
+Launch domain-specific agents based on which domains have changes. Substitute PR diff commands with staging diff commands. Agents: General Security (always), Auth, Billing, Concurrency, Scraper, API Design, Database, Infrastructure.
 
 **MANDATORY — each domain agent MUST post its findings directly to the PR immediately upon completion** (not batched by the orchestrator):
 ```bash

@@ -183,6 +183,31 @@ describe("fixCard", () => {
     const card = fixCard(["run: gh auth login"], "none");
     assert.doesNotMatch(card, /\x1b/);
   });
+
+  it("defaults to 'error' severity (unchanged ember look)", () => {
+    const withDefault = fixCard(["run: gh auth login"], "truecolor");
+    const withExplicitError = fixCard(["run: gh auth login"], "truecolor", "error");
+    assert.equal(withDefault, withExplicitError);
+  });
+
+  it("'warning' severity boxes the card in amber, not ember", () => {
+    const card = fixCard(["heads up"], "truecolor", "warning");
+    assert.match(card, /38;2;232;192;96/);
+    assert.doesNotMatch(card, /38;2;255;107;53/);
+    assert.match(card, /╭[─ ]*.*╮/s);
+  });
+
+  it("'info' severity renders no box border", () => {
+    const card = fixCard(["fyi"], "truecolor", "info");
+    assert.doesNotMatch(card, /[╭╮╰╯]/);
+    assert.match(card, /fyi/);
+  });
+
+  it("'info' severity in mode 'none' emits no escapes", () => {
+    const card = fixCard(["fyi"], "none", "info");
+    assert.doesNotMatch(card, /\x1b/);
+    assert.match(card, /fyi/);
+  });
 });
 
 describe("mode gate on accent helpers (review findings)", () => {

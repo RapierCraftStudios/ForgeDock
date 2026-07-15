@@ -307,4 +307,56 @@ describe("runIssue", () => {
     const s = deriveState(readLog(dir, 42));
     assert.ok(s.committed.includes("close"), "close must be in committed after reconcile");
   });
+
+  it("forge#2028: forwards an explicit backend/model override to every runner() call", async () => {
+    const { w, io } = fakeWorld();
+    const script = {
+      "work-on/investigate": () => { w.markers += " INVESTIGATION:COMPLETE"; },
+    };
+    const calls = [];
+    const runner = async (call) => {
+      calls.push(call);
+      script[call.commandName]?.();
+      return { status: "complete" };
+    };
+
+    const res = await runIssue({ issue: 42, dir, agentId: "a1", lane: "staging",
+      io, runner, now: () => 1000, maxAttempts: 1, backend: "cli", model: "claude-test-model" });
+
+    assert.equal(res.terminalReason, "needs-human"); // only investigate scripted → subsequent phases block
+    assert.ok(calls.length > 0, "runner must have been called at least once");
+    for (const call of calls) {
+      assert.equal(call.backend, "cli", "backend must be forwarded to every runner() call");
+      assert.equal(call.model, "claude-test-model", "model must be forwarded to every runner() call");
+    }
+  });
+
+  it("forge#2028: omitting backend/model preserves the existing runner() call shape (no new keys)", async () => {
+    const { w, io } = fakeWorld();
+    const script = {
+      "work-on/investigate": () => { w.markers += " INVESTIGATION:COMPLETE"; },
+      "work-on/build/context": () => { w.markers += " FORGE:CONTEXT:COMPLETE"; },
+      "work-on/build/architect": () => { w.markers += " FORGE:ARCHITECT:COMPLETE"; },
+      "work-on/build": () => { w.markers += " FORGE:BUILDER:COMPLETE"; w.commitsAhead = 2; },
+      "work-on/review": () => { w.pr = 7; w.prMerged = true; },
+      "work-on/close": () => { w.issueState = "CLOSED"; },
+    };
+    const calls = [];
+    const runner = async (call) => {
+      calls.push(call);
+      script[call.commandName]();
+      return { status: "complete" };
+    };
+
+    const res = await runIssue({ issue: 42, dir, agentId: "a1", lane: "staging",
+      io, runner, now: () => 1000, maxAttempts: 3 });
+
+    assert.equal(res.terminalReason, "merged");
+    assert.ok(calls.length > 0, "runner must have been called at least once");
+    for (const call of calls) {
+      assert.ok(!("backend" in call), "backend key must be absent from runner() call when not supplied to runIssue");
+      assert.ok(!("model" in call), "model key must be absent from runner() call when not supplied to runIssue");
+      assert.deepEqual(Object.keys(call).sort(), ["args", "commandName", "commandsDir"].sort());
+    }
+  });
 });

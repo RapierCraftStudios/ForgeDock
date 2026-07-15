@@ -1,6 +1,6 @@
 ---
 description: Evidence-backed spec evolution — reads finding concentration for a spec file, drafts a spec diff, opens a spec-evolution PR with per-change citations
-argument-hint: [spec file path | "auto"]
+argument-hint: "[spec file path | \"auto\"]"
 install: extras
 ---
 <!-- SPDX-FileCopyrightText: Copyright (c) RapierCraft Studios -->

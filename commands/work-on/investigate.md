@@ -1,6 +1,6 @@
 ---
 description: Investigate a GitHub issue — validate it's real, determine root cause, post findings
-argument-hint: [issue number] [--repo {owner}/{repo}] [--gh-flag "-R {owner}/{repo}"]
+argument-hint: "[issue number] [--repo {owner}/{repo}] [--gh-flag \"-R {owner}/{repo}\"]"
 ---
 <!-- SPDX-FileCopyrightText: Copyright (c) RapierCraft Studios -->
 <!-- SPDX-License-Identifier: AGPL-3.0-or-later -->
@@ -11,7 +11,7 @@ argument-hint: [issue number] [--repo {owner}/{repo}] [--gh-flag "-R {owner}/{re
 
 Standalone investigation phase for the work-on pipeline. Validates whether an issue is real, determines root cause, posts a structured FORGE:INVESTIGATOR comment to GitHub, and updates workflow labels.
 
-**Agent model policy**: `model: "sonnet"` (standard tier). Fallback: `model: "opus"` if rate-limited. Feature gate: pass `effort` in Task/Skill spawns only on Claude Code >= 2.1.154.
+**Agent model policy**: `model: "{DEFAULT_MODEL}"` — resolved from forge.yaml `agents.default_model`, else "sonnet" (standard tier). Fallback: `model: "opus"` if rate-limited. Feature gate: pass `effort` in Task/Skill spawns only on Claude Code >= 2.1.154. This file's mechanical bits (1A label set, `FORGE:CHECKPOINT` writes) stay at this tier because they're interleaved with the reasoning-heavy investigation steps in the same `Skill()` invocation — see `work-on.md` section "Model and Effort Tiering — What Actually Applies". <!-- Added: forge#1827 -->
 **NEVER use plan mode (EnterPlanMode).**
 
 <!-- FORGE:SPEC_LOADED — work-on/investigate.md loaded and active. Agent is bound by this spec. -->
@@ -425,12 +425,19 @@ gh issue comment {NUMBER} {GH_FLAG} --body "<!-- FORGE:INVESTIGATOR -->
 **{YES|NO}** — {reason}
 {if YES: proposed sub-issues with titles and dependencies}
 
-### Acceptance Spec
+### Acceptance Spec <!-- Added: forge#1829 -->
 {For each item in the issue's ## Acceptance Criteria section, emit one machine-checkable check line using the format below. If the issue has no Acceptance Criteria section, derive checks from the Recommendation above. Each check MUST be specific, observable, and testable — not vague prose. Checks are consumed by build/validate Phase B6.5 as the merge gate.}
 
+**Quoting (MANDATORY)**: `target=` and `matcher=` MUST always be wrapped in double quotes — `target="..."` / `matcher="..."` — even when the value is a single token (e.g. a plain file path). The downstream Phase B6.5 parser only extracts quoted values; an unquoted `target=`/`matcher=` will silently truncate at the first space and cause a false-negative gate failure for any multi-word value (shell commands with flags/arguments/pipes are almost always multi-word). Neither `target` nor `matcher` may contain a literal `"` character — use single quotes for any embedded string/regex literal inside the value, as shown below. `id=` and `type=` are always single tokens and are never quoted. `description=` is always the last field on the line and is captured to end-of-line — it does not need quoting.
+
 ```
-ACCEPTANCE_CHECK: id={ac-1} type={exists|contains|command|behavior} target={file_path|command|url} matcher={string|exit_0|regex} description={one-line human description}
-ACCEPTANCE_CHECK: id={ac-2} type={exists|contains|command|behavior} target={file_path|command|url} matcher={string|exit_0|regex} description={one-line human description}
+ACCEPTANCE_CHECK: id={ac-1} type={exists|contains|command|behavior} target="{file_path|command|url}" matcher="{string|exit_0|regex}" description={one-line human description}
+ACCEPTANCE_CHECK: id={ac-2} type={exists|contains|command|behavior} target="{file_path|command|url}" matcher="{string|exit_0|regex}" description={one-line human description}
+```
+
+Example with a multi-word shell command target (the case that previously broke — note the embedded single quotes around the regex, and the double quotes wrapping the whole target):
+```
+ACCEPTANCE_CHECK: id=ac-4 type=command target="grep -qE '(>= ?2|2\+)' commands/orchestrate/phase-1-resolve.md" matcher="exit_0" description=Fan-out cap is documented as >=2 or 2+
 ```
 
 **Check types**:
@@ -439,7 +446,9 @@ ACCEPTANCE_CHECK: id={ac-2} type={exists|contains|command|behavior} target={file
 - `command` — run a shell command and assert exit 0 (`target` = shell command, `matcher` = `exit_0`)
 - `behavior` — assert a runtime/observable behavior via shell command (`target` = shell command, `matcher` = expected output string or regex)
 
-**Skipping**: if the issue has no verifiable acceptance criteria and none can be derived from the recommendation, emit a single sentinel: `ACCEPTANCE_CHECK: id=ac-skip type=skipped target=none matcher=none description=No machine-checkable criteria available — human review required`
+**Self-defeating pipe guideline**: do NOT chain a `-q`/`--quiet` command into a downstream pipe consumer (e.g. `grep -q ... | grep ...`). A `-q` flag suppresses all stdout, so the next command in the pipe always receives empty input and the check can never pass regardless of the actual file content. If a check needs to verify two conditions against the same output, sequence them instead — e.g. `grep -qE 'first' file && grep -qE 'second' file` — or capture the output once and grep the captured variable.
+
+**Skipping**: if the issue has no verifiable acceptance criteria and none can be derived from the recommendation, emit a single sentinel: `ACCEPTANCE_CHECK: id=ac-skip type=skipped target="none" matcher="none" description=No machine-checkable criteria available — human review required`
 ${ANNOTATION_LINK_FOOTER}
 <!-- INVESTIGATION:COMPLETE -->"
 ```
