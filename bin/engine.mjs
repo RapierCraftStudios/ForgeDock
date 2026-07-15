@@ -8,13 +8,9 @@ import { appendEvent, readLog, deriveState, rewriteLog } from "./engine/runlog.m
 import { pickPhase, TERMINAL_REASONS } from "./engine/phases.mjs";
 import { reconcileState } from "./engine/reconcile.mjs";
 import { makeProjector } from "./engine/projector.mjs";
+import { VALID_BACKENDS } from "./runner.mjs";
 
 const DEFAULT_MAX_ATTEMPTS = 3;
-
-// Mirrors runner.mjs's own VALID_BACKENDS set. Duplicated locally (rather than
-// imported) so this validation doesn't take on a cross-file coupling to
-// runner.mjs — kept as a tiny, independently-stable constant instead (forge#2054).
-const VALID_BACKENDS = new Set(["cli", "api", "auto"]);
 
 /**
  * @param {object} opts

@@ -7,6 +7,7 @@ import { join } from "node:path";
 import { runIssue } from "../engine.mjs";
 import { readLog, deriveState } from "../engine/runlog.mjs";
 import { serializeState } from "../engine/state.mjs";
+import { VALID_BACKENDS } from "../runner.mjs";
 
 let dir; beforeEach(() => { dir = mkdtempSync(join(tmpdir(), "fd-engine-")); });
 afterEach(() => { rmSync(dir, { recursive: true, force: true }); });
@@ -398,5 +399,36 @@ describe("runIssue", () => {
       // investigate is scripted) rather than rejecting synchronously.
       assert.equal(res.terminalReason, "needs-human", `backend=${backend} must not be rejected`);
     }
+  });
+
+  it("forge#2076: engine.mjs's accepted backends track runner.mjs's exported VALID_BACKENDS (no independent copy)", async () => {
+    // Guards against re-introducing the duplicate-Set drift fixed in forge#2076:
+    // engine.mjs must import VALID_BACKENDS from runner.mjs rather than
+    // hardcoding its own copy. Iterating the imported set (rather than a
+    // literal ["cli","api","auto"] in this test) means the test fails if the
+    // two sources ever diverge again, regardless of which values they contain.
+    for (const [i, backend] of [...VALID_BACKENDS].entries()) {
+      const issue = 200 + i;
+      const { w, io } = fakeWorld();
+      const script = { "work-on/investigate": () => { w.markers += " INVESTIGATION:COMPLETE"; } };
+      const runner = async (call) => { script[call.commandName]?.(); return { status: "complete" }; };
+
+      const res = await runIssue({ issue, dir, agentId: "a1", lane: "staging",
+        io, runner, now: () => 1000, maxAttempts: 1, backend });
+
+      assert.equal(res.terminalReason, "needs-human",
+        `backend=${backend} (from runner.mjs's VALID_BACKENDS) must be accepted by engine.mjs`);
+    }
+
+    // A value outside runner.mjs's exported set must still be rejected.
+    const bogus = "definitely-not-a-real-backend";
+    assert.ok(!VALID_BACKENDS.has(bogus), "test precondition: bogus value must not collide with a real backend");
+    const { io } = fakeWorld();
+    const runner = async () => ({ status: "complete" });
+    await assert.rejects(
+      () => runIssue({ issue: 999, dir, agentId: "a1", lane: "staging",
+        io, runner, now: () => 1000, maxAttempts: 1, backend: bogus }),
+      (err) => { assert.equal(err.code, "INVALID_BACKEND"); return true; },
+    );
   });
 });
