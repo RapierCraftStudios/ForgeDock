@@ -558,6 +558,219 @@ describe("pre-tool-use hook — gist visibility guard (#1729)", () => {
 });
 
 // ---------------------------------------------------------------------------
+// Rule 5: Filesystem-root `find` guard (issue #2034)
+// Tests for the deterministic block on `find` rooted at `/` or a bare
+// Git-Bash drive mount (`/c`, `/d`, ...). #1984 was a narrow, single-call-
+// site precursor fix (PATH-based `which` lookup removal + prose guardrail in
+// commands/work-on.md); this rule is the systemic, deterministic follow-up.
+// ---------------------------------------------------------------------------
+
+describe("pre-tool-use hook — filesystem-root find guard (#2034)", () => {
+  it("exits 2 and prints BLOCKED for find / -iname x", () => {
+    const { exitCode, stderr } = runHook({
+      hook_event_name: "PreToolUse",
+      tool_name: "Bash",
+      tool_input: { command: "find / -iname x" },
+    });
+    assert.equal(exitCode, 2);
+    assert.match(stderr, /BLOCKED/);
+    assert.match(stderr, /find/);
+  });
+
+  it("exits 2 for find /c -name y (bare drive mount)", () => {
+    const { exitCode, stderr } = runHook({
+      hook_event_name: "PreToolUse",
+      tool_name: "Bash",
+      tool_input: { command: "find /c -name y" },
+    });
+    assert.equal(exitCode, 2);
+    assert.match(stderr, /BLOCKED/);
+  });
+
+  it("exits 2 for find /d rooted at another drive mount, case-insensitive", () => {
+    const { exitCode, stderr } = runHook({
+      hook_event_name: "PreToolUse",
+      tool_name: "Bash",
+      tool_input: { command: "find /D -maxdepth 6 -iname protocols.md" },
+    });
+    assert.equal(exitCode, 2);
+    assert.match(stderr, /BLOCKED/);
+  });
+
+  it('exits 2 for find rooted at "/" appearing after && in a compound command', () => {
+    const { exitCode, stderr } = runHook({
+      hook_event_name: "PreToolUse",
+      tool_name: "Bash",
+      tool_input: { command: "cd /tmp && find / -iname classify-lane.sh" },
+    });
+    assert.equal(exitCode, 2);
+    assert.match(stderr, /BLOCKED/);
+  });
+
+  // Regression tests for a review finding on this PR (SEC-1, CONFIRMED HIGH):
+  // `find` glued to a shell metacharacter with no separating whitespace
+  // stayed fused into the adjacent token (e.g. "/tmp;find", "$(find") and
+  // bypassed detection entirely, since tokenizeCommand() only splits on
+  // whitespace and quotes. extractLogicalTokens() now also splits unquoted
+  // tokens on `;`, `&`, `|`, `(`, `)`, `$`, and backtick.
+  it("exits 2 for find / immediately after a semicolon with no space (cd /tmp;find /)", () => {
+    const { exitCode, stderr } = runHook({
+      hook_event_name: "PreToolUse",
+      tool_name: "Bash",
+      tool_input: { command: "cd /tmp;find / -name x" },
+    });
+    assert.equal(exitCode, 2);
+    assert.match(stderr, /BLOCKED/);
+  });
+
+  it("exits 2 for find / inside command substitution ($(find / ...))", () => {
+    const { exitCode, stderr } = runHook({
+      hook_event_name: "PreToolUse",
+      tool_name: "Bash",
+      tool_input: { command: "for f in $(find / -type f); do echo $f; done" },
+    });
+    assert.equal(exitCode, 2);
+    assert.match(stderr, /BLOCKED/);
+  });
+
+  it("exits 2 for find / inside backticks (legacy command substitution)", () => {
+    const { exitCode, stderr } = runHook({
+      hook_event_name: "PreToolUse",
+      tool_name: "Bash",
+      tool_input: { command: "for f in `find / -type f`; do echo $f; done" },
+    });
+    assert.equal(exitCode, 2);
+    assert.match(stderr, /BLOCKED/);
+  });
+
+  it("exits 2 for find / glued to && with no space (echo hi&&find /c)", () => {
+    const { exitCode, stderr } = runHook({
+      hook_event_name: "PreToolUse",
+      tool_name: "Bash",
+      tool_input: { command: "echo hi&&find /c -iname x" },
+    });
+    assert.equal(exitCode, 2);
+    assert.match(stderr, /BLOCKED/);
+  });
+
+  it("exits 2 for find / glued to a pipe with no space (echo hi|find /)", () => {
+    const { exitCode, stderr } = runHook({
+      hook_event_name: "PreToolUse",
+      tool_name: "Bash",
+      tool_input: { command: "echo hi|find / -iname x" },
+    });
+    assert.equal(exitCode, 2);
+    assert.match(stderr, /BLOCKED/);
+  });
+
+  // Regression test for review finding SEC-2 (CONFIRMED LOW): command-name
+  // matching was case-sensitive, so `Find /` or `FIND /` bypassed the guard
+  // despite Windows resolving them to the same binary as `find`.
+  it("exits 2 for Find / with a capitalized command name (case-insensitive match)", () => {
+    const { exitCode, stderr } = runHook({
+      hook_event_name: "PreToolUse",
+      tool_name: "Bash",
+      tool_input: { command: "Find / -iname x" },
+    });
+    assert.equal(exitCode, 2);
+    assert.match(stderr, /BLOCKED/);
+  });
+
+  it("exits 2 for FIND /C with fully uppercase command and drive letter", () => {
+    const { exitCode, stderr } = runHook({
+      hook_event_name: "PreToolUse",
+      tool_name: "Bash",
+      tool_input: { command: "FIND /C -iname x" },
+    });
+    assert.equal(exitCode, 2);
+    assert.match(stderr, /BLOCKED/);
+  });
+
+  it('allows find "$REPO_PATH" -name z (scoped absolute path)', () => {
+    const { exitCode } = runHook({
+      hook_event_name: "PreToolUse",
+      tool_name: "Bash",
+      tool_input: { command: 'find "$REPO_PATH" -name z' },
+    });
+    assert.equal(exitCode, 0);
+  });
+
+  it("allows find . -maxdepth 2 ... (relative path)", () => {
+    const { exitCode } = runHook({
+      hook_event_name: "PreToolUse",
+      tool_name: "Bash",
+      tool_input: { command: "find . -maxdepth 2 -iname x" },
+    });
+    assert.equal(exitCode, 0);
+  });
+
+  it("allows find /c/Users/.../repo -maxdepth 2 -name x (scoped path under a drive mount)", () => {
+    const { exitCode } = runHook({
+      hook_event_name: "PreToolUse",
+      tool_name: "Bash",
+      tool_input: { command: "find /c/Users/itsmr/repo -maxdepth 2 -name x" },
+    });
+    assert.equal(exitCode, 0);
+  });
+
+  it("allows commands that merely mention 'find /' inside a quoted --body value (no real find invocation)", () => {
+    const { exitCode } = runHook({
+      hook_event_name: "PreToolUse",
+      tool_name: "Bash",
+      tool_input: {
+        command: 'gh issue comment 1 --body "do not run find / to locate files"',
+      },
+    });
+    // The literal text "find /" appears inside a single quoted --body value.
+    // tokenizeCommand() preserves embedded whitespace for quoted arguments —
+    // the whole quoted string becomes ONE token, not separate "find" and "/"
+    // tokens — so this is never mistaken for a real `find` invocation. This
+    // is the same quote-aware protection extractFlag() relies on elsewhere
+    // in this file (issues #1519, #1591) and is essential here: pipeline
+    // comments (like this issue's own investigation report) routinely quote
+    // `find /...` examples in prose and must never trip this guard.
+    assert.equal(exitCode, 0);
+  });
+
+  it("exits 0 (no-op elsewhere) for a non-find command", () => {
+    const { exitCode } = runHook({
+      hook_event_name: "PreToolUse",
+      tool_name: "Bash",
+      tool_input: { command: "git status" },
+    });
+    assert.equal(exitCode, 0);
+  });
+
+  it("blocks find / even when cwd is NOT a ForgeDock-managed directory (cwd-independent, #2034)", () => {
+    const unmanagedDir = mkdtempSync(join(osTop.tmpdir(), "fd-ptu-unmanaged-find-"));
+    try {
+      const { exitCode, stderr } = runHook(
+        {
+          hook_event_name: "PreToolUse",
+          tool_name: "Bash",
+          tool_input: { command: "find / -iname review-pr-agents -type d" },
+        },
+        { cwd: unmanagedDir },
+      );
+      assert.equal(exitCode, 2, "Rule 5 must fire regardless of forge.yaml presence");
+      assert.match(stderr, /BLOCKED/);
+    } finally {
+      rmSync(unmanagedDir, { recursive: true, force: true });
+    }
+  });
+
+  it("blocks find / when cwd IS a ForgeDock-managed directory too (consistent behavior)", () => {
+    const { exitCode, stderr } = runHook({
+      hook_event_name: "PreToolUse",
+      tool_name: "Bash",
+      tool_input: { command: "find / -iname pytest*" },
+    });
+    assert.equal(exitCode, 2);
+    assert.match(stderr, /BLOCKED/);
+  });
+});
+
+// ---------------------------------------------------------------------------
 // settings-hook.mjs — SubagentStop and PreToolUse wiring tests
 // ---------------------------------------------------------------------------
 

@@ -92,12 +92,29 @@ async function getInvariants() {
  *    setting env vars via Bash tool calls, as this hook reads process.env which
  *    is set at process start, not at tool-call time).
  *
- * Both rules only apply inside a ForgeDock-managed directory (a directory
+ * 5. Filesystem-root `find` guard (issue #2034)
+ *    Intercepts any Bash command containing a `find` invocation whose search
+ *    root is `/` or a bare Git-Bash drive mount (`/c`, `/d`, ...) and
+ *    hard-blocks it. On Windows Git Bash, `/` spans every mounted drive, so a
+ *    root-anchored `find` never terminates and accumulates as an orphaned,
+ *    CPU-exhausting process once its parent sub-agent exits (issue #1984 was
+ *    a narrow, single-call-site precursor fix — this rule is the systemic,
+ *    deterministic follow-up). No override — a root-anchored `find` has no
+ *    legitimate use in any ForgeDock pipeline.
+ *
+ * Rules 1-4 only apply inside a ForgeDock-managed directory (a directory
  * with a `forge.yaml` or `.forgedock` marker) — see `isForgeDockManagedCwd()`
  * (issue #1591). The hook installs into the user's global
  * `~/.claude/settings.json`, so without this guard every Bash call in every
  * repo on the machine would be subject to these ForgeDock-specific rules,
  * including unrelated repos where `main` is a legitimate PR target.
+ *
+ * Rule 5 is deliberately NOT gated by `isForgeDockManagedCwd()` — it runs
+ * before that check. A filesystem-root `find` is a universal footgun with no
+ * legitimate use anywhere (unlike Rules 1-4, which are ForgeDock-pipeline-
+ * specific), and gating it the same way would leave it silently disabled
+ * inside git worktrees, which typically carry no `forge.yaml`/`.forgedock`
+ * marker of their own — exactly where build/review sub-agents run.
  *
  * === Fail-open contract ===
  *
@@ -139,6 +156,39 @@ const FORBIDDEN_PR_BASES = ["main", "master"];
 const WORKFLOW_LABEL_PREFIX = "workflow:";
 
 // ---------------------------------------------------------------------------
+// Rule 5 constants (issue #2034)
+// Declared here — above the top-level `await main()` call — for the same
+// reason the label-transition/PR-base constants above are: a top-level
+// `await` suspends module evaluation at that statement, so any top-level
+// `const` declared textually AFTER it (unlike hoisted `function` declarations)
+// is still in its temporal dead zone when `main()` first runs, and would
+// throw a ReferenceError the instant `checkFindRoot()` reads it — silently
+// swallowed by main()'s fail-open catch, defeating the whole rule.
+// ---------------------------------------------------------------------------
+
+/**
+ * Match a `find` search-root token that is exactly the filesystem root (`/`)
+ * or a bare Git-Bash drive mount (`/c`, `/d`, `/C`, ... — a single letter,
+ * case-insensitive, optionally followed by nothing else). Deliberately does
+ * NOT match `/c/Users/...` or any other scoped absolute path — only the bare
+ * root/drive-mount token itself.
+ */
+const FIND_ROOT_TOKEN_RE = /^\/(?:[a-zA-Z])?$/;
+
+/**
+ * Shell metacharacters that can glue a command name to an adjacent token
+ * without whitespace (e.g. `cd /tmp;find /`, `$(find /...)`, `` `find /` ``,
+ * `echo x&&find /`). `tokenizeCommand()` only splits on whitespace and
+ * quotes, so without this extra split step a `find` immediately following
+ * one of these characters stays fused into the previous token (e.g. the
+ * single token `/tmp;find` or `$(find`) and is never recognized as a `find`
+ * invocation — a real, exploitable bypass of Rule 5 (issue #2034 review
+ * finding SEC-1). Declared here (above `try { await main(); }`) for the
+ * same temporal-dead-zone reason as `FIND_ROOT_TOKEN_RE` above.
+ */
+const SHELL_METACHAR_SPLIT_RE = /[;&|()$`]+/;
+
+// ---------------------------------------------------------------------------
 // Main — fail-open wrapper
 // ---------------------------------------------------------------------------
 
@@ -168,12 +218,24 @@ async function main() {
   // Only intercept Bash tool calls.
   if (toolName !== "Bash") { process.exit(0); return; }
 
-  // Only enforce inside a ForgeDock-managed project — this hook installs
-  // globally (~/.claude/settings.json), so without this guard both rules
-  // below would fire in every unrelated repo on the machine (issue #1591).
-  if (!(await isForgeDockManagedCwd())) { process.exit(0); return; }
-
   const command = String(toolInput.command || "");
+
+  // --- Rule 5: Filesystem-root `find` guard ---
+  // Deliberately checked BEFORE the isForgeDockManagedCwd() gate below — a
+  // root-anchored `find` is a universal footgun with no legitimate use in
+  // any directory (managed or not), and must fire inside git worktrees,
+  // which typically carry no forge.yaml/.forgedock marker (issue #2034).
+  const findRootViolation = checkFindRoot(command);
+  if (findRootViolation) {
+    process.stderr.write(findRootViolation);
+    process.exit(2);
+    return;
+  }
+
+  // Only enforce Rules 1-4 inside a ForgeDock-managed project — this hook
+  // installs globally (~/.claude/settings.json), so without this guard those
+  // rules would fire in every unrelated repo on the machine (issue #1591).
+  if (!(await isForgeDockManagedCwd())) { process.exit(0); return; }
 
   // --- Rule 1: PR branch target validation ---
   const prViolation = checkPrTarget(command);
@@ -503,6 +565,116 @@ function checkGistVisibility(command) {
       `Exception: set FORGE_ALLOW_PUBLIC_GIST=1 in your shell environment BEFORE`,
       `starting Claude Code if you intentionally need a public gist.`,
     ].join("\n");
+  }
+
+  return null;
+}
+
+// ---------------------------------------------------------------------------
+// Rule 5: Filesystem-root `find` guard (issue #2034)
+// ---------------------------------------------------------------------------
+
+/**
+ * Break each unquoted token from `tokenizeCommand()` on shell metacharacters
+ * (`;`, `&`, `|`, `(`, `)`, `$`, `` ` ``) to recover `find` as its own
+ * logical token even when it was written with no separating whitespace from
+ * a command separator or a command-substitution opener (`$(find ...)`).
+ *
+ * Quoted tokens are passed through UNSPLIT and as a single logical token —
+ * quoting means the whole thing is inert argument text (e.g. a `--body`
+ * value that merely *mentions* `find /` in prose), never a real command
+ * invocation, so splitting it on these characters would reintroduce the
+ * decoy false-positive this rule must avoid (issues #1519, #1591).
+ *
+ * @param {string} command
+ * @returns {string[]} Flattened list of logical token strings, in order.
+ */
+function extractLogicalTokens(command) {
+  const raw = tokenizeCommand(command);
+  const logical = [];
+  for (const { value, quoted } of raw) {
+    if (quoted) {
+      logical.push(value);
+      continue;
+    }
+    for (const piece of value.split(SHELL_METACHAR_SPLIT_RE)) {
+      if (piece.length > 0) logical.push(piece);
+    }
+  }
+  return logical;
+}
+
+/**
+ * Check whether a Bash command contains a `find` invocation whose search
+ * root is the filesystem root (`/`) or a bare Git-Bash drive mount (`/c`,
+ * `/d`, ...). On Windows Git Bash, `/` spans every mounted drive, so a
+ * root-anchored `find` never terminates and accumulates as an orphaned,
+ * CPU-exhausting process (issue #2034 — #1984 was a narrow precursor fix
+ * that only patched a single call site + added a prose guardrail; this is
+ * the systemic, deterministic follow-up).
+ *
+ * Scans ALL logical tokens for a `find` occurrence (not just the first word
+ * of the command), so it catches `find` appearing after `&&`, `;`, `|`, a
+ * command-substitution opener (`$(find ...)`), or backticks — not just a
+ * command that starts with `find`. Matching is case-insensitive on the
+ * command name (Windows resolves `Find`/`FIND` to the same binary as
+ * `find`) but NOT on the root-path token itself (POSIX paths are
+ * case-sensitive). Uses `extractLogicalTokens()` (quote-aware, and
+ * metacharacter-aware) so flag-shaped or path-shaped text embedded inside
+ * an unrelated quoted `--title`/`--body` value is never misread as a real
+ * `find` invocation (same class of decoy documented for `extractFlag()` —
+ * issues #1519, #1591), while a `find` glued to a shell metacharacter with
+ * no whitespace is still caught (issue #2034 review finding SEC-1/SEC-2).
+ *
+ * For each `find` token found, the search root is taken as the first
+ * following token that is not itself a `find` option (an option either
+ * starts with `-` or is `!` — `find`'s own root argument is always a bare
+ * positional path, never flag-shaped; the grouping operators `(`/`)` are
+ * shell metacharacters already stripped out by `extractLogicalTokens()`).
+ * Only an EXACT match against `FIND_ROOT_TOKEN_RE` blocks — `find
+ * /c/Users/.../repo -maxdepth 2 -name x` and `find "$REPO_PATH" ...` are
+ * legitimate, scoped searches and must be allowed.
+ *
+ * No operator override exists for this rule (unlike Rules 4/5-attribution)
+ * — a root-anchored `find` has no legitimate use in any ForgeDock pipeline.
+ *
+ * @param {string} command
+ * @returns {string|null} Error message to show, or null if allowed.
+ */
+function checkFindRoot(command) {
+  if (!command || !/find/i.test(command)) return null;
+
+  const tokens = extractLogicalTokens(command);
+
+  for (let i = 0; i < tokens.length; i++) {
+    if (tokens[i].toLowerCase() !== "find") continue;
+
+    // The search root is the first token after `find` that isn't a `find`
+    // option. `find` options always start with `-` (e.g. -maxdepth, -iname)
+    // or are `!` — the root path is always a bare positional token.
+    let rootToken = null;
+    for (let j = i + 1; j < tokens.length; j++) {
+      const val = tokens[j];
+      if (val.startsWith("-") || val === "!") continue;
+      rootToken = val;
+      break;
+    }
+
+    if (rootToken && FIND_ROOT_TOKEN_RE.test(rootToken)) {
+      return [
+        `[ForgeDock] BLOCKED: \`find\` rooted at filesystem root "${rootToken}".`,
+        ``,
+        `A \`find\` search starting at "${rootToken}" scans every mounted drive on`,
+        `Windows and never terminates — it becomes an orphaned, CPU-exhausting`,
+        `process once the parent sub-agent exits (issue #2034).`,
+        ``,
+        `Fix: scope the search to $REPO_PATH or a known path, e.g.:`,
+        `  find "$REPO_PATH" -iname "<pattern>"`,
+        ``,
+        `No override exists for this rule — a root-anchored \`find\` has no`,
+        `legitimate use in any ForgeDock pipeline.`,
+      ].join("\n");
+    }
   }
 
   return null;
