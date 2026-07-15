@@ -776,7 +776,7 @@ branches:
 
 # attribution:
 #   # When true, every pipeline-created PR ends with exactly one muted footer:
-#   #   > Orchestrated with [ForgeDock](https://github.com/RapierCraftStudios/ForgeDock)
+#   #   > ⚒️ Orchestrated with [ForgeDock](https://github.com/RapierCraftStudios/ForgeDock)
 #   #   > — state, scheduling, review, and memory on GitHub.
 #   # Posted once at PR creation — never duplicated on edits or retries.
 #   # Opt-out: set to false or omit this key.

@@ -92,6 +92,19 @@ async function getInvariants() {
  *    setting env vars via Bash tool calls, as this hook reads process.env which
  *    is set at process start, not at tool-call time).
  *
+ * 5. Attribution guard
+ *    Intercepts commit / PR / issue / comment creation commands (`git commit`,
+ *    `gh pr create|edit|comment`, `gh issue create|edit|comment`) and
+ *    hard-blocks any whose message or body carries the Claude Code harness
+ *    default attribution — "🤖 Generated with [Claude Code]", "Co-Authored-By:
+ *    Claude", or the `noreply@anthropic.com` co-author trailer. Pipeline output
+ *    is ForgeDock-branded; the assistant-tool attribution must never leak into
+ *    a repo's public commit/PR/issue history. The agent is told to remove the
+ *    attribution and, where a footer is wanted, use the ForgeDock signature.
+ *    Override: set FORGE_ALLOW_AI_ATTRIBUTION=1 in the shell environment before
+ *    starting Claude Code (operator-set only — same process.env semantics as
+ *    the gist guard above).
+ *
  * Both rules only apply inside a ForgeDock-managed directory (a directory
  * with a `forge.yaml` or `.forgedock` marker) — see `isForgeDockManagedCwd()`
  * (issue #1591). The hook installs into the user's global
@@ -137,6 +150,49 @@ const FORBIDDEN_PR_BASES = ["main", "master"];
 
 /** Labels that are always valid (non-workflow labels are not constrained). */
 const WORKFLOW_LABEL_PREFIX = "workflow:";
+
+// ---------------------------------------------------------------------------
+// Attribution guard constants (Rule 5)
+// Declared here — above the top-level `await main()` call — so they are
+// initialized before the hook runs. `checkAttribution` (a hoisted function
+// declaration) is defined further down, but the const values it closes over
+// must exist at call time or the reference throws into the fail-open catch.
+// ---------------------------------------------------------------------------
+
+/**
+ * Canonical ForgeDock signature line. The single source of truth for the
+ * pipeline's brand footer — command specs (work-on/review, review-pr,
+ * work-on/investigate) render this same wording. Kept here so the enforcement
+ * message can quote the exact replacement the agent should use.
+ */
+const FORGEDOCK_SIGNATURE =
+  "⚒️ Orchestrated with [ForgeDock](https://github.com/RapierCraftStudios/ForgeDock) — state, scheduling, review, and memory on GitHub.";
+
+/**
+ * Markers of the Claude Code harness default attribution. These are the exact
+ * signatures the assistant appends by default to commits and PR bodies; none
+ * of them belong in a repo's public commit/PR/issue history when the work is
+ * produced by the ForgeDock pipeline.
+ *
+ * Matching is case-insensitive and scoped (below) to commands that actually
+ * write a commit message or a GitHub body/comment, so mentions of "Claude
+ * Code" in unrelated commands (docs edits, greps) never trip this rule.
+ */
+const AI_ATTRIBUTION_MARKERS = [
+  /generated\s+with\s+\[?claude\s+code/i, // "🤖 Generated with [Claude Code](...)" / "Generated with Claude Code"
+  /co-authored-by:\s*claude/i,            // "Co-Authored-By: Claude ..."
+  /noreply@anthropic\.com/i,              // the anthropic co-author trailer email
+];
+
+/**
+ * Commands that carry a commit message or a GitHub body/comment — the only
+ * surfaces where an attribution footer can be persisted to history.
+ */
+const ATTRIBUTION_SCOPED_COMMANDS = [
+  /git\s+commit\b/,
+  /gh\s+pr\s+(?:create|edit|comment)\b/,
+  /gh\s+issue\s+(?:create|edit|comment)\b/,
+];
 
 // ---------------------------------------------------------------------------
 // Main — fail-open wrapper
@@ -203,6 +259,14 @@ async function main() {
   const gistViolation = checkGistVisibility(command);
   if (gistViolation) {
     process.stderr.write(gistViolation);
+    process.exit(2);
+    return;
+  }
+
+  // --- Rule 5: Attribution guard ---
+  const attributionViolation = checkAttribution(command);
+  if (attributionViolation) {
+    process.stderr.write(attributionViolation);
     process.exit(2);
     return;
   }
@@ -506,6 +570,49 @@ function checkGistVisibility(command) {
   }
 
   return null;
+}
+
+// ---------------------------------------------------------------------------
+// Rule 5: Attribution guard
+// ---------------------------------------------------------------------------
+
+/**
+ * Check whether a commit/PR/issue command carries Claude Code default
+ * attribution. Blocks it so ForgeDock-branded pipeline output never inherits
+ * the assistant-tool signature.
+ *
+ * Override: FORGE_ALLOW_AI_ATTRIBUTION=1 in the operator's shell environment
+ * (read at hook startup, not from the tool payload — agents cannot set it via
+ * a Bash tool call in the same session).
+ *
+ * @param {string} command
+ * @returns {string|null} Error message to show, or null if allowed.
+ */
+function checkAttribution(command) {
+  // Operator override.
+  if (process.env.FORGE_ALLOW_AI_ATTRIBUTION === "1") return null;
+
+  // Only scan commands that persist a message/body to history.
+  if (!ATTRIBUTION_SCOPED_COMMANDS.some((re) => re.test(command))) return null;
+
+  const hit = AI_ATTRIBUTION_MARKERS.find((re) => re.test(command));
+  if (!hit) return null;
+
+  return [
+    `[ForgeDock] BLOCKED: Claude Code default attribution in a commit/PR/issue.`,
+    ``,
+    `The command carries the assistant-tool attribution ("🤖 Generated with`,
+    `Claude Code" / "Co-Authored-By: Claude" / noreply@anthropic.com). Pipeline`,
+    `output is ForgeDock-branded — this must never land in the repo's public`,
+    `commit, PR, or issue history.`,
+    ``,
+    `Fix: remove the attribution line/trailer. If you want a brand footer, use`,
+    `the ForgeDock signature instead:`,
+    `  ${FORGEDOCK_SIGNATURE}`,
+    ``,
+    `Exception: set FORGE_ALLOW_AI_ATTRIBUTION=1 in your shell environment BEFORE`,
+    `starting Claude Code if you intentionally need the assistant attribution.`,
+  ].join("\n");
 }
 
 // ---------------------------------------------------------------------------

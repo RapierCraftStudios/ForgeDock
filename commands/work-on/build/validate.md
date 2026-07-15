@@ -304,6 +304,8 @@ Where `{SCOPE}` is the command or module scope from the contract (e.g. `work-on`
 
 This is the **only** commit for this build cycle. It replaces the old `git commit` that was previously in `implement.md` Phase I4. Do NOT create a separate commit for validation fixes — they are absorbed into this single commit.
 
+**Attribution**: The commit message is exactly the conventional-commit line above — nothing more. Do NOT append a `Co-Authored-By: Claude` trailer, a `🤖 Generated with Claude Code` line, or any assistant-tool attribution. Pipeline output is ForgeDock-branded; the assistant signature must never enter the repo's commit history. (A PreToolUse guard hard-blocks it as a backstop — see `bin/hooks/pre-tool-use.mjs` Rule 5.)
+
 ### V5 Post-Commit Ancestry Audit (MANDATORY)
 
 After committing, run the ancestry audit to detect merge commits from unrelated branches before the branch is pushed:
