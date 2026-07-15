@@ -1144,7 +1144,12 @@ export function renderSummaryCard(ctx) {
  * @param {string} [opts.backend]            - "cli" | "api" | "auto" (default
  *   "auto"). Resolution order when omitted: $FORGEDOCK_BACKEND env > "auto".
  *   "auto" prefers the local Claude Code CLI when detected (no
- *   ANTHROPIC_API_KEY needed), else falls back to the API backend.
+ *   ANTHROPIC_API_KEY needed), else falls back to the API backend. This
+ *   precedence is intentional/shipped (issue #2003's accepted acceptance
+ *   criteria) and is NOT changed by issue #2020 — that issue only adds a
+ *   discoverability notice (below) for the case where the ladder silently
+ *   preferred `cli` while an `ANTHROPIC_API_KEY` was also available, so
+ *   users know the `--backend api`/`FORGEDOCK_BACKEND=api` override exists.
  * @param {{log: Function, error?: Function}} [opts.logger] - Output sink.
  * @returns {Promise<{status: string, command: string, [k: string]: any}>}
  */
@@ -1203,6 +1208,30 @@ export async function runCommand(opts = {}) {
   }
 
   if (resolvedBackend === "cli") {
+    // Discoverability notice (issue #2020): the "auto" ladder's CLI-first
+    // precedence is intentional, shipped behavior (issue #2003's accepted
+    // acceptance criteria: "prefers CLI when present, falls back to SDK")
+    // and is NOT changed here — reverting it would contradict that accepted
+    // design, exactly as sibling issue #2023 found for the analogous
+    // init-enrich ladder. The actual gap #2020 identified is that this
+    // choice is invisible on a live run: --dry-run reports the resolved
+    // backend via renderDryRun() above, but a live run previously printed
+    // nothing, so a user who has both `claude` on PATH and
+    // ANTHROPIC_API_KEY set has no signal that the ladder picked "cli" over
+    // their key, nor that `--backend api`/`FORGEDOCK_BACKEND=api` exists to
+    // pin the previous (API-only) behavior. Gate strictly on:
+    //   - `backend` being the raw, pre-resolution "auto"/default value (an
+    //     explicit `--backend cli`/`FORGEDOCK_BACKEND=cli` request needs no
+    //     "did you mean to override" hint — the user already chose).
+    //   - `apiKey` being truthy (silent for the common CLI-only case with no
+    //     key at all — nothing to "switch away from").
+    if (backend === "auto" && apiKey) {
+      logger.log(
+        "Using the claude CLI backend (found on PATH). ANTHROPIC_API_KEY is also set — " +
+          "pass --backend api or set FORGEDOCK_BACKEND=api to use the API backend instead.",
+      );
+    }
+
     // model/maxIterations only apply to the api backend — the cli backend
     // uses whatever model the `claude` CLI itself is configured for, and has
     // no equivalent iteration-cap concept for a single `claude --print`
