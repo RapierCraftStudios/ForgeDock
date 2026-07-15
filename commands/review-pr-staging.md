@@ -1,7 +1,7 @@
 ---
 description: Staging review mode — comprehensive review of staging branch before deploy to main
 argument-hint: "[PR number or \"staging\"]"
-allowed-tools: Task, Bash, Read, Grep, Glob, WebFetch
+allowed-tools: Task, Agent, Bash, Read, Grep, Glob, WebFetch
 install: core
 ---
 <!-- SPDX-FileCopyrightText: Copyright (c) RapierCraft Studios -->
@@ -15,20 +15,33 @@ Performs comprehensive review of `staging` before merging to `main`. Handles lar
 
 **Agent model policy**: `model: "{DEFAULT_MODEL}"` — resolved from forge.yaml `agents.default_model`, else "sonnet" (standard tier). Fallback: `model: "opus"` if rate-limited. User can override with `--model <name>`. Feature gate: pass `effort` in Task/Skill spawns only on Claude Code >= 2.1.154.
 **NEVER use plan mode (EnterPlanMode).**
-**NEVER use the Agent tool** — this spec uses `Task` for domain agent dispatch. The Agent tool bypasses the allowed-tools constraint declared in this spec's frontmatter and produces opaque output that cannot be structured into the review verdict.
+**Sub-agent dispatch tool: `Task` preferred, `Agent` is the documented fallback.** This spec dispatches domain review agents via a sub-agent-spawning tool. Resolve which one is available ONCE per invocation, before Phase 3, per the **Sub-Agent Dispatch Tool Resolution** rule below — do not halt to ask the operator which tool to use. Never fall back to reviewing inline in the orchestrator's own context; that is a strictly weaker substitute for an isolated fresh-context reviewer and is not a permitted fallback.
 
 <!-- FORGE:SPEC_LOADED — review-pr-staging.md loaded and active. Agent is bound by this spec. -->
 
+## Sub-Agent Dispatch Tool Resolution (MANDATORY — run once, before Phase 3)
+
+This spec dispatches Bug Hunter and domain review agents via a sub-agent-spawning tool. Different runtimes expose different tools for this — resolve deterministically, once per invocation, and use the same tool for every dispatch call in this run:
+
+1. **If `Task` is available in the current environment**: set `{DISPATCH_TOOL} = Task`. This is the preferred tool — tightest `allowed-tools` scoping. (Identical resolution logic to `/review-pr` Phase 3C — do not diverge.)
+2. **Else if `Agent` is available**: set `{DISPATCH_TOOL} = Agent`. This is the documented fallback, not a degraded path — use it exactly as you would `Task`: one call per selected agent (Bug Hunters in Phase 3, Code Quality in Phase 4, domain agents in Phase 5), same prompt template, `subagent_type: "general-purpose"` (or the closest equivalent the environment offers), same requirement that each agent posts its own findings directly to the PR via `gh pr comment`. Isolation and fresh-context review are preserved either way.
+3. **Neither tool is available**: this is a genuine setup defect, not a routing decision — HARD STOP, post a PR/issue comment explaining that no sub-agent dispatch tool is available, add `needs-human`, and exit without posting a verdict. Do NOT fall back to reviewing inline in the orchestrator's own context.
+
+**Do not halt to ask the operator which tool to use.** Steps 1–2 are deterministic and fully resolve the common case; only step 3 (both absent) requires a stop, and even then the action is HARD STOP + `needs-human`, not a question back to the operator.
+
+Everywhere this file says `Task(...)`, read it as `{DISPATCH_TOOL}(...)` using the value resolved here.
+
 ## Forbidden Tools Self-Check
 
-**Before executing any phase**, verify you are NOT using any of these tools:
+**Before executing any phase**, verify you are NOT using any of these:
 
-| Tool | Status | Reason |
+| Tool/Pattern | Status | Reason |
 |------|--------|--------|
-| `Agent` | **FORBIDDEN** | Bypasses allowed-tools constraint; produces opaque output that cannot be structured into the review verdict |
+| `Agent`, when `Task` is available | **FORBIDDEN** | `Task` is preferred whenever present — `Agent` is only the fallback for when `Task` is absent, not a free substitute |
+| Inline self-review (no sub-agent spawn at all) | **FORBIDDEN** | Bypasses isolated fresh-context review entirely — always spawn via the resolved `{DISPATCH_TOOL}`, never review directly in the orchestrator's own context |
 | `EnterPlanMode` | **FORBIDDEN** | Breaks execution context; phases must be executed, not planned |
 
-If you find yourself about to call `Agent(...)`, stop and use `Task(...)` instead.
+If you find yourself about to call `Agent(...)` while `Task` is available, stop and use `Task(...)` instead. If neither `Task` nor `Agent` is available, do not fall through to inline review — follow step 3 of Sub-Agent Dispatch Tool Resolution above.
 
 ---
 
