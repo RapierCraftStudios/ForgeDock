@@ -1,6 +1,6 @@
 ---
 description: Create a well-structured GitHub issue that the pipeline can consume reliably
-argument-hint: "[description of the problem or feature]"
+argument-hint: "[description of the problem or feature] [--dry-run]"
 ---
 <!-- SPDX-FileCopyrightText: Copyright (c) RapierCraft Studios -->
 <!-- SPDX-License-Identifier: AGPL-3.0-or-later -->
@@ -11,8 +11,30 @@ argument-hint: "[description of the problem or feature]"
 
 You create GitHub issues with the exact structure the `/work-on` pipeline expects. Every issue you create must give the investigation agent enough context to find the right files on the first pass — no vague descriptions, no missing domains, no ambiguous scope.
 
+`/issue` is the structured create-hook for issue creation across the pipeline — it enforces the canonical template, reads code before drafting, runs dedup, and validates mandatory sections. Because those checks are deterministic, `/issue` **creates the issue by default once they pass** — it does not wait for a human to approve the draft. Pass `--dry-run` to review the draft without creating anything (see Argument Parsing below).
+
 **Agent model policy**: `model: "{DEFAULT_MODEL}"` — resolved from forge.yaml `agents.default_model`, else "sonnet" (standard tier). Fallback: `model: "opus"` if rate-limited. Feature gate: pass `effort` in Task/Skill spawns only on Claude Code >= 2.1.154.
 **NEVER use plan mode (EnterPlanMode).**
+
+---
+
+## Argument Parsing
+
+| Flag | Effect |
+|------|--------|
+| (none) | Default — read code, dedup, draft, validate, then create the issue immediately. No pre-create confirmation prompt. |
+| `--dry-run` | Draft and validate as normal, but STOP before `gh issue create` — print the draft (or batch draft table) for human review instead of creating it |
+
+```bash
+DRY_RUN=false
+for arg in $ARGUMENTS; do
+  case "$arg" in
+    --dry-run) DRY_RUN=true ;;
+  esac
+done
+```
+
+`--dry-run` never bypasses a correctness gate — the Phase 2D dedup STOP and the `--force` human-override rule (see Phase 2D) apply identically whether or not `--dry-run` is set.
 
 ---
 
@@ -353,10 +375,14 @@ Before creating, verify:
 
 ## Phase 4: Create the Issue
 
-### 4A: Present draft to user
+### 4A: Create by default, or stop for review with `--dry-run`
+
+Once Phase 2D (dedup) has passed with no blocking duplicate and Phase 3E (draft validation) has passed, proceed directly to Phase 4B and create the issue. **No pre-create confirmation prompt.** This is the default for both interactive and programmatic invocations — dedup and validation are the correctness gates, not a human approval step.
+
+**If `--dry-run` was passed** (see Argument Parsing): print the draft below and STOP. Do NOT run Phase 4B.
 
 ```
-## Issue Draft
+## Issue Draft (--dry-run — not created)
 
 **Repo**: {GH_REPO}
 **Title**: {title}
@@ -369,10 +395,8 @@ Before creating, verify:
 
 ---
 
-Create this issue? (yes / adjust / cancel)
+Re-run without --dry-run to create this issue.
 ```
-
-**Wait for user confirmation.** Do NOT create the issue without approval.
 
 ### 4B: Create the issue
 
@@ -481,13 +505,25 @@ fi
 
 If the user provides multiple issues to create (e.g., from an audit, analytics session, or decomposition):
 
-1. Draft ALL issues first
-2. Present them as a numbered list for review
-3. Create all after confirmation
-4. Report all created issue numbers
+1. Draft ALL issues first (each running its own dedup + validation pass, Phase 2D/3E)
+2. Create all of them by default — consistent with the single-issue default in Phase 4A. No pre-create confirmation prompt.
+3. If `--dry-run` was passed, present them as a numbered list instead of creating them (see table below) and STOP
+4. Report all created (or, under `--dry-run`, all drafted) issue numbers
 
+**Default (no `--dry-run`)**: create each drafted issue in order, then report:
 ```
-## Batch Issue Draft
+## Batch Issues Created
+
+| # | Issue | Priority | Category | Deps |
+|---|-------|----------|----------|------|
+| 1 | #{N1} {title} | P2 | bug | — |
+| 2 | #{N2} {title} | P1 | feature | After #{N1} |
+| 3 | #{N3} {title} | P2 | refactor | — |
+```
+
+**With `--dry-run`**: print the batch draft table and stop before any `gh issue create` call:
+```
+## Batch Issue Draft (--dry-run — not created)
 
 | # | Title | Priority | Category | Deps |
 |---|-------|----------|----------|------|
@@ -507,7 +543,7 @@ If the user provides multiple issues to create (e.g., from an audit, analytics s
 
 </details>
 
-Create all {N} issues? (yes / adjust #N / cancel)
+Re-run without --dry-run to create these {N} issues.
 ```
 
 ---
@@ -530,7 +566,7 @@ Create all {N} issues? (yes / adjust #N / cancel)
 
 1. **Always read code before creating an issue.** Never create an issue based solely on user description without verifying the files exist and the problem is plausible.
 2. **Always check for duplicates.** Creating duplicate issues wastes agent runs.
-3. **Always wait for user confirmation.** Never create issues without showing the draft first.
+3. **Default to non-interactive creation.** Once dedup (Phase 2D) and draft validation (Phase 3E) pass, create the issue — do not wait for a human to approve the draft. Only pause for human review when `--dry-run` is explicitly passed.
 4. **Never fabricate file paths.** Every path in the issue body must be verified against the actual repo.
 5. **Never omit override/companion files.** If one compose file is affected, check the other. If one model is affected, check its migration.
 6. **Use conventional commit prefixes in titles.** The pipeline and changelog depend on them.
