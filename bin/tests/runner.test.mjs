@@ -1200,6 +1200,104 @@ describe("runCliBackend argv safety", () => {
 });
 
 // ---------------------------------------------------------------------------
+// runCliBackend — content passthrough (review finding BUG-3, issue #2029)
+//
+// The injection-safety test above proves shell metacharacters in
+// `userMessage` are never *executed*, but it never asserts on the actual
+// *content* the CLI binary receives. That gap is precisely why BUG-1 (#2019
+// — the CLI backend silently drops `systemPrompt`/`spec.content`, so the
+// spawned `claude` process never sees the command specification at all) went
+// uncaught by an otherwise-strong suite. This test closes that gap by
+// capturing the literal argv delivered to the spawned binary and asserting
+// on it directly, using a recording stub binary via the `bin` test seam
+// (same POSIX-shebang stub-binary pattern already used in
+// bin/tests/router.test.mjs — CI runs ubuntu-only, see .github/workflows/ci.yml).
+//
+// NOTE: this pins down TODAY's actual behavior — `runCliBackend` currently
+// receives only `userMessage` ("Execute: /work-on 2003"), not the command
+// spec content, because #2019 is not yet fixed. Fixing #2019 is explicitly
+// out of scope for this test-coverage issue (#2029). Once #2019 lands (i.e.
+// runCliBackend starts receiving/forwarding the system prompt), this test's
+// captured-argv assertion will need a corresponding update — that update
+// being forced is the whole point: this is the regression net that would
+// have caught BUG-1 in the first place.
+// ---------------------------------------------------------------------------
+
+describe("runCliBackend content passthrough (issue #2029)", () => {
+  it("delivers the exact argv — including the literal userMessage — to the spawned CLI binary", () => {
+    // The stub relies on a POSIX shebang; CI runs ubuntu-only (see
+    // .github/workflows/ci.yml), matching the existing precedent in
+    // bin/tests/router.test.mjs. Skip on other platforms rather than fail.
+    if (process.platform === "win32") {
+      return;
+    }
+
+    const shimDir = mkdtempSync(join(os.tmpdir(), "forgedock-cli-argv-capture-"));
+    const captureFile = join(shimDir, "captured-argv.json");
+    const recorderPath = join(shimDir, "record-argv.mjs");
+    const fakeClaudePath = join(shimDir, "fake-claude");
+
+    // The recorder writes its own received argv (everything after the
+    // recorder script path) to captureFile as JSON — this is what actually
+    // reached the "CLI".
+    writeFileSync(
+      recorderPath,
+      [
+        'import { writeFileSync } from "node:fs";',
+        "writeFileSync(process.argv[2], JSON.stringify(process.argv.slice(3)));",
+      ].join("\n") + "\n",
+      "utf-8",
+    );
+
+    // The stub binary is what `runCliBackend` actually spawns (via the `bin`
+    // seam). It re-execs node against the recorder, passing its own argv
+    // through untouched via "$@" — this avoids node's own -p/--print flag
+    // parsing (which would otherwise swallow "--print" as node's own CLI
+    // flag, as happens in the sibling injection-safety test above).
+    writeFileSync(
+      fakeClaudePath,
+      ["#!/bin/sh", `exec node "${recorderPath}" "${captureFile}" "$@"`, ""].join("\n"),
+      { mode: 0o755 },
+    );
+
+    const message = "Execute: /work-on 2003";
+    const logLines = [];
+
+    const result = runCliBackend({
+      spec: loadCommandSpec(COMMANDS_DIR, "work-on"),
+      userMessage: message,
+      args: ["2003"],
+      cwd: shimDir,
+      logger: { log: (s) => logLines.push(s) },
+      bin: fakeClaudePath,
+    });
+
+    assert.equal(result.status, "complete");
+    assert.ok(existsSync(captureFile), "the stub binary must have run and recorded its argv");
+
+    const capturedArgv = JSON.parse(readFileSync(captureFile, "utf-8"));
+
+    // This is the assertion the finding says was missing: the exact content
+    // reaching the CLI invocation, not just "no shell injection occurred".
+    assert.deepStrictEqual(capturedArgv, [
+      "--print",
+      message,
+      "--dangerously-skip-permissions",
+    ]);
+
+    // Documents today's actual (BUG-1-affected) behavior: the spec content
+    // is not part of what reaches the CLI. See the block comment above —
+    // this is expected to require an update once #2019 is fixed.
+    assert.ok(
+      !capturedArgv[1].includes("COMMAND SPECIFICATION"),
+      "current behavior: the command spec is NOT part of the CLI payload (tracked separately in #2019)",
+    );
+
+    rmSync(shimDir, { recursive: true, force: true });
+  });
+});
+
+// ---------------------------------------------------------------------------
 // Backend selection — isClaudeCliAvailable / resolveBackend (issue #2003)
 // ---------------------------------------------------------------------------
 
