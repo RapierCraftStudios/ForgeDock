@@ -274,10 +274,11 @@ Each journey agent: maintain state ledger, verify outcomes cross-step, report da
 1. Parse all agent findings
 2. Deduplicate (prefer journey context over page-only findings)
 3. Reprioritize: found in 3+ pages → bump severity; blocks journey → P0
-4. Create GitHub issues:
+4. Create GitHub issues — route creation through the `/issue` create-hook's programmatic invocation contract (see `commands/issue.md` → Programmatic Invocation Contract) so dedup and mandatory-section validation run on every finding:
 
 ```bash
-gh issue create --title "{fix|feat}: {title} on {page}" --label "qa,{bug_or_enhancement},{priority}" --body "$(cat <<'BODY_EOF'
+QA_BODY_FILE=$(mktemp)
+cat > "$QA_BODY_FILE" <<'BODY_EOF'
 ## Problem
 
 {1-3 sentences: what the QA sweep found. What's broken or missing, with specific observable behavior.}
@@ -318,8 +319,13 @@ Files that need changes:
 
 {List other pages where this issue was also observed, or "None"}
 BODY_EOF
-)"
 ```
+
+```
+Skill(skill="issue", args="--title \"{fix|feat}: {title} on {page}\" --body-file \"$QA_BODY_FILE\" --label \"qa\" --label \"{bug_or_enhancement}\" --label \"{priority}\"")
+```
+
+`qa`, `{bug_or_enhancement}`, and `{priority}` are each passed as their own `--label` flag — `/issue`'s programmatic mode does not comma-split a single `--label` value.
 
 Issue body includes: Source, Page, Device, Type, Severity, Journey context, Description, Steps to Reproduce, State Context, Cross-Page Impact.
 

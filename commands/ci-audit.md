@@ -362,11 +362,15 @@ ${VERSION_NOTE}
             echo "$ISSUE_BODY"
             echo "Labels: bug,P2,audit-finding"
         else
-            CREATED_ISSUE=$(gh issue create $GH_FLAG \
-                --title "ci($tool): add structural config validation step to CI pipeline" \
-                --body "$ISSUE_BODY" \
-                --label "bug,P2,audit-finding" 2>&1)
-            echo "Created issue for $tool gap: $CREATED_ISSUE"
+            # Route creation through the /issue create-hook's programmatic invocation
+            # contract (see commands/issue.md -> Programmatic Invocation Contract) so
+            # dedup and mandatory-section validation run on every CI-gap finding.
+            # Written to a temp file (rather than passed inline via --body) because
+            # $ISSUE_BODY contains backticks and other shell metacharacters that would
+            # be unsafe to re-embed into a Skill args string.
+            CI_GAP_BODY_FILE=$(mktemp)
+            printf '%s' "$ISSUE_BODY" > "$CI_GAP_BODY_FILE"
+            Skill(skill="issue", args="--title \"ci($tool): add structural config validation step to CI pipeline\" --body-file \"$CI_GAP_BODY_FILE\" --label \"bug\" --label \"P2\" --label \"audit-finding\"")
         fi
     fi
 done
@@ -402,10 +406,15 @@ The project has a \`$tool\` validation step in CI, but it only runs in the deplo
     if [ "$DRY_RUN" = "true" ]; then
         echo "=== DRY RUN: Would create placement issue for $tool ==="
     else
-        gh issue create $GH_FLAG \
-            --title "ci($tool): move config validation to PR-time CI workflow" \
-            --body "$ISSUE_BODY" \
-            --label "bug,P3,audit-finding" 2>&1
+        # Route creation through the /issue create-hook's programmatic invocation
+        # contract (see commands/issue.md -> Programmatic Invocation Contract) so
+        # dedup and mandatory-section validation run on every finding. Written to a
+        # temp file (rather than passed inline via --body) because $ISSUE_BODY
+        # contains backticks and other shell metacharacters that would be unsafe to
+        # re-embed into a Skill args string.
+        CI_PLACEMENT_BODY_FILE=$(mktemp)
+        printf '%s' "$ISSUE_BODY" > "$CI_PLACEMENT_BODY_FILE"
+        Skill(skill="issue", args="--title \"ci($tool): move config validation to PR-time CI workflow\" --body-file \"$CI_PLACEMENT_BODY_FILE\" --label \"bug\" --label \"P3\" --label \"audit-finding\"")
     fi
 done
 ```
