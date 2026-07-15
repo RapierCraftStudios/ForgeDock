@@ -136,6 +136,10 @@ function buildEnrichPrompt(draft) {
  *   child_process.spawnSync. Test seam only — lets tests deterministically
  *   simulate success/timeout/non-zero-exit/spawn-error without depending on
  *   a real `claude` install or OS-specific executable shimming.
+ * @param {object} [opts.env] - Environment to derive the scrubbed child env
+ *   from (see SECURITY note below). Defaults to process.env. Test seam —
+ *   mirrors bin/init-enrich-api.mjs's opts.env, lets tests assert on the
+ *   scrub without mutating the real process env.
  * @returns {Promise<object>} Enriched ConfigDraft, or the original draft on
  *   any failure.
  */
@@ -145,6 +149,7 @@ export async function enrich(draft, opts = {}) {
     bin = "claude",
     timeoutMs,
     spawnFn = spawnSync,
+    env = process.env,
   } = opts;
 
   const rawTimeout = parseInt(process.env.FORGEDOCK_CLI_ENRICH_TIMEOUT_MS, 10);
@@ -156,6 +161,15 @@ export async function enrich(draft, opts = {}) {
         : DEFAULT_ENRICH_TIMEOUT_MS;
 
   const message = buildEnrichPrompt(draft);
+
+  // Scrub the Anthropic API key from the child environment. Even though this
+  // backend is restricted to read-only tools (no bash) via
+  // --allowedTools/--disallowedTools, the spawned `claude` process would
+  // otherwise still inherit ANTHROPIC_API_KEY unnecessarily — mirrors the
+  // scrub in bin/runner.mjs's runCliBackend/run_bash. GH_TOKEN/GITHUB_TOKEN
+  // and all other env vars are intentionally left intact.
+  const childEnv = { ...env };
+  delete childEnv.ANTHROPIC_API_KEY;
 
   let result;
   try {
@@ -183,6 +197,7 @@ export async function enrich(draft, opts = {}) {
         encoding: "utf-8",
         maxBuffer: 50 * 1024 * 1024,
         timeout: resolvedTimeoutMs,
+        env: childEnv,
       },
     );
   } catch (err) {

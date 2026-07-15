@@ -352,6 +352,18 @@ export function runCliBackend({
   }
 
   try {
+    // Scrub the Anthropic API key from the child environment. This backend
+    // runs with `--dangerously-skip-permissions` (no confirmation gate on any
+    // tool call, including bash), and the runner is designed to feed
+    // untrusted third-party content (issue/PR bodies via gh) into the model
+    // loop — so a prompt-injection payload could otherwise issue a bash
+    // command that exfiltrates the key straight out of its own environment.
+    // Mirrors the existing scrub in the `run_bash` tool handler below.
+    // GH_TOKEN/GITHUB_TOKEN and all other env vars are intentionally left
+    // intact — only the Anthropic key is removed.
+    const childEnv = { ...process.env };
+    delete childEnv.ANTHROPIC_API_KEY;
+
     // No `shell` option (defaults to false): argv is passed as discrete,
     // unparsed elements — see the SECURITY note above. This also correctly
     // resolves the Windows `.cmd` shim without needing shell:true.
@@ -360,6 +372,7 @@ export function runCliBackend({
       encoding: "utf-8",
       maxBuffer: 50 * 1024 * 1024,
       timeout: timeoutMs,
+      env: childEnv,
     });
 
     const stdout = result.stdout ? String(result.stdout) : "";
