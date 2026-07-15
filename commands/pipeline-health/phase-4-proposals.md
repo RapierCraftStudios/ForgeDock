@@ -57,10 +57,13 @@ while IFS= read -r line; do
     "#\(.number)"
   ' 2>/dev/null | head -10 | tr '\n' ' ')
 
-  gh issue create {GH_FLAG} \
-    --title "feat(quality-gate): promote pattern '$SLUG' to deterministic registry check (recurred ${COUNT}x)" \
-    --label "check-promotion,priority:P2" \
-    --body "$(cat <<CHECK_EOF
+  # Route through the /issue programmatic create-hook (#2085) instead of a raw
+  # `gh issue create` — gets Phase 2D dedup + Phase 3F body validation for free.
+  # The hook's programmatic mode requires the body via --body-file, and expects
+  # one repeatable --label flag per label (a single comma-joined --label value
+  # would be treated as one malformed label name, not two labels).
+  CHECK_BODY_FILE=$(mktemp)
+  cat > "$CHECK_BODY_FILE" <<CHECK_EOF
 ## Problem
 
 The review-finding pattern \`$SLUG\` has recurred ${COUNT} times in the analysis window ($(date -u +%Y-%m-%d) window). Each recurrence costs a full investigate→build→review→merge cycle. A static check catches this in milliseconds.
@@ -91,7 +94,9 @@ ${SOURCE_FINDINGS}
 
 <!-- AUTO-CREATED: pipeline-health Phase 4A — pattern recurrence threshold exceeded -->
 CHECK_EOF
-  )"
+
+  Skill(skill="issue", args="--title \"feat(quality-gate): promote pattern '$SLUG' to deterministic registry check (recurred ${COUNT}x)\" --body-file $CHECK_BODY_FILE --label check-promotion --label priority:P2")
+  rm -f "$CHECK_BODY_FILE"
   echo "Created check-promotion issue for pattern '$SLUG' (recurred ${COUNT}x from: $SOURCE_FINDINGS)"
 done <<< "$PATTERN_LIST"
 ```
@@ -167,10 +172,10 @@ echo "$SPEC_CONCENTRATION" | while IFS=' ' read -r count spec_file finding_nums;
   FINDING_LINKS=$(echo "$finding_nums" | tr ',' '\n' | \
     awk '{print "- " $0}' | head -20 | tr '\n' '\n')
 
-  gh issue create {GH_FLAG} \
-    --title "feat(spec-doctor): queue spec evolution pass for $(basename $spec_file .md) (${count} concentrated findings)" \
-    --label "spec-doctor-trigger,priority:P2" \
-    --body "$(cat <<TRIGGER_EOF
+  # Route through the /issue programmatic create-hook (#2085) instead of a raw
+  # `gh issue create` — same rationale and --label handling as Phase 4A above.
+  TRIGGER_BODY_FILE=$(mktemp)
+  cat > "$TRIGGER_BODY_FILE" <<TRIGGER_EOF
 ## Problem
 
 \`$spec_file\` has accumulated **${count} review findings** in the last 30 days.
@@ -206,7 +211,9 @@ This issue was auto-created by \`pipeline-health\` Phase 4A.5.
 
 <!-- AUTO-CREATED: pipeline-health Phase 4A.5 — spec concentration threshold exceeded -->
 TRIGGER_EOF
-  )"
+
+  Skill(skill="issue", args="--title \"feat(spec-doctor): queue spec evolution pass for $(basename $spec_file .md) (${count} concentrated findings)\" --body-file $TRIGGER_BODY_FILE --label spec-doctor-trigger --label priority:P2")
+  rm -f "$TRIGGER_BODY_FILE"
   echo "Created spec-doctor trigger for '$spec_file' (${count} findings: $finding_nums)"
 done
 ```
