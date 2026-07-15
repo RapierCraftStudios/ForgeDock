@@ -359,4 +359,44 @@ describe("runIssue", () => {
       assert.deepEqual(Object.keys(call).sort(), ["args", "commandName", "commandsDir"].sort());
     }
   });
+
+  it("forge#2054: an invalid backend fails fast with a coded, non-retryable error instead of being retried", async () => {
+    const { io } = fakeWorld();
+    const calls = [];
+    const runner = async (call) => { calls.push(call); return { status: "complete" }; };
+
+    await assert.rejects(
+      () => runIssue({ issue: 42, dir, agentId: "a1", lane: "staging",
+        io, runner, now: () => 1000, maxAttempts: 3, backend: "nonsense" }),
+      (err) => {
+        assert.equal(err.code, "INVALID_BACKEND");
+        assert.match(err.message, /Invalid backend "nonsense"/);
+        return true;
+      },
+    );
+
+    // Must fail before any phase attempt — no PHASE_START event, no runner() call at all.
+    assert.equal(calls.length, 0, "runner() must never be called for an invalid backend");
+    const events = readLog(dir, 42);
+    assert.ok(!events.some((e) => e.event === "PHASE_START"),
+      "no PHASE_START event should be appended — the invalid backend must be rejected before the retry loop");
+  });
+
+  it("forge#2054: backend undefined (no override) and valid values are unaffected by the new check", async () => {
+    for (const [i, backend] of [undefined, "cli", "api", "auto"].entries()) {
+      // Distinct issue number + fresh subdir per iteration so each run starts
+      // from a clean run-log (dir/readLog is keyed by issue number on disk).
+      const issue = 100 + i;
+      const { w, io } = fakeWorld();
+      const script = { "work-on/investigate": () => { w.markers += " INVESTIGATION:COMPLETE"; } };
+      const runner = async (call) => { script[call.commandName]?.(); return { status: "complete" }; };
+
+      const res = await runIssue({ issue, dir, agentId: "a1", lane: "staging",
+        io, runner, now: () => 1000, maxAttempts: 1, ...(backend ? { backend } : {}) });
+
+      // Reaches the normal phase-driving path (blocks on needs-human because only
+      // investigate is scripted) rather than rejecting synchronously.
+      assert.equal(res.terminalReason, "needs-human", `backend=${backend} must not be rejected`);
+    }
+  });
 });
