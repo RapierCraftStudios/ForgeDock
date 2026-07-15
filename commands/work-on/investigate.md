@@ -380,7 +380,7 @@ if [ "$ATTRIBUTION_ANNOTATION_LINK" = "true" ]; then
   ANNOTATION_LINK_FOOTER="
 
 ---
-*Pipeline powered by [ForgeDock](https://github.com/RapierCraftStudios/ForgeDock)*"
+*⚒️ Pipeline powered by [ForgeDock](https://github.com/RapierCraftStudios/ForgeDock)*"
 fi
 ```
 

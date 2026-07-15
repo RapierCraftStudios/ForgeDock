@@ -1902,7 +1902,7 @@ ATTRIBUTION_FOOTER_LINE=""
 if [ "$ATTRIBUTION_PR_FOOTER" = "true" ]; then
   ATTRIBUTION_FOOTER_LINE="
 ---
-> Orchestrated with [ForgeDock](https://github.com/RapierCraftStudios/ForgeDock) — state, scheduling, review, and memory on GitHub."
+> ⚒️ Orchestrated with [ForgeDock](https://github.com/RapierCraftStudios/ForgeDock) — state, scheduling, review, and memory on GitHub."
 fi
 
 # Build trust annotation line for verdict body — always included so the decision is auditable.

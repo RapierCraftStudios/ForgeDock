@@ -898,3 +898,95 @@ describe("settings-hook — PreToolUse wiring", () => {
     after();
   });
 });
+
+// ---------------------------------------------------------------------------
+// Rule 5: Attribution guard — blocks Claude Code default attribution from
+// landing in a repo's commit/PR/issue history (subprocess integration).
+// ---------------------------------------------------------------------------
+
+describe("attribution guard — subprocess", () => {
+  it("blocks a commit carrying a Co-Authored-By: Claude trailer", () => {
+    const { exitCode, stderr } = runHook({
+      hook_event_name: "PreToolUse",
+      tool_name: "Bash",
+      tool_input: {
+        command:
+          'git commit -m "fix(x): thing" -m "Co-Authored-By: Claude <noreply@anthropic.com>"',
+      },
+    });
+    assert.equal(exitCode, 2);
+    assert.match(stderr, /BLOCKED/);
+    assert.match(stderr, /ForgeDock/);
+  });
+
+  it("blocks a PR body with '🤖 Generated with [Claude Code]'", () => {
+    const { exitCode, stderr } = runHook({
+      hook_event_name: "PreToolUse",
+      tool_name: "Bash",
+      tool_input: {
+        command:
+          'gh pr create --base staging --title foo --body "Summary\n\n🤖 Generated with [Claude Code](https://claude.com/claude-code)"',
+      },
+    });
+    assert.equal(exitCode, 2);
+    assert.match(stderr, /BLOCKED/);
+  });
+
+  it("blocks an issue comment carrying the anthropic co-author email", () => {
+    const { exitCode } = runHook({
+      hook_event_name: "PreToolUse",
+      tool_name: "Bash",
+      tool_input: {
+        command: 'gh issue comment 12 --body "done\n\nnoreply@anthropic.com"',
+      },
+    });
+    assert.equal(exitCode, 2);
+  });
+
+  it("allows a clean commit with no attribution", () => {
+    const { exitCode } = runHook({
+      hook_event_name: "PreToolUse",
+      tool_name: "Bash",
+      tool_input: { command: 'git commit -s -m "fix(x): thing (#42)"' },
+    });
+    assert.equal(exitCode, 0);
+  });
+
+  it("allows a PR body carrying the ForgeDock signature", () => {
+    const { exitCode } = runHook({
+      hook_event_name: "PreToolUse",
+      tool_name: "Bash",
+      tool_input: {
+        command:
+          'gh pr create --base staging --title foo --body "Summary\n\n> ⚒️ Orchestrated with ForgeDock — state, scheduling, review, and memory on GitHub."',
+      },
+    });
+    assert.equal(exitCode, 0);
+  });
+
+  it("does not fire on unrelated commands that mention Claude Code", () => {
+    const { exitCode } = runHook({
+      hook_event_name: "PreToolUse",
+      tool_name: "Bash",
+      tool_input: { command: 'grep -r "Generated with Claude Code" docs/' },
+    });
+    assert.equal(exitCode, 0);
+  });
+
+  it("honors FORGE_ALLOW_AI_ATTRIBUTION=1 operator override", () => {
+    const result = spawnSync(process.execPath, [HOOK_PATH], {
+      input: JSON.stringify({
+        hook_event_name: "PreToolUse",
+        tool_name: "Bash",
+        tool_input: {
+          command: 'git commit -m "x" -m "Co-Authored-By: Claude"',
+        },
+      }),
+      encoding: "utf-8",
+      timeout: 5000,
+      env: { ...process.env, NODE_OPTIONS: "", FORGE_ALLOW_AI_ATTRIBUTION: "1" },
+      cwd: DEFAULT_MANAGED_DIR,
+    });
+    assert.equal(result.status ?? -1, 0);
+  });
+});
