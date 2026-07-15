@@ -197,6 +197,54 @@ export function isClaudeCliAvailable(cwd = process.cwd(), { execImpl = execSync 
 }
 
 /**
+ * Shared backend-resolution primitive (issue #2026) used by both
+ * `resolveBackend()` (below, `forgedock run`'s engine ladder — issue #2003)
+ * and `resolveEnrichBackend()` (bin/init-enrich.mjs's init-enrichment
+ * ladder — issue #2004). Both ladders share the exact same two steps — an
+ * explicit override wins outright, otherwise probe the local Claude Code
+ * CLI and prefer it when present — but diverge on (a) which override
+ * values are valid and whether an invalid one throws or is silently
+ * ignored, and (b) what to return when the CLI probe fails (`resolveBackend`
+ * always falls back to `"api"`; `resolveEnrichBackend` falls back to `"api"`
+ * only if `ANTHROPIC_API_KEY` is set, else `"none"`). Rather than force
+ * those into one shape, this shared helper implements exactly the common
+ * two steps and defers to a `cliFallback` callback for the diverging tail,
+ * and defers override *validation* (throw vs. fall-through) entirely to
+ * the caller — this function only performs a membership check, it never
+ * throws. This removes the duplicated CLI-probe-and-branch logic while
+ * preserving each caller's distinct, already-shipped behavior byte-for-byte.
+ *
+ * @param {object} opts
+ * @param {string} [opts.override] - Pre-validated override value. Returned
+ *   as-is when it is a member of `validOverrides`; otherwise ignored (the
+ *   caller is responsible for deciding whether an unrecognized value should
+ *   throw or fall through — this helper never throws).
+ * @param {Set<string>} opts.validOverrides - The set of override values this
+ *   caller accepts outright.
+ * @param {string} [opts.cwd] - Working directory for the CLI probe.
+ * @param {Function} [opts.isCliAvailableFn] - Injectable CLI-presence probe.
+ *   Defaults to `isClaudeCliAvailable` (which is itself memoized per `cwd` —
+ *   issue #2011). Callers MUST pass this through rather than reimplementing
+ *   probing, to preserve that cache.
+ * @param {Function} opts.cliFallback - Called (no args) when no valid
+ *   override was given AND the CLI probe failed. Must return the caller's
+ *   fallback backend value (e.g. `"api"`, or `"api"|"none"` depending on an
+ *   API key check).
+ * @returns {string} The resolved backend value.
+ */
+export function resolveBackendLadder({
+  override,
+  validOverrides,
+  cwd = process.cwd(),
+  isCliAvailableFn = isClaudeCliAvailable,
+  cliFallback,
+}) {
+  if (override !== undefined && validOverrides.has(override)) return override;
+  if (isCliAvailableFn(cwd)) return "cli";
+  return cliFallback();
+}
+
+/**
  * Resolve which execution backend `runCommand()` should use.
  *
  * Ladder (issue #2003):
@@ -210,6 +258,13 @@ export function isClaudeCliAvailable(cwd = process.cwd(), { execImpl = execSync 
  *      falls back to the API backend unchanged (existing behavior for every
  *      caller that never opts in to this feature).
  *
+ * Delegates its shared "override-or-probe-CLI" shape to
+ * `resolveBackendLadder()` (issue #2026) — this function retains its own
+ * `VALID_BACKENDS` throw-on-invalid check (NOT shared; see that helper's
+ * doc comment) and its own no-API-key-check fallback (always `"api"`,
+ * unconditionally — the API key itself is validated lazily downstream, only
+ * if/when the api backend is actually selected).
+ *
  * @param {object} [opts]
  * @param {string} [opts.requested] - "cli" | "api" | "auto" (default "auto").
  * @param {string} [opts.cwd]       - Working directory for the CLI probe.
@@ -221,8 +276,12 @@ export function resolveBackend({ requested = "auto", cwd = process.cwd() } = {})
       `Invalid backend "${requested}". Must be one of: ${[...VALID_BACKENDS].join(", ")}.`,
     );
   }
-  if (requested === "cli" || requested === "api") return requested;
-  return isClaudeCliAvailable(cwd) ? "cli" : "api";
+  return resolveBackendLadder({
+    override: requested === "auto" ? undefined : requested,
+    validOverrides: new Set(["cli", "api"]),
+    cwd,
+    cliFallback: () => "api",
+  });
 }
 
 /**

@@ -48,6 +48,7 @@ import {
   runCommand,
   isClaudeCliAvailable,
   resolveBackend,
+  resolveBackendLadder,
   runCliBackend,
 } from "../runner.mjs";
 
@@ -1640,6 +1641,66 @@ describe("resolveBackend", () => {
       () => resolveBackend({ requested: "not-a-real-backend", cwd: TMP }),
       /Invalid backend "not-a-real-backend"/,
     );
+  });
+});
+
+// resolveBackendLadder — shared primitive underlying both resolveBackend()
+// (above) and bin/init-enrich.mjs's resolveEnrichBackend() (issue #2026).
+describe("resolveBackendLadder", () => {
+  it("returns the override immediately when it is a member of validOverrides, without probing the CLI", () => {
+    let probed = false;
+    const result = resolveBackendLadder({
+      override: "api",
+      validOverrides: new Set(["cli", "api"]),
+      cwd: TMP,
+      isCliAvailableFn: () => {
+        probed = true;
+        return true;
+      },
+      cliFallback: () => "api",
+    });
+    assert.equal(result, "api");
+    assert.equal(probed, false, "CLI probe must not run when an explicit override wins");
+  });
+
+  it("ignores an override that is not a member of validOverrides and falls through to probing", () => {
+    const result = resolveBackendLadder({
+      override: "not-a-real-backend",
+      validOverrides: new Set(["cli", "api"]),
+      cwd: TMP,
+      isCliAvailableFn: () => true,
+      cliFallback: () => "api",
+    });
+    assert.equal(result, "cli");
+  });
+
+  it("returns 'cli' when no override is given and the CLI is available", () => {
+    const result = resolveBackendLadder({
+      override: undefined,
+      validOverrides: new Set(["cli", "api"]),
+      cwd: TMP,
+      isCliAvailableFn: () => true,
+      cliFallback: () => {
+        throw new Error("cliFallback must not be called when the CLI is available");
+      },
+    });
+    assert.equal(result, "cli");
+  });
+
+  it("calls cliFallback() when no override is given and the CLI is unavailable", () => {
+    let fallbackCalled = false;
+    const result = resolveBackendLadder({
+      override: undefined,
+      validOverrides: new Set(["cli", "api"]),
+      cwd: TMP,
+      isCliAvailableFn: () => false,
+      cliFallback: () => {
+        fallbackCalled = true;
+        return "api";
+      },
+    });
+    assert.equal(result, "api");
+    assert.equal(fallbackCalled, true);
   });
 });
 
