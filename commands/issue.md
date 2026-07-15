@@ -54,8 +54,29 @@ PROGRAMMATIC_MILESTONE=""
 # relies on (see e.g. `resolve_script()`'s tier-dispatch callers in work-on.md).
 eval "set -- $ARGUMENTS"
 ARGS=("$@")
+
+# Flag-mode gate: only run the flag-parsing loop (and its hard-error on
+# unrecognized --flags below) when at least one token EXACTLY matches a
+# recognized flag. Free-text invocations (the "(none)" row above) are plain
+# English descriptions and may legitimately contain a "--something" substring
+# as part of the prose (e.g. "fix: crash when using --verbose flag") — those
+# must fall through untouched to Phase 1's free-text parser, not be treated
+# as a caller typo. Without this gate, the --*) error arm below would abort
+# on any free-text description that happens to mention a flag name. See
+# forge#2096 (loop content) for why unrecognized flags must fail loudly once
+# we ARE in flag mode.
+LOOKS_LIKE_FLAG_MODE=false
+for arg in "${ARGS[@]}"; do
+  case "$arg" in
+    --dry-run|--title|--body|--body-file|--label|--milestone)
+      LOOKS_LIKE_FLAG_MODE=true
+      break
+      ;;
+  esac
+done
+
 i=0
-while [ $i -lt ${#ARGS[@]} ]; do
+while [ "$LOOKS_LIKE_FLAG_MODE" = "true" ] && [ $i -lt ${#ARGS[@]} ]; do
   arg="${ARGS[$i]}"
   case "$arg" in
     --dry-run) DRY_RUN=true ;;
