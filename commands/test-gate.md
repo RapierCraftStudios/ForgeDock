@@ -521,10 +521,12 @@ else
     done
 
     TESTGATE_FAIL_TITLE="fix: test-gate FAIL — cluster '${cluster}' broken by staging→${DEFAULT_BRANCH} bundle"
-    # Sanitize before it reaches /issue's `eval "set -- $ARGUMENTS"` tokenizer — double-quoting
-    # alone does not stop backtick/$(...) command substitution inside double quotes in bash.
+    # Defense-in-depth: /issue's arg tokenizer (commands/issue.md, forge#2094) uses
+    # an xargs-based tokenizer that never expands backtick/$(...) substitution, so
+    # this is no longer required for safety — but strip it anyway so the raw title
+    # stays readable if it round-trips through any other eval-based consumer.
     # ${cluster} is config-controlled (forge.yaml verification.integration_tests), but sanitize
-    # unconditionally for defense-in-depth consistency with the other 4 converted call sites.
+    # unconditionally for defense-in-depth consistency with the other converted call sites.
     TESTGATE_FAIL_TITLE=$(printf '%s' "$TESTGATE_FAIL_TITLE" | tr '`' "'" | sed 's/\$(/$ (/g')
     TESTGATE_FAIL_BODY_FILE=$(mktemp)
     cat <<ISSUE_EOF > "$TESTGATE_FAIL_BODY_FILE"
@@ -805,8 +807,10 @@ if [ "${UNCOVERED_COUNT}" -gt 0 ]; then
     fi
 
     TESTGAP_TITLE="fix: test-gap — uncovered criterion in issue #${GAP_ISSUE} (${GAP_TYPE})"
-    # Sanitize before it reaches /issue's `eval "set -- $ARGUMENTS"` tokenizer — double-quoting
-    # alone does not stop backtick/$(...) command substitution inside double quotes in bash.
+    # Defense-in-depth: /issue's arg tokenizer (commands/issue.md, forge#2094) uses
+    # an xargs-based tokenizer that never expands backtick/$(...) substitution, so
+    # this is no longer required for safety — but strip it anyway so the raw title
+    # stays readable if it round-trips through any other eval-based consumer.
     TESTGAP_TITLE=$(printf '%s' "$TESTGAP_TITLE" | tr '`' "'" | sed 's/\$(/$ (/g')
     TESTGAP_BODY_FILE=$(mktemp)
     cat <<TGAP_EOF > "$TESTGAP_BODY_FILE"

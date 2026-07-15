@@ -1705,10 +1705,11 @@ fi
 **For each finding** (that passes dedup), create issue through the `/issue` create-hook's programmatic invocation contract (see `commands/issue.md` § "Programmatic Invocation Contract") — this preserves the bespoke line-range/title dedup above as a precise pre-check, while `/issue`'s own Phase 2D dedup runs as a coarser second pass:
 ```bash
 FINDING_ISSUE_TITLE="fix: [summary] (review finding — PR #${PR_NUMBER})"
-# Sanitize before it reaches /issue's `eval "set -- $ARGUMENTS"` tokenizer (commands/issue.md
-# Argument Parsing) — double-quoting the title in the Skill() args string below does NOT stop
-# backtick or $(...) command substitution, since bash still expands both INSIDE double quotes.
-# Neutralize both before interpolating into args.
+# Defense-in-depth: /issue's arg tokenizer (commands/issue.md Argument Parsing,
+# forge#2094) uses an xargs-based tokenizer that never expands backtick/$(...)
+# substitution, so this is no longer required for safety — but strip it anyway
+# so the raw title stays readable if it round-trips through any other
+# eval-based consumer.
 FINDING_ISSUE_TITLE=$(printf '%s' "$FINDING_ISSUE_TITLE" | tr '`' "'" | sed 's/\$(/$ (/g')
 FINDING_ISSUE_BODY_FILE=$(mktemp)
 cat <<'ISSUE_EOF' > "$FINDING_ISSUE_BODY_FILE"

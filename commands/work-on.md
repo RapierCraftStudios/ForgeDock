@@ -931,8 +931,10 @@ Route through the `/issue` create-hook's programmatic invocation contract (see `
 
 ```bash
 SUB_ISSUE_TITLE_FULL="{fix|feat|refactor}: {SUB_ISSUE_TITLE}"
-# Sanitize before it reaches /issue's `eval "set -- $ARGUMENTS"` tokenizer — double-quoting
-# alone does not stop backtick/$(...) command substitution inside double quotes in bash.
+# Defense-in-depth: /issue's arg tokenizer (commands/issue.md, forge#2094) uses
+# an xargs-based tokenizer that never expands backtick/$(...) substitution, so
+# this is no longer required for safety — but strip it anyway so the raw title
+# stays readable if it round-trips through any other eval-based consumer.
 SUB_ISSUE_TITLE_FULL=$(printf '%s' "$SUB_ISSUE_TITLE_FULL" | tr '`' "'" | sed 's/\$(/$ (/g')
 SUB_ISSUE_BODY_FILE=$(mktemp)
 cat <<'SUB_BODY_EOF' > "$SUB_ISSUE_BODY_FILE"

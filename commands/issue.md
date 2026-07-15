@@ -45,15 +45,54 @@ PROGRAMMATIC_MILESTONE=""
 # — it is NOT pre-tokenized by any harness, and a naive `ARGS=($ARGUMENTS)` would
 # word-split on whitespace without honoring embedded quote characters (a literal
 # `"` inside the string is not shell syntax at this point), fragmenting any
-# multi-word `--title`/`--body` value. Use `eval "set -- $ARGUMENTS"` instead —
-# this makes the shell's own quote-aware tokenizer parse the string exactly as
-# if it had been typed on a command line, so `--title "fix: billing crash"`
-# correctly yields ONE token for the title. `$ARGUMENTS` must already be
-# shell-safely quoted by the caller (as in the example above); this is the same
-# assumption every other `eval`-based arg-forwarding pattern in this pipeline
-# relies on (see e.g. `resolve_script()`'s tier-dispatch callers in work-on.md).
-eval "set -- $ARGUMENTS"
-ARGS=("$@")
+# multi-word `--title`/`--body` value (forge#2094).
+#
+# Do NOT tokenize via `eval "set -- $ARGUMENTS"`. An earlier fix for #2094 used
+# exactly that — it is quote-aware, but `eval` re-parses and EXECUTES the full
+# substituted string as shell code: any unescaped `$(...)`, backtick, `;`, `|`,
+# or `&&` embedded in a caller-supplied title/body value runs as a command
+# during parsing, not just as text. `/issue` is invoked programmatically by
+# other automation (audit tools, /work-on decomposition, review-finding
+# creation — see commands/work-on.md, commands/review-pr.md,
+# commands/review-pr-staging.md, commands/test-gate.md) with less-trusted
+# strings, so this is a real call-site injection surface, not a theoretical one.
+#
+# Use `xargs` instead: it applies the same quote/backslash-aware word-splitting
+# a shell command line would (so `--title "fix: billing crash"` still yields
+# ONE token), but — unlike `eval` — it never expands `$(...)`, never expands
+# backticks, and never executes anything. NUL-delimit the output (`printf
+# '%s\0'` / `xargs -n1 ... -0`) so tokens containing embedded newlines still
+# round-trip correctly through `mapfile -d ''`.
+#
+# `mapfile -d ''` requires bash >= 4.4 — consistent with the minimum this
+# pipeline already assumes elsewhere (e.g. `resolve_script()`'s tier-dispatch
+# in work-on.md), so this is not a new constraint.
+#
+# Do NOT silence xargs's exit status with `2>/dev/null`: xargs has a
+# platform-dependent max single-argument length (POSIX guarantees at least
+# 4096 bytes; Linux/macOS observed limits are far higher but not unbounded).
+# A token exceeding that ceiling makes xargs fail loudly — suppressing stderr
+# would turn that into a silent truncation instead, which is worse than the
+# word-splitting bug this whole block exists to fix. `--title`/`--body` are
+# short by convention; `--body-file` (the mechanism every current caller
+# actually uses for large content — see commands/work-on.md,
+# commands/review-pr.md, commands/review-pr-staging.md, commands/test-gate.md,
+# commands/validate.md) is unaffected, since only the file *path* passes
+# through this tokenizer, not the file's contents.
+#
+# `mapfile -d '' -t ARGS < <(cmd)` cannot observe `cmd`'s exit status —
+# process substitution runs in a detached subshell, and mapfile's own exit
+# status only reflects whether the read succeeded, not the upstream command
+# (verified: `mapfile -d '' -t A < <(false; printf 'x\0')` exits 0). Route
+# through a temp file instead so the real xargs exit status is captured.
+ARGS_TMP=$(mktemp)
+if ! printf '%s' "$ARGUMENTS" | xargs -n1 printf '%s\0' > "$ARGS_TMP"; then
+  echo "ERROR: failed to tokenize \$ARGUMENTS — a single token may exceed xargs's max argument length. Use --body-file for large content instead of inline --body." >&2
+  rm -f "$ARGS_TMP"
+  exit 1
+fi
+mapfile -d '' -t ARGS < "$ARGS_TMP"
+rm -f "$ARGS_TMP"
 
 # Flag-mode gate: only run the flag-parsing loop (and its hard-error on
 # unrecognized --flags below) when at least one token EXACTLY matches a
