@@ -809,6 +809,23 @@ describe("pre-tool-use hook — filesystem-root find guard (#2034)", () => {
     assert.match(stderr, /BLOCKED/);
   });
 
+  // Regression test for a CONFIRMED HIGH finding surfaced during review of
+  // this same fix (PR #2067, issue #2059): backslash-escaping is a separate,
+  // unaddressed way to smuggle the literal token `find` past the guard.
+  // `f\ind` is real bash for the plain word `find` (a backslash strips the
+  // special meaning of the next character and collapses to it literally,
+  // outside quotes). tokenizeCommand() now handles this the same way it
+  // handles quoting.
+  it('exits 2 for find / with a backslash-escaped command name (cd /tmp;f\\ind /)', () => {
+    const { exitCode, stderr } = runHook({
+      hook_event_name: "PreToolUse",
+      tool_name: "Bash",
+      tool_input: { command: "cd /tmp;f\\ind /" },
+    });
+    assert.equal(exitCode, 2);
+    assert.match(stderr, /BLOCKED/);
+  });
+
   it("still allows the multi-word quoted --body decoy after the embedded-whitespace fix (no false positive regression)", () => {
     const { exitCode } = runHook({
       hook_event_name: "PreToolUse",
