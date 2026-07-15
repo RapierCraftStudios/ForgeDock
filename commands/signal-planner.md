@@ -224,10 +224,10 @@ Detect cycles — if a cycle exists, break it by demoting the lower-priority uni
 Post the DAG to a tracker issue on GitHub. First, create the tracker issue:
 
 ```bash
-TRACKER_ISSUE=$(gh issue create -R {GH_REPO} \
-  --title "signal-planner: DAG tracker for {SIGNAL.name}" \
-  --label "signal-planner,priority:{SIGNAL.severity}" \
-  --body "$(cat <<'TRACKER_EOF'
+TRACKER_TITLE="signal-planner: DAG tracker for {SIGNAL.name}"
+TRACKER_BODY_TMPFILE=$(mktemp)
+trap 'rm -f "$TRACKER_BODY_TMPFILE"' EXIT
+cat > "$TRACKER_BODY_TMPFILE" <<'TRACKER_EOF'
 ## Signal
 
 **Type**: {SIGNAL.type}
@@ -247,7 +247,18 @@ This tracker was created by \`/signal-planner\`. The dependency DAG below repres
 - [ ] All DAG issues merged
 - [ ] Originating signal verified resolved (FORGE:SIGNAL_RESOLVED posted)
 TRACKER_EOF
-)" --json number --jq '.number')
+# Route through the /issue create-hook (canonical dedup + body validation) instead of a raw
+# `gh issue create`. This body uses "## Acceptance" rather than the mandatory "## Acceptance
+# Criteria"/"## Affected Files"/"## Problem" sections — /issue's Phase 3F will non-blockingly
+# append placeholder mandatory sections; this is expected for a coordination tracker issue.
+Skill(skill="issue", args="--title \"$TRACKER_TITLE\" --body-file \"$TRACKER_BODY_TMPFILE\" --label signal-planner --label \"priority:{SIGNAL.severity}\"")
+rm -f "$TRACKER_BODY_TMPFILE"
+trap - EXIT
+TRACKER_ISSUE=$(gh issue list -R {GH_REPO} \
+  --state open \
+  --search "$TRACKER_TITLE" \
+  --json number,title \
+  --jq --arg t "$TRACKER_TITLE" '.[] | select(.title == $t) | .number' 2>/dev/null | head -1)
 ```
 
 Then post the `FORGE:PLAN_DAG` comment:
@@ -312,10 +323,10 @@ If governor would be breached, **hard fail** — do not create any issues, do no
 For each work unit with `existing == null`, create a GitHub issue:
 
 ```bash
-ISSUE_NUM=$(gh issue create -R {GH_REPO} \
-  --title "{work_unit.title}" \
-  --label "priority:{work_unit.priority},{work_unit.type}" \
-  --body "$(cat <<'ISSUE_EOF'
+WORK_UNIT_TITLE="{work_unit.title}"
+WORK_UNIT_BODY_TMPFILE=$(mktemp)
+trap 'rm -f "$WORK_UNIT_BODY_TMPFILE"' EXIT
+cat > "$WORK_UNIT_BODY_TMPFILE" <<'ISSUE_EOF'
 ## Problem
 
 {work_unit.rationale — why this is needed to resolve the originating signal}
@@ -341,10 +352,19 @@ Signal context: {relevant subset of SIGNAL.context for this work unit}
 ---
 *Created by \`/signal-planner\` on $(date -u +%Y-%m-%dT%H:%M:%SZ). Will be investigated before any fix is applied.*
 ISSUE_EOF
-)" --json number --jq '.number')
+# Route through the /issue create-hook (canonical dedup + body validation) instead of a raw
+# `gh issue create`.
+Skill(skill="issue", args="--title \"$WORK_UNIT_TITLE\" --body-file \"$WORK_UNIT_BODY_TMPFILE\" --label \"priority:{work_unit.priority}\" --label \"{work_unit.type}\"")
+rm -f "$WORK_UNIT_BODY_TMPFILE"
+trap - EXIT
+ISSUE_NUM=$(gh issue list -R {GH_REPO} \
+  --state open \
+  --search "$WORK_UNIT_TITLE" \
+  --json number,title \
+  --jq --arg t "$WORK_UNIT_TITLE" '.[] | select(.title == $t) | .number' 2>/dev/null | head -1)
 ```
 
-Record each created issue number and update the DAG table in the tracker issue.
+Record each created issue number and update the DAG table in the tracker issue. If `/issue` deduped this work unit against an existing open issue, `ISSUE_NUM` will come back empty — fall back to `work_unit.existing` (if already resolved during Phase 2) or treat the work unit as already covered and skip re-creation.
 
 ### 3C: Compile final DAG issue list
 

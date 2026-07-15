@@ -213,9 +213,10 @@ fi
 ### Step 4B: Create a follow-up issue
 
 ```bash
-gh issue create --title "fix: {original_title} (reverted — needs new approach)" \
-  --label "bug,priority:P1" \
-  --body "$(cat <<'BODY_EOF'
+FOLLOWUP_TITLE="fix: {original_title} (reverted — needs new approach)"
+FOLLOWUP_BODY_TMPFILE=$(mktemp)
+trap 'rm -f "$FOLLOWUP_BODY_TMPFILE"' EXIT
+cat > "$FOLLOWUP_BODY_TMPFILE" <<'BODY_EOF'
 ## Problem
 
 PR #{PR_NUMBER} ({original_title}) was merged and deployed but caused a production incident. It was reverted in PR #{REVERT_PR_NUMBER}. The original fix needs to be re-implemented with a different approach that avoids the production issue.
@@ -249,7 +250,16 @@ Files that need changes (same as original fix, different approach):
 
 Regression of #{ORIGINAL_ISSUE}. Should investigate why the original approach caused issues before implementing.
 BODY_EOF
-)"
+# Route through the /issue create-hook (canonical dedup + body validation) instead of a raw
+# `gh issue create`.
+Skill(skill="issue", args="--title \"$FOLLOWUP_TITLE\" --body-file \"$FOLLOWUP_BODY_TMPFILE\" --label bug --label \"priority:P1\"")
+rm -f "$FOLLOWUP_BODY_TMPFILE"
+trap - EXIT
+FOLLOWUP_ISSUE_NUMBER=$(gh issue list \
+  --state open \
+  --search "$FOLLOWUP_TITLE" \
+  --json number,title \
+  --jq --arg t "$FOLLOWUP_TITLE" '.[] | select(.title == $t) | .number' 2>/dev/null | head -1)
 ```
 
 ### Step 4C: Clean up worktree
