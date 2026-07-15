@@ -84,12 +84,22 @@ export const VALID_BACKENDS = new Set(["cli", "api", "auto"]);
 // invocation, including every `--dry-run`. Without caching, a process that
 // calls runCommand() repeatedly (e.g. bin/batch-runner.mjs driving many
 // commands, or an orchestration loop) re-spawns `claude --version` on every
-// single call. The cache is intentionally scoped to this process's lifetime
-// only (never persisted to disk): a long-lived process where `claude` gets
-// installed/uninstalled mid-run could observe a stale cached result, but
-// this runner's typical usage is a one-shot CLI invocation or a bounded
-// batch run, so that staleness window is negligible next to the guaranteed
-// win of not re-probing on every call.
+// single call.
+//
+// Bounded on two axes (issues #2057, #2058 — review findings on PR #2056):
+//   1. TTL (`CLI_AVAILABILITY_CACHE_TTL_MS`): an entry older than the TTL is
+//      treated as absent and re-probed, so a `claude` install/uninstall that
+//      happens mid-run of a long-lived process (e.g. an orchestration loop)
+//      is picked up within one TTL window instead of staying stale for the
+//      rest of the process's lifetime.
+//   2. Max size (`CLI_AVAILABILITY_CACHE_MAX_SIZE`): entries beyond the cap
+//      evict the oldest (insertion-order, via `Map`'s iteration order and a
+//      delete+re-set on refresh) so a process that probes an unbounded
+//      number of distinct `cwd` values cannot grow this cache without limit.
+// Each entry stores `{ available, cachedAt }` instead of a bare boolean so
+// `isClaudeCliAvailable()` can evaluate the TTL.
+const CLI_AVAILABILITY_CACHE_TTL_MS = 60_000;
+const CLI_AVAILABILITY_CACHE_MAX_SIZE = 100;
 const cliAvailabilityCache = new Map();
 // Cap tool-result payloads so a large file read or verbose command does not
 // blow the context window in a single turn.
@@ -168,10 +178,14 @@ export function resolveConfiguredDefaultModel(cwd) {
  * PATH, times out, non-zero exit — is treated as "not available" and never
  * throws; the caller (resolveBackend) falls back to the API backend.
  *
- * Memoized per `cwd` for the lifetime of this process (see
- * `cliAvailabilityCache` above, issue #2011) — the first call for a given
- * `cwd` pays the probe cost; every subsequent call for that same `cwd`
- * returns the cached result instantly, with no new child process spawned.
+ * Memoized per `cwd` for up to `CLI_AVAILABILITY_CACHE_TTL_MS` (see
+ * `cliAvailabilityCache` above, issues #2011, #2057, #2058) — the first call
+ * for a given `cwd` pays the probe cost; every subsequent call for that same
+ * `cwd` within the TTL window returns the cached result instantly, with no
+ * new child process spawned. Once the TTL elapses the entry is treated as
+ * absent and re-probed, and the cache never grows past
+ * `CLI_AVAILABILITY_CACHE_MAX_SIZE` distinct `cwd` entries (oldest evicted
+ * first).
  *
  * @param {string} [cwd] - Working directory for the probe (default cwd).
  * @param {object} [opts]
@@ -184,8 +198,9 @@ export function resolveConfiguredDefaultModel(cwd) {
  * @returns {boolean}
  */
 export function isClaudeCliAvailable(cwd = process.cwd(), { execImpl = execSync } = {}) {
-  if (cliAvailabilityCache.has(cwd)) {
-    return cliAvailabilityCache.get(cwd);
+  const cached = cliAvailabilityCache.get(cwd);
+  if (cached && Date.now() - cached.cachedAt < CLI_AVAILABILITY_CACHE_TTL_MS) {
+    return cached.available;
   }
   let available;
   try {
@@ -199,7 +214,16 @@ export function isClaudeCliAvailable(cwd = process.cwd(), { execImpl = execSync 
   } catch {
     available = false;
   }
-  cliAvailabilityCache.set(cwd, available);
+  // Re-inserting an existing key moves it to the end of Map's iteration
+  // order (delete+set), so eviction below always drops the true oldest
+  // entry — whether "oldest" means "never refreshed" or "not refreshed in
+  // the longest time."
+  cliAvailabilityCache.delete(cwd);
+  cliAvailabilityCache.set(cwd, { available, cachedAt: Date.now() });
+  if (cliAvailabilityCache.size > CLI_AVAILABILITY_CACHE_MAX_SIZE) {
+    const oldestKey = cliAvailabilityCache.keys().next().value;
+    cliAvailabilityCache.delete(oldestKey);
+  }
   return available;
 }
 
@@ -413,22 +437,34 @@ export function runCliBackend({
   // rather than passing it inline as an argv string — see the SYSTEM PROMPT
   // block comment above for why. The directory is created fresh per call and
   // always removed in `finally`, regardless of how spawnSync exits below.
+  //
+  // `tmpDir` is declared here (outside `try`) so `finally` below can see it,
+  // but the `mkdtempSync`/`writeFileSync` calls themselves now run *inside*
+  // the `try` block (issue #2061 — review finding on PR #2060) rather than
+  // before it: if either call throws (disk full, EACCES on a locked-down
+  // temp dir, etc.), that throw must still be covered by the same `finally`
+  // cleanup path, not bypass it. `tmpDir` is assigned immediately after
+  // `mkdtempSync` succeeds — before `writeFileSync` runs — so a failure in
+  // `writeFileSync` still leaves `tmpDir` set and the already-created
+  // directory gets cleaned up.
   let tmpDir = null;
   let cliArgs = ["--print", userMessage, "--dangerously-skip-permissions"];
-  if (systemPrompt) {
-    tmpDir = mkdtempSync(join(os.tmpdir(), "forgedock-cli-system-prompt-"));
-    const systemPromptPath = join(tmpDir, "system-prompt.txt");
-    writeFileSync(systemPromptPath, systemPrompt, "utf-8");
-    cliArgs = [
-      "--print",
-      userMessage,
-      "--append-system-prompt-file",
-      systemPromptPath,
-      "--dangerously-skip-permissions",
-    ];
-  }
 
   try {
+    if (systemPrompt) {
+      const createdDir = mkdtempSync(join(os.tmpdir(), "forgedock-cli-system-prompt-"));
+      tmpDir = createdDir;
+      const systemPromptPath = join(createdDir, "system-prompt.txt");
+      writeFileSync(systemPromptPath, systemPrompt, "utf-8");
+      cliArgs = [
+        "--print",
+        userMessage,
+        "--append-system-prompt-file",
+        systemPromptPath,
+        "--dangerously-skip-permissions",
+      ];
+    }
+
     // Scrub the Anthropic API key from the child environment. This backend
     // runs with `--dangerously-skip-permissions` (no confirmation gate on any
     // tool call, including bash), and the runner is designed to feed
