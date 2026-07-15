@@ -48,11 +48,11 @@ This is the **orchestrator**. It routes to the right review mode, runs automated
 
 | File | What | How to invoke |
 |------|------|---------------|
-| `$FORGE_HOME/commands/review-pr-agents/protocols.md` | Shared review protocols (Evidence-Based + Structured Findings + Input Scoping) | `Read` tool during Phase 3C (always) |
-| `$FORGE_HOME/commands/review-pr-agents/<persona>.md` | Per-persona agent prompt templates (9 files) | `Read` tool during Phase 3C (selected agents only) |
-| `$FORGE_HOME/commands/review-pr-staging.md` | Full staging→main review pipeline | `Skill("review-pr-staging", ...)` during Phase 0 |
+| `${FORGE_HOME:-$REPO_PATH}/commands/review-pr-agents/protocols.md` | Shared review protocols (Evidence-Based + Structured Findings + Input Scoping) | `Read` tool during Phase 3C (always) |
+| `${FORGE_HOME:-$REPO_PATH}/commands/review-pr-agents/<persona>.md` | Per-persona agent prompt templates (9 files) | `Read` tool during Phase 3C (selected agents only) |
+| `${FORGE_HOME:-$REPO_PATH}/commands/review-pr-staging.md` | Full staging→main review pipeline | `Skill("review-pr-staging", ...)` during Phase 0 |
 
-`$FORGE_HOME` defaults to `~/.claude` (the directory where `npx forgedock` symlinks commands). Override by setting `FORGE_HOME` in your environment.
+`$FORGE_HOME` defaults to `~/.claude` (the directory where `npx forgedock` symlinks commands). When unset, every resolution in this file falls back to `$REPO_PATH` (the repo root, from `forge.yaml → paths.root`) rather than degrading to a bare root-anchored path — see the `TEMPLATE_BASE` tiered guard in Phase 3C and the verification-script resolution in Step 2.5B for the actual fallback chains. Never resolve a missing file via a filesystem-wide `find` — see the guardrail in `commands/review-pr-agents/protocols.md`.
 
 **Invocation flow:**
 ```
@@ -580,13 +580,27 @@ Map each changed file to its activation requirements.
 
 ### Step 2.5B: Run Verification
 
-For each changed file, execute the relevant checks using the standalone verification scripts in `$FORGE_HOME/scripts/`. These scripts can also be run independently outside the review context (e.g., from `/quality-gate` or `/work-on` builder steps).
+For each changed file, execute the relevant checks using the standalone verification scripts in `${FORGE_HOME:-$SCRIPTS_HOME}/scripts/`. These scripts can also be run independently outside the review context (e.g., from `/quality-gate` or `/work-on` builder steps).
 
 **Platform note**: The verify-*.sh scripts require bash and standard POSIX tools. On Windows without bash (Git Bash / WSL / MSYS2), these checks are skipped with an explicit message — the review continues without them.
 
 ```bash
 CHANGED_FILES=$(gh pr diff $ARGUMENTS --name-only)
 REPO_ROOT="."  # Assumes cwd is the repo root
+
+# Resolve the verify-*.sh scripts source directory with the same deterministic
+# fallback as the Phase 3C TEMPLATE_BASE guard: $FORGE_HOME first (the installed
+# ForgeDock location), then this repo's own root (forge.yaml -> paths.root, or
+# git top-level). A bare/unset $FORGE_HOME must never be used directly in a path —
+# that degrades to a root-anchored path (/scripts/verify-*.sh) and silently skips
+# every check below. Never fall back to a filesystem-wide `find`.
+# <!-- Added: forge#2035 -->
+if [ -n "$FORGE_HOME" ] && [ -f "$FORGE_HOME/scripts/verify-route-registration.sh" ]; then
+    SCRIPTS_HOME="$FORGE_HOME"
+else
+    FORGE_YAML="${FORGE_CONFIG:-$(git rev-parse --show-toplevel 2>/dev/null)/forge.yaml}"
+    SCRIPTS_HOME=$(yq '.paths.root' "$FORGE_YAML" 2>/dev/null || git rev-parse --show-toplevel 2>/dev/null || pwd)
+fi
 
 # --- Platform / bash capability guard ---
 # The verify-*.sh scripts require bash. Detect availability before invoking.
@@ -627,11 +641,11 @@ if [ "$BASH_AVAILABLE" = "true" ]; then
         [ -n "$_API_MIDDLEWARE" ] && export FORGE_API_MIDDLEWARE_DIR="$_API_MIDDLEWARE"
     fi
     echo "=== Running: verify-route-registration.sh ==="
-    bash "$FORGE_HOME/scripts/verify-route-registration.sh" "$CHANGED_FILES_TMP" "$REPO_ROOT" || true
+    bash "$SCRIPTS_HOME/scripts/verify-route-registration.sh" "$CHANGED_FILES_TMP" "$REPO_ROOT" || true
 
     # 2. Environment variable wiring (checks .env.example, docker-compose, env_validation, SOPS mapping)
     echo "=== Running: verify-env-vars.sh ==="
-    bash "$FORGE_HOME/scripts/verify-env-vars.sh" "$DIFF_TMP" "$REPO_ROOT" || true
+    bash "$SCRIPTS_HOME/scripts/verify-env-vars.sh" "$DIFF_TMP" "$REPO_ROOT" || true
 
     # 3. Host headers in shell scripts + client-side proxy bypass check
     # Read project-specific internal service patterns from forge.yaml (if present)
@@ -645,11 +659,11 @@ if [ "$BASH_AVAILABLE" = "true" ]; then
     fi
     export FORGE_INTERNAL_PATTERNS
     echo "=== Running: verify-host-headers.sh ==="
-    bash "$FORGE_HOME/scripts/verify-host-headers.sh" "$CHANGED_FILES_TMP" "$REPO_ROOT" || true
+    bash "$SCRIPTS_HOME/scripts/verify-host-headers.sh" "$CHANGED_FILES_TMP" "$REPO_ROOT" || true
 
     # 4. SOPS deploy chain (ENV_MAPPING consistency, deploy path drift, hotfix sync)
     echo "=== Running: verify-sops-chain.sh ==="
-    bash "$FORGE_HOME/scripts/verify-sops-chain.sh" "$DIFF_TMP" "$CHANGED_FILES_TMP" "$REPO_ROOT" || true
+    bash "$SCRIPTS_HOME/scripts/verify-sops-chain.sh" "$DIFF_TMP" "$CHANGED_FILES_TMP" "$REPO_ROOT" || true
 
     # Cleanup temp files
     rm -f "$CHANGED_FILES_TMP" "$DIFF_TMP"

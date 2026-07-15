@@ -266,7 +266,12 @@ Before building agent prompts, run `classify-lane.sh` for every issue in the cur
 ```bash
 # Requires classify-lane.sh to be available at ~/.claude/scripts/classify-lane.sh
 # (installed by `npx forgedock` — see bin/journey.mjs: forge()'s linkPipelineScripts() step)
-# Fallback: bash "$FORGE_HOME/scripts/classify-lane.sh" if ~/.claude/scripts/ is unavailable
+# NOTE: the actual invocations below (and in the review-finding sweep) hardcode this
+# ~/.claude path directly — there is no $FORGE_HOME-based fallback implemented, so this
+# call site is not exposed to the bare-unset-$FORGE_HOME → root-anchored-path footgun
+# that affected commands/review-pr.md (see forge#1984, forge#2035 audit). If
+# ~/.claude/scripts/ is genuinely unavailable, classify-lane.sh hard-fails per the
+# phantom-slug gate above — it does NOT fall through to a filesystem search.
 
 declare -A ISSUE_LANE
 declare -A ISSUE_PR_BASE
