@@ -48,8 +48,11 @@ Include the audit summary in the final report (Phase 6). Key metrics to surface:
 ```bash
 if [ -n "${COORD_ISSUE_NUMBER:-}" ]; then
   # Detect any still-active (unreleased) claims — a claim posted with no matching
-  # CLAIM_RELEASED comment on the same coordination issue. Mirrors the exact query
-  # phase-4-execution.md's claims-board relaxation sweep uses (Step 4B item 4).
+  # CLAIM_RELEASED comment on the same coordination issue. Adapted from the query
+  # phase-4-execution.md's claims-board relaxation sweep uses (Step 4B item 4),
+  # simplified to holder-only (a flat string array) since Step 5C only needs
+  # holder names for the closure note — unlike phase-4-execution.md's version,
+  # which also captures each claim's `files` into an object alongside `holder`.
   ACTIVE_CLAIMS=$(gh api repos/{GH_REPO}/issues/${COORD_ISSUE_NUMBER}/comments \
     --jq '[.[] | select(.body | contains("<!-- FORGE:CLAIM -->")) |
            select(.body | contains("<!-- FORGE:CLAIM_RELEASED -->") | not)] |
