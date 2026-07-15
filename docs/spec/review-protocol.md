@@ -14,6 +14,12 @@ Do not duplicate these protocols in any other file. When updating either protoco
 
 ---
 
+## File Resolution Discipline
+
+Pipeline agents MUST NOT use `find` (unbounded or filesystem-wide) to locate protocol files, persona templates, or verification scripts under any circumstances. If a `Read` or `bash` invocation of an expected pipeline file fails (e.g. because `$FORGE_HOME` is unset and the path degraded to a root-anchored form), that is never a reason to search the filesystem — it means the deterministic fallback chain the orchestrator already computed (`$FORGE_HOME` → `$REPO_PATH` → documented last-resort) was exhausted. Stop and report the failure (or fall through to the orchestrator's documented FATAL/hard-stop behavior — see `commands/review-pr.md` Phase 3C `TEMPLATE_BASE` guard) instead of improvising a `find /`-style search. A filesystem-wide `find` on an unset variable is the exact failure mode that produced runaway orphaned processes in production (see forge#1984, forge#2035). <!-- Added: forge#2035 -->
+
+---
+
 ## Evidence-Based Review Protocol (ALL Agents Follow)
 
 Every agent MUST follow this protocol:
