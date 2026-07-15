@@ -11,10 +11,13 @@ to avoid loading the full catalog on every invocation. Protocols live in `docs/s
 Do not modify this file without also updating `review-pr.md`. To update either protocol, edit
 `docs/spec/review-protocol.md` and sync the copy to `commands/review-pr-agents/protocols.md`.
 
-**NEVER use the Agent tool.** The orchestrator dispatches review agents via `Task` only. `Agent` spawns
-opaque subprocesses that bypass the `allowed-tools` constraint, cannot post structured findings to the PR,
-and are not tracked by the review pipeline. Every agent template is intended to be passed as the `prompt`
-argument to a `Task(...)` call.
+**Dispatch tool: `Task` preferred, `Agent` is the documented fallback.** The orchestrator (`/review-pr` or
+`/review-pr-staging`) resolves the dispatch tool once per invocation per its **Sub-Agent Dispatch Tool
+Resolution** rule: `Task` when available, `Agent` when `Task` is absent from the environment — never inline
+self-review as a substitute for either. Every agent template in this catalog is intended to be passed as
+the `prompt` argument to whichever tool the orchestrator resolved (`Task(...)` or `Agent(...)`), with the
+same per-agent isolation and the same requirement that each agent posts structured findings to the PR
+directly (`gh pr comment`) rather than relaying them through the orchestrator's own context.
 
 <!-- FORGE:PROTOCOL_SOURCE — canonical definition lives in docs/spec/review-protocol.md -->
 
