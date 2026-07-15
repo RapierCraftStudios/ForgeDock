@@ -142,6 +142,8 @@ Pre-commit checks: dead code, missing error handling, security anti-patterns, pe
 
 Creates a well-structured GitHub issue with all mandatory pipeline sections.
 
+Also accepts a programmatic form for callers that have already composed the fields — `Skill(skill="issue", args="--title \"...\" --body-file <path> --label \"...\" [--milestone \"...\"] [--dry-run]")` — which skips free-text parsing and drafting but still runs dedup and body validation. See `commands/issue.md` → Programmatic Invocation Contract.
+
 ### `/cleanup`
 
 Sweeps closed issues for stale labels, prunes worktrees, cleans stale branches.
