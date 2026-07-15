@@ -38,6 +38,19 @@ while IFS= read -r line; do
   [ -z "$SLUG" ] && continue
   [ "$COUNT" -lt 3 ] && continue
 
+  # SECURITY: $SLUG is sourced from a <!-- FORGE:PATTERN: ([^\s>]+) --> tag inside
+  # a review-finding issue body — untrusted, externally-influenced text. It is
+  # interpolated below into a Skill(skill="issue", args="...") string, and
+  # commands/issue.md's Phase 1A resolves that string via `eval "set -- $ARGUMENTS"`.
+  # Any shell metacharacter (quote, backtick, $, ;) in $SLUG would break out of the
+  # intended --title token and be eval'd as shell. Whitelist-validate at the
+  # extraction point — the only legitimate values are check-registry-safe
+  # identifiers (also used to build a filename: scripts/check-registry/${SLUG}.sh).
+  if ! echo "$SLUG" | grep -qE '^[A-Za-z0-9_-]+$'; then
+    echo "WARNING: pattern slug '$SLUG' contains disallowed characters — skipping check-promotion for this pattern (unsafe for interpolation into a downstream eval sink)."
+    continue
+  fi
+
   # Check if a promotion issue already exists for this slug (avoid duplicates)
   EXISTING_PROMOTION=$(gh issue list {GH_FLAG} \
     --label "check-promotion" \
@@ -154,6 +167,16 @@ SPEC_DOCTOR_THRESHOLD=5
 echo "$SPEC_CONCENTRATION" | while IFS=' ' read -r count spec_file finding_nums; do
   [ -z "$spec_file" ] && continue
   [ "${count:-0}" -lt "$SPEC_DOCTOR_THRESHOLD" ] && continue
+
+  # SECURITY (defense-in-depth, consistency with $SLUG above): $spec_file is
+  # already constrained by the extraction regex (commands/[a-z0-9_/-]+\.md), but
+  # it is interpolated below into a Skill(skill="issue", args="...") string that
+  # /issue's Phase 1A resolves via eval. Whitelist-validate again at point of use
+  # so this call site does not depend solely on the extraction regex staying safe.
+  if ! echo "$spec_file" | grep -qE '^commands/[A-Za-z0-9_/-]+\.md$'; then
+    echo "WARNING: spec file '$spec_file' failed the safe-path whitelist — skipping spec-doctor trigger for this entry (unsafe for interpolation into a downstream eval sink)."
+    continue
+  fi
 
   # Skip if a spec-doctor trigger issue already exists for this spec (dedup)
   EXISTING_TRIGGER=$(gh issue list {GH_FLAG} \
