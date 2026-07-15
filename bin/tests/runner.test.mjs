@@ -1241,12 +1241,21 @@ describe("runCliBackend content passthrough (issue #2029, updated for #2019)", (
 
     // The recorder writes its own received argv (everything after the
     // recorder script path) to captureFile as JSON — this is what actually
-    // reached the "CLI".
+    // reached the "CLI". It ALSO captures whether the system-prompt file
+    // exists and its contents AT SPAWN TIME, before runCliBackend's finally
+    // block removes the temp dir. This is the only sound way to observe the
+    // file "while the CLI runs" — checking existsSync from the test after the
+    // synchronous runCliBackend returns would always see the cleaned-up state.
     writeFileSync(
       recorderPath,
       [
-        'import { writeFileSync } from "node:fs";',
-        "writeFileSync(process.argv[2], JSON.stringify(process.argv.slice(3)));",
+        'import { writeFileSync, existsSync, readFileSync } from "node:fs";',
+        "const argv = process.argv.slice(3);",
+        'const flagIdx = argv.indexOf("--append-system-prompt-file");',
+        "const sysPath = flagIdx >= 0 ? argv[flagIdx + 1] : null;",
+        "const sysPromptExists = sysPath ? existsSync(sysPath) : false;",
+        'const sysPromptContents = sysPromptExists ? readFileSync(sysPath, "utf-8") : null;',
+        "writeFileSync(process.argv[2], JSON.stringify({ argv, sysPromptExists, sysPromptContents }));",
       ].join("\n") + "\n",
       "utf-8",
     );
@@ -1285,7 +1294,8 @@ describe("runCliBackend content passthrough (issue #2029, updated for #2019)", (
       assert.equal(result.status, "complete");
       assert.ok(existsSync(captureFile), "the stub binary must have run and recorded its argv");
 
-      const capturedArgv = JSON.parse(readFileSync(captureFile, "utf-8"));
+      const captured = JSON.parse(readFileSync(captureFile, "utf-8"));
+      const capturedArgv = captured.argv;
 
       // The exact content reaching the CLI invocation now includes the
       // system-prompt file flag — this is the fix for BUG-1 / #2019.
@@ -1298,13 +1308,13 @@ describe("runCliBackend content passthrough (issue #2029, updated for #2019)", (
       );
       assert.equal(capturedArgv[4], "--dangerously-skip-permissions");
 
-      // The file must exist AT THE TIME the CLI process ran (captured via the
-      // recorder before this test's own cleanup) and contain the command
-      // spec content — proving the spec is no longer dropped.
-      assert.ok(existsSync(capturedSystemPromptPath), "system-prompt temp file must exist while the CLI runs");
-      const fileContents = readFileSync(capturedSystemPromptPath, "utf-8");
-      assert.match(fileContents, /COMMAND SPECIFICATION/);
-      assert.match(fileContents, /# work-on spec/); // fixture spec content from COMMANDS_DIR
+      // The file existed AT THE TIME the CLI process ran (observed by the
+      // recorder during the spawn, before runCliBackend's finally-block
+      // cleanup) and contained the command spec content — proving the spec is
+      // no longer dropped.
+      assert.ok(captured.sysPromptExists, "system-prompt temp file must exist while the CLI runs");
+      assert.match(captured.sysPromptContents, /COMMAND SPECIFICATION/);
+      assert.match(captured.sysPromptContents, /# work-on spec/); // fixture spec content from COMMANDS_DIR
     } finally {
       rmSync(shimDir, { recursive: true, force: true });
     }

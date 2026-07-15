@@ -91,6 +91,27 @@ Analyzes what a PR touches and spawns domain-specific review agents.
 
 ---
 
+### `/review-pr-staging`
+
+**Staging review mode — deep review of a `staging → main` bundle before deploy.**
+
+Purpose-built for the large, heterogeneous diffs a deploy bundle produces (1,000–10,000+ lines). Invoked by the orchestrator via `Skill("review-pr-staging", …)` or directly.
+
+```bash
+/review-pr-staging staging          # Review the staging → main bundle
+/review-pr-staging 123              # Review a PR targeting main
+/review-pr-staging staging:feature  # Review a feature bundle into staging
+```
+
+**What it does**:
+- Handles large, diverse diffs with deep per-domain analysis and business-impact assessment
+- Deep-diffs workflow siblings (e.g. `ci.yml` vs. `deploy-production.yml`) to catch shared-job drift that only surfaces at deploy time
+- Produces a comprehensive verdict gating the deploy to `main`
+
+*Companion to `/review-pr`, tuned for the deploy gate rather than a single feature PR.*
+
+---
+
 ### `/quality-gate`
 
 **Pre-commit quality checker.**
