@@ -375,3 +375,33 @@ describe("runFromCli --repo targeting guard", () => {
     assert.equal(res.terminalReason, "workflow:merged");
   });
 });
+
+describe("runFromCli --backend/--model forwarding (forge#2028)", () => {
+  it("forwards --backend and --model to runIssue when both are supplied", async () => {
+    const io = { gh: async () => { throw new Error("should not be called"); } };
+    const runIssue = mock.fn(async () => ({ terminalReason: "workflow:merged" }));
+
+    const res = await runFromCli(
+      ["42", "--lane", "staging", "--backend", "cli", "--model", "claude-test-model"],
+      { io, runIssue },
+    );
+
+    assert.equal(runIssue.mock.callCount(), 1);
+    const callArgs = runIssue.mock.calls[0].arguments[0];
+    assert.equal(callArgs.backend, "cli");
+    assert.equal(callArgs.model, "claude-test-model");
+    assert.equal(res.terminalReason, "workflow:merged");
+  });
+
+  it("omits backend/model keys from the runIssue call when neither flag is supplied", async () => {
+    const io = { gh: async () => { throw new Error("should not be called"); } };
+    const runIssue = mock.fn(async () => ({ terminalReason: "workflow:merged" }));
+
+    await runFromCli(["42", "--lane", "staging"], { io, runIssue });
+
+    assert.equal(runIssue.mock.callCount(), 1);
+    const callArgs = runIssue.mock.calls[0].arguments[0];
+    assert.ok(!("backend" in callArgs), "backend key must be absent when --backend is not passed");
+    assert.ok(!("model" in callArgs), "model key must be absent when --model is not passed");
+  });
+});

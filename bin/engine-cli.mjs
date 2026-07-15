@@ -224,6 +224,21 @@ export function lastLocalRun(dir) {
  * @param {{io?: {gh: Function}, runIssue?: Function}} [deps]
  *   Injectable for tests — defaults to real `gh`/`git` (makeIo()) and the real
  *   `runIssue` engine driver.
+ *
+ * Flags:
+ *   --lane <lane>          Required — e.g. `main` or `staging`.
+ *   --repo <owner/repo>    Optional — must match the cwd-resolved repo (forge#1593).
+ *   --backend <cli|api|auto>  Optional (forge#2028). Forwarded to every phase's
+ *                          `runCommand()` call. Omit to keep runner.mjs's own
+ *                          default ("auto" ladder — probes the `claude` CLI, falls
+ *                          back to the API). Mirrors `bin/forgedock.mjs`'s `run()`
+ *                          `--backend` semantics — validation (rejecting invalid
+ *                          values) is left to `runCommand()`'s own `resolveBackend()`
+ *                          rather than duplicated here.
+ *   --model <id>           Optional (forge#2028). Forwarded to every phase's
+ *                          `runCommand()` call; only applies on the "api" backend.
+ *                          Omit to keep runner.mjs's default (`FORGEDOCK_MODEL` env
+ *                          or its built-in default).
  */
 export async function runFromCli(argv, deps = {}) {
   const issue = parseInt(argv[0], 10);
@@ -231,12 +246,18 @@ export async function runFromCli(argv, deps = {}) {
   const lane = flag(argv, "--lane");
   if (!lane) throw new Error("--lane is required: e.g. --lane main or --lane staging. No default to prevent accidental production targeting.");
   const repo = flag(argv, "--repo");
+  const backend = flag(argv, "--backend");
+  const model = flag(argv, "--model");
   const io = deps.io ?? makeIo();
   await assertRepoMatchesCwd(io, repo);
   const runIssueFn = deps.runIssue ?? runIssue;
   const agentId = `cli_${process.pid}`;
   const res = await runIssueFn({ issue, dir: runDir(), agentId, lane, io,
-    runner: (await import("./runner.mjs")).runCommand, now: () => Date.now() });
+    runner: (await import("./runner.mjs")).runCommand, now: () => Date.now(),
+    // Only forwarded when explicitly provided — omitting them preserves
+    // runIssue's/runner.mjs's existing defaults (forge#2028).
+    ...(backend ? { backend } : {}),
+    ...(model ? { model } : {}) });
   console.log(`issue #${issue} → ${res.terminalReason}`);
   return res;
 }
