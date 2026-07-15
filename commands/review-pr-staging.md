@@ -677,13 +677,14 @@ Check for open review-finding issues at same file:line → skip. Closed issues a
 ### 7F: Create Issues
 Sequential creation. Title: `Staging Review: {summary} (staging → main)`. Labels: review-finding, needs-validation, staging-review, priority:P1/priority:P2/priority:P3. Body includes: source branch context (`staging`), code context, evidence, validation checklist.
 
-**For each finding** (that passes dedup), create issue:
+**For each finding** (that passes dedup), create issue through the `/issue` create-hook's programmatic invocation contract (see `commands/issue.md` § "Programmatic Invocation Contract") instead of calling the raw issue-creation command directly:
 ```bash
-ISSUE_NUM=$(gh issue create \
-  -R {GH_REPO} \
-  --title "chore: [summary] (staging review — PR #${PR_NUMBER})" \
-  --label "review-finding,needs-validation,staging-review,{priority}" \
-  --body "$(cat <<'ISSUE_EOF'
+STAGING_FINDING_TITLE="chore: [summary] (staging review — PR #${PR_NUMBER})"
+# Sanitize before it reaches /issue's `eval "set -- $ARGUMENTS"` tokenizer — double-quoting
+# alone does not stop backtick/$(...) command substitution inside double quotes in bash.
+STAGING_FINDING_TITLE=$(printf '%s' "$STAGING_FINDING_TITLE" | tr '`' "'" | sed 's/\$(/$ (/g')
+STAGING_FINDING_BODY_FILE=$(mktemp)
+cat <<'ISSUE_EOF' > "$STAGING_FINDING_BODY_FILE"
 ## Problem
 
 [One sentence: what bug or issue was found. Where it occurs (`file:line`) and what it causes.]
@@ -716,7 +717,20 @@ Files that need changes:
 - [ ] Finding validated: VALIDATED / FALSE_POSITIVE / INCONCLUSIVE
 - [ ] If VALIDATED: fix implemented and tested on correct branch
 ISSUE_EOF
-)" --json number --jq '.number')
+
+# --label is repeatable (not comma-joined) per the /issue programmatic contract.
+Skill(skill="issue", args="--title \"$STAGING_FINDING_TITLE\" --body-file \"$STAGING_FINDING_BODY_FILE\" --label review-finding --label needs-validation --label staging-review --label \"{priority}\"")
+rm -f "$STAGING_FINDING_BODY_FILE"
+
+# /issue has no machine-readable return contract — resolve the created issue's number by
+# exact-title search immediately after the call (title embeds ${PR_NUMBER} + summary, unique
+# enough for a reliable single-match lookup). Retry to absorb GitHub Search API indexing lag.
+ISSUE_NUM=""
+for _resolve_attempt in 1 2 3; do
+  ISSUE_NUM=$(gh issue list -R {GH_REPO} --search "in:title \"${STAGING_FINDING_TITLE}\"" --state open --limit 1 --json number --jq '.[0].number // empty')
+  [ -n "$ISSUE_NUM" ] && break
+  sleep 2
+done
 ```
 
 Labels: `review-finding` + `needs-validation` + `staging-review` + priority (`priority:P1` CONFIRMED, `priority:P2` LIKELY, `priority:P3` POSSIBLE).
