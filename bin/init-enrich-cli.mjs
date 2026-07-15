@@ -36,18 +36,23 @@
  * read-only contract technically enforced instead of compliance-only. Do not
  * reintroduce `--dangerously-skip-permissions` here. (See issue #2022.)
  *
- * The allow-list is the actual enforcement boundary, NOT the disallow-list:
+ * The allow-list is the primary enforcement boundary, NOT the disallow-list:
  * only the tools named in `--allowedTools` ("Read Glob Grep LS") are
  * permitted to execute at all — everything else is implicitly denied by
  * omission, exactly like a default-deny firewall rule. `--disallowedTools`
  * ("Write Edit NotebookEdit Bash") is passed in addition purely as
  * defense-in-depth: an explicit, redundant belt-and-suspenders denial of the
  * specific mutating tools most likely to be added to a future CLI default
- * allow-set. If the two lists were ever to conflict (a tool named in both),
- * the allow-list governs what CAN run — it is not overridden by a matching
- * disallow-list entry granting it back. Do not read the disallow-list as the
- * primary boundary and the allow-list as merely advisory; the reverse is
- * true. (See issue #2047.)
+ * allow-set. The two lists currently have zero overlap (no tool appears in
+ * both), so no conflict exists today — do not add an overlapping entry
+ * without first confirming the CLI's actual conflict-resolution behavior
+ * (which list wins is CLI-version-dependent and not verified here). What
+ * matters for THIS module's security contract is simpler and does not
+ * depend on that resolution order: keep `--allowedTools` scoped to the
+ * minimal read-only set, since that is what makes every tool this session
+ * can possibly invoke enumerable in one place. Do not read the
+ * disallow-list as the primary boundary and the allow-list as merely
+ * advisory; the reverse is true. (See issue #2047.)
  *
  * Windows `.cmd` shim resolution works WITHOUT `shell: true`: Node's
  * spawn/spawnSync resolve a bare `"claude"` command via PATH+PATHEXT and
@@ -89,18 +94,26 @@ const DEFAULT_ENRICH_TIMEOUT_MS = 2 * 60 * 1000;
  *
  * argv passed to `spawnSync` with `shell: false` (this module's contract —
  * see the SECURITY note above) still counts against the OS's total argv+env
- * size limit (`ARG_MAX` on POSIX, ~32K chars for a single CreateProcess
- * command line on Windows — see the SYSTEM PROMPT note in
- * bin/runner.mjs's runCliBackend for the same constraint on a different
- * code path). A ConfigDraft is normally a few KB, but pathological inputs
- * (very large `review.tech_stack`/`repos.satellites` arrays from a
+ * size limit (`ARG_MAX` on POSIX, ~2MB+ — not the binding constraint here;
+ * ~32K *characters* for a single CreateProcess command line on Windows IS
+ * the binding constraint — see the SYSTEM PROMPT note in bin/runner.mjs's
+ * runCliBackend for the same constraint on a different code path, where it
+ * is avoided entirely by writing the payload to a temp file instead of
+ * argv). A ConfigDraft is normally a few KB, but pathological inputs (very
+ * large `review.tech_stack`/`repos.satellites` arrays from a
  * multi-hundred-repo org) could grow large enough to risk hitting that OS
  * ceiling — which would surface as an opaque spawn failure rather than a
- * clean, diagnosable fallback. 256 KB is comfortably below every relevant
- * platform's argv limit while being far above any realistic ConfigDraft
- * size. Override via FORGEDOCK_CLI_ENRICH_MAX_PROMPT_BYTES.
+ * clean, diagnosable fallback. Unlike runCliBackend, this prompt is always
+ * passed inline (no temp-file indirection), so the guard must actually sit
+ * BELOW the Windows ~32K character ceiling — not merely "below every
+ * relevant platform's limit" in the abstract, since Windows is the tightest
+ * one. 24 KB leaves comfortable headroom for the handful of other short
+ * argv elements (`--print`, `--allowedTools`, the tool-name strings,
+ * `--disallowedTools`) that share the same command-line budget, while still
+ * being far above any realistic ConfigDraft size. Override via
+ * FORGEDOCK_CLI_ENRICH_MAX_PROMPT_BYTES.
  */
-const DEFAULT_ENRICH_MAX_PROMPT_BYTES = 256 * 1024;
+const DEFAULT_ENRICH_MAX_PROMPT_BYTES = 24 * 1024;
 
 /**
  * Build the headless enrichment prompt sent to the local `claude` CLI.
