@@ -1,6 +1,6 @@
 ---
 description: Create a well-structured GitHub issue that the pipeline can consume reliably
-argument-hint: "[description of the problem or feature] [--dry-run]"
+argument-hint: "[description of the problem or feature] [--dry-run] | --title \"...\" --body-file <path> --label \"...\" [--milestone \"...\"] [--dry-run]"
 ---
 <!-- SPDX-FileCopyrightText: Copyright (c) RapierCraft Studios -->
 <!-- SPDX-License-Identifier: AGPL-3.0-or-later -->
@@ -13,6 +13,8 @@ You create GitHub issues with the exact structure the `/work-on` pipeline expect
 
 `/issue` is the structured create-hook for issue creation across the pipeline — it enforces the canonical template, reads code before drafting, runs dedup, and validates mandatory sections. Because those checks are deterministic, `/issue` **creates the issue by default once they pass** — it does not wait for a human to approve the draft. Pass `--dry-run` to review the draft without creating anything (see Argument Parsing below).
 
+`/issue` also accepts a **programmatic invocation form** for callers that have already composed a title, body, labels, and (optionally) a milestone — e.g. `Skill(skill="issue", args="--title \"fix: ...\" --body-file /tmp/body.md --label bug --label P2")`. This form skips the free-text parsing (Phase 1) and LLM drafting (Phase 3) entirely, but still runs the same dedup and body-validation correctness gates as the interactive path. See **Programmatic Invocation Contract** below.
+
 **Agent model policy**: `model: "{DEFAULT_MODEL}"` — resolved from forge.yaml `agents.default_model`, else "sonnet" (standard tier). Fallback: `model: "opus"` if rate-limited. Feature gate: pass `effort` in Task/Skill spawns only on Claude Code >= 2.1.154.
 **NEVER use plan mode (EnterPlanMode).**
 
@@ -24,17 +26,91 @@ You create GitHub issues with the exact structure the `/work-on` pipeline expect
 |------|--------|
 | (none) | Default — read code, dedup, draft, validate, then create the issue immediately. No pre-create confirmation prompt. |
 | `--dry-run` | Draft and validate as normal, but STOP before `gh issue create` — print the draft (or batch draft table) for human review instead of creating it |
+| `--title "..."` | **Activates programmatic mode.** Supplies the final issue title directly — skips Phase 1 (parse) and Phase 3 (draft) entirely. See Programmatic Invocation Contract below. |
+| `--body "..."` | Supplies the final issue body directly (programmatic mode only). Mutually exclusive with `--body-file`. |
+| `--body-file <path>` | Supplies the final issue body by reading it from a file (programmatic mode only). Mutually exclusive with `--body`. |
+| `--label "..."` | Adds one label. Repeatable (`--label bug --label P2`) — labels accumulate. Programmatic mode only. |
+| `--milestone "..."` | Supplies the milestone title directly, skipping the Phase 2E milestone lookup. Programmatic mode only, optional. |
 
 ```bash
 DRY_RUN=false
-for arg in $ARGUMENTS; do
+PROGRAMMATIC_TITLE=""
+PROGRAMMATIC_BODY=""
+PROGRAMMATIC_BODY_FILE=""
+PROGRAMMATIC_LABELS=()
+PROGRAMMATIC_MILESTONE=""
+
+# Positional/flag parsing. $ARGUMENTS is shell-tokenized by the harness before this
+# script sees it, so long-value flags (--title, --body, --body-file, --label,
+# --milestone) each consume exactly the next token as their value.
+ARGS=($ARGUMENTS)
+i=0
+while [ $i -lt ${#ARGS[@]} ]; do
+  arg="${ARGS[$i]}"
   case "$arg" in
     --dry-run) DRY_RUN=true ;;
+    --title|--body|--body-file|--label|--milestone)
+      # Each of these flags requires a value token immediately after it. A flag
+      # with no following token (e.g. --title as the last argument) is a usage
+      # error, not an empty value — fail loudly instead of silently proceeding
+      # with PROGRAMMATIC_TITLE="" (which would otherwise mis-detect as
+      # non-programmatic mode and mask the caller's mistake).
+      if [ $((i+1)) -ge ${#ARGS[@]} ]; then
+        echo "ERROR: $arg requires a value"
+        exit 1
+      fi
+      i=$((i+1))
+      case "$arg" in
+        --title) PROGRAMMATIC_TITLE="${ARGS[$i]}" ;;
+        --body) PROGRAMMATIC_BODY="${ARGS[$i]}" ;;
+        --body-file) PROGRAMMATIC_BODY_FILE="${ARGS[$i]}" ;;
+        --label) PROGRAMMATIC_LABELS+=("${ARGS[$i]}") ;;
+        --milestone) PROGRAMMATIC_MILESTONE="${ARGS[$i]}" ;;
+      esac
+      ;;
   esac
+  i=$((i+1))
 done
+
+# PROGRAMMATIC_MODE is true iff --title was supplied. Every other structured flag
+# (--body/--body-file/--label/--milestone) is meaningless without a title and does
+# NOT, on its own, activate programmatic mode — this avoids a caller accidentally
+# triggering the skip-Phase-1/3 path with a partial/malformed flag set.
+if [ -n "$PROGRAMMATIC_TITLE" ]; then
+  PROGRAMMATIC_MODE=true
+else
+  PROGRAMMATIC_MODE=false
+fi
 ```
 
-`--dry-run` never bypasses a correctness gate — the Phase 2D dedup STOP and the `--force` human-override rule (see Phase 2D) apply identically whether or not `--dry-run` is set.
+`--dry-run` never bypasses a correctness gate — the Phase 2D dedup STOP and the `--force` human-override rule (see Phase 2D) apply identically whether or not `--dry-run` is set, and identically in both interactive and programmatic mode.
+
+### Programmatic Invocation Contract
+
+For callers that have already composed a title, body, labels, and (optionally) a milestone — audit tools, `/work-on` decomposition, pipeline-health proposals, review-finding creation, and similar automation — pass `--title` to activate programmatic mode. This bypasses Phase 1 (free-text parsing) and Phase 3 (LLM drafting) entirely; Phase 2D (dedup) and body validation still run.
+
+**Required**: `--title "TEXT"` and exactly one of `--body "TEXT"` / `--body-file <path>`.
+**Optional**: `--label "NAME"` (repeatable, zero or more), `--milestone "TITLE"`, `--dry-run`.
+
+If `--title` is present but neither `--body` nor `--body-file` is supplied, or both are supplied, this is a usage error: print `ERROR: programmatic mode requires exactly one of --body or --body-file` and STOP — do not fall through to Phase 2D or Phase 4B.
+
+```bash
+if [ "$PROGRAMMATIC_MODE" = "true" ]; then
+  if [ -n "$PROGRAMMATIC_BODY" ] && [ -n "$PROGRAMMATIC_BODY_FILE" ]; then
+    echo "ERROR: programmatic mode requires exactly one of --body or --body-file (both given)"
+    exit 1
+  elif [ -z "$PROGRAMMATIC_BODY" ] && [ -z "$PROGRAMMATIC_BODY_FILE" ]; then
+    echo "ERROR: programmatic mode requires exactly one of --body or --body-file (neither given)"
+    exit 1
+  elif [ -n "$PROGRAMMATIC_BODY_FILE" ]; then
+    PROGRAMMATIC_BODY=$(cat "$PROGRAMMATIC_BODY_FILE")
+  fi
+fi
+```
+
+**Routing** (see also Phase 1's routing guard below): when `PROGRAMMATIC_MODE=true`, skip directly from here to **Phase 2D** using `{PROPOSED_TITLE}` = `$PROGRAMMATIC_TITLE` — Phase 1 (parse) and Phase 3 (draft) do not run. After Phase 2D passes, run **Phase 3F: Programmatic Pre-Create Validation** (below), then proceed to the unmodified Phase 4 (create). `{PRIORITY_LABEL},{CATEGORY_LABEL}` in Phase 4B is the comma-join of `PROGRAMMATIC_LABELS[@]`; the milestone flag is included iff `PROGRAMMATIC_MILESTONE` is non-empty.
+
+The free-text/interactive path (`PROGRAMMATIC_MODE=false`) is completely unaffected — it always proceeds through Phase 1 → Phase 2 → Phase 3 → Phase 4 exactly as before this contract was added.
 
 ---
 
@@ -45,6 +121,8 @@ Bad issues cause cascading pipeline failures. When an issue says "fix the docker
 ---
 
 ## Phase 1: Parse the Request
+
+**If `PROGRAMMATIC_MODE=true`** (see Programmatic Invocation Contract above): run **1A only** (repository resolution — `GH_REPO`/`GH_FLAG`/`REPO_PATH`/`STAGING_BRANCH` still come from `forge.yaml` and the multi-repo prefix table, never from a caller flag), then skip 1B/1C/1D (type/priority/category classification — the caller already supplied final `--label` values) and skip Phase 3 (drafting) entirely. Jump directly to Phase 2D using `{PROPOSED_TITLE}` = `$PROGRAMMATIC_TITLE`, then continue to Phase 3F (Programmatic Pre-Create Validation) and Phase 4 (create). Do not apply the free-text classification/drafting rules below — they apply only when `PROGRAMMATIC_MODE=false`.
 
 The user's input (`$ARGUMENTS`) can be:
 
@@ -118,6 +196,8 @@ Pick ONE primary category label:
 ## Phase 2: Gather Context (MANDATORY)
 
 **You MUST read code before writing the issue.** This is the critical difference between a good issue and a bad one. The investigation agent inherits YOUR file references — if you point to the wrong file, the entire pipeline goes sideways.
+
+**In programmatic mode, skip 2A/2B/2C (domain identification, code reading, affected-file enumeration)** — the caller already did its own domain-specific reading and drafting before invoking `/issue` with `--title`/`--body`/`--body-file`; re-deriving that here would duplicate work the caller has already done and risks second-guessing a caller with more direct context (e.g. an audit agent that already read the offending file). Continue to **2D** (dedup — still mandatory) and **2E** (skip — see below).
 
 ### 2A: Identify the domain
 
@@ -194,6 +274,8 @@ If a duplicate exists:
 # If user mentioned a milestone or the issue clearly belongs to one:
 gh api repos/{GH_REPO}/milestones --jq '.[] | select(.state == "open") | "#\(.number) \(.title) (\(.open_issues) open)"'
 ```
+
+**Skip in programmatic mode** — `$PROGRAMMATIC_MILESTONE` (if supplied) is used directly by Phase 4B; there is nothing to look up.
 
 ---
 
@@ -371,13 +453,59 @@ Before creating, verify:
 5. **Override files included**: If `docker-compose.yml` is listed, `docker-compose.prod.yml` is too (if it exists). If a model is listed, its migration is too.
 6. **Priority matches severity**: P0 = prod down, P1 = significant user impact, P2 = minor, P3 = cosmetic
 
+**Skip this step entirely in programmatic mode** — the caller already composed and is responsible for the draft. Programmatic mode has its own validation gate instead: Phase 3F below.
+
+### 3F: Programmatic Pre-Create Validation (programmatic mode only, MANDATORY)
+
+**Skip if `PROGRAMMATIC_MODE=false`** — this step only runs for the `--title`-driven path; the free-text/interactive path uses 3E above instead.
+
+Runs after Phase 2D (dedup) passes and before Phase 4B (create). This reuses the exact same three mandatory-section check Phase 4C.5 performs post-creation — but applied here, pre-create, against the caller-supplied body, so a programmatic caller's issue is validated *before* it exists rather than repaired after the fact. Phase 4C.5 still runs afterward too (unchanged, for both modes) as an idempotent safety net — after this step it will find nothing to repair.
+
+```bash
+MISSING_SECTIONS=""
+echo "$PROGRAMMATIC_BODY" | grep -q "^## Problem" || MISSING_SECTIONS="$MISSING_SECTIONS PROBLEM"
+echo "$PROGRAMMATIC_BODY" | grep -q "^## Affected Files" || MISSING_SECTIONS="$MISSING_SECTIONS AFFECTED_FILES"
+echo "$PROGRAMMATIC_BODY" | grep -q "^## Acceptance Criteria" || MISSING_SECTIONS="$MISSING_SECTIONS ACCEPTANCE_CRITERIA"
+
+if [ -n "$MISSING_SECTIONS" ]; then
+  echo "WARNING: supplied --body is missing sections:$MISSING_SECTIONS — adding placeholders before creation"
+
+  APPEND_TEXT=""
+  echo "$MISSING_SECTIONS" | grep -q "PROBLEM" && APPEND_TEXT="$APPEND_TEXT
+## Problem
+
+Root cause unknown — investigation needed."
+
+  echo "$MISSING_SECTIONS" | grep -q "AFFECTED_FILES" && APPEND_TEXT="$APPEND_TEXT
+## Affected Files
+
+Files to be identified during investigation."
+
+  echo "$MISSING_SECTIONS" | grep -q "ACCEPTANCE_CRITERIA" && APPEND_TEXT="$APPEND_TEXT
+## Acceptance Criteria
+
+- [ ] Fix confirmed during investigation."
+
+  # Append missing sections to the supplied body (never replace — only extend),
+  # same non-blocking "repair, don't fail" semantics as Phase 4C.5.
+  PROGRAMMATIC_BODY="${PROGRAMMATIC_BODY}${APPEND_TEXT}"
+  echo "Body repaired in-memory before creation — added:$MISSING_SECTIONS"
+else
+  echo "Pre-create validation passed — all mandatory sections present"
+fi
+```
+
+**This step never fails or blocks** — identical to Phase 4C.5's contract. Missing sections cause an in-memory repair, not an error; `$PROGRAMMATIC_BODY` (now guaranteed to contain all three mandatory sections) is what Phase 4B creates the issue with, and what a `--dry-run` preview (Phase 4A) prints.
+
 ---
 
 ## Phase 4: Create the Issue
 
 ### 4A: Create by default, or stop for review with `--dry-run`
 
-Once Phase 2D (dedup) has passed with no blocking duplicate and Phase 3E (draft validation) has passed, proceed directly to Phase 4B and create the issue. **No pre-create confirmation prompt.** This is the default for both interactive and programmatic invocations — dedup and validation are the correctness gates, not a human approval step.
+Once Phase 2D (dedup) has passed with no blocking duplicate, and either Phase 3E (interactive draft validation) or Phase 3F (programmatic pre-create validation) has passed, proceed directly to Phase 4B and create the issue. **No pre-create confirmation prompt.** This is the default for both interactive and programmatic invocations — dedup and validation are the correctness gates, not a human approval step.
+
+In programmatic mode, `{title}` = `$PROGRAMMATIC_TITLE`, `{full issue body}` = `$PROGRAMMATIC_BODY` (post-3F, i.e. already section-repaired), `{priority}, {category}` = the joined `PROGRAMMATIC_LABELS[@]`, and `{milestone}` = `$PROGRAMMATIC_MILESTONE` (or "none" if empty) — no interactive drafting occurred, so the dry-run preview below simply echoes back what the caller supplied (plus any 3F repairs).
 
 **If `--dry-run` was passed** (see Argument Parsing): print the draft below and STOP. Do NOT run Phase 4B.
 
@@ -422,6 +550,26 @@ ISSUE_EOF
 )"
 ```
 
+**Programmatic mode variable mapping**: `{TITLE}` = `$PROGRAMMATIC_TITLE`; `{FULL_BODY}` = `$PROGRAMMATIC_BODY` (post-Phase-3F); the milestone branch is used iff `$PROGRAMMATIC_MILESTONE` is non-empty, with `{MILESTONE_TITLE}` = `$PROGRAMMATIC_MILESTONE`. This is the same `gh issue create` call the interactive path uses — no new command surface, only a new source for the variables.
+
+`{PRIORITY_LABEL},{CATEGORY_LABEL}` is comma-joined from `PROGRAMMATIC_LABELS[@]`, but the `--label` flag itself is only included when at least one label was supplied — zero labels is valid and must omit `--label` entirely (an empty `--label ""` would fail):
+
+```bash
+LABEL_FLAG=()
+if [ ${#PROGRAMMATIC_LABELS[@]} -gt 0 ]; then
+  JOINED_LABELS=$(IFS=,; echo "${PROGRAMMATIC_LABELS[*]}")
+  LABEL_FLAG=(--label "$JOINED_LABELS")
+fi
+
+if [ -n "$PROGRAMMATIC_MILESTONE" ]; then
+  gh issue create {GH_FLAG} --title "$PROGRAMMATIC_TITLE" "${LABEL_FLAG[@]}" \
+    --milestone "$PROGRAMMATIC_MILESTONE" --body "$PROGRAMMATIC_BODY"
+else
+  gh issue create {GH_FLAG} --title "$PROGRAMMATIC_TITLE" "${LABEL_FLAG[@]}" \
+    --body "$PROGRAMMATIC_BODY"
+fi
+```
+
 ### 4C: Post-creation verification
 
 ```bash
@@ -435,6 +583,8 @@ echo "Labels: ${LABELS}"
 ### 4C.5: Body Validation (MANDATORY)
 
 After creation, verify the issue body contains the three mandatory pipeline sections. If any are missing, add placeholder content so downstream pipeline agents have the correct scaffolding.
+
+**Runs for both interactive and programmatic invocations, unconditionally — do not skip this step for programmatic mode.** For programmatic callers this is expected to be a no-op: Phase 3F already validated and repaired `$PROGRAMMATIC_BODY` before creation, so `$CREATED_BODY` here should already contain all three sections. This step still runs as an idempotent safety net (e.g. if GitHub or an intermediate transform altered the body between 3F and creation).
 
 **This step never fails or blocks.** Missing sections cause a repair, not an error. Issues created with full structure pass through immediately.
 
@@ -564,10 +714,11 @@ Re-run without --dry-run to create these {N} issues.
 
 ## Safety Rules
 
-1. **Always read code before creating an issue.** Never create an issue based solely on user description without verifying the files exist and the problem is plausible.
-2. **Always check for duplicates.** Creating duplicate issues wastes agent runs.
-3. **Default to non-interactive creation.** Once dedup (Phase 2D) and draft validation (Phase 3E) pass, create the issue — do not wait for a human to approve the draft. Only pause for human review when `--dry-run` is explicitly passed.
+1. **Always read code before creating an issue.** Never create an issue based solely on user description without verifying the files exist and the problem is plausible. (Programmatic mode: this responsibility shifts to the caller — the caller already read code before composing `--title`/`--body`; `/issue` does not re-verify file paths for programmatic invocations.)
+2. **Always check for duplicates.** Creating duplicate issues wastes agent runs — dedup (Phase 2D) runs identically for interactive and programmatic invocations; no flag bypasses it.
+3. **Default to non-interactive creation.** Once dedup (Phase 2D) and draft validation (Phase 3E, or Phase 3F for programmatic mode) pass, create the issue — do not wait for a human to approve the draft. Only pause for human review when `--dry-run` is explicitly passed.
 4. **Never fabricate file paths.** Every path in the issue body must be verified against the actual repo.
 5. **Never omit override/companion files.** If one compose file is affected, check the other. If one model is affected, check its migration.
 6. **Use conventional commit prefixes in titles.** The pipeline and changelog depend on them.
 7. **Default to P2.** Only use P0/P1 when the user explicitly indicates severity or the evidence clearly shows production impact.
+8. **`--title` is the sole programmatic-mode trigger.** `--body`/`--body-file`/`--label`/`--milestone` are meaningless without it and never activate programmatic mode on their own — this prevents an accidental partial flag set from silently skipping Phase 1/3.
