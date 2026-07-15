@@ -2800,20 +2800,41 @@ async function run() {
   let maxIterations;
   let backend;
   const positional = [];
+  // Consume the value for a `--flag <value>` pair at index `idx` (the flag
+  // itself). Errors loudly instead of silently returning `undefined` when
+  // the flag is the last token or is immediately followed by another flag —
+  // both cases previously left the corresponding variable `undefined`,
+  // which downstream validation treats identically to "flag omitted",
+  // silently falling back to the default instead of erroring. Returns the
+  // consumed value; the caller is responsible for advancing its own loop
+  // index past the consumed token.
+  const requireFlagValue = (flagName, idx) => {
+    const value = runArgs[idx + 1];
+    if (value === undefined || value.startsWith("--")) {
+      process.stderr.write(
+        `${RED}Missing value for ${flagName}. Usage: ${flagName} <value>${RESET}\n`,
+      );
+      process.exit(1);
+    }
+    return value;
+  };
   for (let i = 0; i < runArgs.length; i++) {
     const a = runArgs[i];
     if (a === "--dry-run") {
       dryRun = true;
     } else if (a === "--model") {
-      model = runArgs[++i];
+      model = requireFlagValue("--model", i);
+      i++;
     } else if (a.startsWith("--model=")) {
       model = a.slice("--model=".length);
     } else if (a === "--max-iterations") {
-      maxIterations = parseInt(runArgs[++i], 10);
+      maxIterations = parseInt(requireFlagValue("--max-iterations", i), 10);
+      i++;
     } else if (a.startsWith("--max-iterations=")) {
       maxIterations = parseInt(a.slice("--max-iterations=".length), 10);
     } else if (a === "--backend") {
-      backend = runArgs[++i];
+      backend = requireFlagValue("--backend", i);
+      i++;
     } else if (a.startsWith("--backend=")) {
       backend = a.slice("--backend=".length);
     } else {
