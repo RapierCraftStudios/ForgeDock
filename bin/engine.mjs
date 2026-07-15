@@ -11,11 +11,17 @@ import { makeProjector } from "./engine/projector.mjs";
 
 const DEFAULT_MAX_ATTEMPTS = 3;
 
+// Mirrors runner.mjs's own VALID_BACKENDS set. Duplicated locally (rather than
+// imported) so this validation doesn't take on a cross-file coupling to
+// runner.mjs — kept as a tiny, independently-stable constant instead (forge#2054).
+const VALID_BACKENDS = new Set(["cli", "api", "auto"]);
+
 /**
  * @param {object} opts
  * @param {string} [opts.backend] - "cli" | "api" | "auto" (forge#2028). Forwarded
  *   to every phase's `runner()` call when supplied. Omit to keep runner.mjs's own
  *   default ("auto" ladder — probes the `claude` CLI, falls back to the API).
+ *   An invalid value throws synchronously (see below) rather than being forwarded.
  * @param {string} [opts.model] - Model id (forge#2028). Forwarded to every phase's
  *   `runner()` call when supplied; only applies on the "api" backend. Omit to keep
  *   runner.mjs's default (`FORGEDOCK_MODEL` env or its built-in default).
@@ -29,6 +35,26 @@ export async function runIssue(opts) {
           // callers keep runner.mjs's own "auto" ladder default unchanged —
           // this is purely additive pass-through, not a new default.
           backend, model } = opts;
+
+  // forge#2054: validate `backend` before anything else — before state is
+  // read/written and before the phase/retry loop begins below. An invalid
+  // value must fail fast and non-retryably. Without this check, an invalid
+  // backend instead reaches runner.mjs's resolveBackend() deep inside
+  // runPhaseWithRetry()'s per-attempt try/catch, throws an uncoded Error, and
+  // is silently retried up to `maxAttempts` times (the catch there only
+  // fast-fails on `.code === "NO_API_KEY"/"NO_SDK"`) before escalating to
+  // needs-human — burning retries on what is actually a config error, not a
+  // transient phase failure. runIssue() is the single production choke point
+  // (its only caller is bin/engine-cli.mjs's runFromCli()), so validating
+  // here protects every current and future caller without requiring each one
+  // to remember to validate independently.
+  if (backend !== undefined && !VALID_BACKENDS.has(backend)) {
+    throw Object.assign(
+      new Error(`Invalid backend "${backend}". Must be one of: ${[...VALID_BACKENDS].join(", ")}.`),
+      { code: "INVALID_BACKEND" },
+    );
+  }
+
   const projector = makeProjector(io);
 
   // 1. Load + reconcile (GitHub wins).
