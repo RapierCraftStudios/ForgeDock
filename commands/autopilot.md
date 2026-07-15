@@ -149,19 +149,25 @@ if [ -z "$OPS_ISSUE_NUMBER" ]; then
       --description "Autopilot ops issue — rolling FORGE:AUTOPILOT_CYCLE annotations. Managed by /autopilot." \
       --color "0075CA" \
       $GH_FLAG 2>/dev/null || true
-    OPS_ISSUE_NUMBER=$(gh issue create $GH_FLAG \
-      --title "ops: autopilot cycle log" \
-      --label "$AUTOPILOT_OPS_LABEL" \
-      --body "$(cat <<'OPS_EOF'
+    OPS_BODY_TMPFILE=$(mktemp)
+    trap 'rm -f "$OPS_BODY_TMPFILE"' EXIT
+    cat > "$OPS_BODY_TMPFILE" <<'OPS_EOF'
 ## Autopilot Ops Issue
 
 This issue is the rolling log for `/autopilot` cycle annotations. Each cycle appends a `<!-- FORGE:AUTOPILOT_CYCLE -->` comment with its metrics and phase-completion markers. Cycle N+1 reads the latest comment for baseline deltas and resume state.
 
 **Do not close this issue manually.** It is managed by `/autopilot`.
 OPS_EOF
-)" \
-      --json number \
-      --jq '.number' 2>/dev/null || echo '')
+    # Route through the /issue create-hook (canonical dedup + body validation) instead of
+    # a raw `gh issue create`. See commands/issue.md Programmatic Invocation Contract.
+    Skill(skill="issue", args="--title \"ops: autopilot cycle log\" --body-file \"$OPS_BODY_TMPFILE\" --label \"$AUTOPILOT_OPS_LABEL\"")
+    rm -f "$OPS_BODY_TMPFILE"
+    trap - EXIT
+    OPS_ISSUE_NUMBER=$(gh issue list $GH_FLAG \
+      --state open \
+      --search "ops: autopilot cycle log" \
+      --json number,title \
+      --jq '.[] | select(.title == "ops: autopilot cycle log") | .number' 2>/dev/null | head -1)
     echo "Autopilot: ops issue created: #$OPS_ISSUE_NUMBER"
   else
     echo "[DRY-RUN] Would create ops issue with label '$AUTOPILOT_OPS_LABEL'"
@@ -545,36 +551,10 @@ fi
 
 ### 1E: Create issues from recon findings
 
-For each finding (recurring CI failures, critical stale issue patterns):
+For each finding (recurring CI failures, critical stale issue patterns), route creation through the `/issue` create-hook — its Phase 2D runs the same deterministic `scripts/issue-dedup.sh` + LLM-fallback dedup this step used to run inline, and its Phase 3F runs the same mandatory-section repair this step used to run inline post-creation. Do not duplicate either check here.
 
-**Deduplication check first** — deterministic script, then LLM fallback (canonical path from `issue.md §2D`):
 ```bash
-# Authoritative deterministic check — uses token overlap algorithm (see scripts/issue-dedup.sh)
-DEDUP_RESULT=$(scripts/issue-dedup.sh "{finding_title}" "$GH_FLAG" 2>&1)
-DEDUP_EXIT=$?
-
-if [ "$DEDUP_EXIT" -eq 1 ]; then
-  echo "Near-duplicate detected: $DEDUP_RESULT"
-  echo "Existing issue found — skipping creation for this finding."
-  # STOP here for this finding — do not fall through to gh issue create
-elif [ "$DEDUP_EXIT" -eq 2 ]; then
-  echo "Dedup check usage error: $DEDUP_RESULT"
-  echo "Do NOT proceed to issue creation — fix the invocation and retry."
-  # STOP here — do not fall through to gh issue create
-fi
-
-# If script exits 0 (no match), also run LLM-side semantic search as a secondary pass
-if [ "$DEDUP_EXIT" -eq 0 ]; then
-  gh issue list $GH_FLAG --state open --limit 20 --search "{key_terms_from_finding}" \
-    --json number,title,labels \
-    --jq '.[] | "#\(.number) [\(.labels | map(.name) | join(","))] \(.title)"' 2>/dev/null || true
-  # LLM: if the secondary pass finds a semantic duplicate, treat it as DEDUP_EXIT=1 and skip
-fi
-```
-
-For new findings that have no existing open duplicate (DEDUP_EXIT=0 and no LLM match):
-```bash
-if [ "$DRY_RUN" = "false" ] && [ "${DEDUP_EXIT:-0}" -eq 0 ]; then
+if [ "$DRY_RUN" = "false" ]; then
   # Write body to a temp file to avoid heredoc shell-expansion and injection issues
   BODY_TMPFILE=$(mktemp /tmp/autopilot-issue-body-XXXXXX.md)
   trap 'rm -f "$BODY_TMPFILE"' EXIT
@@ -609,47 +589,28 @@ ISSUE_BODY_EOF
   # Substitute the cycle timestamp (not inside heredoc to avoid expansion-in-template issues)
   sed -i "s|{CYCLE_TIMESTAMP}|$(date -u +%Y-%m-%dT%H:%M:%SZ)|g" "$BODY_TMPFILE"
 
-  NEW_NUMBER=$(gh issue create $GH_FLAG \
-    --title "fix: {finding_description}" \
-    --label "P2,bug" \
-    --body-file "$BODY_TMPFILE" \
-    --json number --jq '.number' 2>/dev/null)
+  FINDING_TITLE="fix: {finding_description}"
+
+  # Route through the /issue create-hook (canonical dedup + body validation) instead of
+  # a raw `gh issue create`. If /issue finds a near-duplicate, it reports it and does not
+  # create — NEW_NUMBER will come back empty from the lookup below.
+  Skill(skill="issue", args="--title \"$FINDING_TITLE\" --body-file \"$BODY_TMPFILE\" --label P2 --label bug")
 
   rm -f "$BODY_TMPFILE"
   trap - EXIT
 
-  # §4C.5: Body validation/repair — ensure mandatory pipeline sections are present
-  # (canonical pattern from issue.md §4C.5 — never fails/blocks, only repairs)
+  NEW_NUMBER=$(gh issue list $GH_FLAG \
+    --state open \
+    --search "$FINDING_TITLE" \
+    --json number,title \
+    --jq --arg t "$FINDING_TITLE" '.[] | select(.title == $t) | .number' 2>/dev/null | head -1)
+
   if [ -n "$NEW_NUMBER" ]; then
-    CREATED_BODY=$(gh issue view "$NEW_NUMBER" $GH_FLAG --json body --jq '.body' 2>/dev/null || echo '')
-    MISSING_SECTIONS=""
-    echo "$CREATED_BODY" | grep -q "^## Problem" || MISSING_SECTIONS="$MISSING_SECTIONS PROBLEM"
-    echo "$CREATED_BODY" | grep -q "^## Affected Files" || MISSING_SECTIONS="$MISSING_SECTIONS AFFECTED_FILES"
-    echo "$CREATED_BODY" | grep -q "^## Acceptance Criteria" || MISSING_SECTIONS="$MISSING_SECTIONS ACCEPTANCE_CRITERIA"
-
-    if [ -n "$MISSING_SECTIONS" ]; then
-      echo "WARNING: Issue #$NEW_NUMBER body is missing sections:$MISSING_SECTIONS — adding placeholders"
-      APPEND_TEXT=""
-      echo "$MISSING_SECTIONS" | grep -q "PROBLEM" && APPEND_TEXT="$APPEND_TEXT
-## Problem
-
-Root cause unknown — investigation needed."
-      echo "$MISSING_SECTIONS" | grep -q "AFFECTED_FILES" && APPEND_TEXT="$APPEND_TEXT
-## Affected Files
-
-Files to be identified during investigation."
-      echo "$MISSING_SECTIONS" | grep -q "ACCEPTANCE_CRITERIA" && APPEND_TEXT="$APPEND_TEXT
-## Acceptance Criteria
-
-- [ ] Fix confirmed during investigation."
-      REPAIRED_BODY="${CREATED_BODY}${APPEND_TEXT}"
-      gh issue edit "$NEW_NUMBER" $GH_FLAG --body "$REPAIRED_BODY"
-      echo "Body repaired — added:$MISSING_SECTIONS"
-    else
-      echo "Body validation passed for #$NEW_NUMBER — all mandatory sections present"
-    fi
+    echo "Created: #$NEW_NUMBER"
+  else
+    echo "No new issue created for finding (likely deduped by /issue) — skipping"
   fi
-elif [ "$DRY_RUN" = "true" ]; then
+else
   echo "[DRY-RUN] Would create issue: fix: {finding_description}"
 fi
 ```
@@ -1377,10 +1338,10 @@ if [ "${#RECON_ISSUES[@]:-0}" -gt 0 ] && [ -n "$OPS_ISSUE_NUMBER" ] && [ "$OPS_I
           --limit 1 --json number --jq '.[0].number // empty' 2>/dev/null || echo '')
 
         if [ -z "$EXISTING_META" ] && [ "$DRY_RUN" = "false" ]; then
-          gh issue create $GH_FLAG \
-            --title "meta: recurring autopilot finding — $FINDING_PATTERN" \
-            --label "priority:P2" \
-            --body "$(cat <<META_EOF
+          META_TITLE="meta: recurring autopilot finding — $FINDING_PATTERN"
+          META_BODY_TMPFILE=$(mktemp /tmp/autopilot-meta-body-XXXXXX.md)
+          trap 'rm -f "$META_BODY_TMPFILE"' EXIT
+          cat > "$META_BODY_TMPFILE" <<META_EOF
 ## Problem
 
 The following finding pattern has appeared in **3 or more consecutive /autopilot cycles**, indicating a systemic issue rather than a one-off occurrence.
@@ -1413,9 +1374,22 @@ Files to be identified during investigation.
 **Citing cycles**: ${CITING_CYCLES}
 **Detected by**: /autopilot Phase 4B recurrence detection
 META_EOF
-)" \
-            --json number --jq '"Created meta-issue #\(.number) for recurrent pattern: $ENV.FINDING_PATTERN"' \
-            2>/dev/null || echo "WARNING: Failed to create meta-issue for recurrence pattern: $FINDING_PATTERN"
+          # Route through the /issue create-hook (canonical dedup + body validation) instead
+          # of a raw `gh issue create`. The EXISTING_META search above already guards against
+          # re-creating for the same pattern; /issue's own dedup is an additional safety net.
+          Skill(skill="issue", args="--title \"$META_TITLE\" --body-file \"$META_BODY_TMPFILE\" --label priority:P2")
+          rm -f "$META_BODY_TMPFILE"
+          trap - EXIT
+          META_NEW_NUMBER=$(gh issue list $GH_FLAG \
+            --state open \
+            --search "$META_TITLE" \
+            --json number,title \
+            --jq --arg t "$META_TITLE" '.[] | select(.title == $t) | .number' 2>/dev/null | head -1)
+          if [ -n "$META_NEW_NUMBER" ]; then
+            echo "Created meta-issue #$META_NEW_NUMBER for recurrent pattern: $FINDING_PATTERN"
+          else
+            echo "WARNING: Could not confirm meta-issue creation for recurrence pattern: $FINDING_PATTERN"
+          fi
         elif [ -n "$EXISTING_META" ]; then
           echo "Recurrence meta-issue already exists (#$EXISTING_META) for pattern '$FINDING_PATTERN' — skipping"
         elif [ "$DRY_RUN" = "true" ]; then
