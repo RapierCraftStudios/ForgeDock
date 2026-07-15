@@ -257,16 +257,37 @@ EOF
 # root for the synthesized hook config, invoke /issue, then restore the original content —
 # this is observed correctly by every nested Bash call regardless of tool-call boundaries.
 FORGE_YAML_BACKUP=$(mktemp)
+FORGE_YAML_EXISTED=false
+[ -f forge.yaml ] && FORGE_YAML_EXISTED=true
 cp forge.yaml "$FORGE_YAML_BACKUP" 2>/dev/null || true
+# Restore helper: distinguishes "forge.yaml existed before the swap" (restore the backup)
+# from "forge.yaml was absent before the swap" (remove the stub rather than leaving an
+# empty file behind, which `mv`-ing an empty mktemp file would otherwise do).
+restore_forge_yaml() {
+  if [ "$FORGE_YAML_EXISTED" = "true" ]; then
+    cp "$FORGE_YAML_BACKUP" forge.yaml 2>/dev/null || echo "ERROR: failed to restore forge.yaml from backup ${FORGE_YAML_BACKUP} — repo config may still be the synthesized Forge-repo stub. Restore manually before running any other command." >&2
+  else
+    rm -f forge.yaml 2>/dev/null || true
+  fi
+}
+# Register the restore as a trap on EXIT (covers normal completion, an error inside the
+# Skill(...) call, AND an unexpected early termination of this bash invocation) — not just
+# the sequential "restore line after the Skill call" below, which would be skipped if this
+# script/session terminates before reaching it. The trap is cleared right after the
+# sequential restore succeeds, so it does not double-restore (harmless if it did, but
+# avoids a redundant no-op restore on the normal path).
+trap restore_forge_yaml EXIT
 cp "$FORGE_ISSUE_HOOK_CONFIG" forge.yaml
 
 ISSUE_RESULT=$(Skill(skill="issue", args="--title \"Pipeline Health: $REPO — $(date +%Y-%m-%d) — Score: [SCORE]/100\" --body-file $HEALTH_BODY_FILE --label health-report"))
 echo "$ISSUE_RESULT"
 
-# Restore the original forge.yaml immediately — best-effort, so a subsequent Bash call in
-# this same pipeline-health run (or any other command) does not keep reading the analyzed
-# project's config as the Forge repo's synthesized hook config.
-mv "$FORGE_YAML_BACKUP" forge.yaml 2>/dev/null || cp "$FORGE_YAML_BACKUP" forge.yaml 2>/dev/null || true
+# Restore the original forge.yaml immediately — so a subsequent Bash call in this same
+# pipeline-health run (or any other command) does not keep reading the analyzed project's
+# config as the Forge repo's synthesized hook config. The EXIT trap above is the backstop
+# for abnormal termination; this is the normal-path restore, and clears the trap once done.
+restore_forge_yaml
+trap - EXIT
 
 # Verify the issue actually landed in FORGE_REPO — if the forge.yaml swap above was not
 # honored (e.g. some nested phase re-read a cached config from before the swap), the report
@@ -349,16 +370,33 @@ EOF
 
 # See the persistence note in 5A above — env vars do not cross tool-call boundaries, and
 # the Skill tool is a distinct invocation, not a bash subprocess. Use the same
-# working-directory-relative forge.yaml swap as 5A instead of relying on `export`.
+# working-directory-relative forge.yaml swap as 5A instead of relying on `export`. This is a
+# separate bash invocation from 5A's, so the swap/restore/trap setup is repeated here rather
+# than reused (shell functions and traps do not persist across separate tool-call boundaries
+# any more than exported env vars do).
 FORGE_YAML_BACKUP=$(mktemp)
+FORGE_YAML_EXISTED=false
+[ -f forge.yaml ] && FORGE_YAML_EXISTED=true
 cp forge.yaml "$FORGE_YAML_BACKUP" 2>/dev/null || true
+restore_forge_yaml() {
+  if [ "$FORGE_YAML_EXISTED" = "true" ]; then
+    cp "$FORGE_YAML_BACKUP" forge.yaml 2>/dev/null || echo "ERROR: failed to restore forge.yaml from backup ${FORGE_YAML_BACKUP} — repo config may still be the synthesized Forge-repo stub. Restore manually before running any other command." >&2
+  else
+    rm -f forge.yaml 2>/dev/null || true
+  fi
+}
+# Same EXIT-trap backstop as 5A — restores forge.yaml even if the Skill(...) call errors or
+# this bash invocation terminates early, not just on the normal sequential path below.
+trap restore_forge_yaml EXIT
 cp "$FORGE_ISSUE_HOOK_CONFIG" forge.yaml
 
 ISSUE_RESULT=$(Skill(skill="issue", args="--title \"fix([command]): [description]\" --body-file $PROPOSAL_BODY_FILE --label \"[bug|enhancement|feature]\" --label \"[P1|P2|P3]\""))
 echo "$ISSUE_RESULT"
 
-# Restore the original forge.yaml immediately — same rationale as 5A.
-mv "$FORGE_YAML_BACKUP" forge.yaml 2>/dev/null || cp "$FORGE_YAML_BACKUP" forge.yaml 2>/dev/null || true
+# Restore the original forge.yaml immediately — same rationale as 5A. Clears the EXIT trap
+# once the normal-path restore succeeds.
+restore_forge_yaml
+trap - EXIT
 
 # Same wrong-repo safeguard as 5A — fail loudly instead of silently filing the improvement
 # proposal into the analyzed project's own repo.
