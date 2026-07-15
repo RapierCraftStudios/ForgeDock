@@ -427,6 +427,8 @@ This step posts a structured `<!-- FORGE:AUDIT-AGENTS -->` summary comment to th
 
 **Step 4E.1 — Locate or create the tracking issue**:
 
+Creation (first-use only — the `gh issue list` existence check below still gates whether creation runs at all) is routed through the `/issue` create-hook's programmatic invocation contract (see `commands/issue.md` → Programmatic Invocation Contract):
+
 ```bash
 # Ensure the label exists before using it (gh issue create fails with GraphQL error if label is absent).
 # Color and description match the canonical ForgeDock label manifest (bin/labels.json).
@@ -441,11 +443,32 @@ TRACKING_ISSUE=$(gh issue list -R {FORGE_REPO} \
 
 if [ -z "$TRACKING_ISSUE" ]; then
   # Create the tracking issue on first use
-  TRACKING_ISSUE=$(gh issue create -R {FORGE_REPO} \
-    --title "Orchestration Metrics — Running Log" \
-    --label "orchestration-metrics" \
-    --body "This issue is a running log of persisted \`/audit-agents\` summaries. Each comment contains one session's efficiency metrics. Do not close this issue — \`/pipeline-health\` Phase 2K queries it to aggregate orchestration efficiency trends." \
-    --json number --jq '.number')
+  TRACKING_BODY_FILE=$(mktemp)
+  cat > "$TRACKING_BODY_FILE" <<'EOF'
+## Problem
+
+No `orchestration-metrics` tracking issue exists yet — this is the first `/audit-agents --persist` run for this repo.
+
+## Affected Files
+
+N/A — this is a running log issue, not a code change.
+
+## Acceptance Criteria
+
+- [ ] This issue stays open indefinitely as a running log of persisted `/audit-agents` summaries
+
+## Context
+
+This issue is a running log of persisted `/audit-agents` summaries. Each comment contains one session's efficiency metrics. Do not close this issue — `/pipeline-health` Phase 2K queries it to aggregate orchestration efficiency trends.
+EOF
+
+  Skill(skill="issue", args="--title \"Orchestration Metrics — Running Log\" --body-file \"$TRACKING_BODY_FILE\" --label \"orchestration-metrics\"")
+
+  # /issue's programmatic mode does not print a structured return value — re-query
+  # by label to recover the newly created issue number.
+  TRACKING_ISSUE=$(gh issue list -R {FORGE_REPO} \
+    --state open --label "orchestration-metrics" --limit 1 \
+    --json number --jq '.[0].number' 2>/dev/null)
   echo "Created orchestration-metrics tracking issue #$TRACKING_ISSUE"
 fi
 ```

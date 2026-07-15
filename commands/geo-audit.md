@@ -320,12 +320,10 @@ Show the user a structured report BEFORE creating issues:
 
 **Only after user confirms.** If "adjust" — modify. If specific ones — only create those.
 
-For each approved issue:
+For each approved issue, route creation through the `/issue` create-hook's programmatic invocation contract (see `commands/issue.md` → Programmatic Invocation Contract) so dedup and mandatory-section validation run on every finding:
 ```bash
-gh issue create \
-  --title "{fix|feat}: {concise description}" \
-  --label "{priority},{labels}" \
-  --body "$(cat <<'BODY_EOF'
+GEO_BODY_FILE=$(mktemp)
+cat > "$GEO_BODY_FILE" <<'BODY_EOF'
 ## Problem
 
 {1-3 sentences: what the GEO audit found is wrong or missing. Current state with specific numbers.}
@@ -359,8 +357,13 @@ Identified in GEO audit on {DATE}.
 
 {Concrete technical steps}
 BODY_EOF
-)"
 ```
+
+```
+Skill(skill="issue", args="--title \"{fix|feat}: {concise description}\" --body-file \"$GEO_BODY_FILE\" --label \"{priority}\" --label \"seo\" --label \"geo\"")
+```
+
+`{priority}`, `seo`, and `geo` are each passed as their own `--label` flag — `/issue`'s programmatic mode does not comma-split a single `--label` value. Every row in the Phase 3 table maps to the `seo,geo` label pair, so both are passed as separate literal `--label` flags rather than a single `{labels}` placeholder.
 
 If a `geo-ai-discoverability` milestone exists, assign issues to it:
 ```bash

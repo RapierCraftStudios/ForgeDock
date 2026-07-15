@@ -684,13 +684,11 @@ Fill in historical values from the Phase 0 history snapshots. Leave cells blank 
 
 **Only after user confirms.** If "adjust" — modify list. If they pick specific ones — only create those.
 
-For each approved action:
+For each approved action, route creation through the `/issue` create-hook's programmatic invocation contract (see `commands/issue.md` → Programmatic Invocation Contract) so dedup and mandatory-section validation run on every finding:
 
 ```bash
-gh issue create \
-  --title "{type}: {action title}" \
-  --label "{priority},{category_label}" \
-  --body "$(cat <<'BODY_EOF'
+ANALYTICS_BODY_FILE=$(mktemp)
+cat > "$ANALYTICS_BODY_FILE" <<'BODY_EOF'
 ## Problem
 
 {1-3 sentences: what the analytics data shows is wrong or suboptimal, with specific numbers.}
@@ -727,10 +725,15 @@ Identified in analytics audit on {DATE}.
 
 {Technical steps}
 BODY_EOF
-)"
 ```
 
-**Label mapping**: SEO → `seo`, UX → `ux,frontend`, Performance → `performance,infra`, Bug → `bug`. Priority: `P0`-`P3`.
+```
+Skill(skill="issue", args="--title \"{type}: {action title}\" --body-file \"$ANALYTICS_BODY_FILE\" --label \"{priority}\" --label \"{category_label_1}\" --label \"{category_label_2}\"")
+```
+
+`{priority}`, `{category_label_1}`, and `{category_label_2}` are each passed as their own `--label` flag — `/issue`'s programmatic mode does not comma-split a single `--label` value. Resolve `{category_label_1}`/`{category_label_2}` from the label mapping below: split each mapping's comma-separated value into one label per placeholder. When a category maps to only one label, omit the `--label "{category_label_2}"` flag entirely (do not pass an empty string).
+
+**Label mapping**: SEO → `seo` (single label), UX → `ux` + `frontend` (two labels), Performance → `performance` + `infra` (two labels), Bug → `bug` (single label). Priority: `P0`-`P3`.
 
 If an open milestone fits, offer to assign issues to it.
 
