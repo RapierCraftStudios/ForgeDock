@@ -18,12 +18,18 @@
  *      prints an explanatory message; the deterministic detection baseline
  *      is used unchanged.
  *
- * This is a separate module from bin/runner.mjs's own ladder rather than a
- * shared abstraction: the two invocation shapes differ (a multi-turn agent
- * tool-use loop for `forgedock run` vs. a one-shot `--print` enrichment
- * prompt here), so full extraction is deferred (see issue #2004's Notes).
- * The CLI-presence probe itself (isClaudeCliAvailable) IS reused directly
- * from bin/runner.mjs with zero duplication.
+ * This is a separate module from bin/runner.mjs's own ladder — the two
+ * invocation shapes differ (a multi-turn agent tool-use loop for
+ * `forgedock run` vs. a one-shot `--print` enrichment prompt here), and the
+ * two ladders' override-validation and no-CLI fallback behavior are
+ * intentionally different (see resolveEnrichBackend()'s doc comment below).
+ * But the common "explicit override wins, else probe CLI, prefer cli" shape
+ * IS now shared: both this module's resolveEnrichBackend() and
+ * bin/runner.mjs's resolveBackend() delegate to the same
+ * resolveBackendLadder() primitive (issue #2026), each supplying its own
+ * override set and CLI-unavailable fallback. The CLI-presence probe itself
+ * (isClaudeCliAvailable) is reused directly from bin/runner.mjs with zero
+ * duplication, same as before.
  *
  * Override (issue #2023): the ladder above changed the *default* precedence
  * from "API-key-only" to "CLI-first" (#2004). Existing users who have both
@@ -37,7 +43,7 @@
  * anyone who doesn't set the var.
  */
 
-import { isClaudeCliAvailable } from "./runner.mjs";
+import { isClaudeCliAvailable, resolveBackendLadder } from "./runner.mjs";
 import { enrich as enrichViaApi } from "./init-enrich-api.mjs";
 import { enrich as enrichViaCli } from "./init-enrich-cli.mjs";
 
@@ -68,13 +74,23 @@ export function resolveEnrichBackend({
   // Explicit override (#2023) — takes precedence over the auto ladder.
   // "auto" and any unrecognized value intentionally fall through unchanged,
   // never throw: this preserves the "graceful fallback, never crash init"
-  // discipline the rest of this module follows.
+  // discipline the rest of this module follows. This validation (silent
+  // fallthrough on an invalid value) is intentionally NOT shared with
+  // resolveBackend()'s throw-on-invalid behavior — see resolveBackendLadder()
+  // in bin/runner.mjs, which defers all override validation to callers.
   const override = env.FORGEDOCK_INIT_BACKEND;
-  if (override && VALID_INIT_BACKEND_OVERRIDES.has(override)) return override;
 
-  if (isCliAvailableFn(cwd)) return "cli";
-  if (env.ANTHROPIC_API_KEY) return "api";
-  return "none";
+  // Delegates the shared "override-or-probe-CLI" shape to
+  // resolveBackendLadder() (issue #2026). The CLI-unavailable fallback below
+  // preserves this module's own eager-inline ANTHROPIC_API_KEY check
+  // (distinct from resolveBackend()'s unconditional "api" fallback).
+  return resolveBackendLadder({
+    override,
+    validOverrides: VALID_INIT_BACKEND_OVERRIDES,
+    cwd,
+    isCliAvailableFn,
+    cliFallback: () => (env.ANTHROPIC_API_KEY ? "api" : "none"),
+  });
 }
 
 /**
