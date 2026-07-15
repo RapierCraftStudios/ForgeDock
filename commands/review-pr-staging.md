@@ -2,7 +2,7 @@
 description: Staging review mode — comprehensive review of staging branch before deploy to main
 argument-hint: "[PR number or \"staging\"]"
 allowed-tools: Task, Bash, Read, Grep, Glob, WebFetch
-install: extras
+install: core
 ---
 <!-- SPDX-FileCopyrightText: Copyright (c) RapierCraft Studios -->
 <!-- SPDX-License-Identifier: AGPL-3.0-or-later -->
