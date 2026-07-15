@@ -64,6 +64,22 @@ gh api repos/{OWNER}/{REPO}/issues/{N}/comments --paginate --jq '.[] | {id:.id,b
 
 `--json` field notes: `state` → `"OPEN"|"CLOSED"` (uppercase); `labels` → `[{name,color}]`; `comments` → max 100 entries; `milestone` → `{number,title}`.
 
+**`gh issue create` is NOT in the list above.** See "Issue Creation — Use `/issue`" below — creating an issue is not a raw `gh issue` operation in this pipeline.
+
+---
+
+## Issue Creation — Use `/issue`
+
+**Rule**: All issue creation MUST go through the `/issue` create-hook (`commands/issue.md`) — either the interactive free-text form (`/issue "description"`) or the programmatic form for callers that have already composed their own title/body:
+
+```
+Skill(skill="issue", args="--title \"fix: ...\" --body-file /path/to/body.md --label bug --label P2 [--milestone \"...\"] [--dry-run]")
+```
+
+`/issue` is the enforced path, not just a convention — it runs mandatory-section validation and dedup (`scripts/issue-dedup.sh`) on every invocation, interactive or programmatic. A raw `gh issue create` call bypasses both checks. See `devdocs/agent/using-forgedock.md` for a worked example of the programmatic form.
+
+**Exception**: `gh issue create` (and `gh issue comment`) remain the correct tool for non-issue GitHub artifacts that are not going through the pipeline's issue lifecycle — e.g. writing to the orchestrate claims board (issue #2039, see #2072) is a `gh issue comment` call on an existing tracking issue, not issue creation, and is unaffected by this rule.
+
 ---
 
 ## gh pr
@@ -113,7 +129,9 @@ gh project item-edit --project-id {PID} --id {ITEM_ID} --field-id {FID} --single
 ```bash
 # label — --force prevents error if already exists
 gh label create "workflow:building" --color "0075ca" --force -R {REPO}
-# Warning: gh issue create fails if a label doesn't exist — always create labels first
+# Warning: /issue (and the raw gh issue create it wraps) fails if a label doesn't
+# exist — always create labels first. See "Issue Creation — Use /issue" above;
+# do not use raw `gh issue create` for issue creation even to work around this.
 
 # gist — create supports stdin '-'; edit does NOT
 echo "$CONTENT" | gh gist create -f "file.md" -                    # create: stdin ok
