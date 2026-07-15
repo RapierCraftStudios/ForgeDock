@@ -211,7 +211,7 @@ BODY_EOF
 ```
 
 ```
-Skill(skill="issue", args="--title \"{fix|feat|refactor}: {issue_title}\" --body-file \"${MILESTONE_ISSUE_BODY_FILE}\" --label \"{type}\" --label \"{priority}\" --milestone \"{TITLE}\"")
+ISSUE_SKILL_OUTPUT=$(Skill(skill="issue", args="--title \"{fix|feat|refactor}: {issue_title}\" --body-file \"${MILESTONE_ISSUE_BODY_FILE}\" --label \"{type}\" --label \"{priority}\" --milestone \"{TITLE}\""))
 ```
 
 ```bash
@@ -255,7 +255,7 @@ BODY_EOF
 ```
 
 ```
-Skill(skill="issue", args="--title \"{SATELLITE_PREFIX}: {fix|feat|refactor}: {issue_title}\" --body-file \"${SATELLITE_ISSUE_BODY_FILE}\" --label \"{type}\" --label \"{priority}\"")
+ISSUE_SKILL_OUTPUT=$(Skill(skill="issue", args="--title \"{SATELLITE_PREFIX}: {fix|feat|refactor}: {issue_title}\" --body-file \"${SATELLITE_ISSUE_BODY_FILE}\" --label \"{type}\" --label \"{priority}\""))
 ```
 
 **Extract each created issue number from the Skill output** (see `commands/issue.md` Phase 4C/4E — it echoes `Created: {url}` and reports `**#{NUMBER}**: {title}`) — repeat for both the default-repo and satellite-repo calls above:
@@ -514,7 +514,7 @@ ISSUE_EOF
 ```
 
 ```
-Skill(skill="issue", args="--title \"fix(milestone): rebase conflict during hunk-loss audit for milestone/{slug}\" --body-file \"${REBASE_ISSUE_BODY_FILE}\" --label \"bug\" --label \"priority:P0\" --label \"needs-human\"")
+ISSUE_SKILL_OUTPUT=$(Skill(skill="issue", args="--title \"fix(milestone): rebase conflict during hunk-loss audit for milestone/{slug}\" --body-file \"${REBASE_ISSUE_BODY_FILE}\" --label \"bug\" --label \"priority:P0\" --label \"needs-human\""))
 ```
 
 ```bash

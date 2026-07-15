@@ -139,7 +139,7 @@ BATCH_EOF
 ```
 
 ```
-Skill(skill="issue", args="--title \"fix(batch): P3 review findings — ${SAFE_SURFACE_AREA} (batch #{BATCH_N})\" --body-file \"${BATCH_BODY_FILE}\" --label \"review-finding\" --label \"priority:P3\" --label \"batch\"")
+ISSUE_SKILL_OUTPUT=$(Skill(skill="issue", args="--title \"fix(batch): P3 review findings — ${SAFE_SURFACE_AREA} (batch #{BATCH_N})\" --body-file \"${BATCH_BODY_FILE}\" --label \"review-finding\" --label \"priority:P3\" --label \"batch\""))
 ```
 
 **Extract the created batch issue number from the Skill output** (see `commands/issue.md` Phase 4C/4E — it echoes `Created: {url}` and reports `**#{NUMBER}**: {title}`):

@@ -144,7 +144,7 @@ SUB_BODY_EOF
 **Invoke `/issue` in programmatic mode**:
 
 ```
-Skill(skill="issue", args="--title \"${SUB_TITLE}\" --body-file \"${SUB_BODY_FILE}\" --label \"{PRIORITY_LABEL}\" --milestone \"{MILESTONE_TITLE}\"")
+ISSUE_SKILL_OUTPUT=$(Skill(skill="issue", args="--title \"${SUB_TITLE}\" --body-file \"${SUB_BODY_FILE}\" --label \"{PRIORITY_LABEL}\" --milestone \"{MILESTONE_TITLE}\""))
 ```
 
 `/issue` runs Phase 2D dedup, Phase 3F body validation, then creates the issue (Phase 4) — no separate pre-check needed on this side.
