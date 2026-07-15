@@ -1421,6 +1421,78 @@ describe("runCliBackend content passthrough (issue #2029, updated for #2019)", (
 });
 
 // ---------------------------------------------------------------------------
+// runCliBackend — env scrub (issue #2021)
+// ---------------------------------------------------------------------------
+
+describe("runCliBackend env scrub (issue #2021)", () => {
+  it("does not forward ANTHROPIC_API_KEY to the spawned CLI, but leaves other env vars intact", () => {
+    if (process.platform === "win32") {
+      return;
+    }
+
+    const shimDir = mkdtempSync(join(os.tmpdir(), "forgedock-cli-env-capture-"));
+    const captureFile = join(shimDir, "captured-env.json");
+    const recorderPath = join(shimDir, "record-env.mjs");
+    const fakeClaudePath = join(shimDir, "fake-claude-env");
+
+    // Recorder dumps the two env vars under test (not the full env — full
+    // env dumps in a test fixture are themselves a needless leak surface)
+    // to captureFile as JSON.
+    writeFileSync(
+      recorderPath,
+      [
+        'import { writeFileSync } from "node:fs";',
+        "writeFileSync(process.argv[2], JSON.stringify({",
+        "  anthropicKey: process.env.ANTHROPIC_API_KEY ?? null,",
+        "  marker: process.env.FORGEDOCK_TEST_MARKER ?? null,",
+        "}));",
+      ].join("\n") + "\n",
+      "utf-8",
+    );
+    writeFileSync(
+      fakeClaudePath,
+      ["#!/bin/sh", `exec node "${recorderPath}" "${captureFile}" "$@"`, ""].join("\n"),
+      { mode: 0o755 },
+    );
+
+    const origKey = process.env.ANTHROPIC_API_KEY;
+    const origMarker = process.env.FORGEDOCK_TEST_MARKER;
+    process.env.ANTHROPIC_API_KEY = "sk-ant-should-not-leak";
+    process.env.FORGEDOCK_TEST_MARKER = "should-survive-scrub";
+
+    try {
+      const result = runCliBackend({
+        spec: loadCommandSpec(COMMANDS_DIR, "work-on"),
+        userMessage: "Execute: /work-on 2003",
+        args: ["2003"],
+        cwd: shimDir,
+        logger: { log: () => {} },
+        bin: fakeClaudePath,
+      });
+
+      assert.equal(result.status, "complete");
+      const captured = JSON.parse(readFileSync(captureFile, "utf-8"));
+      assert.equal(
+        captured.anthropicKey,
+        null,
+        "ANTHROPIC_API_KEY must not be present in the spawned CLI's environment",
+      );
+      assert.equal(
+        captured.marker,
+        "should-survive-scrub",
+        "unrelated env vars must still be forwarded — this must be a targeted scrub, not env: {}",
+      );
+    } finally {
+      rmSync(shimDir, { recursive: true, force: true });
+      if (origKey === undefined) delete process.env.ANTHROPIC_API_KEY;
+      else process.env.ANTHROPIC_API_KEY = origKey;
+      if (origMarker === undefined) delete process.env.FORGEDOCK_TEST_MARKER;
+      else process.env.FORGEDOCK_TEST_MARKER = origMarker;
+    }
+  });
+});
+
+// ---------------------------------------------------------------------------
 // buildCliSystemPrompt (issue #2019)
 // ---------------------------------------------------------------------------
 

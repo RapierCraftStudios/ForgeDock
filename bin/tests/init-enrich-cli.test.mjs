@@ -81,6 +81,51 @@ describe("init-enrich-cli enrich()", () => {
     assert.equal(capturedOpts.cwd, "/tmp/repo");
   });
 
+  it("scrubs ANTHROPIC_API_KEY from the env passed to spawnFn while preserving other vars (issue #2021)", async () => {
+    let capturedOpts;
+    const spawnFn = (bin, argv, opts) => {
+      capturedOpts = opts;
+      return { status: 0, stdout: JSON.stringify(ENRICHED_DRAFT), stderr: "", error: undefined };
+    };
+
+    const fakeEnv = { ANTHROPIC_API_KEY: "sk-ant-should-not-leak", GH_TOKEN: "gh-token-should-survive" };
+    await enrich(ORIGINAL_DRAFT, { spawnFn, env: fakeEnv });
+
+    assert.ok(capturedOpts.env, "spawnFn must receive an env option");
+    assert.equal(
+      capturedOpts.env.ANTHROPIC_API_KEY,
+      undefined,
+      "ANTHROPIC_API_KEY must not be present in the env passed to spawnFn",
+    );
+    assert.equal(
+      capturedOpts.env.GH_TOKEN,
+      "gh-token-should-survive",
+      "unrelated env vars must still be forwarded — this must be a targeted scrub, not env: {}",
+    );
+    // The injected `env` opt must not be the SAME identity as spawnFn's
+    // received env, and must not have been mutated in place — a shallow copy,
+    // not a mutation of the caller-owned object.
+    assert.equal(fakeEnv.ANTHROPIC_API_KEY, "sk-ant-should-not-leak");
+  });
+
+  it("defaults env to process.env when opts.env is not supplied", async () => {
+    const origKey = process.env.ANTHROPIC_API_KEY;
+    process.env.ANTHROPIC_API_KEY = "sk-ant-should-not-leak-default";
+    let capturedOpts;
+    const spawnFn = (bin, argv, opts) => {
+      capturedOpts = opts;
+      return { status: 0, stdout: JSON.stringify(ENRICHED_DRAFT), stderr: "", error: undefined };
+    };
+
+    try {
+      await enrich(ORIGINAL_DRAFT, { spawnFn });
+      assert.equal(capturedOpts.env.ANTHROPIC_API_KEY, undefined);
+    } finally {
+      if (origKey === undefined) delete process.env.ANTHROPIC_API_KEY;
+      else process.env.ANTHROPIC_API_KEY = origKey;
+    }
+  });
+
   it("falls back to the original draft on non-zero exit status, never throws", async () => {
     const spawnFn = () => ({ status: 1, stdout: "", stderr: "some CLI error", error: undefined });
 
