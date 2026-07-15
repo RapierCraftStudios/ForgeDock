@@ -1752,4 +1752,131 @@ describe("runCommand backend resolution", () => {
     const warning = lines.find((l) => /ignored on the cli backend/.test(l));
     assert.equal(warning, undefined, "no cli-ignored-options warning expected on the api backend");
   });
+
+  // Discoverability notice (issue #2020): the "auto" ladder's CLI-first
+  // precedence itself is unchanged/intentional (see doc comment at the
+  // notice's call site) — these tests only cover the new notice, never the
+  // resolution logic (that's covered by the existing `describe("resolveBackend", ...)`
+  // block above).
+  describe("auto-resolved-to-cli discoverability notice (issue #2020)", () => {
+    it("logs a notice when backend is left as 'auto', an API key is set, and the ladder resolves to cli", async () => {
+      // Host-dependent, same discipline as isClaudeCliAvailable's own tests:
+      // the notice can only fire when the ladder actually resolves to "cli"
+      // on this host, which requires `claude` to be on PATH. When it isn't,
+      // resolvedBackend is "api" and the entire cli-branch (including the
+      // notice) is unreachable — assert its absence in that case instead,
+      // so the test is deterministic either way rather than flaky.
+      const cliAvailable = isClaudeCliAvailable(TMP);
+      const originalTimeout = process.env.FORGEDOCK_CLI_TIMEOUT_MS;
+      process.env.FORGEDOCK_CLI_TIMEOUT_MS = "1";
+      const lines = [];
+      try {
+        await runCommand({
+          commandsDir: COMMANDS_DIR,
+          commandName: "work-on",
+          args: ["2003"],
+          cwd: TMP,
+          dryRun: false,
+          apiKey: "sk-test-key-present",
+          backend: "auto",
+          logger: { log: (s) => lines.push(s) },
+        });
+      } catch {
+        // Expected on a CLI-available host — the bounded near-instant
+        // timeout/missing-CLI failure is not under test here.
+      } finally {
+        if (originalTimeout === undefined) {
+          delete process.env.FORGEDOCK_CLI_TIMEOUT_MS;
+        } else {
+          process.env.FORGEDOCK_CLI_TIMEOUT_MS = originalTimeout;
+        }
+      }
+      const notice = lines.find((l) => /Using the claude CLI backend/.test(l));
+      if (cliAvailable) {
+        assert.ok(notice, "expected the discoverability notice when auto resolves to cli with an apiKey present");
+        assert.match(notice, /--backend api/);
+        assert.match(notice, /FORGEDOCK_BACKEND=api/);
+      } else {
+        assert.equal(
+          notice,
+          undefined,
+          "no notice expected when the host has no claude CLI (ladder resolves to api, cli-branch unreachable)",
+        );
+      }
+    });
+
+    it("does not log the notice when backend is explicitly 'cli' (explicit choice needs no override hint)", async () => {
+      const originalTimeout = process.env.FORGEDOCK_CLI_TIMEOUT_MS;
+      process.env.FORGEDOCK_CLI_TIMEOUT_MS = "1";
+      const lines = [];
+      try {
+        await runCommand({
+          commandsDir: COMMANDS_DIR,
+          commandName: "work-on",
+          args: ["2003"],
+          cwd: TMP,
+          dryRun: false,
+          apiKey: "sk-test-key-present",
+          backend: "cli",
+          logger: { log: (s) => lines.push(s) },
+        });
+      } catch {
+        // Expected — the bounded timeout/missing-CLI failure is not under test here.
+      } finally {
+        if (originalTimeout === undefined) {
+          delete process.env.FORGEDOCK_CLI_TIMEOUT_MS;
+        } else {
+          process.env.FORGEDOCK_CLI_TIMEOUT_MS = originalTimeout;
+        }
+      }
+      const notice = lines.find((l) => /Using the claude CLI backend/.test(l));
+      assert.equal(notice, undefined, "no notice expected when backend was explicitly requested as cli");
+    });
+
+    it("does not log the notice when no apiKey is set, even if auto resolves to cli", async () => {
+      const cliAvailable = isClaudeCliAvailable(TMP);
+      if (!cliAvailable) return; // notice's containing branch is unreachable without a CLI on PATH
+      const originalTimeout = process.env.FORGEDOCK_CLI_TIMEOUT_MS;
+      process.env.FORGEDOCK_CLI_TIMEOUT_MS = "1";
+      const lines = [];
+      try {
+        await runCommand({
+          commandsDir: COMMANDS_DIR,
+          commandName: "work-on",
+          args: ["2003"],
+          cwd: TMP,
+          dryRun: false,
+          apiKey: "",
+          backend: "auto",
+          logger: { log: (s) => lines.push(s) },
+        });
+      } catch {
+        // Expected — the bounded timeout/missing-CLI failure is not under test here.
+      } finally {
+        if (originalTimeout === undefined) {
+          delete process.env.FORGEDOCK_CLI_TIMEOUT_MS;
+        } else {
+          process.env.FORGEDOCK_CLI_TIMEOUT_MS = originalTimeout;
+        }
+      }
+      const notice = lines.find((l) => /Using the claude CLI backend/.test(l));
+      assert.equal(notice, undefined, "no notice expected when no apiKey is set");
+    });
+
+    it("does not log the notice on --dry-run (dry-run already reports the resolved backend separately)", async () => {
+      const lines = [];
+      await runCommand({
+        commandsDir: COMMANDS_DIR,
+        commandName: "work-on",
+        args: ["2003"],
+        cwd: TMP,
+        dryRun: true,
+        apiKey: "sk-test-key-present",
+        backend: "auto",
+        logger: { log: (s) => lines.push(s) },
+      });
+      const notice = lines.find((l) => /Using the claude CLI backend/.test(l));
+      assert.equal(notice, undefined, "no live-run notice expected during --dry-run");
+    });
+  });
 });
