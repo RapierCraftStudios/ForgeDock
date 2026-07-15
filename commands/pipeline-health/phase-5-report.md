@@ -26,8 +26,6 @@ project:
   repo: "${FORGE_REPO##*/}"
 paths:
   root: "$FORGE_HOME"
-branches:
-  staging: "$(yq '.branches.staging' "${FORGE_CONFIG:-forge.yaml}")"
 HOOKCFG_EOF
 
 HEALTH_BODY_FILE=$(mktemp)
@@ -247,22 +245,36 @@ EOF
 
 # Environment variable state is not guaranteed to persist across separate tool-call
 # boundaries (a Bash call's shell state does not carry into the next Bash call, and the
-# Skill tool has no env-passthrough parameter — it only accepts `skill`/`args`). Use a
-# real `export` and re-affirm FORGE_CONFIG="$FORGE_ISSUE_HOOK_CONFIG" on every bash command
-# you run while walking through the /issue phases invoked below (1A/2D/3F/4A-4E), so
-# CONFIG_FILE="${FORGE_CONFIG:-forge.yaml}" keeps resolving to the Forge repo rather than
-# silently falling back to the analyzed project's own forge.yaml.
-export FORGE_CONFIG="$FORGE_ISSUE_HOOK_CONFIG"
+# Skill tool has no env-passthrough parameter — it only accepts `skill`/`args`; `Skill`
+# is a distinct tool invocation, not a bash subprocess, so an `export` in a prior Bash
+# call cannot reach the nested /issue phases' own Bash calls at all). What DOES persist
+# reliably across tool-call boundaries is the working directory (per the Bash tool's own
+# contract) and the filesystem it points at. commands/issue.md Phase 1A resolves
+# `CONFIG_FILE="${FORGE_CONFIG:-forge.yaml}"` — when `$FORGE_CONFIG` is unset (the normal
+# case, since env vars do not propagate), it falls back to the literal relative path
+# `forge.yaml`, which resolves against the current working directory. So instead of
+# relying on env-var propagation, temporarily swap the on-disk `forge.yaml` at the repo
+# root for the synthesized hook config, invoke /issue, then restore the original content —
+# this is observed correctly by every nested Bash call regardless of tool-call boundaries.
+FORGE_YAML_BACKUP=$(mktemp)
+cp forge.yaml "$FORGE_YAML_BACKUP" 2>/dev/null || true
+cp "$FORGE_ISSUE_HOOK_CONFIG" forge.yaml
 
 ISSUE_RESULT=$(Skill(skill="issue", args="--title \"Pipeline Health: $REPO — $(date +%Y-%m-%d) — Score: [SCORE]/100\" --body-file $HEALTH_BODY_FILE --label health-report"))
 echo "$ISSUE_RESULT"
 
-# Verify the issue actually landed in FORGE_REPO — if the FORGE_CONFIG override above was not
-# honored (e.g. it silently fell back to default forge.yaml), the report would be mis-filed into
-# the analyzed project's own GH_REPO instead of the Forge repo. Fail loudly rather than let a
-# pipeline-health report silently spam the analyzed project's issue tracker.
+# Restore the original forge.yaml immediately — best-effort, so a subsequent Bash call in
+# this same pipeline-health run (or any other command) does not keep reading the analyzed
+# project's config as the Forge repo's synthesized hook config.
+mv "$FORGE_YAML_BACKUP" forge.yaml 2>/dev/null || cp "$FORGE_YAML_BACKUP" forge.yaml 2>/dev/null || true
+
+# Verify the issue actually landed in FORGE_REPO — if the forge.yaml swap above was not
+# honored (e.g. some nested phase re-read a cached config from before the swap), the report
+# would be mis-filed into the analyzed project's own GH_REPO instead of the Forge repo. Fail
+# loudly rather than let a pipeline-health report silently spam the analyzed project's issue
+# tracker.
 if ! echo "$ISSUE_RESULT" | grep -q "github.com/${FORGE_REPO}/issues/"; then
-  echo "ERROR: pipeline-health report was not created in FORGE_REPO ($FORGE_REPO) — verify FORGE_CONFIG propagated to the /issue invocation above before proceeding."
+  echo "ERROR: pipeline-health report was not created in FORGE_REPO ($FORGE_REPO) — verify the forge.yaml swap propagated to the /issue invocation above before proceeding."
 fi
 
 rm -f "$FORGE_ISSUE_HOOK_CONFIG" "$HEALTH_BODY_FILE"
@@ -304,8 +316,6 @@ project:
   repo: "${FORGE_REPO##*/}"
 paths:
   root: "$FORGE_HOME"
-branches:
-  staging: "$(yq '.branches.staging' "${FORGE_CONFIG:-forge.yaml}")"
 HOOKCFG_EOF
 
 PROPOSAL_BODY_FILE=$(mktemp)
@@ -337,17 +347,23 @@ After the fix, [metric] should reach [target value]. [Describe the concrete beha
 - [ ] No regression in other pipeline-health metrics
 EOF
 
-# See the persistence note in 5A above — env vars do not cross tool-call boundaries, so use
-# a real `export` and re-affirm it on every bash command through the nested /issue phases.
-export FORGE_CONFIG="$FORGE_ISSUE_HOOK_CONFIG"
+# See the persistence note in 5A above — env vars do not cross tool-call boundaries, and
+# the Skill tool is a distinct invocation, not a bash subprocess. Use the same
+# working-directory-relative forge.yaml swap as 5A instead of relying on `export`.
+FORGE_YAML_BACKUP=$(mktemp)
+cp forge.yaml "$FORGE_YAML_BACKUP" 2>/dev/null || true
+cp "$FORGE_ISSUE_HOOK_CONFIG" forge.yaml
 
 ISSUE_RESULT=$(Skill(skill="issue", args="--title \"fix([command]): [description]\" --body-file $PROPOSAL_BODY_FILE --label \"[bug|enhancement|feature]\" --label \"[P1|P2|P3]\""))
 echo "$ISSUE_RESULT"
 
+# Restore the original forge.yaml immediately — same rationale as 5A.
+mv "$FORGE_YAML_BACKUP" forge.yaml 2>/dev/null || cp "$FORGE_YAML_BACKUP" forge.yaml 2>/dev/null || true
+
 # Same wrong-repo safeguard as 5A — fail loudly instead of silently filing the improvement
 # proposal into the analyzed project's own repo.
 if ! echo "$ISSUE_RESULT" | grep -q "github.com/${FORGE_REPO}/issues/"; then
-  echo "ERROR: pipeline-health proposal was not created in FORGE_REPO ($FORGE_REPO) — verify FORGE_CONFIG propagated to the /issue invocation above before proceeding."
+  echo "ERROR: pipeline-health proposal was not created in FORGE_REPO ($FORGE_REPO) — verify the forge.yaml swap propagated to the /issue invocation above before proceeding."
 fi
 
 rm -f "$FORGE_ISSUE_HOOK_CONFIG" "$PROPOSAL_BODY_FILE"
