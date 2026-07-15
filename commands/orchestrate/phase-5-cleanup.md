@@ -39,9 +39,47 @@ Include the audit summary in the final report (Phase 6). Key metrics to surface:
 - **Resume cycles** — how many times agents had to be resumed
 - **Stall boundaries** — which phase transitions cause the most stalls
 
-### Step 5C: Report cleanup results
+### Step 5C: Close the coordination issue (claims board) <!-- Added: forge#2072 -->
 
-Include the cleanup summary in the final report (Phase 6). If cleanup found problems, call them out — they indicate agent pipeline failures that may need investigation.
+**Why this step exists**: Step 3D.1 (`phase-3-dependency.md`) creates a per-batch coordination issue (the claims board) and exports `FORGE_COORD_ISSUE`/`COORD_ISSUE_NUMBER`. Step 5A's `/cleanup` sweep only closes orphaned issues whose PR merged — the claims board has no PR of its own, so that heuristic never matches it. Without this step, one `automation`-labelled issue leaks per orchestration batch.
+
+**Run after Step 5B, before Step 5D.** No-ops cleanly if the claims board was never created this run (`COORD_ISSUE_NUMBER` unset/empty — e.g. Step 3D.1's `gh issue create` failed, or this batch never reached DAG construction). Tolerates GitHub API failures without aborting the rest of Phase 5 — the same tolerant-failure convention (`2>/dev/null || echo ...`, `|| true`) used throughout `phase-3-dependency.md`/`phase-4-execution.md`.
+
+```bash
+if [ -n "${COORD_ISSUE_NUMBER:-}" ]; then
+  # Detect any still-active (unreleased) claims — a claim posted with no matching
+  # CLAIM_RELEASED comment on the same coordination issue. Mirrors the exact query
+  # phase-4-execution.md's claims-board relaxation sweep uses (Step 4B item 4).
+  ACTIVE_CLAIMS=$(gh api repos/{GH_REPO}/issues/${COORD_ISSUE_NUMBER}/comments \
+    --jq '[.[] | select(.body | contains("<!-- FORGE:CLAIM -->")) |
+           select(.body | contains("<!-- FORGE:CLAIM_RELEASED -->") | not)] |
+          map(.body | capture("\\*\\*Holder\\*\\*: (?P<h>[^\\n]+)").h // "unknown")' 2>/dev/null || echo '[]')
+  ACTIVE_CLAIMS_COUNT=$(echo "$ACTIVE_CLAIMS" | jq 'length' 2>/dev/null || echo 0)
+
+  if [ "$ACTIVE_CLAIMS_COUNT" -gt 0 ] 2>/dev/null; then
+    ACTIVE_CLAIMS_NOTE="**Still-active claims at close time** (${ACTIVE_CLAIMS_COUNT}) — not blocking closure, listed for visibility:
+$(echo "$ACTIVE_CLAIMS" | jq -r '.[] | "- " + .' 2>/dev/null)"
+  else
+    ACTIVE_CLAIMS_NOTE="No active (unreleased) claims at close time."
+  fi
+
+  gh issue close "$COORD_ISSUE_NUMBER" -R {GH_REPO} --comment "Batch complete — closing claims board.
+
+${ACTIVE_CLAIMS_NOTE}
+
+Closed automatically by \`/orchestrate\` Phase 5 Step 5C." 2>/dev/null \
+    && echo "Closed coordination issue #${COORD_ISSUE_NUMBER}" \
+    || echo "WARNING: failed to close coordination issue #${COORD_ISSUE_NUMBER} — non-fatal, continuing Phase 5"
+else
+  echo "No coordination issue for this batch (FORGE_COORD_ISSUE unset) — Step 5C is a no-op"
+fi
+```
+
+**Idempotency**: `gh issue close` on an already-closed issue succeeds as a no-op (no error) — safe to re-run this step on a resumed/compacted session without an extra pre-check.
+
+### Step 5D: Report cleanup results
+
+Include the cleanup summary in the final report (Phase 6), including whether the coordination issue was closed this run (see Step 5C). If cleanup found problems, call them out — they indicate agent pipeline failures that may need investigation.
 
 ---
 
