@@ -70,8 +70,14 @@ const DEFAULT_CLI_TIMEOUT_MS = 15 * 60 * 1000;
 // it is far shorter than DEFAULT_CLI_TIMEOUT_MS. Mirrors the timeout already
 // used by the `claude --version` doctor check in bin/forgedock.mjs.
 const CLI_PROBE_TIMEOUT_MS = 5000;
-/** Valid values for the `backend` option / --backend flag / FORGEDOCK_BACKEND env. */
-const VALID_BACKENDS = new Set(["cli", "api", "auto"]);
+/**
+ * Valid values for the `backend` option / --backend flag / FORGEDOCK_BACKEND
+ * env. Exported (issue #2013) so bin/forgedock.mjs's CLI-layer `--backend`
+ * flag validation can reuse this exact Set instead of maintaining its own
+ * independently-hardcoded copy — keeps both layers' "Must be one of: ..."
+ * error messages structurally unable to drift apart.
+ */
+export const VALID_BACKENDS = new Set(["cli", "api", "auto"]);
 // Per-process memoization for isClaudeCliAvailable(), keyed by `cwd` (issue
 // #2011). `runCommand()` calls resolveBackend() — and therefore, for the
 // default "auto" backend, isClaudeCliAvailable() — unconditionally on every
@@ -377,6 +383,16 @@ export function resolveBackend({ requested = "auto", cwd = process.cwd() } = {})
  *   itself (Windows resolves a bare executable name via the *calling*
  *   process's search path at the OS level, which is not reliably
  *   overridable per-call from within the same process).
+ * @param {Function} [opts.spawnFn] - Injectable replacement for
+ *   `child_process.spawnSync` (default `spawnSync`). Test seam only —
+ *   production callers must never override this. Mirrors the identical
+ *   `spawnFn` seam on `bin/init-enrich-cli.mjs`'s `enrich()` (issue #2033):
+ *   both functions spawn the local `claude` CLI in headless print mode, so
+ *   sharing the same seam shape lets tests exercise both with equivalent
+ *   fixtures and makes future divergence between the two easier to catch.
+ *   This is additive to the existing `bin` override seam above — tests may
+ *   still use a real fake-binary-on-disk + real `spawnSync` (the original
+ *   seam), or fully mock the call via `spawnFn` (no fake binary needed).
  * @returns {{status: string, command: string, iterations: number, stopReason: string, usage: null, model: string, backend: "cli"}}
  */
 export function runCliBackend({
@@ -387,6 +403,7 @@ export function runCliBackend({
   cwd,
   logger = console,
   bin = "claude",
+  spawnFn = spawnSync,
 }) {
   const rawTimeout = parseInt(process.env.FORGEDOCK_CLI_TIMEOUT_MS, 10);
   const timeoutMs =
@@ -427,7 +444,7 @@ export function runCliBackend({
     // No `shell` option (defaults to false): argv is passed as discrete,
     // unparsed elements — see the SECURITY note above. This also correctly
     // resolves the Windows `.cmd` shim without needing shell:true.
-    const result = spawnSync(bin, cliArgs, {
+    const result = spawnFn(bin, cliArgs, {
       cwd,
       encoding: "utf-8",
       maxBuffer: DEFAULT_SPAWN_MAX_BUFFER_BYTES,
