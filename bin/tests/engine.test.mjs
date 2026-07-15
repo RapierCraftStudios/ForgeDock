@@ -1,13 +1,16 @@
 // bin/tests/engine.test.mjs
 import { describe, it, beforeEach, afterEach } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, rmSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, dirname } from "node:path";
+import { fileURLToPath } from "node:url";
 import { runIssue } from "../engine.mjs";
 import { readLog, deriveState } from "../engine/runlog.mjs";
 import { serializeState } from "../engine/state.mjs";
 import { VALID_BACKENDS } from "../runner.mjs";
+
+const __dirname = dirname(fileURLToPath(import.meta.url));
 
 let dir; beforeEach(() => { dir = mkdtempSync(join(tmpdir(), "fd-engine-")); });
 afterEach(() => { rmSync(dir, { recursive: true, force: true }); });
@@ -430,5 +433,46 @@ describe("runIssue", () => {
         io, runner, now: () => 1000, maxAttempts: 1, backend: bogus }),
       (err) => { assert.equal(err.code, "INVALID_BACKEND"); return true; },
     );
+  });
+
+  it("forge#2079/#2075: VALID_BACKENDS is the read-only runner.mjs singleton, not a diverged local copy", () => {
+    // #2079: the forge#2076 test above only asserts value-equivalence (it
+    // iterates [...VALID_BACKENDS]), so it would still pass if engine.mjs
+    // reintroduced its own hardcoded `new Set(["cli","api","auto"])` with
+    // identical literal values — the drift-elimination fix would silently
+    // regress. This test closes that gap two ways:
+    //
+    // 1. Mutation must actually be blocked (issue #2075). Note this is
+    //    deliberately NOT an Object.isFrozen() check: Object.freeze() does
+    //    NOT prevent Set mutation (add/delete/clear operate on an internal
+    //    slot, not on own properties, so a frozen Set still silently
+    //    accepts .add() — see runner.mjs's readOnlySet() comment). The only
+    //    reliable proof that this is the protected singleton is that
+    //    mutating it actually throws.
+    assert.throws(() => VALID_BACKENDS.add("bogus-backend"), TypeError,
+      "mutating VALID_BACKENDS must throw (issue #2075) — a fresh, " +
+      "unprotected local copy in a consumer would silently accept this instead");
+    assert.throws(() => VALID_BACKENDS.delete("cli"), TypeError,
+      "deleting from VALID_BACKENDS must throw (issue #2075)");
+    assert.equal(VALID_BACKENDS.size, 3,
+      "VALID_BACKENDS contents must be unchanged after the rejected mutation attempts");
+    assert.deepEqual([...VALID_BACKENDS].sort(), ["api", "auto", "cli"],
+      "VALID_BACKENDS values must be unchanged after the rejected mutation attempts");
+    assert.equal(VALID_BACKENDS.constructor, Set,
+      "VALID_BACKENDS.constructor must still be Set — the readOnlySet() Proxy " +
+      "special-cases the constructor trap so brand/identity checks against a " +
+      "plain Set continue to work");
+
+    // 2. Static source check: engine.mjs must import VALID_BACKENDS from
+    //    runner.mjs and must NOT declare its own local `VALID_BACKENDS =
+    //    new Set(...)` — this directly guards against the forge#2076
+    //    regression class (a duplicated, independently-drifting copy)
+    //    regardless of whether the duplicate's initial values happen to
+    //    match runner.mjs's at write time.
+    const engineSource = readFileSync(join(__dirname, "..", "engine.mjs"), "utf8");
+    assert.match(engineSource, /import\s*\{[^}]*VALID_BACKENDS[^}]*\}\s*from\s*["']\.\/runner\.mjs["']/,
+      "engine.mjs must import VALID_BACKENDS from runner.mjs");
+    assert.doesNotMatch(engineSource, /(?:const|let|var)\s+VALID_BACKENDS\s*=\s*new\s+Set/,
+      "engine.mjs must not declare its own local VALID_BACKENDS Set (would reintroduce forge#2076 drift)");
   });
 });

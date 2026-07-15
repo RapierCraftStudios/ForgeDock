@@ -71,13 +71,60 @@ const DEFAULT_CLI_TIMEOUT_MS = 15 * 60 * 1000;
 // used by the `claude --version` doctor check in bin/forgedock.mjs.
 const CLI_PROBE_TIMEOUT_MS = 5000;
 /**
+ * Wraps a Set in a Proxy that blocks add()/delete()/clear(), so the
+ * returned collection is genuinely read-only — not just Object.frozen.
+ *
+ * Note: `Object.freeze(new Set(...))` does NOT prevent mutation. Set's
+ * mutator methods (add/delete/clear) operate on an internal [[SetData]]
+ * slot, not on the object's own enumerable properties, so Object.freeze()
+ * — which only locks down property descriptors — has no effect on them;
+ * `.add()` on a frozen Set still silently succeeds. A Proxy trapping the
+ * mutator method names is the only reliable way to make a Set read-only.
+ *
+ * Two known, intentionally-accepted deviations from a plain Set (neither
+ * is exercised by any current caller — grep confirms only `.has()` and
+ * spread/iteration are used):
+ *   - `structuredClone()` throws on a Proxy (no native [[SetData]] slot to
+ *     brand-check), where it would succeed on a plain Set.
+ *   - Without the `constructor` passthrough below, `.constructor` would
+ *     resolve to a bound wrapper rather than `Set` itself. Special-cased
+ *     here so `VALID_BACKENDS.constructor === Set` still holds.
+ */
+function readOnlySet(values) {
+  const target = new Set(values);
+  return new Proxy(target, {
+    get(t, prop, receiver) {
+      if (prop === "add" || prop === "delete" || prop === "clear") {
+        return () => {
+          throw new TypeError(
+            "VALID_BACKENDS is read-only and must not be mutated.",
+          );
+        };
+      }
+      // Return the real Set constructor, not a bound wrapper — keeps
+      // `VALID_BACKENDS.constructor === Set` true, matching a plain Set.
+      if (prop === "constructor") return Set;
+      const value = Reflect.get(t, prop, t);
+      return typeof value === "function" ? value.bind(t) : value;
+    },
+  });
+}
+
+/**
  * Valid values for the `backend` option / --backend flag / FORGEDOCK_BACKEND
  * env. Exported (issue #2013) so bin/forgedock.mjs's CLI-layer `--backend`
  * flag validation can reuse this exact Set instead of maintaining its own
  * independently-hardcoded copy — keeps both layers' "Must be one of: ..."
  * error messages structurally unable to drift apart.
+ *
+ * Read-only (issue #2075): every importer (bin/engine.mjs, bin/forgedock.mjs)
+ * holds a reference to this exact instance, not a copy. Without the
+ * read-only wrapper above, any consumer calling .add()/.delete()/.clear()
+ * on it would silently change the accepted backend values — and the "Must
+ * be one of: ..." error-message wording — for every other consumer
+ * simultaneously. Treat it as immutable; mutation attempts throw.
  */
-export const VALID_BACKENDS = new Set(["cli", "api", "auto"]);
+export const VALID_BACKENDS = readOnlySet(["cli", "api", "auto"]);
 // Per-process memoization for isClaudeCliAvailable(), keyed by `cwd` (issue
 // #2011). `runCommand()` calls resolveBackend() — and therefore, for the
 // default "auto" backend, isClaudeCliAvailable() — unconditionally on every
