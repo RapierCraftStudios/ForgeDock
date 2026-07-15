@@ -35,6 +35,7 @@ import {
   listCommands,
   loadCommandSpec,
   buildSystemPrompt,
+  buildCliSystemPrompt,
   buildUserMessage,
   TOOL_DEFINITIONS,
   truncateToolResult,
@@ -1200,31 +1201,30 @@ describe("runCliBackend argv safety", () => {
 });
 
 // ---------------------------------------------------------------------------
-// runCliBackend — content passthrough (review finding BUG-3, issue #2029)
+// runCliBackend — content passthrough (review finding BUG-3, issue #2029;
+// fixed for #2019)
 //
 // The injection-safety test above proves shell metacharacters in
 // `userMessage` are never *executed*, but it never asserts on the actual
 // *content* the CLI binary receives. That gap is precisely why BUG-1 (#2019
-// — the CLI backend silently drops `systemPrompt`/`spec.content`, so the
-// spawned `claude` process never sees the command specification at all) went
+// — the CLI backend silently dropped `systemPrompt`/`spec.content`, so the
+// spawned `claude` process never saw the command specification at all) went
 // uncaught by an otherwise-strong suite. This test closes that gap by
 // capturing the literal argv delivered to the spawned binary and asserting
 // on it directly, using a recording stub binary via the `bin` test seam
 // (same POSIX-shebang stub-binary pattern already used in
 // bin/tests/router.test.mjs — CI runs ubuntu-only, see .github/workflows/ci.yml).
 //
-// NOTE: this pins down TODAY's actual behavior — `runCliBackend` currently
-// receives only `userMessage` ("Execute: /work-on 2003"), not the command
-// spec content, because #2019 is not yet fixed. Fixing #2019 is explicitly
-// out of scope for this test-coverage issue (#2029). Once #2019 lands (i.e.
-// runCliBackend starts receiving/forwarding the system prompt), this test's
-// captured-argv assertion will need a corresponding update — that update
-// being forced is the whole point: this is the regression net that would
-// have caught BUG-1 in the first place.
+// UPDATED for #2019: `runCliBackend` now receives `systemPrompt` and forwards
+// it to the CLI via `--append-system-prompt-file <path>` (a temp file, not an
+// inline argv string — see the SYSTEM PROMPT block comment above
+// `runCliBackend` in bin/runner.mjs for why). This test now asserts that flag
+// is present with a path whose file contents include the spec content, and
+// that the temp directory is cleaned up afterward.
 // ---------------------------------------------------------------------------
 
-describe("runCliBackend content passthrough (issue #2029)", () => {
-  it("delivers the exact argv — including the literal userMessage — to the spawned CLI binary", () => {
+describe("runCliBackend content passthrough (issue #2029, updated for #2019)", () => {
+  it("forwards systemPrompt to the spawned CLI binary via --append-system-prompt-file", () => {
     // The stub relies on a POSIX shebang; CI runs ubuntu-only (see
     // .github/workflows/ci.yml), matching the existing precedent in
     // bin/tests/router.test.mjs. Skip on other platforms rather than fail.
@@ -1262,14 +1262,18 @@ describe("runCliBackend content passthrough (issue #2029)", () => {
 
     const message = "Execute: /work-on 2003";
     const logLines = [];
+    const spec = loadCommandSpec(COMMANDS_DIR, "work-on");
+    const systemPrompt = buildCliSystemPrompt(spec);
+    let capturedSystemPromptPath;
 
     // try/finally so shimDir is always cleaned up, even if an assertion
     // below throws — matches the cleanup discipline already established by
     // the "runCliBackend argv safety" test directly above this one.
     try {
       const result = runCliBackend({
-        spec: loadCommandSpec(COMMANDS_DIR, "work-on"),
+        spec,
         userMessage: message,
+        systemPrompt,
         args: ["2003"],
         cwd: shimDir,
         logger: { log: (s) => logLines.push(s) },
@@ -1281,24 +1285,171 @@ describe("runCliBackend content passthrough (issue #2029)", () => {
 
       const capturedArgv = JSON.parse(readFileSync(captureFile, "utf-8"));
 
-      // This is the assertion the finding says was missing: the exact content
-      // reaching the CLI invocation, not just "no shell injection occurred".
-      assert.deepStrictEqual(capturedArgv, [
-        "--print",
-        message,
-        "--dangerously-skip-permissions",
-      ]);
-
-      // Documents today's actual (BUG-1-affected) behavior: the spec content
-      // is not part of what reaches the CLI. See the block comment above —
-      // this is expected to require an update once #2019 is fixed.
+      // The exact content reaching the CLI invocation now includes the
+      // system-prompt file flag — this is the fix for BUG-1 / #2019.
+      assert.deepStrictEqual(capturedArgv.slice(0, 2), ["--print", message]);
+      assert.equal(capturedArgv[2], "--append-system-prompt-file");
+      capturedSystemPromptPath = capturedArgv[3];
       assert.ok(
-        !capturedArgv[1].includes("COMMAND SPECIFICATION"),
-        "current behavior: the command spec is NOT part of the CLI payload (tracked separately in #2019)",
+        typeof capturedSystemPromptPath === "string" && capturedSystemPromptPath.length > 0,
+        "argv must include a system-prompt file path",
       );
+      assert.equal(capturedArgv[4], "--dangerously-skip-permissions");
+
+      // The file must exist AT THE TIME the CLI process ran (captured via the
+      // recorder before this test's own cleanup) and contain the command
+      // spec content — proving the spec is no longer dropped.
+      assert.ok(existsSync(capturedSystemPromptPath), "system-prompt temp file must exist while the CLI runs");
+      const fileContents = readFileSync(capturedSystemPromptPath, "utf-8");
+      assert.match(fileContents, /COMMAND SPECIFICATION/);
+      assert.match(fileContents, /# work-on spec/); // fixture spec content from COMMANDS_DIR
     } finally {
       rmSync(shimDir, { recursive: true, force: true });
     }
+
+    // Cleanup assertion: runCliBackend's own temp dir (parent of the
+    // captured file, NOT shimDir above) must be removed after the call
+    // returns — the finally block inside runCliBackend runs before this
+    // test's try/finally above even begins its own cleanup.
+    assert.ok(
+      !existsSync(capturedSystemPromptPath),
+      "runCliBackend must clean up its own system-prompt temp file after the call completes",
+    );
+  });
+
+  it("omits --append-system-prompt-file entirely when no systemPrompt is supplied (back-compat)", () => {
+    if (process.platform === "win32") {
+      return;
+    }
+
+    const shimDir = mkdtempSync(join(os.tmpdir(), "forgedock-cli-argv-capture-nosysprompt-"));
+    const captureFile = join(shimDir, "captured-argv.json");
+    const recorderPath = join(shimDir, "record-argv.mjs");
+    const fakeClaudePath = join(shimDir, "fake-claude");
+
+    writeFileSync(
+      recorderPath,
+      [
+        'import { writeFileSync } from "node:fs";',
+        "writeFileSync(process.argv[2], JSON.stringify(process.argv.slice(3)));",
+      ].join("\n") + "\n",
+      "utf-8",
+    );
+    writeFileSync(
+      fakeClaudePath,
+      ["#!/bin/sh", `exec node "${recorderPath}" "${captureFile}" "$@"`, ""].join("\n"),
+      { mode: 0o755 },
+    );
+
+    const message = "Execute: /work-on 2003";
+
+    try {
+      const result = runCliBackend({
+        spec: loadCommandSpec(COMMANDS_DIR, "work-on"),
+        userMessage: message,
+        args: ["2003"],
+        cwd: shimDir,
+        logger: { log: () => {} },
+        bin: fakeClaudePath,
+      });
+
+      assert.equal(result.status, "complete");
+      const capturedArgv = JSON.parse(readFileSync(captureFile, "utf-8"));
+      assert.deepStrictEqual(capturedArgv, ["--print", message, "--dangerously-skip-permissions"]);
+    } finally {
+      rmSync(shimDir, { recursive: true, force: true });
+    }
+  });
+
+  it("cleans up the system-prompt temp file when the CLI invocation fails (non-zero exit)", () => {
+    if (process.platform === "win32") {
+      return;
+    }
+
+    const shimDir = mkdtempSync(join(os.tmpdir(), "forgedock-cli-argv-capture-fail-"));
+    const captureFile = join(shimDir, "captured-argv.json");
+    const recorderPath = join(shimDir, "record-argv.mjs");
+    const fakeClaudePath = join(shimDir, "fake-claude-fail");
+
+    // Recorder captures argv AND always exits non-zero, simulating a failed
+    // CLI invocation — this exercises the throw path inside runCliBackend's
+    // try/finally, proving the temp file is still cleaned up.
+    writeFileSync(
+      recorderPath,
+      [
+        'import { writeFileSync } from "node:fs";',
+        "writeFileSync(process.argv[2], JSON.stringify(process.argv.slice(3)));",
+        "process.exit(1);",
+      ].join("\n") + "\n",
+      "utf-8",
+    );
+    writeFileSync(
+      fakeClaudePath,
+      ["#!/bin/sh", `exec node "${recorderPath}" "${captureFile}" "$@"`, ""].join("\n"),
+      { mode: 0o755 },
+    );
+
+    const spec = loadCommandSpec(COMMANDS_DIR, "work-on");
+    const systemPrompt = buildCliSystemPrompt(spec);
+    let capturedSystemPromptPath;
+
+    try {
+      assert.throws(() => {
+        runCliBackend({
+          spec,
+          userMessage: "Execute: /work-on 2003",
+          systemPrompt,
+          args: ["2003"],
+          cwd: shimDir,
+          logger: { log: () => {} },
+          bin: fakeClaudePath,
+        });
+      }, /CLI_BACKEND_FAILED|exited with status/);
+
+      const capturedArgv = JSON.parse(readFileSync(captureFile, "utf-8"));
+      capturedSystemPromptPath = capturedArgv[3];
+      assert.ok(typeof capturedSystemPromptPath === "string" && capturedSystemPromptPath.length > 0);
+    } finally {
+      rmSync(shimDir, { recursive: true, force: true });
+    }
+
+    assert.ok(
+      !existsSync(capturedSystemPromptPath),
+      "temp file must be cleaned up even when the CLI invocation throws (non-zero exit)",
+    );
+  });
+});
+
+// ---------------------------------------------------------------------------
+// buildCliSystemPrompt (issue #2019)
+// ---------------------------------------------------------------------------
+
+describe("buildCliSystemPrompt", () => {
+  it("includes the command spec content", () => {
+    const spec = loadCommandSpec(COMMANDS_DIR, "work-on");
+    const prompt = buildCliSystemPrompt(spec);
+    assert.match(prompt, /COMMAND SPECIFICATION \(commands\/work-on\.md\)/);
+    assert.match(prompt, /# work-on spec/);
+    assert.match(prompt, /Do the work\./);
+  });
+
+  it("does NOT claim the API backend's custom 3-tool loop", () => {
+    const spec = loadCommandSpec(COMMANDS_DIR, "work-on");
+    const prompt = buildCliSystemPrompt(spec);
+    // buildSystemPrompt() (API backend) says this; buildCliSystemPrompt()
+    // (CLI backend) must not, since the CLI has its own native tools.
+    assert.ok(
+      !prompt.includes("You have three tools to do real work"),
+      "CLI system prompt must not claim the API-only read_file/write_file/run_bash loop",
+    );
+    assert.ok(!prompt.includes("read_file: read a file from disk"));
+  });
+
+  it("differs from buildSystemPrompt's API-flavored output for the same spec", () => {
+    const spec = loadCommandSpec(COMMANDS_DIR, "work-on");
+    const apiPrompt = buildSystemPrompt(spec, { repoRoot: "/tmp/repo" });
+    const cliPrompt = buildCliSystemPrompt(spec);
+    assert.notEqual(apiPrompt, cliPrompt);
   });
 });
 
