@@ -154,10 +154,17 @@ export function parseEnrichedDraft(output, draft) {
  * baseline.
  *
  * @param {object} draft - ConfigDraft from detectConfig()
+ * @param {object} [opts]
+ * @param {object} [opts.env] - Environment to read ANTHROPIC_API_KEY from.
+ *   Defaults to process.env. Injectable so callers (bin/init-enrich.mjs's
+ *   dispatcher, which itself receives it from bin/journey.mjs's ctx.env) can
+ *   exercise this backend deterministically in tests without depending on
+ *   the real process environment.
  * @returns {Promise<object>} Enriched ConfigDraft, or the original draft on failure
  */
-export async function enrich(draft) {
-  const apiKey = process.env.ANTHROPIC_API_KEY;
+export async function enrich(draft, opts = {}) {
+  const { env = process.env } = opts;
+  const apiKey = env.ANTHROPIC_API_KEY;
 
   if (!apiKey) {
     console.error(

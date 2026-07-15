@@ -1,7 +1,7 @@
 /**
  * bin/tests/init-enrich-api.test.mjs
  *
- * Unit tests for parseEnrichedDraft from bin/init-enrich-api.mjs.
+ * Unit tests for parseEnrichedDraft and enrich() from bin/init-enrich-api.mjs.
  *
  * Covers:
  *   - Extracts a plain JSON object from the output string
@@ -12,13 +12,16 @@
  *   - Returns original draft when required sections are missing
  *   - Returns original draft when no '{' is found in output
  *   - Accepts enriched draft when meta is a truthy empty object ({})
+ *   - enrich() reads ANTHROPIC_API_KEY from an injected opts.env, not the
+ *     real process.env (issue #2024 — the injectable env option must
+ *     actually be used, not silently ignored)
  *
  * Run with: node --test bin/tests/init-enrich-api.test.mjs
  */
 
-import { describe, it } from "node:test";
+import { describe, it, beforeEach, afterEach } from "node:test";
 import assert from "node:assert/strict";
-import { parseEnrichedDraft } from "../init-enrich-api.mjs";
+import { parseEnrichedDraft, enrich } from "../init-enrich-api.mjs";
 
 // Minimal valid ConfigDraft — returned by detectConfig as the "original"
 const ORIGINAL_DRAFT = {
@@ -324,5 +327,83 @@ describe("parseEnrichedDraft", () => {
     const output = JSON.stringify(enriched);
     const result = parseEnrichedDraft(output, ORIGINAL_DRAFT);
     assert.equal(result.project?.name?.value, 'My "Quoted" App');
+  });
+});
+
+// =============================================================================
+// enrich — injectable env (issue #2024)
+// =============================================================================
+
+describe("enrich — injectable opts.env", () => {
+  const REAL_KEY = "ANTHROPIC_API_KEY";
+  let savedRealKey;
+  let savedFetch;
+
+  beforeEach(() => {
+    savedRealKey = process.env[REAL_KEY];
+    savedFetch = globalThis.fetch;
+  });
+
+  afterEach(() => {
+    if (savedRealKey === undefined) delete process.env[REAL_KEY];
+    else process.env[REAL_KEY] = savedRealKey;
+    globalThis.fetch = savedFetch;
+  });
+
+  it("skips enrichment when the injected env has no ANTHROPIC_API_KEY, even if the real process.env does", async () => {
+    // Real process env HAS a key — if enrich() were still reading
+    // process.env directly (the #2024 bug), it would attempt a network call
+    // here instead of taking the skip path.
+    process.env[REAL_KEY] = "real-process-env-key-should-be-ignored";
+    let fetchCalled = false;
+    globalThis.fetch = async () => {
+      fetchCalled = true;
+      throw new Error("fetch should not be called when injected env has no key");
+    };
+
+    const result = await enrich(ORIGINAL_DRAFT, { env: {} });
+
+    assert.equal(fetchCalled, false);
+    assert.equal(result, ORIGINAL_DRAFT);
+  });
+
+  it("attempts enrichment using the injected env's ANTHROPIC_API_KEY, even if the real process.env has none", async () => {
+    // Real process env has NO key — if enrich() were still reading
+    // process.env directly, it would take the skip path here instead of
+    // proceeding to the fetch call using the injected key.
+    delete process.env[REAL_KEY];
+    let fetchCalled = false;
+    let seenApiKeyHeader;
+    globalThis.fetch = async (_url, requestInit) => {
+      fetchCalled = true;
+      seenApiKeyHeader = requestInit?.headers?.["x-api-key"];
+      return {
+        ok: true,
+        json: async () => ({
+          content: [{ type: "text", text: JSON.stringify(ORIGINAL_DRAFT) }],
+        }),
+      };
+    };
+
+    const result = await enrich(ORIGINAL_DRAFT, { env: { [REAL_KEY]: "injected-test-key" } });
+
+    assert.equal(fetchCalled, true);
+    assert.equal(seenApiKeyHeader, "injected-test-key");
+    assert.deepEqual(result, ORIGINAL_DRAFT);
+  });
+
+  it("defaults to process.env when opts.env is omitted (backward-compatible default)", async () => {
+    delete process.env[REAL_KEY];
+    let fetchCalled = false;
+    globalThis.fetch = async () => {
+      fetchCalled = true;
+      throw new Error("should not be reached");
+    };
+
+    const result = await enrich(ORIGINAL_DRAFT);
+
+    // No opts at all → env defaults to process.env → no key → skip path.
+    assert.equal(fetchCalled, false);
+    assert.equal(result, ORIGINAL_DRAFT);
   });
 });
