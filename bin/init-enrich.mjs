@@ -92,8 +92,11 @@ export function resolveEnrichBackend({
  *   resolved internally.
  * @param {string} [opts.cwd] - Working directory (forwarded to whichever
  *   backend is selected; only meaningful for the cli backend).
- * @param {object} [opts.env] - Environment (used only when opts.backend is
- *   omitted, to resolve the backend).
+ * @param {object} [opts.env] - Environment. Used to resolve the backend when
+ *   opts.backend is omitted, AND forwarded to the api backend
+ *   (enrichViaApi) so it can read ANTHROPIC_API_KEY from the injected value
+ *   instead of the real process.env — the test seam bin/journey.mjs relies
+ *   on when passing ctx.env.
  * @param {Function} [opts.isCliAvailableFn] - See resolveEnrichBackend().
  * @returns {Promise<object>} Enriched ConfigDraft, or the original draft
  *   when no backend is available or the selected backend fails.
@@ -113,6 +116,6 @@ export async function enrich(draft, opts = {}) {
     if (timeoutMs !== undefined) cliOpts.timeoutMs = timeoutMs;
     return enrichViaCli(draft, cliOpts);
   }
-  if (backend === "api") return enrichViaApi(draft);
+  if (backend === "api") return enrichViaApi(draft, { env });
   return draft;
 }

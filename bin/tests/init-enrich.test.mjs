@@ -14,11 +14,13 @@
  *   - FORGEDOCK_INIT_BACKEND override (issue #2023): explicit "cli"/"api"/
  *     "none" wins over the auto ladder; "auto"/unset/invalid falls through
  *     to the unchanged ladder behavior above
+ *   - enrich() forwards opts.env to the api backend, not just for backend
+ *     resolution (issue #2024)
  *
  * Run with: node --test bin/tests/init-enrich.test.mjs
  */
 
-import { describe, it } from "node:test";
+import { describe, it, beforeEach, afterEach } from "node:test";
 import assert from "node:assert/strict";
 import { resolveEnrichBackend, enrich } from "../init-enrich.mjs";
 
@@ -159,6 +161,65 @@ describe("enrich (ladder dispatcher)", () => {
       isCliAvailableFn: () => false,
     });
     // Neither cli nor api available → original draft unchanged.
+    assert.deepEqual(result, DRAFT);
+  });
+});
+
+describe("enrich — forwards opts.env to the api backend (issue #2024)", () => {
+  const REAL_KEY = "ANTHROPIC_API_KEY";
+  let savedRealKey;
+  let savedFetch;
+
+  beforeEach(() => {
+    savedRealKey = process.env[REAL_KEY];
+    savedFetch = globalThis.fetch;
+  });
+
+  afterEach(() => {
+    if (savedRealKey === undefined) delete process.env[REAL_KEY];
+    else process.env[REAL_KEY] = savedRealKey;
+    globalThis.fetch = savedFetch;
+  });
+
+  it("api backend observes the injected opts.env, not the real process.env", async () => {
+    // Real process env HAS a key. Before the #2024 fix, init-enrich.mjs's
+    // enrich() called enrichViaApi(draft) without forwarding opts.env, so
+    // the api backend fell through to reading process.env directly and
+    // would have attempted a fetch here despite the injected env being
+    // empty. After the fix, the injected (empty) env is authoritative and
+    // the skip path is taken — no fetch call.
+    process.env[REAL_KEY] = "real-process-env-key-should-be-ignored";
+    let fetchCalled = false;
+    globalThis.fetch = async () => {
+      fetchCalled = true;
+      throw new Error("fetch should not be called — injected env has no key");
+    };
+
+    const result = await enrich(DRAFT, { backend: "api", env: {} });
+
+    assert.equal(fetchCalled, false);
+    assert.deepEqual(result, DRAFT);
+  });
+
+  it("api backend uses the injected opts.env's key when the real process.env has none", async () => {
+    delete process.env[REAL_KEY];
+    let fetchCalled = false;
+    let seenApiKeyHeader;
+    globalThis.fetch = async (_url, requestInit) => {
+      fetchCalled = true;
+      seenApiKeyHeader = requestInit?.headers?.["x-api-key"];
+      return {
+        ok: true,
+        json: async () => ({
+          content: [{ type: "text", text: JSON.stringify(DRAFT) }],
+        }),
+      };
+    };
+
+    const result = await enrich(DRAFT, { backend: "api", env: { [REAL_KEY]: "injected-test-key" } });
+
+    assert.equal(fetchCalled, true);
+    assert.equal(seenApiKeyHeader, "injected-test-key");
     assert.deepEqual(result, DRAFT);
   });
 });
