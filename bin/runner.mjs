@@ -67,6 +67,19 @@ const DEFAULT_CLI_TIMEOUT_MS = 15 * 60 * 1000;
 const CLI_PROBE_TIMEOUT_MS = 5000;
 /** Valid values for the `backend` option / --backend flag / FORGEDOCK_BACKEND env. */
 const VALID_BACKENDS = new Set(["cli", "api", "auto"]);
+// Per-process memoization for isClaudeCliAvailable(), keyed by `cwd` (issue
+// #2011). `runCommand()` calls resolveBackend() — and therefore, for the
+// default "auto" backend, isClaudeCliAvailable() — unconditionally on every
+// invocation, including every `--dry-run`. Without caching, a process that
+// calls runCommand() repeatedly (e.g. bin/batch-runner.mjs driving many
+// commands, or an orchestration loop) re-spawns `claude --version` on every
+// single call. The cache is intentionally scoped to this process's lifetime
+// only (never persisted to disk): a long-lived process where `claude` gets
+// installed/uninstalled mid-run could observe a stale cached result, but
+// this runner's typical usage is a one-shot CLI invocation or a bounded
+// batch run, so that staleness window is negligible next to the guaranteed
+// win of not re-probing on every call.
+const cliAvailabilityCache = new Map();
 // Cap tool-result payloads so a large file read or verbose command does not
 // blow the context window in a single turn.
 const MAX_TOOL_RESULT_CHARS = 100_000;
@@ -144,21 +157,39 @@ export function resolveConfiguredDefaultModel(cwd) {
  * PATH, times out, non-zero exit — is treated as "not available" and never
  * throws; the caller (resolveBackend) falls back to the API backend.
  *
+ * Memoized per `cwd` for the lifetime of this process (see
+ * `cliAvailabilityCache` above, issue #2011) — the first call for a given
+ * `cwd` pays the probe cost; every subsequent call for that same `cwd`
+ * returns the cached result instantly, with no new child process spawned.
+ *
  * @param {string} [cwd] - Working directory for the probe (default cwd).
+ * @param {object} [opts]
+ * @param {typeof execSync} [opts.execImpl] - Test seam only — production
+ *   callers must never override this; built-in ESM modules like
+ *   `node:child_process` export non-configurable bindings that `node:test`'s
+ *   `mock.method` cannot redefine, so tests inject a stub here directly
+ *   instead. Mirrors the existing `bin` test-seam parameter on
+ *   `runCliBackend()`.
  * @returns {boolean}
  */
-export function isClaudeCliAvailable(cwd = process.cwd()) {
+export function isClaudeCliAvailable(cwd = process.cwd(), { execImpl = execSync } = {}) {
+  if (cliAvailabilityCache.has(cwd)) {
+    return cliAvailabilityCache.get(cwd);
+  }
+  let available;
   try {
-    execSync("claude --version", {
+    execImpl("claude --version", {
       cwd,
       stdio: ["ignore", "pipe", "ignore"],
       encoding: "utf-8",
       timeout: CLI_PROBE_TIMEOUT_MS,
     });
-    return true;
+    available = true;
   } catch {
-    return false;
+    available = false;
   }
+  cliAvailabilityCache.set(cwd, available);
+  return available;
 }
 
 /**

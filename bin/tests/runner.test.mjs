@@ -16,7 +16,7 @@
  * Run with: node --test bin/tests/runner.test.mjs
  */
 
-import { describe, it, before, after } from "node:test";
+import { describe, it, before, after, mock } from "node:test";
 import assert from "node:assert/strict";
 import {
   mkdtempSync,
@@ -1316,6 +1316,74 @@ describe("isClaudeCliAvailable", () => {
       result = isClaudeCliAvailable(TMP);
     });
     assert.equal(typeof result, "boolean");
+  });
+
+  // Per-cwd memoization (issue #2011): resolveBackend()/runCommand() call
+  // isClaudeCliAvailable() unconditionally on every "auto"-backend call,
+  // including every --dry-run. Without caching, a process invoking
+  // runCommand() repeatedly (e.g. bin/batch-runner.mjs) re-spawns
+  // `claude --version` on every single call. These tests inject a fake
+  // `execImpl` via the test-seam second parameter (rather than mocking
+  // `node:child_process`'s `execSync` export directly — built-in ESM modules
+  // export non-configurable bindings that `node:test`'s `mock.method` cannot
+  // redefine) to assert the probe is only actually invoked once per distinct
+  // cwd.
+  it("only spawns the probe once per cwd across repeated calls", () => {
+    const execImpl = mock.fn(() => "1.2.3");
+    const cwd = mkdtempSync(join(os.tmpdir(), "forgedock-cli-cache-"));
+    try {
+      const first = isClaudeCliAvailable(cwd, { execImpl });
+      const second = isClaudeCliAvailable(cwd, { execImpl });
+      const third = isClaudeCliAvailable(cwd, { execImpl });
+      assert.equal(first, true);
+      assert.equal(second, true);
+      assert.equal(third, true);
+      assert.equal(
+        execImpl.mock.callCount(),
+        1,
+        "execImpl should only be invoked once for repeated calls with the same cwd",
+      );
+    } finally {
+      rmSync(cwd, { recursive: true, force: true });
+    }
+  });
+
+  it("caches a negative (not-available) result too, not just a positive one", () => {
+    const execImpl = mock.fn(() => {
+      throw new Error("ENOENT: claude not found");
+    });
+    const cwd = mkdtempSync(join(os.tmpdir(), "forgedock-cli-cache-neg-"));
+    try {
+      const first = isClaudeCliAvailable(cwd, { execImpl });
+      const second = isClaudeCliAvailable(cwd, { execImpl });
+      assert.equal(first, false);
+      assert.equal(second, false);
+      assert.equal(
+        execImpl.mock.callCount(),
+        1,
+        "a cached 'not available' result must not re-probe on subsequent calls",
+      );
+    } finally {
+      rmSync(cwd, { recursive: true, force: true });
+    }
+  });
+
+  it("probes independently for different cwd values", () => {
+    const execImpl = mock.fn(() => "1.2.3");
+    const cwdA = mkdtempSync(join(os.tmpdir(), "forgedock-cli-cache-a-"));
+    const cwdB = mkdtempSync(join(os.tmpdir(), "forgedock-cli-cache-b-"));
+    try {
+      isClaudeCliAvailable(cwdA, { execImpl });
+      isClaudeCliAvailable(cwdB, { execImpl });
+      assert.equal(
+        execImpl.mock.callCount(),
+        2,
+        "distinct cwd values must each be probed independently, not share a cache entry",
+      );
+    } finally {
+      rmSync(cwdA, { recursive: true, force: true });
+      rmSync(cwdB, { recursive: true, force: true });
+    }
   });
 });
 
