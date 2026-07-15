@@ -175,6 +175,19 @@ const WORKFLOW_LABEL_PREFIX = "workflow:";
  */
 const FIND_ROOT_TOKEN_RE = /^\/(?:[a-zA-Z])?$/;
 
+/**
+ * Shell metacharacters that can glue a command name to an adjacent token
+ * without whitespace (e.g. `cd /tmp;find /`, `$(find /...)`, `` `find /` ``,
+ * `echo x&&find /`). `tokenizeCommand()` only splits on whitespace and
+ * quotes, so without this extra split step a `find` immediately following
+ * one of these characters stays fused into the previous token (e.g. the
+ * single token `/tmp;find` or `$(find`) and is never recognized as a `find`
+ * invocation — a real, exploitable bypass of Rule 5 (issue #2034 review
+ * finding SEC-1). Declared here (above `try { await main(); }`) for the
+ * same temporal-dead-zone reason as `FIND_ROOT_TOKEN_RE` above.
+ */
+const SHELL_METACHAR_SPLIT_RE = /[;&|()$`]+/;
+
 // ---------------------------------------------------------------------------
 // Main — fail-open wrapper
 // ---------------------------------------------------------------------------
@@ -562,6 +575,36 @@ function checkGistVisibility(command) {
 // ---------------------------------------------------------------------------
 
 /**
+ * Break each unquoted token from `tokenizeCommand()` on shell metacharacters
+ * (`;`, `&`, `|`, `(`, `)`, `$`, `` ` ``) to recover `find` as its own
+ * logical token even when it was written with no separating whitespace from
+ * a command separator or a command-substitution opener (`$(find ...)`).
+ *
+ * Quoted tokens are passed through UNSPLIT and as a single logical token —
+ * quoting means the whole thing is inert argument text (e.g. a `--body`
+ * value that merely *mentions* `find /` in prose), never a real command
+ * invocation, so splitting it on these characters would reintroduce the
+ * decoy false-positive this rule must avoid (issues #1519, #1591).
+ *
+ * @param {string} command
+ * @returns {string[]} Flattened list of logical token strings, in order.
+ */
+function extractLogicalTokens(command) {
+  const raw = tokenizeCommand(command);
+  const logical = [];
+  for (const { value, quoted } of raw) {
+    if (quoted) {
+      logical.push(value);
+      continue;
+    }
+    for (const piece of value.split(SHELL_METACHAR_SPLIT_RE)) {
+      if (piece.length > 0) logical.push(piece);
+    }
+  }
+  return logical;
+}
+
+/**
  * Check whether a Bash command contains a `find` invocation whose search
  * root is the filesystem root (`/`) or a bare Git-Bash drive mount (`/c`,
  * `/d`, ...). On Windows Git Bash, `/` spans every mounted drive, so a
@@ -570,21 +613,27 @@ function checkGistVisibility(command) {
  * that only patched a single call site + added a prose guardrail; this is
  * the systemic, deterministic follow-up).
  *
- * Scans ALL tokens for a `find` occurrence (not just the first word of the
- * command), so it catches `find` appearing after `&&`, `;`, `|`, or as part
- * of a subshell — not just a command that starts with `find`. Tokenizes via
- * `tokenizeCommand()` first (quote-aware) so flag-shaped or path-shaped text
- * embedded inside an unrelated quoted `--title`/`--body` value is never
- * misread as a real `find` invocation (same class of decoy documented for
- * `extractFlag()` — issues #1519, #1591).
+ * Scans ALL logical tokens for a `find` occurrence (not just the first word
+ * of the command), so it catches `find` appearing after `&&`, `;`, `|`, a
+ * command-substitution opener (`$(find ...)`), or backticks — not just a
+ * command that starts with `find`. Matching is case-insensitive on the
+ * command name (Windows resolves `Find`/`FIND` to the same binary as
+ * `find`) but NOT on the root-path token itself (POSIX paths are
+ * case-sensitive). Uses `extractLogicalTokens()` (quote-aware, and
+ * metacharacter-aware) so flag-shaped or path-shaped text embedded inside
+ * an unrelated quoted `--title`/`--body` value is never misread as a real
+ * `find` invocation (same class of decoy documented for `extractFlag()` —
+ * issues #1519, #1591), while a `find` glued to a shell metacharacter with
+ * no whitespace is still caught (issue #2034 review finding SEC-1/SEC-2).
  *
  * For each `find` token found, the search root is taken as the first
  * following token that is not itself a `find` option (an option either
- * starts with `-` or is `!`/`(` — `find`'s own root argument is always a
- * bare positional path, never flag-shaped). Only an EXACT match against
- * `FIND_ROOT_TOKEN_RE` blocks — `find /c/Users/.../repo -maxdepth 2 -name x`
- * and `find "$REPO_PATH" ...` are legitimate, scoped searches and must be
- * allowed.
+ * starts with `-` or is `!` — `find`'s own root argument is always a bare
+ * positional path, never flag-shaped; the grouping operators `(`/`)` are
+ * shell metacharacters already stripped out by `extractLogicalTokens()`).
+ * Only an EXACT match against `FIND_ROOT_TOKEN_RE` blocks — `find
+ * /c/Users/.../repo -maxdepth 2 -name x` and `find "$REPO_PATH" ...` are
+ * legitimate, scoped searches and must be allowed.
  *
  * No operator override exists for this rule (unlike Rules 4/5-attribution)
  * — a root-anchored `find` has no legitimate use in any ForgeDock pipeline.
@@ -593,20 +642,20 @@ function checkGistVisibility(command) {
  * @returns {string|null} Error message to show, or null if allowed.
  */
 function checkFindRoot(command) {
-  if (!command || !/\bfind\b/.test(command)) return null;
+  if (!command || !/find/i.test(command)) return null;
 
-  const tokens = tokenizeCommand(command);
+  const tokens = extractLogicalTokens(command);
 
   for (let i = 0; i < tokens.length; i++) {
-    if (tokens[i].value !== "find") continue;
+    if (tokens[i].toLowerCase() !== "find") continue;
 
     // The search root is the first token after `find` that isn't a `find`
     // option. `find` options always start with `-` (e.g. -maxdepth, -iname)
-    // or are `(`/`!`/`)` — the root path is always a bare positional token.
+    // or are `!` — the root path is always a bare positional token.
     let rootToken = null;
     for (let j = i + 1; j < tokens.length; j++) {
-      const val = tokens[j].value;
-      if (val.startsWith("-") || val === "(" || val === "!" || val === ")") continue;
+      const val = tokens[j];
+      if (val.startsWith("-") || val === "!") continue;
       rootToken = val;
       break;
     }

@@ -607,6 +607,85 @@ describe("pre-tool-use hook — filesystem-root find guard (#2034)", () => {
     assert.match(stderr, /BLOCKED/);
   });
 
+  // Regression tests for a review finding on this PR (SEC-1, CONFIRMED HIGH):
+  // `find` glued to a shell metacharacter with no separating whitespace
+  // stayed fused into the adjacent token (e.g. "/tmp;find", "$(find") and
+  // bypassed detection entirely, since tokenizeCommand() only splits on
+  // whitespace and quotes. extractLogicalTokens() now also splits unquoted
+  // tokens on `;`, `&`, `|`, `(`, `)`, `$`, and backtick.
+  it("exits 2 for find / immediately after a semicolon with no space (cd /tmp;find /)", () => {
+    const { exitCode, stderr } = runHook({
+      hook_event_name: "PreToolUse",
+      tool_name: "Bash",
+      tool_input: { command: "cd /tmp;find / -name x" },
+    });
+    assert.equal(exitCode, 2);
+    assert.match(stderr, /BLOCKED/);
+  });
+
+  it("exits 2 for find / inside command substitution ($(find / ...))", () => {
+    const { exitCode, stderr } = runHook({
+      hook_event_name: "PreToolUse",
+      tool_name: "Bash",
+      tool_input: { command: "for f in $(find / -type f); do echo $f; done" },
+    });
+    assert.equal(exitCode, 2);
+    assert.match(stderr, /BLOCKED/);
+  });
+
+  it("exits 2 for find / inside backticks (legacy command substitution)", () => {
+    const { exitCode, stderr } = runHook({
+      hook_event_name: "PreToolUse",
+      tool_name: "Bash",
+      tool_input: { command: "for f in `find / -type f`; do echo $f; done" },
+    });
+    assert.equal(exitCode, 2);
+    assert.match(stderr, /BLOCKED/);
+  });
+
+  it("exits 2 for find / glued to && with no space (echo hi&&find /c)", () => {
+    const { exitCode, stderr } = runHook({
+      hook_event_name: "PreToolUse",
+      tool_name: "Bash",
+      tool_input: { command: "echo hi&&find /c -iname x" },
+    });
+    assert.equal(exitCode, 2);
+    assert.match(stderr, /BLOCKED/);
+  });
+
+  it("exits 2 for find / glued to a pipe with no space (echo hi|find /)", () => {
+    const { exitCode, stderr } = runHook({
+      hook_event_name: "PreToolUse",
+      tool_name: "Bash",
+      tool_input: { command: "echo hi|find / -iname x" },
+    });
+    assert.equal(exitCode, 2);
+    assert.match(stderr, /BLOCKED/);
+  });
+
+  // Regression test for review finding SEC-2 (CONFIRMED LOW): command-name
+  // matching was case-sensitive, so `Find /` or `FIND /` bypassed the guard
+  // despite Windows resolving them to the same binary as `find`.
+  it("exits 2 for Find / with a capitalized command name (case-insensitive match)", () => {
+    const { exitCode, stderr } = runHook({
+      hook_event_name: "PreToolUse",
+      tool_name: "Bash",
+      tool_input: { command: "Find / -iname x" },
+    });
+    assert.equal(exitCode, 2);
+    assert.match(stderr, /BLOCKED/);
+  });
+
+  it("exits 2 for FIND /C with fully uppercase command and drive letter", () => {
+    const { exitCode, stderr } = runHook({
+      hook_event_name: "PreToolUse",
+      tool_name: "Bash",
+      tool_input: { command: "FIND /C -iname x" },
+    });
+    assert.equal(exitCode, 2);
+    assert.match(stderr, /BLOCKED/);
+  });
+
   it('allows find "$REPO_PATH" -name z (scoped absolute path)', () => {
     const { exitCode } = runHook({
       hook_event_name: "PreToolUse",
