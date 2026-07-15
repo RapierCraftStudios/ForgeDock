@@ -1263,37 +1263,42 @@ describe("runCliBackend content passthrough (issue #2029)", () => {
     const message = "Execute: /work-on 2003";
     const logLines = [];
 
-    const result = runCliBackend({
-      spec: loadCommandSpec(COMMANDS_DIR, "work-on"),
-      userMessage: message,
-      args: ["2003"],
-      cwd: shimDir,
-      logger: { log: (s) => logLines.push(s) },
-      bin: fakeClaudePath,
-    });
+    // try/finally so shimDir is always cleaned up, even if an assertion
+    // below throws — matches the cleanup discipline already established by
+    // the "runCliBackend argv safety" test directly above this one.
+    try {
+      const result = runCliBackend({
+        spec: loadCommandSpec(COMMANDS_DIR, "work-on"),
+        userMessage: message,
+        args: ["2003"],
+        cwd: shimDir,
+        logger: { log: (s) => logLines.push(s) },
+        bin: fakeClaudePath,
+      });
 
-    assert.equal(result.status, "complete");
-    assert.ok(existsSync(captureFile), "the stub binary must have run and recorded its argv");
+      assert.equal(result.status, "complete");
+      assert.ok(existsSync(captureFile), "the stub binary must have run and recorded its argv");
 
-    const capturedArgv = JSON.parse(readFileSync(captureFile, "utf-8"));
+      const capturedArgv = JSON.parse(readFileSync(captureFile, "utf-8"));
 
-    // This is the assertion the finding says was missing: the exact content
-    // reaching the CLI invocation, not just "no shell injection occurred".
-    assert.deepStrictEqual(capturedArgv, [
-      "--print",
-      message,
-      "--dangerously-skip-permissions",
-    ]);
+      // This is the assertion the finding says was missing: the exact content
+      // reaching the CLI invocation, not just "no shell injection occurred".
+      assert.deepStrictEqual(capturedArgv, [
+        "--print",
+        message,
+        "--dangerously-skip-permissions",
+      ]);
 
-    // Documents today's actual (BUG-1-affected) behavior: the spec content
-    // is not part of what reaches the CLI. See the block comment above —
-    // this is expected to require an update once #2019 is fixed.
-    assert.ok(
-      !capturedArgv[1].includes("COMMAND SPECIFICATION"),
-      "current behavior: the command spec is NOT part of the CLI payload (tracked separately in #2019)",
-    );
-
-    rmSync(shimDir, { recursive: true, force: true });
+      // Documents today's actual (BUG-1-affected) behavior: the spec content
+      // is not part of what reaches the CLI. See the block comment above —
+      // this is expected to require an update once #2019 is fixed.
+      assert.ok(
+        !capturedArgv[1].includes("COMMAND SPECIFICATION"),
+        "current behavior: the command spec is NOT part of the CLI payload (tracked separately in #2019)",
+      );
+    } finally {
+      rmSync(shimDir, { recursive: true, force: true });
+    }
   });
 });
 
