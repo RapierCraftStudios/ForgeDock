@@ -951,6 +951,21 @@ async function statusScreen(c) {
   c.stdout.write("\n");
 }
 
+/**
+ * `npx forgedock init` — detect + AI-enrich + review `forge.yaml`.
+ *
+ * AI enrichment backend selection (bin/init-enrich.mjs `resolveEnrichBackend`,
+ * issue #2004): prefers a local, authenticated `claude` CLI when present,
+ * otherwise falls back to the Anthropic API when ANTHROPIC_API_KEY is set,
+ * otherwise skips enrichment.
+ *
+ * Env:
+ *   FORGEDOCK_INIT_BACKEND   Override ("cli"|"api"|"none"|"auto"; default
+ *                            "auto") — pins the enrichment backend instead of
+ *                            the auto-detect ladder above (issue #2023).
+ *                            Independent of FORGEDOCK_BACKEND, which controls
+ *                            the separate `forgedock run` engine backend.
+ */
 async function initFlow(c) {
   const outputPath = join(c.cwd, "forge.yaml");
   const hasExisting = existsSync(outputPath);

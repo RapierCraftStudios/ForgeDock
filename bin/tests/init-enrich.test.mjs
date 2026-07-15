@@ -11,6 +11,9 @@
  *   - Neither available → "none"
  *   - enrich() dispatches to the resolved backend and never throws
  *   - enrich() accepts a pre-resolved `backend` to skip re-probing
+ *   - FORGEDOCK_INIT_BACKEND override (issue #2023): explicit "cli"/"api"/
+ *     "none" wins over the auto ladder; "auto"/unset/invalid falls through
+ *     to the unchanged ladder behavior above
  *
  * Run with: node --test bin/tests/init-enrich.test.mjs
  */
@@ -62,6 +65,58 @@ describe("resolveEnrichBackend", () => {
   it("never throws regardless of isCliAvailableFn/env combination", () => {
     assert.doesNotThrow(() => {
       resolveEnrichBackend({ env: {}, isCliAvailableFn: () => false });
+    });
+  });
+});
+
+describe("resolveEnrichBackend — FORGEDOCK_INIT_BACKEND override (issue #2023)", () => {
+  it("FORGEDOCK_INIT_BACKEND=api forces the api backend even when the CLI is available", () => {
+    const backend = resolveEnrichBackend({
+      env: { FORGEDOCK_INIT_BACKEND: "api", ANTHROPIC_API_KEY: "test-key" },
+      isCliAvailableFn: () => true,
+    });
+    assert.equal(backend, "api");
+  });
+
+  it("FORGEDOCK_INIT_BACKEND=cli forces the cli backend even when only an API key is set", () => {
+    const backend = resolveEnrichBackend({
+      env: { FORGEDOCK_INIT_BACKEND: "cli", ANTHROPIC_API_KEY: "test-key" },
+      isCliAvailableFn: () => false,
+    });
+    assert.equal(backend, "cli");
+  });
+
+  it("FORGEDOCK_INIT_BACKEND=none skips enrichment regardless of CLI/key availability", () => {
+    const backend = resolveEnrichBackend({
+      env: { FORGEDOCK_INIT_BACKEND: "none", ANTHROPIC_API_KEY: "test-key" },
+      isCliAvailableFn: () => true,
+    });
+    assert.equal(backend, "none");
+  });
+
+  it("FORGEDOCK_INIT_BACKEND=auto preserves the unchanged ladder (cli takes priority)", () => {
+    const backend = resolveEnrichBackend({
+      env: { FORGEDOCK_INIT_BACKEND: "auto", ANTHROPIC_API_KEY: "test-key" },
+      isCliAvailableFn: () => true,
+    });
+    assert.equal(backend, "cli");
+  });
+
+  it("unset FORGEDOCK_INIT_BACKEND preserves the unchanged ladder", () => {
+    const backend = resolveEnrichBackend({
+      env: { ANTHROPIC_API_KEY: "test-key" },
+      isCliAvailableFn: () => false,
+    });
+    assert.equal(backend, "api");
+  });
+
+  it("an invalid FORGEDOCK_INIT_BACKEND value falls back to the ladder rather than throwing", () => {
+    assert.doesNotThrow(() => {
+      const backend = resolveEnrichBackend({
+        env: { FORGEDOCK_INIT_BACKEND: "bogus", ANTHROPIC_API_KEY: "test-key" },
+        isCliAvailableFn: () => false,
+      });
+      assert.equal(backend, "api");
     });
   });
 });
