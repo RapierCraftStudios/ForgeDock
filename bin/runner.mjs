@@ -1063,6 +1063,29 @@ export async function runCommand(opts = {}) {
   }
 
   if (resolvedBackend === "cli") {
+    // model/maxIterations only apply to the api backend — the cli backend
+    // uses whatever model the `claude` CLI itself is configured for, and has
+    // no equivalent iteration-cap concept for a single `claude --print`
+    // invocation. Warn (rather than silently drop) when the caller explicitly
+    // supplied either, so the behavior is discoverable outside of --dry-run.
+    // hasOwnProperty on the raw opts (not the destructured, default-applied
+    // values above) is required here: model/maxIterations always resolve to
+    // a computed default, so checking their truthiness would fire this
+    // warning on every single cli-backend run.
+    const ignoredOptions = [];
+    if (Object.prototype.hasOwnProperty.call(opts, "model")) ignoredOptions.push("model");
+    if (Object.prototype.hasOwnProperty.call(opts, "maxIterations"))
+      ignoredOptions.push("maxIterations");
+    if (ignoredOptions.length > 0) {
+      logger.log(
+        `Warning: --${ignoredOptions.join(" and --")} ${
+          ignoredOptions.length > 1 ? "are" : "is"
+        } ignored on the cli backend (backend: cli uses whatever model the ` +
+          `claude CLI itself is configured for). Use --backend api to honor ${
+            ignoredOptions.length > 1 ? "these options" : "this option"
+          }.`,
+      );
+    }
     return runCliBackend({ spec, userMessage, args, cwd, logger });
   }
 

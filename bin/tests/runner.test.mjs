@@ -1449,4 +1449,88 @@ describe("runCommand backend resolution", () => {
       }
     }
   });
+
+  // silent-flag-drop-on-backend-switch (issue #2010): model/maxIterations
+  // only apply to the api backend. When the cli backend is resolved, any
+  // explicitly-supplied model/maxIterations must be surfaced via a warning
+  // rather than dropped with no diagnostic. The warning is logged
+  // synchronously before runCliBackend() is invoked, so it is captured
+  // regardless of whether the subsequent (intentionally near-instant,
+  // FORGEDOCK_CLI_TIMEOUT_MS-bounded) cli invocation succeeds or throws.
+  it("warns when --model and --max-iterations are explicitly supplied but backend resolves to cli", async () => {
+    const originalTimeout = process.env.FORGEDOCK_CLI_TIMEOUT_MS;
+    process.env.FORGEDOCK_CLI_TIMEOUT_MS = "1";
+    const lines = [];
+    try {
+      await runCommand({
+        commandsDir: COMMANDS_DIR,
+        commandName: "work-on",
+        args: ["2003"],
+        cwd: TMP,
+        dryRun: false,
+        apiKey: "",
+        backend: "cli",
+        model: "some-model",
+        maxIterations: 5,
+        logger: { log: (s) => lines.push(s) },
+      });
+    } catch {
+      // Expected — the bounded timeout/missing-CLI failure is not under test here.
+    } finally {
+      if (originalTimeout === undefined) {
+        delete process.env.FORGEDOCK_CLI_TIMEOUT_MS;
+      } else {
+        process.env.FORGEDOCK_CLI_TIMEOUT_MS = originalTimeout;
+      }
+    }
+    const warning = lines.find((l) => /ignored on the cli backend/.test(l));
+    assert.ok(warning, "expected a warning about ignored options to be logged");
+    assert.match(warning, /--model/);
+    assert.match(warning, /--maxIterations/);
+  });
+
+  it("does not warn when model/maxIterations are only default-computed and backend resolves to cli", async () => {
+    const originalTimeout = process.env.FORGEDOCK_CLI_TIMEOUT_MS;
+    process.env.FORGEDOCK_CLI_TIMEOUT_MS = "1";
+    const lines = [];
+    try {
+      await runCommand({
+        commandsDir: COMMANDS_DIR,
+        commandName: "work-on",
+        args: ["2003"],
+        cwd: TMP,
+        dryRun: false,
+        apiKey: "",
+        backend: "cli",
+        logger: { log: (s) => lines.push(s) },
+      });
+    } catch {
+      // Expected — the bounded timeout/missing-CLI failure is not under test here.
+    } finally {
+      if (originalTimeout === undefined) {
+        delete process.env.FORGEDOCK_CLI_TIMEOUT_MS;
+      } else {
+        process.env.FORGEDOCK_CLI_TIMEOUT_MS = originalTimeout;
+      }
+    }
+    const warning = lines.find((l) => /ignored on the cli backend/.test(l));
+    assert.equal(warning, undefined, "no warning expected when model/maxIterations were not explicitly supplied");
+  });
+
+  it("does not warn about ignored model/maxIterations when backend resolves to api", async () => {
+    const lines = [];
+    await runCommand({
+      commandsDir: COMMANDS_DIR,
+      commandName: "work-on",
+      args: ["2003"],
+      cwd: TMP,
+      dryRun: true,
+      backend: "api",
+      model: "some-model",
+      maxIterations: 5,
+      logger: { log: (s) => lines.push(s) },
+    });
+    const warning = lines.find((l) => /ignored on the cli backend/.test(l));
+    assert.equal(warning, undefined, "no cli-ignored-options warning expected on the api backend");
+  });
 });
