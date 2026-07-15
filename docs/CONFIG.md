@@ -29,9 +29,12 @@ echo "forge.yaml" >> .gitignore  # if your credentials path is sensitive
 |----------|----------|
 | `FORGE_NO_MOTION=1` | Same effect as `--fast` — disables animation frames. Color is unaffected. |
 | `NO_COLOR=1` | Disables ANSI color output only. Motion is unaffected (monochrome choreography). |
+| `FORGEDOCK_INIT_BACKEND=cli\|api\|none\|auto` | Overrides AI-enrichment backend selection for `init` (see below). Default `auto` (or unset) preserves the CLI-first ladder. |
 | Non-TTY / piped output (or `CI=1`) | Plain sequential log: no color **and** no animation. |
 
 The default (no flags) is the annotated review screen: detection runs, AI enrichment fills in what it can — using a local, authenticated `claude` CLI when available, otherwise falling back to the Anthropic API when `ANTHROPIC_API_KEY` is set, otherwise skipped — and you review the result on a single screen — Enter accepts everything, low-confidence fields are flagged with a `# TODO(forgedock:<field>)` comment if left unedited.
+
+If you have both a local `claude` CLI and `ANTHROPIC_API_KEY` set and want to pin one explicitly instead of letting `init` prefer the CLI, set `FORGEDOCK_INIT_BACKEND=api` (or `=cli`, or `=none` to skip enrichment entirely). This is independent of `FORGEDOCK_BACKEND`, which controls the separate `forgedock run` engine backend.
 
 ---
 

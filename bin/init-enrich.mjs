@@ -24,11 +24,26 @@
  * prompt here), so full extraction is deferred (see issue #2004's Notes).
  * The CLI-presence probe itself (isClaudeCliAvailable) IS reused directly
  * from bin/runner.mjs with zero duplication.
+ *
+ * Override (issue #2023): the ladder above changed the *default* precedence
+ * from "API-key-only" to "CLI-first" (#2004). Existing users who have both
+ * ANTHROPIC_API_KEY set and a `claude` CLI on PATH get silently moved onto
+ * the cli backend with no way to opt back into the old, explicit api-key
+ * behavior. `FORGEDOCK_INIT_BACKEND` (values: "cli"|"api"|"none"|"auto")
+ * gives them that escape hatch, mirroring bin/runner.mjs's FORGEDOCK_BACKEND
+ * override for the `forgedock run` engine ladder (#2003). Unset, empty, or
+ * "auto" — including any unrecognized value — falls through to the ladder
+ * unchanged, so the #2004 default behavior is byte-for-byte preserved for
+ * anyone who doesn't set the var.
  */
 
 import { isClaudeCliAvailable } from "./runner.mjs";
 import { enrich as enrichViaApi } from "./init-enrich-api.mjs";
 import { enrich as enrichViaCli } from "./init-enrich-cli.mjs";
+
+/** Valid explicit values for FORGEDOCK_INIT_BACKEND (excluding "auto", which
+ * is the no-override default and falls through to the ladder below). */
+const VALID_INIT_BACKEND_OVERRIDES = new Set(["cli", "api", "none"]);
 
 /**
  * Resolve which enrichment backend should be used.
@@ -36,9 +51,9 @@ import { enrich as enrichViaCli } from "./init-enrich-cli.mjs";
  * @param {object} [opts]
  * @param {string} [opts.cwd] - Working directory for the CLI probe. Defaults
  *   to process.cwd().
- * @param {object} [opts.env] - Environment to read ANTHROPIC_API_KEY from.
- *   Defaults to process.env. Injectable so callers (bin/journey.mjs) can
- *   pass ctx.env for testability.
+ * @param {object} [opts.env] - Environment to read ANTHROPIC_API_KEY and
+ *   FORGEDOCK_INIT_BACKEND from. Defaults to process.env. Injectable so
+ *   callers (bin/journey.mjs) can pass ctx.env for testability.
  * @param {Function} [opts.isCliAvailableFn] - Injectable replacement for
  *   isClaudeCliAvailable. Test seam — lets tests deterministically simulate
  *   CLI presence/absence without depending on whether the CI host happens
@@ -50,6 +65,13 @@ export function resolveEnrichBackend({
   env = process.env,
   isCliAvailableFn = isClaudeCliAvailable,
 } = {}) {
+  // Explicit override (#2023) — takes precedence over the auto ladder.
+  // "auto" and any unrecognized value intentionally fall through unchanged,
+  // never throw: this preserves the "graceful fallback, never crash init"
+  // discipline the rest of this module follows.
+  const override = env.FORGEDOCK_INIT_BACKEND;
+  if (override && VALID_INIT_BACKEND_OVERRIDES.has(override)) return override;
+
   if (isCliAvailableFn(cwd)) return "cli";
   if (env.ANTHROPIC_API_KEY) return "api";
   return "none";
