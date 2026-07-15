@@ -10,13 +10,28 @@ install: extras
 
 ### 5A: Post health report
 
-Create a detailed health report as a GitHub issue in the Forge repo:
+Create a detailed health report as a GitHub issue in the Forge repo, routed through the
+`/issue` programmatic create-hook (#2085) instead of a raw `gh issue create`. Because `/issue`'s
+programmatic mode resolves `GH_REPO` from `forge.yaml → project.owner/repo` (via `$FORGE_CONFIG`,
+default `forge.yaml`) with no explicit `-R` override, and `$FORGE_REPO` may differ from the
+analyzed project's own repo (`forge.yaml → project.forge_repo`, see Config Resolution), point
+`$FORGE_CONFIG` at a synthesized minimal config for the duration of the call so the create-hook
+targets the Forge repo, not the analyzed repo:
 
 ```bash
-gh issue create -R $FORGE_REPO \
-  --title "Pipeline Health: $REPO — $(date +%Y-%m-%d) — Score: [SCORE]/100" \
-  --label "health-report" \
-  --body "$(cat <<'EOF'
+FORGE_ISSUE_HOOK_CONFIG=$(mktemp)
+cat > "$FORGE_ISSUE_HOOK_CONFIG" <<HOOKCFG_EOF
+project:
+  owner: "${FORGE_REPO%%/*}"
+  repo: "${FORGE_REPO##*/}"
+paths:
+  root: "$FORGE_HOME"
+branches:
+  staging: "$(yq '.branches.staging' "${FORGE_CONFIG:-forge.yaml}")"
+HOOKCFG_EOF
+
+HEALTH_BODY_FILE=$(mktemp)
+cat > "$HEALTH_BODY_FILE" <<'EOF'
 ## Pipeline Health Report
 
 **Project**: $REPO
@@ -229,8 +244,35 @@ _Post-deploy audit findings by failure point — see Phase 3A-II table above._
 
 [Git log from Phase 2A]
 EOF
-)"
+
+# Environment variable state is not guaranteed to persist across separate tool-call
+# boundaries (a Bash call's shell state does not carry into the next Bash call, and the
+# Skill tool has no env-passthrough parameter — it only accepts `skill`/`args`). Use a
+# real `export` and re-affirm FORGE_CONFIG="$FORGE_ISSUE_HOOK_CONFIG" on every bash command
+# you run while walking through the /issue phases invoked below (1A/2D/3F/4A-4E), so
+# CONFIG_FILE="${FORGE_CONFIG:-forge.yaml}" keeps resolving to the Forge repo rather than
+# silently falling back to the analyzed project's own forge.yaml.
+export FORGE_CONFIG="$FORGE_ISSUE_HOOK_CONFIG"
+
+ISSUE_RESULT=$(Skill(skill="issue", args="--title \"Pipeline Health: $REPO — $(date +%Y-%m-%d) — Score: [SCORE]/100\" --body-file $HEALTH_BODY_FILE --label health-report"))
+echo "$ISSUE_RESULT"
+
+# Verify the issue actually landed in FORGE_REPO — if the FORGE_CONFIG override above was not
+# honored (e.g. it silently fell back to default forge.yaml), the report would be mis-filed into
+# the analyzed project's own GH_REPO instead of the Forge repo. Fail loudly rather than let a
+# pipeline-health report silently spam the analyzed project's issue tracker.
+if ! echo "$ISSUE_RESULT" | grep -q "github.com/${FORGE_REPO}/issues/"; then
+  echo "ERROR: pipeline-health report was not created in FORGE_REPO ($FORGE_REPO) — verify FORGE_CONFIG propagated to the /issue invocation above before proceeding."
+fi
+
+rm -f "$FORGE_ISSUE_HOOK_CONFIG" "$HEALTH_BODY_FILE"
 ```
+
+The health report body above does not carry the `## Problem`/`## Affected Files`/`## Acceptance
+Criteria` mandatory sections (it is a metrics report, not a pipeline work item) — `/issue`'s
+Phase 3F pre-create validation auto-repairs this non-blockingly by appending placeholder
+sections, exactly as it does for any other programmatic caller that omits them. This is expected
+and does not indicate a problem with the report body.
 
 ### 5B: Create improvement issues in Forge
 
@@ -248,11 +290,27 @@ For each improvement proposal, create a trackable issue using the `/issue` struc
 - Metric 10–20% below target → `P2`
 - Metric < 10% below target → `P3`
 
+Routed through the `/issue` programmatic create-hook (#2085), same as 5A — `$FORGE_REPO` may
+differ from the analyzed repo's own `forge.yaml → project.owner/repo`, so `$FORGE_CONFIG` is
+pointed at a synthesized minimal config for the duration of the call. This body already carries
+all three mandatory sections (`## Problem`, `## Affected Files`, `## Acceptance Criteria`), so
+Phase 3F's pre-create validation is expected to be a no-op here.
+
 ```bash
-gh issue create -R $FORGE_REPO \
-  --title "fix([command]): [description]" \
-  --label "[bug|enhancement|feature],[P1|P2|P3]" \
-  --body "## Problem
+FORGE_ISSUE_HOOK_CONFIG=$(mktemp)
+cat > "$FORGE_ISSUE_HOOK_CONFIG" <<HOOKCFG_EOF
+project:
+  owner: "${FORGE_REPO%%/*}"
+  repo: "${FORGE_REPO##*/}"
+paths:
+  root: "$FORGE_HOME"
+branches:
+  staging: "$(yq '.branches.staging' "${FORGE_CONFIG:-forge.yaml}")"
+HOOKCFG_EOF
+
+PROPOSAL_BODY_FILE=$(mktemp)
+cat > "$PROPOSAL_BODY_FILE" <<'EOF'
+## Problem
 
 [1–3 sentences describing what the pipeline health metric reveals. Include the current value and target value.]
 
@@ -260,13 +318,13 @@ gh issue create -R $FORGE_REPO \
 
 ## Root Cause (if known)
 
-\`commands/[file].md\` [section] — [what the section currently does that causes the metric to suffer]
+`commands/[file].md` [section] — [what the section currently does that causes the metric to suffer]
 
 ## Affected Files
 
 Files that need changes:
 
-1. \`commands/[file].md\` — [what needs to change in this file]
+1. `commands/[file].md` — [what needs to change in this file]
 
 ## Expected Behavior
 
@@ -277,7 +335,22 @@ After the fix, [metric] should reach [target value]. [Describe the concrete beha
 - [ ] [Specific, testable criterion tied to the metric]
 - [ ] [Specific, testable criterion tied to the command behaviour]
 - [ ] No regression in other pipeline-health metrics
-"
+EOF
+
+# See the persistence note in 5A above — env vars do not cross tool-call boundaries, so use
+# a real `export` and re-affirm it on every bash command through the nested /issue phases.
+export FORGE_CONFIG="$FORGE_ISSUE_HOOK_CONFIG"
+
+ISSUE_RESULT=$(Skill(skill="issue", args="--title \"fix([command]): [description]\" --body-file $PROPOSAL_BODY_FILE --label \"[bug|enhancement|feature]\" --label \"[P1|P2|P3]\""))
+echo "$ISSUE_RESULT"
+
+# Same wrong-repo safeguard as 5A — fail loudly instead of silently filing the improvement
+# proposal into the analyzed project's own repo.
+if ! echo "$ISSUE_RESULT" | grep -q "github.com/${FORGE_REPO}/issues/"; then
+  echo "ERROR: pipeline-health proposal was not created in FORGE_REPO ($FORGE_REPO) — verify FORGE_CONFIG propagated to the /issue invocation above before proceeding."
+fi
+
+rm -f "$FORGE_ISSUE_HOOK_CONFIG" "$PROPOSAL_BODY_FILE"
 ```
 
 ---
