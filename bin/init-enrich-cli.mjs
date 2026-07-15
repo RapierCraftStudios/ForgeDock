@@ -19,6 +19,23 @@
  * NOT neutralize `$(...)`/backtick/`!` expansion inside double quotes. Do
  * not reintroduce `shell: true` or string-command interpolation here.
  *
+ * SECURITY — read-only enforcement via --allowedTools/--disallowedTools, NOT
+ * --dangerously-skip-permissions: the prompt tells the model it "MUST NOT
+ * modify, create, or delete any files," but `forgedock init` runs against an
+ * arbitrary user's repo — untrusted content (README, existing config, file
+ * names) could carry a prompt-injection payload that induces writes. A prose
+ * instruction alone is not enforcement. `--dangerously-skip-permissions`
+ * bypasses ALL permission checks for ALL tools (Write, Edit, Bash,
+ * NotebookEdit, etc.), so it cannot be used here. Instead the session is
+ * restricted with `--allowedTools` (pre-approved, read-only tools) and
+ * `--disallowedTools` (explicitly denied mutating tools) — both are
+ * headless-safe (no interactive TTY prompt is generated for tools covered by
+ * either list), so this preserves the original reason
+ * `--dangerously-skip-permissions` was used (avoiding a hang on an
+ * unanswerable permission prompt in `--print` mode) while making the
+ * read-only contract technically enforced instead of compliance-only. Do not
+ * reintroduce `--dangerously-skip-permissions` here. (See issue #2022.)
+ *
  * Windows `.cmd` shim resolution works WITHOUT `shell: true`: Node's
  * spawn/spawnSync resolve a bare `"claude"` command via PATH+PATHEXT and
  * safely re-invoke through cmd.exe internally when the resolved target is a
@@ -145,12 +162,29 @@ export async function enrich(draft, opts = {}) {
     // No `shell` option (defaults to false): argv is passed as discrete,
     // unparsed elements — see the SECURITY note in the module header. This
     // also correctly resolves the Windows `.cmd` shim without shell:true.
-    result = spawnFn(bin, ["--print", message, "--dangerously-skip-permissions"], {
-      cwd,
-      encoding: "utf-8",
-      maxBuffer: 50 * 1024 * 1024,
-      timeout: resolvedTimeoutMs,
-    });
+    //
+    // --allowedTools/--disallowedTools (NOT --dangerously-skip-permissions):
+    // technically restricts this headless session to read-only tools so the
+    // prompt's "MUST NOT modify, create, or delete any files" instruction is
+    // CLI-enforced, not just prose — see the SECURITY note in the module
+    // header (issue #2022).
+    result = spawnFn(
+      bin,
+      [
+        "--print",
+        message,
+        "--allowedTools",
+        "Read Glob Grep LS",
+        "--disallowedTools",
+        "Write Edit NotebookEdit Bash",
+      ],
+      {
+        cwd,
+        encoding: "utf-8",
+        maxBuffer: 50 * 1024 * 1024,
+        timeout: resolvedTimeoutMs,
+      },
+    );
   } catch (err) {
     warn(`unavailable: ${err.message}`, err);
     return draft;
