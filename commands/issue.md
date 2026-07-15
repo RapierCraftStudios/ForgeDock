@@ -78,6 +78,23 @@ while [ $i -lt ${#ARGS[@]} ]; do
         --milestone) PROGRAMMATIC_MILESTONE="${ARGS[$i]}" ;;
       esac
       ;;
+    --*)
+      # Unrecognized flag (e.g. a mistyped --titel instead of --title). Fail
+      # loudly instead of silently discarding it — a silently-ignored flag
+      # can fail open into the interactive/free-text path (PROGRAMMATIC_MODE
+      # stays false because PROGRAMMATIC_TITLE never gets set) with no
+      # diagnostic pointing at the caller's typo. See forge#2096.
+      #
+      # Deliberately NOT a bare `*)` catch-all: free-text invocations (the
+      # "(none)" row in the Argument Parsing table above, e.g. "the billing
+      # page crashes when credits hit zero") tokenize into plain words with
+      # no leading `--`, and those words are intentionally NOT flags — they
+      # are consumed later via $ARGUMENTS as a whole by Phase 1's free-text
+      # parser. Only tokens that look like a flag (start with `--`) but
+      # don't match a known one are a caller mistake worth failing loudly on.
+      echo "ERROR: unrecognized flag: $arg" >&2
+      exit 1
+      ;;
   esac
   i=$((i+1))
 done
@@ -572,14 +589,13 @@ ISSUE_EOF
 
 **Programmatic mode variable mapping**: `{TITLE}` = `$PROGRAMMATIC_TITLE`; `{FULL_BODY}` = `$PROGRAMMATIC_BODY` (post-Phase-3F); the milestone branch is used iff `$PROGRAMMATIC_MILESTONE` is non-empty, with `{MILESTONE_TITLE}` = `$PROGRAMMATIC_MILESTONE`. This is the same `gh issue create` call the interactive path uses — no new command surface, only a new source for the variables.
 
-`{PRIORITY_LABEL},{CATEGORY_LABEL}` is comma-joined from `PROGRAMMATIC_LABELS[@]`, but the `--label` flag itself is only included when at least one label was supplied — zero labels is valid and must omit `--label` entirely (an empty `--label ""` would fail):
+`{PRIORITY_LABEL},{CATEGORY_LABEL}` in the interactive-mode template above stands for `PROGRAMMATIC_LABELS[@]`, but the actual `--label` flag(s) passed to `gh issue create` are built as one repeatable `--label` per array element — NOT a single comma-joined string. `gh issue create --label` itself comma-splits its argument, so joining `PROGRAMMATIC_LABELS[@]` with `,` and passing it as one value would incorrectly fragment any individual label that contains a literal comma (see forge#2097). `--label` is a repeatable flag — passing it multiple times accumulates labels without any join/split ambiguity. Zero labels is valid and must omit `--label` entirely (an empty `--label ""` would fail):
 
 ```bash
 LABEL_FLAG=()
-if [ ${#PROGRAMMATIC_LABELS[@]} -gt 0 ]; then
-  JOINED_LABELS=$(IFS=,; echo "${PROGRAMMATIC_LABELS[*]}")
-  LABEL_FLAG=(--label "$JOINED_LABELS")
-fi
+for label in "${PROGRAMMATIC_LABELS[@]}"; do
+  LABEL_FLAG+=(--label "$label")
+done
 
 if [ -n "$PROGRAMMATIC_MILESTONE" ]; then
   gh issue create {GH_FLAG} --title "$PROGRAMMATIC_TITLE" "${LABEL_FLAG[@]}" \
