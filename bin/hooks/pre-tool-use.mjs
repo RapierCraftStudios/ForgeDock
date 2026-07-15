@@ -580,11 +580,21 @@ function checkGistVisibility(command) {
  * logical token even when it was written with no separating whitespace from
  * a command separator or a command-substitution opener (`$(find ...)`).
  *
- * Quoted tokens are passed through UNSPLIT and as a single logical token —
- * quoting means the whole thing is inert argument text (e.g. a `--body`
- * value that merely *mentions* `find /` in prose), never a real command
- * invocation, so splitting it on these characters would reintroduce the
- * decoy false-positive this rule must avoid (issues #1519, #1591).
+ * A token is only passed through UNSPLIT (treated as inert argument text —
+ * e.g. a `--body` value that merely *mentions* `find /` in prose) when its
+ * quoting actually spans EMBEDDED WHITESPACE, proving the quotes were used
+ * to glue multiple real words into one argument. `quoted` alone is NOT a
+ * sufficient signal: `tokenizeCommand()` sets `quoted = true` the moment ANY
+ * quote character appears anywhere in a token, including a degenerate empty
+ * pair (`""`, `''`) glued onto otherwise-unquoted text. A command like
+ * `cd /tmp;""find /` tokenizes to a single token `/tmp;find` flagged
+ * `quoted: true` even though nothing was actually protected by the empty
+ * quotes — real shells treat `""find` as the plain word `find`. Passing
+ * that token through unsplit hid `find` inside `/tmp;find`, which never
+ * exact-matches `"find"` in `checkFindRoot()`, bypassing the guard (issue
+ * #2059). This mirrors the exact discriminator `extractFlag()` already uses
+ * for the same class of decoy (issues #1519, #1591): "was quoted at all" is
+ * the wrong test; "does the token contain embedded whitespace" is right.
  *
  * @param {string} command
  * @returns {string[]} Flattened list of logical token strings, in order.
@@ -593,7 +603,7 @@ function extractLogicalTokens(command) {
   const raw = tokenizeCommand(command);
   const logical = [];
   for (const { value, quoted } of raw) {
-    if (quoted) {
+    if (quoted && /\s/.test(value)) {
       logical.push(value);
       continue;
     }
@@ -642,7 +652,14 @@ function extractLogicalTokens(command) {
  * @returns {string|null} Error message to show, or null if allowed.
  */
 function checkFindRoot(command) {
-  if (!command || !/find/i.test(command)) return null;
+  if (!command) return null;
+  // Cheap pre-filter to skip tokenization for the common case of a command
+  // with no `find` anywhere. Quote characters are stripped first so a
+  // degenerate/empty quote pair glued inside the word itself (e.g. the
+  // literal text `"f"ind`, which a real shell resolves to the plain word
+  // `find`) doesn't break the substring match and cause a false "no find
+  // here" short-circuit that skips tokenization entirely (issue #2059).
+  if (!/find/i.test(command.replace(/["']/g, ""))) return null;
 
   const tokens = extractLogicalTokens(command);
 
