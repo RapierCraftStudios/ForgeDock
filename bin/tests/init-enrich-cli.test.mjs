@@ -67,8 +67,15 @@ describe("init-enrich-cli enrich()", () => {
     assert.ok(Array.isArray(capturedArgv));
     assert.equal(capturedArgv[0], "--print");
     assert.equal(typeof capturedArgv[1], "string"); // the prompt message
-    assert.equal(capturedArgv[2], "--dangerously-skip-permissions");
-    assert.equal(capturedArgv.length, 3);
+    // Read-only enforcement: --allowedTools/--disallowedTools, NEVER
+    // --dangerously-skip-permissions (issue #2022 — the prose "MUST NOT
+    // modify files" instruction alone is not enforcement).
+    assert.equal(capturedArgv[2], "--allowedTools");
+    assert.equal(capturedArgv[3], "Read Glob Grep LS");
+    assert.equal(capturedArgv[4], "--disallowedTools");
+    assert.equal(capturedArgv[5], "Write Edit NotebookEdit Bash");
+    assert.equal(capturedArgv.length, 6);
+    assert.ok(!capturedArgv.includes("--dangerously-skip-permissions"));
     // The prompt embeds the draft JSON as data, never as a shell command.
     assert.match(capturedArgv[1], /"owner"/);
     assert.equal(capturedOpts.cwd, "/tmp/repo");
