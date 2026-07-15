@@ -106,12 +106,13 @@ BATCHABLE_P3=$(gh issue list {GH_FLAG} \
 - Form same-file clusters first; evaluate any remaining ungrouped findings for leaf-directory clustering. A finding is claimed by at most one batch.
 
 **Sanitize the surface-area path before interpolation (MANDATORY):** `{SURFACE_AREA}` is an affected-file path derived from an issue body, and git filenames can legally carry shell metacharacters (`` ` ``, `$()`, quotes). Restrict it to a validated `[A-Za-z0-9._/-]` charset before templating it into `--title` / `--body`, so an untrusted issue body cannot break the `gh` argument boundary. The same guard is applied at the mirror site in `phase-4-execution.md`. <!-- forge#1833, forge#1835 -->
+
+**Route batch issue creation through `/issue`'s programmatic invocation contract** (`commands/issue.md`, added #2085) instead of calling `gh issue create` directly — this gets dedup (Phase 2D) and mandatory-section body validation (Phase 3F) for free. <!-- Changed: forge#2086 — route through /issue create-hook -->
+
 ```bash
 SAFE_SURFACE_AREA=$(printf '%s' "{SURFACE_AREA}" | tr -cd 'A-Za-z0-9._/-')
-BATCH_ISSUE_NUM=$(gh issue create {GH_FLAG} \
-  --title "fix(batch): P3 review findings — ${SAFE_SURFACE_AREA} (batch #{BATCH_N})" \
-  --label "review-finding,priority:P3,batch" \
-  --body "$(cat <<'BATCH_EOF'
+BATCH_BODY_FILE="$(mktemp)"
+cat > "$BATCH_BODY_FILE" <<'BATCH_EOF'
 ## Problem
 
 Batch of P3 review findings in **{SURFACE_AREA}** (same file or leaf directory), grouped to reduce per-finding pipeline overhead.
@@ -135,7 +136,21 @@ Batch of P3 review findings in **{SURFACE_AREA}** (same file or leaf directory),
 
 <!-- FORGE:BATCHABLE -->
 BATCH_EOF
-)")
+```
+
+```
+Skill(skill="issue", args="--title \"fix(batch): P3 review findings — ${SAFE_SURFACE_AREA} (batch #{BATCH_N})\" --body-file \"${BATCH_BODY_FILE}\" --label \"review-finding\" --label \"priority:P3\" --label \"batch\"")
+```
+
+**Extract the created batch issue number from the Skill output** (see `commands/issue.md` Phase 4C/4E — it echoes `Created: {url}` and reports `**#{NUMBER}**: {title}`):
+
+```bash
+BATCH_ISSUE_NUM=$(echo "$ISSUE_SKILL_OUTPUT" | grep -oE 'issues/[0-9]+' | head -1 | grep -oE '[0-9]+')
+[ -z "$BATCH_ISSUE_NUM" ] && BATCH_ISSUE_NUM=$(echo "$ISSUE_SKILL_OUTPUT" | grep -oE '\*\*#[0-9]+\*\*' | head -1 | grep -oE '[0-9]+')
+
+if [ -z "$BATCH_ISSUE_NUM" ]; then
+  echo "WARNING: /issue did not report a created batch issue number — likely a Phase 2D dedup STOP (near-duplicate found) or a usage error. Do not replace member issues with a batch issue for this cluster; leave the members on the standard individual pipeline instead."
+fi
 ```
 
 **Replace member issues with the batch issue** in the resolved issue set. Member issues are NOT individually dispatched to `/work-on` — the batch issue is the single pipeline unit.
