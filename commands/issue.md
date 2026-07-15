@@ -40,10 +40,20 @@ PROGRAMMATIC_BODY_FILE=""
 PROGRAMMATIC_LABELS=()
 PROGRAMMATIC_MILESTONE=""
 
-# Positional/flag parsing. $ARGUMENTS is shell-tokenized by the harness before this
-# script sees it, so long-value flags (--title, --body, --body-file, --label,
-# --milestone) each consume exactly the next token as their value.
-ARGS=($ARGUMENTS)
+# Positional/flag parsing. $ARGUMENTS is a single opaque string (the invoking
+# agent's raw args, e.g. from `Skill(skill="issue", args="--title \"fix: ...\" ...")`)
+# — it is NOT pre-tokenized by any harness, and a naive `ARGS=($ARGUMENTS)` would
+# word-split on whitespace without honoring embedded quote characters (a literal
+# `"` inside the string is not shell syntax at this point), fragmenting any
+# multi-word `--title`/`--body` value. Use `eval "set -- $ARGUMENTS"` instead —
+# this makes the shell's own quote-aware tokenizer parse the string exactly as
+# if it had been typed on a command line, so `--title "fix: billing crash"`
+# correctly yields ONE token for the title. `$ARGUMENTS` must already be
+# shell-safely quoted by the caller (as in the example above); this is the same
+# assumption every other `eval`-based arg-forwarding pattern in this pipeline
+# relies on (see e.g. `resolve_script()`'s tier-dispatch callers in work-on.md).
+eval "set -- $ARGUMENTS"
+ARGS=("$@")
 i=0
 while [ $i -lt ${#ARGS[@]} ]; do
   arg="${ARGS[$i]}"
@@ -103,6 +113,16 @@ if [ "$PROGRAMMATIC_MODE" = "true" ]; then
     echo "ERROR: programmatic mode requires exactly one of --body or --body-file (neither given)"
     exit 1
   elif [ -n "$PROGRAMMATIC_BODY_FILE" ]; then
+    # Fail loudly on a missing/unreadable file — do NOT let a failed `cat` fall
+    # through as an empty $PROGRAMMATIC_BODY. An empty body would otherwise look
+    # like "no body given" to Phase 3F below, which would silently repair it
+    # with placeholder-only stub sections instead of surfacing the caller's
+    # file-path mistake as an error, same fail-loudly convention as the
+    # both/neither check directly above.
+    if [ ! -r "$PROGRAMMATIC_BODY_FILE" ]; then
+      echo "ERROR: --body-file '$PROGRAMMATIC_BODY_FILE' is missing or unreadable"
+      exit 1
+    fi
     PROGRAMMATIC_BODY=$(cat "$PROGRAMMATIC_BODY_FILE")
   fi
 fi
