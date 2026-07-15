@@ -36,6 +36,19 @@
  * read-only contract technically enforced instead of compliance-only. Do not
  * reintroduce `--dangerously-skip-permissions` here. (See issue #2022.)
  *
+ * The allow-list is the actual enforcement boundary, NOT the disallow-list:
+ * only the tools named in `--allowedTools` ("Read Glob Grep LS") are
+ * permitted to execute at all — everything else is implicitly denied by
+ * omission, exactly like a default-deny firewall rule. `--disallowedTools`
+ * ("Write Edit NotebookEdit Bash") is passed in addition purely as
+ * defense-in-depth: an explicit, redundant belt-and-suspenders denial of the
+ * specific mutating tools most likely to be added to a future CLI default
+ * allow-set. If the two lists were ever to conflict (a tool named in both),
+ * the allow-list governs what CAN run — it is not overridden by a matching
+ * disallow-list entry granting it back. Do not read the disallow-list as the
+ * primary boundary and the allow-list as merely advisory; the reverse is
+ * true. (See issue #2047.)
+ *
  * Windows `.cmd` shim resolution works WITHOUT `shell: true`: Node's
  * spawn/spawnSync resolve a bare `"claude"` command via PATH+PATHEXT and
  * safely re-invoke through cmd.exe internally when the resolved target is a
@@ -57,6 +70,7 @@
 import { spawnSync } from "child_process";
 import { dim, yellow, RESET } from "./tui.mjs";
 import { parseEnrichedDraft } from "./init-enrich-api.mjs";
+import { DEFAULT_SPAWN_MAX_BUFFER_BYTES } from "./cli-spawn-shared.mjs";
 
 /**
  * Default wall-clock limit for a single `claude --print` enrichment call.
@@ -66,6 +80,27 @@ import { parseEnrichedDraft } from "./init-enrich-api.mjs";
  * FORGEDOCK_CLI_ENRICH_TIMEOUT_MS (ms).
  */
 const DEFAULT_ENRICH_TIMEOUT_MS = 2 * 60 * 1000;
+
+/**
+ * Default maximum size (bytes, UTF-8) for the built enrichment prompt
+ * (which embeds the full ConfigDraft JSON as a single argv element) before
+ * `enrich()` skips the CLI spawn entirely and falls back to the baseline
+ * draft unchanged (issue #2016).
+ *
+ * argv passed to `spawnSync` with `shell: false` (this module's contract —
+ * see the SECURITY note above) still counts against the OS's total argv+env
+ * size limit (`ARG_MAX` on POSIX, ~32K chars for a single CreateProcess
+ * command line on Windows — see the SYSTEM PROMPT note in
+ * bin/runner.mjs's runCliBackend for the same constraint on a different
+ * code path). A ConfigDraft is normally a few KB, but pathological inputs
+ * (very large `review.tech_stack`/`repos.satellites` arrays from a
+ * multi-hundred-repo org) could grow large enough to risk hitting that OS
+ * ceiling — which would surface as an opaque spawn failure rather than a
+ * clean, diagnosable fallback. 256 KB is comfortably below every relevant
+ * platform's argv limit while being far above any realistic ConfigDraft
+ * size. Override via FORGEDOCK_CLI_ENRICH_MAX_PROMPT_BYTES.
+ */
+const DEFAULT_ENRICH_MAX_PROMPT_BYTES = 256 * 1024;
 
 /**
  * Build the headless enrichment prompt sent to the local `claude` CLI.
@@ -162,6 +197,26 @@ export async function enrich(draft, opts = {}) {
 
   const message = buildEnrichPrompt(draft);
 
+  // Reject an oversized prompt before ever spawning — see the
+  // DEFAULT_ENRICH_MAX_PROMPT_BYTES doc comment (issue #2016). This mirrors
+  // the graceful-fallback contract of every other failure branch below: no
+  // throw, just an early return of the original draft.
+  const rawMaxPromptBytes = parseInt(
+    process.env.FORGEDOCK_CLI_ENRICH_MAX_PROMPT_BYTES,
+    10,
+  );
+  const maxPromptBytes =
+    Number.isFinite(rawMaxPromptBytes) && rawMaxPromptBytes > 0
+      ? rawMaxPromptBytes
+      : DEFAULT_ENRICH_MAX_PROMPT_BYTES;
+  const messageBytes = Buffer.byteLength(message, "utf-8");
+  if (messageBytes > maxPromptBytes) {
+    warn(
+      `skipped: ConfigDraft is too large to pass as a CLI argument (${messageBytes} bytes exceeds the ${maxPromptBytes} byte limit) — falling back to baseline draft`,
+    );
+    return draft;
+  }
+
   // Scrub the Anthropic API key from the child environment. Even though this
   // backend is restricted to read-only tools (no bash) via
   // --allowedTools/--disallowedTools, the spawned `claude` process would
@@ -195,13 +250,18 @@ export async function enrich(draft, opts = {}) {
       {
         cwd,
         encoding: "utf-8",
-        maxBuffer: 50 * 1024 * 1024,
+        maxBuffer: DEFAULT_SPAWN_MAX_BUFFER_BYTES,
         timeout: resolvedTimeoutMs,
         env: childEnv,
       },
     );
   } catch (err) {
-    warn(`unavailable: ${err.message}`, err);
+    // Unconditional summary is intentionally generic — err.message can
+    // contain local filesystem paths (e.g. an ENOENT spawn error against a
+    // custom `bin` path), which must not appear in always-visible stderr
+    // output (issue #2017). Full detail is still available via the
+    // FORGEDOCK_DEBUG-gated line inside warn().
+    warn("unavailable (invocation failed)", err);
     return draft;
   }
 
@@ -220,7 +280,10 @@ export async function enrich(draft, opts = {}) {
   }
 
   if (result.error) {
-    warn(`failed to invoke: ${result.error.message}`, result.error);
+    // Same rationale as the catch block above: keep the unconditional
+    // summary generic, raw detail (which can include local paths) stays
+    // behind FORGEDOCK_DEBUG (issue #2017).
+    warn("failed to invoke (spawn-level error)", result.error);
     return draft;
   }
 

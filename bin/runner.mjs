@@ -51,6 +51,7 @@ import { join, dirname, basename, relative, isAbsolute } from "path";
 import os from "os";
 import { execSync, spawnSync } from "child_process";
 import { parseForgeYaml, resolveModelAlias } from "./forge-utils.mjs";
+import { DEFAULT_SPAWN_MAX_BUFFER_BYTES } from "./cli-spawn-shared.mjs";
 
 const DEFAULT_MODEL = "claude-sonnet-5";
 const DEFAULT_MAX_ITERATIONS = 50;
@@ -429,7 +430,7 @@ export function runCliBackend({
     const result = spawnSync(bin, cliArgs, {
       cwd,
       encoding: "utf-8",
-      maxBuffer: 50 * 1024 * 1024,
+      maxBuffer: DEFAULT_SPAWN_MAX_BUFFER_BYTES,
       timeout: timeoutMs,
       env: childEnv,
     });
@@ -1017,7 +1018,7 @@ export function getToolHandlers(cwd) {
       const maxBuffer =
         Number.isFinite(rawMaxBuffer) && rawMaxBuffer > 0
           ? rawMaxBuffer
-          : 50 * 1024 * 1024;
+          : DEFAULT_SPAWN_MAX_BUFFER_BYTES;
       const result = spawnSync(command, {
         cwd,
         encoding: "utf-8",

@@ -18,6 +18,13 @@
  *   - Malformed/prose-wrapped stdout: parseEnrichedDraft's existing
  *     extraction still applies (reused, not reimplemented)
  *   - argv is passed as a literal array (no shell string interpolation)
+ *   - spawnFn is never invoked with a truthy `shell` option (issue #2031 —
+ *     regression guard: even though spawnFn is fully mocked, these
+ *     assertions still fail if a future change reintroduces `shell: true`)
+ *   - Oversized ConfigDraft JSON is rejected before spawn, never spawns
+ *     (issue #2016)
+ *   - Failure warnings never leak raw error detail (e.g. local paths) into
+ *     the unconditional (non-FORGEDOCK_DEBUG) stderr line (issue #2017)
  *
  * Run with: node --test bin/tests/init-enrich-cli.test.mjs
  */
@@ -79,6 +86,29 @@ describe("init-enrich-cli enrich()", () => {
     // The prompt embeds the draft JSON as data, never as a shell command.
     assert.match(capturedArgv[1], /"owner"/);
     assert.equal(capturedOpts.cwd, "/tmp/repo");
+    // Regression guard (issue #2031): spawnFn is fully mocked in this suite,
+    // so nothing else here would catch a future `shell: true` reintroduction
+    // — this assertion inspects the actual opts object the mock received.
+    assert.notEqual(
+      capturedOpts.shell,
+      true,
+      "must never invoke spawnFn with shell:true (shell-injection guard — issue #2031)",
+    );
+  });
+
+  it("never passes a truthy `shell` option to spawnFn (issue #2031 — dedicated shell:true regression guard)", async () => {
+    let capturedOpts;
+    const spawnFn = (bin, argv, opts) => {
+      capturedOpts = opts;
+      return { status: 0, stdout: JSON.stringify(ENRICHED_DRAFT), stderr: "", error: undefined };
+    };
+
+    await enrich(ORIGINAL_DRAFT, { spawnFn });
+
+    assert.ok(
+      !capturedOpts.shell,
+      "spawnFn opts.shell must be falsy — argv elements must never be re-parsed by a shell",
+    );
   });
 
   it("scrubs ANTHROPIC_API_KEY from the env passed to spawnFn while preserving other vars (issue #2021)", async () => {
@@ -206,5 +236,103 @@ describe("init-enrich-cli enrich()", () => {
 
     await enrich(ORIGINAL_DRAFT, { bin: "/custom/path/claude", spawnFn });
     assert.equal(capturedBin, "/custom/path/claude");
+  });
+
+  it("falls back to the original draft without spawning when the ConfigDraft JSON exceeds the argv size guard (issue #2016)", async () => {
+    // A huge tech_stack array forces buildEnrichPrompt()'s output well past
+    // the 256KB default (FORGEDOCK_CLI_ENRICH_MAX_PROMPT_BYTES) guard.
+    const HUGE_DRAFT = {
+      ...ORIGINAL_DRAFT,
+      review: {
+        tech_stack: {
+          value: Array.from({ length: 20000 }, (_, i) => `framework-${i}-padding-padding`),
+          confidence: "low",
+          source: "test",
+          why: "oversized fixture",
+        },
+      },
+    };
+
+    let spawnCalled = false;
+    const spawnFn = () => {
+      spawnCalled = true;
+      return { status: 0, stdout: JSON.stringify(ENRICHED_DRAFT), stderr: "", error: undefined };
+    };
+
+    const result = await enrich(HUGE_DRAFT, { spawnFn });
+
+    assert.equal(spawnCalled, false, "spawnFn must never be called for an oversized ConfigDraft");
+    assert.deepEqual(result, HUGE_DRAFT);
+  });
+
+  it("respects FORGEDOCK_CLI_ENRICH_MAX_PROMPT_BYTES override for the argv size guard (issue #2016)", async () => {
+    const origLimit = process.env.FORGEDOCK_CLI_ENRICH_MAX_PROMPT_BYTES;
+    process.env.FORGEDOCK_CLI_ENRICH_MAX_PROMPT_BYTES = "10"; // tiny — any real prompt exceeds this
+    let spawnCalled = false;
+    const spawnFn = () => {
+      spawnCalled = true;
+      return { status: 0, stdout: JSON.stringify(ENRICHED_DRAFT), stderr: "", error: undefined };
+    };
+
+    try {
+      const result = await enrich(ORIGINAL_DRAFT, { spawnFn });
+      assert.equal(spawnCalled, false, "spawnFn must not be called once the override shrinks the limit below the prompt size");
+      assert.deepEqual(result, ORIGINAL_DRAFT);
+    } finally {
+      if (origLimit === undefined) delete process.env.FORGEDOCK_CLI_ENRICH_MAX_PROMPT_BYTES;
+      else process.env.FORGEDOCK_CLI_ENRICH_MAX_PROMPT_BYTES = origLimit;
+    }
+  });
+
+  it("does not leak raw error detail (e.g. local paths) into the unconditional stderr line on spawnFn throw (issue #2017)", async () => {
+    const spawnFn = () => {
+      throw new Error("ENOENT: spawn /Users/someone/secret-local-path/claude");
+    };
+
+    const origErrorLog = console.error;
+    const loggedLines = [];
+    console.error = (...args) => loggedLines.push(args.join(" "));
+
+    try {
+      const result = await enrich(ORIGINAL_DRAFT, { spawnFn });
+      assert.deepEqual(result, ORIGINAL_DRAFT);
+    } finally {
+      console.error = origErrorLog;
+    }
+
+    // FORGEDOCK_DEBUG is not set in this test — only the generic, path-free
+    // category line should have been logged.
+    assert.ok(loggedLines.length >= 1, "warn() must log at least the unconditional summary line");
+    const joined = loggedLines.join("\n");
+    assert.ok(
+      !joined.includes("secret-local-path"),
+      "the raw error message (which can contain local paths) must not appear unconditionally in stderr",
+    );
+  });
+
+  it("does not leak raw error detail into the unconditional stderr line when result.error is set (issue #2017)", async () => {
+    const spawnFn = () => ({
+      status: null,
+      stdout: "",
+      stderr: "",
+      error: new Error("spawn failure at /Users/someone/another-secret-path/claude"),
+    });
+
+    const origErrorLog = console.error;
+    const loggedLines = [];
+    console.error = (...args) => loggedLines.push(args.join(" "));
+
+    try {
+      const result = await enrich(ORIGINAL_DRAFT, { spawnFn });
+      assert.deepEqual(result, ORIGINAL_DRAFT);
+    } finally {
+      console.error = origErrorLog;
+    }
+
+    const joined = loggedLines.join("\n");
+    assert.ok(
+      !joined.includes("another-secret-path"),
+      "the raw error message (which can contain local paths) must not appear unconditionally in stderr",
+    );
   });
 });
