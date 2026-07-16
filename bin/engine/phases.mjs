@@ -50,14 +50,19 @@ async function issueMarkers(issue, io) {
  *
  * Returns -1 (rather than 0) when the underlying `git` call itself failed
  * (lock contention, transient I/O error, ref not yet fetched, etc.) — distinct
- * from a genuine, successfully-computed 0. This distinction matters to the
+ * from a genuine, successfully-computed 0. More generally, -1 means "this
+ * count was not computed" — that includes both a git failure here AND a
+ * caller that had no resolvable branch to check in the first place (forge#2211:
+ * `detectOutcome` mirrors this same -1 sentinel for its unresolved-branch case
+ * rather than synthesizing its own 0). This distinction matters to the
  * build phase's `detectOutcome` (forge#2176): a *genuine* 0 ahead (git ran
  * cleanly and reported no new commits) is a stable fixed point safe to mark
- * non-retryable, but a transient git error folded into the same 0 would not
- * be — the very next attempt could see a different, non-erroring result with
- * no external input having changed, so it must remain retryable. Callers that
- * only compare `> 0` (reconcile()'s satisfied check) are unaffected: -1 is
- * still not `> 0`, so existing behavior there is unchanged.
+ * non-retryable, but a transient git error — or a not-yet-resolved branch —
+ * folded into the same 0 would not be — the very next attempt could see a
+ * different, computed result with no external input having changed, so it
+ * must remain retryable. Callers that only compare `> 0` (reconcile()'s
+ * satisfied check) are unaffected: -1 is still not `> 0`, so existing
+ * behavior there is unchanged.
  */
 async function commitsAhead(lane, branch, io) {
   try {
@@ -221,7 +226,12 @@ export const PHASES = [
       // comment (ground truth), scoped to that specific comment — see
       // resolveBranch()/parseBranchFromMarkers() above (forge#2174, forge#2184).
       const branch = resolveBranch(state, comments);
-      const ahead = branch ? await commitsAhead(state.lane, branch, io) : 0; // … AND real commits
+      // forge#2211: an unresolved branch means the commit count was never
+      // computed at all — mirror commitsAhead()'s own "-1 = not computed"
+      // sentinel here instead of synthesizing a `0`, which is indistinguishable
+      // from a genuine git-confirmed zero and would wrongly trip the
+      // non-retryable guard below on the very first attempt.
+      const ahead = branch ? await commitsAhead(state.lane, branch, io) : -1; // … AND real commits
       if (complete && ahead > 0) return { status: "committed", outputs: { branch } };
       const detail = `builder complete=${complete} commitsAhead=${ahead} branch=${branch || "unresolved"}`;
       // forge#2176: when the builder has already posted FORGE:BUILDER:COMPLETE
@@ -241,10 +251,14 @@ export const PHASES = [
       // retry, so this branch intentionally leaves `retryable` unset
       // (defaults to retryable in bin/engine.mjs's runPhaseWithRetry).
       //
-      // `ahead === -1` means commitsAhead() itself failed (transient git
-      // error), NOT a confirmed zero — that is exactly the kind of failure
-      // a retry might resolve, so it must stay retryable too. Only a
-      // successfully-computed ahead of 0 (a real "nothing new to commit"
+      // `ahead === -1` means the count was never computed — either
+      // commitsAhead() itself failed (transient git error) or the branch
+      // could not be resolved at all (forge#2211: `resolveBranch()` returned
+      // null, e.g. on the very first build attempt before any
+      // FORGE:BUILDER:COMPLETE comment names a branch). Neither is a
+      // confirmed zero — both are exactly the kind of failure a retry might
+      // resolve, so both must stay retryable. Only a successfully-computed
+      // ahead of 0 on a *resolved* branch (a real "nothing new to commit"
       // result) is the true fixed point this non-retryable signal targets.
       if (complete && ahead !== -1) return { status: "failed", detail, retryable: false };
       return { status: "failed", detail };
