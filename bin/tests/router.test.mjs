@@ -866,6 +866,12 @@ describe("doctor --fix (forge#1944)", () => {
       "workflow:merged",
       "workflow:decomposed",
       "workflow:invalid",
+      // forge#2261: bin/labels.json gained a new "workflow:"-prefixed label
+      // (workflow:engine-error). Check 7 filters expectedLabels by
+      // `startsWith("workflow:")`, so this stub's "already present" set must
+      // stay in sync with every workflow:* label in bin/labels.json — this
+      // list existing exactly to mirror that filter, not the full manifest.
+      "workflow:engine-error",
     ].map((name) => ({ name }));
 
     const ghStubPath = join(stubBin, "gh-stub.js");

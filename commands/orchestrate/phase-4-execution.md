@@ -635,6 +635,19 @@ classify_predecessor_state() {
     echo "DONE"
   elif echo "$PRED_LABELS" | grep -qxE "needs-human|workflow:awaiting-merge"; then
     echo "GATED"
+  elif echo "$PRED_LABELS" | grep -qx "workflow:engine-error"; then
+    # forge#2261: the engine/tool itself broke on this run (e.g. a fail-fast
+    # CLI_BACKEND_FAILED, or an exhausted retry loop where the runner never
+    # once succeeded) — this is NOT a human-judgment block, so it must NOT
+    # classify GATED (that would wrongly track dependents as
+    # blocked-on-human-merge, waiting on a merge decision nobody needs to
+    # make). It is also not FAILED — the predecessor's content was never
+    # actually judged bad, the tool just needs to be re-run. Classifying it
+    # IN_PROGRESS means dependents simply keep waiting, exactly as if the
+    # predecessor were still mid-pipeline — which is accurate, since the
+    # stall-detection step below (item 2) auto-resumes/retries a completed
+    # agent run that ends in workflow:engine-error, same as any other stall.
+    echo "IN_PROGRESS"
   elif [ "$PRED_STATE" = "CLOSED" ]; then
     # Closed with no workflow:invalid/merged label (e.g. closed-not-planned) — treat as DONE,
     # not a new deadlock state; there is no pending code for dependents to wait on.
@@ -648,7 +661,7 @@ classify_predecessor_state() {
 - **DONE** — predecessor's code is in the base branch (`workflow:merged`), or the predecessor is closed with no pending code. Safe for dependents to dispatch.
 - **GATED** — predecessor is paused pending a human decision (`needs-human`) or pending only a human merge click (`workflow:awaiting-merge`). Its code is NOT yet in the base branch. Dependents are neither dispatched nor skipped — they move to the `blocked-on-human-merge` tracked state (item 6.5 below).
 - **FAILED** — predecessor was closed as `workflow:invalid`, or the agent explicitly reported a build/test error. Dependents are marked "skipped — dependency failed" (item 6 below) — unchanged from prior behavior.
-- **IN_PROGRESS** — predecessor is still mid-pipeline (`investigating`/`ready-to-build`/`building`/`in-review`). Dependent simply continues waiting; no special tracking needed.
+- **IN_PROGRESS** — predecessor is still mid-pipeline (`investigating`/`ready-to-build`/`building`/`in-review`), or terminated `workflow:engine-error` (forge#2261 — an engine/tool failure, not a human-judgment block or a genuine content failure; treated as still-in-flight since stall-detection auto-resumes it). Dependent simply continues waiting; no special tracking needed.
 
 A GATED predecessor whose PR later merges reclassifies to DONE the next time `classify_predecessor_state` runs (its label flips to `workflow:merged`) — this is exactly what the merge-triggered wake check (item 6.6 below) relies on.
 
@@ -832,7 +845,7 @@ done
    echo "#{NUM}: $FINAL_STATE"
    ```
 
-2. **If the issue is NOT in a terminal-for-this-agent state** (`workflow:merged`, `workflow:invalid`, `needs-human`, or `workflow:awaiting-merge`), the agent stalled mid-pipeline. **Resume it immediately**:
+2. **If the issue is NOT in a terminal-for-this-agent state** (`workflow:merged`, `workflow:invalid`, `needs-human`, or `workflow:awaiting-merge`), the agent stalled mid-pipeline. **Resume it immediately**. `workflow:engine-error` (forge#2261 — `bin/engine.mjs`'s headless engine terminating on an engine/tool-level failure rather than a genuine human-judgment block) is deliberately excluded from the terminal-for-this-agent set: a completed agent run ending there is treated exactly like any other stall and auto-resumed/retried here, up to the resume-cap in item 3 below — no human decision is pending, so there is nothing to gate on:
    ```
    Agent(
      resume=AGENT_ISSUE_MAP[{NUMBER}],

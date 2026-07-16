@@ -3562,7 +3562,13 @@ switch (command) {
       // forge#2175: make a needs-human escalation distinguishable from a
       // successful run by exit code, mirroring the resume-stalled case's
       // existing convention below (result.failed.length > 0 -> exitCode 1).
-      if (result && result.terminalReason === "needs-human") exitCode = 1;
+      // forge#2261: "engine-error" (the engine/tool itself broke — a fail-fast
+      // CLI_BACKEND_FAILED/NO_API_KEY/NO_SDK, or an exhausted retry loop where
+      // the runner never once succeeded) previously reached this same case via
+      // an uncaught throw, which already set exitCode = 1 below. Now that
+      // runIssue() resolves cleanly with a terminalReason instead of throwing,
+      // preserve that same non-zero exit code for this reason too.
+      if (result && (result.terminalReason === "needs-human" || result.terminalReason === "engine-error")) exitCode = 1;
     } catch (err) {
       process.stderr.write(`${RED}${err.message}${RESET}\n`);
       exitCode = 1;

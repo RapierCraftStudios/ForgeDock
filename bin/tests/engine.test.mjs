@@ -312,7 +312,7 @@ describe("runIssue", () => {
     assert.equal(reviewFailures.length, 3, "all 3 attempts must be logged — transient retry behavior unchanged");
   });
 
-  it("forge#2259: CLI_BACKEND_FAILED thrown by the runner fails fast on attempt 1, not retried to maxAttempts", async () => {
+  it("forge#2259/#2261: CLI_BACKEND_FAILED thrown by the runner fails fast on attempt 1, not retried to maxAttempts", async () => {
     // Regression for #2244: a deterministic non-zero exit from the nested
     // `claude` CLI (bin/runner.mjs's runCliBackend() throws with
     // err.code = "CLI_BACKEND_FAILED" — see bin/tests/runner.test.mjs's own
@@ -320,6 +320,15 @@ describe("runIssue", () => {
     // the exact shape) reproduces identically on every attempt. It must be
     // rethrown immediately, exactly like NO_API_KEY/NO_SDK, instead of
     // burning all `maxAttempts` retries on a guaranteed-repeat failure.
+    //
+    // forge#2261: unlike the original #2259 fix (which just let this throw
+    // propagate uncaught out of runIssue()), the engine now catches it at the
+    // phase-driving loop and reaches a clean "engine-error" terminal state —
+    // distinct from "needs-human", since this is the engine/tool breaking,
+    // not a genuine human-judgment block. This closes the gap where a
+    // completed run previously left the issue with NO terminal state or
+    // label at all (the uncaught throw only ever reached bin/forgedock.mjs's
+    // outermost catch, which just prints to stderr).
     const { w, io } = fakeWorld();
     let architectRunnerCalls = 0;
     const script = {
@@ -332,12 +341,15 @@ describe("runIssue", () => {
     };
     const runner = async ({ commandName }) => { script[commandName]?.(); return { status: "complete" }; };
 
-    await assert.rejects(
-      () => runIssue({ issue: 42, dir, agentId: "a1", lane: "staging",
-        io, runner, now: () => 1000, maxAttempts: 3 }),
-      (err) => err.code === "CLI_BACKEND_FAILED",
-      "runIssue must propagate CLI_BACKEND_FAILED uncaught, not swallow it into a needs-human terminal result",
-    );
+    const res = await runIssue({ issue: 42, dir, agentId: "a1", lane: "staging",
+      io, runner, now: () => 1000, maxAttempts: 3 });
+
+    assert.equal(res.terminalReason, "engine-error",
+      "CLI_BACKEND_FAILED must resolve to a distinct engine-error terminal reason, not needs-human, and not an uncaught rejection");
+    assert.ok(w.labels.includes("workflow:engine-error"),
+      "the workflow:engine-error label must be written — not needs-human");
+    assert.ok(!w.labels.includes("needs-human"),
+      "needs-human must NOT be written for an engine/tool-level failure");
     assert.equal(architectRunnerCalls, 1,
       "the architect runner must be invoked exactly once — CLI_BACKEND_FAILED must not be retried");
     const events = readLog(dir, 42);
@@ -346,7 +358,15 @@ describe("runIssue", () => {
       "no PHASE_FAILED event should be logged for a fail-fast rethrow — it never reaches the retry bookkeeping, matching NO_API_KEY/NO_SDK");
   });
 
-  it("forge#2259: other error codes (and uncoded errors) from the runner still retry to maxAttempts, unaffected by the CLI_BACKEND_FAILED fail-fast", async () => {
+  it("forge#2261: an uncoded runner exception on every attempt exhausts retries into engine-error, not needs-human", async () => {
+    // The runner (the tool itself — the nested `claude` CLI invocation, or
+    // whatever `runner()` wraps) crashed on all 3 attempts and detectOutcome()
+    // was never once reached — this is an engine/tool failure by definition,
+    // not a content-level judgment call, even though the thrown error carries
+    // no recognized .code. Prior to #2261 this collapsed into the same
+    // generic "needs-human" as a genuine content-level block (see the
+    // previous version of this test) — that conflation is exactly the defect
+    // #2261 fixes.
     const { w, io } = fakeWorld();
     let architectRunnerCalls = 0;
     const script = {
@@ -362,12 +382,46 @@ describe("runIssue", () => {
     const res = await runIssue({ issue: 42, dir, agentId: "a1", lane: "staging",
       io, runner, now: () => 1000, maxAttempts: 3 });
 
-    assert.equal(res.terminalReason, "needs-human", "an uncoded transient error still escalates after exhausting attempts");
+    assert.equal(res.terminalReason, "engine-error",
+      "an uncoded error that crashes the runner on every attempt is an engine/tool failure, not needs-human");
+    assert.ok(w.labels.includes("workflow:engine-error"),
+      "the workflow:engine-error label must be written");
+    assert.ok(!w.labels.includes("needs-human"),
+      "needs-human must NOT be written when the runner never once succeeded");
     assert.equal(architectRunnerCalls, 3,
       "an uncoded error (no .code, or a code other than NO_API_KEY/NO_SDK/CLI_BACKEND_FAILED) must retry all 3 attempts unchanged");
     const events = readLog(dir, 42);
     const architectFailures = events.filter((e) => e.event === "PHASE_FAILED" && e.phase === "architect");
     assert.equal(architectFailures.length, 3, "all 3 attempts must be logged for a genuinely retryable error");
+  });
+
+  it("forge#2261: a genuine content-level block (detectOutcome reached, phase just isn't done) still escalates to needs-human, not engine-error", async () => {
+    // Guards the "mixed" case: the runner succeeds (the tool works) on every
+    // attempt, but the review phase's own detectOutcome() keeps reporting
+    // "PR open, not merged" — a real content-level state, not a tool crash.
+    // This must stay needs-human even though retries are exhausted, exactly
+    // like the pre-existing "forge#2176 (AC4)" test above — this test
+    // exists to explicitly pin the reason value now that engine-error exists
+    // as an alternative outcome.
+    const { w, io } = fakeWorld();
+    let reviewRunnerCalls = 0;
+    const script = {
+      "work-on/investigate": () => { w.markers += " INVESTIGATION:COMPLETE"; },
+      "work-on/build/context": () => { w.markers += " FORGE:CONTEXT:COMPLETE"; },
+      "work-on/build/architect": () => { w.markers += " FORGE:ARCHITECT:COMPLETE"; },
+      "work-on/build": () => { w.markers += " FORGE:BUILDER:COMPLETE **Branch**: `fix/real-branch-42`"; w.commitsAhead = 2; },
+      "work-on/review": () => { reviewRunnerCalls++; w.pr = 7; w.prMerged = false; },
+    };
+    const runner = async ({ commandName }) => { script[commandName]?.(); return { status: "complete" }; };
+
+    const res = await runIssue({ issue: 42, dir, agentId: "a1", lane: "staging",
+      io, runner, now: () => 1000, maxAttempts: 3 });
+
+    assert.equal(res.terminalReason, "needs-human",
+      "a genuine content-level block (unmerged PR) must stay needs-human, not engine-error");
+    assert.ok(w.labels.includes("needs-human"));
+    assert.ok(!w.labels.includes("workflow:engine-error"));
+    assert.equal(reviewRunnerCalls, 3);
   });
 
   it("I3: defers before writing GitHub state when another agent holds a valid lease (remirror path)", async () => {
