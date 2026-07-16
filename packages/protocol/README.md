@@ -59,6 +59,7 @@ follows:
 | Required field added/removed, or an existing field's semantics/enum values changed, on an existing type | **Major** |
 | An existing reserved type is removed or renamed | **Major** |
 | Documentation, comment, or non-schema-affecting fix (e.g. a stale comment) | **Patch** |
+| Wire-encoding change to an existing type's serialized form, with no schema/type-shape change (e.g. an escaping fix that alters emitted bytes for some field values) | **Patch** — but the CHANGELOG entry MUST include an explicit mixed-version compatibility caveat, since encode/decode output changes even though no reserved type, field, or public export changed |
 
 Every schema-affecting change MUST:
 
