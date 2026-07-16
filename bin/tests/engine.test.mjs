@@ -1318,7 +1318,27 @@ describe("runIssue — forge#2239: in-flight lease", () => {
     assert.equal(sawLeaseBeforeRunnerCall.by, "a1");
   });
 
-  it("renews the lease while a single phase's runner is still in flight (outlives the TTL)", async () => {
+  it("claims the lease before the phase loop and renews it once more before the phase runner starts (non-timer writes only — see the sibling 'setInterval heartbeat' test below for the timer-driven path)", async () => {
+    // forge#2333: this test's original name ("renews the lease while a single
+    // phase's runner is still in flight") implied it exercises the
+    // setInterval-driven heartbeat renewal (bin/engine.mjs's `renewTimer`).
+    // It does not. #2314's investigation proved (and this rename documents)
+    // that the `leaseStates.length >= 2` assertion below is satisfied
+    // entirely by two plain sequential `await`s that both complete before
+    // the runner's artificial delay even starts:
+    //   1. the unconditional pre-loop lease claim (`runIssue()`, before the
+    //      phase loop begins), and
+    //   2. the pre-phase "renew before phase" write (dispatched immediately
+    //      before the runner is invoked, still before `renewTimer` is even
+    //      constructed).
+    // Disabling `setInterval` entirely (i.e. the heartbeat never fires) does
+    // NOT fail this test — it only ever checks these two non-timer writes.
+    // This is a genuine regression guard for THAT pair: reconstructing
+    // pre-#2239 code (`git show 783a652`) yields only 1 non-null lease write,
+    // so a real revert of the pre-loop claim still correctly fails here. Do
+    // NOT delete it. The timer-driven heartbeat itself is covered by the new
+    // test immediately below, which is proven (see its comment) to fail when
+    // the `setInterval` mechanism is disabled — this one is not.
     const { w, io } = fakeWorld();
     const writeStateBodies = [];
     const origGh = io.gh;
@@ -1350,10 +1370,103 @@ describe("runIssue — forge#2239: in-flight lease", () => {
 
     const { parseState } = await import("../engine/state.mjs");
     const leaseStates = writeStateBodies.map((b) => parseState(b)?.lease).filter(Boolean);
-    // At least: the pre-loop claim + at least one mid-phase renewal while the
-    // runner was still awaiting inside its artificial delay.
+    // At least: the pre-loop claim + the pre-phase renew-before-phase write.
+    // Both are plain sequential `await`s — no timer involved. See the block
+    // comment above: this assertion is intentionally satisfied without the
+    // setInterval heartbeat ever firing.
     assert.ok(leaseStates.length >= 2,
-      `expected at least 2 lease-bearing writes (claim + renewal), got ${leaseStates.length}`);
+      `expected at least 2 lease-bearing writes (pre-loop claim + pre-phase renew), got ${leaseStates.length}`);
+  });
+
+  it("the setInterval heartbeat itself renews the lease one or more times while the phase runner is still in flight (timer-driven path, distinct from the pre-loop/pre-phase writes above)", async () => {
+    // forge#2333: isolates the ONE code path the test above does not
+    // exercise — bin/engine.mjs's `renewTimer = setInterval(renewLease,
+    // leaseRenewIntervalMs)`, constructed only after the pre-phase renewal
+    // write and only while a phase's runner is genuinely in flight.
+    //
+    // Non-timer lease-bearing writes for a single-phase, single-attempt run
+    // are exactly 3, regardless of whether the heartbeat ever fires:
+    //   1. the pre-loop unconditional claim,
+    //   2. the pre-phase renew-before-phase write, and
+    //   3. the post-commit write (after the runner resolves, once the phase
+    //      outcome is known — see the `state = deriveState(...); await
+    //      projector.writeState(...)` call right after the phase loop's
+    //      commit branch).
+    // None of these three depend on `setInterval` — they are step 2 and
+    // step 4 above (an earlier/renamed test) plus the always-present
+    // post-commit write. So asserting a COUNT STRICTLY GREATER than 3 (i.e.
+    // >= 4) can only be satisfied by at least one additional write that came
+    // from the timer-driven `renewLease()` firing during the runner's
+    // in-flight window — which is exactly the mechanism this issue found
+    // uncovered.
+    //
+    // Non-vacuousness proof (performed manually against a local copy of
+    // bin/engine.mjs, per this issue's mandate — not merely reasoned about):
+    // commenting out the `setInterval(renewLease, leaseRenewIntervalMs)`
+    // call (equivalently, never scheduling `renewLease`) drops the observed
+    // write count to exactly 3, and this assertion (`>= 4`) then fails. The
+    // renamed test above, by contrast, is unaffected by that same sabotage —
+    // it continues to pass at exactly 2, confirming it only ever covers the
+    // non-timer writes.
+    const { w, io } = fakeWorld();
+    const writeStateBodies = [];
+    const origGh = io.gh;
+    io.gh = async (args) => {
+      const out = await origGh(args);
+      const i = args.indexOf("--body");
+      if (i >= 0) writeStateBodies.push(args[i + 1]);
+      return out;
+    };
+
+    // Same tiny TTL/interval convention as the sibling test above — long
+    // enough (80ms runner delay vs. 10ms interval) that the heartbeat has
+    // several opportunities to fire before the runner resolves, without
+    // waiting on the real 10-minute production default.
+    const LEASE_TTL_MS = 30;
+    const LEASE_RENEW_INTERVAL_MS = 10;
+
+    // Terminate immediately after this ONE phase (INVESTIGATION:INVALID makes
+    // the investigate phase's isTerminalAfter fire — see phases.mjs), rather
+    // than INVESTIGATION:COMPLETE which lets the loop continue on to
+    // work-on/build/context, work-on/build/architect, etc. Letting the loop
+    // continue would add further phases' own pre-phase-renew/post-commit
+    // writes on top of investigate's, making the total count depend on how
+    // many downstream phases happen to run before this mocked world blocks —
+    // which has nothing to do with whether the timer fired during THIS
+    // phase's in-flight window, and would make the ">= 4" threshold below
+    // meaningless. Confirmed empirically: with INVESTIGATION:COMPLETE here,
+    // the run proceeds through context/architect before blocking, and even
+    // with the setInterval heartbeat fully disabled the total write count
+    // stays >= 4 purely from those extra phases — i.e. that variant of this
+    // test would be exactly the vacuous-count trap this issue is about.
+    // Ending the run after exactly one phase is what makes "3 without the
+    // timer, 4+ with it" a hard invariant instead of an environment-dependent
+    // guess.
+    const runner = async ({ commandName }) => {
+      if (commandName === "work-on/investigate") {
+        await new Promise((resolve) => setTimeout(resolve, 80));
+      }
+      w.markers += " INVESTIGATION:INVALID";
+      return { status: "complete" };
+    };
+
+    const res = await runIssue({ issue: 42, dir, agentId: "a1", lane: "staging",
+      io, runner, now: () => Date.now(), maxAttempts: 1,
+      leaseTtlMs: LEASE_TTL_MS, leaseRenewIntervalMs: LEASE_RENEW_INTERVAL_MS });
+
+    assert.equal(res.terminalReason, "invalid",
+      "sanity check: the run must terminate right after the single investigate phase, " +
+      "so the write count below reflects only that one phase's writes");
+
+    const { parseState } = await import("../engine/state.mjs");
+    const leaseStates = writeStateBodies.map((b) => parseState(b)?.lease).filter(Boolean);
+    // 3 non-timer writes (pre-loop claim + pre-phase renew + post-commit) can
+    // never satisfy this on their own — a 4th+ write requires the
+    // setInterval-driven renewLease() to have actually fired during the
+    // runner's in-flight window.
+    assert.ok(leaseStates.length >= 4,
+      `expected at least 4 lease-bearing writes (pre-loop claim + pre-phase renew + >=1 timer-driven ` +
+      `renewal + post-commit write), got ${leaseStates.length} — the setInterval heartbeat may not be firing`);
   });
 
   it("no regression: terminate() still clears the lease to null on a terminal state", async () => {
