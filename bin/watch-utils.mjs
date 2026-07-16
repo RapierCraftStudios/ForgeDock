@@ -161,6 +161,21 @@ export function parseSatelliteRepos(forgeYamlText) {
 }
 
 /**
+ * Escape a value for safe interpolation inside a double-quoted GraphQL
+ * string literal (forge#2307). Backslash MUST be escaped first — escaping
+ * `"` before `\` would double-escape the backslashes just introduced by the
+ * quote-escaping step. A value with no special characters round-trips
+ * unchanged, so this is a no-op for the overwhelming common case (plain
+ * alphanumeric owner/repo names).
+ *
+ * @param {string} value
+ * @returns {string}
+ */
+function escapeGraphQLString(value) {
+  return String(value).replace(/\\/g, "\\\\").replace(/"/g, '\\"');
+}
+
+/**
  * Build a single GraphQL query batching FORGE:HEARTBEAT comment lookups for
  * many issues into one `gh api graphql` round-trip instead of one REST call
  * per issue (forge#2235 — de-N+1). The caller is responsible for chunking
@@ -170,6 +185,14 @@ export function parseSatelliteRepos(forgeYamlText) {
  * Fetches only the last 20 comments per issue (heartbeats are appended, so
  * the latest one is always near the end) rather than the full comment
  * history, to keep the response small.
+ *
+ * `owner`/`repo` are escaped (forge#2307) before interpolation into the
+ * double-quoted GraphQL string literal so a value containing `"` or `\`
+ * cannot break out of the literal and alter the query structure. In
+ * practice these values come from trusted local input (forge.yaml or a
+ * `--repo` CLI flag — see bin/forgedock.mjs resolveLabelsRepo/watch()), not
+ * issue/PR content, but the query builder itself should not depend on that
+ * being true forever.
  *
  * @param {string} owner
  * @param {string} repo
@@ -184,7 +207,7 @@ export function buildHeartbeatBatchQuery(owner, repo, issueNumbers) {
     )
     .join("\n    ");
   return `query {
-  repository(owner: "${owner}", name: "${repo}") {
+  repository(owner: "${escapeGraphQLString(owner)}", name: "${escapeGraphQLString(repo)}") {
     ${aliases}
   }
 }`;

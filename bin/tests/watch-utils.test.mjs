@@ -166,6 +166,42 @@ test("buildHeartbeatBatchQuery produces one aliased issue lookup per issue numbe
   assert.match(q, /i1: issue\(number: 102\)/);
 });
 
+// ---------------------------------------------------------------------------
+// forge#2307: buildHeartbeatBatchQuery must escape owner/repo before
+// interpolating them into the double-quoted GraphQL string literal, so a
+// value containing `"` cannot break out of the literal and alter the query
+// structure. This test fails against the pre-fix implementation (which
+// interpolates owner/repo raw) and passes once escapeGraphQLString() is
+// applied.
+// ---------------------------------------------------------------------------
+test("buildHeartbeatBatchQuery escapes a double-quote in owner/repo instead of breaking out of the string literal", () => {
+  const q = buildHeartbeatBatchQuery('Evil", name: "Injected', "ForgeDock", [1]);
+
+  // The owner value's embedded `"` must appear escaped (`\"`), not raw —
+  // i.e. the literal `owner: "Evil", name: "Injected"` sequence (which would
+  // exist if the value broke out unescaped) must NOT appear in the query.
+  assert.doesNotMatch(q, /owner: "Evil", name: "Injected"/);
+  assert.match(q, /owner: "Evil\\", name: \\"Injected"/);
+
+  // The `owner:` argument's string literal must stay well-formed: an even
+  // number of unescaped double-quotes between the two real string
+  // boundaries. Concretely, the whole `repository(...)` header line must
+  // still contain exactly two *unescaped* quote-delimited arguments.
+  const headerLine = q.split("\n")[1];
+  const unescapedQuoteCount = (headerLine.match(/(?<!\\)"/g) || []).length;
+  assert.equal(unescapedQuoteCount, 4, "owner and name must still be exactly two well-formed quoted string args");
+});
+
+test("buildHeartbeatBatchQuery escapes a backslash in owner/repo without double-escaping", () => {
+  const q = buildHeartbeatBatchQuery("owner\\name", "ForgeDock", [1]);
+  assert.match(q, /owner: "owner\\\\name"/);
+});
+
+test("buildHeartbeatBatchQuery leaves plain alphanumeric owner/repo values unchanged (no-op escaping)", () => {
+  const q = buildHeartbeatBatchQuery("RapierCraftStudios", "ForgeDock", [1]);
+  assert.match(q, /repository\(owner: "RapierCraftStudios", name: "ForgeDock"\)/);
+});
+
 test("parseHeartbeatBatchResponse extracts the latest FORGE:HEARTBEAT body per issue", () => {
   const response = {
     data: {
@@ -204,4 +240,20 @@ test("parseHeartbeatBatchResponse returns an empty Map for a malformed/errored r
 test("chunkArray splits into fixed-size slices with a smaller final chunk", () => {
   assert.deepEqual(chunkArray([1, 2, 3, 4, 5], 2), [[1, 2], [3, 4], [5]]);
   assert.deepEqual(chunkArray([], 2), []);
+});
+
+// ---------------------------------------------------------------------------
+// forge#2308: chunk-boundary coverage beyond the happy path above.
+// ---------------------------------------------------------------------------
+test("chunkArray produces no short final chunk when length is an exact multiple of size", () => {
+  assert.deepEqual(chunkArray([1, 2, 3, 4], 2), [[1, 2], [3, 4]]);
+});
+
+test("chunkArray returns a single chunk when size is >= array length", () => {
+  assert.deepEqual(chunkArray([1, 2, 3], 25), [[1, 2, 3]]);
+  assert.deepEqual(chunkArray([1, 2, 3], 3), [[1, 2, 3]]);
+});
+
+test("chunkArray with size 1 produces one chunk per element", () => {
+  assert.deepEqual(chunkArray([1, 2, 3], 1), [[1], [2], [3]]);
 });
