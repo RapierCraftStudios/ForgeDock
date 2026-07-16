@@ -155,12 +155,12 @@ async function runPhaseWithRetry(phase, state, ctx) {
       // failure — surface it distinctly instead of burning retries and
       // escalating to needs-human as if the LLM run itself misbehaved.
       if (e.code === "NO_API_KEY" || e.code === "NO_SDK") throw e;
-      appendEvent(dir, issue, { event: "PHASE_FAILED", phase: phase.id, attempt, reason: e.message });
+      appendEvent(dir, issue, { event: "PHASE_FAILED", phase: phase.id, attempt, reason: e.message, maxAttempts });
       continue;
     }
     const outcome = await phase.detectOutcome(state, io);
     if (outcome.status === "committed" || outcome.status === "blocked") return outcome;
-    appendEvent(dir, issue, { event: "PHASE_FAILED", phase: phase.id, attempt, reason: outcome.detail });
+    appendEvent(dir, issue, { event: "PHASE_FAILED", phase: phase.id, attempt, reason: outcome.detail, maxAttempts });
     // forge#2176: a phase's detectOutcome can mark a failure as a known,
     // state-derived fixed point — re-running the phase's runner is
     // guaranteed to reproduce the identical failure (e.g. the build phase's

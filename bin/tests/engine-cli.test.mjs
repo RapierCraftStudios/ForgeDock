@@ -445,6 +445,41 @@ describe("formatTerminalDiagnostics (forge#2175)", () => {
     }
   });
 
+  it("uses the run's effective maxAttempts (forge#2226) rather than the DEFAULT_MAX_ATTEMPTS constant", () => {
+    const dir = mkdtempSync(join(os.tmpdir(), "engine-cli-test-"));
+    try {
+      appendEvent(dir, 30001, { event: "RUN_START", issue: 30001, run: "r_30001_staging", lane: "staging" });
+      appendEvent(dir, 30001, { event: "PHASE_START", phase: "build", attempt: 1 });
+      appendEvent(dir, 30001, { event: "PHASE_FAILED", phase: "build", attempt: 1, reason: "transient", maxAttempts: 5 });
+      appendEvent(dir, 30001, { event: "PHASE_START", phase: "build", attempt: 2 });
+      appendEvent(dir, 30001, { event: "PHASE_FAILED", phase: "build", attempt: 2, reason: "transient", maxAttempts: 5 });
+      appendEvent(dir, 30001, { event: "RUN_TERMINAL", reason: "needs-human" });
+
+      const out = formatTerminalDiagnostics(dir, 30001);
+
+      assert.match(out, /phase:\s+build \(failed 2\/5 attempts\)/);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("falls back to DEFAULT_MAX_ATTEMPTS for legacy run-logs whose PHASE_FAILED events predate the maxAttempts field (forge#2226)", () => {
+    const dir = mkdtempSync(join(os.tmpdir(), "engine-cli-test-"));
+    try {
+      appendEvent(dir, 30002, { event: "RUN_START", issue: 30002, run: "r_30002_staging", lane: "staging" });
+      appendEvent(dir, 30002, { event: "PHASE_START", phase: "build", attempt: 1 });
+      // Legacy event shape — no maxAttempts field at all.
+      appendEvent(dir, 30002, { event: "PHASE_FAILED", phase: "build", attempt: 1, reason: "legacy failure" });
+      appendEvent(dir, 30002, { event: "RUN_TERMINAL", reason: "needs-human" });
+
+      const out = formatTerminalDiagnostics(dir, 30002);
+
+      assert.match(out, /phase:\s+build \(failed 1\/3 attempts\)/);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   it("omits the phase/reason lines but still prints state and run-log path when there is no PHASE_FAILED event", () => {
     const dir = mkdtempSync(join(os.tmpdir(), "engine-cli-test-"));
     try {
