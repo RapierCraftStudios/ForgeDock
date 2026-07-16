@@ -9,7 +9,7 @@ import { promisify } from "node:util";
 import { readdirSync, statSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
-import { runIssue } from "./engine.mjs";
+import { runIssue, DEFAULT_MAX_ATTEMPTS } from "./engine.mjs";
 import { makeProjector } from "./engine/projector.mjs";
 import { readLog, deriveState } from "./engine/runlog.mjs";
 
@@ -54,6 +54,56 @@ export function makeIo() {
 }
 
 export function runDir() { return join(homedir(), ".forge", "runs"); }
+
+/**
+ * Renders the diagnostic block printed below the bare terminal line whenever
+ * a run does not terminate `merged` (forge#2175). Reconstructs the failing
+ * phase, attempt count, and `PHASE_FAILED.reason` from the durable run-log
+ * (the same data `bin/engine.mjs`'s `runPhaseWithRetry()` already appends via
+ * `appendEvent()`), plus the final committed/branch/pr state and the run-log
+ * path — closing the gap where an operator previously had to manually open
+ * `~/.forge/runs/{issue}.jsonl` and read engine source to interpret a bare
+ * `issue #N -> needs-human` line.
+ *
+ * Best-effort: if the run-log is empty/unreadable (e.g. a `deferred` early
+ * return before any event was appended), only the run-log path line is
+ * printed — never throws.
+ *
+ * Validates `issue` internally (mirrors the `Number.isInteger` guard in
+ * `lastLocalRun()` below) rather than relying solely on the caller —
+ * `runFromCli()` already validates before calling this, but this is an
+ * exported helper and a future caller could forget to (forge#2190).
+ *
+ * @param {string} dir - runDir() (or an injected override for tests)
+ * @param {number} issue
+ * @returns {string} multi-line diagnostic block (no trailing newline)
+ */
+export function formatTerminalDiagnostics(dir, issue) {
+  if (!Number.isInteger(issue)) {
+    return `  run-log: <invalid issue: ${JSON.stringify(issue)}>`;
+  }
+  const runLogPath = join(dir, `${issue}.jsonl`);
+  let events = [];
+  try {
+    events = readLog(dir, issue);
+  } catch {
+    // Corrupt/unreadable log — degrade to just the run-log path line below.
+  }
+
+  const lines = [];
+  if (events.length > 0) {
+    const state = deriveState(events);
+    const lastFailure = [...events].reverse().find((e) => e.event === "PHASE_FAILED");
+    if (lastFailure) {
+      lines.push(`  phase:   ${lastFailure.phase} (failed ${lastFailure.attempt}/${DEFAULT_MAX_ATTEMPTS} attempts)`);
+      lines.push(`  reason:  ${lastFailure.reason}`);
+    }
+    const committed = state.committed.length ? state.committed.join(",") : "";
+    lines.push(`  state:   committed=[${committed}] branch=${state.branch ?? "null"} pr=${state.pr ?? "null"}`);
+  }
+  lines.push(`  run-log: ${runLogPath}`);
+  return lines.join("\n");
+}
 
 /**
  * Resolves the repo `gh` would target by default (i.e. resolved from the cwd
@@ -252,13 +302,24 @@ export async function runFromCli(argv, deps = {}) {
   await assertRepoMatchesCwd(io, repo);
   const runIssueFn = deps.runIssue ?? runIssue;
   const agentId = `cli_${process.pid}`;
-  const res = await runIssueFn({ issue, dir: runDir(), agentId, lane, io,
+  // Injectable for tests (forge#2175) — defaults to the real ~/.forge/runs dir.
+  const dir = deps.dir ?? runDir();
+  const res = await runIssueFn({ issue, dir, agentId, lane, io,
     runner: (await import("./runner.mjs")).runCommand, now: () => Date.now(),
     // Only forwarded when explicitly provided — omitting them preserves
     // runIssue's/runner.mjs's existing defaults (forge#2028).
     ...(backend ? { backend } : {}),
     ...(model ? { model } : {}) });
   console.log(`issue #${issue} → ${res.terminalReason}`);
+  // forge#2175: a non-success termination previously printed nothing beyond
+  // the bare reason above — the actual failing phase/attempt/reason was only
+  // recoverable by manually reading ~/.forge/runs/{issue}.jsonl and then the
+  // engine source. Print it here instead, reconstructed from the same
+  // run-log runIssue() just wrote. Skipped for "merged" (the success case)
+  // to avoid regressing/cluttering the existing happy-path output.
+  if (res.terminalReason !== "merged") {
+    console.log(formatTerminalDiagnostics(dir, issue));
+  }
   return res;
 }
 

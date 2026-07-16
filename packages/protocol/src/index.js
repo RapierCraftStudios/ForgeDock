@@ -1,7 +1,7 @@
 /**
  * @forgedock/protocol — FORGE Annotation Protocol v1.0 reference implementation.
  *
- * Provides parse, validate, and emit for all 13 reserved annotation types
+ * Provides parse, validate, and emit for all reserved annotation types
  * defined in the FORGE Annotation Protocol specification (CC-BY-4.0).
  *
  * @example
@@ -29,6 +29,7 @@ export { parse } from './parse.js';
 export { validate } from './validate.js';
 export { emit, emitPartial, isKnownType } from './emit.js';
 export { RESERVED_TYPES, RESERVED_TYPE_NAMES, Category, SentinelState } from './types.js';
+export { canonicalJson, toBase64url, encodeCard, decodeCardInlineValue } from './card.js';
 
 /**
  * @typedef {Object} ParsedAnnotation

@@ -4,7 +4,7 @@
  */
 import { describe, it, beforeEach, afterEach } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, readFileSync, writeFileSync, existsSync, mkdirSync, readdirSync } from "node:fs";
+import { mkdtempSync, readFileSync, writeFileSync, existsSync, mkdirSync, readdirSync, unlinkSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import os from "node:os";
 import { writeForgeYaml, backfillForgeYaml, backupExisting, detectDescription, makeCtx, preflight, forge, read, review, celebrate, connect, maybeOfferDemo, openUrl, runJourney, manualLowConfidenceKeys, parseInstallTier, findMarkdownFiles, isEphemeralCachePath, detectCrossEnvInstall, validateForgeYamlShape, writeInstallReceipt, persistHome } from "../journey.mjs";
@@ -742,6 +742,108 @@ describe("persistHome (forge#1943)", () => {
     assert.equal(res.skipped, false);
     assert.equal(res.version, "");
     assert.equal(readFileSync(join(home, ".forge", "version"), "utf-8").trim(), "");
+  });
+
+  // -------------------------------------------------------------------------
+  // Downgrade guard + orphan cleanup (forge#2133)
+  //
+  // Regression covered: a stale resolved package (e.g. a plain
+  // `npx forgedock update` that resolves an old global install) must never
+  // silently overwrite a newer persisted ~/.forge/ with older file contents,
+  // and files dropped from an upstream release must not linger in ~/.forge/
+  // forever — copyDirIfChanged() is additive-only by design.
+  // -------------------------------------------------------------------------
+
+  it("downgrade guard: refuses to overwrite a newer persisted ~/.forge/ with an older source package", async () => {
+    const home = mkdtempSync(join(os.tmpdir(), "fd-persist-downgrade-home-"));
+
+    // First persist a NEWER version (2.0.0).
+    const newerSource = makeSourceForgeHome({ version: "2.0.0" });
+    const first = await persistHome({ forgeHome: newerSource, home });
+    assert.equal(first.skipped, false);
+    assert.equal(first.version, "2.0.0");
+    writeFileSync(join(home, ".forge", "commands", "one.md"), "# /one (v2)\n", "utf-8");
+
+    // Now resolve an OLDER stale package (1.0.0) and attempt to persist it.
+    const olderSource = makeSourceForgeHome({ version: "1.0.0" });
+    const second = await persistHome({ forgeHome: olderSource, home });
+
+    assert.equal(second.skipped, true);
+    assert.match(second.reason, /refus.*downgrade/i);
+    // The persisted version must still report the newer, already-persisted value.
+    assert.equal(second.version, "2.0.0");
+    // The newer content must survive untouched — not overwritten by the stale source.
+    assert.equal(
+      readFileSync(join(home, ".forge", "commands", "one.md"), "utf-8"),
+      "# /one (v2)\n",
+      "downgrade guard must prevent the older source from overwriting the newer persisted file",
+    );
+    assert.equal(readFileSync(join(home, ".forge", "version"), "utf-8").trim(), "2.0.0");
+  });
+
+  it("same-version re-persist is not blocked by the downgrade guard (compareVersions == 0 proceeds normally)", async () => {
+    const home = mkdtempSync(join(os.tmpdir(), "fd-persist-sameversion-home-"));
+    const source = makeSourceForgeHome({ version: "3.1.0" });
+
+    await persistHome({ forgeHome: source, home });
+    writeFileSync(join(source, "commands", "one.md"), "# /one (updated content, same version)\n", "utf-8");
+
+    const second = await persistHome({ forgeHome: source, home });
+    assert.equal(second.skipped, false);
+    assert.equal(
+      readFileSync(join(home, ".forge", "commands", "one.md"), "utf-8"),
+      "# /one (updated content, same version)\n",
+    );
+  });
+
+  it("orphan cleanup: a file removed from the source payload is deleted from the persisted ~/.forge/ copy", async () => {
+    const home = mkdtempSync(join(os.tmpdir(), "fd-persist-orphan-home-"));
+    const forgeHome = makeSourceForgeHome({ version: "1.0.0" });
+    writeFileSync(join(forgeHome, "commands", "two.md"), "# /two\n", "utf-8");
+
+    const first = await persistHome({ forgeHome, home });
+    assert.equal(first.skipped, false);
+    assert.ok(existsSync(join(home, ".forge", "commands", "one.md")));
+    assert.ok(existsSync(join(home, ".forge", "commands", "two.md")));
+
+    // Simulate an upstream release that drops commands/two.md, bumping the
+    // version so the downgrade guard doesn't interfere with this persist.
+    unlinkSync(join(forgeHome, "commands", "two.md"));
+    writeFileSync(join(forgeHome, "package.json"), JSON.stringify({ name: "forgedock", version: "1.1.0" }), "utf-8");
+
+    const second = await persistHome({ forgeHome, home });
+    assert.equal(second.skipped, false);
+    assert.equal(second.filesRemoved, 1);
+    assert.equal(second.migrated, true);
+    assert.ok(
+      !existsSync(join(home, ".forge", "commands", "two.md")),
+      "orphaned file must be removed from ~/.forge/ once dropped from the source payload",
+    );
+    assert.ok(
+      existsSync(join(home, ".forge", "commands", "one.md")),
+      "files still present in the source payload must be left alone",
+    );
+  });
+
+  it("orphan cleanup: an entire orphaned subdirectory is removed recursively", async () => {
+    const home = mkdtempSync(join(os.tmpdir(), "fd-persist-orphan-dir-home-"));
+    const forgeHome = makeSourceForgeHome({ version: "1.0.0" });
+    mkdirSyncFs(join(forgeHome, "commands", "legacy-subdir"), { recursive: true });
+    writeFileSync(join(forgeHome, "commands", "legacy-subdir", "old.md"), "# old\n", "utf-8");
+
+    await persistHome({ forgeHome, home });
+    assert.ok(existsSync(join(home, ".forge", "commands", "legacy-subdir", "old.md")));
+
+    // Drop the whole subdirectory upstream, bump version to clear the downgrade guard.
+    rmSync(join(forgeHome, "commands", "legacy-subdir"), { recursive: true, force: true });
+    writeFileSync(join(forgeHome, "package.json"), JSON.stringify({ name: "forgedock", version: "1.1.0" }), "utf-8");
+
+    const second = await persistHome({ forgeHome, home });
+    assert.equal(second.skipped, false);
+    assert.ok(
+      !existsSync(join(home, ".forge", "commands", "legacy-subdir")),
+      "an orphaned subdirectory must be removed recursively, not just its files",
+    );
   });
 });
 

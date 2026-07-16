@@ -1,0 +1,380 @@
+# ForgeDock — Full-Text Documentation Index
+
+> ForgeDock is deterministic orchestration for autonomous software engineering — it uses GitHub as a structured knowledge graph for Claude Code AI agents. This file concatenates the full text of ForgeDock's core documentation and its open FORGE Annotation Protocol specification for single-fetch ingestion by AI assistants and crawlers.
+>
+> **Note on naming**: ForgeDock is unrelated to ForgeRock (the identity and access management company). Different products, different companies.
+>
+> Canonical source: https://github.com/RapierCraftStudios/ForgeDock
+> Live site: https://rapiercraftstudios.github.io/ForgeDock/
+> Package: https://www.npmjs.com/package/forgedock
+
+=============================================================
+SECTION 1: Getting Started with ForgeDock in 5 Minutes
+Source: docs/site/getting-started.md
+=============================================================
+
+# Getting Started with ForgeDock in 5 Minutes
+
+ForgeDock turns GitHub issues into shipped code — automatically. You open an issue, type one command, and an AI agent investigates it, writes the fix, runs a quality gate, opens a PR, reviews it, and merges it.
+
+This tutorial gets you from zero to your first autonomous pipeline run in under 5 minutes.
+
+## Prerequisites
+
+- Claude Code installed and authenticated
+- Git and GitHub CLI (`gh`) installed and authenticated (`gh auth login`)
+- Node.js 18 or higher
+- `yq` — YAML parser used by all pipeline commands to read `forge.yaml`
+
+## Step 1: Install ForgeDock
+
+Run the installer with `npx` from your project directory:
+
+```bash
+npx forgedock
+```
+
+This installs all ForgeDock command specs into `~/.claude/commands/` — making them available as slash commands in every Claude Code session on this machine, not just this repo. Install is always global.
+
+Verify the install:
+
+```bash
+npx forgedock doctor
+```
+
+`doctor` runs an installation health check across categories — command symlinks, `forge.yaml`, required tools (`gh`, `yq`, Claude Code), GitHub workflow labels, and Playwright MCP.
+
+## Step 2: Your Config Is Already There
+
+`npx forgedock` in Step 1 ran the full install journey — including repo detection and a reviewed `forge.yaml` — so there's no separate config step to run. Re-run `npx forgedock init --minimal` to redo detection later.
+
+Minimal `forge.yaml` example:
+
+```yaml
+project:
+  name: "My App"
+  owner: "my-github-org"
+  repo: "my-app"
+
+paths:
+  root: "/path/to/my-app"
+  worktree_base: "/path/to/my-app/.claude/worktrees"
+
+branches:
+  default: "main"
+  staging: "staging"
+  feature_pattern: "milestone/{slug}"
+```
+
+The three required sections are `project`, `paths`, and `branches`. Everything else (project board, review context, verification commands, multi-repo routing) is optional.
+
+## Step 3: Open an Issue
+
+Create a GitHub issue for something real in your repo — a bug, a feature, a refactor. ForgeDock works best with issues that have a clear problem description, expected behavior, and acceptance criteria.
+
+```bash
+/issue "The login button is misaligned on mobile Safari"
+```
+
+## Step 4: Run Your First Pipeline
+
+Open Claude Code in your project directory and run:
+
+```bash
+/work-on 42
+```
+
+That's it. ForgeDock now:
+
+1. Investigates — reads the issue, traces the code, identifies the root cause
+2. Architects — plans the implementation order, identifies all affected files
+3. Builds — implements the fix in an isolated git worktree
+4. Quality gates — checks for 14+ categories of common defects
+5. Reviews — runs domain-specific review agents (security, logic, UX, etc.)
+6. Merges — opens a PR and merges it when review passes
+
+## Step 5: See the Result
+
+While the pipeline runs, you can watch it in real time on the GitHub issue. ForgeDock writes structured comments at every stage:
+
+```
+<!-- FORGE:INVESTIGATOR -->   What it found
+<!-- FORGE:CONTRACT -->       What it will build
+<!-- FORGE:ARCHITECT -->      Implementation plan
+<!-- FORGE:BUILDER -->        What was built
+<!-- FORGE:TRAJECTORY -->     Full audit trail
+```
+
+When it's done, you'll have a merged PR, a closed issue, and a complete audit trail in GitHub.
+
+## What Just Happened?
+
+ForgeDock uses GitHub as a knowledge graph. Every stage writes structured data that the next stage reads. A new agent session can pick up exactly where the last one left off; review agents can see the full investigation context, not just the diff; future issues touching the same code can learn from what was found here.
+
+=============================================================
+SECTION 2: How ForgeDock's Knowledge Graph Works
+Source: docs/site/how-it-works.md
+=============================================================
+
+# How ForgeDock's Knowledge Graph Works
+
+Every AI coding agent faces the same fundamental problem: it forgets everything between sessions.
+
+When a conversation ends or context compacts, the agent loses all the context it gathered — why the code looks the way it does, which approaches were already tried, which files are connected. The next session starts from scratch.
+
+ForgeDock solves this by treating GitHub as a persistent, structured memory system that every agent can read and write.
+
+## The Core Insight: GitHub Is Already a Knowledge Graph
+
+Your repository already contains everything an agent needs to know: issues (what problems were reported and why), pull requests (what was changed and the reasoning behind it), commits (the exact changes, with references back to issues), comments (investigator notes, architectural decisions, review findings), labels (current workflow state at a glance), and blame (who changed each line and when, tracing back to the originating issue).
+
+These aren't just records for humans. They're queryable, structured data that an agent can use as memory. ForgeDock adds the coordination layer that makes agents use this data systematically.
+
+## FORGE Annotations: Machine-Readable Comments
+
+The key mechanism is FORGE annotations — structured HTML comment blocks posted to GitHub issues and PRs at every pipeline stage.
+
+```
+<!-- FORGE:INVESTIGATOR -->   Root cause, affected files, confidence level
+<!-- FORGE:CONTRACT -->       What will be built — deliverables, acceptance criteria
+<!-- FORGE:ARCHITECT -->      Implementation plan — file order, consistency checks, risks
+<!-- FORGE:CONTEXT -->        Historical pitfalls, past bugs, patterns to avoid
+<!-- FORGE:BUILDER -->        What was built — commits, files changed, criteria status
+<!-- FORGE:REVIEWER -->       Review findings — severity, pattern, prevention rule
+<!-- FORGE:TRAJECTORY -->     Full audit trail — every phase, every decision
+```
+
+Every downstream agent reads these before starting work. The builder reads the investigator's root cause analysis. The reviewer reads the builder's implementation notes. The architect reads the context agent's historical findings.
+
+## The Pipeline: A Relay Race
+
+When you run `/work-on 42`, ForgeDock runs a sequential pipeline where each stage hands off structured context to the next:
+
+- Stage 1: Investigation — reads the issue, explores relevant code, traces git blame, searches related issues. Posts verdict (CONFIRMED/PARTIAL/INVALID), root cause, affected files, evidence, decomposition assessment.
+- Stage 2: Architecture — traces all affected code paths, identifies data flow, checks consistency invariants before any code is written.
+- Stage 3: Context Gathering — surfaces institutional memory: past review findings, historical bugs, patterns that have caused bugs before.
+- Stage 4: Build — implements in an isolated git worktree, following the architecture plan's order.
+- Stage 5: Quality Gate — runs checks covering security, SQL safety, auth model, env var completeness, frontend proxy wiring, deployment config, and more. Iterates until the gate passes.
+- Stage 6: Review — specialized review agents examine the PR: security, business logic, frontend, backend, database, infrastructure, documentation, test coverage, dependency audit. Each finding becomes a separate GitHub issue.
+
+## Compaction Resilience: The Agent Can Always Resume
+
+Claude Code sessions have context limits. When a session compacts, the in-memory state is lost. ForgeDock is designed for this: write state to GitHub after every significant step, re-read GitHub state at the start of every phase.
+
+A new agent session running `/work-on 42` reads the issue body and all comments, checks existing FORGE annotations to determine the current phase, reads the workflow label, and picks up exactly where the last session left off — with no reliance on any in-memory context from previous sessions.
+
+## Labels as State Machine
+
+GitHub labels track the workflow state of every issue. The pipeline reads these labels to determine what to do next. See docs/spec/label-state-machine.md for the full state table, transition rules, and terminal labels.
+
+## Cross-Issue Knowledge: How History Informs the Present
+
+When the context agent runs for a new issue, it searches for past review findings on the same files, past bugs in the same module (found by mining git log references), and related code paths (callers and importers of the functions being changed). Every bug that gets fixed, and every review finding that gets filed, makes the pipeline smarter for future work on the same codebase.
+
+## forge.yaml: The Configuration Layer
+
+The `forge.yaml` file in your repo root tells ForgeDock how your project is structured — project identity, filesystem paths, branch strategy, and project board connection. ForgeDock resolves this once at the start of every pipeline run.
+
+=============================================================
+SECTION 3: GitHub Is Already Your Agents' Memory
+Source: docs/site/github-is-the-memory.md
+=============================================================
+
+# GitHub Is Already Your Agents' Memory
+
+Every agent session begins the same way. The model reads the codebase, forms a hypothesis, and starts writing. It does not know that the function it is about to change was shaped by a bug fix filed in a prior issue. It does not know that the approach it is about to try was already attempted and reverted in a prior PR. It does not know that other files will need the same change, because a review agent noted that dependency weeks ago and the note lives in a comment thread the current session never read.
+
+This is the memory problem — not context length. Context windows are large enough. The bottleneck is that nothing ever gets written down in a place where the next agent session can find it.
+
+The common solution is a sidecar memory store: a vector database, an MCP memory server, a proprietary knowledge base. The execution has a consistent flaw: it duplicates structure that already exists in GitHub while being invisible to humans and every tool that is not specifically wired to query it.
+
+GitHub is already a citation graph. Commits reference issues. Pull requests reference commits. Issues cross-reference related issues. `git blame` traces every line to a commit, which traces to a PR, which traces to an issue thread containing the full reasoning behind the change. That graph is public, auditable, searchable with standard tools, and survives any vendor relationship. Agents just do not use it as one.
+
+The question is not whether to give agents memory. The question is whether that memory should live inside proprietary stores that duplicate GitHub, or whether it should live in GitHub itself — where every human and tool on the project can already read it.
+
+## What "machine-readable" means here
+
+Human-readable is not the same as machine-parseable. A downstream agent cannot reliably extract "the root cause identified in the investigation phase" from a prose paragraph that may or may not contain one.
+
+ForgeDock's answer is FORGE annotations — structured HTML comments written by each pipeline stage and read by every downstream stage. An annotation looks like this:
+
+```html
+<!-- FORGE:INVESTIGATOR
+verdict: CONFIRMED/HIGH
+root_cause: description of the specific defect and why it occurs
+affected_files: path/to/file1, path/to/file2
+-->
+```
+
+This is still a GitHub comment — a human reading the thread sees it as a collapsed HTML comment or reads its contents directly. A downstream agent querying the issue with `gh issue view` gets it as structured text it can parse without guessing at prose intent. The annotation is the contract between stages.
+
+The annotation format is an open standard — the FORGE Annotation Protocol (https://github.com/RapierCraftStudios/ForgeDock/blob/main/docs/spec/forge-protocol-v1.md). Any agent pipeline can implement it without ForgeDock. The format is documented in full, the vocabulary is fixed, and the license is CC-BY-4.0.
+
+## Three terms, defined once
+
+Knowledge graph — the set of GitHub issues, pull requests, commits, and their cross-references, treated as a queryable graph rather than a linear history. The `gh` CLI is the query interface.
+
+Trajectory receipt — the `FORGE:TRAJECTORY` annotation written to a GitHub issue at the end of a pipeline run. It records what each phase actually did. It is a public comment on the issue, readable by any agent that opens that issue in any future session.
+
+Deterministic phase engine — the component that decides what happens next in a pipeline run, based on GitHub state rather than model inference. Phase selection is a pure rule-based state machine.
+
+## Why memory that lives where the work lives is different
+
+A sidecar memory store requires explicit maintenance. Memory in GitHub requires none of this. Every FORGE annotation is a GitHub comment. It appears in the issue timeline, is indexed by GitHub search, exportable via the standard API, and archived in every repository clone.
+
+## The compounding property
+
+Trajectory receipts compound. When the pipeline works on a module it has touched before, the context phase finds prior trajectory receipts for that module, extracts the review findings they record, and forwards them to the architect and builder as known constraints. Known bugs do not get reintroduced. Known approaches that failed are not re-attempted.
+
+## Two paths forward
+
+Try it end-to-end with ForgeDock:
+
+```bash
+npx forgedock demo
+```
+
+This spins up a risk-free demo repository and walks the full pipeline — investigate, build, review, merge.
+
+```bash
+npx forgedock
+```
+
+Checks your environment, installs the slash commands into Claude Code, and generates a `forge.yaml` for your repository.
+
+Adopt the protocol without ForgeDock: the FORGE Annotation Protocol document describes the philosophy and vocabulary. The protocol spec gives the full technical definition — annotation types, required fields, completion markers, and query patterns. The license is CC-BY-4.0. Any agent pipeline can implement structured GitHub annotations using these specs without adopting ForgeDock's command layer.
+
+=============================================================
+SECTION 4: The FORGE Annotation Protocol (v1.0) — Normative Specification
+Source: docs/spec/forge-protocol-v1.md
+License: CC-BY-4.0 (this specification document only)
+=============================================================
+
+# FORGE Annotation Protocol
+
+Version: 1.0 · Status: Published · License: CC-BY-4.0
+
+## 1. Introduction
+
+The FORGE Annotation Protocol is an open, machine-readable convention for AI development agents to pass structured context to one another through the artifacts of a code-hosting platform — issues and pull requests.
+
+Modern AI coding agents are stateless. When a session ends, the next agent starts with no memory of what previous agents investigated, decided, or built. Teams that chain agents together (an investigator, then a builder, then a reviewer) need a durable place to record each agent's output so the next agent can resume without re-deriving everything.
+
+FORGE solves this by defining a small set of annotations: structured blocks of text, wrapped in HTML comment tags, posted as ordinary issue or pull-request comments. Each agent writes the annotations for the work it completes; each downstream agent reads the annotations that came before. Because the host platform stores comments permanently and exposes them through a standard API, the context survives session restarts, context-window compaction, and tooling changes.
+
+This document specifies version 1.0 of the protocol. It is self-contained: a conforming producer or consumer can be built from this document alone, with no dependency on any specific agent framework, language model, editor, or vendor.
+
+Goals: Interoperability (any agent that can read and write platform comments can participate), Durability (context is stored in append-only platform artifacts), Queryability (annotations can be located with simple text-contains filters), Human-readability (annotations are Markdown a person can read directly).
+
+Terminology: Annotation (a structured block of text identified by a FORGE tag), Producer (an agent that writes annotations), Consumer (an agent, automation, or human that reads annotations), Host platform (the code-hosting service whose comments transport annotations), Completion sentinel (a tag that marks an annotation as fully written).
+
+## 2. Transport and Encoding
+
+Transport is the host platform's issue/PR comment API. One annotation lives inside one platform comment; a comment may contain more than one annotation. Encoding is an opening HTML comment tag followed by a Markdown body. Comments are append-only and permanent. Query interface is text-contains filtering on comment bodies.
+
+HTML comment tags are chosen because they render invisibly in Markdown views, so annotations do not clutter the human reading experience, yet remain trivially machine-parseable.
+
+## 3. Syntax
+
+Every annotation begins with an opening tag on its own line: `<!-- FORGE:{TYPE} -->`. The Markdown body follows. An annotation ends at the next `<!-- FORGE:` tag within the same comment, or at the end of the comment body.
+
+A producer signals that an annotation is fully written by emitting a completion sentinel as the final line: `<!-- {TYPE}:COMPLETE -->`. A consumer MUST NOT treat an annotation as complete unless its completion sentinel is present.
+
+When a producer is interrupted before finishing an annotation, it MAY mark it partial: `<!-- {TYPE}:PARTIAL -->`. An annotation with neither sentinel is treated as interrupted; a consumer SHOULD delete it and request the producing phase be re-run.
+
+Some annotations carry a single value directly in the tag: `<!-- FORGE:{TYPE}: {value} -->`.
+
+## 4. Annotation Types
+
+### Lifecycle annotations (posted on issue comments, form the primary context chain)
+
+**FORGE:INVESTIGATOR** — written by an investigation agent; completion sentinel `<!-- INVESTIGATION:COMPLETE -->`. Records verdict (CONFIRMED/PARTIAL/INVALID), confidence, severity, task type, what was claimed, what was found, root cause, affected files, evidence, recommendation, decomposition assessment.
+
+**FORGE:DECOMPOSED** — written by a decomposition agent; completion sentinel `<!-- FORGE:DECOMPOSED:COMPLETE -->`. Posted on a parent issue after it has been split into sub-issues.
+
+**FORGE:CONTRACT** — written by a builder agent before writing code. Defines task type, proposed approach, deliverables table, acceptance criteria, quality considerations, out of scope.
+
+**FORGE:CONTEXT** — written by a context-gathering agent; completion sentinels `<!-- FORGE:CONTEXT:COMPLETE -->` / `<!-- FORGE:CONTEXT:PARTIAL -->`. Surfaces known pitfalls, historical findings, past bugs in the module, related code paths, patterns that cause bugs, successful similar implementations.
+
+**FORGE:ARCHITECT** — written by an architecture agent; completion sentinels `<!-- FORGE:ARCHITECT:COMPLETE -->` / `<!-- FORGE:ARCHITECT:PARTIAL -->`. Contains an ordered implementation plan: affected paths table, implementation order, consistency checks, risk assessment, files to read before coding.
+
+**FORGE:BUILDER** — written by an implementation agent after committing work; completion sentinel `<!-- FORGE:BUILDER:COMPLETE -->`. Primary handoff to review: branch, commits, files changed, approach, changes, acceptance criteria status, testing checklist.
+
+**FORGE:REVIEWER** — written by domain review agents on the pull request. Verdict (APPROVED/CHANGES_REQUESTED/COMMENTED) and findings with severity, location, issue description, suggested fix, prevention rule.
+
+**FORGE:TRAJECTORY** — written by the orchestrator once per issue lifecycle. A permanent audit trail: phase-by-phase results table, decisions, anomalies, completion timestamp.
+
+### Cross-artifact annotations (move context between issues)
+
+**FORGE:KNOWLEDGE_GIST** — inline value pointing to an external artifact holding full investigation findings.
+
+**FORGE:MILESTONE_INDEX** — inline value in the milestone description, pointing to an index aggregating knowledge gists for a milestone.
+
+**FORGE:PRIOR_GIST** — inline value in a sub-issue body, pointing to the parent issue's knowledge artifact.
+
+Security note: all FORGE gist types MUST be created secret, never public — they embed investigation findings including root causes and security details.
+
+### Control and error markers
+
+Phase boundary markers (in pipeline command specs): `FORGE:DISPATCHER` (marks the Universal Phase Dispatcher), `FORGE:PHASE_COMPLETE` (documents an inter-phase boundary).
+
+Issue-comment control markers: `FORGE:REVIEW_STARTED`, `FORGE:ANCESTRY_FAILED`, `FORGE:GATE_FAILED`, `FORGE:PUSH_BLOCKED`, `FORGE:PUSH_FAILED`. Error markers signal that automated processing stopped and human attention is needed.
+
+### Design pipeline annotations
+
+Drive the UI Taste Harness — the design-generation pipeline that produces a landing page from a design-blind product brief: `FORGE:DESIGN_CONTEXT`, `FORGE:DESIGN_RATIONALE`, `FORGE:DESIGN_CANDIDATES`, `FORGE:DESIGN_SPEC`, `FORGE:CRITIQUE`, `FORGE:USER_FEEDBACK`, `FORGE:BENCH_SCORECARD`, `FORGE:DESIGN_SHIPPED`.
+
+### Audit annotations
+
+`FORGE:AUDIT`, `FORGE:SECURITY_AUDIT` — posted by audit commands (`/audit`, `/audit-agents`, `/security-audit`) after running structured code or agent audits.
+
+## 5. The Context Chain
+
+Lifecycle annotations form an ordered chain: Issue body → FORGE:INVESTIGATOR → FORGE:DECOMPOSED (if decomposed) → FORGE:CONTRACT → FORGE:CONTEXT → FORGE:ARCHITECT → FORGE:BUILDER → FORGE:REVIEWER (on the PR) → FORGE:TRAJECTORY. Each stage reads the outputs of all preceding stages, so context accumulates on the issue rather than in any agent's memory.
+
+## 6. Label State Machine
+
+Annotations record what happened; labels record where a unit of work is, in the `workflow:` label namespace. See docs/spec/label-state-machine.md for the full state table, transition diagram, terminal labels, and label-exclusivity pattern.
+
+## 7. Conformance
+
+A conforming producer writes annotations using the exact opening tag, emits the correct completion sentinel, marks interrupted annotations partial, and writes state to the host platform after each significant step.
+
+A conforming consumer locates annotations by text-contains filtering, treats an annotation as complete only when its completion sentinel is present, re-reads platform state at the start of each stage rather than relying on in-memory context, tolerates unknown annotation types gracefully, and honors terminal labels.
+
+## 8. Extension Mechanism
+
+A producer MAY define new annotation types following the convention `<!-- FORGE:YOUR_CUSTOM_TYPE -->`. Custom types SHOULD use a vendor or project prefix to avoid collisions. Because every conforming consumer ignores types it does not recognize, custom annotations are safe to add.
+
+## 9. Worked Example
+
+An investigation agent posts a FORGE:INVESTIGATOR annotation with verdict CONFIRMED, root cause, affected files, and recommendation, ending in `<!-- INVESTIGATION:COMPLETE -->`. After implementing and merging the fix, the builder and orchestrator post FORGE:BUILDER and FORGE:TRAJECTORY annotations. A continuous-integration job can consume FORGE:TRAJECTORY generically — depending only on the protocol, not on the agent that produced the annotations — to publish a release note whenever an issue is closed, exiting cleanly if no trajectory annotation is found (tolerant by design).
+
+## 10. Nested-Command Decomposition Pattern
+
+Large command specs that grow past ~30 KB with two or more separable sub-phases, distinct named skill scopes, or callers that benefit from loading only a subset of logic, are decomposed into a top-level file plus a same-named subdirectory of sub-files, invocable as `<parent>:<sub-file-stem>`.
+
+## 11. Adopting FORGE in Your Own Pipeline
+
+FORGE is an open format. Minimum viable adoption: pick the annotation types relevant to your pipeline (FORGE:INVESTIGATOR + FORGE:BUILDER is a good start), write agent prompts to post annotated comments after each phase, write downstream agent prompts to read those comments before starting. Implementation checklist: read existing annotations before starting work, write annotations using the schemas in Section 4, check for existing annotations before writing (idempotency), respect label state, use text-contains filtering as the primary query interface.
+
+## 12. Versioning
+
+This document specifies version 1.0. Minor revisions add backward-compatible changes (new reserved types, new optional fields). Major revisions introduce breaking changes (renamed/removed reserved types or required fields). Annotations do not carry an explicit version field; conforming consumers MUST tolerate unknown annotation types gracefully.
+
+## 13. Reference Implementation
+
+The canonical reference implementation is published as a separate, MIT-licensed npm package: `@forgedock/protocol`, available at `packages/protocol/` in the ForgeDock repository. `packages/protocol/` is the normative write and read path for all FORGE annotations — hand-rolled annotation construction is non-conformant because it bypasses the codec's escaping and round-trip guarantees.
+
+## 14. Acknowledgements
+
+The FORGE Annotation Protocol was first developed and proven in a production autonomous-development pipeline, where it coordinated investigator, builder, and reviewer agents across tens of thousands of issues. This specification generalizes that wire format into a tool-neutral, openly licensed standard so that any agent pipeline can adopt and interoperate with it.
+
+Full normative text, including exact JSON/CLI schemas, worked examples, and the complete field-by-field annotation grammar: https://github.com/RapierCraftStudios/ForgeDock/blob/main/docs/spec/forge-protocol-v1.md
+
+=============================================================
+END OF FILE
+=============================================================
+
+For the machine-readable index (link list only, no full text), see: https://rapiercraftstudios.github.io/ForgeDock/llms.txt
+Canonical repository: https://github.com/RapierCraftStudios/ForgeDock

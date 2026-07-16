@@ -1,0 +1,9 @@
+{
+  "description": "CARD — well-formed Base64url payload but tampered sha8 integrity prefix (last hex digit flipped 8→9); must be rejected by validate() (§4.2)",
+  "input": "<!-- FORGE:CARD: v1 sha:8e7c6609 b64:eyJpc3N1ZSI6MjEyMSwibm90ZSI6InZhbGlkIGNhcmQgZml4dHVyZSIsInR5cGUiOiJDQVJEIn0 -->",
+  "expect": {
+    "type": "CARD",
+    "valid": false,
+    "inlineValue": "v1 sha:8e7c6609 b64:eyJpc3N1ZSI6MjEyMSwibm90ZSI6InZhbGlkIGNhcmQgZml4dHVyZSIsInR5cGUiOiJDQVJEIn0"
+  }
+}

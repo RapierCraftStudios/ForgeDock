@@ -10,7 +10,9 @@ import { reconcileState } from "./engine/reconcile.mjs";
 import { makeProjector } from "./engine/projector.mjs";
 import { VALID_BACKENDS } from "./runner.mjs";
 
-const DEFAULT_MAX_ATTEMPTS = 3;
+// Exported (forge#2175) so bin/engine-cli.mjs can render "failed N/M attempts"
+// diagnostics without duplicating the retry budget constant.
+export const DEFAULT_MAX_ATTEMPTS = 3;
 
 /**
  * @param {object} opts
@@ -85,11 +87,17 @@ export async function runIssue(opts) {
   }
 
   // 2. Drive phases until terminal.
+  //
+  // Note: the build phase's branch is NOT precomputed here. The real branch
+  // name is slug-derived from the issue title by `commands/work-on/build.md`
+  // (Phase B1A) and cannot be guessed ahead of time — a prior guessed default
+  // (`fix/pipeline-{issue}`) was never communicated to the builder and never
+  // matched the branch it actually created, so `commitsAhead()` always ran
+  // against a nonexistent ref and silently evaluated to 0 (forge#2174). The
+  // build phase's `reconcile`/`detectOutcome` (bin/engine/phases.mjs) resolve
+  // the real branch from the `FORGE:BUILDER` comment instead.
   let phase;
   while ((phase = pickPhase(state))) {
-    // Every issue's build works on a deterministic branch; set it before build runs.
-    if (phase.id === "build" && !state.branch) state.branch = `fix/pipeline-${issue}`;
-
     let reconciled;
     try {
       reconciled = phase.reconcile ? await phase.reconcile(state, io) : { satisfied: false };
@@ -153,6 +161,19 @@ async function runPhaseWithRetry(phase, state, ctx) {
     const outcome = await phase.detectOutcome(state, io);
     if (outcome.status === "committed" || outcome.status === "blocked") return outcome;
     appendEvent(dir, issue, { event: "PHASE_FAILED", phase: phase.id, attempt, reason: outcome.detail });
+    // forge#2176: a phase's detectOutcome can mark a failure as a known,
+    // state-derived fixed point — re-running the phase's runner is
+    // guaranteed to reproduce the identical failure (e.g. the build phase's
+    // builder already completed and will no-op on any re-invocation, per
+    // commands/work-on/build.md's own `BUILD_RESULT: status: ALREADY_DONE`
+    // early-exit). Honor that signal by stopping immediately rather than
+    // burning the remaining attempt budget on a guaranteed-identical result.
+    // Absent/undefined `retryable` defaults to retryable (existing behavior
+    // for every phase that doesn't opt in — investigate/context/architect/
+    // review/close — is unchanged, preserving transient-failure retries).
+    if (outcome.retryable === false) {
+      return { status: "blocked", detail: outcome.detail };
+    }
   }
   // Exhausted transient retries → escalate (spec §7).
   return { status: "blocked", detail: `phase ${phase.id} failed after ${maxAttempts} attempts` };

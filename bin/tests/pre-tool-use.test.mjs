@@ -663,6 +663,51 @@ describe("pre-tool-use hook — filesystem-root find guard (#2034)", () => {
     assert.match(stderr, /BLOCKED/);
   });
 
+  // Regression tests for review finding SEC-1 (CONFIRMED MEDIUM, issue #2113):
+  // FIND_ROOT_TOKEN_RE only matched a bare `/` or bare drive letter, so a
+  // trailing-slash drive mount (`/c/`) or a dot/double-slash root variant
+  // (`/.`, `/..`, `//`) reached the identical whole-drive scan but was
+  // wrongly ALLOWED.
+  it("exits 2 for find /c/ (trailing-slash drive mount)", () => {
+    const { exitCode, stderr } = runHook({
+      hook_event_name: "PreToolUse",
+      tool_name: "Bash",
+      tool_input: { command: "find /c/ -iname x" },
+    });
+    assert.equal(exitCode, 2);
+    assert.match(stderr, /BLOCKED/);
+  });
+
+  it("exits 2 for find /. (dot root)", () => {
+    const { exitCode, stderr } = runHook({
+      hook_event_name: "PreToolUse",
+      tool_name: "Bash",
+      tool_input: { command: "find /. -iname x" },
+    });
+    assert.equal(exitCode, 2);
+    assert.match(stderr, /BLOCKED/);
+  });
+
+  it("exits 2 for find /.. (double-dot root)", () => {
+    const { exitCode, stderr } = runHook({
+      hook_event_name: "PreToolUse",
+      tool_name: "Bash",
+      tool_input: { command: "find /.. -iname x" },
+    });
+    assert.equal(exitCode, 2);
+    assert.match(stderr, /BLOCKED/);
+  });
+
+  it("exits 2 for find // (double-slash root)", () => {
+    const { exitCode, stderr } = runHook({
+      hook_event_name: "PreToolUse",
+      tool_name: "Bash",
+      tool_input: { command: "find // -iname x" },
+    });
+    assert.equal(exitCode, 2);
+    assert.match(stderr, /BLOCKED/);
+  });
+
   // Regression test for review finding SEC-2 (CONFIRMED LOW): command-name
   // matching was case-sensitive, so `Find /` or `FIND /` bypassed the guard
   // despite Windows resolving them to the same binary as `find`.
@@ -709,6 +754,26 @@ describe("pre-tool-use hook — filesystem-root find guard (#2034)", () => {
       hook_event_name: "PreToolUse",
       tool_name: "Bash",
       tool_input: { command: "find /c/Users/itsmr/repo -maxdepth 2 -name x" },
+    });
+    assert.equal(exitCode, 0);
+  });
+
+  // Confirms the SEC-1 (#2113) regex widening for /c/, /., /.., // did not
+  // regress scoped-path matching under a dot or double-slash-adjacent root.
+  it("allows find /./repo -maxdepth 2 -name x (scoped path under a dot-prefixed root)", () => {
+    const { exitCode } = runHook({
+      hook_event_name: "PreToolUse",
+      tool_name: "Bash",
+      tool_input: { command: "find /./repo -maxdepth 2 -name x" },
+    });
+    assert.equal(exitCode, 0);
+  });
+
+  it("allows find /../repo -maxdepth 2 -name x (scoped path under a double-dot-prefixed root)", () => {
+    const { exitCode } = runHook({
+      hook_event_name: "PreToolUse",
+      tool_name: "Bash",
+      tool_input: { command: "find /../repo -maxdepth 2 -name x" },
     });
     assert.equal(exitCode, 0);
   });

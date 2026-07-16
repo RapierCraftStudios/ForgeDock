@@ -56,15 +56,26 @@ function sanitizeFieldValue(rawValue) {
       `emit(): field value resolves to a bare FORGE tag/sentinel line, which is not permitted: ${JSON.stringify(rawValue)}`,
     );
   }
+  // Escape "&" FIRST, before either delimiter-escape pass below. Without this,
+  // a value that already contains literal entity-like text (e.g. "<!--&gt;"
+  // or "&lt;!--") collides with the encoded form of an unrelated real
+  // delimiter — sanitizeFieldValue() would not be injective, and the
+  // collision is unrecoverable by unescapeFieldValue() on decode
+  // (forge#2137). Escaping "&" first guarantees every "&lt;!--"/"--&gt;"/
+  // "--!&gt;" sequence in the output was produced by *this* pass, never by
+  // pre-existing entity text (which is now doubly-escaped, e.g.
+  // "&" -> "&amp;", left untouched by the delimiter passes that only match
+  // literal "<!--"/"--"+">" character sequences).
+  const withAmpEscaped = folded.replace(/&/g, '&amp;');
   // Escape the HTML comment opener ("<!--") so a value cannot start a new
   // unterminated HTML comment in GitHub's renderer, which would visually swallow
   // subsequent lines — the same rendering-leak the closer escaping below prevents
   // from the opposite direction. (forge#1638)
-  const withOpenerEscaped = folded.replace(/<!--/g, '&lt;!--');
+  const withOpenerEscaped = withAmpEscaped.replace(/<!--/g, '&lt;!--');
   // Escape both HTML comment-close forms ("-->" and "--!>") — only replacing the
   // literal character sequence (not just documenting the risk) prevents the
-  // enclosing comment from terminating early. (forge#1594; noted but never fixed
-  // for the FORGE:STATE codec in bin/engine/state.mjs — see issue investigation)
+  // enclosing comment from terminating early. (forge#1594; the FORGE:STATE codec
+  // in bin/engine/state.mjs now mirrors this full three-form scheme — forge#2119)
   return withOpenerEscaped.replace(/--(!)?>/g, (_, bang) => `--${bang || ''}&gt;`);
 }
 

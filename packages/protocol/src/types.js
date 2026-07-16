@@ -18,7 +18,7 @@ export const SentinelState = {
 };
 
 /**
- * All 16 reserved annotation types from spec §4.
+ * All reserved annotation types from spec §4.
  * Spec ref: §4.1 lifecycle, §4.2 cross-artifact, §4.3 control/error markers.
  * Added CLAIM and CLAIM_RELEASED in forge#1736 — claims board for claim-level parallelism.
  * Added AUTOPILOT_CYCLE in forge#1753 — durable cycle state for /autopilot.

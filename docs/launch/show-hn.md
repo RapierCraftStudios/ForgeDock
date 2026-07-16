@@ -25,9 +25,9 @@ The fix isn't a bigger context window. It's structured memory that survives conv
 
 ForgeDock treats GitHub as that memory layer. Every pipeline stage writes machine-readable HTML annotations to issues and PRs — FORGE:INVESTIGATOR traces root cause to a specific commit, FORGE:ARCHITECT produces a typed implementation plan, FORGE:CONTEXT surfaces known pitfalls from closed issues in the same module. The next agent reads these before doing anything. The gh CLI is the query interface; no external store, no embeddings.
 
-The pipeline: /work-on #42 → investigate (reads git blame, closed issues, review findings) → architect (traces all call sites, orders changes by dependency) → build → quality gate (14+ check domains) → 9-agent review → PR. Each stage writes what it found so the next stage doesn't repeat the work. After 20,000+ issues processed across real production codebases, patterns accumulate: the context phase now flags known pitfalls in a module before the builder touches it.
+The pipeline: /work-on #42 → investigate (reads git blame, closed issues, review findings) → architect (traces all call sites, orders changes by dependency) → build → quality gate (14+ check domains) → 9-agent review → PR. Each stage writes what it found so the next stage doesn't repeat the work. ForgeDock builds itself with this pipeline — in its first 30 days, 693 issues filed and 603 PRs merged across the repo — and patterns accumulate: the context phase now flags known pitfalls in a module before the builder touches it.
 
-It's 25 markdown command specs installed via npx forgedock, no runtime server. Would love to hear what the HN community thinks about using GitHub's existing graph structure — commits, blame, cross-references — as agent memory.
+It's a set of markdown command specs installed via npx forgedock, no runtime server. Would love to hear what the HN community thinks about using GitHub's existing graph structure — commits, blame, cross-references — as agent memory.
 ```
 
 **Character count**: ~1,380 characters (well within 4,000 limit)
@@ -71,7 +71,7 @@ It's 25 markdown command specs installed via npx forgedock, no runtime server. W
 
 ### "Why HTML comments for annotations?"
 
-> GitHub renders HTML comments invisibly to humans — the issue stays readable without noise. Agents grep for `<!-- FORGE:INVESTIGATOR -->` to find structured context fast. It's a zero-dependency protocol: no API, no schema registry, no additional auth. Any tool with `gh` CLI access can read and write annotations. The downside is parsing cost (tokens to extract fields from markdown); the [Vision section of the README](https://github.com/RapierCraftStudios/ForgeDock#vision) describes replacing this with a purpose-built graph store once the protocol is proven.
+> GitHub renders HTML comments invisibly to humans — the issue stays readable without noise. Agents grep for `<!-- FORGE:INVESTIGATOR -->` to find structured context fast. It's a zero-dependency protocol: no API, no schema registry, no additional auth. Any tool with `gh` CLI access can read and write annotations. The downside is parsing cost (tokens to extract fields from markdown); the [Where it's going section of the README](https://github.com/RapierCraftStudios/ForgeDock#where-its-going) describes replacing this with a purpose-built graph store once the protocol is proven.
 
 ---
 

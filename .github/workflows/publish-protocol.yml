@@ -22,12 +22,71 @@ jobs:
 
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - name: Use Node.js 24
         uses: actions/setup-node@v4
         with:
           node-version: 24
           registry-url: 'https://registry.npmjs.org'
+
+      - name: Guard — protocol schema change requires a version bump
+        working-directory: .
+        env:
+          EVENT_BEFORE: ${{ github.event.before }}
+          EVENT_NAME: ${{ github.event_name }}
+        run: |
+          # workflow_dispatch has no "before" SHA (that field only exists on push events),
+          # so there is no well-defined "what changed in this manual run" to diff against.
+          # Rather than approximate with HEAD^ (which doesn't correspond to the manual
+          # invocation at all), skip the guard explicitly for workflow_dispatch — the
+          # push-to-main trigger (paths-filtered on packages/protocol/**) is the enforced
+          # path; workflow_dispatch is a manual escape hatch, not primary enforcement.
+          if [ "$EVENT_NAME" = "workflow_dispatch" ]; then
+            echo "Skipping version-bump guard for workflow_dispatch — no well-defined 'before' state for a manual run; push-to-main is the enforced path."
+            exit 0
+          fi
+
+          # Diff against the actual pre-push SHA (github.event.before), not just HEAD^ —
+          # HEAD^ only sees the last commit of a push and silently misses a schema change
+          # made in an earlier (non-tip) commit of a multi-commit push or rebase-merge.
+          BASE_SHA="$EVENT_BEFORE"
+          if [ -z "$BASE_SHA" ] || [ "$BASE_SHA" = "0000000000000000000000000000000000000000" ]; then
+            BASE_SHA="HEAD^"
+          fi
+          if ! git cat-file -e "${BASE_SHA}^{commit}" 2>/dev/null; then
+            echo "::error::Could not resolve base commit ($BASE_SHA) for schema-diff — fetch depth may be insufficient, or this is the repo's first commit. Failing closed."
+            exit 1
+          fi
+
+          if ! CHANGED_SRC=$(git diff --name-only "$BASE_SHA" HEAD -- 'packages/protocol/src/**' 2>&1); then
+            echo "::error::git diff against $BASE_SHA failed — failing closed rather than silently skipping the guard."
+            echo "$CHANGED_SRC"
+            exit 1
+          fi
+
+          if [ -n "$CHANGED_SRC" ]; then
+            if ! OLD_PKG_JSON=$(git show "${BASE_SHA}:packages/protocol/package.json" 2>&1); then
+              echo "::error::Could not read packages/protocol/package.json at $BASE_SHA — failing closed. This guard must not silently pass when it cannot verify a version bump occurred."
+              exit 1
+            fi
+            OLD_VERSION=$(echo "$OLD_PKG_JSON" | node -e "process.stdout.write(JSON.parse(require('fs').readFileSync(0,'utf8')).version)" 2>/dev/null || echo "")
+            NEW_VERSION=$(node -p "require('./packages/protocol/package.json').version")
+            if [ -z "$OLD_VERSION" ]; then
+              echo "::error::Could not parse previous packages/protocol/package.json version at $BASE_SHA — failing closed."
+              exit 1
+            fi
+            if [ "$OLD_VERSION" = "$NEW_VERSION" ]; then
+              echo "::error::packages/protocol/src/ changed but package.json version ($NEW_VERSION) did not change (base: $BASE_SHA). Bump the version — see packages/protocol/README.md versioning policy."
+              echo "Changed files:"
+              echo "$CHANGED_SRC"
+              exit 1
+            fi
+            echo "Schema files changed; version ${OLD_VERSION} -> ${NEW_VERSION} (base: $BASE_SHA) — OK"
+          else
+            echo "No changes under packages/protocol/src/ (base: $BASE_SHA) — skipping version-bump guard"
+          fi
 
       - name: Run tests
         run: node --test "test/**/*.test.mjs"

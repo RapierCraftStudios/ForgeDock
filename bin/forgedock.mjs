@@ -3,7 +3,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 
 import { fileURLToPath } from "url";
-import { dirname, join, relative, resolve } from "path";
+import { dirname, join, relative, resolve, sep } from "path";
 import { mkdir, lstat, readlink, readdir, unlink, readFile, writeFile } from "fs/promises";
 import {
   existsSync,
@@ -13,7 +13,7 @@ import {
   renameSync,
   unlinkSync,
 } from "fs";
-import { execSync, execFileSync } from "child_process";
+import { execSync, execFileSync, spawnSync } from "child_process";
 import { homedir } from "os";
 import https from "https";
 import {
@@ -1475,6 +1475,216 @@ async function printVersionAvailableChangelog(localVersion, latestVersion) {
   }
 }
 
+/**
+ * Detect whether FORGE_HOME resolves inside npm's global install tree, i.e.
+ * this process is running as a globally-installed `forgedock` package (not
+ * an ephemeral npx/dlx cache extraction). Used by update()'s npm-mode branch
+ * (forge#2133) to decide whether a newer published version can be installed
+ * in place with `npm install -g forgedock@latest`, versus the npx-cache case
+ * where there is nothing durable to reinstall over.
+ *
+ * Resolution: `npm root -g` reports the global node_modules directory; if
+ * FORGE_HOME sits under `{globalRoot}/forgedock`, this is a global install.
+ * Fails closed (returns false) on any error — the pre-existing advisory-only
+ * behavior is always a safe fallback when detection is inconclusive.
+ *
+ * @returns {boolean}
+ */
+function isGlobalNpmInstall() {
+  try {
+    const globalRoot = execSync("npm root -g", {
+      encoding: "utf-8",
+      stdio: ["pipe", "pipe", "pipe"],
+      timeout: 5000,
+    }).trim();
+    if (!globalRoot) return false;
+    const globalPkgDir = resolve(join(globalRoot, "forgedock"));
+    const home = resolve(FORGE_HOME);
+    return home === globalPkgDir || home.startsWith(globalPkgDir + sep);
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Maximum number of additional self-update re-exec attempts allowed after the
+ * first (i.e. up to MAX_SELF_UPDATE_ATTEMPTS + 1 total `npm install -g`
+ * attempts across the parent process and its re-exec'd children). Guards
+ * against unbounded recursion when `npm install -g` reports success but the
+ * resolved version never actually advances (stale registry mirror/proxy,
+ * cache issue, mismatched FORGE_HOME resolution) — see forge#2158.
+ */
+const MAX_SELF_UPDATE_ATTEMPTS = 1;
+
+/**
+ * Strict semver-shape check for a version string before it is interpolated
+ * into a shell-invoked command (see forge#2180). Intentionally narrow —
+ * digits-dot-digits-dot-digits with an optional `-prerelease`/`+build`
+ * suffix restricted to `[0-9A-Za-z.-]` — so it accepts every real value
+ * `fetchLatestVersion()` can return from the npm registry's `version` field,
+ * while rejecting anything containing shell metacharacters
+ * (`; | & $ \` ( ) < > " ' \n` etc.) that `shell: true` would otherwise
+ * hand straight to cmd.exe/`/bin/sh`.
+ *
+ * The regex above is fully anchored (`^...$`) but its quantifiers (`\d+`,
+ * `[0-9A-Za-z.-]+`) are unbounded, so shape validity alone does not bound
+ * string *length* — a pathologically long value could still match. This
+ * is defense-in-depth only (see forge#2195): the character-class
+ * restriction already rules out shell metacharacters at any length, and
+ * `fetchLatestVersion()`'s 65536-byte HTTP response cap already bounds
+ * `version` in practice. The explicit length cap below rejects oversized
+ * input before the regex ever runs, closing the gap outright rather than
+ * relying on an upstream cap this function has no visibility into.
+ *
+ * @param {string} version
+ * @returns {boolean}
+ */
+function isValidSemverShape(version) {
+  const MAX_VERSION_LENGTH = 100;
+  return (
+    typeof version === "string" &&
+    version.length <= MAX_VERSION_LENGTH &&
+    /^\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?$/.test(version)
+  );
+}
+
+/**
+ * Install the newer published version globally via `npm install -g
+ * forgedock@{version}`, then re-exec this same file path (which npm has just
+ * overwritten with the new package's contents) so the rest of update()'s
+ * persist/relink phase runs against the *new* payload instead of the stale
+ * in-memory one (forge#2133 — previously the advisory-only branch would
+ * persist/relink from whatever was already resolved, silently downgrading
+ * a newer persisted ~/.forge/ or leaving the global install stuck on the
+ * old version indefinitely).
+ *
+ * Depth guard (forge#2158): the re-exec'd child process could, in principle,
+ * observe the same "newer version available" condition again (e.g. a stale
+ * registry mirror/proxy reports success without the resolved version ever
+ * advancing) and recurse indefinitely, each cycle blocking up to ~125s. The
+ * attempt count is propagated across the re-exec via the
+ * `FORGEDOCK_SELF_UPDATE_ATTEMPT` environment variable (parent process env is
+ * never mutated — the counter is only passed to the spawned child's own
+ * environment). Once `MAX_SELF_UPDATE_ATTEMPTS` is reached, this function
+ * fails loudly with an actionable message and returns `false` instead of
+ * attempting another install/re-exec cycle.
+ *
+ * Fail-open: any error during install or re-exec falls back to the
+ * pre-existing advisory message — the caller must treat a `false` return as
+ * "could not self-update, printed manual instructions instead."
+ *
+ * Windows note (forge#2180): `npm` is a `.cmd` batch launcher on Windows, and
+ * Node's `execFileSync`/`spawnSync` cannot invoke `.cmd`/`.bat` files without
+ * `shell: true` (nodejs/node#3675) — confirmed empirically on a real Windows
+ * 11 machine: `execFileSync("npm", [...])` ENOENTs, and even the exact
+ * `npm.cmd` filename EINVALs, without a shell. `shell: true` is required
+ * here so the install actually runs on Windows. Because that widens the
+ * command line to shell interpretation, `version` — sourced from an
+ * unauthenticated `https://registry.npmjs.org` response in
+ * `fetchLatestVersion()` — is validated against a strict semver shape
+ * (`isValidSemverShape`) before it is ever interpolated into the command,
+ * closing the injection surface `shell: true` would otherwise open (see the
+ * repo-wide execSync→execFileSync shell-injection hardening precedent in
+ * forge#1703/forge#413).
+ *
+ * @param {string} version - target version to install (e.g. "1.2.0")
+ * @returns {boolean} true if re-exec was launched (process will exit before
+ *   returning in the success path); false if self-update failed, was capped
+ *   by the depth guard, and the caller should fall back to advisory-only
+ *   behavior.
+ */
+function selfUpdateGlobalInstall(version) {
+  // Math.max(0, ...) clamps out negative values: `Number.parseInt(x, 10) || 0`
+  // only substitutes 0 for NaN/0/"" — a negative numeric string (e.g. a
+  // corrupted or manually-set FORGEDOCK_SELF_UPDATE_ATTEMPT="-1") is truthy
+  // and passes through unclamped, which would let a negative attempt count
+  // stay perpetually below MAX_SELF_UPDATE_ATTEMPTS. Defense-in-depth only —
+  // no known path sets this env var to a negative value today. (forge#2168)
+  const attempt = Math.max(
+    0,
+    Number.parseInt(process.env.FORGEDOCK_SELF_UPDATE_ATTEMPT, 10) || 0,
+  );
+
+  // `attempt` counts completed installs so far (0 = no installs yet). The
+  // guard must allow MAX_SELF_UPDATE_ATTEMPTS + 1 total installs (see the
+  // doc comment above this function) — i.e. it should only trip once
+  // `attempt` has already reached that total, not one call early. Using
+  // `>=` here tripped after only 1 install instead of the documented 2
+  // (forge#2203 — the retry this guard exists to allow never actually ran).
+  if (attempt > MAX_SELF_UPDATE_ATTEMPTS) {
+    console.log(
+      `  ${YELLOW}Self-update did not converge after ${attempt} attempt(s) — the installed version may not be advancing (stale registry mirror/cache?).${RESET}`,
+    );
+    console.log(
+      `  Run ${CYAN}npm install -g forgedock@latest${RESET} manually, then ${CYAN}npx forgedock update${RESET} again.`,
+    );
+    return false;
+  }
+
+  // Validate before this value ever reaches the shell-invoked install below
+  // (forge#2180) — fail open to the same advisory message a failed install
+  // would print, rather than throwing or passing an unvalidated string to
+  // `shell: true`.
+  if (!isValidSemverShape(version)) {
+    console.log(
+      `  ${YELLOW}Self-update aborted: received an unexpected version string ("${version}").${RESET}`,
+    );
+    console.log(
+      `  Run ${CYAN}npm install -g forgedock@latest${RESET} manually, then ${CYAN}npx forgedock update${RESET} again.`,
+    );
+    return false;
+  }
+
+  try {
+    console.log(`  Installing ${CYAN}forgedock@${version}${RESET} globally...`);
+    // shell: true is required to resolve npm.cmd on Windows (see the
+    // Windows note in this function's doc comment, forge#2180). `version`
+    // is validated as strict semver above before this point.
+    execFileSync("npm", ["install", "-g", `forgedock@${version}`], {
+      stdio: "inherit",
+      timeout: 120000,
+      shell: true,
+    });
+  } catch (err) {
+    console.log(
+      `  ${YELLOW}Global self-update failed: ${err && err.message ? err.message : String(err)}${RESET}`,
+    );
+    console.log(
+      `  Run ${CYAN}npm install -g forgedock@latest${RESET} manually, then ${CYAN}npx forgedock update${RESET} again.`,
+    );
+    return false;
+  }
+
+  console.log(
+    `  ${GREEN}Installed v${version}.${RESET} Re-running update to finish persist/relink...`,
+  );
+  try {
+    const result = spawnSync(process.execPath, [__filename, "update"], {
+      stdio: "inherit",
+      env: {
+        ...process.env,
+        FORGEDOCK_SELF_UPDATE_ATTEMPT: String(attempt + 1),
+      },
+    });
+    // `result.signal` is set (non-null) when the re-exec'd child was
+    // terminated by a signal (e.g. SIGTERM/SIGKILL) rather than exiting
+    // cleanly — in that case `result.status` is `null`, and
+    // `result.status ?? 0` would silently collapse a killed child into a
+    // reported "success" (exit 0). Exit non-zero explicitly for the
+    // signal-killed case; the non-signaled path is unchanged. (forge#2159)
+    process.exit(result.signal ? 1 : (result.status ?? 0));
+    // Unreachable — process.exit() above terminates the process. Present
+    // only to satisfy linters expecting a return on every path.
+    return true;
+  } catch (err) {
+    console.log(
+      `  ${YELLOW}Could not re-run update after install: ${err && err.message ? err.message : String(err)}${RESET}`,
+    );
+    console.log(`  Run ${CYAN}npx forgedock update${RESET} again manually.`);
+    return false;
+  }
+}
+
 async function update() {
   console.log("");
   console.log(`${BOLD}ForgeDock${RESET} — Checking for updates`);
@@ -1569,8 +1779,25 @@ async function update() {
       console.log(
         `  ${GREEN}New version available: v${latestVersion}${RESET} (you have v${localVersion}).`,
       );
-      console.log(`  Run ${CYAN}npx forgedock@latest${RESET} to fetch it.`);
       await printVersionAvailableChangelog(localVersion, latestVersion);
+
+      // forge#2133 — a global npm install can actually be upgraded in place;
+      // do that instead of only printing an advisory (which previously left
+      // global installs stuck on whatever version was first installed,
+      // since every subsequent `npx forgedock update` re-resolves the same
+      // stale global binary). selfUpdateGlobalInstall() re-execs and exits
+      // the process on success, so anything after this block only runs when
+      // self-update wasn't attempted or failed.
+      if (isGlobalNpmInstall()) {
+        selfUpdateGlobalInstall(latestVersion);
+        // selfUpdateGlobalInstall() only returns (rather than exiting the
+        // process) when the install or re-exec failed — it already printed
+        // manual-recovery instructions, so fall through to the persist
+        // refresh below using the still-stale local payload (fail-open,
+        // matches pre-existing behavior for this failure case).
+      } else {
+        console.log(`  Run ${CYAN}npx forgedock@latest${RESET} to fetch it.`);
+      }
     } else {
       console.log(`  Already up to date (v${localVersion}).`);
     }
@@ -3238,7 +3465,11 @@ switch (command) {
   case "run-issue": {
     const { runFromCli } = await import("./engine-cli.mjs");
     try {
-      await runFromCli(restArgs);
+      const result = await runFromCli(restArgs);
+      // forge#2175: make a needs-human escalation distinguishable from a
+      // successful run by exit code, mirroring the resume-stalled case's
+      // existing convention below (result.failed.length > 0 -> exitCode 1).
+      if (result && result.terminalReason === "needs-human") exitCode = 1;
     } catch (err) {
       process.stderr.write(`${RED}${err.message}${RESET}\n`);
       exitCode = 1;

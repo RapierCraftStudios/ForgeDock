@@ -54,6 +54,29 @@ describe("state codec", () => {
     assert.deepEqual(got, poison);
   });
 
+  it("round-trips state containing <!-- in string values (HTML comment injection guard)", () => {
+    // A terminalReason or branch containing "<!--" must not open a new (nested-looking)
+    // HTML comment in GitHub's renderer, which would visually swallow subsequent content.
+    const poison = { ...idx, terminalReason: "before <!-- injected --> after", branch: "fix/<!---42" };
+    const body = "prefix\n\n" + serializeState(poison);
+    const rawPayload = body.match(/<!-- FORGE:STATE\n([\s\S]*?)\n-->/)?.[1] ?? "";
+    assert.ok(!rawPayload.includes("<!--"), "payload must not contain raw <!-- (would open a nested HTML comment)");
+    assert.ok(!rawPayload.includes("-->"), "payload must not contain raw --> either");
+    const got = parseState(body);
+    assert.deepEqual(got, poison);
+  });
+
+  it("round-trips state containing all three comment-delimiter forms combined", () => {
+    const poison = { ...idx, terminalReason: "<!-- open, close --> and alt close --!> combined", branch: "fix/<!---->-42" };
+    const body = "prefix\n\n" + serializeState(poison);
+    const rawPayload = body.match(/<!-- FORGE:STATE\n([\s\S]*?)\n-->/)?.[1] ?? "";
+    assert.ok(!rawPayload.includes("<!--"), "payload must not contain raw <!--");
+    assert.ok(!rawPayload.includes("-->"), "payload must not contain raw -->");
+    assert.ok(!rawPayload.includes("--!>"), "payload must not contain raw --!>");
+    const got = parseState(body);
+    assert.deepEqual(got, poison);
+  });
+
   it("upsertStateBlock handles $ replacement patterns in JSON values", () => {
     // Create an index with $ replacement patterns in serialized values
     const idx1 = { v: 1, run: "r1", issue: 42, lane: "staging",
@@ -76,5 +99,50 @@ describe("state codec", () => {
     // Preserved surrounding text
     assert.match(body, /Header/);
     assert.match(body, /Footer/);
+  });
+
+  it("round-trips a value that is a real delimiter immediately followed by literal entity-like text (forge#2137)", () => {
+    const poison = { ...idx, terminalReason: "<!--&gt;" };
+    const body = "prefix\n\n" + serializeState(poison);
+    const got = parseState(body);
+    assert.deepEqual(got, poison);
+  });
+
+  it("round-trips a value that is pure pre-existing entity-like text with no real delimiter (forge#2137)", () => {
+    const poison = { ...idx, terminalReason: "&lt;!--" };
+    const body = "prefix\n\n" + serializeState(poison);
+    const got = parseState(body);
+    assert.deepEqual(got, poison);
+  });
+
+  it("does not collide: '<!--&gt;' and '&lt;!--&gt;' encode to distinct payloads and both round-trip (forge#2137)", () => {
+    const a = { ...idx, terminalReason: "<!--&gt;" };
+    const b = { ...idx, terminalReason: "&lt;!--&gt;" };
+    const bodyA = serializeState(a);
+    const bodyB = serializeState(b);
+    assert.notEqual(bodyA, bodyB, "distinct inputs must not collide to the same encoded payload");
+    assert.deepEqual(parseState(bodyA), a);
+    assert.deepEqual(parseState(bodyB), b);
+  });
+
+  it("round-trips a value containing a literal ampersand alongside real delimiters (forge#2137)", () => {
+    const poison = { ...idx, terminalReason: "AT&T <!-- test --> done --!> & more <!--&gt; end" };
+    const body = "prefix\n\n" + serializeState(poison);
+    const got = parseState(body);
+    assert.deepEqual(got, poison);
+  });
+
+  it("round-trips a value containing the literal \"&amp;\" substring (already-escaped-looking ampersand) (forge#2166)", () => {
+    const poison = { ...idx, terminalReason: "status: pending &amp; done" };
+    const body = "prefix\n\n" + serializeState(poison);
+    const got = parseState(body);
+    assert.deepEqual(got, poison);
+  });
+
+  it("round-trips a value combining the \"--!>\" comment-closer variant with adjacent entity-like text (forge#2166)", () => {
+    const poison = { ...idx, terminalReason: "--!>&gt;" };
+    const body = "prefix\n\n" + serializeState(poison);
+    const got = parseState(body);
+    assert.deepEqual(got, poison);
   });
 });

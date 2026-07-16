@@ -96,7 +96,11 @@ function makeWorld() {
       case "work-on/investigate": w.markers += " INVESTIGATION:COMPLETE"; break;
       case "work-on/build/context": w.markers += " FORGE:CONTEXT FORGE:CONTEXT:COMPLETE"; break;
       case "work-on/build/architect": w.markers += " FORGE:ARCHITECT FORGE:ARCHITECT:COMPLETE"; break;
-      case "work-on/build": w.markers += " FORGE:BUILDER:COMPLETE"; w.commitsAhead = 2; w.buildRuns++; break;
+      // The Branch marker mirrors the real `**Branch**: `{BRANCH}`` field the
+      // FORGE:BUILDER comment always reports (implement.md Phase I6) — the
+      // engine now resolves the build branch from this ground truth instead
+      // of a guessed default (forge#2174), so the mock must emit it too.
+      case "work-on/build": w.markers += " FORGE:BUILDER:COMPLETE **Branch**: `fix/real-branch-42`"; w.commitsAhead = 2; w.buildRuns++; break;
       // Idempotent review runner: adopts an existing PR instead of creating a
       // second one on resume, so a duplicate-create would be observable via
       // prCreateCount instead of being silently masked by `w.pr = 7`.
@@ -208,5 +212,99 @@ describe("crash injection: resume from the durable run-log", () => {
     assert.ok(launches >= 2, `mid-review crash must fire and require resume (launches=${launches})`);
     assert.equal(res.terminalReason, "merged");
     assertCleanMerge(w);
+  });
+});
+
+describe("crash injection: forge#2184 comment-scoped last-match resume semantics", () => {
+  // makeWorld() above models the `.../comments` endpoint as one concatenated
+  // string blob (`w.markers`). issueMarkers() (bin/engine/phases.mjs) can only
+  // build its per-comment `comments` array from a genuine JSON array response;
+  // against a raw-string blob its JSON.parse fails and it falls back to a
+  // single one-element pseudo-comment, which makes "last comment wins" and
+  // "first regex match within that one blob" indistinguishable. That fallback
+  // is exactly the coverage gap this issue flags (review finding on PR #2182)
+  // — so this scenario needs its own world whose comments endpoint returns a
+  // real JSON array of distinct comment bodies, preserving comment boundaries
+  // the way the real `gh api .../comments --jq "[.[].body]"` call does.
+  function makeMultiCommentWorld() {
+    const w = { comments: [], pr: null, prMerged: false, issueState: "OPEN", labels: [],
+                commitsAheadByBranch: {}, body: "Issue." };
+    const io = {
+      gh: async (args) => {
+        const a = args.join(" ");
+        if (a.includes("/comments")) return JSON.stringify(w.comments);
+        if (a.startsWith("issue view") && a.includes("body")) return JSON.stringify({ body: w.body });
+        if (a.startsWith("issue view")) return JSON.stringify({ state: w.issueState, labels: w.labels });
+        if (a.startsWith("issue edit")) {
+          const bi = args.indexOf("--body"); if (bi >= 0) w.body = args[bi + 1];
+          const li = args.indexOf("--add-label"); if (li >= 0) w.labels.push(args[li + 1]);
+          return "";
+        }
+        if (a.startsWith("pr list")) return JSON.stringify(w.pr ? [{ number: w.pr }] : []);
+        if (a.startsWith("pr view")) return JSON.stringify({ number: w.pr,
+          state: w.prMerged ? "MERGED" : "OPEN", mergedAt: w.prMerged ? "t" : null, labels: [] });
+        return "";
+      },
+      git: async (args) => {
+        const range = args[args.length - 1] || "";
+        const branch = range.split("..")[1] || "";
+        return String(w.commitsAheadByBranch[branch] || 0);
+      },
+    };
+    return { w, io };
+  }
+
+  it("a stale FORGE:BUILDER:COMPLETE comment left by a crashed prior attempt does not win over the resumed run's fresh completion comment", async () => {
+    // Simulates exactly the scenario this issue calls out: a previous session
+    // crashed AFTER posting its own FORGE:BUILDER:COMPLETE comment (naming a
+    // branch that, in the end, never received real commits — e.g. the crash
+    // happened before the builder's commit step) but BEFORE the engine's local
+    // PHASE_COMMIT for "build" was appended. On resume, investigate/context/
+    // architect are already committed locally; the engine re-enters "build",
+    // whose runner completes normally this time and posts a SECOND, fresh
+    // FORGE:BUILDER:COMPLETE comment naming a different (real, committed-to)
+    // branch. The engine must resolve the LAST eligible comment — the fresh
+    // one — not the stale leftover from the crashed attempt.
+    const { w, io } = makeMultiCommentWorld();
+    const STALE_BRANCH = "fix/crashed-attempt-42";
+    const REAL_BRANCH = "fix/resumed-real-branch-42";
+    w.commitsAheadByBranch[STALE_BRANCH] = 0;
+
+    // Pre-seed the world as if a prior (crashed) session already posted its
+    // own investigate/context/architect/stale-build markers before dying.
+    w.comments.push("INVESTIGATION:COMPLETE");
+    w.comments.push("FORGE:CONTEXT:COMPLETE");
+    w.comments.push("FORGE:ARCHITECT:COMPLETE");
+    w.comments.push(`FORGE:BUILDER:COMPLETE **Branch**: \`${STALE_BRANCH}\``);
+
+    // Pre-seed the local run-log to match: investigate/context/architect
+    // already committed locally (mirrors the crashed session having gotten
+    // that far before dying), "build" not yet committed.
+    const { appendEvent } = await import("../engine/runlog.mjs");
+    appendEvent(dir, 42, { event: "RUN_START", issue: 42, run: "r_42_staging", lane: "staging" });
+    appendEvent(dir, 42, { event: "PHASE_COMMIT", phase: "investigate", outputs: {} });
+    appendEvent(dir, 42, { event: "PHASE_COMMIT", phase: "context", outputs: {} });
+    appendEvent(dir, 42, { event: "PHASE_COMMIT", phase: "architect", outputs: {} });
+
+    const script = {
+      "work-on/build": () => {
+        // The resumed run's own build attempt completes and posts a fresh
+        // completion comment naming a different, real branch.
+        w.comments.push(`FORGE:BUILDER:COMPLETE **Branch**: \`${REAL_BRANCH}\``);
+        w.commitsAheadByBranch[REAL_BRANCH] = 2;
+      },
+      "work-on/review": () => { w.pr = 7; w.prMerged = true; },
+      "work-on/close": () => { w.issueState = "CLOSED"; },
+    };
+    const runner = async ({ commandName }) => { script[commandName]?.(); return { status: "complete" }; };
+
+    const res = await runIssue({ issue: 42, dir, agentId: "a1", lane: "staging",
+      io, runner, now: () => 1, maxAttempts: 3 });
+
+    assert.equal(res.terminalReason, "merged",
+      "resumed run must merge on the fresh/real branch, not escalate on the crashed attempt's stale branch");
+    const s = deriveState(readLog(dir, 42));
+    assert.equal(s.branch, REAL_BRANCH,
+      "resolved branch must be the LAST FORGE:BUILDER:COMPLETE comment (this run's), not the crashed prior attempt's");
   });
 });

@@ -34,8 +34,8 @@ Commands are classified by role. Each role has a max line count — beyond this,
 |------|-----------|-----------|
 | Orchestrator (work-on, orchestrate, review-pr) | 800 | Delegates to sub-agents; needs full pipeline logic |
 | Agent catalog (review-pr-agents, review-pr-staging) | 1000 | Reference file read on demand, not fed whole to one agent |
-| Specialist (milestone, analytics, validate, etc.) | 400 | Single-purpose; Sonnet attention degrades past this |
-| Utility (cleanup, sync-ecosystem, forge-stats) | 250 | Simple tasks; should stay lean |
+| Specialist (milestone, analytics, sync-ecosystem, validate, etc.) | 400 | Single-purpose or multi-subcommand; Sonnet attention degrades past this |
+| Utility (cleanup, forge-stats) | 250 | Simple tasks; should stay lean |
 | Sub-file (quality-gate, pipeline-health) | 350 | Invoked by parent; shares context budget |
 
 **Current overages (v1.1.0 baseline):**
@@ -46,7 +46,8 @@ Commands are classified by role. Each role has a max line count — beyond this,
 - `review-pr.md`: 796 lines (threshold 800) — OK
 - `validate.md`: 97 lines (threshold 400) — OK (compressed from 679)
 - `orchestrate.md`: 654 lines (threshold 800) — OK
-- `analytics.md`: 590 lines (threshold 400) — **48% over**
+- `analytics.md`: 856 lines (threshold 400) — **114% over**
+- `sync-ecosystem.md`: 799 lines (threshold 400) — **99% over**
 
 ---
 
@@ -75,7 +76,7 @@ for cmd in commands/*.md; do
     case "$name" in
         work-on.md|orchestrate.md|review-pr.md) threshold=800 ;;
         review-pr-agents.md|review-pr-staging.md) threshold=1000 ;;
-        cleanup.md|sync-ecosystem.md|forge-stats.md) threshold=250 ;;
+        cleanup.md|forge-stats.md) threshold=250 ;;
         quality-gate.md|pipeline-health.md) threshold=350 ;;
         *) threshold=400 ;;
     esac

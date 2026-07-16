@@ -180,13 +180,23 @@ const WORKFLOW_LABEL_PREFIX = "workflow:";
 // ---------------------------------------------------------------------------
 
 /**
- * Match a `find` search-root token that is exactly the filesystem root (`/`)
- * or a bare Git-Bash drive mount (`/c`, `/d`, `/C`, ... — a single letter,
- * case-insensitive, optionally followed by nothing else). Deliberately does
- * NOT match `/c/Users/...` or any other scoped absolute path — only the bare
- * root/drive-mount token itself.
+ * Match a `find` search-root token that reaches the exact same whole-drive,
+ * non-terminating scan on Git Bash as the bare filesystem root (`/`) or a
+ * bare drive mount (`/c`, `/d`, ...). This includes trailing-slash drive
+ * mounts (`/c/`) — a natural way to write the same root, since `/c` and
+ * `/c/` are the identical directory — and the dot/double-slash root
+ * variants `/.`, `/..`, `//`, which likewise resolve to (or immediately
+ * above, which Git Bash still normalizes to) the same whole-drive tree
+ * (issue #2113 — PR #2112 review finding SEC-1: `find /c/` was silently
+ * ALLOWED because the prior regex had no trailing-slash/dot alternative).
+ *
+ * Deliberately does NOT match `/c/Users/...`, `/./foo`, `/../foo`, or any
+ * other scoped absolute path — only the bare root/drive-mount token itself,
+ * optionally followed by exactly one trailing slash (drive-letter case) or
+ * standing alone (dot/double-slash case). Case-insensitive on the drive
+ * letter only (POSIX paths are otherwise case-sensitive).
  */
-const FIND_ROOT_TOKEN_RE = /^\/(?:[a-zA-Z])?$/;
+const FIND_ROOT_TOKEN_RE = /^\/(?:[a-zA-Z]\/?|\.{1,2}|\/)?$/;
 
 /**
  * Shell metacharacters that can glue a command name to an adjacent token
@@ -682,12 +692,16 @@ function extractLogicalTokens(command) {
 
 /**
  * Check whether a Bash command contains a `find` invocation whose search
- * root is the filesystem root (`/`) or a bare Git-Bash drive mount (`/c`,
- * `/d`, ...). On Windows Git Bash, `/` spans every mounted drive, so a
- * root-anchored `find` never terminates and accumulates as an orphaned,
- * CPU-exhausting process (issue #2034 — #1984 was a narrow precursor fix
- * that only patched a single call site + added a prose guardrail; this is
- * the systemic, deterministic follow-up).
+ * root is the filesystem root (`/`), a bare Git-Bash drive mount (`/c`,
+ * `/d`, ...), a trailing-slash drive mount (`/c/`), or a dot/double-slash
+ * root variant (`/.`, `/..`, `//`). On Windows Git Bash, `/` spans every
+ * mounted drive, so a root-anchored `find` never terminates and accumulates
+ * as an orphaned, CPU-exhausting process (issue #2034 — #1984 was a narrow
+ * precursor fix that only patched a single call site + added a prose
+ * guardrail; this is the systemic, deterministic follow-up. Issue #2113
+ * widened the root-token match to also cover the trailing-slash/dot
+ * variants, which reach the identical whole-drive scan but were not
+ * originally matched by `FIND_ROOT_TOKEN_RE`).
  *
  * Scans ALL logical tokens for a `find` occurrence (not just the first word
  * of the command), so it catches `find` appearing after `&&`, `;`, `|`, a

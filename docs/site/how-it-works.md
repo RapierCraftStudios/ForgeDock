@@ -129,7 +129,7 @@ A new agent session running `/work-on 42` should always know what to do next by 
 
 GitHub labels track the workflow state of every issue. The pipeline reads these labels to determine what to do next. A human can also manually set a label to nudge the pipeline or override its routing.
 
-> **Label reference**: [`docs/spec/label-state-machine.md`](../spec/label-state-machine.md) — full state table, transition rules, and terminal labels.
+> **Label reference**: [`docs/spec/label-state-machine.md`](https://github.com/RapierCraftStudios/ForgeDock/blob/main/docs/spec/label-state-machine.md) — full state table, transition rules, and terminal labels.
 
 ---
 

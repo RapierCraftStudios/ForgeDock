@@ -45,7 +45,11 @@ describe("runIssue", () => {
       "work-on/investigate": () => { w.markers += " INVESTIGATION:COMPLETE"; },
       "work-on/build/context": () => { w.markers += " FORGE:CONTEXT:COMPLETE"; },
       "work-on/build/architect": () => { w.markers += " FORGE:ARCHITECT:COMPLETE"; },
-      "work-on/build": () => { w.markers += " FORGE:BUILDER:COMPLETE"; w.commitsAhead = 2; },
+      // The Branch marker mirrors the real `**Branch**: `{BRANCH}`` field the
+      // FORGE:BUILDER comment always reports (implement.md Phase I6) — the
+      // engine resolves the build branch from this ground truth, never from
+      // a guessed default (forge#2174).
+      "work-on/build": () => { w.markers += " FORGE:BUILDER:COMPLETE **Branch**: `fix/real-branch-42`"; w.commitsAhead = 2; },
       "work-on/review": () => { w.pr = 7; w.prMerged = true; },
       "work-on/close": () => { w.issueState = "CLOSED"; },
     };
@@ -57,7 +61,9 @@ describe("runIssue", () => {
     assert.equal(res.terminalReason, "merged");
     const s = deriveState(readLog(dir, 42));
     assert.deepEqual(s.committed, ["investigate","context","architect","build","review","close"]);
-    assert.equal(s.branch, "fix/pipeline-42"); // set by engine before build (see impl)
+    // forge#2174: branch must be the real, ground-truth branch parsed from the
+    // FORGE:BUILDER comment — never a guessed default the engine invented.
+    assert.equal(s.branch, "fix/real-branch-42");
   });
 
   it("stops at needs-human when a phase reports blocked (no silent merge)", async () => {
@@ -66,7 +72,7 @@ describe("runIssue", () => {
       "work-on/investigate": () => { w.markers += " INVESTIGATION:COMPLETE"; },
       "work-on/build/context": () => { w.markers += " FORGE:CONTEXT:COMPLETE"; },
       "work-on/build/architect": () => { w.markers += " FORGE:ARCHITECT:COMPLETE"; },
-      "work-on/build": () => { w.markers += " FORGE:BUILDER:COMPLETE"; w.commitsAhead = 1; },
+      "work-on/build": () => { w.markers += " FORGE:BUILDER:COMPLETE **Branch**: `fix/real-branch-42`"; w.commitsAhead = 1; },
       "work-on/review": () => { w.pr = 7; w.prNeedsHuman = true; },
     };
     const runner = async ({ commandName }) => { script[commandName]?.(); return { status: "complete" }; };
@@ -89,7 +95,11 @@ describe("runIssue", () => {
       "work-on/investigate": () => { w.markers += " INVESTIGATION:COMPLETE"; },
       "work-on/build/context": () => { w.markers += " FORGE:CONTEXT:COMPLETE"; },
       "work-on/build/architect": () => { w.markers += " FORGE:ARCHITECT:COMPLETE"; },
-      "work-on/build": () => { w.markers += " FORGE:BUILDER:COMPLETE"; w.commitsAhead = 2; },
+      // The Branch marker mirrors the real `**Branch**: `{BRANCH}`` field the
+      // FORGE:BUILDER comment always reports (implement.md Phase I6) — the
+      // engine resolves the build branch from this ground truth, never from
+      // a guessed default (forge#2174).
+      "work-on/build": () => { w.markers += " FORGE:BUILDER:COMPLETE **Branch**: `fix/real-branch-42`"; w.commitsAhead = 2; },
       "work-on/review": () => { w.pr = 7; w.prMerged = true; },
       "work-on/close": () => { w.issueState = "CLOSED"; },
     };
@@ -101,6 +111,165 @@ describe("runIssue", () => {
     assert.equal(res.terminalReason, "merged");
     const s = deriveState(readLog(dir, 42));
     assert.deepEqual(s.committed, ["investigate", "context", "architect", "build", "review", "close"]);
+  });
+
+  it("forge#2174: build commits when the builder's real (slug-derived) branch has commits, even though a naively-guessed default branch name never existed", async () => {
+    // Regression test for the exact reported bug: the engine used to precompute
+    // a guessed branch name (`fix/pipeline-{issue}`) that never matched the real,
+    // slug-derived branch the builder actually creates (`fix/{slug}-{issue}`,
+    // per commands/work-on/build.md Phase B1A). git only recognizes the REAL
+    // branch here — any rev-list against the old guessed name would reject.
+    // The build phase must resolve the branch from the FORGE:BUILDER comment
+    // (ground truth) and drive to merged.
+    const { w, io } = fakeWorld();
+    const REAL_BRANCH = "fix/role-arn-unbounded-error-msg-42";
+    io.git = async (args) => {
+      const range = args[args.indexOf("--count") + 1] || "";
+      if (range.endsWith(`..${REAL_BRANCH}`)) return String(w.commitsAhead);
+      // Any other ref (e.g. a guessed "fix/pipeline-42") does not exist.
+      throw new Error("fatal: unknown revision or path not in the working tree.");
+    };
+    const script = {
+      "work-on/investigate": () => { w.markers += " INVESTIGATION:COMPLETE"; },
+      "work-on/build/context": () => { w.markers += " FORGE:CONTEXT:COMPLETE"; },
+      "work-on/build/architect": () => { w.markers += " FORGE:ARCHITECT:COMPLETE"; },
+      "work-on/build": () => { w.markers += ` FORGE:BUILDER:COMPLETE **Branch**: \`${REAL_BRANCH}\``; w.commitsAhead = 1; },
+      "work-on/review": () => { w.pr = 7; w.prMerged = true; },
+      "work-on/close": () => { w.issueState = "CLOSED"; },
+    };
+    const runner = async ({ commandName }) => { script[commandName](); return { status: "complete" }; };
+
+    const res = await runIssue({ issue: 42, dir, agentId: "a1", lane: "staging",
+      io, runner, now: () => 1000, maxAttempts: 3 });
+
+    assert.equal(res.terminalReason, "merged");
+    const s = deriveState(readLog(dir, 42));
+    assert.deepEqual(s.committed, ["investigate", "context", "architect", "build", "review", "close"]);
+    assert.equal(s.branch, REAL_BRANCH, "resolved branch must be the real, ground-truth branch, not a guess");
+  });
+
+  it("forge#2174: a genuinely empty build (builder complete, zero real commits) still fails the gate", async () => {
+    const { w, io } = fakeWorld();
+    const REAL_BRANCH = "fix/some-real-branch-42";
+    const script = {
+      "work-on/investigate": () => { w.markers += " INVESTIGATION:COMPLETE"; },
+      "work-on/build/context": () => { w.markers += " FORGE:CONTEXT:COMPLETE"; },
+      "work-on/build/architect": () => { w.markers += " FORGE:ARCHITECT:COMPLETE"; },
+      // Builder reports complete and even names a real branch, but never actually
+      // committed anything — commitsAhead stays 0 (w.commitsAhead is never bumped).
+      "work-on/build": () => { w.markers += ` FORGE:BUILDER:COMPLETE **Branch**: \`${REAL_BRANCH}\``; },
+    };
+    const runner = async ({ commandName }) => { script[commandName]?.(); return { status: "complete" }; };
+
+    const res = await runIssue({ issue: 42, dir, agentId: "a1", lane: "staging",
+      io, runner, now: () => 1000, maxAttempts: 1 });
+
+    assert.equal(res.terminalReason, "needs-human", "zero real commits must still escalate, not silently merge");
+    const s = deriveState(readLog(dir, 42));
+    assert.ok(!s.committed.includes("build"), "build must not be marked committed with zero real commits");
+  });
+
+  it("forge#2176: a builder-complete/zero-commits fixed point does not consume a third attempt (non-retryable)", async () => {
+    // Regression for the issue's core complaint: `reason: "builder complete=true
+    // commitsAhead=0"` repeating byte-identically across attempts must NOT burn
+    // the full maxAttempts budget. The builder's own idempotent early-exit
+    // (commands/work-on/build.md's BUILD_RESULT: status: ALREADY_DONE) guarantees
+    // this state is a fixed point — retrying can never change it — so the build
+    // phase's detectOutcome now marks it retryable: false, and the engine must
+    // honor that by stopping after exactly 1 attempt even when maxAttempts: 3.
+    const { w, io } = fakeWorld();
+    const REAL_BRANCH = "fix/some-real-branch-42";
+    let buildRunnerCalls = 0;
+    const script = {
+      "work-on/investigate": () => { w.markers += " INVESTIGATION:COMPLETE"; },
+      "work-on/build/context": () => { w.markers += " FORGE:CONTEXT:COMPLETE"; },
+      "work-on/build/architect": () => { w.markers += " FORGE:ARCHITECT:COMPLETE"; },
+      // Builder reports complete on every invocation (mirrors the real builder's
+      // BUILD_RESULT: status: ALREADY_DONE early-exit) but never commits anything
+      // new — commitsAhead stays 0 no matter how many times this runs.
+      "work-on/build": () => {
+        buildRunnerCalls++;
+        w.markers += ` FORGE:BUILDER:COMPLETE **Branch**: \`${REAL_BRANCH}\``;
+      },
+    };
+    const runner = async ({ commandName }) => { script[commandName]?.(); return { status: "complete" }; };
+
+    const res = await runIssue({ issue: 42, dir, agentId: "a1", lane: "staging",
+      io, runner, now: () => 1000, maxAttempts: 3 });
+
+    assert.equal(res.terminalReason, "needs-human", "fixed-point build failure must still escalate");
+    assert.equal(buildRunnerCalls, 1,
+      "the build runner must be invoked exactly once — retryable:false must stop the loop before attempt 2");
+    const events = readLog(dir, 42);
+    const buildStarts = events.filter((e) => e.event === "PHASE_START" && e.phase === "build");
+    const buildFailures = events.filter((e) => e.event === "PHASE_FAILED" && e.phase === "build");
+    assert.equal(buildStarts.length, 1, "only 1 PHASE_START for build — not 3");
+    assert.equal(buildFailures.length, 1, "only 1 PHASE_FAILED for build — not 3");
+  });
+
+  it("forge#2176: a transient git error during commitsAhead (not a genuine zero) stays retryable", async () => {
+    // Regression for a review finding on #2176: commitsAhead() previously folded
+    // BOTH a genuine "0 commits ahead" AND a transient git failure (lock
+    // contention, unfetched ref, I/O hiccup) into the same 0 value. If the build
+    // phase treated every commitsAhead()===0 as the non-retryable fixed point,
+    // a merely transient git error would wrongly escalate to needs-human after
+    // just 1 attempt instead of getting the retries it previously — and still
+    // should — get. commitsAhead() now returns -1 (not 0) when git itself
+    // throws, and detectOutcome must NOT set retryable:false in that case.
+    const { w, io } = fakeWorld();
+    const REAL_BRANCH = "fix/some-real-branch-42";
+    let buildRunnerCalls = 0;
+    io.git = async () => { throw new Error("fatal: unable to read current working directory: Device or resource busy"); };
+    const script = {
+      "work-on/investigate": () => { w.markers += " INVESTIGATION:COMPLETE"; },
+      "work-on/build/context": () => { w.markers += " FORGE:CONTEXT:COMPLETE"; },
+      "work-on/build/architect": () => { w.markers += " FORGE:ARCHITECT:COMPLETE"; },
+      "work-on/build": () => {
+        buildRunnerCalls++;
+        w.markers += ` FORGE:BUILDER:COMPLETE **Branch**: \`${REAL_BRANCH}\``;
+      },
+    };
+    const runner = async ({ commandName }) => { script[commandName]?.(); return { status: "complete" }; };
+
+    const res = await runIssue({ issue: 42, dir, agentId: "a1", lane: "staging",
+      io, runner, now: () => 1000, maxAttempts: 3 });
+
+    assert.equal(res.terminalReason, "needs-human", "still escalates once transient retries are exhausted");
+    assert.equal(buildRunnerCalls, 3,
+      "a transient git error (commitsAhead returning -1) must NOT set retryable:false — all 3 attempts must run");
+    const events = readLog(dir, 42);
+    const buildFailures = events.filter((e) => e.event === "PHASE_FAILED" && e.phase === "build");
+    assert.equal(buildFailures.length, 3, "all 3 attempts must be logged — transient git errors keep retrying");
+  });
+
+  it("forge#2176 (AC4): a phase that does not opt into retryable:false still retries to maxAttempts (transient failures unaffected)", async () => {
+    // Guard against over-generalizing the retryable mechanism: the review
+    // phase's "PR open, not merged" detail can legitimately repeat identically
+    // across attempts while a merge is still in flight — it must keep retrying
+    // exactly as before, since its detectOutcome never sets retryable: false.
+    const { w, io } = fakeWorld();
+    let reviewRunnerCalls = 0;
+    const script = {
+      "work-on/investigate": () => { w.markers += " INVESTIGATION:COMPLETE"; },
+      "work-on/build/context": () => { w.markers += " FORGE:CONTEXT:COMPLETE"; },
+      "work-on/build/architect": () => { w.markers += " FORGE:ARCHITECT:COMPLETE"; },
+      "work-on/build": () => { w.markers += " FORGE:BUILDER:COMPLETE **Branch**: `fix/real-branch-42`"; w.commitsAhead = 2; },
+      // PR exists but never merges — "PR open, not merged" repeats identically
+      // on every attempt, exactly like the pre-#2176 build-phase symptom, but
+      // this phase has NOT opted into retryable:false so it must keep retrying.
+      "work-on/review": () => { reviewRunnerCalls++; w.pr = 7; w.prMerged = false; },
+    };
+    const runner = async ({ commandName }) => { script[commandName]?.(); return { status: "complete" }; };
+
+    const res = await runIssue({ issue: 42, dir, agentId: "a1", lane: "staging",
+      io, runner, now: () => 1000, maxAttempts: 3 });
+
+    assert.equal(res.terminalReason, "needs-human", "unmerged PR after exhausting attempts still escalates");
+    assert.equal(reviewRunnerCalls, 3,
+      "the review runner must be invoked for all 3 attempts — no retryable:false signal means unchanged behavior");
+    const events = readLog(dir, 42);
+    const reviewFailures = events.filter((e) => e.event === "PHASE_FAILED" && e.phase === "review");
+    assert.equal(reviewFailures.length, 3, "all 3 attempts must be logged — transient retry behavior unchanged");
   });
 
   it("I3: defers before writing GitHub state when another agent holds a valid lease (remirror path)", async () => {
@@ -193,7 +362,11 @@ describe("runIssue", () => {
       "work-on/investigate": () => { w.markers += " INVESTIGATION:COMPLETE"; },
       "work-on/build/context": () => { w.markers += " FORGE:CONTEXT:COMPLETE"; },
       "work-on/build/architect": () => { w.markers += " FORGE:ARCHITECT:COMPLETE"; },
-      "work-on/build": () => { w.markers += " FORGE:BUILDER:COMPLETE"; w.commitsAhead = 2; },
+      // The Branch marker mirrors the real `**Branch**: `{BRANCH}`` field the
+      // FORGE:BUILDER comment always reports (implement.md Phase I6) — the
+      // engine resolves the build branch from this ground truth, never from
+      // a guessed default (forge#2174).
+      "work-on/build": () => { w.markers += " FORGE:BUILDER:COMPLETE **Branch**: `fix/real-branch-42`"; w.commitsAhead = 2; },
       "work-on/review": () => { w.pr = 7; w.prMerged = true; },
       "work-on/close": () => { w.issueState = "CLOSED"; },
     };
@@ -228,7 +401,11 @@ describe("runIssue", () => {
 
     const script = {
       "work-on/build/architect": () => { w.markers += " FORGE:ARCHITECT:COMPLETE"; },
-      "work-on/build": () => { w.markers += " FORGE:BUILDER:COMPLETE"; w.commitsAhead = 2; },
+      // The Branch marker mirrors the real `**Branch**: `{BRANCH}`` field the
+      // FORGE:BUILDER comment always reports (implement.md Phase I6) — the
+      // engine resolves the build branch from this ground truth, never from
+      // a guessed default (forge#2174).
+      "work-on/build": () => { w.markers += " FORGE:BUILDER:COMPLETE **Branch**: `fix/real-branch-42`"; w.commitsAhead = 2; },
       "work-on/review": () => { w.pr = 7; w.prMerged = true; },
       "work-on/close": () => { w.issueState = "CLOSED"; },
     };
@@ -260,7 +437,11 @@ describe("runIssue", () => {
     appendEvent(dir, 42, { event: "PHASE_COMMIT", phase: "context", outputs: {} });
 
     const script = {
-      "work-on/build": () => { w.markers += " FORGE:BUILDER:COMPLETE"; w.commitsAhead = 2; },
+      // The Branch marker mirrors the real `**Branch**: `{BRANCH}`` field the
+      // FORGE:BUILDER comment always reports (implement.md Phase I6) — the
+      // engine resolves the build branch from this ground truth, never from
+      // a guessed default (forge#2174).
+      "work-on/build": () => { w.markers += " FORGE:BUILDER:COMPLETE **Branch**: `fix/real-branch-42`"; w.commitsAhead = 2; },
       "work-on/review": () => { w.pr = 7; w.prMerged = true; },
       "work-on/close": () => { w.issueState = "CLOSED"; },
     };
@@ -341,7 +522,11 @@ describe("runIssue", () => {
       "work-on/investigate": () => { w.markers += " INVESTIGATION:COMPLETE"; },
       "work-on/build/context": () => { w.markers += " FORGE:CONTEXT:COMPLETE"; },
       "work-on/build/architect": () => { w.markers += " FORGE:ARCHITECT:COMPLETE"; },
-      "work-on/build": () => { w.markers += " FORGE:BUILDER:COMPLETE"; w.commitsAhead = 2; },
+      // The Branch marker mirrors the real `**Branch**: `{BRANCH}`` field the
+      // FORGE:BUILDER comment always reports (implement.md Phase I6) — the
+      // engine resolves the build branch from this ground truth, never from
+      // a guessed default (forge#2174).
+      "work-on/build": () => { w.markers += " FORGE:BUILDER:COMPLETE **Branch**: `fix/real-branch-42`"; w.commitsAhead = 2; },
       "work-on/review": () => { w.pr = 7; w.prMerged = true; },
       "work-on/close": () => { w.issueState = "CLOSED"; },
     };
@@ -474,5 +659,122 @@ describe("runIssue", () => {
       "engine.mjs must import VALID_BACKENDS from runner.mjs");
     assert.doesNotMatch(engineSource, /(?:const|let|var)\s+VALID_BACKENDS\s*=\s*new\s+Set/,
       "engine.mjs must not declare its own local VALID_BACKENDS Set (would reintroduce forge#2076 drift)");
+  });
+
+  // A variant of fakeWorld() whose `.../comments` endpoint returns a genuine
+  // JSON array of distinct comment bodies (as the real `gh api ... --jq
+  // "[.[].body]"` call does) instead of one concatenated string blob. This is
+  // required to exercise `parseBranchFromMarkers()`'s comment-scoped,
+  // last-match semantics (forge#2184): with fakeWorld()'s raw-blob mock,
+  // `issueMarkers()`'s `JSON.parse` fails and falls back to a single
+  // one-element pseudo-comment array, which makes "last comment wins" and
+  // "first regex match within that one comment" indistinguishable — the
+  // exact coverage gap flagged by this issue (review finding on PR #2182).
+  function multiCommentWorld() {
+    const w = { comments: [], pr: null, prMerged: false, prNeedsHuman: false,
+                issueState: "OPEN", labels: [], commitsAheadByBranch: {}, body: "Issue." };
+    const io = {
+      gh: async (args) => {
+        const a = args.join(" ");
+        if (a.startsWith("api ") && a.includes("/comments")) return JSON.stringify(w.comments);
+        if (a.startsWith("issue view") && a.includes("body")) return JSON.stringify({ body: w.body });
+        if (a.startsWith("issue view")) return JSON.stringify({ state: w.issueState, labels: w.labels });
+        if (a.startsWith("issue edit")) { const i = args.indexOf("--body"); if (i>=0) w.body = args[i+1];
+          const j = args.indexOf("--add-label"); if (j>=0) w.labels.push(args[j+1]); return ""; }
+        if (a.startsWith("pr list")) return JSON.stringify(w.pr ? [{ number: w.pr }] : []);
+        if (a.startsWith("pr view")) return JSON.stringify({ number: w.pr, state: w.prMerged?"MERGED":"OPEN",
+          mergedAt: w.prMerged ? "t" : null, labels: w.prNeedsHuman ? [{name:"needs-human"}] : [] });
+        return "";
+      },
+      // Branch-aware: `commitsAhead(lane, branch, io)` calls
+      // `io.git(["rev-list", "--count", `origin/${lane}..${branch}`])` — resolve
+      // the requested branch out of the range arg so distinct branches can have
+      // distinct (and independently controllable) commit counts.
+      git: async (args) => {
+        const range = args[args.length - 1] || "";
+        const branch = range.split("..")[1] || "";
+        return String(w.commitsAheadByBranch[branch] || 0);
+      },
+    };
+    return { w, io };
+  }
+
+  it("forge#2184: resolves the LAST FORGE:BUILDER:COMPLETE comment's branch when an earlier stale comment names a different branch", async () => {
+    // Regression test for the documented-but-unasserted "last match wins"
+    // contract: two genuinely distinct FORGE:BUILDER:COMPLETE comments exist
+    // (mirroring a resumed/retried build whose earlier attempt already posted
+    // a completion comment), each naming a DIFFERENT branch. The stale first
+    // comment's branch has zero real commits (as if that attempt never
+    // actually committed); the fresh second comment's branch has real commits.
+    // If the engine ever regressed to resolving the FIRST eligible comment
+    // instead of the LAST, it would pick the stale branch, see 0 commits
+    // ahead, and escalate to needs-human instead of merging — so this test
+    // fails loudly under that regression rather than passing vacuously.
+    const { w, io } = multiCommentWorld();
+    const STALE_BRANCH = "fix/stale-attempt-42";
+    const REAL_BRANCH = "fix/real-branch-42";
+    w.commitsAheadByBranch[STALE_BRANCH] = 0;
+
+    const script = {
+      "work-on/investigate": () => { w.comments.push("INVESTIGATION:COMPLETE"); },
+      "work-on/build/context": () => { w.comments.push("FORGE:CONTEXT:COMPLETE"); },
+      "work-on/build/architect": () => { w.comments.push("FORGE:ARCHITECT:COMPLETE"); },
+      "work-on/build": () => {
+        // Stale comment first (earlier attempt, never actually committed),
+        // fresh real comment appended after it (this run's own completion).
+        w.comments.push(`FORGE:BUILDER:COMPLETE **Branch**: \`${STALE_BRANCH}\``);
+        w.comments.push(`FORGE:BUILDER:COMPLETE **Branch**: \`${REAL_BRANCH}\``);
+        w.commitsAheadByBranch[REAL_BRANCH] = 2;
+      },
+      "work-on/review": () => { w.pr = 7; w.prMerged = true; },
+      "work-on/close": () => { w.issueState = "CLOSED"; },
+    };
+    const runner = async ({ commandName }) => { script[commandName](); return { status: "complete" }; };
+
+    const res = await runIssue({ issue: 42, dir, agentId: "a1", lane: "staging",
+      io, runner, now: () => 1000, maxAttempts: 3 });
+
+    assert.equal(res.terminalReason, "merged",
+      "must merge on the fresh/real branch, not escalate on the stale one");
+    const s = deriveState(readLog(dir, 42));
+    assert.equal(s.branch, REAL_BRANCH,
+      "resolved branch must be the LAST FORGE:BUILDER:COMPLETE comment's branch, not the first/stale one");
+  });
+
+  it("forge#2184: a stray **Branch** field in a non-BUILDER:COMPLETE comment (e.g. FORGE:CONTRACT) is never considered", async () => {
+    // Comment-scoping regression: a CONTRACT/ARCHITECT/CONTEXT/reviewer comment
+    // can legitimately contain a `**Branch**:`-shaped field (e.g. quoting a
+    // branch name in prose) without being a completion marker. Only comments
+    // whose body contains FORGE:BUILDER:COMPLETE are eligible — a decoy field
+    // in an ineligible comment posted AFTER the real completion comment must
+    // not win.
+    const { w, io } = multiCommentWorld();
+    const REAL_BRANCH = "fix/real-branch-99";
+    const DECOY_BRANCH = "fix/decoy-branch-99";
+    w.commitsAheadByBranch[REAL_BRANCH] = 3;
+    w.commitsAheadByBranch[DECOY_BRANCH] = 3; // even if "ahead", it must never be selected
+
+    const script = {
+      "work-on/investigate": () => { w.comments.push("INVESTIGATION:COMPLETE"); },
+      "work-on/build/context": () => { w.comments.push("FORGE:CONTEXT:COMPLETE"); },
+      "work-on/build/architect": () => { w.comments.push("FORGE:ARCHITECT:COMPLETE"); },
+      "work-on/build": () => {
+        w.comments.push(`FORGE:BUILDER:COMPLETE **Branch**: \`${REAL_BRANCH}\``);
+        // Posted AFTER the real completion comment but has no FORGE:BUILDER:COMPLETE
+        // marker — e.g. a remediation/reviewer comment quoting a branch name.
+        w.comments.push(`FORGE:REMEDIATION note — see \`${DECOY_BRANCH}\` for context, **Branch**: \`${DECOY_BRANCH}\``);
+      },
+      "work-on/review": () => { w.pr = 7; w.prMerged = true; },
+      "work-on/close": () => { w.issueState = "CLOSED"; },
+    };
+    const runner = async ({ commandName }) => { script[commandName](); return { status: "complete" }; };
+
+    const res = await runIssue({ issue: 42, dir, agentId: "a1", lane: "staging",
+      io, runner, now: () => 1000, maxAttempts: 3 });
+
+    assert.equal(res.terminalReason, "merged");
+    const s = deriveState(readLog(dir, 42));
+    assert.equal(s.branch, REAL_BRANCH,
+      "a **Branch** field in a comment lacking FORGE:BUILDER:COMPLETE must never be selected, even if posted later");
   });
 });
