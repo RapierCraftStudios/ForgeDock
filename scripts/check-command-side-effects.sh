@@ -99,24 +99,33 @@ class_a_scan() {
   local HAS_GIST=0
   local BLOCK_LINES=""
   local BLOCK_START=0
-  local LINENO=0
-  local line PUBLIC_LINENO ACTUAL_LINE
+  local LN=0
+  local line PUBLIC_LN ACTUAL_LINE
 
   while IFS= read -r line; do
-    LINENO=$((LINENO + 1))
+    LN=$((LN + 1))
 
-    if echo "$line" | grep -qF "$FENCE"; then
-      if [ "$IN_CB" -eq 0 ]; then
+    # Fence detection is anchored to line-start (ignoring leading whitespace)
+    # rather than an unanchored substring match, and an already-open block is
+    # only closed by a bare fence (nothing after the backticks but optional
+    # trailing whitespace) — a fence line carrying an info string (e.g. a
+    # nested ```bash) while already inside a block is treated as block content,
+    # not a premature close. (forge#2210)
+    if [ "$IN_CB" -eq 0 ]; then
+      if echo "$line" | grep -qE "^[[:space:]]*${FENCE}"; then
         IN_CB=1
         HAS_GIST=0
         BLOCK_LINES=""
-        BLOCK_START=$LINENO
-      else
+        BLOCK_START=$LN
+      fi
+      continue
+    else
+      if echo "$line" | grep -qE "^[[:space:]]*${FENCE}[[:space:]]*\$"; then
         # End of code block — check if it had both gh gist and --public
         if [ "$HAS_GIST" -eq 1 ] && echo "$BLOCK_LINES" | grep -qE '^[[:space:]]*--public([[:space:]]|$)'; then
           # Find the line number of --public within the block
-          PUBLIC_LINENO=$(echo "$BLOCK_LINES" | grep -n '^[[:space:]]*--public' | head -1 | cut -d: -f1)
-          ACTUAL_LINE=$((BLOCK_START + PUBLIC_LINENO))
+          PUBLIC_LN=$(echo "$BLOCK_LINES" | grep -n '^[[:space:]]*--public' | head -1 | cut -d: -f1)
+          ACTUAL_LINE=$((BLOCK_START + PUBLIC_LN))
           if ! echo "$BLOCK_LINES" | grep -qF "$ALLOWLIST_TOKEN"; then
             echo "HIGH | $file | line ~$ACTUAL_LINE | Class A: 'gh gist create/edit --public' in code block — gists MUST be secret (omit --public); --public exposes private repo data. (forge#1587)" >&2
             VIOLATIONS=$((VIOLATIONS + 1))
@@ -125,8 +134,8 @@ class_a_scan() {
         IN_CB=0
         HAS_GIST=0
         BLOCK_LINES=""
+        continue
       fi
-      continue
     fi
 
     if [ "$IN_CB" -eq 1 ]; then
@@ -192,7 +201,7 @@ else
       SECTION_HAS_ADDED_SE=0
       SECTION_SE_LINE=0
       SECTION_SE_VERB=""
-      LINENO=0
+      LN=0
 
       flush_and_reset() {
         local new_heading="$1"
@@ -209,18 +218,31 @@ else
       }
 
       while IFS= read -r line; do
-        LINENO=$((LINENO + 1))
+        LN=$((LN + 1))
 
-        # Section heading reset
-        if echo "$line" | grep -qE '^#{1,4}[[:space:]]+'; then
-          heading=$(echo "$line" | sed 's/^#*[[:space:]]*//' | sed 's/[[:space:]]*$//')
-          flush_and_reset "$heading"
-          continue
+        # Code block fence — checked BEFORE the heading test so IN_CB reflects
+        # this line's actual state. Anchored to line-start; an already-open
+        # block is only closed by a bare fence (nothing after the backticks),
+        # so an info-string fence (e.g. nested ```bash) encountered mid-block
+        # is treated as block content, not a premature close. (forge#2210)
+        if [ "$IN_CB" -eq 0 ]; then
+          if echo "$line" | grep -qE "^[[:space:]]*${FENCE}"; then
+            IN_CB=1
+            continue
+          fi
+        else
+          if echo "$line" | grep -qE "^[[:space:]]*${FENCE}[[:space:]]*\$"; then
+            IN_CB=0
+            continue
+          fi
         fi
 
-        # Code block fence
-        if echo "$line" | grep -qF "$FENCE"; then
-          [ "$IN_CB" -eq 0 ] && IN_CB=1 || IN_CB=0
+        # Section heading reset — gated on IN_CB so a bash comment inside a
+        # code block (e.g. "# Added lines...") is never misdetected as a
+        # markdown heading/section boundary. (forge#2210)
+        if [ "$IN_CB" -eq 0 ] && echo "$line" | grep -qE '^#{1,6}[[:space:]]+'; then
+          heading=$(echo "$line" | sed 's/^#*[[:space:]]*//' | sed 's/[[:space:]]*$//')
+          flush_and_reset "$heading"
           continue
         fi
 
@@ -235,7 +257,7 @@ else
             # Is this specific line in the added content?
             if echo "$ADDED_CONTENT" | grep -qF "${line:0:80}" 2>/dev/null; then
               SECTION_HAS_ADDED_SE=1
-              SECTION_SE_LINE=$LINENO
+              SECTION_SE_LINE=$LN
               SECTION_SE_VERB=$(echo "$line" | grep -oE "$SIDE_EFFECT_PATTERN" | head -1 || echo "side-effect")
             fi
           fi
