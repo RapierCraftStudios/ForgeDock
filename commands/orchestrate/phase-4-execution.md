@@ -1200,6 +1200,57 @@ Gating predecessor #${NUM} reached \`workflow:merged\` — dispatching now. (Was
 - Polling the same status check repeatedly on a timer
 - Waiting for a "batch" of completions before checking for newly ready issues — check after EVERY completion
 
+### Step 4B.6: Predicate Re-Resolution (standing queries only)
+
+<!-- Added: forge#2236 -->
+
+**Purpose**: Phase 1 resolves `$ARGUMENTS` to an issue-number list exactly once (see `phase-1-resolve.md` "Predicate Persistence"). For a standing-query input (`ORIGINATING_QUERY_KIND == "query"` — everything except an explicit `#1 #2 #3` literal set), a new issue matching the same predicate can appear mid-run (a human files it, `/analytics` or `/signal-planner` create it, it gets added to the milestone) and is otherwise invisible to this batch until the operator re-invokes `/orchestrate` by hand. This step closes that gap for the *originating* issue set, distinct from Step 4C which folds in review-findings spawned *by* this batch's own agents.
+
+**Skip entirely if** `ORIGINATING_QUERY_KIND == "literal"` (see `phase-1-resolve.md`) — an explicit issue-number list is the complete intent; there is nothing to re-resolve, ever.
+
+**Trigger** (event-driven, same model as the rest of this file — no sleep/poll timer): run once per Step 4B completion cycle, immediately after the per-agent-completion handling above and before Step 4B.5's stall check.
+
+```bash
+# Gate on config + literal/query kind + round cap via bin/engine/resolve.mjs's
+# shouldReResolve (mirrors admission.mjs's role for Step 4C's admission rules).
+RERESOLVE_ENABLED=$(yq '.orchestration.reresolve.enabled // true' forge.yaml 2>/dev/null || echo "true")
+RERESOLVE_MAX_ROUNDS=$(yq '.orchestration.reresolve.max_rounds // "unbounded"' forge.yaml 2>/dev/null || echo "unbounded")
+
+node -e '
+import("{REPO_PATH}/bin/engine/resolve.mjs").then(({ shouldReResolve }) => {
+  const classified = { kind: process.argv[1], pattern: process.argv[2], args: [] };
+  const config = {
+    enabled: process.argv[3] === "false" ? false : process.argv[3],
+    maxRounds: process.argv[4] === "unbounded" ? undefined : Number(process.argv[4]),
+  };
+  const rounds = Number(process.argv[5]);
+  console.log(JSON.stringify(shouldReResolve(classified, config, rounds)));
+});
+' "$ORIGINATING_QUERY_KIND" "$ORIGINATING_QUERY_PATTERN" "$RERESOLVE_ENABLED" "$RERESOLVE_MAX_ROUNDS" "$RERESOLVE_ROUNDS_SO_FAR"
+```
+
+If the result's `reResolve` is `false` (off switch, or `RERESOLVE_ROUNDS_SO_FAR` has reached `max_rounds` — bounded termination per the issue's acceptance criteria), skip this step for the current cycle and log the reason. `RERESOLVE_ROUNDS_SO_FAR` starts at 0 for the batch and increments once per cycle this step actually runs (declare it alongside the other Step 4A.pre batch-scope accumulators — do not re-initialize per completion).
+
+**Re-run the original query** using the exact same resolution logic Phase 1 used for `$ORIGINATING_QUERY_PATTERN`/`$ORIGINATING_QUERY_ARGS` (e.g. re-run the `gh issue list --milestone`/`--label`/`priority:P*` fetch from `phase-1-resolve.md`'s "Fetch the issues" section), applying the exact same eligibility filter Phase 1 applied (`phase-4-execution.md` cross-reference: `phase-1-resolve.md` "Filter out ineligible issues" — closed/`needs-human`/`workflow:decomposed`/`workflow:awaiting-merge` excluded, same as T0).
+
+**Fold new matches through the existing admission path — never a bypass**:
+
+```bash
+node -e '
+import("{REPO_PATH}/bin/engine/resolve.mjs").then(({ foldNewMatches }) => {
+  const reResolved = JSON.parse(process.argv[1]);
+  const processed = JSON.parse(process.argv[2]);
+  console.log(JSON.stringify(foldNewMatches(reResolved, processed)));
+});
+' "$RERESOLVED_NUMBERS_JSON" "$ALL_BATCH_ISSUE_NUMBERS_JSON"
+```
+
+`newMatches` from `foldNewMatches` are candidate issues, not admitted ones. Each one MUST be dispatched through the exact same path a T0-resolved issue takes — DAG dependency analysis (`phase-3-dependency.md`), then Step 4A/4B's standard `dispatch_headroom`-gated dispatch — **not** through Step 4C's review-finding-specific `evaluateCascadeFinding` chain (that gate's rules, e.g. the comment/typo keyword heuristic, are shaped for cascade-spawned findings, not arbitrary re-resolved issues). This is the same non-bypass requirement Step 4C already satisfies for its own admission stream; this step must not become a second, ungated entry point into the DAG. Add every `newMatch` to `ALL_BATCH_ISSUE_NUMBERS` (so a later re-resolution round or Step 4C sees it as already processed) and to `SORTED_READY_SET`/the DAG exactly as Step 4A.pre.0 processes a T0-resolved issue.
+
+**Reporting (mandatory — do not let this become an alert-only dead-code path, per forge#1832)**: track which issues were T0-resolved vs. admitted via re-resolution, and which round each entered in. Surface this distinction in the final report (`phase-6-report.md`) rather than only in a log line — a run whose predicate still matches unadmitted work at exit (round cap or config disabled mid-run) must say so explicitly, not report a silent clean drain.
+
+**Multi-repo**: for `all-repos`/satellite-scoped queries (`next <N> all-repos`, `mcp:fast`, etc.), re-run the query against every repo the original resolution covered — not just the default repo.
+
 ### Step 4B.5: Time-Based Stall Detection
 
 **Purpose**: Catches agents that have stopped responding WITHOUT exiting (e.g., rate-limited, context-frozen, or silently hung). The reactive check in Step 4B only fires on agent completion — this check catches agents that never complete at all.

@@ -129,6 +129,26 @@ NEAR_MISS=$(echo "$ALL_LABELS" | grep -iE "${SLUG:0:4}" || true)
 
 Report back to the caller: `No milestone or label matched "{SLUG}". Did you mean: {NEAR_MISS list, or "review-finding"/"batch" if SLUG resembles "cascade"}?` This directly fixes the case reported in #2231 — `cascade` is not itself a label in most repos (the only cascade-adjacent labels are `review-finding` and `batch`), so a bare `cascade` slug previously resolved to nothing with no feedback. Note that `cascade`/`review-findings`/`findings` are now handled by the dedicated resolution rule above and never reach this bare-slug fallback path at all — this near-miss path remains for any other unmatched slug.
 
+### Predicate Persistence (literal set vs. standing query)
+
+<!-- Added: forge#2236 -->
+
+Phase 1 resolves `$ARGUMENTS` to a concrete issue-number list exactly once, at T0, and that list is currently frozen for the rest of the run (`phase-4-execution.md`: "Phase 1 only runs once, at the start."). Of the input patterns above, only `#1 #2 #3` / `1 2 3` (optionally repo-prefixed) is genuinely a one-time literal set — every other row (`milestone <slug>`, `next <N>`, `next <N> all-repos`, `fast-lane`, `priority:P0`/`priority:P1`, `mcp:fast`/`n8n:next 3`, a bare `<slug>`) is a **standing query**: the predicate ("all open P0s", "this milestone") is the caller's actual intent, not the specific numbers it happened to resolve to at T0.
+
+Classify `$ARGUMENTS` and persist that classification alongside the resolved issue-number list, so Phase 4 (`phase-4-execution.md` Step 4B) can decide whether to re-run the query later in the batch:
+
+```bash
+node -e '
+import("{REPO_PATH}/bin/engine/resolve.mjs").then(({ classifyInputPattern }) => {
+  console.log(JSON.stringify(classifyInputPattern(process.argv[1])));
+}, () => process.exit(0));
+' "$ARGUMENTS"
+```
+
+This mirrors `bin/engine/resolve.mjs`'s `classifyInputPattern` — a typed, unit-tested reference implementation of the same literal-vs-query rule table shown here (see that file's docstring). As with `admission.mjs` for cascade policy, the two must stay in sync by hand: any change to which patterns count as `literal` vs `query` in this table must be mirrored in `resolve.mjs`, and vice versa.
+
+Persist the result (`kind`, `pattern`, `args`) next to the resolved issue-number list in the batch's in-memory/report state — e.g. `ORIGINATING_QUERY_KIND`, `ORIGINATING_QUERY_PATTERN`, `ORIGINATING_QUERY_ARGS`. Phase 4's re-resolution step (see `phase-4-execution.md` Step 4B) reads these three values; it never re-derives them from `$ARGUMENTS` a second time. If `kind` is `literal`, Phase 4 MUST NOT attempt to re-resolve — the list of numbers already resolved here IS the complete intent.
+
 ### Fetch the issues
 
 For each resolved repo, use the appropriate `-R` flag:
