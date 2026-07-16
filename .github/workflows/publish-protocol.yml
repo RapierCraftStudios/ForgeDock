@@ -106,11 +106,31 @@ jobs:
             echo "SKIP_PUBLISH=false" >> $GITHUB_ENV
           fi
 
+      # Canonical auth path: OIDC trusted publishing (matches publish.yml's working
+      # pattern for the root `forgedock` package — no token, no secret, just
+      # `id-token: write` above + npm's OIDC exchange at publish time).
+      #
+      # This step is gated off by default via the `PROTOCOL_NPM_PUBLISH_ENABLED`
+      # repo variable (Settings → Secrets and variables → Actions → Variables).
+      # It defaults to unset/false, so this step is a no-op until a human completes
+      # the one-time bootstrap (tracked in a needs-human follow-up issue):
+      #   1. `cd packages/protocol && npm publish --access public` from a machine
+      #      with publish rights on the `@forgedock` npm scope (package has never
+      #      been published — OIDC trusted publishing cannot attach to a
+      #      nonexistent package).
+      #   2. On npmjs.com, configure a trusted publisher for `@forgedock/protocol`
+      #      pointing at `RapierCraftStudios/ForgeDock` + workflow
+      #      `publish-protocol.yml`.
+      #   3. Set the `PROTOCOL_NPM_PUBLISH_ENABLED` repo variable to `true`.
+      #
+      # Do NOT reintroduce `NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}` here — that
+      # secret does not exist, forces npm into token-auth mode, and fails the whole
+      # job with ENEEDAUTH before OIDC ever gets a chance (see #2218). If token auth
+      # is ever chosen instead of OIDC, this comment and the gate condition below
+      # must be updated together.
       - name: Publish to npm (OIDC trusted publishing)
-        if: env.SKIP_PUBLISH != 'true'
+        if: env.SKIP_PUBLISH != 'true' && vars.PROTOCOL_NPM_PUBLISH_ENABLED == 'true'
         run: npm publish --provenance --access public
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
 
       - name: Publish to GitHub Packages
         if: env.SKIP_PUBLISH != 'true'
