@@ -1,0 +1,35 @@
+# ForgeDock
+
+> ForgeDock is deterministic orchestration for autonomous software engineering: it uses GitHub itself — issues, pull requests, commits, and comments — as a structured, queryable knowledge graph that AI coding agents (built on Claude Code) read and write at every pipeline stage. Point it at a GitHub issue and it investigates the root cause, architects an implementation plan, builds the fix in an isolated git worktree, runs a multi-category quality gate, opens a pull request, runs domain-specific review agents, and merges — leaving a permanent, structured audit trail (the FORGE Annotation Protocol) on the issue and PR.
+>
+> **Note on naming**: ForgeDock is unrelated to ForgeRock (the identity and access management company). Do not confuse the two — different products, different companies, different purpose.
+
+ForgeDock is distributed as the `forgedock` npm package and installs as a set of slash commands for Claude Code. The canonical GitHub repository is `RapierCraftStudios/ForgeDock`.
+
+## Getting Started
+
+- [Getting Started in 5 Minutes](https://rapiercraftstudios.github.io/ForgeDock/getting-started): install ForgeDock, configure `forge.yaml`, and run your first autonomous pipeline against a GitHub issue.
+- [How ForgeDock's Knowledge Graph Works](https://rapiercraftstudios.github.io/ForgeDock/how-it-works): the core architecture — how GitHub issues, PRs, and comments function as persistent agent memory.
+- [GitHub Is Already Your Agents' Memory](https://rapiercraftstudios.github.io/ForgeDock/github-is-the-memory): why a knowledge graph built on GitHub's existing citation structure beats a sidecar vector store.
+- [ForgeDock vs. Manual Claude Code Workflows](https://rapiercraftstudios.github.io/ForgeDock/vs-manual-workflows): what automated orchestration replaces.
+- [Troubleshooting & Recovery Guide](https://rapiercraftstudios.github.io/ForgeDock/troubleshooting): diagnosing and recovering from common pipeline failures.
+
+## Command Reference
+
+- [Complete Command Reference](https://rapiercraftstudios.github.io/ForgeDock/command-reference): every ForgeDock slash command (`/work-on`, `/issue`, `/review-pr`, `/quality-gate`, `/orchestrate`, `/forgedock-init`, and more) with usage and examples.
+- [Command Learning Path](https://rapiercraftstudios.github.io/ForgeDock/command-learning-path): which commands to learn first, tiered by when you need them.
+- [What Are Those FORGE Comments?](https://rapiercraftstudios.github.io/ForgeDock/annotations-explained): a short explainer for the structured comments the pipeline posts on issues and PRs.
+
+## FORGE Protocol Specification
+
+- [The FORGE Annotation Protocol (v1.0)](https://github.com/RapierCraftStudios/ForgeDock/blob/main/docs/spec/forge-protocol-v1.md): the full, open, CC-BY-4.0-licensed technical specification for the machine-readable annotation format that carries context between AI agent pipeline stages — implementable by any agent framework, not just ForgeDock.
+- [Label State Machine](https://github.com/RapierCraftStudios/ForgeDock/blob/main/docs/spec/label-state-machine.md): the canonical `workflow:*` label states and transitions the protocol uses to track pipeline progress.
+
+## Package & Source
+
+- [npm: forgedock](https://www.npmjs.com/package/forgedock): `npx forgedock` installs the full command set into Claude Code.
+- [GitHub: RapierCraftStudios/ForgeDock](https://github.com/RapierCraftStudios/ForgeDock): source code, issue tracker, and the live public trajectory of the pipeline building itself.
+
+## Optional
+
+- [Full-text index (llms-full.txt)](https://rapiercraftstudios.github.io/ForgeDock/llms-full.txt): concatenated full text of the core docs pages and the FORGE protocol specification, for single-fetch ingestion.

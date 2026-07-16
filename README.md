@@ -8,6 +8,10 @@
 
 <p>LLMs generate the code. ForgeDock owns everything else — <strong>state, scheduling, recovery, review, and memory</strong> — as durable, inspectable structure on the GitHub you already have. Issues are the queue. PRs are the ledger. Annotations are the memory. Point it at an issue and get a merged, reviewed PR; point it at a <strong>milestone</strong> and get parallel pipelines with conflict-aware scheduling.</p>
 
+<p><em>ForgeDock (not ForgeRock) — this project is unrelated to ForgeRock's identity and access management platform.</em></p>
+
+<p>📖 <a href="https://rapiercraftstudios.github.io/ForgeDock/">Full documentation site</a></p>
+
 <a href="LICENSE"><img src="https://img.shields.io/badge/License-AGPL--3.0-blue.svg" alt="License: AGPL-3.0" /></a>
 <a href="https://github.com/RapierCraftStudios/ForgeDock/stargazers"><img src="https://img.shields.io/github/stars/RapierCraftStudios/ForgeDock?style=social" alt="GitHub Stars" /></a>
 <a href="https://docs.anthropic.com/en/docs/claude-code"><img src="https://img.shields.io/badge/Built%20for-Claude%20Code-blueviolet" alt="Claude Code" /></a>
