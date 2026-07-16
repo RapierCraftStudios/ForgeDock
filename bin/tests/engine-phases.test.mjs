@@ -202,4 +202,69 @@ describe("pickPhase", () => {
       assert.equal(outcome.status, "committed");
     });
   });
+
+  // Regression tests for #2193: within-comment `**Branch**:` field match order is
+  // first-match, by design (see phases.mjs parseBranchFromMarkers doc comment).
+  // Comment-level last-match (#2184) is unaffected/untouched by these tests.
+  describe("build — within-comment **Branch** field match order (#2193)", () => {
+    const build = PHASES.find(p => p.id === "build");
+
+    it("uses the FIRST **Branch** field when a single eligible comment contains two", async () => {
+      // Synthetic: no real pipeline path produces this today, but the function's
+      // documented behavior must stay pinned to first-match for such an input.
+      const body = "<!-- FORGE:BUILDER --> **Branch**: `fix/first-branch` some notes " +
+        "**Branch**: `fix/second-branch` <!-- FORGE:BUILDER:COMPLETE -->";
+      const io = {
+        gh: async () => JSON.stringify([{ body }]),
+        git: async () => "3",
+      };
+      const outcome = await build.detectOutcome({ ...base, branch: null }, io);
+      assert.equal(outcome.status, "committed");
+      assert.equal(outcome.outputs.branch, "fix/first-branch");
+    });
+
+    it("comment-level last-match (#2184) still wins over field-level ordering", async () => {
+      // Two eligible comments; the LAST comment's (only) field must be used,
+      // even though its **Branch** value differs from the earlier comment's.
+      const older = "<!-- FORGE:BUILDER --> **Branch**: `fix/old-attempt` <!-- FORGE:BUILDER:COMPLETE -->";
+      const newer = "<!-- FORGE:BUILDER --> **Branch**: `fix/retry-attempt` <!-- FORGE:BUILDER:COMPLETE -->";
+      const io = {
+        gh: async () => JSON.stringify([{ body: older }, { body: newer }]),
+        git: async () => "1",
+      };
+      const outcome = await build.detectOutcome({ ...base, branch: null }, io);
+      assert.equal(outcome.status, "committed");
+      assert.equal(outcome.outputs.branch, "fix/retry-attempt");
+    });
+  });
+
+  // Regression tests for #2194: FORGE:BUILDER:COMPLETE eligibility is a plain
+  // substring test, consistent with every other marker check in this file
+  // (see phases.mjs `has()` doc comment for the accepted-risk reasoning).
+  describe("build — FORGE:BUILDER:COMPLETE substring eligibility (#2194)", () => {
+    const build = PHASES.find(p => p.id === "build");
+
+    it("a comment merely mentioning the marker text (not HTML-comment-wrapped) still counts as eligible", async () => {
+      // Documents current, intentional substring behavior: this is not scoped
+      // to the `<!-- FORGE:BUILDER:COMPLETE -->` HTML-comment shape specifically.
+      const body = "**Branch**: `fix/plain-mention` this text contains FORGE:BUILDER:COMPLETE inline";
+      const io = {
+        gh: async () => JSON.stringify([{ body }]),
+        git: async () => "2",
+      };
+      const outcome = await build.detectOutcome({ ...base, branch: null }, io);
+      assert.equal(outcome.status, "committed");
+      assert.equal(outcome.outputs.branch, "fix/plain-mention");
+    });
+
+    it("a comment without the marker text anywhere is never eligible", async () => {
+      const body = "**Branch**: `fix/no-marker-here` build in progress, not done yet";
+      const io = {
+        gh: async () => JSON.stringify([{ body }]),
+        git: async () => "2",
+      };
+      const outcome = await build.detectOutcome({ ...base, branch: null }, io);
+      assert.equal(outcome.status, "failed");
+    });
+  });
 });
