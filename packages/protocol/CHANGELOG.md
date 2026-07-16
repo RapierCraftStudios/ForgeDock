@@ -11,7 +11,20 @@ to version bumps.
 ## [1.2.1] - 2026-07-16
 
 Patch — internal escaping bugfix only. No reserved type, field, or public
-export changed. Consumers already on 1.2.0 remain fully compatible.
+export changed. Consumers who upgrade both the encode and decode sides
+together are unaffected.
+
+**Mixed-version compatibility caveat**: annotations **emitted by a 1.2.1 (or
+later) encoder** that contain a literal `&` in a field value (e.g. `"AT&T"`,
+`"R&D"`, a branch name with `&`) will **not** round-trip correctly through a
+**pre-1.2.1 decoder** — the decoder has no knowledge of the new `&amp;`
+escape and passes it through unchanged, so the consumer observes the literal
+text `"AT&amp;T"` instead of `"AT&T"`. The reverse direction (a pre-1.2.1
+encoder read by a 1.2.1+ decoder) is safe, since a pre-1.2.1 encoder never
+emits `&amp;` for a genuinely un-escaped `&`. Repos or tooling that may run
+mixed protocol versions across satellites during a rollout (e.g. via
+`sync-ecosystem`) should upgrade decoders before, or atomically with,
+encoders.
 
 ### Fixed
 
