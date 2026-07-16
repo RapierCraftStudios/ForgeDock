@@ -35,12 +35,22 @@ jobs:
         working-directory: .
         env:
           EVENT_BEFORE: ${{ github.event.before }}
+          EVENT_NAME: ${{ github.event_name }}
         run: |
+          # workflow_dispatch has no "before" SHA (that field only exists on push events),
+          # so there is no well-defined "what changed in this manual run" to diff against.
+          # Rather than approximate with HEAD^ (which doesn't correspond to the manual
+          # invocation at all), skip the guard explicitly for workflow_dispatch — the
+          # push-to-main trigger (paths-filtered on packages/protocol/**) is the enforced
+          # path; workflow_dispatch is a manual escape hatch, not primary enforcement.
+          if [ "$EVENT_NAME" = "workflow_dispatch" ]; then
+            echo "Skipping version-bump guard for workflow_dispatch — no well-defined 'before' state for a manual run; push-to-main is the enforced path."
+            exit 0
+          fi
+
           # Diff against the actual pre-push SHA (github.event.before), not just HEAD^ —
           # HEAD^ only sees the last commit of a push and silently misses a schema change
           # made in an earlier (non-tip) commit of a multi-commit push or rebase-merge.
-          # workflow_dispatch has no "before" SHA, so fall back to HEAD^ there (single-commit
-          # semantics are the best available signal for a manual run).
           BASE_SHA="$EVENT_BEFORE"
           if [ -z "$BASE_SHA" ] || [ "$BASE_SHA" = "0000000000000000000000000000000000000000" ]; then
             BASE_SHA="HEAD^"
