@@ -1225,7 +1225,7 @@ import("{REPO_PATH}/bin/engine/resolve.mjs").then(({ shouldReResolve }) => {
   };
   const rounds = Number(process.argv[5]);
   console.log(JSON.stringify(shouldReResolve(classified, config, rounds)));
-});
+}, () => process.exit(0));
 ' "$ORIGINATING_QUERY_KIND" "$ORIGINATING_QUERY_PATTERN" "$RERESOLVE_ENABLED" "$RERESOLVE_MAX_ROUNDS" "$RERESOLVE_ROUNDS_SO_FAR"
 ```
 
@@ -1241,7 +1241,7 @@ import("{REPO_PATH}/bin/engine/resolve.mjs").then(({ foldNewMatches }) => {
   const reResolved = JSON.parse(process.argv[1]);
   const processed = JSON.parse(process.argv[2]);
   console.log(JSON.stringify(foldNewMatches(reResolved, processed)));
-});
+}, () => process.exit(0));
 ' "$RERESOLVED_NUMBERS_JSON" "$ALL_BATCH_ISSUE_NUMBERS_JSON"
 ```
 

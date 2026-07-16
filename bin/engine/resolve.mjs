@@ -66,7 +66,14 @@
  *   "fast-lane", "priority", "repo-scoped", "bare-slug".
  * @property {string[]} args - The raw argument tokens (excluding the pattern
  *   keyword itself) that produced this classification, preserved so a
- *   re-resolution round can replay the exact same query.
+ *   re-resolution round can replay the exact same query. Exceptions:
+ *   `priority` and `repo-scoped` keep the FULL token list instead of
+ *   slicing off a leading keyword token — for those two patterns the
+ *   pattern keyword is fused into the same token as its argument
+ *   (`priority:P0`, `mcp:fast-lane`, `n8n:next`), so there is no separable
+ *   leading keyword token to drop the way there is for `milestone <slug>`
+ *   or `next <N>`. Slicing here would destroy the only copy of the data a
+ *   re-resolution round needs to replay the query.
  */
 
 /**
@@ -182,6 +189,17 @@ export function shouldReResolve(classified, config = {}, roundsSoFar = 0) {
   }
 
   const enabledRaw = config.enabled;
+  // The `"off"` string branch IS reachable via the real `yq`-based bash
+  // mirror in `phase-4-execution.md` Step 4B.6 — not just from direct JS
+  // callers (e.g. this file's own unit tests). `yq`'s default core schema
+  // only coerces the literal scalars `true`/`false` to booleans; an
+  // unquoted `enabled: off` in forge.yaml is parsed as the plain string
+  // `"off"` (verified: `yq '.a.enabled' <<< 'a: {enabled: off}'` prints
+  // `off`, `... | type` prints `!!str`), which then survives
+  // `process.argv[3] === "false" ? false : process.argv[3]` unchanged and
+  // reaches this branch as the string `"off"`. Only `enabled: false`
+  // (unquoted) is coerced by `yq` to boolean `false` before this code
+  // runs. Do not remove this branch as unreachable dead code.
   const disabled =
     enabledRaw === false || (typeof enabledRaw === "string" && enabledRaw.trim().toLowerCase() === "off");
   if (disabled) {
