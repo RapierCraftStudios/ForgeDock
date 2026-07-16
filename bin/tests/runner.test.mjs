@@ -50,6 +50,7 @@ import {
   resolveBackend,
   resolveBackendLadder,
   runCliBackend,
+  sanitizeArgvForLog,
   VALID_BACKENDS,
 } from "../runner.mjs";
 
@@ -1656,6 +1657,54 @@ describe("runCliBackend spawnFn seam (issue #2033)", () => {
         }),
       (err) => err.code === "CLI_BACKEND_FAILED" && /signal SIGKILL/.test(err.message),
     );
+  });
+
+  // #2277: the CLI_BACKEND_FAILED diagnostic embeds `cliArgs.join(" ")`
+  // (which includes `userMessage` verbatim) into the thrown Error.message,
+  // and that message is later written verbatim to stderr by
+  // bin/forgedock.mjs's `run-issue` case. `userMessage` is built from
+  // untrusted issue/PR body content, so the diagnostic must bound length and
+  // neutralize control characters — without losing the argv/cwd context
+  // #2258 added (that context is what makes the diagnostic useful at all).
+  it("bounds and neutralizes untrusted userMessage content in the CLI_BACKEND_FAILED diagnostic", () => {
+    const hugeMessage = "\x1b[31mFAKE LOG LINE\x1b[0m\nInjected-Header: evil" + "A".repeat(5000);
+    const spawnFn = () => ({ status: 1, signal: null, stdout: "", stderr: "", error: undefined });
+
+    let thrown;
+    try {
+      runCliBackend({
+        spec: loadCommandSpec(COMMANDS_DIR, "work-on"),
+        userMessage: hugeMessage,
+        args: ["2033"],
+        cwd: TMP,
+        logger: { log: () => {} },
+        bin: "claude",
+        spawnFn,
+      });
+    } catch (err) {
+      thrown = err;
+    }
+
+    assert.ok(thrown, "expected runCliBackend to throw");
+    assert.equal(thrown.code, "CLI_BACKEND_FAILED");
+    // Bounded: must not contain the full 5000-char run of "A"s.
+    assert.ok(
+      !thrown.message.includes("A".repeat(5000)),
+      "message must not contain the full unbounded userMessage",
+    );
+    // Neutralized: raw ESC (\x1b) and other C0 control chars must not survive.
+    // eslint-disable-next-line no-control-regex -- asserting the ABSENCE of raw control chars is the point of this test
+    assert.ok(!/[\x00-\x1F\x7F]/.test(thrown.message), "message must not contain raw control characters");
+    assert.match(thrown.message, /\\x1b/, "escaped ESC sequence should appear in place of the raw control char");
+    // Diagnosability preserved: flags and cwd must still be visible.
+    assert.match(thrown.message, /--print/);
+    assert.match(thrown.message, /--dangerously-skip-permissions/);
+    assert.ok(thrown.message.includes(TMP), "cwd must remain visible in the diagnostic");
+  });
+
+  it("sanitizeArgvForLog leaves short, plain argv elements unchanged", () => {
+    const summary = sanitizeArgvForLog(["--print", "hello world", "--dangerously-skip-permissions"]);
+    assert.equal(summary, "--print hello world --dangerously-skip-permissions");
   });
 
   it("defaults to the real spawnSync when spawnFn is omitted (backward compatibility)", () => {

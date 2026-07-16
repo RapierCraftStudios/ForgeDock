@@ -466,6 +466,55 @@ export function resolveBackend({ requested = "auto", cwd = process.cwd() } = {})
  *   seam), or fully mock the call via `spawnFn` (no fake binary needed).
  * @returns {{status: string, command: string, iterations: number, stopReason: string, usage: null, model: string, backend: "cli"}}
  */
+
+// Diagnostic-only bound on each logged argv element (see sanitizeArgvForLog
+// below) — independent of DEFAULT_SPAWN_MAX_BUFFER_BYTES, which governs the
+// actual child process's stdout/stderr capture, not this summary string.
+const MAX_LOGGED_ARGV_ELEMENT_LEN = 200;
+
+/**
+ * Build a safe-for-logs/error-messages summary of a CLI argv array.
+ *
+ * `cliArgs` (see `runCliBackend` below) includes `userMessage` verbatim, and
+ * `userMessage` is built from untrusted third-party content (issue/PR bodies
+ * fetched via `gh` — see the SECURITY note in `bin/engine.mjs`). The
+ * non-zero-exit diagnostic added in #2258 embeds `cliArgs.join(" ")` directly
+ * into a thrown `Error.message`, which `bin/forgedock.mjs`'s `run-issue` case
+ * later writes verbatim to stderr (`process.stderr.write(err.message)`) — so
+ * a crafted issue/PR body could otherwise inject raw ANSI escape sequences or
+ * newline-heavy content into operator-visible CI/terminal logs, or simply
+ * balloon log size with an arbitrarily large body (#2277).
+ *
+ * This function is used ONLY to build the human-readable diagnostic string —
+ * it must NEVER be applied to the actual `cliArgs` array passed to `spawnFn`,
+ * which must remain byte-exact for the real invocation. It intentionally
+ * keeps (rather than removes) the argv/cwd context: that context is exactly
+ * what #2258 added to fix a prior defect where a real CLI failure produced a
+ * diagnostic pointing at output that didn't exist. The goal here is to bound
+ * and neutralize each element, not to delete the context.
+ *
+ * - Control characters (`\x00`-`\x1F`, `\x7F`) are escaped to a visible
+ *   `\xHH` form, neutralizing ANSI escape sequences and log-line spoofing.
+ * - Each element is independently truncated to `MAX_LOGGED_ARGV_ELEMENT_LEN`
+ *   characters, with an explicit `…[truncated, N chars]` marker appended
+ *   when truncation occurs, so log growth is bounded regardless of how large
+ *   the untrusted `userMessage` is.
+ *
+ * @param {string[]} cliArgs
+ * @returns {string} space-joined, sanitized argv summary
+ */
+export function sanitizeArgvForLog(cliArgs) {
+  return cliArgs
+    .map((arg) => {
+      const str = String(arg);
+      // eslint-disable-next-line no-control-regex -- intentional: neutralizing C0/DEL control chars is the point of this function
+      const escaped = str.replace(/[\x00-\x1F\x7F]/g, (ch) => `\\x${ch.charCodeAt(0).toString(16).padStart(2, "0")}`);
+      if (escaped.length <= MAX_LOGGED_ARGV_ELEMENT_LEN) return escaped;
+      return `${escaped.slice(0, MAX_LOGGED_ARGV_ELEMENT_LEN)}…[truncated, ${escaped.length} chars]`;
+    })
+    .join(" ");
+}
+
 export function runCliBackend({
   spec,
   userMessage,
@@ -566,7 +615,11 @@ export function runCliBackend({
       // #2258 / parent #2244.
       const hadOutput = output.length > 0;
       const signalPart = result.signal ? `, signal ${result.signal}` : "";
-      const argvSummary = cliArgs.join(" ");
+      // Sanitized for the diagnostic string ONLY — the actual `cliArgs` array
+      // above (passed to spawnFn) is untouched. See sanitizeArgvForLog's doc
+      // comment for why (#2277 — untrusted userMessage content must not reach
+      // stderr/CI logs unbounded/unescaped).
+      const argvSummary = sanitizeArgvForLog(cliArgs);
       const diagnostic = hadOutput
         ? `Captured output (stdout+stderr):\n${output}`
         : "No output was captured on stdout or stderr.";
