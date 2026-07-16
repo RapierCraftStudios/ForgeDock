@@ -7,10 +7,34 @@
 
 export const TERMINAL_REASONS = ["merged", "invalid", "needs-human", "decomposed"];
 
-/** Fetch the issue's comment bodies as one blob for marker checks. */
+/**
+ * Fetch the issue's comments. Returns both:
+ *  - `blob`: all bodies joined into one string, for simple marker-presence checks
+ *    (`has(blob, marker)`) where it doesn't matter which comment posted the marker.
+ *  - `comments`: an array of individual comment bodies, preserving per-comment
+ *    boundaries, for extraction that MUST be scoped to a specific comment (see
+ *    `parseBranchFromMarkers()` below — forge#2184).
+ *
+ * The `--jq '[.[].body]'` query asks `gh` for a JSON array of bodies. If the
+ * response isn't valid JSON (a non-JSON gh error string, or a test mock that
+ * supplies a raw marker string instead of the real API shape), fall back to
+ * treating the whole blob as a single pseudo-comment — `has()` checks are
+ * unaffected either way, and comment-scoped extraction simply won't match,
+ * which is the safe, conservative behavior.
+ */
 async function issueMarkers(issue, io) {
-  const out = await io.gh(["api", `repos/{owner}/{repo}/issues/${issue}/comments`, "--jq", ".[].body"]);
-  return out || "";
+  const out = await io.gh(["api", `repos/{owner}/{repo}/issues/${issue}/comments`, "--jq", "[.[].body]"]);
+  const blob = out || "";
+  let comments = [];
+  try {
+    const parsed = JSON.parse(out);
+    if (Array.isArray(parsed)) {
+      comments = parsed.map((c) => (typeof c === "string" ? c : (c && c.body) || ""));
+    }
+  } catch {
+    comments = blob ? [blob] : [];
+  }
+  return { blob, comments };
 }
 /**
  * Count commits on `branch` ahead of `lane`'s base. On the first build the
@@ -53,24 +77,37 @@ function has(blob, marker) { return blob.includes(marker); }
  * reliable source, since the branch name is slug-derived from the issue
  * title and cannot be guessed or precomputed (forge#2174).
  *
- * Returns the LAST match so a resumed/retried build's most recent comment
- * wins over any stale attempt.
+ * SCOPING (forge#2184): only comments whose body contains `FORGE:BUILDER:COMPLETE`
+ * — the same completion marker the build phase already gates on — are eligible
+ * to supply the branch. A `**Branch**:` field inside any other comment (a
+ * FORGE:CONTRACT, FORGE:ARCHITECT, FORGE:CONTEXT, reviewer, or remediation
+ * comment) is never considered, even if it happens to match the same regex
+ * shape. If more than one FORGE:BUILDER:COMPLETE comment exists (e.g. a
+ * resumed/retried build re-posting a fresh completion comment), the LAST one
+ * — by array/chronological order — wins, so the most recent build attempt's
+ * branch is used. Returns null (never invents a value) if no eligible comment
+ * contains the field.
  */
-function parseBranchFromMarkers(blob) {
-  const re = /\*\*Branch\*\*:\s*`([^`]+)`/g;
-  let match, last = null;
-  while ((match = re.exec(blob)) !== null) last = match[1];
-  return last;
+function parseBranchFromMarkers(comments) {
+  const re = /\*\*Branch\*\*:\s*`([^`]+)`/;
+  for (let i = comments.length - 1; i >= 0; i--) {
+    const body = comments[i];
+    if (!body || !body.includes("FORGE:BUILDER:COMPLETE")) continue;
+    const match = body.match(re);
+    if (match) return match[1];
+  }
+  return null;
 }
 
 /**
  * Resolve the branch to evaluate the build phase against: ground truth from
- * the FORGE:BUILDER comment if present, else whatever `state.branch` already
- * holds (e.g. a real branch carried forward from a prior PHASE_COMMIT — see
+ * the FORGE:BUILDER:COMPLETE comment if present (see `parseBranchFromMarkers()`
+ * for the exact scoping rule), else whatever `state.branch` already holds
+ * (e.g. a real branch carried forward from a prior PHASE_COMMIT — see
  * `runlog.mjs:deriveState`). Never invents a value.
  */
-function resolveBranch(state, markersBlob) {
-  return parseBranchFromMarkers(markersBlob) || state.branch || null;
+function resolveBranch(state, comments) {
+  return parseBranchFromMarkers(comments) || state.branch || null;
 }
 
 /** @type {Phase[]} */
@@ -80,12 +117,12 @@ export const PHASES = [
     command: "work-on/investigate",
     entryCondition: () => true,
     async detectOutcome(state, io) {
-      const m = await issueMarkers(state.issue, io);
-      if (has(m, "INVESTIGATION:INVALID"))
+      const { blob } = await issueMarkers(state.issue, io);
+      if (has(blob, "INVESTIGATION:INVALID"))
         return { status: "committed", terminalReason: "invalid", outputs: { verdict: "INVALID" } };
-      if (has(m, "DECOMPOSE:YES"))
+      if (has(blob, "DECOMPOSE:YES"))
         return { status: "committed", terminalReason: "decomposed", outputs: { decompose: true } };
-      if (has(m, "INVESTIGATION:COMPLETE"))
+      if (has(blob, "INVESTIGATION:COMPLETE"))
         return { status: "committed", outputs: { verdict: "CONFIRMED" } };
       return { status: "failed", detail: "no INVESTIGATION:COMPLETE marker" };
     },
@@ -98,13 +135,13 @@ export const PHASES = [
     async reconcile(state, io) {
       // Idempotent resume: FORGE:CONTEXT:COMPLETE present → skip the LLM re-run.
       // Bare FORGE:CONTEXT matches a partial/interrupted annotation — require :COMPLETE.
-      const m = await issueMarkers(state.issue, io);
-      return has(m, "FORGE:CONTEXT:COMPLETE") ? { satisfied: true } : { satisfied: false };
+      const { blob } = await issueMarkers(state.issue, io);
+      return has(blob, "FORGE:CONTEXT:COMPLETE") ? { satisfied: true } : { satisfied: false };
     },
     async detectOutcome(state, io) {
-      const m = await issueMarkers(state.issue, io);
+      const { blob } = await issueMarkers(state.issue, io);
       // Context is non-critical: a missing marker is a VISIBLE skip, not a hard fail (spec §7).
-      if (has(m, "FORGE:CONTEXT")) return { status: "committed", outputs: {} };
+      if (has(blob, "FORGE:CONTEXT")) return { status: "committed", outputs: {} };
       return { status: "committed", outputs: { skipped: true, which: "context" } };
     },
   },
@@ -115,12 +152,12 @@ export const PHASES = [
     async reconcile(state, io) {
       // Idempotent resume: FORGE:ARCHITECT:COMPLETE present → skip the LLM re-run.
       // Bare FORGE:ARCHITECT matches a partial/interrupted annotation — require :COMPLETE.
-      const m = await issueMarkers(state.issue, io);
-      return has(m, "FORGE:ARCHITECT:COMPLETE") ? { satisfied: true } : { satisfied: false };
+      const { blob } = await issueMarkers(state.issue, io);
+      return has(blob, "FORGE:ARCHITECT:COMPLETE") ? { satisfied: true } : { satisfied: false };
     },
     async detectOutcome(state, io) {
-      const m = await issueMarkers(state.issue, io);
-      return has(m, "FORGE:ARCHITECT:COMPLETE")
+      const { blob } = await issueMarkers(state.issue, io);
+      return has(blob, "FORGE:ARCHITECT:COMPLETE")
         ? { status: "committed", outputs: {} }
         : { status: "failed", detail: "no FORGE:ARCHITECT:COMPLETE" };
     },
@@ -133,20 +170,20 @@ export const PHASES = [
       // Idempotent resume: resolve the real branch from ground truth (FORGE:BUILDER
       // comment) rather than trusting a possibly-stale/absent state.branch, then
       // check it's already ahead of base → treat as done, skip the LLM (forge#2174).
-      const m = await issueMarkers(state.issue, io);
-      const branch = resolveBranch(state, m);
-      if (branch && has(m, "FORGE:BUILDER:COMPLETE") && (await commitsAhead(state.lane, branch, io)) > 0) {
+      const { blob, comments } = await issueMarkers(state.issue, io);
+      const branch = resolveBranch(state, comments);
+      if (branch && has(blob, "FORGE:BUILDER:COMPLETE") && (await commitsAhead(state.lane, branch, io)) > 0) {
         return { satisfied: true, outputs: { branch } };
       }
       return { satisfied: false };
     },
     async detectOutcome(state, io) {
-      const m = await issueMarkers(state.issue, io);
-      const complete = has(m, "FORGE:BUILDER:COMPLETE");           // #1305: require :COMPLETE …
-      // Resolve the branch the builder actually created from the FORGE:BUILDER
-      // comment (ground truth) instead of a guessed/self-referential state.branch
-      // — see resolveBranch()/parseBranchFromMarkers() above (forge#2174).
-      const branch = resolveBranch(state, m);
+      const { blob, comments } = await issueMarkers(state.issue, io);
+      const complete = has(blob, "FORGE:BUILDER:COMPLETE");        // #1305: require :COMPLETE …
+      // Resolve the branch the builder actually created from the FORGE:BUILDER:COMPLETE
+      // comment (ground truth), scoped to that specific comment — see
+      // resolveBranch()/parseBranchFromMarkers() above (forge#2174, forge#2184).
+      const branch = resolveBranch(state, comments);
       const ahead = branch ? await commitsAhead(state.lane, branch, io) : 0; // … AND real commits
       if (complete && ahead > 0) return { status: "committed", outputs: { branch } };
       const detail = `builder complete=${complete} commitsAhead=${ahead} branch=${branch || "unresolved"}`;
