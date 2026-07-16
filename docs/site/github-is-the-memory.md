@@ -36,7 +36,7 @@ affected_files: commands/orchestrate.md, scripts/layer5-query.sh
 
 This is still a GitHub comment — a human reading the thread sees it as a collapsed HTML comment or reads its contents directly. But a downstream agent querying the issue with `gh issue view` gets it as structured text it can parse without guessing at prose intent. The annotation is the contract between stages.
 
-The annotation format is an open standard — the [FORGE Annotation Protocol](../spec/forge-protocol-v1.md). Any agent pipeline can implement it without ForgeDock. The format is documented in full, the vocabulary is fixed, and the license is CC-BY-4.0.
+The annotation format is an open standard — the [FORGE Annotation Protocol](https://github.com/RapierCraftStudios/ForgeDock/blob/main/docs/spec/forge-protocol-v1.md). Any agent pipeline can implement it without ForgeDock. The format is documented in full, the vocabulary is fixed, and the license is CC-BY-4.0.
 
 ---
 
@@ -106,7 +106,7 @@ Checks your environment, installs the slash commands into Claude Code, and gener
 
 **Adopt the protocol without ForgeDock:**
 
-The annotation format is the independently useful part. The [FORGE Annotation Protocol](../FORGE-PROTOCOL.md) document describes the philosophy and vocabulary. The [protocol spec](../spec/forge-protocol-v1.md) gives the full technical definition — annotation types, required fields, completion markers, and query patterns. The license is CC-BY-4.0. Any agent pipeline can implement structured GitHub annotations using these specs without adopting ForgeDock's command layer. The only requirement is consistency: if annotations are written and read with the same vocabulary, the knowledge graph is coherent across sessions.
+The annotation format is the independently useful part. The [FORGE Annotation Protocol](https://github.com/RapierCraftStudios/ForgeDock/blob/main/docs/FORGE-PROTOCOL.md) document describes the philosophy and vocabulary. The [protocol spec](https://github.com/RapierCraftStudios/ForgeDock/blob/main/docs/spec/forge-protocol-v1.md) gives the full technical definition — annotation types, required fields, completion markers, and query patterns. The license is CC-BY-4.0. Any agent pipeline can implement structured GitHub annotations using these specs without adopting ForgeDock's command layer. The only requirement is consistency: if annotations are written and read with the same vocabulary, the knowledge graph is coherent across sessions.
 
 ---
 

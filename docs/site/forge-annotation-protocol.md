@@ -10,7 +10,7 @@ keywords: ["ai agent context protocol", "ai agent communication", "forge annotat
 >
 > The normative specification for the FORGE Annotation Protocol is now maintained at:
 >
-> **[`docs/spec/forge-protocol-v1.md`](../spec/forge-protocol-v1.md)**
+> **[`docs/spec/forge-protocol-v1.md`](https://github.com/RapierCraftStudios/ForgeDock/blob/main/docs/spec/forge-protocol-v1.md)**
 >
 > That document is the single source of truth for all FORGE annotation types,
 > syntax rules, the label state machine, conformance requirements, the extension

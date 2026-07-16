@@ -30,7 +30,7 @@ Use this table to determine which license you need:
 
 Key clarification: ForgeDock is a **development tool**, not a library embedded in your product. Simply using ForgeDock to build and ship your own software does not trigger the copyleft clause — the clause applies when you modify ForgeDock itself and offer it as a service to others.
 
-For the full license text, see [`LICENSE`](../../LICENSE) (AGPL-3.0) and [`COMMERCIAL-LICENSE.md`](../../COMMERCIAL-LICENSE.md).
+For the full license text, see [`LICENSE`](https://github.com/RapierCraftStudios/ForgeDock/blob/main/LICENSE) (AGPL-3.0) and [`COMMERCIAL-LICENSE.md`](https://github.com/RapierCraftStudios/ForgeDock/blob/main/COMMERCIAL-LICENSE.md).
 
 ---
 
@@ -76,13 +76,13 @@ All pipeline state lives in your GitHub repository: issue comments (FORGE annota
 No. ForgeDock has no server-side component that could receive your code or GitHub data. The `npx forgedock` installer symlinks command files into `~/.claude/commands/` on the developer's machine — it does not phone home.
 
 **How are contributions governed?**
-All contributors sign a Developer Certificate of Origin (DCO) on each commit. ForgeDock does not use a CLA. See [`CONTRIBUTING.md`](../../CONTRIBUTING.md) for the full process.
+All contributors sign a Developer Certificate of Origin (DCO) on each commit. ForgeDock does not use a CLA. See [`CONTRIBUTING.md`](https://github.com/RapierCraftStudios/ForgeDock/blob/main/CONTRIBUTING.md) for the full process.
 
 **Security policy?**
-See [`SECURITY.md`](../../SECURITY.md) for the vulnerability disclosure policy and contact.
+See [`SECURITY.md`](https://github.com/RapierCraftStudios/ForgeDock/blob/main/SECURITY.md) for the vulnerability disclosure policy and contact.
 
 **Governance?**
-See [`GOVERNANCE.md`](../../GOVERNANCE.md) for the project's decision-making process and stewardship model.
+See [`GOVERNANCE.md`](https://github.com/RapierCraftStudios/ForgeDock/blob/main/GOVERNANCE.md) for the project's decision-making process and stewardship model.
 
 ---
 
