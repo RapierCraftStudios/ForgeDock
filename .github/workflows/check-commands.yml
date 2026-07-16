@@ -12,6 +12,7 @@ on:
       - 'scripts/check-command-docs-drift.sh'
       - 'scripts/check-command-side-effects.sh'
       - 'scripts/check-spec-markers.sh'
+      - '.github/workflows/check-commands.yml'
   push:
     branches:
       - staging
@@ -26,6 +27,7 @@ on:
       - 'scripts/check-command-docs-drift.sh'
       - 'scripts/check-command-side-effects.sh'
       - 'scripts/check-spec-markers.sh'
+      - '.github/workflows/check-commands.yml'
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
