@@ -97,17 +97,45 @@ jobs:
             fi
           }
 
+          # has_matching_signoff: literal (non-regex) trailer check.
+          #
+          # Commit author name/email/body are fully attacker-controlled strings
+          # (this workflow runs on pull_request_target). Two properties this
+          # function relies on to stay safe against that:
+          #   1. Each commit's SHA/name/email/body below are read via their OWN
+          #      dedicated `git log --format='%X'` invocation (see the SHA loop),
+          #      never sliced out of one delimiter-joined blob. A field value
+          #      containing a stray control byte can therefore never shift or
+          #      corrupt a sibling field's boundaries.
+          #   2. The extracted trailer email is compared to the accepted email
+          #      with bash's literal `==`/`[[ ]]` string equality -- never
+          #      embedded into a grep/regex pattern -- so no ERE metacharacter
+          #      in an attacker-controlled email (e.g. `|`, `*`, `(`) can widen
+          #      what the pattern matches.
+          has_matching_signoff() {
+            local body="$1" accepted="$2" trailer_line trailer_email
+            while IFS= read -r trailer_line; do
+              # Extract the email inside the last <...> on the trailer line.
+              trailer_email="${trailer_line##*<}"
+              trailer_email="${trailer_email%%>*}"
+              [[ "$trailer_email" == "$accepted" ]] && return 0
+            done < <(printf '%s\n' "$body" | grep -i '^Signed-off-by:')
+            return 1
+          }
+
           declare -a FAILURES=()
           PASSES=0
           TOTAL=0
 
-          while IFS= read -r -d '' record; do
-            sha="${record%%$'\x1f'*}"
-            rest="${record#*$'\x1f'}"
-            name="${rest%%$'\x1f'*}"
-            rest="${rest#*$'\x1f'}"
-            email="${rest%%$'\x1f'*}"
-            body="${rest#*$'\x1f'}"
+          # Enumerate commit SHAs first -- git log %H is always a plain hex
+          # string, so this line-oriented pass carries no delimiter-injection
+          # risk regardless of what any commit's author/committer/message
+          # contains. Each SHA is then resolved independently below.
+          while IFS= read -r sha; do
+            [[ -z "$sha" ]] && continue
+            name=$(git log -1 --format='%an' "$sha")
+            email=$(git log -1 --format='%ae' "$sha")
+            body=$(git log -1 --format='%B' "$sha")
 
             short_sha="${sha:0:7}"
             TOTAL=$((TOTAL+1))
@@ -126,8 +154,7 @@ jobs:
 
             ok=0
             while IFS= read -r accepted; do
-              escaped="${accepted//./\\.}"
-              if grep -qiE "^Signed-off-by:.*<${escaped}>" <<< "$body"; then
+              if has_matching_signoff "$body" "$accepted"; then
                 ok=1
                 break
               fi
@@ -140,7 +167,7 @@ jobs:
               echo "FAIL  $short_sha  $name <$email>  (no matching Signed-off-by trailer)"
               FAILURES+=("$short_sha  $name <$email>")
             fi
-          done < <(git log --no-merges -z --format='%H%x1f%an%x1f%ae%x1f%B' "$MERGE_BASE..$HEAD_SHA")
+          done < <(git log --no-merges --format='%H' "$MERGE_BASE..$HEAD_SHA")
 
           echo ""
           echo "DCO check: $PASSES/$TOTAL commits passed, ${#FAILURES[@]} failed"
