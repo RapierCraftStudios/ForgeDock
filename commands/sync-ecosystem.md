@@ -1,6 +1,6 @@
 ---
 description: Detect API changes, sync satellite repos, and publish releases
-argument-hint: [check | auto | status | publish | PR-number]
+argument-hint: "[check | auto | status | publish | PR-number]"
 install: extras
 ---
 <!-- SPDX-FileCopyrightText: Copyright (c) RapierCraft Studios -->
@@ -218,10 +218,16 @@ Create issues in the affected repos:
 
 ```bash
 # For satellite repos (separate GitHub repos):
-gh issue create -R {TARGET_REPO} \
-  --title "feat(sync): {description of what API change needs to be reflected}" \
-  --label "feature,priority:P2" \
-  --body "$(cat <<'BODY_EOF'
+#
+# /issue resolves its target repo in Phase 1A from a `{prefix}:` token at the start of the
+# free-text input, not from an explicit -R override — its multi-repo prefix table is keyed
+# off forge.yaml → repos.satellites (the same registry this file already iterates). Prepend
+# the satellite's configured {COMPONENT} (= satellites[].prefix) to the title so /issue routes
+# to {TARGET_REPO} correctly instead of the default project repo.
+SYNC_TITLE="feat(sync): {description of what API change needs to be reflected}"
+SYNC_BODY_TMPFILE=$(mktemp)
+trap 'rm -f "$SYNC_BODY_TMPFILE"' EXIT
+cat > "$SYNC_BODY_TMPFILE" <<'BODY_EOF'
 ## Problem
 
 {1-3 sentences: what API or schema change in the upstream repo needs to be reflected in this satellite repo. What will break or be missing if this sync is not done.}
@@ -252,13 +258,41 @@ Files that need changes:
 
 {If applicable: describe the new API shape with an example}
 BODY_EOF
-)"
+# Route through the /issue create-hook (canonical dedup + body validation) instead of a raw
+# `gh issue create`. Prefixing the title with "{COMPONENT}: " lets /issue's Phase 1A resolve
+# the satellite repo ({TARGET_REPO}) from forge.yaml → repos.satellites, matching how a human
+# would invoke /issue for the same satellite (e.g. "mcp: add list_schemas tool"). The prefix
+# is stripped by /issue's own routing — it does not become part of the created issue title.
+Skill(skill="issue", args="\"{COMPONENT}: $SYNC_TITLE\" --title \"$SYNC_TITLE\" --body-file \"$SYNC_BODY_TMPFILE\" --label feature --label \"priority:P2\"")
+rm -f "$SYNC_BODY_TMPFILE"
+trap - EXIT
+SYNC_ISSUE_NUMBER=$(gh issue list -R {TARGET_REPO} \
+  --state open \
+  --search "$SYNC_TITLE" \
+  --json number,title \
+  --jq --arg t "$SYNC_TITLE" '.[] | select(.title == $t) | .number' 2>/dev/null | head -1)
+
+# Safety net: the "{COMPONENT}: " prefix trick above is not a documented part of the
+# Programmatic Invocation Contract (issue.md has no --repo/-R flag for programmatic mode) —
+# if /issue's Phase 1A did not honor the prefix and created the issue in the default project
+# repo instead of {TARGET_REPO}, the lookup above returns empty and this would otherwise be
+# silently treated as "deduped by /issue" further down. Distinguish the two cases explicitly.
+if [ -z "$SYNC_ISSUE_NUMBER" ]; then
+  MISROUTED_CHECK=$(gh issue list \
+    --state open \
+    --search "$SYNC_TITLE" \
+    --json number,title \
+    --jq --arg t "$SYNC_TITLE" '.[] | select(.title == $t) | .number' 2>/dev/null | head -1)
+  if [ -n "$MISROUTED_CHECK" ]; then
+    echo "WARNING: '/issue' created #$MISROUTED_CHECK in the default project repo instead of {TARGET_REPO} — the '{COMPONENT}:' prefix routing did not take effect. Move/re-file the issue in {TARGET_REPO} manually."
+  fi
+fi
 
 # For monorepo issues (SDKs, packages inside a single repo):
-gh issue create \
-  --title "feat(sync): {description of what API change needs to be reflected}" \
-  --label "feature,priority:P2" \
-  --body "$(cat <<'BODY_EOF'
+MONOREPO_SYNC_TITLE="feat(sync): {description of what API change needs to be reflected}"
+MONOREPO_SYNC_BODY_TMPFILE=$(mktemp)
+trap 'rm -f "$MONOREPO_SYNC_BODY_TMPFILE"' EXIT
+cat > "$MONOREPO_SYNC_BODY_TMPFILE" <<'BODY_EOF'
 ## Problem
 
 {1-3 sentences: what API or schema change needs to be reflected in this SDK or package. What will be out of sync if not updated.}
@@ -285,7 +319,16 @@ Files that need changes:
 **Change**: {description of upstream API change}
 **Detected by**: `/sync-ecosystem`
 BODY_EOF
-)"
+# Route through the /issue create-hook (canonical dedup + body validation) instead of a raw
+# `gh issue create`. No prefix needed — this targets the default/monorepo repo.
+Skill(skill="issue", args="--title \"$MONOREPO_SYNC_TITLE\" --body-file \"$MONOREPO_SYNC_BODY_TMPFILE\" --label feature --label \"priority:P2\"")
+rm -f "$MONOREPO_SYNC_BODY_TMPFILE"
+trap - EXIT
+MONOREPO_SYNC_ISSUE_NUMBER=$(gh issue list \
+  --state open \
+  --search "$MONOREPO_SYNC_TITLE" \
+  --json number,title \
+  --jq --arg t "$MONOREPO_SYNC_TITLE" '.[] | select(.title == $t) | .number' 2>/dev/null | head -1)
 ```
 
 ### Add sync issues to Project board

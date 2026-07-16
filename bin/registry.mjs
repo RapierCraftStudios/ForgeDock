@@ -11,6 +11,8 @@
  *   setOptOut(dir, optedOut)   → Promise<void>  (adds/removes dir from opt-out set)
  *   nudgeSeen(dir)             → boolean  (true if nudge was already shown for dir)
  *   markNudgeSeen(dir)         → Promise<void>  (records that nudge was shown for dir)
+ *   getPersistedHomeState()    → { path, version, updatedAt } | null  (reads persistedHome)
+ *   setPersistedHomeState(s)   → Promise<void>  (writes persistedHome; see #1943)
  *
  * Registry file: ~/.claude/forgedock/registry.json
  * Registry schema:
@@ -21,7 +23,12 @@
  *     },
  *     "nudgeSeen": {
  *       "/absolute/path/to/dir": { "at": "<ISO-8601 timestamp>" }
- *     }
+ *     },
+ *     "persistedHome": {
+ *       "path": "/absolute/path/to/~/.forge",
+ *       "version": "1.2.3",
+ *       "updatedAt": "<ISO-8601 timestamp>"
+ *     } | null
  *   }
  *
  * State model:
@@ -33,6 +40,12 @@
  *     registry always fails open (never blocks a Claude Code session).
  *   - A nudge is shown at most once per unmanaged directory; `nudgeSeen` tracks
  *     which directories have already received the nudge.
+ *   - `persistedHome` records the last known state of the persisted-toolset
+ *     copy (bin/journey.mjs: persistHome(), issue #1943) written under
+ *     `~/.forge/`. `null` means persistHome() has never run (or was skipped —
+ *     e.g. a git-clone install) for this user. This is metadata ABOUT that
+ *     copy — the copy itself is not stored here; only registry.mjs's own
+ *     `~/.claude/forgedock/registry.json` lives in this file.
  *
  * Contract guarantees:
  *   - Safe: every try/catch degrades gracefully; resolveState never throws
@@ -77,10 +90,10 @@ const REGISTRY_PATH = join(REGISTRY_DIR, "registry.json");
  * Empty registry structure — returned whenever the file is missing or corrupt.
  * Using a factory function avoids shared mutable state across calls.
  *
- * @returns {{ version: number, optedOut: Record<string, { at: string }>, nudgeSeen: Record<string, { at: string }> }}
+ * @returns {{ version: number, optedOut: Record<string, { at: string }>, nudgeSeen: Record<string, { at: string }>, persistedHome: null }}
  */
 function emptyRegistry() {
-  return { version: 1, optedOut: {}, nudgeSeen: {} };
+  return { version: 1, optedOut: {}, nudgeSeen: {}, persistedHome: null };
 }
 
 // ---------------------------------------------------------------------------
@@ -161,6 +174,11 @@ function readRegistry() {
       // Ensure nudgeSeen is present (may be absent in older registry files)
       if (!parsed.nudgeSeen || typeof parsed.nudgeSeen !== "object") {
         parsed.nudgeSeen = {};
+      }
+      // Ensure persistedHome is present (absent in registry files written
+      // before #1943 added persisted-home tracking).
+      if (parsed.persistedHome === undefined) {
+        parsed.persistedHome = null;
       }
       return parsed;
     }
@@ -374,6 +392,76 @@ export async function clearNudgeSeen(dir) {
   const absDir = normalizeDir(dir);
   await writeRegistry((registry) => {
     delete registry.nudgeSeen[absDir];
+  });
+}
+
+// ---------------------------------------------------------------------------
+// Persisted-home state tracking (issue #1943)
+// ---------------------------------------------------------------------------
+// bin/journey.mjs's persistHome() copies ForgeDock's own toolset (bin/,
+// commands/, scripts/, templates/) into a stable `~/.forge/` home so
+// ~/.claude/commands/ symlinks and the SessionStart hook's script path
+// survive npm/npx cache eviction. These two functions are the single place
+// doctor()/update() read and write what persistHome() last did, so both
+// commands agree on "where does the persisted copy live and what version is
+// it" instead of each re-deriving it independently (forge#1589's split-brain
+// precedent — install/doctor/status previously disagreed about where
+// ForgeDock lived, and this issue must not reintroduce that).
+
+/**
+ * Read the last recorded persisted-home state from the registry.
+ *
+ * NOT pure: reads `~/.claude/forgedock/registry.json` from disk on every
+ * call. Fail-open — a missing/corrupt registry file, or a registry written
+ * before #1943, both resolve to `null` (equivalent to "persistHome() has
+ * never recorded state for this user") rather than throwing.
+ *
+ * @returns {{ path: string, version: string, updatedAt: string } | null}
+ */
+export function getPersistedHomeState() {
+  try {
+    const registry = readRegistry();
+    return registry.persistedHome ?? null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Record the current persisted-home state in the registry.
+ *
+ * NOT pure: performs a disk write (via the atomic `.tmp` + `renameSync`
+ * pattern in `_doWriteRegistryWith`) and, when the caller omits `updatedAt`,
+ * calls `new Date()` to stamp one — this function has real side effects, it
+ * does not merely compute a value (see forge#462: a prior JSDoc/behavior
+ * mismatch in this file claimed a writer was a "pure mutation function" when
+ * it in fact touched the clock and the filesystem — documenting that
+ * honestly here rather than repeating it).
+ *
+ * Best-effort: write failures are swallowed by writeRegistry()'s existing
+ * fail-open contract; a failed write leaves the previous persistedHome value
+ * (or null) in place rather than throwing.
+ *
+ * @param {{ path: string, version: string, updatedAt?: string }} state
+ * @returns {Promise<void>}
+ */
+export async function setPersistedHomeState({ path, version, updatedAt } = {}) {
+  // Normalize the same way normalizeDir() does elsewhere in this file
+  // (lowercase Windows drive letter) so a later lookup never mismatches on
+  // drive-letter casing alone (forge#412 precedent). Falls back to the raw
+  // path if it doesn't exist yet or can't be resolved — never throws.
+  let normalizedPath = path;
+  try {
+    if (path) normalizedPath = normalizeDir(path);
+  } catch {
+    normalizedPath = path;
+  }
+  await writeRegistry((registry) => {
+    registry.persistedHome = {
+      path: normalizedPath,
+      version: version || "",
+      updatedAt: updatedAt || new Date().toISOString(),
+    };
   });
 }
 

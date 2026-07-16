@@ -1,5 +1,30 @@
 name: Publish to npm
 
+# ROLLBACK RUNBOOK (see forge#2025 / PR #2018 staging review finding REG-2):
+# This workflow publishes to the `latest` npm dist-tag on every qualifying push
+# to `main`. If a bad release is published:
+#   1. Do NOT run `npm unpublish`. Unpublishing removes the version entirely,
+#      which breaks any consumer that has already resolved/installed it and
+#      forfeits the version number (npm blocks republishing the same version
+#      for 24h+). It also does not un-ship whatever already propagated.
+#   2. Instead: `git revert` the offending commit(s) on `main`, push the
+#      revert, and let this workflow publish a new patch version containing
+#      the revert. This is the only supported rollback path — a forward-fix
+#      release, not a destructive unpublish.
+#   3. If the bad release must be hidden from new installs immediately while
+#      the revert is prepared, use `npm dist-tag` to move `latest` back to the
+#      last-known-good version (this does not remove the bad version, it only
+#      stops it from being the default resolution target):
+#       npm dist-tag add forgedock@<last-good-version> latest
+#
+# The `concurrency` group below serializes publish runs so two qualifying
+# pushes landing close together (e.g. a merge immediately followed by this
+# workflow's own auto-generated "chore: bump version" push) cannot race on
+# the version bump / npm publish steps.
+concurrency:
+  group: publish-main
+  cancel-in-progress: false
+
 on:
   push:
     branches: [main]
@@ -58,10 +83,35 @@ jobs:
       - name: Check native command conflicts
         run: bash scripts/check-native-conflicts.sh commands/
 
+      - name: Install dependencies
+        run: npm ci --ignore-scripts
+
       - name: Run tests
         run: npm test
 
-      - name: Bump patch version
+      - name: Determine version bump type
+        if: env.SKIP_PUBLISH != 'true'
+        run: |
+          # Conventional-commit-aware bump: any feat()-scoped commit since the
+          # last release tag bumps `minor`; otherwise `patch`. Major/breaking-change
+          # detection is intentionally out of scope (no BREAKING CHANGE convention
+          # is currently enforced in this repo — see forge#2036).
+          LAST_TAG=$(git describe --tags --abbrev=0 2>/dev/null || echo "")
+          if [ -z "$LAST_TAG" ]; then
+            echo "No previous tag found — defaulting to patch bump"
+            echo "BUMP_TYPE=patch" >> $GITHUB_ENV
+          else
+            COMMIT_SUBJECTS=$(git log "$LAST_TAG"..HEAD --format=%s 2>/dev/null || echo "")
+            if echo "$COMMIT_SUBJECTS" | grep -qE '^feat(\([^)]*\))?!?:'; then
+              echo "feat()-scoped commit(s) found since $LAST_TAG — bumping minor"
+              echo "BUMP_TYPE=minor" >> $GITHUB_ENV
+            else
+              echo "No feat()-scoped commits since $LAST_TAG — bumping patch"
+              echo "BUMP_TYPE=patch" >> $GITHUB_ENV
+            fi
+          fi
+
+      - name: Bump version
         if: env.SKIP_PUBLISH != 'true'
         run: |
           git config user.name "github-actions[bot]"
@@ -69,7 +119,12 @@ jobs:
           CURRENT_VERSION=$(node -p "require('./package.json').version")
           NEXT_VERSION=$(node -p "
             const [maj,min,pat] = '$CURRENT_VERSION'.split('.').map(Number);
-            \`\${maj}.\${min}.\${pat+1}\`
+            const bumpType = '$BUMP_TYPE';
+            if (bumpType === 'minor') {
+              \`\${maj}.\${min+1}.0\`;
+            } else {
+              \`\${maj}.\${min}.\${pat+1}\`;
+            }
           ")
           # Re-run guard: check if NEXT_VERSION (not the current committed version) was
           # already published. This correctly identifies the re-run case where a partial
@@ -81,7 +136,7 @@ jobs:
             echo "VERSION=$NEXT_VERSION" >> $GITHUB_ENV
             echo "SKIP_PUBLISH=true" >> $GITHUB_ENV
           else
-            npm version patch --no-git-tag-version
+            npm version "$BUMP_TYPE" --no-git-tag-version
             NEW_VERSION=$(node -p "require('./package.json').version")
             echo "VERSION=$NEW_VERSION" >> $GITHUB_ENV
             echo "SKIP_PUBLISH=false" >> $GITHUB_ENV

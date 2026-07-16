@@ -1,0 +1,14 @@
+{
+  "description": "CLAIM — complete resource reservation annotation with all required fields",
+  "input": "<!-- FORGE:CLAIM -->\n## Resource Claim\n\n**Holder**: #1736 / orchestration-run-abc123\n**Files**: commands/orchestrate/phase-3-dependency.md\ncommands/orchestrate/phase-4-execution.md\n**Interfaces**: Step 3C conflict detection API; Step 4A dispatch context injection shape\n**TTL**: terminal state of Holder issue #1736\n\n<!-- CLAIM:COMPLETE -->",
+  "expect": {
+    "type": "CLAIM",
+    "valid": true,
+    "sentinelState": "complete",
+    "inlineValue": null,
+    "fieldChecks": {
+      "Holder": "#1736 / orchestration-run-abc123",
+      "TTL": "terminal state of Holder issue #1736"
+    }
+  }
+}

@@ -1,6 +1,6 @@
 ---
 description: Validation agent — quality gate loop, format/verify, proxy check, deploy check
-argument-hint: [issue number] [--repo GH_REPO] [--gh-flag GH_FLAG] [--worktree PATH] [--files FILE1 FILE2...]
+argument-hint: "[issue number] [--repo GH_REPO] [--gh-flag GH_FLAG] [--worktree PATH] [--files FILE1 FILE2...]"
 ---
 <!-- SPDX-FileCopyrightText: Copyright (c) RapierCraft Studios -->
 <!-- SPDX-License-Identifier: AGPL-3.0-or-later -->
@@ -12,7 +12,7 @@ argument-hint: [issue number] [--repo GH_REPO] [--gh-flag GH_FLAG] [--worktree P
 **Invoked by**: `work-on.md` Step 3F.5, after `implement.md` has written and staged code (not committed).
 **Output**: Return `GATE_PASSED: true/false` to caller. On failure after max iterations, post comment and set `needs-human`.
 
-**Agent model policy**: `model: "sonnet"` (standard tier). Fallback: `model: "opus"` if rate-limited. Feature gate: pass `effort` in Task/Skill spawns only on Claude Code >= 2.1.154.
+**Agent model policy**: `model: "{DEFAULT_MODEL}"` — resolved from forge.yaml `agents.default_model`, else "sonnet" (standard tier). Fallback: `model: "opus"` if rate-limited. Feature gate: pass `effort` in Task/Skill spawns only on Claude Code >= 2.1.154.
 **NEVER use plan mode (EnterPlanMode).**
 
 <!-- FORGE:SPEC_LOADED — work-on/build/validate.md loaded and active. Agent is bound by this spec. -->
@@ -36,6 +36,34 @@ Skip all phases (return `GATE_PASSED: true` immediately) if:
 - Only 1 file was changed AND it is a config or docs file with no code logic (e.g. `.md`, `.yml` with no scripts, `.env.example`)
 
 In all other cases, the gate MUST run.
+
+---
+
+## Phase V1: Builder Self-Check — Wire-Through Proof (MANDATORY, run BEFORE quality gate loop)
+
+<!-- Added: forge#1731 -->
+
+Before invoking the quality gate, the builder MUST perform a self-check on newly added conditional paths. This mirrors the quality gate's 2G.8 check and allows the builder to resolve gaps before the gate invocation rather than after.
+
+**Self-check protocol**:
+
+1. Scan the staged diff for newly added conditional lines:
+   ```bash
+   git diff HEAD -- {CHANGED_FILES} | grep -E '^\+' | grep -v '^+++' \
+       | grep -E '\bif\b|\belif\b|\belse\b|guard|feature.?flag|FEATURE_FLAG|ENABLE_|DISABLE_'
+   ```
+
+2. For each new conditional found, confirm at least ONE of:
+   - **Test in diff**: A test function or assertion in the diff exercises this conditional branch (e.g., calls the function with parameters that trigger the `if`, asserts the guarded output, or triggers the error path deliberately)
+   - **WIRE:PROVEN annotation**: Add `# WIRE:PROVEN — <method>` immediately before or after the new conditional, describing how you verified it fires (e.g., `# WIRE:PROVEN — gate logic: condition is checked before every call; unreachable path would raise ValueError visible in tests`)
+   - **Trivial re-guard** (auto-exempt): The conditional is a null/length/type check whose body is `return`/`continue`/`break`/`pass` or a single-line assignment — defensive re-guards with no new behavior
+
+3. If none of the above is true for a new conditional, either:
+   - Add a test or trace that exercises the path before staging
+   - Add a `# WIRE:PROVEN — <method>` annotation explaining how you verified reachability
+   - Confirm it qualifies as a trivial re-guard
+
+**Why this matters**: Guards, flags, and validators that are never exercised are functionally dead code. This class has cost multiple sprint cycles in this pipeline (#1230, #1244, #1522, #1580). The self-check catches gaps before the quality gate fires, reducing iteration count. <!-- Added: forge#1731 -->
 
 ---
 
@@ -334,6 +362,8 @@ Where `{SCOPE}` is the command or module scope from the contract (e.g. `work-on`
 - Refactor → `refactor(`
 
 This is the **only** commit for this build cycle. It replaces the old `git commit` that was previously in `implement.md` Phase I4. Do NOT create a separate commit for validation fixes — they are absorbed into this single commit.
+
+**Attribution**: The commit message is exactly the conventional-commit line above — nothing more. Do NOT append a `Co-Authored-By: Claude` trailer, a `🤖 Generated with Claude Code` line, or any assistant-tool attribution. Pipeline output is ForgeDock-branded; the assistant signature must never enter the repo's commit history. (A PreToolUse guard hard-blocks it as a backstop — see `bin/hooks/pre-tool-use.mjs` Rule 5.)
 
 ### V5 Post-Commit Ancestry Audit (MANDATORY)
 

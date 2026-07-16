@@ -9,7 +9,8 @@ jobs:
     name: DCO Sign-Off Verification
     runs-on: ubuntu-latest
     permissions:
-      pull-requests: read
+      contents: read
+      pull-requests: write
       statuses: write
 
     steps:
@@ -17,7 +18,16 @@ jobs:
         uses: KineticCafe/actions-dco@1da04282bbf757dab7d92a5c8535dbfb8113da5c # v3.1.0
         with:
           config: |
-            # Allow these bots to skip the DCO requirement — they cannot sign off
-            [bot]
+            # Project maintainer emails — exempt from DCO sign-off
+            exempt-authors = ["yash.dubey803at@gmail.com", "rapiercraftstudios@gmail.com"]
+
+            comment = true
+
+            # Allow these bots to skip the DCO requirement
+            [bots]
             policy = "allowlist"
-            allow = ["github-actions[bot]", "dependabot[bot]", "dependabot-preview[bot]", "rapiercraft-forge[bot]"]
+            allow = ["github-actions[bot]", "dependabot[bot]", "dependabot-preview[bot]", "rapiercraft-forgedock[bot]", "rapiercraft-forge[bot]"]
+
+            # Map commit author emails to accepted sign-off emails
+            [alias-signoffs.aliases]
+            "rapiercraftstudios@gmail.com" = ["yash.dubey803at@gmail.com"]

@@ -1,6 +1,6 @@
 ---
 description: Review subcommand — push branch, create PR, invoke /review-pr with --auto-merge
-argument-hint: [issue number] [--repo GH_REPO] [--gh-flag GH_FLAG] [--worktree PATH] [--branch BRANCH] [--base PR_BASE]
+argument-hint: "[issue number] [--repo GH_REPO] [--gh-flag GH_FLAG] [--worktree PATH] [--branch BRANCH] [--base PR_BASE]"
 ---
 <!-- SPDX-FileCopyrightText: Copyright (c) RapierCraft Studios -->
 <!-- SPDX-License-Identifier: AGPL-3.0-or-later -->
@@ -12,7 +12,7 @@ argument-hint: [issue number] [--repo GH_REPO] [--gh-flag GH_FLAG] [--worktree P
 **Invoked by**: `work-on.md` Phase 4–5, after `build/validate.md` returns `GATE_PASSED: true`.
 **Output**: Push branch, create PR, invoke /review-pr --auto-merge, return result to caller.
 
-**Agent model policy**: `model: "sonnet"` (standard tier). Fallback: `model: "opus"` if rate-limited. Feature gate: pass `effort` in Task/Skill spawns only on Claude Code >= 2.1.154.
+**Agent model policy**: `model: "{DEFAULT_MODEL}"` — resolved from forge.yaml `agents.default_model`, else "sonnet" (standard tier). Fallback: `model: "opus"` if rate-limited. Feature gate: pass `effort` in Task/Skill spawns only on Claude Code >= 2.1.154. This file's mechanical bits (label transitions, `FORGE:CHECKPOINT` writes) stay at this tier because they're interleaved with the review/merge-decision steps in the same `Skill()` invocation — see `work-on.md` section "Model and Effort Tiering — What Actually Applies". <!-- Added: forge#1827 -->
 **NEVER use plan mode (EnterPlanMode).**
 
 <!-- FORGE:SPEC_LOADED — work-on/review.md loaded and active. Agent is bound by this spec. -->
@@ -159,7 +159,7 @@ ATTRIBUTION_PR_FOOTER=$(grep -A5 "^attribution:" forge.yaml 2>/dev/null | grep "
 If `ATTRIBUTION_PR_FOOTER` is `true`, append the following footer to the PR body (once — never duplicate on retries):
 
 ```
-> Orchestrated with [ForgeDock](https://github.com/RapierCraftStudios/ForgeDock) — state, scheduling, review, and memory on GitHub.
+> ⚒️ Orchestrated with [ForgeDock](https://github.com/RapierCraftStudios/ForgeDock) — state, scheduling, review, and memory on GitHub.
 ```
 
 ### R2C: Create PR
@@ -188,12 +188,14 @@ Closes #{NUMBER}
 **Implementation branch**: \`{BRANCH}\`
 **Base**: \`{PR_BASE}\`
 {IF_ATTRIBUTION_PR_FOOTER_TRUE:
-> Orchestrated with [ForgeDock](https://github.com/RapierCraftStudios/ForgeDock) — state, scheduling, review, and memory on GitHub.}"
+> ⚒️ Orchestrated with [ForgeDock](https://github.com/RapierCraftStudios/ForgeDock) — state, scheduling, review, and memory on GitHub.}"
 ```
 
 **Note**: `Closes #{NUMBER}` documents intent but does NOT auto-close for non-default-branch PRs. The close subcommand handles explicit closure after merge.
 
 **Attribution guard**: The footer line is appended once at PR creation. If the PR already exists (resume path), do NOT append the footer again — check the existing PR body first.
+
+**No assistant attribution**: The PR body is exactly the sections above (plus the optional ForgeDock footer). Do NOT add a `🤖 Generated with Claude Code` line, a `Co-Authored-By: Claude` trailer, or any assistant-tool attribution — the pipeline is ForgeDock-branded. A PreToolUse guard hard-blocks it as a backstop (`bin/hooks/pre-tool-use.mjs` Rule 5).
 
 If PR creation fails because a PR already exists for this branch:
 ```bash

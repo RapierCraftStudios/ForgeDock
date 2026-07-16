@@ -18,8 +18,10 @@ export const SentinelState = {
 };
 
 /**
- * All 13 reserved annotation types from spec §4.
+ * All 16 reserved annotation types from spec §4.
  * Spec ref: §4.1 lifecycle, §4.2 cross-artifact, §4.3 control/error markers.
+ * Added CLAIM and CLAIM_RELEASED in forge#1736 — claims board for claim-level parallelism.
+ * Added AUTOPILOT_CYCLE in forge#1753 — durable cycle state for /autopilot.
  */
 export const RESERVED_TYPES = {
   // §4.1 Lifecycle annotations
@@ -92,6 +94,48 @@ export const RESERVED_TYPES = {
     inlineValue: false,
     requiredFields: [],
   },
+  /**
+   * AUTOPILOT_CYCLE — durable record of one /autopilot execution cycle.
+   * Posted as a comment on the designated ops issue (label: autopilot-ops) at
+   * the end of every cycle so that cycle N+1 can read baseline metrics, compute
+   * deltas, and resume an interrupted cycle without re-executing committed phases.
+   *
+   * Required fields:
+   *   cycle_id      — unique cycle identifier (e.g. "20260708-1" — date + counter)
+   *   timestamp     — ISO-8601 UTC timestamp of cycle start
+   *   baseline      — snapshot of key metrics at cycle start (JSON-encoded string)
+   *   phase_markers — comma-separated list of completed phase names for resume
+   *
+   * Completion sentinel: <!-- FORGE:AUTOPILOT_CYCLE:COMPLETE -->
+   * <!-- Added: forge#1753 — durable cycle state + baseline deltas + resume -->
+   */
+  AUTOPILOT_CYCLE: {
+    type: 'AUTOPILOT_CYCLE',
+    category: Category.LIFECYCLE,
+    completionSentinel: 'FORGE:AUTOPILOT_CYCLE:COMPLETE',
+    partialSentinel: null,
+    inlineValue: false,
+    requiredFields: ['cycle_id', 'timestamp', 'baseline', 'phase_markers'],
+  },
+  /**
+   * CLAIM — an agent's active resource reservation, posted on the coordination issue
+   * (claims board) when the agent begins implementation under an orchestration batch.
+   * Required fields:
+   *   Holder     — the issue/run reference holding this claim (e.g. "#1736 / run-abc")
+   *   Files      — newline-separated list of claimed file paths
+   *   Interfaces — preserved interface contracts (function signatures, API shapes)
+   *   TTL        — auto-expire condition ("terminal state of Holder issue")
+   * Released by posting a CLAIM_RELEASED control marker referencing the same Holder.
+   * <!-- Added: forge#1736 — claims board for claim-level parallelism -->
+   */
+  CLAIM: {
+    type: 'CLAIM',
+    category: Category.LIFECYCLE,
+    completionSentinel: 'CLAIM:COMPLETE',
+    partialSentinel: null,
+    inlineValue: false,
+    requiredFields: ['Holder', 'Files', 'Interfaces', 'TTL'],
+  },
 
   // §4.2 Cross-artifact annotations
   KNOWLEDGE_GIST: {
@@ -163,6 +207,36 @@ export const RESERVED_TYPES = {
     partialSentinel: null,
     inlineValue: false,
     controlMarker: true,
+    requiredFields: [],
+  },
+  /**
+   * CLAIM_RELEASED — posted on the coordination issue when the Holder's issue reaches
+   * a terminal state (workflow:merged, workflow:invalid, needs-human). Signals that all
+   * files and interfaces declared in the preceding CLAIM annotation are no longer held.
+   * Consumers MUST treat any CLAIM without a subsequent CLAIM_RELEASED from the same
+   * Holder as expired when the Holder issue reaches a terminal state.
+   * <!-- Added: forge#1736 — claims board for claim-level parallelism -->
+   */
+  CLAIM_RELEASED: {
+    type: 'CLAIM_RELEASED',
+    category: Category.CONTROL,
+    completionSentinel: null,
+    partialSentinel: null,
+    inlineValue: false,
+    controlMarker: true,
+    requiredFields: [],
+  },
+
+  // §4.2 Machine-surface cross-artifact annotation (Base64url encoded — design decision 2026-07-08)
+  // Format: <!-- FORGE:CARD: v1 sha:{sha8hex} b64:{base64url_of_canonical_json} -->
+  // The inline value carries the full encoding: "v1 sha:XXXXXXXX b64:YYYYYY..."
+  // This is an inline-value type — parse() extracts the full encoding as inlineValue.
+  CARD: {
+    type: 'CARD',
+    category: Category.CROSS_ARTIFACT,
+    completionSentinel: null,
+    partialSentinel: null,
+    inlineValue: true,
     requiredFields: [],
   },
 };

@@ -1,6 +1,6 @@
 ---
 description: Scan for pipeline-orphaned issues stuck in intermediate workflow states and recover them — diagnose each orphan's actual GitHub state, apply recovery actions, clean up worktrees
-argument-hint: [--dry-run | --since <hours> | --issue <number>]
+argument-hint: "[--dry-run | --since <hours> | --issue <number>]"
 ---
 <!-- SPDX-FileCopyrightText: Copyright (c) RapierCraft Studios -->
 <!-- SPDX-License-Identifier: AGPL-3.0-or-later -->
@@ -11,7 +11,7 @@ argument-hint: [--dry-run | --since <hours> | --issue <number>]
 
 Scan ALL open issues with intermediate workflow labels for orphaned state — issues where the agent died mid-pipeline (context expired, rate-limited, crashed) and no active agent is continuing. Diagnose each orphan's actual GitHub state and apply the appropriate recovery action.
 
-**Agent model policy**: `model: "sonnet"`. Fallback: `model: "opus"` if rate-limited.
+**Agent model policy**: `model: "{DEFAULT_MODEL}"` — resolved from forge.yaml `agents.default_model`, else "sonnet". Fallback: `model: "opus"` if rate-limited.
 **NEVER use plan mode (EnterPlanMode).**
 **NEVER use the Agent tool** — recover-orphans re-enters the pipeline via `Skill(skill="work-on", ...)` and `Skill(skill="review-pr", ...)` only.
 
@@ -336,7 +336,7 @@ for NUM in $ORPHAN_LIST; do
       else
         gh issue edit "$NUM" ${GH_FLAG} \
           --add-label "workflow:merged" \
-          --remove-label "workflow:investigating,workflow:ready-to-build,workflow:building,workflow:in-review,workflow:invalid,workflow:decomposed" \
+          --remove-label "workflow:investigating,workflow:ready-to-build,workflow:building,workflow:in-review,workflow:awaiting-merge,workflow:invalid,workflow:decomposed" \
           2>/dev/null || true
         gh issue close "$NUM" ${GH_FLAG} \
           --comment "Closed by /recover-orphans: PR #${PR_NUM} was already merged. Labels corrected." \
@@ -362,7 +362,7 @@ for NUM in $ORPHAN_LIST; do
             2>/dev/null || true
           gh issue edit "$NUM" ${GH_FLAG} \
             --add-label "workflow:merged" \
-            --remove-label "workflow:investigating,workflow:ready-to-build,workflow:building,workflow:in-review,workflow:invalid,workflow:decomposed" \
+            --remove-label "workflow:investigating,workflow:ready-to-build,workflow:building,workflow:in-review,workflow:awaiting-merge,workflow:invalid,workflow:decomposed" \
             2>/dev/null || true
         fi
       fi
@@ -378,7 +378,7 @@ for NUM in $ORPHAN_LIST; do
         Skill(skill="review-pr", args="${PR_NUM} --auto-merge --issue ${NUM} --gh-flag ${GH_FLAG}")
         # After review: update label
         gh issue edit "$NUM" ${GH_FLAG} --add-label "workflow:in-review" \
-          --remove-label "workflow:building" 2>/dev/null || true
+          --remove-label "workflow:building,workflow:awaiting-merge" 2>/dev/null || true
       fi
       RECOVERY_RESULTS="${RECOVERY_RESULTS}| #${NUM} | review-pr | PR #${PR_NUM} submitted for review |\n"
       ;;
@@ -401,7 +401,7 @@ for NUM in $ORPHAN_LIST; do
         echo "  [DRY-RUN] Would: remove workflow:investigating, workflow:ready-to-build, workflow:building, workflow:in-review"
       else
         gh issue edit "$NUM" ${GH_FLAG} \
-          --remove-label "workflow:investigating,workflow:ready-to-build,workflow:building,workflow:in-review" \
+          --remove-label "workflow:investigating,workflow:ready-to-build,workflow:building,workflow:in-review,workflow:awaiting-merge" \
           2>/dev/null || true
         gh issue comment "$NUM" ${GH_FLAG} \
           --body "<!-- FORGE:ORPHAN_RECOVERED -->

@@ -29,9 +29,12 @@ echo "forge.yaml" >> .gitignore  # if your credentials path is sensitive
 |----------|----------|
 | `FORGE_NO_MOTION=1` | Same effect as `--fast` — disables animation frames. Color is unaffected. |
 | `NO_COLOR=1` | Disables ANSI color output only. Motion is unaffected (monochrome choreography). |
+| `FORGEDOCK_INIT_BACKEND=cli\|api\|none\|auto` | Overrides AI-enrichment backend selection for `init` (see below). Default `auto` (or unset) preserves the CLI-first ladder. |
 | Non-TTY / piped output (or `CI=1`) | Plain sequential log: no color **and** no animation. |
 
-The default (no flags) is the annotated review screen: detection runs, AI enrichment fills in what it can (when an API key is available), and you review the result on a single screen — Enter accepts everything, low-confidence fields are flagged with a `# TODO(forgedock:<field>)` comment if left unedited.
+The default (no flags) is the annotated review screen: detection runs, AI enrichment fills in what it can — using a local, authenticated `claude` CLI when available, otherwise falling back to the Anthropic API when `ANTHROPIC_API_KEY` is set, otherwise skipped — and you review the result on a single screen — Enter accepts everything, low-confidence fields are flagged with a `# TODO(forgedock:<field>)` comment if left unedited.
+
+If you have both a local `claude` CLI and `ANTHROPIC_API_KEY` set and want to pin one explicitly instead of letting `init` prefer the CLI, set `FORGEDOCK_INIT_BACKEND=api` (or `=cli`, or `=none` to skip enrichment entirely). This is independent of `FORGEDOCK_BACKEND`, which controls the separate `forgedock run` engine backend.
 
 ---
 
@@ -42,6 +45,7 @@ The default (no flags) is the annotated review screen: detection runs, AI enrich
 | [`project`](#project-required) | **Yes** | GitHub identity (owner, repo, name) |
 | [`paths`](#paths-required) | **Yes** | Local filesystem locations |
 | [`branches`](#branches-required) | **Yes** | Branch naming conventions |
+| [`agents`](#agents-optional) | No | Default model for pipeline agents |
 | [`repos`](#repos-optional) | No | Multi-repository routing |
 | [`project_board`](#project_board-optional) | No | GitHub Projects v2 integration |
 | [`services`](#services-optional) | No | External service URLs and IDs |
@@ -122,6 +126,40 @@ branches:
 - Issue has milestone → feature lane → PR targets branch matching `branches.feature_pattern`
 
 **Commands that use this section**: `work-on`, `review-pr`, `cleanup`
+
+---
+
+## `agents` (OPTIONAL)
+
+Model configuration for pipeline agents. `default_model` governs the main agent — the one you invoke directly (`work-on`, `orchestrate`, `review-pr`, etc.), referenced by every command spec's "Agent model policy" line. `subagent_model` governs the **child** sub-agents that a top-level command spawns internally — e.g. `/orchestrate`'s per-issue `/work-on` agents, `/review-pr`'s domain persona reviewers, `/analytics`'s parallel data-collection agents, `/incident-response`'s validation/root-cause agents.
+
+```yaml
+agents:
+  default_model: "sonnet"
+  subagent_model: "sonnet"
+```
+
+| Field | Type | Required | Default | Description |
+|-------|------|----------|---------|-------------|
+| `default_model` | string | No | `"sonnet"` | Short alias — `"sonnet"`, `"opus"`, or `"haiku"` — the same values the Agent/Task tool's `model` parameter accepts. This is the only form that works for interactive command-spec sub-agent spawning. |
+| `subagent_model` | string | No | `default_model`, else `"sonnet"` | Short alias, same accepted values as `default_model`. Overrides the model used for child agents spawned internally by a top-level command (see above). Omit to inherit `default_model`. |
+
+**Resolution order** (highest precedence first):
+1. `--model <id>` — CLI flag, `npx forgedock run` only (headless; main agent only).
+2. `FORGEDOCK_MODEL` env var — headless runner only (main agent only).
+3. `agents.default_model` — this field. Governs the main agent.
+4. Hardcoded default — `"sonnet"` for interactive agents, `"claude-sonnet-5"` for the headless runner (`bin/runner.mjs`'s `DEFAULT_MODEL`).
+
+**Sub-agent resolution order** (highest precedence first):
+1. `agents.subagent_model` — this field. Governs child agents spawned by a top-level command.
+2. `agents.default_model` — falls back here when `subagent_model` is unset.
+3. Hardcoded default — `"sonnet"`.
+
+**Headless runner note**: `bin/runner.mjs` (`npx forgedock run`, used for CI/headless invocations) calls the Anthropic SDK directly and also accepts a full Anthropic model ID here as a pass-through escape hatch (e.g. `"claude-opus-4-6"`). A full model ID does **not** work for interactive Agent/Task tool calls in command specs — those only accept the short-alias enum (`sonnet`/`opus`/`haiku`/`fable`). Prefer the short alias unless you specifically need a headless-only override. `subagent_model` is interactive-only — it has no headless-runner equivalent, since the headless runner does not spawn child sub-agents.
+
+Projects without this section see no behavior change — everything defaults exactly as it did before these fields existed.
+
+**Commands that use this section**: all commands with an "Agent model policy" line (`default_model`, nearly every command spec) and all commands that spawn internal sub-agents — `orchestrate`, `review-pr`, `analytics`, `incident-response` (`subagent_model`).
 
 ---
 
@@ -571,6 +609,26 @@ Colors are grouped by semantic meaning:
 
 ---
 
+## GitHub App Install
+
+During `npx forgedock`, the installer prompts you to install the ForgeDock GitHub App (`rapiercraft-forgedock`) on your account or org.
+
+**What installing it does today**: registers the app against the account/org you choose. That's it.
+
+**What it does NOT do (yet)**:
+- It does **not** create a bot token. GitHub App *installation* tokens can only be minted with the app's private key, and that key is held solely by RapierCraft Studios (the app's owner) — your installation grants *your* installation ID against *RapierCraft's* app, not a key you can use yourself.
+- It does **not** auto-refresh anything, and there is no background process managing token expiry.
+- It does **not** change which `gh` auth context pipeline commands (`/work-on`, `/orchestrate`, etc.) use. Every pipeline `gh` call always uses whatever auth is currently active in your shell — your personal token unless you've manually configured something else.
+- It does **not** wire up webhook-driven "automatic pipeline triggers" — no webhook receiver exists yet.
+
+**Why this matters**: GitHub App installation tokens get materially higher API rate limits than a personal access token, and actions taken with them are attributed to the bot (`rapiercraft-forgedock[bot]`) rather than your personal account. Those benefits are real, but delivering them to arbitrary installers requires a hosted token-minting backend service that doesn't exist yet (tracked as forge#1890). Installing the app today is safe and free, but on its own changes nothing about how the pipeline authenticates.
+
+`npx forgedock doctor` reports this status explicitly (Check 12: "GitHub App / bot token") so you aren't left guessing whether a bot token is active.
+
+**If you want bot-token behavior today**: you'd need to register your own GitHub App (with your own private key), and drive your own token-refresh loop (mint an installation token via the app's `/app/installations/{id}/access_tokens` API, then `gh auth login --with-token`, repeating before the ~1-hour expiry). This is an advanced, self-hosted setup — ForgeDock does not package a generic version of this for you.
+
+---
+
 ## `marketing` (OPTIONAL)
 
 Controls opt-in growth features such as 'Powered by ForgeDock' footers on PR descriptions created by the pipeline.
@@ -686,7 +744,7 @@ const draft = await detectConfig(process.cwd());
 
 Downstream consumers read `field.value` for the raw value and `field.confidence` to decide how to handle it:
 
-- **`init-enrich`** (AI enrichment): passes `low`- and `medium`-confidence fields to the AI backend to raise their confidence; leaves `high`-confidence fields untouched.
+- **`init-enrich`** (AI enrichment): passes `low`- and `medium`-confidence fields to the selected AI backend (a local `claude` CLI when available, otherwise the Anthropic API with `ANTHROPIC_API_KEY`) to raise their confidence; leaves `high`-confidence fields untouched.
 - **`review-render`** (TUI review screen): shows each field with its source and why; highlights `low`-confidence fields with a `# TODO(forgedock:<field>)` annotation in the generated YAML.
 
 ---
@@ -727,6 +785,53 @@ npx forgedock status   # show the current directory's resolved state
 ```
 
 See [Per-Directory State Registry](#per-directory-state-registry) below for how opt-out state is tracked.
+
+---
+
+## Persisted Toolset Home (`~/.forge/`)
+
+`npx`/`npm` never installs `forgedock` to a stable location on your machine — it resolves to wherever `npx`'s cache (or a global npm install, or a git clone) happens to physically live. Historically, `~/.claude/commands/` and the SessionStart hook's script path were symlinked **directly** from that ephemeral location. When npm/npx (or the OS) later evicted its cache, those symlinks silently dangled — Claude Code sessions stopped getting ForgeDock context with no error shown.
+
+As of this feature, every `npx forgedock` (or `npx forgedock update`) run copies ForgeDock's own installable payload into a stable, version-independent home:
+
+```
+~/.forge/
+  bin/          — the same bin/ tree bundled with the resolved package (hooks, CLI entry points)
+  commands/     — the slash-command specs (.md)
+  scripts/      — the universal pipeline-agent scripts (classify-lane.sh, etc.)
+  templates/    — scaffold templates (e.g. the demo repo)
+  version       — plain-text file containing the source package's version (e.g. "1.7.2")
+```
+
+`~/.claude/commands/` symlinks and the SessionStart hook's baked-in script path are then built from **this** copy, not the original ephemeral source — so they keep working even after the npm/npx cache that originally served them is cleared.
+
+### When It Runs
+
+| Command | Behavior |
+|---------|----------|
+| `npx forgedock` / `npx forgedock install` | Copies the resolved package's payload into `~/.forge/` (content-compared — unchanged files are never rewritten) before linking commands, then links from `~/.forge/`, not the original source |
+| `npx forgedock init` | Does not touch `~/.forge/` — `init` only writes `forge.yaml`, it never installs commands |
+| `npx forgedock update` (npm/npx install) | Refreshes `~/.forge/` from whatever the currently-resolved package looks like, then relinks |
+| `npx forgedock update` (git-clone install) | **Does not** touch `~/.forge/` at all — see the exemption below |
+| `npx forgedock doctor` | Reports `~/.forge/version` and confirms `~/.forge/{bin,commands,scripts,templates}` exist |
+
+The copy is idempotent: files whose content is already byte-identical are never rewritten, so steady-state re-runs are fast and don't generate false "updated" noise.
+
+### The Git-Clone Exemption
+
+If you run ForgeDock from a git clone (or a git worktree) of the repo itself — the development/self-hosted install mode — nothing is copied into `~/.forge/`. A git clone is already a stable, user-owned location; copying it into `~/.forge/` and linking commands from the copy instead of the clone would silently disconnect `git pull` (or `npx forgedock update`'s git branch) from what's actually linked into `~/.claude/commands/`. So:
+
+- `~/.claude/commands/` continues to symlink directly from the clone, exactly as before this feature.
+- `~/.forge/{bin,commands,scripts,templates}` correctly does **not** exist for this install mode — `npx forgedock doctor` treats that absence as healthy, not a warning.
+
+### Not the Same as `~/.forge/{runs,index}`
+
+`~/.forge/` also hosts two **unrelated, pre-existing** directories used by other parts of ForgeDock:
+
+- `~/.forge/runs/` — durable engine run state for `npx forgedock run-issue` / `resume-stalled` (see `bin/engine.mjs`).
+- `~/.forge/index/` — the `recall` knowledge index (see `bin/recall.mjs`, `docs/FORGE-PROTOCOL.md`).
+
+These are **engine data**, not the toolset itself, and this feature does not read, write, or otherwise change them. `~/.forge/{bin,commands,scripts,templates,version}` (this section) and `~/.forge/{runs,index}` (engine data) are unrelated siblings that merely happen to live under the same `~/.forge/` root — don't conflate the two when reading `~/.forge/`'s contents.
 
 ---
 
@@ -807,6 +912,90 @@ npx forgedock enable [dir]   # Remove a directory from the opt-out set (default:
 npx forgedock disable [dir]  # Add a directory to the opt-out set (default: cwd)
 npx forgedock status [dir]   # Show a directory's resolved state (default: cwd)
 ```
+
+---
+
+## Install Receipt
+
+ForgeDock writes a machine-readable receipt of what the last install or update actually did, so debugging drift (wrong commands installed, wrong tier, stale hooks) can start from a recorded fact instead of re-deriving state from scratch.
+
+### Receipt File Location
+
+```
+~/.forge/install-receipt.json
+```
+
+The directory (`~/.forge/`) is created automatically on first write with `mkdir(..., { recursive: true })`. The file is never committed to version control — it is per-user, per-machine state.
+
+### When It's Written
+
+- After every successful `npx forgedock install` (end of the onboarding journey, right after the "Forged." celebration screen).
+- After every `npx forgedock update` — both the git-clone branch (fast-forward pull) and the npm branch (version-check advisory) route through the same repair step (`relinkAndHint()`), so the receipt is refreshed either way.
+
+The write is best-effort and never blocks or fails the install/update it records: any error (permission denied, disk full, unusual `FORGE_HOME` layout) degrades silently to a no-op, matching the fail-open contract already used by the command-manifest and hook-registration steps.
+
+### Receipt Schema
+
+```json
+{
+  "schemaVersion": 1,
+  "timestamp": "2026-07-10T12:00:00.000Z",
+  "forgedockVersion": "1.1.6",
+  "installMode": "npm",
+  "forgeHome": "/home/user/.npm/_npx/abc123/node_modules/forgedock",
+  "cwd": "/home/user/projects/my-repo",
+  "platform": {
+    "platform": "linux",
+    "platformLabel": "Linux",
+    "isWSL": false,
+    "wslDistro": null,
+    "shell": "bash"
+  },
+  "tier": "core",
+  "commands": {
+    "count": 42,
+    "list": ["work-on", "review-pr", "quality-gate", "orchestrate/phase-1-resolve"]
+  },
+  "hooks": {
+    "sessionStart": "registered",
+    "preToolUse": "registered",
+    "subagentStopEnforce": null
+  },
+  "forgeYaml": {
+    "present": true,
+    "validShape": true
+  }
+}
+```
+
+| Field | Type | Description |
+|-------|------|--------------|
+| `schemaVersion` | number | Schema version — currently `1` |
+| `timestamp` | string | ISO-8601 timestamp of this install/update |
+| `forgedockVersion` | string | `version` field from `{forgeHome}/package.json` (empty string if unreadable) |
+| `installMode` | `"npm"` \| `"git-clone"` | Detected from whether `{forgeHome}/.git` exists — same predicate `update()` already uses to choose its update strategy |
+| `forgeHome` | string | Absolute path to the ForgeDock package install (`FORGE_HOME`) |
+| `cwd` | string | Absolute path to the project directory the command was run in |
+| `platform` | object | `detectEnvironment()`'s output — platform, human label, WSL status/distro, detected shell |
+| `tier` | `"core"` \| `"extras"` | Whether `--extras` was passed (opt-in command tier, see `install: extras` frontmatter) |
+| `commands` | object | `count` and `list` (relative slash-command names) of everything installed for the resolved tier, sourced from `findMarkdownFiles()` — never a separately maintained list |
+| `hooks.sessionStart` | string \| null | SessionStart hook registration status (`"registered"`, `"already"`, `"skipped-malformed"`) |
+| `hooks.preToolUse` | string \| null | PreToolUse enforcement hook status, or `null` when the installed Claude Code version doesn't support it |
+| `hooks.subagentStopEnforce` | string \| null | Cleanup status of the (retired) SubagentStop enforce hook |
+| `forgeYaml.present` | boolean | Whether `forge.yaml` exists in `cwd` at receipt-write time |
+| `forgeYaml.validShape` | boolean | Whether `forge.yaml` contains the 3 required top-level sections (`project:`, `paths:`, `branches:`) — a lightweight regex check, not a full YAML parse |
+
+### No PII or Secrets
+
+The receipt never contains `process.env` values, GitHub tokens, API keys, or the contents of `forge.yaml` — only the `present`/`validShape` booleans above. Absolute filesystem paths (`forgeHome`, `cwd`) are included for drift debugging; they typically contain the OS username but nothing more sensitive, consistent with other per-machine ForgeDock state (e.g. `registry.json`'s path-keyed entries, see above).
+
+### Reading the Receipt
+
+```bash
+cat ~/.forge/install-receipt.json
+```
+
+There is no CLI subcommand to read it yet — `doctor()` reading the receipt to detect drift is a deliberately deferred stretch goal, not part of this feature.
 
 ---
 

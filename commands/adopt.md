@@ -1,6 +1,6 @@
 ---
 description: Bootstrap an existing repo for ForgeDock — triage open issues, apply labels, suggest a starter milestone, and identify first /work-on candidates
-argument-hint: [--dry-run | --limit <N> | --milestone | --no-milestone]
+argument-hint: "[--dry-run | --limit <N> | --milestone | --no-milestone]"
 install: extras
 ---
 
@@ -12,7 +12,7 @@ You onboard an existing repo into the ForgeDock pipeline. Unlike `/forgedock-ini
 
 Run `/adopt` once after `npx forgedock init` + `/forgedock-init` to make a legacy backlog pipeline-ready without touching the issues themselves.
 
-**Agent model policy**: `model: "sonnet"` (standard tier). Fallback: `model: "opus"` if rate-limited. Feature gate: pass `effort` in Task/Skill spawns only on Claude Code >= 2.1.154.
+**Agent model policy**: `model: "{DEFAULT_MODEL}"` — resolved from forge.yaml `agents.default_model`, else "sonnet" (standard tier). Fallback: `model: "opus"` if rate-limited. Feature gate: pass `effort` in Task/Skill spawns only on Claude Code >= 2.1.154.
 **NEVER use plan mode (EnterPlanMode).**
 
 <!-- FORGE:SPEC_LOADED — adopt.md loaded and active. Agent is bound by this spec. -->

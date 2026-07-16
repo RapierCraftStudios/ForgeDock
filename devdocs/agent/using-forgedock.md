@@ -21,7 +21,7 @@ ForgeDock agents running on this repository are running ForgeDock to improve For
 - Bugs found during pipeline runs surface immediately as pipeline failures
 - Any improvement to command specs takes effect in the NEXT pipeline run (not the current one)
 
-**Implication for agents**: When a command spec has a bug you observe during execution, do NOT work around it silently. Create a GitHub issue via `gh issue create` and note the observation. The fix will be addressed by a subsequent `/work-on` run.
+**Implication for agents**: When a command spec has a bug you observe during execution, do NOT work around it silently. Create a GitHub issue via `/issue` (never a raw `gh issue create` — see "Issue Creation" below) and note the observation. The fix will be addressed by a subsequent `/work-on` run.
 
 ---
 
@@ -66,7 +66,7 @@ commands/              # Authoritative pipeline specs — what agents READ and E
   quality-gate.md      # Pre-commit checks (14+ domains)
   autopilot.md         # Self-improvement cycle
 bin/                   # npm installer
-  forgedock.mjs        # npx forgedock — project-scoped install (default); npx forgedock --global installs into ~/.claude/commands/
+  forgedock.mjs        # npx forgedock — always installs into ~/.claude/commands/ (--global accepted but is a no-op)
 scripts/               # Universal deterministic scripts (ship with npm)
   classify-lane.sh     # Lane routing: milestone → feature lane, no milestone → staging
   transition-label.sh  # Label state machine validation
@@ -113,7 +113,7 @@ Runs the full pipeline for a single issue. Re-invoking picks up from the last st
 /work-on next     # pick highest-priority open issue
 ```
 
-**When dogfooding**: `/work-on` reads its own spec from the project-scoped install location (symlinked from `commands/work-on.md`). On a global install (`--global`), the spec lives at `~/.claude/commands/work-on.md`. Changes to `commands/work-on.md` take effect in the NEXT session, not the current one.
+**When dogfooding**: `/work-on` reads its own spec from `~/.claude/commands/work-on.md` (symlinked from `commands/work-on.md` — install is always global). Changes to `commands/work-on.md` take effect in the NEXT session, not the current one.
 
 ### `/orchestrate [milestone_slug]`
 
@@ -138,9 +138,36 @@ Runs a multi-agent code review. Findings become separate GitHub issues.
 
 Pre-commit checks: dead code, missing error handling, security anti-patterns, performance.
 
-### `/issue [description]`
+### `/issue [description]` — the required path for issue creation
 
-Creates a well-structured GitHub issue with all mandatory pipeline sections.
+Creates a well-structured GitHub issue with all mandatory pipeline sections. **`/issue` is the enforced create-hook for every issue this pipeline creates — raw `gh issue create` is not an acceptable substitute** (see `devdocs/agent/github-cli-patterns.md` → "Issue Creation — Use `/issue`" for the rule and its one exception, the orchestrate claims board). `/issue` runs dedup and mandatory-section validation that a raw `gh issue create` call skips entirely.
+
+Also accepts a programmatic form for callers that have already composed the fields — `Skill(skill="issue", args="--title \"...\" --body-file <path> --label \"...\" [--milestone \"...\"] [--dry-run]")` — which skips free-text parsing and drafting but still runs dedup and body validation. See `commands/issue.md` → Programmatic Invocation Contract.
+
+**Worked example** — a command/skill that has already drafted a title and body (e.g. an audit tool, `/work-on` decomposition, or a review-finding writer) creates the issue like this:
+
+```bash
+# 1. Write the composed body to a file (avoids shell-quoting the full markdown body)
+cat > /tmp/finding-body.md <<'EOF'
+## Problem
+
+{concise description of what's wrong}
+
+## Affected Files
+
+1. `path/to/file.ts` — {what needs to change}
+
+## Acceptance Criteria
+
+- [ ] {specific, testable criterion} [type:manual]
+EOF
+
+# 2. Invoke /issue programmatically — skips Phase 1 (parse) and Phase 3 (draft),
+#    but still runs Phase 2D (dedup) and Phase 3F (pre-create validation)
+Skill(skill="issue", args="--title \"fix(worker): queue leak in task_processor\" --body-file /tmp/finding-body.md --label bug --label P2")
+```
+
+Any new command or skill that needs to create an issue programmatically MUST use this pattern — not a direct `gh issue create` call — so it inherits dedup and validation automatically.
 
 ### `/cleanup`
 

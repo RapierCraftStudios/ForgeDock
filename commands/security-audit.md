@@ -1,6 +1,6 @@
 ---
 description: Periodic security posture audit — runs a scripted 4-phase checklist against repo files (not diffs), creates GitHub issues for confirmed findings
-argument-hint: [--repo <prefix>] [--phase 1|2|3|4|all] [--dry-run]
+argument-hint: "[--repo <prefix>] [--phase 1|2|3|4|all] [--dry-run]"
 install: extras
 ---
 <!-- SPDX-FileCopyrightText: Copyright (c) RapierCraft Studios -->
@@ -19,7 +19,7 @@ This command is designed to be run:
 
 This is NOT a PR review — it does not approve or block. It creates issues for each gap found.
 
-**Agent model policy**: `model: "sonnet"`, `effort: xhigh` (deep tier — comprehensive security analysis). Fallback: `model: "opus"` if rate-limited. Feature gate: pass `effort` only on Claude Code >= 2.1.154.
+**Agent model policy**: `model: "{DEFAULT_MODEL}"` — resolved from forge.yaml `agents.default_model`, else "sonnet", `effort: xhigh` (deep tier — comprehensive security analysis). Fallback: `model: "opus"` if rate-limited. Feature gate: pass `effort` only on Claude Code >= 2.1.154.
 **NEVER use plan mode (EnterPlanMode).**
 
 ---
@@ -515,20 +515,18 @@ gh label create "priority:P3" --color "C2E0C6" --description "Low priority — m
 
 ### 5C: Create GitHub issues for CONFIRMED findings
 
-For each CONFIRMED finding (not REVIEW-only), create an issue:
+For each CONFIRMED finding (not REVIEW-only), create an issue — routed through the `/issue` create-hook's programmatic invocation contract (see `commands/issue.md` → Programmatic Invocation Contract) so dedup and mandatory-section validation run on every finding:
 
 ```bash
-gh issue create -R "{GH_REPO}" \
-  --title "{ISSUE_TITLE}" \
-  --label "security,audit-finding,{SEVERITY}" \
-  --body "$(cat <<'ISSUE_EOF'
+SECURITY_BODY_FILE=$(mktemp)
+cat > "$SECURITY_BODY_FILE" <<'ISSUE_EOF'
 ## Problem
 
 {2-3 sentences describing the finding, its location, and exploitation path.}
 
 ## Evidence
 
-**File**: \`{FILE}\`
+**File**: `{FILE}`
 **Line**: {LINE}
 **Finding**: {GREP_OUTPUT}
 
@@ -538,22 +536,27 @@ gh issue create -R "{GH_REPO}" \
 
 ## Affected Files
 
-1. \`{FILE}\` — {what needs to change}
+1. `{FILE}` — {what needs to change}
 
 ## Acceptance Criteria
 
 - [ ] {Specific remediation step}
-- [ ] Verified by re-running \`/security-audit\` after fix
+- [ ] Verified by re-running `/security-audit` after fix
 
 ## Context
 
 **Audited at**: {TIMESTAMP}
 **Audit phase**: {PHASE}
 **Severity**: {SEVERITY}
-**Source**: \`/security-audit\` run on \`{GH_REPO}\`
+**Source**: `/security-audit` run on `{GH_REPO}`
 ISSUE_EOF
-)"
 ```
+
+```
+Skill(skill="issue", args="--title \"{ISSUE_TITLE}\" --body-file \"$SECURITY_BODY_FILE\" --label \"security\" --label \"audit-finding\" --label \"{SEVERITY}\"")
+```
+
+`security`, `audit-finding`, and `{SEVERITY}` are each passed as their own `--label` flag — `/issue`'s programmatic mode does not comma-split a single `--label` value. Note: `/issue` resolves the target repo from `forge.yaml → project.owner/repo` (or the satellite-prefix table), not from a caller-supplied `-R`/`--repo` flag — this is correct for the common case where `{GH_REPO}` matches `forge.yaml`'s project repo.
 
 ### 5D: Post audit summary comment (if invoked from a GitHub issue context)
 

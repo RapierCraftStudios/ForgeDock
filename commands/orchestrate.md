@@ -1,6 +1,6 @@
 ---
 description: Orchestrate parallel work on multiple issues or an entire milestone — spawns sub-agents that each run the full /work-on pipeline
-argument-hint: [milestone <slug> | #1 #2 #3 | next <N> | fast-lane | priority:P0]
+argument-hint: "[milestone <slug> | #1 #2 #3 | next <N> | fast-lane | priority:P0]"
 ---
 <!-- SPDX-FileCopyrightText: Copyright (c) RapierCraft Studios -->
 <!-- SPDX-License-Identifier: AGPL-3.0-or-later -->

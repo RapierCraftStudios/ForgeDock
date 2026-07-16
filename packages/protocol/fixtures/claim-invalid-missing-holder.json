@@ -1,0 +1,10 @@
+{
+  "description": "CLAIM — invalid annotation missing required Holder field",
+  "input": "<!-- FORGE:CLAIM -->\n## Resource Claim\n\n**Files**: commands/orchestrate/phase-3-dependency.md\n**Interfaces**: Step 3C conflict detection API\n**TTL**: terminal state of Holder issue\n\n<!-- CLAIM:COMPLETE -->",
+  "expect": {
+    "type": "CLAIM",
+    "valid": false,
+    "sentinelState": "complete",
+    "errorIncludes": "Holder"
+  }
+}

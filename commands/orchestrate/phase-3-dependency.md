@@ -1,5 +1,5 @@
 ---
-install: internal
+install: core
 ---
 <!-- SPDX-FileCopyrightText: Copyright (c) RapierCraft Studios -->
 <!-- SPDX-License-Identifier: AGPL-3.0-or-later -->
@@ -28,17 +28,28 @@ done
 For each issue, estimate which domains it touches based on title, body, and labels. This improves DAG construction — issues in the same domain likely touch the same files and should be serialized (one becomes a predecessor of the other).
 
 ```bash
+declare -A ISSUE_DOMAIN   # issue → comma-separated matched domain tags, or "NONE" (forge#1913)
 for NUM in {issue_numbers}; do
   ISSUE=$(gh issue view $NUM --json title,body,labels --jq '{title: .title, labels: [.labels[].name], body: (.body[:300])}')
   echo "=== #$NUM ==="
-  echo "$ISSUE" | grep -qiE "credit|billing|pricing|stripe|charge|refund" && echo "  BILLING" || true
-  echo "$ISSUE" | grep -qiE "auth|session|jwt|login|permission|oauth" && echo "  AUTH" || true
-  echo "$ISSUE" | grep -qiE "worker|queue|job|task|background|consumer" && echo "  WORKER" || true
-  echo "$ISSUE" | grep -qiE "migration|\.sql|database|postgres|alembic" && echo "  DATABASE" || true
-  echo "$ISSUE" | grep -qiE "component|page|layout|dashboard|ui|ux|frontend|web/src" && echo "  FRONTEND" || true
-  echo "$ISSUE" | grep -qiE "docker|deploy|traefik|nginx|ci|cd|infra|github.action" && echo "  INFRA" || true
-  echo "$ISSUE" | grep -qiE "llm|extract|schema|format|embedding|model" && echo "  AI" || true
+  MATCHED_DOMAINS=()
+  if echo "$ISSUE" | grep -qiE "credit|billing|pricing|stripe|charge|refund"; then echo "  BILLING"; MATCHED_DOMAINS+=("BILLING"); fi
+  if echo "$ISSUE" | grep -qiE "auth|session|jwt|login|permission|oauth"; then echo "  AUTH"; MATCHED_DOMAINS+=("AUTH"); fi
+  if echo "$ISSUE" | grep -qiE "worker|queue|job|task|background|consumer"; then echo "  WORKER"; MATCHED_DOMAINS+=("WORKER"); fi
+  if echo "$ISSUE" | grep -qiE "migration|\.sql|database|postgres|alembic"; then echo "  DATABASE"; MATCHED_DOMAINS+=("DATABASE"); fi
+  if echo "$ISSUE" | grep -qiE "component|page|layout|dashboard|ui|ux|frontend|web/src"; then echo "  FRONTEND"; MATCHED_DOMAINS+=("FRONTEND"); fi
+  if echo "$ISSUE" | grep -qiE "docker|deploy|traefik|nginx|ci|cd|infra|github.action"; then echo "  INFRA"; MATCHED_DOMAINS+=("INFRA"); fi
+  if echo "$ISSUE" | grep -qiE "llm|extract|schema|format|embedding|model"; then echo "  AI"; MATCHED_DOMAINS+=("AI"); fi
   # For project-specific domains, configure keywords in forge.yaml → review.domains and extend above
+
+  # Materialize the result — every issue gets an explicit ISSUE_DOMAIN entry, even when no
+  # keyword matched ("NONE"). This is what Step 3D.6's completion gate checks for key presence
+  # (not truthiness) — an un-set key means this loop never ran for that issue. <!-- forge#1913 -->
+  if [ "${#MATCHED_DOMAINS[@]}" -eq 0 ]; then
+    ISSUE_DOMAIN[$NUM]="NONE"
+  else
+    ISSUE_DOMAIN[$NUM]=$(IFS=,; echo "${MATCHED_DOMAINS[*]}")
+  fi
 done
 ```
 
@@ -48,7 +59,7 @@ done
 - BILLING + AUTH issues should be prioritized early (security-critical)
 - **DATABASE issues are ALWAYS serialized — hard rule, no exceptions.** Multiple agents writing migrations simultaneously will produce duplicate migration numbers (e.g., two `0067_*.sql` files), which breaks the migration runner. DATABASE issues form a linear predecessor chain in the DAG. If 3 DATABASE issues are in a batch: A has no predecessors, B has {A} as predecessor, C has {B} as predecessor.
 
-**Store domain tags per issue** for use in the plan presentation (Step 3E).
+**Domain tags are stored in `ISSUE_DOMAIN[$NUM]`** (materialized above) for use in the plan presentation (Step 3E) and the Step 3D.6 completion gate.
 
 ### Step 3C: Multi-layer conflict detection
 
@@ -60,6 +71,8 @@ Domain estimation (above) catches broad category overlap but misses cases where 
 
 ```bash
 LAYER1_FILES=()
+declare -A EDGE_KIND   # "{PRED}:{SUCCESSOR}" → same-file | directory | shared-module (forge#1860)
+declare -A EDGE_FILES  # "{PRED}:{SUCCESSOR}" → the specific file(s) that triggered the edge (forge#1860)
 for NUM in {issue_numbers}; do
   echo "=== #$NUM ==="
   FILES_FOR_NUM=$(gh api repos/{GH_REPO}/issues/${NUM}/comments \
@@ -86,6 +99,7 @@ done
 - If two issues share ANY affected file → one MUST be a predecessor of the other (serialized)
 - The issue with lower issue number goes first (stable ordering), unless an explicit `Depends on #` says otherwise
 - Add a conflict note to the DAG plan: "#{A} and #{B} both modify `{file}` — #{A} is predecessor of #{B}"
+- **Record the edge kind and shared file(s)** <!-- Added: forge#1860 -->: alongside the predecessor relationship, set `EDGE_KIND["${A}:${B}"]="same-file"` and `EDGE_FILES["${A}:${B}"]="{file}"` (space-separated if multiple files overlap). Layer 1 is the only point where the specific overlapping file is known — Step 3D's DAG only records that a predecessor relationship exists, not why. `EDGE_KIND`/`EDGE_FILES` have two consumers in `phase-4-execution.md` Step 4B: (1) the DONE-case "same-file current-state brief" forwarding (forge#1860, unchanged), and (2) `verify_file_overlap_edge()` (forge#1904), which re-checks this guessed file list against the predecessor's *actual* PR diff once it reaches FAILED or GATED — since Layer 1's file list is extracted from a pre-build investigation guess or a raw issue-body parse, never from real code, it can be wrong, and a predecessor that concludes without ever touching the guessed file should not keep a dependent gated/skipped on it. See `phase-4-execution.md`'s "File-overlap edge re-verification" section for the full mechanism.
 
 #### Layer 2: Directory-proximity detection
 
@@ -112,6 +126,7 @@ done
   - `web/src/lib/` (shared utilities)
   - `shared/` (volume-mounted, affects all services)
   - `infra/migrations/` (already covered by DATABASE hard rule, but explicit here too)
+- **Record the edge kind and shared directory** <!-- Added: forge#1860 -->: whenever this layer actually serializes a pair (small-directory match, broad-directory + same-domain match, or a known high-conflict directory), set `EDGE_KIND["${A}:${B}"]="directory"` and `EDGE_FILES["${A}:${B}"]="{shared_directory}"`. Same consumption contract as Layer 1 — read by Step 4B's same-file brief forwarding.
 
 #### Layer 3: Shared-module inference
 
@@ -149,6 +164,11 @@ HIGH_FAN_IN = [
 
 # For each issue, check if affected files include a high-fan-in file
 # If yes: that issue cannot be parallelized with any other issue touching the same service
+
+# Record edge metadata for any pair actually serialized by this layer <!-- Added: forge#1860 -->:
+#   EDGE_KIND["${A}:${B}"]="shared-module"
+#   EDGE_FILES["${A}:${B}"]="{the shared high-fan-in file, or the inferred barrel/init/registry module}"
+# Same consumption contract as Layers 1-2 — read by Step 4B's same-file brief forwarding.
 ```
 
 #### Layer 4: Conservative fallback (low-confidence cases)
@@ -162,11 +182,111 @@ When file extraction yields **fewer than 2 file paths** for an issue (common for
 
 **Rationale**: The cost of a false-negative (two agents conflict → one fails with merge error, wasting the full agent run) far exceeds the cost of a false-positive (an issue waits for one predecessor before starting). Always err toward serialization when uncertain.
 
-#### Layer 5: Historical co-change coupling <!-- Added: forge#1196 --> <!-- Empty-set guard: forge#1206 -->
+#### Layer 5: Historical co-change coupling <!-- Added: forge#1196 --> <!-- Empty-set guard: forge#1206 --> <!-- Matrix lookup: forge#1738 -->
 
-Layers 1-4 infer conflict risk from structure — path overlap, directory nesting, hard-coded high-fan-in lists. They miss the case where two files with no directory or naming relationship have historically changed together in the same commits (e.g. `models/user.py` and `services/billing/charge.py`), and they over-serialize the inverse case where files merely sit near each other but have never actually co-changed. Git commit history answers both questions directly and empirically. This layer reads **commit metadata only** — the list of files touched per commit — never file contents, so it does not violate Hard Rule 2 ("dispatcher, not a builder... never read code"). This is the same category of operation already established as compliant in `commands/work-on/investigate.md` and `commands/work-on/build/context.md`, which mine `git log` for issue cross-referencing.
+Layers 1-4 infer conflict risk from structure — path overlap, directory nesting, hard-coded high-fan-in lists. They miss the case where two files with no directory or naming relationship have historically changed together in the same commits (e.g. `models/user.py` and `services/billing/charge.py`), and they over-serialize the inverse case where files merely sit near each other but have never actually co-changed. Git commit history answers both questions directly and empirically. This layer reads **commit metadata only** — the list of files touched per commit — never file contents, so it does not violate Hard Rule 2 ("dispatcher, not a builder... never read code").
 
-**Bounded query** — restrict both the time window and the file set so this stays a small, deterministic, single-shot lookup (never a full-repo co-change matrix). An empty `ALL_AFFECTED_FILES` set MUST short-circuit before the query runs — passing an empty array to `git log --` does not mean "match nothing", it means "no pathspec restriction", which would silently widen the query to the entire repo:
+**Primary path — persisted co-change matrix** (O(1) lookup, repo-wide coverage): <!-- Added: forge#1738 -->
+
+Check whether `~/.forge/index/cochange.jsonl` (produced by `scripts/danger-zones.mjs`) exists before
+falling back to the live `git log` query. The matrix is repo-wide and covers file pairs outside the
+current batch — providing broader coupling signal than the batch-scoped live query alone.
+
+```bash
+COCHANGE_INDEX="${HOME}/.forge/index/cochange.jsonl"
+COCHANGE_META="${HOME}/.forge/index/cochange-meta.json"
+
+if [ -f "$COCHANGE_INDEX" ]; then
+  echo "Layer 5: co-change matrix found — using persisted index for pair lookups"
+  LAYER5_SOURCE="matrix"
+  TOTAL_COMMITS=$(cat "$COCHANGE_META" 2>/dev/null | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('totalCommits',0))" 2>/dev/null || echo "0")
+else
+  echo "Layer 5: co-change matrix absent — falling back to live git query (run 'node scripts/danger-zones.mjs' to build)"
+  LAYER5_SOURCE="live"
+  TOTAL_COMMITS=0
+fi
+```
+
+**Matrix lookup per file pair** (when `LAYER5_SOURCE=matrix`):
+
+For each pair of files across issues in the batch, query the matrix for coupling verdict:
+
+```bash
+# Query a single file pair from the matrix
+query_cochange_pair() {
+  local FILE_A="$1"
+  local FILE_B="$2"
+
+  # Find the record for FILE_A (matrix stores each pair once in lexicographic order,
+  # but also includes reverse-lookup entries for O(1) lookup from either side)
+  local RECORD
+  RECORD=$(grep -m1 "\"file\":\"${FILE_A}\"" "$COCHANGE_INDEX" 2>/dev/null || true)
+  if [ -z "$RECORD" ]; then
+    echo "unknown"  # FILE_A not in matrix — insufficient history
+    return
+  fi
+
+  # Extract n(A) — sum of monthly ring buffer
+  local N_A
+  N_A=$(echo "$RECORD" | python3 -c "
+import sys, json
+r = json.loads(sys.stdin.read())
+n = r.get('n', [0,0,0])
+print(sum(n))
+" 2>/dev/null || echo "0")
+
+  # Extract c(A,B) — co-occurrence count with FILE_B
+  local C_AB
+  C_AB=$(echo "$RECORD" | python3 -c "
+import sys, json
+r = json.loads(sys.stdin.read())
+partners = r.get('partners', {})
+c = partners.get('${FILE_B}', [0,0,0])
+print(sum(c))
+" 2>/dev/null || echo "0")
+
+  # Apply thresholds: cold-start check (n < 5), support (c >= 3), confidence
+  if [ "$N_A" -lt 5 ]; then
+    echo "unknown"  # Insufficient history for FILE_A
+    return
+  fi
+
+  local FILE_B_RECORD
+  FILE_B_RECORD=$(grep -m1 "\"file\":\"${FILE_B}\"" "$COCHANGE_INDEX" 2>/dev/null || true)
+  local N_B=0
+  if [ -n "$FILE_B_RECORD" ]; then
+    N_B=$(echo "$FILE_B_RECORD" | python3 -c "
+import sys, json
+r = json.loads(sys.stdin.read())
+n = r.get('n', [0,0,0])
+print(sum(n))
+" 2>/dev/null || echo "0")
+  fi
+
+  if [ "$N_B" -lt 5 ]; then
+    echo "unknown"  # Insufficient history for FILE_B
+    return
+  fi
+
+  # Use danger-zones.mjs --query for the authoritative normalization verdict
+  # (handles ubiquity, directional confidence, companions — avoids re-implementing)
+  VERDICT=$(node "$(git rev-parse --show-toplevel 2>/dev/null)/scripts/danger-zones.mjs" \
+    --query "$FILE_A" 2>/dev/null \
+    | python3 -c "
+import sys, json
+d = json.loads(sys.stdin.read())
+partners = d.get('cochangePartners', [])
+for p in partners:
+    if p['file'] == '${FILE_B}':
+        print(p['verdict'])
+        sys.exit(0)
+print('unknown')
+" 2>/dev/null || echo "unknown")
+  echo "$VERDICT"
+}
+```
+
+**Fallback path — live git query** (when matrix is absent or file pair not found in matrix):
 
 ```bash
 # Union of affected files across all issues in the CURRENT batch only (already
@@ -204,14 +324,16 @@ else
 fi
 ```
 
-**Scoring rule**: A file pair is **co-change coupled** when it appears together in **3 or more** of the commits captured by the bounded query above. A pair with **zero** co-occurrences across the entire window is **verified independent**.
+**Scoring rule**: A file pair is **co-change coupled** when it appears together in **3 or more** commits in the window. A pair with **zero** co-occurrences across the entire window (and both files have n ≥ 5 commits) is **verified independent**. Pairs where either file has fewer than 5 commits in the window are **unknown** — the matrix must NOT be used to downgrade edges for unknown pairs.
 
 **Apply the signal:**
 - **High co-change pair spans two different issues in the batch** → add a serialization edge between them (same directed-edge convention as Layers 1-4: lower issue number is predecessor), OR, if the pair also carries competing investigation recommendations, flag it for Phase 2.5 arbitration instead of a blind serialization edge (see cross-reference in Step 2.5B below).
-- **Verified-independent pair** → MAY be used to downgrade an existing Layer 2 "broad directory + different domain" or Layer 4 "conservative fallback" serialization to parallel. This downgrade is **never** applied to Layer 1 (same-file hard conflict, which is ground truth from the current batch, not historical inference) or to Layer 3 high-fan-in-file edges (a file can be structurally high-risk even with a thin history window, e.g. a newly added `main.py`).
-- If `ALL_AFFECTED_FILES` is empty, the guard above skips the query and Layer 5 contributes nothing for the entire batch. If the bounded query runs but returns no commits (e.g. brand-new files, or window/pair-set too small to have history) → Layer 5 contributes nothing; fall back silently to Layers 1-4's existing verdict for that pair.
+- **Verified-independent pair** → MAY be used to downgrade an existing Layer 2 "broad directory + different domain" or Layer 4 "conservative fallback" serialization to parallel. This downgrade is **never** applied to Layer 1 (same-file hard conflict, which is ground truth from the current batch, not historical inference) or to Layer 3 high-fan-in-file edges (a file can be structurally high-risk even with a thin history window, e.g. a newly added `main.py`). Ubiquitous-file pairs (n/N > 0.2 for either file) are **ineligible** for verified-independent downgrade even with zero co-occurrences.
+- If `ALL_AFFECTED_FILES` is empty, the guard above skips the query and Layer 5 contributes nothing for the entire batch. If the matrix or live query returns no data for a pair → Layer 5 contributes nothing; fall back silently to Layers 1-4's existing verdict for that pair.
 
-**Rationale**: Empirical co-change is a strictly stronger signal than directory proximity or naming convention — it is the actual observed outcome the other layers are trying to approximate. Bounding the window and pair-set keeps the query cheap and deterministic while still catching the cross-directory conflicts Layers 1-4 structurally cannot see.
+**Wire-through proof (mandatory check)**: When `LAYER5_SOURCE=matrix`, confirm the matrix lookup path executes on at least one pair in the batch and log the verdict. This proves the path is live, not dead code. If no pairs are in the matrix, log that the live fallback ran instead. <!-- Ref: forge#1731, forge#1230, forge#1244 — Layer 5 has had two dead-code defects; this check prevents recurrence. -->
+
+**Rationale**: The persisted matrix provides broader coverage (repo-wide, not batch-scoped) and O(1) lookup vs O(batch × commits) live query. The live fallback ensures no regression when the matrix is absent (cold start or first run). Bounding the live fallback to the batch file set keeps it cheap and deterministic.
 
 #### Combining all layers
 
@@ -242,9 +364,74 @@ Build a **directed acyclic graph (DAG)** of per-issue dependencies. Each issue g
 - **Explicit dependencies**: If issue B says "Depends on #A" or "Blocked by #A", add A to B's predecessors
 - **File-conflict edges**: If two issues share affected files (from Step 3C Layer 1), add a directed edge: lower issue number → higher issue number (unless explicit deps say otherwise). The later issue has the earlier issue in its predecessors.
 - **Domain serialization edges**: DATABASE issues form a linear chain (each has the previous DATABASE issue as its predecessor). Same-small-directory issues (Layer 2) and high-fan-in file issues (Layer 3) get directed edges as per Step 3C rules.
+- **Edge-kind tagging for same-file/directory/shared-module briefing and re-verification** <!-- Added: forge#1860; extended forge#1904 -->: Layer 1/2/3 edges are additionally tagged with `EDGE_KIND` (`same-file` / `directory` / `shared-module`) and `EDGE_FILES` at the point they're added (see Step 3C). Explicit-dependency edges, the DATABASE domain chain, Layer 4 conservative-fallback edges, and Layer 5 co-change edges deliberately do NOT receive one of these three `EDGE_KIND` values. This is what lets Step 4B distinguish "predecessor edge came from Step 3C Layer 1/2/3" from every other edge type, for two purposes: a same-file current-state brief (DONE case, forge#1860) and edge re-verification against the predecessor's actual PR diff once it reaches FAILED or GATED (`verify_file_overlap_edge()`, forge#1904 — see `phase-4-execution.md` Step 4B). Non-`EDGE_KIND` edges are eligible for neither — they always `KEEP` in the re-verification check and are never candidates for the same-file brief.
 - **Conservative fallback edges**: Low-confidence issues (Layer 4) get edges to same-domain issues as per Step 3C rules.
 - **Co-change coupling edges** <!-- Added: forge#1196 -->: High co-change file pairs (Layer 5, 3+ shared commits in the bounded window) that span two different issues get a directed edge using the same lower-issue-number-is-predecessor convention as Layer 1. Verified-independent pairs (Layer 5, zero shared commits) may instead REMOVE an edge that Layer 2 or Layer 4 would otherwise have added for that pair — Layer 1 and Layer 3 edges are never removed by a Layer 5 downgrade.
-- **No artificial concurrency limit by default** — all issues with empty predecessor sets dispatch simultaneously. The only constraints are file overlap, explicit dependencies, and co-change coupling. When `forge.yaml → orchestration.max_concurrent` is set, the dispatch loop queues excess ready issues and releases them as running workers complete (see Engine mode § Concurrency model).
+- **Claims-board downgrade (Layer 2/4 edges only)** <!-- Added: forge#1736 -->: After dispatch begins (Phase 4A), when both issues in a Layer-2 or Layer-4 serialized pair post `FORGE:CLAIM` annotations on the coordination issue and their claimed file sets are **disjoint** (no path appears in both claims), the serialization edge for that pair MAY be relaxed — the blocked issue becomes ready. This downgrade is **never** applied to Layer-1 (same-file) or Layer-3 (high-fan-in) edges. See Step 4B: Claims-board relaxation sweep for the runtime check.
+- **Concurrency is capped by default** <!-- Updated: forge#1912 --> — issues with empty predecessor sets are still all *eligible* to dispatch simultaneously (file overlap, explicit dependencies, and co-change coupling remain the only DAG-ordering constraints), but Phase 4's dispatch loop holds at most `MAX_CONCURRENT` in flight at once (default 12; `forge.yaml → orchestration.max_concurrent` overrides). Ready issues beyond the cap queue and dispatch as running workers complete (see Engine mode § Concurrency model, and `phase-4-execution.md` Step 4A-pre.0.2).
+
+**Materialize the DAG** <!-- Added: forge#1913 -->: The rules above describe how edges are derived, but they must be applied into real, checkable data structures — not carried in prose or reconstructed from memory later. Step 3D.1 (coordination issue), Step 3D.5 (cycle detection), Step 3E.5 (scoring), and Step 3E (plan presentation) all read `ISSUES[]` and `PREDECESSORS[]` as if this already happened; this is the one place they're actually built:
+
+```bash
+# --- Step 3D: Materialize the DAG ---
+ISSUES=({issue_numbers})   # all issues in this batch, excluding Phase 2 investigations
+declare -A PREDECESSORS    # issue → space-separated predecessor issue numbers ("" = no predecessors)
+
+for NUM in "${ISSUES[@]}"; do
+  PREDECESSORS[$NUM]=""    # every issue gets an explicit entry — even an empty one — so
+                           # Step 3D.6's gate can tell "no predecessors" (valid) apart from
+                           # "never processed" (the bug this gate exists to catch)
+done
+
+# Apply edges in the order described above — explicit deps, then Layer 1/2/3 conflicts
+# (Step 3C), then the DATABASE domain chain, then Layer 4 conservative fallback, then
+# Layer 5 co-change coupling/downgrades. Each edge appends the predecessor's number to
+# the successor's entry:
+#   PREDECESSORS[$SUCCESSOR]="${PREDECESSORS[$SUCCESSOR]:+${PREDECESSORS[$SUCCESSOR]} }$PREDECESSOR_NUM"
+# --- End Step 3D materialization ---
+```
+
+### Step 3D.1: Create coordination issue (claims board) <!-- Added: forge#1736 -->
+
+**When to run**: Immediately after DAG construction (Step 3D), before Step 3D.5 cycle detection. Run once per orchestration batch. Skip if `FORGE_COORD_ISSUE` is already set (e.g., resumed session).
+
+**Purpose**: Create a dedicated GitHub issue that serves as the shared claims board for the batch. Agents post `FORGE:CLAIM` annotations here when they begin implementation; they post `FORGE:CLAIM_RELEASED` when they reach a terminal state. The orchestrator reads active claims during the Layer-2/4 relaxation sweep (Step 4B) to determine whether serialized pairs can now run in parallel.
+
+```bash
+# Create coordination issue for this orchestration batch
+BATCH_ISSUE_COUNT="${#ISSUES[@]}"
+BATCH_ID="$(date -u +%Y%m%dT%H%M%S)-$$"
+
+COORD_ISSUE_BODY="## Orchestration Batch Claims Board
+
+This issue is the claims board for an orchestration batch of ${BATCH_ISSUE_COUNT} issues.
+Agents post \`FORGE:CLAIM\` here on build start and \`FORGE:CLAIM_RELEASED\` on terminal state.
+
+**Batch ID**: ${BATCH_ID}
+**Issues in batch**: ${ISSUES[*]/#/#}
+**Created**: $(date -u +%Y-%m-%dT%H:%M:%SZ)
+
+<!-- FORGE:COORD_ISSUE -->
+<!-- FORGE:BATCH_ID: ${BATCH_ID} -->"
+
+COORD_ISSUE_URL=$(gh issue create -R {GH_REPO} \
+  --title "orchestrate: claims board for batch ${BATCH_ID}" \
+  --body "$COORD_ISSUE_BODY" \
+  --label "automation" 2>/dev/null || echo "")
+
+if [ -z "$COORD_ISSUE_URL" ]; then
+  echo "WARNING: failed to create coordination issue — claims board disabled for this batch. Layer-2/4 relaxation will not run."
+  FORGE_COORD_ISSUE=""
+else
+  COORD_ISSUE_NUMBER=$(echo "$COORD_ISSUE_URL" | grep -oE '[0-9]+$')
+  FORGE_COORD_ISSUE="$COORD_ISSUE_URL"
+  echo "Coordination issue created: ${COORD_ISSUE_URL} (#${COORD_ISSUE_NUMBER})"
+  export FORGE_COORD_ISSUE
+  export COORD_ISSUE_NUMBER
+fi
+```
+
+**Idempotency**: If `FORGE_COORD_ISSUE` is already set in the environment (e.g., after a compaction / orchestrator restart), skip creation and use the existing URL. The coordination issue persists for the lifetime of the batch.
 
 **Terminology:**
 - **Ready issues**: Issues whose predecessor set is empty (all predecessors have reached terminal state or were never added)
@@ -370,8 +557,262 @@ fi
 - `EXCLUDED_CYCLE[]` contains cyclic issue numbers — reported in Step 3E, never dispatched
 - If `EXCLUDED_CYCLE` is non-empty, report it clearly in the Step 3E plan before asking for user confirmation
 - If `ISSUES[]` is empty after cycle exclusion (all issues were cyclic), the guard above aborts with `exit 1` — Step 3E is never reached with an empty plan <!-- Added: forge#1110 -->
+- Proceed next to **Step 3D.6** before Step 3E.5's scoring pass. <!-- Added: forge#1913 -->
+
+### Step 3D.6: Phase 3 Completion Gate (MANDATORY) <!-- Added: forge#1913 -->
+
+**Run immediately after Step 3D.5's cycle detection, before Step 3E.5's scoring pass and Step 3E's plan presentation.** Steps 3D.1, 3D.5, 3E.5, and 3E all read `ISSUES[]`, `PREDECESSORS[]`, and `ISSUE_DOMAIN[]` as if Step 3B/3D already built them for real. Without this gate, an orchestrator under time or context pressure (e.g. a 73-issue batch) can skip the actual extraction loops in Steps 3A–3D and hand-write a plausible-looking DAG from memory instead — Step 3E.5's scoring and Phase 4's dispatch would then run against fabricated data with no error, because the `${PREDECESSORS[$NUM]:-}` defaulting used throughout Step 3D.5 silently tolerates a missing entry instead of failing loudly.
+
+**Check**: every issue in `ISSUES[]` must have an explicit key in `PREDECESSORS` and in `ISSUE_DOMAIN` — checked by **key presence**, not by whether the value is non-empty. An issue with zero real predecessors (`PREDECESSORS[$NUM]=""`) or no matched domain (`ISSUE_DOMAIN[$NUM]="NONE"`) is a valid, common outcome and must NOT trip this gate — only a genuinely *absent* key means the upstream step never ran for that issue.
+
+```bash
+# --- Step 3D.6: Phase 3 Completion Gate ---
+MISSING_PREDECESSORS=()
+MISSING_DOMAIN=()
+for NUM in "${ISSUES[@]}"; do
+  # Key-presence test (${arr[key]+x}), NOT emptiness — PREDECESSORS[$NUM]="" and
+  # ISSUE_DOMAIN[$NUM]="NONE" are valid values and must pass this check.
+  [ -z "${PREDECESSORS[$NUM]+x}" ] && MISSING_PREDECESSORS+=("$NUM")
+  [ -z "${ISSUE_DOMAIN[$NUM]+x}" ] && MISSING_DOMAIN+=("$NUM")
+done
+
+if [ "${#MISSING_PREDECESSORS[@]}" -gt 0 ] || [ "${#MISSING_DOMAIN[@]}" -gt 0 ]; then
+  echo "FATAL: Phase 3 DAG construction is incomplete — cannot proceed to Step 3E.5, Step 3E, or Phase 4."
+  [ "${#MISSING_PREDECESSORS[@]}" -gt 0 ] && echo "  Missing PREDECESSORS[] entry for: ${MISSING_PREDECESSORS[*]/#/#}"
+  [ "${#MISSING_DOMAIN[@]}" -gt 0 ] && echo "  Missing ISSUE_DOMAIN[] entry for: ${MISSING_DOMAIN[*]/#/#}"
+  echo "This means Step 3B (domain estimation) and/or Step 3D (DAG edge construction) were"
+  echo "skipped, or did not run for every issue in the batch. Do NOT hand-write the missing"
+  echo "entries from memory or by re-reading issue titles — go back and run Steps 3A-3D for"
+  echo "the listed issues, then re-run this gate before proceeding."
+  exit 1
+else
+  echo "Phase 3 completion gate: PASS — ${#ISSUES[@]} issues all have PREDECESSORS[] and ISSUE_DOMAIN[] entries."
+fi
+# --- End Step 3D.6 ---
+```
+
+**After this gate passes**: Step 3E.5 (scoring) and Step 3E (plan presentation) may proceed. Do not present the Step 3E plan, run Step 3E.5, or hand off to Phase 4 while this gate is failing.
+
+### Step 3E.5: Value/Cost Scoring Pass (MANDATORY) <!-- Added: forge#1743 -->
+
+**Run immediately after Step 3D.5, before presenting the plan (Step 3E).** This step scores every issue in `ISSUES[]` by its expected value/cost ratio and re-orders the ready-set (issues with an empty predecessors set) in descending value/cost order. Dependency constraints are **never overridden** — this is a reordering pass within the existing ready-set only, not an edge-insertion pass. No new edges are added; cycle detection (Step 3D.5) has already completed.
+
+**Purpose**: Ensure that when a budget is finite (see `--budget` in Phase 4), the highest-value-per-token work dispatches first. When no budget is set (the default, uncapped behavior), dispatch order still reflects value/cost — useful for observability even without a hard cap.
+
+#### Value function (transparent heuristic — deferral decisions must be explainable)
+
+```
+value(issue) = priority_weight × danger_zone_weight
+```
+
+**Priority weight** (from issue labels):
+
+| Label | Weight |
+|-------|--------|
+| `priority:P0` | 4.0 |
+| `priority:P1` | 3.0 |
+| `priority:P2` | 2.0 |
+| `priority:P3` | 1.0 |
+| *(no priority label)* | 1.5 |
+
+**Danger-zone weight** (from affected files via FORGE:INVESTIGATOR comment): Read the `### Affected Files` section and check each file path against the danger-zone list from `forge.yaml → review.danger_zones[]`. Each affected file that appears in a danger zone adds 0.5 to the weight (additive, capped at 2.0). Default (no matches): 1.0.
+
+```
+danger_zone_weight = min(2.0, 1.0 + 0.5 × count_of_danger_zone_files_affected)
+```
+
+If `forge.yaml → review.danger_zones` is absent: danger_zone_weight = 1.0 for all issues.
+
+#### Cost function (fallback hierarchy)
+
+```
+cost_estimate(issue) → expected_spend_usd
+```
+
+Resolve in this order (use the first that produces a non-null result):
+
+1. **Cost-prior lookup** (primary): Read `~/.forge/index/cost-priors.json`. Compute key = `task_type:module` where:
+   - `task_type` = FORGE:INVESTIGATOR `**Task Type**` field (lower-cased, spaces→hyphens). If no investigator comment: infer from issue labels (`feature` → `feature`, `bug` → `bug-fix`, else `unknown`).
+   - `module` = basename (no ext, lowercase) of the primary affected file from FORGE:INVESTIGATOR. If absent: `_unknown`.
+   - If the key exists in cost-priors.json: use `priors[key].mean`. Mark the issue as `has_prior: true` for exploration-reserve logic below.
+
+2. **Label heuristic fallback** (when cost-priors.json absent or key not found):
+   ```
+   bug/fix: $0.20 · feature: $0.40 · refactor: $0.30 · investigation: $0.50 · unknown: $0.35
+   ```
+   Mark the issue as `has_prior: false`.
+
+3. **File-count proxy** (last resort — no labels and no prior):
+   ```
+   estimated_cost = 0.10 + 0.05 × count_of_affected_files
+   ```
+   Mark the issue as `has_prior: false`.
+
+#### Scoring and sorting
+
+```bash
+# --- Step 3E.5: Value/Cost Scoring Pass ---
+# Requires: ISSUES[] (post-cycle-detection), PREDECESSORS[], GH_REPO
+# Outputs: ISSUE_SCORE[], ISSUE_COST_ESTIMATE[], ISSUE_HAS_PRIOR[], SORTED_READY_SET[]
+
+declare -A ISSUE_SCORE        # issue → value/cost ratio (float)
+declare -A ISSUE_COST_ESTIMATE # issue → estimated cost (USD float string)
+declare -A ISSUE_HAS_PRIOR    # issue → true|false
+declare -A ISSUE_VALUE        # issue → value weight (float)
+
+COST_PRIORS_PATH="${HOME}/.forge/index/cost-priors.json"
+
+for NUM in "${ISSUES[@]}"; do
+  # 1. Fetch issue data for scoring (labels, investigator comment)
+  ISSUE_DATA=$(gh issue view "$NUM" -R {GH_REPO} --json labels,body \
+    --jq '{labels: [.labels[].name]}' 2>/dev/null || echo '{"labels":[]}')
+
+  LABELS=$(echo "$ISSUE_DATA" | jq -r '.labels[]' 2>/dev/null || echo '')
+
+  # --- Value: priority weight ---
+  if echo "$LABELS" | grep -q "priority:P0"; then
+    PRIO_WEIGHT=4.0
+  elif echo "$LABELS" | grep -q "priority:P1"; then
+    PRIO_WEIGHT=3.0
+  elif echo "$LABELS" | grep -q "priority:P2"; then
+    PRIO_WEIGHT=2.0
+  elif echo "$LABELS" | grep -q "priority:P3"; then
+    PRIO_WEIGHT=1.0
+  else
+    PRIO_WEIGHT=1.5
+  fi
+
+  # --- Value: danger-zone weight ---
+  DANGER_WEIGHT=1.0
+  DANGER_ZONES=$(yq '.review.danger_zones[]? // ""' forge.yaml 2>/dev/null || echo '')
+  if [ -n "$DANGER_ZONES" ]; then
+    # Fetch affected files from INVESTIGATOR comment
+    AFFECTED=$(gh api repos/{GH_REPO}/issues/${NUM}/comments \
+      --jq '.[] | select(.body | contains("FORGE:INVESTIGATOR")) | .body' 2>/dev/null \
+      | grep -oP '`[^`]+\.(py|mjs|ts|md|sh|yaml|yml)`' | tr -d '`' | head -20 || echo '')
+    ZONE_HIT_COUNT=0
+    while IFS= read -r dz; do
+      [ -z "$dz" ] && continue
+      if echo "$AFFECTED" | grep -q "$dz"; then
+        ZONE_HIT_COUNT=$((ZONE_HIT_COUNT + 1))
+      fi
+    done <<< "$DANGER_ZONES"
+    DZ_ADD=$(echo "scale=1; if ($ZONE_HIT_COUNT * 0.5 > 1.0) 1.0 else $ZONE_HIT_COUNT * 0.5" | bc 2>/dev/null || echo "0")
+    DANGER_WEIGHT=$(echo "scale=1; 1.0 + $DZ_ADD" | bc 2>/dev/null || echo "1.0")
+  fi
+
+  VALUE=$(echo "scale=4; $PRIO_WEIGHT * $DANGER_WEIGHT" | bc 2>/dev/null || echo "$PRIO_WEIGHT")
+  ISSUE_VALUE[$NUM]="$VALUE"
+
+  # --- Cost: prior lookup → label heuristic → file-count proxy ---
+  COST=""
+  HAS_PRIOR="false"
+
+  if [ -f "$COST_PRIORS_PATH" ]; then
+    # Derive task_type:module key
+    TASK_TYPE=$(gh api repos/{GH_REPO}/issues/${NUM}/comments \
+      --jq '[.[] | select(.body | contains("FORGE:INVESTIGATOR")) | .body] | last // ""' 2>/dev/null \
+      | grep -oP '(?<=\*\*Task Type\*\*: )\S+' | head -1 | tr '[:upper:]' '[:lower:]' \
+      | tr ' ' '-' || echo '')
+    [ -z "$TASK_TYPE" ] && {
+      if echo "$LABELS" | grep -q "^feature$"; then TASK_TYPE="feature"
+      elif echo "$LABELS" | grep -q "^bug$"; then TASK_TYPE="bug-fix"
+      else TASK_TYPE="unknown"; fi
+    }
+
+    PRIMARY_FILE=$(gh api repos/{GH_REPO}/issues/${NUM}/comments \
+      --jq '[.[] | select(.body | contains("FORGE:INVESTIGATOR")) | .body] | last // ""' 2>/dev/null \
+      | grep -oP '`[^`]+\.(py|mjs|ts|md|sh|yaml|yml)`' | tr -d '`' | head -1 || echo '')
+    MODULE=$(basename "${PRIMARY_FILE:-_unknown}" | sed 's/\.[^.]*$//' | tr '[:upper:]' '[:lower:]')
+    [ -z "$MODULE" ] && MODULE="_unknown"
+
+    PRIOR_KEY="${TASK_TYPE}:${MODULE}"
+    COST=$(jq -r --arg k "$PRIOR_KEY" '.priors[$k].mean // empty' "$COST_PRIORS_PATH" 2>/dev/null || echo '')
+    [ -n "$COST" ] && HAS_PRIOR="true"
+  fi
+
+  if [ -z "$COST" ]; then
+    # Label heuristic fallback
+    if echo "$LABELS" | grep -q "^feature$"; then COST="0.40"
+    elif echo "$LABELS" | grep -q "^bug$"; then COST="0.20"
+    elif echo "$LABELS" | grep -q "^refactor$"; then COST="0.30"
+    else COST="0.35"; fi
+  fi
+
+  # Score = value / cost (protected against divide-by-zero)
+  SCORE=$(echo "scale=4; if ($COST > 0) $VALUE / $COST else $VALUE / 0.01" | bc 2>/dev/null || echo "1.0")
+
+  ISSUE_SCORE[$NUM]="$SCORE"
+  ISSUE_COST_ESTIMATE[$NUM]="$COST"
+  ISSUE_HAS_PRIOR[$NUM]="$HAS_PRIOR"
+
+  echo "Score: #${NUM} value=${VALUE} cost_est=\$${COST} (prior=${HAS_PRIOR}) score=${SCORE}"
+done
+
+# --- ε-exploration reserve ---
+# ε = 10% of budget allocated to no-prior issues (high-variance unknowns).
+# A no-prior issue is guaranteed a dispatch slot within the ε reserve even if
+# its score would otherwise place it below the budget cutoff. This prevents
+# discovery starvation on novel modules with no cost history.
+#
+# Implementation: when --budget is set in Phase 4, the dispatch loop reserves
+# EPSILON_BUDGET = 0.10 × BUDGET_LIMIT for issues where ISSUE_HAS_PRIOR[N] == "false".
+# This step only MARKS the no-prior issues; Phase 4 reads ISSUE_HAS_PRIOR[] to apply the reserve.
+#
+# No-prior issues still compete in the main dispatch queue by score. The reserve
+# acts as a safety net: if no no-prior issue has been dispatched by the time
+# PROJECTED_SPEND reaches (BUDGET_LIMIT − EPSILON_BUDGET), the highest-scoring
+# no-prior issue is force-dispatched from the reserve before budget cutoff.
+
+NO_PRIOR_ISSUES=()
+for NUM in "${ISSUES[@]}"; do
+  [ "${ISSUE_HAS_PRIOR[$NUM]:-false}" = "false" ] && NO_PRIOR_ISSUES+=("$NUM")
+done
+echo "Exploration reserve: ${#NO_PRIOR_ISSUES[@]} no-prior issues (ε=10% of budget reserved for these)"
+
+# --- Sort the ready-set by descending score ---
+# The ready-set is the subset of ISSUES with empty PREDECESSORS[].
+# Dependency-constrained issues (non-empty PREDECESSORS[]) keep their original DAG ordering —
+# their dispatch is triggered by predecessor completion, not by score rank.
+# SORTED_READY_SET is consumed by Step 3E (plan) and Phase 4 (dispatch order).
+
+READY_SET=()
+for NUM in "${ISSUES[@]}"; do
+  [ -z "${PREDECESSORS[$NUM]:-}" ] && READY_SET+=("$NUM")
+done
+
+# Sort by score descending (bc-based comparison via temporary file)
+SCORE_PAIRS=""
+for NUM in "${READY_SET[@]}"; do
+  SCORE_PAIRS="${SCORE_PAIRS}${ISSUE_SCORE[$NUM]:-0} $NUM"$'\n'
+done
+SORTED_READY_SET=()
+while IFS=' ' read -r _score num; do
+  [ -n "$num" ] && SORTED_READY_SET+=("$num")
+done < <(echo "$SCORE_PAIRS" | sort -rn -k1,1 | grep -v '^$')
+
+echo ""
+echo "Ready-set dispatch order (descending value/cost):"
+for NUM in "${SORTED_READY_SET[@]}"; do
+  PRIOR_TAG="${ISSUE_HAS_PRIOR[$NUM]:-false}"
+  [ "$PRIOR_TAG" = "false" ] && PRIOR_NOTE=" [ε-reserve eligible]" || PRIOR_NOTE=" [prior known]"
+  echo "  #${NUM} score=${ISSUE_SCORE[$NUM]:-?} cost_est=\$${ISSUE_COST_ESTIMATE[$NUM]:-?}${PRIOR_NOTE}"
+done
+# --- End Step 3E.5 ---
+```
+
+**Output state** (consumed by Step 3E and Phase 4):
+- `ISSUE_SCORE[N]` — value/cost ratio for each issue
+- `ISSUE_COST_ESTIMATE[N]` — estimated spend in USD
+- `ISSUE_HAS_PRIOR[N]` — `true` if cost-priors.json had an entry; `false` = no-prior (ε-reserve eligible)
+- `SORTED_READY_SET[]` — ready issues sorted by descending score (used in Step 3E plan table and Phase 4 dispatch loop)
+- `NO_PRIOR_ISSUES[]` — issues with no cost history (a subset of `SORTED_READY_SET` + blocked issues)
+
+**Important**: `ISSUE_SCORE[]` and `ISSUE_COST_ESTIMATE[]` are also set for blocked issues (for reporting). The sorted order only affects the ready-set — blocked issues dispatch when their predecessors complete, regardless of score.
 
 ### Step 3E: Present the plan to the user
+
+**Populate every row below by dereferencing `PREDECESSORS[$NUM]`, `ISSUE_DOMAIN[$NUM]`, `ISSUE_SCORE[$NUM]`, and `ISSUE_COST_ESTIMATE[$NUM]` computed in Steps 3B–3E.5 — do not fabricate values from memory or by re-reading issue titles at this point.** The Step 3D.6 gate having passed only guarantees the data structures exist; it does not substitute for actually reading them here. <!-- Added: forge#1913 -->
 
 ```
 ## Orchestration Plan
@@ -404,17 +845,22 @@ fi
 
 ### Dependency Graph
 
-| Issue | Predecessors | Domain | Status |
-|-------|-------------|--------|--------|
-| #{A} | — | FRONTEND | Ready (dispatches immediately) |
-| #{B} | — | BILLING | Ready (dispatches immediately) |
-| #{C} | — | WORKER | Ready (dispatches immediately) |
-| #{D} | #{A} | FRONTEND | Blocked (waits for #{A} only) |
-| #{E} | — | DATABASE | Ready (dispatches immediately) |
-| #{F} | #{E} | DATABASE | Blocked (serialized — waits for #{E}) |
+| Issue | Predecessors | Domain | Score | Est. Cost | Status |
+|-------|-------------|--------|-------|-----------|--------|
+| #{A} | — | FRONTEND | {score} | ${cost} | Ready (dispatches 1st by score) |
+| #{B} | — | BILLING | {score} | ${cost} | Ready (dispatches 2nd by score) |
+| #{C} | — | WORKER | {score} | ${cost} [ε] | Ready (dispatches 3rd — ε-reserve) |
+| #{D} | #{A} | FRONTEND | {score} | ${cost} | Blocked (waits for #{A} only) |
+| #{E} | — | DATABASE | {score} | ${cost} | Ready (dispatches 4th by score) |
+| #{F} | #{E} | DATABASE | {score} | ${cost} | Blocked (serialized — waits for #{E}) |
+
+**[ε]** = no cost prior; eligible for exploration reserve (10% of budget guaranteed for these)
+
+**Score** = value / estimated_cost (value = priority_weight × danger_zone_weight; higher = dispatches first within the ready-set)
+**Est. Cost** = cost-prior mean for (task_type × module), or label heuristic if no prior
 
 **Critical path**: #{E} → #{F} (2 steps, determines minimum wall-clock time)
-**Initial dispatch**: #{A}, #{B}, #{C}, #{E} (all predecessors resolved)
+**Initial dispatch**: #{A}, #{B}, #{C}, #{E} (all predecessors resolved — ordered by score)
 **Streaming**: #{D} dispatches as soon as #{A} completes — does NOT wait for #{B}, #{C}, or #{E}
 
 **Note**: Investigations may create additional issues that will be automatically added to the dependency graph. The final graph will be confirmed after investigations complete.
@@ -443,15 +889,19 @@ Proceed? (yes / adjust / pick specific issues)
 
 ---
 
-## Engine mode (headless)
+## Engine mode (default)
 
-When running headless/CI, dispatch each issue via the durable execution engine instead of spawning prose agents:
+Dispatch each issue via the durable execution engine. This is the **default execution mode** for both interactive (`/autopilot`, `/orchestrate`) and headless/CI paths:
 
 ```bash
 forgedock run-issue <issue> --lane <staging|milestone/slug>
 ```
 
-The engine drives every phase transition deterministically, mirrors state to the `FORGE:STATE` block on the issue, and holds a lease. To recover stalls, scan in-flight issues' `FORGE:STATE`; any issue with an expired lease and a non-terminal state is re-dispatched with the same `forgedock run-issue <issue>` command — it resumes from the last committed phase (idempotent). This replaces the label-heuristic "already in progress" check and the resume-with-nagging loop.
+The engine drives every phase transition deterministically, mirrors state to the `FORGE:STATE` block on the issue, and holds a lease. Its **fail-closed review gate** (`phases.mjs → detectOutcome`) means the PR must be confirmed merged before the phase is committed — missing or unparseable review comments are treated as failures, not approvals. To recover stalls, scan in-flight issues' `FORGE:STATE`; any issue with an expired lease and a non-terminal state is re-dispatched with the same `forgedock run-issue <issue>` command — it resumes from the last committed phase (idempotent). This replaces the label-heuristic "already in progress" check and the resume-with-nagging loop.
+
+**Why engine-first**: The engine's phase table enforces gate semantics in code — not via LLM interpretation of markdown specs. This eliminates the class of bug where the LLM assumes a review approved when the FORGE:REVIEW comment is absent or unreadable (issue #1714). Interactive sessions that run `/work-on` via Skill invocations additionally bridge to the engine run-log via the SubagentStop hook (`bin/hooks/interactive-engine.mjs`) — state is durable across compaction and context resets.
+
+**Fallback (no forgedock CLI)**: If `forgedock` is not in PATH, fall back to spawning Agent sub-agents that run `Skill("work-on", ...)` per issue. The SubagentStop hook still bridges these runs to the engine run-log for state persistence.
 
 ### Concurrency model: in-process worker pool + worktree-per-issue
 
@@ -473,10 +923,11 @@ On completion or failure:
 scripts/worktree-lifecycle.sh cleanup <issue-number>
 ```
 
-**Concurrency cap** (`forge.yaml → orchestration.max_concurrent`):
-- Default: uncapped — all DAG-ready issues dispatch simultaneously (preserves current behaviour).
-- When `max_concurrent: N` is set, the dispatch loop holds at most N in-flight workers. Newly ready issues queue and start as running workers complete.
+**Concurrency cap** (`forge.yaml → orchestration.max_concurrent`): <!-- Updated: forge#1912 -->
+- Default: **12** — the dispatch loop holds at most 12 in-flight workers unless overridden. This is an enforced default, not opt-in: earlier revisions defaulted to uncapped, which let a large ready set (e.g. 40+ issues) dispatch in one burst and saturate the Anthropic API rate limit.
+- When `max_concurrent: N` is set, the dispatch loop holds at most N in-flight workers instead of the default 12. Newly ready issues queue and start as running workers complete.
 - Prevents wave-triggered rate-limit storms on large batches (e.g., 40-issue milestone dispatches).
+- See `phase-4-execution.md` Step 4A-pre.0.2 for the concrete initialization and headroom-gated dispatch logic that enforces this cap on both the engine-first and Agent-spawn-fallback dispatch paths.
 
 **Rate-limit backpressure** (pre-dispatch gate):
 
@@ -500,7 +951,7 @@ fi
 **Configuration reference** (`forge.yaml`):
 ```yaml
 orchestration:
-  max_concurrent: 8          # optional; default: uncapped
+  max_concurrent: 8          # optional; default: 12
   rate_limit_floor: 200      # optional; default: 200
 ```
 
@@ -553,39 +1004,131 @@ The orchestrator context window must stay small regardless of how many issues ha
 
 **Contract**: After any compaction event or orchestrator wake (session resumed after idle/restart), do NOT rely on in-context variables. Instead, reconstruct the DAG dispatch state from GitHub before checking for newly ready issues:
 
+This reconstruction MUST use the same three-way **DONE / GATED / FAILED** predecessor classification defined in `phase-4-execution.md` Step 4B ("Predecessor Classification") — not a binary terminal/non-terminal grep. A binary grep is exactly the bug forge#1812 fixed: it let `needs-human` simultaneously satisfy "predecessor is done, dispatch the successor" (this block, pre-fix) and "predecessor failed, skip the successor" (Step 4B's failure handler, pre-fix) — with no way to represent "predecessor is human-gated, its PR is still open, and its dependents should wait but not be abandoned." That third case is exactly what wake/compaction reconstruction hits most often, since a merge approved by a human typically happens *after* the orchestrator session that dispatched the predecessor has already ended — this block, not the live Step 4B loop, is the realistic trigger point for "gating PR merged while nobody was watching."
+
+For the same reason, this reconstruction also MUST call `verify_file_overlap_edge()` (also defined in `phase-4-execution.md` Step 4B, alongside `classify_predecessor_state()` — re-declare it here too if this block runs in a fresh context) before treating a GATED or FAILED predecessor's `EDGE_KIND` edge as still blocking. <!-- Added: forge#1904 --> A predecessor that reached `needs-human`/`workflow:invalid` with no PR, or whose PR never actually touched the guessed shared file, most realistically gets *discovered* at wake time — the session that would have caught it live has already ended. Re-verifying only in the live Step 4B loop and not here would leave this exact wake-time case unfixed.
+
 ```bash
 # Reconstruct dispatch state from GitHub after compaction / wake
 # Run this block at the top of every resumed Phase 4 loop iteration.
 
-# 1. Re-fetch all issue labels to rebuild terminal-state knowledge
+# 1. Re-fetch all issue labels and classify each into DONE / GATED / FAILED / IN_PROGRESS
+#    (same classify_predecessor_state() function defined in phase-4-execution.md Step 4B —
+#    re-declare it here if this block runs in a fresh context that hasn't sourced Step 4B yet).
+declare -A ISSUE_CLASS
+DONE_ISSUES=()
+GATED_ISSUES=()
+FAILED_ISSUES=()
+ACTIVE_ISSUES=()   # IN_PROGRESS — still mid-pipeline, not yet terminal-for-this-agent
+
 for NUM in {all_issue_numbers_in_batch}; do
-  ISSUE_STATE=$(gh issue view "$NUM" -R {GH_REPO} --json state,labels \
-    --jq '{state: .state, workflow: [.labels[].name | select(startswith("workflow:"))]}' \
-    2>/dev/null || echo '{}')
-  # Classify: terminal if workflow:merged, workflow:invalid, needs-human, or CLOSED
-  if echo "$ISSUE_STATE" | grep -qE 'workflow:merged|workflow:invalid|needs-human|CLOSED'; then
-    TERMINAL_ISSUES+=("$NUM")
-  else
-    ACTIVE_ISSUES+=("$NUM")
+  CLASS=$(classify_predecessor_state "$NUM")
+  ISSUE_CLASS["$NUM"]="$CLASS"
+  case "$CLASS" in
+    DONE) DONE_ISSUES+=("$NUM") ;;
+    GATED) GATED_ISSUES+=("$NUM") ;;
+    FAILED) FAILED_ISSUES+=("$NUM") ;;
+    *) ACTIVE_ISSUES+=("$NUM") ;;
+  esac
+done
+
+# 2. Re-derive the ready set: any non-terminal issue whose predecessors are ALL classified DONE
+#    (or GATED-but-edge-dropped — see the re-verification gate below).
+#    A GATED predecessor blocks dispatch but does NOT fail the dependent — see step 2.5 below.
+#
+# Edge re-verification (forge#1904): a GATED (or FAILED) predecessor's file-overlap edge is only
+# a real block if `verify_file_overlap_edge()` (phase-4-execution.md Step 4B, defined alongside
+# `classify_predecessor_state()`) confirms it. This block is the wake/compaction-time mirror of
+# phase-4-execution.md item 6.5's live-session check — it MUST call the identical function, not a
+# re-derived equivalent, to avoid the drift class forge#1812/#1837 already had to fix once for
+# classification and regex tooling respectively. This is what handles the case where a GATED
+# predecessor with no PR (or a PR that never touched the guessed shared file) resolves the
+# `needs-human`/`workflow:invalid` state AFTER the orchestrator session that dispatched it has
+# already ended — the realistic trigger point named in the "Why this matters" note above.
+READY_ISSUES=()
+NEWLY_BLOCKED=()   # dependents whose gating predecessor is GATED with a still-live edge — need blocked-on-human-merge tracking
+for NUM in "${ACTIVE_ISSUES[@]}"; do
+  ALL_PREDS_DONE=true
+  GATING_PRED=""
+  for PRED in {predecessors_of_NUM}; do
+    case "${ISSUE_CLASS[$PRED]:-IN_PROGRESS}" in
+      DONE) ;;
+      GATED|FAILED)
+        EDGE_VERDICT=$(verify_file_overlap_edge "$PRED" "$NUM")
+        if [ "$EDGE_VERDICT" = "DROP" ]; then
+          echo "Edge re-verification: #${PRED} → #${NUM} dropped (GATED/FAILED predecessor never opened a PR, or its actual diff never touched the guessed shared file). Treating this predecessor as resolved for #${NUM}."
+          # Do NOT set ALL_PREDS_DONE=false for this predecessor — the guessed edge never
+          # materialized into a real conflict, so it does not gate #${NUM}.
+        elif [ "${ISSUE_CLASS[$PRED]}" = "GATED" ]; then
+          ALL_PREDS_DONE=false
+          GATING_PRED="$PRED"
+        else
+          ALL_PREDS_DONE=false   # FAILED with a confirmed real edge — dependent stays blocked/skipped, handled by existing FAILED-cascade logic elsewhere
+        fi
+        ;;
+      *) ALL_PREDS_DONE=false ;;
+    esac
+  done
+  if [ "$ALL_PREDS_DONE" = "true" ]; then
+    READY_ISSUES+=("$NUM")
+  elif [ -n "$GATING_PRED" ]; then
+    NEWLY_BLOCKED+=("$NUM|$GATING_PRED")
   fi
 done
 
-# 2. Re-derive the ready set: any non-terminal issue whose predecessors are all terminal
-for NUM in "${ACTIVE_ISSUES[@]}"; do
-  ALL_PREDS_DONE=true
-  for PRED in {predecessors_of_NUM}; do
-    if ! printf '%s\n' "${TERMINAL_ISSUES[@]}" | grep -qx "$PRED"; then
-      ALL_PREDS_DONE=false
-      break
-    fi
-  done
-  $ALL_PREDS_DONE && READY_ISSUES+=("$NUM")
+# 2.5. Track newly-blocked dependents (mirrors phase-4-execution.md Step 4B item 6.5)
+# Self-heal the label if not yet bootstrapped (same pattern as review-pr.md 6C / phase-4-execution.md item 6.5).
+gh label create "blocked-on-human-merge" --color "006B75" --description "Dependent of a gated (needs-human/awaiting-merge) predecessor. Managed by ForgeDock." --force -R {GH_REPO} 2>/dev/null
+for ENTRY in "${NEWLY_BLOCKED[@]:-}"; do
+  [ -z "$ENTRY" ] && continue
+  DEP="${ENTRY%%|*}"
+  PRED="${ENTRY##*|}"
+  # Anchor on the exact "**Gating predecessor**: #N" label with a word boundary —
+  # a bare contains("#N") substring would false-match #50/#500 for predecessor #5. <!-- forge#1830 -->
+  ALREADY_TRACKED=$(gh api repos/{GH_REPO}/issues/${DEP}/comments \
+    --jq --arg prednum "${PRED}" '[.[] | select(.body | contains("FORGE:BLOCKED_ON_HUMAN_MERGE") and test("Gating predecessor\\*\\*: #" + $prednum + "\\b"))] | length' 2>/dev/null || echo "0")
+  if [ "$ALREADY_TRACKED" -eq 0 ]; then
+    GATING_PR=$(gh pr list -R {GH_REPO} --state open --search "\"Closes #${PRED}\" in:body" \
+      --json number --jq '.[0].number // empty' 2>/dev/null || echo "")
+    gh issue comment "$DEP" -R {GH_REPO} --body "<!-- FORGE:BLOCKED_ON_HUMAN_MERGE -->
+**Gating predecessor**: #${PRED} (state: \`${ISSUE_CLASS[$PRED]}\`${GATING_PR:+, open PR #${GATING_PR}})
+**Status**: Detected on orchestrator wake/compaction reconstruction. Ready to dispatch as soon as #${PRED} reaches \`workflow:merged\`."
+    gh issue edit "$DEP" -R {GH_REPO} --add-label "blocked-on-human-merge" 2>/dev/null || true
+  fi
 done
 
-# 3. Dispatch the reconstructed ready set via standard Step 4A.pre.0 → 4A.pre → 4A flow
+# 3. Merge-triggered wake: any issue tracked as blocked-on-human-merge whose gating predecessor
+#    is now DONE gets un-blocked and added to the ready set. This is the wake-time equivalent of
+#    phase-4-execution.md Step 4B item 6.6 — it is what makes "auto-dispatch on merge, no manual
+#    /orchestrate re-run" hold true even when the merge happened after the session ended.
+BLOCKED_NOW=$(gh issue list -R {GH_REPO} --state open --label "blocked-on-human-merge" --json number \
+  --jq '.[].number' 2>/dev/null || echo "")
+for DEP in $BLOCKED_NOW; do
+  # Read which predecessor(s) this DEP is tracked against
+  GATING_PREDS_RAW=$(gh api repos/{GH_REPO}/issues/${DEP}/comments \
+    --jq '[.[] | select(.body | contains("FORGE:BLOCKED_ON_HUMAN_MERGE")) | (.body | capture("Gating predecessor\\*\\*: #(?<p>[0-9]+)").p)]' 2>/dev/null || echo '[]')
+  STILL_GATED=false
+  for GPRED in $(echo "$GATING_PREDS_RAW" | jq -r '.[]' 2>/dev/null); do
+    GPRED_CLASS=$(classify_predecessor_state "$GPRED")
+    [ "$GPRED_CLASS" != "DONE" ] && STILL_GATED=true
+  done
+  if [ "$STILL_GATED" = "false" ]; then
+    gh issue edit "$DEP" -R {GH_REPO} --remove-label "blocked-on-human-merge" 2>/dev/null || true
+    gh issue comment "$DEP" -R {GH_REPO} --body "<!-- FORGE:UNBLOCKED -->
+All gating predecessor(s) reached \`workflow:merged\` (detected on orchestrator wake) — dispatching now."
+    READY_ISSUES+=("$DEP")
+  fi
+done
+
+# 4. Dispatch the reconstructed ready set (DONE_ISSUES-unblocked + merge-triggered-woken +
+#    edge-dropped-into-READY_ISSUES from step 2 above) via the standard Step 4A.pre.0 → 4A.pre →
+#    4A flow. FAILED_ISSUES' transitive dependents remain marked "skipped — dependency failed" per
+#    phase-4-execution.md Step 4B item 6 — do not re-add them here — UNLESS step 2's
+#    `verify_file_overlap_edge()` check already placed them in READY_ISSUES because the FAILED
+#    predecessor's edge dropped (forge#1904); that case is legitimately ready, not a re-add.
 ```
 
-**Why this keeps context small**: Each `Agent()` call returns an agent ID stored only in `AGENT_ISSUE_MAP`, which is rebuilt per Step 4A.pre dispatch batch. After compaction, the map is gone — but the DAG state is fully on GitHub. The reconstruction above re-derives the ready set from labels alone, so the orchestrator context never needs to hold cumulative dispatch history.
+**Why this keeps context small**: Each `Agent()` call returns an agent ID stored only in `AGENT_ISSUE_MAP`, which is rebuilt per Step 4A.pre dispatch batch. After compaction, the map is gone — but the DAG state, including `blocked-on-human-merge` tracking (a durable `FORGE:BLOCKED_ON_HUMAN_MERGE` comment plus label, not an in-context variable), is fully on GitHub. The reconstruction above re-derives the ready set, the gated set, and the blocked-on-human-merge set from labels and comments alone, so the orchestrator context never needs to hold cumulative dispatch history.
 
 ---
 

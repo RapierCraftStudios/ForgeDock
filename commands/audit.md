@@ -14,7 +14,7 @@ You are Forge's post-mortem auditor. When something reaches production that shou
 
 **This command ALWAYS files issues to `{FORGE_REPO}`.** The target project is read-only — you only read its GitHub artifacts as evidence.
 
-**Agent model policy**: `model: "sonnet"` (standard tier). Fallback: `model: "opus"` if rate-limited. Feature gate: pass `effort` in Task/Skill spawns only on Claude Code >= 2.1.154.
+**Agent model policy**: `model: "{DEFAULT_MODEL}"` — resolved from forge.yaml `agents.default_model`, else "sonnet" (standard tier). Fallback: `model: "opus"` if rate-limited. Feature gate: pass `effort` in Task/Skill spawns only on Claude Code >= 2.1.154.
 
 **NEVER use plan mode (EnterPlanMode).**
 
@@ -287,29 +287,13 @@ Create a detailed, actionable issue in the **Forge repository**.
 
 ### 4B: Create the issue
 
-**Before creating, run the deterministic dedup check:** <!-- Added: forge#1335 -->
+Creation is routed through the `/issue` create-hook's programmatic invocation contract (see `commands/issue.md` → Programmatic Invocation Contract). `/issue` runs its own Phase 2D deterministic dedup check (`scripts/issue-dedup.sh`, same script and exit-code semantics this file used to run manually) before creating — a separate manual pre-check here is redundant and has been removed. `/issue`'s dedup STOP is authoritative: on exit 1 (near-duplicate) or exit 2 (usage error) it stops before creation and the audit tool should treat that as "skip creation, comment on the existing issue with new evidence instead" (see `commands/issue.md` Phase 2D).
 
 ```bash
 AUDIT_TITLE="fix(pipeline): {one-line description of what the pipeline missed}"
-DEDUP_RESULT=$(scripts/issue-dedup.sh "$AUDIT_TITLE" -R {FORGE_REPO} 2>&1)
-DEDUP_EXIT=$?
-if [ "$DEDUP_EXIT" -eq 1 ]; then
-  echo "DEDUP: Audit finding near-duplicate — $DEDUP_RESULT"
-  echo "Skipping creation. Comment on the existing issue with new evidence instead."
-  # Do NOT call gh issue create for this audit finding
-elif [ "$DEDUP_EXIT" -eq 2 ]; then
-  echo "DEDUP: Usage error — $DEDUP_RESULT"
-  # Do NOT call gh issue create for this audit finding — fix the invocation and retry
-fi
-```
 
-Only call `gh issue create` when the dedup script exits 0:
-
-```bash
-gh issue create -R {FORGE_REPO} \
-  --title "fix(pipeline): {one-line description of what the pipeline missed}" \
-  --label "{LABELS}" \
-  --body "$(cat <<'EOF'
+AUDIT_BODY_FILE=$(mktemp)
+cat > "$AUDIT_BODY_FILE" <<'EOF'
 ## Problem
 
 {2-3 sentences: what production issue or implementation failure occurred and what pipeline phase failed to prevent it.}
@@ -397,8 +381,13 @@ gh issue list -R {FORGE_REPO} --state all --limit 30 --json number,title \
 
 {Include results here with links}
 EOF
-)"
 ```
+
+```
+Skill(skill="issue", args="--title \"$AUDIT_TITLE\" --body-file \"$AUDIT_BODY_FILE\" --label \"{LABEL_1}\" --label \"{LABEL_2}\" --label \"{LABEL_3}\"")
+```
+
+`{LABELS}` from the table in 4A (e.g. `P1,audit-finding,bug`) is split into one `--label` flag per label (`{LABEL_1}`, `{LABEL_2}`, `{LABEL_3}`) — `/issue`'s programmatic mode does not comma-split a single `--label` value. If `/issue` stops on dedup (near-duplicate or usage error, per the note above), do not fall back to a raw `gh issue create` — comment on the existing issue with the new evidence instead.
 
 ---
 

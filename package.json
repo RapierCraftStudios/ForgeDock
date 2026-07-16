@@ -1,6 +1,6 @@
 {
   "name": "forgedock",
-  "version": "1.1.1",
+  "version": "1.1.11",
   "description": "Autonomous dev pipeline for Claude Code. GitHub as institutional memory — every issue, PR, and annotation survives context resets and makes the next agent smarter.",
   "bin": {
     "forgedock": "bin/forgedock.mjs"
@@ -40,12 +40,13 @@
     "examples/",
     "packages/protocol/src/",
     "scripts/",
+    "!scripts/refresh-bot-token.sh",
     "templates/",
     "LICENSE",
     "README.md"
   ],
   "scripts": {
-    "test": "node --test \"bin/tests/**/*.test.mjs\"",
+    "test": "node --test \"bin/tests/**/*.test.mjs\" \"packages/protocol/test/**/*.test.mjs\"",
     "docs:dev": "vitepress dev docs/site",
     "docs:build": "vitepress build docs/site",
     "docs:preview": "vitepress preview docs/site"

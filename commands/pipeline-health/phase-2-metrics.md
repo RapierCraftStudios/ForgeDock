@@ -45,7 +45,70 @@ gh issue list -R $REPO --state closed --label "review-finding" --json number,cre
   --jq "[.[] | select(.createdAt > \"$SINCE\")] | length"
 ```
 
-**False positive rate** = invalid / total closed. Target: < 10%.
+**False positive rate (proxy)** = invalid / total closed. Target: < 10%.
+
+**Note**: This proxy uses `workflow:invalid` as a stand-in for false-positive. Phase 2C.5 reports the actual false-positive rate from the `false-positive` label. Both metrics should be reported; they should converge as validation coverage increases.
+
+### 2C.5: Validation coverage (finding lifecycle health) <!-- Added: forge#1730 -->
+
+Measures whether the `needs-validation → validated/false-positive` lifecycle is operating. This is the primary health signal for the review system's calibration corpus.
+
+```bash
+# All finding-issue types: review-finding, staging-review, audit-finding
+FINDING_LABELS="review-finding staging-review audit-finding"
+
+TOTAL_FINDINGS=0
+TOTAL_VALIDATED=0
+TOTAL_FALSE_POSITIVE=0
+TOTAL_NEEDS_VALIDATION=0
+
+for LABEL in $FINDING_LABELS; do
+  COUNT=$(gh issue list -R $REPO --state all --label "$LABEL" --limit 1000 --json number \
+    --jq 'length' 2>/dev/null || echo 0)
+  TOTAL_FINDINGS=$((TOTAL_FINDINGS + COUNT))
+
+  VAL=$(gh issue list -R $REPO --state all --label "$LABEL,validated" --limit 1000 --json number \
+    --jq 'length' 2>/dev/null || echo 0)
+  TOTAL_VALIDATED=$((TOTAL_VALIDATED + VAL))
+
+  FP=$(gh issue list -R $REPO --state all --label "$LABEL,false-positive" --limit 1000 --json number \
+    --jq 'length' 2>/dev/null || echo 0)
+  TOTAL_FALSE_POSITIVE=$((TOTAL_FALSE_POSITIVE + FP))
+
+  NV=$(gh issue list -R $REPO --state all --label "$LABEL,needs-validation" --limit 1000 --json number \
+    --jq 'length' 2>/dev/null || echo 0)
+  TOTAL_NEEDS_VALIDATION=$((TOTAL_NEEDS_VALIDATION + NV))
+done
+
+TOTAL_RESOLVED=$((TOTAL_VALIDATED + TOTAL_FALSE_POSITIVE))
+if [ "$TOTAL_FINDINGS" -gt 0 ]; then
+  VALIDATION_COVERAGE_PCT=$(echo "scale=1; $TOTAL_RESOLVED * 100 / $TOTAL_FINDINGS" | bc 2>/dev/null || echo "N/A")
+  if [ "$TOTAL_RESOLVED" -gt 0 ]; then
+    FALSE_POSITIVE_RATE_PCT=$(echo "scale=1; $TOTAL_FALSE_POSITIVE * 100 / $TOTAL_RESOLVED" | bc 2>/dev/null || echo "N/A")
+  else
+    FALSE_POSITIVE_RATE_PCT="N/A (no resolved findings)"
+  fi
+else
+  VALIDATION_COVERAGE_PCT="N/A"
+  FALSE_POSITIVE_RATE_PCT="N/A"
+fi
+
+echo "=== Validation Coverage (2C.5) ==="
+echo "Total finding-issues:      $TOTAL_FINDINGS (review-finding + staging-review + audit-finding)"
+echo "  validated:               $TOTAL_VALIDATED"
+echo "  false-positive:          $TOTAL_FALSE_POSITIVE"
+echo "  resolved (total):        $TOTAL_RESOLVED"
+echo "  needs-validation (open): $TOTAL_NEEDS_VALIDATION"
+echo "Validation coverage:       ${VALIDATION_COVERAGE_PCT}% (target: ≥ 95% for newly closed findings)"
+echo "False-positive rate:       ${FALSE_POSITIVE_RATE_PCT}% of resolved findings (actual label-based rate)"
+```
+
+**Metrics to compute**:
+- **Validation coverage**: (validated + false-positive) / total finding-issues. Target: ≥ 95% for newly closed findings.
+- **False-positive rate (actual)**: false-positive / (validated + false-positive). Reports true negative rate, not the `workflow:invalid` proxy from 2C.
+- **Unresolved finding count**: Issues still holding `needs-validation` — actionable target for `/cleanup labels` backfill.
+
+**Why this matters**: The `needs-validation` label was previously a dead end — applied at creation, never resolved. With the lifecycle wired (#1730), these metrics become the primary signal for review system calibration quality. Validation coverage < 95% indicates pipeline runs are not completing the verdict transition; false-positive rate is now a reportable number instead of undefined.
 
 ### 2D: Build failure rate
 
@@ -493,6 +556,136 @@ gh issue list -R $FORGE_REPO --state all --label "audit-finding" \
 - **Review escape rate**: REVIEW_FALSE_NEG findings / PRs merged in window. Target: < 2%. This is the most direct measure of review agent effectiveness — these are defects the review agent saw but approved.
 - **Failure category distribution**: breakdown by failure point (INVESTIGATION, IMPLEMENTATION, REVIEW, REVIEW_FALSE_NEG, DEPLOY_GATE, etc.). No target — use for diagnosis. High IMPLEMENTATION counts indicate builder gaps; high REVIEW_FALSE_NEG counts indicate review agent gaps.
 - **Mean time to detect (MTD)**: average days from PR merge to audit-finding creation. Target: < 7 days. Long MTD means defects linger undetected in production.
+
+### 2M.5: Review intensity distribution and escaped-defect rate by tier <!-- Added: forge#1745 -->
+
+This metric is only meaningful once `scripts/calibration.mjs --provenance` has been publishing to the `forge-knowledge` branch for at least one 30-day shadow-mode window. Before that point, all PRs have `INTENSITY_TIER=SHADOW` in their FORGE:REVIEW annotations and both tier buckets will be empty — this is expected and correct.
+
+**Why this matters**: Review spend should track risk. This metric verifies that the trust escalation system is working as intended: proven cells should have lower escaped-defect rates than novel cells, and overall review token cost per PR should trend down while escaped-defect rate stays flat or falls.
+
+**Success metric**: Review token cost per PR trending down (fewer agents on proven PRs) while escaped-defect rate (14-day post-merge review-findings) stays flat or falls; zero escapes attributable to a dropped agent that the full panel would have run.
+
+```bash
+# Collect FORGE:REVIEW annotation INTENSITY_TIER fields from merged PRs in the analysis window.
+# Source: the APPROVED:/CHANGES REQUESTED: PR comment from review-pr.md Phase 7B.
+# Field format (set since forge#1745): "**Intensity tier**: PROVEN | **Cell**: `...` | **Shadow mode**: false"
+#
+# This relies on MERGED_PRS (list of PR numbers) being available from Phase 2E.
+# If not available, fall back to gh pr list.
+if [ -z "${MERGED_PRS:-}" ]; then
+  MERGED_PRS=$(gh pr list -R "$FORGE_REPO" --state merged --limit 200 \
+    --json number,mergedAt \
+    --jq "[.[] | select(.mergedAt > \"$SINCE\")] | .[].number" 2>/dev/null || echo "")
+fi
+
+# Accumulators per intensity tier
+TIER_NOVEL_COUNT=0
+TIER_PROVEN_COUNT=0
+TIER_SHADOW_COUNT=0
+TIER_NOVEL_NEEDS_HUMAN_COUNT=0
+TIER_NOVEL_ESCAPES=0
+TIER_PROVEN_ESCAPES=0
+
+# Also track escaped defect counts per tier using the audit-finding ledger from 2L.
+# AUDIT_FINDINGS must be set from Phase 2L (contains audit-finding issues in window).
+AUDIT_FINDINGS_AVAILABLE="${AUDIT_FINDINGS:+true}"
+
+while IFS= read -r PR_NUM; do
+  [ -z "$PR_NUM" ] && continue
+
+  # Read the FORGE:REVIEW comment from this PR to extract INTENSITY_TIER
+  REVIEW_COMMENT=$(gh api "repos/${FORGE_REPO}/issues/${PR_NUM}/comments" \
+    --jq '[.[] | select(
+      (.body | test("APPROVED:|CHANGES REQUESTED:"; "i")) and
+      (.body | contains("Intensity tier"))
+    )] | last | .body // ""' 2>/dev/null || echo "")
+
+  if [ -z "$REVIEW_COMMENT" ]; then
+    TIER_SHADOW_COUNT=$((TIER_SHADOW_COUNT + 1))
+    continue
+  fi
+
+  PR_TIER=$(echo "$REVIEW_COMMENT" | grep -oP '(?<=\*\*Intensity tier\*\*: )[A-Z_]+' | head -1 || echo "SHADOW")
+  case "$PR_TIER" in
+    PROVEN)              TIER_PROVEN_COUNT=$((TIER_PROVEN_COUNT + 1)) ;;
+    NOVEL_NEEDS_HUMAN)   TIER_NOVEL_NEEDS_HUMAN_COUNT=$((TIER_NOVEL_NEEDS_HUMAN_COUNT + 1))
+                         TIER_NOVEL_COUNT=$((TIER_NOVEL_COUNT + 1)) ;;
+    NOVEL)               TIER_NOVEL_COUNT=$((TIER_NOVEL_COUNT + 1)) ;;
+    *)                   TIER_SHADOW_COUNT=$((TIER_SHADOW_COUNT + 1)) ;;
+  esac
+
+  # Cross-reference escaped defects for this PR's files (from 2L AUDIT_FINDINGS)
+  # A REVIEW_FALSE_NEG audit-finding referencing PR #{PR_NUM} counts as an escape for this tier.
+  if [ "$AUDIT_FINDINGS_AVAILABLE" = "true" ]; then
+    ESCAPE_COUNT=$(echo "$AUDIT_FINDINGS" | \
+      jq --argjson pr "$PR_NUM" '[.[] | select(
+        (.body | test("\\*\\*Failure point\\*\\*:.*REVIEW_FALSE_NEG")) and
+        (.body | test("#" + ($pr | tostring)))
+      )] | length' 2>/dev/null || echo "0")
+
+    if [ "${ESCAPE_COUNT:-0}" -gt 0 ]; then
+      case "$PR_TIER" in
+        PROVEN) TIER_PROVEN_ESCAPES=$((TIER_PROVEN_ESCAPES + ESCAPE_COUNT)) ;;
+        NOVEL|NOVEL_NEEDS_HUMAN) TIER_NOVEL_ESCAPES=$((TIER_NOVEL_ESCAPES + ESCAPE_COUNT)) ;;
+      esac
+    fi
+  fi
+done <<< "$MERGED_PRS"
+
+TIER_TOTAL=$((TIER_NOVEL_COUNT + TIER_PROVEN_COUNT + TIER_SHADOW_COUNT + TIER_NOVEL_NEEDS_HUMAN_COUNT))
+
+echo ""
+echo "=== Review Intensity Distribution (forge#1745 — provenance trust) ==="
+echo "Window: ${SINCE} → now | Total PRs: ${TIER_TOTAL}"
+echo ""
+echo "Tier distribution:"
+printf "  %-22s %4d  (%s%%)\n" "PROVEN (de-escalated):" "$TIER_PROVEN_COUNT" \
+  "$([ "$TIER_TOTAL" -gt 0 ] && echo "scale=0; $TIER_PROVEN_COUNT * 100 / $TIER_TOTAL" | bc || echo "0")"
+printf "  %-22s %4d  (%s%%)\n" "NOVEL (full panel):" "$TIER_NOVEL_COUNT" \
+  "$([ "$TIER_TOTAL" -gt 0 ] && echo "scale=0; $TIER_NOVEL_COUNT * 100 / $TIER_TOTAL" | bc || echo "0")"
+printf "  %-22s %4d  (%s%%)\n" "SHADOW (no action yet):" "$TIER_SHADOW_COUNT" \
+  "$([ "$TIER_TOTAL" -gt 0 ] && echo "scale=0; $TIER_SHADOW_COUNT * 100 / $TIER_TOTAL" | bc || echo "0")"
+
+echo ""
+echo "Escaped-defect rate by tier (REVIEW_FALSE_NEG audit-findings):"
+if [ "$TIER_PROVEN_COUNT" -gt 0 ]; then
+  PROVEN_ESCAPE_RATE=$(echo "scale=1; $TIER_PROVEN_ESCAPES * 100 / $TIER_PROVEN_COUNT" | bc 2>/dev/null || echo "N/A")
+  echo "  PROVEN: ${TIER_PROVEN_ESCAPES} escapes / ${TIER_PROVEN_COUNT} PRs = ${PROVEN_ESCAPE_RATE}% (target: ≤ review-wide escape rate)"
+else
+  echo "  PROVEN: no PRs in this tier yet"
+fi
+if [ "$TIER_NOVEL_COUNT" -gt 0 ]; then
+  NOVEL_ESCAPE_RATE=$(echo "scale=1; $TIER_NOVEL_ESCAPES * 100 / $TIER_NOVEL_COUNT" | bc 2>/dev/null || echo "N/A")
+  echo "  NOVEL:  ${TIER_NOVEL_ESCAPES} escapes / ${TIER_NOVEL_COUNT} PRs = ${NOVEL_ESCAPE_RATE}%"
+else
+  echo "  NOVEL: no PRs in this tier yet"
+fi
+
+# Health signal: if PROVEN escape rate > NOVEL escape rate, the de-escalation is leaking.
+# This should never happen in steady state — flag it if it does.
+if [ "$TIER_PROVEN_COUNT" -gt 0 ] && [ "$TIER_NOVEL_COUNT" -gt 0 ]; then
+  PROVEN_ESC_CMP=$(echo "scale=3; $TIER_PROVEN_ESCAPES / $TIER_PROVEN_COUNT" | bc 2>/dev/null || echo "0")
+  NOVEL_ESC_CMP=$(echo "scale=3; $TIER_NOVEL_ESCAPES / $TIER_NOVEL_COUNT" | bc 2>/dev/null || echo "0")
+  if awk "BEGIN{exit !($PROVEN_ESC_CMP > $NOVEL_ESC_CMP)}" 2>/dev/null; then
+    echo ""
+    echo "⚠ WARNING: PROVEN tier escape rate (${PROVEN_ESC_CMP}) exceeds NOVEL tier (${NOVEL_ESC_CMP})."
+    echo "  This indicates that de-escalation is suppressing agents that would have caught defects."
+    echo "  Investigate: run /pipeline-health --detail and check which cells are PROVEN with recent escapes."
+    echo "  Consider resetting affected provenance cells or raising the PROVEN threshold."
+  fi
+fi
+
+# Export for downstream phases (phase-3-analyze.md health score)
+export TIER_NOVEL_COUNT TIER_PROVEN_COUNT TIER_SHADOW_COUNT
+export TIER_NOVEL_ESCAPES TIER_PROVEN_ESCAPES
+```
+
+**Metrics to report in Phase 5 health summary**:
+- **Intensity distribution**: PROVEN / NOVEL / SHADOW counts and percentages over the analysis window
+- **Escaped-defect rate by tier**: REVIEW_FALSE_NEG audit-finding rate per tier (target: PROVEN ≤ overall rate, NOVEL ≥ overall rate before de-escalation takes effect, PROVEN never exceeds NOVEL)
+- **Shadow mode PRs**: count of PRs where intensity tier was computed but not acted on (should decrease after 30-day window)
+
+**Note**: If `TRUST_SHADOW_MODE=true` is still set in forge.yaml, all PRs will appear as SHADOW tier in this metric. This is correct — shadow mode has not yet been enforced. After setting `trust_shadow_mode: false`, tiers will populate.
 
 ### 2M: Session discovery and date-gated filtering (conversation transcript analytics)
 
@@ -1724,6 +1917,117 @@ fi
 
 **Skip condition**: If `TRANSCRIPT_DATA_AVAILABLE` is false or `PER_SESSION_METRICS_RAW` is empty, emit:
 > `Phase 2Q: Aggregated transcript metrics unavailable — Phase 2O did not produce session data. Run /pipeline-health on the machine where Claude Code sessions are stored.`
+
+---
+
+### 2R: Confidence Calibration Table (from run outcomes)
+
+**Purpose**: Surfaces whether the pipeline's stated confidence levels predict actual outcomes. A HIGH-confidence issue that frequently triggers review-findings or reverts within 14 days indicates systematic overconfidence — the investigator's confidence is not tracking reality. Conversely, needs-human routing on issues that almost always survive indicates overcaution. This section reads the calibration table produced by `scripts/calibration.mjs` and published to the `forge-knowledge` branch. <!-- Added: forge#1741 -->
+
+**Skip if**: forge-knowledge branch is absent or `calibration/table.json` does not exist on it — emit the unavailability note below and continue.
+
+**Read calibration table**:
+```bash
+# Read calibration table from forge-knowledge branch (fail-safe: any error → skip)
+CALIBRATION_TABLE=""
+CALIBRATION_AVAILABLE=false
+
+if git show-ref --quiet "refs/remotes/origin/${FORGE_KNOWLEDGE_BRANCH:-forge-knowledge}" 2>/dev/null || \
+   git ls-remote --exit-code origin "${FORGE_KNOWLEDGE_BRANCH:-forge-knowledge}" >/dev/null 2>&1; then
+  RAW_TABLE=$(git show "origin/${FORGE_KNOWLEDGE_BRANCH:-forge-knowledge}:calibration/table.json" 2>/dev/null || echo '')
+  if [ -n "$RAW_TABLE" ]; then
+    CALIBRATION_TABLE="$RAW_TABLE"
+    CALIBRATION_AVAILABLE=true
+    CALIB_COMPUTED_AT=$(echo "$CALIBRATION_TABLE" | jq -r '.computedAt // "unknown"' 2>/dev/null || echo 'unknown')
+    CALIB_TOTAL_RUNS=$(echo "$CALIBRATION_TABLE" | jq -r '.totalRuns // 0' 2>/dev/null || echo '0')
+    CALIB_WINDOW_DAYS=$(echo "$CALIBRATION_TABLE" | jq -r '.windowDays // 14' 2>/dev/null || echo '14')
+    CALIB_MIN_SAMPLES=$(echo "$CALIBRATION_TABLE" | jq -r '.minSamples // 10' 2>/dev/null || echo '10')
+    echo "Calibration table loaded: ${CALIB_TOTAL_RUNS} runs, computed ${CALIB_COMPUTED_AT}"
+  fi
+fi
+
+if [ "$CALIBRATION_AVAILABLE" = false ]; then
+  echo "Phase 2R: Calibration table unavailable (forge-knowledge:calibration/table.json not found)"
+  echo "  To compute: node scripts/calibration.mjs --repo ${REPO} --publish"
+  # Store unavailability for Phase 5A report
+  CALIBRATION_AVAILABILITY_NOTE="⚠ Calibration table unavailable — run: node scripts/calibration.mjs --repo ${REPO} --publish"
+fi
+```
+
+**Render calibration table** (when available):
+
+```bash
+if [ "$CALIBRATION_AVAILABLE" = true ]; then
+  echo "## Confidence Calibration Table"
+  echo "**Source**: forge-knowledge:calibration/table.json"
+  echo "**Computed**: ${CALIB_COMPUTED_AT}"
+  echo "**Outcome window**: ${CALIB_WINDOW_DAYS} days | **Min samples for trust**: ${CALIB_MIN_SAMPLES}"
+  echo "**Total runs in corpus**: ${CALIB_TOTAL_RUNS}"
+  echo ""
+
+  # Extract and render per-cell rows; flag overconfidence and overcaution cells
+  OVERCONFIDENCE_CELLS=""
+  OVERCAUTION_CELLS=""
+
+  echo "$CALIBRATION_TABLE" | jq -r '
+    .rows[] |
+    [
+      .taskType,
+      .confidence,
+      (if .trusted then (.survivalRate * 100 | floor | tostring) + "%" else "—(N<" + (.sampleCount | tostring) + ")" end),
+      (.sampleCount | tostring),
+      (if .trusted then
+        (if .flag == "overconfidence" then "⚠ OVERCONFIDENCE" elif .flag == "overcaution-candidate" then "ℹ OVERCAUTION?" else "✅ OK" end)
+      else "ℹ untrusted" end)
+    ] | @tsv
+  ' 2>/dev/null | while IFS=$'\t' read -r taskType confidence survivalRate sampleCount status; do
+    printf "| %-20s | %-8s | %-18s | %-7s | %s\n" \
+      "$taskType" "$confidence" "$survivalRate" "$sampleCount" "$status"
+
+    # Collect flagged cells for summary
+    if [[ "$status" == *"OVERCONFIDENCE"* ]]; then
+      OVERCONFIDENCE_CELLS="${OVERCONFIDENCE_CELLS}\n  - ${taskType} × ${confidence}: ${survivalRate} survival (${sampleCount} runs)"
+    elif [[ "$status" == *"OVERCAUTION"* ]]; then
+      OVERCAUTION_CELLS="${OVERCAUTION_CELLS}\n  - ${taskType} × ${confidence}: ${survivalRate} survival (${sampleCount} runs)"
+    fi
+  done
+
+  # Emit flag summaries
+  if [ -n "$OVERCONFIDENCE_CELLS" ]; then
+    echo ""
+    echo "### ⚠ Overconfidence Cells (HIGH confidence, survival < 80%)"
+    echo "These task-type × confidence combinations claim HIGH confidence but have poor real-world outcomes."
+    echo "The review threshold for these cells should be tightened (consider needs-human routing)."
+    echo -e "$OVERCONFIDENCE_CELLS"
+  fi
+
+  if [ -n "$OVERCAUTION_CELLS" ]; then
+    echo ""
+    echo "### ℹ Overcaution Candidates (survival > 95% — needs-human may be unnecessary)"
+    echo "These cells have very high survival rates. Needs-human routing on them may be unnecessary,"
+    echo "but any loosening of behavior requires the eval-gate to pass on the affected task-type corpus."
+    echo "Do NOT loosen automatically — flag for human review."
+    echo -e "$OVERCAUTION_CELLS"
+  fi
+
+  # 30-day trend (compare against prior report's PRIOR_CALIBRATION_COMPUTED_AT if available)
+  if [ -n "${PRIOR_CALIBRATION_COMPUTED_AT:-}" ]; then
+    echo ""
+    echo "### Calibration Trend"
+    echo "Prior table computed: ${PRIOR_CALIBRATION_COMPUTED_AT}"
+    echo "Current table computed: ${CALIB_COMPUTED_AT}"
+    echo "(Trend comparison requires prior report data — compare manually if prior available)"
+  fi
+fi
+```
+
+**Metrics to surface in Phase 5A report**:
+- **Calibration data coverage**: `${CALIB_TOTAL_RUNS}` runs in corpus (target: > 20 for meaningful cells)
+- **Overconfidence cells**: count of cells where HIGH-confidence survival < 80%
+- **Overcaution candidates**: count of cells where survival > 95% (informational — loosening requires eval-gate)
+- **Table freshness**: `computedAt` timestamp — flag as stale if > 7 days old
+
+**Why this matters**: Static confidence thresholds in review-pr.md (Phase 7B blocking criteria) are prose rules with no feedback from outcomes. The calibration table is the mechanism by which the pipeline learns whether its stated confidence is tracking reality. A task-type with persistent overconfidence should have its review intensity increased regardless of the agent's stated confidence. <!-- Added: forge#1741 -->
 
 ---
 

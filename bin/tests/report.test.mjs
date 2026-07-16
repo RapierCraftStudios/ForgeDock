@@ -45,8 +45,9 @@ function makeIssue({ closedAt, createdAt, labels = [], body = "", authorType = "
 }
 
 function makeClosedIssue(minutesAgo, durationMinutes, opts = {}) {
-  const closedAt = new Date(Date.now() - minutesAgo * 60000).toISOString();
-  const createdAt = new Date(Date.now() - (minutesAgo + durationMinutes) * 60000).toISOString();
+  const now = Date.now();
+  const closedAt = new Date(now - minutesAgo * 60000).toISOString();
+  const createdAt = new Date(now - (minutesAgo + durationMinutes) * 60000).toISOString();
   return makeIssue({ closedAt, createdAt, ...opts });
 }
 

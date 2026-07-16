@@ -13,7 +13,7 @@ argument-hint: <PR number or URL> [--max-attempts N] [--repo owner/repo]
 
 **Output**: Structured result — `{ pr, status, attempts, fixes_applied }` — printed to stdout and available to the calling skill.
 
-**Agent model policy**: `model: "sonnet"` (standard tier). Fallback: `model: "opus"` if rate-limited. User can override with `--model <name>`. Feature gate: pass `effort` in Task/Skill spawns only on Claude Code >= 2.1.154.
+**Agent model policy**: `model: "{DEFAULT_MODEL}"` — resolved from forge.yaml `agents.default_model`, else "sonnet" (standard tier). Fallback: `model: "opus"` if rate-limited. User can override with `--model <name>`. Feature gate: pass `effort` in Task/Skill spawns only on Claude Code >= 2.1.154.
 **NEVER use plan mode (EnterPlanMode).**
 **NEVER force-push or amend commits** — always create new commits.
 
