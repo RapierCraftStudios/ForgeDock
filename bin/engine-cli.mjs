@@ -69,11 +69,19 @@ export function runDir() { return join(homedir(), ".forge", "runs"); }
  * return before any event was appended), only the run-log path line is
  * printed — never throws.
  *
+ * Validates `issue` internally (mirrors the `Number.isInteger` guard in
+ * `lastLocalRun()` below) rather than relying solely on the caller —
+ * `runFromCli()` already validates before calling this, but this is an
+ * exported helper and a future caller could forget to (forge#2190).
+ *
  * @param {string} dir - runDir() (or an injected override for tests)
  * @param {number} issue
  * @returns {string} multi-line diagnostic block (no trailing newline)
  */
 export function formatTerminalDiagnostics(dir, issue) {
+  if (!Number.isInteger(issue)) {
+    return `  run-log: <invalid issue: ${JSON.stringify(issue)}>`;
+  }
   const runLogPath = join(dir, `${issue}.jsonl`);
   let events = [];
   try {

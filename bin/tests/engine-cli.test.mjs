@@ -474,6 +474,20 @@ describe("formatTerminalDiagnostics (forge#2175)", () => {
       rmSync(dir, { recursive: true, force: true });
     }
   });
+
+  it("degrades to a safe placeholder without touching the filesystem when issue is not an integer (forge#2190)", () => {
+    const dir = mkdtempSync(join(os.tmpdir(), "engine-cli-test-"));
+    try {
+      for (const invalid of [NaN, "not-a-number", undefined, null, 1.5]) {
+        const out = formatTerminalDiagnostics(dir, invalid);
+        assert.ok(!out.includes("phase:"), `must not print a phase: line for invalid issue ${invalid}`);
+        assert.ok(!out.includes("state:"), `must not print a state: line for invalid issue ${invalid}`);
+        assert.match(out, /run-log:\s+<invalid issue:/);
+      }
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
 });
 
 describe("runFromCli terminal diagnostics (forge#2175)", () => {
