@@ -36,6 +36,17 @@ import {
   PIPELINE_SCRIPTS,
 } from "./journey.mjs";
 import {
+  deriveWorkflowLabels,
+  FINDINGS_LANE_LABEL,
+  classifyFindingStatus,
+  hasWorkflowLabel,
+  normalizePriority,
+  parseSatelliteRepos,
+  buildHeartbeatBatchQuery,
+  parseHeartbeatBatchResponse,
+  chunkArray,
+} from "./watch-utils.mjs";
+import {
   removeSessionStartHook,
   removeSubagentStopHook,
   removePreToolUseHook,
@@ -3257,13 +3268,25 @@ async function demo() {
 /**
  * `forgedock watch` — live per-agent orchestration view
  *
- * Polls GitHub every 5 seconds for in-flight issues (those with workflow:*
- * labels) and renders a per-agent table with issue#, title, phase, elapsed
- * time, and staleness status.  All data is sourced from FORGE:HEARTBEAT
- * comments written by the pipeline at each phase boundary.
+ * Polls GitHub every 5 seconds for in-flight issues (those carrying any
+ * label in the workflow-prefixed / needs-human family, derived from
+ * bin/labels.json — see deriveWorkflowLabels() in bin/watch-utils.mjs,
+ * forge#2235) and renders
+ * a per-agent table with issue#, title, phase, elapsed time, and staleness
+ * status. All data is sourced from FORGE:HEARTBEAT comments written by the
+ * pipeline at each phase boundary.
+ *
+ * A second, independent "Findings" lane renders review-finding issues
+ * regardless of workflow:* state (forge#2235) — a finding is born without
+ * any workflow:* label and may never acquire one (deferred findings), so it
+ * must not depend on the in-flight label set to be visible. Findings render
+ * with a distinct queued/deferred/validated status, never "running".
  *
  * Stalled agents (no HEARTBEAT update within pipeline.stall_timeout_minutes)
  * are highlighted in yellow.
+ *
+ * If `forge.yaml` defines `repos.satellites`, each satellite repo is watched
+ * in its own section in addition to the default/`--repo` repo.
  *
  * Run:  npx forgedock watch [--repo owner/repo]
  * Exit: Ctrl+C
@@ -3271,8 +3294,11 @@ async function demo() {
 async function watch() {
   const POLL_INTERVAL_MS = 5000;
   const USE_ANSI_WATCH = process.stdout.isTTY === true && !process.env.NO_COLOR && process.env.TERM !== "dumb";
+  const ISSUE_LIST_LIMIT = 500; // forge#2235 — was 30; matches phase-1-resolve.md's --limit 500 mandate
+  const HEARTBEAT_BATCH_CHUNK_SIZE = 25; // keep GraphQL query size/complexity bounded
 
-  // ── Resolve repo ──────────────────────────────────────────────────────────
+  // ── Resolve repo(s) ────────────────────────────────────────────────────────
+  const explicitRepoFlag = restArgs.includes("--repo");
   const watchRepo = resolveLabelsRepo(restArgs);
   if (!watchRepo) {
     process.stderr.write(
@@ -3282,6 +3308,22 @@ async function watch() {
     process.exitCode = 1;
     return;
   }
+
+  // Satellite repos (forge.yaml → repos.satellites) are watched in addition
+  // to the primary repo, unless the caller explicitly overrode --repo (an
+  // explicit --repo means "just this one repo"). Returns [] when no
+  // satellites section is present, so single-repo behavior is unchanged.
+  let satelliteRepos = [];
+  if (!explicitRepoFlag) {
+    const forgeYamlPathForSatellites = join(process.cwd(), "forge.yaml");
+    if (existsSync(forgeYamlPathForSatellites)) {
+      try {
+        const raw = readFileSync(forgeYamlPathForSatellites, "utf-8");
+        satelliteRepos = parseSatelliteRepos(raw).filter((r) => r !== watchRepo);
+      } catch { /* ignore — stay default-repo-only */ }
+    }
+  }
+  const watchedRepos = [watchRepo, ...satelliteRepos];
 
   // ── Validate gh CLI auth ───────────────────────────────────────────────────
   try {
@@ -3346,26 +3388,88 @@ async function watch() {
   }
 
   // ── Render loop ────────────────────────────────────────────────────────────
-  const WORKFLOW_LABELS = [
-    "workflow:investigating",
-    "workflow:ready-to-build",
-    "workflow:building",
-    "workflow:in-review",
-    "needs-human",
-  ];
+  // Derived from bin/labels.json (forge#2235) instead of a hardcoded literal,
+  // so a newly-added workflow:* label (e.g. workflow:engine-error) is watched
+  // automatically without a code change. Falls back to a conservative
+  // built-in list if the manifest is missing/unreadable.
+  const WORKFLOW_LABELS = deriveWorkflowLabels(join(__dirname, "labels.json"));
 
-  async function render() {
-    const rows = [["#", "Title", "Phase", "Elapsed", "Status"]];
+  // Batch-fetch the latest FORGE:HEARTBEAT comment for a set of issue numbers
+  // in ONE `gh api graphql` round-trip (chunked) instead of one REST call per
+  // issue (forge#2235 — de-N+1). Falls back to the old per-issue REST fetch
+  // for the whole set on any GraphQL error, so this optimization can never
+  // make watch() go blind.
+  async function fetchHeartbeatsBatch(repo, issueNumbers) {
+    const result = new Map();
+    if (issueNumbers.length === 0) return result;
+    const [owner, name] = repo.split("/");
+    if (!owner || !name) return fetchHeartbeatsPerIssueFallback(repo, issueNumbers);
+
+    try {
+      for (const chunk of chunkArray(issueNumbers, HEARTBEAT_BATCH_CHUNK_SIZE)) {
+        const query = buildHeartbeatBatchQuery(owner, name, chunk);
+        const raw = execFileSync(
+          "gh",
+          ["api", "graphql", "-f", `query=${query}`],
+          { encoding: "utf-8", stdio: ["ignore", "pipe", "pipe"] },
+        );
+        const parsed = parseHeartbeatBatchResponse(JSON.parse(raw));
+        for (const [num, body] of parsed) result.set(num, body);
+      }
+      return result;
+    } catch {
+      // GraphQL batch failed (auth scope gap, malformed query, rate limit) —
+      // fall back to the pre-forge#2235 per-issue REST behavior so watch()
+      // degrades gracefully instead of losing heartbeat data entirely.
+      return fetchHeartbeatsPerIssueFallback(repo, issueNumbers);
+    }
+  }
+
+  function fetchHeartbeatsPerIssueFallback(repo, issueNumbers) {
+    const result = new Map();
+    for (const num of issueNumbers) {
+      try {
+        const commentsJson = execFileSync(
+          "gh",
+          ["api", `repos/${repo}/issues/${num}/comments`,
+           "--jq", "[.[] | select(.body | contains(\"FORGE:HEARTBEAT\"))] | last | .body // \"\""],
+          { encoding: "utf-8", stdio: ["ignore", "pipe", "pipe"] },
+        ).trim();
+        if (commentsJson && commentsJson !== '""' && commentsJson !== "") {
+          result.set(num, commentsJson.replace(/^"|"$/g, "").replace(/\\n/g, "\n"));
+        } else {
+          result.set(num, null);
+        }
+      } catch {
+        result.set(num, null);
+      }
+    }
+    return result;
+  }
+
+  // Renders a normalized priority for the "Pri" column, accepting both the
+  // canonical `priority:P<n>` label form and the bare `P<n>` form used by
+  // some consumer repos (forge#2232 / forge#2235).
+  function priorityCell(issue) {
+    return normalizePriority(issue.labels || []) || "—";
+  }
+
+  async function renderRepo(repo) {
+    const rows = [["#", "Pri", "Title", "Phase", "Elapsed", "Status"]];
+    const findingsRows = [["#", "Pri", "Title", "Status"]];
     let anyIssues = false;
+    const inFlightNumbers = new Set();
+    const issuesByLabel = [];
 
+    // ── In-flight lane: one query per workflow:*/needs-human label ──────────
     for (const label of WORKFLOW_LABELS) {
       let issueJson;
       try {
-        // Use execFileSync with argument array to avoid shell injection via watchRepo
+        // Use execFileSync with argument array to avoid shell injection via repo
         issueJson = execFileSync(
           "gh",
-          ["issue", "list", "-R", watchRepo, "--state", "open",
-           "--label", label, "--limit", "30", "--json", "number,title"],
+          ["issue", "list", "-R", repo, "--state", "open",
+           "--label", label, "--limit", String(ISSUE_LIST_LIMIT), "--json", "number,title,labels"],
           { encoding: "utf-8", stdio: ["ignore", "pipe", "pipe"] },
         );
       } catch {
@@ -3375,26 +3479,32 @@ async function watch() {
       let issues;
       try { issues = JSON.parse(issueJson); } catch { continue; }
 
+      if (issues.length === ISSUE_LIST_LIMIT) {
+        process.stderr.write(
+          `${YELLOW}WARNING: label '${label}' on ${repo} returned exactly ${ISSUE_LIST_LIMIT} issues — ` +
+          `results may be truncated.${RESET}\n`,
+        );
+      }
+
+      issuesByLabel.push({ label, issues });
+      for (const issue of issues) inFlightNumbers.add(issue.number);
+    }
+
+    // Batch-fetch heartbeats once for every in-flight issue across all labels
+    const heartbeats = await fetchHeartbeatsBatch(repo, [...inFlightNumbers]);
+
+    for (const { label, issues } of issuesByLabel) {
       for (const issue of issues) {
         anyIssues = true;
         let phase = label.replace("workflow:", "");
         let elapsed = null;
 
-        // Fetch latest FORGE:HEARTBEAT comment for phase + timestamp
-        try {
-          const commentsJson = execFileSync(
-            "gh",
-            ["api", `repos/${watchRepo}/issues/${issue.number}/comments`,
-             "--jq", "[.[] | select(.body | contains(\"FORGE:HEARTBEAT\"))] | last | .body // \"\""],
-            { encoding: "utf-8", stdio: ["ignore", "pipe", "pipe"] },
-          ).trim();
-          if (commentsJson && commentsJson !== '""' && commentsJson !== "") {
-            const body = commentsJson.replace(/^"|"$/g, "").replace(/\\n/g, "\n");
-            phase = extractPhase(body) || phase;
-            const ts = extractTimestamp(body);
-            elapsed = elapsedMin(ts);
-          }
-        } catch { /* use label-derived phase */ }
+        const body = heartbeats.get(issue.number);
+        if (body) {
+          phase = extractPhase(body) || phase;
+          const ts = extractTimestamp(body);
+          elapsed = elapsedMin(ts);
+        }
 
         const isStalled = elapsed !== null && elapsed >= stallMinutes;
         const isBlocked = label === "needs-human";
@@ -3413,6 +3523,7 @@ async function watch() {
 
         rows.push([
           `#${issue.number}`,
+          priorityCell(issue),
           titleColored,
           phaseShort,
           elapsedStr(elapsed),
@@ -3421,7 +3532,60 @@ async function watch() {
       }
     }
 
+    // ── Findings lane: review-finding issues, regardless of workflow:* state ─
+    // A finding is born without any workflow:* label and may never acquire
+    // one (deferred/PERMANENT_DEFERRED findings) — this lane makes them
+    // visible from creation instead of only during the narrow in-flight
+    // window (forge#2235).
+    let anyFindings = false;
+    try {
+      const findingsJson = execFileSync(
+        "gh",
+        ["issue", "list", "-R", repo, "--state", "open",
+         "--label", FINDINGS_LANE_LABEL, "--limit", String(ISSUE_LIST_LIMIT), "--json", "number,title,labels"],
+        { encoding: "utf-8", stdio: ["ignore", "pipe", "pipe"] },
+      );
+      const findings = JSON.parse(findingsJson);
+      if (findings.length === ISSUE_LIST_LIMIT) {
+        process.stderr.write(
+          `${YELLOW}WARNING: label '${FINDINGS_LANE_LABEL}' on ${repo} returned exactly ${ISSUE_LIST_LIMIT} issues — ` +
+          `results may be truncated.${RESET}\n`,
+        );
+      }
+      for (const issue of findings) {
+        // Findings that already carry a workflow:* label are in-flight and
+        // already rendered above — do not double-render them here.
+        if (hasWorkflowLabel(issue.labels || [], WORKFLOW_LABELS)) continue;
+
+        anyFindings = true;
+        const findingStatus = classifyFindingStatus(issue.labels || []); // validated | false-positive | queued | deferred
+        const statusDisplay = findingStatus.toUpperCase();
+        const statusColored = USE_ANSI_WATCH
+          ? (findingStatus === "validated" ? `\x1b[32m${statusDisplay}\x1b[0m`
+             : findingStatus === "false-positive" ? `\x1b[90m${statusDisplay}\x1b[0m`
+             : `\x1b[36m${statusDisplay}\x1b[0m`) // queued / deferred
+          : statusDisplay;
+
+        const titleTrunc = issue.title.length > 38 ? issue.title.slice(0, 35) + "..." : issue.title;
+
+        findingsRows.push([
+          `#${issue.number}`,
+          priorityCell(issue),
+          titleTrunc,
+          statusColored,
+        ]);
+      }
+    } catch { /* findings lane best-effort — never blocks the in-flight table */ }
+
+    return { repo, rows, anyIssues, findingsRows, anyFindings };
+  }
+
+  async function render() {
     const now = new Date().toISOString().replace("T", " ").slice(0, 19) + " UTC";
+    const results = [];
+    for (const repo of watchedRepos) {
+      results.push(await renderRepo(repo));
+    }
 
     if (USE_ANSI_WATCH) {
       process.stdout.write("\x1b[2J\x1b[H"); // clear screen + home
@@ -3429,12 +3593,26 @@ async function watch() {
       process.stdout.write(`\n${"─".repeat(60)}\n`);
     }
 
-    process.stdout.write(`${BOLD}ForgeDock Watch${RESET} — ${dim(watchRepo)}  ${dim(now)}\n\n`);
+    const repoLabel = watchedRepos.length > 1 ? `${watchedRepos.length} repos` : watchRepo;
+    process.stdout.write(`${BOLD}ForgeDock Watch${RESET} — ${dim(repoLabel)}  ${dim(now)}\n\n`);
 
-    if (!anyIssues || rows.length === 1) {
-      process.stdout.write(`  ${dim("No in-flight issues. All quiet.")}\n`);
-    } else {
-      process.stdout.write(table(rows, { header: true }));
+    for (const { repo, rows, anyIssues, findingsRows, anyFindings } of results) {
+      if (watchedRepos.length > 1) {
+        process.stdout.write(`${BOLD}${repo}${RESET}\n`);
+      }
+
+      if (!anyIssues || rows.length === 1) {
+        process.stdout.write(`  ${dim("No in-flight issues. All quiet.")}\n`);
+      } else {
+        process.stdout.write(table(rows, { header: true }));
+      }
+
+      if (anyFindings && findingsRows.length > 1) {
+        process.stdout.write(`\n${BOLD}Findings${RESET} ${dim("(review-finding — queued/deferred/validated)")}\n`);
+        process.stdout.write(table(findingsRows, { header: true }));
+      }
+
+      if (watchedRepos.length > 1) process.stdout.write("\n");
     }
 
     if (USE_ANSI_WATCH) {
