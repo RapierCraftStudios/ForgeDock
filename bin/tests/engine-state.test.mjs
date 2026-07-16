@@ -100,4 +100,35 @@ describe("state codec", () => {
     assert.match(body, /Header/);
     assert.match(body, /Footer/);
   });
+
+  it("round-trips a value that is a real delimiter immediately followed by literal entity-like text (forge#2137)", () => {
+    const poison = { ...idx, terminalReason: "<!--&gt;" };
+    const body = "prefix\n\n" + serializeState(poison);
+    const got = parseState(body);
+    assert.deepEqual(got, poison);
+  });
+
+  it("round-trips a value that is pure pre-existing entity-like text with no real delimiter (forge#2137)", () => {
+    const poison = { ...idx, terminalReason: "&lt;!--" };
+    const body = "prefix\n\n" + serializeState(poison);
+    const got = parseState(body);
+    assert.deepEqual(got, poison);
+  });
+
+  it("does not collide: '<!--&gt;' and '&lt;!--&gt;' encode to distinct payloads and both round-trip (forge#2137)", () => {
+    const a = { ...idx, terminalReason: "<!--&gt;" };
+    const b = { ...idx, terminalReason: "&lt;!--&gt;" };
+    const bodyA = serializeState(a);
+    const bodyB = serializeState(b);
+    assert.notEqual(bodyA, bodyB, "distinct inputs must not collide to the same encoded payload");
+    assert.deepEqual(parseState(bodyA), a);
+    assert.deepEqual(parseState(bodyB), b);
+  });
+
+  it("round-trips a value containing a literal ampersand alongside real delimiters (forge#2137)", () => {
+    const poison = { ...idx, terminalReason: "AT&T <!-- test --> done --!> & more <!--&gt; end" };
+    const body = "prefix\n\n" + serializeState(poison);
+    const got = parseState(body);
+    assert.deepEqual(got, poison);
+  });
 });

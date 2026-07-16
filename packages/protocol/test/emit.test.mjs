@@ -252,6 +252,13 @@ const ADVERSARIAL_VALUES = [
   // Unicode
   { label: 'unicode emoji', value: 'status: ✅ done' },
   { label: 'unicode CJK', value: '修复：协议注释注入' },
+  // forge#2137 — encode-injectivity collision between a real delimiter
+  // immediately followed by literal entity-like text, and pre-existing
+  // entity-like text with no real delimiter at all.
+  { label: 'real opener + literal entity text "<!--&gt;"', value: '<!--&gt;' },
+  { label: 'pure literal entity text "&lt;!--"', value: '&lt;!--' },
+  { label: 'pure literal entity text "&lt;!--&gt;" (collision partner of "<!--&gt;")', value: '&lt;!--&gt;' },
+  { label: 'literal ampersand alongside real delimiters', value: 'AT&T <!-- test --> done --!> & more' },
 ];
 
 // Test all adversarial values as field VALUES for CONTEXT (field-body type)
@@ -294,6 +301,19 @@ for (const { label, value } of ADVERSARIAL_VALUES.filter(v => !v.value.includes(
       `Round-trip mismatch for inline value: ${JSON.stringify(value)}`);
   });
 }
+
+// forge#2137 — explicit non-collision test: two distinct values that both
+// involve HTML-comment-delimiter/entity-text overlap must not encode to the
+// same annotation text, and each must round-trip to its own original value.
+test('emit() does not collide "<!--&gt;" and "&lt;!--&gt;" into the same encoded output', () => {
+  const textA = emit('CONTEXT', { Note: '<!--&gt;' });
+  const textB = emit('CONTEXT', { Note: '&lt;!--&gt;' });
+  assert.notEqual(textA, textB, 'distinct field values must not collide to the same emitted text');
+  const [annA] = parse(textA);
+  const [annB] = parse(textB);
+  assert.equal(annA.fields['Note'], '<!--&gt;');
+  assert.equal(annB.fields['Note'], '&lt;!--&gt;');
+});
 
 // Verify that parse(emit(x)) is lossless for all reserved field-body types
 // using a representative set of fields with safe values.

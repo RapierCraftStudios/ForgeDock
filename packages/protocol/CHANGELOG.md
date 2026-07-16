@@ -8,6 +8,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 See `README.md` for the versioning policy that governs how schema changes map
 to version bumps.
 
+## [1.2.1] - 2026-07-16
+
+Patch — internal escaping bugfix only. No reserved type, field, or public
+export changed. Consumers already on 1.2.0 remain fully compatible.
+
+### Fixed
+
+- `sanitizeFieldValue()` (emit.js) / `unescapeFieldValue()` (parse.js): the
+  HTML-comment-delimiter escaping scheme was not injective — a field value
+  that already contained literal entity-like text adjacent to `--` (e.g.
+  `"<!--&gt;"` or `"&lt;!--"`) could encode to the same output as an
+  unrelated value, making the round-tripped decoded value unrecoverable for
+  one of them. Fixed by escaping `&` → `&amp;` first (before the delimiter
+  escapes) on encode, and unescaping `&amp;` → `&` last (after the delimiter
+  unescapes) on decode — the same fix was applied identically to
+  `bin/engine/state.mjs`'s FORGE:STATE codec to keep the two escaping
+  schemes unified (forge#2119). (forge#2137)
+
 ## [1.2.0] - 2026-07-16
 
 Additive coverage/capability change only — no breaking changes to any
