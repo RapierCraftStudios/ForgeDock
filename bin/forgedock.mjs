@@ -1548,8 +1548,16 @@ const MAX_SELF_UPDATE_ATTEMPTS = 1;
  *   behavior.
  */
 function selfUpdateGlobalInstall(version) {
-  const attempt =
-    Number.parseInt(process.env.FORGEDOCK_SELF_UPDATE_ATTEMPT, 10) || 0;
+  // Math.max(0, ...) clamps out negative values: `Number.parseInt(x, 10) || 0`
+  // only substitutes 0 for NaN/0/"" — a negative numeric string (e.g. a
+  // corrupted or manually-set FORGEDOCK_SELF_UPDATE_ATTEMPT="-1") is truthy
+  // and passes through unclamped, which would let a negative attempt count
+  // stay perpetually below MAX_SELF_UPDATE_ATTEMPTS. Defense-in-depth only —
+  // no known path sets this env var to a negative value today. (forge#2168)
+  const attempt = Math.max(
+    0,
+    Number.parseInt(process.env.FORGEDOCK_SELF_UPDATE_ATTEMPT, 10) || 0,
+  );
 
   if (attempt >= MAX_SELF_UPDATE_ATTEMPTS) {
     console.log(
@@ -1588,7 +1596,13 @@ function selfUpdateGlobalInstall(version) {
         FORGEDOCK_SELF_UPDATE_ATTEMPT: String(attempt + 1),
       },
     });
-    process.exit(result.status ?? 0);
+    // `result.signal` is set (non-null) when the re-exec'd child was
+    // terminated by a signal (e.g. SIGTERM/SIGKILL) rather than exiting
+    // cleanly — in that case `result.status` is `null`, and
+    // `result.status ?? 0` would silently collapse a killed child into a
+    // reported "success" (exit 0). Exit non-zero explicitly for the
+    // signal-killed case; the non-signaled path is unchanged. (forge#2159)
+    process.exit(result.signal ? 1 : (result.status ?? 0));
     // Unreachable — process.exit() above terminates the process. Present
     // only to satisfy linters expecting a return on every path.
     return true;
