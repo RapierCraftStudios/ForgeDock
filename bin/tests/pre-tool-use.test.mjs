@@ -148,6 +148,140 @@ describe("checkPrTarget — pure logic", () => {
 });
 
 // ---------------------------------------------------------------------------
+// Label transition state machine — pure logic (issue #2326)
+//
+// checkLabelTransition() in the real hook shells out to `gh issue view` to
+// read current labels/comments before deciding — that network dependency
+// can't be exercised via a subprocess-level `gh` shim on this host: gh
+// ships as a real (non-.cmd) executable and the hook invokes it with
+// execFileSync("gh", ...) and no `shell: true`, so on Windows a shim placed
+// on PATH is never resolved the same way (see the identical constraint
+// documented in bin/tests/router.test.mjs around its npm.cmd shims). The
+// pure-logic re-implementation below mirrors checkPrTarget's existing
+// pattern above: it duplicates the hook's decision logic (the widened
+// LABEL_TRANSITIONS map, the evidence predicate, and the post-fetch
+// decision branch of checkLabelTransition) so the actual behavioral change
+// can be asserted directly, independent of the gh round-trip.
+//
+// To confirm this test suite is not vacuous: reverting bin/hooks/pre-tool-use.mjs
+// to its pre-#2326 state (workflow:building/workflow:in-review/workflow:ready-to-build
+// with no "workflow:invalid" successor, and no evidence predicate) and mirroring
+// that revert into the duplicated map below makes "allows building -> invalid
+// with reversal evidence" and "allows in-review -> invalid with reversal evidence"
+// FAIL (transition rejected as not in the allowed-successors list at all) —
+// confirmed manually via `git stash` against origin/staging before this fix.
+// ---------------------------------------------------------------------------
+
+const LABEL_TRANSITIONS = {
+  "workflow:investigating": ["workflow:ready-to-build", "workflow:invalid", "workflow:decomposed"],
+  "workflow:ready-to-build": ["workflow:building", "workflow:invalid"],
+  "workflow:building": ["workflow:in-review", "workflow:ready-to-build", "workflow:invalid"],
+  "workflow:in-review": ["workflow:merged", "workflow:building", "workflow:invalid"],
+  "workflow:merged": [],
+  "workflow:invalid": [],
+  "workflow:decomposed": [],
+};
+
+const EVIDENCE_REQUIRED_FOR_INVALID_FROM = new Set([
+  "workflow:ready-to-build",
+  "workflow:building",
+  "workflow:in-review",
+]);
+
+function hasInvalidReversalEvidence(comments) {
+  if (!Array.isArray(comments)) return false;
+  return comments.some((c) => {
+    const body = String((c && c.body) || "");
+    if (!body.includes("FORGE:INVESTIGATOR")) return false;
+    return /\*\*Verdict\*\*:\s*INVALID/i.test(body);
+  });
+}
+
+/**
+ * Mirrors the post-fetch decision branch of checkLabelTransition(): given an
+ * already-known current label + candidate comments (standing in for the
+ * `gh issue view --json labels,comments` result), decide whether the
+ * transition to newLabel is allowed. Returns null (allow) or a block message.
+ */
+function decideLabelTransition(currentWorkflowLabel, newLabel, comments) {
+  const successors = LABEL_TRANSITIONS[currentWorkflowLabel];
+  if (successors !== undefined && successors.length === 0) {
+    return `BLOCKED: terminal state "${currentWorkflowLabel}"`;
+  }
+  const allowed = LABEL_TRANSITIONS[currentWorkflowLabel] || null;
+  if (allowed === null) return null;
+  if (!allowed.includes(newLabel)) {
+    return `BLOCKED: "${currentWorkflowLabel}" -> "${newLabel}" not a legal transition`;
+  }
+  if (newLabel === "workflow:invalid" && EVIDENCE_REQUIRED_FOR_INVALID_FROM.has(currentWorkflowLabel)) {
+    if (!hasInvalidReversalEvidence(comments)) {
+      return `BLOCKED: workflow:invalid requires reversal evidence`;
+    }
+  }
+  return null;
+}
+
+describe("label transition state machine — pure logic (#2326)", () => {
+  const reversalComment = {
+    body: '<!-- FORGE:INVESTIGATOR -->\n## Investigation Report — CORRECTED\n\n**Verdict**: INVALID\n**Confidence**: HIGH',
+  };
+  const originalComment = {
+    body: '<!-- FORGE:INVESTIGATOR -->\n## Investigation Report\n\n**Verdict**: CONFIRMED\n**Confidence**: HIGH',
+  };
+
+  it("REJECTS workflow:building -> workflow:invalid with no evidence (still gated, not a removal)", () => {
+    const msg = decideLabelTransition("workflow:building", "workflow:invalid", [originalComment]);
+    assert.ok(msg, "must be blocked without a posted reversal");
+    assert.match(msg, /evidence/);
+  });
+
+  it("ACCEPTS workflow:building -> workflow:invalid once a reversal comment is posted (the #2326 fix)", () => {
+    const msg = decideLabelTransition("workflow:building", "workflow:invalid", [originalComment, reversalComment]);
+    assert.equal(msg, null, "must be allowed once reversal evidence exists");
+  });
+
+  it("REJECTS workflow:in-review -> workflow:invalid with no evidence", () => {
+    const msg = decideLabelTransition("workflow:in-review", "workflow:invalid", [originalComment]);
+    assert.ok(msg);
+    assert.match(msg, /evidence/);
+  });
+
+  it("ACCEPTS workflow:in-review -> workflow:invalid with reversal evidence", () => {
+    const msg = decideLabelTransition("workflow:in-review", "workflow:invalid", [originalComment, reversalComment]);
+    assert.equal(msg, null);
+  });
+
+  it("ACCEPTS workflow:ready-to-build -> workflow:invalid with reversal evidence", () => {
+    const msg = decideLabelTransition("workflow:ready-to-build", "workflow:invalid", [reversalComment]);
+    assert.equal(msg, null);
+  });
+
+  it("does not require evidence for workflow:investigating -> workflow:invalid (unchanged normal path)", () => {
+    const msg = decideLabelTransition("workflow:investigating", "workflow:invalid", []);
+    assert.equal(msg, null, "investigating -> invalid must stay evidence-free (Phase 1D's normal path)");
+  });
+
+  it("still blocks a plain unrelated illegal jump (investigating -> merged) — the original #1250 protection is intact", () => {
+    const msg = decideLabelTransition("workflow:investigating", "workflow:merged", []);
+    assert.ok(msg);
+  });
+
+  it("does not treat a comment merely containing FORGE:INVESTIGATOR text without an INVALID verdict as evidence", () => {
+    const msg = decideLabelTransition("workflow:building", "workflow:invalid", [
+      originalComment,
+      { body: "<!-- FORGE:INVESTIGATOR -->\nsome unrelated note mentioning invalidation informally" },
+    ]);
+    assert.ok(msg, "a loosely-worded comment must not satisfy the evidence bar");
+  });
+
+  it("terminal states remain terminal (workflow:merged has no successors, including invalid)", () => {
+    const msg = decideLabelTransition("workflow:merged", "workflow:invalid", [reversalComment]);
+    assert.ok(msg);
+    assert.match(msg, /terminal/);
+  });
+});
+
+// ---------------------------------------------------------------------------
 // Hook process integration tests (subprocess execution)
 // ---------------------------------------------------------------------------
 

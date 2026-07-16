@@ -151,16 +151,76 @@ async function getInvariants() {
 /**
  * Allowed label transitions: from → [to, ...]
  * A label not in this map can be added freely (not a workflow: label).
+ *
+ * `workflow:invalid` is reachable from `ready-to-build`, `building`, and
+ * `in-review` (issue #2326) — not just from `investigating` — because
+ * invalidity is not always discovered where the pipeline first labels the
+ * issue "ready to build". A cheap false positive is usually caught during
+ * investigation; a subtler one is only disproved once the architect/build
+ * phase reads the actual code and tests (see #2312: the premise wasn't
+ * disproved until Phase 3C.6 read `bin/tests/engine-crash.test.mjs`).
+ *
+ * These three post-investigation successors are NOT unconditional, though —
+ * see EVIDENCE_REQUIRED_TARGETS below and its enforcement in
+ * checkLabelTransition(). Reaching `workflow:invalid` from any of these
+ * three states requires a posted reversal comment (a second
+ * `FORGE:INVESTIGATOR` comment carrying `**Verdict**: INVALID`) already on
+ * the issue — the state machine still refuses a bare relabel with no
+ * evidence trail. This preserves the original protection (see history below)
+ * while making the terminal state reachable where it is actually discovered.
+ *
+ * History: this map was introduced by #1250/#1513 to stop arbitrary/skipped
+ * label jumps (e.g. investigating → merged in one hop) — it enforces that
+ * every workflow label transition follows the pipeline's real phase order,
+ * with corrective error messages naming the legal next states. Widening a
+ * terminal-reachability edge is safe as long as an equivalent guard (the
+ * evidence precondition) replaces the blanket "not reachable at all" rule
+ * for the specific case this hook was never asked to consider: legitimate,
+ * evidenced invalidation discovered after ready-to-build.
  */
 const LABEL_TRANSITIONS = {
   "workflow:investigating": ["workflow:ready-to-build", "workflow:invalid", "workflow:decomposed"],
-  "workflow:ready-to-build": ["workflow:building"],
-  "workflow:building": ["workflow:in-review", "workflow:ready-to-build"], // retry allowed
-  "workflow:in-review": ["workflow:merged", "workflow:building"],         // review → re-build allowed
+  "workflow:ready-to-build": ["workflow:building", "workflow:invalid"],
+  "workflow:building": ["workflow:in-review", "workflow:ready-to-build", "workflow:invalid"], // retry allowed; evidenced reversal allowed (#2326)
+  "workflow:in-review": ["workflow:merged", "workflow:building", "workflow:invalid"],         // review → re-build allowed; evidenced reversal allowed (#2326)
   "workflow:merged": [],     // terminal — no successors
   "workflow:invalid": [],    // terminal
   "workflow:decomposed": [], // terminal
 };
+
+/**
+ * States from which a transition to `workflow:invalid` requires posted
+ * evidence (a reversal comment), rather than being freely allowed.
+ * `workflow:investigating` is deliberately excluded — invalidation
+ * discovered during initial investigation is the pipeline's normal,
+ * unguarded path (Phase 1D) and needs no additional precondition.
+ */
+const EVIDENCE_REQUIRED_FOR_INVALID_FROM = new Set([
+  "workflow:ready-to-build",
+  "workflow:building",
+  "workflow:in-review",
+]);
+
+/**
+ * A reversal comment is a `FORGE:INVESTIGATOR` annotation whose verdict is
+ * INVALID — i.e. a second investigation report that supersedes the
+ * original CONFIRMED/PARTIAL verdict with citable evidence (see #2312's
+ * "Investigation Report — CORRECTED" comment for the live example this
+ * pattern is modeled on). Matching on the marker + verdict line only (not
+ * on incident-specific text like issue numbers or the word "CORRECTED")
+ * keeps this a general-purpose evidence check, not a one-off special case.
+ *
+ * @param {Array<{body?: string}>} comments
+ * @returns {boolean}
+ */
+function hasInvalidReversalEvidence(comments) {
+  if (!Array.isArray(comments)) return false;
+  return comments.some((c) => {
+    const body = String((c && c.body) || "");
+    if (!body.includes("FORGE:INVESTIGATOR")) return false;
+    return /\*\*Verdict\*\*:\s*INVALID/i.test(body);
+  });
+}
 
 /** Labels that are never allowed as a PR --base target. */
 const FORBIDDEN_PR_BASES = ["main", "master"];
@@ -538,11 +598,18 @@ function checkLabelTransition(command) {
   // Extract repo (-R flag) if present.
   const repoFlag = extractFlag(command, "-R") || extractFlag(command, "--repo");
 
-  // Read current labels from GitHub synchronously.
+  // Read current labels from GitHub synchronously. Also fetch comments when
+  // the requested transition is one that requires reversal evidence (see
+  // EVIDENCE_REQUIRED_FOR_INVALID_FROM) — deferred to a single conditional
+  // extra field so the common case (any other transition) stays a
+  // labels-only fetch, unchanged from before #2326.
   let currentWorkflowLabel = null;
+  let comments = null;
+  const mayNeedEvidence = newLabel === "workflow:invalid";
   try {
     const { execFileSync: exec } = _require("child_process");
-    const args = ["issue", "view", issueNum, "--json", "labels"];
+    const fields = mayNeedEvidence ? "labels,comments" : "labels";
+    const args = ["issue", "view", issueNum, "--json", fields];
     if (repoFlag) { args.push("-R", repoFlag); }
     const out = exec("gh", args, {
       encoding: "utf-8",
@@ -558,6 +625,9 @@ function checkLabelTransition(command) {
       if (lbl.startsWith(WORKFLOW_LABEL_PREFIX)) {
         currentWorkflowLabel = lbl;
       }
+    }
+    if (mayNeedEvidence) {
+      comments = Array.isArray(parsed.comments) ? parsed.comments : [];
     }
   } catch {
     return null; // gh CLI error — fail-open
@@ -595,6 +665,30 @@ function checkLabelTransition(command) {
       ``,
       `Fix: check the pipeline phase and apply the correct next workflow label.`,
     ].join("\n");
+  }
+
+  // Evidence precondition (#2326): reaching workflow:invalid from
+  // ready-to-build/building/in-review is structurally allowed above, but
+  // still gated against *casual* invalidation — a bare relabel with no
+  // paper trail is blocked. Require a posted reversal comment (a second
+  // FORGE:INVESTIGATOR annotation carrying "**Verdict**: INVALID") already
+  // on the issue before allowing the transition through.
+  if (newLabel === "workflow:invalid" && EVIDENCE_REQUIRED_FOR_INVALID_FROM.has(currentWorkflowLabel)) {
+    if (!hasInvalidReversalEvidence(comments)) {
+      return [
+        `[ForgeDock] BLOCKED: workflow:invalid requires reversal evidence.`,
+        ``,
+        `Current workflow state: "${currentWorkflowLabel}"`,
+        `Attempted transition: → "workflow:invalid"`,
+        ``,
+        `This transition is allowed only when the issue carries a posted reversal:`,
+        `a FORGE:INVESTIGATOR comment with "**Verdict**: INVALID" documenting the`,
+        `evidence that disproved the original premise (see #2312 for the pattern).`,
+        ``,
+        `Fix: post the corrected investigation report first (verdict INVALID, with`,
+        `evidence), then retry this label transition.`,
+      ].join("\n");
+    }
   }
 
   return null; // valid transition — allow

@@ -37,6 +37,8 @@ See also: [FORGE Annotation Protocol §6](forge-protocol-v1.md#6-label-state-mac
   → needs-human     [TERMINAL]  [Any phase: pipeline blocked]
 ```
 
+**`workflow:invalid` after `ready-to-build`/`building`/`in-review`** (#2326): the enforcement hook (`bin/hooks/pre-tool-use.mjs`) allows `workflow:invalid` as a successor of these three states — not only of `workflow:investigating` — because invalidity is sometimes only discovered during architecture planning or build, once the actual code/tests are read (see #2312). This is gated, not unconditional: the hook requires a posted reversal comment already on the issue — a second `FORGE:INVESTIGATOR` annotation carrying `**Verdict**: INVALID` — before it allows the transition through. A bare relabel with no evidence trail is still blocked. `workflow:investigating → workflow:invalid` remains evidence-free (Phase 1D's normal path).
+
 ## Terminal Labels
 
 Processing stops when any of these labels is set:
