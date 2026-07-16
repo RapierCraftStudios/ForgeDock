@@ -10,24 +10,150 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: read
-      pull-requests: write
-      statuses: write
 
     steps:
-      - name: Check DCO sign-off
-        uses: KineticCafe/actions-dco@1da04282bbf757dab7d92a5c8535dbfb8113da5c # v3.1.0
+      - name: Checkout base branch
+        uses: actions/checkout@v4
         with:
-          config: |
-            # Project maintainer emails — exempt from DCO sign-off
-            exempt-authors = ["yash.dubey803at@gmail.com", "rapiercraftstudios@gmail.com"]
+          fetch-depth: 0
+          persist-credentials: false
 
-            comment = true
+      - name: Fetch PR commit range
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          HEAD_REPO: ${{ github.event.pull_request.head.repo.full_name }}
+        run: |
+          set -euo pipefail
+          # Same-repo PRs: both SHAs are already reachable from origin.
+          git fetch origin "$BASE_SHA" || true
+          git fetch origin "$HEAD_SHA" || \
+            git fetch "https://github.com/${HEAD_REPO}.git" "$HEAD_SHA"
 
-            # Allow these bots to skip the DCO requirement
-            [bots]
-            policy = "allowlist"
-            allow = ["github-actions[bot]", "dependabot[bot]", "dependabot-preview[bot]", "rapiercraft-forgedock[bot]", "rapiercraft-forge[bot]"]
+      # Reimplements the DCO check inline against raw `git log` data instead of
+      # going through a third-party action + the GitHub Compare Commits REST API.
+      #
+      # Why: KineticCafe/actions-dco v3.1.0's generated JSON decoder treats the
+      # compare API's `commits[].author` / `commits[].committer` fields as
+      # required non-null objects. GitHub returns `null` for those fields for
+      # any commit whose author/committer email isn't linked to a verified
+      # GitHub account -- the normal case for this repo's commits -- so the
+      # decode (and the whole check) fails with "Failed to decode commit
+      # comparison JSON" on nearly every PR. See issue #2116.
+      #
+      # `git log`'s own commit objects always carry a non-null author/committer
+      # (name + email + date), so this approach is structurally immune to that
+      # upstream bug. Policy (exempt authors, bot allowlist, alias-signoffs) is
+      # preserved verbatim from the prior TOML config.
+      - name: Check DCO sign-off
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          set -euo pipefail
 
-            # Map commit author emails to accepted sign-off emails
-            [alias-signoffs.aliases]
-            "rapiercraftstudios@gmail.com" = ["yash.dubey803at@gmail.com"]
+          # --- Policy (kept in sync with prior TOML config) ---------------------
+          # Project maintainer emails -- exempt from DCO sign-off (author-only).
+          EXEMPT_AUTHORS=("yash.dubey803at@gmail.com" "rapiercraftstudios@gmail.com")
+
+          # Bots allowed to skip the DCO requirement.
+          BOT_LOGINS=("github-actions[bot]" "dependabot[bot]" "dependabot-preview[bot]" "rapiercraft-forgedock[bot]" "rapiercraft-forge[bot]")
+
+          # Map commit author emails to additional accepted sign-off emails.
+          declare -A ALIAS_SIGNOFFS
+          ALIAS_SIGNOFFS["rapiercraftstudios@gmail.com"]="yash.dubey803at@gmail.com"
+          # ------------------------------------------------------------------------
+
+          MERGE_BASE=$(git merge-base "$BASE_SHA" "$HEAD_SHA")
+
+          is_bot_author() {
+            local email="$1"
+            for login in "${BOT_LOGINS[@]}"; do
+              if [[ "$email" == *"+${login}@users.noreply.github.com" ]] || \
+                 [[ "$email" == "${login}@users.noreply.github.com" ]]; then
+                return 0
+              fi
+            done
+            return 1
+          }
+
+          is_exempt_author() {
+            local email="$1"
+            for pattern in "${EXEMPT_AUTHORS[@]}"; do
+              if [[ "$pattern" == @* ]]; then
+                [[ "$email" == *"$pattern" ]] && return 0
+              else
+                [[ "$email" == "$pattern" ]] && return 0
+              fi
+            done
+            return 1
+          }
+
+          accepted_signoff_emails() {
+            local author_email="$1"
+            printf '%s\n' "$author_email"
+            if [[ -n "${ALIAS_SIGNOFFS[$author_email]:-}" ]]; then
+              printf '%s\n' "${ALIAS_SIGNOFFS[$author_email]}"
+            fi
+          }
+
+          declare -a FAILURES=()
+          PASSES=0
+          TOTAL=0
+
+          while IFS= read -r -d '' record; do
+            sha="${record%%$'\x1f'*}"
+            rest="${record#*$'\x1f'}"
+            name="${rest%%$'\x1f'*}"
+            rest="${rest#*$'\x1f'}"
+            email="${rest%%$'\x1f'*}"
+            body="${rest#*$'\x1f'}"
+
+            short_sha="${sha:0:7}"
+            TOTAL=$((TOTAL+1))
+
+            if is_bot_author "$email"; then
+              echo "PASS  $short_sha  $name <$email>  (bot allowlist)"
+              PASSES=$((PASSES+1))
+              continue
+            fi
+
+            if is_exempt_author "$email"; then
+              echo "PASS  $short_sha  $name <$email>  (exempt author)"
+              PASSES=$((PASSES+1))
+              continue
+            fi
+
+            ok=0
+            while IFS= read -r accepted; do
+              escaped="${accepted//./\\.}"
+              if grep -qiE "^Signed-off-by:.*<${escaped}>" <<< "$body"; then
+                ok=1
+                break
+              fi
+            done < <(accepted_signoff_emails "$email")
+
+            if [[ "$ok" -eq 1 ]]; then
+              echo "PASS  $short_sha  $name <$email>  (signed off)"
+              PASSES=$((PASSES+1))
+            else
+              echo "FAIL  $short_sha  $name <$email>  (no matching Signed-off-by trailer)"
+              FAILURES+=("$short_sha  $name <$email>")
+            fi
+          done < <(git log --no-merges -z --format='%H%x1f%an%x1f%ae%x1f%B' "$MERGE_BASE..$HEAD_SHA")
+
+          echo ""
+          echo "DCO check: $PASSES/$TOTAL commits passed, ${#FAILURES[@]} failed"
+
+          if [[ "${#FAILURES[@]}" -gt 0 ]]; then
+            echo ""
+            echo "Commits missing a valid Signed-off-by trailer:"
+            for f in "${FAILURES[@]}"; do
+              echo "  - $f"
+            done
+            echo ""
+            echo "Fix with: git rebase --signoff <base>  (then force-push), or add -s to future commits."
+            exit 1
+          fi
+
+          echo "All commits passed DCO check."
