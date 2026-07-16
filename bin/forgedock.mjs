@@ -1507,6 +1507,43 @@ function isGlobalNpmInstall() {
 }
 
 /**
+ * Detect a separate global npm install of `forgedock` that is NOT the
+ * `FORGE_HOME` this process resolved to (forge#2220). This is the classic
+ * `npx`-shadowing scenario: running `npx forgedock update` from inside a
+ * ForgeDock git clone resolves `FORGE_HOME` to the clone (because the clone
+ * itself is the `forgedock` package on disk), so the git-clone update path
+ * runs and updates the checkout — while a genuinely separate global npm
+ * install elsewhere on disk is silently left untouched.
+ *
+ * Resolution mirrors `isGlobalNpmInstall()`: `npm root -g` gives the global
+ * node_modules directory; if a `forgedock` package exists there AND it is a
+ * different path than the current `FORGE_HOME`, a separate global install
+ * exists. Fails closed (returns null) on any error or timeout — this is an
+ * advisory notice only and must never block or alter the update itself.
+ *
+ * @returns {string|null} absolute path to the separate global install, or null
+ */
+function findSeparateGlobalInstall() {
+  try {
+    const globalRoot = execSync("npm root -g", {
+      encoding: "utf-8",
+      stdio: ["pipe", "pipe", "pipe"],
+      timeout: 5000,
+    }).trim();
+    if (!globalRoot) return null;
+    const globalPkgDir = resolve(join(globalRoot, "forgedock"));
+    const home = resolve(FORGE_HOME);
+    if (home === globalPkgDir || home.startsWith(globalPkgDir + sep)) {
+      // Current FORGE_HOME already IS the global install — nothing separate.
+      return null;
+    }
+    return existsSync(globalPkgDir) ? globalPkgDir : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
  * Maximum number of additional self-update re-exec attempts allowed after the
  * first (i.e. up to MAX_SELF_UPDATE_ATTEMPTS + 1 total `npm install -g`
  * attempts across the parent process and its re-exec'd children). Guards
@@ -1690,12 +1727,26 @@ async function update() {
   console.log(`${BOLD}ForgeDock${RESET} — Checking for updates`);
   console.log("");
 
-  console.log(`  Mode: global (~/.claude)`);
   console.log(`  ${dim(getLogoTagline("update"))}`);
 
   // Check if installed via npm (no .git directory) or via git clone
   const gitDir = join(FORGE_HOME, ".git");
   if (existsSync(gitDir)) {
+    // forge#2220 — state the actual install being updated. Printing this
+    // only after the git-dir check (rather than an unconditional "global"
+    // line before it) is the fix: a clone resolved via npx-shadowing was
+    // previously reported as "Mode: global (~/.claude)", which reads as
+    // "your global install was updated" when in fact only this checkout was.
+    console.log(`  Mode: git clone at ${CYAN}${FORGE_HOME}${RESET}`);
+    const separateGlobalInstall = findSeparateGlobalInstall();
+    if (separateGlobalInstall) {
+      console.log(
+        `  ${YELLOW}Note: this updates the git clone above. Your global npm install at ${separateGlobalInstall} was NOT touched.${RESET}`,
+      );
+      console.log(
+        `  ${YELLOW}Run 'npm update -g forgedock', or 'npx forgedock update' from outside a clone, to update it.${RESET}`,
+      );
+    }
     try {
       const branch = execSync("git rev-parse --abbrev-ref HEAD", {
         cwd: FORGE_HOME,
@@ -1783,6 +1834,18 @@ async function update() {
     // cache path (`npx forgedock`), which was never globally installed, so
     // "npm update -g forgedock" is a no-op. Check the actual published
     // version instead and give advice that reflects the real install model.
+    //
+    // forge#2220 — state the actual resolved install kind + path up front,
+    // computed once and reused below, so the mode line can never drift from
+    // the branch actually taken (isGlobalNpmInstall() is also consulted
+    // later to decide whether to self-update in place).
+    const globalInstall = isGlobalNpmInstall();
+    console.log(
+      globalInstall
+        ? `  Mode: global npm install at ${CYAN}${FORGE_HOME}${RESET}`
+        : `  Mode: npx (ad-hoc, not installed) — resolved from ${CYAN}${FORGE_HOME}${RESET}`,
+    );
+
     const localVersion = getVersion();
     const latestVersion = await fetchLatestVersion();
 
@@ -1807,7 +1870,7 @@ async function update() {
       // stale global binary). selfUpdateGlobalInstall() re-execs and exits
       // the process on success, so anything after this block only runs when
       // self-update wasn't attempted or failed.
-      if (isGlobalNpmInstall()) {
+      if (globalInstall) {
         selfUpdateGlobalInstall(latestVersion);
         // selfUpdateGlobalInstall() only returns (rather than exiting the
         // process) when the install or re-exec failed — it already printed
