@@ -45,7 +45,10 @@ echo "{ARGUMENTS}" | grep -qE -- '--include-deferred|--allow-gen2' && ALLOW_GEN2
 CASCADE_RESOLVED="[]"
 echo "$CASCADE_CANDIDATES" | jq -c '.[]' | while IFS= read -r FINDING; do
   FINDING_BODY=$(echo "$FINDING" | jq -r '.body')
-  SOURCE_NUM=$(echo "$FINDING_BODY" | grep -oP '(?i)spawned from issue #\K\d+|source issue[: #]+\K\d+' | head -1)
+  # Portable two-step extraction (grep -E, not -P/PCRE — macOS BSD grep lacks \K support):
+  # first match the whole "spawned from issue #N" / "source issue: #N" phrase, then pull
+  # the trailing digits off that match.
+  SOURCE_NUM=$(echo "$FINDING_BODY" | grep -ioE 'spawned from issue #[0-9]+|source issue[: #]+[0-9]+' | head -1 | grep -oE '[0-9]+$')
   IS_GEN2=false
   if [ -n "$SOURCE_NUM" ] && gh issue view "$SOURCE_NUM" {GH_FLAG} --json labels --jq '[.labels[].name]' 2>/dev/null | grep -q "review-finding"; then
     IS_GEN2=true
