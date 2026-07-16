@@ -1320,13 +1320,15 @@ describe("update — global npm install self-update (forge#2133)", () => {
   // NaN/0/"" — a negative numeric string passes through unclamped and is
   // truthy, so it survives the `|| 0` fallback. Without an explicit
   // non-negative floor, a corrupted/negative FORGEDOCK_SELF_UPDATE_ATTEMPT
-  // (e.g. "-3") would let the depth guard's `attempt >= MAX_SELF_UPDATE_ATTEMPTS`
+  // (e.g. "-3") would let the depth guard's `attempt > MAX_SELF_UPDATE_ATTEMPTS`
   // check stay false for several extra re-exec cycles while the value
   // increments back up through 0 — i.e. several more `npm install -g` calls
   // than MAX_SELF_UPDATE_ATTEMPTS should ever allow. With the fix
-  // (`Math.max(0, ...)`), attempt=-3 is immediately treated as attempt=0, so
-  // exactly one install happens before the guard trips on the very next call
-  // (env becomes "1", which is >= MAX_SELF_UPDATE_ATTEMPTS=1).
+  // (`Math.max(0, ...)`), attempt=-3 is immediately treated as attempt=0 — the
+  // exact same starting state as a fresh, unset-env-var call — so this
+  // clamped run must produce the same 2 total installs (1 initial + 1 retry)
+  // as the depth-guard test above (forge#2203), not fewer. The guard trips
+  // only on the third would-be call (attempt=2, > MAX_SELF_UPDATE_ATTEMPTS=1).
   //
   // Windows note (forge#2169): skipped for the same reason as the two tests
   // above — execFileSync("npm", ...) cannot resolve npm on Windows.
@@ -1397,13 +1399,14 @@ describe("update — global npm install self-update (forge#2133)", () => {
       assert.equal(res.status, 0, `update exited non-zero:\n${res.stdout}\n${res.stderr}`);
       assert.ok(existsSync(installLog), "the fake npm must have been invoked with `install -g` at least once");
       const attempts = readFileSync(installLog, "utf-8").trim().split("\n").filter(Boolean);
-      // With the clamp fix, attempt=-3 is treated as attempt=0: exactly one
-      // install happens, then the very next re-exec sees attempt=1 (>= MAX)
-      // and stops. Without the fix, the negative value would only climb back
-      // to the cap after several more unclamped increments (-3→-2→-1→0→1),
-      // producing 4 installs instead of 1 — this assertion is the exact
-      // regression guard for forge#2168.
-      assert.equal(attempts.length, 1, `expected exactly 1 install attempt (negative input clamped to 0), got ${attempts.length}:\n${attempts.join("\n")}`);
+      // With the clamp fix, attempt=-3 is treated as attempt=0, producing the
+      // same 2 total installs (1 initial + 1 retry) as the depth-guard test's
+      // happy path above (forge#2203) — clamped-negative and fresh-start are
+      // the same starting state. Without the clamp, the negative value would
+      // only climb back to the cap after several more unclamped increments
+      // (-3→-2→-1→0→1→2), producing more installs than the guard should ever
+      // allow — this assertion is the exact regression guard for forge#2168.
+      assert.equal(attempts.length, 2, `expected exactly 2 install attempts (negative input clamped to 0, then capped like a fresh start), got ${attempts.length}:\n${attempts.join("\n")}`);
     } finally {
       rmSync(shimDir, { recursive: true, force: true });
     }

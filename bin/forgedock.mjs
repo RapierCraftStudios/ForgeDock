@@ -1605,9 +1605,15 @@ function selfUpdateGlobalInstall(version) {
     Number.parseInt(process.env.FORGEDOCK_SELF_UPDATE_ATTEMPT, 10) || 0,
   );
 
-  if (attempt >= MAX_SELF_UPDATE_ATTEMPTS) {
+  // `attempt` counts completed installs so far (0 = no installs yet). The
+  // guard must allow MAX_SELF_UPDATE_ATTEMPTS + 1 total installs (see the
+  // doc comment above this function) — i.e. it should only trip once
+  // `attempt` has already reached that total, not one call early. Using
+  // `>=` here tripped after only 1 install instead of the documented 2
+  // (forge#2203 — the retry this guard exists to allow never actually ran).
+  if (attempt > MAX_SELF_UPDATE_ATTEMPTS) {
     console.log(
-      `  ${YELLOW}Self-update did not converge after ${attempt + 1} attempt(s) — the installed version may not be advancing (stale registry mirror/cache?).${RESET}`,
+      `  ${YELLOW}Self-update did not converge after ${attempt} attempt(s) — the installed version may not be advancing (stale registry mirror/cache?).${RESET}`,
     );
     console.log(
       `  Run ${CYAN}npm install -g forgedock@latest${RESET} manually, then ${CYAN}npx forgedock update${RESET} again.`,
