@@ -1188,4 +1188,99 @@ describe("update — global npm install self-update (forge#2133)", () => {
     // happen: no self-update attempt.
     assert.doesNotMatch(res.stdout, /Installing.*forgedock@.*globally/i);
   });
+
+  // -------------------------------------------------------------------------
+  // selfUpdateGlobalInstall() re-exec depth guard (forge#2158)
+  //
+  // Regression covered: if `npm install -g` reports success but the resolved
+  // version never actually advances (stale registry mirror/proxy, cache
+  // issue), the pre-fix code re-exec'd `update` unconditionally with no
+  // attempt counter — recursing indefinitely, each cycle blocking up to
+  // ~125s. This exercises the fixed path with a shim that deliberately never
+  // bumps the on-disk version, so `update()` sees "newer version available"
+  // on every attempt: the guard must cap re-exec at MAX_SELF_UPDATE_ATTEMPTS
+  // (1 retry, i.e. 2 total install attempts) and print an actionable message
+  // instead of looping forever.
+  // -------------------------------------------------------------------------
+  it("caps self-update re-exec attempts when the installed version never advances, instead of looping indefinitely", () => {
+    if (process.platform === "win32") {
+      return;
+    }
+
+    const shimDir = mkdtempSync(join(os.tmpdir(), "fd-npm-stale-shim-"));
+    const globalRoot = join(shimDir, "global-root");
+    const forgeHome = join(globalRoot, "forgedock");
+    const installLog = join(shimDir, "install-log.txt");
+
+    try {
+      mkdirSync(join(forgeHome, "bin"), { recursive: true });
+      cpSync(dirname(CLI), join(forgeHome, "bin"), {
+        recursive: true,
+        filter: (src) => !src.includes("tests"),
+      });
+      mkdirSync(join(forgeHome, "commands"), { recursive: true });
+      writeFileSync(join(forgeHome, "commands", "one.md"), "# /one\n\nTest command\n", "utf-8");
+      // Deliberately stale on disk, and the shim below never bumps it — every
+      // `update()` invocation (parent and every re-exec'd child) sees this
+      // same stale version and decides a self-update is needed again.
+      writeFileSync(join(forgeHome, "package.json"), JSON.stringify({ name: "forgedock", version: "0.0.1" }), "utf-8");
+
+      // Fake `npm`: responds to `npm root -g` normally, but `npm install -g`
+      // only logs the call (appends one line per invocation) and exits 0 —
+      // it never actually writes a new version to package.json, simulating a
+      // stale registry mirror/proxy that reports success without the
+      // resolved version ever advancing.
+      const npmShimPath = join(shimDir, "npm");
+      writeFileSync(
+        npmShimPath,
+        [
+          "#!/bin/sh",
+          'if [ "$1" = "root" ] && [ "$2" = "-g" ]; then',
+          `  printf '%s\\n' "${globalRoot.replace(/\\/g, "/")}"`,
+          "  exit 0",
+          "fi",
+          'if [ "$1" = "install" ] && [ "$2" = "-g" ]; then',
+          `  printf '%s\\n' "$3" >> "${installLog.replace(/\\/g, "/")}"`,
+          "  exit 0",
+          "fi",
+          "exit 1",
+          "",
+        ].join("\n"),
+        { mode: 0o755 },
+      );
+
+      const home = mkdtempSync(join(os.tmpdir(), "fd-npm-stale-shim-home-"));
+      const res = spawnSync(
+        process.execPath,
+        [join(forgeHome, "bin", "forgedock.mjs"), "update"],
+        {
+          cwd: mkdtempSync(join(os.tmpdir(), "fd-npm-stale-shim-cwd-")),
+          env: {
+            ...process.env,
+            HOME: home,
+            USERPROFILE: home,
+            NO_COLOR: "1",
+            PATH: `${shimDir}:${process.env.PATH}`,
+          },
+          encoding: "utf-8",
+          timeout: 30000,
+        },
+      );
+
+      assert.equal(res.status, 0, `update exited non-zero:\n${res.stdout}\n${res.stderr}`);
+
+      // Exactly 2 install attempts total (initial + 1 retry allowed by
+      // MAX_SELF_UPDATE_ATTEMPTS=1), never more — this is the core
+      // regression assertion: the process must NOT recurse indefinitely.
+      assert.ok(existsSync(installLog), "the fake npm must have been invoked with `install -g` at least once");
+      const attempts = readFileSync(installLog, "utf-8").trim().split("\n").filter(Boolean);
+      assert.equal(attempts.length, 2, `expected exactly 2 install attempts (cap reached), got ${attempts.length}:\n${attempts.join("\n")}`);
+
+      // The guard must print an actionable message instead of silently
+      // stopping or looping past the cap.
+      assert.match(res.stdout, /did not converge|manually/i);
+    } finally {
+      rmSync(shimDir, { recursive: true, force: true });
+    }
+  });
 });

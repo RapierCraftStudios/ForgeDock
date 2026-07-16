@@ -1507,6 +1507,16 @@ function isGlobalNpmInstall() {
 }
 
 /**
+ * Maximum number of additional self-update re-exec attempts allowed after the
+ * first (i.e. up to MAX_SELF_UPDATE_ATTEMPTS + 1 total `npm install -g`
+ * attempts across the parent process and its re-exec'd children). Guards
+ * against unbounded recursion when `npm install -g` reports success but the
+ * resolved version never actually advances (stale registry mirror/proxy,
+ * cache issue, mismatched FORGE_HOME resolution) — see forge#2158.
+ */
+const MAX_SELF_UPDATE_ATTEMPTS = 1;
+
+/**
  * Install the newer published version globally via `npm install -g
  * forgedock@{version}`, then re-exec this same file path (which npm has just
  * overwritten with the new package's contents) so the rest of update()'s
@@ -1516,16 +1526,41 @@ function isGlobalNpmInstall() {
  * a newer persisted ~/.forge/ or leaving the global install stuck on the
  * old version indefinitely).
  *
+ * Depth guard (forge#2158): the re-exec'd child process could, in principle,
+ * observe the same "newer version available" condition again (e.g. a stale
+ * registry mirror/proxy reports success without the resolved version ever
+ * advancing) and recurse indefinitely, each cycle blocking up to ~125s. The
+ * attempt count is propagated across the re-exec via the
+ * `FORGEDOCK_SELF_UPDATE_ATTEMPT` environment variable (parent process env is
+ * never mutated — the counter is only passed to the spawned child's own
+ * environment). Once `MAX_SELF_UPDATE_ATTEMPTS` is reached, this function
+ * fails loudly with an actionable message and returns `false` instead of
+ * attempting another install/re-exec cycle.
+ *
  * Fail-open: any error during install or re-exec falls back to the
  * pre-existing advisory message — the caller must treat a `false` return as
  * "could not self-update, printed manual instructions instead."
  *
  * @param {string} version - target version to install (e.g. "1.2.0")
  * @returns {boolean} true if re-exec was launched (process will exit before
- *   returning in the success path); false if self-update failed and the
- *   caller should fall back to advisory-only behavior.
+ *   returning in the success path); false if self-update failed, was capped
+ *   by the depth guard, and the caller should fall back to advisory-only
+ *   behavior.
  */
 function selfUpdateGlobalInstall(version) {
+  const attempt =
+    Number.parseInt(process.env.FORGEDOCK_SELF_UPDATE_ATTEMPT, 10) || 0;
+
+  if (attempt >= MAX_SELF_UPDATE_ATTEMPTS) {
+    console.log(
+      `  ${YELLOW}Self-update did not converge after ${attempt + 1} attempt(s) — the installed version may not be advancing (stale registry mirror/cache?).${RESET}`,
+    );
+    console.log(
+      `  Run ${CYAN}npm install -g forgedock@latest${RESET} manually, then ${CYAN}npx forgedock update${RESET} again.`,
+    );
+    return false;
+  }
+
   try {
     console.log(`  Installing ${CYAN}forgedock@${version}${RESET} globally...`);
     execFileSync("npm", ["install", "-g", `forgedock@${version}`], {
@@ -1548,6 +1583,10 @@ function selfUpdateGlobalInstall(version) {
   try {
     const result = spawnSync(process.execPath, [__filename, "update"], {
       stdio: "inherit",
+      env: {
+        ...process.env,
+        FORGEDOCK_SELF_UPDATE_ATTEMPT: String(attempt + 1),
+      },
     });
     process.exit(result.status ?? 0);
     // Unreachable — process.exit() above terminates the process. Present
