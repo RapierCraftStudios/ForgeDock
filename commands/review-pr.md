@@ -1,7 +1,7 @@
 ---
 description: Context-aware PR review — analyzes what the PR touches, spawns domain-specific agents with project conventions. Supports staging reviews.
-argument-hint: [PR number, URL, "open", or "staging" for feature→main review]
-allowed-tools: Task, Bash, Read, Grep, Glob, WebFetch, Skill
+argument-hint: "[PR number, URL, \"open\", or \"staging\" for feature→main review]"
+allowed-tools: Task, Agent, Bash, Read, Grep, Glob, WebFetch, Skill
 ---
 <!-- SPDX-FileCopyrightText: Copyright (c) RapierCraft Studios -->
 <!-- SPDX-License-Identifier: AGPL-3.0-or-later -->
@@ -11,7 +11,7 @@ allowed-tools: Task, Bash, Read, Grep, Glob, WebFetch, Skill
 **Input**: $ARGUMENTS
 
 **NEVER use plan mode (EnterPlanMode)** during review — it breaks execution context.
-**NEVER use the Agent tool** — review-pr dispatches domain agents via `Task` tool only. `Agent` spawns opaque subprocesses that bypass the allowed-tools constraint and cannot post structured findings to the PR. Always use `Task(...)` for review agent launch (Phase 3C).
+**Sub-agent dispatch tool: `Task` preferred, `Agent` is the documented fallback.** review-pr dispatches domain review agents via a sub-agent-spawning tool. Resolve which one is available ONCE per invocation, before Phase 3C, per the **Sub-Agent Dispatch Tool Resolution** rule below — do not halt to ask the operator which tool to use. Never fall back to reviewing inline in the orchestrator's own context; inline self-review is a strictly weaker substitute for an isolated fresh-context reviewer and is not a permitted fallback.
 
 **Agent model policy**: `model: "{DEFAULT_MODEL}"` — resolved from forge.yaml `agents.default_model`, else "sonnet" (standard tier); the General Security & Quality reviewer spawned as always-runs Task uses `effort: xhigh` (deep tier). Fallback: `model: "opus"` if rate-limited. User can override with `--model <name>`. Pass model and effort explicitly in every `Task` tool call. Feature gate: pass `effort` only on Claude Code >= 2.1.154. **The domain-review Task agents this file dispatches** (per `commands/review-pr-agents/*.md`) resolve via `model: "{SUBAGENT_MODEL}"` — forge.yaml `agents.subagent_model`, else `agents.default_model`, else `"sonnet"` — not `{DEFAULT_MODEL}` directly.
 
@@ -19,7 +19,7 @@ allowed-tools: Task, Bash, Read, Grep, Glob, WebFetch, Skill
 
 ## HARD RULES — READ BEFORE ANYTHING ELSE
 
-1. **Use `Task(...)` for ALL domain agent launches.** Never substitute `Agent(...)`. Task agents run in a constrained context, post findings to the PR via `gh pr comment`, and their output is structured. Agent spawns opaque subprocesses outside allowed-tools.
+1. **Use the resolved `{DISPATCH_TOOL}(...)` for ALL domain agent launches.** Resolve `{DISPATCH_TOOL}` once, per the **Sub-Agent Dispatch Tool Resolution** section below: `Task` when available, `Agent` as the documented fallback when `Task` is absent from the environment. Every dispatch call in this run uses the same resolved tool — do not mix. Whichever tool is used, each agent MUST run in an isolated, fresh-context sub-agent (not inline in the orchestrator's own context) and post findings to the PR via `gh pr comment` in structured form.
 
 2. **Post the FORGE:REVIEW verdict regardless of finding severity.** A review that completes but posts no `<!-- FORGE:REVIEW -->` comment is invisible to the pipeline. Even a PASS verdict must be posted.
 
@@ -29,16 +29,29 @@ allowed-tools: Task, Bash, Read, Grep, Glob, WebFetch, Skill
 
 5. **`spec-evolution` PRs are NEVER auto-merged.** When a PR carries the `spec-evolution` label (created by `/spec-doctor`), Phase -1 MUST set `AUTO_MERGE=false` and add `needs-human` before any other processing. This cannot be overridden by the caller — the eval gate plus human review are the only permitted merge path. See Phase -1 `spec-evolution guard` block. <!-- Added: forge#1742 -->
 
+## Sub-Agent Dispatch Tool Resolution (MANDATORY — run once, before Phase 3C)
+
+This spec dispatches domain review agents via a sub-agent-spawning tool. Different runtimes expose different tools for this — resolve deterministically, once per invocation, and use the same tool for every dispatch call in this run:
+
+1. **If `Task` is available in the current environment**: set `{DISPATCH_TOOL} = Task`. This is the preferred tool — tightest `allowed-tools` scoping.
+2. **Else if `Agent` is available**: set `{DISPATCH_TOOL} = Agent`. This is the documented fallback, not a degraded path — use it exactly as you would `Task`: one call per selected domain agent, same prompt template, `subagent_type: "general-purpose"` (or the closest equivalent the environment offers), same requirement that each agent posts its own findings directly to the PR via `gh pr comment`. Isolation and fresh-context review are preserved either way.
+3. **Neither tool is available**: this is a genuine setup defect, not a routing decision — HARD STOP, post a PR/issue comment explaining that no sub-agent dispatch tool is available, add `needs-human`, and exit without posting a verdict. Do NOT fall back to reviewing inline in the orchestrator's own context — inline self-review is strictly weaker than an isolated fresh-context reviewer and is never a substitute for a missing dispatch tool.
+
+**Do not halt to ask the operator which tool to use.** Steps 1–2 are deterministic and fully resolve the common case; only step 3 (both absent) requires a stop, and even then the action is HARD STOP + `needs-human`, not a question back to the operator.
+
+Everywhere this file (and `review-pr-agents.md` / the `review-pr-agents/*.md` persona files) says `Task(...)`, read it as `{DISPATCH_TOOL}(...)` using the value resolved here.
+
 ## Forbidden Tools Self-Check
 
-**Before executing any phase**, verify you are NOT using any of these tools:
+**Before executing any phase**, verify you are NOT using any of these:
 
-| Tool | Status | Reason |
+| Tool/Pattern | Status | Reason |
 |------|--------|--------|
-| `Agent` | **FORBIDDEN** | Spawns opaque subprocesses outside allowed-tools; bypasses spec workflow; cannot post structured findings |
+| `Agent`, when `Task` is available | **FORBIDDEN** | `Task` is preferred whenever present — `Agent` is only the fallback for when `Task` is absent, not a free substitute |
+| Inline self-review (no sub-agent spawn at all) | **FORBIDDEN** | Bypasses isolated fresh-context review entirely — always spawn via the resolved `{DISPATCH_TOOL}`, never review directly in the orchestrator's own context |
 | `EnterPlanMode` | **FORBIDDEN** | Breaks execution context; must run phases, not plan them |
 
-If you find yourself about to call `Agent(...)`, stop and use `Task(...)` instead. If you find yourself about to use `EnterPlanMode`, stop and execute the next phase directly.
+If you find yourself about to call `Agent(...)` while `Task` is available, stop and use `Task(...)` instead. If neither `Task` nor `Agent` is available, do not fall through to inline review — follow step 3 of Sub-Agent Dispatch Tool Resolution above. If you find yourself about to use `EnterPlanMode`, stop and execute the next phase directly.
 
 ## Architecture — How This Command Works
 
@@ -48,11 +61,11 @@ This is the **orchestrator**. It routes to the right review mode, runs automated
 
 | File | What | How to invoke |
 |------|------|---------------|
-| `$FORGE_HOME/commands/review-pr-agents/protocols.md` | Shared review protocols (Evidence-Based + Structured Findings + Input Scoping) | `Read` tool during Phase 3C (always) |
-| `$FORGE_HOME/commands/review-pr-agents/<persona>.md` | Per-persona agent prompt templates (9 files) | `Read` tool during Phase 3C (selected agents only) |
-| `$FORGE_HOME/commands/review-pr-staging.md` | Full staging→main review pipeline | `Skill("review-pr-staging", ...)` during Phase 0 |
+| `${FORGE_HOME:-$REPO_PATH}/commands/review-pr-agents/protocols.md` | Shared review protocols (Evidence-Based + Structured Findings + Input Scoping) | `Read` tool during Phase 3C (always) |
+| `${FORGE_HOME:-$REPO_PATH}/commands/review-pr-agents/<persona>.md` | Per-persona agent prompt templates (9 files) | `Read` tool during Phase 3C (selected agents only) |
+| `${FORGE_HOME:-$REPO_PATH}/commands/review-pr-staging.md` | Full staging→main review pipeline | `Skill("review-pr-staging", ...)` during Phase 0 |
 
-`$FORGE_HOME` defaults to `~/.claude` (the directory where `npx forgedock` symlinks commands). Override by setting `FORGE_HOME` in your environment.
+`$FORGE_HOME` defaults to `~/.claude` (the directory where `npx forgedock` symlinks commands). When unset, every resolution in this file falls back to `$REPO_PATH` (the repo root, from `forge.yaml → paths.root`) rather than degrading to a bare root-anchored path — see the `TEMPLATE_BASE` tiered guard in Phase 3C and the verification-script resolution in Step 2.5B for the actual fallback chains. Never resolve a missing file via a filesystem-wide `find` — see the guardrail in `commands/review-pr-agents/protocols.md`.
 
 **Invocation flow:**
 ```
@@ -580,13 +593,27 @@ Map each changed file to its activation requirements.
 
 ### Step 2.5B: Run Verification
 
-For each changed file, execute the relevant checks using the standalone verification scripts in `$FORGE_HOME/scripts/`. These scripts can also be run independently outside the review context (e.g., from `/quality-gate` or `/work-on` builder steps).
+For each changed file, execute the relevant checks using the standalone verification scripts in `${FORGE_HOME:-$SCRIPTS_HOME}/scripts/`. These scripts can also be run independently outside the review context (e.g., from `/quality-gate` or `/work-on` builder steps).
 
 **Platform note**: The verify-*.sh scripts require bash and standard POSIX tools. On Windows without bash (Git Bash / WSL / MSYS2), these checks are skipped with an explicit message — the review continues without them.
 
 ```bash
 CHANGED_FILES=$(gh pr diff $ARGUMENTS --name-only)
 REPO_ROOT="."  # Assumes cwd is the repo root
+
+# Resolve the verify-*.sh scripts source directory with the same deterministic
+# fallback as the Phase 3C TEMPLATE_BASE guard: $FORGE_HOME first (the installed
+# ForgeDock location), then this repo's own root (forge.yaml -> paths.root, or
+# git top-level). A bare/unset $FORGE_HOME must never be used directly in a path —
+# that degrades to a root-anchored path (/scripts/verify-*.sh) and silently skips
+# every check below. Never fall back to a filesystem-wide `find`.
+# <!-- Added: forge#2035 -->
+if [ -n "$FORGE_HOME" ] && [ -f "$FORGE_HOME/scripts/verify-route-registration.sh" ]; then
+    SCRIPTS_HOME="$FORGE_HOME"
+else
+    FORGE_YAML="${FORGE_CONFIG:-$(git rev-parse --show-toplevel 2>/dev/null)/forge.yaml}"
+    SCRIPTS_HOME=$(yq '.paths.root' "$FORGE_YAML" 2>/dev/null || git rev-parse --show-toplevel 2>/dev/null || pwd)
+fi
 
 # --- Platform / bash capability guard ---
 # The verify-*.sh scripts require bash. Detect availability before invoking.
@@ -627,11 +654,11 @@ if [ "$BASH_AVAILABLE" = "true" ]; then
         [ -n "$_API_MIDDLEWARE" ] && export FORGE_API_MIDDLEWARE_DIR="$_API_MIDDLEWARE"
     fi
     echo "=== Running: verify-route-registration.sh ==="
-    bash "$FORGE_HOME/scripts/verify-route-registration.sh" "$CHANGED_FILES_TMP" "$REPO_ROOT" || true
+    bash "$SCRIPTS_HOME/scripts/verify-route-registration.sh" "$CHANGED_FILES_TMP" "$REPO_ROOT" || true
 
     # 2. Environment variable wiring (checks .env.example, docker-compose, env_validation, SOPS mapping)
     echo "=== Running: verify-env-vars.sh ==="
-    bash "$FORGE_HOME/scripts/verify-env-vars.sh" "$DIFF_TMP" "$REPO_ROOT" || true
+    bash "$SCRIPTS_HOME/scripts/verify-env-vars.sh" "$DIFF_TMP" "$REPO_ROOT" || true
 
     # 3. Host headers in shell scripts + client-side proxy bypass check
     # Read project-specific internal service patterns from forge.yaml (if present)
@@ -645,11 +672,11 @@ if [ "$BASH_AVAILABLE" = "true" ]; then
     fi
     export FORGE_INTERNAL_PATTERNS
     echo "=== Running: verify-host-headers.sh ==="
-    bash "$FORGE_HOME/scripts/verify-host-headers.sh" "$CHANGED_FILES_TMP" "$REPO_ROOT" || true
+    bash "$SCRIPTS_HOME/scripts/verify-host-headers.sh" "$CHANGED_FILES_TMP" "$REPO_ROOT" || true
 
     # 4. SOPS deploy chain (ENV_MAPPING consistency, deploy path drift, hotfix sync)
     echo "=== Running: verify-sops-chain.sh ==="
-    bash "$FORGE_HOME/scripts/verify-sops-chain.sh" "$DIFF_TMP" "$CHANGED_FILES_TMP" "$REPO_ROOT" || true
+    bash "$SCRIPTS_HOME/scripts/verify-sops-chain.sh" "$DIFF_TMP" "$CHANGED_FILES_TMP" "$REPO_ROOT" || true
 
     # Cleanup temp files
     rm -f "$CHANGED_FILES_TMP" "$DIFF_TMP"
@@ -1485,9 +1512,9 @@ The `protocols.md` file contains the Evidence-Based Review Protocol, Structured 
 6. Substitute code index slice: `[INDEX_SLICE]` → the matching `$INDEX_SLICE_{DOMAIN}` variable for this agent (e.g., `$INDEX_SLICE_AUTH` for the auth agent). Agents MUST query index data first; fall back to grep only when index slice is empty or unavailable.
 7. Substitute per-agent diff slice: `[DOMAIN_DIFF_SLICE]` → the matching `$DIFF_SLICE_*` variable (e.g., `$DIFF_SLICE_AUTH` for the auth agent, `$DIFF_SLICE_SECURITY` for the security agent). This replaces any `gh pr diff [PR_NUMBER]` call inside the agent template — the agent works from the pre-computed slice, not the full changeset.
 8. If Phase 2.5 found broken assumptions, append them to the agent's prompt as "Pre-found integration issues to verify"
-9. Launch via `Task` tool with `model: "{SUBAGENT_MODEL}"` (forge.yaml `agents.subagent_model`, else `agents.default_model`, else `"sonnet"`; fallback `"opus"` if rate-limited)
+9. Launch via the resolved `{DISPATCH_TOOL}` (see Sub-Agent Dispatch Tool Resolution above) with `model: "{SUBAGENT_MODEL}"` (forge.yaml `agents.subagent_model`, else `agents.default_model`, else `"sonnet"`; fallback `"opus"` if rate-limited)
 
-**CRITICAL**: Launch ALL selected agents in a SINGLE message using multiple Task tool calls. Each agent posts findings directly to the PR via `gh pr comment`.
+**CRITICAL**: Launch ALL selected agents in a SINGLE message using multiple `{DISPATCH_TOOL}` calls. Each agent posts findings directly to the PR via `gh pr comment`.
 
 #### Domain Diff Slicing
 
@@ -1629,7 +1656,7 @@ if [ "$DEDUP_EXIT" -eq 1 ]; then
   # Add a comment on the existing issue referencing this recurrence in PR #${PR_NUMBER}
 elif [ "$DEDUP_EXIT" -eq 2 ]; then
   echo "DEDUP: Usage error — $DEDUP_RESULT"
-  # Skip this finding — do NOT fall through to gh issue create on a usage error
+  # Skip this finding — do NOT fall through to issue creation on a usage error
 fi
 ```
 
@@ -1688,13 +1715,17 @@ fi
 - Open `review-finding` issue at same file with similar title (3+ shared keywords) → **skip** (likely same finding despite line drift)
 - Closed `review-finding` at same file within ±5 lines → create with regression warning, elevate to `priority:P1`
 
-**For each finding** (that passes dedup), create issue:
+**For each finding** (that passes dedup), create issue through the `/issue` create-hook's programmatic invocation contract (see `commands/issue.md` § "Programmatic Invocation Contract") — this preserves the bespoke line-range/title dedup above as a precise pre-check, while `/issue`'s own Phase 2D dedup runs as a coarser second pass:
 ```bash
-ISSUE_NUM=$(gh issue create \
-  --title "fix: [summary] (review finding — PR #${PR_NUMBER})" \
-  --label "review-finding,needs-validation,{priority}" \
-  ${MILESTONE_FLAG} \
-  --body "$(cat <<'ISSUE_EOF'
+FINDING_ISSUE_TITLE="fix: [summary] (review finding — PR #${PR_NUMBER})"
+# Defense-in-depth: /issue's arg tokenizer (commands/issue.md Argument Parsing,
+# forge#2094) uses an xargs-based tokenizer that never expands backtick/$(...)
+# substitution, so this is no longer required for safety — but strip it anyway
+# so the raw title stays readable if it round-trips through any other
+# eval-based consumer.
+FINDING_ISSUE_TITLE=$(printf '%s' "$FINDING_ISSUE_TITLE" | tr '`' "'" | sed 's/\$(/$ (/g')
+FINDING_ISSUE_BODY_FILE=$(mktemp)
+cat <<'ISSUE_EOF' > "$FINDING_ISSUE_BODY_FILE"
 ## Problem
 
 [One sentence: what bug or issue was found. Where it occurs (`file:line`) and what it causes.]
@@ -1745,7 +1776,21 @@ Files that need changes:
 - [ ] Reproduce or construct proof-of-concept
 [BATCHABLE_ANNOTATION]
 ISSUE_EOF
-)" --json number --jq '.number')
+
+# --label is repeatable (not comma-joined) per the /issue programmatic contract.
+Skill(skill="issue", args="--title \"$FINDING_ISSUE_TITLE\" --body-file \"$FINDING_ISSUE_BODY_FILE\" --label review-finding --label needs-validation --label \"{priority}\" ${MILESTONE_FLAG}")
+rm -f "$FINDING_ISSUE_BODY_FILE"
+
+# /issue has no machine-readable return contract (it's a user-facing command, not a work-on
+# subcommand) — resolve the created issue's number by exact-title search immediately after
+# the call. The title embeds ${PR_NUMBER} and the finding summary, making it unique enough
+# for a reliable single-match lookup. Retry to absorb GitHub Search API indexing lag.
+ISSUE_NUM=""
+for _resolve_attempt in 1 2 3; do
+  ISSUE_NUM=$(gh issue list -R ${REPO} --search "in:title \"${FINDING_ISSUE_TITLE}\"" --state open --limit 1 --json number --jq '.[0].number // empty')
+  [ -n "$ISSUE_NUM" ] && break
+  sleep 2
+done
 ```
 
 Labels: `review-finding` + `needs-validation` + priority (`priority:P1` CONFIRMED, `priority:P2` LIKELY, `priority:P3` POSSIBLE).
@@ -1888,7 +1933,7 @@ ATTRIBUTION_FOOTER_LINE=""
 if [ "$ATTRIBUTION_PR_FOOTER" = "true" ]; then
   ATTRIBUTION_FOOTER_LINE="
 ---
-> Orchestrated with [ForgeDock](https://github.com/RapierCraftStudios/ForgeDock) — state, scheduling, review, and memory on GitHub."
+> ⚒️ Orchestrated with [ForgeDock](https://github.com/RapierCraftStudios/ForgeDock) — state, scheduling, review, and memory on GitHub."
 fi
 
 # Build trust annotation line for verdict body — always included so the decision is auditable.

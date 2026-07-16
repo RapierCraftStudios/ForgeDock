@@ -1,8 +1,8 @@
 ---
 description: Staging review mode — comprehensive review of staging branch before deploy to main
-argument-hint: [PR number or "staging"]
-allowed-tools: Task, Bash, Read, Grep, Glob, WebFetch
-install: extras
+argument-hint: "[PR number or \"staging\"]"
+allowed-tools: Task, Agent, Bash, Read, Grep, Glob, WebFetch
+install: core
 ---
 <!-- SPDX-FileCopyrightText: Copyright (c) RapierCraft Studios -->
 <!-- SPDX-License-Identifier: AGPL-3.0-or-later -->
@@ -15,20 +15,33 @@ Performs comprehensive review of `staging` before merging to `main`. Handles lar
 
 **Agent model policy**: `model: "{DEFAULT_MODEL}"` — resolved from forge.yaml `agents.default_model`, else "sonnet" (standard tier). Fallback: `model: "opus"` if rate-limited. User can override with `--model <name>`. Feature gate: pass `effort` in Task/Skill spawns only on Claude Code >= 2.1.154.
 **NEVER use plan mode (EnterPlanMode).**
-**NEVER use the Agent tool** — this spec uses `Task` for domain agent dispatch. The Agent tool bypasses the allowed-tools constraint declared in this spec's frontmatter and produces opaque output that cannot be structured into the review verdict.
+**Sub-agent dispatch tool: `Task` preferred, `Agent` is the documented fallback.** This spec dispatches domain review agents via a sub-agent-spawning tool. Resolve which one is available ONCE per invocation, before Phase 3, per the **Sub-Agent Dispatch Tool Resolution** rule below — do not halt to ask the operator which tool to use. Never fall back to reviewing inline in the orchestrator's own context; that is a strictly weaker substitute for an isolated fresh-context reviewer and is not a permitted fallback.
 
 <!-- FORGE:SPEC_LOADED — review-pr-staging.md loaded and active. Agent is bound by this spec. -->
 
+## Sub-Agent Dispatch Tool Resolution (MANDATORY — run once, before Phase 3)
+
+This spec dispatches Bug Hunter and domain review agents via a sub-agent-spawning tool. Different runtimes expose different tools for this — resolve deterministically, once per invocation, and use the same tool for every dispatch call in this run:
+
+1. **If `Task` is available in the current environment**: set `{DISPATCH_TOOL} = Task`. This is the preferred tool — tightest `allowed-tools` scoping. (Identical resolution logic to `/review-pr` Phase 3C — do not diverge.)
+2. **Else if `Agent` is available**: set `{DISPATCH_TOOL} = Agent`. This is the documented fallback, not a degraded path — use it exactly as you would `Task`: one call per selected agent (Bug Hunters in Phase 3, Code Quality in Phase 4, domain agents in Phase 5), same prompt template, `subagent_type: "general-purpose"` (or the closest equivalent the environment offers), same requirement that each agent posts its own findings directly to the PR via `gh pr comment`. Isolation and fresh-context review are preserved either way.
+3. **Neither tool is available**: this is a genuine setup defect, not a routing decision — HARD STOP, post a PR/issue comment explaining that no sub-agent dispatch tool is available, add `needs-human`, and exit without posting a verdict. Do NOT fall back to reviewing inline in the orchestrator's own context.
+
+**Do not halt to ask the operator which tool to use.** Steps 1–2 are deterministic and fully resolve the common case; only step 3 (both absent) requires a stop, and even then the action is HARD STOP + `needs-human`, not a question back to the operator.
+
+Everywhere this file says `Task(...)`, read it as `{DISPATCH_TOOL}(...)` using the value resolved here.
+
 ## Forbidden Tools Self-Check
 
-**Before executing any phase**, verify you are NOT using any of these tools:
+**Before executing any phase**, verify you are NOT using any of these:
 
-| Tool | Status | Reason |
+| Tool/Pattern | Status | Reason |
 |------|--------|--------|
-| `Agent` | **FORBIDDEN** | Bypasses allowed-tools constraint; produces opaque output that cannot be structured into the review verdict |
+| `Agent`, when `Task` is available | **FORBIDDEN** | `Task` is preferred whenever present — `Agent` is only the fallback for when `Task` is absent, not a free substitute |
+| Inline self-review (no sub-agent spawn at all) | **FORBIDDEN** | Bypasses isolated fresh-context review entirely — always spawn via the resolved `{DISPATCH_TOOL}`, never review directly in the orchestrator's own context |
 | `EnterPlanMode` | **FORBIDDEN** | Breaks execution context; phases must be executed, not planned |
 
-If you find yourself about to call `Agent(...)`, stop and use `Task(...)` instead.
+If you find yourself about to call `Agent(...)` while `Task` is available, stop and use `Task(...)` instead. If neither `Task` nor `Agent` is available, do not fall through to inline review — follow step 3 of Sub-Agent Dispatch Tool Resolution above.
 
 ---
 
@@ -677,13 +690,16 @@ Check for open review-finding issues at same file:line → skip. Closed issues a
 ### 7F: Create Issues
 Sequential creation. Title: `Staging Review: {summary} (staging → main)`. Labels: review-finding, needs-validation, staging-review, priority:P1/priority:P2/priority:P3. Body includes: source branch context (`staging`), code context, evidence, validation checklist.
 
-**For each finding** (that passes dedup), create issue:
+**For each finding** (that passes dedup), create issue through the `/issue` create-hook's programmatic invocation contract (see `commands/issue.md` § "Programmatic Invocation Contract") instead of calling the raw issue-creation command directly:
 ```bash
-ISSUE_NUM=$(gh issue create \
-  -R {GH_REPO} \
-  --title "chore: [summary] (staging review — PR #${PR_NUMBER})" \
-  --label "review-finding,needs-validation,staging-review,{priority}" \
-  --body "$(cat <<'ISSUE_EOF'
+STAGING_FINDING_TITLE="chore: [summary] (staging review — PR #${PR_NUMBER})"
+# Defense-in-depth: /issue's arg tokenizer (commands/issue.md, forge#2094) uses
+# an xargs-based tokenizer that never expands backtick/$(...) substitution, so
+# this is no longer required for safety — but strip it anyway so the raw title
+# stays readable if it round-trips through any other eval-based consumer.
+STAGING_FINDING_TITLE=$(printf '%s' "$STAGING_FINDING_TITLE" | tr '`' "'" | sed 's/\$(/$ (/g')
+STAGING_FINDING_BODY_FILE=$(mktemp)
+cat <<'ISSUE_EOF' > "$STAGING_FINDING_BODY_FILE"
 ## Problem
 
 [One sentence: what bug or issue was found. Where it occurs (`file:line`) and what it causes.]
@@ -716,7 +732,20 @@ Files that need changes:
 - [ ] Finding validated: VALIDATED / FALSE_POSITIVE / INCONCLUSIVE
 - [ ] If VALIDATED: fix implemented and tested on correct branch
 ISSUE_EOF
-)" --json number --jq '.number')
+
+# --label is repeatable (not comma-joined) per the /issue programmatic contract.
+Skill(skill="issue", args="--title \"$STAGING_FINDING_TITLE\" --body-file \"$STAGING_FINDING_BODY_FILE\" --label review-finding --label needs-validation --label staging-review --label \"{priority}\"")
+rm -f "$STAGING_FINDING_BODY_FILE"
+
+# /issue has no machine-readable return contract — resolve the created issue's number by
+# exact-title search immediately after the call (title embeds ${PR_NUMBER} + summary, unique
+# enough for a reliable single-match lookup). Retry to absorb GitHub Search API indexing lag.
+ISSUE_NUM=""
+for _resolve_attempt in 1 2 3; do
+  ISSUE_NUM=$(gh issue list -R {GH_REPO} --search "in:title \"${STAGING_FINDING_TITLE}\"" --state open --limit 1 --json number --jq '.[0].number // empty')
+  [ -n "$ISSUE_NUM" ] && break
+  sleep 2
+done
 ```
 
 Labels: `review-finding` + `needs-validation` + `staging-review` + priority (`priority:P1` CONFIRMED, `priority:P2` LIKELY, `priority:P3` POSSIBLE).

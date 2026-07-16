@@ -1,6 +1,6 @@
 ---
 description: Independently verify if a reported issue is actually a problem before making code changes.
-argument-hint: [issue description or #number]
+argument-hint: "[issue description or #number]"
 install: extras
 ---
 <!-- SPDX-FileCopyrightText: Copyright (c) RapierCraft Studios -->
@@ -91,10 +91,17 @@ If CONFIRMED — recommended next step:
   Root cause: [one sentence]
   Fix approach: [one sentence]
   Create issue:
+Route through the `/issue` create-hook's programmatic invocation contract (see `commands/issue.md` § "Programmatic Invocation Contract") instead of calling the raw issue-creation command directly — this gets dedup (Phase 2D) and body validation (Phase 3F) for free:
+
 ```bash
-gh issue create --title "fix: [concise description of the confirmed bug]" \
-  --label "[priority],[bug|enhancement]" \
-  --body "$(cat <<'BODY_EOF'
+VALIDATE_ISSUE_TITLE="fix: [concise description of the confirmed bug]"
+# Defense-in-depth: /issue's arg tokenizer (commands/issue.md, forge#2094) uses
+# an xargs-based tokenizer that never expands backtick/$(...) substitution, so
+# this is no longer required for safety — but strip it anyway so the raw title
+# stays readable if it round-trips through any other eval-based consumer.
+VALIDATE_ISSUE_TITLE=$(printf '%s' "$VALIDATE_ISSUE_TITLE" | tr '`' "'" | sed 's/\$(/$ (/g')
+VALIDATE_ISSUE_BODY_FILE=$(mktemp)
+cat <<'BODY_EOF' > "$VALIDATE_ISSUE_BODY_FILE"
 ## Problem
 
 [1-3 sentences: what the validation confirmed is wrong. Specific and concrete.]
@@ -123,7 +130,11 @@ Validated by \`/validate\` on [DATE]. Confidence: [High|Medium|Low].
 - [source]: [finding]
 - [source]: [finding]
 BODY_EOF
-)"
+
+# [priority] and [bug|enhancement] are two separate labels — passed as repeated --label flags,
+# never comma-joined (the /issue programmatic contract's --label is repeatable, not CSV).
+Skill(skill="issue", args="--title \"$VALIDATE_ISSUE_TITLE\" --body-file \"$VALIDATE_ISSUE_BODY_FILE\" --label \"[priority]\" --label \"[bug|enhancement]\"")
+rm -f "$VALIDATE_ISSUE_BODY_FILE"
 ```
 
 If NOT A PROBLEM — why the report was wrong:

@@ -1,12 +1,16 @@
 // bin/tests/engine.test.mjs
 import { describe, it, beforeEach, afterEach } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, rmSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, dirname } from "node:path";
+import { fileURLToPath } from "node:url";
 import { runIssue } from "../engine.mjs";
 import { readLog, deriveState } from "../engine/runlog.mjs";
 import { serializeState } from "../engine/state.mjs";
+import { VALID_BACKENDS } from "../runner.mjs";
+
+const __dirname = dirname(fileURLToPath(import.meta.url));
 
 let dir; beforeEach(() => { dir = mkdtempSync(join(tmpdir(), "fd-engine-")); });
 afterEach(() => { rmSync(dir, { recursive: true, force: true }); });
@@ -306,5 +310,169 @@ describe("runIssue", () => {
     assert.equal(runCounts["work-on/close"] || 0, 0, "close must not re-run when issue already CLOSED");
     const s = deriveState(readLog(dir, 42));
     assert.ok(s.committed.includes("close"), "close must be in committed after reconcile");
+  });
+
+  it("forge#2028: forwards an explicit backend/model override to every runner() call", async () => {
+    const { w, io } = fakeWorld();
+    const script = {
+      "work-on/investigate": () => { w.markers += " INVESTIGATION:COMPLETE"; },
+    };
+    const calls = [];
+    const runner = async (call) => {
+      calls.push(call);
+      script[call.commandName]?.();
+      return { status: "complete" };
+    };
+
+    const res = await runIssue({ issue: 42, dir, agentId: "a1", lane: "staging",
+      io, runner, now: () => 1000, maxAttempts: 1, backend: "cli", model: "claude-test-model" });
+
+    assert.equal(res.terminalReason, "needs-human"); // only investigate scripted → subsequent phases block
+    assert.ok(calls.length > 0, "runner must have been called at least once");
+    for (const call of calls) {
+      assert.equal(call.backend, "cli", "backend must be forwarded to every runner() call");
+      assert.equal(call.model, "claude-test-model", "model must be forwarded to every runner() call");
+    }
+  });
+
+  it("forge#2028: omitting backend/model preserves the existing runner() call shape (no new keys)", async () => {
+    const { w, io } = fakeWorld();
+    const script = {
+      "work-on/investigate": () => { w.markers += " INVESTIGATION:COMPLETE"; },
+      "work-on/build/context": () => { w.markers += " FORGE:CONTEXT:COMPLETE"; },
+      "work-on/build/architect": () => { w.markers += " FORGE:ARCHITECT:COMPLETE"; },
+      "work-on/build": () => { w.markers += " FORGE:BUILDER:COMPLETE"; w.commitsAhead = 2; },
+      "work-on/review": () => { w.pr = 7; w.prMerged = true; },
+      "work-on/close": () => { w.issueState = "CLOSED"; },
+    };
+    const calls = [];
+    const runner = async (call) => {
+      calls.push(call);
+      script[call.commandName]();
+      return { status: "complete" };
+    };
+
+    const res = await runIssue({ issue: 42, dir, agentId: "a1", lane: "staging",
+      io, runner, now: () => 1000, maxAttempts: 3 });
+
+    assert.equal(res.terminalReason, "merged");
+    assert.ok(calls.length > 0, "runner must have been called at least once");
+    for (const call of calls) {
+      assert.ok(!("backend" in call), "backend key must be absent from runner() call when not supplied to runIssue");
+      assert.ok(!("model" in call), "model key must be absent from runner() call when not supplied to runIssue");
+      assert.deepEqual(Object.keys(call).sort(), ["args", "commandName", "commandsDir"].sort());
+    }
+  });
+
+  it("forge#2054: an invalid backend fails fast with a coded, non-retryable error instead of being retried", async () => {
+    const { io } = fakeWorld();
+    const calls = [];
+    const runner = async (call) => { calls.push(call); return { status: "complete" }; };
+
+    await assert.rejects(
+      () => runIssue({ issue: 42, dir, agentId: "a1", lane: "staging",
+        io, runner, now: () => 1000, maxAttempts: 3, backend: "nonsense" }),
+      (err) => {
+        assert.equal(err.code, "INVALID_BACKEND");
+        assert.match(err.message, /Invalid backend "nonsense"/);
+        return true;
+      },
+    );
+
+    // Must fail before any phase attempt — no PHASE_START event, no runner() call at all.
+    assert.equal(calls.length, 0, "runner() must never be called for an invalid backend");
+    const events = readLog(dir, 42);
+    assert.ok(!events.some((e) => e.event === "PHASE_START"),
+      "no PHASE_START event should be appended — the invalid backend must be rejected before the retry loop");
+  });
+
+  it("forge#2054: backend undefined (no override) and valid values are unaffected by the new check", async () => {
+    for (const [i, backend] of [undefined, "cli", "api", "auto"].entries()) {
+      // Distinct issue number + fresh subdir per iteration so each run starts
+      // from a clean run-log (dir/readLog is keyed by issue number on disk).
+      const issue = 100 + i;
+      const { w, io } = fakeWorld();
+      const script = { "work-on/investigate": () => { w.markers += " INVESTIGATION:COMPLETE"; } };
+      const runner = async (call) => { script[call.commandName]?.(); return { status: "complete" }; };
+
+      const res = await runIssue({ issue, dir, agentId: "a1", lane: "staging",
+        io, runner, now: () => 1000, maxAttempts: 1, ...(backend ? { backend } : {}) });
+
+      // Reaches the normal phase-driving path (blocks on needs-human because only
+      // investigate is scripted) rather than rejecting synchronously.
+      assert.equal(res.terminalReason, "needs-human", `backend=${backend} must not be rejected`);
+    }
+  });
+
+  it("forge#2076: engine.mjs's accepted backends track runner.mjs's exported VALID_BACKENDS (no independent copy)", async () => {
+    // Guards against re-introducing the duplicate-Set drift fixed in forge#2076:
+    // engine.mjs must import VALID_BACKENDS from runner.mjs rather than
+    // hardcoding its own copy. Iterating the imported set (rather than a
+    // literal ["cli","api","auto"] in this test) means the test fails if the
+    // two sources ever diverge again, regardless of which values they contain.
+    for (const [i, backend] of [...VALID_BACKENDS].entries()) {
+      const issue = 200 + i;
+      const { w, io } = fakeWorld();
+      const script = { "work-on/investigate": () => { w.markers += " INVESTIGATION:COMPLETE"; } };
+      const runner = async (call) => { script[call.commandName]?.(); return { status: "complete" }; };
+
+      const res = await runIssue({ issue, dir, agentId: "a1", lane: "staging",
+        io, runner, now: () => 1000, maxAttempts: 1, backend });
+
+      assert.equal(res.terminalReason, "needs-human",
+        `backend=${backend} (from runner.mjs's VALID_BACKENDS) must be accepted by engine.mjs`);
+    }
+
+    // A value outside runner.mjs's exported set must still be rejected.
+    const bogus = "definitely-not-a-real-backend";
+    assert.ok(!VALID_BACKENDS.has(bogus), "test precondition: bogus value must not collide with a real backend");
+    const { io } = fakeWorld();
+    const runner = async () => ({ status: "complete" });
+    await assert.rejects(
+      () => runIssue({ issue: 999, dir, agentId: "a1", lane: "staging",
+        io, runner, now: () => 1000, maxAttempts: 1, backend: bogus }),
+      (err) => { assert.equal(err.code, "INVALID_BACKEND"); return true; },
+    );
+  });
+
+  it("forge#2079/#2075: VALID_BACKENDS is the read-only runner.mjs singleton, not a diverged local copy", () => {
+    // #2079: the forge#2076 test above only asserts value-equivalence (it
+    // iterates [...VALID_BACKENDS]), so it would still pass if engine.mjs
+    // reintroduced its own hardcoded `new Set(["cli","api","auto"])` with
+    // identical literal values — the drift-elimination fix would silently
+    // regress. This test closes that gap two ways:
+    //
+    // 1. Mutation must actually be blocked (issue #2075). Note this is
+    //    deliberately NOT an Object.isFrozen() check: Object.freeze() does
+    //    NOT prevent Set mutation (add/delete/clear operate on an internal
+    //    slot, not on own properties, so a frozen Set still silently
+    //    accepts .add() — see runner.mjs's readOnlySet() comment). The only
+    //    reliable proof that this is the protected singleton is that
+    //    mutating it actually throws.
+    assert.throws(() => VALID_BACKENDS.add("bogus-backend"), TypeError,
+      "mutating VALID_BACKENDS must throw (issue #2075) — a fresh, " +
+      "unprotected local copy in a consumer would silently accept this instead");
+    assert.throws(() => VALID_BACKENDS.delete("cli"), TypeError,
+      "deleting from VALID_BACKENDS must throw (issue #2075)");
+    assert.equal(VALID_BACKENDS.size, 3,
+      "VALID_BACKENDS contents must be unchanged after the rejected mutation attempts");
+    assert.deepEqual([...VALID_BACKENDS].sort(), ["api", "auto", "cli"],
+      "VALID_BACKENDS values must be unchanged after the rejected mutation attempts");
+    assert.equal(VALID_BACKENDS.constructor, Set,
+      "VALID_BACKENDS.constructor must still be Set — the readOnlySet() Proxy " +
+      "special-cases the constructor trap so brand/identity checks against a " +
+      "plain Set continue to work");
+
+    // 2. Static source check: engine.mjs must import VALID_BACKENDS from
+    //    runner.mjs and must NOT declare its own local `VALID_BACKENDS =
+    //    new Set(...)` — this directly guards against the forge#2076
+    //    regression class (a duplicated, independently-drifting copy)
+    //    regardless of whether the duplicate's initial values happen to
+    //    match runner.mjs's at write time.
+    const engineSource = readFileSync(join(__dirname, "..", "engine.mjs"), "utf8");
+    assert.match(engineSource, /import\s*\{[^}]*VALID_BACKENDS[^}]*\}\s*from\s*["']\.\/runner\.mjs["']/,
+      "engine.mjs must import VALID_BACKENDS from runner.mjs");
+    assert.doesNotMatch(engineSource, /(?:const|let|var)\s+VALID_BACKENDS\s*=\s*new\s+Set/,
+      "engine.mjs must not declare its own local VALID_BACKENDS Set (would reintroduce forge#2076 drift)");
   });
 });

@@ -1,6 +1,6 @@
 ---
 description: Coordinate P0 incident response — hotfix validation, timeline reconstruction, and post-incident analysis
-argument-hint: [issue number | "active" | "postmortem {issue}"]
+argument-hint: "[issue number | \"active\" | \"postmortem {issue}\"]"
 install: extras
 ---
 <!-- SPDX-FileCopyrightText: Copyright (c) RapierCraft Studios -->
@@ -330,9 +330,10 @@ POSTMORTEM_EOF
 For each action item identified in the postmortem:
 
 ```bash
-gh issue create --title "{fix|feat|refactor}: {action item title}" \
-  --label "{type_label},P{priority}" \
-  --body "$(cat <<'BODY_EOF'
+ACTION_ITEM_TITLE="{fix|feat|refactor}: {action item title}"
+ACTION_ITEM_BODY_TMPFILE=$(mktemp)
+trap 'rm -f "$ACTION_ITEM_BODY_TMPFILE"' EXIT
+cat > "$ACTION_ITEM_BODY_TMPFILE" <<'BODY_EOF'
 ## Problem
 
 {What gap or vulnerability this action item addresses. What failure mode it prevents.}
@@ -361,7 +362,16 @@ See postmortem: #{INCIDENT_NUMBER} (comment)
 
 {Concrete next step}
 BODY_EOF
-)"
+# Route through the /issue create-hook (canonical dedup + body validation) instead of a raw
+# `gh issue create`.
+Skill(skill="issue", args="--title \"$ACTION_ITEM_TITLE\" --body-file \"$ACTION_ITEM_BODY_TMPFILE\" --label \"{type_label}\" --label \"P{priority}\"")
+rm -f "$ACTION_ITEM_BODY_TMPFILE"
+trap - EXIT
+ACTION_ITEM_NUMBER=$(gh issue list \
+  --state open \
+  --search "$ACTION_ITEM_TITLE" \
+  --json number,title \
+  --jq --arg t "$ACTION_ITEM_TITLE" '.[] | select(.title == $t) | .number' 2>/dev/null | head -1)
 ```
 
 ---

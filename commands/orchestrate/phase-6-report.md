@@ -300,6 +300,7 @@ current session's live wake pick them up automatically if it is still running).
 - Worktrees removed: {N}
 - Branches pruned: {N}
 - Milestones closed: {N}
+- Coordination board: {IF `COORD_ISSUE_NUMBER` was set this run: "closed — #{COORD_ISSUE_NUMBER}" ELSE: "n/a (no claims board this batch)"} <!-- Added: forge#2072 -->
 
 ### Agent Efficiency (from /audit-agents)
 

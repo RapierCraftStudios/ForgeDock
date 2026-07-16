@@ -601,6 +601,7 @@ export function makeCtx(overrides = {}) {
   const argv = overrides.argv ?? process.argv.slice(2);
   const nodeVersion = overrides.nodeVersion ?? process.versions.node;
   const enrichFn = overrides.enrichFn ?? enrich;
+  const isCliAvailableFn = overrides.isCliAvailableFn ?? isClaudeCliAvailable;
   const openFn = overrides.openFn ?? openUrl;
   const confirmFn = overrides.confirmFn ?? confirm;
   const platform = overrides.platform ?? process.platform;
@@ -626,6 +627,7 @@ export function makeCtx(overrides = {}) {
     release,
     linkStrategy: "symlink",
     enrichFn,
+    isCliAvailableFn,
     openFn,
     confirmFn,
     exec: (cmd, args) =>
@@ -1720,7 +1722,8 @@ export async function forge(ctx) {
 // ---------------------------------------------------------------------------
 
 import { detectConfig } from "./init-detect.mjs";
-import { enrich } from "./init-enrich-api.mjs";
+import { enrich, resolveEnrichBackend } from "./init-enrich.mjs";
+import { isClaudeCliAvailable } from "./runner.mjs";
 import { annotatedReviewScreen, box, confirm, getLogoTagline } from "./tui.mjs";
 
 const badgeOf = (field) => field.confidence;
@@ -1751,16 +1754,22 @@ export async function read(ctx) {
   ];
   await revealRows(rows, { mode: ctx.mode, motion: ctx.motion, writer: w });
 
-  if (ctx.env.ANTHROPIC_API_KEY) {
+  const enrichBackend = resolveEnrichBackend({
+    cwd: ctx.cwd,
+    env: ctx.env,
+    isCliAvailableFn: ctx.isCliAvailableFn,
+  });
+
+  if (enrichBackend !== "none") {
     try {
       w.write("  " + dimLine(ctx, "✦ enriching with AI…") + "\n");
-      const enriched = await ctx.enrichFn(draft);
+      const enriched = await ctx.enrichFn(draft, { backend: enrichBackend, cwd: ctx.cwd, env: ctx.env });
       if (enriched && typeof enriched === "object") draft = enriched;
     } catch {
       w.write("  " + dimLine(ctx, "✦ AI enrichment unavailable — continuing with detection only") + "\n");
     }
   } else {
-    w.write("  " + dimLine(ctx, "✦ no ANTHROPIC_API_KEY — skipping AI enrichment") + "\n");
+    w.write("  " + dimLine(ctx, "✦ no Claude Code CLI or ANTHROPIC_API_KEY — skipping AI enrichment") + "\n");
   }
 
   return { draft, description };

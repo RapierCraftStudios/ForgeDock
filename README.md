@@ -250,7 +250,7 @@ Then just open Claude Code and run `/work-on <issue>`.
 
 Commands then appear as `/forgedock:work-on`, etc. You still run `npx forgedock init` to generate `forge.yaml`.
 
-**Headless / CI:** the pipeline also runs outside Claude Code. `npx forgedock run work-on <issue> --dry-run` previews the assembled prompt and tool plan; with an `ANTHROPIC_API_KEY`, `npx forgedock run` drives the same command specs through a hardened tool-use loop, and `npx forgedock run-issue <issue>` executes them on the durable engine (event-sourced run log, leases, crash-safe resume).
+**Headless / CI:** the pipeline also runs outside Claude Code. `npx forgedock run work-on <issue> --dry-run` previews the assembled prompt and tool plan. `npx forgedock run` picks an execution backend automatically (`--backend auto`, the default): if the Claude Code CLI (`claude`) is installed and already authenticated (Pro/Max subscription or a CLI-managed key), it drives the command through that — **no separate `ANTHROPIC_API_KEY` required**. Otherwise it falls back to the Anthropic API directly (`ANTHROPIC_API_KEY` required). Force either path explicitly with `--backend cli` / `--backend api` (or `FORGEDOCK_BACKEND=cli|api`) — the API backend is what CI environments without an interactive `claude` login should use. `npx forgedock run-issue <issue>` executes the same command specs on the durable engine (event-sourced run log, leases, crash-safe resume).
 
 **Explicit install command:**
 

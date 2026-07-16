@@ -1,6 +1,6 @@
 ---
 description: Pick up a GitHub issue and run the full investigate-build-review-merge pipeline
-argument-hint: [issue number or "next" to pick highest priority]
+argument-hint: "[issue number or \"next\" to pick highest priority]"
 ---
 <!-- SPDX-FileCopyrightText: Copyright (c) RapierCraft Studios -->
 <!-- SPDX-License-Identifier: AGPL-3.0-or-later -->
@@ -926,10 +926,18 @@ For each sub-issue:
 - **Milestone**: same as parent
 
 ### 2C: Create sub-issues
+
+Route through the `/issue` create-hook's programmatic invocation contract (see `commands/issue.md` § "Programmatic Invocation Contract") instead of calling the raw issue-creation command directly — this gets dedup (Phase 2D) and body validation (Phase 3F) for free on every decomposition-spawned sub-issue.
+
 ```bash
-gh issue create {GH_FLAG} \
-  --title "{fix|feat|refactor}: {SUB_ISSUE_TITLE}" \
-  --body "$(cat <<'SUB_BODY_EOF'
+SUB_ISSUE_TITLE_FULL="{fix|feat|refactor}: {SUB_ISSUE_TITLE}"
+# Defense-in-depth: /issue's arg tokenizer (commands/issue.md, forge#2094) uses
+# an xargs-based tokenizer that never expands backtick/$(...) substitution, so
+# this is no longer required for safety — but strip it anyway so the raw title
+# stays readable if it round-trips through any other eval-based consumer.
+SUB_ISSUE_TITLE_FULL=$(printf '%s' "$SUB_ISSUE_TITLE_FULL" | tr '`' "'" | sed 's/\$(/$ (/g')
+SUB_ISSUE_BODY_FILE=$(mktemp)
+cat <<'SUB_BODY_EOF' > "$SUB_ISSUE_BODY_FILE"
 ## Problem
 
 {1-3 sentences: what this sub-issue specifically addresses. What's wrong or what needs to be built.}
@@ -955,9 +963,22 @@ Files that need changes:
 **Parent**: #{NUMBER}
 {If depends on another sub-issue: "**Depends on**: #{SUB_ISSUE_N} — {reason}"}
 SUB_BODY_EOF
-)" \
-  --label "{PRIORITY_LABEL}" \
-  --milestone "{MILESTONE_TITLE}"
+
+# --milestone is only passed when the parent has one (see Phase 2B — "Milestone: same as parent").
+MILESTONE_ARG=""
+[ -n "{MILESTONE_TITLE}" ] && MILESTONE_ARG="--milestone \"{MILESTONE_TITLE}\""
+Skill(skill="issue", args="--title \"$SUB_ISSUE_TITLE_FULL\" --body-file \"$SUB_ISSUE_BODY_FILE\" --label \"{PRIORITY_LABEL}\" ${MILESTONE_ARG}")
+rm -f "$SUB_ISSUE_BODY_FILE"
+
+# /issue has no machine-readable return contract — resolve the created issue's number by
+# exact-title search immediately after the call (used by Phase 2D's tracker checklist).
+# Retry to absorb GitHub Search API indexing lag.
+SUB_ISSUE_NUM=""
+for _resolve_attempt in 1 2 3; do
+  SUB_ISSUE_NUM=$(gh issue list {GH_FLAG} --search "in:title \"${SUB_ISSUE_TITLE_FULL}\"" --state open --limit 1 --json number --jq '.[0].number // empty')
+  [ -n "$SUB_ISSUE_NUM" ] && break
+  sleep 2
+done
 ```
 
 ### 2D: Update parent issue body

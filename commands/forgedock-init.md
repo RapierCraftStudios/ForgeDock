@@ -1,6 +1,6 @@
 ---
 description: AI-powered forge.yaml config generator — scans codebase, queries GitHub, auto-fills all optional sections from detection
-argument-hint: [--preserve | --interactive | --section <name>]
+argument-hint: "[--preserve | --interactive | --section <name>]"
 ---
 <!-- SPDX-FileCopyrightText: Copyright (c) RapierCraft Studios -->
 <!-- SPDX-License-Identifier: AGPL-3.0-or-later -->

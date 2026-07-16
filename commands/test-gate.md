@@ -1,6 +1,6 @@
 ---
 description: Deterministic deploy-gate — verify a staging→main bundle's acceptance criteria against running code before deploy
-argument-hint: [--prs "<N1 N2 ...>"] [--base <branch>]
+argument-hint: "[--prs \"<N1 N2 ...>\"] [--base <branch>]"
 allowed-tools: Task, Bash, Read, Grep, Glob
 install: extras
 ---
@@ -520,10 +520,16 @@ else
       SOURCE_ISSUES_LIST="${SOURCE_ISSUES_LIST}\n- #${issue_num}"
     done
 
-    ISSUE_NUM=$(gh issue create ${GH_FLAG} \
-      --title "fix: test-gate FAIL — cluster '${cluster}' broken by staging→${DEFAULT_BRANCH} bundle" \
-      --label "test-failure,priority:P1" \
-      --body "$(cat <<ISSUE_EOF
+    TESTGATE_FAIL_TITLE="fix: test-gate FAIL — cluster '${cluster}' broken by staging→${DEFAULT_BRANCH} bundle"
+    # Defense-in-depth: /issue's arg tokenizer (commands/issue.md, forge#2094) uses
+    # an xargs-based tokenizer that never expands backtick/$(...) substitution, so
+    # this is no longer required for safety — but strip it anyway so the raw title
+    # stays readable if it round-trips through any other eval-based consumer.
+    # ${cluster} is config-controlled (forge.yaml verification.integration_tests), but sanitize
+    # unconditionally for defense-in-depth consistency with the other converted call sites.
+    TESTGATE_FAIL_TITLE=$(printf '%s' "$TESTGATE_FAIL_TITLE" | tr '`' "'" | sed 's/\$(/$ (/g')
+    TESTGATE_FAIL_BODY_FILE=$(mktemp)
+    cat <<ISSUE_EOF > "$TESTGATE_FAIL_BODY_FILE"
 ## Problem
 
 The \`/test-gate\` command detected a runtime failure in cluster \`${cluster}\` that was introduced by the staging→${DEFAULT_BRANCH} bundle. The failure did not exist on \`${BASE_BRANCH}\` (baseline PASS), confirming it is batch-introduced, not pre-existing.
@@ -570,7 +576,21 @@ $(echo -e "$SOURCE_ISSUES_LIST")
    $(yq ".verification.integration_tests[] | select(.cluster == \"${cluster}\") | .command" "$CONFIG_FILE")
    \`\`\`
 ISSUE_EOF
-)" --json number --jq '.number' 2>/dev/null || echo "FAILED")
+
+    # Route through the /issue create-hook's programmatic invocation contract (see
+    # commands/issue.md § "Programmatic Invocation Contract") instead of the raw issue-creation call.
+    Skill(skill="issue", args="--title \"$TESTGATE_FAIL_TITLE\" --body-file \"$TESTGATE_FAIL_BODY_FILE\" --label test-failure --label priority:P1")
+    rm -f "$TESTGATE_FAIL_BODY_FILE"
+
+    # /issue has no machine-readable return contract — resolve the created issue's number by
+    # exact-title search immediately after the call. Retry to absorb GitHub Search API indexing lag.
+    ISSUE_NUM=""
+    for _resolve_attempt in 1 2 3; do
+      ISSUE_NUM=$(gh issue list ${GH_FLAG} --search "in:title \"${TESTGATE_FAIL_TITLE}\"" --state open --limit 1 --json number --jq '.[0].number // empty' 2>/dev/null || echo "")
+      [ -n "$ISSUE_NUM" ] && break
+      sleep 2
+    done
+    [ -z "$ISSUE_NUM" ] && ISSUE_NUM="FAILED"
 
     if [ "$ISSUE_NUM" != "FAILED" ] && [ -n "$ISSUE_NUM" ]; then
       echo "Filed test-failure issue #${ISSUE_NUM} for cluster '${cluster}'"
@@ -786,10 +806,14 @@ if [ "${UNCOVERED_COUNT}" -gt 0 ]; then
       continue
     fi
 
-    GAP_ISSUE_NUM=$(gh issue create ${GH_FLAG} \
-      --title "fix: test-gap — uncovered criterion in issue #${GAP_ISSUE} (${GAP_TYPE})" \
-      --label "test-gap" \
-      --body "$(cat <<TGAP_EOF
+    TESTGAP_TITLE="fix: test-gap — uncovered criterion in issue #${GAP_ISSUE} (${GAP_TYPE})"
+    # Defense-in-depth: /issue's arg tokenizer (commands/issue.md, forge#2094) uses
+    # an xargs-based tokenizer that never expands backtick/$(...) substitution, so
+    # this is no longer required for safety — but strip it anyway so the raw title
+    # stays readable if it round-trips through any other eval-based consumer.
+    TESTGAP_TITLE=$(printf '%s' "$TESTGAP_TITLE" | tr '`' "'" | sed 's/\$(/$ (/g')
+    TESTGAP_BODY_FILE=$(mktemp)
+    cat <<TGAP_EOF > "$TESTGAP_BODY_FILE"
 ## Problem
 
 The \`/test-gate\` criteria-adequacy check (Phase 6) found a runtime-testable acceptance criterion in issue #${GAP_ISSUE} that is not covered by any configured test cluster. Coverage gaps cannot produce a clean PASS verdict — this criterion must be covered before the staging→${DEFAULT_BRANCH} bundle can pass the deploy gate.
@@ -822,7 +846,21 @@ Files to be identified during investigation. Start with the test suite for the \
 ${GAP_CRITERION}
 \`\`\`
 TGAP_EOF
-)" --json number --jq '.number' 2>/dev/null || echo "FAILED")
+
+    # Route through the /issue create-hook's programmatic invocation contract (see
+    # commands/issue.md § "Programmatic Invocation Contract") instead of the raw issue-creation call.
+    Skill(skill="issue", args="--title \"$TESTGAP_TITLE\" --body-file \"$TESTGAP_BODY_FILE\" --label test-gap")
+    rm -f "$TESTGAP_BODY_FILE"
+
+    # /issue has no machine-readable return contract — resolve the created issue's number by
+    # exact-title search immediately after the call. Retry to absorb GitHub Search API indexing lag.
+    GAP_ISSUE_NUM=""
+    for _resolve_attempt in 1 2 3; do
+      GAP_ISSUE_NUM=$(gh issue list ${GH_FLAG} --search "in:title \"${TESTGAP_TITLE}\"" --state open --limit 1 --json number --jq '.[0].number // empty' 2>/dev/null || echo "")
+      [ -n "$GAP_ISSUE_NUM" ] && break
+      sleep 2
+    done
+    [ -z "$GAP_ISSUE_NUM" ] && GAP_ISSUE_NUM="FAILED"
 
     if [ "$GAP_ISSUE_NUM" != "FAILED" ] && [ -n "$GAP_ISSUE_NUM" ]; then
       echo "Filed test-gap issue #${GAP_ISSUE_NUM} for uncovered criterion in #${GAP_ISSUE} (${GAP_TYPE})"
