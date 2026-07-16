@@ -242,6 +242,46 @@ describe("runIssue", () => {
     assert.equal(buildFailures.length, 3, "all 3 attempts must be logged — transient git errors keep retrying");
   });
 
+  it("forge#2211: an unresolved branch (FORGE:BUILDER:COMPLETE present, no Branch marker) stays retryable, not a synthesized fixed point", async () => {
+    // Regression for a review finding on PR #2204: detectOutcome used to
+    // synthesize `ahead = 0` when resolveBranch() returned null (branch not
+    // yet resolvable — e.g. first build attempt, no **Branch**: `x` marker
+    // posted yet, and state.branch not carried forward from a prior commit).
+    // That synthesized 0 was indistinguishable from a genuine, git-confirmed
+    // zero and wrongly tripped the `ahead !== -1` non-retryable guard after a
+    // single attempt. An unresolved branch must map to the same "not computed"
+    // sentinel (-1) that a transient git error already uses, so this stays
+    // retryable and consumes the full attempt budget.
+    const { w, io } = fakeWorld();
+    let buildRunnerCalls = 0;
+    let gitCalls = 0;
+    io.git = async () => { gitCalls++; return String(w.commitsAhead); };
+    const script = {
+      "work-on/investigate": () => { w.markers += " INVESTIGATION:COMPLETE"; },
+      "work-on/build/context": () => { w.markers += " FORGE:CONTEXT:COMPLETE"; },
+      "work-on/build/architect": () => { w.markers += " FORGE:ARCHITECT:COMPLETE"; },
+      // Builder reports complete but never names a branch (no **Branch**: `x`
+      // marker) — resolveBranch() must return null since state.branch is also
+      // never set by a prior PHASE_COMMIT in this scenario.
+      "work-on/build": () => {
+        buildRunnerCalls++;
+        w.markers += " FORGE:BUILDER:COMPLETE";
+      },
+    };
+    const runner = async ({ commandName }) => { script[commandName]?.(); return { status: "complete" }; };
+
+    const res = await runIssue({ issue: 42, dir, agentId: "a1", lane: "staging",
+      io, runner, now: () => 1000, maxAttempts: 3 });
+
+    assert.equal(res.terminalReason, "needs-human", "still escalates once retries are exhausted");
+    assert.equal(buildRunnerCalls, 3,
+      "an unresolved branch must NOT set retryable:false — all 3 attempts must run, not just 1");
+    assert.equal(gitCalls, 0, "commitsAhead() must never be called when the branch could not be resolved");
+    const events = readLog(dir, 42);
+    const buildFailures = events.filter((e) => e.event === "PHASE_FAILED" && e.phase === "build");
+    assert.equal(buildFailures.length, 3, "all 3 attempts must be logged — unresolved branch keeps retrying");
+  });
+
   it("forge#2176 (AC4): a phase that does not opt into retryable:false still retries to maxAttempts (transient failures unaffected)", async () => {
     // Guard against over-generalizing the retryable mechanism: the review
     // phase's "PR open, not merged" detail can legitimately repeat identically
