@@ -66,7 +66,14 @@
  *   "fast-lane", "priority", "repo-scoped", "bare-slug".
  * @property {string[]} args - The raw argument tokens (excluding the pattern
  *   keyword itself) that produced this classification, preserved so a
- *   re-resolution round can replay the exact same query.
+ *   re-resolution round can replay the exact same query. Exceptions:
+ *   `priority` and `repo-scoped` keep the FULL token list instead of
+ *   slicing off a leading keyword token — for those two patterns the
+ *   pattern keyword is fused into the same token as its argument
+ *   (`priority:P0`, `mcp:fast-lane`, `n8n:next`), so there is no separable
+ *   leading keyword token to drop the way there is for `milestone <slug>`
+ *   or `next <N>`. Slicing here would destroy the only copy of the data a
+ *   re-resolution round needs to replay the query.
  */
 
 /**
@@ -182,6 +189,15 @@ export function shouldReResolve(classified, config = {}, roundsSoFar = 0) {
   }
 
   const enabledRaw = config.enabled;
+  // The `"off"` string branch is a defensive/API-level allowance for direct
+  // JS callers (e.g. this file's own unit tests) — it is NOT currently
+  // reachable via the real `yq`-based bash mirror in
+  // `phase-4-execution.md` Step 4B.6, which reads
+  // `orchestration.reresolve.enabled` and passes it through
+  // `process.argv[3] === "false" ? false : process.argv[3]`: the only
+  // string value that CLI path can ever produce for a disabled config is
+  // boolean-string `"false"`, never `"off"`. Do not assume this branch is
+  // exercised end-to-end via the documented CLI path.
   const disabled =
     enabledRaw === false || (typeof enabledRaw === "string" && enabledRaw.trim().toLowerCase() === "off");
   if (disabled) {
