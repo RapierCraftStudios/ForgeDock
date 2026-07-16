@@ -96,7 +96,11 @@ function makeWorld() {
       case "work-on/investigate": w.markers += " INVESTIGATION:COMPLETE"; break;
       case "work-on/build/context": w.markers += " FORGE:CONTEXT FORGE:CONTEXT:COMPLETE"; break;
       case "work-on/build/architect": w.markers += " FORGE:ARCHITECT FORGE:ARCHITECT:COMPLETE"; break;
-      case "work-on/build": w.markers += " FORGE:BUILDER:COMPLETE"; w.commitsAhead = 2; w.buildRuns++; break;
+      // The Branch marker mirrors the real `**Branch**: `{BRANCH}`` field the
+      // FORGE:BUILDER comment always reports (implement.md Phase I6) — the
+      // engine now resolves the build branch from this ground truth instead
+      // of a guessed default (forge#2174), so the mock must emit it too.
+      case "work-on/build": w.markers += " FORGE:BUILDER:COMPLETE **Branch**: `fix/real-branch-42`"; w.commitsAhead = 2; w.buildRuns++; break;
       // Idempotent review runner: adopts an existing PR instead of creating a
       // second one on resume, so a duplicate-create would be observable via
       // prCreateCount instead of being silently masked by `w.pr = 7`.

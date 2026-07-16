@@ -45,7 +45,11 @@ describe("runIssue", () => {
       "work-on/investigate": () => { w.markers += " INVESTIGATION:COMPLETE"; },
       "work-on/build/context": () => { w.markers += " FORGE:CONTEXT:COMPLETE"; },
       "work-on/build/architect": () => { w.markers += " FORGE:ARCHITECT:COMPLETE"; },
-      "work-on/build": () => { w.markers += " FORGE:BUILDER:COMPLETE"; w.commitsAhead = 2; },
+      // The Branch marker mirrors the real `**Branch**: `{BRANCH}`` field the
+      // FORGE:BUILDER comment always reports (implement.md Phase I6) — the
+      // engine resolves the build branch from this ground truth, never from
+      // a guessed default (forge#2174).
+      "work-on/build": () => { w.markers += " FORGE:BUILDER:COMPLETE **Branch**: `fix/real-branch-42`"; w.commitsAhead = 2; },
       "work-on/review": () => { w.pr = 7; w.prMerged = true; },
       "work-on/close": () => { w.issueState = "CLOSED"; },
     };
@@ -57,7 +61,9 @@ describe("runIssue", () => {
     assert.equal(res.terminalReason, "merged");
     const s = deriveState(readLog(dir, 42));
     assert.deepEqual(s.committed, ["investigate","context","architect","build","review","close"]);
-    assert.equal(s.branch, "fix/pipeline-42"); // set by engine before build (see impl)
+    // forge#2174: branch must be the real, ground-truth branch parsed from the
+    // FORGE:BUILDER comment — never a guessed default the engine invented.
+    assert.equal(s.branch, "fix/real-branch-42");
   });
 
   it("stops at needs-human when a phase reports blocked (no silent merge)", async () => {
@@ -66,7 +72,7 @@ describe("runIssue", () => {
       "work-on/investigate": () => { w.markers += " INVESTIGATION:COMPLETE"; },
       "work-on/build/context": () => { w.markers += " FORGE:CONTEXT:COMPLETE"; },
       "work-on/build/architect": () => { w.markers += " FORGE:ARCHITECT:COMPLETE"; },
-      "work-on/build": () => { w.markers += " FORGE:BUILDER:COMPLETE"; w.commitsAhead = 1; },
+      "work-on/build": () => { w.markers += " FORGE:BUILDER:COMPLETE **Branch**: `fix/real-branch-42`"; w.commitsAhead = 1; },
       "work-on/review": () => { w.pr = 7; w.prNeedsHuman = true; },
     };
     const runner = async ({ commandName }) => { script[commandName]?.(); return { status: "complete" }; };
@@ -89,7 +95,11 @@ describe("runIssue", () => {
       "work-on/investigate": () => { w.markers += " INVESTIGATION:COMPLETE"; },
       "work-on/build/context": () => { w.markers += " FORGE:CONTEXT:COMPLETE"; },
       "work-on/build/architect": () => { w.markers += " FORGE:ARCHITECT:COMPLETE"; },
-      "work-on/build": () => { w.markers += " FORGE:BUILDER:COMPLETE"; w.commitsAhead = 2; },
+      // The Branch marker mirrors the real `**Branch**: `{BRANCH}`` field the
+      // FORGE:BUILDER comment always reports (implement.md Phase I6) — the
+      // engine resolves the build branch from this ground truth, never from
+      // a guessed default (forge#2174).
+      "work-on/build": () => { w.markers += " FORGE:BUILDER:COMPLETE **Branch**: `fix/real-branch-42`"; w.commitsAhead = 2; },
       "work-on/review": () => { w.pr = 7; w.prMerged = true; },
       "work-on/close": () => { w.issueState = "CLOSED"; },
     };
@@ -101,6 +111,62 @@ describe("runIssue", () => {
     assert.equal(res.terminalReason, "merged");
     const s = deriveState(readLog(dir, 42));
     assert.deepEqual(s.committed, ["investigate", "context", "architect", "build", "review", "close"]);
+  });
+
+  it("forge#2174: build commits when the builder's real (slug-derived) branch has commits, even though a naively-guessed default branch name never existed", async () => {
+    // Regression test for the exact reported bug: the engine used to precompute
+    // a guessed branch name (`fix/pipeline-{issue}`) that never matched the real,
+    // slug-derived branch the builder actually creates (`fix/{slug}-{issue}`,
+    // per commands/work-on/build.md Phase B1A). git only recognizes the REAL
+    // branch here — any rev-list against the old guessed name would reject.
+    // The build phase must resolve the branch from the FORGE:BUILDER comment
+    // (ground truth) and drive to merged.
+    const { w, io } = fakeWorld();
+    const REAL_BRANCH = "fix/role-arn-unbounded-error-msg-42";
+    io.git = async (args) => {
+      const range = args[args.indexOf("--count") + 1] || "";
+      if (range.endsWith(`..${REAL_BRANCH}`)) return String(w.commitsAhead);
+      // Any other ref (e.g. a guessed "fix/pipeline-42") does not exist.
+      throw new Error("fatal: unknown revision or path not in the working tree.");
+    };
+    const script = {
+      "work-on/investigate": () => { w.markers += " INVESTIGATION:COMPLETE"; },
+      "work-on/build/context": () => { w.markers += " FORGE:CONTEXT:COMPLETE"; },
+      "work-on/build/architect": () => { w.markers += " FORGE:ARCHITECT:COMPLETE"; },
+      "work-on/build": () => { w.markers += ` FORGE:BUILDER:COMPLETE **Branch**: \`${REAL_BRANCH}\``; w.commitsAhead = 1; },
+      "work-on/review": () => { w.pr = 7; w.prMerged = true; },
+      "work-on/close": () => { w.issueState = "CLOSED"; },
+    };
+    const runner = async ({ commandName }) => { script[commandName](); return { status: "complete" }; };
+
+    const res = await runIssue({ issue: 42, dir, agentId: "a1", lane: "staging",
+      io, runner, now: () => 1000, maxAttempts: 3 });
+
+    assert.equal(res.terminalReason, "merged");
+    const s = deriveState(readLog(dir, 42));
+    assert.deepEqual(s.committed, ["investigate", "context", "architect", "build", "review", "close"]);
+    assert.equal(s.branch, REAL_BRANCH, "resolved branch must be the real, ground-truth branch, not a guess");
+  });
+
+  it("forge#2174: a genuinely empty build (builder complete, zero real commits) still fails the gate", async () => {
+    const { w, io } = fakeWorld();
+    const REAL_BRANCH = "fix/some-real-branch-42";
+    const script = {
+      "work-on/investigate": () => { w.markers += " INVESTIGATION:COMPLETE"; },
+      "work-on/build/context": () => { w.markers += " FORGE:CONTEXT:COMPLETE"; },
+      "work-on/build/architect": () => { w.markers += " FORGE:ARCHITECT:COMPLETE"; },
+      // Builder reports complete and even names a real branch, but never actually
+      // committed anything — commitsAhead stays 0 (w.commitsAhead is never bumped).
+      "work-on/build": () => { w.markers += ` FORGE:BUILDER:COMPLETE **Branch**: \`${REAL_BRANCH}\``; },
+    };
+    const runner = async ({ commandName }) => { script[commandName]?.(); return { status: "complete" }; };
+
+    const res = await runIssue({ issue: 42, dir, agentId: "a1", lane: "staging",
+      io, runner, now: () => 1000, maxAttempts: 1 });
+
+    assert.equal(res.terminalReason, "needs-human", "zero real commits must still escalate, not silently merge");
+    const s = deriveState(readLog(dir, 42));
+    assert.ok(!s.committed.includes("build"), "build must not be marked committed with zero real commits");
   });
 
   it("I3: defers before writing GitHub state when another agent holds a valid lease (remirror path)", async () => {
@@ -193,7 +259,11 @@ describe("runIssue", () => {
       "work-on/investigate": () => { w.markers += " INVESTIGATION:COMPLETE"; },
       "work-on/build/context": () => { w.markers += " FORGE:CONTEXT:COMPLETE"; },
       "work-on/build/architect": () => { w.markers += " FORGE:ARCHITECT:COMPLETE"; },
-      "work-on/build": () => { w.markers += " FORGE:BUILDER:COMPLETE"; w.commitsAhead = 2; },
+      // The Branch marker mirrors the real `**Branch**: `{BRANCH}`` field the
+      // FORGE:BUILDER comment always reports (implement.md Phase I6) — the
+      // engine resolves the build branch from this ground truth, never from
+      // a guessed default (forge#2174).
+      "work-on/build": () => { w.markers += " FORGE:BUILDER:COMPLETE **Branch**: `fix/real-branch-42`"; w.commitsAhead = 2; },
       "work-on/review": () => { w.pr = 7; w.prMerged = true; },
       "work-on/close": () => { w.issueState = "CLOSED"; },
     };
@@ -228,7 +298,11 @@ describe("runIssue", () => {
 
     const script = {
       "work-on/build/architect": () => { w.markers += " FORGE:ARCHITECT:COMPLETE"; },
-      "work-on/build": () => { w.markers += " FORGE:BUILDER:COMPLETE"; w.commitsAhead = 2; },
+      // The Branch marker mirrors the real `**Branch**: `{BRANCH}`` field the
+      // FORGE:BUILDER comment always reports (implement.md Phase I6) — the
+      // engine resolves the build branch from this ground truth, never from
+      // a guessed default (forge#2174).
+      "work-on/build": () => { w.markers += " FORGE:BUILDER:COMPLETE **Branch**: `fix/real-branch-42`"; w.commitsAhead = 2; },
       "work-on/review": () => { w.pr = 7; w.prMerged = true; },
       "work-on/close": () => { w.issueState = "CLOSED"; },
     };
@@ -260,7 +334,11 @@ describe("runIssue", () => {
     appendEvent(dir, 42, { event: "PHASE_COMMIT", phase: "context", outputs: {} });
 
     const script = {
-      "work-on/build": () => { w.markers += " FORGE:BUILDER:COMPLETE"; w.commitsAhead = 2; },
+      // The Branch marker mirrors the real `**Branch**: `{BRANCH}`` field the
+      // FORGE:BUILDER comment always reports (implement.md Phase I6) — the
+      // engine resolves the build branch from this ground truth, never from
+      // a guessed default (forge#2174).
+      "work-on/build": () => { w.markers += " FORGE:BUILDER:COMPLETE **Branch**: `fix/real-branch-42`"; w.commitsAhead = 2; },
       "work-on/review": () => { w.pr = 7; w.prMerged = true; },
       "work-on/close": () => { w.issueState = "CLOSED"; },
     };
@@ -341,7 +419,11 @@ describe("runIssue", () => {
       "work-on/investigate": () => { w.markers += " INVESTIGATION:COMPLETE"; },
       "work-on/build/context": () => { w.markers += " FORGE:CONTEXT:COMPLETE"; },
       "work-on/build/architect": () => { w.markers += " FORGE:ARCHITECT:COMPLETE"; },
-      "work-on/build": () => { w.markers += " FORGE:BUILDER:COMPLETE"; w.commitsAhead = 2; },
+      // The Branch marker mirrors the real `**Branch**: `{BRANCH}`` field the
+      // FORGE:BUILDER comment always reports (implement.md Phase I6) — the
+      // engine resolves the build branch from this ground truth, never from
+      // a guessed default (forge#2174).
+      "work-on/build": () => { w.markers += " FORGE:BUILDER:COMPLETE **Branch**: `fix/real-branch-42`"; w.commitsAhead = 2; },
       "work-on/review": () => { w.pr = 7; w.prMerged = true; },
       "work-on/close": () => { w.issueState = "CLOSED"; },
     };
