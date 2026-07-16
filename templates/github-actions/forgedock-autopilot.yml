@@ -64,6 +64,16 @@ jobs:
 
       - name: Resolve autopilot arguments
         id: args
+        env:
+          # Pass workflow_dispatch inputs through env: indirection rather than
+          # interpolating ${{ inputs.* }} directly into the run: script text.
+          # inputs.limit is free-text (type: string) — splicing it straight into
+          # the shell would let a crafted value break out of the assignment and
+          # inject arbitrary commands. inputs.mode is a `type: choice` enum and
+          # isn't exploitable the same way, but is routed the same way for
+          # consistency/defense-in-depth.
+          MODE_INPUT: ${{ inputs.mode }}
+          LIMIT_INPUT: ${{ inputs.limit }}
         run: |
           # On scheduled runs: always recon mode (safe default)
           # On workflow_dispatch: use the selected mode input
@@ -71,8 +81,8 @@ jobs:
             MODE="recon"
             LIMIT="3"
           else
-            MODE="${{ inputs.mode }}"
-            LIMIT="${{ inputs.limit }}"
+            MODE="$MODE_INPUT"
+            LIMIT="$LIMIT_INPUT"
           fi
 
           if [ "$MODE" = "fix" ]; then
