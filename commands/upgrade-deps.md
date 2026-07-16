@@ -218,10 +218,14 @@ Before creating any issue, check for existing open issues that already track the
 
 ```bash
 for pkg in ${ELIGIBLE_PACKAGES}; do
+  # Pass $pkg to jq via the environment (env.PKG) instead of splicing it into the
+  # jq program text — avoids breaking the outer quoting if $pkg ever contained a
+  # single quote or other shell-meaningful character.
+  export PKG="$pkg"
   EXISTING=$(gh issue list $GH_FLAG --state open \
     --search "upgrade $pkg" --limit 5 \
     --json number,title \
-    --jq '.[] | select(.title | test("upgrade.*'"$pkg"'"; "i")) | .number' 2>/dev/null | head -1)
+    --jq '.[] | select(.title | test("upgrade.*" + env.PKG; "i")) | .number' 2>/dev/null | head -1)
 
   if [ -n "$EXISTING" ]; then
     echo "Skipping $pkg — open issue #$EXISTING already tracks this upgrade"
