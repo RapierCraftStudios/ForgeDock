@@ -1,9 +1,15 @@
 import { defineConfig } from 'vitepress'
 
+// Deploy base path for GitHub Pages. This is the single source of truth for the
+// `/ForgeDock/` path segment — SITE_HOSTNAME below derives from it instead of
+// hardcoding the same segment a second time, so the two can never drift apart
+// if this ever changes (custom domain, repo rename). (Ref: forge#2141)
+const BASE_PATH = '/ForgeDock/'
+
 // Canonical hostname for the deployed GitHub Pages site. Shared by `sitemap.hostname`
 // and the per-page canonical/og:url logic in `transformHead` below so the two can never
 // drift apart (see FORGE:ARCHITECT — hostname drift was the #1 risk flagged for this file).
-const SITE_HOSTNAME = 'https://rapiercraftstudios.github.io/ForgeDock/'
+const SITE_HOSTNAME = `https://rapiercraftstudios.github.io${BASE_PATH}`
 const SOCIAL_IMAGE = 'https://avatars.githubusercontent.com/in/4051319?s=400'
 
 export default defineConfig({
@@ -12,7 +18,7 @@ export default defineConfig({
   lang: 'en-US',
 
   // Deploy to GitHub Pages at /
-  base: '/ForgeDock/',
+  base: BASE_PATH,
 
   // Emits sitemap.xml at build time, listing every page under SITE_HOSTNAME.
   sitemap: {
