@@ -1741,6 +1741,38 @@ describe("runCliBackend spawnFn seam (issue #2033)", () => {
     assert.equal(summary, "a\\x09b\\x1bc\\x7f");
   });
 
+  it("sanitizeArgvForLog does not split a UTF-16 surrogate pair at the truncation boundary (#2293)", () => {
+    // U+1F600 GRINNING FACE is an astral-plane character represented as a
+    // high+low surrogate pair in UTF-16. Position it so the pair straddles
+    // the MAX_LOGGED_ARGV_ELEMENT_LEN (200) cut: 199 plain chars + the 2-unit
+    // emoji = 201 units, so a naive `.slice(0, 200)` would keep the 199 chars
+    // plus only the emoji's lone high surrogate.
+    const emoji = String.fromCodePoint(0x1f600);
+    const arg = "a".repeat(199) + emoji + "trailing content past the cut";
+    const summary = sanitizeArgvForLog([arg]);
+    const [truncated] = summary.split("…[truncated,");
+    for (let i = 0; i < truncated.length; i++) {
+      const code = truncated.charCodeAt(i);
+      const isHighSurrogate = code >= 0xd800 && code <= 0xdbff;
+      const isLowSurrogate = code >= 0xdc00 && code <= 0xdfff;
+      if (isHighSurrogate) {
+        assert.ok(
+          i + 1 < truncated.length && truncated.charCodeAt(i + 1) >= 0xdc00 && truncated.charCodeAt(i + 1) <= 0xdfff,
+          `lone high surrogate at index ${i} — surrogate pair was split`,
+        );
+      }
+      assert.ok(!isLowSurrogate || (i > 0 && truncated.charCodeAt(i - 1) >= 0xd800 && truncated.charCodeAt(i - 1) <= 0xdbff), `lone low surrogate at index ${i}`);
+    }
+    assert.match(summary, /…\[truncated, \d+ chars\]/);
+  });
+
+  it("sanitizeArgvForLog truncation marker still reports the true pre-trim length (#2293)", () => {
+    const emoji = String.fromCodePoint(0x1f600);
+    const arg = "a".repeat(199) + emoji + "trailing content past the cut";
+    const summary = sanitizeArgvForLog([arg]);
+    assert.match(summary, new RegExp(`…\\[truncated, ${arg.length} chars\\]`));
+  });
+
   it("defaults to the real spawnSync when spawnFn is omitted (backward compatibility)", () => {
     // No behavior assertion beyond "does not throw a TypeError from a missing
     // spawnFn" — this just confirms the default parameter wiring is correct.
