@@ -558,7 +558,17 @@ export function extractSessionLimitResetTime(output) {
   const match = /session limit[^\n]*?resets?\s+([^\n]+?)\s*$/im.exec(output);
   if (!match) return undefined;
   const resetAt = match[1].trim();
-  return resetAt.length > 0 ? resetAt : undefined;
+  if (resetAt.length === 0) return undefined;
+  // Security review finding (forge#2241, PR #2323): `resetAt` is extracted
+  // from raw, untrusted CLI stdout/stderr — the same `output` that #2277/
+  // #2292/#2293 fixed control-char/bidi-override/surrogate-pair injection
+  // for in the neighboring CLI_BACKEND_FAILED diagnostic. Route it through
+  // the same sanitizeArgvForLog() escaping + length-capping used for
+  // argvSummary before it can reach err.resetAt -> the engine-error
+  // terminate detail -> operator-visible terminal/CI logs, so this new call
+  // site inherits the identical defensive posture instead of reopening that
+  // threat model via a fresh, unsanitized path.
+  return sanitizeArgvForLog([resetAt]);
 }
 
 export function runCliBackend({
