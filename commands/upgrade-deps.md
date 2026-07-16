@@ -260,6 +260,11 @@ For each eligible package (or batch), create a GitHub issue:
 ### 3A: Per-package issue (patch or minor, non-batched)
 
 ```bash
+# DRY_RUN guard — must stay above the create it guards (forge#1609). In dry-run
+# mode print the would-be issue and move on; never create it.
+if [ "$DRY_RUN" = "true" ]; then
+  echo "[DRY RUN] Would create issue: feat(deps): upgrade {PACKAGE} from {CURRENT} to {LATEST} ({SEMVER_LEVEL})"
+else
 gh issue create $GH_FLAG \
   --title "feat(deps): upgrade {PACKAGE} from {CURRENT} to {LATEST} ({SEMVER_LEVEL})" \
   --label "enhancement" \
@@ -303,6 +308,7 @@ Additional files will be identified if the new version has breaking changes requ
 *Created by `/upgrade-deps`. Will be validated before any changes are applied.*
 ISSUE_EOF
 )"
+fi
 ```
 
 ### 3B: Batch patch issue (when `--batch` is set)
@@ -312,6 +318,11 @@ Group multiple patch-level packages into one issue:
 ```bash
 BATCH_PACKAGE_LIST=$(printf '- `%s`: %s → %s\n' {PACKAGE} {CURRENT} {LATEST})
 
+# DRY_RUN guard — must stay above the create it guards (forge#1609).
+if [ "$DRY_RUN" = "true" ]; then
+  echo "[DRY RUN] Would create batch issue: feat(deps): batch patch upgrades — {COUNT} packages ({DATE})"
+  echo "[DRY RUN] Packages: $BATCH_PACKAGE_LIST"
+else
 gh issue create $GH_FLAG \
   --title "feat(deps): batch patch upgrades — {COUNT} packages ({DATE})" \
   --label "enhancement" \
@@ -349,11 +360,12 @@ All listed packages updated to their latest patch version. Full test suite passe
 *Batch created by `/upgrade-deps`. Investigate step will verify each package's patch notes.*
 BATCH_ISSUE_EOF
 )"
+fi
 ```
 
-**DRY_RUN check**: If `DRY_RUN=true`, print the would-be issue body but skip `gh issue create`.
+**DRY_RUN check**: enforced inline in 3A and 3B above — the guard wraps each `gh issue create` rather than being stated after it, so a dry run cannot create issues even if only one section is read in isolation (forge#1609).
 
-Store created issue numbers as `CREATED_ISSUES`.
+Store created issue numbers as `CREATED_ISSUES` (empty when `DRY_RUN=true`).
 
 ---
 
