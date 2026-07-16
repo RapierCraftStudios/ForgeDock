@@ -86,9 +86,14 @@ jobs:
           # - 'EMEMO_EOF' — exact uppercase heredoc token; no false positives expected
           # - 'is_byop'   — exact token; no false positives expected
           # - 'byop_discount' — exact token; no false positives expected
+          #
+          # No allowlist/exemption mechanism: an unscoped `<!-- allowlist: -->` opt-out
+          # previously let ANY line suppress ANY banned token, which defeated the point
+          # of this gate (see forge#2233). If a legitimate need for an exemption ever
+          # arises, it must be a token-specific, line-specific marker that this grep
+          # explicitly and narrowly excludes — not a blanket prefix match.
           MATCHES=$(grep -rniE '\balterlab\b|\bememo\b|EMEMO_EOF|\bis_byop\b|\bbyop_discount\b' commands/ \
             --include='*.md' \
-            | grep -v '<!-- allowlist:' \
             || true)
           if [ -n "$MATCHES" ]; then
             echo "ERROR: Banned product-specific tokens found in commands/:"
@@ -98,6 +103,28 @@ jobs:
             exit 1
           fi
           echo "OK: No banned tokens found in commands/"
+
+      - name: Self-test — banned token lint must catch a marked token (regression guard for forge#2233)
+        run: |
+          # Prove the lint logic itself still fires on a banned token, even one
+          # decorated with what used to be a blanket allowlist marker. This runs
+          # against a throwaway scratch file outside commands/ so it never pollutes
+          # the real corpus, and it inverts the assertion: the self-test FAILS the
+          # job if the banned-token pattern does NOT match.
+          SCRATCH_DIR=$(mktemp -d)
+          trap 'rm -rf "$SCRATCH_DIR"' EXIT
+          cat > "$SCRATCH_DIR/self-test.md" <<'EOF'
+          This line references alterlab and used to carry a blanket exemption. <!-- allowlist: AlterLab -->
+          EOF
+          SELF_TEST_MATCHES=$(grep -rniE '\balterlab\b|\bememo\b|EMEMO_EOF|\bis_byop\b|\bbyop_discount\b' "$SCRATCH_DIR" \
+            --include='*.md' \
+            || true)
+          if [ -z "$SELF_TEST_MATCHES" ]; then
+            echo "ERROR: Self-test failed — a line containing 'alterlab' plus a marker was NOT flagged."
+            echo "The banned-token lint regressed to allowing a blanket exemption. See forge#2233."
+            exit 1
+          fi
+          echo "OK: Self-test confirms the banned-token lint catches 'alterlab' even with a marker present."
 
   portability-lint:
     name: Shell portability lint (no grep -P in specs)
