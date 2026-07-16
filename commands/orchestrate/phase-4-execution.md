@@ -304,8 +304,56 @@ BATCH_FULLY_GATED=false
 # Step 4C's cascade dispatch of review-finding issues. Declared once here (batch scope,
 # not per-agent) so BATCH_TOKEN_SPEND accumulates correctly across every Step 4C run
 # this session performs.
-TOKEN_BUDGET=$(yq '.pipeline.token_budget_per_batch // 900000' forge.yaml 2>/dev/null || echo 900000)
+
+# --- Cascade admission policy resolution (forge#2234) ---
+# `orchestration.cascade` gives the admission rules below (rules 0/3/4/5) an
+# independently-settable config surface, on top of a named preset. Absent
+# section => `balanced`, which reproduces today's hardcoded behavior exactly
+# (no-op for existing configs). See `bin/engine/admission.mjs` for the typed,
+# unit-tested reference implementation of this same preset table.
+CASCADE_POLICY_NAME=$(yq '.orchestration.cascade.policy // "balanced"' forge.yaml 2>/dev/null || echo "balanced")
+[ "$CASCADE_POLICY_NAME" = "null" ] && CASCADE_POLICY_NAME="balanced"
+
+case "$CASCADE_POLICY_NAME" in
+  all)
+    PRESET_TOKEN_BUDGET="unlimited"; PRESET_DEFER_GATED="false"; PRESET_KEYWORD="false"; PRESET_P3_SAME_FILE="false" ;;
+  conservative)
+    PRESET_TOKEN_BUDGET=450000; PRESET_DEFER_GATED="true"; PRESET_KEYWORD="true"; PRESET_P3_SAME_FILE="true" ;;
+  balanced)
+    PRESET_TOKEN_BUDGET=900000; PRESET_DEFER_GATED="true"; PRESET_KEYWORD="true"; PRESET_P3_SAME_FILE="true" ;;
+  *)
+    echo "WARNING: forge.yaml → orchestration.cascade.policy \"${CASCADE_POLICY_NAME}\" is not one of: all, balanced, conservative — falling back to \"balanced\""
+    CASCADE_POLICY_NAME="balanced"
+    PRESET_TOKEN_BUDGET=900000; PRESET_DEFER_GATED="true"; PRESET_KEYWORD="true"; PRESET_P3_SAME_FILE="true" ;;
+esac
+
+# token_budget precedence: orchestration.cascade.token_budget (new home) >
+# pipeline.token_budget_per_batch (deprecated alias, forge#1858, kept working
+# unchanged) > the resolved preset default. Accepts the "unlimited" sentinel —
+# unlike a bare `// 900000` yq default, an explicit "unlimited" string must
+# NOT be coerced back to the numeric default (see forge#2234 "Known Pitfalls":
+# threading the sentinel through before wiring the levers, not after).
+LEGACY_TOKEN_BUDGET=$(yq '.pipeline.token_budget_per_batch // ""' forge.yaml 2>/dev/null || echo "")
+[ "$LEGACY_TOKEN_BUDGET" = "null" ] && LEGACY_TOKEN_BUDGET=""
+TOKEN_BUDGET_FALLBACK="${LEGACY_TOKEN_BUDGET:-$PRESET_TOKEN_BUDGET}"
+TOKEN_BUDGET=$(yq ".orchestration.cascade.token_budget // \"${TOKEN_BUDGET_FALLBACK}\"" forge.yaml 2>/dev/null || echo "$TOKEN_BUDGET_FALLBACK")
+[ "$TOKEN_BUDGET" = "null" ] && TOKEN_BUDGET="$TOKEN_BUDGET_FALLBACK"
+if [ "$TOKEN_BUDGET" != "unlimited" ] && ! echo "$TOKEN_BUDGET" | grep -qE '^[1-9][0-9]*$'; then
+  echo "WARNING: forge.yaml → orchestration.cascade.token_budget is not a positive integer or \"unlimited\" (\"${TOKEN_BUDGET}\") — falling back to default ${PRESET_TOKEN_BUDGET}"
+  TOKEN_BUDGET="$PRESET_TOKEN_BUDGET"
+fi
+
 TOKEN_ESTIMATE_PER_FINDING=$(yq '.pipeline.token_estimate_per_finding // 150000' forge.yaml 2>/dev/null || echo 150000)
+
+# Independent boolean levers — each accepts an explicit granular override on
+# top of the resolved preset (preset supplies the default, not a hard value).
+CASCADE_DEFER_ON_BATCH_GATED=$(yq ".orchestration.cascade.defer_on_batch_gated // ${PRESET_DEFER_GATED}" forge.yaml 2>/dev/null || echo "$PRESET_DEFER_GATED")
+CASCADE_KEYWORD_HEURISTIC=$(yq ".orchestration.cascade.keyword_heuristic // ${PRESET_KEYWORD}" forge.yaml 2>/dev/null || echo "$PRESET_KEYWORD")
+CASCADE_P3_SAME_FILE_DEFER=$(yq ".orchestration.cascade.p3_same_file_defer // ${PRESET_P3_SAME_FILE}" forge.yaml 2>/dev/null || echo "$PRESET_P3_SAME_FILE")
+
+echo "Cascade admission policy resolved: policy=${CASCADE_POLICY_NAME} token_budget=${TOKEN_BUDGET} defer_on_batch_gated=${CASCADE_DEFER_ON_BATCH_GATED} keyword_heuristic=${CASCADE_KEYWORD_HEURISTIC} p3_same_file_defer=${CASCADE_P3_SAME_FILE_DEFER} (forge.yaml → orchestration.cascade; see docs/CONFIG.md)"
+# --- End cascade admission policy resolution ---
+
 BATCH_TOKEN_SPEND=0
 TOKEN_DEFERRED=()   # findings deferred by the token-budget rule this run (re-evaluable in Step 4F.2.6)
 
@@ -1244,12 +1292,12 @@ gh issue list -R {GH_REPO} --state open --label "review-finding" --limit 20 \
 For each spawned finding, determine whether it should be **executed** or **deferred**:
 
 **Evaluation order** (first matching rule wins):
-0. **Batch fully human-gated** (`BATCH_FULLY_GATED == true`, always defer, even for P1/P2) <!-- Added: forge#1814 -->: The original batch (see Step 4B item 6.7) has exhausted into DONE/FAILED/GATED with nothing left `IN_PROGRESS` — the real blockers are the GATED issues, not a lack of dispatchable findings. Dispatching a new review-finding here cannot produce net batch progress; it only inflates the open-issue count while the productive path waits on a human merge. Always defer, checked before generation and priority. Rationale: this is the idle/backpressure policy this issue adds — without it, rule 2 (below) unconditionally executes P1/P2 findings regardless of how gated the rest of the batch is, which is the root cause of the net-negative churn this policy exists to stop.
-1. **Generation ≥ 2** (always defer, even for P1/P2, for autonomous mid-run cascade — see scope note below): Finding was spawned by an issue that was itself a review-finding. Check the source issue's labels for `review-finding` — if the source has that label, the new finding is generation 2. Always defer within this Step 4C triage pass. Rationale: gen-2+ cascade is theoretically unbounded — cap it here. **Scope**: this rule caps *autonomous* cascade — findings discovered and re-triaged automatically during an unattended run. It is not a cap on what a human can explicitly request. When an operator directly asks for cascade/review-finding work via `phase-1-resolve.md`'s dedicated `cascade`/`review-findings`/`findings` resolution (with `--include-deferred`/`--allow-gen2`, or the `orchestration.cascade.max_generation` config lever from #2234), those findings enter the DAG through Phase 1 resolution, not through this Step 4C mid-run triage — this rule still defers anything Step 4C itself discovers mid-run, including inside a human-requested gen≥2 batch (see recursion safety below). <!-- Added: forge#2231 -->
+0. **Batch fully human-gated** (`BATCH_FULLY_GATED == true`, always defer, even for P1/P2) <!-- Added: forge#1814 -->: The original batch (see Step 4B item 6.7) has exhausted into DONE/FAILED/GATED with nothing left `IN_PROGRESS` — the real blockers are the GATED issues, not a lack of dispatchable findings. Dispatching a new review-finding here cannot produce net batch progress; it only inflates the open-issue count while the productive path waits on a human merge. Always defer, checked before generation and priority. Rationale: this is the idle/backpressure policy this issue adds — without it, rule 2 (below) unconditionally executes P1/P2 findings regardless of how gated the rest of the batch is, which is the root cause of the net-negative churn this policy exists to stop. **Configurable** via `orchestration.cascade.defer_on_batch_gated` (default `true`; `false` under `policy: all` — forge#2234).
+1. **Generation ≥ 2** (always defer, even for P1/P2, for autonomous mid-run cascade — see scope note below): Finding was spawned by an issue that was itself a review-finding. Check the source issue's labels for `review-finding` — if the source has that label, the new finding is generation 2. Always defer within this Step 4C triage pass. Rationale: gen-2+ cascade is theoretically unbounded — cap it here. **Scope**: this rule caps *autonomous* cascade — findings discovered and re-triaged automatically during an unattended run. It is not a cap on what a human can explicitly request. When an operator directly asks for cascade/review-finding work via `phase-1-resolve.md`'s dedicated `cascade`/`review-findings`/`findings` resolution (with `--include-deferred`/`--allow-gen2`, or the `orchestration.cascade.max_generation` config lever from #2234), those findings enter the DAG through Phase 1 resolution, not through this Step 4C mid-run triage — this rule still defers anything Step 4C itself discovers mid-run, including inside a human-requested gen≥2 batch (see recursion safety below). **Not configurable here** — `orchestration.cascade.max_generation` governs Phase 1 resolve-time admission only (see `phase-1-resolve.md` "Cascade / Review-Finding Resolution"); this Step 4C rule stays an absolute autonomous-cascade cap regardless of policy, including `policy: all`. <!-- Added: forge#2231 -->
 2. **Priority override** (P1 or P2 → always execute): If the finding is labeled P1 or P2, skip all remaining heuristics and execute. Rationale: high-priority findings must never be suppressed by keyword matching.
-3. **Comment/typo heuristic** (P3 and below only): Finding title contains the word "comment" or "typo" (case-insensitive). These are 1-line cosmetic fixes that do not block other work.
-4. **P3 + same-file overlap**: Finding is labeled `P3` AND the file it targets overlaps with ANY file already in the current batch (active or queued in the DAG). Rationale: same-file P3 findings add predecessor edges that serialize agents — one finding per original issue increases wall-clock time with no proportional value.
-5. **Per-batch token budget** (P3 and below only, applied AFTER surface-area batching below — see "Per-batch token budget gate") <!-- Added: forge#1858 -->: Once `BATCH_TOKEN_SPEND` would exceed `TOKEN_BUDGET`, additional P3-and-below units (an unclubbed finding, or an already-clubbed batch issue) defer rather than dispatch. This is NOT part of the per-finding rule 0-4 chain immediately below — it is a quantity gate applied to the POST-clubbing `QUEUED_FINDINGS` list, so a same-run surface-area batch issue (surface-area batching below) is charged once for the whole cluster, not once per member. P1/P2 are NEVER gated by it (they are excluded by rule 2 before reaching this gate, same as they are excluded from rules 3-4).
+3. **Comment/typo heuristic** (P3 and below only): Finding title contains the word "comment" or "typo" (case-insensitive). These are 1-line cosmetic fixes that do not block other work. **Configurable** via `orchestration.cascade.keyword_heuristic` (default `true`; `false` under `policy: all` — forge#2234).
+4. **P3 + same-file overlap**: Finding is labeled `P3` AND the file it targets overlaps with ANY file already in the current batch (active or queued in the DAG). Rationale: same-file P3 findings add predecessor edges that serialize agents — one finding per original issue increases wall-clock time with no proportional value. **Configurable** via `orchestration.cascade.p3_same_file_defer` (default `true`; `false` under `policy: all` — forge#2234).
+5. **Per-batch token budget** (P3 and below only, applied AFTER surface-area batching below — see "Per-batch token budget gate") <!-- Added: forge#1858 -->: Once `BATCH_TOKEN_SPEND` would exceed `TOKEN_BUDGET`, additional P3-and-below units (an unclubbed finding, or an already-clubbed batch issue) defer rather than dispatch. This is NOT part of the per-finding rule 0-4 chain immediately below — it is a quantity gate applied to the POST-clubbing `QUEUED_FINDINGS` list, so a same-run surface-area batch issue (surface-area batching below) is charged once for the whole cluster, not once per member. P1/P2 are NEVER gated by it (they are excluded by rule 2 before reaching this gate, same as they are excluded from rules 3-4). **Configurable** via `orchestration.cascade.token_budget` (default `900000`, deprecated alias `pipeline.token_budget_per_batch`; `unlimited` under `policy: all` — forge#2234). This is a distinct, independent lever from rule 1's generation cap — "admit gen-2, stop at gen-3" (`max_generation: 3`) and "admit cascade until N tokens" (`token_budget: N`) can each be set without the other.
 
 **Defer** (do NOT add to the DAG) if rules 0, 1, 3, 4, or 5 match.
 
@@ -1311,9 +1359,16 @@ for FINDING_NUM in {spawned_finding_numbers}; do
   # Rule 0: Batch fully human-gated — checked FIRST, overrides even the P1/P2 priority
   # override below. BATCH_FULLY_GATED is computed once per completion cycle in Step 4B
   # item 6.7; read it here, do not recompute. <!-- Added: forge#1814 -->
-  if [ "${BATCH_FULLY_GATED:-false}" = "true" ]; then
+  # Gated by CASCADE_DEFER_ON_BATCH_GATED (orchestration.cascade, forge#2234) — "policy:
+  # all" sets this to false so an operator draining a backlog is never idle-gated.
+  if [ "$CASCADE_DEFER_ON_BATCH_GATED" = "true" ] && [ "${BATCH_FULLY_GATED:-false}" = "true" ]; then
     DEFER=true; DEFER_REASON="batch fully human-gated — idle policy"
   # Heuristic 1: Generation check — source issue has review-finding label (always defer, even for P1/P2)
+  # NOT gated by orchestration.cascade.max_generation — this is Step 4C's autonomous
+  # mid-run cascade cap, which stays absolute regardless of config (see forge#2231's
+  # scope note above and phase-1-resolve.md's Cascade / Review-Finding Resolution
+  # section). `orchestration.cascade.max_generation` governs what an explicit human
+  # request admits at Phase 1 resolve time, not what this unattended triage pass defers.
   elif SOURCE_NUM=$(echo "$FINDING_DATA" | jq -r '.body' | grep -oP '(?i)spawned from issue #\K\d+|source issue[: #]+\K\d+' | head -1) && \
        [ -n "$SOURCE_NUM" ] && \
        gh issue view $SOURCE_NUM -R {GH_REPO} --json labels --jq '[.labels[].name]' 2>/dev/null | grep -q "review-finding"; then
@@ -1322,10 +1377,12 @@ for FINDING_NUM in {spawned_finding_numbers}; do
   elif [ "$PRIORITY" = "P1" ] || [ "$PRIORITY" = "P2" ]; then
     DEFER=false
   # Heuristic 2: Comment/typo keyword (only applies to P3 and below)
-  elif echo "$TITLE" | grep -qi "comment\|typo"; then
+  # Gated by CASCADE_KEYWORD_HEURISTIC (orchestration.cascade, forge#2234).
+  elif [ "$CASCADE_KEYWORD_HEURISTIC" = "true" ] && echo "$TITLE" | grep -qi "comment\|typo"; then
     DEFER=true; DEFER_REASON="comment/typo heuristic"
   # Heuristic 3: P3 + same-file overlap
-  elif [ "$PRIORITY" = "P3" ]; then
+  # Gated by CASCADE_P3_SAME_FILE_DEFER (orchestration.cascade, forge#2234).
+  elif [ "$CASCADE_P3_SAME_FILE_DEFER" = "true" ] && [ "$PRIORITY" = "P3" ]; then
     # Extract file target from finding body (look for code block or backtick path)
     FINDING_FILE=$(echo "$FINDING_DATA" | jq -r '.body' | grep -oP '`[^\`]+\.(py|ts|tsx|sh|md)`' | head -1 | tr -d '`')
     if [ -n "$FINDING_FILE" ] && echo "$ALL_BATCH_FILES" | grep -qF "$FINDING_FILE"; then
@@ -1489,7 +1546,9 @@ for FINDING_NUM in "${QUEUED_FINDINGS[@]}"; do
   fi
 
   PROJECTED_TOKEN_SPEND=$((BATCH_TOKEN_SPEND + TOKEN_ESTIMATE_PER_FINDING))
-  if [ "$PROJECTED_TOKEN_SPEND" -gt "$TOKEN_BUDGET" ]; then
+  # TOKEN_BUDGET may be the "unlimited" sentinel (orchestration.cascade.token_budget /
+  # policy: all) — never gate in that case, regardless of projected spend.
+  if [ "$TOKEN_BUDGET" != "unlimited" ] && [ "$PROJECTED_TOKEN_SPEND" -gt "$TOKEN_BUDGET" ]; then
     TOKEN_DEFERRED+=("$FINDING_NUM")
     TOKEN_BUDGET_DEFERRED_THIS_RUN+=("$FINDING_NUM")
     DEFERRED_REASONS[$FINDING_NUM]="token budget exceeded (est. ${TOKEN_ESTIMATE_PER_FINDING} tokens would push batch spend to ${PROJECTED_TOKEN_SPEND} > ceiling ${TOKEN_BUDGET})"
@@ -1809,7 +1868,7 @@ if [ "${#TOKEN_GATED[@]}" -gt 0 ]; then
     [ "$STATE" = "CLOSED" ] && continue   # resolved by another process — drop silently
 
     PROJECTED_SWEEP_SPEND=$((SWEEP_TOKEN_SPEND + TOKEN_ESTIMATE_PER_FINDING))
-    if [ "$PROJECTED_SWEEP_SPEND" -gt "$TOKEN_BUDGET" ]; then
+    if [ "$TOKEN_BUDGET" != "unlimited" ] && [ "$PROJECTED_SWEEP_SPEND" -gt "$TOKEN_BUDGET" ]; then
       SWEEP_STILL_DEFERRED+=($FINDING_NUM)
       echo "Sweep: #${FINDING_NUM} still deferred (token budget — sweep allowance ${TOKEN_BUDGET} would be exceeded at ${PROJECTED_SWEEP_SPEND})"
     else
