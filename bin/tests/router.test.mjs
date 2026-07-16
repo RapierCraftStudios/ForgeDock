@@ -1312,4 +1312,188 @@ describe("update — global npm install self-update (forge#2133)", () => {
       rmSync(shimDir, { recursive: true, force: true });
     }
   });
+
+  // -------------------------------------------------------------------------
+  // Negative attempt-counter clamp (forge#2168)
+  //
+  // Regression covered: `Number.parseInt(x, 10) || 0` only substitutes 0 for
+  // NaN/0/"" — a negative numeric string passes through unclamped and is
+  // truthy, so it survives the `|| 0` fallback. Without an explicit
+  // non-negative floor, a corrupted/negative FORGEDOCK_SELF_UPDATE_ATTEMPT
+  // (e.g. "-3") would let the depth guard's `attempt >= MAX_SELF_UPDATE_ATTEMPTS`
+  // check stay false for several extra re-exec cycles while the value
+  // increments back up through 0 — i.e. several more `npm install -g` calls
+  // than MAX_SELF_UPDATE_ATTEMPTS should ever allow. With the fix
+  // (`Math.max(0, ...)`), attempt=-3 is immediately treated as attempt=0, so
+  // exactly one install happens before the guard trips on the very next call
+  // (env becomes "1", which is >= MAX_SELF_UPDATE_ATTEMPTS=1).
+  //
+  // Windows note (forge#2169): skipped for the same reason as the two tests
+  // above — execFileSync("npm", ...) cannot resolve npm on Windows.
+  // -------------------------------------------------------------------------
+  it("clamps a negative FORGEDOCK_SELF_UPDATE_ATTEMPT to 0 instead of allowing extra re-exec cycles", () => {
+    if (process.platform === "win32") {
+      return;
+    }
+
+    const shimDir = mkdtempSync(join(os.tmpdir(), "fd-npm-neg-shim-"));
+    const globalRoot = join(shimDir, "global-root");
+    const forgeHome = join(globalRoot, "forgedock");
+    const installLog = join(shimDir, "install-log.txt");
+
+    try {
+      mkdirSync(join(forgeHome, "bin"), { recursive: true });
+      cpSync(dirname(CLI), join(forgeHome, "bin"), {
+        recursive: true,
+        filter: (src) => !src.includes("tests"),
+      });
+      mkdirSync(join(forgeHome, "commands"), { recursive: true });
+      writeFileSync(join(forgeHome, "commands", "one.md"), "# /one\n\nTest command\n", "utf-8");
+      // Deliberately stale, and the shim below never bumps it — same "never
+      // converges" setup as the depth-guard test above, so every re-exec
+      // decides a self-update is needed again and the only thing capping
+      // total installs is the attempt-count guard under test here.
+      writeFileSync(join(forgeHome, "package.json"), JSON.stringify({ name: "forgedock", version: "0.0.1" }), "utf-8");
+
+      const npmShimPath = join(shimDir, "npm");
+      writeFileSync(
+        npmShimPath,
+        [
+          "#!/bin/sh",
+          'if [ "$1" = "root" ] && [ "$2" = "-g" ]; then',
+          `  printf '%s\\n' "${globalRoot.replace(/\\/g, "/")}"`,
+          "  exit 0",
+          "fi",
+          'if [ "$1" = "install" ] && [ "$2" = "-g" ]; then',
+          `  printf '%s\\n' "$3" >> "${installLog.replace(/\\/g, "/")}"`,
+          "  exit 0",
+          "fi",
+          "exit 1",
+          "",
+        ].join("\n"),
+        { mode: 0o755 },
+      );
+
+      const home = mkdtempSync(join(os.tmpdir(), "fd-npm-neg-shim-home-"));
+      const res = spawnSync(
+        process.execPath,
+        [join(forgeHome, "bin", "forgedock.mjs"), "update"],
+        {
+          cwd: mkdtempSync(join(os.tmpdir(), "fd-npm-neg-shim-cwd-")),
+          env: {
+            ...process.env,
+            HOME: home,
+            USERPROFILE: home,
+            NO_COLOR: "1",
+            PATH: `${shimDir}:${process.env.PATH}`,
+            // The regression input: a negative starting attempt count.
+            FORGEDOCK_SELF_UPDATE_ATTEMPT: "-3",
+          },
+          encoding: "utf-8",
+          timeout: 30000,
+        },
+      );
+
+      assert.equal(res.status, 0, `update exited non-zero:\n${res.stdout}\n${res.stderr}`);
+      assert.ok(existsSync(installLog), "the fake npm must have been invoked with `install -g` at least once");
+      const attempts = readFileSync(installLog, "utf-8").trim().split("\n").filter(Boolean);
+      // With the clamp fix, attempt=-3 is treated as attempt=0: exactly one
+      // install happens, then the very next re-exec sees attempt=1 (>= MAX)
+      // and stops. Without the fix, the negative value would only climb back
+      // to the cap after several more unclamped increments (-3→-2→-1→0→1),
+      // producing 4 installs instead of 1 — this assertion is the exact
+      // regression guard for forge#2168.
+      assert.equal(attempts.length, 1, `expected exactly 1 install attempt (negative input clamped to 0), got ${attempts.length}:\n${attempts.join("\n")}`);
+    } finally {
+      rmSync(shimDir, { recursive: true, force: true });
+    }
+  });
+
+  // -------------------------------------------------------------------------
+  // Signal-killed re-exec child no longer reported as success (forge#2159)
+  //
+  // Regression covered: `process.exit(result.status ?? 0)` collapses a
+  // signal-killed child (`result.status === null`, `result.signal` set) into
+  // exit code 0, masking the failure. This test replaces the re-exec'd
+  // binary (the file `selfUpdateGlobalInstall()` re-execs via
+  // `spawnSync(process.execPath, [__filename, "update"], ...)`) with a
+  // script that immediately self-terminates via SIGTERM, then asserts the
+  // *outer* `update` process — which is the real, unmodified
+  // `selfUpdateGlobalInstall()` under test — exits non-zero rather than 0.
+  //
+  // Windows note (forge#2169): skipped for the same reason as the tests
+  // above, plus POSIX signal semantics (a process terminating itself via
+  // `process.kill(process.pid, "SIGTERM")` and being observed by the parent
+  // as `signal: "SIGTERM"`) do not hold on Windows.
+  // -------------------------------------------------------------------------
+  it("exits non-zero (not 0) when the re-exec'd self-update child is killed by a signal", () => {
+    if (process.platform === "win32") {
+      return;
+    }
+
+    const shimDir = mkdtempSync(join(os.tmpdir(), "fd-npm-sig-shim-"));
+    const globalRoot = join(shimDir, "global-root");
+    const forgeHome = join(globalRoot, "forgedock");
+    const forgedockBin = join(forgeHome, "bin", "forgedock.mjs");
+
+    try {
+      mkdirSync(join(forgeHome, "bin"), { recursive: true });
+      cpSync(dirname(CLI), join(forgeHome, "bin"), {
+        recursive: true,
+        filter: (src) => !src.includes("tests"),
+      });
+      mkdirSync(join(forgeHome, "commands"), { recursive: true });
+      writeFileSync(join(forgeHome, "commands", "one.md"), "# /one\n\nTest command\n", "utf-8");
+      writeFileSync(join(forgeHome, "package.json"), JSON.stringify({ name: "forgedock", version: "0.0.1" }), "utf-8");
+
+      // Fake `npm`: on `install -g`, overwrite the on-disk forgedock.mjs
+      // (the exact path `selfUpdateGlobalInstall()` re-execs via
+      // `__filename`) with a tiny script that immediately kills itself with
+      // SIGTERM. The outer/parent process is still running the real,
+      // already-loaded forgedock.mjs code in memory — only the file that the
+      // *re-exec'd child* will load from disk is replaced.
+      const npmShimPath = join(shimDir, "npm");
+      writeFileSync(
+        npmShimPath,
+        [
+          "#!/bin/sh",
+          'if [ "$1" = "root" ] && [ "$2" = "-g" ]; then',
+          `  printf '%s\\n' "${globalRoot.replace(/\\/g, "/")}"`,
+          "  exit 0",
+          "fi",
+          'if [ "$1" = "install" ] && [ "$2" = "-g" ]; then',
+          `  printf 'process.kill(process.pid, \\"SIGTERM\\");\\n' > "${forgedockBin.replace(/\\/g, "/")}"`,
+          "  exit 0",
+          "fi",
+          "exit 1",
+          "",
+        ].join("\n"),
+        { mode: 0o755 },
+      );
+
+      const home = mkdtempSync(join(os.tmpdir(), "fd-npm-sig-shim-home-"));
+      const res = spawnSync(
+        process.execPath,
+        [forgedockBin, "update"],
+        {
+          cwd: mkdtempSync(join(os.tmpdir(), "fd-npm-sig-shim-cwd-")),
+          env: {
+            ...process.env,
+            HOME: home,
+            USERPROFILE: home,
+            NO_COLOR: "1",
+            PATH: `${shimDir}:${process.env.PATH}`,
+          },
+          encoding: "utf-8",
+          timeout: 30000,
+        },
+      );
+
+      // Core regression assertion: a signal-killed re-exec child must NOT be
+      // reported as a successful (exit 0) update.
+      assert.notEqual(res.status, 0, `expected non-zero exit for a signal-killed re-exec child, got status=${res.status} signal=${res.signal}\n${res.stdout}\n${res.stderr}`);
+    } finally {
+      rmSync(shimDir, { recursive: true, force: true });
+    }
+  });
 });
