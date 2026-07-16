@@ -555,15 +555,35 @@ export function runCliBackend({
     }
 
     const output = (stdout + stderr).trim();
-    if (output) logger.log(output);
 
     if (result.status !== 0) {
+      // Non-zero exit: always emit a self-contained diagnostic, regardless of
+      // whether stdout/stderr captured anything. Previously this branch threw
+      // a self-referential message that unconditionally pointed to
+      // previously-logged output, even when `output` was empty (the
+      // success-path log call above was gated on `if (output)` and never
+      // ran) -- leaving the operator with nothing to consult. See issue
+      // #2258 / parent #2244.
+      const hadOutput = output.length > 0;
+      const signalPart = result.signal ? `, signal ${result.signal}` : "";
+      const argvSummary = cliArgs.join(" ");
+      const diagnostic = hadOutput
+        ? `Captured output (stdout+stderr):\n${output}`
+        : "No output was captured on stdout or stderr.";
+      logger.log(diagnostic);
+
       const err = new Error(
-        `claude CLI exited with status ${result.status ?? "?"}. See output above for details.`,
+        `claude CLI exited with status ${result.status ?? "?"}${signalPart}. ` +
+          (hadOutput
+            ? "See captured output above."
+            : "No output was captured (stdout and stderr were both empty).") +
+          ` Invocation: ${bin} ${argvSummary} (cwd: ${cwd})`,
       );
       err.code = "CLI_BACKEND_FAILED";
       throw err;
     }
+
+    if (output) logger.log(output);
 
     logger.log(
       renderSummaryCard({

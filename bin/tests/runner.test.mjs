@@ -1576,6 +1576,88 @@ describe("runCliBackend spawnFn seam (issue #2033)", () => {
     );
   });
 
+  // Issue #2258 (parent: #2244) — a non-zero exit with fully empty
+  // stdout/stderr previously threw a self-referential "See output above for
+  // details" message even though nothing was ever logged, making the failure
+  // structurally undiagnosable. This asserts the fixed message is
+  // self-contained: it never claims output exists when it doesn't, and it
+  // inlines exit status, signal, and invocation (argv/cwd) context.
+  it("never claims 'output above' and inlines status/signal/argv/cwd when stdout AND stderr are both empty", () => {
+    const loggedLines = [];
+    const spawnFn = () => ({
+      status: 1,
+      signal: null,
+      stdout: "",
+      stderr: "",
+      error: undefined,
+    });
+
+    let thrown;
+    try {
+      runCliBackend({
+        spec: loadCommandSpec(COMMANDS_DIR, "work-on"),
+        userMessage: "Execute: /work-on 2258",
+        args: ["2258"],
+        cwd: TMP,
+        logger: { log: (line) => loggedLines.push(line) },
+        bin: "claude",
+        spawnFn,
+      });
+    } catch (err) {
+      thrown = err;
+    }
+
+    assert.ok(thrown, "runCliBackend must throw on non-zero exit");
+    assert.equal(thrown.code, "CLI_BACKEND_FAILED");
+    assert.match(thrown.message, /exited with status 1/);
+    assert.ok(
+      !thrown.message.includes("See output above for details"),
+      `message must not claim output exists when none was captured: ${thrown.message}`,
+    );
+    assert.match(
+      thrown.message,
+      /no output was captured/i,
+      "message must explicitly state that no output was captured",
+    );
+    assert.match(
+      thrown.message,
+      /claude --print/,
+      "message must inline the argv used for the failed invocation",
+    );
+    assert.ok(
+      thrown.message.includes(TMP),
+      "message must inline the cwd used for the failed invocation",
+    );
+    assert.ok(
+      loggedLines.some((line) => /no output was captured/i.test(line)),
+      "an explicit 'no output captured' diagnostic must be logged even when nothing was printed",
+    );
+  });
+
+  it("surfaces result.signal in the thrown message when the child was killed by a signal", () => {
+    const spawnFn = () => ({
+      status: null,
+      signal: "SIGKILL",
+      stdout: "",
+      stderr: "",
+      error: undefined,
+    });
+
+    assert.throws(
+      () =>
+        runCliBackend({
+          spec: loadCommandSpec(COMMANDS_DIR, "work-on"),
+          userMessage: "Execute: /work-on 2258",
+          args: ["2258"],
+          cwd: TMP,
+          logger: { log: () => {} },
+          bin: "claude",
+          spawnFn,
+        }),
+      (err) => err.code === "CLI_BACKEND_FAILED" && /signal SIGKILL/.test(err.message),
+    );
+  });
+
   it("defaults to the real spawnSync when spawnFn is omitted (backward compatibility)", () => {
     // No behavior assertion beyond "does not throw a TypeError from a missing
     // spawnFn" — this just confirms the default parameter wiring is correct.
