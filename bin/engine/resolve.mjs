@@ -189,15 +189,17 @@ export function shouldReResolve(classified, config = {}, roundsSoFar = 0) {
   }
 
   const enabledRaw = config.enabled;
-  // The `"off"` string branch is a defensive/API-level allowance for direct
-  // JS callers (e.g. this file's own unit tests) — it is NOT currently
-  // reachable via the real `yq`-based bash mirror in
-  // `phase-4-execution.md` Step 4B.6, which reads
-  // `orchestration.reresolve.enabled` and passes it through
-  // `process.argv[3] === "false" ? false : process.argv[3]`: the only
-  // string value that CLI path can ever produce for a disabled config is
-  // boolean-string `"false"`, never `"off"`. Do not assume this branch is
-  // exercised end-to-end via the documented CLI path.
+  // The `"off"` string branch IS reachable via the real `yq`-based bash
+  // mirror in `phase-4-execution.md` Step 4B.6 — not just from direct JS
+  // callers (e.g. this file's own unit tests). `yq`'s default core schema
+  // only coerces the literal scalars `true`/`false` to booleans; an
+  // unquoted `enabled: off` in forge.yaml is parsed as the plain string
+  // `"off"` (verified: `yq '.a.enabled' <<< 'a: {enabled: off}'` prints
+  // `off`, `... | type` prints `!!str`), which then survives
+  // `process.argv[3] === "false" ? false : process.argv[3]` unchanged and
+  // reaches this branch as the string `"off"`. Only `enabled: false`
+  // (unquoted) is coerced by `yq` to boolean `false` before this code
+  // runs. Do not remove this branch as unreachable dead code.
   const disabled =
     enabledRaw === false || (typeof enabledRaw === "string" && enabledRaw.trim().toLowerCase() === "off");
   if (disabled) {
