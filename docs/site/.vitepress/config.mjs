@@ -69,6 +69,14 @@ export default defineConfig({
       head.push([
         'script',
         { type: 'application/ld+json' },
+        // Defense-in-depth: JSON.stringify does not escape `<`, so a `</script>` or
+        // `<!--` substring embedded in any interpolated value could prematurely close
+        // this inline <script> tag. The values below are static repo-controlled
+        // strings today, but escaping `<` -> `<` protects against this becoming
+        // exploitable if these values are ever sourced from something less trusted
+        // (e.g. per-page frontmatter). < is valid inside a JSON string and is
+        // parsed back to `<` identically by JSON.parse / schema.org consumers.
+        // (Ref: forge#2140 — review finding on PR #2139)
         JSON.stringify({
           '@context': 'https://schema.org',
           '@type': 'SoftwareApplication',
@@ -82,7 +90,7 @@ export default defineConfig({
             price: '0',
             priceCurrency: 'USD',
           },
-        }),
+        }).replace(/</g, '\\u003c'),
       ])
     }
 
