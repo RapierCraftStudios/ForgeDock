@@ -1526,12 +1526,24 @@ const MAX_SELF_UPDATE_ATTEMPTS = 1;
  * (`; | & $ \` ( ) < > " ' \n` etc.) that `shell: true` would otherwise
  * hand straight to cmd.exe/`/bin/sh`.
  *
+ * The regex above is fully anchored (`^...$`) but its quantifiers (`\d+`,
+ * `[0-9A-Za-z.-]+`) are unbounded, so shape validity alone does not bound
+ * string *length* — a pathologically long value could still match. This
+ * is defense-in-depth only (see forge#2195): the character-class
+ * restriction already rules out shell metacharacters at any length, and
+ * `fetchLatestVersion()`'s 65536-byte HTTP response cap already bounds
+ * `version` in practice. The explicit length cap below rejects oversized
+ * input before the regex ever runs, closing the gap outright rather than
+ * relying on an upstream cap this function has no visibility into.
+ *
  * @param {string} version
  * @returns {boolean}
  */
 function isValidSemverShape(version) {
+  const MAX_VERSION_LENGTH = 100;
   return (
     typeof version === "string" &&
+    version.length <= MAX_VERSION_LENGTH &&
     /^\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?$/.test(version)
   );
 }
