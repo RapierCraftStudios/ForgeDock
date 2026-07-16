@@ -29,6 +29,7 @@ export { parse } from './parse.js';
 export { validate } from './validate.js';
 export { emit, emitPartial, isKnownType } from './emit.js';
 export { RESERVED_TYPES, RESERVED_TYPE_NAMES, Category, SentinelState } from './types.js';
+export { canonicalJson, toBase64url, encodeCard, decodeCardInlineValue } from './card.js';
 
 /**
  * @typedef {Object} ParsedAnnotation

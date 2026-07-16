@@ -8,6 +8,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 See `README.md` for the versioning policy that governs how schema changes map
 to version bumps.
 
+## [1.2.0] - 2026-07-16
+
+Additive coverage/capability change only — no breaking changes to any
+existing reserved type or public export. Consumers already on 1.1.0 remain
+fully compatible.
+
+### Added
+
+- CARD codec (`canonicalJson`, `toBase64url`, `encodeCard`,
+  `decodeCardInlineValue`) extracted from `src/cli.js` into a standalone
+  `src/card.js` module and exported from the package's public API
+  (`src/index.js`), so library consumers no longer need to reach into the
+  CLI to encode/decode CARD's Base64url machine-surface form. (forge#2121)
+- `validate()` now performs a CARD-specific integrity check: an inline value
+  that fails to decode, or whose sha8 integrity prefix does not match, is now
+  reported as invalid (previously any non-empty inline value passed). This
+  only tightens acceptance of already-out-of-spec (corrupted/malformed)
+  annotations — no well-formed CARD annotation is affected. (forge#2121)
+- 4 new conformance fixtures under `fixtures/card-*.json`: a valid card, a
+  valid card with a unicode payload, a card with a tampered sha8 prefix, and
+  a card with a malformed Base64url segment. (forge#2121)
+- `test/card.test.mjs` — round-trip property tests for the CARD codec
+  covering unicode payloads, arrays/nested objects, and payloads whose string
+  values contain literal HTML-comment-delimiter text (`-->`, `<!--`),
+  verifying the Base64url encoding's structural safety guarantee. (forge#2121)
+
 ## [1.1.0] - 2026-07-16
 
 Additive schema changes only — no breaking changes to any existing reserved
@@ -45,5 +71,6 @@ Protocol, covering the following reserved types:
 Also included: a conformance test suite (`fixtures/` + `src/cli.js`) and an
 MIT license for the reference implementation.
 
+[1.2.0]: https://github.com/RapierCraftStudios/ForgeDock/tree/main/packages/protocol
 [1.1.0]: https://github.com/RapierCraftStudios/ForgeDock/tree/main/packages/protocol
 [1.0.0]: https://github.com/RapierCraftStudios/ForgeDock/tree/main/packages/protocol
