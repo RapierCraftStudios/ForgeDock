@@ -72,17 +72,24 @@ die() {
   local message="$2"
   local ts_val
   ts_val=$(ts)
-  # Escape double quotes in message for JSON embedding
-  message="${message//\"/\\\"}"
+  # Route through json_str for full JSON-string escaping (backslash, quote, and
+  # control characters) — die() is fed raw multi-line `gh` CLI stderr, which may
+  # contain backslashes and newlines that a quote-only escape would not handle.
+  message=$(json_str "$message")
   emit "{\"event\":\"error\",\"code\":\"${code}\",\"message\":\"${message}\",\"ts\":\"${ts_val}\"}"
   exit 1
 }
 
-# JSON-escape a string (double-quote characters only — sufficient for ASCII label/branch values)
+# JSON-escape a string: backslash, double-quote, and control characters (\n, \r, \t).
+# Order matters — backslash escaping runs first so a literal backslash becomes \\
+# before quote/control-character passes run, avoiding double-escaping ambiguity.
 json_str() {
   local s="$1"
   s="${s//\\/\\\\}"
   s="${s//\"/\\\"}"
+  s="${s//$'\n'/\\n}"
+  s="${s//$'\r'/\\r}"
+  s="${s//$'\t'/\\t}"
   printf '%s' "$s"
 }
 
