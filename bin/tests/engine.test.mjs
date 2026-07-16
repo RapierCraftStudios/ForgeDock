@@ -930,3 +930,150 @@ describe("runIssue", () => {
       "a **Branch** field in a comment lacking FORGE:BUILDER:COMPLETE must never be selected, even if posted later");
   });
 });
+
+describe("runIssue — forge#2239: in-flight lease", () => {
+  it("claims a real (non-null) lease before the first phase runs, not after PHASE_COMMIT", async () => {
+    const { w, io } = fakeWorld();
+    const bodiesAtRunnerCall = [];
+    const origGh = io.gh;
+    io.gh = async (args) => {
+      const out = await origGh(args);
+      return out;
+    };
+    const runner = async ({ commandName }) => {
+      // Snapshot GitHub body the instant the FIRST phase's runner is invoked —
+      // before it does anything. If the lease is only claimed post-commit
+      // (the pre-fix bug), this snapshot would show lease: null.
+      if (commandName === "work-on/investigate") bodiesAtRunnerCall.push(w.body);
+      w.markers += " INVESTIGATION:COMPLETE";
+      return { status: "complete" };
+    };
+
+    await runIssue({ issue: 42, dir, agentId: "a1", lane: "staging",
+      io, runner, now: () => 1000, maxAttempts: 1 });
+
+    assert.equal(bodiesAtRunnerCall.length, 1);
+    const { parseState } = await import("../engine/state.mjs");
+    const snapshot = parseState(bodiesAtRunnerCall[0]);
+    assert.ok(snapshot, "a FORGE:STATE block must already be published before the first phase's runner is invoked");
+    assert.ok(snapshot.lease, "lease must be non-null before the first phase runs (forge#2239)");
+    assert.equal(snapshot.lease.by, "a1");
+    assert.ok(snapshot.lease.until > 1000, "lease must not already be expired at claim time");
+  });
+
+  it("claims a lease for the previously-unhandled 'local' reconcile action (local log ahead, no remote state)", async () => {
+    // Regression for the widest gap found during investigation: when reconcileState
+    // returns action:"local" (local run-log present, no remote FORGE:STATE at all),
+    // the pre-fix code wrote NOTHING to GitHub before running phases — not even a
+    // null lease. Confirm the post-fix code now claims a real lease in this path too.
+    const { w, io } = fakeWorld();
+    w.body = ""; // no remote FORGE:STATE block at all
+    const { appendEvent } = await import("../engine/runlog.mjs");
+    appendEvent(dir, 42, { event: "RUN_START", issue: 42, run: "r_42_staging", lane: "staging" });
+
+    let sawLeaseBeforeRunnerCall = null;
+    const runner = async ({ commandName }) => {
+      if (commandName === "work-on/investigate") {
+        const { parseState } = await import("../engine/state.mjs");
+        sawLeaseBeforeRunnerCall = parseState(w.body)?.lease ?? null;
+      }
+      w.markers += " INVESTIGATION:COMPLETE";
+      return { status: "complete" };
+    };
+
+    const res = await runIssue({ issue: 42, dir, agentId: "a1", lane: "staging",
+      io, runner, now: () => 1000, maxAttempts: 1 });
+
+    assert.notEqual(res.terminalReason, "deferred");
+    assert.ok(sawLeaseBeforeRunnerCall, "the 'local' resume path must also claim a lease before the first phase runs");
+    assert.equal(sawLeaseBeforeRunnerCall.by, "a1");
+  });
+
+  it("renews the lease while a single phase's runner is still in flight (outlives the TTL)", async () => {
+    const { w, io } = fakeWorld();
+    const writeStateBodies = [];
+    const origGh = io.gh;
+    io.gh = async (args) => {
+      const out = await origGh(args);
+      const i = args.indexOf("--body");
+      if (i >= 0) writeStateBodies.push(args[i + 1]);
+      return out;
+    };
+
+    // Tiny TTL/renew-interval so a short real-time delay inside the runner
+    // reliably outlives at least one renewal cycle, without waiting on the
+    // real 10-minute production default.
+    const LEASE_TTL_MS = 30;
+    const LEASE_RENEW_INTERVAL_MS = 10;
+
+    const runner = async ({ commandName }) => {
+      if (commandName === "work-on/investigate") {
+        // Outlive several renewal cycles.
+        await new Promise((resolve) => setTimeout(resolve, 80));
+      }
+      w.markers += " INVESTIGATION:COMPLETE";
+      return { status: "complete" };
+    };
+
+    await runIssue({ issue: 42, dir, agentId: "a1", lane: "staging",
+      io, runner, now: () => Date.now(), maxAttempts: 1,
+      leaseTtlMs: LEASE_TTL_MS, leaseRenewIntervalMs: LEASE_RENEW_INTERVAL_MS });
+
+    const { parseState } = await import("../engine/state.mjs");
+    const leaseStates = writeStateBodies.map((b) => parseState(b)?.lease).filter(Boolean);
+    // At least: the pre-loop claim + at least one mid-phase renewal while the
+    // runner was still awaiting inside its artificial delay.
+    assert.ok(leaseStates.length >= 2,
+      `expected at least 2 lease-bearing writes (claim + renewal), got ${leaseStates.length}`);
+  });
+
+  it("no regression: terminate() still clears the lease to null on a terminal state", async () => {
+    const { w, io } = fakeWorld();
+    const script = {
+      "work-on/investigate": () => { w.markers += " INVESTIGATION:INVALID"; },
+    };
+    const runner = async ({ commandName }) => { script[commandName]?.(); return { status: "complete" }; };
+
+    const res = await runIssue({ issue: 42, dir, agentId: "a1", lane: "staging",
+      io, runner, now: () => 1000, maxAttempts: 1 });
+
+    assert.equal(res.terminalReason, "invalid");
+    const { parseState } = await import("../engine/state.mjs");
+    const finalState = parseState(w.body);
+    assert.equal(finalState.lease, null, "terminal states must still publish lease: null (no regression)");
+  });
+
+  it("a second concurrent run-issue is deferred by the now-real (non-null) lease claimed by the first run", async () => {
+    // End-to-end proof that the concurrency guard (bin/engine.mjs I3 check) is
+    // actually reachable now: run agent "a1" far enough to claim a lease (but
+    // not finish), then have agent "a2" attempt to start against the same
+    // GitHub state and confirm it defers instead of racing in.
+    const { w, io } = fakeWorld();
+    let leaseSnapshotAfterA1Start = null;
+    const runnerA1 = async ({ commandName }) => {
+      if (commandName === "work-on/investigate") {
+        const { parseState } = await import("../engine/state.mjs");
+        leaseSnapshotAfterA1Start = parseState(w.body)?.lease ?? null;
+      }
+      // Never resolves the investigate phase — simulates a run that is still
+      // genuinely in flight when a2 attempts to start.
+      return new Promise(() => {});
+    };
+
+    // Fire a1 but don't await it to completion (it never resolves) — just
+    // enough ticks for it to have claimed the lease and be "running".
+    runIssue({ issue: 42, dir, agentId: "a1", lane: "staging",
+      io, runner: runnerA1, now: () => Date.now(), maxAttempts: 1 });
+    // Yield a couple of microtask/timer turns so a1's pre-loop lease claim lands.
+    await new Promise((resolve) => setTimeout(resolve, 20));
+
+    assert.ok(leaseSnapshotAfterA1Start, "a1 must have claimed a lease before its phase runner was invoked");
+
+    const runnerA2 = async () => { throw new Error("a2's runner must never be called while a1 holds the lease"); };
+    const res2 = await runIssue({ issue: 42, dir: mkdtempSync(join(tmpdir(), "fd-engine-a2-")), agentId: "a2", lane: "staging",
+      io, runner: runnerA2, now: () => Date.now(), maxAttempts: 1 });
+
+    assert.equal(res2.terminalReason, "deferred");
+    assert.ok(res2.detail.includes("a1"));
+  });
+});

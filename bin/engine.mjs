@@ -14,6 +14,12 @@ import { VALID_BACKENDS } from "./runner.mjs";
 // diagnostics without duplicating the retry budget constant.
 export const DEFAULT_MAX_ATTEMPTS = 3;
 
+// forge#2239: lease TTL and renewal-interval defaults. Exported/overridable
+// (mirrors DEFAULT_MAX_ATTEMPTS) so tests can exercise "phase outlives the
+// TTL, lease gets renewed" without waiting on real 10-minute wall-clock time.
+export const DEFAULT_LEASE_TTL_MS = 600000;
+export const DEFAULT_LEASE_RENEW_INTERVAL_MS = 240000;
+
 /**
  * @param {object} opts
  * @param {string} [opts.backend] - "cli" | "api" | "auto" (forge#2028). Forwarded
@@ -23,6 +29,11 @@ export const DEFAULT_MAX_ATTEMPTS = 3;
  * @param {string} [opts.model] - Model id (forge#2028). Forwarded to every phase's
  *   `runner()` call when supplied; only applies on the "api" backend. Omit to keep
  *   runner.mjs's default (`FORGEDOCK_MODEL` env or its built-in default).
+ * @param {number} [opts.leaseTtlMs] - forge#2239: how long a claimed lease is
+ *   valid for. Defaults to DEFAULT_LEASE_TTL_MS. Overridable for tests.
+ * @param {number} [opts.leaseRenewIntervalMs] - forge#2239: how often the lease
+ *   is re-written while an unsatisfied phase's runner is executing. Defaults to
+ *   DEFAULT_LEASE_RENEW_INTERVAL_MS. Overridable for tests.
  */
 export async function runIssue(opts) {
   const { issue, dir, agentId, lane = "staging", io, runner,
@@ -32,7 +43,9 @@ export async function runIssue(opts) {
           // call (forge#2028 / MAT-3). Left undefined by default so existing
           // callers keep runner.mjs's own "auto" ladder default unchanged —
           // this is purely additive pass-through, not a new default.
-          backend, model } = opts;
+          backend, model,
+          leaseTtlMs = DEFAULT_LEASE_TTL_MS,
+          leaseRenewIntervalMs = DEFAULT_LEASE_RENEW_INTERVAL_MS } = opts;
 
   // forge#2054: validate `backend` before anything else — before state is
   // read/written and before the phase/retry loop begins below. An invalid
@@ -72,9 +85,6 @@ export async function runIssue(opts) {
   if (!state) {
     state = freshState(issue, lane);
     appendEvent(dir, issue, { event: "RUN_START", issue, run: state.run, lane });
-    await projector.writeState(issue, state);
-  } else if (action === "remirror") {
-    await projector.writeState(issue, state);
   } else if (action === "hydrate") {
     // GitHub is ahead of (or the only source of) local state. Rebuild the
     // local run-log to match the remote compact index so downstream
@@ -83,8 +93,20 @@ export async function runIssue(opts) {
     // and regress committed/issue/v (C2).
     rewriteLog(dir, issue, eventsFromIndex(state));
     state = deriveState(readLog(dir, issue));
-    await projector.writeState(issue, state);
   }
+  // forge#2239: claim the lease unconditionally here — before the phase loop
+  // starts, for EVERY reconcile action ("fresh", "remirror", "hydrate", and
+  // "local"). Previously only "fresh"/"remirror"/"hydrate" wrote any state at
+  // all at this point, and none of them claimed a real (non-null) lease — the
+  // lease was only ever written retroactively after a phase's PHASE_COMMIT
+  // (see the write inside the loop below), leaving the entire first phase
+  // (and, for the "local" action, every phase before the first commit)
+  // publishing lease:null. That is indistinguishable from a dead run to both
+  // the I3 concurrency guard above and the stall-recovery scan in
+  // commands/orchestrate/config.md. This write MUST stay after the I3 guard
+  // check above (commit 541a3e5 fixed the reverse ordering as a real bug —
+  // do not reintroduce it).
+  await projector.writeState(issue, { ...state, lease: { by: agentId, until: now() + leaseTtlMs } });
 
   // 2. Drive phases until terminal.
   //
@@ -111,6 +133,25 @@ export async function runIssue(opts) {
       outcome = { status: "committed", outputs: reconciled.outputs || {} };
     } else {
       if (reconciled.outputs?.pr) state.pr = reconciled.outputs.pr;
+      // forge#2239: renew the lease immediately before running this phase's
+      // runner, then keep renewing it on a heartbeat for as long as the
+      // runner is in flight. A single phase can legitimately run longer than
+      // leaseTtlMs — without renewal, a healthy, still-running phase would
+      // eventually publish an *expired* (not just null) lease and get reaped
+      // by stall recovery even though the run is fine. The interval is
+      // `.unref()`'d so it can never keep the process alive on its own, and
+      // is always cleared in `finally` so it cannot outlive this phase's
+      // execution — covers the committed path, the blocked path, and the
+      // engine-error fail-fast throw caught just below.
+      await projector.writeState(issue, { ...state, lease: { by: agentId, until: now() + leaseTtlMs } });
+      const renewLease = () => {
+        projector.writeState(issue, { ...state, lease: { by: agentId, until: now() + leaseTtlMs } }).catch(() => {
+          // Best-effort: a transient renewal failure must not crash the run.
+          // The next scheduled renewal (or the post-commit write) will retry.
+        });
+      };
+      const renewTimer = setInterval(renewLease, leaseRenewIntervalMs);
+      if (typeof renewTimer.unref === "function") renewTimer.unref();
       try {
         outcome = await runPhaseWithRetry(phase, state, { io, runner, dir, issue, commandsDir, maxAttempts, backend, model });
       } catch (e) {
@@ -131,6 +172,8 @@ export async function runIssue(opts) {
           return await terminate(state, "engine-error", `phase ${phase.id}: ${e.code} - ${e.message}`);
         }
         throw e;
+      } finally {
+        clearInterval(renewTimer);
       }
     }
 
@@ -140,7 +183,7 @@ export async function runIssue(opts) {
     appendEvent(dir, issue, { event: "PHASE_COMMIT", phase: phase.id, outputs: outcome.outputs || {} });
     state = deriveState(readLog(dir, issue));
     if (outcome.terminalReason) state.terminalReason = outcome.terminalReason;
-    await projector.writeState(issue, { ...state, lease: { by: agentId, until: now() + 600000 } });
+    await projector.writeState(issue, { ...state, lease: { by: agentId, until: now() + leaseTtlMs } });
 
     if (outcome.terminalReason && TERMINAL_REASONS.includes(outcome.terminalReason))
       return await terminate(state, outcome.terminalReason);
