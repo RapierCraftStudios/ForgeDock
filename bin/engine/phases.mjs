@@ -13,20 +13,54 @@ async function issueMarkers(issue, io) {
   return out || "";
 }
 /**
- * Count commits on branch ahead of the lane base. On the first build the
+ * Count commits on `branch` ahead of `lane`'s base. On the first build the
  * branch does not exist yet, so real git rejects the ref range — swallow
  * that (and any other git failure) as "0 ahead" rather than letting it
  * propagate and crash runIssue (C1).
+ *
+ * Takes explicit `lane`/`branch` args (rather than reading them off `state`)
+ * so every call site is forced to resolve the branch it means to check —
+ * see `resolveBranch()` below (forge#2174: the previous `state.branch`-only
+ * signature let the build phase evaluate this against a guessed branch name
+ * that never matched the branch the builder actually created).
  */
-async function commitsAhead(state, io) {
+async function commitsAhead(lane, branch, io) {
   try {
-    const n = await io.git(["rev-list", "--count", `origin/${state.lane}..${state.branch}`]);
+    const n = await io.git(["rev-list", "--count", `origin/${lane}..${branch}`]);
     return parseInt(String(n).trim(), 10) || 0;
   } catch {
     return 0;
   }
 }
 function has(blob, marker) { return blob.includes(marker); }
+
+/**
+ * Parse the real branch name out of the `FORGE:BUILDER` comment's
+ * `**Branch**: \`{BRANCH}\`` field (see `commands/work-on/build/implement.md`
+ * Phase I6 — this is the exact format the builder posts). Ground truth for
+ * "what branch did the builder actually create" — the engine has no other
+ * reliable source, since the branch name is slug-derived from the issue
+ * title and cannot be guessed or precomputed (forge#2174).
+ *
+ * Returns the LAST match so a resumed/retried build's most recent comment
+ * wins over any stale attempt.
+ */
+function parseBranchFromMarkers(blob) {
+  const re = /\*\*Branch\*\*:\s*`([^`]+)`/g;
+  let match, last = null;
+  while ((match = re.exec(blob)) !== null) last = match[1];
+  return last;
+}
+
+/**
+ * Resolve the branch to evaluate the build phase against: ground truth from
+ * the FORGE:BUILDER comment if present, else whatever `state.branch` already
+ * holds (e.g. a real branch carried forward from a prior PHASE_COMMIT — see
+ * `runlog.mjs:deriveState`). Never invents a value.
+ */
+function resolveBranch(state, markersBlob) {
+  return parseBranchFromMarkers(markersBlob) || state.branch || null;
+}
 
 /** @type {Phase[]} */
 export const PHASES = [
@@ -85,19 +119,26 @@ export const PHASES = [
     command: "work-on/build",
     entryCondition: (s) => s.committed.includes("architect"),
     async reconcile(state, io) {
-      // Idempotent resume: branch already ahead of base → treat as done, skip the LLM.
-      if (state.branch && (await commitsAhead(state, io)) > 0) {
-        const m = await issueMarkers(state.issue, io);
-        if (has(m, "FORGE:BUILDER:COMPLETE")) return { satisfied: true, outputs: { branch: state.branch } };
+      // Idempotent resume: resolve the real branch from ground truth (FORGE:BUILDER
+      // comment) rather than trusting a possibly-stale/absent state.branch, then
+      // check it's already ahead of base → treat as done, skip the LLM (forge#2174).
+      const m = await issueMarkers(state.issue, io);
+      const branch = resolveBranch(state, m);
+      if (branch && has(m, "FORGE:BUILDER:COMPLETE") && (await commitsAhead(state.lane, branch, io)) > 0) {
+        return { satisfied: true, outputs: { branch } };
       }
       return { satisfied: false };
     },
     async detectOutcome(state, io) {
       const m = await issueMarkers(state.issue, io);
       const complete = has(m, "FORGE:BUILDER:COMPLETE");           // #1305: require :COMPLETE …
-      const ahead = state.branch ? await commitsAhead(state, io) : 0; // … AND real commits
-      if (complete && ahead > 0) return { status: "committed", outputs: { branch: state.branch } };
-      return { status: "failed", detail: `builder complete=${complete} commitsAhead=${ahead}` };
+      // Resolve the branch the builder actually created from the FORGE:BUILDER
+      // comment (ground truth) instead of a guessed/self-referential state.branch
+      // — see resolveBranch()/parseBranchFromMarkers() above (forge#2174).
+      const branch = resolveBranch(state, m);
+      const ahead = branch ? await commitsAhead(state.lane, branch, io) : 0; // … AND real commits
+      if (complete && ahead > 0) return { status: "committed", outputs: { branch } };
+      return { status: "failed", detail: `builder complete=${complete} commitsAhead=${ahead} branch=${branch || "unresolved"}` };
     },
   },
   {

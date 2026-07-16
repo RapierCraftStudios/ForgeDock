@@ -85,11 +85,17 @@ export async function runIssue(opts) {
   }
 
   // 2. Drive phases until terminal.
+  //
+  // Note: the build phase's branch is NOT precomputed here. The real branch
+  // name is slug-derived from the issue title by `commands/work-on/build.md`
+  // (Phase B1A) and cannot be guessed ahead of time — a prior guessed default
+  // (`fix/pipeline-{issue}`) was never communicated to the builder and never
+  // matched the branch it actually created, so `commitsAhead()` always ran
+  // against a nonexistent ref and silently evaluated to 0 (forge#2174). The
+  // build phase's `reconcile`/`detectOutcome` (bin/engine/phases.mjs) resolve
+  // the real branch from the `FORGE:BUILDER` comment instead.
   let phase;
   while ((phase = pickPhase(state))) {
-    // Every issue's build works on a deterministic branch; set it before build runs.
-    if (phase.id === "build" && !state.branch) state.branch = `fix/pipeline-${issue}`;
-
     let reconciled;
     try {
       reconciled = phase.reconcile ? await phase.reconcile(state, io) : { satisfied: false };
