@@ -90,10 +90,11 @@ For each hit:
 
 ```bash
 # Added lines in the pre-supplied diff that introduce/alter gh, git-destructive, delete, or network commands
-echo "[DOMAIN_DIFF_SLICE]" | grep -E '^\+' | grep -E '\bgh \w|\bgit (push|reset|clean|rm)|\brm -rf|\bcurl\b|\bwget\b' | grep -v '^\+\+\+' # <!-- allowlist:check-command-side-effects --> detection pattern, not an invocation: this reads a diff on stdin and performs no side effect
+echo "[DOMAIN_DIFF_SLICE]" | grep -E '^\+' | grep -E '\bgh \w|\bgit (push|reset|clean|rm)|\brm -rf|\bcurl\b|\bwget\b' | grep -v '^\+\+\+'
 ```
 
-Attribute each hit to its `commands/*.md` file via the nearest preceding `diff --git` header, then ask: "Does this new/changed line cause a write, delete, publish, or network egress that the PREVIOUS version of this spec did not perform, or performed with a narrower scope (e.g. `gist create` without `--public` → with `--public`; `git push` → `git push --force`)?" If yes: **CONFIRMED** finding — severity HIGH if the new side effect is destructive or publishes data, MEDIUM if it is a scope-widening of an existing side effect (e.g. a new label added to an existing bulk-edit loop).
+Attribute each hit to its `commands/*.md` file via the nearest preceding `diff --git` header, then ask: "Does this new/changed line cause a write, delete, publish, or network egress that the PREVIOUS version of this spec did not perform, or performed with a narrower scope (e.g. `gist create` without `--public` → with `--public`; `git push` → `git push --force`)?" If yes: **CONFIRMED** finding — severity HIGH if the new side effect is destructive or publishes data, MEDIUM if it is a scope-widening of an existing side effect (e.g. a new label added to an existing bulk-edit loop). <!-- allowlist:check-command-side-effects — the `git push` above is a cited example of a scope-widening diff this auditor looks for, not a command this spec runs -->
+
 
 **Do NOT treat `commands/*.md` diffs as "just docs".** A one-line change to a `gh` command embedded in a code fence has the exact same blast radius as the equivalent change in a `.py`/`.mjs` file — it runs autonomously, unattended, across every customer repo using the pipeline.
 
