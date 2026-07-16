@@ -12,6 +12,7 @@
  */
 
 import { RESERVED_TYPES, RESERVED_TYPE_NAMES } from './types.js';
+import { escapeHtmlCommentDelimiters } from './html-comment-escape.js';
 
 // A folded field/inline value that is itself (whole, trimmed) shaped like a FORGE
 // opening tag or a generic sentinel line has no legitimate reason to look that way —
@@ -40,7 +41,9 @@ const NEWLINE_RE = /\r\n|\r|\n/g;
  *      subsequent lines including the completion sentinel, and treats a literal
  *      `-->` as ending the enclosing comment early, leaking the remainder as
  *      visible rendered text. Both directions of the delimiter pair must be
- *      escaped. (forge#1594, forge#1638)
+ *      escaped. (forge#1594, forge#1638) Delegated to the shared
+ *      `escapeHtmlCommentDelimiters()` helper (forge#2225) so this scheme has a
+ *      single implementation shared with `bin/engine/state.mjs`.
  *
  * As defense in depth, if a value still folds down to a line that is itself a
  * bare FORGE tag/sentinel shape, emit() rejects it outright rather than silently
@@ -56,27 +59,7 @@ function sanitizeFieldValue(rawValue) {
       `emit(): field value resolves to a bare FORGE tag/sentinel line, which is not permitted: ${JSON.stringify(rawValue)}`,
     );
   }
-  // Escape "&" FIRST, before either delimiter-escape pass below. Without this,
-  // a value that already contains literal entity-like text (e.g. "<!--&gt;"
-  // or "&lt;!--") collides with the encoded form of an unrelated real
-  // delimiter — sanitizeFieldValue() would not be injective, and the
-  // collision is unrecoverable by unescapeFieldValue() on decode
-  // (forge#2137). Escaping "&" first guarantees every "&lt;!--"/"--&gt;"/
-  // "--!&gt;" sequence in the output was produced by *this* pass, never by
-  // pre-existing entity text (which is now doubly-escaped, e.g.
-  // "&" -> "&amp;", left untouched by the delimiter passes that only match
-  // literal "<!--"/"--"+">" character sequences).
-  const withAmpEscaped = folded.replace(/&/g, '&amp;');
-  // Escape the HTML comment opener ("<!--") so a value cannot start a new
-  // unterminated HTML comment in GitHub's renderer, which would visually swallow
-  // subsequent lines — the same rendering-leak the closer escaping below prevents
-  // from the opposite direction. (forge#1638)
-  const withOpenerEscaped = withAmpEscaped.replace(/<!--/g, '&lt;!--');
-  // Escape both HTML comment-close forms ("-->" and "--!>") — only replacing the
-  // literal character sequence (not just documenting the risk) prevents the
-  // enclosing comment from terminating early. (forge#1594; the FORGE:STATE codec
-  // in bin/engine/state.mjs now mirrors this full three-form scheme — forge#2119)
-  return withOpenerEscaped.replace(/--(!)?>/g, (_, bang) => `--${bang || ''}&gt;`);
+  return escapeHtmlCommentDelimiters(folded);
 }
 
 /**
