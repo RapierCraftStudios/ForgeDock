@@ -10,7 +10,7 @@
 #   # Add forge.yaml to your .gitignore if it contains sensitive paths
 #
 # Required sections: project, paths, branches
-# Optional sections: agents, repos, project_board, pipeline, services, review, verification, deploy, billing, devdocs, adaptive_scripts, learned, attribution
+# Optional sections: agents, repos, project_board, orchestration, pipeline, services, review, verification, deploy, billing, devdocs, adaptive_scripts, learned, attribution
 
 # =============================================================================
 # PROJECT (REQUIRED)
@@ -257,6 +257,63 @@ branches:
 #       label: "MCP Server"
 
 # =============================================================================
+# ORCHESTRATION (OPTIONAL)
+# Concurrency limits and cascade admission policy for the /orchestrate batch
+# engine. `max_concurrent` already existed at runtime but was undocumented
+# anywhere prior to forge#2234; `cascade` is the new admission-policy config
+# surface (forge#2234) — see docs/CONFIG.md → `orchestration` for full field
+# docs and the preset table (all / balanced / conservative).
+# Commands: orchestrate
+# =============================================================================
+
+# orchestration:
+#   # Maximum number of /work-on sub-agents dispatched concurrently. Guards
+#   # against saturating the Anthropic API rate limit in one burst on a large
+#   # ready set. Default: 12.
+#   max_concurrent: 12
+#
+#   cascade:
+#     # Named preset — "all" (pick up everything, no caps, no heuristics),
+#     # "balanced" (default, matches pre-#2234 hardcoded behavior exactly), or
+#     # "conservative" (same shape as balanced, lower token ceiling). Any
+#     # granular key below overrides just that field on top of the preset.
+#     policy: "balanced"
+#
+#     # Max cascade generation admitted at Phase 1 resolve time (the
+#     # `cascade`/`review-findings`/`findings` resolution). Generation 1 = an
+#     # original issue; generation 2 = spawned from a review-finding;
+#     # generation 3 = spawned from a finding spawned from a review-finding;
+#     # etc. Accepts a positive integer or "unlimited". This is what makes
+#     # "admit gen-2, stop at gen-3" expressible — the pre-#2234 --allow-gen2
+#     # CLI flag was all-or-nothing and could not say that. Does NOT relax
+#     # Step 4C's absolute autonomous mid-run cascade defer (unaffected by
+#     # this key regardless of value). Default: 1.
+#     max_generation: 1
+#
+#     # Per-batch token ceiling for Step 4C's review-finding cascade dispatch.
+#     # New home for the same lever previously read only via the deprecated
+#     # pipeline.token_budget_per_batch alias below (still honored when this
+#     # key is absent). Accepts a positive integer or "unlimited". Default:
+#     # 900000.
+#     token_budget: 900000
+#
+#     # Suppress cascade-finding dispatch once the original batch is fully
+#     # human-gated (forge#1814's BATCH_FULLY_GATED). Default: true.
+#     defer_on_batch_gated: true
+#
+#     # Defer P3-and-below findings whose title contains "comment"/"typo".
+#     # Default: true.
+#     keyword_heuristic: true
+#
+#     # Defer a P3 finding that shares a file with the active batch. Default: true.
+#     p3_same_file_defer: true
+#
+# NOTE: safety exclusions (security/billing/anti-bot/auth findings) are never
+# batched or auto-admitted by ANY cascade.policy, including "all" — that
+# exclusion is a hard invariant enforced upstream of this section, not a
+# configurable key.
+
+# =============================================================================
 # PIPELINE (OPTIONAL)
 # Tuning knobs for the /orchestrate batch engine — stall detection and the
 # review-finding cascade-control token budget. All keys optional; sane
@@ -270,6 +327,10 @@ branches:
 #   # an auto-resume. Default: 15.
 #   stall_timeout_minutes: 15
 #
+#   # DEPRECATED — use orchestration.cascade.token_budget instead (forge#2234).
+#   # Kept working as an alias so existing configs are unaffected; when both
+#   # are set, orchestration.cascade.token_budget wins.
+#   #
 #   # Per-batch token ceiling for /orchestrate's Step 4C review-finding cascade
 #   # control. Distinct from the `--budget N` dollar-cost flag (economic
 #   # scheduling, forge#1743): that mechanism is opt-in, dollar-denominated, and
