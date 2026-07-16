@@ -1101,8 +1101,14 @@ async function removeOrphans(srcDir, destDir) {
     const srcEntries = await readdir(srcDir, { withFileTypes: true });
     srcNames = new Set(srcEntries.map((e) => e.name));
   } catch (err) {
-    if (err.code !== "ENOENT") throw err;
-    // srcDir missing entirely — every dest entry is an orphan.
+    if (err.code !== "ENOENT" && err.code !== "ENOTDIR") throw err;
+    // srcDir missing entirely (ENOENT), or the corresponding source path changed
+    // type and is no longer a directory — e.g. a symlink-to-file replacing what
+    // used to be a real directory (ENOTDIR) — every dest entry is an orphan.
+    // Treating both the same way keeps this a per-path fail-open instead of
+    // letting an uncaught ENOTDIR escape to persistHome()'s single outer catch,
+    // which would otherwise silently skip the *entire* persist for one bad path
+    // (forge#2227).
     srcNames = new Set();
   }
 
