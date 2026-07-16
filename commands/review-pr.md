@@ -2247,7 +2247,12 @@ if [ "$IS_FIRST_TIME_CONTRIBUTOR" = "true" ] && [ "$WELCOME_ENABLED" != "false" 
 - **Issues, not inline fixes**: when you spot a bug or improvement opportunity, open a GitHub issue rather than fixing it inline — so it flows through the pipeline with full traceability."
     fi
 
-    gh pr comment "$ARGUMENTS" --body "## Welcome to ${PROJECT_NAME_WELCOME}! 🎉
+    # Unquoted heredoc (not the corpus's quoted <<'EOF' form) — this body needs live
+    # ${VAR} interpolation, which a quoted heredoc would disable. Literal backticks in
+    # the static text are still escaped (\`) since they remain live inside an unquoted
+    # heredoc, same as inside a double-quoted string. See forge#2223.
+    gh pr comment "$ARGUMENTS" --body "$(cat <<EOF
+## Welcome to ${PROJECT_NAME_WELCOME}! 🎉
 
 Hi @${PR_AUTHOR} — this looks like your first merged contribution here. Thanks for opening a PR!
 
@@ -2264,7 +2269,9 @@ ${CONVENTIONS_TEXT}
 - Contributing guide: [\`${CONTRIBUTING_URL}\`](${CONTRIBUTING_URL})
 - Run \`npx forgedock\` to install the pipeline commands locally if you want to run /review-pr or /work-on yourself.
 
-Welcome aboard!"
+Welcome aboard!
+EOF
+)"
 fi
 ```
 
