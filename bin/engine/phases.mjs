@@ -23,13 +23,24 @@ async function issueMarkers(issue, io) {
  * see `resolveBranch()` below (forge#2174: the previous `state.branch`-only
  * signature let the build phase evaluate this against a guessed branch name
  * that never matched the branch the builder actually created).
+ *
+ * Returns -1 (rather than 0) when the underlying `git` call itself failed
+ * (lock contention, transient I/O error, ref not yet fetched, etc.) — distinct
+ * from a genuine, successfully-computed 0. This distinction matters to the
+ * build phase's `detectOutcome` (forge#2176): a *genuine* 0 ahead (git ran
+ * cleanly and reported no new commits) is a stable fixed point safe to mark
+ * non-retryable, but a transient git error folded into the same 0 would not
+ * be — the very next attempt could see a different, non-erroring result with
+ * no external input having changed, so it must remain retryable. Callers that
+ * only compare `> 0` (reconcile()'s satisfied check) are unaffected: -1 is
+ * still not `> 0`, so existing behavior there is unchanged.
  */
 async function commitsAhead(lane, branch, io) {
   try {
     const n = await io.git(["rev-list", "--count", `origin/${lane}..${branch}`]);
     return parseInt(String(n).trim(), 10) || 0;
   } catch {
-    return 0;
+    return -1;
   }
 }
 function has(blob, marker) { return blob.includes(marker); }
@@ -138,7 +149,31 @@ export const PHASES = [
       const branch = resolveBranch(state, m);
       const ahead = branch ? await commitsAhead(state.lane, branch, io) : 0; // … AND real commits
       if (complete && ahead > 0) return { status: "committed", outputs: { branch } };
-      return { status: "failed", detail: `builder complete=${complete} commitsAhead=${ahead} branch=${branch || "unresolved"}` };
+      const detail = `builder complete=${complete} commitsAhead=${ahead} branch=${branch || "unresolved"}`;
+      // forge#2176: when the builder has already posted FORGE:BUILDER:COMPLETE
+      // but the resolved (real, ground-truth) branch has zero commits ahead of
+      // the lane base, this is a stable fixed point, not a transient failure.
+      // commands/work-on/build.md's own early-exit (Phase B0) means any
+      // subsequent re-invocation of this phase's runner will see
+      // FORGE:BUILDER:COMPLETE already present and immediately no-op with
+      // `BUILD_RESULT: status: ALREADY_DONE` — it will never touch git again,
+      // so `ahead` cannot change without new, out-of-band input (e.g. a human
+      // pushing a commit). Retrying is therefore guaranteed to reproduce this
+      // exact result; mark it non-retryable so the engine escalates after a
+      // single attempt instead of burning the full attempt budget.
+      //
+      // When `complete` is false, the builder never finished at all (crashed,
+      // ran out of iterations, or was interrupted) — that IS worth a fresh
+      // retry, so this branch intentionally leaves `retryable` unset
+      // (defaults to retryable in bin/engine.mjs's runPhaseWithRetry).
+      //
+      // `ahead === -1` means commitsAhead() itself failed (transient git
+      // error), NOT a confirmed zero — that is exactly the kind of failure
+      // a retry might resolve, so it must stay retryable too. Only a
+      // successfully-computed ahead of 0 (a real "nothing new to commit"
+      // result) is the true fixed point this non-retryable signal targets.
+      if (complete && ahead !== -1) return { status: "failed", detail, retryable: false };
+      return { status: "failed", detail };
     },
   },
   {

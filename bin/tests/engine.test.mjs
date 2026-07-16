@@ -169,6 +169,109 @@ describe("runIssue", () => {
     assert.ok(!s.committed.includes("build"), "build must not be marked committed with zero real commits");
   });
 
+  it("forge#2176: a builder-complete/zero-commits fixed point does not consume a third attempt (non-retryable)", async () => {
+    // Regression for the issue's core complaint: `reason: "builder complete=true
+    // commitsAhead=0"` repeating byte-identically across attempts must NOT burn
+    // the full maxAttempts budget. The builder's own idempotent early-exit
+    // (commands/work-on/build.md's BUILD_RESULT: status: ALREADY_DONE) guarantees
+    // this state is a fixed point — retrying can never change it — so the build
+    // phase's detectOutcome now marks it retryable: false, and the engine must
+    // honor that by stopping after exactly 1 attempt even when maxAttempts: 3.
+    const { w, io } = fakeWorld();
+    const REAL_BRANCH = "fix/some-real-branch-42";
+    let buildRunnerCalls = 0;
+    const script = {
+      "work-on/investigate": () => { w.markers += " INVESTIGATION:COMPLETE"; },
+      "work-on/build/context": () => { w.markers += " FORGE:CONTEXT:COMPLETE"; },
+      "work-on/build/architect": () => { w.markers += " FORGE:ARCHITECT:COMPLETE"; },
+      // Builder reports complete on every invocation (mirrors the real builder's
+      // BUILD_RESULT: status: ALREADY_DONE early-exit) but never commits anything
+      // new — commitsAhead stays 0 no matter how many times this runs.
+      "work-on/build": () => {
+        buildRunnerCalls++;
+        w.markers += ` FORGE:BUILDER:COMPLETE **Branch**: \`${REAL_BRANCH}\``;
+      },
+    };
+    const runner = async ({ commandName }) => { script[commandName]?.(); return { status: "complete" }; };
+
+    const res = await runIssue({ issue: 42, dir, agentId: "a1", lane: "staging",
+      io, runner, now: () => 1000, maxAttempts: 3 });
+
+    assert.equal(res.terminalReason, "needs-human", "fixed-point build failure must still escalate");
+    assert.equal(buildRunnerCalls, 1,
+      "the build runner must be invoked exactly once — retryable:false must stop the loop before attempt 2");
+    const events = readLog(dir, 42);
+    const buildStarts = events.filter((e) => e.event === "PHASE_START" && e.phase === "build");
+    const buildFailures = events.filter((e) => e.event === "PHASE_FAILED" && e.phase === "build");
+    assert.equal(buildStarts.length, 1, "only 1 PHASE_START for build — not 3");
+    assert.equal(buildFailures.length, 1, "only 1 PHASE_FAILED for build — not 3");
+  });
+
+  it("forge#2176: a transient git error during commitsAhead (not a genuine zero) stays retryable", async () => {
+    // Regression for a review finding on #2176: commitsAhead() previously folded
+    // BOTH a genuine "0 commits ahead" AND a transient git failure (lock
+    // contention, unfetched ref, I/O hiccup) into the same 0 value. If the build
+    // phase treated every commitsAhead()===0 as the non-retryable fixed point,
+    // a merely transient git error would wrongly escalate to needs-human after
+    // just 1 attempt instead of getting the retries it previously — and still
+    // should — get. commitsAhead() now returns -1 (not 0) when git itself
+    // throws, and detectOutcome must NOT set retryable:false in that case.
+    const { w, io } = fakeWorld();
+    const REAL_BRANCH = "fix/some-real-branch-42";
+    let buildRunnerCalls = 0;
+    io.git = async () => { throw new Error("fatal: unable to read current working directory: Device or resource busy"); };
+    const script = {
+      "work-on/investigate": () => { w.markers += " INVESTIGATION:COMPLETE"; },
+      "work-on/build/context": () => { w.markers += " FORGE:CONTEXT:COMPLETE"; },
+      "work-on/build/architect": () => { w.markers += " FORGE:ARCHITECT:COMPLETE"; },
+      "work-on/build": () => {
+        buildRunnerCalls++;
+        w.markers += ` FORGE:BUILDER:COMPLETE **Branch**: \`${REAL_BRANCH}\``;
+      },
+    };
+    const runner = async ({ commandName }) => { script[commandName]?.(); return { status: "complete" }; };
+
+    const res = await runIssue({ issue: 42, dir, agentId: "a1", lane: "staging",
+      io, runner, now: () => 1000, maxAttempts: 3 });
+
+    assert.equal(res.terminalReason, "needs-human", "still escalates once transient retries are exhausted");
+    assert.equal(buildRunnerCalls, 3,
+      "a transient git error (commitsAhead returning -1) must NOT set retryable:false — all 3 attempts must run");
+    const events = readLog(dir, 42);
+    const buildFailures = events.filter((e) => e.event === "PHASE_FAILED" && e.phase === "build");
+    assert.equal(buildFailures.length, 3, "all 3 attempts must be logged — transient git errors keep retrying");
+  });
+
+  it("forge#2176 (AC4): a phase that does not opt into retryable:false still retries to maxAttempts (transient failures unaffected)", async () => {
+    // Guard against over-generalizing the retryable mechanism: the review
+    // phase's "PR open, not merged" detail can legitimately repeat identically
+    // across attempts while a merge is still in flight — it must keep retrying
+    // exactly as before, since its detectOutcome never sets retryable: false.
+    const { w, io } = fakeWorld();
+    let reviewRunnerCalls = 0;
+    const script = {
+      "work-on/investigate": () => { w.markers += " INVESTIGATION:COMPLETE"; },
+      "work-on/build/context": () => { w.markers += " FORGE:CONTEXT:COMPLETE"; },
+      "work-on/build/architect": () => { w.markers += " FORGE:ARCHITECT:COMPLETE"; },
+      "work-on/build": () => { w.markers += " FORGE:BUILDER:COMPLETE **Branch**: `fix/real-branch-42`"; w.commitsAhead = 2; },
+      // PR exists but never merges — "PR open, not merged" repeats identically
+      // on every attempt, exactly like the pre-#2176 build-phase symptom, but
+      // this phase has NOT opted into retryable:false so it must keep retrying.
+      "work-on/review": () => { reviewRunnerCalls++; w.pr = 7; w.prMerged = false; },
+    };
+    const runner = async ({ commandName }) => { script[commandName]?.(); return { status: "complete" }; };
+
+    const res = await runIssue({ issue: 42, dir, agentId: "a1", lane: "staging",
+      io, runner, now: () => 1000, maxAttempts: 3 });
+
+    assert.equal(res.terminalReason, "needs-human", "unmerged PR after exhausting attempts still escalates");
+    assert.equal(reviewRunnerCalls, 3,
+      "the review runner must be invoked for all 3 attempts — no retryable:false signal means unchanged behavior");
+    const events = readLog(dir, 42);
+    const reviewFailures = events.filter((e) => e.event === "PHASE_FAILED" && e.phase === "review");
+    assert.equal(reviewFailures.length, 3, "all 3 attempts must be logged — transient retry behavior unchanged");
+  });
+
   it("I3: defers before writing GitHub state when another agent holds a valid lease (remirror path)", async () => {
     // Regression test for: writeState() called before lease check in remirror/hydrate branches.
     // A concurrent agent holds a valid lease — we must NOT write GitHub state before deferring.
