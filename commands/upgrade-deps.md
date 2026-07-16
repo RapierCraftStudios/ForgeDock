@@ -376,7 +376,12 @@ Store created issue numbers as `CREATED_ISSUES` (empty when `DRY_RUN=true`).
 For each issue in `CREATED_ISSUES`, invoke `/work-on` via the Skill tool:
 
 ```
-Skill(skill: "work-on", args: "{ISSUE_NUMBER}")
+# DRY_RUN guard — must stay above the Skill() call it guards (forge#1609).
+if [ "$DRY_RUN" = "true" ]; then
+  echo "[DRY RUN] Would invoke: Skill(skill: \"work-on\", args: \"{ISSUE_NUMBER}\")"
+else
+  Skill(skill: "work-on", args: "{ISSUE_NUMBER}")
+fi
 ```
 
 Run **sequentially** — each `/work-on` invocation is heavyweight. If one fails, continue to the next and record the outcome.
@@ -389,7 +394,7 @@ FIX_RESULTS = [
 ]
 ```
 
-**DRY_RUN check**: If `DRY_RUN=true`, print what would be invoked but skip `Skill()` calls.
+**DRY_RUN check**: enforced inline above — the guard wraps the `Skill()` call rather than being stated after it, so a dry run cannot invoke `/work-on` even if only this section is read in isolation (forge#1609).
 
 ---
 
