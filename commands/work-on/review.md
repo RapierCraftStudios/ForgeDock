@@ -47,9 +47,34 @@ gh pr list {GH_FLAG} --head {BRANCH} --json number,state,url 2>/dev/null
 ```
 
 **Resume check**:
-- If PR already exists AND is OPEN → skip to Phase R3 (invoke /review-pr)
+- If PR already exists AND is OPEN → run the **HEAD-unchanged re-review guard** below before proceeding to Phase R3
 - If PR already exists AND is MERGED → return `REVIEW_RESULT: status: ALREADY_MERGED`
 - If no `<!-- FORGE:BUILDER -->` comment exists → EXIT with `REVIEW_RESULT: status: BLOCKED`, blocker: "FORGE:BUILDER comment not found — implement phase may not have completed"
+
+**HEAD-unchanged re-review guard** (MANDATORY when a PR already exists and is OPEN) <!-- Added: forge#2243 --> — a PR whose most recent review verdict was CHANGES REQUESTED must not be resubmitted for a full domain-agent review fan-out if nothing has changed since that verdict. `/review-pr` records the exact commit it reviewed in its verdict comment (`CHANGES REQUESTED: commit {sha} — ...`, see `commands/review-pr.md` Phase 8/9); compare that recorded sha against the PR's current `headRefOid`:
+
+```bash
+LAST_VERDICT=$(gh pr view {PR_NUMBER} {GH_FLAG} --json comments \
+  --jq '[.comments[] | select(.body | test("CHANGES REQUESTED: commit "))] | last | .body // ""' 2>/dev/null)
+LAST_VERDICT_SHA=$(echo "$LAST_VERDICT" | grep -oE 'CHANGES REQUESTED: commit [0-9a-f]+' | grep -oE '[0-9a-f]+$' | head -1)
+CURRENT_SHA_SHORT=$(gh pr view {PR_NUMBER} {GH_FLAG} --json headRefOid --jq '.headRefOid' 2>/dev/null | cut -c1-7)
+
+if [ -n "$LAST_VERDICT_SHA" ] && [ "$LAST_VERDICT_SHA" = "$CURRENT_SHA_SHORT" ]; then
+  echo "HEAD unchanged since last CHANGES REQUESTED verdict ($LAST_VERDICT_SHA) — skipping re-review."
+  gh issue comment {NUMBER} {GH_FLAG} --body "## Re-Review Skipped — HEAD Unchanged
+
+PR #{PR_NUMBER}'s HEAD (\`${CURRENT_SHA_SHORT}\`) has not changed since the last CHANGES REQUESTED verdict. Re-running \`/review-pr\` would re-review byte-identical code and reproduce the same verdict — this is a pure waste of a full domain-agent fan-out.
+
+The PR is already \`needs-human\` (or will be shortly, if this is the first time this guard has fired for it). Progress here now depends on remediation (fix the findings, push a new commit, re-review) rather than another raw review submission. If running under \`/orchestrate\`, item 6.4 in \`phase-4-execution.md\` auto-dispatches remediation for any \`needs-human\`-gated issue, including this one (see forge#2243) — no manual action should be needed. If running standalone, invoke \`/work-on {PR_NUMBER} --remediate --issue {NUMBER}\` directly.
+
+<!-- FORGE:REREVIEW_SKIPPED -->"
+  gh issue edit {NUMBER} {GH_FLAG} --add-label "needs-human" 2>/dev/null || true
+  # Return REVIEW_RESULT: status: BLOCKED — do not invoke /review-pr again on unchanged HEAD
+  exit 1
+fi
+```
+
+If `LAST_VERDICT_SHA` is empty (no prior CHANGES REQUESTED verdict found) or differs from the current HEAD (a new commit was pushed since the last verdict — e.g. by remediation), proceed normally to Phase R3.
 
 ---
 
