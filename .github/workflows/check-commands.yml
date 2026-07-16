@@ -70,6 +70,29 @@ jobs:
   banned-token-lint:
     name: Banned token lint
     runs-on: ubuntu-latest
+    env:
+      # Single source of truth for the banned-token pattern. Both the production
+      # step and the self-test step below reference this same job-level env var
+      # instead of each carrying their own literal copy. Previously the two steps
+      # each hardcoded an identical regex string; if one copy were ever edited
+      # (e.g. a token added/removed) without updating the other, the self-test
+      # would keep passing against its own stale pattern while the real gate
+      # silently drifted out of sync — the exact class of bug forge#2233 fixed
+      # one layer down (an unscoped allowlist exemption). See forge#2274.
+      #
+      # Notes on pattern precision:
+      # - 'alterlab'  — matched case-insensitively; no false positives expected
+      # - '\bememo\b' — word-boundary match excludes React's 'useMemo'/'React.memo'
+      # - 'EMEMO_EOF' — exact uppercase heredoc token; no false positives expected
+      # - 'is_byop'   — exact token; no false positives expected
+      # - 'byop_discount' — exact token; no false positives expected
+      #
+      # No allowlist/exemption mechanism: an unscoped `<!-- allowlist: -->` opt-out
+      # previously let ANY line suppress ANY banned token, which defeated the point
+      # of this gate (see forge#2233). If a legitimate need for an exemption ever
+      # arises, it must be a token-specific, line-specific marker that this grep
+      # explicitly and narrowly excludes — not a blanket prefix match.
+      BANNED_TOKEN_PATTERN: '\balterlab\b|\bememo\b|EMEMO_EOF|\bis_byop\b|\bbyop_discount\b'
 
     steps:
       - uses: actions/checkout@v4
@@ -80,19 +103,9 @@ jobs:
           # These tokens indicate AlterLab-specific residue that must not re-enter
           # the generic ForgeDock command corpus.
           #
-          # Notes on pattern precision:
-          # - 'alterlab'  — matched case-insensitively; no false positives expected
-          # - '\bememo\b' — word-boundary match excludes React's 'useMemo'/'React.memo'
-          # - 'EMEMO_EOF' — exact uppercase heredoc token; no false positives expected
-          # - 'is_byop'   — exact token; no false positives expected
-          # - 'byop_discount' — exact token; no false positives expected
-          #
-          # No allowlist/exemption mechanism: an unscoped `<!-- allowlist: -->` opt-out
-          # previously let ANY line suppress ANY banned token, which defeated the point
-          # of this gate (see forge#2233). If a legitimate need for an exemption ever
-          # arises, it must be a token-specific, line-specific marker that this grep
-          # explicitly and narrowly excludes — not a blanket prefix match.
-          MATCHES=$(grep -rniE '\balterlab\b|\bememo\b|EMEMO_EOF|\bis_byop\b|\bbyop_discount\b' commands/ \
+          # Pattern is defined once, at job level, in $BANNED_TOKEN_PATTERN — see
+          # that env var's comment above for precision notes and rationale.
+          MATCHES=$(grep -rniE "$BANNED_TOKEN_PATTERN" commands/ \
             --include='*.md' \
             || true)
           if [ -n "$MATCHES" ]; then
@@ -111,12 +124,17 @@ jobs:
           # against a throwaway scratch file outside commands/ so it never pollutes
           # the real corpus, and it inverts the assertion: the self-test FAILS the
           # job if the banned-token pattern does NOT match.
+          #
+          # Uses the same $BANNED_TOKEN_PATTERN job-level env var as the production
+          # step above, so this genuinely proves the production pattern still fires
+          # rather than exercising a separately-maintained copy that could drift
+          # (see forge#2274 — this step previously hardcoded its own literal copy).
           SCRATCH_DIR=$(mktemp -d)
           trap 'rm -rf "$SCRATCH_DIR"' EXIT
           cat > "$SCRATCH_DIR/self-test.md" <<'EOF'
           This line references alterlab and used to carry a blanket exemption. <!-- allowlist: AlterLab -->
           EOF
-          SELF_TEST_MATCHES=$(grep -rniE '\balterlab\b|\bememo\b|EMEMO_EOF|\bis_byop\b|\bbyop_discount\b' "$SCRATCH_DIR" \
+          SELF_TEST_MATCHES=$(grep -rniE "$BANNED_TOKEN_PATTERN" "$SCRATCH_DIR" \
             --include='*.md' \
             || true)
           if [ -z "$SELF_TEST_MATCHES" ]; then
