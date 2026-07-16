@@ -60,9 +60,23 @@ export async function runIssue(opts) {
           onProgress = () => {} } = opts;
 
   // forge#2240: defensive wrapper — a caller's onProgress must never be able
-  // to crash an otherwise-healthy run.
+  // to crash an otherwise-healthy run. A plain try/catch only guards a
+  // *synchronous* throw — if onProgress is (or becomes) async and its
+  // returned promise rejects, that rejection is never awaited/caught here,
+  // producing an unhandled promise rejection that terminates the whole
+  // Node process (Node >=15 default behavior) well after runIssue() itself
+  // has already resolved. That is strictly worse than the silent-hang bug
+  // this issue fixes. Detect a thenable return value and attach a no-op
+  // .catch() to it (fire-and-forget — onProgress is not awaited either way,
+  // consistent with its documented synchronous-observer contract) so a
+  // rejection can never escape as unhandled. (review finding, #2240)
   const emitProgress = (event) => {
-    try { onProgress(event); } catch { /* best-effort observer, never fatal */ }
+    try {
+      const result = onProgress(event);
+      if (result && typeof result.then === "function") {
+        result.catch(() => { /* best-effort observer, never fatal */ });
+      }
+    } catch { /* best-effort observer, never fatal */ }
   };
 
   // forge#2054: validate `backend` before anything else — before state is
@@ -201,6 +215,12 @@ export async function runIssue(opts) {
         // human-judgment block (see #2244/#2261). Any other thrown error is
         // a true unexpected crash and keeps propagating unchanged.
         if (e.code === "NO_API_KEY" || e.code === "NO_SDK" || e.code === "CLI_BACKEND_FAILED") {
+          // forge#2240 (review finding): this fail-fast path previously left
+          // phase_exit unreported — a caller tailing progress output would see
+          // "→ phase X started" and then nothing, dangling exactly on the
+          // phase that actually failed. Report it as blocked before
+          // terminating so the progress trail stays complete on this path too.
+          emitProgress({ event: "phase_exit", phase: phase.id, status: "blocked", detail: `${e.code} - ${e.message}` });
           return await terminate(state, "engine-error", `phase ${phase.id}: ${e.code} - ${e.message}`);
         }
         throw e;
