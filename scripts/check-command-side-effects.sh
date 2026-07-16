@@ -100,28 +100,51 @@ class_a_scan() {
   local BLOCK_LINES=""
   local BLOCK_START=0
   local LN=0
-  local line PUBLIC_LN ACTUAL_LINE
+  local line PUBLIC_LN ACTUAL_LINE IS_FENCE IS_BARE
 
   while IFS= read -r line; do
     LN=$((LN + 1))
 
-    # Fence detection is anchored to line-start (ignoring leading whitespace)
-    # rather than an unanchored substring match, and an already-open block is
-    # only closed by a bare fence (nothing after the backticks but optional
-    # trailing whitespace) — a fence line carrying an info string (e.g. a
-    # nested ```bash) while already inside a block is treated as block content,
-    # not a premature close. (forge#2210)
+    # Fence detection is anchored to line-start (ignoring leading whitespace).
+    # IN_CB is a true nesting-DEPTH counter, not a 0/1 flag: a fence line
+    # carrying an info string (e.g. a nested ```bash) while already inside a
+    # block opens one more nesting level (increment); a bare fence (nothing
+    # after the backticks but optional trailing whitespace) closes exactly
+    # one level (decrement). The accumulated block is only evaluated once
+    # depth returns to 0 — i.e. once the OUTERMOST fence has actually closed,
+    # not merely an inner one. A binary flag cannot distinguish "still inside
+    # the outer fence, past an inner fence's close" from "outside all
+    # fences"; depth tracking can. (forge#2210 fixed anchoring/info-string-is-
+    # content; forge#2288 adds true depth so 2+ nesting levels close correctly.)
+    IS_FENCE=0
+    IS_BARE=0
+    if echo "$line" | grep -qE "^[[:space:]]*${FENCE}"; then
+      IS_FENCE=1
+      if echo "$line" | grep -qE "^[[:space:]]*${FENCE}[[:space:]]*\$"; then
+        IS_BARE=1
+      fi
+    fi
+
     if [ "$IN_CB" -eq 0 ]; then
-      if echo "$line" | grep -qE "^[[:space:]]*${FENCE}"; then
+      if [ "$IS_FENCE" -eq 1 ]; then
         IN_CB=1
         HAS_GIST=0
         BLOCK_LINES=""
         BLOCK_START=$LN
       fi
       continue
-    else
-      if echo "$line" | grep -qE "^[[:space:]]*${FENCE}[[:space:]]*\$"; then
-        # End of code block — check if it had both gh gist and --public
+    fi
+
+    # IN_CB >= 1 — inside a block, possibly nested.
+    if [ "$IS_FENCE" -eq 1 ]; then
+      if [ "$IS_BARE" -eq 1 ]; then
+        IN_CB=$((IN_CB - 1))
+      else
+        IN_CB=$((IN_CB + 1))
+      fi
+      if [ "$IN_CB" -eq 0 ]; then
+        # Fully closed (outermost fence) — check if the accumulated block had
+        # both gh gist and --public.
         if [ "$HAS_GIST" -eq 1 ] && echo "$BLOCK_LINES" | grep -qE '^[[:space:]]*--public([[:space:]]|$)'; then
           # Find the line number of --public within the block
           PUBLIC_LN=$(echo "$BLOCK_LINES" | grep -n '^[[:space:]]*--public' | head -1 | cut -d: -f1)
@@ -131,20 +154,22 @@ class_a_scan() {
             VIOLATIONS=$((VIOLATIONS + 1))
           fi
         fi
-        IN_CB=0
         HAS_GIST=0
         BLOCK_LINES=""
         continue
       fi
-    fi
-
-    if [ "$IN_CB" -eq 1 ]; then
+      # Still inside (nested transition) — the fence line itself is block content.
       BLOCK_LINES="${BLOCK_LINES}${line}
 "
-      # Check if this line has gh gist create/edit (even with line continuation \)
-      if echo "$line" | grep -qE 'gh[[:space:]]+gist[[:space:]]+(create|edit)'; then
-        HAS_GIST=1
-      fi
+      continue
+    fi
+
+    # Regular content line while inside (at any depth).
+    BLOCK_LINES="${BLOCK_LINES}${line}
+"
+    # Check if this line has gh gist create/edit (even with line continuation \)
+    if echo "$line" | grep -qE 'gh[[:space:]]+gist[[:space:]]+(create|edit)'; then
+      HAS_GIST=1
     fi
   done < "$file"
 }
@@ -221,45 +246,68 @@ else
         LN=$((LN + 1))
 
         # Code block fence — checked BEFORE the heading test so IN_CB reflects
-        # this line's actual state. Anchored to line-start; an already-open
-        # block is only closed by a bare fence (nothing after the backticks),
-        # so an info-string fence (e.g. nested ```bash) encountered mid-block
-        # is treated as block content, not a premature close. (forge#2210)
+        # this line's actual state. IN_CB is a true nesting-DEPTH counter, not
+        # a 0/1 flag: a fence line carrying an info string (e.g. nested
+        # ```bash) encountered while already inside a block opens one more
+        # nesting level (increment); a bare fence (nothing after the
+        # backticks) closes exactly one level (decrement). Heading detection
+        # below only fires once depth returns to 0 — i.e. once we are outside
+        # ALL fences, not merely an inner one. A binary flag cannot
+        # distinguish "still inside the outer fence, past an inner fence's
+        # close" from "outside all fences"; this is exactly the gap that let
+        # embedded `## Step N` headers inside one continuous outer code block
+        # (e.g. commands/review-pr-agents/spec-cli.md) be misdetected as real
+        # section boundaries. (forge#2210 fixed anchoring/info-string-is-
+        # content for a single nesting level; forge#2288 adds true depth so
+        # 2+ nesting levels close correctly.)
+        IS_FENCE=0
+        IS_BARE=0
+        if echo "$line" | grep -qE "^[[:space:]]*${FENCE}"; then
+          IS_FENCE=1
+          if echo "$line" | grep -qE "^[[:space:]]*${FENCE}[[:space:]]*\$"; then
+            IS_BARE=1
+          fi
+        fi
+
         if [ "$IN_CB" -eq 0 ]; then
-          if echo "$line" | grep -qE "^[[:space:]]*${FENCE}"; then
+          if [ "$IS_FENCE" -eq 1 ]; then
             IN_CB=1
             continue
           fi
-        else
-          if echo "$line" | grep -qE "^[[:space:]]*${FENCE}[[:space:]]*\$"; then
-            IN_CB=0
+
+          # Section heading reset — only when fully outside all fences.
+          # (forge#2210)
+          if echo "$line" | grep -qE '^#{1,6}[[:space:]]+'; then
+            heading=$(echo "$line" | sed 's/^#*[[:space:]]*//' | sed 's/[[:space:]]*$//')
+            flush_and_reset "$heading"
             continue
           fi
-        fi
-
-        # Section heading reset — gated on IN_CB so a bash comment inside a
-        # code block (e.g. "# Added lines...") is never misdetected as a
-        # markdown heading/section boundary. (forge#2210)
-        if [ "$IN_CB" -eq 0 ] && echo "$line" | grep -qE '^#{1,6}[[:space:]]+'; then
-          heading=$(echo "$line" | sed 's/^#*[[:space:]]*//' | sed 's/[[:space:]]*$//')
-          flush_and_reset "$heading"
           continue
         fi
 
-        if [ "$IN_CB" -eq 1 ]; then
-          if echo "$line" | grep -qF "$ALLOWLIST_TOKEN"; then continue; fi
+        # IN_CB >= 1 — inside a block, possibly nested.
+        if [ "$IS_FENCE" -eq 1 ]; then
+          if [ "$IS_BARE" -eq 1 ]; then
+            IN_CB=$((IN_CB - 1))
+          else
+            IN_CB=$((IN_CB + 1))
+          fi
+          continue
+        fi
 
-          # Check for guard
-          echo "$line" | grep -qE "$GUARD_PATTERN" && SECTION_HAS_GUARD=1
+        # Content line while inside (at any depth).
+        if echo "$line" | grep -qF "$ALLOWLIST_TOKEN"; then continue; fi
 
-          # Check if this line is in the diff's added lines AND has a side-effect verb
-          if [ "$SECTION_HAS_ADDED_SE" -eq 0 ] && echo "$line" | grep -qE "$SIDE_EFFECT_PATTERN"; then
-            # Is this specific line in the added content?
-            if echo "$ADDED_CONTENT" | grep -qF "${line:0:80}" 2>/dev/null; then
-              SECTION_HAS_ADDED_SE=1
-              SECTION_SE_LINE=$LN
-              SECTION_SE_VERB=$(echo "$line" | grep -oE "$SIDE_EFFECT_PATTERN" | head -1 || echo "side-effect")
-            fi
+        # Check for guard
+        echo "$line" | grep -qE "$GUARD_PATTERN" && SECTION_HAS_GUARD=1
+
+        # Check if this line is in the diff's added lines AND has a side-effect verb
+        if [ "$SECTION_HAS_ADDED_SE" -eq 0 ] && echo "$line" | grep -qE "$SIDE_EFFECT_PATTERN"; then
+          # Is this specific line in the added content?
+          if echo "$ADDED_CONTENT" | grep -qF "${line:0:80}" 2>/dev/null; then
+            SECTION_HAS_ADDED_SE=1
+            SECTION_SE_LINE=$LN
+            SECTION_SE_VERB=$(echo "$line" | grep -oE "$SIDE_EFFECT_PATTERN" | head -1 || echo "side-effect")
           fi
         fi
       done < "$file"
