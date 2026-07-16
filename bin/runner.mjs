@@ -536,6 +536,41 @@ export function sanitizeArgvForLog(cliArgs) {
     .join(" ");
 }
 
+/**
+ * Best-effort extraction of a Claude CLI session-limit reset time from
+ * captured stdout/stderr (forge#2241). The CLI's own session-limit message
+ * looks like `You've hit your session limit · resets 12:50am (Asia/Calcutta)`
+ * — when present, this lets a non-zero-exit CLI_BACKEND_FAILED surface *when*
+ * the quota resets instead of forcing a human to read raw logs (issue #2241
+ * AC3). Deliberately narrow and case-insensitive: anchored on the literal
+ * "session limit" phrase plus a trailing "resets ..." clause, so it can never
+ * misattribute an unrelated crash's output as a reset time (see #2258/#2277/
+ * #2292/#2293 — this same diagnostic branch has repeatedly needed defensive
+ * narrowing around untrusted CLI output).
+ *
+ * @param {string} output - combined, already-captured stdout+stderr text
+ * @returns {string|undefined} the reset-time text (trimmed), or undefined if
+ *   no session-limit pattern was found — callers must not fabricate a value
+ *   when this returns undefined.
+ */
+export function extractSessionLimitResetTime(output) {
+  if (!output) return undefined;
+  const match = /session limit[^\n]*?resets?\s+([^\n]+?)\s*$/im.exec(output);
+  if (!match) return undefined;
+  const resetAt = match[1].trim();
+  if (resetAt.length === 0) return undefined;
+  // Security review finding (forge#2241, PR #2323): `resetAt` is extracted
+  // from raw, untrusted CLI stdout/stderr — the same `output` that #2277/
+  // #2292/#2293 fixed control-char/bidi-override/surrogate-pair injection
+  // for in the neighboring CLI_BACKEND_FAILED diagnostic. Route it through
+  // the same sanitizeArgvForLog() escaping + length-capping used for
+  // argvSummary before it can reach err.resetAt -> the engine-error
+  // terminate detail -> operator-visible terminal/CI logs, so this new call
+  // site inherits the identical defensive posture instead of reopening that
+  // threat model via a fresh, unsanitized path.
+  return sanitizeArgvForLog([resetAt]);
+}
+
 export function runCliBackend({
   spec,
   userMessage,
@@ -654,6 +689,12 @@ export function runCliBackend({
           ` Invocation: ${bin} ${argvSummary} (cwd: ${cwd})`,
       );
       err.code = "CLI_BACKEND_FAILED";
+      // forge#2241: attach the CLI's reported session-limit reset time (when
+      // present) so callers (bin/engine.mjs) can surface *when* a
+      // quota-exhaustion failure will clear without reading raw logs. Only
+      // ever set when the pattern actually matches — never fabricated.
+      const resetAt = extractSessionLimitResetTime(output);
+      if (resetAt) err.resetAt = resetAt;
       throw err;
     }
 

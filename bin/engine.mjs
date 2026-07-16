@@ -215,13 +215,21 @@ export async function runIssue(opts) {
         // human-judgment block (see #2244/#2261). Any other thrown error is
         // a true unexpected crash and keeps propagating unchanged.
         if (e.code === "NO_API_KEY" || e.code === "NO_SDK" || e.code === "CLI_BACKEND_FAILED") {
+          // forge#2241: when the runner attached a session-limit reset time
+          // (bin/runner.mjs's extractSessionLimitResetTime(), only ever set
+          // for a genuine session-limit CLI_BACKEND_FAILED — never
+          // fabricated), append it so the terminal state is legible without
+          // reading raw logs. Purely additive: the base detail string is
+          // unchanged, and this appends nothing when e.resetAt is absent.
+          const resetSuffix = e.resetAt ? ` (resets: ${e.resetAt})` : "";
+          const detail = `phase ${phase.id}: ${e.code} - ${e.message}${resetSuffix}`;
           // forge#2240 (review finding): this fail-fast path previously left
           // phase_exit unreported — a caller tailing progress output would see
           // "→ phase X started" and then nothing, dangling exactly on the
           // phase that actually failed. Report it as blocked before
           // terminating so the progress trail stays complete on this path too.
-          emitProgress({ event: "phase_exit", phase: phase.id, status: "blocked", detail: `${e.code} - ${e.message}` });
-          return await terminate(state, "engine-error", `phase ${phase.id}: ${e.code} - ${e.message}`);
+          emitProgress({ event: "phase_exit", phase: phase.id, status: "blocked", detail });
+          return await terminate(state, "engine-error", detail);
         }
         throw e;
       } finally {

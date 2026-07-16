@@ -51,6 +51,7 @@ import {
   resolveBackendLadder,
   runCliBackend,
   sanitizeArgvForLog,
+  extractSessionLimitResetTime,
   VALID_BACKENDS,
 } from "../runner.mjs";
 
@@ -1790,6 +1791,127 @@ describe("runCliBackend spawnFn seam (issue #2033)", () => {
         }),
       /Failed to invoke claude CLI/,
     );
+  });
+});
+
+// ---------------------------------------------------------------------------
+// extractSessionLimitResetTime / CLI_BACKEND_FAILED resetAt (issue #2241)
+//
+// #2259/#2261 already fail-fast + terminate cleanly as "engine-error" (not
+// "needs-human") for a session-limit CLI_BACKEND_FAILED — this closes the one
+// remaining acceptance gap: surfacing *when* the CLI's own reported quota
+// resets, instead of requiring a human to read raw logs. Deliberately narrow:
+// must never fabricate a reset time for ordinary, unrelated crash output.
+// ---------------------------------------------------------------------------
+
+describe("extractSessionLimitResetTime (issue #2241)", () => {
+  it("extracts the reset-time text from a genuine session-limit message", () => {
+    const output = "You've hit your session limit · resets 12:50am (Asia/Calcutta)";
+    assert.equal(extractSessionLimitResetTime(output), "12:50am (Asia/Calcutta)");
+  });
+
+  it("is case-insensitive and tolerates surrounding stdout/stderr noise", () => {
+    const output = "some preamble\nYOU'VE HIT YOUR SESSION LIMIT · RESETS 3:00pm (UTC)\ntrailing noise";
+    assert.equal(extractSessionLimitResetTime(output), "3:00pm (UTC)");
+  });
+
+  it("returns undefined for ordinary non-session-limit crash output (must not fabricate a reset time)", () => {
+    const output = "Captured output (stdout+stderr):\nTypeError: cannot read property 'foo' of undefined\n    at main (/app/index.js:12:3)";
+    assert.equal(extractSessionLimitResetTime(output), undefined);
+  });
+
+  it("returns undefined for empty or falsy output", () => {
+    assert.equal(extractSessionLimitResetTime(""), undefined);
+    assert.equal(extractSessionLimitResetTime(undefined), undefined);
+  });
+
+  it("returns undefined when the 'session limit' phrase appears without a resets clause", () => {
+    const output = "session limit configuration changed — no action needed";
+    assert.equal(extractSessionLimitResetTime(output), undefined);
+  });
+
+  // Security review finding (forge#2241, PR #2323): resetAt is extracted from
+  // untrusted CLI stdout/stderr — the same threat model #2277/#2292/#2293
+  // fixed for the neighboring argvSummary diagnostic. This asserts the fix
+  // (routing resetAt through sanitizeArgvForLog) actually neutralizes control
+  // chars and bidi-override sequences instead of passing them through raw.
+  it("neutralizes control characters and bidi-override sequences in the captured reset-time text (security review finding)", () => {
+    const output = "You've hit your session limit · resets 12:50am\x1b[31m‮evil‬";
+    const resetAt = extractSessionLimitResetTime(output);
+    assert.ok(resetAt, "a reset time should still be extracted");
+    // eslint-disable-next-line no-control-regex -- asserting the ABSENCE of raw control/bidi chars is the point of this test
+    assert.ok(!/[\x00-\x1F\x7F-\x9F‪-‮⁦-⁩]/.test(resetAt),
+      `resetAt must not contain raw control/bidi-override characters: ${JSON.stringify(resetAt)}`);
+    assert.match(resetAt, /\\x1b/, "escaped ESC sequence should appear in place of the raw control char");
+    assert.match(resetAt, /\\u202e/i, "escaped RLO sequence should appear in place of the raw bidi-override char");
+  });
+
+  it("caps an excessively long captured reset-time string (security review finding — no unbounded log growth)", () => {
+    const output = `You've hit your session limit · resets ${"A".repeat(5000)}`;
+    const resetAt = extractSessionLimitResetTime(output);
+    assert.ok(resetAt, "a reset time should still be extracted");
+    assert.ok(!resetAt.includes("A".repeat(5000)), "resetAt must not contain the full unbounded run of characters");
+    assert.match(resetAt, /…\[truncated, \d+ chars\]/, "resetAt must carry the truncation marker for an oversized value");
+  });
+});
+
+describe("runCliBackend attaches resetAt to CLI_BACKEND_FAILED on a session-limit exit (issue #2241)", () => {
+  it("sets err.resetAt when the captured output reports a session-limit reset time", () => {
+    const spawnFn = () => ({
+      status: 1,
+      signal: null,
+      stdout: "You've hit your session limit · resets 12:50am (Asia/Calcutta)",
+      stderr: "",
+      error: undefined,
+    });
+
+    let thrown;
+    try {
+      runCliBackend({
+        spec: loadCommandSpec(COMMANDS_DIR, "work-on"),
+        userMessage: "Execute: /work-on 2241",
+        args: ["2241"],
+        cwd: TMP,
+        logger: { log: () => {} },
+        bin: "claude",
+        spawnFn,
+      });
+    } catch (err) {
+      thrown = err;
+    }
+
+    assert.ok(thrown, "runCliBackend must throw on non-zero exit");
+    assert.equal(thrown.code, "CLI_BACKEND_FAILED");
+    assert.equal(thrown.resetAt, "12:50am (Asia/Calcutta)");
+  });
+
+  it("leaves resetAt unset (undefined) for an ordinary non-session-limit crash — never fabricated", () => {
+    const spawnFn = () => ({
+      status: 1,
+      signal: null,
+      stdout: "",
+      stderr: "boom",
+      error: undefined,
+    });
+
+    let thrown;
+    try {
+      runCliBackend({
+        spec: loadCommandSpec(COMMANDS_DIR, "work-on"),
+        userMessage: "Execute: /work-on 2241",
+        args: ["2241"],
+        cwd: TMP,
+        logger: { log: () => {} },
+        bin: "claude",
+        spawnFn,
+      });
+    } catch (err) {
+      thrown = err;
+    }
+
+    assert.ok(thrown, "runCliBackend must throw on non-zero exit");
+    assert.equal(thrown.code, "CLI_BACKEND_FAILED");
+    assert.equal(thrown.resetAt, undefined, "resetAt must not be set for unrelated crash output");
   });
 });
 
