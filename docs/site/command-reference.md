@@ -453,6 +453,23 @@ Measures pipeline performance, correlates with prompt changes, and proposes impr
 
 ---
 
+### `/upgrade-deps`
+
+**Autonomous dependency upgrade pipeline.**
+
+Detects outdated packages, triages them by semver risk, creates GitHub issues for eligible upgrades, and runs each through `/work-on` — so every upgrade gets investigation, compatibility verification, quality gate, review, and merge rather than a blind version bump. Major upgrades are flagged for human review unless `--allow-major` is passed.
+
+```bash
+/upgrade-deps                     # Detect + triage + report only
+/upgrade-deps --dry-run           # All phases, but create nothing
+/upgrade-deps --ecosystem npm     # Limit to one ecosystem (npm|pip|cargo)
+/upgrade-deps --allow-major       # Include major upgrades in issue creation
+/upgrade-deps --limit 5           # Cap issue creation (default: 10)
+/upgrade-deps --batch             # Group patch upgrades into one issue
+```
+
+---
+
 ## Investigation & Validation
 
 ---
