@@ -131,4 +131,18 @@ describe("state codec", () => {
     const got = parseState(body);
     assert.deepEqual(got, poison);
   });
+
+  it("round-trips a value containing the literal \"&amp;\" substring (already-escaped-looking ampersand) (forge#2166)", () => {
+    const poison = { ...idx, terminalReason: "status: pending &amp; done" };
+    const body = "prefix\n\n" + serializeState(poison);
+    const got = parseState(body);
+    assert.deepEqual(got, poison);
+  });
+
+  it("round-trips a value combining the \"--!>\" comment-closer variant with adjacent entity-like text (forge#2166)", () => {
+    const poison = { ...idx, terminalReason: "--!>&gt;" };
+    const body = "prefix\n\n" + serializeState(poison);
+    const got = parseState(body);
+    assert.deepEqual(got, poison);
+  });
 });

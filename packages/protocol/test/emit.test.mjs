@@ -259,6 +259,15 @@ const ADVERSARIAL_VALUES = [
   { label: 'pure literal entity text "&lt;!--"', value: '&lt;!--' },
   { label: 'pure literal entity text "&lt;!--&gt;" (collision partner of "<!--&gt;")', value: '&lt;!--&gt;' },
   { label: 'literal ampersand alongside real delimiters', value: 'AT&T <!-- test --> done --!> & more' },
+  // forge#2166 — coverage gap follow-up to forge#2137: a value that already
+  // contains the literal 3-char-escaped substring "&amp;" (not just a bare
+  // "&"), to verify ampersand-escape-first does not double-escape it into
+  // "&amp;amp;".
+  { label: 'literal "&amp;" substring (already-escaped-looking ampersand)', value: 'status: pending &amp; done' },
+  // forge#2166 — "--!>" comment-closer variant immediately followed by
+  // entity-like text, mirroring the existing "<!--&gt;" pairing above but
+  // for the alternate closer delimiter.
+  { label: 'comment closer variant "--!>" + literal entity text "--!>&gt;"', value: '--!>&gt;' },
 ];
 
 // Test all adversarial values as field VALUES for CONTEXT (field-body type)
