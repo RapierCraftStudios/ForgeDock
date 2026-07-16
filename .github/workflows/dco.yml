@@ -8,6 +8,16 @@ jobs:
   dco:
     name: DCO Sign-Off Verification
     runs-on: ubuntu-latest
+    # Intentionally minimal: contents:read is the only permission this job needs.
+    # The prior KineticCafe/actions-dco action also held pull-requests:write /
+    # statuses:write so it could post a PR comment explaining DCO failures on
+    # top of the Checks-tab result. That comment-on-failure UX was deliberately
+    # NOT re-implemented when this check was rewritten inline (see #2116/#2135) —
+    # re-adding those write scopes purely to restore a comment would widen this
+    # job's permission surface for a cosmetic feature. Checks-tab / workflow-log
+    # visibility (the `exit 1` + "Commits missing a valid Signed-off-by
+    # trailer:" output below) is the accepted replacement. Documented decision,
+    # not a silent gap — see #2145.
     permissions:
       contents: read
 
@@ -60,12 +70,30 @@ jobs:
           BOT_LOGINS=("github-actions[bot]" "dependabot[bot]" "dependabot-preview[bot]" "rapiercraft-forgedock[bot]" "rapiercraft-forge[bot]")
 
           # Map commit author emails to additional accepted sign-off emails.
+          # Value is a space-separated list (not a single email) so an author
+          # can have more than one accepted alias without a code change -- see
+          # #2144. Today only one alias is configured per author, but the
+          # shape supports adding more, e.g.:
+          #   ALIAS_SIGNOFFS["a@example.com"]="b@example.com c@example.com"
           declare -A ALIAS_SIGNOFFS
           ALIAS_SIGNOFFS["rapiercraftstudios@gmail.com"]="yash.dubey803at@gmail.com"
           # ------------------------------------------------------------------------
 
           MERGE_BASE=$(git merge-base "$BASE_SHA" "$HEAD_SHA")
 
+          # Identity-trust model (accepted, intentional trade-off -- see #2143):
+          # is_bot_author()/is_exempt_author() below trust the raw `git log`
+          # author/committer email (%ae) as-is; there is no cross-check against
+          # a GitHub-API-verified account linkage. The prior GitHub-API-based
+          # action *did* get an implicit authentication signal this way (the
+          # Compare Commits API returns null author/committer objects for
+          # emails not linked to a verified account) -- but that same behavior
+          # is exactly what made the old action fail-closed on nearly every PR
+          # (see #2116), which is why this check was rewritten against `git log`
+          # data instead. Re-adding API-based verification here would
+          # reintroduce that failure mode. This is a known, low-blast-radius
+          # limitation (allowlists are a handful of known maintainer/bot
+          # emails) rather than a silent gap.
           is_bot_author() {
             local email="$1"
             for login in "${BOT_LOGINS[@]}"; do
@@ -93,7 +121,11 @@ jobs:
             local author_email="$1"
             printf '%s\n' "$author_email"
             if [[ -n "${ALIAS_SIGNOFFS[$author_email]:-}" ]]; then
-              printf '%s\n' "${ALIAS_SIGNOFFS[$author_email]}"
+              # ALIAS_SIGNOFFS values are a space-separated list of accepted
+              # alias emails for this author (see #2144) -- split and emit
+              # each one rather than assuming a single value.
+              local alias_list=(${ALIAS_SIGNOFFS[$author_email]})
+              printf '%s\n' "${alias_list[@]}"
             fi
           }
 
