@@ -16,10 +16,10 @@ Parse `$ARGUMENTS` to determine which issues to work on:
 |-------|------------|
 | `milestone <slug>` | All open issues assigned to that GitHub milestone (default repo) |
 | `#1 #2 #3` or `1 2 3` | Specific issue numbers, optionally repo-prefixed (e.g., `#123 mcp:5 n8n:12`) |
-| `next <N>` | Top N priority open issues (priority:P0 first, then priority:P1, etc.) |
+| `next <N>` | Top N priority open issues (P0 first, then P1, etc. — accepts both `priority:P<n>` and bare `P<n>` labels, see "Priority label schema" note under P3 batching below) |
 | `next <N> all-repos` | Top N across ALL ecosystem repos |
 | `fast-lane` or `fast` | All open fast-lane issues (no milestone, bugs/fixes) |
-| `priority:P0` or `priority:P1` | All open issues with that priority label |
+| `priority:P0` or `priority:P1` | All open issues with that priority label (matches both `priority:P<n>` and bare `P<n>` on the target repo — see "Priority label schema" note below) |
 | `mcp:fast` or `n8n:next 3` | Repo-scoped queries |
 | `cascade`, `review-findings`, or `findings` (optionally `--include-deferred` / `--allow-gen2`) | All open `review-finding` issues (default repo, or repo-scoped e.g. `mcp:cascade`). See "Cascade / Review-Finding Resolution" below — by default this still excludes `PERMANENT_DEFERRED` (generation ≥ 2) findings; the override flags admit them for this explicit, human-requested run only. <!-- Added: forge#2231 -->|
 | `<slug>` (no keyword) | Try milestone first, then fall back to label search. If both resolve to zero issues, report near-miss label candidates instead of silently resolving to nothing — see "Near-Miss Suggestion" below. <!-- Added: forge#2231 -->|
@@ -101,7 +101,11 @@ gh issue view {NUMBER} -R {SATELLITE_REPO} --json number,title,labels,state,mile
 gh issue list {GH_FLAG} --state open --limit {N} --json number,title,labels,milestone
 # For each satellite in forge.yaml → repos.satellites:
 gh issue list -R {SATELLITE_REPO} --state open --limit 500 --json number,title,labels,milestone
-# Combine, sort by priority, take top N
+# Combine, sort by priority, take top N.
+# Priority rank when sorting: read each issue's labels and normalize to bare P<n> form —
+# `priority:P<n>` and bare `P<n>` both resolve to the same rank (see "Priority label schema"
+# note under P3 batching below); an issue with neither label form sorts last, not first, and
+# should be logged as untriaged rather than silently treated as top priority. <!-- Added: forge#2232 -->
 ```
 
 **Count validation**: After fetching issues, log the count returned. If a milestone query returns exactly 30 issues, warn the user: "WARNING: Exactly 30 issues returned — gh CLI default may have truncated results. Re-running with --limit 500 is recommended." (The --limit 500 above prevents this for standard runs, but verify if the count seems suspiciously low relative to milestone expectations.)
@@ -124,11 +128,14 @@ If a `workflow:decomposed` issue is found, automatically expand it to its open s
 
 <!-- Added: forge#1333 -->
 <!-- Extended: forge#1818 — default-batchable eligibility, surface-area grouping, lowered same-file threshold -->
+<!-- Extended: forge#2232 — priority-label schema tolerance (bare P<n> vs priority:P<n>) -->
 
 Before finalizing the issue set, apply the P3 batching rule to reduce full-pipeline overhead on low-severity review findings.
 
+**Priority label schema**: ForgeDock's own issue creator (`review-pr.md`) writes only the canonical `priority:P<n>` label form. Some repos this pipeline operates against (issues opened externally, imported, or predating ForgeDock adoption) instead carry a bare `P<n>` label with no `priority:` prefix. Every priority-read check in this section — and its mirrors in `phase-4-execution.md` and `cleanup.md` — MUST accept both forms. `priority:P<n>` wins when (unusually) both are present on the same issue. Issue-*creation* call sites (the batch-issue creation below) are unaffected and keep writing canonical `priority:P<n>` only — there is no case where this pipeline needs to *write* the bare form. <!-- Added: forge#2232 -->
+
 **Trigger conditions** (default-batchable — no opt-in marker required):
-1. The issue has labels `review-finding` + `priority:P3`
+1. The issue has label `review-finding` + a P3 priority label (`priority:P3` or bare `P3`)
 2. The issue does NOT match any Safety exclusion below
 
 The `<!-- FORGE:BATCHABLE -->` marker (still appended by `review-pr.md` at finding-creation time) is honored when present but is no longer REQUIRED for eligibility — a `review-finding`+`priority:P3` issue is batchable by default unless explicitly excluded. This closes the gap where cascade-spawned findings that never carried the marker sat un-batched indefinitely. <!-- Added: forge#1818 -->
@@ -141,13 +148,17 @@ These exclusions apply regardless of priority: P1/P2 findings are already never 
 
 **Grouping algorithm (surface area — same file first, leaf directory as broader fallback):** <!-- Changed: forge#1818 — was domain-only -->
 ```bash
-# Fetch all open batchable P3 issues (default-batchable; marker no longer required)
+# Fetch all open batchable P3 issues (default-batchable; marker no longer required).
+# NOTE: `--label` is an exact-match GH filter and cannot OR "priority:P3" with bare "P3" in
+# one query, so the P3 test moves into the jq predicate below (schema-tolerant, forge#2232).
+# Only "review-finding" stays in the --label filter.
 BATCHABLE_P3=$(gh issue list {GH_FLAG} \
   --state open \
-  --label "review-finding,priority:P3" \
+  --label "review-finding" \
   --limit 500 \
   --json number,title,body,labels \
-  --jq '.[] | select((.title | test("security|billing|anti-bot|auth"; "i")) | not)
+  --jq '.[] | select([.labels[].name] | any(test("^(priority:)?P3$")))
+         | select((.title | test("security|billing|anti-bot|auth"; "i")) | not)
          | select(.body | test("## Problem[\\s\\S]{0,500}(security|billing|anti-bot|auth)"; "i") | not)
          | select(([.labels[].name] | any(. == "security" or . == "billing" or . == "anti-bot" or . == "auth")) | not)')
 
