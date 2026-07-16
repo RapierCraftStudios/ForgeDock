@@ -38,12 +38,20 @@
  *
  * Hard invariant (by design, not configurable): `foldNewMatches` only ever
  * narrows a re-resolved set down to "not yet processed" — it does not itself
- * decide admission. Every folded-in issue MUST still pass through the
- * existing Step 4C admission gate (`admission.mjs`'s `evaluateCascadeFinding`)
- * before an agent is dispatched on it. A mid-run check that detects new work
- * but never actually wires into dispatch is exactly the dead-code failure
- * class documented in forge#1832 (`SURFACE_BATCHED_FINDINGS`) — this module
- * must not become a second instance of it.
+ * decide admission. Every folded-in issue (`newMatches`) MUST still be
+ * dispatched through the exact same path a T0-resolved issue takes —
+ * standard DAG dependency analysis (`phase-3-dependency.md`) followed by
+ * Step 4A/4B's `dispatch_headroom`-gated dispatch (see
+ * `phase-4-execution.md` Step 4B.6) — before an agent is dispatched on it.
+ * This is deliberately **not** Step 4C's `admission.mjs`'s
+ * `evaluateCascadeFinding` chain: that gate's rules (comment/typo keyword
+ * heuristic, P3+same-file defer, generation cap) are shaped for
+ * cascade-spawned review-findings — a different issue-origin stream — and
+ * would incorrectly restrict legitimate re-resolved standing-query issues
+ * if applied here. A mid-run check that detects new work but never
+ * actually wires into dispatch is exactly the dead-code failure class
+ * documented in forge#1832 (`SURFACE_BATCHED_FINDINGS`) — this module must
+ * not become a second instance of it.
  */
 
 /**
@@ -198,9 +206,12 @@ export function shouldReResolve(classified, config = {}, roundsSoFar = 0) {
  * issues — ones not already present in the run's processed-issue registry
  * (T0-resolved issues plus any already admitted in a prior re-resolution
  * round). This function does NOT decide admission; every returned number
- * must still be passed to the existing Step 4C admission gate
- * (`admission.mjs`'s `evaluateCascadeFinding`) before an agent is
- * dispatched — see module docstring's "Hard invariant".
+ * (`newMatches`) must still be dispatched through the same path a
+ * T0-resolved issue takes — standard DAG dependency analysis followed by
+ * Step 4A/4B's dispatch (`phase-4-execution.md` Step 4B.6) — NOT through
+ * Step 4C's `admission.mjs`'s `evaluateCascadeFinding` chain, which is
+ * reserved for the cascade-spawned review-finding stream — see module
+ * docstring's "Hard invariant".
  *
  * @param {number[]} reResolvedNumbers - Issue numbers the query returned this round.
  * @param {Iterable<number>} processedRegistry - Issue numbers already
