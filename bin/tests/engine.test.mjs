@@ -660,4 +660,121 @@ describe("runIssue", () => {
     assert.doesNotMatch(engineSource, /(?:const|let|var)\s+VALID_BACKENDS\s*=\s*new\s+Set/,
       "engine.mjs must not declare its own local VALID_BACKENDS Set (would reintroduce forge#2076 drift)");
   });
+
+  // A variant of fakeWorld() whose `.../comments` endpoint returns a genuine
+  // JSON array of distinct comment bodies (as the real `gh api ... --jq
+  // "[.[].body]"` call does) instead of one concatenated string blob. This is
+  // required to exercise `parseBranchFromMarkers()`'s comment-scoped,
+  // last-match semantics (forge#2184): with fakeWorld()'s raw-blob mock,
+  // `issueMarkers()`'s `JSON.parse` fails and falls back to a single
+  // one-element pseudo-comment array, which makes "last comment wins" and
+  // "first regex match within that one comment" indistinguishable — the
+  // exact coverage gap flagged by this issue (review finding on PR #2182).
+  function multiCommentWorld() {
+    const w = { comments: [], pr: null, prMerged: false, prNeedsHuman: false,
+                issueState: "OPEN", labels: [], commitsAheadByBranch: {}, body: "Issue." };
+    const io = {
+      gh: async (args) => {
+        const a = args.join(" ");
+        if (a.startsWith("api ") && a.includes("/comments")) return JSON.stringify(w.comments);
+        if (a.startsWith("issue view") && a.includes("body")) return JSON.stringify({ body: w.body });
+        if (a.startsWith("issue view")) return JSON.stringify({ state: w.issueState, labels: w.labels });
+        if (a.startsWith("issue edit")) { const i = args.indexOf("--body"); if (i>=0) w.body = args[i+1];
+          const j = args.indexOf("--add-label"); if (j>=0) w.labels.push(args[j+1]); return ""; }
+        if (a.startsWith("pr list")) return JSON.stringify(w.pr ? [{ number: w.pr }] : []);
+        if (a.startsWith("pr view")) return JSON.stringify({ number: w.pr, state: w.prMerged?"MERGED":"OPEN",
+          mergedAt: w.prMerged ? "t" : null, labels: w.prNeedsHuman ? [{name:"needs-human"}] : [] });
+        return "";
+      },
+      // Branch-aware: `commitsAhead(lane, branch, io)` calls
+      // `io.git(["rev-list", "--count", `origin/${lane}..${branch}`])` — resolve
+      // the requested branch out of the range arg so distinct branches can have
+      // distinct (and independently controllable) commit counts.
+      git: async (args) => {
+        const range = args[args.length - 1] || "";
+        const branch = range.split("..")[1] || "";
+        return String(w.commitsAheadByBranch[branch] || 0);
+      },
+    };
+    return { w, io };
+  }
+
+  it("forge#2184: resolves the LAST FORGE:BUILDER:COMPLETE comment's branch when an earlier stale comment names a different branch", async () => {
+    // Regression test for the documented-but-unasserted "last match wins"
+    // contract: two genuinely distinct FORGE:BUILDER:COMPLETE comments exist
+    // (mirroring a resumed/retried build whose earlier attempt already posted
+    // a completion comment), each naming a DIFFERENT branch. The stale first
+    // comment's branch has zero real commits (as if that attempt never
+    // actually committed); the fresh second comment's branch has real commits.
+    // If the engine ever regressed to resolving the FIRST eligible comment
+    // instead of the LAST, it would pick the stale branch, see 0 commits
+    // ahead, and escalate to needs-human instead of merging — so this test
+    // fails loudly under that regression rather than passing vacuously.
+    const { w, io } = multiCommentWorld();
+    const STALE_BRANCH = "fix/stale-attempt-42";
+    const REAL_BRANCH = "fix/real-branch-42";
+    w.commitsAheadByBranch[STALE_BRANCH] = 0;
+
+    const script = {
+      "work-on/investigate": () => { w.comments.push("INVESTIGATION:COMPLETE"); },
+      "work-on/build/context": () => { w.comments.push("FORGE:CONTEXT:COMPLETE"); },
+      "work-on/build/architect": () => { w.comments.push("FORGE:ARCHITECT:COMPLETE"); },
+      "work-on/build": () => {
+        // Stale comment first (earlier attempt, never actually committed),
+        // fresh real comment appended after it (this run's own completion).
+        w.comments.push(`FORGE:BUILDER:COMPLETE **Branch**: \`${STALE_BRANCH}\``);
+        w.comments.push(`FORGE:BUILDER:COMPLETE **Branch**: \`${REAL_BRANCH}\``);
+        w.commitsAheadByBranch[REAL_BRANCH] = 2;
+      },
+      "work-on/review": () => { w.pr = 7; w.prMerged = true; },
+      "work-on/close": () => { w.issueState = "CLOSED"; },
+    };
+    const runner = async ({ commandName }) => { script[commandName](); return { status: "complete" }; };
+
+    const res = await runIssue({ issue: 42, dir, agentId: "a1", lane: "staging",
+      io, runner, now: () => 1000, maxAttempts: 3 });
+
+    assert.equal(res.terminalReason, "merged",
+      "must merge on the fresh/real branch, not escalate on the stale one");
+    const s = deriveState(readLog(dir, 42));
+    assert.equal(s.branch, REAL_BRANCH,
+      "resolved branch must be the LAST FORGE:BUILDER:COMPLETE comment's branch, not the first/stale one");
+  });
+
+  it("forge#2184: a stray **Branch** field in a non-BUILDER:COMPLETE comment (e.g. FORGE:CONTRACT) is never considered", async () => {
+    // Comment-scoping regression: a CONTRACT/ARCHITECT/CONTEXT/reviewer comment
+    // can legitimately contain a `**Branch**:`-shaped field (e.g. quoting a
+    // branch name in prose) without being a completion marker. Only comments
+    // whose body contains FORGE:BUILDER:COMPLETE are eligible — a decoy field
+    // in an ineligible comment posted AFTER the real completion comment must
+    // not win.
+    const { w, io } = multiCommentWorld();
+    const REAL_BRANCH = "fix/real-branch-99";
+    const DECOY_BRANCH = "fix/decoy-branch-99";
+    w.commitsAheadByBranch[REAL_BRANCH] = 3;
+    w.commitsAheadByBranch[DECOY_BRANCH] = 3; // even if "ahead", it must never be selected
+
+    const script = {
+      "work-on/investigate": () => { w.comments.push("INVESTIGATION:COMPLETE"); },
+      "work-on/build/context": () => { w.comments.push("FORGE:CONTEXT:COMPLETE"); },
+      "work-on/build/architect": () => { w.comments.push("FORGE:ARCHITECT:COMPLETE"); },
+      "work-on/build": () => {
+        w.comments.push(`FORGE:BUILDER:COMPLETE **Branch**: \`${REAL_BRANCH}\``);
+        // Posted AFTER the real completion comment but has no FORGE:BUILDER:COMPLETE
+        // marker — e.g. a remediation/reviewer comment quoting a branch name.
+        w.comments.push(`FORGE:REMEDIATION note — see \`${DECOY_BRANCH}\` for context, **Branch**: \`${DECOY_BRANCH}\``);
+      },
+      "work-on/review": () => { w.pr = 7; w.prMerged = true; },
+      "work-on/close": () => { w.issueState = "CLOSED"; },
+    };
+    const runner = async ({ commandName }) => { script[commandName](); return { status: "complete" }; };
+
+    const res = await runIssue({ issue: 42, dir, agentId: "a1", lane: "staging",
+      io, runner, now: () => 1000, maxAttempts: 3 });
+
+    assert.equal(res.terminalReason, "merged");
+    const s = deriveState(readLog(dir, 42));
+    assert.equal(s.branch, REAL_BRANCH,
+      "a **Branch** field in a comment lacking FORGE:BUILDER:COMPLETE must never be selected, even if posted later");
+  });
 });
