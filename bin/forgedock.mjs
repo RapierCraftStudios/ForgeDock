@@ -3,7 +3,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 
 import { fileURLToPath } from "url";
-import { dirname, join, relative, resolve } from "path";
+import { dirname, join, relative, resolve, sep } from "path";
 import { mkdir, lstat, readlink, readdir, unlink, readFile, writeFile } from "fs/promises";
 import {
   existsSync,
@@ -13,7 +13,7 @@ import {
   renameSync,
   unlinkSync,
 } from "fs";
-import { execSync, execFileSync } from "child_process";
+import { execSync, execFileSync, spawnSync } from "child_process";
 import { homedir } from "os";
 import https from "https";
 import {
@@ -1475,6 +1475,93 @@ async function printVersionAvailableChangelog(localVersion, latestVersion) {
   }
 }
 
+/**
+ * Detect whether FORGE_HOME resolves inside npm's global install tree, i.e.
+ * this process is running as a globally-installed `forgedock` package (not
+ * an ephemeral npx/dlx cache extraction). Used by update()'s npm-mode branch
+ * (forge#2133) to decide whether a newer published version can be installed
+ * in place with `npm install -g forgedock@latest`, versus the npx-cache case
+ * where there is nothing durable to reinstall over.
+ *
+ * Resolution: `npm root -g` reports the global node_modules directory; if
+ * FORGE_HOME sits under `{globalRoot}/forgedock`, this is a global install.
+ * Fails closed (returns false) on any error — the pre-existing advisory-only
+ * behavior is always a safe fallback when detection is inconclusive.
+ *
+ * @returns {boolean}
+ */
+function isGlobalNpmInstall() {
+  try {
+    const globalRoot = execSync("npm root -g", {
+      encoding: "utf-8",
+      stdio: ["pipe", "pipe", "pipe"],
+      timeout: 5000,
+    }).trim();
+    if (!globalRoot) return false;
+    const globalPkgDir = resolve(join(globalRoot, "forgedock"));
+    const home = resolve(FORGE_HOME);
+    return home === globalPkgDir || home.startsWith(globalPkgDir + sep);
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Install the newer published version globally via `npm install -g
+ * forgedock@{version}`, then re-exec this same file path (which npm has just
+ * overwritten with the new package's contents) so the rest of update()'s
+ * persist/relink phase runs against the *new* payload instead of the stale
+ * in-memory one (forge#2133 — previously the advisory-only branch would
+ * persist/relink from whatever was already resolved, silently downgrading
+ * a newer persisted ~/.forge/ or leaving the global install stuck on the
+ * old version indefinitely).
+ *
+ * Fail-open: any error during install or re-exec falls back to the
+ * pre-existing advisory message — the caller must treat a `false` return as
+ * "could not self-update, printed manual instructions instead."
+ *
+ * @param {string} version - target version to install (e.g. "1.2.0")
+ * @returns {boolean} true if re-exec was launched (process will exit before
+ *   returning in the success path); false if self-update failed and the
+ *   caller should fall back to advisory-only behavior.
+ */
+function selfUpdateGlobalInstall(version) {
+  try {
+    console.log(`  Installing ${CYAN}forgedock@${version}${RESET} globally...`);
+    execFileSync("npm", ["install", "-g", `forgedock@${version}`], {
+      stdio: "inherit",
+      timeout: 120000,
+    });
+  } catch (err) {
+    console.log(
+      `  ${YELLOW}Global self-update failed: ${err && err.message ? err.message : String(err)}${RESET}`,
+    );
+    console.log(
+      `  Run ${CYAN}npm install -g forgedock@latest${RESET} manually, then ${CYAN}npx forgedock update${RESET} again.`,
+    );
+    return false;
+  }
+
+  console.log(
+    `  ${GREEN}Installed v${version}.${RESET} Re-running update to finish persist/relink...`,
+  );
+  try {
+    const result = spawnSync(process.execPath, [__filename, "update"], {
+      stdio: "inherit",
+    });
+    process.exit(result.status ?? 0);
+    // Unreachable — process.exit() above terminates the process. Present
+    // only to satisfy linters expecting a return on every path.
+    return true;
+  } catch (err) {
+    console.log(
+      `  ${YELLOW}Could not re-run update after install: ${err && err.message ? err.message : String(err)}${RESET}`,
+    );
+    console.log(`  Run ${CYAN}npx forgedock update${RESET} again manually.`);
+    return false;
+  }
+}
+
 async function update() {
   console.log("");
   console.log(`${BOLD}ForgeDock${RESET} — Checking for updates`);
@@ -1569,8 +1656,25 @@ async function update() {
       console.log(
         `  ${GREEN}New version available: v${latestVersion}${RESET} (you have v${localVersion}).`,
       );
-      console.log(`  Run ${CYAN}npx forgedock@latest${RESET} to fetch it.`);
       await printVersionAvailableChangelog(localVersion, latestVersion);
+
+      // forge#2133 — a global npm install can actually be upgraded in place;
+      // do that instead of only printing an advisory (which previously left
+      // global installs stuck on whatever version was first installed,
+      // since every subsequent `npx forgedock update` re-resolves the same
+      // stale global binary). selfUpdateGlobalInstall() re-execs and exits
+      // the process on success, so anything after this block only runs when
+      // self-update wasn't attempted or failed.
+      if (isGlobalNpmInstall()) {
+        selfUpdateGlobalInstall(latestVersion);
+        // selfUpdateGlobalInstall() only returns (rather than exiting the
+        // process) when the install or re-exec failed — it already printed
+        // manual-recovery instructions, so fall through to the persist
+        // refresh below using the still-stale local payload (fail-open,
+        // matches pre-existing behavior for this failure case).
+      } else {
+        console.log(`  Run ${CYAN}npx forgedock@latest${RESET} to fetch it.`);
+      }
     } else {
       console.log(`  Already up to date (v${localVersion}).`);
     }

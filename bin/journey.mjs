@@ -747,7 +747,8 @@ export async function preflight(ctx) {
 // Act II — Forging: command symlinks + SessionStart hook (Task 6)
 // ---------------------------------------------------------------------------
 
-import { mkdir, symlink, readlink, lstat, readdir, rename, copyFile, readFile, writeFile, unlink } from "fs/promises";
+import { mkdir, symlink, readlink, lstat, readdir, rename, copyFile, readFile, writeFile, unlink, rm } from "fs/promises";
+import { compareVersions } from "./registry.mjs";
 import { relative, dirname as pathDirname } from "path";
 import {
   installSessionStartHook,
@@ -1074,6 +1075,54 @@ async function copyDirIfChanged(srcDir, destDir) {
 }
 
 /**
+ * Recursively delete entries in `destDir` that no longer exist in `srcDir`.
+ * The mirror-image of copyDirIfChanged(): that function is additive-only (it
+ * copies new/changed files but never removes anything), so a file dropped or
+ * renamed upstream would otherwise linger in the persisted `~/.forge/` copy
+ * forever (forge#2133). A missing `srcDir` or `destDir` is treated as
+ * "nothing to reconcile" rather than an error — mirrors copyDirIfChanged()'s
+ * own ENOENT handling.
+ *
+ * @param {string} srcDir
+ * @param {string} destDir
+ * @returns {Promise<{ removed: number }>}
+ */
+async function removeOrphans(srcDir, destDir) {
+  let destEntries;
+  try {
+    destEntries = await readdir(destDir, { withFileTypes: true });
+  } catch (err) {
+    if (err.code === "ENOENT") return { removed: 0 };
+    throw err;
+  }
+
+  let srcNames = null;
+  try {
+    const srcEntries = await readdir(srcDir, { withFileTypes: true });
+    srcNames = new Set(srcEntries.map((e) => e.name));
+  } catch (err) {
+    if (err.code !== "ENOENT") throw err;
+    // srcDir missing entirely — every dest entry is an orphan.
+    srcNames = new Set();
+  }
+
+  let removed = 0;
+  for (const entry of destEntries) {
+    const destPath = join(destDir, entry.name);
+    if (!srcNames.has(entry.name)) {
+      await rm(destPath, { recursive: true, force: true });
+      removed++;
+      continue;
+    }
+    if (entry.isDirectory()) {
+      const sub = await removeOrphans(join(srcDir, entry.name), destPath);
+      removed += sub.removed;
+    }
+  }
+  return { removed };
+}
+
+/**
  * Copy ForgeDock's own installable payload (bin/, commands/, scripts/,
  * templates/) from wherever the package currently resolved — npm global
  * install, npx/dlx cache, or any other non-git extraction — into a stable
@@ -1115,6 +1164,7 @@ async function copyDirIfChanged(srcDir, destDir) {
  *   version: string,
  *   filesCopied?: number,
  *   filesUnchanged?: number,
+ *   filesRemoved?: number,
  * }>}
  */
 export async function persistHome(ctx) {
@@ -1142,15 +1192,55 @@ export async function persistHome(ctx) {
     // proceed with version === ""
   }
 
+  // Downgrade guard (forge#2133): if a newer version is already persisted at
+  // ~/.forge/version than the source package we're about to copy from, skip
+  // the copy entirely rather than silently overwriting newer files with
+  // older ones. This happens when a stale resolved package (e.g. a plain
+  // `npx forgedock update` that resolved an old global install) runs after
+  // ~/.forge/ was already refreshed to a newer version by some other path
+  // (e.g. `npx forgedock@latest`). Both `version` and the persisted value
+  // must be non-empty for the guard to apply — an unreadable/missing
+  // ~/.forge/version is treated as "no guard needed" so first-run persist
+  // is never blocked.
+  const persistedVersionPath = join(persistedHome, "version");
+  let existingPersistedVersion = "";
+  let persistedVersionFileExists = true;
+  try {
+    existingPersistedVersion = readFileSync(persistedVersionPath, "utf-8").trim();
+  } catch {
+    // missing/unreadable — proceed, nothing to guard against. Tracked
+    // separately from existingPersistedVersion's "" default so the
+    // versionChanged check below (a fresh persist with no prior version
+    // file) is still correctly treated as "changed" even when the source
+    // package's own version also resolves to "" (e.g. missing package.json).
+    persistedVersionFileExists = false;
+  }
+  if (
+    version &&
+    existingPersistedVersion &&
+    compareVersions(version, existingPersistedVersion) < 0
+  ) {
+    return {
+      forgeHome: persistedHome,
+      migrated: false,
+      skipped: true,
+      reason: `refusing to downgrade ~/.forge/ from v${existingPersistedVersion} to v${version} — source package is older than what's already persisted`,
+      version: existingPersistedVersion,
+    };
+  }
+
   try {
     await mkdir(persistedHome, { recursive: true });
 
     let filesCopied = 0;
     let filesUnchanged = 0;
+    let filesRemoved = 0;
     for (const name of PERSIST_HOME_DIRS) {
       const res = await copyDirIfChanged(join(source, name), join(persistedHome, name));
       filesCopied += res.copied;
       filesUnchanged += res.unchanged;
+      const pruned = await removeOrphans(join(source, name), join(persistedHome, name));
+      filesRemoved += pruned.removed;
     }
 
     // Also persist package.json itself (not just PERSIST_HOME_DIRS) — several
@@ -1181,18 +1271,19 @@ export async function persistHome(ctx) {
 
     // Write ~/.forge/version — content-compared like everything else here so
     // an unchanged version doesn't touch the file's mtime on every re-run.
-    const versionPath = join(persistedHome, "version");
-    let versionChanged = true;
-    try {
-      versionChanged = readFileSync(versionPath, "utf-8").trim() !== version;
-    } catch {
-      // missing/unreadable — treat as changed
-    }
+    // Reuses persistedVersionPath/existingPersistedVersion read above for the
+    // downgrade guard rather than re-reading the same file a second time. A
+    // version file that didn't exist yet (persistedVersionFileExists: false)
+    // always counts as "changed", regardless of whether the source's own
+    // version happens to also be "" (e.g. missing package.json) — otherwise
+    // "" !== "" would wrongly read as unchanged on a fresh, never-persisted
+    // ~/.forge/.
+    let versionChanged = !persistedVersionFileExists || existingPersistedVersion !== version;
     if (versionChanged) {
-      const tmpVersionPath = versionPath + ".tmp";
+      const tmpVersionPath = persistedVersionPath + ".tmp";
       try {
         writeFileSync(tmpVersionPath, version + "\n", "utf-8");
-        renameSync(tmpVersionPath, versionPath);
+        renameSync(tmpVersionPath, persistedVersionPath);
       } catch (err) {
         try { unlinkSync(tmpVersionPath); } catch { /* best-effort cleanup */ }
         throw err;
@@ -1201,11 +1292,12 @@ export async function persistHome(ctx) {
 
     return {
       forgeHome: persistedHome,
-      migrated: filesCopied > 0 || versionChanged,
+      migrated: filesCopied > 0 || filesRemoved > 0 || versionChanged,
       skipped: false,
       version,
       filesCopied,
       filesUnchanged,
+      filesRemoved,
     };
   } catch (err) {
     // Fail-open (forge#383): a permission error, disk-full, etc. must never

@@ -5,7 +5,7 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { mkdtempSync, writeFileSync, readFileSync, existsSync, mkdirSync, cpSync, unlinkSync } from "node:fs";
+import { mkdtempSync, writeFileSync, readFileSync, existsSync, mkdirSync, cpSync, unlinkSync, rmSync } from "node:fs";
 import { join, dirname } from "node:path";
 import os from "node:os";
 import { fileURLToPath } from "node:url";
@@ -1043,5 +1043,149 @@ describe("status — re-entry mini-dashboard (#1945)", () => {
     assert.equal(res.status, 0, res.stdout + res.stderr);
     assert.doesNotMatch(res.stdout, /staging PRs/i);
     assert.doesNotMatch(res.stdout, /bot token/i);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// update() global npm install self-update (forge#2133)
+//
+// Regression covered: `npx forgedock update` on a machine with a global npm
+// install previously only printed an advisory ("New version available...
+// run npx forgedock@latest") and never actually upgraded anything — the
+// stale binary kept re-persisting itself into ~/.forge/ forever. This
+// exercises the fixed path: detect a global npm install (via `npm root -g`),
+// run `npm install -g forgedock@latest`, then re-exec the freshly-installed
+// binary to complete persist/relink.
+//
+// Stub relies on a POSIX shebang (`#!/bin/sh`) — CI runs ubuntu-only (see
+// .github/workflows/ci.yml), matching the existing shim precedent in this
+// file and in bin/tests/runner.test.mjs. Skipped on other platforms rather
+// than failed.
+// ---------------------------------------------------------------------------
+
+describe("update — global npm install self-update (forge#2133)", () => {
+  it("detects a global install, runs `npm install -g`, and re-execs to finish persist/relink from the new payload", () => {
+    if (process.platform === "win32") {
+      return;
+    }
+
+    const shimDir = mkdtempSync(join(os.tmpdir(), "fd-npm-shim-"));
+    const globalRoot = join(shimDir, "global-root");
+    const forgeHome = join(globalRoot, "forgedock");
+    const installLog = join(shimDir, "install-log.txt");
+
+    try {
+      // Build a fake global-install layout: {globalRoot}/forgedock is what
+      // `npm root -g` + isGlobalNpmInstall()'s `{root}/forgedock` join must
+      // resolve to.
+      mkdirSync(join(forgeHome, "bin"), { recursive: true });
+      cpSync(dirname(CLI), join(forgeHome, "bin"), {
+        recursive: true,
+        filter: (src) => !src.includes("tests"),
+      });
+      mkdirSync(join(forgeHome, "commands"), { recursive: true });
+      writeFileSync(join(forgeHome, "commands", "one.md"), "# /one\n\nTest command\n", "utf-8");
+      // Deliberately stale — guaranteed older than whatever the real npm
+      // registry's current "latest" is, so the self-update branch triggers
+      // without needing a fetchLatestVersion() stub (none is injectable —
+      // same constraint documented on the "does not hang..." version test
+      // above).
+      writeFileSync(join(forgeHome, "package.json"), JSON.stringify({ name: "forgedock", version: "0.0.1" }), "utf-8");
+
+      // Fake `npm`: responds to `npm root -g` with our fake global root, and
+      // to `npm install -g forgedock@X` by bumping the target package.json's
+      // version to X — simulating what a real `npm install -g` would leave
+      // on disk (the same install path, now containing the new version) —
+      // and logging the exact argv it received for the assertion below.
+      const npmShimPath = join(shimDir, "npm");
+      writeFileSync(
+        npmShimPath,
+        [
+          "#!/bin/sh",
+          'if [ "$1" = "root" ] && [ "$2" = "-g" ]; then',
+          `  printf '%s\\n' "${globalRoot.replace(/\\/g, "/")}"`,
+          "  exit 0",
+          "fi",
+          'if [ "$1" = "install" ] && [ "$2" = "-g" ]; then',
+          `  printf '%s\\n' "$3" >> "${installLog.replace(/\\/g, "/")}"`,
+          '  VER=$(printf \'%s\' "$3" | sed \'s/^forgedock@//\')',
+          `  NPM_SHIM_NEW_VERSION="$VER" node -e "const fs=require('fs');const p='${join(forgeHome, "package.json").replace(/\\/g, "/")}';const pkg=JSON.parse(fs.readFileSync(p,'utf-8'));pkg.version=process.env.NPM_SHIM_NEW_VERSION;fs.writeFileSync(p, JSON.stringify(pkg));"`,
+          "  exit 0",
+          "fi",
+          "exit 1",
+          "",
+        ].join("\n"),
+        { mode: 0o755 },
+      );
+
+      const home = mkdtempSync(join(os.tmpdir(), "fd-npm-shim-home-"));
+      const res = spawnSync(
+        process.execPath,
+        [join(forgeHome, "bin", "forgedock.mjs"), "update"],
+        {
+          cwd: mkdtempSync(join(os.tmpdir(), "fd-npm-shim-cwd-")),
+          env: {
+            ...process.env,
+            HOME: home,
+            USERPROFILE: home,
+            NO_COLOR: "1",
+            PATH: `${shimDir}:${process.env.PATH}`,
+          },
+          encoding: "utf-8",
+          timeout: 30000,
+        },
+      );
+
+      assert.equal(res.status, 0, `update exited non-zero:\n${res.stdout}\n${res.stderr}`);
+      assert.match(res.stdout, /Installing.*forgedock@.*globally/i);
+      assert.ok(existsSync(installLog), "the fake npm must have been invoked with `install -g`");
+      const loggedArg = readFileSync(installLog, "utf-8").trim();
+      assert.match(loggedArg, /^forgedock@\d+\.\d+\.\d+/, "npm install -g must be called with an explicit forgedock@<version> argv, not a bare 'npm update'");
+
+      // After re-exec, the local package.json must no longer read "0.0.1" —
+      // the fake npm bumped it to the real registry's latest version.
+      const finalPkg = JSON.parse(readFileSync(join(forgeHome, "package.json"), "utf-8"));
+      assert.notEqual(finalPkg.version, "0.0.1", "self-update must actually change the installed version, not leave the stale one in place");
+
+      // The re-exec must complete the persist/relink phase from the NEW
+      // payload — commands/one.md must be linked into ~/.claude/commands/.
+      assert.ok(
+        existsSync(join(home, ".claude", "commands", "one.md")),
+        "the re-exec'd update must complete relink from the newly-installed payload",
+      );
+    } finally {
+      rmSync(shimDir, { recursive: true, force: true });
+    }
+  });
+
+  it("falls back to the advisory message (no self-update attempt) when not a global install", () => {
+    // Regression guard: the existing npx-cache-path test above (line ~111)
+    // already covers this, but assert explicitly here that isGlobalNpmInstall()
+    // detection is negative for an ordinary temp-dir forgeHome (not nested
+    // under any `npm root -g` result), so the pre-existing advisory-only
+    // behavior for genuinely ephemeral installs is unchanged by forge#2133.
+    const forgeHome = mkdtempSync(join(os.tmpdir(), "fd-npm-notglobal-"));
+    cpSync(dirname(CLI), join(forgeHome, "bin"), {
+      recursive: true,
+      filter: (src) => !src.includes("tests"),
+    });
+    mkdirSync(join(forgeHome, "commands"), { recursive: true });
+    writeFileSync(join(forgeHome, "commands", "one.md"), "# /one\n\nTest command\n", "utf-8");
+    writeFileSync(join(forgeHome, "package.json"), JSON.stringify({ name: "forgedock", version: "0.0.1" }), "utf-8");
+
+    const home = mkdtempSync(join(os.tmpdir(), "fd-npm-notglobal-home-"));
+    const res = spawnSync(process.execPath, [join(forgeHome, "bin", "forgedock.mjs"), "update"], {
+      cwd: mkdtempSync(join(os.tmpdir(), "fd-npm-notglobal-cwd-")),
+      env: { ...process.env, HOME: home, USERPROFILE: home, NO_COLOR: "1" },
+      encoding: "utf-8",
+      timeout: 30000,
+    });
+
+    assert.equal(res.status, 0, res.stdout + res.stderr);
+    // Either the registry lookup succeeded and printed the advisory (most
+    // likely, since 0.0.1 is guaranteed stale), or network was unavailable —
+    // both are correct outcomes; the decisive assertion is what must NOT
+    // happen: no self-update attempt.
+    assert.doesNotMatch(res.stdout, /Installing.*forgedock@.*globally/i);
   });
 });
