@@ -144,8 +144,19 @@ export async function runIssue(opts) {
       // execution — covers the committed path, the blocked path, and the
       // engine-error fail-fast throw caught just below.
       await projector.writeState(issue, { ...state, lease: { by: agentId, until: now() + leaseTtlMs } });
+      // forge#2239 (review finding): `projector.writeState` is a plain
+      // read-body/edit-body round trip with no CAS — whichever `gh issue
+      // edit` call actually lands last on GitHub wins, regardless of dispatch
+      // order. A fire-and-forget renewal write left in flight when this
+      // phase finishes could land AFTER the post-commit write or even after
+      // terminate()'s `lease: null` write, resurrecting a phantom lease on an
+      // already-terminated run. Track the most recently dispatched renewal's
+      // promise and await it in `finally` (below) before letting the loop
+      // proceed — this guarantees no renewal write is still in flight when
+      // control moves on to the next write (commit or terminate).
+      let pendingRenewal = null;
       const renewLease = () => {
-        projector.writeState(issue, { ...state, lease: { by: agentId, until: now() + leaseTtlMs } }).catch(() => {
+        pendingRenewal = projector.writeState(issue, { ...state, lease: { by: agentId, until: now() + leaseTtlMs } }).catch(() => {
           // Best-effort: a transient renewal failure must not crash the run.
           // The next scheduled renewal (or the post-commit write) will retry.
         });
@@ -174,6 +185,11 @@ export async function runIssue(opts) {
         throw e;
       } finally {
         clearInterval(renewTimer);
+        // Join any renewal write already dispatched before this phase's
+        // outcome is allowed to reach a commit/terminate write — closes the
+        // TOCTOU window above. `pendingRenewal` already swallows its own
+        // rejection (see renewLease()), so this await never throws.
+        if (pendingRenewal) await pendingRenewal;
       }
     }
 

@@ -1043,6 +1043,79 @@ describe("runIssue — forge#2239: in-flight lease", () => {
     assert.equal(finalState.lease, null, "terminal states must still publish lease: null (no regression)");
   });
 
+  it("review finding: a slow in-flight heartbeat renewal write must not resurrect the lease after terminate()'s lease:null write", async () => {
+    // Regression test for a CONFIRMED HIGH review finding on this PR:
+    // projector.writeState is a plain read-body/edit-body round trip with no
+    // CAS, so whichever `gh issue edit` call lands last on GitHub wins,
+    // regardless of dispatch order. The heartbeat renewal write is
+    // fire-and-forget (best-effort .catch()) — without joining it before the
+    // loop proceeds to a commit/terminate write, a slow renewal write that
+    // was already in flight when the phase finished could land AFTER
+    // terminate()'s lease:null write, resurrecting a phantom non-null lease
+    // on an already-terminated run. The fix: track the most recently
+    // dispatched renewal's promise and await it in `finally` before letting
+    // the loop continue.
+    const { w, io } = fakeWorld();
+    const origGh = io.gh;
+    let delayNextEdit = false;
+    // Track the slow write's own promise so the test can deterministically wait
+    // for it to actually land on `w.body`, regardless of whether runIssue()
+    // itself joins it (pre-fix: it doesn't; post-fix: it does). Without this,
+    // asserting on `w.body` immediately after `runIssue()` resolves would race
+    // ahead of the slow write in BOTH the buggy and fixed code paths, making
+    // the assertion pass trivially either way.
+    let slowEditPromise = null;
+    io.gh = async (args) => {
+      if (args[0] === "issue" && args[1] === "edit" && delayNextEdit) {
+        delayNextEdit = false;
+        // Simulate a slow GitHub API round trip for exactly one renewal write —
+        // long enough that, without the fix, it would still be in flight when
+        // the phase finishes and the run reaches terminate().
+        const delayed = new Promise((resolve) => setTimeout(resolve, 60)).then(() => origGh(args));
+        slowEditPromise = delayed;
+        return delayed;
+      }
+      return origGh(args);
+    };
+
+    const LEASE_TTL_MS = 20;
+    const LEASE_RENEW_INTERVAL_MS = 5;
+
+    const runner = async ({ commandName }) => {
+      if (commandName === "work-on/investigate") {
+        // Let exactly one renewal heartbeat fire and become "slow", then
+        // immediately finish the phase — this is the exact window where the
+        // pre-fix code would leave the slow write unjoined.
+        await new Promise((resolve) => setTimeout(resolve, LEASE_RENEW_INTERVAL_MS + 1));
+        delayNextEdit = true;
+        await new Promise((resolve) => setTimeout(resolve, LEASE_RENEW_INTERVAL_MS + 1));
+      }
+      // Terminal (INVALID) on first phase — reaches terminate()'s lease:null
+      // write shortly after the slow renewal write was dispatched.
+      w.markers += " INVESTIGATION:INVALID";
+      return { status: "complete" };
+    };
+
+    const res = await runIssue({ issue: 42, dir, agentId: "a1", lane: "staging",
+      io, runner, now: () => Date.now(), maxAttempts: 1,
+      leaseTtlMs: LEASE_TTL_MS, leaseRenewIntervalMs: LEASE_RENEW_INTERVAL_MS });
+
+    assert.equal(res.terminalReason, "invalid");
+    // Critical: explicitly wait for the slow write to actually land before
+    // inspecting `w.body`. Pre-fix, `runIssue()` itself resolves WITHOUT
+    // joining the slow renewal write (that's the bug) — so checking `w.body`
+    // immediately after `await runIssue(...)` would race ahead of the slow
+    // write in BOTH the buggy and fixed code, making this assertion pass
+    // trivially either way. Post-fix, `runIssue()` already joins the slow
+    // write internally before returning, so this await is a no-op there.
+    if (slowEditPromise) await slowEditPromise;
+    const { parseState } = await import("../engine/state.mjs");
+    const finalState = parseState(w.body);
+    assert.equal(finalState.lease, null,
+      "a slow in-flight renewal write must be joined before terminate()'s lease:null write, " +
+      "so it can never land afterward and resurrect a phantom lease");
+  });
+
   it("a second concurrent run-issue is deferred by the now-real (non-null) lease claimed by the first run", async () => {
     // End-to-end proof that the concurrency guard (bin/engine.mjs I3 check) is
     // actually reachable now: run agent "a1" far enough to claim a lease (but
