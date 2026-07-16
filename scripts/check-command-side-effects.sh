@@ -108,6 +108,31 @@ class_a_scan() {
   local LN=0
   local line PUBLIC_LN ACTUAL_LINE IS_FENCE IS_BARE
 
+  # flush_a_block — evaluate the currently-accumulated block's HAS_GIST/
+  # BLOCK_LINES state for a 'gh gist create/edit --public' violation, then
+  # reset it. Defined inside class_a_scan (not at file scope) so it shares
+  # this invocation's `local` variables via bash's dynamic scoping — the same
+  # mechanism Class B's flush_block() relies on for its own loop-local state.
+  # Called from two sites: (1) the existing fence-close path below, when a
+  # bare fence brings IN_CB back to 0, and (2) once more, defensively, after
+  # the read loop ends — covering a file that ends with an unterminated
+  # fence (IN_CB still > 0 at EOF), which previously discarded any
+  # accumulated violation silently. (forge#2289 added the equivalent
+  # end-of-file flush for Class B only; this closes the same gap in Class A.)
+  flush_a_block() {
+    if [ "$HAS_GIST" -eq 1 ] && echo "$BLOCK_LINES" | grep -qE '^[[:space:]]*--public([[:space:]]|$)'; then
+      # Find the line number of --public within the block
+      PUBLIC_LN=$(echo "$BLOCK_LINES" | grep -n '^[[:space:]]*--public' | head -1 | cut -d: -f1)
+      ACTUAL_LINE=$((BLOCK_START + PUBLIC_LN))
+      if ! echo "$BLOCK_LINES" | grep -qF "$ALLOWLIST_TOKEN"; then
+        echo "HIGH | $file | line ~$ACTUAL_LINE | Class A: 'gh gist create/edit --public' in code block — gists MUST be secret (omit --public); --public exposes private repo data. (forge#1587)" >&2
+        VIOLATIONS=$((VIOLATIONS + 1))
+      fi
+    fi
+    HAS_GIST=0
+    BLOCK_LINES=""
+  }
+
   while IFS= read -r line; do
     LN=$((LN + 1))
 
@@ -149,19 +174,8 @@ class_a_scan() {
         IN_CB=$((IN_CB + 1))
       fi
       if [ "$IN_CB" -eq 0 ]; then
-        # Fully closed (outermost fence) — check if the accumulated block had
-        # both gh gist and --public.
-        if [ "$HAS_GIST" -eq 1 ] && echo "$BLOCK_LINES" | grep -qE '^[[:space:]]*--public([[:space:]]|$)'; then
-          # Find the line number of --public within the block
-          PUBLIC_LN=$(echo "$BLOCK_LINES" | grep -n '^[[:space:]]*--public' | head -1 | cut -d: -f1)
-          ACTUAL_LINE=$((BLOCK_START + PUBLIC_LN))
-          if ! echo "$BLOCK_LINES" | grep -qF "$ALLOWLIST_TOKEN"; then
-            echo "HIGH | $file | line ~$ACTUAL_LINE | Class A: 'gh gist create/edit --public' in code block — gists MUST be secret (omit --public); --public exposes private repo data. (forge#1587)" >&2
-            VIOLATIONS=$((VIOLATIONS + 1))
-          fi
-        fi
-        HAS_GIST=0
-        BLOCK_LINES=""
+        # Fully closed (outermost fence) — evaluate the accumulated block now.
+        flush_a_block
         continue
       fi
       # Still inside (nested transition) — the fence line itself is block content.
@@ -178,6 +192,12 @@ class_a_scan() {
       HAS_GIST=1
     fi
   done < "$file"
+
+  # Defensive final flush — evaluates any block state left accumulated if the
+  # file ended with an unterminated fence (IN_CB never returned to 0). A
+  # no-op if the last block already closed and was flushed above. Mirrors
+  # Class B's identical end-of-file `flush_block` call. (forge#2305)
+  flush_a_block
 }
 
 while IFS= read -r file; do
