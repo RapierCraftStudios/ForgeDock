@@ -34,6 +34,17 @@ export const DEFAULT_LEASE_RENEW_INTERVAL_MS = 240000;
  * @param {number} [opts.leaseRenewIntervalMs] - forge#2239: how often the lease
  *   is re-written while an unsatisfied phase's runner is executing. Defaults to
  *   DEFAULT_LEASE_RENEW_INTERVAL_MS. Overridable for tests.
+ * @param {(event: {event: string, phase: string, status?: string, detail?: string}) => void} [opts.onProgress] -
+ *   forge#2240: optional phase-boundary observer. Called with
+ *   `{event: "phase_enter", phase}` right before a phase's runner is about to
+ *   execute (i.e. the phase was NOT already satisfied on reconcile), and with
+ *   `{event: "phase_exit", phase, status: "committed"|"blocked", detail?}`
+ *   once that phase's outcome is known. Defaults to a no-op so every existing
+ *   caller/test is unaffected. Deliberately engine.mjs's ONLY new surface for
+ *   this issue — no `console.log`/stdout write is added here; printing is the
+ *   CLI layer's job (bin/engine-cli.mjs), preserving the io-injection/testability
+ *   convention this module already follows. Invocations are wrapped so a
+ *   throwing callback can never crash a run.
  */
 export async function runIssue(opts) {
   const { issue, dir, agentId, lane = "staging", io, runner,
@@ -45,7 +56,14 @@ export async function runIssue(opts) {
           // this is purely additive pass-through, not a new default.
           backend, model,
           leaseTtlMs = DEFAULT_LEASE_TTL_MS,
-          leaseRenewIntervalMs = DEFAULT_LEASE_RENEW_INTERVAL_MS } = opts;
+          leaseRenewIntervalMs = DEFAULT_LEASE_RENEW_INTERVAL_MS,
+          onProgress = () => {} } = opts;
+
+  // forge#2240: defensive wrapper — a caller's onProgress must never be able
+  // to crash an otherwise-healthy run.
+  const emitProgress = (event) => {
+    try { onProgress(event); } catch { /* best-effort observer, never fatal */ }
+  };
 
   // forge#2054: validate `backend` before anything else — before state is
   // read/written and before the phase/retry loop begins below. An invalid
@@ -133,6 +151,9 @@ export async function runIssue(opts) {
       outcome = { status: "committed", outputs: reconciled.outputs || {} };
     } else {
       if (reconciled.outputs?.pr) state.pr = reconciled.outputs.pr;
+      // forge#2240: the phase is actually about to run (not a resume no-op)
+      // — this is the one point in the loop where "entering phase X" is true.
+      emitProgress({ event: "phase_enter", phase: phase.id });
       // forge#2239: renew the lease immediately before running this phase's
       // runner, then keep renewing it on a heartbeat for as long as the
       // runner is in flight. A single phase can legitimately run longer than
@@ -193,9 +214,13 @@ export async function runIssue(opts) {
       }
     }
 
-    if (outcome.status === "blocked") return await terminate(state, outcome.reason || "needs-human", outcome.detail);
+    if (outcome.status === "blocked") {
+      emitProgress({ event: "phase_exit", phase: phase.id, status: "blocked", detail: outcome.detail });
+      return await terminate(state, outcome.reason || "needs-human", outcome.detail);
+    }
 
     // committed
+    emitProgress({ event: "phase_exit", phase: phase.id, status: "committed" });
     appendEvent(dir, issue, { event: "PHASE_COMMIT", phase: phase.id, outputs: outcome.outputs || {} });
     state = deriveState(readLog(dir, issue));
     if (outcome.terminalReason) state.terminalReason = outcome.terminalReason;

@@ -384,6 +384,65 @@ describe("runFromCli --repo targeting guard", () => {
   });
 });
 
+describe("runFromCli phase progress output (forge#2240)", () => {
+  it("prints the run-log path at start, before runIssue is even invoked", async () => {
+    const dir = mkdtempSync(join(os.tmpdir(), "engine-cli-test-"));
+    const io = { gh: async () => { throw new Error("should not be called"); } };
+    const logs = [];
+    let runLogPrintedBeforeRunIssue = false;
+    const runIssue = mock.fn(async () => {
+      // At the moment runIssue is invoked, the run-log line must already be there.
+      runLogPrintedBeforeRunIssue = logs.some((l) => l.includes("run-log:"));
+      return { terminalReason: "merged" };
+    });
+
+    const originalLog = console.log;
+    console.log = (...args) => logs.push(args.join(" "));
+    try {
+      await runFromCli(["42", "--lane", "staging"], { io, runIssue, dir });
+    } finally {
+      console.log = originalLog;
+      rmSync(dir, { recursive: true, force: true });
+    }
+
+    assert.ok(runLogPrintedBeforeRunIssue, "run-log path must be printed before runIssue starts, not only in a completion summary");
+    assert.ok(logs.some((l) => l.includes(`run-log: ${join(dir, "42.jsonl")}`)));
+  });
+
+  it("emits a stdout line for each phase_enter/phase_exit onProgress event from runIssue", async () => {
+    const dir = mkdtempSync(join(os.tmpdir(), "engine-cli-test-"));
+    const io = { gh: async () => { throw new Error("should not be called"); } };
+    const runIssue = mock.fn(async ({ onProgress }) => {
+      // Simulate a multi-phase run in flight — more than the startup banner.
+      onProgress({ event: "phase_enter", phase: "investigate" });
+      onProgress({ event: "phase_exit", phase: "investigate", status: "committed" });
+      onProgress({ event: "phase_enter", phase: "build" });
+      onProgress({ event: "phase_exit", phase: "build", status: "blocked", detail: "no commits yet" });
+      return { terminalReason: "needs-human" };
+    });
+
+    const logs = [];
+    const originalLog = console.log;
+    console.log = (...args) => logs.push(args.join(" "));
+    try {
+      await runFromCli(["42", "--lane", "staging"], { io, runIssue, dir });
+    } finally {
+      console.log = originalLog;
+      rmSync(dir, { recursive: true, force: true });
+    }
+
+    const output = logs.join("\n");
+    assert.match(output, /phase investigate started/);
+    assert.match(output, /phase investigate committed/);
+    assert.match(output, /phase build started/);
+    assert.match(output, /phase build blocked: no commits yet/);
+    // A run in flight for longer than one phase produces more than just the
+    // run-log line and the final summary line — the explicit regression this
+    // issue targets.
+    assert.ok(logs.length > 2, "expected more than just the run-log line and the completion summary");
+  });
+});
+
 describe("runFromCli --backend/--model forwarding (forge#2028)", () => {
   it("forwards --backend and --model to runIssue when both are supplied", async () => {
     const io = { gh: async () => { throw new Error("should not be called"); } };
@@ -555,7 +614,7 @@ describe("runFromCli terminal diagnostics (forge#2175)", () => {
     assert.match(output, /run-log:/);
   });
 
-  it("does NOT print the diagnostic block after a merged termination", async () => {
+  it("does NOT print the post-completion diagnostic block after a merged termination", async () => {
     const dir = mkdtempSync(join(os.tmpdir(), "engine-cli-test-"));
     const io = { gh: async () => { throw new Error("should not be called"); } };
     const runIssue = mock.fn(async () => ({ terminalReason: "merged" }));
@@ -572,6 +631,14 @@ describe("runFromCli terminal diagnostics (forge#2175)", () => {
 
     const output = logs.join("\n");
     assert.match(output, /issue #42 → merged/);
-    assert.ok(!output.includes("run-log:"), "no diagnostic block should be printed on a merged termination");
+    // forge#2240: the run-log path is now always printed once at run START
+    // (so a caller knows where to look immediately, not only on failure) —
+    // that single startup line is expected here. What must NOT appear is the
+    // post-completion diagnostic BLOCK (phase:/reason: lines), which stays
+    // gated to non-merged terminations (forge#2175's original intent).
+    const runLogLines = logs.filter((l) => l.includes("run-log:"));
+    assert.equal(runLogLines.length, 1, "run-log path should be printed exactly once (at start), not again in a diagnostic block");
+    assert.ok(!output.includes("phase:"), "no diagnostic block should be printed on a merged termination");
+    assert.ok(!output.includes("reason:"), "no diagnostic block should be printed on a merged termination");
   });
 });

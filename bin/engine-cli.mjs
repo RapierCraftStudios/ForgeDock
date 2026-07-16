@@ -304,8 +304,24 @@ export async function runFromCli(argv, deps = {}) {
   const agentId = `cli_${process.pid}`;
   // Injectable for tests (forge#2175) — defaults to the real ~/.forge/runs dir.
   const dir = deps.dir ?? runDir();
+  // forge#2240: print the run-log path at the very start of the run, not only
+  // in the non-merged completion diagnostics (formatTerminalDiagnostics prints
+  // it too, but only post-completion and only for non-"merged" outcomes). A
+  // caller tailing this process's stdout should be able to find the run-log
+  // to inspect immediately, without waiting for the run to finish.
+  console.log(`run-log: ${join(dir, `${issue}.jsonl`)}`);
+  // forge#2240: phase-boundary progress lines — the only stdout emitted
+  // during the run itself. `runIssue()`'s `onProgress` callback defaults to a
+  // no-op, so this is purely additive; engine.mjs never calls console.log
+  // directly (keeps it injectable/testable — see its onProgress param doc).
+  const onProgress = (e) => {
+    if (e.event === "phase_enter") console.log(`→ phase ${e.phase} started`);
+    else if (e.event === "phase_exit" && e.status === "committed") console.log(`✓ phase ${e.phase} committed`);
+    else if (e.event === "phase_exit" && e.status === "blocked") console.log(`✗ phase ${e.phase} blocked: ${e.detail ?? "no detail"}`);
+  };
   const res = await runIssueFn({ issue, dir, agentId, lane, io,
     runner: (await import("./runner.mjs")).runCommand, now: () => Date.now(),
+    onProgress,
     // Only forwarded when explicitly provided — omitting them preserves
     // runIssue's/runner.mjs's existing defaults (forge#2028).
     ...(backend ? { backend } : {}),
