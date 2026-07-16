@@ -174,6 +174,41 @@ describe("runIssue", () => {
     assert.equal(res.terminalReason, "merged");
   });
 
+  it("forge#2321: phase_exit is not emitted without a matching phase_enter for a reconcile-satisfied phase", async () => {
+    // Regression for the R1 resume scenario (context.reconcile short-circuits
+    // when FORGE:CONTEXT is already present): the phase's runner never
+    // executes on this path, so phase_enter is never emitted for it either —
+    // phase_exit must not be emitted for it, to avoid a dangling exit with no
+    // preceding enter (bin/engine-cli.mjs would otherwise print "✓ phase
+    // context committed" with no prior "→ phase context started" line).
+    const { w, io } = fakeWorld();
+    w.markers = " INVESTIGATION:COMPLETE FORGE:CONTEXT:COMPLETE";
+    const { appendEvent } = await import("../engine/runlog.mjs");
+    appendEvent(dir, 42, { event: "RUN_START", issue: 42, run: "r_42_staging", lane: "staging" });
+    appendEvent(dir, 42, { event: "PHASE_COMMIT", phase: "investigate", outputs: {} });
+
+    const script = {
+      "work-on/build/architect": () => { w.markers += " FORGE:ARCHITECT:COMPLETE"; },
+      "work-on/build": () => { w.markers += " FORGE:BUILDER:COMPLETE **Branch**: `fix/real-branch-42`"; w.commitsAhead = 2; },
+      "work-on/review": () => { w.pr = 7; w.prMerged = true; },
+      "work-on/close": () => { w.issueState = "CLOSED"; },
+    };
+    const runner = async ({ commandName }) => { script[commandName]?.(); return { status: "complete" }; };
+    const events = [];
+
+    const res = await runIssue({ issue: 42, dir, agentId: "a1", lane: "staging",
+      io, runner, now: () => 1000, maxAttempts: 3, onProgress: (e) => events.push(e) });
+
+    assert.equal(res.terminalReason, "merged");
+    const contextEvents = events.filter((e) => e.phase === "context");
+    assert.deepEqual(contextEvents, [], "a reconcile-satisfied phase must emit neither phase_enter nor phase_exit");
+
+    // Sanity: a phase that DID actually run (architect, not pre-satisfied)
+    // still gets a paired enter+exit — proves the fix does not over-suppress.
+    const architectEvents = events.filter((e) => e.phase === "architect").map((e) => e.event);
+    assert.deepEqual(architectEvents, ["phase_enter", "phase_exit"]);
+  });
+
   it("stops at needs-human when a phase reports blocked (no silent merge)", async () => {
     const { w, io } = fakeWorld();
     const script = {
@@ -1148,6 +1183,80 @@ describe("runIssue — forge#2313: lease config validation", () => {
       io, runner, now: () => 1000, maxAttempts: 1,
       leaseTtlMs: 1000, leaseRenewIntervalMs: 100 });
     assert.notEqual(res2.terminalReason, undefined);
+  });
+
+  it("forge#2329: rejects NaN leaseTtlMs, which silently bypasses the relational check", async () => {
+    // NaN >= x and x >= NaN are both false in JS, so `leaseRenewIntervalMs >=
+    // leaseTtlMs` alone never catches a NaN leaseTtlMs — this must be caught
+    // by the finite-number guard instead.
+    const { w, io } = fakeWorld();
+    const runner = async () => { throw new Error("runner must never be called"); };
+
+    await assert.rejects(
+      () => runIssue({ issue: 46, dir, agentId: "a1", lane: "staging",
+        io, runner, now: () => 1000, maxAttempts: 1,
+        leaseTtlMs: NaN, leaseRenewIntervalMs: 100 }),
+      (err) => {
+        assert.equal(err.code, "INVALID_LEASE_CONFIG");
+        assert.match(err.message, /leaseTtlMs must be a finite number/);
+        return true;
+      },
+    );
+    assert.equal(w.body, "Issue.", "no state should be written to GitHub for an invalid lease config");
+  });
+
+  it("forge#2329: rejects NaN leaseRenewIntervalMs, which silently bypasses the relational check", async () => {
+    const { io } = fakeWorld();
+    const runner = async () => { throw new Error("runner must never be called"); };
+
+    await assert.rejects(
+      () => runIssue({ issue: 47, dir, agentId: "a1", lane: "staging",
+        io, runner, now: () => 1000, maxAttempts: 1,
+        leaseTtlMs: 1000, leaseRenewIntervalMs: NaN }),
+      (err) => {
+        assert.equal(err.code, "INVALID_LEASE_CONFIG");
+        assert.match(err.message, /leaseRenewIntervalMs must be a finite number/);
+        return true;
+      },
+    );
+  });
+
+  it("forge#2329: rejects Infinity and -Infinity lease values", async () => {
+    const { io } = fakeWorld();
+    const runner = async () => { throw new Error("runner must never be called"); };
+
+    await assert.rejects(
+      () => runIssue({ issue: 48, dir, agentId: "a1", lane: "staging",
+        io, runner, now: () => 1000, maxAttempts: 1,
+        leaseTtlMs: Infinity, leaseRenewIntervalMs: 100 }),
+      (err) => { assert.equal(err.code, "INVALID_LEASE_CONFIG"); return true; },
+    );
+
+    await assert.rejects(
+      () => runIssue({ issue: 49, dir, agentId: "a1", lane: "staging",
+        io, runner, now: () => 1000, maxAttempts: 1,
+        leaseTtlMs: 1000, leaseRenewIntervalMs: -Infinity }),
+      (err) => { assert.equal(err.code, "INVALID_LEASE_CONFIG"); return true; },
+    );
+  });
+
+  it("forge#2329: rejects non-numeric lease values (string, null)", async () => {
+    const { io } = fakeWorld();
+    const runner = async () => { throw new Error("runner must never be called"); };
+
+    await assert.rejects(
+      () => runIssue({ issue: 50, dir, agentId: "a1", lane: "staging",
+        io, runner, now: () => 1000, maxAttempts: 1,
+        leaseTtlMs: "1000", leaseRenewIntervalMs: 100 }),
+      (err) => { assert.equal(err.code, "INVALID_LEASE_CONFIG"); return true; },
+    );
+
+    await assert.rejects(
+      () => runIssue({ issue: 51, dir, agentId: "a1", lane: "staging",
+        io, runner, now: () => 1000, maxAttempts: 1,
+        leaseTtlMs: 1000, leaseRenewIntervalMs: null }),
+      (err) => { assert.equal(err.code, "INVALID_LEASE_CONFIG"); return true; },
+    );
   });
 });
 

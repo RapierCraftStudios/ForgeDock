@@ -108,11 +108,36 @@ export async function runIssue(opts) {
   // "phase outlives its lease" gap #2239 closed, because a genuinely-alive
   // run would publish (or be caught holding) an expired `lease.until` in that
   // window, which both the I3 concurrency guard above and the stall-recovery
-  // scanner (commands/orchestrate/config.md) read directly. Both parameters
-  // are overridable-for-tests options with no current production caller
-  // forwarding them (bin/engine-cli.mjs's runFromCli() only forwards
+  // scanner (commands/orchestrate/phase-3-dependency.md) read directly. Both
+  // parameters are overridable-for-tests options with no current production
+  // caller forwarding them (bin/engine-cli.mjs's runFromCli() only forwards
   // `backend`/`model`), so this only guards a future caller/config typo —
   // reject rather than silently clamp, matching INVALID_BACKEND's precedent.
+  //
+  // forge#2329: guard for finite numbers BEFORE the relational check below.
+  // Every relational comparison against NaN evaluates to false in JS, so a
+  // NaN in either parameter silently passes `leaseRenewIntervalMs >=
+  // leaseTtlMs` (both `NaN >= x` and `x >= NaN` are false) — reopening the
+  // exact gap this whole guard exists to close, just via a different bad
+  // input. Infinity/-Infinity are "numbers" per `typeof` but are equally
+  // nonsensical as a lease duration/interval and are not reliably caught by
+  // the relational check either. Non-number types (strings, null, objects)
+  // are coerced by `>=` instead of rejected, which can silently poison
+  // downstream arithmetic (`now() + leaseTtlMs`) with string concatenation
+  // instead of numeric addition. Same placement precedent as the relational
+  // check itself: synchronous, before any state I/O or timer creation, so it
+  // cannot interact with the async lease-renewal heartbeat or the
+  // crash-and-relaunch write-then-throw architecture (bin/tests/engine-crash.test.mjs).
+  for (const [name, value] of [["leaseTtlMs", leaseTtlMs], ["leaseRenewIntervalMs", leaseRenewIntervalMs]]) {
+    if (typeof value !== "number" || !Number.isFinite(value)) {
+      throw Object.assign(
+        new Error(
+          `Invalid lease config: ${name} must be a finite number, got ${typeof value === "number" ? value : `${typeof value} (${JSON.stringify(value)})`}.`,
+        ),
+        { code: "INVALID_LEASE_CONFIG" },
+      );
+    }
+  }
   if (leaseRenewIntervalMs >= leaseTtlMs) {
     throw Object.assign(
       new Error(
@@ -159,7 +184,7 @@ export async function runIssue(opts) {
   // (and, for the "local" action, every phase before the first commit)
   // publishing lease:null. That is indistinguishable from a dead run to both
   // the I3 concurrency guard above and the stall-recovery scan in
-  // commands/orchestrate/config.md. This write MUST stay after the I3 guard
+  // commands/orchestrate/phase-3-dependency.md. This write MUST stay after the I3 guard
   // check above (commit 541a3e5 fixed the reverse ordering as a real bug —
   // do not reintroduce it).
   await projector.writeState(issue, { ...state, lease: { by: agentId, until: now() + leaseTtlMs } });
@@ -176,6 +201,15 @@ export async function runIssue(opts) {
   // the real branch from the `FORGE:BUILDER` comment instead.
   let phase;
   while ((phase = pickPhase(state))) {
+    // forge#2321: tracks whether `phase_enter` was actually emitted for this
+    // loop iteration. Re-declared `false` on every iteration (never hoisted
+    // above the loop) so a reconcile-satisfied phase can never inherit a
+    // stale `true` from a previous iteration's actually-run phase. Only the
+    // committed-exit emission below needs this guard — the blocked-exit
+    // emission is unreachable from the `reconciled.satisfied` branch, since
+    // that branch always yields `status: "committed"` (see below), never
+    // "blocked".
+    let phaseEntered = false;
     let reconciled;
     try {
       reconciled = phase.reconcile ? await phase.reconcile(state, io) : { satisfied: false };
@@ -191,6 +225,7 @@ export async function runIssue(opts) {
       if (reconciled.outputs?.pr) state.pr = reconciled.outputs.pr;
       // forge#2240: the phase is actually about to run (not a resume no-op)
       // — this is the one point in the loop where "entering phase X" is true.
+      phaseEntered = true;
       emitProgress({ event: "phase_enter", phase: phase.id });
       // forge#2239: renew the lease immediately before running this phase's
       // runner, then keep renewing it on a heartbeat for as long as the
@@ -272,7 +307,15 @@ export async function runIssue(opts) {
     }
 
     // committed
-    emitProgress({ event: "phase_exit", phase: phase.id, status: "committed" });
+    // forge#2321: only report a phase_exit if a matching phase_enter was
+    // actually emitted for this phase this iteration. A reconcile-satisfied
+    // phase (short-circuited above without ever entering the `else` branch)
+    // never "started" this run — emitting phase_exit for it produced a
+    // dangling exit with no preceding enter (bin/engine-cli.mjs prints
+    // "✓ phase X committed" with no prior "→ phase X started" line).
+    // Suppressing the unmatched exit is correct here rather than fabricating
+    // a synthetic phase_enter, since the phase's runner genuinely never ran.
+    if (phaseEntered) emitProgress({ event: "phase_exit", phase: phase.id, status: "committed" });
     appendEvent(dir, issue, { event: "PHASE_COMMIT", phase: phase.id, outputs: outcome.outputs || {} });
     state = deriveState(readLog(dir, issue));
     if (outcome.terminalReason) state.terminalReason = outcome.terminalReason;
