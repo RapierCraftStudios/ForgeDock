@@ -54,7 +54,12 @@ describe("resolveCascadePolicy — presets", () => {
     assert.equal(policy.deferOnBatchGated, false);
     assert.equal(policy.keywordHeuristic, false);
     assert.equal(policy.p3SameFileDefer, false);
-    assert.deepEqual(warnings, []);
+    // "all" leaves both levers uncapped by design — this is the one preset expected to
+    // carry the both-uncapped notice (see "resolveCascadePolicy — both-uncapped notice"
+    // describe block below for the dedicated coverage of that behavior).
+    assert.deepEqual(warnings, [
+      "orchestration.cascade: both max_generation and token_budget are unlimited — cascade admission has no upper bound on generation depth or token spend for this run.",
+    ]);
   });
 
   it("policy: conservative keeps balanced's shape but lowers the token budget", () => {
@@ -110,6 +115,57 @@ describe("resolveCascadePolicy — token_budget deprecated-alias fallback", () =
   it("orchestration.cascade.token_budget wins over the legacy alias when both are set", () => {
     const { policy } = resolveCascadePolicy({ policy: "balanced", token_budget: 50000 }, 300000);
     assert.equal(policy.tokenBudget, 50000);
+  });
+
+  it("validates the legacy fallback itself — a malformed legacy value does not silently bypass validation (forge#2302)", () => {
+    const { policy, warnings } = resolveCascadePolicy({ policy: "balanced" }, -1);
+    // -1 is invalid — must NOT be silently adopted; falls back to the balanced preset default.
+    assert.equal(policy.tokenBudget, 900000);
+    assert.ok(warnings.some((w) => /token_budget_per_batch \(legacy alias\)/.test(w)));
+  });
+
+  it("accepts a valid legacy fallback with no warning", () => {
+    const { policy, warnings } = resolveCascadePolicy({ policy: "balanced" }, 123456);
+    assert.equal(policy.tokenBudget, 123456);
+    assert.ok(!warnings.some((w) => /legacy alias/.test(w)));
+  });
+});
+
+describe("resolveCascadePolicy — both-uncapped notice", () => {
+  it("flags bothUncapped and adds a warning when policy: all leaves both levers unlimited", () => {
+    const { policy, bothUncapped, warnings } = resolveCascadePolicy({ policy: "all" });
+    assert.equal(policy.maxGeneration, UNLIMITED);
+    assert.equal(policy.tokenBudget, UNLIMITED);
+    assert.equal(bothUncapped, true);
+    assert.ok(warnings.some((w) => /both max_generation and token_budget are unlimited/.test(w)));
+  });
+
+  it("flags bothUncapped via a granular override combination, not just the all preset", () => {
+    const { bothUncapped } = resolveCascadePolicy({
+      policy: "balanced",
+      max_generation: "unlimited",
+      token_budget: "unlimited",
+    });
+    assert.equal(bothUncapped, true);
+  });
+
+  it("does not flag bothUncapped when only one lever is uncapped", () => {
+    const { bothUncapped: onlyGenUncapped } = resolveCascadePolicy({
+      policy: "balanced",
+      max_generation: "unlimited",
+    });
+    assert.equal(onlyGenUncapped, false);
+
+    const { bothUncapped: onlyTokenUncapped } = resolveCascadePolicy({
+      policy: "balanced",
+      token_budget: "unlimited",
+    });
+    assert.equal(onlyTokenUncapped, false);
+  });
+
+  it("balanced preset (default, no config) never flags bothUncapped", () => {
+    const { bothUncapped } = resolveCascadePolicy();
+    assert.equal(bothUncapped, false);
   });
 });
 

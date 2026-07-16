@@ -151,7 +151,7 @@ export function parseIntOrUnlimited(raw, fallback) {
  * @param {number|string} [legacyTokenBudgetPerBatch] - Deprecated-alias fallback:
  *   `pipeline.token_budget_per_batch`, read when `config.token_budget` is absent
  *   so existing configs keep working unchanged (see forge#1858).
- * @returns {{ policy: CascadePolicy, policyName: string, warnings: string[] }}
+ * @returns {{ policy: CascadePolicy, policyName: string, bothUncapped: boolean, warnings: string[] }}
  */
 export function resolveCascadePolicy(config = {}, legacyTokenBudgetPerBatch) {
   const warnings = [];
@@ -175,8 +175,17 @@ export function resolveCascadePolicy(config = {}, legacyTokenBudgetPerBatch) {
 
   // token_budget precedence: orchestration.cascade.token_budget (new home) >
   // pipeline.token_budget_per_batch (deprecated alias, forge#1858) > preset default.
+  // The legacy fallback is validated through parseIntOrUnlimited itself before use —
+  // NOT trusted as-is — so a malformed legacy value (0, negative, NaN, a
+  // case-mismatched sentinel like "UNLIMITED") cannot silently bypass validation
+  // the way a bare pass-through would (forge#2302).
+  const { value: validatedLegacyFallback, warning: legacyWarning } = parseIntOrUnlimited(
+    legacyTokenBudgetPerBatch,
+    preset.tokenBudget,
+  );
+  if (legacyWarning) warnings.push(`pipeline.token_budget_per_batch (legacy alias) ${legacyWarning}`);
   const tokenBudgetFallback =
-    legacyTokenBudgetPerBatch !== undefined ? legacyTokenBudgetPerBatch : preset.tokenBudget;
+    legacyTokenBudgetPerBatch !== undefined ? validatedLegacyFallback : preset.tokenBudget;
   const tokenBudget = parseIntOrUnlimited(config.token_budget, tokenBudgetFallback);
   if (tokenBudget.warning) warnings.push(`orchestration.cascade.token_budget ${tokenBudget.warning}`);
 
@@ -187,6 +196,20 @@ export function resolveCascadePolicy(config = {}, legacyTokenBudgetPerBatch) {
   const p3SameFileDefer =
     typeof config.p3_same_file_defer === "boolean" ? config.p3_same_file_defer : preset.p3SameFileDefer;
 
+  // Both-uncapped notice: neither generation depth nor token spend is bounded this
+  // run. This is never a preset default (no preset in CASCADE_PRESETS sets both to
+  // UNLIMITED... except "all", which does so deliberately) — surface it loudly so an
+  // operator running `policy: all` (or an equivalent granular-override combination)
+  // sees the tradeoff explicitly rather than discovering it from an unexpectedly long
+  // cascade tail. Distinct from the per-parse `warnings` above (which flag malformed
+  // config); this is a policy-shape notice about a valid, fully-resolved configuration.
+  const bothUncapped = maxGen.value === UNLIMITED && tokenBudget.value === UNLIMITED;
+  if (bothUncapped) {
+    warnings.push(
+      "orchestration.cascade: both max_generation and token_budget are unlimited — cascade admission has no upper bound on generation depth or token spend for this run.",
+    );
+  }
+
   return {
     policy: {
       maxGeneration: maxGen.value,
@@ -196,6 +219,7 @@ export function resolveCascadePolicy(config = {}, legacyTokenBudgetPerBatch) {
       p3SameFileDefer,
     },
     policyName,
+    bothUncapped,
     warnings,
   };
 }

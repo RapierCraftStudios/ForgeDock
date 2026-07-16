@@ -316,16 +316,26 @@ CASCADE_POLICY_NAME=$(yq '.orchestration.cascade.policy // "balanced"' forge.yam
 
 case "$CASCADE_POLICY_NAME" in
   all)
-    PRESET_TOKEN_BUDGET="unlimited"; PRESET_DEFER_GATED="false"; PRESET_KEYWORD="false"; PRESET_P3_SAME_FILE="false" ;;
+    PRESET_MAX_GEN="unlimited"; PRESET_TOKEN_BUDGET="unlimited"; PRESET_DEFER_GATED="false"; PRESET_KEYWORD="false"; PRESET_P3_SAME_FILE="false" ;;
   conservative)
-    PRESET_TOKEN_BUDGET=450000; PRESET_DEFER_GATED="true"; PRESET_KEYWORD="true"; PRESET_P3_SAME_FILE="true" ;;
+    PRESET_MAX_GEN=1; PRESET_TOKEN_BUDGET=450000; PRESET_DEFER_GATED="true"; PRESET_KEYWORD="true"; PRESET_P3_SAME_FILE="true" ;;
   balanced)
-    PRESET_TOKEN_BUDGET=900000; PRESET_DEFER_GATED="true"; PRESET_KEYWORD="true"; PRESET_P3_SAME_FILE="true" ;;
+    PRESET_MAX_GEN=1; PRESET_TOKEN_BUDGET=900000; PRESET_DEFER_GATED="true"; PRESET_KEYWORD="true"; PRESET_P3_SAME_FILE="true" ;;
   *)
     echo "WARNING: forge.yaml → orchestration.cascade.policy \"${CASCADE_POLICY_NAME}\" is not one of: all, balanced, conservative — falling back to \"balanced\""
     CASCADE_POLICY_NAME="balanced"
-    PRESET_TOKEN_BUDGET=900000; PRESET_DEFER_GATED="true"; PRESET_KEYWORD="true"; PRESET_P3_SAME_FILE="true" ;;
+    PRESET_MAX_GEN=1; PRESET_TOKEN_BUDGET=900000; PRESET_DEFER_GATED="true"; PRESET_KEYWORD="true"; PRESET_P3_SAME_FILE="true" ;;
 esac
+
+# max_generation is authoritatively resolved in phase-1-resolve.md (it only governs
+# Phase 1 resolve-time cascade admission, never Step 4C's autonomous defer — see rule 1
+# above). It is re-read here, read-only, ONLY to support the both-uncapped notice below —
+# Step 4C does not otherwise consume MAX_GENERATION_FOR_NOTICE.
+MAX_GENERATION_FOR_NOTICE=$(yq ".orchestration.cascade.max_generation // \"${PRESET_MAX_GEN}\"" forge.yaml 2>/dev/null || echo "$PRESET_MAX_GEN")
+[ "$MAX_GENERATION_FOR_NOTICE" = "null" ] && MAX_GENERATION_FOR_NOTICE="$PRESET_MAX_GEN"
+if [ "$MAX_GENERATION_FOR_NOTICE" != "unlimited" ] && ! echo "$MAX_GENERATION_FOR_NOTICE" | grep -qE '^[1-9][0-9]*$'; then
+  MAX_GENERATION_FOR_NOTICE="$PRESET_MAX_GEN"
+fi
 
 # token_budget precedence: orchestration.cascade.token_budget (new home) >
 # pipeline.token_budget_per_batch (deprecated alias, forge#1858, kept working
@@ -352,6 +362,16 @@ CASCADE_KEYWORD_HEURISTIC=$(yq ".orchestration.cascade.keyword_heuristic // ${PR
 CASCADE_P3_SAME_FILE_DEFER=$(yq ".orchestration.cascade.p3_same_file_defer // ${PRESET_P3_SAME_FILE}" forge.yaml 2>/dev/null || echo "$PRESET_P3_SAME_FILE")
 
 echo "Cascade admission policy resolved: policy=${CASCADE_POLICY_NAME} token_budget=${TOKEN_BUDGET} defer_on_batch_gated=${CASCADE_DEFER_ON_BATCH_GATED} keyword_heuristic=${CASCADE_KEYWORD_HEURISTIC} p3_same_file_defer=${CASCADE_P3_SAME_FILE_DEFER} (forge.yaml → orchestration.cascade; see docs/CONFIG.md)"
+
+# Both-uncapped notice (loud, one-time, printed once per orchestrate invocation since
+# this resolution block itself runs once at Step 4A.pre) — never a preset default except
+# "all", which sets it deliberately. Surfacing this explicitly means an operator running
+# an uncapped policy sees the tradeoff up front rather than discovering it from an
+# unexpectedly long cascade tail (the exact gen-2→3→4 drift this config surface exists to
+# make controllable — see forge#2234 issue body evidence).
+if [ "$MAX_GENERATION_FOR_NOTICE" = "unlimited" ] && [ "$TOKEN_BUDGET" = "unlimited" ]; then
+  echo "⚠ WARNING: orchestration.cascade — both max_generation and token_budget are unlimited. Cascade admission has NO upper bound on generation depth or token spend this run (policy=${CASCADE_POLICY_NAME})."
+fi
 # --- End cascade admission policy resolution ---
 
 BATCH_TOKEN_SPEND=0
