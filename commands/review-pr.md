@@ -2235,6 +2235,18 @@ if [ "$IS_FIRST_TIME_CONTRIBUTOR" = "true" ] && [ "$WELCOME_ENABLED" != "false" 
     CUSTOM_CONVENTIONS=$(yq '.community.conventions // ""' forge.yaml 2>/dev/null || echo '')
     PROJECT_NAME_WELCOME=$(yq '.project.name // "this project"' forge.yaml 2>/dev/null || echo 'this project')
 
+    # Resolve the conventions text into a plain shell variable BEFORE interpolating it into
+    # the --body string below. A nested $(...) command substitution containing an escaped
+    # \$VAR here is never expanded — see forge#2214.
+    if [ -n "$CUSTOM_CONVENTIONS" ]; then
+        CONVENTIONS_TEXT="$CUSTOM_CONVENTIONS"
+    else
+        CONVENTIONS_TEXT="- **Conventional commits**: prefix your commit messages with \`fix(scope):\`, \`feat(scope):\`, \`refactor(scope):\`, etc.
+- **DCO sign-off**: all commits must be signed off with \`git commit -s\` (Developer Certificate of Origin — required for the dual-license model).
+  Fix unsigned commits: \`git commit --amend -s --no-edit && git push --force-with-lease\`
+- **Issues, not inline fixes**: when you spot a bug or improvement opportunity, open a GitHub issue rather than fixing it inline — so it flows through the pipeline with full traceability."
+    fi
+
     gh pr comment "$ARGUMENTS" --body "## Welcome to ${PROJECT_NAME_WELCOME}! 🎉
 
 Hi @${PR_AUTHOR} — this looks like your first merged contribution here. Thanks for opening a PR!
@@ -2245,10 +2257,7 @@ The automated review pipeline (/review-pr) ran against your PR. It spawned domai
 
 ### Key conventions
 
-$([ -n "\$CUSTOM_CONVENTIONS" ] && echo "\$CUSTOM_CONVENTIONS" || echo "- **Conventional commits**: prefix your commit messages with \`fix(scope):\`, \`feat(scope):\`, \`refactor(scope):\`, etc.
-- **DCO sign-off**: all commits must be signed off with \`git commit -s\` (Developer Certificate of Origin — required for the dual-license model).
-  Fix unsigned commits: \`git commit --amend -s --no-edit && git push --force-with-lease\`
-- **Issues, not inline fixes**: when you spot a bug or improvement opportunity, open a GitHub issue rather than fixing it inline — so it flows through the pipeline with full traceability.")
+${CONVENTIONS_TEXT}
 
 ### Getting started
 
