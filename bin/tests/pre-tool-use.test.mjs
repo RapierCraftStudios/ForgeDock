@@ -708,6 +708,31 @@ describe("pre-tool-use hook — filesystem-root find guard (#2034)", () => {
     assert.match(stderr, /BLOCKED/);
   });
 
+  // Regression tests for review finding (issue #2213): the #2113 fix added
+  // an optional trailing slash to the drive-letter branch of
+  // FIND_ROOT_TOKEN_RE but not to the dot branch, so the bare trailing-slash
+  // dot forms `/./` and `/../` still bypassed the guard despite being
+  // directory-equivalent to `/.` and `/..`.
+  it("exits 2 for find /./ (dot root with trailing slash)", () => {
+    const { exitCode, stderr } = runHook({
+      hook_event_name: "PreToolUse",
+      tool_name: "Bash",
+      tool_input: { command: "find /./ -iname x" },
+    });
+    assert.equal(exitCode, 2);
+    assert.match(stderr, /BLOCKED/);
+  });
+
+  it("exits 2 for find /../ (double-dot root with trailing slash)", () => {
+    const { exitCode, stderr } = runHook({
+      hook_event_name: "PreToolUse",
+      tool_name: "Bash",
+      tool_input: { command: "find /../ -iname x" },
+    });
+    assert.equal(exitCode, 2);
+    assert.match(stderr, /BLOCKED/);
+  });
+
   // Regression test for review finding SEC-2 (CONFIRMED LOW): command-name
   // matching was case-sensitive, so `Find /` or `FIND /` bypassed the guard
   // despite Windows resolving them to the same binary as `find`.

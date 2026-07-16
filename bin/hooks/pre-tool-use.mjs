@@ -189,14 +189,20 @@ const WORKFLOW_LABEL_PREFIX = "workflow:";
  * above, which Git Bash still normalizes to) the same whole-drive tree
  * (issue #2113 — PR #2112 review finding SEC-1: `find /c/` was silently
  * ALLOWED because the prior regex had no trailing-slash/dot alternative).
+ * This also includes the trailing-slash dot forms `/./` and `/../` — the
+ * dot alternative did not originally carry the same optional trailing
+ * slash the drive-letter alternative got in #2113, so those two bare
+ * tokens reached the identical whole-drive scan but were wrongly ALLOWED
+ * (issue #2213).
  *
- * Deliberately does NOT match `/c/Users/...`, `/./foo`, `/../foo`, or any
- * other scoped absolute path — only the bare root/drive-mount token itself,
- * optionally followed by exactly one trailing slash (drive-letter case) or
- * standing alone (dot/double-slash case). Case-insensitive on the drive
- * letter only (POSIX paths are otherwise case-sensitive).
+ * Deliberately does NOT match `/c/Users/...`, `/./foo`, `/../foo` (with
+ * anything beyond the trailing slash), or any other scoped absolute path —
+ * only the bare root/drive-mount token itself, optionally followed by
+ * exactly one trailing slash (drive-letter and dot/double-slash cases) or
+ * standing alone. Case-insensitive on the drive letter only (POSIX paths
+ * are otherwise case-sensitive).
  */
-const FIND_ROOT_TOKEN_RE = /^\/(?:[a-zA-Z]\/?|\.{1,2}|\/)?$/;
+const FIND_ROOT_TOKEN_RE = /^\/(?:[a-zA-Z]\/?|\.{1,2}\/?|\/)?$/;
 
 /**
  * Shell metacharacters that can glue a command name to an adjacent token
