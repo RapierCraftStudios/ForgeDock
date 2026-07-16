@@ -1517,6 +1517,26 @@ function isGlobalNpmInstall() {
 const MAX_SELF_UPDATE_ATTEMPTS = 1;
 
 /**
+ * Strict semver-shape check for a version string before it is interpolated
+ * into a shell-invoked command (see forge#2180). Intentionally narrow —
+ * digits-dot-digits-dot-digits with an optional `-prerelease`/`+build`
+ * suffix restricted to `[0-9A-Za-z.-]` — so it accepts every real value
+ * `fetchLatestVersion()` can return from the npm registry's `version` field,
+ * while rejecting anything containing shell metacharacters
+ * (`; | & $ \` ( ) < > " ' \n` etc.) that `shell: true` would otherwise
+ * hand straight to cmd.exe/`/bin/sh`.
+ *
+ * @param {string} version
+ * @returns {boolean}
+ */
+function isValidSemverShape(version) {
+  return (
+    typeof version === "string" &&
+    /^\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?$/.test(version)
+  );
+}
+
+/**
  * Install the newer published version globally via `npm install -g
  * forgedock@{version}`, then re-exec this same file path (which npm has just
  * overwritten with the new package's contents) so the rest of update()'s
@@ -1540,6 +1560,20 @@ const MAX_SELF_UPDATE_ATTEMPTS = 1;
  * Fail-open: any error during install or re-exec falls back to the
  * pre-existing advisory message — the caller must treat a `false` return as
  * "could not self-update, printed manual instructions instead."
+ *
+ * Windows note (forge#2180): `npm` is a `.cmd` batch launcher on Windows, and
+ * Node's `execFileSync`/`spawnSync` cannot invoke `.cmd`/`.bat` files without
+ * `shell: true` (nodejs/node#3675) — confirmed empirically on a real Windows
+ * 11 machine: `execFileSync("npm", [...])` ENOENTs, and even the exact
+ * `npm.cmd` filename EINVALs, without a shell. `shell: true` is required
+ * here so the install actually runs on Windows. Because that widens the
+ * command line to shell interpretation, `version` — sourced from an
+ * unauthenticated `https://registry.npmjs.org` response in
+ * `fetchLatestVersion()` — is validated against a strict semver shape
+ * (`isValidSemverShape`) before it is ever interpolated into the command,
+ * closing the injection surface `shell: true` would otherwise open (see the
+ * repo-wide execSync→execFileSync shell-injection hardening precedent in
+ * forge#1703/forge#413).
  *
  * @param {string} version - target version to install (e.g. "1.2.0")
  * @returns {boolean} true if re-exec was launched (process will exit before
@@ -1569,11 +1603,29 @@ function selfUpdateGlobalInstall(version) {
     return false;
   }
 
+  // Validate before this value ever reaches the shell-invoked install below
+  // (forge#2180) — fail open to the same advisory message a failed install
+  // would print, rather than throwing or passing an unvalidated string to
+  // `shell: true`.
+  if (!isValidSemverShape(version)) {
+    console.log(
+      `  ${YELLOW}Self-update aborted: received an unexpected version string ("${version}").${RESET}`,
+    );
+    console.log(
+      `  Run ${CYAN}npm install -g forgedock@latest${RESET} manually, then ${CYAN}npx forgedock update${RESET} again.`,
+    );
+    return false;
+  }
+
   try {
     console.log(`  Installing ${CYAN}forgedock@${version}${RESET} globally...`);
+    // shell: true is required to resolve npm.cmd on Windows (see the
+    // Windows note in this function's doc comment, forge#2180). `version`
+    // is validated as strict semver above before this point.
     execFileSync("npm", ["install", "-g", `forgedock@${version}`], {
       stdio: "inherit",
       timeout: 120000,
+      shell: true,
     });
   } catch (err) {
     console.log(
