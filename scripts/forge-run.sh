@@ -80,9 +80,17 @@ die() {
   exit 1
 }
 
-# JSON-escape a string: backslash, double-quote, and control characters (\n, \r, \t).
-# Order matters — backslash escaping runs first so a literal backslash becomes \\
-# before quote/control-character passes run, avoiding double-escaping ambiguity.
+# JSON-escape a string: backslash, double-quote, and the full C0 control range
+# (U+0000-U+001F), per RFC 8259 section 7. Order matters:
+#   1. Backslash escaping runs first so a literal backslash becomes \\ before
+#      any other pass runs, avoiding double-escaping ambiguity.
+#   2. Double-quote next.
+#   3. The three named control escapes (\n, \r, \t) next, so they get their
+#      short two-character form rather than falling through to \u00XX.
+#   4. Every remaining C0 control byte (U+0000-U+001F, excluding \n/\r/\t
+#      already handled above) is escaped as \u00XX — bash's ${s//pat/rep}
+#      cannot loop over an arbitrary byte range in one substitution, so this
+#      is a bounded loop over hex 00-1F.
 json_str() {
   local s="$1"
   s="${s//\\/\\\\}"
@@ -90,6 +98,22 @@ json_str() {
   s="${s//$'\n'/\\n}"
   s="${s//$'\r'/\\r}"
   s="${s//$'\t'/\\t}"
+  local i
+  for ((i = 0; i <= 31; i++)); do
+    # \n (10=0x0a), \r (13=0x0d), \t (9=0x09) already escaped above — skip them
+    # here so they keep their short named form instead of becoming \u00XX.
+    if [ "$i" -eq 9 ] || [ "$i" -eq 10 ] || [ "$i" -eq 13 ]; then
+      continue
+    fi
+    local hex
+    hex=$(printf '%02x' "$i")
+    local ctrl_char
+    printf -v ctrl_char '\\x%02x' "$i"
+    ctrl_char=$(printf "$ctrl_char")
+    if [[ "$s" == *"$ctrl_char"* ]]; then
+      s="${s//$ctrl_char/\\u00$hex}"
+    fi
+  done
   printf '%s' "$s"
 }
 
@@ -322,7 +346,7 @@ emit "{\"event\":\"phase_detail\",\"phase\":\"$(json_str "${PHASE}")\",\"lane\":
 # Event 3: action_required (only for non-terminal active phases)
 if [ -n "$ACTION" ]; then
   ts_val=$(ts)
-  ACTION_ESCAPED="${ACTION//\"/\\\"}"
+  ACTION_ESCAPED=$(json_str "${ACTION}")
   emit "{\"event\":\"action_required\",\"phase\":\"$(json_str "${PHASE}")\",\"action\":\"${ACTION_ESCAPED}\",\"ts\":\"${ts_val}\"}"
 fi
 
