@@ -22,12 +22,36 @@ jobs:
 
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 2
 
       - name: Use Node.js 24
         uses: actions/setup-node@v4
         with:
           node-version: 24
           registry-url: 'https://registry.npmjs.org'
+
+      - name: Guard — protocol schema change requires a version bump
+        working-directory: .
+        run: |
+          CHANGED_SRC=$(git diff --name-only HEAD^ HEAD -- 'packages/protocol/src/**' 2>/dev/null || echo "")
+          if [ -n "$CHANGED_SRC" ]; then
+            OLD_VERSION=$(git show HEAD^:packages/protocol/package.json 2>/dev/null | node -e "process.stdout.write(JSON.parse(require('fs').readFileSync(0,'utf8')).version)" 2>/dev/null || echo "")
+            NEW_VERSION=$(node -p "require('./packages/protocol/package.json').version")
+            if [ -z "$OLD_VERSION" ]; then
+              echo "::error::Could not determine previous packages/protocol/package.json version at HEAD^ — failing closed. This guard must not silently pass when it cannot verify a version bump occurred."
+              exit 1
+            fi
+            if [ "$OLD_VERSION" = "$NEW_VERSION" ]; then
+              echo "::error::packages/protocol/src/ changed but package.json version ($NEW_VERSION) did not change. Bump the version — see packages/protocol/README.md versioning policy."
+              echo "Changed files:"
+              echo "$CHANGED_SRC"
+              exit 1
+            fi
+            echo "Schema files changed; version ${OLD_VERSION} -> ${NEW_VERSION} — OK"
+          else
+            echo "No changes under packages/protocol/src/ — skipping version-bump guard"
+          fi
 
       - name: Run tests
         run: node --test "test/**/*.test.mjs"

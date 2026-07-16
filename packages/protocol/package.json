@@ -1,6 +1,6 @@
 {
   "name": "@forgedock/protocol",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "description": "Parse, validate, and emit FORGE annotation protocol v1.0 annotations. MIT-licensed reference implementation.",
   "type": "module",
   "main": "./src/index.js",
@@ -40,6 +40,8 @@
   "files": [
     "src/",
     "fixtures/",
-    "LICENSE"
+    "LICENSE",
+    "CHANGELOG.md",
+    "README.md"
   ]
 }
