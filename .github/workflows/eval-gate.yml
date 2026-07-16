@@ -41,6 +41,7 @@ on:
   pull_request:
     paths:
       - 'commands/**'
+      - '.github/workflows/eval-gate.yml'
     # spec-evolution PRs trigger on the `labeled` event (label filter in eval-subset job).
     # opened/synchronize/reopened are the GitHub defaults for pull_request; listing them
     # explicitly here ensures they remain active when `types:` is specified.
@@ -55,6 +56,7 @@ on:
       - main
     paths:
       - 'commands/**'
+      - '.github/workflows/eval-gate.yml'
   workflow_dispatch:
     inputs:
       run_mode:
