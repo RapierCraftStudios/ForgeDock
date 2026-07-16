@@ -206,8 +206,8 @@ const EVIDENCE_REQUIRED_FOR_INVALID_FROM = new Set([
  * which GitHub computes server-side from the commenter's actual repo/org
  * relationship) that are trusted to post reversal evidence. Deliberately
  * NOT a hardcoded bot login: the pipeline's own `gh` identity legitimately
- * rotates (issue #1722 — `rapiercraft-forgedock[bot]`'s token went invalid
- * mid-batch and a session switched to the `RapierCraft` account to keep
+ * rotates (issue #1722 — the primary automation account's token went invalid
+ * mid-batch and a session switched to a maintainer's personal account to keep
  * working), and a literal-login allowlist would fail closed the next time
  * identity rotates. Checking the GitHub-computed relationship instead of a
  * specific account name survives that rotation: whichever account is
