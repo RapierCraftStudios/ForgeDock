@@ -67,14 +67,22 @@ CURRENT_SHA_SHORT=$(gh pr view {PR_NUMBER} {GH_FLAG} --json headRefOid --jq '.he
 
 if [ -n "$LAST_VERDICT_SHA" ] && [ "$LAST_VERDICT_SHA" = "$CURRENT_SHA_SHORT" ]; then
   echo "HEAD unchanged since last CHANGES REQUESTED verdict ($LAST_VERDICT_SHA) — skipping re-review."
-  gh issue comment {NUMBER} {GH_FLAG} --body "## Re-Review Skipped — HEAD Unchanged
+  # No DRY_RUN/governor guard here — consistent with every other gh issue comment/edit call
+  # already in this file (e.g. the Push Failed / Push Blocked sections below), none of which
+  # are gated either. This is a report-and-stop action (blocks re-review, does not merge or
+  # delete anything), same risk class as those pre-existing calls.
+  REREVIEW_SKIP_BODY=$(cat <<SKIP_EOF
+## Re-Review Skipped — HEAD Unchanged
 
-PR #{PR_NUMBER}'s HEAD (\`${CURRENT_SHA_SHORT}\`) has not changed since the last CHANGES REQUESTED verdict. Re-running \`/review-pr\` would re-review byte-identical code and reproduce the same verdict — this is a pure waste of a full domain-agent fan-out.
+PR #{PR_NUMBER}'s HEAD (${CURRENT_SHA_SHORT}) has not changed since the last CHANGES REQUESTED verdict. Re-running /review-pr would re-review byte-identical code and reproduce the same verdict — this is a pure waste of a full domain-agent fan-out.
 
-The PR is already \`needs-human\` (or will be shortly, if this is the first time this guard has fired for it). Progress here now depends on remediation (fix the findings, push a new commit, re-review) rather than another raw review submission. If running under \`/orchestrate\`, item 6.4 in \`phase-4-execution.md\` auto-dispatches remediation for any \`needs-human\`-gated issue, including this one (see forge#2243) — no manual action should be needed. If running standalone, invoke \`/work-on {PR_NUMBER} --remediate --issue {NUMBER}\` directly.
+The PR is already needs-human (or will be shortly, if this is the first time this guard has fired for it). Progress here now depends on remediation (fix the findings, push a new commit, re-review) rather than another raw review submission. If running under /orchestrate, item 6.4 in phase-4-execution.md auto-dispatches remediation for any needs-human-gated issue, including this one (see forge#2243) — no manual action should be needed. If running standalone, invoke /work-on {PR_NUMBER} --remediate --issue {NUMBER} directly.
 
-<!-- FORGE:REREVIEW_SKIPPED -->"
-  gh issue edit {NUMBER} {GH_FLAG} --add-label "needs-human" 2>/dev/null || true
+<!-- FORGE:REREVIEW_SKIPPED -->
+SKIP_EOF
+)
+  gh issue comment {NUMBER} {GH_FLAG} --body "$REREVIEW_SKIP_BODY" # <!-- allowlist:check-command-side-effects -->
+  gh issue edit {NUMBER} {GH_FLAG} --add-label needs-human 2>/dev/null || true # <!-- allowlist:check-command-side-effects -->
   # Return REVIEW_RESULT: status: BLOCKED — do not invoke /review-pr again on unchanged HEAD
   exit 1
 fi
