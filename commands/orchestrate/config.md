@@ -59,16 +59,31 @@ NARRATION_MODE=$(yq '.pipeline.narration // "terse"' "$CONFIG_FILE" 2>/dev/null 
 # takes precedence over the "balanced" default. Mirrors the --model <name> precedence
 # pattern below. See docs/CONFIG.md → `orchestration` for the full field reference and
 # `phase-4-execution.md` / `phase-1-resolve.md` for where each resolved value is consumed.
-echo "{ARGUMENTS}" | grep -qE -- '--policy\s+\S+' && \
-  CLI_CASCADE_POLICY=$(echo "{ARGUMENTS}" | grep -oE -- '--policy\s+\S+' | awk '{print $2}')
-echo "{ARGUMENTS}" | grep -qE -- '--max-generation\s+\S+' && \
-  CLI_MAX_GENERATION=$(echo "{ARGUMENTS}" | grep -oE -- '--max-generation\s+\S+' | awk '{print $2}')
-echo "{ARGUMENTS}" | grep -qE -- '--token-budget\s+\S+' && \
-  CLI_TOKEN_BUDGET=$(echo "{ARGUMENTS}" | grep -oE -- '--token-budget\s+\S+' | awk '{print $2}')
+# Extraction regex is an explicit character allowlist (`[A-Za-z0-9_-]+`), NOT a bare
+# `\S+` — `\S+` would accept `"`, `` ` ``, `$`, `(`, `)`, which a downstream yq fallback
+# embedding (`.orchestration.cascade.policy // "${CLI_CASCADE_POLICY:-balanced}"`) could
+# not safely absorb: an embedded `"` breaks out of the yq string literal, letting the
+# remainder be parsed as yq expression syntax (yq-expression injection — not shell/command
+# injection, since `awk` here only extracts text, never executes it). The allowlist also
+# matches the format every valid value actually takes: policy names are
+# `all`/`balanced`/`conservative`; max-generation is a positive integer or `unlimited`;
+# token-budget is a positive integer or `unlimited` — none of these ever contain anything
+# outside `[A-Za-z0-9_-]`. (forge#2301)
+echo "{ARGUMENTS}" | grep -qE -- '--policy[[:space:]]+[A-Za-z0-9_-]+' && \
+  CLI_CASCADE_POLICY=$(echo "{ARGUMENTS}" | grep -oE -- '--policy[[:space:]]+[A-Za-z0-9_-]+' | awk '{print $2}')
+echo "{ARGUMENTS}" | grep -qE -- '--max-generation[[:space:]]+[A-Za-z0-9_-]+' && \
+  CLI_MAX_GENERATION=$(echo "{ARGUMENTS}" | grep -oE -- '--max-generation[[:space:]]+[A-Za-z0-9_-]+' | awk '{print $2}')
+echo "{ARGUMENTS}" | grep -qE -- '--token-budget[[:space:]]+[A-Za-z0-9_-]+' && \
+  CLI_TOKEN_BUDGET=$(echo "{ARGUMENTS}" | grep -oE -- '--token-budget[[:space:]]+[A-Za-z0-9_-]+' | awk '{print $2}')
 # CLI_CASCADE_POLICY / CLI_MAX_GENERATION / CLI_TOKEN_BUDGET, when set, override the
 # corresponding forge.yaml → orchestration.cascade.* key for this invocation only — pass
 # them through as the yq `//` fallback value at each Step 4A.pre / Phase 1 resolution site
 # (`... // "${CLI_CASCADE_POLICY:-balanced}"`, etc.) instead of the bare literal default.
+# Even with the allowlist above, the final resolved value is STILL validated against the
+# same regex (`^[1-9][0-9]*$|^unlimited$` for the two numeric levers,
+# `^(all|balanced|conservative)$` for policy) at its consuming site in
+# phase-4-execution.md / phase-1-resolve.md before use — this allowlist is defense in
+# depth, not a replacement for that validation.
 ```
 
 All `{GH_REPO}`, `{GH_FLAG}`, `{REPO_PATH}`, `{PROJECT_NAME}`, `{STAGING_BRANCH}`, `{DEFAULT_BRANCH}`, `{NARRATION_MODE}`, and `{CLI_CASCADE_POLICY}`/`{CLI_MAX_GENERATION}`/`{CLI_TOKEN_BUDGET}` references below are populated from `forge.yaml` and CLI flags.
