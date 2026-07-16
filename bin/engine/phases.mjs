@@ -67,6 +67,26 @@ async function commitsAhead(lane, branch, io) {
     return -1;
   }
 }
+/**
+ * Marker-presence check used throughout this file — including
+ * `FORGE:BUILDER:COMPLETE` eligibility gates in the "build" phase's
+ * `reconcile`/`detectOutcome` below (forge#2194 — investigated, no change).
+ *
+ * This is a plain substring test, deliberately, for consistency: every other
+ * marker gate in this file (`INVESTIGATION:INVALID`, `DECOMPOSE:YES`,
+ * `INVESTIGATION:COMPLETE`, `FORGE:CONTEXT:COMPLETE`,
+ * `FORGE:ARCHITECT:COMPLETE`, `workflow:merged`) uses the identical
+ * substring/membership technique — singling out `FORGE:BUILDER:COMPLETE`
+ * alone for a "structured" parse would be inconsistent and would not close
+ * any real gap: the actual trust boundary for issue-comment content is
+ * *authorship* (can an untrusted actor post a comment on this issue at all),
+ * not *format*. Nothing in this engine validates comment authorship for any
+ * marker today, so an actor able to post an arbitrary comment could just as
+ * easily post whatever "structured" shape a parser would accept — format
+ * hardening alone buys nothing here. If comment-spoofing is ever a concern
+ * worth addressing, the fix is an author allowlist applied uniformly to all
+ * markers, not a bespoke parser for this one field.
+ */
 function has(blob, marker) { return blob.includes(marker); }
 
 /**
@@ -87,6 +107,23 @@ function has(blob, marker) { return blob.includes(marker); }
  * — by array/chronological order — wins, so the most recent build attempt's
  * branch is used. Returns null (never invents a value) if no eligible comment
  * contains the field.
+ *
+ * WITHIN-COMMENT FIELD ORDER (forge#2193 — investigated, no change): once the
+ * winning comment is selected (comment-level last-match, above — settled by
+ * forge#2184, do not conflate with this paragraph), `body.match(re)` returns
+ * the FIRST `**Branch**:` occurrence in that comment, because `re` has no
+ * `/g` flag. This is intentional, not an oversight: there is exactly one
+ * producer of this field — `commands/work-on/build/implement.md` Phase I6 —
+ * which posts `**Branch**: \`{BRANCH}\`` exactly once per FORGE:BUILDER
+ * comment. `FORGE:BUILDER:COMPLETE` is appended IN PLACE to that same
+ * existing comment by `commands/work-on/build/validate.md` Phase V5 (an edit,
+ * not a new comment), so no code path in this pipeline ever produces two
+ * `**Branch**:` fields inside one FORGE:BUILDER:COMPLETE-eligible comment.
+ * First-match and last-match are therefore equivalent for every real input;
+ * first-match is kept because it's the simpler default. If a future producer
+ * ever posts more than one `**Branch**:` field in a single eligible comment,
+ * this will silently keep returning the first one — revisit this comment
+ * before changing that invariant.
  */
 function parseBranchFromMarkers(comments) {
   const re = /\*\*Branch\*\*:\s*`([^`]+)`/;
