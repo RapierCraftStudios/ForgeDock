@@ -518,7 +518,20 @@ export function sanitizeArgvForLog(cliArgs) {
         return code <= 0xff ? `\\x${code.toString(16).padStart(2, "0")}` : `\\u${code.toString(16).padStart(4, "0")}`;
       });
       if (escaped.length <= MAX_LOGGED_ARGV_ELEMENT_LEN) return escaped;
-      return `${escaped.slice(0, MAX_LOGGED_ARGV_ELEMENT_LEN)}…[truncated, ${escaped.length} chars]`;
+      // `.slice()` counts UTF-16 code units, not Unicode code points. If the cut
+      // lands between a high surrogate (\uD800-\uDBFF) and its paired low
+      // surrogate (\uDC00-\uDFFF) — e.g. an astral-plane emoji straddling the
+      // boundary — a plain slice bisects the pair and leaves a lone/unpaired
+      // surrogate at the tail, which can render as U+FFFD or otherwise
+      // mis-encode downstream (#2293). Trim one additional unit in that case
+      // so the cut never lands mid-pair. This does not change
+      // MAX_LOGGED_ARGV_ELEMENT_LEN, the escaping logic above, or the reported
+      // `escaped.length` in the truncation marker — only the slice boundary
+      // itself may shift by at most 1 code unit.
+      let cutLen = MAX_LOGGED_ARGV_ELEMENT_LEN;
+      const lastCode = escaped.charCodeAt(cutLen - 1);
+      if (lastCode >= 0xd800 && lastCode <= 0xdbff) cutLen -= 1;
+      return `${escaped.slice(0, cutLen)}…[truncated, ${escaped.length} chars]`;
     })
     .join(" ");
 }
