@@ -42,10 +42,10 @@
 
 import { readFileSync, readdirSync } from 'node:fs';
 import { resolve, extname } from 'node:path';
-import { createHash } from 'node:crypto';
 import { parse } from './parse.js';
 import { validate } from './validate.js';
 import { emit } from './emit.js';
+import { encodeCard, decodeCardInlineValue } from './card.js';
 
 // ---------------------------------------------------------------------------
 // Argv routing
@@ -114,16 +114,15 @@ function cmdEmit(argv) {
     // Payload: canonical JSON (sorted keys, single line, UTF-8).
     // The Base64url alphabet [A-Za-z0-9_-] cannot contain '>', '<', or '!' —
     // so -->, --!>, and <!-- are structurally unrepresentable by construction.
+    // Codec lives in ./card.js (shared with validate.js and the test suite).
     const payload = Object.keys(fields).length > 0 ? { ...fields } : {};
     if (type) payload.type = type.toUpperCase();
-    const canonical = canonicalJson(payload);
-    const b64url = toBase64url(canonical);
-    const sha8 = createHash('sha256').update(canonical, 'utf8').digest('hex').slice(0, 8);
+    const { inlineValue } = encodeCard(payload);
     // The colon-separator form "<!-- FORGE:CARD: v1 sha:X b64:Y -->" matches
     // OPENING_TAG_RE so parse() can extract the inline value "v1 sha:X b64:Y".
     // This keeps the canonical FORGE inline-value syntax (§3.4) while adding
     // the sha8 integrity prefix and Base64url payload from the design decision.
-    process.stdout.write(`<!-- FORGE:CARD: v1 sha:${sha8} b64:${b64url} -->\n`);
+    process.stdout.write(`<!-- FORGE:CARD: ${inlineValue} -->\n`);
     return;
   }
 
@@ -350,76 +349,4 @@ function cmdConformance(argv) {
 function die(msg) {
   process.stderr.write(`forge-protocol-cli: ${msg}\n`);
   process.exit(1);
-}
-
-/**
- * Produce canonical JSON: sorted keys, single line, UTF-8.
- * This is the payload that gets Base64url-encoded in the CARD format.
- */
-function canonicalJson(obj) {
-  return JSON.stringify(sortKeysDeep(obj));
-}
-
-function sortKeysDeep(val) {
-  if (Array.isArray(val)) return val.map(sortKeysDeep);
-  if (val !== null && typeof val === 'object') {
-    return Object.fromEntries(
-      Object.keys(val)
-        .sort()
-        .map(k => [k, sortKeysDeep(val[k])]),
-    );
-  }
-  return val;
-}
-
-/**
- * Encode a UTF-8 string as Base64url (URL-safe alphabet, no padding).
- * The Base64url alphabet [A-Za-z0-9_-] cannot contain '>', '<', or '!' —
- * so -->, --!>, and <!-- are structurally unrepresentable by construction
- * (design decision 2026-07-08: encoding beats escaping).
- *
- * @param {string} str — UTF-8 string to encode
- * @returns {string} Base64url-encoded string without padding
- */
-function toBase64url(str) {
-  return Buffer.from(str, 'utf8')
-    .toString('base64')
-    .replace(/\+/g, '-')
-    .replace(/\//g, '_')
-    .replace(/=/g, '');
-}
-
-/**
- * Decode a CARD inline value of the form "v1 sha:<sha8hex> b64:<base64url>"
- * and return the parsed JSON object, or null if the format is unrecognized.
- * Verifies the sha8 integrity prefix; returns null on corruption or tampering.
- *
- * @param {string} inlineValue — the parsed inlineValue from a CARD annotation
- * @returns {object|null}
- */
-function decodeCardInlineValue(inlineValue) {
-  const m = inlineValue.match(/^v1\s+sha:([0-9a-f]{8})\s+b64:([A-Za-z0-9_-]+)$/);
-  if (!m) return null;
-  const [, sha8, b64url] = m;
-
-  // Restore standard Base64 padding and swap the URL-safe alphabet back.
-  const b64std = b64url.replace(/-/g, '+').replace(/_/g, '/');
-  const padded = b64std + '='.repeat((4 - (b64std.length % 4)) % 4);
-
-  let canonical;
-  try {
-    canonical = Buffer.from(padded, 'base64').toString('utf8');
-  } catch {
-    return null;
-  }
-
-  // Integrity check: first 8 hex chars of SHA-256 must match the prefix.
-  const expectedSha8 = createHash('sha256').update(canonical, 'utf8').digest('hex').slice(0, 8);
-  if (expectedSha8 !== sha8) return null;
-
-  try {
-    return JSON.parse(canonical);
-  } catch {
-    return null;
-  }
 }

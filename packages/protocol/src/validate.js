@@ -8,12 +8,14 @@
  *   - Required field presence (§4.1 per-type field tables)
  *   - Required field enum values (Verdict, Confidence, Severity, Task Type)
  *   - Inline-value non-empty (§3.4)
+ *   - CARD inline-value decodability + sha8 integrity (§4.2 — see card.js)
  *   - Partial sentinel marking (§3.3) — generates a warning, not an error
  *
  * @license MIT
  */
 
 import { RESERVED_TYPES, SentinelState } from './types.js';
+import { decodeCardInlineValue } from './card.js';
 
 /**
  * Validate a parsed annotation against the spec.
@@ -46,6 +48,15 @@ export function validate(annotation) {
   if (typeDef.inlineValue) {
     if (inlineValue === null || inlineValue === '') {
       errors.push(`Inline-value annotation "${type}" must carry a non-empty value (§3.4)`);
+    } else if (type === 'CARD') {
+      // CARD-specific (§4.2): the inline value must decode via the Base64url
+      // codec and pass its sha8 integrity check. A malformed encoding or a
+      // tampered/corrupted payload must not be treated as a valid annotation.
+      if (decodeCardInlineValue(inlineValue) === null) {
+        errors.push(
+          `Inline-value "CARD" annotation failed to decode or failed its sha8 integrity check (§4.2)`,
+        );
+      }
     }
     return { valid: errors.length === 0, errors, warnings };
   }

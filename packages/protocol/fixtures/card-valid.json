@@ -1,0 +1,9 @@
+{
+  "description": "CARD — valid Base64url machine-surface annotation with matching sha8 integrity prefix",
+  "input": "<!-- FORGE:CARD: v1 sha:8e7c6608 b64:eyJpc3N1ZSI6MjEyMSwibm90ZSI6InZhbGlkIGNhcmQgZml4dHVyZSIsInR5cGUiOiJDQVJEIn0 -->",
+  "expect": {
+    "type": "CARD",
+    "valid": true,
+    "inlineValue": "v1 sha:8e7c6608 b64:eyJpc3N1ZSI6MjEyMSwibm90ZSI6InZhbGlkIGNhcmQgZml4dHVyZSIsInR5cGUiOiJDQVJEIn0"
+  }
+}

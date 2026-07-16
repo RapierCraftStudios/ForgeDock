@@ -1,0 +1,9 @@
+{
+  "description": "CARD — valid annotation with a unicode payload (accented Latin, Japanese, emoji)",
+  "input": "<!-- FORGE:CARD: v1 sha:40ea755c b64:eyJub3RlIjoidW5pY29kZSBwYXlsb2FkOiBjYWbDqSwg5pel5pys6KqeLCBlbW9qaSDwn5qAIiwidHlwZSI6IkNBUkQifQ -->",
+  "expect": {
+    "type": "CARD",
+    "valid": true,
+    "inlineValue": "v1 sha:40ea755c b64:eyJub3RlIjoidW5pY29kZSBwYXlsb2FkOiBjYWbDqSwg5pel5pys6KqeLCBlbW9qaSDwn5qAIiwidHlwZSI6IkNBUkQifQ"
+  }
+}

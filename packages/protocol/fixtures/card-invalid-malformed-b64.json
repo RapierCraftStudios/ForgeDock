@@ -1,0 +1,9 @@
+{
+  "description": "CARD — b64 segment contains a character outside the Base64url alphabet [A-Za-z0-9_-] ('+'), so decodeCardInlineValue's regex never matches; must be rejected by validate() (§4.2)",
+  "input": "<!-- FORGE:CARD: v1 sha:8e7c6608 b64:+yJpc3N1ZSI6MjEyMSwibm90ZSI6InZhbGlkIGNhcmQgZml4dHVyZSIsInR5cGUiOiJDQVJEIn0 -->",
+  "expect": {
+    "type": "CARD",
+    "valid": false,
+    "inlineValue": "v1 sha:8e7c6608 b64:+yJpc3N1ZSI6MjEyMSwibm90ZSI6InZhbGlkIGNhcmQgZml4dHVyZSIsInR5cGUiOiJDQVJEIn0"
+  }
+}
