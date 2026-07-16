@@ -63,8 +63,8 @@ function sanitizeFieldValue(rawValue) {
   const withOpenerEscaped = folded.replace(/<!--/g, '&lt;!--');
   // Escape both HTML comment-close forms ("-->" and "--!>") — only replacing the
   // literal character sequence (not just documenting the risk) prevents the
-  // enclosing comment from terminating early. (forge#1594; noted but never fixed
-  // for the FORGE:STATE codec in bin/engine/state.mjs — see issue investigation)
+  // enclosing comment from terminating early. (forge#1594; the FORGE:STATE codec
+  // in bin/engine/state.mjs now mirrors this full three-form scheme — forge#2119)
   return withOpenerEscaped.replace(/--(!)?>/g, (_, bang) => `--${bang || ''}&gt;`);
 }
 
