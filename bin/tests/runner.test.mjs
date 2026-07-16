@@ -1707,6 +1707,40 @@ describe("runCliBackend spawnFn seam (issue #2033)", () => {
     assert.equal(summary, "--print hello world --dangerously-skip-permissions");
   });
 
+  it("sanitizeArgvForLog neutralizes Unicode bidi-override characters (#2292)", () => {
+    // U+202E RIGHT-TO-LEFT OVERRIDE — could visually reorder the diagnostic
+    // line in a terminal/log viewer that renders bidi controls.
+    const rlo = "‮evil";
+    const summary = sanitizeArgvForLog([rlo]);
+    assert.ok(!/[‪-‮⁦-⁩]/.test(summary), "message must not contain a raw bidi control char");
+    assert.match(summary, /\\u202e/i, "escaped RLO sequence should appear in place of the raw char");
+  });
+
+  it("sanitizeArgvForLog neutralizes Unicode bidi isolate characters (#2292)", () => {
+    // U+2066 LRI / U+2069 PDI — bidi isolate pair, distinct Unicode block from
+    // the override range above but same visual-spoofing threat model.
+    const isolated = "⁦embedded⁩";
+    const summary = sanitizeArgvForLog([isolated]);
+    assert.ok(!/[‪-‮⁦-⁩]/.test(summary), "message must not contain raw bidi isolate chars");
+    assert.match(summary, /\\u2066/i);
+    assert.match(summary, /\\u2069/i);
+  });
+
+  it("sanitizeArgvForLog neutralizes C1 control characters (#2292)", () => {
+    // U+009B CSI (C1 control range \x80-\x9F) — not covered by the original
+    // C0/DEL-only regex.
+    const csi = "evil";
+    const summary = sanitizeArgvForLog([csi]);
+    // eslint-disable-next-line no-control-regex -- asserting the ABSENCE of raw C1 control chars is the point of this test
+    assert.ok(!/[\x80-\x9F]/.test(summary), "message must not contain a raw C1 control char");
+    assert.match(summary, /\\x9b/i, "escaped CSI sequence should appear in place of the raw char");
+  });
+
+  it("sanitizeArgvForLog still escapes C0/DEL exactly as before (regression guard, #2292)", () => {
+    const summary = sanitizeArgvForLog(["a\tb\x1bc\x7f"]);
+    assert.equal(summary, "a\\x09b\\x1bc\\x7f");
+  });
+
   it("defaults to the real spawnSync when spawnFn is omitted (backward compatibility)", () => {
     // No behavior assertion beyond "does not throw a TypeError from a missing
     // spawnFn" — this just confirms the default parameter wiring is correct.

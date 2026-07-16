@@ -493,8 +493,13 @@ const MAX_LOGGED_ARGV_ELEMENT_LEN = 200;
  * diagnostic pointing at output that didn't exist. The goal here is to bound
  * and neutralize each element, not to delete the context.
  *
- * - Control characters (`\x00`-`\x1F`, `\x7F`) are escaped to a visible
- *   `\xHH` form, neutralizing ANSI escape sequences and log-line spoofing.
+ * - Control characters (`\x00`-`\x1F`, `\x7F`-`\x9F` — C0/DEL and C1) are
+ *   escaped to a visible `\xHH` form, neutralizing ANSI escape sequences and
+ *   log-line spoofing.
+ * - Unicode bidirectional-override/format characters (`‪`-`‮`
+ *   LRE/RLE/PDF/LRO/RLO and `⁦`-`⁩` LRI/RLI/FSI/PDI) are escaped to
+ *   a visible `\uHHHH` form, neutralizing visual reordering of the diagnostic
+ *   line in terminals/log viewers that render bidi controls (#2292).
  * - Each element is independently truncated to `MAX_LOGGED_ARGV_ELEMENT_LEN`
  *   characters, with an explicit `…[truncated, N chars]` marker appended
  *   when truncation occurs, so log growth is bounded regardless of how large
@@ -507,8 +512,11 @@ export function sanitizeArgvForLog(cliArgs) {
   return cliArgs
     .map((arg) => {
       const str = String(arg);
-      // eslint-disable-next-line no-control-regex -- intentional: neutralizing C0/DEL control chars is the point of this function
-      const escaped = str.replace(/[\x00-\x1F\x7F]/g, (ch) => `\\x${ch.charCodeAt(0).toString(16).padStart(2, "0")}`);
+      // eslint-disable-next-line no-control-regex -- intentional: neutralizing C0/DEL/C1 control chars and Unicode bidi-override/format chars is the point of this function
+      const escaped = str.replace(/[\x00-\x1F\x7F-\x9F\u202A-\u202E\u2066-\u2069]/g, (ch) => {
+        const code = ch.charCodeAt(0);
+        return code <= 0xff ? `\\x${code.toString(16).padStart(2, "0")}` : `\\u${code.toString(16).padStart(4, "0")}`;
+      });
       if (escaped.length <= MAX_LOGGED_ARGV_ELEMENT_LEN) return escaped;
       return `${escaped.slice(0, MAX_LOGGED_ARGV_ELEMENT_LEN)}…[truncated, ${escaped.length} chars]`;
     })
