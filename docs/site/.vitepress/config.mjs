@@ -41,8 +41,16 @@ export default defineConfig({
   transformHead({ page, title, description, siteConfig }) {
     // `page` is the source-relative path (e.g. "index.md", "getting-started.md").
     // Map it to the deployed URL path, respecting `base` and VitePress's clean-URL
-    // output (index.md -> root, foo.md -> foo.html).
-    const routePath = page === 'index.md' ? '' : page.replace(/\.md$/, '.html')
+    // output (index.md -> root, foo.md -> foo.html). Index pages at any depth
+    // (e.g. a future "guide/index.md") map to their directory route ("guide/"),
+    // not a literal "guide/index.html" — VitePress serves nested index pages at
+    // the directory URL, so the flat `.html` suffix would be wrong for those.
+    // (Ref: forge#2142 — flat-page assumption flagged as a review finding on #2139)
+    const routePath = page.endsWith('/index.md')
+      ? page.slice(0, -'index.md'.length)
+      : page === 'index.md'
+        ? ''
+        : page.replace(/\.md$/, '.html')
     const canonicalUrl = `${SITE_HOSTNAME}${routePath}`
 
     const head = [
