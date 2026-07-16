@@ -16,6 +16,9 @@ forge.yaml
 forge.yaml.bak
 forge.yaml.bak.*
 
+# Secrets (e.g. GitHub App private keys used by scripts/refresh-bot-token.sh)
+secrets/
+
 # Claude Code
 .claude/
 CLAUDE.md
