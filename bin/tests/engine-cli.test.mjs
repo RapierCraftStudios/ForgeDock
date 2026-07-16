@@ -3,8 +3,9 @@ import assert from "node:assert/strict";
 import { mkdtempSync, writeFileSync, rmSync, utimesSync } from "node:fs";
 import { join } from "node:path";
 import os from "node:os";
-import { scanStalls, resumeStalledFromCli, runFromCli, countEngineActivity, lastLocalRun } from "../engine-cli.mjs";
+import { scanStalls, resumeStalledFromCli, runFromCli, countEngineActivity, lastLocalRun, formatTerminalDiagnostics } from "../engine-cli.mjs";
 import { serializeState } from "../engine/state.mjs";
+import { appendEvent } from "../engine/runlog.mjs";
 
 /** Builds a fake io.gh that serves `issue list` (only for `label`) and `issue view` (state) calls. */
 function makeFakeIo(states, { fanOutLabel = "workflow:building" } = {}) {
@@ -358,21 +359,28 @@ describe("runFromCli --repo targeting guard", () => {
   it("invokes runIssue when --repo matches the cwd-resolved repo", async () => {
     const io = makeRepoAwareIo("acme/target-repo");
     const runIssue = mock.fn(async () => ({ terminalReason: "workflow:merged" }));
+    // forge#2175: an injected dir keeps the terminal-diagnostics read (triggered
+    // here since the mocked terminalReason isn't the literal "merged") off the
+    // real ~/.forge/runs directory.
+    const dir = mkdtempSync(join(os.tmpdir(), "engine-cli-test-"));
 
-    const res = await runFromCli(["42", "--lane", "staging", "--repo", "acme/target-repo"], { io, runIssue });
+    const res = await runFromCli(["42", "--lane", "staging", "--repo", "acme/target-repo"], { io, runIssue, dir });
 
     assert.equal(runIssue.mock.callCount(), 1);
     assert.equal(res.terminalReason, "workflow:merged");
+    rmSync(dir, { recursive: true, force: true });
   });
 
   it("skips the repo-view check entirely when --repo is omitted", async () => {
     const io = { gh: async () => { throw new Error("should not be called"); } };
     const runIssue = mock.fn(async () => ({ terminalReason: "workflow:merged" }));
+    const dir = mkdtempSync(join(os.tmpdir(), "engine-cli-test-"));
 
-    const res = await runFromCli(["42", "--lane", "staging"], { io, runIssue });
+    const res = await runFromCli(["42", "--lane", "staging"], { io, runIssue, dir });
 
     assert.equal(runIssue.mock.callCount(), 1);
     assert.equal(res.terminalReason, "workflow:merged");
+    rmSync(dir, { recursive: true, force: true });
   });
 });
 
@@ -380,10 +388,11 @@ describe("runFromCli --backend/--model forwarding (forge#2028)", () => {
   it("forwards --backend and --model to runIssue when both are supplied", async () => {
     const io = { gh: async () => { throw new Error("should not be called"); } };
     const runIssue = mock.fn(async () => ({ terminalReason: "workflow:merged" }));
+    const dir = mkdtempSync(join(os.tmpdir(), "engine-cli-test-"));
 
     const res = await runFromCli(
       ["42", "--lane", "staging", "--backend", "cli", "--model", "claude-test-model"],
-      { io, runIssue },
+      { io, runIssue, dir },
     );
 
     assert.equal(runIssue.mock.callCount(), 1);
@@ -391,17 +400,129 @@ describe("runFromCli --backend/--model forwarding (forge#2028)", () => {
     assert.equal(callArgs.backend, "cli");
     assert.equal(callArgs.model, "claude-test-model");
     assert.equal(res.terminalReason, "workflow:merged");
+    rmSync(dir, { recursive: true, force: true });
   });
 
   it("omits backend/model keys from the runIssue call when neither flag is supplied", async () => {
     const io = { gh: async () => { throw new Error("should not be called"); } };
     const runIssue = mock.fn(async () => ({ terminalReason: "workflow:merged" }));
+    const dir = mkdtempSync(join(os.tmpdir(), "engine-cli-test-"));
 
-    await runFromCli(["42", "--lane", "staging"], { io, runIssue });
+    await runFromCli(["42", "--lane", "staging"], { io, runIssue, dir });
 
     assert.equal(runIssue.mock.callCount(), 1);
     const callArgs = runIssue.mock.calls[0].arguments[0];
     assert.ok(!("backend" in callArgs), "backend key must be absent when --backend is not passed");
     assert.ok(!("model" in callArgs), "model key must be absent when --model is not passed");
+    rmSync(dir, { recursive: true, force: true });
+  });
+});
+
+describe("formatTerminalDiagnostics (forge#2175)", () => {
+  it("renders phase, attempt/max, reason, state, and run-log path from a run-log with a PHASE_FAILED event", () => {
+    const dir = mkdtempSync(join(os.tmpdir(), "engine-cli-test-"));
+    try {
+      appendEvent(dir, 29241, { event: "RUN_START", issue: 29241, run: "r_29241_staging", lane: "staging" });
+      appendEvent(dir, 29241, { event: "PHASE_COMMIT", phase: "investigate", outputs: {} });
+      appendEvent(dir, 29241, { event: "PHASE_COMMIT", phase: "context", outputs: {} });
+      appendEvent(dir, 29241, { event: "PHASE_COMMIT", phase: "architect", outputs: {} });
+      appendEvent(dir, 29241, { event: "PHASE_START", phase: "build", attempt: 1 });
+      appendEvent(dir, 29241, { event: "PHASE_FAILED", phase: "build", attempt: 1, reason: "builder complete=true commitsAhead=0" });
+      appendEvent(dir, 29241, { event: "PHASE_START", phase: "build", attempt: 2 });
+      appendEvent(dir, 29241, { event: "PHASE_FAILED", phase: "build", attempt: 2, reason: "builder complete=true commitsAhead=0" });
+      appendEvent(dir, 29241, { event: "PHASE_START", phase: "build", attempt: 3 });
+      appendEvent(dir, 29241, { event: "PHASE_FAILED", phase: "build", attempt: 3, reason: "builder complete=true commitsAhead=0" });
+      appendEvent(dir, 29241, { event: "RUN_TERMINAL", reason: "needs-human" });
+
+      const out = formatTerminalDiagnostics(dir, 29241);
+
+      assert.match(out, /phase:\s+build \(failed 3\/3 attempts\)/);
+      assert.match(out, /reason:\s+builder complete=true commitsAhead=0/);
+      assert.match(out, /state:\s+committed=\[investigate,context,architect\] branch=null pr=null/);
+      assert.match(out, new RegExp(`run-log:\\s+.*29241\\.jsonl`));
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("omits the phase/reason lines but still prints state and run-log path when there is no PHASE_FAILED event", () => {
+    const dir = mkdtempSync(join(os.tmpdir(), "engine-cli-test-"));
+    try {
+      appendEvent(dir, 55, { event: "RUN_START", issue: 55, run: "r_55_staging", lane: "staging" });
+      appendEvent(dir, 55, { event: "PHASE_COMMIT", phase: "investigate", outputs: {} });
+      appendEvent(dir, 55, { event: "RUN_TERMINAL", reason: "decomposed" });
+
+      const out = formatTerminalDiagnostics(dir, 55);
+
+      assert.ok(!out.includes("phase:"), "must not print a phase: line when no PHASE_FAILED exists");
+      assert.ok(!out.includes("reason:"), "must not print a reason: line when no PHASE_FAILED exists");
+      assert.match(out, /state:\s+committed=\[investigate\] branch=null pr=null/);
+      assert.match(out, /run-log:/);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("prints only the run-log path when the log is empty/nonexistent (e.g. a deferred early return)", () => {
+    const dir = mkdtempSync(join(os.tmpdir(), "engine-cli-test-"));
+    try {
+      const out = formatTerminalDiagnostics(dir, 999);
+      assert.ok(!out.includes("phase:"));
+      assert.ok(!out.includes("state:"));
+      assert.match(out, /run-log:/);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});
+
+describe("runFromCli terminal diagnostics (forge#2175)", () => {
+  it("prints the diagnostic block after a needs-human termination", async () => {
+    const dir = mkdtempSync(join(os.tmpdir(), "engine-cli-test-"));
+    const io = { gh: async () => { throw new Error("should not be called"); } };
+    const runIssue = mock.fn(async ({ dir: d, issue }) => {
+      appendEvent(d, issue, { event: "RUN_START", issue, run: `r_${issue}_staging`, lane: "staging" });
+      appendEvent(d, issue, { event: "PHASE_START", phase: "build", attempt: 1 });
+      appendEvent(d, issue, { event: "PHASE_FAILED", phase: "build", attempt: 1, reason: "builder complete=true commitsAhead=0" });
+      appendEvent(d, issue, { event: "RUN_TERMINAL", reason: "needs-human" });
+      return { terminalReason: "needs-human" };
+    });
+
+    const logs = [];
+    const originalLog = console.log;
+    console.log = (...args) => logs.push(args.join(" "));
+    try {
+      const res = await runFromCli(["42", "--lane", "staging"], { io, runIssue, dir });
+      assert.equal(res.terminalReason, "needs-human");
+    } finally {
+      console.log = originalLog;
+      rmSync(dir, { recursive: true, force: true });
+    }
+
+    const output = logs.join("\n");
+    assert.match(output, /issue #42 → needs-human/);
+    assert.match(output, /phase:\s+build \(failed 1\/3 attempts\)/);
+    assert.match(output, /reason:\s+builder complete=true commitsAhead=0/);
+    assert.match(output, /run-log:/);
+  });
+
+  it("does NOT print the diagnostic block after a merged termination", async () => {
+    const dir = mkdtempSync(join(os.tmpdir(), "engine-cli-test-"));
+    const io = { gh: async () => { throw new Error("should not be called"); } };
+    const runIssue = mock.fn(async () => ({ terminalReason: "merged" }));
+
+    const logs = [];
+    const originalLog = console.log;
+    console.log = (...args) => logs.push(args.join(" "));
+    try {
+      await runFromCli(["42", "--lane", "staging"], { io, runIssue, dir });
+    } finally {
+      console.log = originalLog;
+      rmSync(dir, { recursive: true, force: true });
+    }
+
+    const output = logs.join("\n");
+    assert.match(output, /issue #42 → merged/);
+    assert.ok(!output.includes("run-log:"), "no diagnostic block should be printed on a merged termination");
   });
 });

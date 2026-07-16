@@ -10,7 +10,9 @@ import { reconcileState } from "./engine/reconcile.mjs";
 import { makeProjector } from "./engine/projector.mjs";
 import { VALID_BACKENDS } from "./runner.mjs";
 
-const DEFAULT_MAX_ATTEMPTS = 3;
+// Exported (forge#2175) so bin/engine-cli.mjs can render "failed N/M attempts"
+// diagnostics without duplicating the retry budget constant.
+export const DEFAULT_MAX_ATTEMPTS = 3;
 
 /**
  * @param {object} opts

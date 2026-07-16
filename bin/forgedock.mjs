@@ -3395,7 +3395,11 @@ switch (command) {
   case "run-issue": {
     const { runFromCli } = await import("./engine-cli.mjs");
     try {
-      await runFromCli(restArgs);
+      const result = await runFromCli(restArgs);
+      // forge#2175: make a needs-human escalation distinguishable from a
+      // successful run by exit code, mirroring the resume-stalled case's
+      // existing convention below (result.failed.length > 0 -> exitCode 1).
+      if (result && result.terminalReason === "needs-human") exitCode = 1;
     } catch (err) {
       process.stderr.write(`${RED}${err.message}${RESET}\n`);
       exitCode = 1;
