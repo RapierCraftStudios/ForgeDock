@@ -2229,7 +2229,7 @@ Post a welcome comment when all three conditions are true:
 # Read config — default enabled when key is absent
 WELCOME_ENABLED=$(yq '.community.welcome_new_contributors // true' forge.yaml 2>/dev/null || echo 'true')
 
-if [ "$IS_FIRST_TIME_CONTRIBUTOR" = "true" ] && [ "$WELCOME_ENABLED" != "false" ]; then
+if [ "$IS_FIRST_TIME_CONTRIBUTOR" = "true" ] && [ "$WELCOME_ENABLED" != "false" ] && [ "$REVIEW_MODE" = "single-pr" ]; then
     # Read optional custom values from forge.yaml community section
     CONTRIBUTING_URL=$(yq '.community.contributing_url // "CONTRIBUTING.md"' forge.yaml 2>/dev/null || echo 'CONTRIBUTING.md')
     CUSTOM_CONVENTIONS=$(yq '.community.conventions // ""' forge.yaml 2>/dev/null || echo '')
