@@ -10,6 +10,8 @@ on:
       - 'scripts/check-native-conflicts.sh'
       - 'scripts/check-protocol-restatements.sh'
       - 'scripts/check-command-docs-drift.sh'
+      - 'scripts/check-command-side-effects.sh'
+      - 'scripts/check-spec-markers.sh'
   push:
     branches:
       - staging
@@ -22,6 +24,8 @@ on:
       - 'scripts/check-native-conflicts.sh'
       - 'scripts/check-protocol-restatements.sh'
       - 'scripts/check-command-docs-drift.sh'
+      - 'scripts/check-command-side-effects.sh'
+      - 'scripts/check-spec-markers.sh'
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
@@ -80,7 +84,7 @@ jobs:
           # - 'EMEMO_EOF' — exact uppercase heredoc token; no false positives expected
           # - 'is_byop'   — exact token; no false positives expected
           # - 'byop_discount' — exact token; no false positives expected
-          MATCHES=$(grep -rniP '\balterlab\b|\bememo\b|EMEMO_EOF|\bis_byop\b|\bbyop_discount\b' commands/ \
+          MATCHES=$(grep -rniE '\balterlab\b|\bememo\b|EMEMO_EOF|\bis_byop\b|\bbyop_discount\b' commands/ \
             --include='*.md' \
             | grep -v '<!-- allowlist:' \
             || true)
@@ -92,3 +96,99 @@ jobs:
             exit 1
           fi
           echo "OK: No banned tokens found in commands/"
+
+  portability-lint:
+    name: Shell portability lint (no grep -P in specs)
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Check commands/ for non-portable grep -P / grep -oP patterns
+        run: |
+          # Fail if any command spec CHANGED IN THIS PR contains grep -P or grep -oP
+          # (GNU-only PCRE). macOS BSD grep does not support -P; these patterns cause
+          # silent empty-variable failures on any non-GNU platform.
+          # Use grep -E / grep -oE + sed instead.
+          #
+          # Scope: diff-based — only files changed in this PR are checked.
+          # This allows phased remediation of the existing corpus while enforcing
+          # correctness on all new/modified spec files. A separate tracking issue
+          # (#1608) covers migrating the full corpus. <!-- scope: diff-only; see #1608 -->
+          #
+          # Exclusions:
+          # - Lines containing '<!-- allowlist:' are intentionally exempted.
+          # - This check itself uses only grep -E (portable).
+          #
+          # Detect changed commands/*.md files in this PR (works for both push and PR events)
+          if [ -n "${{ github.event.pull_request.base.sha }}" ]; then
+            BASE_SHA="${{ github.event.pull_request.base.sha }}"
+          else
+            BASE_SHA="$(git rev-parse HEAD^)"
+          fi
+          CHANGED_SPECS=$(git diff --name-only "$BASE_SHA"...HEAD -- 'commands/**/*.md' 2>/dev/null \
+            | grep -E '\.md$' || true)
+          if [ -z "$CHANGED_SPECS" ]; then
+            echo "OK: No commands/*.md files changed in this PR — portability-lint skipped."
+            exit 0
+          fi
+          echo "Checking changed spec files for grep -P / grep -oP patterns:"
+          echo "$CHANGED_SPECS"
+          echo ""
+          MATCHES=""
+          while IFS= read -r spec_file; do
+            [ -f "$spec_file" ] || continue
+            FILE_MATCHES=$(grep -nE "grep\s+-[a-zA-Z]*P[ '\"]|grep\s+-oP[ '\"]|grep\s+-P[ '\"]" "$spec_file" \
+              | grep -v '<!-- allowlist:' || true)
+            if [ -n "$FILE_MATCHES" ]; then
+              MATCHES="${MATCHES}${spec_file}:${FILE_MATCHES}\n"
+            fi
+          done <<< "$CHANGED_SPECS"
+          if [ -n "$MATCHES" ]; then
+            echo "ERROR: Non-portable grep -P / grep -oP found in changed spec files:"
+            printf "%b" "$MATCHES"
+            echo ""
+            echo "Replace with grep -E / grep -oE + sed for portable extraction."
+            echo "BSD grep (macOS) does not support -P (PCRE). See #786, #811, #1179."
+            exit 1
+          fi
+          echo "OK: No grep -P / grep -oP patterns found in changed commands/ spec files."
+
+  spec-side-effects:
+    name: Spec-as-code side-effect gate
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Check commands/ for unguarded side-effect verbs
+        run: |
+          # Fail if any command spec introduces:
+          #   Class A: gh gist create/edit --public (always prohibited — gists must be secret)
+          #   Class B: side-effect verb in a section with no DRY_RUN/governor guard (diff-aware)
+          #
+          # <!-- Added: forge#1609 -->
+          if [ -n "${{ github.event.pull_request.base.sha }}" ]; then
+            export GITHUB_BASE_SHA="${{ github.event.pull_request.base.sha }}"
+          fi
+          bash scripts/check-command-side-effects.sh commands/
+
+  spec-markers:
+    name: Spec marker / placeholder check
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Check commands/ for unknown FORGE markers and workflow placeholders
+        run: |
+          # Fail if any command spec contains:
+          #   - A FORGE: annotation marker not in the known registry (catches typos like FORGE:NOTES)
+          #   - An unsubstituted {PLACEHOLDER} token in a .github/workflows/*.yml run block
+          #
+          # <!-- Added: forge#1609 -->
+          bash scripts/check-spec-markers.sh commands/ .
