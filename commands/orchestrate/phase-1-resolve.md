@@ -21,7 +21,43 @@ Parse `$ARGUMENTS` to determine which issues to work on:
 | `fast-lane` or `fast` | All open fast-lane issues (no milestone, bugs/fixes) |
 | `priority:P0` or `priority:P1` | All open issues with that priority label |
 | `mcp:fast` or `n8n:next 3` | Repo-scoped queries |
-| `<slug>` (no keyword) | Try milestone first, then fall back to label search |
+| `cascade`, `review-findings`, or `findings` (optionally `--include-deferred` / `--allow-gen2`) | All open `review-finding` issues (default repo, or repo-scoped e.g. `mcp:cascade`). See "Cascade / Review-Finding Resolution" below — by default this still excludes `PERMANENT_DEFERRED` (generation ≥ 2) findings; the override flags admit them for this explicit, human-requested run only. <!-- Added: forge#2231 -->|
+| `<slug>` (no keyword) | Try milestone first, then fall back to label search. If both resolve to zero issues, report near-miss label candidates instead of silently resolving to nothing — see "Near-Miss Suggestion" below. <!-- Added: forge#2231 -->|
+
+### Cascade / Review-Finding Resolution
+
+<!-- Added: forge#2231 -->
+
+When the input matches `cascade`, `review-findings`, or `findings` (case-insensitive, optionally repo-prefixed), resolve to all open `review-finding`-labeled issues instead of a milestone or plain label search:
+
+```bash
+gh issue list {GH_FLAG} --label "review-finding" --state open --limit 500 \
+  --json number,title,labels,milestone \
+  --jq '.[] | {number, title, labels: [.labels[].name], milestone: .milestone.title}'
+```
+
+**Generation ≥ 2 findings remain excluded by default**, consistent with the Step 4C admission rule in `phase-4-execution.md` — a `review-finding` issue whose *source* issue also carries the `review-finding` label is generation 2+ and is normally deferred permanently (`PERMANENT_DEFERRED`). That cap is an **autonomy guard**, not a human-request guard: it exists to stop an unattended run from cascading forever, not to block an operator who explicitly asked for this exact bucket of work. See `phase-4-execution.md` Step 4C rule 1 and the reworded anti-pattern note for the full rationale.
+
+This resolve step is a human-requested entry point (the operator typed `cascade`/`review-findings`/`findings` directly), so it honors an explicit override:
+
+- `--include-deferred` or `--allow-gen2` appended to the input (e.g. `cascade --allow-gen2`, `review-findings --include-deferred`): admit generation ≥ 2 findings into the resolved set for this run. Without either flag, generation ≥ 2 findings are filtered out of the resolved set here, exactly as Step 4C would defer them mid-run — the flags only change what this **explicit** request is allowed to touch; they do not relax Step 4C's autonomous behavior for anything spawned *during* this run (see "Recursion safety" below).
+- The config-driven lever for this same override (`orchestration.cascade.max_generation` / `--policy` CLI flags) is owned by #2234 — when that config surface lands, prefer it over the flags here; the flags above remain as the pre-#2234 mechanism for this resolve step specifically.
+
+**Recursion safety (unchanged)**: findings spawned *during* this run by its own sweep agents are still never re-swept, regardless of whether `--include-deferred`/`--allow-gen2` was passed at resolve time — see `phase-4-execution.md` Step 4C rules and the recursion-safety note near the anti-patterns list. The override above only widens what this one resolve step admits from the *pre-existing* open issue set; it has no effect on Step 4C's in-run admission logic.
+
+### Near-Miss Suggestion
+
+<!-- Added: forge#2231 -->
+
+When a bare `<slug>` (no keyword) resolves to **zero** issues via both the milestone lookup and the label-search fallback, do not silently return an empty set. Fetch the repo's label list and suggest the closest matching label(s) instead:
+
+```bash
+ALL_LABELS=$(gh label list {GH_FLAG} --json name --jq '.[].name')
+# Simple substring/prefix match against the attempted slug — no fuzzy-matching library required.
+NEAR_MISS=$(echo "$ALL_LABELS" | grep -iE "${SLUG:0:4}" || true)
+```
+
+Report back to the caller: `No milestone or label matched "{SLUG}". Did you mean: {NEAR_MISS list, or "review-finding"/"batch" if SLUG resembles "cascade"}?` This directly fixes the case reported in #2231 — `cascade` is not itself a label in most repos (the only cascade-adjacent labels are `review-finding` and `batch`), so a bare `cascade` slug previously resolved to nothing with no feedback. Note that `cascade`/`review-findings`/`findings` are now handled by the dedicated resolution rule above and never reach this bare-slug fallback path at all — this near-miss path remains for any other unmatched slug.
 
 ### Fetch the issues
 
