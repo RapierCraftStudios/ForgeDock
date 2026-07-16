@@ -54,8 +54,14 @@ gh pr list {GH_FLAG} --head {BRANCH} --json number,state,url 2>/dev/null
 **HEAD-unchanged re-review guard** (MANDATORY when a PR already exists and is OPEN) <!-- Added: forge#2243 --> — a PR whose most recent review verdict was CHANGES REQUESTED must not be resubmitted for a full domain-agent review fan-out if nothing has changed since that verdict. `/review-pr` records the exact commit it reviewed in its verdict comment (`CHANGES REQUESTED: commit {sha} — ...`, see `commands/review-pr.md` Phase 8/9); compare that recorded sha against the PR's current `headRefOid`:
 
 ```bash
-LAST_VERDICT=$(gh pr view {PR_NUMBER} {GH_FLAG} --json comments \
-  --jq '[.comments[] | select(.body | test("CHANGES REQUESTED: commit "))] | last | .body // ""' 2>/dev/null)
+# NOTE: the CHANGES REQUESTED verdict is posted via `gh pr review --comment` (see
+# commands/review-pr.md Phase 7B) — that creates a PullRequestReview, which surfaces under
+# the `reviews` field, NOT `comments` (issue/PR comments are a separate GraphQL object).
+# Query both --json reviews and --json comments (same combined-read pattern already used in
+# work-on.md's REVIEW_BODIES/REVIEW_PRESENT checks) so this guard works regardless of which
+# GitHub object type carries the verdict text.
+LAST_VERDICT=$(gh pr view {PR_NUMBER} {GH_FLAG} --json reviews,comments \
+  --jq '([.reviews[] | {body, created_at: (.submittedAt // "")}] + [.comments[] | {body, created_at: (.createdAt // "")}]) | map(select(.body | test("CHANGES REQUESTED: commit "))) | sort_by(.created_at) | last | .body // ""' 2>/dev/null)
 LAST_VERDICT_SHA=$(echo "$LAST_VERDICT" | grep -oE 'CHANGES REQUESTED: commit [0-9a-f]+' | grep -oE '[0-9a-f]+$' | head -1)
 CURRENT_SHA_SHORT=$(gh pr view {PR_NUMBER} {GH_FLAG} --json headRefOid --jq '.headRefOid' 2>/dev/null | cut -c1-7)
 
