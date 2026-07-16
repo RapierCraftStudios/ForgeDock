@@ -8,8 +8,8 @@ Per-release pipeline evaluation results for ForgeDock. Every scorecard here was 
 
 | Field | Value |
 |-------|-------|
-| Scorecard | [claude-sonnet-5-2026-07-04.json](published/claude-sonnet-5-2026-07-04.json) |
-| Model | claude-sonnet-5 |
+| Scorecard | [claude-sonnet-4-6-2026-07-04.json](published/claude-sonnet-4-6-2026-07-04.json) |
+| Model | claude-sonnet-4-6 |
 | Corpus | seed-v1 |
 | Run date | 2026-07-04 |
 | One-shot success rate | — (pending harness) |
@@ -17,7 +17,7 @@ Per-release pipeline evaluation results for ForgeDock. Every scorecard here was 
 
 > **Note**: The baseline above is a format placeholder. The harness (#1285) and CI gate (#1286) must be operational before real scorecard values can be populated. When the first real run completes, update this table and remove this note.
 >
-> **Model upgrade**: Default model was updated from `claude-sonnet-4-5` to `claude-sonnet-5` in PR #1441 (issue #1248, committed 2026-07-04). The `--model` flag and `FORGEDOCK_MODEL` env var override the default at runtime.
+> **Model upgrade**: Default model was updated from `claude-sonnet-4-5` to `claude-sonnet-5` in PR #1441 (issue #1248, committed 2026-07-04). The `--model` flag and `FORGEDOCK_MODEL` env var override the default at runtime. No `claude-sonnet-5` scorecard has been published yet — see the Published results table below.
 
 ---
 
@@ -25,7 +25,7 @@ Per-release pipeline evaluation results for ForgeDock. Every scorecard here was 
 
 | Run ID | Model | Corpus | Date | One-shot success | Human interventions/issue | Scorecard |
 |--------|-------|--------|------|-----------------|--------------------------|-----------|
-| claude-sonnet-5-2026-07-04 | claude-sonnet-5 | seed-v1 | 2026-07-04 | pending | pending | [scorecard](published/claude-sonnet-5-2026-07-04.json) |
+| claude-sonnet-5-2026-07-04 | claude-sonnet-5 | seed-v1 | 2026-07-04 | pending | pending | not yet published |
 | claude-sonnet-4-6-2026-07-04 | claude-sonnet-4-6 | seed-v1 | 2026-07-04 | pending | pending | [scorecard](published/claude-sonnet-4-6-2026-07-04.json) |
 
 ---
