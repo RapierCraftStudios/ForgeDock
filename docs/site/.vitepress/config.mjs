@@ -6,7 +6,7 @@ export default defineConfig({
   lang: 'en-US',
 
   // Deploy to GitHub Pages at /
-  base: '/',
+  base: '/ForgeDock/',
 
   head: [
     ['link', { rel: 'icon', href: '/favicon.ico' }],
