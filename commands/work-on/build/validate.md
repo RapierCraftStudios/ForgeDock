@@ -254,6 +254,65 @@ fi
 
 ---
 
+## Phase V3.6: Browser Signal Check
+
+**Skip if**: No TypeScript/TSX files were changed, OR `forge.yaml → services.app_url` is absent or empty.
+
+After static proxy checks, run a lightweight live browser check using Playwright MCP tools to surface console errors, failed network requests, and basic performance metrics for any changed UI routes. This check is advisory — findings are surfaced as warnings in the V5 summary but do NOT block the gate unless the browser session is available AND returns ERROR-level console output.
+
+```bash
+cd {WORKTREE_PATH}
+APP_URL=$(yq '.services.app_url // ""' forge.yaml 2>/dev/null || echo '')
+if [ -z "$APP_URL" ]; then
+    echo "SKIPPED — services.app_url not configured in forge.yaml (browser signal check requires a running app URL)"
+else
+    echo "BROWSER SIGNAL CHECK: navigating $APP_URL"
+fi
+```
+
+**When APP_URL is configured**, perform the following using Playwright MCP tools:
+
+**Step 1 — Navigate**
+Use `browser_navigate` to load `{APP_URL}`. If the changed files include a specific page route (e.g., `web/src/app/dashboard/page.tsx`), derive the route path and navigate there instead (e.g., `{APP_URL}/dashboard`).
+
+**Step 2 — Capture console messages**
+```
+browser_console_messages
+```
+Classify findings:
+- Any message at `error` level → **MEDIUM** finding: `BROWSER-CONSOLE-ERROR | MEDIUM | console | {message}`
+- Any message at `warn` level → **LOW** advisory: `BROWSER-CONSOLE-WARN | LOW | console | {message}`
+- Ignore `info` and `log` levels
+
+**Step 3 — Capture network failures**
+```
+browser_network_requests filter="static:false"
+```
+Check for HTTP 4xx and 5xx responses on non-static requests. Exclude known third-party analytics/tracking domains.
+- HTTP 4xx or 5xx response → **HIGH** finding: `BROWSER-NETWORK-FAIL | HIGH | network | {url} returned {status}`
+
+**Step 4 — Capture performance metrics (LCP-ish)**
+```
+browser_evaluate function="() => {
+  const nav = performance.getEntriesByType('navigation')[0];
+  const paint = performance.getEntriesByType('paint');
+  const fcp = paint.find(e => e.name === 'first-contentful-paint');
+  return {
+    domContentLoaded: nav ? Math.round(nav.domContentLoadedEventEnd) : null,
+    loadTime: nav ? Math.round(nav.loadEventEnd) : null,
+    fcp: fcp ? Math.round(fcp.startTime) : null
+  };
+}"
+```
+Classify:
+- `loadTime > 4000` ms → **HIGH** finding: `BROWSER-PERF | HIGH | performance | page load time {loadTime}ms exceeds 4s threshold`
+- `loadTime > 2500` ms → **MEDIUM** finding: `BROWSER-PERF | MEDIUM | performance | page load time {loadTime}ms exceeds 2.5s threshold`
+- `fcp > 1800` ms → **LOW** advisory: `BROWSER-PERF | LOW | performance | FCP {fcp}ms — consider lazy-loading or code splitting`
+
+**Advisory scope**: Browser signal findings are included in the V5 summary under "Browser Signals". They do NOT block the gate (GATE_PASSED stays true) unless a BROWSER-NETWORK-FAIL HIGH finding is present on the primary app URL (indicating the app is completely broken for that route). Console ERROR findings are MEDIUM — surfaced for human review, not blocking.
+
+---
+
 ## Phase V4: Deployment Completeness Check
 
 **Skip if**: No new environment variables were introduced in the changed files.
@@ -398,9 +457,10 @@ This module runs at **Step 3F.5** — after implement, before commit (3J) and PR
 
 ```
 3F  → Implement (by implement.md) — code written, staged (not committed)
-3F.5 → [THIS MODULE] Validate — gate loop, format, proxy, deploy checks
+3F.5 → [THIS MODULE] Validate — gate loop, format, proxy, browser signals, deploy checks
 3G  → (covered by Phase V2 above)
 3H  → (covered by Phase V3 above)
+3H.5 → (covered by Phase V3.6 above — browser signal check for UI changes)
 3I  → (covered by Phase V4 above)
 3J  → V5 commit happens here after GATE_PASSED=true (single commit for implementation + any fixes)
 ```
