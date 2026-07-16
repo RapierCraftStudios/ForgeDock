@@ -1061,10 +1061,33 @@ describe("status — re-entry mini-dashboard (#1945)", () => {
 // .github/workflows/ci.yml), matching the existing shim precedent in this
 // file and in bin/tests/runner.test.mjs. Skipped on other platforms rather
 // than failed.
+//
+// Windows note (forge#2169): a `.cmd`-based cross-platform npm stub is NOT a
+// viable alternative here — this was investigated and empirically ruled out,
+// not merely assumed. `selfUpdateGlobalInstall()` in bin/forgedock.mjs calls
+// `execFileSync("npm", [...])` with no `shell: true`, and on Windows that
+// call cannot resolve ANY `.cmd`-based npm — real or stubbed:
+//   execFileSync("npm", ["--version"])       [real npm.cmd already on PATH] → ENOENT
+//   execFileSync("npm.cmd", ["--version"])   [exact filename, real npm.cmd] → EINVAL
+// This exactly matches — and extends — the identical `gh`-stub finding
+// documented for the doctor Check 7 test (see commit 4061853, "fix(tests):
+// scope Check 7 gh-stub test to POSIX platforms (#1964)"): execFileSync
+// without a shell cannot invoke a .cmd/.bat launcher on Windows at all.
+// Shipping a `.cmd` shim for these tests would therefore never even be
+// reached by the code under test, so it would not restore real coverage —
+// it would only mask that `execFileSync("npm", ...)` itself cannot resolve
+// npm on Windows regardless of shim vs. real install. (That resolution
+// failure is a separate, more significant latent issue tracked outside this
+// low-severity test-coverage gap — see the issue thread for the follow-up.)
+// These two tests therefore remain intentionally POSIX-only; CI (ubuntu-only)
+// is where the real coverage lives.
 // ---------------------------------------------------------------------------
 
 describe("update — global npm install self-update (forge#2133)", () => {
   it("detects a global install, runs `npm install -g`, and re-execs to finish persist/relink from the new payload", () => {
+    // See the Windows note in the file-level comment above this describe
+    // block (forge#2169) — a Windows shim is not viable for this exact
+    // execFileSync("npm", ...) call, confirmed empirically.
     if (process.platform === "win32") {
       return;
     }
@@ -1201,6 +1224,12 @@ describe("update — global npm install self-update (forge#2133)", () => {
   // on every attempt: the guard must cap re-exec at MAX_SELF_UPDATE_ATTEMPTS
   // (1 retry, i.e. 2 total install attempts) and print an actionable message
   // instead of looping forever.
+  //
+  // Windows note (forge#2169): skipped for the same reason as the forge#2133
+  // test above (see the file-level comment above the enclosing describe
+  // block) — execFileSync("npm", ...) cannot resolve any .cmd-based npm on
+  // Windows, real or stubbed, so a Windows shim would not be reachable by
+  // the code under test.
   // -------------------------------------------------------------------------
   it("caps self-update re-exec attempts when the installed version never advances, instead of looping indefinitely", () => {
     if (process.platform === "win32") {
