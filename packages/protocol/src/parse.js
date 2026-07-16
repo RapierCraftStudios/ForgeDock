@@ -101,17 +101,25 @@ function escapeRegExp(str) {
 /**
  * Reverse the HTML entity escapes applied by emit()'s sanitizeFieldValue().
  *
- * emit() escapes three HTML comment delimiter sequences to protect GitHub's
- * renderer from comment injection:
+ * emit() escapes "&" first, then three HTML comment delimiter sequences, to
+ * protect GitHub's renderer from comment injection AND to keep the encoding
+ * injective (reversible for every input, not just delimiter-free ones):
+ *   0. `&`     → `&amp;`      (forge#2137 — must run first on encode)
  *   1. `<!--`  → `&lt;!--`   (forge#1638)
  *   2. `--!>`  → `--!&gt;`   (forge#1594)
  *   3. `-->`   → `--&gt;`    (forge#1594)
  *
- * parse() must apply the inverse so that round-tripping through emit → parse
- * is lossless. Unescape order: `--!&gt;` before `--&gt;` (most-specific first)
- * to avoid the `!` being left dangling by an overly-greedy `--&gt;` pass.
- * The `&lt;!--` unescape is independent and can run in any relative order.
- * (forge#1662)
+ * parse() must apply the exact inverse, in reverse order, so that
+ * round-tripping through emit → parse is lossless. Unescape order:
+ * `--!&gt;` before `--&gt;` (most-specific first) to avoid the `!` being left
+ * dangling by an overly-greedy `--&gt;` pass; `&lt;!--` can run in any order
+ * relative to those two. The `&amp;` → `&` unescape MUST run LAST — doing it
+ * first (or interleaved) would corrupt the `&` that is part of a freshly
+ * restored `<!--`/`-->`/`--!>` sequence. Running "&" first on encode and last
+ * on decode is what makes the scheme injective: any pre-existing entity-like
+ * text in the original value (e.g. `&lt;!--` or `<!--&gt;`) is doubly-escaped
+ * at encode time and can never collide with the single-escaped form produced
+ * by a real delimiter (forge#2137; forge#1662).
  *
  * @param {string} raw
  * @returns {string}
@@ -120,7 +128,8 @@ function unescapeFieldValue(raw) {
   return raw
     .replace(/--!&gt;/g, '--!>')
     .replace(/--&gt;/g, '-->')
-    .replace(/&lt;!--/g, '<!--');
+    .replace(/&lt;!--/g, '<!--')
+    .replace(/&amp;/g, '&');
 }
 
 /**

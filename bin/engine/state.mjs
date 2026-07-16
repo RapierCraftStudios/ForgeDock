@@ -17,7 +17,18 @@ export function serializeState(index) {
   //     honour. JSON.stringify does not escape any of these, so a payload
   //     value containing them could otherwise open/close the
   //     <!-- FORGE:STATE ... --> block early (CodeQL js/bad-tag-filter).
+  //
+  // The "&" escape below MUST run first, before the delimiter escapes. Without
+  // it, a payload value that already contains literal entity-like text (e.g.
+  // "<!--&gt;" or "&lt;!--") collides with the encoded form of an unrelated
+  // real delimiter — the encoder is not injective and the collision is
+  // unrecoverable on decode (forge#2137). Escaping "&" first guarantees every
+  // "&lt;!--"/"--&gt;"/"--!&gt;" sequence present in the output was produced
+  // by *this* encode pass, never by pre-existing entity text (which is now
+  // doubly-escaped, e.g. "&" -> "&amp;" -> untouched by the delimiter pass
+  // that only matches literal "<!--"/"--"+">" character sequences).
   const payload = JSON.stringify(index)
+    .replace(/&/g, "&amp;")
     .replace(/<!--/g, "&lt;!--")
     .replace(/--(!?)>/g, "--$1&gt;");
   return `${OPEN}\n${payload}\n${CLOSE}`;
@@ -27,15 +38,20 @@ export function serializeState(index) {
 export function parseState(issueBody) {
   const m = BLOCK_RE.exec(issueBody || "");
   if (!m) return null;
-  // Inverse of serializeState: restore "--&gt;", "--!&gt;", and "&lt;!--".
-  // Unescape the closer forms first (most-specific "--!&gt;" before "--&gt;")
-  // so a dangling "!" is never left behind, then restore the opener — same
-  // ordering rationale as packages/protocol/src/parse.js's unescapeFieldValue.
+  // Inverse of serializeState: restore "--&gt;", "--!&gt;", "&lt;!--", then
+  // "&amp;" — in that order. Unescape the closer forms first (most-specific
+  // "--!&gt;" before "--&gt;") so a dangling "!" is never left behind, then
+  // restore the opener — same ordering rationale as
+  // packages/protocol/src/parse.js's unescapeFieldValue. The "&amp;" -> "&"
+  // unescape MUST run LAST (mirroring the encode side running it FIRST) so it
+  // never touches the "&" that is part of a just-restored "<!--"/"-->"/"--!>"
+  // sequence (forge#2137).
   try {
     return JSON.parse(
       m[1].trim()
         .replace(/--(!?)&gt;/g, "--$1>")
-        .replace(/&lt;!--/g, "<!--"),
+        .replace(/&lt;!--/g, "<!--")
+        .replace(/&amp;/g, "&"),
     );
   } catch { return null; }
 }
