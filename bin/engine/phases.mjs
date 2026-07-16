@@ -138,7 +138,25 @@ export const PHASES = [
       const branch = resolveBranch(state, m);
       const ahead = branch ? await commitsAhead(state.lane, branch, io) : 0; // … AND real commits
       if (complete && ahead > 0) return { status: "committed", outputs: { branch } };
-      return { status: "failed", detail: `builder complete=${complete} commitsAhead=${ahead} branch=${branch || "unresolved"}` };
+      const detail = `builder complete=${complete} commitsAhead=${ahead} branch=${branch || "unresolved"}`;
+      // forge#2176: when the builder has already posted FORGE:BUILDER:COMPLETE
+      // but the resolved (real, ground-truth) branch has zero commits ahead of
+      // the lane base, this is a stable fixed point, not a transient failure.
+      // commands/work-on/build.md's own early-exit (Phase B0) means any
+      // subsequent re-invocation of this phase's runner will see
+      // FORGE:BUILDER:COMPLETE already present and immediately no-op with
+      // `BUILD_RESULT: status: ALREADY_DONE` — it will never touch git again,
+      // so `ahead` cannot change without new, out-of-band input (e.g. a human
+      // pushing a commit). Retrying is therefore guaranteed to reproduce this
+      // exact result; mark it non-retryable so the engine escalates after a
+      // single attempt instead of burning the full attempt budget.
+      //
+      // When `complete` is false, the builder never finished at all (crashed,
+      // ran out of iterations, or was interrupted) — that IS worth a fresh
+      // retry, so this branch intentionally leaves `retryable` unset
+      // (defaults to retryable in bin/engine.mjs's runPhaseWithRetry).
+      if (complete) return { status: "failed", detail, retryable: false };
+      return { status: "failed", detail };
     },
   },
   {

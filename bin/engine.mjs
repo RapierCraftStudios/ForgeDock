@@ -159,6 +159,19 @@ async function runPhaseWithRetry(phase, state, ctx) {
     const outcome = await phase.detectOutcome(state, io);
     if (outcome.status === "committed" || outcome.status === "blocked") return outcome;
     appendEvent(dir, issue, { event: "PHASE_FAILED", phase: phase.id, attempt, reason: outcome.detail });
+    // forge#2176: a phase's detectOutcome can mark a failure as a known,
+    // state-derived fixed point — re-running the phase's runner is
+    // guaranteed to reproduce the identical failure (e.g. the build phase's
+    // builder already completed and will no-op on any re-invocation, per
+    // commands/work-on/build.md's own `BUILD_RESULT: status: ALREADY_DONE`
+    // early-exit). Honor that signal by stopping immediately rather than
+    // burning the remaining attempt budget on a guaranteed-identical result.
+    // Absent/undefined `retryable` defaults to retryable (existing behavior
+    // for every phase that doesn't opt in — investigate/context/architect/
+    // review/close — is unchanged, preserving transient-failure retries).
+    if (outcome.retryable === false) {
+      return { status: "blocked", detail: outcome.detail };
+    }
   }
   // Exhausted transient retries → escalate (spec §7).
   return { status: "blocked", detail: `phase ${phase.id} failed after ${maxAttempts} attempts` };
