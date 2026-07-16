@@ -39,6 +39,8 @@ See also: [FORGE Annotation Protocol §6](forge-protocol-v1.md#6-label-state-mac
 
 **`workflow:invalid` after `ready-to-build`/`building`/`in-review`** (#2326): the enforcement hook (`bin/hooks/pre-tool-use.mjs`) allows `workflow:invalid` as a successor of these three states — not only of `workflow:investigating` — because invalidity is sometimes only discovered during architecture planning or build, once the actual code/tests are read (see #2312). This is gated, not unconditional: the hook requires a posted reversal comment already on the issue — a second `FORGE:INVESTIGATOR` annotation carrying `**Verdict**: INVALID` — before it allows the transition through. A bare relabel with no evidence trail is still blocked. `workflow:investigating → workflow:invalid` remains evidence-free (Phase 1D's normal path).
 
+The reversal comment must also carry a trusted `authorAssociation` — `OWNER`, `MEMBER`, or `COLLABORATOR` (#2332). Marker+verdict text alone is forgeable by any commenter on a public issue with no repo write access; the hook additionally requires GitHub's own `authorAssociation` classification on that comment (returned by `gh issue view --json comments` at no extra cost) to be one of those three tiers. This check is deliberately identity-agnostic rather than a hardcoded bot-login allowlist, so it survives the pipeline's `gh` identity rotating between accounts (#1722) without needing to be updated.
+
 ## Terminal Labels
 
 Processing stops when any of these labels is set:

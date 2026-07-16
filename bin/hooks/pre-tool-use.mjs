@@ -202,6 +202,26 @@ const EVIDENCE_REQUIRED_FOR_INVALID_FROM = new Set([
 ]);
 
 /**
+ * `authorAssociation` values (as returned by `gh issue view --json comments`,
+ * which GitHub computes server-side from the commenter's actual repo/org
+ * relationship) that are trusted to post reversal evidence. Deliberately
+ * NOT a hardcoded bot login: the pipeline's own `gh` identity legitimately
+ * rotates (issue #1722 — `rapiercraft-forgedock[bot]`'s token went invalid
+ * mid-batch and a session switched to the `RapierCraft` account to keep
+ * working), and a literal-login allowlist would fail closed the next time
+ * identity rotates. Checking the GitHub-computed relationship instead of a
+ * specific account name survives that rotation: whichever account is
+ * authenticated, as long as it is an org member / repo owner / granted
+ * collaborator access, reports one of these three values regardless of which
+ * account it is. Everything else — `CONTRIBUTOR`, `FIRST_TIME_CONTRIBUTOR`,
+ * `NONE`, or a missing/malformed field — is untrusted and must NOT satisfy
+ * the evidence check (issue #2332: this repo is public with no interaction
+ * restrictions, so any free GitHub account can otherwise post a comment
+ * matching the marker + verdict text below).
+ */
+const TRUSTED_REVERSAL_AUTHOR_ASSOCIATIONS = new Set(["OWNER", "MEMBER", "COLLABORATOR"]);
+
+/**
  * A reversal comment is a `FORGE:INVESTIGATOR` annotation whose verdict is
  * INVALID — i.e. a second investigation report that supersedes the
  * original CONFIRMED/PARTIAL verdict with citable evidence (see #2312's
@@ -210,7 +230,12 @@ const EVIDENCE_REQUIRED_FOR_INVALID_FROM = new Set([
  * on incident-specific text like issue numbers or the word "CORRECTED")
  * keeps this a general-purpose evidence check, not a one-off special case.
  *
- * @param {Array<{body?: string}>} comments
+ * In addition to the marker + verdict text, the comment's author must carry
+ * a trusted `authorAssociation` (see TRUSTED_REVERSAL_AUTHOR_ASSOCIATIONS
+ * above, issue #2332) — otherwise any commenter, with no write access to the
+ * repository, could forge the marker text and unlock this transition.
+ *
+ * @param {Array<{body?: string, authorAssociation?: string}>} comments
  * @returns {boolean}
  */
 function hasInvalidReversalEvidence(comments) {
@@ -218,7 +243,9 @@ function hasInvalidReversalEvidence(comments) {
   return comments.some((c) => {
     const body = String((c && c.body) || "");
     if (!body.includes("FORGE:INVESTIGATOR")) return false;
-    return /\*\*Verdict\*\*:\s*INVALID/i.test(body);
+    if (!/\*\*Verdict\*\*:\s*INVALID/i.test(body)) return false;
+    const association = String((c && c.authorAssociation) || "").toUpperCase();
+    return TRUSTED_REVERSAL_AUTHOR_ASSOCIATIONS.has(association);
   });
 }
 
@@ -672,7 +699,9 @@ function checkLabelTransition(command) {
   // still gated against *casual* invalidation — a bare relabel with no
   // paper trail is blocked. Require a posted reversal comment (a second
   // FORGE:INVESTIGATOR annotation carrying "**Verdict**: INVALID") already
-  // on the issue before allowing the transition through.
+  // on the issue before allowing the transition through, from a trusted
+  // author (issue #2332 — marker text alone is forgeable by anyone who can
+  // comment on a public issue; see TRUSTED_REVERSAL_AUTHOR_ASSOCIATIONS).
   if (newLabel === "workflow:invalid" && EVIDENCE_REQUIRED_FOR_INVALID_FROM.has(currentWorkflowLabel)) {
     if (!hasInvalidReversalEvidence(comments)) {
       return [
@@ -683,10 +712,13 @@ function checkLabelTransition(command) {
         ``,
         `This transition is allowed only when the issue carries a posted reversal:`,
         `a FORGE:INVESTIGATOR comment with "**Verdict**: INVALID" documenting the`,
-        `evidence that disproved the original premise (see #2312 for the pattern).`,
+        `evidence that disproved the original premise (see #2312 for the pattern),`,
+        `posted by an author with a trusted authorAssociation (OWNER, MEMBER, or`,
+        `COLLABORATOR — see #2332). A comment matching the marker text from any`,
+        `other commenter does not satisfy this gate.`,
         ``,
         `Fix: post the corrected investigation report first (verdict INVALID, with`,
-        `evidence), then retry this label transition.`,
+        `evidence, from a trusted account), then retry this label transition.`,
       ].join("\n");
     }
   }
