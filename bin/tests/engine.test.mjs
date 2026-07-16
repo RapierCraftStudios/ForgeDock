@@ -472,6 +472,56 @@ describe("runIssue", () => {
       "no PHASE_FAILED event should be logged for a fail-fast rethrow — it never reaches the retry bookkeeping, matching NO_API_KEY/NO_SDK");
   });
 
+  it("forge#2241: a session-limit CLI_BACKEND_FAILED carrying resetAt threads the reset time into the engine-error detail", async () => {
+    // bin/runner.mjs's runCliBackend() attaches err.resetAt (extracted via
+    // extractSessionLimitResetTime()) only when the CLI's captured output
+    // reports a genuine session-limit reset time. This closes the one
+    // remaining acceptance gap left by #2259/#2261: the terminal reason was
+    // already distinct ("engine-error", not "needs-human"), but the reset
+    // time itself never reached the terminal detail — this asserts it now
+    // does, additively, without altering the base detail shape.
+    const { w, io } = fakeWorld();
+    const script = {
+      "work-on/investigate": () => { w.markers += " INVESTIGATION:COMPLETE"; },
+      "work-on/build/context": () => { w.markers += " FORGE:CONTEXT:COMPLETE"; },
+      "work-on/build/architect": () => {
+        throw Object.assign(
+          new Error("claude CLI exited with status 1"),
+          { code: "CLI_BACKEND_FAILED", resetAt: "12:50am (Asia/Calcutta)" },
+        );
+      },
+    };
+    const runner = async ({ commandName }) => { script[commandName]?.(); return { status: "complete" }; };
+
+    const res = await runIssue({ issue: 42, dir, agentId: "a1", lane: "staging",
+      io, runner, now: () => 1000, maxAttempts: 3 });
+
+    assert.equal(res.terminalReason, "engine-error");
+    assert.ok(res.detail.includes("resets: 12:50am (Asia/Calcutta)"),
+      `terminal detail must surface the CLI's reported reset time: ${res.detail}`);
+    assert.ok(res.detail.includes("CLI_BACKEND_FAILED"),
+      "the base detail (code/message) must still be present — reset time is additive, not a replacement");
+  });
+
+  it("forge#2241: a CLI_BACKEND_FAILED with no resetAt leaves the engine-error detail unchanged (no fabricated reset text)", async () => {
+    const { w, io } = fakeWorld();
+    const script = {
+      "work-on/investigate": () => { w.markers += " INVESTIGATION:COMPLETE"; },
+      "work-on/build/context": () => { w.markers += " FORGE:CONTEXT:COMPLETE"; },
+      "work-on/build/architect": () => {
+        throw Object.assign(new Error("claude CLI exited with status 1"), { code: "CLI_BACKEND_FAILED" });
+      },
+    };
+    const runner = async ({ commandName }) => { script[commandName]?.(); return { status: "complete" }; };
+
+    const res = await runIssue({ issue: 42, dir, agentId: "a1", lane: "staging",
+      io, runner, now: () => 1000, maxAttempts: 3 });
+
+    assert.equal(res.terminalReason, "engine-error");
+    assert.ok(!res.detail.includes("resets:"),
+      `no resetAt on the thrown error must not fabricate reset text in the detail: ${res.detail}`);
+  });
+
   it("forge#2261: an uncoded runner exception on every attempt exhausts retries into engine-error, not needs-human", async () => {
     // The runner (the tool itself — the nested `claude` CLI invocation, or
     // whatever `runner()` wraps) crashed on all 3 attempts and detectOutcome()
