@@ -2257,7 +2257,7 @@ The automated review pipeline (/review-pr) ran against your PR. It spawned domai
 
 ### Key conventions
 
-${CONVENTIONS_TEXT}"
+${CONVENTIONS_TEXT}
 
 ### Getting started
 
