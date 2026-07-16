@@ -1476,6 +1476,33 @@ async function printVersionAvailableChangelog(localVersion, latestVersion) {
 }
 
 /**
+ * Resolve the absolute path npm's global install tree would use for a
+ * `forgedock` package, i.e. `{npm root -g}/forgedock`. Shared by
+ * `isGlobalNpmInstall()` and `findSeparateGlobalInstall()` (forge#2273) so
+ * the `npm root -g` shell-out and path-join logic exists in exactly one
+ * place instead of being duplicated across both callers.
+ *
+ * Fails closed (returns null) on any error, timeout, or empty `npm root -g`
+ * output — callers treat null identically to their pre-existing "detection
+ * inconclusive" fallback (isGlobalNpmInstall: false; findSeparateGlobalInstall: null).
+ *
+ * @returns {string|null} absolute path to `{globalRoot}/forgedock`, or null
+ */
+function resolveGlobalNpmForgedockDir() {
+  try {
+    const globalRoot = execSync("npm root -g", {
+      encoding: "utf-8",
+      stdio: ["pipe", "pipe", "pipe"],
+      timeout: 5000,
+    }).trim();
+    if (!globalRoot) return null;
+    return resolve(join(globalRoot, "forgedock"));
+  } catch {
+    return null;
+  }
+}
+
+/**
  * Detect whether FORGE_HOME resolves inside npm's global install tree, i.e.
  * this process is running as a globally-installed `forgedock` package (not
  * an ephemeral npx/dlx cache extraction). Used by update()'s npm-mode branch
@@ -1483,27 +1510,19 @@ async function printVersionAvailableChangelog(localVersion, latestVersion) {
  * in place with `npm install -g forgedock@latest`, versus the npx-cache case
  * where there is nothing durable to reinstall over.
  *
- * Resolution: `npm root -g` reports the global node_modules directory; if
- * FORGE_HOME sits under `{globalRoot}/forgedock`, this is a global install.
- * Fails closed (returns false) on any error — the pre-existing advisory-only
- * behavior is always a safe fallback when detection is inconclusive.
+ * Resolution: `resolveGlobalNpmForgedockDir()` (forge#2273) reports where npm's
+ * global install tree would place a `forgedock` package; if FORGE_HOME sits
+ * under that path, this is a global install. Fails closed (returns false) on
+ * any error — the pre-existing advisory-only behavior is always a safe
+ * fallback when detection is inconclusive.
  *
  * @returns {boolean}
  */
 function isGlobalNpmInstall() {
-  try {
-    const globalRoot = execSync("npm root -g", {
-      encoding: "utf-8",
-      stdio: ["pipe", "pipe", "pipe"],
-      timeout: 5000,
-    }).trim();
-    if (!globalRoot) return false;
-    const globalPkgDir = resolve(join(globalRoot, "forgedock"));
-    const home = resolve(FORGE_HOME);
-    return home === globalPkgDir || home.startsWith(globalPkgDir + sep);
-  } catch {
-    return false;
-  }
+  const globalPkgDir = resolveGlobalNpmForgedockDir();
+  if (!globalPkgDir) return false;
+  const home = resolve(FORGE_HOME);
+  return home === globalPkgDir || home.startsWith(globalPkgDir + sep);
 }
 
 /**
@@ -1515,32 +1534,24 @@ function isGlobalNpmInstall() {
  * runs and updates the checkout — while a genuinely separate global npm
  * install elsewhere on disk is silently left untouched.
  *
- * Resolution mirrors `isGlobalNpmInstall()`: `npm root -g` gives the global
- * node_modules directory; if a `forgedock` package exists there AND it is a
- * different path than the current `FORGE_HOME`, a separate global install
- * exists. Fails closed (returns null) on any error or timeout — this is an
- * advisory notice only and must never block or alter the update itself.
+ * Resolution mirrors `isGlobalNpmInstall()` via the shared
+ * `resolveGlobalNpmForgedockDir()` helper (forge#2273): if a `forgedock`
+ * package exists at the resolved global path AND it is a different path than
+ * the current `FORGE_HOME`, a separate global install exists. Fails closed
+ * (returns null) on any error or timeout — this is an advisory notice only
+ * and must never block or alter the update itself.
  *
  * @returns {string|null} absolute path to the separate global install, or null
  */
 function findSeparateGlobalInstall() {
-  try {
-    const globalRoot = execSync("npm root -g", {
-      encoding: "utf-8",
-      stdio: ["pipe", "pipe", "pipe"],
-      timeout: 5000,
-    }).trim();
-    if (!globalRoot) return null;
-    const globalPkgDir = resolve(join(globalRoot, "forgedock"));
-    const home = resolve(FORGE_HOME);
-    if (home === globalPkgDir || home.startsWith(globalPkgDir + sep)) {
-      // Current FORGE_HOME already IS the global install — nothing separate.
-      return null;
-    }
-    return existsSync(globalPkgDir) ? globalPkgDir : null;
-  } catch {
+  const globalPkgDir = resolveGlobalNpmForgedockDir();
+  if (!globalPkgDir) return null;
+  const home = resolve(FORGE_HOME);
+  if (home === globalPkgDir || home.startsWith(globalPkgDir + sep)) {
+    // Current FORGE_HOME already IS the global install — nothing separate.
     return null;
   }
+  return existsSync(globalPkgDir) ? globalPkgDir : null;
 }
 
 /**
