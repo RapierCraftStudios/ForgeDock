@@ -28,19 +28,39 @@ Parse `$ARGUMENTS` to determine which issues to work on:
 
 <!-- Added: forge#2231 -->
 
-When the input matches `cascade`, `review-findings`, or `findings` (case-insensitive, optionally repo-prefixed), resolve to all open `review-finding`-labeled issues instead of a milestone or plain label search:
+When the input matches `cascade`, `review-findings`, or `findings` (case-insensitive, optionally repo-prefixed), resolve to open `review-finding`-labeled issues instead of a milestone or plain label search, then apply the same generation check Step 4C uses (`phase-4-execution.md` "Heuristic 1: Generation check") so the default set here matches what Step 4C would actually admit:
 
 ```bash
-gh issue list {GH_FLAG} --label "review-finding" --state open --limit 500 \
-  --json number,title,labels,milestone \
-  --jq '.[] | {number, title, labels: [.labels[].name], milestone: .milestone.title}'
+# Fetch all open review-finding issues, including body (needed for the generation check below —
+# unlike a plain label search, we cannot skip straight to {number,title,labels,milestone} here).
+CASCADE_CANDIDATES=$(gh issue list {GH_FLAG} --label "review-finding" --state open --limit 500 \
+  --json number,title,labels,milestone,body)
+
+ALLOW_GEN2=false
+echo "{ARGUMENTS}" | grep -qE -- '--include-deferred|--allow-gen2' && ALLOW_GEN2=true
+
+# Generation check — mirrors phase-4-execution.md Step 4C "Heuristic 1" exactly: a finding is
+# generation >= 2 if its body references a source issue (via "spawned from issue #N" or
+# "source issue #N") AND that source issue also carries the review-finding label.
+CASCADE_RESOLVED="[]"
+echo "$CASCADE_CANDIDATES" | jq -c '.[]' | while IFS= read -r FINDING; do
+  FINDING_BODY=$(echo "$FINDING" | jq -r '.body')
+  SOURCE_NUM=$(echo "$FINDING_BODY" | grep -oP '(?i)spawned from issue #\K\d+|source issue[: #]+\K\d+' | head -1)
+  IS_GEN2=false
+  if [ -n "$SOURCE_NUM" ] && gh issue view "$SOURCE_NUM" {GH_FLAG} --json labels --jq '[.labels[].name]' 2>/dev/null | grep -q "review-finding"; then
+    IS_GEN2=true
+  fi
+  if [ "$IS_GEN2" = "false" ] || [ "$ALLOW_GEN2" = "true" ]; then
+    echo "$FINDING" | jq '{number, title, labels: [.labels[].name], milestone: .milestone.title, generation: (if '"$IS_GEN2"' then 2 else 1 end)}'
+  fi
+done
 ```
 
-**Generation ≥ 2 findings remain excluded by default**, consistent with the Step 4C admission rule in `phase-4-execution.md` — a `review-finding` issue whose *source* issue also carries the `review-finding` label is generation 2+ and is normally deferred permanently (`PERMANENT_DEFERRED`). That cap is an **autonomy guard**, not a human-request guard: it exists to stop an unattended run from cascading forever, not to block an operator who explicitly asked for this exact bucket of work. See `phase-4-execution.md` Step 4C rule 1 and the reworded anti-pattern note for the full rationale.
+**Generation ≥ 2 findings are excluded by default** by the loop above — a `review-finding` issue whose *source* issue also carries the `review-finding` label is generation 2+ and is normally deferred permanently (`PERMANENT_DEFERRED`) by Step 4C's identical check. That cap is an **autonomy guard**, not a human-request guard: it exists to stop an unattended run from cascading forever, not to block an operator who explicitly asked for this exact bucket of work. See `phase-4-execution.md` Step 4C rule 1 and the reworded anti-pattern note for the full rationale.
 
 This resolve step is a human-requested entry point (the operator typed `cascade`/`review-findings`/`findings` directly), so it honors an explicit override:
 
-- `--include-deferred` or `--allow-gen2` appended to the input (e.g. `cascade --allow-gen2`, `review-findings --include-deferred`): admit generation ≥ 2 findings into the resolved set for this run. Without either flag, generation ≥ 2 findings are filtered out of the resolved set here, exactly as Step 4C would defer them mid-run — the flags only change what this **explicit** request is allowed to touch; they do not relax Step 4C's autonomous behavior for anything spawned *during* this run (see "Recursion safety" below).
+- `--include-deferred` or `--allow-gen2` appended to the input (e.g. `cascade --allow-gen2`, `review-findings --include-deferred`): sets `ALLOW_GEN2=true` above, admitting generation ≥ 2 findings into the resolved set for this run. Without either flag, generation ≥ 2 findings are filtered out of the resolved set here, exactly as Step 4C would defer them mid-run — the flags only change what this **explicit** request is allowed to touch; they do not relax Step 4C's autonomous behavior for anything spawned *during* this run (see "Recursion safety" below).
 - The config-driven lever for this same override (`orchestration.cascade.max_generation` / `--policy` CLI flags) is owned by #2234 — when that config surface lands, prefer it over the flags here; the flags above remain as the pre-#2234 mechanism for this resolve step specifically.
 
 **Recursion safety (unchanged)**: findings spawned *during* this run by its own sweep agents are still never re-swept, regardless of whether `--include-deferred`/`--allow-gen2` was passed at resolve time — see `phase-4-execution.md` Step 4C rules and the recursion-safety note near the anti-patterns list. The override above only widens what this one resolve step admits from the *pre-existing* open issue set; it has no effect on Step 4C's in-run admission logic.
