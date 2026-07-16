@@ -36,6 +36,23 @@ See README.md Requirements section for full setup instructions.
 
 ---
 
+## Playwright MCP Prerequisite (MANDATORY — check before proceeding)
+
+Playwright MCP is a **guaranteed ForgeDock dependency** for all browser automation commands. Before running any qa-sweep phase, verify it is available:
+
+**Check**: Confirm `mcp__playwright__*` tools are available in your tool context (e.g., `mcp__playwright__browser_navigate`, `mcp__playwright__browser_snapshot`).
+
+**If Playwright MCP tools are NOT available**: STOP immediately. Do not attempt to run qa-sweep — all browser automation steps will fail silently.
+
+**Fix**:
+1. Register Playwright MCP: `claude mcp add playwright npx @playwright/mcp@latest`
+2. Restart Claude Code to reload MCP servers
+3. Verify with: `npx forgedock doctor` (Check 9 confirms registration)
+
+See README.md Requirements section for full setup instructions.
+
+---
+
 ## Browser Tool Reference
 
 All browser automation uses Playwright MCP tools (`mcp__playwright__*`). Playwright MCP is a guaranteed ForgeDock dependency — see the Playwright MCP Prerequisite section above.

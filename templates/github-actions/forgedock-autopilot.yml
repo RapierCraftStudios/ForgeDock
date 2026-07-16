@@ -1,0 +1,97 @@
+# ForgeDock Autopilot — Scheduled Cron Workflow Template
+#
+# Copy this file into your repo at:
+#   .github/workflows/forgedock-autopilot.yml
+#
+# Required secrets (set in your repo's Settings → Secrets → Actions):
+#   ANTHROPIC_API_KEY   — Your Anthropic API key (https://console.anthropic.com)
+#
+# GITHUB_TOKEN is provided automatically by GitHub Actions.
+#
+# See docs/AUTOPILOT-CRON.md for full setup guide.
+
+name: ForgeDock Autopilot
+
+on:
+  schedule:
+    # Every Monday at 9 AM UTC — adjust to your preferred cadence
+    - cron: '0 9 * * 1'
+
+  workflow_dispatch:
+    # Manual trigger — allows you to run autopilot on demand with custom options
+    inputs:
+      mode:
+        description: 'Run mode: recon (safe, read-only) or fix (creates branches + PRs)'
+        required: false
+        default: 'recon'
+        type: choice
+        options:
+          - recon
+          - fix
+      limit:
+        description: 'Max issues to fix per run (fix mode only)'
+        required: false
+        default: '3'
+        type: string
+
+jobs:
+  autopilot:
+    name: Run /autopilot
+    runs-on: ubuntu-latest
+
+    permissions:
+      contents: write        # Required: create branches, push commits (fix mode)
+      issues: write          # Required: create and label issues
+      pull-requests: write   # Required: create PRs (fix mode)
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          # Fetch full history so git log commands in /autopilot work correctly
+          fetch-depth: 0
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24
+
+      - name: Install ForgeDock
+        run: npx --yes forgedock
+
+      - name: Install Claude Code CLI
+        run: npm install -g @anthropic-ai/claude-code
+
+      - name: Resolve autopilot arguments
+        id: args
+        run: |
+          # On scheduled runs: always recon mode (safe default)
+          # On workflow_dispatch: use the selected mode input
+          if [ "${{ github.event_name }}" = "schedule" ]; then
+            MODE="recon"
+            LIMIT="3"
+          else
+            MODE="${{ inputs.mode }}"
+            LIMIT="${{ inputs.limit }}"
+          fi
+
+          if [ "$MODE" = "fix" ]; then
+            ARGS="--fix --limit $LIMIT"
+          else
+            ARGS="--recon-only"
+          fi
+
+          echo "mode=$MODE" >> "$GITHUB_OUTPUT"
+          echo "args=$ARGS" >> "$GITHUB_OUTPUT"
+          echo "Autopilot mode: $MODE (args: $ARGS)"
+
+      - name: Run /autopilot
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          GH_TOKEN: ${{ github.token }}
+          # CI=true tells /autopilot Phase 4B to skip the interactive confirmation
+          # gate. The workflow_dispatch mode=fix input serves as the human opt-in.
+          CI: "true"
+        run: |
+          claude --dangerously-skip-permissions \
+            -p "/autopilot ${{ steps.args.outputs.args }}"

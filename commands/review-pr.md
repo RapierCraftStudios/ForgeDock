@@ -252,6 +252,14 @@ done
 
 # Resolve repo name early — used in Phases 5, 6, 8B, 9A (clean-review skip path bypasses Phase 6A) <!-- Added: forge#820 -->
 REPO=$(gh repo view --json nameWithOwner --jq '.nameWithOwner')
+
+# First-time contributor detection <!-- Added: forge#960 -->
+# Requires REPO to be set (line above). Checks whether the PR author has any prior merged PRs in this repo.
+# IS_FIRST_TIME_CONTRIBUTOR is consumed in Phase 9 to conditionally post an onboarding welcome comment.
+PR_AUTHOR=$(gh pr view "$ARGUMENTS" -R "$REPO" --json author --jq '.author.login')
+PRIOR_MERGED_COUNT=$(gh pr list -R "$REPO" --author "$PR_AUTHOR" --state merged --limit 1 --json number --jq 'length' 2>/dev/null || echo "1")
+IS_FIRST_TIME_CONTRIBUTOR="false"
+[ "$PRIOR_MERGED_COUNT" -eq 0 ] && IS_FIRST_TIME_CONTRIBUTOR="true"
 ```
 
 ### 1B: Classify
@@ -2208,6 +2216,47 @@ fi
 CURRENT_SHA=$(gh pr view $ARGUMENTS --json headRefOid --jq '.headRefOid')
 REVIEW_IS_STALE="false"
 if [ "$CURRENT_SHA" != "$REVIEW_SHA" ]; then REVIEW_IS_STALE="true"; fi
+```
+
+### Phase 9 — New Contributor Welcome (Conditional) <!-- Added: forge#960 -->
+
+Post a welcome comment when all three conditions are true:
+1. `IS_FIRST_TIME_CONTRIBUTOR="true"` (set in Phase 1A — no prior merged PRs from this author in this repo)
+2. `community.welcome_new_contributors` is not `false` in `forge.yaml` (default: enabled)
+3. This is a single-PR review (MODE 3) — not a staging→main or multi-PR review
+
+```bash
+# Read config — default enabled when key is absent
+WELCOME_ENABLED=$(yq '.community.welcome_new_contributors // true' forge.yaml 2>/dev/null || echo 'true')
+
+if [ "$IS_FIRST_TIME_CONTRIBUTOR" = "true" ] && [ "$WELCOME_ENABLED" != "false" ]; then
+    # Read optional custom values from forge.yaml community section
+    CONTRIBUTING_URL=$(yq '.community.contributing_url // "CONTRIBUTING.md"' forge.yaml 2>/dev/null || echo 'CONTRIBUTING.md')
+    CUSTOM_CONVENTIONS=$(yq '.community.conventions // ""' forge.yaml 2>/dev/null || echo '')
+    PROJECT_NAME_WELCOME=$(yq '.project.name // "this project"' forge.yaml 2>/dev/null || echo 'this project')
+
+    gh pr comment "$ARGUMENTS" --body "## Welcome to ${PROJECT_NAME_WELCOME}! 🎉
+
+Hi @${PR_AUTHOR} — this looks like your first merged contribution here. Thanks for opening a PR!
+
+### What just happened
+
+The automated review pipeline (/review-pr) ran against your PR. It spawned domain-specific agents to review security, integration assumptions, and code quality. Any findings were created as separate GitHub issues — not merge blockers unless they are CONFIRMED at HIGH/CRITICAL severity.
+
+### Key conventions
+
+$([ -n "\$CUSTOM_CONVENTIONS" ] && echo "\$CUSTOM_CONVENTIONS" || echo "- **Conventional commits**: prefix your commit messages with \`fix(scope):\`, \`feat(scope):\`, \`refactor(scope):\`, etc.
+- **DCO sign-off**: all commits must be signed off with \`git commit -s\` (Developer Certificate of Origin — required for the dual-license model).
+  Fix unsigned commits: \`git commit --amend -s --no-edit && git push --force-with-lease\`
+- **Issues, not inline fixes**: when you spot a bug or improvement opportunity, open a GitHub issue rather than fixing it inline — so it flows through the pipeline with full traceability.")
+
+### Getting started
+
+- Contributing guide: [\`${CONTRIBUTING_URL}\`](${CONTRIBUTING_URL})
+- Run \`npx forgedock\` to install the pipeline commands locally if you want to run /review-pr or /work-on yourself.
+
+Welcome aboard!"
+fi
 ```
 
 **Verifiable agent count (MANDATORY — do not report a self-asserted `Agents: [N]` figure)** <!-- Added: forge#1849 -->

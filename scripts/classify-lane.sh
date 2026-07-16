@@ -1,13 +1,18 @@
 #!/usr/bin/env bash
 # classify-lane.sh — Deterministic lane routing from issue milestone
 #
-# Usage: classify-lane.sh <issue_number> [-R <owner/repo>]
+# Usage: classify-lane.sh <issue_number> [-R <owner/repo>] [--json]
 #   issue_number: GitHub issue number (required)
 #   -R <owner/repo>: GitHub repository (optional, defaults to current repo)
+#   --json: emit structured JSON object instead of plain lane string (optional)
 #
-# Output: lane string written to stdout
+# Output: lane string written to stdout (default)
 #   staging              — issue has no milestone (fast lane)
 #   milestone/{slug}     — issue has a milestone (feature lane, slug = lowercased, spaces→hyphens, git-invalid chars stripped)
+#
+# Output: JSON object when --json flag is passed
+#   {"lane":"staging","branch":"staging","source":"fast-lane","milestone":null}
+#   {"lane":"milestone/{slug}","branch":"milestone/{slug}","source":"feature-lane","milestone":"{title}","slug":"{slug}"}
 #
 # Exit codes: 0 = success, 1 = error (invalid issue, gh auth failure, branch missing, etc.)
 #
@@ -23,11 +28,12 @@ set -euo pipefail
 
 ISSUE_NUMBER="${1:-}"
 GH_REPO_ARGS=()
+JSON_OUTPUT=false
 
-# Parse arguments: issue number + optional -R flag
+# Parse arguments: issue number + optional -R flag + optional --json flag
 if [ -z "$ISSUE_NUMBER" ]; then
   echo "ERROR: issue number is required" >&2
-  echo "Usage: classify-lane.sh <issue_number> [-R <owner/repo>]" >&2
+  echo "Usage: classify-lane.sh <issue_number> [-R <owner/repo>] [--json]" >&2
   exit 1
 fi
 
@@ -37,7 +43,7 @@ while [ $# -gt 0 ]; do
     -R)
       if [ $# -lt 2 ]; then
         echo "ERROR: -R requires a value <owner/repo>" >&2
-        echo "Usage: classify-lane.sh <issue_number> [-R <owner/repo>]" >&2
+        echo "Usage: classify-lane.sh <issue_number> [-R <owner/repo>] [--json]" >&2
         exit 1
       fi
       if ! [[ "$2" =~ ^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$ ]]; then
@@ -46,6 +52,10 @@ while [ $# -gt 0 ]; do
       fi
       GH_REPO_ARGS=(-R "$2")
       shift 2
+      ;;
+    --json)
+      JSON_OUTPUT=true
+      shift
       ;;
     *)
       echo "ERROR: unknown argument: $1" >&2
@@ -94,7 +104,12 @@ if [ -z "$MILESTONE_TITLE" ]; then
     echo "       Run: git push origin HEAD:$STAGING_BRANCH  (from the default branch)" >&2
     exit 1
   fi
-  echo "$STAGING_BRANCH"
+  if [ "$JSON_OUTPUT" = "true" ]; then
+    printf '{"lane":"%s","branch":"%s","source":"fast-lane","milestone":null}\n' \
+      "$STAGING_BRANCH" "$STAGING_BRANCH"
+  else
+    echo "$STAGING_BRANCH"
+  fi
 else
   # Slugify: lowercase, spaces → hyphens, strip git-invalid chars, collapse multiple hyphens,
   # strip leading/trailing hyphens.
@@ -134,5 +149,12 @@ else
     exit 1
   fi
 
-  echo "$LANE"
+  if [ "$JSON_OUTPUT" = "true" ]; then
+    # Escape double quotes in milestone title for safe JSON embedding.
+    MILESTONE_ESCAPED="${MILESTONE_TITLE//\"/\\\"}"
+    printf '{"lane":"%s","branch":"%s","source":"feature-lane","milestone":"%s","slug":"%s"}\n' \
+      "$LANE" "$LANE" "$MILESTONE_ESCAPED" "$SLUG"
+  else
+    echo "$LANE"
+  fi
 fi
