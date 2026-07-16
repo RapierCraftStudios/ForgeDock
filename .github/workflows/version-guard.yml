@@ -45,6 +45,10 @@ jobs:
         with:
           fetch-depth: 0
 
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+
       - name: Read base and head package.json content
         id: read
         env:
