@@ -845,6 +845,41 @@ describe("persistHome (forge#1943)", () => {
       "an orphaned subdirectory must be removed recursively, not just its files",
     );
   });
+
+  it("removeOrphans: source subdir replaced by a symlink-to-file (ENOTDIR) does not abort the whole persist (forge#2227)", async () => {
+    const home = mkdtempSync(join(os.tmpdir(), "fd-persist-enotdir-home-"));
+    const forgeHome = makeSourceForgeHome({ version: "1.0.0" });
+    mkdirSyncFs(join(forgeHome, "commands", "subdir"), { recursive: true });
+    writeFileSync(join(forgeHome, "commands", "subdir", "old.md"), "# old\n", "utf-8");
+
+    const first = await persistHome({ forgeHome, home });
+    assert.equal(first.skipped, false);
+    assert.ok(existsSync(join(home, ".forge", "commands", "subdir", "old.md")));
+    assert.ok(existsSync(join(home, ".forge", "commands", "one.md")));
+
+    // Replace the source subdirectory with a symlink pointing at a plain file.
+    // readdir()'ing this path (as removeOrphans recurses into the still-real
+    // dest-side directory) throws ENOTDIR, not ENOENT — the exact escape this
+    // regression guards against. Bump version to clear the downgrade guard.
+    rmSync(join(forgeHome, "commands", "subdir"), { recursive: true, force: true });
+    symlinkSync(join(forgeHome, "package.json"), join(forgeHome, "commands", "subdir"));
+    writeFileSync(join(forgeHome, "package.json"), JSON.stringify({ name: "forgedock", version: "1.1.0" }), "utf-8");
+
+    const second = await persistHome({ forgeHome, home });
+    assert.equal(
+      second.skipped,
+      false,
+      "an ENOTDIR on one reconciled path must not fail the whole persist open (forge#2227)",
+    );
+    assert.ok(
+      existsSync(join(home, ".forge", "commands", "one.md")),
+      "unrelated files must still be persisted/kept even when one path hits ENOTDIR",
+    );
+    assert.ok(
+      !existsSync(join(home, ".forge", "commands", "subdir", "old.md")),
+      "the now-type-mismatched subdir's stale contents must be treated as orphaned and removed",
+    );
+  });
 });
 
 describe("detectCrossEnvInstall (forge#1893)", () => {
