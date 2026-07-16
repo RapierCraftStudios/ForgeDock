@@ -14,11 +14,17 @@
 #     Gists created by the pipeline MUST be secret — --public exposes private repo
 #     titles, root causes, and file paths to the world. (Ref: forge#1587)
 #
-#   Class B — Side-effect verbs in sections with no DRY_RUN/governor guard (diff-aware):
+#   Class B — Side-effect verbs in code blocks with no DRY_RUN/governor guard (diff-aware):
 #     When added lines introduce a side-effect verb (gh issue create, gh pr merge,
 #     git push, gh issue edit|comment, --auto-merge, --add/remove-label) inside a
-#     code block in a section that has no guard expression (DRY_RUN, GOVERNOR,
-#     --dry-run) anywhere in that section's code blocks, the change is flagged.
+#     code block that has no guard expression (DRY_RUN, GOVERNOR, --dry-run)
+#     anywhere in THAT SAME code block, the change is flagged. Guard/side-effect
+#     correlation is scoped to the individual fenced code block, not the whole
+#     section — a guard mentioned in an unrelated code block elsewhere in the
+#     same section (before or after the flagged verb) does not silence the
+#     finding. (Ref: forge#2289 — a decoy guard anywhere in the section, in any
+#     code block, previously silenced detection of an actually-unguarded side
+#     effect in a different block of that same section.)
 #     Operates on the diff (GITHUB_BASE_SHA or HEAD^) to avoid flagging legacy corpus.
 #     (Ref: forge#1609 — signal-planner.md DRY_RUN guard placed after the create it guards)
 #
@@ -219,27 +225,35 @@ else
         continue
       fi
 
-      # Parse the full file to map sections → (has_guard, has_side_effect_in_added_lines)
+      # Parse the full file to map code blocks → (has_guard, has_side_effect_in_added_lines).
+      # SECTION is tracked only as a human-readable label for the violation message —
+      # it plays NO role in guard/side-effect correlation. Correlation is scoped to
+      # the individual fenced code block (BLOCK_* state), reset on every block open
+      # and evaluated on every block close, so a guard mentioned in a different code
+      # block — even one earlier or later in the very same section — cannot silence
+      # an unguarded side effect in another block. (forge#2289)
       IN_CB=0
       SECTION="(top)"
-      SECTION_HAS_GUARD=0
-      SECTION_HAS_ADDED_SE=0
-      SECTION_SE_LINE=0
-      SECTION_SE_VERB=""
+      BLOCK_HAS_GUARD=0
+      BLOCK_HAS_ADDED_SE=0
+      BLOCK_SE_LINE=0
+      BLOCK_SE_VERB=""
       LN=0
 
-      flush_and_reset() {
-        local new_heading="$1"
-        if [ "$SECTION_HAS_ADDED_SE" -eq 1 ] && [ "$SECTION_HAS_GUARD" -eq 0 ]; then
-          echo "HIGH | $file | line $SECTION_SE_LINE | Class B: side-effect '$SECTION_SE_VERB' added to section '$SECTION' which has no DRY_RUN/governor guard — add guard before this line or wrap in DRY_RUN check" >&2
+      flush_block() {
+        # Evaluate and reset the current code block's guard/side-effect state.
+        # Called whenever a fenced code block's outermost fence closes (depth
+        # returns to 0), and once more, defensively, at end-of-file to cover a
+        # malformed/unterminated block (mirrors the pre-forge#2289 behavior of
+        # unconditionally evaluating accumulated state before resetting).
+        if [ "$BLOCK_HAS_ADDED_SE" -eq 1 ] && [ "$BLOCK_HAS_GUARD" -eq 0 ]; then
+          echo "HIGH | $file | line $BLOCK_SE_LINE | Class B: side-effect '$BLOCK_SE_VERB' added in section '$SECTION' with no DRY_RUN/governor guard in the same code block — add a guard inside this code block or wrap the effect in a DRY_RUN check" >&2
           VIOLATIONS=$((VIOLATIONS + 1))
         fi
-        SECTION="$new_heading"
-        SECTION_HAS_GUARD=0
-        SECTION_HAS_ADDED_SE=0
-        SECTION_SE_LINE=0
-        SECTION_SE_VERB=""
-        IN_CB=0
+        BLOCK_HAS_GUARD=0
+        BLOCK_HAS_ADDED_SE=0
+        BLOCK_SE_LINE=0
+        BLOCK_SE_VERB=""
       }
 
       while IFS= read -r line; do
@@ -275,11 +289,14 @@ else
             continue
           fi
 
-          # Section heading reset — only when fully outside all fences.
-          # (forge#2210)
+          # Section heading — label-only update (forge#2210). This no longer
+          # flushes guard/side-effect state: that state is now block-scoped
+          # (forge#2289) and is always already at rest here, since this branch
+          # is only reached when IN_CB is 0 — i.e. any block that was open has
+          # already been closed and flushed at its own fence-close below.
           if echo "$line" | grep -qE '^#{1,6}[[:space:]]+'; then
             heading=$(echo "$line" | sed 's/^#*[[:space:]]*//' | sed 's/[[:space:]]*$//')
-            flush_and_reset "$heading"
+            SECTION="$heading"
             continue
           fi
           continue
@@ -292,27 +309,35 @@ else
           else
             IN_CB=$((IN_CB + 1))
           fi
+          if [ "$IN_CB" -eq 0 ]; then
+            # Outermost fence just closed — evaluate this block's guard/SE
+            # correlation now, before starting the next block. (forge#2289)
+            flush_block
+          fi
           continue
         fi
 
         # Content line while inside (at any depth).
         if echo "$line" | grep -qF "$ALLOWLIST_TOKEN"; then continue; fi
 
-        # Check for guard
-        echo "$line" | grep -qE "$GUARD_PATTERN" && SECTION_HAS_GUARD=1
+        # Check for guard — scoped to THIS code block only (forge#2289)
+        echo "$line" | grep -qE "$GUARD_PATTERN" && BLOCK_HAS_GUARD=1
 
         # Check if this line is in the diff's added lines AND has a side-effect verb
-        if [ "$SECTION_HAS_ADDED_SE" -eq 0 ] && echo "$line" | grep -qE "$SIDE_EFFECT_PATTERN"; then
+        if [ "$BLOCK_HAS_ADDED_SE" -eq 0 ] && echo "$line" | grep -qE "$SIDE_EFFECT_PATTERN"; then
           # Is this specific line in the added content?
           if echo "$ADDED_CONTENT" | grep -qF "${line:0:80}" 2>/dev/null; then
-            SECTION_HAS_ADDED_SE=1
-            SECTION_SE_LINE=$LN
-            SECTION_SE_VERB=$(echo "$line" | grep -oE "$SIDE_EFFECT_PATTERN" | head -1 || echo "side-effect")
+            BLOCK_HAS_ADDED_SE=1
+            BLOCK_SE_LINE=$LN
+            BLOCK_SE_VERB=$(echo "$line" | grep -oE "$SIDE_EFFECT_PATTERN" | head -1 || echo "side-effect")
           fi
         fi
       done < "$file"
 
-      flush_and_reset "(end-of-file)"
+      # Defensive final flush — evaluates any block state left accumulated if
+      # the file ended with an unterminated fence (malformed input); a no-op
+      # if the last block already closed and was flushed above.
+      flush_block
 
     done <<< "$CHANGED_SPECS"
   fi
