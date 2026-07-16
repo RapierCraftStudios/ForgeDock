@@ -312,6 +312,64 @@ describe("runIssue", () => {
     assert.equal(reviewFailures.length, 3, "all 3 attempts must be logged — transient retry behavior unchanged");
   });
 
+  it("forge#2259: CLI_BACKEND_FAILED thrown by the runner fails fast on attempt 1, not retried to maxAttempts", async () => {
+    // Regression for #2244: a deterministic non-zero exit from the nested
+    // `claude` CLI (bin/runner.mjs's runCliBackend() throws with
+    // err.code = "CLI_BACKEND_FAILED" — see bin/tests/runner.test.mjs's own
+    // "propagates a non-zero exit status ... as CLI_BACKEND_FAILED" test for
+    // the exact shape) reproduces identically on every attempt. It must be
+    // rethrown immediately, exactly like NO_API_KEY/NO_SDK, instead of
+    // burning all `maxAttempts` retries on a guaranteed-repeat failure.
+    const { w, io } = fakeWorld();
+    let architectRunnerCalls = 0;
+    const script = {
+      "work-on/investigate": () => { w.markers += " INVESTIGATION:COMPLETE"; },
+      "work-on/build/context": () => { w.markers += " FORGE:CONTEXT:COMPLETE"; },
+      "work-on/build/architect": () => {
+        architectRunnerCalls++;
+        throw Object.assign(new Error("claude CLI exited with status 1"), { code: "CLI_BACKEND_FAILED" });
+      },
+    };
+    const runner = async ({ commandName }) => { script[commandName]?.(); return { status: "complete" }; };
+
+    await assert.rejects(
+      () => runIssue({ issue: 42, dir, agentId: "a1", lane: "staging",
+        io, runner, now: () => 1000, maxAttempts: 3 }),
+      (err) => err.code === "CLI_BACKEND_FAILED",
+      "runIssue must propagate CLI_BACKEND_FAILED uncaught, not swallow it into a needs-human terminal result",
+    );
+    assert.equal(architectRunnerCalls, 1,
+      "the architect runner must be invoked exactly once — CLI_BACKEND_FAILED must not be retried");
+    const events = readLog(dir, 42);
+    const architectFailures = events.filter((e) => e.event === "PHASE_FAILED" && e.phase === "architect");
+    assert.equal(architectFailures.length, 0,
+      "no PHASE_FAILED event should be logged for a fail-fast rethrow — it never reaches the retry bookkeeping, matching NO_API_KEY/NO_SDK");
+  });
+
+  it("forge#2259: other error codes (and uncoded errors) from the runner still retry to maxAttempts, unaffected by the CLI_BACKEND_FAILED fail-fast", async () => {
+    const { w, io } = fakeWorld();
+    let architectRunnerCalls = 0;
+    const script = {
+      "work-on/investigate": () => { w.markers += " INVESTIGATION:COMPLETE"; },
+      "work-on/build/context": () => { w.markers += " FORGE:CONTEXT:COMPLETE"; },
+      "work-on/build/architect": () => {
+        architectRunnerCalls++;
+        throw new Error("transient network blip");
+      },
+    };
+    const runner = async ({ commandName }) => { script[commandName]?.(); return { status: "complete" }; };
+
+    const res = await runIssue({ issue: 42, dir, agentId: "a1", lane: "staging",
+      io, runner, now: () => 1000, maxAttempts: 3 });
+
+    assert.equal(res.terminalReason, "needs-human", "an uncoded transient error still escalates after exhausting attempts");
+    assert.equal(architectRunnerCalls, 3,
+      "an uncoded error (no .code, or a code other than NO_API_KEY/NO_SDK/CLI_BACKEND_FAILED) must retry all 3 attempts unchanged");
+    const events = readLog(dir, 42);
+    const architectFailures = events.filter((e) => e.event === "PHASE_FAILED" && e.phase === "architect");
+    assert.equal(architectFailures.length, 3, "all 3 attempts must be logged for a genuinely retryable error");
+  });
+
   it("I3: defers before writing GitHub state when another agent holds a valid lease (remirror path)", async () => {
     // Regression test for: writeState() called before lease check in remirror/hydrate branches.
     // A concurrent agent holds a valid lease — we must NOT write GitHub state before deferring.
