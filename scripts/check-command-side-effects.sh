@@ -233,7 +233,6 @@ else
           # Check if this line is in the diff's added lines AND has a side-effect verb
           if [ "$SECTION_HAS_ADDED_SE" -eq 0 ] && echo "$line" | grep -qE "$SIDE_EFFECT_PATTERN"; then
             # Is this specific line in the added content?
-            escaped=$(echo "$line" | sed 's/[|+*?(){}[\]^$.\\]/\\&/g' | head -c 80)
             if echo "$ADDED_CONTENT" | grep -qF "${line:0:80}" 2>/dev/null; then
               SECTION_HAS_ADDED_SE=1
               SECTION_SE_LINE=$LINENO
