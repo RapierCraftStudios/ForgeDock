@@ -1095,6 +1095,62 @@ describe("runIssue", () => {
   });
 });
 
+describe("runIssue — forge#2313: lease config validation", () => {
+  it("rejects leaseRenewIntervalMs >= leaseTtlMs (boundary-equal case) before any state I/O", async () => {
+    const { w, io } = fakeWorld();
+    const runner = async () => { throw new Error("runner must never be called"); };
+
+    await assert.rejects(
+      () => runIssue({ issue: 42, dir, agentId: "a1", lane: "staging",
+        io, runner, now: () => 1000, maxAttempts: 1,
+        leaseTtlMs: 100, leaseRenewIntervalMs: 100 }),
+      (err) => {
+        assert.equal(err.code, "INVALID_LEASE_CONFIG");
+        assert.match(err.message, /leaseRenewIntervalMs \(100\) must be less than leaseTtlMs \(100\)/);
+        return true;
+      },
+    );
+
+    // Must fail before any state is read/written — the fake GitHub issue body
+    // must remain at its pristine fixture value (no FORGE:STATE ever written),
+    // and no run-log event appended (same fail-fast placement as INVALID_BACKEND).
+    assert.equal(w.body, "Issue.", "no state should be written to GitHub for an invalid lease config");
+    const events = readLog(dir, 42);
+    assert.equal(events.length, 0, "no run-log event should be appended for an invalid lease config");
+  });
+
+  it("rejects leaseRenewIntervalMs > leaseTtlMs", async () => {
+    const { io } = fakeWorld();
+    const runner = async () => { throw new Error("runner must never be called"); };
+
+    await assert.rejects(
+      () => runIssue({ issue: 43, dir, agentId: "a1", lane: "staging",
+        io, runner, now: () => 1000, maxAttempts: 1,
+        leaseTtlMs: 100, leaseRenewIntervalMs: 500 }),
+      (err) => { assert.equal(err.code, "INVALID_LEASE_CONFIG"); return true; },
+    );
+  });
+
+  it("defaults and explicitly-valid overrides are unaffected by the new check", async () => {
+    const { w, io } = fakeWorld();
+    const runner = async ({ commandName }) => {
+      w.markers += " INVESTIGATION:COMPLETE";
+      return { status: "complete" };
+    };
+
+    // No override at all — production default path (DEFAULT_LEASE_TTL_MS/DEFAULT_LEASE_RENEW_INTERVAL_MS).
+    const res1 = await runIssue({ issue: 44, dir, agentId: "a1", lane: "staging",
+      io, runner, now: () => 1000, maxAttempts: 1 });
+    assert.notEqual(res1.terminalReason, undefined);
+
+    // Explicit valid override (interval < ttl).
+    const res2 = await runIssue({ issue: 45, dir, agentId: "a1", lane: "staging",
+      io, runner, now: () => 1000, maxAttempts: 1,
+      leaseTtlMs: 1000, leaseRenewIntervalMs: 100 });
+    assert.notEqual(res2.terminalReason, undefined);
+  });
+});
+
 describe("runIssue — forge#2239: in-flight lease", () => {
   it("claims a real (non-null) lease before the first phase runs, not after PHASE_COMMIT", async () => {
     const { w, io } = fakeWorld();

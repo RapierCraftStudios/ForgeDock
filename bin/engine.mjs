@@ -98,6 +98,30 @@ export async function runIssue(opts) {
     );
   }
 
+  // forge#2313: validate the lease-timing relationship before anything else —
+  // same placement/rationale as the INVALID_BACKEND check above (before state
+  // is read/written, before the phase loop begins). `leaseTtlMs` controls how
+  // long a claimed lease is valid for; `leaseRenewIntervalMs` controls how
+  // often the in-flight heartbeat (forge#2239) re-writes it. If the renew
+  // interval is >= the TTL, the first renewal tick fires at or after the
+  // moment the previously-written lease already expired — reopening the exact
+  // "phase outlives its lease" gap #2239 closed, because a genuinely-alive
+  // run would publish (or be caught holding) an expired `lease.until` in that
+  // window, which both the I3 concurrency guard above and the stall-recovery
+  // scanner (commands/orchestrate/config.md) read directly. Both parameters
+  // are overridable-for-tests options with no current production caller
+  // forwarding them (bin/engine-cli.mjs's runFromCli() only forwards
+  // `backend`/`model`), so this only guards a future caller/config typo —
+  // reject rather than silently clamp, matching INVALID_BACKEND's precedent.
+  if (leaseRenewIntervalMs >= leaseTtlMs) {
+    throw Object.assign(
+      new Error(
+        `Invalid lease config: leaseRenewIntervalMs (${leaseRenewIntervalMs}) must be less than leaseTtlMs (${leaseTtlMs}), or a live run's lease can expire before the next renewal.`,
+      ),
+      { code: "INVALID_LEASE_CONFIG" },
+    );
+  }
+
   const projector = makeProjector(io);
 
   // 1. Load + reconcile (GitHub wins).
