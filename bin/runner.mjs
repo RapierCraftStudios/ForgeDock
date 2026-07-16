@@ -559,10 +559,11 @@ export function runCliBackend({
     if (result.status !== 0) {
       // Non-zero exit: always emit a self-contained diagnostic, regardless of
       // whether stdout/stderr captured anything. Previously this branch threw
-      // a self-referential "See output above for details" message even when
-      // `output` was empty (the success-path log call above was gated on
-      // `if (output)` and never ran) — leaving the operator with nothing to
-      // read "above". See issue #2258 / parent #2244.
+      // a self-referential message that unconditionally pointed to
+      // previously-logged output, even when `output` was empty (the
+      // success-path log call above was gated on `if (output)` and never
+      // ran) -- leaving the operator with nothing to consult. See issue
+      // #2258 / parent #2244.
       const hadOutput = output.length > 0;
       const signalPart = result.signal ? `, signal ${result.signal}` : "";
       const argvSummary = cliArgs.join(" ");
