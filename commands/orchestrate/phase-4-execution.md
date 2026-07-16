@@ -908,9 +908,15 @@ done
 
    Report every dependent whose skip was avoided this way — e.g. "#{DEP} — predecessor #{PRED} failed but never touched the shared file(s); edge dropped, #{DEP} not skipped." For all remaining dependents (real `EDGE_KIND` overlap confirmed, or a non-`EDGE_KIND` edge type), mark them "skipped — dependency #{X} failed" and report them. Do NOT dispatch them.
 
-6.4. **Auto-dispatch remediation against a `needs-human`-gated predecessor's own PR** <!-- Added: forge#1813 --> — item 6.5 below tracks the *dependents* of a `GATED` predecessor; this item handles the predecessor's own PR, which item 6.5/6.6 never re-drive on their own. Run this check whenever a completed agent's issue classifies `GATED` **specifically via `needs-human`** — NOT `workflow:awaiting-merge`. That second state already means "remediated and re-reviewed to a clean verdict, just needs a human's merge click" (see forge#1810's guard) — dispatching remediation again would be redundant, not just wasteful, since there is nothing left to fix.
+6.4. **Auto-dispatch remediation against a `needs-human`-gated issue's own PR — runs unconditionally per completion, with or without dependents** <!-- Added: forge#1813, fixed: forge#2243 --> — item 6.5 below tracks the *dependents* of a `GATED` predecessor; this item handles the gated issue's own PR, which item 6.5/6.6 never re-drive on their own. **This check is bound directly to the issue that just completed — `PRED="$NUM"` (the same issue number carried from items 1-4 of this Step 4B sequence) — NOT to any `$PRED` produced by walking a dependent's predecessor list (item 5's readiness loop) or by item 6's FAILED-specific dependent-walk.** Run it for every completed agent, every cycle, regardless of whether that issue has any dependents in the DAG at all — a leaf issue (no dependents) is just as eligible as an issue that blocks others. Trigger condition: the completed issue classifies `GATED` **specifically via `needs-human`** — NOT `workflow:awaiting-merge`. That second state already means "remediated and re-reviewed to a clean verdict, just needs a human's merge click" (see forge#1810's guard) — dispatching remediation again would be redundant, not just wasteful, since there is nothing left to fix.
 
    ```bash
+   # Bind PRED to the issue that just completed — independent of item 5's dependent-walk loop
+   # and item 6's FAILED-specific dependent-walk. This is the fix for forge#2243: a leaf issue
+   # (no dependents) must still reach this check, since it never appears as a loop-bound $PRED
+   # in either of those other contexts.
+   PRED="$NUM"
+
    PRED_CURRENT_LABEL=$(gh issue view "$PRED" -R {GH_REPO} --json labels \
      --jq '[.labels[].name | select(. == "needs-human" or . == "workflow:awaiting-merge")] | .[0] // empty' 2>/dev/null)
 
@@ -951,7 +957,7 @@ Do not ask the user questions — you are running autonomously in the background
    fi
    ```
 
-   This satisfies #1809 Q2 (the orchestrator auto-dispatches remediation against the gated predecessor itself — the exact gap forge#1812's item 6.5/6.6 left open, since those items only ever track and wake *dependents*, never the gated PR's own remediation). The remediation agent's outcome is picked up on the **next** completion-monitoring cycle of this same Step 4B loop: if it lands (`workflow:merged`), item 6.6 below fires normally and wakes any `blocked-on-human-merge` dependents; if it holds/re-escalates, the predecessor simply remains `GATED` and item 6.5 continues tracking its dependents unchanged.
+   This satisfies #1809 Q2 (the orchestrator auto-dispatches remediation against the gated issue itself — the exact gap forge#1812's item 6.5/6.6 left open, since those items only ever track and wake *dependents*, never the gated PR's own remediation) — and closes forge#2243 (the gap that #1812's fix left open for *leaf* issues with no dependents: because this item's `$PRED` binding was never made explicit and self-contained, it was only ever reached while walking a dependent's predecessor list, so a `needs-human` issue that has no dependents never got remediation dispatched and its CHANGES-REQUESTED PR re-reviewed the same unchanged commit forever). The remediation agent's outcome is picked up on the **next** completion-monitoring cycle of this same Step 4B loop: if it lands (`workflow:merged`), item 6.6 below fires normally and wakes any `blocked-on-human-merge` dependents (if any exist — a leaf issue simply has none to wake); if it holds/re-escalates, the issue simply remains `GATED` and item 6.5 continues tracking its dependents (if any) unchanged.
 
 6.5. **Handle predecessor gating** (`GATED` — `needs-human` or `workflow:awaiting-merge`) <!-- Added: forge#1812 --> — if a completed agent's issue classifies as `GATED`, its direct dependents are neither dispatched nor marked failed/skipped. For each direct dependent `DEP` of the gated predecessor `PRED`:
 
