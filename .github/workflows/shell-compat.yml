@@ -15,6 +15,7 @@ on:
     paths:
       - 'scripts/**'
       - '.github/workflows/**'
+      - '.github/workflows/shell-compat.yml'
   push:
     branches:
       - staging
@@ -22,6 +23,7 @@ on:
     paths:
       - 'scripts/**'
       - '.github/workflows/**'
+      - '.github/workflows/shell-compat.yml'
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}

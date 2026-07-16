@@ -5,6 +5,7 @@ on:
     branches: [main]
     paths:
       - 'docs/articles/**'
+      - '.github/workflows/cross-publish.yml'
 
 jobs:
   publish:
