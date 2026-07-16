@@ -10,13 +10,26 @@ install: extras
 
 ### 5A: Post health report
 
-Create a detailed health report as a GitHub issue in the Forge repo:
+Create a detailed health report as a GitHub issue in the Forge repo, routed through the
+`/issue` programmatic create-hook (#2085) instead of a raw `gh issue create`. Because `/issue`'s
+programmatic mode resolves `GH_REPO` from `forge.yaml → project.owner/repo` (via `$FORGE_CONFIG`,
+default `forge.yaml`) with no explicit `-R` override, and `$FORGE_REPO` may differ from the
+analyzed project's own repo (`forge.yaml → project.forge_repo`, see Config Resolution), point
+`$FORGE_CONFIG` at a synthesized minimal config for the duration of the call so the create-hook
+targets the Forge repo, not the analyzed repo:
 
 ```bash
-gh issue create -R $FORGE_REPO \
-  --title "Pipeline Health: $REPO — $(date +%Y-%m-%d) — Score: [SCORE]/100" \
-  --label "health-report" \
-  --body "$(cat <<'EOF'
+FORGE_ISSUE_HOOK_CONFIG=$(mktemp)
+cat > "$FORGE_ISSUE_HOOK_CONFIG" <<HOOKCFG_EOF
+project:
+  owner: "${FORGE_REPO%%/*}"
+  repo: "${FORGE_REPO##*/}"
+paths:
+  root: "$FORGE_HOME"
+HOOKCFG_EOF
+
+HEALTH_BODY_FILE=$(mktemp)
+cat > "$HEALTH_BODY_FILE" <<'EOF'
 ## Pipeline Health Report
 
 **Project**: $REPO
@@ -229,8 +242,70 @@ _Post-deploy audit findings by failure point — see Phase 3A-II table above._
 
 [Git log from Phase 2A]
 EOF
-)"
+
+# Environment variable state is not guaranteed to persist across separate tool-call
+# boundaries (a Bash call's shell state does not carry into the next Bash call, and the
+# Skill tool has no env-passthrough parameter — it only accepts `skill`/`args`; `Skill`
+# is a distinct tool invocation, not a bash subprocess, so an `export` in a prior Bash
+# call cannot reach the nested /issue phases' own Bash calls at all). What DOES persist
+# reliably across tool-call boundaries is the working directory (per the Bash tool's own
+# contract) and the filesystem it points at. commands/issue.md Phase 1A resolves
+# `CONFIG_FILE="${FORGE_CONFIG:-forge.yaml}"` — when `$FORGE_CONFIG` is unset (the normal
+# case, since env vars do not propagate), it falls back to the literal relative path
+# `forge.yaml`, which resolves against the current working directory. So instead of
+# relying on env-var propagation, temporarily swap the on-disk `forge.yaml` at the repo
+# root for the synthesized hook config, invoke /issue, then restore the original content —
+# this is observed correctly by every nested Bash call regardless of tool-call boundaries.
+FORGE_YAML_BACKUP=$(mktemp)
+FORGE_YAML_EXISTED=false
+[ -f forge.yaml ] && FORGE_YAML_EXISTED=true
+cp forge.yaml "$FORGE_YAML_BACKUP" 2>/dev/null || true
+# Restore helper: distinguishes "forge.yaml existed before the swap" (restore the backup)
+# from "forge.yaml was absent before the swap" (remove the stub rather than leaving an
+# empty file behind, which `mv`-ing an empty mktemp file would otherwise do).
+restore_forge_yaml() {
+  if [ "$FORGE_YAML_EXISTED" = "true" ]; then
+    cp "$FORGE_YAML_BACKUP" forge.yaml 2>/dev/null || echo "ERROR: failed to restore forge.yaml from backup ${FORGE_YAML_BACKUP} — repo config may still be the synthesized Forge-repo stub. Restore manually before running any other command." >&2
+  else
+    rm -f forge.yaml 2>/dev/null || true
+  fi
+}
+# Register the restore as a trap on EXIT (covers normal completion, an error inside the
+# Skill(...) call, AND an unexpected early termination of this bash invocation) — not just
+# the sequential "restore line after the Skill call" below, which would be skipped if this
+# script/session terminates before reaching it. The trap is cleared right after the
+# sequential restore succeeds, so it does not double-restore (harmless if it did, but
+# avoids a redundant no-op restore on the normal path).
+trap restore_forge_yaml EXIT
+cp "$FORGE_ISSUE_HOOK_CONFIG" forge.yaml
+
+ISSUE_RESULT=$(Skill(skill="issue", args="--title \"Pipeline Health: $REPO — $(date +%Y-%m-%d) — Score: [SCORE]/100\" --body-file $HEALTH_BODY_FILE --label health-report"))
+echo "$ISSUE_RESULT"
+
+# Restore the original forge.yaml immediately — so a subsequent Bash call in this same
+# pipeline-health run (or any other command) does not keep reading the analyzed project's
+# config as the Forge repo's synthesized hook config. The EXIT trap above is the backstop
+# for abnormal termination; this is the normal-path restore, and clears the trap once done.
+restore_forge_yaml
+trap - EXIT
+
+# Verify the issue actually landed in FORGE_REPO — if the forge.yaml swap above was not
+# honored (e.g. some nested phase re-read a cached config from before the swap), the report
+# would be mis-filed into the analyzed project's own GH_REPO instead of the Forge repo. Fail
+# loudly rather than let a pipeline-health report silently spam the analyzed project's issue
+# tracker.
+if ! echo "$ISSUE_RESULT" | grep -q "github.com/${FORGE_REPO}/issues/"; then
+  echo "ERROR: pipeline-health report was not created in FORGE_REPO ($FORGE_REPO) — verify the forge.yaml swap propagated to the /issue invocation above before proceeding."
+fi
+
+rm -f "$FORGE_ISSUE_HOOK_CONFIG" "$HEALTH_BODY_FILE"
 ```
+
+The health report body above does not carry the `## Problem`/`## Affected Files`/`## Acceptance
+Criteria` mandatory sections (it is a metrics report, not a pipeline work item) — `/issue`'s
+Phase 3F pre-create validation auto-repairs this non-blockingly by appending placeholder
+sections, exactly as it does for any other programmatic caller that omits them. This is expected
+and does not indicate a problem with the report body.
 
 ### 5B: Create improvement issues in Forge
 
@@ -248,11 +323,25 @@ For each improvement proposal, create a trackable issue using the `/issue` struc
 - Metric 10–20% below target → `P2`
 - Metric < 10% below target → `P3`
 
+Routed through the `/issue` programmatic create-hook (#2085), same as 5A — `$FORGE_REPO` may
+differ from the analyzed repo's own `forge.yaml → project.owner/repo`, so `$FORGE_CONFIG` is
+pointed at a synthesized minimal config for the duration of the call. This body already carries
+all three mandatory sections (`## Problem`, `## Affected Files`, `## Acceptance Criteria`), so
+Phase 3F's pre-create validation is expected to be a no-op here.
+
 ```bash
-gh issue create -R $FORGE_REPO \
-  --title "fix([command]): [description]" \
-  --label "[bug|enhancement|feature],[P1|P2|P3]" \
-  --body "## Problem
+FORGE_ISSUE_HOOK_CONFIG=$(mktemp)
+cat > "$FORGE_ISSUE_HOOK_CONFIG" <<HOOKCFG_EOF
+project:
+  owner: "${FORGE_REPO%%/*}"
+  repo: "${FORGE_REPO##*/}"
+paths:
+  root: "$FORGE_HOME"
+HOOKCFG_EOF
+
+PROPOSAL_BODY_FILE=$(mktemp)
+cat > "$PROPOSAL_BODY_FILE" <<'EOF'
+## Problem
 
 [1–3 sentences describing what the pipeline health metric reveals. Include the current value and target value.]
 
@@ -260,13 +349,13 @@ gh issue create -R $FORGE_REPO \
 
 ## Root Cause (if known)
 
-\`commands/[file].md\` [section] — [what the section currently does that causes the metric to suffer]
+`commands/[file].md` [section] — [what the section currently does that causes the metric to suffer]
 
 ## Affected Files
 
 Files that need changes:
 
-1. \`commands/[file].md\` — [what needs to change in this file]
+1. `commands/[file].md` — [what needs to change in this file]
 
 ## Expected Behavior
 
@@ -277,7 +366,45 @@ After the fix, [metric] should reach [target value]. [Describe the concrete beha
 - [ ] [Specific, testable criterion tied to the metric]
 - [ ] [Specific, testable criterion tied to the command behaviour]
 - [ ] No regression in other pipeline-health metrics
-"
+EOF
+
+# See the persistence note in 5A above — env vars do not cross tool-call boundaries, and
+# the Skill tool is a distinct invocation, not a bash subprocess. Use the same
+# working-directory-relative forge.yaml swap as 5A instead of relying on `export`. This is a
+# separate bash invocation from 5A's, so the swap/restore/trap setup is repeated here rather
+# than reused (shell functions and traps do not persist across separate tool-call boundaries
+# any more than exported env vars do).
+FORGE_YAML_BACKUP=$(mktemp)
+FORGE_YAML_EXISTED=false
+[ -f forge.yaml ] && FORGE_YAML_EXISTED=true
+cp forge.yaml "$FORGE_YAML_BACKUP" 2>/dev/null || true
+restore_forge_yaml() {
+  if [ "$FORGE_YAML_EXISTED" = "true" ]; then
+    cp "$FORGE_YAML_BACKUP" forge.yaml 2>/dev/null || echo "ERROR: failed to restore forge.yaml from backup ${FORGE_YAML_BACKUP} — repo config may still be the synthesized Forge-repo stub. Restore manually before running any other command." >&2
+  else
+    rm -f forge.yaml 2>/dev/null || true
+  fi
+}
+# Same EXIT-trap backstop as 5A — restores forge.yaml even if the Skill(...) call errors or
+# this bash invocation terminates early, not just on the normal sequential path below.
+trap restore_forge_yaml EXIT
+cp "$FORGE_ISSUE_HOOK_CONFIG" forge.yaml
+
+ISSUE_RESULT=$(Skill(skill="issue", args="--title \"fix([command]): [description]\" --body-file $PROPOSAL_BODY_FILE --label \"[bug|enhancement|feature]\" --label \"[P1|P2|P3]\""))
+echo "$ISSUE_RESULT"
+
+# Restore the original forge.yaml immediately — same rationale as 5A. Clears the EXIT trap
+# once the normal-path restore succeeds.
+restore_forge_yaml
+trap - EXIT
+
+# Same wrong-repo safeguard as 5A — fail loudly instead of silently filing the improvement
+# proposal into the analyzed project's own repo.
+if ! echo "$ISSUE_RESULT" | grep -q "github.com/${FORGE_REPO}/issues/"; then
+  echo "ERROR: pipeline-health proposal was not created in FORGE_REPO ($FORGE_REPO) — verify the forge.yaml swap propagated to the /issue invocation above before proceeding."
+fi
+
+rm -f "$FORGE_ISSUE_HOOK_CONFIG" "$PROPOSAL_BODY_FILE"
 ```
 
 ---

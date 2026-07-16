@@ -1,5 +1,5 @@
 ---
-install: internal
+install: core
 ---
 <!-- SPDX-FileCopyrightText: Copyright (c) RapierCraft Studios -->
 <!-- SPDX-License-Identifier: AGPL-3.0-or-later -->
@@ -22,7 +22,9 @@ You are the top-level orchestrator. Your job is to take a batch of issues, plan 
 
 **You have access to ALL tools** — Agent tool (critical), Task tool, Skill tool, Bash, everything. Use the Agent tool aggressively to parallelize work.
 
-**Agent model policy**: `model: "haiku"`, `effort: low` (mechanical — dispatch bookkeeping, lane routing, classification). Fallback: `model: "sonnet"` if rate-limited. User can override with `--model <name>`. Feature gate: pass `effort` in Task/Skill spawns only on Claude Code >= 2.1.154.
+**Agent model policy**: `model: "haiku"`, `effort: low` (mechanical — dispatch bookkeeping, lane routing, classification). Fallback: `model: "sonnet"` if rate-limited. User can override with `--model <name>`. Feature gate: pass `effort` in Task/Skill spawns only on Claude Code >= 2.1.154. **Distinct from the spawned `/work-on` sub-agents** (Phase 4, per-issue and review-finding sweep): those resolve via `model: "{SUBAGENT_MODEL}"` — forge.yaml `agents.subagent_model`, else `agents.default_model`, else `"sonnet"` — not this dispatcher's own `haiku` policy.
+
+**Hard exclusion — already enforced by this design, not left to convention**: this `haiku`/`effort: low` tier applies ONLY to the orchestrator's own mechanical bookkeeping (dispatch, lane routing, classification) — never to the spawned `/work-on` sub-agents, which always run at `{SUBAGENT_MODEL}` (standard tier, sonnet by default). Every reasoning-heavy `/work-on` sub-phase file (`investigate.md`, `build/architect.md`, `build/implement.md`, `review.md`) carries its own "Agent model policy" line pinned to `{DEFAULT_MODEL}`/standard tier — see `work-on.md`'s `FORGE:MODEL_TIER_NOTE` for the canonical explanation of why these are never downtiered, and forge#1827 for the explicit correction against adding a `model: "haiku"` claim to any file where mechanical bits are interleaved with reasoning-heavy content. Do not introduce a second, competing deterministic-step-to-cheap-model config — this per-file tiering plus the dispatcher/sub-agent split above is the single source of truth for which steps may use a cheaper model.
 **NEVER use plan mode (EnterPlanMode).**
 
 <!-- FORGE:SPEC_LOADED — orchestrate.md loaded and active. Agent is bound by HARD RULES above. -->
@@ -44,9 +46,17 @@ STAGING_BRANCH=$(yq '.branches.staging' "$CONFIG_FILE")
 DEFAULT_BRANCH=$(yq '.branches.default' "$CONFIG_FILE")
 # Build satellite repo map from repos.satellites list
 # Each satellite: { prefix, repo, staging_branch }
+
+# Narration verbosity for Step 4B's per-completion status updates (phase-4-execution.md item 8).
+# "terse" (default when unset): one-line status per completion — matches today's existing
+# behavior, so leaving pipeline.narration unset is a no-op. "verbose": adds a running
+# per-completion recap table. Never affects the Step 6B consolidated report, which always
+# renders full tables once at the end regardless of this value.
+NARRATION_MODE=$(yq '.pipeline.narration // "terse"' "$CONFIG_FILE" 2>/dev/null || echo "terse")
+[ "$NARRATION_MODE" = "null" ] && NARRATION_MODE="terse"
 ```
 
-All `{GH_REPO}`, `{GH_FLAG}`, `{REPO_PATH}`, `{PROJECT_NAME}`, `{STAGING_BRANCH}`, and `{DEFAULT_BRANCH}` references below are populated from `forge.yaml`.
+All `{GH_REPO}`, `{GH_FLAG}`, `{REPO_PATH}`, `{PROJECT_NAME}`, `{STAGING_BRANCH}`, `{DEFAULT_BRANCH}`, and `{NARRATION_MODE}` references below are populated from `forge.yaml`.
 
 ---
 

@@ -2,37 +2,155 @@
 # transition-label.sh — Workflow label state machine for ForgeDock pipeline
 #
 # Usage: transition-label.sh <ISSUE_NUMBER> <GH_FLAG...> <TARGET_STATE>
+#   OR:  transition-label.sh --validate <VERDICT> <ISSUE_NUMBER> [GH_FLAG...]
 #
 #   ISSUE_NUMBER  GitHub issue number (e.g. 674)
 #   GH_FLAG       Repository flag passed to gh (e.g. -R RapierCraftStudios/forgedock)
 #                 May be multiple tokens — pass before TARGET_STATE
 #   TARGET_STATE  One of: investigating, ready-to-build, building, in-review,
-#                         merged, invalid, decomposed
+#                         merged, invalid, decomposed, awaiting-merge
+#
+#   --validate    Sub-command mode: translate an investigation verdict into a
+#                 finding-lifecycle label (needs-validation → validated/false-positive).
+#   VERDICT       One of: CONFIRMED, NOT-CONFIRMED, INVALID, PARTIAL
+#                 CONFIRMED → validated; all others → false-positive
 #
 # Examples:
 #   transition-label.sh 674 -R RapierCraftStudios/forgedock investigating
 #   transition-label.sh 674 -R owner/repo ready-to-build
+#   transition-label.sh --validate CONFIRMED 674 -R owner/repo
+#   transition-label.sh --validate NOT-CONFIRMED 674 -R owner/repo
 #
-# Behavior:
+# Behavior (workflow mode):
 #   1. Validates ISSUE_NUMBER and TARGET_STATE
 #   2. Verifies the issue exists (exits 1 if not)
 #   3. Adds workflow:{TARGET_STATE} label
 #   4. Removes all other workflow:* labels atomically
+#
+# Behavior (--validate mode):
+#   1. Validates VERDICT and ISSUE_NUMBER
+#   2. Verifies issue exists and has needs-validation label (exits 0 silently if not)
+#   3. Adds validated (CONFIRMED) or false-positive (all other verdicts) label
+#   4. Removes needs-validation label
+#   5. Idempotent: if already labeled validated/false-positive, exits 0 silently
 #
 # Exit codes: 0 = success, 1 = error (bad args, issue not found, gh failure)
 
 set -euo pipefail
 
 # ---------------------------------------------------------------------------
-# Argument parsing
+# --validate sub-command: finding lifecycle label transition
+# Signature: --validate <VERDICT> <ISSUE_NUMBER> [GH_FLAG...]
+# Separate from the workflow state machine — operates on needs-validation,
+# validated, false-positive labels only; never touches workflow:* labels.
+# ---------------------------------------------------------------------------
+if [ "${1:-}" = "--validate" ]; then
+  shift
+
+  if [ "$#" -lt 2 ]; then
+    echo "ERROR: Usage: transition-label.sh --validate <VERDICT> <ISSUE_NUMBER> [GH_FLAG...]" >&2
+    echo "       VERDICT: CONFIRMED | NOT-CONFIRMED | INVALID | PARTIAL" >&2
+    echo "       Example: transition-label.sh --validate CONFIRMED 674 -R owner/repo" >&2
+    exit 1
+  fi
+
+  VERDICT="$1"
+  shift
+  ISSUE_NUMBER="$1"
+  shift
+  GH_ARGS=("$@")
+
+  # Validate verdict
+  case "$VERDICT" in
+    CONFIRMED|NOT-CONFIRMED|INVALID|PARTIAL) ;;
+    *)
+      echo "ERROR: Unknown verdict: '$VERDICT'" >&2
+      echo "       Valid verdicts: CONFIRMED, NOT-CONFIRMED, INVALID, PARTIAL" >&2
+      exit 1
+      ;;
+  esac
+
+  # Validate issue number
+  if ! [[ "$ISSUE_NUMBER" =~ ^[0-9]+$ ]]; then
+    echo "ERROR: ISSUE_NUMBER must be a positive integer, got: '$ISSUE_NUMBER'" >&2
+    exit 1
+  fi
+
+  # Verify issue exists
+  if ! gh issue view "$ISSUE_NUMBER" "${GH_ARGS[@]}" --json number >/dev/null 2>&1; then
+    echo "ERROR: Issue #$ISSUE_NUMBER not found (GH_FLAG: ${GH_ARGS[*]:-<none>})" >&2
+    exit 1
+  fi
+
+  # Check if issue carries needs-validation (idempotent gate)
+  #
+  # forge#1991: a bare `2>/dev/null || echo ""` here collapsed "fetch
+  # failed" and "fetch succeeded, issue has no labels" into the same empty
+  # string, so a failed fetch fell through to the "no needs-validation —
+  # no action taken (idempotent)" branch below and exited 0, silently
+  # misreporting a transient API failure as successful idempotent no-op.
+  # Use the same `if VAR=$(cmd); then ... else ... fi` idiom already
+  # applied to the workflow-mode label fetches (forge#1977/#1988/#1990) to
+  # keep the two outcomes distinguishable. This block has no
+  # TRANSITION_EXIT_CODE deferred-exit convention (that only exists in the
+  # workflow-mode block below), so failure exits 1 directly here, matching
+  # this script's documented exit codes (0 = success, 1 = error).
+  if CURRENT_LABELS=$(gh issue view "$ISSUE_NUMBER" "${GH_ARGS[@]}" --json labels \
+    --jq '[.labels[].name] | join(",")' 2>/dev/null); then
+    : # fetch succeeded; CURRENT_LABELS may legitimately be an empty string
+  else
+    echo "ERROR: needs-validation label fetch failed (transient network error / rate limit?) for issue #$ISSUE_NUMBER — cannot determine finding-lifecycle state. Aborting without action." >&2
+    exit 1
+  fi
+
+  if ! echo "$CURRENT_LABELS" | grep -q "needs-validation"; then
+    echo "OK: Issue #$ISSUE_NUMBER does not have needs-validation — no action taken (idempotent)"
+    exit 0
+  fi
+
+  # Check if already resolved (idempotent)
+  if echo "$CURRENT_LABELS" | grep -qE "validated|false-positive"; then
+    echo "OK: Issue #$ISSUE_NUMBER already has a resolved verdict label — no action taken (idempotent)"
+    exit 0
+  fi
+
+  # Map verdict to label
+  if [ "$VERDICT" = "CONFIRMED" ]; then
+    TARGET_VERDICT_LABEL="validated"
+    echo "Verdict CONFIRMED → adding 'validated' to issue #$ISSUE_NUMBER..."
+  else
+    TARGET_VERDICT_LABEL="false-positive"
+    echo "Verdict $VERDICT → adding 'false-positive' to issue #$ISSUE_NUMBER..."
+  fi
+
+  # Add verdict label
+  gh issue edit "$ISSUE_NUMBER" "${GH_ARGS[@]}" --add-label "$TARGET_VERDICT_LABEL"
+
+  # Remove needs-validation
+  gh issue edit "$ISSUE_NUMBER" "${GH_ARGS[@]}" --remove-label "needs-validation" 2>/dev/null || true
+
+  echo "OK: needs-validation → $TARGET_VERDICT_LABEL on issue #$ISSUE_NUMBER"
+  exit 0
+fi
+
+# ---------------------------------------------------------------------------
+# Argument parsing (workflow state machine mode)
 # Signature: <ISSUE_NUMBER> [GH_FLAG...] <TARGET_STATE>
 # We consume ISSUE_NUMBER as $1, TARGET_STATE as the last arg, everything
 # in between is GH_FLAG (e.g. -R RapierCraftStudios/forgedock).
 # ---------------------------------------------------------------------------
 
+# Deferred exit code (forge#1929) — set to 1 by the persistent stale-label
+# removal failure branch below instead of exiting immediately, so that the
+# unconditional needs-human clear step (scoped to awaiting-merge) always
+# gets a chance to run before the script actually exits. Initialized here,
+# before any conditional logic, so `set -u` never sees it unbound.
+TRANSITION_EXIT_CODE=0
+
 if [ "$#" -lt 2 ]; then
   echo "ERROR: Usage: transition-label.sh <ISSUE_NUMBER> [GH_FLAG...] <TARGET_STATE>" >&2
   echo "       Example: transition-label.sh 674 -R RapierCraftStudios/forgedock investigating" >&2
+  echo "       OR:      transition-label.sh --validate CONFIRMED 674 -R owner/repo" >&2
   exit 1
 fi
 
@@ -65,6 +183,7 @@ VALID_STATES=(
   "merged"
   "invalid"
   "decomposed"
+  "awaiting-merge"
 )
 
 # ---------------------------------------------------------------------------
@@ -161,9 +280,181 @@ echo "Adding $EFFECTIVE_LABEL to issue #$ISSUE_NUMBER..."
 gh issue edit "$ISSUE_NUMBER" "${GH_ARGS[@]}" --add-label "$EFFECTIVE_LABEL"
 
 # ---------------------------------------------------------------------------
-# Remove all other workflow:* labels (best-effort — labels may not all exist)
+# Remove all other workflow:* labels currently on the issue (best-effort)
+#
+# IMPORTANT: `gh issue edit --remove-label` is atomic across its whole
+# comma-separated argument — if ANY label in the list is not a valid label
+# on the repo (e.g. a newly added VALID_STATES entry like awaiting-merge
+# whose repo-side `gh label create` / bootstrap hasn't run yet), the ENTIRE
+# call fails with "not found" and — under `set -euo pipefail` without the
+# `|| true` this used to silently swallow — no labels are removed at all,
+# including ones that DO exist and SHOULD have been cleared (forge#1810
+# follow-up: this exact bug was caught by dogfooding this script against
+# the live repo before `workflow:awaiting-merge` had been bootstrapped).
+#
+# Fix: only ask to remove labels that are BOTH (a) in REMOVE_LABELS (valid
+# states other than the target) AND (b) actually present on the issue right
+# now. A label that was never applied to this issue can't be "not found" on
+# the repo without failing the whole call, and a label the issue doesn't
+# have doesn't need removing anyway — so intersecting against the issue's
+# current labels sidesteps the all-or-nothing failure mode entirely instead
+# of relying on `|| true` to mask it.
+#
+# forge#1990: this fetch itself can fail (transient network error, rate
+# limit) independently of whether the issue actually has any stale labels.
+# A bare `2>/dev/null || echo ""` collapsed "fetch failed" and "fetch
+# succeeded, issue has no labels" into the same empty string — so a failed
+# fetch here silently skipped the ENTIRE removal/verification block below
+# (not just its post-hoc confirmation) while the script still reported `OK`
+# on exit 0. Use the same `if VAR=$(cmd); then ... else ... fi` idiom
+# already applied to the post-removal verification fetch below (forge#1977/
+# #1988) to keep the two outcomes distinguishable, and defer a non-zero
+# exit via TRANSITION_EXIT_CODE (forge#1929 convention) instead of masking
+# the failure as success.
 # ---------------------------------------------------------------------------
-echo "Removing stale workflow:* labels ($REMOVE_LABELS)..."
-gh issue edit "$ISSUE_NUMBER" "${GH_ARGS[@]}" --remove-label "$REMOVE_LABELS" 2>/dev/null || true
+if CURRENT_ISSUE_LABELS=$(gh issue view "$ISSUE_NUMBER" "${GH_ARGS[@]}" --json labels \
+  --jq '[.labels[].name] | join(",")' 2>/dev/null); then
+  : # fetch succeeded; CURRENT_ISSUE_LABELS may legitimately be an empty string
+else
+  echo "ERROR: pre-removal label fetch failed (transient network error / rate limit?) for issue #$ISSUE_NUMBER — cannot determine which stale workflow:* labels to remove. Skipping removal to avoid acting on incomplete data." >&2
+  CURRENT_ISSUE_LABELS=""
+  TRANSITION_EXIT_CODE=1
+fi
+
+TO_REMOVE=""
+IFS=',' read -ra REMOVE_CANDIDATES <<< "$REMOVE_LABELS"
+for candidate in "${REMOVE_CANDIDATES[@]}"; do
+  case ",$CURRENT_ISSUE_LABELS," in
+    *",$candidate,"*)
+      TO_REMOVE="${TO_REMOVE:+$TO_REMOVE,}$candidate"
+      ;;
+  esac
+done
+
+if [ -n "$TO_REMOVE" ]; then
+  echo "Removing stale workflow:* labels present on the issue ($TO_REMOVE)..."
+  gh issue edit "$ISSUE_NUMBER" "${GH_ARGS[@]}" --remove-label "$TO_REMOVE" 2>/dev/null || true
+
+  # -------------------------------------------------------------------------
+  # Post-condition verification + single retry (forge#1915)
+  #
+  # The intersection fix above (forge#1810) already prevents the "unbootstrapped
+  # label 404" all-or-nothing failure — every candidate in $TO_REMOVE is known
+  # to exist on the issue at the time it was computed. But the removal call
+  # itself can still fail for reasons unrelated to label existence (a transient
+  # `gh`/GitHub API hiccup, rate limiting, a dropped connection), and that
+  # failure was previously swallowed unconditionally by `2>/dev/null || true`
+  # with no verification — leaving stale workflow:* labels stacked alongside
+  # the newly-added terminal label with no diagnostic trail. Live evidence:
+  # issue #1892 closed with both workflow:in-review and workflow:merged applied
+  # simultaneously because this exact removal call silently failed once.
+  #
+  # Fix: re-fetch the issue's labels after the removal call. If any label in
+  # $TO_REMOVE is still present, retry the removal once. If it's *still*
+  # present after the retry, this is a real, persistent failure — surface it
+  # loudly (stderr ERROR + non-zero exit) instead of the unconditional "OK".
+  #
+  # forge#1929: the non-zero exit is DEFERRED (via $TRANSITION_EXIT_CODE)
+  # rather than immediate. This block runs before the needs-human clear step
+  # further down, which is scoped to TARGET_STATE=awaiting-merge and must
+  # run regardless of this failure — it is unrelated to stale-label removal.
+  # An immediate `exit 1` here would silently skip that unrelated cleanup
+  # step in the one case (persistent removal failure) it's most important
+  # for the caller to see a consistent, fully-applied label state.
+  # -------------------------------------------------------------------------
+  # forge#1977: the fetch itself can fail (transient network error, rate
+  # limit) independently of whether the label was actually removed. A bare
+  # `2>/dev/null || echo ""` collapses "fetch failed" and "fetch succeeded,
+  # label absent" into the same empty string, so a failed verification call
+  # was previously indistinguishable from a confirmed-clean result — masking
+  # the exact failure mode this block exists to catch. Use `if VAR=$(cmd);
+  # then ... else ... fi` (set -e-safe: command substitution failure inside
+  # an `if` condition does not trigger `set -e`) to keep the two outcomes
+  # distinguishable, and treat a failed fetch as "still present" so it flows
+  # into the existing retry / fail-loud path below instead of silently
+  # reporting success.
+  if POST_REMOVE_LABELS=$(gh issue view "$ISSUE_NUMBER" "${GH_ARGS[@]}" --json labels \
+    --jq '[.labels[].name] | join(",")' 2>/dev/null); then
+    STILL_PRESENT=""
+    IFS=',' read -ra TO_REMOVE_CHECK <<< "$TO_REMOVE"
+    for candidate in "${TO_REMOVE_CHECK[@]}"; do
+      case ",$POST_REMOVE_LABELS," in
+        *",$candidate,"*)
+          STILL_PRESENT="${STILL_PRESENT:+$STILL_PRESENT,}$candidate"
+          ;;
+      esac
+    done
+  else
+    echo "WARNING: post-removal verification API call failed (transient network error / rate limit?) — cannot confirm removal, treating ($TO_REMOVE) as unverified..." >&2
+    STILL_PRESENT="$TO_REMOVE"
+  fi
+
+  if [ -n "$STILL_PRESENT" ]; then
+    echo "WARNING: label removal did not take effect for ($STILL_PRESENT) — retrying once..." >&2
+    gh issue edit "$ISSUE_NUMBER" "${GH_ARGS[@]}" --remove-label "$STILL_PRESENT" 2>/dev/null || true
+
+    if POST_RETRY_LABELS=$(gh issue view "$ISSUE_NUMBER" "${GH_ARGS[@]}" --json labels \
+      --jq '[.labels[].name] | join(",")' 2>/dev/null); then
+      STILL_PRESENT_AFTER_RETRY=""
+      IFS=',' read -ra RETRY_CHECK <<< "$STILL_PRESENT"
+      for candidate in "${RETRY_CHECK[@]}"; do
+        case ",$POST_RETRY_LABELS," in
+          *",$candidate,"*)
+            STILL_PRESENT_AFTER_RETRY="${STILL_PRESENT_AFTER_RETRY:+$STILL_PRESENT_AFTER_RETRY,}$candidate"
+            ;;
+        esac
+      done
+    else
+      echo "WARNING: post-retry verification API call also failed (transient network error / rate limit?) — cannot confirm removal after retry, treating ($STILL_PRESENT) as unverified..." >&2
+      STILL_PRESENT_AFTER_RETRY="$STILL_PRESENT"
+    fi
+
+    if [ -n "$STILL_PRESENT_AFTER_RETRY" ]; then
+      echo "ERROR: failed to remove stale label(s) ($STILL_PRESENT_AFTER_RETRY) from issue #$ISSUE_NUMBER after retry — label state machine now inconsistent (issue carries both '$EFFECTIVE_LABEL' and the stale label(s) above)." >&2
+      TRANSITION_EXIT_CODE=1
+    else
+      echo "Retry succeeded — stale label(s) removed."
+    fi
+  fi
+else
+  echo "No stale workflow:* labels present on the issue — nothing to remove."
+fi
+
+# ---------------------------------------------------------------------------
+# Clear needs-human (best-effort) — SCOPED to workflow:awaiting-merge only
+#
+# needs-human is NOT a workflow:* label, so it is never included in
+# VALID_STATES/REMOVE_LABELS above. It is a write-only, sticky, terminal
+# label: once a human flags an issue/PR as needing attention, no routine
+# forward-progress transition (investigating, ready-to-build, building,
+# in-review, merged, invalid, decomposed) should silently clear it.
+#
+# The ONE deliberate exception is workflow:awaiting-merge (forge#1809/#1810):
+# a remediated + re-reviewed PR that has moved off needs-human without yet
+# meeting the auto-land bar. That is the single code path allowed to clear
+# needs-human — every other TARGET_STATE must leave a pre-existing
+# needs-human label untouched.
+#
+# Best-effort: `|| true` so a missing label never fails the script under
+# `set -euo pipefail`.
+# ---------------------------------------------------------------------------
+if [ "$TARGET_STATE" = "awaiting-merge" ]; then
+  echo "Clearing needs-human (best-effort, scoped to awaiting-merge)..."
+  gh issue edit "$ISSUE_NUMBER" "${GH_ARGS[@]}" --remove-label "needs-human" 2>/dev/null || true
+else
+  echo "Skipping needs-human clear — TARGET_STATE is '$TARGET_STATE', not 'awaiting-merge'."
+fi
+
+# ---------------------------------------------------------------------------
+# Final exit (forge#1929) — honor any deferred failure from the persistent
+# stale-label removal check above. The needs-human clear step just above
+# always ran first, regardless of that failure, so the caller-visible exit
+# code still surfaces the same "fail loud" signal introduced by forge#1915,
+# just after the unrelated cleanup step has had a chance to run.
+# ---------------------------------------------------------------------------
+if [ "$TRANSITION_EXIT_CODE" -ne 0 ]; then
+  echo "FAILED: $EFFECTIVE_LABEL set on issue #$ISSUE_NUMBER, but persistent stale-label removal failure occurred (see ERROR above)." >&2
+  exit "$TRANSITION_EXIT_CODE"
+fi
 
 echo "OK: $EFFECTIVE_LABEL set on issue #$ISSUE_NUMBER"

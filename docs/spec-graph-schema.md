@@ -134,7 +134,7 @@ walks `CONTAINS` (sub-phases) and `REQUIRES` (devdocs) edges in the *forward*
 direction to a fixpoint, then maps the reachable nodes to their repo-relative
 file `path`s. The result is the **minimal spec set** an agent must read to run
 that command — the command itself plus only the sub-phases and devdocs actually
-reachable from it, never the full ~27-command corpus. It is the resolver that
+reachable from it, never the full spec corpus. It is the resolver that
 powers selective spec loading (Phase 0 of `work-on`). `READS`/`WRITES`/
 `TRANSITIONS`/`INVOKES` edges are *not* followed — annotations and labels have
 no spec file, and scripts are resolved separately at invoke time. The walk shares
@@ -413,8 +413,8 @@ parent spec references a child via `Skill(skill="<name>", ...)`.
 
 **How `load-set` exploits decomposition**: `load-set <command>` seeds at the
 command's node and walks `CONTAINS` and `REQUIRES` edges forward. A decomposed
-command like `work-on` returns only the 11 files its execution graph actually
-reaches — not the full ~44-spec corpus. Sub-specs that belong to `work-on/build/`
+command like `work-on` returns only the files its execution graph actually
+reaches — not the full spec corpus. Sub-specs that belong to `work-on/build/`
 but are only invoked under specific conditions (e.g., `context.md` is skipped for
 TRIVIAL tasks) can be added or removed from the reachable set by updating the
 `CONTAINS` edges in the parent spec, without changing the query logic.

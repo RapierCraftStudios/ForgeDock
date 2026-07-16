@@ -1,7 +1,7 @@
 /**
  * @forgedock/protocol — FORGE Annotation Protocol v1.0 reference implementation.
  *
- * Provides parse, validate, and emit for all 13 reserved annotation types
+ * Provides parse, validate, and emit for all reserved annotation types
  * defined in the FORGE Annotation Protocol specification (CC-BY-4.0).
  *
  * @example

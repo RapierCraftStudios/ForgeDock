@@ -1,6 +1,6 @@
 ---
 description: Trace a failed or stalled pipeline run — identify which FORGE annotation is missing or malformed, diagnose the failure point, and suggest specific remediation steps
-argument-hint: [issue number] [--repo prefix]
+argument-hint: "[issue number] [--repo prefix]"
 install: extras
 ---
 
@@ -10,7 +10,7 @@ install: extras
 
 **NEVER use plan mode (EnterPlanMode)** — it breaks execution context.
 
-**Agent model policy**: `model: "sonnet"` (standard tier). Fallback: `model: "opus"` if rate-limited. Feature gate: pass `effort` in Task/Skill spawns only on Claude Code >= 2.1.154.
+**Agent model policy**: `model: "{DEFAULT_MODEL}"` — resolved from forge.yaml `agents.default_model`, else "sonnet" (standard tier). Fallback: `model: "opus"` if rate-limited. Feature gate: pass `effort` in Task/Skill spawns only on Claude Code >= 2.1.154.
 
 You are the pipeline's diagnostic layer. Given a single GitHub issue number, you reconstruct the full FORGE annotation chain for that pipeline run, identify the exact failure point, and suggest specific remediation steps. This command is **read-only** — it never mutates GitHub state.
 

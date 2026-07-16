@@ -1,6 +1,6 @@
 ---
 description: Create, manage, and ship milestones — the top-level planning layer for feature development
-argument-hint: [create <name> | status | ship <slug> | sync <slug>]
+argument-hint: "[create <name> | status | ship <slug> | sync <slug>]"
 install: extras
 ---
 <!-- SPDX-FileCopyrightText: Copyright (c) RapierCraft Studios -->
@@ -168,17 +168,16 @@ Present the proposed issues to the user. Ask:
 
 **Issue body standard**: Use the **Pipeline Issue Template** from `issue.md` Phase 3D as the body structure for every issue created here. Do NOT use a bespoke inline template — the Pipeline Issue Template is the single canonical standard for all automated issue creation across the pipeline. The body content (Problem, Root Cause, Affected Files, Acceptance Criteria, Context, Dependencies) comes from the per-issue investigation in Step 4B. <!-- Added: forge#293 -->
 
+**Route creation through `/issue`'s programmatic invocation contract** (`commands/issue.md`, added #2085) instead of calling `gh issue create` directly — this gets dedup (Phase 2D) and mandatory-section body validation (Phase 3F) for free. <!-- Changed: forge#2086 — route through /issue create-hook -->
+
 For each approved issue, create it in the **correct repo** based on the scope analysis:
 
 ```bash
 # For default repo issues:
 # Body content derives from the Step 4B per-issue investigation.
 # Structure MUST match the Pipeline Issue Template in issue.md Phase 3D.
-gh issue create {GH_FLAG} \
-  --title "{fix|feat|refactor}: {issue_title}" \
-  --label "{type},{priority}" \
-  --milestone "{TITLE}" \
-  --body "$(cat <<'BODY_EOF'
+MILESTONE_ISSUE_BODY_FILE="$(mktemp)"
+cat > "$MILESTONE_ISSUE_BODY_FILE" <<'BODY_EOF'
 ## Problem
 
 {1-3 sentences: what needs to be built or fixed for this milestone. Specific — derived from Step 4B code read, not milestone description alone.}
@@ -209,15 +208,21 @@ Part of milestone: **{MILESTONE_TITLE}**
 
 {Either "None" or "Depends on #{ISSUE_NUMBER} — {reason}"}
 BODY_EOF
-)"
+```
 
+```
+ISSUE_SKILL_OUTPUT=$(Skill(skill="issue", args="--title \"{fix|feat|refactor}: {issue_title}\" --body-file \"${MILESTONE_ISSUE_BODY_FILE}\" --label \"{type}\" --label \"{priority}\" --milestone \"{TITLE}\""))
+```
+
+```bash
 # For satellite repo issues (MCP, n8n) — create in the satellite repo:
 # Note: GitHub milestones are per-repo, so satellite issues reference the milestone by name only
 # Body structure MUST match the Pipeline Issue Template in issue.md Phase 3D.
-gh issue create -R {SATELLITE_REPO} \
-  --title "{fix|feat|refactor}: {issue_title}" \
-  --label "{type},{priority}" \
-  --body "$(cat <<'BODY_EOF'
+# issue.md's Phase 1A resolves target repo from a "{satellite_prefix}: " prefix embedded in
+# the title text itself (not a --repo flag — the programmatic contract has none), so the
+# satellite prefix is prepended here exactly as issue.md's routing table documents it.
+SATELLITE_ISSUE_BODY_FILE="$(mktemp)"
+cat > "$SATELLITE_ISSUE_BODY_FILE" <<'BODY_EOF'
 ## Problem
 
 {1-3 sentences: what needs to be built or fixed in this satellite repo for the milestone.}
@@ -247,7 +252,24 @@ Part of cross-repo milestone: **{MILESTONE_TITLE}** (primary: {GH_REPO})
 
 {Either "None" or "Depends on #{ISSUE_NUMBER} — {reason}"}
 BODY_EOF
-)"
+```
+
+```
+ISSUE_SKILL_OUTPUT=$(Skill(skill="issue", args="--title \"{SATELLITE_PREFIX}: {fix|feat|refactor}: {issue_title}\" --body-file \"${SATELLITE_ISSUE_BODY_FILE}\" --label \"{type}\" --label \"{priority}\""))
+```
+
+**Extract each created issue number from the Skill output** (see `commands/issue.md` Phase 4C/4E — it echoes `Created: {url}` and reports `**#{NUMBER}**: {title}`) — repeat for both the default-repo and satellite-repo calls above:
+
+```bash
+NEW_ISSUE_NUMBER=$(echo "$ISSUE_SKILL_OUTPUT" | grep -oE 'issues/[0-9]+' | head -1 | grep -oE '[0-9]+')
+[ -z "$NEW_ISSUE_NUMBER" ] && NEW_ISSUE_NUMBER=$(echo "$ISSUE_SKILL_OUTPUT" | grep -oE '\*\*#[0-9]+\*\*' | head -1 | grep -oE '[0-9]+')
+
+if [ -z "$NEW_ISSUE_NUMBER" ]; then
+  echo "WARNING: /issue did not report a created issue number for '{issue_title}' — likely a Phase 2D dedup STOP (near-duplicate found) or a usage error. Do not add this issue to {created_issue_numbers} (Step 6B) or to any dependency reference in a later issue body — review the Skill output above."
+else
+  # Accumulate into {created_issue_numbers} for Step 6B project board sync
+  created_issue_numbers+=("$NEW_ISSUE_NUMBER")
+fi
 ```
 
 ### Step 6B: Add issues to Project board
@@ -445,9 +467,10 @@ else
             # Truncate AT_RISK to safe size for issue body (avoid shell quoting issues with large diffs)
             AT_RISK_SNIPPET=$(echo "$AT_RISK" | head -60 | sed "s/'/'\\\\''/g")
 
-            gh issue create {GH_FLAG} \
-              --title "fix(milestone): rebase conflict during hunk-loss audit for milestone/{slug}" \
-              --body "$(cat <<ISSUE_EOF
+            # Route through /issue's programmatic invocation contract (commands/issue.md, #2085)
+            # instead of calling gh issue create directly — gets dedup + body validation for free.
+            REBASE_ISSUE_BODY_FILE="$(mktemp)"
+            cat > "$REBASE_ISSUE_BODY_FILE" <<ISSUE_EOF
 ## Problem
 
 The pre-merge hunk-loss audit for milestone \`{slug}\` detected $AT_RISK_COUNT at-risk staging hunks, then attempted to rebase \`milestone/{slug}\` onto \`origin/{STAGING_BRANCH}\` to absorb them. The rebase conflicted and was aborted. Manual resolution is required before the milestone can ship.
@@ -488,10 +511,14 @@ Then re-run \`/milestone ship {slug}\`.
 
 <!-- AUTO-CREATED: hunk-loss audit rebase conflict -->
 ISSUE_EOF
-)" \
-              --label "bug" --label "priority:P0" --label "needs-human"
+```
 
-            echo "STOP: Rebase conflict. Created issue for manual resolution. Do NOT proceed to PR creation."
+```
+ISSUE_SKILL_OUTPUT=$(Skill(skill="issue", args="--title \"fix(milestone): rebase conflict during hunk-loss audit for milestone/{slug}\" --body-file \"${REBASE_ISSUE_BODY_FILE}\" --label \"bug\" --label \"priority:P0\" --label \"needs-human\""))
+```
+
+```bash
+            echo "STOP: Rebase conflict. Created issue for manual resolution (see /issue output above). Do NOT proceed to PR creation."
             echo "Run '/milestone ship {slug}' again after resolving the conflict."
             exit 1
         fi

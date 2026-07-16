@@ -1,6 +1,6 @@
 ---
 description: Validation agent — quality gate loop, format/verify, proxy check, deploy check
-argument-hint: [issue number] [--repo GH_REPO] [--gh-flag GH_FLAG] [--worktree PATH] [--files FILE1 FILE2...]
+argument-hint: "[issue number] [--repo GH_REPO] [--gh-flag GH_FLAG] [--worktree PATH] [--files FILE1 FILE2...]"
 ---
 <!-- SPDX-FileCopyrightText: Copyright (c) RapierCraft Studios -->
 <!-- SPDX-License-Identifier: AGPL-3.0-or-later -->
@@ -12,7 +12,7 @@ argument-hint: [issue number] [--repo GH_REPO] [--gh-flag GH_FLAG] [--worktree P
 **Invoked by**: `work-on.md` Step 3F.5, after `implement.md` has written and staged code (not committed).
 **Output**: Return `GATE_PASSED: true/false` to caller. On failure after max iterations, post comment and set `needs-human`.
 
-**Agent model policy**: `model: "sonnet"` (standard tier). Fallback: `model: "opus"` if rate-limited. Feature gate: pass `effort` in Task/Skill spawns only on Claude Code >= 2.1.154.
+**Agent model policy**: `model: "{DEFAULT_MODEL}"` — resolved from forge.yaml `agents.default_model`, else "sonnet" (standard tier). Fallback: `model: "opus"` if rate-limited. Feature gate: pass `effort` in Task/Skill spawns only on Claude Code >= 2.1.154.
 **NEVER use plan mode (EnterPlanMode).**
 
 <!-- FORGE:SPEC_LOADED — work-on/build/validate.md loaded and active. Agent is bound by this spec. -->
@@ -36,6 +36,34 @@ Skip all phases (return `GATE_PASSED: true` immediately) if:
 - Only 1 file was changed AND it is a config or docs file with no code logic (e.g. `.md`, `.yml` with no scripts, `.env.example`)
 
 In all other cases, the gate MUST run.
+
+---
+
+## Phase V1: Builder Self-Check — Wire-Through Proof (MANDATORY, run BEFORE quality gate loop)
+
+<!-- Added: forge#1731 -->
+
+Before invoking the quality gate, the builder MUST perform a self-check on newly added conditional paths. This mirrors the quality gate's 2G.8 check and allows the builder to resolve gaps before the gate invocation rather than after.
+
+**Self-check protocol**:
+
+1. Scan the staged diff for newly added conditional lines:
+   ```bash
+   git diff HEAD -- {CHANGED_FILES} | grep -E '^\+' | grep -v '^+++' \
+       | grep -E '\bif\b|\belif\b|\belse\b|guard|feature.?flag|FEATURE_FLAG|ENABLE_|DISABLE_'
+   ```
+
+2. For each new conditional found, confirm at least ONE of:
+   - **Test in diff**: A test function or assertion in the diff exercises this conditional branch (e.g., calls the function with parameters that trigger the `if`, asserts the guarded output, or triggers the error path deliberately)
+   - **WIRE:PROVEN annotation**: Add `# WIRE:PROVEN — <method>` immediately before or after the new conditional, describing how you verified it fires (e.g., `# WIRE:PROVEN — gate logic: condition is checked before every call; unreachable path would raise ValueError visible in tests`)
+   - **Trivial re-guard** (auto-exempt): The conditional is a null/length/type check whose body is `return`/`continue`/`break`/`pass` or a single-line assignment — defensive re-guards with no new behavior
+
+3. If none of the above is true for a new conditional, either:
+   - Add a test or trace that exercises the path before staging
+   - Add a `# WIRE:PROVEN — <method>` annotation explaining how you verified reachability
+   - Confirm it qualifies as a trivial re-guard
+
+**Why this matters**: Guards, flags, and validators that are never exercised are functionally dead code. This class has cost multiple sprint cycles in this pipeline (#1230, #1244, #1522, #1580). The self-check catches gaps before the quality gate fires, reducing iteration count. <!-- Added: forge#1731 -->
 
 ---
 
@@ -226,6 +254,65 @@ fi
 
 ---
 
+## Phase V3.6: Browser Signal Check
+
+**Skip if**: No TypeScript/TSX files were changed, OR `forge.yaml → services.app_url` is absent or empty.
+
+After static proxy checks, run a lightweight live browser check using Playwright MCP tools to surface console errors, failed network requests, and basic performance metrics for any changed UI routes. This check is advisory — findings are surfaced as warnings in the V5 summary but do NOT block the gate unless the browser session is available AND returns ERROR-level console output.
+
+```bash
+cd {WORKTREE_PATH}
+APP_URL=$(yq '.services.app_url // ""' forge.yaml 2>/dev/null || echo '')
+if [ -z "$APP_URL" ]; then
+    echo "SKIPPED — services.app_url not configured in forge.yaml (browser signal check requires a running app URL)"
+else
+    echo "BROWSER SIGNAL CHECK: navigating $APP_URL"
+fi
+```
+
+**When APP_URL is configured**, perform the following using Playwright MCP tools:
+
+**Step 1 — Navigate**
+Use `browser_navigate` to load `{APP_URL}`. If the changed files include a specific page route (e.g., `web/src/app/dashboard/page.tsx`), derive the route path and navigate there instead (e.g., `{APP_URL}/dashboard`).
+
+**Step 2 — Capture console messages**
+```
+browser_console_messages
+```
+Classify findings:
+- Any message at `error` level → **MEDIUM** finding: `BROWSER-CONSOLE-ERROR | MEDIUM | console | {message}`
+- Any message at `warn` level → **LOW** advisory: `BROWSER-CONSOLE-WARN | LOW | console | {message}`
+- Ignore `info` and `log` levels
+
+**Step 3 — Capture network failures**
+```
+browser_network_requests filter="static:false"
+```
+Check for HTTP 4xx and 5xx responses on non-static requests. Exclude known third-party analytics/tracking domains.
+- HTTP 4xx or 5xx response → **HIGH** finding: `BROWSER-NETWORK-FAIL | HIGH | network | {url} returned {status}`
+
+**Step 4 — Capture performance metrics (LCP-ish)**
+```
+browser_evaluate function="() => {
+  const nav = performance.getEntriesByType('navigation')[0];
+  const paint = performance.getEntriesByType('paint');
+  const fcp = paint.find(e => e.name === 'first-contentful-paint');
+  return {
+    domContentLoaded: nav ? Math.round(nav.domContentLoadedEventEnd) : null,
+    loadTime: nav ? Math.round(nav.loadEventEnd) : null,
+    fcp: fcp ? Math.round(fcp.startTime) : null
+  };
+}"
+```
+Classify:
+- `loadTime > 4000` ms → **HIGH** finding: `BROWSER-PERF | HIGH | performance | page load time {loadTime}ms exceeds 4s threshold`
+- `loadTime > 2500` ms → **MEDIUM** finding: `BROWSER-PERF | MEDIUM | performance | page load time {loadTime}ms exceeds 2.5s threshold`
+- `fcp > 1800` ms → **LOW** advisory: `BROWSER-PERF | LOW | performance | FCP {fcp}ms — consider lazy-loading or code splitting`
+
+**Advisory scope**: Browser signal findings are included in the V5 summary under "Browser Signals". They do NOT block the gate (GATE_PASSED stays true) unless a BROWSER-NETWORK-FAIL HIGH finding is present on the primary app URL (indicating the app is completely broken for that route). Console ERROR findings are MEDIUM — surfaced for human review, not blocking.
+
+---
+
 ## Phase V4: Deployment Completeness Check
 
 **Skip if**: No new environment variables were introduced in the changed files.
@@ -275,6 +362,8 @@ Where `{SCOPE}` is the command or module scope from the contract (e.g. `work-on`
 - Refactor → `refactor(`
 
 This is the **only** commit for this build cycle. It replaces the old `git commit` that was previously in `implement.md` Phase I4. Do NOT create a separate commit for validation fixes — they are absorbed into this single commit.
+
+**Attribution**: The commit message is exactly the conventional-commit line above — nothing more. Do NOT append a `Co-Authored-By: Claude` trailer, a `🤖 Generated with Claude Code` line, or any assistant-tool attribution. Pipeline output is ForgeDock-branded; the assistant signature must never enter the repo's commit history. (A PreToolUse guard hard-blocks it as a backstop — see `bin/hooks/pre-tool-use.mjs` Rule 5.)
 
 ### V5 Post-Commit Ancestry Audit (MANDATORY)
 
@@ -368,9 +457,10 @@ This module runs at **Step 3F.5** — after implement, before commit (3J) and PR
 
 ```
 3F  → Implement (by implement.md) — code written, staged (not committed)
-3F.5 → [THIS MODULE] Validate — gate loop, format, proxy, deploy checks
+3F.5 → [THIS MODULE] Validate — gate loop, format, proxy, browser signals, deploy checks
 3G  → (covered by Phase V2 above)
 3H  → (covered by Phase V3 above)
+3H.5 → (covered by Phase V3.6 above — browser signal check for UI changes)
 3I  → (covered by Phase V4 above)
 3J  → V5 commit happens here after GATE_PASSED=true (single commit for implementation + any fixes)
 ```

@@ -1,6 +1,6 @@
 ---
 description: Close subcommand — update project board, final issue body, parent tracker, summary report, trajectory log
-argument-hint: [issue number] [--repo GH_REPO] [--gh-flag GH_FLAG] [--pr PR_NUMBER] [--base PR_BASE] [--branch BRANCH] [--worktree WORKTREE_PATH]
+argument-hint: "[issue number] [--repo GH_REPO] [--gh-flag GH_FLAG] [--pr PR_NUMBER] [--base PR_BASE] [--branch BRANCH] [--worktree WORKTREE_PATH]"
 ---
 <!-- SPDX-FileCopyrightText: Copyright (c) RapierCraft Studios -->
 <!-- SPDX-License-Identifier: AGPL-3.0-or-later -->
@@ -12,7 +12,7 @@ argument-hint: [issue number] [--repo GH_REPO] [--gh-flag GH_FLAG] [--pr PR_NUMB
 **Invoked by**: `work-on.md` Phase 6–7, after `review.md` returns `REVIEW_RESULT: status: COMPLETE`.
 **Output**: Update project board, close issue, update parent tracker, post trajectory log. Return final summary.
 
-**Agent model policy**: `model: "haiku"`, `effort: low` (mechanical tier — label transitions, annotation posting, board updates). Fallback: `model: "sonnet"` if rate-limited. Feature gate: pass `effort` only on Claude Code >= 2.1.154.
+**Agent model policy**: `effort: low` (mechanical tier — label transitions, annotation posting, board updates; this file is mechanical end-to-end, so a low effort level is safe here). Fallback: `model: "sonnet"` if rate-limited. Feature gate: pass `effort` only on Claude Code >= 2.1.154. **Note**: this file is dispatched via `Skill("work-on:close", ...)`, which does not support a `model` override — see `work-on.md` section "Model and Effort Tiering — What Actually Applies" for why a `model: "haiku"` claim here would not take effect. <!-- Corrected: forge#1827 -->
 **NEVER use plan mode (EnterPlanMode).**
 
 <!-- FORGE:SPEC_LOADED — work-on/close.md loaded and active. Agent is bound by this spec. -->
@@ -59,6 +59,77 @@ Extract from agent comments:
 
 ---
 
+## Phase C0.5: Close-Scope Invariant Assertions (MANDATORY)
+
+Run before any close actions. Evaluates `close`-scope invariants declared in
+`forge-invariants.yaml` via `bin/engine/invariants.mjs`. A failed assertion
+logs the violated proposition by name and flags the anomaly in the trajectory
+log — it does NOT abort the close phase (advisory enforcement: flag, then continue).
+
+**Skip if**: `forge-invariants.yaml` is absent or `bin/engine/invariants.mjs`
+is unavailable (e.g. fresh install before this file ships). Fail-open.
+
+```bash
+# Read local run-log for this issue (absolute path matches engine run-log dir)
+RUN_LOG_DIR="${HOME}/.forge/runs"
+RUN_LOG_FILE="${RUN_LOG_DIR}/{NUMBER}.jsonl"
+
+INVARIANT_ANOMALIES=""
+
+if [ -f "${RUN_LOG_FILE}" ] && [ -f "$(dirname "$(which node)")/node" ] 2>/dev/null; then
+  # Check close-scope invariants via the evaluator
+  INVARIANT_RESULT=$(node -e "
+    import(new URL('file://$(pwd)/bin/engine/invariants.mjs'))
+      .then(m => {
+        const decls = m.loadInvariants('$(pwd)/forge-invariants.yaml');
+        const fs = require('fs');
+        let events = [];
+        try {
+          const lines = fs.readFileSync('${RUN_LOG_FILE}', 'utf-8').split('\n').filter(Boolean);
+          events = lines.flatMap(l => { try { return [JSON.parse(l)]; } catch { return []; } });
+        } catch {}
+        const results = m.assertCloseInvariants(decls, events);
+        const failed = results.filter(r => !r.ok);
+        if (failed.length) {
+          failed.forEach(r => process.stderr.write(m.formatViolation(r) + '\n'));
+          process.exit(1);
+        }
+      })
+      .catch(() => process.exit(0));  // fail-open on any error
+  " 2>&1) || INVARIANT_ANOMALIES="${INVARIANT_RESULT}"
+
+  if [ -n "$INVARIANT_ANOMALIES" ]; then
+    echo "CLOSE-SCOPE INVARIANT ANOMALY (flagging — close continues):"
+    echo "$INVARIANT_ANOMALIES"
+    # The anomaly will be recorded in the trajectory log Anomalies field.
+    # It does NOT block the close phase.
+  fi
+fi
+
+# Also check: issue must be in CLOSED state after close attempt.
+# This check runs AFTER Phase C2 (ensure issue is closed). Set a sentinel
+# here to be evaluated post-C2:
+CLOSE_INVARIANT_ISSUE_CHECK=true
+```
+
+**Post-C2 check** (evaluate after Phase C2 runs the `gh issue close` command):
+
+```bash
+if [ "${CLOSE_INVARIANT_ISSUE_CHECK:-false}" = "true" ]; then
+  ISSUE_STATE=$(gh issue view {NUMBER} {GH_FLAG} --json state --jq '.state' 2>/dev/null || echo "UNKNOWN")
+  if [ "$ISSUE_STATE" != "CLOSED" ]; then
+    INVARIANT_ANOMALIES="${INVARIANT_ANOMALIES:+$INVARIANT_ANOMALIES; }issue_closed_at_terminal: issue state is ${ISSUE_STATE} (not CLOSED) after close attempt"
+    echo "INVARIANT ANOMALY: issue_closed_at_terminal — issue is ${ISSUE_STATE}, not CLOSED"
+    # Flag but continue — trajectory Anomalies field will surface this.
+  fi
+fi
+```
+
+The `INVARIANT_ANOMALIES` variable is read in Phase C4.5 (trajectory post) and written to the **Anomalies** field.
+
+---
+
+
 ## Phase C1: Final Issue Body Update
 
 **Multi-phase guard**: Before checking off items, detect whether the issue has multiple phases. Only check off items belonging to the current completed phase — not all remaining items across future phases.
@@ -103,6 +174,194 @@ fi
 ```
 
 The `REMAINING_AFTER` variable is passed to Phase C2 to decide whether to close.
+
+---
+
+## Phase C1.7: Module Dossier Append (MANDATORY when PR exists) <!-- Added: forge#1733 -->
+
+**Goal**: After each merge that touches a module covered by `devdocs/modules/`, append a dated entry so future agents working on that module receive current institutional knowledge through the binding devdocs channel.
+
+**This phase is non-blocking** — if the dossier write fails, log the reason and continue to Phase C1.5. Never stall close for dossier maintenance.
+
+**Skip if**: `{PR_NUMBER}` is empty (investigation-only tasks) OR `{REPO_PATH}` is unset OR `devdocs/index.yaml` does not contain a `modules:` section OR no PR files match any module glob.
+
+### Step 1: Resolve affected files from FORGE:BUILDER comment
+
+```bash
+# Read FORGE:BUILDER comment to get the list of changed files
+BUILDER_COMMENT=$(gh api repos/{GH_REPO}/issues/{NUMBER}/comments \
+  --jq '[.[] | select(.body | contains("FORGE:BUILDER"))] | last | .body // ""' 2>/dev/null || echo "")
+
+# Extract file paths from the Changes section (lines starting with `- \`filepath\``)
+CHANGED_FILES_RAW=$(echo "$BUILDER_COMMENT" \
+  | sed -n '/^### Changes/,/^###/p' \
+  | grep -oE '`[^`]+`' \
+  | tr -d '`' \
+  | grep -E '\.' \
+  | head -20)
+
+# Fallback: try the FORGE:INVESTIGATOR affected files list
+if [ -z "$CHANGED_FILES_RAW" ]; then
+  CHANGED_FILES_RAW=$(gh api repos/{GH_REPO}/issues/{NUMBER}/comments \
+    --jq '[.[] | select(.body | contains("FORGE:INVESTIGATOR"))] | last | .body // ""' 2>/dev/null \
+    | sed -n '/### Affected Files/,/###/p' \
+    | grep -oE '`[^`]+`' \
+    | tr -d '`' \
+    | grep -E '\.' \
+    | head -20)
+fi
+
+if [ -z "$CHANGED_FILES_RAW" ]; then
+  echo "Phase C1.7: No changed files found from FORGE:BUILDER or FORGE:INVESTIGATOR — skipping dossier append"
+  # → continue to Phase C1.5
+fi
+```
+
+### Step 2: Match against module globs and append entries
+
+```bash
+CONFIG_FILE="${FORGE_CONFIG:-forge.yaml}"
+DEVDOCS_REL=$(yq '.devdocs.path // "devdocs"' "$CONFIG_FILE" 2>/dev/null || echo "devdocs")
+DEVDOCS_PATH="${REPO_PATH:-{REPO_PATH}}/${DEVDOCS_REL}"
+INDEX_PATH="${DEVDOCS_PATH}/index.yaml"
+
+if [ ! -f "$INDEX_PATH" ]; then
+  echo "Phase C1.7: ${INDEX_PATH} not found — skipping dossier append"
+  # → continue to Phase C1.5
+fi
+
+# Extract modules entries: "name|glob|path"
+MODULE_ENTRIES=$(yq '.modules[]? | .name + "|" + .glob + "|" + .path' "$INDEX_PATH" 2>/dev/null || echo "")
+
+if [ -z "$MODULE_ENTRIES" ]; then
+  echo "Phase C1.7: No modules[] section in index.yaml — skipping dossier append"
+  # → continue to Phase C1.5
+fi
+
+DOSSIER_TIMESTAMP=$(date -u +"%Y-%m-%d")
+DOSSIER_UPDATED_MODULES=""
+
+# Iterate module entries; for each: check if any changed file matches the glob
+while IFS='|' read -r MOD_NAME MOD_GLOB MOD_PATH; do
+  [ -z "$MOD_GLOB" ] || [ -z "$MOD_PATH" ] && continue
+  DOSSIER_ABS="${DEVDOCS_PATH}/${MOD_PATH}"
+
+  MATCHED=0
+  # Iterate changed files using while read — not bare for-in (IFS word-split guard per c39758d)
+  while IFS= read -r af; do
+    [ -z "$af" ] && continue
+    AF_BASENAME=$(basename "$af")
+    case "$AF_BASENAME" in
+      $MOD_GLOB) MATCHED=1; break ;;
+    esac
+    case "$af" in
+      $MOD_GLOB) MATCHED=1; break ;;
+    esac
+  done <<< "$CHANGED_FILES_RAW"
+
+  if [ "$MATCHED" -eq 0 ]; then
+    continue
+  fi
+
+  echo "Phase C1.7: Module '${MOD_NAME}' matched (glob '${MOD_GLOB}') — appending entry to ${MOD_PATH}"
+
+  # Build entry text
+  # One-line summary from the PR title + issue number
+  PR_TITLE=$(gh pr view {PR_NUMBER} {GH_FLAG} --json title --jq '.title' 2>/dev/null || echo "untitled")
+  DOSSIER_ENTRY="## Entry ${DOSSIER_TIMESTAMP} — ${PR_TITLE} (#{NUMBER})
+
+PR #{PR_NUMBER} touched \`${MOD_NAME}\`. See FORGE:BUILDER comment on issue #{NUMBER} for full change list.
+Key gotcha recorded: (update this entry by editing \`${MOD_PATH}\` in a follow-up PR if the change revealed a new failure mode).
+Cite: #${NUMBER} / PR #{PR_NUMBER}."
+
+  # Ensure dossier file exists (create skeleton if missing — allows operator to create
+  # a new module entry in index.yaml before the dossier file is seeded)
+  if [ ! -f "$DOSSIER_ABS" ]; then
+    mkdir -p "$(dirname "$DOSSIER_ABS")"
+    cat > "$DOSSIER_ABS" <<DOSSIER_INIT_EOF
+---
+module: ${MOD_NAME}
+glob: "${MOD_GLOB}"
+authority: required
+token_cost: 200
+last_compacted: "${DOSSIER_TIMESTAMP}"
+---
+
+# Module Dossier: ${MOD_NAME}
+
+Rolling per-module knowledge log. Each entry is 3–5 lines with a citation.
+Hard cap: 150 lines. Entries are appended by close.md Phase C1.7 after each
+PR that touches this module. When the file exceeds 150 lines, oldest entries
+are compacted into the Summary block (LLM compaction, in-run).
+
+## Summary
+
+_No compacted history yet. Dossier was auto-created on ${DOSSIER_TIMESTAMP} by close.md Phase C1.7._
+DOSSIER_INIT_EOF
+    echo "Phase C1.7: Created new dossier skeleton at ${DOSSIER_ABS}"
+  fi
+
+  # Append entry (avoid subshell — use file redirect directly)
+  printf '\n%s\n' "$DOSSIER_ENTRY" >> "$DOSSIER_ABS"
+
+  # Compact if over 150 lines
+  DOSSIER_LINE_COUNT=$(wc -l < "$DOSSIER_ABS" 2>/dev/null || echo 0)
+  if [ "$DOSSIER_LINE_COUNT" -gt 150 ]; then
+    echo "Phase C1.7: Dossier ${MOD_PATH} has ${DOSSIER_LINE_COUNT} lines (>150) — compacting oldest entries"
+    # LLM compaction: read the dossier, summarize oldest Entry blocks into the ## Summary
+    # section, keeping the most recent 3 entries intact.
+    # Implementation note: this is prose-instruction compaction (LLM reads the file and
+    # rewrites it). The compacted file must preserve the frontmatter and ## Summary block;
+    # it may replace old ## Entry blocks with a single "## Archived Summary (compacted)"
+    # block. After compaction, update frontmatter last_compacted to today's date.
+    # The compacted file MUST be ≤ 150 lines. If compaction fails (e.g. LLM context
+    # overflow), log a warning and leave the file as-is — never delete entries silently.
+    echo "COMPACT INSTRUCTION: Read ${DOSSIER_ABS}. Keep the frontmatter (lines between ---), keep the ## Summary section, keep the 3 most recent ## Entry blocks, and replace all older ## Entry blocks with a single '## Archived Summary (compacted — ${DOSSIER_TIMESTAMP})' block containing a 5–8 line distillation of the key failure modes, gotchas, and citations from the archived entries. Write the result back to ${DOSSIER_ABS}. The output MUST be ≤ 150 lines. Update frontmatter last_compacted to ${DOSSIER_TIMESTAMP}."
+  fi
+
+  DOSSIER_UPDATED_MODULES="${DOSSIER_UPDATED_MODULES} ${MOD_NAME}"
+
+done <<< "$MODULE_ENTRIES"
+```
+
+### Step 3: Commit dossier changes and post annotation
+
+```bash
+if [ -n "$DOSSIER_UPDATED_MODULES" ]; then
+  # Commit the updated dossier files
+  cd "{REPO_PATH}"
+  CHANGED_DOSSIER_FILES=$(echo "$DOSSIER_UPDATED_MODULES" | tr ' ' '\n' | while IFS= read -r mod; do
+    yq ".modules[]? | select(.name == \"${mod}\") | \"${DEVDOCS_REL}/\" + .path" "$INDEX_PATH" 2>/dev/null
+  done | grep -v '^$')
+
+  if [ -n "$CHANGED_DOSSIER_FILES" ]; then
+    # CHANGED_DOSSIER_FILES is newline-separated — iterate so paths containing
+    # spaces are staged individually rather than word-split by the shell.
+    while IFS= read -r dossier_file; do
+      [ -n "$dossier_file" ] || continue
+      git -C "{REPO_PATH}" add "$dossier_file" 2>/dev/null || true
+    done <<< "$CHANGED_DOSSIER_FILES"
+    # Only commit if there are staged changes (new or modified dossier files)
+    if ! git -C "{REPO_PATH}" diff --cached --quiet 2>/dev/null; then
+      git -C "{REPO_PATH}" commit -s -m "docs(dossier): append entry for PR #{PR_NUMBER} (#${NUMBER})" 2>/dev/null || true
+      echo "Phase C1.7: Dossier commit created for modules:${DOSSIER_UPDATED_MODULES}"
+    else
+      echo "Phase C1.7: No staged dossier changes — skipping commit"
+    fi
+  fi
+
+  # Post annotation on the issue
+  gh issue comment {NUMBER} {GH_FLAG} --body "<!-- FORGE:DOSSIER_UPDATED -->
+Module dossier(s) updated:${DOSSIER_UPDATED_MODULES}
+
+Entries appended to \`devdocs/modules/\` after PR #{PR_NUMBER} merged. Future agents working
+on these modules will receive the updated knowledge through the devdocs channel (context.md Phase C-1).
+
+<!-- FORGE:DOSSIER_UPDATED:COMPLETE -->" 2>/dev/null || true
+else
+  echo "Phase C1.7: No module dossiers matched changed files — skipping"
+fi
+```
 
 ---
 
@@ -217,9 +476,10 @@ gh issue edit {NUMBER} {GH_FLAG} \
 
 **Skip if**: Issue body does NOT contain a parent issue reference (e.g. `Part of #NNN`) or the issue has no parent in its milestone tracker.
 
-Detect parent reference:
+Detect parent reference. Markdown emphasis markers (`**bold**`, `__bold__`, `*italic*`) are stripped before matching, since sub-issue bodies commonly render the label as `**Parent**: #NNN` and the bare label alternation below would otherwise fail to match past the emphasis characters:
 ```bash
 PARENT_REF=$(gh issue view {NUMBER} {GH_FLAG} --json body --jq '.body' \
+  | sed -E 's/[*_]+//g' \
   | grep -oP '(?i)(part of|spawned from|sub-issue of|parent issue[:]?|parent[:])\s*#\K\d+' \
   | head -1)
 ```
@@ -404,7 +664,58 @@ CARD_JSON=$(jq -nc \
 
 ## Phase C5: Trajectory Log (MANDATORY)
 
-Post the `<!-- FORGE:TRAJECTORY -->` comment as the final pipeline record:
+**CODEC PATH (forge#1727)**: Post the `<!-- FORGE:TRAJECTORY -->` comment via the protocol codec — do NOT hand-roll the opening tag. Use `forge-annotation.sh write TRAJECTORY --field ...` or `node packages/protocol/src/cli.js emit TRAJECTORY` to produce the opening tag. The codec handles any field escaping automatically.
+
+```bash
+# Codec produces the opening <!-- FORGE:TRAJECTORY --> tag
+TRAJECTORY_HEADER=$(node packages/protocol/src/cli.js emit TRAJECTORY)
+# $TRAJECTORY_HEADER = "<!-- FORGE:TRAJECTORY -->"
+# Append the Markdown body sections, then post via gh issue comment.
+```
+
+Post the `<!-- FORGE:TRAJECTORY -->` comment as the final pipeline record.
+
+**Prior delta computation** — read cost-prior for this issue's task_type × module before posting (forge#1743):
+
+```bash
+# Compute actual vs prior cost delta for self-correction of cost priors
+COST_PRIORS_PATH="${HOME}/.forge/index/cost-priors.json"
+ACTUAL_TOTAL_USD=""
+PRIOR_EST_USD=""
+COST_DELTA_NOTE=""
+
+# Read actual spend from FORGE:BUILDER / FORGE:TRAJECTORY best-effort telemetry
+# (same extraction used in work-on.md Phase 7C DECISION_RECORD cost block)
+ACTUAL_TOTAL_USD=$(gh api repos/{GH_REPO}/issues/{NUMBER}/comments \
+  --jq '[.[] | select(.body | contains("FORGE:BUILDER")) | .body] | last // ""' 2>/dev/null \
+  | grep -oP '(?<=cost_usd: )\S+' | head -1 || echo "")
+
+if [ -n "$ACTUAL_TOTAL_USD" ] && [ -f "$COST_PRIORS_PATH" ]; then
+  # Derive task_type:module key (same logic as Step 3E.5)
+  TASK_TYPE=$(gh api repos/{GH_REPO}/issues/{NUMBER}/comments \
+    --jq '[.[] | select(.body | contains("FORGE:INVESTIGATOR")) | .body] | last // ""' 2>/dev/null \
+    | grep -oP '(?<=\*\*Task Type\*\*: )\S+' | head -1 | tr '[:upper:]' '[:lower:]' | tr ' ' '-' || echo 'unknown')
+  PRIMARY_FILE=$(gh api repos/{GH_REPO}/issues/{NUMBER}/comments \
+    --jq '[.[] | select(.body | contains("FORGE:INVESTIGATOR")) | .body] | last // ""' 2>/dev/null \
+    | grep -oP '`[^`]+\.(py|mjs|ts|md|sh|yaml|yml)`' | tr -d '`' | head -1 || echo '')
+  MODULE=$(basename "${PRIMARY_FILE:-_unknown}" | sed 's/\.[^.]*$//' | tr '[:upper:]' '[:lower:]')
+  [ -z "$MODULE" ] && MODULE="_unknown"
+  PRIOR_KEY="${TASK_TYPE}:${MODULE}"
+
+  PRIOR_EST_USD=$(jq -r --arg k "$PRIOR_KEY" '.priors[$k].mean // empty' "$COST_PRIORS_PATH" 2>/dev/null || echo '')
+
+  if [ -n "$PRIOR_EST_USD" ]; then
+    DELTA=$(echo "scale=4; $ACTUAL_TOTAL_USD - $PRIOR_EST_USD" | bc 2>/dev/null || echo "?")
+    COST_DELTA_NOTE="actual=\$${ACTUAL_TOTAL_USD} prior=\$${PRIOR_EST_USD} delta=${DELTA} key=${PRIOR_KEY}"
+  else
+    COST_DELTA_NOTE="actual=\$${ACTUAL_TOTAL_USD} prior=absent (no prior for key ${PRIOR_KEY})"
+  fi
+elif [ -n "$ACTUAL_TOTAL_USD" ]; then
+  COST_DELTA_NOTE="actual=\$${ACTUAL_TOTAL_USD} prior=index-absent"
+else
+  COST_DELTA_NOTE="no-telemetry"
+fi
+```
 
 ```bash
 gh issue comment {NUMBER} {GH_FLAG} --body "<!-- FORGE:TRAJECTORY -->
@@ -426,25 +737,68 @@ gh issue comment {NUMBER} {GH_FLAG} --body "<!-- FORGE:TRAJECTORY -->
 - Decomposition skipped: {DECOMPOSE_REASON}
 - PR merged to: \`{PR_BASE}\` (feature lane, milestone branch)
 
+**Cost (economic scheduling)**: ${COST_DELTA_NOTE}
+
 **Anomalies**: None
 
 **Pipeline completed**: {TIMESTAMP}
 
-<!-- FORGE:CARD ${CARD_JSON} -->"
+$(node packages/protocol/src/cli.js emit CARD --b64 \
+  --field issue={NUMBER} \
+  --field status={CARD_STATUS} \
+  --field pipeline="${PIPELINE_LINE}" \
+  --field pr={PR_NUMBER} \
+  --field pr_target="${PR_TARGET}" \
+  --field commits="${COMMITS}" \
+  --field additions="${ADDITIONS}" \
+  --field deletions="${DELETIONS}" \
+  --field review="${REVIEW_SUMMARY}" \
+  --field elapsed="${ELAPSED_SECS:-0}")"
 ```
 
-The `<!-- FORGE:CARD {...} -->` block carries the machine-readable summary computed in
-Phase C4.5c. It is wrapped in an HTML comment so it stays hidden in GitHub's rendered view
-(keeping the trajectory comment clean) while remaining greppable in the raw body for platform
-consumption — `/orchestrate` reads it to build per-issue cards. This block is **additive**:
-all existing `FORGE:TRAJECTORY` consumers select via `contains("FORGE:TRAJECTORY")` and parse
-the markdown table, so the embedded JSON does not affect them.
+The `<!-- FORGE:CARD: v1 sha:... b64:... -->` line carries the machine-readable summary computed in
+Phase C4.5c, encoded as Base64url (design decision 2026-07-08: encoding beats escaping — the
+Base64url alphabet cannot contain HTML comment delimiters by construction). It is wrapped in
+the inline-value annotation form `<!-- FORGE:CARD: ... -->` so parse() extracts the encoded
+payload. Platform consumers (e.g., `/orchestrate`) decode via `node packages/protocol/src/cli.js
+parse --type CARD --field status`. This block is **additive**: all existing `FORGE:TRAJECTORY`
+consumers select via `contains("FORGE:TRAJECTORY")` and parse the markdown table, so the
+embedded CARD line does not affect them.
+
+**CODEC PATH (forge#1727)**: The `$(node packages/protocol/src/cli.js emit CARD --b64 ...)` call
+above replaces the previous `<!-- FORGE:CARD ${CARD_JSON} -->` inline-JSON form. The Base64url
+form is safe against all HTML comment injection vectors and includes a sha8 integrity prefix for
+truncation detection. Consumers that parsed the old inline-JSON form must migrate to the codec
+parse path: `echo '...' | node packages/protocol/src/cli.js parse --type CARD --field <key>`.
 
 Where:
 - `{PARENT_STATUS}` = `⏭ Skipped` (if no parent) or `✅ Complete` (if parent updated)
 - `{PARENT_NOTES}` = `No parent tracker` or `Checked off in #{PARENT_REF}`
 - `{CLEANUP_STATUS}` = `✅ Removed` (worktree removed + branch deleted) or `⏭ Skipped` (no path provided or path not found)
 - `{TIMESTAMP}` = current date/time in ISO format
+
+---
+
+## Phase C5.1: Knowledge Index + Cost Prior Update (forge#1743) <!-- Added: forge#1743 -->
+
+**Goal**: Re-index this issue's knowledge cards and regenerate cost-priors.json so that economic scheduling (orchestrate Step 3E.5) has up-to-date data for future runs. The actual-vs-prior delta recorded in the TRAJECTORY above is the write side of the self-correction loop — this step performs the read/recompute.
+
+**This phase is non-blocking** — if the indexer fails, log the reason and continue to Phase C5.2. Never stall close for the cost-prior update.
+
+**Skip if**: Terminal state is `INVALID` (no useful cost data from invalid issues).
+
+```bash
+# Re-index this issue and regenerate cost priors — non-blocking
+INDEXER_PATH=$(dirname "$(realpath "$0" 2>/dev/null || echo '.')")/../../scripts/build-knowledge-index.mjs
+if node --version >/dev/null 2>&1 && [ -f "$INDEXER_PATH" ]; then
+  echo "[cost-prior] Re-indexing issue #${NUMBER} and regenerating cost priors..."
+  node "$INDEXER_PATH" --issue {NUMBER} --no-mirror 2>&1 | tail -5 \
+    && echo "[cost-prior] Cost priors updated" \
+    || echo "WARNING: Cost prior update failed — continuing (non-blocking)"
+else
+  echo "[cost-prior] Indexer not available — skipping cost prior update (non-blocking)"
+fi
+```
 
 ---
 
@@ -566,6 +920,266 @@ Future \`investigate\` runs on \`{GH_REPO}\` will retrieve this entry as a prior
 
 <!-- FORGE:MEMORY_INDEXED:COMPLETE -->"
   echo "[MEMORY] Indexed issue #{NUMBER} into memory at: ${MEMORY_INDEX_URL}"
+fi
+```
+
+---
+
+## Phase C5.3: Knowledge Ledger Index <!-- Added: forge#1732 -->
+
+**Goal**: Index the just-closed issue into the Forge Ledger so future context phases can retrieve
+its knowledge cards by file path or symbol without making live GitHub API calls.
+
+**This phase is non-blocking** — if the indexer fails, log the reason and continue to Phase C5.5.
+Never stall close for ledger indexing.
+
+**Skip if**: Terminal state is `INVALID` (no confirmed findings to index) OR a `<!-- FORGE:LEDGER_INDEXED -->` comment already exists on the issue (idempotency guard).
+
+**Requires**: `scripts/build-knowledge-index.mjs` present in the repository root. If absent, skip
+with a warning — the feature may not be installed on this version.
+
+### Step 1: Idempotency check
+
+```bash
+LEDGER_INDEXED=$(gh api repos/{GH_REPO}/issues/{NUMBER}/comments \
+  --jq '[.[] | select(.body | contains("FORGE:LEDGER_INDEXED"))] | length > 0' 2>/dev/null || echo "false")
+```
+
+**Skip to Phase C5.5 if `$LEDGER_INDEXED == "true"`**.
+
+### Step 2: Run incremental indexer
+
+Resolve the indexer script path relative to the repository root:
+
+```bash
+INDEXER_PATH="${REPO_PATH:-$(git rev-parse --show-toplevel 2>/dev/null)}/scripts/build-knowledge-index.mjs"
+
+if [ ! -f "$INDEXER_PATH" ]; then
+  echo "[LEDGER] scripts/build-knowledge-index.mjs not found — skipping Phase C5.3"
+  echo "[LEDGER] Install: update ForgeDock to a version that ships this file"
+else
+  # Run incremental indexer for this issue only — ~2 API calls
+  LEDGER_EXIT=0
+  LEDGER_OUTPUT=$(node "$INDEXER_PATH" \
+    --issue {NUMBER} \
+    --repo {GH_REPO} \
+    --no-mirror \
+    2>&1) || LEDGER_EXIT=$?
+
+  if [ $LEDGER_EXIT -eq 0 ]; then
+    echo "[LEDGER] Issue #{NUMBER} indexed into Forge Ledger"
+
+    # Mirror update: run separately after single-issue index so mirror has up-to-date postings
+    node "$INDEXER_PATH" --issue {NUMBER} --repo {GH_REPO} \
+      2>/dev/null || true  # Non-blocking: mirror failure does not affect local index
+
+    # Post audit annotation (idempotency guard for future close runs)
+    gh issue comment {NUMBER} {GH_FLAG} --body "<!-- FORGE:LEDGER_INDEXED -->
+Issue #{NUMBER} has been indexed into the Forge Ledger.
+
+Knowledge cards extracted from FORGE:INVESTIGATOR and FORGE:TRAJECTORY annotations are now
+queryable via \`forge recall\` (exact file/symbol lookup or free-text BM25 search).
+
+\`\`\`
+forge recall --file {PRIMARY_AFFECTED_FILE} --json
+\`\`\`
+
+<!-- FORGE:LEDGER_INDEXED:COMPLETE -->" 2>/dev/null || true
+
+  else
+    echo "[LEDGER] WARNING: Indexer exited with code ${LEDGER_EXIT} — continuing"
+    echo "[LEDGER] Output: ${LEDGER_OUTPUT}"
+  fi
+fi
+```
+
+### Watermark semantics
+
+The indexer's watermark is `max(issue.updated_at)` across all indexed issues. Indexing a
+single issue via `--issue` advances the watermark only if this issue's `updated_at` is newer
+than the stored watermark — ensuring the next full incremental run starts from the right
+position and does not re-scan already-indexed history.
+
+---
+
+## Phase C5.4: Auto-ADR Extraction from TRAJECTORY Decisions <!-- Added: forge#1737 -->
+
+**Goal**: Promote tradeoff-shaped Decisions bullets from the FORGE:TRAJECTORY comment into
+human-readable, git-tracked ADR markdown files at `devdocs/decisions/NNN-{slug}.md`. Architect
+plans on future runs will load matching ADRs as constraints before writing any code.
+
+**This phase is non-blocking** — if ADR extraction, file write, or commit fails at any step,
+log the reason and continue to Phase C5.5. Never stall close for ADR generation.
+
+**Skip if**: Terminal state is `INVALID` (no useful decisions to record) OR a
+`<!-- FORGE:ADR_EXTRACTED -->` comment already exists on the issue (idempotency guard) OR
+`devdocs/decisions/` directory does not exist in the repository root (feature not installed).
+
+### What is a "tradeoff-shaped" decision?
+
+A Decisions bullet is extractable if it contains BOTH:
+1. A **choice indicator**: words like `chose`, `use`, `prefer`, `process substitution`, `over`,
+   `instead`, `rather than`, `not X`
+2. A **rationale connector**: `because`, `since`, `so`, `to avoid`, `prevents`, `due to`
+
+Generic bullets like `- Decomposition skipped: single-concern change` do NOT match and are ignored.
+
+### Step 1: Idempotency check
+
+```bash
+ADR_EXTRACTED=$(gh api repos/{GH_REPO}/issues/{NUMBER}/comments \
+  --jq '[.[] | select(.body | contains("FORGE:ADR_EXTRACTED"))] | length > 0' 2>/dev/null || echo "false")
+```
+
+**Skip to Phase C5.5 if `$ADR_EXTRACTED == "true"`**.
+
+### Step 2: Extract TRAJECTORY Decisions
+
+```bash
+# Read the TRAJECTORY comment posted in Phase C5
+TRAJECTORY_BODY=$(gh api repos/{GH_REPO}/issues/{NUMBER}/comments \
+  --jq '[.[] | select(.body | contains("FORGE:TRAJECTORY"))] | last | .body // ""' 2>/dev/null || echo '')
+
+# Extract the Decisions section (lines between **Decisions**: and **Anomalies**:)
+DECISIONS_RAW=$(echo "$TRAJECTORY_BODY" \
+  | awk '/^\*\*Decisions\*\*:/{found=1; next} /^\*\*Anomalies\*\*:/{found=0} found{print}' \
+  | grep -v '^\s*$' \
+  | head -20)  # Cap at 20 bullets to prevent runaway parsing
+
+if [ -z "$DECISIONS_RAW" ] || echo "$DECISIONS_RAW" | grep -qi "^- None$\|^None$"; then
+  echo "[ADR] No Decisions section found in TRAJECTORY — skipping ADR extraction"
+  ADR_FILES_WRITTEN=0
+fi
+```
+
+### Step 3: Parse and filter for tradeoff shape
+
+```bash
+ADR_FILES_WRITTEN=0
+DECISIONS_DIR="${REPO_PATH:-$(git rev-parse --show-toplevel 2>/dev/null)}/devdocs/decisions"
+
+if [ -z "$DECISIONS_RAW" ] || ! [ -d "$DECISIONS_DIR" ]; then
+  echo "[ADR] Skipping: no decisions or devdocs/decisions/ absent"
+else
+  # Get commit SHA for anchor citation
+  COMMIT_SHA=$(git -C "${REPO_PATH:-$(git rev-parse --show-toplevel 2>/dev/null)}" \
+    rev-parse HEAD 2>/dev/null | head -c 12 || echo "unknown")
+
+  while IFS= read -r bullet; do
+    # Strip leading "- " or "* "
+    text=$(echo "$bullet" | sed 's/^[-*]\s*//')
+    [ -z "$text" ] && continue
+
+    # Tradeoff shape filter: must have a choice indicator + rationale connector
+    CHOICE_MATCH=$(echo "$text" | grep -iE 'chose|use |prefer|instead|rather than|over |not [a-z]|process substitution|branched from|avoided' || true)
+    RATIONALE_MATCH=$(echo "$text" | grep -iE 'because|since[[:space:]]|so[[:space:]]|to avoid|prevents|due to' || true)
+
+    if [ -z "$CHOICE_MATCH" ] || [ -z "$RATIONALE_MATCH" ]; then
+      echo "[ADR] Skipped (not a tradeoff): $text"
+      continue
+    fi
+
+    # Extract anchor: first backtick-quoted path-like string in the decision text
+    ANCHOR_PATH=$(echo "$text" | grep -oE '`[a-zA-Z][^`]*/[^`]+`' | head -1 | tr -d '`' || true)
+
+    # Build slug from first 6 words of decision (lowercase, hyphenated)
+    SLUG=$(echo "$text" | tr '[:upper:]' '[:lower:]' | \
+      sed 's/[^a-z0-9 ]/ /g' | tr -s ' ' '-' | \
+      cut -c1-40 | sed 's/-$//')
+    ADR_FILENAME="${NUMBER}-${SLUG}.md"
+    ADR_PATH="$DECISIONS_DIR/$ADR_FILENAME"
+
+    # Idempotency: skip if file already exists
+    if [ -f "$ADR_PATH" ]; then
+      echo "[ADR] Already exists — skipping: $ADR_FILENAME"
+      ADR_FILES_WRITTEN=$((ADR_FILES_WRITTEN + 1))
+      continue
+    fi
+
+    # Write ADR file
+    PR_REF="${PR_NUMBER:-unknown}"
+    cat > "$ADR_PATH" <<ADR_EOF
+---
+issue: {NUMBER}
+pr: ${PR_REF}
+commit: ${COMMIT_SHA}
+status: fresh
+anchor: ${ANCHOR_PATH:-unknown}
+created: $(date -u +%Y-%m-%d)
+---
+
+# ADR — ${text}
+
+## Decision
+
+${text}
+
+## Context
+
+Auto-extracted from FORGE:TRAJECTORY Decisions section on issue #{NUMBER}.
+
+**Citations**:
+- Issue: https://github.com/{GH_REPO}/issues/{NUMBER}
+- PR: https://github.com/{GH_REPO}/pull/${PR_REF}
+- Commit: ${COMMIT_SHA}
+- Anchor: \`${ANCHOR_PATH:-no file anchor found}\`
+
+## Status
+
+\`fresh\` — anchor is active. Architect plans on future runs will inject this ADR as a constraint
+when the anchor path overlaps the contract files.
+
+Set \`status: needs-review\` manually (or the staleness pass in \`build-knowledge-index.mjs\` will
+flip it automatically) when the anchored code region no longer exists.
+ADR_EOF
+
+    echo "[ADR] Written: $ADR_FILENAME"
+    ADR_FILES_WRITTEN=$((ADR_FILES_WRITTEN + 1))
+  done <<< "$DECISIONS_RAW"
+fi
+```
+
+### Step 4: Commit and push ADR files (non-blocking)
+
+```bash
+if [ "$ADR_FILES_WRITTEN" -gt 0 ] && [ -n "{WORKTREE_PATH}" ] && [ -d "{WORKTREE_PATH}" ]; then
+  # Commit ADR files in the worktree so they ride the existing PR
+  (
+    cd "{WORKTREE_PATH}"
+    # Stage only the new/updated ADR files (not the whole tree)
+    git add devdocs/decisions/*.md 2>/dev/null || true
+    # Check if there's anything to commit
+    if ! git diff --cached --quiet 2>/dev/null; then
+      git commit -s -m "docs(decisions): auto-ADRs from TRAJECTORY decisions (#{NUMBER})" \
+        --no-verify 2>/dev/null && echo "[ADR] Committed ${ADR_FILES_WRITTEN} ADR file(s)" || \
+        echo "[ADR] WARNING: commit failed — ADR files on disk but not in git"
+    else
+      echo "[ADR] No staged changes — ADR files may already be committed"
+    fi
+  ) || echo "[ADR] WARNING: worktree operations failed — ADR files written but not committed"
+else
+  if [ "$ADR_FILES_WRITTEN" -gt 0 ]; then
+    echo "[ADR] No worktree available — ADR files written to repo root devdocs/decisions/ only"
+    echo "[ADR] Manually commit devdocs/decisions/*.md if needed"
+  fi
+fi
+```
+
+### Step 5: Post audit annotation
+
+```bash
+if [ "${ADR_FILES_WRITTEN:-0}" -gt 0 ]; then
+  gh issue comment {NUMBER} {GH_FLAG} --body "<!-- FORGE:ADR_EXTRACTED -->
+${ADR_FILES_WRITTEN} ADR file(s) auto-extracted from TRAJECTORY decisions and written to \`devdocs/decisions/\`.
+
+Future architect runs will load matching ADRs as constraints when anchor paths overlap contract files.
+
+ADRs are human-editable — update or remove them as the codebase evolves. The staleness pass in
+\`build-knowledge-index.mjs\` automatically flips \`status: needs-review\` when an anchor is dead.
+
+<!-- FORGE:ADR_EXTRACTED:COMPLETE -->" 2>/dev/null || true
+else
+  echo "[ADR] No tradeoff-shaped decisions found — no ADR files written"
 fi
 ```
 

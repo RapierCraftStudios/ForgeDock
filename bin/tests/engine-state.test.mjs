@@ -54,6 +54,29 @@ describe("state codec", () => {
     assert.deepEqual(got, poison);
   });
 
+  it("round-trips state containing <!-- in string values (HTML comment injection guard)", () => {
+    // A terminalReason or branch containing "<!--" must not open a new (nested-looking)
+    // HTML comment in GitHub's renderer, which would visually swallow subsequent content.
+    const poison = { ...idx, terminalReason: "before <!-- injected --> after", branch: "fix/<!---42" };
+    const body = "prefix\n\n" + serializeState(poison);
+    const rawPayload = body.match(/<!-- FORGE:STATE\n([\s\S]*?)\n-->/)?.[1] ?? "";
+    assert.ok(!rawPayload.includes("<!--"), "payload must not contain raw <!-- (would open a nested HTML comment)");
+    assert.ok(!rawPayload.includes("-->"), "payload must not contain raw --> either");
+    const got = parseState(body);
+    assert.deepEqual(got, poison);
+  });
+
+  it("round-trips state containing all three comment-delimiter forms combined", () => {
+    const poison = { ...idx, terminalReason: "<!-- open, close --> and alt close --!> combined", branch: "fix/<!---->-42" };
+    const body = "prefix\n\n" + serializeState(poison);
+    const rawPayload = body.match(/<!-- FORGE:STATE\n([\s\S]*?)\n-->/)?.[1] ?? "";
+    assert.ok(!rawPayload.includes("<!--"), "payload must not contain raw <!--");
+    assert.ok(!rawPayload.includes("-->"), "payload must not contain raw -->");
+    assert.ok(!rawPayload.includes("--!>"), "payload must not contain raw --!>");
+    const got = parseState(body);
+    assert.deepEqual(got, poison);
+  });
+
   it("upsertStateBlock handles $ replacement patterns in JSON values", () => {
     // Create an index with $ replacement patterns in serialized values
     const idx1 = { v: 1, run: "r1", issue: 42, lane: "staging",

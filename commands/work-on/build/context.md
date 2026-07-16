@@ -1,6 +1,6 @@
 ---
 description: Pre-implementation context gathering — surfaces historical findings, bug patterns, and related code paths before the builder writes any code
-argument-hint: [issue number] [affected_files...] [--functions function_names...]
+argument-hint: "[issue number] [affected_files...] [--functions function_names...]"
 ---
 <!-- SPDX-FileCopyrightText: Copyright (c) RapierCraft Studios -->
 <!-- SPDX-License-Identifier: AGPL-3.0-or-later -->
@@ -202,6 +202,50 @@ if [ -n "$DEVDOCS_PATH" ] && [ -f "$INDEX_PATH" ]; then
 
   DEVDOCS_APPLICABLE=$(printf "%s" "$DEVDOCS_APPLICABLE" | sort | cut -d'|' -f2-)
 
+  # --- Module dossier glob pass (index-first path only) ---
+  # When AFFECTED_FILES are known (passed via --repo-path or from the contract),
+  # match each file against every modules[].glob in index.yaml. Inject matched
+  # dossier files into DEVDOCS_APPLICABLE as authority:required entries.
+  #
+  # Skip if: AFFECTED_FILES is empty, modules section absent, or DEVDOCS_PATH unset.
+  #
+  # Glob matching uses bash `case` (fnmatch semantics): supports * ? and [class].
+  # Operators must use patterns that match the BASENAME of the affected file
+  # (e.g. "runner*" matches "bin/runner.mjs" via basename extraction below)
+  # OR a relative-path prefix pattern (e.g. "bin/runner*").
+  # Both forms are tried; first match wins for each module entry.
+  if [ -n "${AFFECTED_FILES:-}" ] && [ -n "$DEVDOCS_PATH" ] && [ -f "$INDEX_PATH" ]; then
+    # Extract modules[] entries from index.yaml
+    # Format per entry: "name|glob|path"
+    MODULE_ENTRIES=$(yq '.modules[]? | .name + "|" + .glob + "|" + .path' "$INDEX_PATH" 2>/dev/null || echo "")
+
+    if [ -n "$MODULE_ENTRIES" ]; then
+      IFS=' ' read -ra AFFECTED_FILES_GLOB_ARR <<< "${AFFECTED_FILES}"
+      while IFS='|' read -r MOD_NAME MOD_GLOB MOD_PATH; do
+        [ -z "$MOD_GLOB" ] || [ -z "$MOD_PATH" ] && continue
+        DOSSIER_ABS="${DEVDOCS_PATH}/${MOD_PATH}"
+        [ -f "$DOSSIER_ABS" ] || { echo "WARN: modules[${MOD_NAME}] references missing dossier '${MOD_PATH}' — skipping"; continue; }
+        MATCHED=0
+        for af in "${AFFECTED_FILES_GLOB_ARR[@]}"; do
+          [ -z "$af" ] && continue
+          AF_BASENAME=$(basename "$af")
+          # Try basename match first, then relative-path match
+          case "$AF_BASENAME" in
+            $MOD_GLOB) MATCHED=1; break ;;
+          esac
+          case "$af" in
+            $MOD_GLOB) MATCHED=1; break ;;
+          esac
+        done
+        if [ "$MATCHED" -eq 1 ]; then
+          echo "Module dossier matched: '${MOD_GLOB}' → ${MOD_PATH} (module: ${MOD_NAME})"
+          # Add as sort key "0" (higher priority than required=1) so dossier appears first
+          DEVDOCS_APPLICABLE="0|${DOSSIER_ABS}"$'\n'"${DEVDOCS_APPLICABLE}"
+        fi
+      done <<< "$MODULE_ENTRIES"
+    fi
+  fi
+
 elif [ -n "$DEVDOCS_PATH" ]; then
   # --- Fallback: O(N) enumerate (backward compatible — no index.yaml present) ---
   echo "No index.yaml found at ${INDEX_PATH} — falling back to full enumerate (backward compatible)"
@@ -265,6 +309,232 @@ done <<< "$DEVDOCS_APPLICABLE"
 ### Step 3: Store for output
 
 `DEVDOCS_CONTENT` is used in the `### Authoritative Devdocs` section of the FORGE:CONTEXT comment output. If empty (path absent or no applicable files), the section is replaced with a skip note.
+
+**Module dossier injection**: When the glob pass (Step 1, index-first path) matched one or more dossiers, they appear first in `DEVDOCS_APPLICABLE` (sort key `0`) and are rendered as `#### Module Dossier: {name}` sub-sections within `### Authoritative Devdocs`. The 200-line/file cap applies to each dossier individually — the same cap used for all other devdocs files. This ensures dossier injection is bounded by the existing token budget even as dossiers grow. <!-- Added: forge#1733 -->
+
+---
+
+## Phase C-0.5: Active Peer Claims Reader (conditional — when running under orchestration batch) <!-- Added: forge#1736 -->
+
+**Skip if**: `FORGE_COORD_ISSUE` is not set. This phase is a no-op when the agent is not running under an `/orchestrate` batch — no error, no output.
+
+**Purpose**: Before writing any code, check whether peer agents in the same orchestration batch have posted `FORGE:CLAIM` annotations on the coordination issue that overlap with this agent's planned files. If overlapping claims exist, inject them into the builder's mental model as explicit constraints so the builder avoids modifying interfaces the peer has reserved.
+
+**Time budget**: 20 seconds. If exceeded, log a warning and continue without peer-claim constraints.
+
+```bash
+if [ -n "${FORGE_COORD_ISSUE:-}" ]; then
+  COORD_NUM=$(echo "$FORGE_COORD_ISSUE" | grep -oE '[0-9]+$')
+  if [ -n "$COORD_NUM" ]; then
+    echo "Phase C-0.5: reading active peer claims from coordination issue #${COORD_NUM}"
+
+    # Fetch all comments from coordination issue
+    COORD_COMMENTS=$(gh api repos/{GH_REPO}/issues/${COORD_NUM}/comments \
+      --jq 'map(select(.body | contains("<!-- FORGE:CLAIM -->")))' 2>/dev/null || echo '[]')
+
+    # Extract active claims: FORGE:CLAIM comments that are NOT followed by FORGE:CLAIM_RELEASED
+    # from the same Holder. We identify active claims by the presence of CLAIM:COMPLETE
+    # and the absence of a subsequent CLAIM_RELEASED referencing the same Holder.
+    # Self-exclusion is done via jq select() against the **Holder**: #{NUMBER} field —
+    # the actual encoding of the owning issue number — not by grep-matching flattened text
+    # (claim comment lines never start with a bare #N, so a line-prefix grep can never match).
+    ACTIVE_PEER_CLAIMS=$(echo "$COORD_COMMENTS" | jq -r --arg num "$NUMBER" '.[] |
+      select(.body | contains("<!-- CLAIM:COMPLETE -->")) |
+      select(.body | contains("<!-- FORGE:CLAIM_RELEASED -->") | not) |
+      select((.body | capture("\\*\\*Holder\\*\\*: #(?<n>[0-9]+)").n // "") != $num) |
+      "Holder: " + (.body | capture("\\*\\*Holder\\*\\*: (?P<h>[^\n]+)").h // "unknown") +
+      "\nFiles: " + (.body | capture("\\*\\*Files\\*\\*: (?P<f>[^\n]+)").f // "none")
+    ' 2>/dev/null || echo "")
+
+    if [ -n "$ACTIVE_PEER_CLAIMS" ]; then
+      echo "Active peer claims found:"
+      echo "$ACTIVE_PEER_CLAIMS"
+
+      # Extract claimed file paths from peer claims (self already excluded above via jq select)
+      PEER_CLAIMED_FILES=$(echo "$COORD_COMMENTS" | jq -r --arg num "$NUMBER" '.[] |
+        select(.body | contains("<!-- CLAIM:COMPLETE -->")) |
+        select(.body | contains("<!-- FORGE:CLAIM_RELEASED -->") | not) |
+        select((.body | capture("\\*\\*Holder\\*\\*: #(?<n>[0-9]+)").n // "") != $num) |
+        .body' 2>/dev/null \
+        | awk '/\*\*Files\*\*:/{found=1; next} /\*\*Interfaces\*\*:/{found=0} found{print}' \
+        | grep -oP '[a-zA-Z0-9._/-]+\.(py|tsx?|jsx?|sql|json|ya?ml|md|mjs|sh)' \
+        | sort -u || echo "")
+
+      # Check overlap with this agent's planned files (from FORGE:CONTRACT)
+      OWN_FILES=$(gh api repos/{GH_REPO}/issues/{NUMBER}/comments \
+        --jq '[.[] | select(.body | contains("FORGE:CONTRACT"))] | last | .body' 2>/dev/null \
+        | grep -oP '`[^`]+\.(py|tsx?|jsx?|sql|json|ya?ml|md|mjs|sh)`' \
+        | tr -d '`' | sort -u || echo "")
+
+      OVERLAP=$(comm -12 <(echo "$PEER_CLAIMED_FILES") <(echo "$OWN_FILES") 2>/dev/null || echo "")
+
+      if [ -n "$OVERLAP" ]; then
+        PEER_CLAIMS_CONSTRAINT="
+⚠ CLAIMS BOARD CONSTRAINT: The following files are claimed by peer agents in this orchestration batch.
+You MUST NOT modify the public interfaces of these files without first checking the peer's FORGE:CLAIM
+on coordination issue #${COORD_NUM} to understand what interfaces they have reserved.
+
+Overlapping claimed files:
+$(echo "$OVERLAP" | sed 's/^/  - /')
+
+Peer claims:
+$(echo "$ACTIVE_PEER_CLAIMS" | sed 's/^/  /')
+
+If you need to change an interface claimed by a peer, post a comment on coordination issue #${COORD_NUM}
+describing the conflict — this routes to Phase 2.5 arbitration."
+      else
+        PEER_CLAIMS_CONSTRAINT="
+ℹ CLAIMS BOARD: Peer claims exist but no file overlap with this agent's planned files.
+Peer agents are working on independent file sets — no interface constraint applies.
+Peer claims (for reference): $(echo "$ACTIVE_PEER_CLAIMS" | head -5)"
+      fi
+
+      # Store for injection into the FORGE:CONTEXT comment (Phase C4)
+      export PEER_CLAIMS_CONSTRAINT
+    else
+      echo "Phase C-0.5: no active peer claims found on coordination issue #${COORD_NUM}"
+      PEER_CLAIMS_CONSTRAINT=""
+      export PEER_CLAIMS_CONSTRAINT
+    fi
+  fi
+fi
+```
+
+**Constraint injection into FORGE:CONTEXT**: When `PEER_CLAIMS_CONSTRAINT` is set, append it to the `### Known Pitfalls for This Area` section of the FORGE:CONTEXT comment (Phase C4). This ensures the builder sees peer claims in the same context block as historical review findings — a single consolidated constraint surface. If `PEER_CLAIMS_CONSTRAINT` is empty, the section is omitted.
+
+---
+
+## Phase C0.5: Danger-Zone Rule Cards (fixed 400-token slot) <!-- Added: forge#1744 -->
+
+Surface the highest-value risk knowledge for exactly the files this build will touch. Reads the persisted danger-zones index produced by `scripts/danger-zones.mjs`, filters to files that overlap the Builder Contract's deliverables table, ranks by risk score, and emits one-line rule cards cut at a hard 400-token ceiling. The slot is constant by construction — never more, never less — so risk injection adds zero variance to the builder's token budget.
+
+**Time budget**: 10 seconds. If exceeded, log a warning and continue without danger-zone cards.
+
+**Skip if**: `~/.forge/index/danger-zones.json` is absent (cold start — no index built yet). Zero cards → section omitted from FORGE:CONTEXT (no empty scaffolding). <!-- Cold-start safety: required — the index only exists after danger-zones.mjs has run at least once -->
+
+### Step 0: Locate danger-zones.json
+
+```bash
+# Resolve index directory — forge.yaml may override ~/.forge/index
+FORGE_INDEX_DIR="${HOME}/.forge/index"
+if [ -f "{REPO_PATH}/forge.yaml" ]; then
+  FORGE_INDEX_OVERRIDE=$(yq '.forge_index.directory // ""' "{REPO_PATH}/forge.yaml" 2>/dev/null || echo '')
+  [ -n "$FORGE_INDEX_OVERRIDE" ] && FORGE_INDEX_DIR="$FORGE_INDEX_OVERRIDE"
+fi
+
+DANGER_ZONES_PATH="${FORGE_INDEX_DIR}/danger-zones.json"
+
+if [ ! -f "$DANGER_ZONES_PATH" ]; then
+  echo "Phase C0.5: danger-zones.json absent at ${DANGER_ZONES_PATH} — skipping (cold start)"
+  DANGER_ZONE_CARDS=""
+  # → Continue to Phase C0 without emitting any cards
+fi
+```
+
+### Step 1: Extract contract-overlapping files
+
+Read the Builder Contract from the FORGE:CONTRACT comment on the issue. Extract the file paths listed in the Deliverables table:
+
+```bash
+CONTRACT_FILES=$(gh api repos/{GH_REPO}/issues/{NUMBER}/comments \
+  --jq '[.[] | select(.body | contains("FORGE:CONTRACT")) | .body] | last // ""' 2>/dev/null \
+  | grep -oE '`[^`]+\.(py|ts|tsx|js|mjs|md|sh|yaml|yml|json)[^`]*`' \
+  | tr -d '`' \
+  | sort -u)
+
+if [ -z "$CONTRACT_FILES" ]; then
+  # Fallback: use AFFECTED_FILES from arguments
+  CONTRACT_FILES=$(echo "{AFFECTED_FILES}" | tr ' ' '\n' | grep -v '^$' | sort -u)
+fi
+echo "Phase C0.5: contract files: $(echo "$CONTRACT_FILES" | tr '\n' ' ')"
+```
+
+### Step 2: Filter danger-zones.json to overlapping files
+
+Read the danger-zones index and select only entries whose `file` key matches (by basename or full path) any file in the contract:
+
+```bash
+DANGER_ZONE_CARDS=""
+TOKEN_BUDGET=400          # hard cap (tokens)
+CHAR_BUDGET=$((TOKEN_BUDGET * 4))   # proxy: 1 token ≈ 4 chars → 1600 chars
+CHARS_USED=0
+
+# Read and filter danger-zones.json entries (files key is a dict keyed by file path)
+# For each contract file: look up its entry in danger-zones.json by basename or full path
+while IFS= read -r contract_file; do
+  [ -z "$contract_file" ] && continue
+  BASENAME=$(basename "$contract_file")
+
+  # Look up by exact path first, then by basename match
+  DZ_ENTRY=$(python3 -c "
+import sys, json, os
+
+dz = json.load(open('${DANGER_ZONES_PATH}'))
+files = dz.get('files', {})
+
+# Try exact match first
+target = '${contract_file}'
+if target in files:
+    entry = files[target]
+    entry['file'] = target
+    print(json.dumps(entry))
+    sys.exit(0)
+
+# Basename fallback: match any file whose basename equals the target basename
+basename = os.path.basename(target)
+for path, entry in files.items():
+    if os.path.basename(path) == basename:
+        entry['file'] = path
+        print(json.dumps(entry))
+        sys.exit(0)
+" 2>/dev/null || echo '')
+
+  [ -z "$DZ_ENTRY" ] && continue
+
+  # Extract fields for the card
+  FILE_PATH=$(echo "$DZ_ENTRY" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('file',''))" 2>/dev/null || echo '')
+  FINDINGS=$(echo "$DZ_ENTRY" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('findingCount90d',0))" 2>/dev/null || echo '0')
+  TOP_PATTERN=$(echo "$DZ_ENTRY" | python3 -c "import sys,json; d=json.load(sys.stdin); p=d.get('topPatterns',[]); print(p[0] if p else '')" 2>/dev/null || echo '')
+  TOP_ISSUE=$(echo "$DZ_ENTRY" | python3 -c "import sys,json; d=json.load(sys.stdin); ci=d.get('citedIssues',[]); print('#'+str(ci[0]) if ci else '')" 2>/dev/null || echo '')
+  RISK_SCORE=$(echo "$DZ_ENTRY" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('riskScore',0))" 2>/dev/null || echo '0')
+
+  # Skip files with zero findings (only in danger-zones due to co-change, not findings)
+  [ "$FINDINGS" -eq 0 ] && continue
+
+  # Build one-line card in issue-spec format:
+  # {file} — {N} findings/90d — recurring: {pattern} (#{issue}); rule: {prevention}
+  if [ -n "$TOP_PATTERN" ] && [ -n "$TOP_ISSUE" ]; then
+    CARD="${FILE_PATH} — ${FINDINGS} findings/90d — recurring: ${TOP_PATTERN} (${TOP_ISSUE}); rule: do not repeat this pattern"
+  elif [ -n "$TOP_PATTERN" ]; then
+    CARD="${FILE_PATH} — ${FINDINGS} findings/90d — recurring: ${TOP_PATTERN}; rule: do not repeat this pattern"
+  else
+    CARD="${FILE_PATH} — ${FINDINGS} findings/90d; rule: review before modifying"
+  fi
+
+  # Enforce 400-token cap (1600 char proxy)
+  CARD_LEN=${#CARD}
+  if [ $((CHARS_USED + CARD_LEN + 2)) -gt $CHAR_BUDGET ]; then
+    echo "Phase C0.5: token cap reached at ${CHARS_USED} chars (≈$((CHARS_USED / 4)) tokens) — truncating card list"
+    break
+  fi
+
+  DANGER_ZONE_CARDS="${DANGER_ZONE_CARDS}
+- ${CARD}"
+  CHARS_USED=$((CHARS_USED + CARD_LEN + 2))
+
+done < <(echo "$CONTRACT_FILES")
+
+CARDS_TOKEN_COUNT=$((CHARS_USED / 4))
+if [ -n "$DANGER_ZONE_CARDS" ]; then
+  echo "Phase C0.5: emitting ${CARDS_TOKEN_COUNT} tokens of danger-zone cards (cap: ${TOKEN_BUDGET})"
+else
+  echo "Phase C0.5: no danger-zone entries for contract files — skipping section"
+fi
+```
+
+### Step 3: Store for output
+
+`DANGER_ZONE_CARDS` and `CARDS_TOKEN_COUNT` are used in the `### Danger-Zone Rule Cards` section of the FORGE:CONTEXT comment output. If `DANGER_ZONE_CARDS` is empty (no overlapping files with findings, or index absent), the section is **omitted entirely** — no empty scaffolding.
 
 ---
 
@@ -406,30 +676,73 @@ If `GIST_SUMMARIES` is non-empty, it will be included in the `### Prior Investig
 
 ## Phase C1: Past Review Findings on These Files
 
+**Primary path — Forge Ledger** (O(1) local index lookup, zero API calls): <!-- Added: forge#1732 -->
+
+Check for a local knowledge index before making any GitHub API calls. If the index exists, use
+`forge recall` for exact file-path lookups. Fall back to live `gh issue list --search` only when
+the index is absent or returns no results for a given file.
+
+```bash
+# Resolve recall CLI path relative to repository root
+RECALL_PATH="${REPO_PATH:-$(git rev-parse --show-toplevel 2>/dev/null)}/bin/recall.mjs"
+LEDGER_AVAILABLE=0
+
+if [ -f "$RECALL_PATH" ]; then
+  # Quick probe: does the index exist and have cards?
+  PROBE=$(node "$RECALL_PATH" --doctor 2>/dev/null | grep "^Total cards:" | grep -v "^Total cards:    0" || true)
+  [ -n "$PROBE" ] && LEDGER_AVAILABLE=1
+fi
+
+LEDGER_FINDINGS=""
+
+if [ "$LEDGER_AVAILABLE" -eq 1 ]; then
+  echo "[context:C1] Using Forge Ledger for file-path recall (zero API calls)"
+  IFS=' ' read -ra AFFECTED_FILES_ARR <<< "{AFFECTED_FILES}"
+  for file in "${AFFECTED_FILES_ARR[@]}"; do
+    FILE_CARDS=$(node "$RECALL_PATH" --file "$file" --k 5 --json 2>/dev/null || echo "[]")
+    if [ "$FILE_CARDS" != "[]" ] && [ -n "$FILE_CARDS" ]; then
+      LEDGER_FINDINGS="${LEDGER_FINDINGS}
+### Ledger findings for \`${file}\`
+\`\`\`json
+${FILE_CARDS}
+\`\`\`"
+    fi
+  done
+fi
+```
+
+**Extract from ledger results** (when `LEDGER_AVAILABLE=1` and `LEDGER_FINDINGS` is non-empty):
+Parse the JSON card array. For each card: extract `kind`, `rootCause`, `pattern`, `prevention`,
+`paths`, `symbols`, `issue` (citation). Include in the FORGE:CONTEXT output under
+**### Known Pitfalls for This Area** (pattern/stale cards) and **### Historical Findings on These
+Files** (investigation cards). Cards with `status: "stale"` are noted as such but still included
+— they may describe a bug class that has since moved files.
+
+**Fallback path — live GitHub search** (when `LEDGER_AVAILABLE=0` or `LEDGER_FINDINGS` is empty):
+
 Query closed issues with `review-finding` label, searching by filename:
 
 ```bash
-# {AFFECTED_FILES} is a space-separated file path list (see contract note above)
-# — split explicitly on IFS=' ' into an array instead of a bare
-# `for file in {AFFECTED_FILES}`, which word-splits on the shell's default IFS
-# (space, tab, AND newline) and would corrupt any path containing a space.
-IFS=' ' read -ra AFFECTED_FILES_ARR <<< "{AFFECTED_FILES}"
-for file in "${AFFECTED_FILES_ARR[@]}"; do
-  basename=$(basename "$file" .py)
-  gh issue list -R {GH_REPO} \
-    --state closed \
-    --label "review-finding" \
-    --search "$basename" \
-    --limit 10 \
-    --json number,title,body \
-    --jq '.[] | {
-      number,
-      title,
-      pattern:    (.body | capture("\\*\\*Pattern\\*\\*: *(?<p>[^\\n]+)").p    // null),
-      prevention: (.body | capture("\\*\\*Prevention\\*\\*: *(?<v>[^\\n]+)").v // null),
-      root_cause: (.body | capture("\\*\\*Root cause\\*\\*: *(?<rc>[^\\n]+)").rc // (.body | capture("Root Cause[^\\n]*\\n(?<rc>[^\\n]+)").rc // "see body"))
-    }'
-done
+if [ "$LEDGER_AVAILABLE" -eq 0 ] || [ -z "$LEDGER_FINDINGS" ]; then
+  echo "[context:C1] Forge Ledger unavailable or empty — falling back to live gh search"
+  IFS=' ' read -ra AFFECTED_FILES_ARR <<< "{AFFECTED_FILES}"
+  for file in "${AFFECTED_FILES_ARR[@]}"; do
+    basename=$(basename "$file" .py)
+    gh issue list -R {GH_REPO} \
+      --state closed \
+      --label "review-finding" \
+      --search "$basename" \
+      --limit 10 \
+      --json number,title,body \
+      --jq '.[] | {
+        number,
+        title,
+        pattern:    (.body | capture("\\*\\*Pattern\\*\\*: *(?<p>[^\\n]+)").p    // null),
+        prevention: (.body | capture("\\*\\*Prevention\\*\\*: *(?<v>[^\\n]+)").v // null),
+        root_cause: (.body | capture("\\*\\*Root cause\\*\\*: *(?<rc>[^\\n]+)").rc // (.body | capture("Root Cause[^\\n]*\\n(?<rc>[^\\n]+)").rc // "see body"))
+      }'
+  done
+fi
 ```
 
 Keep findings where the filename or function name appears in the title or body. Discard false matches (same word, different module).
@@ -526,6 +839,15 @@ Use 2-3 keywords from the issue title. If no results, skip this phase — do not
 
 ## Output Format
 
+**CODEC PATH (forge#1727)**: Post the `<!-- FORGE:CONTEXT -->` comment via the protocol codec — do NOT hand-roll the opening tag or completion sentinel. Use `forge-annotation.sh write CONTEXT` or `node packages/protocol/src/cli.js emit CONTEXT` to produce the tag and sentinel (`<!-- FORGE:CONTEXT:COMPLETE -->`). The codec handles completion sentinel emission automatically.
+
+```bash
+# Codec produces the opening tag and completion sentinel
+CONTEXT_BODY=$(node packages/protocol/src/cli.js emit CONTEXT)
+# $CONTEXT_BODY = "<!-- FORGE:CONTEXT -->\n<!-- FORGE:CONTEXT:COMPLETE -->"
+# Insert the Markdown sections between the opening tag line and the sentinel.
+```
+
 Post the following as a GitHub comment on `{NUMBER}`:
 
 ```bash
@@ -540,11 +862,25 @@ gh issue comment {NUMBER} -R {GH_REPO} --body "<!-- FORGE:CONTEXT -->
      'No devdocs found at {DEVDOCS_PATH} — skipping. Run `npx forgedock docs init` to scaffold.' -->
 {DEVDOCS_CONTENT}
 
+### Danger-Zone Rule Cards
+<!-- Ranked risk cards for contract-overlapping files from the Forge Ledger danger-zones index (Phase C0.5).
+     Token budget: {CARDS_TOKEN_COUNT} / 400 tokens used.
+     Each card: {file} — {N} findings/90d — recurring: {pattern} (#{issue}); rule: {prevention}
+     BINDING CONSTRAINT: treat each card as a must-not-violate rule before committing.
+     If danger-zones.json was absent or no contract files had findings — omit this section entirely (no empty scaffolding). -->
+{DANGER_ZONE_CARDS}
+
 ### Prior Investigation Findings
 <!-- Summarized Knowledge Gist content from upstream investigations (Phase C0).
      If no FORGE:PRIOR_GIST annotations were found in the issue body: omit this section entirely.
      If Gist fetches failed: include the failure note so the builder knows context was attempted. -->
 {GIST_SUMMARIES}
+
+### Claims Board Constraints
+<!-- Active peer claims from the orchestration coordination issue (Phase C-0.5).
+     If FORGE_COORD_ISSUE is not set (not running under /orchestrate): omit this section entirely.
+     If no peer claims overlap this agent's planned files: write 'No overlapping peer claims.' -->
+{PEER_CLAIMS_CONSTRAINT}
 
 ### Known Pitfalls for This Area
 <!-- Structured prevention rules extracted from past review-finding issues (Pattern Metadata section).
@@ -607,7 +943,9 @@ This module runs at **Step 3C.5** — after Builder Contract is posted, before I
 ```
 3C   → Builder Contract posted
 3C.5 → [THIS MODULE] Context gathering (max 2 min)
-         Phase C-1: Authoritative Devdocs (project-resident knowledge — highest precedence)
+         Phase C-1:  Authoritative Devdocs (project-resident knowledge — highest precedence)
+         Phase C-0.5: Active Peer Claims Reader (conditional — orchestration only)
+         Phase C0.5: Danger-Zone Rule Cards (fixed 400-token slot — forge#1744)
          Phase C0:  Prior Investigation Findings (from Gists)
          Phase C1:  Past Review Findings on These Files
          Phase C2:  Past Bugs in the Same Module

@@ -1,10 +1,10 @@
-# Forge for Codex
+# ForgeDock for Codex
 
-Forge is a workflow-spec repository. The shared source of truth lives in `commands/`.
+ForgeDock is a workflow-spec repository. The shared source of truth lives in `commands/`.
 
 Claude Code support remains intact:
-- `install.sh` installs slash-command symlinks into the current project directory by default; pass `--global` to install into `~/.claude/commands/` for all projects
-- `CLAUDE.md` remains the Claude-oriented project reference
+- `install.sh` installs slash-command symlinks into `~/.claude/commands/` for all projects (always global)
+- `README.md` remains the project reference
 
 Codex support is additive:
 - `install-codex.sh` installs Codex-native, namespaced Forge skills into `~/.codex/skills`
@@ -38,16 +38,16 @@ Examples:
 
 ## Scope Boundaries
 
-- This repo is not an app service; it is the Forge pipeline itself.
+- This repo is not an app service; it is the ForgeDock pipeline itself.
 - `commands/review-pr-agents.md` is a catalog read by other workflows, not a primary user entrypoint.
 - The Codex layer should wrap the existing command system, not fork it into a separate copy.
 - Repo-local Codex skills may override repo defaults from shared command specs when Forge-specific behavior differs from project-specific upstream assumptions.
 
 ## First References
 
-Read these first when operating Forge from Codex:
+Read these first when operating ForgeDock from Codex:
 - `docs/CODEX.md`
-- `CLAUDE.md`
+- `README.md`
 - the relevant file in `commands/`
 
 Notable commands for security work:

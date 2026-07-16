@@ -1,6 +1,6 @@
 ---
 description: Investigate a GitHub issue — validate it's real, determine root cause, post findings
-argument-hint: [issue number] [--repo {owner}/{repo}] [--gh-flag "-R {owner}/{repo}"]
+argument-hint: "[issue number] [--repo {owner}/{repo}] [--gh-flag \"-R {owner}/{repo}\"]"
 ---
 <!-- SPDX-FileCopyrightText: Copyright (c) RapierCraft Studios -->
 <!-- SPDX-License-Identifier: AGPL-3.0-or-later -->
@@ -11,7 +11,7 @@ argument-hint: [issue number] [--repo {owner}/{repo}] [--gh-flag "-R {owner}/{re
 
 Standalone investigation phase for the work-on pipeline. Validates whether an issue is real, determines root cause, posts a structured FORGE:INVESTIGATOR comment to GitHub, and updates workflow labels.
 
-**Agent model policy**: `model: "sonnet"` (standard tier). Fallback: `model: "opus"` if rate-limited. Feature gate: pass `effort` in Task/Skill spawns only on Claude Code >= 2.1.154.
+**Agent model policy**: `model: "{DEFAULT_MODEL}"` — resolved from forge.yaml `agents.default_model`, else "sonnet" (standard tier). Fallback: `model: "opus"` if rate-limited. Feature gate: pass `effort` in Task/Skill spawns only on Claude Code >= 2.1.154. This file's mechanical bits (1A label set, `FORGE:CHECKPOINT` writes) stay at this tier because they're interleaved with the reasoning-heavy investigation steps in the same `Skill()` invocation — see `work-on.md` section "Model and Effort Tiering — What Actually Applies". <!-- Added: forge#1827 -->
 **NEVER use plan mode (EnterPlanMode).**
 
 <!-- FORGE:SPEC_LOADED — work-on/investigate.md loaded and active. Agent is bound by this spec. -->
@@ -87,6 +87,171 @@ Affected files: {files}
 ```
 
 Print these blocks to stdout before Phase 1A begins. During Phase 1B (step 3 — blame analysis and step 5 — pickaxe pass), **explicitly check whether the current issue's suspected symbol or file appears in any prior root cause or affected files**. If a match is found, cite it in the FORGE:INVESTIGATOR comment's History Findings field as a `[MEMORY PRIOR]` hit.
+
+---
+
+## Phase 0.6: Forge Ledger Pre-Recall <!-- Added: forge#1740 -->
+
+**Goal**: Query the Forge Ledger knowledge index for prior cards matching this issue's title terms, affected files, and symbols — **before reading any code**. Inject above-threshold results with explicit delta-verification framing so the investigator builds on prior knowledge rather than re-deriving it.
+
+**This phase is non-blocking** — if the index is absent, empty, or returns no match above threshold, log a single line and proceed to Phase 1A. Never stall the pipeline for recall.
+
+**Relationship to Phase 0.5**: Phase 0.5 retrieves structured priors from the Gist-based FORGE:MEMORY_INDEX (coarse keyword scoring over MEMORY_ENTRY lines). Phase 0.6 queries the Forge Ledger index (BM25 over structured knowledge cards, indexed by `build-knowledge-index.mjs`). Both are complementary and both run — neither replaces the other.
+
+### Step 1: Probe for index
+
+```bash
+RECALL_PATH="${REPO_PATH:-$(git rev-parse --show-toplevel 2>/dev/null)}/bin/recall.mjs"
+LEDGER_AVAILABLE=0
+
+if [ -f "$RECALL_PATH" ]; then
+  # Quick probe: does the index exist and have at least one card?
+  PROBE=$(node "$RECALL_PATH" --doctor 2>/dev/null | grep "^Total cards:" | grep -v "^Total cards:    0" || true)
+  [ -n "$PROBE" ] && LEDGER_AVAILABLE=1
+fi
+
+if [ "$LEDGER_AVAILABLE" -eq 0 ]; then
+  echo "[recall] Forge Ledger index absent or empty — skipping Phase 0.6, proceeding to Phase 1A"
+  # → Continue to Phase 1A
+fi
+```
+
+### Step 2: Build combined query (title terms + symbols + affected files)
+
+Extract query components from the issue body and title. The recall CLI accepts free text (BM25 ranked) plus repeated `--file` flags (exact-match boost):
+
+```bash
+# Extract title keywords: lowercase, remove stop words, keep noun/verb tokens (≥4 chars)
+ISSUE_TITLE=$(gh issue view {NUMBER} {GH_FLAG} --json title --jq '.title' 2>/dev/null || echo '')
+TITLE_TERMS=$(echo "$ISSUE_TITLE" | tr '[:upper:]' '[:lower:]' \
+  | sed 's/[^a-z0-9 ]/ /g' \
+  | tr ' ' '\n' \
+  | grep -E '^[a-z]{4,}$' \
+  | grep -vE '^(with|that|this|from|into|have|will|when|then|than|them|they|been|were|also|only|does|some|each|more|over|such|both|most|other|many|after|about|should|would|could|their|these|those|which|where|there|being|while|using|since|until|before|under|above)$' \
+  | sort -u | head -10 | tr '\n' ' ' | xargs)
+
+# Extract affected files from the issue body's ## Affected Files section
+ISSUE_BODY=$(gh issue view {NUMBER} {GH_FLAG} --json body --jq '.body' 2>/dev/null || echo '')
+AFFECTED_FILES_RAW=$(echo "$ISSUE_BODY" \
+  | sed -n '/^## Affected Files/,/^## /p' \
+  | grep -oE '`[^`]+\.(md|mjs|js|ts|py|sh|yaml|yml|json)`' \
+  | tr -d '`' | sort -u | head -5)
+
+# Extract symbols: backtick-quoted identifiers from the issue body (≥4 chars, camelCase or snake_case)
+SYMBOLS_RAW=$(echo "$ISSUE_BODY" \
+  | grep -oE '`[A-Za-z_][A-Za-z0-9_]{3,}`' \
+  | tr -d '`' | sort -u | head -5)
+
+# Build --file flags (one per affected file)
+FILE_FLAGS=""
+while IFS= read -r f; do
+  [ -n "$f" ] && FILE_FLAGS="$FILE_FLAGS --file $f"
+done <<< "$AFFECTED_FILES_RAW"
+
+# Build --symbol flag (first symbol only — recall supports one --symbol)
+SYMBOL_FLAG=""
+FIRST_SYMBOL=$(echo "$SYMBOLS_RAW" | head -1)
+[ -n "$FIRST_SYMBOL" ] && SYMBOL_FLAG="--symbol $FIRST_SYMBOL"
+```
+
+### Step 3: Run recall query and capture results
+
+```bash
+RECALL_RESULTS=""
+RECALL_ISSUE_CITATIONS=""
+
+if [ "$LEDGER_AVAILABLE" -eq 1 ] && [ -n "$TITLE_TERMS$FILE_FLAGS$SYMBOL_FLAG" ]; then
+  echo "[recall] Querying Forge Ledger: terms='${TITLE_TERMS}' files='${AFFECTED_FILES_RAW}' symbol='${FIRST_SYMBOL}'"
+
+  # Run combined query: title terms (free text) + file flags + symbol + min-score threshold
+  # --json for machine-readable output; --min-score 0.3 filters weak matches (noise gate)
+  RECALL_JSON=$(node "$RECALL_PATH" \
+    $TITLE_TERMS \
+    $FILE_FLAGS \
+    $SYMBOL_FLAG \
+    --k 5 \
+    --min-score 0.3 \
+    --json \
+    2>/dev/null || echo '[]')
+
+  # Count results
+  RECALL_COUNT=$(echo "$RECALL_JSON" | node -e "
+    let d = ''; process.stdin.on('data', c => d += c);
+    process.stdin.on('end', () => {
+      try { console.log(JSON.parse(d).length); } catch { console.log(0); }
+    });
+  " 2>/dev/null || echo "0")
+
+  if [ "${RECALL_COUNT:-0}" -gt 0 ]; then
+    echo "[recall] Found ${RECALL_COUNT} prior card(s) above threshold — injecting with delta-verification framing"
+
+    # Extract issue citations for the Prior Investigations field in the FORGE:INVESTIGATOR comment
+    RECALL_ISSUE_CITATIONS=$(echo "$RECALL_JSON" | node -e "
+      let d = ''; process.stdin.on('data', c => d += c);
+      process.stdin.on('end', () => {
+        try {
+          const cards = JSON.parse(d);
+          const seen = new Set();
+          const cites = cards
+            .filter(c => { if (seen.has(c.issue)) return false; seen.add(c.issue); return true; })
+            .map(c => '#' + c.issue)
+            .join(', ');
+          console.log(cites);
+        } catch { console.log(''); }
+      });
+    " 2>/dev/null || echo '')
+
+    # Format cards as human-readable text for injection (not raw JSON)
+    RECALL_FORMATTED=$(echo "$RECALL_JSON" | node -e "
+      let d = ''; process.stdin.on('data', c => d += c);
+      process.stdin.on('end', () => {
+        try {
+          const cards = JSON.parse(d);
+          const lines = [];
+          for (const c of cards) {
+            lines.push('── ' + c.kind.toUpperCase() + ' from #' + c.issue + ' (score: ' + c.score.toFixed(2) + ') ──');
+            if (c.rootCause)  lines.push('Root Cause: ' + c.rootCause);
+            if (c.prevention) lines.push('Fix/Prevention: ' + c.prevention);
+            if (c.pattern)    lines.push('Pattern: ' + c.pattern);
+            if (c.verdict)    lines.push('Verdict: ' + c.verdict + ' (' + (c.confidence || '?') + ')');
+            if (c.paths && c.paths.length) lines.push('Files: ' + c.paths.slice(0,3).join(', '));
+          }
+          console.log(lines.join('\n'));
+        } catch (e) { console.log(''); }
+      });
+    " 2>/dev/null || echo '')
+
+    # Cap at ≤ 2K chars (same budget as context C0 Gist summaries)
+    RECALL_RESULTS=$(echo "$RECALL_FORMATTED" | head -c 2048)
+  else
+    echo "[recall] No prior cards above threshold (min-score 0.3) — investigating from scratch"
+  fi
+fi
+```
+
+### Step 4: Inject recall results into investigation context
+
+If `RECALL_RESULTS` is non-empty, print the following block to stdout **before Phase 1A begins**. The investigation steps in Phase 1B MUST treat this as starting context — verify deltas against current code rather than re-deriving the prior model.
+
+**If `RECALL_RESULTS` is empty**: skip this step entirely and proceed to Phase 1A.
+
+```
+[FORGE:RECALL_PRIOR — Forge Ledger pre-recall results]
+Prior cards matched this issue above threshold (min-score 0.3).
+
+CRITICAL FRAMING: These cards describe prior findings on the same files/symbols.
+  → Verify the deltas against current code — do NOT re-derive the prior model.
+  → Stale cards (status: stale) are excluded by default — the query runs without
+     --include-stale. Do not treat any card as authoritative without confirming
+     the finding still exists in the current code.
+  → Cite confirmed priors in the FORGE:INVESTIGATOR "Prior Investigations" field.
+
+${RECALL_RESULTS}
+
+[END FORGE:RECALL_PRIOR]
+```
+
+Store `RECALL_ISSUE_CITATIONS` in a variable — it is used in Phase 1C to populate the `**Prior Investigations (via recall)**` field in the FORGE:INVESTIGATOR comment.
 
 ---
 
@@ -192,6 +357,20 @@ bash {REPO_PATH}/scripts/code-index.sh query --domain {DOMAIN_LABEL} --repo-path
 
 The comment MUST include `<!-- INVESTIGATION:COMPLETE -->` at the very end, AFTER all required sections are present. This marker signals the investigation finished successfully.
 
+**CODEC PATH (forge#1727)**: Construct the annotation body via the protocol codec — do NOT hand-roll the `<!-- FORGE:INVESTIGATOR -->` header. Use `forge-annotation.sh write INVESTIGATOR --field ...` or `node packages/protocol/src/cli.js emit INVESTIGATOR --field ...` to produce the opening tag and completion sentinel. Fill in the Markdown body sections below. The full pattern:
+
+```bash
+# Build the annotation body via codec (escaping and sentinel handled by codec)
+ANNOTATION_BODY=$(node packages/protocol/src/cli.js emit INVESTIGATOR \
+  --field "Verdict={VERDICT}" \
+  --field "Confidence={CONFIDENCE}" \
+  --field "Severity={SEVERITY}" \
+  --field "Task Type={TASK_TYPE}" \
+  --field "Decomposition Assessment={YES|NO} — {reason}")
+# ANNOTATION_BODY now has opening tag + required fields + INVESTIGATION:COMPLETE sentinel.
+# Append the Markdown body sections to it before posting.
+```
+
 Before posting, resolve the attribution annotation link from `forge.yaml`:
 
 ```bash
@@ -201,7 +380,7 @@ if [ "$ATTRIBUTION_ANNOTATION_LINK" = "true" ]; then
   ANNOTATION_LINK_FOOTER="
 
 ---
-*Pipeline powered by [ForgeDock](https://github.com/RapierCraftStudios/ForgeDock)*"
+*⚒️ Pipeline powered by [ForgeDock](https://github.com/RapierCraftStudios/ForgeDock)*"
 fi
 ```
 
@@ -234,6 +413,7 @@ gh issue comment {NUMBER} {GH_FLAG} --body "<!-- FORGE:INVESTIGATOR -->
 **Last touched**: {hash — author — date — subject}
 **Pickaxe hits (prior fixes / regressions)**: {commit(s) found via \`git log -S\`/\`-G\`, or 'None found' — max 5}
 {This field is MANDATORY — populate from the git blame + pickaxe commands in step 4/5. If a file is newly created (no history), write 'New file — no history.'}
+**Prior Investigations (via recall)**: {Comma-separated issue citations from \`RECALL_ISSUE_CITATIONS\` (e.g. '#1172, #1243 — building on, not repeating'), or 'None — no Forge Ledger match above threshold' if \`RECALL_RESULTS\` was empty. Use the \`RECALL_ISSUE_CITATIONS\` variable populated in Phase 0.6.}
 
 ### Recommendation
 {what to build/fix, concrete and actionable}
@@ -245,12 +425,19 @@ gh issue comment {NUMBER} {GH_FLAG} --body "<!-- FORGE:INVESTIGATOR -->
 **{YES|NO}** — {reason}
 {if YES: proposed sub-issues with titles and dependencies}
 
-### Acceptance Spec
+### Acceptance Spec <!-- Added: forge#1829 -->
 {For each item in the issue's ## Acceptance Criteria section, emit one machine-checkable check line using the format below. If the issue has no Acceptance Criteria section, derive checks from the Recommendation above. Each check MUST be specific, observable, and testable — not vague prose. Checks are consumed by build/validate Phase B6.5 as the merge gate.}
 
+**Quoting (MANDATORY)**: `target=` and `matcher=` MUST always be wrapped in double quotes — `target="..."` / `matcher="..."` — even when the value is a single token (e.g. a plain file path). The downstream Phase B6.5 parser only extracts quoted values; an unquoted `target=`/`matcher=` will silently truncate at the first space and cause a false-negative gate failure for any multi-word value (shell commands with flags/arguments/pipes are almost always multi-word). Neither `target` nor `matcher` may contain a literal `"` character — use single quotes for any embedded string/regex literal inside the value, as shown below. `id=` and `type=` are always single tokens and are never quoted. `description=` is always the last field on the line and is captured to end-of-line — it does not need quoting.
+
 ```
-ACCEPTANCE_CHECK: id={ac-1} type={exists|contains|command|behavior} target={file_path|command|url} matcher={string|exit_0|regex} description={one-line human description}
-ACCEPTANCE_CHECK: id={ac-2} type={exists|contains|command|behavior} target={file_path|command|url} matcher={string|exit_0|regex} description={one-line human description}
+ACCEPTANCE_CHECK: id={ac-1} type={exists|contains|command|behavior} target="{file_path|command|url}" matcher="{string|exit_0|regex}" description={one-line human description}
+ACCEPTANCE_CHECK: id={ac-2} type={exists|contains|command|behavior} target="{file_path|command|url}" matcher="{string|exit_0|regex}" description={one-line human description}
+```
+
+Example with a multi-word shell command target (the case that previously broke — note the embedded single quotes around the regex, and the double quotes wrapping the whole target):
+```
+ACCEPTANCE_CHECK: id=ac-4 type=command target="grep -qE '(>= ?2|2\+)' commands/orchestrate/phase-1-resolve.md" matcher="exit_0" description=Fan-out cap is documented as >=2 or 2+
 ```
 
 **Check types**:
@@ -259,7 +446,9 @@ ACCEPTANCE_CHECK: id={ac-2} type={exists|contains|command|behavior} target={file
 - `command` — run a shell command and assert exit 0 (`target` = shell command, `matcher` = `exit_0`)
 - `behavior` — assert a runtime/observable behavior via shell command (`target` = shell command, `matcher` = expected output string or regex)
 
-**Skipping**: if the issue has no verifiable acceptance criteria and none can be derived from the recommendation, emit a single sentinel: `ACCEPTANCE_CHECK: id=ac-skip type=skipped target=none matcher=none description=No machine-checkable criteria available — human review required`
+**Self-defeating pipe guideline**: do NOT chain a `-q`/`--quiet` command into a downstream pipe consumer (e.g. `grep -q ... | grep ...`). A `-q` flag suppresses all stdout, so the next command in the pipe always receives empty input and the check can never pass regardless of the actual file content. If a check needs to verify two conditions against the same output, sequence them instead — e.g. `grep -qE 'first' file && grep -qE 'second' file` — or capture the output once and grep the captured variable.
+
+**Skipping**: if the issue has no verifiable acceptance criteria and none can be derived from the recommendation, emit a single sentinel: `ACCEPTANCE_CHECK: id=ac-skip type=skipped target="none" matcher="none" description=No machine-checkable criteria available — human review required`
 ${ANNOTATION_LINK_FOOTER}
 <!-- INVESTIGATION:COMPLETE -->"
 ```
@@ -540,6 +729,47 @@ fi
 ---
 
 ## Phase 1D: Update Labels & Return Verdict
+
+### 1D.0: Finding Lifecycle Label Transition (MANDATORY — run before workflow label update)
+
+**Purpose**: Wire the investigation verdict into the finding-validation lifecycle. If the issue under investigation is a review-finding (carries `needs-validation`), translate the verdict into `validated` or `false-positive` using `transition-label.sh --validate`. This is the primary mechanism that resolves the `needs-validation → validated/false-positive` lifecycle gap. <!-- Added: forge#1730 -->
+
+**Run this block regardless of verdict (CONFIRMED, PARTIAL, INVALID) — the verdict-to-label mapping handles all cases:**
+
+```bash
+# Check if this issue is a finding awaiting validation
+ISSUE_LABELS=$(gh issue view {NUMBER} {GH_FLAG} --json labels --jq '[.labels[].name] | join(",")' 2>/dev/null || echo "")
+
+if echo "$ISSUE_LABELS" | grep -q "needs-validation"; then
+  echo "Issue #{NUMBER} has needs-validation — applying verdict label transition..."
+  RESOLUTION=$(resolve_script 'transition-label')
+  TIER="${RESOLUTION%%:*}"
+  SCRIPT_PATH="${RESOLUTION#*:}"
+  case "$TIER" in
+    adaptive|universal)
+      bash "$SCRIPT_PATH" --validate {VERDICT} {NUMBER} {GH_FLAG} || true
+      ;;
+    prose)
+      # Prose fallback: apply label transition directly via gh
+      if [ "{VERDICT}" = "CONFIRMED" ]; then
+        gh issue edit {NUMBER} {GH_FLAG} --add-label "validated" --remove-label "needs-validation" 2>/dev/null || true
+        echo "Applied: needs-validation → validated (verdict: CONFIRMED)"
+      else
+        gh issue edit {NUMBER} {GH_FLAG} --add-label "false-positive" --remove-label "needs-validation" 2>/dev/null || true
+        echo "Applied: needs-validation → false-positive (verdict: {VERDICT})"
+      fi
+      ;;
+  esac
+else
+  echo "Issue #{NUMBER} does not have needs-validation — no finding lifecycle transition needed"
+fi
+```
+
+**Verdict → label mapping**: `CONFIRMED` → `validated`; `PARTIAL`, `NOT-CONFIRMED`, `INVALID` → `false-positive`.
+
+**Idempotency**: `transition-label.sh --validate` is a no-op if the issue already has `validated` or `false-positive`, or if it lacks `needs-validation`. Safe to call on any issue.
+
+---
 
 **CONFIRMED or PARTIAL with decompose: NO**:
 ```bash

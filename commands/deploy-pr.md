@@ -1,6 +1,6 @@
 ---
 description: Ship a branch to its deploy target — detect or create PR, fix CI, review, merge. Returns structured result for callers.
-argument-hint: [source_branch | "staging" | "milestone/{slug}"] [--target TARGET] [--issue ISSUE_NUMBER] [--repo REPO] [--max-ci-iterations N] [--max-review-iterations N] [--dry-run]
+argument-hint: "[source_branch | \"staging\" | \"milestone/{slug}\"] [--target TARGET] [--issue ISSUE_NUMBER] [--repo REPO] [--max-ci-iterations N] [--max-review-iterations N] [--dry-run]"
 allowed-tools: Bash, Read, Grep, Glob, Skill
 ---
 <!-- SPDX-FileCopyrightText: Copyright (c) RapierCraft Studios -->
@@ -13,7 +13,7 @@ allowed-tools: Bash, Read, Grep, Glob, Skill
 **NEVER use plan mode (EnterPlanMode)** — it breaks execution context.
 **NEVER use the Agent tool** — deploy-pr dispatches sub-skills via `Skill(...)` only. The Agent tool bypasses the allowed-tools constraint and produces opaque output that cannot be structured into the deploy result.
 
-**Agent model policy**: `model: "sonnet"` (standard tier). Fallback: `model: "opus"` if rate-limited. User can override with `--model <name>`.
+**Agent model policy**: `model: "{DEFAULT_MODEL}"` — resolved from forge.yaml `agents.default_model`, else "sonnet" (standard tier). Fallback: `model: "opus"` if rate-limited. User can override with `--model <name>`.
 
 <!-- FORGE:SPEC_LOADED — deploy-pr.md loaded and active. Agent is bound by this spec. -->
 
@@ -392,8 +392,11 @@ while [ "$REVIEW_ITER" -lt "$MAX_REVIEW_ITER" ] && [ "$REVIEW_GATE_PASSED" = "fa
       # This loop's next iteration will re-read the latest PR state.
     fi
   else
-    echo "WARNING: Could not determine review verdict from FORGE:REVIEW comment. Assuming APPROVED."
-    REVIEW_GATE_PASSED=true
+    # Fail-closed: unknown verdict must block merge, not grant it.
+    # If FORGE:REVIEW comment is missing, malformed, or unparseable for any reason
+    # (race condition, context compaction, skill error, comment format mismatch),
+    # treat it as a failed review — REVIEW_GATE_PASSED remains false.
+    echo "ERROR: Could not determine review verdict from FORGE:REVIEW comment. Blocking merge — review verdict is required. (#1714)"
   fi
 done
 

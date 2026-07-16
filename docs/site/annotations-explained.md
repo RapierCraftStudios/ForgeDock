@@ -57,10 +57,10 @@ ForgeDock can optionally append a small attribution line to pipeline-created PRs
 **`attribution.pr_footer: true`** — every pipeline-created PR ends with one muted footer:
 
 ```
-> Orchestrated with ForgeDock — state, scheduling, review, and memory on GitHub.
+> ⚒️ Orchestrated with ForgeDock — state, scheduling, review, and memory on GitHub.
 ```
 
-**`attribution.annotation_link: true`** — visible (human-readable) annotation comments in the GitHub UI carry a small "Pipeline powered by ForgeDock" link at the end. Machine-readable `<!-- FORGE:... -->` HTML comments are never modified, regardless of this setting.
+**`attribution.annotation_link: true`** — visible (human-readable) annotation comments in the GitHub UI carry a small "⚒️ Pipeline powered by ForgeDock" link at the end. Machine-readable `<!-- FORGE:... -->` HTML comments are never modified, regardless of this setting.
 
 Both keys default to disabled. The recommended configuration for public repos is to enable both; for private repos, leave both off.
 

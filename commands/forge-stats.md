@@ -1,6 +1,6 @@
 ---
 description: Track command sizes, detect bloat, compare against baselines and thresholds
-argument-hint: [diff | baseline | full | cost]
+argument-hint: "[diff | baseline | full | cost]"
 install: internal
 ---
 <!-- SPDX-FileCopyrightText: Copyright (c) RapierCraft Studios -->

@@ -165,3 +165,50 @@ test('validate: CONTRACT missing Task type → invalid', () => {
   assert.equal(valid, false);
   assert.ok(errors.some(e => e.includes('Task type')));
 });
+
+// --- CLAIM and CLAIM_RELEASED tests (forge#1736) ---
+
+test('validate: valid CLAIM with all required fields passes', () => {
+  const ann = parseOne(
+    `<!-- FORGE:CLAIM -->\n**Holder**: #1736 / run-abc123\n**Files**: commands/orchestrate/phase-3-dependency.md\n**Interfaces**: Step 3C conflict detection API\n**TTL**: terminal state of Holder issue #1736\n<!-- CLAIM:COMPLETE -->`,
+    'CLAIM',
+  );
+  const { valid, errors } = validate(ann);
+  assert.equal(valid, true, `Expected valid but got errors: ${errors.join(', ')}`);
+});
+
+test('validate: CLAIM missing Holder field → invalid', () => {
+  const ann = parseOne(
+    `<!-- FORGE:CLAIM -->\n**Files**: commands/orchestrate/phase-3-dependency.md\n**Interfaces**: Step 3C API\n**TTL**: terminal state\n<!-- CLAIM:COMPLETE -->`,
+    'CLAIM',
+  );
+  const { valid, errors } = validate(ann);
+  assert.equal(valid, false);
+  assert.ok(errors.some(e => e.includes('Holder')));
+});
+
+test('validate: CLAIM missing Files field → invalid', () => {
+  const ann = parseOne(
+    `<!-- FORGE:CLAIM -->\n**Holder**: #1736 / run-abc\n**Interfaces**: Step 3C API\n**TTL**: terminal state\n<!-- CLAIM:COMPLETE -->`,
+    'CLAIM',
+  );
+  const { valid, errors } = validate(ann);
+  assert.equal(valid, false);
+  assert.ok(errors.some(e => e.includes('Files')));
+});
+
+test('validate: CLAIM missing completion sentinel → invalid', () => {
+  const ann = parseOne(
+    `<!-- FORGE:CLAIM -->\n**Holder**: #1736 / run-abc\n**Files**: path/to/file.md\n**Interfaces**: foo\n**TTL**: terminal`,
+    'CLAIM',
+  );
+  const { valid, errors } = validate(ann);
+  assert.equal(valid, false);
+  assert.ok(errors.some(e => e.includes('completion sentinel')));
+});
+
+test('validate: CLAIM_RELEASED control marker → valid', () => {
+  const ann = parseOne(`<!-- FORGE:CLAIM_RELEASED -->`, 'CLAIM_RELEASED');
+  const { valid } = validate(ann);
+  assert.equal(valid, true);
+});

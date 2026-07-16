@@ -32,7 +32,7 @@ We will credit you in the release notes unless you prefer to remain anonymous.
 
 ForgeDock is a set of markdown command specs that run inside Claude Code. The primary security surface areas are:
 
-- **`bin/forgedock.mjs`** — the npm installer that symlinks commands into the current project directory (default) or `~/.claude/commands/` when `--global` is passed
+- **`bin/forgedock.mjs`** — the npm installer that symlinks commands into `~/.claude/commands/` (always global; `--global` is accepted for backward compatibility but has no effect)
 - **`commands/*.md`** — prompt specs that instruct Claude Code agents to run `gh`, `git`, and shell commands
 - **`forge.yaml`** — project configuration that influences which repos and branches agents target
 

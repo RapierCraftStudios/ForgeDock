@@ -1,5 +1,5 @@
 ---
-install: internal
+install: core
 ---
 <!-- SPDX-FileCopyrightText: Copyright (c) RapierCraft Studios -->
 <!-- SPDX-License-Identifier: AGPL-3.0-or-later -->
@@ -10,7 +10,7 @@ install: internal
 
 
 
-**Type**: `security-exploit-auditor` | **Model**: `sonnet`
+**Type**: `security-exploit-auditor` | **Model**: `{SUBAGENT_MODEL}`
 
 **Prompt template:**
 ```

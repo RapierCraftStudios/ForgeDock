@@ -91,6 +91,27 @@ Analyzes what a PR touches and spawns domain-specific review agents.
 
 ---
 
+### `/review-pr-staging`
+
+**Staging review mode — deep review of a `staging → main` bundle before deploy.**
+
+Purpose-built for the large, heterogeneous diffs a deploy bundle produces (1,000–10,000+ lines). Invoked by the orchestrator via `Skill("review-pr-staging", …)` or directly.
+
+```bash
+/review-pr-staging staging          # Review the staging → main bundle
+/review-pr-staging 123              # Review a PR targeting main
+/review-pr-staging staging:feature  # Review a feature bundle into staging
+```
+
+**What it does**:
+- Handles large, diverse diffs with deep per-domain analysis and business-impact assessment
+- Deep-diffs workflow siblings (e.g. `ci.yml` vs. `deploy-production.yml`) to catch shared-job drift that only surfaces at deploy time
+- Produces a comprehensive verdict gating the deploy to `main`
+
+*Companion to `/review-pr`, tuned for the deploy gate rather than a single feature PR.*
+
+---
+
 ### `/quality-gate`
 
 **Pre-commit quality checker.**
@@ -592,7 +613,37 @@ These are invoked automatically by `/work-on` but can also be run standalone.
 | `/work-on/review` | Phase 5 | Review only |
 | `/work-on/close` | Phase 6 | Close & cleanup only |
 | `/work-on/decompose` | Phase 2 | Decompose into sub-issues |
-| `/review-pr-agents` | PR review | Agent catalog read by `/review-pr` during dispatch (not user-invokable directly) |
+| `/work-on/remediate` | Phase 0A.1 | Remediate a `needs-human` PR: fix findings, re-review, re-gate (`/work-on <pr> --remediate`) |
+| `/review-pr-agents` | PR review | Agent catalog router read by `/review-pr` during dispatch (not user-invokable directly) |
+
+`/review-pr` (core) reads the following per-persona and shared-protocol templates from `commands/review-pr-agents/` at runtime during Phase 3C dispatch. They ship as part of every install alongside `/review-pr` — not user-invokable directly.
+
+| Command | Phase | Purpose |
+|---------|-------|---------|
+| `/review-pr-agents/protocols` | Phase 3C | Shared Evidence-Based/Structured-Findings/Input-Scoping protocols read before every persona template |
+| `/review-pr-agents/security` | Phase 3C | General security & quality scan (always runs) |
+| `/review-pr-agents/auth` | Phase 3C | Auth conventions auditor (AUTH domain) |
+| `/review-pr-agents/billing` | Phase 3C | Billing/payments auditor (BILLING domain) |
+| `/review-pr-agents/concurrency` | Phase 3C | Concurrency/locking auditor (CONCURRENCY domain) |
+| `/review-pr-agents/database` | Phase 3C | Database/migration auditor (DATABASE domain) |
+| `/review-pr-agents/frontend` | Phase 3C | Frontend conventions auditor (FRONTEND domain) |
+| `/review-pr-agents/infra` | Phase 3C | Infra/deploy auditor (INFRA domain) |
+| `/review-pr-agents/api` | Phase 3C | API/SDK contract auditor (API domain) |
+| `/review-pr-agents/scraper` | Phase 3C | Scraping/anti-bot auditor (SCRAPING domain) |
+
+`/orchestrate` (core) reads the following phase files from `commands/orchestrate/` at runtime. They ship as part of every install alongside `/orchestrate` — not user-invokable directly.
+
+| Command | Phase | Purpose |
+|---------|-------|---------|
+| `/orchestrate/config` | Phase 0 | Hard rules, config resolution, multi-repo support — read first |
+| `/orchestrate/phase-1-resolve` | Phase 1 | Resolve the issue set from input |
+| `/orchestrate/phase-2-triage` | Phase 2 | Investigation-first triage, Wave 0 |
+| `/orchestrate/phase-2.5-synthesis` | Phase 2.5 | Investigation synthesis and deconfliction |
+| `/orchestrate/phase-3-dependency` | Phase 3 | Dependency analysis, DAG construction, execution plan |
+| `/orchestrate/phase-4-execution` | Phase 4 | Streaming DAG execution, agent dispatch, stall detection |
+| `/orchestrate/phase-5-cleanup` | Phase 5 | Post-batch cleanup sweep and agent audit |
+| `/orchestrate/phase-6-report` | Phase 6 | Consolidated report and pipeline summary |
+| `/orchestrate/safety` | Reference | Safety rules and examples |
 
 ---
 

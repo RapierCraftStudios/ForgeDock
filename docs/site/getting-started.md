@@ -49,9 +49,9 @@ Run the installer with `npx` from your project directory:
 npx forgedock
 ```
 
-This installs all 25+ ForgeDock command specs into the current project (project-scoped by default) — making them available as slash commands in Claude Code sessions for this repo.
+This installs all 25+ ForgeDock command specs into `~/.claude/commands/` — making them available as slash commands in every Claude Code session on this machine, not just this repo.
 
-> **Want commands available across all projects on this machine?** Use `npx forgedock --global` to install into `~/.claude/commands/` instead. Project-scoped is the default for new installs; use `--global` as an explicit opt-in.
+> Install is always global. `--global` is still accepted on the command line for backward compatibility, but it's a no-op — `npx forgedock` and `npx forgedock --global` do exactly the same thing.
 
 **Verify the install:**
 
@@ -75,7 +75,7 @@ ForgeDock Doctor — Installation Health Check
 
 It exits `0` when everything passes and `1` if any check fails, so you can also use it in CI.
 
-> Prefer a quick spot-check? `ls .claude/commands/ | grep -E "work-on|review-pr|quality-gate"` should list `work-on.md`, `review-pr.md`, and `quality-gate.md`. (For a `--global` install, use `ls ~/.claude/commands/` instead.)
+> Prefer a quick spot-check? `ls ~/.claude/commands/ | grep -E "work-on|review-pr|quality-gate"` should list `work-on.md`, `review-pr.md`, and `quality-gate.md`.
 
 ---
 
@@ -205,7 +205,7 @@ The quick fixes below cover the most common first-run issues. For the full list 
 
 **`/work-on` not found in Claude Code**
 
-The symlink wasn't created. Re-run `npx forgedock` and check `ls .claude/commands/` (project-scoped, default) or `ls ~/.claude/commands/` (if you used `--global`).
+The symlink wasn't created. Re-run `npx forgedock` and check `ls ~/.claude/commands/`.
 
 **`forge.yaml` not found**
 
@@ -221,37 +221,12 @@ The issue may have been marked `workflow:invalid`. Check the issue comments for 
 
 ---
 
-## Migrating from a global install
+## A note on install location
 
-If you installed ForgeDock before project-scoped became the default (prior to v1.0.22), your commands live in `~/.claude/commands/`. You have two options:
-
-**Option A: Keep the global install (no action required)**
-
-Add `--global` to all future `npx forgedock install/update/uninstall/doctor` calls. Your existing setup is unchanged.
+ForgeDock briefly shipped a project-scoped-by-default install mode. It was backed out after causing a "split-brain" bug (`doctor`/`status` assumed project-scoped while the installer still wrote globally — [#1589](https://github.com/RapierCraftStudios/ForgeDock/issues/1589)), so install has always been global (`~/.claude/commands/`) since. If you have scripts or CI that still pass `--global`, there's nothing to change — it's accepted for backward compatibility and does exactly what a plain `npx forgedock` does.
 
 ```bash
-npx forgedock update --global   # re-link after a version bump
-```
-
-**Option B: Switch to project-scoped (recommended for per-repo version control)**
-
-1. Remove the global install:
-   ```bash
-   npx forgedock uninstall --global
-   ```
-2. In each repo you want ForgeDock in, run a fresh project-scoped install:
-   ```bash
-   cd /path/to/your-repo
-   npx forgedock install
-   ```
-3. Verify:
-   ```bash
-   npx forgedock doctor      # auto-detects project-scoped install
-   ```
-
-**Detect your current mode:**
-
-```bash
-npx forgedock doctor          # prints "Mode: project-scoped" or "Mode: global"
-npx forgedock status          # shows install path
+npx forgedock update           # re-link after a version bump
+npx forgedock doctor           # confirm the install is healthy
+npx forgedock status           # shows the install path (~/.claude/commands/)
 ```

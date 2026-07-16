@@ -1,6 +1,6 @@
 ---
 description: Decompose subcommand — break a complex issue into ordered sub-issues, post FORGE:DECOMPOSED, stop
-argument-hint: [issue number] [--repo GH_REPO] [--gh-flag GH_FLAG]
+argument-hint: "[issue number] [--repo GH_REPO] [--gh-flag GH_FLAG]"
 ---
 <!-- SPDX-FileCopyrightText: Copyright (c) RapierCraft Studios -->
 <!-- SPDX-License-Identifier: AGPL-3.0-or-later -->
@@ -12,7 +12,7 @@ argument-hint: [issue number] [--repo GH_REPO] [--gh-flag GH_FLAG]
 **Invoked by**: `work-on.md` routing loop, when `INVESTIGATE_RESULT.decompose = YES`.
 **Output**: Create sub-issues, update parent tracker, post `<!-- FORGE:DECOMPOSED -->` comment, set labels. STOP — each sub-issue runs its own /work-on.
 
-**Agent model policy**: `model: "sonnet"` (standard tier). Fallback: `model: "opus"` if rate-limited. Feature gate: pass `effort` in Task/Skill spawns only on Claude Code >= 2.1.154.
+**Agent model policy**: `model: "{DEFAULT_MODEL}"` — resolved from forge.yaml `agents.default_model`, else "sonnet" (standard tier). Fallback: `model: "opus"` if rate-limited. Feature gate: pass `effort` in Task/Skill spawns only on Claude Code >= 2.1.154. This file's mechanical bits (label transitions, sub-issue creation) stay at this tier because they're interleaved with the reasoning-heavy sub-issue design steps in the same `Skill()` invocation — see `work-on.md` section "Model and Effort Tiering — What Actually Applies". <!-- Added: forge#1827 -->
 **NEVER use plan mode (EnterPlanMode).**
 
 ---
@@ -106,30 +106,14 @@ For each sub-issue, prepare:
 
 ## Phase D3: Create Sub-Issues
 
-For each sub-issue (in dependency order):
+For each sub-issue (in dependency order), route creation through the `/issue` create-hook's programmatic invocation contract (`commands/issue.md` Programmatic Invocation Contract, added in #2085) instead of calling `gh issue create` directly. `/issue`'s Phase 2D runs the same `scripts/issue-dedup.sh` check this file used to run manually — the standalone pre-check below is removed; dedup is now enforced inside the create-hook on every call, with no bypass path. <!-- Changed: forge#2086 — route through /issue create-hook -->
 
-**Before creating each sub-issue, run the deterministic dedup check:** <!-- Added: forge#1335 -->
+**Compose the sub-issue body to a temp file** (avoids quoting issues when passed as `--body-file`):
 
 ```bash
 SUB_TITLE="{fix|feat|refactor}: {SUB_ISSUE_TITLE}"
-DEDUP_RESULT=$(scripts/issue-dedup.sh "$SUB_TITLE" {GH_FLAG} 2>&1)
-DEDUP_EXIT=$?
-if [ "$DEDUP_EXIT" -eq 1 ]; then
-  echo "DEDUP: Sub-issue near-duplicate detected — $DEDUP_RESULT"
-  echo "Skipping creation. Comment on the existing issue instead."
-  # Do NOT call gh issue create for this sub-issue
-elif [ "$DEDUP_EXIT" -eq 2 ]; then
-  echo "DEDUP: Usage error — $DEDUP_RESULT"
-  # Do NOT call gh issue create for this sub-issue — fix the invocation and retry
-fi
-```
-
-Only call `gh issue create` when the dedup script exits 0 (no match):
-
-```bash
-gh issue create {GH_FLAG} \
-  --title "{fix|feat|refactor}: {SUB_ISSUE_TITLE}" \
-  --body "$(cat <<'SUB_BODY_EOF'
+SUB_BODY_FILE="$(mktemp)"
+cat > "$SUB_BODY_FILE" <<'SUB_BODY_EOF'
 ## Problem
 
 {1-3 sentences: what this sub-issue specifically addresses. What's wrong or what needs to be built for this sub-task.}
@@ -155,10 +139,29 @@ Files that need changes:
 **Parent**: #{NUMBER}
 {If depends on another sub-issue: "**Depends on**: #{SUB_ISSUE_N} — {reason}"}
 SUB_BODY_EOF
-)" \
-  --label "{PRIORITY_LABEL}" \
-  --milestone "{MILESTONE_TITLE}"
 ```
+
+**Invoke `/issue` in programmatic mode**:
+
+```
+ISSUE_SKILL_OUTPUT=$(Skill(skill="issue", args="--title \"${SUB_TITLE}\" --body-file \"${SUB_BODY_FILE}\" --label \"{PRIORITY_LABEL}\" --milestone \"{MILESTONE_TITLE}\""))
+```
+
+`/issue` runs Phase 2D dedup, Phase 3F body validation, then creates the issue (Phase 4) — no separate pre-check needed on this side.
+
+**Extract the created sub-issue number from the Skill output** (see `commands/issue.md` Phase 4C/4E — it echoes `Created: {url}` and reports `**#{NUMBER}**: {title}`):
+
+```bash
+# Match either the "Created: {url}" line (extract trailing /issues/N) or the "**#{NUMBER}**" bold report line.
+SUB_NUMBER=$(echo "$ISSUE_SKILL_OUTPUT" | grep -oE 'issues/[0-9]+' | head -1 | grep -oE '[0-9]+')
+[ -z "$SUB_NUMBER" ] && SUB_NUMBER=$(echo "$ISSUE_SKILL_OUTPUT" | grep -oE '\*\*#[0-9]+\*\*' | head -1 | grep -oE '[0-9]+')
+
+if [ -z "$SUB_NUMBER" ]; then
+  echo "WARNING: /issue did not report a created issue number for sub-issue '${SUB_TITLE}' — likely a Phase 2D dedup STOP (near-duplicate found) or a usage error. Skipping this sub-issue: do not reference it in the parent tracker or in dependent sub-issue bodies. Review the Skill output above and, if a near-duplicate exists, comment on the existing issue instead."
+fi
+```
+
+If `SUB_NUMBER` is empty, treat this sub-issue as not created — do not add it to the parent tracker checklist (Phase D4) and do not reference it as a dependency in later sub-issues.
 
 **Append Prior Investigation section** (conditional — only if `GIST_URLS` from Phase D1.5 is non-empty):
 

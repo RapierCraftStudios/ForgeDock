@@ -200,14 +200,32 @@ function badgeText(badge, mode) {
   return `${fg(rgb, mode)}[${label}]\x1b[0m`;
 }
 
-/** Ember-bordered fix card (wraps tui.box; border color applied when able). */
-export function fixCard(lines, mode) {
+/**
+ * Severity-banded fix card (wraps tui.box; border color/weight applied when
+ * able).
+ *
+ * - "error"   (default): ember/red bordered box — current look, unchanged.
+ * - "warning": amber bordered box — lighter than error, still boxed.
+ * - "info":    no border — plain, dimmed lines only.
+ *
+ * @param {string[]} lines
+ * @param {string} mode
+ * @param {'error'|'warning'|'info'} [severity]
+ */
+export function fixCard(lines, mode, severity = "error") {
+  if (severity === "info") {
+    const padded = lines.map((l) => ` ${l} `);
+    if (mode === "none") return padded.join("\n");
+    return padded.map((l) => `\x1b[2m${l}\x1b[22m`).join("\n");
+  }
+
   const boxed = box(lines.map((l) => ` ${l} `), { title: "fix" });
   if (mode === "none") return boxed;
-  const ember = fg([255, 107, 53], mode);
+  const rgb = severity === "warning" ? [232, 192, 96] : [255, 107, 53];
+  const color = fg(rgb, mode);
   return boxed
     .split("\n")
-    .map((l) => l.replace(/[╭╮╰╯─│]/gu, (m) => `${ember}${m}\x1b[0m`))
+    .map((l) => l.replace(/[╭╮╰╯─│]/gu, (m) => `${color}${m}\x1b[0m`))
     .join("\n");
 }
 
@@ -253,7 +271,7 @@ export async function revealRows(
     }
     writer.write(formatRow(row.label, res, mode) + "\n");
     if (!res.ok && res.fix && res.fix.length > 0) {
-      writer.write(fixCard(res.fix, mode) + "\n");
+      writer.write(fixCard(res.fix, mode, res.severity || "error") + "\n");
     }
     results.push(res);
   }

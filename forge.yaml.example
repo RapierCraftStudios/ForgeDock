@@ -10,7 +10,7 @@
 #   # Add forge.yaml to your .gitignore if it contains sensitive paths
 #
 # Required sections: project, paths, branches
-# Optional sections: repos, project_board, services, review, verification, deploy, billing, devdocs, adaptive_scripts, learned, attribution
+# Optional sections: agents, repos, project_board, pipeline, services, review, verification, deploy, billing, devdocs, adaptive_scripts, learned, attribution
 
 # =============================================================================
 # PROJECT (REQUIRED)
@@ -96,6 +96,53 @@ branches:
   # {slug} is replaced with the milestone title converted to kebab-case
   # Example: milestone "User Auth v2" → "milestone/user-auth-v2"
   feature_pattern: "milestone/{slug}"
+
+# =============================================================================
+# AGENTS (OPTIONAL)
+# Default model for pipeline agents — the main orchestrator and every
+# sub-agent spawned via the Agent/Task tool while following a command spec
+# (work-on, orchestrate, review-pr, etc.).
+# Commands: all commands with an "Agent model policy" line
+# =============================================================================
+
+# agents:
+#   # Accepts a short alias: "sonnet", "opus", or "haiku" — the same values
+#   # the Agent/Task tool's `model` parameter already accepts. This is the
+#   # only form that works for interactive command-spec sub-agent spawning.
+#   #
+#   # bin/runner.mjs (the headless/CI runner, which calls the Anthropic SDK
+#   # directly) also accepts a full Anthropic model ID here as a pass-through
+#   # escape hatch (e.g. "claude-opus-4-6") — but a full ID does NOT work for
+#   # interactive Agent/Task tool calls, which only accept the short-alias
+#   # enum above. Prefer the short alias unless you specifically need a
+#   # headless-only override.
+#   #
+#   # Resolution order (highest precedence first):
+#   #   1. --model <id>              (forgedock run CLI flag, headless only)
+#   #   2. FORGEDOCK_MODEL env var   (headless runner only)
+#   #   3. agents.default_model      (this field)
+#   #   4. Hardcoded default         ("sonnet" for interactive agents /
+#   #                                 "claude-sonnet-5" for the headless runner)
+#   #
+#   # Omit this field entirely for no change from today's behavior.
+#   default_model: "sonnet"
+#
+#   # Model override for CHILD sub-agents that a top-level command spawns
+#   # internally — e.g. /orchestrate's per-issue /work-on agents, /review-pr's
+#   # domain persona reviewers, /analytics's parallel data-collection agents.
+#   # This is distinct from `default_model` above, which only governs the
+#   # main agent you invoke directly (the one running the command spec).
+#   #
+#   # Accepts the same short alias as `default_model` ("sonnet"/"opus"/"haiku").
+#   #
+#   # Resolution order (highest precedence first):
+#   #   1. agents.subagent_model     (this field)
+#   #   2. agents.default_model      (falls back here if subagent_model is unset)
+#   #   3. Hardcoded default         ("sonnet")
+#   #
+#   # Omit this field to have sub-agents inherit default_model (or "sonnet"
+#   # if that's unset too) — no change from today's behavior.
+#   subagent_model: "sonnet"
 
 # =============================================================================
 # REPOS (OPTIONAL)
@@ -210,6 +257,56 @@ branches:
 #       label: "MCP Server"
 
 # =============================================================================
+# PIPELINE (OPTIONAL)
+# Tuning knobs for the /orchestrate batch engine — stall detection and the
+# review-finding cascade-control token budget. All keys optional; sane
+# defaults apply when omitted (read via `yq '.pipeline.KEY // default'`).
+# Commands: orchestrate
+# =============================================================================
+
+# pipeline:
+#   # Minutes an agent may sit idle (no FORGE:HEARTBEAT / label change) before
+#   # /orchestrate's Step 4B.5 stall detector treats it as stuck and attempts
+#   # an auto-resume. Default: 15.
+#   stall_timeout_minutes: 15
+#
+#   # Per-batch token ceiling for /orchestrate's Step 4C review-finding cascade
+#   # control. Distinct from the `--budget N` dollar-cost flag (economic
+#   # scheduling, forge#1743): that mechanism is opt-in, dollar-denominated, and
+#   # gates the *original* issue dispatch order. This ceiling is always-on,
+#   # token-denominated, and scopes ONLY to Step 4C's cascade dispatch of
+#   # review-finding issues spawned mid-batch. P1/P2 findings are NEVER gated by
+#   # this budget — only P3-and-below dispatch volume is reduced once the
+#   # ceiling is approached; additional findings defer to the Step 4F
+#   # Completion Sweep instead of spawning more individual /work-on pipelines.
+#   # Default: 900000 (sized for ~6 average P3 pipelines at the estimate below).
+#   token_budget_per_batch: 900000
+#
+#   # Estimated token cost of a single P3-or-lower review-finding /work-on
+#   # pipeline, used to decrement token_budget_per_batch above. There is no
+#   # live per-agent token telemetry to read yet (see commands/audit-agents.md,
+#   # which tracks idle%/active-time/resumes, not token counts) — this is a
+#   # fixed estimate, not a measurement. A same-run surface-area-clubbed batch
+#   # issue (forge#1818) is charged this estimate ONCE for the whole cluster,
+#   # not once per member finding. Default: 150000 (midpoint of the commonly
+#   # observed 75k-260k token range for a single P3 review-finding pipeline).
+#   token_estimate_per_finding: 150000
+#
+#   # Narration verbosity for /orchestrate Step 4B per-completion status updates.
+#   #   "terse"   (default when unset) — one line per completion only, e.g.
+#   #             "✓ #123 — {title} → PR #456 merged to staging". No recap
+#   #             table is printed between completions. Matches today's
+#   #             existing behavior — setting this explicitly is a no-op.
+#   #   "verbose" — same one-liners, plus a running per-completion recap table
+#   #             (issue, title, PR, target, elapsed). Useful when babysitting
+#   #             a batch interactively; noisier for long unattended runs.
+#   # This setting is cosmetic only — it never changes which phases run or
+#   # what gets committed. The Step 6B consolidated report (Implementation
+#   # Results, Review-Spawned Issues, Batch Trajectory Analytics — full tables)
+#   # always renders in full exactly once at the end, regardless of this value.
+#   narration: "terse"
+
+# =============================================================================
 # SERVICES (OPTIONAL)
 # External service URLs and identifiers. Used by analytics, monitoring, and
 # GEO audit commands.
@@ -303,6 +400,18 @@ branches:
 #     # scraping: "Browser pool in worker/browser/pool.py; tier escalation in worker/consumers/scrape.py"
 #     # ^^^ Uncomment scraping only if this project has a web-scraping domain.
 #     # ^^^ Leaving it commented out prevents the Scraper agent from spawning on Playwright E2E PRs.
+#
+#   # Provenance-based trust escalation (forge#1745).
+#   # Controls the 30-day shadow-mode window before enforcement begins.
+#   #
+#   # "true"  (default) — shadow mode: intensity tier is computed and logged in the FORGE:REVIEW
+#   #           annotation, but the agent roster is NOT modified. Use this during the initial
+#   #           30-day calibration window so the provenance table can accumulate data.
+#   # "false" — enforcement mode: the computed intensity tier DOES modify the agent roster
+#   #           (PROVEN cells may drop optional judgment agents; NOVEL cells escalate to full panel).
+#   #           Set this after the 30-day shadow window once the provenance table is trusted.
+#   #
+#   # trust_shadow_mode: "true"
 #
 #   # Domain-to-file mapping used by /work-on investigation and /review-pr agents
 #   # to quickly locate relevant files for a given issue domain.
@@ -442,6 +551,33 @@ branches:
 #   #     test: "cargo test"
 #   #     build: "cargo build"
 #
+#   # Known-slow / hanging test suites to skip or narrow during automated pipeline
+#   # runs. Some test files make live network/LLM calls or otherwise hang far
+#   # longer than a normal unit-test pass — without this list, /work-on Phase 3H
+#   # (and any `learned.test_commands` entry) will re-launch the full hanging
+#   # suite on every pass, and each stall-triggered resume reloads full context.
+#   #
+#   # Each entry's `pattern` is matched as a substring against the full command
+#   # text (e.g. "pytest tests/test_agents.py -x -q") — not just a bare filename.
+#   # Exactly one of `skip` or `subset` should be set per entry:
+#   #   skip: true       — the matched command is skipped entirely (logged, not run)
+#   #   subset: "<cmd>"  — the matched command is replaced with this safe-subset
+#   #                      command instead of running the full command
+#   # `reason` is free text surfaced in the skip/substitution log line.
+#   #
+#   # Default: [] (no known-slow tests configured — all commands run unchanged,
+#   # same as today's behavior). This is additive and fully backward compatible —
+#   # repos that don't set this field see no behavior change.
+#   # Used by: work-on (Phase 3H, before running learned.test_commands)
+#   #
+#   # known_slow_tests:
+#   #   - pattern: "test_agents.py"
+#   #     reason: "Makes real network/LLM calls — hangs pipeline agents waiting on live responses"
+#   #     skip: true
+#   #   - pattern: "test_integration.py"
+#   #     reason: "Full suite requires a live DB; subset covers unit-safe cases only"
+#   #     subset: "pytest tests/test_integration.py -k 'not live_db' -x -q"
+#
 #   # Integration test suites run by /test-gate against the provisioned cluster.
 #   # Each entry specifies a logical cluster (matched to test_services), the shell
 #   # command to execute, and the working directory (relative to project root).
@@ -514,6 +650,55 @@ branches:
 #   secrets_backend: "sops"
 
 # =============================================================================
+# AUTOPILOT (OPTIONAL)
+# Configuration for the /autopilot autonomous deploy loop.
+# Commands: autopilot
+# =============================================================================
+
+# autopilot:
+#   # Label used to identify the rolling ops issue where FORGE:AUTOPILOT_CYCLE
+#   # annotations accumulate. The ops issue is created automatically on first run
+#   # if no open issue with this label exists.
+#   # Default: "autopilot-ops"
+#   ops_issue_label: "autopilot-ops"
+#
+#   # Declared autonomy policy — controls unattended (headless) operation.
+#   # When headless: false (default), /autopilot with --fix refuses to dispatch
+#   # any fixes and explains why. Autonomy is opt-in per repo.
+#   #
+#   # headless: false   # explicit opt-in to unattended fixing; default: false
+#
+#   # Per-priority approval map — evaluated when headless: true.
+#   # Each priority maps to one of two actions:
+#   #   auto        — dispatch the fix autonomously
+#   #   needs-human — post the fix plan on the ops issue for async approval; never dispatch
+#   # Default for all priorities: needs-human (conservative)
+#   #
+#   # approve:
+#   #   p0: needs-human   # P0s are never autonomous — always gate
+#   #   p1: needs-human   # P1s require human approval
+#   #   p2: auto          # P2s are safe to auto-approve in unattended runs
+#   #   p3: auto          # P3s are safe to auto-approve in unattended runs
+#
+#   # Budget ceilings — enforced per cycle; cycle stops dispatching when hit.
+#   # per_cycle_fixes: max number of issues dispatched as fixes in one cycle.
+#   #   When reached, remaining eligible issues are deferred to the next cycle
+#   #   with a deferral report in the FORGE:AUTOPILOT_CYCLE annotation.
+#   # per_cycle_tokens: advisory spend cap (null = unlimited).
+#   #   Enforceable once #1743 (token accounting) is merged. Until then, treated
+#   #   as documentation-only; no runtime enforcement.
+#   #
+#   # budget:
+#   #   per_cycle_fixes: 3     # FIX_LIMIT ceiling; null or omit for unlimited
+#   #   per_cycle_tokens: null # optional hard spend cap (future enforcement via #1743)
+#
+#   # Recon sources — which collectors run during Phase 1 (Recon).
+#   # Values: ci (CI/CD health), backlog (issue backlog health)
+#   # Default: [ci, backlog] (both run)
+#   #
+#   # recon_sources: [ci, backlog]
+
+# =============================================================================
 # BILLING (OPTIONAL)
 # Controls whether financial integrity checks run in security-audit.md.
 # Only relevant if your project uses Stripe or similar billing infrastructure.
@@ -580,6 +765,39 @@ branches:
 #   # true: remove .forgedock/scripts/ from .gitignore to share scripts with your team
 #   # To opt in: remove the .forgedock/scripts/ entry from .gitignore
 #   commit: false
+#
+#   # gate.d/ — learned quality-gate checks (Tier-A mechanizable patterns)
+#   #
+#   # Scripts placed in <directory>/gate.d/ are executed by /quality-gate after
+#   # the built-in domain checks and the static check-registry (Step 2R). They
+#   # run on every quality-gate invocation when adaptive_scripts.enabled is true.
+#   #
+#   # CONTRACT:
+#   #   Input:   $1 = absolute path to the unified diff file (git diff HEAD)
+#   #            $2 = absolute path to the worktree root
+#   #   Output:  findings lines on stdout, one per line, in the standard format:
+#   #              SLUG | HIGH|MEDIUM|LOW | FILE | MESSAGE
+#   #            (e.g.  GATD-stderr-contamination | HIGH | scripts/doctor.sh | ...)
+#   #   Exit codes:
+#   #     0  — no findings / check passed (stdout may be empty)
+#   #     1  — one or more findings emitted on stdout
+#   #     2  — check is inapplicable to this diff (skip silently)
+#   #   Timeout: 30 seconds per script, enforced by quality-gate.
+#   #            Timeout is treated as a HIGH finding (fail-closed).
+#   #
+#   # Promotion: /optimize Phase 5 drafts gate.d scripts when a pattern reaches
+#   # ≥3 validated occurrences in the Forge Ledger. Scripts arrive as a PR for
+#   # human review before enforcement — they are never silently auto-enforced.
+#   #
+#   # Example gate.d script (checks for stderr contamination in doctor scripts):
+#   #   #!/usr/bin/env bash
+#   #   # gate.d/stderr-contamination.sh
+#   #   # Flags 'command 2>&1' patterns in doctor/*.sh (contaminates stdout health output)
+#   #   DIFF_PATH="$1"
+#   #   grep -n '2>&1' "$DIFF_PATH" | grep -E '^[+][^+].*doctor' | while IFS= read -r line; do
+#   #     echo "GATD-stderr-contamination | HIGH | (diff) | 2>&1 in doctor script contaminates stdout"
+#   #     exit 1
+#   #   done
 
 # =============================================================================
 # LEARNED (OPTIONAL)
@@ -682,7 +900,7 @@ branches:
 
 # attribution:
 #   # When true, every pipeline-created PR ends with exactly one muted footer:
-#   #   > Orchestrated with [ForgeDock](https://github.com/RapierCraftStudios/ForgeDock)
+#   #   > ⚒️ Orchestrated with [ForgeDock](https://github.com/RapierCraftStudios/ForgeDock)
 #   #   > — state, scheduling, review, and memory on GitHub.
 #   # Posted once at PR creation — never duplicated on edits or retries.
 #   # Opt-out: set to false or omit this key.
@@ -696,3 +914,72 @@ branches:
 #   # Opt-out: set to false or omit this key.
 #   # Recommended: true for public repos, false for private repos.
 #   annotation_link: true
+
+# =============================================================================
+# PATTERN_FEEDS (OPTIONAL)
+# Subscribe to external pattern card repositories so that validated learnings
+# from one ForgeDock installation flow into this repo's ledger as low-priority
+# priors. Patterns are fetched at a pinned ref — no floating-HEAD supply-chain
+# surface. Imported cards are marked by origin and never counted toward local
+# promotion thresholds (#1739 counts local validated findings only).
+#
+# How it works:
+#   1. Run `node scripts/build-knowledge-index.mjs` (or add to CI) to pull
+#      subscribed cards into the local ledger as LOW-priority priors.
+#   2. Cards with a `gate.d` check template are seeded as Tier-B (warning)
+#      learned rules in /quality-gate Step 2S for matching stacks.
+#   3. Local validated findings always outrank imported cards by slug.
+#   4. Unsubscribing removes all cards from that feed (tracked by origin tag).
+#
+# Security constraints:
+#   - ALWAYS use a pinned commit SHA for `ref` — never `main` or `HEAD`.
+#     Pinned refs prevent supply-chain injection from upstream changes.
+#   - Imported cards are READ-ONLY inputs to the local ledger; they are never
+#     executed, committed, or auto-published from your repo.
+#   - The contribution path (/optimize Phase 5) requires explicit human
+#     approval before anything flows OUTBOUND to an exchange repo.
+#
+# Commands: scripts/build-knowledge-index.mjs (pull), /quality-gate Step 2S
+#           (seed gate rules), /optimize Phase 5 (contribution path)
+# =============================================================================
+
+# pattern_feeds:
+#   # List of exchange repos to subscribe to.
+#   # Each entry is a pinned-ref subscription to a public pattern card repo.
+#   feeds:
+#     - slug: "forge-core"
+#       # GitHub repo containing the pattern cards (owner/repo format)
+#       repo: "RapierCraftStudios/forge-patterns"
+#       # REQUIRED: pinned commit SHA — never "main", "HEAD", or a branch name.
+#       # Pinned refs prevent supply-chain injection from upstream changes.
+#       # Update this SHA manually after reviewing the upstream diff.
+#       ref: "abc1234def5678..."        # TODO: replace with actual commit SHA
+#       # Path prefix within the repo where card files live.
+#       # Cards are discovered as {path}/**/*.md files.
+#       path: "cards"
+#       # Stack filter — only import cards whose `stacks:` field overlaps
+#       # with this list. Omit to import all cards regardless of stack.
+#       # Valid values: node, python, bash, gha, typescript, go, rust, generic
+#       stacks: ["node", "bash", "gha"]
+#       # Priority assigned to all imported cards from this feed.
+#       # LOW = imported cards are advisory priors; they never outrank local
+#       # validated findings and never count toward promotion thresholds.
+#       # Do not change this value — the pipeline enforces LOW for all feeds.
+#       priority: "LOW"               # read-only: always LOW for imported cards
+#
+#     # Additional feeds — add more entries following the same schema:
+#     # - slug: "my-team-patterns"
+#     #   repo: "my-org/my-pattern-cards"
+#     #   ref: "abc1234..."
+#     #   path: "patterns"
+#     #   stacks: ["python"]
+#     #   priority: "LOW"
+#
+#   # When true, build-knowledge-index.mjs fetches all feeds and merges cards.
+#   # When false, the script is a no-op (useful to temporarily disable without
+#   # removing feed config).
+#   enabled: true
+#
+#   # Local ledger path where imported cards are merged.
+#   # Default: ".forge/ledger" — must match index.cache_dir if configured.
+#   # ledger_path: ".forge/ledger"

@@ -1,6 +1,6 @@
 ---
 description: Build subcommand — create worktree, post contract, sequence context/architect/implement/validate
-argument-hint: [issue number] [--repo GH_REPO] [--gh-flag GH_FLAG] [--base PR_BASE]
+argument-hint: "[issue number] [--repo GH_REPO] [--gh-flag GH_FLAG] [--base PR_BASE]"
 ---
 <!-- SPDX-FileCopyrightText: Copyright (c) RapierCraft Studios -->
 <!-- SPDX-License-Identifier: AGPL-3.0-or-later -->
@@ -12,7 +12,7 @@ argument-hint: [issue number] [--repo GH_REPO] [--gh-flag GH_FLAG] [--base PR_BA
 **Invoked by**: `work-on.md` Phase 3 — entered when the issue carries label `workflow:ready-to-build` or `workflow:building` (see Universal Phase Dispatcher in work-on.md).
 **Output**: Create worktree, post contract, run build phases, return result to work-on.md.
 
-**Agent model policy**: `model: "sonnet"` (standard tier). Fallback: `model: "opus"` if rate-limited. Feature gate: pass `effort` in Task/Skill spawns only on Claude Code >= 2.1.154.
+**Agent model policy**: `model: "{DEFAULT_MODEL}"` — resolved from forge.yaml `agents.default_model`, else "sonnet" (standard tier). Fallback: `model: "opus"` if rate-limited. Feature gate: pass `effort` in Task/Skill spawns only on Claude Code >= 2.1.154. This file's mechanical bits (3B classification, 3D label transitions) stay at this tier because they're interleaved with the reasoning-heavy build steps (3C.5/3C.6/3F) in the same `Skill()` invocation — see `work-on.md` section "Model and Effort Tiering — What Actually Applies". <!-- Added: forge#1827 -->
 **NEVER use plan mode (EnterPlanMode).**
 
 **CRITICAL: You MUST execute ALL phases B0–B6 in order. Phases B3 (context) and B4 (architect) are skipped ONLY when COMPLEXITY_BAND: TRIVIAL (read from FORGE:FAST_PATH comment in Phase B0). For STANDARD and COMPLEX tasks they are NOT optional — skipping them degrades build quality.**
@@ -193,6 +193,50 @@ ${ATTRIBUTION_LINE}"
 
 Contract must be grounded in the investigation report. Every deliverable file must appear in the affected files list from the investigator. Adversarially validate the proposed fix against adjacent system layers before posting.
 
+### B2.1: Post FORGE:CLAIM on coordination issue (conditional — when running under orchestration batch) <!-- Added: forge#1736 -->
+
+**Skip if**: `FORGE_COORD_ISSUE` is not set (agent is not running under an orchestration batch). This step is a no-op outside of `/orchestrate` dispatch — no error, no output.
+
+**When `FORGE_COORD_ISSUE` is set**: Post a `FORGE:CLAIM` annotation on the coordination issue to advertise this agent's active resource reservation to the orchestrator and peer agents. This enables the claims-board Layer-2/4 relaxation sweep (orchestrate Step 4B) to identify issue-pairs with disjoint file sets and downgrade unnecessary serialization edges.
+
+```bash
+if [ -n "${FORGE_COORD_ISSUE:-}" ]; then
+  COORD_NUM=$(echo "$FORGE_COORD_ISSUE" | grep -oE '[0-9]+$')
+  if [ -n "$COORD_NUM" ]; then
+    # Extract file paths from the just-posted FORGE:CONTRACT deliverables table
+    CLAIMED_FILES=$(gh api repos/{GH_REPO}/issues/{NUMBER}/comments \
+      --jq '[.[] | select(.body | contains("FORGE:CONTRACT"))] | last | .body' 2>/dev/null \
+      | awk '/^### Deliverables/{p=1; next} /^### /{p=0} p' \
+      | grep -oP '`[^`]+\.(py|tsx?|jsx?|sql|json|ya?ml|md|mjs|sh)`' \
+      | tr -d '`' | sort -u | tr '\n' '\n' | head -20)
+    CLAIMED_FILES="${CLAIMED_FILES:-"(files listed in FORGE:CONTRACT deliverables table)"}"
+
+    # Extract preserved interfaces from the FORGE:ARCHITECT affected paths table (if present)
+    CLAIMED_INTERFACES=$(gh api repos/{GH_REPO}/issues/{NUMBER}/comments \
+      --jq '[.[] | select(.body | contains("FORGE:ARCHITECT"))] | last | .body' 2>/dev/null \
+      | awk '/^### Affected Paths/{p=1; next} /^### /{p=0} p' \
+      | grep -oP 'Function/Class.*\|.*\|' | head -10 || echo "(see FORGE:ARCHITECT for interface details)")
+    CLAIMED_INTERFACES="${CLAIMED_INTERFACES:-"(see FORGE:ARCHITECT comment for interface details)"}"
+
+    CLAIM_HOLDER="#${NUMBER} / $(date -u +%Y%m%dT%H%M%S)"
+    CLAIM_TTL="terminal state of Holder issue #${NUMBER}"
+
+    gh issue comment "$COORD_NUM" -R {GH_REPO} --body "<!-- FORGE:CLAIM -->
+## Resource Claim
+
+**Holder**: ${CLAIM_HOLDER}
+**Files**: ${CLAIMED_FILES}
+**Interfaces**: ${CLAIMED_INTERFACES}
+**TTL**: ${CLAIM_TTL}
+
+<!-- CLAIM:COMPLETE -->" 2>/dev/null || true
+    echo "FORGE:CLAIM posted on coordination issue #${COORD_NUM} for #${NUMBER}"
+  fi
+fi
+```
+
+**After posting**: Continue to Phase B2.5. The claim is now visible to the orchestrator and peer agents. The orchestrator's claims-board relaxation sweep (orchestrate Step 4B) will read this claim when determining whether serialized peers can be unblocked.
+
 ---
 
 ## Phase B2.5: Extract FUNCTION_NAMES from Contract
@@ -337,17 +381,42 @@ The acceptance spec contains only a skip sentinel (\`type=skipped\`). No automat
 <!-- FORGE:ACCEPTANCE_GATE:PASSED -->"
 ```
 
-**Otherwise — execute each check**:
+**Otherwise — execute each check**: <!-- Added: forge#1829 -->
 
 ```bash
 GATE_PASS=true
 FAILED_CHECKS=""
 
 while IFS= read -r check_line; do
-  ID=$(echo "$check_line"    | sed -n 's/.*id=\([^ ]*\).*/\1/p')
-  TYPE=$(echo "$check_line"  | sed -n 's/.*type=\([^ ]*\).*/\1/p')
-  TARGET=$(echo "$check_line"| sed -n 's/.*target=\([^ ]*\).*/\1/p')
-  MATCHER=$(echo "$check_line"| sed -n 's/.*matcher=\([^ ]*\).*/\1/p')
+  # Fields are extracted by anchoring each sed pattern to `^ACCEPTANCE_CHECK:` and walking
+  # through the fixed field order from investigate.md (id= type= target="..." matcher="..."
+  # description=<free text to EOL>) instead of truncating the line before extraction. This
+  # is deliberate: description= is unconstrained free text and can legitimately contain
+  # key="value"-shaped substrings (e.g. `description=works when target="prod"`), while
+  # target=/matcher= are themselves free-form shell commands/regexes and can legitimately
+  # contain the literal substring "description=" (e.g. `target="grep -c description= file"`).
+  # A prior fix truncated the line at the first description= to keep free text from being
+  # mistaken for a real field — but that truncation then broke whenever a *real* target=/
+  # matcher= value contained "description=" text, cutting mid-quote. Anchoring from the start
+  # of the line through each preceding field in order avoids truncation entirely: every
+  # anchored pattern matches only the one fixed position where that field can occur, so
+  # neither direction of collision (fake fields inside description=, or description=-like
+  # text inside target=/matcher=) can hijack extraction. Falls back to the full line
+  # unchanged if a field is absent (no-op, safe for malformed lines).
+  ID=$(echo "$check_line" | sed -n 's/^ACCEPTANCE_CHECK: id=\([^ ]*\) type=.*/\1/p')
+  TYPE=$(echo "$check_line" | sed -n 's/^ACCEPTANCE_CHECK: id=[^ ]* type=\([^ ]*\) target=.*/\1/p')
+  # target=/matcher= are quoted (target="..." matcher="...") per the investigate.md wire format —
+  # quoting is required so multi-word/piped shell-command values (e.g. `target="grep -qE '...' file"`)
+  # survive extraction instead of being truncated at the first space. The quote-bounded pattern
+  # (`"\([^"]*\)"`) captures everything up to the next literal quote verbatim, including a literal
+  # "description=" substring inside the value. Fall back to the legacy unquoted [^ ]* extraction
+  # only for older ACCEPTANCE_CHECK comments emitted before this fix (still correct for
+  # single-token exists/contains targets; multi-word legacy targets remain truncated until the
+  # issue's investigation is re-run to emit the quoted format).
+  TARGET=$(echo "$check_line" | sed -n 's/^ACCEPTANCE_CHECK: id=[^ ]* type=[^ ]* target="\([^"]*\)".*/\1/p')
+  [ -z "$TARGET" ] && TARGET=$(echo "$check_line" | sed -n 's/^ACCEPTANCE_CHECK: id=[^ ]* type=[^ ]* target=\([^ ]*\).*/\1/p')
+  MATCHER=$(echo "$check_line" | sed -n 's/^ACCEPTANCE_CHECK: id=[^ ]* type=[^ ]* target="[^"]*" matcher="\([^"]*\)".*/\1/p')
+  [ -z "$MATCHER" ] && MATCHER=$(echo "$check_line" | sed -n 's/^ACCEPTANCE_CHECK: id=[^ ]* type=[^ ]* target=[^ ]* matcher=\([^ ]*\).*/\1/p')
   DESC=$(echo "$check_line"  | sed -n 's/.*description=\(.*\)/\1/p')
 
   [ "$TYPE" = "skipped" ] && continue

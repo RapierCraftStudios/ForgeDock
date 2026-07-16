@@ -1,6 +1,6 @@
 ---
 description: Coordinate P0 incident response — hotfix validation, timeline reconstruction, and post-incident analysis
-argument-hint: [issue number | "active" | "postmortem {issue}"]
+argument-hint: "[issue number | \"active\" | \"postmortem {issue}\"]"
 install: extras
 ---
 <!-- SPDX-FileCopyrightText: Copyright (c) RapierCraft Studios -->
@@ -16,7 +16,7 @@ install: extras
 
 You are the pipeline's incident response coordinator. When production goes down or a critical bug surfaces, this command orchestrates the response: validates the hotfix before deploy, reconstructs the incident timeline, and produces a post-incident analysis.
 
-**Agent model policy**: `model: "sonnet"` (standard tier). Fallback: `model: "opus"` if rate-limited. User can override with `--model <name>`. Feature gate: pass `effort` in Task/Skill spawns only on Claude Code >= 2.1.154.
+**Agent model policy**: `model: "{DEFAULT_MODEL}"` — resolved from forge.yaml `agents.default_model`, else "sonnet" (standard tier). Fallback: `model: "opus"` if rate-limited. User can override with `--model <name>`. Feature gate: pass `effort` in Task/Skill spawns only on Claude Code >= 2.1.154.
 
 **NEVER use plan mode (EnterPlanMode)** — it breaks execution context.
 
@@ -109,7 +109,7 @@ gh api repos/{owner}/{repo}/issues/{NUMBER}/comments \
 Spawn a validation agent to check the proposed fix:
 
 ```
-Agent(model="sonnet", prompt="
+Agent(model="{SUBAGENT_MODEL}", prompt="
 You are validating a hotfix for a P0 production incident.
 
 Issue: #{NUMBER} — {TITLE}
@@ -242,7 +242,7 @@ gh pr list --state merged --base main --json number,title,mergedAt \
 Spawn an investigation agent:
 
 ```
-Agent(model="sonnet", prompt="
+Agent(model="{SUBAGENT_MODEL}", prompt="
 You are conducting a post-incident root cause analysis.
 
 Incident: #{NUMBER} — {TITLE}
@@ -330,9 +330,10 @@ POSTMORTEM_EOF
 For each action item identified in the postmortem:
 
 ```bash
-gh issue create --title "{fix|feat|refactor}: {action item title}" \
-  --label "{type_label},P{priority}" \
-  --body "$(cat <<'BODY_EOF'
+ACTION_ITEM_TITLE="{fix|feat|refactor}: {action item title}"
+ACTION_ITEM_BODY_TMPFILE=$(mktemp)
+trap 'rm -f "$ACTION_ITEM_BODY_TMPFILE"' EXIT
+cat > "$ACTION_ITEM_BODY_TMPFILE" <<'BODY_EOF'
 ## Problem
 
 {What gap or vulnerability this action item addresses. What failure mode it prevents.}
@@ -361,7 +362,16 @@ See postmortem: #{INCIDENT_NUMBER} (comment)
 
 {Concrete next step}
 BODY_EOF
-)"
+# Route through the /issue create-hook (canonical dedup + body validation) instead of a raw
+# `gh issue create`.
+Skill(skill="issue", args="--title \"$ACTION_ITEM_TITLE\" --body-file \"$ACTION_ITEM_BODY_TMPFILE\" --label \"{type_label}\" --label \"P{priority}\"")
+rm -f "$ACTION_ITEM_BODY_TMPFILE"
+trap - EXIT
+ACTION_ITEM_NUMBER=$(gh issue list \
+  --state open \
+  --search "$ACTION_ITEM_TITLE" \
+  --json number,title \
+  --jq --arg t "$ACTION_ITEM_TITLE" '.[] | select(.title == $t) | .number' 2>/dev/null | head -1)
 ```
 
 ---

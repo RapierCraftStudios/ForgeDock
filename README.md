@@ -1,12 +1,16 @@
 <div align="center">
 
-<img src="https://avatars.githubusercontent.com/in/3731547?s=200&u=b38eba537e011502c010d4b682d641f802591845&v=4" alt="ForgeDock" width="80" />
+<img src="https://avatars.githubusercontent.com/in/4051319?s=200&v=4" alt="ForgeDock" width="80" />
 
 <h1>ForgeDock</h1>
 
 <p><strong>Deterministic orchestration for autonomous software engineering.</strong></p>
 
 <p>LLMs generate the code. ForgeDock owns everything else — <strong>state, scheduling, recovery, review, and memory</strong> — as durable, inspectable structure on the GitHub you already have. Issues are the queue. PRs are the ledger. Annotations are the memory. Point it at an issue and get a merged, reviewed PR; point it at a <strong>milestone</strong> and get parallel pipelines with conflict-aware scheduling.</p>
+
+<p><em>ForgeDock (not ForgeRock) — this project is unrelated to ForgeRock's identity and access management platform.</em></p>
+
+<p>📖 <a href="https://rapiercraftstudios.github.io/ForgeDock/">Full documentation site</a></p>
 
 <a href="LICENSE"><img src="https://img.shields.io/badge/License-AGPL--3.0-blue.svg" alt="License: AGPL-3.0" /></a>
 <a href="https://github.com/RapierCraftStudios/ForgeDock/stargazers"><img src="https://img.shields.io/github/stars/RapierCraftStudios/ForgeDock?style=social" alt="GitHub Stars" /></a>
@@ -221,11 +225,12 @@ More ship today (web-property analytics, browser QA sweeps, self-benchmarking) �
 **Requirements:** [Claude Code](https://docs.anthropic.com/en/docs/claude-code) · [GitHub CLI](https://cli.github.com/) (authenticated) · Node.js ≥ 18.
 
 ```bash
-npx forgedock          # project-scoped install: checks your environment, installs commands for this repo, detects your repo, and hands you a reviewed forge.yaml
-npx forgedock --global # global install: installs into ~/.claude/commands/ — available in every Claude Code session on this machine
+npx forgedock # checks your environment, installs commands into ~/.claude/commands/ (available in every Claude Code session on this machine), detects your repo, and hands you a reviewed forge.yaml
 ```
 
-**Project-scoped is the default.** `npx forgedock` installs commands scoped to the current project directory. Use `--global` only when you want the commands available across all your projects on this machine.
+**Install is always global**, to `~/.claude/commands/`. `--global` is still accepted on the command line for backward compatibility but has no effect — there's no other install location to opt out of.
+
+> **Want engine-mode dispatch?** `npx forgedock` is transient — the `forgedock` binary isn't persisted in PATH after install. `/orchestrate` and `/autopilot` use agent dispatch mode by default, which is fully functional. To enable engine-mode dispatch (`forgedock run-issue`) with its durable phase table and fail-closed review gate, run `npm install -g forgedock` instead.
 
 One command does everything: it checks your environment, installs the slash commands into Claude Code, detects your repo (owner, branches, paths), and hands you a single annotated `forge.yaml` to review — press Enter to accept. Run `npx forgedock init` any time afterward to re-generate the config only.
 
@@ -249,16 +254,14 @@ Then just open Claude Code and run `/work-on <issue>`.
 
 Commands then appear as `/forgedock:work-on`, etc. You still run `npx forgedock init` to generate `forge.yaml`.
 
-**Headless / CI:** the pipeline also runs outside Claude Code. `npx forgedock run work-on <issue> --dry-run` previews the assembled prompt and tool plan; with an `ANTHROPIC_API_KEY`, `npx forgedock run` drives the same command specs through a hardened tool-use loop, and `npx forgedock run-issue <issue>` executes them on the durable engine (event-sourced run log, leases, crash-safe resume).
+**Headless / CI:** the pipeline also runs outside Claude Code. `npx forgedock run work-on <issue> --dry-run` previews the assembled prompt and tool plan. `npx forgedock run` picks an execution backend automatically (`--backend auto`, the default): if the Claude Code CLI (`claude`) is installed and already authenticated (Pro/Max subscription or a CLI-managed key), it drives the command through that — **no separate `ANTHROPIC_API_KEY` required**. Otherwise it falls back to the Anthropic API directly (`ANTHROPIC_API_KEY` required). Force either path explicitly with `--backend cli` / `--backend api` (or `FORGEDOCK_BACKEND=cli|api`) — the API backend is what CI environments without an interactive `claude` login should use. `npx forgedock run-issue <issue>` executes the same command specs on the durable engine (event-sourced run log, leases, crash-safe resume).
 
-**Install modes:**
+**Explicit install command:**
 
 ```bash
-npx forgedock install           # project-scoped: <cwd>/.claude/commands/ (default)
-npx forgedock install --global  # global: ~/.claude/commands/ (opt-in)
+npx forgedock install           # installs into ~/.claude/commands/
+npx forgedock install --global  # same thing — --global is accepted but is a no-op
 ```
-
-`uninstall`, `update`, and `doctor` auto-detect which mode is installed — no need to re-specify `--global` after a global install. To explicitly target global: `npx forgedock doctor --global`.
 
 **Maintenance:**
 
@@ -267,9 +270,9 @@ npx forgedock update      # relink commands + refresh the SessionStart hook
 npx forgedock enable      # turn ForgeDock on for this directory
 npx forgedock disable     # turn ForgeDock off for this directory
 npx forgedock status      # show ForgeDock's state for this directory
-npx forgedock doctor      # installation health check with fix hints (auto-detects mode)
+npx forgedock doctor      # installation health check with fix hints
 npx forgedock report      # 30-day pipeline impact receipts (--md for Markdown, --json for scripting)
-npx forgedock uninstall   # remove commands, the hook, and tracked copies (auto-detects mode)
+npx forgedock uninstall   # remove commands, the hook, and tracked copies
 npx forgedock help        # show everything
 ```
 
@@ -278,31 +281,11 @@ npx forgedock help        # show everything
 </details>
 
 <details>
-<summary><strong>Migrating from a global install</strong></summary>
+<summary><strong>A note on install location</strong></summary>
 
-If you installed ForgeDock before project-scoped became the default, your commands live in `~/.claude/commands/`. You have two paths forward:
+ForgeDock briefly experimented with a project-scoped-by-default install mode. It was backed out after causing a "split-brain" bug (`detect` assumed project-scoped while the installer still wrote globally — [#1589](https://github.com/RapierCraftStudios/ForgeDock/issues/1589)), so every version you'd realistically install today only ever writes to `~/.claude/commands/`. `--global` is still accepted as a flag for old scripts/muscle memory, but it changes nothing.
 
-**Keep the global install** — add `--global` going forward and nothing changes:
-
-```bash
-npx forgedock --global   # install / update globally as before
-```
-
-**Switch to project-scoped** (recommended for multi-repo setups):
-
-```bash
-# 1. Check your current install mode
-npx forgedock status
-
-# 2. Remove the global install
-npx forgedock uninstall --global
-
-# 3. Install project-scoped in each repo you use ForgeDock in
-cd /path/to/your/project
-npx forgedock
-```
-
-Run `npx forgedock doctor` after switching to confirm everything is healthy.
+If you're carrying an older `--global` habit in scripts or CI, it's harmless to leave it — `npx forgedock --global` and `npx forgedock` do exactly the same thing.
 
 </details>
 

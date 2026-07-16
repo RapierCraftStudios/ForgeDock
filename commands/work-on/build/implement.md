@@ -1,6 +1,6 @@
 ---
 description: Implementation agent — writes code, makes commits, posts builder comment
-argument-hint: [issue number] [--repo GH_REPO] [--gh-flag GH_FLAG] [--worktree PATH] [--branch BRANCH]
+argument-hint: "[issue number] [--repo GH_REPO] [--gh-flag GH_FLAG] [--worktree PATH] [--branch BRANCH]"
 ---
 <!-- SPDX-FileCopyrightText: Copyright (c) RapierCraft Studios -->
 <!-- SPDX-License-Identifier: AGPL-3.0-or-later -->
@@ -12,7 +12,7 @@ argument-hint: [issue number] [--repo GH_REPO] [--gh-flag GH_FLAG] [--worktree P
 **Invoked by**: `work-on.md` Step 3F, after worktree is created and context is gathered.
 **Output**: Write code, commit(s), post `<!-- FORGE:BUILDER -->` comment, return result to caller.
 
-**Agent model policy**: `model: "sonnet"` (standard tier). Fallback: `model: "opus"` if rate-limited. Feature gate: pass `effort` in Task/Skill spawns only on Claude Code >= 2.1.154.
+**Agent model policy**: `model: "{DEFAULT_MODEL}"` — resolved from forge.yaml `agents.default_model`, else "sonnet" (standard tier). Fallback: `model: "opus"` if rate-limited. Feature gate: pass `effort` in Task/Skill spawns only on Claude Code >= 2.1.154.
 **NEVER use plan mode (EnterPlanMode).**
 
 <!-- FORGE:SPEC_LOADED — work-on/build/implement.md loaded and active. Agent is bound by this spec. -->
@@ -87,6 +87,8 @@ Extract from contract:
 - Deliverables table (file, change, why)
 - Acceptance criteria
 
+**Danger-Zone Rule Cards (BINDING CONSTRAINTS)**: When the FORGE:CONTEXT comment contains a `### Danger-Zone Rule Cards` section, each card is a **binding must-not-violate constraint** with the same authority as devdocs custom instructions. Before writing any code, read all injected cards and internalize them as explicit prohibitions. If the implementation plan requires touching a file listed in a card, the card's rule overrides the plan — choose an implementation path that satisfies the rule, or post a `needs-human` comment explaining the conflict. Do NOT silently proceed past a rule card that the implementation would violate. The quality gate (check 2G.9) will flag violations as `known-pattern-recurrence` (highest embarrassment class). <!-- Added: forge#1744 -->
+
 ---
 
 ## Phase I2: Route by Task Type
@@ -100,7 +102,7 @@ Extract from contract:
 | Refactor / Maintenance | Implement directly following contract deliverables |
 | Investigation | Spawn research agents, create GitHub issues for findings, skip to I5 |
 
-**Investigation task special case**: Research deeply, create GitHub issues for each finding using the Pipeline Issue Template (see `commands/issue.md` § "Pipeline Issue Template"). Each issue MUST include `## Problem`, `## Affected Files`, and `## Acceptance Criteria`. Use `gh issue create {GH_FLAG}` with a fully-structured body. Post a deliverables comment listing the created issues, close the original issue, return `IMPLEMENT_RESULT: status: INVESTIGATION_COMPLETE`.
+**Investigation task special case**: Research deeply, create GitHub issues for each finding using the Pipeline Issue Template (see `commands/issue.md` § "Pipeline Issue Template"). Each issue MUST include `## Problem`, `## Affected Files`, and `## Acceptance Criteria`. Create each issue via the `/issue` create-hook's programmatic invocation contract (see `commands/issue.md` § "Programmatic Invocation Contract") — `Skill(skill="issue", args="--title \"...\" --body-file <path> --label ...")` — instead of calling the raw issue-creation command directly; this gets dedup and body validation for free. Post a deliverables comment listing the created issues, close the original issue, return `IMPLEMENT_RESULT: status: INVESTIGATION_COMPLETE`.
 
 ---
 

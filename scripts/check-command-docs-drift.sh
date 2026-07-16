@@ -96,7 +96,9 @@ declare -a DOCUMENTED_COMMANDS=()
 
 while IFS= read -r line; do
   # Match H3 heading: ### `/command-name` or ### `/command/sub`
-  if [[ "$line" =~ ^###[[:space:]]+\`(/[a-zA-Z0-9_/-]+)\` ]]; then
+  # Character class includes `.` to support dotted phase filenames (e.g.
+  # commands/orchestrate/phase-2.5-synthesis.md -> /orchestrate/phase-2.5-synthesis).
+  if [[ "$line" =~ ^###[[:space:]]+\`(/[a-zA-Z0-9_./-]+)\` ]]; then
     cmd="${BASH_REMATCH[1]}"
     DOCUMENTED_COMMANDS+=("$cmd")
   # Match table cell containing a bare command path: | `/command-name` | ...
@@ -105,7 +107,7 @@ while IFS= read -r line; do
   # matching inline code examples in prose or fix-instruction blocks.
   elif [[ "$line" =~ ^\| ]]; then
     # Extract all backtick-wrapped tokens that look like command paths
-    while [[ "$line" =~ \`(/[a-zA-Z0-9_/-]+)\` ]]; do
+    while [[ "$line" =~ \`(/[a-zA-Z0-9_./-]+)\` ]]; do
       cmd="${BASH_REMATCH[1]}"
       DOCUMENTED_COMMANDS+=("$cmd")
       # Remove the matched portion so the loop can find multiple tokens per line

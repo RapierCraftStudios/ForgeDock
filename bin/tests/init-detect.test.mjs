@@ -23,10 +23,10 @@
 import { describe, it, before, after } from "node:test";
 import assert from "node:assert/strict";
 import { mkdtempSync, rmSync, mkdirSync } from "node:fs";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 import os from "node:os";
 import { execFileSync } from "node:child_process";
-import { detectConfig, buildMinimalForgeYaml } from "../init-detect.mjs";
+import { detectConfig, buildMinimalForgeYaml, resolveGitRoot } from "../init-detect.mjs";
 
 // ---------------------------------------------------------------------------
 // Fixture helpers
@@ -303,14 +303,19 @@ describe("detectConfig — staging branch detection", async () => {
     assert.equal(draft.branches.staging.confidence, "high");
   });
 
-  it("falls back to default branch at medium confidence when no staging remote", async () => {
+  it("falls back to default branch at LOW confidence when no staging remote (forge#1850)", async () => {
     stagingRepoPath = join(tmpDir, "no-staging-repo");
     makeLocalRepo(stagingRepoPath, "main");
     addRemote(stagingRepoPath, "origin", "git@github.com:org/repo.git");
     // No fetch — no remote branches visible → no origin/staging
     const draft = await detectConfig(stagingRepoPath);
-    // Should fall back to default branch (or 'main') at medium confidence
-    assert.equal(draft.branches.staging.confidence, "medium");
+    // Deriving a merge target (staging is the fast-lane PR target) from a
+    // failed lookup is a guess, not a "likely correct" inference — it must
+    // be flagged "low" so it gets a # TODO comment and the [low] badge
+    // instead of silently blending in as verified. Regression guard for
+    // forge#1850 (medium confidence let a guessed staging: "main" ship
+    // silently, turning a routine PR into a production deploy trigger).
+    assert.equal(draft.branches.staging.confidence, "low");
     assert.ok(draft.branches.staging.value.length > 0);
   });
 
@@ -385,6 +390,156 @@ describe("detectConfig — non-git directory (graceful fallback)", async () => {
   it("paths.root equals the injected cwd even for non-git directory", async () => {
     const draft = await detectConfig(tmpDir);
     assert.equal(draft.paths.root.value, tmpDir);
+  });
+});
+
+// =============================================================================
+// Monorepo-adjacent directory detection (forge#1850)
+// =============================================================================
+//
+// Regression coverage for defect 3: `cwd` is not itself a git repository, but
+// holds exactly one immediate subdirectory that is (the ScraperAPI/alterlab
+// layout from the issue). Detection must resolve to that subdirectory instead
+// of falling straight to "your-github-org"/"your-repo-name" placeholders.
+
+describe("detectConfig — monorepo-adjacent subdirectory detection (forge#1850)", async () => {
+  let tmpDir;
+
+  before(() => {
+    tmpDir = mkdtempSync(join(os.tmpdir(), "forge-detect-monorepo-"));
+  });
+
+  after(() => {
+    rmSync(tmpDir, { recursive: true, force: true });
+  });
+
+  it("resolves to the single git subdirectory when cwd itself is not a repo", async () => {
+    const parentDir = join(tmpDir, "ScraperAPI");
+    const repoDir = join(parentDir, "alterlab");
+    makeLocalRepo(repoDir, "main");
+    addRemote(repoDir, "origin", "https://github.com/RapierCraftStudios/alterlab.git");
+
+    const draft = await detectConfig(parentDir);
+
+    // Owner/repo detected from the subdirectory's remote, not placeholders.
+    assert.equal(draft.project.owner.value, "RapierCraftStudios");
+    assert.equal(draft.project.repo.value, "alterlab");
+    assert.notEqual(draft.project.owner.confidence, "low");
+    // paths.root redirected to the subdirectory, not the (non-repo) parent.
+    assert.equal(draft.paths.root.value, repoDir);
+    assert.match(draft.paths.root.why, /alterlab/);
+  });
+
+  it("falls back to placeholders when cwd has zero git subdirectories", async () => {
+    const parentDir = join(tmpDir, "no-subdirs");
+    mkdirSync(join(parentDir, "not-a-repo"), { recursive: true });
+
+    const draft = await detectConfig(parentDir);
+
+    assert.equal(draft.project.owner.value, "your-github-org");
+    assert.equal(draft.paths.root.value, parentDir);
+  });
+
+  it("falls back to placeholders when cwd has multiple git subdirectories (ambiguous)", async () => {
+    const parentDir = join(tmpDir, "multi-repo");
+    makeLocalRepo(join(parentDir, "repo-a"), "main");
+    makeLocalRepo(join(parentDir, "repo-b"), "main");
+
+    const draft = await detectConfig(parentDir);
+
+    // Ambiguous — must not guess which subdirectory is "the" repo.
+    assert.equal(draft.project.owner.value, "your-github-org");
+    assert.equal(draft.paths.root.value, parentDir);
+  });
+});
+
+// =============================================================================
+// resolveGitRoot (direct unit tests — forge#1927)
+// =============================================================================
+//
+// resolveGitRoot() was previously only exercised indirectly through
+// detectConfig() (see the monorepo-adjacent describe block above). It is now
+// exported directly so bin/hooks/session-start.mjs can reuse it for
+// nudge-tracking. These tests cover it in isolation, independent of the rest
+// of detectConfig()'s detection pipeline.
+
+describe("resolveGitRoot", async () => {
+  let tmpDir;
+
+  before(() => {
+    tmpDir = mkdtempSync(join(os.tmpdir(), "forge-resolve-git-root-"));
+  });
+
+  after(() => {
+    rmSync(tmpDir, { recursive: true, force: true });
+  });
+
+  it("returns cwd unresolved when cwd is itself a git repo root", () => {
+    const repoDir = join(tmpDir, "own-repo");
+    makeLocalRepo(repoDir, "main");
+
+    const result = resolveGitRoot(repoDir);
+
+    assert.equal(result.root, repoDir);
+    assert.equal(result.resolved, false);
+  });
+
+  it("resolves to the true toplevel when cwd is nested inside a repo", () => {
+    const repoDir = join(tmpDir, "nested-repo");
+    makeLocalRepo(repoDir, "main");
+    const nestedDir = join(repoDir, "src", "components");
+    mkdirSync(nestedDir, { recursive: true });
+
+    const result = resolveGitRoot(nestedDir);
+
+    // git rev-parse --show-toplevel always emits forward slashes, even on
+    // Windows (see resolveGitRoot's own doc comment) — normalize with
+    // path.resolve() before comparing so a pure separator-style difference
+    // doesn't fail the assertion.
+    assert.equal(resolve(result.root), resolve(repoDir));
+    assert.equal(result.resolved, true);
+  });
+
+  it("resolves to the single git subdirectory when cwd is a non-repo parent", () => {
+    const parentDir = join(tmpDir, "single-child-parent");
+    const repoDir = join(parentDir, "my-app");
+    makeLocalRepo(repoDir, "main");
+
+    const result = resolveGitRoot(parentDir);
+
+    assert.equal(result.root, repoDir);
+    assert.equal(result.resolved, true);
+    assert.match(result.why, /my-app/);
+  });
+
+  it("falls back to unresolved cwd when there are zero git subdirectories", () => {
+    const parentDir = join(tmpDir, "no-child-repos");
+    mkdirSync(join(parentDir, "not-a-repo"), { recursive: true });
+
+    const result = resolveGitRoot(parentDir);
+
+    assert.equal(result.root, parentDir);
+    assert.equal(result.resolved, false);
+  });
+
+  it("falls back to unresolved cwd when there are two or more git subdirectories (ambiguous)", () => {
+    const parentDir = join(tmpDir, "two-sibling-repos");
+    makeLocalRepo(join(parentDir, "repo-a"), "main");
+    makeLocalRepo(join(parentDir, "repo-b"), "main");
+
+    const result = resolveGitRoot(parentDir);
+
+    assert.equal(result.root, parentDir);
+    assert.equal(result.resolved, false);
+  });
+
+  it("falls back to unresolved cwd when cwd does not exist", () => {
+    const missingDir = join(tmpDir, "does-not-exist");
+
+    const result = resolveGitRoot(missingDir);
+
+    assert.equal(result.root, missingDir);
+    assert.equal(result.resolved, false);
   });
 });
 

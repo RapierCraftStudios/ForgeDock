@@ -40,6 +40,11 @@
     "description": "Pipeline: PR created, under review. Managed by ForgeDock."
   },
   {
+    "name": "workflow:awaiting-merge",
+    "color": "FF8C00",
+    "description": "Pipeline: remediated + re-reviewed, awaiting a human merge decision. Managed by ForgeDock."
+  },
+  {
     "name": "workflow:merged",
     "color": "0E8A16",
     "description": "Pipeline: PR merged, issue closed. Managed by ForgeDock."
@@ -58,6 +63,11 @@
     "name": "needs-human",
     "color": "E4E669",
     "description": "Pipeline stalled — requires human intervention. Managed by ForgeDock."
+  },
+  {
+    "name": "blocked-on-human-merge",
+    "color": "006B75",
+    "description": "Dependent of a gated (needs-human/awaiting-merge) predecessor. Managed by ForgeDock."
   },
   {
     "name": "review-finding",
