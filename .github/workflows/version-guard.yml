@@ -83,18 +83,32 @@ jobs:
               return 0;
             }
 
+            // This gate exists to block a specific hazard (a version regression
+            // on main). If it cannot evaluate its own precondition — either
+            // package.json fails to parse, or the version field is missing or
+            // not valid semver — it MUST fail closed rather than silently pass.
+            // A gate that waves a PR through when it can't read the data it's
+            // supposed to check provides false assurance, which is strictly
+            // worse than no gate at all. (Mirrors the repo's own fail-closed
+            // precedent for unreadable/unparseable gate input — see
+            // phases.mjs → detectOutcome, which treats a missing or
+            // unparseable review verdict as a failure, never as an approval.)
             let base, head;
             try {
               base = JSON.parse(fs.readFileSync(`${dir}/base-package.json`, "utf8"));
             } catch (e) {
-              console.log("::warning::Could not parse base package.json — skipping version-guard check.");
-              process.exit(0);
+              console.log(
+                `::error::Deploy Version Guard FAILED — could not parse main's package.json as JSON (${e.message}). Cannot verify the head version is not a regression, so failing closed instead of silently passing.`
+              );
+              process.exit(1);
             }
             try {
               head = JSON.parse(fs.readFileSync(`${dir}/head-package.json`, "utf8"));
             } catch (e) {
-              console.log("::warning::Could not parse PR head package.json — skipping version-guard check.");
-              process.exit(0);
+              console.log(
+                `::error::Deploy Version Guard FAILED — could not parse the PR head's package.json as JSON (${e.message}). Cannot verify the head version is not a regression, so failing closed instead of silently passing.`
+              );
+              process.exit(1);
             }
 
             const baseVersion = base.version;
@@ -104,9 +118,9 @@ jobs:
 
             if (!baseParsed || !headParsed) {
               console.log(
-                `::warning::Could not parse semver from base version "${baseVersion}" or head version "${headVersion}" — skipping version-guard check.`
+                `::error::Deploy Version Guard FAILED — could not parse a valid semver "version" field from main (saw: ${JSON.stringify(baseVersion)}) or from the PR head (saw: ${JSON.stringify(headVersion)}). Cannot verify the head version is not a regression, so failing closed instead of silently passing.`
               );
-              process.exit(0);
+              process.exit(1);
             }
 
             console.log(`Base (main) package.json version: ${baseVersion}`);
