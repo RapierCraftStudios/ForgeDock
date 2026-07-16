@@ -1269,8 +1269,25 @@ for FINDING_NUM in {spawned_finding_numbers}; do
   FINDING_DATA=$(gh issue view $FINDING_NUM -R {GH_REPO} --json labels,title,body \
     --jq '{labels: [.labels[].name], title: .title, body: .body}')
 
-  PRIORITY=$(echo "$FINDING_DATA" | jq -r '.labels[] | select(startswith("priority:P")) | ltrimstr("priority:")' | head -1)
+  # Priority extraction accepts both label schemas: canonical `priority:P<n>` (the only
+  # form review-pr.md ever creates) and bare `P<n>` (carried by some consumer repos'
+  # externally/legacy-labeled issues). `priority:P<n>` wins if both are present on the
+  # same issue. Normalizes to bare P<n> form since all downstream comparisons in this file
+  # compare against bare "P1"/"P2"/"P3". Mirrored verbatim in the token-budget gate below,
+  # the Step 4F.2 sweep loop, and phase-1-resolve.md / cleanup.md's batching queries —
+  # keep all sites byte-identical (forge#1837: mirrored checks must not drift). <!-- Added: forge#2232 -->
+  # NOTE: $FINDING_DATA.labels is already a flat array of label-name strings (see the
+  # gh issue view --jq above: {labels: [.labels[].name], ...}) — so this reads `.labels[]`
+  # directly, NOT `.labels[].name` (that would error: "Cannot index string with name").
+  PRIORITY=$(echo "$FINDING_DATA" | jq -r '
+    ([.labels[] | select(test("^priority:P[0-9]+$"))] | .[0]) //
+    ([.labels[] | select(test("^P[0-9]+$"))] | .[0]) //
+    "" | ltrimstr("priority:")')
   TITLE=$(echo "$FINDING_DATA" | jq -r '.title')
+
+  if [ -z "$PRIORITY" ]; then
+    echo "WARNING: #${FINDING_NUM} has no parseable priority label (checked priority:P<n> and bare P<n>) — treating as untriaged, all priority-dependent rules below will not match"
+  fi
 
   # Rule 0: Batch fully human-gated — checked FIRST, overrides even the P1/P2 priority
   # override below. BATCH_FULLY_GATED is computed once per completion cycle in Step 4B
@@ -1353,8 +1370,9 @@ for FINDING_NUM in "${QUEUED_FINDINGS[@]}"; do
     or ([.labels[]] | any(. == "security" or . == "billing" or . == "anti-bot" or . == "auth"))
   ' >/dev/null && continue
 
-  # Only P3 findings are eligible (P1/P2 already dispatched individually above)
-  echo "$FINDING_DATA" | jq -e '[.labels[]] | any(. == "priority:P3")' >/dev/null || continue
+  # Only P3 findings are eligible (P1/P2 already dispatched individually above).
+  # Schema-tolerant: matches canonical priority:P3 or bare P3 (forge#2232).
+  echo "$FINDING_DATA" | jq -e '[.labels[]] | any(test("^(priority:)?P3$"))' >/dev/null || continue
 
   FINDING_FILE=$(echo "$FINDING_DATA" | jq -r '.body' | grep -oE '`[^`]+\.(py|tsx?|jsx?|sql|json|ya?ml|sh|md)`' | head -1 | tr -d '`')
   [ -z "$FINDING_FILE" ] && continue
@@ -1434,8 +1452,16 @@ Rule 5 from the evaluation order above. Charges ONE `TOKEN_ESTIMATE_PER_FINDING`
 TOKEN_BUDGET_DEFERRED_THIS_RUN=()
 
 for FINDING_NUM in "${QUEUED_FINDINGS[@]}"; do
+  # Schema-tolerant extraction (forge#2232) — same pattern as the Step 4C main loop above.
+  # Defaults to P3 only when NEITHER label form is present (an empty labels match, not
+  # merely a non-priority:P<n> label), so a bare-P3-labeled finding is read correctly
+  # instead of falling through to this default.
   FINDING_PRIORITY=$(gh issue view "$FINDING_NUM" -R {GH_REPO} --json labels \
-    --jq '([.labels[].name | select(startswith("priority:P"))] | .[0] // "priority:P3") | ltrimstr("priority:")' 2>/dev/null || echo "P3")
+    --jq '(
+      ([.labels[].name | select(test("^priority:P[0-9]+$"))] | .[0]) //
+      ([.labels[].name | select(test("^P[0-9]+$"))] | .[0]) //
+      "priority:P3"
+    ) | ltrimstr("priority:")' 2>/dev/null || echo "P3")
 
   # P1/P2 are NEVER gated by the token budget — they were queued by rule 2 above
   # regardless of budget headroom; skip them here and leave them in QUEUED_FINDINGS.
@@ -1688,7 +1714,16 @@ for FINDING_NUM in "${SWEEP_CANDIDATES[@]}"; do
   STATE=$(echo "$FINDING_DATA" | jq -r '.state')
   [ "$STATE" = "CLOSED" ] && continue
 
-  PRIORITY=$(echo "$FINDING_DATA" | jq -r '.labels[] | select(startswith("priority:P")) | ltrimstr("priority:")' | head -1)
+  # Schema-tolerant extraction (forge#2232), mirrors the Step 4C main loop above.
+  # PRIORITY is not currently read by the branches below (comment/typo is title-only),
+  # kept normalized for consistency and to avoid reintroducing the schema bug if a
+  # future rule here starts branching on it. NOTE: $FINDING_DATA.labels here is already
+  # a flat array of label-name strings (see the --jq above: {labels: [.labels[].name], ...}),
+  # so this reads `.labels[]` directly, not `.labels[].name`.
+  PRIORITY=$(echo "$FINDING_DATA" | jq -r '
+    ([.labels[] | select(test("^priority:P[0-9]+$"))] | .[0]) //
+    ([.labels[] | select(test("^P[0-9]+$"))] | .[0]) //
+    "" | ltrimstr("priority:")')
   TITLE=$(echo "$FINDING_DATA" | jq -r '.title')
 
   # Re-apply heuristics against the drained DAG (no active batch files)
