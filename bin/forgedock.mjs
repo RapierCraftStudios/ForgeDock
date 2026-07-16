@@ -1708,6 +1708,25 @@ async function update() {
       const isDetached = branch === "HEAD";
       const needsCheckout = branch !== "main";
       if (needsCheckout) {
+        // Dirty-tree guard: refuse to move HEAD in this clone if there are
+        // uncommitted TRACKED changes. Untracked files are intentionally
+        // excluded (--untracked-files=no) so a clean checkout with stray
+        // scratch/log files does not spuriously block the update.
+        const porcelain = execFileSync(
+          "git",
+          ["status", "--porcelain", "--untracked-files=no"],
+          { cwd: FORGE_HOME, encoding: "utf-8" },
+        ).trim();
+        if (porcelain) {
+          console.log(
+            `  ${YELLOW}Working tree has uncommitted changes on branch ${branch} — skipping update.${RESET}`,
+          );
+          console.log(
+            `  ${YELLOW}Commit or stash your changes before updating, or run from a clean clone. HEAD was NOT moved.${RESET}`,
+          );
+          return;
+        }
+
         if (isDetached) {
           console.log(
             `  ${YELLOW}Detached HEAD state — switching to main for update.${RESET}`,
@@ -1717,7 +1736,7 @@ async function update() {
             `  On branch ${CYAN}${branch}${RESET} — switching to ${CYAN}main${RESET} for update...`,
           );
         }
-        execSync("git checkout main --quiet", { cwd: FORGE_HOME });
+        execFileSync("git", ["checkout", "main", "--quiet"], { cwd: FORGE_HOME });
       }
 
       const before = execSync("git rev-parse HEAD", {
@@ -1744,7 +1763,7 @@ async function update() {
       // Restore original branch after a successful update.
       if (needsCheckout && !isDetached) {
         try {
-          execSync(`git checkout ${branch} --quiet`, { cwd: FORGE_HOME });
+          execFileSync("git", ["checkout", branch, "--quiet"], { cwd: FORGE_HOME });
           console.log(
             `  Restored branch ${CYAN}${branch}${RESET}.`,
           );
