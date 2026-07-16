@@ -34,6 +34,17 @@ export const DEFAULT_LEASE_RENEW_INTERVAL_MS = 240000;
  * @param {number} [opts.leaseRenewIntervalMs] - forge#2239: how often the lease
  *   is re-written while an unsatisfied phase's runner is executing. Defaults to
  *   DEFAULT_LEASE_RENEW_INTERVAL_MS. Overridable for tests.
+ * @param {(event: {event: string, phase: string, status?: string, detail?: string}) => void} [opts.onProgress] -
+ *   forge#2240: optional phase-boundary observer. Called with
+ *   `{event: "phase_enter", phase}` right before a phase's runner is about to
+ *   execute (i.e. the phase was NOT already satisfied on reconcile), and with
+ *   `{event: "phase_exit", phase, status: "committed"|"blocked", detail?}`
+ *   once that phase's outcome is known. Defaults to a no-op so every existing
+ *   caller/test is unaffected. Deliberately engine.mjs's ONLY new surface for
+ *   this issue — no `console.log`/stdout write is added here; printing is the
+ *   CLI layer's job (bin/engine-cli.mjs), preserving the io-injection/testability
+ *   convention this module already follows. Invocations are wrapped so a
+ *   throwing callback can never crash a run.
  */
 export async function runIssue(opts) {
   const { issue, dir, agentId, lane = "staging", io, runner,
@@ -45,7 +56,28 @@ export async function runIssue(opts) {
           // this is purely additive pass-through, not a new default.
           backend, model,
           leaseTtlMs = DEFAULT_LEASE_TTL_MS,
-          leaseRenewIntervalMs = DEFAULT_LEASE_RENEW_INTERVAL_MS } = opts;
+          leaseRenewIntervalMs = DEFAULT_LEASE_RENEW_INTERVAL_MS,
+          onProgress = () => {} } = opts;
+
+  // forge#2240: defensive wrapper — a caller's onProgress must never be able
+  // to crash an otherwise-healthy run. A plain try/catch only guards a
+  // *synchronous* throw — if onProgress is (or becomes) async and its
+  // returned promise rejects, that rejection is never awaited/caught here,
+  // producing an unhandled promise rejection that terminates the whole
+  // Node process (Node >=15 default behavior) well after runIssue() itself
+  // has already resolved. That is strictly worse than the silent-hang bug
+  // this issue fixes. Detect a thenable return value and attach a no-op
+  // .catch() to it (fire-and-forget — onProgress is not awaited either way,
+  // consistent with its documented synchronous-observer contract) so a
+  // rejection can never escape as unhandled. (review finding, #2240)
+  const emitProgress = (event) => {
+    try {
+      const result = onProgress(event);
+      if (result && typeof result.then === "function") {
+        result.catch(() => { /* best-effort observer, never fatal */ });
+      }
+    } catch { /* best-effort observer, never fatal */ }
+  };
 
   // forge#2054: validate `backend` before anything else — before state is
   // read/written and before the phase/retry loop begins below. An invalid
@@ -133,6 +165,9 @@ export async function runIssue(opts) {
       outcome = { status: "committed", outputs: reconciled.outputs || {} };
     } else {
       if (reconciled.outputs?.pr) state.pr = reconciled.outputs.pr;
+      // forge#2240: the phase is actually about to run (not a resume no-op)
+      // — this is the one point in the loop where "entering phase X" is true.
+      emitProgress({ event: "phase_enter", phase: phase.id });
       // forge#2239: renew the lease immediately before running this phase's
       // runner, then keep renewing it on a heartbeat for as long as the
       // runner is in flight. A single phase can legitimately run longer than
@@ -180,6 +215,12 @@ export async function runIssue(opts) {
         // human-judgment block (see #2244/#2261). Any other thrown error is
         // a true unexpected crash and keeps propagating unchanged.
         if (e.code === "NO_API_KEY" || e.code === "NO_SDK" || e.code === "CLI_BACKEND_FAILED") {
+          // forge#2240 (review finding): this fail-fast path previously left
+          // phase_exit unreported — a caller tailing progress output would see
+          // "→ phase X started" and then nothing, dangling exactly on the
+          // phase that actually failed. Report it as blocked before
+          // terminating so the progress trail stays complete on this path too.
+          emitProgress({ event: "phase_exit", phase: phase.id, status: "blocked", detail: `${e.code} - ${e.message}` });
           return await terminate(state, "engine-error", `phase ${phase.id}: ${e.code} - ${e.message}`);
         }
         throw e;
@@ -193,9 +234,13 @@ export async function runIssue(opts) {
       }
     }
 
-    if (outcome.status === "blocked") return await terminate(state, outcome.reason || "needs-human", outcome.detail);
+    if (outcome.status === "blocked") {
+      emitProgress({ event: "phase_exit", phase: phase.id, status: "blocked", detail: outcome.detail });
+      return await terminate(state, outcome.reason || "needs-human", outcome.detail);
+    }
 
     // committed
+    emitProgress({ event: "phase_exit", phase: phase.id, status: "committed" });
     appendEvent(dir, issue, { event: "PHASE_COMMIT", phase: phase.id, outputs: outcome.outputs || {} });
     state = deriveState(readLog(dir, issue));
     if (outcome.terminalReason) state.terminalReason = outcome.terminalReason;

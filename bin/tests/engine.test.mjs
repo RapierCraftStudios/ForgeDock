@@ -66,6 +66,114 @@ describe("runIssue", () => {
     assert.equal(s.branch, "fix/real-branch-42");
   });
 
+  it("forge#2240: onProgress fires phase_enter/phase_exit for every phase actually run, and never crashes the run if it throws", async () => {
+    const { w, io } = fakeWorld();
+    const script = {
+      "work-on/investigate": () => { w.markers += " INVESTIGATION:COMPLETE"; },
+      "work-on/build/context": () => { w.markers += " FORGE:CONTEXT:COMPLETE"; },
+      "work-on/build/architect": () => { w.markers += " FORGE:ARCHITECT:COMPLETE"; },
+      "work-on/build": () => { w.markers += " FORGE:BUILDER:COMPLETE **Branch**: `fix/real-branch-42`"; w.commitsAhead = 2; },
+      "work-on/review": () => { w.pr = 7; w.prMerged = true; },
+      "work-on/close": () => { w.issueState = "CLOSED"; },
+    };
+    const runner = async ({ commandName }) => { script[commandName](); return { status: "complete" }; };
+    const events = [];
+    // Intentionally throws on the first call — proves a misbehaving onProgress
+    // cannot crash an otherwise-healthy run (engine.mjs wraps every call).
+    let thrown = false;
+    const onProgress = (e) => {
+      events.push(e);
+      if (!thrown) { thrown = true; throw new Error("boom — a badly-behaved observer"); }
+    };
+
+    const res = await runIssue({ issue: 42, dir, agentId: "a1", lane: "staging",
+      io, runner, now: () => 1000, maxAttempts: 3, onProgress });
+
+    assert.equal(res.terminalReason, "merged", "a throwing onProgress must not crash or alter the run's outcome");
+    const enters = events.filter((e) => e.event === "phase_enter").map((e) => e.phase);
+    const exits = events.filter((e) => e.event === "phase_exit").map((e) => e.phase);
+    assert.deepEqual(enters, ["investigate", "context", "architect", "build", "review", "close"]);
+    assert.deepEqual(exits, ["investigate", "context", "architect", "build", "review", "close"]);
+    assert.ok(events.filter((e) => e.event === "phase_exit").every((e) => e.status === "committed"));
+  });
+
+  it("forge#2240 (review finding): an async onProgress that rejects does not produce an unhandled rejection", async () => {
+    // Security review of PR #2319 found that emitProgress's try/catch only
+    // guards a *synchronous* throw — an async onProgress whose returned
+    // promise rejects would previously escape as an unhandled rejection,
+    // crashing the whole process well after runIssue() itself resolved.
+    // Reproduce with process's own 'unhandledRejection' listener: if the fix
+    // works, it must never fire.
+    const { w, io } = fakeWorld();
+    const script = {
+      "work-on/investigate": () => { w.markers += " INVESTIGATION:COMPLETE"; },
+      "work-on/build/context": () => { w.markers += " FORGE:CONTEXT:COMPLETE"; },
+      "work-on/build/architect": () => { w.markers += " FORGE:ARCHITECT:COMPLETE"; },
+      "work-on/build": () => { w.markers += " FORGE:BUILDER:COMPLETE **Branch**: `fix/real-branch-42`"; w.commitsAhead = 2; },
+      "work-on/review": () => { w.pr = 7; w.prMerged = true; },
+      "work-on/close": () => { w.issueState = "CLOSED"; },
+    };
+    const runner = async ({ commandName }) => { script[commandName](); return { status: "complete" }; };
+
+    let unhandledRejectionFired = false;
+    const onUnhandled = () => { unhandledRejectionFired = true; };
+    process.on("unhandledRejection", onUnhandled);
+    try {
+      // An async onProgress whose returned promise rejects on every call.
+      const onProgress = async () => { throw new Error("async observer rejection"); };
+      const res = await runIssue({ issue: 42, dir, agentId: "a1", lane: "staging",
+        io, runner, now: () => 1000, maxAttempts: 3, onProgress });
+      assert.equal(res.terminalReason, "merged", "an async-rejecting onProgress must not alter the run's outcome");
+      // Give any not-yet-settled microtask/rejection a chance to surface before asserting.
+      await new Promise((resolve) => setImmediate(resolve));
+      assert.equal(unhandledRejectionFired, false, "onProgress's rejected promise must be caught, never surfaced as an unhandled rejection");
+    } finally {
+      process.off("unhandledRejection", onUnhandled);
+    }
+  });
+
+  it("forge#2240 (review finding): phase_exit(blocked) fires on the engine-error fail-fast path, not just a dangling phase_enter", async () => {
+    // Security review of PR #2319 found that the NO_API_KEY/NO_SDK/CLI_BACKEND_FAILED
+    // fail-fast catch emitted phase_enter but returned via terminate() without a
+    // matching phase_exit — leaving the progress trail dangling exactly on the
+    // phase that actually failed, undermining this issue's own diagnosability goal.
+    const { w, io } = fakeWorld();
+    const script = {
+      "work-on/investigate": () => { w.markers += " INVESTIGATION:COMPLETE"; },
+      "work-on/build/context": () => { w.markers += " FORGE:CONTEXT:COMPLETE"; },
+      "work-on/build/architect": () => {
+        throw Object.assign(new Error("claude CLI exited with status 1"), { code: "CLI_BACKEND_FAILED" });
+      },
+    };
+    const runner = async ({ commandName }) => { script[commandName]?.(); return { status: "complete" }; };
+    const events = [];
+    const res = await runIssue({ issue: 42, dir, agentId: "a1", lane: "staging",
+      io, runner, now: () => 1000, maxAttempts: 3, onProgress: (e) => events.push(e) });
+
+    assert.equal(res.terminalReason, "engine-error");
+    const architectEvents = events.filter((e) => e.phase === "architect");
+    assert.deepEqual(architectEvents.map((e) => e.event), ["phase_enter", "phase_exit"],
+      "the architect phase must report both entry AND exit on the engine-error fail-fast path");
+    const exitEvent = architectEvents.find((e) => e.event === "phase_exit");
+    assert.equal(exitEvent.status, "blocked");
+  });
+
+  it("forge#2240: onProgress defaults to a no-op — omitting it is safe", async () => {
+    const { w, io } = fakeWorld();
+    const script = {
+      "work-on/investigate": () => { w.markers += " INVESTIGATION:COMPLETE"; },
+      "work-on/build/context": () => { w.markers += " FORGE:CONTEXT:COMPLETE"; },
+      "work-on/build/architect": () => { w.markers += " FORGE:ARCHITECT:COMPLETE"; },
+      "work-on/build": () => { w.markers += " FORGE:BUILDER:COMPLETE **Branch**: `fix/real-branch-42`"; w.commitsAhead = 2; },
+      "work-on/review": () => { w.pr = 7; w.prMerged = true; },
+      "work-on/close": () => { w.issueState = "CLOSED"; },
+    };
+    const runner = async ({ commandName }) => { script[commandName](); return { status: "complete" }; };
+    const res = await runIssue({ issue: 42, dir, agentId: "a1", lane: "staging",
+      io, runner, now: () => 1000, maxAttempts: 3 });
+    assert.equal(res.terminalReason, "merged");
+  });
+
   it("stops at needs-human when a phase reports blocked (no silent merge)", async () => {
     const { w, io } = fakeWorld();
     const script = {
@@ -76,10 +184,16 @@ describe("runIssue", () => {
       "work-on/review": () => { w.pr = 7; w.prNeedsHuman = true; },
     };
     const runner = async ({ commandName }) => { script[commandName]?.(); return { status: "complete" }; };
+    const events = [];
     const res = await runIssue({ issue: 42, dir, agentId: "a1", lane: "staging",
-      io, runner, now: () => 1000, maxAttempts: 1 });
+      io, runner, now: () => 1000, maxAttempts: 1, onProgress: (e) => events.push(e) });
     assert.equal(res.terminalReason, "needs-human");
     assert.ok(w.labels.includes("needs-human"));
+    // forge#2240: the phase that ultimately blocks must report a phase_exit
+    // with status "blocked" — not silently omitted.
+    const lastExit = events.filter((e) => e.event === "phase_exit").at(-1);
+    assert.equal(lastExit.phase, "review");
+    assert.equal(lastExit.status, "blocked");
   });
 
   it("C1: commitsAhead swallows a git rejection on first build (no ref yet) and still drives build to merged", async () => {
