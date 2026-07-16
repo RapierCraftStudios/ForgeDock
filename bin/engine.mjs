@@ -111,10 +111,30 @@ export async function runIssue(opts) {
       outcome = { status: "committed", outputs: reconciled.outputs || {} };
     } else {
       if (reconciled.outputs?.pr) state.pr = reconciled.outputs.pr;
-      outcome = await runPhaseWithRetry(phase, state, { io, runner, dir, issue, commandsDir, maxAttempts, backend, model });
+      try {
+        outcome = await runPhaseWithRetry(phase, state, { io, runner, dir, issue, commandsDir, maxAttempts, backend, model });
+      } catch (e) {
+        // forge#2261: NO_API_KEY/NO_SDK/CLI_BACKEND_FAILED are fail-fast
+        // rethrown by runPhaseWithRetry() (see its own catch below) instead
+        // of being retried — but until now that throw was never caught here,
+        // so it propagated all the way out of runIssue() uncaught (through
+        // bin/engine-cli.mjs's runFromCli(), which also has no try/catch)
+        // and only landed in bin/forgedock.mjs's outermost `run-issue` case,
+        // which just prints the message to stderr and exits 1 — no terminal
+        // state or label was ever written, leaving the issue stuck on
+        // whatever workflow label it already had. Catch it here instead and
+        // reach a clean terminal state: "engine-error" is deliberately NOT
+        // "needs-human" — this is the engine/tool breaking, not a genuine
+        // human-judgment block (see #2244/#2261). Any other thrown error is
+        // a true unexpected crash and keeps propagating unchanged.
+        if (e.code === "NO_API_KEY" || e.code === "NO_SDK" || e.code === "CLI_BACKEND_FAILED") {
+          return await terminate(state, "engine-error", `phase ${phase.id}: ${e.code} - ${e.message}`);
+        }
+        throw e;
+      }
     }
 
-    if (outcome.status === "blocked") return await terminate(state, "needs-human", outcome.detail);
+    if (outcome.status === "blocked") return await terminate(state, outcome.reason || "needs-human", outcome.detail);
 
     // committed
     appendEvent(dir, issue, { event: "PHASE_COMMIT", phase: phase.id, outputs: outcome.outputs || {} });
@@ -134,12 +154,27 @@ export async function runIssue(opts) {
     const final = { ...deriveState(readLog(dir, issue)), terminal: true, terminalReason: reason, lease: null };
     await projector.writeState(issue, final);
     if (reason === "needs-human") await projector.setLabel(issue, "needs-human");
+    // forge#2261: a distinct label for engine/tool-level failures (broken CLI
+    // invocation, exhausted retries where the runner itself never once
+    // succeeded) — NOT needs-human. /orchestrate's classify_predecessor_state()
+    // (commands/orchestrate/phase-4-execution.md) must not treat this as GATED:
+    // there is no human decision pending, just a tool that needs to be re-run.
+    else if (reason === "engine-error") await projector.setLabel(issue, "workflow:engine-error");
     return { terminalReason: reason, detail };
   }
 }
 
 async function runPhaseWithRetry(phase, state, ctx) {
   const { io, runner, dir, issue, commandsDir, maxAttempts, backend, model } = ctx;
+  // forge#2261: true only if EVERY attempt failed by the runner itself
+  // throwing (never once reached phase.detectOutcome()). This is the signal
+  // that distinguishes an engine/tool crash (the tool never even produced a
+  // result to evaluate) from a genuine content-level block (the tool ran
+  // fine, but the phase's own completion criteria weren't met — e.g. an
+  // unmerged PR, an unresolved branch, or a fixed-point zero-commits case).
+  // Flips to false the instant any attempt's runner() call succeeds, even if
+  // that attempt's detectOutcome() itself reports failure.
+  let allAttemptsThrew = true;
   for (let attempt = 1; attempt <= maxAttempts; attempt++) {
     appendEvent(dir, issue, { event: "PHASE_START", phase: phase.id, attempt });
     try {
@@ -172,6 +207,7 @@ async function runPhaseWithRetry(phase, state, ctx) {
       appendEvent(dir, issue, { event: "PHASE_FAILED", phase: phase.id, attempt, reason: e.message, maxAttempts });
       continue;
     }
+    allAttemptsThrew = false;
     const outcome = await phase.detectOutcome(state, io);
     if (outcome.status === "committed" || outcome.status === "blocked") return outcome;
     appendEvent(dir, issue, { event: "PHASE_FAILED", phase: phase.id, attempt, reason: outcome.detail, maxAttempts });
@@ -190,6 +226,22 @@ async function runPhaseWithRetry(phase, state, ctx) {
     }
   }
   // Exhausted transient retries → escalate (spec §7).
+  // forge#2261: if the runner itself threw on every single attempt (it never
+  // once produced a result for detectOutcome() to evaluate), this is an
+  // engine/tool failure, not a content-level judgment call — tag the outcome
+  // so runIssue()'s terminate() writes a distinct label instead of
+  // needs-human. If at least one attempt reached detectOutcome() (the tool
+  // ran, the phase just isn't done), this stays the existing untagged shape,
+  // which runIssue() defaults to "needs-human" — unchanged behavior for every
+  // genuine content-level block (unmerged PR, unresolved branch, a transient
+  // git error inside commitsAhead(), etc.).
+  if (allAttemptsThrew) {
+    return {
+      status: "blocked",
+      detail: `phase ${phase.id} failed after ${maxAttempts} attempts (runner threw every attempt)`,
+      reason: "engine-error",
+    };
+  }
   return { status: "blocked", detail: `phase ${phase.id} failed after ${maxAttempts} attempts` };
 }
 

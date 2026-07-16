@@ -5,7 +5,12 @@
  * @typedef ... (see plan "Shared types")
  */
 
-export const TERMINAL_REASONS = ["merged", "invalid", "needs-human", "decomposed"];
+// forge#2261: "engine-error" is a distinct terminal reason for engine/tool-level
+// failures (e.g. an exhausted retry loop where the runner itself never once
+// succeeded, or a fail-fast CLI_BACKEND_FAILED/NO_API_KEY/NO_SDK throw) — kept
+// separate from "needs-human" so it is never misclassified as a genuine
+// human-judgment block by /orchestrate's classify_predecessor_state().
+export const TERMINAL_REASONS = ["merged", "invalid", "needs-human", "decomposed", "engine-error"];
 
 /**
  * Fetch the issue's comments. Returns both:
