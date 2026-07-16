@@ -95,7 +95,7 @@ export function formatTerminalDiagnostics(dir, issue) {
     const state = deriveState(events);
     const lastFailure = [...events].reverse().find((e) => e.event === "PHASE_FAILED");
     if (lastFailure) {
-      lines.push(`  phase:   ${lastFailure.phase} (failed ${lastFailure.attempt}/${DEFAULT_MAX_ATTEMPTS} attempts)`);
+      lines.push(`  phase:   ${lastFailure.phase} (failed ${lastFailure.attempt}/${lastFailure.maxAttempts ?? DEFAULT_MAX_ATTEMPTS} attempts)`);
       lines.push(`  reason:  ${lastFailure.reason}`);
     }
     const committed = state.committed.length ? state.committed.join(",") : "";
