@@ -207,6 +207,41 @@ describe("runIssue", () => {
     assert.equal(buildFailures.length, 1, "only 1 PHASE_FAILED for build — not 3");
   });
 
+  it("forge#2176: a transient git error during commitsAhead (not a genuine zero) stays retryable", async () => {
+    // Regression for a review finding on #2176: commitsAhead() previously folded
+    // BOTH a genuine "0 commits ahead" AND a transient git failure (lock
+    // contention, unfetched ref, I/O hiccup) into the same 0 value. If the build
+    // phase treated every commitsAhead()===0 as the non-retryable fixed point,
+    // a merely transient git error would wrongly escalate to needs-human after
+    // just 1 attempt instead of getting the retries it previously — and still
+    // should — get. commitsAhead() now returns -1 (not 0) when git itself
+    // throws, and detectOutcome must NOT set retryable:false in that case.
+    const { w, io } = fakeWorld();
+    const REAL_BRANCH = "fix/some-real-branch-42";
+    let buildRunnerCalls = 0;
+    io.git = async () => { throw new Error("fatal: unable to read current working directory: Device or resource busy"); };
+    const script = {
+      "work-on/investigate": () => { w.markers += " INVESTIGATION:COMPLETE"; },
+      "work-on/build/context": () => { w.markers += " FORGE:CONTEXT:COMPLETE"; },
+      "work-on/build/architect": () => { w.markers += " FORGE:ARCHITECT:COMPLETE"; },
+      "work-on/build": () => {
+        buildRunnerCalls++;
+        w.markers += ` FORGE:BUILDER:COMPLETE **Branch**: \`${REAL_BRANCH}\``;
+      },
+    };
+    const runner = async ({ commandName }) => { script[commandName]?.(); return { status: "complete" }; };
+
+    const res = await runIssue({ issue: 42, dir, agentId: "a1", lane: "staging",
+      io, runner, now: () => 1000, maxAttempts: 3 });
+
+    assert.equal(res.terminalReason, "needs-human", "still escalates once transient retries are exhausted");
+    assert.equal(buildRunnerCalls, 3,
+      "a transient git error (commitsAhead returning -1) must NOT set retryable:false — all 3 attempts must run");
+    const events = readLog(dir, 42);
+    const buildFailures = events.filter((e) => e.event === "PHASE_FAILED" && e.phase === "build");
+    assert.equal(buildFailures.length, 3, "all 3 attempts must be logged — transient git errors keep retrying");
+  });
+
   it("forge#2176 (AC4): a phase that does not opt into retryable:false still retries to maxAttempts (transient failures unaffected)", async () => {
     // Guard against over-generalizing the retryable mechanism: the review
     // phase's "PR open, not merged" detail can legitimately repeat identically
