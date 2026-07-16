@@ -154,7 +154,21 @@ async function runPhaseWithRetry(phase, state, ctx) {
       // A missing API key / SDK is a config error, not a transient phase
       // failure — surface it distinctly instead of burning retries and
       // escalating to needs-human as if the LLM run itself misbehaved.
-      if (e.code === "NO_API_KEY" || e.code === "NO_SDK") throw e;
+      //
+      // forge#2259: a non-zero exit from the nested `claude` CLI
+      // (bin/runner.mjs's runCliBackend(), which sets err.code =
+      // "CLI_BACKEND_FAILED" on any non-zero `result.status`) is likewise
+      // not a transient phase failure — same argv/cwd/session state
+      // reproduces the identical crash on every attempt. Retrying it
+      // `maxAttempts` times burns the entire retry budget (observed live in
+      // #2244: 3 nested-CLI invocations, zero PRs/commits) on a failure that
+      // was never going to succeed. Fail fast instead, mirroring the
+      // NO_API_KEY/NO_SDK precedent (commit 570cb10 / #2054 established this
+      // exact dispatch pattern for INVALID_BACKEND). This does not assume
+      // *why* the CLI exited 1 (the quota/session-limit theory in #2244 is
+      // unproven) — a deterministic tool crash should not be retried as if
+      // transient regardless of its root cause.
+      if (e.code === "NO_API_KEY" || e.code === "NO_SDK" || e.code === "CLI_BACKEND_FAILED") throw e;
       appendEvent(dir, issue, { event: "PHASE_FAILED", phase: phase.id, attempt, reason: e.message, maxAttempts });
       continue;
     }
