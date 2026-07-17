@@ -1243,7 +1243,7 @@ describe("forge (Act II)", () => {
     assert.equal(manifest.files["a.md"], true);
   });
 
-  it("user-owned regular file is never clobbered", async () => {
+  it("stale regular-file copy with no manifest entry is overwritten and adopted (forge#2459)", async () => {
     const home = mkdtempSync(join(os.tmpdir(), "fd-forge-home4-"));
     const forgeHome = mkdtempSync(join(os.tmpdir(), "fd-forge-src4-"));
     mkdirSyncFs(join(forgeHome, "commands"), { recursive: true });
@@ -1251,18 +1251,51 @@ describe("forge (Act II)", () => {
     writeFileSync(join(forgeHome, "commands", "a.md"), "A", "utf-8");
     writeFileSync(join(forgeHome, "bin", "hooks", "session-start.mjs"), "// hook", "utf-8");
 
-    // Pre-create the target as a user-owned regular file — no manifest entry.
+    // Pre-create the target as a stale regular-file copy (content mismatches
+    // the current source) with no manifest entry — e.g. a pre-manifest
+    // ForgeDock version's copy-fallback install, or one that fell out of the
+    // manifest. `a.md` is a path forge() itself ships (findMarkdownFiles(commandsDir)
+    // enumerates it), so it is never an arbitrary user file — doctor --fix must
+    // be able to repair it without a manual delete step.
     const target = join(home, ".claude", "commands", "a.md");
     mkdirSyncFs(join(home, ".claude", "commands"), { recursive: true });
-    writeFileSync(target, "USER OWNED", "utf-8");
+    writeFileSync(target, "OLD STALE COPY", "utf-8");
 
     const { ctx, w } = stubCtx({ home });
     ctx.forgeHome = forgeHome;
     const res = await forge(ctx);
 
-    assert.equal(readFileSync(target, "utf-8"), "USER OWNED");
-    assert.equal(res.skipped, 1);
-    assert.match(w.text, /WARNING/);
+    assert.equal(readFileSync(target, "utf-8"), "A", "stale copy should be overwritten with current source content");
+    assert.equal(res.updated, 1);
+    assert.doesNotMatch(w.text, /WARNING/, "should not warn — the stale copy was repaired");
+    const manifest = JSON.parse(
+      readFileSync(join(home, ".claude", "forgedock", "copied-commands.json"), "utf-8"),
+    );
+    assert.equal(manifest.files["a.md"], true, "repaired file should be adopted into the manifest");
+  });
+
+  it("files outside the shipped command set are never touched by forge() (forge#2459 AC#3)", async () => {
+    const home = mkdtempSync(join(os.tmpdir(), "fd-forge-home-unrelated-"));
+    const forgeHome = mkdtempSync(join(os.tmpdir(), "fd-forge-src-unrelated-"));
+    mkdirSyncFs(join(forgeHome, "commands"), { recursive: true });
+    mkdirSyncFs(join(forgeHome, "bin", "hooks"), { recursive: true });
+    writeFileSync(join(forgeHome, "commands", "a.md"), "A", "utf-8");
+    writeFileSync(join(forgeHome, "bin", "hooks", "session-start.mjs"), "// hook", "utf-8");
+
+    // A file at a path forge() never enumerates (no corresponding source file
+    // under forgeHome/commands) — this is genuinely outside the ForgeDock
+    // command set (e.g. a user's own custom slash command) and must be left
+    // completely untouched, since forge()'s loop only ever iterates paths
+    // returned by findMarkdownFiles(commandsDir).
+    const unrelatedTarget = join(home, ".claude", "commands", "my-custom-command.md");
+    mkdirSyncFs(join(home, ".claude", "commands"), { recursive: true });
+    writeFileSync(unrelatedTarget, "MY OWN CUSTOM COMMAND", "utf-8");
+
+    const { ctx } = stubCtx({ home });
+    ctx.forgeHome = forgeHome;
+    await forge(ctx);
+
+    assert.equal(readFileSync(unrelatedTarget, "utf-8"), "MY OWN CUSTOM COMMAND");
   });
 
   it("adopts pre-manifest regular file into manifest when content matches source", async () => {

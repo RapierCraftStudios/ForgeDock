@@ -1623,22 +1623,33 @@ export async function forge(ctx) {
           }
         }
       } else {
-        // Regular file not in manifest — could be a copy from a pre-manifest
-        // ForgeDock version, or a user-owned file. Content-compare: if it
-        // matches source exactly, adopt it into the manifest silently (it was
-        // ours). If it differs, leave it untouched — it may be user-customized.
-        let adopted = false;
+        // Regular file not in manifest — a copy from a pre-manifest ForgeDock
+        // version, or a stale copy that was never adopted. `rel` here is
+        // always enumerated from `files` (ForgeDock's own commandsDir
+        // listing, see above) — every path this loop touches is a
+        // ForgeDock-managed command file, never an arbitrary user file, so
+        // there is no "user-customized" case to protect. Content-compare: if
+        // it matches source, adopt it into the manifest silently (it was
+        // ours all along). If it differs, it's stale — overwrite it and
+        // adopt it into the manifest too, mirroring the manifest-tracked
+        // branch above, so future runs take the manifest-aware fast path.
+        let handled = false;
         try {
           const [src, dst] = await Promise.all([readFile(file), readFile(target)]);
           if (src.equals(dst)) {
             recordCopy(rel);
             skipped++;
-            adopted = true;
+            handled = true;
+          } else {
+            await copyFile(file, target);
+            recordCopy(rel);
+            updated++;
+            handled = true;
           }
-        } catch { /* readFile failure — fall through to warning */ }
-        if (!adopted) {
+        } catch { /* readFile/copyFile failure — fall through to warning */ }
+        if (!handled) {
           if (barShown) { w.write("\x1b[1A\x1b[2K"); barShown = false; }
-          w.write(`  WARNING: ${rel} is a regular file — skipping (remove it manually to let ForgeDock manage it)\n`);
+          w.write(`  WARNING: ${rel} could not be repaired — remove it manually to let ForgeDock manage it\n`);
           skipped++;
         }
       }
