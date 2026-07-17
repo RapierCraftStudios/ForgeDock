@@ -73,6 +73,14 @@ before(() => {
   writeFileSync(join(COMMANDS_DIR, "review-pr.md"), "# review-pr spec");
   writeFileSync(join(COMMANDS_DIR, "work-on", "build.md"), "# build spec");
   writeFileSync(join(COMMANDS_DIR, "work-on", "build", "architect.md"), "# architect spec");
+  // forge#2434: spec files for the remaining hard-enforced phase ids
+  // (investigate/review/close), so runCommand()'s loadCommandSpec() can
+  // resolve them — without these, tests using these commandName values
+  // would fail with "Unknown command" before ever reaching the
+  // report_result tool-loop logic under test.
+  writeFileSync(join(COMMANDS_DIR, "work-on", "investigate.md"), "# investigate spec");
+  writeFileSync(join(COMMANDS_DIR, "work-on", "review.md"), "# review spec");
+  writeFileSync(join(COMMANDS_DIR, "work-on", "close.md"), "# close spec");
 });
 
 after(() => {
@@ -143,6 +151,9 @@ describe("listCommands", () => {
       "work-on",
       "work-on/build",
       "work-on/build/architect",
+      "work-on/close",
+      "work-on/investigate",
+      "work-on/review",
     ]);
   });
 
@@ -1261,6 +1272,115 @@ describe("runCommand — report_result tool-loop control flow", () => {
       lines.some((l) => /called again/.test(l)),
       "repeat report_result call must be logged, not silent",
     );
+  });
+
+  // -------------------------------------------------------------------------
+  // forge#2434: the accept-path scenarios above only ever drive the loop
+  // with commandName "work-on/build" (or "work-on/build/architect" for the
+  // soft-skip case) — proving isHardEnforced's phase-id-agnostic dispatch
+  // works, but never proving the phase-id -> schema lookup is correct for
+  // the other three hard-enforced phases, each of which has a differently
+  // shaped PHASE_RESULT_SCHEMAS entry (packages/protocol/src/phases.js).
+  // These three tests close that gap with one accept-path proof per
+  // remaining hard-enforced phase id. The reject/nudge/phase-failed/
+  // max_tokens branches are intentionally NOT re-parametrized here — they
+  // are phase-id-agnostic (isHardEnforced and the loop dispatch above do not
+  // branch on which schema is active), so a single accept-path integration
+  // test per phase id is sufficient to prove the wiring without duplicating
+  // purely mechanical scenarios four times over.
+  // -------------------------------------------------------------------------
+
+  it("accept path (investigate): a schema-valid report_result call is threaded through as `result` for the investigate phase", async () => {
+    const client = makeFakeClient([
+      {
+        stop_reason: "tool_use",
+        content: [
+          {
+            type: "tool_use",
+            id: "t1",
+            name: "report_result",
+            input: { verdict: "CONFIRMED", decompose: false },
+          },
+        ],
+        usage: { input_tokens: 10, output_tokens: 5 },
+      },
+      { stop_reason: "end_turn", content: [{ type: "text", text: "done" }], usage: { input_tokens: 3, output_tokens: 2 } },
+    ]);
+    const result = await runCommand({
+      commandsDir: COMMANDS_DIR,
+      commandName: "work-on/investigate",
+      args: ["1"],
+      cwd: TMP,
+      apiKey: "test-key",
+      backend: "api",
+      anthropicClient: client,
+      logger: { log() {} },
+    });
+    assert.equal(result.status, "complete");
+    assert.deepEqual(result.result, { verdict: "CONFIRMED", decompose: false });
+    assert.equal(client.calls.length, 2);
+  });
+
+  it("accept path (review): a schema-valid report_result call is threaded through as `result` for the review phase", async () => {
+    const client = makeFakeClient([
+      {
+        stop_reason: "tool_use",
+        content: [
+          {
+            type: "tool_use",
+            id: "t1",
+            name: "report_result",
+            input: { pr: 1, disposition: "APPROVED" },
+          },
+        ],
+        usage: { input_tokens: 10, output_tokens: 5 },
+      },
+      { stop_reason: "end_turn", content: [{ type: "text", text: "done" }], usage: { input_tokens: 3, output_tokens: 2 } },
+    ]);
+    const result = await runCommand({
+      commandsDir: COMMANDS_DIR,
+      commandName: "work-on/review",
+      args: ["1"],
+      cwd: TMP,
+      apiKey: "test-key",
+      backend: "api",
+      anthropicClient: client,
+      logger: { log() {} },
+    });
+    assert.equal(result.status, "complete");
+    assert.deepEqual(result.result, { pr: 1, disposition: "APPROVED" });
+    assert.equal(client.calls.length, 2);
+  });
+
+  it("accept path (close): a schema-valid report_result call is threaded through as `result` for the close phase", async () => {
+    const client = makeFakeClient([
+      {
+        stop_reason: "tool_use",
+        content: [
+          {
+            type: "tool_use",
+            id: "t1",
+            name: "report_result",
+            input: { merged: true },
+          },
+        ],
+        usage: { input_tokens: 10, output_tokens: 5 },
+      },
+      { stop_reason: "end_turn", content: [{ type: "text", text: "done" }], usage: { input_tokens: 3, output_tokens: 2 } },
+    ]);
+    const result = await runCommand({
+      commandsDir: COMMANDS_DIR,
+      commandName: "work-on/close",
+      args: ["1"],
+      cwd: TMP,
+      apiKey: "test-key",
+      backend: "api",
+      anthropicClient: client,
+      logger: { log() {} },
+    });
+    assert.equal(result.status, "complete");
+    assert.deepEqual(result.result, { merged: true });
+    assert.equal(client.calls.length, 2);
   });
 });
 
