@@ -1072,8 +1072,19 @@ describe("runCommand — report_result tool-loop control flow", () => {
       {
         stop_reason: "tool_use",
         content: [
-          // wrong type for branch, missing required commits
-          { type: "tool_use", id: "t1", name: "report_result", input: { branch: 123 } },
+          // wrong type for branch, missing required commits, PLUS an
+          // unexpected field whose key embeds a raw control character
+          // (ESC, \x1b). `validatePhaseResult`'s "Unexpected field" check
+          // (packages/protocol/src/phases.js) interpolates the offending
+          // key unescaped into its error message — this is the one
+          // validation-error path that actually carries raw model-supplied
+          // string content, so it's the only input shape that can prove
+          // `sanitizeOutputExcerptForLog` (bin/runner.mjs) ran on the
+          // rejection text below, rather than merely asserting that *some*
+          // rejection happened. A plain type-mismatch input (the previous
+          // `{ branch: 123 }`) would pass this test identically whether or
+          // not the sanitize call existed at all.
+          { type: "tool_use", id: "t1", name: "report_result", input: { branch: 123, "bad\x1b[31mkey": "z" } },
         ],
         usage: {},
       },
@@ -1106,6 +1117,21 @@ describe("runCommand — report_result tool-loop control flow", () => {
     const toolResult = rejectionTurn.content.find((c) => c.tool_use_id === "t1");
     assert.equal(toolResult.is_error, true);
     assert.match(toolResult.content, /schema validation failed/);
+    // Sanitization-specific assertions: prove sanitizeOutputExcerptForLog
+    // actually ran on the rejection text, not just that rejection happened.
+    // If the `errors.map((e) => sanitizeOutputExcerptForLog(e))` call in
+    // bin/runner.mjs were deleted, the raw ESC byte from the offending key
+    // above would flow straight into toolResult.content and the first
+    // assertion below would fail.
+    assert.ok(
+      !toolResult.content.includes("\x1b"),
+      "raw ESC control byte must not reach the tool_result content — sanitizeOutputExcerptForLog should have escaped it",
+    );
+    assert.match(
+      toolResult.content,
+      /bad\\x1b\[31mkey/,
+      "escaped form of the control character (\\x1b) must be present, proving sanitization ran",
+    );
   });
 
   it("non-tool_use nudge/continue path: a clean stop before any report_result call is rejected and the model is nudged to call it", async () => {
