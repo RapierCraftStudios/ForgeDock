@@ -462,6 +462,22 @@ export const PHASES = [
         ? { satisfied: true }
         : { satisfied: false };
     },
+    // forge#2441: NOT called by the current production dispatch. Since this
+    // phase also declares `execute` (below), bin/engine.mjs's runIssue()
+    // dispatches it via runExecutePhase() — which calls only phase.execute()
+    // and never phase.detectOutcome() (see runExecutePhase's own doc comment
+    // and runIssue()'s `phase.execute ? runExecutePhase(...) : runPhaseWithRetry(...)`
+    // branch). `close`'s `reconcile` above remains genuinely live (it's called
+    // unconditionally for every phase, independent of `execute`) — only
+    // `detectOutcome` is currently unreachable in production.
+    //
+    // Retained deliberately, not deleted: (1) it has direct, load-bearing unit
+    // test coverage in bin/tests/engine-phases.test.mjs (a standalone
+    // malformed-response test plus a full describe("close.detectOutcome", ...)
+    // block covering the CLOSED / workflow:merged / PR-open branches),
+    // independent of whether the dispatcher ever calls it; (2) it is the
+    // dormant logic `runPhaseWithRetry` would use for this phase if `execute`
+    // were ever removed from `close`, restoring the LLM-driven dispatch path.
     async detectOutcome(state, io) {
       const snap = await issueSnapshot(state.issue, io);
       if (!snap.ok) return { status: "failed", detail: "malformed gh response" };
