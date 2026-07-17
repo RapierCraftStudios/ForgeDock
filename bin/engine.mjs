@@ -14,6 +14,44 @@ import { VALID_BACKENDS } from "./runner.mjs";
 // diagnostics without duplicating the retry budget constant.
 export const DEFAULT_MAX_ATTEMPTS = 3;
 
+/**
+ * forge#2382: engine-issued `workflow:*` label transitions — an in-process
+ * port of scripts/transition-label.sh's state machine (see
+ * bin/engine/projector.mjs's `setWorkflowLabel`, which this calls; that
+ * method is the shared add-target/remove-stale/clear-needs-human-on-
+ * awaiting-merge logic transition-label.sh implements as a standalone
+ * script). Maps a just-committed phase id to the `workflow:*` label
+ * representing the NEXT stage the run is entering, mirroring
+ * commands/work-on.md's own label-transition points (Phase 1D
+ * `ready-to-build`, Phase 3D `building`) so an engine-driven run reaches the
+ * identical label sequence an LLM-driven run would — deterministically, and
+ * without depending on any phase spec's own `gh issue edit` prose firing
+ * correctly.
+ *
+ * "review" is intentionally absent: `workflow:in-review` is conditional on a
+ * PR actually existing (adopted OR created), not on the `build` phase merely
+ * committing — the `review` phase's own `reconcile` (bin/engine/phases.mjs,
+ * forge#2382) issues that transition itself once a PR is resolved. "close" is
+ * likewise absent — `close.execute()` (forge#2381) already sets
+ * `workflow:merged` directly. "investigate" maps to `ready-to-build` and
+ * "architect" maps to `building` (the last phase to commit before the `build`
+ * phase itself dispatches, matching work-on.md Phase 3D's placement — right
+ * before the actual build work begins). "decompose"/"remediate" are absent:
+ * both are branch phases whose own LLM-authored specs (work-on/decompose.md,
+ * work-on/remediate.md Phase M8) own their terminal-state labeling already.
+ *
+ * Illegal transitions are impossible by construction: this map is only ever
+ * consulted with the fixed `phase.id` of whatever phase just committed in
+ * THIS iteration of the loop below, each id appears at most once as a key,
+ * and `setWorkflowLabel` itself throws on any value outside its own
+ * canonical state list — there is no code path that can request an
+ * unrecognized `workflow:*` label through this mechanism.
+ */
+const WORKFLOW_LABEL_AFTER_COMMIT = {
+  investigate: "ready-to-build",
+  architect: "building",
+};
+
 // forge#2239: lease TTL and renewal-interval defaults. Exported/overridable
 // (mirrors DEFAULT_MAX_ATTEMPTS) so tests can exercise "phase outlives the
 // TTL, lease gets renewed" without waiting on real 10-minute wall-clock time.
@@ -278,6 +316,24 @@ export async function runIssue(opts) {
       // — this is the one point in the loop where "entering phase X" is true.
       phaseEntered = true;
       emitProgress({ event: "phase_enter", phase: phase.id });
+      // forge#2382: engine-owned worktree lifecycle, before dispatching ANY
+      // phase whose runner needs the build's worktree on disk — see
+      // ensureWorktreeForBuild()'s own doc comment for why this is scoped to
+      // `state.branch` already being known rather than to `phase.id ===
+      // "build"` specifically. `state.branch` is set exactly once, by the
+      // "build" phase's own PHASE_COMMIT — so on the very iteration "build"
+      // itself is about to dispatch, `state.branch` is still null (a
+      // first-time build owns its own initial worktree/branch creation, and
+      // this call is correctly a no-op there). The case this DOES catch: a
+      // later phase in the SAME lineage (review, remediate) dispatching
+      // after a resume/hydrate where the worktree directory was lost
+      // out-of-band between sessions but the branch survived — those phase
+      // specs `cd {WORKTREE_PATH}` and would otherwise fail outright instead
+      // of getting the re-attach commands/work-on/build.md's own worktree
+      // logic (Phase B1C) would have performed had IT been the one resuming.
+      if (state.branch) {
+        try { await ensureWorktreeForBuild(state, io); } catch { /* best-effort — the phase's own runner is the fallback */ }
+      }
       // forge#2239: renew the lease immediately before running this phase's
       // runner, then keep renewing it on a heartbeat for as long as the
       // runner is in flight. A single phase can legitimately run longer than
@@ -427,6 +483,20 @@ export async function runIssue(opts) {
     if (outcome.terminalReason) state.terminalReason = outcome.terminalReason;
     await projector.writeState(issue, { ...state, lease: { by: agentId, until: now() + leaseTtlMs } });
 
+    // forge#2382: engine-issued workflow:* label transition for this commit —
+    // see WORKFLOW_LABEL_AFTER_COMMIT's doc comment above. Deliberately
+    // scoped to forward-progress commits only: a terminal outcome on this
+    // same phase (investigate reporting "invalid"/"decomposed") must NOT
+    // also get stamped with the forward-progress label on its way out — that
+    // phase's own terminal path (invalid via investigate.md itself; decomposed
+    // via the handoff to the "decompose" phase) owns the label in that case.
+    if (!outcome.terminalReason) {
+      const nextLabel = WORKFLOW_LABEL_AFTER_COMMIT[phase.id];
+      if (nextLabel) {
+        try { await projector.setWorkflowLabel(issue, nextLabel); } catch { /* best-effort — a label-transition failure must not crash a healthy run */ }
+      }
+    }
+
     // forge#2379: the "investigate" phase reporting terminalReason "decomposed"
     // is a HANDOFF to the "decompose" phase (bin/engine/phases.mjs), not a
     // dead end — decompose is what actually dispatches work-on/decompose
@@ -456,6 +526,21 @@ export async function runIssue(opts) {
     appendEvent(dir, issue, { event: "RUN_TERMINAL", reason });
     const final = { ...deriveState(readLog(dir, issue)), terminal: true, terminalReason: reason, lease: null };
     await projector.writeState(issue, final);
+    // forge#2382: prune the worktree/branch once the run reaches a genuinely
+    // final state with no further branch-based work possible — see
+    // cleanupWorktreeAfterTerminal()'s own doc comment for the full
+    // rationale. Deliberately scoped to "merged" only: needs-human/
+    // engine-error/awaiting-merge keep the branch/worktree alive on purpose
+    // (a human, or a future `--remediate` run, may still need it).
+    // "invalid"/"decomposed" never have a branch to clean up in the first
+    // place (state.branch is only ever set once the build phase commits,
+    // which cannot happen before either of those reasons is reached) — this
+    // is enforced by cleanupWorktreeAfterTerminal's own `!s.branch` guard,
+    // not by narrowing this call site further, so no branch/worktree state
+    // is ever silently destroyed on a path a human might still need.
+    if (reason === "merged") {
+      try { await cleanupWorktreeAfterTerminal(final, io); } catch { /* best-effort — never mask the real terminal reason being returned */ }
+    }
     if (reason === "needs-human") await projector.setLabel(issue, "needs-human");
     // forge#2261: a distinct label for engine/tool-level failures (broken CLI
     // invocation, exhausted retries where the runner itself never once
@@ -465,6 +550,126 @@ export async function runIssue(opts) {
     else if (reason === "engine-error") await projector.setLabel(issue, "workflow:engine-error");
     return { terminalReason: reason, detail };
   }
+}
+
+/**
+ * forge#2382: engine-owned worktree lifecycle — an in-process port of
+ * scripts/worktree-lifecycle.sh's `ensure`/`cleanup` subcommands (ported
+ * rather than shelled out, matching how the label state machine above was
+ * ported into bin/engine/projector.mjs — same rationale: "reusing ... logic
+ * in-process" per this issue's own item 3 wording). Both operate purely
+ * through the injected `io.git` — no direct filesystem access beyond what
+ * `git worktree`/`git branch` themselves touch, and no dependency on the
+ * standalone script being present on disk.
+ *
+ * Unlike the standalone script, the branch name is not always known ahead of
+ * the build phase's own runner() dispatch — commands/work-on/build.md's
+ * Phase B1A derives it from the issue title via LLM judgment, and that
+ * choice cannot be guessed here (see the pre-existing comment above this
+ * file's phase loop, just above `let phase;`). `state.branch` is set exactly
+ * once: by the "build" phase's own PHASE_COMMIT (bin/engine/phases.mjs's
+ * `build.detectOutcome`), which means on the very iteration the "build" phase
+ * ITSELF is about to dispatch, `state.branch` is still null — a first-time
+ * build owns its own initial worktree/branch creation, and this function is
+ * correctly a no-op there (see the `!state.branch` guard below).
+ *
+ * `ensureWorktreeForBuild` is therefore scoped to the case that IS knowable
+ * ahead of a dispatch: a LATER phase in the same lineage — "review" or
+ * "remediate" — about to run after `state.branch` is already resolved (a
+ * resume/hydrate, or simply the very next loop iteration after "build"
+ * commits), whose worktree directory has gone missing out-of-band (a lost
+ * session, an unrelated `/cleanup` sweep). Those phase specs `cd
+ * {WORKTREE_PATH}` for `git push`/etc. and would otherwise fail outright
+ * instead of getting the exact re-attach commands/work-on/build.md's own
+ * Phase B1C worktree logic performs for itself on a resumed build. Called
+ * from the phase loop below (`if (state.branch) { ... }`) — not gated to
+ * `phase.id === "build"` — for exactly this reason.
+ *
+ * @param {import("./engine/phases.mjs").RunState} state
+ * @param {{gh: Function, git: Function}} io
+ */
+async function ensureWorktreeForBuild(state, io) {
+  if (!state.branch) return; // nothing to ensure yet — first-time build owns its own creation
+  const hasLocalBranch = await branchExistsLocally(state.branch, io);
+  if (!hasLocalBranch) return; // branch doesn't exist yet either — nothing to re-attach
+  const registeredPath = await worktreePathForBranch(state.branch, io);
+  if (registeredPath) return; // already has a worktree registered — nothing to do
+  await io.git(["worktree", "add", "--", worktreeEnsureFallbackPath(state.issue), state.branch]);
+}
+
+/**
+ * forge#2382: engine-native worktree cleanup — called from `terminate()`
+ * above, scoped to `reason === "merged"` so a run that ends needs-human/
+ * invalid/engine-error/awaiting-merge/decomposed never loses a branch a
+ * human (or a future `--remediate` run) might still need. In-process port of
+ * worktree-lifecycle.sh's `cleanup` subcommand, generalized to not require a
+ * precomputed path: the actual worktree path is discovered from `git
+ * worktree list` by matching `state.branch` (see `worktreePathForBranch`),
+ * since — as documented on `ensureWorktreeForBuild` above — the engine never
+ * learns the exact path the build runner chose for it.
+ *
+ * Both steps (worktree removal, branch deletion) are independently
+ * best-effort/tolerant of an already-removed state, matching the standalone
+ * script's own `|| true` tolerance.
+ *
+ * @param {import("./engine/phases.mjs").RunState} state
+ * @param {{gh: Function, git: Function}} io
+ */
+async function cleanupWorktreeAfterTerminal(state, io) {
+  if (!state.branch) return; // no build ever ran — nothing to clean up
+  try {
+    const path = await worktreePathForBranch(state.branch, io);
+    if (path) await io.git(["worktree", "remove", path, "--force"]);
+  } catch { /* best-effort — tolerate an already-removed worktree */ }
+  try {
+    await io.git(["branch", "-D", state.branch]);
+  } catch { /* best-effort — tolerate an already-deleted branch */ }
+}
+
+/** @returns {Promise<boolean>} whether a local branch ref exists for `branch`. */
+async function branchExistsLocally(branch, io) {
+  try {
+    await io.git(["show-ref", "--verify", "--quiet", `refs/heads/${branch}`]);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Resolve the worktree path currently registered for `branch`, by scanning
+ * `git worktree list --porcelain` for a `worktree <path>` line immediately
+ * (within the same record) followed by a matching `branch refs/heads/<branch>`
+ * line. Returns null if no worktree is registered for that branch (including
+ * on any `git` failure — fail-open, consistent with every other best-effort
+ * git probe in this file).
+ * @returns {Promise<string|null>}
+ */
+async function worktreePathForBranch(branch, io) {
+  let out;
+  try {
+    out = await io.git(["worktree", "list", "--porcelain"]);
+  } catch {
+    return null;
+  }
+  const ref = `refs/heads/${branch}`;
+  let currentPath = null;
+  for (const line of String(out || "").split("\n")) {
+    if (line.startsWith("worktree ")) currentPath = line.slice("worktree ".length).trim();
+    else if (line.startsWith("branch ") && line.slice("branch ".length).trim() === ref) return currentPath;
+  }
+  return null;
+}
+
+/**
+ * Deterministic, collision-safe fallback path for `ensureWorktreeForBuild`'s
+ * re-attach. The build runner's own slug-derived path
+ * (commands/work-on/build.md Phase B1A/B1C) is unknown here, so this
+ * intentionally does NOT try to reproduce it — `git worktree add` only needs
+ * A valid, currently-unused path, not the same one a prior run used.
+ */
+function worktreeEnsureFallbackPath(issue) {
+  return `.claude/worktrees/engine-resume-${issue}`;
 }
 
 /**

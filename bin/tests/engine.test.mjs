@@ -18,15 +18,23 @@ afterEach(() => { rmSync(dir, { recursive: true, force: true }); });
 // A scriptable fake GitHub/git world whose markers advance as phases "run".
 function fakeWorld() {
   const w = { markers: "", pr: null, prMerged: false, prNeedsHuman: false,
-              issueState: "OPEN", labels: [], commitsAhead: 0, body: "Issue." };
+              issueState: "OPEN", labels: [], commitsAhead: 0, body: "Issue.",
+              // forge#2382: raw call logs — additive, unused by any pre-existing
+              // test, so recording every call here is safe for the whole file.
+              ghCalls: [], gitCalls: [], worktrees: [] };
   const io = {
     gh: async (args) => {
       const a = args.join(" ");
+      w.ghCalls.push(a);
       if (a.startsWith("api ") && a.includes("/comments")) return w.markers;
+      if (a.startsWith("issue view") && a.includes("title,body")) return JSON.stringify({ title: "Fix: thing", body: w.body });
       if (a.startsWith("issue view") && a.includes("body")) return JSON.stringify({ body: w.body });
       if (a.startsWith("issue view")) return JSON.stringify({ state: w.issueState, labels: w.labels });
       if (a.startsWith("issue edit")) { const i = args.indexOf("--body"); if (i>=0) w.body = args[i+1];
-        const j = args.indexOf("--add-label"); if (j>=0) w.labels.push(args[j+1]); return ""; }
+        const j = args.indexOf("--add-label"); if (j>=0) w.labels.push(args[j+1]);
+        const k = args.indexOf("--remove-label"); if (k>=0) { const names = args[k+1].split(",");
+          w.labels = w.labels.filter((l) => !names.includes(l)); }
+        return ""; }
       // forge#2381: close.execute() calls `gh issue close` directly (the
       // engine-native path no longer relies on a scripted "work-on/close"
       // runner() call to flip issueState) — mirror that here so the world
@@ -36,9 +44,36 @@ function fakeWorld() {
       if (a.startsWith("pr list")) return JSON.stringify(w.pr ? [{ number: w.pr }] : []);
       if (a.startsWith("pr view")) return JSON.stringify({ number: w.pr, state: w.prMerged?"MERGED":"OPEN",
         mergedAt: w.prMerged ? "t" : null, labels: w.prNeedsHuman ? [{name:"needs-human"}] : [] });
+      if (a.startsWith("pr create")) { w.pr = w.pr || 99; return `https://github.com/o/r/pull/${w.pr}`; }
       return "";
     },
-    git: async () => String(w.commitsAhead),
+    git: async (args) => {
+      const a = args.join(" ");
+      w.gitCalls.push(a);
+      // forge#2382: minimal `git worktree`/`git branch`/`git show-ref` fake so
+      // ensureWorktreeForBuild/cleanupWorktreeAfterTerminal (bin/engine.mjs)
+      // can be exercised end-to-end through runIssue() without a real repo.
+      // Matches this file's only two call shapes: `worktree add -- <path> <branch>`
+      // and `worktree remove <path> --force`.
+      if (args[0] === "worktree" && args[1] === "add") {
+        const branch = args.at(-1);
+        const path = args.at(-2);
+        w.worktrees.push({ path, branch });
+        return "";
+      }
+      if (args[0] === "worktree" && args[1] === "remove") { const path = args[2]; w.worktrees = w.worktrees.filter((wt) => wt.path !== path); return ""; }
+      if (args[0] === "worktree" && args[1] === "list") {
+        return w.worktrees.map((wt) => `worktree ${wt.path}\nbranch refs/heads/${wt.branch}\n`).join("\n");
+      }
+      if (args[0] === "show-ref") {
+        const branch = args.at(-1).replace("refs/heads/", "");
+        if (w.worktrees.some((wt) => wt.branch === branch) || branch === w.knownLocalBranch) return "";
+        throw new Error("no such ref");
+      }
+      if (args[0] === "branch" && args[1] === "-D") return "";
+      if (args[0] === "push") return "";
+      return String(w.commitsAhead);
+    },
   };
   return { w, io };
 }
@@ -2186,5 +2221,151 @@ describe("runIssue — forge#2381: engine-native phase dispatch (execute)", () =
     // (no `reason` field on the returned outcome → defaults to "needs-human").
     assert.equal(res.terminalReason, "needs-human");
     assert.equal(w.issueState, "OPEN", "the issue was never actually closed given the injected failure");
+  });
+});
+
+describe("runIssue — forge#2382: engine-issued label transitions and worktree lifecycle", () => {
+  function happyScript(w) {
+    return {
+      "work-on/investigate": () => { w.markers += " INVESTIGATION:COMPLETE"; },
+      "work-on/build/context": () => { w.markers += " FORGE:CONTEXT:COMPLETE"; },
+      "work-on/build/architect": () => { w.markers += " FORGE:ARCHITECT:COMPLETE"; },
+      "work-on/build": () => { w.markers += " FORGE:BUILDER:COMPLETE **Branch**: `fix/real-branch-42`"; w.commitsAhead = 2; },
+      "work-on/review": () => { w.pr = 7; w.prMerged = true; },
+    };
+  }
+
+  it("sets workflow:ready-to-build after investigate commits and workflow:building after architect commits", async () => {
+    const { w, io } = fakeWorld();
+    const script = happyScript(w);
+    const runner = async ({ commandName }) => { script[commandName](); return { status: "complete" }; };
+
+    await runIssue({ issue: 42, dir, agentId: "a1", lane: "staging", io, runner, now: () => 1000, maxAttempts: 3 });
+
+    assert.ok(w.ghCalls.some((c) => c.includes("--add-label") && c.includes("workflow:ready-to-build")),
+      "investigate committing (non-terminal) must set workflow:ready-to-build");
+    assert.ok(w.ghCalls.some((c) => c.includes("--add-label") && c.includes("workflow:building")),
+      "architect committing must set workflow:building");
+    // Final state still ends up workflow:merged — earlier transitions are
+    // superseded (setWorkflowLabel removes every other workflow:* state).
+    assert.ok(w.labels.includes("workflow:merged"));
+    assert.ok(!w.labels.includes("workflow:ready-to-build"));
+    assert.ok(!w.labels.includes("workflow:building"));
+  });
+
+  it("does NOT set workflow:ready-to-build when investigate commits with a terminal reason (invalid)", async () => {
+    const { w, io } = fakeWorld();
+    const runner = async ({ commandName }) => {
+      if (commandName === "work-on/investigate") { w.markers += " INVESTIGATION:INVALID"; return { status: "complete" }; }
+      throw new Error(`unexpected phase dispatch: ${commandName}`);
+    };
+
+    const res = await runIssue({ issue: 42, dir, agentId: "a1", lane: "staging", io, runner, now: () => 1000, maxAttempts: 3 });
+
+    assert.equal(res.terminalReason, "invalid");
+    assert.ok(!w.ghCalls.some((c) => c.includes("--add-label") && c.includes("workflow:ready-to-build")),
+      "a terminal (invalid) investigate commit must not also get the forward-progress label");
+  });
+
+  it("review.reconcile sets workflow:in-review once a PR is adopted/created (via the shared engine label state machine)", async () => {
+    const { w, io } = fakeWorld();
+    const script = happyScript(w);
+    const runner = async ({ commandName }) => { script[commandName](); return { status: "complete" }; };
+
+    await runIssue({ issue: 42, dir, agentId: "a1", lane: "staging", io, runner, now: () => 1000, maxAttempts: 3 });
+
+    assert.ok(w.ghCalls.some((c) => c.includes("--add-label") && c.includes("workflow:in-review")));
+  });
+
+  it("cleans up the worktree/branch when the run terminates merged", async () => {
+    const { w, io } = fakeWorld();
+    // Simulate the build runner having created a worktree for the real branch,
+    // the way commands/work-on/build.md's own Phase B1C would in production.
+    const script = {
+      ...happyScript(w),
+      "work-on/build": () => {
+        w.markers += " FORGE:BUILDER:COMPLETE **Branch**: `fix/real-branch-42`";
+        w.commitsAhead = 2;
+        w.worktrees.push({ path: ".claude/worktrees/real-branch-42", branch: "fix/real-branch-42" });
+      },
+    };
+    const runner = async ({ commandName }) => { script[commandName](); return { status: "complete" }; };
+
+    const res = await runIssue({ issue: 42, dir, agentId: "a1", lane: "staging", io, runner, now: () => 1000, maxAttempts: 3 });
+
+    assert.equal(res.terminalReason, "merged");
+    assert.equal(w.worktrees.length, 0, "the worktree must be removed once the run terminates merged");
+    assert.ok(w.gitCalls.some((c) => c.startsWith("worktree remove")));
+    assert.ok(w.gitCalls.some((c) => c === "branch -D fix/real-branch-42"));
+  });
+
+  it("does NOT clean up the worktree/branch when the run terminates needs-human", async () => {
+    const { w, io } = fakeWorld();
+    const script = {
+      "work-on/investigate": () => { w.markers += " INVESTIGATION:COMPLETE"; },
+      "work-on/build/context": () => { w.markers += " FORGE:CONTEXT:COMPLETE"; },
+      "work-on/build/architect": () => { w.markers += " FORGE:ARCHITECT:COMPLETE"; },
+      "work-on/build": () => {
+        w.markers += " FORGE:BUILDER:COMPLETE **Branch**: `fix/real-branch-42`";
+        w.commitsAhead = 2;
+        w.worktrees.push({ path: ".claude/worktrees/real-branch-42", branch: "fix/real-branch-42" });
+      },
+      "work-on/review": () => { w.pr = 7; w.prNeedsHuman = true; }, // open, needs-human -> "blocked"
+    };
+    const runner = async ({ commandName }) => { script[commandName](); return { status: "complete" }; };
+
+    const res = await runIssue({ issue: 42, dir, agentId: "a1", lane: "staging", io, runner, now: () => 1000, maxAttempts: 3 });
+
+    assert.equal(res.terminalReason, "needs-human");
+    assert.equal(w.worktrees.length, 1, "a needs-human terminal state must leave the worktree/branch intact for a human/remediation run");
+    assert.ok(!w.gitCalls.some((c) => c.startsWith("worktree remove")));
+    assert.ok(!w.gitCalls.some((c) => c.startsWith("branch -D")));
+  });
+
+  it("ensureWorktreeForBuild re-attaches a lost worktree before dispatching review, once build has already committed a branch", async () => {
+    const { w, io } = fakeWorld();
+    // Simulate a resumed run: "build" already committed (state.branch is
+    // therefore genuinely resolvable via eventsFromIndex's hydrate path — see
+    // bin/engine.mjs's own comment on why state.branch can never be known
+    // BEFORE "build" itself dispatches), the branch still exists locally, but
+    // no worktree is currently registered for it (lost/deleted out-of-band
+    // between sessions) — this is exactly the gap ensureWorktreeForBuild
+    // exists to close for "review"/"remediate", whose own phase specs `cd
+    // {WORKTREE_PATH}` and would otherwise fail outright.
+    w.knownLocalBranch = "fix/resumed-branch-42";
+    const remoteIndex = {
+      v: 1, run: "r_42_staging", issue: 42, lane: "staging",
+      committed: ["investigate", "context", "architect", "build"],
+      phase: null, branch: "fix/resumed-branch-42", pr: null,
+      terminal: false, terminalReason: null, lease: null,
+    };
+    w.body = serializeState(remoteIndex);
+    const runner = async ({ commandName }) => {
+      if (commandName === "work-on/review") { w.pr = 7; w.prMerged = true; return { status: "complete" }; }
+      throw new Error(`unexpected phase dispatch: ${commandName} — "build" is already committed and must not be re-run`);
+    };
+
+    const res = await runIssue({ issue: 42, dir, agentId: "a1", lane: "staging", io, runner, now: () => 1000, maxAttempts: 3 });
+
+    assert.equal(res.terminalReason, "merged");
+    assert.ok(w.gitCalls.some((c) => c.startsWith("worktree add") && c.includes("fix/resumed-branch-42")),
+      "must re-attach the surviving local branch via `git worktree add` before dispatching review");
+  });
+
+  it("ensureWorktreeForBuild is a no-op while state.branch is still unresolved (first-time build)", async () => {
+    const { w, io } = fakeWorld();
+    const script = happyScript(w);
+    const runner = async ({ commandName }) => { script[commandName](); return { status: "complete" }; };
+
+    await runIssue({ issue: 42, dir, agentId: "a1", lane: "staging", io, runner, now: () => 1000, maxAttempts: 3 });
+
+    // No worktree was ever registered in this fake world (the test never
+    // injected one, unlike the "cleans up the worktree" test above) — so any
+    // "worktree add" call here would have to have come from
+    // ensureWorktreeForBuild firing on the "build" phase's own dispatch,
+    // which must not happen (state.branch is still null at that point — see
+    // the function's own doc comment).
+    assert.ok(!w.gitCalls.some((c) => c.startsWith("worktree add")),
+      "ensureWorktreeForBuild must not fire while state.branch is unresolved");
   });
 });
