@@ -2412,6 +2412,38 @@ describe("runIssue — forge#2382: engine-issued label transitions and worktree 
     assert.ok(!w.gitCalls.some((c) => c.startsWith("branch -D")));
   });
 
+  it("forge#2506: cleanupWorktreeAfterTerminal never removes a protected branch's worktree/branch (main, staging, milestone/*), even on a merged terminal", async () => {
+    // isProtectedBranch has no known live trigger today (state.branch is only
+    // ever engine/LLM-set once, by the build phase's own PHASE_COMMIT, to a
+    // `fix/*-{issue}`/`feat/*-{issue}` slug) — this test exercises the guard
+    // directly by forcing state.branch to resolve to each protected name via
+    // the same FORGE:BUILDER `**Branch**:` marker parseBranchFromMarkers()
+    // reads in production, so the defense-in-depth path is proven reachable
+    // rather than merely asserted in a comment.
+    let issue = 100;
+    for (const protectedBranch of ["main", "staging", "milestone/foo"]) {
+      const { w, io } = fakeWorld();
+      const script = {
+        ...happyScript(w),
+        "work-on/build": () => {
+          w.markers += ` FORGE:BUILDER:COMPLETE **Branch**: \`${protectedBranch}\``;
+          w.commitsAhead = 2;
+          w.worktrees.push({ path: `.claude/worktrees/${protectedBranch.replace("/", "-")}`, branch: protectedBranch });
+        },
+      };
+      const runner = async ({ commandName }) => { script[commandName](); return { status: "complete" }; };
+
+      const res = await runIssue({ issue: issue++, dir, agentId: "a1", lane: "staging",
+        io, runner, now: () => 1000, maxAttempts: 3 });
+
+      assert.equal(res.terminalReason, "merged", `(${protectedBranch}) run must still terminate merged`);
+      assert.equal(w.worktrees.length, 1,
+        `(${protectedBranch}) cleanupWorktreeAfterTerminal must never remove a protected branch's worktree, even on a merged terminal`);
+      assert.ok(!w.gitCalls.some((c) => c.startsWith("worktree remove")), `(${protectedBranch}) must not call worktree remove`);
+      assert.ok(!w.gitCalls.some((c) => c.startsWith("branch -D")), `(${protectedBranch}) must not call branch -D`);
+    }
+  });
+
   it("ensureWorktreeForBuild re-attaches a lost worktree before dispatching review, once build has already committed a branch", async () => {
     const { w, io } = fakeWorld();
     // Simulate a resumed run: "build" already committed (state.branch is

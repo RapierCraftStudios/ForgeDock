@@ -595,6 +595,15 @@ async function ensureWorktreeForBuild(state, io) {
   if (!hasLocalBranch) return; // branch doesn't exist yet either — nothing to re-attach
   const registeredPath = await worktreePathForBranch(state.branch, io);
   if (registeredPath) return; // already has a worktree registered — nothing to do
+  // forge#2508: an out-of-band `rm -rf` of a worktree directory (instead of
+  // `git worktree remove`/`prune`) leaves stale administrative metadata behind
+  // that `git worktree list --porcelain` no longer reports (so the check
+  // above sees no registered path) but that `git worktree add` can still
+  // collide with. Best-effort/fail-open, matching every other git probe in
+  // this file: a prune failure must never block the add attempt below.
+  try {
+    await io.git(["worktree", "prune"]);
+  } catch { /* best-effort — proceed to the add attempt regardless */ }
   await io.git(["worktree", "add", "--", worktreeEnsureFallbackPath(state.issue), state.branch]);
 }
 
@@ -618,6 +627,12 @@ async function ensureWorktreeForBuild(state, io) {
  */
 async function cleanupWorktreeAfterTerminal(state, io) {
   if (!state.branch) return; // no build ever ran — nothing to clean up
+  // forge#2506: defense-in-depth — `state.branch` is only ever engine/LLM-set
+  // once, by the build phase's own PHASE_COMMIT, to a `fix/*-{issue}` or
+  // `feat/*-{issue}` slug, so this guard has no known live trigger today. It
+  // exists so this destructive cleanup never relies solely on git's own
+  // implicit checked-out-branch protection if that assumption ever changes.
+  if (isProtectedBranch(state.branch)) return;
   try {
     const path = await worktreePathForBranch(state.branch, io);
     if (path) await io.git(["worktree", "remove", path, "--force"]);
@@ -625,6 +640,16 @@ async function cleanupWorktreeAfterTerminal(state, io) {
   try {
     await io.git(["branch", "-D", "--", state.branch]);
   } catch { /* best-effort — tolerate an already-deleted branch */ }
+}
+
+/**
+ * forge#2506: `true` if `branch` is a protected branch name that
+ * `cleanupWorktreeAfterTerminal` must never delete — the two known deploy
+ * lanes (`main`, `staging`) and any `milestone/*` feature-lane branch.
+ * @returns {boolean}
+ */
+function isProtectedBranch(branch) {
+  return branch === "main" || branch === "staging" || branch.startsWith("milestone/");
 }
 
 /** @returns {Promise<boolean>} whether a local branch ref exists for `branch`. */
