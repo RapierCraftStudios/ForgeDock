@@ -249,6 +249,103 @@ describe("pickPhase", () => {
     });
   });
 
+  // forge#2382: engine-native PR creation — review.reconcile now creates a PR
+  // itself (io.gh(["pr", "create", ...])) when none exists yet, instead of
+  // leaving that entirely to the review-phase LLM.
+  describe("review.reconcile — engine-native PR creation (forge#2382)", () => {
+    const review = PHASES.find(p => p.id === "review");
+    const reviewState = { ...base, branch: "fix/x-42", lane: "staging" };
+
+    /** A scriptable fake GitHub world for the review.reconcile PR-creation path. */
+    function fakeGh({ existingPrList = "[]", createOut = "https://github.com/o/r/pull/99", createThrows = false, labels = [] } = {}) {
+      const calls = [];
+      const gh = async (args) => {
+        calls.push(args.join(" "));
+        const a = args.join(" ");
+        if (a.startsWith("pr list")) return existingPrList;
+        if (a.startsWith("pr create")) {
+          if (createThrows) throw new Error("pr create rejected");
+          return createOut;
+        }
+        if (a.startsWith("api ")) return JSON.stringify([{ body: "<!-- FORGE:BUILDER:COMPLETE --> did the thing" }]);
+        if (a.startsWith("issue view") && a.includes("title,body")) return JSON.stringify({ title: "Fix: thing", body: "Problem description.\nMore." });
+        if (a.startsWith("issue view") && a.includes("labels")) return JSON.stringify({ labels: labels.map((n) => ({ name: n })) });
+        if (a.startsWith("issue edit")) return "";
+        throw new Error(`unexpected gh call: ${a}`);
+      };
+      const gitCalls = [];
+      const git = async (args) => { gitCalls.push(args.join(" ")); return ""; };
+      return { gh, git, calls, gitCalls };
+    }
+
+    it("adopts an existing PR without creating a new one or pushing", async () => {
+      const { gh, git, calls, gitCalls } = fakeGh({ existingPrList: JSON.stringify([{ number: 7 }]) });
+      const result = await review.reconcile(reviewState, { gh, git });
+      assert.equal(result.outputs.pr, 7);
+      assert.ok(!calls.some((c) => c.startsWith("pr create")), "must not create a PR when one is already adopted");
+      assert.equal(gitCalls.length, 0, "must not push when adopting an existing PR");
+    });
+
+    it("creates a PR when none exists: pushes the branch, calls gh pr create, and sets workflow:in-review", async () => {
+      const { gh, git, calls, gitCalls } = fakeGh({ createOut: "https://github.com/o/r/pull/123" });
+      const result = await review.reconcile(reviewState, { gh, git });
+      assert.equal(result.outputs.pr, 123);
+      assert.ok(gitCalls.some((c) => c.startsWith("push origin fix/x-42:fix/x-42")), "must push the branch before creating the PR");
+      const createCall = calls.find((c) => c.startsWith("pr create"));
+      assert.ok(createCall, "must call gh pr create");
+      assert.ok(createCall.includes("--base staging"), "PR base must be the run's lane");
+      assert.ok(createCall.includes("--head fix/x-42"));
+      assert.ok(calls.some((c) => c.includes("--add-label workflow:in-review")), "must set workflow:in-review once the PR is created");
+    });
+
+    it("PR body includes the Closes footer and FORGE:BUILDER content", async () => {
+      let capturedBody = null;
+      const gh = async (args) => {
+        const a = args.join(" ");
+        if (a.startsWith("pr list")) return "[]";
+        if (a.startsWith("pr create")) {
+          const bi = args.indexOf("--body");
+          capturedBody = args[bi + 1];
+          return "https://github.com/o/r/pull/5";
+        }
+        if (a.startsWith("api ")) return JSON.stringify([{ body: "<!-- FORGE:BUILDER:COMPLETE --> implemented the fix" }]);
+        if (a.startsWith("issue view") && a.includes("title,body")) return JSON.stringify({ title: "Fix: thing", body: "Problem." });
+        if (a.startsWith("issue view") && a.includes("labels")) return JSON.stringify({ labels: [] });
+        if (a.startsWith("issue edit")) return "";
+        throw new Error(`unexpected gh call: ${a}`);
+      };
+      const git = async () => "";
+      const result = await review.reconcile(reviewState, { gh, git });
+      assert.equal(result.outputs.pr, 5);
+      assert.match(capturedBody, /Closes #42/);
+      assert.match(capturedBody, /implemented the fix/);
+    });
+
+    it("falls through to null (no PR) when the push fails — LLM-driven path is the safety net", async () => {
+      const { gh, calls } = fakeGh();
+      const git = async () => { throw new Error("push rejected"); };
+      const result = await review.reconcile(reviewState, { gh, git });
+      assert.equal(result.satisfied, false);
+      assert.equal(result.outputs, undefined);
+      assert.ok(!calls.some((c) => c.startsWith("pr create")), "must not attempt PR creation when the push failed");
+    });
+
+    it("falls through to null (no PR) when gh pr create itself throws", async () => {
+      const { gh, git } = fakeGh({ createThrows: true });
+      const result = await review.reconcile(reviewState, { gh, git });
+      assert.equal(result.satisfied, false);
+      assert.equal(result.outputs, undefined);
+    });
+
+    it("does nothing when state.branch is unresolved", async () => {
+      const gh = async () => { throw new Error("no gh call should be made"); };
+      const git = async () => { throw new Error("no git call should be made"); };
+      const result = await review.reconcile({ ...base, branch: null }, { gh, git });
+      assert.equal(result.satisfied, false);
+      assert.equal(result.outputs, undefined);
+    });
+  });
+
   describe("close.detectOutcome", () => {
     const close = PHASES.find(p => p.id === "close");
     const ioWith = (blob) => ({ gh: async () => blob, git: async () => "0" });
