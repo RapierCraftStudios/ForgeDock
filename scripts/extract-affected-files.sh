@@ -7,8 +7,8 @@
 #   extract-affected-files.sh <issue_number> "-R <owner/repo>"   (single pre-joined token also accepted)
 #
 # Output (stdout):
-#   Line 1:   PROVENANCE=affected-files-section | body-fallback | none
-#   Line 2+:  one extracted file path per line (zero lines when PROVENANCE=none)
+#   Line 1:   PROVENANCE=affected-files-section | body-fallback | none | error
+#   Line 2+:  one extracted file path per line (zero lines when PROVENANCE=none or error)
 #
 # Exit codes:
 #   0 — Extraction completed (including the zero-files/PROVENANCE=none case — that is
@@ -35,6 +35,15 @@
 #      scraping the whole body/comment) defeated that safety net. Yielding nothing
 #      when there is nothing to justify is strictly safer than yielding something
 #      wrong (forge#2436).
+#   4. PROVENANCE=error — distinct from `none` (forge#2504): emitted when a `gh`
+#      invocation itself fails (non-zero exit — network error, auth expiry, rate
+#      limit) AND no file path was recovered from any path (including a fallback
+#      attempted after a failed primary call). `none` means "we confirmed there is
+#      nothing to extract"; `error` means "we could not confirm that — a `gh` call
+#      failed, so this result is inconclusive, not a verified empty result." A `gh`
+#      failure that is followed by a *successful* fallback yielding real files still
+#      reports the normal `body-fallback` provenance — `error` only fires when the
+#      failure actually cost us data.
 #
 # Extension regex covers: py|tsx?|jsx?|sql|json|ya?ml|mjs|js|sh|md — the repo's
 # dominant file types. mjs/js/sh/md were previously missing, which meant the
@@ -148,6 +157,7 @@ extract_paths() {
 # --------------------------------------------------------------------------- #
 PROVENANCE="none"
 FILES=""
+GH_CALL_FAILED=0
 
 # NOTE: deliberately no `| tail -1` here — `gh api --jq`'s raw-string output
 # for a multi-line `.body` field embeds literal newlines, so isolating "the
@@ -158,8 +168,24 @@ FILES=""
 # work-on/investigate.md), so at most one such comment exists per issue at
 # any time — matching the original Layer 1 pseudocode, which also consumed
 # this stream directly with no last-comment isolation.
-INVESTIGATOR_BODY=$(gh api "repos/${REPO}/issues/${NUM}/comments" \
-  --jq '.[] | select(.body | contains("FORGE:INVESTIGATOR")) | .body' 2>/dev/null || true)
+#
+# forge#2504: `VAR=$(cmd 2>/dev/null || true)` discarded gh's exit code
+# entirely, so a genuine `gh` failure (network error, auth expiry, rate
+# limit) was indistinguishable from "gh succeeded, output legitimately
+# empty." Use `if ! VAR=$(cmd); then ... fi` instead — exempt from
+# `set -e` because it's an `if` condition, so no `|| true` is needed — and
+# track the failure in GH_CALL_FAILED so it can be reflected in PROVENANCE
+# below rather than silently defaulting to "none". Same idiom already
+# established in scripts/transition-label.sh (forge#1991/PR #1996), adapted
+# here because this script must always complete (exit 0) rather than abort,
+# so failures are surfaced via a new PROVENANCE=error value instead of a
+# non-zero exit.
+if ! INVESTIGATOR_BODY=$(gh api "repos/${REPO}/issues/${NUM}/comments" \
+  --jq '.[] | select(.body | contains("FORGE:INVESTIGATOR")) | .body' 2>/dev/null); then
+  GH_CALL_FAILED=1
+  echo "WARNING: gh api call failed while fetching comments for issue #$NUM (repo: $REPO) — cannot confirm whether a FORGE:INVESTIGATOR comment exists; treating as inconclusive, not empty" >&2
+  INVESTIGATOR_BODY=""
+fi
 
 if [[ -n "$INVESTIGATOR_BODY" ]]; then
   SCOPED=$(extract_investigator_section "$INVESTIGATOR_BODY")
@@ -170,11 +196,17 @@ if [[ -n "$INVESTIGATOR_BODY" ]]; then
 else
   # --------------------------------------------------------------------------- #
   # Fallback path: raw issue body, scoped to a deliverables-shaped heading.
-  # Only reached when NO FORGE:INVESTIGATOR comment exists at all (matches the
-  # original Layer 1 contract: "For issues WITHOUT an investigation comment,
-  # fall back to parsing the issue body").
+  # Reached both when NO FORGE:INVESTIGATOR comment exists (the original Layer 1
+  # contract: "For issues WITHOUT an investigation comment, fall back to parsing
+  # the issue body") AND when the primary gh call above failed (in which case we
+  # genuinely don't know if a comment exists, so attempting the fallback gives a
+  # chance at real data rather than giving up immediately).
   # --------------------------------------------------------------------------- #
-  ISSUE_BODY=$(gh issue view "$NUM" -R "$REPO" --json body --jq '.body' 2>/dev/null || true)
+  if ! ISSUE_BODY=$(gh issue view "$NUM" -R "$REPO" --json body --jq '.body' 2>/dev/null); then
+    GH_CALL_FAILED=1
+    echo "WARNING: gh issue view call failed for issue #$NUM (repo: $REPO) — cannot confirm the issue body's Affected Files section; treating as inconclusive, not empty" >&2
+    ISSUE_BODY=""
+  fi
   if [[ -n "$ISSUE_BODY" ]]; then
     SCOPED=$(extract_body_fallback_section "$ISSUE_BODY")
     FILES=$(extract_paths "$SCOPED")
@@ -182,6 +214,14 @@ else
       PROVENANCE="body-fallback"
     fi
   fi
+fi
+
+# forge#2504: only escalate to "error" when neither path yielded real data AND
+# at least one gh call genuinely failed along the way. A failed primary call
+# followed by a successful fallback that found files must still report
+# body-fallback (real data recovered) — never overwrite that with "error".
+if [[ "$PROVENANCE" == "none" && "$GH_CALL_FAILED" -eq 1 ]]; then
+  PROVENANCE="error"
 fi
 
 echo "PROVENANCE=$PROVENANCE"
