@@ -717,7 +717,13 @@ while true; do
     echo "Fast lane: zero open unmilestoned issues and no stalled/blocked in-flight agents — loop complete"
     break
   elif [ "$OPEN_UNMILESTONED" -eq 0 ]; then
-    echo "Fast lane: zero open unmilestoned issues, but query fleet reports stalled/blocked agents (exit $FLEET_EXIT) — running one more recovery-focused iteration before declaring complete"
+    # Note: this extra pass re-runs the SAME dispatch/recovery sweep as every other
+    # iteration, which is scoped to unmilestoned issues only (FAST_LANE_ISSUE_NUMS /
+    # PRE_DISPATCH_ISSUES below both filter on `.milestone == null`). It does not
+    # itself recover a milestoned stalled/blocked agent — that's handled separately
+    # by /orchestrate's own stall detector. This is just a bounded extra fast-lane
+    # iteration before declaring the loop complete, not a milestone-aware recovery step.
+    echo "Fast lane: zero open unmilestoned issues, but query fleet reports stalled/blocked agents (exit $FLEET_EXIT) — running one more fast-lane iteration before declaring complete (unmilestoned-scope recovery sweep only; milestoned stalls are recovered separately by /orchestrate)"
   fi
 
   # Step 1: Drive all open fast-lane issues through the durable engine.
