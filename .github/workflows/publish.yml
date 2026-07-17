@@ -53,12 +53,17 @@ jobs:
         with:
           fetch-depth: 0  # Full history needed for git describe --tags (path-guard check)
 
-      - name: Check if publishable files changed (workflow_dispatch only)
-        if: github.event_name == 'workflow_dispatch'
+      - name: Check if publishable files changed
         run: |
-          # workflow_dispatch has no paths: filter (GitHub limitation).
-          # Mirror the push trigger's path filter manually: skip publish if no
-          # relevant files changed since the last release tag.
+          # Runs for both push and workflow_dispatch. workflow_dispatch has no
+          # paths: filter (GitHub limitation), so this always needed to run for
+          # that event. It must ALSO run on push: the push trigger's own
+          # paths: filter includes this workflow's own file
+          # ('.github/workflows/publish.yml', see forge#2278/#2284) so a push
+          # touching only the workflow file satisfies the trigger without
+          # touching any actually-publishable path. Re-diffing here (instead of
+          # trusting the push paths: filter to mean "something publishable
+          # changed") is what correctly sets SKIP_PUBLISH=true for that case.
           LAST_TAG=$(git describe --tags --abbrev=0 2>/dev/null || echo "")
           if [ -z "$LAST_TAG" ]; then
             echo "No previous tag found — proceeding with publish"
