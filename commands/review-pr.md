@@ -1785,8 +1785,15 @@ Files that need changes:
 [BATCHABLE_ANNOTATION]
 ISSUE_EOF
 
+# priority:* label is a deterministic function of the finding's **Severity**
+# (CRITICAL/HIGH/MEDIUM/LOW/INFO) — NEVER of its Confidence
+# (CONFIRMED/LIKELY/POSSIBLE). scripts/severity-to-priority.sh is the single
+# source of truth for this mapping; commands/review-pr-staging.md calls the
+# identical script so the two specs cannot independently drift. <!-- forge#2447 -->
+FINDING_PRIORITY=$(bash scripts/severity-to-priority.sh "$FINDING_SEVERITY")
+
 # --label is repeatable (not comma-joined) per the /issue programmatic contract.
-Skill(skill="issue", args="--title \"$FINDING_ISSUE_TITLE\" --body-file \"$FINDING_ISSUE_BODY_FILE\" --label review-finding --label needs-validation --label \"{priority}\" ${MILESTONE_FLAG}")
+Skill(skill="issue", args="--title \"$FINDING_ISSUE_TITLE\" --body-file \"$FINDING_ISSUE_BODY_FILE\" --label review-finding --label needs-validation --label \"$FINDING_PRIORITY\" ${MILESTONE_FLAG}")
 rm -f "$FINDING_ISSUE_BODY_FILE"
 
 # /issue has no machine-readable return contract (it's a user-facing command, not a work-on
@@ -1801,13 +1808,13 @@ for _resolve_attempt in 1 2 3; do
 done
 ```
 
-Labels: `review-finding` + `needs-validation` + priority (`priority:P1` CONFIRMED, `priority:P2` LIKELY, `priority:P3` POSSIBLE).
+Labels: `review-finding` + `needs-validation` + priority. `priority:*` is derived from the finding's `**Severity**` field via `scripts/severity-to-priority.sh` (single documented mapping — see that script's header comment): `CRITICAL` → `priority:P0`, `HIGH` → `priority:P1`, `MEDIUM` → `priority:P2`, `LOW` → `priority:P3`, `INFO` → `priority:P3`. **Never derive `priority:*` from Confidence** (CONFIRMED/LIKELY/POSSIBLE) — Confidence and Severity are independent axes; conflating them previously mislabeled LOW-severity CONFIRMED findings as `priority:P1`, defeating the P3 batching rule below. <!-- forge#2447 -->
 
-**P3 batchable annotation** — <!-- Added: forge#1333 --> When priority resolves to `priority:P3` (POSSIBLE confidence), check whether the finding qualifies for batching. If the affected file does NOT touch a security or billing path, substitute `[BATCHABLE_ANNOTATION]` with the `<!-- FORGE:BATCHABLE -->` marker. This signals the orchestrator's Phase 1 batching rule that this finding can be grouped with other P3s in the same domain:
+**P3 batchable annotation** — <!-- Added: forge#1333 --> When priority resolves to `priority:P3` (i.e. `**Severity**: LOW` or `INFO`), check whether the finding qualifies for batching. If the affected file does NOT touch a security or billing path, substitute `[BATCHABLE_ANNOTATION]` with the `<!-- FORGE:BATCHABLE -->` marker. This signals the orchestrator's Phase 1 batching rule that this finding can be grouped with other P3s in the same domain:
 
 ```bash
 # Determine batchable eligibility for this finding
-FINDING_PRIORITY="{priority}"  # priority:P1 / priority:P2 / priority:P3
+# $FINDING_PRIORITY was already computed above (severity-to-priority.sh) — reuse it, do not re-derive.
 BATCHABLE_ANNOTATION=""
 
 if [ "$FINDING_PRIORITY" = "priority:P3" ]; then
