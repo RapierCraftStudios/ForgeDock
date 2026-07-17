@@ -634,6 +634,24 @@ export function extractSessionLimitResetTime(output) {
   return sanitizeArgvForLog([resetAt]);
 }
 
+/**
+ * Coerce a single CLI-reported `usage.*` field to a finite number, or `0`
+ * when it isn't one (forge#2424). `?? 0` only replaces `null`/`undefined` —
+ * it does not coerce or reject other non-numeric values (e.g. a string), so
+ * a malformed/unexpected field previously flowed through unchanged and later
+ * string-concatenated instead of numerically adding in
+ * bin/batch-runner.mjs's `tokenCost()` (`input + output`). Applied to all
+ * four `usage.*` fields parsed from the CLI's `--output-format json`
+ * envelope, which — unlike the API backend's SDK-typed `response.usage` — is
+ * arbitrary CLI stdout and must not be trusted to already be well-typed.
+ *
+ * @param {unknown} value - raw field value from the parsed CLI JSON envelope
+ * @returns {number} a finite number, or `0` when `value` is not one
+ */
+function toFiniteUsageNumber(value) {
+  return typeof value === "number" && Number.isFinite(value) ? value : 0;
+}
+
 export function runCliBackend({
   spec,
   userMessage,
@@ -812,20 +830,38 @@ export function runCliBackend({
     // `--output-format` (or any other non-JSON stdout) are handled
     // defensively: any parse failure, or a parsed value missing `usage`,
     // degrades to the pre-existing `usage: null` behavior — this must never
-    // throw on the success path. Field-by-field `?? 0` normalization mirrors
-    // the API backend's usage accumulator above (see `runCommand()`).
+    // throw on the success path.
+    //
+    // forge#2422: parse `stdout` ALONE here, not `output` (the combined
+    // `stdout + stderr` string used above for the timeout/non-zero-exit
+    // diagnostics). `--output-format json` writes exactly one JSON object to
+    // stdout; any warning/banner text a CLI version writes to stderr on an
+    // otherwise-clean, zero-exit run (deprecation notice, Node
+    // `--trace-warnings`, etc.) would corrupt the combined string and break
+    // `JSON.parse`, silently degrading `usage` to `null` even though valid
+    // JSON was on stdout. `output` itself is untouched — the diagnostic
+    // branches above still need the combined stream.
+    //
+    // forge#2424: each usage field is coerced with `toFiniteUsageNumber()`
+    // rather than `?? 0`. `?? 0` only replaces `null`/`undefined` — a
+    // non-numeric value (e.g. a string) would pass through unchanged and
+    // later string-concatenate instead of numerically add in
+    // bin/batch-runner.mjs's `tokenCost()` (`input + output`).
+    const stdoutTrimmed = stdout.trim();
     let parsedResult = null;
     let usage = null;
     try {
-      const parsed = JSON.parse(output);
+      const parsed = JSON.parse(stdoutTrimmed);
       if (parsed && typeof parsed === "object") {
         parsedResult = typeof parsed.result === "string" ? parsed.result : null;
         if (parsed.usage && typeof parsed.usage === "object") {
           usage = {
-            input_tokens: parsed.usage.input_tokens ?? 0,
-            output_tokens: parsed.usage.output_tokens ?? 0,
-            cache_creation_input_tokens: parsed.usage.cache_creation_input_tokens ?? 0,
-            cache_read_input_tokens: parsed.usage.cache_read_input_tokens ?? 0,
+            input_tokens: toFiniteUsageNumber(parsed.usage.input_tokens),
+            output_tokens: toFiniteUsageNumber(parsed.usage.output_tokens),
+            cache_creation_input_tokens: toFiniteUsageNumber(
+              parsed.usage.cache_creation_input_tokens,
+            ),
+            cache_read_input_tokens: toFiniteUsageNumber(parsed.usage.cache_read_input_tokens),
           };
         }
       }

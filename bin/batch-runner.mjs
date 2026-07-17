@@ -114,11 +114,16 @@ export function classifyRunnerResult(result) {
 
 /**
  * forge#2377: derive a numeric "cost" (docs/spec/eval-run-result.md's
- * `cost: null | number` field — "token/USD cost") from a runCommand() result's
- * `usage` object. `runCommand()` (bin/runner.mjs, since #1295/PR #1421)
- * already accumulates `{input_tokens, output_tokens, cache_creation_input_tokens,
- * cache_read_input_tokens}` for the API backend and returns `usage: null` for
- * the CLI backend. This reports total billed tokens (input + output; cache
+ * `cost: null | number` field — a billed-token proxy, not a USD amount; see
+ * forge#2397) from a runCommand() result's `usage` object. `runCommand()`
+ * (bin/runner.mjs, since #1295/PR #1421) already accumulates
+ * `{input_tokens, output_tokens, cache_creation_input_tokens,
+ * cache_read_input_tokens}` for the API backend. The CLI backend
+ * (`runCliBackend()`) also returns a best-effort-parsed `usage` object on its
+ * success path since forge#2398/PR #2421 — `usage: null` from the CLI
+ * backend now only occurs when the CLI's `--output-format json` envelope
+ * could not be parsed (older CLI version, or a non-JSON stdout), not
+ * unconditionally. This reports total billed tokens (input + output; cache
  * reads/writes are not separately billed at the standard rate and are
  * omitted from this proxy) as the numeric cost signal — converting to a USD
  * amount requires a per-model pricing table, which is out of this issue's
