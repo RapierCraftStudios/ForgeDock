@@ -203,7 +203,10 @@ describe("detectPhase — real nested Claude Code transcript schema (#1580)", ()
     assert.equal(phaseId, "context");
   });
 
-  it("extracts PR number and branch from a nested tool_result block", () => {
+  it("does not extract PR number or branch from a nested tool_result block (forge#2375)", () => {
+    // detectPhase() no longer scrapes branch/PR from arbitrary tool_result text —
+    // those values were unverifiable against GitHub and produced corrupt run-log
+    // entries. Phase detection itself (via markers) is unaffected.
     const path = writeTranscript(dir, [
       assistantToolUse("Skill", { skill: "work-on:review", args: "1580" }),
       userToolResult('branch refs/heads/fix/thing-1580 pushed\n{"number": 42, "state": "OPEN"}\nFORGE:REVIEWER:MERGED'),
@@ -211,8 +214,58 @@ describe("detectPhase — real nested Claude Code transcript schema (#1580)", ()
     const transcript = parseTranscript(path);
     const { phaseId, outputs } = detectPhase(transcript);
     assert.equal(phaseId, "review");
-    assert.equal(outputs.pr, 42);
-    assert.match(outputs.branch, /fix\/thing-1580/);
+    assert.deepEqual(outputs, {});
+  });
+
+  // Regression tests (forge#2375) — modeled directly on the corrupt run-log
+  // PHASE_COMMIT events observed in .forgedock/run-logs/*.jsonl before this fix.
+  // Each fixture reproduces the tool_result text pattern that previously produced
+  // a bogus branch/pr value; all must now yield an empty `outputs` object.
+  it("does not derive a branch from unrelated prose containing the word 'branch' (was: branch=\"diff\")", () => {
+    const path = writeTranscript(dir, [
+      assistantToolUse("Skill", { skill: "work-on:close", args: "1712" }),
+      userToolResult('git diff --stat\n 3 files changed\nswitched to branch diff of the working tree\nworkflow:merged'),
+    ]);
+    const transcript = parseTranscript(path);
+    const { phaseId, outputs } = detectPhase(transcript);
+    assert.equal(phaseId, "close");
+    assert.deepEqual(outputs, {});
+  });
+
+  it("does not derive a branch from a stray 'branch:' token (was: branch=\"writer\")", () => {
+    const path = writeTranscript(dir, [
+      assistantToolUse("Skill", { skill: "work-on:investigate", args: "2159" }),
+      userToolResult('role: writer branch: writer access granted\n<!-- INVESTIGATION:COMPLETE -->'),
+    ]);
+    const transcript = parseTranscript(path);
+    const { phaseId, outputs } = detectPhase(transcript);
+    assert.equal(phaseId, "investigate");
+    assert.deepEqual(outputs, {});
+  });
+
+  it("does not derive a branch from a bare 'refs/heads/' fragment (was: branch=\"refs\")", () => {
+    const path = writeTranscript(dir, [
+      assistantToolUse("Skill", { skill: "work-on:build", args: "2204" }),
+      // The old regex's "branch[:\s]+" alternative matches "branch refs" here and
+      // captures the bare word "refs" — reproduces the exact corrupt value seen
+      // in .forgedock/run-logs/2204.jsonl.
+      userToolResult('Updating branch refs for local tracking\nFORGE:BUILDER:COMPLETE'),
+    ]);
+    const transcript = parseTranscript(path);
+    const { phaseId, outputs } = detectPhase(transcript);
+    assert.equal(phaseId, "build");
+    assert.deepEqual(outputs, {});
+  });
+
+  it("does not derive a PR number from an unrelated JSON 'number' field (was: pr=<issue number>)", () => {
+    const path = writeTranscript(dir, [
+      assistantToolUse("Skill", { skill: "work-on:close", args: "2337" }),
+      userToolResult('{"number": 2337, "title": "some issue", "state": "OPEN"}\nworkflow:merged'),
+    ]);
+    const transcript = parseTranscript(path);
+    const { phaseId, outputs } = detectPhase(transcript);
+    assert.equal(phaseId, "close");
+    assert.deepEqual(outputs, {});
   });
 
   it("returns no phase/issue for an unrelated transcript (no Skill, no markers)", () => {
@@ -273,14 +326,24 @@ describe("detectPhaseFromText — real module import (#1592)", () => {
     assert.equal(terminalReason, "decomposed");
   });
 
-  it("detects context phase from FORGE:CONTEXT", () => {
-    const { phaseId } = detectPhaseFromText("<!-- FORGE:CONTEXT -->");
+  it("detects context phase from FORGE:CONTEXT:COMPLETE", () => {
+    const { phaseId } = detectPhaseFromText("<!-- FORGE:CONTEXT:COMPLETE -->");
     assert.equal(phaseId, "context");
   });
 
-  it("detects architect phase from FORGE:ARCHITECT", () => {
-    const { phaseId } = detectPhaseFromText("FORGE:ARCHITECT annotation posted");
+  it("does NOT detect context phase from a bare FORGE:CONTEXT marker (forge#2375 — matches a partial/interrupted annotation, not a committed one)", () => {
+    const { phaseId } = detectPhaseFromText("<!-- FORGE:CONTEXT -->\n... interrupted ...\n<!-- FORGE:CONTEXT:PARTIAL -->");
+    assert.equal(phaseId, null);
+  });
+
+  it("detects architect phase from FORGE:ARCHITECT:COMPLETE", () => {
+    const { phaseId } = detectPhaseFromText("FORGE:ARCHITECT:COMPLETE annotation posted");
     assert.equal(phaseId, "architect");
+  });
+
+  it("does NOT detect architect phase from a bare FORGE:ARCHITECT marker (forge#2375 — must match bin/engine/phases.mjs's :COMPLETE-gated detectOutcome)", () => {
+    const { phaseId } = detectPhaseFromText("FORGE:ARCHITECT annotation posted\nFORGE:ARCHITECT:PARTIAL");
+    assert.equal(phaseId, null);
   });
 
   it("detects build phase from FORGE:BUILDER:COMPLETE", () => {
