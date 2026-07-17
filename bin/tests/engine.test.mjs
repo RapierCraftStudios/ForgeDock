@@ -623,6 +623,96 @@ describe("runIssue", () => {
     assert.equal(reviewRunnerCalls, 3);
   });
 
+  it("forge#2338 (review finding): a slow in-flight lease-renewal write must not resurrect the lease after terminate()'s lease:null write on the engine-error catch path", async () => {
+    // Regression for a CONFIRMED HIGH review finding: `return await
+    // terminate(state, "engine-error", detail)` sits INSIDE the catch block
+    // that guards runPhaseWithRetry(). Per try/catch/finally semantics, that
+    // return's expression (terminate(), including its own `lease: null`
+    // write) is fully evaluated to completion BEFORE the enclosing `finally`
+    // block runs `clearInterval` / `await pendingRenewal`. A renewal write
+    // already dispatched before the throw could therefore land on GitHub
+    // AFTER terminate()'s `lease: null` write, resurrecting a phantom lease
+    // on an already-terminated run — reopening the exact race #2239
+    // (07b3b8a) closed on the non-throwing path, on this one call site that
+    // fix didn't cover. Mirrors the sibling "a slow in-flight heartbeat
+    // renewal write must not resurrect the lease after terminate()'s
+    // lease:null write" test above (which exercises the non-throwing
+    // INVESTIGATION:INVALID terminal path) — same slow-write technique,
+    // applied to the CLI_BACKEND_FAILED catch/return path instead.
+    const { w, io } = fakeWorld();
+    const origGh = io.gh;
+    let delayEdits = false;
+    // Track EVERY delayed write's promise (not just the first) so the test
+    // can deterministically wait for all of them to actually land on
+    // `w.body`, regardless of whether runIssue() itself joins them (pre-fix:
+    // it doesn't on this path; post-fix: it does), and regardless of how
+    // many setInterval ticks happen to fire during the armed window under
+    // system/CI load. Without this, asserting on `w.body` immediately after
+    // `runIssue()` resolves would race ahead of the slow write(s) in BOTH
+    // the buggy and fixed code, making the assertion pass trivially either
+    // way; and delaying only the FIRST armed write would leave a second,
+    // fast-resolving tick free to silently replace `pendingRenewal` inside
+    // engine.mjs with an already-settled promise, defeating the technique
+    // regardless of whether the engine-error path is actually fixed.
+    const delayedEditPromises = [];
+    io.gh = async (args) => {
+      if (args[0] === "issue" && args[1] === "edit" && delayEdits) {
+        // Simulate a slow GitHub API round trip for every renewal write
+        // dispatched while armed — long enough that, without the fix, it
+        // would still be in flight when the engine-error catch branch calls
+        // terminate().
+        const delayed = new Promise((resolve) => setTimeout(resolve, 60)).then(() => origGh(args));
+        delayedEditPromises.push(delayed);
+        return delayed;
+      }
+      return origGh(args);
+    };
+
+    const LEASE_TTL_MS = 100;
+    const LEASE_RENEW_INTERVAL_MS = 25;
+
+    const runner = async ({ commandName }) => {
+      if (commandName === "work-on/investigate") {
+        // Let at least one renewal heartbeat fire and become "slow", then
+        // disarm (synchronously, no further ticks can land as "slow" once
+        // armed=false) and throw CLI_BACKEND_FAILED immediately — this is
+        // the exact window where the pre-fix code would leave the slow
+        // write(s) unjoined before reaching the engine-error terminate()
+        // call.
+        await new Promise((resolve) => setTimeout(resolve, LEASE_RENEW_INTERVAL_MS + 2));
+        delayEdits = true;
+        await new Promise((resolve) => setTimeout(resolve, LEASE_RENEW_INTERVAL_MS + 2));
+        delayEdits = false;
+        throw Object.assign(new Error("claude CLI exited with status 1"), { code: "CLI_BACKEND_FAILED" });
+      }
+      return { status: "complete" };
+    };
+
+    const res = await runIssue({ issue: 42, dir, agentId: "a1", lane: "staging",
+      io, runner, now: () => Date.now(), maxAttempts: 1,
+      leaseTtlMs: LEASE_TTL_MS, leaseRenewIntervalMs: LEASE_RENEW_INTERVAL_MS });
+
+    assert.equal(res.terminalReason, "engine-error",
+      "sanity check: the run must reach the engine-error catch/return path this test targets");
+    assert.ok(delayedEditPromises.length >= 1,
+      "test setup sanity check: at least one renewal write must have been armed/delayed during the window");
+
+    // Critical: explicitly wait for every slow write to actually land before
+    // inspecting `w.body`. Pre-fix, `runIssue()` resolves WITHOUT joining
+    // the slow renewal write(s) on this path (that's the bug) — so checking
+    // `w.body` immediately after `await runIssue(...)` would race ahead of
+    // the slow write(s) in BOTH the buggy and fixed code, making this
+    // assertion pass trivially either way. Post-fix, `runIssue()` already
+    // joins the slow write internally (before calling terminate()), so this
+    // await is a no-op there.
+    await Promise.all(delayedEditPromises);
+    const { parseState } = await import("../engine/state.mjs");
+    const finalState = parseState(w.body);
+    assert.equal(finalState.lease, null,
+      "a slow in-flight renewal write must be joined before terminate()'s lease:null write on the " +
+      "engine-error catch path too, so it can never land afterward and resurrect a phantom lease");
+  });
+
   it("I3: defers before writing GitHub state when another agent holds a valid lease (remirror path)", async () => {
     // Regression test for: writeState() called before lease check in remirror/hydrate branches.
     // A concurrent agent holds a valid lease — we must NOT write GitHub state before deferring.

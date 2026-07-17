@@ -288,6 +288,21 @@ export async function runIssue(opts) {
           // phase that actually failed. Report it as blocked before
           // terminating so the progress trail stays complete on this path too.
           emitProgress({ event: "phase_exit", phase: phase.id, status: "blocked", detail });
+          // forge#2338 (review finding): `return await terminate(...)` here
+          // sits INSIDE this catch block, so per try/catch/finally semantics
+          // its expression is fully evaluated — including terminate()'s own
+          // `lease: null` write completing — BEFORE the `finally` block below
+          // ever runs `clearInterval`/`await pendingRenewal`. A renewal write
+          // already dispatched before this throw can therefore land on
+          // GitHub AFTER terminate()'s `lease: null` write, resurrecting a
+          // phantom lease on an already-terminated run — reopening the exact
+          // race #2239 was written to close, just on this one call site the
+          // #2239 fix (07b3b8a) didn't cover. Explicitly join here, before
+          // calling terminate(), rather than relying on `finally` (too
+          // late). The `finally` block's identical calls remain below as a
+          // harmless idempotent safety net for the `throw e;` path.
+          clearInterval(renewTimer);
+          if (pendingRenewal) await pendingRenewal;
           return await terminate(state, "engine-error", detail);
         }
         throw e;
