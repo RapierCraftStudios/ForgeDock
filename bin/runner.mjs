@@ -873,7 +873,24 @@ export function runCliBackend({
     // Prefer the parsed envelope's human-readable `.result` string so
     // console output stays prose, not a raw JSON blob; fall back to the raw
     // captured output when parsing failed or `.result` was absent.
-    const humanOutput = parsedResult ?? output;
+    //
+    // forge#2456: `.result` alone would otherwise silently drop any non-empty
+    // `stderr` on an exit-0 run (deprecation notice, Node runtime banner,
+    // etc.) — a real behavior change from the pre-#2398 baseline, where the
+    // combined stdout+stderr stream was always logged. Append trimmed
+    // `stderr` after the parsed result when present, so operators still see
+    // it; when `stderr` is empty (the common case) the logged string is
+    // unchanged. This mirrors the same "combine streams instead of dropping
+    // one" fix already applied to the `run_bash` tool handler's success path
+    // in #1229. `JSON.parse` itself still targets `stdout` alone (forge#2422)
+    // — only the logged/displayed string composition changes here.
+    const stderrTrimmed = stderr.trim();
+    const humanOutput =
+      parsedResult !== null
+        ? stderrTrimmed
+          ? `${parsedResult}\n${stderrTrimmed}`
+          : parsedResult
+        : output;
     if (humanOutput) logger.log(humanOutput);
 
     logger.log(

@@ -2269,7 +2269,75 @@ describe("runCliBackend usage parsing from --output-format json (issue #2398)", 
       },
       "usage must parse from stdout's clean JSON envelope, not degrade to null because of stderr noise",
     );
-    assert.ok(loggedLines.some((line) => line === "Hi! Done."));
+    // forge#2456: the stderr noise itself is no longer silently dropped from
+    // the logged output — it's appended after the parsed .result text, on
+    // its own line, once JSON.parse has already succeeded from stdout alone.
+    assert.ok(
+      loggedLines.some((line) => line === `Hi! Done.\n${stderrNoise.trim()}`),
+      "the parsed .result text and the stderr noise must both be logged, in that order",
+    );
+  });
+
+  // forge#2456: `runCliBackend`'s success path previously discarded any
+  // non-empty stderr whenever the JSON envelope parsed with a string
+  // `.result` — silently dropping warnings/banners a user would have seen in
+  // the pre-#2398 raw-output behavior. Mirrors the same "combine streams
+  // instead of dropping one" fix already applied to the `run_bash` tool
+  // handler's success path (#1229).
+  it("appends non-empty stderr after the parsed .result on a successful JSON-parse exit (forge#2456)", () => {
+    const envelope = JSON.stringify({
+      type: "result",
+      result: "Hi! Done.",
+      usage: { input_tokens: 1, output_tokens: 1 },
+    });
+    const stderrBanner = "(node:99999) [DEP0040] DeprecationWarning: punycode is deprecated";
+    const spawnFn = () => ({ status: 0, stdout: envelope, stderr: stderrBanner, error: undefined });
+
+    const loggedLines = [];
+    const result = runCliBackend({
+      spec: loadCommandSpec(COMMANDS_DIR, "work-on"),
+      userMessage: "Execute: /work-on 2456",
+      args: ["2456"],
+      cwd: TMP,
+      logger: { log: (line) => loggedLines.push(line) },
+      bin: "claude",
+      spawnFn,
+    });
+
+    assert.equal(result.status, "complete");
+    assert.ok(
+      loggedLines.some((line) => line === `Hi! Done.\n${stderrBanner}`),
+      "non-empty stderr must be appended after the parsed .result text, not dropped",
+    );
+    assert.ok(
+      !loggedLines.some((line) => line === "Hi! Done."),
+      "the parsed .result text must not ALSO be logged bare when stderr was appended to it",
+    );
+  });
+
+  it("logs the parsed .result unchanged (no trailing newline/whitespace) when stderr is empty on a successful JSON-parse exit (forge#2456)", () => {
+    const envelope = JSON.stringify({
+      type: "result",
+      result: "Hi! Done.",
+      usage: { input_tokens: 1, output_tokens: 1 },
+    });
+    const spawnFn = () => ({ status: 0, stdout: envelope, stderr: "", error: undefined });
+
+    const loggedLines = [];
+    runCliBackend({
+      spec: loadCommandSpec(COMMANDS_DIR, "work-on"),
+      userMessage: "Execute: /work-on 2456",
+      args: ["2456"],
+      cwd: TMP,
+      logger: { log: (line) => loggedLines.push(line) },
+      bin: "claude",
+      spawnFn,
+    });
+
+    assert.ok(
+      loggedLines.some((line) => line === "Hi! Done."),
+      "with empty stderr, the logged line must be byte-identical to the parsed .result — no formatting change",
+    );
   });
 
   // forge#2424: a non-numeric usage field (e.g. a string, as an alternate/
