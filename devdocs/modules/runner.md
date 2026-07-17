@@ -50,3 +50,15 @@ again. Follow-up findings filed (non-blocking, POSSIBLE/LOW): #2483
 applied on this success-path sink) and #2484 (empty-string `.result` +
 non-empty stderr produces a leading-newline-only logged string). Cite: #2456,
 PR #2476, #2422, #1229.
+
+## Entry 2026-07-17 — fix(batch): P3 review findings — bin/runner.mjs (#2522)
+
+PR #2531 fixed the #2483/#2484 follow-ups from the entry above. Key gotcha:
+`parsedResult !== null` is true even when `parsedResult === ""` — any future
+edit to this ternary must gate on `parsedResult` truthiness (not `!== null`)
+when deciding whether to prefix stderr, or an empty `.result` produces a
+leading-newline-only artifact. Also: any untrusted stderr/stdout appended
+into a NEW log sink in this file must be routed through
+`sanitizeOutputExcerptForLog()` — this file now has 6 prior
+output-sanitization findings (#2277, #2292, #2293, #2355, #2483, #2484).
+Cite: #2522, PR #2531.
