@@ -36,6 +36,27 @@ import { readLog } from "./runlog.mjs";
 export const TERMINAL_REASONS = ["merged", "invalid", "needs-human", "decomposed", "engine-error", "awaiting-merge"];
 
 /**
+ * forge#2381: close-scope invariant ids (forge-invariants.yaml) that are
+ * structurally unsatisfiable at `close.execute()`'s call point and are
+ * therefore excluded from its in-process check rather than fabricated into
+ * passing.
+ *
+ * `run_log_terminal_at_close` asserts a RUN_TERMINAL event is present in the
+ * run-log. In the engine-native path RUN_TERMINAL is written by
+ * bin/engine.mjs's `terminate()` strictly AFTER this phase's outcome commits
+ * (`close.isTerminalAfter` is always true), so it cannot be present yet when
+ * `execute()` runs — evaluating it here would fail every healthy run. The
+ * assertion targets the interactive `commands/work-on/close.md` path, whose
+ * run-log ordering differs; it remains meaningful there and is still
+ * evaluated by `bin/tests/engine-invariants.test.mjs`.
+ *
+ * Do NOT "fix" an unsatisfiable assertion by synthesizing the event it looks
+ * for — that silently converts the gate into a no-op. Exclude it here (loudly,
+ * by id, with a reason) or change the assertion.
+ */
+const CLOSE_INVARIANTS_NOT_APPLICABLE_TO_EXECUTE = new Set(["run_log_terminal_at_close"]);
+
+/**
  * Fetch the issue's comments. Returns both:
  *  - `blob`: all bodies joined into one string, for simple marker-presence checks
  *    (`has(blob, marker)`) where it doesn't matter which comment posted the marker.
@@ -480,27 +501,37 @@ export const PHASES = [
      *
      * @param {import("./phases.mjs").RunState} state
      * @param {object} io - injected { gh, git } (see bin/engine.mjs)
-     * @param {{dir?: string}} [ctx] - dir: local run-log directory, used only to
-     *   evaluate close-scope invariants (bin/engine/invariants.mjs). Optional —
-     *   when absent, invariant evaluation is skipped (fail-open, matching every
-     *   other fail-open convention already in this file, e.g. `issueSnapshot`).
+     * @param {{dir?: string, invariants?: object[]}} [ctx] - dir: local run-log
+     *   directory, used only to evaluate close-scope invariants
+     *   (bin/engine/invariants.mjs). Optional — when absent, invariant evaluation
+     *   is skipped (fail-open, matching every other fail-open convention already
+     *   in this file, e.g. `issueSnapshot`). invariants: optional injected
+     *   declaration list, defaulting to `loadInvariants()`. This is a test seam —
+     *   it lets bin/tests/engine-phases.test.mjs exercise the violation path with
+     *   a genuinely-failing assertion rather than asserting the gate's shape and
+     *   calling that coverage. excludeInvariants: optional Set of assertion ids
+     *   to skip, defaulting to CLOSE_INVARIANTS_NOT_APPLICABLE_TO_EXECUTE — also
+     *   a test seam, so the violation/blocked path can be exercised end-to-end.
+     *   Production callers (bin/engine.mjs's runExecutePhase) never pass either.
      * @returns {Promise<{status: "committed"|"blocked", outputs: object, terminalReason?: string, detail?: string}>}
      */
     async execute(state, io, ctx = {}) {
       // 1. Close-scope invariant check, before any mutating gh call.
       if (ctx.dir) {
         const events = readLog(ctx.dir, state.issue);
-        // forge#2381: `run_log_terminal_at_close` (forge-invariants.yaml) checks
-        // for a RUN_TERMINAL event in the run-log — but RUN_TERMINAL is written
-        // by bin/engine.mjs's terminate() strictly AFTER this phase's outcome
-        // commits (isTerminalAfter above is always true for `close`), so it can
-        // never be present yet at this exact call — this call IS what causes
-        // terminate() to run immediately afterward (assuming a "committed"
-        // return below). Append a synthetic marker purely for this in-memory
-        // evaluation so the check reflects that forward guarantee rather than
-        // unconditionally failing on every healthy run; nothing is persisted.
-        const invariants = loadInvariants();
-        const results = assertCloseInvariants(invariants, [...events, { event: "RUN_TERMINAL", reason: "merged" }]);
+        const declared = ctx.invariants ?? loadInvariants();
+        const excluded = ctx.excludeInvariants ?? CLOSE_INVARIANTS_NOT_APPLICABLE_TO_EXECUTE;
+        const invariants = declared.filter((i) => !excluded.has(i.id));
+        // Evaluate the REAL event list — never a fabricated one. An earlier
+        // revision appended a synthetic RUN_TERMINAL here so that
+        // `run_log_terminal_at_close` would pass; that made the whole gate
+        // vacuous (the assertion only checks that such an event exists, so
+        // synthesizing one guaranteed ok:true and nothing could ever block).
+        // Structurally-unsatisfiable assertions are excluded by id instead —
+        // see CLOSE_INVARIANTS_NOT_APPLICABLE_TO_EXECUTE — so every assertion
+        // that IS evaluated here is evaluated against real state and can
+        // genuinely fail.
+        const results = assertCloseInvariants(invariants, events);
         const violations = results.filter((r) => !r.ok);
         if (violations.length) {
           return {

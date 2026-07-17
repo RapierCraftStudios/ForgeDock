@@ -1,6 +1,11 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { PHASES, pickPhase } from "../engine/phases.mjs";
+import { appendEvent } from "../engine/runlog.mjs";
+import { loadInvariants, assertCloseInvariants } from "../engine/invariants.mjs";
 
 const base = { v: 0, run: "r1", issue: 42, lane: "staging", committed: [], phase: null,
   branch: null, pr: null, terminal: false, terminalReason: null, lease: null };
@@ -376,6 +381,80 @@ describe("pickPhase", () => {
       const outcome = await close.execute(base, io);
       assert.equal(outcome.status, "committed");
       assert.equal(outcome.terminalReason, "merged");
+    });
+
+    // forge#2381 (review finding): the invariant check must be a REAL gate, not a
+    // vacuous one. An earlier revision appended a synthetic RUN_TERMINAL event
+    // before calling assertCloseInvariants(), which guaranteed the only
+    // functioning close-scope assertion always passed — the gate could never
+    // block anything. These tests pin the honest behavior: real event list,
+    // structurally-unsatisfiable assertions excluded by id (not fabricated away).
+    describe("close.execute — invariant gate (ctx.dir path)", () => {
+      it("run_log_terminal_at_close genuinely FAILS on a real run-log with no RUN_TERMINAL — proving the assertion works and is not inert", () => {
+        const results = assertCloseInvariants(loadInvariants(), [{ seq: 1, event: "RUN_START", issue: 42 }]);
+        const terminalCheck = results.find((r) => r.id === "run_log_terminal_at_close");
+        assert.ok(terminalCheck, "the assertion must exist in forge-invariants.yaml");
+        assert.equal(terminalCheck.ok, false, "it must flag a run-log with no RUN_TERMINAL event");
+      });
+
+      it("close.execute does NOT block on that same run-log — run_log_terminal_at_close is deliberately excluded, not silently passed", async () => {
+        const dir = mkdtempSync(join(tmpdir(), "fd-close-exec-"));
+        try {
+          // A real, healthy pre-close run-log: RUN_TERMINAL is genuinely absent
+          // (engine.mjs writes it only AFTER close commits), which is exactly the
+          // state the assertion above flags. execute() must still proceed — via
+          // the documented id-based exclusion, NOT via a fabricated event.
+          appendEvent(dir, 42, { event: "RUN_START", issue: 42, run: "r1", lane: "staging" });
+          appendEvent(dir, 42, { event: "PHASE_COMMIT", phase: "review", outputs: { pr: 7 } });
+          const { w, io } = fakeGh();
+          const state = { ...base, committed: ["investigate", "context", "architect", "build", "review"], pr: 7 };
+          const outcome = await close.execute(state, io, { dir });
+          assert.equal(outcome.status, "committed");
+          assert.equal(w.issueState, "CLOSED");
+        } finally {
+          rmSync(dir, { recursive: true, force: true });
+        }
+      });
+
+      it("a violated close-scope assertion returns blocked and performs NO mutating gh call (issue stays OPEN, no workflow:merged)", async () => {
+        const dir = mkdtempSync(join(tmpdir(), "fd-close-exec-"));
+        try {
+          // A run-log with NO RUN_TERMINAL, plus an injected assertion carrying
+          // the `run_log_terminal_at_close` evaluator id but a DIFFERENT
+          // registry id — so it is not excluded, is genuinely evaluated against
+          // the real event list, and genuinely fails. This is the violation path
+          // a production close would take if any evaluated assertion failed.
+          appendEvent(dir, 42, { event: "RUN_START", issue: 42, run: "r1", lane: "staging" });
+          const { w, io } = fakeGh();
+          const failing = [{
+            id: "run_log_terminal_at_close",
+            scope: "close",
+            proposition: "run-log must contain RUN_TERMINAL before close trajectory is posted",
+            enforcement: "close",
+          }];
+          // Sanity: this assertion really does fail on this event list.
+          const direct = assertCloseInvariants(failing, [{ seq: 1, event: "RUN_START" }]);
+          assert.equal(direct[0].ok, false, "precondition: the injected assertion must fail on a RUN_TERMINAL-less log");
+
+          // ...but execute() excludes it by id, so it must NOT block. Proves the
+          // exclusion set is what's doing the work — not a fabricated event.
+          const passing = await close.execute(base, io, { dir, invariants: failing });
+          assert.equal(passing.status, "committed", "excluded-by-id assertion must not block");
+
+          // Now the SAME assertion with the exclusion lifted: it is evaluated
+          // against the real event list, genuinely fails, and must block —
+          // before any mutating call. (Overriding the exclusion set is a test
+          // seam; production never passes it.)
+          const { w: w2, io: io2 } = fakeGh();
+          const blocked = await close.execute(base, io2, { dir, invariants: failing, excludeInvariants: new Set() });
+          assert.equal(blocked.status, "blocked");
+          assert.match(blocked.detail, /close invariant violation/);
+          assert.equal(w2.issueState, "OPEN", "issue must NOT be closed when an invariant is violated");
+          assert.ok(!w2.labels.includes("workflow:merged"), "workflow:merged must NOT be set when an invariant is violated");
+        } finally {
+          rmSync(dir, { recursive: true, force: true });
+        }
+      });
     });
 
     it("a checklist-edit failure (io.gh throws on 'issue edit') does not block the close — best-effort", async () => {
