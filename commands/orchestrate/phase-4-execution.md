@@ -1435,10 +1435,10 @@ for FINDING_NUM in {spawned_finding_numbers}; do
   # repairs a single finding's missing provenance at discovery time).
   FINDING_BODY_RAW=$(echo "$FINDING_DATA" | jq -r '.body')
   if ! echo "$FINDING_BODY_RAW" | grep -q '\*\*Code branch\*\*:'; then
-    # Portable (non-PCRE) extraction — grep -oP is not supported by Git Bash's
-    # grep build on Windows (same convention as scripts/derive-finding-milestone.sh
-    # and scripts/code-index.sh), so use a bash regex + BASH_REMATCH instead of
-    # a lookbehind.
+    # Portable (non-PCRE) extraction — PCRE grep lookbehinds are not supported by
+    # Git Bash's grep build on Windows (same convention as
+    # scripts/derive-finding-milestone.sh and scripts/code-index.sh), so use a
+    # bash regex + BASH_REMATCH instead of a lookbehind.
     REPAIR_SOURCE_PR=""
     FINDING_BODY_LOWER=$(echo "$FINDING_BODY_RAW" | tr '[:upper:]' '[:lower:]')
     if [[ "$FINDING_BODY_LOWER" =~ \*\*source\*\*:[[:space:]]*pr[[:space:]]*#([0-9]+) ]]; then
