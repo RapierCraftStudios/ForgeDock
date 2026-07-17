@@ -103,3 +103,211 @@ export const PHASE_MARKERS = {
     completionLabel: 'workflow:merged',
   },
 };
+
+/**
+ * Per-phase JSON-schema-shaped input contracts for the `report_result` tool
+ * (forge#2380). This is the schema-enforced counterpart to `PHASE_MARKERS`
+ * above: instead of a phase asserting completion by posting an exact-substring
+ * marker in a GitHub comment (parsed post-hoc, out-of-band), the API-backend
+ * tool loop (`bin/runner.mjs`) requires a validated `report_result` tool call
+ * carrying one of these shapes before it will let the phase terminate.
+ *
+ * Single-sourced the same way `PHASE_MARKERS` is: `enum` constraints are
+ * pulled from `RESERVED_TYPES[*]` wherever an equivalent enum already exists
+ * there (`INVESTIGATOR.verdictValues`, `REVIEWER.verdictValues`), rather than
+ * re-declaring a second, potentially-drifting copy of the same value list.
+ *
+ * `context` and `architect` deliberately do NOT accept any "partial" or
+ * "degraded" success value — forge#1669 (PR #1682) established that
+ * `architect`'s marker gate must reject anything short of full `:COMPLETE`
+ * because the architect's plan is the builder's primary implementation
+ * guide, and PR #2400 made that strictness structural via `PHASE_MARKERS`
+ * above. A schema that accepted e.g. `{ status: "partial" }` as valid input
+ * here would silently reopen exactly the gap that decision closed — so
+ * neither schema below defines a `status`/`complete` field at all; the sole
+ * completion signal for those two phases is "the call validated", full stop.
+ *
+ * Not every phase id has a registered schema. Absence of a `PHASE_IDS` entry
+ * here is a deliberate, supported state — `validatePhaseResult()` treats an
+ * unregistered phase id as "nothing to enforce" (`{ valid: true, errors: [] }`),
+ * and `bin/runner.mjs`'s loop only engages `report_result` enforcement for
+ * phases that DO have a schema.
+ *
+ * @typedef {Object} JsonSchemaLite
+ * @property {'object'} type
+ * @property {Object.<string, {type: string, enum?: string[], items?: {type: string}}>} properties
+ * @property {string[]} required
+ */
+
+/**
+ * Phase ids for which `bin/runner.mjs`'s report_result enforcement must NOT
+ * hard-block phase termination on a missing/never-made call (forge#2380,
+ * rebuild constraint "was #2404").
+ *
+ * This mirrors `PHASE_MARKERS.context`'s existing `presenceMarker` soft-skip
+ * convention (spec §7: "a missing completion marker is a visible skip, not a
+ * hard fail") and extends the same treatment to `architect` for the
+ * *report_result tool-loop* specifically — NOT for the separate
+ * comment-marker gate `bin/engine/phases.mjs` enforces, which still requires
+ * architect's `:COMPLETE` marker per forge#1669. The two are independent
+ * enforcement layers: report_result is additive, session-level, API-backend
+ * telemetry (`runCommand()`'s returned `result` field is not yet consumed by
+ * `detectOutcome` — see the Builder Contract for forge#2380 scope), while the
+ * marker gate is what the engine actually treats as the phase's completion
+ * signal today. Hard-blocking the API loop until the model calls a tool nobody
+ * downstream reads yet — even with an accepted empty `{}` payload — forces a
+ * needless retry cycle for two phases the rest of the pipeline already
+ * tolerates a skip on. `investigate`/`build`/`review`/`close` are NOT in this
+ * list — those hard-block exactly as before.
+ *
+ * @type {string[]}
+ */
+export const SOFT_SKIP_RESULT_PHASES = ['context', 'architect'];
+
+/** @type {Object.<string, JsonSchemaLite>} */
+export const PHASE_RESULT_SCHEMAS = {
+  investigate: {
+    type: 'object',
+    properties: {
+      verdict: { type: 'string', enum: RESERVED_TYPES.INVESTIGATOR.verdictValues }, // CONFIRMED | PARTIAL | INVALID
+      decompose: { type: 'boolean' },
+      rootCause: { type: 'string' },
+    },
+    required: ['verdict', 'decompose'],
+  },
+  build: {
+    type: 'object',
+    properties: {
+      branch: { type: 'string' },
+      commits: { type: 'array', items: { type: 'string' } },
+    },
+    required: ['branch', 'commits'],
+  },
+  review: {
+    type: 'object',
+    properties: {
+      pr: { type: 'number' },
+      disposition: { type: 'string', enum: RESERVED_TYPES.REVIEWER.verdictValues }, // APPROVED | CHANGES_REQUESTED | COMMENTED
+    },
+    required: ['pr', 'disposition'],
+  },
+  close: {
+    type: 'object',
+    properties: {
+      merged: { type: 'boolean' },
+    },
+    required: ['merged'],
+  },
+  // context/architect intentionally define no accepted fields beyond a free-form
+  // `summary` — see the doc comment above for why no partial/degraded-success
+  // value exists for either. A schema-valid call with an empty object `{}` is
+  // sufficient completion signal; `summary` is optional metadata only.
+  context: {
+    type: 'object',
+    properties: {
+      summary: { type: 'string' },
+    },
+    required: [],
+  },
+  architect: {
+    type: 'object',
+    properties: {
+      summary: { type: 'string' },
+    },
+    required: [],
+  },
+};
+
+/**
+ * Narrow `typeof` that also distinguishes arrays and null, matching the
+ * vocabulary `PHASE_RESULT_SCHEMAS` above uses for its `type`/`items.type`
+ * fields ('object', 'array', 'string', 'number', 'boolean', 'null').
+ * @param {*} v
+ * @returns {string}
+ */
+function typeOfForSchema(v) {
+  if (Array.isArray(v)) return 'array';
+  if (v === null) return 'null';
+  return typeof v;
+}
+
+/**
+ * Validate a `report_result` tool call's input against the registered schema
+ * for `phaseId`. This is intentionally a small, dependency-free subset of
+ * JSON Schema — just what `PHASE_RESULT_SCHEMAS` above actually uses (object
+ * type check, required-field presence, per-property type check, enum
+ * membership, and one level of array `items.type` checking) — not a general
+ * JSON Schema implementation.
+ *
+ * A `phaseId` with no registered schema returns `{ valid: true, errors: [] }`
+ * ("nothing to enforce"), matching how `bin/runner.mjs`'s enforcement loop
+ * only engages for phases that have one.
+ *
+ * @param {string} phaseId
+ * @param {*} input - the `report_result` tool call's parsed `input` object.
+ * @returns {{ valid: boolean, errors: string[] }}
+ */
+export function validatePhaseResult(phaseId, input) {
+  const schema = PHASE_RESULT_SCHEMAS[phaseId];
+  if (!schema) return { valid: true, errors: [] };
+
+  if (typeOfForSchema(input) !== 'object') {
+    return { valid: false, errors: [`report_result input must be a JSON object, got "${typeOfForSchema(input)}"`] };
+  }
+
+  const errors = [];
+
+  // forge#2380 (rebuild constraint "was #2408"): reject/strip keys not
+  // declared in schema.properties — including `__proto__`. This tool's input
+  // is entirely model-controlled JSON; without an explicit allow-list check,
+  // a `report_result` call carrying `{"__proto__": {...}}` would be accepted
+  // as "valid" (no field in `schema.required`/`schema.properties` inspects
+  // it), and the accepted object is threaded through `runCommand()`'s
+  // returned `result` field to whatever eventually consumes it. There was no
+  // exploitable sink downstream of that in the original diff, but the
+  // structural gap — an unvalidated arbitrary-key object flowing out of a
+  // "schema-validated" call — is exactly the kind of thing that becomes
+  // exploitable the moment a future consumer does something like
+  // `Object.assign({}, defaults, result)` or spreads `result` into another
+  // object. Enforce a closed set of allowed keys at the schema boundary
+  // instead of trusting every future consumer to defend against it
+  // individually. `Object.keys()`/`for...in` both skip non-enumerable/inherited
+  // properties, so a JSON-parsed `__proto__` key (always own+enumerable, per
+  // JSON.parse's behavior of never triggering the Object.prototype setter) is
+  // still caught here like any other unexpected key.
+  const allowedKeys = new Set(Object.keys(schema.properties));
+  for (const key of Object.keys(input)) {
+    if (!allowedKeys.has(key)) {
+      errors.push(`Unexpected field "${key}" is not part of this phase's result schema`);
+    }
+  }
+
+  for (const field of schema.required) {
+    if (!(field in input) || input[field] === '' || input[field] === null || input[field] === undefined) {
+      errors.push(`Required field "${field}" is missing or empty`);
+    }
+  }
+
+  for (const [key, def] of Object.entries(schema.properties)) {
+    if (!(key in input)) continue;
+    const value = input[key];
+    const actualType = typeOfForSchema(value);
+    if (def.type && actualType !== def.type) {
+      errors.push(`Field "${key}" must be of type "${def.type}", got "${actualType}"`);
+      continue;
+    }
+    if (def.enum && !def.enum.includes(value)) {
+      errors.push(`Field "${key}" must be one of: ${def.enum.join(', ')} — got: ${JSON.stringify(value)}`);
+    }
+    if (def.type === 'array' && def.items && Array.isArray(value)) {
+      value.forEach((item, i) => {
+        const itemType = typeOfForSchema(item);
+        if (def.items.type && itemType !== def.items.type) {
+          errors.push(`Field "${key}[${i}]" must be of type "${def.items.type}", got "${itemType}"`);
+        }
+      });
+    }
+  }
+
+  return { valid: errors.length === 0, errors };
+}

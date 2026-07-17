@@ -30,7 +30,13 @@ export { validate } from './validate.js';
 export { emit, emitPartial, isKnownType } from './emit.js';
 export { RESERVED_TYPES, RESERVED_TYPE_NAMES, Category, SentinelState } from './types.js';
 export { canonicalJson, toBase64url, encodeCard, decodeCardInlineValue } from './card.js';
-export { PHASE_IDS, PHASE_MARKERS } from './phases.js';
+export {
+  PHASE_IDS,
+  PHASE_MARKERS,
+  PHASE_RESULT_SCHEMAS,
+  SOFT_SKIP_RESULT_PHASES,
+  validatePhaseResult,
+} from './phases.js';
 
 /**
  * @typedef {Object} ParsedAnnotation

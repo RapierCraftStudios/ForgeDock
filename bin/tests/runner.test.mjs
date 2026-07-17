@@ -38,6 +38,8 @@ import {
   buildCliSystemPrompt,
   buildUserMessage,
   TOOL_DEFINITIONS,
+  buildToolDefinitions,
+  derivePhaseId,
   truncateToolResult,
   isWindowsBashShim,
   resolveBashShell,
@@ -219,13 +221,60 @@ describe("buildUserMessage", () => {
 // ---------------------------------------------------------------------------
 
 describe("TOOL_DEFINITIONS", () => {
-  it("defines read_file, write_file, run_bash with schemas", () => {
+  it("defines read_file, write_file, run_bash, report_result with schemas", () => {
     const names = TOOL_DEFINITIONS.map((t) => t.name);
-    assert.deepEqual(names.sort(), ["read_file", "run_bash", "write_file"]);
+    assert.deepEqual(names.sort(), ["read_file", "report_result", "run_bash", "write_file"]);
     for (const tool of TOOL_DEFINITIONS) {
       assert.equal(tool.input_schema.type, "object");
       assert.ok(Array.isArray(tool.input_schema.required));
     }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// report_result tool infrastructure (forge#2380)
+// ---------------------------------------------------------------------------
+
+describe("derivePhaseId", () => {
+  it("takes the last '/'-segment of the command name", () => {
+    assert.equal(derivePhaseId("work-on/investigate"), "investigate");
+    assert.equal(derivePhaseId("work-on/build/context"), "context");
+    assert.equal(derivePhaseId("work-on/build/architect"), "architect");
+    assert.equal(derivePhaseId("work-on/build"), "build");
+  });
+
+  it("returns the bare name unchanged when there is no '/'", () => {
+    assert.equal(derivePhaseId("issue"), "issue");
+  });
+
+  it("returns null for empty/nullish input", () => {
+    assert.equal(derivePhaseId(""), null);
+    assert.equal(derivePhaseId(undefined), null);
+  });
+});
+
+describe("buildToolDefinitions", () => {
+  it("returns TOOL_DEFINITIONS unchanged when phaseId has no registered schema", () => {
+    assert.equal(buildToolDefinitions(null), TOOL_DEFINITIONS);
+    assert.equal(buildToolDefinitions("not-a-real-phase"), TOOL_DEFINITIONS);
+  });
+
+  it("substitutes report_result's input_schema with the phase-specific schema", () => {
+    const tools = buildToolDefinitions("build");
+    const reportResult = tools.find((t) => t.name === "report_result");
+    assert.deepEqual(Object.keys(reportResult.input_schema.properties).sort(), ["branch", "commits"]);
+    assert.deepEqual(reportResult.input_schema.required, ["branch", "commits"]);
+    // Other tools are untouched.
+    const readFile = tools.find((t) => t.name === "read_file");
+    assert.equal(readFile, TOOL_DEFINITIONS.find((t) => t.name === "read_file"));
+  });
+
+  it("does not mutate the original TOOL_DEFINITIONS array or its report_result entry", () => {
+    const original = TOOL_DEFINITIONS.find((t) => t.name === "report_result").input_schema;
+    buildToolDefinitions("build");
+    const stillOriginal = TOOL_DEFINITIONS.find((t) => t.name === "report_result").input_schema;
+    assert.equal(stillOriginal, original);
+    assert.deepEqual(Object.keys(stillOriginal.properties), []);
   });
 });
 
@@ -948,6 +997,244 @@ describe("runCommand", () => {
     });
     assert.equal(result.status, "dry-run");
     assert.equal(result.model, "claude-test-model", "dry-run result must include model field");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// runCommand — report_result tool-loop control flow (forge#2380 rebuild
+// constraint "was #2406": integration coverage for the actual tool loop —
+// accept, reject-with-sanitized-error, non-tool_use nudge/continue, and
+// phase-failed terminal status — not just the pure helpers covered above.
+//
+// `opts.anthropicClient` (see bin/runner.mjs) is a test-only injection seam:
+// when supplied, it is used verbatim instead of importing/constructing the
+// real `@anthropic-ai/sdk` client, so these tests run without the optional
+// SDK package installed and without any network access.
+// ---------------------------------------------------------------------------
+
+describe("runCommand — report_result tool-loop control flow", () => {
+  /**
+   * Fake Anthropic-SDK-shaped client. `messages.create()` returns each entry
+   * in `responses` in order (repeating the last entry if called more times
+   * than provided — a control-flow bug then shows up as a wrong status or
+   * call count, not a hang). Every call's `messages` array is deep-cloned
+   * into `calls` for inspection after the run.
+   */
+  function makeFakeClient(responses) {
+    const calls = [];
+    let i = 0;
+    return {
+      calls,
+      messages: {
+        create: async (req) => {
+          calls.push(JSON.parse(JSON.stringify(req.messages)));
+          const response = responses[Math.min(i, responses.length - 1)];
+          i++;
+          return response;
+        },
+      },
+    };
+  }
+
+  it("accept path: a schema-valid report_result call is threaded through as `result` and the run completes", async () => {
+    const client = makeFakeClient([
+      {
+        stop_reason: "tool_use",
+        content: [
+          {
+            type: "tool_use",
+            id: "t1",
+            name: "report_result",
+            input: { branch: "fix/x-1", commits: ["abc1234"] },
+          },
+        ],
+        usage: { input_tokens: 10, output_tokens: 5 },
+      },
+      { stop_reason: "end_turn", content: [{ type: "text", text: "done" }], usage: { input_tokens: 3, output_tokens: 2 } },
+    ]);
+    const result = await runCommand({
+      commandsDir: COMMANDS_DIR,
+      commandName: "work-on/build",
+      args: ["1"],
+      cwd: TMP,
+      apiKey: "test-key",
+      backend: "api",
+      anthropicClient: client,
+      logger: { log() {} },
+    });
+    assert.equal(result.status, "complete");
+    assert.deepEqual(result.result, { branch: "fix/x-1", commits: ["abc1234"] });
+    assert.equal(client.calls.length, 2);
+  });
+
+  it("reject-with-sanitized-error path: a schema-invalid report_result call is rejected via an is_error tool_result and the model retries", async () => {
+    const client = makeFakeClient([
+      {
+        stop_reason: "tool_use",
+        content: [
+          // wrong type for branch, missing required commits
+          { type: "tool_use", id: "t1", name: "report_result", input: { branch: 123 } },
+        ],
+        usage: {},
+      },
+      {
+        stop_reason: "tool_use",
+        content: [
+          { type: "tool_use", id: "t2", name: "report_result", input: { branch: "fix/x-1", commits: [] } },
+        ],
+        usage: {},
+      },
+      { stop_reason: "end_turn", content: [], usage: {} },
+    ]);
+    const result = await runCommand({
+      commandsDir: COMMANDS_DIR,
+      commandName: "work-on/build",
+      args: ["1"],
+      cwd: TMP,
+      apiKey: "test-key",
+      backend: "api",
+      anthropicClient: client,
+      logger: { log() {} },
+    });
+    assert.equal(result.status, "complete");
+    assert.deepEqual(result.result, { branch: "fix/x-1", commits: [] });
+    // The 2nd request's message history must carry the rejection as an is_error tool_result
+    // with a sanitized error message (not a raw echo).
+    const secondRequestMessages = client.calls[1];
+    const rejectionTurn = secondRequestMessages.at(-1);
+    assert.equal(rejectionTurn.role, "user");
+    const toolResult = rejectionTurn.content.find((c) => c.tool_use_id === "t1");
+    assert.equal(toolResult.is_error, true);
+    assert.match(toolResult.content, /schema validation failed/);
+  });
+
+  it("non-tool_use nudge/continue path: a clean stop before any report_result call is rejected and the model is nudged to call it", async () => {
+    const client = makeFakeClient([
+      { stop_reason: "end_turn", content: [{ type: "text", text: "I think I'm done" }], usage: {} },
+      {
+        stop_reason: "tool_use",
+        content: [
+          { type: "tool_use", id: "t1", name: "report_result", input: { branch: "fix/x-1", commits: [] } },
+        ],
+        usage: {},
+      },
+      { stop_reason: "end_turn", content: [], usage: {} },
+    ]);
+    const result = await runCommand({
+      commandsDir: COMMANDS_DIR,
+      commandName: "work-on/build",
+      args: ["1"],
+      cwd: TMP,
+      apiKey: "test-key",
+      backend: "api",
+      anthropicClient: client,
+      logger: { log() {} },
+    });
+    assert.equal(result.status, "complete");
+    assert.equal(client.calls.length, 3, "must have nudged once before the model called report_result");
+    const nudgeTurn = client.calls[1].at(-1);
+    assert.equal(nudgeTurn.role, "user");
+    assert.match(nudgeTurn.content, /must call the report_result tool/);
+  });
+
+  it("phase-failed terminal status: iteration-cap exhaustion without a valid report_result call is distinct, not silently accepted", async () => {
+    const client = makeFakeClient([
+      { stop_reason: "end_turn", content: [{ type: "text", text: "still thinking" }], usage: {} },
+    ]);
+    const result = await runCommand({
+      commandsDir: COMMANDS_DIR,
+      commandName: "work-on/build",
+      args: ["1"],
+      cwd: TMP,
+      apiKey: "test-key",
+      backend: "api",
+      maxIterations: 2,
+      anthropicClient: client,
+      logger: { log() {} },
+    });
+    assert.equal(result.status, "phase-failed");
+    assert.equal(result.result, null);
+    assert.match(result.detail, /report_result was never called/);
+    assert.match(result.detail, /"build"/);
+  });
+
+  it("max_tokens truncation on a hard-enforced phase returns a distinct 'incomplete' status immediately, not a generic phase-failed after burning iterations (was #2405)", async () => {
+    const client = makeFakeClient([
+      { stop_reason: "max_tokens", content: [{ type: "text", text: "cut off mid" }], usage: {} },
+    ]);
+    const result = await runCommand({
+      commandsDir: COMMANDS_DIR,
+      commandName: "work-on/build",
+      args: ["1"],
+      cwd: TMP,
+      apiKey: "test-key",
+      backend: "api",
+      maxIterations: 5,
+      anthropicClient: client,
+      logger: { log() {} },
+    });
+    assert.equal(result.status, "incomplete");
+    assert.equal(client.calls.length, 1, "must not burn further iterations nudging a truncated response");
+    assert.match(result.detail, /truncated/);
+  });
+
+  it("soft-skip phases (context/architect) do not hard-block on a missing report_result call (was #2404)", async () => {
+    const client = makeFakeClient([
+      {
+        stop_reason: "end_turn",
+        content: [{ type: "text", text: "architecture plan posted to the issue" }],
+        usage: {},
+      },
+    ]);
+    const result = await runCommand({
+      commandsDir: COMMANDS_DIR,
+      commandName: "work-on/build/architect",
+      args: ["1"],
+      cwd: TMP,
+      apiKey: "test-key",
+      backend: "api",
+      anthropicClient: client,
+      logger: { log() {} },
+    });
+    assert.equal(result.status, "complete");
+    assert.equal(result.result, null);
+    assert.equal(client.calls.length, 1, "must not nudge/loop for a soft-skip phase");
+  });
+
+  it("repeat report_result calls are logged, not silent — last-write-wins (was #2407)", async () => {
+    const client = makeFakeClient([
+      {
+        stop_reason: "tool_use",
+        content: [
+          { type: "tool_use", id: "t1", name: "report_result", input: { branch: "fix/x-1", commits: ["a"] } },
+        ],
+        usage: {},
+      },
+      {
+        stop_reason: "tool_use",
+        content: [
+          { type: "tool_use", id: "t2", name: "report_result", input: { branch: "fix/x-1", commits: ["a", "b"] } },
+        ],
+        usage: {},
+      },
+      { stop_reason: "end_turn", content: [], usage: {} },
+    ]);
+    const lines = [];
+    const result = await runCommand({
+      commandsDir: COMMANDS_DIR,
+      commandName: "work-on/build",
+      args: ["1"],
+      cwd: TMP,
+      apiKey: "test-key",
+      backend: "api",
+      anthropicClient: client,
+      logger: { log: (s) => lines.push(s) },
+    });
+    assert.deepEqual(result.result, { branch: "fix/x-1", commits: ["a", "b"] });
+    assert.ok(
+      lines.some((l) => /called again/.test(l)),
+      "repeat report_result call must be logged, not silent",
+    );
   });
 });
 
