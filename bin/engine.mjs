@@ -401,7 +401,14 @@ export async function runIssue(opts) {
     // Suppressing the unmatched exit is correct here rather than fabricating
     // a synthetic phase_enter, since the phase's runner genuinely never ran.
     if (phaseEntered) emitProgress({ event: "phase_exit", phase: phase.id, status: "committed" });
-    appendEvent(dir, issue, { event: "PHASE_COMMIT", phase: phase.id, outputs: outcome.outputs || {} });
+    // forge#2377: `outcome.usage` is populated by runPhaseWithRetry() below
+    // from the injected runner()'s (== bin/runner.mjs's runCommand()) return
+    // value — null when the backend doesn't report usage (CLI backend today)
+    // or when detectOutcome() never ran (this call site is only reached on
+    // the "committed" path, so that case doesn't apply here). Kept as a
+    // sibling of `outputs` rather than nested inside it, since `outputs` is
+    // owned by phase.detectOutcome() (bin/engine/phases.mjs).
+    appendEvent(dir, issue, { event: "PHASE_COMMIT", phase: phase.id, outputs: outcome.outputs || {}, usage: outcome.usage ?? null });
     state = deriveState(readLog(dir, issue));
     if (outcome.terminalReason) state.terminalReason = outcome.terminalReason;
     await projector.writeState(issue, { ...state, lease: { by: agentId, until: now() + leaseTtlMs } });
@@ -439,10 +446,20 @@ async function runPhaseWithRetry(phase, state, ctx) {
   // Flips to false the instant any attempt's runner() call succeeds, even if
   // that attempt's detectOutcome() itself reports failure.
   let allAttemptsThrew = true;
+  // forge#2377: the last successful attempt's `usage` (from runner()'s ==
+  // runCommand()'s resolved value — {input_tokens, output_tokens,
+  // cache_creation_input_tokens, cache_read_input_tokens} on the API
+  // backend, or null on the CLI backend / when the field is absent). Reset
+  // is unnecessary since a thrown attempt never reaches the assignment
+  // below — `lastUsage` simply stays whatever the previous successful
+  // attempt (if any) set it to, which is correct: it always reflects the
+  // most recent attempt that actually produced a result.
+  let lastUsage = null;
   for (let attempt = 1; attempt <= maxAttempts; attempt++) {
     appendEvent(dir, issue, { event: "PHASE_START", phase: phase.id, attempt });
+    let result;
     try {
-      await runner({
+      result = await runner({
         commandsDir, commandName: phase.command, args: [String(issue)],
         // Only forwarded when explicitly provided — omitting them preserves
         // runner.mjs's existing default ("auto" backend / DEFAULT_MODEL).
@@ -468,13 +485,19 @@ async function runPhaseWithRetry(phase, state, ctx) {
       // unproven) — a deterministic tool crash should not be retried as if
       // transient regardless of its root cause.
       if (e.code === "NO_API_KEY" || e.code === "NO_SDK" || e.code === "CLI_BACKEND_FAILED") throw e;
+      // forge#2377: no `usage` field here — the runner threw, so no result
+      // (and therefore no usage data) was ever produced for this attempt.
+      // Do not fabricate a value; omitting the field (rather than a stale
+      // `lastUsage` from a prior attempt) keeps this event's usage
+      // trustworthy as "usage actually observed on this attempt".
       appendEvent(dir, issue, { event: "PHASE_FAILED", phase: phase.id, attempt, reason: e.message, maxAttempts });
       continue;
     }
     allAttemptsThrew = false;
+    lastUsage = result?.usage ?? null;
     const outcome = await phase.detectOutcome(state, io);
-    if (outcome.status === "committed" || outcome.status === "blocked") return outcome;
-    appendEvent(dir, issue, { event: "PHASE_FAILED", phase: phase.id, attempt, reason: outcome.detail, maxAttempts });
+    if (outcome.status === "committed" || outcome.status === "blocked") return { ...outcome, usage: lastUsage };
+    appendEvent(dir, issue, { event: "PHASE_FAILED", phase: phase.id, attempt, reason: outcome.detail, maxAttempts, usage: lastUsage });
     // forge#2176: a phase's detectOutcome can mark a failure as a known,
     // state-derived fixed point — re-running the phase's runner is
     // guaranteed to reproduce the identical failure (e.g. the build phase's
@@ -486,7 +509,7 @@ async function runPhaseWithRetry(phase, state, ctx) {
     // for every phase that doesn't opt in — investigate/context/architect/
     // review/close — is unchanged, preserving transient-failure retries).
     if (outcome.retryable === false) {
-      return { status: "blocked", detail: outcome.detail };
+      return { status: "blocked", detail: outcome.detail, usage: lastUsage };
     }
   }
   // Exhausted transient retries → escalate (spec §7).
@@ -504,9 +527,10 @@ async function runPhaseWithRetry(phase, state, ctx) {
       status: "blocked",
       detail: `phase ${phase.id} failed after ${maxAttempts} attempts (runner threw every attempt)`,
       reason: "engine-error",
+      usage: null,
     };
   }
-  return { status: "blocked", detail: `phase ${phase.id} failed after ${maxAttempts} attempts` };
+  return { status: "blocked", detail: `phase ${phase.id} failed after ${maxAttempts} attempts`, usage: lastUsage };
 }
 
 /**

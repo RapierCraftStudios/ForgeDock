@@ -1221,6 +1221,135 @@ describe("runIssue", () => {
   });
 });
 
+describe("runIssue — forge#2377: per-phase usage recording", () => {
+  it("attaches a successful runner()'s usage to the phase's PHASE_COMMIT event", async () => {
+    const { w, io } = fakeWorld();
+    const USAGE = { input_tokens: 1200, output_tokens: 340, cache_creation_input_tokens: 0, cache_read_input_tokens: 500 };
+    const script = {
+      "work-on/investigate": () => { w.markers += " INVESTIGATION:COMPLETE"; },
+      "work-on/build/context": () => { w.markers += " FORGE:CONTEXT:COMPLETE"; },
+      "work-on/build/architect": () => { w.markers += " FORGE:ARCHITECT:COMPLETE"; },
+      "work-on/build": () => { w.markers += " FORGE:BUILDER:COMPLETE **Branch**: `fix/real-branch-42`"; w.commitsAhead = 2; },
+      "work-on/review": () => { w.pr = 7; w.prMerged = true; },
+      "work-on/close": () => { w.issueState = "CLOSED"; w.labels.push("workflow:merged"); },
+    };
+    // Only the investigate phase's runner() reports usage in this fixture —
+    // the rest resolve with the pre-existing `{ status: "complete" }` shape
+    // (no usage field) used throughout the suite, to prove the two shapes
+    // coexist without crashing.
+    const runner = async ({ commandName }) => {
+      script[commandName](); // eslint-disable-line
+      if (commandName === "work-on/investigate") return { status: "complete", usage: USAGE };
+      return { status: "complete" };
+    };
+
+    const res = await runIssue({ issue: 42, dir, agentId: "a1", lane: "staging",
+      io, runner, now: () => 1000, maxAttempts: 3 });
+
+    assert.equal(res.terminalReason, "merged");
+    const events = readLog(dir, 42);
+    const investigateCommit = events.find((e) => e.event === "PHASE_COMMIT" && e.phase === "investigate");
+    assert.deepEqual(investigateCommit.usage, USAGE,
+      "the investigate phase's PHASE_COMMIT event must carry the usage object its runner() resolved with");
+  });
+
+  it("degrades to usage: null on PHASE_COMMIT when the runner reports no usage (e.g. CLI backend)", async () => {
+    const { w, io } = fakeWorld();
+    const script = {
+      "work-on/investigate": () => { w.markers += " INVESTIGATION:COMPLETE"; },
+      "work-on/build/context": () => { w.markers += " FORGE:CONTEXT:COMPLETE"; },
+      "work-on/build/architect": () => { w.markers += " FORGE:ARCHITECT:COMPLETE"; },
+      "work-on/build": () => { w.markers += " FORGE:BUILDER:COMPLETE **Branch**: `fix/real-branch-42`"; w.commitsAhead = 2; },
+      "work-on/review": () => { w.pr = 7; w.prMerged = true; },
+      "work-on/close": () => { w.issueState = "CLOSED"; w.labels.push("workflow:merged"); },
+    };
+    // Matches the existing suite-wide fixture shape (`{ status: "complete" }`,
+    // no usage field at all) — the same shape every pre-#2377 test in this
+    // file already uses, proving no regression for callers that never
+    // supply usage.
+    const runner = async ({ commandName }) => { script[commandName](); return { status: "complete" }; };
+
+    const res = await runIssue({ issue: 42, dir, agentId: "a1", lane: "staging",
+      io, runner, now: () => 1000, maxAttempts: 3 });
+
+    assert.equal(res.terminalReason, "merged");
+    const events = readLog(dir, 42);
+    const commits = events.filter((e) => e.event === "PHASE_COMMIT");
+    assert.ok(commits.length > 0);
+    for (const c of commits) {
+      assert.equal(c.usage, null, `PHASE_COMMIT for phase ${c.phase} must default usage to null when the runner reports none`);
+    }
+  });
+
+  it("omits usage on a PHASE_FAILED event produced by a thrown runner() error (no result was ever produced)", async () => {
+    const { w, io } = fakeWorld();
+    let investigateCalls = 0;
+    const script = {
+      "work-on/investigate": () => { investigateCalls++; if (investigateCalls > 1) w.markers += " INVESTIGATION:COMPLETE"; },
+      "work-on/build/context": () => { w.markers += " FORGE:CONTEXT:COMPLETE"; },
+      "work-on/build/architect": () => { w.markers += " FORGE:ARCHITECT:COMPLETE"; },
+      "work-on/build": () => { w.markers += " FORGE:BUILDER:COMPLETE **Branch**: `fix/real-branch-42`"; w.commitsAhead = 2; },
+      "work-on/review": () => { w.pr = 7; w.prMerged = true; },
+      "work-on/close": () => { w.issueState = "CLOSED"; w.labels.push("workflow:merged"); },
+    };
+    const runner = async ({ commandName }) => {
+      if (commandName === "work-on/investigate" && investigateCalls === 0) {
+        script[commandName]();
+        throw new Error("transient network error");
+      }
+      script[commandName]();
+      return { status: "complete" };
+    };
+
+    const res = await runIssue({ issue: 42, dir, agentId: "a1", lane: "staging",
+      io, runner, now: () => 1000, maxAttempts: 3 });
+
+    assert.equal(res.terminalReason, "merged");
+    const events = readLog(dir, 42);
+    const investigateFailures = events.filter((e) => e.event === "PHASE_FAILED" && e.phase === "investigate");
+    assert.equal(investigateFailures.length, 1);
+    assert.ok(!("usage" in investigateFailures[0]),
+      "a PHASE_FAILED event for a thrown-runner attempt must not carry a fabricated usage field");
+  });
+
+  it("attaches the attempt's usage to a PHASE_FAILED event produced by detectOutcome (runner succeeded, phase not yet done)", async () => {
+    const { w, io } = fakeWorld();
+    const USAGE_ATTEMPT_1 = { input_tokens: 100, output_tokens: 20 };
+    let buildCalls = 0;
+    const script = {
+      "work-on/investigate": () => { w.markers += " INVESTIGATION:COMPLETE"; },
+      "work-on/build/context": () => { w.markers += " FORGE:CONTEXT:COMPLETE"; },
+      "work-on/build/architect": () => { w.markers += " FORGE:ARCHITECT:COMPLETE"; },
+      "work-on/build": () => {
+        buildCalls++;
+        // First attempt: builder posts its marker but no commits landed yet
+        // (detectOutcome reports failure, retryable — commitsAhead === 0
+        // with no branch resolved is the existing "keep retrying" case).
+        if (buildCalls === 1) return;
+        w.markers += " FORGE:BUILDER:COMPLETE **Branch**: `fix/real-branch-42`";
+        w.commitsAhead = 2;
+      },
+      "work-on/review": () => { w.pr = 7; w.prMerged = true; },
+      "work-on/close": () => { w.issueState = "CLOSED"; w.labels.push("workflow:merged"); },
+    };
+    const runner = async ({ commandName }) => {
+      script[commandName]();
+      if (commandName === "work-on/build" && buildCalls === 1) return { status: "complete", usage: USAGE_ATTEMPT_1 };
+      return { status: "complete" };
+    };
+
+    const res = await runIssue({ issue: 42, dir, agentId: "a1", lane: "staging",
+      io, runner, now: () => 1000, maxAttempts: 3 });
+
+    assert.equal(res.terminalReason, "merged");
+    const events = readLog(dir, 42);
+    const buildFailures = events.filter((e) => e.event === "PHASE_FAILED" && e.phase === "build");
+    assert.equal(buildFailures.length, 1, "attempt 1 fails (no commits yet), attempt 2 succeeds");
+    assert.deepEqual(buildFailures[0].usage, USAGE_ATTEMPT_1,
+      "the PHASE_FAILED event for a detectOutcome-reported failure must carry that attempt's usage");
+  });
+});
+
 describe("runIssue — forge#2313: lease config validation", () => {
   it("rejects leaseRenewIntervalMs >= leaseTtlMs (boundary-equal case) before any state I/O", async () => {
     const { w, io } = fakeWorld();

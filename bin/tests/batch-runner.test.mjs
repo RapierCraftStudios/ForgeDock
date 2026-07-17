@@ -27,6 +27,7 @@ import {
   makeRunResult,
   classifyRunnerResult,
   writeResults,
+  tokenCost,
 } from "../batch-runner.mjs";
 
 // ---------------------------------------------------------------------------
@@ -194,6 +195,37 @@ describe("classifyRunnerResult", () => {
 
   it("maps any unknown status to incomplete (safe default)", () => {
     assert.equal(classifyRunnerResult({ status: "something-new" }), "incomplete");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// tokenCost (forge#2377)
+// ---------------------------------------------------------------------------
+
+describe("tokenCost", () => {
+  it("sums input_tokens and output_tokens", () => {
+    assert.equal(tokenCost({ input_tokens: 1000, output_tokens: 250 }), 1250);
+  });
+
+  it("returns null when usage is null (e.g. CLI backend)", () => {
+    assert.equal(tokenCost(null), null);
+  });
+
+  it("returns null when usage is undefined", () => {
+    assert.equal(tokenCost(undefined), null);
+  });
+
+  it("treats missing input_tokens/output_tokens fields as 0", () => {
+    assert.equal(tokenCost({}), 0);
+    assert.equal(tokenCost({ input_tokens: 500 }), 500);
+    assert.equal(tokenCost({ output_tokens: 75 }), 75);
+  });
+
+  it("ignores cache_read_input_tokens/cache_creation_input_tokens (not part of the billed-token proxy)", () => {
+    assert.equal(
+      tokenCost({ input_tokens: 100, output_tokens: 20, cache_creation_input_tokens: 5000, cache_read_input_tokens: 9000 }),
+      120,
+    );
   });
 });
 
