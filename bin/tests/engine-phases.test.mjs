@@ -290,6 +290,108 @@ describe("pickPhase", () => {
     });
   });
 
+  // forge#2381: close.execute() — engine-native close, zero LLM tokens.
+  describe("close.execute", () => {
+    const close = PHASES.find(p => p.id === "close");
+
+    /** A scriptable fake GitHub world recording every gh call made. */
+    function fakeGh(initialBody = "Issue.") {
+      const w = { body: initialBody, labels: [], issueState: "OPEN", closed: false, calls: [] };
+      const gh = async (args) => {
+        w.calls.push(args.join(" "));
+        const a = args.join(" ");
+        if (a.startsWith("issue view") && a.includes("body")) return JSON.stringify({ body: w.body });
+        if (a.startsWith("issue view")) return JSON.stringify({ state: w.issueState, labels: w.labels.map(n => ({ name: n })) });
+        if (a.startsWith("issue edit")) {
+          const bi = args.indexOf("--body"); if (bi >= 0) w.body = args[bi + 1];
+          const li = args.indexOf("--add-label"); if (li >= 0) w.labels.push(args[li + 1]);
+          return "";
+        }
+        if (a.startsWith("issue close")) { w.issueState = "CLOSED"; w.closed = true; return ""; }
+        if (a.startsWith("issue comment")) return "";
+        return "";
+      };
+      return { w, io: { gh, git: async () => "0" } };
+    }
+
+    it("happy path: closes the issue, sets workflow:merged, posts a trajectory comment — no ctx.dir means invariant check is skipped (fail-open)", async () => {
+      const { w, io } = fakeGh();
+      const state = { ...base, committed: ["investigate", "context", "architect", "build", "review"], pr: 7, branch: "feat/x-1" };
+      const outcome = await close.execute(state, io);
+      assert.equal(outcome.status, "committed");
+      assert.equal(outcome.terminalReason, "merged");
+      assert.equal(w.closed, true);
+      assert.ok(w.labels.includes("workflow:merged"));
+      assert.ok(w.calls.some(c => c.startsWith("issue comment") ), "posts a FORGE:TRAJECTORY comment");
+    });
+
+    it("checks off remaining checklist items in the issue body before closing", async () => {
+      const { w, io } = fakeGh("## Acceptance Criteria\n- [ ] one\n- [x] two\n- [ ] three\n");
+      const outcome = await close.execute(base, io);
+      assert.equal(outcome.status, "committed");
+      assert.equal(w.body, "## Acceptance Criteria\n- [x] one\n- [x] two\n- [x] three\n");
+    });
+
+    it("updates the parent tracker checkbox and closes the parent once all sub-issues are checked", async () => {
+      const { w: subW, io: subIo } = fakeGh("**Parent**: #100");
+      // Parent world: separate fake, wired so the sub-issue's io.gh routes
+      // "issue view 100"/"issue edit 100"/"issue close 100" to the parent state.
+      const parent = { body: "- [x] #41\n- [ ] #42\n", labels: [], issueState: "OPEN", closed: false };
+      const combinedGh = async (args) => {
+        const a = args.join(" ");
+        if (a.includes(" 100 ") || a.endsWith(" 100")) {
+          if (a.startsWith("issue view") && a.includes("body")) return JSON.stringify({ body: parent.body });
+          if (a.startsWith("issue edit")) { const bi = args.indexOf("--body"); if (bi >= 0) parent.body = args[bi + 1];
+            const li = args.indexOf("--add-label"); if (li >= 0) parent.labels.push(args[li + 1]); return ""; }
+          if (a.startsWith("issue close")) { parent.closed = true; parent.issueState = "CLOSED"; return ""; }
+        }
+        return subIo.gh(args);
+      };
+      const state = { ...base, issue: 42, committed: ["investigate", "context", "architect", "build", "review"] };
+      const outcome = await close.execute(state, { gh: combinedGh, git: async () => "0" });
+      assert.equal(outcome.status, "committed");
+      assert.equal(parent.body, "- [x] #41\n- [x] #42\n");
+      assert.equal(parent.closed, true, "parent closes once every sub-issue checkbox is checked");
+    });
+
+    it("does not update the parent tracker when the parent's checklist has no matching sub-issue line", async () => {
+      const { w: subW, io: subIo } = fakeGh("**Parent**: #200");
+      const parent = { body: "- [ ] #999\n", edited: false };
+      const combinedGh = async (args) => {
+        const a = args.join(" ");
+        if (a.includes(" 200 ") || a.endsWith(" 200")) {
+          if (a.startsWith("issue view") && a.includes("body")) return JSON.stringify({ body: parent.body });
+          if (a.startsWith("issue edit")) { parent.edited = true; return ""; }
+        }
+        return subIo.gh(args);
+      };
+      const state = { ...base, issue: 42, committed: ["investigate", "context", "architect", "build", "review"] };
+      const outcome = await close.execute(state, { gh: combinedGh, git: async () => "0" });
+      assert.equal(outcome.status, "committed");
+      assert.equal(parent.edited, false, "no matching '- [ ] #42' line in parent — nothing to update");
+    });
+
+    it("project-board sync is a no-op that never throws or blocks the close", async () => {
+      const { w, io } = fakeGh();
+      const outcome = await close.execute(base, io);
+      assert.equal(outcome.status, "committed");
+      assert.equal(outcome.terminalReason, "merged");
+    });
+
+    it("a checklist-edit failure (io.gh throws on 'issue edit') does not block the close — best-effort", async () => {
+      const { w, io } = fakeGh("- [ ] one\n");
+      const origGh = io.gh;
+      io.gh = async (args) => {
+        if (args.join(" ").startsWith("issue edit") && args.includes("--body")) throw new Error("transient failure");
+        return origGh(args);
+      };
+      const outcome = await close.execute(base, io);
+      assert.equal(outcome.status, "committed");
+      assert.equal(outcome.terminalReason, "merged");
+      assert.equal(w.closed, true, "the load-bearing close still happens despite the checklist-edit failure");
+    });
+  });
+
   // Regression tests for #1669: reconcile must require :COMPLETE markers, not bare annotation openers.
   describe("context.reconcile — requires FORGE:CONTEXT:COMPLETE (not bare FORGE:CONTEXT)", () => {
     const context = PHASES.find(p => p.id === "context");

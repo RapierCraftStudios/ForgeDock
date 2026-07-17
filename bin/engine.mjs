@@ -328,7 +328,16 @@ export async function runIssue(opts) {
       const renewTimer = setInterval(renewLease, leaseRenewIntervalMs);
       if (typeof renewTimer.unref === "function") renewTimer.unref();
       try {
-        outcome = await runPhaseWithRetry(phase, state, { io, runner, dir, issue, commandsDir, maxAttempts, backend, model });
+        // forge#2381: engine-native phases (those declaring `execute` — see
+        // the `close` entry in bin/engine/phases.mjs) skip runner()/the LLM
+        // subagent entirely. runExecutePhase() normalizes execute()'s return
+        // to the exact same {status, outputs, terminalReason?, usage} shape
+        // runPhaseWithRetry() returns, so every downstream branch (commit,
+        // blocked, terminate, PHASE_COMMIT emission below) needs no
+        // execute()-specific special-casing beyond this one dispatch check.
+        outcome = phase.execute
+          ? await runExecutePhase(phase, state, io, dir)
+          : await runPhaseWithRetry(phase, state, { io, runner, dir, issue, commandsDir, maxAttempts, backend, model });
       } catch (e) {
         // forge#2261: NO_API_KEY/NO_SDK/CLI_BACKEND_FAILED are fail-fast
         // rethrown by runPhaseWithRetry() (see its own catch below) instead
@@ -408,7 +417,12 @@ export async function runIssue(opts) {
     // the "committed" path, so that case doesn't apply here). Kept as a
     // sibling of `outputs` rather than nested inside it, since `outputs` is
     // owned by phase.detectOutcome() (bin/engine/phases.mjs).
-    appendEvent(dir, issue, { event: "PHASE_COMMIT", phase: phase.id, outputs: outcome.outputs || {}, usage: outcome.usage ?? null });
+    // forge#2381: `engineNative` distinguishes a PHASE_COMMIT produced by
+    // phase.execute() (zero LLM tokens) from the default runner()/LLM path —
+    // additive-only field; bin/engine/runlog.mjs's deriveState()/eventsFromIndex()
+    // pass unrecognized event fields through untouched, so every existing
+    // consumer of PHASE_COMMIT events is unaffected by its presence/absence.
+    appendEvent(dir, issue, { event: "PHASE_COMMIT", phase: phase.id, outputs: outcome.outputs || {}, usage: outcome.usage ?? null, engineNative: !!phase.execute });
     state = deriveState(readLog(dir, issue));
     if (outcome.terminalReason) state.terminalReason = outcome.terminalReason;
     await projector.writeState(issue, { ...state, lease: { by: agentId, until: now() + leaseTtlMs } });
@@ -450,6 +464,26 @@ export async function runIssue(opts) {
     // there is no human decision pending, just a tool that needs to be re-run.
     else if (reason === "engine-error") await projector.setLabel(issue, "workflow:engine-error");
     return { terminalReason: reason, detail };
+  }
+}
+
+/**
+ * forge#2381: dispatch for engine-native phases (those declaring `execute` —
+ * e.g. `close` in bin/engine/phases.mjs). Runs the phase's own code directly,
+ * with zero LLM/runner() invocation and no retry loop (execute() is plain
+ * deterministic code, not a flaky external subagent — a thrown error here is
+ * a genuine bug, not a transient failure worth retrying blindly). Normalizes
+ * the return to the same {status, outputs, terminalReason?, usage} shape
+ * runPhaseWithRetry() returns below, so the caller's downstream handling
+ * (commit/blocked/terminate, PHASE_COMMIT emission) needs no special-casing
+ * beyond the `phase.execute` dispatch check itself.
+ */
+async function runExecutePhase(phase, state, io, dir) {
+  try {
+    const result = await phase.execute(state, io, { dir });
+    return { ...result, usage: result.usage ?? null };
+  } catch (e) {
+    return { status: "blocked", detail: `phase ${phase.id} execute() threw: ${e.message}`, usage: null };
   }
 }
 
