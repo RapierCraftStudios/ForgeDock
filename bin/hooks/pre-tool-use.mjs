@@ -596,7 +596,13 @@ function checkPrTarget(command) {
  *
  * Reads the current workflow labels from GitHub via `gh issue view` and
  * validates that the new label is a legal successor in the state machine.
- * Falls back to allow (exit 0) on any gh CLI error so the hook is fail-open.
+ * Falls back to allow (exit 0) on a `gh` CLI error for ordinary transitions,
+ * so the hook stays resilient to transient `gh`/network failures. The one
+ * exception (#2347): when the attempted transition is to `workflow:invalid`
+ * (`mayNeedEvidence`), the same lookup also fetches the reversal-evidence
+ * comments required by the evidence gate below — a `gh` error there fails
+ * *closed* instead, so a transient CLI error can never silently bypass the
+ * evidence gate the way a blanket fail-open would.
  *
  * @param {string} command
  * @returns {string|null} Error message to show, or null if allowed.
@@ -657,7 +663,25 @@ function checkLabelTransition(command) {
       comments = Array.isArray(parsed.comments) ? parsed.comments : [];
     }
   } catch {
-    return null; // gh CLI error — fail-open
+    if (mayNeedEvidence) {
+      // #2347: the lookup that failed is the same one that would have
+      // fetched the reversal-evidence comments for the workflow:invalid
+      // evidence gate (#2326/#2332). Fail closed here instead of silently
+      // allowing an unverified workflow:invalid transition through.
+      return [
+        `[ForgeDock] BLOCKED: Unable to verify workflow:invalid evidence (gh CLI error).`,
+        ``,
+        `Attempted transition: → "workflow:invalid"`,
+        ``,
+        `This transition requires verifying a posted reversal comment, but the`,
+        `"gh issue view" lookup used to fetch that evidence failed. Failing`,
+        `closed rather than silently bypassing the evidence gate.`,
+        ``,
+        `This is transient, not permanent: retry once "gh issue view ${issueNum}"`,
+        `succeeds again (e.g. after a network blip or rate-limit reset).`,
+      ].join("\n");
+    }
+    return null; // gh CLI error on an ordinary transition — fail-open
   }
 
   if (!currentWorkflowLabel) {
