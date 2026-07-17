@@ -62,3 +62,17 @@ into a NEW log sink in this file must be routed through
 `sanitizeOutputExcerptForLog()` — this file now has 6 prior
 output-sanitization findings (#2277, #2292, #2293, #2355, #2483, #2484).
 Cite: #2522, PR #2531.
+
+## Entry 2026-07-17 — feat(engine): auto-resume on session-limit hit (#2524)
+
+PR #2555 added `parseSessionLimitResetEpochMs()` to `bin/runner.mjs` — turns
+`extractSessionLimitResetTime()`'s sanitized display string ("12:50am (Asia/
+Calcutta)") into a machine-usable epoch-ms timestamp via `Intl.DateTimeFormat`
+(next-occurrence semantics), and `runCliBackend()` now attaches
+`err.resetAtEpochMs` alongside the existing `err.resetAt`. Key gotcha (review
+finding #2560, non-blocking/LOW): the hour-parsing regex allows any 1-2 digit
+value (00-99), and `parseInt(hourStr, 10) % 12` silently wraps out-of-range
+hours (13, 25, 99) into a plausible-but-wrong value instead of returning
+`undefined` — any future edit to this parser must bounds-check the raw hour
+(1-12) BEFORE the `% 12` conversion, mirroring the existing `minute > 59`
+guard. Cite: #2524, PR #2555, #2560.
