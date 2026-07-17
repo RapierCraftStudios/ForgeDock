@@ -1463,8 +1463,8 @@ ALL_BATCH_FILES=$(echo "$ALL_BATCH_FILES" | sort -u | grep -v '^$')
 # NOTE: DEFERRED_FINDINGS, QUEUED_FINDINGS, and DEFERRED_REASONS are declared at
 # batch scope in Step 4A.pre — do NOT re-initialize them here (Step 4C runs per-agent).
 for FINDING_NUM in {spawned_finding_numbers}; do
-  FINDING_DATA=$(gh issue view $FINDING_NUM -R {GH_REPO} --json labels,title,body \
-    --jq '{labels: [.labels[].name], title: .title, body: .body}')
+  FINDING_DATA=$(gh issue view $FINDING_NUM -R {GH_REPO} --json labels,title,body,updatedAt \
+    --jq '{labels: [.labels[].name], title: .title, body: .body, updatedAt: .updatedAt}')
 
   # Code-branch repair guard (MANDATORY — before priority/defer heuristics below).
   # A review-finding with no **Code branch** annotation, whose parent PR's base is
@@ -1478,6 +1478,9 @@ for FINDING_NUM in {spawned_finding_numbers}; do
   # entire milestone's PRs for base-branch drift after the fact; this one
   # repairs a single finding's missing provenance at discovery time).
   FINDING_BODY_RAW=$(echo "$FINDING_DATA" | jq -r '.body')
+  # Snapshot freshness marker alongside the body read above — compared immediately
+  # before the body-mutating write below to detect a concurrent edit (forge#2512).
+  FINDING_UPDATED_AT_SNAPSHOT=$(echo "$FINDING_DATA" | jq -r '.updatedAt')
   if ! echo "$FINDING_BODY_RAW" | grep -q '\*\*Code branch\*\*:'; then
     # Portable (non-PCRE) extraction — PCRE grep lookbehinds are not supported by
     # Git Bash's grep build on Windows (same convention as
@@ -1508,18 +1511,38 @@ for FINDING_NUM in {spawned_finding_numbers}; do
         # Read-then-append: never blind-overwrite the existing body, only extend it.
         REPAIRED_BODY=$(printf '%s\n\n## Source Branch Context (repaired by orchestrate Step 4C — forge#2443)\n\n**Code branch**: `%s`\n**Worktree base**: `origin/%s`\n' \
           "$FINDING_BODY_RAW" "$REPAIR_PARENT_BASE" "$REPAIR_PARENT_BASE")
+        # Concurrency guard (forge#2512 — TOCTOU fix): REPAIRED_BODY above was built purely
+        # by string-appending to the FINDING_BODY_RAW snapshot captured at the top of this
+        # loop iteration. The write below is a full-body overwrite — if the issue's body
+        # changed since that read (a human edit, a second orchestrator run, or the finding's
+        # own creation process still settling), a blind write here would silently clobber
+        # that concurrent edit with no conflict signal. Re-fetch just `updatedAt` (cheap —
+        # no body/labels payload) immediately before the write and compare against the
+        # snapshot captured alongside FINDING_BODY_RAW. Bounded by the same
+        # REPAIR_GOVERNOR_MAX cap as the write itself — at most one extra `gh issue view`
+        # call per repair attempt.
+        FINDING_UPDATED_AT_CURRENT=$(gh issue view "$FINDING_NUM" -R {GH_REPO} --json updatedAt --jq '.updatedAt' 2>/dev/null || echo "")
+        if [ -n "$FINDING_UPDATED_AT_CURRENT" ] && [ "$FINDING_UPDATED_AT_CURRENT" != "$FINDING_UPDATED_AT_SNAPSHOT" ]; then
+          echo "REPAIR: #${FINDING_NUM} skipped — concurrent edit detected (updatedAt changed from ${FINDING_UPDATED_AT_SNAPSHOT} to ${FINDING_UPDATED_AT_CURRENT} since this iteration's initial read); flagging instead of repairing"
+          gh issue comment "$FINDING_NUM" -R {GH_REPO} --body "<!-- FORGE:GATE_FAILURE -->
+## Code Branch Repair Skipped — Concurrent Edit Detected
+
+Finding #${FINDING_NUM} has no **Code branch** annotation and its parent PR #${REPAIR_SOURCE_PR} bases on \`${REPAIR_PARENT_BASE}\` — not the staging fast lane. Automatic repair was skipped because the issue body was edited concurrently (\`updatedAt\` changed from \`${FINDING_UPDATED_AT_SNAPSHOT}\` to \`${FINDING_UPDATED_AT_CURRENT}\` between this run's initial read and the repair write). Overwriting the body now would have silently discarded that concurrent edit. Human review required to reconcile and, if still needed, re-apply the Code branch stamp manually. <!-- forge#2512 -->" 2>/dev/null || true
+          gh issue edit "$FINDING_NUM" -R {GH_REPO} --add-label needs-human 2>/dev/null || true  # concurrent-edit path
+        else
         if gh issue edit "$FINDING_NUM" -R {GH_REPO} --body "$REPAIRED_BODY" 2>/dev/null; then
           echo "REPAIR: #${FINDING_NUM} Code branch repaired to '${REPAIR_PARENT_BASE}'"
           # Re-fetch so the rest of this loop iteration (priority/defer heuristics
           # below) sees the repaired body, not the stale pre-repair one.
-          FINDING_DATA=$(gh issue view $FINDING_NUM -R {GH_REPO} --json labels,title,body \
-            --jq '{labels: [.labels[].name], title: .title, body: .body}')
+          FINDING_DATA=$(gh issue view $FINDING_NUM -R {GH_REPO} --json labels,title,body,updatedAt \
+            --jq '{labels: [.labels[].name], title: .title, body: .body, updatedAt: .updatedAt}')
         else
           gh issue comment "$FINDING_NUM" -R {GH_REPO} --body "<!-- FORGE:GATE_FAILURE -->
 ## Code Branch Repair Failed
 
 Finding #${FINDING_NUM} has no **Code branch** annotation and its parent PR #${REPAIR_SOURCE_PR} bases on \`${REPAIR_PARENT_BASE}\` — not the staging fast lane. Automatic repair (\`gh issue edit --body\`) failed. Without this annotation, \`/work-on\`'s investigation phase may look for the code on the wrong branch (staging, where it is absent) and misclassify this confirmed finding as invalid. Human review required. <!-- forge#2443 -->" 2>/dev/null || true
           gh issue edit "$FINDING_NUM" -R {GH_REPO} --add-label needs-human 2>/dev/null || true  # repair-failure path
+        fi
         fi
         fi
       fi
