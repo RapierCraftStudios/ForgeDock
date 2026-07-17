@@ -220,6 +220,28 @@ describe("resumeStalledFromCli", () => {
     assert.equal(dispatch.mock.callCount(), 0);
   });
 
+  // forge#2444: getFleetSnapshot()'s `gh api graphql` call previously had no
+  // try/catch around it — a transient GraphQL failure aborted the whole
+  // resume-stalled invocation instead of degrading gracefully, unlike the
+  // old per-label `gh issue list` loop (each label individually try/caught).
+  it("degrades to no-candidates instead of rejecting when the fleet snapshot fetch fails", async () => {
+    const io = {
+      gh: async (args) => {
+        if (args[0] === "repo" && args[1] === "view") return "acme/widgets\n";
+        if (args[0] === "api" && args[1] === "graphql") {
+          throw new Error("gh: GraphQL: connection reset (fleet search)");
+        }
+        throw new Error(`unexpected gh call: ${args.join(" ")}`);
+      },
+    };
+    const dispatch = mock.fn(async () => ({ terminalReason: "workflow:merged" }));
+
+    const result = await resumeStalledFromCli(["--lane", "staging"], { io, dispatch });
+
+    assert.deepEqual(result, { stalled: [], dispatched: [], failed: [] });
+    assert.equal(dispatch.mock.callCount(), 0);
+  });
+
   it("excludes needs-human (blocked) candidates — only ACTIVE_WORKFLOW_LABELS agents are resume candidates", async () => {
     const states = {
       500: { terminal: false, lease: { by: "a", until: 1_000 } }, // workflow:building — candidate

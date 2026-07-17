@@ -438,7 +438,22 @@ export async function resumeStalledFromCli(argv, deps = {}) {
     return { stalled: [], dispatched: [], failed: [] };
   }
 
-  const snapshot = await getFleetSnapshot({ repo: resolvedRepo, runsDir: runDir(), io, now: () => now });
+  // A transient fleet-snapshot fetch failure (network blip, GraphQL 5xx,
+  // rate limit) must not abort the whole candidate enumeration — degrade
+  // to the same empty-result contract used by the `!resolvedRepo` branch
+  // above, mirroring the fault isolation the old per-label `gh issue list`
+  // loop had (each label's failure was individually caught and treated as
+  // zero matches for that label). The failure is still surfaced via
+  // console.error so operators/logs retain visibility (forge#2444).
+  let snapshot;
+  try {
+    snapshot = await getFleetSnapshot({ repo: resolvedRepo, runsDir: runDir(), io, now: () => now });
+  } catch (err) {
+    const message = err?.message ?? String(err);
+    console.error(`resume-stalled: fleet snapshot fetch failed — degrading to no candidates: ${message}`);
+    console.log("resume-stalled: no in-flight issues found.");
+    return { stalled: [], dispatched: [], failed: [] };
+  }
   const candidates = snapshot.agents
     .filter((a) => ACTIVE_WORKFLOW_LABELS.includes(a.workflowLabel))
     .map((a) => a.issue);
