@@ -2134,6 +2134,34 @@ describe("runIssue — forge#2381: engine-native phase dispatch (execute)", () =
     }
   });
 
+  // forge#2442: eventsFromIndex() (hydrate/C2 reconstruction path) must derive
+  // `engineNative` on read from the static PHASES table, since the compact
+  // FORGE:STATE index's `committed` field is a flat phase-id string[] and
+  // never carried the flag itself.
+  it("C2 + forge#2381: hydrate reconstructs PHASE_COMMIT events with engineNative — close: true, all runner()-dispatched phases: false", async () => {
+    const { w, io } = fakeWorld();
+    const remoteIndex = {
+      v: 6, run: "r_42_staging", issue: 42, lane: "staging",
+      committed: ["investigate", "context", "architect", "build", "review", "close"],
+      phase: null, branch: "fix/real-branch-42", pr: 7,
+      terminal: true, terminalReason: "merged", lease: null,
+    };
+    w.body = serializeState(remoteIndex);
+
+    const runner = async () => { throw new Error("runner must not be called — remote state is already terminal"); };
+
+    const res = await runIssue({ issue: 42, dir, agentId: "a1", lane: "staging",
+      io, runner, now: () => 1000, maxAttempts: 3 });
+
+    assert.equal(res.terminalReason, "merged");
+    const events = readLog(dir, 42).filter(e => e.event === "PHASE_COMMIT");
+    const byPhase = Object.fromEntries(events.map(e => [e.phase, e.engineNative]));
+    assert.equal(byPhase.close, true, "close must be reconstructed as engineNative: true after hydrate");
+    for (const p of ["investigate", "context", "architect", "build", "review"]) {
+      assert.equal(byPhase[p], false, `${p} must be reconstructed as engineNative: false after hydrate`);
+    }
+  });
+
   it("a throwing execute() (failure on the load-bearing 'gh issue close' call) is caught by runExecutePhase and surfaces as needs-human, not an unhandled crash", async () => {
     const { w, io } = fakeWorld();
     const origGh = io.gh;

@@ -5,7 +5,7 @@
  */
 import { fileURLToPath } from "node:url";
 import { appendEvent, readLog, deriveState, rewriteLog } from "./engine/runlog.mjs";
-import { pickPhase, TERMINAL_REASONS, issueSnapshot } from "./engine/phases.mjs";
+import { pickPhase, TERMINAL_REASONS, issueSnapshot, PHASES } from "./engine/phases.mjs";
 import { reconcileState } from "./engine/reconcile.mjs";
 import { makeProjector } from "./engine/projector.mjs";
 import { VALID_BACKENDS } from "./runner.mjs";
@@ -595,7 +595,19 @@ function eventsFromIndex(idx) {
     const outputs = {};
     if (phase === "build" && idx.branch) outputs.branch = idx.branch;
     if (phase === "review" && idx.pr != null) outputs.pr = idx.pr;
-    events.push({ event: "PHASE_COMMIT", phase, outputs });
+    // forge#2442: `engineNative` (forge#2381) isn't carried by the compact
+    // FORGE:STATE index (`idx.committed` is a flat phase-id string[] — see
+    // bin/engine/state.mjs), so it can't be replayed from idx directly. It's
+    // derived on read instead: `engineNative` is a property of the phase
+    // *definition* (does this phase id dispatch via `execute()`?), not of
+    // any per-run data, so looking it up in the same static `PHASES` table
+    // the live write path reads from (line ~425's `!!phase.execute`) is
+    // exactly equivalent to what would have been persisted — with zero risk
+    // of drift, since both paths share one source of truth. Deliberately
+    // NOT persisted into the compact index itself (see bin/engine/state.mjs
+    // — `committed` staying a flat string[] is relied on by 7+ call sites).
+    const phaseDef = PHASES.find((p) => p.id === phase);
+    events.push({ event: "PHASE_COMMIT", phase, outputs, engineNative: !!phaseDef?.execute });
   }
   if (idx.terminal) events.push({ event: "RUN_TERMINAL", reason: idx.terminalReason });
   return events;
