@@ -56,18 +56,20 @@ export function makeIo() {
 export function runDir() { return join(homedir(), ".forge", "runs"); }
 
 /**
- * Renders the diagnostic block printed below the bare terminal line whenever
- * a run does not terminate `merged` (forge#2175). Reconstructs the failing
- * phase, attempt count, and `PHASE_FAILED.reason` from the durable run-log
- * (the same data `bin/engine.mjs`'s `runPhaseWithRetry()` already appends via
- * `appendEvent()`), plus the final committed/branch/pr state and the run-log
- * path — closing the gap where an operator previously had to manually open
- * `~/.forge/runs/{issue}.jsonl` and read engine source to interpret a bare
- * `issue #N -> needs-human` line.
+ * Reconstructs the failing phase, attempt count, and `PHASE_FAILED.reason`
+ * from the durable run-log (the same data `bin/engine.mjs`'s
+ * `runPhaseWithRetry()` already appends via `appendEvent()`), plus the final
+ * committed/branch/pr state and the run-log path — as a plain data object
+ * rather than pre-formatted text, so callers other than the CLI (e.g.
+ * `bin/observe.mjs`'s `getIssueDetail`) can consume the same facts without
+ * parsing `formatTerminalDiagnostics()`'s rendered string back apart
+ * (forge#2389 — extracted out of `formatTerminalDiagnostics` below, which
+ * now calls this and formats its return value; behavior/output of
+ * `formatTerminalDiagnostics` is unchanged by this extraction).
  *
  * Best-effort: if the run-log is empty/unreadable (e.g. a `deferred` early
- * return before any event was appended), only the run-log path line is
- * printed — never throws.
+ * return before any event was appended), only `runLogPath` is populated —
+ * never throws.
  *
  * Validates `issue` internally (mirrors the `Number.isInteger` guard in
  * `lastLocalRun()` below) rather than relying solely on the caller —
@@ -76,32 +78,82 @@ export function runDir() { return join(homedir(), ".forge", "runs"); }
  *
  * @param {string} dir - runDir() (or an injected override for tests)
  * @param {number} issue
- * @returns {string} multi-line diagnostic block (no trailing newline)
+ * @returns {{
+ *   valid: boolean,
+ *   hadEvents: boolean,
+ *   runLogPath: string|null,
+ *   failedPhase: string|null,
+ *   attempt: number|null,
+ *   maxAttempts: number|null,
+ *   reason: string|null,
+ *   committed: string[],
+ *   branch: string|null,
+ *   pr: number|null,
+ * }}
  */
-export function formatTerminalDiagnostics(dir, issue) {
+export function terminalDiagnostics(dir, issue) {
   if (!Number.isInteger(issue)) {
-    return `  run-log: <invalid issue: ${JSON.stringify(issue)}>`;
+    return {
+      valid: false, hadEvents: false, runLogPath: null, failedPhase: null, attempt: null,
+      maxAttempts: null, reason: null, committed: [], branch: null, pr: null,
+    };
   }
   const runLogPath = join(dir, `${issue}.jsonl`);
   let events = [];
   try {
     events = readLog(dir, issue);
   } catch {
-    // Corrupt/unreadable log — degrade to just the run-log path line below.
+    // Corrupt/unreadable log — degrade to just the run-log path below.
   }
 
-  const lines = [];
+  const out = {
+    valid: true, hadEvents: events.length > 0, runLogPath, failedPhase: null, attempt: null,
+    maxAttempts: null, reason: null, committed: [], branch: null, pr: null,
+  };
   if (events.length > 0) {
     const state = deriveState(events);
     const lastFailure = [...events].reverse().find((e) => e.event === "PHASE_FAILED");
     if (lastFailure) {
-      lines.push(`  phase:   ${lastFailure.phase} (failed ${lastFailure.attempt}/${DEFAULT_MAX_ATTEMPTS} attempts)`);
-      lines.push(`  reason:  ${lastFailure.reason}`);
+      out.failedPhase = lastFailure.phase;
+      out.attempt = lastFailure.attempt;
+      out.maxAttempts = DEFAULT_MAX_ATTEMPTS;
+      out.reason = lastFailure.reason;
     }
-    const committed = state.committed.length ? state.committed.join(",") : "";
-    lines.push(`  state:   committed=[${committed}] branch=${state.branch ?? "null"} pr=${state.pr ?? "null"}`);
+    out.committed = state.committed;
+    out.branch = state.branch ?? null;
+    out.pr = state.pr ?? null;
   }
-  lines.push(`  run-log: ${runLogPath}`);
+  return out;
+}
+
+/**
+ * Renders the diagnostic block printed below the bare terminal line whenever
+ * a run does not terminate `merged` (forge#2175) — closing the gap where an
+ * operator previously had to manually open `~/.forge/runs/{issue}.jsonl` and
+ * read engine source to interpret a bare `issue #N -> needs-human` line.
+ * Now a thin text formatter over `terminalDiagnostics()` (forge#2389) —
+ * output is unchanged from before the extraction.
+ *
+ * @param {string} dir - runDir() (or an injected override for tests)
+ * @param {number} issue
+ * @returns {string} multi-line diagnostic block (no trailing newline)
+ */
+export function formatTerminalDiagnostics(dir, issue) {
+  const d = terminalDiagnostics(dir, issue);
+  if (!d.valid) {
+    return `  run-log: <invalid issue: ${JSON.stringify(issue)}>`;
+  }
+
+  const lines = [];
+  if (d.hadEvents) {
+    if (d.failedPhase !== null) {
+      lines.push(`  phase:   ${d.failedPhase} (failed ${d.attempt}/${d.maxAttempts} attempts)`);
+      lines.push(`  reason:  ${d.reason}`);
+    }
+    const committed = d.committed.length ? d.committed.join(",") : "";
+    lines.push(`  state:   committed=[${committed}] branch=${d.branch ?? "null"} pr=${d.pr ?? "null"}`);
+  }
+  lines.push(`  run-log: ${d.runLogPath}`);
   return lines.join("\n");
 }
 
