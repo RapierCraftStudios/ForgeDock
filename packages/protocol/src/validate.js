@@ -6,7 +6,7 @@
  * Checks:
  *   - Completion sentinel presence (§3.2) — for types that define one
  *   - Required field presence (§4.1 per-type field tables)
- *   - Required field enum values (Verdict, Confidence, Severity, Task Type)
+ *   - Required field enum values (Verdict, Confidence, Severity, Task Type, Re-gate outcome)
  *   - Inline-value non-empty (§3.4)
  *   - CARD inline-value decodability + sha8 integrity (§4.2 — see card.js)
  *   - Partial sentinel marking (§3.3) — generates a warning, not an error
@@ -126,6 +126,29 @@ export function validate(annotation) {
       errors.push(
         `Invalid Verdict "${fields['Verdict']}" — must be one of: ${typeDef.verdictValues.join(', ')}`,
       );
+    }
+  }
+
+  // REMEDIATION-specific enum validation (forge#2450): the Re-gate outcome field is
+  // optional at the required-field-presence layer (it is absent until
+  // commands/work-on/remediate.md's Phase M8 posts it), but when present its value
+  // must come from the single-sourced registry list — not a second hardcoded copy.
+  //
+  // Phase M8 posts this field as "**Re-gate outcome**: ${RE_GATE_OUTCOME} ${OUTCOME_DETAIL}"
+  // (see commands/work-on/remediate.md), so the parsed field value carries trailing free-text
+  // detail (e.g. "AUTO-LANDED to staging"), not just the bare outcome token. Only the leading
+  // token is the actual outcome — extract it the same way bin/engine/phases.mjs's own
+  // `/\*\*Re-gate outcome\*\*:\s*([A-Z-]+)/` regex does, so real production annotations with
+  // trailing detail text are not falsely rejected.
+  if (type === 'REMEDIATION') {
+    const reGateOutcome = fields['Re-gate outcome'];
+    if (reGateOutcome) {
+      const outcomeToken = reGateOutcome.match(/^([A-Z-]+)/)?.[1] ?? reGateOutcome;
+      if (!typeDef.reGateOutcomeValues.includes(outcomeToken)) {
+        errors.push(
+          `Invalid Re-gate outcome "${outcomeToken}" — must be one of: ${typeDef.reGateOutcomeValues.join(', ')}`,
+        );
+      }
     }
   }
 
