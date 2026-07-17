@@ -431,9 +431,17 @@ export function resolveBackend({ requested = "auto", cwd = process.cwd() } = {})
  * Model selection is intentionally NOT forwarded to the CLI in this first
  * increment — the CLI backend uses whatever model the `claude` CLI itself is
  * configured for. `opts.model`/FORGEDOCK_MODEL only affects the API backend.
- * Likewise, structured token usage is not available the same way the
- * Anthropic SDK exposes it; `usage` is reported as `null` (an already
- * fully-supported value throughout renderSummaryCard/renderDryRun).
+ *
+ * Token usage: the invocation requests `--output-format json`, and on a
+ * successful exit the captured stdout is parsed as the CLI's single-result
+ * JSON envelope. When parsing succeeds and the envelope carries a `usage`
+ * object, it is normalized to the same shape the API backend returns
+ * (`{input_tokens, output_tokens, cache_creation_input_tokens,
+ * cache_read_input_tokens}`, each field `?? 0`). When the output isn't valid
+ * JSON (older CLI versions, or a CLI that ignores `--output-format`) or the
+ * envelope has no `usage` field, this degrades gracefully to `usage: null`
+ * (an already fully-supported value throughout renderSummaryCard/renderDryRun)
+ * — this parsing never throws on the success path.
  *
  * @param {object} opts
  * @param {{path: string, name: string, content: string}} opts.spec
@@ -464,7 +472,7 @@ export function resolveBackend({ requested = "auto", cwd = process.cwd() } = {})
  *   This is additive to the existing `bin` override seam above — tests may
  *   still use a real fake-binary-on-disk + real `spawnSync` (the original
  *   seam), or fully mock the call via `spawnFn` (no fake binary needed).
- * @returns {{status: string, command: string, iterations: number, stopReason: string, usage: null, model: string, backend: "cli"}}
+ * @returns {{status: string, command: string, iterations: number, stopReason: string, usage: ({input_tokens: number, output_tokens: number, cache_creation_input_tokens: number, cache_read_input_tokens: number}|null), model: string, backend: "cli"}}
  */
 
 // Diagnostic-only bound on each logged argv element (see sanitizeArgvForLog
@@ -655,7 +663,13 @@ export function runCliBackend({
   // `writeFileSync` still leaves `tmpDir` set and the already-created
   // directory gets cleaned up.
   let tmpDir = null;
-  let cliArgs = ["--print", userMessage, "--dangerously-skip-permissions"];
+  let cliArgs = [
+    "--print",
+    userMessage,
+    "--output-format",
+    "json",
+    "--dangerously-skip-permissions",
+  ];
 
   try {
     if (systemPrompt) {
@@ -666,6 +680,8 @@ export function runCliBackend({
       cliArgs = [
         "--print",
         userMessage,
+        "--output-format",
+        "json",
         "--append-system-prompt-file",
         systemPromptPath,
         "--dangerously-skip-permissions",
@@ -785,7 +801,44 @@ export function runCliBackend({
       throw err;
     }
 
-    if (output) logger.log(output);
+    // Parse the `--output-format json` single-result envelope requested
+    // above. `claude --print --output-format json` emits a JSON object with
+    // (among other fields) a top-level `result` string — the same
+    // human-readable text the CLI would otherwise print in plain-text mode —
+    // and a top-level `usage` object shaped like the Anthropic SDK's
+    // `response.usage` (`input_tokens`/`output_tokens`/
+    // `cache_creation_input_tokens`/`cache_read_input_tokens`, plus extra
+    // fields we don't need). Older CLI versions that ignore
+    // `--output-format` (or any other non-JSON stdout) are handled
+    // defensively: any parse failure, or a parsed value missing `usage`,
+    // degrades to the pre-existing `usage: null` behavior — this must never
+    // throw on the success path. Field-by-field `?? 0` normalization mirrors
+    // the API backend's usage accumulator above (see `runCommand()`).
+    let parsedResult = null;
+    let usage = null;
+    try {
+      const parsed = JSON.parse(output);
+      if (parsed && typeof parsed === "object") {
+        parsedResult = typeof parsed.result === "string" ? parsed.result : null;
+        if (parsed.usage && typeof parsed.usage === "object") {
+          usage = {
+            input_tokens: parsed.usage.input_tokens ?? 0,
+            output_tokens: parsed.usage.output_tokens ?? 0,
+            cache_creation_input_tokens: parsed.usage.cache_creation_input_tokens ?? 0,
+            cache_read_input_tokens: parsed.usage.cache_read_input_tokens ?? 0,
+          };
+        }
+      }
+    } catch {
+      // Non-JSON output (older CLI, or --output-format was ignored) —
+      // parsedResult/usage stay null; fall back to raw output below.
+    }
+
+    // Prefer the parsed envelope's human-readable `.result` string so
+    // console output stays prose, not a raw JSON blob; fall back to the raw
+    // captured output when parsing failed or `.result` was absent.
+    const humanOutput = parsedResult ?? output;
+    if (humanOutput) logger.log(humanOutput);
 
     logger.log(
       renderSummaryCard({
@@ -793,7 +846,7 @@ export function runCliBackend({
         args,
         iterations: 1,
         stopReason: "cli_exit_0",
-        usage: null,
+        usage,
       }),
     );
 
@@ -802,7 +855,7 @@ export function runCliBackend({
       command: spec.name,
       iterations: 1,
       stopReason: "cli_exit_0",
-      usage: null,
+      usage,
       model: "cli",
       backend: "cli",
     };
