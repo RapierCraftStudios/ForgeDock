@@ -70,7 +70,7 @@ jobs:
             echo "SKIP_PUBLISH=false" >> $GITHUB_ENV
           else
             CHANGED=$(git diff --name-only "$LAST_TAG"..HEAD -- \
-              commands/ bin/ docs/ scripts/ templates/ package.json 2>/dev/null || echo "")
+              commands/ bin/ .claude-plugin/ docs/ scripts/ templates/ package.json 2>/dev/null || echo "")
             if [ -z "$CHANGED" ]; then
               echo "No publish-relevant files changed since $LAST_TAG — skipping spurious dispatch"
               echo "SKIP_PUBLISH=true" >> $GITHUB_ENV
