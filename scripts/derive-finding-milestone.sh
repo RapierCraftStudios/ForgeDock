@@ -93,12 +93,19 @@ while [ $# -gt 0 ]; do
 done
 
 # --- Tier 1: PR's own milestone -------------------------------------------
-PR_JSON=$(gh pr view "$PR_NUMBER" "${GH_REPO_ARGS[@]}" \
-  --json milestone,body,baseRefName,headRefName 2>&1) || {
+# stderr is routed to a separate temp file (not merged via 2>&1) so that a
+# 0-exit gh call's stdout is never polluted with incidental stderr text
+# (e.g. a gh CLI update notice) ahead of the jq -r parse below. Mirrors the
+# GH_STDERR_TMP pattern already used in scripts/classify-lane.sh.
+GH_STDERR_TMP=$(mktemp)
+PR_JSON=$(gh pr view "$PR_NUMBER" "${GH_REPO_ARGS[@]+"${GH_REPO_ARGS[@]}"}" \
+  --json milestone,body,baseRefName,headRefName 2>"$GH_STDERR_TMP") || {
   echo "ERROR: failed to fetch PR #$PR_NUMBER — check PR number and repo flag" >&2
-  echo "$PR_JSON" >&2
+  cat "$GH_STDERR_TMP" >&2
+  rm -f "$GH_STDERR_TMP"
   exit 1
 }
+rm -f "$GH_STDERR_TMP"
 
 MILESTONE_TITLE=$(echo "$PR_JSON" | jq -r '.milestone.title // empty')
 if [ -n "$MILESTONE_TITLE" ]; then
@@ -118,7 +125,7 @@ if [[ "$PR_BODY_LOWER" =~ (closes|fixes|resolves)[[:space:]]*#([0-9]+) ]]; then
 fi
 
 if [ -n "$SOURCE_ISSUE" ]; then
-  ISSUE_MILESTONE=$(gh issue view "$SOURCE_ISSUE" "${GH_REPO_ARGS[@]}" \
+  ISSUE_MILESTONE=$(gh issue view "$SOURCE_ISSUE" "${GH_REPO_ARGS[@]+"${GH_REPO_ARGS[@]}"}" \
     --json milestone --jq '.milestone.title // empty' 2>/dev/null || echo "")
   if [ -n "$ISSUE_MILESTONE" ]; then
     echo "$ISSUE_MILESTONE"
