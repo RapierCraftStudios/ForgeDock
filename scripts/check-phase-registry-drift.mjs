@@ -69,6 +69,28 @@ async function main() {
     process.exit(1);
   }
 
+  // Verify every id in PHASE_IDS has a corresponding key in PHASE_MARKERS.
+  // The empty-marker check below iterates Object.entries(PHASE_MARKERS), which
+  // only visits keys that actually exist on the object — a phase id that is
+  // entirely absent from PHASE_MARKERS (as opposed to present-but-empty) never
+  // appears in that iteration, so it would pass silently here and only surface
+  // later as a runtime TypeError in bin/engine/phases.mjs (e.g.
+  // `PHASE_MARKERS.someId.completionMarker` on an undefined `someId` entry).
+  // Catch that gap explicitly before the empty-marker check below.
+  const phaseMarkers = registryModule.PHASE_MARKERS || {};
+  const missingKeys = registryIds.filter(
+    (id) => !Object.prototype.hasOwnProperty.call(phaseMarkers, id)
+  );
+  if (missingKeys.length > 0) {
+    console.error(
+      `ERROR: PHASE_MARKERS is missing an entry entirely for: ${missingKeys.join(", ")}`
+    );
+    console.error(
+      "  Add a corresponding key to packages/protocol/src/phases.js's PHASE_MARKERS for each id above."
+    );
+    process.exit(1);
+  }
+
   // Also verify every registry marker entry that has a `completionMarker` or
   // `completionLabel` field is a non-empty string — catches an accidental
   // undefined/null slipping in (e.g. a typo'd RESERVED_TYPES key whose
@@ -76,7 +98,7 @@ async function main() {
   // has(blob, undefined) → substring "undefined" never matches, masking a
   // real bug as "phase never completes".
   const emptyMarkers = [];
-  for (const [phaseId, entry] of Object.entries(registryModule.PHASE_MARKERS || {})) {
+  for (const [phaseId, entry] of Object.entries(phaseMarkers)) {
     const marker = entry.completionMarker ?? entry.completionLabel;
     if (typeof marker !== "string" || marker.length === 0) {
       emptyMarkers.push(phaseId);
