@@ -54,6 +54,23 @@ describe("runlog", () => {
     assert.equal(s.v, 0);
     assert.deepEqual(s.committed, []);
     assert.equal(s.phase, null);
+    assert.equal(s.complexity, null); // forge#2387
+  });
+
+  // forge#2387: deterministic scope classification carried through the fold,
+  // same pattern as branch/pr above.
+  it("deriveState: PHASE_COMMIT(investigate) with outputs.complexity carries it into state.complexity", () => {
+    appendEvent(dir, 42, { event: "RUN_START", issue: 42, run: "r1", lane: "staging" });
+    appendEvent(dir, 42, { event: "PHASE_COMMIT", phase: "investigate", outputs: { verdict: "CONFIRMED", complexity: "trivial" } });
+    const s = deriveState(readLog(dir, 42));
+    assert.equal(s.complexity, "trivial");
+  });
+
+  it("deriveState: PHASE_COMMIT(investigate) with outputs.complexity: null does NOT overwrite the null default (falsy values are not folded)", () => {
+    appendEvent(dir, 42, { event: "RUN_START", issue: 42, run: "r1", lane: "staging" });
+    appendEvent(dir, 42, { event: "PHASE_COMMIT", phase: "investigate", outputs: { verdict: "CONFIRMED", complexity: null } });
+    const s = deriveState(readLog(dir, 42));
+    assert.equal(s.complexity, null);
   });
 
   it("readLog throws on corrupted non-final line (mid-file data loss)", () => {

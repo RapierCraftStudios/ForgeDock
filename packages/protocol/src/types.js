@@ -31,11 +31,22 @@ export const RESERVED_TYPES = {
     completionSentinel: 'INVESTIGATION:COMPLETE',
     partialSentinel: null,
     inlineValue: false,
+    // 'Complexity' is deliberately NOT in requiredFields (forge#2387): it is an
+    // additive, optional scope-classification field consumed by
+    // bin/engine/phases.mjs's context/architect `reconcile()` skip logic. Every
+    // INVESTIGATOR annotation posted before this field existed — and any future
+    // one that omits it — must remain a fully valid, complete investigation.
+    // Absence is read downstream as "unclassified" (full pipeline runs, no
+    // skip), never coerced into a default value.
     requiredFields: ['Verdict', 'Confidence', 'Severity', 'Task Type', 'Decomposition Assessment'],
     verdictValues: ['CONFIRMED', 'PARTIAL', 'INVALID'],
     confidenceValues: ['HIGH', 'MEDIUM', 'LOW'],
     severityValues: ['CRITICAL', 'HIGH', 'MEDIUM', 'LOW'],
     taskTypeValues: ['Bug Fix', 'Feature', 'Refactor', 'Maintenance', 'Investigation'],
+    // forge#2387: deterministic scope classification — trivial-class issues
+    // let bin/engine/phases.mjs skip the context/architect phases entirely
+    // (zero LLM cost, via reconcile()'s existing bypass mechanism).
+    complexityValues: ['trivial', 'standard', 'complex'],
   },
   DECOMPOSED: {
     type: 'DECOMPOSED',

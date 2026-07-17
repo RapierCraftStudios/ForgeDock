@@ -90,6 +90,40 @@ test('validatePhaseResult: investigate — missing required field is rejected', 
   assert.ok(errors.some((e) => e.includes('"decompose"')));
 });
 
+// forge#2387: deterministic scope classification — optional `complexity` field.
+test('validatePhaseResult: investigate — complexity is optional; omitting it is still valid', () => {
+  const { valid, errors } = validatePhaseResult('investigate', { verdict: 'CONFIRMED', decompose: false });
+  assert.equal(valid, true, `Expected valid, got errors: ${errors.join(', ')}`);
+});
+
+test('validatePhaseResult: investigate — valid complexity value passes', () => {
+  for (const complexity of ['trivial', 'standard', 'complex']) {
+    const { valid, errors } = validatePhaseResult('investigate', { verdict: 'CONFIRMED', decompose: false, complexity });
+    assert.equal(valid, true, `Expected valid for complexity="${complexity}", got errors: ${errors.join(', ')}`);
+  }
+});
+
+test('validatePhaseResult: investigate — invalid complexity enum value is rejected', () => {
+  const { valid, errors } = validatePhaseResult('investigate', {
+    verdict: 'CONFIRMED',
+    decompose: false,
+    complexity: 'medium',
+  });
+  assert.equal(valid, false);
+  assert.ok(errors.some((e) => e.includes('complexity') && e.includes('medium')));
+});
+
+test('PHASE_RESULT_SCHEMAS: investigate.complexity enum matches RESERVED_TYPES.INVESTIGATOR.complexityValues (single-sourced)', () => {
+  assert.deepEqual(
+    PHASE_RESULT_SCHEMAS.investigate.properties.complexity.enum,
+    RESERVED_TYPES.INVESTIGATOR.complexityValues,
+  );
+});
+
+test('RESERVED_TYPES.INVESTIGATOR.requiredFields does NOT include Complexity (optional/additive field)', () => {
+  assert.equal(RESERVED_TYPES.INVESTIGATOR.requiredFields.includes('Complexity'), false);
+});
+
 test('validatePhaseResult: investigate — invalid verdict enum value is rejected', () => {
   const { valid, errors } = validatePhaseResult('investigate', {
     verdict: 'MAYBE',

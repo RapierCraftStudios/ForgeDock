@@ -183,6 +183,12 @@ export const PHASE_RESULT_SCHEMAS = {
       verdict: { type: 'string', enum: RESERVED_TYPES.INVESTIGATOR.verdictValues }, // CONFIRMED | PARTIAL | INVALID
       decompose: { type: 'boolean' },
       rootCause: { type: 'string' },
+      // forge#2387: optional deterministic scope classification. NOT in
+      // `required` — a call that omits it is still schema-valid (same
+      // additive-optional treatment as `rootCause`), so this cannot regress
+      // any existing caller. See bin/engine/phases.mjs's context/architect
+      // `reconcile()` for the consumer.
+      complexity: { type: 'string', enum: RESERVED_TYPES.INVESTIGATOR.complexityValues }, // trivial | standard | complex
     },
     required: ['verdict', 'decompose'],
     additionalProperties: false,

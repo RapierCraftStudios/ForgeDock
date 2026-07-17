@@ -1275,6 +1275,87 @@ describe("runIssue", () => {
   });
 });
 
+describe("runIssue — forge#2387: deterministic scope classification skips context/architect for trivial issues", () => {
+  it("investigate classifying the issue trivial skips context/architect runner dispatch entirely (zero LLM cost), as visible PHASE_COMMIT skip events", async () => {
+    const { w, io } = fakeWorld();
+    const contextArchitectCalls = [];
+    const script = {
+      "work-on/investigate": () => { w.markers += " <!-- FORGE:INVESTIGATOR --> **Complexity**: trivial INVESTIGATION:COMPLETE"; },
+      "work-on/build/context": () => { contextArchitectCalls.push("context"); w.markers += " FORGE:CONTEXT:COMPLETE"; },
+      "work-on/build/architect": () => { contextArchitectCalls.push("architect"); w.markers += " FORGE:ARCHITECT:COMPLETE"; },
+      "work-on/build": () => { w.markers += " FORGE:BUILDER:COMPLETE **Branch**: `fix/trivial-42`"; w.commitsAhead = 2; },
+      "work-on/review": () => { w.pr = 7; w.prMerged = true; },
+      "work-on/close": () => { w.issueState = "CLOSED"; w.labels.push("workflow:merged"); },
+    };
+    const runner = async ({ commandName }) => { script[commandName](); return { status: "complete" }; };
+
+    const res = await runIssue({ issue: 42, dir, agentId: "a1", lane: "staging",
+      io, runner, now: () => 1000, maxAttempts: 3 });
+
+    assert.equal(res.terminalReason, "merged");
+    const s = deriveState(readLog(dir, 42));
+    assert.deepEqual(s.committed, ["investigate", "context", "architect", "build", "review", "close"],
+      "context/architect still COMMIT — they are skipped, not removed from the pipeline");
+    assert.equal(s.complexity, "trivial");
+    assert.deepEqual(contextArchitectCalls, [],
+      "runner() must never be dispatched for context/architect on a trivial-classified issue — genuinely zero LLM cost, not just a tolerated missing marker");
+
+    // The skip must be a visible run-log event, never silent (issue's own requirement).
+    const events = readLog(dir, 42);
+    const contextCommit = events.find((e) => e.event === "PHASE_COMMIT" && e.phase === "context");
+    const architectCommit = events.find((e) => e.event === "PHASE_COMMIT" && e.phase === "architect");
+    assert.equal(contextCommit.outputs.skipped, true);
+    assert.ok(contextCommit.outputs.reason, "context skip must carry a non-empty reason");
+    assert.equal(architectCommit.outputs.skipped, true);
+    assert.ok(architectCommit.outputs.reason, "architect skip must carry a non-empty reason");
+  });
+
+  it("a standard-complexity issue still dispatches context/architect runners normally (no regression)", async () => {
+    const { w, io } = fakeWorld();
+    const contextArchitectCalls = [];
+    const script = {
+      "work-on/investigate": () => { w.markers += " <!-- FORGE:INVESTIGATOR --> **Complexity**: standard INVESTIGATION:COMPLETE"; },
+      "work-on/build/context": () => { contextArchitectCalls.push("context"); w.markers += " FORGE:CONTEXT:COMPLETE"; },
+      "work-on/build/architect": () => { contextArchitectCalls.push("architect"); w.markers += " FORGE:ARCHITECT:COMPLETE"; },
+      "work-on/build": () => { w.markers += " FORGE:BUILDER:COMPLETE **Branch**: `fix/standard-42`"; w.commitsAhead = 2; },
+      "work-on/review": () => { w.pr = 7; w.prMerged = true; },
+      "work-on/close": () => { w.issueState = "CLOSED"; w.labels.push("workflow:merged"); },
+    };
+    const runner = async ({ commandName }) => { script[commandName](); return { status: "complete" }; };
+
+    const res = await runIssue({ issue: 42, dir, agentId: "a1", lane: "staging",
+      io, runner, now: () => 1000, maxAttempts: 3 });
+
+    assert.equal(res.terminalReason, "merged");
+    const s = deriveState(readLog(dir, 42));
+    assert.equal(s.complexity, "standard");
+    assert.deepEqual(contextArchitectCalls, ["context", "architect"],
+      "a non-trivial classification must not alter existing behavior");
+  });
+
+  it("an investigation with no Complexity field at all still runs the full pipeline (fail-safe default: no skip)", async () => {
+    const { w, io } = fakeWorld();
+    const contextArchitectCalls = [];
+    const script = {
+      "work-on/investigate": () => { w.markers += " INVESTIGATION:COMPLETE"; }, // no **Complexity** field posted
+      "work-on/build/context": () => { contextArchitectCalls.push("context"); w.markers += " FORGE:CONTEXT:COMPLETE"; },
+      "work-on/build/architect": () => { contextArchitectCalls.push("architect"); w.markers += " FORGE:ARCHITECT:COMPLETE"; },
+      "work-on/build": () => { w.markers += " FORGE:BUILDER:COMPLETE **Branch**: `fix/unclassified-42`"; w.commitsAhead = 2; },
+      "work-on/review": () => { w.pr = 7; w.prMerged = true; },
+      "work-on/close": () => { w.issueState = "CLOSED"; w.labels.push("workflow:merged"); },
+    };
+    const runner = async ({ commandName }) => { script[commandName](); return { status: "complete" }; };
+
+    const res = await runIssue({ issue: 42, dir, agentId: "a1", lane: "staging",
+      io, runner, now: () => 1000, maxAttempts: 3 });
+
+    assert.equal(res.terminalReason, "merged");
+    const s = deriveState(readLog(dir, 42));
+    assert.equal(s.complexity, null);
+    assert.deepEqual(contextArchitectCalls, ["context", "architect"]);
+  });
+});
+
 describe("runIssue — forge#2377: per-phase usage recording", () => {
   it("attaches a successful runner()'s usage to the phase's PHASE_COMMIT event", async () => {
     const { w, io } = fakeWorld();
