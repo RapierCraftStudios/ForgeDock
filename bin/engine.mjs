@@ -21,64 +21,20 @@ export const DEFAULT_LEASE_TTL_MS = 600000;
 export const DEFAULT_LEASE_RENEW_INTERVAL_MS = 240000;
 
 /**
- * @param {object} opts
- * @param {string} [opts.backend] - "cli" | "api" | "auto" (forge#2028). Forwarded
- *   to every phase's `runner()` call when supplied. Omit to keep runner.mjs's own
- *   default ("auto" ladder — probes the `claude` CLI, falls back to the API).
- *   An invalid value throws synchronously (see below) rather than being forwarded.
- * @param {string} [opts.model] - Model id (forge#2028). Forwarded to every phase's
- *   `runner()` call when supplied; only applies on the "api" backend. Omit to keep
- *   runner.mjs's default (`FORGEDOCK_MODEL` env or its built-in default).
- * @param {number} [opts.leaseTtlMs] - forge#2239: how long a claimed lease is
- *   valid for. Defaults to DEFAULT_LEASE_TTL_MS. Overridable for tests.
- * @param {number} [opts.leaseRenewIntervalMs] - forge#2239: how often the lease
- *   is re-written while an unsatisfied phase's runner is executing. Defaults to
- *   DEFAULT_LEASE_RENEW_INTERVAL_MS. Overridable for tests.
- * @param {(event: {event: string, phase: string, status?: string, detail?: string}) => void} [opts.onProgress] -
- *   forge#2240: optional phase-boundary observer. Called with
- *   `{event: "phase_enter", phase}` right before a phase's runner is about to
- *   execute (i.e. the phase was NOT already satisfied on reconcile), and with
- *   `{event: "phase_exit", phase, status: "committed"|"blocked", detail?}`
- *   once that phase's outcome is known. Defaults to a no-op so every existing
- *   caller/test is unaffected. Deliberately engine.mjs's ONLY new surface for
- *   this issue — no `console.log`/stdout write is added here; printing is the
- *   CLI layer's job (bin/engine-cli.mjs), preserving the io-injection/testability
- *   convention this module already follows. Invocations are wrapped so a
- *   throwing callback can never crash a run.
+ * Validates the subset of `runIssue()`'s options that must fail fast,
+ * synchronously, before any state I/O or timer creation — `backend` and the
+ * lease-timing pair. Extracted from `runIssue()` (forge#2452) purely for
+ * readability; call-order and thrown-error shape are unchanged from the
+ * inline block this replaces, and MUST stay that way — see the per-check
+ * rationale comments below, all of which trace back to real review findings.
+ *
+ * @param {object} params
+ * @param {string} [params.backend] - "cli" | "api" | "auto" (forge#2028).
+ * @param {number} params.leaseTtlMs - forge#2239: how long a claimed lease is valid for.
+ * @param {number} params.leaseRenewIntervalMs - forge#2239: how often the lease is re-written.
+ * @throws {Error & {code: "INVALID_BACKEND"|"INVALID_LEASE_CONFIG"}}
  */
-export async function runIssue(opts) {
-  const { issue, dir, agentId, lane = "staging", io, runner,
-          now = () => Date.now(), maxAttempts = DEFAULT_MAX_ATTEMPTS,
-          commandsDir = fileURLToPath(new URL("../commands", import.meta.url)),
-          // Optional execution-backend override for every phase's `runner()`
-          // call (forge#2028 / MAT-3). Left undefined by default so existing
-          // callers keep runner.mjs's own "auto" ladder default unchanged —
-          // this is purely additive pass-through, not a new default.
-          backend, model,
-          leaseTtlMs = DEFAULT_LEASE_TTL_MS,
-          leaseRenewIntervalMs = DEFAULT_LEASE_RENEW_INTERVAL_MS,
-          onProgress = () => {} } = opts;
-
-  // forge#2240: defensive wrapper — a caller's onProgress must never be able
-  // to crash an otherwise-healthy run. A plain try/catch only guards a
-  // *synchronous* throw — if onProgress is (or becomes) async and its
-  // returned promise rejects, that rejection is never awaited/caught here,
-  // producing an unhandled promise rejection that terminates the whole
-  // Node process (Node >=15 default behavior) well after runIssue() itself
-  // has already resolved. That is strictly worse than the silent-hang bug
-  // this issue fixes. Detect a thenable return value and attach a no-op
-  // .catch() to it (fire-and-forget — onProgress is not awaited either way,
-  // consistent with its documented synchronous-observer contract) so a
-  // rejection can never escape as unhandled. (review finding, #2240)
-  const emitProgress = (event) => {
-    try {
-      const result = onProgress(event);
-      if (result && typeof result.then === "function") {
-        result.catch(() => { /* best-effort observer, never fatal */ });
-      }
-    } catch { /* best-effort observer, never fatal */ }
-  };
-
+function validateRunIssueOptions({ backend, leaseTtlMs, leaseRenewIntervalMs }) {
   // forge#2054: validate `backend` before anything else — before state is
   // read/written and before the phase/retry loop begins below. An invalid
   // value must fail fast and non-retryably. Without this check, an invalid
@@ -146,6 +102,88 @@ export async function runIssue(opts) {
       { code: "INVALID_LEASE_CONFIG" },
     );
   }
+}
+
+/**
+ * Builds the defensive `emitProgress` wrapper around a caller-supplied
+ * `onProgress` observer. Extracted from `runIssue()` (forge#2452) — purely a
+ * factory, no shared state beyond the `onProgress` closure itself, so this
+ * carries no behavioral risk.
+ *
+ * forge#2240: a caller's onProgress must never be able to crash an otherwise
+ * healthy run. A plain try/catch only guards a *synchronous* throw — if
+ * onProgress is (or becomes) async and its returned promise rejects, that
+ * rejection is never awaited/caught here, producing an unhandled promise
+ * rejection that terminates the whole Node process (Node >=15 default
+ * behavior) well after runIssue() itself has already resolved. That is
+ * strictly worse than the silent-hang bug this issue fixes. Detect a
+ * thenable return value and attach a no-op .catch() to it (fire-and-forget —
+ * onProgress is not awaited either way, consistent with its documented
+ * synchronous-observer contract) so a rejection can never escape as
+ * unhandled. (review finding, #2240)
+ *
+ * @param {(event: {event: string, phase: string, status?: string, detail?: string}) => void} onProgress
+ * @returns {(event: object) => void}
+ */
+function makeProgressEmitter(onProgress) {
+  return (event) => {
+    try {
+      const result = onProgress(event);
+      if (result && typeof result.then === "function") {
+        result.catch(() => { /* best-effort observer, never fatal */ });
+      }
+    } catch { /* best-effort observer, never fatal */ }
+  };
+}
+
+/**
+ * @param {object} opts
+ * @param {string} [opts.backend] - "cli" | "api" | "auto" (forge#2028). Forwarded
+ *   to every phase's `runner()` call when supplied. Omit to keep runner.mjs's own
+ *   default ("auto" ladder — probes the `claude` CLI, falls back to the API).
+ *   An invalid value throws synchronously (see below) rather than being forwarded.
+ * @param {string} [opts.model] - Model id (forge#2028). Forwarded to every phase's
+ *   `runner()` call when supplied; only applies on the "api" backend. Omit to keep
+ *   runner.mjs's default (`FORGEDOCK_MODEL` env or its built-in default).
+ * @param {number} [opts.leaseTtlMs] - forge#2239: how long a claimed lease is
+ *   valid for. Defaults to DEFAULT_LEASE_TTL_MS. Overridable for tests.
+ * @param {number} [opts.leaseRenewIntervalMs] - forge#2239: how often the lease
+ *   is re-written while an unsatisfied phase's runner is executing. Defaults to
+ *   DEFAULT_LEASE_RENEW_INTERVAL_MS. Overridable for tests.
+ * @param {(event: {event: string, phase: string, status?: string, detail?: string}) => void} [opts.onProgress] -
+ *   forge#2240: optional phase-boundary observer. Called with
+ *   `{event: "phase_enter", phase}` right before a phase's runner is about to
+ *   execute (i.e. the phase was NOT already satisfied on reconcile), and with
+ *   `{event: "phase_exit", phase, status: "committed"|"blocked", detail?}`
+ *   once that phase's outcome is known. Defaults to a no-op so every existing
+ *   caller/test is unaffected. Deliberately engine.mjs's ONLY new surface for
+ *   this issue — no `console.log`/stdout write is added here; printing is the
+ *   CLI layer's job (bin/engine-cli.mjs), preserving the io-injection/testability
+ *   convention this module already follows. Invocations are wrapped so a
+ *   throwing callback can never crash a run.
+ */
+export async function runIssue(opts) {
+  const { issue, dir, agentId, lane = "staging", io, runner,
+          now = () => Date.now(), maxAttempts = DEFAULT_MAX_ATTEMPTS,
+          commandsDir = fileURLToPath(new URL("../commands", import.meta.url)),
+          // Optional execution-backend override for every phase's `runner()`
+          // call (forge#2028 / MAT-3). Left undefined by default so existing
+          // callers keep runner.mjs's own "auto" ladder default unchanged —
+          // this is purely additive pass-through, not a new default.
+          backend, model,
+          leaseTtlMs = DEFAULT_LEASE_TTL_MS,
+          leaseRenewIntervalMs = DEFAULT_LEASE_RENEW_INTERVAL_MS,
+          onProgress = () => {} } = opts;
+
+  // forge#2452: extracted into makeProgressEmitter() — see its docstring for
+  // the forge#2240 rationale this wrapper implements.
+  const emitProgress = makeProgressEmitter(onProgress);
+
+  // forge#2452: extracted into validateRunIssueOptions() — see its docstring
+  // for the forge#2054/#2313/#2329 rationale and required call-order (before
+  // any state I/O or timer creation, unchanged from the inline block this
+  // replaces).
+  validateRunIssueOptions({ backend, leaseTtlMs, leaseRenewIntervalMs });
 
   const projector = makeProjector(io);
 
