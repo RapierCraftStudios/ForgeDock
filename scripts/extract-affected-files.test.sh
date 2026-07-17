@@ -31,16 +31,29 @@ trap cleanup EXIT
 #   gh api repos/<repo>/issues/<num>/comments --jq '...'   -> cat $MOCK_GH_COMMENTS (if set+exists, else empty)
 #   gh issue view <num> -R <repo> --json body --jq '...'   -> cat $MOCK_GH_BODY (if set+exists, else empty)
 # Any other invocation is a test setup error.
+#
+# forge#2504: MOCK_GH_COMMENTS_FAIL=1 / MOCK_GH_BODY_FAIL=1 force the respective
+# call site to simulate a genuine `gh` failure (non-zero exit, nothing on
+# stdout) instead of a "call succeeded, empty/no-match result" — this is the
+# distinction extract-affected-files.sh must now surface as PROVENANCE=error.
 # --------------------------------------------------------------------------- #
 cat > "$TMP_BIN/gh" <<'MOCK'
 #!/usr/bin/env bash
 if [[ "$1" == "api" ]]; then
+  if [[ "${MOCK_GH_COMMENTS_FAIL:-}" == "1" ]]; then
+    echo "mock gh api: simulated failure (network error / rate limit)" >&2
+    exit 1
+  fi
   if [[ -n "${MOCK_GH_COMMENTS:-}" && -f "${MOCK_GH_COMMENTS:-}" ]]; then
     cat "$MOCK_GH_COMMENTS"
   fi
   exit 0
 fi
 if [[ "$1" == "issue" && "$2" == "view" ]]; then
+  if [[ "${MOCK_GH_BODY_FAIL:-}" == "1" ]]; then
+    echo "mock gh issue view: simulated failure (network error / rate limit)" >&2
+    exit 1
+  fi
   if [[ -n "${MOCK_GH_BODY:-}" && -f "${MOCK_GH_BODY:-}" ]]; then
     cat "$MOCK_GH_BODY"
   fi
@@ -57,10 +70,16 @@ PASS=0
 FAIL=0
 
 # assert_output <description> <expected_provenance> <expected_files_csv_or_empty> <extract args...>
+#
+# forge#2504: stdout is captured separately from stderr (`2>/dev/null`, not
+# `2>&1`) because the script's PROVENANCE=/file-list contract lives entirely
+# on stdout — the new gh-failure paths intentionally also emit a stderr
+# WARNING (see extract-affected-files.sh), which must not be merged into the
+# line this helper parses as "line 1 == PROVENANCE=...".
 assert_output() {
   local desc="$1" expected_prov="$2" expected_files="$3"
   shift 3
-  OUT=$("$EXTRACT" "$@" 2>&1)
+  OUT=$("$EXTRACT" "$@" 2>/dev/null)
   ACTUAL_PROV=$(echo "$OUT" | head -1)
   ACTUAL_FILES=$(echo "$OUT" | tail -n +2 | tr '\n' ',' | sed 's/,$//')
   if [[ "$ACTUAL_PROV" == "PROVENANCE=$expected_prov" && "$ACTUAL_FILES" == "$expected_files" ]]; then
@@ -266,6 +285,40 @@ MOCK_GH_BODY="$BODY_SCOPED" assert_output \
 assert_exit "missing issue number -> exit 2" 2 -R test/repo
 assert_exit "missing value for -R -> exit 2" 2 2388 -R
 assert_exit "malformed -R value (no slash, pre-joined token) -> exit 2" 2 2389 "-R notaslash"
+
+# --------------------------------------------------------------------------- #
+# Scenario 9 (forge#2504 regression fixture): primary `gh api` call fails
+# outright (simulated network error / rate limit) and there is no usable
+# fallback body either. Must yield PROVENANCE=error, NOT the pre-fix
+# behavior of silently falling through to PROVENANCE=none as if this were
+# a confirmed-empty result.
+# --------------------------------------------------------------------------- #
+unset MOCK_GH_COMMENTS MOCK_GH_BODY MOCK_GH_BODY_FAIL
+MOCK_GH_COMMENTS_FAIL=1 assert_output \
+  "forge#2504: primary gh api call fails, no usable fallback -> PROVENANCE=error, not none" \
+  "error" "" 2504 -R test/repo
+
+# --------------------------------------------------------------------------- #
+# Scenario 10 (forge#2504 regression fixture): no FORGE:INVESTIGATOR comment
+# (primary path legitimately empty, not failed) but the fallback `gh issue
+# view` call fails outright. Must yield PROVENANCE=error, NOT none.
+# --------------------------------------------------------------------------- #
+unset MOCK_GH_COMMENTS MOCK_GH_COMMENTS_FAIL
+MOCK_GH_BODY_FAIL=1 assert_output \
+  "forge#2504: no INVESTIGATOR comment (legitimately empty) + fallback gh issue view fails -> PROVENANCE=error, not none" \
+  "error" "" 2505 -R test/repo
+
+# --------------------------------------------------------------------------- #
+# Scenario 11 (forge#2504 regression fixture): primary `gh api` call fails,
+# but the fallback `gh issue view` call succeeds and yields real files. A
+# gh failure must never suppress or overwrite data actually recovered by a
+# subsequent successful call — this must still report body-fallback, not
+# error. Reuses the BODY_SCOPED fixture from Scenario 2.
+# --------------------------------------------------------------------------- #
+unset MOCK_GH_BODY_FAIL
+MOCK_GH_COMMENTS_FAIL=1 MOCK_GH_BODY="$BODY_SCOPED" assert_output \
+  "forge#2504: primary gh api call fails but fallback succeeds with real files -> body-fallback, not error" \
+  "body-fallback" "bin/engine.mjs,bin/engine/phases.mjs" 2506 -R test/repo
 
 # --------------------------------------------------------------------------- #
 # Summary
