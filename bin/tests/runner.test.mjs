@@ -1778,6 +1778,129 @@ describe("runCliBackend spawnFn seam (issue #2033)", () => {
     );
   });
 
+  // Issue #2360: spawnSync's `timeout` option kills the child on expiry, but
+  // any stdout/stderr the CLI had already produced before the kill is still
+  // populated on `result` — the timeout branch previously discarded it
+  // entirely. This asserts the partial output is now embedded in the thrown
+  // message (mirroring the #2355 fix to the sibling non-zero-exit branch).
+  it("embeds captured partial output in the thrown message on ETIMEDOUT (#2360)", () => {
+    const spawnFn = () => ({
+      status: null,
+      signal: null,
+      error: { code: "ETIMEDOUT" },
+      stdout: "Architect plan: step 1 of 5 complete...",
+      stderr: "",
+    });
+
+    let thrown;
+    try {
+      runCliBackend({
+        spec: loadCommandSpec(COMMANDS_DIR, "work-on"),
+        userMessage: "Execute: /work-on 2360",
+        args: ["2360"],
+        cwd: TMP,
+        logger: { log: () => {} },
+        bin: "claude",
+        spawnFn,
+      });
+    } catch (err) {
+      thrown = err;
+    }
+
+    assert.ok(thrown, "expected runCliBackend to throw on ETIMEDOUT");
+    assert.match(thrown.message, /timed out after \d+s and was killed/);
+    assert.match(thrown.message, /FORGEDOCK_CLI_TIMEOUT_MS/);
+    assert.ok(
+      thrown.message.includes("Partial output:"),
+      `message must include a Partial output section: ${thrown.message}`,
+    );
+    assert.ok(
+      thrown.message.includes("Architect plan: step 1 of 5 complete..."),
+      `message must embed the actual captured partial stdout text: ${thrown.message}`,
+    );
+  });
+
+  // Issue #2360: no regression — when the killed CLI produced no output at
+  // all before timing out, the message must remain byte-identical to the
+  // pre-existing (pre-#2360) text, with no dangling "Partial output:" suffix.
+  it("does not append a Partial output section when stdout/stderr are both empty on ETIMEDOUT (#2360)", () => {
+    const spawnFn = () => ({
+      status: null,
+      signal: null,
+      error: { code: "ETIMEDOUT" },
+      stdout: "",
+      stderr: "",
+    });
+
+    let thrown;
+    try {
+      runCliBackend({
+        spec: loadCommandSpec(COMMANDS_DIR, "work-on"),
+        userMessage: "Execute: /work-on 2360",
+        args: ["2360"],
+        cwd: TMP,
+        logger: { log: () => {} },
+        bin: "claude",
+        spawnFn,
+      });
+    } catch (err) {
+      thrown = err;
+    }
+
+    assert.ok(thrown, "expected runCliBackend to throw on ETIMEDOUT");
+    assert.ok(
+      !thrown.message.includes("Partial output:"),
+      `message must not include a Partial output section when nothing was captured: ${thrown.message}`,
+    );
+    assert.match(
+      thrown.message,
+      /^claude CLI invocation timed out after \d+s and was killed\. Set FORGEDOCK_CLI_TIMEOUT_MS \(ms\) to adjust, or use --backend api\.$/,
+      "empty-output timeout message text must remain byte-identical to the pre-#2360 behavior",
+    );
+  });
+
+  // Issue #2360: the embedded partial-output excerpt on timeout must be
+  // bounded and sanitized the same way as the #2355 fix to the sibling
+  // non-zero-exit branch — reusing `sanitizeOutputExcerptForLog()`, not a new
+  // unsanitized/unbounded path (this file has 4 prior review findings for
+  // exactly that defect class: #2277, #2292, #2293, #2355).
+  it("bounds and truncates a very large partial-output excerpt on ETIMEDOUT (#2360)", () => {
+    const hugeOutput = "T".repeat(10000);
+    const spawnFn = () => ({
+      status: null,
+      signal: null,
+      error: { code: "ETIMEDOUT" },
+      stdout: hugeOutput,
+      stderr: "",
+    });
+
+    let thrown;
+    try {
+      runCliBackend({
+        spec: loadCommandSpec(COMMANDS_DIR, "work-on"),
+        userMessage: "Execute: /work-on 2360",
+        args: ["2360"],
+        cwd: TMP,
+        logger: { log: () => {} },
+        bin: "claude",
+        spawnFn,
+      });
+    } catch (err) {
+      thrown = err;
+    }
+
+    assert.ok(thrown, "expected runCliBackend to throw on ETIMEDOUT");
+    assert.ok(
+      !thrown.message.includes("T".repeat(10000)),
+      "message must not contain the full unbounded captured partial output",
+    );
+    assert.match(
+      thrown.message,
+      /…\[truncated, \d+ chars\]/,
+      "message must contain a visible truncation marker for the bounded excerpt",
+    );
+  });
+
   // #2277: the CLI_BACKEND_FAILED diagnostic embeds `cliArgs.join(" ")`
   // (which includes `userMessage` verbatim) into the thrown Error.message,
   // and that message is later written verbatim to stderr by

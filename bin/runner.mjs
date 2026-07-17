@@ -705,9 +705,25 @@ export function runCliBackend({
     const timedOut = result.status === null && result.error?.code === "ETIMEDOUT";
     if (timedOut) {
       const timeoutSecs = Math.round(timeoutMs / 1000);
+      // forge#2360: spawnSync's `timeout` option kills the child outright on
+      // expiry, but any stdout/stderr the CLI had already produced up to
+      // that point is still populated on `result` — surface it rather than
+      // silently discarding it, mirroring both the `run_bash` timeout path
+      // below (which appends its own captured `partial` output) and the
+      // sibling `result.status !== 0` branch just below this one (forge#2355
+      // / PR #2374), which embeds a bounded/sanitized excerpt of captured
+      // output via `sanitizeOutputExcerptForLog()` for the same reason: only
+      // `err.message` is persisted into the durable `~/.forge/runs/*.jsonl`
+      // run-log (via bin/engine.mjs's `reason: e.message`), never the
+      // `logger.log()` call. Reuses the exact same hardened helper — do NOT
+      // add a new unsanitized/unbounded path here (this file has 4 prior
+      // review findings — #2277, #2292, #2293, #2355 — for that defect
+      // class).
+      const partial = (stdout + stderr).trim();
       throw new Error(
         `claude CLI invocation timed out after ${timeoutSecs}s and was killed. ` +
-          `Set FORGEDOCK_CLI_TIMEOUT_MS (ms) to adjust, or use --backend api.`,
+          `Set FORGEDOCK_CLI_TIMEOUT_MS (ms) to adjust, or use --backend api.` +
+          (partial ? ` Partial output: ${sanitizeOutputExcerptForLog(partial)}` : ""),
       );
     }
     if (result.error) {
