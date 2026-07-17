@@ -83,3 +83,161 @@ export const PHASE_MARKERS = {
     completionLabel: 'workflow:merged',
   },
 };
+
+/**
+ * Per-phase JSON-schema-shaped input contracts for the `report_result` tool
+ * (forge#2380). This is the schema-enforced counterpart to `PHASE_MARKERS`
+ * above: instead of a phase asserting completion by posting an exact-substring
+ * marker in a GitHub comment (parsed post-hoc, out-of-band), the API-backend
+ * tool loop (`bin/runner.mjs`) requires a validated `report_result` tool call
+ * carrying one of these shapes before it will let the phase terminate.
+ *
+ * Single-sourced the same way `PHASE_MARKERS` is: `enum` constraints are
+ * pulled from `RESERVED_TYPES[*]` wherever an equivalent enum already exists
+ * there (`INVESTIGATOR.verdictValues`, `REVIEWER.verdictValues`), rather than
+ * re-declaring a second, potentially-drifting copy of the same value list.
+ *
+ * `context` and `architect` deliberately do NOT accept any "partial" or
+ * "degraded" success value — forge#1669 (PR #1682) established that
+ * `architect`'s marker gate must reject anything short of full `:COMPLETE`
+ * because the architect's plan is the builder's primary implementation
+ * guide, and PR #2400 made that strictness structural via `PHASE_MARKERS`
+ * above. A schema that accepted e.g. `{ status: "partial" }` as valid input
+ * here would silently reopen exactly the gap that decision closed — so
+ * neither schema below defines a `status`/`complete` field at all; the sole
+ * completion signal for those two phases is "the call validated", full stop.
+ *
+ * Not every phase id has a registered schema. Absence of a `PHASE_IDS` entry
+ * here is a deliberate, supported state — `validatePhaseResult()` treats an
+ * unregistered phase id as "nothing to enforce" (`{ valid: true, errors: [] }`),
+ * and `bin/runner.mjs`'s loop only engages `report_result` enforcement for
+ * phases that DO have a schema.
+ *
+ * @typedef {Object} JsonSchemaLite
+ * @property {'object'} type
+ * @property {Object.<string, {type: string, enum?: string[], items?: {type: string}}>} properties
+ * @property {string[]} required
+ */
+
+/** @type {Object.<string, JsonSchemaLite>} */
+export const PHASE_RESULT_SCHEMAS = {
+  investigate: {
+    type: 'object',
+    properties: {
+      verdict: { type: 'string', enum: RESERVED_TYPES.INVESTIGATOR.verdictValues }, // CONFIRMED | PARTIAL | INVALID
+      decompose: { type: 'boolean' },
+      rootCause: { type: 'string' },
+    },
+    required: ['verdict', 'decompose'],
+  },
+  build: {
+    type: 'object',
+    properties: {
+      branch: { type: 'string' },
+      commits: { type: 'array', items: { type: 'string' } },
+    },
+    required: ['branch', 'commits'],
+  },
+  review: {
+    type: 'object',
+    properties: {
+      pr: { type: 'number' },
+      disposition: { type: 'string', enum: RESERVED_TYPES.REVIEWER.verdictValues }, // APPROVED | CHANGES_REQUESTED | COMMENTED
+    },
+    required: ['pr', 'disposition'],
+  },
+  close: {
+    type: 'object',
+    properties: {
+      merged: { type: 'boolean' },
+    },
+    required: ['merged'],
+  },
+  // context/architect intentionally define no accepted fields beyond a free-form
+  // `summary` — see the doc comment above for why no partial/degraded-success
+  // value exists for either. A schema-valid call with an empty object `{}` is
+  // sufficient completion signal; `summary` is optional metadata only.
+  context: {
+    type: 'object',
+    properties: {
+      summary: { type: 'string' },
+    },
+    required: [],
+  },
+  architect: {
+    type: 'object',
+    properties: {
+      summary: { type: 'string' },
+    },
+    required: [],
+  },
+};
+
+/**
+ * Narrow `typeof` that also distinguishes arrays and null, matching the
+ * vocabulary `PHASE_RESULT_SCHEMAS` above uses for its `type`/`items.type`
+ * fields ('object', 'array', 'string', 'number', 'boolean', 'null').
+ * @param {*} v
+ * @returns {string}
+ */
+function typeOfForSchema(v) {
+  if (Array.isArray(v)) return 'array';
+  if (v === null) return 'null';
+  return typeof v;
+}
+
+/**
+ * Validate a `report_result` tool call's input against the registered schema
+ * for `phaseId`. This is intentionally a small, dependency-free subset of
+ * JSON Schema — just what `PHASE_RESULT_SCHEMAS` above actually uses (object
+ * type check, required-field presence, per-property type check, enum
+ * membership, and one level of array `items.type` checking) — not a general
+ * JSON Schema implementation.
+ *
+ * A `phaseId` with no registered schema returns `{ valid: true, errors: [] }`
+ * ("nothing to enforce"), matching how `bin/runner.mjs`'s enforcement loop
+ * only engages for phases that have one.
+ *
+ * @param {string} phaseId
+ * @param {*} input - the `report_result` tool call's parsed `input` object.
+ * @returns {{ valid: boolean, errors: string[] }}
+ */
+export function validatePhaseResult(phaseId, input) {
+  const schema = PHASE_RESULT_SCHEMAS[phaseId];
+  if (!schema) return { valid: true, errors: [] };
+
+  if (typeOfForSchema(input) !== 'object') {
+    return { valid: false, errors: [`report_result input must be a JSON object, got "${typeOfForSchema(input)}"`] };
+  }
+
+  const errors = [];
+
+  for (const field of schema.required) {
+    if (!(field in input) || input[field] === '' || input[field] === null || input[field] === undefined) {
+      errors.push(`Required field "${field}" is missing or empty`);
+    }
+  }
+
+  for (const [key, def] of Object.entries(schema.properties)) {
+    if (!(key in input)) continue;
+    const value = input[key];
+    const actualType = typeOfForSchema(value);
+    if (def.type && actualType !== def.type) {
+      errors.push(`Field "${key}" must be of type "${def.type}", got "${actualType}"`);
+      continue;
+    }
+    if (def.enum && !def.enum.includes(value)) {
+      errors.push(`Field "${key}" must be one of: ${def.enum.join(', ')} — got: ${JSON.stringify(value)}`);
+    }
+    if (def.type === 'array' && def.items && Array.isArray(value)) {
+      value.forEach((item, i) => {
+        const itemType = typeOfForSchema(item);
+        if (def.items.type && itemType !== def.items.type) {
+          errors.push(`Field "${key}[${i}]" must be of type "${def.items.type}", got "${itemType}"`);
+        }
+      });
+    }
+  }
+
+  return { valid: errors.length === 0, errors };
+}
