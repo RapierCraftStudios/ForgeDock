@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { mkdtempSync, writeFileSync, rmSync, utimesSync } from "node:fs";
 import { join } from "node:path";
 import os from "node:os";
-import { scanStalls, resumeStalledFromCli, runFromCli, countEngineActivity, lastLocalRun, formatTerminalDiagnostics } from "../engine-cli.mjs";
+import { scanStalls, resumeStalledFromCli, runFromCli, countEngineActivity, lastLocalRun, formatTerminalDiagnostics, aggregateUsage, formatUsageLine } from "../engine-cli.mjs";
 import { serializeState } from "../engine/state.mjs";
 import { appendEvent } from "../engine/runlog.mjs";
 
@@ -582,6 +582,74 @@ describe("formatTerminalDiagnostics (forge#2175)", () => {
       rmSync(dir, { recursive: true, force: true });
     }
   });
+
+  it("appends an aggregate usage line when at least one PHASE_COMMIT/PHASE_FAILED event carries usage (forge#2399)", () => {
+    const dir = mkdtempSync(join(os.tmpdir(), "engine-cli-test-"));
+    try {
+      appendEvent(dir, 40001, { event: "RUN_START", issue: 40001, run: "r_40001_staging", lane: "staging" });
+      appendEvent(dir, 40001, { event: "PHASE_COMMIT", phase: "investigate", outputs: {}, usage: { input_tokens: 100, output_tokens: 20, cache_creation_input_tokens: 5, cache_read_input_tokens: 50 } });
+      appendEvent(dir, 40001, { event: "PHASE_COMMIT", phase: "context", outputs: {}, usage: { input_tokens: 30, output_tokens: 10, cache_creation_input_tokens: 0, cache_read_input_tokens: 15 } });
+      appendEvent(dir, 40001, { event: "RUN_TERMINAL", reason: "needs-human" });
+
+      const out = formatTerminalDiagnostics(dir, 40001);
+
+      assert.match(out, /usage:\s+130 in \/ 30 out \(65 cache-read \/ 5 cache-write\)/);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("omits the usage line entirely (no misleading 0 tokens line) when no event carries usage data (forge#2399)", () => {
+    const dir = mkdtempSync(join(os.tmpdir(), "engine-cli-test-"));
+    try {
+      appendEvent(dir, 40002, { event: "RUN_START", issue: 40002, run: "r_40002_staging", lane: "staging" });
+      appendEvent(dir, 40002, { event: "PHASE_COMMIT", phase: "investigate", outputs: {} });
+      appendEvent(dir, 40002, { event: "RUN_TERMINAL", reason: "needs-human" });
+
+      const out = formatTerminalDiagnostics(dir, 40002);
+
+      assert.ok(!out.includes("usage:"), "must not print a usage: line when no event carries usage");
+      assert.ok(!/\b0\s*(tokens|in)\b/i.test(out), "must not print a misleading zero-token line");
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});
+
+describe("aggregateUsage / formatUsageLine (forge#2399)", () => {
+  it("sums usage across PHASE_COMMIT and PHASE_FAILED events, guarding each field with ?? 0", () => {
+    const events = [
+      { event: "RUN_START" },
+      { event: "PHASE_COMMIT", usage: { input_tokens: 10, output_tokens: 5 } },
+      { event: "PHASE_FAILED", usage: { input_tokens: 3, cache_read_input_tokens: 7 } },
+      { event: "PHASE_START" }, // no usage field — must not throw or be counted
+    ];
+    const total = aggregateUsage(events);
+    assert.deepEqual(total, { input_tokens: 13, output_tokens: 5, cache_creation_input_tokens: 0, cache_read_input_tokens: 7 });
+  });
+
+  it("returns null when no event carries a non-null usage object", () => {
+    const events = [
+      { event: "RUN_START" },
+      { event: "PHASE_COMMIT", outputs: {} },
+      { event: "PHASE_COMMIT", usage: null },
+      { event: "PHASE_FAILED", reason: "x" },
+    ];
+    assert.equal(aggregateUsage(events), null);
+  });
+
+  it("ignores usage on event types other than PHASE_COMMIT/PHASE_FAILED", () => {
+    const events = [{ event: "RUN_TERMINAL", usage: { input_tokens: 999 } }];
+    assert.equal(aggregateUsage(events), null);
+  });
+
+  it("formatUsageLine renders '' for null usage and a formatted line otherwise", () => {
+    assert.equal(formatUsageLine(null), "");
+    assert.match(
+      formatUsageLine({ input_tokens: 1, output_tokens: 2, cache_creation_input_tokens: 3, cache_read_input_tokens: 4 }),
+      /usage:\s+1 in \/ 2 out \(4 cache-read \/ 3 cache-write\)/
+    );
+  });
 });
 
 describe("runFromCli terminal diagnostics (forge#2175)", () => {
@@ -640,5 +708,56 @@ describe("runFromCli terminal diagnostics (forge#2175)", () => {
     assert.equal(runLogLines.length, 1, "run-log path should be printed exactly once (at start), not again in a diagnostic block");
     assert.ok(!output.includes("phase:"), "no diagnostic block should be printed on a merged termination");
     assert.ok(!output.includes("reason:"), "no diagnostic block should be printed on a merged termination");
+  });
+
+  it("prints the aggregate usage line on a merged termination when the run-log carries usage data (forge#2399)", async () => {
+    const dir = mkdtempSync(join(os.tmpdir(), "engine-cli-test-"));
+    const io = { gh: async () => { throw new Error("should not be called"); } };
+    const runIssue = mock.fn(async ({ dir: d, issue }) => {
+      appendEvent(d, issue, { event: "RUN_START", issue, run: `r_${issue}_staging`, lane: "staging" });
+      appendEvent(d, issue, { event: "PHASE_COMMIT", phase: "build", outputs: {}, usage: { input_tokens: 42, output_tokens: 8, cache_creation_input_tokens: 0, cache_read_input_tokens: 0 } });
+      appendEvent(d, issue, { event: "RUN_TERMINAL", reason: "merged" });
+      return { terminalReason: "merged" };
+    });
+
+    const logs = [];
+    const originalLog = console.log;
+    console.log = (...args) => logs.push(args.join(" "));
+    try {
+      await runFromCli(["42", "--lane", "staging"], { io, runIssue, dir });
+    } finally {
+      console.log = originalLog;
+      rmSync(dir, { recursive: true, force: true });
+    }
+
+    const output = logs.join("\n");
+    assert.match(output, /issue #42 → merged/);
+    assert.match(output, /usage:\s+42 in \/ 8 out \(0 cache-read \/ 0 cache-write\)/);
+    assert.ok(!output.includes("phase:"), "the phase/reason diagnostic block must still stay gated to non-merged terminations");
+  });
+
+  it("prints no usage line on a merged termination when the run-log carries no usage data (forge#2399)", async () => {
+    const dir = mkdtempSync(join(os.tmpdir(), "engine-cli-test-"));
+    const io = { gh: async () => { throw new Error("should not be called"); } };
+    const runIssue = mock.fn(async ({ dir: d, issue }) => {
+      appendEvent(d, issue, { event: "RUN_START", issue, run: `r_${issue}_staging`, lane: "staging" });
+      appendEvent(d, issue, { event: "PHASE_COMMIT", phase: "build", outputs: {} });
+      appendEvent(d, issue, { event: "RUN_TERMINAL", reason: "merged" });
+      return { terminalReason: "merged" };
+    });
+
+    const logs = [];
+    const originalLog = console.log;
+    console.log = (...args) => logs.push(args.join(" "));
+    try {
+      await runFromCli(["42", "--lane", "staging"], { io, runIssue, dir });
+    } finally {
+      console.log = originalLog;
+      rmSync(dir, { recursive: true, force: true });
+    }
+
+    const output = logs.join("\n");
+    assert.match(output, /issue #42 → merged/);
+    assert.ok(!output.includes("usage:"), "must not print a usage line when no usage data exists");
   });
 });

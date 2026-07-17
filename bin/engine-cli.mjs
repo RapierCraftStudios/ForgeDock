@@ -56,14 +56,59 @@ export function makeIo() {
 export function runDir() { return join(homedir(), ".forge", "runs"); }
 
 /**
+ * Sums the four token-usage fields across every `PHASE_COMMIT`/`PHASE_FAILED`
+ * run-log event that carries a non-null `usage` object. Mirrors the writer
+ * shape and `?? 0` accumulation convention used by `bin/engine.mjs:411,500`
+ * (`usage: outcome.usage ?? null`) and `bin/runner.mjs:1699-1723` (the
+ * canonical per-run accumulator) — same field names, same null-safe adds.
+ *
+ * Only `PHASE_COMMIT`/`PHASE_FAILED` events carry `usage`; other event types
+ * are skipped without inspecting their shape.
+ *
+ * @param {Array<object>} events - run-log events (from readLog())
+ * @returns {{input_tokens: number, output_tokens: number, cache_creation_input_tokens: number, cache_read_input_tokens: number} | null}
+ *   `null` when no event carried usage data (e.g. an all-CLI-backend run) —
+ *   callers MUST treat `null` as "omit the line", never substitute zeros
+ *   (a `0 tokens` line would misleadingly imply usage was measured and was
+ *   zero, rather than "not measured at all").
+ */
+export function aggregateUsage(events) {
+  let found = false;
+  const total = { input_tokens: 0, output_tokens: 0, cache_creation_input_tokens: 0, cache_read_input_tokens: 0 };
+  for (const e of events) {
+    if (e.event !== "PHASE_COMMIT" && e.event !== "PHASE_FAILED") continue;
+    if (!e.usage || typeof e.usage !== "object") continue;
+    found = true;
+    total.input_tokens += e.usage.input_tokens ?? 0;
+    total.output_tokens += e.usage.output_tokens ?? 0;
+    total.cache_creation_input_tokens += e.usage.cache_creation_input_tokens ?? 0;
+    total.cache_read_input_tokens += e.usage.cache_read_input_tokens ?? 0;
+  }
+  return found ? total : null;
+}
+
+/**
+ * Renders a single usage-summary line from an `aggregateUsage()` result, or
+ * `""` when `usage` is `null` — callers must skip printing entirely in that
+ * case rather than print a placeholder/zero line.
+ * @param {{input_tokens:number, output_tokens:number, cache_creation_input_tokens:number, cache_read_input_tokens:number} | null} usage
+ * @returns {string}
+ */
+export function formatUsageLine(usage) {
+  if (!usage) return "";
+  return `  usage:   ${usage.input_tokens} in / ${usage.output_tokens} out (${usage.cache_read_input_tokens} cache-read / ${usage.cache_creation_input_tokens} cache-write)`;
+}
+
+/**
  * Renders the diagnostic block printed below the bare terminal line whenever
  * a run does not terminate `merged` (forge#2175). Reconstructs the failing
  * phase, attempt count, and `PHASE_FAILED.reason` from the durable run-log
  * (the same data `bin/engine.mjs`'s `runPhaseWithRetry()` already appends via
- * `appendEvent()`), plus the final committed/branch/pr state and the run-log
- * path — closing the gap where an operator previously had to manually open
- * `~/.forge/runs/{issue}.jsonl` and read engine source to interpret a bare
- * `issue #N -> needs-human` line.
+ * `appendEvent()`), plus the final committed/branch/pr state, the aggregate
+ * per-run token usage (forge#2399 — omitted when no event carries usage
+ * data), and the run-log path — closing the gap where an operator previously
+ * had to manually open `~/.forge/runs/{issue}.jsonl` and read engine source
+ * to interpret a bare `issue #N -> needs-human` line.
  *
  * Best-effort: if the run-log is empty/unreadable (e.g. a `deferred` early
  * return before any event was appended), only the run-log path line is
@@ -102,6 +147,8 @@ export function formatTerminalDiagnostics(dir, issue) {
     lines.push(`  state:   committed=[${committed}] branch=${state.branch ?? "null"} pr=${state.pr ?? "null"}`);
   }
   lines.push(`  run-log: ${runLogPath}`);
+  const usageLine = formatUsageLine(aggregateUsage(events));
+  if (usageLine) lines.push(usageLine);
   return lines.join("\n");
 }
 
@@ -335,6 +382,18 @@ export async function runFromCli(argv, deps = {}) {
   // to avoid regressing/cluttering the existing happy-path output.
   if (res.terminalReason !== "merged") {
     console.log(formatTerminalDiagnostics(dir, issue));
+  } else {
+    // forge#2399: formatTerminalDiagnostics() (and its phase/reason/state
+    // block) intentionally stays gated to non-merged outcomes above, but the
+    // aggregate token-usage total should print for "total tokens per run" to
+    // hold on the common success case too — surface just the usage line here
+    // rather than the full diagnostic block.
+    try {
+      const usageLine = formatUsageLine(aggregateUsage(readLog(dir, issue)));
+      if (usageLine) console.log(usageLine);
+    } catch {
+      // Corrupt/unreadable log — degrade silently, same as formatTerminalDiagnostics.
+    }
   }
   return res;
 }
