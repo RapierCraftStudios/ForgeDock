@@ -45,7 +45,7 @@ import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 
 import { getFleetSnapshot, getIssueDetail, PHASE_IDS } from "./observe.mjs";
-import { stripAnsi, truncateVisible, dim, bold } from "./tui.mjs";
+import { stripAnsi, truncateVisible, dim, bold, yellow } from "./tui.mjs";
 import { renderMark, colorMode } from "./cinema.mjs";
 import { openUrl } from "./journey.mjs";
 
@@ -409,6 +409,9 @@ function renderKeyLegend() {
  * @param {string} [opts.filterMode='all'] - one of FILTER_MODES
  * @param {number} [opts.selectedIndex=0] - index into the sorted/filtered agent list
  * @param {boolean} [opts.showLegend=false]
+ * @param {string|null} [opts.detailError] - fixed-literal message shown as a
+ *   one-line banner in the fleet view when a drill-down detail fetch fails
+ *   (forge#2491); never echoes external/caught-error content verbatim
  * @returns {string[]}
  */
 export function renderFrame(snapshot, opts = {}) {
@@ -460,6 +463,10 @@ export function renderFrame(snapshot, opts = {}) {
   if (paused) {
     const ageLabel = Number.isFinite(opts.pausedAgeSeconds) ? `${opts.pausedAgeSeconds}s` : "0s";
     lines.push(rule, dim(`  ⏸ paused ${ageLabel} — press p to resume`));
+  }
+
+  if (viewMode === "fleet" && opts.detailError) {
+    lines.push(rule, yellow(`  ⚠ ${opts.detailError}`));
   }
 
   if (showLegend) {
@@ -573,6 +580,7 @@ async function runInteractiveLoop({
   let showLegend = false;
   let detail = null;
   let detailLoading = false;
+  let detailError = null; // fixed-literal status string, or null (forge#2491)
 
   let lastSnapshot = null;
   let lastInterval = POLL_ACTIVE_MS;
@@ -594,6 +602,7 @@ async function runInteractiveLoop({
       paused,
       showLegend,
       detail,
+      detailError,
       ...extra,
     });
     const ops = diffFrame(prevLines, lines);
@@ -711,11 +720,17 @@ async function runInteractiveLoop({
             getDetail({ repo, issue: target.issue, runsDir, io, now, cwd })
               .then((d) => {
                 detail = d;
+                detailError = null;
                 viewMode = "detail";
               })
               .catch(() => {
-                // Best-effort — a detail-fetch failure leaves the fleet
-                // view intact rather than crashing the loop.
+                // A detail-fetch failure leaves the fleet view intact
+                // rather than crashing the loop, but it must not be
+                // silent (forge#2491) — record a fixed-literal status
+                // message (never the caught error's own text, to keep
+                // rendered state free of unsanitized external content)
+                // so the operator sees something happened and can retry.
+                detailError = "detail fetch failed — press Enter to retry";
               })
               .finally(() => {
                 detailLoading = false;

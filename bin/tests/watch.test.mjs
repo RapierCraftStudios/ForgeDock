@@ -740,6 +740,53 @@ describe("renderFrame — keyboard interaction state (forge#2392)", () => {
     assert.ok(text.includes("12s"));
   });
 
+  // forge#2491 — a failed drill-down detail fetch must surface a visible
+  // banner in the fleet view instead of silently no-op'ing.
+  it("renders a detail-fetch error banner in the fleet view when detailError is set", () => {
+    const lines = renderFrame(snapshot({ agents: [] }), { width: 80, detailError: "detail fetch failed — press Enter to retry" });
+    const text = lines.join("\n");
+    assert.ok(text.includes("detail fetch failed — press Enter to retry"));
+  });
+
+  it("does not render a detail-fetch error banner when detailError is not set", () => {
+    const lines = renderFrame(snapshot({ agents: [] }), { width: 80 });
+    const text = lines.join("\n");
+    assert.ok(!text.includes("detail fetch failed"));
+  });
+
+  it("does not render the detail-fetch error banner while viewMode is 'detail' (error only ever occurs in fleet view)", () => {
+    const detail = {
+      issue: 42,
+      title: "x",
+      branch: "feat/x",
+      pr: 7,
+      status: "running",
+      phaseHistory: [],
+      heartbeat: null,
+      lastHeartbeatBody: null,
+      diagnostics: { valid: true, failedPhase: null },
+    };
+    const lines = renderFrame(snapshot({ agents: [] }), {
+      width: 100,
+      viewMode: "detail",
+      detail,
+      detailError: "detail fetch failed — press Enter to retry",
+    });
+    assert.ok(!lines.join("\n").includes("detail fetch failed"));
+  });
+
+  it("shows both the paused banner and the detail-fetch error banner together without collision", () => {
+    const lines = renderFrame(snapshot({ agents: [] }), {
+      width: 80,
+      paused: true,
+      pausedAgeSeconds: 5,
+      detailError: "detail fetch failed — press Enter to retry",
+    });
+    const text = lines.join("\n");
+    assert.ok(text.includes("paused"));
+    assert.ok(text.includes("detail fetch failed — press Enter to retry"));
+  });
+
   it("shows the active sort/filter labels in the header", () => {
     const lines = renderFrame(snapshot({ agents: [] }), { width: 80, sortOrder: "issueNumber", filterMode: "running" });
     const text = lines.join("\n");
@@ -836,6 +883,62 @@ describe("runWatch — keyboard interaction (forge#2392)", () => {
     });
     assert.deepEqual(detailCalls, [9], "getIssueDetailFn should be called exactly once, with the selected issue number");
     assert.ok(stdout.text().includes("Phase timeline"), "detail view should have been painted at some point");
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  // forge#2491 — a failed drill-down detail fetch must not silently no-op;
+  // it must render a visible banner, and a subsequent successful fetch must
+  // clear it (rather than leaving a stale error message displayed forever).
+  it("Enter shows a visible error banner when the detail fetch fails, and a subsequent successful fetch clears it", async () => {
+    const dir = tmpDir();
+    const stdout = fakeTtyStdout();
+    const stdin = fakeTtyStdin();
+    let callCount = 0;
+    const getIssueDetailFn = async (opts) => {
+      callCount += 1;
+      if (callCount === 1) throw new Error("boom");
+      return {
+        issue: opts.issue,
+        title: "t",
+        branch: null,
+        pr: null,
+        status: "running",
+        stall: null,
+        phase: "build",
+        attempt: { n: 1, max: 3 },
+        phaseHistory: [],
+        heartbeat: null,
+        lastHeartbeatBody: null,
+        diagnostics: { valid: true, failedPhase: null },
+        lease: null,
+      };
+    };
+    let sleepCount = 0;
+    const sleep = async () => {
+      sleepCount += 1;
+      if (sleepCount === 1) stdin.emit("data", "\r"); // first attempt — the injected fn rejects
+      if (sleepCount === 3) stdin.emit("data", "\r"); // second attempt — the injected fn resolves
+      if (sleepCount === 5) stdin.emit("data", "q");
+    };
+    await runWatch(["--repo", "acme/widgets"], {
+      stdout,
+      stdin,
+      io: ghOk([nodeFor(9)]),
+      getIssueDetailFn,
+      now: () => 1000,
+      runsDir: dir,
+      maxTicks: 1000,
+      sleep,
+    });
+    assert.equal(callCount, 2, "getIssueDetailFn should have been called twice — once failing, once succeeding");
+    assert.ok(
+      stdout.text().includes("detail fetch failed"),
+      "a visible error banner should have been painted after the failed fetch — not a silent no-op",
+    );
+    assert.ok(
+      stdout.text().includes("Phase timeline"),
+      "the detail view should have been painted after the second, successful fetch",
+    );
     rmSync(dir, { recursive: true, force: true });
   });
 
