@@ -1644,7 +1644,10 @@ MILESTONE_FLAG=""
 # milestone/* branches) supersedes the old base/head-branch-only slug match
 # that used to be hand-rolled here.
 MILESTONE_TITLE=$(bash scripts/derive-finding-milestone.sh "${PR_NUMBER}" -R "${REPO}")
-[ -n "$MILESTONE_TITLE" ] && MILESTONE_FLAG="--milestone $MILESTONE_TITLE"
+# Quoted so multi-word milestone titles (e.g. "Watch & Fleet Observability") survive
+# as a single value wherever MILESTONE_FLAG is later interpolated — matches the
+# quoting convention already used for --title/--body-file/--label below.
+[ -n "$MILESTONE_TITLE" ] && MILESTONE_FLAG="--milestone \"$MILESTONE_TITLE\""
 ```
 
 **Dedup against existing issues (MANDATORY before creating):**

@@ -694,7 +694,10 @@ MILESTONE_FLAG=""
 # both call it identically so the two specs cannot independently drift.
 # <!-- forge#2443 -->
 MILESTONE_TITLE=$(bash scripts/derive-finding-milestone.sh "${PR_NUMBER}" -R {GH_REPO})
-[ -n "$MILESTONE_TITLE" ] && MILESTONE_FLAG="--milestone $MILESTONE_TITLE"
+# Quoted so multi-word milestone titles survive as a single value wherever
+# MILESTONE_FLAG is later interpolated — matches the quoting convention already
+# used for --title/--body-file/--label below.
+[ -n "$MILESTONE_TITLE" ] && MILESTONE_FLAG="--milestone \"$MILESTONE_TITLE\""
 ```
 
 Plain staging→main reviews resolve `CODE_BRANCH` to `staging` dynamically (same value as before, now derived rather than hardcoded) and typically resolve no milestone. A milestone→staging review resolves `CODE_BRANCH` to `milestone/X` and (via the shared script) the matching milestone.
