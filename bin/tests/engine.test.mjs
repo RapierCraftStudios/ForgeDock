@@ -27,6 +27,12 @@ function fakeWorld() {
       if (a.startsWith("issue view")) return JSON.stringify({ state: w.issueState, labels: w.labels });
       if (a.startsWith("issue edit")) { const i = args.indexOf("--body"); if (i>=0) w.body = args[i+1];
         const j = args.indexOf("--add-label"); if (j>=0) w.labels.push(args[j+1]); return ""; }
+      // forge#2381: close.execute() calls `gh issue close` directly (the
+      // engine-native path no longer relies on a scripted "work-on/close"
+      // runner() call to flip issueState) — mirror that here so the world
+      // stays consistent whichever dispatch path a phase takes.
+      if (a.startsWith("issue close")) { w.issueState = "CLOSED"; return ""; }
+      if (a.startsWith("issue comment")) return "";
       if (a.startsWith("pr list")) return JSON.stringify(w.pr ? [{ number: w.pr }] : []);
       if (a.startsWith("pr view")) return JSON.stringify({ number: w.pr, state: w.prMerged?"MERGED":"OPEN",
         mergedAt: w.prMerged ? "t" : null, labels: w.prNeedsHuman ? [{name:"needs-human"}] : [] });
@@ -1123,6 +1129,10 @@ describe("runIssue", () => {
         if (a.startsWith("issue view")) return JSON.stringify({ state: w.issueState, labels: w.labels });
         if (a.startsWith("issue edit")) { const i = args.indexOf("--body"); if (i>=0) w.body = args[i+1];
           const j = args.indexOf("--add-label"); if (j>=0) w.labels.push(args[j+1]); return ""; }
+        // forge#2381: mirror the fakeWorld() mock above — close.execute() calls
+        // `gh issue close` directly rather than relying on a scripted runner().
+        if (a.startsWith("issue close")) { w.issueState = "CLOSED"; return ""; }
+        if (a.startsWith("issue comment")) return "";
         if (a.startsWith("pr list")) return JSON.stringify(w.pr ? [{ number: w.pr }] : []);
         if (a.startsWith("pr view")) return JSON.stringify({ number: w.pr, state: w.prMerged?"MERGED":"OPEN",
           mergedAt: w.prMerged ? "t" : null, labels: w.prNeedsHuman ? [{name:"needs-human"}] : [] });
@@ -2069,5 +2079,84 @@ describe("runIssue — forge#2352: state-vs-GitHub divergence guard", () => {
 
     assert.equal(res.terminalReason, "merged");
     assert.ok(snapshotCalls > 0, "the guard's snapshot call must actually have been exercised (and failed) at least once");
+  });
+});
+
+// forge#2381: engine-native phase dispatch — a phase declaring `execute`
+// (currently only `close`) must skip runner()/the LLM subagent entirely, and
+// its PHASE_COMMIT run-log event must carry a distinct `engineNative` field.
+describe("runIssue — forge#2381: engine-native phase dispatch (execute)", () => {
+  it("close never invokes the injected runner mock — the whole pipeline still reaches terminalReason merged via close.execute()", async () => {
+    const { w, io } = fakeWorld();
+    let closeRunnerCalled = false;
+    const script = {
+      "work-on/investigate": () => { w.markers += " INVESTIGATION:COMPLETE"; },
+      "work-on/build/context": () => { w.markers += " FORGE:CONTEXT:COMPLETE"; },
+      "work-on/build/architect": () => { w.markers += " FORGE:ARCHITECT:COMPLETE"; },
+      "work-on/build": () => { w.markers += " FORGE:BUILDER:COMPLETE **Branch**: `fix/real-branch-42`"; w.commitsAhead = 2; },
+      "work-on/review": () => { w.pr = 7; w.prMerged = true; },
+      // Intentionally NOT scripted for "work-on/close" — if runner() is ever
+      // called for close, this throws, proving the dispatch actually skipped it.
+    };
+    const runner = async ({ commandName }) => {
+      if (commandName === "work-on/close") { closeRunnerCalled = true; throw new Error("runner() must never be called for an execute()-dispatched phase"); }
+      script[commandName](); return { status: "complete" };
+    };
+
+    const res = await runIssue({ issue: 42, dir, agentId: "a1", lane: "staging",
+      io, runner, now: () => 1000, maxAttempts: 3 });
+
+    assert.equal(closeRunnerCalled, false);
+    assert.equal(res.terminalReason, "merged");
+    assert.equal(w.issueState, "CLOSED", "close.execute() itself performed the real `gh issue close` call");
+    assert.ok(w.labels.includes("workflow:merged"));
+  });
+
+  it("PHASE_COMMIT for close carries engineNative: true; every runner()-dispatched phase carries engineNative: false", async () => {
+    const { w, io } = fakeWorld();
+    const script = {
+      "work-on/investigate": () => { w.markers += " INVESTIGATION:COMPLETE"; },
+      "work-on/build/context": () => { w.markers += " FORGE:CONTEXT:COMPLETE"; },
+      "work-on/build/architect": () => { w.markers += " FORGE:ARCHITECT:COMPLETE"; },
+      "work-on/build": () => { w.markers += " FORGE:BUILDER:COMPLETE **Branch**: `fix/real-branch-42`"; w.commitsAhead = 2; },
+      "work-on/review": () => { w.pr = 7; w.prMerged = true; },
+    };
+    const runner = async ({ commandName }) => { script[commandName](); return { status: "complete" }; };
+
+    await runIssue({ issue: 42, dir, agentId: "a1", lane: "staging",
+      io, runner, now: () => 1000, maxAttempts: 3 });
+
+    const events = readLog(dir, 42).filter(e => e.event === "PHASE_COMMIT");
+    const byPhase = Object.fromEntries(events.map(e => [e.phase, e.engineNative]));
+    assert.equal(byPhase.close, true);
+    for (const p of ["investigate", "context", "architect", "build", "review"]) {
+      assert.equal(byPhase[p], false, `${p} must not be tagged engineNative`);
+    }
+  });
+
+  it("a throwing execute() (failure on the load-bearing 'gh issue close' call) is caught by runExecutePhase and surfaces as needs-human, not an unhandled crash", async () => {
+    const { w, io } = fakeWorld();
+    const origGh = io.gh;
+    io.gh = async (args) => {
+      if (args.join(" ").startsWith("issue close")) throw new Error("boom from the load-bearing close call");
+      return origGh(args);
+    };
+    const script = {
+      "work-on/investigate": () => { w.markers += " INVESTIGATION:COMPLETE"; },
+      "work-on/build/context": () => { w.markers += " FORGE:CONTEXT:COMPLETE"; },
+      "work-on/build/architect": () => { w.markers += " FORGE:ARCHITECT:COMPLETE"; },
+      "work-on/build": () => { w.markers += " FORGE:BUILDER:COMPLETE **Branch**: `fix/real-branch-42`"; w.commitsAhead = 2; },
+      "work-on/review": () => { w.pr = 7; w.prMerged = true; },
+    };
+    const runner = async ({ commandName }) => { script[commandName](); return { status: "complete" }; };
+
+    const res = await runIssue({ issue: 42, dir, agentId: "a1", lane: "staging",
+      io, runner, now: () => 1000, maxAttempts: 3 });
+
+    // runExecutePhase() catches the throw and returns {status: "blocked"} — runIssue's
+    // existing blocked-outcome handling then terminates with reason "needs-human"
+    // (no `reason` field on the returned outcome → defaults to "needs-human").
+    assert.equal(res.terminalReason, "needs-human");
+    assert.equal(w.issueState, "OPEN", "the issue was never actually closed given the injected failure");
   });
 });

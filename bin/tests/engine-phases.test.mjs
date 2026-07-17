@@ -1,6 +1,11 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { PHASES, pickPhase } from "../engine/phases.mjs";
+import { appendEvent } from "../engine/runlog.mjs";
+import { loadInvariants, assertCloseInvariants } from "../engine/invariants.mjs";
 
 const base = { v: 0, run: "r1", issue: 42, lane: "staging", committed: [], phase: null,
   branch: null, pr: null, terminal: false, terminalReason: null, lease: null };
@@ -287,6 +292,182 @@ describe("pickPhase", () => {
       const io = ioWith(JSON.stringify({ state: "OPEN", labels: [] }));
       const outcome = await close.detectOutcome(base, io);
       assert.equal(outcome.status, "failed");
+    });
+  });
+
+  // forge#2381: close.execute() — engine-native close, zero LLM tokens.
+  describe("close.execute", () => {
+    const close = PHASES.find(p => p.id === "close");
+
+    /** A scriptable fake GitHub world recording every gh call made. */
+    function fakeGh(initialBody = "Issue.") {
+      const w = { body: initialBody, labels: [], issueState: "OPEN", closed: false, calls: [] };
+      const gh = async (args) => {
+        w.calls.push(args.join(" "));
+        const a = args.join(" ");
+        if (a.startsWith("issue view") && a.includes("body")) return JSON.stringify({ body: w.body });
+        if (a.startsWith("issue view")) return JSON.stringify({ state: w.issueState, labels: w.labels.map(n => ({ name: n })) });
+        if (a.startsWith("issue edit")) {
+          const bi = args.indexOf("--body"); if (bi >= 0) w.body = args[bi + 1];
+          const li = args.indexOf("--add-label"); if (li >= 0) w.labels.push(args[li + 1]);
+          return "";
+        }
+        if (a.startsWith("issue close")) { w.issueState = "CLOSED"; w.closed = true; return ""; }
+        if (a.startsWith("issue comment")) return "";
+        return "";
+      };
+      return { w, io: { gh, git: async () => "0" } };
+    }
+
+    it("happy path: closes the issue, sets workflow:merged, posts a trajectory comment — no ctx.dir means invariant check is skipped (fail-open)", async () => {
+      const { w, io } = fakeGh();
+      const state = { ...base, committed: ["investigate", "context", "architect", "build", "review"], pr: 7, branch: "feat/x-1" };
+      const outcome = await close.execute(state, io);
+      assert.equal(outcome.status, "committed");
+      assert.equal(outcome.terminalReason, "merged");
+      assert.equal(w.closed, true);
+      assert.ok(w.labels.includes("workflow:merged"));
+      assert.ok(w.calls.some(c => c.startsWith("issue comment") ), "posts a FORGE:TRAJECTORY comment");
+    });
+
+    it("checks off remaining checklist items in the issue body before closing", async () => {
+      const { w, io } = fakeGh("## Acceptance Criteria\n- [ ] one\n- [x] two\n- [ ] three\n");
+      const outcome = await close.execute(base, io);
+      assert.equal(outcome.status, "committed");
+      assert.equal(w.body, "## Acceptance Criteria\n- [x] one\n- [x] two\n- [x] three\n");
+    });
+
+    it("updates the parent tracker checkbox and closes the parent once all sub-issues are checked", async () => {
+      const { w: subW, io: subIo } = fakeGh("**Parent**: #100");
+      // Parent world: separate fake, wired so the sub-issue's io.gh routes
+      // "issue view 100"/"issue edit 100"/"issue close 100" to the parent state.
+      const parent = { body: "- [x] #41\n- [ ] #42\n", labels: [], issueState: "OPEN", closed: false };
+      const combinedGh = async (args) => {
+        const a = args.join(" ");
+        if (a.includes(" 100 ") || a.endsWith(" 100")) {
+          if (a.startsWith("issue view") && a.includes("body")) return JSON.stringify({ body: parent.body });
+          if (a.startsWith("issue edit")) { const bi = args.indexOf("--body"); if (bi >= 0) parent.body = args[bi + 1];
+            const li = args.indexOf("--add-label"); if (li >= 0) parent.labels.push(args[li + 1]); return ""; }
+          if (a.startsWith("issue close")) { parent.closed = true; parent.issueState = "CLOSED"; return ""; }
+        }
+        return subIo.gh(args);
+      };
+      const state = { ...base, issue: 42, committed: ["investigate", "context", "architect", "build", "review"] };
+      const outcome = await close.execute(state, { gh: combinedGh, git: async () => "0" });
+      assert.equal(outcome.status, "committed");
+      assert.equal(parent.body, "- [x] #41\n- [x] #42\n");
+      assert.equal(parent.closed, true, "parent closes once every sub-issue checkbox is checked");
+    });
+
+    it("does not update the parent tracker when the parent's checklist has no matching sub-issue line", async () => {
+      const { w: subW, io: subIo } = fakeGh("**Parent**: #200");
+      const parent = { body: "- [ ] #999\n", edited: false };
+      const combinedGh = async (args) => {
+        const a = args.join(" ");
+        if (a.includes(" 200 ") || a.endsWith(" 200")) {
+          if (a.startsWith("issue view") && a.includes("body")) return JSON.stringify({ body: parent.body });
+          if (a.startsWith("issue edit")) { parent.edited = true; return ""; }
+        }
+        return subIo.gh(args);
+      };
+      const state = { ...base, issue: 42, committed: ["investigate", "context", "architect", "build", "review"] };
+      const outcome = await close.execute(state, { gh: combinedGh, git: async () => "0" });
+      assert.equal(outcome.status, "committed");
+      assert.equal(parent.edited, false, "no matching '- [ ] #42' line in parent — nothing to update");
+    });
+
+    it("project-board sync is a no-op that never throws or blocks the close", async () => {
+      const { w, io } = fakeGh();
+      const outcome = await close.execute(base, io);
+      assert.equal(outcome.status, "committed");
+      assert.equal(outcome.terminalReason, "merged");
+    });
+
+    // forge#2381 (review finding): the invariant check must be a REAL gate, not a
+    // vacuous one. An earlier revision appended a synthetic RUN_TERMINAL event
+    // before calling assertCloseInvariants(), which guaranteed the only
+    // functioning close-scope assertion always passed — the gate could never
+    // block anything. These tests pin the honest behavior: real event list,
+    // structurally-unsatisfiable assertions excluded by id (not fabricated away).
+    describe("close.execute — invariant gate (ctx.dir path)", () => {
+      it("run_log_terminal_at_close genuinely FAILS on a real run-log with no RUN_TERMINAL — proving the assertion works and is not inert", () => {
+        const results = assertCloseInvariants(loadInvariants(), [{ seq: 1, event: "RUN_START", issue: 42 }]);
+        const terminalCheck = results.find((r) => r.id === "run_log_terminal_at_close");
+        assert.ok(terminalCheck, "the assertion must exist in forge-invariants.yaml");
+        assert.equal(terminalCheck.ok, false, "it must flag a run-log with no RUN_TERMINAL event");
+      });
+
+      it("close.execute does NOT block on that same run-log — run_log_terminal_at_close is deliberately excluded, not silently passed", async () => {
+        const dir = mkdtempSync(join(tmpdir(), "fd-close-exec-"));
+        try {
+          // A real, healthy pre-close run-log: RUN_TERMINAL is genuinely absent
+          // (engine.mjs writes it only AFTER close commits), which is exactly the
+          // state the assertion above flags. execute() must still proceed — via
+          // the documented id-based exclusion, NOT via a fabricated event.
+          appendEvent(dir, 42, { event: "RUN_START", issue: 42, run: "r1", lane: "staging" });
+          appendEvent(dir, 42, { event: "PHASE_COMMIT", phase: "review", outputs: { pr: 7 } });
+          const { w, io } = fakeGh();
+          const state = { ...base, committed: ["investigate", "context", "architect", "build", "review"], pr: 7 };
+          const outcome = await close.execute(state, io, { dir });
+          assert.equal(outcome.status, "committed");
+          assert.equal(w.issueState, "CLOSED");
+        } finally {
+          rmSync(dir, { recursive: true, force: true });
+        }
+      });
+
+      it("a violated close-scope assertion returns blocked and performs NO mutating gh call (issue stays OPEN, no workflow:merged)", async () => {
+        const dir = mkdtempSync(join(tmpdir(), "fd-close-exec-"));
+        try {
+          // A run-log with NO RUN_TERMINAL, plus an injected assertion carrying
+          // the `run_log_terminal_at_close` evaluator id but a DIFFERENT
+          // registry id — so it is not excluded, is genuinely evaluated against
+          // the real event list, and genuinely fails. This is the violation path
+          // a production close would take if any evaluated assertion failed.
+          appendEvent(dir, 42, { event: "RUN_START", issue: 42, run: "r1", lane: "staging" });
+          const { w, io } = fakeGh();
+          const failing = [{
+            id: "run_log_terminal_at_close",
+            scope: "close",
+            proposition: "run-log must contain RUN_TERMINAL before close trajectory is posted",
+            enforcement: "close",
+          }];
+          // Sanity: this assertion really does fail on this event list.
+          const direct = assertCloseInvariants(failing, [{ seq: 1, event: "RUN_START" }]);
+          assert.equal(direct[0].ok, false, "precondition: the injected assertion must fail on a RUN_TERMINAL-less log");
+
+          // ...but execute() excludes it by id, so it must NOT block. Proves the
+          // exclusion set is what's doing the work — not a fabricated event.
+          const passing = await close.execute(base, io, { dir, invariants: failing });
+          assert.equal(passing.status, "committed", "excluded-by-id assertion must not block");
+
+          // Now the SAME assertion with the exclusion lifted: it is evaluated
+          // against the real event list, genuinely fails, and must block —
+          // before any mutating call. (Overriding the exclusion set is a test
+          // seam; production never passes it.)
+          const { w: w2, io: io2 } = fakeGh();
+          const blocked = await close.execute(base, io2, { dir, invariants: failing, excludeInvariants: new Set() });
+          assert.equal(blocked.status, "blocked");
+          assert.match(blocked.detail, /close invariant violation/);
+          assert.equal(w2.issueState, "OPEN", "issue must NOT be closed when an invariant is violated");
+          assert.ok(!w2.labels.includes("workflow:merged"), "workflow:merged must NOT be set when an invariant is violated");
+        } finally {
+          rmSync(dir, { recursive: true, force: true });
+        }
+      });
+    });
+
+    it("a checklist-edit failure (io.gh throws on 'issue edit') does not block the close — best-effort", async () => {
+      const { w, io } = fakeGh("- [ ] one\n");
+      const origGh = io.gh;
+      io.gh = async (args) => {
+        if (args.join(" ").startsWith("issue edit") && args.includes("--body")) throw new Error("transient failure");
+        return origGh(args);
+      };
+      const outcome = await close.execute(base, io);
+      assert.equal(outcome.status, "committed");
+      assert.equal(outcome.terminalReason, "merged");
+      assert.equal(w.closed, true, "the load-bearing close still happens despite the checklist-edit failure");
     });
   });
 

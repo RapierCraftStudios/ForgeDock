@@ -12,6 +12,12 @@
 // imports the identical registry, so the two can no longer drift apart the way
 // they did in forge#2375/PR#2395.
 import { PHASE_MARKERS } from "../../packages/protocol/src/phases.js";
+// forge#2381: close.execute() reuses the existing io.gh-based projector helpers
+// instead of hand-rolling new gh calls, and evaluates close-scope invariants
+// in-process via the existing (previously test-only) invariants.mjs API.
+import { makeProjector } from "./projector.mjs";
+import { loadInvariants, assertCloseInvariants } from "./invariants.mjs";
+import { readLog } from "./runlog.mjs";
 
 // forge#2261: "engine-error" is a distinct terminal reason for engine/tool-level
 // failures (e.g. an exhausted retry loop where the runner itself never once
@@ -28,6 +34,27 @@ import { PHASE_MARKERS } from "../../packages/protocol/src/phases.js";
 // "needs-human" (which would misrepresent a clean-but-unmet-bar re-review as
 // a fresh human-judgment escalation).
 export const TERMINAL_REASONS = ["merged", "invalid", "needs-human", "decomposed", "engine-error", "awaiting-merge"];
+
+/**
+ * forge#2381: close-scope invariant ids (forge-invariants.yaml) that are
+ * structurally unsatisfiable at `close.execute()`'s call point and are
+ * therefore excluded from its in-process check rather than fabricated into
+ * passing.
+ *
+ * `run_log_terminal_at_close` asserts a RUN_TERMINAL event is present in the
+ * run-log. In the engine-native path RUN_TERMINAL is written by
+ * bin/engine.mjs's `terminate()` strictly AFTER this phase's outcome commits
+ * (`close.isTerminalAfter` is always true), so it cannot be present yet when
+ * `execute()` runs — evaluating it here would fail every healthy run. The
+ * assertion targets the interactive `commands/work-on/close.md` path, whose
+ * run-log ordering differs; it remains meaningful there and is still
+ * evaluated by `bin/tests/engine-invariants.test.mjs`.
+ *
+ * Do NOT "fix" an unsatisfiable assertion by synthesizing the event it looks
+ * for — that silently converts the gate into a no-op. Exclude it here (loudly,
+ * by id, with a reason) or change the assertion.
+ */
+const CLOSE_INVARIANTS_NOT_APPLICABLE_TO_EXECUTE = new Set(["run_log_terminal_at_close"]);
 
 /**
  * Fetch the issue's comments. Returns both:
@@ -456,6 +483,97 @@ export const PHASES = [
       return { status: "failed", detail: "issue not closed" };
     },
     isTerminalAfter: () => true,
+    /**
+     * forge#2381: engine-native close — performs commands/work-on/close.md's
+     * mechanical operations directly via io.gh, with zero LLM invocation:
+     * (1) close-scope invariant check (escalates to needs-human on violation,
+     * BEFORE any mutating call — a violation must never reach workflow:merged),
+     * (2) final issue-body checklist completion, (3) best-effort project-board
+     * sync, (4) `gh issue close` + `workflow:merged` label — the two load-bearing
+     * operations, (5) parent-tracker checkbox update (sub-issues only), (6) a
+     * templated FORGE:TRAJECTORY summary comment composed from already-known
+     * typed state — no generated narrative (spec point 3: an LLM narrative is
+     * explicitly out of scope here).
+     *
+     * bin/engine.mjs's phase loop calls this directly (see `runExecutePhase`)
+     * instead of `runPhaseWithRetry`/`runner()` whenever a phase declares
+     * `execute` — see that file's dispatch branch for the calling contract.
+     *
+     * @param {import("./phases.mjs").RunState} state
+     * @param {object} io - injected { gh, git } (see bin/engine.mjs)
+     * @param {{dir?: string, invariants?: object[]}} [ctx] - dir: local run-log
+     *   directory, used only to evaluate close-scope invariants
+     *   (bin/engine/invariants.mjs). Optional — when absent, invariant evaluation
+     *   is skipped (fail-open, matching every other fail-open convention already
+     *   in this file, e.g. `issueSnapshot`). invariants: optional injected
+     *   declaration list, defaulting to `loadInvariants()`. This is a test seam —
+     *   it lets bin/tests/engine-phases.test.mjs exercise the violation path with
+     *   a genuinely-failing assertion rather than asserting the gate's shape and
+     *   calling that coverage. excludeInvariants: optional Set of assertion ids
+     *   to skip, defaulting to CLOSE_INVARIANTS_NOT_APPLICABLE_TO_EXECUTE — also
+     *   a test seam, so the violation/blocked path can be exercised end-to-end.
+     *   Production callers (bin/engine.mjs's runExecutePhase) never pass either.
+     * @returns {Promise<{status: "committed"|"blocked", outputs: object, terminalReason?: string, detail?: string}>}
+     */
+    async execute(state, io, ctx = {}) {
+      // 1. Close-scope invariant check, before any mutating gh call.
+      if (ctx.dir) {
+        const events = readLog(ctx.dir, state.issue);
+        const declared = ctx.invariants ?? loadInvariants();
+        const excluded = ctx.excludeInvariants ?? CLOSE_INVARIANTS_NOT_APPLICABLE_TO_EXECUTE;
+        const invariants = declared.filter((i) => !excluded.has(i.id));
+        // Evaluate the REAL event list — never a fabricated one. An earlier
+        // revision appended a synthetic RUN_TERMINAL here so that
+        // `run_log_terminal_at_close` would pass; that made the whole gate
+        // vacuous (the assertion only checks that such an event exists, so
+        // synthesizing one guaranteed ok:true and nothing could ever block).
+        // Structurally-unsatisfiable assertions are excluded by id instead —
+        // see CLOSE_INVARIANTS_NOT_APPLICABLE_TO_EXECUTE — so every assertion
+        // that IS evaluated here is evaluated against real state and can
+        // genuinely fail.
+        const results = assertCloseInvariants(invariants, events);
+        const violations = results.filter((r) => !r.ok);
+        if (violations.length) {
+          return {
+            status: "blocked",
+            detail: `close invariant violation(s): ${violations.map((v) => `${v.id} (${v.violated})`).join("; ")}`,
+            outputs: {},
+          };
+        }
+      }
+
+      // 2. Final issue-body checklist completion — best-effort, never fatal.
+      try {
+        await completeIssueBodyChecklist(state.issue, io);
+      } catch { /* best-effort — a checklist-edit failure must not block close */ }
+
+      // 3. Project-board sync — best-effort. Full field-ID-based Status/Workflow
+      // sync (forge.yaml → project_board.field_ids) requires repo-specific config
+      // this pure io.gh-based phase has no access to (phases.mjs reads no config
+      // today); this stays a documented no-op placeholder rather than a hard
+      // dependency, matching close.md's own "best-effort" framing for board sync.
+      try {
+        await updateProjectBoard(state.issue, io);
+      } catch { /* best-effort */ }
+
+      // 4. The load-bearing operations: close the issue + set workflow:merged.
+      const projector = makeProjector(io);
+      const prLabel = state.pr != null ? `PR #${state.pr}` : "no PR";
+      await io.gh(["issue", "close", String(state.issue), "--comment", `Closed: ${prLabel} merged. Closes #${state.issue}.`]);
+      await projector.setLabel(state.issue, PHASE_MARKERS.close.completionLabel);
+
+      // 5. Parent-tracker checkbox (sub-issues only) — best-effort.
+      try {
+        await updateParentTracker(state.issue, io);
+      } catch { /* best-effort */ }
+
+      // 6. Templated trajectory summary — composed from typed state, no LLM call.
+      try {
+        await postTrajectoryComment(state, io);
+      } catch { /* best-effort — the close itself already succeeded above */ }
+
+      return { status: "committed", outputs: {}, terminalReason: "merged" };
+    },
   },
 ];
 
@@ -473,6 +591,88 @@ async function prStatusFor(state, io) {
   const labels = (j.labels || []).map((l) => l.name || l);
   return { number: j.number, merged: !!j.mergedAt || j.state === "MERGED",
            needsHuman: labels.includes("needs-human") };
+}
+
+// ---------------------------------------------------------------------------
+// forge#2381: close.execute() helpers — mechanical GitHub operations ported
+// from commands/work-on/close.md, each best-effort/non-fatal except where
+// the phase's `execute` body above explicitly treats a step as load-bearing.
+// ---------------------------------------------------------------------------
+
+/** Check off every remaining `- [ ]` checklist item in the issue body. */
+async function completeIssueBodyChecklist(issue, io) {
+  const out = await io.gh(["issue", "view", String(issue), "--json", "body"]);
+  let body;
+  try { body = JSON.parse(out || "{}").body ?? ""; } catch { return; }
+  const updated = body.replace(/^- \[ \] /gm, "- [x] ");
+  if (updated !== body) await io.gh(["issue", "edit", String(issue), "--body", updated]);
+}
+
+/**
+ * Project-board Status/Workflow sync — currently a documented no-op. Full
+ * field-ID-based sync (forge.yaml → project_board.field_ids) requires
+ * repo-specific config this pure io.gh-based phase has no access to (no
+ * phase in this file reads forge.yaml today); left as a placeholder so the
+ * call site in `execute()` above needs no change once that config is threaded
+ * through in a future issue.
+ */
+async function updateProjectBoard(_issue, _io) {
+  return;
+}
+
+/**
+ * If this issue's body references a parent tracker issue, check off this
+ * issue's line in the parent's tracker checklist. If every sub-issue line in
+ * the parent is now checked, close the parent too (mirrors close.md's Phase
+ * 6D "if ALL sub-issues checked off → close parent with workflow:merged").
+ */
+async function updateParentTracker(issue, io) {
+  const out = await io.gh(["issue", "view", String(issue), "--json", "body"]);
+  let body;
+  try { body = JSON.parse(out || "{}").body ?? ""; } catch { return; }
+  const stripped = body.replace(/[*_]+/g, "");
+  const match = stripped.match(/(?:part of|spawned from|sub-issue of|parent issue:?|parent:)\s*#(\d+)/i);
+  if (!match) return;
+  const parentNum = match[1];
+
+  const parentOut = await io.gh(["issue", "view", parentNum, "--json", "body"]);
+  let parentBody;
+  try { parentBody = JSON.parse(parentOut || "{}").body ?? ""; } catch { return; }
+  const issueRef = new RegExp(`- \\[ \\] #${issue}\\b`);
+  if (!issueRef.test(parentBody)) return;
+
+  const updatedParentBody = parentBody.replace(issueRef, `- [x] #${issue}`);
+  await io.gh(["issue", "edit", parentNum, "--body", updatedParentBody]);
+
+  const remaining = (updatedParentBody.match(/- \[ \] #\d+/g) || []).length;
+  if (remaining === 0) {
+    await io.gh(["issue", "close", parentNum, "--comment", "All sub-issues merged. Closing parent."]);
+    await makeProjector(io).setLabel(parentNum, PHASE_MARKERS.close.completionLabel);
+  }
+}
+
+/**
+ * Templated FORGE:TRAJECTORY summary comment, composed from already-known
+ * typed state — no generated narrative (spec point 3: an LLM narrative call
+ * for this is explicitly optional/future, not built here).
+ */
+async function postTrajectoryComment(state, io) {
+  const timestamp = new Date().toISOString();
+  const prLine = state.pr != null ? `PR #${state.pr}` : "no PR";
+  const phaseRows = state.committed.map((p) => `| ${p} | ✅ Complete |`).join("\n");
+  const body = `<!-- FORGE:TRAJECTORY -->
+## Pipeline Trajectory — #${state.issue}
+
+| Phase | Result |
+|-------|--------|
+${phaseRows}
+| close | ✅ Complete (engine-native) |
+
+**Branch**: \`${state.branch ?? "—"}\`
+**PR**: ${prLine}
+**Pipeline completed**: ${timestamp}
+**Executed by**: engine (\`bin/engine/phases.mjs\` \`close.execute\` — zero LLM tokens)`;
+  await io.gh(["issue", "comment", String(state.issue), "--body", body]);
 }
 
 /** The engine's transition function: first uncommitted phase whose gate holds. */
