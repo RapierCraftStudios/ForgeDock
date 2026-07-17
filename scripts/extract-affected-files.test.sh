@@ -246,7 +246,22 @@ MOCK_GH_BODY="$BODY_NO_HEADINGS" assert_output \
   "none" "" 2387 -R test/repo
 
 # --------------------------------------------------------------------------- #
-# Scenario 7: usage errors.
+# Scenario 7 (forge#2503 regression fixture): positive-path pre-joined
+# single-token -R form, e.g. "-R owner/repo" as ONE argv element instead of
+# two separate tokens. The script's usage comment and its `-R\ *` case arm
+# both document this form as supported, but until this fixture the only
+# assertion touching that arm was the malformed-value negative case in
+# Scenario 8 below — the success branch (REPO="$_rval"; shift) had zero
+# positive-path coverage. Reuses the BODY_SCOPED fixture from Scenario 2;
+# only the argv form differs.
+# --------------------------------------------------------------------------- #
+unset MOCK_GH_COMMENTS
+MOCK_GH_BODY="$BODY_SCOPED" assert_output \
+  "pre-joined single-token -R form (\"-R test/repo\" as one argv element): body-fallback scoped to ## Affected Files" \
+  "body-fallback" "bin/engine.mjs,bin/engine/phases.mjs" 2390 "-R test/repo"
+
+# --------------------------------------------------------------------------- #
+# Scenario 8: usage errors.
 # --------------------------------------------------------------------------- #
 assert_exit "missing issue number -> exit 2" 2 -R test/repo
 assert_exit "missing value for -R -> exit 2" 2 2388 -R
