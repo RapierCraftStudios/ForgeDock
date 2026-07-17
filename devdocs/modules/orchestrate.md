@@ -41,3 +41,12 @@ PR #1733 introduced the module dossier system. `commands/orchestrate.md` was
 NOT changed in this PR — this entry seeds the dossier from historical findings.
 Key gotcha: Step 4B.7 wrong-PR resolution and Agent-tool bypass are the two
 most common regression sites. Cite: #1634, #1383, #1202.
+
+## Entry 2026-07-17 — Fix: quote GH_REPO placeholder in phase-3-dependency.md Layer 1 call site (#2502)
+
+PR #2526 fixed a quoting inconsistency in `commands/orchestrate/phase-3-dependency.md:81`:
+`-R {GH_REPO}` was unquoted while the adjacent `"$NUM"` was quoted. Fixed to
+`-R "{GH_REPO}"`. Sibling-pattern sweep confirmed unquoted `-R {GH_REPO}` is
+still the prevailing convention across the rest of `commands/` — this fix was
+intentionally scoped to just this one call site, not a repo-wide requoting
+pass. Cite: #2502, PR #2526, PR #2500 (source finding).
