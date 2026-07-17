@@ -394,11 +394,28 @@ Eligibility is **default-batchable**: any open `review-finding` + a P3 priority 
 # below (schema-tolerant, mirrors phase-1-resolve.md exactly). <!-- Added: forge#2232 -->
 # Safety-exclusion alternation is word-boundary anchored (not bare substrings)
 # and the body scan strips the review-finding template's attribution
-# boilerplate (**Source**/**Agent**/**Confidence**/**Severity**/**Review
-# comment**) before matching — identical fix mirrored across all three sweep
+# boilerplate (**Confidence**/**Severity**/**Review comment** — see forge#2477
+# note below for why **Source**/**Agent** are deliberately excluded from this
+# list) before matching — identical fix mirrored across all three sweep
 # sites so `authority_source` and a Security-agent-attributed finding no
 # longer false-positive, while a genuine auth/billing/security/anti-bot
 # finding still excludes. <!-- forge#2423 -->
+# Each stripped alternative is anchored to the field's real generator-output
+# shape (enum for Confidence/Severity, URL for Review comment) rather than a
+# bare label-prefix + `.*$` — matching on label shape alone lets
+# attacker-controlled body text on one of these lines get stripped along with
+# the label, smuggling banned keywords past the scan below. Source/Agent are
+# deliberately NOT stripped: both hold genuinely free-text generator output (a
+# PR title; an agent's self-description) with no fixed vocabulary, so no shape
+# bound can distinguish legitimate attribution from attacker-authored payload
+# placed in the same position — a length-bounded free-text alternative for
+# either field re-opens the exact smuggling gap this fix closes (an attacker
+# need only prefix their payload with a fake "PR #N — " or agent name to
+# satisfy the bound). Leaving them unstripped trades a narrow, already-known
+# false-positive (forge#2423's Agent-line case; a P3 finding whose Source/Agent
+# text happens to mention a domain keyword is not auto-batched) for closing a
+# real bypass — the safe direction for a security-relevant exclusion.
+# <!-- forge#2477 -->
 UNBATCHED_P3=$(gh issue list {GH_FLAG} \
   --state open \
   --label "review-finding" \
@@ -407,7 +424,7 @@ UNBATCHED_P3=$(gh issue list {GH_FLAG} \
   --jq '.[] | select([.labels[].name] | any(test("^(priority:)?P3$")))
          | select(([.labels[].name] | any(. == "batch")) | not)
          | select((.title | test("\\b(security|billing|anti-bot|auth|authentication|authorization|authn|authz)\\b"; "i")) | not)
-         | (.body | gsub("(?m)^\\*\\*(Source|Agent|Confidence|Severity|Review comment)\\*\\*:.*$"; "")) as $stripped_body
+         | (.body | gsub("(?m)^\\*\\*(?:Confidence\\*\\*: (?:CONFIRMED|LIKELY|POSSIBLE)|Severity\\*\\*: (?:CRITICAL|HIGH|MEDIUM|LOW|INFO)|Review comment\\*\\*: https?://\\S+)$"; "")) as $stripped_body
          | select($stripped_body | test("## Problem[\\s\\S]{0,500}\\b(security|billing|anti-bot|auth|authentication|authorization|authn|authz)\\b"; "i") | not)
          | select(([.labels[].name] | any(. == "security" or . == "billing" or . == "anti-bot" or . == "auth")) | not)')
 

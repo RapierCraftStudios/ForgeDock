@@ -1631,15 +1631,33 @@ for FINDING_NUM in "${QUEUED_FINDINGS[@]}"; do
   # Safety exclusions — never batch, at any priority. Same jq test() engine and
   # patterns as phase-1-resolve.md's batching rule (single shared mechanism).
   # Word-boundary anchored (not bare substrings) and attribution-boilerplate
-  # (**Source**/**Agent**/**Confidence**/**Severity**/**Review comment**) stripped
-  # from the body before scanning, so a finding naming its own reviewing agent
-  # ("Security") or an identifier like `authority_source` no longer false-positives.
+  # (**Confidence**/**Severity**/**Review comment** — see forge#2477 note below
+  # for why **Source**/**Agent** are deliberately excluded from this list)
+  # stripped from the body before scanning, so a finding naming its own
+  # reviewing agent ("Security") or an identifier like `authority_source` no
+  # longer false-positives.
   # `authentication|authorization|authn|authz` preserve real auth-domain coverage
   # as separate whole-word alternatives now that bare `auth` is boundary-anchored.
   # <!-- forge#2423 -->
+  # Each stripped alternative is anchored to the field's real generator-output
+  # shape (enum for Confidence/Severity, URL for Review comment) rather than a
+  # bare label-prefix + `.*$` — matching on label shape alone lets
+  # attacker-controlled body text on one of these lines get stripped along
+  # with the label, smuggling banned keywords past the scan below. Source/Agent
+  # are deliberately NOT stripped: both hold genuinely free-text generator
+  # output (a PR title; an agent's self-description) with no fixed vocabulary,
+  # so no shape bound can distinguish legitimate attribution from
+  # attacker-authored payload placed in the same position — a length-bounded
+  # free-text alternative for either field re-opens the exact smuggling gap
+  # this fix closes (an attacker need only prefix their payload with a fake
+  # "PR #N — " or agent name to satisfy the bound). Leaving them unstripped
+  # trades a narrow, already-known false-positive (forge#2423's Agent-line
+  # case; a P3 finding whose Source/Agent text happens to mention a domain
+  # keyword is not auto-batched) for closing a real bypass — the safe
+  # direction for a security-relevant exclusion. <!-- forge#2477 -->
   echo "$FINDING_DATA" | jq -e '
     (.title | test("\\b(security|billing|anti-bot|auth|authentication|authorization|authn|authz)\\b"; "i"))
-    or ((.body | gsub("(?m)^\\*\\*(Source|Agent|Confidence|Severity|Review comment)\\*\\*:.*$"; "")) | test("## Problem[\\s\\S]{0,500}\\b(security|billing|anti-bot|auth|authentication|authorization|authn|authz)\\b"; "i"))
+    or ((.body | gsub("(?m)^\\*\\*(?:Confidence\\*\\*: (?:CONFIRMED|LIKELY|POSSIBLE)|Severity\\*\\*: (?:CRITICAL|HIGH|MEDIUM|LOW|INFO)|Review comment\\*\\*: https?://\\S+)$"; "")) | test("## Problem[\\s\\S]{0,500}\\b(security|billing|anti-bot|auth|authentication|authorization|authn|authz)\\b"; "i"))
     or ([.labels[]] | any(. == "security" or . == "billing" or . == "anti-bot" or . == "auth"))
   ' >/dev/null && continue
 

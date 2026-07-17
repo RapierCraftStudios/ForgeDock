@@ -322,11 +322,30 @@ BATCHABLE_P3=$(gh issue list {GH_FLAG} \
   --jq '.[] | select([.labels[].name] | any(test("^(priority:)?P3$")))
          | select((.title | test("\\b(security|billing|anti-bot|auth|authentication|authorization|authn|authz)\\b"; "i")) | not)
          # Strip the review-finding template's attribution boilerplate
-         # (**Source**/**Agent**/**Confidence**/**Severity**/**Review comment**,
-         # see review-pr.md L1691-1719) before scanning the body — otherwise a
-         # finding is excluded because of who reviewed it (e.g. "**Agent**:
-         # Security (...)") rather than what it is actually about. <!-- forge#2423 -->
-         | (.body | gsub("(?m)^\\*\\*(Source|Agent|Confidence|Severity|Review comment)\\*\\*:.*$"; "")) as $stripped_body
+         # (**Confidence**/**Severity**/**Review comment** — see forge#2477
+         # note below for why **Source**/**Agent** are deliberately excluded
+         # from this list; see review-pr.md L1691-1719 for the full template)
+         # before scanning the body — otherwise a finding is excluded because
+         # of who reviewed it (e.g. "**Agent**: Security (...)") rather than
+         # what it is actually about. <!-- forge#2423 -->
+         # Each alternative is anchored to the field's real generator-output shape
+         # (enum for Confidence/Severity, URL for Review comment) rather than a
+         # bare label-prefix + `.*$` — matching on label shape alone lets
+         # attacker-controlled body text on one of these lines get stripped
+         # along with the label, smuggling banned keywords past the scan below.
+         # Source/Agent are deliberately NOT stripped: both hold genuinely
+         # free-text generator output (a PR title; an agent's self-description)
+         # with no fixed vocabulary, so no shape bound can distinguish
+         # legitimate attribution from attacker-authored payload placed in the
+         # same position — a length-bounded free-text alternative for either
+         # field re-opens the exact smuggling gap this fix closes (an attacker
+         # need only prefix their payload with a fake "PR #N — " or agent name
+         # to satisfy the bound). Leaving them unstripped trades a narrow,
+         # already-known false-positive (forge#2423's Agent-line case; a P3
+         # finding whose Source/Agent text happens to mention a domain keyword
+         # is not auto-batched) for closing a real bypass — the safe direction
+         # for a security-relevant exclusion. <!-- forge#2477 -->
+         | (.body | gsub("(?m)^\\*\\*(?:Confidence\\*\\*: (?:CONFIRMED|LIKELY|POSSIBLE)|Severity\\*\\*: (?:CRITICAL|HIGH|MEDIUM|LOW|INFO)|Review comment\\*\\*: https?://\\S+)$"; "")) as $stripped_body
          | select($stripped_body | test("## Problem[\\s\\S]{0,500}\\b(security|billing|anti-bot|auth|authentication|authorization|authn|authz)\\b"; "i") | not)
          | select(([.labels[].name] | any(. == "security" or . == "billing" or . == "anti-bot" or . == "auth")) | not)')
 
