@@ -32,8 +32,16 @@ import { RESERVED_TYPES } from './types.js';
 
 /** Phase ids, in canonical dispatch order (mirrors `commands/work-on.md`'s
  * "Universal Phase Dispatcher" table and `bin/engine/phases.mjs`'s `PHASES`
- * array). */
-export const PHASE_IDS = ['investigate', 'context', 'architect', 'build', 'review', 'close'];
+ * array).
+ *
+ * `decompose` and `remediate` (forge#2379) are branch phases, not part of the
+ * six-phase linear happy path — `decompose` is reached only when `investigate`
+ * signals `DECOMPOSE:YES`, and `remediate` only when `review` escalates to
+ * `needs-human`. They are still declared here, in the exact same array
+ * position `bin/engine/phases.mjs`'s `PHASES` array declares them, because
+ * `scripts/check-phase-registry-drift.mjs` requires the two lists to match
+ * index-for-index — see that file's own doc comment. */
+export const PHASE_IDS = ['investigate', 'decompose', 'context', 'architect', 'build', 'review', 'remediate', 'close'];
 
 /**
  * @typedef {Object} PhaseMarkerEntry
@@ -56,6 +64,12 @@ export const PHASE_MARKERS = {
     invalidMarker: 'INVESTIGATION:INVALID',
     decomposedMarker: 'DECOMPOSE:YES',
   },
+  // forge#2379: `decompose` actually runs work-on/decompose (sub-issue
+  // fan-out) once `investigate` hands off on `DECOMPOSE:YES` — see
+  // bin/engine/phases.mjs's `decompose` phase entry for the handoff mechanics.
+  decompose: {
+    completionMarker: RESERVED_TYPES.DECOMPOSED.completionSentinel, // 'FORGE:DECOMPOSED:COMPLETE'
+  },
   context: {
     completionMarker: RESERVED_TYPES.CONTEXT.completionSentinel, // 'FORGE:CONTEXT:COMPLETE'
     partialMarker: RESERVED_TYPES.CONTEXT.partialSentinel, // 'FORGE:CONTEXT:PARTIAL'
@@ -77,6 +91,12 @@ export const PHASE_MARKERS = {
     // No RESERVED_TYPES entry defines this sentinel (REVIEWER has no
     // completionSentinel in spec §4.1) — declared directly here.
     completionMarker: 'FORGE:REVIEWER:MERGED',
+  },
+  // forge#2379: `remediate` re-drives a needs-human PR (commands/work-on/remediate.md).
+  // Posted to BOTH the PR and the linked issue (Phase M8) — bin/engine/phases.mjs's
+  // `remediate` phase reads it off the issue, consistent with every other phase here.
+  remediate: {
+    completionMarker: RESERVED_TYPES.REMEDIATION.completionSentinel, // 'FORGE:REMEDIATION:COMPLETE'
   },
   close: {
     // A GitHub label, not a comment marker — see `completionLabel` above.

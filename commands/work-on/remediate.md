@@ -20,6 +20,8 @@ argument-hint: "[PR number] [--issue N] [--repo GH_REPO] [--gh-flag GH_FLAG] [--
 
 **Scope note**: This mode owns exactly one gap — re-driving a `needs-human` PR's own remediation. It does NOT implement the `needs-human` sub-label taxonomy (#1815's scope) and it does NOT edit `review-pr.md`'s Phase 8 guard (forge#1810) — that guard's existing safe-default (`workflow:awaiting-merge` on any clean re-review of a previously-escalated PR) is reused as-is; this file only adds a bar-check *after* that guard has already fired.
 
+**Engine coverage** (forge#2379): this subcommand's `command` name (`work-on/remediate`) and completion marker (`FORGE:REMEDIATION:COMPLETE`, including the `**Re-gate outcome**` field Phase M8 posts below) are now registered in the headless engine's phase table — `RESERVED_TYPES.REMEDIATION` in `packages/protocol/src/types.js`, `remediate` in `packages/protocol/src/phases.js`'s `PHASE_IDS`/`PHASE_MARKERS`, and a matching `remediate` entry in `bin/engine/phases.mjs`'s `PHASES` array (`entryCondition`: review committed + `terminalReason: "needs-human"`; `detectOutcome` maps each re-gate outcome to the right terminal reason). **Known limitation, documented in that engine entry's own comment**: a single continuous `runIssue()` walk cannot reach this phase today — `review`'s `"blocked"` outcome and the needs-human divergence guard both terminate the run before `remediate`'s `entryCondition` is ever evaluated. This subcommand therefore continues to run exactly as documented above — as its own separate top-level entry point — until a follow-up issue live-wires the engine to reconstruct state from GitHub for a dedicated remediation run.
+
 ---
 
 ## Inputs

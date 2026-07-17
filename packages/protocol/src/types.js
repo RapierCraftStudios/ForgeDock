@@ -86,6 +86,23 @@ export const RESERVED_TYPES = {
     requiredFields: ['Verdict'],
     verdictValues: ['APPROVED', 'CHANGES_REQUESTED', 'COMMENTED'],
   },
+  /**
+   * REMEDIATION — paper trail for a needs-human PR re-driven by
+   * commands/work-on/remediate.md. Posted to BOTH the PR and the linked
+   * issue (Phase M8) once the re-gate outcome (AUTO-LANDED /
+   * HELD-AWAITING-MERGE / RE-ESCALATED / UNFIXABLE) is known. Added in
+   * forge#2379 to single-source the completion sentinel that
+   * bin/engine/phases.mjs's `remediate` phase gates on. <!-- Added: forge#2379 -->
+   */
+  REMEDIATION: {
+    type: 'REMEDIATION',
+    category: Category.LIFECYCLE,
+    completionSentinel: 'FORGE:REMEDIATION:COMPLETE',
+    partialSentinel: null,
+    inlineValue: false,
+    requiredFields: [],
+    reGateOutcomeValues: ['AUTO-LANDED', 'HELD-AWAITING-MERGE', 'RE-ESCALATED', 'UNFIXABLE'],
+  },
   TRAJECTORY: {
     type: 'TRAJECTORY',
     category: Category.LIFECYCLE,

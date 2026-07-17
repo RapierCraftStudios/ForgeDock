@@ -413,7 +413,25 @@ export async function runIssue(opts) {
     if (outcome.terminalReason) state.terminalReason = outcome.terminalReason;
     await projector.writeState(issue, { ...state, lease: { by: agentId, until: now() + leaseTtlMs } });
 
-    if (outcome.terminalReason && TERMINAL_REASONS.includes(outcome.terminalReason))
+    // forge#2379: the "investigate" phase reporting terminalReason "decomposed"
+    // is a HANDOFF to the "decompose" phase (bin/engine/phases.mjs), not a
+    // dead end — decompose is what actually dispatches work-on/decompose
+    // (sub-issue fan-out, FORGE:DECOMPOSED posting). Before this change,
+    // "decomposed" being a member of TERMINAL_REASONS meant the run
+    // terminated the instant investigate reported it, and decompose's own
+    // entryCondition (state.terminalReason === "decomposed") was never
+    // actually reachable through pickPhase. Narrowly exempting exactly this
+    // phase/reason combination — and no other phase, no other reason — lets
+    // the loop continue to pickPhase, which now correctly selects "decompose"
+    // next (investigate.isTerminalAfter was narrowed to only "invalid" in
+    // the same change, so it no longer independently forces termination
+    // here either). Once the "decompose" phase itself later reports
+    // terminalReason "decomposed" (re-affirming it after FORGE:DECOMPOSED:COMPLETE
+    // is seen), phase.id is "decompose" — not "investigate" — so this
+    // exemption does not apply and the normal terminate() path below fires,
+    // ending the run for real.
+    const isDecomposeHandoff = phase.id === "investigate" && outcome.terminalReason === "decomposed";
+    if (outcome.terminalReason && TERMINAL_REASONS.includes(outcome.terminalReason) && !isDecomposeHandoff)
       return await terminate(state, outcome.terminalReason);
     if (phase.isTerminalAfter && phase.isTerminalAfter(state))
       return await terminate(state, state.terminalReason || "merged");
