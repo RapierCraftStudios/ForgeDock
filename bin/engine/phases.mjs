@@ -70,8 +70,15 @@ const CLOSE_INVARIANTS_NOT_APPLICABLE_TO_EXECUTE = new Set(["run_log_terminal_at
  * treating the whole blob as a single pseudo-comment — `has()` checks are
  * unaffected either way, and comment-scoped extraction simply won't match,
  * which is the safe, conservative behavior.
+ *
+ * forge#2383: exported (was module-private) so bin/engine.mjs's
+ * `buildContextPackForPhase()` can reuse this exact fetch/parse logic when
+ * gathering "relevant FORGE annotations" for a phase's context pack, instead
+ * of duplicating the same `gh api .../comments --jq '[.[].body]'` call and
+ * JSON-array-or-fallback parsing inline. Purely additive — every existing
+ * call site in this file still resolves it as a same-module reference.
  */
-async function issueMarkers(issue, io) {
+export async function issueMarkers(issue, io) {
   const out = await io.gh(["api", `repos/{owner}/{repo}/issues/${issue}/comments`, "--jq", "[.[].body]"]);
   const blob = out || "";
   let comments = [];

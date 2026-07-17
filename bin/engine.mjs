@@ -5,10 +5,11 @@
  */
 import { fileURLToPath } from "node:url";
 import { appendEvent, readLog, deriveState, rewriteLog } from "./engine/runlog.mjs";
-import { pickPhase, TERMINAL_REASONS, issueSnapshot, PHASES } from "./engine/phases.mjs";
+import { pickPhase, TERMINAL_REASONS, issueSnapshot, issueMarkers, PHASES } from "./engine/phases.mjs";
 import { reconcileState } from "./engine/reconcile.mjs";
 import { makeProjector } from "./engine/projector.mjs";
 import { VALID_BACKENDS } from "./runner.mjs";
+import { buildContextPack } from "./engine/context-pack.mjs";
 
 // Exported (forge#2175) so bin/engine-cli.mjs can render "failed N/M attempts"
 // diagnostics without duplicating the retry budget constant.
@@ -692,8 +693,91 @@ async function runExecutePhase(phase, state, io, dir) {
   }
 }
 
+// forge#2383: per-phase context-pack byte budget passed to
+// bin/engine/context-pack.mjs's buildContextPack(). Matches the 20-40KB
+// range the parent issue itself proposed; picked the midpoint rather than
+// the low or high end so a typical STANDARD-complexity issue's investigation
+// + contract + a few annotations fits without truncation, while still
+// leaving real headroom below the phase system prompt's own token budget.
+const CONTEXT_PACK_BUDGET_BYTES = 32000;
+
+/**
+ * forge#2383: assemble this phase's deterministic context pack — issue
+ * title/body, prior phases' typed outputs (from this run's own local
+ * run-log), and recent FORGE annotations — before its runner() dispatch.
+ *
+ * Entirely best-effort/fail-open: every fetch below is independently
+ * try/catch-wrapped, and a total failure (or simply nothing to report)
+ * degrades to `buildContextPack({})`, which resolves to an empty pack
+ * (`bytes: 0`, `sections: []`). `runPhaseWithRetry` below only forwards
+ * `contextPack` to `runner()` when `pack.text` is non-empty, so a fully
+ * failed/empty pack is IDENTICAL to this function never having been called
+ * — no phase's correctness can depend on this pack (matches the parent
+ * issue's own acceptance criteria).
+ *
+ * Deliberately called ONCE per phase dispatch (outside the attempt retry
+ * loop in `runPhaseWithRetry`, not once per attempt) — a phase's context
+ * does not meaningfully change between same-phase retry attempts a few
+ * seconds apart, so re-fetching per attempt would just be the exact
+ * redundant-round-trip tax this issue exists to reduce.
+ *
+ * Prior phase outputs are read from the LOCAL run-log (`readLog`), not
+ * fetched over the network — this is the one piece of "engine already has
+ * this data" reuse the parent issue's proposal specifically called out.
+ * Issue title/body and recent FORGE annotations still cost one `gh` call
+ * each (title/body is not part of `state`, and `issueMarkers()` — reused
+ * from bin/engine/phases.mjs rather than duplicated — is invoked directly
+ * here since `phase.reconcile()`'s own internal call is encapsulated per
+ * phase and not surfaced back to this call site); both are bounded, one-shot
+ * calls, not the N-calls-per-phase-spec pattern this issue is aimed at.
+ *
+ * @param {import("./engine/phases.mjs").RunState} state
+ * @param {{gh: Function, git: Function}} io
+ * @param {string} dir - run-log directory (for readLog)
+ * @returns {Promise<{text: string, bytes: number, sections: string[], truncated: string[]}>}
+ */
+async function buildContextPackForPhase(state, io, dir) {
+  const priorOutputs = {};
+  try {
+    for (const e of readLog(dir, state.issue)) {
+      if (e.event === "PHASE_COMMIT" && e.outputs && Object.keys(e.outputs).length > 0) {
+        priorOutputs[e.phase] = e.outputs;
+      }
+    }
+  } catch { /* best-effort — an unreadable local run-log degrades to no prior-outputs section */ }
+
+  let issue;
+  try {
+    const out = await io.gh(["issue", "view", String(state.issue), "--json", "title,body"]);
+    const j = JSON.parse(out || "{}");
+    issue = { number: state.issue, title: j.title || "", body: j.body || "" };
+  } catch { /* best-effort — pack simply omits the issue section */ }
+
+  // Relevant FORGE annotations: reuse the last 8 comments containing a
+  // "<!-- FORGE:" marker. Capped (not just budget-truncated later) so a very
+  // long-running issue's full comment history doesn't dominate every other
+  // section before byte-truncation even gets a say.
+  let annotations = [];
+  try {
+    const { comments } = await issueMarkers(state.issue, io);
+    annotations = comments.filter((c) => typeof c === "string" && c.includes("<!-- FORGE:")).slice(-8);
+  } catch { /* best-effort — pack simply omits the annotations section */ }
+
+  return buildContextPack({ issue, priorOutputs, annotations }, { budgetBytes: CONTEXT_PACK_BUDGET_BYTES });
+}
+
 async function runPhaseWithRetry(phase, state, ctx) {
   const { io, runner, dir, issue, commandsDir, maxAttempts, backend, model } = ctx;
+
+  // forge#2383: build once, reused across every retry attempt below (see
+  // buildContextPackForPhase's own doc comment for why per-attempt rebuilding
+  // would be wasteful). A thrown/failed build degrades to `contextPack: null`
+  // — treated identically to the option never being supplied.
+  let contextPack = null;
+  try {
+    contextPack = await buildContextPackForPhase(state, io, dir);
+  } catch { contextPack = null; }
+
   // forge#2261: true only if EVERY attempt failed by the runner itself
   // throwing (never once reached phase.detectOutcome()). This is the signal
   // that distinguishes an engine/tool crash (the tool never even produced a
@@ -713,7 +797,15 @@ async function runPhaseWithRetry(phase, state, ctx) {
   // most recent attempt that actually produced a result.
   let lastUsage = null;
   for (let attempt = 1; attempt <= maxAttempts; attempt++) {
-    appendEvent(dir, issue, { event: "PHASE_START", phase: phase.id, attempt });
+    // forge#2383: packBytes/packSections are additive fields — null when no
+    // pack was built (or the pack came back empty), so a downstream
+    // PHASE_START consumer that doesn't know about this feature yet sees
+    // exactly what it saw before (extra unknown fields, safe to ignore).
+    appendEvent(dir, issue, {
+      event: "PHASE_START", phase: phase.id, attempt,
+      packBytes: contextPack?.bytes ?? null,
+      packSections: contextPack?.sections ?? null,
+    });
     let result;
     try {
       result = await runner({
@@ -722,6 +814,11 @@ async function runPhaseWithRetry(phase, state, ctx) {
         // runner.mjs's existing default ("auto" backend / DEFAULT_MODEL).
         ...(backend ? { backend } : {}),
         ...(model ? { model } : {}),
+        // forge#2383: only forwarded when the pack actually has content —
+        // an empty/failed pack must produce the exact same runner() call
+        // shape as today (no `contextPack` key at all), matching the
+        // existing backend/model spread convention above.
+        ...(contextPack?.text ? { contextPack: contextPack.text } : {}),
       });
     } catch (e) {
       // A missing API key / SDK is a config error, not a transient phase

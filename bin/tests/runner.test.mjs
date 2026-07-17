@@ -211,6 +211,24 @@ describe("buildSystemPrompt", () => {
     const prompt = buildSystemPrompt(spec);
     assert.doesNotMatch(prompt, /Working directory \/ repo root:/);
   });
+
+  // forge#2383: engine-provided context pack injection.
+  it("fail-open: omitting contextPack produces no context-pack section at all", () => {
+    const spec = loadCommandSpec(COMMANDS_DIR, "work-on");
+    const prompt = buildSystemPrompt(spec, { repoRoot: "/repo/root" });
+    assert.doesNotMatch(prompt, /ENGINE-PROVIDED CONTEXT PACK/);
+  });
+
+  it("injects a non-empty contextPack as a delimited section", () => {
+    const spec = loadCommandSpec(COMMANDS_DIR, "work-on");
+    const prompt = buildSystemPrompt(spec, { contextPack: "## Issue #42: Fix thing\n\nDo the thing." });
+    assert.match(prompt, /=== ENGINE-PROVIDED CONTEXT PACK ===/);
+    assert.match(prompt, /=== END CONTEXT PACK ===/);
+    assert.match(prompt, /## Issue #42: Fix thing/);
+    // The pack section must appear before the command specification, so the
+    // model reads pre-fetched context before the spec's own fetch instructions.
+    assert.ok(prompt.indexOf("ENGINE-PROVIDED CONTEXT PACK") < prompt.indexOf("COMMAND SPECIFICATION"));
+  });
 });
 
 describe("buildUserMessage", () => {
@@ -994,6 +1012,51 @@ describe("runCommand", () => {
     });
     assert.equal(result.status, "dry-run");
     assert.equal(result.usage, undefined, "dry-run should not include usage");
+  });
+
+  // forge#2383: contextPack threading through runCommand's dry-run path
+  // (verified indirectly via the reported system-prompt char count, since
+  // dry-run never exposes the raw prompt string itself — renderDryRun()
+  // already reports `systemPrompt.length`, see bin/runner.mjs).
+  it("dry-run: supplying contextPack increases the reported system-prompt length", async () => {
+    const linesWithout = [];
+    await runCommand({
+      commandsDir: COMMANDS_DIR,
+      commandName: "work-on",
+      args: ["1151"],
+      cwd: TMP,
+      dryRun: true,
+      backend: "api",
+      logger: { log: (s) => linesWithout.push(s) },
+    });
+    const linesWith = [];
+    await runCommand({
+      commandsDir: COMMANDS_DIR,
+      commandName: "work-on",
+      args: ["1151"],
+      cwd: TMP,
+      dryRun: true,
+      backend: "api",
+      contextPack: "## Issue #1151: Something\n\nSome pre-fetched context.",
+      logger: { log: (s) => linesWith.push(s) },
+    });
+    const extractLen = (lines) => {
+      const line = lines[0].split("\n").find((l) => l.includes("system prompt:"));
+      return Number(line.match(/(\d+) chars/)[1]);
+    };
+    assert.ok(extractLen(linesWith) > extractLen(linesWithout), "contextPack must increase the assembled system prompt size");
+  });
+
+  it("dry-run: omitting contextPack entirely is a no-op (fail-open)", async () => {
+    const result = await runCommand({
+      commandsDir: COMMANDS_DIR,
+      commandName: "work-on",
+      args: ["1151"],
+      cwd: TMP,
+      dryRun: true,
+      logger: { log() {} },
+    });
+    assert.equal(result.status, "dry-run");
   });
 
   it("dry-run result includes model field", async () => {
@@ -2619,6 +2682,52 @@ describe("buildCliSystemPrompt", () => {
     const apiPrompt = buildSystemPrompt(spec, { repoRoot: "/tmp/repo" });
     const cliPrompt = buildCliSystemPrompt(spec);
     assert.notEqual(apiPrompt, cliPrompt);
+  });
+
+  // forge#2383: engine-provided context pack injection — CLI backend.
+  it("fail-open: omitting contextPack produces no context-pack section at all", () => {
+    const spec = loadCommandSpec(COMMANDS_DIR, "work-on");
+    const prompt = buildCliSystemPrompt(spec);
+    assert.doesNotMatch(prompt, /ENGINE-PROVIDED CONTEXT PACK/);
+  });
+
+  it("injects a non-empty contextPack as a delimited section", () => {
+    const spec = loadCommandSpec(COMMANDS_DIR, "work-on");
+    const prompt = buildCliSystemPrompt(spec, { contextPack: "## Issue #42: Fix thing\n\nDo the thing." });
+    assert.match(prompt, /=== ENGINE-PROVIDED CONTEXT PACK ===/);
+    assert.match(prompt, /=== END CONTEXT PACK ===/);
+    assert.match(prompt, /## Issue #42: Fix thing/);
+  });
+});
+
+// forge#2383: CLI/API backend injection parity — the #2404/#2060 precedent is
+// logic added to buildSystemPrompt but not buildCliSystemPrompt (or vice
+// versa). Assert both backends render the exact same pack text framed by the
+// exact same delimiters, so the two prompt builders cannot silently diverge
+// on this feature the way they have on others.
+describe("context pack injection parity (buildSystemPrompt vs buildCliSystemPrompt)", () => {
+  it("renders the identical delimited section in both backends for the same contextPack", () => {
+    const spec = loadCommandSpec(COMMANDS_DIR, "work-on");
+    const pack = "## Issue #7: Feat thing\n\n## Prior Phase Outputs\n\n### investigate\n```json\n{\"verdict\":\"CONFIRMED\"}\n```";
+    const apiPrompt = buildSystemPrompt(spec, { repoRoot: "/tmp/repo", contextPack: pack });
+    const cliPrompt = buildCliSystemPrompt(spec, { contextPack: pack });
+
+    const extractSection = (prompt) => {
+      const start = prompt.indexOf("=== ENGINE-PROVIDED CONTEXT PACK ===");
+      const end = prompt.indexOf("=== END CONTEXT PACK ===");
+      assert.ok(start >= 0 && end > start, "context pack section must be present");
+      return prompt.slice(start, end);
+    };
+
+    assert.equal(extractSection(apiPrompt), extractSection(cliPrompt));
+  });
+
+  it("both backends omit the section identically when contextPack is absent", () => {
+    const spec = loadCommandSpec(COMMANDS_DIR, "work-on");
+    const apiPrompt = buildSystemPrompt(spec, { repoRoot: "/tmp/repo" });
+    const cliPrompt = buildCliSystemPrompt(spec);
+    assert.doesNotMatch(apiPrompt, /ENGINE-PROVIDED CONTEXT PACK/);
+    assert.doesNotMatch(cliPrompt, /ENGINE-PROVIDED CONTEXT PACK/);
   });
 });
 

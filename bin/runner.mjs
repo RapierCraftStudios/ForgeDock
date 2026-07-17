@@ -949,14 +949,41 @@ export function loadCommandSpec(commandsDir, commandName) {
 // ---------------------------------------------------------------------------
 
 /**
+ * forge#2383: render the optional per-phase context pack as a clearly
+ * delimited system-prompt section. Shared verbatim by both
+ * `buildSystemPrompt` (API backend) and `buildCliSystemPrompt` (CLI backend)
+ * so the two can never drift apart the way the API/CLI prompt builders have
+ * before (#2404, #2060) — same heading, same framing, same content, in both.
+ *
+ * Returns "" for a falsy/empty `contextPack`, so every call site can splice
+ * this into a `.filter(Boolean)`'d array (buildSystemPrompt) or a plain
+ * `.join("\n")`'d array with an empty-string no-op line (buildCliSystemPrompt)
+ * without a separate presence check.
+ *
+ * @param {string} [contextPack]
+ * @returns {string}
+ */
+function renderContextPackSection(contextPack) {
+  if (!contextPack) return "";
+  return [
+    ``,
+    `=== ENGINE-PROVIDED CONTEXT PACK ===`,
+    `The engine has pre-fetched the following context for this phase (issue fields, prior phases' typed outputs, and/or relevant FORGE annotations) so you do not need to re-fetch it. Trust this pack; only re-fetch from GitHub if you need a value that is genuinely absent here (e.g. a comment posted after this pack was built, or a file's live contents). This pack is an optimization, not a hard dependency — if it looks stale or incomplete, fall back to the command specification's own fetch instructions.`,
+    ``,
+    contextPack,
+    `=== END CONTEXT PACK ===`,
+  ].join("\n");
+}
+
+/**
  * Assemble the system prompt from a loaded spec.
  *
  * @param {{name: string, content: string}} spec
- * @param {{repoRoot?: string}} [opts]
+ * @param {{repoRoot?: string, contextPack?: string}} [opts]
  * @returns {string}
  */
 export function buildSystemPrompt(spec, opts = {}) {
-  const { repoRoot } = opts;
+  const { repoRoot, contextPack } = opts;
   return [
     `You are ForgeDock's standalone command runner. You are executing the "/${spec.name}" command directly via the Anthropic API — NOT inside Claude Code.`,
     ``,
@@ -967,6 +994,7 @@ export function buildSystemPrompt(spec, opts = {}) {
     ``,
     `Use run_bash for all git/gh operations and for running scripts from scripts/. Post FORGE annotations to GitHub via the gh CLI exactly as the spec instructs. Do not ask the user questions — this is a headless run. When the command is fully complete, stop and emit a concise final summary of what was accomplished.`,
     repoRoot ? `\nWorking directory / repo root: ${repoRoot}` : "",
+    renderContextPackSection(contextPack),
     ``,
     `=== COMMAND SPECIFICATION (commands/${spec.name}.md) ===`,
     spec.content,
@@ -994,11 +1022,18 @@ export function buildSystemPrompt(spec, opts = {}) {
  * `/${spec.name}` as a real Claude Code slash command would behave.
  *
  * @param {{name: string, content: string}} spec
+ * @param {{contextPack?: string}} [opts] - forge#2383: optional per-phase
+ *   context pack, rendered via the same `renderContextPackSection()` helper
+ *   `buildSystemPrompt` uses, so the CLI and API backends never see a
+ *   differently-worded/differently-shaped pack section (see that helper's
+ *   doc comment for the #2404/#2060 CLI/API-drift rationale).
  * @returns {string}
  */
-export function buildCliSystemPrompt(spec) {
+export function buildCliSystemPrompt(spec, opts = {}) {
+  const { contextPack } = opts;
   return [
     `You are executing the ForgeDock "/${spec.name}" command. Follow the command specification below exactly, using your normal available tools to do the work (file edits, git, gh, running scripts/build/test commands, etc.). Post FORGE annotations to GitHub via the gh CLI exactly as the spec instructs. Do not ask the user questions — this is a headless run. When the command is fully complete, stop and emit a concise final summary of what was accomplished.`,
+    renderContextPackSection(contextPack),
     ``,
     `=== COMMAND SPECIFICATION (commands/${spec.name}.md) ===`,
     spec.content,
@@ -1652,6 +1687,13 @@ export function renderSummaryCard(ctx) {
  *   preferred `cli` while an `ANTHROPIC_API_KEY` was also available, so
  *   users know the `--backend api`/`FORGEDOCK_BACKEND=api` override exists.
  * @param {{log: Function, error?: Function}} [opts.logger] - Output sink.
+ * @param {string} [opts.contextPack]        - forge#2383: optional
+ *   engine-pre-fetched per-phase context (issue fields, prior phases' typed
+ *   outputs, relevant FORGE annotations — see bin/engine/context-pack.mjs).
+ *   Injected identically into both the API and CLI backends' system prompts
+ *   when present; omitted entirely has zero effect on either prompt (fail-open
+ *   — no caller is required to supply this, and every existing caller that
+ *   doesn't gets exactly today's behavior).
  * @returns {Promise<{status: string, command: string, [k: string]: any}>}
  */
 export async function runCommand(opts = {}) {
@@ -1668,14 +1710,15 @@ export async function runCommand(opts = {}) {
     dryRun = false,
     backend = process.env.FORGEDOCK_BACKEND || "auto",
     logger = console,
+    contextPack,
   } = opts;
 
   const spec = loadCommandSpec(commandsDir, commandName);
-  const systemPrompt = buildSystemPrompt(spec, { repoRoot: cwd });
+  const systemPrompt = buildSystemPrompt(spec, { repoRoot: cwd, contextPack });
   // CLI-backend-specific prompt (issue #2019) — see buildCliSystemPrompt's
   // doc comment for why this must NOT be the same string as `systemPrompt`
   // above (that one is written for the API backend's custom 3-tool loop).
-  const cliSystemPrompt = buildCliSystemPrompt(spec);
+  const cliSystemPrompt = buildCliSystemPrompt(spec, { contextPack });
   const userMessage = buildUserMessage(commandName, args);
 
   // Resolve the backend before dry-run so the preview reports what would
