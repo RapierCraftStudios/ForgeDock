@@ -191,6 +191,95 @@ Remove issues that should NOT be worked on:
 
 If a `workflow:decomposed` issue is found, automatically expand it to its open sub-issues instead.
 
+### Source-PR Triage Hint (pre-flight, non-binding)
+
+<!-- Added: forge#2351 -->
+
+**This is a triage hint for the operator and the dispatched investigation agent — it is NEVER an automated verdict.** It must never cause an issue to be closed, skipped, or excluded from dispatch. See "CRITICAL: No duplicate detection at orchestrator level" below — that rule's spirit ("only a `/work-on` investigation agent, after reading the actual code, can determine validity") applies identically here: a closed-unmerged source PR is a reason to look closer, not a reason to skip looking at all.
+
+**Why this exists**: `staging-review`/`review-finding` issues carry a `**Source**: PR #{N}` citation in their body (e.g. `**Source**: PR #2337 — Deploy: staging → main`, or `**Source**: PR #2337 | Agent: material-change | Confidence: ... | Severity: ...` — see `review-pr-staging.md` and `review-pr.md` for the citation format). When that source PR closed without merging, the finding's premise ("this change lands on staging/main") may or may not still hold — resolving the PR's state ONCE per distinct PR number, before dispatch, costs one `gh pr view` call and gives the operator and the investigation agent a head start, without ever deciding the outcome.
+
+**Two counterexamples from the same 2026-07-17 run prove why this must stay a hint, never a skip:**
+- **#2339 / #2342** — source PR #2337 closed unmerged; the flagged change genuinely never landed by any route (`git log -S` found zero commits for #2339's flagged line; the widening commit in #2342 is not an ancestor of `origin/main`). The hint would have been correct here.
+- **#2346 / #2261 (the load-bearing counterexample)** — source PR #2337 also closed unmerged for #2346, but the flagged code reached `staging` anyway via a **different, independently-merged PR (#2261, commit `90376f5`)** — verified via `git merge-base --is-ancestor 90376f5 origin/staging`. #2346 correctly ended at `needs-human`, not `invalid`. A hint that had been treated as a verdict ("source PR never merged → close") would have been **factually wrong** here — sibling PRs can and do reintroduce or independently land the same code by a different route. **The rule to encode: "the source PR never merged" does NOT imply "the finding is moot."**
+
+**Resolve once per distinct PR number, not once per issue** (many findings from one staging review cite the same source PR):
+
+```bash
+# Fetch staging-review / review-finding issues from the already-resolved issue set.
+# Follows this file's per-issue `gh issue view` convention (see Step 3A/3B in
+# phase-3-dependency.md) rather than assuming a pre-materialized bulk JSON variable.
+declare -A SOURCE_PR_STATE_CACHE   # PR number -> "state|mergedAt" (cached, resolved once per PR)
+declare -A ISSUE_SOURCE_PR         # issue number -> cited PR number (or empty if no citation found)
+declare -A ISSUE_SOURCE_PR_STATE   # issue number -> "OPEN" | "MERGED" | "CLOSED_UNMERGED" | "unknown"
+declare -A ISSUE_LIKELY_MOOT       # issue number -> "yes" | "unknown"
+
+for NUM in {issue_numbers}; do
+  ISSUE_JSON_NUM=$(gh issue view "$NUM" {GH_FLAG} --json labels,body 2>/dev/null)
+  LABELS_NUM=$(echo "$ISSUE_JSON_NUM" | jq -r '[.labels[].name] | join(",")' 2>/dev/null || echo "")
+  case "$LABELS_NUM" in
+    *staging-review*|*review-finding*) : ;;
+    *) ISSUE_LIKELY_MOOT[$NUM]="unknown"; continue ;;
+  esac
+
+  ISSUE_BODY_NUM=$(echo "$ISSUE_JSON_NUM" | jq -r '.body // ""' 2>/dev/null || echo "")
+
+  # Extract the cited PR number. Anchored on the literal "**Source**: PR #" prefix so it
+  # matches both observed formats ("PR #2337 — Deploy: staging → main" and
+  # "PR #2337 | Agent: material-change | ..."); capture stops at the first non-digit.
+  PRNUM=$(echo "$ISSUE_BODY_NUM" | grep -oE '\*\*Source\*\*: PR #[0-9]+' | head -1 | grep -oE '[0-9]+' | head -1)
+  # Digits-only guard (defense in depth — the regex above already restricts to [0-9]+,
+  # but re-validate before interpolating into any gh command; see #1833 — an unsanitized
+  # issue-body-derived value was templated verbatim into a gh command elsewhere in this file).
+  if ! echo "$PRNUM" | grep -qE '^[0-9]+$'; then
+    ISSUE_SOURCE_PR[$NUM]=""
+    ISSUE_SOURCE_PR_STATE[$NUM]="unknown"
+    ISSUE_LIKELY_MOOT[$NUM]="unknown"
+    continue
+  fi
+  ISSUE_SOURCE_PR[$NUM]="$PRNUM"
+
+  # Resolve this PR's state ONCE — cache hit skips the gh call entirely for every
+  # subsequent issue citing the same PR number.
+  if [ -z "${SOURCE_PR_STATE_CACHE[$PRNUM]+x}" ]; then
+    PR_JSON=$(gh pr view "$PRNUM" {GH_FLAG} --json state,mergedAt 2>/dev/null)
+    if [ -n "$PR_JSON" ]; then
+      PR_STATE=$(echo "$PR_JSON" | jq -r '.state')
+      PR_MERGED_AT=$(echo "$PR_JSON" | jq -r '.mergedAt // "null"')
+      SOURCE_PR_STATE_CACHE[$PRNUM]="${PR_STATE}|${PR_MERGED_AT}"
+    else
+      # gh pr view failed (rate limit, deleted PR, network) — non-fatal, mark unknown and continue.
+      SOURCE_PR_STATE_CACHE[$PRNUM]="unknown|unknown"
+    fi
+  fi
+
+  CACHED="${SOURCE_PR_STATE_CACHE[$PRNUM]}"
+  C_STATE="${CACHED%%|*}"
+  C_MERGED="${CACHED##*|}"
+
+  if [ "$C_STATE" = "unknown" ]; then
+    ISSUE_SOURCE_PR_STATE[$NUM]="unknown"
+    ISSUE_LIKELY_MOOT[$NUM]="unknown"
+  elif [ "$C_STATE" = "CLOSED" ] && [ "$C_MERGED" = "null" ]; then
+    ISSUE_SOURCE_PR_STATE[$NUM]="CLOSED_UNMERGED"
+    ISSUE_LIKELY_MOOT[$NUM]="yes"
+  elif [ "$C_STATE" = "MERGED" ] || { [ "$C_STATE" = "CLOSED" ] && [ "$C_MERGED" != "null" ]; }; then
+    ISSUE_SOURCE_PR_STATE[$NUM]="MERGED"
+    ISSUE_LIKELY_MOOT[$NUM]="unknown"
+  else
+    ISSUE_SOURCE_PR_STATE[$NUM]="OPEN"
+    ISSUE_LIKELY_MOOT[$NUM]="unknown"
+  fi
+done
+```
+
+**Output arrays** (consumed downstream — never re-derived): `ISSUE_LIKELY_MOOT[$NUM]` (`yes`/`unknown`), `ISSUE_SOURCE_PR[$NUM]` (cited PR number or empty), `ISSUE_SOURCE_PR_STATE[$NUM]` (`OPEN`/`MERGED`/`CLOSED_UNMERGED`/`unknown`).
+
+- `commands/orchestrate/phase-3-dependency.md` Step 3E's Dependency Graph plan table dereferences `ISSUE_LIKELY_MOOT[$NUM]` as a `Source-PR Hint` column — informational only, never affecting a row's `Status`.
+- `commands/orchestrate/phase-4-execution.md`'s Agent-spawn template threads `ISSUE_LIKELY_MOOT[$NUM]` / `ISSUE_SOURCE_PR[$NUM]` / `ISSUE_SOURCE_PR_STATE[$NUM]` into the dispatched agent's initial context as `{SOURCE_PR_HINT_CONTEXT}`, explicitly framed as a starting point to check first — never as a reason to skip investigating.
+
+**MUST NOT**: This hint MUST NOT be used, anywhere in this pipeline, to auto-close an issue, auto-skip it from dispatch, exclude it from the resolved issue set, or substitute for the investigation agent's own evidence-based verdict. Every `likely-moot: yes` issue is still dispatched into a full `/work-on` pipeline exactly like every other issue in the resolved set — the "CRITICAL: No duplicate detection at orchestrator level" rule below governs this identically.
+
 ### P3 Review-Finding Batching (deterministic grouping rule)
 
 <!-- Added: forge#1333 -->
