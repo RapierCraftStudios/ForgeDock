@@ -25,13 +25,7 @@
  *   renderDryRun(ctx)                       → string
  *   renderSummaryCard(ctx)                  → string
  *   resolveConfiguredDefaultModel(cwd)      → string|null   (forge.yaml agents.default_model, resolved)
- *   derivePhaseId(commandName)              → string|null   (phase id, or null if not phase-shaped)
- *   buildMessagesCreateParams(opts)         → object         (messages.create() params, cache_control-annotated — forge#2385)
- *   groupRunsForCacheLocality(runs)         → object[]       (stable same-phase grouping for fleet cache locality — forge#2385)
- *   createMessageBatch(requests, client)    → Promise<object> (Anthropic Message Batches API — opt-in, unwired — forge#2385)
- *   pollMessageBatchStatus(batchId, client) → Promise<object> (opt-in, unwired — forge#2385)
- *   retrieveMessageBatchResults(batchId, client) → Promise<object[]> (opt-in, unwired — forge#2385)
- *   runCommand(opts)                        → Promise<{status, ..., result}>
+ *   runCommand(opts)                        → Promise<{status, ...}>
  *
  * Design notes:
  *   - The Anthropic SDK is a LAZY/optional dependency: it is imported only when
@@ -58,11 +52,6 @@ import os from "os";
 import { execSync, spawnSync } from "child_process";
 import { parseForgeYaml, resolveModelAlias } from "./forge-utils.mjs";
 import { DEFAULT_SPAWN_MAX_BUFFER_BYTES } from "./cli-spawn-shared.mjs";
-// forge#2380: report_result's per-phase schemas are single-sourced from the
-// same registry bin/engine/phases.mjs and bin/hooks/interactive-engine.mjs
-// import their marker strings from (forge#2378/PR#2400) — do NOT declare a
-// second, independent schema/enum list in this file.
-import { PHASE_RESULT_SCHEMAS, validatePhaseResult } from "../packages/protocol/src/phases.js";
 
 const DEFAULT_MODEL = "claude-sonnet-5";
 const DEFAULT_MAX_ITERATIONS = 50;
@@ -1035,270 +1024,7 @@ export const TOOL_DEFINITIONS = [
       required: ["command"],
     },
   },
-  {
-    // forge#2380: schema-enforced structured phase result. The concrete
-    // input_schema is phase-specific (see PHASE_RESULT_SCHEMAS in
-    // packages/protocol/src/phases.js) and is substituted per-request by
-    // buildToolDefinitions() below for whichever phase the current command
-    // resolves to (see derivePhaseId()) — this generic object schema is only
-    // what's shown by renderDryRun()/buildCliSystemPrompt() and any command
-    // whose derived phase id has no registered schema.
-    //
-    // For an enforced phase, runCommand()'s live loop will not accept the
-    // phase as complete (a non-tool_use stop) until this tool has been
-    // called with schema-valid input — a validation failure returns an
-    // is_error tool_result so the model retries, and exhausting
-    // maxIterations without ever getting a valid call is a distinct
-    // "phase-failed" outcome (not silently treated as success).
-    name: "report_result",
-    description:
-      "Report this phase's structured, machine-validated result. Call this exactly once, when the phase's work is actually complete, with a JSON object matching the phase's expected shape (investigate: {verdict, decompose, rootCause}; build: {branch, commits}; review: {pr, disposition}; context/architect: {summary} — an empty object is also valid for those two). A schema-invalid call is rejected and must be retried with corrected input; the phase cannot be reported complete without a schema-valid call.",
-    input_schema: {
-      type: "object",
-      properties: {},
-      required: [],
-      additionalProperties: true,
-    },
-  },
 ];
-
-/**
- * Return TOOL_DEFINITIONS with `report_result`'s generic input_schema
- * swapped for the concrete, phase-specific schema registered in
- * PHASE_RESULT_SCHEMAS (packages/protocol/src/phases.js), when one exists
- * for `phaseId`. When `phaseId` is null/unregistered, TOOL_DEFINITIONS is
- * returned unchanged (report_result keeps its generic, unenforced schema —
- * matching "nothing to enforce" from validatePhaseResult()).
- *
- * @param {string|null} phaseId
- * @returns {object[]}
- */
-export function buildToolDefinitions(phaseId) {
-  const schema = phaseId ? PHASE_RESULT_SCHEMAS[phaseId] : null;
-  if (!schema) return TOOL_DEFINITIONS;
-  return TOOL_DEFINITIONS.map((tool) =>
-    tool.name === "report_result" ? { ...tool, input_schema: schema } : tool,
-  );
-}
-
-/**
- * Derive the phase id a command name corresponds to, for `report_result`
- * schema enforcement purposes. Mirrors the `command` → `id` convention
- * already established in bin/engine/phases.mjs's PHASES table (e.g.
- * `"work-on/build/architect"` is the `command` for the `"architect"` phase)
- * without duplicating that table here: every phase `command` value in that
- * table is `.../{id}` or exactly `{id}`, so taking the last `/`-segment
- * recovers the id directly.
- *
- * Returns the derived segment even when it is not a member of PHASE_IDS —
- * callers that only want to *enforce* a schema should additionally check
- * PHASE_IDS.includes(...) or simply rely on PHASE_RESULT_SCHEMAS[id] being
- * undefined for non-phase commands (validatePhaseResult() already treats an
- * unregistered id as "nothing to enforce").
- *
- * @param {string} commandName
- * @returns {string|null}
- */
-export function derivePhaseId(commandName) {
-  const name = String(commandName ?? "").trim();
-  if (!name) return null;
-  const segments = name.split("/").filter(Boolean);
-  return segments.length ? segments[segments.length - 1] : null;
-}
-
-// ---------------------------------------------------------------------------
-// Prompt-cache-aware scheduling / Batch API (forge#2385)
-// ---------------------------------------------------------------------------
-
-/**
- * Build the exact params object passed to `client.messages.create()`, with
- * Anthropic prompt-caching breakpoints applied to the stable prefix (system
- * prompt + tool definitions).
- *
- * Per-phase system prompts are the full command-spec markdown
- * (`buildSystemPrompt()`/`buildCliSystemPrompt()`) — 100KB-class for specs
- * like `work-on.md` — and are byte-identical across every iteration of a
- * single run's tool-use loop, and across separate runs of the same
- * command/phase within Anthropic's ~5-minute cache TTL. Likewise
- * `toolsForRequest` (from `buildToolDefinitions()`) is a fixed small array
- * that only varies by `report_result`'s substituted schema per phase id —
- * still stable across all iterations of one run. Both are therefore ideal
- * `cache_control: {type: "ephemeral"}` breakpoints: the cache write happens
- * once (first call), and every subsequent call within the TTL reads from
- * cache instead of re-processing the full prefix as fresh input tokens.
- *
- * `system` must be converted from a plain string to a content-block array to
- * carry `cache_control` (the Anthropic API only accepts cache_control on a
- * content block, not as a sibling of a bare string `system` field).
- * `cache_control` on `tools` is placed on the LAST tool definition only —
- * per Anthropic's caching model a breakpoint caches everything up to and
- * including the block it's attached to, so one breakpoint at the end of the
- * tools array covers the entire (stable) tools prefix; adding it to every
- * tool would waste cache-breakpoint budget (Anthropic caps breakpoints per
- * request) for no additional benefit.
- *
- * This function is a pure, dependency-free extraction so it is directly
- * unit-testable without mocking the Anthropic SDK or making a network call —
- * `runCommand()` has no client-injection seam today (unlike the CLI
- * backend's `spawnFn` seam), so testing the exact request shape requires
- * either adding such a seam or, as done here, extracting request-building
- * into a pure function and testing that directly. Mirrors the existing
- * `buildCliSystemPrompt`/`buildUserMessage`/`buildToolDefinitions` pattern
- * in this file.
- *
- * Does NOT mutate its inputs — `tools` is copied (via map), never mutated in
- * place, matching the "does not mutate the original TOOL_DEFINITIONS array"
- * invariant already established and tested for `buildToolDefinitions()`
- * (forge#2403).
- *
- * @param {{model: string, systemPrompt: string, tools: object[], messages: object[], maxTokens?: number}} opts
- * @returns {{model: string, max_tokens: number, system: object[], tools: object[], messages: object[]}}
- */
-export function buildMessagesCreateParams({ model, systemPrompt, tools, messages, maxTokens = DEFAULT_MAX_TOKENS }) {
-  const cachedTools =
-    Array.isArray(tools) && tools.length
-      ? tools.map((tool, i) =>
-          i === tools.length - 1 ? { ...tool, cache_control: { type: "ephemeral" } } : tool,
-        )
-      : tools;
-  return {
-    model,
-    max_tokens: maxTokens,
-    system: [{ type: "text", text: systemPrompt, cache_control: { type: "ephemeral" } }],
-    tools: cachedTools,
-    messages,
-  };
-}
-
-/**
- * Stably group an array of run descriptors by `phase`, preserving each
- * group's original relative order and the original relative order of groups
- * (first-seen phase first) — a stable partition, not a sort by any other
- * key. This is the cache-aware fleet-ordering helper for issue #2385's
- * ask #2: when a fleet run (e.g. `/orchestrate` or resume-stalled) has
- * multiple issues queued, processing all same-phase work together — rather
- * than interleaved by issue — keeps the phase's system-prompt/tools cache
- * breakpoint warm across issues instead of evicting/rewriting it on every
- * phase switch (Anthropic's cache TTL is ~5 minutes; interleaving phases
- * across issues risks the cache going cold between same-phase calls).
- *
- * Deliberately generic over the run-descriptor shape: only `phase` is read;
- * every other field on each element is passed through unchanged. No caller
- * in this codebase invokes this yet — wiring it into `bin/engine.mjs`'s or
- * `commands/orchestrate.md`'s scheduler is out of this issue's file scope
- * (`bin/runner.mjs` only) and is left as a follow-up once #2376's corpus is
- * available to validate the expected cache-read increase quantitatively.
- *
- * @param {{phase: string, [key: string]: *}[]} runs
- * @returns {{phase: string, [key: string]: *}[]} a new array; `runs` is not mutated
- */
-export function groupRunsForCacheLocality(runs) {
-  if (!Array.isArray(runs) || runs.length === 0) return [];
-  const groups = new Map();
-  for (const run of runs) {
-    const key = run?.phase;
-    if (!groups.has(key)) groups.set(key, []);
-    groups.get(key).push(run);
-  }
-  return Array.from(groups.values()).flat();
-}
-
-/**
- * Submit a batch of independent, single-turn Anthropic Message Batches API
- * requests. Opt-in Batch API lane infrastructure for issue #2385's ask #3
- * ("an opt-in --batch mode routing non-interactive phases through the
- * Message Batches API at half price").
- *
- * IMPORTANT — architectural scope: `runCommand()`'s loop (see below) is a
- * MULTI-TURN agentic tool-use loop, where each iteration's request depends
- * on the previous iteration's LOCAL tool-execution results (`read_file`/
- * `write_file`/`run_bash` handlers run in this process, not on Anthropic's
- * infrastructure). The Message Batches API is built for independent,
- * single-shot requests with no inter-request dependency and up to 24h
- * completion latency — it cannot transparently replace the full multi-turn
- * loop for a single phase run. This function (and its siblings below) is
- * therefore infrastructure for the ask the issue itself actually describes —
- * batching the SAME iteration of the SAME phase ACROSS MULTIPLE independent,
- * concurrently-queued fleet runs (e.g. `/orchestrate`/resume-stalled
- * processing many issues) — not an internal replacement for a single run's
- * tool loop. Wiring this into `bin/engine.mjs`'s scheduler (which would need
- * a poll-then-resume async completion pattern it does not yet have) is
- * explicitly out of this issue's file scope and left as a follow-up.
- *
- * Deliberately NOT called from `runCommand()` or any CLI entrypoint in this
- * PR — merging this function does not change the behavior or billing model
- * of any existing pipeline run.
- *
- * `client` is passed explicitly (not constructed here, not read from a
- * module-level singleton) so tests can inject a fake object exposing
- * `client.messages.batches.create(...)` without importing the real
- * `@anthropic-ai/sdk` or making any network call.
- *
- * NOTE for the future integrator: `requests` here mirrors the same
- * `messages.create()`-shaped params `buildMessagesCreateParams()` produces
- * (minus `messages` role framing specifics the Batches API requires per
- * https://docs.anthropic.com/en/api/creating-message-batches) — apply the
- * same `cache_control` breakpoints for consistency. Any text extracted from
- * a batch result that could reach a log/error (e.g. a failed-request's error
- * message) MUST be routed through `sanitizeOutputExcerptForLog()`/
- * `sanitizeAndCap()` before being logged or embedded in a thrown Error — this
- * file has 5 prior review findings (#2277/#2292/#2293/#2355/#2360) for
- * exactly that unsanitized-content defect class; do not add a 6th unsanitized
- * path when this is eventually wired in.
- *
- * @param {object[]} requests - array of `{custom_id: string, params: object}` batch request entries
- * @param {{messages: {batches: {create: Function}}}} client - an Anthropic SDK client (or a test double exposing the same shape)
- * @returns {Promise<object>} the created batch object (as returned by the SDK)
- */
-export async function createMessageBatch(requests, client) {
-  return client.messages.batches.create({ requests });
-}
-
-/**
- * Poll the current processing status of a previously-submitted Message
- * Batch. See `createMessageBatch()`'s doc comment for the architectural
- * scope of the Batch API lane this belongs to (forge#2385).
- *
- * `client` is passed explicitly for the same testability reason as
- * `createMessageBatch()` — no module-level client, no real SDK import
- * required in tests.
- *
- * @param {string} batchId
- * @param {{messages: {batches: {retrieve: Function}}}} client
- * @returns {Promise<object>} the batch object (as returned by the SDK), including `processing_status`
- */
-export async function pollMessageBatchStatus(batchId, client) {
-  return client.messages.batches.retrieve(batchId);
-}
-
-/**
- * Retrieve the per-request results of a Message Batch once processing has
- * completed. See `createMessageBatch()`'s doc comment for the architectural
- * scope of the Batch API lane this belongs to (forge#2385).
- *
- * Callers MUST check `pollMessageBatchStatus()`'s `processing_status` is
- * `"ended"` before calling this — an in-progress batch's results are not yet
- * available and the SDK will reject the request.
- *
- * `client` is passed explicitly for the same testability reason as
- * `createMessageBatch()` — no module-level client, no real SDK import
- * required in tests.
- *
- * NOTE: the real `@anthropic-ai/sdk`'s `client.messages.batches.results()`
- * returns an async-iterable JSONL stream, not a plain array — this wrapper
- * intentionally does not reshape that, it returns whatever `client`'s
- * `results()` method returns verbatim (an async iterable for the real SDK, a
- * plain array/value for a test double). The future integrator wiring this in
- * must iterate it accordingly (`for await (const result of ...)`), not
- * assume array methods are available.
- *
- * @param {string} batchId
- * @param {{messages: {batches: {results: Function}}}} client
- * @returns {Promise<*>} whatever `client.messages.batches.results()` returns (an async iterable for the real SDK)
- */
-export async function retrieveMessageBatchResults(batchId, client) {
-  return client.messages.batches.results(batchId);
-}
 
 /**
  * Resolve a tool-supplied path against cwd unless it is already absolute.
@@ -1967,17 +1693,6 @@ export async function runCommand(opts = {}) {
   const handlers = getToolHandlers(cwd);
   const messages = [{ role: "user", content: userMessage }];
 
-  // forge#2380: derive the phase this command corresponds to (if any) and
-  // resolve the report_result schema it must satisfy before this run is
-  // allowed to report success. Commands with no registered schema (most
-  // non-phase commands, e.g. ad-hoc /issue runs) get no enforcement —
-  // report_result stays available to call but nothing requires it, and
-  // `result` is simply reported as null throughout.
-  const resultPhaseId = derivePhaseId(commandName);
-  const resultSchema = resultPhaseId ? PHASE_RESULT_SCHEMAS[resultPhaseId] : null;
-  const toolsForRequest = buildToolDefinitions(resultPhaseId);
-  let structuredResult = null;
-
   // Accumulate token usage across all messages.create() calls in this run.
   // Field names match the Anthropic SDK's response.usage object exactly.
   const usage = {
@@ -1991,14 +1706,13 @@ export async function runCommand(opts = {}) {
   while (iterations < maxIterations) {
     iterations++;
 
-    // forge#2385: cache_control breakpoints on the stable system-prompt +
-    // tool-definitions prefix — see buildMessagesCreateParams()'s doc
-    // comment for why this is extracted as a pure function rather than
-    // inlined here (no client-injection seam exists to unit-test the inline
-    // shape directly).
-    const response = await client.messages.create(
-      buildMessagesCreateParams({ model, systemPrompt, tools: toolsForRequest, messages }),
-    );
+    const response = await client.messages.create({
+      model,
+      max_tokens: DEFAULT_MAX_TOKENS,
+      system: systemPrompt,
+      tools: TOOL_DEFINITIONS,
+      messages,
+    });
 
     // Accumulate usage — guard each field for null/undefined (SDK omits
     // cache fields when prompt caching is not active).
@@ -2017,25 +1731,6 @@ export async function runCommand(opts = {}) {
     }
 
     if (response.stop_reason !== "tool_use") {
-      // forge#2380: for a phase with a registered report_result schema, a
-      // non-tool_use stop is NOT accepted as completion until a schema-valid
-      // report_result call has actually happened — otherwise the model could
-      // simply stop talking (run out of things to say, decide it's "probably
-      // done", etc.) and have that silently treated as phase success, which
-      // is exactly the "forgot to post the marker" failure mode this tool
-      // exists to close. Nudge with a corrective user turn and keep going,
-      // bounded by the same maxIterations as everything else in this loop.
-      if (resultSchema && !structuredResult) {
-        messages.push({
-          role: "user",
-          content:
-            "This phase is not yet complete: you must call the report_result tool with a " +
-            "schema-valid result before stopping. Expected input shape: " +
-            JSON.stringify(resultSchema),
-        });
-        continue;
-      }
-
       // `max_tokens` is a TRUNCATED assistant turn, not a clean finish — report
       // it distinctly so callers (and CI) don't treat a cut-off run as success.
       const status =
@@ -2057,47 +1752,12 @@ export async function runCommand(opts = {}) {
         usage,
         model,
         backend: "api",
-        result: structuredResult,
       };
     }
 
     const toolResults = [];
     for (const block of response.content) {
       if (block.type !== "tool_use") continue;
-
-      if (block.name === "report_result") {
-        // forge#2380: handled separately from the generic handler dispatch
-        // below — report_result has no filesystem/shell side effect, it only
-        // records (and schema-validates) the phase's typed result.
-        const { valid, errors } = resultSchema
-          ? validatePhaseResult(resultPhaseId, block.input)
-          : { valid: true, errors: [] };
-        if (valid) {
-          structuredResult = block.input ?? {};
-          toolResults.push({
-            type: "tool_result",
-            tool_use_id: block.id,
-            content: "Result accepted.",
-          });
-        } else {
-          // Validation errors can echo back a model-supplied value (e.g. an
-          // invalid enum value) — route through the same sanitize/cap helper
-          // used for every other piece of model-controlled content that
-          // reaches a tool_result/log/error in this file (#2277/#2292/#2293/
-          // #2355/#2360), rather than opening a new unsanitized path.
-          const sanitizedErrors = errors.map((e) => sanitizeOutputExcerptForLog(e));
-          toolResults.push({
-            type: "tool_result",
-            tool_use_id: block.id,
-            content: truncateToolResult(
-              `Result rejected — schema validation failed:\n- ${sanitizedErrors.join("\n- ")}`,
-            ),
-            is_error: true,
-          });
-        }
-        continue;
-      }
-
       const handler = handlers[block.name];
       let content;
       let isError = false;
@@ -2118,33 +1778,6 @@ export async function runCommand(opts = {}) {
     messages.push({ role: "user", content: toolResults });
   }
 
-  // forge#2380: iteration-cap exhaustion for a phase with a registered schema
-  // that never received a valid report_result call is a distinct failure —
-  // not a bare "max-iterations" — so callers can tell "ran out of turns
-  // having never reported a valid result" apart from an ordinary
-  // max-iterations cutoff on an unenforced command.
-  if (resultSchema && !structuredResult) {
-    logger.log(
-      renderSummaryCard({
-        command: spec.name,
-        args,
-        iterations,
-        stopReason: "phase_failed_no_result",
-        usage,
-      }),
-    );
-    return {
-      status: "phase-failed",
-      command: spec.name,
-      iterations,
-      usage,
-      model,
-      backend: "api",
-      result: null,
-      detail: `report_result was never called with schema-valid input for phase "${resultPhaseId}" after ${iterations} iterations`,
-    };
-  }
-
   logger.log(
     renderSummaryCard({
       command: spec.name,
@@ -2161,6 +1794,5 @@ export async function runCommand(opts = {}) {
     usage,
     model,
     backend: "api",
-    result: structuredResult,
   };
 }
